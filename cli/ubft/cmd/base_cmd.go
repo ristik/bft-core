@@ -51,6 +51,7 @@ func (a *UnicityBFTApp) AddSubcommands() {
 	a.baseCmd.AddCommand(newShardNodeCmd(a.baseConfig))
 	a.baseCmd.AddCommand(newShardConfCmd(a.baseConfig))
 	a.baseCmd.AddCommand(newNodeIDCmd(a.baseConfig))
+	a.baseCmd.AddCommand(newEngineAPICmd(a.baseConfig))
 }
 
 func newBaseCmd(obsF Factory) (*cobra.Command, *baseFlags) {

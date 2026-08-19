@@ -39,6 +39,8 @@ type Round struct {
 	signer       abcrypto.Signer
 	submitter    Submitter
 	log          *slog.Logger
+	metrics      *Metrics // optional; every use is nil-safe, see metrics.go
+	health       *Health  // optional; every use is nil-safe, see health.go
 
 	// awaitTimeout bounds how long a follower waits for the leader's
 	// disseminated block before giving up on this round. Without a bound,
@@ -77,6 +79,8 @@ type pendingSubmission struct {
 	// (e.g. an Executor whose genesis Build with zero entries simply
 	// echoes head) — see blockHashOrFallback and TestRound_SingleValidator_GenesisToThreeRounds.
 	needsCommit bool
+
+	submittedAt time.Time // for Metrics.recordQuorumLatency
 }
 
 func NewRound(nodeID string, partitionID types.PartitionID, shardID types.ShardID, executor Executor, disseminator Disseminator, signer abcrypto.Signer, submitter Submitter, log *slog.Logger) *Round {
@@ -103,6 +107,22 @@ func (r *Round) SetAwaitTimeout(d time.Duration) {
 	r.awaitTimeout = d
 }
 
+// SetMetrics attaches an optional Metrics recorder. Safe to call, or not, at
+// any point before Run starts — round.go never assumes it's set.
+func (r *Round) SetMetrics(m *Metrics) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.metrics = m
+}
+
+// SetHealth attaches an optional Health snapshot. Safe to call, or not, at
+// any point before Run starts.
+func (r *Round) SetHealth(h *Health) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.health = h
+}
+
 // HandleCertificate is the framework's single entry point, called once for
 // every UC classified as UCValid or UCRepeat (UCDuplicate is filtered out
 // before reaching here — see BFTClient). It commits the previous round's
@@ -122,8 +142,10 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 
 	head, err := r.executor.Head(ctx)
 	if err != nil {
+		r.health.updateExecutorStatus(false, err.Error())
 		return fmt.Errorf("reading executor head: %w", err)
 	}
+	r.health.updateExecutorStatus(true, "")
 	// exp.PreviousHash is nil exactly when the root chain has never
 	// certified anything for this shard yet (its genesis IR.Hash is nil —
 	// see rootchain/consensus/storage/sharding.go NewShardInfo). An
@@ -149,11 +171,29 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("producing round %d block: %w", exp.Round, err)
 	}
 
-	status, err := r.executor.Verify(ctx, block, params)
+	verifyStart := time.Now()
+	status, err := r.verifyWithRetry(ctx, block, params)
+	r.metrics.recordVerifyDuration(ctx, time.Since(verifyStart), tr.Leader == r.nodeID)
 	if err != nil {
 		return fmt.Errorf("self-verifying round %d block: %w", exp.Round, err)
 	}
-	if status != StatusValid {
+	switch status {
+	case StatusValid:
+		// proceed
+	case StatusSyncing, StatusAccepted:
+		// Retried until r.awaitTimeout and still not resolved — abstain
+		// from this round rather than treat "not yet validated" the same
+		// as "rejected". The next certificate (likely a repeat UC) starts
+		// the next attempt; see docs/engine-api-adapter-plan.md §6's
+		// status policy table.
+		r.metrics.recordIRDivergence(ctx, "self_verify_pending_timeout")
+		if r.log != nil {
+			r.log.WarnContext(ctx, "abstaining from round: executor still reports pending status after the retry deadline",
+				slog.Uint64("round", exp.Round), slog.String("status", status.String()))
+		}
+		return nil
+	default: // StatusInvalid or anything else
+		r.metrics.recordIRDivergence(ctx, "self_verify_rejected")
 		return fmt.Errorf("shardnode: executor rejected its own round %d block with status %s — refusing to submit it for certification", exp.Round, status)
 	}
 
@@ -170,6 +210,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("building input record for round %d: %w", exp.Round, err)
 	}
 	if err := ValidateLocal(ir, exp); err != nil {
+		r.metrics.recordIRDivergence(ctx, "local_validation_failed")
 		return fmt.Errorf("shardnode: locally-built input record for round %d would be rejected by the root chain: %w", exp.Round, err)
 	}
 
@@ -190,7 +231,8 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("signing certification request: %w", err)
 	}
 
-	r.pending = &pendingSubmission{round: exp.Round, hash: block.Hash, needsCommit: executorChanged}
+	r.pending = &pendingSubmission{round: exp.Round, hash: block.Hash, needsCommit: executorChanged, submittedAt: time.Now()}
+	r.health.updateSubmitted(exp.Round)
 
 	if r.log != nil {
 		r.log.InfoContext(ctx, "submitting block certification request",
@@ -212,6 +254,13 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 	p := r.pending
 	r.pending = nil
 
+	// Recorded for every confirmed round, quiet or not — both are "this
+	// round reached quorum," which is what the metric is for.
+	r.metrics.recordRoundCertified(ctx)
+	if !p.submittedAt.IsZero() {
+		r.metrics.recordQuorumLatency(ctx, time.Since(p.submittedAt))
+	}
+
 	if !p.needsCommit {
 		return nil
 	}
@@ -220,6 +269,7 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 		return err
 	}
 	if status != StatusValid {
+		r.metrics.recordIRDivergence(ctx, "commit_failed")
 		return fmt.Errorf("shardnode: executor could not commit round %d (hash %x, status %s) — this node has fallen behind and needs to resync (see docs/troubleshooting.md)",
 			p.round, p.hash, status)
 	}
@@ -251,6 +301,7 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 // after the executor itself lost the block, e.g. disk loss — out of scope
 // for exec-mode).
 func (r *Round) reconcile(ctx context.Context, uc *types.UnicityCertificate, exp Expectation, head BlockRef) (BlockRef, error) {
+	r.metrics.recordIRDivergence(ctx, "head_diverged")
 	// Commit is keyed by block hash everywhere else in this file (see
 	// pendingSubmission.hash, always a Block.Hash) — never by state root.
 	// uc.InputRecord.BlockHash is the certificate's own copy of that same
@@ -289,6 +340,41 @@ func (r *Round) reconcile(ctx context.Context, uc *types.UnicityCertificate, exp
 	return newHead, nil
 }
 
+// verifyRetryInterval is the poll spacing verifyWithRetry uses while an
+// Executor reports StatusSyncing/StatusAccepted. Not configurable — the
+// budget that matters is the deadline (r.awaitTimeout), not how finely it's
+// polled.
+const verifyRetryInterval = 100 * time.Millisecond
+
+// verifyWithRetry applies the status policy from
+// docs/engine-api-adapter-plan.md §6: StatusSyncing and StatusAccepted both
+// mean "not yet validated," not "rejected" — retry until r.awaitTimeout
+// elapses before giving up. StatusValid and StatusInvalid both return
+// immediately, since neither benefits from waiting. Shares its deadline
+// budget with the disseminator-await timeout (both are "how long is this
+// validator willing to wait before abstaining from the round") rather than
+// introducing a second, independently-tuned timeout.
+func (r *Round) verifyWithRetry(ctx context.Context, block Block, params RoundParams) (Status, error) {
+	deadline := time.Now().Add(r.awaitTimeout)
+	for {
+		status, err := r.executor.Verify(ctx, block, params)
+		if err != nil {
+			return status, err
+		}
+		if status != StatusSyncing && status != StatusAccepted {
+			return status, nil
+		}
+		if !time.Now().Before(deadline) {
+			return status, nil // caller treats a still-pending status as abstain, not reject
+		}
+		select {
+		case <-ctx.Done():
+			return status, fmt.Errorf("verify retry: %w", ctx.Err())
+		case <-time.After(verifyRetryInterval):
+		}
+	}
+}
+
 // produceBlock builds (leader) or awaits and verifies-for-dissemination-only
 // (follower) the candidate for this round. Note: the leader's block is
 // still passed through executor.Verify by the caller (HandleCertificate) —
@@ -304,11 +390,13 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 	}
 
 	if leader == r.nodeID {
+		buildStart := time.Now()
 		id, err := r.executor.Build(ctx, params)
 		if err != nil {
 			return Block{}, params, fmt.Errorf("build: %w", err)
 		}
 		block, err := r.executor.Seal(ctx, id)
+		r.metrics.recordBuildDuration(ctx, time.Since(buildStart))
 		if err != nil {
 			return Block{}, params, fmt.Errorf("seal: %w", err)
 		}

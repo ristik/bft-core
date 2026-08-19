@@ -2,13 +2,19 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/ainvaltin/httpsrv"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -40,6 +46,8 @@ type shardNodeRunFlags struct {
 	CertNodes         int
 	HeartbeatInterval time.Duration
 	InactivityTimeout time.Duration
+
+	RPCServerAddress string // exposes /api/v1/metrics and /api/v1/health when set
 }
 
 func shardNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
@@ -74,6 +82,8 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 	cmd.Flags().IntVar(&flags.CertNodes, "cert-nodes", shardnode.DefaultBFTClientOptions.CertNodes, "number of root nodes to submit each certification request to")
 	cmd.Flags().DurationVar(&flags.HeartbeatInterval, "heartbeat-interval", shardnode.DefaultBFTClientOptions.HeartbeatInterval, "how often to check for root-chain inactivity")
 	cmd.Flags().DurationVar(&flags.InactivityTimeout, "inactivity-timeout", shardnode.DefaultBFTClientOptions.InactivityTimeout, "re-handshake if no certificate has been received for this long")
+	cmd.Flags().StringVar(&flags.RPCServerAddress, "rpc-server-address", "",
+		`address for the metrics/health HTTP server, in the form "host:port". Not started if empty.`)
 
 	return cmd
 }
@@ -170,6 +180,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 		return fmt.Errorf("creating shard node: %w", err)
 	}
 
+	metrics, err := shardnode.NewMetrics(flags.observe.Meter("shardnode"))
+	if err != nil {
+		return fmt.Errorf("creating metrics: %w", err)
+	}
+	node.SetMetrics(metrics)
+
 	if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
 		return fmt.Errorf("bootstrap connect: %w", err)
 	}
@@ -177,7 +193,39 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 	flags.observe.Logger().Info("shard node starting",
 		"nodeID", peer.ID().String(), "partitionID", shardConf.PartitionID, "executor", flags.Executor)
 
-	return node.Run(ctx)
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error { return node.Run(gctx) })
+	g.Go(func() error { return serveShardNodeRPC(gctx, flags, node) })
+	return g.Wait()
+}
+
+// serveShardNodeRPC exposes /api/v1/metrics (Prometheus, when --metrics
+// prometheus is set) and /api/v1/health (JSON, always) — see
+// docs/engine-api-adapter-plan.md C3.2/C3.4. Mirrors root_node.go's own
+// RPC server construction.
+func serveShardNodeRPC(ctx context.Context, flags *shardNodeRunFlags, node *shardnode.Node) error {
+	if flags.RPCServerAddress == "" {
+		return nil // do not kill the errgroup
+	}
+
+	mux := http.NewServeMux()
+	if pr := flags.observe.PrometheusRegisterer(); pr != nil {
+		mux.Handle("/api/v1/metrics", promhttp.HandlerFor(pr.(prometheus.Gatherer), promhttp.HandlerOpts{MaxRequestsInFlight: 1}))
+	}
+	mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(node.Health().Snapshot())
+	})
+
+	return httpsrv.Run(ctx,
+		&http.Server{
+			Addr:              flags.RPCServerAddress,
+			Handler:           mux,
+			ReadTimeout:       3 * time.Second,
+			ReadHeaderTimeout: time.Second,
+			WriteTimeout:      5 * time.Second,
+			IdleTimeout:       30 * time.Second,
+		})
 }
 
 // buildDisseminator picks the transport based on how many validators the

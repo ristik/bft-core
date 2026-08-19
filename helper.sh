@@ -53,8 +53,11 @@ function init_root_nodes() {
     nodeInfoFiles+=" --node-info ${home}$i/node-info.json"
   done
 
-  # Generate trust-base once to test-nodes
-  build/ubft trust-base generate --home test-nodes --epoch 0 --epoch-start 1 --network-id 3 $nodeInfoFiles
+  # Generate trust-base once to test-nodes. Genesis epoch must be 1 (trust_base.go
+  # rejects 0: "genesis trust base epoch must be 1") — this was 0 and broke
+  # setup-nodes.sh outright; fixed here rather than left for the EVM scripts to
+  # work around, since every caller of init_root_nodes hit it.
+  build/ubft trust-base generate --home test-nodes --epoch 1 --epoch-start 1 --network-id 3 $nodeInfoFiles
 
   # Sign trust-base by each node
   for i in $(seq 1 "$1")
@@ -117,4 +120,135 @@ function start_root_nodes() {
 
   echo
   echo "started $(($i-1)) root nodes"
+}
+
+# ============================================================================
+# EVM shard helpers — see docs/engine-api-adapter-plan.md.
+#
+# These are additive: they don't touch the root-chain-only functions above,
+# and setup-evm-nodes.sh/start-evm.sh/stop-evm.sh are the scripts that use
+# them, parallel to setup-nodes.sh/start.sh/stop.sh rather than replacing
+# them.
+# ============================================================================
+
+evmValidatorPortStart=28111
+evmDisseminationPortStart=28211
+
+# init_evm_validators - generate keys + node-info for N shard validators
+# $1 number of validators
+function init_evm_validators() {
+  echo "initializing $1 EVM shard validator identities"
+  for i in $(seq 1 "$1")
+  do
+    build/ubft shard-node init --home "test-nodes/evm$i" -g
+  done
+}
+
+# generate_evm_shard_conf - generate the shard conf for the EVM partition,
+# naming every validator init_evm_validators created.
+# $1 number of validators
+# $2 partition id
+# $3 chain id (the EVM chainId — distinct from --network-id)
+# $4 t2 timeout in milliseconds
+# $5 proof_type (exec | light_client | sp1 — see the build plan §8)
+function generate_evm_shard_conf() {
+  local n=$1 partitionID=$2 chainID=$3 t2=$4 proofType=$5
+  nodeInfoFiles=
+  for i in $(seq 1 "$n")
+  do
+    nodeInfoFiles+=" --node-info test-nodes/evm$i/node-info.json"
+  done
+
+  build/ubft shard-conf generate --home test-nodes \
+    --network-id 3 --partition-id "$partitionID" --partition-type-id "$partitionID" \
+    --shard-id 0x80 --epoch-start 1 --t2-timeout "$t2" \
+    --partition-params "proof_type=$proofType,chain_id=$chainID" \
+    $nodeInfoFiles
+
+  echo "generated test-nodes/shard-conf-${partitionID}_0.json"
+}
+
+# generate_evm_genesis - emit the reth chain spec derived from the shard
+# conf generate_evm_shard_conf just wrote — see engine_api_genesis.go for
+# why this must be derived, not hand-written separately.
+# $1 partition id
+function generate_evm_genesis() {
+  local partitionID=$1
+  build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
+    --out test-nodes/evm-genesis.json
+}
+
+# evm_validator_id - node id of EVM validator $1 (must already be initialized)
+function evm_validator_id() {
+  build/ubft node-id --home "test-nodes/evm$1" | tail -n1
+}
+
+# evm_validator_addr - this validator's own dialable multiaddress, for
+# other validators' bootnode lists
+function evm_validator_addr() {
+  local i=$1 port=$((evmValidatorPortStart + i - 1))
+  echo "/ip4/127.0.0.1/tcp/$port/p2p/$(evm_validator_id "$i")"
+}
+
+# start_evm_validators - start N shard-node processes, each bootstrapped to
+# the root chain AND directly to every sibling validator (a full mesh,
+# guaranteeing dissemination connectivity without depending on DHT peer
+# routing — see shardnode/net_dissemination.go's doc comment).
+# $1 number of validators
+# $2 partition id
+# $3 root boot address (from init_root_nodes/boot_node)
+# $4 executor: "fake" or "engine-api"
+# For --executor engine-api, set EVM_ENGINE_URL_i / EVM_ETH_URL_i env vars
+# per validator (i = 1..N) before calling, or every validator defaults to
+# the same single reth instance on the standard ports — fine for a
+# single-reth smoke test, wrong for a real multi-reth deployment.
+function start_evm_validators() {
+  local n=$1 partitionID=$2 rootBoot=$3 executor=$4
+
+  # pass 1: every validator's own address, before any of them are running
+  local addrs=()
+  for i in $(seq 1 "$n"); do
+    addrs+=("$(evm_validator_addr "$i")")
+  done
+
+  for i in $(seq 1 "$n"); do
+    local port=$((evmValidatorPortStart + i - 1))
+    local bootnodes="$rootBoot"
+    for j in $(seq 1 "$n"); do
+      if [ "$j" != "$i" ]; then
+        bootnodes+=",${addrs[$((j-1))]}"
+      fi
+    done
+
+    local executorArgs=()
+    if [ "$executor" == "engine-api" ]; then
+      local engineURLVar="EVM_ENGINE_URL_$i" ethURLVar="EVM_ETH_URL_$i"
+      local engineURL="${!engineURLVar:-http://127.0.0.1:8551}"
+      local ethURL="${!ethURLVar:-http://127.0.0.1:8545}"
+      executorArgs=(--engine-url "$engineURL" --eth-url "$ethURL" --jwt-secret "test-nodes/evm$i/jwt.hex")
+    fi
+
+    build/ubft shard-node run --home "test-nodes/evm$i" --executor "$executor" \
+      --address "/ip4/127.0.0.1/tcp/$port" --bootnodes "$bootnodes" \
+      --trust-base test-nodes/trust-base.json \
+      --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
+      --log-format text --log-level info "${executorArgs[@]}" \
+      >> "test-nodes/evm$i/debug.log" 2>&1 &
+    echo $! > "test-nodes/evm$i/pid"
+  done
+
+  echo "started $n EVM shard validators (executor=$executor)"
+}
+
+# stop_evm_validators - kill every started validator by its recorded pid
+function stop_evm_validators() {
+  for pidfile in test-nodes/evm*/pid; do
+    [ -f "$pidfile" ] || continue
+    local pid
+    pid=$(cat "$pidfile")
+    if ps -p "$pid" >/dev/null 2>&1; then
+      kill "$pid"
+    fi
+    rm -f "$pidfile"
+  done
 }

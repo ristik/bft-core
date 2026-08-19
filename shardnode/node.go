@@ -24,6 +24,7 @@ type Node struct {
 	round        *Round
 	store        *FileStore
 	disseminator Disseminator
+	health       *Health
 }
 
 // runnable is implemented by Disseminators with their own background
@@ -77,7 +78,25 @@ func New(
 	round := NewRound(peer.ID().String(), partitionID, shardID, executor, disseminator, signer, client, log)
 	client.SetDriver(&persistingDriver{driver: round, store: store})
 
-	return &Node{client: client, round: round, store: store, disseminator: disseminator}, nil
+	health := NewHealth()
+	client.SetHealth(health)
+	round.SetHealth(health)
+
+	return &Node{client: client, round: round, store: store, disseminator: disseminator, health: health}, nil
+}
+
+// SetMetrics attaches an optional Metrics recorder to both the round loop
+// and the root-chain client. Call after New, before Run.
+func (n *Node) SetMetrics(m *Metrics) {
+	n.client.SetMetrics(m)
+	n.round.SetMetrics(m)
+}
+
+// Health returns this node's live status snapshot — see health.go. Always
+// non-nil; wire it into an HTTP handler to expose it (see
+// cli/ubft/cmd/shard_node_run.go).
+func (n *Node) Health() *Health {
+	return n.health
 }
 
 // Run blocks until ctx is done or either the client or the disseminator's

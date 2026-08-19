@@ -64,6 +64,8 @@ type BFTClient struct {
 	driver         RoundDriver
 	log            *slog.Logger
 	opts           BFTClientOptions
+	metrics        *Metrics // optional; nil-safe, see metrics.go
+	health         *Health  // optional; nil-safe, see health.go
 
 	mu  sync.Mutex
 	luc *types.UnicityCertificate
@@ -131,6 +133,20 @@ func (c *BFTClient) SetDriver(driver RoundDriver) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.driver = driver
+}
+
+// SetMetrics attaches an optional Metrics recorder.
+func (c *BFTClient) SetMetrics(m *Metrics) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.metrics = m
+}
+
+// SetHealth attaches an optional Health snapshot.
+func (c *BFTClient) SetHealth(h *Health) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.health = h
 }
 
 // Run subscribes to the root chain's UC feed and processes certificates
@@ -245,7 +261,14 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 		return nil
 	}
 	c.luc = &cr.UC
+	metrics := c.metrics
+	health := c.health
 	c.mu.Unlock()
+
+	if class == UCRepeat {
+		metrics.recordRepeatUC(ctx)
+	}
+	health.updateCertificate(cr.UC.GetRoundNumber(), cr.UC.GetRootRoundNumber(), cr.Technical.Leader, c.nodeID)
 
 	if c.log != nil {
 		c.log.InfoContext(ctx, "accepted certificate",
