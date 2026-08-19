@@ -104,3 +104,43 @@ jobs:
         run: go install github.com/securego/gosec/v2/cmd/gosec@latest
       - name: gosec
         run: make gosec
+
+  # evm-shard-chaos and evm-shard-compose-e2e are the "compose E2E" and live-fault-injection legs
+  # of docs/engine-api-adapter-plan.md T1.7 — the `test` job above already covers unit tests, the
+  # executortest conformance suite, and the determinism harness (shardnode/determinism_test.go) as
+  # part of `go test ./...`; these two exercise the process-based and container-based shard
+  # topologies respectively, which `go test` alone doesn't reach. Both run against
+  # `--executor fake` only — neither has a reth image to test against; see
+  # docs/engine-api-adapter-plan.md §10 and scripts/reth-by-hand.sh.
+  evm-shard-chaos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: kill-leader / kill-follower / cold-restart / corrupted-store scenarios
+        run: ./scripts/chaos-evm.sh -v 4
+
+  evm-shard-compose-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bring up the EVM shard topology
+        run: docker compose -f docker-compose.evm.yml up --build -d root1 root2 root3 evm1 evm2 evm3 evm4
+      - name: Wait for the shard to certify
+        run: |
+          for i in $(seq 1 24); do
+            if docker compose -f docker-compose.evm.yml logs evm1 2>&1 | grep -q 'accepted certificate'; then
+              echo "certifying"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "no certificate observed within 120s" >&2
+          docker compose -f docker-compose.evm.yml logs
+          exit 1
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.evm.yml down -v

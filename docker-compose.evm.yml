@@ -1,0 +1,262 @@
+# EVM shard container topology, `--executor fake` — mirrors setup-evm-nodes.sh/start-evm.sh's
+# 3-root, 4-validator topology (see docs/evm-shard-quickstart.md) as containers instead of local
+# processes, for CI's E2E stage (.github/workflows/ci.yml) and for anyone who'd rather not run seven
+# processes on bare metal. Genesis is a short chain of one-shot init containers (each
+# `service_completed_successfully`), same ceremony helper.sh's shell functions perform, followed by
+# the seven long-running services.
+#
+# Deliberately not the `--executor engine-api` topology (eleven services: this shard plus a reth
+# instance per validator) — that needs a reth image, and this build environment never had a reth
+# binary to base one on or verify against (see docs/engine-api-adapter-plan.md §10, B1.1/B2/B3).
+# `docs/engine-api-adapter.md` and `scripts/reth-by-hand.sh` cover that path on a machine that has
+# one; extending this file with four `reth` services alongside the four `evmN` ones, wired to their
+# `--engine-url`/`--eth-url`/`--jwt-secret`, is the natural next step there.
+#
+# Usage:
+#   docker compose -f docker-compose.evm.yml up --build --abort-on-container-exit --exit-code-from evm1
+#   docker compose -f docker-compose.evm.yml logs -f evm1
+#   docker compose -f docker-compose.evm.yml down -v
+#
+# Verification note: `docker compose -f docker-compose.evm.yml config` passes (valid YAML, all
+# variable interpolation resolves) in this build environment, but a live `up --build` could not be
+# run here — this sandbox's Docker installation has no buildx plugin and its compose build path
+# can't reach the daemon socket, unrelated to anything in this file. Treat the genesis/networking
+# design as reviewed and internally consistent with helper.sh's own (live-verified) sequencing, not
+# as live-proven the way scripts/chaos-evm.sh is for the process-based topology.
+
+services:
+  ubft:
+    platform: linux/amd64
+    user: root
+    build:
+      context: ./
+      dockerfile: ./scripts/Dockerfile
+
+  # --- root chain genesis (3 identities -> one trust base, signed by all 3) ---
+
+  root-genesis-1:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command: [ "ubft root-node init --home /genesis/root1 --generate" ]
+
+  root-genesis-2:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command: [ "ubft root-node init --home /genesis/root2 --generate" ]
+
+  root-genesis-3:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command: [ "ubft root-node init --home /genesis/root3 --generate" ]
+
+  root-genesis-trustbase:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      root-genesis-1: { condition: service_completed_successfully }
+      root-genesis-2: { condition: service_completed_successfully }
+      root-genesis-3: { condition: service_completed_successfully }
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command:
+      - |
+        ubft trust-base generate --home /genesis --network-id 3 \
+          --node-info /genesis/root1/node-info.json \
+          --node-info /genesis/root2/node-info.json \
+          --node-info /genesis/root3/node-info.json
+
+  # Signing is sequential, not parallel: all three write into the same shared
+  # trust-base.json, and trust-base sign is a read-modify-write, not an
+  # append-only operation safe under concurrent writers.
+  root-genesis-sign-1:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      root-genesis-trustbase: { condition: service_completed_successfully }
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command: [ "ubft trust-base sign --home /genesis/root1 -k /genesis/root1/keys.json -t /genesis/trust-base.json" ]
+
+  root-genesis-sign-2:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      root-genesis-sign-1: { condition: service_completed_successfully }
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command: [ "ubft trust-base sign --home /genesis/root2 -k /genesis/root2/keys.json -t /genesis/trust-base.json" ]
+
+  root-genesis-sign-3:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      root-genesis-sign-2: { condition: service_completed_successfully }
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command: [ "ubft trust-base sign --home /genesis/root3 -k /genesis/root3/keys.json -t /genesis/trust-base.json" ]
+
+  # --- shard validator genesis (4 identities -> one shard conf; chain spec kept for topology parity, unused by fake) ---
+
+  evm-genesis-1:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command: [ "ubft shard-node init --home /genesis/evm1 --generate" ]
+
+  evm-genesis-2:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command: [ "ubft shard-node init --home /genesis/evm2 --generate" ]
+
+  evm-genesis-3:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command: [ "ubft shard-node init --home /genesis/evm3 --generate" ]
+
+  evm-genesis-4:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command: [ "ubft shard-node init --home /genesis/evm4 --generate" ]
+
+  evm-genesis-shardconf:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      evm-genesis-1: { condition: service_completed_successfully }
+      evm-genesis-2: { condition: service_completed_successfully }
+      evm-genesis-3: { condition: service_completed_successfully }
+      evm-genesis-4: { condition: service_completed_successfully }
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command:
+      - |
+        ubft shard-conf generate --home /genesis \
+          --network-id 3 --partition-id 8 --partition-type-id 8 --shard-id 0x80 \
+          --epoch-start 1 --t2-timeout 3000 \
+          --partition-params proof_type=exec,chain_id=31337 \
+          --node-info /genesis/evm1/node-info.json --node-info /genesis/evm2/node-info.json \
+          --node-info /genesis/evm3/node-info.json --node-info /genesis/evm4/node-info.json
+
+  evm-genesis-chainspec:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      evm-genesis-shardconf: { condition: service_completed_successfully }
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command: [ "ubft engine-api genesis --shard-conf /genesis/shard-conf-8_0.json --out /genesis/evm-genesis.json" ]
+
+  # --- root chain (3 nodes; shard conf passed at startup via -s, not registered after the fact,
+  #     which is also why this topology doesn't need helper.sh's wait_for_root_chain_settle —
+  #     see docs/troubleshooting.md's "first launch" entry for the race this avoids) ---
+
+  root1:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      root-genesis-sign-3: { condition: service_completed_successfully }
+      evm-genesis-chainspec: { condition: service_completed_successfully }
+    healthcheck:
+      test: [ "CMD", "nc", "-zv", "root1", "8000" ]
+      interval: 5s
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command:
+      - |
+        ubft root-node run --home /genesis/root1 \
+          --address "/ip4/$(hostname -i)/tcp/8000" \
+          --trust-base /genesis/trust-base.json --shard-conf /genesis/shard-conf-8_0.json \
+          --rpc-server-address "$(hostname -i):8002" --metrics prometheus
+
+  root2:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      root-genesis-sign-3: { condition: service_completed_successfully }
+      evm-genesis-chainspec: { condition: service_completed_successfully }
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command:
+      - |
+        ubft root-node run --home /genesis/root2 \
+          --address "/ip4/$(hostname -i)/tcp/8000" \
+          --bootnodes "/dns4/root1/tcp/8000/p2p/$(ubft node-id --home /genesis/root1 | tail -n1)" \
+          --trust-base /genesis/trust-base.json --shard-conf /genesis/shard-conf-8_0.json \
+          --rpc-server-address "$(hostname -i):8002" --metrics prometheus
+
+  root3:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      root-genesis-sign-3: { condition: service_completed_successfully }
+      evm-genesis-chainspec: { condition: service_completed_successfully }
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command:
+      - |
+        ubft root-node run --home /genesis/root3 \
+          --address "/ip4/$(hostname -i)/tcp/8000" \
+          --bootnodes "/dns4/root1/tcp/8000/p2p/$(ubft node-id --home /genesis/root1 | tail -n1)" \
+          --trust-base /genesis/trust-base.json --shard-conf /genesis/shard-conf-8_0.json \
+          --rpc-server-address "$(hostname -i):8002" --metrics prometheus
+
+  # --- shard validators (4, full-mesh dissemination + root1 for the root-chain connection) ---
+
+  evm1:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      root1: { condition: service_healthy }
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command:
+      - |
+        ubft shard-node run --home /genesis/evm1 --executor fake \
+          --address "/ip4/$(hostname -i)/tcp/9000" \
+          --bootnodes "/dns4/root1/tcp/8000/p2p/$(ubft node-id --home /genesis/root1 | tail -n1),/dns4/evm2/tcp/9000/p2p/$(ubft node-id --home /genesis/evm2 | tail -n1),/dns4/evm3/tcp/9000/p2p/$(ubft node-id --home /genesis/evm3 | tail -n1),/dns4/evm4/tcp/9000/p2p/$(ubft node-id --home /genesis/evm4 | tail -n1)" \
+          --trust-base /genesis/trust-base.json --shard-conf /genesis/shard-conf-8_0.json \
+          --rpc-server-address "$(hostname -i):9101" --metrics prometheus
+
+  evm2:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      root1: { condition: service_healthy }
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command:
+      - |
+        ubft shard-node run --home /genesis/evm2 --executor fake \
+          --address "/ip4/$(hostname -i)/tcp/9000" \
+          --bootnodes "/dns4/root1/tcp/8000/p2p/$(ubft node-id --home /genesis/root1 | tail -n1),/dns4/evm1/tcp/9000/p2p/$(ubft node-id --home /genesis/evm1 | tail -n1),/dns4/evm3/tcp/9000/p2p/$(ubft node-id --home /genesis/evm3 | tail -n1),/dns4/evm4/tcp/9000/p2p/$(ubft node-id --home /genesis/evm4 | tail -n1)" \
+          --trust-base /genesis/trust-base.json --shard-conf /genesis/shard-conf-8_0.json \
+          --rpc-server-address "$(hostname -i):9101" --metrics prometheus
+
+  evm3:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      root1: { condition: service_healthy }
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command:
+      - |
+        ubft shard-node run --home /genesis/evm3 --executor fake \
+          --address "/ip4/$(hostname -i)/tcp/9000" \
+          --bootnodes "/dns4/root1/tcp/8000/p2p/$(ubft node-id --home /genesis/root1 | tail -n1),/dns4/evm1/tcp/9000/p2p/$(ubft node-id --home /genesis/evm1 | tail -n1),/dns4/evm2/tcp/9000/p2p/$(ubft node-id --home /genesis/evm2 | tail -n1),/dns4/evm4/tcp/9000/p2p/$(ubft node-id --home /genesis/evm4 | tail -n1)" \
+          --trust-base /genesis/trust-base.json --shard-conf /genesis/shard-conf-8_0.json \
+          --rpc-server-address "$(hostname -i):9101" --metrics prometheus
+
+  evm4:
+    extends: { service: ubft }
+    volumes: [ genesis:/genesis ]
+    depends_on:
+      root1: { condition: service_healthy }
+    entrypoint: [ "/busybox/sh", "-c" ]
+    command:
+      - |
+        ubft shard-node run --home /genesis/evm4 --executor fake \
+          --address "/ip4/$(hostname -i)/tcp/9000" \
+          --bootnodes "/dns4/root1/tcp/8000/p2p/$(ubft node-id --home /genesis/root1 | tail -n1),/dns4/evm1/tcp/9000/p2p/$(ubft node-id --home /genesis/evm1 | tail -n1),/dns4/evm2/tcp/9000/p2p/$(ubft node-id --home /genesis/evm2 | tail -n1),/dns4/evm3/tcp/9000/p2p/$(ubft node-id --home /genesis/evm3 | tail -n1)" \
+          --trust-base /genesis/trust-base.json --shard-conf /genesis/shard-conf-8_0.json \
+          --rpc-server-address "$(hostname -i):9101" --metrics prometheus
+
+networks:
+  default:
+
+volumes:
+  genesis:
