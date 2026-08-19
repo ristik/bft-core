@@ -158,13 +158,26 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 	}
 
 	if len(resp.ExecutionPayload.Transactions) == 0 {
-		// Quiet: echo the parent exactly, matching executortest.Fake's own
-		// convention for the same case — round.go's quiet-detection
-		// compares against Expectation.PreviousHash, not against anything
-		// Executor-specific, so every Executor must agree on this shape.
+		// Quiet: echo the parent's Number/StateRoot, matching
+		// executortest.Fake's own convention for the same case — round.go's
+		// quiet-detection compares against Expectation.PreviousHash, not
+		// against anything Executor-specific, so every Executor must agree
+		// on this shape.
+		//
+		// Hash is deliberately nil here, NOT bc.parent.Hash — this is not
+		// optional cosmetic parity with Fake, it's load-bearing. Fake's own
+		// genesis head has a nil Hash by construction (executortest.New),
+		// which is what makes blockHashOrFallback's genesis fallback (use
+		// StateRoot instead of Hash) trigger correctly. A real execution
+		// client's genesis always has a real, non-nil block hash — echoing
+		// it here would hand the framework that SAME real hash to use as
+		// the genesis round's BlockHash, aliasing a certified round to a
+		// block that already existed before this round ran, rather than a
+		// value distinct to this round. See docs/troubleshooting.md and
+		// TestAdapter_Seal_QuietRound_EchoesParentWithNilHash.
 		return shardnode.Block{
 			Number:     bc.parent.Number,
-			Hash:       bc.parent.Hash,
+			Hash:       nil,
 			StateRoot:  bc.parent.StateRoot,
 			ParentHash: bc.parent.Hash,
 			Raw:        nil,
@@ -183,9 +196,15 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 // is rejected before reth ever sees the payload.
 func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.RoundParams) (shardnode.Status, error) {
 	if len(b.Raw) == 0 {
-		// Quiet block: must be exactly the parent, unchanged. Nothing to
-		// execute — see Seal's quiet case above, which this mirrors.
-		if b.Number == p.Parent.Number && bytes.Equal(b.StateRoot, p.Parent.StateRoot) && bytes.Equal(b.Hash, p.Parent.Hash) {
+		// Quiet block: must be exactly the parent's Number/StateRoot,
+		// unchanged. Nothing to execute — see Seal's quiet case above,
+		// which this mirrors, including deliberately NOT checking b.Hash
+		// against p.Parent.Hash: Seal's echo always sets Hash nil (never
+		// the parent's real hash — see that comment for why), so a
+		// same-as-parent Hash comparison here would reject every honest
+		// quiet block. executortest.Fake.Verify's quiet check has the same
+		// shape, for the same reason.
+		if b.Number == p.Parent.Number && bytes.Equal(b.StateRoot, p.Parent.StateRoot) {
 			return shardnode.StatusValid, nil
 		}
 		return shardnode.StatusInvalid, nil

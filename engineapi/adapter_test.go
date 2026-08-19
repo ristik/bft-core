@@ -224,7 +224,7 @@ func TestAdapter_BuildSealCommit_NonQuietRound(t *testing.T) {
 	require.Equal(t, shardnode.StatusValid, status)
 }
 
-func TestAdapter_Seal_QuietRound_EchoesParent(t *testing.T) {
+func TestAdapter_Seal_QuietRound_EchoesParentWithNilHash(t *testing.T) {
 	parentHash := fixedHash(0x11)
 	var payloadID data = []byte{9, 9, 9, 9, 9, 9, 9, 9}
 
@@ -259,7 +259,7 @@ func TestAdapter_Seal_QuietRound_EchoesParent(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, parentRef.Number, block.Number)
-	require.Equal(t, parentRef.Hash, block.Hash)
+	require.Empty(t, block.Hash, "echoed Hash must be nil, not the parent's real hash — a real hash here would let a live execution client's genesis hash get reused as a later round's BlockHash; see Seal's comment and docs/troubleshooting.md")
 	require.Equal(t, parentRef.StateRoot, block.StateRoot)
 	require.Empty(t, block.Raw, "quiet block must carry no proposal envelope")
 
@@ -269,6 +269,60 @@ func TestAdapter_Seal_QuietRound_EchoesParent(t *testing.T) {
 	status, err := a.Verify(ctx, block, params)
 	require.NoError(t, err)
 	require.Equal(t, shardnode.StatusValid, status)
+}
+
+// TestAdapter_GenesisQuietRound_DoesNotAliasParentBlockHash reproduces the
+// scenario a live single-validator run against real reth (v2.5.0) surfaced:
+// round 1 is genesis (framework-forced non-quiet — see
+// docs/shard-protocol.md §5 — regardless of what the executor itself
+// changed), built with zero transactions. Before Seal started nulling Hash
+// on its echo, round.go's blockHashOrFallback would see a non-empty
+// block.Hash (the parent's own real hash) and use it directly as round 1's
+// BlockHash — silently certifying a "new" block whose hash was actually
+// genesis's own, already-existing hash. With Hash nil, blockHashOrFallback
+// falls back to StateRoot instead, matching executortest.Fake's behavior
+// (whose genesis head.Hash is nil for exactly this reason).
+func TestAdapter_GenesisQuietRound_DoesNotAliasParentBlockHash(t *testing.T) {
+	genesisHash := fixedHash(0x11)
+	genesisRoot := shardnode.Hash(fixedHashBytes(0x22))
+	var payloadID data = []byte{1, 2, 3, 4, 5, 6, 7, 8}
+
+	engine := newMockReth(t, Secret{})
+	engine.on("engine_forkchoiceUpdatedV3", func(p json.RawMessage) (any, *rpcError) {
+		return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid}, PayloadID: &payloadID}, nil
+	})
+	engine.on("engine_getPayloadV3", func(p json.RawMessage) (any, *rpcError) {
+		return GetPayloadV3Response{
+			ExecutionPayload: ExecutionPayloadV3{
+				ParentHash:   genesisHash,
+				Transactions: []data{}, // zero transactions, matching a fresh chain with no mempool activity
+			},
+		}, nil
+	})
+
+	eth := newMockReth(t, Secret{})
+	eth.on("eth_getBlockByHash", func(p json.RawMessage) (any, *rpcError) {
+		return blockHeaderJSON{Timestamp: 0}, nil
+	})
+
+	a, closeFn := newTestAdapter(t, engine, eth)
+	defer closeFn()
+	ctx := context.Background()
+
+	// genesis: Number 0, a real non-nil Hash (unlike Fake's own genesis,
+	// which is nil by construction — a real execution client's genesis
+	// always has one).
+	genesisRef := shardnode.BlockRef{Number: 0, Hash: shardnode.Hash(genesisHash[:]), StateRoot: genesisRoot}
+	params := shardnode.RoundParams{Round: 1, Timestamp: 1, SealHash: shardnode.Hash(fixedHashBytes(0x99)), Parent: genesisRef}
+
+	id, err := a.Build(ctx, params)
+	require.NoError(t, err)
+	block, err := a.Seal(ctx, id)
+	require.NoError(t, err)
+
+	blockHash := shardnode.Hash(shardnode.BlockHashOrFallback(block, false)) // false: the framework forces genesis non-quiet regardless of executor state
+	require.NotEqual(t, genesisRef.Hash, blockHash, "round 1's BlockHash must not alias genesis's own already-existing hash")
+	require.Equal(t, genesisRoot, blockHash, "must fall back to StateRoot, exactly as executortest.Fake's own genesis round does")
 }
 
 func TestAdapter_Verify_RejectsTamperedAttributes_WithoutCallingNewPayload(t *testing.T) {

@@ -77,7 +77,7 @@ type pendingSubmission struct {
 	// genesis round is always non-quiet from the root chain's point of view
 	// (nil ≠ any real hash) but the executor may still report no change
 	// (e.g. an Executor whose genesis Build with zero entries simply
-	// echoes head) — see blockHashOrFallback and TestRound_SingleValidator_GenesisToThreeRounds.
+	// echoes head) — see BlockHashOrFallback and TestRound_SingleValidator_GenesisToThreeRounds.
 	needsCommit bool
 
 	submittedAt time.Time // for Metrics.recordQuorumLatency
@@ -203,7 +203,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// only at genesis — see pendingSubmission.needsCommit.
 	irQuiet := bytes.Equal(block.StateRoot, exp.PreviousHash)
 	executorChanged := !bytes.Equal(block.StateRoot, head.StateRoot)
-	blockHashForIR := blockHashOrFallback(block, irQuiet)
+	blockHashForIR := BlockHashOrFallback(block, irQuiet)
 
 	ir, err := BuildInputRecord(exp, block.StateRoot, blockHashForIR, irQuiet)
 	if err != nil {
@@ -420,7 +420,7 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 	return block, params, nil
 }
 
-// blockHashOrFallback returns the InputRecord's BlockHash for a non-quiet
+// BlockHashOrFallback returns the InputRecord's BlockHash for a non-quiet
 // round. Ordinarily that is the executor's own Block.Hash; the fallback to
 // StateRoot exists for one specific case — the very first round ever
 // certified, whose root-chain PreviousHash is nil (see
@@ -428,7 +428,7 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 // Executor's own genesis head has no meaningful "block hash" distinct from
 // its state root. Every round after that has a real, executor-assigned
 // block hash and this fallback never triggers.
-func blockHashOrFallback(b Block, quiet bool) []byte {
+func BlockHashOrFallback(b Block, quiet bool) []byte {
 	if quiet {
 		return nil
 	}
