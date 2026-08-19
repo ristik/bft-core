@@ -44,8 +44,10 @@ The CLI binary `ubft` provides commands for different node types:
 # Root node (consensus coordinator)
 ./build/ubft root-node run --home path/to/node-dir
 
-# Shard/partition node (transaction processor)
-./build/ubft shard-node run --home path/to/node-dir
+# Shard node — the executor is the important choice; see "Shard nodes" above
+./build/ubft shard-node run --home path/to/node-dir --executor fake       # deterministic, no external process
+./build/ubft shard-node run --home path/to/node-dir --executor engine-api \
+  --engine-url http://localhost:8551 --eth-url http://localhost:8545     # drives reth
 
 # View available commands
 ./build/ubft -h
@@ -53,19 +55,20 @@ The CLI binary `ubft` provides commands for different node types:
 
 ### Test Environment Setup
 
+`setup-nodes.sh`/`start.sh`/`stop.sh` only stand up the **root chain** on this
+branch — their `-m`/`-t`/`-p money`/`-p tokens` flags documented in earlier
+versions of this file no longer exist; there is no built-in money/token
+partition to point them at (see "Shard nodes" above). For a shard node, set
+one up separately with `shard-node init` / `shard-conf generate` / `trust-base
+sign` and register it with the root chain — `docs/engine-api-adapter-plan.md`
+§8 has the full sequence, and its reference commands are kept in sync with
+what `cli/ubft/cmd` actually accepts.
+
 ```bash
-# Set up root chain + 3 money partition nodes
-./setup-nodes.sh -m 3 -t 0
-
-# Set up root + money + token partitions
-./setup-nodes.sh -m 3 -t 3
-
-# Start nodes
-./start.sh -r -p money           # root + money partitions
-./start.sh -r -p money -p tokens # root + money + tokens
-
-# Stop all
-./stop.sh -a
+# Root chain only
+./setup-nodes.sh -r 3   # 3 root nodes; -c to reset db files instead
+./start.sh -r            # start the root nodes
+./stop.sh -a              # stop everything
 ```
 
 Generated node configurations are in `test-nodes/` directory.
@@ -81,11 +84,27 @@ Generated node configurations are in `test-nodes/` directory.
 - Returns Unicity Certificates (UCs) to certify partition state
 - Single root chain can coordinate multiple partitions
 
-**Partitions/Shards** (`partition/`):
-- Process transactions independently
-- Submit block certification requests to root chain
-- Receive UCs to finalize blocks
-- Types: Money partition, Token partition, Orchestration partition, Custom partitions
+**Shard nodes** — a shard node is a *role* (anything that certifies state-root
+transitions against the root chain), not a fixed package in this repo. This
+branch (`l1`) contains only the root chain; there is no built-in partition
+runtime, transaction system, or state package here — those were removed.
+Every client implements the shard-node role itself:
+
+- `shardnode/` (this repo) — the reusable framework: root-chain protocol,
+  round state machine, UC classification, crash recovery. Executor-agnostic
+  by design — see `docs/adr/0001-executor-boundary.md`. Two implementations
+  live alongside it: `shardnode/executortest` (a deterministic in-memory
+  fake, for testing the framework itself) and `engineapi/` (drives an
+  Ethereum execution client such as reth over the standard Engine API).
+  `ubft shard-node run --executor {fake|engine-api}` runs either.
+- `aggregator-go` and `rugregator` (separate repos) — the Unicity
+  Aggregation Layer, each with its own hand-rolled copy of this same
+  protocol (`aggregator-go/internal/bft/`, `rugregator`'s
+  `round/live_committer.rs`), predating `shardnode/`.
+
+See `docs/shard-protocol.md` for the normative round protocol and
+`docs/engine-api-adapter-plan.md` for the build plan this framework came
+from.
 
 ### Key Components
 
@@ -101,19 +120,12 @@ Generated node configurations are in `test-nodes/` directory.
   - `certification/`: Block certification request/response
   - `handshake/`: UC feed subscription
   - `abdrc/`: Consensus messages (proposals, votes, recovery)
-  - `blockproposal/`: Block proposals
-  - `replication/`: Ledger replication
-
-**State Management** (`state/`):
-- Partition state trees
-- Merkle tree implementations for state commitments
-- State replication and recovery
-
-**Transaction Systems** (`txsystem/`):
-- Pluggable transaction processing
-- Money partition: transfers, splits, swaps, fee credits
-- Token partition: NFTs, fungible tokens
-- Predicates: WASM-based smart contract execution
+- `network/shard_network.go`: the shard-facing counterpart of the root
+  chain's send/receive protocol registration — what `shardnode/bftclient.go`
+  uses to talk to the root chain
+- `shardnode/net_dissemination.go`: a separate, shard-internal protocol
+  (`/unicity/shard-payload/1.0.0`) for the round's leader to disseminate its
+  block to the shard's other validators — this never touches the root chain
 
 **Storage** (`keyvaluedb/`):
 - Abstraction over storage backends
@@ -162,9 +174,11 @@ Example from certification protocol:
 [partition_id, shard_id, node_id, input_record, zk_proof, block_size, state_size, signature]
 ```
 
-### Partition Integration Pattern
+### Shard Node Integration Pattern
 
-When building a new partition/blockchain that integrates with BFT Core:
+When building a new shard node that integrates with BFT Core — or, on this
+branch, just use `shardnode/` directly and implement `shardnode.Executor`
+instead of re-deriving the steps below from scratch:
 
 1. **Initialization**:
    - Subscribe to UC feed via Handshake message
@@ -253,7 +267,7 @@ make test
 go test ./rootchain/consensus
 
 # Specific test
-go test ./partition -run TestNode_StartAndStop
+go test ./shardnode -run TestRound_SingleValidator_GenesisToThreeRounds
 
 # With race detector
 go test -race ./...
@@ -295,3 +309,6 @@ DOCKER_GO_DEPENDENCY=../bft-go-base make build-docker
 
 - `bft-go-base`: Shared types and utilities (InputRecord, UnicityCertificate, validation rules)
 - Integration clients should implement CBOR serialization matching Go's `toarray` format
+- `aggregator-go` / `rugregator`: the Unicity Aggregation Layer, a shard node implemented outside
+  this repo (see "Shard nodes" above) — `aggregator-go/internal/bft/client.go` is the most complete
+  reference for the round protocol in a language other than what `shardnode/` uses

@@ -11,5 +11,6 @@ func newShardNodeCmd(baseFlags *baseFlags) *cobra.Command {
 		Short: "Tools to run a shard node",
 	}
 	cmd.AddCommand(shardNodeInitCmd(baseFlags))
+	cmd.AddCommand(shardNodeRunCmd(baseFlags))
 	return cmd
 }
