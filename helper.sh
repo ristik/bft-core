@@ -133,6 +133,14 @@ function start_root_nodes() {
 
 evmValidatorPortStart=28111
 evmDisseminationPortStart=28211
+evmRPCPortStart=28311
+
+# evm_validator_rpc_addr - this validator's metrics/health address, for
+# scripts/chaos-evm.sh's post-restart health checks.
+function evm_validator_rpc_addr() {
+  local i=$1 port=$((evmRPCPortStart + i - 1))
+  echo "127.0.0.1:$port"
+}
 
 # init_evm_validators - generate keys + node-info for N shard validators
 # $1 number of validators
@@ -198,46 +206,66 @@ function evm_validator_addr() {
 # $2 partition id
 # $3 root boot address (from init_root_nodes/boot_node)
 # $4 executor: "fake" or "engine-api"
+# $5 "rpc" (optional) - expose each validator's /api/v1/metrics and
+#    /api/v1/health on 127.0.0.1:evmRPCPortStart+i-1 (see evm_validator_rpc_addr).
+#    Omit for a plain smoke test; scripts/chaos-evm.sh passes it.
 # For --executor engine-api, set EVM_ENGINE_URL_i / EVM_ETH_URL_i env vars
 # per validator (i = 1..N) before calling, or every validator defaults to
 # the same single reth instance on the standard ports — fine for a
 # single-reth smoke test, wrong for a real multi-reth deployment.
 function start_evm_validators() {
-  local n=$1 partitionID=$2 rootBoot=$3 executor=$4
-
-  # pass 1: every validator's own address, before any of them are running
-  local addrs=()
-  for i in $(seq 1 "$n"); do
-    addrs+=("$(evm_validator_addr "$i")")
-  done
+  local n=$1 partitionID=$2 rootBoot=$3 executor=$4 exposeRPC=$5
 
   for i in $(seq 1 "$n"); do
-    local port=$((evmValidatorPortStart + i - 1))
-    local bootnodes="$rootBoot"
-    for j in $(seq 1 "$n"); do
-      if [ "$j" != "$i" ]; then
-        bootnodes+=",${addrs[$((j-1))]}"
-      fi
-    done
-
-    local executorArgs=()
-    if [ "$executor" == "engine-api" ]; then
-      local engineURLVar="EVM_ENGINE_URL_$i" ethURLVar="EVM_ETH_URL_$i"
-      local engineURL="${!engineURLVar:-http://127.0.0.1:8551}"
-      local ethURL="${!ethURLVar:-http://127.0.0.1:8545}"
-      executorArgs=(--engine-url "$engineURL" --eth-url "$ethURL" --jwt-secret "test-nodes/evm$i/jwt.hex")
-    fi
-
-    build/ubft shard-node run --home "test-nodes/evm$i" --executor "$executor" \
-      --address "/ip4/127.0.0.1/tcp/$port" --bootnodes "$bootnodes" \
-      --trust-base test-nodes/trust-base.json \
-      --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-      --log-format text --log-level info "${executorArgs[@]}" \
-      >> "test-nodes/evm$i/debug.log" 2>&1 &
-    echo $! > "test-nodes/evm$i/pid"
+    start_one_evm_validator "$i" "$n" "$partitionID" "$rootBoot" "$executor" "$exposeRPC"
   done
 
   echo "started $n EVM shard validators (executor=$executor)"
+}
+
+# start_one_evm_validator - (re)start a single validator $1 of $2, bootstrapped
+# to the root chain and (full-mesh) every sibling — the same computation
+# start_evm_validators does per-node, factored out so scripts/chaos-evm.sh can
+# restart exactly one validator (kill-and-recover scenarios) without
+# duplicating the bootnode/executor-args logic. Safe to call on an already-
+# initialized validator any number of times — e.g. after stop_one_evm_validator.
+# $1 this validator's index (1..$2)
+# $2 total number of validators (for the full-mesh bootnode list)
+# $3 partition id
+# $4 root boot address
+# $5 executor: "fake" or "engine-api"
+# $6 "rpc" (optional) - see start_evm_validators
+function start_one_evm_validator() {
+  local i=$1 n=$2 partitionID=$3 rootBoot=$4 executor=$5 exposeRPC=$6
+  local port=$((evmValidatorPortStart + i - 1))
+
+  local bootnodes="$rootBoot"
+  for j in $(seq 1 "$n"); do
+    if [ "$j" != "$i" ]; then
+      bootnodes+=",$(evm_validator_addr "$j")"
+    fi
+  done
+
+  local executorArgs=()
+  if [ "$executor" == "engine-api" ]; then
+    local engineURLVar="EVM_ENGINE_URL_$i" ethURLVar="EVM_ETH_URL_$i"
+    local engineURL="${!engineURLVar:-http://127.0.0.1:8551}"
+    local ethURL="${!ethURLVar:-http://127.0.0.1:8545}"
+    executorArgs=(--engine-url "$engineURL" --eth-url "$ethURL" --jwt-secret "test-nodes/evm$i/jwt.hex")
+  fi
+
+  local rpcArgs=()
+  if [ "$exposeRPC" == "rpc" ]; then
+    rpcArgs=(--rpc-server-address "$(evm_validator_rpc_addr "$i")")
+  fi
+
+  build/ubft shard-node run --home "test-nodes/evm$i" --executor "$executor" \
+    --address "/ip4/127.0.0.1/tcp/$port" --bootnodes "$bootnodes" \
+    --trust-base test-nodes/trust-base.json \
+    --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
+    --log-format text --log-level info "${executorArgs[@]}" "${rpcArgs[@]}" \
+    >> "test-nodes/evm$i/debug.log" 2>&1 &
+  echo $! > "test-nodes/evm$i/pid"
 }
 
 # stop_evm_validators - kill every started validator by its recorded pid
@@ -251,4 +279,20 @@ function stop_evm_validators() {
     fi
     rm -f "$pidfile"
   done
+}
+
+# stop_one_evm_validator - kill validator $1 by its recorded pid, e.g. for
+# scripts/chaos-evm.sh's kill-leader/kill-follower scenarios. $2 selects the
+# signal (default TERM; pass KILL for an unclean kill, simulating a crash
+# rather than a graceful shutdown).
+function stop_one_evm_validator() {
+  local i=$1 sig=${2:-TERM}
+  local pidfile="test-nodes/evm$i/pid"
+  [ -f "$pidfile" ] || { echo "no pid file for validator $i (already stopped?)" >&2; return 1; }
+  local pid
+  pid=$(cat "$pidfile")
+  if ps -p "$pid" >/dev/null 2>&1; then
+    kill "-$sig" "$pid"
+  fi
+  rm -f "$pidfile"
 }

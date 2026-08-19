@@ -1,0 +1,269 @@
+#!/bin/bash
+# chaos-evm.sh - formalizes the failure scenarios exercised manually while
+# building the shard-node framework (see docs/engine-api-adapter-plan.md
+# C3.1): a validator dying and coming back, whether as a follower or as the
+# round's current leader, and a corrupted on-disk certificate store. Runs
+# entirely against --executor fake, so it needs nothing beyond this repo.
+#
+# What this does and does not prove, honestly: the CLI's fake executor is
+# never given entries to certify (there is no transaction-ingestion path
+# wired to it), so every round after genesis is quiet and the state root
+# never leaves all-zero. That makes "does a restarted validator resume
+# without equivocating or falling out of sync with the root chain" a real,
+# live-exercised question here (handshake, LUC store continuity, round
+# numbering) — but it means Executor.Commit's own recovery path (a
+# restarted node reconciling a *non-quiet* head against a persisted block
+# store) never actually triggers, because fake has no persistence to
+# recover FROM and quiet rounds never move the head to begin with. That
+# path is covered instead by shardnode/round_recovery_test.go, in-process,
+# where a real non-quiet round can be constructed. See
+# docs/adr/0001-executor-boundary.md.
+#
+# Usage: scripts/chaos-evm.sh [-v validators] [-p partition id] [-k]
+#   -v  number of validators (default 4; needs >=4 to tolerate one fault)
+#   -p  partition id (default 8)
+#   -k  keep test-nodes/ and the running processes afterwards (default:
+#       stop everything and exit)
+#
+# Exit code is nonzero if any scenario's assertion failed.
+
+set -e
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+validators=4
+partition_id=8
+keep=false
+
+usage() {
+  echo "Usage: $0 [-h usage] [-v number of validators] [-p partition id] [-k keep nodes running after]"
+  exit 0
+}
+
+while getopts "hv:p:k" o; do
+  case "${o}" in
+  v) validators=${OPTARG} ;;
+  p) partition_id=${OPTARG} ;;
+  k) keep=true ;;
+  h | *) usage ;;
+  esac
+done
+
+if [ "$validators" -lt 4 ]; then
+  echo "need at least 4 validators to tolerate one fault (got $validators)" >&2
+  exit 1
+fi
+
+failures=0
+pass() { echo "  PASS: $1"; }
+fail() {
+  echo "  FAIL: $1" >&2
+  failures=$((failures + 1))
+}
+
+# wait_for - poll (up to $2 seconds) until `grep -q "$1" "$3"` succeeds.
+wait_for() {
+  local pattern=$1 timeout=$2 file=$3 waited=0
+  while ! grep -q "$pattern" "$file" 2>/dev/null; do
+    if [ "$waited" -ge "$timeout" ]; then
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 0
+}
+
+# latest_round - highest partitionRound this validator has logged accepting,
+# or 0 if it hasn't logged one yet (keeps callers' arithmetic/comparisons
+# well-defined under set -e rather than tripping over an empty string).
+latest_round() {
+  local r
+  r=$(grep -o 'partitionRound=[0-9]*' "test-nodes/evm$1/debug.log" 2>/dev/null | tail -1 | cut -d= -f2)
+  echo "${r:-0}"
+}
+
+# recent_leader - true if validator $1 logged itself as leader in its last
+# 20 "submitting block certification request" lines.
+was_recent_leader() {
+  tail -n 200 "test-nodes/evm$1/debug.log" 2>/dev/null | grep 'submitting block certification request' | tail -20 | grep -q 'leader=true'
+}
+
+# wait_for_progress - poll (up to $3 seconds) for validator $1's
+# partitionRound to exceed $2. Deliberately a poll with a generous budget,
+# not a fixed sleep-then-compare: a round assigned to a currently-dead
+# leader only recovers once the root chain's own T2 timeout reissues a
+# repeat certificate with the next leader in rotation (see
+# docs/shard-protocol.md), which can take a few multiples of T2 — a short
+# fixed window flags healthy self-recovery as a stall.
+wait_for_progress() {
+  local validator=$1 above=$2 timeout=$3 waited=0
+  while [ "$(latest_round "$validator")" -le "$above" ]; do
+    if [ "$waited" -ge "$timeout" ]; then
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 0
+}
+
+echo "=== chaos-evm.sh: setting up $validators-validator fake-executor shard ==="
+buildLog=$(mktemp)
+make clean build >"$buildLog" 2>&1 || { cat "$buildLog"; exit 1; }
+rm -f "$buildLog"
+rm -rf test-nodes
+mkdir test-nodes
+source helper.sh
+
+init_root_nodes 3
+init_evm_validators "$validators"
+generate_evm_shard_conf "$validators" "$partition_id" 31337 3000 exec
+generate_log_configuration "test-nodes/*/"
+
+echo -n "starting root nodes..." && start_root_nodes
+sleep 2
+rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
+start_evm_validators "$validators" "$partition_id" "$rootBoot" fake rpc
+
+cleanup() {
+  if [ "$keep" != true ]; then
+    echo "=== stopping everything ==="
+    stop_evm_validators
+    ./stop.sh -a
+  else
+    echo "=== leaving test-nodes/ running (-k) ==="
+  fi
+}
+trap cleanup EXIT
+
+echo "=== waiting for certification to get underway ==="
+for i in $(seq 1 "$validators"); do
+  if ! wait_for 'accepted certificate' 30 "test-nodes/evm$i/debug.log"; then
+    fail "validator $i never certified a round within 30s — aborting, see test-nodes/evm$i/debug.log"
+    exit 1
+  fi
+done
+pass "all $validators validators are certifying"
+
+echo
+echo "=== scenario: kill-follower ==="
+follower=1
+for i in $(seq 1 "$validators"); do
+  if ! was_recent_leader "$i"; then
+    follower=$i
+    break
+  fi
+done
+before=$(latest_round "$follower")
+echo "stopping validator $follower (not recently leader, round $before) ..."
+stop_one_evm_validator "$follower"
+survivor=$((follower % validators + 1))
+survivorBefore=$(latest_round "$survivor")
+if wait_for_progress "$survivor" "$survivorBefore" 30; then
+  pass "remaining $((validators - 1)) validators kept certifying without validator $follower (round $survivorBefore -> $(latest_round "$survivor"))"
+else
+  fail "quorum stalled after killing validator $follower (round stuck at $survivorBefore for 30s)"
+fi
+echo "restarting validator $follower ..."
+start_one_evm_validator "$follower" "$validators" "$partition_id" "$rootBoot" fake rpc
+if wait_for 'accepted certificate' 20 "test-nodes/evm$follower/debug.log"; then
+  pass "validator $follower rejoined and resumed certifying"
+else
+  fail "validator $follower did not resume certifying within 20s after restart"
+fi
+if grep -qi 'diverges\|equivocat' "test-nodes/evm$follower/debug.log"; then
+  fail "validator $follower logged a divergence/equivocation error after restart"
+else
+  pass "validator $follower's restart logged no divergence or equivocation error"
+fi
+
+echo
+echo "=== scenario: kill-leader ==="
+leader=1
+for i in $(seq 1 "$validators"); do
+  if was_recent_leader "$i"; then
+    leader=$i
+    break
+  fi
+done
+before=$(latest_round "$leader")
+echo "stopping validator $leader (recently leader, round $before) ..."
+stop_one_evm_validator "$leader"
+survivor=$((leader % validators + 1))
+survivorBefore=$(latest_round "$survivor")
+if wait_for_progress "$survivor" "$survivorBefore" 30; then
+  pass "remaining $((validators - 1)) validators kept certifying without leader $leader (round $survivorBefore -> $(latest_round "$survivor"), leader rotation recovered)"
+else
+  fail "quorum stalled after killing leader $leader (round stuck at $survivorBefore for 30s)"
+fi
+echo "restarting validator $leader ..."
+start_one_evm_validator "$leader" "$validators" "$partition_id" "$rootBoot" fake rpc
+if wait_for 'accepted certificate' 20 "test-nodes/evm$leader/debug.log"; then
+  pass "validator $leader rejoined and resumed certifying"
+else
+  fail "validator $leader did not resume certifying within 20s after restart"
+fi
+
+echo
+echo "=== scenario: cold-restart (longer outage) ==="
+target=$survivor
+before=$(latest_round "$target")
+echo "stopping validator $target for an extended outage (others keep certifying without it) ..."
+stop_one_evm_validator "$target"
+other=$((target % validators + 1))
+otherBefore=$(latest_round "$other")
+otherProgressed=false
+if wait_for_progress "$other" "$otherBefore" 15; then
+  otherProgressed=true
+fi
+sleep 5 # let a few more rounds pass while target is still down, for a real "outage", not a blink
+otherRoundDuringOutage=$(latest_round "$other")
+if [ "$otherProgressed" = true ]; then
+  pass "shard progressed well past validator $target's last round ($before -> $otherRoundDuringOutage) while it was down"
+else
+  fail "shard made no progress during validator $target's outage"
+fi
+start_one_evm_validator "$target" "$validators" "$partition_id" "$rootBoot" fake rpc
+if wait_for 'accepted certificate' 20 "test-nodes/evm$target/debug.log"; then
+  pass "validator $target caught up and resumed certifying after a $((otherRoundDuringOutage - before))-round outage"
+else
+  fail "validator $target did not resume after its outage"
+fi
+if grep -qi 'diverges\|equivocat' "test-nodes/evm$target/debug.log"; then
+  fail "validator $target logged a divergence/equivocation error catching up"
+else
+  pass "validator $target's outage-and-catchup logged no divergence or equivocation error"
+fi
+
+echo
+echo "=== scenario: tampered-block (corrupted on-disk certificate store) ==="
+victim=$target
+echo "stopping validator $victim and corrupting its persisted LUC store ..."
+stop_one_evm_validator "$victim"
+lucFile="test-nodes/evm$victim/shard-node-luc.json"
+if [ -f "$lucFile" ]; then
+  echo '{this is not valid json, simulating disk corruption or tampering' >"$lucFile"
+else
+  fail "no LUC store found at $lucFile to tamper with — was round 1 ever certified?"
+fi
+: >"test-nodes/evm$victim/debug.log" # isolate this scenario's log output
+start_one_evm_validator "$victim" "$validators" "$partition_id" "$rootBoot" fake rpc
+sleep 2
+if grep -q 'unmarshaling stored certificate' "test-nodes/evm$victim/debug.log" 2>/dev/null; then
+  pass "validator $victim refused to start on a corrupted certificate store (failed loudly, did not silently resume from scratch)"
+else
+  fail "validator $victim did not report the expected unmarshal error on a corrupted LUC store — see test-nodes/evm$victim/debug.log"
+fi
+# The process above exits immediately on that error (shardNodeRun returns
+# it before Run starts) — nothing left to stop, but remove any stale pid
+# file so the final stop_evm_validators sweep doesn't try to kill a pid
+# that already exited.
+rm -f "test-nodes/evm$victim/pid"
+
+echo
+if [ "$failures" -eq 0 ]; then
+  echo "=== chaos-evm.sh: all scenarios passed ==="
+else
+  echo "=== chaos-evm.sh: $failures scenario(s) failed ===" >&2
+fi
+exit "$failures"
