@@ -38,6 +38,9 @@ done
 
 if [ "$start_roots" == true ]; then
   echo -n "starting root nodes..." && start_root_nodes
+  if [ "$start_vals" == true ]; then
+    wait_for_root_chain_settle
+  fi
 fi
 
 if [ "$start_vals" == true ]; then

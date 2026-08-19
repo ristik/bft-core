@@ -121,7 +121,7 @@ generate_evm_shard_conf "$validators" "$partition_id" 31337 3000 exec
 generate_log_configuration "test-nodes/*/"
 
 echo -n "starting root nodes..." && start_root_nodes
-sleep 2
+wait_for_root_chain_settle
 rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
 start_evm_validators "$validators" "$partition_id" "$rootBoot" fake rpc
 
@@ -137,9 +137,14 @@ cleanup() {
 trap cleanup EXIT
 
 echo "=== waiting for certification to get underway ==="
+# 90s, not 30s: a validator that handshakes before the root chain's own
+# consensus has caught up on a freshly-registered shard conf gets "unknown
+# partition" and has to wait out its own 30s inactivity timeout to retry —
+# sometimes more than once. This is expected first-launch behavior, not a
+# bug in this script; see docs/troubleshooting.md.
 for i in $(seq 1 "$validators"); do
-  if ! wait_for 'accepted certificate' 30 "test-nodes/evm$i/debug.log"; then
-    fail "validator $i never certified a round within 30s — aborting, see test-nodes/evm$i/debug.log"
+  if ! wait_for 'accepted certificate' 90 "test-nodes/evm$i/debug.log"; then
+    fail "validator $i never certified a round within 90s — aborting, see test-nodes/evm$i/debug.log"
     exit 1
   fi
 done

@@ -66,6 +66,23 @@ function init_root_nodes() {
   done
 }
 
+# wait_for_root_chain_settle - pause after start_root_nodes and before
+# starting any shard validators against it. Root-node startup's shard-conf
+# registration (the curl PUT inside start_root_nodes) returns 200 as soon as
+# it's durably written to that root node's own orchestration store, but the
+# root chain's live consensus state (what a shard validator's handshake is
+# actually checked against — rootchain/consensus_manager.go's ShardInfo)
+# only picks up a newly-registered shard a few root rounds later. A
+# validator that handshakes before that catches "unknown partition ...
+# shard" and has to wait out its own 30s inactivity timeout to retry — 5s
+# here is confirmed (empirically, see docs/troubleshooting.md) to comfortably
+# clear that window, against root rounds that in practice complete in well
+# under a second each once the chain is up.
+function wait_for_root_chain_settle() {
+  echo "letting the root chain settle before starting validators..."
+  sleep 5
+}
+
 function start_root_nodes() {
   # use root node 1 as bootstrap node
   local bootNode=""
