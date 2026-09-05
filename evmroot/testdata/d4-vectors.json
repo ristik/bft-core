@@ -1,0 +1,266 @@
+{
+  "pipeline_depth": 3,
+  "scenarios": [
+    {
+      "name": "delayed_signatures",
+      "note": "Endorsement weight arrives in two batches; the second crosses the threshold before Commit.",
+      "steps": [
+        {
+          "step": "prepare"
+        },
+        {
+          "step": "freeze"
+        },
+        {
+          "step": "endorse_below_threshold"
+        },
+        {
+          "step": "endorse_at_threshold"
+        },
+        {
+          "step": "commit"
+        },
+        {
+          "step": "activate_at_boundary"
+        },
+        {
+          "step": "acknowledge"
+        }
+      ],
+      "final_phase": "acknowledged",
+      "want_phase": "acknowledged",
+      "phase_ok": true,
+      "violations": null,
+      "invariants_ok": true
+    },
+    {
+      "name": "asymmetric_delivery",
+      "note": "A replica that never received the commit record stays at endorsed; it cannot self-activate and keeps the old assignment authoritative for every round.",
+      "steps": [
+        {
+          "step": "try_activate_without_commit"
+        }
+      ],
+      "final_phase": "endorsed",
+      "want_phase": "endorsed",
+      "phase_ok": true,
+      "violations": null,
+      "invariants_ok": true
+    },
+    {
+      "name": "missed_earliest_activation",
+      "note": "Observed root round passes A_min before Commit; activation waits for the committed A*, not the proposed start.",
+      "steps": [
+        {
+          "step": "prepare"
+        },
+        {
+          "step": "freeze"
+        },
+        {
+          "step": "round_passes_A_min_no_commit"
+        },
+        {
+          "step": "endorse"
+        },
+        {
+          "step": "commit_A_star_ge_observed"
+        },
+        {
+          "step": "activate_at_A_star"
+        },
+        {
+          "step": "acknowledge"
+        }
+      ],
+      "final_phase": "acknowledged",
+      "want_phase": "acknowledged",
+      "phase_ok": true,
+      "violations": null,
+      "invariants_ok": true
+    },
+    {
+      "name": "crash_at_prepared",
+      "note": "Resume from the durable phase; the next phase cannot be skipped.",
+      "steps": [
+        {
+          "step": "skip_to_endorse"
+        }
+      ],
+      "final_phase": "prepared",
+      "want_phase": "prepared",
+      "phase_ok": true,
+      "violations": null,
+      "invariants_ok": true
+    },
+    {
+      "name": "crash_at_frozen",
+      "note": "Resume from the durable phase; the next phase cannot be skipped.",
+      "steps": [
+        {
+          "step": "skip_to_commit"
+        }
+      ],
+      "final_phase": "frozen",
+      "want_phase": "frozen",
+      "phase_ok": true,
+      "violations": null,
+      "invariants_ok": true
+    },
+    {
+      "name": "crash_at_endorsed",
+      "note": "Resume from the durable phase; the next phase cannot be skipped.",
+      "steps": [
+        {
+          "step": "skip_to_activate"
+        }
+      ],
+      "final_phase": "endorsed",
+      "want_phase": "endorsed",
+      "phase_ok": true,
+      "violations": null,
+      "invariants_ok": true
+    },
+    {
+      "name": "crash_at_committed",
+      "note": "Resume from the durable phase; the next phase cannot be skipped.",
+      "steps": [
+        {
+          "step": "resume_and_activate"
+        }
+      ],
+      "final_phase": "activated",
+      "want_phase": "activated",
+      "phase_ok": true,
+      "violations": null,
+      "invariants_ok": true
+    },
+    {
+      "name": "old_quorum_loss_after_prepare",
+      "note": "Old quorum is unavailable after Prepare; endorsement cannot complete and the handoff stalls with the old set still authoritative.",
+      "steps": [
+        {
+          "step": "prepare"
+        },
+        {
+          "step": "freeze"
+        },
+        {
+          "step": "endorse_fails_forever"
+        },
+        {
+          "step": "activate_still_impossible"
+        }
+      ],
+      "final_phase": "frozen",
+      "want_phase": "frozen",
+      "phase_ok": true,
+      "violations": null,
+      "invariants_ok": true
+    },
+    {
+      "name": "committed_abort_vs_late_activate",
+      "note": "Once committed, Abort is rejected; once aborted, Activate is rejected. Conflicting records cannot both take effect.",
+      "steps": [
+        {
+          "step": "prepare"
+        },
+        {
+          "step": "freeze"
+        },
+        {
+          "step": "endorse"
+        },
+        {
+          "step": "commit"
+        },
+        {
+          "step": "abort_after_commit_rejected"
+        }
+      ],
+      "final_phase": "committed",
+      "want_phase": "committed",
+      "phase_ok": true,
+      "violations": null,
+      "invariants_ok": true
+    },
+    {
+      "name": "aborted_then_activate_rejected",
+      "note": "A pre-commit abort kills attempt j; Activate is impossible afterwards; a replacement needs attempt j+1.",
+      "steps": [
+        {
+          "step": "prepare"
+        },
+        {
+          "step": "freeze"
+        },
+        {
+          "step": "abort"
+        },
+        {
+          "step": "activate_rejected"
+        }
+      ],
+      "final_phase": "aborted",
+      "want_phase": "aborted",
+      "phase_ok": true,
+      "violations": null,
+      "invariants_ok": true
+    },
+    {
+      "name": "incomplete_prepare_then_clock",
+      "note": "Prepare only, then the round counter reaches the proposed start: no activation.",
+      "steps": [
+        {
+          "step": "prepare"
+        },
+        {
+          "step": "clock_reaches_proposed_start"
+        }
+      ],
+      "final_phase": "prepared",
+      "want_phase": "prepared",
+      "phase_ok": true,
+      "violations": null,
+      "invariants_ok": true
+    },
+    {
+      "name": "incomplete_prepare_then_rest_insertion",
+      "note": "A locally submitted trust base (simulated as an Activate with no committed record) is rejected.",
+      "steps": [
+        {
+          "step": "prepare"
+        },
+        {
+          "step": "local_rest_insertion"
+        }
+      ],
+      "final_phase": "prepared",
+      "want_phase": "prepared",
+      "phase_ok": true,
+      "violations": null,
+      "invariants_ok": true
+    }
+  ],
+  "phase_order_interleavings": {
+    "note": "All 24 orderings of the four core phases are run; only the canonical order reaches a committed handoff, and no ordering authorises the new assignment before commit.",
+    "permutations": 24,
+    "orders_reaching_committed": [
+      "prepare-\u003efreeze-\u003eendorse-\u003ecommit"
+    ],
+    "orders_authorising_new_before_commit": null,
+    "canonical_order": [
+      "prepare",
+      "freeze",
+      "endorse",
+      "commit"
+    ],
+    "only_canonical_commits": true,
+    "no_early_new_authorization": true
+  },
+  "summary": {
+    "scenarios": 12,
+    "all_phase_expectations_met": true,
+    "all_invariants_held": true
+  }
+}
