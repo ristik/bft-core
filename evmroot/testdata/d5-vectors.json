@@ -1,0 +1,168 @@
+{
+  "vote_binding": {
+    "note": "LedgerCommitInfo binds VoteInfo iff its VoteInfoHash == H(CBOR(VoteInfo)); the signed preimage opens with the domain tag + network and binds the message domain even when commit fields are empty.",
+    "vote_info_hash": "120fa0da11ab26950c66fd3114b53dced2ed5baa4266e7f23a797664e266e466",
+    "commit_binds_vote": true,
+    "tampered_commit_rejected": true,
+    "non_committing_vote_still_binds_domain": true,
+    "non_committing_preimage_hex": "8670554e49434954595f504f535f564f54450369726f6f742d766f74655820120fa0da11ab26950c66fd3114b53dced2ed5baa4266e7f23a797664e266e466f600"
+  },
+  "slashable_conflicts": [
+    {
+      "name": "double_sign_same_round",
+      "conflict": true,
+      "note": "same key/network/domain/epoch/round, different signed statements: the offense"
+    },
+    {
+      "name": "duplicate_delivery",
+      "conflict": false,
+      "note": "identical preimage delivered twice: not two votes"
+    },
+    {
+      "name": "different_round",
+      "conflict": false,
+      "note": "different voting round: not this offense"
+    },
+    {
+      "name": "different_domain",
+      "conflict": false,
+      "note": "different message domain: not this offense"
+    },
+    {
+      "name": "legacy_vote",
+      "conflict": false,
+      "note": "legacy votes use their explicit legacy rules; never reinterpreted"
+    }
+  ],
+  "protection_params": {
+    "params": {
+      "WCert": 50,
+      "DeltaEv": 100,
+      "DeltaIncl": 40,
+      "DeltaExec": 40,
+      "DeltaHold": 200
+    },
+    "valid": true,
+    "note": "W_cert \u003c= Δ_ev \u003c Δ_hold and Δ_hold \u003e Δ_ev + Δ_incl + Δ_exec (200 \u003e 100+40+40=180)"
+  },
+  "withdrawal_gates": [
+    {
+      "name": "protection_not_elapsed",
+      "now": 1100,
+      "inbox_watermark": 2000,
+      "timely_evidence_pending": false,
+      "allowed": false,
+      "reason": "protection period has not elapsed"
+    },
+    {
+      "name": "watermark_behind_liability",
+      "now": 1300,
+      "inbox_watermark": 1040,
+      "timely_evidence_pending": false,
+      "allowed": false,
+      "reason": "forced-inbox consumption watermark has not passed this reservation's last liability"
+    },
+    {
+      "name": "timely_evidence_pending",
+      "now": 1300,
+      "inbox_watermark": 2000,
+      "timely_evidence_pending": true,
+      "allowed": false,
+      "reason": "a timely-queued evidence case against this key is still unprocessed"
+    },
+    {
+      "name": "all_gates_clear",
+      "now": 1300,
+      "inbox_watermark": 2000,
+      "timely_evidence_pending": false,
+      "allowed": true
+    }
+  ],
+  "evidence_timeliness": [
+    {
+      "name": "executed_in_window",
+      "offense_round": 500,
+      "exec_round": 560,
+      "inbox_commit_round": 0,
+      "payload_available": false,
+      "timely": true
+    },
+    {
+      "name": "executed_late_no_inbox",
+      "offense_round": 500,
+      "exec_round": 900,
+      "inbox_commit_round": 0,
+      "payload_available": false,
+      "timely": false
+    },
+    {
+      "name": "inbox_committed_in_window_then_late_exec",
+      "offense_round": 500,
+      "exec_round": 900,
+      "inbox_commit_round": 540,
+      "payload_available": true,
+      "timely": true
+    },
+    {
+      "name": "inbox_hash_unavailable",
+      "offense_round": 500,
+      "exec_round": 900,
+      "inbox_commit_round": 540,
+      "payload_available": false,
+      "timely": false
+    }
+  ],
+  "forced_inbox": {
+    "note": "Prepaid UCT credits in an immutable escrow; unique credit consumed in root consensus; refunds only via root-certified reconciliation of unused credits.",
+    "duplicate_deposit_rejected": true,
+    "admit_without_credit_rejected": true,
+    "double_spend_of_credit_rejected": true,
+    "http_ack_is_not_an_enqueue_certificate": true,
+    "due_prefix_outcomes": [
+      {
+        "Seq": 0,
+        "Executed": true,
+        "Reason": "",
+        "CreditKept": true
+      },
+      {
+        "Seq": 1,
+        "Executed": false,
+        "Reason": "nonce_already_used",
+        "CreditKept": true
+      },
+      {
+        "Seq": 2,
+        "Executed": true,
+        "Reason": "",
+        "CreditKept": true
+      }
+    ],
+    "poisoned_entry_does_not_stall_queue": true,
+    "watermark_advance_results": [
+      true,
+      false,
+      false
+    ],
+    "refund_of_reserved_credit_rejected": true,
+    "refund_race_applied_at_most_once": true
+  },
+  "inclusion_bound_k": [
+    {
+      "max_backlog_gas": 3000000,
+      "declared_gas_limit": 300000,
+      "g_fi": 300000,
+      "origin_observation_lag_blocks": 2,
+      "root_round_allowance_blocks": 3,
+      "k": 16
+    },
+    {
+      "max_backlog_gas": 0,
+      "declared_gas_limit": 300000,
+      "g_fi": 300000,
+      "origin_observation_lag_blocks": 1,
+      "root_round_allowance_blocks": 0,
+      "k": 2
+    }
+  ]
+}
