@@ -1,0 +1,149 @@
+{
+  "exec_config": {
+    "g_max": 30000000,
+    "g_sys": 2000000,
+    "g_fi": 0,
+    "base_fee_floor": 7,
+    "ordinary_capacity": 28000000,
+    "ordinary_target": 14000000
+  },
+  "gas_accounting": {
+    "note": "System runs under g_sys, ordinary under g_max-g_sys-g_fi; header gasUsed is the sum; base fee updates from ordinary vs ordinary target only.",
+    "system_gas": 1800000,
+    "forced_gas": 0,
+    "ordinary_gas": 15000000,
+    "header_gas_used": 16800000,
+    "parent_base_fee": 1000000000,
+    "next_base_fee": 1008928571,
+    "budget_ok": true,
+    "closes_exactly": true
+  },
+  "base_fee_series": [
+    {
+      "parent_base_fee": 1000000000,
+      "ordinary_used": 14000000,
+      "ordinary_target": 14000000,
+      "next_base_fee": 1000000000,
+      "note": "used == target -\u003e unchanged"
+    },
+    {
+      "parent_base_fee": 1000000000,
+      "ordinary_used": 21000000,
+      "ordinary_target": 14000000,
+      "next_base_fee": 1062500000,
+      "note": "used \u003e target -\u003e base fee rises"
+    },
+    {
+      "parent_base_fee": 1000000000,
+      "ordinary_used": 7000000,
+      "ordinary_target": 14000000,
+      "next_base_fee": 937500000,
+      "note": "used \u003c target -\u003e base fee falls"
+    },
+    {
+      "parent_base_fee": 8,
+      "ordinary_used": 0,
+      "ordinary_target": 14000000,
+      "next_base_fee": 7,
+      "note": "tiny parent fee, zero ordinary demand -\u003e clamps to positive floor"
+    }
+  ],
+  "import_checks": [
+    {
+      "name": "valid",
+      "want_ok": true,
+      "want_code": "",
+      "got_ok": true,
+      "got_code": "",
+      "matches": true
+    },
+    {
+      "name": "companion_missing",
+      "want_ok": false,
+      "want_code": "companion_missing",
+      "got_ok": false,
+      "got_code": "companion_missing",
+      "matches": true
+    },
+    {
+      "name": "extradata_mismatch",
+      "want_ok": false,
+      "want_code": "extradata_mismatch",
+      "got_ok": false,
+      "got_code": "extradata_mismatch",
+      "matches": true
+    },
+    {
+      "name": "system_origin_forged",
+      "want_ok": false,
+      "want_code": "system_origin_forged",
+      "got_ok": false,
+      "got_code": "system_origin_forged",
+      "matches": true
+    },
+    {
+      "name": "system_value_nonzero",
+      "want_ok": false,
+      "want_code": "system_value_nonzero",
+      "got_ok": false,
+      "got_code": "system_value_nonzero",
+      "matches": true
+    },
+    {
+      "name": "system_from_pool",
+      "want_ok": false,
+      "want_code": "system_from_pool",
+      "got_ok": false,
+      "got_code": "system_from_pool",
+      "matches": true
+    },
+    {
+      "name": "system_failed",
+      "want_ok": false,
+      "want_code": "system_failed",
+      "got_ok": false,
+      "got_code": "system_failed",
+      "matches": true
+    },
+    {
+      "name": "base_fee_below_floor",
+      "want_ok": false,
+      "want_code": "base_fee_below_floor",
+      "got_ok": false,
+      "got_code": "base_fee_below_floor",
+      "matches": true
+    },
+    {
+      "name": "withdrawals_nonempty",
+      "want_ok": false,
+      "want_code": "withdrawals_nonempty",
+      "got_ok": false,
+      "got_code": "withdrawals_nonempty",
+      "matches": true
+    },
+    {
+      "name": "blob_tx_present",
+      "want_ok": false,
+      "want_code": "blob_tx_present",
+      "got_ok": false,
+      "got_code": "blob_tx_present",
+      "matches": true
+    },
+    {
+      "name": "system_gas_over_budget",
+      "want_ok": false,
+      "want_code": "gas_budget",
+      "got_ok": false,
+      "got_code": "gas_budget",
+      "matches": true
+    },
+    {
+      "name": "ordinary_gas_over_capacity",
+      "want_ok": false,
+      "want_code": "gas_budget",
+      "got_ok": false,
+      "got_code": "gas_budget",
+      "matches": true
+    }
+  ]
+}
