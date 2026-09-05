@@ -1,0 +1,217 @@
+{
+  "assignment": {
+    "members": [
+      {
+        "ID": "root-a",
+        "Weight": 10
+      },
+      {
+        "ID": "root-b",
+        "Weight": 6
+      },
+      {
+        "ID": "root-c",
+        "Weight": 5
+      },
+      {
+        "ID": "root-d",
+        "Weight": 2
+      },
+      {
+        "ID": "root-e",
+        "Weight": 1
+      }
+    ],
+    "total_weight": 24,
+    "member_count": 5,
+    "root_threshold": 17,
+    "shard_threshold": 13,
+    "faulty_weight_bound": 7
+  },
+  "root_quorum": [
+    {
+      "signers": [
+        "root-a",
+        "root-b",
+        "root-c"
+      ],
+      "signer_count": 3,
+      "signer_weight": 21,
+      "threshold": 17,
+      "reached": true,
+      "note": "10+6+5 = 21 \u003e= 17: quorum"
+    },
+    {
+      "signers": [
+        "root-a",
+        "root-b"
+      ],
+      "signer_count": 2,
+      "signer_weight": 16,
+      "threshold": 17,
+      "reached": false,
+      "note": "10+6 = 16 \u003c 17: no quorum, though a numeric majority of a 3-of-5 subset"
+    },
+    {
+      "signers": [
+        "root-b",
+        "root-c",
+        "root-d",
+        "root-e"
+      ],
+      "signer_count": 4,
+      "signer_weight": 14,
+      "threshold": 17,
+      "reached": false,
+      "note": "6+5+2+1 = 14 \u003c 17: four of five signers, still short"
+    },
+    {
+      "signers": [
+        "root-a",
+        "root-c",
+        "root-d"
+      ],
+      "signer_count": 3,
+      "signer_weight": 17,
+      "threshold": 17,
+      "reached": true,
+      "note": "10+5+2 = 17 == 17: exactly the threshold"
+    }
+  ],
+  "shard_quorum": [
+    {
+      "signers": [
+        "root-a",
+        "root-d"
+      ],
+      "signer_count": 2,
+      "signer_weight": 12,
+      "threshold": 13,
+      "reached": false,
+      "note": "10+2 = 12 \u003c 13: no attestation quorum"
+    },
+    {
+      "signers": [
+        "root-a",
+        "root-c"
+      ],
+      "signer_count": 2,
+      "signer_weight": 15,
+      "threshold": 13,
+      "reached": true,
+      "note": "10+5 = 15 \u003e= 13: attestation quorum"
+    },
+    {
+      "signers": [
+        "root-b",
+        "root-c",
+        "root-e"
+      ],
+      "signer_count": 3,
+      "signer_weight": 12,
+      "threshold": 13,
+      "reached": false,
+      "note": "6+5+1 = 12 \u003c 13"
+    }
+  ],
+  "timeout_amplification": [
+    {
+      "signers": [
+        "root-d",
+        "root-e"
+      ],
+      "signer_weight": 3,
+      "faulty_weight_bound": 7,
+      "amplifies": false,
+      "note": "2+1 = 3 \u003c= 7: no amplification"
+    },
+    {
+      "signers": [
+        "root-b",
+        "root-d"
+      ],
+      "signer_weight": 8,
+      "faulty_weight_bound": 7,
+      "amplifies": true,
+      "note": "6+2 = 8 \u003e 7: at least one honest weight is timing out -\u003e jump to timeout"
+    },
+    {
+      "signers": [
+        "root-c",
+        "root-d"
+      ],
+      "signer_weight": 7,
+      "faulty_weight_bound": 7,
+      "amplifies": false,
+      "note": "5+2 = 7 == bound: not strictly greater -\u003e no amplification"
+    }
+  ],
+  "quorum_impossibility": [
+    {
+      "current_weight": 6,
+      "remaining_weight": 8,
+      "threshold": 17,
+      "impossible": true,
+      "note": "6 committed + 8 still unvoted = 14 \u003c 17: this value can never reach quorum"
+    },
+    {
+      "current_weight": 10,
+      "remaining_weight": 8,
+      "threshold": 17,
+      "impossible": false,
+      "note": "10 + 8 = 18 \u003e= 17: still possible"
+    }
+  ],
+  "duplicate_signers": {
+    "signers": [
+      "root-a",
+      "root-a",
+      "root-b"
+    ],
+    "valid": false,
+    "note": "root-a listed twice: SignerWeight rejects the set rather than counting weight 10 twice"
+  },
+  "minority_stake_majority_identities": {
+    "note": "A numeric majority of signer identities carries a minority of voting power; quorum tracks weight, not headcount.",
+    "identity_majority_signers": [
+      "root-b",
+      "root-c",
+      "root-d",
+      "root-e"
+    ],
+    "identity_majority_count": 4,
+    "total_members": 5,
+    "identity_majority_weight": 14,
+    "root_threshold": 17,
+    "identity_majority_reaches_quorum": false,
+    "single_whale_signer": "root-a",
+    "whale_weight": 10,
+    "whale_reaches_quorum": false
+  },
+  "overflow_bounds": [
+    {
+      "name": "within_bounds",
+      "ok": true,
+      "note": "baseline assignment sums cleanly"
+    },
+    {
+      "name": "member_over_cap",
+      "ok": false,
+      "note": "a single member weight above MaxMemberWeight is rejected"
+    },
+    {
+      "name": "total_over_cap",
+      "ok": false,
+      "note": "300 near-cap members exceed MaxTotalWeight; rejected before 2W can overflow"
+    }
+  ],
+  "trust_base_identity": {
+    "note": "Identity is SHA-256(CBOR(body)) over members (sorted by id) + thresholds + summary + change/predecessor hashes. It has no field for current-epoch signatures or the old-epoch endorsement witness, so neither can change it.",
+    "body_cbor": "890203071a000186a0858266726f6f742d610a8266726f6f742d62068266726f6f742d63058266726f6f742d64028266726f6f742d65011158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5820c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c35820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+    "identity": "d1f317bb1430dd1792a3b7e56bc90c24c2d4a486645706b200e70cd9cc4a7d1e",
+    "same_fields_identity": "d1f317bb1430dd1792a3b7e56bc90c24c2d4a486645706b200e70cd9cc4a7d1e",
+    "identities_equal": true,
+    "mutated_identity": "98282eb873b96bd15ac9d9691fda1429bda59bdadf3384d08a6034cb2a95bb51",
+    "mutated_differs": true
+  }
+}
