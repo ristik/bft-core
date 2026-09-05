@@ -1,0 +1,122 @@
+{
+  "global_execution_layer_supply_observable": false,
+  "checkpoint_and_windows": {
+    "note": "Freshness limit is a client policy in elapsed time = Δ_hold × min round period; it is not W_cert and not the key-cache count. Live cert age fits inside the evidence window, which fits inside retirement protection.",
+    "checkpoint_complete": true,
+    "delta_hold_rounds": 200,
+    "min_round_period_seconds": 6,
+    "freshness_limit_seconds": 1200,
+    "w_cert": 50,
+    "delta_ev": 100,
+    "nesting_valid": true,
+    "key_retained_for_outstanding_obligation": true
+  },
+  "historical_block_authentication": [
+    {
+      "name": "near_history_ok",
+      "from_head": 900000,
+      "to_block": 899000,
+      "header_chain_ok": true,
+      "authenticated": true,
+      "header_count": 1000,
+      "constant_size": false
+    },
+    {
+      "name": "deep_history_ok",
+      "from_head": 900000,
+      "to_block": 400000,
+      "header_chain_ok": true,
+      "authenticated": true,
+      "header_count": 500000,
+      "constant_size": false
+    },
+    {
+      "name": "broken_chain",
+      "from_head": 900000,
+      "to_block": 899000,
+      "header_chain_ok": false,
+      "authenticated": false,
+      "header_count": 1000,
+      "constant_size": false
+    }
+  ],
+  "multi_shard_anchor": {
+    "note": "A history touching two aggregator shards verifies with one shared seal plus one shard path per touched shard; path count grows with touched shards, seal verification does not.",
+    "verified": true,
+    "seal_verified_once": true,
+    "shard_path_count": 2,
+    "touched_shards": 2
+  },
+  "lock_witness_refresh": {
+    "note": "A recent proof of the same permanent lock digest refreshes historical backing; token identity does not include the refreshed witness.",
+    "token_identity_unchanged": true,
+    "historical_backing_refreshed": true
+  },
+  "supply_and_backing": {
+    "s0": 1000000000,
+    "burn": 12345,
+    "native_supply": 999987655,
+    "vault_native_balance": 50000,
+    "wuct_supply": 8000,
+    "bridged_outstanding": 40000,
+    "backing_not_double_counted": true,
+    "note": "Native UCT, WUCT and bridged claims are distinct balances. WUCT is a separate wrapper; bridged outstanding (O = L - D) is covered by vault native UCT and never double-counted against WUCT."
+  },
+  "custody_walkthrough": [
+    {
+      "state": "locked",
+      "ledger": {
+        "L": 110000,
+        "D": 60000,
+        "P": 55000
+      },
+      "outstanding": 50000,
+      "unpaid_credit": 5000,
+      "invariants_ok": true
+    },
+    {
+      "state": "burned",
+      "ledger": {
+        "L": 110000,
+        "D": 60000,
+        "P": 55000
+      },
+      "outstanding": 50000,
+      "unpaid_credit": 5000,
+      "invariants_ok": true
+    },
+    {
+      "state": "redemption_credited",
+      "ledger": {
+        "L": 110000,
+        "D": 70000,
+        "P": 55000
+      },
+      "outstanding": 40000,
+      "unpaid_credit": 15000,
+      "invariants_ok": true
+    },
+    {
+      "state": "paid",
+      "ledger": {
+        "L": 110000,
+        "D": 70000,
+        "P": 65000
+      },
+      "outstanding": 40000,
+      "unpaid_credit": 5000,
+      "invariants_ok": true
+    }
+  ],
+  "token_profile": {
+    "transfer_allowed": true,
+    "burn_allowed": true,
+    "split_allowed": false,
+    "merge_allowed": false,
+    "mint_reason_extension_allowed": false
+  },
+  "redemption_relation": {
+    "note": "Direct (atomic, metered) and succinct (over-budget history) paths bind the same network/config/trust-base/nullifier/lock-refs/release-leaves — the same semantic relation on the common admitted token profile.",
+    "direct_and_succinct_same_semantic_relation": true
+  }
+}
