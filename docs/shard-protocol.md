@@ -12,7 +12,7 @@ possible executor, not the only one.
 
 ## Contents
 
-1. [The three messages](#1-the-three-messages)
+1. [Messages](#1-messages)
 2. [InputRecord field mapping](#2-inputrecord-field-mapping)
 3. [The round state machine](#3-the-round-state-machine)
 4. [UC classification](#4-uc-classification)
@@ -23,7 +23,7 @@ possible executor, not the only one.
 
 ---
 
-## 1. The three messages
+## 1. Messages
 
 Everything a shard node needs to send or receive is three CBOR `toarray`
 messages over three libp2p protocols. Nothing else exists at this layer.
