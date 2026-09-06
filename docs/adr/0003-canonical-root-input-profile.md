@@ -2,8 +2,12 @@
 
 ## Status
 
-Proposed (D1, issue #3). Freeze once reviewed by a protocol reviewer other than
-the author. Builds on ADR 0002 (integration branch). Does not supersede ADR 0001.
+Proposed (D1, issue #3). Revised after the first review (#77):
+certificate **binding** replaces "highest root round seen"; `rootInput` binds
+**both** the certified and authorized epoch instead of imposing equality;
+canonical bytes are cross-checked against an independent CBOR oracle and real
+signed `types.UnicitySeal` fixtures. Freeze once re-reviewed by a protocol
+reviewer other than the author. Builds on ADR 0002. Does not supersede ADR 0001.
 
 ## Context
 
@@ -33,9 +37,22 @@ Key points:
 1. **Signature-free root origin `O_-`.** Certificates and their signature sets
    are authentication witnesses only. `O_-` is a deterministic CBOR body built
    from committed content (network, root round/epoch, reference time, Unicity
-   Tree root, certified `IR`, `TRHash`, `ShardConfHash`). Different valid
-   signature subsets or transport encodings of the same statement produce a
-   byte-identical `O_-`.
+   Tree root, certified `IR`, `TRHash`, `ShardConfHash`). `RootOriginFromCertificate`
+   reads none of `UnicitySeal.Signatures`, the shard-tree path or the
+   unicity-tree path; two real fixtures signed by different `>2/3` secp256k1
+   subsets produce a byte-identical `O_-` (`TestRootOrigin_TwoValidSignatureSubsetsAgree`).
+
+1a. **Certificate binding, not local selection.** The proposer binds one valid
+   certificate for round `n` in the block (`O_-` in `extraData`, full `UC_-`/`TE_-`
+   in D2 companion data). Followers validate that binding against committed state
+   (the seal-registry cursor), never re-pick from their own observed set. A late
+   repeat the proposer did not bind is unused; a bound certificate behind the
+   follower's applied cursor is rejected and the round re-proposed.
+
+1b. **Both epochs bound.** `rootInput` carries `e_cert = O_-.IR.Epoch` and
+   `e_auth = TE_-.Epoch`; equality is the normal case and `e_auth = e_cert + 1`
+   is the committed handoff (`sharding.go` `nextBlock`). `RootInput.Validate`
+   rejects any other relationship and malformed digest widths.
 
 2. **Canonical `rootInput` tuple** `(v, α, β, σ, n, e, h_parent, O_-, TE_-, D)`,
    committed in the block header as `extraData = SHA-256(CBOR(rootInput))`. Every

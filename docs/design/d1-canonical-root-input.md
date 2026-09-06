@@ -62,11 +62,31 @@ header commits:
 | profile version | v | this profile ⇒ **1** | uint |
 | network / partition / shard | α, β, σ | partition configuration (`st=8`) | uint, uint, bytes |
 | authorized shard round | n | `TechnicalRecord.Round` | uint |
-| shard epoch | e | `TechnicalRecord.Epoch` (= `IR.Epoch`) | uint |
+| certified epoch | e_cert | `O_-.IR.Epoch` (the outgoing epoch the previous IR belongs to) | uint |
+| authorized epoch | e_auth | `TechnicalRecord.Epoch` (the epoch the authorized round runs under) | uint |
 | last certified EVM parent hash | h_parent | previous certified block's `h_b` (Ethereum) | bytes(32) or null at genesis |
 | root origin | O_- | §2 above | array |
 | technical record | TE_- | `TechnicalRecord` `(Round,Epoch,Leader,StatHash,FeeHash)` | array |
 | pending transitions | D | ordered committed trust-base bodies + handoff acks the EVM is still missing | array of bytes |
+
+### Both epochs are bound — equality is NOT imposed
+
+`rootchain/consensus/storage/sharding.go`'s `nextBlock` handles `prevSI.TR.Epoch !=
+prevSI.IR.Epoch`: the previous IR belongs to the outgoing epoch while the
+technical record authorizes the successor. `rootInput` therefore binds **both**
+`e_cert = O_-.IR.Epoch` and `e_auth = TE_-.Epoch` and classifies the boundary:
+
+| Boundary | Condition | Meaning |
+|---|---|---|
+| **normal** | `e_auth == e_cert` | ordinary round |
+| **handoff** | `e_auth == e_cert + 1` | the committed epoch handoff: this round runs the successor assignment against the last certified parent from the outgoing epoch |
+| **invalid** | anything else | rejected (`RootInput.Validate`) |
+
+`h_parent` is the actual last certified EVM parent regardless of the boundary — a
+handoff does not reset it. `RootInput.Validate` also enforces `TE_-.Round == n`,
+`TE_-.Epoch == e_auth` and `O_-.IR.Epoch == e_cert`. Vector group `epoch_boundary`
+covers normal, handoff and both invalid directions; `root_inputs.epoch_handoff_boundary`
+is a full tuple across the boundary.
 
 Everything a historical replay needs is inside this tuple. No constituent is read
 from node-local configuration, a local clock, a file or a network response
@@ -91,19 +111,21 @@ Canonical bodies (element order is normative):
 
 ```
 O_-      = [ α, r, eᵣ, tᵣ, u,
-             [ n, e, h', h, t, h_b ],      ; IR
+             [ n, e, h', h, t, h_b ],      ; IR (e = O_-.IR.Epoch = e_cert)
              TRHash, ShardConfHash ]
 
 TE_-     = [ Round, Epoch, Leader, StatHash, FeeHash ]
 
-rootInput = [ v, α, β, σ, n, e, h_parent, O_-, TE_-, [ D₀, D₁, … ] ]
+rootInput = [ v, α, β, σ, n, e_cert, e_auth, h_parent, O_-, TE_-, [ D₀, D₁, … ] ]
 
 extraData = SHA-256( CBOR(rootInput) )      ; 32 bytes, header extraData
 ```
 
 The reference encoder is `evmroot/cbor.go` — deliberately independent of
 bft-go-base's CBOR library so a match is evidence of canonicality, not of shared
-defaults.
+defaults. `TestRootOrigin_IndependentCBOROracle` / `TestExtraData_IndependentOracle`
+cross-check every canonical byte against bft-go-base's fxamacker `CoreDetEnc`
+encoder as a second implementation.
 
 ## 4. Domain-separated round parameters
 
@@ -139,27 +161,55 @@ side by side for the same inputs so an implementer can confirm which they are on
 > newest message locally observed. — `appendix-evm.tex`, Seal registry state
 
 A node receives multiple `CertificationResponse`s: duplicates from several root
-nodes, and repeat certificates after a shard timeout. The `(UC_-, TE_-)` pair
-that authorizes shard round `n` is selected by:
+nodes, and repeat certificates after a shard timeout. An earlier draft of this
+profile said "pick the highest root round you have seen for round `n`" — but that
+is still local: a proposer that has seen only `C1` and a follower that has also
+seen a later valid `C2` would derive different `rootInput`/`extraData` for the
+same block. The rule is instead:
 
-1. **`TE_-.Round == n`** — the technical record names the round being built. This,
-   not arrival order, identifies the authorizing pair.
-2. Among pairs with `TE_-.Round == n`, the one carried by the `UnicityCertificate`
-   with the **highest `UnicitySeal.RootChainRoundNumber`** (a repeat certificate
-   re-issues the same `IR` under a later root round; the later seal is the one
-   whose `r` the round parameters and seal registry must use).
-3. Before accepting, run `types.CheckNonEquivocatingCertificates(prev, new)`
-   (Yellowpaper "Algorithm 6"). An equivocating pair is fatal, not a selection
-   input.
+### The block binds one certificate; followers validate that binding
 
-The **certified round clock** (`evmroot/clock.go`) records `r` from the selected
+1. **Proposer.** Picks *any* certificate that is valid (verified against the
+   trust base — D3), authorizes shard round `n` (`TE_-.Round == n`), and is not
+   behind the proposer's own seal-registry cursor. It **binds** that certificate
+   in the block: `O_-` is committed in `extraData`, and the full `UC_-`/`TE_-`
+   travel in the D2 companion data (`sealCompanion.witnesses`).
+2. **Follower.** Does **not** re-pick from its own view. It recomputes `extraData`
+   from the companion `rootInput` (D2), then runs
+   `ValidateBoundCertificate(ref, cert, n, lastAppliedRootRound)`:
+   - the bound certificate must be one the follower has verified against the
+     trust base;
+   - `cert.AuthorizedRound == n`;
+   - the bound certificate's `O_-` identity and `TRHash` match the block's
+     binding;
+   - `cert.RootRound >= lastAppliedRootRound` — the only view-dependent input,
+     and it is **committed state** (the seal-registry cursor), identical on every
+     node that processed the same certified sequence, not message-arrival order.
+3. A **later valid repeat** (same `IR`, higher `r`) that the proposer did *not*
+   bind is simply unused for this block; two honest nodes still agree because they
+   both validate the one bound certificate. If a follower has *already applied*
+   that repeat (cursor moved past the bound cert's `r`), it rejects the block and
+   the round is re-proposed against a current certificate — deterministic given
+   committed state.
+4. Before accepting a certificate for verification, `CheckNonEquivocatingCertificates`
+   (Yellowpaper "Algorithm 6") still applies; an equivocating pair is fatal.
+
+Vectors: `certificate_selection` covers `node_a`/`node_b` reaching the identical
+result despite different observed sets, a stale binding rejected by the registry
+cursor, an unverified binding, and a wrong-round binding.
+`TestSelection_AsymmetricDeliveryAgrees` and
+`TestSelection_LateRepeatDoesNotChangeAcceptedResult` are the model tests.
+
+### Certified round clock
+
+The **certified round clock** (`evmroot/clock.go`) records `r` from the *bound*
 certificate in seal-registry state and only ever moves it forward. Protocol
 deadlines compare the recorded `r` against a threshold with `>=`, never `==`, and
 the trigger fires once even if the feed skipped the exact threshold value
 (imports at 98 then 107 still fire a threshold of 100, exactly once — vector
 group `certified_round_clock`). A certificate that would move the recorded round
-**backwards** is rejected outright — that is the concrete symptom of selecting by
-local arrival.
+**backwards** is rejected outright — the concrete symptom of arrival-order
+selection.
 
 ## 6. Round types
 
@@ -222,14 +272,17 @@ Notes:
 
 | D1 acceptance clause | Evidence |
 |---|---|
-| independent vectors cover alternate valid signature subsets and encodings | `evmroot` `signature_subsets`; `TestRootOrigin_IdentityIndependentOfSignatures` |
-| … same commitment on all validators | `RootOrigin.canonicalBody()` has no signature/path input, asserted by test |
-| … a different authenticated statement | `distinct_statement`; `TestRootOrigin_DistinctStatementDistinctIdentity` |
+| independent vectors cover alternate valid signature subsets and encodings | real `types.UnicitySeal` fixtures signed by two different `>2/3` secp256k1 subsets; `TestRootOrigin_TwoValidSignatureSubsetsAgree` — `RootOriginFromCertificate` byte-identical for both |
+| … same commitment on all validators | `RootOriginFromCertificate` reads only committed content (no `Signatures`, no tree paths); structural check + the fixture test above |
+| … a different authenticated statement | `TestRootOrigin_DifferentAuthenticatedStatementDiffers` (a byte of `IR.Hash` changed on a signed fixture) |
+| … an independent derivation of the expected canonical bytes | `TestRootOrigin_IndependentCBOROracle`, `TestExtraData_IndependentOracle` — hand-rolled `evmroot/cbor.go` cross-checked against bft-go-base's fxamacker `CoreDetEnc` for the same logical arrays |
+| … genesis null/state-root rules and malformed widths | `TestRootInput_RejectsMalformedWidths`; `RootOrigin.Validate` / `RootInput.Validate`; `root_inputs.genesis` (null `h_b`, null `h_parent`, pinned 32-byte `h'`/`h`) |
 | … genesis, retries, root rounds skipped by the EVM | `root_origins`/`root_inputs` genesis + repeat + `root_rounds_skipped`; round-type table §6 |
+| a certified outgoing-IR / new-TR fixture imports the successor assignment, keeps the actual last certified parent | `root_inputs.epoch_handoff_boundary` (`e_cert=1`, `e_auth=2`, `h_parent` unchanged); `epoch_boundary` group; `TestRootInput_EpochBoundaryNotEqualityImposed` |
 | A root-round 98-to-107 observation triggers a threshold at 100 exactly once | `certified_round_clock`; `TestCertifiedRoundClock_FiresOnceAcrossSkippedRounds` |
 | Historical replay has every required input without node-local configuration | `rootInput` inventory §2; `root_inputs[*].self_contained` |
 | domain and hash distinctions | `domains` (v0 vs v1); §1, §4; `TestDomainHash_*` |
-| Certificates cannot be selected by latest local arrival | §5; `TestCertifiedRoundClock_BackwardsPanics` |
+| Certificates cannot be selected by latest local arrival; asymmetric-delivery / late-repeat with identical accepted block results | §5 binding rule; `certificate_selection` vectors; `TestSelection_AsymmetricDeliveryAgrees`, `TestSelection_StaleBindingRejected`, `TestSelection_LateRepeatDoesNotChangeAcceptedResult`; `TestCertifiedRoundClock_BackwardsPanics` |
 
 ## 10. Reproduce
 

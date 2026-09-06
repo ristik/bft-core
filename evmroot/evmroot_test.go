@@ -88,24 +88,16 @@ func TestDomainHash_V1DiffersFromV0Prototype(t *testing.T) {
 
 // --- RootOrigin: signature-free identity --------------------------------
 
-func TestRootOrigin_IdentityIndependentOfSignatures(t *testing.T) {
-	// The canonical body is built only from committed content. There is no
-	// field, parameter or code path in RootOrigin that a signature map or a
-	// tree path could enter — assert that by encoding the same statement
-	// "received" as different objects and getting one identity.
+func TestRootOrigin_StructuralIndependenceFromSignatures(t *testing.T) {
+	// Structural check: canonicalBody has no field a signature map or tree
+	// path could enter. The real signed-fixture proof is in
+	// d1fixtures_test.go TestRootOrigin_TwoValidSignatureSubsetsAgree.
 	statement := sampleOrigin()
-	enc1 := statement.Encode()
-
-	// A byte-identical re-decode/re-encode round trip (simulating a
-	// different transport framing that carries the same committed values).
-	var reread RootOrigin = statement
-	enc2 := reread.Encode()
-
-	if !bytes.Equal(enc1, enc2) {
-		t.Fatal("same statement, different object -> different canonical body")
+	if !bytes.Equal(statement.Encode(), statement.Encode()) {
+		t.Fatal("encoding not deterministic")
 	}
-	if statement.Identity() != reread.Identity() {
-		t.Fatal("identity depends on something other than committed content")
+	if err := statement.Validate(); err != nil {
+		t.Fatalf("sample origin invalid: %v", err)
 	}
 }
 
@@ -137,10 +129,19 @@ func TestRootOrigin_AllRoundKindsEncode(t *testing.T) {
 
 // --- RootInput: extraData commitment, self-containment ------------------
 
-func TestRootInput_ExtraDataIsSHA256OfCBOR(t *testing.T) {
-	ri := RootInput{
+func sampleRootInput() RootInput {
+	o := sampleOrigin()
+	return RootInput{
 		Version: ProfileVersion, NetworkID: 3, PartitionID: 0x45564d00, ShardID: []byte{},
-		Round: 57, Epoch: 1, ParentHash: rep(0xEE, 32), Origin: sampleOrigin(), TE: sampleTE(),
+		Round: 57, CertifiedEpoch: o.IR.Epoch, AuthorizedEpoch: sampleTE().Epoch,
+		ParentHash: rep(0xEE, 32), Origin: o, TE: sampleTE(),
+	}
+}
+
+func TestRootInput_ExtraDataIsSHA256OfCBOR(t *testing.T) {
+	ri := sampleRootInput()
+	if err := ri.Validate(); err != nil {
+		t.Fatalf("sample rootInput invalid: %v", err)
 	}
 	want := sha256.Sum256(ri.Encode())
 	if ri.ExtraData() != Hash32(want) {
@@ -152,11 +153,67 @@ func TestRootInput_ExtraDataIsSHA256OfCBOR(t *testing.T) {
 }
 
 func TestRootInput_VersionIsCommitted(t *testing.T) {
-	a := RootInput{Version: 1, Origin: sampleOrigin(), TE: sampleTE(), ShardID: []byte{}}
+	a := sampleRootInput()
 	b := a
 	b.Version = 2
 	if a.ExtraData() == b.ExtraData() {
 		t.Fatal("profile version is not bound into the commitment")
+	}
+}
+
+func TestRootInput_EpochBoundaryNotEqualityImposed(t *testing.T) {
+	// A normal round has equal epochs.
+	if sampleRootInput().EpochBoundary() != EpochNormal {
+		t.Fatal("normal round not classified normal")
+	}
+	// The handoff boundary — certified epoch 1, authorized epoch 2 — is
+	// accepted, not rejected. This is the sharding.go nextBlock case
+	// (prevSI.TR.Epoch != prevSI.IR.Epoch).
+	h := sampleRootInput()
+	h.Round, h.CertifiedEpoch, h.AuthorizedEpoch = 58, 1, 2
+	h.Origin.IR.Round, h.Origin.IR.Epoch = 58, 1
+	h.TE = TechnicalRecord{Round: 58, Epoch: 2, Leader: "n", StatHash: rep(1, 32), FeeHash: rep(2, 32)}
+	if h.EpochBoundary() != EpochHandoff {
+		t.Fatalf("handoff boundary misclassified as %s", h.EpochBoundary())
+	}
+	if err := h.Validate(); err != nil {
+		t.Fatalf("handoff-boundary rootInput rejected: %v", err)
+	}
+	// Two epochs apart, or backwards, is invalid.
+	for _, bad := range [][2]uint64{{1, 3}, {2, 1}, {5, 0}} {
+		x := sampleRootInput()
+		x.CertifiedEpoch, x.AuthorizedEpoch = bad[0], bad[1]
+		x.Origin.IR.Epoch = bad[0]
+		x.TE.Epoch = bad[1]
+		if x.EpochBoundary() != EpochInvalid || x.Validate() == nil {
+			t.Fatalf("epochs %v accepted", bad)
+		}
+	}
+}
+
+func TestRootInput_RejectsMalformedWidths(t *testing.T) {
+	base := sampleRootInput()
+	for _, m := range []struct {
+		name string
+		mut  func(*RootInput)
+	}{
+		{"short unicity tree root", func(r *RootInput) { r.Origin.UnicityTreeRoot = rep(1, 31) }},
+		{"long TRHash", func(r *RootInput) { r.Origin.TRHash = rep(1, 33) }},
+		{"short IR.Hash", func(r *RootInput) { r.Origin.IR.Hash = rep(1, 16) }},
+		{"non-genesis nil parent", func(r *RootInput) { r.ParentHash = nil }},
+		{"quiet round with block hash", func(r *RootInput) {
+			r.Origin.IR.Hash = rep(0x11, 32) // == PreviousHash -> quiet
+			r.Origin.IR.BlockHash = rep(0x33, 32)
+		}},
+		{"empty transition entry", func(r *RootInput) { r.Transitions = [][]byte{{}} }},
+	} {
+		ri := base
+		ri.Origin.IR.PreviousHash = rep(0x11, 32)
+		ri.Origin.IR.Hash = rep(0x22, 32)
+		m.mut(&ri)
+		if err := ri.Validate(); err == nil {
+			t.Errorf("%s: Validate accepted a malformed input", m.name)
+		}
 	}
 }
 

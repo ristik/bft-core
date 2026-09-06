@@ -15,7 +15,10 @@
 // https://github.com/ristik/bft-core/issues/3
 package evmroot
 
-import "crypto/sha256"
+import (
+	"crypto/sha256"
+	"fmt"
+)
 
 // ProfileVersion is the D1 root-input profile version this package
 // implements. v1 is the normative form defined by the specification
@@ -163,26 +166,93 @@ func (o RootOrigin) Encode() []byte { return marshalCBOR(o.canonicalBody()) }
 // without carrying its whole body.
 func (o RootOrigin) Identity() Hash32 { return sha256.Sum256(o.Encode()) }
 
+// Validate rejects malformed field widths. Every present digest is exactly
+// 32 bytes. At genesis (IR.Round == 0) IR.PreviousHash/IR.Hash carry the
+// pinned genesis commitment (still 32 bytes, never null) and IR.BlockHash
+// is null; otherwise IR.BlockHash is null iff the round is quiet
+// (IR.Hash == IR.PreviousHash).
+func (o RootOrigin) Validate() error {
+	for name, h := range map[string][]byte{
+		"UnicityTreeRoot": o.UnicityTreeRoot, "TRHash": o.TRHash, "ShardConfHash": o.ShardConfHash,
+		"IR.PreviousHash": o.IR.PreviousHash, "IR.Hash": o.IR.Hash,
+	} {
+		if len(h) != 32 {
+			return fmt.Errorf("evmroot: %s must be 32 bytes, got %d", name, len(h))
+		}
+	}
+	quiet := string(o.IR.PreviousHash) == string(o.IR.Hash)
+	switch {
+	case o.IR.Round == 0:
+		if len(o.IR.BlockHash) != 0 {
+			return fmt.Errorf("evmroot: genesis IR must have a null block hash")
+		}
+	case quiet && len(o.IR.BlockHash) != 0:
+		return fmt.Errorf("evmroot: quiet round (h == h') must have a null block hash")
+	case !quiet && len(o.IR.BlockHash) != 32:
+		return fmt.Errorf("evmroot: non-quiet round block hash must be 32 bytes, got %d", len(o.IR.BlockHash))
+	}
+	return nil
+}
+
+// EpochBoundary classifies the relationship between the certified shard
+// epoch (O_-.IR.Epoch, the outgoing epoch the previous IR belongs to) and
+// the authorized epoch (TE_-.Epoch, the epoch the authorized round runs
+// under). At a normal round they are equal; at the committed handoff the
+// authorized epoch is exactly one greater — the case
+// rootchain/consensus/storage/sharding.go's nextBlock handles when
+// prevSI.TR.Epoch != prevSI.IR.Epoch. Any other relationship is invalid.
+type EpochBoundary uint8
+
+const (
+	EpochInvalid EpochBoundary = iota
+	EpochNormal                // authorized == certified
+	EpochHandoff               // authorized == certified + 1
+)
+
+func (b EpochBoundary) String() string {
+	return [...]string{"invalid", "normal", "handoff"}[b]
+}
+
+// ClassifyEpochBoundary compares the certified and authorized epochs.
+func ClassifyEpochBoundary(certifiedEpoch, authorizedEpoch uint64) EpochBoundary {
+	switch {
+	case authorizedEpoch == certifiedEpoch:
+		return EpochNormal
+	case authorizedEpoch == certifiedEpoch+1:
+		return EpochHandoff
+	default:
+		return EpochInvalid
+	}
+}
+
 // RootInput is the canonical input the privileged seal operation receives
 // and the header commits:
 //
-//	rootInput = (v, alpha, beta, sigma, n, e, h_parent, O_-, TE_-, D)
+//	rootInput = (v, alpha, beta, sigma, n, e_cert, e_auth, h_parent, O_-, TE_-, D)
+//
+// Both epochs are bound: e_cert = O_-.IR.Epoch (the outgoing certified
+// epoch) and e_auth = TE_-.Epoch (the epoch the authorized round runs
+// under). They are equal at a normal round and differ by one at the
+// committed handoff boundary; ClassifyEpochBoundary must not return
+// EpochInvalid. h_parent is the actual last certified EVM parent regardless
+// of the boundary.
 //
 // D is the ordered sequence of committed trust-base bodies and handoff
 // acknowledgements the importing EVM is still missing; each element is an
 // opaque, already-canonical body whose external authentication witness is
 // NOT re-hashed into this input.
 type RootInput struct {
-	Version     uint64 // v — must equal ProfileVersion
-	NetworkID   uint64 // alpha
-	PartitionID uint64 // beta
-	ShardID     []byte // sigma — canonical shard-id bytes ("" for the single unsharded governance shard)
-	Round       uint64 // n — authorized shard round
-	Epoch       uint64 // e — shard epoch
-	ParentHash  []byte // h_parent — last certified EVM parent block hash (Ethereum Keccak/RLP hash), carried verbatim
-	Origin      RootOrigin
-	TE          TechnicalRecord
-	Transitions [][]byte // D — ordered; each entry a canonical committed body
+	Version         uint64 // v — must equal ProfileVersion
+	NetworkID       uint64 // alpha
+	PartitionID     uint64 // beta
+	ShardID         []byte // sigma — canonical shard-id bytes ("" for the single unsharded governance shard)
+	Round           uint64 // n — authorized shard round (TE_-.Round)
+	CertifiedEpoch  uint64 // e_cert — O_-.IR.Epoch
+	AuthorizedEpoch uint64 // e_auth — TE_-.Epoch
+	ParentHash      []byte // h_parent — last certified EVM parent block hash (Ethereum Keccak/RLP hash), carried verbatim
+	Origin          RootOrigin
+	TE              TechnicalRecord
+	Transitions     [][]byte // D — ordered; each entry a canonical committed body
 }
 
 func (ri RootInput) canonicalBody() cArray {
@@ -203,12 +273,55 @@ func (ri RootInput) canonicalBody() cArray {
 		cUint(ri.PartitionID),
 		cBytes(ri.ShardID),
 		cUint(ri.Round),
-		cUint(ri.Epoch),
+		cUint(ri.CertifiedEpoch),
+		cUint(ri.AuthorizedEpoch),
 		optBytes(ri.ParentHash), // null at genesis (no parent block)
 		ri.Origin.canonicalBody(),
 		te,
 		d,
 	}
+}
+
+// EpochBoundary reports the certified-vs-authorized epoch relationship.
+func (ri RootInput) EpochBoundary() EpochBoundary {
+	return ClassifyEpochBoundary(ri.CertifiedEpoch, ri.AuthorizedEpoch)
+}
+
+// Validate checks the structural invariants a consumer must not assume away:
+// profile version, epoch boundary, the TE/authorized-epoch agreement, the
+// O_-/certified-epoch agreement, hash widths, and the genesis nulling rule.
+func (ri RootInput) Validate() error {
+	if ri.Version != ProfileVersion {
+		return fmt.Errorf("evmroot: rootInput version %d != profile %d", ri.Version, ProfileVersion)
+	}
+	if ri.EpochBoundary() == EpochInvalid {
+		return fmt.Errorf("evmroot: epoch boundary invalid: certified %d, authorized %d", ri.CertifiedEpoch, ri.AuthorizedEpoch)
+	}
+	if ri.TE.Epoch != ri.AuthorizedEpoch {
+		return fmt.Errorf("evmroot: TE.Epoch %d != authorized epoch %d", ri.TE.Epoch, ri.AuthorizedEpoch)
+	}
+	if ri.TE.Round != ri.Round {
+		return fmt.Errorf("evmroot: TE.Round %d != authorized round %d", ri.TE.Round, ri.Round)
+	}
+	if ri.Origin.IR.Epoch != ri.CertifiedEpoch {
+		return fmt.Errorf("evmroot: O_-.IR.Epoch %d != certified epoch %d", ri.Origin.IR.Epoch, ri.CertifiedEpoch)
+	}
+	if err := ri.Origin.Validate(); err != nil {
+		return err
+	}
+	genesis := ri.Origin.IR.Round == 0
+	if genesis && len(ri.ParentHash) != 0 {
+		return fmt.Errorf("evmroot: genesis rootInput must have a null parent hash")
+	}
+	if !genesis && len(ri.ParentHash) != 32 {
+		return fmt.Errorf("evmroot: non-genesis parent hash must be 32 bytes, got %d", len(ri.ParentHash))
+	}
+	for i, d := range ri.Transitions {
+		if len(d) == 0 {
+			return fmt.Errorf("evmroot: transition D[%d] is empty", i)
+		}
+	}
+	return nil
 }
 
 // Encode returns the canonical deterministic-CBOR encoding of rootInput.

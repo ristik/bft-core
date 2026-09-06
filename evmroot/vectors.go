@@ -19,8 +19,34 @@ type VectorSet struct {
 	SignatureSubsets  SignatureSubsetCase   `json:"signature_subsets"`
 	DistinctStatement DistinctStatementCase `json:"distinct_statement"`
 	RootInputs        []RootInputVector     `json:"root_inputs"`
+	EpochBoundary     []EpochBoundaryVector `json:"epoch_boundary"`
+	Selection         []SelectionVector     `json:"certificate_selection"`
 	Timestamps        []TimestampVector     `json:"timestamps"`
 	Clock             ClockVector           `json:"certified_round_clock"`
+}
+
+// EpochBoundaryVector shows the certified-vs-authorized epoch relationship
+// and that equality is not imposed.
+type EpochBoundaryVector struct {
+	Name            string `json:"name"`
+	CertifiedEpoch  uint64 `json:"certified_epoch"`
+	AuthorizedEpoch uint64 `json:"authorized_epoch"`
+	Boundary        string `json:"boundary"` // normal | handoff | invalid
+	Accepted        bool   `json:"accepted"` // RootInput.Validate() passes
+}
+
+// SelectionVector exercises ValidateBoundCertificate: two nodes with
+// different observed certificate sets validate the same block-bound
+// certificate to the same result, and a stale bound certificate is
+// rejected.
+type SelectionVector struct {
+	Name                 string `json:"name"`
+	BoundRootRound       uint64 `json:"bound_root_round"`
+	AuthorizedRound      uint64 `json:"authorized_round"`
+	FollowerAppliedRound uint64 `json:"follower_last_applied_root_round"`
+	SignaturesValid      bool   `json:"bound_cert_signatures_valid"`
+	Accept               bool   `json:"accept"`
+	Reason               string `json:"reason,omitempty"`
 }
 
 // DomainVectors shows, byte for byte, how the v1 domain-separated
@@ -72,11 +98,14 @@ type DistinctStatementCase struct {
 // commitment. "self_contained" records that the tuple carries every field
 // a historical replay needs with no node-local configuration.
 type RootInputVector struct {
-	Name          string `json:"name"`
-	Kind          string `json:"kind"`
-	CBOR          string `json:"cbor"`
-	ExtraData     string `json:"extra_data"` // H(CBOR(rootInput))
-	SelfContained bool   `json:"self_contained"`
+	Name            string `json:"name"`
+	Kind            string `json:"kind"`
+	CBOR            string `json:"cbor"`
+	ExtraData       string `json:"extra_data"` // H(CBOR(rootInput))
+	CertifiedEpoch  uint64 `json:"certified_epoch"`
+	AuthorizedEpoch uint64 `json:"authorized_epoch"`
+	EpochBoundary   string `json:"epoch_boundary"`
+	SelfContained   bool   `json:"self_contained"`
 }
 
 // TimestampVector exercises max(referenceTime, parentTimestamp+1).
@@ -218,30 +247,106 @@ func BuildVectors() VectorSet {
 	}
 
 	// --- full root inputs -------------------------------------------------
-	mkRI := func(o RootOrigin, round uint64, parent []byte, d [][]byte) RootInput {
-		return RootInput{
+	// mkRI derives both epochs from the origin's certified IR and the
+	// technical record, and validates the assembled input.
+	mkRI := func(o RootOrigin, te TechnicalRecord, parent []byte, d [][]byte) RootInput {
+		ri := RootInput{
 			Version: ProfileVersion, NetworkID: 3, PartitionID: 0x45564d00, ShardID: []byte{},
-			Round: round, Epoch: 1, ParentHash: parent, Origin: o, TE: sampleTE(), Transitions: d,
+			Round: te.Round, CertifiedEpoch: o.IR.Epoch, AuthorizedEpoch: te.Epoch,
+			ParentHash: parent, Origin: o, TE: te, Transitions: d,
 		}
+		if o.IR.Round != 0 {
+			if err := ri.Validate(); err != nil {
+				panic("evmroot: vector rootInput invalid: " + err.Error())
+			}
+		}
+		return ri
 	}
-	genesisRI := mkRI(genesis, 0, nil, nil)
-	successRI := mkRI(successful, 57, rep(0xEE, 32), nil)
-	skipRI := mkRI(func() RootOrigin { o := sampleOrigin(); o.RootRound = 140; return o }(), 58, rep(0x33, 32), nil)
-	handoffRI := mkRI(successful, 57, rep(0xEE, 32), [][]byte{rep(0xB0, 48), rep(0xB1, 24)})
+	// A handoff-boundary origin: the certified IR still belongs to epoch 1
+	// (its outgoing epoch) while the technical record authorizes epoch 2.
+	handoffOrigin := sampleOrigin()
+	handoffOrigin.RootRound = 108
+	handoffOrigin.IR.Round = 58
+	handoffOrigin.IR.Epoch = 1
+	handoffTE := TechnicalRecord{Round: 58, Epoch: 2, Leader: "evm-node-3", StatHash: rep(0x66, 32), FeeHash: rep(0x77, 32)}
+	genesisTE := TechnicalRecord{Round: 0, Epoch: 1, Leader: "evm-node-1", StatHash: rep(0x66, 32), FeeHash: rep(0x77, 32)}
+
+	genesisRI := mkRI(genesis, genesisTE, nil, nil)
+	successRI := mkRI(successful, sampleTE(), rep(0xEE, 32), nil)
+	skipRI := mkRI(func() RootOrigin { o := sampleOrigin(); o.RootRound = 140; return o }(), sampleTE(), rep(0x33, 32), nil)
+	transRI := mkRI(successful, sampleTE(), rep(0xEE, 32), [][]byte{rep(0xB0, 48), rep(0xB1, 24)})
+	handoffRI := mkRI(handoffOrigin, handoffTE, rep(0xEE, 32), [][]byte{rep(0xB2, 48)})
 	for _, riv := range []struct {
 		name string
 		kind RoundKind
 		ri   RootInput
 	}{
 		{"genesis", RoundGenesis, genesisRI},
-		{"successful", RoundSuccessful, successRI},
+		{"successful_normal_epoch", RoundSuccessful, successRI},
 		{"root_rounds_skipped", RoundSuccessful, skipRI},
-		{"with_pending_transitions", RoundSuccessful, handoffRI},
+		{"with_pending_transitions", RoundSuccessful, transRI},
+		{"epoch_handoff_boundary", RoundSuccessful, handoffRI},
 	} {
 		vs.RootInputs = append(vs.RootInputs, RootInputVector{
 			Name: riv.name, Kind: riv.kind.String(),
 			CBOR: hx(riv.ri.Encode()), ExtraData: hx32(riv.ri.ExtraData()),
+			CertifiedEpoch: riv.ri.CertifiedEpoch, AuthorizedEpoch: riv.ri.AuthorizedEpoch,
+			EpochBoundary: riv.ri.EpochBoundary().String(),
 			SelfContained: true, // every field is in the tuple; no node-local config is read
+		})
+	}
+
+	// --- epoch boundary --------------------------------------------------
+	for _, eb := range []struct {
+		name       string
+		cert, auth uint64
+	}{
+		{"normal_round", 1, 1},
+		{"handoff_boundary", 1, 2},
+		{"invalid_skips_epoch", 1, 3},
+		{"invalid_goes_backwards", 2, 1},
+	} {
+		ri := RootInput{
+			Version: ProfileVersion, NetworkID: 3, PartitionID: 0x45564d00, ShardID: []byte{},
+			Round: 58, CertifiedEpoch: eb.cert, AuthorizedEpoch: eb.auth, ParentHash: rep(0xEE, 32),
+			Origin: func() RootOrigin { o := sampleOrigin(); o.IR.Round = 58; o.IR.Epoch = eb.cert; return o }(),
+			TE:     TechnicalRecord{Round: 58, Epoch: eb.auth, Leader: "n", StatHash: rep(1, 32), FeeHash: rep(2, 32)},
+		}
+		vs.EpochBoundary = append(vs.EpochBoundary, EpochBoundaryVector{
+			Name: eb.name, CertifiedEpoch: eb.cert, AuthorizedEpoch: eb.auth,
+			Boundary: ri.EpochBoundary().String(), Accepted: ri.Validate() == nil,
+		})
+	}
+
+	// --- certificate selection ----------------------------------------
+	selOrigin := sampleOrigin() // RootRound 104, authorizes shard round 57
+	selRef, _ := RefFromOrigin(selOrigin)
+	const authRound = 57
+	// The block binds selOrigin's certificate. Two nodes with different
+	// observed sets both validate this one bound certificate.
+	nodeA := verifiedCertFromOrigin(selOrigin, authRound, true) // node A verified exactly the bound cert
+	nodeB := nodeA                                              // node B also saw a later repeat, but validates the bound one
+	stale := verifiedCertFromOrigin(func() RootOrigin { o := sampleOrigin(); o.RootRound = 90; return o }(), authRound, true)
+	for _, sc := range []struct {
+		name    string
+		ref     AuthorizingRef
+		cert    VerifiedCert
+		applied uint64
+	}{
+		{"node_a_accepts_bound_cert", selRef, nodeA, 104},
+		{"node_b_same_result_despite_later_repeat_seen", selRef, nodeB, 104},
+		{"stale_binding_rejected_by_registry_cursor", func() AuthorizingRef {
+			r, _ := RefFromOrigin(func() RootOrigin { o := sampleOrigin(); o.RootRound = 90; return o }())
+			return r
+		}(), stale, 104},
+		{"unverified_binding_rejected", selRef, func() VerifiedCert { c := nodeA; c.SignaturesValid = false; return c }(), 104},
+		{"wrong_authorized_round_rejected", selRef, func() VerifiedCert { c := nodeA; c.AuthorizedRound = 58; return c }(), 104},
+	} {
+		res := ValidateBoundCertificate(sc.ref, sc.cert, authRound, sc.applied)
+		vs.Selection = append(vs.Selection, SelectionVector{
+			Name: sc.name, BoundRootRound: sc.cert.RootRound, AuthorizedRound: authRound,
+			FollowerAppliedRound: sc.applied, SignaturesValid: sc.cert.SignaturesValid,
+			Accept: res.Accept, Reason: res.Reason,
 		})
 	}
 
