@@ -23,12 +23,32 @@ Proposed (D2, issue #4). Revised twice:
     `header.gasUsed` transparently includes the mandated `g_sys` work (not
     "unchanged").
   - **`VerifyCompanionWitnesses` verifies proof bindings, not assertions.** No
-    `threshold` parameter — it is derived as `⌊2W/3⌋+1` from the verifier's own
-    authenticated `D2TrustBase` (`{NodeID, weight, consensusKey}`). The carried
-    `TE` must hash to `Origin.TRHash`. Seal signatures are **real secp256k1
-    signatures** over `D2SealWitnessStatement(OriginID, TRHash)`, verified against
-    each member's key; only verified weight counts. `{a:10,b:6,c:5,d:2,e:1}` +
-    signer `e` alone no longer passes.
+    `threshold` parameter — it is derived. (Superseded below.)
+
+- After the fourth review #78:
+  - **Verify the existing certificate, don't invent a root signature.** The
+    third-review `D2SealWitnessStatement` (a new message for root validators to
+    sign) is removed. `VerifyCompanionWitnesses` now consumes **D1's
+    `VerifiedCert`** — the real `types.UnicityCertificate` verified against the
+    trust base for its epoch (`UnicitySeal.Verify`: signatures **and** quorum,
+    plus inclusion paths and `tr.Hash()`) — through D1's `ValidateBoundCertificate`.
+    It is an explicit **verified external precondition**; the certificate →
+    `VerifiedCert` mapping is exercised through bft-go-base's real verifier in
+    `TestD2_CertificateBoundaryFixtures` (positive quorum subset / negative
+    sub-quorum subset). D2 no longer holds root keys or has a signing obligation.
+  - **Transition contents are authenticated.** A second verified input,
+    `ExpectedTransitions` — the verifier's authenticated ordered committed-body
+    sequence. `ri.Transitions` must equal it byte-for-byte, position by
+    position; substitution, reordering, omission and replay all fail (a
+    byte-count check does not).
+  - **The commitment is written after the forced prefix.** The first system call
+    is presence-only. A post-prefix `FinalizeStep` (a second privileged
+    operation, gas-charged against `g_sys`) writes `sealRegistryCommitment` over
+    the outcomes determined **at each forced entry's turn** — because a prior
+    valid forced tx can change a later entry's pre-state, and a future-outcome
+    input to the first call would be contract-readable. `ValidateImport`
+    re-derives the outcomes (`evalForcedPrefix`) and checks the finalized
+    commitment and the storage value against them.
 
 Freeze once re-reviewed by a Go-adapter + reth reviewer other than the author.
 Depends on ADR 0003 (D1).
@@ -74,11 +94,20 @@ Adopt the profile in
    an **ordinary** target only; protocol-mandated gas is outside the feedback
    loop and is recovered as `header.gasUsed − g_sys − rejectedConsumption`.
 
-3b. **Off-trie commitment in contract state, not a header field** — a successful
-   forced transaction is an ordinary transaction with a standard receipt. Only
-   the system call and `forced_rejected` records are off-trie, committed by
-   `sealRegistryCommitment` written into the seal-registry contract's storage
-   (authenticated by `stateRoot`, `eth_getProof`).
+3b. **Off-trie commitment in contract state, not a header field, written after
+   the forced prefix** — a successful forced transaction is an ordinary
+   transaction with a standard receipt. Only the system ops and `forced_rejected`
+   records are off-trie. The first system call is presence-only; a post-prefix
+   `FinalizeStep` (gas-charged against `g_sys`) writes `sealRegistryCommitment`
+   over the outcomes determined at each forced entry's turn into seal-registry
+   contract storage (authenticated by `stateRoot`, `eth_getProof`).
+
+3c. **Authentication consumes verified inputs.** `VerifyCompanionWitnesses`
+   consumes D1's `VerifiedCert` (the real `UnicityCertificate` verified against
+   the trust base — signatures, quorum, inclusion paths, `tr.Hash()`) via
+   `ValidateBoundCertificate`, checks `SHA-256(CBOR(TE_-)) == O_-.TRHash`, and
+   requires `ri.Transitions` to equal the authenticated `ExpectedTransitions`
+   position by position. D2 invents no root signature and holds no root keys.
 
 4. **Validity rules** — positive base-fee floor `f_base^min` checked every block;
    withdrawals always empty; blob transactions disabled; no protocol issuance.
@@ -91,17 +120,21 @@ Adopt the profile in
 - `evmroot/d2gas.go` — budgets, header `gasUsed`, EIP-1559 update with the
   ordinary-only substitution and the floor clamp.
 - `evmroot/d2import.go` — the ordered import-validation predicate set with stable
-  rejection codes; `SealRegistryCommitment` (contract-state value, not a header
-  field); `VerifyCompanionWitnesses(witness, rootInput, D2TrustBase)` with a
-  derived threshold, the TE↔TRHash binding and verified signatures.
-- `evmroot/d2seal.go` — deterministic secp256k1 seal-witness keys and
-  `D2TrustBase` / `D2SealWitnessStatement` / `VerifiedSignerWeight`.
+  rejection codes; `SealRegistryCommitment` (contract-state value);
+  `FinalizeStep` + `ForcedEntry` / `evalForcedPrefix` / `DerivedSealOutcomes`
+  (turn-determined outcomes); `VerifyCompanionWitnesses(witness, rootInput,
+  lastAppliedRootRound)` consuming D1's `VerifiedCert` via
+  `ValidateBoundCertificate`, the TE↔TRHash binding, and position-by-position
+  `ExpectedTransitions` matching. (The invented `d2seal.go` seal-witness
+  statement + keys are removed.)
 - `evmroot/testdata/d2-vectors.json` — exec config, a gas-accounting vector that
-  closes exactly, a base-fee series (up/flat/down/floor), the
-  `seal_registry_commitment` vector (successful forced tx stays ordinary), and
-  import-check vectors including `witness_name_without_signature`,
-  `witness_te_not_bound_to_trhash`, `successful_forced_not_a_seal_record`,
-  `seal_registry_commitment_mismatch`.
+  closes exactly, a base-fee series (up/flat/down/floor), the `seal_outcome_list`
+  vector (a sequential forced prefix where entry 1 changes entry 2's
+  turn-validity; successful forced tx stays ordinary; commitment written
+  post-prefix), and import-check vectors including `cert_not_verified`,
+  `cert_stale_root_round`, `transition_inserted_body`,
+  `transition_substituted_body`, `seal_finalize_missing`,
+  `finalize_wrong_commitment`.
 - `evmroot/cmd/d2vectors` + `TestD2_VectorsMatchGolden`.
 
 ## Consequences
@@ -134,5 +167,17 @@ Adopt the profile in
   reuses the authenticated `stateRoot` + `eth_getProof` path and keeps successful
   forced txs ordinary.
 - **A caller-supplied threshold / signer-name list for `VerifyCompanionWitnesses`.**
-  Rejected: a supplied threshold can be 1 and a name is not a signature. The
-  threshold is derived and the seal signatures are cryptographically verified.
+  Rejected: a supplied threshold can be 1 and a name is not a signature.
+- **A new root-quorum message (`D2SealWitnessStatement`) for validators to sign
+  (third-review version).** Rejected on the fourth review: the existing
+  `UnicitySeal` signatures cover `SigBytes()` and cannot be reused over a new
+  message, and an adapter cannot mint root-quorum signatures — this would become
+  a new signing obligation / attestation layer. D2 consumes D1's `VerifiedCert`
+  (the real verifier's verdict) as an explicit verified precondition instead.
+- **Authenticate committed transition bodies by proof count / non-emptiness.**
+  Rejected: an inserted body with a one-byte "proof" passes. `ri.Transitions`
+  must equal the verifier's authenticated `ExpectedTransitions` byte-for-byte.
+- **Write `sealRegistryCommitment` in the first system call.** Rejected: a prior
+  valid forced tx changes a later entry's pre-state, so the rejection set is not
+  determinable before the prefix runs; and a future-outcome input would be
+  contract-readable. The commitment is written by a post-prefix `FinalizeStep`.

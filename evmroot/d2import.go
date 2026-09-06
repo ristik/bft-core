@@ -3,6 +3,7 @@ package evmroot
 import (
 	"bytes"
 	"crypto/sha256"
+	"fmt"
 )
 
 // D2 import-validation model: the ordered predicate set an execution client
@@ -39,8 +40,11 @@ var (
 	SystemRegistry = [20]byte{0: 0xff, 19: 0x02} // a_sr  — the seal-registry destination
 )
 
-// SystemCall describes the single privileged operation that must be the
-// first entry of the seal-outcome list of every successful block.
+// SystemCall describes the single privileged operation that runs FIRST on
+// every successful block. It is PRESENCE-ONLY: it opens the seal-registry
+// commitment slot and binds the rootInput, and carries NO forced-outcome
+// input — those are not yet determined. The commitment value is written
+// later by the post-prefix FinalizeStep.
 type SystemCall struct {
 	From       [20]byte
 	To         [20]byte
@@ -48,7 +52,54 @@ type SystemCall struct {
 	HasSig     bool   // must be false — no EOA signature
 	HasNonce   bool   // must be false — no account nonce
 	FromTxPool bool   // must be false — cannot enter through the transaction pool
+	GasUsed    uint64 // g_sys work of the open step
 	Succeeded  bool   // false => whole block invalid
+}
+
+// FinalizeStep is the narrowly-scoped SECOND privileged operation. It runs
+// AFTER the forced-inclusion prefix, once every forced entry's outcome AT
+// ITS TURN is determined, and writes `sealRegistryCommitment` into the
+// seal-registry contract's storage. Its gas is charged explicitly against
+// the g_sys sub-budget. This is why the first call cannot — and must not —
+// take a forced-outcome argument.
+type FinalizeStep struct {
+	Present           bool
+	AfterForcedPrefix bool     // ordering: it must run after the whole forced prefix
+	Committed         [32]byte // the value written to seal-registry storage
+	GasUsed           uint64   // g_sys sub-budget for the finalization
+}
+
+// ForcedEntry is one forced-inclusion entry in the block's FIFO prefix.
+// Whether it is valid is decided AT ITS TURN, against the running pre-state
+// the earlier prefix entries left — never at admission.
+type ForcedEntry struct {
+	Sender     string
+	ValueDelta int64  // net balance effect if it executes (negative = a spend)
+	Reason     string // the rejection reason it carries if invalid at its turn
+	Digest     []byte // 32-byte canonical-payload digest
+}
+
+// evalForcedPrefix walks the FIFO prefix against starting balances and
+// returns, per entry, whether it was valid AT ITS TURN. A spend an earlier
+// entry made unaffordable is rejected at its turn even though it looked
+// fine at admission — which is exactly why the outcome set cannot be known
+// before the prefix runs.
+func evalForcedPrefix(entries []ForcedEntry, start map[string]int64) []bool {
+	bal := map[string]int64{}
+	for k, v := range start {
+		bal[k] = v
+	}
+	out := make([]bool, len(entries))
+	for i, e := range entries {
+		nb := bal[e.Sender] + e.ValueDelta
+		if nb < 0 {
+			out[i] = false
+			continue
+		}
+		bal[e.Sender] = nb
+		out[i] = true
+	}
+	return out
 }
 
 // SealOutcomeKind classifies one entry committed by the seal-registry
@@ -91,40 +142,50 @@ func SealRegistryCommitment(outcomes []SealOutcome) [32]byte {
 	return sha256.Sum256(marshalCBOR(arr))
 }
 
-// The D2-local root-assignment view (NodeID + weight + consensus key) and
-// its derived threshold live in d2seal.go as D2TrustBase. D3 owns the full
-// weighted-consensus model; D2 and D3 are independent tracks off D1, so D2
-// carries this minimal copy rather than depending on D3.
+// --- verified inputs the authentication boundary consumes ---------------
+//
+// D2 does NOT re-verify root signatures and does NOT invent a new
+// root-quorum message. Two things are VERIFIED UPSTREAM and consumed here
+// as typed inputs — the boundary is explicit, tested, and cannot become a
+// new signing obligation by accident:
+//
+//  1. VerifiedCert (D1) — the real types.UnicityCertificate for this O_-
+//     has been verified against the trust base for its epoch: the
+//     UnicitySeal signatures + quorum (bft-go-base UnicitySeal.Verify),
+//     the shard-tree / unicity-tree inclusion paths, and TR.Hash. Its
+//     SignaturesValid field IS that verdict. VerifyCompanionWitnesses
+//     consumes it via D1's ValidateBoundCertificate; the certificate ->
+//     VerifiedCert mapping is exercised through bft-go-base's real
+//     verifier in TestD2_CertificateBoundaryFixtures.
+//  2. ExpectedTransitions — the authenticated, ordered committed
+//     trust-base bodies the verifier expects THIS block to carry, from its
+//     own committed cursor. Produced by whoever verified the committed-body
+//     chain (D3 / seal registry). ri.Transitions must equal it byte-for-
+//     byte, position by position.
 
-// UCWitness is the verified-UC evidence a companion carries: the O_-
-// identity the UC certifies, the claimed seal signer node-ids, and the
-// actual secp256k1 signatures over D2SealWitnessStatement(OriginID,
-// Origin.TRHash). VerifyCompanionWitnesses checks the signatures against
-// the verifier's OWN authenticated assignment — a name is not evidence.
+// UCWitness carries the verified certificate for the block's O_-.
 type UCWitness struct {
-	OriginID    Hash32
-	SealSigners []string          // claimed signers (informational; only signed ones count)
-	Signatures  map[string][]byte // NodeID -> signature over the seal-witness statement
+	Cert VerifiedCert
 }
 
 // CompanionWitness carries the authentication evidence for a block's
-// rootInput. There is no free-standing `Authenticated bool`: the verdict is
-// produced by VerifyCompanionWitnesses, whose trusted boundary and
-// obligations are stated there.
+// rootInput. The verdict is produced by VerifyCompanionWitnesses; there is
+// no free-standing `Authenticated bool`.
 type CompanionWitness struct {
-	UC               UCWitness
-	TransitionProofs [][]byte // one per rootInput.Transitions entry (authenticates D, not re-hashed)
+	UC                  UCWitness
+	ExpectedTransitions [][]byte // the verifier's authenticated committed-body sequence for this block
 }
 
 // CompanionData is the block's required out-of-payload transport: the
-// STRUCTURED rootInput, the authentication witness, the seal-outcome list,
-// and provenance.
+// STRUCTURED rootInput, the authentication witness, and provenance. The
+// seal-registry records are DERIVED from the forced prefix at import
+// (DerivedSealOutcomes), not transported — the first system call cannot
+// know them.
 type CompanionData struct {
-	Present      bool
-	RootInput    RootInput
-	Witness      CompanionWitness
-	SealOutcomes []SealOutcome
-	Provenance   string // "build" | "newPayload" | "devp2p" | "reexec"
+	Present    bool
+	RootInput  RootInput
+	Witness    CompanionWitness
+	Provenance string // "build" | "newPayload" | "devp2p" | "reexec"
 }
 
 // CompanionAuth is the outcome of VerifyCompanionWitnesses.
@@ -142,60 +203,74 @@ func teHash(te TechnicalRecord) []byte {
 	return h
 }
 
-// VerifyCompanionWitnesses is the AUTHENTICATION BOUNDARY. Its only trusted
-// input is the verifier's OWN authenticated assignment `tb` (from
-// authenticated seal-registry state, never from the companion). It checks
-// PROOF BINDINGS, not assertions:
+// VerifyCompanionWitnesses is the AUTHENTICATION BOUNDARY. It consumes the
+// two verified inputs above and checks their bindings:
 //
-//   - the witness UC certifies exactly this rootInput's O_- (OriginID ==
-//     Origin.Identity());
-//   - the carried technical record is bound to the certified TRHash
+//   - D1's ValidateBoundCertificate accepts the VerifiedCert for this O_-:
+//     cert.SignaturesValid (the real UnicitySeal.Verify verdict, quorum
+//     included), the O_- / TRHash / root-round binding, the authorized
+//     round == this shard round, and a non-stale seal-registry cursor;
+//   - the carried technical record hashes to the certified TRHash
 //     (H(CBOR(TE_-)) == Origin.TRHash) — a swapped TE is rejected;
-//   - the threshold is DERIVED here as tb.RootQuorumThreshold(); a
-//     companion-supplied threshold is not consulted and cannot exist;
-//   - the seal signatures VERIFY: each is checked with secp256k1 against
-//     the named member's consensus key over
-//     D2SealWitnessStatement(OriginID, Origin.TRHash), and only verified
-//     signers' weight counts toward the quorum. Signer names alone are
-//     worth nothing;
-//   - there is one transition proof per rootInput.Transitions entry.
+//   - every committed body equals the authenticated ExpectedTransitions
+//     body at its position — substitution, reordering, omission and replay
+//     all fail (a byte-count check is NOT enough).
 //
-// WHO runs it: the shard node / Engine-API adapter, which holds the
-// assignment. Over the JWT-authenticated Engine API the execution client
-// trusts that verdict; a devp2p importer and an offline re-executor re-run
-// this function against their OWN assignment using the same witnesses. The
-// verdict is never an untrusted companion assertion.
-func VerifyCompanionWitnesses(w CompanionWitness, ri RootInput, tb D2TrustBase) CompanionAuth {
-	if w.UC.OriginID != ri.Origin.Identity() {
-		return CompanionAuth{Reason: "witness UC certifies a different O_- than the companion rootInput"}
+// WHO runs it: the shard node / Engine-API adapter, which produced the
+// VerifiedCert and the ExpectedTransitions from authenticated state. Over
+// the JWT-authenticated Engine API the execution client trusts that
+// verdict; a devp2p importer and an offline re-executor re-derive the same
+// two verified inputs and re-run this function. The verdict is never an
+// untrusted companion assertion, and this function is the CHECK — not the
+// source of trust.
+func VerifyCompanionWitnesses(w CompanionWitness, ri RootInput, lastAppliedRootRound uint64) CompanionAuth {
+	ref, err := RefFromOrigin(ri.Origin)
+	if err != nil {
+		return CompanionAuth{Reason: "rootInput O_- has no valid authorizing ref: " + err.Error()}
 	}
-	if len(ri.Origin.TRHash) != 32 || !bytesEqualD2(teHash(ri.TE), ri.Origin.TRHash) {
+	if sel := ValidateBoundCertificate(ref, w.UC.Cert, ri.Round, lastAppliedRootRound); !sel.Accept {
+		return CompanionAuth{Reason: "bound certificate: " + sel.Reason}
+	}
+	if len(ri.Origin.TRHash) != 32 || !bytes.Equal(teHash(ri.TE), ri.Origin.TRHash) {
 		return CompanionAuth{Reason: "carried technical record is not bound to the certified TRHash"}
 	}
-	if tb.TotalWeight() == 0 {
-		return CompanionAuth{Reason: "verifier trust base is empty"}
+	if len(ri.Transitions) != len(w.ExpectedTransitions) {
+		return CompanionAuth{Reason: fmt.Sprintf("companion carries %d committed bodies; the authenticated sequence has %d", len(ri.Transitions), len(w.ExpectedTransitions))}
 	}
-	threshold := tb.RootQuorumThreshold()
-	stmt := D2SealWitnessStatement(w.UC.OriginID, ri.Origin.TRHash)
-	sw, ok := tb.VerifiedSignerWeight(stmt, w.UC.Signatures)
-	if !ok {
-		return CompanionAuth{Reason: "seal witness carries no verifying signature (unknown/duplicate/bad signature)"}
-	}
-	if sw < threshold {
-		return CompanionAuth{Reason: "verified seal signer weight is below the derived root quorum threshold"}
-	}
-	if len(w.TransitionProofs) != len(ri.Transitions) {
-		return CompanionAuth{Reason: "transition-proof count does not match rootInput.Transitions"}
-	}
-	for i, p := range w.TransitionProofs {
-		if len(p) == 0 {
-			return CompanionAuth{Reason: "empty transition proof at index " + itoaSmall(i)}
+	for i := range ri.Transitions {
+		if !bytes.Equal(ri.Transitions[i], w.ExpectedTransitions[i]) {
+			return CompanionAuth{Reason: "committed body at index " + itoaSmall(i) + " is not the authenticated body at that position (substitution / reorder / omission / replay)"}
 		}
 	}
 	return CompanionAuth{OK: true}
 }
 
-func bytesEqualD2(a, b []byte) bool { return string(a) == string(b) }
+// forcedDigest is a deterministic canonical-payload digest for a rejected
+// forced entry (position-bound so reorders change it).
+func forcedDigest(pos int, e ForcedEntry) []byte {
+	if len(e.Digest) == 32 {
+		return e.Digest
+	}
+	return sha256Slice(marshalCBOR(cArray{cText("UNICITY_FORCED_ENTRY"), cUint(uint64(pos)), cText(e.Sender), cUint(uint64(e.ValueDelta)), cText(e.Reason)}))
+}
+
+// DerivedSealOutcomes is the seal-registry record list the FinalizeStep
+// writes: the system op (index 0), then a forced_rejected record for every
+// prefix entry invalid AT ITS TURN. It is computed AFTER the forced prefix
+// runs — it cannot be produced by the first system call.
+func DerivedSealOutcomes(b SealBlock) []SealOutcome {
+	outs := []SealOutcome{{Kind: OutcomeSystem, GasUsed: b.SystemCall.GasUsed, Status: 1, Digest: b.ExtraData[:]}}
+	for i, ok := range evalForcedPrefix(b.ForcedPrefix, b.ForcedStartBalance) {
+		if !ok {
+			e := b.ForcedPrefix[i]
+			outs = append(outs, SealOutcome{
+				Kind: OutcomeForcedRejected, GasUsed: b.RejectedConsumptionGas, Status: 0,
+				Reason: e.Reason, Digest: forcedDigest(i, e),
+			})
+		}
+	}
+	return outs
+}
 
 func itoaSmall(i int) string {
 	if i == 0 {
@@ -233,17 +308,27 @@ type SealBlock struct {
 	// reporting; neither ever includes the system call or a rejection record.
 	OrdinaryTxCount int
 	ForcedTxCount   int
-	// The value the system call wrote into the seal-registry contract's
-	// storage — authenticated by the block's stateRoot, not a header field.
-	SealRegistryStateValue [32]byte
-	SystemCall             SystemCall
-	Work                   BlockWork
-	Companion              CompanionData
 
-	// The importer's OWN authenticated root assignment (from authenticated
-	// seal-registry state). Not part of the block. The quorum threshold is
-	// derived from it, never carried.
-	TrustBase D2TrustBase
+	// The forced-inclusion prefix, its starting balances, and the g_fi
+	// consumption charge per rejected entry. Outcomes are determined AT EACH
+	// ENTRY'S TURN by evalForcedPrefix.
+	ForcedPrefix           []ForcedEntry
+	ForcedStartBalance     map[string]int64
+	RejectedConsumptionGas uint64
+
+	SystemCall SystemCall   // the presence-only open step (first)
+	Finalize   FinalizeStep // the post-prefix commitment write
+
+	// The value in the seal-registry contract's storage — authenticated by
+	// the block's stateRoot (eth_getProof), not a header field.
+	SealRegistryStateValue [32]byte
+
+	Work      BlockWork
+	Companion CompanionData
+
+	// The verifier's own committed seal-registry cursor (last-applied root
+	// round). Not part of the block; from authenticated local state.
+	LastAppliedRootRound uint64
 }
 
 // ImportResult is the outcome of ValidateImport.
@@ -264,9 +349,10 @@ func ValidateImport(b SealBlock, cfg ExecConfig) ImportResult {
 		return reject("companion_missing", "block has no companion data")
 	}
 
-	// Authentication boundary: verify the witness against the caller's own
-	// trust base. Executing the payload authenticates nothing.
-	auth := VerifyCompanionWitnesses(b.Companion.Witness, b.Companion.RootInput, b.TrustBase)
+	// Authentication boundary: consume the verified certificate + the
+	// authenticated expected-transition sequence. Executing the payload
+	// authenticates nothing.
+	auth := VerifyCompanionWitnesses(b.Companion.Witness, b.Companion.RootInput, b.LastAppliedRootRound)
 	if !auth.OK {
 		return reject("companion_unauthenticated", auth.Reason)
 	}
@@ -290,26 +376,11 @@ func ValidateImport(b SealBlock, cfg ExecConfig) ImportResult {
 		return reject("extradata_mismatch", "header extraData != SHA-256(CBOR(canonical rootInput))")
 	}
 
-	// Seal-registry commitment: the system call (index 0) plus authenticated
-	// rejection records, committed by a value in the seal-registry
-	// contract's storage — authenticated by stateRoot, NOT a header field.
-	// A successful forced transaction is an ordinary tx and is NOT here.
-	outs := b.Companion.SealOutcomes
-	if len(outs) == 0 || outs[0].Kind != OutcomeSystem {
-		return reject("seal_outcomes_shape", "seal-outcome list is empty or does not start with the system call")
-	}
-	for i, o := range outs[1:] {
-		if o.Kind != OutcomeForcedRejected {
-			return reject("seal_outcomes_shape", "seal-outcome index "+itoaSmall(i+1)+" is not a forced-rejection record (successful forced txs are ordinary txs)")
-		}
-	}
-	if got := SealRegistryCommitment(outs); got != b.SealRegistryStateValue {
-		return reject("seal_registry_commitment_mismatch", "seal-registry storage value != SHA-256(CBOR(system + rejection records)) — check via eth_getProof against stateRoot")
-	}
 	if b.OrdinaryTxCount < 0 || b.ForcedTxCount < 0 {
 		return reject("tx_list_shape", "negative transaction count")
 	}
 
+	// The first system call is presence-only.
 	sc := b.SystemCall
 	switch {
 	case sc.From != SystemOrigin:
@@ -322,8 +393,29 @@ func ValidateImport(b SealBlock, cfg ExecConfig) ImportResult {
 		return reject("system_eoa_like", "system operation has an EOA signature or nonce")
 	case sc.FromTxPool:
 		return reject("system_from_pool", "system operation entered through the transaction pool")
-	case !sc.Succeeded || outs[0].Status != 1:
+	case !sc.Succeeded:
 		return reject("system_failed", "system operation failed — the whole block is invalid")
+	}
+
+	// The seal-registry commitment is written by a post-forced-prefix
+	// FinalizeStep — because a valid prefix entry can change whether a later
+	// entry is valid at its turn, the first system call cannot determine it.
+	derived := DerivedSealOutcomes(b)
+	if !b.Finalize.Present || !b.Finalize.AfterForcedPrefix {
+		return reject("seal_finalize_missing", "sealRegistryCommitment must be written by a post-forced-prefix finalization step, not the first system call")
+	}
+	if b.Finalize.GasUsed == 0 && len(b.ForcedPrefix) > 0 {
+		return reject("seal_finalize_unmetered", "the finalization step consumed no gas — its work must be charged against g_sys")
+	}
+	want := SealRegistryCommitment(derived)
+	if b.Finalize.Committed != want {
+		return reject("seal_registry_commitment_mismatch", "finalization wrote a commitment that does not match the outcomes determined at each forced entry's turn")
+	}
+	if b.SealRegistryStateValue != want {
+		return reject("seal_registry_commitment_mismatch", "seal-registry storage value != the finalized commitment (eth_getProof against stateRoot)")
+	}
+	if derived[0].Status != 1 {
+		return reject("system_failed", "system operation record has non-1 status")
 	}
 
 	if b.BaseFee < cfg.BaseFeeFloor {

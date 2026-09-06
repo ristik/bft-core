@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"os"
 	"testing"
+
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 )
 
 func TestD2_GasBudgetInvariant(t *testing.T) {
@@ -86,40 +88,33 @@ func TestD2_MissingCompanionDataIsFatal(t *testing.T) {
 func TestD2_AuthenticationBoundary(t *testing.T) {
 	cfg := DefaultExecConfig()
 
-	// The witness UC certifies a different O_-.
+	// The consumed VerifiedCert is not verified against the trust base.
 	b, _ := validSealBlock(cfg)
-	b.Companion.Witness.UC.OriginID = Hash32{9}
+	b.Companion.Witness.UC.Cert.SignaturesValid = false
 	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
-		t.Fatalf("witness for a different O_- accepted: %+v", r)
+		t.Fatalf("an unverified certificate authenticated the block: %+v", r)
 	}
 
-	// Verified seal signer weight below the derived root quorum threshold —
-	// real signatures, but only 2+1 = 3 < 17.
+	// The verified cert is for a different O_-.
 	b, _ = validSealBlock(cfg)
-	b.Companion.Witness = d2Witness(b.Companion.RootInput, []string{"root-d", "root-e"})
+	b.Companion.Witness.UC.Cert.OriginID = Hash32{9}
 	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
-		t.Fatalf("below-threshold seal accepted: %+v", r)
+		t.Fatalf("cert for a different O_- accepted: %+v", r)
 	}
 
-	// The importer DERIVES the threshold from its own assignment. There is
-	// no threshold parameter to lie about.
-	tb := d2TrustBase()
-	if tb.RootQuorumThreshold() != 17 {
-		t.Fatalf("threshold not derived from the assignment: %d", tb.RootQuorumThreshold())
-	}
-	// A quorum of signer NAMES with only one real signature is not enough.
+	// The cert authorizes a different shard round.
 	b, _ = validSealBlock(cfg)
-	st := D2SealWitnessStatement(b.Companion.RootInput.Origin.Identity(), b.Companion.RootInput.Origin.TRHash)
-	b.Companion.Witness.UC.SealSigners = d2SealSigners()
-	b.Companion.Witness.UC.Signatures = SignD2SealWitness(st, []string{"root-e"}) // weight 1
+	b.Companion.Witness.UC.Cert.AuthorizedRound = 99
 	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
-		t.Fatalf("signer names without signatures accepted: %+v", r)
+		t.Fatalf("cert authorizing the wrong round accepted: %+v", r)
 	}
-	// VerifyCompanionWitnesses itself: assignment {a:10,b:6,c:5,d:2,e:1},
-	// signer e alone. Root quorum is 17; no caller can pass a threshold=1.
-	eOnly := d2Witness(d2RootInput(), []string{"root-e"})
-	if VerifyCompanionWitnesses(eOnly, d2RootInput(), tb).OK {
-		t.Fatal("signer e alone authenticated despite a derived quorum of 17")
+
+	// A stale certificate (root round behind the verifier's seal-registry
+	// cursor) is rejected.
+	b, _ = validSealBlock(cfg)
+	b.LastAppliedRootRound = b.Companion.Witness.UC.Cert.RootRound + 5
+	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
+		t.Fatalf("stale bound certificate accepted: %+v", r)
 	}
 
 	// A swapped technical record: TE no longer hashes to Origin.TRHash.
@@ -129,11 +124,27 @@ func TestD2_AuthenticationBoundary(t *testing.T) {
 		t.Fatalf("TE not bound to the certified TRHash: %+v", r)
 	}
 
-	// Transition-proof count must match rootInput.Transitions.
+	// FINDING: transition contents must be authenticated, not just counted.
+	// Append an arbitrary committed body; the authenticated expected
+	// sequence does not contain it.
 	b, _ = validSealBlock(cfg)
-	b.Companion.RootInput.Transitions = [][]byte{rep(0xB0, 8)}
+	b.Companion.RootInput.Transitions = append(b.Companion.RootInput.Transitions, []byte{0x81, 0x01})
 	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
-		t.Fatalf("transition-proof count mismatch accepted: %+v", r)
+		t.Fatalf("an inserted committed body was accepted: %+v", r)
+	}
+	// Same-length substitution of the one expected body is also rejected.
+	b, _ = validSealBlock(cfg)
+	b.Companion.Witness.ExpectedTransitions = [][]byte{{0x01, 0x02}}
+	b.Companion.RootInput.Transitions = [][]byte{{0xFF, 0xFF}}
+	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
+		t.Fatalf("a substituted committed body was accepted: %+v", r)
+	}
+	// A reorder of two expected bodies is rejected.
+	b, _ = validSealBlock(cfg)
+	b.Companion.Witness.ExpectedTransitions = [][]byte{{0x0A}, {0x0B}}
+	b.Companion.RootInput.Transitions = [][]byte{{0x0B}, {0x0A}}
+	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
+		t.Fatalf("a reordered committed body sequence was accepted: %+v", r)
 	}
 
 	// Structurally invalid rootInput (after a passing witness): only
@@ -146,8 +157,7 @@ func TestD2_AuthenticationBoundary(t *testing.T) {
 		t.Fatalf("structurally invalid rootInput accepted: %+v", r)
 	}
 
-	// A rootInput for a DIFFERENT block: the witness OriginID no longer
-	// matches, so it fails at the authentication boundary.
+	// A rootInput for a DIFFERENT block: the cert OriginID no longer matches.
 	b, _ = validSealBlock(cfg)
 	other := d2RootInput()
 	other.Round, other.TE.Round = 99, 99
@@ -157,10 +167,121 @@ func TestD2_AuthenticationBoundary(t *testing.T) {
 	}
 }
 
+// TestD2_CertificateBoundaryFixtures establishes the mapping the reviewer
+// asked for: a real types.UnicityCertificate verified through bft-go-base's
+// UnicitySeal.Verify against a real trust base, projected to RootOrigin,
+// yields the VerifiedCert that D2's authentication boundary consumes —
+// positive (quorum subset) and negative (sub-quorum subset).
+func TestD2_CertificateBoundaryFixtures(t *testing.T) {
+	ids := []string{"r1", "r2", "r3", "r4", "r5"}
+	signers := map[string]abcrypto.Signer{}
+	pubs := map[string][]byte{}
+	for _, id := range ids {
+		s, p := newSigner(t)
+		signers[id], pubs[id] = s, p
+	}
+	tb := fixtureTrustBase(t, ids, pubs) // equal stake, quorum 4
+
+	// Positive: a 4-of-5 subset reaches quorum.
+	ucOK, trOK := fixtureCertificate(t, []string{"r1", "r2", "r3", "r4"}, signers)
+	sigValidOK := ucOK.UnicitySeal.Verify(tb) == nil
+	if !sigValidOK {
+		t.Fatal("4-of-5 subset did not verify to quorum")
+	}
+	oOK, err := RootOriginFromCertificate(ucOK, trOK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certOK := verifiedCertFromOrigin(oOK, trOK.Round, sigValidOK)
+
+	// Negative: a 1-of-5 subset does not reach quorum.
+	ucBad, trBad := fixtureCertificate(t, []string{"r1"}, signers)
+	sigValidBad := ucBad.UnicitySeal.Verify(tb) == nil
+	if sigValidBad {
+		t.Fatal("1-of-5 subset unexpectedly verified to quorum")
+	}
+	oBad, err := RootOriginFromCertificate(ucBad, trBad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certBad := verifiedCertFromOrigin(oBad, trBad.Round, sigValidBad)
+
+	// Build a rootInput around the fixture O_- and feed the boundary.
+	ri := RootInput{
+		Version: ProfileVersion, NetworkID: oOK.NetworkID, PartitionID: 0x45564d00, ShardID: []byte{},
+		Round: trOK.Round, CertifiedEpoch: oOK.IR.Epoch, AuthorizedEpoch: trOK.Epoch,
+		ParentHash: rep(0xEE, 32), Origin: oOK, TE: TechnicalRecord{
+			Round: trOK.Round, Epoch: trOK.Epoch, Leader: trOK.Leader,
+			StatHash: trOK.StatHash, FeeHash: trOK.FeeHash,
+		},
+	}
+	if !bytes.Equal(teHash(ri.TE), ri.Origin.TRHash) {
+		t.Fatal("fixture TE does not hash to the projected O_-.TRHash")
+	}
+	wOK := CompanionWitness{UC: UCWitness{Cert: certOK}}
+	if a := VerifyCompanionWitnesses(wOK, ri, 0); !a.OK {
+		t.Fatalf("quorum-verified certificate rejected at the boundary: %s", a.Reason)
+	}
+	wBad := CompanionWitness{UC: UCWitness{Cert: certBad}}
+	if a := VerifyCompanionWitnesses(wBad, ri, 0); a.OK {
+		t.Fatal("a sub-quorum certificate authenticated at the boundary")
+	}
+}
+
+// TestD2_ForcedPrefixOutcomesDeterminedAtTurn is the third-review fixture:
+// a preceding valid forced tx changes whether the next entry is valid, so
+// the rejection set — and the commitment over it — cannot be known before
+// the prefix runs.
+func TestD2_ForcedPrefixOutcomesDeterminedAtTurn(t *testing.T) {
+	cfg := DefaultExecConfig()
+	cfg.GFI = 2_000_000
+
+	b, _ := validSealBlock(cfg)
+	b.ForcedStartBalance = map[string]int64{"alice": 100}
+	b.ForcedPrefix = []ForcedEntry{
+		{Sender: "alice", ValueDelta: -100, Reason: ""},
+		{Sender: "alice", ValueDelta: -50, Reason: "insufficient_balance_at_turn"},
+	}
+	b.RejectedConsumptionGas = 21_000
+	b.ForcedTxCount = 1
+	b.SystemCall.GasUsed = 1_500_000
+	b.Work = BlockWork{System: 1_530_000, Forced: 21_000, Ordinary: 10_000_000}
+	b.Finalize = finalizeFor(b)
+	b.SealRegistryStateValue = b.Finalize.Committed
+
+	// entry 2 is valid at admission (100 >= 50) but invalid at its turn.
+	turns := evalForcedPrefix(b.ForcedPrefix, b.ForcedStartBalance)
+	if !turns[0] || turns[1] {
+		t.Fatalf("prefix turn evaluation wrong: %v", turns)
+	}
+	outs := DerivedSealOutcomes(b)
+	if len(outs) != 2 || outs[1].Kind != OutcomeForcedRejected || outs[1].Reason == "" {
+		t.Fatalf("rejection record not derived from the turn outcome: %+v", outs)
+	}
+	if r := ValidateImport(b, cfg); !r.OK {
+		t.Fatalf("valid sequential-prefix block rejected: %s (%s)", r.Code, r.Reason)
+	}
+	// The first system call cannot carry the outcome: moving the write into
+	// it (no post-prefix finalization) is rejected.
+	nf := b
+	nf.Finalize.AfterForcedPrefix = false
+	if r := ValidateImport(nf, cfg); r.OK || r.Code != "seal_finalize_missing" {
+		t.Fatalf("commitment written before the prefix accepted: %+v", r)
+	}
+	// A commitment that reflects the ADMISSION-time set (both entries valid,
+	// no rejection record) does not match the turn-determined outcomes.
+	wrong := b
+	wrong.Finalize.Committed = SealRegistryCommitment([]SealOutcome{outs[0]})
+	wrong.SealRegistryStateValue = wrong.Finalize.Committed
+	if r := ValidateImport(wrong, cfg); r.OK || r.Code != "seal_registry_commitment_mismatch" {
+		t.Fatalf("admission-time commitment accepted: %+v", r)
+	}
+}
+
 func TestD2_SealOutcomeListSeparateFromTxList(t *testing.T) {
 	v := BuildD2Vectors().SealOutcomes
 	if !v.ImportOK {
-		t.Fatal("the system-op + rejection-record block did not import")
+		t.Fatal("the sequential-forced-prefix block did not import")
 	}
 	if v.SystemOrRejectedInTrie {
 		t.Fatal("the system op or a rejection record is in a transaction/receipt trie")
@@ -174,12 +295,16 @@ func TestD2_SealOutcomeListSeparateFromTxList(t *testing.T) {
 	if !v.PoisonNotAReverT {
 		t.Fatal("the rejected entry is not a rejection record with an authenticated reason")
 	}
+	// Entry 2 is valid at admission but not at its turn — so the rejection
+	// set is only determinable after the prefix runs.
+	if !v.Entry1ValidAtTurn || v.Entry2ValidAtTurn || !v.Entry2ValidAtAdmission ||
+		!v.OutcomeDeterminedAtTurn || !v.CommitmentWrittenPostPrefix {
+		t.Fatalf("forced-prefix turn semantics not demonstrated: %+v", v)
+	}
 	if v.HeaderGasUsed != v.SystemGas+v.RejectedConsumptionGas+v.RecoveredOrdinary {
 		t.Fatalf("gas does not close: header %d != %d + %d + %d",
 			v.HeaderGasUsed, v.SystemGas, v.RejectedConsumptionGas, v.RecoveredOrdinary)
 	}
-	// system_not_first_outcome, successful_forced_not_a_seal_record and
-	// seal_registry_commitment_mismatch are covered by the import_checks table.
 }
 
 func TestD2_NextBaseFeeNoOverflow(t *testing.T) {

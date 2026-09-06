@@ -98,7 +98,7 @@
     }
   ],
   "seal_outcome_list": {
-    "note": "The system op and the rejection record for a forced entry invalid at its turn are committed by a value in the seal-registry contract's storage (authenticated by stateRoot via eth_getProof) — NOT a header field. A rejection record is Kind=forced_rejected with an authenticated reason, NEVER an EVM revert. A SUCCESSFUL forced transaction is an ordinary transaction: it is in transactionsRoot / receiptsRoot with a standard receipt (logs, bloom, cumulative gas). header.gasUsed = ordinary cumulative (incl. successful forced) + g_sys work + the g_fi consumption charge for rejected entries; it is not unchanged vs a vanilla block.",
+    "note": "The forced prefix runs FIFO; each entry's validity is decided AT ITS TURN against the running pre-state. Entry 1 spends alice's balance, so entry 2 — fine at admission — is invalid at its turn. The rejection set is knowable only after the prefix, so a post-prefix FinalizeStep (a second, gas-charged system op) writes sealRegistryCommitment into seal-registry contract storage; the first system call carries NO forced-outcome input. The successful forced entry (entry 1) is an ordinary transaction in transactionsRoot / receiptsRoot with a standard receipt. header.gasUsed = ordinary cumulative + g_sys (open + finalize) + the g_fi consumption charge for rejected entries.",
     "seal_registry_records": [
       {
         "Kind": "system",
@@ -111,17 +111,22 @@
         "Kind": "forced_rejected",
         "GasUsed": 21000,
         "Status": 0,
-        "Reason": "nonce_already_used",
-        "Digest": "8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PA="
+        "Reason": "insufficient_balance_at_turn",
+        "Digest": "TXvFUykwpDdiHISW2bcWYSYow0GJcLe2cDjL/RIsswA="
       }
     ],
-    "seal_registry_commitment": "d047ff315d5dd24379ab646c55677c3e135484da0efacace685f8d405e4f379c",
+    "seal_registry_commitment": "8ac7edd0cb6c68c88ade5df1f2feb804963677f6708b0cb3f9174b4b70eeb0c7",
     "ordinary_tx_count": 3,
     "successful_forced_tx_count_in_receipt_trie": 1,
-    "header_gas_used": 11921000,
-    "system_gas": 1500000,
+    "header_gas_used": 11951000,
+    "system_gas": 1530000,
     "rejected_entry_consumption_gas": 21000,
     "recovered_ordinary_gas": 10400000,
+    "forced_entry_1_valid_at_its_turn": true,
+    "forced_entry_2_valid_at_its_turn": false,
+    "forced_entry_2_valid_at_admission": true,
+    "rejection_set_determined_only_at_turn_not_admission": true,
+    "commitment_written_by_post_prefix_finalization": true,
     "rejection_record_is_not_an_evm_revert": true,
     "system_or_rejected_record_in_a_trie": false,
     "successful_forced_tx_in_tx_and_receipt_trie": true,
@@ -146,7 +151,7 @@
       "matches": true
     },
     {
-      "name": "witness_wrong_origin",
+      "name": "cert_not_verified",
       "want_ok": false,
       "want_code": "companion_unauthenticated",
       "got_ok": false,
@@ -154,7 +159,7 @@
       "matches": true
     },
     {
-      "name": "witness_below_threshold",
+      "name": "cert_wrong_origin",
       "want_ok": false,
       "want_code": "companion_unauthenticated",
       "got_ok": false,
@@ -162,7 +167,7 @@
       "matches": true
     },
     {
-      "name": "witness_unknown_signer",
+      "name": "cert_wrong_authorized_round",
       "want_ok": false,
       "want_code": "companion_unauthenticated",
       "got_ok": false,
@@ -170,7 +175,7 @@
       "matches": true
     },
     {
-      "name": "witness_name_without_signature",
+      "name": "cert_stale_root_round",
       "want_ok": false,
       "want_code": "companion_unauthenticated",
       "got_ok": false,
@@ -186,7 +191,15 @@
       "matches": true
     },
     {
-      "name": "witness_transition_proof_count",
+      "name": "transition_inserted_body",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "transition_substituted_body",
       "want_ok": false,
       "want_code": "companion_unauthenticated",
       "got_ok": false,
@@ -210,7 +223,7 @@
       "matches": true
     },
     {
-      "name": "malformed_origin_breaks_witness",
+      "name": "malformed_origin_breaks_ref",
       "want_ok": false,
       "want_code": "companion_unauthenticated",
       "got_ok": false,
@@ -242,27 +255,19 @@
       "matches": true
     },
     {
-      "name": "seal_outcomes_empty",
+      "name": "seal_finalize_missing",
       "want_ok": false,
-      "want_code": "seal_outcomes_shape",
+      "want_code": "seal_finalize_missing",
       "got_ok": false,
-      "got_code": "seal_outcomes_shape",
+      "got_code": "seal_finalize_missing",
       "matches": true
     },
     {
-      "name": "system_not_first_outcome",
+      "name": "seal_finalize_not_after_prefix",
       "want_ok": false,
-      "want_code": "seal_outcomes_shape",
+      "want_code": "seal_finalize_missing",
       "got_ok": false,
-      "got_code": "seal_outcomes_shape",
-      "matches": true
-    },
-    {
-      "name": "successful_forced_not_a_seal_record",
-      "want_ok": false,
-      "want_code": "seal_outcomes_shape",
-      "got_ok": false,
-      "got_code": "seal_outcomes_shape",
+      "got_code": "seal_finalize_missing",
       "matches": true
     },
     {
@@ -274,11 +279,11 @@
       "matches": true
     },
     {
-      "name": "system_outcome_status_zero",
+      "name": "finalize_wrong_commitment",
       "want_ok": false,
-      "want_code": "system_failed",
+      "want_code": "seal_registry_commitment_mismatch",
       "got_ok": false,
-      "got_code": "system_failed",
+      "got_code": "seal_registry_commitment_mismatch",
       "matches": true
     },
     {
