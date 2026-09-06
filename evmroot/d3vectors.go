@@ -329,7 +329,7 @@ func BuildD3Vectors() D3VectorSet {
 // d3Body is the baseline well-formed v2 body.
 func d3Body(rootThreshold uint64) TrustBaseBodyV2 {
 	return TrustBaseBodyV2{
-		Version: TrustBaseVersion, NetworkID: 3, Epoch: 7, EpochStart: 100_000,
+		Version: TrustBaseVersion, NetworkID: 3, Epoch: 7, EarliestActivation: 100_000,
 		Members: d3Assignment(), RootThreshold: rootThreshold,
 		StateSummary: rep(0x5A, 32), ChangeRecordHash: rep(0xC3, 32), PredecessorHash: rep(0xD0, 32),
 	}

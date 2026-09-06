@@ -264,16 +264,23 @@ func FirstV2PredecessorHash(a V1Anchor) ([]byte, error) {
 // threshold, and excludes BOTH the current-epoch signatures AND the
 // old-epoch endorsement witness. PredecessorHash is the v2 body identity of
 // the current trust base (or, for the first v2 body, FirstV2PredecessorHash).
+//
+// EarliestActivation is the candidate lower bound A_min — the earliest root
+// round the successor may activate — known at Freeze and stable for the
+// life of the endorsed body. The ACTUAL activation boundary A* is NOT in
+// the body: it is fixed at the old-quorum commit and lives in a separate
+// authenticated ActivatedTrustBase record (D4). A consumer deriving the
+// active epoch reads that record, never a would-be EpochStart on the body.
 type TrustBaseBodyV2 struct {
-	Version          uint64
-	NetworkID        uint64
-	Epoch            uint64
-	EpochStart       uint64 // the actual boundary fixed by the committed handoff (D4)
-	Members          WeightSet
-	RootThreshold    uint64 // must equal RootQuorumThreshold(ΣWeight)
-	StateSummary     []byte
-	ChangeRecordHash []byte
-	PredecessorHash  []byte
+	Version            uint64
+	NetworkID          uint64
+	Epoch              uint64
+	EarliestActivation uint64 // A_min — a lower bound, not the actual boundary
+	Members            WeightSet
+	RootThreshold      uint64 // must equal RootQuorumThreshold(ΣWeight)
+	StateSummary       []byte
+	ChangeRecordHash   []byte
+	PredecessorHash    []byte
 }
 
 // Validate checks version, member well-formedness and that RootThreshold is
@@ -307,13 +314,42 @@ func (b TrustBaseBodyV2) canonicalBody() cArray {
 		cUint(b.Version),
 		cUint(b.NetworkID),
 		cUint(b.Epoch),
-		cUint(b.EpochStart),
+		cUint(b.EarliestActivation),
 		mem,
 		cUint(b.RootThreshold),
 		optBytes(b.StateSummary),
 		optBytes(b.ChangeRecordHash),
 		optBytes(b.PredecessorHash),
 	}
+}
+
+// ActivatedTrustBase is the authenticated record that fixes the ACTUAL
+// activation boundary A* for a trust-base body. It is produced by the
+// old-quorum commit (D4) and is what a joining node reads to derive the
+// active epoch — the body's EarliestActivation is only a lower bound.
+type ActivatedTrustBase struct {
+	BodyIdentity       []byte // the v2 body this activates
+	EpochStart         uint64 // A* — the actual boundary, >= body.EarliestActivation
+	ActivationCommitID []byte // identity of the old-quorum commit record that fixed A*
+}
+
+// DerivedActiveEpoch returns which epoch is active at observedRootRound,
+// given the current body and its activation record. Before A* the current
+// epoch is active; at or after A*, the activated body's epoch. A record
+// whose EpochStart is below the body's EarliestActivation, or that names a
+// different body, is rejected.
+func DerivedActiveEpoch(current TrustBaseBodyV2, activated TrustBaseBodyV2, rec ActivatedTrustBase, observedRootRound uint64) (epoch uint64, ok bool) {
+	id := activated.Identity()
+	if len(rec.BodyIdentity) != 32 || string(rec.BodyIdentity) != string(id[:]) {
+		return 0, false
+	}
+	if rec.EpochStart < activated.EarliestActivation {
+		return 0, false
+	}
+	if observedRootRound >= rec.EpochStart {
+		return activated.Epoch, true
+	}
+	return current.Epoch, true
 }
 
 // Encode returns the canonical deterministic-CBOR body (no signatures, no

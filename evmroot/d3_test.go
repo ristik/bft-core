@@ -125,6 +125,33 @@ func TestD3_KeyBindingChangesIdentity(t *testing.T) {
 	}
 }
 
+func TestD3_ActiveEpochFromActivationRecordNotBodyEpochStart(t *testing.T) {
+	rt := RootQuorumThreshold(24)
+	current := d3Body(rt)
+	current.Epoch = 7
+	activated := d3Body(rt)
+	activated.Epoch = 8
+	activated.EarliestActivation = 100_000 // A_min lower bound only
+	id := activated.Identity()
+	rec := ActivatedTrustBase{BodyIdentity: id[:], EpochStart: 100_050, ActivationCommitID: rep(0xC0, 32)}
+
+	// Before A* (100_050): epoch 7. At/after: epoch 8. A_min (100_000) is
+	// NOT the boundary — a consumer that used it would switch 50 rounds early.
+	if e, ok := DerivedActiveEpoch(current, activated, rec, 100_049); !ok || e != 7 {
+		t.Fatalf("before A*: epoch %d ok %v, want 7", e, ok)
+	}
+	if e, ok := DerivedActiveEpoch(current, activated, rec, 100_050); !ok || e != 8 {
+		t.Fatalf("at A*: epoch %d ok %v, want 8", e, ok)
+	}
+	// A record naming a different body, or with EpochStart below A_min, is rejected.
+	if _, ok := DerivedActiveEpoch(current, activated, ActivatedTrustBase{BodyIdentity: rep(0x11, 32), EpochStart: 100_050}, 200_000); ok {
+		t.Fatal("accepted an activation record for a different body")
+	}
+	if _, ok := DerivedActiveEpoch(current, activated, ActivatedTrustBase{BodyIdentity: id[:], EpochStart: 99_999}, 200_000); ok {
+		t.Fatal("accepted an activation record with EpochStart below EarliestActivation")
+	}
+}
+
 func TestD3_FirstV2PredecessorIsTaggedTransition(t *testing.T) {
 	v1 := sha256Bytes([]byte("v1-anchor-hash"))
 	pred, err := FirstV2PredecessorHash(V1Anchor{Version: 1, NetworkID: 3, Epoch: 6, HashIncludingSigs: v1})

@@ -117,13 +117,30 @@ that was proven, and a later swap is detectable as a different body identity.
 normative:
 
 ```
-[ version, networkId, epoch, epochStart,
+[ version, networkId, epoch, earliestActivation,
   [ [stakingID, nodeID, consensusKey, weight], … ]   ; members, sorted bytewise by nodeID
   rootThreshold,             ; must equal ⌊2·ΣWeight/3⌋+1
   stateSummary,              ; agreed frozen transition state
   changeRecordHash,          ; candidate body hash + committed handoff binding
   predecessorHash ]          ; v2 body identity of the current trust base (32 bytes)
 ```
+
+### `earliestActivation` vs the actual boundary `A*` (joint with D4)
+
+The body hashes **`earliestActivation` = A_min**, the candidate's lower bound —
+known at Freeze and stable for the life of the endorsed body. The **actual**
+activation boundary `A*` is fixed only at the old-quorum commit and is **not** in
+the body; it lives in a separate authenticated **`ActivatedTrustBase`** record
+`{ bodyIdentity, epochStart (= A*), activationCommitID }` (produced by D4).
+
+A joining node derives the active epoch from that record, never from a would-be
+`epochStart` on the body: `DerivedActiveEpoch(current, activated, rec, r)` returns
+the current epoch for `r < A*` and the activated epoch for `r ≥ A*`, and rejects a
+record that names a different body or whose `epochStart < body.earliestActivation`.
+A consumer that used `A_min` as the boundary would switch epochs early — the test
+`TestD3_ActiveEpochFromActivationRecordNotBodyEpochStart` demonstrates the 50-round
+gap. This replaces the earlier `epochStart` field that D4's `Freeze` and D3's hash
+disagreed on.
 
 ### First v1 → v2 transition
 
