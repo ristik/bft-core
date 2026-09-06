@@ -1,0 +1,273 @@
+{
+  "assignment": {
+    "members": [
+      {
+        "StakingID": "stake-root-a",
+        "NodeID": "root-a",
+        "ConsensusKey": "ArriANU8AHpvZn5j5MrS+TRszhO02JSDFCD7/q5fJsam",
+        "Weight": 10
+      },
+      {
+        "StakingID": "stake-root-b",
+        "NodeID": "root-b",
+        "ConsensusKey": "AiqX1GXn6FSA16p4UW3XKQt2McoMt2cb4wAEvIFWutEE",
+        "Weight": 6
+      },
+      {
+        "StakingID": "stake-root-c",
+        "NodeID": "root-c",
+        "ConsensusKey": "Ao8bh669euD6D4Oji+/PrEmJhCog9tLoYUnVHHE11acw",
+        "Weight": 5
+      },
+      {
+        "StakingID": "stake-root-d",
+        "NodeID": "root-d",
+        "ConsensusKey": "Av+eH2yEmAlj1NzpVdSS3vFCpc/bQokEV9uMsRs7REw/",
+        "Weight": 2
+      },
+      {
+        "StakingID": "stake-root-e",
+        "NodeID": "root-e",
+        "ConsensusKey": "Ai1SGa5YERUdbSJNka5cfb5eL+oOpTFgvEIh6zLyugU3",
+        "Weight": 1
+      }
+    ],
+    "total_weight": 24,
+    "member_count": 5,
+    "root_threshold": 17,
+    "shard_threshold": 13,
+    "faulty_weight_bound": 7
+  },
+  "root_quorum": [
+    {
+      "signers": [
+        "root-a",
+        "root-b",
+        "root-c"
+      ],
+      "signer_count": 3,
+      "signer_weight": 21,
+      "threshold": 17,
+      "reached": true,
+      "note": "10+6+5 = 21 \u003e= 17: quorum"
+    },
+    {
+      "signers": [
+        "root-a",
+        "root-b"
+      ],
+      "signer_count": 2,
+      "signer_weight": 16,
+      "threshold": 17,
+      "reached": false,
+      "note": "10+6 = 16 \u003c 17: no quorum, though a numeric majority of a 3-of-5 subset"
+    },
+    {
+      "signers": [
+        "root-b",
+        "root-c",
+        "root-d",
+        "root-e"
+      ],
+      "signer_count": 4,
+      "signer_weight": 14,
+      "threshold": 17,
+      "reached": false,
+      "note": "6+5+2+1 = 14 \u003c 17: four of five signers, still short"
+    },
+    {
+      "signers": [
+        "root-a",
+        "root-c",
+        "root-d"
+      ],
+      "signer_count": 3,
+      "signer_weight": 17,
+      "threshold": 17,
+      "reached": true,
+      "note": "10+5+2 = 17 == 17: exactly the threshold"
+    }
+  ],
+  "shard_quorum": [
+    {
+      "signers": [
+        "root-a",
+        "root-d"
+      ],
+      "signer_count": 2,
+      "signer_weight": 12,
+      "threshold": 13,
+      "reached": false,
+      "note": "10+2 = 12 \u003c 13: no attestation quorum"
+    },
+    {
+      "signers": [
+        "root-a",
+        "root-c"
+      ],
+      "signer_count": 2,
+      "signer_weight": 15,
+      "threshold": 13,
+      "reached": true,
+      "note": "10+5 = 15 \u003e= 13: attestation quorum"
+    },
+    {
+      "signers": [
+        "root-b",
+        "root-c",
+        "root-e"
+      ],
+      "signer_count": 3,
+      "signer_weight": 12,
+      "threshold": 13,
+      "reached": false,
+      "note": "6+5+1 = 12 \u003c 13"
+    }
+  ],
+  "timeout_amplification": [
+    {
+      "signers": [
+        "root-d",
+        "root-e"
+      ],
+      "signer_weight": 3,
+      "faulty_weight_bound": 7,
+      "amplifies": false,
+      "note": "2+1 = 3 \u003c= 7: no amplification"
+    },
+    {
+      "signers": [
+        "root-b",
+        "root-d"
+      ],
+      "signer_weight": 8,
+      "faulty_weight_bound": 7,
+      "amplifies": true,
+      "note": "6+2 = 8 \u003e 7: at least one honest weight is timing out -\u003e jump to timeout"
+    },
+    {
+      "signers": [
+        "root-c",
+        "root-d"
+      ],
+      "signer_weight": 7,
+      "faulty_weight_bound": 7,
+      "amplifies": false,
+      "note": "5+2 = 7 == bound: not strictly greater -\u003e no amplification"
+    }
+  ],
+  "quorum_impossibility": [
+    {
+      "current_weight": 6,
+      "remaining_weight": 8,
+      "threshold": 17,
+      "impossible": true,
+      "note": "6 committed + 8 still unvoted = 14 \u003c 17: this value can never reach quorum"
+    },
+    {
+      "current_weight": 10,
+      "remaining_weight": 8,
+      "threshold": 17,
+      "impossible": false,
+      "note": "10 + 8 = 18 \u003e= 17: still possible"
+    }
+  ],
+  "duplicate_signers": {
+    "signers": [
+      "root-a",
+      "root-a",
+      "root-b"
+    ],
+    "valid": false,
+    "note": "root-a listed twice: SignerWeight rejects the set rather than counting weight 10 twice"
+  },
+  "minority_stake_majority_identities": {
+    "note": "A numeric majority of signer identities carries a minority of voting power; quorum tracks weight, not headcount.",
+    "identity_majority_signers": [
+      "root-b",
+      "root-c",
+      "root-d",
+      "root-e"
+    ],
+    "identity_majority_count": 4,
+    "total_members": 5,
+    "identity_majority_weight": 14,
+    "root_threshold": 17,
+    "identity_majority_reaches_quorum": false,
+    "single_whale_signer": "root-a",
+    "whale_weight": 10,
+    "whale_reaches_quorum": false
+  },
+  "overflow_bounds": [
+    {
+      "name": "within_bounds",
+      "ok": true,
+      "note": "baseline assignment sums cleanly"
+    },
+    {
+      "name": "empty_assignment",
+      "ok": false,
+      "note": "an empty assignment has no quorum denominator — TotalWeight returns (0, false), never (0, true)"
+    },
+    {
+      "name": "member_over_cap",
+      "ok": false,
+      "note": "a single member weight above MaxMemberWeight is rejected"
+    },
+    {
+      "name": "total_over_cap",
+      "ok": false,
+      "note": "300 near-cap members exceed MaxTotalWeight; rejected before 2W can overflow"
+    }
+  ],
+  "body_validation": [
+    {
+      "name": "well_formed",
+      "accepted": true
+    },
+    {
+      "name": "wrong_version",
+      "accepted": false,
+      "reason": "evmroot: trust-base body version 1 != 2"
+    },
+    {
+      "name": "recorded_threshold_not_weighted_threshold",
+      "accepted": false,
+      "reason": "evmroot: recorded root threshold 20 != weighted threshold 17"
+    },
+    {
+      "name": "empty_members",
+      "accepted": false,
+      "reason": "evmroot: empty validator assignment"
+    },
+    {
+      "name": "short_consensus_key",
+      "accepted": false,
+      "reason": "evmroot: member \"root-a\" consensus key must be 33 bytes, got 16"
+    }
+  ],
+  "trust_base_identity": {
+    "note": "Identity is SHA-256(CBOR(body)) over the complete member records (staking id, node id, consensus key, weight; sorted by node id) plus thresholds/summary/change/predecessor hashes. It has no field for current-epoch signatures or the old-epoch endorsement witness.",
+    "body_cbor": "890203071a000186a085846c7374616b652d726f6f742d6166726f6f742d61582102bae200d53c007a6f667e63e4cad2f9346cce13b4d894831420fbfeae5f26c6a60a846c7374616b652d726f6f742d6266726f6f742d625821022a97d465e7e85480d7aa78516dd7290b7631ca0cb7671be30004bc8156bad10406846c7374616b652d726f6f742d6366726f6f742d635821028f1b87aebd7ae0fa0f83a38befcfac4989842a20f6d2e86149d51c7135d5a73005846c7374616b652d726f6f742d6466726f6f742d64582102ff9e1f6c84980963d4dce955d492def142a5cfdb42890457db8cb11b3b444c3f02846c7374616b652d726f6f742d6566726f6f742d655821022d5219ae5811151d6d224d91ae5c7dbe5e2fea0ea53160bc4221eb32f2ba0537011158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5820c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c35820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+    "identity": "daa39c9a00315f404192cf4518e6626248dbeac378366e75f9fc04c0dc7aee8e",
+    "same_fields_identity": "daa39c9a00315f404192cf4518e6626248dbeac378366e75f9fc04c0dc7aee8e",
+    "identities_equal": true,
+    "mutated_identity": "637a0e024d356f1791067c054abbb6a825d6d34c602faa7664a473accdc34e64",
+    "mutated_differs": true
+  },
+  "key_binding": {
+    "note": "The v2 body binds the complete member record; a key or role substitution changes the identity, and a shared consensus key across node ids is rejected by Validate.",
+    "baseline_identity": "daa39c9a00315f404192cf4518e6626248dbeac378366e75f9fc04c0dc7aee8e",
+    "consensus_key_substituted_identity": "d734b840af891f4435333bde5c97cebae54dc31d20f05e101dc7c476c1a5203c",
+    "consensus_key_substitution_changes_identity": true,
+    "staking_id_swapped_identity": "0995553c92e7d2903b1697cb9673b046e1cb04402af80e8a31b0e78c2695cec9",
+    "staking_id_swap_changes_identity": true,
+    "duplicate_consensus_key_across_ids_rejected": true
+  },
+  "v1_to_v2_transition": {
+    "note": "The first v2 body's predecessor is SHA-256(CBOR([\"UNICITY_TRUSTBASE_V1_TO_V2\", network, epoch, v1Hash])). The v1 anchor hash (which by v1 rules folds in signatures) is bound through this explicit transition; the v2 encoder never re-encodes legacy bytes.",
+    "v1_anchor_hash_including_sigs": "90b77db4bc8fd77329323ffe5b580c0a975f3a3fc4dfa868e4bdca112dcb7265",
+    "first_v2_predecessor_hash": "96d60d0f7913e0ed3469f003efede7b2103a0bff919a3fce51c1948e54a41d72",
+    "predecessor_is_a_tagged_transition_not_raw_v1_bytes": true
+  }
+}
