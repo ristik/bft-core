@@ -1,8 +1,8 @@
 package evmroot
 
 import (
-	"crypto/sha256"
 	"encoding/json"
+	"math/big"
 )
 
 // D2 vector set: the reth system-call and fee profile, made checkable
@@ -11,10 +11,35 @@ import (
 
 // D2VectorSet is the whole D2 vector document.
 type D2VectorSet struct {
-	ExecConfig    D2ConfigVector    `json:"exec_config"`
-	GasAccounting D2GasVector       `json:"gas_accounting"`
-	BaseFeeSeries []D2BaseFeeVector `json:"base_fee_series"`
-	ImportChecks  []D2ImportVector  `json:"import_checks"`
+	ExecConfig     D2ConfigVector      `json:"exec_config"`
+	GasAccounting  D2GasVector         `json:"gas_accounting"`
+	BaseFeeSeries  []D2BaseFeeVector   `json:"base_fee_series"`
+	BaseFeeOracle  []D2BaseFeeOracle   `json:"base_fee_arithmetic_oracle"`
+	OrdinaryGasRec []D2OrdinaryGasCase `json:"ordinary_gas_recovery"`
+	ImportChecks   []D2ImportVector    `json:"import_checks"`
+}
+
+// D2BaseFeeOracle cross-checks ExecConfig.NextBaseFee against an
+// independent big.Int computation for values large enough to overflow a
+// naive uint64 multiply.
+type D2BaseFeeOracle struct {
+	ParentBaseFee uint64 `json:"parent_base_fee"`
+	OrdinaryUsed  uint64 `json:"ordinary_used"`
+	Model         uint64 `json:"model_next_base_fee"`
+	BigIntOracle  uint64 `json:"bigint_oracle_next_base_fee"`
+	Match         bool   `json:"match"`
+	Note          string `json:"note,omitempty"`
+}
+
+// D2OrdinaryGasCase exercises RecoverOrdinaryGas: header gasUsed minus the
+// system and forced-prefix receipt gas is the value that feeds the next
+// base fee.
+type D2OrdinaryGasCase struct {
+	HeaderGasUsed    uint64 `json:"header_gas_used"`
+	SystemReceiptGas uint64 `json:"system_receipt_gas"`
+	ForcedReceiptGas uint64 `json:"forced_receipt_gas_sum"`
+	OrdinaryGas      uint64 `json:"recovered_ordinary_gas"`
+	OK               bool   `json:"ok"`
 }
 
 type D2ConfigVector struct {
@@ -55,16 +80,28 @@ type D2ImportVector struct {
 	Matches  bool   `json:"matches"`
 }
 
-// validSealBlock builds a baseline block that passes every D2 predicate,
-// with a header extraData that actually commits its companion rootInput.
-func validSealBlock(cfg ExecConfig) (SealBlock, []byte) {
-	ri := RootInput{
+// d2RootInput is the structured, D1-valid rootInput the baseline D2 block
+// imports.
+func d2RootInput() RootInput {
+	o := sampleOrigin()
+	return RootInput{
 		Version: ProfileVersion, NetworkID: 3, PartitionID: 0x45564d00, ShardID: []byte{},
-		Round: 57, Epoch: 1, ParentHash: rep(0xEE, 32), Origin: sampleOrigin(), TE: sampleTE(),
+		Round: 57, CertifiedEpoch: o.IR.Epoch, AuthorizedEpoch: sampleTE().Epoch,
+		ParentHash: rep(0xEE, 32), Origin: o, TE: sampleTE(),
 	}
-	riBytes := ri.Encode()
+}
+
+// validSealBlock builds a baseline block that passes every D2 predicate:
+// its companion carries the structured rootInput, is authenticated, and its
+// header context and extraData agree with that input.
+func validSealBlock(cfg ExecConfig) (SealBlock, RootInput) {
+	ri := d2RootInput()
 	return SealBlock{
-		ExtraData:   sha256.Sum256(riBytes),
+		ExtraData: ri.ExtraData(),
+		Context: BlockContext{
+			NetworkID: ri.NetworkID, PartitionID: ri.PartitionID, ShardID: ri.ShardID,
+			Round: ri.Round, ParentHash: ri.ParentHash,
+		},
 		BaseFee:     1_000_000_000,
 		Withdrawals: 0,
 		BlobTxCount: 0,
@@ -72,9 +109,12 @@ func validSealBlock(cfg ExecConfig) (SealBlock, []byte) {
 			From: SystemOrigin, To: SystemRegistry, Value: 0,
 			HasSig: false, HasNonce: false, FromTxPool: false, Succeeded: true,
 		},
-		Work:      BlockWork{System: 1_800_000, Forced: 0, Ordinary: 15_000_000},
-		Companion: CompanionData{Present: true, RootInput: riBytes, Witnesses: [][]byte{rep(0xC0, 40)}},
-	}, riBytes
+		Work: BlockWork{System: 1_800_000, Forced: 0, Ordinary: 15_000_000},
+		Companion: CompanionData{
+			Present: true, Authenticated: true, RootInput: ri,
+			Witnesses: [][]byte{rep(0xC0, 40)}, Provenance: "newPayload",
+		},
+	}, ri
 }
 
 // BuildD2Vectors computes the D2 vector set from this package's model.
@@ -119,6 +159,37 @@ func BuildD2Vectors() D2VectorSet {
 		})
 	}
 
+	// --- base-fee arithmetic oracle (overflow-range) --------------------
+	for _, o := range []struct {
+		parent uint64
+		used   uint64
+		note   string
+	}{
+		{10_000_000_000_000, 2 * tgt, "parent 1e13, ordinary at 2x target: naive uint64 parent*(used-target) overflows"},
+		{1 << 60, tgt / 4, "parent 2^60, quarter target: down-step, still exact"},
+		{MaxBaseFee, 2 * tgt, "parent at MaxBaseFee: result stays clamped and exact"},
+	} {
+		model := cfg.NextBaseFee(o.parent, BlockWork{System: cfg.GSys, Ordinary: o.used})
+		oracle := bigIntNextBaseFee(cfg, o.parent, o.used)
+		vs.BaseFeeOracle = append(vs.BaseFeeOracle, D2BaseFeeOracle{
+			ParentBaseFee: o.parent, OrdinaryUsed: o.used,
+			Model: model, BigIntOracle: oracle, Match: model == oracle, Note: o.note,
+		})
+	}
+
+	// --- ordinary-gas recovery ---------------------------------------
+	for _, g := range [][3]uint64{
+		{16_800_000, 1_800_000, 0},         // system 1.8M, no forced -> ordinary 15M
+		{20_000_000, 2_000_000, 3_000_000}, // -> ordinary 15M
+		{1_000_000, 2_000_000, 0},          // receipts exceed header -> not ok
+	} {
+		rec, ok := RecoverOrdinaryGas(g[0], g[1], g[2])
+		vs.OrdinaryGasRec = append(vs.OrdinaryGasRec, D2OrdinaryGasCase{
+			HeaderGasUsed: g[0], SystemReceiptGas: g[1], ForcedReceiptGas: g[2],
+			OrdinaryGas: rec, OK: ok,
+		})
+	}
+
 	// --- import checks --------------------------------------------------
 	mut := func(f func(*SealBlock)) SealBlock {
 		b, _ := validSealBlock(cfg)
@@ -132,7 +203,20 @@ func BuildD2Vectors() D2VectorSet {
 		wantCode string
 	}{
 		{"valid", mut(func(*SealBlock) {}), true, ""},
-		{"companion_missing", mut(func(b *SealBlock) { b.Companion.Present = false; b.Companion.RootInput = nil }), false, "companion_missing"},
+		{"companion_missing", mut(func(b *SealBlock) { b.Companion.Present = false }), false, "companion_missing"},
+		{"companion_unauthenticated", mut(func(b *SealBlock) { b.Companion.Authenticated = false }), false, "companion_unauthenticated"},
+		{"companion_no_witnesses", mut(func(b *SealBlock) { b.Companion.Witnesses = nil }), false, "companion_unauthenticated"},
+		{"rootinput_invalid_epoch", mut(func(b *SealBlock) { b.Companion.RootInput.AuthorizedEpoch = 9; b.Companion.RootInput.TE.Epoch = 9 }), false, "rootinput_invalid"},
+		{"rootinput_malformed_widths", mut(func(b *SealBlock) { b.Companion.RootInput.Origin.TRHash = rep(1, 8) }), false, "rootinput_invalid"},
+		{"context_mismatch_round", mut(func(b *SealBlock) { b.Context.Round = 58 }), false, "context_mismatch"},
+		{"context_mismatch_parent", mut(func(b *SealBlock) { b.Context.ParentHash = rep(0xAB, 32) }), false, "context_mismatch"},
+		{"spliced_rootinput_for_other_block", mut(func(b *SealBlock) {
+			other := d2RootInput()
+			other.Round = 99
+			other.TE.Round = 99
+			other.Origin.IR.Round = 99
+			b.Companion.RootInput = other // extraData still commits the original -> extradata_mismatch after context passes? no: context.Round stays 57 != 99
+		}), false, "context_mismatch"},
 		{"extradata_mismatch", mut(func(b *SealBlock) { b.ExtraData[0] ^= 0xff }), false, "extradata_mismatch"},
 		{"system_origin_forged", mut(func(b *SealBlock) { b.SystemCall.From = [20]byte{0: 0x01} }), false, "system_origin_forged"},
 		{"system_value_nonzero", mut(func(b *SealBlock) { b.SystemCall.Value = 1 }), false, "system_value_nonzero"},
@@ -154,6 +238,53 @@ func BuildD2Vectors() D2VectorSet {
 	}
 
 	return vs
+}
+
+// bigIntNextBaseFee is an independent big.Int oracle for
+// ExecConfig.NextBaseFee: the London update over ordinary gas/target with
+// the positive floor and MaxBaseFee clamps, computed with no intermediate
+// truncation.
+func bigIntNextBaseFee(c ExecConfig, parentBaseFee, ordinaryUsed uint64) uint64 {
+	target := c.OrdinaryTarget()
+	used := ordinaryUsed
+	if used > 2*target {
+		used = 2 * target
+	}
+	parent := new(big.Int).SetUint64(parentBaseFee)
+	tgt := new(big.Int).SetUint64(target)
+	denom := new(big.Int).SetUint64(c.BaseFeeChangeDenom)
+	var child *big.Int
+	switch {
+	case target == 0 || used == target:
+		child = new(big.Int).Set(parent)
+	case used > target:
+		num := new(big.Int).SetUint64(used - target)
+		delta := new(big.Int).Mul(parent, num)
+		delta.Div(delta, tgt)
+		delta.Div(delta, denom)
+		if delta.Sign() == 0 {
+			delta.SetUint64(1)
+		}
+		child = new(big.Int).Add(parent, delta)
+	default:
+		num := new(big.Int).SetUint64(target - used)
+		delta := new(big.Int).Mul(parent, num)
+		delta.Div(delta, tgt)
+		delta.Div(delta, denom)
+		child = new(big.Int).Sub(parent, delta)
+		if child.Sign() < 0 {
+			child.SetUint64(0)
+		}
+	}
+	floor := new(big.Int).SetUint64(c.BaseFeeFloor)
+	if child.Cmp(floor) < 0 {
+		child.Set(floor)
+	}
+	maxbf := new(big.Int).SetUint64(MaxBaseFee)
+	if child.Cmp(maxbf) > 0 {
+		child.Set(maxbf)
+	}
+	return child.Uint64()
 }
 
 // MarshalD2Vectors renders the D2 vector set as stable, indented JSON.

@@ -2,8 +2,14 @@
 
 ## Status
 
-Proposed (D2, issue #4). Freeze once reviewed by a Go-adapter + reth reviewer
-other than the author. Depends on ADR 0003 (D1). No supersession.
+Proposed (D2, issue #4). Revised after the first review (#78): a
+**verified-input boundary** (structured companion `rootInput` + authentication
+verdict + header-context match) replaces the "matching self-hash is enough"
+check; `NextBaseFee` uses a 128-bit intermediate and `ExecConfig.Valid()`;
+concrete `engine_*WithSealV1` methods, capability strings, an exact system-call
+receipt convention and `RecoverOrdinaryGas` are specified. Freeze once
+re-reviewed by a Go-adapter + reth reviewer other than the author. Depends on
+ADR 0003 (D1).
 
 ## Context
 

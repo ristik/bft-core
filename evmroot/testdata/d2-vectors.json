@@ -48,6 +48,55 @@
       "note": "tiny parent fee, zero ordinary demand -\u003e clamps to positive floor"
     }
   ],
+  "base_fee_arithmetic_oracle": [
+    {
+      "parent_base_fee": 10000000000000,
+      "ordinary_used": 28000000,
+      "model_next_base_fee": 11250000000000,
+      "bigint_oracle_next_base_fee": 11250000000000,
+      "match": true,
+      "note": "parent 1e13, ordinary at 2x target: naive uint64 parent*(used-target) overflows"
+    },
+    {
+      "parent_base_fee": 1152921504606846976,
+      "ordinary_used": 3500000,
+      "model_next_base_fee": 1044835113549955072,
+      "bigint_oracle_next_base_fee": 1044835113549955072,
+      "match": true,
+      "note": "parent 2^60, quarter target: down-step, still exact"
+    },
+    {
+      "parent_base_fee": 4611686018427387904,
+      "ordinary_used": 28000000,
+      "model_next_base_fee": 4611686018427387904,
+      "bigint_oracle_next_base_fee": 4611686018427387904,
+      "match": true,
+      "note": "parent at MaxBaseFee: result stays clamped and exact"
+    }
+  ],
+  "ordinary_gas_recovery": [
+    {
+      "header_gas_used": 16800000,
+      "system_receipt_gas": 1800000,
+      "forced_receipt_gas_sum": 0,
+      "recovered_ordinary_gas": 15000000,
+      "ok": true
+    },
+    {
+      "header_gas_used": 20000000,
+      "system_receipt_gas": 2000000,
+      "forced_receipt_gas_sum": 3000000,
+      "recovered_ordinary_gas": 15000000,
+      "ok": true
+    },
+    {
+      "header_gas_used": 1000000,
+      "system_receipt_gas": 2000000,
+      "forced_receipt_gas_sum": 0,
+      "recovered_ordinary_gas": 0,
+      "ok": false
+    }
+  ],
   "import_checks": [
     {
       "name": "valid",
@@ -63,6 +112,62 @@
       "want_code": "companion_missing",
       "got_ok": false,
       "got_code": "companion_missing",
+      "matches": true
+    },
+    {
+      "name": "companion_unauthenticated",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "companion_no_witnesses",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "rootinput_invalid_epoch",
+      "want_ok": false,
+      "want_code": "rootinput_invalid",
+      "got_ok": false,
+      "got_code": "rootinput_invalid",
+      "matches": true
+    },
+    {
+      "name": "rootinput_malformed_widths",
+      "want_ok": false,
+      "want_code": "rootinput_invalid",
+      "got_ok": false,
+      "got_code": "rootinput_invalid",
+      "matches": true
+    },
+    {
+      "name": "context_mismatch_round",
+      "want_ok": false,
+      "want_code": "context_mismatch",
+      "got_ok": false,
+      "got_code": "context_mismatch",
+      "matches": true
+    },
+    {
+      "name": "context_mismatch_parent",
+      "want_ok": false,
+      "want_code": "context_mismatch",
+      "got_ok": false,
+      "got_code": "context_mismatch",
+      "matches": true
+    },
+    {
+      "name": "spliced_rootinput_for_other_block",
+      "want_ok": false,
+      "want_code": "context_mismatch",
+      "got_ok": false,
+      "got_code": "context_mismatch",
       "matches": true
     },
     {
