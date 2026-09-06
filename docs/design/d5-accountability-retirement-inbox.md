@@ -61,16 +61,22 @@ Phases: `Bonded → RetirementRequested → Draining → Released`.
   rejected.
 - **Timing parameters** (`ProtectionParams`), ordering mandatory:
   `W_cert ≤ Δ_ev < Δ_hold` and `Δ_hold > Δ_ev + Δ_incl + Δ_exec`.
-- **`CanWithdraw(now)`** requires, in order:
+- **`CanWithdraw(now, p, positionCutoffSatisfied, timelyEvidencePending)`** requires, in order:
   1. phase `Draining`;
   2. `now ≥ max(R_ret + Δ_hold, inheritedProtectionUntil)` — inherited protection
-     from key rotation / delegation changes dominates a nearer boundary; key
-     rotation and queued withdrawals cannot remove liability for an earlier
-     offense;
-  3. `inboxWatermark ≥ LastLiabilityRound` — the forced-inbox consumption
-     watermark has passed this reservation's last liability;
+     from key rotation / delegation changes dominates a nearer boundary;
+  3. **position cutoff** satisfied — see below;
   4. no timely-queued evidence case against the key is unprocessed.
   Exceeding `Δ_incl` / `Δ_exec` never unlocks an unresolved liability.
+- **Position cutoff (fixing the unit mismatch).** The reservation carries
+  `LiabilityDeadlineRound` (a **root round**). The linkage to the inbox is
+  `ForcedInbox.PositionCutoffSatisfied(deadlineRound)`: **every** entry whose
+  `AdmissionRound ≤ deadlineRound` must be **certified-consumed**. It never
+  compares a sequence number to a root round. An **empty interval** (nothing
+  admitted through the deadline) is trivially satisfied; many entries admitted in
+  one root round, or long empty intervals, or a partial acknowledgement, are all
+  covered (`withdrawal_gates.cutoff_*` vectors;
+  `TestD5_PositionCutoffNotAWatermarkComparison`).
 - **`EvidenceTimely`** — timely iff executed within `Δ_ev` root rounds of the
   offense, **or** its complete payload was committed to the forced inbox within
   that window. A bare local submission or an unavailable payload hash does not
@@ -79,16 +85,19 @@ Phases: `Bonded → RetirementRequested → Draining → Released`.
 
 ## 4. Paid forced-inbox admission
 
-### Credits
+### Authenticated credits
 
-- `CreditEscrow` is an immutable EVM escrow. `ApplyDeposit(proofID, owner, amount)`
-  credits against a **certified** deposit; replaying the same `proofID` is a
-  **no-op** — never a second credit, so a duplicated deposit proof produces no
-  unbacked admission.
-- Admission consumes **exactly one unique, unconsumed** credit in root consensus.
-  A second `Admit` with the same `creditID` is rejected (`credit_already_consumed`
-  / `credit_already_reserved`) — no double spend. An `Admit` from a sender with
-  no credit is rejected (`no_credit`) — no unbacked admission.
+- `ApplyDeposit(CertifiedDeposit{DepositID, Owner, Amount, Certified})` requires
+  `Certified` and dedups on the **certified `DepositID`** — the root-certified
+  deposit identity, *not* a hash of a proof serialization. A re-encoded proof for
+  the same deposit is the same `DepositID` and adds nothing; an uncertified
+  deposit is rejected.
+- `Admit` **mints one credit** for `sender` from its available balance and binds
+  the credit to the queue `seq`. Each credit records its `owner` and originating
+  deposit.
+- A second `Admit` with the same `creditID` is rejected
+  (`credit_already_consumed`, or `credit_already_reconciled` if it was refunded).
+  An `Admit` from a sender with no available credit is `no_credit`.
 
 ### Admission checks (root, ordered)
 
@@ -103,60 +112,81 @@ Only a successful `Admit` yields an `*EnqueueCertificate` (`seq`, payload digest
 admission round). **A local HTTP response or a shard-statistics field is never an
 enqueue certificate.**
 
-### FIFO progress and poisoned entries
+### Entry lifecycle: pending → tentatively executed → certified-consumed
 
-`ProcessDuePrefix` processes the FIFO prefix whose combined `declaredGas` fits
-`g_fi`. An entry invalid at its deterministic turn (`nonce_already_used`,
-`insufficient_balance`, `fee_cap_below_base_fee`, `incompatible_activated_rules`,
-`higher_nonce_not_ready`) is **consumed with an authenticated rejection reason**
-and does **not** stall the queue; the entries after it still execute. An
-executable transaction that reverts consumes gas and has a normal failed receipt.
+Each entry has three states.
+`ProcessDuePrefix` **tentatively executes** the pending prefix whose combined
+`declaredGas` fits `g_fi`, marking each `entryTentativelyExecuted`. A poisoned
+entry (`nonce_already_used`, `insufficient_balance`, `fee_cap_below_base_fee`,
+`incompatible_activated_rules`, `higher_nonce_not_ready`) is consumed with its
+authenticated reason and does **not** stall the queue.
+`AcknowledgeConsumption(throughSeq)` moves every live entry with `seq ≤ throughSeq`
+to `entryCertifiedConsumed`, **removes it from the executable queue, releases its
+per-sender / global slot, and archives it** (retained for proof export, never
+re-executed). It advances the watermark **exactly once**; a repeat / lower call
+is a no-op.
 
-### Consumption watermark
+**Crash / replay.** `ProcessDuePrefix` skips certified-consumed entries
+(`EntryOutcome.AlreadyFinal`) — a re-run after a restart never re-executes an
+acknowledged entry, and the freed capacity lets a previously `per_sender_queue_full`
+sender admit (`TestD5_QueueLifecycleReleasesCapacityAndNoReExecution`).
 
-`AcknowledgeConsumption(throughSeq)` advances the watermark **exactly once**; a
-repeat call with the same or a lower value is a no-op — a repeat UC does not
-double-advance the watermark or create a second claim.
+### Refund provenance
 
-### Refund reconciliation
+`ReconcileUnusedCredit(RefundStatement{CreditID, Owner, RootCertifiedUnused}, q)`
+refunds a credit **only** when:
 
-`ReconcileUnusedCredit` refunds a credit **only** when the root has certified the
-entry was never consumed, and **at most once** regardless of how many refund
-requests race. A credit backing a consumed entry is never refunded.
+- the statement is root-certified (`RootCertifiedUnused`);
+- the statement's `Owner` equals the credit's **recorded** owner (a refund can
+  only return value to the original owner — not a caller-selected address);
+- the credit's queue entry is **not** `entryCertifiedConsumed`;
+- it has not already been reconciled.
 
-### Inclusion bound `K`
+Applied **at most once** regardless of racing requests. Re-admitting a reconciled
+`creditID` fails (`credit_already_reconciled`). A conflicting `Admit` /
+reconciliation interleaving can neither create nor redirect credit.
+
+### Inclusion bound `K` — entry-count / fragmentation aware
+
+FIFO entries are **indivisible**, so the adversary makes every entry as large as
+the declared limit allows:
 
 ```
-K = ceil( (maxBacklogGas + declaredGasLimit) / g_fi )
-    + originObservationLagBlocks
-    + rootRoundAllowanceBlocks
+entriesPerBlock  = max(1, g_fi / declaredGasLimit)
+blocksForBacklog = ceil( (maxBacklogEntries + 1) / entriesPerBlock )
+K = blocksForBacklog + originObservationLagBlocks + rootRoundAllowanceBlocks
 ```
 
-published in produced EVM blocks, folding in the maximum admitted backlog, the
-declared per-entry gas limit, the reserved per-block budget `g_fi`, and the
-input-observation lag. The root-round allowance additionally assumes bounded EVM
-progress. Vector `inclusion_bound_k` shows `K = 16` for a 3M-gas backlog with
-`g_fi = 300k`, lag 2, allowance 3.
+All three added terms are in **produced EVM blocks**. `maxBacklogEntries` is the
+admission-bounded global-queue size; `declaredGasLimit` is the per-entry cap; the
+`+1` counts the entry itself. Vector `inclusion_bound_k`:
+`adversarial_indivisible_packing` — **3 entries of 60 gas, `g_fi` 100 ⇒ one per
+block ⇒ K = 3** (the case the earlier fluid-gas formula got wrong, returning 2);
+`half_target_two_per_block` ⇒ K = 10; `empty_backlog` ⇒ K = 2.
 
-### Sponsor path
+### Sponsor path — executable
 
-A first-time user without credits has a **documented permissionless sponsor
-path**; the inclusion guarantee is explicitly conditional on it
-(`SponsorPathDocumented`). Local receipt of a request is not a liveness promise;
-bounded inclusion assumes root enqueue progress and enough honest execution
-weight producing blocks. A root quorum failure cannot be repaired by this queue.
+`GrantSponsoredCredit(SponsorGrant{GrantID, Sponsor, Recipient, Amount, Certified})`
+debits a sponsor's certified credits and credits a first-time `Recipient`, so a
+credit-less newcomer can then `Admit` (`TestD5_SponsorPathIsExecutable`;
+`SponsorPathAvailable()`). It dedups on `GrantID`. This replaces the former
+`SponsorPathDocumented = true` constant with a real path. Local receipt of a
+request is not a liveness promise; bounded inclusion assumes root enqueue
+progress and enough honest execution weight. A root quorum failure cannot be
+repaired by this queue.
 
 ## 5. Acceptance mapping
 
 | D5 acceptance clause | Evidence |
 |---|---|
-| no unbacked admission | `forced_inbox.duplicate_deposit_rejected`, `admit_without_credit_rejected`; `TestD5_InboxNoUnbackedAdmissionNoDoubleSpend` |
+| no unbacked admission | certified-deposit dedup + `no_credit`; `forced_inbox.duplicate_certified_deposit_rejected`, `admit_without_credit_rejected`; `TestD5_InboxNoUnbackedAdmissionNoDoubleSpend` |
 | no double spend | `forced_inbox.double_spend_of_credit_rejected` |
-| no refund of reserved credits | `forced_inbox.refund_of_reserved_credit_rejected`, `refund_race_applied_at_most_once`; `TestD5_RefundOnlyViaReconciliationAndAtMostOnce` |
-| no poisoned nonce/fee/balance entry stalls the queue | `forced_inbox.poisoned_entry_does_not_stall_queue`; `TestD5_PoisonedEntryDoesNotStallQueue` |
-| timely evidence survives delayed execution without premature withdrawal | `evidence_timeliness.inbox_committed_in_window_then_late_exec` + `withdrawal_gates.timely_evidence_pending`; `TestD5_WithdrawalGates` |
-| published K derivation includes max backlog, declared gas limits, origin-observation lag | §4 `K`; `inclusion_bound_k`; `TestD5_InclusionBoundK` |
+| no refund of reserved credits; refund provenance | §4 "Refund provenance" — owner-bound, non-consumed-only, once; `forced_inbox.refund_to_wrong_owner_rejected`, `refund_of_certified_consumed_entry_rejected`, `refund_without_root_certification_rejected`, `refund_race_applied_at_most_once`, `admit_reusing_a_reconciled_credit_rejected`; `TestD5_RefundProvenance` |
+| no poisoned entry stalls the queue; **acknowledged entries leave the executable queue with no re-execution and released capacity** | §4 "Entry lifecycle"; `forced_inbox.poisoned_entry_does_not_stall_queue`, `acknowledgement_releases_per_sender_capacity`, `reprocess_after_ack_does_not_re_execute`; `TestD5_PoisonedEntryDoesNotStallQueue`, `TestD5_QueueLifecycleReleasesCapacityAndNoReExecution` |
+| timely evidence survives delayed execution without premature withdrawal; **withdrawal linkage in compatible units** | §3 position cutoff (root-round deadline → certified-consumed positions, not a watermark comparison); `withdrawal_gates.cutoff_*`; `TestD5_PositionCutoffNotAWatermarkComparison`, `TestD5_WithdrawalGates` |
+| published K derivation is entry-count / fragmentation aware; observation lag has explicit units | §4 `K` (indivisible entries, `entriesPerBlock`, terms in produced EVM blocks); `inclusion_bound_k.adversarial_indivisible_packing` (K=3); `TestD5_InclusionBoundK_EntryCountAware` |
 | an HTTP acknowledgement is never an enqueue certificate | §4; `forced_inbox.http_ack_is_not_an_enqueue_certificate` |
+| an executable permissionless newcomer path | §4 "Sponsor path"; `forced_inbox.certified_sponsor_grant_lets_a_newcomer_admit`; `TestD5_SponsorPathIsExecutable` |
 | exact slashable vote domains + VoteInfo↔LedgerCommitInfo binding | §2; `vote_binding`, `slashable_conflicts`; `TestD5_VoteInfoLedgerCommitBinding`, `TestD5_SlashableConflictDomain` |
 | PoS signing preimage binds network/domain even for non-committing votes; builtin argument is not a binding | §2; `vote_binding.non_committing_vote_still_binds_domain`; `TestD5_SigningPreimageBindsDomainEvenForNonCommittingVote` |
 

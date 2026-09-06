@@ -2,9 +2,15 @@
 
 ## Status
 
-Proposed (D5, issue #7). Freeze once reviewed by a consensus / protocol reviewer
-and a custody-accounting reviewer, neither the author. Depends on ADR 0003 (D1),
-ADR 0005 (D3), ADR 0006 (D4). No supersession.
+Proposed (D5, issue #7). Revised after the first review (#81): a three-state
+entry lifecycle (pending → tentatively executed → certified-consumed + archived)
+that releases queue capacity and never re-executes on replay; the withdrawal
+gate uses a **root-round liability deadline → certified-consumed positions**
+cutoff, not a watermark-vs-round comparison; `K` is **entry-count /
+fragmentation aware** (indivisible entries); credits and refunds are bound to a
+**certified deposit identity** and the **recorded owner**, with an **executable
+sponsor path**. Freeze once re-reviewed by a consensus reviewer and a
+custody-accounting reviewer, neither the author. Depends on ADR 0003/0005/0006.
 
 ## Context
 

@@ -54,9 +54,12 @@ type Reservation struct {
 	// queued withdrawals cannot remove liability for an earlier offense.
 	InheritedProtectionUntil uint64
 
-	// The last root round at which this reservation could have incurred an
-	// inbox liability whose consumption must be acknowledged first.
-	LastLiabilityRound uint64
+	// LiabilityDeadlineRound is the root round through which every
+	// forced-inbox entry that could carry evidence against this key must be
+	// certified-consumed before withdrawal. It is a ROOT ROUND; the linkage
+	// to inbox sequence positions is ForcedInbox.PositionCutoffSatisfied,
+	// not a raw watermark comparison.
+	LiabilityDeadlineRound uint64
 }
 
 // RequestRetirement moves Bonded -> RetirementRequested. It does not start
@@ -94,11 +97,15 @@ type WithdrawBlock struct {
 //
 //   - phase must be Draining;
 //   - now >= max(R_ret + Δ_hold, inherited protection);
-//   - the inbox consumption watermark must be past LastLiabilityRound;
+//   - positionCutoffSatisfied: every forced-inbox entry admitted at or
+//     before LiabilityDeadlineRound is certified-consumed (an empty
+//     interval satisfies this trivially) — from
+//     ForcedInbox.PositionCutoffSatisfied(r.LiabilityDeadlineRound), never a
+//     raw sequence/round comparison;
 //   - no timely-queued evidence against this key may be pending.
 //
 // Exceeding Δ_incl/Δ_exec never unlocks an unresolved liability.
-func (r *Reservation) CanWithdraw(now uint64, p ProtectionParams, inboxWatermark uint64, timelyEvidencePending bool) WithdrawBlock {
+func (r *Reservation) CanWithdraw(now uint64, p ProtectionParams, positionCutoffSatisfied, timelyEvidencePending bool) WithdrawBlock {
 	if r.Phase != Draining {
 		return WithdrawBlock{false, "reservation is not in the draining phase"}
 	}
@@ -109,8 +116,8 @@ func (r *Reservation) CanWithdraw(now uint64, p ProtectionParams, inboxWatermark
 	if now < protectionUntil {
 		return WithdrawBlock{false, "protection period has not elapsed"}
 	}
-	if inboxWatermark < r.LastLiabilityRound {
-		return WithdrawBlock{false, "forced-inbox consumption watermark has not passed this reservation's last liability"}
+	if !positionCutoffSatisfied {
+		return WithdrawBlock{false, "forced-inbox entries admitted through the liability deadline are not all certified-consumed"}
 	}
 	if timelyEvidencePending {
 		return WithdrawBlock{false, "a timely-queued evidence case against this key is still unprocessed"}

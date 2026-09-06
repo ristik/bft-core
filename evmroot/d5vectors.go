@@ -38,12 +38,12 @@ type D5ProtectionCase struct {
 }
 
 type D5WithdrawCase struct {
-	Name           string `json:"name"`
-	Now            uint64 `json:"now"`
-	InboxWatermark uint64 `json:"inbox_watermark"`
-	TimelyEvidence bool   `json:"timely_evidence_pending"`
-	Allowed        bool   `json:"allowed"`
-	Reason         string `json:"reason,omitempty"`
+	Name                    string `json:"name"`
+	Now                     uint64 `json:"now"`
+	PositionCutoffSatisfied bool   `json:"position_cutoff_satisfied"`
+	TimelyEvidence          bool   `json:"timely_evidence_pending"`
+	Allowed                 bool   `json:"allowed"`
+	Reason                  string `json:"reason,omitempty"`
 }
 
 type D5EvidenceCase struct {
@@ -56,25 +56,34 @@ type D5EvidenceCase struct {
 }
 
 type D5InboxCase struct {
-	Note                       string         `json:"note"`
-	DuplicateDepositRejected   bool           `json:"duplicate_deposit_rejected"`
-	AdmitWithoutCreditRejected bool           `json:"admit_without_credit_rejected"`
-	DoubleSpendRejected        bool           `json:"double_spend_of_credit_rejected"`
-	HTTPAckIsNotEnqueue        bool           `json:"http_ack_is_not_an_enqueue_certificate"`
-	Outcomes                   []EntryOutcome `json:"due_prefix_outcomes"`
-	PoisonDoesNotStall         bool           `json:"poisoned_entry_does_not_stall_queue"`
-	WatermarkAdvance           []bool         `json:"watermark_advance_results"` // first true, repeats false
-	RefundReservedRejected     bool           `json:"refund_of_reserved_credit_rejected"`
-	RefundRaceAppliedOnce      bool           `json:"refund_race_applied_at_most_once"`
+	Note                        string         `json:"note"`
+	DuplicateDepositRejected    bool           `json:"duplicate_certified_deposit_rejected"`
+	AdmitWithoutCreditRejected  bool           `json:"admit_without_credit_rejected"`
+	DoubleSpendRejected         bool           `json:"double_spend_of_credit_rejected"`
+	HTTPAckIsNotEnqueue         bool           `json:"http_ack_is_not_an_enqueue_certificate"`
+	Outcomes                    []EntryOutcome `json:"due_prefix_outcomes"`
+	PoisonDoesNotStall          bool           `json:"poisoned_entry_does_not_stall_queue"`
+	AckReleasesCapacity         bool           `json:"acknowledgement_releases_per_sender_capacity"`
+	NoReExecutionAfterAck       bool           `json:"reprocess_after_ack_does_not_re_execute"`
+	WatermarkAdvance            []bool         `json:"watermark_advance_results"` // first true, repeats false
+	RefundWrongOwnerRejected    bool           `json:"refund_to_wrong_owner_rejected"`
+	RefundConsumedEntryRejected bool           `json:"refund_of_certified_consumed_entry_rejected"`
+	RefundReservedRejected      bool           `json:"refund_without_root_certification_rejected"`
+	RefundRaceAppliedOnce       bool           `json:"refund_race_applied_at_most_once"`
+	AdmitAfterRefundRejected    bool           `json:"admit_reusing_a_reconciled_credit_rejected"`
+	SponsorPathAdmits           bool           `json:"certified_sponsor_grant_lets_a_newcomer_admit"`
 }
 
 type D5KCase struct {
-	MaxBacklogGas            uint64 `json:"max_backlog_gas"`
+	Name                     string `json:"name"`
+	MaxBacklogEntries        uint64 `json:"max_backlog_entries"`
 	DeclaredGasLimit         uint64 `json:"declared_gas_limit"`
 	GFI                      uint64 `json:"g_fi"`
+	EntriesPerBlock          uint64 `json:"entries_per_block"`
 	OriginObservationLag     uint64 `json:"origin_observation_lag_blocks"`
 	RootRoundAllowanceBlocks uint64 `json:"root_round_allowance_blocks"`
-	K                        uint64 `json:"k"`
+	K                        uint64 `json:"k_produced_evm_blocks"`
+	Note                     string `json:"note,omitempty"`
 }
 
 func BuildD5Vectors() D5VectorSet {
@@ -116,17 +125,43 @@ func BuildD5Vectors() D5VectorSet {
 		Note: "W_cert <= Δ_ev < Δ_hold and Δ_hold > Δ_ev + Δ_incl + Δ_exec (200 > 100+40+40=180)"}
 
 	// --- withdrawal gates ----------------------------------------------
-	res := Reservation{Phase: Draining, RetirementRound: 1_000, LastLiabilityRound: 1_050}
-	mkW := func(name string, now, wm uint64, ev bool) D5WithdrawCase {
-		wb := res.CanWithdraw(now, p, wm, ev)
-		return D5WithdrawCase{Name: name, Now: now, InboxWatermark: wm, TimelyEvidence: ev, Allowed: wb.Allowed, Reason: wb.Reason}
+	// LiabilityDeadlineRound is a root round; the linkage to inbox positions
+	// is ForcedInbox.PositionCutoffSatisfied, exercised below and passed in
+	// here as a bool so the two units never get compared directly.
+	res := Reservation{Phase: Draining, RetirementRound: 1_000, LiabilityDeadlineRound: 1_050}
+	mkW := func(name string, now uint64, cutoff, ev bool) D5WithdrawCase {
+		wb := res.CanWithdraw(now, p, cutoff, ev)
+		return D5WithdrawCase{Name: name, Now: now, PositionCutoffSatisfied: cutoff, TimelyEvidence: ev, Allowed: wb.Allowed, Reason: wb.Reason}
 	}
 	vs.Withdrawal = []D5WithdrawCase{
-		mkW("protection_not_elapsed", 1_100, 2_000, false),     // < 1000+200
-		mkW("watermark_behind_liability", 1_300, 1_040, false), // wm 1040 < 1050
-		mkW("timely_evidence_pending", 1_300, 2_000, true),
-		mkW("all_gates_clear", 1_300, 2_000, false),
+		mkW("protection_not_elapsed", 1_100, true, false), // < 1000+200
+		mkW("position_cutoff_not_satisfied", 1_300, false, false),
+		mkW("timely_evidence_pending", 1_300, true, true),
+		mkW("all_gates_clear", 1_300, true, false),
 	}
+
+	// A concrete position-cutoff evaluation: two entries admitted in the
+	// same root round 1_050, one still live -> cutoff not satisfied; after
+	// both are certified-consumed -> satisfied. An earlier deadline with no
+	// admitted entries -> trivially satisfied.
+	cesc := NewCreditEscrow()
+	cesc.ApplyDeposit(CertifiedDeposit{DepositID: "cd", Owner: "v", Amount: 5, Certified: true})
+	cq := NewForcedInbox(cesc, AdmissionLimits{MaxEncodedBytes: 4096, GFI: 300_000, PerSenderQueue: 9, GlobalQueue: 16})
+	cq.Admit("v", "k1", 10, 100_000, rep(1, 32), true, 1_050, true, true, true)
+	cq.Admit("v", "k2", 10, 100_000, rep(2, 32), true, 1_050, true, true, true)
+	cutoffBefore := cq.PositionCutoffSatisfied(1_050)
+	emptyIntervalOK := cq.PositionCutoffSatisfied(1_049)
+	cq.ProcessDuePrefix(nil)
+	cq.AcknowledgeConsumption(0) // seq 0 only
+	cutoffMid := cq.PositionCutoffSatisfied(1_050)
+	cq.AcknowledgeConsumption(1) // seq 1 too
+	cutoffAfter := cq.PositionCutoffSatisfied(1_050)
+	vs.Withdrawal = append(vs.Withdrawal,
+		D5WithdrawCase{Name: "cutoff_many_entries_one_root_round_before", PositionCutoffSatisfied: cutoffBefore},
+		D5WithdrawCase{Name: "cutoff_empty_interval_trivially_ok", PositionCutoffSatisfied: emptyIntervalOK},
+		D5WithdrawCase{Name: "cutoff_partial_ack_still_not_satisfied", PositionCutoffSatisfied: cutoffMid},
+		D5WithdrawCase{Name: "cutoff_all_consumed_satisfied", PositionCutoffSatisfied: cutoffAfter},
+	)
 
 	// --- evidence timeliness -------------------------------------------
 	vs.EvidenceTimely = []D5EvidenceCase{
@@ -138,48 +173,90 @@ func BuildD5Vectors() D5VectorSet {
 
 	// --- forced inbox --------------------------------------------------
 	esc := NewCreditEscrow()
-	esc.ApplyDeposit("dep-1", "alice", 3)
-	dupDep := esc.ApplyDeposit("dep-1", "alice", 3)
-	esc.ApplyDeposit("dep-2", "bob", 1)
-	limits := AdmissionLimits{MaxEncodedBytes: 4096, GFI: 300_000, PerSenderQueue: 4, GlobalQueue: 16}
+	esc.ApplyDeposit(CertifiedDeposit{DepositID: "dep-1", Owner: "alice", Amount: 3, Certified: true})
+	dupDep := esc.ApplyDeposit(CertifiedDeposit{DepositID: "dep-1", Owner: "alice", Amount: 3, Certified: true})
+	esc.ApplyDeposit(CertifiedDeposit{DepositID: "dep-2", Owner: "bob", Amount: 1, Certified: true})
+	limits := AdmissionLimits{MaxEncodedBytes: 4096, GFI: 300_000, PerSenderQueue: 2, GlobalQueue: 16}
 	q := NewForcedInbox(esc, limits)
-	r1, cert1 := q.Admit("alice", "cr-a1", 1000, 100_000, rep(0xA1, 32), true, 10, true, true, true)
-	// double spend: reuse cr-a1
-	rDup, _ := q.Admit("alice", "cr-a1", 1000, 100_000, rep(0xA2, 32), true, 11, true, true, true)
-	// no credit: charlie never deposited
+	r1, cert1 := q.Admit("alice", "cr-a1", 1000, 100_000, rep(0xA1, 32), true, 10, true, true, true) // seq 0
+	rDup, _ := q.Admit("alice", "cr-a1", 1000, 100_000, rep(0xA2, 32), true, 11, true, true, true)   // reuse credit id
 	rNoCredit, _ := q.Admit("charlie", "cr-c1", 1000, 100_000, rep(0xC1, 32), true, 12, true, true, true)
-	q.Admit("alice", "cr-a2", 1000, 100_000, rep(0xA3, 32), true, 13, true, true, true)
-	q.Admit("bob", "cr-b1", 1000, 100_000, rep(0xB1, 32), true, 14, true, true, true)
+	q.Admit("alice", "cr-a2", 1000, 100_000, rep(0xA3, 32), true, 13, true, true, true)             // seq 1 -> alice at PerSenderQueue=2
+	rFull, _ := q.Admit("alice", "cr-a3", 1000, 100_000, rep(0xA4, 32), true, 14, true, true, true) // per_sender_queue_full
+	q.Admit("bob", "cr-b1", 1000, 100_000, rep(0xB1, 32), true, 15, true, true, true)               // seq 2
+
 	// process due prefix with entry seq 1 poisoned (nonce already used)
 	outcomes := q.ProcessDuePrefix(map[uint64]PoisonKind{1: PoisonNonceUsed})
 	poisonDoesNotStall := len(outcomes) == 3 && outcomes[1].Reason == string(PoisonNonceUsed) && outcomes[2].Executed
-	// watermark advance
-	wmResults := []bool{q.AcknowledgeConsumption(3), q.AcknowledgeConsumption(3), q.AcknowledgeConsumption(2)}
-	// refund of a reserved (consumed) credit without root-certified reconciliation
-	refundReserved := esc.ReconcileUnusedCredit("cr-a1", "alice", false)
-	// refund race: two reconciliations of the same credit, only the first applies
-	refund1 := esc.ReconcileUnusedCredit("cr-a2", "alice", true)
-	refund2 := esc.ReconcileUnusedCredit("cr-a2", "alice", true)
+
+	// acknowledge seq 0..1: alice's live-queue occupancy drops from 2 to 0.
+	capBeforeAck := q.AvailableCapacity("alice") // 0 (at PerSenderQueue)
+	wm1 := q.AcknowledgeConsumption(1)
+	capAfterAck := q.AvailableCapacity("alice") // 2 again — capacity released
+	// reprocess after ack: seq 0 and 1 are certified-consumed -> AlreadyFinal, never re-executed.
+	reOut := q.ProcessDuePrefix(nil)
+	noReExec := true
+	for _, o := range reOut {
+		if (o.Seq == 0 || o.Seq == 1) && !o.AlreadyFinal {
+			noReExec = false
+		}
+	}
+	wmResults := []bool{wm1, q.AcknowledgeConsumption(1), q.AcknowledgeConsumption(0)}
+
+	// refund provenance. cr-a2 (seq 1) was certified-consumed -> refund of it
+	// is rejected. A fresh unconsumed-then-rolled-back credit is the refundable
+	// case: admit cr-x, then a root-certified reconciliation before it is
+	// acknowledged.
+	esc.ApplyDeposit(CertifiedDeposit{DepositID: "dep-x", Owner: "alice", Amount: 1, Certified: true})
+	q.Admit("alice", "cr-x", 1000, 100_000, rep(0xAA, 32), true, 20, true, true, true) // seq 3, not acknowledged
+	refundWrongOwner := esc.ReconcileUnusedCredit(RefundStatement{CreditID: "cr-x", Owner: "mallory", RootCertifiedUnused: true}, q)
+	refundNoCert := esc.ReconcileUnusedCredit(RefundStatement{CreditID: "cr-x", Owner: "alice", RootCertifiedUnused: false}, q)
+	refundConsumed := esc.ReconcileUnusedCredit(RefundStatement{CreditID: "cr-a2", Owner: "alice", RootCertifiedUnused: true}, q)
+	refund1 := esc.ReconcileUnusedCredit(RefundStatement{CreditID: "cr-x", Owner: "alice", RootCertifiedUnused: true}, q)
+	refund2 := esc.ReconcileUnusedCredit(RefundStatement{CreditID: "cr-x", Owner: "alice", RootCertifiedUnused: true}, q)
+	admitAfterRefund, _ := q.Admit("alice", "cr-x", 1000, 100_000, rep(0xAB, 32), true, 21, true, true, true)
+
+	// sponsor path: a newcomer with no credits is funded by a certified grant.
+	sesc := NewCreditEscrow()
+	sesc.ApplyDeposit(CertifiedDeposit{DepositID: "sd", Owner: "sponsor", Amount: 2, Certified: true})
+	sesc.GrantSponsoredCredit(SponsorGrant{GrantID: "g1", Sponsor: "sponsor", Recipient: "newbie", Amount: 1, Certified: true})
+	sq := NewForcedInbox(sesc, limits)
+	sponsorAdmit, _ := sq.Admit("newbie", "cr-n1", 100, 100_000, rep(0x4E, 32), true, 30, true, true, true)
 
 	vs.Inbox = D5InboxCase{
-		Note:                       "Prepaid UCT credits in an immutable escrow; unique credit consumed in root consensus; refunds only via root-certified reconciliation of unused credits.",
-		DuplicateDepositRejected:   !dupDep.Applied,
-		AdmitWithoutCreditRejected: rNoCredit.Code == "no_credit",
-		DoubleSpendRejected:        rDup.Code == "credit_already_consumed" || rDup.Code == "credit_already_reserved",
-		HTTPAckIsNotEnqueue:        r1.Admitted && cert1 != nil, // only Admit yields an EnqueueCertificate; an HTTP ack carries none
-		Outcomes:                   outcomes,
-		PoisonDoesNotStall:         poisonDoesNotStall,
-		WatermarkAdvance:           wmResults,
-		RefundReservedRejected:     !refundReserved.Applied,
-		RefundRaceAppliedOnce:      refund1.Applied && !refund2.Applied,
+		Note:                        "Authenticated certified deposits (dedup on certified DepositID); unique credit minted+consumed per admission; a three-state entry lifecycle (pending -> tentatively executed -> certified-consumed+archived) that releases queue capacity; refunds bound to the credit's recorded owner and only for a non-consumed entry, at most once.",
+		DuplicateDepositRejected:    !dupDep.Applied,
+		AdmitWithoutCreditRejected:  rNoCredit.Code == "no_credit",
+		DoubleSpendRejected:         rDup.Code == "credit_already_consumed",
+		HTTPAckIsNotEnqueue:         r1.Admitted && cert1 != nil && rFull.Code == "per_sender_queue_full",
+		Outcomes:                    outcomes,
+		PoisonDoesNotStall:          poisonDoesNotStall,
+		AckReleasesCapacity:         capBeforeAck == 0 && capAfterAck == 2,
+		NoReExecutionAfterAck:       noReExec,
+		WatermarkAdvance:            wmResults,
+		RefundWrongOwnerRejected:    !refundWrongOwner.Applied,
+		RefundConsumedEntryRejected: !refundConsumed.Applied,
+		RefundReservedRejected:      !refundNoCert.Applied,
+		RefundRaceAppliedOnce:       refund1.Applied && !refund2.Applied,
+		AdmitAfterRefundRejected:    admitAfterRefund.Code == "credit_already_reconciled",
+		SponsorPathAdmits:           sponsorAdmit.Admitted && SponsorPathAvailable(),
 	}
 
-	// --- K derivation --------------------------------------------------
+	// --- K derivation (entry-count / fragmentation aware) ----------------
 	for _, k := range []D5KCase{
-		{MaxBacklogGas: 3_000_000, DeclaredGasLimit: 300_000, GFI: 300_000, OriginObservationLag: 2, RootRoundAllowanceBlocks: 3},
-		{MaxBacklogGas: 0, DeclaredGasLimit: 300_000, GFI: 300_000, OriginObservationLag: 1, RootRoundAllowanceBlocks: 0},
+		{Name: "adversarial_indivisible_packing", MaxBacklogEntries: 2, DeclaredGasLimit: 60, GFI: 100, OriginObservationLag: 0, RootRoundAllowanceBlocks: 0,
+			Note: "3 entries of 60 gas, g_fi 100: only one fits per block -> K = ceil((2+1)/1) = 3"},
+		{Name: "half_target_two_per_block", MaxBacklogEntries: 9, DeclaredGasLimit: 150_000, GFI: 300_000, OriginObservationLag: 2, RootRoundAllowanceBlocks: 3,
+			Note: "entriesPerBlock = 2 -> ceil(10/2) = 5, +2 lag +3 allowance = 10"},
+		{Name: "empty_backlog", MaxBacklogEntries: 0, DeclaredGasLimit: 300_000, GFI: 300_000, OriginObservationLag: 1, RootRoundAllowanceBlocks: 0,
+			Note: "just the entry itself -> 1, +1 lag = 2"},
 	} {
-		k.K = InclusionBoundK(k.MaxBacklogGas, k.DeclaredGasLimit, k.GFI, k.OriginObservationLag, k.RootRoundAllowanceBlocks)
+		epb := k.GFI / k.DeclaredGasLimit
+		if epb == 0 {
+			epb = 1
+		}
+		k.EntriesPerBlock = epb
+		k.K = InclusionBoundK(k.MaxBacklogEntries, k.DeclaredGasLimit, k.GFI, k.OriginObservationLag, k.RootRoundAllowanceBlocks)
 		vs.KDerivation = append(vs.KDerivation, k)
 	}
 
