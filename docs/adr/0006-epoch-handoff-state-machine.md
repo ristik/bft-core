@@ -2,9 +2,15 @@
 
 ## Status
 
-Proposed (D4, issue #6). Freeze once reviewed by a Go consensus / protocol
-reviewer other than the author. Depends on ADR 0003 (D1) and ADR 0005 (D3). No
-supersession.
+Proposed (D4, issue #6). Revised after the first review (#80): the endorsement
+signs a `FrozenID` that binds the whole frozen state (not the bare body id); the
+trust-base body records `EpochStart = A_min` and `A*` lives only in the commit
+record (removes the D3-`EpochStart` circularity); `FinalizeCommit` /
+`CommitFinalized` gates activation on the root ordering rule, not a round count;
+a **multi-replica exploration** with a global signer lock replaces the
+4-method-permutation check as the safety evidence. Freeze once re-reviewed by a
+Go consensus / protocol reviewer other than the author. Depends on ADR 0003 (D1)
+and ADR 0005 (D3).
 
 ## Context
 

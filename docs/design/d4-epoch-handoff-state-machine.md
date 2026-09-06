@@ -51,25 +51,63 @@ all 24 orderings of the four core phases, only the canonical order reaches
 The candidate carries `A_min` (earliest activation bound) — **not** a prediction
 of the actual round (`appendix-evm.tex` §"Candidate Record").
 
+### The endorsement binds the whole frozen state (`FrozenID`)
+
+`Freeze` does not store `frozenSummary` / `lastEVMParent` loosely next to the
+body. It computes
+
+```
+FrozenID = SHA-256( CBOR([ "UNICITY_HANDOFF_FROZEN",
+                            bodyIdentity, frozenSummary, lastEVMParent,
+                            candidateHash, attempt, predecessorHash ]) )
+```
+
+and the endorsement signs **`FrozenID`**, not the bare body identity. Two
+handoffs that freeze the *same* body with different frozen summaries or EVM
+parents get **different** `FrozenID`s, so a single endorsement can never be
+counted toward divergent handoff states
+(`TestD4_FreezeBindsFrozenStateIntoEndorsedIdentity`). `Freeze` also rejects a
+body whose `EpochStart != A_min` or whose predecessor ≠ the candidate's, and a
+missing frozen summary / parent.
+
+### The trust-base body records `A_min`, not `A*`
+
+D3's v2 body hashes `EpochStart`. To keep the body identity stable from Freeze,
+`EpochStart == A_min` (known at Freeze). The **actual** boundary `A*` is fixed
+only at Commit and lives **only in the commit record** — it is never in the
+body, so fixing it later cannot change any endorsed identity. This removes the
+circularity the review flagged.
+
 | Signed message | Fields it binds | All known at signing? |
 |---|---|---|
-| endorsement | `network, protocolVersion, predecessorHash, attempt, bodyIdentity, A_min` | yes — `bodyIdentity` is fixed at Freeze; `A_min` comes from the candidate. **No `A*`, no successor TR.** |
-| commit | `… + A*, successorTRHash` | yes — `A*` is fixed **now**, bounded by `A* ≥ commitRound + PipelineDepth` (a known quantity) and `A* ≥ A_min`; the successor TR is constructed now |
+| endorsement | `network, protocolVersion, predecessorHash, attempt, FrozenID, A_min` | yes. **No `A*`, no successor TR.** |
+| commit | `… + A*, successorTRHash` | yes — `A*` is fixed now, `A* ≥ A_min` and `A* ≥ commitRound + PipelineDepth`; the successor TR is constructed now |
 
-`PipelineDepth` is the root-consensus pipeline depth: a commit QC decided at root
-round `r` is final at `r + PipelineDepth`. Requiring `A* ≥ commitRound +
-PipelineDepth` guarantees the commit is final before `A*` is reached, so
-activation never races an unfinalised commit. `FieldsAreKnown` enforces that the
-endorsement domain has `A* == 0` and `successorTRHash == nil`; a non-zero value
-there is `errFutureState`.
+### Finality is the root rule, not a round count
 
-The **activation condition and state summary are determined by the root
-handoff**, not by an agent's local clock or an unknown future EVM state
-(`governance.tex` §"root handoff" step 3). `Activate` requires
-`Phase == Committed` **and** `observedRootRound ≥ A*` where `A*` came from the
-committed record. From any pre-Commit phase, `Activate` returns `errNoCommit` —
-"a locally submitted trust base cannot activate merely because a round counter
-reaches its proposed start" (step 4).
+`PipelineDepth` is only the minimum gap `A*` must leave after the commit round so
+`A*` is not scheduled inside the reorg window. It does **not** establish
+finality. Finality of the commit is the root's own QC/ancestry rule, modelled by
+`FinalizeCommit()` / `CommitFinalized` (a descendant commit exists, or an
+authenticated ancestry path to a committed root block covers it). **`Activate`
+requires `CommitFinalized` and `observedRootRound ≥ A*`** — a round counter
+reaching `A*` on its own is `errCommitNotFinal`
+(`TestD4_ActivationRequiresFinalizedCommit`). From any pre-Commit phase,
+`Activate` returns `errNoCommit`.
+
+### First successor proposal, old-quorum proof, timeout gaps
+
+- The **first governance proposal under the new assignment** is produced by the
+  leader named in the committed **successor technical record**
+  (`FirstSuccessorProposalLeader` → `SuccessorTRHash`).
+- Its **authorisation witness** is the commit record: an old-quorum QC over
+  `CommitDomainFor` (`FrozenID`, `A*`, `successorTRHash`, predecessor, attempt).
+  The new set does not need the old set online — it carries the proof.
+- **Timeout gaps**: if no block is certified at exactly `A*`, the certified root
+  round clock (D1) crosses `A*` and the **first certified round `≥ A*` under the
+  new assignment** is the activation. A repeat/timeout certificate between the
+  commit and `A*` installs nobody (`Authorized` still returns `old` for rounds
+  `< A*`, `new` for `≥ A*`, on a committed+finalised replica only).
 
 ## 3. Authorisation function (the safety core)
 
@@ -101,10 +139,33 @@ probe rounds:
 | `single_successor` | an aborted handoff carries no successor technical record |
 | `no_overlap_no_gap` | `Authorized(r)` matches the §3 table for every probe round `r` |
 | `no_future_signature` | once set, the endorsement domain binds no post-commit field |
-| `activation_final_under_pipelining` | `A* ≥ commitRound + PipelineDepth` |
+| `activation_gap` | `A* ≥ commitRound + PipelineDepth` (reorg-window gap, not finality) |
+| `activation_requires_final_commit` | `Activated`/`Acknowledged` implies `CommitFinalized` |
 
-Scenarios (all in `d4-vectors.json`, `phase_ok` and `invariants_ok` true for
-each):
+### Multi-replica exploration (`multi_replica_exploration`)
+
+The single-`Handoff` scenarios exercise **one** replica's phase API. The
+multi-replica model (`d4multireplica.go`) runs several replicas that receive the
+handoff records (`prepare` / `freeze` / `endorse` / `commit` / `abort` /
+`finalize`) in **different per-replica orders** and lose some, with a **global
+signer lock** (a signer bound to `FrozenID` X cannot be counted for `FrozenID`
+Y), and checks properties that only exist across replicas:
+
+| Global property | Statement | Result |
+|---|---|---|
+| G1 | no signer's weight is counted toward two `FrozenID`s (quorum intersection) | holds; equivocation attempts are **blocked** (`equivocation_attempts_blocked`) |
+| G2 | at most one `FrozenID` is ever committed; an aborted attempt's `FrozenID` never commits | holds |
+| G3 | across the replica population, no round is authorised by both sets; committed replicas agree on one `A*` | holds |
+| G4 | no replica reaches `Activated`/`Acknowledged` without a finalised commit | holds |
+| G5 | (conditional) all records to all replicas, no loss, no abort ⇒ every replica reaches `acknowledged` | `reached` for `all_delivered_reordered`; `held-safe` otherwise |
+
+Runs: `all_delivered_reordered` (3 replicas, 3 orders, all acknowledge),
+`commit_not_delivered_to_one` (C stalls at `endorsed`, keeps old set,
+never activates), `equivocating_endorsement_rejected` (a second `FrozenID`
+reusing signer `r1` is blocked, cannot gather weight or commit),
+`aborted_attempt_never_commits`.
+
+### Scenarios (all in `d4-vectors.json`, `phase_ok` and `invariants_ok` true for each):
 
 | Scenario | What it exercises | Terminal phase |
 |---|---|---|
@@ -152,12 +213,13 @@ preserved, recovery not claimed.
 
 | D4 acceptance clause | Evidence |
 |---|---|
-| model exploration shows two effective successors / old+new authorisation of the same extension cannot occur | §3; `no_overlap_no_gap` + `single_successor` invariants across all scenarios; `phase_order_interleavings.no_early_new_authorization` |
-| delayed signatures, asymmetric delivery, missed earliest activation, crash at every phase, old quorum loss, committed abort vs late activate | the scenario table §4 (all present) |
+| model exploration (not a phase-API test) shows two effective successors / old+new authorisation of the same extension cannot occur, across competing replicas with signer locks / quorum intersection / attempts / delayed commit vs abort | §4 multi-replica model — G1 (signer lock), G2 (single `FrozenID` commits), G3 (no cross-replica overlap, one `A*`); runs `all_delivered_reordered`, `commit_not_delivered_to_one`, `equivocating_endorsement_rejected`, `aborted_attempt_never_commits`; `TestD4_MultiReplicaGlobalInvariants` |
+| delayed signatures, asymmetric delivery, missed earliest activation, crash at every phase, old quorum loss, committed abort vs late activate | scenario table §4; asymmetric/commit-loss also in the multi-replica runs |
+| freeze authenticates the state it endorses — one endorsement cannot authorise divergent handoff states | §2 `FrozenID` (binds body + frozen summary + parent + candidate + attempt); `TestD4_FreezeBindsFrozenStateIntoEndorsedIdentity` |
+| pipeline/activation is not circular; who produces the first successor proposal and which old-quorum proof authorises it; behaviour under timeout gaps; `EpochStart` reconciled with D3 | §2 "The trust-base body records `A_min`, not `A*`" + "First successor proposal…" + "Finality is the root rule"; `FinalizeCommit`/`CommitFinalized` gate; `TestD4_ActivationRequiresFinalizedCommit` |
 | an incomplete prepare cannot activate through local REST insertion or clock passage | `incomplete_prepare_then_clock`, `incomplete_prepare_then_rest_insertion`; `TestD4_NoActivationWithoutCommit` |
-| under declared assumptions the model completes a handoff; outside them it preserves safety without claiming recovery | §4 last paragraph |
-| no signature depends on unknown future state | §2; `FieldsAreKnown`; `TestD4_EndorsementBindsNoFutureState` |
-| root pipelining | `PipelineDepth`; `A* ≥ commitRound + PipelineDepth`; `TestD4_ActivationRoundMustBeFinalUnderPipelining` |
+| under declared assumptions the model completes a handoff; outside them it preserves safety without claiming recovery | §4 G5 (`reached` vs `held-safe`); scenario `old_quorum_loss_after_prepare` |
+| no signature depends on unknown future state | §2; `FieldsAreKnown` (endorsement binds `FrozenID`, not `A*`); `TestD4_EndorsementBindsNoFutureState` |
 
 ## 7. Reproduce
 

@@ -10,10 +10,11 @@ import (
 // new assignment is never authorised before commit.
 
 type D4VectorSet struct {
-	PipelineDepth uint64            `json:"pipeline_depth"`
-	Scenarios     []ScenarioResult  `json:"scenarios"`
-	Interleavings D4InterleaveCheck `json:"phase_order_interleavings"`
-	Summary       D4Summary         `json:"summary"`
+	PipelineDepth uint64               `json:"pipeline_depth"`
+	Scenarios     []ScenarioResult     `json:"scenarios"`
+	Interleavings D4InterleaveCheck    `json:"phase_order_interleavings"`
+	MultiReplica  []MultiReplicaResult `json:"multi_replica_exploration"`
+	Summary       D4Summary            `json:"summary"`
 }
 
 type D4InterleaveCheck struct {
@@ -30,6 +31,8 @@ type D4Summary struct {
 	Scenarios            int  `json:"scenarios"`
 	AllPhaseExpectations bool `json:"all_phase_expectations_met"`
 	AllInvariantsHeld    bool `json:"all_invariants_held"`
+	MultiReplicaRuns     int  `json:"multi_replica_runs"`
+	AllGlobalInvariants  bool `json:"all_global_invariants_held"`
 }
 
 func BuildD4Vectors() D4VectorSet {
@@ -41,7 +44,16 @@ func BuildD4Vectors() D4VectorSet {
 		allPhase = allPhase && s.PhaseOK
 		allInv = allInv && s.InvariantsOK
 	}
-	vs.Summary = D4Summary{Scenarios: len(vs.Scenarios), AllPhaseExpectations: allPhase, AllInvariantsHeld: allInv}
+	vs.MultiReplica = D4MultiReplicaRuns()
+	allGlobal := true
+	for _, m := range vs.MultiReplica {
+		allGlobal = allGlobal && m.G1NoEquivocation && m.G2SingleSuccessor && m.G3NoOverlap && m.G4FinalCommit
+	}
+
+	vs.Summary = D4Summary{
+		Scenarios: len(vs.Scenarios), AllPhaseExpectations: allPhase, AllInvariantsHeld: allInv,
+		MultiReplicaRuns: len(vs.MultiReplica), AllGlobalInvariants: allGlobal,
+	}
 
 	// --- exhaustive 4-phase interleaving ---------------------------------
 	oldThreshold := RootQuorumThreshold(func() uint64 { w, _ := d3Assignment().TotalWeight(); return w }())

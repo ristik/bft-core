@@ -21,6 +21,9 @@
           "step": "commit"
         },
         {
+          "step": "finalize_commit"
+        },
+        {
           "step": "activate_at_boundary"
         },
         {
@@ -65,6 +68,9 @@
         },
         {
           "step": "commit_A_star_ge_observed"
+        },
+        {
+          "step": "finalize_commit"
         },
         {
           "step": "activate_at_A_star"
@@ -126,7 +132,7 @@
       "note": "Resume from the durable phase; the next phase cannot be skipped.",
       "steps": [
         {
-          "step": "resume_and_activate"
+          "step": "resume_finalize_and_activate"
         }
       ],
       "final_phase": "activated",
@@ -258,9 +264,160 @@
     "only_canonical_commits": true,
     "no_early_new_authorization": true
   },
+  "multi_replica_exploration": [
+    {
+      "name": "all_delivered_reordered",
+      "note": "Three replicas receive every handoff record; different per-replica orders; all reach acknowledged, one A*, no equivocation.",
+      "replicas": [
+        "A",
+        "B",
+        "C"
+      ],
+      "delivery_order": [
+        "A\u003c-0",
+        "A\u003c-1",
+        "A\u003c-2",
+        "A\u003c-3",
+        "A\u003c-4",
+        "A\u003c-5",
+        "B\u003c-0",
+        "B\u003c-1",
+        "B\u003c-3",
+        "B\u003c-2",
+        "B\u003c-4",
+        "B\u003c-5",
+        "C\u003c-0",
+        "C\u003c-1",
+        "C\u003c-3",
+        "C\u003c-4",
+        "C\u003c-2",
+        "C\u003c-5"
+      ],
+      "final_phases": {
+        "A": "acknowledged",
+        "B": "acknowledged",
+        "C": "acknowledged"
+      },
+      "committed_frozen_ids": [
+        "6fc914d62e42eb35"
+      ],
+      "violations": null,
+      "g1_no_equivocation": true,
+      "equivocation_attempts_blocked": 0,
+      "g2_single_successor": true,
+      "g3_no_overlap_across_replicas": true,
+      "g4_no_activation_without_final_commit": true,
+      "g5_liveness": "reached"
+    },
+    {
+      "name": "commit_not_delivered_to_one",
+      "note": "Replica C is missing the commit and finalize records: it holds at endorsed, keeps the old set authoritative for every round, and never activates. A and B proceed.",
+      "replicas": [
+        "A",
+        "B",
+        "C"
+      ],
+      "delivery_order": [
+        "A\u003c-0",
+        "A\u003c-1",
+        "A\u003c-2",
+        "A\u003c-3",
+        "A\u003c-4",
+        "A\u003c-5",
+        "B\u003c-0",
+        "B\u003c-1",
+        "B\u003c-2",
+        "B\u003c-3",
+        "B\u003c-4",
+        "B\u003c-5",
+        "C\u003c-0",
+        "C\u003c-1",
+        "C\u003c-2",
+        "C\u003c-3"
+      ],
+      "final_phases": {
+        "A": "acknowledged",
+        "B": "acknowledged",
+        "C": "endorsed"
+      },
+      "committed_frozen_ids": [
+        "6fc914d62e42eb35"
+      ],
+      "violations": null,
+      "g1_no_equivocation": true,
+      "equivocation_attempts_blocked": 0,
+      "g2_single_successor": true,
+      "g3_no_overlap_across_replicas": true,
+      "g4_no_activation_without_final_commit": true,
+      "g5_liveness": "n/a"
+    },
+    {
+      "name": "equivocating_endorsement_rejected",
+      "note": "A second FrozenID reuses endorsement signer r1; the global lock rejects it, so it can never gather weight or be committed.",
+      "replicas": [
+        "A",
+        "B"
+      ],
+      "delivery_order": [
+        "A\u003c-0",
+        "A\u003c-1",
+        "A\u003c-2",
+        "A\u003c-3",
+        "A\u003c-4",
+        "A\u003c-5",
+        "B\u003c-0",
+        "B\u003c-6",
+        "B\u003c-7"
+      ],
+      "final_phases": {
+        "A": "acknowledged",
+        "B": "frozen"
+      },
+      "committed_frozen_ids": [
+        "6fc914d62e42eb35"
+      ],
+      "violations": null,
+      "g1_no_equivocation": true,
+      "equivocation_attempts_blocked": 1,
+      "g2_single_successor": true,
+      "g3_no_overlap_across_replicas": true,
+      "g4_no_activation_without_final_commit": true,
+      "g5_liveness": "n/a"
+    },
+    {
+      "name": "aborted_attempt_never_commits",
+      "note": "An attempt is aborted before commit; its FrozenID can never reach a commit on any replica.",
+      "replicas": [
+        "A",
+        "B"
+      ],
+      "delivery_order": [
+        "A\u003c-0",
+        "A\u003c-1",
+        "A\u003c-2",
+        "B\u003c-0",
+        "B\u003c-1",
+        "B\u003c-2"
+      ],
+      "final_phases": {
+        "A": "aborted",
+        "B": "aborted"
+      },
+      "committed_frozen_ids": null,
+      "violations": null,
+      "g1_no_equivocation": true,
+      "equivocation_attempts_blocked": 0,
+      "g2_single_successor": true,
+      "g3_no_overlap_across_replicas": true,
+      "g4_no_activation_without_final_commit": true,
+      "g5_liveness": "n/a"
+    }
+  ],
   "summary": {
     "scenarios": 12,
     "all_phase_expectations_met": true,
-    "all_invariants_held": true
+    "all_invariants_held": true,
+    "multi_replica_runs": 4,
+    "all_global_invariants_held": true
   }
 }

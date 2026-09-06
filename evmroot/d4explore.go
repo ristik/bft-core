@@ -56,12 +56,18 @@ func checkInvariants(h *Handoff, rounds []uint64) []InvariantViolation {
 		}
 	}
 
-	// INV4: A* is final under pipelining.
+	// INV4: A* leaves the reorg-window gap after the commit round.
 	if h.Phase >= PhaseCommitted && h.Phase != PhaseAborted {
 		if h.ActivationRound < h.CommitRound+PipelineDepth {
-			v = append(v, InvariantViolation{"activation_final_under_pipelining",
+			v = append(v, InvariantViolation{"activation_gap",
 				fmt.Sprintf("A*=%d < commit %d + pipeline %d", h.ActivationRound, h.CommitRound, PipelineDepth)})
 		}
+	}
+
+	// INV5: activation implies the commit is final under the root ordering
+	// rule — not merely that a round counter elapsed.
+	if (h.Phase == PhaseActivated || h.Phase == PhaseAcknowledged) && !h.CommitFinalized {
+		v = append(v, InvariantViolation{"activation_requires_final_commit", "activated without CommitFinalized"})
 	}
 	return v
 }
@@ -116,12 +122,14 @@ func runScenario(name, note, wantPhase string, start *Handoff, steps []Step) Sce
 func freshHandoff() *Handoff {
 	c := Candidate{
 		Network: 3, NextEpoch: 8, Attempt: 0,
-		PredecessorHash: rep(0xE7, 32), MinActivation: 10, MembersHash: rep(0xAA, 32),
+		PredecessorHash: rep(0xE7, 32), MinActivation: 10, CandidateHash: rep(0xCA, 32),
 	}
 	return NewHandoff(c, 1)
 }
 
-func body(h *Handoff) TrustBaseBodyV2 { return sampleHandoffBody(h.Candidate.PredecessorHash) }
+func body(h *Handoff) TrustBaseBodyV2 {
+	return sampleHandoffBody(h.Candidate.PredecessorHash, h.Candidate.MinActivation)
+}
 
 // D4Scenarios builds the full scenario set.
 func D4Scenarios() []ScenarioResult {
@@ -144,6 +152,7 @@ func D4Scenarios() []ScenarioResult {
 			}},
 			{"endorse_at_threshold", func(h *Handoff) error { return h.Endorse(oldThreshold, oldThreshold) }},
 			{"commit", func(h *Handoff) error { return h.Commit(6, 10, rep(0x33, 32)) }},
+			{"finalize_commit", func(h *Handoff) error { return h.FinalizeCommit() }},
 			{"activate_at_boundary", func(h *Handoff) error { return h.Activate(10) }},
 			{"acknowledge", func(h *Handoff) error { return h.Acknowledge(41) }},
 		}))
@@ -183,6 +192,7 @@ func D4Scenarios() []ScenarioResult {
 			}},
 			{"endorse", func(h *Handoff) error { return h.Endorse(oldThreshold, oldThreshold) }},
 			{"commit_A_star_ge_observed", func(h *Handoff) error { return h.Commit(50, 60, rep(0x33, 32)) }},
+			{"finalize_commit", func(h *Handoff) error { return h.FinalizeCommit() }},
 			{"activate_at_A_star", func(h *Handoff) error { return h.Activate(60) }},
 			{"acknowledge", func(h *Handoff) error { return h.Acknowledge(200) }},
 		}))
@@ -231,7 +241,12 @@ func D4Scenarios() []ScenarioResult {
 			_ = h.Endorse(oldThreshold, oldThreshold)
 			_ = h.Commit(6, 10, rep(0x33, 32))
 			return h
-		}, Step{"resume_and_activate", func(h *Handoff) error { return h.Activate(10) }}},
+		}, Step{"resume_finalize_and_activate", func(h *Handoff) error {
+			if err := h.FinalizeCommit(); err != nil {
+				return err
+			}
+			return h.Activate(10)
+		}}},
 	} {
 		want := cp.build().Phase.String()
 		if cp.name == "crash_at_committed" {

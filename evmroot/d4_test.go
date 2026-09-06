@@ -38,6 +38,83 @@ func TestD4_NoActivationWithoutCommit(t *testing.T) {
 	}
 }
 
+func TestD4_FreezeBindsFrozenStateIntoEndorsedIdentity(t *testing.T) {
+	// Two handoffs freeze the SAME body but with different frozen summaries
+	// / EVM parents. Their endorsement domains must differ, so one
+	// endorsement cannot authorise divergent handoff states.
+	a := freshHandoff()
+	_ = a.Prepare()
+	if err := a.Freeze(rep(0x11, 32), rep(0x22, 32), body(a)); err != nil {
+		t.Fatal(err)
+	}
+	b := freshHandoff()
+	_ = b.Prepare()
+	if err := b.Freeze(rep(0x99, 32), rep(0x22, 32), body(b)); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(a.FrozenID, b.FrozenID) {
+		t.Fatal("different frozen summaries produced the same FrozenID")
+	}
+	if bytes.Equal(a.EndorsementDomainFor().FrozenID, b.EndorsementDomainFor().FrozenID) {
+		t.Fatal("different frozen state produced the same endorsement identity")
+	}
+	// Freeze rejects a body whose EpochStart is not the candidate A_min
+	// (A* is not known until commit) and a body with the wrong predecessor.
+	c := freshHandoff()
+	_ = c.Prepare()
+	badBody := body(c)
+	badBody.EpochStart = 999 // not A_min
+	if err := c.Freeze(rep(1, 32), rep(2, 32), badBody); err == nil {
+		t.Fatal("Freeze accepted a body with EpochStart != A_min")
+	}
+}
+
+func TestD4_ActivationRequiresFinalizedCommit(t *testing.T) {
+	oldT := RootQuorumThreshold(func() uint64 { w, _ := d3Assignment().TotalWeight(); return w }())
+	h := freshHandoff()
+	_ = h.Prepare()
+	_ = h.Freeze(rep(1, 32), rep(2, 32), body(h))
+	_ = h.Endorse(oldT, oldT)
+	_ = h.Commit(6, 10, rep(3, 32))
+	// A* reached but commit not final under the root rule.
+	if err := h.Activate(10); err != errCommitNotFinal {
+		t.Fatalf("activated on round count alone: %v", err)
+	}
+	if err := h.FinalizeCommit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Activate(10); err != nil {
+		t.Fatalf("activation rejected after finalize: %v", err)
+	}
+}
+
+func TestD4_MultiReplicaGlobalInvariants(t *testing.T) {
+	for _, m := range D4MultiReplicaRuns() {
+		if !m.G1NoEquivocation {
+			t.Errorf("%s: a signer's weight was counted toward two FrozenIDs", m.Name)
+		}
+		if !m.G2SingleSuccessor {
+			t.Errorf("%s: more than one FrozenID committed", m.Name)
+		}
+		if !m.G3NoOverlap {
+			t.Errorf("%s: G3 (no old/new overlap across replicas) broken: %+v", m.Name, m.Violations)
+		}
+		if !m.G4FinalCommit {
+			t.Errorf("%s: a replica activated without a finalised commit", m.Name)
+		}
+	}
+	runs := D4MultiReplicaRuns()
+	// The equivocation run must record exactly one blocked attempt.
+	for _, m := range runs {
+		if m.Name == "equivocating_endorsement_rejected" && m.EquivBlocked != 1 {
+			t.Fatalf("equivocation run blocked %d attempts, want 1", m.EquivBlocked)
+		}
+		if m.Name == "all_delivered_reordered" && m.G5Liveness != "reached" {
+			t.Fatalf("all-delivered run did not reach liveness: %s", m.G5Liveness)
+		}
+	}
+}
+
 func TestD4_EndorsementBindsNoFutureState(t *testing.T) {
 	h := freshHandoff()
 	_ = h.Prepare()
