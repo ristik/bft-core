@@ -309,12 +309,23 @@ func (ri RootInput) Validate() error {
 	if err := ri.Origin.Validate(); err != nil {
 		return err
 	}
-	genesis := ri.Origin.IR.Round == 0
-	if genesis && len(ri.ParentHash) != 0 {
-		return fmt.Errorf("evmroot: genesis rootInput must have a null parent hash")
-	}
-	if !genesis && len(ri.ParentHash) != 32 {
-		return fmt.Errorf("evmroot: non-genesis parent hash must be 32 bytes, got %d", len(ri.ParentHash))
+	// The parent-hash rule keys on the AUTHORIZED shard round (ri.Round),
+	// not the certified IR round. Genesis *installation* — the certificate
+	// for shard round 0, before any certification request — has no parent
+	// block, so ParentHash is null. Every certificate that authorizes an
+	// executable payload authorizes round >= 1 and carries a real 32-byte
+	// parent hash — including the FIRST post-genesis payload, which builds
+	// on the pinned EVM genesis header even though its certified IR round is
+	// still 0 (nothing has been certified after round 0 yet).
+	switch {
+	case ri.Round == 0:
+		if len(ri.ParentHash) != 0 {
+			return fmt.Errorf("evmroot: genesis-installation rootInput (authorized round 0) must have a null parent hash")
+		}
+	default:
+		if len(ri.ParentHash) != 32 {
+			return fmt.Errorf("evmroot: rootInput authorizing round %d must carry a 32-byte parent hash, got %d", ri.Round, len(ri.ParentHash))
+		}
 	}
 	for i, d := range ri.Transitions {
 		if len(d) == 0 {

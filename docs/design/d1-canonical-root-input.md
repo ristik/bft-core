@@ -64,7 +64,7 @@ header commits:
 | authorized shard round | n | `TechnicalRecord.Round` | uint |
 | certified epoch | e_cert | `O_-.IR.Epoch` (the outgoing epoch the previous IR belongs to) | uint |
 | authorized epoch | e_auth | `TechnicalRecord.Epoch` (the epoch the authorized round runs under) | uint |
-| last certified EVM parent hash | h_parent | previous certified block's `h_b` (Ethereum) | bytes(32) or null at genesis |
+| last certified EVM parent hash | h_parent | previous certified block's `h_b` (Ethereum); the pinned genesis block hash for the first post-genesis payload | bytes(32); null **only** for genesis installation (authorized round 0) |
 | root origin | O_- | §2 above | array |
 | technical record | TE_- | `TechnicalRecord` `(Round,Epoch,Leader,StatHash,FeeHash)` | array |
 | pending transitions | D | ordered committed trust-base bodies + handoff acks the EVM is still missing | array of bytes |
@@ -103,7 +103,7 @@ tags, no floats, no negative integers, no indefinite lengths. Adding any of thes
 is a version bump.
 
 `null` vs empty byte string is meaningful: `IR.h_b` is `null` **iff** the round
-is quiet (`IR.h == IR.h'`); `h_parent` is `null` **iff** genesis. A present digest
+is quiet (`IR.h == IR.h'`); `h_parent` is `null` **iff** the authorized shard round is 0 (genesis installation) — the first post-genesis payload authorizes round 1 and carries the real pinned genesis block hash. A present digest
 is always exactly 32 bytes. `h'` and `h` are never `null` — at genesis they carry
 the pinned genesis commitment.
 
@@ -188,10 +188,18 @@ same block. The rule is instead:
 3. A **later valid repeat** (same `IR`, higher `r`) that the proposer did *not*
    bind is simply unused for this block; two honest nodes still agree because they
    both validate the one bound certificate. If a follower has *already applied*
-   that repeat (cursor moved past the bound cert's `r`), it rejects the block and
-   the round is re-proposed against a current certificate — deterministic given
-   committed state.
-4. Before accepting a certificate for verification, `CheckNonEquivocatingCertificates`
+   that repeat — the **seal-registry root-round cursor** (`r` recorded in state)
+   moved past the bound cert's `r` — it rejects the block, and the round is
+   re-proposed against a current certificate. Deterministic given committed
+   state. (This is the one cursor a repeat moves; it does **not** move the
+   transition or reward cursors — §6.)
+4. The **parent** the block builds on and that validation checks continuity
+   against is `O_-.IR.Hash` (the last **certified** state, from the bound
+   certificate) — never a node's later local execution head. `RoundParams.Parent`
+   in the framework is populated from the certificate, and `reconcile`
+   (`shardnode/round.go`) exists precisely to bring a diverged local head back to
+   the certified parent before building.
+5. Before accepting a certificate for verification, `CheckNonEquivocatingCertificates`
    (Yellowpaper "Algorithm 6") still applies; an equivocating pair is fatal.
 
 Vectors: `certificate_selection` covers `node_a`/`node_b` reaching the identical
@@ -215,7 +223,8 @@ selection.
 
 | Kind | `IR` shape | Block committed? | Cursors advanced | `rootInput` built? |
 |---|---|---|---|---|
-| **genesis** | `n=0`; `h'`,`h` = pinned genesis commitment; `h_b` = null | the genesis block (pinned) | origin + assignment installed; transition/reward cursors empty | yes — first ordinary block uses the same format |
+| **genesis installation** | authorized round `n = 0`; certified `IR.Round = 0`; `IR.h'`,`IR.h` = pinned genesis commitment; `IR.h_b` = null; **`h_parent` = null** (no block yet) | the pinned genesis block is installed, not executed | origin + assignment installed; transition/reward cursors empty | yes — but it installs, it does not execute a payload |
+| **first post-genesis payload** | authorized round `n = 1`; certified `IR.Round` still `0` (nothing certified after round 0); **`h_parent` = the real 32-byte pinned EVM genesis block hash** | yes — the first executed block | root origin (new seal) | yes — committed in `extraData`; the header parent equals `h_parent` (D2 checks this exactly) |
 | **successful** | `h ≠ h'`; `h_b` present (32 bytes) | yes | root origin + transition cursor (if `D` non-empty) + reward cursor, **each once** | yes — committed in `extraData` |
 | **quiet** | `h = h'` ⇔ `h_b = null` | no block executed this shard round | root origin only (new seal); **not** transition/reward | yes — but no block carries it |
 | **repeat** | `IR` byte-identical to previous; strictly greater `r` | no | **none** — no second reward claim for an already-imported interval | no new commitment; the earlier block's `extraData` stands |
@@ -272,11 +281,12 @@ Notes:
 
 | D1 acceptance clause | Evidence |
 |---|---|
-| independent vectors cover alternate valid signature subsets and encodings | real `types.UnicitySeal` fixtures signed by two different `>2/3` secp256k1 subsets; `TestRootOrigin_TwoValidSignatureSubsetsAgree` — `RootOriginFromCertificate` byte-identical for both |
-| … same commitment on all validators | `RootOriginFromCertificate` reads only committed content (no `Signatures`, no tree paths); structural check + the fixture test above |
-| … a different authenticated statement | `TestRootOrigin_DifferentAuthenticatedStatementDiffers` (a byte of `IR.Hash` changed on a signed fixture) |
+| independent vectors cover alternate valid signature subsets and encodings | two **independently quorum-verified** 4-of-5 secp256k1 subsets against a real `types.RootTrustBaseV1` (threshold 4); `TestRootOrigin_TwoValidSignatureSubsetsAgree` also asserts a 3-of-5 subset **fails** `seal.Verify(tb)`; `RootOriginFromCertificate` byte-identical for both quorum subsets |
+| … same commitment on all validators | `RootOriginFromCertificate` reads only committed content (no `Signatures`, no tree paths). The `O_-` projection is the signature-free view; full UC authentication (shard-tree / unicity-tree paths + `seal.Verify`) is a separate step the consumer performs — the two are not conflated |
+| … a different authenticated statement | `TestRootOrigin_DifferentAuthenticatedStatementDiffers` — the IR is mutated **and re-certified** (new seal recommitted over the mutated IR, re-signed to quorum, `seal.Verify(tb)` passes) before comparing identities |
 | … an independent derivation of the expected canonical bytes | `TestRootOrigin_IndependentCBOROracle`, `TestExtraData_IndependentOracle` — hand-rolled `evmroot/cbor.go` cross-checked against bft-go-base's fxamacker `CoreDetEnc` for the same logical arrays |
-| … genesis null/state-root rules and malformed widths | `TestRootInput_RejectsMalformedWidths`; `RootOrigin.Validate` / `RootInput.Validate`; `root_inputs.genesis` (null `h_b`, null `h_parent`, pinned 32-byte `h'`/`h`) |
+| genesis installation distinct from the first post-genesis payload | §6 round-type table; `RootInput.Validate` keys the parent-null rule on the **authorized round** (`ri.Round`), not `Origin.IR.Round`; vectors `root_inputs.genesis_installation` (round 0, null parent) and `root_inputs.first_post_genesis_payload` (round 1, `Origin.IR.Round` still 0, real 32-byte pinned genesis parent); `TestRootInput_RejectsMalformedWidths` |
+| … malformed widths | `RootOrigin.Validate` / `RootInput.Validate` reject non-32-byte digests; `TestRootInput_RejectsMalformedWidths` |
 | … genesis, retries, root rounds skipped by the EVM | `root_origins`/`root_inputs` genesis + repeat + `root_rounds_skipped`; round-type table §6 |
 | a certified outgoing-IR / new-TR fixture imports the successor assignment, keeps the actual last certified parent | `root_inputs.epoch_handoff_boundary` (`e_cert=1`, `e_auth=2`, `h_parent` unchanged); `epoch_boundary` group; `TestRootInput_EpochBoundaryNotEqualityImposed` |
 | A root-round 98-to-107 observation triggers a threshold at 100 exactly once | `certified_round_clock`; `TestCertifiedRoundClock_FiresOnceAcrossSkippedRounds` |

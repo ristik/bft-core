@@ -1,9 +1,15 @@
 package evmroot
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 )
+
+func sha256Slice(b []byte) []byte {
+	h := sha256.Sum256(b)
+	return h[:]
+}
 
 // This file builds the D1 independent vector set. The same builder feeds
 // both the golden-file test (vectors_test.go) and the standalone
@@ -248,17 +254,16 @@ func BuildVectors() VectorSet {
 
 	// --- full root inputs -------------------------------------------------
 	// mkRI derives both epochs from the origin's certified IR and the
-	// technical record, and validates the assembled input.
+	// technical record, and validates every assembled input (genesis
+	// included).
 	mkRI := func(o RootOrigin, te TechnicalRecord, parent []byte, d [][]byte) RootInput {
 		ri := RootInput{
 			Version: ProfileVersion, NetworkID: 3, PartitionID: 0x45564d00, ShardID: []byte{},
 			Round: te.Round, CertifiedEpoch: o.IR.Epoch, AuthorizedEpoch: te.Epoch,
 			ParentHash: parent, Origin: o, TE: te, Transitions: d,
 		}
-		if o.IR.Round != 0 {
-			if err := ri.Validate(); err != nil {
-				panic("evmroot: vector rootInput invalid: " + err.Error())
-			}
+		if err := ri.Validate(); err != nil {
+			panic("evmroot: vector rootInput invalid: " + err.Error())
 		}
 		return ri
 	}
@@ -269,9 +274,21 @@ func BuildVectors() VectorSet {
 	handoffOrigin.IR.Round = 58
 	handoffOrigin.IR.Epoch = 1
 	handoffTE := TechnicalRecord{Round: 58, Epoch: 2, Leader: "evm-node-3", StatHash: rep(0x66, 32), FeeHash: rep(0x77, 32)}
-	genesisTE := TechnicalRecord{Round: 0, Epoch: 1, Leader: "evm-node-1", StatHash: rep(0x66, 32), FeeHash: rep(0x77, 32)}
 
-	genesisRI := mkRI(genesis, genesisTE, nil, nil)
+	// Genesis INSTALLATION: authorized round 0, certified IR round 0, null
+	// parent (no block yet), pinned commitment state roots, null IR block
+	// hash. This installs the origin; it does not execute a payload.
+	genesisInstallTE := TechnicalRecord{Round: 0, Epoch: 1, Leader: "evm-node-1", StatHash: rep(0x66, 32), FeeHash: rep(0x77, 32)}
+	genesisInstallRI := mkRI(genesis, genesisInstallTE, nil, nil)
+
+	// FIRST POST-GENESIS PAYLOAD: authorized round 1, but the certified IR
+	// is still the genesis IR (round 0) because nothing has been certified
+	// after round 0. h_parent is the REAL 32-byte pinned EVM genesis block
+	// hash — nulling it here would break D2's header-parent equality check.
+	firstPayloadTE := TechnicalRecord{Round: 1, Epoch: 1, Leader: "evm-node-1", StatHash: rep(0x66, 32), FeeHash: rep(0x77, 32)}
+	pinnedGenesisBlockHash := sha256Slice([]byte("PINNED_EVM_GENESIS_BLOCK_HASH"))
+	firstPayloadRI := mkRI(genesis, firstPayloadTE, pinnedGenesisBlockHash, nil)
+
 	successRI := mkRI(successful, sampleTE(), rep(0xEE, 32), nil)
 	skipRI := mkRI(func() RootOrigin { o := sampleOrigin(); o.RootRound = 140; return o }(), sampleTE(), rep(0x33, 32), nil)
 	transRI := mkRI(successful, sampleTE(), rep(0xEE, 32), [][]byte{rep(0xB0, 48), rep(0xB1, 24)})
@@ -281,7 +298,8 @@ func BuildVectors() VectorSet {
 		kind RoundKind
 		ri   RootInput
 	}{
-		{"genesis", RoundGenesis, genesisRI},
+		{"genesis_installation", RoundGenesis, genesisInstallRI},
+		{"first_post_genesis_payload", RoundGenesis, firstPayloadRI},
 		{"successful_normal_epoch", RoundSuccessful, successRI},
 		{"root_rounds_skipped", RoundSuccessful, skipRI},
 		{"with_pending_transitions", RoundSuccessful, transRI},
