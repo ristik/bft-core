@@ -33,7 +33,8 @@ and what "done" means. Where the two disagree, `docs/pos/PROCESS.md` wins.
 - **Stacked PRs.** When a ticket depends on another that is still in review, base your
   branch on the dependency's branch and set the PR base to that branch (not
   `integration/enshrined-evm`). State the dependency explicitly in the PR description
-  (`Depends on #<n>`). GitHub retargets the child PR automatically when the parent merges.
+  (`Depends on #<n>`). After a parent merges, verify and, where needed, retarget the child PR to the integration
+  branch. Keep parent branches until the remaining stack is safely retargeted.
 - **Never fold an unrelated change into a ticket commit.** No drive-by formatting, no
   unrelated dependency bumps.
 - **Split before coding** if the ticket crosses reviewable ownership boundaries: open
@@ -81,8 +82,7 @@ separate explicit authorization and are never performed by merging a PR or closi
 
 ## 5. Repository enforcement
 
-The branch protection, required status checks and reviewer rules this workflow assumes are
-**proposed, not yet configured** — see
-[`docs/pos/repo-protection-proposal.md`](docs/pos/repo-protection-proposal.md). Until a
-maintainer applies them, contributors self-enforce the rules above. `F1` owns turning the
-required-check list into enforced, PR-triggered CI.
+Branch protection remains **off**, by the owner's decision on 2026-09-06. Trusted
+contributors follow the review and validation workflow above without GitHub enforcement.
+See [the recorded decision](docs/pos/repo-protection-proposal.md). F1 implements
+PR-triggered checks and real-reth coverage, not branch protection or required-check settings.

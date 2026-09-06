@@ -2,8 +2,9 @@
 
 ## Status
 
-Proposed (R0, issue #2). Adopted once the R0 PR is reviewed and a maintainer confirms the
-branch layout and the cross-repository locations below. Supersedes no earlier ADR;
+Accepted on 2026-09-06 for R0 (#2), using the owner-authorized review and merge.
+The integration branch is adopted; unnamed external repository homes remain decisions for
+their consuming tickets and are not implicitly approved. Supersedes no earlier ADR;
 `0001-executor-boundary.md` remains in force.
 
 ## Context
@@ -68,6 +69,12 @@ The `docs/pos/specification/` snapshot in this repo is a **review copy** made av
 upstream publication. The Yellowpaper is maintained upstream; replace the snapshot with an
 accepted upstream commit reference once published, and record every later normative change in
 a new ADR that also updates affected issues, vectors and gates.
+
+## Repository enforcement
+
+Branch protection remains off by explicit owner instruction on 2026-09-06. Trusted
+contributors retain the documented review and validation workflow. F1 adds CI coverage,
+not protection settings. See `docs/pos/repo-protection-proposal.md`.
 
 ## Consequences
 

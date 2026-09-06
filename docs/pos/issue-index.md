@@ -1,6 +1,6 @@
 # GitHub implementation issue index
 
-Program: [#1 PROGRAM](https://github.com/ristik/bft-core/issues/1) · Reference PR: publication pending approval
+Program: [#1 PROGRAM](https://github.com/ristik/bft-core/issues/1) · Reference PR: https://github.com/ristik/bft-core/pull/76
 
 Start with [#2 R0](https://github.com/ristik/bft-core/issues/2), then [#3 D1](https://github.com/ristik/bft-core/issues/3). After D1, D2 and D3 can proceed independently.
 

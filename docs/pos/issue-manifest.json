@@ -5,8 +5,8 @@
     "id": 5359161226,
     "url": "https://github.com/ristik/bft-core/issues/1"
   },
-  "reference_pr": null,
-  "snapshot_commit": null,
+  "reference_pr": "https://github.com/ristik/bft-core/pull/76",
+  "snapshot_commit": "1d57ebea87e1189e1c96ab27e50f020243161212",
   "issues": {
     "PROGRAM": {
       "number": 1,

@@ -44,8 +44,8 @@
   negative vectors. A mock or benchmark alone cannot replace the required integrated evidence.
 - Every PR includes the issue link, behavioral change, validation commands/results, affected
   protocol/storage versions and migration/activation behavior. Independent review is required
-  before merging. R0 proposes repository enforcement; this document does not claim protection
-  or required checks are already configured.
+  before merging. The owner decided on 2026-09-06 to keep branch protection off for trusted contributors.
+  F1 implements PR-triggered CI; it does not enable branch protection or required-check rules.
 
 ## Definition of done
 
