@@ -331,8 +331,15 @@ func BuildD6Vectors() D6VectorSet {
 		{Name: "wrong_epoch_seal_rejected", Verified: wrongEpochRes.Verified, SealWeight: wrongEpochRes.SealWeight, SealThreshold: wrongEpochRes.SealThreshold, Reason: wrongEpochRes.Reason},
 	}
 
-	// --- proof bundle: structural availability vs offline verification --
-	pbSubject := sha256Bytes([]byte("exported-subject"))
+	// --- proof bundle: subject auth AND execution-evidence verification --
+	// The subject is a BLOCK HEADER; its ReceiptsRoot is authenticated
+	// because SubjectHeader.Hash() == SubjectHash and the anchor
+	// authenticates that hash. The exported event's digest is proven under
+	// that ReceiptsRoot.
+	pbEvent := sha256Bytes([]byte("event: alice credited 5 UCT"))
+	pbReceiptsRoot := hashNode(receiptLeaf(0, 0, pbEvent), zero)
+	pbHeader := Header{Number: 900_000, ParentHash: rep(0x11, 32), ReceiptsRoot: pbReceiptsRoot, Payload: []byte("blk")}
+	pbSubject := pbHeader.Hash()
 	pbRoot := hashNode(shardAnchorLeaf(7, "0", cfg0, hashNode(pbSubject, zero)), zero)
 	pbStmt := AnchorSealStatement(pbRoot, anchorEpoch, anchorAssignmentID)
 	pbAnchor := AnchorBundle{
@@ -340,15 +347,22 @@ func BuildD6Vectors() D6VectorSet {
 		ShardPaths: []ShardAnchorPath{{PartitionID: 7, ShardID: "0", ConfigHash: cfg0, ShardStateRoot: hashNode(pbSubject, zero), Path: []PathStep{{Sibling: zero, Left: false}}}},
 	}
 	pbLeaf := AnchoredLeaf{PartitionID: 7, ShardID: "0", LeafHash: pbSubject, Path: []PathStep{{Sibling: zero, Left: false}}}
-	pbGood := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: pbSubject, Mode: AuthLiveCertificate, LiveAnchor: &pbAnchor, LiveLeaf: &pbLeaf, Receipt: []byte("r")}
-	pbNaked := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: pbSubject, Mode: AuthLiveCertificate, Receipt: []byte("r")}
+	pbReceipt := &ReceiptClaim{ReceiptDigest: pbEvent, TxIndex: 0, LogIndex: 0, Path: []PathStep{{Sibling: zero, Left: false}}}
+	pbGood := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: pbSubject, Mode: AuthLiveCertificate,
+		LiveAnchor: &pbAnchor, LiveLeaf: &pbLeaf, SubjectHeader: &pbHeader, Receipt: pbReceipt}
+	pbNaked := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: pbSubject, Mode: AuthLiveCertificate}
 	pbWeak := pbGood
 	weakSeal := pbAnchor
 	weakSeal.Seal.Signatures = SignAnchorSeal(pbStmt, []string{"root-e"})
 	pbWeak.LiveAnchor = &weakSeal
 
-	// The verifier's own authenticated trust anchor — assignment/epoch/id
-	// come from here, never from the bundle.
+	// FINDING: a forged event — every other byte retained — must not verify.
+	pbForgedReceipt := pbGood
+	forged := *pbReceipt
+	forged.ReceiptDigest = sha256Bytes([]byte("event: attacker credited 100 UCT"))
+	pbForgedReceipt.Receipt = &forged
+
+	// The verifier's own authenticated trust anchor.
 	pbFresh := FreshnessPolicy{DeltaHoldRounds: 20_000, DeltaEvRounds: 8_000, MinRoundPeriodSeconds: 6,
 		ChurnMarginSeconds: 3_600, AcquireLatencySeconds: 1_800, EnforcedRealTimeFloorSeconds: 100_000}
 	pbTrust := VerifierTrustAnchor{Network: 1, ChainContext: []byte("ctx"), Epoch: anchorEpoch, BodyIdentity: anchorAssignmentID,
@@ -357,7 +371,8 @@ func BuildD6Vectors() D6VectorSet {
 	// A bundle carrying its own one-member attacker assignment + attacker
 	// signature, against an unrelated trusted checkpoint.
 	attWs := WeightSet{d6Member("pb-attacker", 1)}
-	attSub := sha256Bytes([]byte("pb-attacker-subject"))
+	attHeader := Header{Number: 900_000, ParentHash: rep(0x22, 32), ReceiptsRoot: pbReceiptsRoot, Payload: []byte("att")}
+	attSub := attHeader.Hash()
 	attRoot := hashNode(shardAnchorLeaf(7, "0", cfg0, hashNode(attSub, zero)), zero)
 	attStmt := AnchorSealStatement(attRoot, anchorEpoch, anchorAssignmentID) // even copying the honest id
 	attAnchor := AnchorBundle{
@@ -365,23 +380,26 @@ func BuildD6Vectors() D6VectorSet {
 		ShardPaths: []ShardAnchorPath{{PartitionID: 7, ShardID: "0", ConfigHash: cfg0, ShardStateRoot: hashNode(attSub, zero), Path: []PathStep{{Sibling: zero, Left: false}}}},
 	}
 	attLeaf := AnchoredLeaf{PartitionID: 7, ShardID: "0", LeafHash: attSub, Path: []PathStep{{Sibling: zero, Left: false}}}
-	pbForged := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: attSub, Mode: AuthLiveCertificate, LiveAnchor: &attAnchor, LiveLeaf: &attLeaf, Receipt: []byte("r")}
+	pbForged := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: attSub, Mode: AuthLiveCertificate,
+		LiveAnchor: &attAnchor, LiveLeaf: &attLeaf, SubjectHeader: &attHeader, Receipt: pbReceipt}
 
 	pbStale := pbGood
 	staleTrust := pbTrust
 	staleTrust.CheckpointAgeSeconds = pbFresh.MaxCheckpointStalenessSeconds() + 1
 
 	vs.ProofBundles = []D6ProofBundleCase{
-		{Name: "live_with_verifying_anchor", Mode: "live_certificate", CarriesEvidence: pbGood.CarriesEvidence(), OfflineVerifies: pbGood.OfflineVerify(pbTrust),
-			Note: "carries a certified seal + shard path proving the subject; verifies offline against the verifier's own trust anchor"},
-		{Name: "live_receipt_only_no_certificate_proof", Mode: "live_certificate", CarriesEvidence: pbNaked.CarriesEvidence(), OfflineVerifies: pbNaked.OfflineVerify(pbTrust),
-			Note: "non-empty context/subject/receipt but no anchor evidence — neither structurally complete nor offline-verifiable"},
+		{Name: "live_subject_and_receipt_verify", Mode: "live_certificate", CarriesEvidence: pbGood.CarriesEvidence(), OfflineVerifies: pbGood.OfflineVerify(pbTrust),
+			Note: "certified seal + shard path authenticate the subject header (and its ReceiptsRoot); the exported event's digest folds up its path to that ReceiptsRoot at the bound tx/log index"},
+		{Name: "no_evidence_at_all", Mode: "live_certificate", CarriesEvidence: pbNaked.CarriesEvidence(), OfflineVerifies: pbNaked.OfflineVerify(pbTrust),
+			Note: "no anchor / header / receipt — neither structurally complete nor offline-verifiable"},
 		{Name: "live_anchor_below_threshold", Mode: "live_certificate", CarriesEvidence: pbWeak.CarriesEvidence(), OfflineVerifies: pbWeak.OfflineVerify(pbTrust),
-			Note: "structurally complete but the seal is below the derived quorum — offline verification fails"},
+			Note: "structurally complete but the seal is below the derived quorum — verification fails"},
+		{Name: "forged_event_not_in_receipts_root", Mode: "live_certificate", CarriesEvidence: pbForgedReceipt.CarriesEvidence(), OfflineVerifies: pbForgedReceipt.OfflineVerify(pbTrust),
+			Note: "every byte kept except the exported event text; its digest no longer folds to the authenticated ReceiptsRoot — verification fails"},
 		{Name: "forged_self_supplied_assignment", Mode: "live_certificate", CarriesEvidence: pbForged.CarriesEvidence(), OfflineVerifies: pbForged.OfflineVerify(pbTrust),
-			Note: "a fresh one-member attacker assignment with a valid attacker signature (even copying the honest AssignmentID) does NOT verify: OfflineVerify re-checks against the trust anchor's Weights, not the bundle's"},
+			Note: "a fresh one-member attacker assignment with a valid attacker signature (even copying the honest AssignmentID) does NOT verify: OfflineVerify re-checks against the trust anchor's Weights"},
 		{Name: "stale_checkpoint_policy", Mode: "live_certificate", CarriesEvidence: pbStale.CarriesEvidence(), OfflineVerifies: pbStale.OfflineVerify(staleTrust),
-			Note: "the verifier's checkpoint is older than the freshness limit — no safety claim, verification fails"},
+			Note: "the verifier's checkpoint is older than the freshness limit — verification fails"},
 	}
 
 	// --- lock witness refresh (real proofs) ------------------------

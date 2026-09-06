@@ -50,23 +50,27 @@ func evalPath(leaf []byte, steps []PathStep) []byte {
 
 // --- historical header ancestry ------------------------------------------
 
-// Header is a minimal hash-linked block header. Hash is
-// SHA-256(be64(Number) ‖ ParentHash ‖ Payload); a real client uses
-// Keccak(RLP(header)) but the linkage property is the same.
+// Header is a minimal hash-linked block header. Hash is a length-delimited
+// SHA-256 over its fields; a real client uses Keccak(RLP(header)) but the
+// linkage property is the same. ReceiptsRoot is INSIDE the hash, so a
+// header authenticated by the anchor (live mode) or the header chain
+// (ancestry mode) authenticates its receipts root — which is what a
+// receipt/log proof is checked against.
 type Header struct {
-	Number     uint64
-	ParentHash []byte
-	Payload    []byte // stand-in for the rest of the header
+	Number       uint64
+	ParentHash   []byte
+	ReceiptsRoot []byte // the block's receipts-trie root (32 bytes)
+	Payload      []byte // stand-in for the rest of the header
 }
 
 // Hash computes the header hash.
 func (h Header) Hash() []byte {
-	var nb [8]byte
-	binary.BigEndian.PutUint64(nb[:], h.Number)
 	s := sha256.New()
-	s.Write(nb[:])
-	s.Write(h.ParentHash)
-	s.Write(h.Payload)
+	s.Write([]byte("UNICITY_EVM_HEADER"))
+	writeLenField(s, u64be(h.Number))
+	writeLenField(s, h.ParentHash)
+	writeLenField(s, h.ReceiptsRoot)
+	writeLenField(s, h.Payload)
 	return s.Sum(nil)
 }
 
@@ -308,6 +312,29 @@ const (
 	AuthCheckpointAncestry                 // outside W_cert: a parent-header chain from a recent authenticated head
 )
 
+// receiptLeaf is the length-delimited leaf a receipt/log proof folds from:
+// SHA-256("UNICITY_EVM_RECEIPT" ‖ txIndex ‖ logIndex ‖ receiptDigest). The
+// tx/log index is bound, so a proof for the right receipt at the wrong
+// position fails.
+func receiptLeaf(txIndex, logIndex uint64, receiptDigest []byte) []byte {
+	s := sha256.New()
+	s.Write([]byte("UNICITY_EVM_RECEIPT"))
+	writeLenField(s, u64be(txIndex))
+	writeLenField(s, u64be(logIndex))
+	writeLenField(s, receiptDigest)
+	return s.Sum(nil)
+}
+
+// ReceiptClaim is the execution-evidence part of a proof bundle: a digest
+// of the exported receipt/event, its position, and a Merkle path to the
+// subject block's receipts root.
+type ReceiptClaim struct {
+	ReceiptDigest []byte // SHA-256 of the canonical receipt/event bytes
+	TxIndex       uint64
+	LogIndex      uint64
+	Path          []PathStep // folds receiptLeaf(...) up to the subject header's ReceiptsRoot
+}
+
 // ProofBundle is the self-contained export for one subject.
 type ProofBundle struct {
 	Version      uint64
@@ -317,11 +344,17 @@ type ProofBundle struct {
 	HeaderChain  []Header // for AuthCheckpointAncestry
 
 	// For AuthLiveCertificate: the anchor that authenticates the subject
-	// back to a certified root seal, and the shard/leaf the subject sits
-	// under. A non-empty Receipt alone is NOT authentication.
-	LiveAnchor *AnchorBundle
-	LiveLeaf   *AnchoredLeaf
-	Receipt    []byte
+	// back to a certified root seal, the shard/leaf the subject sits under,
+	// and the subject BLOCK HEADER whose Hash() must equal SubjectHash — so
+	// its ReceiptsRoot is authenticated.
+	LiveAnchor    *AnchorBundle
+	LiveLeaf      *AnchoredLeaf
+	SubjectHeader *Header
+
+	// The exported execution evidence. Its digest is proven under the
+	// authenticated subject header's ReceiptsRoot; a forged event or a
+	// wrong index fails.
+	Receipt *ReceiptClaim
 }
 
 // CarriesEvidence reports STRUCTURAL availability only: the bundle has the
@@ -331,9 +364,12 @@ func (b ProofBundle) CarriesEvidence() bool {
 	if len(b.ChainContext) == 0 || len(b.SubjectHash) == 0 {
 		return false
 	}
+	if b.Receipt == nil || len(b.Receipt.ReceiptDigest) == 0 || len(b.Receipt.Path) == 0 {
+		return false
+	}
 	switch b.Mode {
 	case AuthLiveCertificate:
-		return b.LiveAnchor != nil && b.LiveLeaf != nil && len(b.Receipt) > 0
+		return b.LiveAnchor != nil && b.LiveLeaf != nil && b.SubjectHeader != nil
 	case AuthCheckpointAncestry:
 		return len(b.HeaderChain) > 0
 	default:
@@ -364,13 +400,20 @@ func (t VerifierTrustAnchor) fresh() bool {
 	return t.CheckpointAgeSeconds <= t.Freshness.MaxCheckpointStalenessSeconds()
 }
 
-// OfflineVerify verifies the bundle against the verifier's OWN authenticated
-// trust anchor. Live mode: the bundle's carried assignment/epoch/id are
-// UNTRUSTED — the seal's Epoch and AssignmentID must match the anchor, and
-// the seal is re-checked against the ANCHOR's Weights (the carried
-// assignment is discarded), so an attacker-supplied one-member assignment
-// with a valid attacker signature does not verify. Ancestry mode:
-// AuthenticateOldBlock walks the header chain to the anchor's trusted head.
+// OfflineVerify verifies, against the verifier's OWN authenticated trust
+// anchor, BOTH that the subject is authenticated AND that the exported
+// receipt/event is included in the subject block:
+//
+//   - subject authentication — live mode: the seal's Epoch/AssignmentID
+//     match the anchor and the seal is re-checked against the ANCHOR's
+//     Weights (the carried assignment is discarded); the subject header's
+//     Hash() equals SubjectHash. Ancestry mode: AuthenticateOldBlock walks
+//     the header chain to the anchor's trusted head.
+//   - execution evidence — the ReceiptClaim's digest folds up its Merkle
+//     path, at the bound tx/log index, to the AUTHENTICATED subject
+//     header's ReceiptsRoot. A forged event, a wrong index, or a bad path
+//     fails.
+//
 // A bundle that only "carries evidence" but does not verify returns false.
 func (b ProofBundle) OfflineVerify(t VerifierTrustAnchor) bool {
 	if !b.CarriesEvidence() {
@@ -387,6 +430,11 @@ func (b ProofBundle) OfflineVerify(t VerifierTrustAnchor) bool {
 		if !bytes.Equal(b.LiveLeaf.LeafHash, b.SubjectHash) {
 			return false
 		}
+		// The subject header's Hash() must equal SubjectHash — this is what
+		// authenticates its ReceiptsRoot.
+		if !bytes.Equal(b.SubjectHeader.Hash(), b.SubjectHash) {
+			return false
+		}
 		seal := b.LiveAnchor.Seal
 		if seal.Epoch != t.Epoch {
 			return false
@@ -397,17 +445,36 @@ func (b ProofBundle) OfflineVerify(t VerifierTrustAnchor) bool {
 		// Re-verify against the ANCHOR's assignment, not the carried one.
 		authAnchor := *b.LiveAnchor
 		authAnchor.Seal.Weights = t.Weights
-		return VerifyAnchoredHistory(authAnchor, []AnchoredLeaf{*b.LiveLeaf}).Verified
+		if !VerifyAnchoredHistory(authAnchor, []AnchoredLeaf{*b.LiveLeaf}).Verified {
+			return false
+		}
+		return b.receiptVerifies(b.SubjectHeader.ReceiptsRoot)
 	case AuthCheckpointAncestry:
-		return AuthenticateOldBlock(b.SubjectHash, b.HeaderChain, t.TrustedHeadHash).Authenticated
+		if !AuthenticateOldBlock(b.SubjectHash, b.HeaderChain, t.TrustedHeadHash).Authenticated {
+			return false
+		}
+		return b.receiptVerifies(b.HeaderChain[0].ReceiptsRoot)
 	default:
 		return false
 	}
 }
 
-// SelfContained is retained as the offline-verifiable predicate: it means
-// "verifies offline against the verifier's own authenticated trust anchor",
-// not merely "has non-empty fields".
+// receiptVerifies checks the exported receipt/event proof against an
+// AUTHENTICATED receipts root: the digest folds up its path to that root at
+// the bound tx/log index. A forged event (different digest), a wrong index,
+// or a bad path all fail.
+func (b ProofBundle) receiptVerifies(authReceiptsRoot []byte) bool {
+	if len(authReceiptsRoot) != 32 || b.Receipt == nil || len(b.Receipt.ReceiptDigest) == 0 {
+		return false
+	}
+	leaf := receiptLeaf(b.Receipt.TxIndex, b.Receipt.LogIndex, b.Receipt.ReceiptDigest)
+	return bytes.Equal(evalPath(leaf, b.Receipt.Path), authReceiptsRoot)
+}
+
+// SelfContained is an alias for OfflineVerify: it means "the subject AND
+// its exported receipt/event verify offline against the verifier's own
+// authenticated trust anchor" — the exact fact OfflineVerify establishes,
+// no broader.
 func (b ProofBundle) SelfContained(t VerifierTrustAnchor) bool {
 	return b.OfflineVerify(t)
 }

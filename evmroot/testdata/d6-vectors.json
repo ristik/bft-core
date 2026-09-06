@@ -197,39 +197,46 @@
   ],
   "proof_bundle_offline_verification": [
     {
-      "name": "live_with_verifying_anchor",
+      "name": "live_subject_and_receipt_verify",
       "mode": "live_certificate",
       "carries_evidence_structurally": true,
       "verifies_offline": true,
-      "note": "carries a certified seal + shard path proving the subject; verifies offline against the verifier's own trust anchor"
+      "note": "certified seal + shard path authenticate the subject header (and its ReceiptsRoot); the exported event's digest folds up its path to that ReceiptsRoot at the bound tx/log index"
     },
     {
-      "name": "live_receipt_only_no_certificate_proof",
+      "name": "no_evidence_at_all",
       "mode": "live_certificate",
       "carries_evidence_structurally": false,
       "verifies_offline": false,
-      "note": "non-empty context/subject/receipt but no anchor evidence — neither structurally complete nor offline-verifiable"
+      "note": "no anchor / header / receipt — neither structurally complete nor offline-verifiable"
     },
     {
       "name": "live_anchor_below_threshold",
       "mode": "live_certificate",
       "carries_evidence_structurally": true,
       "verifies_offline": false,
-      "note": "structurally complete but the seal is below the derived quorum — offline verification fails"
+      "note": "structurally complete but the seal is below the derived quorum — verification fails"
+    },
+    {
+      "name": "forged_event_not_in_receipts_root",
+      "mode": "live_certificate",
+      "carries_evidence_structurally": true,
+      "verifies_offline": false,
+      "note": "every byte kept except the exported event text; its digest no longer folds to the authenticated ReceiptsRoot — verification fails"
     },
     {
       "name": "forged_self_supplied_assignment",
       "mode": "live_certificate",
       "carries_evidence_structurally": true,
       "verifies_offline": false,
-      "note": "a fresh one-member attacker assignment with a valid attacker signature (even copying the honest AssignmentID) does NOT verify: OfflineVerify re-checks against the trust anchor's Weights, not the bundle's"
+      "note": "a fresh one-member attacker assignment with a valid attacker signature (even copying the honest AssignmentID) does NOT verify: OfflineVerify re-checks against the trust anchor's Weights"
     },
     {
       "name": "stale_checkpoint_policy",
       "mode": "live_certificate",
       "carries_evidence_structurally": true,
       "verifies_offline": false,
-      "note": "the verifier's checkpoint is older than the freshness limit — no safety claim, verification fails"
+      "note": "the verifier's checkpoint is older than the freshness limit — verification fails"
     }
   ],
   "lock_witness_refresh": [

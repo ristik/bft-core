@@ -220,7 +220,13 @@ func TestD6_ProofBundleOfflineVerification(t *testing.T) {
 	aid := sha256Bytes([]byte("assignment-8"))
 	cfg := sha256Bytes([]byte("cfg"))
 	z := rep(0, 32)
-	subject := sha256Bytes([]byte("subject-block"))
+
+	// The subject is a BLOCK HEADER; its ReceiptsRoot is authenticated by
+	// SubjectHeader.Hash() == SubjectHash.
+	event := sha256Bytes([]byte("event: alice credited 5 UCT"))
+	receiptsRoot := hashNode(receiptLeaf(0, 0, event), z)
+	header := Header{Number: 900_000, ParentHash: rep(0x11, 32), ReceiptsRoot: receiptsRoot, Payload: []byte("blk")}
+	subject := header.Hash()
 	sRoot := hashNode(subject, z)
 	bl := shardAnchorLeaf(7, "0", cfg, sRoot)
 	rStar := hashNode(bl, z)
@@ -230,24 +236,52 @@ func TestD6_ProofBundleOfflineVerification(t *testing.T) {
 		ShardPaths: []ShardAnchorPath{{PartitionID: 7, ShardID: "0", ConfigHash: cfg, ShardStateRoot: sRoot, Path: []PathStep{{Sibling: z, Left: false}}}},
 	}
 	leaf := AnchoredLeaf{PartitionID: 7, ShardID: "0", LeafHash: subject, Path: []PathStep{{Sibling: z, Left: false}}}
+	receipt := &ReceiptClaim{ReceiptDigest: event, TxIndex: 0, LogIndex: 0, Path: []PathStep{{Sibling: z, Left: false}}}
 
-	// The verifier's OWN authenticated trust anchor — never taken from the
-	// bundle. Assignment, epoch and body identity come from here.
+	// The verifier's OWN authenticated trust anchor.
 	fresh := FreshnessPolicy{DeltaHoldRounds: 20_000, DeltaEvRounds: 8_000, MinRoundPeriodSeconds: 6,
 		ChurnMarginSeconds: 3_600, AcquireLatencySeconds: 1_800, EnforcedRealTimeFloorSeconds: 100_000}
 	trust := VerifierTrustAnchor{Network: 1, ChainContext: []byte("ctx"), Epoch: epoch, BodyIdentity: aid,
 		Weights: ws, Freshness: fresh, CheckpointAgeSeconds: 10}
 
 	good := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: subject, Mode: AuthLiveCertificate,
-		LiveAnchor: &anchor, LiveLeaf: &leaf, Receipt: []byte("receipt")}
+		LiveAnchor: &anchor, LiveLeaf: &leaf, SubjectHeader: &header, Receipt: receipt}
 	if !good.CarriesEvidence() || !good.OfflineVerify(trust) || !good.SelfContained(trust) {
-		t.Fatal("a live bundle carrying a verifying anchor did not verify offline against the trust anchor")
+		t.Fatal("a live bundle whose subject and receipt both verify was rejected")
 	}
-	// FINDING: a bundle with a fresh one-member ATTACKER assignment,
-	// attacker-generated root/paths and a valid ATTACKER signature must NOT
-	// verify against an unrelated trusted checkpoint.
+
+	// FINDING: a forged event — every other byte kept — must NOT verify.
+	forgedEvt := good
+	fr := *receipt
+	fr.ReceiptDigest = sha256Bytes([]byte("event: attacker credited 100 UCT"))
+	forgedEvt.Receipt = &fr
+	if !forgedEvt.CarriesEvidence() {
+		t.Fatal("forged-event bundle is not structurally complete")
+	}
+	if forgedEvt.OfflineVerify(trust) {
+		t.Fatal("a forged event verified — its digest is not in the authenticated ReceiptsRoot")
+	}
+	// A right event at the wrong tx/log index also fails.
+	wrongIdx := good
+	wi := *receipt
+	wi.TxIndex = 3
+	wrongIdx.Receipt = &wi
+	if wrongIdx.OfflineVerify(trust) {
+		t.Fatal("a receipt proof at the wrong index verified")
+	}
+	// A subject header whose Hash() != SubjectHash: ReceiptsRoot unauthenticated.
+	badHdr := good
+	bh := header
+	bh.Payload = []byte("tampered")
+	badHdr.SubjectHeader = &bh
+	if badHdr.OfflineVerify(trust) {
+		t.Fatal("an unauthenticated subject header (Hash != SubjectHash) verified")
+	}
+
+	// A fresh one-member ATTACKER assignment + valid attacker signature.
 	attWs := WeightSet{d6Member("attacker", 1)}
-	attSubject := sha256Bytes([]byte("attacker-subject"))
+	attHeader := Header{Number: 900_000, ParentHash: rep(0x22, 32), ReceiptsRoot: receiptsRoot, Payload: []byte("att")}
+	attSubject := attHeader.Hash()
 	attSRoot := hashNode(attSubject, z)
 	attBL := shardAnchorLeaf(7, "0", cfg, attSRoot)
 	attRoot := hashNode(attBL, z)
@@ -259,12 +293,10 @@ func TestD6_ProofBundleOfflineVerification(t *testing.T) {
 	}
 	attLeaf := AnchoredLeaf{PartitionID: 7, ShardID: "0", LeafHash: attSubject, Path: []PathStep{{Sibling: z, Left: false}}}
 	forged := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: attSubject, Mode: AuthLiveCertificate,
-		LiveAnchor: &attAnchor, LiveLeaf: &attLeaf, Receipt: []byte("receipt")}
+		LiveAnchor: &attAnchor, LiveLeaf: &attLeaf, SubjectHeader: &attHeader, Receipt: receipt}
 	if forged.OfflineVerify(trust) {
 		t.Fatal("a bundle carrying its own attacker assignment verified against an unrelated trusted checkpoint")
 	}
-	// Even if the attacker copies the honest BodyIdentity into AssignmentID,
-	// the re-check uses the honest Weights and the attacker signature fails.
 	attAnchor2 := attAnchor
 	attAnchor2.Seal.AssignmentID = aid
 	forged2 := forged
@@ -273,10 +305,10 @@ func TestD6_ProofBundleOfflineVerification(t *testing.T) {
 		t.Fatal("copying the honest AssignmentID let an attacker-signed seal verify")
 	}
 
-	// Non-empty context/subject/receipt but NO anchor evidence: must not pass.
-	naked := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: subject, Mode: AuthLiveCertificate, Receipt: []byte("receipt")}
+	// No anchor / header / receipt: not structurally complete, does not verify.
+	naked := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: subject, Mode: AuthLiveCertificate}
 	if naked.CarriesEvidence() || naked.OfflineVerify(trust) {
-		t.Fatal("a live bundle with only a receipt and no certificate proof passed")
+		t.Fatal("a bundle with no evidence passed")
 	}
 	// Anchor present but seal below threshold: carries evidence, does not verify.
 	weakAnchor := anchor

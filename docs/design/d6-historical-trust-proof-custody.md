@@ -101,8 +101,11 @@ be curtailed to permit a withdrawal.
 ## 3. Proof export and historical authentication
 
 The models here use **real hash-linked fixtures**, not trusted booleans: a
-`Header.Hash()` is `SHA-256(be64(number) ‖ parentHash ‖ payload)` (a real client
-uses `Keccak(RLP(header))`; the linkage property is identical), and the anchor /
+`Header.Hash()` is a **length-delimited** `SHA-256` over `number ‖ parentHash ‖
+receiptsRoot ‖ payload` (a real client uses `Keccak(RLP(header))`; the linkage
+property is identical) — `receiptsRoot` is inside the hash, so a header
+authenticated by the anchor or the header chain authenticates its receipts root.
+The anchor /
 lock paths are actual Merkle paths folded with `hashNode(a,b) = SHA-256(a ‖ b)`.
 
 **`ProofBundle` — structural availability vs offline verification**: the
@@ -111,28 +114,40 @@ non-empty context and subject, without carrying any certificate/receipt proof.
 Now the two are separate:
 
 - `CarriesEvidence()` — **structural only**: the bundle has the pieces its mode
-  needs (live mode: a `LiveAnchor`, a `LiveLeaf`, and a non-empty `Receipt`;
-  ancestry mode: a non-empty header chain). It runs no verification.
-- `OfflineVerify(t VerifierTrustAnchor)` — **actually verifies, against the
-  verifier's OWN authenticated state**. The third review noted the earlier
-  version used `LiveAnchor.Seal.Weights` / `Epoch` / `AssignmentID` **from the
-  bundle**, so an attacker's one-member assignment with a valid attacker
-  signature verified against an unrelated checkpoint. Now `t` carries the
-  verifier's authenticated `ChainContext`, `Epoch`, trust-base `BodyIdentity`,
-  `Weights` and `FreshnessPolicy`. Live mode: the checkpoint must be fresh
-  (`t.Freshness.Valid()` and within the staleness limit); `b.ChainContext` must
-  equal `t.ChainContext`; the seal's `Epoch` and `AssignmentID` must equal the
-  anchor's; and the seal is re-checked **against `t.Weights`, not the carried
-  assignment**. Even copying the honest `AssignmentID` fails, because the
-  attacker's signature does not verify against any honest member's key. Ancestry
-  mode: `AuthenticateOldBlock` walks the header chain to `t.TrustedHeadHash`.
-- `SelfContained(t)` is retained as an alias for `OfflineVerify(t)`.
+  needs (a `ReceiptClaim` with a digest and a path always; live mode also a
+  `LiveAnchor`, a `LiveLeaf`, and a `SubjectHeader`; ancestry mode a non-empty
+  header chain). It runs no verification.
+- `OfflineVerify(t VerifierTrustAnchor)` — **verifies, against the verifier's OWN
+  authenticated state, BOTH that the subject is authenticated AND that the
+  exported receipt/event is in it**:
+  - **subject authentication** — the third review's fix: `t` carries the
+    verifier's authenticated `ChainContext`, `Epoch`, trust-base `BodyIdentity`,
+    `Weights` and `FreshnessPolicy`. The checkpoint must be fresh;
+    `b.ChainContext == t.ChainContext`; the seal's `Epoch`/`AssignmentID` match
+    the anchor's; the seal is re-checked **against `t.Weights`, not the carried
+    assignment** (copying the honest `AssignmentID` still fails — the attacker
+    signature does not verify). Live mode also requires
+    `SubjectHeader.Hash() == SubjectHash`, so the header's `ReceiptsRoot` is
+    authenticated. Ancestry mode: `AuthenticateOldBlock` walks the chain to
+    `t.TrustedHeadHash` (the subject is `chain[0]`, so its `ReceiptsRoot` is
+    authenticated).
+  - **execution evidence** — the fourth review's fix: the earlier version
+    checked `Receipt` only for non-emptiness, so replacing it with
+    `"attacker credited 100 UCT"` while keeping every other byte still verified.
+    Now the `ReceiptClaim` digest folds up its Merkle path — at the bound
+    `(TxIndex, LogIndex)` — to the **authenticated `ReceiptsRoot`**
+    (`receiptLeaf(...)`, length-delimited). A forged event (different digest), a
+    wrong index, or a bad path all fail.
+- `SelfContained(t)` is an alias for `OfflineVerify(t)` — it means exactly "the
+  subject and its exported receipt/event verify offline", no broader.
 
-Vectors `proof_bundle_offline_verification`: `live_with_verifying_anchor`
-(carries + verifies), `live_receipt_only_no_certificate_proof` (a receipt but no
-anchor — neither carries nor verifies), `live_anchor_below_threshold`
-(structurally complete, seal below the derived quorum — does not verify);
-`TestD6_ProofBundleOfflineVerification`.
+Vectors `proof_bundle_offline_verification`: `live_subject_and_receipt_verify`,
+`no_evidence_at_all`, `live_anchor_below_threshold`,
+`forged_event_not_in_receipts_root` (every byte kept except the event text — its
+digest is no longer in the authenticated `ReceiptsRoot`),
+`forged_self_supplied_assignment`, `stale_checkpoint_policy`;
+`TestD6_ProofBundleOfflineVerification` (also a wrong-index and an
+unauthenticated-`SubjectHeader` negative).
 
 **Historical header ancestry** (`AuthenticateOldBlock(subjectHash, chain,
 trustedHeadHash)`): walks a `[]Header` from a recently authenticated head
@@ -247,10 +262,11 @@ the succinct path.
 |---|---|
 | proof/accounting vectors distinguish native UCT, WUCT and bridged claims | §4; `supply_and_backing` (`O + C ≤ vault`, WUCT vs its own contract native); `TestD6_CustodySolvencyEquation` |
 | live age measured from the current authenticated origin, not a checkpoint | §2 "Live certificate admission"; `live_certificate_admission.stale_past_window` (`admitted: false` for a 900-round-old cert with `W_cert 10`), `future_ahead_of_origin`, `at_window_boundary`; `TestD6_LiveCertMeasuredFromImportedOrigin` |
-| the proof vectors carry real evidence, not assumed booleans | §3 real hash-linked headers + Merkle paths + real secp256k1 seal signatures; `historical_block_authentication` (broken linkage / wrong head fail), `multi_shard_anchor` (bad leaf / below-threshold / unsigned / forged signer / relabelled path / substituted root / wrong epoch all fail), `proof_bundle_offline_verification` (receipt-only does not verify), `lock_witness_refresh` (wrong digest fails); `TestD6_HistoricalAuthWalksARealChain`, `TestD6_MultiShardAnchorRecomputesPaths`, `TestD6_ProofBundleOfflineVerification`, `TestD6_LockRefreshRealProofs` |
+| the proof vectors carry real evidence, not assumed booleans | §3 real hash-linked headers + Merkle paths + real secp256k1 seal signatures; `historical_block_authentication` (broken linkage / wrong head fail), `multi_shard_anchor` (bad leaf / below-threshold / unsigned / forged signer / relabelled path / substituted root / wrong epoch all fail), `proof_bundle_offline_verification` (a forged event is not in the authenticated ReceiptsRoot), `lock_witness_refresh` (wrong digest fails); `TestD6_HistoricalAuthWalksARealChain`, `TestD6_MultiShardAnchorRecomputesPaths`, `TestD6_ProofBundleOfflineVerification`, `TestD6_LockRefreshRealProofs` |
+| offline verification authenticates the exported receipt/event, not just the subject | §3 "`ProofBundle` …" — the `ReceiptClaim` digest folds up its path at the bound `(TxIndex, LogIndex)` to the authenticated `SubjectHeader.ReceiptsRoot`; `proof_bundle_offline_verification.forged_event_not_in_receipts_root`; `TestD6_ProofBundleOfflineVerification` (wrong-index / unauthenticated-header negatives) |
 | the shared seal authenticates r* itself and the shard paths authenticate their partition/shard/config | §3; `AnchorSeal.VerifySeal` derives the threshold and checks signatures over `AnchorSealStatement(r*, epoch, assignmentID)`; `shardAnchorLeaf` binds length-delimited partition ‖ shard ‖ configHash into the leaf; `multi_shard_anchor.relabelled_shard_path_rejected`, `unsigned_seal_zero_weight`, `forged_signer_entry_not_counted`, `wrong_epoch_seal_rejected`; `TestD6_ShardAnchorLeafFieldBoundaries` |
 | offline verification derives the assignment from the verifier's own authenticated trust store, not the proof | §3 "`ProofBundle` …"; `OfflineVerify(VerifierTrustAnchor)` re-checks the seal against `t.Weights` and requires `ChainContext`/`Epoch`/`AssignmentID` to match a fresh checkpoint; `proof_bundle_offline_verification.forged_self_supplied_assignment`, `stale_checkpoint_policy`; `TestD6_ProofBundleOfflineVerification` |
-| a proof bundle's structural availability is distinct from successful offline verification | §3 "`ProofBundle` — structural availability vs offline verification"; `CarriesEvidence` vs `OfflineVerify`; `proof_bundle_offline_verification`; `TestD6_ProofBundleOfflineVerification` |
+| a proof bundle's structural availability is distinct from successful offline verification; `SelfContained` claims no more than is proved | §3 "`ProofBundle` …"; `CarriesEvidence` vs `OfflineVerify` (subject **and** receipt); `SelfContained` = `OfflineVerify`; `proof_bundle_offline_verification`; `TestD6_ProofBundleOfflineVerification` |
 | an old block is authenticated without trusting retired signatures alone | §3; header-chain path only; retired keys are not an input |
 | fresh lock evidence leaves token identity unchanged | §4; `lock_witness_refresh.fresh_proof_same_digest` (`token_identity_unchanged: true`, `historical_backing_refreshed: true`) |
 | a history touching two aggregator shards verifies with one seal plus the necessary paths | §3; `multi_shard_anchor.two_aggregator_shards_one_seal` (`seal_verified_once: true`, `shard_path_count: 2`) |

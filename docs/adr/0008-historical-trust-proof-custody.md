@@ -51,6 +51,19 @@ Revised again after the third review (#82):
 - **`shardAnchorLeaf` is length-delimited** — moving a byte across the
   `shardID`/`configHash` boundary no longer preserves the hash.
 
+Revised again after the fourth review (#82):
+
+- **Offline verification authenticates the exported receipt/event, not just the
+  subject.** The earlier `OfflineVerify` checked `Receipt` only for
+  non-emptiness, so replacing it with a forged event while keeping every other
+  byte still verified. Now the subject is a block `Header` whose `Hash()` must
+  equal `SubjectHash` (so its `ReceiptsRoot` is authenticated — it is inside the
+  length-delimited header hash), and the `ReceiptClaim` digest folds up its
+  Merkle path at the bound `(TxIndex, LogIndex)` to that `ReceiptsRoot`
+  (`receiptLeaf`, length-delimited). A forged event, a wrong index, a bad path,
+  or an unauthenticated `SubjectHeader` all fail. `SelfContained` is an alias for
+  `OfflineVerify` and claims exactly that — subject + receipt verify — no more.
+
 Freeze once re-reviewed by a cryptography reviewer
 and a custody-accounting reviewer, neither the author. Depends on ADR
 0003/0006/0007. Closes the M0 design set.
@@ -105,8 +118,9 @@ Adopt the profile in
 
 - `evmroot/d6checkpoint.go` (`FreshnessPolicy` with `EnforcedRealTimeFloorSeconds`
   / `Supported()` / advisory round arithmetic), `d6proof.go`
-  (`VerifierTrustAnchor`, length-delimited `shardAnchorLeaf`), `d6custody.go`,
-  `d6seal.go` (deterministic real-key seal fixtures).
+  (`VerifierTrustAnchor`, length-delimited `Header.Hash` + `shardAnchorLeaf` +
+  `receiptLeaf`, `ReceiptClaim`, `OfflineVerify` verifying subject **and**
+  receipt), `d6custody.go`, `d6seal.go` (deterministic real-key seal fixtures).
 - `evmroot/testdata/d6-vectors.json` — checkpoint/windows (enforced-floor vs
   advisory, unsupported / too-fast / too-slow rejections), historical-block
   authentication (constant-size false, header count grows), multi-shard anchor
@@ -145,6 +159,10 @@ Adopt the profile in
 - **Let `SelfContained` mean "has non-empty fields".** Rejected: it conflated
   structural availability with a successful offline check. Split into
   `CarriesEvidence` and `OfflineVerify`.
+- **Check the exported receipt only for non-emptiness.** Rejected on the fourth
+  review: a forged event ("attacker credited 100 UCT") with every other byte kept
+  still verified. The receipt digest is now proven under the authenticated
+  subject header's `ReceiptsRoot` at the bound tx/log index.
 - **Verify the live seal against the assignment carried in the proof bundle.**
   Rejected on the third review: an attacker supplies their own one-member
   assignment and signature. `OfflineVerify` derives the assignment from the
