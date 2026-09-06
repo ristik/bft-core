@@ -6,16 +6,29 @@ Proposed (D2, issue #4). Revised twice:
 
 - After review #78: a verified-input boundary, 128-bit fee arithmetic +
   `ExecConfig.Valid()`, concrete `engine_*WithSealV1` methods.
-- After re-review #78: a **deviation inventory** (§3a, 8 rows with alternatives /
-  audit surface / conformance); the **seal-outcome list** — protocol operations
-  are committed by a `sealOutcomeRoot` header sibling and stay **out** of
-  `transactionsRoot` / `receiptsRoot`, so ordinary transaction/receipt semantics
-  are unchanged and an intrinsically invalid forced entry is a
-  `forced_rejected` record, never an EVM revert; the **authentication
-  lifecycle** is finished — `VerifyCompanionWitnesses` runs against the
-  verifier's own trust base with a **recomputed** threshold, and the per-path
-  "who verifies" is stated (adapter over JWT for `newPayload`; re-run for devp2p
-  / offline).
+- After re-review #78: a **deviation inventory** (§3a); a `sealOutcomeRoot`
+  header sibling committing a seal-outcome list; a finished authentication
+  lifecycle.
+
+- After the third review #78:
+  - **No new header field, and the standard execution-evidence path is kept.**
+    A **successful forced transaction is an ordinary transaction** —
+    `transactionsRoot` / `receiptsRoot` with a standard receipt (logs, bloom,
+    cumulative gas), so its events export through the normal receipt proof. Only
+    the privileged seal call and **rejected** forced-inbox entries are off-trie,
+    committed by `sealRegistryCommitment` — a value the system call writes into
+    the **seal-registry contract's storage**, authenticated by the block's
+    `stateRoot` and provable with `eth_getProof`. The false "transitively under
+    `extraData`" claim is withdrawn; `extraData` hashes only the rootInput.
+    `header.gasUsed` transparently includes the mandated `g_sys` work (not
+    "unchanged").
+  - **`VerifyCompanionWitnesses` verifies proof bindings, not assertions.** No
+    `threshold` parameter — it is derived as `⌊2W/3⌋+1` from the verifier's own
+    authenticated `D2TrustBase` (`{NodeID, weight, consensusKey}`). The carried
+    `TE` must hash to `Origin.TRHash`. Seal signatures are **real secp256k1
+    signatures** over `D2SealWitnessStatement(OriginID, TRHash)`, verified against
+    each member's key; only verified weight counts. `{a:10,b:6,c:5,d:2,e:1}` +
+    signer `e` alone no longer passes.
 
 Freeze once re-reviewed by a Go-adapter + reth reviewer other than the author.
 Depends on ADR 0003 (D1).
@@ -55,9 +68,17 @@ Adopt the profile in
    partition `version` record and the startup capability check.
 
 3. **Gas separation** — `g_sys + g_fi + g_ordinary_capacity = g_max` exactly.
-   Header `gasUsed` is the sum of system + forced + ordinary actual gas. The
-   EIP-1559 base-fee update uses **ordinary** gas against an **ordinary** target
-   only; protocol-mandated gas is outside the feedback loop.
+   Header `gasUsed` = ordinary cumulative gas (transaction list, including
+   successful forced txs) + `g_sys` work + the `g_fi` consumption charge for
+   rejected entries. The EIP-1559 base-fee update uses **ordinary** gas against
+   an **ordinary** target only; protocol-mandated gas is outside the feedback
+   loop and is recovered as `header.gasUsed − g_sys − rejectedConsumption`.
+
+3b. **Off-trie commitment in contract state, not a header field** — a successful
+   forced transaction is an ordinary transaction with a standard receipt. Only
+   the system call and `forced_rejected` records are off-trie, committed by
+   `sealRegistryCommitment` written into the seal-registry contract's storage
+   (authenticated by `stateRoot`, `eth_getProof`).
 
 4. **Validity rules** — positive base-fee floor `f_base^min` checked every block;
    withdrawals always empty; blob transactions disabled; no protocol issuance.
@@ -70,10 +91,17 @@ Adopt the profile in
 - `evmroot/d2gas.go` — budgets, header `gasUsed`, EIP-1559 update with the
   ordinary-only substitution and the floor clamp.
 - `evmroot/d2import.go` — the ordered import-validation predicate set with stable
-  rejection codes.
+  rejection codes; `SealRegistryCommitment` (contract-state value, not a header
+  field); `VerifyCompanionWitnesses(witness, rootInput, D2TrustBase)` with a
+  derived threshold, the TE↔TRHash binding and verified signatures.
+- `evmroot/d2seal.go` — deterministic secp256k1 seal-witness keys and
+  `D2TrustBase` / `D2SealWitnessStatement` / `VerifiedSignerWeight`.
 - `evmroot/testdata/d2-vectors.json` — exec config, a gas-accounting vector that
-  closes exactly, a base-fee series (up/flat/down/floor), and 12 import-check
-  vectors including `system_origin_forged` and `companion_missing`.
+  closes exactly, a base-fee series (up/flat/down/floor), the
+  `seal_registry_commitment` vector (successful forced tx stays ordinary), and
+  import-check vectors including `witness_name_without_signature`,
+  `witness_te_not_bound_to_trhash`, `successful_forced_not_a_seal_record`,
+  `seal_registry_commitment_mismatch`.
 - `evmroot/cmd/d2vectors` + `TestD2_VectorsMatchGolden`.
 
 ## Consequences
@@ -96,3 +124,15 @@ Adopt the profile in
 - **Reuse stock `PayloadAttributesV3` with the beacon-root field as a smuggling
   channel.** Rejected: the beacon root is already a derived D1 field; overloading
   it hides the input from import validation.
+- **Synthetic receipts in `receiptsRoot` for protocol operations.** Rejected:
+  changes Ethereum receipt semantics and misleads every tool/proof.
+- **A new `sealOutcomeRoot` header field (second-review version).** Rejected on
+  the third review: it expands every client's header/import/RPC surface, needs a
+  normative RLP position + block-hash derivation, is not covered by `extraData`,
+  and removing successful forced txs from `receiptsRoot` loses their standard
+  log/receipt proof. A **contract-state value** committed by the system call
+  reuses the authenticated `stateRoot` + `eth_getProof` path and keeps successful
+  forced txs ordinary.
+- **A caller-supplied threshold / signer-name list for `VerifyCompanionWitnesses`.**
+  Rejected: a supplied threshold can be 1 and a name is not a signature. The
+  threshold is derived and the seal signatures are cryptographically verified.

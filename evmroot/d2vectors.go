@@ -25,17 +25,20 @@ type D2VectorSet struct {
 // sealOutcomeRoot, with the ordinary transaction list carrying NONE of
 // them.
 type D2SealOutcomeCase struct {
-	Note              string        `json:"note"`
-	Outcomes          []SealOutcome `json:"outcomes"`
-	OutcomeRootHex    string        `json:"seal_outcome_root"`
-	OrdinaryTxCount   int           `json:"ordinary_tx_count"`
-	HeaderGasUsed     uint64        `json:"header_gas_used"`
-	SystemGas         uint64        `json:"system_gas"`
-	ForcedGasSum      uint64        `json:"forced_gas_sum"`
-	RecoveredOrdinary uint64        `json:"recovered_ordinary_gas"`
-	PoisonNotAReverT  bool          `json:"poison_entry_is_a_rejection_record_not_an_evm_revert"`
-	SystemInTxList    bool          `json:"system_or_forced_in_ordinary_tx_list"`
-	ImportOK          bool          `json:"import_ok"`
+	Note                        string        `json:"note"`
+	Outcomes                    []SealOutcome `json:"seal_registry_records"`
+	OutcomeRootHex              string        `json:"seal_registry_commitment"`
+	OrdinaryTxCount             int           `json:"ordinary_tx_count"`
+	ForcedTxCount               int           `json:"successful_forced_tx_count_in_receipt_trie"`
+	HeaderGasUsed               uint64        `json:"header_gas_used"`
+	SystemGas                   uint64        `json:"system_gas"`
+	RejectedConsumptionGas      uint64        `json:"rejected_entry_consumption_gas"`
+	RecoveredOrdinary           uint64        `json:"recovered_ordinary_gas"`
+	PoisonNotAReverT            bool          `json:"rejection_record_is_not_an_evm_revert"`
+	SystemOrRejectedInTrie      bool          `json:"system_or_rejected_record_in_a_trie"`
+	SuccessfulForcedInTxReceipt bool          `json:"successful_forced_tx_in_tx_and_receipt_trie"`
+	CommitmentInContractState   bool          `json:"commitment_is_a_contract_state_value_not_a_header_field"`
+	ImportOK                    bool          `json:"import_ok"`
 }
 
 // D2BaseFeeOracle cross-checks ExecConfig.NextBaseFee against an
@@ -103,27 +106,46 @@ type D2ImportVector struct {
 // imports.
 func d2RootInput() RootInput {
 	o := sampleOrigin()
+	te := sampleTE()
+	o.TRHash = teHash(te) // O_-.TRHash IS the hash of the carried technical record
 	return RootInput{
 		Version: ProfileVersion, NetworkID: 3, PartitionID: 0x45564d00, ShardID: []byte{},
-		Round: 57, CertifiedEpoch: o.IR.Epoch, AuthorizedEpoch: sampleTE().Epoch,
-		ParentHash: rep(0xEE, 32), Origin: o, TE: sampleTE(),
+		Round: 57, CertifiedEpoch: o.IR.Epoch, AuthorizedEpoch: te.Epoch,
+		ParentHash: rep(0xEE, 32), Origin: o, TE: te,
 	}
 }
 
-// d2TrustBase is the importer's trust-base view: a 5-member unequal-weight
-// assignment (10/6/5/2/1, W=24) and its recomputed quorum threshold (17).
-func d2TrustBase() (SignerAssignment, uint64) {
-	a := SignerAssignment{"root-a": 10, "root-b": 6, "root-c": 5, "root-d": 2, "root-e": 1}
-	return a, a.RootQuorumThreshold()
+// d2TrustBase is the importer's OWN authenticated assignment: 5 members,
+// weights 10/6/5/2/1 (W=24), real deterministic secp256k1 keys. The quorum
+// threshold (17) is derived from it.
+func d2TrustBase() D2TrustBase {
+	names := []struct {
+		id string
+		w  uint64
+	}{{"root-a", 10}, {"root-b", 6}, {"root-c", 5}, {"root-d", 2}, {"root-e", 1}}
+	var t D2TrustBase
+	for _, n := range names {
+		t.Members = append(t.Members, D2SealMember{NodeID: n.id, Weight: n.w, ConsensusKey: d2SealPub(n.id)})
+	}
+	return t
 }
 
 // d2SealSigners is a signer subset whose weight clears the threshold.
 func d2SealSigners() []string { return []string{"root-a", "root-b", "root-c"} } // 10+6+5 = 21 >= 17
 
+// d2Witness builds a verifying seal witness for a rootInput.
+func d2Witness(ri RootInput, signers []string) CompanionWitness {
+	oid := ri.Origin.Identity()
+	stmt := D2SealWitnessStatement(oid, ri.Origin.TRHash)
+	return CompanionWitness{
+		UC: UCWitness{OriginID: oid, SealSigners: signers, Signatures: SignD2SealWitness(stmt, signers)},
+	}
+}
+
 // validSealBlock builds a baseline block that passes every D2 predicate.
 func validSealBlock(cfg ExecConfig) (SealBlock, RootInput) {
 	ri := d2RootInput()
-	tb, thr := d2TrustBase()
+	tb := d2TrustBase()
 	ed := ri.ExtraData()
 	outcomes := []SealOutcome{
 		{Kind: OutcomeSystem, GasUsed: 1_800_000, Status: 1, Digest: ed[:]},
@@ -132,28 +154,27 @@ func validSealBlock(cfg ExecConfig) (SealBlock, RootInput) {
 		ExtraData: ed,
 		Context: BlockContext{
 			NetworkID: ri.NetworkID, PartitionID: ri.PartitionID, ShardID: ri.ShardID,
-			Round: ri.Round, ParentHash: ri.ParentHash, SealOutcomeRoot: SealOutcomeRoot(outcomes),
+			Round: ri.Round, ParentHash: ri.ParentHash,
 		},
-		BaseFee:         1_000_000_000,
-		Withdrawals:     0,
-		BlobTxCount:     0,
-		OrdinaryTxCount: 12,
+		SealRegistryStateValue: SealRegistryCommitment(outcomes),
+		BaseFee:                1_000_000_000,
+		Withdrawals:            0,
+		BlobTxCount:            0,
+		OrdinaryTxCount:        12,
+		ForcedTxCount:          0,
 		SystemCall: SystemCall{
 			From: SystemOrigin, To: SystemRegistry, Value: 0,
 			HasSig: false, HasNonce: false, FromTxPool: false, Succeeded: true,
 		},
 		Work: BlockWork{System: 1_800_000, Forced: 0, Ordinary: 15_000_000},
 		Companion: CompanionData{
-			Present:   true,
-			RootInput: ri,
-			Witness: CompanionWitness{
-				UC: UCWitness{OriginID: ri.Origin.Identity(), SealSigners: d2SealSigners()},
-			},
+			Present:      true,
+			RootInput:    ri,
+			Witness:      d2Witness(ri, d2SealSigners()),
 			SealOutcomes: outcomes,
 			Provenance:   "newPayload",
 		},
-		TrustBase:          tb,
-		TrustBaseThreshold: thr,
+		TrustBase: tb,
 	}, ri
 }
 
@@ -230,47 +251,55 @@ func BuildD2Vectors() D2VectorSet {
 		})
 	}
 
-	// --- seal-outcome list: system + poison + valid forced --------------
+	// --- seal-registry commitment: system op + a rejected forced entry;
+	//     a SUCCESSFUL forced tx is an ordinary tx (counted in ForcedTxCount,
+	//     in transactionsRoot / receiptsRoot with a standard receipt) -------
 	fcfg := cfg
 	fcfg.GFI = 2_000_000 // enable the forced inbox for this vector
 	fri := d2RootInput()
 	fed := fri.ExtraData()
 	fOutcomes := []SealOutcome{
 		{Kind: OutcomeSystem, GasUsed: 1_500_000, Status: 1, Digest: fed[:]},
-		{Kind: OutcomeForcedRejected, GasUsed: 0, Status: 0, Reason: "nonce_already_used", Digest: rep(0xF0, 32)},
-		{Kind: OutcomeForced, GasUsed: 400_000, Status: 1, Digest: rep(0xF1, 32)},
+		{Kind: OutcomeForcedRejected, GasUsed: 21_000, Status: 0, Reason: "nonce_already_used", Digest: rep(0xF0, 32)},
 	}
-	tb2, thr2 := d2TrustBase()
+	tb2 := d2TrustBase()
 	fBlock := SealBlock{
 		ExtraData: fed,
 		Context: BlockContext{
 			NetworkID: fri.NetworkID, PartitionID: fri.PartitionID, ShardID: fri.ShardID,
-			Round: fri.Round, ParentHash: fri.ParentHash, SealOutcomeRoot: SealOutcomeRoot(fOutcomes),
+			Round: fri.Round, ParentHash: fri.ParentHash,
 		},
-		BaseFee: 1_000_000_000, OrdinaryTxCount: 3,
-		SystemCall: SystemCall{From: SystemOrigin, To: SystemRegistry, Succeeded: true},
-		Work:       BlockWork{System: 1_500_000, Forced: 400_000, Ordinary: 10_000_000},
+		SealRegistryStateValue: SealRegistryCommitment(fOutcomes),
+		BaseFee:                1_000_000_000,
+		OrdinaryTxCount:        3,
+		ForcedTxCount:          1, // one successful forced tx, sitting in the ordinary tx/receipt trie
+		SystemCall:             SystemCall{From: SystemOrigin, To: SystemRegistry, Succeeded: true},
+		// Ordinary now includes the successful forced tx's 400_000 gas.
+		Work: BlockWork{System: 1_500_000, Forced: 21_000, Ordinary: 10_400_000},
 		Companion: CompanionData{
 			Present: true, RootInput: fri,
-			Witness:      CompanionWitness{UC: UCWitness{OriginID: fri.Origin.Identity(), SealSigners: d2SealSigners()}},
+			Witness:      d2Witness(fri, d2SealSigners()),
 			SealOutcomes: fOutcomes, Provenance: "newPayload",
 		},
-		TrustBase: tb2, TrustBaseThreshold: thr2,
+		TrustBase: tb2,
 	}
 	fRes := ValidateImport(fBlock, fcfg)
 	headerGas := fBlock.Work.HeaderGasUsed()
-	forcedSum := fOutcomes[1].GasUsed + fOutcomes[2].GasUsed
-	recOrd, _ := RecoverOrdinaryGas(headerGas, fOutcomes[0].GasUsed, forcedSum)
-	sor := SealOutcomeRoot(fOutcomes)
+	rejectedConsumption := fOutcomes[1].GasUsed
+	recOrd, _ := RecoverOrdinaryGas(headerGas, fOutcomes[0].GasUsed, rejectedConsumption)
+	src := SealRegistryCommitment(fOutcomes)
 	vs.SealOutcomes = D2SealOutcomeCase{
-		Note: "System op + forced entries live in the seal-outcome list committed by sealOutcomeRoot, NOT in the Ethereum transaction list. " +
-			"A poison entry is a rejection record (Kind=forced_rejected, an authenticated reason), never an EVM revert. " +
-			"transactionsRoot/receiptsRoot keep standard semantics over the ordinary txs only.",
-		Outcomes: fOutcomes, OutcomeRootHex: hx(sor[:]), OrdinaryTxCount: fBlock.OrdinaryTxCount,
-		HeaderGasUsed: headerGas, SystemGas: fOutcomes[0].GasUsed, ForcedGasSum: forcedSum, RecoveredOrdinary: recOrd,
-		PoisonNotAReverT: fOutcomes[1].Kind == OutcomeForcedRejected && fOutcomes[1].Reason != "",
-		SystemInTxList:   false, // by construction: the tx list count excludes them
-		ImportOK:         fRes.OK,
+		Note: "The system op and the rejection record for a forced entry invalid at its turn are committed by a value in the seal-registry contract's storage (authenticated by stateRoot via eth_getProof) — NOT a header field. " +
+			"A rejection record is Kind=forced_rejected with an authenticated reason, NEVER an EVM revert. " +
+			"A SUCCESSFUL forced transaction is an ordinary transaction: it is in transactionsRoot / receiptsRoot with a standard receipt (logs, bloom, cumulative gas). " +
+			"header.gasUsed = ordinary cumulative (incl. successful forced) + g_sys work + the g_fi consumption charge for rejected entries; it is not unchanged vs a vanilla block.",
+		Outcomes: fOutcomes, OutcomeRootHex: hx(src[:]), OrdinaryTxCount: fBlock.OrdinaryTxCount, ForcedTxCount: fBlock.ForcedTxCount,
+		HeaderGasUsed: headerGas, SystemGas: fOutcomes[0].GasUsed, RejectedConsumptionGas: rejectedConsumption, RecoveredOrdinary: recOrd,
+		PoisonNotAReverT:            fOutcomes[1].Kind == OutcomeForcedRejected && fOutcomes[1].Reason != "",
+		SystemOrRejectedInTrie:      false, // neither is a transaction or a receipt
+		SuccessfulForcedInTxReceipt: true,  // it IS an ordinary tx/receipt
+		CommitmentInContractState:   true,  // not a header field
+		ImportOK:                    fRes.OK,
 	}
 
 	// --- import checks --------------------------------------------------
@@ -288,13 +317,27 @@ func BuildD2Vectors() D2VectorSet {
 		{"valid", mut(func(*SealBlock) {}), true, ""},
 		{"companion_missing", mut(func(b *SealBlock) { b.Companion.Present = false }), false, "companion_missing"},
 		{"witness_wrong_origin", mut(func(b *SealBlock) { b.Companion.Witness.UC.OriginID = Hash32{1} }), false, "companion_unauthenticated"},
-		{"witness_below_threshold", mut(func(b *SealBlock) { b.Companion.Witness.UC.SealSigners = []string{"root-d", "root-e"} }), false, "companion_unauthenticated"}, // 2+1 = 3 < 17
-		{"witness_unknown_signer", mut(func(b *SealBlock) { b.Companion.Witness.UC.SealSigners = []string{"root-a", "ghost"} }), false, "companion_unauthenticated"},
+		{"witness_below_threshold", mut(func(b *SealBlock) {
+			b.Companion.Witness = d2Witness(b.Companion.RootInput, []string{"root-d", "root-e"}) // 2+1 = 3 < 17, all signed
+		}), false, "companion_unauthenticated"},
+		{"witness_unknown_signer", mut(func(b *SealBlock) {
+			// a real signature from a key that is NOT in the assignment
+			st := D2SealWitnessStatement(b.Companion.RootInput.Origin.Identity(), b.Companion.RootInput.Origin.TRHash)
+			b.Companion.Witness.UC.Signatures = SignD2SealWitness(st, []string{"root-a", "root-b", "ghost"})
+		}), false, "companion_unauthenticated"},
+		{"witness_name_without_signature", mut(func(b *SealBlock) {
+			// claim a quorum of names but only sign with root-e (weight 1)
+			b.Companion.Witness = d2Witness(b.Companion.RootInput, []string{"root-e"})
+			b.Companion.Witness.UC.SealSigners = d2SealSigners()
+		}), false, "companion_unauthenticated"},
+		{"witness_te_not_bound_to_trhash", mut(func(b *SealBlock) {
+			b.Companion.RootInput.TE.Leader = "someone-else" // TE no longer hashes to Origin.TRHash
+		}), false, "companion_unauthenticated"},
 		{"witness_transition_proof_count", mut(func(b *SealBlock) {
 			b.Companion.RootInput.Transitions = [][]byte{rep(0xB0, 8)}
 			// extraData + outcome root now stale, but the witness count check fires first
 		}), false, "companion_unauthenticated"},
-		{"rootinput_invalid_epoch", mut(func(b *SealBlock) { b.Companion.RootInput.AuthorizedEpoch = 9; b.Companion.RootInput.TE.Epoch = 9 }), false, "rootinput_invalid"},
+		{"rootinput_invalid_epoch", mut(func(b *SealBlock) { b.Companion.RootInput.AuthorizedEpoch = 9 }), false, "rootinput_invalid"}, // TE.Epoch (1) != AuthorizedEpoch (9); TE unchanged so the witness still binds
 		{"rootinput_short_parent_hash", mut(func(b *SealBlock) { b.Companion.RootInput.ParentHash = rep(0xEE, 31) }), false, "rootinput_invalid"},
 		{"malformed_origin_breaks_witness", mut(func(b *SealBlock) { b.Companion.RootInput.Origin.TRHash = rep(1, 8) }), false, "companion_unauthenticated"}, // a malformed O_- cannot carry a matching witness
 		{"context_mismatch_round", mut(func(b *SealBlock) { b.Context.Round = 58 }), false, "context_mismatch"},
@@ -302,13 +345,17 @@ func BuildD2Vectors() D2VectorSet {
 		{"extradata_mismatch", mut(func(b *SealBlock) { b.ExtraData[0] ^= 0xff }), false, "extradata_mismatch"},
 		{"seal_outcomes_empty", mut(func(b *SealBlock) { b.Companion.SealOutcomes = nil }), false, "seal_outcomes_shape"},
 		{"system_not_first_outcome", mut(func(b *SealBlock) {
-			b.Companion.SealOutcomes = []SealOutcome{{Kind: OutcomeForced, GasUsed: 1, Status: 1}, {Kind: OutcomeSystem, GasUsed: 1_800_000, Status: 1}}
-			b.Context.SealOutcomeRoot = SealOutcomeRoot(b.Companion.SealOutcomes)
+			b.Companion.SealOutcomes = []SealOutcome{{Kind: OutcomeForcedRejected, GasUsed: 1, Status: 0, Reason: "x"}, {Kind: OutcomeSystem, GasUsed: 1_800_000, Status: 1}}
+			b.SealRegistryStateValue = SealRegistryCommitment(b.Companion.SealOutcomes)
 		}), false, "seal_outcomes_shape"},
-		{"seal_outcome_root_mismatch", mut(func(b *SealBlock) { b.Context.SealOutcomeRoot[0] ^= 0xff }), false, "seal_outcome_root_mismatch"},
+		{"successful_forced_not_a_seal_record", mut(func(b *SealBlock) {
+			b.Companion.SealOutcomes = append(b.Companion.SealOutcomes, SealOutcome{Kind: "forced", GasUsed: 400_000, Status: 1})
+			b.SealRegistryStateValue = SealRegistryCommitment(b.Companion.SealOutcomes)
+		}), false, "seal_outcomes_shape"},
+		{"seal_registry_commitment_mismatch", mut(func(b *SealBlock) { b.SealRegistryStateValue[0] ^= 0xff }), false, "seal_registry_commitment_mismatch"},
 		{"system_outcome_status_zero", mut(func(b *SealBlock) {
 			b.Companion.SealOutcomes[0].Status = 0
-			b.Context.SealOutcomeRoot = SealOutcomeRoot(b.Companion.SealOutcomes)
+			b.SealRegistryStateValue = SealRegistryCommitment(b.Companion.SealOutcomes)
 		}), false, "system_failed"},
 		{"system_origin_forged", mut(func(b *SealBlock) { b.SystemCall.From = [20]byte{0: 0x01} }), false, "system_origin_forged"},
 		{"system_value_nonzero", mut(func(b *SealBlock) { b.SystemCall.Value = 1 }), false, "system_value_nonzero"},

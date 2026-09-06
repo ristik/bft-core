@@ -9,14 +9,27 @@ import (
 // (builder, follower, devp2p import, re-execution) applies to a sealed
 // enshrined-EVM block before it can be certified.
 //
-// The protocol operations (the privileged seal call and the
-// forced-inclusion prefix) live in a SEPARATE committed structure — the
-// seal-outcome list — NOT in the Ethereum transaction list. Ordinary
-// transactions keep standard `transactionsRoot` / `receiptsRoot` semantics
-// unchanged; an intrinsically invalid forced entry is consumed with a
-// seal-outcome rejection record, never as an EVM revert.
+// Third-review revision — minimal client divergence:
 //
-// Normative source: docs/design/d2-reth-system-call-fee-profile.md.
+//   - A SUCCESSFUL forced-inclusion transaction IS an ordinary Ethereum
+//     transaction. It sits in `transactionsRoot` / `receiptsRoot` with a
+//     standard receipt (logs, bloom, cumulative gas), so its events export
+//     through the normal receipt proof. No divergence.
+//   - Only two things cannot be ordinary transactions: the privileged seal
+//     call (no fee payer, no signature) and a REJECTED forced-inbox entry
+//     (an authenticated rejection record — not an EVM transaction, so it
+//     has no receipt). These are committed by a value the system call
+//     writes into the seal-registry contract's storage — the
+//     `sealRegistryCommitment` — which is already covered by the block's
+//     `stateRoot` and provable via `eth_getProof`. There is NO new header
+//     field. `extraData` (D1) hashes only the rootInput and never claimed
+//     to cover these.
+//   - `header.gasUsed` is the standard cumulative gas over the transaction
+//     list (now including successful forced txs) PLUS the seal call's
+//     `g_sys` work. It is NOT "entirely unchanged"; it includes the
+//     system-call gas, which is bounded by `g_sys` and recoverable.
+//
+// Normative source: docs/design/d2-reth-system-call-fee-profile.md §3.
 
 // Fixed protocol addresses (illustrative values; a deployment pins them in
 // ExecConfig-adjacent partition configuration). No private key can
@@ -38,34 +51,39 @@ type SystemCall struct {
 	Succeeded  bool   // false => whole block invalid
 }
 
-// SealOutcomeKind classifies one entry of the seal-outcome list.
+// SealOutcomeKind classifies one entry committed by the seal-registry
+// contract-state commitment.
 type SealOutcomeKind string
 
 const (
 	OutcomeSystem         SealOutcomeKind = "system"          // the privileged seal call — index 0, always
-	OutcomeForced         SealOutcomeKind = "forced"          // an executed forced-inclusion entry (may have reverted)
-	OutcomeForcedRejected SealOutcomeKind = "forced_rejected" // an entry invalid at its turn — consumed, NOT executed
+	OutcomeForcedRejected SealOutcomeKind = "forced_rejected" // a forced-inbox entry invalid at its turn — consumed with an authenticated reason, NEVER executed, NOT an EVM revert
 )
 
-// SealOutcome is one record in the seal-outcome list. It is NOT an RLP
-// receipt: there is no corresponding entry in the transaction list, no
-// transactionsRoot slot, and no receiptsRoot slot. Its only proof surface
-// is the sealOutcomeRoot committed in companion data.
+// SealOutcome is one record committed by SealRegistryCommitment — the
+// system call and the authenticated rejection records for forced-inbox
+// entries invalid at their turn. It is NOT an RLP receipt and NOT a
+// transaction. A SUCCESSFUL forced transaction is not here: it is an
+// ordinary transaction in transactionsRoot / receiptsRoot with a standard
+// receipt (logs, bloom, cumulative gas).
 type SealOutcome struct {
 	Kind    SealOutcomeKind
-	GasUsed uint64 // charged against g_sys (system) or g_fi (forced); never a fee payer
-	Status  uint8  // 1 executed OK, 0 executed-and-reverted; a rejected entry has status 0 with a Reason
+	GasUsed uint64 // g_sys work (system) or the g_fi consumption charge for a rejected entry; never a fee payer
+	Status  uint8  // system: 1 (0 ⇒ block invalid). forced_rejected: always 0, with a Reason
 	Reason  string // authenticated rejection reason for OutcomeForcedRejected, else ""
-	Digest  []byte // 32-byte digest of the entry's canonical payload (forced) or the rootInput commitment (system)
+	Digest  []byte // 32-byte digest of the rejected entry's canonical payload, or the rootInput commitment (system)
 }
 
 func (o SealOutcome) canonical() cArray {
 	return cArray{cText(string(o.Kind)), cUint(o.GasUsed), cUint(uint64(o.Status)), cText(o.Reason), optBytes(o.Digest)}
 }
 
-// SealOutcomeRoot is SHA-256(CBOR([outcome_0, outcome_1, …])) over the
-// ordered list. outcome_0 is always the system call.
-func SealOutcomeRoot(outcomes []SealOutcome) [32]byte {
+// SealRegistryCommitment is SHA-256(CBOR([outcome_0, outcome_1, …])) over
+// the ordered list. outcome_0 is always the system call; the rest are
+// rejection records. The system call writes this value into the
+// seal-registry contract's storage, so it is authenticated by the block's
+// stateRoot (provable via eth_getProof) — NOT by a header field.
+func SealRegistryCommitment(outcomes []SealOutcome) [32]byte {
 	arr := make(cArray, len(outcomes))
 	for i, o := range outcomes {
 		arr[i] = o.canonical()
@@ -73,51 +91,20 @@ func SealOutcomeRoot(outcomes []SealOutcome) [32]byte {
 	return sha256.Sum256(marshalCBOR(arr))
 }
 
-// SignerAssignment is the D2-local view of the root assignment: NodeID ->
-// effective weight. D3 owns the full weighted-consensus model; D2 needs
-// only "sum the unique authorised signers' weight and compare a threshold",
-// so it carries a minimal copy rather than depending on D3 (D2 and D3 are
-// independent tracks off D1).
-type SignerAssignment map[string]uint64
-
-// TotalWeight sums all members' weight.
-func (a SignerAssignment) TotalWeight() uint64 {
-	var w uint64
-	for _, v := range a {
-		w += v
-	}
-	return w
-}
-
-// RootQuorumThreshold is ⌊2W/3⌋+1 over the assignment — recomputed here,
-// never accepted from the companion.
-func (a SignerAssignment) RootQuorumThreshold() uint64 { return (2*a.TotalWeight())/3 + 1 }
-
-// SignerWeight sums the unique authorised signers' weight. ok is false on an
-// unknown or duplicate signer.
-func (a SignerAssignment) SignerWeight(signers []string) (weight uint64, ok bool) {
-	seen := make(map[string]struct{}, len(signers))
-	for _, s := range signers {
-		if _, dup := seen[s]; dup {
-			return 0, false
-		}
-		seen[s] = struct{}{}
-		w, known := a[s]
-		if !known {
-			return 0, false
-		}
-		weight += w
-	}
-	return weight, true
-}
+// The D2-local root-assignment view (NodeID + weight + consensus key) and
+// its derived threshold live in d2seal.go as D2TrustBase. D3 owns the full
+// weighted-consensus model; D2 and D3 are independent tracks off D1, so D2
+// carries this minimal copy rather than depending on D3.
 
 // UCWitness is the verified-UC evidence a companion carries: the O_-
-// identity the UC certifies and the seal's signer node-ids. The seal
-// signatures themselves are verified by whoever holds the trust base (the
-// shard node / adapter); see VerifyCompanionWitnesses for the boundary.
+// identity the UC certifies, the claimed seal signer node-ids, and the
+// actual secp256k1 signatures over D2SealWitnessStatement(OriginID,
+// Origin.TRHash). VerifyCompanionWitnesses checks the signatures against
+// the verifier's OWN authenticated assignment — a name is not evidence.
 type UCWitness struct {
 	OriginID    Hash32
-	SealSigners []string // NodeIDs whose signatures are on the seal
+	SealSigners []string          // claimed signers (informational; only signed ones count)
+	Signatures  map[string][]byte // NodeID -> signature over the seal-witness statement
 }
 
 // CompanionWitness carries the authentication evidence for a block's
@@ -146,34 +133,56 @@ type CompanionAuth struct {
 	Reason string
 }
 
-// VerifyCompanionWitnesses is the AUTHENTICATION BOUNDARY. Trusted inputs:
-// the caller's own trust-base view (`tb`, `threshold`) — from D3, obtained
-// from authenticated seal-registry state, never from the companion. It
-// checks:
+// teHash is H(CBOR(TE_-)) in the same field order the canonical root input
+// commits — the value O_-.TRHash must equal.
+func teHash(te TechnicalRecord) []byte {
+	h := sha256Slice(marshalCBOR(cArray{
+		cUint(te.Round), cUint(te.Epoch), cText(te.Leader), cBytes(te.StatHash), cBytes(te.FeeHash),
+	}))
+	return h
+}
+
+// VerifyCompanionWitnesses is the AUTHENTICATION BOUNDARY. Its only trusted
+// input is the verifier's OWN authenticated assignment `tb` (from
+// authenticated seal-registry state, never from the companion). It checks
+// PROOF BINDINGS, not assertions:
 //
-//   - the witness UC certifies exactly this rootInput's O_- (OriginID);
-//   - the seal's unique authorised signer weight meets the threshold
-//     (reusing D3's weighted-quorum rule over the caller's assignment);
+//   - the witness UC certifies exactly this rootInput's O_- (OriginID ==
+//     Origin.Identity());
+//   - the carried technical record is bound to the certified TRHash
+//     (H(CBOR(TE_-)) == Origin.TRHash) — a swapped TE is rejected;
+//   - the threshold is DERIVED here as tb.RootQuorumThreshold(); a
+//     companion-supplied threshold is not consulted and cannot exist;
+//   - the seal signatures VERIFY: each is checked with secp256k1 against
+//     the named member's consensus key over
+//     D2SealWitnessStatement(OriginID, Origin.TRHash), and only verified
+//     signers' weight counts toward the quorum. Signer names alone are
+//     worth nothing;
 //   - there is one transition proof per rootInput.Transitions entry.
 //
-// WHO runs it: the shard node / Engine-API adapter, which holds the trust
-// base. Over the JWT-authenticated Engine API the execution client trusts
-// that verdict; a devp2p importer and an offline re-executor re-run this
-// function against their OWN trust base using the same companion witnesses.
-// The verdict is never an untrusted companion assertion.
-func VerifyCompanionWitnesses(w CompanionWitness, ri RootInput, tb SignerAssignment, threshold uint64) CompanionAuth {
+// WHO runs it: the shard node / Engine-API adapter, which holds the
+// assignment. Over the JWT-authenticated Engine API the execution client
+// trusts that verdict; a devp2p importer and an offline re-executor re-run
+// this function against their OWN assignment using the same witnesses. The
+// verdict is never an untrusted companion assertion.
+func VerifyCompanionWitnesses(w CompanionWitness, ri RootInput, tb D2TrustBase) CompanionAuth {
 	if w.UC.OriginID != ri.Origin.Identity() {
 		return CompanionAuth{Reason: "witness UC certifies a different O_- than the companion rootInput"}
 	}
-	if threshold == 0 {
-		return CompanionAuth{Reason: "trust-base threshold is zero"}
+	if len(ri.Origin.TRHash) != 32 || !bytesEqualD2(teHash(ri.TE), ri.Origin.TRHash) {
+		return CompanionAuth{Reason: "carried technical record is not bound to the certified TRHash"}
 	}
-	sw, ok := tb.SignerWeight(w.UC.SealSigners)
+	if tb.TotalWeight() == 0 {
+		return CompanionAuth{Reason: "verifier trust base is empty"}
+	}
+	threshold := tb.RootQuorumThreshold()
+	stmt := D2SealWitnessStatement(w.UC.OriginID, ri.Origin.TRHash)
+	sw, ok := tb.VerifiedSignerWeight(stmt, w.UC.Signatures)
 	if !ok {
-		return CompanionAuth{Reason: "seal signer set is malformed (unknown/duplicate signer)"}
+		return CompanionAuth{Reason: "seal witness carries no verifying signature (unknown/duplicate/bad signature)"}
 	}
 	if sw < threshold {
-		return CompanionAuth{Reason: "seal signer weight is below the root quorum threshold"}
+		return CompanionAuth{Reason: "verified seal signer weight is below the derived root quorum threshold"}
 	}
 	if len(w.TransitionProofs) != len(ri.Transitions) {
 		return CompanionAuth{Reason: "transition-proof count does not match rootInput.Transitions"}
@@ -185,6 +194,8 @@ func VerifyCompanionWitnesses(w CompanionWitness, ri RootInput, tb SignerAssignm
 	}
 	return CompanionAuth{OK: true}
 }
+
+func bytesEqualD2(a, b []byte) bool { return string(a) == string(b) }
 
 func itoaSmall(i int) string {
 	if i == 0 {
@@ -203,30 +214,36 @@ func itoaSmall(i int) string {
 // BlockContext is the block-header context the decoded rootInput must agree
 // with.
 type BlockContext struct {
-	NetworkID       uint64
-	PartitionID     uint64
-	ShardID         []byte
-	Round           uint64
-	ParentHash      []byte
-	SealOutcomeRoot [32]byte // header sibling field committing the seal-outcome list
+	NetworkID   uint64
+	PartitionID uint64
+	ShardID     []byte
+	Round       uint64
+	ParentHash  []byte
 }
 
 // SealBlock is the subset of a sealed block D2 import validation inspects.
 type SealBlock struct {
-	ExtraData       [32]byte
-	Context         BlockContext
-	BaseFee         uint64
-	Withdrawals     int
-	BlobTxCount     int
-	OrdinaryTxCount int // entries in the Ethereum transaction list — never includes system/forced
-	SystemCall      SystemCall
-	Work            BlockWork
-	Companion       CompanionData
+	ExtraData   [32]byte
+	Context     BlockContext
+	BaseFee     uint64
+	Withdrawals int
+	BlobTxCount int
+	// Discretionary transactions and SUCCESSFUL forced transactions are both
+	// ordinary entries in transactionsRoot / receiptsRoot. Split only for
+	// reporting; neither ever includes the system call or a rejection record.
+	OrdinaryTxCount int
+	ForcedTxCount   int
+	// The value the system call wrote into the seal-registry contract's
+	// storage — authenticated by the block's stateRoot, not a header field.
+	SealRegistryStateValue [32]byte
+	SystemCall             SystemCall
+	Work                   BlockWork
+	Companion              CompanionData
 
-	// Trust-base view the importer holds (from D3, via authenticated
-	// seal-registry state). Not part of the block; supplied by the caller.
-	TrustBase          SignerAssignment
-	TrustBaseThreshold uint64
+	// The importer's OWN authenticated root assignment (from authenticated
+	// seal-registry state). Not part of the block. The quorum threshold is
+	// derived from it, never carried.
+	TrustBase D2TrustBase
 }
 
 // ImportResult is the outcome of ValidateImport.
@@ -249,7 +266,7 @@ func ValidateImport(b SealBlock, cfg ExecConfig) ImportResult {
 
 	// Authentication boundary: verify the witness against the caller's own
 	// trust base. Executing the payload authenticates nothing.
-	auth := VerifyCompanionWitnesses(b.Companion.Witness, b.Companion.RootInput, b.TrustBase, b.TrustBaseThreshold)
+	auth := VerifyCompanionWitnesses(b.Companion.Witness, b.Companion.RootInput, b.TrustBase)
 	if !auth.OK {
 		return reject("companion_unauthenticated", auth.Reason)
 	}
@@ -273,24 +290,24 @@ func ValidateImport(b SealBlock, cfg ExecConfig) ImportResult {
 		return reject("extradata_mismatch", "header extraData != SHA-256(CBOR(canonical rootInput))")
 	}
 
-	// Seal-outcome list: committed by its own root, distinct from the tx
-	// list. outcome_0 is the system call; the rest are forced outcomes.
+	// Seal-registry commitment: the system call (index 0) plus authenticated
+	// rejection records, committed by a value in the seal-registry
+	// contract's storage — authenticated by stateRoot, NOT a header field.
+	// A successful forced transaction is an ordinary tx and is NOT here.
 	outs := b.Companion.SealOutcomes
 	if len(outs) == 0 || outs[0].Kind != OutcomeSystem {
 		return reject("seal_outcomes_shape", "seal-outcome list is empty or does not start with the system call")
 	}
 	for i, o := range outs[1:] {
-		if o.Kind != OutcomeForced && o.Kind != OutcomeForcedRejected {
-			return reject("seal_outcomes_shape", "non-forced entry at seal-outcome index "+itoaSmall(i+1))
+		if o.Kind != OutcomeForcedRejected {
+			return reject("seal_outcomes_shape", "seal-outcome index "+itoaSmall(i+1)+" is not a forced-rejection record (successful forced txs are ordinary txs)")
 		}
 	}
-	if got := SealOutcomeRoot(outs); got != ctx.SealOutcomeRoot {
-		return reject("seal_outcome_root_mismatch", "header sealOutcomeRoot != SHA-256(CBOR(seal-outcome list))")
+	if got := SealRegistryCommitment(outs); got != b.SealRegistryStateValue {
+		return reject("seal_registry_commitment_mismatch", "seal-registry storage value != SHA-256(CBOR(system + rejection records)) — check via eth_getProof against stateRoot")
 	}
-	// The ordinary transaction list must NOT include the system op or any
-	// forced entry — its count is exactly the discretionary transactions.
-	if b.OrdinaryTxCount < 0 {
-		return reject("tx_list_shape", "negative ordinary transaction count")
+	if b.OrdinaryTxCount < 0 || b.ForcedTxCount < 0 {
+		return reject("tx_list_shape", "negative transaction count")
 	}
 
 	sc := b.SystemCall

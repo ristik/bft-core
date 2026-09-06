@@ -93,18 +93,40 @@ func TestD2_AuthenticationBoundary(t *testing.T) {
 		t.Fatalf("witness for a different O_- accepted: %+v", r)
 	}
 
-	// Seal signer weight below the recomputed root quorum threshold.
+	// Verified seal signer weight below the derived root quorum threshold —
+	// real signatures, but only 2+1 = 3 < 17.
 	b, _ = validSealBlock(cfg)
-	b.Companion.Witness.UC.SealSigners = []string{"root-d", "root-e"} // 2+1 = 3 < 17
+	b.Companion.Witness = d2Witness(b.Companion.RootInput, []string{"root-d", "root-e"})
 	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
 		t.Fatalf("below-threshold seal accepted: %+v", r)
 	}
 
-	// The importer recomputes the threshold from its own assignment — a
-	// companion-supplied low threshold cannot help.
-	tb, thr := d2TrustBase()
-	if thr != tb.RootQuorumThreshold() || thr != 17 {
-		t.Fatalf("threshold not recomputed from the assignment: %d", thr)
+	// The importer DERIVES the threshold from its own assignment. There is
+	// no threshold parameter to lie about.
+	tb := d2TrustBase()
+	if tb.RootQuorumThreshold() != 17 {
+		t.Fatalf("threshold not derived from the assignment: %d", tb.RootQuorumThreshold())
+	}
+	// A quorum of signer NAMES with only one real signature is not enough.
+	b, _ = validSealBlock(cfg)
+	st := D2SealWitnessStatement(b.Companion.RootInput.Origin.Identity(), b.Companion.RootInput.Origin.TRHash)
+	b.Companion.Witness.UC.SealSigners = d2SealSigners()
+	b.Companion.Witness.UC.Signatures = SignD2SealWitness(st, []string{"root-e"}) // weight 1
+	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
+		t.Fatalf("signer names without signatures accepted: %+v", r)
+	}
+	// VerifyCompanionWitnesses itself: assignment {a:10,b:6,c:5,d:2,e:1},
+	// signer e alone. Root quorum is 17; no caller can pass a threshold=1.
+	eOnly := d2Witness(d2RootInput(), []string{"root-e"})
+	if VerifyCompanionWitnesses(eOnly, d2RootInput(), tb).OK {
+		t.Fatal("signer e alone authenticated despite a derived quorum of 17")
+	}
+
+	// A swapped technical record: TE no longer hashes to Origin.TRHash.
+	b, _ = validSealBlock(cfg)
+	b.Companion.RootInput.TE.Leader = "someone-else"
+	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
+		t.Fatalf("TE not bound to the certified TRHash: %+v", r)
 	}
 
 	// Transition-proof count must match rootInput.Transitions.
@@ -114,10 +136,12 @@ func TestD2_AuthenticationBoundary(t *testing.T) {
 		t.Fatalf("transition-proof count mismatch accepted: %+v", r)
 	}
 
-	// Structurally invalid rootInput (after a passing witness).
+	// Structurally invalid rootInput (after a passing witness): only
+	// AuthorizedEpoch is bumped, so the TE still hashes to Origin.TRHash and
+	// the witness authenticates; RootInput.Validate then fails on
+	// TE.Epoch != AuthorizedEpoch.
 	b, _ = validSealBlock(cfg)
 	b.Companion.RootInput.AuthorizedEpoch = 9
-	b.Companion.RootInput.TE.Epoch = 9
 	if r := ValidateImport(b, cfg); r.OK || r.Code != "rootinput_invalid" {
 		t.Fatalf("structurally invalid rootInput accepted: %+v", r)
 	}
@@ -136,20 +160,26 @@ func TestD2_AuthenticationBoundary(t *testing.T) {
 func TestD2_SealOutcomeListSeparateFromTxList(t *testing.T) {
 	v := BuildD2Vectors().SealOutcomes
 	if !v.ImportOK {
-		t.Fatal("the poison-then-valid seal-outcome block did not import")
+		t.Fatal("the system-op + rejection-record block did not import")
 	}
-	if v.SystemInTxList {
-		t.Fatal("the system op or a forced entry is in the ordinary transaction list")
+	if v.SystemOrRejectedInTrie {
+		t.Fatal("the system op or a rejection record is in a transaction/receipt trie")
+	}
+	if !v.SuccessfulForcedInTxReceipt {
+		t.Fatal("a successful forced tx is not exported through the ordinary tx/receipt trie")
+	}
+	if !v.CommitmentInContractState {
+		t.Fatal("the seal-registry commitment is claimed as a header field, not contract state")
 	}
 	if !v.PoisonNotAReverT {
-		t.Fatal("the poison entry is not a rejection record with an authenticated reason")
+		t.Fatal("the rejected entry is not a rejection record with an authenticated reason")
 	}
-	if v.HeaderGasUsed != v.SystemGas+v.ForcedGasSum+v.RecoveredOrdinary {
+	if v.HeaderGasUsed != v.SystemGas+v.RejectedConsumptionGas+v.RecoveredOrdinary {
 		t.Fatalf("gas does not close: header %d != %d + %d + %d",
-			v.HeaderGasUsed, v.SystemGas, v.ForcedGasSum, v.RecoveredOrdinary)
+			v.HeaderGasUsed, v.SystemGas, v.RejectedConsumptionGas, v.RecoveredOrdinary)
 	}
-	// system_not_first_outcome and seal_outcome_root_mismatch are covered
-	// by the import_checks table.
+	// system_not_first_outcome, successful_forced_not_a_seal_record and
+	// seal_registry_commitment_mismatch are covered by the import_checks table.
 }
 
 func TestD2_NextBaseFeeNoOverflow(t *testing.T) {

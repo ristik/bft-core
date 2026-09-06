@@ -62,18 +62,29 @@ the same bad block for the same stated reason.
 ### The authentication lifecycle — who verifies, and the trusted boundary
 
 There is **no free-standing `Authenticated` boolean**. The verdict is produced by
-`VerifyCompanionWitnesses(witness, rootInput, trustBase, threshold)`, whose
-inputs, checks and obligations are:
+`VerifyCompanionWitnesses(witness, rootInput, trustBase)`, which checks **proof
+bindings, not assertions**:
 
-- **Trusted inputs**: the verifier's **own** trust-base view (`trustBase`,
-  `threshold`) — a `NodeID → weight` assignment obtained from **authenticated
-  seal-registry state** (D3), never from the companion. The `threshold` is
-  **recomputed** as `⌊2W/3⌋+1` over that assignment; a companion-supplied
-  threshold is ignored.
+- **The only trusted input** is the verifier's **own** authenticated assignment
+  `D2TrustBase` — `{NodeID, weight, consensusKey}` members from **authenticated
+  seal-registry state**, never from the companion. There is **no `threshold`
+  parameter**: it is **derived** here as `⌊2W/3⌋+1` over that assignment, so a
+  companion cannot supply one. (`{a:10,b:6,c:5,d:2,e:1}`, signer `e` alone → root
+  quorum 17 → rejected; `TestD2_AuthenticationBoundary`.)
 - **Checks**: (a) the witness UC certifies **exactly this `rootInput`'s `O_-`**
-  (`witness.UC.OriginID == rootInput.Origin.Identity()`); (b) the seal's
-  **unique authorised signer weight ≥ threshold**; (c) one non-empty transition
-  proof per `rootInput.Transitions` entry.
+  (`witness.UC.OriginID == rootInput.Origin.Identity()`); (b) the **carried
+  technical record is bound to the certified TRHash** —
+  `SHA-256(CBOR(TE_-)) == Origin.TRHash` — so a swapped `TE` fails; (c) the seal
+  **signatures verify**: each is a real secp256k1 signature checked against the
+  named member's `consensusKey` over
+  `D2SealWitnessStatement(OriginID, Origin.TRHash)`, and **only verified
+  signers' weight counts** toward the quorum — a quorum of signer *names* with
+  one real signature is not enough; (d) one non-empty transition proof per
+  `rootInput.Transitions` entry.
+- **Where the assignment + keys come from** is an explicit **upstream boundary**:
+  the shard node / adapter derives the authenticated seal-registry assignment
+  (network / config / trust-base chain) and passes `D2TrustBase` in. This
+  function is the *check*, not the *source of trust*.
 - **Who runs it, per path**:
   - **build**: the shard node holds the authorizing certificate (it is the
     leader). `sealBuildInput` carries only `{rootInput, transitions}` because the
@@ -88,9 +99,11 @@ inputs, checks and obligations are:
     witness + transition proofs carried in `sealCompanion.witnesses`. The
     verdict is never an untrusted companion assertion.
 - **Negative fixtures** (`import_checks`): `witness_wrong_origin`,
-  `witness_below_threshold`, `witness_unknown_signer`,
-  `witness_transition_proof_count`, `malformed_origin_breaks_witness` (a
-  malformed `O_-` cannot carry a matching witness).
+  `witness_below_threshold` (real signatures, weight 3 < 17),
+  `witness_unknown_signer` (a real signature from a key not in the assignment),
+  `witness_name_without_signature` (quorum of names, one signature),
+  `witness_te_not_bound_to_trhash`, `witness_transition_proof_count`,
+  `malformed_origin_breaks_witness`.
 
 ### Verified-input boundary (ordered predicates)
 
@@ -105,7 +118,7 @@ invalid **regardless of whether its Ethereum payload executes**:
 | 3 | `rootinput_invalid` | the decoded `rootInput` passes D1 `RootInput.Validate` |
 | 4 | `context_mismatch` | `rootInput`'s network/partition/shard, authorized round and parent hash equal the block header context |
 | 5 | `extradata_mismatch` | `header.extraData == SHA-256(CBOR(canonical rootInput))` |
-| 6 | `seal_outcomes_shape` / `seal_outcome_root_mismatch` | the seal-outcome list starts with the system op, the rest are forced, and `header.sealOutcomeRoot == SHA-256(CBOR(list))` (§3) |
+| 6 | `seal_outcomes_shape` / `seal_registry_commitment_mismatch` | the list starts with the system op and the rest are `forced_rejected` records (a successful forced tx is an ordinary tx, not here), and the seal-registry storage value `== SHA-256(CBOR(list))` — checked via `eth_getProof` against `stateRoot`, not a header field (§3) |
 | 7 | `system_*` | the privileged operation (§1); `outcome[0].Status == 1` |
 | 8 | `base_fee_below_floor` / `withdrawals_nonempty` / `blob_tx_present` | §4 |
 | 9 | `gas_budget` | §3 |
@@ -196,39 +209,55 @@ deterministic inbox watermark (D5). `ordinary_gas_recovery` vectors cover it.
   including the case the first review flagged (parent `10^13`, ordinary at `2×`
   target → `parent + parent/8 = 11_250_000_000_000`).
 
-### The seal-outcome list — protocol operations stay OUT of the tx/receipt trie
+### Block semantics — keep the standard execution-evidence path
 
-The earlier draft inserted a synthetic receipt at index 0 with no corresponding
-transaction, and treated an intrinsically invalid forced entry as an EVM revert.
-Both change Ethereum receipt semantics. Instead:
+The first-review draft inserted a synthetic receipt at index 0 with no
+transaction, treated an intrinsically invalid forced entry as an EVM revert, and
+the second-review revision then removed **all** forced entries from
+`transactionsRoot` / `receiptsRoot` — which loses the standard receipt/log proof
+for an actually-executed forced staking or bridge transaction. The third-review
+revision keeps ordinary Ethereum evidence wherever the thing genuinely is an
+Ethereum transaction:
 
-- **Ordinary transactions keep standard semantics, unchanged.**
-  `transactionsRoot` / `receiptsRoot` cover **only** the discretionary RLP
-  transactions; their indices, `transactionHash`, `cumulativeGasUsed`, revert
-  handling and proof/lookup behaviour are exactly Ethereum's. The system op and
-  every forced entry are **not** in the transaction list.
-- The system op and the forced prefix are recorded in a separate **seal-outcome
-  list**, committed by a **`sealOutcomeRoot`** = `SHA-256(CBOR([o₀, o₁, …]))`
-  carried in a header sibling field (and, transitively, under the `extraData`
-  root-input commitment via the companion). Each `SealOutcome` is
-  `{kind, gasUsed, status, reason, digest}` — **not** an RLP receipt:
-
-  | Index | `kind` | Meaning |
-  |---|---|---|
-  | 0 | `system` | the privileged seal call. `status` must be `1`; `status 0` ⇒ block invalid. `digest` = `extraData` |
-  | 1..k | `forced` | an executed forced entry (`status 1`, or `status 0` for an executed-and-reverted transaction — ordinary EVM semantics apply to its execution) |
-  | 1..k | `forced_rejected` | an entry **intrinsically invalid at its turn** (nonce already used / insufficient balance / fee cap below base fee / incompatible rules). It is **consumed** with an authenticated `reason` and `status 0`. It is **never** an EVM revert and never enters the transaction list. |
-
-- **Lookup / proof**: an inclusion proof for an ordinary transaction is a
-  standard receipts-trie proof. An inclusion/outcome proof for the system op or a
-  forced entry is a position proof against `sealOutcomeRoot` (in the companion
-  data / archival proof service — D6/F7). The two proof surfaces are disjoint.
-- `header.gasUsed` still totals `system + forced + ordinary` — a header field, no
-  semantic change. `debug_trace*` replays system → forced → ordinary.
-- Vectors: `seal_outcome_list` (system + `forced_rejected` + `forced`, one
-  `sealOutcomeRoot`, `ordinary_tx_count` excludes all three, gas closes);
-  `import_checks` `system_not_first_outcome`, `seal_outcome_root_mismatch`,
-  `seal_outcomes_empty`, `system_outcome_status_zero`.
+- **A successful forced transaction IS an ordinary transaction.** It sits in
+  `transactionsRoot` / `receiptsRoot` with a **standard receipt** — logs, logs
+  bloom, `cumulativeGasUsed`, `transactionHash`, revert handling, `eth_getProof`
+  / receipt-proof lookup — exactly Ethereum's. Its events export through the
+  normal path. The only thing distinguishing it is *where it came from* (the
+  forced inbox, recorded off-trie), not *how it executes*. `ForcedTxCount` is a
+  reporting split of the transaction list, not a separate trie.
+- **Only two things cannot be ordinary transactions**, and only these are
+  recorded off-trie:
+  - the **privileged seal call** — no fee payer, no signature, no nonce;
+  - a **rejected forced-inbox entry** — an entry *intrinsically invalid at its
+    turn* (nonce already used / insufficient balance / fee cap below base fee /
+    incompatible rules). It is **consumed** with an authenticated `reason` and
+    `status 0`. It is **not** an EVM transaction, has **no** receipt, and is
+    **never** an EVM revert.
+- **Where the off-trie commitment lives.** The system call writes a value —
+  `sealRegistryCommitment = SHA-256(CBOR([system, rejection₀, rejection₁, …]))` —
+  into the **seal-registry contract's storage**. That storage is already
+  authenticated by the block's **`stateRoot`** and provable with a standard
+  `eth_getProof` against a known contract + slot. **There is no new header
+  field.** `extraData` (D1) hashes only the `rootInput` and never covered these —
+  the earlier "transitively under `extraData`" claim is withdrawn. A companion is
+  still transported for the witness set, but the *commitment* rides in state.
+- **`header.gasUsed`** is the standard cumulative gas over the transaction list
+  (now including successful forced txs) **plus** the seal call's `g_sys` work
+  **plus** the `g_fi` consumption charge for rejected entries. It is **not**
+  "entirely unchanged" versus a vanilla block; it includes the system-call gas.
+  That gas is bounded by `g_sys` and recoverable
+  (`RecoverOrdinaryGas(header.gasUsed − system − rejectedConsumption)`).
+- **Lookup / proof.** A successful forced (or discretionary) transaction:
+  standard receipts-trie / log proof. The system op and rejection records:
+  `eth_getProof` on the seal-registry contract slot against `stateRoot`. Both are
+  standard Ethereum state/receipt proofs — no bespoke position-proof scheme.
+- Vectors: `seal_registry_commitment` (system + one rejection record; one
+  successful forced tx in the receipt trie; commitment is a contract-state value,
+  gas closes); `import_checks` `system_not_first_outcome`,
+  `successful_forced_not_a_seal_record`, `seal_registry_commitment_mismatch`,
+  `seal_outcomes_empty`, `system_outcome_status_zero`;
+  `TestD2_SealOutcomeListSeparateFromTxList`.
 
 ### Worked build → import → replay example (`gas_accounting` vector)
 
@@ -236,8 +265,9 @@ Both change Ethereum receipt semantics. Instead:
 config:  g_max 30_000_000   g_sys 2_000_000   g_fi 0
          g_ordinary_capacity 28_000_000   ordinary_target 14_000_000
 build:   engine_forkchoiceUpdatedWithSealV1(fc, attrs, {rootInput, transitions:[]})
-         -> system op (index 0) writes the seal registry, gasUsed 1_800_000
-         -> ordinary txs fill to gasUsed 15_000_000
+         -> system op writes sealRegistryCommitment into the seal-registry
+            contract storage (authenticated by stateRoot), g_sys work 1_800_000
+         -> ordinary + successful-forced txs fill to cumulative gasUsed 15_000_000
          header.gasUsed = 16_800_000   header.extraData = SHA-256(CBOR(rootInput))
          getPayloadWithSealV1 -> { payload, sealCompanion:{rootInput, witnesses, provenance:"build"} }
 import:  engine_newPayloadWithSealV1(payload, [], beaconRoot, sealCompanion)
@@ -259,7 +289,7 @@ or amends this table before D2 freezes.
 |---|---|---|---|---|---|
 | 1 | Privileged **system call** (`a_sys → a_sr`, no key/nonce, first, failure ⇒ invalid block) | a genesis pre-deploy that a normal transaction pokes each block | a normal transaction needs a funded EOA + nonce, can be reordered or censored, and cannot be *mandatory*; the authenticated root input must be un-forgeable and un-replayable | the one privileged origin; import validation predicates | `import_checks` `system_*`; `TestD2_SystemCallMustBeFirstAndValid` |
 | 2 | **`extraData` = 32-byte `SHA-256(CBOR(rootInput))`** commitment | put the root input in a standard payload attribute | V3 `PayloadAttributesV3` has no field for it and it must be in the *header* so it is covered by the block hash; witnesses do not fit in `extraData` | 32 bytes of header; the D1 encoder | D1 vectors + `TestExtraData_IndependentOracle` |
-| 3 | **`sealOutcomeRoot`** header sibling + seal-outcome list | reuse `receiptsRoot` with synthetic receipts | synthetic receipts change Ethereum receipt semantics and mislead every existing tool/proof; keeping protocol operations out of the tx/receipt trie is the *smaller* change | one header field; `SealOutcomeRoot` CBOR | `seal_outcome_list`; `TestD2_SealOutcomeListSeparateFromTxList` |
+| 3 | **`sealRegistryCommitment` in seal-registry contract storage** (system op + rejection records only); successful forced txs stay ordinary | (a) synthetic receipts in `receiptsRoot`; (b) a new `sealOutcomeRoot` header field | (a) changes Ethereum receipt semantics and misleads every tool/proof; (b) a new header field expands every client's header/import/RPC surface and needs a normative RLP position + block-hash derivation, and `extraData` does **not** cover it. A **contract-state value** reuses the authenticated `stateRoot` + `eth_getProof` path that already exists — the *smallest* change. Successful forced txs keep the standard receipt/log proof. | a known contract + storage slot; the CBOR list encoder; `header.gasUsed` now includes `g_sys` | `seal_registry_commitment`; `TestD2_SealOutcomeListSeparateFromTxList` |
 | 4 | **Ordinary-only EIP-1559 feedback** (`g_sys`, `g_fi` excluded from the base-fee target) | feed total `gasUsed` into the London formula | protocol-mandated gas is not a demand signal; including it raises fees purely because the protocol ran | `NextBaseFee` + `RecoverOrdinaryGas` | `TestD2_BaseFeeUpdateExcludesSystemAndForcedGas`, `base_fee_arithmetic_oracle` |
 | 5 | **Positive base-fee floor** `f_base^min` as a validity rule | genesis initial base fee only | a floor that is only a genesis value can be driven to 0 by sustained under-target blocks, breaking fee-market and DoS assumptions | one comparison per block | `import_checks.base_fee_below_floor` |
 | 6 | **Three `engine_*WithSealV1` siblings** (fcU / newPayload / getPayload) | a single new method, or overload existing V3 params | build needs `{rootInput, transitions}` in the fcU→getPayload flow; import needs the full witness set in newPayload; getPayload must return the companion for dissemination — the three flows carry different data | the Engine API surface (JWT-authenticated) | capability check in `engineapi/adapter.go`; negative auth fixtures |
@@ -267,7 +297,9 @@ or amends this table before D2 freezes.
 | 8 | **RPC parity** for `eth_call` / tracing (same fee split, no privileged-state authorisation) | leave RPC unchanged | a local simulation that used a different fee split or could call `a_sys` would diverge from consensus / leak authority | RPC handlers | §5; assertion in the model |
 
 Deviations 1–5 are execution-client changes; 6–8 are Engine API / adapter
-changes. None changes ordinary transaction, receipt or trie semantics.
+changes. No deviation adds a header field or changes ordinary transaction /
+receipt / trie semantics; deviation 3 rides in already-authenticated contract
+state, and `header.gasUsed` transparently includes the mandated `g_sys` work.
 
 ## 4. Payload shape
 
@@ -296,10 +328,10 @@ changes. None changes ordinary transaction, receipt or trie semantics.
 | owner deviation review — minimal-divergence inventory, alternatives, audit surface, conformance | **§3a** (8-row table); each deviation names the simpler alternative and why it fails |
 | design traces one block through builder, follower, devp2p/sync and re-execution | §2 "authentication lifecycle" (who verifies per path) + §2 concrete methods + retention rule; §3 worked build→import→replay; `ValidateImport` is path-independent |
 | … including missing companion data and a forged ordinary system sender | `import_checks`: `companion_missing`, `witness_*`, `system_origin_forged`; `TestD2_MissingCompanionDataIsFatal`, `TestD2_AuthenticationBoundary`, `TestD2_SystemCallMustBeFirstAndValid` |
-| the authentication lifecycle is finished — the verdict is not an untrusted companion assertion | §2 "authentication lifecycle"; `VerifyCompanionWitnesses` (own trust base, recomputed threshold, `OriginID` binding, transition-proof count); negatives `witness_wrong_origin`, `witness_below_threshold`, `witness_unknown_signer`, `witness_transition_proof_count`, `malformed_origin_breaks_witness`; `TestD2_AuthenticationBoundary` |
+| the authentication lifecycle verifies proof bindings, not assertions | §2 "authentication lifecycle"; `VerifyCompanionWitnesses(witness, rootInput, D2TrustBase)` — own assignment + keys, **derived** threshold (no parameter), `OriginID` binding, **TE↔TRHash** binding, **real secp256k1 signatures** over `D2SealWitnessStatement` with only verified weight counted, transition-proof count; negatives `witness_wrong_origin`, `witness_below_threshold`, `witness_unknown_signer`, `witness_name_without_signature`, `witness_te_not_bound_to_trhash`, `malformed_origin_breaks_witness`; `TestD2_AuthenticationBoundary` |
 | A gas accounting vector closes exactly | `gas_accounting.closes_exactly = true`; §3 worked example; `TestD2_GasBudgetInvariant`, `TestD2_HeaderGasUsedIsTheSum` |
 | the frozen fee arithmetic stays exact for representable values | `NextBaseFee` via 128-bit `mulDivFloor`; `base_fee_arithmetic_oracle` (big.Int cross-check incl. parent `10^13`); `ExecConfig.Valid()`; `TestD2_NextBaseFeeNoOverflow`, `TestD2_ConfigValidation` |
-| receipt indexing / block semantics resolved | §3 "seal-outcome list" — protocol operations stay OUT of `transactionsRoot` / `receiptsRoot`; system op + forced entries committed by `sealOutcomeRoot`; ordinary tx/receipt semantics unchanged; canonical block vector `seal_outcome_list` (poison + valid forced); `import_checks` `system_not_first_outcome`, `seal_outcome_root_mismatch`; `TestD2_SealOutcomeListSeparateFromTxList` |
+| receipt indexing / block semantics resolved, standard execution-evidence path preserved | §3 "Block semantics" — a **successful forced tx is an ordinary tx** in `transactionsRoot`/`receiptsRoot` with a standard receipt (logs/bloom exported normally); only the system op + `forced_rejected` records are off-trie, committed by a **seal-registry contract-state value** authenticated by `stateRoot` (`eth_getProof`), **no header field**; `header.gasUsed` transparently includes `g_sys`; vector `seal_registry_commitment`; `import_checks` `system_not_first_outcome`, `successful_forced_not_a_seal_record`, `seal_registry_commitment_mismatch`; `TestD2_SealOutcomeListSeparateFromTxList` |
 | an intrinsically invalid forced entry is not an EVM revert | §3 — `kind = forced_rejected` with an authenticated `reason` and `status 0`, never in the transaction list; `seal_outcome_list.poison_entry_is_a_rejection_record_not_an_evm_revert` |
 | positive base-fee floor as a validity rule | §3; `import_checks.base_fee_below_floor`; `TestD2_BaseFeeClampsToPositiveFloor` |
 | empty withdrawals, blobs disabled | §4; `import_checks.withdrawals_nonempty`, `import_checks.blob_tx_present` |

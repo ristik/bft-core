@@ -84,17 +84,18 @@ func (c ExecConfig) OrdinaryCapacity() uint64 { return c.GMax - c.GSys - c.GFI }
 func (c ExecConfig) OrdinaryTarget() uint64 { return c.OrdinaryCapacity() / c.ElasticityDenom }
 
 // BlockWork is the gas actually consumed in one produced block, split by
-// origin. All three are metered; only Ordinary feeds the base-fee update.
+// origin. Only Ordinary feeds the base-fee update.
 type BlockWork struct {
 	System   uint64 // actual gas of the single privileged seal operation (<= GSys)
-	Forced   uint64 // actual gas of the executed forced-inclusion prefix (<= GFI)
-	Ordinary uint64 // actual gas of discretionary transactions (<= OrdinaryCapacity)
+	Forced   uint64 // g_fi consumption charge for REJECTED forced entries only (<= GFI). A successful forced tx is an ordinary tx; its gas is in Ordinary and its receipt is in receiptsRoot.
+	Ordinary uint64 // discretionary + successful-forced transaction gas (<= OrdinaryCapacity), i.e. the cumulative gas of the transaction list
 }
 
-// HeaderGasUsed is the value written to the block header's gasUsed field:
-// every executed unit, system + forced + ordinary. Receipts and tracing
-// are consistent with this total (each system/forced entry has a receipt
-// with its own cumulativeGasUsed contribution).
+// HeaderGasUsed is the block header's gasUsed field: the standard
+// cumulative gas over the transaction list (Ordinary, which now includes
+// successful forced txs) PLUS the seal call's g_sys work PLUS the g_fi
+// consumption charge for rejected entries. It is NOT "entirely unchanged"
+// vs a vanilla block — it includes the system-call gas.
 func (w BlockWork) HeaderGasUsed() uint64 { return w.System + w.Forced + w.Ordinary }
 
 // GasCheck is the per-block gas validity result.
