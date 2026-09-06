@@ -1,0 +1,477 @@
+\chapter{Unicity Token Encoding}\label{app:execution-layer}
+
+This appendix specifies the concrete encodings for the Unicity Token defined in the Execution Layer chapter. All structures are serialized using CBOR (Appendix~\ref{app:encodings}) with deterministic encoding rules.
+
+\section{Constants}\label{app:el-constants}
+
+The Unicity Mainnet ($\alpha = 1$) MUST use following public constants. Other networks MAY use the same.
+
+\begin{itemize}
+	\item $\mathsf{MINT\_SUFFIX} = \mathsf{SHA\text{-}256}(\texttt{"TOKENID"})$ -- a fixed 32-byte domain separator used to derive the source state hash of mint transactions.
+	\item $\mathsf{MINTER\_SECRET}$ = \\
+	  \hspace*{10mm}\texttt{0x495f414d5f554e4956455253414c5f4d494e5445525f464f525f} \\
+	  \hspace*{10mm} (ASCII: \texttt{"I\_AM\_UNIVERSAL\_MINTER\_FOR\_"}) \\
+	  -- a fixed 26-byte constant used to derive deterministic minting key pairs.
+	\item The minting key pair for a token with network identifier $\alpha$ and token identifier $\mathsf{id}$ is derived as:
+	\[
+	\mathsf{sk}_\mathsf{mint} = \mathsf{SHA\text{-}256}(\mathsf{CBOR}(\mathsf{MINTER\_SECRET}, \mathsf{id}))
+	\]
+	The corresponding public key $\mathsf{pk}_\mathsf{mint}$ is the secp256k1 public key for $\mathsf{sk}_\mathsf{mint}$. The private key is intentionally public; the key pair exists solely to provide a uniform request interface with the Unicity Service.
+\end{itemize}
+
+\newcommand{\encpred}{\mathsf{EncPred}}
+\newcommand{\decpred}{\mathsf{DecodePred}}
+
+\section{Predicate Encoding}\label{app:predicate-encoding}
+
+A predicate is a value $\predi$ whose authority over a token state is defined by its canonical byte encoding
+\[
+\encpred(\predi) \in \{0,1\}^* .
+\]
+
+Predicate equality means byte equality of canonical encodings:
+\[
+\predi_1 = \predi_2 \quad\Longleftrightarrow\quad
+\encpred(\predi_1) = \encpred(\predi_2).
+\]
+
+The encoding $\encpred$ is implemented as encoding to a CBOR array with three top-level elements:
+
+\begin{longtable}{clp{8cm}}
+\textbf{Index} & \textbf{Type} & \textbf{Description} \\
+\hline
+0 & unsigned integer & Predicate engine identifier. Value $1$ denotes the built-in engine. \\
+1 & byte string & Predicate type code within the engine. \\
+2 & byte string or CBOR item & Serialized parameters (encoding depends on the predicate type; see below). \\
+\end{longtable}
+
+\noindent Throughout this section, $\mathsf{pk}$ denotes a 33-byte compressed secp256k1 public key (see Sec.~\ref{app:signature-format}), and timestamps $\tau \in \mathbb{T}$ are encoded as CBOR unsigned integers (seconds; same convention as $C^\mathsf{r}.t_r$). Hashes are 32 bytes.
+
+\subsection{Built-in Predicate Type Codes}
+
+\begin{longtable}{llp{10cm}}
+\textbf{Code} & \textbf{Predicate} & \textbf{Parameters encoding} \\
+\hline
+\endhead
+\texttt{0x01} & $\predi_\mathsf{sig}$ (Signature) & Recipient public key $\mathsf{pk}$. \\
+\texttt{0x02} & $\predi_\mathsf{burn}$ (Burn) & reason hash $h_\mathsf{reason}$. \\
+\texttt{0x03} & $\predi_\mathsf{tlock}$ (Timelock) & CBOR array[2]: $[\mathsf{pk}\ (33\text{-byte bstr}),\ \tau_\mathsf{min}\ (\text{uint})]$. \\
+\texttt{0x04} & $\predi_\mathsf{p2pkh}$ (Pay-to-Public-Key-Hash) & public key hash $h_\mathsf{pk}$. \\
+\texttt{0x05} & $\predi_\mathsf{p2sh}$ (Pay-to-Script-Hash) & predicate hash $h_\predi = H(\mathsf{CBOR}(\predi'))$. \\
+\texttt{0x06} & $\predi_\mathsf{msig}$ (Multi-signature) & CBOR array of $n$ entries of $\mathsf{pk}_i$. \\
+\texttt{0x07} & $\predi_\mathsf{tsig}$ (Threshold-signature) & CBOR array[2]: $[k\ (\text{uint}),\ [\mathsf{pk}_1,\ldots,\mathsf{pk}_n]]$; $1 \le k \le n$. \\
+\texttt{0x08} & $\predi_\mathsf{htlc}$ (Hashed Timelock) & CBOR array[4]: $[\mathsf{pk},\ \mathsf{pk}',\ y\ (32\text{-byte bstr}),\ \tau_\mathsf{max}\ (\text{uint})]$. \\
+\end{longtable}
+
+\subsection{Unlocking Argument Encoding}
+
+The unlocking argument $u$ accompanying a Unicity Service Request (Sec.~\ref{sec:request-validation}) is encoded according to the current owner's predicate type. Signatures are 65 bytes in the $R\|S\|V$ format defined in Sec.~\ref{app:signature-format}.
+
+\begin{longtable}{cp{10cm}}
+\textbf{Pred.} & \textbf{Unlocking argument encoding} \\
+\hline
+\endhead
+$\predi_\mathsf{sig}$    & signature $s$. \\
+$\predi_\mathsf{burn}$   & None; the predicate never evaluates to $1$ and no unlocking argument exists. \\
+$\predi_\mathsf{tlock}$  & signature $s$. \\
+$\predi_\mathsf{p2pkh}$  & CBOR array[2]: $[\mathsf{pk},\ s]$. \\
+$\predi_\mathsf{p2sh}$   & CBOR array[2]: $[\mathsf{CBOR}(\predi')\ (\text{bstr}),\ u'\ (\text{bstr})]$, where $\predi'$ is the revealed predicate and $u'$ is the unlocking argument encoded according to $\predi'$'s type. \\
+$\predi_\mathsf{msig}$   & CBOR array of $n$ signatures $[s_1, \ldots, s_n]$, in the same order as the parameter public keys. \\
+$\predi_\mathsf{tsig}$   & CBOR array of $k$ entries, each a CBOR array[2]: $[s_i,\ j_i\ (\text{uint})]$, where $j_i \in \{1,\ldots,n\}$ is the index of the parameter public key used to produce $s_i$. Indices must be pairwise distinct. \\
+$\predi_\mathsf{htlc}$   & CBOR array[2]: $[x\ (\text{bstr}),\ s\ (65\text{-byte bstr})]$. For the claim path $x$ is the preimage with $H(x) = y$; for the refund path $x$ may be empty ($\mathtt{h'}$). \\
+\end{longtable}
+
+
+\subsection{Predicate Soundness}\label{app:predicate-soundness}
+
+The following rules must apply to all predicates, including user-defined, custom programmable predicates.
+
+
+\begin{enumerate}
+  \item \textbf{Canonical encoding.}
+    $\encpred$ MUST be deterministic, injective on valid predicates, and encoded using deterministic CBOR. A conforming decoder MUST reject non-canonical CBOR encodings, trailing bytes, duplicate map keys, invalid field counts, invalid field types, invalid public keys, invalid thresholds, and any type-specific malformed parameters.
+
+  \item \textbf{Round-trip stability.}
+    For every accepted predicate byte string $b$:
+    \[
+      \encpred(\decpred(b)) = b.
+    \]
+    For every valid predicate object $\predi$, repeated evaluations of $\encpred(\predi)$ MUST return identical bytes.
+
+  \item \textbf{Predicate immutability.}
+    The value used in defined protocol steps is the canonical byte string $\encpred(\predi)$, not an in-memory object or function. Implementations MUST store and compare this byte string.
+
+    \item \textbf{State identifier binding.}
+    The state identifier MUST be derived from exactly the same canonical predicate bytes that are authenticated by the unlocking argument:
+    \[
+      \mathsf{sid} =
+      \mathsf{SHA\text{-}256}(
+        \mathsf{CBOR}(\encpred(\predi), \sthash)
+      ).
+    \]
+    Verification of an inclusion proof for a transaction spending state $(\predi,\sthash)$ MUST reject unless the predicate and source state
+  hash contained in the certified request are byte-identical to the transaction's current-owner predicate and source state hash.
+
+    \item \textbf{Deterministic verification relation.}
+    Each predicate type defines a deterministic verification relation
+    \[
+      \mathsf{VerifyPred}(\predi, u, \sthash, \txhash, C) \in \{0,1\},
+    \]
+    where $u$ is the unlocking argument and $C$ is explicit public verification context, such as a certified timestamp if required. For fixed inputs, the result MUST be stable and MUST NOT depend on hidden local state, network calls, randomness, or implementation-specific
+  object identity.
+
+
+
+    \item \textbf{Unlocking Argument canonicality.}
+    Each unlocking argument $u$ MUST have a deterministic CBOR encoding and a predicate-type-specific decoder. The decoder MUST reject malformed, non-canonical, ambiguous, duplicate, out-of-range, or trailing-byte encodings. Re-encoding an accepted unlocking argument MUST reproduce the accepted byte string.
+
+    \item \textbf{No side effects by unlock argument.}
+    The unlocking argument MAY provide witnesses required by the predicate, such as signatures, public keys for P2PKH, scripts for P2SH, or hash preimages. It MUST NOT alter the current-owner predicate, source state hash, transaction hash, or state identifier. If $u$ reveals a hidden predicate $\predi'$ for P2SH, verification MUST first check:
+    \[
+      \mathsf{SHA\text{-}256}(\encpred(\predi')) = h_\predi
+    \]
+    before even trying to parse $\predi'$.
+
+    \item \textbf{Explicit public context.}
+    Predicates that depend on time, block height, round number, or certificate metadata MUST define precisely which certified public field is used. Such predicates MUST NOT depend on any external data not committed by spending Unicity Certificate.
+
+    \item \textbf{User-defined predicate safety.}
+    Extension engines MUST define:
+    \[
+      (\mathsf{engine},\mathsf{code},\mathsf{params},\mathsf{unlock},\mathsf{VerifyPred})
+    \]
+    with canonical encodings for both parameters and unlocking arguments. Extension predicates MUST satisfy the same determinism,
+  immutability, and round-trip requirements as built-in predicates.
+  \end{enumerate}
+
+  \noindent These requirements ensure that a relying party, wallet, SDK, and Unicity Service all derive the same state identifier and verify the same authorization statement.
+
+\subsection{Recipient Field}
+
+The \emph{recipient} field in both mint transactions and transactions stores the next owner's predicate $\predi'$ encoded as in Sec.~\ref{app:predicate-encoding}.
+
+By convention, a mint transaction uses $\predi' = \predi_\mathsf{sig}(\mathsf{pk'})$ (type code \texttt{0x01}) for the first owner.
+
+If a sender wishes to commit only to a hash of a complex predicate (hiding its structure until spend time), they can do so explicitly by setting $\predi' = \predi_\mathsf{p2sh}(H(\mathsf{CBOR}(\predi'')))$ (Sec.~\ref{sec:p2sh}); the P2SH predicate is itself encoded as a first-class predicate in the recipient field.
+
+
+\section{Transaction Encoding}\label{app:transaction-encoding}
+
+\subsection{Mint Transaction}
+
+A mint transaction has the common data
+$D_\mathsf{mint} = (\alpha, \predi', \mathsf{salt}, \mathsf{ty}, \mathsf{reason}, \auxd')$:
+
+\begin{longtable}{clp{10cm}}
+\textbf{Index} & \textbf{Type} & \textbf{Description} \\
+\hline
+0 & unsigned integer & Network Identifier $\alpha$ (Sec.~\ref{sec:networks}) \\
+1 & byte string & Recipient: CBOR-encoded first owner's predicate $\mathsf{CBOR}(\predi')$ (Sec.~\ref{app:predicate-encoding}); by convention $\predi' = \predi_\mathsf{sig}(\mathsf{pk'})$ \\
+2 & byte string & Token identifier salt $\mathsf{salt}$ (32 bytes). \\
+3 & byte string & Token Type $\mathsf{ty}$ (32 bytes) \\
+4 & byte string & Mint Reason $\mathsf{reason}$ (optional, arbitrary length) \\
+5 & byte string & Auxiliary Payload $\auxd'$ (optional, arbitrary length) \\
+\end{longtable}
+
+The payload is $D_\mathsf{mint}$ followed by the request timeout $\tau_Q$ at index~6, encoded as an unsigned integer, or as the CBOR simple value \texttt{null} when $\tau_Q=\bot$ (Appendix~\ref{app:encodings}). A versioned tagged envelope carries the payload.
+
+The implicit token identifier is derived as $\mathsf{id} = H(\mathsf{salt}, \alpha)$ (Sec.~\ref{app:hash-derivations}) from the unique salt chosen by the minter.
+
+\subsection{Transfer Transaction}
+
+A transfer transaction (spending a mint or prior transaction output) has five common elements:
+
+\begin{longtable}{clp{10cm}}
+\textbf{Index} & \textbf{Type} & \textbf{Description} \\
+\hline
+0 & byte string & Source state hash $\sthash$ (32 bytes) \\
+1 & byte string & Unlocking Argument: CBOR-encoded $\mathsf{CBOR}(u)$ (Sec.~\ref{app:predicate-encoding}); must unlock the recipient predicate of the preceding transaction \\
+2 & byte string & Recipient: CBOR-encoded next owner's predicate $\mathsf{CBOR}(\predi')$ (Sec.~\ref{app:predicate-encoding}) \\
+3 & byte string & Random value $x$ (32 bytes) \\
+4 & byte string & Auxiliary data $\auxd'$ \\
+\end{longtable}
+
+The payload contains these common elements followed by the request timeout $\tau_Q$, encoded as an unsigned integer, or as the CBOR simple value \texttt{null} when $\tau_Q=\bot$ (Appendix~\ref{app:encodings}). A versioned tagged envelope carries the payload.
+
+
+\subsection{Certified Transaction}
+
+A certified transaction (mint or transfer) is encoded as a three-element CBOR array:
+
+\begin{longtable}{clp{8cm}}
+\textbf{Index} & \textbf{Type} & \textbf{Description} \\
+\hline
+0 & CBOR array & The transaction \\
+1 & unsigned integer & Reference time $\tau$ of the round in which the leaf was created \\
+2 & CBOR structure & Inclusion proof $\pi$ \\
+\end{longtable}
+
+The inclusion proof also carries the validation reference time, and a decoder requires it to agree with the value in the certified transaction. The request timeout $\tau_Q$ is inside the transaction at index~0.
+
+
+\subsection{Token}
+
+A token is encoded as a CBOR array with two elements:
+
+\begin{longtable}{clp{8cm}}
+\textbf{Index} & \textbf{Type} & \textbf{Description} \\
+\hline
+0 & CBOR array & Certified mint transaction \\
+1 & CBOR array & Array of certified transactions (may be empty) \\
+\end{longtable}
+
+
+\section{Hash Derivations}\label{app:hash-derivations}
+
+All hash derivations use SHA-256 over CBOR-encoded inputs.
+
+\subsection{Token Identifier}
+
+The token identifier is derived from the mint-transaction salt and network identifier:
+\[
+\mathsf{id} = \mathsf{SHA\text{-}256}(\mathsf{CBOR}(\mathsf{salt}, \alpha))
+\]
+where $\mathsf{salt}$ is the 32-byte field at index 2 of $D_\mathsf{mint}$ and $\alpha$ is the network identifier at index 0.
+
+\subsection{State Identifier}
+
+The state identifier is derived from the predicate and state hash:
+\[
+\mathsf{sid} = \mathsf{SHA\text{-}256}(\mathsf{CBOR}(\predi, \sthash))
+\]
+
+\subsection{State Hash}
+
+For mint transactions:
+\[
+\sthash = \mathsf{SHA\text{-}256}(\mathsf{CBOR}(\mathsf{id}, \mathsf{MINT\_SUFFIX})), \quad \text{where } \mathsf{id} = \mathsf{SHA\text{-}256}(\mathsf{CBOR}(\mathsf{salt}, \alpha))
+\]
+
+For transfer transactions, the next state hash:
+\[
+\sthash' = \mathsf{SHA\text{-}256}(\mathsf{CBOR}(\sthash, x))
+\]
+
+\subsection{Transaction Hash} % the leaf's value of aggregator tree
+
+For mint transactions:
+\[
+\txhash = \mathsf{SHA\text{-}256}(\mathsf{CBOR}(\alpha, \predi', \mathsf{salt}, \mathsf{ty}, \mathsf{reason}, \auxd', \tau_Q))
+\]
+
+For transactions:
+\[
+\txhash = \mathsf{SHA\text{-}256}(\mathsf{CBOR}(\predi', x, \auxd', \tau_Q))
+\]
+
+Here $\mathsf{CBOR}(\ldots)$ denotes deterministic CBOR array encoding. The timeout is always present as the last element and is therefore always committed by the transaction hash; $\tau_Q=\bot$ is encoded as \texttt{null} and requires no clock.
+
+
+\section{Signature Format}\label{app:signature-format}
+
+All standard predicates that verify digital signatures ($\predi_\mathsf{sig}$, $\predi_\mathsf{p2pkh}$, $\predi_\mathsf{tlock}$, $\predi_\mathsf{msig}$, $\predi_\mathsf{tsig}$, $\predi_\mathsf{htlc}$) use ECDSA over the secp256k1 curve with the following formats.
+
+\begin{itemize}
+	\item \textbf{Public keys}: compressed format, 33 bytes (1-byte prefix $\texttt{0x02}$ or $\texttt{0x03}$, followed by 32-byte $x$-coordinate).
+	\item \textbf{Signatures}: 65 bytes ($R \mathbin{\|} S \mathbin{\|} V$), where $R$ and $S$ are 32-byte integers and $V$ is a 1-byte recovery identifier.
+	\item \textbf{Signed message}: the predicate message hash $m = \mathsf{SHA\text{-}256}(\mathsf{CBOR}(\sthash, \txhash))$, where $\txhash$ commits to the exclusive request timeout, as defined in Sec.~\ref{sec:predicate-framework}.
+\end{itemize}
+
+
+\section{Mint-Reason Dispatch}\label{app:mint-reason-dispatch}
+
+Mint reasons are dispatched by CBOR semantic tag under the token type's pinned issuance policy. Tag \texttt{39044} denotes the split reason below; \texttt{39047} denotes external-chain backing; \texttt{39049} denotes enshrined backing (Appendix~\ref{app:bridging-enshrined}). Tag \texttt{39048} is a return reason, not an alternative mint authorization. An unknown tag, unsupported version or reason forbidden by the token type is rejected even if another registered verifier recognizes it.
+
+For enshrined backing, the immutable reason is the lock-reference array. Its refreshable UC and EVM state proof are supplied in the token verification context, not in the signed mint bytes or token identifier. A recipient requires a complete authenticated witness but may replace that witness without changing the certified token. The initial enshrined type forbids split and merge reasons; generic split support does not override that policy.
+
+\section{Split Proof Encoding}\label{app:split-proof-encoding}
+
+This section specifies the split mint reason described in Sec.~\ref{sec:token-splitting}. The split manifest and mint reason are identified by their distinct CBOR semantic tags.
+
+\subsection{Canonical Assets and Limits}
+
+The token-type-specific function $\Call{Assets}{\mathsf{ty},\auxd'}$ returns a sequence
+\[
+\langle(\mathsf{aid}_1,v_1),\ldots,(\mathsf{aid}_m,v_m)\rangle
+\]
+strictly ordered by the raw bytes of $\mathsf{aid}_i$ using unsigned lexicographic comparison, with a shorter byte string ordered first when it is a prefix of another. The split protocol requires:
+\begin{itemize}
+	\item $1 \leq m \leq 256$;
+	\item $1 \leq \len{\mathsf{aid}_i} \leq 128$ bytes;
+	\item $1 \leq v_i < 2^{256}$; and
+	\item no repeated asset identifier.
+\end{itemize}
+Amounts and RSMST sums are encoded as minimal unsigned big-endian byte strings of at most 32 bytes. Zero is encoded by the empty byte string where a surrounding structure permits zero; split allocation leaves and sibling sums are strictly positive. An accepted non-empty integer encoding MUST NOT begin with \texttt{0x00}.
+
+All structures below use deterministic CBOR and must be consumed completely. Decoders MUST reject indefinite-length items, non-minimal heads or integers, wrong or unknown tags, wrong field counts or types, trailing bytes, duplicate or unordered assets, invalid lengths, arithmetic overflow, and exhausted cumulative byte, item, nesting, proof-step or embedded-token budgets.
+
+\subsection{Output Commitment}\label{app:split-output-commitment}
+
+The output commitment binds an allocation leaf to the complete output mint transaction except for its mint reason. Split verification additionally requires the output token type to equal the source token type byte-for-byte; including $\mathsf{ty}_j$ in this commitment prevents replay of a prepared proof under any other mint transaction. Define $\mathsf{SPLIT\_OUTPUT}$ as the ASCII byte string \texttt{"UNICITY\_SPLIT\_OUTPUT"}. For source identifier $\mathsf{id}_\mathsf{src}$ and output mint data
+\[
+D_{\mathsf{mint},j}
+=(\alpha,\predi'_j,\mathsf{salt}_j,\mathsf{ty}_j,
+  \mathsf{reason}_j,\auxd'_j),
+\]
+derive
+\[
+\begin{split}
+\mathsf{id}_j &:= H(\mathsf{salt}_j,\alpha),\\
+d_j &:= \mathsf{SHA\text{-}256}\bigl(\mathsf{CBOR}(
+  \mathsf{SPLIT\_OUTPUT},
+  \mathsf{id}_\mathsf{src},
+  \alpha,
+  \encpred(\predi'_j),
+  \mathsf{salt}_j,
+  \mathsf{id}_j,
+  \mathsf{ty}_j,
+  \auxd'_j
+)\bigr).
+\end{split}
+\]
+Every term is encoded as a CBOR byte string except $\alpha$, which is an unsigned integer. In particular, $\auxd'_j$ is the exact auxiliary-payload byte string stored in the mint transaction, not a decoded or normalized object. The mint reason is deliberately excluded to avoid a circular commitment.
+
+\subsection{Split Manifest}\label{app:split-manifest}
+
+The final transfer of the source token stores a split manifest in its auxiliary-data byte string. The byte string contains CBOR semantic tag \texttt{39046} applied directly to an array of RSMST root hashes:
+
+\[
+\langle r_1,\ldots,r_m\rangle.
+\]
+Each $r_i$ is encoded as a byte string containing the raw 32-byte SHA-256 digest.
+
+The roots are positionally aligned with $\Call{Assets}{\mathsf{ty}_\mathsf{src},\auxd'_\mathsf{src}}$ in canonical asset order. The array length MUST equal the source asset count. Asset identifiers and source amounts are not repeated in the manifest.
+
+The source identifier is omitted. The certified transfer carrying the manifest is already part of the source token, and every allocation leaf is independently bound to that source identifier by $d_j$.
+
+Let $b_\mathcal{M}$ be the complete canonical tagged CBOR encoding of the manifest. The certified burn transfer MUST contain $b_\mathcal{M}$ as its exact auxiliary-data value and MUST have burn reason set to its hash:
+\[
+\predi_\mathsf{burn}(\mathsf{SHA\text{-}256}(b_\mathcal{M})).
+\]
+
+\subsection{Split Allocation Inclusion Proof}\label{app:split-allocation-proof}
+
+The RSMST construction and hashing rules are defined in Appendix~\ref{app:rsmst}.  For a split allocation leaf, $k=\mathsf{id}_j$, $d=d_j$, $v=v_j(\mathsf{aid})$, and the expected root hash comes from the manifest.  These values are therefore omitted from the encoded proof and supplied by the verifier.
+
+An encoded split allocation proof is a CBOR array of zero to 256 sibling entries, ordered leaf-to-root.  The empty array is valid only when the allocation tree for that asset contains a single output leaf.
+
+Each sibling entry is a three-element CBOR array:
+
+\begin{longtable}{clp{9cm}}
+\textbf{Index} & \textbf{Type} & \textbf{Description} \\
+\hline
+0 & unsigned integer & Parent bifurcation depth $\delta_i$, with $0\leq\delta_i\leq255$. \\
+1 & byte string & Sibling subtree hash $s_i$, the raw 32-byte SHA-256 digest. \\
+2 & byte string & Positive sibling subtree sum $w_i$, minimally encoded. \\
+\end{longtable}
+
+Depths MUST be strictly decreasing in proof order.  Decoders MUST reject non-minimal CBOR integers, depths outside $0,\ldots,255$, repeated or non-decreasing depths, sibling hashes whose length is not 32 bytes, zero sibling sums, overlong or non-minimal sum encodings, or more than 256 sibling entries.  No bitmap, path segment, root hash, asset identifier, output identifier, leaf data or leaf amount occurs in the encoded proof.
+
+\subsubsection{Function $\textsc{rsmst\_verify\_inclusion}$}\label{sec:rsmst-split-verify}
+
+\textbf{Input}:
+\begin{enumerate}
+	\item $k \in \bytes{32}$ -- expected output token identifier;
+	\item $d \in \bytes{32}$ -- expected output commitment;
+	\item $v \in \mathbb{N}$, $1\leq v<2^{256}$ -- expected output amount;
+	\item $C^\mathsf{inc}=\langle(\delta_1,s_1,w_1),\ldots,(\delta_n,s_n,w_n)\rangle$ -- split allocation proof; and
+	\item $r \in \bytes{32}$ -- expected raw root digest from the manifest.
+\end{enumerate}
+
+\textbf{Output}: $(b,v_\mathsf{root}) \in \bool\times\mathbb{N}$, where $b$ is the success flag and $v_\mathsf{root}$ is the reconstructed root sum.
+
+The verifier uses Appendix~\ref{sec:rsmst-verify-inclusion}.  It MUST reject an overflowing intermediate sum before invoking a big-integer implementation that could silently accept values outside the 256-bit amount domain.
+
+\subsection{Split Mint Reason}\label{app:split-mint-reason}
+
+The mint-reason byte string of a split output contains CBOR semantic tag \texttt{39044} applied to this two-element array:
+
+\begin{longtable}{clp{9cm}}
+\textbf{Index} & \textbf{Type} & \textbf{Description} \\
+\hline
+0 & CBOR structure & Complete burned source token $\mathcal{L}_\mathsf{burn}$, including its certified manifest-bearing burn transfer. \\
+1 & CBOR array & Split allocation proofs, one per output asset in canonical output-asset order. \\
+\end{longtable}
+
+The proof array contains no asset identifiers. Its length and positional interpretation are determined exclusively by $\Call{Assets}{\mathsf{ty}_j,\auxd'_j}$.
+
+\subsection{Split Construction Algorithm}\label{app:split-construction}
+
+\begin{algorithm}[!htbp]
+	\caption{Split Construction}\label{alg:split-construction}
+	\begin{algorithmic}[0]
+		\Function{ConstructSplit}{$\mathcal{L},\langle D_{\mathsf{out},1},\ldots,D_{\mathsf{out},k}\rangle,\mathcal{T}$}
+			\State ensure($\Call{VerifyToken}{\mathcal{L},\mathcal{T}}=1$)
+			\State $D_\mathsf{src}\gets\mathcal{L}.T_0.D_\mathsf{mint}$
+			\State $\mathcal{A}\gets\Call{Assets}{D_\mathsf{src}.\mathsf{ty},D_\mathsf{src}.\auxd'}$
+			\State ensure($\mathcal{A}$ is non-empty and canonical)
+			\For{$j\gets1$ to $k$}
+				\State ensure($D_{\mathsf{out},j}.\alpha=\mathcal{T}.\alpha$)
+				\State ensure($D_{\mathsf{out},j}.\mathsf{ty}=D_\mathsf{src}.\mathsf{ty}$)
+				\State $\mathsf{id}_j\gets H(D_{\mathsf{out},j}.\mathsf{salt},D_{\mathsf{out},j}.\alpha)$
+				\State ensure($\mathsf{id}_j$ is distinct among the outputs)
+				\State $\mathcal{A}_j\gets\Call{Assets}{D_{\mathsf{out},j}.\mathsf{ty},D_{\mathsf{out},j}.\auxd'}$
+				\State ensure($\mathcal{A}_j$ is non-empty, canonical, and contains no identifier absent from $\mathcal{A}$)
+				\State $d_j\gets\Call{split\_output\_commitment}{\mathcal{L}.\mathsf{id},D_{\mathsf{out},j}}$
+			\EndFor
+			\ForAll{$(\mathsf{aid}_i,v_i)\in\mathcal{A}$ in canonical order}
+				\State $\mathcal{S}_i\gets$ empty RSMST
+				\For{$j\gets1$ to $k$}
+					\If{$(\mathsf{aid}_i,v_{i,j})\in\mathcal{A}_j$}
+						\State insert $(\mathsf{id}_j,d_j,v_{i,j})$ into $\mathcal{S}_i$
+					\EndIf
+				\EndFor
+				\State $(r_i,v'_i)\gets\Call{RSMSTRoot}{\mathcal{S}_i}$
+				\State ensure($v'_i=v_i$)
+			\EndFor
+			\State $b_\mathcal{M}\gets\Call{EncodeSplitManifest}{\langle r_1,\ldots,r_m\rangle}$
+			\State construct burn transfer with auxiliary data $b_\mathcal{M}$ and recipient $\predi_\mathsf{burn}(\mathsf{SHA\text{-}256}(b_\mathcal{M}))$
+			\For{$j\gets1$ to $k$}
+				\State $P_j\gets\langle\Call{RSMSTPath}{\mathcal{S}_i,\mathsf{id}_j}\mid(\mathsf{aid}_i,\_)\in\mathcal{A}_j\rangle$
+			\EndFor
+			\State durably persist $b_\mathcal{M}$, the burn transfer, and every $(D_{\mathsf{out},j},P_j)$
+			\State certify the burn and obtain $\mathcal{L}_\mathsf{burn}$
+			\For{$j\gets1$ to $k$}
+				\State $\mathsf{reason}_j\gets\Call{EncodeSplitReason}{\mathcal{L}_\mathsf{burn},P_j}$
+			\EndFor
+			\State \Return the burn transfer and output mint data with reasons $\mathsf{reason}_j$
+		\EndFunction
+	\end{algorithmic}
+\end{algorithm}
+
+The caller MUST persist all output mint fields and proofs before submitting the burn request. Reconstructing the same split after a failure requires byte-identical output fields, manifest and burn transfer.
+
+\subsection{Split Mint-Reason Verification Algorithm}\label{app:split-verification-algorithm}
+
+The following algorithm runs as the token-type-specific mint-reason check after normal verification of the output's certified mint transaction. Recursive calls share the same trust base, verifier registry, issuance policy and cumulative resource budget.
+
+\begin{algorithm}[!htbp]
+	\caption{Split Mint-Reason Verification}\label{alg:split-verify}
+	\begin{algorithmic}[0]
+		\Function{VerifySplitReason}{$D_{\mathsf{mint},j},\mathcal{T},\mathsf{context}$}
+			\State $(\mathcal{L}_\mathsf{burn},P_j)\gets\Call{DecodeSplitReason}{D_{\mathsf{mint},j}.\mathsf{reason}}$
+			\State ensure($\Call{VerifyToken}{\mathcal{L}_\mathsf{burn},\mathcal{T},\mathsf{context}}=1$)
+			\State ensure($\mathcal{L}_\mathsf{burn}.\alpha=D_{\mathsf{mint},j}.\alpha=\mathcal{T}.\alpha$)
+			\State $T_\mathsf{burn}\gets$ final certified transfer of $\mathcal{L}_\mathsf{burn}$
+			\State $b_\mathcal{M}\gets T_\mathsf{burn}.\auxd'$
+			\State $\langle r_1,\ldots,r_m\rangle\gets\Call{DecodeSplitManifest}{b_\mathcal{M}}$
+			\State ensure($T_\mathsf{burn}.\predi'=\predi_\mathsf{burn}(\mathsf{SHA\text{-}256}(b_\mathcal{M}))$)
+			\State $D_\mathsf{src}\gets\mathcal{L}_\mathsf{burn}.T_0.D_\mathsf{mint}$
+			\State ensure($D_{\mathsf{mint},j}.\mathsf{ty}=D_\mathsf{src}.\mathsf{ty}$)
+			\State $\mathcal{A}\gets\Call{Assets}{D_\mathsf{src}.\mathsf{ty},D_\mathsf{src}.\auxd'}$
+			\State ensure($\len{\mathcal{A}}=m$ and $\mathcal{A}$ is canonical)
+			\State $\mathcal{A}_j\gets\Call{Assets}{D_{\mathsf{mint},j}.\mathsf{ty},D_{\mathsf{mint},j}.\auxd'}$
+			\State ensure($\mathcal{A}_j$ is non-empty and canonical and $\len{P_j}=\len{\mathcal{A}_j}$)
+			\State $\mathsf{id}_j\gets H(D_{\mathsf{mint},j}.\mathsf{salt},D_{\mathsf{mint},j}.\alpha)$
+			\State $d_j\gets\Call{split\_output\_commitment}{\mathcal{L}_\mathsf{burn}.\mathsf{id},D_{\mathsf{mint},j}}$
+			\For{$\ell\gets1$ to $\len{\mathcal{A}_j}$}
+				\State $(\mathsf{aid},v)\gets\mathcal{A}_j[\ell]$
+				\State $i\gets$ the unique index with $\mathcal{A}[i].\mathsf{aid}=\mathsf{aid}$; ensure it exists
+				\State $(b,v_\mathsf{root})\gets\Call{rsmst\_verify\_inclusion}{\mathsf{id}_j,d_j,v,P_j[\ell],r_i}$
+				\State ensure($b=\TRUE$)
+				\State ensure($v_\mathsf{root}=\mathcal{A}[i].v$)
+			\EndFor
+			\State \Return $1$
+		\EndFunction
+	\end{algorithmic}
+\end{algorithm}
