@@ -123,13 +123,23 @@ type RefundStatement struct {
 	RootCertifiedUnused bool
 }
 
-// ReconcileUnusedCredit refunds a credit only when: the statement is
-// root-certified; the credit exists; the statement's owner matches the
-// credit's recorded owner; the credit's queue entry was NOT certified-
-// consumed; and it has not already been reconciled. Applied at most once.
+// ReconcileUnusedCredit is the certified admission rollback and the refund
+// as ONE bound transition. It applies only when: the statement is
+// root-certified; the forced inbox it rolls back is supplied (a refund
+// cannot be reasoned about without the queue state it changes); the credit
+// exists; the statement's owner matches the credit's recorded owner; the
+// credit has not already been reconciled; and — if the credit was consumed
+// into a queue entry — that entry is still pending. A pending entry is
+// permanently revoked here (dropped from the live queue, its per-sender
+// slot released) so the same paid credit can never also back an executed
+// entry. A tentatively-executed or certified-consumed entry cannot be
+// rolled back and its credit is not refundable. Applied at most once.
 func (e *CreditEscrow) ReconcileUnusedCredit(s RefundStatement, q *ForcedInbox) DepositResult {
 	if !s.RootCertifiedUnused {
 		return DepositResult{false, "no root-certified reconciliation"}
+	}
+	if q == nil {
+		return DepositResult{false, "reconciliation must be applied against the forced inbox it rolls back"}
 	}
 	c, ok := e.credits[s.CreditID]
 	if !ok {
@@ -141,10 +151,19 @@ func (e *CreditEscrow) ReconcileUnusedCredit(s RefundStatement, q *ForcedInbox) 
 	if c.reconciled {
 		return DepositResult{false, "credit already reconciled"}
 	}
-	if c.consumedBy >= 0 && q != nil && q.entryState(uint64(c.consumedBy)) == entryCertifiedConsumed {
-		return DepositResult{false, "credit backs a certified-consumed entry — nothing to refund"}
+	if c.consumedBy >= 0 {
+		switch q.entryState(uint64(c.consumedBy)) {
+		case entryCertifiedConsumed:
+			return DepositResult{false, "credit backs a certified-consumed entry — nothing to refund"}
+		case entryTentativelyExecuted:
+			return DepositResult{false, "credit's entry is tentatively executed — awaiting a consumption certificate, not refundable"}
+		}
+		if !q.RevokeEntry(uint64(c.consumedBy), s.CreditID) {
+			return DepositResult{false, "credit's admission is not a pending live entry in this queue"}
+		}
 	}
 	c.reconciled = true
+	c.consumedBy = -1
 	e.available[c.owner]++
 	return DepositResult{Applied: true}
 }
@@ -354,6 +373,32 @@ func (q *ForcedInbox) AcknowledgeConsumption(throughSeq uint64) bool {
 	q.watermark = throughSeq
 	q.acked = true
 	return true
+}
+
+// RevokeEntry permanently removes a still-pending entry from the live queue
+// as part of a root-certified admission rollback (see
+// CreditEscrow.ReconcileUnusedCredit): it drops the entry and releases its
+// per-sender / global slot. It matches on BOTH seq and creditID, so a
+// stale seq or an unrelated queue cannot revoke the wrong entry. It refuses
+// an entry that is already tentatively executed or certified-consumed —
+// those outcomes cannot be rolled back. A revoked entry is neither live nor
+// archived, so it no longer blocks PositionCutoffSatisfied: its admission
+// was resolved by the certified rollback. Returns false if (seq, creditID)
+// is not a pending live entry.
+func (q *ForcedInbox) RevokeEntry(seq uint64, creditID string) bool {
+	for i := range q.live {
+		if q.live[i].Seq != seq || q.live[i].CreditID != creditID {
+			continue
+		}
+		if q.live[i].state != entryPending {
+			return false
+		}
+		sender := q.live[i].Sender
+		q.live = append(q.live[:i], q.live[i+1:]...)
+		q.perSender[sender]--
+		return true
+	}
+	return false
 }
 
 // Watermark is the acknowledged consumption position.

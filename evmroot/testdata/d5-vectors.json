@@ -141,7 +141,7 @@
     }
   ],
   "forced_inbox": {
-    "note": "Authenticated certified deposits (dedup on certified DepositID); unique credit minted+consumed per admission; a three-state entry lifecycle (pending -\u003e tentatively executed -\u003e certified-consumed+archived) that releases queue capacity; refunds bound to the credit's recorded owner and only for a non-consumed entry, at most once.",
+    "note": "Authenticated certified deposits (dedup on certified DepositID); unique credit minted+consumed per admission; a three-state entry lifecycle (pending -\u003e tentatively executed -\u003e certified-consumed+archived) that releases queue capacity; a refund is the certified admission rollback and the credit return as ONE transition — it needs the queue, permanently revokes the still-pending entry (matched on seq AND creditID), and returns the credit at most once; a tentatively-executed or certified-consumed entry is not refundable.",
     "duplicate_certified_deposit_rejected": true,
     "admit_without_credit_rejected": true,
     "double_spend_of_credit_rejected": true,
@@ -179,6 +179,9 @@
     "refund_without_root_certification_rejected": true,
     "refund_race_applied_at_most_once": true,
     "admit_reusing_a_reconciled_credit_rejected": true,
+    "refund_permanently_revokes_the_pending_queue_entry": true,
+    "refunded_balance_backs_exactly_one_fresh_admission": true,
+    "refund_with_no_queue_rejected": true,
     "certified_sponsor_grant_lets_a_newcomer_admit": true
   },
   "inclusion_bound_k": [

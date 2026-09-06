@@ -71,6 +71,9 @@ type D5InboxCase struct {
 	RefundReservedRejected      bool           `json:"refund_without_root_certification_rejected"`
 	RefundRaceAppliedOnce       bool           `json:"refund_race_applied_at_most_once"`
 	AdmitAfterRefundRejected    bool           `json:"admit_reusing_a_reconciled_credit_rejected"`
+	RefundRevokesQueueEntry     bool           `json:"refund_permanently_revokes_the_pending_queue_entry"`
+	RefundedBalanceBacksOne     bool           `json:"refunded_balance_backs_exactly_one_fresh_admission"`
+	RefundNilQueueRejected      bool           `json:"refund_with_no_queue_rejected"`
 	SponsorPathAdmits           bool           `json:"certified_sponsor_grant_lets_a_newcomer_admit"`
 }
 
@@ -216,6 +219,27 @@ func BuildD5Vectors() D5VectorSet {
 	refund2 := esc.ReconcileUnusedCredit(RefundStatement{CreditID: "cr-x", Owner: "alice", RootCertifiedUnused: true}, q)
 	admitAfterRefund, _ := q.Admit("alice", "cr-x", 1000, 100_000, rep(0xAB, 32), true, 21, true, true, true)
 
+	// The refund and the admission rollback are one transition: cr-x's
+	// pending entry (seq 3) is permanently revoked, so a later
+	// ProcessDuePrefix never executes it. The restored balance backs
+	// exactly one fresh admission (cr-x2), not a second copy of seq 3.
+	revokedGone := true
+	for _, e := range q.live {
+		if e.CreditID == "cr-x" {
+			revokedGone = false
+		}
+	}
+	freshAdmit, _ := q.Admit("alice", "cr-x2", 1000, 100_000, rep(0xAC, 32), true, 22, true, true, true)
+	reAfterRefund := q.ProcessDuePrefix(nil)
+	revokedNeverExecutes := true
+	for _, o := range reAfterRefund {
+		if o.Seq == 3 {
+			revokedNeverExecutes = false
+		}
+	}
+	// A reconciliation with no queue to roll back is refused outright.
+	refundNilQueue := esc.ReconcileUnusedCredit(RefundStatement{CreditID: "cr-x2", Owner: "alice", RootCertifiedUnused: true}, nil)
+
 	// sponsor path: a newcomer with no credits is funded by a certified grant.
 	sesc := NewCreditEscrow()
 	sesc.ApplyDeposit(CertifiedDeposit{DepositID: "sd", Owner: "sponsor", Amount: 2, Certified: true})
@@ -224,7 +248,7 @@ func BuildD5Vectors() D5VectorSet {
 	sponsorAdmit, _ := sq.Admit("newbie", "cr-n1", 100, 100_000, rep(0x4E, 32), true, 30, true, true, true)
 
 	vs.Inbox = D5InboxCase{
-		Note:                        "Authenticated certified deposits (dedup on certified DepositID); unique credit minted+consumed per admission; a three-state entry lifecycle (pending -> tentatively executed -> certified-consumed+archived) that releases queue capacity; refunds bound to the credit's recorded owner and only for a non-consumed entry, at most once.",
+		Note:                        "Authenticated certified deposits (dedup on certified DepositID); unique credit minted+consumed per admission; a three-state entry lifecycle (pending -> tentatively executed -> certified-consumed+archived) that releases queue capacity; a refund is the certified admission rollback and the credit return as ONE transition — it needs the queue, permanently revokes the still-pending entry (matched on seq AND creditID), and returns the credit at most once; a tentatively-executed or certified-consumed entry is not refundable.",
 		DuplicateDepositRejected:    !dupDep.Applied,
 		AdmitWithoutCreditRejected:  rNoCredit.Code == "no_credit",
 		DoubleSpendRejected:         rDup.Code == "credit_already_consumed",
@@ -239,6 +263,9 @@ func BuildD5Vectors() D5VectorSet {
 		RefundReservedRejected:      !refundNoCert.Applied,
 		RefundRaceAppliedOnce:       refund1.Applied && !refund2.Applied,
 		AdmitAfterRefundRejected:    admitAfterRefund.Code == "credit_already_reconciled",
+		RefundRevokesQueueEntry:     revokedGone && revokedNeverExecutes,
+		RefundedBalanceBacksOne:     freshAdmit.Admitted,
+		RefundNilQueueRejected:      !refundNilQueue.Applied,
 		SponsorPathAdmits:           sponsorAdmit.Admitted && SponsorPathAvailable(),
 	}
 

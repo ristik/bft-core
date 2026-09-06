@@ -273,17 +273,64 @@ func TestD5_RefundProvenance(t *testing.T) {
 		t.Fatal("refunded a credit backing a certified-consumed entry")
 	}
 
-	// A genuinely unconsumed (rolled-back) credit: refund once only.
-	q.Admit("a", "c2", 100, 100_000, rep(2, 32), true, 2, true, true, true) // seq 1, not acknowledged
+	// A genuinely unconsumed (rolled-back) credit: refund once only, and it
+	// must PERMANENTLY revoke the still-pending queue entry — otherwise the
+	// same paid credit backs both a refund and an executed entry.
+	q.Admit("a", "c2", 100, 100_000, rep(2, 32), true, 2, true, true, true) // seq 1, pending
+	if esc.ReconcileUnusedCredit(RefundStatement{CreditID: "c2", Owner: "a", RootCertifiedUnused: true}, nil).Applied {
+		t.Fatal("refund applied with no queue to roll back")
+	}
 	if !esc.ReconcileUnusedCredit(RefundStatement{CreditID: "c2", Owner: "a", RootCertifiedUnused: true}, q).Applied {
 		t.Fatal("a rolled-back credit was not refunded")
 	}
 	if esc.ReconcileUnusedCredit(RefundStatement{CreditID: "c2", Owner: "a", RootCertifiedUnused: true}, q).Applied {
 		t.Fatal("second reconciliation applied (refund race)")
 	}
-	// Re-admitting a reconciled credit id fails.
+	// seq 1 is gone from the live queue and never executes.
+	for _, o := range q.ProcessDuePrefix(nil) {
+		if o.Seq == 1 {
+			t.Fatal("a refunded credit's entry still executed — credit reuse")
+		}
+	}
+	// Re-admitting the reconciled credit id fails; the restored balance is
+	// usable through a fresh credit id.
 	if r, _ := q.Admit("a", "c2", 100, 100_000, rep(3, 32), true, 3, true, true, true); r.Admitted || r.Code != "credit_already_reconciled" {
 		t.Fatalf("a reconciled credit id was reused: %+v", r)
+	}
+	if r, _ := q.Admit("a", "c3", 100, 100_000, rep(4, 32), true, 4, true, true, true); !r.Admitted {
+		t.Fatalf("refunded balance did not back a fresh admission: %+v", r)
+	}
+}
+
+// TestD5_RefundedCreditCannotBackTwoEntries is the re-review counterexample:
+// deposit one credit, admit c1, refund c1, admit c2 — after the fix the
+// refunded c1's entry is revoked, so ProcessDuePrefix executes only c2 and
+// the single paid credit backs a single entry.
+func TestD5_RefundedCreditCannotBackTwoEntries(t *testing.T) {
+	esc := NewCreditEscrow()
+	esc.ApplyDeposit(CertifiedDeposit{DepositID: "d", Owner: "a", Amount: 1, Certified: true})
+	q := NewForcedInbox(esc, AdmissionLimits{MaxEncodedBytes: 4096, GFI: 300_000, PerSenderQueue: 4, GlobalQueue: 16})
+
+	if r, _ := q.Admit("a", "c1", 100, 100_000, rep(1, 32), true, 1, true, true, true); !r.Admitted {
+		t.Fatalf("c1 not admitted: %+v", r)
+	}
+	if !esc.ReconcileUnusedCredit(RefundStatement{CreditID: "c1", Owner: "a", RootCertifiedUnused: true}, q).Applied {
+		t.Fatal("c1 refund not applied")
+	}
+	if r, _ := q.Admit("a", "c2", 100, 100_000, rep(2, 32), true, 2, true, true, true); !r.Admitted {
+		t.Fatalf("c2 not admitted from the refunded balance: %+v", r)
+	}
+	executed := 0
+	for _, o := range q.ProcessDuePrefix(nil) {
+		if o.Executed {
+			executed++
+		}
+		if o.Seq == 0 {
+			t.Fatal("refunded c1's entry (seq 0) executed — one paid credit backed two entries")
+		}
+	}
+	if executed != 1 {
+		t.Fatalf("one paid credit backed %d executed entries, want 1", executed)
 	}
 }
 

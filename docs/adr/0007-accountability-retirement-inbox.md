@@ -9,8 +9,18 @@ gate uses a **root-round liability deadline → certified-consumed positions**
 cutoff, not a watermark-vs-round comparison; `K` is **entry-count /
 fragmentation aware** (indivisible entries); credits and refunds are bound to a
 **certified deposit identity** and the **recorded owner**, with an **executable
-sponsor path**. Freeze once re-reviewed by a consensus reviewer and a
-custody-accounting reviewer, neither the author. Depends on ADR 0003/0005/0006.
+sponsor path**.
+
+Revised again after the second review (#81): a refund is the certified admission
+rollback and the credit return as **one bound transition**. `ReconcileUnusedCredit`
+now requires the forced inbox it rolls back (rejects `nil`), applies only to a
+still-`pending` entry, and **permanently revokes** that entry
+(`RevokeEntry(seq, creditID)` — matched on both fields, drops it from the live
+queue, releases the slot) before returning the credit. This closes the credit-reuse
+gap where a refunded credit's admitted entry stayed executable (refund `c1`, admit
+`c2` from the restored balance, both execute). Freeze once re-reviewed by a
+consensus reviewer and a custody-accounting reviewer, neither the author. Depends
+on ADR 0003/0005/0006.
 
 ## Context
 
@@ -45,7 +55,8 @@ Adopt the model in
 3. **Paid forced inbox.** Prepaid UCT credits in an immutable escrow; a certified
    deposit credits once (duplicate proof is a no-op); admission consumes exactly
    one unique credit in root consensus; a refund of an unused credit requires a
-   root-certified reconciliation and applies at most once. FIFO progresses past a
+   root-certified reconciliation against the queue, permanently revokes the
+   still-pending entry, and applies at most once. FIFO progresses past a
    poisoned entry (consumed with an authenticated reason). The consumption
    watermark advances exactly once. Only a successful admission yields an
    `EnqueueCertificate`; an HTTP ack is not one. `K` is published as
@@ -56,6 +67,8 @@ Adopt the model in
 ## Deliverables
 
 - `evmroot/d5vote.go`, `d5retire.go`, `d5inbox.go` — the three models.
+  `d5inbox.go` adds `ForcedInbox.RevokeEntry` and the bound
+  rollback-and-return in `ReconcileUnusedCredit`.
 - `evmroot/testdata/d5-vectors.json` — vote binding, slashable-conflict domain,
   protection-param ordering, withdrawal gates, evidence timeliness, forced-inbox
   accounting (no unbacked admission / no double spend / no reserved-credit
@@ -82,5 +95,9 @@ Adopt the model in
 - **Refund on entry rejection.** Rejected: a poisoned entry is still consumed
   (it occupied a queue slot and admission work); refunds are only for credits
   whose entry was never consumed, via root-certified reconciliation.
+- **Refund by restoring balance alone, leaving the queue entry in place.**
+  Rejected on re-review: the refunded credit's admitted entry stayed executable,
+  so one paid credit could back both a refund and an executed entry. The refund
+  now revokes the entry in the same transition and requires the queue to do so.
 - **Treat an HTTP 200 from the intake as an enqueue receipt.** Rejected
   explicitly by the spec; only a consensus enqueue certificate counts.
