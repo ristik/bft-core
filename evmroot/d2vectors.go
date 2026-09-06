@@ -16,7 +16,26 @@ type D2VectorSet struct {
 	BaseFeeSeries  []D2BaseFeeVector   `json:"base_fee_series"`
 	BaseFeeOracle  []D2BaseFeeOracle   `json:"base_fee_arithmetic_oracle"`
 	OrdinaryGasRec []D2OrdinaryGasCase `json:"ordinary_gas_recovery"`
+	SealOutcomes   D2SealOutcomeCase   `json:"seal_outcome_list"`
 	ImportChecks   []D2ImportVector    `json:"import_checks"`
+}
+
+// D2SealOutcomeCase is the canonical block-structure vector: a system op
+// followed by a poison forced entry followed by a valid one, committed by
+// sealOutcomeRoot, with the ordinary transaction list carrying NONE of
+// them.
+type D2SealOutcomeCase struct {
+	Note              string        `json:"note"`
+	Outcomes          []SealOutcome `json:"outcomes"`
+	OutcomeRootHex    string        `json:"seal_outcome_root"`
+	OrdinaryTxCount   int           `json:"ordinary_tx_count"`
+	HeaderGasUsed     uint64        `json:"header_gas_used"`
+	SystemGas         uint64        `json:"system_gas"`
+	ForcedGasSum      uint64        `json:"forced_gas_sum"`
+	RecoveredOrdinary uint64        `json:"recovered_ordinary_gas"`
+	PoisonNotAReverT  bool          `json:"poison_entry_is_a_rejection_record_not_an_evm_revert"`
+	SystemInTxList    bool          `json:"system_or_forced_in_ordinary_tx_list"`
+	ImportOK          bool          `json:"import_ok"`
 }
 
 // D2BaseFeeOracle cross-checks ExecConfig.NextBaseFee against an
@@ -91,29 +110,50 @@ func d2RootInput() RootInput {
 	}
 }
 
-// validSealBlock builds a baseline block that passes every D2 predicate:
-// its companion carries the structured rootInput, is authenticated, and its
-// header context and extraData agree with that input.
+// d2TrustBase is the importer's trust-base view: a 5-member unequal-weight
+// assignment (10/6/5/2/1, W=24) and its recomputed quorum threshold (17).
+func d2TrustBase() (SignerAssignment, uint64) {
+	a := SignerAssignment{"root-a": 10, "root-b": 6, "root-c": 5, "root-d": 2, "root-e": 1}
+	return a, a.RootQuorumThreshold()
+}
+
+// d2SealSigners is a signer subset whose weight clears the threshold.
+func d2SealSigners() []string { return []string{"root-a", "root-b", "root-c"} } // 10+6+5 = 21 >= 17
+
+// validSealBlock builds a baseline block that passes every D2 predicate.
 func validSealBlock(cfg ExecConfig) (SealBlock, RootInput) {
 	ri := d2RootInput()
+	tb, thr := d2TrustBase()
+	ed := ri.ExtraData()
+	outcomes := []SealOutcome{
+		{Kind: OutcomeSystem, GasUsed: 1_800_000, Status: 1, Digest: ed[:]},
+	}
 	return SealBlock{
-		ExtraData: ri.ExtraData(),
+		ExtraData: ed,
 		Context: BlockContext{
 			NetworkID: ri.NetworkID, PartitionID: ri.PartitionID, ShardID: ri.ShardID,
-			Round: ri.Round, ParentHash: ri.ParentHash,
+			Round: ri.Round, ParentHash: ri.ParentHash, SealOutcomeRoot: SealOutcomeRoot(outcomes),
 		},
-		BaseFee:     1_000_000_000,
-		Withdrawals: 0,
-		BlobTxCount: 0,
+		BaseFee:         1_000_000_000,
+		Withdrawals:     0,
+		BlobTxCount:     0,
+		OrdinaryTxCount: 12,
 		SystemCall: SystemCall{
 			From: SystemOrigin, To: SystemRegistry, Value: 0,
 			HasSig: false, HasNonce: false, FromTxPool: false, Succeeded: true,
 		},
 		Work: BlockWork{System: 1_800_000, Forced: 0, Ordinary: 15_000_000},
 		Companion: CompanionData{
-			Present: true, Authenticated: true, RootInput: ri,
-			Witnesses: [][]byte{rep(0xC0, 40)}, Provenance: "newPayload",
+			Present:   true,
+			RootInput: ri,
+			Witness: CompanionWitness{
+				UC: UCWitness{OriginID: ri.Origin.Identity(), SealSigners: d2SealSigners()},
+			},
+			SealOutcomes: outcomes,
+			Provenance:   "newPayload",
 		},
+		TrustBase:          tb,
+		TrustBaseThreshold: thr,
 	}, ri
 }
 
@@ -190,6 +230,49 @@ func BuildD2Vectors() D2VectorSet {
 		})
 	}
 
+	// --- seal-outcome list: system + poison + valid forced --------------
+	fcfg := cfg
+	fcfg.GFI = 2_000_000 // enable the forced inbox for this vector
+	fri := d2RootInput()
+	fed := fri.ExtraData()
+	fOutcomes := []SealOutcome{
+		{Kind: OutcomeSystem, GasUsed: 1_500_000, Status: 1, Digest: fed[:]},
+		{Kind: OutcomeForcedRejected, GasUsed: 0, Status: 0, Reason: "nonce_already_used", Digest: rep(0xF0, 32)},
+		{Kind: OutcomeForced, GasUsed: 400_000, Status: 1, Digest: rep(0xF1, 32)},
+	}
+	tb2, thr2 := d2TrustBase()
+	fBlock := SealBlock{
+		ExtraData: fed,
+		Context: BlockContext{
+			NetworkID: fri.NetworkID, PartitionID: fri.PartitionID, ShardID: fri.ShardID,
+			Round: fri.Round, ParentHash: fri.ParentHash, SealOutcomeRoot: SealOutcomeRoot(fOutcomes),
+		},
+		BaseFee: 1_000_000_000, OrdinaryTxCount: 3,
+		SystemCall: SystemCall{From: SystemOrigin, To: SystemRegistry, Succeeded: true},
+		Work:       BlockWork{System: 1_500_000, Forced: 400_000, Ordinary: 10_000_000},
+		Companion: CompanionData{
+			Present: true, RootInput: fri,
+			Witness:      CompanionWitness{UC: UCWitness{OriginID: fri.Origin.Identity(), SealSigners: d2SealSigners()}},
+			SealOutcomes: fOutcomes, Provenance: "newPayload",
+		},
+		TrustBase: tb2, TrustBaseThreshold: thr2,
+	}
+	fRes := ValidateImport(fBlock, fcfg)
+	headerGas := fBlock.Work.HeaderGasUsed()
+	forcedSum := fOutcomes[1].GasUsed + fOutcomes[2].GasUsed
+	recOrd, _ := RecoverOrdinaryGas(headerGas, fOutcomes[0].GasUsed, forcedSum)
+	sor := SealOutcomeRoot(fOutcomes)
+	vs.SealOutcomes = D2SealOutcomeCase{
+		Note: "System op + forced entries live in the seal-outcome list committed by sealOutcomeRoot, NOT in the Ethereum transaction list. " +
+			"A poison entry is a rejection record (Kind=forced_rejected, an authenticated reason), never an EVM revert. " +
+			"transactionsRoot/receiptsRoot keep standard semantics over the ordinary txs only.",
+		Outcomes: fOutcomes, OutcomeRootHex: hx(sor[:]), OrdinaryTxCount: fBlock.OrdinaryTxCount,
+		HeaderGasUsed: headerGas, SystemGas: fOutcomes[0].GasUsed, ForcedGasSum: forcedSum, RecoveredOrdinary: recOrd,
+		PoisonNotAReverT: fOutcomes[1].Kind == OutcomeForcedRejected && fOutcomes[1].Reason != "",
+		SystemInTxList:   false, // by construction: the tx list count excludes them
+		ImportOK:         fRes.OK,
+	}
+
 	// --- import checks --------------------------------------------------
 	mut := func(f func(*SealBlock)) SealBlock {
 		b, _ := validSealBlock(cfg)
@@ -204,20 +287,29 @@ func BuildD2Vectors() D2VectorSet {
 	}{
 		{"valid", mut(func(*SealBlock) {}), true, ""},
 		{"companion_missing", mut(func(b *SealBlock) { b.Companion.Present = false }), false, "companion_missing"},
-		{"companion_unauthenticated", mut(func(b *SealBlock) { b.Companion.Authenticated = false }), false, "companion_unauthenticated"},
-		{"companion_no_witnesses", mut(func(b *SealBlock) { b.Companion.Witnesses = nil }), false, "companion_unauthenticated"},
+		{"witness_wrong_origin", mut(func(b *SealBlock) { b.Companion.Witness.UC.OriginID = Hash32{1} }), false, "companion_unauthenticated"},
+		{"witness_below_threshold", mut(func(b *SealBlock) { b.Companion.Witness.UC.SealSigners = []string{"root-d", "root-e"} }), false, "companion_unauthenticated"}, // 2+1 = 3 < 17
+		{"witness_unknown_signer", mut(func(b *SealBlock) { b.Companion.Witness.UC.SealSigners = []string{"root-a", "ghost"} }), false, "companion_unauthenticated"},
+		{"witness_transition_proof_count", mut(func(b *SealBlock) {
+			b.Companion.RootInput.Transitions = [][]byte{rep(0xB0, 8)}
+			// extraData + outcome root now stale, but the witness count check fires first
+		}), false, "companion_unauthenticated"},
 		{"rootinput_invalid_epoch", mut(func(b *SealBlock) { b.Companion.RootInput.AuthorizedEpoch = 9; b.Companion.RootInput.TE.Epoch = 9 }), false, "rootinput_invalid"},
-		{"rootinput_malformed_widths", mut(func(b *SealBlock) { b.Companion.RootInput.Origin.TRHash = rep(1, 8) }), false, "rootinput_invalid"},
+		{"rootinput_short_parent_hash", mut(func(b *SealBlock) { b.Companion.RootInput.ParentHash = rep(0xEE, 31) }), false, "rootinput_invalid"},
+		{"malformed_origin_breaks_witness", mut(func(b *SealBlock) { b.Companion.RootInput.Origin.TRHash = rep(1, 8) }), false, "companion_unauthenticated"}, // a malformed O_- cannot carry a matching witness
 		{"context_mismatch_round", mut(func(b *SealBlock) { b.Context.Round = 58 }), false, "context_mismatch"},
 		{"context_mismatch_parent", mut(func(b *SealBlock) { b.Context.ParentHash = rep(0xAB, 32) }), false, "context_mismatch"},
-		{"spliced_rootinput_for_other_block", mut(func(b *SealBlock) {
-			other := d2RootInput()
-			other.Round = 99
-			other.TE.Round = 99
-			other.Origin.IR.Round = 99
-			b.Companion.RootInput = other // extraData still commits the original -> extradata_mismatch after context passes? no: context.Round stays 57 != 99
-		}), false, "context_mismatch"},
 		{"extradata_mismatch", mut(func(b *SealBlock) { b.ExtraData[0] ^= 0xff }), false, "extradata_mismatch"},
+		{"seal_outcomes_empty", mut(func(b *SealBlock) { b.Companion.SealOutcomes = nil }), false, "seal_outcomes_shape"},
+		{"system_not_first_outcome", mut(func(b *SealBlock) {
+			b.Companion.SealOutcomes = []SealOutcome{{Kind: OutcomeForced, GasUsed: 1, Status: 1}, {Kind: OutcomeSystem, GasUsed: 1_800_000, Status: 1}}
+			b.Context.SealOutcomeRoot = SealOutcomeRoot(b.Companion.SealOutcomes)
+		}), false, "seal_outcomes_shape"},
+		{"seal_outcome_root_mismatch", mut(func(b *SealBlock) { b.Context.SealOutcomeRoot[0] ^= 0xff }), false, "seal_outcome_root_mismatch"},
+		{"system_outcome_status_zero", mut(func(b *SealBlock) {
+			b.Companion.SealOutcomes[0].Status = 0
+			b.Context.SealOutcomeRoot = SealOutcomeRoot(b.Companion.SealOutcomes)
+		}), false, "system_failed"},
 		{"system_origin_forged", mut(func(b *SealBlock) { b.SystemCall.From = [20]byte{0: 0x01} }), false, "system_origin_forged"},
 		{"system_value_nonzero", mut(func(b *SealBlock) { b.SystemCall.Value = 1 }), false, "system_value_nonzero"},
 		{"system_from_pool", mut(func(b *SealBlock) { b.SystemCall.FromTxPool = true }), false, "system_from_pool"},

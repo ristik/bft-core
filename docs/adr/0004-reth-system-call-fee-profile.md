@@ -2,14 +2,23 @@
 
 ## Status
 
-Proposed (D2, issue #4). Revised after the first review (#78): a
-**verified-input boundary** (structured companion `rootInput` + authentication
-verdict + header-context match) replaces the "matching self-hash is enough"
-check; `NextBaseFee` uses a 128-bit intermediate and `ExecConfig.Valid()`;
-concrete `engine_*WithSealV1` methods, capability strings, an exact system-call
-receipt convention and `RecoverOrdinaryGas` are specified. Freeze once
-re-reviewed by a Go-adapter + reth reviewer other than the author. Depends on
-ADR 0003 (D1).
+Proposed (D2, issue #4). Revised twice:
+
+- After review #78: a verified-input boundary, 128-bit fee arithmetic +
+  `ExecConfig.Valid()`, concrete `engine_*WithSealV1` methods.
+- After re-review #78: a **deviation inventory** (§3a, 8 rows with alternatives /
+  audit surface / conformance); the **seal-outcome list** — protocol operations
+  are committed by a `sealOutcomeRoot` header sibling and stay **out** of
+  `transactionsRoot` / `receiptsRoot`, so ordinary transaction/receipt semantics
+  are unchanged and an intrinsically invalid forced entry is a
+  `forced_rejected` record, never an EVM revert; the **authentication
+  lifecycle** is finished — `VerifyCompanionWitnesses` runs against the
+  verifier's own trust base with a **recomputed** threshold, and the per-path
+  "who verifies" is stated (adapter over JWT for `newPayload`; re-run for devp2p
+  / offline).
+
+Freeze once re-reviewed by a Go-adapter + reth reviewer other than the author.
+Depends on ADR 0003 (D1).
 
 ## Context
 

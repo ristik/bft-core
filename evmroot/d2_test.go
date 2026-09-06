@@ -83,34 +83,73 @@ func TestD2_MissingCompanionDataIsFatal(t *testing.T) {
 	}
 }
 
-func TestD2_UnauthenticatedOrInvalidRootInputRejected(t *testing.T) {
+func TestD2_AuthenticationBoundary(t *testing.T) {
 	cfg := DefaultExecConfig()
 
-	// Present but not authenticated.
+	// The witness UC certifies a different O_-.
 	b, _ := validSealBlock(cfg)
-	b.Companion.Authenticated = false
+	b.Companion.Witness.UC.OriginID = Hash32{9}
 	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
-		t.Fatalf("unauthenticated companion accepted: %+v", r)
+		t.Fatalf("witness for a different O_- accepted: %+v", r)
 	}
 
-	// Authenticated but the decoded rootInput is structurally invalid.
+	// Seal signer weight below the recomputed root quorum threshold.
 	b, _ = validSealBlock(cfg)
-	b.Companion.RootInput.AuthorizedEpoch = 9 // 2 epochs from certified -> invalid boundary
+	b.Companion.Witness.UC.SealSigners = []string{"root-d", "root-e"} // 2+1 = 3 < 17
+	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
+		t.Fatalf("below-threshold seal accepted: %+v", r)
+	}
+
+	// The importer recomputes the threshold from its own assignment — a
+	// companion-supplied low threshold cannot help.
+	tb, thr := d2TrustBase()
+	if thr != tb.RootQuorumThreshold() || thr != 17 {
+		t.Fatalf("threshold not recomputed from the assignment: %d", thr)
+	}
+
+	// Transition-proof count must match rootInput.Transitions.
+	b, _ = validSealBlock(cfg)
+	b.Companion.RootInput.Transitions = [][]byte{rep(0xB0, 8)}
+	if r := ValidateImport(b, cfg); r.OK || r.Code != "companion_unauthenticated" {
+		t.Fatalf("transition-proof count mismatch accepted: %+v", r)
+	}
+
+	// Structurally invalid rootInput (after a passing witness).
+	b, _ = validSealBlock(cfg)
+	b.Companion.RootInput.AuthorizedEpoch = 9
 	b.Companion.RootInput.TE.Epoch = 9
 	if r := ValidateImport(b, cfg); r.OK || r.Code != "rootinput_invalid" {
 		t.Fatalf("structurally invalid rootInput accepted: %+v", r)
 	}
 
-	// A syntactically fine rootInput for a DIFFERENT block, spliced in with
-	// the original header context: rejected on context, and even past that
-	// the extraData would not match.
+	// A rootInput for a DIFFERENT block: the witness OriginID no longer
+	// matches, so it fails at the authentication boundary.
 	b, _ = validSealBlock(cfg)
 	other := d2RootInput()
-	other.Round, other.TE.Round, other.Origin.IR.Round = 99, 99, 99
+	other.Round, other.TE.Round = 99, 99
 	b.Companion.RootInput = other
 	if r := ValidateImport(b, cfg); r.OK {
 		t.Fatal("a rootInput for a different block was accepted")
 	}
+}
+
+func TestD2_SealOutcomeListSeparateFromTxList(t *testing.T) {
+	v := BuildD2Vectors().SealOutcomes
+	if !v.ImportOK {
+		t.Fatal("the poison-then-valid seal-outcome block did not import")
+	}
+	if v.SystemInTxList {
+		t.Fatal("the system op or a forced entry is in the ordinary transaction list")
+	}
+	if !v.PoisonNotAReverT {
+		t.Fatal("the poison entry is not a rejection record with an authenticated reason")
+	}
+	if v.HeaderGasUsed != v.SystemGas+v.ForcedGasSum+v.RecoveredOrdinary {
+		t.Fatalf("gas does not close: header %d != %d + %d + %d",
+			v.HeaderGasUsed, v.SystemGas, v.ForcedGasSum, v.RecoveredOrdinary)
+	}
+	// system_not_first_outcome and seal_outcome_root_mismatch are covered
+	// by the import_checks table.
 }
 
 func TestD2_NextBaseFeeNoOverflow(t *testing.T) {

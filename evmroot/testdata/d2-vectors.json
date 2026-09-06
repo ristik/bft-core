@@ -97,6 +97,41 @@
       "ok": false
     }
   ],
+  "seal_outcome_list": {
+    "note": "System op + forced entries live in the seal-outcome list committed by sealOutcomeRoot, NOT in the Ethereum transaction list. A poison entry is a rejection record (Kind=forced_rejected, an authenticated reason), never an EVM revert. transactionsRoot/receiptsRoot keep standard semantics over the ordinary txs only.",
+    "outcomes": [
+      {
+        "Kind": "system",
+        "GasUsed": 1500000,
+        "Status": 1,
+        "Reason": "",
+        "Digest": "TieYK5Z0I/g4jel0Je4NBB3cz4QifucgTNdQVJVjep8="
+      },
+      {
+        "Kind": "forced_rejected",
+        "GasUsed": 0,
+        "Status": 0,
+        "Reason": "nonce_already_used",
+        "Digest": "8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PDw8PA="
+      },
+      {
+        "Kind": "forced",
+        "GasUsed": 400000,
+        "Status": 1,
+        "Reason": "",
+        "Digest": "8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fE="
+      }
+    ],
+    "seal_outcome_root": "1f52b2e926cb64863524241bb6f83fc7421cce88ddadaf5c8552ec2d0b45574c",
+    "ordinary_tx_count": 3,
+    "header_gas_used": 11900000,
+    "system_gas": 1500000,
+    "forced_gas_sum": 400000,
+    "recovered_ordinary_gas": 10000000,
+    "poison_entry_is_a_rejection_record_not_an_evm_revert": true,
+    "system_or_forced_in_ordinary_tx_list": false,
+    "import_ok": true
+  },
   "import_checks": [
     {
       "name": "valid",
@@ -115,7 +150,7 @@
       "matches": true
     },
     {
-      "name": "companion_unauthenticated",
+      "name": "witness_wrong_origin",
       "want_ok": false,
       "want_code": "companion_unauthenticated",
       "got_ok": false,
@@ -123,7 +158,23 @@
       "matches": true
     },
     {
-      "name": "companion_no_witnesses",
+      "name": "witness_below_threshold",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "witness_unknown_signer",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "witness_transition_proof_count",
       "want_ok": false,
       "want_code": "companion_unauthenticated",
       "got_ok": false,
@@ -139,11 +190,19 @@
       "matches": true
     },
     {
-      "name": "rootinput_malformed_widths",
+      "name": "rootinput_short_parent_hash",
       "want_ok": false,
       "want_code": "rootinput_invalid",
       "got_ok": false,
       "got_code": "rootinput_invalid",
+      "matches": true
+    },
+    {
+      "name": "malformed_origin_breaks_witness",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
       "matches": true
     },
     {
@@ -163,19 +222,43 @@
       "matches": true
     },
     {
-      "name": "spliced_rootinput_for_other_block",
-      "want_ok": false,
-      "want_code": "context_mismatch",
-      "got_ok": false,
-      "got_code": "context_mismatch",
-      "matches": true
-    },
-    {
       "name": "extradata_mismatch",
       "want_ok": false,
       "want_code": "extradata_mismatch",
       "got_ok": false,
       "got_code": "extradata_mismatch",
+      "matches": true
+    },
+    {
+      "name": "seal_outcomes_empty",
+      "want_ok": false,
+      "want_code": "seal_outcomes_shape",
+      "got_ok": false,
+      "got_code": "seal_outcomes_shape",
+      "matches": true
+    },
+    {
+      "name": "system_not_first_outcome",
+      "want_ok": false,
+      "want_code": "seal_outcomes_shape",
+      "got_ok": false,
+      "got_code": "seal_outcomes_shape",
+      "matches": true
+    },
+    {
+      "name": "seal_outcome_root_mismatch",
+      "want_ok": false,
+      "want_code": "seal_outcome_root_mismatch",
+      "got_ok": false,
+      "got_code": "seal_outcome_root_mismatch",
+      "matches": true
+    },
+    {
+      "name": "system_outcome_status_zero",
+      "want_ok": false,
+      "want_code": "system_failed",
+      "got_ok": false,
+      "got_code": "system_failed",
       "matches": true
     },
     {
