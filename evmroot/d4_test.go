@@ -98,7 +98,33 @@ func TestD4_ActivationRequiresFinalizedCommit(t *testing.T) {
 	if err := h.FinalizeCommit(weak, oldT); err != errFinalityQuorum {
 		t.Fatalf("a below-quorum descendant finalised the commit: %v", err)
 	}
-	if err := h.FinalizeCommit(h.DescendantCommitQC(oldT), oldT); err != nil {
+
+	// The CHECKED MAPPING: DeriveFinalityEvidence refuses to produce a QC
+	// from a root commit chain that is not a real 2-chain.
+	chain := h.RootCommitChainWith(oldT)
+	if _, ok := DeriveFinalityEvidence(chain[:1], h.CommitRecordID, oldT); ok {
+		t.Fatal("derived finality from a 1-chain (no descendant commit)")
+	}
+	brokenGap := h.RootCommitChainWith(oldT)
+	brokenGap[1].Round = h.CommitRound + 2 // non-consecutive
+	if _, ok := DeriveFinalityEvidence(brokenGap, h.CommitRecordID, oldT); ok {
+		t.Fatal("derived finality from a non-consecutive descendant")
+	}
+	weakChain := h.RootCommitChainWith(oldT)
+	weakChain[1].QuorumWeight = oldT - 1
+	if _, ok := DeriveFinalityEvidence(weakChain, h.CommitRecordID, oldT); ok {
+		t.Fatal("derived finality from an under-quorum descendant")
+	}
+	if _, ok := DeriveFinalityEvidence(chain, rep(0xAB, 32), oldT); ok {
+		t.Fatal("derived finality for a commit not in the chain")
+	}
+	// Positive path: a real 2-chain -> derived QC -> finalize, with the
+	// committed root taken FROM the chain, not fabricated.
+	ev, ok := DeriveFinalityEvidence(chain, h.CommitRecordID, oldT)
+	if !ok || !bytes.Equal(ev.CommittedRootHash, chain[1].CommittedRootHash) {
+		t.Fatalf("derived finality QC does not carry the chain's committed root: %+v", ev)
+	}
+	if err := h.FinalizeFromRootChain(chain, oldT); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.Activate(10); err != nil {
@@ -172,25 +198,45 @@ func TestD4_HandoffProgressAndAbortModel(t *testing.T) {
 			t.Errorf("%s: progress/abort property does not hold: %+v", p.Name, p)
 		}
 	}
-	// The reviewer's split counterexample must be covered and resolved.
-	if !names["no_honest_split_byzantine_withholding"] {
-		t.Fatal("the honest-weight-split scenario is not modelled")
+	for _, n := range []string{
+		"byzantine_leader_cannot_split_honest_weight",
+		"two_root_ordered_frozen_ids_is_a_root_violation",
+		"durable_state_survives_restart",
+		"commit_then_abort_cannot_reach_quorum",
+		"combined_delay_restart_equivocation_abort",
+	} {
+		if !names[n] {
+			t.Fatalf("missing progress/abort run %q", n)
+		}
 	}
-	if !names["view_change_carries_lock"] || !names["commit_then_abort_cannot_reach_quorum"] ||
-		!names["combined_delay_restart_commit_vs_abort"] {
-		t.Fatal("view-change lock / commit-vs-abort / combined schedule runs missing")
-	}
-	// Directly: a quorum forms for exactly one FrozenID with b/e Byzantine
-	// and withholding, and none forms for the other.
 	for _, p := range runs {
-		if p.Name == "no_honest_split_byzantine_withholding" {
-			if !p.QuorumFormed || !p.SplitAvoided || len(p.EndorsedFrozenIDs) != 1 {
-				t.Fatalf("honest weight was split or no quorum formed: %+v", p)
+		if p.Name == "byzantine_leader_cannot_split_honest_weight" {
+			if !p.QuorumFormed || !p.SplitAvoided || len(p.EndorsedFrozenIDs) != 1 || p.EndorsedFrozenIDs[0] != "X" {
+				t.Fatalf("a Byzantine leader split honest weight or no single quorum formed: %+v", p)
 			}
 		}
-		if p.Name == "combined_delay_restart_commit_vs_abort" && p.AbortReachedQuorum {
-			t.Fatal("an abort of a committed attempt reached a quorum in the combined schedule")
+		if p.Name == "combined_delay_restart_equivocation_abort" {
+			if p.AbortReachedQuorum || !p.SplitAvoided {
+				t.Fatalf("combined schedule broke safety: %+v", p)
+			}
 		}
+	}
+
+	// The endorsement model itself: an honest signer refuses a FrozenID
+	// with no root-ordering proof, and refuses to switch after endorsing.
+	tb := RootQuorumThreshold(func() uint64 { w, _ := d3Assignment().TotalWeight(); return w }())
+	fid := rep(0xF1, 32)
+	other := rep(0xF2, 32)
+	s := &honestSigner{id: "x", weight: 5}
+	if s.endorse(fid, FrozenOrdered{}, tb) {
+		t.Fatal("endorsed a FrozenID with no FrozenOrdered proof")
+	}
+	if !s.endorse(fid, d4FrozenOrdered(fid, tb+1), tb) {
+		t.Fatal("refused a genuinely root-ordered FrozenID")
+	}
+	s.restart()
+	if s.endorse(other, d4FrozenOrdered(other, tb+1), tb) {
+		t.Fatal("switched endorsement to a different FrozenID after a restart")
 	}
 }
 

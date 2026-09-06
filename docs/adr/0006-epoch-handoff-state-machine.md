@@ -38,12 +38,31 @@ Revised again after the third review (#80):
   chain as authorisation, and `A*` as the proposed round; its certification is
   the first certified round `≥ A*`.
 - **A handoff progress/abort model** (`d4progress.go`) supplements the static
-  quorum enumeration: one `FrozenID` per (attempt, view); honest signers follow
-  the view leader's single proposal and hold it durably (restart-safe, no
-  double-endorse); a view change carries the highest lock and the next leader
-  must re-propose it. This resolves the "honest weight split across `X` and `Y`"
-  case the enumeration alone could not, and models commit-vs-abort exclusion
-  under durable state in a combined delayed-message/restart schedule.
+  quorum enumeration. *(Superseded — see the fourth review.)*
+
+Revised again after the fourth review (#80):
+
+- **Finality evidence is a checked mapping, not a fabricated hash.** The
+  descendant `CommitQC` is produced by `DeriveFinalityEvidence(RootCommitChain,
+  commitRecordID, oldThreshold)` — a checked walk of the verifier's authenticated
+  view of the root `LedgerCommitInfo` commit stream (a **verified external
+  precondition**). It succeeds only for a hash-linked, consecutive-round, quorate
+  chain that contains the commit **and a descendant** that extends it; the
+  returned `CommittedRootHash` comes from the chain. `FinalizeCommit` still
+  re-checks the relation directly, so a hand-built QC is also rejected.
+  `FinalizeFromRootChain` is the positive helper. Negatives: 1-chain, gap,
+  under-quorum, commit-not-in-chain.
+- **The progress model no longer invents a handoff consensus.** The third-review
+  "view-change + lock" model did not hold — a Byzantine handoff leader could send
+  `X` to one signer and `Y` to another. `d4progress.go` rev 2: the **freeze
+  record is committed by the existing root BFT consensus** before endorsement
+  (`FrozenOrdered` — the verifier's authenticated view of that root commit), and
+  root consensus commits at most one freeze per `(attempt, predecessor)`. An
+  honest signer endorses only a `FrozenID` carrying a `FrozenOrdered` proof, so a
+  Byzantine leader cannot split honest weight; durable per-signer state is
+  checked **unconditionally** (restart-safe); two quorate `FrozenOrdered` proofs
+  for one slot are flagged as a root-consensus violation, not resolved by the
+  handoff.
 
 Freeze once re-reviewed by a Go consensus / protocol reviewer other than the
 author. Depends on ADR 0003 (D1) and ADR 0005 (D3).
@@ -99,8 +118,9 @@ Adopt the state machine in
 
 - `evmroot/d4handoff.go` — `Handoff` state, the phase transitions, `Authorized`,
   `FieldsAreKnown`, `PipelineDepth`, `CommitRecordID`, `ActivationRecord`,
-  `CommitQC`, `FinalizeCommit(descendant CommitQC, oldThreshold)`,
-  `FirstSuccessorProposal`.
+  `CommitQC`, `RootCommit` / `RootCommitChain` / `DeriveFinalityEvidence`,
+  `FinalizeCommit(descendant CommitQC, oldThreshold)` /
+  `FinalizeFromRootChain`, `FrozenOrdered`, `FirstSuccessorProposal`.
 - `evmroot/d4explore.go` — `checkInvariants` and 12 fault scenarios (delayed
   signatures, asymmetric delivery, missed earliest activation, crash at every
   phase, old quorum loss, committed abort vs late activate, incomplete-prepare
@@ -109,9 +129,10 @@ Adopt the state machine in
   a bounded Byzantine equivocating set, exhaustive honest-assignment
   quorum-intersection search (G2), per-replica commit tuples (G3), the
   conflicting-`A*` counterexample, the descendant-`CommitQC` finality negatives.
-- `evmroot/d4progress.go` — the handoff progress/abort model: view-leader single
-  proposal, durable per-signer state, safe lock rule across view change,
-  commit-vs-abort exclusion, combined delayed-message/restart schedule.
+- `evmroot/d4progress.go` — the handoff progress/abort model (rev 2): the
+  root-ordered freeze (`FrozenOrdered`), unconditional durable per-signer state,
+  Byzantine-leader-cannot-split, commit-vs-abort exclusion, combined
+  delay/restart/equivocation schedule.
 - `evmroot/d4vectors.go` — scenario results plus the exhaustive 24-permutation
   phase-order check.
 - `evmroot/testdata/d4-vectors.json` + `TestD4_VectorsMatchGolden`.
@@ -154,5 +175,14 @@ Adopt the state machine in
   committed root hash.
 - **Rely on the static quorum-intersection enumeration as the whole handoff
   model.** Rejected: it assumes a fixed honest partition and cannot explain how
-  ordering prevents an honest split before endorsement. Supplemented with the
-  view-leader / durable-lock progress model in `d4progress.go`.
+  ordering prevents an honest split before endorsement.
+- **Model a bespoke handoff "view-change + lock" protocol** (third-review
+  version). Rejected on the fourth review: a Byzantine handoff leader can send
+  different `FrozenID`s to different signers within one view, and "following a
+  leader is not agreement". Replaced by consuming the **existing root
+  consensus's** commitment of the freeze record (`FrozenOrdered`) — no second
+  consensus.
+- **Fabricate the descendant `CommitQC` in a helper.** Rejected on the fourth
+  review: `CommittedRootHash` was an unrelated SHA-256 and the weight was
+  caller-supplied. `DeriveFinalityEvidence` derives it from an authenticated
+  `RootCommitChain` and takes the root hash from the chain.

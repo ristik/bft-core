@@ -90,16 +90,27 @@ endorsed identity. This removes the circularity the review flagged.
 `A*` is not scheduled inside the reorg window. It does **not** establish
 finality.
 
-`FinalizeCommit` no longer takes a bare round number. It takes a **descendant
-`CommitQC`** — the executable stand-in for the root `SafetyModule.isCommitCandidate`
-relation plus the signed `LedgerCommitInfo` — and checks the real relation:
+The descendant `CommitQC` is **not fabricated** in the model. It is derived by a
+**checked mapping** from an authenticated `RootCommitChain` — the verifier's view
+of the root chain's own `LedgerCommitInfo` commit stream, consumed as a **verified
+external precondition**:
 
-| Check | Rejects |
+`DeriveFinalityEvidence(chain, commitRecordID, oldThreshold)` walks the chain and
+returns the descendant `CommitQC` **only** if:
+
+| Requirement | Rejects |
 |---|---|
-| `descendant.ParentCommitID == this.CommitRecordID` | an **unrelated higher-round QC** (`errFinalityLink`) |
-| `descendant.Round == CommitRound + 1` | a **timeout gap** / non-consecutive QC (`errFinalityGap`) |
-| `descendant.QuorumWeight ≥ ⌊2Wₒₗd/3⌋+1` | an under-quorum descendant (`errFinalityQuorum`) |
-| `len(descendant.CommittedRootHash) == 32` | a QC binding no committed root (`errFinalityRoot`) |
+| the chain is hash-linked (`ParentID == predecessor.CommitID`) and consecutive-round throughout | a broken / gapped chain |
+| every entry is quorate (`QuorumWeight ≥ ⌊2Wₒₗd/3⌋+1`) and has a 32-byte `CommittedRootHash` | an under-quorum or rootless commit |
+| the chain contains `commitRecordID` **and a descendant that extends it** | a 1-chain (no descendant) / a commit not in the chain |
+
+The returned QC's `CommittedRootHash` is **taken from the chain**, never
+synthesised. `FinalizeCommit(descendant, oldThreshold)` then re-checks
+`ParentCommitID == this.CommitRecordID` (`errFinalityLink`),
+`Round == CommitRound + 1` (`errFinalityGap`), `QuorumWeight ≥ threshold`
+(`errFinalityQuorum`), `len(CommittedRootHash) == 32` (`errFinalityRoot`) — so a
+hand-built unrelated / gapped / under-quorum QC is still rejected on the direct
+path. `FinalizeFromRootChain` is the positive one-call helper.
 
 `Commit` records this handoff's own `SelfCommitQC` (parent = the pre-handoff
 committed head, weight = the endorsement weight). **`Activate` requires
@@ -188,7 +199,7 @@ away Byzantine equivocation. The model now:
 |---|---|---|
 | G2 | over every honest assignment, with the Byzantine set on both sides, **at most one** of two conflicting statements reaches a quorum — applied to two `FrozenID`s, two `CommitRecordID`s (conflicting `A*`), and commit-vs-abort of one attempt | `max_simultaneous_quorums = 1` in every run; at the `f_W` bound the closest split is one side at 17, the other at 14 |
 | G3 | per-replica commit tuples `(replica, FrozenID, A*, commitRound, CommitRecordID)` are kept **un-deduplicated** and must all agree | holds for `replica_commit_tuples_agree`; the counterexample is **flagged**, not silently merged |
-| G4 | activation requires `FinalizeCommit(descendantRound > commitRound)` — the root 2-chain, not a round count | holds (`activation_requires_finalized_commit`) |
+| G4 | activation requires a `CommitFinalized` set only by a descendant `CommitQC` **derived from an authenticated `RootCommitChain`** — the root 2-chain, not a round count | holds (`activation_requires_finalized_commit`) |
 | G5 | (conditional) every record delivered, no abort ⇒ every replica reaches `acknowledged` | `reached` (`conditional_liveness_all_delivered`) |
 
 `G1` ("no signer ever equivocates") is **deliberately not a property**:
@@ -208,29 +219,40 @@ the tuple check must flag the disagreement), `activation_requires_finalized_comm
 
 ### Handoff progress / abort model (`handoff_progress_and_abort`)
 
-The enumeration above is a *static* safety fact. The re-review's third round
-noted it assumes every honest signer has already, permanently, chosen `X` / `Y`
-/ abstain, and does not say how consensus ordering keeps honest weight from being
-split in the first place — e.g. `a(10)→X`, `c,d(7)→Y` with `b,e(7)` Byzantine
-withholding leaves no quorum although 17 honest weight is online.
+The enumeration above is a *static* safety fact. The third-review version of this
+section invented a bespoke "handoff view-change" protocol; the fourth review
+showed it did not hold for its own state machine — a **Byzantine handoff leader**
+can send `X` to signer `a` and `Y` to `c,d`, and a signer that "follows the
+leader" accepts whatever it received. *Following a leader is not agreement.*
 
-`d4progress.go` models the progress side. The structural fact: the election
-candidate is committed by the epoch manager, so there is **one `FrozenID` per
-(attempt, view)**. Honest signers do **not** pick a `FrozenID` independently —
-they endorse the one the current **view leader** proposed, and hold that choice
-**durably** (a restart reloads it; they refuse to double-endorse). A cross-
-`FrozenID` split can only appear across a **view change**, and a view-change
-certificate carries the highest lock, which the next leader **must** re-propose
-(`leaderProposalValid`); honest signers reject a proposal that drops it.
+The fix is to **stop inventing a second consensus**. The **freeze record — like
+every handoff record — is committed by the existing root BFT consensus** before
+any endorsement, and root consensus commits **at most one freeze per (attempt,
+predecessor)** (quorum intersection at the root level). So:
+
+- An honest signer endorses a `FrozenID` **only if it carries a `FrozenOrdered`
+  proof** — the verifier's authenticated view of the root commit that ordered
+  that exact freeze record (`FrozenID` is the full
+  `frozenID(bodyIdentity, frozenSummary, lastEVMParent, candidateHash, attempt,
+  predecessor)` hash — the candidate alone does not determine it). A Byzantine
+  handoff leader **cannot obtain** such a proof for two different `FrozenID`s.
+- Honest signers hold **durable local state**, checked **unconditionally**: once
+  they endorsed `F` for attempt `j` they will not endorse a different value for
+  `j` (a restart reloads this), and they will not sign an abort of a committed
+  `F`.
+- Byzantine signers (weight ≤ `f_W`) may equivocate.
 
 | Run | Shows |
 |---|---|
-| `no_honest_split_byzantine_withholding` | `b,e` (weight 7) withhold; `a,c,d` follow the view-1 leader's single proposal `X`; `10+5+2 = 17` reaches the quorum, **nothing lands on `Y`**. The posited split needs independent honest choice, which the view rule forbids. |
-| `view_change_carries_lock` | view 1 partially endorses `X` (a only); a view-2 leader proposing `Y` is **rejected** (drops the carried lock); the valid view-2 leader re-proposes `X`; `a,c,d` reach 17 on `X`; `Y` never gathers honest weight. |
-| `commit_then_abort_cannot_reach_quorum` | `X` endorsed and committed; honest signers refuse to sign an abort of a committed attempt; only Byzantine weight 7 < 17 is available — a commit and its abort cannot both be certified. |
-| `combined_delay_restart_commit_vs_abort` | one execution: endorsements delivered out of order, `root-a` restarts and its durable state blocks a switch to `Y`, `X` reaches 17, a later abort of the committed attempt gets only weight 7. |
+| `byzantine_leader_cannot_split_honest_weight` | the leader sends `X` to `a`, `Y` to `c,d`; only `X`'s freeze was root-ordered. `a` endorses `X`; `c,d` **reject `Y`** (no `FrozenOrdered` proof) and adopt `X`. `X` reaches `10+5+2 = 17`; `Y` gets only Byzantine weight 7. **No honest weight on `Y`.** |
+| `two_root_ordered_frozen_ids_is_a_root_violation` | two quorate `FrozenOrdered` proofs for one `(attempt, predecessor)` slot is a **root-consensus violation** (two root quorums for one commit slot) — the model flags it; the handoff machine does not have to resolve it. |
+| `durable_state_survives_restart` | `a` endorses `X`, restarts, is handed a valid-looking `FrozenOrdered` proof for `Y` → **still refused**; re-endorsing the same `X` is allowed. |
+| `commit_then_abort_cannot_reach_quorum` | `X` endorsed and committed; honest signers refuse an abort of a committed attempt; only Byzantine weight 7 < 17 is available. |
+| `combined_delay_restart_equivocation_abort` | one execution: out-of-order endorsements, `root-a` restart blocking a switch to `Y`, Byzantine `b,e` equivocating, then a late abort — `X` reaches 17 with nothing on `Y`, the abort gets only weight 7. |
 
-All four hold (`all_progress_properties_hold`); `TestD4_HandoffProgressAndAbortModel`.
+All hold (`all_progress_properties_hold`); `TestD4_HandoffProgressAndAbortModel`
+(which also directly exercises `honestSigner.endorse` — a `FrozenID` with no
+proof is refused, and a post-restart switch is refused).
 
 ### Scenarios (all in `d4-vectors.json`, `phase_ok` and `invariants_ok` true for each):
 
@@ -283,8 +305,9 @@ preserved, recovery not claimed.
 | model exploration (not a phase-API test) shows two effective successors / old+new authorisation of the same extension cannot occur, across competing replicas with quorum intersection under Byzantine equivocation / attempts / delayed commit vs abort | §4 adversarial model — G2 (at most one of two conflicting `FrozenID`s / `CommitRecordID`s / commit-vs-abort reaches a quorum, honest signers split every way, Byzantine set ≤ `f_W` on both sides), G3 (per-replica commit tuples kept un-deduplicated and required to agree; conflicting-`A*` counterexample flagged); `TestD4_MultiReplicaGlobalInvariants` |
 | delayed signatures, asymmetric delivery, missed earliest activation, crash at every phase, old quorum loss, committed abort vs late activate | scenario table §4 (`asymmetric_delivery`, `old_quorum_loss_after_prepare`, `crash_at_*`, `committed_abort_vs_late_activate`) |
 | freeze authenticates the state it endorses — one endorsement cannot authorise divergent handoff states | §2 `FrozenID` (binds body + frozen summary + parent + candidate + attempt); `TestD4_FreezeBindsFrozenStateIntoEndorsedIdentity` |
-| pipeline/activation is not circular; who produces the first successor proposal and which old-quorum proof authorises it; behaviour under timeout gaps; `EpochStart` reconciled with D3 | §2 "The trust-base body records `A_min`, not `A*`" + "First successor proposal — the bootstrap step" (`FirstSuccessorProposal` — leader = successor TR, builds on the finalised committed root, at `A*`) + "Finality is the root 2-chain"; `FinalizeCommit(CommitQC)` checks parent link / consecutive round / quorum weight / committed root, rejecting unrelated-higher-round and timeout-gap QCs; `TestD4_ActivationRequiresFinalizedCommit` |
-| the model exercises the handoff progress/abort rule, not just static quorum arithmetic | §4 "Handoff progress / abort model" — view-leader single proposal + durable per-signer state + safe lock rule across view change + commit-vs-abort exclusion; `handoff_progress_and_abort`; `TestD4_HandoffProgressAndAbortModel` |
+| finality evidence is a checked mapping from real root QCs, not a fabricated hash | §2 "Finality is the root 2-chain" — `DeriveFinalityEvidence(RootCommitChain, commitRecordID, threshold)` requires a hash-linked, consecutive-round, quorate chain containing the commit **and a descendant**; `CommittedRootHash` comes from the chain; negatives (1-chain, gap, under-quorum, commit-not-in-chain) in `TestD4_ActivationRequiresFinalizedCommit` |
+| pipeline/activation is not circular; who produces the first successor proposal and which old-quorum proof authorises it; behaviour under timeout gaps | §2 "First successor proposal — the bootstrap step" (`FirstSuccessorProposal` — leader = successor TR, builds on the finalised committed root, at `A*`); `TestD4_ActivationRequiresFinalizedCommit` |
+| the model exercises the handoff progress/abort rule against equivocating leaders and restarts, not static quorum arithmetic | §4 "Handoff progress / abort model" — the freeze is committed by the **existing root consensus** (`FrozenOrdered`), so a Byzantine handoff leader cannot split honest weight; unconditional durable per-signer state (restart-safe); commit-vs-abort exclusion; `handoff_progress_and_abort`; `TestD4_HandoffProgressAndAbortModel` |
 | an incomplete prepare cannot activate through local REST insertion or clock passage | `incomplete_prepare_then_clock`, `incomplete_prepare_then_rest_insertion`; `TestD4_NoActivationWithoutCommit` |
 | under declared assumptions the model completes a handoff; outside them it preserves safety without claiming recovery | §4 G5 (`reached` vs `held-safe`); scenario `old_quorum_loss_after_prepare` |
 | no signature depends on unknown future state | §2; `FieldsAreKnown` (endorsement binds `FrozenID`, not `A*`); `TestD4_EndorsementBindsNoFutureState` |

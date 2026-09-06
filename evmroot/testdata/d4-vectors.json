@@ -532,8 +532,8 @@
   ],
   "handoff_progress_and_abort": [
     {
-      "name": "no_honest_split_byzantine_withholding",
-      "note": "Byzantine b/e (weight 7 = f_W) withhold. Honest a/c/d follow the view-1 leader's single proposal X; 10+5+2 = 17 reaches the quorum. No honest weight lands on Y — the a→X / c,d→Y split the review posited requires honest signers to choose independently, which the view rule forbids.",
+      "name": "byzantine_leader_cannot_split_honest_weight",
+      "note": "A Byzantine handoff leader sends X to a and Y to c/d in the same attempt. Only the FREEZE for X was committed by the existing root BFT consensus, so only X carries a FrozenOrdered proof. Honest signers endorse only a root-ordered FrozenID: a keeps X, c/d reject Y and adopt X. X reaches 17; Y gets only Byzantine weight 7. Honest weight is never split.",
       "threshold": 17,
       "faulty_weight_bound": 7,
       "byzantine_signers": [
@@ -554,30 +554,34 @@
       "property_holds": true
     },
     {
-      "name": "view_change_carries_lock",
-      "note": "View 1 partially endorsed X (a only). The view-2 leader proposing Y is rejected (drops the carried lock X). The valid view-2 leader re-proposes X; a/c/d endorse it, 17 reaches the quorum. Y never gathers honest weight across either view.",
+      "name": "two_root_ordered_frozen_ids_is_a_root_violation",
+      "note": "Two FrozenOrdered proofs with distinct FrozenIDs, both quorate, for one (attempt, predecessor) slot. Each needs a root quorum; two root quorums for one commit slot violate quorum intersection. The model FLAGS this as a root-consensus violation — the handoff state machine does not have to resolve it.",
       "threshold": 17,
       "faulty_weight_bound": 7,
-      "byzantine_signers": [
-        "root-b",
-        "root-e"
-      ],
-      "online_honest_signers": [
-        "root-a",
-        "root-c",
-        "root-d"
-      ],
-      "frozen_ids_that_reached_a_quorum": [
-        "X"
-      ],
+      "byzantine_signers": null,
+      "online_honest_signers": null,
+      "frozen_ids_that_reached_a_quorum": null,
       "abort_reached_a_quorum": false,
-      "a_quorum_formed": true,
-      "honest_weight_not_split": true,
+      "a_quorum_formed": false,
+      "honest_weight_not_split": false,
+      "property_holds": true
+    },
+    {
+      "name": "durable_state_survives_restart",
+      "note": "root-a endorses X, restarts (durable endorsedFroze retained), then is handed a valid-looking FrozenOrdered proof for Y. The unconditional durable-state check refuses the switch; re-endorsing the same X is still allowed.",
+      "threshold": 17,
+      "faulty_weight_bound": 7,
+      "byzantine_signers": null,
+      "online_honest_signers": null,
+      "frozen_ids_that_reached_a_quorum": null,
+      "abort_reached_a_quorum": false,
+      "a_quorum_formed": false,
+      "honest_weight_not_split": false,
       "property_holds": true
     },
     {
       "name": "commit_then_abort_cannot_reach_quorum",
-      "note": "X endorsed and committed in view 1. Honest signers refuse to sign an abort of a committed attempt (durable state); only Byzantine weight 7 is available for the abort, 7 \u003c 17. A committed handoff and its abort cannot both be certified.",
+      "note": "X endorsed and committed. Honest signers refuse to sign an abort of a committed attempt; only Byzantine weight 7 \u003c 17 is available. A committed handoff and its abort cannot both be certified.",
       "threshold": 17,
       "faulty_weight_bound": 7,
       "byzantine_signers": [
@@ -596,8 +600,8 @@
       "property_holds": true
     },
     {
-      "name": "combined_delay_restart_commit_vs_abort",
-      "note": "Endorsements delivered out of order (d, a, then delayed c); root-a restarts and its durable state blocks a switch to Y; X reaches 17; a subsequent abort of the committed attempt gets only Byzantine weight 7 \u003c 17.",
+      "name": "combined_delay_restart_equivocation_abort",
+      "note": "Endorsements delivered out of order (d, a, then delayed c); root-a restarts and its durable state blocks a switch to Y; Byzantine b/e equivocate; X reaches 17 with nothing on Y; a subsequent abort of the committed attempt gets only weight 7.",
       "threshold": 17,
       "faulty_weight_bound": 7,
       "byzantine_signers": [
@@ -624,7 +628,7 @@
     "all_invariants_held": true,
     "multi_replica_runs": 9,
     "all_global_invariants_held": true,
-    "progress_runs": 4,
+    "progress_runs": 5,
     "all_progress_properties_hold": true
   }
 }

@@ -341,7 +341,7 @@ func D4MultiReplicaRuns() []MultiReplicaResult {
 		fv = append(fv, InvariantViolation{"g4", "a timeout-gap QC was accepted as finality evidence"})
 	}
 	// The real descendant 2-chain QC finalises it.
-	if fr.FinalizeCommit(fr.DescendantCommitQC(thr), thr) != nil {
+	if fr.FinalizeFromRootChain(fr.RootCommitChainWith(thr), thr) != nil {
 		fv = append(fv, InvariantViolation{"g4", "the real descendant 2-chain QC was rejected"})
 	}
 	afterFinal := fr.Activate(12)
@@ -369,7 +369,7 @@ func D4MultiReplicaRuns() []MultiReplicaResult {
 		_ = h.Freeze(rep(0x11, 32), rep(0x22, 32), body(h))
 		_ = h.Endorse(thr, thr)
 		_ = h.Commit(6, 12, rep(0x33, 32))
-		_ = h.FinalizeCommit(h.DescendantCommitQC(thr), thr)
+		_ = h.FinalizeFromRootChain(h.RootCommitChainWith(thr), thr)
 		_ = h.Activate(12)
 		_ = h.Acknowledge(13)
 		if h.Phase != PhaseAcknowledged {

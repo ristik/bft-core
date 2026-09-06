@@ -159,6 +159,89 @@ func committedRootHashFor(commitRecordID []byte, round uint64) []byte {
 	return sha256Bytes(marshalCBOR(cArray{cText("UNICITY_ROOT_COMMIT"), cBytes(commitRecordID), cUint(round)}))
 }
 
+// RootCommit is ONE commit in the root chain's own commit sequence, as the
+// verifier's AUTHENTICATED view of it (from the real root consensus /
+// LedgerCommitInfo stream). D4 consumes it as a VERIFIED EXTERNAL
+// PRECONDITION — it is never fabricated by this model.
+type RootCommit struct {
+	CommitID          []byte // 32 bytes — the committed statement's id (a handoff commit's is its CommitRecordID)
+	Round             uint64
+	ParentID          []byte // the CommitID this one extends
+	CommittedRootHash []byte // 32 bytes — the signed LedgerCommitInfo committed-state field
+	QuorumWeight      uint64 // distinct old-assignment signer weight on this commit's QC
+}
+
+// RootCommitChain is an ascending-round slice of RootCommits, hash-linked
+// by ParentID == predecessor.CommitID.
+type RootCommitChain []RootCommit
+
+func (c RootCommitChain) linkedAndQuorate(oldThreshold uint64) bool {
+	if len(c) == 0 || oldThreshold == 0 {
+		return false
+	}
+	for i := range c {
+		if len(c[i].CommitID) != 32 || len(c[i].CommittedRootHash) != 32 || c[i].QuorumWeight < oldThreshold {
+			return false
+		}
+		if i > 0 && (!bytesEqual(c[i].ParentID, c[i-1].CommitID) || c[i].Round != c[i-1].Round+1) {
+			return false
+		}
+	}
+	return true
+}
+
+// DeriveFinalityEvidence is the CHECKED MAPPING from the authenticated root
+// commit chain to the descendant CommitQC that finalises the handoff commit
+// `commitRecordID` under the root 2-chain. It succeeds only if the chain
+// contains that commit AND a descendant commit that extends it at the
+// consecutive next round, both quorate. It never manufactures a root hash —
+// CommittedRootHash comes from the chain. Negatives: the commit is absent,
+// has no descendant (1-chain), a non-consecutive descendant (gap), an
+// under-quorum descendant, or a broken link.
+func DeriveFinalityEvidence(chain RootCommitChain, commitRecordID []byte, oldThreshold uint64) (CommitQC, bool) {
+	if !chain.linkedAndQuorate(oldThreshold) {
+		return CommitQC{}, false
+	}
+	idx := -1
+	for i := range chain {
+		if bytesEqual(chain[i].CommitID, commitRecordID) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || idx+1 >= len(chain) {
+		return CommitQC{}, false
+	}
+	d := chain[idx+1] // linkedAndQuorate guarantees d links to chain[idx] at +1 round, quorate
+	return CommitQC{
+		CommitRecordID:    append([]byte(nil), d.CommitID...),
+		Round:             d.Round,
+		ParentCommitID:    append([]byte(nil), commitRecordID...),
+		CommittedRootHash: append([]byte(nil), d.CommittedRootHash...),
+		QuorumWeight:      d.QuorumWeight,
+	}, true
+}
+
+// FrozenOrdered is the proof that this EXACT frozen record was committed by
+// the existing root BFT consensus BEFORE any endorsement. The freeze record
+// — like every handoff record — rides the root chain, which commits at most
+// one freeze per (attempt, predecessor). A Byzantine handoff leader
+// therefore cannot obtain a FrozenOrdered proof for two different
+// FrozenIDs. FrozenID is the full frozenID(bodyIdentity, frozenSummary,
+// lastEVMParent, candidateHash, attempt, predecessor) hash — the candidate
+// alone does not determine it. Honest signers endorse ONLY a FrozenID that
+// carries a valid FrozenOrdered proof. It is a VERIFIED EXTERNAL
+// PRECONDITION (the verifier's authenticated view of that root commit).
+type FrozenOrdered struct {
+	FrozenID   []byte
+	RootCommit RootCommit
+}
+
+func (fo FrozenOrdered) authenticates(frozenID []byte, oldThreshold uint64) bool {
+	return oldThreshold > 0 && len(frozenID) == 32 && bytesEqual(fo.FrozenID, frozenID) &&
+		len(fo.RootCommit.CommitID) == 32 && fo.RootCommit.QuorumWeight >= oldThreshold
+}
+
 // NewHandoff starts an Idle handoff for a candidate.
 func NewHandoff(c Candidate, protocolVer uint64) *Handoff {
 	return &Handoff{Phase: PhaseIdle, Candidate: c, ProtocolVer: protocolVer}
@@ -325,11 +408,23 @@ func (h *Handoff) Commit(commitRound, activationRound uint64, successorTRHash []
 	return nil
 }
 
+// RootCommitChainWith returns the 2-entry authenticated root commit chain a
+// well-formed finality proof for this handoff commit would carry: this
+// handoff commit, then a quorate descendant at the consecutive next round.
+// Test/scenario helper standing in for the real root LedgerCommitInfo
+// stream. DeriveFinalityEvidence is what turns it into a CommitQC.
+func (h *Handoff) RootCommitChainWith(descQuorumWeight uint64) RootCommitChain {
+	childID := sha256Bytes(marshalCBOR(cArray{cText("UNICITY_ROOT_COMMIT_CHILD"), cBytes(h.CommitRecordID)}))
+	return RootCommitChain{
+		{CommitID: append([]byte(nil), h.CommitRecordID...), Round: h.CommitRound, ParentID: preHandoffHeadCommitID(h.Candidate.PredecessorHash, h.Candidate.Attempt), CommittedRootHash: committedRootHashFor(h.CommitRecordID, h.CommitRound), QuorumWeight: h.SelfCommitQC.QuorumWeight},
+		{CommitID: childID, Round: h.CommitRound + 1, ParentID: append([]byte(nil), h.CommitRecordID...), CommittedRootHash: committedRootHashFor(childID, h.CommitRound+1), QuorumWeight: descQuorumWeight},
+	}
+}
+
 // DescendantCommitQC builds the CommitQC that would finalise this handoff
-// commit under the root 2-chain: a commit at the consecutive next round,
-// naming this commit as its parent, carrying quorumWeight. Test/scenario
-// helper — real code receives this object from the root consensus, it does
-// not fabricate it.
+// commit under the root 2-chain. Test/scenario helper for NEGATIVE cases;
+// the positive path derives the QC from an authenticated RootCommitChain
+// via DeriveFinalityEvidence, which never fabricates a root hash.
 func (h *Handoff) DescendantCommitQC(quorumWeight uint64) CommitQC {
 	childID := sha256Bytes(marshalCBOR(cArray{cText("UNICITY_ROOT_COMMIT_CHILD"), cBytes(h.CommitRecordID)}))
 	round := h.CommitRound + 1
@@ -343,8 +438,9 @@ func (h *Handoff) DescendantCommitQC(quorumWeight uint64) CommitQC {
 }
 
 // FinalizeCommit records finality under the ROOT 2-CHAIN RULE. It takes a
-// DESCENDANT CommitQC (produced by the root consensus, never fabricated
-// here) and oldThreshold, and checks the real relation:
+// DESCENDANT CommitQC — in real code and in the positive fixtures produced
+// by DeriveFinalityEvidence from the authenticated root commit chain, never
+// fabricated — and oldThreshold, and checks the real relation:
 //
 //   - the descendant's ParentCommitID is THIS commit's CommitRecordID
 //     (it extends this commit, not some unrelated higher-round commit);
@@ -380,6 +476,18 @@ func (h *Handoff) FinalizeCommit(descendant CommitQC, oldThreshold uint64) error
 	h.FinalityEvidence = descendant
 	h.FinalityDescendantRound = descendant.Round
 	return nil
+}
+
+// FinalizeFromRootChain is the positive path: derive the descendant
+// CommitQC from the AUTHENTICATED root commit chain (DeriveFinalityEvidence
+// — never a fabricated root hash), then FinalizeCommit with it. Real code
+// receives `chain` from the root LedgerCommitInfo stream.
+func (h *Handoff) FinalizeFromRootChain(chain RootCommitChain, oldThreshold uint64) error {
+	ev, ok := DeriveFinalityEvidence(chain, h.CommitRecordID, oldThreshold)
+	if !ok {
+		return errFinalityShape
+	}
+	return h.FinalizeCommit(ev, oldThreshold)
 }
 
 // FirstSuccessorProposal is the bootstrap step the re-review asked to make
