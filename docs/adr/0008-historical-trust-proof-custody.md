@@ -2,9 +2,15 @@
 
 ## Status
 
-Proposed (D6, issue #8). Freeze once reviewed by a cryptography / proof reviewer
-and a custody-accounting reviewer, neither the author. Depends on ADR 0003 (D1),
-ADR 0006 (D4), ADR 0007 (D5). Closes the M0 design set.
+Proposed (D6, issue #8). Revised after the first review (#82): live certificate
+age is measured against the **imported certified origin**, not a checkpoint
+round; the proof models use **real hash-linked header chains and Merkle paths**
+that fail on a broken link / wrong root / below-threshold seal / wrong digest,
+not trusted booleans; **`BridgeLedger.Solvent()`** checks `Balance + Shortfall ==
+L − P` with no deficit (not just `L ≥ D ≥ P`); checkpoint freshness is a
+**derived, strict** policy. Freeze once re-reviewed by a cryptography reviewer
+and a custody-accounting reviewer, neither the author. Depends on ADR
+0003/0006/0007. Closes the M0 design set.
 
 ## Context
 

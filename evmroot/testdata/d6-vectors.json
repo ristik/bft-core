@@ -1,66 +1,164 @@
 {
   "global_execution_layer_supply_observable": false,
-  "checkpoint_and_windows": {
-    "note": "Freshness limit is a client policy in elapsed time = Δ_hold × min round period; it is not W_cert and not the key-cache count. Live cert age fits inside the evidence window, which fits inside retirement protection.",
-    "checkpoint_complete": true,
-    "delta_hold_rounds": 200,
+  "live_certificate_admission": [
+    {
+      "name": "fresh_at_origin",
+      "cert_round": 1000,
+      "imported_origin_round": 1000,
+      "w_cert": 10,
+      "signer_epoch_active_at_claimed_round": true,
+      "admitted": true
+    },
+    {
+      "name": "within_window",
+      "cert_round": 995,
+      "imported_origin_round": 1000,
+      "w_cert": 10,
+      "signer_epoch_active_at_claimed_round": true,
+      "admitted": true
+    },
+    {
+      "name": "at_window_boundary",
+      "cert_round": 990,
+      "imported_origin_round": 1000,
+      "w_cert": 10,
+      "signer_epoch_active_at_claimed_round": true,
+      "admitted": true
+    },
+    {
+      "name": "stale_past_window",
+      "cert_round": 100,
+      "imported_origin_round": 1000,
+      "w_cert": 10,
+      "signer_epoch_active_at_claimed_round": true,
+      "admitted": false,
+      "reason": "certificate is older than W_cert relative to the current authenticated origin — use the historical checkpoint/ancestry path"
+    },
+    {
+      "name": "future_ahead_of_origin",
+      "cert_round": 1001,
+      "imported_origin_round": 1000,
+      "w_cert": 10,
+      "signer_epoch_active_at_claimed_round": true,
+      "admitted": false,
+      "reason": "certificate round is ahead of the imported certified origin — retry after root progress"
+    },
+    {
+      "name": "signer_epoch_inactive",
+      "cert_round": 998,
+      "imported_origin_round": 1000,
+      "w_cert": 10,
+      "signer_epoch_active_at_claimed_round": false,
+      "admitted": false,
+      "reason": "signer epoch was not active at the claimed root round"
+    }
+  ],
+  "checkpoint_freshness_policy": {
+    "note": "Max checkpoint staleness = (Δ_hold - Δ_ev) real seconds - churn margin - acquisition latency, and strictly \u003c the min real-time protection. Illustrative client policy; a deployment pins its own values.",
+    "delta_hold_rounds": 20000,
+    "delta_ev_rounds": 8000,
     "min_round_period_seconds": 6,
-    "freshness_limit_seconds": 1200,
+    "churn_margin_seconds": 3600,
+    "acquire_latency_seconds": 1800,
+    "min_real_time_protection_seconds": 68400,
+    "max_checkpoint_staleness_seconds": 66600,
+    "staleness_strictly_less_than_protection": true,
+    "policy_valid": true
+  },
+  "window_nesting_and_key_retention": {
     "w_cert": 50,
     "delta_ev": 100,
+    "delta_hold": 200,
     "nesting_valid": true,
-    "key_retained_for_outstanding_obligation": true
+    "key_retained_for_outstanding_evidence": true,
+    "key_retained_for_outstanding_retirement": true,
+    "key_not_retained_with_no_obligation": true
   },
   "historical_block_authentication": [
     {
-      "name": "near_history_ok",
-      "from_head": 900000,
-      "to_block": 899000,
-      "header_chain_ok": true,
+      "name": "valid_deep_chain",
+      "chain_len": 500,
       "authenticated": true,
-      "header_count": 1000,
+      "header_count": 500,
       "constant_size": false
     },
     {
-      "name": "deep_history_ok",
-      "from_head": 900000,
-      "to_block": 400000,
-      "header_chain_ok": true,
+      "name": "valid_short_chain",
+      "chain_len": 20,
       "authenticated": true,
-      "header_count": 500000,
+      "header_count": 20,
       "constant_size": false
     },
     {
-      "name": "broken_chain",
-      "from_head": 900000,
-      "to_block": 899000,
-      "header_chain_ok": false,
+      "name": "broken_linkage",
+      "chain_len": 500,
       "authenticated": false,
-      "header_count": 1000,
-      "constant_size": false
+      "header_count": 500,
+      "constant_size": false,
+      "reason": "broken hash linkage between consecutive headers"
+    },
+    {
+      "name": "wrong_trusted_head",
+      "chain_len": 500,
+      "authenticated": false,
+      "header_count": 500,
+      "constant_size": false,
+      "reason": "top header does not hash to the trusted head"
     }
   ],
-  "multi_shard_anchor": {
-    "note": "A history touching two aggregator shards verifies with one shared seal plus one shard path per touched shard; path count grows with touched shards, seal verification does not.",
-    "verified": true,
-    "seal_verified_once": true,
-    "shard_path_count": 2,
-    "touched_shards": 2
-  },
-  "lock_witness_refresh": {
-    "note": "A recent proof of the same permanent lock digest refreshes historical backing; token identity does not include the refreshed witness.",
-    "token_identity_unchanged": true,
-    "historical_backing_refreshed": true
-  },
+  "multi_shard_anchor": [
+    {
+      "name": "two_aggregator_shards_one_seal",
+      "verified": true,
+      "seal_verified_once": true,
+      "seal_weight": 21,
+      "shard_path_count": 2,
+      "touched_shards": 2
+    },
+    {
+      "name": "leaf_path_does_not_recompute",
+      "verified": false,
+      "seal_verified_once": true,
+      "seal_weight": 0,
+      "shard_path_count": 2,
+      "touched_shards": 0,
+      "reason": "a leaf does not recompute to its shard state root"
+    },
+    {
+      "name": "seal_below_threshold",
+      "verified": false,
+      "seal_verified_once": false,
+      "seal_weight": 0,
+      "shard_path_count": 0,
+      "touched_shards": 0,
+      "reason": "shared seal signatures do not meet the threshold"
+    }
+  ],
+  "lock_witness_refresh": [
+    {
+      "name": "fresh_proof_same_digest",
+      "fresh_witness_valid": true,
+      "token_identity_unchanged": true,
+      "historical_backing_refreshed": true,
+      "token_lock_identity": "2582124512a4b2af1c7d9f2abd34bc14dbcff93905cc948b4d78f1b462557790"
+    },
+    {
+      "name": "fresh_proof_wrong_digest_rejected",
+      "fresh_witness_valid": false,
+      "token_identity_unchanged": false,
+      "historical_backing_refreshed": false
+    }
+  ],
   "supply_and_backing": {
     "s0": 1000000000,
     "burn": 12345,
     "native_supply": 999987655,
     "vault_native_balance": 50000,
     "wuct_supply": 8000,
-    "bridged_outstanding": 40000,
-    "backing_not_double_counted": true,
-    "note": "Native UCT, WUCT and bridged claims are distinct balances. WUCT is a separate wrapper; bridged outstanding (O = L - D) is covered by vault native UCT and never double-counted against WUCT."
+    "wuct_contract_native": 8000,
+    "bridged_total_liability_o_plus_c": 45000,
+    "backing_consistent": true,
+    "note": "Vault native must cover O + C (the full bridge liability), not just O. WUCT is backed 1:1 by its own contract's native, separate from the vault."
   },
   "custody_walkthrough": [
     {
@@ -68,44 +166,108 @@
       "ledger": {
         "L": 110000,
         "D": 60000,
-        "P": 55000
+        "P": 55000,
+        "Balance": 55000,
+        "Shortfall": 0
       },
       "outstanding": 50000,
       "unpaid_credit": 5000,
-      "invariants_ok": true
+      "owed": 55000,
+      "solvent": true
     },
     {
       "state": "burned",
       "ledger": {
         "L": 110000,
         "D": 60000,
-        "P": 55000
+        "P": 55000,
+        "Balance": 55000,
+        "Shortfall": 0
       },
       "outstanding": 50000,
       "unpaid_credit": 5000,
-      "invariants_ok": true
+      "owed": 55000,
+      "solvent": true
     },
     {
       "state": "redemption_credited",
       "ledger": {
         "L": 110000,
         "D": 70000,
-        "P": 55000
+        "P": 55000,
+        "Balance": 55000,
+        "Shortfall": 0
       },
       "outstanding": 40000,
       "unpaid_credit": 15000,
-      "invariants_ok": true
+      "owed": 55000,
+      "solvent": true
     },
     {
       "state": "paid",
       "ledger": {
         "L": 110000,
         "D": 70000,
-        "P": 65000
+        "P": 65000,
+        "Balance": 45000,
+        "Shortfall": 0
       },
       "outstanding": 40000,
       "unpaid_credit": 5000,
-      "invariants_ok": true
+      "owed": 45000,
+      "solvent": true
+    }
+  ],
+  "custody_solvency": [
+    {
+      "name": "solvent_fully_backed",
+      "l": 100,
+      "d": 100,
+      "p": 0,
+      "vault_balance": 100,
+      "shortfall": 0,
+      "owed_l_minus_p": 100,
+      "solvent": true
+    },
+    {
+      "name": "insolvent_zero_balance",
+      "l": 100,
+      "d": 100,
+      "p": 0,
+      "vault_balance": 0,
+      "shortfall": 0,
+      "owed_l_minus_p": 100,
+      "solvent": false
+    },
+    {
+      "name": "insolvent_recorded_deficit",
+      "l": 100,
+      "d": 100,
+      "p": 0,
+      "vault_balance": 60,
+      "shortfall": 40,
+      "owed_l_minus_p": 100,
+      "solvent": false
+    },
+    {
+      "name": "solvent_partial_paid",
+      "l": 100,
+      "d": 40,
+      "p": 40,
+      "vault_balance": 60,
+      "shortfall": 0,
+      "owed_l_minus_p": 60,
+      "solvent": true
+    },
+    {
+      "name": "insolvent_identity_not_closed",
+      "l": 100,
+      "d": 40,
+      "p": 40,
+      "vault_balance": 50,
+      "shortfall": 0,
+      "owed_l_minus_p": 60,
+      "solvent": false
     }
   ],
   "token_profile": {
@@ -116,7 +278,7 @@
     "mint_reason_extension_allowed": false
   },
   "redemption_relation": {
-    "note": "Direct (atomic, metered) and succinct (over-budget history) paths bind the same network/config/trust-base/nullifier/lock-refs/release-leaves — the same semantic relation on the common admitted token profile.",
+    "note": "Direct (atomic, metered) and succinct (over-budget history) bind the same network/config/trust-base/nullifier/lock-refs/release-leaves.",
     "direct_and_succinct_same_semantic_relation": true
   }
 }

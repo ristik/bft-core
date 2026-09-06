@@ -12,122 +12,203 @@ func TestD6_NoGlobalSupplyClaim(t *testing.T) {
 	}
 }
 
-func TestD6_CheckpointFreshnessSeparateFromWCertAndKeyCache(t *testing.T) {
-	// Freshness limit is Δ_hold rounds × min round period, in seconds — a
-	// different quantity from W_cert (rounds) and from any key count.
-	if got := CheckpointFreshnessLimitSeconds(200, 6); got != 1200 {
-		t.Fatalf("freshness limit = %d, want 1200", got)
+func TestD6_LiveCertMeasuredFromImportedOrigin(t *testing.T) {
+	// The review's case: cert round 100, imported origin 1000, W_cert 10 ->
+	// 900 rounds old -> NOT live.
+	if AdmitLiveCertificate(100, 1000, 10, true).Admitted {
+		t.Fatal("a certificate 900 rounds behind the origin was admitted as live")
 	}
-	if !NestingValid(50, 100, 200) {
-		t.Fatal("W_cert <= Δ_ev < Δ_hold rejected")
+	// At the boundary (exactly W_cert old): admitted.
+	if !AdmitLiveCertificate(990, 1000, 10, true).Admitted {
+		t.Fatal("a certificate exactly W_cert old was not admitted")
 	}
-	if NestingValid(120, 100, 200) {
-		t.Fatal("W_cert > Δ_ev accepted")
+	// One past the boundary: not admitted.
+	if AdmitLiveCertificate(989, 1000, 10, true).Admitted {
+		t.Fatal("a certificate W_cert+1 old was admitted")
 	}
-	if NestingValid(50, 200, 200) {
-		t.Fatal("Δ_ev == Δ_hold accepted (must be strictly less)")
+	// Ahead of the origin: not admitted (retry after progress).
+	if AdmitLiveCertificate(1001, 1000, 10, true).Admitted {
+		t.Fatal("a future certificate was admitted")
 	}
-}
-
-func TestD6_KeyRetentionOutlivesAdmissionCache(t *testing.T) {
-	if !KeyRetentionRequired(true, false) {
-		t.Fatal("key not retained for an outstanding evidence obligation")
-	}
-	if !KeyRetentionRequired(false, true) {
-		t.Fatal("key not retained for an outstanding retirement obligation")
-	}
-	if KeyRetentionRequired(false, false) {
-		t.Fatal("key retained with no obligation")
+	// Signer epoch inactive: not admitted.
+	if AdmitLiveCertificate(995, 1000, 10, false).Admitted {
+		t.Fatal("a certificate from an inactive signer epoch was admitted")
 	}
 }
 
-func TestD6_OldBlockAuthenticatedWithoutRetiredSignatures(t *testing.T) {
-	near := AuthenticateOldBlock(AuthPath{Mode: AuthCheckpointAncestry, FromHeadNumber: 900_000, ToBlockNumber: 899_000, HeaderChainOK: true})
-	deep := AuthenticateOldBlock(AuthPath{Mode: AuthCheckpointAncestry, FromHeadNumber: 900_000, ToBlockNumber: 400_000, HeaderChainOK: true})
-	if !near.Authenticated || !deep.Authenticated {
-		t.Fatal("valid header-chain authentication failed")
+func TestD6_CheckpointFreshnessDerivedAndStrict(t *testing.T) {
+	fp := FreshnessPolicy{DeltaHoldRounds: 20_000, DeltaEvRounds: 8_000, MinRoundPeriodSeconds: 6, ChurnMarginSeconds: 3_600, AcquireLatencySeconds: 1_800}
+	prot := fp.MinRealTimeProtectionSeconds()
+	stale := fp.MaxCheckpointStalenessSeconds()
+	if prot == 0 || stale == 0 {
+		t.Fatalf("degenerate policy: prot=%d stale=%d", prot, stale)
 	}
-	if near.ConstantSize || deep.ConstantSize {
-		t.Fatal("header-chain path claimed to be constant-size")
+	if stale >= prot {
+		t.Fatalf("staleness limit %d is not strictly less than protection %d", stale, prot)
 	}
-	if deep.HeaderCount <= near.HeaderCount {
-		t.Fatal("header count did not grow with distance")
+	if !fp.Valid() {
+		t.Fatal("a well-formed policy was rejected")
 	}
-	bad := AuthenticateOldBlock(AuthPath{Mode: AuthCheckpointAncestry, FromHeadNumber: 900_000, ToBlockNumber: 899_000, HeaderChainOK: false})
-	if bad.Authenticated {
-		t.Fatal("broken header chain authenticated")
+	// A too-short protection window (Δ_hold barely exceeds Δ_ev): no safe policy.
+	bad := FreshnessPolicy{DeltaHoldRounds: 8_100, DeltaEvRounds: 8_000, MinRoundPeriodSeconds: 6, ChurnMarginSeconds: 3_600, AcquireLatencySeconds: 1_800}
+	if bad.Valid() {
+		t.Fatal("an unsafe pacing/protection combination produced a valid policy")
 	}
 }
 
-func TestD6_MultiShardAnchorOneSealManyPaths(t *testing.T) {
-	anchor := AnchorBundle{
-		SealSignaturesVerified: true, RootStateRoot: rep(1, 32),
-		ShardPaths: []ShardPath{
-			{PartitionID: 7, ShardID: "0", PathToRootOK: true},
-			{PartitionID: 7, ShardID: "1", PathToRootOK: true},
+func TestD6_WindowNestingAndKeyRetention(t *testing.T) {
+	if !NestingValid(50, 100, 200) || NestingValid(120, 100, 200) || NestingValid(50, 200, 200) {
+		t.Fatal("window nesting check wrong")
+	}
+	if !KeyRetentionRequired(true, false) || !KeyRetentionRequired(false, true) || KeyRetentionRequired(false, false) {
+		t.Fatal("key retention check wrong")
+	}
+}
+
+func TestD6_HistoricalAuthWalksARealChain(t *testing.T) {
+	chain := LinkHeaders(400_000, rep(0, 32), 300)
+	head := chain[len(chain)-1].Hash()
+	subject := chain[0].Hash()
+
+	ok := AuthenticateOldBlock(subject, chain, head)
+	if !ok.Authenticated || ok.ConstantSize || ok.HeaderCount != 300 {
+		t.Fatalf("valid chain not authenticated: %+v", ok)
+	}
+	// A shorter distance authenticates with fewer headers — linear, not constant.
+	short := LinkHeaders(400_000, rep(0, 32), 30)
+	if r := AuthenticateOldBlock(short[0].Hash(), short, short[len(short)-1].Hash()); r.HeaderCount >= ok.HeaderCount {
+		t.Fatal("header count did not shrink with distance")
+	}
+	// Broken linkage: not authenticated.
+	broken := append([]Header(nil), chain...)
+	broken[150].ParentHash = rep(0xFF, 32)
+	if AuthenticateOldBlock(subject, broken, head).Authenticated {
+		t.Fatal("a broken hash link authenticated")
+	}
+	// Wrong trusted head: not authenticated. Retired-key signatures are not
+	// part of this path at all.
+	if AuthenticateOldBlock(subject, chain, rep(0xAB, 32)).Authenticated {
+		t.Fatal("authenticated against the wrong trusted head")
+	}
+}
+
+func TestD6_MultiShardAnchorRecomputesPaths(t *testing.T) {
+	ws := d3Assignment()
+	w, _ := ws.TotalWeight()
+	s0leaf := sha256Bytes([]byte("s0"))
+	s1leaf := sha256Bytes([]byte("s1"))
+	z := rep(0, 32)
+	s0root := hashNode(s0leaf, z)
+	s1root := hashNode(s1leaf, z)
+	rStar := hashNode(s0root, s1root)
+	bundle := AnchorBundle{
+		Seal: AnchorSeal{RootStateRoot: rStar, Signers: []string{"root-a", "root-b", "root-c"}, Weights: ws, Threshold: RootQuorumThreshold(w)},
+		ShardPaths: []ShardAnchorPath{
+			{PartitionID: 7, ShardID: "0", ShardStateRoot: s0root, Path: []PathStep{{Sibling: s1root, Left: false}}},
+			{PartitionID: 7, ShardID: "1", ShardStateRoot: s1root, Path: []PathStep{{Sibling: s0root, Left: true}}},
 		},
 	}
 	leaves := []AnchoredLeaf{
-		{PartitionID: 7, ShardID: "0", LeafOK: true},
-		{PartitionID: 7, ShardID: "1", LeafOK: true},
+		{PartitionID: 7, ShardID: "0", LeafHash: s0leaf, Path: []PathStep{{Sibling: z, Left: false}}},
+		{PartitionID: 7, ShardID: "1", LeafHash: s1leaf, Path: []PathStep{{Sibling: z, Left: false}}},
 	}
-	r := VerifyAnchoredHistory(anchor, leaves)
+	r := VerifyAnchoredHistory(bundle, leaves)
 	if !r.Verified || !r.SealVerifiedOnce || r.ShardPathCount != 2 {
-		t.Fatalf("multi-shard anchor verification: %+v", r)
+		t.Fatalf("valid multi-shard anchor rejected: %+v", r)
 	}
-	// A leaf on a third shard with no path fails.
-	leaves = append(leaves, AnchoredLeaf{PartitionID: 7, ShardID: "2", LeafOK: true})
-	if VerifyAnchoredHistory(anchor, leaves).Verified {
-		t.Fatal("verified a leaf with no anchor path")
+	// A tampered r* -> shard paths no longer recompute.
+	bad := bundle
+	bad.Seal.RootStateRoot = rep(0x11, 32)
+	if VerifyAnchoredHistory(bad, leaves).Verified {
+		t.Fatal("a wrong r* verified")
 	}
-	// Seal not verified -> fail before any path work.
-	anchor.SealSignaturesVerified = false
-	if VerifyAnchoredHistory(anchor, leaves[:2]).Verified {
-		t.Fatal("verified with an unverified shared seal")
+	// A leaf whose path does not recompute to its shard root.
+	badLeaves := append([]AnchoredLeaf(nil), leaves...)
+	badLeaves[0].LeafHash = rep(0x22, 32)
+	if VerifyAnchoredHistory(bundle, badLeaves).Verified {
+		t.Fatal("a bad leaf verified")
 	}
-}
-
-func TestD6_LockRefreshLeavesIdentityUnchanged(t *testing.T) {
-	idUnchanged, refreshed := RefreshLockWitness(rep(0x7C, 32), rep(0x1C, 32), rep(1, 32), rep(2, 32))
-	if !idUnchanged {
-		t.Fatal("refreshing the lock witness changed token identity")
-	}
-	if !refreshed {
-		t.Fatal("a different root history was not recognised as a refreshed backing")
+	// Seal below threshold.
+	low := bundle
+	low.Seal.Signers = []string{"root-e"}
+	if VerifyAnchoredHistory(low, leaves).Verified {
+		t.Fatal("a below-threshold seal verified")
 	}
 }
 
-func TestD6_SupplyAndBackingNotDoubleCounted(t *testing.T) {
-	if (SupplyLedger{S0: 1000, Burn: 40}).NativeSupply() != 960 {
-		t.Fatal("native supply != S0 - Burn")
+func TestD6_LockRefreshRealProofs(t *testing.T) {
+	tokenID := sha256Bytes([]byte("tok"))
+	digest := sha256Bytes([]byte("lock-digest"))
+	oldSib := sha256Bytes([]byte("old"))
+	freshSib := sha256Bytes([]byte("fresh"))
+	oldW := LockWitness{Digest: digest, RootStateRoot: hashNode(digest, oldSib), Path: []PathStep{{Sibling: oldSib}}}
+	freshW := LockWitness{Digest: digest, RootStateRoot: hashNode(digest, freshSib), Path: []PathStep{{Sibling: freshSib}}}
+	if !oldW.Verify() || !freshW.Verify() {
+		t.Fatal("a valid lock witness did not verify")
 	}
-	ok := VaultBacking{VaultNativeBalance: 50_000, WUCTSupply: 8_000, BridgedOutstanding: 40_000}
-	if !ok.Consistent() {
-		t.Fatal("consistent backing rejected")
+	idUn, refreshed, valid := RefreshLockWitness(tokenID, digest, oldW, freshW)
+	if !valid || !idUn || !refreshed {
+		t.Fatalf("refresh with a valid fresh proof failed: valid=%v idUnchanged=%v refreshed=%v", valid, idUn, refreshed)
 	}
-	bad := VaultBacking{VaultNativeBalance: 30_000, WUCTSupply: 8_000, BridgedOutstanding: 40_000}
-	if bad.Consistent() {
-		t.Fatal("bridged outstanding exceeding vault native accepted")
+	// A fresh witness whose path does not recompute.
+	brokenFresh := freshW
+	brokenFresh.RootStateRoot = rep(0x77, 32)
+	if _, _, v := RefreshLockWitness(tokenID, digest, oldW, brokenFresh); v {
+		t.Fatal("an invalid fresh witness was accepted")
+	}
+	// A fresh witness for a different digest.
+	other := sha256Bytes([]byte("other"))
+	bad := LockWitness{Digest: other, RootStateRoot: hashNode(other, oldSib), Path: []PathStep{{Sibling: oldSib}}}
+	if _, _, v := RefreshLockWitness(tokenID, digest, oldW, bad); v {
+		t.Fatal("a fresh witness for the wrong digest was accepted")
+	}
+	// Identity is a pure function of (tokenID, digest).
+	if TokenLockIdentity(tokenID, digest) != TokenLockIdentity(tokenID, digest) {
+		t.Fatal("token lock identity is not deterministic")
+	}
+	if TokenLockIdentity(tokenID, digest) == TokenLockIdentity(tokenID, other) {
+		t.Fatal("token lock identity does not depend on the digest")
 	}
 }
 
-func TestD6_CustodyWalkthroughInvariants(t *testing.T) {
-	steps := WalkCustody(BridgeLedger{L: 100_000, D: 60_000, P: 55_000}, 10_000)
+func TestD6_CustodySolvencyEquation(t *testing.T) {
+	// The case the earlier model missed: L=D=100, P=0, Balance=0. L>=D>=P
+	// holds, but Owed()=100 and Balance=0 -> insolvent.
+	insolvent := BridgeLedger{L: 100, D: 100, P: 0, Balance: 0}
+	if insolvent.Invariants() != true {
+		t.Fatal("ordering invariant should still hold")
+	}
+	if insolvent.Solvent() {
+		t.Fatal("a vault owing 100 with a 0 balance was reported solvent")
+	}
+	solvent := BridgeLedger{L: 100, D: 100, P: 0, Balance: 100}
+	if !solvent.Solvent() {
+		t.Fatal("a fully-backed vault was reported insolvent")
+	}
+	// Identity must close: Balance + Shortfall == L - P.
+	deficit := BridgeLedger{L: 100, D: 100, P: 0, Balance: 60, Shortfall: 40}
+	if deficit.Solvent() {
+		t.Fatal("a recorded deficit was reported solvent")
+	}
+	mismatch := BridgeLedger{L: 100, D: 40, P: 40, Balance: 50, Shortfall: 0}
+	if mismatch.Solvent() {
+		t.Fatal("an unbalanced identity was reported solvent")
+	}
+}
+
+func TestD6_CustodyWalkthroughSolventThroughout(t *testing.T) {
+	steps := WalkCustody(BridgeLedger{L: 100_000, D: 60_000, P: 55_000, Balance: 45_000}, 10_000)
 	if len(steps) != 4 {
-		t.Fatalf("got %d custody steps, want 4", len(steps))
+		t.Fatalf("got %d steps, want 4", len(steps))
 	}
 	for _, s := range steps {
-		if !s.InvariantsOK {
-			t.Fatalf("invariant broken at %s: %+v", s.State, s.Ledger)
+		if !s.Solvent {
+			t.Fatalf("insolvent at %s: %+v (owed %d)", s.State, s.Ledger, s.Owed)
 		}
 	}
-	final := steps[len(steps)-1]
-	if final.State != "paid" || final.Ledger.L != 110_000 || final.Ledger.D != 70_000 || final.Ledger.P != 65_000 {
-		t.Fatalf("final ledger wrong: %+v", final)
-	}
-	// Outstanding backing O = L - D held non-negative throughout.
-	if steps[1].Outstanding != 50_000 { // after burn, before credit: L=110k D=60k
-		t.Fatalf("post-burn outstanding = %d, want 50000", steps[1].Outstanding)
+	final := steps[3]
+	if final.State != "paid" || final.Ledger.L != 110_000 || final.Ledger.P != 65_000 || final.Ledger.Balance != 45_000 {
+		t.Fatalf("final ledger wrong: %+v", final.Ledger)
 	}
 }
 

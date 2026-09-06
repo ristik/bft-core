@@ -1,6 +1,9 @@
 package evmroot
 
-import "bytes"
+import (
+	"bytes"
+	"crypto/sha256"
+)
 
 // D6 part 3: native supply accounting, bridge liability accounting, and the
 // refreshable lock witness.
@@ -38,34 +41,36 @@ func (k ClaimKind) String() string {
 	return [...]string{"native_uct", "wuct", "bridged"}[k]
 }
 
-// VaultBacking is the check that WUCT and bridged claims do not double-count
-// the vault's native UCT.
+// VaultBacking is the wrapper-vs-vault separation. WUCT is a distinct
+// composability wrapper backed by its OWN contract's native deposits; a
+// WUCT custody path cannot call an ERC-20 balance as native custody.
 type VaultBacking struct {
-	VaultNativeBalance uint64 // native UCT held by the bridge vault (a_A = zero address)
-	WUCTSupply         uint64 // outstanding wrapped-native
-	BridgedOutstanding uint64 // outstanding bridged claims (O = L - D)
+	VaultNativeBalance    uint64 // native UCT held by the bridge vault (a_A = zero address)
+	WUCTSupply            uint64 // outstanding wrapped-native
+	WUCTContractNative    uint64 // native UCT held by the WUCT contract itself
+	BridgedTotalLiability uint64 // O + C : outstanding backing + unpaid credits owed by the vault
 }
 
-// Consistent reports whether the vault's native balance covers both the
-// WUCT wrapper and outstanding bridged claims without either being counted
-// as the other's backing. WUCT is a separate composability wrapper; a WUCT
-// custody path cannot call an ERC-20 balance as native custody.
+// Consistent requires: the vault's native balance covers the FULL bridge
+// liability owed against it (O + C, not just O), and WUCT is fully backed
+// by its own contract's native, with no cross-counting between the two.
 func (v VaultBacking) Consistent() bool {
-	// Each wrapped unit is 1:1 native in the WUCT contract; each bridged
-	// outstanding unit is 1:1 native in the vault. The vault's native
-	// balance must be at least the bridged outstanding; WUCT is backed by
-	// its own contract's native deposits, distinct from the vault.
-	return v.BridgedOutstanding <= v.VaultNativeBalance
+	return v.BridgedTotalLiability <= v.VaultNativeBalance &&
+		v.WUCTSupply <= v.WUCTContractNative
 }
 
 // BridgeLedger is the liability accounting of appendix-bridging.tex
 // §"Accounting": L cumulative locked native value, D cumulative redemption
 // value credited after verified burns, P cumulative value actually paid to
-// claimants (including relayer shares).
+// claimants (including relayer shares). Balance is the vault's current
+// native UCT holding; Shortfall is any amount by which the vault falls
+// below what it owes.
 type BridgeLedger struct {
-	L uint64
-	D uint64
-	P uint64
+	L         uint64
+	D         uint64
+	P         uint64
+	Balance   uint64 // vault native UCT balance
+	Shortfall uint64 // Balance deficit versus (L - P); >0 means the vault is under-collateralised
 }
 
 // Outstanding backing O = L - D.
@@ -74,11 +79,25 @@ func (b BridgeLedger) Outstanding() uint64 { return b.L - b.D }
 // UnpaidCredits C = D - P.
 func (b BridgeLedger) UnpaidCredits() uint64 { return b.D - b.P }
 
-// Invariants: L ≥ D ≥ P, so O ≥ 0 and C ≥ 0. Rewards, treasury and bridge
-// liabilities cannot spend one another's backing.
-func (b BridgeLedger) Invariants() bool {
-	return b.L >= b.D && b.D >= b.P
+// Owed is what the vault must hold to cover every claim: O + C == L - P.
+func (b BridgeLedger) Owed() uint64 { return b.L - b.P }
+
+// Solvent reports whether the vault actually covers what it owes:
+//
+//	Balance + Shortfall == L - P    (the accounting identity closes)
+//	Shortfall == 0                  (no deficit)
+//
+// This is the check the earlier model was missing: L == D == 100, P == 0,
+// Balance == 0 has L >= D >= P but Owed == 100 and Balance == 0, so it is
+// insolvent.
+func (b BridgeLedger) Solvent() bool {
+	return b.L >= b.D && b.D >= b.P && // ordering still holds
+		b.Balance+b.Shortfall == b.Owed() && // identity closes
+		b.Shortfall == 0 // and there is no deficit
 }
+
+// Invariants keeps the ordering check for callers that only need L >= D >= P.
+func (b BridgeLedger) Invariants() bool { return b.L >= b.D && b.D >= b.P }
 
 // CustodyState is one intermediate state of a bridged unit.
 type CustodyState uint8
@@ -100,44 +119,72 @@ type CustodyStep struct {
 	Ledger       BridgeLedger `json:"ledger"`
 	Outstanding  uint64       `json:"outstanding"`
 	UnpaidCredit uint64       `json:"unpaid_credit"`
-	InvariantsOK bool         `json:"invariants_ok"`
+	Owed         uint64       `json:"owed"`
+	Solvent      bool         `json:"solvent"`
 }
 
 // WalkCustody applies amount through Locked → Burned → RedemptionCredited →
-// Paid, recording the ledger and invariants at each step. Burn does not
-// change L/D/P (the lock still backs it until redemption is credited);
-// crediting moves D; payment moves P.
+// Paid, tracking the vault Balance and checking solvency at every step.
+// Lock deposits native into the vault (Balance += amount); burn on the
+// Execution layer changes nothing in the vault; crediting moves D; payment
+// debits the vault (Balance -= amount) and moves P. Solvent() holds at
+// every step.
 func WalkCustody(start BridgeLedger, amount uint64) []CustodyStep {
 	l := start
 	steps := []CustodyStep{}
 	record := func(st CustodyState) {
 		steps = append(steps, CustodyStep{
 			State: st.String(), Ledger: l,
-			Outstanding: l.Outstanding(), UnpaidCredit: l.UnpaidCredits(), InvariantsOK: l.Invariants(),
+			Outstanding: l.Outstanding(), UnpaidCredit: l.UnpaidCredits(),
+			Owed: l.Owed(), Solvent: l.Solvent(),
 		})
 	}
 	l.L += amount
+	l.Balance += amount // native locked into the vault
 	record(CustodyLocked)
-	record(CustodyBurned) // burn on the Execution layer; vault ledger unchanged until credit
+	record(CustodyBurned) // Execution-layer burn; vault unchanged
 	l.D += amount
 	record(CustodyRedemptionCredited)
 	l.P += amount
+	l.Balance -= amount // paid out of the vault
 	record(CustodyPaid)
 	return steps
 }
 
-// RefreshLockWitness models refreshing historical backing: a recent proof
-// of the SAME permanent lock digest refreshes the witness without changing
-// token identity. Token identity does not include the refreshed witness.
-// Lock digests remain provable after redemption and cannot be deleted.
-func RefreshLockWitness(tokenIdentity, permanentLockDigest, oldWitnessRootHistory, freshWitnessRootHistory []byte) (identityUnchanged bool, backingRefreshed bool) {
-	// The fresh witness authenticates the same permanentLockDigest under a
-	// newer certified root history. Identity is a function of
-	// tokenIdentity + permanentLockDigest only.
-	identityBefore := lockIdentity(tokenIdentity, permanentLockDigest)
-	identityAfter := lockIdentity(tokenIdentity, permanentLockDigest)
-	identityUnchanged = bytes.Equal(identityBefore, identityAfter)
-	backingRefreshed = !bytes.Equal(oldWitnessRootHistory, freshWitnessRootHistory)
+// LockWitness is an authenticated proof that a permanent lock digest is
+// included under a certified EVM state root. Refreshing produces a new
+// witness (newer RootStateRoot / path) for the SAME digest.
+type LockWitness struct {
+	Digest        []byte
+	RootStateRoot []byte
+	Path          []PathStep
+}
+
+// Verify recomputes the witness path and reports whether it authenticates
+// Digest under RootStateRoot.
+func (w LockWitness) Verify() bool {
+	return len(w.Digest) > 0 && bytes.Equal(evalPath(w.Digest, w.Path), w.RootStateRoot)
+}
+
+// TokenLockIdentity is SHA-256(CBOR([tokenIdentity, permanentLockDigest])) —
+// a function of those two values ONLY. It does not include any witness.
+func TokenLockIdentity(tokenIdentity, permanentLockDigest []byte) Hash32 {
+	return sha256.Sum256(lockIdentity(tokenIdentity, permanentLockDigest))
+}
+
+// RefreshLockWitness checks that `fresh` is a valid witness for the same
+// permanentLockDigest as `old`, under a newer certified root. It returns
+// whether the token-lock identity is unchanged (it must be — identity omits
+// the witness) and whether the backing was genuinely refreshed (a different
+// root).
+func RefreshLockWitness(tokenIdentity, permanentLockDigest []byte, old, fresh LockWitness) (identityUnchanged, backingRefreshed, freshValid bool) {
+	freshValid = fresh.Verify() &&
+		bytes.Equal(fresh.Digest, permanentLockDigest) &&
+		bytes.Equal(old.Digest, permanentLockDigest)
+	before := TokenLockIdentity(tokenIdentity, permanentLockDigest)
+	after := TokenLockIdentity(tokenIdentity, permanentLockDigest)
+	identityUnchanged = before == after
+	backingRefreshed = !bytes.Equal(old.RootStateRoot, fresh.RootStateRoot)
 	return
 }
 

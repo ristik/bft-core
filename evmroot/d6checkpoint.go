@@ -1,25 +1,24 @@
 package evmroot
 
-// D6 part 1: the trusted checkpoint, its freshness policy, and the
-// separation of live certificate admission from retirement-related key
+// D6 part 1: the trusted checkpoint, its freshness policy (derived, not
+// asserted), and the separation of live certificate admission (measured
+// against the current authenticated origin) from retirement-related key
 // retention.
 //
 // Normative source: docs/design/d6-historical-trust-proof-custody.md §2,
 // docs/pos/specification/evm-partition.tex §"Execution Evidence and
-// Historical Trust", governance.tex §"Economic Invariants". Issue:
-// https://github.com/ristik/bft-core/issues/8
+// Historical Trust", governance.tex §"Economic Invariants".
 
 // Checkpoint is what a new or long-offline client starts from. It is trust
-// initialisation, not a complete history: the client verifies subsequent
-// transitions, not an arbitrary chain signed by retired keys.
+// initialisation, not a complete history.
 type Checkpoint struct {
 	NetworkID        uint64
-	RootCommitment   []byte // committed root/configuration commitment
+	RootCommitment   []byte
 	ConfigCommitment []byte
 	EVMHeadNumber    uint64
 	EVMHeadHash      []byte
 	EVMHeadStateRoot []byte
-	RootRound        uint64 // certified root round of this checkpoint
+	RootRound        uint64 // certified root round this checkpoint attests
 }
 
 // Complete reports whether every field a client needs is present.
@@ -28,67 +27,95 @@ func (c Checkpoint) Complete() bool {
 		len(c.EVMHeadHash) == 32 && len(c.EVMHeadStateRoot) == 32
 }
 
-// CheckpointFreshnessLimitSeconds is the weak-subjectivity checkpoint
-// freshness limit — a CLIENT policy measured in elapsed time, derived from
-// the minimum real-time protection implied by round pacing and collateral
-// retention:
-//
-//	limit = Δ_hold (retirement protection, in rounds) × minRoundPeriodSeconds
-//
-// It is DISTINCT from W_cert (a round-denominated admission window) and from
-// the number of keys cached in EVM state. Changing pacing, churn or
-// protection requires re-deriving it.
-func CheckpointFreshnessLimitSeconds(deltaHoldRounds, minRoundPeriodSeconds uint64) uint64 {
-	return deltaHoldRounds * minRoundPeriodSeconds
-}
-
-// LiveCertAdmission is the result of the round-denominated live certificate
-// check.
+// LiveCertAdmission is the round-denominated live certificate check result.
 type LiveCertAdmission struct {
 	Admitted bool
 	Reason   string
 }
 
 // AdmitLiveCertificate applies the live certificate admission rule
-// (governance.tex §"Economic Invariants" clause 3): the round is within the
-// W_cert window of the checkpoint, the signer epoch was active at the
-// claimed root round, and the round is not ahead of the imported origin. A
-// certificate outside this window is not rejected outright — it needs the
-// checkpoint/ancestry path instead (see d6proof.go), never expired-key
-// signatures alone.
-func AdmitLiveCertificate(certRound, checkpointRound, importedOriginRound, wCert uint64, signerEpochActiveAtClaimedRound bool) LiveCertAdmission {
+// (governance.tex §"Economic Invariants" clause 3) against the CURRENT
+// AUTHENTICATED ORIGIN, not a checkpoint:
+//
+//   - the certificate round is not ahead of the imported certified origin;
+//   - the certificate is within W_cert certified root rounds of that origin;
+//   - the signer epoch was active at the claimed root round.
+//
+// A certificate outside the W_cert window is NOT admitted as live — it must
+// be authenticated through the historical checkpoint/ancestry path
+// (d6proof.go), never by expired-key signatures alone. Checkpoints belong
+// to that separate path and are not an input here.
+func AdmitLiveCertificate(certRound, importedOriginRound, wCert uint64, signerEpochActiveAtClaimedRound bool) LiveCertAdmission {
 	if certRound > importedOriginRound {
-		return LiveCertAdmission{false, "certificate round is ahead of the imported root origin — retry after root progress"}
+		return LiveCertAdmission{false, "certificate round is ahead of the imported certified origin — retry after root progress"}
+	}
+	if importedOriginRound-certRound > wCert {
+		return LiveCertAdmission{false, "certificate is older than W_cert relative to the current authenticated origin — use the historical checkpoint/ancestry path"}
 	}
 	if !signerEpochActiveAtClaimedRound {
 		return LiveCertAdmission{false, "signer epoch was not active at the claimed root round"}
 	}
-	if checkpointRound > certRound && checkpointRound-certRound > wCert {
-		return LiveCertAdmission{false, "certificate is older than W_cert — authenticate via the checkpoint/ancestry path, not expired keys"}
-	}
 	return LiveCertAdmission{Admitted: true}
 }
 
-// NestingValid checks the mandatory nesting of the three round windows:
-// live certificate age fits inside the evidence window, which fits inside
-// retirement protection.
-//
-//	W_cert ≤ Δ_ev < Δ_hold
+// NestingValid checks the mandatory window nesting: W_cert <= Δ_ev < Δ_hold.
 func NestingValid(wCert, deltaEv, deltaHold uint64) bool {
 	return wCert <= deltaEv && deltaEv < deltaHold
 }
 
 // KeyRetentionRequired reports whether an evidence-verification key must be
-// retained even though it has left the ordinary certificate-admission
-// cache. Retention is bounded by governed validator/transition/evidence
-// limits and must NOT be curtailed to permit a withdrawal.
+// retained even after it leaves the ordinary certificate-admission cache.
 func KeyRetentionRequired(hasOutstandingEvidenceObligation, hasOutstandingRetirementObligation bool) bool {
 	return hasOutstandingEvidenceObligation || hasOutstandingRetirementObligation
 }
 
-// MinRealTimeProtectionSeconds is what an offline client must assume as the
-// real-time value of retirement protection, given round pacing. It is the
-// floor the checkpoint freshness limit is derived from.
-func MinRealTimeProtectionSeconds(deltaHoldRounds, minRoundPeriodSeconds uint64) uint64 {
-	return deltaHoldRounds * minRoundPeriodSeconds
+// FreshnessPolicy is a checkpoint acquisition/age policy, in elapsed
+// seconds. It is a CLIENT policy derived from real-time protection, round
+// pacing, churn margin and acquisition latency — not simply Δ_hold rounds
+// times a period.
+type FreshnessPolicy struct {
+	DeltaHoldRounds       uint64 // Δ_hold in certified root rounds
+	DeltaEvRounds         uint64 // Δ_ev in certified root rounds
+	MinRoundPeriodSeconds uint64 // conservative floor on the real time one certified root round takes
+	ChurnMarginSeconds    uint64 // slack for validator-set churn faster than the nominal pacing
+	AcquireLatencySeconds uint64 // worst-case time to fetch and verify a fresh checkpoint
+}
+
+// MinRealTimeProtectionSeconds is the least real time retirement protection
+// can be relied on to last: Δ_hold rounds at the conservative per-round
+// floor, minus the evidence window (which must still fit inside protection),
+// minus churn slack.
+func (p FreshnessPolicy) MinRealTimeProtectionSeconds() uint64 {
+	hold := p.DeltaHoldRounds * p.MinRoundPeriodSeconds
+	ev := p.DeltaEvRounds * p.MinRoundPeriodSeconds
+	if hold <= ev+p.ChurnMarginSeconds {
+		return 0
+	}
+	return hold - ev - p.ChurnMarginSeconds
+}
+
+// MaxCheckpointStalenessSeconds is the strict freshness limit: a client's
+// trusted checkpoint may be at most this old. It leaves the acquisition
+// latency as headroom so that, even if a client refreshes at the last
+// permitted moment, keys backing the anchor cannot have become withdrawable
+// before the refresh completes. Zero (or the Valid check failing) means the
+// configured pacing/protection cannot support a safe checkpoint policy.
+func (p FreshnessPolicy) MaxCheckpointStalenessSeconds() uint64 {
+	prot := p.MinRealTimeProtectionSeconds()
+	if prot <= p.AcquireLatencySeconds {
+		return 0
+	}
+	limit := prot - p.AcquireLatencySeconds
+	if limit >= prot {
+		return prot - 1 // strictly less than the protection itself
+	}
+	return limit
+}
+
+// Valid reports whether the policy admits a positive, strictly-safe
+// staleness limit.
+func (p FreshnessPolicy) Valid() bool {
+	return p.MinRoundPeriodSeconds > 0 &&
+		p.MaxCheckpointStalenessSeconds() > 0 &&
+		p.MaxCheckpointStalenessSeconds() < p.MinRealTimeProtectionSeconds()
 }
