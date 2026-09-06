@@ -67,31 +67,32 @@ handoffs that freeze the *same* body with different frozen summaries or EVM
 parents get **different** `FrozenID`s, so a single endorsement can never be
 counted toward divergent handoff states
 (`TestD4_FreezeBindsFrozenStateIntoEndorsedIdentity`). `Freeze` also rejects a
-body whose `EpochStart != A_min` or whose predecessor ≠ the candidate's, and a
-missing frozen summary / parent.
+body whose `EarliestActivation != A_min` or whose predecessor ≠ the candidate's,
+and a missing frozen summary / parent.
 
 ### The trust-base body records `A_min`, not `A*`
 
-D3's v2 body hashes `EpochStart`. To keep the body identity stable from Freeze,
-`EpochStart == A_min` (known at Freeze). The **actual** boundary `A*` is fixed
-only at Commit and lives **only in the commit record** — it is never in the
-body, so fixing it later cannot change any endorsed identity. This removes the
-circularity the review flagged.
+D3's v2 body hashes `EarliestActivation` (renamed from `EpochStart` in the joint
+D3/D4 revision). To keep the body identity stable from Freeze,
+`EarliestActivation == A_min` (known at Freeze). The **actual** boundary `A*` is
+fixed only at Commit and lives **only in the `ActivatedTrustBase` commit
+record** — it is never in the body, so fixing it later cannot change any
+endorsed identity. This removes the circularity the review flagged.
 
 | Signed message | Fields it binds | All known at signing? |
 |---|---|---|
-| endorsement | `network, protocolVersion, predecessorHash, attempt, FrozenID, A_min` | yes. **No `A*`, no successor TR.** |
+| endorsement | `network, protocolVersion, predecessorHash, attempt, FrozenID, A_min` (= body `EarliestActivation`) | yes. **No `A*`, no successor TR.** |
 | commit | `… + A*, successorTRHash` | yes — `A*` is fixed now, `A* ≥ A_min` and `A* ≥ commitRound + PipelineDepth`; the successor TR is constructed now |
 
 ### Finality is the root rule, not a round count
 
 `PipelineDepth` is only the minimum gap `A*` must leave after the commit round so
 `A*` is not scheduled inside the reorg window. It does **not** establish
-finality. Finality of the commit is the root's own QC/ancestry rule, modelled by
-`FinalizeCommit()` / `CommitFinalized` (a descendant commit exists, or an
-authenticated ancestry path to a committed root block covers it). **`Activate`
-requires `CommitFinalized` and `observedRootRound ≥ A*`** — a round counter
-reaching `A*` on its own is `errCommitNotFinal`
+finality. Finality of the commit is the root's own 2-chain rule, modelled by
+`FinalizeCommit(descendantCommitRound)` / `CommitFinalized`, which requires a
+descendant commit at a root round strictly greater than this commit's round.
+**`Activate` requires `CommitFinalized` and `observedRootRound ≥ A*`** — a round
+counter reaching `A*` on its own is `errCommitNotFinal`
 (`TestD4_ActivationRequiresFinalizedCommit`). From any pre-Commit phase,
 `Activate` returns `errNoCommit`.
 
@@ -142,28 +143,45 @@ probe rounds:
 | `activation_gap` | `A* ≥ commitRound + PipelineDepth` (reorg-window gap, not finality) |
 | `activation_requires_final_commit` | `Activated`/`Acknowledged` implies `CommitFinalized` |
 
-### Multi-replica exploration (`multi_replica_exploration`)
+### Adversarial multi-replica exploration (`multi_replica_exploration`)
 
 The single-`Handoff` scenarios exercise **one** replica's phase API. The
-multi-replica model (`d4multireplica.go`) runs several replicas that receive the
-handoff records (`prepare` / `freeze` / `endorse` / `commit` / `abort` /
-`finalize`) in **different per-replica orders** and lose some, with a **global
-signer lock** (a signer bound to `FrozenID` X cannot be counted for `FrozenID`
-Y), and checks properties that only exist across replicas:
+adversarial model (`d4multireplica.go`) states the fault the handoff must
+survive and checks that safety holds under it. The first-review version used a
+**global signer lock** — no signer, honest or Byzantine, could ever be counted
+for two conflicting statements. The re-review (#80) rejected that: it assumes
+away Byzantine equivocation. The model now:
 
-| Global property | Statement | Result |
+- gives **honest** signers durable local state — each signs **at most one** of
+  two conflicting statements (a per-honest-signer lock, not a global one);
+- names an explicit **Byzantine** set whose authenticated weight is `≤ f_W =
+  W − ⌊2W/3⌋ − 1` and lets it **equivocate freely** — sign *both* statements;
+- derives every quorum from the **actual distinct authenticated signer set**
+  via `WeightSet.SignerWeight`, never a supplied cumulative number;
+- enumerates **every** assignment of the honest signers to `{X, Y, abstain}`
+  (`3^|honest|`) and records the largest number of the two statements that
+  simultaneously reach `⌊2W/3⌋+1`.
+
+| Property | Statement | Result |
 |---|---|---|
-| G1 | no signer's weight is counted toward two `FrozenID`s (quorum intersection) | holds; equivocation attempts are **blocked** (`equivocation_attempts_blocked`) |
-| G2 | at most one `FrozenID` is ever committed; an aborted attempt's `FrozenID` never commits | holds |
-| G3 | across the replica population, no round is authorised by both sets; committed replicas agree on one `A*` | holds |
-| G4 | no replica reaches `Activated`/`Acknowledged` without a finalised commit | holds |
-| G5 | (conditional) all records to all replicas, no loss, no abort ⇒ every replica reaches `acknowledged` | `reached` for `all_delivered_reordered`; `held-safe` otherwise |
+| G2 | over every honest assignment, with the Byzantine set on both sides, **at most one** of two conflicting statements reaches a quorum — applied to two `FrozenID`s, two `CommitRecordID`s (conflicting `A*`), and commit-vs-abort of one attempt | `max_simultaneous_quorums = 1` in every run; at the `f_W` bound the closest split is one side at 17, the other at 14 |
+| G3 | per-replica commit tuples `(replica, FrozenID, A*, commitRound, CommitRecordID)` are kept **un-deduplicated** and must all agree | holds for `replica_commit_tuples_agree`; the counterexample is **flagged**, not silently merged |
+| G4 | activation requires `FinalizeCommit(descendantRound > commitRound)` — the root 2-chain, not a round count | holds (`activation_requires_finalized_commit`) |
+| G5 | (conditional) every record delivered, no abort ⇒ every replica reaches `acknowledged` | `reached` (`conditional_liveness_all_delivered`) |
 
-Runs: `all_delivered_reordered` (3 replicas, 3 orders, all acknowledge),
-`commit_not_delivered_to_one` (C stalls at `endorsed`, keeps old set,
-never activates), `equivocating_endorsement_rejected` (a second `FrozenID`
-reusing signer `r1` is blocked, cannot gather weight or commit),
-`aborted_attempt_never_commits`.
+`G1` ("no signer ever equivocates") is **deliberately not a property**:
+Byzantine signers do equivocate, and safety must not depend on their not doing
+so — the reason the global lock was wrong.
+
+Runs: `endorsement_quorum_honest_only`, `endorsement_quorum_byzantine_below_bound`
+(weight 6), `endorsement_quorum_byzantine_at_bound` (weight 7 = `f_W`),
+`commit_quorum_conflicting_activation_rounds` (two `CommitRecordID`s for one
+`FrozenID` with `A*` = 12 and 15 — the mechanism that makes finding 1's
+scenario unreachable), `commit_versus_abort_exclusion`,
+`replica_commit_tuples_agree`, `conflicting_activation_round_counterexample`
+(`is_counterexample: true` — replica A committed `A*`=12, replica B `A*`=15;
+the tuple check must flag the disagreement), `activation_requires_finalized_commit`,
+`conditional_liveness_all_delivered`.
 
 ### Scenarios (all in `d4-vectors.json`, `phase_ok` and `invariants_ok` true for each):
 
@@ -213,10 +231,10 @@ preserved, recovery not claimed.
 
 | D4 acceptance clause | Evidence |
 |---|---|
-| model exploration (not a phase-API test) shows two effective successors / old+new authorisation of the same extension cannot occur, across competing replicas with signer locks / quorum intersection / attempts / delayed commit vs abort | §4 multi-replica model — G1 (signer lock), G2 (single `FrozenID` commits), G3 (no cross-replica overlap, one `A*`); runs `all_delivered_reordered`, `commit_not_delivered_to_one`, `equivocating_endorsement_rejected`, `aborted_attempt_never_commits`; `TestD4_MultiReplicaGlobalInvariants` |
-| delayed signatures, asymmetric delivery, missed earliest activation, crash at every phase, old quorum loss, committed abort vs late activate | scenario table §4; asymmetric/commit-loss also in the multi-replica runs |
+| model exploration (not a phase-API test) shows two effective successors / old+new authorisation of the same extension cannot occur, across competing replicas with quorum intersection under Byzantine equivocation / attempts / delayed commit vs abort | §4 adversarial model — G2 (at most one of two conflicting `FrozenID`s / `CommitRecordID`s / commit-vs-abort reaches a quorum, honest signers split every way, Byzantine set ≤ `f_W` on both sides), G3 (per-replica commit tuples kept un-deduplicated and required to agree; conflicting-`A*` counterexample flagged); `TestD4_MultiReplicaGlobalInvariants` |
+| delayed signatures, asymmetric delivery, missed earliest activation, crash at every phase, old quorum loss, committed abort vs late activate | scenario table §4 (`asymmetric_delivery`, `old_quorum_loss_after_prepare`, `crash_at_*`, `committed_abort_vs_late_activate`) |
 | freeze authenticates the state it endorses — one endorsement cannot authorise divergent handoff states | §2 `FrozenID` (binds body + frozen summary + parent + candidate + attempt); `TestD4_FreezeBindsFrozenStateIntoEndorsedIdentity` |
-| pipeline/activation is not circular; who produces the first successor proposal and which old-quorum proof authorises it; behaviour under timeout gaps; `EpochStart` reconciled with D3 | §2 "The trust-base body records `A_min`, not `A*`" + "First successor proposal…" + "Finality is the root rule"; `FinalizeCommit`/`CommitFinalized` gate; `TestD4_ActivationRequiresFinalizedCommit` |
+| pipeline/activation is not circular; who produces the first successor proposal and which old-quorum proof authorises it; behaviour under timeout gaps; `EpochStart` reconciled with D3 | §2 "The trust-base body records `A_min`, not `A*`" (D3's `EpochStart` renamed to `EarliestActivation`; `A*` in the `ActivatedTrustBase` record) + "First successor proposal…" + "Finality is the root rule"; `FinalizeCommit(descendantRound)`/`CommitFinalized` gate; `TestD4_ActivationRequiresFinalizedCommit` |
 | an incomplete prepare cannot activate through local REST insertion or clock passage | `incomplete_prepare_then_clock`, `incomplete_prepare_then_rest_insertion`; `TestD4_NoActivationWithoutCommit` |
 | under declared assumptions the model completes a handoff; outside them it preserves safety without claiming recovery | §4 G5 (`reached` vs `held-safe`); scenario `old_quorum_loss_after_prepare` |
 | no signature depends on unknown future state | §2; `FieldsAreKnown` (endorsement binds `FrozenID`, not `A*`); `TestD4_EndorsementBindsNoFutureState` |

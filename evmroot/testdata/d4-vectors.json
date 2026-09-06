@@ -266,158 +266,275 @@
   },
   "multi_replica_exploration": [
     {
-      "name": "all_delivered_reordered",
-      "note": "Three replicas receive every handoff record; different per-replica orders; all reach acknowledged, one A*, no equivocation.",
-      "replicas": [
-        "A",
-        "B",
-        "C"
-      ],
-      "delivery_order": [
-        "A\u003c-0",
-        "A\u003c-1",
-        "A\u003c-2",
-        "A\u003c-3",
-        "A\u003c-4",
-        "A\u003c-5",
-        "B\u003c-0",
-        "B\u003c-1",
-        "B\u003c-3",
-        "B\u003c-2",
-        "B\u003c-4",
-        "B\u003c-5",
-        "C\u003c-0",
-        "C\u003c-1",
-        "C\u003c-3",
-        "C\u003c-4",
-        "C\u003c-2",
-        "C\u003c-5"
-      ],
-      "final_phases": {
-        "A": "acknowledged",
-        "B": "acknowledged",
-        "C": "acknowledged"
+      "name": "endorsement_quorum_honest_only",
+      "note": "Two competing FrozenIDs X and Y. Every honest signer signs at most one (durable local state). Over all 3^5 = 243 assignments, at most one FrozenID reaches ⌊2W/3⌋+1 = 17.",
+      "kind": "quorum",
+      "is_counterexample": false,
+      "quorum_exploration": {
+        "statements": [
+          "frozenX",
+          "frozenY"
+        ],
+        "honest_signers": [
+          "root-a",
+          "root-b",
+          "root-c",
+          "root-d",
+          "root-e"
+        ],
+        "byzantine_signers": null,
+        "byzantine_weight": 0,
+        "faulty_weight_bound": 7,
+        "quorum_threshold": 17,
+        "honest_assignments_enumerated": 243,
+        "max_simultaneous_quorums": 1,
+        "byzantine_signed_both_statements": false,
+        "max_min_side_weight": 12,
+        "closest_split_to_a_double_quorum": "frozenX={root-b,root-c,root-e} w=12 ; frozenY={root-a,root-d} w=12 (threshold 17)"
       },
-      "committed_frozen_ids": [
-        "6fc914d62e42eb35"
+      "g2_at_most_one_statement_reaches_quorum": true,
+      "g3_all_replica_commit_tuples_agree": true,
+      "g4_no_activation_without_finalized_commit": true,
+      "byzantine_equivocation_modelled": false,
+      "conflict_detected_by_tuple_check": false,
+      "property_held": true
+    },
+    {
+      "name": "endorsement_quorum_byzantine_below_bound",
+      "note": "root-c (5) + root-e (1) = 6 ≤ f_W = 7 are Byzantine and sign BOTH X and Y. Honest signers (a,b,d = weight 18) still cannot be split to give both X and Y ≥ 17. Max simultaneous quorums stays 1.",
+      "kind": "quorum",
+      "is_counterexample": false,
+      "quorum_exploration": {
+        "statements": [
+          "frozenX",
+          "frozenY"
+        ],
+        "honest_signers": [
+          "root-a",
+          "root-b",
+          "root-d"
+        ],
+        "byzantine_signers": [
+          "root-c",
+          "root-e"
+        ],
+        "byzantine_weight": 6,
+        "faulty_weight_bound": 7,
+        "quorum_threshold": 17,
+        "honest_assignments_enumerated": 27,
+        "max_simultaneous_quorums": 1,
+        "byzantine_signed_both_statements": true,
+        "max_min_side_weight": 14,
+        "closest_split_to_a_double_quorum": "frozenX={root-b,root-c,root-d,root-e} w=14 ; frozenY={root-a,root-c,root-e} w=16 (threshold 17)"
+      },
+      "g2_at_most_one_statement_reaches_quorum": true,
+      "g3_all_replica_commit_tuples_agree": true,
+      "g4_no_activation_without_finalized_commit": true,
+      "byzantine_equivocation_modelled": true,
+      "conflict_detected_by_tuple_check": false,
+      "property_held": true
+    },
+    {
+      "name": "endorsement_quorum_byzantine_at_bound",
+      "note": "root-b (6) + root-e (1) = 7 = f_W are Byzantine and sign both. Honest weight (a,c,d = 17) is a single quorum's worth and indivisible across two statements — one quorum at most.",
+      "kind": "quorum",
+      "is_counterexample": false,
+      "quorum_exploration": {
+        "statements": [
+          "frozenX",
+          "frozenY"
+        ],
+        "honest_signers": [
+          "root-a",
+          "root-c",
+          "root-d"
+        ],
+        "byzantine_signers": [
+          "root-b",
+          "root-e"
+        ],
+        "byzantine_weight": 7,
+        "faulty_weight_bound": 7,
+        "quorum_threshold": 17,
+        "honest_assignments_enumerated": 27,
+        "max_simultaneous_quorums": 1,
+        "byzantine_signed_both_statements": true,
+        "max_min_side_weight": 14,
+        "closest_split_to_a_double_quorum": "frozenX={root-b,root-c,root-d,root-e} w=14 ; frozenY={root-a,root-b,root-e} w=17 (threshold 17)"
+      },
+      "g2_at_most_one_statement_reaches_quorum": true,
+      "g3_all_replica_commit_tuples_agree": true,
+      "g4_no_activation_without_finalized_commit": true,
+      "byzantine_equivocation_modelled": true,
+      "conflict_detected_by_tuple_check": false,
+      "property_held": true
+    },
+    {
+      "name": "commit_quorum_conflicting_activation_rounds",
+      "note": "Two CommitRecordIDs for the same FrozenID with A*=12 and A*=15. Each needs its own old-quorum QC over UNICITY_HANDOFF_COMMIT. Byzantine set (weight 6) signs both; at most one reaches 17, so two conflicting activation rounds cannot both be certified.",
+      "kind": "quorum",
+      "is_counterexample": false,
+      "quorum_exploration": {
+        "statements": [
+          "commit_Astar_12",
+          "commit_Astar_15"
+        ],
+        "honest_signers": [
+          "root-a",
+          "root-b",
+          "root-d"
+        ],
+        "byzantine_signers": [
+          "root-c",
+          "root-e"
+        ],
+        "byzantine_weight": 6,
+        "faulty_weight_bound": 7,
+        "quorum_threshold": 17,
+        "honest_assignments_enumerated": 27,
+        "max_simultaneous_quorums": 1,
+        "byzantine_signed_both_statements": true,
+        "max_min_side_weight": 14,
+        "closest_split_to_a_double_quorum": "commit_Astar_12={root-b,root-c,root-d,root-e} w=14 ; commit_Astar_15={root-a,root-c,root-e} w=16 (threshold 17)"
+      },
+      "g2_at_most_one_statement_reaches_quorum": true,
+      "g3_all_replica_commit_tuples_agree": true,
+      "g4_no_activation_without_finalized_commit": true,
+      "byzantine_equivocation_modelled": true,
+      "conflict_detected_by_tuple_check": false,
+      "property_held": true
+    },
+    {
+      "name": "commit_versus_abort_exclusion",
+      "note": "An old-quorum commit and an old-quorum abort of attempt j. Byzantine signers (weight 6) sign both; honest signers sign one. At most one reaches quorum, so a committed handoff and an abort cannot both take effect.",
+      "kind": "quorum",
+      "is_counterexample": false,
+      "quorum_exploration": {
+        "statements": [
+          "commit_j",
+          "abort_j"
+        ],
+        "honest_signers": [
+          "root-a",
+          "root-b",
+          "root-d"
+        ],
+        "byzantine_signers": [
+          "root-c",
+          "root-e"
+        ],
+        "byzantine_weight": 6,
+        "faulty_weight_bound": 7,
+        "quorum_threshold": 17,
+        "honest_assignments_enumerated": 27,
+        "max_simultaneous_quorums": 1,
+        "byzantine_signed_both_statements": true,
+        "max_min_side_weight": 14,
+        "closest_split_to_a_double_quorum": "commit_j={root-b,root-c,root-d,root-e} w=14 ; abort_j={root-a,root-c,root-e} w=16 (threshold 17)"
+      },
+      "g2_at_most_one_statement_reaches_quorum": true,
+      "g3_all_replica_commit_tuples_agree": true,
+      "g4_no_activation_without_finalized_commit": true,
+      "byzantine_equivocation_modelled": true,
+      "conflict_detected_by_tuple_check": false,
+      "property_held": true
+    },
+    {
+      "name": "replica_commit_tuples_agree",
+      "note": "Three replicas apply the same certified commit record. Their (FrozenID, A*, commitRound, CommitRecordID) tuples are kept separately and all agree.",
+      "kind": "tuples",
+      "is_counterexample": false,
+      "per_replica_commit_tuples": [
+        {
+          "replica": "A",
+          "frozen_id": "6fc914d62e42eb35",
+          "a_star": 12,
+          "commit_round": 6,
+          "commit_record_id": "10313bf67c8b8b63"
+        },
+        {
+          "replica": "B",
+          "frozen_id": "6fc914d62e42eb35",
+          "a_star": 12,
+          "commit_round": 6,
+          "commit_record_id": "10313bf67c8b8b63"
+        },
+        {
+          "replica": "C",
+          "frozen_id": "6fc914d62e42eb35",
+          "a_star": 12,
+          "commit_round": 6,
+          "commit_record_id": "10313bf67c8b8b63"
+        }
       ],
-      "violations": null,
-      "g1_no_equivocation": true,
-      "equivocation_attempts_blocked": 0,
-      "g2_single_successor": true,
-      "g3_no_overlap_across_replicas": true,
-      "g4_no_activation_without_final_commit": true,
+      "distinct_commit_tuples": 1,
+      "g2_at_most_one_statement_reaches_quorum": true,
+      "g3_all_replica_commit_tuples_agree": true,
+      "g4_no_activation_without_finalized_commit": true,
+      "byzantine_equivocation_modelled": false,
+      "conflict_detected_by_tuple_check": false,
+      "property_held": true
+    },
+    {
+      "name": "conflicting_activation_round_counterexample",
+      "note": "Same FrozenID committed with A*=12 to replica A and A*=15 to replica B. The per-replica tuples differ (A*, CommitRecordID) and the check flags it. This can only arise if two conflicting old-quorum QCs were produced — commit_quorum_conflicting_activation_rounds shows that is impossible.",
+      "kind": "tuples",
+      "is_counterexample": true,
+      "per_replica_commit_tuples": [
+        {
+          "replica": "A",
+          "frozen_id": "6fc914d62e42eb35",
+          "a_star": 12,
+          "commit_round": 6,
+          "commit_record_id": "10313bf67c8b8b63"
+        },
+        {
+          "replica": "B",
+          "frozen_id": "6fc914d62e42eb35",
+          "a_star": 15,
+          "commit_round": 6,
+          "commit_record_id": "ad34cf922a4d0570"
+        }
+      ],
+      "distinct_commit_tuples": 2,
+      "g2_at_most_one_statement_reaches_quorum": true,
+      "g3_all_replica_commit_tuples_agree": false,
+      "g4_no_activation_without_finalized_commit": true,
+      "byzantine_equivocation_modelled": false,
+      "conflict_detected_by_tuple_check": true,
+      "property_held": true
+    },
+    {
+      "name": "activation_requires_finalized_commit",
+      "note": "observedRootRound ≥ A* is not enough: Activate fails until FinalizeCommit records a descendant commit at a round \u003e commitRound (the root 2-chain). The first successor proposal at A* carries CommitRecordID as its old-quorum authorisation.",
+      "kind": "finality",
+      "is_counterexample": false,
+      "g2_at_most_one_statement_reaches_quorum": true,
+      "g3_all_replica_commit_tuples_agree": true,
+      "g4_no_activation_without_finalized_commit": true,
+      "byzantine_equivocation_modelled": false,
+      "conflict_detected_by_tuple_check": false,
+      "property_held": true
+    },
+    {
+      "name": "conditional_liveness_all_delivered",
+      "note": "With every handoff record delivered to every replica and no abort, all replicas reach acknowledged.",
+      "kind": "liveness",
+      "is_counterexample": false,
+      "g2_at_most_one_statement_reaches_quorum": true,
+      "g3_all_replica_commit_tuples_agree": true,
+      "g4_no_activation_without_finalized_commit": true,
+      "byzantine_equivocation_modelled": false,
+      "conflict_detected_by_tuple_check": false,
+      "property_held": true,
       "g5_liveness": "reached"
-    },
-    {
-      "name": "commit_not_delivered_to_one",
-      "note": "Replica C is missing the commit and finalize records: it holds at endorsed, keeps the old set authoritative for every round, and never activates. A and B proceed.",
-      "replicas": [
-        "A",
-        "B",
-        "C"
-      ],
-      "delivery_order": [
-        "A\u003c-0",
-        "A\u003c-1",
-        "A\u003c-2",
-        "A\u003c-3",
-        "A\u003c-4",
-        "A\u003c-5",
-        "B\u003c-0",
-        "B\u003c-1",
-        "B\u003c-2",
-        "B\u003c-3",
-        "B\u003c-4",
-        "B\u003c-5",
-        "C\u003c-0",
-        "C\u003c-1",
-        "C\u003c-2",
-        "C\u003c-3"
-      ],
-      "final_phases": {
-        "A": "acknowledged",
-        "B": "acknowledged",
-        "C": "endorsed"
-      },
-      "committed_frozen_ids": [
-        "6fc914d62e42eb35"
-      ],
-      "violations": null,
-      "g1_no_equivocation": true,
-      "equivocation_attempts_blocked": 0,
-      "g2_single_successor": true,
-      "g3_no_overlap_across_replicas": true,
-      "g4_no_activation_without_final_commit": true,
-      "g5_liveness": "n/a"
-    },
-    {
-      "name": "equivocating_endorsement_rejected",
-      "note": "A second FrozenID reuses endorsement signer r1; the global lock rejects it, so it can never gather weight or be committed.",
-      "replicas": [
-        "A",
-        "B"
-      ],
-      "delivery_order": [
-        "A\u003c-0",
-        "A\u003c-1",
-        "A\u003c-2",
-        "A\u003c-3",
-        "A\u003c-4",
-        "A\u003c-5",
-        "B\u003c-0",
-        "B\u003c-6",
-        "B\u003c-7"
-      ],
-      "final_phases": {
-        "A": "acknowledged",
-        "B": "frozen"
-      },
-      "committed_frozen_ids": [
-        "6fc914d62e42eb35"
-      ],
-      "violations": null,
-      "g1_no_equivocation": true,
-      "equivocation_attempts_blocked": 1,
-      "g2_single_successor": true,
-      "g3_no_overlap_across_replicas": true,
-      "g4_no_activation_without_final_commit": true,
-      "g5_liveness": "n/a"
-    },
-    {
-      "name": "aborted_attempt_never_commits",
-      "note": "An attempt is aborted before commit; its FrozenID can never reach a commit on any replica.",
-      "replicas": [
-        "A",
-        "B"
-      ],
-      "delivery_order": [
-        "A\u003c-0",
-        "A\u003c-1",
-        "A\u003c-2",
-        "B\u003c-0",
-        "B\u003c-1",
-        "B\u003c-2"
-      ],
-      "final_phases": {
-        "A": "aborted",
-        "B": "aborted"
-      },
-      "committed_frozen_ids": null,
-      "violations": null,
-      "g1_no_equivocation": true,
-      "equivocation_attempts_blocked": 0,
-      "g2_single_successor": true,
-      "g3_no_overlap_across_replicas": true,
-      "g4_no_activation_without_final_commit": true,
-      "g5_liveness": "n/a"
     }
   ],
   "summary": {
     "scenarios": 12,
     "all_phase_expectations_met": true,
     "all_invariants_held": true,
-    "multi_replica_runs": 4,
+    "multi_replica_runs": 9,
     "all_global_invariants_held": true
   }
 }

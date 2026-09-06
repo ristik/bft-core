@@ -4,13 +4,26 @@
 
 Proposed (D4, issue #6). Revised after the first review (#80): the endorsement
 signs a `FrozenID` that binds the whole frozen state (not the bare body id); the
-trust-base body records `EpochStart = A_min` and `A*` lives only in the commit
-record (removes the D3-`EpochStart` circularity); `FinalizeCommit` /
-`CommitFinalized` gates activation on the root ordering rule, not a round count;
-a **multi-replica exploration** with a global signer lock replaces the
-4-method-permutation check as the safety evidence. Freeze once re-reviewed by a
-Go consensus / protocol reviewer other than the author. Depends on ADR 0003 (D1)
-and ADR 0005 (D3).
+trust-base body records `EarliestActivation = A_min` and `A*` lives only in the
+`ActivatedTrustBase` commit record (removes the D3-`EpochStart` circularity — a
+joint D3/D4 change);  `FinalizeCommit(descendantRound)` / `CommitFinalized`
+gates activation on the root 2-chain rule, not a round count.
+
+Revised again after the second review (#80): the multi-replica model's **global
+signer lock** — which prevented *every* signer, honest or Byzantine, from
+equivocating — assumed away the fault. It is replaced by an **adversarial
+model**: honest signers hold durable local state and sign at most one of two
+conflicting statements; an explicit Byzantine set of weight `≤ f_W` equivocates
+freely (signs both); every quorum is the weight of the actual distinct
+authenticated signer set (`WeightSet.SignerWeight`). The model enumerates every
+honest assignment and shows **at most one** of two conflicting `FrozenID`s /
+`CommitRecordID`s (conflicting `A*`) / a commit-vs-abort pair reaches a quorum
+(G2). Per-replica commit tuples are kept un-deduplicated and required to agree
+(G3), with a conflicting-`A*` counterexample the tuple check must flag. `G1`
+("no signer equivocates") is explicitly dropped.
+
+Freeze once re-reviewed by a Go consensus / protocol reviewer other than the
+author. Depends on ADR 0003 (D1) and ADR 0005 (D3).
 
 ## Context
 
@@ -46,8 +59,13 @@ Adopt the state machine in
    for rounds `≥ A*` once committed; the old set for every round before commit or
    after abort. One `≥` comparison against one `A*` — no overlap, no gap.
 
-4. **Activate requires a committed record.** From any pre-Commit phase it fails
-   (`errNoCommit`); clock passage and local trust-base insertion cannot activate.
+4. **Activate requires a committed record that is final under the root
+   2-chain.** From any pre-Commit phase it fails (`errNoCommit`); with a commit
+   but no descendant commit it fails (`errCommitNotFinal`); clock passage and
+   local trust-base insertion cannot activate. Safety of two conflicting commits
+   / a commit and an abort rests on quorum intersection under Byzantine
+   equivocation, not on a no-equivocation assumption (see the design §4
+   adversarial model).
 
 5. **Abort is pre-Commit and old-quorum only.** After it, the attempt `j` is
    dead; a replacement is attempt `j+1` with the same predecessor. A committed
@@ -57,11 +75,16 @@ Adopt the state machine in
 ## Deliverables
 
 - `evmroot/d4handoff.go` — `Handoff` state, the phase transitions, `Authorized`,
-  `FieldsAreKnown`, `PipelineDepth`.
+  `FieldsAreKnown`, `PipelineDepth`, `CommitRecordID`, `ActivationRecord`,
+  `FinalizeCommit(descendantRound)`.
 - `evmroot/d4explore.go` — `checkInvariants` and 12 fault scenarios (delayed
   signatures, asymmetric delivery, missed earliest activation, crash at every
   phase, old quorum loss, committed abort vs late activate, incomplete-prepare
   via clock / REST insertion).
+- `evmroot/d4multireplica.go` — the adversarial model: honest per-signer locks,
+  a bounded Byzantine equivocating set, exhaustive honest-assignment
+  quorum-intersection search (G2), per-replica commit tuples (G3), the
+  conflicting-`A*` counterexample.
 - `evmroot/d4vectors.go` — scenario results plus the exhaustive 24-permutation
   phase-order check.
 - `evmroot/testdata/d4-vectors.json` + `TestD4_VectorsMatchGolden`.
@@ -89,3 +112,11 @@ Adopt the state machine in
 - **Allow abort after commit for liveness.** Rejected: a committed handoff and a
   later abort could both look effective to different replicas; abort is
   pre-Commit only.
+- **A global signer non-equivocation lock as the safety model** (first-review
+  version). Rejected on re-review: it forbids the Byzantine equivocation the
+  protocol has to survive, so it proves nothing about the adversarial case.
+  Replaced by the honest-lock + bounded-Byzantine-equivocation +
+  quorum-intersection model.
+- **Deduplicate committed handoffs by `FrozenID` in the exploration.** Rejected:
+  it hides a disagreement on `A*` between replicas that committed the same
+  `FrozenID`. Per-replica tuples are compared field-by-field instead.

@@ -1,7 +1,6 @@
 package evmroot
 
 import (
-	"crypto/sha256"
 	"errors"
 	"fmt"
 )
@@ -88,10 +87,13 @@ type Handoff struct {
 	EndorsementDomain SigDomain
 
 	// Set at Commit:
-	CommitRound     uint64 // root round at which the endorsed handoff was committed
-	ActivationRound uint64 // A* — the actual boundary, fixed here, >= MinActivation and >= CommitRound+PipelineDepth
-	SuccessorTRHash []byte // successor technical record — names the leader of the first successor proposal
-	CommitFinalized bool   // the commit's own QC has a descendant commit / an ancestry proof (root rule, not a round count)
+	CommitRound             uint64             // root round at which the endorsed handoff was committed
+	ActivationRound         uint64             // A* — the actual boundary, fixed here, >= MinActivation and >= CommitRound+PipelineDepth
+	SuccessorTRHash         []byte             // successor technical record — names the leader of the first successor proposal
+	CommitRecordID          []byte             // identity of the old-quorum commit statement (see CommitRecordID)
+	ActivationRecord        ActivatedTrustBase // D3 record fixing A*; what a joining node reads for the active epoch
+	CommitFinalized         bool               // a descendant commit extends this one (root ordering rule, not a round count)
+	FinalityDescendantRound uint64             // the round of that descendant commit
 
 	// Set at Acknowledge:
 	AckEVMRound uint64 // EVM block round whose system op acknowledged the handoff
@@ -160,8 +162,11 @@ func (h *Handoff) Freeze(frozenSummary, lastEVMParent []byte, body TrustBaseBody
 	if err := body.Validate(); err != nil {
 		return fmt.Errorf("d4: frozen trust-base body invalid: %w", err)
 	}
-	if body.EpochStart != h.Candidate.MinActivation {
-		return fmt.Errorf("d4: body EpochStart %d != candidate A_min %d (A* is fixed only at Commit)", body.EpochStart, h.Candidate.MinActivation)
+	// The body binds EarliestActivation (A_min) — a lower bound, known now.
+	// The actual boundary A* is fixed at Commit and lives ONLY in the
+	// ActivatedTrustBase record (D3), never in the body.
+	if body.EarliestActivation != h.Candidate.MinActivation {
+		return fmt.Errorf("d4: body EarliestActivation %d != candidate A_min %d", body.EarliestActivation, h.Candidate.MinActivation)
 	}
 	if !bytesEqual(body.PredecessorHash, h.Candidate.PredecessorHash) {
 		return errors.New("d4: body predecessor hash does not match the candidate")
@@ -239,10 +244,23 @@ func (h *Handoff) Endorse(weight, oldThreshold uint64) error {
 	return nil
 }
 
+// CommitRecordID is the identity of the old-quorum commit statement:
+// H( "UNICITY_HANDOFF_COMMIT", frozenID, A*, successorTRHash, attempt,
+// predecessor ). An honest old-quorum member signs at most one of these per
+// (frozenID, attempt); a second commit with a different A* or successor TR
+// is a distinct CommitRecordID and needs a second, conflicting old-quorum
+// QC — impossible by quorum intersection (see d4multireplica.go G2/G6).
+func CommitRecordID(frozenID []byte, aStar uint64, successorTRHash []byte, attempt uint64, predecessor []byte) []byte {
+	return sha256Bytes(marshalCBOR(cArray{
+		cText("UNICITY_HANDOFF_COMMIT"),
+		cBytes(frozenID), cUint(aStar), cBytes(successorTRHash), cUint(attempt), cBytes(predecessor),
+	}))
+}
+
 // Commit commits the endorsed handoff under the old consensus rules,
 // binding the new body, the actual activation boundary and the successor
-// technical record. commitRound is the root round of this commit;
-// activationRound is A*. Only from Endorsed.
+// technical record. It produces the ActivatedTrustBase record (D3) that
+// fixes A*. Only from Endorsed.
 func (h *Handoff) Commit(commitRound, activationRound uint64, successorTRHash []byte) error {
 	if h.Phase != PhaseEndorsed {
 		return errPhase
@@ -256,20 +274,30 @@ func (h *Handoff) Commit(commitRound, activationRound uint64, successorTRHash []
 	h.CommitRound = commitRound
 	h.ActivationRound = activationRound
 	h.SuccessorTRHash = successorTRHash
+	h.CommitRecordID = CommitRecordID(h.FrozenID, activationRound, successorTRHash, h.Candidate.Attempt, h.Candidate.PredecessorHash)
+	h.ActivationRecord = ActivatedTrustBase{
+		BodyIdentity:       append([]byte(nil), h.BodyIdentity...),
+		EpochStart:         activationRound,
+		ActivationCommitID: append([]byte(nil), h.CommitRecordID...),
+	}
 	h.Phase = PhaseCommitted
 	return nil
 }
 
-// FinalizeCommit records that the commit's own quorum certificate is final
-// under the root's ordering rule — a descendant commit exists, or an
-// authenticated ancestry path to a committed root block covers it. This is
+// FinalizeCommit records finality under the ROOT ORDERING RULE, not a round
+// count: a descendant commit at descendantCommitRound extends this commit
+// (a 2-chain). It requires descendantCommitRound > h.CommitRound. This is
 // what establishes finality; PipelineDepth only keeps A* outside the reorg
-// window. Idempotent; only meaningful from Committed onward.
-func (h *Handoff) FinalizeCommit() error {
+// window. Idempotent; only from Committed onward.
+func (h *Handoff) FinalizeCommit(descendantCommitRound uint64) error {
 	if h.Phase < PhaseCommitted || h.Phase == PhaseAborted {
 		return errPhase
 	}
+	if descendantCommitRound <= h.CommitRound {
+		return fmt.Errorf("d4: finality needs a descendant commit after round %d, got %d", h.CommitRound, descendantCommitRound)
+	}
 	h.CommitFinalized = true
+	h.FinalityDescendantRound = descendantCommitRound
 	return nil
 }
 
@@ -388,20 +416,16 @@ func (h *Handoff) CommitDomainFor() SigDomain {
 }
 
 // sampleHandoffBody builds a representative next trust-base body for the
-// model. EpochStart is the candidate's A_min (known at Freeze); the actual
-// boundary A* is never in the body — it lives only in the commit record.
+// model. EarliestActivation is the candidate's A_min (known at Freeze); the
+// actual boundary A* is never in the body — it lives only in the
+// ActivatedTrustBase record.
 func sampleHandoffBody(predecessor []byte, minActivation uint64) TrustBaseBodyV2 {
 	ws := d3Assignment()
 	w, _ := ws.TotalWeight()
 	return TrustBaseBodyV2{
-		Version: TrustBaseVersion, NetworkID: 3, Epoch: 8, EpochStart: minActivation,
+		Version: TrustBaseVersion, NetworkID: 3, Epoch: 8, EarliestActivation: minActivation,
 		Members: ws, RootThreshold: RootQuorumThreshold(w),
 		StateSummary: rep(0x5A, 32), ChangeRecordHash: sha256Slice([]byte("candidate-8-attempt-0")),
 		PredecessorHash: predecessor,
 	}
-}
-
-func sha256Slice(b []byte) []byte {
-	h := sha256.Sum256(b)
-	return h[:]
 }

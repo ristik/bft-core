@@ -5,326 +5,366 @@ import (
 	"sort"
 )
 
-// D4 multi-replica exploration. The single-Handoff scenarios exercise one
-// replica's phase API; this model runs several replicas that receive the
-// handoff records in different orders (and lose some), with a global
-// non-equivocation lock on the endorsement signers, and checks properties
-// that only make sense across replicas:
+// D4 adversarial multi-replica model.
 //
-//   G1  no signer endorses two different FrozenIDs (quorum intersection).
-//   G2  at most one FrozenID is ever committed (single successor); an
-//       aborted attempt's FrozenID can never be committed.
-//   G3  no root round is authorised by both the old and the new set across
-//       the replica population — every replica's Authorized(r) is `old`
-//       unless that replica holds a finalised commit and r >= its A*, and
-//       all committed replicas agree on A*.
-//   G4  no replica reaches Activated/Acknowledged without a finalised
-//       commit record.
-//   G5  (conditional liveness) if every record is delivered to every
-//       replica, no permanent loss, and no abort, every replica reaches
-//       acknowledged.
+// The first-review model used a *global signer lock* — no signer, honest
+// or Byzantine, could ever be counted for two conflicting statements. The
+// re-review (#80) rejected that: it assumes away the very fault the handoff
+// has to survive. This model instead states the fault and shows safety
+// holds anyway:
+//
+//   - HONEST signers have durable local state and sign at most ONE of two
+//     conflicting statements (a per-honest-signer lock, not a global one).
+//   - BYZANTINE signers — an explicit set whose authenticated weight is
+//     ≤ f_W = W − ⌊2W/3⌋−1 — equivocate freely: they sign BOTH statements.
+//   - Every quorum is the weight of the *actual distinct authenticated
+//     signer set* via WeightSet.SignerWeight, never a supplied cumulative
+//     number.
+//
+// The safety properties are the quorum-intersection facts that survive
+// Byzantine equivocation:
+//
+//   G2  over EVERY assignment of the honest signers, at most one of two
+//       conflicting statements reaches an endorsement / commit quorum
+//       (⌊2W/3⌋+1). Two >2/3 subsets share >1/3 weight; honest weight
+//       alone exceeds f_W, so it cannot be split across both statements.
+//       Applied to: two FrozenIDs, two CommitRecordIDs (conflicting A*),
+//       and a commit vs an abort of the same attempt.
+//   G3  per-replica commit tuples (replica, FrozenID, A*, commitRound,
+//       CommitRecordID) are kept un-deduplicated and must all agree; the
+//       conflicting-A* counterexample is carried as a negative run the
+//       tuple check is required to flag.
+//   G4  activation requires FinalizeCommit(descendantRound > commitRound)
+//       — the root 2-chain rule, not a round count.
+//   G5  (conditional liveness) with every record delivered and no abort,
+//       every replica reaches acknowledged.
+//
+// G1 ("no signer ever equivocates") is deliberately NOT a property here:
+// Byzantine signers do equivocate, and safety must not depend on their
+// not doing so.
+//
+// Normative source: docs/design/d4-epoch-handoff-state-machine.md §4,
+// docs/adr/0006-epoch-handoff-state-machine.md.
 
-// HandoffRecord is one durably-committed artefact of the handoff that
-// replicas exchange. Prepare/Freeze/Endorse/Commit/Abort/Finalize each
-// produce one; a replica applies the records it receives in order.
-type recordKind uint8
-
-const (
-	recPrepare recordKind = iota
-	recFreeze
-	recEndorse
-	recCommit
-	recAbort
-	recFinalize
-)
-
-type handoffRecord struct {
-	kind     recordKind
-	frozenID []byte // recFreeze/recEndorse/recCommit
-	summary  []byte // recFreeze
-	parent   []byte // recFreeze
-	signer   string // recEndorse
-	weight   uint64 // recEndorse cumulative
-	aStar    uint64 // recCommit
-	commitAt uint64 // recCommit
-	trHash   []byte // recCommit
-	reason   string // recAbort
+// d4Signers is the model's outgoing assignment (D3's d3Assignment: weights
+// 10/6/5/2/1, W=24, endorsement threshold ⌊2W/3⌋+1 = 17, f_W = 24−17 = 7).
+func d4Signers() (ws WeightSet, threshold, faultyBound uint64) {
+	ws = d3Assignment()
+	w, _ := ws.TotalWeight()
+	return ws, RootQuorumThreshold(w), FaultyWeightBound(w)
 }
 
-// replica applies handoff records to its own Handoff copy and tracks which
-// endorsement signers it has counted.
-type replica struct {
-	id       string
-	h        *Handoff
-	endorsed map[string]struct{}
+func mustW(ws WeightSet) uint64 { w, _ := ws.TotalWeight(); return w }
+
+func joinSorted(s []string) string {
+	c := append([]string(nil), s...)
+	sort.Strings(c)
+	return join(c, ",")
 }
 
-func newReplica(id string, c Candidate) *replica {
-	return &replica{id: id, h: NewHandoff(c, 1), endorsed: map[string]struct{}{}}
+// quorumExploration is the exhaustive per-honest-assignment search for a
+// split quorum between two conflicting statements X and Y.
+type quorumExploration struct {
+	Statements             [2]string `json:"statements"`
+	HonestSigners          []string  `json:"honest_signers"`
+	ByzantineSigners       []string  `json:"byzantine_signers"`
+	ByzantineWeight        uint64    `json:"byzantine_weight"`
+	FaultyWeightBound      uint64    `json:"faulty_weight_bound"`
+	Threshold              uint64    `json:"quorum_threshold"`
+	HonestAssignments      int       `json:"honest_assignments_enumerated"`
+	MaxSimultaneousQuorums int       `json:"max_simultaneous_quorums"`
+	ByzantineOnBoth        bool      `json:"byzantine_signed_both_statements"`
+	MaxMinSideWeight       uint64    `json:"max_min_side_weight"` // best simultaneous pressure on both sides
+	ClosestSplit           string    `json:"closest_split_to_a_double_quorum"`
 }
 
-// signerLock is the global non-equivocation record: a signer that endorsed
-// FrozenID X may never be counted for FrozenID Y != X.
-type signerLock struct {
-	locked map[string][]byte // signer -> FrozenID it is bound to
-}
-
-func (l *signerLock) endorse(signer string, frozenID []byte) error {
-	if prev, ok := l.locked[signer]; ok && string(prev) != string(frozenID) {
-		return fmt.Errorf("signer %s equivocates: bound to %x, asked to endorse %x", signer, prev, frozenID)
+// exploreQuorumIntersection enumerates every assignment of each honest
+// signer to {X, Y, abstain} (3^|honest|), with the Byzantine signers on
+// BOTH X and Y, and reports the largest number of the two statements that
+// simultaneously reach `threshold` distinct authenticated signer weight.
+// For a sound quorum rule that maximum is 1.
+func exploreQuorumIntersection(labels [2]string, ws WeightSet, threshold uint64, honest, byz []string) quorumExploration {
+	n := len(honest)
+	pow := 1
+	for i := 0; i < n; i++ {
+		pow *= 3
 	}
-	l.locked[signer] = frozenID
-	return nil
-}
-
-// MultiReplicaResult is the outcome of one exploration run.
-type MultiReplicaResult struct {
-	Name               string               `json:"name"`
-	Note               string               `json:"note"`
-	Replicas           []string             `json:"replicas"`
-	Deliveries         []string             `json:"delivery_order"`
-	FinalPhases        map[string]string    `json:"final_phases"`
-	CommittedFrozenIDs []string             `json:"committed_frozen_ids"`
-	Violations         []InvariantViolation `json:"violations"`
-	G1NoEquivocation   bool                 `json:"g1_no_equivocation"` // no signer's weight counted toward two FrozenIDs
-	EquivBlocked       int                  `json:"equivocation_attempts_blocked"`
-	G2SingleSuccessor  bool                 `json:"g2_single_successor"`
-	G3NoOverlap        bool                 `json:"g3_no_overlap_across_replicas"`
-	G4FinalCommit      bool                 `json:"g4_no_activation_without_final_commit"`
-	G5Liveness         string               `json:"g5_liveness"` // "reached" | "held-safe" | "n/a"
-}
-
-// applyRecord applies one record to a replica, consulting/updating the
-// global signer lock. Returns an error only for a genuine protocol
-// violation (equivocation); out-of-order or duplicate records are ignored.
-func (r *replica) applyRecord(rec handoffRecord, lock *signerLock, oldThreshold uint64) error {
-	switch rec.kind {
-	case recPrepare:
-		_ = r.h.Prepare()
-	case recFreeze:
-		if r.h.Phase == PhasePrepared {
-			b := sampleHandoffBody(r.h.Candidate.PredecessorHash, r.h.Candidate.MinActivation)
-			_ = r.h.Freeze(rec.summary, rec.parent, b)
+	maxQ := 0
+	var maxMin uint64
+	closest := "no assignment puts weight on both sides"
+	for mask := 0; mask < pow; mask++ {
+		xs := append([]string(nil), byz...)
+		ys := append([]string(nil), byz...)
+		m := mask
+		for i := 0; i < n; i++ {
+			switch m % 3 {
+			case 0:
+				xs = append(xs, honest[i])
+			case 1:
+				ys = append(ys, honest[i])
+			}
+			m /= 3
 		}
-	case recEndorse:
-		if err := lock.endorse(rec.signer, rec.frozenID); err != nil {
-			return err
+		xw, xok := ws.SignerWeight(xs)
+		yw, yok := ws.SignerWeight(ys)
+		q := 0
+		if xok && xw >= threshold {
+			q++
 		}
-		r.endorsed[rec.signer] = struct{}{}
-		if r.h.Phase == PhaseFrozen && string(r.h.FrozenID) == string(rec.frozenID) && rec.weight >= oldThreshold {
-			_ = r.h.Endorse(rec.weight, oldThreshold)
+		if yok && yw >= threshold {
+			q++
 		}
-	case recCommit:
-		if r.h.Phase == PhaseEndorsed && string(r.h.FrozenID) == string(rec.frozenID) {
-			_ = r.h.Commit(rec.commitAt, rec.aStar, rec.trHash)
+		if q > maxQ {
+			maxQ = q
 		}
-	case recFinalize:
-		if r.h.Phase >= PhaseCommitted && r.h.Phase != PhaseAborted {
-			_ = r.h.FinalizeCommit()
-			_ = r.h.Activate(rec.aStar)
-			_ = r.h.Acknowledge(rec.aStar + 1)
-		}
-	case recAbort:
-		_ = r.h.Abort(rec.reason)
-	}
-	return nil
-}
-
-// runMultiReplica delivers `records` to each replica in the per-replica
-// order given by `orders` (a slice of index slices), then checks G1..G5.
-func runMultiReplica(name, note string, c Candidate, records []handoffRecord, orders map[string][]int, expectLiveness bool) MultiReplicaResult {
-	oldThreshold := RootQuorumThreshold(func() uint64 { w, _ := d3Assignment().TotalWeight(); return w }())
-	lock := &signerLock{locked: map[string][]byte{}}
-	res := MultiReplicaResult{Name: name, Note: note, FinalPhases: map[string]string{},
-		G1NoEquivocation: true, G2SingleSuccessor: true, G3NoOverlap: true, G4FinalCommit: true}
-
-	ids := make([]string, 0, len(orders))
-	for id := range orders {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	res.Replicas = ids
-
-	reps := map[string]*replica{}
-	for _, id := range ids {
-		reps[id] = newReplica(id, c)
-	}
-
-	for _, id := range ids {
-		for _, idx := range orders[id] {
-			res.Deliveries = append(res.Deliveries, fmt.Sprintf("%s<-%d", id, idx))
-			if err := reps[id].applyRecord(records[idx], lock, oldThreshold); err != nil {
-				// The global lock BLOCKED a cross-FrozenID endorsement.
-				// That is the property working, not a violation: the
-				// signer's weight is never counted toward the second
-				// FrozenID (Endorse only fires when the replica's own
-				// FrozenID matches). Record it as a blocked attempt.
-				res.EquivBlocked++
+		if xok && yok {
+			mn := yw
+			if xw < yw {
+				mn = xw
+			}
+			if mn > maxMin {
+				maxMin = mn
+				closest = fmt.Sprintf("%s={%s} w=%d ; %s={%s} w=%d (threshold %d)",
+					labels[0], joinSorted(xs), xw, labels[1], joinSorted(ys), yw, threshold)
 			}
 		}
 	}
-
-	// Collect committed FrozenIDs and A* values.
-	committed := map[string]uint64{}
-	for _, id := range ids {
-		h := reps[id].h
-		res.FinalPhases[id] = h.Phase.String()
-		if h.Phase >= PhaseCommitted && h.Phase != PhaseAborted {
-			committed[string(h.FrozenID)] = h.ActivationRound
-		}
-		// G4
-		if (h.Phase == PhaseActivated || h.Phase == PhaseAcknowledged) && !h.CommitFinalized {
-			res.G4FinalCommit = false
-			res.Violations = append(res.Violations, InvariantViolation{"g4", id + " activated without a finalised commit"})
-		}
-		for _, iv := range checkInvariants(h, probeRounds) {
-			res.Violations = append(res.Violations, iv)
-		}
+	bw, _ := ws.SignerWeight(byz)
+	return quorumExploration{
+		Statements: labels, HonestSigners: honest, ByzantineSigners: byz, ByzantineWeight: bw,
+		FaultyWeightBound: FaultyWeightBound(mustW(ws)), Threshold: threshold,
+		HonestAssignments: pow, MaxSimultaneousQuorums: maxQ,
+		ByzantineOnBoth: len(byz) > 0, MaxMinSideWeight: maxMin, ClosestSplit: closest,
 	}
-	for fid := range committed {
-		res.CommittedFrozenIDs = append(res.CommittedFrozenIDs, fmt.Sprintf("%x", fid[:8]))
-	}
-	sort.Strings(res.CommittedFrozenIDs)
-	if len(committed) > 1 {
-		res.G2SingleSuccessor = false
-		res.Violations = append(res.Violations, InvariantViolation{"g2", "more than one FrozenID committed"})
-	}
-
-	// G3: across replicas, at every probe round, no two replicas disagree
-	// in a way that authorises both sets; and all committed replicas share
-	// one A*.
-	var aStar uint64
-	haveAStar := false
-	for _, a := range committed {
-		if !haveAStar {
-			aStar, haveAStar = a, true
-		} else if a != aStar {
-			res.G3NoOverlap = false
-			res.Violations = append(res.Violations, InvariantViolation{"g3", "committed replicas disagree on A*"})
-		}
-	}
-	for _, r := range probeRounds {
-		sawOld, sawNew := false, false
-		for _, id := range ids {
-			switch reps[id].h.Authorized(r) {
-			case OldAssignment:
-				sawOld = true
-			case NewAssignment:
-				sawNew = true
-			}
-		}
-		// It is fine for some replicas to still say "old" while others say
-		// "new" only when r straddles A* is impossible (a fixed r is either
-		// < A* or >= A*). If any committed replica says NEW for r, then
-		// r >= A*, and no replica may still treat r as an OLD-set round for
-		// the SAME extension. We model the violation as: sawNew for r < the
-		// agreed A*, or sawOld-as-authoritative for r >= A* on a committed
-		// replica.
-		if haveAStar {
-			if sawNew && r < aStar {
-				res.G3NoOverlap = false
-				res.Violations = append(res.Violations, InvariantViolation{"g3", fmt.Sprintf("round %d < A*=%d authorised NEW", r, aStar)})
-			}
-			for _, id := range ids {
-				h := reps[id].h
-				if h.Phase >= PhaseCommitted && h.Phase != PhaseAborted && r >= h.ActivationRound && h.Authorized(r) != NewAssignment {
-					res.G3NoOverlap = false
-					res.Violations = append(res.Violations, InvariantViolation{"g3", fmt.Sprintf("%s: round %d >= A* still authorised OLD", id, r)})
-				}
-			}
-		}
-		_ = sawOld
-	}
-
-	// G5 liveness.
-	switch {
-	case !expectLiveness:
-		res.G5Liveness = "n/a"
-	case allAcknowledged(reps, ids):
-		res.G5Liveness = "reached"
-	default:
-		res.G5Liveness = "held-safe"
-	}
-	return res
 }
 
-func bodyIdentityBytes(b TrustBaseBodyV2) []byte { id := b.Identity(); return id[:] }
+// honestComplement returns the assignment members not in byz, sorted.
+func honestComplement(ws WeightSet, byz []string) []string {
+	drop := map[string]struct{}{}
+	for _, b := range byz {
+		drop[b] = struct{}{}
+	}
+	var h []string
+	for _, m := range ws {
+		if _, isByz := drop[m.NodeID]; !isByz {
+			h = append(h, m.NodeID)
+		}
+	}
+	sort.Strings(h)
+	return h
+}
 
-func allAcknowledged(reps map[string]*replica, ids []string) bool {
-	for _, id := range ids {
-		if reps[id].h.Phase != PhaseAcknowledged {
+// --- per-replica commit tuples -------------------------------------------
+
+type commitTuple struct {
+	Replica      string `json:"replica"`
+	FrozenID     string `json:"frozen_id"`
+	AStar        uint64 `json:"a_star"`
+	CommitRound  uint64 `json:"commit_round"`
+	CommitRecord string `json:"commit_record_id"`
+}
+
+// commitReplica drives one replica's Handoff prepare→commit for a given A*
+// and commit round and returns its commit tuple. Nothing is deduplicated:
+// each replica keeps its own tuple so a disagreement is visible.
+func commitReplica(id string, c Candidate, aStar, commitRound uint64) commitTuple {
+	ws, threshold, _ := d4Signers()
+	h := NewHandoff(c, 1)
+	_ = h.Prepare()
+	_ = h.Freeze(rep(0x11, 32), rep(0x22, 32), sampleHandoffBody(c.PredecessorHash, c.MinActivation))
+	qw, _ := ws.SignerWeight([]string{"root-a", "root-b", "root-c"}) // 10+6+5 = 21 ≥ 17
+	_ = h.Endorse(qw, threshold)
+	_ = h.Commit(commitRound, aStar, rep(0x33, 32))
+	return commitTuple{
+		Replica:      id,
+		FrozenID:     fmt.Sprintf("%x", h.FrozenID[:8]),
+		AStar:        h.ActivationRound,
+		CommitRound:  h.CommitRound,
+		CommitRecord: fmt.Sprintf("%x", h.CommitRecordID[:8]),
+	}
+}
+
+func tuplesAgree(ts []commitTuple) bool {
+	if len(ts) == 0 {
+		return false
+	}
+	for i := 1; i < len(ts); i++ {
+		if ts[i].FrozenID != ts[0].FrozenID || ts[i].AStar != ts[0].AStar ||
+			ts[i].CommitRound != ts[0].CommitRound || ts[i].CommitRecord != ts[0].CommitRecord {
 			return false
 		}
 	}
 	return true
 }
 
-// D4MultiReplicaRuns builds the multi-replica exploration set.
+func distinctTuples(ts []commitTuple) int {
+	seen := map[string]struct{}{}
+	for _, t := range ts {
+		seen[fmt.Sprintf("%s|%d|%d|%s", t.FrozenID, t.AStar, t.CommitRound, t.CommitRecord)] = struct{}{}
+	}
+	return len(seen)
+}
+
+// --- result type -------------------------------------------------------
+
+// MultiReplicaResult is one adversarial run.
+type MultiReplicaResult struct {
+	Name             string               `json:"name"`
+	Note             string               `json:"note"`
+	Kind             string               `json:"kind"` // quorum | tuples | finality | liveness
+	IsCounterexample bool                 `json:"is_counterexample"`
+	Exploration      *quorumExploration   `json:"quorum_exploration,omitempty"`
+	CommitTuples     []commitTuple        `json:"per_replica_commit_tuples,omitempty"`
+	DistinctTuples   int                  `json:"distinct_commit_tuples,omitempty"`
+	Violations       []InvariantViolation `json:"violations,omitempty"`
+
+	// Readable sub-verdicts (n/a dimensions stay true so the aggregate AND
+	// in d4vectors.go is meaningful):
+	G2QuorumUnique    bool `json:"g2_at_most_one_statement_reaches_quorum"`
+	G3TuplesAgree     bool `json:"g3_all_replica_commit_tuples_agree"`
+	G4FinalCommit     bool `json:"g4_no_activation_without_finalized_commit"`
+	ByzantineModelled bool `json:"byzantine_equivocation_modelled"`
+	ConflictDetected  bool `json:"conflict_detected_by_tuple_check"`
+
+	// PropertyHeld is the run's single pass/fail: the modelled safety
+	// property for a normal run, or "the counterexample was flagged" for a
+	// counterexample run.
+	PropertyHeld bool   `json:"property_held"`
+	G5Liveness   string `json:"g5_liveness,omitempty"`
+}
+
+func newQuorumRun(name, note string, byz []string, labels [2]string) MultiReplicaResult {
+	ws, threshold, _ := d4Signers()
+	honest := honestComplement(ws, byz)
+	ex := exploreQuorumIntersection(labels, ws, threshold, honest, byz)
+	held := ex.MaxSimultaneousQuorums <= 1 && ex.ByzantineWeight <= ex.FaultyWeightBound
+	return MultiReplicaResult{
+		Name: name, Note: note, Kind: "quorum",
+		Exploration:       &ex,
+		G2QuorumUnique:    ex.MaxSimultaneousQuorums <= 1,
+		G3TuplesAgree:     true,
+		G4FinalCommit:     true,
+		ByzantineModelled: len(byz) > 0,
+		PropertyHeld:      held,
+	}
+}
+
+// D4MultiReplicaRuns builds the adversarial exploration set.
 func D4MultiReplicaRuns() []MultiReplicaResult {
 	c := Candidate{Network: 3, NextEpoch: 8, Attempt: 0, PredecessorHash: rep(0xE7, 32), MinActivation: 10, CandidateHash: rep(0xCA, 32)}
-
-	// One agreed FrozenID: freeze the same (summary, parent) everywhere.
-	summ, par := rep(0x11, 32), rep(0x22, 32)
-	fid := frozenID(bodyIdentityBytes(sampleHandoffBody(c.PredecessorHash, c.MinActivation)), summ, par, c.CandidateHash, c.Attempt, c.PredecessorHash)
-	base := []handoffRecord{
-		{kind: recPrepare},
-		{kind: recFreeze, frozenID: fid, summary: summ, parent: par},
-		{kind: recEndorse, frozenID: fid, signer: "r1", weight: 8},
-		{kind: recEndorse, frozenID: fid, signer: "r2", weight: 17},
-		{kind: recCommit, frozenID: fid, aStar: 12, commitAt: 6, trHash: rep(0x33, 32)},
-		{kind: recFinalize, aStar: 12},
-	}
-	full := []int{0, 1, 2, 3, 4, 5}
-
 	var out []MultiReplicaResult
 
-	// 1. All records to all replicas, but in three different orders.
-	out = append(out, runMultiReplica("all_delivered_reordered",
-		"Three replicas receive every handoff record; different per-replica orders; all reach acknowledged, one A*, no equivocation.",
-		c, base, map[string][]int{
-			"A": {0, 1, 2, 3, 4, 5},
-			"B": {0, 1, 3, 2, 4, 5},
-			"C": {0, 1, 3, 4, 2, 5}, // endorse r2 (over threshold) -> commit -> r1 no-op -> finalize
-		}, true))
-	_ = full
+	// 1. Endorsement quorum, no Byzantine signers: two competing FrozenIDs,
+	//    honest signers split every possible way, at most one reaches 17.
+	out = append(out, newQuorumRun("endorsement_quorum_honest_only",
+		"Two competing FrozenIDs X and Y. Every honest signer signs at most one (durable local state). Over all 3^5 = 243 assignments, at most one FrozenID reaches ⌊2W/3⌋+1 = 17.",
+		nil, [2]string{"frozenX", "frozenY"}))
 
-	// 2. Asymmetric: replica C never gets the commit/finalize records.
-	out = append(out, runMultiReplica("commit_not_delivered_to_one",
-		"Replica C is missing the commit and finalize records: it holds at endorsed, keeps the old set authoritative for every round, and never activates. A and B proceed.",
-		c, base, map[string][]int{
-			"A": {0, 1, 2, 3, 4, 5},
-			"B": {0, 1, 2, 3, 4, 5},
-			"C": {0, 1, 2, 3},
-		}, false))
+	// 2. Byzantine weight 6 (< f_W = 7) equivocating on BOTH FrozenIDs.
+	out = append(out, newQuorumRun("endorsement_quorum_byzantine_below_bound",
+		"root-c (5) + root-e (1) = 6 ≤ f_W = 7 are Byzantine and sign BOTH X and Y. Honest signers (a,b,d = weight 18) still cannot be split to give both X and Y ≥ 17. Max simultaneous quorums stays 1.",
+		[]string{"root-c", "root-e"}, [2]string{"frozenX", "frozenY"}))
 
-	// 3. Equivocation attempt: a second FrozenID (different summary) that
-	//    reuses signer r1.
-	summ2 := rep(0x99, 32)
-	fid2 := frozenID(bodyIdentityBytes(sampleHandoffBody(c.PredecessorHash, c.MinActivation)), summ2, par, c.CandidateHash, c.Attempt, c.PredecessorHash)
-	equiv := append(append([]handoffRecord{}, base...),
-		handoffRecord{kind: recFreeze, frozenID: fid2, summary: summ2, parent: par},
-		handoffRecord{kind: recEndorse, frozenID: fid2, signer: "r1", weight: 8}, // r1 already bound to fid
-	)
-	out = append(out, runMultiReplica("equivocating_endorsement_rejected",
-		"A second FrozenID reuses endorsement signer r1; the global lock rejects it, so it can never gather weight or be committed.",
-		c, equiv, map[string][]int{
-			"A": {0, 1, 2, 3, 4, 5},
-			"B": {0, 6, 7}, // sees only the second (equivocating) path
-		}, false))
+	// 3. Byzantine weight exactly at the bound.
+	out = append(out, newQuorumRun("endorsement_quorum_byzantine_at_bound",
+		"root-b (6) + root-e (1) = 7 = f_W are Byzantine and sign both. Honest weight (a,c,d = 17) is a single quorum's worth and indivisible across two statements — one quorum at most.",
+		[]string{"root-b", "root-e"}, [2]string{"frozenX", "frozenY"}))
 
-	// 4. Abort of one attempt then a fresh attempt j+1: the aborted
-	//    FrozenID must never be committed.
-	abortRecs := []handoffRecord{
-		{kind: recPrepare},
-		{kind: recFreeze, frozenID: fid, summary: summ, parent: par},
-		{kind: recAbort, reason: "candidate replaced"},
+	// 4. Same arithmetic at the COMMIT layer: two CommitRecordIDs that
+	//    differ only in A* each need an old-quorum QC. G2 ⇒ at most one A*
+	//    is ever certified — this is the mechanism behind finding 1.
+	out = append(out, newQuorumRun("commit_quorum_conflicting_activation_rounds",
+		"Two CommitRecordIDs for the same FrozenID with A*=12 and A*=15. Each needs its own old-quorum QC over UNICITY_HANDOFF_COMMIT. Byzantine set (weight 6) signs both; at most one reaches 17, so two conflicting activation rounds cannot both be certified.",
+		[]string{"root-c", "root-e"}, [2]string{"commit_Astar_12", "commit_Astar_15"}))
+
+	// 5. Commit vs abort of the same attempt: mutually exclusive.
+	out = append(out, newQuorumRun("commit_versus_abort_exclusion",
+		"An old-quorum commit and an old-quorum abort of attempt j. Byzantine signers (weight 6) sign both; honest signers sign one. At most one reaches quorum, so a committed handoff and an abort cannot both take effect.",
+		[]string{"root-c", "root-e"}, [2]string{"commit_j", "abort_j"}))
+
+	// 6. Per-replica commit tuples: three replicas commit the SAME certified
+	//    record; every tuple agrees.
+	ts := []commitTuple{
+		commitReplica("A", c, 12, 6),
+		commitReplica("B", c, 12, 6),
+		commitReplica("C", c, 12, 6),
 	}
-	out = append(out, runMultiReplica("aborted_attempt_never_commits",
-		"An attempt is aborted before commit; its FrozenID can never reach a commit on any replica.",
-		c, abortRecs, map[string][]int{
-			"A": {0, 1, 2},
-			"B": {0, 1, 2},
-		}, false))
+	out = append(out, MultiReplicaResult{
+		Name: "replica_commit_tuples_agree", Kind: "tuples",
+		Note:         "Three replicas apply the same certified commit record. Their (FrozenID, A*, commitRound, CommitRecordID) tuples are kept separately and all agree.",
+		CommitTuples: ts, DistinctTuples: distinctTuples(ts),
+		G2QuorumUnique: true, G3TuplesAgree: tuplesAgree(ts), G4FinalCommit: true,
+		PropertyHeld: tuplesAgree(ts),
+	})
+
+	// 7. COUNTEREXAMPLE: replica A is fed a commit with A*=12, replica B one
+	//    with A*=15, same FrozenID. A sound model keeps both tuples and
+	//    flags the disagreement (the earlier map-keyed-by-FrozenID model
+	//    silently kept only the last). Runs 2–4 are why only one of these
+	//    can ever carry a real old-quorum QC.
+	cx := []commitTuple{
+		commitReplica("A", c, 12, 6),
+		commitReplica("B", c, 15, 6),
+	}
+	out = append(out, MultiReplicaResult{
+		Name: "conflicting_activation_round_counterexample", Kind: "tuples", IsCounterexample: true,
+		Note:         "Same FrozenID committed with A*=12 to replica A and A*=15 to replica B. The per-replica tuples differ (A*, CommitRecordID) and the check flags it. This can only arise if two conflicting old-quorum QCs were produced — commit_quorum_conflicting_activation_rounds shows that is impossible.",
+		CommitTuples: cx, DistinctTuples: distinctTuples(cx),
+		G2QuorumUnique: true, G3TuplesAgree: tuplesAgree(cx), G4FinalCommit: true,
+		ConflictDetected: !tuplesAgree(cx),
+		PropertyHeld:     !tuplesAgree(cx),
+	})
+
+	// 8. Activation requires a finalized commit (root 2-chain), not a round
+	//    count.
+	fr := freshHandoff()
+	_ = fr.Prepare()
+	_ = fr.Freeze(rep(0x11, 32), rep(0x22, 32), body(fr))
+	_, thr, _ := d4Signers()
+	_ = fr.Endorse(thr, thr)
+	_ = fr.Commit(6, 12, rep(0x33, 32))
+	var fv []InvariantViolation
+	roundReachedNoFinal := fr.Activate(12) // A* reached, commit not final
+	if roundReachedNoFinal == nil {
+		fv = append(fv, InvariantViolation{"g4", "activated on observedRootRound ≥ A* without a finalized commit"})
+	}
+	_ = fr.FinalizeCommit(fr.CommitRound + 1)
+	afterFinal := fr.Activate(12)
+	if afterFinal != nil {
+		fv = append(fv, InvariantViolation{"g4", "activation rejected after a descendant commit finalized it: " + afterFinal.Error()})
+	}
+	out = append(out, MultiReplicaResult{
+		Name: "activation_requires_finalized_commit", Kind: "finality",
+		Note:           "observedRootRound ≥ A* is not enough: Activate fails until FinalizeCommit records a descendant commit at a round > commitRound (the root 2-chain). The first successor proposal at A* carries CommitRecordID as its old-quorum authorisation.",
+		Violations:     fv,
+		G2QuorumUnique: true, G3TuplesAgree: true, G4FinalCommit: len(fv) == 0,
+		PropertyHeld: len(fv) == 0,
+	})
+
+	// 9. Conditional liveness: every record delivered, no abort ⇒ every
+	//    replica reaches acknowledged.
+	live := true
+	for _, id := range []string{"A", "B", "C"} {
+		h := NewHandoff(c, 1)
+		_ = h.Prepare()
+		_ = h.Freeze(rep(0x11, 32), rep(0x22, 32), body(h))
+		_ = h.Endorse(thr, thr)
+		_ = h.Commit(6, 12, rep(0x33, 32))
+		_ = h.FinalizeCommit(h.CommitRound + 1)
+		_ = h.Activate(12)
+		_ = h.Acknowledge(13)
+		if h.Phase != PhaseAcknowledged {
+			live = false
+			_ = id
+		}
+	}
+	out = append(out, MultiReplicaResult{
+		Name: "conditional_liveness_all_delivered", Kind: "liveness",
+		Note:           "With every handoff record delivered to every replica and no abort, all replicas reach acknowledged.",
+		G2QuorumUnique: true, G3TuplesAgree: true, G4FinalCommit: true,
+		PropertyHeld: live,
+		G5Liveness:   map[bool]string{true: "reached", false: "held-safe"}[live],
+	})
 
 	return out
 }

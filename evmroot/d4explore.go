@@ -152,7 +152,7 @@ func D4Scenarios() []ScenarioResult {
 			}},
 			{"endorse_at_threshold", func(h *Handoff) error { return h.Endorse(oldThreshold, oldThreshold) }},
 			{"commit", func(h *Handoff) error { return h.Commit(6, 10, rep(0x33, 32)) }},
-			{"finalize_commit", func(h *Handoff) error { return h.FinalizeCommit() }},
+			{"finalize_commit", func(h *Handoff) error { return h.FinalizeCommit(h.CommitRound + 1) }},
 			{"activate_at_boundary", func(h *Handoff) error { return h.Activate(10) }},
 			{"acknowledge", func(h *Handoff) error { return h.Acknowledge(41) }},
 		}))
@@ -192,7 +192,7 @@ func D4Scenarios() []ScenarioResult {
 			}},
 			{"endorse", func(h *Handoff) error { return h.Endorse(oldThreshold, oldThreshold) }},
 			{"commit_A_star_ge_observed", func(h *Handoff) error { return h.Commit(50, 60, rep(0x33, 32)) }},
-			{"finalize_commit", func(h *Handoff) error { return h.FinalizeCommit() }},
+			{"finalize_commit", func(h *Handoff) error { return h.FinalizeCommit(h.CommitRound + 1) }},
 			{"activate_at_A_star", func(h *Handoff) error { return h.Activate(60) }},
 			{"acknowledge", func(h *Handoff) error { return h.Acknowledge(200) }},
 		}))
@@ -242,7 +242,7 @@ func D4Scenarios() []ScenarioResult {
 			_ = h.Commit(6, 10, rep(0x33, 32))
 			return h
 		}, Step{"resume_finalize_and_activate", func(h *Handoff) error {
-			if err := h.FinalizeCommit(); err != nil {
+			if err := h.FinalizeCommit(h.CommitRound + 1); err != nil {
 				return err
 			}
 			return h.Activate(10)

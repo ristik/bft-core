@@ -63,7 +63,7 @@ func TestD4_FreezeBindsFrozenStateIntoEndorsedIdentity(t *testing.T) {
 	c := freshHandoff()
 	_ = c.Prepare()
 	badBody := body(c)
-	badBody.EpochStart = 999 // not A_min
+	badBody.EarliestActivation = 999 // not A_min
 	if err := c.Freeze(rep(1, 32), rep(2, 32), badBody); err == nil {
 		t.Fatal("Freeze accepted a body with EpochStart != A_min")
 	}
@@ -80,7 +80,7 @@ func TestD4_ActivationRequiresFinalizedCommit(t *testing.T) {
 	if err := h.Activate(10); err != errCommitNotFinal {
 		t.Fatalf("activated on round count alone: %v", err)
 	}
-	if err := h.FinalizeCommit(); err != nil {
+	if err := h.FinalizeCommit(h.CommitRound + 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.Activate(10); err != nil {
@@ -89,29 +89,49 @@ func TestD4_ActivationRequiresFinalizedCommit(t *testing.T) {
 }
 
 func TestD4_MultiReplicaGlobalInvariants(t *testing.T) {
-	for _, m := range D4MultiReplicaRuns() {
-		if !m.G1NoEquivocation {
-			t.Errorf("%s: a signer's weight was counted toward two FrozenIDs", m.Name)
+	runs := D4MultiReplicaRuns()
+	sawByzantineEquivocation := false
+	sawCounterexample := false
+	sawLiveness := false
+	for _, m := range runs {
+		if !m.PropertyHeld {
+			t.Errorf("%s: modelled safety property does not hold: %+v", m.Name, m.Violations)
 		}
-		if !m.G2SingleSuccessor {
-			t.Errorf("%s: more than one FrozenID committed", m.Name)
+		if m.Exploration != nil && m.Exploration.ByzantineWeight > 0 {
+			sawByzantineEquivocation = true
+			if m.Exploration.ByzantineWeight > m.Exploration.FaultyWeightBound {
+				t.Errorf("%s: Byzantine weight %d exceeds f_W %d — outside the model's assumption",
+					m.Name, m.Exploration.ByzantineWeight, m.Exploration.FaultyWeightBound)
+			}
+			if m.Exploration.MaxSimultaneousQuorums > 1 {
+				t.Errorf("%s: Byzantine equivocation split a quorum (max %d simultaneous)",
+					m.Name, m.Exploration.MaxSimultaneousQuorums)
+			}
+			if !m.Exploration.ByzantineOnBoth {
+				t.Errorf("%s: Byzantine signers were not placed on both statements", m.Name)
+			}
 		}
-		if !m.G3NoOverlap {
-			t.Errorf("%s: G3 (no old/new overlap across replicas) broken: %+v", m.Name, m.Violations)
+		if m.IsCounterexample {
+			sawCounterexample = true
+			if !m.ConflictDetected {
+				t.Errorf("%s: conflicting per-replica commit tuples were not flagged", m.Name)
+			}
 		}
-		if !m.G4FinalCommit {
-			t.Errorf("%s: a replica activated without a finalised commit", m.Name)
+		if m.Name == "conditional_liveness_all_delivered" {
+			sawLiveness = true
+			if m.G5Liveness != "reached" {
+				t.Fatalf("conditional-liveness run did not reach: %s", m.G5Liveness)
+			}
 		}
 	}
-	runs := D4MultiReplicaRuns()
-	// The equivocation run must record exactly one blocked attempt.
-	for _, m := range runs {
-		if m.Name == "equivocating_endorsement_rejected" && m.EquivBlocked != 1 {
-			t.Fatalf("equivocation run blocked %d attempts, want 1", m.EquivBlocked)
-		}
-		if m.Name == "all_delivered_reordered" && m.G5Liveness != "reached" {
-			t.Fatalf("all-delivered run did not reach liveness: %s", m.G5Liveness)
-		}
+	if !sawByzantineEquivocation {
+		t.Fatal("no run models Byzantine signer equivocation — the fault is assumed away")
+	}
+	if !sawCounterexample {
+		t.Fatal("no conflicting-activation-round counterexample in the suite")
+	}
+	if !sawLiveness {
+		t.Fatal("no conditional-liveness run in the suite")
 	}
 }
 

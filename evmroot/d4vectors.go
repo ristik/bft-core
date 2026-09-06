@@ -47,7 +47,7 @@ func BuildD4Vectors() D4VectorSet {
 	vs.MultiReplica = D4MultiReplicaRuns()
 	allGlobal := true
 	for _, m := range vs.MultiReplica {
-		allGlobal = allGlobal && m.G1NoEquivocation && m.G2SingleSuccessor && m.G3NoOverlap && m.G4FinalCommit
+		allGlobal = allGlobal && m.PropertyHeld
 	}
 
 	vs.Summary = D4Summary{
