@@ -35,18 +35,24 @@ type D6LiveCertCase struct {
 }
 
 type D6FreshnessCase struct {
-	Note                       string `json:"note"`
-	DeltaHoldRounds            uint64 `json:"delta_hold_rounds"`
-	DeltaEvRounds              uint64 `json:"delta_ev_rounds"`
-	MinRoundPeriodSeconds      uint64 `json:"min_round_period_seconds"`
-	ChurnMarginSeconds         uint64 `json:"churn_margin_seconds"`
-	AcquireLatencySeconds      uint64 `json:"acquire_latency_seconds"`
-	MinRealTimeProtection      uint64 `json:"min_real_time_protection_seconds"`
-	MaxCheckpointStaleness     uint64 `json:"max_checkpoint_staleness_seconds"`
-	StrictlyLessThanProtection bool   `json:"staleness_strictly_less_than_protection"`
-	PolicyValid                bool   `json:"policy_valid"`
-	EnforcedMinRoundPeriod     uint64 `json:"enforced_min_round_period_seconds"`
-	SubFloorPeriodRejected     bool   `json:"policy_below_enforced_floor_rejected"`
+	Note                         string `json:"note"`
+	DeltaHoldRounds              uint64 `json:"delta_hold_rounds"`
+	DeltaEvRounds                uint64 `json:"delta_ev_rounds"`
+	MinRoundPeriodSeconds        uint64 `json:"min_round_period_seconds"`
+	ChurnMarginSeconds           uint64 `json:"churn_margin_seconds"`
+	AcquireLatencySeconds        uint64 `json:"acquire_latency_seconds"`
+	EnforcedRealTimeFloorSeconds uint64 `json:"enforced_real_time_floor_seconds"`
+	RoundBasedAdvisorySeconds    uint64 `json:"round_based_advisory_seconds"`
+	MinRealTimeProtection        uint64 `json:"min_real_time_protection_seconds"`
+	MaxCheckpointStaleness       uint64 `json:"max_checkpoint_staleness_seconds"`
+	StrictlyLessThanProtection   bool   `json:"staleness_strictly_less_than_protection"`
+	PolicySupported              bool   `json:"policy_supported_by_enforced_floor"`
+	PolicyValid                  bool   `json:"policy_valid"`
+	RoundsOnlyPolicyUnsupported  bool   `json:"rounds_only_policy_reported_unsupported"`
+	SubMinRoundEstimateRejected  bool   `json:"sub_physical_minimum_round_estimate_rejected"`
+	OverMaxRoundEstimateRejected bool   `json:"arbitrarily_large_round_estimate_rejected"`
+	PhysicalMinRoundSeconds      uint64 `json:"physical_min_round_seconds"`
+	MaxObservedRoundSeconds      uint64 `json:"max_observed_round_seconds"`
 }
 
 type D6WindowsCase struct {
@@ -155,26 +161,40 @@ func BuildD6Vectors() D6VectorSet {
 		})
 	}
 
-	// --- checkpoint freshness policy (derived) -----------------------
-	fp := FreshnessPolicy{
+	// --- checkpoint freshness policy --------------------------------
+	// A round-count-only policy is UNSUPPORTED: consensus does not
+	// guarantee a minimum successful-round duration, so no safety limit
+	// follows from Δ_hold rounds × a period.
+	roundsOnly := FreshnessPolicy{
 		DeltaHoldRounds: 20_000, DeltaEvRounds: 8_000,
 		MinRoundPeriodSeconds: 6, ChurnMarginSeconds: 3_600, AcquireLatencySeconds: 1_800,
 	}
-	subFloor := fp
-	subFloor.MinRoundPeriodSeconds = ConsensusMinRoundPeriodSeconds - 1 // below the enforced floor
+	// The safety limit comes only from an enforced wall-clock floor.
+	fp := roundsOnly
+	fp.EnforcedRealTimeFloorSeconds = 100_000
+	tooFast := fp
+	tooFast.MinRoundPeriodSeconds = ConsensusMinRoundPeriodSeconds - 1
+	tooSlow := fp
+	tooSlow.MinRoundPeriodSeconds = MaxObservedRoundPeriodSeconds + 1
 	vs.Freshness = D6FreshnessCase{
-		Note:                       "Max checkpoint staleness = (Δ_hold - Δ_ev) real seconds - churn margin - acquisition latency, and strictly < the min real-time protection. The per-round floor must be >= ConsensusMinRoundPeriodSeconds (a protocol-enforced minimum, not a tuning knob); a policy below it is rejected. A deployment may raise MinRoundPeriodSeconds above the floor for slower observed pacing.",
-		DeltaHoldRounds:            fp.DeltaHoldRounds,
-		DeltaEvRounds:              fp.DeltaEvRounds,
-		MinRoundPeriodSeconds:      fp.MinRoundPeriodSeconds,
-		ChurnMarginSeconds:         fp.ChurnMarginSeconds,
-		AcquireLatencySeconds:      fp.AcquireLatencySeconds,
-		MinRealTimeProtection:      fp.MinRealTimeProtectionSeconds(),
-		MaxCheckpointStaleness:     fp.MaxCheckpointStalenessSeconds(),
-		StrictlyLessThanProtection: fp.MaxCheckpointStalenessSeconds() < fp.MinRealTimeProtectionSeconds(),
-		PolicyValid:                fp.Valid(),
-		EnforcedMinRoundPeriod:     ConsensusMinRoundPeriodSeconds,
-		SubFloorPeriodRejected:     !subFloor.Valid(),
+		Note:                         "The round-count arithmetic (Δ_hold rounds × a per-round estimate) is ADVISORY ONLY — Pacemaker.AdvanceRoundQC advances immediately on a QC, so consensus guarantees no minimum successful-round duration. A policy with no EnforcedRealTimeFloorSeconds is Unsupported. The staleness limit is derived from that enforced wall-clock floor, minus acquisition latency, strictly less than the floor. The advisory per-round estimate must be a conservative lower bound: in [ConsensusMinRoundPeriodSeconds, MaxObservedRoundPeriodSeconds] — a sub-minimum value or an arbitrarily large one is rejected.",
+		DeltaHoldRounds:              fp.DeltaHoldRounds,
+		DeltaEvRounds:                fp.DeltaEvRounds,
+		MinRoundPeriodSeconds:        fp.MinRoundPeriodSeconds,
+		ChurnMarginSeconds:           fp.ChurnMarginSeconds,
+		AcquireLatencySeconds:        fp.AcquireLatencySeconds,
+		EnforcedRealTimeFloorSeconds: fp.EnforcedRealTimeFloorSeconds,
+		RoundBasedAdvisorySeconds:    fp.RoundBasedAdvisorySeconds(),
+		MinRealTimeProtection:        fp.MinRealTimeProtectionSeconds(),
+		MaxCheckpointStaleness:       fp.MaxCheckpointStalenessSeconds(),
+		StrictlyLessThanProtection:   fp.MaxCheckpointStalenessSeconds() < fp.MinRealTimeProtectionSeconds(),
+		PolicySupported:              fp.Supported(),
+		PolicyValid:                  fp.Valid(),
+		RoundsOnlyPolicyUnsupported:  !roundsOnly.Supported() && !roundsOnly.Valid(),
+		SubMinRoundEstimateRejected:  !tooFast.Valid(),
+		OverMaxRoundEstimateRejected: !tooSlow.Valid(),
+		PhysicalMinRoundSeconds:      ConsensusMinRoundPeriodSeconds,
+		MaxObservedRoundSeconds:      MaxObservedRoundPeriodSeconds,
 	}
 
 	// --- window nesting + key retention ----------------------------
@@ -326,13 +346,42 @@ func BuildD6Vectors() D6VectorSet {
 	weakSeal := pbAnchor
 	weakSeal.Seal.Signatures = SignAnchorSeal(pbStmt, []string{"root-e"})
 	pbWeak.LiveAnchor = &weakSeal
+
+	// The verifier's own authenticated trust anchor — assignment/epoch/id
+	// come from here, never from the bundle.
+	pbFresh := FreshnessPolicy{DeltaHoldRounds: 20_000, DeltaEvRounds: 8_000, MinRoundPeriodSeconds: 6,
+		ChurnMarginSeconds: 3_600, AcquireLatencySeconds: 1_800, EnforcedRealTimeFloorSeconds: 100_000}
+	pbTrust := VerifierTrustAnchor{Network: 1, ChainContext: []byte("ctx"), Epoch: anchorEpoch, BodyIdentity: anchorAssignmentID,
+		Weights: ws, Freshness: pbFresh, CheckpointAgeSeconds: 10}
+
+	// A bundle carrying its own one-member attacker assignment + attacker
+	// signature, against an unrelated trusted checkpoint.
+	attWs := WeightSet{d6Member("pb-attacker", 1)}
+	attSub := sha256Bytes([]byte("pb-attacker-subject"))
+	attRoot := hashNode(shardAnchorLeaf(7, "0", cfg0, hashNode(attSub, zero)), zero)
+	attStmt := AnchorSealStatement(attRoot, anchorEpoch, anchorAssignmentID) // even copying the honest id
+	attAnchor := AnchorBundle{
+		Seal:       AnchorSeal{RootStateRoot: attRoot, Epoch: anchorEpoch, AssignmentID: anchorAssignmentID, Weights: attWs, Signatures: SignAnchorSeal(attStmt, []string{"pb-attacker"})},
+		ShardPaths: []ShardAnchorPath{{PartitionID: 7, ShardID: "0", ConfigHash: cfg0, ShardStateRoot: hashNode(attSub, zero), Path: []PathStep{{Sibling: zero, Left: false}}}},
+	}
+	attLeaf := AnchoredLeaf{PartitionID: 7, ShardID: "0", LeafHash: attSub, Path: []PathStep{{Sibling: zero, Left: false}}}
+	pbForged := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: attSub, Mode: AuthLiveCertificate, LiveAnchor: &attAnchor, LiveLeaf: &attLeaf, Receipt: []byte("r")}
+
+	pbStale := pbGood
+	staleTrust := pbTrust
+	staleTrust.CheckpointAgeSeconds = pbFresh.MaxCheckpointStalenessSeconds() + 1
+
 	vs.ProofBundles = []D6ProofBundleCase{
-		{Name: "live_with_verifying_anchor", Mode: "live_certificate", CarriesEvidence: pbGood.CarriesEvidence(), OfflineVerifies: pbGood.OfflineVerify(nil),
-			Note: "carries a certified seal + shard path proving the subject; verifies offline"},
-		{Name: "live_receipt_only_no_certificate_proof", Mode: "live_certificate", CarriesEvidence: pbNaked.CarriesEvidence(), OfflineVerifies: pbNaked.OfflineVerify(nil),
+		{Name: "live_with_verifying_anchor", Mode: "live_certificate", CarriesEvidence: pbGood.CarriesEvidence(), OfflineVerifies: pbGood.OfflineVerify(pbTrust),
+			Note: "carries a certified seal + shard path proving the subject; verifies offline against the verifier's own trust anchor"},
+		{Name: "live_receipt_only_no_certificate_proof", Mode: "live_certificate", CarriesEvidence: pbNaked.CarriesEvidence(), OfflineVerifies: pbNaked.OfflineVerify(pbTrust),
 			Note: "non-empty context/subject/receipt but no anchor evidence — neither structurally complete nor offline-verifiable"},
-		{Name: "live_anchor_below_threshold", Mode: "live_certificate", CarriesEvidence: pbWeak.CarriesEvidence(), OfflineVerifies: pbWeak.OfflineVerify(nil),
+		{Name: "live_anchor_below_threshold", Mode: "live_certificate", CarriesEvidence: pbWeak.CarriesEvidence(), OfflineVerifies: pbWeak.OfflineVerify(pbTrust),
 			Note: "structurally complete but the seal is below the derived quorum — offline verification fails"},
+		{Name: "forged_self_supplied_assignment", Mode: "live_certificate", CarriesEvidence: pbForged.CarriesEvidence(), OfflineVerifies: pbForged.OfflineVerify(pbTrust),
+			Note: "a fresh one-member attacker assignment with a valid attacker signature (even copying the honest AssignmentID) does NOT verify: OfflineVerify re-checks against the trust anchor's Weights, not the bundle's"},
+		{Name: "stale_checkpoint_policy", Mode: "live_certificate", CarriesEvidence: pbStale.CarriesEvidence(), OfflineVerifies: pbStale.OfflineVerify(staleTrust),
+			Note: "the verifier's checkpoint is older than the freshness limit — no safety claim, verification fails"},
 	}
 
 	// --- lock witness refresh (real proofs) ------------------------

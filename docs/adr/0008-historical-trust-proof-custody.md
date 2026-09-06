@@ -26,10 +26,30 @@ Revised again after the second review (#82):
 - **`ProofBundle` separates structural availability from verification** —
   `CarriesEvidence()` (has the pieces) vs `OfflineVerify()` (actually checks the
   seal + path + subject). A live bundle with only a receipt no longer passes.
-- **Checkpoint freshness rests on an enforced floor** —
-  `ConsensusMinRoundPeriodSeconds` is the protocol-enforced minimum real time a
-  certified root round can take; `FreshnessPolicy.Valid()` rejects any per-round
-  floor below it.
+- **Checkpoint freshness** — `ConsensusMinRoundPeriodSeconds` bracketed the
+  per-round estimate.
+
+Revised again after the third review (#82):
+
+- **Offline verification no longer trusts the assignment supplied by the proof.**
+  `OfflineVerify` takes a `VerifierTrustAnchor` — the verifier's own
+  authenticated `ChainContext`, `Epoch`, trust-base `BodyIdentity`, `Weights`
+  and `FreshnessPolicy`. The bundle's carried assignment/epoch/id are untrusted:
+  they must match the anchor, and the seal is re-checked against **`t.Weights`**,
+  so an attacker's one-member assignment with a valid attacker signature (even
+  copying the honest `AssignmentID`) does not verify.
+- **The freshness "floor" is honest about what consensus guarantees.**
+  `Pacemaker.AdvanceRoundQC` advances immediately on a QC, so there is no
+  enforced minimum successful-round duration. The round-count arithmetic is now
+  `RoundBasedAdvisorySeconds()` (advisory only). The safety limit is derived
+  solely from `EnforcedRealTimeFloorSeconds` — a real wall-clock guarantee
+  supplied as an authenticated input; `FreshnessPolicy.Supported()`/`Valid()`
+  are false without one. `MinRoundPeriodSeconds` must be in
+  `[ConsensusMinRoundPeriodSeconds, MaxObservedRoundPeriodSeconds]` — a
+  conservative floor is a lower bound, so an arbitrarily large value is rejected
+  too.
+- **`shardAnchorLeaf` is length-delimited** — moving a byte across the
+  `shardID`/`configHash` boundary no longer preserves the hash.
 
 Freeze once re-reviewed by a cryptography reviewer
 and a custody-accounting reviewer, neither the author. Depends on ADR
@@ -83,14 +103,17 @@ Adopt the profile in
 
 ## Deliverables
 
-- `evmroot/d6checkpoint.go`, `d6proof.go`, `d6custody.go`, `d6seal.go`
-  (deterministic real-key seal fixtures).
-- `evmroot/testdata/d6-vectors.json` — checkpoint/windows (incl. the enforced
-  per-round floor), historical-block authentication (constant-size false, header
-  count grows), multi-shard anchor (verifying case + relabel / unsigned / forged
-  / substituted-root / wrong-epoch negatives), proof-bundle offline verification,
-  lock-witness refresh, supply/backing, custody walkthrough, token profile,
-  redemption relation.
+- `evmroot/d6checkpoint.go` (`FreshnessPolicy` with `EnforcedRealTimeFloorSeconds`
+  / `Supported()` / advisory round arithmetic), `d6proof.go`
+  (`VerifierTrustAnchor`, length-delimited `shardAnchorLeaf`), `d6custody.go`,
+  `d6seal.go` (deterministic real-key seal fixtures).
+- `evmroot/testdata/d6-vectors.json` — checkpoint/windows (enforced-floor vs
+  advisory, unsupported / too-fast / too-slow rejections), historical-block
+  authentication (constant-size false, header count grows), multi-shard anchor
+  (verifying case + relabel / unsigned / forged / substituted-root / wrong-epoch
+  negatives), proof-bundle offline verification (forged self-supplied
+  assignment, stale checkpoint), lock-witness refresh, supply/backing, custody
+  walkthrough, token profile, redemption relation.
 - `evmroot/cmd/d6vectors` + `TestD6_VectorsMatchGolden`.
 
 ## Consequences
@@ -122,3 +145,12 @@ Adopt the profile in
 - **Let `SelfContained` mean "has non-empty fields".** Rejected: it conflated
   structural availability with a successful offline check. Split into
   `CarriesEvidence` and `OfflineVerify`.
+- **Verify the live seal against the assignment carried in the proof bundle.**
+  Rejected on the third review: an attacker supplies their own one-member
+  assignment and signature. `OfflineVerify` derives the assignment from the
+  verifier's own authenticated `VerifierTrustAnchor` and re-checks against it.
+- **Derive a real-time protection guarantee from `Δ_hold` rounds × a per-round
+  period.** Rejected: consensus advances immediately on a QC and guarantees no
+  minimum successful-round duration; a larger assumed period only inflates the
+  number. The round arithmetic is advisory; the safety limit comes only from an
+  enforced wall-clock floor, and the policy is reported unsupported without one.

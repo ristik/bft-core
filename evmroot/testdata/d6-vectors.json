@@ -54,18 +54,24 @@
     }
   ],
   "checkpoint_freshness_policy": {
-    "note": "Max checkpoint staleness = (Δ_hold - Δ_ev) real seconds - churn margin - acquisition latency, and strictly \u003c the min real-time protection. The per-round floor must be \u003e= ConsensusMinRoundPeriodSeconds (a protocol-enforced minimum, not a tuning knob); a policy below it is rejected. A deployment may raise MinRoundPeriodSeconds above the floor for slower observed pacing.",
+    "note": "The round-count arithmetic (Δ_hold rounds × a per-round estimate) is ADVISORY ONLY — Pacemaker.AdvanceRoundQC advances immediately on a QC, so consensus guarantees no minimum successful-round duration. A policy with no EnforcedRealTimeFloorSeconds is Unsupported. The staleness limit is derived from that enforced wall-clock floor, minus acquisition latency, strictly less than the floor. The advisory per-round estimate must be a conservative lower bound: in [ConsensusMinRoundPeriodSeconds, MaxObservedRoundPeriodSeconds] — a sub-minimum value or an arbitrarily large one is rejected.",
     "delta_hold_rounds": 20000,
     "delta_ev_rounds": 8000,
     "min_round_period_seconds": 6,
     "churn_margin_seconds": 3600,
     "acquire_latency_seconds": 1800,
-    "min_real_time_protection_seconds": 68400,
-    "max_checkpoint_staleness_seconds": 66600,
+    "enforced_real_time_floor_seconds": 100000,
+    "round_based_advisory_seconds": 68400,
+    "min_real_time_protection_seconds": 100000,
+    "max_checkpoint_staleness_seconds": 98200,
     "staleness_strictly_less_than_protection": true,
+    "policy_supported_by_enforced_floor": true,
     "policy_valid": true,
-    "enforced_min_round_period_seconds": 2,
-    "policy_below_enforced_floor_rejected": true
+    "rounds_only_policy_reported_unsupported": true,
+    "sub_physical_minimum_round_estimate_rejected": true,
+    "arbitrarily_large_round_estimate_rejected": true,
+    "physical_min_round_seconds": 2,
+    "max_observed_round_seconds": 120
   },
   "window_nesting_and_key_retention": {
     "w_cert": 50,
@@ -195,7 +201,7 @@
       "mode": "live_certificate",
       "carries_evidence_structurally": true,
       "verifies_offline": true,
-      "note": "carries a certified seal + shard path proving the subject; verifies offline"
+      "note": "carries a certified seal + shard path proving the subject; verifies offline against the verifier's own trust anchor"
     },
     {
       "name": "live_receipt_only_no_certificate_proof",
@@ -210,6 +216,20 @@
       "carries_evidence_structurally": true,
       "verifies_offline": false,
       "note": "structurally complete but the seal is below the derived quorum — offline verification fails"
+    },
+    {
+      "name": "forged_self_supplied_assignment",
+      "mode": "live_certificate",
+      "carries_evidence_structurally": true,
+      "verifies_offline": false,
+      "note": "a fresh one-member attacker assignment with a valid attacker signature (even copying the honest AssignmentID) does NOT verify: OfflineVerify re-checks against the trust anchor's Weights, not the bundle's"
+    },
+    {
+      "name": "stale_checkpoint_policy",
+      "mode": "live_certificate",
+      "carries_evidence_structurally": true,
+      "verifies_offline": false,
+      "note": "the verifier's checkpoint is older than the freshness limit — no safety claim, verification fails"
     }
   ],
   "lock_witness_refresh": [

@@ -37,33 +37,52 @@ func TestD6_LiveCertMeasuredFromImportedOrigin(t *testing.T) {
 }
 
 func TestD6_CheckpointFreshnessDerivedAndStrict(t *testing.T) {
-	fp := FreshnessPolicy{DeltaHoldRounds: 20_000, DeltaEvRounds: 8_000, MinRoundPeriodSeconds: 6, ChurnMarginSeconds: 3_600, AcquireLatencySeconds: 1_800}
+	// A policy WITHOUT an enforced real-time floor is Unsupported — the
+	// round-count arithmetic on its own asserts nothing.
+	roundsOnly := FreshnessPolicy{DeltaHoldRounds: 20_000, DeltaEvRounds: 8_000, MinRoundPeriodSeconds: 6, ChurnMarginSeconds: 3_600, AcquireLatencySeconds: 1_800}
+	if roundsOnly.Supported() || roundsOnly.Valid() {
+		t.Fatal("a policy with no enforced real-time floor was treated as supported/valid")
+	}
+	if roundsOnly.MaxCheckpointStalenessSeconds() != 0 || roundsOnly.MinRealTimeProtectionSeconds() != 0 {
+		t.Fatal("an unsupported policy produced a nonzero staleness/protection")
+	}
+
+	// With an enforced wall-clock floor the limit is derived from THAT.
+	fp := roundsOnly
+	fp.EnforcedRealTimeFloorSeconds = 100_000
+	if !fp.Supported() || !fp.Valid() {
+		t.Fatalf("a supported, well-formed policy was rejected: valid=%v", fp.Valid())
+	}
 	prot := fp.MinRealTimeProtectionSeconds()
 	stale := fp.MaxCheckpointStalenessSeconds()
-	if prot == 0 || stale == 0 {
-		t.Fatalf("degenerate policy: prot=%d stale=%d", prot, stale)
+	if prot != 100_000 || stale == 0 || stale >= prot {
+		t.Fatalf("staleness limit %d not strictly < enforced protection %d", stale, prot)
 	}
-	if stale >= prot {
-		t.Fatalf("staleness limit %d is not strictly less than protection %d", stale, prot)
+
+	// A per-round estimate BELOW the physical minimum is not a conservative
+	// lower bound — rejected.
+	tooFast := fp
+	tooFast.MinRoundPeriodSeconds = ConsensusMinRoundPeriodSeconds - 1
+	if tooFast.Valid() {
+		t.Fatal("a sub-physical-minimum per-round estimate was accepted")
 	}
-	if !fp.Valid() {
-		t.Fatal("a well-formed policy was rejected")
+	// An arbitrarily LARGE per-round estimate inflates the advisory window
+	// without any stronger guarantee — also rejected.
+	tooSlow := fp
+	tooSlow.MinRoundPeriodSeconds = MaxObservedRoundPeriodSeconds + 1
+	if tooSlow.Valid() {
+		t.Fatalf("a per-round estimate %d > MaxObserved %d was accepted",
+			tooSlow.MinRoundPeriodSeconds, MaxObservedRoundPeriodSeconds)
 	}
-	// A too-short protection window (Δ_hold barely exceeds Δ_ev): no safe policy.
-	bad := FreshnessPolicy{DeltaHoldRounds: 8_100, DeltaEvRounds: 8_000, MinRoundPeriodSeconds: 6, ChurnMarginSeconds: 3_600, AcquireLatencySeconds: 1_800}
-	if bad.Valid() {
-		t.Fatal("an unsafe pacing/protection combination produced a valid policy")
+	// The advisory number and the enforced number are reported separately.
+	if fp.RoundBasedAdvisorySeconds() == 0 {
+		t.Fatal("advisory round-based number went to zero for a sane policy")
 	}
-	// A per-round floor BELOW the protocol-enforced minimum is not a
-	// guarantee, however large the derived numbers look.
-	subFloor := fp
-	subFloor.MinRoundPeriodSeconds = ConsensusMinRoundPeriodSeconds - 1
-	if subFloor.Valid() {
-		t.Fatalf("a policy with MinRoundPeriodSeconds %d < enforced floor %d was accepted",
-			subFloor.MinRoundPeriodSeconds, ConsensusMinRoundPeriodSeconds)
-	}
-	if !fp.Valid() {
-		t.Fatal("the reference policy (period >= enforced floor) was rejected")
+	// Acquisition latency with no headroom under the enforced floor: no safe limit.
+	noHeadroom := fp
+	noHeadroom.AcquireLatencySeconds = fp.EnforcedRealTimeFloorSeconds
+	if noHeadroom.Valid() {
+		t.Fatal("a policy with no acquisition headroom was accepted")
 	}
 }
 
@@ -212,15 +231,51 @@ func TestD6_ProofBundleOfflineVerification(t *testing.T) {
 	}
 	leaf := AnchoredLeaf{PartitionID: 7, ShardID: "0", LeafHash: subject, Path: []PathStep{{Sibling: z, Left: false}}}
 
+	// The verifier's OWN authenticated trust anchor — never taken from the
+	// bundle. Assignment, epoch and body identity come from here.
+	fresh := FreshnessPolicy{DeltaHoldRounds: 20_000, DeltaEvRounds: 8_000, MinRoundPeriodSeconds: 6,
+		ChurnMarginSeconds: 3_600, AcquireLatencySeconds: 1_800, EnforcedRealTimeFloorSeconds: 100_000}
+	trust := VerifierTrustAnchor{Network: 1, ChainContext: []byte("ctx"), Epoch: epoch, BodyIdentity: aid,
+		Weights: ws, Freshness: fresh, CheckpointAgeSeconds: 10}
+
 	good := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: subject, Mode: AuthLiveCertificate,
 		LiveAnchor: &anchor, LiveLeaf: &leaf, Receipt: []byte("receipt")}
-	if !good.CarriesEvidence() || !good.OfflineVerify(nil) || !good.SelfContained(nil) {
-		t.Fatal("a live bundle carrying a verifying anchor did not verify offline")
+	if !good.CarriesEvidence() || !good.OfflineVerify(trust) || !good.SelfContained(trust) {
+		t.Fatal("a live bundle carrying a verifying anchor did not verify offline against the trust anchor")
 	}
-	// Non-empty context/subject/receipt but NO anchor evidence: must not
-	// pass — this is the finding.
+	// FINDING: a bundle with a fresh one-member ATTACKER assignment,
+	// attacker-generated root/paths and a valid ATTACKER signature must NOT
+	// verify against an unrelated trusted checkpoint.
+	attWs := WeightSet{d6Member("attacker", 1)}
+	attSubject := sha256Bytes([]byte("attacker-subject"))
+	attSRoot := hashNode(attSubject, z)
+	attBL := shardAnchorLeaf(7, "0", cfg, attSRoot)
+	attRoot := hashNode(attBL, z)
+	attAID := sha256Bytes([]byte("attacker-assignment"))
+	attStmt := AnchorSealStatement(attRoot, epoch, attAID)
+	attAnchor := AnchorBundle{
+		Seal:       AnchorSeal{RootStateRoot: attRoot, Epoch: epoch, AssignmentID: attAID, Weights: attWs, Signatures: SignAnchorSeal(attStmt, []string{"attacker"})},
+		ShardPaths: []ShardAnchorPath{{PartitionID: 7, ShardID: "0", ConfigHash: cfg, ShardStateRoot: attSRoot, Path: []PathStep{{Sibling: z, Left: false}}}},
+	}
+	attLeaf := AnchoredLeaf{PartitionID: 7, ShardID: "0", LeafHash: attSubject, Path: []PathStep{{Sibling: z, Left: false}}}
+	forged := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: attSubject, Mode: AuthLiveCertificate,
+		LiveAnchor: &attAnchor, LiveLeaf: &attLeaf, Receipt: []byte("receipt")}
+	if forged.OfflineVerify(trust) {
+		t.Fatal("a bundle carrying its own attacker assignment verified against an unrelated trusted checkpoint")
+	}
+	// Even if the attacker copies the honest BodyIdentity into AssignmentID,
+	// the re-check uses the honest Weights and the attacker signature fails.
+	attAnchor2 := attAnchor
+	attAnchor2.Seal.AssignmentID = aid
+	forged2 := forged
+	forged2.LiveAnchor = &attAnchor2
+	if forged2.OfflineVerify(trust) {
+		t.Fatal("copying the honest AssignmentID let an attacker-signed seal verify")
+	}
+
+	// Non-empty context/subject/receipt but NO anchor evidence: must not pass.
 	naked := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: subject, Mode: AuthLiveCertificate, Receipt: []byte("receipt")}
-	if naked.CarriesEvidence() || naked.OfflineVerify(nil) {
+	if naked.CarriesEvidence() || naked.OfflineVerify(trust) {
 		t.Fatal("a live bundle with only a receipt and no certificate proof passed")
 	}
 	// Anchor present but seal below threshold: carries evidence, does not verify.
@@ -228,19 +283,49 @@ func TestD6_ProofBundleOfflineVerification(t *testing.T) {
 	weakAnchor.Seal.Signatures = SignAnchorSeal(stmt, []string{"root-e"})
 	weak := good
 	weak.LiveAnchor = &weakAnchor
-	if !weak.CarriesEvidence() {
-		t.Fatal("bundle should still be structurally complete")
-	}
-	if weak.OfflineVerify(nil) {
+	if !weak.CarriesEvidence() || weak.OfflineVerify(trust) {
 		t.Fatal("a bundle whose seal is below threshold verified offline")
+	}
+	// Wrong chain context.
+	wrongCtx := good
+	wrongCtx.ChainContext = []byte("other-chain")
+	if wrongCtx.OfflineVerify(trust) {
+		t.Fatal("a bundle from a different chain context verified")
+	}
+	// Wrong epoch relative to the trust anchor.
+	wrongEpochTrust := trust
+	wrongEpochTrust.Epoch = 9
+	if good.OfflineVerify(wrongEpochTrust) {
+		t.Fatal("a bundle verified against a trust anchor for a different epoch")
+	}
+	// Stale / unsupported checkpoint policy.
+	staleTrust := trust
+	staleTrust.CheckpointAgeSeconds = fresh.MaxCheckpointStalenessSeconds() + 1
+	if good.OfflineVerify(staleTrust) {
+		t.Fatal("a bundle verified against a stale checkpoint")
+	}
+	unsupportedTrust := trust
+	unsupportedTrust.Freshness.EnforcedRealTimeFloorSeconds = 0
+	if good.OfflineVerify(unsupportedTrust) {
+		t.Fatal("a bundle verified against an unsupported freshness policy")
 	}
 	// Leaf that is not the subject.
 	otherLeaf := leaf
 	otherLeaf.LeafHash = sha256Bytes([]byte("not-subject"))
 	mismatch := good
 	mismatch.LiveLeaf = &otherLeaf
-	if mismatch.OfflineVerify(nil) {
+	if mismatch.OfflineVerify(trust) {
 		t.Fatal("a bundle whose anchored leaf is not the subject verified")
+	}
+}
+
+func TestD6_ShardAnchorLeafFieldBoundaries(t *testing.T) {
+	// Moving a byte across the shardID/configHash boundary must change the
+	// hash — length-delimited encoding, not bare concatenation.
+	a := shardAnchorLeaf(7, "0aa", []byte("bb"), rep(1, 32))
+	b := shardAnchorLeaf(7, "0a", []byte("abb"), rep(1, 32))
+	if bytes.Equal(a, b) {
+		t.Fatal("shardAnchorLeaf is not injective across the shardID/configHash boundary")
 	}
 }
 

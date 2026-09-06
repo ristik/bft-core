@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"hash"
 
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 )
@@ -188,20 +189,33 @@ func (s AnchorSeal) VerifySeal() (weight, threshold uint64, ok bool) {
 }
 
 // shardAnchorLeaf binds a shard path's certified identity INTO the leaf
-// that folds up to r*: SHA-256("UNICITY_SHARD_ANCHOR_LEAF" ‖ be64(pid) ‖
-// shardID ‖ configHash ‖ shardStateRoot). Relabelling a path's partition,
-// shard or config changes this leaf, so it no longer recomputes to the
-// certified r*.
+// that folds up to r*: SHA-256("UNICITY_SHARD_ANCHOR_LEAF" ‖ len‖be64(pid)
+// ‖ len‖shardID ‖ len‖configHash ‖ len‖shardStateRoot). Every field is
+// length-delimited, so relabelling a path's partition/shard/config — or
+// shifting a byte across a field boundary — changes this leaf and it no
+// longer recomputes to the certified r*.
 func shardAnchorLeaf(pid uint64, sid string, configHash, shardStateRoot []byte) []byte {
-	var nb [8]byte
-	binary.BigEndian.PutUint64(nb[:], pid)
 	h := sha256.New()
 	h.Write([]byte("UNICITY_SHARD_ANCHOR_LEAF"))
-	h.Write(nb[:])
-	h.Write([]byte(sid))
-	h.Write(configHash)
-	h.Write(shardStateRoot)
+	// Every field is length-delimited (be64 length prefix), so moving bytes
+	// between shardID and configHash — or any other field boundary — changes
+	// the hash. A bare concatenation of variable-length fields would not.
+	writeLenField(h, u64be(pid))
+	writeLenField(h, []byte(sid))
+	writeLenField(h, configHash)
+	writeLenField(h, shardStateRoot)
 	return h.Sum(nil)
+}
+
+func u64be(v uint64) []byte {
+	var b [8]byte
+	binary.BigEndian.PutUint64(b[:], v)
+	return b[:]
+}
+
+func writeLenField(h hash.Hash, b []byte) {
+	h.Write(u64be(uint64(len(b))))
+	h.Write(b)
 }
 
 // ShardAnchorPath authenticates one shard's state root against r*: the
@@ -327,31 +341,73 @@ func (b ProofBundle) CarriesEvidence() bool {
 	}
 }
 
-// OfflineVerify actually verifies the bundle against a recent trusted
-// checkpoint. Live mode: the carried anchor's seal verifies, the leaf
-// recomputes under its shard path to r*, and the leaf is the subject.
-// Ancestry mode: AuthenticateOldBlock walks the header chain to
-// trustedHeadHash. A bundle that only "carries evidence" but does not
-// verify returns false here.
-func (b ProofBundle) OfflineVerify(trustedHeadHash []byte) bool {
+// VerifierTrustAnchor is the EXTERNAL authenticated state a verifier holds
+// from its own checkpoint / trust store. OfflineVerify derives the seal
+// assignment from THIS, never from the proof bundle. A bundle can carry a
+// trust-base body as evidence, but it is untrusted until its chain is
+// authenticated back to something in here.
+type VerifierTrustAnchor struct {
+	Network              uint64
+	ChainContext         []byte    // the authenticated chain/config context this verifier trusts
+	Epoch                uint64    // the epoch whose assignment is active at the subject's round
+	BodyIdentity         []byte    // identity of the authenticated trust-base body; the seal's AssignmentID must equal this
+	Weights              WeightSet // that body's members (real keys) — the assignment used to check the seal
+	TrustedHeadHash      []byte    // for ancestry mode: a recently authenticated EVM head
+	Freshness            FreshnessPolicy
+	CheckpointAgeSeconds uint64 // how old the verifier's own checkpoint is right now
+}
+
+func (t VerifierTrustAnchor) fresh() bool {
+	if !t.Freshness.Valid() {
+		return false
+	}
+	return t.CheckpointAgeSeconds <= t.Freshness.MaxCheckpointStalenessSeconds()
+}
+
+// OfflineVerify verifies the bundle against the verifier's OWN authenticated
+// trust anchor. Live mode: the bundle's carried assignment/epoch/id are
+// UNTRUSTED — the seal's Epoch and AssignmentID must match the anchor, and
+// the seal is re-checked against the ANCHOR's Weights (the carried
+// assignment is discarded), so an attacker-supplied one-member assignment
+// with a valid attacker signature does not verify. Ancestry mode:
+// AuthenticateOldBlock walks the header chain to the anchor's trusted head.
+// A bundle that only "carries evidence" but does not verify returns false.
+func (b ProofBundle) OfflineVerify(t VerifierTrustAnchor) bool {
 	if !b.CarriesEvidence() {
 		return false
+	}
+	if !t.fresh() {
+		return false // stale / unsupported checkpoint policy — cannot make a safety claim
+	}
+	if len(t.ChainContext) == 0 || !bytes.Equal(b.ChainContext, t.ChainContext) {
+		return false // subject is not in the chain/config context this verifier trusts
 	}
 	switch b.Mode {
 	case AuthLiveCertificate:
 		if !bytes.Equal(b.LiveLeaf.LeafHash, b.SubjectHash) {
 			return false
 		}
-		return VerifyAnchoredHistory(*b.LiveAnchor, []AnchoredLeaf{*b.LiveLeaf}).Verified
+		seal := b.LiveAnchor.Seal
+		if seal.Epoch != t.Epoch {
+			return false
+		}
+		if len(seal.AssignmentID) == 0 || !bytes.Equal(seal.AssignmentID, t.BodyIdentity) {
+			return false
+		}
+		// Re-verify against the ANCHOR's assignment, not the carried one.
+		authAnchor := *b.LiveAnchor
+		authAnchor.Seal.Weights = t.Weights
+		return VerifyAnchoredHistory(authAnchor, []AnchoredLeaf{*b.LiveLeaf}).Verified
 	case AuthCheckpointAncestry:
-		return AuthenticateOldBlock(b.SubjectHash, b.HeaderChain, trustedHeadHash).Authenticated
+		return AuthenticateOldBlock(b.SubjectHash, b.HeaderChain, t.TrustedHeadHash).Authenticated
 	default:
 		return false
 	}
 }
 
-// SelfContained is retained as the offline-verifiable predicate: it now
-// means "verifies offline", not merely "has non-empty fields".
-func (b ProofBundle) SelfContained(trustedHeadHash []byte) bool {
-	return b.OfflineVerify(trustedHeadHash)
+// SelfContained is retained as the offline-verifiable predicate: it means
+// "verifies offline against the verifier's own authenticated trust anchor",
+// not merely "has non-empty fields".
+func (b ProofBundle) SelfContained(t VerifierTrustAnchor) bool {
+	return b.OfflineVerify(t)
 }
