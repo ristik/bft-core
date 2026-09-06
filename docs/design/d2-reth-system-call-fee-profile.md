@@ -112,6 +112,15 @@ record is rejected.
     `VerifiedCert` (from the carried UC via the real verifier) and its own
     `ExpectedTransitions`, then re-runs the function. This function is the
     *check*, never the *source of trust*.
+
+  **Implementation boundary**: `VerifiedCert` and `ExpectedTransitions` are
+  **verifier-owned inputs**, never trusted fields deserialized straight from a
+  peer companion. The model's `TestD2_CertificateBoundaryFixtures` establishes
+  the seal-quorum leg of the mapping through bft-go-base's real
+  `UnicitySeal.Verify`; the full UC inclusion-path / `ShardConfHash` / `TRHash` /
+  committed-body-chain derivation is a **mandatory adapter integration test**
+  before F1 enables the path — the model consumes its result as a typed
+  precondition.
 - **Negative fixtures** (`import_checks`): `cert_not_verified`,
   `cert_wrong_origin`, `cert_wrong_authorized_round`, `cert_stale_root_round`,
   `witness_te_not_bound_to_trhash`, `transition_inserted_body`,
@@ -136,7 +145,8 @@ invalid **regardless of whether its Ethereum payload executes**:
 | 7 | `system_*` | the FIRST privileged operation (§1) — presence-only, no forced-outcome input |
 | 8 | `seal_finalize_missing` / `seal_registry_commitment_mismatch` | a post-forced-prefix `FinalizeStep` is present and ordered after the whole prefix; its `Committed` and the seal-registry storage value both `== SHA-256(CBOR(DerivedSealOutcomes))` — the outcomes determined **at each forced entry's turn** (§3). Checked via `eth_getProof` against `stateRoot`, not a header field |
 | 9 | `base_fee_below_floor` / `withdrawals_nonempty` / `blob_tx_present` | §4 |
-| 10 | `gas_budget` | §3 — `Work.System` includes the open step **and** the finalization step |
+| 10 | `gas_split_unreconciled` | `reconcileWork` — `Work.System == SystemCall.GasUsed + Finalize.GasUsed` (overflow-checked) and `Work.Forced == turn-rejected count * RejectedConsumptionGas` |
+| 11 | `gas_budget` | §3 — `CheckGas` on the **derived** work: combined `g_sys` cap on `open + finalize`, `g_fi` cap, ordinary capacity, `g_max` |
 
 `rootInput = []byte{0x80}` (or any blob) never reaches step 5: it is not a
 structured `RootInput`, and step 2 fails first.
@@ -186,12 +196,25 @@ base-fee target would push fees up purely because the protocol did its job.
 ```
 g_sys + g_fi + g_ordinary_capacity = g_max          (exact; g_max is the header gas limit)
 g_ordinary_capacity = g_max - g_sys - g_fi
-g_system_actual   <= g_sys        (else block invalid)
-g_forced_actual   <= g_fi
-g_ordinary_actual <= g_ordinary_capacity
+
+g_system_actual   = SystemCall.GasUsed + Finalize.GasUsed   (DERIVED; overflow-checked) <= g_sys
+g_forced_actual   = (# forced entries invalid at their turn) * RejectedConsumptionGas   <= g_fi
+g_ordinary_actual = the transaction-list cumulative gas (incl. successful forced txs)   <= g_ordinary_capacity
+header.gasUsed    = g_system_actual + g_forced_actual + g_ordinary_actual
 ```
 
-`g_fi = 0` until the forced inbox is enabled; the split still closes.
+`g_system_actual` and `g_forced_actual` are **not** taken from a caller-supplied
+`BlockWork` total: `ValidateImport` (`reconcileWork`) derives them from the two
+executed privileged steps and the turn-determined rejection set, and rejects
+(`gas_split_unreconciled`) any `Work.System` / `Work.Forced` that does not match —
+so an independently supplied total cannot hide a finalizer that exceeds the
+budget, and cannot break the `g_sys` / `g_fi` split. The combined `g_sys` cap is
+then checked against the derived `g_system_actual` (`gas_budget`). Ordinary-gas
+recovery nets out **both** `g_sys` steps:
+`RecoverOrdinaryGas(header.gasUsed, SystemCall.GasUsed + Finalize.GasUsed, g_forced_actual)`.
+
+`g_fi = 0` until the forced inbox is enabled; the split still closes, and with no
+forced prefix `Finalize.GasUsed` may be 0 (`g_system_actual = SystemCall.GasUsed`).
 
 ### EIP-1559 — exact integer arithmetic
 
@@ -296,16 +319,22 @@ config:  g_max 30_000_000   g_sys 2_000_000   g_fi 0
          g_ordinary_capacity 28_000_000   ordinary_target 14_000_000
 build:   engine_forkchoiceUpdatedWithSealV1(fc, attrs, {rootInput, transitions:[]})
          -> first system op (presence-only) opens the seal-registry slot,
-            binds rootInput; g_sys open work 1_800_000
-         -> forced prefix runs FIFO; each entry's outcome decided at its turn
-         -> FinalizeStep writes sealRegistryCommitment into seal-registry
-            contract storage (authenticated by stateRoot); g_sys finalize work
+            binds rootInput;                         g_sys OPEN work     1_780_000
+         -> forced prefix empty (g_fi 0)             g_forced_actual         0
+         -> FinalizeStep writes sealRegistryCommitment over {system}
+            into seal-registry contract storage;     g_sys FINALIZE work    20_000
          -> ordinary + successful-forced txs fill to cumulative gasUsed 15_000_000
-         header.gasUsed = 16_800_000   header.extraData = SHA-256(CBOR(rootInput))
+         g_system_actual = 1_780_000 + 20_000 = 1_800_000  (DERIVED; <= g_sys 2_000_000)
+         header.gasUsed  = 1_800_000 + 0 + 15_000_000 = 16_800_000
+         header.extraData = SHA-256(CBOR(rootInput))
          getPayloadWithSealV1 -> { payload, sealCompanion:{rootInput, witnesses, provenance:"build"} }
 import:  engine_newPayloadWithSealV1(payload, [], beaconRoot, sealCompanion)
-         steps 0-5 pass; reth re-executes -> same stateRoot/blockHash -> VALID
-replay:  recovered ordinary gas = 16_800_000 - 1_800_000 - 0 = 15_000_000
+         reconcileWork re-derives g_system_actual (open + finalize) and
+         g_forced_actual (turn-rejected count * charge); a mismatched
+         Work.System / Work.Forced is rejected (gas_split_unreconciled);
+         CheckGas enforces the g_sys cap on the DERIVED sum; reth re-executes
+         -> same stateRoot/blockHash -> VALID
+replay:  recovered ordinary gas = 16_800_000 - (1_780_000 + 20_000) - 0 = 15_000_000
          parent_base_fee 1_000_000_000
          numerator = 15_000_000 - 14_000_000 = 1_000_000
          delta = floor(1e9 * 1_000_000 / 14_000_000) / 8 = floor(71_428_571 / 8) = 8_928_571
@@ -322,7 +351,7 @@ or amends this table before D2 freezes.
 |---|---|---|---|---|---|
 | 1 | Privileged **system call** (`a_sys → a_sr`, no key/nonce, first, failure ⇒ invalid block) | a genesis pre-deploy that a normal transaction pokes each block | a normal transaction needs a funded EOA + nonce, can be reordered or censored, and cannot be *mandatory*; the authenticated root input must be un-forgeable and un-replayable | the one privileged origin; import validation predicates | `import_checks` `system_*`; `TestD2_SystemCallMustBeFirstAndValid` |
 | 2 | **`extraData` = 32-byte `SHA-256(CBOR(rootInput))`** commitment | put the root input in a standard payload attribute | V3 `PayloadAttributesV3` has no field for it and it must be in the *header* so it is covered by the block hash; witnesses do not fit in `extraData` | 32 bytes of header; the D1 encoder | D1 vectors + `TestExtraData_IndependentOracle` |
-| 3 | **`sealRegistryCommitment` in seal-registry contract storage**, written by a **post-forced-prefix `FinalizeStep`** (system op + rejection records only); successful forced txs stay ordinary | (a) synthetic receipts in `receiptsRoot`; (b) a new `sealOutcomeRoot` header field; (c) the first system call writes it | (a) changes Ethereum receipt semantics; (b) a new header field expands every client's header/import/RPC surface, needs a normative RLP position + block-hash derivation, and `extraData` does **not** cover it; (c) a prior valid forced tx changes a later entry's pre-state, so the outcome set is not knowable before the prefix runs — and a future-outcome input to the first call is contract-readable. A **contract-state value** written at finalization reuses the authenticated `stateRoot` + `eth_getProof` path — the *smallest* change; successful forced txs keep the standard receipt/log proof. | a known contract + slot; the CBOR list encoder; a `g_sys` sub-budget for the finalize step; `header.gasUsed` includes both `g_sys` steps | `seal_outcome_list` (sequential prefix); `TestD2_SealOutcomeListSeparateFromTxList`, `TestD2_ForcedPrefixOutcomesDeterminedAtTurn` |
+| 3 | **`sealRegistryCommitment` in seal-registry contract storage**, written by a **post-forced-prefix `FinalizeStep`** (system op + rejection records only); successful forced txs stay ordinary | (a) synthetic receipts in `receiptsRoot`; (b) a new `sealOutcomeRoot` header field; (c) the first system call writes it | (a) changes Ethereum receipt semantics; (b) a new header field expands every client's header/import/RPC surface, needs a normative RLP position + block-hash derivation, and `extraData` does **not** cover it; (c) a prior valid forced tx changes a later entry's pre-state, so the outcome set is not knowable before the prefix runs — and a future-outcome input to the first call is contract-readable. A **contract-state value** written at finalization reuses the authenticated `stateRoot` + `eth_getProof` path — the *smallest* change; successful forced txs keep the standard receipt/log proof. | a known contract + slot; the CBOR list encoder; a `g_sys` sub-budget for the finalize step (derived, capped against the combined `g_sys`); `header.gasUsed` includes both `g_sys` steps | `seal_outcome_list` (sequential prefix); `gas_accounting` (open + finalize split, reconciles, closes); `TestD2_SealOutcomeListSeparateFromTxList`, `TestD2_ForcedPrefixOutcomesDeterminedAtTurn`, `TestD2_FinalizerGasBoundToBudget` |
 | 4 | **Ordinary-only EIP-1559 feedback** (`g_sys`, `g_fi` excluded from the base-fee target) | feed total `gasUsed` into the London formula | protocol-mandated gas is not a demand signal; including it raises fees purely because the protocol ran | `NextBaseFee` + `RecoverOrdinaryGas` | `TestD2_BaseFeeUpdateExcludesSystemAndForcedGas`, `base_fee_arithmetic_oracle` |
 | 5 | **Positive base-fee floor** `f_base^min` as a validity rule | genesis initial base fee only | a floor that is only a genesis value can be driven to 0 by sustained under-target blocks, breaking fee-market and DoS assumptions | one comparison per block | `import_checks.base_fee_below_floor` |
 | 6 | **Three `engine_*WithSealV1` siblings** (fcU / newPayload / getPayload) | a single new method, or overload existing V3 params | build needs `{rootInput, transitions}` in the fcU→getPayload flow; import needs the full witness set in newPayload; getPayload must return the companion for dissemination — the three flows carry different data | the Engine API surface (JWT-authenticated) | capability check in `engineapi/adapter.go`; negative auth fixtures |
@@ -363,7 +392,7 @@ state, and `header.gasUsed` transparently includes the mandated `g_sys` work.
 | … including missing companion data and a forged ordinary system sender | `import_checks`: `companion_missing`, `witness_*`, `system_origin_forged`; `TestD2_MissingCompanionDataIsFatal`, `TestD2_AuthenticationBoundary`, `TestD2_SystemCallMustBeFirstAndValid` |
 | verify the real certificate, not a new signature; transition contents are authenticated | §2 "authentication lifecycle" — `VerifyCompanionWitnesses` consumes D1's `VerifiedCert` (real `UnicitySeal.Verify` + quorum + inclusion paths, mapped in `TestD2_CertificateBoundaryFixtures`) via `ValidateBoundCertificate`, checks **TE↔TRHash**, and requires `ri.Transitions` to equal the authenticated `ExpectedTransitions` byte-for-byte, position by position; negatives `cert_not_verified`, `cert_wrong_origin`, `cert_wrong_authorized_round`, `cert_stale_root_round`, `transition_inserted_body`, `transition_substituted_body`, `witness_te_not_bound_to_trhash`; `TestD2_AuthenticationBoundary`, `TestD2_CertificateBoundaryFixtures` |
 | the first privileged op cannot know the rejection outcomes it commits | §3 "Block semantics" — the first system call is presence-only; a post-forced-prefix `FinalizeStep` (gas-charged) writes `sealRegistryCommitment` over the turn-determined outcomes; `seal_outcome_list` shows entry 1 changing whether entry 2 is valid at its turn; `import_checks` `seal_finalize_missing`, `seal_finalize_not_after_prefix`, `finalize_wrong_commitment`; `TestD2_ForcedPrefixOutcomesDeterminedAtTurn` |
-| A gas accounting vector closes exactly | `gas_accounting.closes_exactly = true`; §3 worked example; `TestD2_GasBudgetInvariant`, `TestD2_HeaderGasUsedIsTheSum` |
+| A gas accounting vector closes exactly, with the finalizer gas bound to the budget | `gas_accounting` (`system_open_gas` + `system_finalize_gas` = derived `system_gas`; `work_split_reconciles`, `system_within_g_sys`, `closes_exactly` all true); §3 "Budgets" + worked example; `reconcileWork` derives `Work.System` / `Work.Forced` and rejects a mismatch (`gas_split_unreconciled`), `CheckGas` caps the derived combined `g_sys`; `import_checks` `finalizer_gas_hidden_from_work`, `work_system_mismatch`, `work_forced_mismatch`, `combined_system_over_g_sys`, `system_plus_finalize_overflow`; `TestD2_FinalizerGasBoundToBudget`, `TestD2_GasBudgetInvariant`, `TestD2_HeaderGasUsedIsTheSum` |
 | the frozen fee arithmetic stays exact for representable values | `NextBaseFee` via 128-bit `mulDivFloor`; `base_fee_arithmetic_oracle` (big.Int cross-check incl. parent `10^13`); `ExecConfig.Valid()`; `TestD2_NextBaseFeeNoOverflow`, `TestD2_ConfigValidation` |
 | receipt indexing / block semantics resolved, standard execution-evidence path preserved | §3 "Block semantics" — a **successful forced tx is an ordinary tx** in `transactionsRoot`/`receiptsRoot` with a standard receipt (logs/bloom exported normally); only the system ops + `forced_rejected` records are off-trie, committed by a **seal-registry contract-state value** authenticated by `stateRoot` (`eth_getProof`), **no header field**; `header.gasUsed` transparently includes both `g_sys` steps; vector `seal_outcome_list`; `import_checks` `seal_finalize_missing`, `finalize_wrong_commitment`, `seal_registry_commitment_mismatch`; `TestD2_SealOutcomeListSeparateFromTxList` |
 | an intrinsically invalid forced entry is not an EVM revert | §3 — `kind = forced_rejected` with an authenticated `reason` and `status 0`, never in the transaction list; `seal_outcome_list.poison_entry_is_a_rejection_record_not_an_evm_revert` |

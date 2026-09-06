@@ -50,6 +50,21 @@ Proposed (D2, issue #4). Revised twice:
     re-derives the outcomes (`evalForcedPrefix`) and checks the finalized
     commitment and the storage value against them.
 
+- After the fifth review #78:
+  - **The finalizer gas is bound to the checked budget.** `ValidateImport`
+    (`reconcileWork`) **derives** `Work.System = SystemCall.GasUsed +
+    Finalize.GasUsed` (overflow-checked) and `Work.Forced = turn-rejected count *
+    RejectedConsumptionGas`, rejects a caller-supplied `Work` that does not match
+    (`gas_split_unreconciled`), and runs `CheckGas` on the **derived** work so the
+    combined `g_sys` cap covers open + finalize. Ordinary-gas recovery nets out
+    both `g_sys` steps. The `gas_accounting` vector and the §3 worked example
+    show the open/finalize split. An independently supplied `Work.System` /
+    `Work.Forced` can no longer hide an over-budget finalizer or defeat the
+    `g_sys` / `g_fi` split.
+  - `VerifiedCert` / `ExpectedTransitions` are **verifier-owned**, not
+    peer-deserialized; full UC inclusion / config / TR / committed-body
+    derivation is a mandatory adapter integration test before F1.
+
 Freeze once re-reviewed by a Go-adapter + reth reviewer other than the author.
 Depends on ADR 0003 (D1).
 
@@ -88,11 +103,14 @@ Adopt the profile in
    partition `version` record and the startup capability check.
 
 3. **Gas separation** — `g_sys + g_fi + g_ordinary_capacity = g_max` exactly.
-   Header `gasUsed` = ordinary cumulative gas (transaction list, including
-   successful forced txs) + `g_sys` work + the `g_fi` consumption charge for
-   rejected entries. The EIP-1559 base-fee update uses **ordinary** gas against
-   an **ordinary** target only; protocol-mandated gas is outside the feedback
-   loop and is recovered as `header.gasUsed − g_sys − rejectedConsumption`.
+   `g_system_actual` and `g_forced_actual` are **derived** by `reconcileWork`
+   (open + finalize; turn-rejected count × charge), not taken from a
+   caller-supplied `Work` total; a mismatch is `gas_split_unreconciled`. Header
+   `gasUsed` = ordinary cumulative gas (transaction list, incl. successful forced
+   txs) + `g_system_actual` (both `g_sys` steps) + `g_forced_actual`. The
+   EIP-1559 update uses **ordinary** gas against an **ordinary** target only;
+   protocol-mandated gas is recovered as
+   `header.gasUsed − (open + finalize) − g_forced_actual`.
 
 3b. **Off-trie commitment in contract state, not a header field, written after
    the forced prefix** — a successful forced transaction is an ordinary
@@ -118,23 +136,28 @@ Adopt the profile in
 ## Deliverables
 
 - `evmroot/d2gas.go` — budgets, header `gasUsed`, EIP-1559 update with the
-  ordinary-only substitution and the floor clamp.
+  ordinary-only substitution and the floor clamp; `BlockWork.System` / `.Forced`
+  are DERIVED and checked (see `d2import.go` `reconcileWork`).
 - `evmroot/d2import.go` — the ordered import-validation predicate set with stable
   rejection codes; `SealRegistryCommitment` (contract-state value);
   `FinalizeStep` + `ForcedEntry` / `evalForcedPrefix` / `DerivedSealOutcomes`
-  (turn-determined outcomes); `VerifyCompanionWitnesses(witness, rootInput,
-  lastAppliedRootRound)` consuming D1's `VerifiedCert` via
-  `ValidateBoundCertificate`, the TE↔TRHash binding, and position-by-position
-  `ExpectedTransitions` matching. (The invented `d2seal.go` seal-witness
-  statement + keys are removed.)
-- `evmroot/testdata/d2-vectors.json` — exec config, a gas-accounting vector that
-  closes exactly, a base-fee series (up/flat/down/floor), the `seal_outcome_list`
-  vector (a sequential forced prefix where entry 1 changes entry 2's
+  (turn-determined outcomes); `reconcileWork` (derives `Work.System` /
+  `Work.Forced`, overflow-checked, `gas_split_unreconciled`);
+  `VerifyCompanionWitnesses(witness, rootInput, lastAppliedRootRound)` consuming
+  D1's `VerifiedCert` via `ValidateBoundCertificate`, the TE↔TRHash binding, and
+  position-by-position `ExpectedTransitions` matching. (The invented `d2seal.go`
+  seal-witness statement + keys are removed.)
+- `evmroot/testdata/d2-vectors.json` — exec config, a `gas_accounting` vector
+  that shows the open/finalize split and closes exactly, a base-fee series
+  (up/flat/down/floor), the `seal_outcome_list` vector (a sequential forced
+  prefix where entry 1 changes entry 2's
   turn-validity; successful forced tx stays ordinary; commitment written
   post-prefix), and import-check vectors including `cert_not_verified`,
   `cert_stale_root_round`, `transition_inserted_body`,
   `transition_substituted_body`, `seal_finalize_missing`,
-  `finalize_wrong_commitment`.
+  `finalize_wrong_commitment`, `finalizer_gas_hidden_from_work`,
+  `work_system_mismatch`, `work_forced_mismatch`, `combined_system_over_g_sys`,
+  `system_plus_finalize_overflow`.
 - `evmroot/cmd/d2vectors` + `TestD2_VectorsMatchGolden`.
 
 ## Consequences
@@ -181,3 +204,8 @@ Adopt the profile in
   valid forced tx changes a later entry's pre-state, so the rejection set is not
   determinable before the prefix runs; and a future-outcome input would be
   contract-readable. The commitment is written by a post-prefix `FinalizeStep`.
+- **Take `Work.System` / `Work.Forced` from a caller-supplied total and check it
+  with `CheckGas`.** Rejected on the fifth review: a finalizer over the whole
+  `g_sys` budget imported successfully because nothing tied `Work.System` to
+  `SystemCall.GasUsed + Finalize.GasUsed`. Both are now derived (`reconcileWork`),
+  a mismatch is rejected, and the `g_sys` cap is applied to the derived sum.

@@ -76,6 +76,70 @@ func TestD2_SystemCallMustBeFirstAndValid(t *testing.T) {
 	}
 }
 
+func TestD2_FinalizerGasBoundToBudget(t *testing.T) {
+	cfg := DefaultExecConfig()
+
+	// The reviewer's reproduction: bump the finalizer gas without touching
+	// Work — import must now reject (Work.System no longer equals the sum
+	// of the two privileged steps).
+	b, _ := validSealBlock(cfg)
+	b.Finalize.GasUsed = cfg.GSys + 1
+	if r := ValidateImport(b, cfg); r.OK || r.Code != "gas_split_unreconciled" {
+		t.Fatalf("a finalizer alone over the whole system budget was accepted: %+v", r)
+	}
+
+	// Even if Work.System is bumped to match the (open + finalize) sum, the
+	// COMBINED cap still bites.
+	b, _ = validSealBlock(cfg)
+	b.SystemCall.GasUsed = cfg.GSys - 100
+	b.Finalize = finalizeFor(b) // recompute commitment for the new open gas
+	b.Finalize.GasUsed = 200    // sum = GSys + 100 > GSys
+	b.SealRegistryStateValue = b.Finalize.Committed
+	b.Work.System = cfg.GSys + 100
+	if r := ValidateImport(b, cfg); r.OK || r.Code != "gas_budget" {
+		t.Fatalf("combined system gas over g_sys was accepted: %+v", r)
+	}
+
+	// Work.Forced cannot be supplied independently of the turn-rejected set.
+	b, _ = validSealBlock(cfg)
+	b.Work.Forced = 9_000 // baseline has no forced prefix -> derived Forced is 0
+	if r := ValidateImport(b, cfg); r.OK || r.Code != "gas_split_unreconciled" {
+		t.Fatalf("an independently supplied Work.Forced was accepted: %+v", r)
+	}
+
+	// A block WITH a forced prefix: Work.System / Work.Forced must reconcile.
+	fc := cfg
+	fc.GFI = 2_000_000
+	b, _ = validSealBlock(fc)
+	b.ForcedStartBalance = map[string]int64{"a": 100}
+	b.ForcedPrefix = []ForcedEntry{
+		{Sender: "a", ValueDelta: -100, Reason: ""},
+		{Sender: "a", ValueDelta: -50, Reason: "insufficient_balance_at_turn"}, // 1 rejected
+	}
+	b.RejectedConsumptionGas = 21_000
+	b.SystemCall.GasUsed = 1_500_000
+	b.Finalize = finalizeFor(b)
+	b.Finalize.GasUsed = 30_000
+	b.SealRegistryStateValue = b.Finalize.Committed
+	b.Work = BlockWork{System: 1_530_000, Forced: 21_000, Ordinary: 10_000_000}
+	if r := ValidateImport(b, fc); !r.OK {
+		t.Fatalf("a well-formed forced-prefix block was rejected: %s (%s)", r.Code, r.Reason)
+	}
+	// header gas includes BOTH privileged steps + the rejected-entry charge.
+	if b.Work.HeaderGasUsed() != 1_530_000+21_000+10_000_000 {
+		t.Fatalf("header gas does not include both g_sys steps + forced charge: %d", b.Work.HeaderGasUsed())
+	}
+	rec, ok := RecoverOrdinaryGas(b.Work.HeaderGasUsed(), b.SystemCall.GasUsed+b.Finalize.GasUsed, b.Work.Forced)
+	if !ok || rec != b.Work.Ordinary {
+		t.Fatalf("ordinary-gas recovery does not net out both g_sys steps: rec=%d ok=%v", rec, ok)
+	}
+	// Now hide the finalizer charge from Work.System -> rejected.
+	b.Work.System = 1_500_000
+	if r := ValidateImport(b, fc); r.OK || r.Code != "gas_split_unreconciled" {
+		t.Fatalf("hidden finalizer charge accepted on a forced-prefix block: %+v", r)
+	}
+}
+
 func TestD2_MissingCompanionDataIsFatal(t *testing.T) {
 	cfg := DefaultExecConfig()
 	b, _ := validSealBlock(cfg)

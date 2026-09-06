@@ -83,19 +83,26 @@ func (c ExecConfig) OrdinaryCapacity() uint64 { return c.GMax - c.GSys - c.GFI }
 // a congestion signal.
 func (c ExecConfig) OrdinaryTarget() uint64 { return c.OrdinaryCapacity() / c.ElasticityDenom }
 
-// BlockWork is the gas actually consumed in one produced block, split by
-// origin. Only Ordinary feeds the base-fee update.
+// BlockWork is the gas consumed in one produced block, split by origin.
+// Only Ordinary feeds the base-fee update. System and Forced are DERIVED
+// and checked by ValidateImport / reconcileWork — a caller cannot supply a
+// System / Forced total that does not match the two privileged steps and
+// the turn-determined rejection set:
+//
+//	System = SystemCall.GasUsed (open step) + Finalize.GasUsed (write step); <= GSys
+//	Forced = (# forced entries invalid at their turn) * RejectedConsumptionGas; <= GFI
+//	Ordinary = the transaction-list cumulative gas incl. successful forced txs; <= OrdinaryCapacity
 type BlockWork struct {
-	System   uint64 // actual gas of the single privileged seal operation (<= GSys)
-	Forced   uint64 // g_fi consumption charge for REJECTED forced entries only (<= GFI). A successful forced tx is an ordinary tx; its gas is in Ordinary and its receipt is in receiptsRoot.
-	Ordinary uint64 // discretionary + successful-forced transaction gas (<= OrdinaryCapacity), i.e. the cumulative gas of the transaction list
+	System   uint64
+	Forced   uint64
+	Ordinary uint64
 }
 
-// HeaderGasUsed is the block header's gasUsed field: the standard
-// cumulative gas over the transaction list (Ordinary, which now includes
-// successful forced txs) PLUS the seal call's g_sys work PLUS the g_fi
-// consumption charge for rejected entries. It is NOT "entirely unchanged"
-// vs a vanilla block — it includes the system-call gas.
+// HeaderGasUsed is the block header's gasUsed field: the transaction-list
+// cumulative gas (Ordinary, incl. successful forced txs) PLUS BOTH
+// privileged g_sys steps (open + finalize) PLUS the g_fi consumption charge
+// for turn-rejected entries. It is NOT "entirely unchanged" vs a vanilla
+// block.
 func (w BlockWork) HeaderGasUsed() uint64 { return w.System + w.Forced + w.Ordinary }
 
 // GasCheck is the per-block gas validity result.
@@ -113,7 +120,7 @@ func (c ExecConfig) CheckGas(w BlockWork) GasCheck {
 	case w.System == 0:
 		return GasCheck{Reason: "system operation consumed no gas — it must run on every successful block"}
 	case w.System > c.GSys:
-		return GasCheck{Reason: "system gas exceeds reserved g_sys — block invalid, not silently truncated"}
+		return GasCheck{Reason: "combined system gas (open + finalize) exceeds reserved g_sys — block invalid, not silently truncated"}
 	case w.Forced > c.GFI:
 		return GasCheck{Reason: "forced-inclusion gas exceeds reserved g_fi"}
 	case w.Ordinary > c.OrdinaryCapacity():

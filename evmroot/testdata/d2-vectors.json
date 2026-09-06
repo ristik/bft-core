@@ -8,11 +8,16 @@
     "ordinary_target": 14000000
   },
   "gas_accounting": {
-    "note": "System runs under g_sys, ordinary under g_max-g_sys-g_fi; header gasUsed is the sum; base fee updates from ordinary vs ordinary target only.",
+    "note": "g_system_actual is DERIVED as SystemCall.GasUsed (open) + Finalize.GasUsed (write); g_forced_actual as turn-rejected count * RejectedConsumptionGas. header.gasUsed is their sum plus the transaction-list cumulative gas. Base fee updates from ordinary vs ordinary target only.",
+    "system_open_gas": 1780000,
+    "system_finalize_gas": 20000,
     "system_gas": 1800000,
     "forced_gas": 0,
     "ordinary_gas": 15000000,
     "header_gas_used": 16800000,
+    "recovered_ordinary_gas": 15000000,
+    "work_split_reconciles": true,
+    "system_within_g_sys": true,
     "parent_base_fee": 1000000000,
     "next_base_fee": 1008928571,
     "budget_ok": true,
@@ -343,7 +348,7 @@
       "matches": true
     },
     {
-      "name": "system_gas_over_budget",
+      "name": "ordinary_gas_over_capacity",
       "want_ok": false,
       "want_code": "gas_budget",
       "got_ok": false,
@@ -351,11 +356,43 @@
       "matches": true
     },
     {
-      "name": "ordinary_gas_over_capacity",
+      "name": "finalizer_gas_hidden_from_work",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    },
+    {
+      "name": "work_system_mismatch",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    },
+    {
+      "name": "work_forced_mismatch",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    },
+    {
+      "name": "combined_system_over_g_sys",
       "want_ok": false,
       "want_code": "gas_budget",
       "got_ok": false,
       "got_code": "gas_budget",
+      "matches": true
+    },
+    {
+      "name": "system_plus_finalize_overflow",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
       "matches": true
     }
   ]

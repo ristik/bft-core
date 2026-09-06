@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"math/bits"
 )
 
 // D2 import-validation model: the ordered predicate set an execution client
@@ -427,8 +428,53 @@ func ValidateImport(b SealBlock, cfg ExecConfig) ImportResult {
 	if b.BlobTxCount != 0 {
 		return reject("blob_tx_present", "blob transactions are disabled in the initial profile")
 	}
-	if gc := cfg.CheckGas(b.Work); !gc.BudgetOK {
+	// Gas: the system split is DERIVED from the two executed privileged
+	// steps and the turn-determined rejection set, not taken from a
+	// caller-supplied total. An independently supplied Work.System /
+	// Work.Forced cannot defeat the g_sys / g_fi split.
+	work, wreason := reconcileWork(b)
+	if wreason != "" {
+		return reject("gas_split_unreconciled", wreason)
+	}
+	if gc := cfg.CheckGas(work); !gc.BudgetOK {
 		return reject("gas_budget", gc.Reason)
 	}
 	return ImportResult{OK: true}
+}
+
+// reconcileWork derives the system and forced gas from the block's actual
+// steps and checks that the caller-supplied Work.System / Work.Forced match
+// them, with overflow-safe arithmetic:
+//
+//	System = SystemCall.GasUsed + Finalize.GasUsed   (both privileged steps)
+//	Forced = (# entries invalid at their turn) * RejectedConsumptionGas
+//	Ordinary = Work.Ordinary   (the standard transaction-list cumulative
+//	           gas, incl. successful forced txs — a re-executor reproduces it)
+//
+// Returns the derived BlockWork and "" on success, or a non-empty reason.
+func reconcileWork(b SealBlock) (BlockWork, string) {
+	sysGas, carry := bits.Add64(b.SystemCall.GasUsed, b.Finalize.GasUsed, 0)
+	if carry != 0 {
+		return BlockWork{}, "system + finalize gas overflows uint64"
+	}
+	rejected := uint64(0)
+	for _, valid := range evalForcedPrefix(b.ForcedPrefix, b.ForcedStartBalance) {
+		if !valid {
+			rejected++
+		}
+	}
+	fHi, forcedGas := bits.Mul64(rejected, b.RejectedConsumptionGas)
+	if fHi != 0 {
+		return BlockWork{}, "rejected-entry consumption charge overflows uint64"
+	}
+	derived := BlockWork{System: sysGas, Forced: forcedGas, Ordinary: b.Work.Ordinary}
+	if b.Work.System != sysGas {
+		return derived, fmt.Sprintf("Work.System %d != SystemCall.GasUsed %d + Finalize.GasUsed %d",
+			b.Work.System, b.SystemCall.GasUsed, b.Finalize.GasUsed)
+	}
+	if b.Work.Forced != forcedGas {
+		return derived, fmt.Sprintf("Work.Forced %d != %d turn-rejected entries * %d consumption charge",
+			b.Work.Forced, rejected, b.RejectedConsumptionGas)
+	}
+	return derived, ""
 }

@@ -80,14 +80,19 @@ type D2ConfigVector struct {
 
 type D2GasVector struct {
 	Note          string `json:"note"`
-	System        uint64 `json:"system_gas"`
-	Forced        uint64 `json:"forced_gas"`
+	SystemOpenGas uint64 `json:"system_open_gas"`
+	FinalizeGas   uint64 `json:"system_finalize_gas"`
+	System        uint64 `json:"system_gas"` // DERIVED: open + finalize
+	Forced        uint64 `json:"forced_gas"` // DERIVED: turn-rejected count * charge
 	Ordinary      uint64 `json:"ordinary_gas"`
 	HeaderGasUsed uint64 `json:"header_gas_used"` // system + forced + ordinary
+	RecoveredOrd  uint64 `json:"recovered_ordinary_gas"`
+	ReconcilesOK  bool   `json:"work_split_reconciles"`
+	SystemWithinG bool   `json:"system_within_g_sys"`
 	ParentBaseFee uint64 `json:"parent_base_fee"`
 	NextBaseFee   uint64 `json:"next_base_fee"` // from ordinary gas vs ordinary target only
 	BudgetOK      bool   `json:"budget_ok"`
-	ClosesExactly bool   `json:"closes_exactly"` // header_gas_used == system+forced+ordinary and each within budget
+	ClosesExactly bool   `json:"closes_exactly"`
 }
 
 type D2BaseFeeVector struct {
@@ -183,16 +188,28 @@ func BuildD2Vectors() D2VectorSet {
 	}
 
 	// --- worked gas accounting that closes exactly -----------------------
-	w := BlockWork{System: 1_800_000, Forced: 0, Ordinary: 15_000_000}
-	gc := cfg.CheckGas(w)
+	// A real block: the system split is DERIVED (open + finalize), not a
+	// caller-supplied lump; reconcileWork rejects a Work that does not match.
+	gb, _ := validSealBlock(cfg)
+	gb.SystemCall.GasUsed = 1_780_000
+	gb.Finalize = finalizeFor(gb)
+	gb.Finalize.GasUsed = 20_000
+	gb.SealRegistryStateValue = gb.Finalize.Committed
+	gb.Work = BlockWork{System: 1_800_000, Forced: 0, Ordinary: 15_000_000}
+	gw, gwReason := reconcileWork(gb)
+	gc := cfg.CheckGas(gw)
+	gRec, _ := RecoverOrdinaryGas(gw.HeaderGasUsed(), gb.SystemCall.GasUsed+gb.Finalize.GasUsed, gw.Forced)
 	vs.GasAccounting = D2GasVector{
-		Note:   "System runs under g_sys, ordinary under g_max-g_sys-g_fi; header gasUsed is the sum; base fee updates from ordinary vs ordinary target only.",
-		System: w.System, Forced: w.Forced, Ordinary: w.Ordinary,
-		HeaderGasUsed: w.HeaderGasUsed(),
+		Note:          "g_system_actual is DERIVED as SystemCall.GasUsed (open) + Finalize.GasUsed (write); g_forced_actual as turn-rejected count * RejectedConsumptionGas. header.gasUsed is their sum plus the transaction-list cumulative gas. Base fee updates from ordinary vs ordinary target only.",
+		SystemOpenGas: gb.SystemCall.GasUsed, FinalizeGas: gb.Finalize.GasUsed,
+		System: gw.System, Forced: gw.Forced, Ordinary: gw.Ordinary,
+		HeaderGasUsed: gw.HeaderGasUsed(), RecoveredOrd: gRec,
+		ReconcilesOK:  gwReason == "",
+		SystemWithinG: gw.System <= cfg.GSys,
 		ParentBaseFee: 1_000_000_000,
-		NextBaseFee:   cfg.NextBaseFee(1_000_000_000, w),
+		NextBaseFee:   cfg.NextBaseFee(1_000_000_000, gw),
 		BudgetOK:      gc.BudgetOK,
-		ClosesExactly: gc.BudgetOK && gc.HeaderGasUsed == w.System+w.Forced+w.Ordinary,
+		ClosesExactly: gc.BudgetOK && gc.HeaderGasUsed == gw.System+gw.Forced+gw.Ordinary && gRec == gw.Ordinary,
 	}
 
 	// --- base-fee series: up, flat, down, floor clamp --------------------
@@ -354,8 +371,28 @@ func BuildD2Vectors() D2VectorSet {
 		{"base_fee_below_floor", mut(func(b *SealBlock) { b.BaseFee = cfg.BaseFeeFloor - 1 }), false, "base_fee_below_floor"},
 		{"withdrawals_nonempty", mut(func(b *SealBlock) { b.Withdrawals = 1 }), false, "withdrawals_nonempty"},
 		{"blob_tx_present", mut(func(b *SealBlock) { b.BlobTxCount = 1 }), false, "blob_tx_present"},
-		{"system_gas_over_budget", mut(func(b *SealBlock) { b.Work.System = cfg.GSys + 1 }), false, "gas_budget"},
 		{"ordinary_gas_over_capacity", mut(func(b *SealBlock) { b.Work.Ordinary = cfg.OrdinaryCapacity() + 1 }), false, "gas_budget"},
+		// Gas split cannot be lied about: Work.System is derived from the two
+		// privileged steps, Work.Forced from the turn-rejected set.
+		{"finalizer_gas_hidden_from_work", mut(func(b *SealBlock) { b.Finalize.GasUsed = cfg.GSys + 1 }), false, "gas_split_unreconciled"},
+		{"work_system_mismatch", mut(func(b *SealBlock) { b.Work.System = cfg.GSys - 1 }), false, "gas_split_unreconciled"},
+		{"work_forced_mismatch", mut(func(b *SealBlock) { b.Work.Forced = 5_000 }), false, "gas_split_unreconciled"},
+		{"combined_system_over_g_sys", mut(func(b *SealBlock) {
+			// open + finalize both reported, Work.System matches the sum, but
+			// the SUM exceeds g_sys.
+			b.SystemCall.GasUsed = cfg.GSys - 10
+			b.Finalize = finalizeFor(*b) // recompute the commitment for the new open gas
+			b.Finalize.GasUsed = 20
+			b.SealRegistryStateValue = b.Finalize.Committed
+			b.Work.System = cfg.GSys + 10
+		}), false, "gas_budget"},
+		{"system_plus_finalize_overflow", mut(func(b *SealBlock) {
+			b.SystemCall.GasUsed = ^uint64(0)
+			b.Finalize = finalizeFor(*b)
+			b.Finalize.GasUsed = 1
+			b.SealRegistryStateValue = b.Finalize.Committed
+			b.Work.System = 0
+		}), false, "gas_split_unreconciled"},
 	}
 	for _, c := range cases {
 		got := ValidateImport(c.block, cfg)
