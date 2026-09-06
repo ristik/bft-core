@@ -6,8 +6,9 @@ Proposed (D4, issue #6). Revised after the first review (#80): the endorsement
 signs a `FrozenID` that binds the whole frozen state (not the bare body id); the
 trust-base body records `EarliestActivation = A_min` and `A*` lives only in the
 `ActivatedTrustBase` commit record (removes the D3-`EpochStart` circularity — a
-joint D3/D4 change);  `FinalizeCommit(descendantRound)` / `CommitFinalized`
-gates activation on the root 2-chain rule, not a round count.
+joint D3/D4 change); `FinalizeCommit` / `CommitFinalized` gates activation on the
+root 2-chain rule, not a round count (the check is tightened in the third review,
+below).
 
 Revised again after the second review (#80): the multi-replica model's **global
 signer lock** — which prevented *every* signer, honest or Byzantine, from
@@ -21,6 +22,28 @@ honest assignment and shows **at most one** of two conflicting `FrozenID`s /
 (G2). Per-replica commit tuples are kept un-deduplicated and required to agree
 (G3), with a conflicting-`A*` counterexample the tuple check must flag. `G1`
 ("no signer equivocates") is explicitly dropped.
+
+Revised again after the third review (#80):
+
+- **`FinalizeCommit` no longer takes a round number.** It takes a descendant
+  `CommitQC` — the executable stand-in for the root `SafetyModule.isCommitCandidate`
+  relation plus the signed `LedgerCommitInfo` — and checks the real relation:
+  `ParentCommitID == this CommitRecordID` (rejects an unrelated higher-round QC),
+  `Round == CommitRound + 1` (rejects a timeout gap), `QuorumWeight ≥ ⌊2Wₒₗd/3⌋+1`,
+  and a 32-byte committed root hash. `Commit` records the handoff's own
+  `SelfCommitQC`.
+- **The bootstrap step is explicit.** `FirstSuccessorProposal()` (only from a
+  finalised commit) returns the successor-TR leader, the finalised committed root
+  it builds on (not a new-set round — none exists yet), the finalised commit
+  chain as authorisation, and `A*` as the proposed round; its certification is
+  the first certified round `≥ A*`.
+- **A handoff progress/abort model** (`d4progress.go`) supplements the static
+  quorum enumeration: one `FrozenID` per (attempt, view); honest signers follow
+  the view leader's single proposal and hold it durably (restart-safe, no
+  double-endorse); a view change carries the highest lock and the next leader
+  must re-propose it. This resolves the "honest weight split across `X` and `Y`"
+  case the enumeration alone could not, and models commit-vs-abort exclusion
+  under durable state in a combined delayed-message/restart schedule.
 
 Freeze once re-reviewed by a Go consensus / protocol reviewer other than the
 author. Depends on ADR 0003 (D1) and ADR 0005 (D3).
@@ -76,7 +99,8 @@ Adopt the state machine in
 
 - `evmroot/d4handoff.go` — `Handoff` state, the phase transitions, `Authorized`,
   `FieldsAreKnown`, `PipelineDepth`, `CommitRecordID`, `ActivationRecord`,
-  `FinalizeCommit(descendantRound)`.
+  `CommitQC`, `FinalizeCommit(descendant CommitQC, oldThreshold)`,
+  `FirstSuccessorProposal`.
 - `evmroot/d4explore.go` — `checkInvariants` and 12 fault scenarios (delayed
   signatures, asymmetric delivery, missed earliest activation, crash at every
   phase, old quorum loss, committed abort vs late activate, incomplete-prepare
@@ -84,7 +108,10 @@ Adopt the state machine in
 - `evmroot/d4multireplica.go` — the adversarial model: honest per-signer locks,
   a bounded Byzantine equivocating set, exhaustive honest-assignment
   quorum-intersection search (G2), per-replica commit tuples (G3), the
-  conflicting-`A*` counterexample.
+  conflicting-`A*` counterexample, the descendant-`CommitQC` finality negatives.
+- `evmroot/d4progress.go` — the handoff progress/abort model: view-leader single
+  proposal, durable per-signer state, safe lock rule across view change,
+  commit-vs-abort exclusion, combined delayed-message/restart schedule.
 - `evmroot/d4vectors.go` — scenario results plus the exhaustive 24-permutation
   phase-order check.
 - `evmroot/testdata/d4-vectors.json` + `TestD4_VectorsMatchGolden`.
@@ -120,3 +147,12 @@ Adopt the state machine in
 - **Deduplicate committed handoffs by `FrozenID` in the exploration.** Rejected:
   it hides a disagreement on `A*` between replicas that committed the same
   `FrozenID`. Per-replica tuples are compared field-by-field instead.
+- **Treat a larger descendant round as finality evidence** (`FinalizeCommit(uint64)`,
+  second-review version). Rejected on the third review: any value `> CommitRound`
+  toggled the flag with no linked block/QC/parent. Replaced by a descendant
+  `CommitQC` with a checked parent link, consecutive round, quorum weight and
+  committed root hash.
+- **Rely on the static quorum-intersection enumeration as the whole handoff
+  model.** Rejected: it assumes a fixed honest partition and cannot explain how
+  ordering prevents an honest split before endorsement. Supplemented with the
+  view-leader / durable-lock progress model in `d4progress.go`.

@@ -328,14 +328,33 @@ func D4MultiReplicaRuns() []MultiReplicaResult {
 	if roundReachedNoFinal == nil {
 		fv = append(fv, InvariantViolation{"g4", "activated on observedRootRound ≥ A* without a finalized commit"})
 	}
-	_ = fr.FinalizeCommit(fr.CommitRound + 1)
+	// An unrelated higher-round QC (wrong parent) must NOT finalise.
+	unrelated := fr.DescendantCommitQC(thr)
+	unrelated.ParentCommitID = rep(0x7A, 32)
+	if fr.FinalizeCommit(unrelated, thr) == nil {
+		fv = append(fv, InvariantViolation{"g4", "an unrelated higher-round QC was accepted as finality evidence"})
+	}
+	// A timeout-gap QC (non-consecutive round) must NOT finalise.
+	gap := fr.DescendantCommitQC(thr)
+	gap.Round = fr.CommitRound + 2
+	if fr.FinalizeCommit(gap, thr) == nil {
+		fv = append(fv, InvariantViolation{"g4", "a timeout-gap QC was accepted as finality evidence"})
+	}
+	// The real descendant 2-chain QC finalises it.
+	if fr.FinalizeCommit(fr.DescendantCommitQC(thr), thr) != nil {
+		fv = append(fv, InvariantViolation{"g4", "the real descendant 2-chain QC was rejected"})
+	}
 	afterFinal := fr.Activate(12)
 	if afterFinal != nil {
 		fv = append(fv, InvariantViolation{"g4", "activation rejected after a descendant commit finalized it: " + afterFinal.Error()})
 	}
+	sp, spOK := fr.FirstSuccessorProposal()
+	if !spOK || len(sp.Leader) == 0 || !bytesEqual(sp.BuildsOnRoot, sp.FinalityQC.CommittedRootHash) || sp.ProposedRound != fr.ActivationRound {
+		fv = append(fv, InvariantViolation{"g4", "first successor proposal does not build on the finalised committed root at A*"})
+	}
 	out = append(out, MultiReplicaResult{
 		Name: "activation_requires_finalized_commit", Kind: "finality",
-		Note:           "observedRootRound ≥ A* is not enough: Activate fails until FinalizeCommit records a descendant commit at a round > commitRound (the root 2-chain). The first successor proposal at A* carries CommitRecordID as its old-quorum authorisation.",
+		Note:           "observedRootRound ≥ A* is not enough, and a larger round number is not finality. FinalizeCommit takes a DESCENDANT CommitQC and checks: ParentCommitID == this CommitRecordID, Round == CommitRound+1 (no timeout gap), QuorumWeight ≥ old threshold, a 32-byte committed root hash. An unrelated higher-round QC and a timeout-gap QC are both rejected. The first successor proposal is produced by the committed successor-TR leader and builds on the FINALISED committed root — not on a new-set round, none of which exists yet — at A*.",
 		Violations:     fv,
 		G2QuorumUnique: true, G3TuplesAgree: true, G4FinalCommit: len(fv) == 0,
 		PropertyHeld: len(fv) == 0,
@@ -350,7 +369,7 @@ func D4MultiReplicaRuns() []MultiReplicaResult {
 		_ = h.Freeze(rep(0x11, 32), rep(0x22, 32), body(h))
 		_ = h.Endorse(thr, thr)
 		_ = h.Commit(6, 12, rep(0x33, 32))
-		_ = h.FinalizeCommit(h.CommitRound + 1)
+		_ = h.FinalizeCommit(h.DescendantCommitQC(thr), thr)
 		_ = h.Activate(12)
 		_ = h.Acknowledge(13)
 		if h.Phase != PhaseAcknowledged {

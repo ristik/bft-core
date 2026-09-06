@@ -84,31 +84,53 @@ endorsed identity. This removes the circularity the review flagged.
 | endorsement | `network, protocolVersion, predecessorHash, attempt, FrozenID, A_min` (= body `EarliestActivation`) | yes. **No `A*`, no successor TR.** |
 | commit | `… + A*, successorTRHash` | yes — `A*` is fixed now, `A* ≥ A_min` and `A* ≥ commitRound + PipelineDepth`; the successor TR is constructed now |
 
-### Finality is the root rule, not a round count
+### Finality is the root 2-chain, not a round count
 
 `PipelineDepth` is only the minimum gap `A*` must leave after the commit round so
 `A*` is not scheduled inside the reorg window. It does **not** establish
-finality. Finality of the commit is the root's own 2-chain rule, modelled by
-`FinalizeCommit(descendantCommitRound)` / `CommitFinalized`, which requires a
-descendant commit at a root round strictly greater than this commit's round.
-**`Activate` requires `CommitFinalized` and `observedRootRound ≥ A*`** — a round
-counter reaching `A*` on its own is `errCommitNotFinal`
-(`TestD4_ActivationRequiresFinalizedCommit`). From any pre-Commit phase,
-`Activate` returns `errNoCommit`.
+finality.
 
-### First successor proposal, old-quorum proof, timeout gaps
+`FinalizeCommit` no longer takes a bare round number. It takes a **descendant
+`CommitQC`** — the executable stand-in for the root `SafetyModule.isCommitCandidate`
+relation plus the signed `LedgerCommitInfo` — and checks the real relation:
 
-- The **first governance proposal under the new assignment** is produced by the
-  leader named in the committed **successor technical record**
-  (`FirstSuccessorProposalLeader` → `SuccessorTRHash`).
-- Its **authorisation witness** is the commit record: an old-quorum QC over
-  `CommitDomainFor` (`FrozenID`, `A*`, `successorTRHash`, predecessor, attempt).
-  The new set does not need the old set online — it carries the proof.
+| Check | Rejects |
+|---|---|
+| `descendant.ParentCommitID == this.CommitRecordID` | an **unrelated higher-round QC** (`errFinalityLink`) |
+| `descendant.Round == CommitRound + 1` | a **timeout gap** / non-consecutive QC (`errFinalityGap`) |
+| `descendant.QuorumWeight ≥ ⌊2Wₒₗd/3⌋+1` | an under-quorum descendant (`errFinalityQuorum`) |
+| `len(descendant.CommittedRootHash) == 32` | a QC binding no committed root (`errFinalityRoot`) |
+
+`Commit` records this handoff's own `SelfCommitQC` (parent = the pre-handoff
+committed head, weight = the endorsement weight). **`Activate` requires
+`CommitFinalized` and `observedRootRound ≥ A*`** — a larger round number on its
+own is `errCommitNotFinal` (`TestD4_ActivationRequiresFinalizedCommit`, which
+exercises the unrelated-parent, timeout-gap and under-quorum negatives). From any
+pre-Commit phase, `Activate` returns `errNoCommit`.
+
+### First successor proposal — the bootstrap step
+
+`FirstSuccessorProposal()` (available only from a **finalised** commit) makes the
+bootstrap explicit — who produces the first proposal before any new-assignment
+certified round `≥ A*` exists:
+
+- **Leader**: the identity in the committed successor technical record
+  (`SuccessorTRHash`), fixed at Commit under the old quorum.
+- **BuildsOnRoot**: the last **old-set finalised committed root** — this
+  handoff's `FinalityEvidence.CommittedRootHash`. Not a new-set round; none
+  exists yet.
+- **Authorisation**: the finalised commit chain — `CommitRecordID`,
+  `SelfCommitQC` and the descendant `FinalityEvidence`. The new set carries this
+  proof; it does not need the old set online.
+- **ProposedRound**: `A*`. Once this proposal is certified it **is** the first
+  certified round `≥ A*` — the activation round.
+
 - **Timeout gaps**: if no block is certified at exactly `A*`, the certified root
   round clock (D1) crosses `A*` and the **first certified round `≥ A*` under the
-  new assignment** is the activation. A repeat/timeout certificate between the
-  commit and `A*` installs nobody (`Authorized` still returns `old` for rounds
-  `< A*`, `new` for `≥ A*`, on a committed+finalised replica only).
+  new assignment** (this proposal, or a later one) is the activation. A
+  repeat/timeout certificate between the commit and `A*` installs nobody
+  (`Authorized` still returns `old` for rounds `< A*`, `new` for `≥ A*`, on a
+  committed+finalised replica only).
 
 ## 3. Authorisation function (the safety core)
 
@@ -180,8 +202,35 @@ Runs: `endorsement_quorum_honest_only`, `endorsement_quorum_byzantine_below_boun
 scenario unreachable), `commit_versus_abort_exclusion`,
 `replica_commit_tuples_agree`, `conflicting_activation_round_counterexample`
 (`is_counterexample: true` — replica A committed `A*`=12, replica B `A*`=15;
-the tuple check must flag the disagreement), `activation_requires_finalized_commit`,
-`conditional_liveness_all_delivered`.
+the tuple check must flag the disagreement), `activation_requires_finalized_commit`
+(now exercises the unrelated-parent and timeout-gap finality negatives and the
+`FirstSuccessorProposal` bootstrap), `conditional_liveness_all_delivered`.
+
+### Handoff progress / abort model (`handoff_progress_and_abort`)
+
+The enumeration above is a *static* safety fact. The re-review's third round
+noted it assumes every honest signer has already, permanently, chosen `X` / `Y`
+/ abstain, and does not say how consensus ordering keeps honest weight from being
+split in the first place — e.g. `a(10)→X`, `c,d(7)→Y` with `b,e(7)` Byzantine
+withholding leaves no quorum although 17 honest weight is online.
+
+`d4progress.go` models the progress side. The structural fact: the election
+candidate is committed by the epoch manager, so there is **one `FrozenID` per
+(attempt, view)**. Honest signers do **not** pick a `FrozenID` independently —
+they endorse the one the current **view leader** proposed, and hold that choice
+**durably** (a restart reloads it; they refuse to double-endorse). A cross-
+`FrozenID` split can only appear across a **view change**, and a view-change
+certificate carries the highest lock, which the next leader **must** re-propose
+(`leaderProposalValid`); honest signers reject a proposal that drops it.
+
+| Run | Shows |
+|---|---|
+| `no_honest_split_byzantine_withholding` | `b,e` (weight 7) withhold; `a,c,d` follow the view-1 leader's single proposal `X`; `10+5+2 = 17` reaches the quorum, **nothing lands on `Y`**. The posited split needs independent honest choice, which the view rule forbids. |
+| `view_change_carries_lock` | view 1 partially endorses `X` (a only); a view-2 leader proposing `Y` is **rejected** (drops the carried lock); the valid view-2 leader re-proposes `X`; `a,c,d` reach 17 on `X`; `Y` never gathers honest weight. |
+| `commit_then_abort_cannot_reach_quorum` | `X` endorsed and committed; honest signers refuse to sign an abort of a committed attempt; only Byzantine weight 7 < 17 is available — a commit and its abort cannot both be certified. |
+| `combined_delay_restart_commit_vs_abort` | one execution: endorsements delivered out of order, `root-a` restarts and its durable state blocks a switch to `Y`, `X` reaches 17, a later abort of the committed attempt gets only weight 7. |
+
+All four hold (`all_progress_properties_hold`); `TestD4_HandoffProgressAndAbortModel`.
 
 ### Scenarios (all in `d4-vectors.json`, `phase_ok` and `invariants_ok` true for each):
 
@@ -234,7 +283,8 @@ preserved, recovery not claimed.
 | model exploration (not a phase-API test) shows two effective successors / old+new authorisation of the same extension cannot occur, across competing replicas with quorum intersection under Byzantine equivocation / attempts / delayed commit vs abort | §4 adversarial model — G2 (at most one of two conflicting `FrozenID`s / `CommitRecordID`s / commit-vs-abort reaches a quorum, honest signers split every way, Byzantine set ≤ `f_W` on both sides), G3 (per-replica commit tuples kept un-deduplicated and required to agree; conflicting-`A*` counterexample flagged); `TestD4_MultiReplicaGlobalInvariants` |
 | delayed signatures, asymmetric delivery, missed earliest activation, crash at every phase, old quorum loss, committed abort vs late activate | scenario table §4 (`asymmetric_delivery`, `old_quorum_loss_after_prepare`, `crash_at_*`, `committed_abort_vs_late_activate`) |
 | freeze authenticates the state it endorses — one endorsement cannot authorise divergent handoff states | §2 `FrozenID` (binds body + frozen summary + parent + candidate + attempt); `TestD4_FreezeBindsFrozenStateIntoEndorsedIdentity` |
-| pipeline/activation is not circular; who produces the first successor proposal and which old-quorum proof authorises it; behaviour under timeout gaps; `EpochStart` reconciled with D3 | §2 "The trust-base body records `A_min`, not `A*`" (D3's `EpochStart` renamed to `EarliestActivation`; `A*` in the `ActivatedTrustBase` record) + "First successor proposal…" + "Finality is the root rule"; `FinalizeCommit(descendantRound)`/`CommitFinalized` gate; `TestD4_ActivationRequiresFinalizedCommit` |
+| pipeline/activation is not circular; who produces the first successor proposal and which old-quorum proof authorises it; behaviour under timeout gaps; `EpochStart` reconciled with D3 | §2 "The trust-base body records `A_min`, not `A*`" + "First successor proposal — the bootstrap step" (`FirstSuccessorProposal` — leader = successor TR, builds on the finalised committed root, at `A*`) + "Finality is the root 2-chain"; `FinalizeCommit(CommitQC)` checks parent link / consecutive round / quorum weight / committed root, rejecting unrelated-higher-round and timeout-gap QCs; `TestD4_ActivationRequiresFinalizedCommit` |
+| the model exercises the handoff progress/abort rule, not just static quorum arithmetic | §4 "Handoff progress / abort model" — view-leader single proposal + durable per-signer state + safe lock rule across view change + commit-vs-abort exclusion; `handoff_progress_and_abort`; `TestD4_HandoffProgressAndAbortModel` |
 | an incomplete prepare cannot activate through local REST insertion or clock passage | `incomplete_prepare_then_clock`, `incomplete_prepare_then_rest_insertion`; `TestD4_NoActivationWithoutCommit` |
 | under declared assumptions the model completes a handoff; outside them it preserves safety without claiming recovery | §4 G5 (`reached` vs `held-safe`); scenario `old_quorum_loss_after_prepare` |
 | no signature depends on unknown future state | §2; `FieldsAreKnown` (endorsement binds `FrozenID`, not `A*`); `TestD4_EndorsementBindsNoFutureState` |

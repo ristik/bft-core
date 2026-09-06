@@ -14,6 +14,7 @@ type D4VectorSet struct {
 	Scenarios     []ScenarioResult     `json:"scenarios"`
 	Interleavings D4InterleaveCheck    `json:"phase_order_interleavings"`
 	MultiReplica  []MultiReplicaResult `json:"multi_replica_exploration"`
+	Progress      []ProgressRun        `json:"handoff_progress_and_abort"`
 	Summary       D4Summary            `json:"summary"`
 }
 
@@ -33,6 +34,8 @@ type D4Summary struct {
 	AllInvariantsHeld    bool `json:"all_invariants_held"`
 	MultiReplicaRuns     int  `json:"multi_replica_runs"`
 	AllGlobalInvariants  bool `json:"all_global_invariants_held"`
+	ProgressRuns         int  `json:"progress_runs"`
+	AllProgressHold      bool `json:"all_progress_properties_hold"`
 }
 
 func BuildD4Vectors() D4VectorSet {
@@ -50,9 +53,16 @@ func BuildD4Vectors() D4VectorSet {
 		allGlobal = allGlobal && m.PropertyHeld
 	}
 
+	vs.Progress = D4ProgressRuns()
+	allProgress := true
+	for _, p := range vs.Progress {
+		allProgress = allProgress && p.Holds
+	}
+
 	vs.Summary = D4Summary{
 		Scenarios: len(vs.Scenarios), AllPhaseExpectations: allPhase, AllInvariantsHeld: allInv,
 		MultiReplicaRuns: len(vs.MultiReplica), AllGlobalInvariants: allGlobal,
+		ProgressRuns: len(vs.Progress), AllProgressHold: allProgress,
 	}
 
 	// --- exhaustive 4-phase interleaving ---------------------------------

@@ -91,9 +91,11 @@ type Handoff struct {
 	ActivationRound         uint64             // A* — the actual boundary, fixed here, >= MinActivation and >= CommitRound+PipelineDepth
 	SuccessorTRHash         []byte             // successor technical record — names the leader of the first successor proposal
 	CommitRecordID          []byte             // identity of the old-quorum commit statement (see CommitRecordID)
+	SelfCommitQC            CommitQC           // the old-quorum QC that certified THIS commit
 	ActivationRecord        ActivatedTrustBase // D3 record fixing A*; what a joining node reads for the active epoch
-	CommitFinalized         bool               // a descendant commit extends this one (root ordering rule, not a round count)
-	FinalityDescendantRound uint64             // the round of that descendant commit
+	CommitFinalized         bool               // a descendant commit QC extends this one (root 2-chain, not a round count)
+	FinalityEvidence        CommitQC           // the descendant commit QC that finalised this one
+	FinalityDescendantRound uint64             // its round (== CommitRound + 1)
 
 	// Set at Acknowledge:
 	AckEVMRound uint64 // EVM block round whose system op acknowledged the handoff
@@ -120,10 +122,42 @@ var (
 	errPhase          = errors.New("d4: transition not allowed from this phase")
 	errActivationRoot = errors.New("d4: activation round below MinActivation or inside the reorg window")
 	errNoCommit       = errors.New("d4: cannot activate without a committed handoff record")
-	errCommitNotFinal = errors.New("d4: commit is not yet final under the root ordering rule")
+	errCommitNotFinal = errors.New("d4: commit is not yet final under the root 2-chain rule")
 	errEndorseWeight  = errors.New("d4: endorsement weight below the old root threshold")
 	errFutureState    = errors.New("d4: signed domain binds state not known at signing time")
+	errFinalityLink   = errors.New("d4: finality QC does not extend this commit (ParentCommitID mismatch)")
+	errFinalityGap    = errors.New("d4: finality QC is not the consecutive next commit (timeout gap)")
+	errFinalityQuorum = errors.New("d4: finality QC weight below the old root threshold")
+	errFinalityRoot   = errors.New("d4: finality QC binds no committed root hash")
+	errFinalityShape  = errors.New("d4: finality QC is malformed")
 )
+
+// CommitQC is an old-quorum quorum certificate over a root commit — the
+// executable stand-in for the root's SafetyModule.isCommitCandidate
+// relation plus the signed LedgerCommitInfo. Finality of a handoff commit
+// is a DESCENDANT CommitQC that (a) names this commit as its parent, (b)
+// sits at the consecutive next round, (c) carries its own old-quorum weight
+// and (d) binds a committed root hash. A larger round number alone is not
+// finality.
+type CommitQC struct {
+	CommitRecordID    []byte // the commit statement this QC certifies
+	Round             uint64 // root round of this commit
+	ParentCommitID    []byte // the commit this one extends (the 2-chain link)
+	CommittedRootHash []byte // root block hash bound by the signed LedgerCommitInfo
+	QuorumWeight      uint64 // distinct old-assignment signer weight on this QC
+}
+
+// preHandoffHeadCommitID is a deterministic stand-in for the last committed
+// root state the handoff extends — the parent of the handoff commit.
+func preHandoffHeadCommitID(predecessor []byte, attempt uint64) []byte {
+	return sha256Bytes(marshalCBOR(cArray{cText("UNICITY_HANDOFF_HEAD"), cBytes(predecessor), cUint(attempt)}))
+}
+
+// committedRootHashFor is the deterministic committed root hash a CommitQC
+// binds in the model (the signed LedgerCommitInfo's committed-state field).
+func committedRootHashFor(commitRecordID []byte, round uint64) []byte {
+	return sha256Bytes(marshalCBOR(cArray{cText("UNICITY_ROOT_COMMIT"), cBytes(commitRecordID), cUint(round)}))
+}
 
 // NewHandoff starts an Idle handoff for a candidate.
 func NewHandoff(c Candidate, protocolVer uint64) *Handoff {
@@ -275,6 +309,13 @@ func (h *Handoff) Commit(commitRound, activationRound uint64, successorTRHash []
 	h.ActivationRound = activationRound
 	h.SuccessorTRHash = successorTRHash
 	h.CommitRecordID = CommitRecordID(h.FrozenID, activationRound, successorTRHash, h.Candidate.Attempt, h.Candidate.PredecessorHash)
+	h.SelfCommitQC = CommitQC{
+		CommitRecordID:    append([]byte(nil), h.CommitRecordID...),
+		Round:             commitRound,
+		ParentCommitID:    preHandoffHeadCommitID(h.Candidate.PredecessorHash, h.Candidate.Attempt),
+		CommittedRootHash: committedRootHashFor(h.CommitRecordID, commitRound),
+		QuorumWeight:      h.EndorsementWeight, // the commit is under the same old quorum that endorsed
+	}
 	h.ActivationRecord = ActivatedTrustBase{
 		BodyIdentity:       append([]byte(nil), h.BodyIdentity...),
 		EpochStart:         activationRound,
@@ -284,27 +325,107 @@ func (h *Handoff) Commit(commitRound, activationRound uint64, successorTRHash []
 	return nil
 }
 
-// FinalizeCommit records finality under the ROOT ORDERING RULE, not a round
-// count: a descendant commit at descendantCommitRound extends this commit
-// (a 2-chain). It requires descendantCommitRound > h.CommitRound. This is
-// what establishes finality; PipelineDepth only keeps A* outside the reorg
-// window. Idempotent; only from Committed onward.
-func (h *Handoff) FinalizeCommit(descendantCommitRound uint64) error {
+// DescendantCommitQC builds the CommitQC that would finalise this handoff
+// commit under the root 2-chain: a commit at the consecutive next round,
+// naming this commit as its parent, carrying quorumWeight. Test/scenario
+// helper — real code receives this object from the root consensus, it does
+// not fabricate it.
+func (h *Handoff) DescendantCommitQC(quorumWeight uint64) CommitQC {
+	childID := sha256Bytes(marshalCBOR(cArray{cText("UNICITY_ROOT_COMMIT_CHILD"), cBytes(h.CommitRecordID)}))
+	round := h.CommitRound + 1
+	return CommitQC{
+		CommitRecordID:    childID,
+		Round:             round,
+		ParentCommitID:    append([]byte(nil), h.CommitRecordID...),
+		CommittedRootHash: committedRootHashFor(childID, round),
+		QuorumWeight:      quorumWeight,
+	}
+}
+
+// FinalizeCommit records finality under the ROOT 2-CHAIN RULE. It takes a
+// DESCENDANT CommitQC (produced by the root consensus, never fabricated
+// here) and oldThreshold, and checks the real relation:
+//
+//   - the descendant's ParentCommitID is THIS commit's CommitRecordID
+//     (it extends this commit, not some unrelated higher-round commit);
+//   - the descendant sits at the consecutive next round (CommitRound + 1) —
+//     a timeout gap is not a 2-chain;
+//   - the descendant carries its own old-quorum weight ≥ oldThreshold;
+//   - the descendant binds a 32-byte committed root hash (the signed
+//     LedgerCommitInfo's committed-state field).
+//
+// A larger round number on its own no longer finalises anything.
+// PipelineDepth still only keeps A* outside the reorg window. Idempotent;
+// only from Committed onward.
+func (h *Handoff) FinalizeCommit(descendant CommitQC, oldThreshold uint64) error {
 	if h.Phase < PhaseCommitted || h.Phase == PhaseAborted {
 		return errPhase
 	}
-	if descendantCommitRound <= h.CommitRound {
-		return fmt.Errorf("d4: finality needs a descendant commit after round %d, got %d", h.CommitRound, descendantCommitRound)
+	if len(descendant.CommitRecordID) != 32 || len(descendant.ParentCommitID) != 32 {
+		return errFinalityShape
+	}
+	if !bytesEqual(descendant.ParentCommitID, h.CommitRecordID) {
+		return errFinalityLink
+	}
+	if descendant.Round != h.CommitRound+1 {
+		return errFinalityGap
+	}
+	if len(descendant.CommittedRootHash) != 32 {
+		return errFinalityRoot
+	}
+	if descendant.QuorumWeight < oldThreshold {
+		return errFinalityQuorum
 	}
 	h.CommitFinalized = true
-	h.FinalityDescendantRound = descendantCommitRound
+	h.FinalityEvidence = descendant
+	h.FinalityDescendantRound = descendant.Round
 	return nil
 }
 
-// FirstSuccessorProposalLeader returns the identity that produces the first
-// governance proposal under the new assignment — the leader named by the
-// committed successor technical record. It carries the commit record (an
-// old-quorum QC over CommitDomainFor) as its authorisation witness.
+// FirstSuccessorProposal is the bootstrap step the re-review asked to make
+// explicit: BEFORE any new-assignment certified root round ≥ A* exists,
+// who produces the first proposal and what authorises it.
+//
+//   - Leader: the identity named by the committed successor technical
+//     record (SuccessorTRHash). It is fixed at Commit, under the old quorum.
+//   - BuildsOn: the last old-set finalised committed root — this handoff's
+//     own finalised commit (SelfCommitQC + FinalityEvidence), NOT a
+//     new-set round (none exists yet).
+//   - Authorisation: the finalised commit chain (CommitRecordID +
+//     SelfCommitQC + the descendant FinalityEvidence). The new set carries
+//     this proof; it does not need the old set online.
+//   - ProposedRound: A*. Once THIS proposal is certified it becomes the
+//     first certified round ≥ A* — the activation round.
+//
+// Available only from a FINALISED commit; a bare commit cannot bootstrap.
+type SuccessorProposal struct {
+	Leader        []byte
+	BuildsOnRoot  []byte // committed root hash the new set extends
+	CommitRecord  []byte
+	CommitQC      CommitQC
+	FinalityQC    CommitQC
+	ProposedRound uint64 // A*
+}
+
+func (h *Handoff) FirstSuccessorProposal() (SuccessorProposal, bool) {
+	if h.Phase != PhaseCommitted && h.Phase != PhaseActivated && h.Phase != PhaseAcknowledged {
+		return SuccessorProposal{}, false
+	}
+	if !h.CommitFinalized {
+		return SuccessorProposal{}, false
+	}
+	return SuccessorProposal{
+		Leader:        append([]byte(nil), h.SuccessorTRHash...),
+		BuildsOnRoot:  append([]byte(nil), h.FinalityEvidence.CommittedRootHash...),
+		CommitRecord:  append([]byte(nil), h.CommitRecordID...),
+		CommitQC:      h.SelfCommitQC,
+		FinalityQC:    h.FinalityEvidence,
+		ProposedRound: h.ActivationRound,
+	}, true
+}
+
+// FirstSuccessorProposalLeader is the leader identity alone (kept for
+// callers that only need the name).
 func (h *Handoff) FirstSuccessorProposalLeader() ([]byte, bool) {
 	if h.Phase < PhaseCommitted || h.Phase == PhaseAborted {
 		return nil, false

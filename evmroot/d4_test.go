@@ -80,11 +80,39 @@ func TestD4_ActivationRequiresFinalizedCommit(t *testing.T) {
 	if err := h.Activate(10); err != errCommitNotFinal {
 		t.Fatalf("activated on round count alone: %v", err)
 	}
-	if err := h.FinalizeCommit(h.CommitRound + 1); err != nil {
+	// A merely-larger round is NOT finality: an unrelated higher-round QC
+	// (wrong parent) and a timeout-gap QC (non-consecutive) are both
+	// rejected.
+	unrelated := h.DescendantCommitQC(oldT)
+	unrelated.ParentCommitID = rep(0x7A, 32)
+	if err := h.FinalizeCommit(unrelated, oldT); err != errFinalityLink {
+		t.Fatalf("an unrelated higher-round QC finalised the commit: %v", err)
+	}
+	gap := h.DescendantCommitQC(oldT)
+	gap.Round = h.CommitRound + 2
+	if err := h.FinalizeCommit(gap, oldT); err != errFinalityGap {
+		t.Fatalf("a timeout-gap QC finalised the commit: %v", err)
+	}
+	weak := h.DescendantCommitQC(oldT)
+	weak.QuorumWeight = oldT - 1
+	if err := h.FinalizeCommit(weak, oldT); err != errFinalityQuorum {
+		t.Fatalf("a below-quorum descendant finalised the commit: %v", err)
+	}
+	if err := h.FinalizeCommit(h.DescendantCommitQC(oldT), oldT); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.Activate(10); err != nil {
 		t.Fatalf("activation rejected after finalize: %v", err)
+	}
+	// The bootstrap step is now explicit: a finalised commit yields the
+	// first successor proposal, built on the finalised committed root, not
+	// on a new-set round.
+	sp, ok := h.FirstSuccessorProposal()
+	if !ok || len(sp.Leader) == 0 || len(sp.BuildsOnRoot) != 32 || sp.ProposedRound != h.ActivationRound {
+		t.Fatalf("first successor proposal not well-formed: %+v ok=%v", sp, ok)
+	}
+	if !bytes.Equal(sp.FinalityQC.CommittedRootHash, sp.BuildsOnRoot) {
+		t.Fatal("successor proposal does not build on the finalised committed root")
 	}
 }
 
@@ -132,6 +160,37 @@ func TestD4_MultiReplicaGlobalInvariants(t *testing.T) {
 	}
 	if !sawLiveness {
 		t.Fatal("no conditional-liveness run in the suite")
+	}
+}
+
+func TestD4_HandoffProgressAndAbortModel(t *testing.T) {
+	runs := D4ProgressRuns()
+	names := map[string]bool{}
+	for _, p := range runs {
+		names[p.Name] = true
+		if !p.Holds {
+			t.Errorf("%s: progress/abort property does not hold: %+v", p.Name, p)
+		}
+	}
+	// The reviewer's split counterexample must be covered and resolved.
+	if !names["no_honest_split_byzantine_withholding"] {
+		t.Fatal("the honest-weight-split scenario is not modelled")
+	}
+	if !names["view_change_carries_lock"] || !names["commit_then_abort_cannot_reach_quorum"] ||
+		!names["combined_delay_restart_commit_vs_abort"] {
+		t.Fatal("view-change lock / commit-vs-abort / combined schedule runs missing")
+	}
+	// Directly: a quorum forms for exactly one FrozenID with b/e Byzantine
+	// and withholding, and none forms for the other.
+	for _, p := range runs {
+		if p.Name == "no_honest_split_byzantine_withholding" {
+			if !p.QuorumFormed || !p.SplitAvoided || len(p.EndorsedFrozenIDs) != 1 {
+				t.Fatalf("honest weight was split or no quorum formed: %+v", p)
+			}
+		}
+		if p.Name == "combined_delay_restart_commit_vs_abort" && p.AbortReachedQuorum {
+			t.Fatal("an abort of a committed attempt reached a quorum in the combined schedule")
+		}
 	}
 }
 

@@ -506,7 +506,7 @@
     },
     {
       "name": "activation_requires_finalized_commit",
-      "note": "observedRootRound ≥ A* is not enough: Activate fails until FinalizeCommit records a descendant commit at a round \u003e commitRound (the root 2-chain). The first successor proposal at A* carries CommitRecordID as its old-quorum authorisation.",
+      "note": "observedRootRound ≥ A* is not enough, and a larger round number is not finality. FinalizeCommit takes a DESCENDANT CommitQC and checks: ParentCommitID == this CommitRecordID, Round == CommitRound+1 (no timeout gap), QuorumWeight ≥ old threshold, a 32-byte committed root hash. An unrelated higher-round QC and a timeout-gap QC are both rejected. The first successor proposal is produced by the committed successor-TR leader and builds on the FINALISED committed root — not on a new-set round, none of which exists yet — at A*.",
       "kind": "finality",
       "is_counterexample": false,
       "g2_at_most_one_statement_reaches_quorum": true,
@@ -530,11 +530,101 @@
       "g5_liveness": "reached"
     }
   ],
+  "handoff_progress_and_abort": [
+    {
+      "name": "no_honest_split_byzantine_withholding",
+      "note": "Byzantine b/e (weight 7 = f_W) withhold. Honest a/c/d follow the view-1 leader's single proposal X; 10+5+2 = 17 reaches the quorum. No honest weight lands on Y — the a→X / c,d→Y split the review posited requires honest signers to choose independently, which the view rule forbids.",
+      "threshold": 17,
+      "faulty_weight_bound": 7,
+      "byzantine_signers": [
+        "root-b",
+        "root-e"
+      ],
+      "online_honest_signers": [
+        "root-a",
+        "root-c",
+        "root-d"
+      ],
+      "frozen_ids_that_reached_a_quorum": [
+        "X"
+      ],
+      "abort_reached_a_quorum": false,
+      "a_quorum_formed": true,
+      "honest_weight_not_split": true,
+      "property_holds": true
+    },
+    {
+      "name": "view_change_carries_lock",
+      "note": "View 1 partially endorsed X (a only). The view-2 leader proposing Y is rejected (drops the carried lock X). The valid view-2 leader re-proposes X; a/c/d endorse it, 17 reaches the quorum. Y never gathers honest weight across either view.",
+      "threshold": 17,
+      "faulty_weight_bound": 7,
+      "byzantine_signers": [
+        "root-b",
+        "root-e"
+      ],
+      "online_honest_signers": [
+        "root-a",
+        "root-c",
+        "root-d"
+      ],
+      "frozen_ids_that_reached_a_quorum": [
+        "X"
+      ],
+      "abort_reached_a_quorum": false,
+      "a_quorum_formed": true,
+      "honest_weight_not_split": true,
+      "property_holds": true
+    },
+    {
+      "name": "commit_then_abort_cannot_reach_quorum",
+      "note": "X endorsed and committed in view 1. Honest signers refuse to sign an abort of a committed attempt (durable state); only Byzantine weight 7 is available for the abort, 7 \u003c 17. A committed handoff and its abort cannot both be certified.",
+      "threshold": 17,
+      "faulty_weight_bound": 7,
+      "byzantine_signers": [
+        "root-b",
+        "root-e"
+      ],
+      "online_honest_signers": [
+        "root-a",
+        "root-c",
+        "root-d"
+      ],
+      "frozen_ids_that_reached_a_quorum": null,
+      "abort_reached_a_quorum": false,
+      "a_quorum_formed": true,
+      "honest_weight_not_split": true,
+      "property_holds": true
+    },
+    {
+      "name": "combined_delay_restart_commit_vs_abort",
+      "note": "Endorsements delivered out of order (d, a, then delayed c); root-a restarts and its durable state blocks a switch to Y; X reaches 17; a subsequent abort of the committed attempt gets only Byzantine weight 7 \u003c 17.",
+      "threshold": 17,
+      "faulty_weight_bound": 7,
+      "byzantine_signers": [
+        "root-b",
+        "root-e"
+      ],
+      "online_honest_signers": [
+        "root-a",
+        "root-c",
+        "root-d"
+      ],
+      "frozen_ids_that_reached_a_quorum": [
+        "X"
+      ],
+      "abort_reached_a_quorum": false,
+      "a_quorum_formed": true,
+      "honest_weight_not_split": true,
+      "property_holds": true
+    }
+  ],
   "summary": {
     "scenarios": 12,
     "all_phase_expectations_met": true,
     "all_invariants_held": true,
     "multi_replica_runs": 9,
-    "all_global_invariants_held": true
+    "all_global_invariants_held": true,
+    "progress_runs": 4,
+    "all_progress_properties_hold": true
   }
 }
