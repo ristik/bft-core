@@ -8,7 +8,30 @@ round; the proof models use **real hash-linked header chains and Merkle paths**
 that fail on a broken link / wrong root / below-threshold seal / wrong digest,
 not trusted booleans; **`BridgeLedger.Solvent()`** checks `Balance + Shortfall ==
 L − P` with no deficit (not just `L ≥ D ≥ P`); checkpoint freshness is a
-**derived, strict** policy. Freeze once re-reviewed by a cryptography reviewer
+**derived, strict** policy.
+
+Revised again after the second review (#82):
+
+- **The shared seal now authenticates `r*` itself.** `AnchorSeal` carries `r*`,
+  the epoch, the assignment id, a real-key `WeightSet` and a `Signatures` map;
+  `VerifySeal()` **derives** the threshold as `RootQuorumThreshold(TotalWeight)`
+  (never supplied — a zero threshold is impossible) and verifies each signer's
+  secp256k1 signature over `AnchorSealStatement(r*, epoch, assignmentID)`.
+  Unsigned seals, forged signer entries, substituted roots and cross-epoch
+  replays all fall short of the derived threshold.
+- **Shard paths authenticate their partition/shard/config.** Each
+  `ShardAnchorPath` carries a certified `ConfigHash`, and the path folds from
+  `shardAnchorLeaf(pid ‖ shardID ‖ configHash ‖ shardStateRoot)`, so relabelling
+  `7/0 → 99/attacker` no longer recomputes to `r*`.
+- **`ProofBundle` separates structural availability from verification** —
+  `CarriesEvidence()` (has the pieces) vs `OfflineVerify()` (actually checks the
+  seal + path + subject). A live bundle with only a receipt no longer passes.
+- **Checkpoint freshness rests on an enforced floor** —
+  `ConsensusMinRoundPeriodSeconds` is the protocol-enforced minimum real time a
+  certified root round can take; `FreshnessPolicy.Valid()` rejects any per-round
+  floor below it.
+
+Freeze once re-reviewed by a cryptography reviewer
 and a custody-accounting reviewer, neither the author. Depends on ADR
 0003/0006/0007. Closes the M0 design set.
 
@@ -37,9 +60,12 @@ Adopt the profile in
    distance**, **explicitly not constant-size**. Retired-key signatures alone are
    insufficient.
 
-3. **Shared-seal multi-shard anchor** — one seal `C*` / root `r*`, verified once;
-   one shard path per touched shard; each leaf checked under its own shard state
-   root. Path count grows with touched shards.
+3. **Shared-seal multi-shard anchor** — one seal `C*` / root `r*`, verified once
+   against **real signatures over `r*`** and a **derived** quorum threshold; one
+   shard path per touched shard, each folding from a leaf that **binds the
+   certified partition/shard/config**; each transaction leaf checked under its
+   own shard state root. Path count grows with touched shards; seal verification
+   does not.
 
 4. **Custody accounting** — `NativeSupply = S_0 − Burn`; `native_uct` / `wuct` /
    `bridged` are distinct claims; the vault's native balance is not
@@ -57,11 +83,14 @@ Adopt the profile in
 
 ## Deliverables
 
-- `evmroot/d6checkpoint.go`, `d6proof.go`, `d6custody.go`.
-- `evmroot/testdata/d6-vectors.json` — checkpoint/windows, historical-block
-  authentication (constant-size false, header count grows), multi-shard anchor
-  (one seal, two paths), lock-witness refresh, supply/backing, custody
-  walkthrough, token profile, redemption relation.
+- `evmroot/d6checkpoint.go`, `d6proof.go`, `d6custody.go`, `d6seal.go`
+  (deterministic real-key seal fixtures).
+- `evmroot/testdata/d6-vectors.json` — checkpoint/windows (incl. the enforced
+  per-round floor), historical-block authentication (constant-size false, header
+  count grows), multi-shard anchor (verifying case + relabel / unsigned / forged
+  / substituted-root / wrong-epoch negatives), proof-bundle offline verification,
+  lock-witness refresh, supply/backing, custody walkthrough, token profile,
+  redemption relation.
 - `evmroot/cmd/d6vectors` + `TestD6_VectorsMatchGolden`.
 
 ## Consequences
@@ -83,3 +112,13 @@ Adopt the profile in
   (count) independent, because they are re-derived from different inputs.
 - **Claim an MMR now.** Rejected: the MMR is optional compression; the
   header-chain and state-proof paths are the required baseline and are linear.
+- **Trust a supplied seal threshold and a signer name list.** Rejected on
+  re-review: a supplied threshold can be zero and a name is not a signature. The
+  threshold is derived from the authenticated assignment and each signer must
+  present a signature over `r*`.
+- **Key the shard→root association by a caller-supplied `(partitionID, shardID)`.**
+  Rejected: relabelling then passes. The identity is hashed into the leaf that
+  folds to `r*`.
+- **Let `SelfContained` mean "has non-empty fields".** Rejected: it conflated
+  structural availability with a successful offline check. Split into
+  `CarriesEvidence` and `OfflineVerify`.

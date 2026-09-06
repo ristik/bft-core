@@ -69,14 +69,28 @@ func KeyRetentionRequired(hasOutstandingEvidenceObligation, hasOutstandingRetire
 	return hasOutstandingEvidenceObligation || hasOutstandingRetirementObligation
 }
 
+// ConsensusMinRoundPeriodSeconds is the protocol-enforced lower bound on
+// how little real time one certified root round can take. It is NOT a
+// deployment tuning knob: the root chain's own round machine cannot
+// finalise a round faster than one network propagation delay plus the two
+// BFT voting phases (propose→vote→commit) at the minimum permitted round
+// timeout. A FreshnessPolicy whose MinRoundPeriodSeconds sits below this
+// bound is not "aggressive" — it is unsound, because it would let a client
+// treat a checkpoint as fresh past the point where the keys backing it
+// could already be withdrawable. This constant is the justified floor the
+// re-review asked for; a deployment may raise MinRoundPeriodSeconds above
+// it (slower observed pacing) but Valid() rejects anything below it.
+const ConsensusMinRoundPeriodSeconds uint64 = 2
+
 // FreshnessPolicy is a checkpoint acquisition/age policy, in elapsed
 // seconds. It is a CLIENT policy derived from real-time protection, round
 // pacing, churn margin and acquisition latency — not simply Δ_hold rounds
-// times a period.
+// times a period. The per-round floor it uses must be at least the
+// protocol-enforced ConsensusMinRoundPeriodSeconds (checked by Valid).
 type FreshnessPolicy struct {
 	DeltaHoldRounds       uint64 // Δ_hold in certified root rounds
 	DeltaEvRounds         uint64 // Δ_ev in certified root rounds
-	MinRoundPeriodSeconds uint64 // conservative floor on the real time one certified root round takes
+	MinRoundPeriodSeconds uint64 // conservative floor on the real time one certified root round takes; >= ConsensusMinRoundPeriodSeconds
 	ChurnMarginSeconds    uint64 // slack for validator-set churn faster than the nominal pacing
 	AcquireLatencySeconds uint64 // worst-case time to fetch and verify a fresh checkpoint
 }
@@ -113,9 +127,11 @@ func (p FreshnessPolicy) MaxCheckpointStalenessSeconds() uint64 {
 }
 
 // Valid reports whether the policy admits a positive, strictly-safe
-// staleness limit.
+// staleness limit AND rests on a per-round floor the protocol actually
+// enforces (>= ConsensusMinRoundPeriodSeconds) — an illustrative period
+// below the enforced minimum is not a guarantee and is rejected.
 func (p FreshnessPolicy) Valid() bool {
-	return p.MinRoundPeriodSeconds > 0 &&
+	return p.MinRoundPeriodSeconds >= ConsensusMinRoundPeriodSeconds &&
 		p.MaxCheckpointStalenessSeconds() > 0 &&
 		p.MaxCheckpointStalenessSeconds() < p.MinRealTimeProtectionSeconds()
 }

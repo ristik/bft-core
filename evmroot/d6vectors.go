@@ -15,6 +15,7 @@ type D6VectorSet struct {
 	Windows                D6WindowsCase       `json:"window_nesting_and_key_retention"`
 	HistoricalAuth         []D6HistAuthCase    `json:"historical_block_authentication"`
 	MultiShardAnchor       []D6AnchorCase      `json:"multi_shard_anchor"`
+	ProofBundles           []D6ProofBundleCase `json:"proof_bundle_offline_verification"`
 	LockRefresh            []D6LockRefreshCase `json:"lock_witness_refresh"`
 	Supply                 D6SupplyCase        `json:"supply_and_backing"`
 	Custody                []CustodyStep       `json:"custody_walkthrough"`
@@ -44,6 +45,8 @@ type D6FreshnessCase struct {
 	MaxCheckpointStaleness     uint64 `json:"max_checkpoint_staleness_seconds"`
 	StrictlyLessThanProtection bool   `json:"staleness_strictly_less_than_protection"`
 	PolicyValid                bool   `json:"policy_valid"`
+	EnforcedMinRoundPeriod     uint64 `json:"enforced_min_round_period_seconds"`
+	SubFloorPeriodRejected     bool   `json:"policy_below_enforced_floor_rejected"`
 }
 
 type D6WindowsCase struct {
@@ -70,9 +73,18 @@ type D6AnchorCase struct {
 	Verified         bool   `json:"verified"`
 	SealVerifiedOnce bool   `json:"seal_verified_once"`
 	SealWeight       uint64 `json:"seal_weight"`
+	SealThreshold    uint64 `json:"seal_threshold"`
 	ShardPathCount   int    `json:"shard_path_count"`
 	TouchedShards    int    `json:"touched_shards"`
 	Reason           string `json:"reason,omitempty"`
+}
+
+type D6ProofBundleCase struct {
+	Name            string `json:"name"`
+	Mode            string `json:"mode"`
+	CarriesEvidence bool   `json:"carries_evidence_structurally"`
+	OfflineVerifies bool   `json:"verifies_offline"`
+	Note            string `json:"note,omitempty"`
 }
 
 type D6LockRefreshCase struct {
@@ -148,8 +160,10 @@ func BuildD6Vectors() D6VectorSet {
 		DeltaHoldRounds: 20_000, DeltaEvRounds: 8_000,
 		MinRoundPeriodSeconds: 6, ChurnMarginSeconds: 3_600, AcquireLatencySeconds: 1_800,
 	}
+	subFloor := fp
+	subFloor.MinRoundPeriodSeconds = ConsensusMinRoundPeriodSeconds - 1 // below the enforced floor
 	vs.Freshness = D6FreshnessCase{
-		Note:                       "Max checkpoint staleness = (Δ_hold - Δ_ev) real seconds - churn margin - acquisition latency, and strictly < the min real-time protection. Illustrative client policy; a deployment pins its own values.",
+		Note:                       "Max checkpoint staleness = (Δ_hold - Δ_ev) real seconds - churn margin - acquisition latency, and strictly < the min real-time protection. The per-round floor must be >= ConsensusMinRoundPeriodSeconds (a protocol-enforced minimum, not a tuning knob); a policy below it is rejected. A deployment may raise MinRoundPeriodSeconds above the floor for slower observed pacing.",
 		DeltaHoldRounds:            fp.DeltaHoldRounds,
 		DeltaEvRounds:              fp.DeltaEvRounds,
 		MinRoundPeriodSeconds:      fp.MinRoundPeriodSeconds,
@@ -159,6 +173,8 @@ func BuildD6Vectors() D6VectorSet {
 		MaxCheckpointStaleness:     fp.MaxCheckpointStalenessSeconds(),
 		StrictlyLessThanProtection: fp.MaxCheckpointStalenessSeconds() < fp.MinRealTimeProtectionSeconds(),
 		PolicyValid:                fp.Valid(),
+		EnforcedMinRoundPeriod:     ConsensusMinRoundPeriodSeconds,
+		SubFloorPeriodRejected:     !subFloor.Valid(),
 	}
 
 	// --- window nesting + key retention ----------------------------
@@ -196,21 +212,34 @@ func BuildD6Vectors() D6VectorSet {
 		})
 	}
 
-	// --- multi-shard anchor (real Merkle paths, one shared seal) ------
-	ws := d3Assignment()
-	w, _ := ws.TotalWeight()
-	s0leaf := sha256Bytes([]byte("agg-shard-0-leaf"))
-	s1leaf := sha256Bytes([]byte("agg-shard-1-leaf"))
+	// --- multi-shard anchor (real Merkle paths, real signatures over r*,
+	//     partition/shard/config bound into the leaves) -----------------
+	ws := d6Assignment()
+	const anchorEpoch uint64 = 8
+	anchorAssignmentID := sha256Bytes([]byte("d6-anchor-assignment-epoch-8"))
+	cfg0 := sha256Bytes([]byte("agg-shard-0-config"))
+	cfg1 := sha256Bytes([]byte("agg-shard-1-config"))
 	zero := rep(0x00, 32)
+	s0leaf := sha256Bytes([]byte("agg-shard-0-txleaf"))
+	s1leaf := sha256Bytes([]byte("agg-shard-1-txleaf"))
+	// Shard state roots: tx leaf folds with a zero sibling.
 	s0root := hashNode(s0leaf, zero)
 	s1root := hashNode(s1leaf, zero)
-	rStar := hashNode(s0root, s1root)
-	seal := AnchorSeal{RootStateRoot: rStar, Signers: []string{"root-a", "root-b", "root-c"}, Weights: ws, Threshold: RootQuorumThreshold(w)}
+	// r* is over the two BOUND shard-anchor leaves (partition ‖ shard ‖
+	// config ‖ shard state root), so relabelling any of those breaks it.
+	bl0 := shardAnchorLeaf(0x41474701, "0", cfg0, s0root)
+	bl1 := shardAnchorLeaf(0x41474701, "1", cfg1, s1root)
+	rStar := hashNode(bl0, bl1)
+	stmt := AnchorSealStatement(rStar, anchorEpoch, anchorAssignmentID)
+	seal := AnchorSeal{
+		RootStateRoot: rStar, Epoch: anchorEpoch, AssignmentID: anchorAssignmentID, Weights: ws,
+		Signatures: SignAnchorSeal(stmt, []string{"root-a", "root-b", "root-c"}), // 10+6+5 = 21 >= 17
+	}
 	bundle := AnchorBundle{
 		Seal: seal,
 		ShardPaths: []ShardAnchorPath{
-			{PartitionID: 0x41474701, ShardID: "0", ShardStateRoot: s0root, Path: []PathStep{{Sibling: s1root, Left: false}}},
-			{PartitionID: 0x41474701, ShardID: "1", ShardStateRoot: s1root, Path: []PathStep{{Sibling: s0root, Left: true}}},
+			{PartitionID: 0x41474701, ShardID: "0", ConfigHash: cfg0, ShardStateRoot: s0root, Path: []PathStep{{Sibling: bl1, Left: false}}},
+			{PartitionID: 0x41474701, ShardID: "1", ConfigHash: cfg1, ShardStateRoot: s1root, Path: []PathStep{{Sibling: bl0, Left: true}}},
 		},
 	}
 	leaves := []AnchoredLeaf{
@@ -221,13 +250,89 @@ func BuildD6Vectors() D6VectorSet {
 	badLeaves := append([]AnchoredLeaf(nil), leaves...)
 	badLeaves[1].LeafHash = rep(0x99, 32)
 	badRes := VerifyAnchoredHistory(bundle, badLeaves)
+
+	// seal below threshold: only root-e (weight 1) signs.
 	lowSeal := seal
-	lowSeal.Signers = []string{"root-e"}
+	lowSeal.Signatures = SignAnchorSeal(stmt, []string{"root-e"})
 	lowRes := VerifyAnchoredHistory(AnchorBundle{Seal: lowSeal, ShardPaths: bundle.ShardPaths}, leaves)
+
+	// zero-threshold / unsigned seal: no signatures at all. The derived
+	// threshold is 17, weight 0 -> fails.
+	unsignedSeal := seal
+	unsignedSeal.Signatures = map[string][]byte{}
+	unsignedRes := VerifyAnchoredHistory(AnchorBundle{Seal: unsignedSeal, ShardPaths: bundle.ShardPaths}, leaves)
+
+	// forged signer: "root-a" entry actually signed by root-e's key.
+	forgedSeal := seal
+	forgedSeal.Signatures = map[string][]byte{
+		"root-a": ForgeAnchorSignature(stmt, "root-a", "root-e")["root-a"],
+		"root-b": seal.Signatures["root-b"],
+		"root-c": seal.Signatures["root-c"],
+	}
+	forgedRes := VerifyAnchoredHistory(AnchorBundle{Seal: forgedSeal, ShardPaths: bundle.ShardPaths}, leaves)
+
+	// relabelled shard path: partition 0x41474701 -> 0x99, keeping the same
+	// state root and path. The bound leaf changes, so it no longer folds to
+	// r*. Leaves relabelled to match.
+	relabelBundle := AnchorBundle{Seal: seal, ShardPaths: []ShardAnchorPath{
+		{PartitionID: 0x99, ShardID: "attacker", ConfigHash: cfg0, ShardStateRoot: s0root, Path: bundle.ShardPaths[0].Path},
+		bundle.ShardPaths[1],
+	}}
+	relabelLeaves := []AnchoredLeaf{
+		{PartitionID: 0x99, ShardID: "attacker", LeafHash: s0leaf, Path: leaves[0].Path},
+		leaves[1],
+	}
+	relabelRes := VerifyAnchoredHistory(relabelBundle, relabelLeaves)
+
+	// substituted r*: the attacker picks a new root r' and can rebuild
+	// Merkle paths to it at will, but the honest signatures were made over
+	// r*, so VerifySeal counts zero valid signatures for r' and the whole
+	// bundle fails before any path is even considered.
+	rPrime := hashNode(sha256Bytes([]byte("attacker-bl0")), sha256Bytes([]byte("attacker-bl1")))
+	subSeal := AnchorSeal{RootStateRoot: rPrime, Epoch: anchorEpoch, AssignmentID: anchorAssignmentID, Weights: ws, Signatures: seal.Signatures}
+	subBundle := AnchorBundle{Seal: subSeal, ShardPaths: []ShardAnchorPath{
+		{PartitionID: 0x41474701, ShardID: "0", ConfigHash: cfg0, ShardStateRoot: s0root, Path: []PathStep{{Sibling: sha256Bytes([]byte("attacker-bl1")), Left: false}}},
+	}}
+	subRes := VerifyAnchoredHistory(subBundle, nil)
+
+	// wrong epoch: same r*, signatures made for epoch 8, seal claims epoch 9.
+	wrongEpochSeal := seal
+	wrongEpochSeal.Epoch = 9
+	wrongEpochRes := VerifyAnchoredHistory(AnchorBundle{Seal: wrongEpochSeal, ShardPaths: bundle.ShardPaths}, leaves)
+
 	vs.MultiShardAnchor = []D6AnchorCase{
-		{Name: "two_aggregator_shards_one_seal", Verified: okRes.Verified, SealVerifiedOnce: okRes.SealVerifiedOnce, SealWeight: okRes.SealWeight, ShardPathCount: okRes.ShardPathCount, TouchedShards: 2},
-		{Name: "leaf_path_does_not_recompute", Verified: badRes.Verified, SealVerifiedOnce: badRes.SealVerifiedOnce, ShardPathCount: badRes.ShardPathCount, Reason: badRes.Reason},
-		{Name: "seal_below_threshold", Verified: lowRes.Verified, SealVerifiedOnce: lowRes.SealVerifiedOnce, Reason: lowRes.Reason},
+		{Name: "two_aggregator_shards_one_seal", Verified: okRes.Verified, SealVerifiedOnce: okRes.SealVerifiedOnce, SealWeight: okRes.SealWeight, SealThreshold: okRes.SealThreshold, ShardPathCount: okRes.ShardPathCount, TouchedShards: 2},
+		{Name: "leaf_path_does_not_recompute", Verified: badRes.Verified, SealVerifiedOnce: badRes.SealVerifiedOnce, SealWeight: badRes.SealWeight, SealThreshold: badRes.SealThreshold, ShardPathCount: badRes.ShardPathCount, Reason: badRes.Reason},
+		{Name: "seal_below_threshold", Verified: lowRes.Verified, SealVerifiedOnce: lowRes.SealVerifiedOnce, SealWeight: lowRes.SealWeight, SealThreshold: lowRes.SealThreshold, Reason: lowRes.Reason},
+		{Name: "unsigned_seal_zero_weight", Verified: unsignedRes.Verified, SealWeight: unsignedRes.SealWeight, SealThreshold: unsignedRes.SealThreshold, Reason: unsignedRes.Reason},
+		{Name: "forged_signer_entry_not_counted", Verified: forgedRes.Verified, SealVerifiedOnce: forgedRes.SealVerifiedOnce, SealWeight: forgedRes.SealWeight, SealThreshold: forgedRes.SealThreshold, Reason: forgedRes.Reason},
+		{Name: "relabelled_shard_path_rejected", Verified: relabelRes.Verified, SealVerifiedOnce: relabelRes.SealVerifiedOnce, SealWeight: relabelRes.SealWeight, SealThreshold: relabelRes.SealThreshold, Reason: relabelRes.Reason},
+		{Name: "substituted_root_no_valid_signatures", Verified: subRes.Verified, SealWeight: subRes.SealWeight, SealThreshold: subRes.SealThreshold, Reason: subRes.Reason},
+		{Name: "wrong_epoch_seal_rejected", Verified: wrongEpochRes.Verified, SealWeight: wrongEpochRes.SealWeight, SealThreshold: wrongEpochRes.SealThreshold, Reason: wrongEpochRes.Reason},
+	}
+
+	// --- proof bundle: structural availability vs offline verification --
+	pbSubject := sha256Bytes([]byte("exported-subject"))
+	pbRoot := hashNode(shardAnchorLeaf(7, "0", cfg0, hashNode(pbSubject, zero)), zero)
+	pbStmt := AnchorSealStatement(pbRoot, anchorEpoch, anchorAssignmentID)
+	pbAnchor := AnchorBundle{
+		Seal:       AnchorSeal{RootStateRoot: pbRoot, Epoch: anchorEpoch, AssignmentID: anchorAssignmentID, Weights: ws, Signatures: SignAnchorSeal(pbStmt, []string{"root-a", "root-b", "root-c"})},
+		ShardPaths: []ShardAnchorPath{{PartitionID: 7, ShardID: "0", ConfigHash: cfg0, ShardStateRoot: hashNode(pbSubject, zero), Path: []PathStep{{Sibling: zero, Left: false}}}},
+	}
+	pbLeaf := AnchoredLeaf{PartitionID: 7, ShardID: "0", LeafHash: pbSubject, Path: []PathStep{{Sibling: zero, Left: false}}}
+	pbGood := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: pbSubject, Mode: AuthLiveCertificate, LiveAnchor: &pbAnchor, LiveLeaf: &pbLeaf, Receipt: []byte("r")}
+	pbNaked := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: pbSubject, Mode: AuthLiveCertificate, Receipt: []byte("r")}
+	pbWeak := pbGood
+	weakSeal := pbAnchor
+	weakSeal.Seal.Signatures = SignAnchorSeal(pbStmt, []string{"root-e"})
+	pbWeak.LiveAnchor = &weakSeal
+	vs.ProofBundles = []D6ProofBundleCase{
+		{Name: "live_with_verifying_anchor", Mode: "live_certificate", CarriesEvidence: pbGood.CarriesEvidence(), OfflineVerifies: pbGood.OfflineVerify(nil),
+			Note: "carries a certified seal + shard path proving the subject; verifies offline"},
+		{Name: "live_receipt_only_no_certificate_proof", Mode: "live_certificate", CarriesEvidence: pbNaked.CarriesEvidence(), OfflineVerifies: pbNaked.OfflineVerify(nil),
+			Note: "non-empty context/subject/receipt but no anchor evidence — neither structurally complete nor offline-verifiable"},
+		{Name: "live_anchor_below_threshold", Mode: "live_certificate", CarriesEvidence: pbWeak.CarriesEvidence(), OfflineVerifies: pbWeak.OfflineVerify(nil),
+			Note: "structurally complete but the seal is below the derived quorum — offline verification fails"},
 	}
 
 	// --- lock witness refresh (real proofs) ------------------------

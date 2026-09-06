@@ -67,10 +67,21 @@ maxCheckpointStaleness = minRealTimeProtection − acquireLatency        (and st
 
 so that a client refreshing at the last permitted moment still completes the
 refresh **before** any key backing the anchor could become withdrawable
-(`acquireLatency` is left as headroom). `FreshnessPolicy.Valid()` fails for a
+(`acquireLatency` is left as headroom).
+
+The re-review asked for a **justified, enforced** lower bound on `minRoundPeriod`
+— an illustrative period is not a guarantee. `ConsensusMinRoundPeriodSeconds` is
+that floor: the root chain's own round machine cannot finalise a certified round
+faster than one network propagation delay plus the two BFT voting phases
+(propose→vote→commit) at the minimum permitted round timeout, so no smaller
+per-round time is physically reachable. It is **not** a tuning knob.
+`FreshnessPolicy.Valid()` now rejects any policy with
+`MinRoundPeriodSeconds < ConsensusMinRoundPeriodSeconds` (as well as any
 pacing/protection combination that cannot support a positive, strictly-safe
-limit. This is an **illustrative** derivation; a deployment pins its own numbers.
-Vector `checkpoint_freshness_policy` (`staleness_strictly_less_than_protection: true`);
+limit). A deployment may *raise* `MinRoundPeriodSeconds` above the floor for
+slower observed pacing, but not below it. Vector `checkpoint_freshness_policy`
+(`staleness_strictly_less_than_protection: true`, `policy_valid: true`,
+`enforced_min_round_period_seconds`, `policy_below_enforced_floor_rejected: true`);
 `TestD6_CheckpointFreshnessDerivedAndStrict`.
 
 **Key retention** (`KeyRetentionRequired`): an evidence-verification key is
@@ -85,8 +96,26 @@ The models here use **real hash-linked fixtures**, not trusted booleans: a
 uses `Keccak(RLP(header))`; the linkage property is identical), and the anchor /
 lock paths are actual Merkle paths folded with `hashNode(a,b) = SHA-256(a ‖ b)`.
 
-**`ProofBundle.SelfContained`**: verified offline given a recent trusted head
-hash — for the ancestry mode it actually runs `AuthenticateOldBlock`.
+**`ProofBundle` — structural availability vs offline verification**: the
+first-review `SelfContained` returned `true` for any live-mode bundle with a
+non-empty context and subject, without carrying any certificate/receipt proof.
+Now the two are separate:
+
+- `CarriesEvidence()` — **structural only**: the bundle has the pieces its mode
+  needs (live mode: a `LiveAnchor`, a `LiveLeaf`, and a non-empty `Receipt`;
+  ancestry mode: a non-empty header chain). It runs no verification.
+- `OfflineVerify(trustedHeadHash)` — **actually verifies**. Live mode: the
+  carried anchor's seal verifies (real signatures over `r*`), the leaf recomputes
+  under its shard path to `r*`, and the leaf **is** the subject. Ancestry mode:
+  `AuthenticateOldBlock` walks the header chain to `trustedHeadHash`.
+- `SelfContained` is retained as an alias for `OfflineVerify` — it now means
+  "verifies offline", not "has non-empty fields".
+
+Vectors `proof_bundle_offline_verification`: `live_with_verifying_anchor`
+(carries + verifies), `live_receipt_only_no_certificate_proof` (a receipt but no
+anchor — neither carries nor verifies), `live_anchor_below_threshold`
+(structurally complete, seal below the derived quorum — does not verify);
+`TestD6_ProofBundleOfflineVerification`.
 
 **Historical header ancestry** (`AuthenticateOldBlock(subjectHash, chain,
 trustedHeadHash)`): walks a `[]Header` from a recently authenticated head
@@ -98,15 +127,39 @@ grows: 500 vs 20 for a shallower distance) and **never constant-size**
 Retired-key signatures are not part of this path at all. Vectors
 `historical_block_authentication`; `TestD6_HistoricalAuthWalksARealChain`.
 
-**Shared-seal multi-shard anchor** (`VerifyAnchoredHistory`): `AnchorSeal` carries
-`r*`, the signer node-ids, the D3 `WeightSet` and the threshold —
-`VerifySeal()` sums **unique authorised signer weight** and compares, **once**.
-Each `ShardAnchorPath` recomputes (`evalPath`) to `r*`; each `AnchoredLeaf`
-recomputes to its **own shard's** authenticated state root. Path count grows with
-touched shards; seal verification does not. A leaf whose path does not recompute,
-or a seal below threshold, **fails**. Vectors `multi_shard_anchor`
-(`two_aggregator_shards_one_seal` verifies with one seal + 2 paths;
-`leaf_path_does_not_recompute`, `seal_below_threshold` fail);
+**Shared-seal multi-shard anchor** (`VerifyAnchoredHistory`). The first-review
+model had two holes the re-review flagged:
+
+1. **Signer names were treated as evidence** and the threshold was supplied — so
+   an `AnchorSeal` with a valid `WeightSet`, no signers and `Threshold = 0`
+   verified. Now `AnchorSeal` carries `RootStateRoot` (`r*`), `Epoch`,
+   `AssignmentID`, the `WeightSet` (members carry **real** secp256k1
+   `ConsensusKey`s — `d6Assignment`), and a `Signatures` map. `VerifySeal()`:
+   - **derives** the threshold as `RootQuorumThreshold(TotalWeight)` — it is
+     never supplied and is always ≥ 1;
+   - requires a non-empty `r*` and a non-empty signature set;
+   - verifies **each** claimed signer's secp256k1 signature over
+     `AnchorSealStatement(r*, epoch, assignmentID)` against that member's key,
+     and sums only the weight of signers whose signature checks out.
+   A substituted `r*`, a replay under another epoch, a different assignment, or a
+   forged signer entry all leave `VerifySeal` short of the derived threshold.
+2. **Shard paths did not authenticate the partition/shard/config** — the path
+   folded from the bare `ShardStateRoot`, and the caller-supplied
+   `PartitionID`/`ShardID` were just map keys, so relabelling `7/0 → 99/attacker`
+   still verified. Now each `ShardAnchorPath` carries a certified `ConfigHash`,
+   and the path folds from a **bound leaf**
+   `shardAnchorLeaf(pid, shardID, configHash, shardStateRoot) =
+   SHA-256("UNICITY_SHARD_ANCHOR_LEAF" ‖ be64(pid) ‖ shardID ‖ configHash ‖
+   shardStateRoot)`. Relabelling any of those changes the leaf, so it no longer
+   recomputes to the certified `r*`. A path with no `ConfigHash` is rejected.
+
+Each `AnchoredLeaf` still recomputes to its **own shard's** authenticated state
+root. Path count grows with touched shards; seal verification runs **once**.
+Vectors `multi_shard_anchor` — `two_aggregator_shards_one_seal` verifies
+(weight 21 ≥ derived threshold 17, 2 paths); `leaf_path_does_not_recompute`,
+`seal_below_threshold`, `unsigned_seal_zero_weight`,
+`forged_signer_entry_not_counted`, `relabelled_shard_path_rejected`,
+`substituted_root_no_valid_signatures`, `wrong_epoch_seal_rejected` all fail;
 `TestD6_MultiShardAnchorRecomputesPaths`.
 
 ## 4. Custody, supply and bridge liability accounting
@@ -174,14 +227,16 @@ the succinct path.
 |---|---|
 | proof/accounting vectors distinguish native UCT, WUCT and bridged claims | §4; `supply_and_backing` (`O + C ≤ vault`, WUCT vs its own contract native); `TestD6_CustodySolvencyEquation` |
 | live age measured from the current authenticated origin, not a checkpoint | §2 "Live certificate admission"; `live_certificate_admission.stale_past_window` (`admitted: false` for a 900-round-old cert with `W_cert 10`), `future_ahead_of_origin`, `at_window_boundary`; `TestD6_LiveCertMeasuredFromImportedOrigin` |
-| the proof vectors carry real evidence, not assumed booleans | §3 real hash-linked headers + Merkle paths; `historical_block_authentication` (broken linkage / wrong head fail), `multi_shard_anchor` (bad leaf / low seal fail), `lock_witness_refresh` (wrong digest fails); `TestD6_HistoricalAuthWalksARealChain`, `TestD6_MultiShardAnchorRecomputesPaths`, `TestD6_LockRefreshRealProofs` |
+| the proof vectors carry real evidence, not assumed booleans | §3 real hash-linked headers + Merkle paths + real secp256k1 seal signatures; `historical_block_authentication` (broken linkage / wrong head fail), `multi_shard_anchor` (bad leaf / below-threshold / unsigned / forged signer / relabelled path / substituted root / wrong epoch all fail), `proof_bundle_offline_verification` (receipt-only does not verify), `lock_witness_refresh` (wrong digest fails); `TestD6_HistoricalAuthWalksARealChain`, `TestD6_MultiShardAnchorRecomputesPaths`, `TestD6_ProofBundleOfflineVerification`, `TestD6_LockRefreshRealProofs` |
+| the shared seal authenticates r* itself and the shard paths authenticate their partition/shard/config | §3; `AnchorSeal.VerifySeal` derives the threshold and checks signatures over `AnchorSealStatement(r*, epoch, assignmentID)`; `shardAnchorLeaf` binds partition ‖ shard ‖ configHash into the leaf; `multi_shard_anchor.relabelled_shard_path_rejected`, `unsigned_seal_zero_weight`, `forged_signer_entry_not_counted`, `wrong_epoch_seal_rejected` |
+| a proof bundle's structural availability is distinct from successful offline verification | §3 "`ProofBundle` — structural availability vs offline verification"; `CarriesEvidence` vs `OfflineVerify`; `proof_bundle_offline_verification`; `TestD6_ProofBundleOfflineVerification` |
 | an old block is authenticated without trusting retired signatures alone | §3; header-chain path only; retired keys are not an input |
 | fresh lock evidence leaves token identity unchanged | §4; `lock_witness_refresh.fresh_proof_same_digest` (`token_identity_unchanged: true`, `historical_backing_refreshed: true`) |
 | a history touching two aggregator shards verifies with one seal plus the necessary paths | §3; `multi_shard_anchor.two_aggregator_shards_one_seal` (`seal_verified_once: true`, `shard_path_count: 2`) |
 | no claim of constant-size arbitrarily old proofs | §3; `historical_block_authentication[*].constant_size = false`, `header_count` 500 vs 20 |
 | no claim of globally observable Execution-layer supply | §4; `global_execution_layer_supply_observable = false`; `TestD6_NoGlobalSupplyClaim` |
 | custody solvency is checked, not just `L ≥ D ≥ P` | §4 `BridgeLedger.Solvent()` (`Balance + Shortfall == L − P`, `Shortfall == 0`); `custody_solvency`, `custody_walkthrough`; `TestD6_CustodySolvencyEquation`, `TestD6_CustodyWalkthroughSolventThroughout` |
-| checkpoint freshness is derived and strict, not asserted | §2 "Checkpoint freshness"; `checkpoint_freshness_policy.staleness_strictly_less_than_protection = true`, `policy_valid`; `TestD6_CheckpointFreshnessDerivedAndStrict` |
+| checkpoint freshness is derived and strict, not asserted, and rests on an enforced per-round floor | §2 "Checkpoint freshness"; `ConsensusMinRoundPeriodSeconds` floor enforced by `FreshnessPolicy.Valid()`; `checkpoint_freshness_policy.staleness_strictly_less_than_protection = true`, `policy_valid`, `policy_below_enforced_floor_rejected = true`; `TestD6_CheckpointFreshnessDerivedAndStrict` |
 | live cert age ⊂ evidence window ⊂ retirement protection | §2; `window_nesting_and_key_retention.nesting_valid`; `TestD6_WindowNestingAndKeyRetention` |
 | bridge type restrictions, config/hash bindings, direct/succinct relation | §4; `token_profile`, `redemption_relation`; `TestD6_TokenProfileForbidsSplitMergeMintExt`, `TestD6_DirectAndSuccinctSameSemanticRelation` |
 

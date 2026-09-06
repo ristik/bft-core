@@ -54,7 +54,7 @@
     }
   ],
   "checkpoint_freshness_policy": {
-    "note": "Max checkpoint staleness = (Δ_hold - Δ_ev) real seconds - churn margin - acquisition latency, and strictly \u003c the min real-time protection. Illustrative client policy; a deployment pins its own values.",
+    "note": "Max checkpoint staleness = (Δ_hold - Δ_ev) real seconds - churn margin - acquisition latency, and strictly \u003c the min real-time protection. The per-round floor must be \u003e= ConsensusMinRoundPeriodSeconds (a protocol-enforced minimum, not a tuning knob); a policy below it is rejected. A deployment may raise MinRoundPeriodSeconds above the floor for slower observed pacing.",
     "delta_hold_rounds": 20000,
     "delta_ev_rounds": 8000,
     "min_round_period_seconds": 6,
@@ -63,7 +63,9 @@
     "min_real_time_protection_seconds": 68400,
     "max_checkpoint_staleness_seconds": 66600,
     "staleness_strictly_less_than_protection": true,
-    "policy_valid": true
+    "policy_valid": true,
+    "enforced_min_round_period_seconds": 2,
+    "policy_below_enforced_floor_rejected": true
   },
   "window_nesting_and_key_retention": {
     "w_cert": 50,
@@ -112,6 +114,7 @@
       "verified": true,
       "seal_verified_once": true,
       "seal_weight": 21,
+      "seal_threshold": 17,
       "shard_path_count": 2,
       "touched_shards": 2
     },
@@ -119,7 +122,8 @@
       "name": "leaf_path_does_not_recompute",
       "verified": false,
       "seal_verified_once": true,
-      "seal_weight": 0,
+      "seal_weight": 21,
+      "seal_threshold": 17,
       "shard_path_count": 2,
       "touched_shards": 0,
       "reason": "a leaf does not recompute to its shard state root"
@@ -128,10 +132,84 @@
       "name": "seal_below_threshold",
       "verified": false,
       "seal_verified_once": false,
-      "seal_weight": 0,
+      "seal_weight": 1,
+      "seal_threshold": 17,
       "shard_path_count": 0,
       "touched_shards": 0,
-      "reason": "shared seal signatures do not meet the threshold"
+      "reason": "shared seal: signatures over r* do not reach the derived quorum threshold"
+    },
+    {
+      "name": "unsigned_seal_zero_weight",
+      "verified": false,
+      "seal_verified_once": false,
+      "seal_weight": 0,
+      "seal_threshold": 17,
+      "shard_path_count": 0,
+      "touched_shards": 0,
+      "reason": "shared seal: signatures over r* do not reach the derived quorum threshold"
+    },
+    {
+      "name": "forged_signer_entry_not_counted",
+      "verified": false,
+      "seal_verified_once": false,
+      "seal_weight": 11,
+      "seal_threshold": 17,
+      "shard_path_count": 0,
+      "touched_shards": 0,
+      "reason": "shared seal: signatures over r* do not reach the derived quorum threshold"
+    },
+    {
+      "name": "relabelled_shard_path_rejected",
+      "verified": false,
+      "seal_verified_once": true,
+      "seal_weight": 21,
+      "seal_threshold": 17,
+      "shard_path_count": 0,
+      "touched_shards": 0,
+      "reason": "a shard path does not recompute to r* (partition/shard/config are not the certified ones)"
+    },
+    {
+      "name": "substituted_root_no_valid_signatures",
+      "verified": false,
+      "seal_verified_once": false,
+      "seal_weight": 0,
+      "seal_threshold": 17,
+      "shard_path_count": 0,
+      "touched_shards": 0,
+      "reason": "shared seal: signatures over r* do not reach the derived quorum threshold"
+    },
+    {
+      "name": "wrong_epoch_seal_rejected",
+      "verified": false,
+      "seal_verified_once": false,
+      "seal_weight": 0,
+      "seal_threshold": 17,
+      "shard_path_count": 0,
+      "touched_shards": 0,
+      "reason": "shared seal: signatures over r* do not reach the derived quorum threshold"
+    }
+  ],
+  "proof_bundle_offline_verification": [
+    {
+      "name": "live_with_verifying_anchor",
+      "mode": "live_certificate",
+      "carries_evidence_structurally": true,
+      "verifies_offline": true,
+      "note": "carries a certified seal + shard path proving the subject; verifies offline"
+    },
+    {
+      "name": "live_receipt_only_no_certificate_proof",
+      "mode": "live_certificate",
+      "carries_evidence_structurally": false,
+      "verifies_offline": false,
+      "note": "non-empty context/subject/receipt but no anchor evidence — neither structurally complete nor offline-verifiable"
+    },
+    {
+      "name": "live_anchor_below_threshold",
+      "mode": "live_certificate",
+      "carries_evidence_structurally": true,
+      "verifies_offline": false,
+      "note": "structurally complete but the seal is below the derived quorum — offline verification fails"
     }
   ],
   "lock_witness_refresh": [

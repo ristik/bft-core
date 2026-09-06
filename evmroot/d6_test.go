@@ -54,6 +54,17 @@ func TestD6_CheckpointFreshnessDerivedAndStrict(t *testing.T) {
 	if bad.Valid() {
 		t.Fatal("an unsafe pacing/protection combination produced a valid policy")
 	}
+	// A per-round floor BELOW the protocol-enforced minimum is not a
+	// guarantee, however large the derived numbers look.
+	subFloor := fp
+	subFloor.MinRoundPeriodSeconds = ConsensusMinRoundPeriodSeconds - 1
+	if subFloor.Valid() {
+		t.Fatalf("a policy with MinRoundPeriodSeconds %d < enforced floor %d was accepted",
+			subFloor.MinRoundPeriodSeconds, ConsensusMinRoundPeriodSeconds)
+	}
+	if !fp.Valid() {
+		t.Fatal("the reference policy (period >= enforced floor) was rejected")
+	}
 }
 
 func TestD6_WindowNestingAndKeyRetention(t *testing.T) {
@@ -93,19 +104,28 @@ func TestD6_HistoricalAuthWalksARealChain(t *testing.T) {
 }
 
 func TestD6_MultiShardAnchorRecomputesPaths(t *testing.T) {
-	ws := d3Assignment()
-	w, _ := ws.TotalWeight()
+	ws := d6Assignment()
+	const epoch uint64 = 8
+	aid := sha256Bytes([]byte("assignment-8"))
+	cfg0 := sha256Bytes([]byte("cfg0"))
+	cfg1 := sha256Bytes([]byte("cfg1"))
+	z := rep(0, 32)
 	s0leaf := sha256Bytes([]byte("s0"))
 	s1leaf := sha256Bytes([]byte("s1"))
-	z := rep(0, 32)
 	s0root := hashNode(s0leaf, z)
 	s1root := hashNode(s1leaf, z)
-	rStar := hashNode(s0root, s1root)
+	bl0 := shardAnchorLeaf(7, "0", cfg0, s0root)
+	bl1 := shardAnchorLeaf(7, "1", cfg1, s1root)
+	rStar := hashNode(bl0, bl1)
+	stmt := AnchorSealStatement(rStar, epoch, aid)
+	mkSeal := func(signers ...string) AnchorSeal {
+		return AnchorSeal{RootStateRoot: rStar, Epoch: epoch, AssignmentID: aid, Weights: ws, Signatures: SignAnchorSeal(stmt, signers)}
+	}
 	bundle := AnchorBundle{
-		Seal: AnchorSeal{RootStateRoot: rStar, Signers: []string{"root-a", "root-b", "root-c"}, Weights: ws, Threshold: RootQuorumThreshold(w)},
+		Seal: mkSeal("root-a", "root-b", "root-c"), // 21 >= 17
 		ShardPaths: []ShardAnchorPath{
-			{PartitionID: 7, ShardID: "0", ShardStateRoot: s0root, Path: []PathStep{{Sibling: s1root, Left: false}}},
-			{PartitionID: 7, ShardID: "1", ShardStateRoot: s1root, Path: []PathStep{{Sibling: s0root, Left: true}}},
+			{PartitionID: 7, ShardID: "0", ConfigHash: cfg0, ShardStateRoot: s0root, Path: []PathStep{{Sibling: bl1, Left: false}}},
+			{PartitionID: 7, ShardID: "1", ConfigHash: cfg1, ShardStateRoot: s1root, Path: []PathStep{{Sibling: bl0, Left: true}}},
 		},
 	}
 	leaves := []AnchoredLeaf{
@@ -113,10 +133,11 @@ func TestD6_MultiShardAnchorRecomputesPaths(t *testing.T) {
 		{PartitionID: 7, ShardID: "1", LeafHash: s1leaf, Path: []PathStep{{Sibling: z, Left: false}}},
 	}
 	r := VerifyAnchoredHistory(bundle, leaves)
-	if !r.Verified || !r.SealVerifiedOnce || r.ShardPathCount != 2 {
+	if !r.Verified || !r.SealVerifiedOnce || r.ShardPathCount != 2 || r.SealThreshold != 17 {
 		t.Fatalf("valid multi-shard anchor rejected: %+v", r)
 	}
-	// A tampered r* -> shard paths no longer recompute.
+
+	// A tampered r* -> the honest signatures no longer verify over it.
 	bad := bundle
 	bad.Seal.RootStateRoot = rep(0x11, 32)
 	if VerifyAnchoredHistory(bad, leaves).Verified {
@@ -128,11 +149,98 @@ func TestD6_MultiShardAnchorRecomputesPaths(t *testing.T) {
 	if VerifyAnchoredHistory(bundle, badLeaves).Verified {
 		t.Fatal("a bad leaf verified")
 	}
-	// Seal below threshold.
-	low := bundle
-	low.Seal.Signers = []string{"root-e"}
-	if VerifyAnchoredHistory(low, leaves).Verified {
+	// Seal below the DERIVED threshold (root-e alone, weight 1).
+	if VerifyAnchoredHistory(AnchorBundle{Seal: mkSeal("root-e"), ShardPaths: bundle.ShardPaths}, leaves).Verified {
 		t.Fatal("a below-threshold seal verified")
+	}
+	// Unsigned seal with no threshold field to lean on: derived threshold
+	// 17, weight 0.
+	unsigned := bundle
+	unsigned.Seal.Signatures = map[string][]byte{}
+	if res := VerifyAnchoredHistory(unsigned, leaves); res.Verified || res.SealThreshold != 17 {
+		t.Fatalf("an unsigned zero-weight seal verified: %+v", res)
+	}
+	// Forged signer: a "root-a" entry actually produced by root-e's key.
+	forged := bundle
+	forged.Seal.Signatures = map[string][]byte{
+		"root-a": ForgeAnchorSignature(stmt, "root-a", "root-e")["root-a"],
+		"root-b": bundle.Seal.Signatures["root-b"],
+		"root-c": bundle.Seal.Signatures["root-c"],
+	}
+	if VerifyAnchoredHistory(forged, leaves).Verified {
+		t.Fatal("a forged signer entry was counted toward the quorum")
+	}
+	// Relabelled shard path: partition 7 -> 99, same state root and path.
+	// The bound leaf changes, so it no longer folds to r*.
+	relabel := AnchorBundle{Seal: bundle.Seal, ShardPaths: []ShardAnchorPath{
+		{PartitionID: 99, ShardID: "attacker", ConfigHash: cfg0, ShardStateRoot: s0root, Path: bundle.ShardPaths[0].Path},
+		bundle.ShardPaths[1],
+	}}
+	relabelLeaves := []AnchoredLeaf{{PartitionID: 99, ShardID: "attacker", LeafHash: s0leaf, Path: leaves[0].Path}, leaves[1]}
+	if VerifyAnchoredHistory(relabel, relabelLeaves).Verified {
+		t.Fatal("a relabelled shard anchor path verified")
+	}
+	// Missing config hash on a path.
+	noCfg := bundle
+	noCfg.ShardPaths = append([]ShardAnchorPath(nil), bundle.ShardPaths...)
+	noCfg.ShardPaths[0].ConfigHash = nil
+	if VerifyAnchoredHistory(noCfg, leaves).Verified {
+		t.Fatal("a shard path with no certified config hash verified")
+	}
+	// Wrong epoch: signatures made for epoch 8, seal claims epoch 9.
+	we := bundle
+	we.Seal.Epoch = 9
+	if VerifyAnchoredHistory(we, leaves).Verified {
+		t.Fatal("a seal replayed under the wrong epoch verified")
+	}
+}
+
+func TestD6_ProofBundleOfflineVerification(t *testing.T) {
+	ws := d6Assignment()
+	const epoch uint64 = 8
+	aid := sha256Bytes([]byte("assignment-8"))
+	cfg := sha256Bytes([]byte("cfg"))
+	z := rep(0, 32)
+	subject := sha256Bytes([]byte("subject-block"))
+	sRoot := hashNode(subject, z)
+	bl := shardAnchorLeaf(7, "0", cfg, sRoot)
+	rStar := hashNode(bl, z)
+	stmt := AnchorSealStatement(rStar, epoch, aid)
+	anchor := AnchorBundle{
+		Seal:       AnchorSeal{RootStateRoot: rStar, Epoch: epoch, AssignmentID: aid, Weights: ws, Signatures: SignAnchorSeal(stmt, []string{"root-a", "root-b", "root-c"})},
+		ShardPaths: []ShardAnchorPath{{PartitionID: 7, ShardID: "0", ConfigHash: cfg, ShardStateRoot: sRoot, Path: []PathStep{{Sibling: z, Left: false}}}},
+	}
+	leaf := AnchoredLeaf{PartitionID: 7, ShardID: "0", LeafHash: subject, Path: []PathStep{{Sibling: z, Left: false}}}
+
+	good := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: subject, Mode: AuthLiveCertificate,
+		LiveAnchor: &anchor, LiveLeaf: &leaf, Receipt: []byte("receipt")}
+	if !good.CarriesEvidence() || !good.OfflineVerify(nil) || !good.SelfContained(nil) {
+		t.Fatal("a live bundle carrying a verifying anchor did not verify offline")
+	}
+	// Non-empty context/subject/receipt but NO anchor evidence: must not
+	// pass — this is the finding.
+	naked := ProofBundle{Version: 1, ChainContext: []byte("ctx"), SubjectHash: subject, Mode: AuthLiveCertificate, Receipt: []byte("receipt")}
+	if naked.CarriesEvidence() || naked.OfflineVerify(nil) {
+		t.Fatal("a live bundle with only a receipt and no certificate proof passed")
+	}
+	// Anchor present but seal below threshold: carries evidence, does not verify.
+	weakAnchor := anchor
+	weakAnchor.Seal.Signatures = SignAnchorSeal(stmt, []string{"root-e"})
+	weak := good
+	weak.LiveAnchor = &weakAnchor
+	if !weak.CarriesEvidence() {
+		t.Fatal("bundle should still be structurally complete")
+	}
+	if weak.OfflineVerify(nil) {
+		t.Fatal("a bundle whose seal is below threshold verified offline")
+	}
+	// Leaf that is not the subject.
+	otherLeaf := leaf
+	otherLeaf.LeafHash = sha256Bytes([]byte("not-subject"))
+	mismatch := good
+	mismatch.LiveLeaf = &otherLeaf
+	if mismatch.OfflineVerify(nil) {
+		t.Fatal("a bundle whose anchored leaf is not the subject verified")
 	}
 }
 

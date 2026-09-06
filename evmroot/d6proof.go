@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 )
 
 // D6 part 2: EVM proof export, historical header ancestry, and the
@@ -120,31 +122,96 @@ func AuthenticateOldBlock(subjectHash []byte, chain []Header, trustedHeadHash []
 
 // --- shared-seal multi-shard anchor ------------------------------------
 
+// AnchorSealStatement is the exact byte string every seal signature must
+// cover: SHA-256(CBOR([ "UNICITY_ANCHOR_SEAL", r*, epoch, assignmentID ])).
+// Binding r*, the epoch and the authorising assignment identity means a
+// substituted root, a replayed seal from another epoch, or a seal from a
+// different assignment all invalidate every signature.
+func AnchorSealStatement(rootStateRoot []byte, epoch uint64, assignmentID []byte) []byte {
+	return sha256Bytes(marshalCBOR(cArray{
+		cText("UNICITY_ANCHOR_SEAL"),
+		cBytes(rootStateRoot), cUint(epoch), cBytes(assignmentID),
+	}))
+}
+
 // AnchorSeal is the shared root seal C* / its Unicity Tree root r*, plus
 // the weighted signature evidence over r*. It is verified ONCE for a
-// multi-shard history.
+// multi-shard history. The threshold is NOT carried — it is derived from
+// the authenticated assignment (RootQuorumThreshold of its total weight) —
+// and signer names are not evidence: each claimed signer must present a
+// secp256k1 signature over AnchorSealStatement that verifies against that
+// member's ConsensusKey.
 type AnchorSeal struct {
-	RootStateRoot []byte    // r*
-	Signers       []string  // NodeIDs that signed r*
-	Weights       WeightSet // the assignment; verification sums unique signer weights
-	Threshold     uint64
+	RootStateRoot []byte            // r*
+	Epoch         uint64            // the epoch whose assignment authorises this seal
+	AssignmentID  []byte            // identity of that assignment (e.g. the D3 trust-base body id)
+	Weights       WeightSet         // the authenticated assignment; members carry real ConsensusKeys
+	Signatures    map[string][]byte // NodeID -> signature over AnchorSealStatement(RootStateRoot, Epoch, AssignmentID)
 }
 
-// VerifySeal reports whether the seal's unique authorised signer weight
-// meets the threshold.
-func (s AnchorSeal) VerifySeal() (uint64, bool) {
-	w, ok := s.Weights.SignerWeight(s.Signers)
-	if !ok {
-		return 0, false
+// VerifySeal returns the validated unique signer weight, the DERIVED
+// threshold (⌊2W/3⌋+1 over the assignment's total weight), and whether the
+// weight meets it. It rejects: a malformed assignment; an empty root or an
+// empty signature set; and any signature that does not verify against the
+// named member's key over the seal statement. A supplied zero threshold or
+// a bare signer list can no longer pass.
+func (s AnchorSeal) VerifySeal() (weight, threshold uint64, ok bool) {
+	w, wok := s.Weights.TotalWeight()
+	if !wok {
+		return 0, 0, false
 	}
-	return w, w >= s.Threshold
+	threshold = RootQuorumThreshold(w) // always >= 1
+	if len(s.RootStateRoot) == 0 || len(s.Signatures) == 0 {
+		return 0, threshold, false
+	}
+	stmt := AnchorSealStatement(s.RootStateRoot, s.Epoch, s.AssignmentID)
+	counted := map[string]struct{}{}
+	for _, m := range s.Weights {
+		sig, has := s.Signatures[m.NodeID]
+		if !has {
+			continue
+		}
+		if _, dup := counted[m.NodeID]; dup {
+			continue
+		}
+		v, err := abcrypto.NewVerifierSecp256k1(m.ConsensusKey)
+		if err != nil {
+			continue
+		}
+		if v.VerifyBytes(sig, stmt) != nil {
+			continue // a name without a valid signature over r* counts for nothing
+		}
+		counted[m.NodeID] = struct{}{}
+		weight += m.Weight
+	}
+	return weight, threshold, weight >= threshold
 }
 
-// ShardAnchorPath authenticates one shard's state root against r* : the
-// shard state root folds up through Path to RootStateRoot.
+// shardAnchorLeaf binds a shard path's certified identity INTO the leaf
+// that folds up to r*: SHA-256("UNICITY_SHARD_ANCHOR_LEAF" ‖ be64(pid) ‖
+// shardID ‖ configHash ‖ shardStateRoot). Relabelling a path's partition,
+// shard or config changes this leaf, so it no longer recomputes to the
+// certified r*.
+func shardAnchorLeaf(pid uint64, sid string, configHash, shardStateRoot []byte) []byte {
+	var nb [8]byte
+	binary.BigEndian.PutUint64(nb[:], pid)
+	h := sha256.New()
+	h.Write([]byte("UNICITY_SHARD_ANCHOR_LEAF"))
+	h.Write(nb[:])
+	h.Write([]byte(sid))
+	h.Write(configHash)
+	h.Write(shardStateRoot)
+	return h.Sum(nil)
+}
+
+// ShardAnchorPath authenticates one shard's state root against r*: the
+// bound leaf (partition ‖ shard ‖ configHash ‖ shardStateRoot) folds up
+// through Path to RootStateRoot. ConfigHash is the certified shard-config
+// identity; an empty one is rejected.
 type ShardAnchorPath struct {
 	PartitionID    uint64
 	ShardID        string
+	ConfigHash     []byte
 	ShardStateRoot []byte
 	Path           []PathStep
 }
@@ -169,6 +236,7 @@ type AnchorResult struct {
 	Verified         bool
 	SealVerifiedOnce bool
 	SealWeight       uint64
+	SealThreshold    uint64
 	ShardPathCount   int
 	Reason           string
 }
@@ -184,29 +252,36 @@ func shardKey(pid uint64, sid string) string {
 // recomputes to its own shard's authenticated state root. The number of
 // shard paths grows with the touched shards, seal verification does not.
 func VerifyAnchoredHistory(a AnchorBundle, leaves []AnchoredLeaf) AnchorResult {
-	w, ok := a.Seal.VerifySeal()
+	w, threshold, ok := a.Seal.VerifySeal()
 	if !ok {
-		return AnchorResult{Reason: "shared seal signatures do not meet the threshold"}
+		return AnchorResult{SealWeight: w, SealThreshold: threshold,
+			Reason: "shared seal: signatures over r* do not reach the derived quorum threshold"}
 	}
 	roots := map[string][]byte{}
 	for _, sp := range a.ShardPaths {
-		if !bytes.Equal(evalPath(sp.ShardStateRoot, sp.Path), a.Seal.RootStateRoot) {
-			return AnchorResult{SealVerifiedOnce: true, SealWeight: w, Reason: "a shard path does not recompute to r*"}
+		if len(sp.ConfigHash) == 0 {
+			return AnchorResult{SealVerifiedOnce: true, SealWeight: w, SealThreshold: threshold,
+				Reason: "a shard anchor path carries no certified config hash"}
+		}
+		leaf := shardAnchorLeaf(sp.PartitionID, sp.ShardID, sp.ConfigHash, sp.ShardStateRoot)
+		if !bytes.Equal(evalPath(leaf, sp.Path), a.Seal.RootStateRoot) {
+			return AnchorResult{SealVerifiedOnce: true, SealWeight: w, SealThreshold: threshold,
+				Reason: "a shard path does not recompute to r* (partition/shard/config are not the certified ones)"}
 		}
 		roots[shardKey(sp.PartitionID, sp.ShardID)] = sp.ShardStateRoot
 	}
 	for _, l := range leaves {
 		sr, have := roots[shardKey(l.PartitionID, l.ShardID)]
 		if !have {
-			return AnchorResult{SealVerifiedOnce: true, SealWeight: w, ShardPathCount: len(a.ShardPaths),
+			return AnchorResult{SealVerifiedOnce: true, SealWeight: w, SealThreshold: threshold, ShardPathCount: len(a.ShardPaths),
 				Reason: "leaf references a shard with no anchor path"}
 		}
 		if !bytes.Equal(evalPath(l.LeafHash, l.Path), sr) {
-			return AnchorResult{SealVerifiedOnce: true, SealWeight: w, ShardPathCount: len(a.ShardPaths),
+			return AnchorResult{SealVerifiedOnce: true, SealWeight: w, SealThreshold: threshold, ShardPathCount: len(a.ShardPaths),
 				Reason: "a leaf does not recompute to its shard state root"}
 		}
 	}
-	return AnchorResult{Verified: true, SealVerifiedOnce: true, SealWeight: w, ShardPathCount: len(a.ShardPaths)}
+	return AnchorResult{Verified: true, SealVerifiedOnce: true, SealWeight: w, SealThreshold: threshold, ShardPathCount: len(a.ShardPaths)}
 }
 
 // --- proof bundle self-containment -----------------------------------
@@ -226,21 +301,57 @@ type ProofBundle struct {
 	SubjectHash  []byte
 	Mode         AuthMode
 	HeaderChain  []Header // for AuthCheckpointAncestry
-	Receipt      []byte
+
+	// For AuthLiveCertificate: the anchor that authenticates the subject
+	// back to a certified root seal, and the shard/leaf the subject sits
+	// under. A non-empty Receipt alone is NOT authentication.
+	LiveAnchor *AnchorBundle
+	LiveLeaf   *AnchoredLeaf
+	Receipt    []byte
 }
 
-// SelfContained reports whether the bundle can be verified offline given a
-// recent trusted checkpoint (a trusted head hash for the ancestry mode).
-func (b ProofBundle) SelfContained(trustedHeadHash []byte) bool {
+// CarriesEvidence reports STRUCTURAL availability only: the bundle has the
+// pieces its mode needs. It does not run any verification. Use
+// OfflineVerify for the actual check.
+func (b ProofBundle) CarriesEvidence() bool {
 	if len(b.ChainContext) == 0 || len(b.SubjectHash) == 0 {
 		return false
 	}
 	switch b.Mode {
 	case AuthLiveCertificate:
-		return true
+		return b.LiveAnchor != nil && b.LiveLeaf != nil && len(b.Receipt) > 0
+	case AuthCheckpointAncestry:
+		return len(b.HeaderChain) > 0
+	default:
+		return false
+	}
+}
+
+// OfflineVerify actually verifies the bundle against a recent trusted
+// checkpoint. Live mode: the carried anchor's seal verifies, the leaf
+// recomputes under its shard path to r*, and the leaf is the subject.
+// Ancestry mode: AuthenticateOldBlock walks the header chain to
+// trustedHeadHash. A bundle that only "carries evidence" but does not
+// verify returns false here.
+func (b ProofBundle) OfflineVerify(trustedHeadHash []byte) bool {
+	if !b.CarriesEvidence() {
+		return false
+	}
+	switch b.Mode {
+	case AuthLiveCertificate:
+		if !bytes.Equal(b.LiveLeaf.LeafHash, b.SubjectHash) {
+			return false
+		}
+		return VerifyAnchoredHistory(*b.LiveAnchor, []AnchoredLeaf{*b.LiveLeaf}).Verified
 	case AuthCheckpointAncestry:
 		return AuthenticateOldBlock(b.SubjectHash, b.HeaderChain, trustedHeadHash).Authenticated
 	default:
 		return false
 	}
+}
+
+// SelfContained is retained as the offline-verifiable predicate: it now
+// means "verifies offline", not merely "has non-empty fields".
+func (b ProofBundle) SelfContained(trustedHeadHash []byte) bool {
+	return b.OfflineVerify(trustedHeadHash)
 }
