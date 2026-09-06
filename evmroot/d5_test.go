@@ -334,6 +334,58 @@ func TestD5_RefundedCreditCannotBackTwoEntries(t *testing.T) {
 	}
 }
 
+// TestD5_RefundRejectsForeignQueue is the third-review counterexample: two
+// independent escrows/queues, each with owner "a" and credit "c1" at seq 0.
+// A refund on escrow1 must not be satisfiable by handing it queue2 — that
+// would refund escrow1 while revoking queue2's entry, leaving queue1's c1
+// still executable. seq/creditID are only unique within a queue, so the
+// refund must be bound to the exact escrow/queue identity.
+func TestD5_RefundRejectsForeignQueue(t *testing.T) {
+	esc1 := NewCreditEscrow()
+	esc1.ApplyDeposit(CertifiedDeposit{DepositID: "d1", Owner: "a", Amount: 1, Certified: true})
+	q1 := NewForcedInbox(esc1, AdmissionLimits{MaxEncodedBytes: 4096, GFI: 300_000, PerSenderQueue: 4, GlobalQueue: 16})
+
+	esc2 := NewCreditEscrow()
+	esc2.ApplyDeposit(CertifiedDeposit{DepositID: "d2", Owner: "a", Amount: 1, Certified: true})
+	q2 := NewForcedInbox(esc2, AdmissionLimits{MaxEncodedBytes: 4096, GFI: 300_000, PerSenderQueue: 4, GlobalQueue: 16})
+
+	if r, _ := q1.Admit("a", "c1", 100, 100_000, rep(1, 32), true, 1, true, true, true); !r.Admitted {
+		t.Fatalf("q1 c1 not admitted: %+v", r)
+	}
+	if r, _ := q2.Admit("a", "c1", 100, 100_000, rep(2, 32), true, 1, true, true, true); !r.Admitted {
+		t.Fatalf("q2 c1 not admitted: %+v", r)
+	}
+
+	// The foreign queue is refused before any mutation.
+	res := esc1.ReconcileUnusedCredit(RefundStatement{CreditID: "c1", Owner: "a", RootCertifiedUnused: true}, q2)
+	if res.Applied {
+		t.Fatal("refund on esc1 was satisfied with an unrelated escrow's queue")
+	}
+	// q2's entry was NOT revoked, esc1's credit was NOT reconciled, esc1's
+	// balance was NOT restored.
+	if q2.entryState(0) != entryPending {
+		t.Fatal("the foreign queue's entry was revoked")
+	}
+	if esc1.credits["c1"].reconciled {
+		t.Fatal("esc1's credit was reconciled by a foreign-queue refund")
+	}
+	// The matching queue still refunds correctly (entry pending, revoked).
+	if !esc1.ReconcileUnusedCredit(RefundStatement{CreditID: "c1", Owner: "a", RootCertifiedUnused: true}, q1).Applied {
+		t.Fatal("refund on esc1 with its own queue q1 was rejected")
+	}
+	// q1's c1 is now revoked and does not execute; q2's c1 is untouched.
+	for _, o := range q1.ProcessDuePrefix(nil) {
+		if o.Seq == 0 {
+			t.Fatal("q1's revoked c1 still executed")
+		}
+	}
+	for _, o := range q2.ProcessDuePrefix(nil) {
+		if o.Seq == 0 && !o.Executed {
+			t.Fatal("q2's c1 did not execute — a foreign refund revoked it after all")
+		}
+	}
+}
+
 func TestD5_SponsorPathIsExecutable(t *testing.T) {
 	esc := NewCreditEscrow()
 	esc.ApplyDeposit(CertifiedDeposit{DepositID: "sd", Owner: "sponsor", Amount: 2, Certified: true})

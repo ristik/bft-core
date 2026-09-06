@@ -147,6 +147,13 @@ transition. It applies **only** when:
 - the statement is root-certified (`RootCertifiedUnused`);
 - the forced inbox `q` it rolls back is supplied — `q == nil` is rejected
   (`reconciliation must be applied against the forced inbox it rolls back`);
+- **`q` is the inbox this escrow backs** — `q.escrow == e`. `seq` and `creditID`
+  are only unique *within* a queue, so a queue from another escrow/admission
+  domain (with its own owner-`a`, credit-`c1`, seq-0 entry) cannot stand in: a
+  refund on escrow 1 handed escrow 2's queue would refund escrow 1 while revoking
+  escrow 2's entry, leaving escrow 1's original entry executable. In a deployment
+  this binding is the authenticated network/partition/queue domain; the model's
+  `q.escrow == e` is its stand-in. Rejected **before any mutation**;
 - the statement's `Owner` equals the credit's **recorded** owner (a refund can
   only return value to the original owner — not a caller-selected address);
 - it has not already been reconciled;
@@ -155,10 +162,9 @@ transition. It applies **only** when:
   entry cannot be rolled back and its credit is not refundable.
 
 A pending entry is **permanently revoked** here — `q.RevokeEntry(seq, creditID)`
-matches on both `seq` and `creditID` (so a stale seq or an unrelated queue
-cannot revoke the wrong entry), drops it from the live queue and releases its
-per-sender / global slot. A revoked entry is neither live nor archived, so it no
-longer blocks `PositionCutoffSatisfied`: its admission was resolved by the
+matches on both `seq` and `creditID`, drops it from the live queue and releases
+its per-sender / global slot. A revoked entry is neither live nor archived, so it
+no longer blocks `PositionCutoffSatisfied`: its admission was resolved by the
 certified rollback. `consumedBy` is cleared and the credit id is marked
 reconciled, so the same paid credit can never also back an executed entry.
 
@@ -203,7 +209,7 @@ repaired by this queue.
 |---|---|
 | no unbacked admission | certified-deposit dedup + `no_credit`; `forced_inbox.duplicate_certified_deposit_rejected`, `admit_without_credit_rejected`; `TestD5_InboxNoUnbackedAdmissionNoDoubleSpend` |
 | no double spend | `forced_inbox.double_spend_of_credit_rejected` |
-| no refund of reserved credits; refund provenance; a refund cannot leave the admitted entry executable | §4 "Refund provenance — one bound rollback-and-return transition" — owner-bound, queue-required, pending-only, revokes the entry, once; `forced_inbox.refund_to_wrong_owner_rejected`, `refund_of_certified_consumed_entry_rejected`, `refund_without_root_certification_rejected`, `refund_race_applied_at_most_once`, `admit_reusing_a_reconciled_credit_rejected`, `refund_permanently_revokes_the_pending_queue_entry`, `refunded_balance_backs_exactly_one_fresh_admission`, `refund_with_no_queue_rejected`; `TestD5_RefundProvenance`, `TestD5_RefundedCreditCannotBackTwoEntries` |
+| no refund of reserved credits; refund provenance; a refund cannot leave the admitted entry executable; a refund cannot target a foreign queue | §4 "Refund provenance — one bound rollback-and-return transition" — owner-bound, queue-required, **queue-identity-bound** (`q.escrow == e`), pending-only, revokes the entry, once; `forced_inbox.refund_to_wrong_owner_rejected`, `refund_of_certified_consumed_entry_rejected`, `refund_without_root_certification_rejected`, `refund_race_applied_at_most_once`, `admit_reusing_a_reconciled_credit_rejected`, `refund_permanently_revokes_the_pending_queue_entry`, `refunded_balance_backs_exactly_one_fresh_admission`, `refund_with_no_queue_rejected`, `refund_with_a_foreign_escrow_queue_rejected`; `TestD5_RefundProvenance`, `TestD5_RefundedCreditCannotBackTwoEntries`, `TestD5_RefundRejectsForeignQueue` |
 | no poisoned entry stalls the queue; **acknowledged entries leave the executable queue with no re-execution and released capacity** | §4 "Entry lifecycle"; `forced_inbox.poisoned_entry_does_not_stall_queue`, `acknowledgement_releases_per_sender_capacity`, `reprocess_after_ack_does_not_re_execute`; `TestD5_PoisonedEntryDoesNotStallQueue`, `TestD5_QueueLifecycleReleasesCapacityAndNoReExecution` |
 | timely evidence survives delayed execution without premature withdrawal; **withdrawal linkage in compatible units** | §3 position cutoff (root-round deadline → certified-consumed positions, not a watermark comparison); `withdrawal_gates.cutoff_*`; `TestD5_PositionCutoffNotAWatermarkComparison`, `TestD5_WithdrawalGates` |
 | published K derivation is entry-count / fragmentation aware; observation lag has explicit units | §4 `K` (indivisible entries, `entriesPerBlock`, terms in produced EVM blocks); `inclusion_bound_k.adversarial_indivisible_packing` (K=3); `TestD5_InclusionBoundK_EntryCountAware` |

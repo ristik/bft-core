@@ -74,6 +74,7 @@ type D5InboxCase struct {
 	RefundRevokesQueueEntry     bool           `json:"refund_permanently_revokes_the_pending_queue_entry"`
 	RefundedBalanceBacksOne     bool           `json:"refunded_balance_backs_exactly_one_fresh_admission"`
 	RefundNilQueueRejected      bool           `json:"refund_with_no_queue_rejected"`
+	RefundForeignQueueRejected  bool           `json:"refund_with_a_foreign_escrow_queue_rejected"`
 	SponsorPathAdmits           bool           `json:"certified_sponsor_grant_lets_a_newcomer_admit"`
 }
 
@@ -239,6 +240,15 @@ func BuildD5Vectors() D5VectorSet {
 	}
 	// A reconciliation with no queue to roll back is refused outright.
 	refundNilQueue := esc.ReconcileUnusedCredit(RefundStatement{CreditID: "cr-x2", Owner: "alice", RootCertifiedUnused: true}, nil)
+	// A reconciliation handed a queue from a DIFFERENT escrow/admission
+	// domain is refused before any mutation, even though that queue may
+	// hold an entry with the same seq/creditID.
+	foreignEsc := NewCreditEscrow()
+	foreignEsc.ApplyDeposit(CertifiedDeposit{DepositID: "fdep", Owner: "alice", Amount: 1, Certified: true})
+	foreignQ := NewForcedInbox(foreignEsc, limits)
+	foreignQ.Admit("alice", "cr-x2", 100, 100_000, rep(0xF0, 32), true, 40, true, true, true)
+	refundForeignQueue := esc.ReconcileUnusedCredit(RefundStatement{CreditID: "cr-x2", Owner: "alice", RootCertifiedUnused: true}, foreignQ)
+	foreignEntryUntouched := foreignQ.entryState(0) == entryPending
 
 	// sponsor path: a newcomer with no credits is funded by a certified grant.
 	sesc := NewCreditEscrow()
@@ -248,7 +258,7 @@ func BuildD5Vectors() D5VectorSet {
 	sponsorAdmit, _ := sq.Admit("newbie", "cr-n1", 100, 100_000, rep(0x4E, 32), true, 30, true, true, true)
 
 	vs.Inbox = D5InboxCase{
-		Note:                        "Authenticated certified deposits (dedup on certified DepositID); unique credit minted+consumed per admission; a three-state entry lifecycle (pending -> tentatively executed -> certified-consumed+archived) that releases queue capacity; a refund is the certified admission rollback and the credit return as ONE transition — it needs the queue, permanently revokes the still-pending entry (matched on seq AND creditID), and returns the credit at most once; a tentatively-executed or certified-consumed entry is not refundable.",
+		Note:                        "Authenticated certified deposits (dedup on certified DepositID); unique credit minted+consumed per admission; a three-state entry lifecycle (pending -> tentatively executed -> certified-consumed+archived) that releases queue capacity; a refund is the certified admission rollback and the credit return as ONE transition — it needs the queue AND the queue must be the one this escrow backs (q.escrow == e; the deployment binding is the authenticated network/partition/queue domain), it permanently revokes the still-pending entry (matched on seq AND creditID), and returns the credit at most once; a tentatively-executed or certified-consumed entry is not refundable.",
 		DuplicateDepositRejected:    !dupDep.Applied,
 		AdmitWithoutCreditRejected:  rNoCredit.Code == "no_credit",
 		DoubleSpendRejected:         rDup.Code == "credit_already_consumed",
@@ -266,6 +276,7 @@ func BuildD5Vectors() D5VectorSet {
 		RefundRevokesQueueEntry:     revokedGone && revokedNeverExecutes,
 		RefundedBalanceBacksOne:     freshAdmit.Admitted,
 		RefundNilQueueRejected:      !refundNilQueue.Applied,
+		RefundForeignQueueRejected:  !refundForeignQueue.Applied && foreignEntryUntouched,
 		SponsorPathAdmits:           sponsorAdmit.Admitted && SponsorPathAvailable(),
 	}
 

@@ -125,21 +125,30 @@ type RefundStatement struct {
 
 // ReconcileUnusedCredit is the certified admission rollback and the refund
 // as ONE bound transition. It applies only when: the statement is
-// root-certified; the forced inbox it rolls back is supplied (a refund
-// cannot be reasoned about without the queue state it changes); the credit
-// exists; the statement's owner matches the credit's recorded owner; the
-// credit has not already been reconciled; and — if the credit was consumed
-// into a queue entry — that entry is still pending. A pending entry is
-// permanently revoked here (dropped from the live queue, its per-sender
-// slot released) so the same paid credit can never also back an executed
-// entry. A tentatively-executed or certified-consumed entry cannot be
-// rolled back and its credit is not refundable. Applied at most once.
+// root-certified; the forced inbox it rolls back is supplied AND is the one
+// this escrow backs (`q.escrow == e`) — a queue from another
+// escrow/admission domain cannot stand in, even if it happens to hold an
+// entry with the same seq and credit id; the credit exists; the statement's
+// owner matches the credit's recorded owner; the credit has not already
+// been reconciled; and — if the credit was consumed into a queue entry —
+// that entry is still pending. A pending entry is permanently revoked here
+// (dropped from the live queue, its per-sender slot released) so the same
+// paid credit can never also back an executed entry. A tentatively-executed
+// or certified-consumed entry cannot be rolled back and its credit is not
+// refundable. Every check runs BEFORE any mutation. Applied at most once.
+//
+// In a deployment the queue identity is the authenticated
+// network/partition/queue domain; here `q.escrow == e` is the model's
+// stand-in for that binding.
 func (e *CreditEscrow) ReconcileUnusedCredit(s RefundStatement, q *ForcedInbox) DepositResult {
 	if !s.RootCertifiedUnused {
 		return DepositResult{false, "no root-certified reconciliation"}
 	}
 	if q == nil {
 		return DepositResult{false, "reconciliation must be applied against the forced inbox it rolls back"}
+	}
+	if q.escrow != e {
+		return DepositResult{false, "forced inbox belongs to a different escrow / admission domain"}
 	}
 	c, ok := e.credits[s.CreditID]
 	if !ok {

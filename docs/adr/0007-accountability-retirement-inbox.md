@@ -18,7 +18,17 @@ still-`pending` entry, and **permanently revokes** that entry
 (`RevokeEntry(seq, creditID)` — matched on both fields, drops it from the live
 queue, releases the slot) before returning the credit. This closes the credit-reuse
 gap where a refunded credit's admitted entry stayed executable (refund `c1`, admit
-`c2` from the restored balance, both execute). Freeze once re-reviewed by a
+`c2` from the restored balance, both execute).
+
+Revised again after the third review (#81): `seq` and `creditID` are unique only
+*within* a queue, so `ReconcileUnusedCredit` now also requires `q.escrow == e` —
+the inbox must be the one this escrow backs. A queue from another
+escrow/admission domain (its own owner-`a`/credit-`c1`/seq-0 entry) is rejected
+before any mutation, closing the two-queue collision (refund escrow 1 while
+revoking escrow 2's entry). The deployment binding is the authenticated
+network/partition/queue domain.
+
+Freeze once re-reviewed by a
 consensus reviewer and a custody-accounting reviewer, neither the author. Depends
 on ADR 0003/0005/0006.
 
@@ -99,5 +109,9 @@ Adopt the model in
   Rejected on re-review: the refunded credit's admitted entry stayed executable,
   so one paid credit could back both a refund and an executed entry. The refund
   now revokes the entry in the same transition and requires the queue to do so.
+- **Identify the entry by `(seq, creditID)` match on any supplied queue.**
+  Rejected on the third review: those fields are unique only within a queue, so a
+  foreign escrow's queue could be substituted. The refund is now bound to the
+  exact escrow/queue identity (`q.escrow == e`).
 - **Treat an HTTP 200 from the intake as an enqueue receipt.** Rejected
   explicitly by the spec; only a consensus enqueue certificate counts.
