@@ -2,9 +2,14 @@
 
 ## Status
 
-Proposed (D3, issue #5). Freeze once reviewed by a Go consensus / protocol
-reviewer other than the author. Depends on ADR 0003 (D1). No supersession;
-`RootTrustBaseV1` verification stays valid under version 1.
+Proposed (D3, issue #5). Revised after the first review (#79): the v2 body binds
+the **complete** member record `(StakingID, NodeID, ConsensusKey, Weight)`, not
+`(id, weight)`; a tagged `UNICITY_TRUSTBASE_V1_TO_V2` transition defines the
+first predecessor without reinterpreting legacy bytes; `WeightSet.Validate()`
+gates all arithmetic (empty set → `(0, false)`, no `FaultyWeightBound(0)` wrap)
+and `TrustBaseBodyV2.Validate()` verifies the recorded threshold. Freeze once
+re-reviewed by a Go consensus / protocol reviewer other than the author. Depends
+on ADR 0003 (D1). `RootTrustBaseV1` verification stays valid under version 1.
 
 ## Context
 

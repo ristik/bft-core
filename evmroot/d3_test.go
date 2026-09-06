@@ -60,15 +60,85 @@ func TestD3_QuorumImpossibility(t *testing.T) {
 	}
 }
 
-func TestD3_OverflowBounds(t *testing.T) {
-	if _, ok := (WeightSet{{ID: "x", Weight: MaxMemberWeight + 1}}).TotalWeight(); ok {
+func TestD3_OverflowAndValidationBounds(t *testing.T) {
+	if _, ok := (WeightSet{d3Member("x", MaxMemberWeight+1)}).TotalWeight(); ok {
 		t.Fatal("member weight above MaxMemberWeight accepted")
 	}
-	if _, ok := (WeightSet{{ID: "a", Weight: 1}, {ID: "a", Weight: 1}}).TotalWeight(); ok {
-		t.Fatal("duplicate member id accepted")
+	dup := WeightSet{d3Member("a", 1), d3Member("a", 1)}
+	if dup.Validate() == nil {
+		t.Fatal("duplicate node id accepted")
 	}
-	if _, ok := (WeightSet{{ID: "z", Weight: 0}}).TotalWeight(); ok {
+	if _, ok := (WeightSet{d3Member("z", 0)}).TotalWeight(); ok {
 		t.Fatal("zero-weight member accepted")
+	}
+	if _, ok := WeightSet(nil).TotalWeight(); ok {
+		t.Fatal("empty assignment returned (0, true) — it has no quorum denominator")
+	}
+	if FaultyWeightBound(0) != 0 {
+		t.Fatalf("FaultyWeightBound(0) = %d, want 0 (no wrap)", FaultyWeightBound(0))
+	}
+	// Duplicate consensus key across two distinct node ids is rejected.
+	shared := WeightSet{d3Member("a", 1), d3Member("b", 1)}
+	shared[1].ConsensusKey = shared[0].ConsensusKey
+	if shared.Validate() == nil {
+		t.Fatal("two node ids sharing a consensus key were accepted")
+	}
+	// QuorumReached with a zero threshold is invalid.
+	if _, valid := d3Assignment().QuorumReached([]string{"root-a"}, 0); valid {
+		t.Fatal("QuorumReached accepted a zero threshold")
+	}
+}
+
+func TestD3_BodyValidationRequiresWeightedThreshold(t *testing.T) {
+	rt := RootQuorumThreshold(24)
+	good := d3Body(rt)
+	if err := good.Validate(); err != nil {
+		t.Fatalf("well-formed body rejected: %v", err)
+	}
+	bad := good
+	bad.RootThreshold = rt + 1 // agent-chosen, not the weighted threshold
+	if bad.Validate() == nil {
+		t.Fatal("a body recording a non-weighted root threshold was accepted")
+	}
+	badV := good
+	badV.Version = 1
+	if badV.Validate() == nil {
+		t.Fatal("a version-1 body validated as v2")
+	}
+}
+
+func TestD3_KeyBindingChangesIdentity(t *testing.T) {
+	base := d3Body(RootQuorumThreshold(24))
+	sub := base
+	m := append(WeightSet(nil), base.Members...)
+	m[0].ConsensusKey = d3Key("attacker")
+	sub.Members = m
+	if base.Identity() == sub.Identity() {
+		t.Fatal("substituting a consensus key did not change the body identity")
+	}
+	swap := base
+	sm := append(WeightSet(nil), base.Members...)
+	sm[0].StakingID, sm[1].StakingID = sm[1].StakingID, sm[0].StakingID
+	swap.Members = sm
+	if base.Identity() == swap.Identity() {
+		t.Fatal("swapping staking identities did not change the body identity")
+	}
+}
+
+func TestD3_FirstV2PredecessorIsTaggedTransition(t *testing.T) {
+	v1 := sha256Bytes([]byte("v1-anchor-hash"))
+	pred, err := FirstV2PredecessorHash(V1Anchor{Version: 1, NetworkID: 3, Epoch: 6, HashIncludingSigs: v1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(pred, v1) {
+		t.Fatal("first v2 predecessor is the raw v1 hash — legacy bytes reinterpreted")
+	}
+	if len(pred) != 32 {
+		t.Fatalf("predecessor length %d", len(pred))
+	}
+	if _, err := FirstV2PredecessorHash(V1Anchor{Version: 2, HashIncludingSigs: v1}); err == nil {
+		t.Fatal("accepted a non-v1 anchor")
 	}
 }
 
@@ -76,11 +146,7 @@ func TestD3_TrustBaseIdentityIgnoresSignaturesAndEndorsement(t *testing.T) {
 	// The type has no signature or endorsement field, so identity is a
 	// function of the body alone. Rebuilding with identical fields gives an
 	// identical identity; changing one member weight changes it.
-	base := TrustBaseBodyV2{
-		Version: 2, NetworkID: 3, Epoch: 7, EpochStart: 100_000,
-		Members: d3Assignment(), RootThreshold: 17,
-		StateSummary: rep(0x5A, 32), ChangeRecordHash: rep(0xC3, 32), PredecessorHash: rep(0xD0, 32),
-	}
+	base := d3Body(RootQuorumThreshold(24))
 	same := base
 	if base.Identity() != same.Identity() {
 		t.Fatal("identity not stable across rebuild")

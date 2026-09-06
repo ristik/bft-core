@@ -2,23 +2,33 @@
   "assignment": {
     "members": [
       {
-        "ID": "root-a",
+        "StakingID": "stake-root-a",
+        "NodeID": "root-a",
+        "ConsensusKey": "ArriANU8AHpvZn5j5MrS+TRszhO02JSDFCD7/q5fJsam",
         "Weight": 10
       },
       {
-        "ID": "root-b",
+        "StakingID": "stake-root-b",
+        "NodeID": "root-b",
+        "ConsensusKey": "AiqX1GXn6FSA16p4UW3XKQt2McoMt2cb4wAEvIFWutEE",
         "Weight": 6
       },
       {
-        "ID": "root-c",
+        "StakingID": "stake-root-c",
+        "NodeID": "root-c",
+        "ConsensusKey": "Ao8bh669euD6D4Oji+/PrEmJhCog9tLoYUnVHHE11acw",
         "Weight": 5
       },
       {
-        "ID": "root-d",
+        "StakingID": "stake-root-d",
+        "NodeID": "root-d",
+        "ConsensusKey": "Av+eH2yEmAlj1NzpVdSS3vFCpc/bQokEV9uMsRs7REw/",
         "Weight": 2
       },
       {
-        "ID": "root-e",
+        "StakingID": "stake-root-e",
+        "NodeID": "root-e",
+        "ConsensusKey": "Ai1SGa5YERUdbSJNka5cfb5eL+oOpTFgvEIh6zLyugU3",
         "Weight": 1
       }
     ],
@@ -195,6 +205,11 @@
       "note": "baseline assignment sums cleanly"
     },
     {
+      "name": "empty_assignment",
+      "ok": false,
+      "note": "an empty assignment has no quorum denominator — TotalWeight returns (0, false), never (0, true)"
+    },
+    {
       "name": "member_over_cap",
       "ok": false,
       "note": "a single member weight above MaxMemberWeight is rejected"
@@ -205,13 +220,54 @@
       "note": "300 near-cap members exceed MaxTotalWeight; rejected before 2W can overflow"
     }
   ],
+  "body_validation": [
+    {
+      "name": "well_formed",
+      "accepted": true
+    },
+    {
+      "name": "wrong_version",
+      "accepted": false,
+      "reason": "evmroot: trust-base body version 1 != 2"
+    },
+    {
+      "name": "recorded_threshold_not_weighted_threshold",
+      "accepted": false,
+      "reason": "evmroot: recorded root threshold 20 != weighted threshold 17"
+    },
+    {
+      "name": "empty_members",
+      "accepted": false,
+      "reason": "evmroot: empty validator assignment"
+    },
+    {
+      "name": "short_consensus_key",
+      "accepted": false,
+      "reason": "evmroot: member \"root-a\" consensus key must be 33 bytes, got 16"
+    }
+  ],
   "trust_base_identity": {
-    "note": "Identity is SHA-256(CBOR(body)) over members (sorted by id) + thresholds + summary + change/predecessor hashes. It has no field for current-epoch signatures or the old-epoch endorsement witness, so neither can change it.",
-    "body_cbor": "890203071a000186a0858266726f6f742d610a8266726f6f742d62068266726f6f742d63058266726f6f742d64028266726f6f742d65011158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5820c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c35820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
-    "identity": "d1f317bb1430dd1792a3b7e56bc90c24c2d4a486645706b200e70cd9cc4a7d1e",
-    "same_fields_identity": "d1f317bb1430dd1792a3b7e56bc90c24c2d4a486645706b200e70cd9cc4a7d1e",
+    "note": "Identity is SHA-256(CBOR(body)) over the complete member records (staking id, node id, consensus key, weight; sorted by node id) plus thresholds/summary/change/predecessor hashes. It has no field for current-epoch signatures or the old-epoch endorsement witness.",
+    "body_cbor": "890203071a000186a085846c7374616b652d726f6f742d6166726f6f742d61582102bae200d53c007a6f667e63e4cad2f9346cce13b4d894831420fbfeae5f26c6a60a846c7374616b652d726f6f742d6266726f6f742d625821022a97d465e7e85480d7aa78516dd7290b7631ca0cb7671be30004bc8156bad10406846c7374616b652d726f6f742d6366726f6f742d635821028f1b87aebd7ae0fa0f83a38befcfac4989842a20f6d2e86149d51c7135d5a73005846c7374616b652d726f6f742d6466726f6f742d64582102ff9e1f6c84980963d4dce955d492def142a5cfdb42890457db8cb11b3b444c3f02846c7374616b652d726f6f742d6566726f6f742d655821022d5219ae5811151d6d224d91ae5c7dbe5e2fea0ea53160bc4221eb32f2ba0537011158205a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5820c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c35820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+    "identity": "daa39c9a00315f404192cf4518e6626248dbeac378366e75f9fc04c0dc7aee8e",
+    "same_fields_identity": "daa39c9a00315f404192cf4518e6626248dbeac378366e75f9fc04c0dc7aee8e",
     "identities_equal": true,
-    "mutated_identity": "98282eb873b96bd15ac9d9691fda1429bda59bdadf3384d08a6034cb2a95bb51",
+    "mutated_identity": "637a0e024d356f1791067c054abbb6a825d6d34c602faa7664a473accdc34e64",
     "mutated_differs": true
+  },
+  "key_binding": {
+    "note": "The v2 body binds the complete member record; a key or role substitution changes the identity, and a shared consensus key across node ids is rejected by Validate.",
+    "baseline_identity": "daa39c9a00315f404192cf4518e6626248dbeac378366e75f9fc04c0dc7aee8e",
+    "consensus_key_substituted_identity": "d734b840af891f4435333bde5c97cebae54dc31d20f05e101dc7c476c1a5203c",
+    "consensus_key_substitution_changes_identity": true,
+    "staking_id_swapped_identity": "0995553c92e7d2903b1697cb9673b046e1cb04402af80e8a31b0e78c2695cec9",
+    "staking_id_swap_changes_identity": true,
+    "duplicate_consensus_key_across_ids_rejected": true
+  },
+  "v1_to_v2_transition": {
+    "note": "The first v2 body's predecessor is SHA-256(CBOR([\"UNICITY_TRUSTBASE_V1_TO_V2\", network, epoch, v1Hash])). The v1 anchor hash (which by v1 rules folds in signatures) is bound through this explicit transition; the v2 encoder never re-encodes legacy bytes.",
+    "v1_anchor_hash_including_sigs": "90b77db4bc8fd77329323ffe5b580c0a975f3a3fc4dfa868e4bdca112dcb7265",
+    "first_v2_predecessor_hash": "96d60d0f7913e0ed3469f003efede7b2103a0bff919a3fce51c1948e54a41d72",
+    "predecessor_is_a_tagged_transition_not_raw_v1_bytes": true
   }
 }
