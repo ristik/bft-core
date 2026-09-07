@@ -222,6 +222,7 @@ Recorded results against reth `189c0df3`:
 | Two `l1` commits unmerged; consistency-proof fixtures not retained | §3.2 | F8 (#16) |
 | FFI CI lane disabled (`if: false`) | §5.2 | F8 (#16) |
 | `rootchain/consensus` `Test_recoverState`, `Test_rootNetworkRunning`, `Test_ConsensusManager_messages` fail on a slow/loaded host: they assert round progress against wall-clock deadlines and reach only rounds 2–3 within them. Pass in CI (run 34102642015 attempt 2) and fail reproducibly on the F1 development host, in isolation as well as in the full suite. Not a protocol defect; a test-harness timing assumption. | §5.1 | F1 records; retest under F8 (#16)'s fixture work |
+| `scripts/chaos-evm.sh`'s `cold-restart` scenario asserts round progress within 15s of killing a validator; fails on a loaded runner (`evm-shard-chaos`, run 34105234592). Same wall-clock assumption as the row above. | §6.3 | F1 records; retest under F8 (#16) |
 | `gosec` reports 28 findings (analyzer job is `continue-on-error`) | §6.3 | F1 records; see §6.3 |
 | Certified head still in latest-only JSON persistence | `shardnode/store.go` | F6 (#14) |
 | Canonical root input unauthenticated at the executor boundary | §4.4 | F2 (#10) |
@@ -260,8 +261,18 @@ The D2 handoff requires these be recorded or fixed rather than waived.
   reference-model code, not production paths; the G404 in `rootnodes.go` is root-node selection
   shuffling and wants a look from whoever owns F9 (#17)'s transport work. No blanket waiver is
   claimed — the findings are listed so the next ticket inherits them explicitly.
-- **Discovery timeout (earlier run) — see §5.4.** Same family as the local
-  `rootchain/consensus` failures: wall-clock progress assertions on a loaded runner.
+- **Discovery timeout — fixed.** `network.TestProvidesAndDiscoverNodes` waits for `peer1` and
+  `peer2` to learn about `peer3`, which joined after both were already up, so it reaches them only
+  through the bootstrap node's gossip. At `2*test.WaitDuration` that was an 8s coin flip: it failed
+  again on this branch (run 34105234592) while the identical job on the same commit passed. The
+  budget is now 8×. Raising it rather than forcing the lookup is deliberate —
+  `dht.RefreshRoutingTable` does force it, but the queries it spawns outlive the test and log
+  through `newDHT`'s routing-table callback after completion, panicking the package exactly the way
+  the untracked `Subscriptions` goroutines did. The test asserts *that* discovery converges, not how
+  fast, so a longer budget costs a slow machine seconds and a fast one nothing.
+- **`evm-shard-chaos` — environment-sensitive, see §5.4.** Its `cold-restart` scenario asserts the
+  surviving validators advance a round within 15s of a validator being killed. Same family as the
+  `rootchain/consensus` failures: a wall-clock progress assertion on a loaded runner.
 
 ### 6.4 Real-reth in CI
 
