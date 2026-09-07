@@ -68,10 +68,52 @@ fi
 ethURL()    { echo "http://127.0.0.1:$((rethEthBase + $1 - 1))"; }
 engineURL() { echo "http://127.0.0.1:$((rethEngineBase + $1 - 1))"; }
 
+# --- RPC, strictly validated -------------------------------------------------------------------
+#
+# Every observation used in an assertion goes through rpcField. A transport failure, a JSON-RPC
+# error object, a missing result or a missing field is a FAILED OBSERVATION and returns nonzero;
+# it never yields a value an assertion can accidentally agree on.
+#
+# This matters more than it sounds. The first version returned "" on failure and compared the
+# strings: with every block and receipt call erroring, all four nodes produced the same empty
+# observation, so "all clients agree on the canonical head", "...on the sender nonce" and
+# "...on every receipt" all PASSED with zero failures. A harness that reports agreement because
+# nothing answered is worse than no harness. Reproduced by the reviewer and now pinned by
+# scripts/reth-chaos-selftest.sh.
 rpc() {
   curl -sS --max-time 15 -X POST "$1" -H "Content-Type: application/json" \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}" 2>/dev/null
 }
+
+# rpcField <url> <method> <params> <python-index-expr>
+# Prints the field on success. Returns 1 on transport failure, JSON-RPC error, null result, or a
+# missing/null field, printing nothing.
+rpcField() {
+  local url=$1 method=$2 params=$3 expr=$4 body
+  body=$(rpc "$url" "$method" "$params") || return 1
+  [ -n "$body" ] || return 1
+  python3 - "$body" "$expr" <<'PYEOF' 2>/dev/null || return 1
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
+if not isinstance(d, dict) or d.get("error") is not None:
+    sys.exit(1)
+if "result" not in d or d["result"] is None:
+    sys.exit(1)
+cur = d
+try:
+    for key in json.loads(sys.argv[2]):
+        cur = cur[key]
+except Exception:
+    sys.exit(1)
+if cur is None:
+    sys.exit(1)
+print(cur)
+PYEOF
+}
+
 pyget() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d$1)" 2>/dev/null; }
 hexToDec() { python3 -c "print(int('${1:-0x0}',16))" 2>/dev/null || echo 0; }
 
@@ -89,11 +131,22 @@ startReth() {
   echo $! >"test-nodes/reth$i/pid"
 }
 
+# stopReth - stop a client and WAIT for it to actually exit before returning. Dropping the pid
+# file immediately let a restart race the dying process for its datadir and ports.
 stopReth() {
-  local i=$1
+  local i=$1 pid waited=0
   [ -f "test-nodes/reth$i/pid" ] || return 0
-  kill "$(cat "test-nodes/reth$i/pid")" 2>/dev/null
+  pid=$(cat "test-nodes/reth$i/pid")
   rm -f "test-nodes/reth$i/pid"
+  kill "$pid" 2>/dev/null || return 0
+  while ps -p "$pid" >/dev/null 2>&1; do
+    if [ "$waited" -ge 30 ]; then
+      kill -9 "$pid" 2>/dev/null
+      break
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  return 0
 }
 
 # waitReth - bounded, condition-driven: poll until the client answers, never a fixed sleep.
@@ -143,7 +196,17 @@ cleanup() {
   stopReth "wrongchain" 2>/dev/null
   wait 2>/dev/null
 }
-trap 'cleanup; exit 130' INT TERM
+# finish - collect evidence, then tear down. Runs on success, on assertion failure, and on
+# cancellation, so a run never ends without its evidence. Idempotent: an interrupt during the
+# normal end-of-run path must not collect or tear down twice.
+finished=""
+finish() {
+  [ -z "$finished" ] || return 0
+  finished=yes
+  collectEvidence
+  cleanup
+}
+trap 'echo; echo "=== interrupted ==="; finish; exit 130' INT TERM
 
 # --- observation helpers ----------------------------------------------------------------------
 log() { echo "test-nodes/evm$1/debug.log"; }
@@ -156,11 +219,15 @@ certifiedRound() {
   echo "${r:-0}"
 }
 
-# execHead - the reth canonical head this validator's executor has applied.
+# execHead - the reth canonical head this validator's executor has applied, as "number:hash".
+# Returns nonzero and prints nothing if the client cannot be observed: an unobservable head is not
+# a head value, and must never flow into a comparison.
 execHead() {
-  local blk
-  blk=$(rpc "$(ethURL "$1")" eth_getBlockByNumber '["latest", false]')
-  echo "$(hexToDec "$(echo "$blk" | pyget "['result']['number']")"):$(echo "$blk" | pyget "['result']['hash']")"
+  local num hash
+  num=$(rpcField "$(ethURL "$1")" eth_getBlockByNumber '["latest", false]' '["result","number"]') || return 1
+  hash=$(rpcField "$(ethURL "$1")" eth_getBlockByNumber '["latest", false]' '["result","hash"]') || return 1
+  case "$hash" in 0x*) ;; *) return 1 ;; esac
+  echo "$(hexToDec "$num"):$hash"
 }
 
 # shardLeadersSince - distinct validators that logged themselves leader after line $2 of their log.
@@ -176,6 +243,35 @@ shardLeadersSince() {
     fi
   done
   echo "$found"
+}
+
+# validatorForPeer - map a peer ID (as it appears in TechnicalRecord.Leader) to a validator index,
+# using each node's own node-info.json. Prints nothing if unknown.
+validatorForPeer() {
+  local want=$1 i id
+  for i in $(seq 1 "$validators"); do
+    id=$(python3 -c "import json;print(json.load(open('test-nodes/evm$i/node-info.json'))['nodeId'])" 2>/dev/null)
+    [ "$id" = "$want" ] && { echo "$i"; return 0; }
+  done
+  return 1
+}
+
+# currentShardLeader - the validator the shard's own latest accepted certificate names as leader
+# for the NEXT round, i.e. the authenticated technical-record context rather than a guess from
+# recent log lines. Prints "index peerID round" so the boundary can be recorded as evidence.
+#
+# The first version scanned for the lowest-index node whose last five submissions contained
+# leader=true, which is neither the assigned nor the most recent leader; the reviewer was right
+# that it made the scenario a shard-process restart rather than a leader experiment.
+currentShardLeader() {
+  local from=$1 line peer round idx
+  line=$(grep 'accepted certificate' "$(log "$from")" 2>/dev/null | tail -1)
+  [ -n "$line" ] || return 1
+  peer=$(echo "$line" | grep -o 'nextLeader=[^ ]*' | cut -d= -f2)
+  round=$(echo "$line" | grep -o 'nextRound=[0-9]*' | cut -d= -f2)
+  [ -n "$peer" ] || return 1
+  idx=$(validatorForPeer "$peer") || return 1
+  echo "$idx $peer $round"
 }
 
 markAll() {
@@ -270,51 +366,99 @@ runWorkload() {
 # nonce for the workload so far. Head agreement alone would not catch divergent state.
 assertConvergence() {
   local label=$1
-  local i heads="" h rcptBlocks="" nonces="" acct=$senderAcct
+  local i h expected live=0 bad=0
+  local heads="" nonces="" rcpts=""
 
   # Bounded wait for propagation before comparing. A block reaches the other clients over devp2p
   # and through their own forkchoice, which is not instant; comparing immediately would measure
-  # delivery latency and report it as divergence. If they never converge, that IS the finding —
-  # the assertions below then fail with the actual differing values.
-  local waited=0 live
-  while [ "$waited" -lt 60 ]; do
-    live=""
+  # delivery latency and report it as divergence.
+  local waited=0 probe seen
+  # Budget is overridable so scripts/reth-chaos-selftest.sh can drive the oracle without waiting
+  # out a propagation window that will never be satisfied by stubs.
+  while [ "$waited" -lt "${CONVERGE_WAIT_BUDGET:-60}" ]; do
+    seen=""; probe=0
     for i in $(seq 1 "$validators"); do
       [ -f "test-nodes/reth$i/pid" ] || continue
-      live="$live$(execHead "$i")"$'\n'
+      probe=$((probe + 1))
+      seen="$seen$(execHead "$i" || echo UNOBSERVABLE)"$'\n'
     done
-    [ "$(printf '%s' "$live" | sort -u | grep -c .)" = "1" ] && break
+    [ "$(printf '%s' "$seen" | sort -u | grep -c .)" = "1" ] && ! printf '%s' "$seen" | grep -q UNOBSERVABLE && break
     sleep 2; waited=$((waited + 2))
   done
 
+  # Collect. Every live participant MUST be observable, and every submitted transaction MUST have
+  # a receipt with the block and status it was recorded with. A failed observation is a failure,
+  # never an empty string that happens to match another empty string.
   for i in $(seq 1 "$validators"); do
     [ -f "test-nodes/reth$i/pid" ] || continue
-    heads="$heads$(execHead "$i")"$'\n'
-    nonces="$nonces$(rpc "$(ethURL "$i")" eth_getTransactionCount "[\"$acct\",\"latest\"]" | pyget "['result']")"$'\n'
-    local per="" r
+    live=$((live + 1))
+
+    local head nonce
+    if ! head=$(execHead "$i"); then
+      fail "$label: validator $i's execution head could not be observed"
+      bad=$((bad + 1)); continue
+    fi
+    heads="$heads$head"$'\n'
+
+    if ! nonce=$(rpcField "$(ethURL "$i")" eth_getTransactionCount "[\"$senderAcct\",\"latest\"]" '["result"]'); then
+      fail "$label: validator $i's sender nonce could not be observed"
+      bad=$((bad + 1)); continue
+    fi
+    nonces="$nonces$(hexToDec "$nonce")"$'\n'
+
+    local per="" blk st
     for h in ${txHashes[@]+"${txHashes[@]}"}; do
-      # One query per receipt: two separate calls can straddle propagation and disagree with
-      # themselves rather than with another node.
-      r=$(rpc "$(ethURL "$i")" eth_getTransactionReceipt "[\"$h\"]")
-      per="$per$(echo "$r" | pyget "['result']['blockNumber']"),$(echo "$r" | pyget "['result']['status']");"
+      if ! blk=$(rpcField "$(ethURL "$i")" eth_getTransactionReceipt "[\"$h\"]" '["result","blockNumber"]'); then
+        fail "$label: validator $i has no receipt for $h (it was executed and recorded earlier)"
+        bad=$((bad + 1)); per=""; break
+      fi
+      if ! st=$(rpcField "$(ethURL "$i")" eth_getTransactionReceipt "[\"$h\"]" '["result","status"]'); then
+        fail "$label: validator $i has no receipt status for $h"
+        bad=$((bad + 1)); per=""; break
+      fi
+      # Cross-check against what was recorded when the transaction executed, so a client that
+      # agrees with its peers but disagrees with history is still caught.
+      expected=$(awk -v hh="$h" '$1==hh {print $3" "$4}' test-nodes/evidence/workload.txt | tail -1)
+      if [ -n "$expected" ] && [ "$(hexToDec "$blk") $st" != "$expected" ]; then
+        fail "$label: validator $i has $h at block $(hexToDec "$blk") status $st, recorded as $expected"
+        bad=$((bad + 1))
+      fi
+      per="$per$(hexToDec "$blk"),$st;"
     done
-    rcptBlocks="$rcptBlocks$per"$'\n'
+    rcpts="$rcpts$per"$'\n'
   done
+
   {
-    echo "--- $label ---"; echo "heads:"; printf '%s' "$heads"
-    echo "nonces:"; printf '%s' "$nonces"; echo "receipts:"; printf '%s' "$rcptBlocks"
+    echo "--- $label (live=$live unobservable=$bad) ---"
+    echo "heads:"; printf '%s' "$heads"
+    echo "nonces:"; printf '%s' "$nonces"
+    echo "receipts:"; printf '%s' "$rcpts"
   } >>test-nodes/evidence/convergence.txt
 
-  local uniqHeads uniqNonces uniqRcpts
+  if [ "$live" -eq 0 ]; then
+    fail "$label: no live execution clients to compare — convergence is unproven, not satisfied"
+    return 1
+  fi
+  if [ "$bad" -gt 0 ]; then
+    fail "$label: $bad of $live live clients could not be observed; convergence NOT established"
+    return 1
+  fi
+
+  # Only now is agreement meaningful: every live client answered, for every recorded transaction.
+  local uniqHeads uniqNonces uniqRcpts nHeads
+  nHeads=$(printf '%s' "$heads" | grep -c .)
   uniqHeads=$(printf '%s' "$heads" | sort -u | grep -c .)
   uniqNonces=$(printf '%s' "$nonces" | sort -u | grep -c .)
-  uniqRcpts=$(printf '%s' "$rcptBlocks" | sort -u | grep -c .)
-  [ "$uniqHeads" = "1" ] && pass "$label: all live clients agree on the canonical head" \
+  uniqRcpts=$(printf '%s' "$rcpts" | sort -u | grep -c .)
+
+  [ "$nHeads" = "$live" ] || { fail "$label: observed $nHeads heads for $live live clients"; return 1; }
+  [ "$uniqHeads" = "1" ] && pass "$label: all $live live clients agree on the canonical head" \
     || { fail "$label: canonical heads disagree"; printf '%s' "$heads"; }
-  [ "$uniqNonces" = "1" ] && pass "$label: all live clients agree on the sender nonce (no duplicate execution)" \
+  [ "$uniqNonces" = "1" ] && pass "$label: all $live live clients agree on the sender nonce (no duplicate execution)" \
     || { fail "$label: sender nonce disagrees"; printf '%s' "$nonces"; }
-  [ "$uniqRcpts" = "1" ] && pass "$label: all live clients agree on every workload receipt block and status" \
-    || { fail "$label: receipts disagree"; printf '%s' "$rcptBlocks"; }
+  [ "$uniqRcpts" = "1" ] && pass "$label: all $live live clients agree on every one of ${#txHashes[@]} recorded receipts" \
+    || { fail "$label: receipts disagree"; printf '%s' "$rcpts"; }
+  return 0
 }
 
 # --- evidence ---------------------------------------------------------------------------------
@@ -337,6 +481,40 @@ snapshot() {
   done
 }
 
+collectEvidence() {
+  local out=test-nodes/evidence
+  local i
+  for i in $(seq 1 "$validators"); do
+    cp "$(log "$i")" "$out/evm$i-debug.log" 2>/dev/null
+    cp "test-nodes/reth$i/reth.log" "$out/reth$i.log" 2>/dev/null
+    cp "test-nodes/evm$i/shard-node-luc.json" "$out/evm$i-luc.bin" 2>/dev/null
+    cp "test-nodes/evm$i/node-info.json" "$out/evm$i-node-info.json" 2>/dev/null
+  done
+  for i in 1 2 3; do cp "test-nodes/root$i/debug.log" "$out/root$i-debug.log" 2>/dev/null; done
+  cp "test-nodes/shard-conf-${partitionID}_0.json" "$out/" 2>/dev/null
+  cp test-nodes/trust-base.json "$out/" 2>/dev/null
+  cp test-nodes/evm-genesis.json test-nodes/evm-genesis-funded.json "$out/" 2>/dev/null
+  # Secrets are excluded by construction, never filtered after the fact: keys.json and jwt.hex
+  # are simply not copied. The check below fails the run if one ever appears anyway.
+  if find "$out" -name 'keys.json' -o -name 'jwt.hex' | grep -q .; then
+    fail "evidence archive contains a secret file"
+  else
+    pass "evidence archive contains no keys.json or jwt.hex"
+  fi
+  # Check the archive was actually produced and is non-trivial before claiming it exists.
+  if tar czf test-nodes/reth-chaos-evidence.tar.gz -C test-nodes evidence 2>/dev/null &&
+     [ -s test-nodes/reth-chaos-evidence.tar.gz ] &&
+     [ "$(tar tzf test-nodes/reth-chaos-evidence.tar.gz 2>/dev/null | wc -l | tr -d ' ')" -gt 5 ]; then
+    pass "evidence archived: test-nodes/reth-chaos-evidence.tar.gz ($(du -h test-nodes/reth-chaos-evidence.tar.gz | cut -f1), $(tar tzf test-nodes/reth-chaos-evidence.tar.gz | wc -l | tr -d ' ') files)"
+  else
+    fail "evidence archive was not produced — the run's evidence is only in test-nodes/evidence/"
+  fi
+}
+
+# --- HARNESS DEFINITIONS END -------------------------------------------------------------------
+# Everything above is function and variable definitions only, so scripts/reth-chaos-selftest.sh can
+# source it and exercise the assertion oracle without starting a devnet. Keep it that way.
+
 echo "=== reth-chaos.sh: real-reth workload and fault evidence (F1a #88) ==="
 echo "reth:        $rethCommit"
 echo "validators:  $validators, one pinned reth each"
@@ -346,7 +524,7 @@ echo
 echo "=== 0. clean fixtures ==="
 ./stop-evm.sh -a >/dev/null 2>&1
 for i in $(seq 1 "$validators"); do stopReth "$i"; done
-./setup-evm-nodes.sh -r 3 -v "$validators" >/dev/null || { echo "setup failed" >&2; cleanup; exit 1; }
+./setup-evm-nodes.sh -r 3 -v "$validators" >/dev/null || { echo "setup failed" >&2; cleanup; exit 1; }  # nothing to collect yet
 mkdir -p test-nodes/evidence
 : >test-nodes/evidence/workload.txt
 : >test-nodes/evidence/convergence.txt
@@ -372,7 +550,7 @@ for i in $(seq 1 "$validators"); do
   startReth "$i"
 done
 for i in $(seq 1 "$validators"); do
-  waitReth "$i" 90 || { fail "reth$i did not start"; cleanup; exit 1; }
+  waitReth "$i" 90 || { fail "reth$i did not start"; finish; exit 1; }
 done
 peerReths
 pass "$validators pinned reth instances up and statically peered"
@@ -387,7 +565,7 @@ rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
 
 waited=0
 until grep -q 'accepted certificate' "$(log 1)" 2>/dev/null; do
-  [ "$waited" -ge 180 ] && { fail "shard never certified"; cleanup; exit 1; }
+  [ "$waited" -ge 180 ] && { fail "shard never certified"; finish; exit 1; }
   sleep 2; waited=$((waited + 2))
 done
 pass "shard certifying on --executor engine-api against real reth"
@@ -401,11 +579,27 @@ echo
 # recoveredAndWorking - the returning node must (a) accept a certificate logged after its restart
 # and (b) participate in executing a NEW transaction, agreeing with everyone else afterwards.
 # A restart that merely re-reads an old certificate is not recovery.
+# recoveryFailed is sticky. #88 requires that no further fault be injected until the returning node
+# demonstrably executes and certifies new work, and the reviewer showed the consequence of ignoring
+# it: after a failed recovery the next scenario ran against an already-degraded cluster, so its
+# result said nothing about the fault it was supposed to isolate. Later scenarios are now marked
+# NOT RUN instead of producing contaminated evidence.
+recoveryFailed=""
+
+skipIfUnrecovered() {
+  [ -n "$recoveryFailed" ] || return 1
+  echo "  SKIP: $1 NOT RUN — the cluster never recovered from $recoveryFailed, so any result here"
+  echo "        would be contaminated (#88: do not inject another fault until the returning node"
+  echo "        demonstrably executes and certifies new work)."
+  return 0
+}
+
 recoveredAndWorking() {
   local v=$1 mark=$2 label=$3 budget=${4:-120} waited=0
   while ! awk -v n="$mark" 'NR > n && /accepted certificate/ {f=1; exit} END{exit !f}' "$(log "$v")" 2>/dev/null; do
     if [ "$waited" -ge "$budget" ]; then
       fail "$label: validator $v accepted no NEW certificate within ${budget}s after returning"
+      recoveryFailed="$label"
       return 1
     fi
     sleep 2; waited=$((waited + 2))
@@ -419,12 +613,13 @@ recoveredAndWorking() {
   local via headBefore
   via=$(( v % validators + 1 ))
   [ -f "test-nodes/reth$via/pid" ] || via=1
-  headBefore=$(execHead "$v")
-  submitAndConfirm "$via" || return 1
+  headBefore=$(execHead "$v") || { fail "$label: validator $v's head is unobservable after returning"; recoveryFailed="$label"; return 1; }
+  submitAndConfirm "$via" || { recoveryFailed="$label"; return 1; }
   waited=0
-  while [ "$(execHead "$v")" = "$headBefore" ]; do
+  while [ "$(execHead "$v" || echo UNOBSERVABLE)" = "$headBefore" ]; do
     if [ "$waited" -ge 120 ]; then
       fail "$label: validator $v's executor did not apply the new block (still $headBefore)"
+      recoveryFailed="$label"
       return 1
     fi
     sleep 2; waited=$((waited + 2))
@@ -471,13 +666,19 @@ snapshot 02b-after-follower-restart
 echo
 
 echo "=== 3. shard leader process kill, quorum of others live ==="
-# Target whoever most recently led, so this is a leader kill rather than another follower kill.
-leader=$(for i in $(seq 1 "$validators"); do
-  if tail -n 200 "$(log "$i")" 2>/dev/null | grep 'submitting block certification request' | tail -5 | grep -q 'leader=true'; then echo "$i"; fi
-done | head -1)
-leader=${leader:-1}
+if skipIfUnrecovered "leader kill"; then :; else
+# Take the target from the authenticated technical record — the leader the shard's own latest
+# accepted certificate names for the next round — and record that boundary as evidence.
+leaderCtx=$(currentShardLeader 1) || leaderCtx=""
+if [ -n "$leaderCtx" ]; then
+  leader=$(echo "$leaderCtx" | awk '{print $1}')
+  info "assigned shard leader from the latest technical record: validator $leader (peer $(echo "$leaderCtx" | awk '{print $2}'), nextRound $(echo "$leaderCtx" | awk '{print $3}'))"
+  echo "leader-kill target: $leaderCtx" >>test-nodes/evidence/workload.txt
+else
+  leader=1
+  info "could not read an assigned leader from the technical record; falling back to validator 1 — this scenario is then a shard-process restart, not a verified leader experiment"
+fi
 survivor=$(( leader % validators + 1 ))
-info "most recent shard leader observed: validator $leader (survivor observed: $survivor)"
 beforeRound=$(certifiedRound "$survivor")
 snapshot 03a-before-leader-kill
 stop_one_evm_validator "$leader"
@@ -493,9 +694,11 @@ start_one_evm_validator "$leader" "$validators" "$partitionID" "$rootBoot" engin
 recoveredAndWorking "$leader" "$mark" "leader-restart"
 assertConvergence "post-leader-restart"
 snapshot 03b-after-leader-restart
+fi
 echo
 
 echo "=== 4. reth-only restart, datadir retained (the shard process stays up) ==="
+if skipIfUnrecovered "reth-only restart"; then :; else
 # The executor disappears from under a running shard node. Two things matter: the shard must
 # abstain rather than certify something it cannot execute, and it must resume once the client
 # returns with its retained data.
@@ -525,9 +728,11 @@ info "reth$target restarted with its retained datadir (head was $execBefore)"
 recoveredAndWorking "$target" "$mark" "reth-restart"
 assertConvergence "post-reth-restart"
 snapshot 04b-after-reth-restart
+fi
 echo
 
 echo "=== 5. complete shard+reth pair restart, both datadirs retained ==="
+if skipIfUnrecovered "shard+reth pair restart"; then :; else
 pair=2
 snapshot 05a-before-pair-restart
 mark=$(logLines "$pair")
@@ -547,9 +752,13 @@ start_one_evm_validator "$pair" "$validators" "$partitionID" "$rootBoot" engine-
 recoveredAndWorking "$pair" "$mark" "pair-restart"
 assertConvergence "post-pair-restart"
 snapshot 05b-after-pair-restart
+fi
 echo
 
 echo "=== 6. final workload and multi-leader evidence ==="
+if skipIfUnrecovered "final workload"; then
+  echo "  SKIP: multi-leader and EVM-block-count evidence NOT RUN for the same reason."
+else
 runWorkload "post-fault" "$workloadTxs"
 leadersAfter=$(cat test-nodes/evidence/.leaders-post-fault)
 assertConvergence "final"
@@ -570,6 +779,7 @@ else
   fail "only $blocks EVM blocks for ${expected} transactions"
 fi
 snapshot 06-final
+fi
 echo
 
 if [ "$injectFailure" = true ]; then
@@ -577,34 +787,10 @@ if [ "$injectFailure" = true ]; then
   fail "INJECTED: deliberate failure (-F) so the artifact path is proven, not assumed"
 fi
 
-echo "=== evidence ==="
-collectEvidence() {
-  local out=test-nodes/evidence
-  local i
-  for i in $(seq 1 "$validators"); do
-    cp "$(log "$i")" "$out/evm$i-debug.log" 2>/dev/null
-    cp "test-nodes/reth$i/reth.log" "$out/reth$i.log" 2>/dev/null
-    cp "test-nodes/evm$i/shard-node-luc.json" "$out/evm$i-luc.bin" 2>/dev/null
-    cp "test-nodes/evm$i/node-info.json" "$out/evm$i-node-info.json" 2>/dev/null
-  done
-  for i in 1 2 3; do cp "test-nodes/root$i/debug.log" "$out/root$i-debug.log" 2>/dev/null; done
-  cp "test-nodes/shard-conf-${partitionID}_0.json" "$out/" 2>/dev/null
-  cp test-nodes/trust-base.json "$out/" 2>/dev/null
-  cp test-nodes/evm-genesis.json test-nodes/evm-genesis-funded.json "$out/" 2>/dev/null
-  # Secrets are excluded by construction, never filtered after the fact: keys.json and jwt.hex
-  # are simply not copied. The check below fails the run if one ever appears anyway.
-  if find "$out" -name 'keys.json' -o -name 'jwt.hex' | grep -q .; then
-    fail "evidence archive contains a secret file"
-  else
-    pass "evidence archive contains no keys.json or jwt.hex"
-  fi
-  tar czf test-nodes/reth-chaos-evidence.tar.gz -C test-nodes evidence
-  pass "evidence archived: test-nodes/reth-chaos-evidence.tar.gz ($(du -h test-nodes/reth-chaos-evidence.tar.gz | cut -f1))"
-}
-collectEvidence
 
 echo
-cleanup
+echo "=== evidence ==="
+finish
 if [ "$failures" -gt 0 ]; then
   echo "=== reth-chaos.sh: $failures assertion(s) failed — evidence retained ==="
   exit 1

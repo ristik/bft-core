@@ -576,7 +576,7 @@ and the root chain's databases. Signing keys are deliberately excluded. Retentio
 **Open, and blocking.** Owner: F2 (#10) for classification, F8 (#16) and root consensus for the
 stall. Per the review, budgets were not raised and no diagnostic was suppressed.
 
-### 5.7 Real-reth workload and fault evidence (F1a #88) — one blocking finding
+### 5.7 Real-reth workload and fault harness (F1a #88) — evidence pending isolated reruns
 
 `scripts/reth-chaos.sh` is the real-execution counterpart to `scripts/chaos-evm.sh`: four pinned
 reth instances, one per validator, driven by the actual Go adapter, with a funded transaction
@@ -584,48 +584,49 @@ workload so recovery is judged by executed blocks and receipts rather than by ro
 advance whether or not anything ran. No fake fallback; a wrong client revision fails.
 
 ```bash
-./scripts/reth-chaos.sh -v 4 -t 2      # add -F to inject a failure and exercise evidence collection
+./scripts/reth-chaos.sh -v 4 -t 2      # -F injects a failure to exercise evidence collection
+./scripts/reth-chaos-selftest.sh       # the assertion oracle's own regression tests, no devnet
 ```
 
-**What passes.** The pre-fault workload executes and certifies, three to four distinct shard
-leaders produce certified work, and all four clients agree on the canonical head, the sender nonce
-and every receipt. A **shard follower restart with its reth retained** fully recovers: the returning
-node accepts new certificates, its executor applies newly certified blocks, and all four clients
-reconverge on head, nonce and receipts. The shard also keeps certifying with one validator absent,
-and a node whose executor is removed reports it rather than proceeding silently.
+**A previous revision of this section drew a conclusion this harness could not support, and it is
+withdrawn.** It claimed three independent scenarios showed an executor that "never catches up", and
+attributed it to blocks never being gossiped over devp2p. Review 5134687869 found two defects that
+invalidate that reading:
 
-**What fails, consistently, and looks like a real defect.** Whenever a validator's *executor* falls
-behind — as opposed to just its shard process — it never catches up, and the shard stops executing
-new transactions from then on:
+- **Scenarios continued after a failed recovery**, so each later fault was injected into an already
+  degraded cluster. The retained `convergence.txt` shows node 1 stuck at block 4 while others
+  reached 6 and 7 — the later scenarios were measuring the earlier unrecovered state, not the fault
+  they named.
+- **A failed observation could satisfy an assertion.** With every block and receipt RPC returning a
+  JSON-RPC error, all four nodes produced the same empty observation, so "all clients agree on the
+  canonical head", "…on the sender nonce" and "…on every receipt" all passed with zero failures.
 
-| Scenario | Result |
-| --- | --- |
-| Follower restart, reth retained | recovers fully |
-| **Leader restart** (reth up but unfed while the shard process was down) | returning node accepts certificates, but its executor never applies the new block; heads, nonce and receipts diverge |
-| **reth-only restart**, datadir retained | returning client never rejoins the canonical head; subsequent transactions are never executed |
-| **Complete shard+reth pair restart** | same, plus the shard stalls while the pair is down |
+The devp2p attribution was also asserted without tracing it, and is withdrawn on that ground alone.
 
-The shape is the same in all three: the follower case is the one where the executor never missed a
-payload. A shard node delivers blocks to its own client over the Engine API; if the client misses
-those payloads, nothing appears to drive it back to the certified head, and devp2p does not fill the
-gap because the missed blocks were never gossiped as canonical. Once one client is behind, later
-transactions are not executed anywhere.
+**What the harness now guarantees.** Every observation goes through `rpcField`, which fails on a
+transport error, a JSON-RPC error, a null result or a missing field, so an unobservable client is a
+failure rather than a value that matches other failures. `assertConvergence` additionally requires
+every live participant to answer and every recorded transaction to have a receipt matching the
+block and status it was recorded with. `scripts/reth-chaos-selftest.sh` pins all of this, including
+the reviewer's exact reproduction, and runs without a devnet. After any failed recovery the
+remaining scenarios are reported **NOT RUN** rather than producing contaminated evidence. The
+leader-kill target is taken from the authenticated technical record (the leader named for the next
+round by the latest accepted certificate) and that boundary is recorded; if it cannot be read the
+run says so and labels the scenario a shard-process restart. Evidence collection and teardown run
+on success, failure and cancellation, and the archive is verified before it is claimed.
 
-**Status: this is exposed, not diagnosed.** The run is 24 assertions passing and 21 failing at the
-head this section was written against. Per #88 the harness may land with its failing scenarios
-clearly exposed; the ticket's acceptance stays open until they pass or an explicit fail-closed
-recovery contract is approved. The failures are **not** budget artifacts — several distinct harness
-bugs were found and fixed first (see the commit message), and the remaining pattern is stable across
-runs. Owners: F6 (#14) for the executor recovery contract, F2 (#10) for what a returning node should
-do about a certified head it cannot reach, and F8 (#16), which should treat this as a candidate
-explanation for the unexplained stall rather than a separate issue.
+**The concrete runtime lead**, which is more specific than anything this harness had concluded, came
+from the retained `evm1` log: a divergent state with `certifiedBlockHash=""` followed by
+`engineapi: commit: expected a 32-byte hash, got 0 bytes` — `Round.reconcile` passing a quiet
+certificate's nil `BlockHash` into `Commit`. That is **#92**, with its own deterministic regression
+and local-payload-present versus absent cases. The stale-certificate-versus-equivocation taxonomy is
+**#93**. Neither is claimed here.
 
-Evidence: every run writes `test-nodes/evidence/` and archives it to
-`test-nodes/reth-chaos-evidence.tar.gz` — per-scenario snapshots of certified cursor, applied
-execution head and persisted certificate, plus all root, shard and reth logs, the shard conf, trust
-base and both genesis files. Signing keys and JWT secrets are excluded by construction and the run
-asserts their absence. The collection path is exercised by real failures, not only by the `-F`
-injection switch.
+**Status.** The harness is corrected; the scenario results are **not yet acceptance evidence**. They
+must be regenerated as isolated runs at an exact committed harness and build revision, with hashes
+retained. #88 stays open. Owners for whatever survives isolation: F6 (#14) for the executor recovery
+contract, F2 (#10) for what a returning node should do about a certified head it cannot reach, and
+F8 (#16), which should not treat this as an explanation for the unexplained stall without evidence.
 
 ### 6.4 Real-reth in CI
 
