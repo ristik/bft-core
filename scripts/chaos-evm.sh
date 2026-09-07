@@ -358,10 +358,18 @@ fi
 : >"test-nodes/evm$victim/debug.log" # isolate this scenario's log output
 start_one_evm_validator "$victim" "$validators" "$partition_id" "$rootBoot" fake rpc
 sleep 2
-if grep -q 'unmarshaling stored certificate' "test-nodes/evm$victim/debug.log" 2>/dev/null; then
+# The store is canonical CBOR since issue #86, so damaged content is reported as damaged
+# rather than as a decode error. What matters for this scenario is unchanged and still
+# asserted: the node refuses to start and says why, instead of quietly treating an
+# unreadable checkpoint as a fresh store and voting from genesis. The corrupt text below
+# begins with "{", so this also pins that a damaged file is NOT misreported as a legacy
+# JSON checkpoint needing migration.
+if grep -qE 'certificate store .* is damaged' "test-nodes/evm$victim/debug.log" 2>/dev/null; then
   pass "validator $victim refused to start on a corrupted certificate store (failed loudly, did not silently resume from scratch)"
+elif grep -q 'legacy JSON format' "test-nodes/evm$victim/debug.log" 2>/dev/null; then
+  fail "validator $victim reported corruption as a legacy-format migration — see test-nodes/evm$victim/debug.log"
 else
-  fail "validator $victim did not report the expected unmarshal error on a corrupted LUC store — see test-nodes/evm$victim/debug.log"
+  fail "validator $victim did not report a damaged LUC store — see test-nodes/evm$victim/debug.log"
 fi
 # The process above exits immediately on that error (shardNodeRun returns
 # it before Run starts) — nothing left to stop, but remove any stale pid

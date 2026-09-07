@@ -87,19 +87,25 @@ func ClassifyUC(prevUC, newUC *types.UnicityCertificate) (UCClass, error) {
 }
 
 /*
-DescribeUCConflict renders the two certificates a failed ClassifyUC compared, field
-by field, so a rejection carries its own evidence.
+DescribeUCConflict renders the two certificates a failed ClassifyUC compared, so a
+rejection carries its own evidence.
 
 Motivation (F1 #9, review 5132493933): CI reproduced a shard node repeatedly logging
 "equivocating UC, different input records for same partition round 4" and never
 recovering, and the log said only that. Deciding whether that is two genuinely
-conflicting quorum certificates, a stale response from a lagging root node, or a
-local state bug requires knowing WHICH field differs and which root rounds the two
-seals came from — none of which the error string carries. This does not change any
-classification decision; it only makes the rejection explicable.
+conflicting quorum certificates, a stale response, or a local representation bug
+requires knowing WHICH field differs and which root rounds the two seals came from.
 
-Marked with the differing fields so the reader does not have to diff two long lines
-by eye.
+Equality here is decided by the canonical CBOR the signatures actually cover
+(InputRecord.Bytes), never by a field-by-field bytes.Equal scan. An earlier version of
+this function did the latter and reported "input records are equal" for the very
+conflict it was written to explain — bytes.Equal(nil, []byte{}) is true, while the
+canonical encodings differ (0xf6 null versus 0x40 empty byte string). That is exactly
+the nil/empty loss issue #86 fixes in the checkpoint encoding, and a diagnostic that
+cannot see it is worse than none. Byte fields are therefore reported as nil, empty or
+hex, so the distinction is visible in the log line.
+
+This does not change any classification decision.
 */
 func DescribeUCConflict(prevUC, newUC *types.UnicityCertificate) string {
 	if prevUC == nil || newUC == nil {
@@ -116,24 +122,73 @@ func DescribeUCConflict(prevUC, newUC *types.UnicityCertificate) string {
 			diffs = append(diffs, name)
 		}
 	}
+	// sameBytes is deliberately stricter than bytes.Equal: nil and empty are different
+	// values here, because they encode differently and the encoding is what is signed.
+	sameBytes := func(a, b []byte) bool {
+		if (a == nil) != (b == nil) {
+			return false
+		}
+		return bytes.Equal(a, b)
+	}
+	cmp("version", p.Version == n.Version)
 	cmp("roundNumber", p.RoundNumber == n.RoundNumber)
 	cmp("epoch", p.Epoch == n.Epoch)
-	cmp("previousHash", bytes.Equal(p.PreviousHash, n.PreviousHash))
-	cmp("hash", bytes.Equal(p.Hash, n.Hash))
-	cmp("blockHash", bytes.Equal(p.BlockHash, n.BlockHash))
-	cmp("summaryValue", bytes.Equal(p.SummaryValue, n.SummaryValue))
+	cmp("previousHash", sameBytes(p.PreviousHash, n.PreviousHash))
+	cmp("hash", sameBytes(p.Hash, n.Hash))
+	cmp("blockHash", sameBytes(p.BlockHash, n.BlockHash))
+	cmp("summaryValue", sameBytes(p.SummaryValue, n.SummaryValue))
 	cmp("timestamp", p.Timestamp == n.Timestamp)
 	cmp("sumOfEarnedFees", p.SumOfEarnedFees == n.SumOfEarnedFees)
-	cmp("etHash", bytes.Equal(p.ETHash, n.ETHash))
+	cmp("etHash", sameBytes(p.ETHash, n.ETHash))
 
-	differing := "none (input records are equal)"
+	// The authority on whether the records differ at all. If this disagrees with the
+	// field list above, say so rather than picking one - it means a field this function
+	// does not know about changed, and silently reporting "equal" is how the previous
+	// version misled.
+	canonical := "canonical IR bytes: "
+	pb, pErr := p.Bytes()
+	nb, nErr := n.Bytes()
+	switch {
+	case pErr != nil || nErr != nil:
+		canonical += fmt.Sprintf("uncomputable (prev err=%v, new err=%v)", pErr, nErr)
+	case bytes.Equal(pb, nb):
+		canonical += "IDENTICAL"
+	default:
+		canonical += fmt.Sprintf("DIFFER (prev=%x new=%x)", pb, nb)
+	}
+
+	differing := "none by field comparison"
 	if len(diffs) > 0 {
 		differing = strings.Join(diffs, ",")
 	}
-	return fmt.Sprintf("differing IR fields: [%s]; stored: rootRound=%d rootEpoch=%d seal=%X IR{%s}; received: rootRound=%d rootEpoch=%d seal=%X IR{%s}",
-		differing,
-		prevUC.GetRootRoundNumber(), prevUC.GetRootEpoch(), sealHash(prevUC), p.String(),
-		newUC.GetRootRoundNumber(), newUC.GetRootEpoch(), sealHash(newUC), n.String())
+	return fmt.Sprintf("differing IR fields: [%s]; %s; stored: rootRound=%d rootEpoch=%d seal=%X %s; received: rootRound=%d rootEpoch=%d seal=%X %s",
+		differing, canonical,
+		prevUC.GetRootRoundNumber(), prevUC.GetRootEpoch(), sealHash(prevUC), describeIR(p),
+		newUC.GetRootRoundNumber(), newUC.GetRootEpoch(), sealHash(newUC), describeIR(n))
+}
+
+// describeIR renders an InputRecord for a log line. InputRecord.String omits Timestamp,
+// which is one of the fields that can legitimately differ between two attempts at the
+// same round, so it is spelled out here along with the nil/empty state of every byte
+// field.
+func describeIR(ir *types.InputRecord) string {
+	return fmt.Sprintf("IR{v:%d round:%d epoch:%d ts:%d fees:%d H:%s Hprev:%s Bh:%s summary:%s ETh:%s}",
+		ir.Version, ir.RoundNumber, ir.Epoch, ir.Timestamp, ir.SumOfEarnedFees,
+		describeBytes(ir.Hash), describeBytes(ir.PreviousHash), describeBytes(ir.BlockHash),
+		describeBytes(ir.SummaryValue), describeBytes(ir.ETHash))
+}
+
+// describeBytes distinguishes the three states a byte field can be in. "nil" and "empty"
+// look identical in hex and encode differently; conflating them is the bug this whole
+// diagnostic exists to expose.
+func describeBytes(b []byte) string {
+	if b == nil {
+		return "nil"
+	}
+	if len(b) == 0 {
+		return "empty"
+	}
+	return fmt.Sprintf("%X", b)
 }
 
 // sealHash is the certified Unicity Tree root of uc's seal, or nil if absent. It

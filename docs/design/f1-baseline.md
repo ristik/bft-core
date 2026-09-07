@@ -346,9 +346,9 @@ negotiation.
 | FFI CI lane disabled (`if: false`) | §5.2 | F8 (#16) |
 | `rootchain/consensus` `Test_recoverState`, `Test_rootNetworkRunning`, `Test_ConsensusManager_messages` fail on a slow/loaded host: they assert round progress against wall-clock deadlines and reach only rounds 2–3 within them. Pass in CI (run 34102642015 attempt 2) and fail reproducibly on the F1 development host, in isolation as well as in the full suite. Not a protocol defect; a test-harness timing assumption. | §5.1 | F1 records; retest under F8 (#16)'s fixture work |
 | `evm-shard-chaos` still stalls intermittently in CI after the leader is killed (`round stuck at 4 for 30s`) with a 3-of-4 quorum live. **Unexplained.** Three test bugs that were masking and partly causing it are fixed; the budget was deliberately not raised again, and the stall paths now dump per-validator round/submit/error evidence so the next occurrence is decidable. May belong to root-chain leader rotation rather than the shard. | §6.3 | Open, F8 (#16) |
-| Stale certification responses are classified as `ErrEquivocatingUC` at ERROR, indistinguishable from genuine equivocation | §6.3 | F2 (#10), F6 (#14) |
+| A stale certification response is classified as `ErrEquivocatingUC` at ERROR, indistinguishable from genuine equivocation; and a wedged node escapes only via an unchecked non-consecutive round | §6.3.1 | F2 (#10), F6 (#14) |
 | `gosec` reports 28 findings (analyzer job is `continue-on-error`) | §6.3 | F1 records; see §6.3 |
-| Certified head still in latest-only JSON persistence | `shardnode/store.go` | F6 (#14) |
+| Certified head is still a single latest-only file with no history; the encoding is now lossless CBOR (#86) but durable write ordering is unproven — a rename is not an fsync | `shardnode/store.go` | F6 (#14) |
 | Canonical root input unauthenticated at the executor boundary | §4.4 | F2 (#10) |
 
 ## 6. CI
@@ -504,52 +504,57 @@ classifying certificate: shardnode: equivocating unicity certificate:
 round. `NewRepeatIR` copies every field including `Timestamp`, so an ordinary repeat UC is
 byte-identical and cannot produce this.
 
-**Leading hypothesis, stated as a hypothesis.** A round's IR timestamp is copied from the seal of
-the certificate that authorised it (`shardnode/inputrecord.go`'s `ExpectedIR`:
-`Timestamp: uc.UnicitySeal.Timestamp`), and the root chain requires the two to match
-(`rootchain/consensus/storage/sharding.go:610`). So if a round is attempted twice — the first
-attempt timing out, the second authorised by a later certificate — honest validators produce two
-input records for the same partition round differing **only in `Timestamp`**. Nothing Byzantine has
-occurred, but the whole-bytes comparison reports equivocation. That would fit everything observed:
-the conflict is at the round the killed leader stalled on, it is intermittent, and it needs a
-timeout at the wrong moment.
+**Cause: found, reproduced locally, and fixed (issue #86).** The checkpoint encoding was lossy.
+`FileStore` used `encoding/json`, and `hex.Bytes` marshals nil and empty alike to an empty string
+and unmarshals that back to **nil**, while canonical CBOR distinguishes empty bytes (`0x40`) from
+null (`0xf6`). `BuildInputRecord` deliberately emits a non-nil empty `SummaryValue`, so every
+save/load round trip silently rewrote it to nil and changed `InputRecord.Bytes()` — the very bytes
+the signatures cover:
 
-**This is not established, and reading the root chain argues against it.**
-`ShardInfo.ValidRequest` pins *both* the round and the timestamp to the same `LastCR`:
-
-```go
-if req.IRRound() != si.LastCR.Technical.Round { ... }
-if req.InputRecord.Timestamp != si.LastCR.UC.UnicitySeal.Timestamp { ... }
+```
+original IR CBOR = ...5820<32 bytes>4001f600f6     (0x40 = empty byte string)
+restored IR CBOR = ...5820<32 bytes>f601f600f6     (0xf6 = null)
 ```
 
-Once round N is certified, `LastCR.Technical.Round` advances to N+1 and a second round-N request is
-rejected outright — so two *quorum-certified* round-N input records should not both exist. The
-timestamp story explains the shape of the message but not how both certificates came to be, which
-makes the observation more concerning rather than less. `DescribeUCConflict` now prints which field
-differs, plus both root rounds, root epochs, seal hashes and IRs, at the moment of rejection:
-`[timestamp]` alone means a re-attempted round, a `hash`/`blockHash` difference means something
-substantively different was certified. `shardnode/uc_conflict_test.go` pins both shapes.
+The consequences follow directly. A restarted node's restored certificate fails its own
+`UC.Verify` with "summary value is nil"; because that restored certificate is the authority the
+non-equivocation check compares against, the node then rejects the genuine, correctly signed
+certificate for that round as `different input records for same partition round N`, and — since
+`c.luc` is left unchanged on a classification error — refuses everything after it. **No root
+equivocation and no disk tampering are required.** This is a purely local defect, reproducible in a
+unit test with one signer.
 
-**A concrete asymmetry found while chasing it, worth fixing on its own merits.** The two sides of
-that comparison are not held to the same standard:
+An earlier revision of this section offered a timestamp-based hypothesis for the conflict. It was
+wrong, and its causal claim has been removed rather than left standing beside the real cause.
 
-| | Authenticated? |
-| --- | --- |
-| The **received** certificate | Yes — `handleCertificationResponse` runs `UC.Verify` against the trust base for its root epoch (signatures, quorum, inclusion paths) *before* `ClassifyUC` |
-| The **stored** certificate it is judged against | **No** — `FileStore.LoadLUC` only JSON-decodes, and `node.go` seeds it straight in via `SeedLUC` on every restart |
+**The fix.** The checkpoint is now a versioned envelope encoded with `types.Cbor` — the same codec
+that computes the signed bytes — so signatures, inclusion paths, config/TR commitments and the
+nil/empty distinction all survive. `EqualIR` is unchanged, signed-byte semantics are unchanged, and
+no certificate arriving from the network is normalised to make a comparison pass. Legacy JSON stores
+fail startup with a migration message and are left on disk; a damaged file is reported as damaged
+rather than as a migration, and neither is ever treated as a fresh store, which would mean voting
+from genesis. Regression coverage is in `shardnode/store_roundtrip_test.go` and
+`shardnode/restore_auth_test.go`.
 
-So on the equivocation path the authority is a local file and the thing being judged against it is
-the authenticated object. Combined with `c.luc` being left unchanged on error, a well-formed but
-wrong stored certificate makes a node reject genuinely quorum-certified certificates indefinitely —
-and every one of the observed failures was on a node that had just restarted.
-`TestFileStore_LoadLUCDoesNotAuthenticate` pins it: a certificate with **no signatures at all** and
-an arbitrary root round loads and is usable. The chaos suite's tampered-block scenario does not
-cover this, because it corrupts the file so the decode fails; this is the well-formed case.
+**The diagnostic was also wrong, and is fixed.** `DescribeUCConflict` compared fields with
+`bytes.Equal`, and `bytes.Equal(nil, []byte{})` is true — so for this exact conflict it reported
+`none (input records are equal)`. It now decides equality from canonical `InputRecord.Bytes()`,
+renders every byte field as `nil`/`empty`/hex, and spells out the timestamp that
+`InputRecord.String` omits.
 
-This is recorded as a disposition, not fixed here: whether `SeedLUC` should verify, and against
-which trust base at startup, is F2 (#10)'s call, with F6 (#14) owning the persistence contract. It
-is not established that this caused the CI failure — the artifact upload below is what will settle
-that, since it captures the stored `shard-node-luc.json` alongside the logs.
+**Restored certificates are now authenticated before they become authoritative.** `New` verifies the
+loaded certificate against the trust base from the *configured* store — never from the checkpoint,
+whose own epoch is the thing in question — for signatures, quorum, inclusion paths and this node's
+partition and shard, before `SeedLUC`. It does **not** check the expected shard configuration hash:
+`UC.Verify` takes that argument and both this path and the live network path pass `nil`, which
+accepts the certificate's own `ShardConfHash` without comparison. Plumbing the configured hash in
+requires a `New` interface change and is split to F2 (#10); nothing here should be described as
+enforcing it.
+
+**What this does not close.** It establishes a local mechanism sufficient to produce the observed
+rejection. It does **not** establish that every recorded leader-kill stall had this cause — the
+stall investigation stays open under F8 (#16) and root consensus, with the evidence capture below
+retained. A green chaos run does not close it.
 
 **Why the node never recovers, which is a separate finding.** On a classification error `c.luc` is
 deliberately left unchanged, so the comparison repeats against the same stored certificate.

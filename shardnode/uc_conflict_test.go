@@ -45,22 +45,14 @@ func TestUCConflictDisposition(t *testing.T) {
 	})
 
 	t.Run("a timestamp-only difference is also called equivocation", func(t *testing.T) {
-		// This is the shape worth looking for first in the next CI occurrence. A round's IR
-		// timestamp is copied from the seal of the certificate that authorised it
-		// (inputrecord.go's ExpectedIR: Timestamp = uc.UnicitySeal.Timestamp). So if a round is
-		// attempted twice — the first attempt timing out and the second being authorised by a
-		// later certificate — honest validators produce two input records for the same partition
-		// round that differ ONLY in timestamp. Nothing Byzantine has happened, but this check
-		// compares whole IR bytes and reports "equivocating".
-		//
-		// Whether that actually occurred in CI is exactly what DescribeUCConflict's
-		// "differing IR fields" list will settle: [timestamp] alone means a re-attempted round;
-		// hash/blockHash differences mean something substantively different was certified.
+		// Recorded as a fact about the check, not as a diagnosis of any observed failure: two
+		// input records for one partition round differing only in Timestamp are reported as
+		// equivocating, because the comparison is over whole canonical bytes.
 		later := uc(4, 51, h0, hA, blkA)
 		later.InputRecord.Timestamp = stored.InputRecord.Timestamp + 1
 		_, err := ClassifyUC(stored, later)
 		require.ErrorIs(t, err, ErrEquivocatingUC)
-		require.Contains(t, DescribeUCConflict(stored, later), "differing IR fields: [timestamp]")
+		require.Contains(t, DescribeUCConflict(stored, later), "timestamp")
 	})
 
 	t.Run("the rejection describes which field differed and both root rounds", func(t *testing.T) {
@@ -70,10 +62,11 @@ func TestUCConflictDisposition(t *testing.T) {
 		require.NotContains(t, strings.SplitN(got, ";", 2)[0], "timestamp")
 		require.Contains(t, got, "rootRound=50")
 		require.Contains(t, got, "rootRound=51")
+		require.Contains(t, got, "canonical IR bytes: DIFFER")
 	})
 
-	t.Run("equal input records report no differing fields", func(t *testing.T) {
-		require.Contains(t, DescribeUCConflict(stored, uc(4, 51, h0, hA, blkA)),
-			"differing IR fields: [none (input records are equal)]")
+	t.Run("identical input records are reported from canonical bytes", func(t *testing.T) {
+		got := DescribeUCConflict(stored, uc(4, 51, h0, hA, blkA))
+		require.Contains(t, got, "canonical IR bytes: IDENTICAL")
 	})
 }
