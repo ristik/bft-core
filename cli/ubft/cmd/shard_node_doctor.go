@@ -232,23 +232,26 @@ func adapterChecks(flags *shardNodeDoctorFlags) []doctorCheck {
 				if !ok {
 					return false, "shard conf has no chain_id partition param", ""
 				}
-				// Deliberately the same Adapter.CheckChainID that `shard-node run` now enforces
-				// at startup, so doctor cannot drift from what the node actually refuses to
-				// start on. Reported here with remediation text rather than as a bare error.
-				eth := engineapi.NewEthClient(flags.EthURL)
-				gotChainID, err := eth.ChainID(ctx)
-				if err != nil {
-					return false, err.Error(), "check --eth-url points at a running execution client's plain RPC endpoint"
-				}
+				// Deliberately the same Adapter.CheckChainID that `shard-node run` enforces at
+				// startup, so doctor cannot drift from what the node actually refuses to start
+				// on — and called exactly ONCE.
+				//
+				// An earlier version queried eth_chainId itself for the report text and then
+				// called CheckChainID, which queries again. Two requests can disagree: if the
+				// second failed for any reason, doctor printed a mismatch message built from the
+				// first response — reporting a chain-id mismatch even when the ids were equal.
+				// The check's own error is now the report, so what doctor says and what the node
+				// enforces cannot diverge (issue #89 item 4).
 				a, err := newAdapter()
 				if err != nil {
 					return false, err.Error(), ""
 				}
 				if err := a.CheckChainID(ctx, wantChainID); err != nil {
-					return false, fmt.Sprintf("execution client reports chainId=%d, shard conf says %d", gotChainID, wantChainID),
-						"the wrong reth instance, or a genesis.json generated for a different shard conf"
+					return false, err.Error(),
+						"the wrong reth instance, a genesis.json generated for a different shard conf, " +
+							"or --eth-url not pointing at a running execution client's plain RPC endpoint"
 				}
-				return true, fmt.Sprintf("chainId=%d, matches shard conf", gotChainID), ""
+				return true, fmt.Sprintf("chainId=%d, matches shard conf", wantChainID), ""
 			},
 		},
 		{
