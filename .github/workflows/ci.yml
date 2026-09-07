@@ -140,7 +140,42 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: kill-leader / kill-follower / cold-restart / corrupted-store scenarios
-        run: ./scripts/chaos-evm.sh -v 4
+        run: ./scripts/chaos-evm.sh -v 4 -k
+
+      # The intermittent leader-kill stall and the same-partition-round certificate conflict
+      # cannot be settled from the truncated snippets in the step log (F1 #9, review 5132493933).
+      # Keep the full node logs and persisted state from a failing run so the next occurrence can
+      # be analysed instead of re-guessed. -k above stops the script from tearing test-nodes/ down.
+      - name: Collect node logs and state on failure
+        if: failure()
+        run: |
+          mkdir -p chaos-artifacts
+          for d in test-nodes/*/; do
+            name=$(basename "$d")
+            mkdir -p "chaos-artifacts/$name"
+            # Logs plus the persisted certificate store: the stored UC is half of every
+            # conflict comparison and cannot be reconstructed from the log alone.
+            # keys.json is excluded on purpose. These are throwaway devnet keys regenerated every
+            # run, but publishing signing keys as a build artifact is not a habit worth forming,
+            # and nothing in this analysis needs them — node-info.json carries the public identity.
+            cp "$d"debug.log "chaos-artifacts/$name/" 2>/dev/null || true
+            find "$d" -maxdepth 1 -type f ! -name 'debug.log' ! -name 'pid' ! -name 'keys.json' \
+              -exec cp {} "chaos-artifacts/$name/" \; 2>/dev/null || true
+          done
+          tar czf chaos-artifacts.tar.gz chaos-artifacts
+          echo "collected:"; du -sh chaos-artifacts.tar.gz
+
+      - name: Upload chaos failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-failure-evidence
+          path: chaos-artifacts.tar.gz
+          retention-days: 14
+
+      - name: Stop nodes
+        if: always()
+        run: ./stop-evm.sh -a || true
 
   evm-shard-compose-e2e:
     runs-on: ubuntu-latest

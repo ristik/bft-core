@@ -472,6 +472,73 @@ The D2 handoff requires these be recorded or fixed rather than waived.
   diagnosed defect — I have not established whether the response was genuinely stale or whether
   something produced it that should not have.
 
+### 6.3.1 The leader-kill stall and the same-round certificate conflict — investigation state
+
+Reproduced on `8a9a7603` in push run 34127020349 (chaos job 101757978534) while the paired PR job
+passed. **Not resolved. Not waived.** This section records what the evidence does and does not
+establish, so the next occurrence starts from here rather than from scratch.
+
+**What the stall evidence actually showed.** The dump added for exactly this purpose answered the
+question it was added for. During the leader-kill stall, `evm2`/`evm3`/`evm4` were **not idle**:
+
+```
+evm2 last rounds:  partitionRound=4 partitionRound=4
+evm2 last submits: round=4 quiet=true leader=false   round=5 quiet=true leader=false
+evm2 last error:   "producing round 6 block: awaiting round 6 ..."
+```
+
+and in the later cold-restart window, submissions had run to `round=30` while accepted certificates
+were still at `partitionRound=4`. So the shard nodes kept advancing their round counter from each
+`TechnicalRecord` and kept submitting — what stopped was **certificate acceptance**, not shard
+liveness. That rules out "the budget was too short" as a complete explanation: 50 seconds is not the
+issue when a node has submitted 26 further rounds without accepting one.
+
+**What the conflict is.** Validator 2, after its restart, repeatedly logged
+
+```
+classifying certificate: shardnode: equivocating unicity certificate:
+  equivocating UC, different input records for same partition round 4
+```
+
+`CheckNonEquivocatingCertificates` compares **whole InputRecord bytes** for a shared partition
+round. `NewRepeatIR` copies every field including `Timestamp`, so an ordinary repeat UC is
+byte-identical and cannot produce this.
+
+**Leading hypothesis, stated as a hypothesis.** A round's IR timestamp is copied from the seal of
+the certificate that authorised it (`shardnode/inputrecord.go`'s `ExpectedIR`:
+`Timestamp: uc.UnicitySeal.Timestamp`), and the root chain requires the two to match
+(`rootchain/consensus/storage/sharding.go:610`). So if a round is attempted twice — the first
+attempt timing out, the second authorised by a later certificate — honest validators produce two
+input records for the same partition round differing **only in `Timestamp`**. Nothing Byzantine has
+occurred, but the whole-bytes comparison reports equivocation. That would fit everything observed:
+the conflict is at the round the killed leader stalled on, it is intermittent, and it needs a
+timeout at the wrong moment.
+
+**This is not established.** It could equally be a substantively different certified state, which
+would be far more serious. The two are distinguished by *which field differs*, which the log did not
+carry. `DescribeUCConflict` now prints exactly that, plus both root rounds, both root epochs, both
+seal hashes and both IRs, at the moment of rejection —
+`differing IR fields: [timestamp]` means a re-attempted round; a `hash`/`blockHash` difference means
+something else. `shardnode/uc_conflict_test.go` pins both shapes deterministically.
+
+**Why the node never recovers, which is a separate finding.** On a classification error `c.luc` is
+deliberately left unchanged, so the comparison repeats against the same stored certificate.
+`TestUCConflictDisposition` records the consequence: the conflicting same-round certificate is
+rejected, *and* the next consecutive round on that branch is rejected too ("does not extend previous
+state hash"). A node in this state rejects everything the shard produces — which is what
+"validator 2 did not resume within its restart budget" was. It escapes only when a **non-consecutive**
+round arrives, because `CheckNonEquivocatingCertificates` draws no conclusion across a gap and
+accepts it unchecked. So the recovery path is the least-verified one available. That disposition
+deserves a deliberate decision from F2 (#10) regardless of what caused the conflict.
+
+**Evidence capture.** The chaos job now runs with `-k` and, on failure, uploads
+`chaos-failure-evidence` — every root and shard node's `debug.log`, the persisted
+`shard-node-luc.json` (the stored half of every conflict comparison, unavailable from logs alone),
+and the root chain's databases. Signing keys are deliberately excluded. Retention 14 days.
+
+**Open, and blocking.** Owner: F2 (#10) for classification, F8 (#16) and root consensus for the
+stall. Per the review, budgets were not raised and no diagnostic was suppressed.
+
 ### 6.4 Real-reth in CI
 
 Neither `scripts/reth-baseline.sh` nor `scripts/reth-paired-devnet.sh` is wired into the GitHub

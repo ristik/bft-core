@@ -1,8 +1,10 @@
 package shardnode
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -82,4 +84,63 @@ func ClassifyUC(prevUC, newUC *types.UnicityCertificate) (UCClass, error) {
 		return UCRepeat, nil
 	}
 	return UCValid, nil
+}
+
+/*
+DescribeUCConflict renders the two certificates a failed ClassifyUC compared, field
+by field, so a rejection carries its own evidence.
+
+Motivation (F1 #9, review 5132493933): CI reproduced a shard node repeatedly logging
+"equivocating UC, different input records for same partition round 4" and never
+recovering, and the log said only that. Deciding whether that is two genuinely
+conflicting quorum certificates, a stale response from a lagging root node, or a
+local state bug requires knowing WHICH field differs and which root rounds the two
+seals came from — none of which the error string carries. This does not change any
+classification decision; it only makes the rejection explicable.
+
+Marked with the differing fields so the reader does not have to diff two long lines
+by eye.
+*/
+func DescribeUCConflict(prevUC, newUC *types.UnicityCertificate) string {
+	if prevUC == nil || newUC == nil {
+		return fmt.Sprintf("prevUC nil=%t newUC nil=%t", prevUC == nil, newUC == nil)
+	}
+	p, n := prevUC.InputRecord, newUC.InputRecord
+	if p == nil || n == nil {
+		return fmt.Sprintf("prevUC.IR nil=%t newUC.IR nil=%t", p == nil, n == nil)
+	}
+
+	var diffs []string
+	cmp := func(name string, same bool) {
+		if !same {
+			diffs = append(diffs, name)
+		}
+	}
+	cmp("roundNumber", p.RoundNumber == n.RoundNumber)
+	cmp("epoch", p.Epoch == n.Epoch)
+	cmp("previousHash", bytes.Equal(p.PreviousHash, n.PreviousHash))
+	cmp("hash", bytes.Equal(p.Hash, n.Hash))
+	cmp("blockHash", bytes.Equal(p.BlockHash, n.BlockHash))
+	cmp("summaryValue", bytes.Equal(p.SummaryValue, n.SummaryValue))
+	cmp("timestamp", p.Timestamp == n.Timestamp)
+	cmp("sumOfEarnedFees", p.SumOfEarnedFees == n.SumOfEarnedFees)
+	cmp("etHash", bytes.Equal(p.ETHash, n.ETHash))
+
+	differing := "none (input records are equal)"
+	if len(diffs) > 0 {
+		differing = strings.Join(diffs, ",")
+	}
+	return fmt.Sprintf("differing IR fields: [%s]; stored: rootRound=%d rootEpoch=%d seal=%X IR{%s}; received: rootRound=%d rootEpoch=%d seal=%X IR{%s}",
+		differing,
+		prevUC.GetRootRoundNumber(), prevUC.GetRootEpoch(), sealHash(prevUC), p.String(),
+		newUC.GetRootRoundNumber(), newUC.GetRootEpoch(), sealHash(newUC), n.String())
+}
+
+// sealHash is the certified Unicity Tree root of uc's seal, or nil if absent. It
+// identifies which root-chain view a certificate came from without re-encoding it.
+func sealHash(uc *types.UnicityCertificate) []byte {
+	if uc.UnicitySeal == nil {
+		return nil
+	}
+	return uc.UnicitySeal.Hash
 }
