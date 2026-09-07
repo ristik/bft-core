@@ -113,15 +113,28 @@ The prototype's entire CI story runs `--executor fake`. `docker-compose.evm.yml`
 header comment, and `scripts/reth-by-hand.sh` carried a standing disclaimer that it had "not been
 executed against a live reth".
 
-**That disclaimer is now discharged.** `scripts/reth-by-hand.sh` was run against reth
-`189c0df3` at this baseline and passed unmodified — genesis → `forkchoiceUpdatedV3` →
-`getPayloadV3` → `newPayloadV3` → canonical block 1, all `VALID` (§5.3). The request and response
-shapes the script asserts do match what a real client accepts, so `engineapi/`'s encoding is
-sound on that path.
+**That disclaimer is discharged, but it buys less than it looks like.** `scripts/reth-by-hand.sh`
+was run against reth `189c0df3` and passed unmodified — genesis → `forkchoiceUpdatedV3` →
+`getPayloadV3` → `newPayloadV3` → canonical block 1, all `VALID`. What that establishes is that
+**the client** behaves as expected against hand-written requests. It says nothing about the Go
+adapter: the script constructs every request itself with `curl` and `openssl`, and executes no
+Unicity code at all. The same is true of `scripts/reth-baseline.sh`. Neither can tell you whether
+`engineapi/`'s JWT minting, encoding, round-params derivation or Build/Seal/Verify/Commit path
+works, because neither runs any of it.
 
-What the fake executor still hides is *header economics*, which the fake does not model at all —
-see §4. That is the substantive fake-versus-real conflict, and it is why F1 adds a real-reth lane
-rather than declaring the compose job sufficient.
+The lane that does is **`scripts/reth-paired-devnet.sh`** (§5.5): one real reth per validator, with
+`ubft shard-node run --executor engine-api` driving them, certifying against a real root chain. It
+is what F1's integration claims rest on. Two distinct fake-versus-real conflicts show up there and
+nowhere else:
+
+- **Header economics** (§4), which the fake models not at all.
+- **An idle shard builds no EVM block whatsoever.** Every round after the first is `quiet=true` —
+  unchanged state root, nil block hash — so the adapter never asks reth to build, and reth's
+  canonical head stays at genesis no matter how many rounds certify. This is correct behaviour at
+  this baseline, and it is easy to mistake for a broken integration. Producing blocks on idle
+  rounds at the EVM cadence is F4 (#12). Proving the adapter *can* build therefore requires a real
+  transaction, which requires a funded account, which the generated genesis does not have — see
+  §5.5.
 
 ## 4. Deviation inventory against ADR 0004
 
@@ -141,35 +154,75 @@ does advertise V1–V6 of the standard methods (including `newPayloadV4/V5`, `ge
 `forkchoiceUpdatedV4`), so F3's explicit version negotiation has room to work without displacing
 standard semantics.
 
-### 4.2 D-1 — the base fee has no floor, and genesis cannot give it one
+### 4.2 D-1 — the genesis base fee is not preserved, and settles at a 7-wei artefact
 
-Driving empty blocks through real reth, `baseFeePerGas` falls by exactly 7/8 per block:
+For an empty block, EIP-1559's update is, in integer arithmetic,
 
-| Block | 1 | 6 | 12 | 24 | 41 |
-| --- | --- | --- | --- | --- | --- |
-| `baseFeePerGas` (wei) | 875,000,000 | 448,795,319 | 201,417,240 | 40,568,907 | 4,191,124 |
+```
+next = parent - floor(parent / 8)
+```
 
-Measured ratio is 0.875 to within 6×10⁻⁹ every block. From the genesis 1 gwei, the base fee reaches
-1 wei in **156 empty blocks** — at the shard's idle cadence that is minutes, and system-only blocks
-(F4, #12) are empty by construction, so the idle path drives it there continuously.
+applied from the genesis base fee. Measured against reth `189c0df3` over 160 blocks, every observed
+value matches that recurrence **exactly**:
 
-This measures the claim F5 (#13) has to satisfy — "the fee floor persists after many empty/system-only
-blocks; changing the initial genesis base fee alone is demonstrably insufficient" — and confirms it
-on a live client rather than by argument. Genesis `baseFeePerGas` is a starting point, not a floor.
-Owner: F5 (#13).
+| Block | 1 | 6 | 12 | 41 | 100 | 145 | 160 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `baseFeePerGas` (wei) | 875,000,000 | 448,795,319 | 201,417,240 | 4,191,124 | 1,362 | 7 | 7 |
 
-### 4.3 D-2 — the gas limit is not pinned by configuration
+**The sequence terminates at 7 wei and stays there**, because `floor(7/8) == 0`. It reaches 7 at
+block 145 and is a fixed point from then on.
 
-Over the same run, `gasLimit` rises by exactly 1/1024 per block (30,000,000 → 31,224,868 across 41
-blocks), the builder walking toward its own default target. It doubles in ~711 blocks and has no
-upper bound from our chain spec.
+An earlier version of this document claimed it reaches 1 wei in 156 blocks, extrapolating with
+repeated floating-point multiplication by 7/8. That is wrong: the floor makes the descent stop.
+The earlier `reth-baseline.sh` encoded the same error as a float-ratio assertion, which then
+**falsely reported `BASELINE CHANGED` on unmodified reth** at 160 blocks, once rounding began to
+dominate. Both are corrected: the script now asserts the integer recurrence directly, which holds
+for all 160 blocks in both controls.
 
-F5 (#13) must hold "system work plus forced and ordinary capacity cannot exceed the configured
-total". At this baseline the configured total is not configured: it drifts upward every block, so any
-capacity split computed from it silently inflates. Owner: F5 (#13).
+What this does and does not establish for F5 (#13):
 
-Both deviations are asserted by `scripts/reth-baseline.sh` **in their current broken form**, so that
-a fix flips the assertion and forces this document and F5 to be updated together.
+- The genesis `baseFeePerGas` is **not preserved** — 1 gwei becomes 7 wei, roughly eight orders of
+  magnitude, within a few minutes of idle rounds. F5's acceptance case that "changing the initial
+  genesis base fee alone is demonstrably insufficient" holds.
+- The 7-wei fixed point is **not a fee floor** and must not be treated as one. It is an artefact of
+  integer division: no operator can configure it, it is not derived from any policy, and it sits
+  far below any plausible economic floor. A configurable protocol floor remains a distinct F5
+  validity requirement.
+- These are **stock empty blocks**, which are not the same object as D2's system-only blocks. A
+  system-only block's `header.gasUsed` includes the mandated system work `g_sys`, while the
+  ordinary-only fee feedback that drives this recurrence excludes it. The measurement above bounds
+  the stock behaviour F5 starts from; it does not predict the update on a system-only block, which
+  depends on decisions D2 records and F4 (#12) implements.
+
+### 4.3 D-2 — the gas limit drifts under reth's *default* builder configuration, and a standard flag pins it
+
+Under the default builder, `gasLimit` rises by about 1/1024 per block — 30,000,000 → 35,070,622
+across 160 blocks — as the builder walks toward its own desired target, clamped per block to the
+allowed adjustment range (`EthereumBuilderConfig::gas_limit_with_target` →
+`calculate_block_gas_limit` at the pinned revision).
+
+**This is a configuration default, not a client defect.** Control B of `scripts/reth-baseline.sh`
+runs the same pinned binary with `--builder.gaslimit 30000000` and every block holds at exactly
+30,000,000, with no client change of any kind. An earlier version of this document concluded the
+growth was unbounded and used that to scope F5 work; that conclusion was wrong, and the correction
+matters directly under the owner's minimal-divergence constraint — this is one less reason to touch
+the execution client.
+
+Two separable problems remain, and only the second may need a Unicity validity rule:
+
+1. **Configuring our own builder.** Solved by a standard flag. It belongs in deployment
+   configuration and in whatever `ubft engine-api genesis` emits alongside the chain spec, not in
+   the fork. Owner: F5 (#13), as an operational requirement.
+2. **Enforcing the chain's gas-limit and capacity policy on blocks imported from peers.** A
+   flag on our own builder constrains only blocks *we* build. Nothing measured here says a
+   follower rejects a peer's block that carries a different gas limit, and F5's requirement that
+   "system work plus forced and ordinary capacity cannot exceed the configured total" is a
+   statement about every block the shard certifies, including a malicious builder's. That is a
+   validity rule, and it is the part that may justify divergence. Owner: F5 (#13), with the
+   builder/follower/import/replay evidence F3 (#11) has to carry for any retained hook.
+
+Both controls are asserted by `scripts/reth-baseline.sh` in their present form, so a change in
+either flips an assertion and forces this document and F5 to be updated together.
 
 ### 4.4 Not enabled, by design
 
@@ -203,9 +256,10 @@ Disabled in CI (`if: false` on `build-with-ffi` and `test-with-ffi`) at the prot
 disabled here — enabling it is coupled to the §3.2 `l1` merge, since the FFI crates are exactly what
 those two commits change. Owner: F8 (#16).
 
-### 5.3 Real-reth lane
+### 5.3 Stock-client lane (no Go adapter involved)
 
-Requires a `reth` binary at the pinned revision. This lane did not exist before F1.
+Requires a `reth` binary at the pinned revision. A wrong revision **fails** the baseline gate;
+`F1_ALLOW_UNPINNED_RETH=1` runs anyway and labels the output as not evidence.
 
 ```bash
 ./setup-evm-nodes.sh -r 3 -v 4          # generates test-nodes/evm-genesis.json
@@ -216,27 +270,82 @@ reth node --chain test-nodes/evm-genesis.json --datadir <dir> \
   --http --http.port 8545 --disable-discovery --port 30399 &
 ./scripts/reth-by-hand.sh <jwt.hex>
 
-# the regression baseline: starts its own reth, drives N empty blocks, asserts §4
-./scripts/reth-baseline.sh 40
+# header economics: two controls (default builder, and --builder.gaslimit), 160 blocks each
+./scripts/reth-baseline.sh 160
 ```
 
 Recorded results against reth `189c0df3`:
 
 - `reth-by-hand.sh`: passes unmodified. All four Engine API steps `VALID`; canonical block 1 at
   `0xeaad90ed02b1e654726166541e071f3107aa25a1b77f9fe0fbff43d32588b5a8`.
-- `reth-baseline.sh 40`: passes. Both "behaviour we want" assertions hold; both §4 deviation
-  assertions confirm the deviation is still present.
+- `reth-baseline.sh 160`: passes, 10/10 assertions across both controls. The integer fee
+  recurrence matches exactly for all 320 measured blocks; the gas limit drifts under the default
+  builder and holds at 30,000,000 under `--builder.gaslimit`.
+- Pin enforcement verified: with a deliberately wrong `pinnedRethCommit` the script exits 1 having
+  started nothing, and exits 0 under `F1_ALLOW_UNPINNED_RETH=1` with both the header and footer
+  labelling the run as not evidence.
+
+Neither script executes any Unicity code. See §3.3 — they are evidence about the client only.
+
+### 5.5 Paired real-reth devnet (the Go adapter integration lane)
+
+This is the lane F1's integration claims rest on: one real reth per validator, driven by
+`ubft shard-node run --executor engine-api`, certifying against a real 3-node root chain.
+
+```bash
+./scripts/reth-paired-devnet.sh 4 5     # 4 validators, wait for 5 certified rounds
+```
+
+It fails on a client revision mismatch by default, the same way the baseline does. Recorded results
+against reth `189c0df3` — all checks pass:
+
+| Check | Result |
+| --- | --- |
+| 4 reth instances on the generated chain spec, statically peered (§5 of `docs/engine-api-adapter.md`) | up |
+| **Negative:** chainId mismatch refused before voting | `execution client reports chainId=31338, shard conf says 31337` |
+| **Negative:** unreachable Engine API refused before voting | refused |
+| Shard certifies with `--executor engine-api` against real reth | `partitionRound=14 rootRound=67` |
+| Idle rounds are `quiet=true` and reth stays at block 0 | as expected — see §3.3 |
+| A funded transaction is executed and certified | reth block 1, `status=0x1`, `gasUsed=0x5208` |
+| All 4 reth instances converge on the same canonical head | `0x760b0bf9…` on all four |
+| No validator logs divergence or equivocation | clean |
+
+Two things about this lane are worth stating plainly:
+
+- **The transaction is what makes it meaningful.** Without one the shard only certifies quiet
+  rounds, which never call the adapter's build path at all; the run would pass while proving very
+  little. The generated genesis has an empty `alloc`, so the script derives
+  `test-nodes/evm-genesis-funded.json` from it and funds one well-known test account via
+  `scripts/evmtx`. That is **test-only**; real genesis funding is T1 (#28). The chainId and fork
+  schedule still come from the shard conf.
+- **`scripts/evmtx` deliberately avoids go-ethereum.** It is only an indirect dependency here, and
+  promoting it pulls in gnark-crypto, blst, c-kzg-4844 and go-verkle — a lot of new cryptographic
+  surface for a consensus repository to carry for one test helper. The transaction is assembled
+  from RLP, Keccak-256 and a recoverable secp256k1 signature using packages already in the module
+  graph; `go.sum` is unchanged and no new module is added.
+
+### 5.6 What this lane still does not cover
+
+It exercises one transaction through one leader. It is not a load test, not a fault-injection
+exercise against real reth (`scripts/chaos-evm.sh` remains fake-executor only), and it does not
+exercise mixed cadence or multiple partitions — F8 (#16). The mismatch negatives cover chainId and
+an unreachable Engine API; they do not cover a client that speaks a *different* Engine API version
+set, which needs a second reth build to test against and belongs with F3 (#11)'s version
+negotiation.
 
 ### 5.4 Known-limitations register
 
 | Limitation | Evidence | Owner |
 | --- | --- | --- |
-| No base-fee floor (D-1) | §4.2, `reth-baseline.sh` | F5 (#13) |
-| Gas limit not pinned (D-2) | §4.3, `reth-baseline.sh` | F5 (#13) |
+| Genesis base fee is not preserved; no *configurable* floor exists (the 7-wei fixed point is an integer-division artefact, not a policy) (D-1) | §4.2, `reth-baseline.sh` | F5 (#13) |
+| Our own builder's gas limit needs `--builder.gaslimit` in deployment config (D-2, part 1 — a standard flag, no client change) | §4.3, `reth-baseline.sh` control B | F5 (#13) |
+| No evidence that a follower rejects a peer block carrying a different gas limit / over-capacity (D-2, part 2 — the part that may need a validity rule) | §4.3 | F5 (#13), F3 (#11) |
+| Adapter integration is exercised by one transaction through one leader; no load, fault injection or mixed cadence against real reth | §5.6 | F8 (#16) |
+| Mismatch negatives cover chainId and an unreachable endpoint, not a differing Engine API version set | §5.6 | F3 (#11) |
 | Two `l1` commits unmerged; consistency-proof fixtures not retained | §3.2 | F8 (#16) |
 | FFI CI lane disabled (`if: false`) | §5.2 | F8 (#16) |
 | `rootchain/consensus` `Test_recoverState`, `Test_rootNetworkRunning`, `Test_ConsensusManager_messages` fail on a slow/loaded host: they assert round progress against wall-clock deadlines and reach only rounds 2–3 within them. Pass in CI (run 34102642015 attempt 2) and fail reproducibly on the F1 development host, in isolation as well as in the full suite. Not a protocol defect; a test-harness timing assumption. | §5.1 | F1 records; retest under F8 (#16)'s fixture work |
-| `scripts/chaos-evm.sh`'s `cold-restart` scenario asserts round progress within 15s of killing a validator; fails on a loaded runner (`evm-shard-chaos`, run 34105234592). Same wall-clock assumption as the row above. | §6.3 | F1 records; retest under F8 (#16) |
+| `scripts/chaos-evm.sh`'s `cold-restart` scenario asserts round progress within 15s of killing a validator. **Intermittent on identical code** (fails and passes across reruns and across the two trigger sets on one commit); the cause is *not* established, and a genuine recovery issue surfacing under timing pressure is not excluded. | §6.3 | Open question for F8 (#16) |
 | `gosec` reports 28 findings (analyzer job is `continue-on-error`) | §6.3 | F1 records; see §6.3 |
 | Certified head still in latest-only JSON persistence | `shardnode/store.go` | F6 (#14) |
 | Canonical root input unauthenticated at the executor boundary | §4.4 | F2 (#10) |
@@ -266,8 +375,13 @@ The D2 handoff requires these be recorded or fixed rather than waived.
   the subtest returned while that goroutine was still writing to its `testing.T`. Fixed by giving
   those goroutines a lifetime — a `sync.WaitGroup` and `Subscriptions.Wait()`, drained by
   `Node.Run` at shutdown and by `t.Cleanup` in the tests. `Test_Subscriptions_Wait` pins the
-  contract. This also removes an unbounded goroutine leak at node shutdown, which F9 (#17) cares
-  about independently.
+  contract.
+
+  **Scope of that claim, precisely:** `Subscriptions.Wait()` joins the goroutines `Send` itself
+  starts. It does **not** join everything those goroutines hand off to — `LibP2PNetwork.Send`
+  starts its own per-peer goroutines and returns — so this is not proof that all node network
+  goroutines have stopped when `Run` returns. It fixes the specific unbounded leak in
+  `Subscriptions` and makes the test deterministic. Draining the transport is F9 (#17) work.
 - **`analyze` job — recorded, not fixed.** 28 gosec findings over 158 files: mostly G115 integer
   conversions in `evmroot/` (`cbor.go`, `d2import.go`, `d5inbox.go`), G301/G306 file permissions in
   the `evmroot/cmd/d*vectors` generators, and one G404 weak RNG in `shardnode/rootnodes.go`. The job
@@ -284,23 +398,39 @@ The D2 handoff requires these be recorded or fixed rather than waived.
   through `newDHT`'s routing-table callback after completion, panicking the package exactly the way
   the untracked `Subscriptions` goroutines did. The test asserts *that* discovery converges, not how
   fast, so a longer budget costs a slow machine seconds and a fast one nothing.
-- **`evm-shard-chaos` — environment-sensitive, see §5.4.** Its `cold-restart` scenario asserts the
-  surviving validators advance a round within 15s of a validator being killed. Same family as the
-  `rootchain/consensus` failures: a wall-clock progress assertion on a loaded runner.
+- **`evm-shard-chaos` — intermittent; cause not established.** Its `cold-restart` scenario asserts
+  the surviving validators advance a round within 15s of a validator being killed, and it has now
+  failed and passed on identical code more than once (run 34105234592 failed then passed on rerun;
+  at `8645d6ae` the push and pull_request check sets disagreed with each other). That establishes
+  the result is **intermittent**, and that it is not a deterministic regression from this branch.
+  It does **not** establish that a loaded runner is the cause, and it does not rule out a genuine
+  protocol or recovery issue that manifests under timing pressure. The wall-clock assertion is the
+  obvious suspect and shares a shape with the `rootchain/consensus` failures, but that is a
+  hypothesis, not a diagnosis. F8 (#16) inherits it as an open question, not as a known-benign
+  flake.
 
 ### 6.4 Real-reth in CI
 
-`scripts/reth-baseline.sh` is the lane, but it is **not** wired into the GitHub workflow: it needs a
-reth binary built at the pinned revision, and building `ureth` in CI is a Rust job whose cost and
-caching belong with the change that first makes the fork differ from upstream. Wiring it is F3
-(#11)'s job, when it has an artifact worth installing. Until then it is a documented local gate, run
-and recorded here (§5.3).
+Neither `scripts/reth-baseline.sh` nor `scripts/reth-paired-devnet.sh` is wired into the GitHub
+workflow. Both need a reth binary at the pinned revision; the approved fork now exists
+(`ristik/ureth`, §2), so the remaining obstacle is the Rust build and cache cost, which belongs with
+the change that first makes the fork differ from upstream. Wiring them in is F3 (#11)'s job. Until
+then they are documented local gates, run and recorded here (§5.3, §5.5).
 
 ## 7. What F1 does not cover
 
-A version/spec mismatch is detected before voting only to the extent the existing shard-conf and
-trust-base checks already do it; F1 adds no new mismatch detection. There is no paired real-reth
-devnet run (four validators each driving their own reth) in this deliverable — §5.3 exercises one
-reth through the Engine API directly, which is what bounds §4. The paired topology is F8 (#16).
-Cross-client execution fixtures go to their implementation owners, and real UC / config / TR /
-transition derivation fixtures go to F2 (#10), per the D2 handoff.
+**This PR is a partial deliverable against #9.** It does not close the ticket, and the acceptance
+obligations below stay open on #9 with named owners rather than being reassigned away from it.
+
+- **Paired devnet:** §5.5 delivers one — four validators, four reth instances, a real transaction
+  executed and certified. What it does *not* deliver is the ticket's fuller intent: no load, no
+  fault injection against real reth (`scripts/chaos-evm.sh` is still fake-executor only), and only
+  one transaction through one leader (§5.6). Mixed cadence and multiple partitions are F8 (#16);
+  the rest stays open on #9.
+- **Mismatch detection before voting:** §5.5 demonstrates two real negatives (chainId mismatch, an
+  unreachable Engine API), both refused by `shard-node doctor` before the node votes. F1 adds no
+  *new* detection mechanism — it exercises what already exists. A client speaking a different
+  Engine API version set is untested and needs F3 (#11)'s version negotiation to be meaningful.
+- **The `l1` merge** (§3.2) is not done; F8 (#16) owns it.
+- **Cross-client execution fixtures** go to their implementation owners, and real UC / config / TR /
+  transition derivation fixtures go to F2 (#10), per the D2 handoff.

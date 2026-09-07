@@ -122,10 +122,15 @@ jobs:
   # docs/engine-api-adapter-plan.md §10 and scripts/reth-by-hand.sh.
   #
   # These are NOT real-execution evidence, and F1 (#9) requires that distinction be explicit: the
-  # fake executor models no header economics at all, which is where the deviations in
-  # docs/design/f1-baseline.md §4 live. The real-execution lane is scripts/reth-baseline.sh, run
-  # locally against a pinned reth (§5.3) — it is not a job here because there is no approved
-  # execution-client fork to pin a binary from yet. Wiring it in is F3 (#11).
+  # fake executor models no header economics at all, and nothing here drives a real execution
+  # client. Two local lanes cover that (docs/design/f1-baseline.md §5.3, §5.5):
+  #   scripts/reth-baseline.sh      — stock-client header economics, curl only, no Go adapter
+  #   scripts/reth-paired-devnet.sh — the actual integration: `--executor engine-api` against one
+  #                                   real reth per validator, which is the lane that says
+  #                                   anything about engineapi/
+  # Neither is a job here yet. The approved fork now exists (ristik/ureth, pinned in §2), so the
+  # blocker is no longer "where would the binary come from" but the Rust build/cache cost, which
+  # belongs with the change that first makes the fork differ from upstream. Wiring it in is F3 (#11).
   evm-shard-chaos:
     runs-on: ubuntu-latest
     steps:

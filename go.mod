@@ -4,6 +4,7 @@ go 1.24
 
 require (
 	github.com/ainvaltin/httpsrv v0.3.1
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.3.0
 	github.com/libp2p/go-libp2p v0.37.0
 	github.com/libp2p/go-libp2p-kad-dht v0.28.1
 	github.com/lmittmann/tint v1.0.5
@@ -27,6 +28,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.32.0
 	go.opentelemetry.io/otel/sdk/metric v1.32.0
 	go.opentelemetry.io/otel/trace v1.32.0
+	golang.org/x/crypto v0.31.0
 	golang.org/x/sync v0.10.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -42,7 +44,6 @@ require (
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c // indirect
-	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.3.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/elastic/gosigar v0.14.3 // indirect
 	github.com/ethereum/go-ethereum v1.14.11 // indirect
@@ -157,7 +158,6 @@ require (
 	go.uber.org/mock v0.5.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
-	golang.org/x/crypto v0.31.0 // indirect
 	golang.org/x/exp v0.0.0-20241108190413-2d47ceb2692f // indirect
 	golang.org/x/mod v0.22.0 // indirect
 	golang.org/x/net v0.31.0 // indirect
