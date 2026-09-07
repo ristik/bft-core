@@ -102,6 +102,35 @@ check_divergence() {
   fi
 }
 
+# log_lines - current line count of validator $1's log, for use as a "everything before here is
+# history" marker across a restart.
+log_lines() {
+  local n
+  n=$(wc -l <"test-nodes/evm$1/debug.log" 2>/dev/null || echo 0)
+  echo "${n:-0}"
+}
+
+# wait_for_after - poll (up to $2 seconds) until pattern $1 appears in $3 BEYOND line $4.
+#
+# Validator logs are opened with >> (helper.sh's start_one_evm_validator), so they accumulate
+# across restarts. A plain `wait_for 'accepted certificate'` after a restart therefore matches a
+# certificate the node accepted *before* it was killed and returns immediately, making every
+# "rejoined and resumed certifying" assertion vacuous. That is not academic: it let this script
+# stop a third validator while a previously-restarted one had not actually rejoined, dropping the
+# shard below its 3-of-4 quorum and producing a genuine stall that then looked like a flaky
+# progress check.
+wait_for_after() {
+  local pattern=$1 timeout=$2 file=$3 after=$4 waited=0
+  while ! awk -v n="$after" -v p="$pattern" 'NR > n && index($0, p) {found=1; exit} END {exit !found}' "$file" 2>/dev/null; do
+    if [ "$waited" -ge "$timeout" ]; then
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 0
+}
+
 # wait_for - poll (up to $2 seconds) until `grep -q "$1" "$3"` succeeds.
 wait_for() {
   local pattern=$1 timeout=$2 file=$3 waited=0
@@ -212,8 +241,9 @@ else
   fail "quorum stalled after killing validator $follower (round stuck at $survivorBefore for 30s)"
 fi
 echo "restarting validator $follower ..."
+followerMark=$(log_lines "$follower")
 start_one_evm_validator "$follower" "$validators" "$partition_id" "$rootBoot" fake rpc
-if wait_for 'accepted certificate' 20 "test-nodes/evm$follower/debug.log"; then
+if wait_for_after 'accepted certificate' 30 "test-nodes/evm$follower/debug.log" "$followerMark"; then
   pass "validator $follower rejoined and resumed certifying"
 else
   fail "validator $follower did not resume certifying within 20s after restart"
@@ -240,8 +270,9 @@ else
   fail "quorum stalled after killing leader $leader (round stuck at $survivorBefore for 30s)"
 fi
 echo "restarting validator $leader ..."
+leaderMark=$(log_lines "$leader")
 start_one_evm_validator "$leader" "$validators" "$partition_id" "$rootBoot" fake rpc
-if wait_for 'accepted certificate' 20 "test-nodes/evm$leader/debug.log"; then
+if wait_for_after 'accepted certificate' 30 "test-nodes/evm$leader/debug.log" "$leaderMark"; then
   pass "validator $leader rejoined and resumed certifying"
 else
   fail "validator $leader did not resume certifying within 20s after restart"
@@ -275,8 +306,9 @@ if [ "$otherRoundDuringOutage" -gt "$otherBefore" ]; then
 else
   fail "shard made no progress during validator $target's outage (validator $other stuck at round $otherBefore for 50s)"
 fi
+targetMark=$(log_lines "$target")
 start_one_evm_validator "$target" "$validators" "$partition_id" "$rootBoot" fake rpc
-if wait_for 'accepted certificate' 20 "test-nodes/evm$target/debug.log"; then
+if wait_for_after 'accepted certificate' 30 "test-nodes/evm$target/debug.log" "$targetMark"; then
   pass "validator $target caught up and resumed certifying after a $((otherRoundDuringOutage - before))-round outage"
 else
   fail "validator $target did not resume after its outage"
