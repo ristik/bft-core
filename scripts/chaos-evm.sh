@@ -60,8 +60,8 @@ fail() {
   failures=$((failures + 1))
 }
 
-# check_divergence <validator> <context> - report whether a validator logged a divergence or
-# equivocation, distinguishing the two cases the old flat grep conflated:
+# check_divergence <validator> <context> [afterLine] - report whether a validator logged a
+# divergence or equivocation since afterLine, distinguishing the cases the old flat grep conflated:
 #
 #   shardnode/round.go:317  WARN "executor head diverges ... attempting recovery via Commit"
 #                           — expected after an outage, and benign IF recovery then succeeds
@@ -73,12 +73,16 @@ fail() {
 # script matched both and then discarded the log. So on any match this prints the offending lines
 # and only fails hard for the ones that are actually faults.
 check_divergence() {
-  local v=$1 context=$2
+  local v=$1 context=$2 after=${3:-0}
   # Declared separately on purpose: referring to $v inside the same `local` that assigns it is
   # not reliably left-to-right across shells, and silently yields test-nodes/evm/debug.log.
   local log="test-nodes/evm$v/debug.log"
   local hits
-  hits=$(grep -in 'diverges\|equivocat' "$log" 2>/dev/null || true) # no match is the good case
+  # Scoped to lines after the restart marker. Without that this scans the whole appended log and
+  # attributes startup-time messages to whatever scenario happens to be running: CI job on
+  # b9c1ae53 reported a FATAL equivocation "during outage-and-catchup" from line 8 of the log,
+  # which was the node's very first startup, minutes earlier.
+  hits=$(awk -v n="$after" 'NR > n && tolower($0) ~ /diverges|equivocat/ {print NR ":" $0}' "$log" 2>/dev/null || true)
   if [ -z "$hits" ]; then
     pass "validator $v's $context logged no divergence or equivocation error"
     return
@@ -248,7 +252,7 @@ if wait_for_after 'accepted certificate' 30 "test-nodes/evm$follower/debug.log" 
 else
   fail "validator $follower did not resume certifying within 20s after restart"
 fi
-check_divergence "$follower" "restart"
+check_divergence "$follower" "restart" "$followerMark"
 
 echo
 echo "=== scenario: kill-leader ==="
@@ -313,7 +317,7 @@ if wait_for_after 'accepted certificate' 30 "test-nodes/evm$target/debug.log" "$
 else
   fail "validator $target did not resume after its outage"
 fi
-check_divergence "$target" "outage-and-catchup"
+check_divergence "$target" "outage-and-catchup" "$targetMark"
 
 echo
 echo "=== scenario: tampered-block (corrupted on-disk certificate store) ==="

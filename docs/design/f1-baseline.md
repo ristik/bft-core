@@ -413,17 +413,40 @@ The D2 handoff requires these be recorded or fixed rather than waived.
   leader, "a few multiples of T2" — and T2 is 3000ms here, so 15s allowed five, with nothing spare
   for a loaded runner. The verdict now comes from the measurement and the wait is 45s.
 
-  **One observation remains unexplained.** Job 101727627944 additionally reported a
-  divergence/equivocation match on the cold-restart path, which is a more serious class of signal
-  than a timing assertion. At the time the check was a flat `grep -i 'diverges\|equivocat'` that
-  matched three very different messages and then discarded the log, so which one fired cannot be
-  recovered. It has not recurred in the runs since, and it did not reproduce locally.
-  `check_divergence` now prints the matching lines and separates the benign recovery warning
-  (`round.go:317`, followed by a successful certification) from the fatal `cannot safely build
-  round N` (`round.go:326`) and from `ErrEquivocatingUC`. **This does not explain that run** — it
-  makes the next one explicable. Flagged to F6 (#14), which owns crash recovery: if that warning
-  fires on the cold-restart path, the reconcile-after-outage behaviour deserves deliberate
-  examination rather than an inference from a passing catch-up assertion.
+  **The instrumentation then caught the message the original check had hidden.** On `b9c1ae53`:
+
+  ```
+  ERROR shardnode/bftclient.go:227 msg="processing certification response"
+    err="classifying certificate: shardnode: equivocating unicity certificate:
+         new certificate is from older root round 52 than previous certificate 59"
+  ```
+
+  Two separate things follow, and they should not be confused.
+
+  *The scenario attribution was wrong, and that was my check's fault.* It reported this "during
+  outage-and-catchup", but the line is **line 8** of the log — the node's very first startup,
+  minutes before any validator was killed. `check_divergence` was scanning the whole appended log
+  rather than the window under test, the same masking bug already fixed twice on this branch. It
+  now takes a line marker and only considers lines after it. Verified against synthetic logs:
+  a historical equivocation before the marker is ignored, one after it is fatal.
+
+  *The message itself is real and is not a cold-restart issue.* A shard node received a
+  certification response carrying a UC from an **older root round than one it had already
+  accepted** (52 after 59) and rejected it. Rejecting it is correct — the node must not regress —
+  but two things are worth a decision rather than an assumption:
+
+  - A late or re-sent response from a lagging root node is a routine occurrence in a 3-root
+    topology, and `types.CheckNonEquivocatingCertificates` classifies it under the same
+    `ErrEquivocatingUC` as genuine equivocation, which is a far more serious condition (two
+    conflicting certificates for the *same* round). Same error, same ERROR log level, very
+    different meanings.
+  - It is logged at ERROR and dropped. Nothing measured here says the node then fails to catch up,
+    and in this run it did resume certifying.
+
+  Owner: F2 (#10), which owns certificate verification and classification, with F6 (#14) for the
+  recovery-path implications. Recorded as an observation needing a decision, **not** as a
+  diagnosed defect — I have not established whether the response was genuinely stale or whether
+  something produced it that should not have.
 
 ### 6.4 Real-reth in CI
 
