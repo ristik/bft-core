@@ -622,11 +622,33 @@ certificate's nil `BlockHash` into `Commit`. That is **#92**, with its own deter
 and local-payload-present versus absent cases. The stale-certificate-versus-equivocation taxonomy is
 **#93**. Neither is claimed here.
 
-**Status.** The harness is corrected; the scenario results are **not yet acceptance evidence**. They
-must be regenerated as isolated runs at an exact committed harness and build revision, with hashes
-retained. #88 stays open. Owners for whatever survives isolation: F6 (#14) for the executor recovery
-contract, F2 (#10) for what a returning node should do about a certified head it cannot reach, and
-F8 (#16), which should not treat this as an explanation for the unexplained stall without evidence.
+**First isolated run, at an exact committed revision.** bft `f1d8a1c3c0a97bbb5d17bb3213479b213984335b`,
+reth `189c0df32617afc488e0f091dbface1bd72cceb4`, clean tree, genesis
+`efe500c5…`, funded genesis `f68ca0e5…`, evidence archive sha256 `98eed1d3f13e980e…`.
+Result: 12 pass, 3 fail, 5 NOT RUN.
+
+The isolation changed the finding, and not in my favour. The **follower restart with its reth
+retained** — the one case the previous revision reported as recovering fully — now **fails**:
+
+```
+PASS: follower-restart: validator 2 accepted a new certificate after returning
+FAIL: follower-restart: validator 2's executor did not apply the new block (still 2:0x8655ef86…)
+FAIL: post-follower-restart: validator 2 has no receipt for 0xcbed4193… (executed and recorded earlier)
+FAIL: post-follower-restart: 1 of 4 live clients could not be observed; convergence NOT established
+```
+
+It passed before because the weak oracle accepted an unobservable client as agreement. So the
+correct statement is narrower than either previous version: **one fault, the mildest of the four,
+already leaves a returning node's executor behind**, and scenarios 3 to 6 are honestly NOT RUN
+rather than reported. Nothing here says the other three faults behave the same way; that needs
+per-scenario clean fixtures.
+
+**Status.** The harness is corrected and its oracle is regression-tested; this single isolated run
+is the only scenario evidence, and it covers exactly one fault. #88 stays open. The likely runtime
+cause is #92 (`Round.reconcile` passing a quiet certificate's nil `BlockHash` into `Commit`), which
+fits a node that accepts certificates but never applies a block. Owners: F6 (#14) for the executor
+recovery contract, F2 (#10) for what a returning node should do about a certified head it cannot
+reach, F8 (#16) — which should not treat this as an explanation for the unexplained stall.
 
 ### 6.4 Real-reth in CI
 
