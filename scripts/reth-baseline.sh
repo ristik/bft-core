@@ -9,7 +9,8 @@
 # reth or a fork changes it, this script says so instead of silently passing.
 #
 # Unlike reth-by-hand.sh, this one HAS been run against a live client:
-#   reth 2.5.0-dev, commit 189c0df32617afc488e0f091dbface1bd72cceb4 (paradigmxyz/reth, tag v2.5.0)
+#   reth 2.5.0-dev, commit 189c0df32617afc488e0f091dbface1bd72cceb4 — ristik/ureth branch
+#   unicity/main, which at this pin is byte-identical to upstream paradigmxyz/reth tag v2.5.0.
 # See docs/design/f1-baseline.md §2 for the pinned revision table and §5 for the recorded results.
 #
 # Usage:
@@ -22,7 +23,7 @@ set -euo pipefail
 
 blocks=${1:-40}
 genesis=test-nodes/evm-genesis.json
-pinnedRethCommit=189c0df32617afc488e0f091dbface1bd72cceb4
+pinnedRethCommit=189c0df32617afc488e0f091dbface1bd72cceb4   # ristik/ureth, branch unicity/main
 
 # The genesis this profile starts from, and the two rates measured against the pinned reth.
 # Sourced from the generated chain spec rather than hardcoded, so a change to

@@ -34,14 +34,28 @@ are a real, unmerged divergence, inventoried in §3.2.
 | Prototype (`engine-api-adapter`) | `627318b5e6e0ca79e601d58b35fc9c46498f2731` | 2026-09-05 |
 | Aggregation layer (`l1`) | `d637cbba441beb2b72857009cd581a0fb3eae3ab` | 2026-08-20 |
 | Upstream (`main`) | `ceceacd11b7a735de74ce17884a3a45e0db1748d` | 2026-04-22 |
-| Execution client (`paradigmxyz/reth`, tag `v2.5.0`) | `189c0df32617afc488e0f091dbface1bd72cceb4` | 2026-08-12 |
+| Execution client (`ristik/ureth`, branch `unicity/main`) | `189c0df32617afc488e0f091dbface1bd72cceb4` | 2026-08-12 |
 | `bft-go-base` | `v1.1.1-0.20260421100318-01ab63a83bf5` | — |
 | Go | 1.24 | — |
 
-The execution client is pinned to **upstream reth**, not to a fork. No approved execution-client
-fork exists yet; F3 (#11) creates it and must record its own pin here. Until then every real-reth
-result in this repository is a result about stock upstream reth, which is exactly what makes §4's
-deviation list meaningful — it is the delta the fork will have to close.
+The approved execution-client fork is **[`ristik/ureth`](https://github.com/ristik/ureth)**, branch
+`unicity/main`, created for F3 (#11) at upstream `paradigmxyz/reth` tag `v2.5.0`. It is a private
+mirror rather than a GitHub fork — GitHub forks inherit the parent's visibility, so a fork of public
+reth cannot itself be private — with `upstream` configured as a remote, so fetching and rebasing onto
+a later tag work normally. Its `UNICITY.md` records the fork point, the divergence budget and the
+deviations below.
+
+At this pin `unicity/main` is **byte-identical to upstream `v2.5.0`**: nothing has diverged yet, and
+the first divergence will be F3's privileged system call. So every real-reth result in this document
+is currently a result about stock upstream reth, which is exactly what makes §4's deviation list
+meaningful — it is the delta the fork has to close, measured before any of our own code could have
+influenced it.
+
+The contract package's approved home is
+**[`ristik/unicity-pos-contracts`](https://github.com/ristik/unicity-pos-contracts)** (Foundry,
+solc 0.8.28, `evm_version = "cancun"` matching the shard's chain spec), recorded for F4 (#12) per
+PROCESS.md's requirement that repository, toolchain and ownership be settled before implementation.
+Nothing is implemented there yet.
 
 Configuration produced by `./setup-evm-nodes.sh -r 3 -v 4` at this baseline (partition 8,
 `proof_type=exec`, chainId 31337):
@@ -277,9 +291,10 @@ The D2 handoff requires these be recorded or fixed rather than waived.
 ### 6.4 Real-reth in CI
 
 `scripts/reth-baseline.sh` is the lane, but it is **not** wired into the GitHub workflow: it needs a
-pinned reth binary, and per §2 no approved fork exists to pin. Wiring it is F3 (#11)'s job, when it
-creates the fork and has an artifact to install. Until then it is a documented local gate, run and
-recorded here.
+reth binary built at the pinned revision, and building `ureth` in CI is a Rust job whose cost and
+caching belong with the change that first makes the fork differ from upstream. Wiring it is F3
+(#11)'s job, when it has an artifact worth installing. Until then it is a documented local gate, run
+and recorded here (§5.3).
 
 ## 7. What F1 does not cover
 
