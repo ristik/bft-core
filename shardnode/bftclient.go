@@ -251,6 +251,19 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	class, err := ClassifyUC(prevLUC, &cr.UC)
 	if err != nil {
 		c.mu.Unlock()
+		// Log the two certificates that were compared before returning. The error string alone
+		// says a conflict happened but not which field differs or which root rounds the seals
+		// came from, and this node will now reject every subsequent certificate the same way
+		// (c.luc is deliberately left unchanged), so without this the first rejection — the only
+		// one that carries information — is unrecoverable after the fact. See F1 #9 review
+		// 5132493933. Diagnostic only; the classification decision is unchanged.
+		if c.log != nil {
+			c.log.ErrorContext(ctx, "certificate rejected by classification",
+				slog.String("err", err.Error()),
+				slog.Uint64("nextRound", cr.Technical.Round),
+				slog.String("nextLeader", cr.Technical.Leader),
+				slog.String("comparison", DescribeUCConflict(prevLUC, &cr.UC)))
+		}
 		return fmt.Errorf("classifying certificate: %w", err)
 	}
 	if class == UCDuplicate {

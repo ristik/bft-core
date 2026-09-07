@@ -21,3 +21,6 @@ gosec_report.json
 
 go.work
 go.work.sum
+
+# stray binary if someone runs `go build ./scripts/...` instead of `go run`
+/evmtx

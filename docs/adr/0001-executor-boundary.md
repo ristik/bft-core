@@ -2,8 +2,11 @@
 
 ## Status
 
-Accepted. Implemented in `shardnode/` (framework) as of this ADR's commit; `engineapi/` (the
-reth-driving Executor) is planned, not yet built — see `docs/engine-api-adapter-plan.md`.
+Accepted. Implemented in `shardnode/` (framework) as of this ADR's commit. `engineapi/` (the
+reth-driving Executor) was written on the `engine-api-adapter` branch and is present at the F1
+baseline (`docs/design/f1-baseline.md`), driving standard Engine API V3 against a real reth. It is
+not yet the enshrined-EVM executor: the privileged system call, canonical root input and fee profile
+that D1/D2 specify are F2 (#10), F3 (#11) and F5 (#13) work, not part of this boundary.
 
 ## Context
 

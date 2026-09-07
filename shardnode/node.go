@@ -2,6 +2,8 @@ package shardnode
 
 import (
 	"context"
+	"crypto"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -67,6 +69,19 @@ func New(
 			return nil, fmt.Errorf("loading persisted certificate: %w", err)
 		}
 		if luc != nil {
+			// Authenticate before seeding. The stored certificate becomes this node's
+			// non-equivocation authority: every certificate arriving from the network is
+			// judged against it, and a classification failure leaves it in place, so an
+			// unauthenticated one wedges the node against genuine, correctly signed
+			// certificates. It was previously installed on the strength of having decoded.
+			//
+			// The trust base comes from the configured store, never from the checkpoint —
+			// the checkpoint names a root epoch, and that name is exactly what is in
+			// question, so an unknown or untrusted epoch must fail rather than be adopted.
+			if err := verifyRestoredLUC(luc, trustBaseStore, partitionID, shardID); err != nil {
+				return nil, fmt.Errorf("authenticating persisted certificate (round %d, root round %d): %w",
+					luc.GetRoundNumber(), luc.GetRootRoundNumber(), err)
+			}
 			client.SeedLUC(luc)
 			if log != nil {
 				log.Info("resumed from persisted certificate",
@@ -129,6 +144,44 @@ func (p *persistingDriver) HandleCertificate(ctx context.Context, uc *types.Unic
 	}
 	if err := p.store.SaveLUC(uc); err != nil {
 		return fmt.Errorf("persisting certificate: %w", err)
+	}
+	return nil
+}
+
+/*
+verifyRestoredLUC authenticates a certificate loaded from local storage before it is
+allowed to become this node's non-equivocation authority (issue #86, delivery step 4).
+
+What it checks, via the same types.UnicityCertificate.Verify the network path uses: the
+seal's root-quorum signatures against the trust base for the certificate's root epoch,
+the shard-tree and unicity-tree inclusion paths against the sealed root hash, and that
+the certificate is for this node's partition and shard.
+
+What it does NOT check, stated plainly rather than implied: the expected shard
+configuration hash. Verify takes a shardConfHash argument and the live network path
+passes nil, which means "accept the certificate's own ShardConfHash without comparing it
+to the configuration this node was started with". Passing the configured hash here would
+require plumbing the shard conf into New, which is an interface change belonging to
+F2 (#10) — it is split out deliberately rather than papered over. Nothing in this
+function should be described as enforcing the configured shard hash.
+
+The trust base is taken from the configured store, never from the checkpoint. An epoch
+the store does not know is a failure, not a reason to trust the file: the checkpoint
+names its own epoch, and that name is precisely what is in question.
+
+Startup is a synchronous, local operation and the configured store is file-backed, so
+this uses a background context rather than threading one through New.
+*/
+func verifyRestoredLUC(uc *types.UnicityCertificate, trustBaseStore TrustBaseStore, partitionID types.PartitionID, shardID types.ShardID) error {
+	if trustBaseStore == nil {
+		return errors.New("no trust base store configured")
+	}
+	tb, err := trustBaseStore.GetByEpoch(context.Background(), uc.GetRootEpoch())
+	if err != nil {
+		return fmt.Errorf("loading trust base for root epoch %d: %w", uc.GetRootEpoch(), err)
+	}
+	if err := uc.Verify(tb, crypto.SHA256, partitionID, shardID, nil); err != nil {
+		return fmt.Errorf("verifying certificate: %w", err)
 	}
 	return nil
 }

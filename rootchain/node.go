@@ -124,7 +124,12 @@ func (v *Node) Run(ctx context.Context) error {
 	g.Go(func() error { return v.partitionMsgLoop(gctx) })
 	// Start handling certification responses
 	g.Go(func() error { return v.handleConsensus(gctx) })
-	return g.Wait()
+	err := g.Wait()
+	// handleConsensus has returned, so nothing can call subscription.Send any more;
+	// drain the sends already in flight rather than leaving them writing to the
+	// logger and the meter after Run has reported the node stopped.
+	v.subscription.Wait()
+	return err
 }
 
 func (v *Node) GetPeer() *network.Peer {
