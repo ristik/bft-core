@@ -18,6 +18,8 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
+
 	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/shardnode"
@@ -145,7 +147,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 		return fmt.Errorf("creating shard network: %w", err)
 	}
 
-	executor, err := buildExecutor(ctx, flags)
+	executor, err := buildExecutor(ctx, flags, shardConf)
 	if err != nil {
 		return err
 	}
@@ -253,7 +255,7 @@ func buildDisseminator(p *network.Peer, obs Observability, validators []*types.N
 	return shardnode.NewNetDisseminator(p, obs, peers)
 }
 
-func buildExecutor(ctx context.Context, flags *shardNodeRunFlags) (shardnode.Executor, error) {
+func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *types.PartitionDescriptionRecord) (shardnode.Executor, error) {
 	switch flags.Executor {
 	case "fake":
 		return executortest.New(), nil
@@ -283,6 +285,20 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags) (shardnode.Exe
 		// they show up as a mysteriously stalled first round.
 		if err := adapter.CheckCapabilities(ctx); err != nil {
 			return nil, fmt.Errorf("engine-api executor failed its startup capability check: %w", err)
+		}
+
+		// Capability exchange cannot tell one chain from another — the V3 method set is
+		// identical whatever chain the client is running — so a node pointed at the wrong
+		// execution client would pass the check above and then certify against the wrong
+		// state. `shard-node doctor` has always caught this, but doctor is an optional
+		// preflight; F1 (#9) requires the node itself to refuse before it can vote.
+		wantChainID, ok := zkverifier.ParseChainIDFromParams(shardConf.PartitionParams)
+		if !ok {
+			return nil, fmt.Errorf("engine-api executor requires a chain_id partition param in the shard conf, which has none")
+		}
+		if err := adapter.CheckChainID(ctx, wantChainID); err != nil {
+			return nil, fmt.Errorf("engine-api executor failed its startup chain-identity check "+
+				"(the wrong execution client, or a genesis generated for a different shard conf): %w", err)
 		}
 		return adapter, nil
 

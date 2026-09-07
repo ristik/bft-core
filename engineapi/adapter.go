@@ -67,6 +67,32 @@ func (a *Adapter) CheckCapabilities(ctx context.Context) error {
 	return nil
 }
 
+// CheckChainID verifies the execution client is running the chain this shard is
+// configured for, by comparing eth_chainId against the shard conf's chain_id
+// partition param.
+//
+// This is a startup check with real consequences, not a convenience. A node pointed
+// at an execution client for a different chain passes CheckCapabilities happily — the
+// Engine API method set is identical — and then builds and certifies blocks against
+// the wrong state, which the shard cannot detect for it. `ubft shard-node doctor` has
+// checked this since the adapter was written, but doctor is an optional preflight an
+// operator has to remember to run; F1 (#9) requires the node itself to refuse before
+// it can vote. Call it alongside CheckCapabilities, before Run.
+//
+// It does not establish that the genesis *state* matches, only the chain id. Two
+// chain specs can share a chain id and differ elsewhere; comparing genesis hashes
+// across validators remains an operator step (see doctor's "genesis hash" check).
+func (a *Adapter) CheckChainID(ctx context.Context, want uint64) error {
+	got, err := a.eth.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("engineapi: reading chain id: %w", err)
+	}
+	if got != want {
+		return fmt.Errorf("engineapi: execution client reports chainId=%d, shard conf says %d", got, want)
+	}
+	return nil
+}
+
 func (a *Adapter) Head(ctx context.Context) (shardnode.BlockRef, error) {
 	h, err := a.eth.GetBlockByNumber(ctx, "latest")
 	if err != nil {

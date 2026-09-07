@@ -232,12 +232,19 @@ func adapterChecks(flags *shardNodeDoctorFlags) []doctorCheck {
 				if !ok {
 					return false, "shard conf has no chain_id partition param", ""
 				}
+				// Deliberately the same Adapter.CheckChainID that `shard-node run` now enforces
+				// at startup, so doctor cannot drift from what the node actually refuses to
+				// start on. Reported here with remediation text rather than as a bare error.
 				eth := engineapi.NewEthClient(flags.EthURL)
 				gotChainID, err := eth.ChainID(ctx)
 				if err != nil {
 					return false, err.Error(), "check --eth-url points at a running execution client's plain RPC endpoint"
 				}
-				if gotChainID != wantChainID {
+				a, err := newAdapter()
+				if err != nil {
+					return false, err.Error(), ""
+				}
+				if err := a.CheckChainID(ctx, wantChainID); err != nil {
 					return false, fmt.Sprintf("execution client reports chainId=%d, shard conf says %d", gotChainID, wantChainID),
 						"the wrong reth instance, or a genesis.json generated for a different shard conf"
 				}
