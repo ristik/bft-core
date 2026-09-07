@@ -60,6 +60,48 @@ fail() {
   failures=$((failures + 1))
 }
 
+# check_divergence <validator> <context> - report whether a validator logged a divergence or
+# equivocation, distinguishing the two cases the old flat grep conflated:
+#
+#   shardnode/round.go:317  WARN "executor head diverges ... attempting recovery via Commit"
+#                           — expected after an outage, and benign IF recovery then succeeds
+#   shardnode/round.go:326  the fatal "cannot safely build round N" error
+#   shardnode/uc.go         ErrEquivocatingUC — never benign
+#
+# A run in CI (job 101727627944, cold-restart) tripped the old check while the adjacent
+# "resumed certifying" assertion passed, and nobody could tell which message fired, because the
+# script matched both and then discarded the log. So on any match this prints the offending lines
+# and only fails hard for the ones that are actually faults.
+check_divergence() {
+  local v=$1 context=$2
+  # Declared separately on purpose: referring to $v inside the same `local` that assigns it is
+  # not reliably left-to-right across shells, and silently yields test-nodes/evm/debug.log.
+  local log="test-nodes/evm$v/debug.log"
+  local hits
+  hits=$(grep -in 'diverges\|equivocat' "$log" 2>/dev/null || true) # no match is the good case
+  if [ -z "$hits" ]; then
+    pass "validator $v's $context logged no divergence or equivocation error"
+    return
+  fi
+  echo "  --- divergence/equivocation lines from validator $v ---" >&2
+  echo "$hits" >&2
+  echo "  --- end ---" >&2
+  if echo "$hits" | grep -qi 'equivocat\|cannot safely build round'; then
+    fail "validator $v logged a FATAL divergence/equivocation during $context (see lines above)"
+    return
+  fi
+  # Recovery only counts if it happened AFTER the warning: the log is appended across restarts, so
+  # certificates from before the outage are still in it and would otherwise mask a stuck node.
+  local lastWarn firstCertAfter
+  lastWarn=$(echo "$hits" | tail -1 | cut -d: -f1)
+  firstCertAfter=$(awk -v n="$lastWarn" 'NR > n && /accepted certificate/ {print NR; exit}' "$log" || true)
+  if [ -n "$firstCertAfter" ]; then
+    pass "validator $v warned about a diverged head during $context (line $lastWarn), then recovered and certified (line $firstCertAfter)"
+  else
+    fail "validator $v logged a diverged head during $context (line $lastWarn) and certified nothing afterwards"
+  fi
+}
+
 # wait_for - poll (up to $2 seconds) until `grep -q "$1" "$3"` succeeds.
 wait_for() {
   local pattern=$1 timeout=$2 file=$3 waited=0
@@ -176,11 +218,7 @@ if wait_for 'accepted certificate' 20 "test-nodes/evm$follower/debug.log"; then
 else
   fail "validator $follower did not resume certifying within 20s after restart"
 fi
-if grep -qi 'diverges\|equivocat' "test-nodes/evm$follower/debug.log"; then
-  fail "validator $follower logged a divergence/equivocation error after restart"
-else
-  pass "validator $follower's restart logged no divergence or equivocation error"
-fi
+check_divergence "$follower" "restart"
 
 echo
 echo "=== scenario: kill-leader ==="
@@ -234,11 +272,7 @@ if wait_for 'accepted certificate' 20 "test-nodes/evm$target/debug.log"; then
 else
   fail "validator $target did not resume after its outage"
 fi
-if grep -qi 'diverges\|equivocat' "test-nodes/evm$target/debug.log"; then
-  fail "validator $target logged a divergence/equivocation error catching up"
-else
-  pass "validator $target's outage-and-catchup logged no divergence or equivocation error"
-fi
+check_divergence "$target" "outage-and-catchup"
 
 echo
 echo "=== scenario: tampered-block (corrupted on-disk certificate store) ==="
