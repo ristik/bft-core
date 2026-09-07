@@ -514,12 +514,42 @@ occurred, but the whole-bytes comparison reports equivocation. That would fit ev
 the conflict is at the round the killed leader stalled on, it is intermittent, and it needs a
 timeout at the wrong moment.
 
-**This is not established.** It could equally be a substantively different certified state, which
-would be far more serious. The two are distinguished by *which field differs*, which the log did not
-carry. `DescribeUCConflict` now prints exactly that, plus both root rounds, both root epochs, both
-seal hashes and both IRs, at the moment of rejection —
-`differing IR fields: [timestamp]` means a re-attempted round; a `hash`/`blockHash` difference means
-something else. `shardnode/uc_conflict_test.go` pins both shapes deterministically.
+**This is not established, and reading the root chain argues against it.**
+`ShardInfo.ValidRequest` pins *both* the round and the timestamp to the same `LastCR`:
+
+```go
+if req.IRRound() != si.LastCR.Technical.Round { ... }
+if req.InputRecord.Timestamp != si.LastCR.UC.UnicitySeal.Timestamp { ... }
+```
+
+Once round N is certified, `LastCR.Technical.Round` advances to N+1 and a second round-N request is
+rejected outright — so two *quorum-certified* round-N input records should not both exist. The
+timestamp story explains the shape of the message but not how both certificates came to be, which
+makes the observation more concerning rather than less. `DescribeUCConflict` now prints which field
+differs, plus both root rounds, root epochs, seal hashes and IRs, at the moment of rejection:
+`[timestamp]` alone means a re-attempted round, a `hash`/`blockHash` difference means something
+substantively different was certified. `shardnode/uc_conflict_test.go` pins both shapes.
+
+**A concrete asymmetry found while chasing it, worth fixing on its own merits.** The two sides of
+that comparison are not held to the same standard:
+
+| | Authenticated? |
+| --- | --- |
+| The **received** certificate | Yes — `handleCertificationResponse` runs `UC.Verify` against the trust base for its root epoch (signatures, quorum, inclusion paths) *before* `ClassifyUC` |
+| The **stored** certificate it is judged against | **No** — `FileStore.LoadLUC` only JSON-decodes, and `node.go` seeds it straight in via `SeedLUC` on every restart |
+
+So on the equivocation path the authority is a local file and the thing being judged against it is
+the authenticated object. Combined with `c.luc` being left unchanged on error, a well-formed but
+wrong stored certificate makes a node reject genuinely quorum-certified certificates indefinitely —
+and every one of the observed failures was on a node that had just restarted.
+`TestFileStore_LoadLUCDoesNotAuthenticate` pins it: a certificate with **no signatures at all** and
+an arbitrary root round loads and is usable. The chaos suite's tampered-block scenario does not
+cover this, because it corrupts the file so the decode fails; this is the well-formed case.
+
+This is recorded as a disposition, not fixed here: whether `SeedLUC` should verify, and against
+which trust base at startup, is F2 (#10)'s call, with F6 (#14) owning the persistence contract. It
+is not established that this caused the CI failure — the artifact upload below is what will settle
+that, since it captures the stored `shard-node-luc.json` alongside the logs.
 
 **Why the node never recovers, which is a separate finding.** On a classification error `c.luc` is
 deliberately left unchanged, so the comparison repeats against the same stored certificate.
