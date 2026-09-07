@@ -578,11 +578,45 @@ stall. Per the review, budgets were not raised and no diagnostic was suppressed.
 
 ### 6.4 Real-reth in CI
 
-Neither `scripts/reth-baseline.sh` nor `scripts/reth-paired-devnet.sh` is wired into the GitHub
-workflow. Both need a reth binary at the pinned revision; the approved fork now exists
-(`ristik/ureth`, §2), so the remaining obstacle is the Rust build and cache cost, which belongs with
-the change that first makes the fork differ from upstream. Wiring them in is F3 (#11)'s job. Until
-then they are documented local gates, run and recorded here (§5.3, §5.5).
+`.github/workflows/reth-smoke.yml` runs the adapter against the **approved pinned execution client**
+on every PR to `integration/enshrined-evm`, and on manual dispatch (F1c, #90). It is a separate
+workflow with a distinct name on purpose: a green `ci` run must never be read as real-execution
+evidence, because every job there uses `--executor fake`.
+
+**Provenance instead of a 40-minute Rust build.** The pin `189c0df3` *is* upstream tag `v2.5.0` —
+verified: `git/refs/tags/v2.5.0` resolves to that commit — and `ristik/ureth`'s `unicity/main` is
+byte-identical to it (§2), so the upstream release artifact is a legitimate source for it today.
+The workflow records the source URL, the exact asset name and its SHA-256
+(`6719ec67…`, GitHub's own reported asset digest), verifies the archive against it, and then
+**verifies the extracted binary reports the pinned commit — on cache hits as well as fresh
+downloads**. A cache is a convenience, never an authority.
+
+That choice is only valid while the fork has not diverged. **The moment `ureth` carries its own
+commits, this lane must build from source** (or publish its own artifact with equivalent provenance),
+and the digest and tag pins here stop being meaningful. F3 (#11) extends this workflow rather than
+starting a second one.
+
+Budget, measured against the artifact path rather than estimated:
+
+| Step | Cost |
+| --- | --- |
+| Artifact download + digest verify (cache miss) | ~52 MB, well under a minute |
+| Cache hit | negligible; the revision check still runs |
+| Rust build | **none** — avoided entirely by the artifact path |
+| `reth-baseline.sh 20` (stock control) | ~1 minute |
+| `reth-paired-devnet.sh 4 5` (4 validators, 4 clients, funded transaction) | several minutes |
+| Job timeout | 45 minutes |
+
+The 160-block baseline run stays a local gate (§5.3); CI runs 20 blocks, which still exercises both
+controls. Longer repeat and fault runs belong on a separate bounded lane (#90 stage 3) so that a
+green PR check never implies fault coverage that did not run.
+
+Evidence: collection and teardown run on success, failure **and cancellation**. The archive carries
+root, shard and reth logs, shard conf, trust base, both genesis files and a provenance record
+(BFT commit, reth commit/tag/asset/digest, run id and attempt). Signing keys and JWT secrets are
+never copied and their absence is asserted, failing the job if one appears. Retention 14 days. The
+upload path can be exercised deliberately via the `inject_failure` dispatch input rather than
+waiting for a real failure to discover it does not work.
 
 ## 7. What F1 does not cover
 

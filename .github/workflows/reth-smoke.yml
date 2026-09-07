@@ -1,0 +1,160 @@
+# Real-reth smoke lane (F1c, #90).
+#
+# The `ci` workflow's compose and chaos jobs run `--executor fake`, which models no execution at
+# all — they cannot say anything about the Engine API path. This workflow is the counterpart that
+# runs the Go adapter against the APPROVED PINNED execution client, so the local real-reth evidence
+# recorded in docs/design/f1-baseline.md becomes continuous.
+#
+# Named separately and deliberately: a green `ci` run must never be read as real-execution
+# evidence, and this job's name says which it is.
+#
+# There is no fake fallback anywhere in here. A wrong pin, a missing binary or an RPC failure fails
+# the job visibly rather than skipping.
+name: real-reth-smoke
+
+on:
+  pull_request:
+    branches:
+      - integration/enshrined-evm
+  workflow_dispatch:
+    inputs:
+      inject_failure:
+        description: "Fail the lane deliberately after the scenarios, to prove the evidence upload path (#90 stage 4)"
+        type: boolean
+        default: false
+
+env:
+  GO_VERSION: 1.24
+  # The approved execution-client pin. ristik/ureth branch unicity/main is byte-identical to
+  # upstream paradigmxyz/reth tag v2.5.0 at this commit, which is why an upstream release artifact
+  # is a legitimate source for it — see docs/design/f1-baseline.md §2.
+  RETH_COMMIT: 189c0df32617afc488e0f091dbface1bd72cceb4
+  RETH_TAG: v2.5.0
+  # Provenance, recorded rather than trusted blindly. Both are verified below:
+  #   - the archive's sha256 must equal RETH_SHA256 (GitHub's own reported asset digest)
+  #   - the extracted binary must report RETH_COMMIT, checked on cache hits too
+  RETH_ASSET: reth-v2.5.0-x86_64-unknown-linux-gnu.tar.gz
+  RETH_SHA256: 6719ec675744c279dadab1269a15b3afb6ed153839aa87ccad7c2d119d48f47f
+
+jobs:
+  real-reth-smoke:
+    name: real-reth smoke (pinned client, funded transaction)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # Cache key includes the commit, the exact asset and its digest, and the runner arch, so a
+      # changed pin or a re-published artifact can never be served from a stale cache.
+      - name: Cache the pinned reth binary
+        id: reth-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/reth
+          key: reth-${{ env.RETH_COMMIT }}-${{ env.RETH_ASSET }}-${{ env.RETH_SHA256 }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Fetch the pinned reth artifact
+        if: steps.reth-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.local/bin
+          url="https://github.com/paradigmxyz/reth/releases/download/${RETH_TAG}/${RETH_ASSET}"
+          echo "source: $url"
+          curl -fsSL -o /tmp/reth.tar.gz "$url"
+          echo "${RETH_SHA256}  /tmp/reth.tar.gz" | sha256sum -c -
+          tar xzf /tmp/reth.tar.gz -C ~/.local/bin reth
+          chmod +x ~/.local/bin/reth
+
+      # Runs on cache hits as well as fresh downloads. A cache is a convenience, never an
+      # authority: the binary itself has to say it is the pinned revision.
+      - name: Verify the binary is the pinned revision
+        run: |
+          set -euo pipefail
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          reth --version | sed -n '1p;2p'
+          got=$(reth --version | sed -n 's/^Commit SHA: //p')
+          if [ "$got" != "$RETH_COMMIT" ]; then
+            echo "::error::reth reports $got, pinned is $RETH_COMMIT" >&2
+            exit 1
+          fi
+          echo "verified: reth is $got (cache-hit=${{ steps.reth-cache.outputs.cache-hit }})"
+
+      - name: Build ubft
+        run: make build
+
+      # Stock-client control: header economics against the pinned client, no Unicity code involved.
+      # Fewer blocks than the local 160-block run to keep the PR budget sane; the long run stays a
+      # local gate (docs/design/f1-baseline.md §5.3).
+      - name: Stock-client control (reth-baseline)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          ./setup-evm-nodes.sh -r 3 -v 4
+          ./scripts/reth-baseline.sh 20
+
+      # The lane that actually exercises the Go adapter: four validators, one reth each, a funded
+      # transaction executed and certified, and all four clients agreeing.
+      - name: Paired real-reth devnet (funded transaction)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          ./scripts/reth-paired-devnet.sh 4 5
+
+      - name: Inject a deliberate failure (#90 stage 4)
+        if: github.event_name == 'workflow_dispatch' && inputs.inject_failure
+        run: |
+          echo "::error::deliberate failure requested via workflow_dispatch, to exercise the evidence upload path"
+          exit 1
+
+      # Collection runs on success, failure AND cancellation, so a cancelled run still leaves
+      # evidence. Secrets are excluded by construction and their absence asserted.
+      - name: Collect evidence
+        if: always()
+        run: |
+          set -uo pipefail
+          out=reth-smoke-evidence
+          mkdir -p "$out"
+          {
+            echo "bft=${GITHUB_SHA}"
+            echo "reth=${RETH_COMMIT} (${RETH_TAG}, asset ${RETH_ASSET}, sha256 ${RETH_SHA256})"
+            echo "workflow_run=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT}"
+            echo "event=${GITHUB_EVENT_NAME}"
+          } >"$out/provenance.txt"
+          for d in test-nodes/*/; do
+            name=$(basename "$d")
+            mkdir -p "$out/$name"
+            cp "$d"debug.log "$out/$name/" 2>/dev/null || true
+            cp "$d"reth.log "$out/$name/" 2>/dev/null || true
+            # keys.json and jwt.hex are deliberately never copied.
+            find "$d" -maxdepth 1 -type f \
+              ! -name 'debug.log' ! -name 'reth.log' ! -name 'pid' \
+              ! -name 'keys.json' ! -name 'jwt.hex' \
+              -exec cp {} "$out/$name/" \; 2>/dev/null || true
+          done
+          cp test-nodes/shard-conf-*.json test-nodes/trust-base.json "$out/" 2>/dev/null || true
+          cp test-nodes/evm-genesis.json test-nodes/evm-genesis-funded.json "$out/" 2>/dev/null || true
+          if find "$out" \( -name 'keys.json' -o -name 'jwt.hex' \) | grep -q .; then
+            echo "::error::evidence archive contains a secret file" >&2
+            exit 1
+          fi
+          tar czf reth-smoke-evidence.tar.gz "$out"
+          echo "collected $(tar tzf reth-smoke-evidence.tar.gz | wc -l) files, $(du -h reth-smoke-evidence.tar.gz | cut -f1)"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reth-smoke-evidence
+          path: reth-smoke-evidence.tar.gz
+          retention-days: 14
+
+      # Every execution client must be stopped whatever happened, including cancellation.
+      - name: Tear down
+        if: always()
+        run: |
+          ./stop-evm.sh -a || true
+          pkill -f 'reth node' || true
