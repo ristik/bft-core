@@ -345,7 +345,7 @@ negotiation.
 | Two `l1` commits unmerged; consistency-proof fixtures not retained | §3.2 | F8 (#16) |
 | FFI CI lane disabled (`if: false`) | §5.2 | F8 (#16) |
 | `rootchain/consensus` `Test_recoverState`, `Test_rootNetworkRunning`, `Test_ConsensusManager_messages` fail on a slow/loaded host: they assert round progress against wall-clock deadlines and reach only rounds 2–3 within them. Pass in CI (run 34102642015 attempt 2) and fail reproducibly on the F1 development host, in isolation as well as in the full suite. Not a protocol defect; a test-harness timing assumption. | §5.1 | F1 records; retest under F8 (#16)'s fixture work |
-| `scripts/chaos-evm.sh`'s `cold-restart` scenario asserts round progress within 15s of killing a validator. **Intermittent on identical code** (fails and passes across reruns and across the two trigger sets on one commit); the cause is *not* established, and a genuine recovery issue surfacing under timing pressure is not excluded. | §6.3 | Open question for F8 (#16) |
+| `scripts/chaos-evm.sh`'s `cold-restart` verdict came from a 15s race while its reported number came from a measurement 5s later, so the two contradicted each other in CI ("no progress" alongside "a 7-round outage"). **Fixed:** the verdict now comes from the measurement, and the wait is 45s rather than 5×T2. | §6.3 | F1 fixed |
 | `gosec` reports 28 findings (analyzer job is `continue-on-error`) | §6.3 | F1 records; see §6.3 |
 | Certified head still in latest-only JSON persistence | `shardnode/store.go` | F6 (#14) |
 | Canonical root input unauthenticated at the executor boundary | §4.4 | F2 (#10) |
@@ -398,16 +398,32 @@ The D2 handoff requires these be recorded or fixed rather than waived.
   through `newDHT`'s routing-table callback after completion, panicking the package exactly the way
   the untracked `Subscriptions` goroutines did. The test asserts *that* discovery converges, not how
   fast, so a longer budget costs a slow machine seconds and a fast one nothing.
-- **`evm-shard-chaos` — intermittent; cause not established.** Its `cold-restart` scenario asserts
-  the surviving validators advance a round within 15s of a validator being killed, and it has now
-  failed and passed on identical code more than once (run 34105234592 failed then passed on rerun;
-  at `8645d6ae` the push and pull_request check sets disagreed with each other). That establishes
-  the result is **intermittent**, and that it is not a deterministic regression from this branch.
-  It does **not** establish that a loaded runner is the cause, and it does not rule out a genuine
-  protocol or recovery issue that manifests under timing pressure. The wall-clock assertion is the
-  obvious suspect and shares a shape with the `rootchain/consensus` failures, but that is a
-  hypothesis, not a diagnosis. F8 (#16) inherits it as an open question, not as a known-benign
-  flake.
+- **`evm-shard-chaos` — a broken assertion, now fixed; plus one unexplained observation.**
+
+  This was first recorded here as "environment-sensitive", which was a hypothesis stated as a
+  diagnosis. Instrumenting it produced an actual answer.
+
+  **The failure was the test contradicting itself.** `cold-restart` took its verdict from whether a
+  15-second `wait_for_progress` won its race, but took the number it *reported* from a measurement
+  five seconds later. So CI runs 101730435909 and 101730449401 both printed `shard made no progress
+  during validator N's outage` immediately followed by `resumed certifying after a 7-round outage`.
+  The shard had progressed; only the race had been lost. 15s was too tight for what the scenario
+  deliberately provokes: `wait_for_progress`'s own comment notes that a round assigned to a
+  currently-dead leader recovers only after the root chain's T2 timeout reissues it to the next
+  leader, "a few multiples of T2" — and T2 is 3000ms here, so 15s allowed five, with nothing spare
+  for a loaded runner. The verdict now comes from the measurement and the wait is 45s.
+
+  **One observation remains unexplained.** Job 101727627944 additionally reported a
+  divergence/equivocation match on the cold-restart path, which is a more serious class of signal
+  than a timing assertion. At the time the check was a flat `grep -i 'diverges\|equivocat'` that
+  matched three very different messages and then discarded the log, so which one fired cannot be
+  recovered. It has not recurred in the runs since, and it did not reproduce locally.
+  `check_divergence` now prints the matching lines and separates the benign recovery warning
+  (`round.go:317`, followed by a successful certification) from the fatal `cannot safely build
+  round N` (`round.go:326`) and from `ErrEquivocatingUC`. **This does not explain that run** — it
+  makes the next one explicable. Flagged to F6 (#14), which owns crash recovery: if that warning
+  fires on the cold-restart path, the reconcile-after-outage behaviour deserves deliberate
+  examination rather than an inference from a passing catch-up assertion.
 
 ### 6.4 Real-reth in CI
 

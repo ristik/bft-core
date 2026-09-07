@@ -255,16 +255,25 @@ echo "stopping validator $target for an extended outage (others keep certifying 
 stop_one_evm_validator "$target"
 other=$((target % validators + 1))
 otherBefore=$(latest_round "$other")
-otherProgressed=false
-if wait_for_progress "$other" "$otherBefore" 15; then
-  otherProgressed=true
-fi
+# The verdict below is taken from the measurement, not from whether this wait won its race.
+# Those were two different things and they contradicted each other in CI: runs 101730435909 and
+# 101730449401 both reported "shard made no progress during validator N's outage" from a failed
+# 15s wait, and then, five seconds later, "resumed certifying after a 7-round outage" from the
+# measurement. The shard had progressed; only the race had been lost.
+#
+# 15s was too tight for what this scenario deliberately provokes. wait_for_progress's own comment
+# says a round assigned to a currently-dead leader recovers only once the root chain's T2 timeout
+# reissues it to the next leader in rotation, "a few multiples of T2" — and T2 here is 3000ms
+# (see generate_evm_shard_conf above), so 15s is five of them, with no allowance for a loaded
+# runner. The wait is now 45s and exists only to avoid sleeping the full budget when the shard
+# recovers quickly.
+wait_for_progress "$other" "$otherBefore" 45 || true
 sleep 5 # let a few more rounds pass while target is still down, for a real "outage", not a blink
 otherRoundDuringOutage=$(latest_round "$other")
-if [ "$otherProgressed" = true ]; then
+if [ "$otherRoundDuringOutage" -gt "$otherBefore" ]; then
   pass "shard progressed well past validator $target's last round ($before -> $otherRoundDuringOutage) while it was down"
 else
-  fail "shard made no progress during validator $target's outage"
+  fail "shard made no progress during validator $target's outage (validator $other stuck at round $otherBefore for 50s)"
 fi
 start_one_evm_validator "$target" "$validators" "$partition_id" "$rootBoot" fake rpc
 if wait_for 'accepted certificate' 20 "test-nodes/evm$target/debug.log"; then
