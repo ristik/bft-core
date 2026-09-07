@@ -253,7 +253,7 @@ function start_evm_validators() {
 # $5 executor: "fake" or "engine-api"
 # $6 "rpc" (optional) - see start_evm_validators
 function start_one_evm_validator() {
-  local i=$1 n=$2 partitionID=$3 rootBoot=$4 executor=$5 exposeRPC=$6
+  local i=$1 n=$2 partitionID=$3 rootBoot=$4 executor=$5 exposeRPC=${6:-}
   local port=$((evmValidatorPortStart + i - 1))
 
   local bootnodes="$rootBoot"
@@ -271,6 +271,10 @@ function start_one_evm_validator() {
     executorArgs=(--engine-url "$engineURL" --eth-url "$ethURL" --jwt-secret "test-nodes/evm$i/jwt.hex")
   fi
 
+  # Expanded as ${arr[@]+"${arr[@]}"} below, and $6 defaulted above, so this function works under
+  # `set -u`. macOS's /bin/bash 3.2 treats "${empty[@]}" as an unbound variable, which aborted the
+  # function mid-way for a `set -u` caller: the node was never started and nothing said so.
+  # scripts/chaos-evm.sh never hit it because it does not set -u; scripts/reth-chaos.sh does.
   local rpcArgs=()
   if [ "$exposeRPC" == "rpc" ]; then
     rpcArgs=(--rpc-server-address "$(evm_validator_rpc_addr "$i")")
@@ -280,7 +284,8 @@ function start_one_evm_validator() {
     --address "/ip4/127.0.0.1/tcp/$port" --bootnodes "$bootnodes" \
     --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-    --log-format text --log-level info "${executorArgs[@]}" "${rpcArgs[@]}" \
+    --log-format text --log-level info \
+    ${executorArgs[@]+"${executorArgs[@]}"} ${rpcArgs[@]+"${rpcArgs[@]}"} \
     >> "test-nodes/evm$i/debug.log" 2>&1 &
   echo $! > "test-nodes/evm$i/pid"
 }

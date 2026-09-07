@@ -576,6 +576,57 @@ and the root chain's databases. Signing keys are deliberately excluded. Retentio
 **Open, and blocking.** Owner: F2 (#10) for classification, F8 (#16) and root consensus for the
 stall. Per the review, budgets were not raised and no diagnostic was suppressed.
 
+### 5.7 Real-reth workload and fault evidence (F1a #88) — one blocking finding
+
+`scripts/reth-chaos.sh` is the real-execution counterpart to `scripts/chaos-evm.sh`: four pinned
+reth instances, one per validator, driven by the actual Go adapter, with a funded transaction
+workload so recovery is judged by executed blocks and receipts rather than by round counters that
+advance whether or not anything ran. No fake fallback; a wrong client revision fails.
+
+```bash
+./scripts/reth-chaos.sh -v 4 -t 2      # add -F to inject a failure and exercise evidence collection
+```
+
+**What passes.** The pre-fault workload executes and certifies, three to four distinct shard
+leaders produce certified work, and all four clients agree on the canonical head, the sender nonce
+and every receipt. A **shard follower restart with its reth retained** fully recovers: the returning
+node accepts new certificates, its executor applies newly certified blocks, and all four clients
+reconverge on head, nonce and receipts. The shard also keeps certifying with one validator absent,
+and a node whose executor is removed reports it rather than proceeding silently.
+
+**What fails, consistently, and looks like a real defect.** Whenever a validator's *executor* falls
+behind — as opposed to just its shard process — it never catches up, and the shard stops executing
+new transactions from then on:
+
+| Scenario | Result |
+| --- | --- |
+| Follower restart, reth retained | recovers fully |
+| **Leader restart** (reth up but unfed while the shard process was down) | returning node accepts certificates, but its executor never applies the new block; heads, nonce and receipts diverge |
+| **reth-only restart**, datadir retained | returning client never rejoins the canonical head; subsequent transactions are never executed |
+| **Complete shard+reth pair restart** | same, plus the shard stalls while the pair is down |
+
+The shape is the same in all three: the follower case is the one where the executor never missed a
+payload. A shard node delivers blocks to its own client over the Engine API; if the client misses
+those payloads, nothing appears to drive it back to the certified head, and devp2p does not fill the
+gap because the missed blocks were never gossiped as canonical. Once one client is behind, later
+transactions are not executed anywhere.
+
+**Status: this is exposed, not diagnosed.** The run is 24 assertions passing and 21 failing at the
+head this section was written against. Per #88 the harness may land with its failing scenarios
+clearly exposed; the ticket's acceptance stays open until they pass or an explicit fail-closed
+recovery contract is approved. The failures are **not** budget artifacts — several distinct harness
+bugs were found and fixed first (see the commit message), and the remaining pattern is stable across
+runs. Owners: F6 (#14) for the executor recovery contract, F2 (#10) for what a returning node should
+do about a certified head it cannot reach, and F8 (#16), which should treat this as a candidate
+explanation for the unexplained stall rather than a separate issue.
+
+Evidence: every run writes `test-nodes/evidence/` and archives it to
+`test-nodes/reth-chaos-evidence.tar.gz` — per-scenario snapshots of certified cursor, applied
+execution head and persisted certificate, plus all root, shard and reth logs, the shard conf, trust
+base and both genesis files. Signing keys and JWT secrets are excluded by construction and the run
+asserts their absence. The collection path is exercised by real failures, not only by the `-F`
+injection switch.
+
 ### 6.4 Real-reth in CI
 
 Neither `scripts/reth-baseline.sh` nor `scripts/reth-paired-devnet.sh` is wired into the GitHub
