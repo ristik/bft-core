@@ -284,10 +284,20 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 // certified, and r.pending — the in-memory record commitPrevious would
 // normally use — is empty, because it never survives a restart. That does
 // not necessarily mean the certified block is lost: an Executor backed by
-// a persistent store (reth writes a block to disk the moment newPayload
-// succeeds, before any forkchoiceUpdate makes it canonical) may still have
-// it sitting right there, simply never finalized because the process died
-// between submitting the request and processing the confirming UC.
+// a persistent store may still have it sitting right there, simply never
+// finalized because the process died between submitting the request and
+// processing the confirming UC.
+//
+// MEASURED CORRECTION (issue #92 stage 2, scripts/reth-payload-retention.sh).
+// This used to assert that "reth writes a block to disk the moment
+// newPayload succeeds, before any forkchoiceUpdate makes it canonical".
+// Against the pinned client that is true only WITHIN a process lifetime:
+// forkchoiceUpdated to an accepted-but-unfinalised block returns VALID
+// while the client lives, and after a restart with the same datadir the
+// block is gone and forkchoiceUpdated returns SYNCING. So this path
+// recovers a lost in-memory pending record against a live executor; it
+// does not recover a shard-node restart, where the payload has to be
+// re-acquired. See docs/design/f6b-quiet-uc-recovery.md §1.
 //
 // So Commit is retried directly against the root-chain-certified hash
 // before giving up. This is the one place the framework calls Commit with
