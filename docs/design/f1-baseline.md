@@ -304,6 +304,7 @@ against reth `189c0df3` — all checks pass:
 | 4 reth instances on the generated chain spec, statically peered (§5 of `docs/engine-api-adapter.md`) | up |
 | **Doctor preflight negative:** chainId mismatch rejected | `execution client reports chainId=31338, shard conf says 31337` |
 | **Doctor preflight negative:** unreachable Engine API rejected | refused |
+| **Startup negative, the node itself:** `shard-node run` against chainId 31338 | refused, exit 1, before voting |
 | Shard certifies with `--executor engine-api` against real reth | `partitionRound=14 rootRound=67` |
 | Idle rounds are `quiet=true` and reth stays at block 0 | as expected — see §3.3 |
 | A funded transaction is executed and certified | reth block 1, `status=0x1`, `gasUsed=0x5208` |
@@ -341,7 +342,8 @@ negotiation.
 | Our own builder's gas limit needs `--builder.gaslimit` in deployment config (D-2, part 1 — a standard flag, no client change) | §4.3, `reth-baseline.sh` control B | F5 (#13) |
 | No evidence that a follower rejects a peer block carrying a different gas limit / over-capacity (D-2, part 2 — the part that may need a validity rule) | §4.3 | F5 (#13), F3 (#11) |
 | Adapter integration is exercised by one transaction through one leader; no load, fault injection or mixed cadence against real reth | §5.6 | F8 (#16) |
-| Mismatch negatives cover chainId and an unreachable endpoint, not a differing Engine API version set | §5.6 | F3 (#11) |
+| Startup enforces chain id but not genesis *state*: two chain specs can share an id and differ elsewhere, so cross-validator genesis-hash comparison is still an operator step | §5.5 | F1 records; operator procedure |
+| No negative for a client speaking a differing Engine API capability set (needs a second reth build) | §5.6 | F3 (#11) |
 | Two `l1` commits unmerged; consistency-proof fixtures not retained | §3.2 | F8 (#16) |
 | FFI CI lane disabled (`if: false`) | §5.2 | F8 (#16) |
 | `rootchain/consensus` `Test_recoverState`, `Test_rootNetworkRunning`, `Test_ConsensusManager_messages` fail on a slow/loaded host: they assert round progress against wall-clock deadlines and reach only rounds 2–3 within them. Pass in CI (run 34102642015 attempt 2) and fail reproducibly on the F1 development host, in isolation as well as in the full suite. Not a protocol defect; a test-harness timing assumption. | §5.1 | F1 records; retest under F8 (#16)'s fixture work |
@@ -592,12 +594,18 @@ obligations below stay open on #9 with named owners rather than being reassigned
   fault injection against real reth (`scripts/chaos-evm.sh` is still fake-executor only), and only
   one transaction through one leader (§5.6). Mixed cadence and multiple partitions are F8 (#16);
   the rest stays open on #9.
-- **Mismatch detection before voting:** §5.5 demonstrates two real negatives (chainId mismatch, an
-  unreachable Engine API), both rejected by `shard-node doctor`. This is preflight evidence, not a test that
-  `shard-node run` enforces chain identity before voting: startup currently calls
-  `CheckCapabilities`, while the chain-ID check is in doctor. F1 adds no new detection
-  mechanism. An automatic startup chain/spec-mismatch rejection and a differing Engine API
-  capability-set negative remain open on #9, with F3 (#11) as integration owner.
+- **Mismatch detection before voting:** now enforced by the node itself, not only by preflight.
+  `shard-node run` calls `Adapter.CheckChainID` alongside `CheckCapabilities` and refuses to start
+  when the execution client's `eth_chainId` disagrees with the shard conf's `chain_id` param. This
+  closes the gap the previous revision recorded honestly: capability exchange cannot tell one chain
+  from another — the V3 method set is identical — so a node pointed at the wrong client used to
+  start and certify against the wrong state, with only the optional `doctor` able to catch it.
+  `doctor` now calls the same method, so the two cannot drift. §5.5 records all three negatives,
+  including a live run of the real binary exiting 1.
+  **Still open on #9:** a differing Engine API *capability set* negative, which needs a second reth
+  build to test against and is meaningful only alongside F3 (#11)'s version negotiation; and
+  matching genesis *state* across validators, which chain id does not establish — two chain specs
+  can share an id and differ elsewhere, so comparing genesis hashes remains an operator step.
 - **The `l1` merge** (§3.2) is not done; F8 (#16) owns it.
 - **Cross-client execution fixtures** go to their implementation owners, and real UC / config / TR /
   transition derivation fixtures go to F2 (#10), per the D2 handoff.

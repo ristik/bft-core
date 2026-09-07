@@ -166,6 +166,42 @@ else
   fail "unreachable Engine API not detected; doctor said: $(echo "$capOut" | tail -3)"
 fi
 
+# 3c. THE NODE ITSELF, not doctor. The two checks above are preflight: an operator has to
+# remember to run them. F1 (#9) requires `shard-node run` to refuse a spec mismatch before it
+# can vote, which it now does — capability exchange cannot tell one chain from another, so
+# without this a node pointed at the wrong execution client starts and certifies against the
+# wrong state. This drives the real binary and asserts a nonzero exit.
+mkdir -p test-nodes/reth-wrongchain
+python3 - <<'PYGEN'
+import json
+g = json.load(open("test-nodes/evm-genesis-funded.json"))
+g["config"]["chainId"] = 31338
+json.dump(g, open("test-nodes/wrong-chain-genesis.json", "w"))
+PYGEN
+reth node --chain test-nodes/wrong-chain-genesis.json --datadir test-nodes/reth-wrongchain/dd \
+  --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18751 \
+  --http --http.addr 127.0.0.1 --http.port 18745 --http.api eth,net,web3 \
+  --port 30599 --disable-discovery --ipcdisable \
+  >test-nodes/reth-wrongchain/reth.log 2>&1 &
+echo $! >test-nodes/reth-wrongchain/pid
+for _ in $(seq 1 60); do
+  rpc http://127.0.0.1:18745 eth_chainId '[]' 2>/dev/null | grep -q result && break
+  sleep 1
+done
+runOut=$(build/ubft shard-node run --home test-nodes/evm1 --executor engine-api \
+  --address /ip4/127.0.0.1/tcp/28001 --trust-base test-nodes/trust-base.json \
+  --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
+  --engine-url http://127.0.0.1:18751 --eth-url http://127.0.0.1:18745 \
+  --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info 2>&1)
+runStatus=$?
+if [ "$runStatus" -ne 0 ] && echo "$runOut" | grep -q 'startup chain-identity check' &&
+   echo "$runOut" | grep -q 'chainId=31338, shard conf says 31337'; then
+  pass "shard-node run itself refused to start against chainId 31338 (exit $runStatus), before voting"
+else
+  fail "shard-node run did not refuse the wrong chain (exit $runStatus): $(echo "$runOut" | tail -3)"
+fi
+kill "$(cat test-nodes/reth-wrongchain/pid)" 2>/dev/null; rm -f test-nodes/reth-wrongchain/pid
+
 echo
 echo "=== 4. start the root chain and the shard validators on --executor engine-api ==="
 source helper.sh
