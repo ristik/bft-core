@@ -142,11 +142,13 @@ invalid **regardless of whether its Ethereum payload executes**:
 | 4 | `context_mismatch` | `rootInput`'s network/partition/shard, authorized round and parent hash equal the block header context |
 | 5 | `extradata_mismatch` | `header.extraData == SHA-256(CBOR(canonical rootInput))` |
 | 6 | `tx_list_shape` | non-negative `OrdinaryTxCount` / `ForcedTxCount` |
+| 6a | `forced_tx_count_mismatch` | `ForcedTxCount` equals the number of forced entries valid at their turn (each is an ordinary tx in the receipt trie — a builder cannot drop or invent one) |
+| 6b | `forced_declared_over_g_fi` | every forced entry's `DeclaredGas ≤ g_fi` (the D5 admission invariant) |
 | 7 | `system_*` | the FIRST privileged operation (§1) — presence-only, no forced-outcome input |
 | 8 | `seal_finalize_missing` / `seal_registry_commitment_mismatch` | a post-forced-prefix `FinalizeStep` is present and ordered after the whole prefix; its `Committed` and the seal-registry storage value both `== SHA-256(CBOR(DerivedSealOutcomes))` — the outcomes determined **at each forced entry's turn** (§3). Checked via `eth_getProof` against `stateRoot`, not a header field |
 | 9 | `base_fee_below_floor` / `withdrawals_nonempty` / `blob_tx_present` | §4 |
-| 10 | `gas_split_unreconciled` | `reconcileWork` — `Work.System == SystemCall.GasUsed + Finalize.GasUsed` (overflow-checked) and `Work.Forced == turn-rejected count * RejectedConsumptionGas` |
-| 11 | `gas_budget` | §3 — `CheckGas` on the **derived** work: combined `g_sys` cap on `open + finalize`, `g_fi` cap, ordinary capacity, `g_max` |
+| 10 | `gas_split_unreconciled` | `reconcileWork` — `Work.System == SystemCall.GasUsed + Finalize.GasUsed`, `Work.Forced == Σ ExecGas(valid prefix) + turn-rejected count * RejectedConsumptionGas`, every `ExecGas ≤ DeclaredGas`, a turn-rejected entry carries no `ExecGas` (all overflow-checked) |
+| 11 | `gas_budget` | §3 — `CheckGas` on the **derived** work: combined `g_sys` cap on `open + finalize`, `g_fi` cap on `g_forced_actual` (executed valid prefix + rejected charges), `g_ordinary_capacity` on `DiscretionaryGasUsed`, `g_max` on the total |
 
 `rootInput = []byte{0x80}` (or any blob) never reaches step 5: it is not a
 structured `RootInput`, and step 2 fails first.
@@ -189,7 +191,8 @@ Two quantities that implementations routinely conflate are kept distinct:
 
 Rationale: the system operation and the forced-inclusion prefix are
 protocol-mandated work, not a congestion signal. Counting them toward the
-base-fee target would push fees up purely because the protocol did its job.
+base-fee target would push fees up purely because the protocol did its job — and
+that includes the gas an admitted forced transaction consumes.
 
 ### Budgets
 
@@ -197,24 +200,46 @@ base-fee target would push fees up purely because the protocol did its job.
 g_sys + g_fi + g_ordinary_capacity = g_max          (exact; g_max is the header gas limit)
 g_ordinary_capacity = g_max - g_sys - g_fi
 
-g_system_actual   = SystemCall.GasUsed + Finalize.GasUsed   (DERIVED; overflow-checked) <= g_sys
-g_forced_actual   = (# forced entries invalid at their turn) * RejectedConsumptionGas   <= g_fi
-g_ordinary_actual = the transaction-list cumulative gas (incl. successful forced txs)   <= g_ordinary_capacity
+g_system_actual   = SystemCall.GasUsed + Finalize.GasUsed                       (DERIVED; overflow-checked) <= g_sys
+g_forced_actual   = Σ ExecGas over forced entries VALID at their turn (a valid
+                    entry that EVM-reverts still consumed its gas here)
+                  + (# entries INVALID at their turn) * RejectedConsumptionGas  (DERIVED; overflow-checked) <= g_fi
+g_ordinary_actual = DiscretionaryGasUsed — the Σ receipt gasUsed of the
+                    NON-forced transactions only                               (DERIVED)                   <= g_ordinary_capacity
 header.gasUsed    = g_system_actual + g_forced_actual + g_ordinary_actual
 ```
 
-`g_system_actual` and `g_forced_actual` are **not** taken from a caller-supplied
-`BlockWork` total: `ValidateImport` (`reconcileWork`) derives them from the two
-executed privileged steps and the turn-determined rejection set, and rejects
-(`gas_split_unreconciled`) any `Work.System` / `Work.Forced` that does not match —
-so an independently supplied total cannot hide a finalizer that exceeds the
-budget, and cannot break the `g_sys` / `g_fi` split. The combined `g_sys` cap is
-then checked against the derived `g_system_actual` (`gas_budget`). Ordinary-gas
-recovery nets out **both** `g_sys` steps:
+**A forced transaction's execution gas is `g_forced_actual`, drawn from the
+reserved `g_fi` budget — never `g_ordinary_actual`.** A forced entry valid at its
+turn stays an ordinary transaction in `transactionsRoot` / `receiptsRoot` with a
+standard receipt (whether it then succeeds or EVM-reverts — a reverted forced tx
+is a `status 0` receipt, not a rejection record); only its *gas-accounting bucket*
+differs. This is what makes the D5 reservation real: a forced tx the inbox
+admitted (`declaredGas ≤ g_fi`, D5 §4) is includable **regardless of
+discretionary demand** — it cannot be starved by user transactions filling
+`g_ordinary_capacity` — and its gas never moves the base fee. Charging it to
+ordinary capacity (the fifth-review model) let a valid 9M forced transaction be
+rejected under a 20M `g_fi` / 8M ordinary-capacity profile with an otherwise
+empty block; that is fixed.
+
+`ValidateImport` (`reconcileWork`) **derives every bucket** from block content —
+the two executed privileged steps, the per-entry `ExecGas` of the re-executed
+valid forced prefix, the turn-determined rejection set, and `DiscretionaryGasUsed`
+— with overflow-safe `math/bits` arithmetic. It reconciles the builder's claimed
+`Work.System` / `Work.Forced` and rejects a mismatch (`gas_split_unreconciled`);
+`Work.Ordinary` is advisory (the authoritative value is `DiscretionaryGasUsed`).
+Per valid entry `ExecGas ≤ DeclaredGas`, and D5's `DeclaredGas ≤ g_fi`
+(`forced_declared_over_g_fi`). The count of forced txs in the receipt trie must
+equal the turn-valid set (`forced_tx_count_mismatch`), so an admitted forced tx
+cannot be silently dropped. `CheckGas` then caps the derived work: combined
+`g_sys` on `open + finalize`, `g_fi` on `g_forced_actual`, ordinary capacity on
+`g_ordinary_actual`, `g_max` on the total. Ordinary-gas recovery nets out **both**
+`g_sys` steps **and the full `g_forced_actual`**:
 `RecoverOrdinaryGas(header.gasUsed, SystemCall.GasUsed + Finalize.GasUsed, g_forced_actual)`.
 
 `g_fi = 0` until the forced inbox is enabled; the split still closes, and with no
-forced prefix `Finalize.GasUsed` may be 0 (`g_system_actual = SystemCall.GasUsed`).
+forced prefix `Finalize.GasUsed` may be 0 (`g_system_actual = SystemCall.GasUsed`,
+`g_forced_actual = 0`).
 
 ### EIP-1559 — exact integer arithmetic
 
@@ -294,11 +319,13 @@ Ethereum transaction:
     and checks both `FinalizeStep.Committed` and the storage value equal the
     re-derived commitment. Build / import / replay all run
     open → prefix → finalize in that order.
-- **`header.gasUsed`** is the standard cumulative gas over the transaction list
-  (now including successful forced txs) **plus** the seal call's `g_sys` work
-  (open **and** finalize) **plus** the `g_fi` consumption charge for rejected
-  entries. It is **not** "entirely unchanged" versus a vanilla block. It stays
-  recoverable (`RecoverOrdinaryGas(header.gasUsed − g_sys − rejectedConsumption)`).
+- **`header.gasUsed`** = `g_ordinary_actual` (the **discretionary** transaction
+  receipt gas) **plus** the seal call's `g_sys` work (open **and** finalize)
+  **plus** `g_forced_actual` (the executed valid forced prefix **and** the `g_fi`
+  consumption charge for rejected entries). A valid forced tx's receipt gas is
+  counted **once**, in `g_forced_actual`. It is **not** "entirely unchanged"
+  versus a vanilla block, and it stays recoverable
+  (`RecoverOrdinaryGas(header.gasUsed − (open + finalize) − g_forced_actual)`).
 - **Lookup / proof.** A successful forced (or discretionary) transaction:
   standard receipts-trie / log proof. The system ops and rejection records:
   `eth_getProof` on the seal-registry contract slot against `stateRoot`. Both are
@@ -307,10 +334,25 @@ Ethereum transaction:
   its turn) spends alice's balance so entry 2 (valid at *admission*) is invalid
   at *its* turn; the rejection set is `determined_only_at_turn_not_admission` and
   the commitment is `written_by_post_prefix_finalization`; entry 1 is an ordinary
-  tx in the receipt trie. `import_checks` `seal_finalize_missing`,
-  `seal_finalize_not_after_prefix`, `finalize_wrong_commitment`,
-  `seal_registry_commitment_mismatch`; `TestD2_SealOutcomeListSeparateFromTxList`,
-  `TestD2_ForcedPrefixOutcomesDeterminedAtTurn`.
+  tx in the receipt trie and its `ExecGas` is charged to `g_forced_actual`.
+  `forced_prefix_accounting` — a **mixed** prefix (one entry succeeds, one is
+  valid-at-turn but EVM-reverts, one is invalid at its turn): both valid entries
+  charge `ExecGas` to `g_forced_actual` against `g_fi`, `g_ordinary_actual` is the
+  discretionary receipt gas only, the header gas closes exactly, base-fee
+  recovery ignores the forced work, and the 8M of executed forced gas exceeds the
+  8M ordinary capacity — proving the reserved budget is what makes an admitted
+  forced tx includable (the 9M/20M/8M counterexample).  `import_checks`
+  `seal_finalize_missing`, `seal_finalize_not_after_prefix`,
+  `finalize_wrong_commitment`, `seal_registry_commitment_mismatch`,
+  `forced_prefix_uses_reserved_capacity`, `reverted_forced_tx_uses_reserved_capacity`,
+  `forced_prefix_over_g_fi`, `forced_declared_over_g_fi`,
+  `forced_gas_charged_to_discretionary`, `forced_exec_over_declared`,
+  `forced_tx_count_drops_admitted_entry`, `rejected_entry_carries_exec_gas`;
+  `TestD2_SealOutcomeListSeparateFromTxList`,
+  `TestD2_ForcedPrefixOutcomesDeterminedAtTurn`,
+  `TestD2_ForcedPrefixGasUsesReservedBudget`,
+  `TestD2_ForcedTxCountMustMatchTurnValidSet`,
+  `TestReview6SuccessfulForcedPrefixUsesReservedCapacity`.
 
 ### Worked build → import → replay example (`gas_accounting` vector)
 
@@ -323,22 +365,47 @@ build:   engine_forkchoiceUpdatedWithSealV1(fc, attrs, {rootInput, transitions:[
          -> forced prefix empty (g_fi 0)             g_forced_actual         0
          -> FinalizeStep writes sealRegistryCommitment over {system}
             into seal-registry contract storage;     g_sys FINALIZE work    20_000
-         -> ordinary + successful-forced txs fill to cumulative gasUsed 15_000_000
+         -> discretionary txs fill to receipt gasUsed  DiscretionaryGasUsed 15_000_000
          g_system_actual = 1_780_000 + 20_000 = 1_800_000  (DERIVED; <= g_sys 2_000_000)
          header.gasUsed  = 1_800_000 + 0 + 15_000_000 = 16_800_000
          header.extraData = SHA-256(CBOR(rootInput))
          getPayloadWithSealV1 -> { payload, sealCompanion:{rootInput, witnesses, provenance:"build"} }
 import:  engine_newPayloadWithSealV1(payload, [], beaconRoot, sealCompanion)
-         reconcileWork re-derives g_system_actual (open + finalize) and
-         g_forced_actual (turn-rejected count * charge); a mismatched
+         reconcileWork re-derives g_system_actual (open + finalize),
+         g_forced_actual (Σ ExecGas of the valid prefix + turn-rejected count *
+         charge) and g_ordinary_actual (DiscretionaryGasUsed); a mismatched
          Work.System / Work.Forced is rejected (gas_split_unreconciled);
-         CheckGas enforces the g_sys cap on the DERIVED sum; reth re-executes
-         -> same stateRoot/blockHash -> VALID
+         CheckGas enforces the g_sys / g_fi caps on the DERIVED buckets; reth
+         re-executes -> same stateRoot/blockHash -> VALID
 replay:  recovered ordinary gas = 16_800_000 - (1_780_000 + 20_000) - 0 = 15_000_000
          parent_base_fee 1_000_000_000
          numerator = 15_000_000 - 14_000_000 = 1_000_000
          delta = floor(1e9 * 1_000_000 / 14_000_000) / 8 = floor(71_428_571 / 8) = 8_928_571
          next_base_fee = 1_008_928_571   (>= 7, <= 2^62)
+```
+
+### Reserved forced-inclusion budget example (`forced_prefix_accounting` vector)
+
+```
+config:  g_max 30_000_000   g_sys 2_000_000   g_fi 20_000_000
+         g_ordinary_capacity 8_000_000   ordinary_target 4_000_000
+prefix:  entry A  valid at its turn, succeeds       DeclaredGas 4M  ExecGas 3_000_000
+         entry B  valid at its turn, EVM-reverts    DeclaredGas 6M  ExecGas 5_000_000
+         entry C  invalid at its turn (poison)      consumed for       21_000
+         A and B are ordinary txs in transactionsRoot / receiptsRoot (B is a
+         status-0 receipt); C is a rejection record, off-trie.
+build:   g_system_actual   = 1_500_000 open + 30_000 finalize = 1_530_000   (<= g_sys)
+         g_forced_actual   = 3_000_000 + 5_000_000 + 21_000   = 8_021_000   (DERIVED; <= g_fi 20_000_000)
+         g_ordinary_actual = DiscretionaryGasUsed (non-forced receipts)      = 4_000_000  (<= 8_000_000)
+         header.gasUsed    = 1_530_000 + 8_021_000 + 4_000_000 = 13_551_000
+import:  reconcileWork derives all three buckets; ForcedTxCount (2) == turn-valid
+         set; every DeclaredGas <= g_fi; CheckGas caps g_forced_actual at g_fi.
+replay:  recovered ordinary gas = 13_551_000 - (1_500_000 + 30_000) - 8_021_000 = 4_000_000
+         base fee: g_ordinary_actual 4_000_000 == ordinary_target -> unchanged.
+         The 8_000_000 of executed forced gas alone exceeds g_ordinary_capacity
+         (8_000_000) once any discretionary demand is present: charging it there
+         (the fifth-review model) would make an admitted forced tx unincludable.
+         Against the reserved g_fi it fits, and it does not move the base fee.
 ```
 
 ## 3a. Deviation inventory (minimal-divergence review)
@@ -352,7 +419,8 @@ or amends this table before D2 freezes.
 | 1 | Privileged **system call** (`a_sys → a_sr`, no key/nonce, first, failure ⇒ invalid block) | a genesis pre-deploy that a normal transaction pokes each block | a normal transaction needs a funded EOA + nonce, can be reordered or censored, and cannot be *mandatory*; the authenticated root input must be un-forgeable and un-replayable | the one privileged origin; import validation predicates | `import_checks` `system_*`; `TestD2_SystemCallMustBeFirstAndValid` |
 | 2 | **`extraData` = 32-byte `SHA-256(CBOR(rootInput))`** commitment | put the root input in a standard payload attribute | V3 `PayloadAttributesV3` has no field for it and it must be in the *header* so it is covered by the block hash; witnesses do not fit in `extraData` | 32 bytes of header; the D1 encoder | D1 vectors + `TestExtraData_IndependentOracle` |
 | 3 | **`sealRegistryCommitment` in seal-registry contract storage**, written by a **post-forced-prefix `FinalizeStep`** (system op + rejection records only); successful forced txs stay ordinary | (a) synthetic receipts in `receiptsRoot`; (b) a new `sealOutcomeRoot` header field; (c) the first system call writes it | (a) changes Ethereum receipt semantics; (b) a new header field expands every client's header/import/RPC surface, needs a normative RLP position + block-hash derivation, and `extraData` does **not** cover it; (c) a prior valid forced tx changes a later entry's pre-state, so the outcome set is not knowable before the prefix runs — and a future-outcome input to the first call is contract-readable. A **contract-state value** written at finalization reuses the authenticated `stateRoot` + `eth_getProof` path — the *smallest* change; successful forced txs keep the standard receipt/log proof. | a known contract + slot; the CBOR list encoder; a `g_sys` sub-budget for the finalize step (derived, capped against the combined `g_sys`); `header.gasUsed` includes both `g_sys` steps | `seal_outcome_list` (sequential prefix); `gas_accounting` (open + finalize split, reconciles, closes); `TestD2_SealOutcomeListSeparateFromTxList`, `TestD2_ForcedPrefixOutcomesDeterminedAtTurn`, `TestD2_FinalizerGasBoundToBudget` |
-| 4 | **Ordinary-only EIP-1559 feedback** (`g_sys`, `g_fi` excluded from the base-fee target) | feed total `gasUsed` into the London formula | protocol-mandated gas is not a demand signal; including it raises fees purely because the protocol ran | `NextBaseFee` + `RecoverOrdinaryGas` | `TestD2_BaseFeeUpdateExcludesSystemAndForcedGas`, `base_fee_arithmetic_oracle` |
+| 4 | **Ordinary-only EIP-1559 feedback** (`g_sys` **and** `g_fi` — including a valid forced tx's execution gas — excluded from the base-fee target) | feed total `gasUsed`, or discretionary + forced, into the London formula | protocol-mandated gas is not a demand signal; including it raises fees purely because the protocol ran or because someone forced a transaction in | `NextBaseFee` + `RecoverOrdinaryGas` (nets out `g_forced_actual`) | `TestD2_BaseFeeUpdateExcludesSystemAndForcedGas`, `TestD2_ForcedPrefixGasUsesReservedBudget`, `forced_prefix_accounting`, `base_fee_arithmetic_oracle` |
+| 4a | **Forced-tx execution gas charged to `g_forced_actual` / `g_fi`, not ordinary capacity** | count a successful forced tx's receipt gas in `g_ordinary_actual` like any other tx (fifth-review model) | with `g_fi` then only consumed by *rejected* entries, discretionary demand filling `g_ordinary_capacity` could permanently exclude a forced tx the D5 inbox admitted (`declaredGas ≤ g_fi`) — the reservation protected nothing it was for (9M forced / 20M `g_fi` / 8M ordinary capacity, empty block ⇒ rejected) | `reconcileWork` (per-entry `ExecGas`, `DiscretionaryGasUsed`); the `g_fi` cap; `ForcedTxCount` ↔ turn-valid set | `forced_prefix_accounting`; `import_checks` `forced_prefix_uses_reserved_capacity`, `reverted_forced_tx_uses_reserved_capacity`, `forced_prefix_over_g_fi`, `forced_declared_over_g_fi`, `forced_gas_charged_to_discretionary`, `forced_exec_over_declared`, `forced_tx_count_drops_admitted_entry`, `rejected_entry_carries_exec_gas`; `TestD2_ForcedPrefixGasUsesReservedBudget`, `TestD2_ForcedTxCountMustMatchTurnValidSet`, `TestReview6SuccessfulForcedPrefixUsesReservedCapacity` |
 | 5 | **Positive base-fee floor** `f_base^min` as a validity rule | genesis initial base fee only | a floor that is only a genesis value can be driven to 0 by sustained under-target blocks, breaking fee-market and DoS assumptions | one comparison per block | `import_checks.base_fee_below_floor` |
 | 6 | **Three `engine_*WithSealV1` siblings** (fcU / newPayload / getPayload) | a single new method, or overload existing V3 params | build needs `{rootInput, transitions}` in the fcU→getPayload flow; import needs the full witness set in newPayload; getPayload must return the companion for dissemination — the three flows carry different data | the Engine API surface (JWT-authenticated) | capability check in `engineapi/adapter.go`; negative auth fixtures |
 | 7 | **Companion retention + archival serving** | rely on devp2p re-gossip | historical import and proof export need the witness after gossip has aged out; a retention horizon is published so this is a bounded obligation, not "keep everything forever" | node storage policy | D6 §"proof export"; retention-horizon vector (F7) |
@@ -393,8 +461,9 @@ state, and `header.gasUsed` transparently includes the mandated `g_sys` work.
 | verify the real certificate, not a new signature; transition contents are authenticated | §2 "authentication lifecycle" — `VerifyCompanionWitnesses` consumes D1's `VerifiedCert` (real `UnicitySeal.Verify` + quorum + inclusion paths, mapped in `TestD2_CertificateBoundaryFixtures`) via `ValidateBoundCertificate`, checks **TE↔TRHash**, and requires `ri.Transitions` to equal the authenticated `ExpectedTransitions` byte-for-byte, position by position; negatives `cert_not_verified`, `cert_wrong_origin`, `cert_wrong_authorized_round`, `cert_stale_root_round`, `transition_inserted_body`, `transition_substituted_body`, `witness_te_not_bound_to_trhash`; `TestD2_AuthenticationBoundary`, `TestD2_CertificateBoundaryFixtures` |
 | the first privileged op cannot know the rejection outcomes it commits | §3 "Block semantics" — the first system call is presence-only; a post-forced-prefix `FinalizeStep` (gas-charged) writes `sealRegistryCommitment` over the turn-determined outcomes; `seal_outcome_list` shows entry 1 changing whether entry 2 is valid at its turn; `import_checks` `seal_finalize_missing`, `seal_finalize_not_after_prefix`, `finalize_wrong_commitment`; `TestD2_ForcedPrefixOutcomesDeterminedAtTurn` |
 | A gas accounting vector closes exactly, with the finalizer gas bound to the budget | `gas_accounting` (`system_open_gas` + `system_finalize_gas` = derived `system_gas`; `work_split_reconciles`, `system_within_g_sys`, `closes_exactly` all true); §3 "Budgets" + worked example; `reconcileWork` derives `Work.System` / `Work.Forced` and rejects a mismatch (`gas_split_unreconciled`), `CheckGas` caps the derived combined `g_sys`; `import_checks` `finalizer_gas_hidden_from_work`, `work_system_mismatch`, `work_forced_mismatch`, `combined_system_over_g_sys`, `system_plus_finalize_overflow`; `TestD2_FinalizerGasBoundToBudget`, `TestD2_GasBudgetInvariant`, `TestD2_HeaderGasUsedIsTheSum` |
+| the reserved forced-inclusion budget actually protects an admitted forced tx; a mixed success/revert/rejected prefix closes | §3 "Budgets" + "Reserved forced-inclusion budget example"; deviation 4a; `reconcileWork` charges each valid entry's `ExecGas` (success **or** EVM-revert) to `g_forced_actual` / `g_fi` and derives `g_ordinary_actual` from `DiscretionaryGasUsed` only; `forced_prefix_accounting` vector (`work_split_reconciles`, `header_gas_closes_exactly`, `base_fee_ignores_forced_gas`, `nine_million_forced_tx_fits_with_ordinary_full` all true); `import_checks` `forced_prefix_uses_reserved_capacity`, `reverted_forced_tx_uses_reserved_capacity`, `forced_prefix_over_g_fi`, `forced_declared_over_g_fi`, `forced_gas_charged_to_discretionary`, `forced_tx_count_drops_admitted_entry`; `TestD2_ForcedPrefixGasUsesReservedBudget`, `TestD2_ForcedTxCountMustMatchTurnValidSet`, `TestReview6SuccessfulForcedPrefixUsesReservedCapacity` |
 | the frozen fee arithmetic stays exact for representable values | `NextBaseFee` via 128-bit `mulDivFloor`; `base_fee_arithmetic_oracle` (big.Int cross-check incl. parent `10^13`); `ExecConfig.Valid()`; `TestD2_NextBaseFeeNoOverflow`, `TestD2_ConfigValidation` |
-| receipt indexing / block semantics resolved, standard execution-evidence path preserved | §3 "Block semantics" — a **successful forced tx is an ordinary tx** in `transactionsRoot`/`receiptsRoot` with a standard receipt (logs/bloom exported normally); only the system ops + `forced_rejected` records are off-trie, committed by a **seal-registry contract-state value** authenticated by `stateRoot` (`eth_getProof`), **no header field**; `header.gasUsed` transparently includes both `g_sys` steps; vector `seal_outcome_list`; `import_checks` `seal_finalize_missing`, `finalize_wrong_commitment`, `seal_registry_commitment_mismatch`; `TestD2_SealOutcomeListSeparateFromTxList` |
+| receipt indexing / block semantics resolved, standard execution-evidence path preserved | §3 "Block semantics" — a **forced tx valid at its turn is an ordinary tx** in `transactionsRoot`/`receiptsRoot` with a standard receipt (logs/bloom exported normally; a reverted one is a `status 0` receipt), its **execution gas charged to `g_forced_actual` / `g_fi`** not ordinary capacity; only the system ops + `forced_rejected` records are off-trie, committed by a **seal-registry contract-state value** authenticated by `stateRoot` (`eth_getProof`), **no header field**; `header.gasUsed` transparently includes both `g_sys` steps and `g_forced_actual`; vectors `seal_outcome_list`, `forced_prefix_accounting`; `import_checks` `seal_finalize_missing`, `finalize_wrong_commitment`, `seal_registry_commitment_mismatch`; `TestD2_SealOutcomeListSeparateFromTxList` |
 | an intrinsically invalid forced entry is not an EVM revert | §3 — `kind = forced_rejected` with an authenticated `reason` and `status 0`, never in the transaction list; `seal_outcome_list.poison_entry_is_a_rejection_record_not_an_evm_revert` |
 | positive base-fee floor as a validity rule | §3; `import_checks.base_fee_below_floor`; `TestD2_BaseFeeClampsToPositiveFloor` |
 | empty withdrawals, blobs disabled | §4; `import_checks.withdrawals_nonempty`, `import_checks.blob_tx_present` |

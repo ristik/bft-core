@@ -13,23 +13,30 @@ import (
 //
 // Third-review revision — minimal client divergence:
 //
-//   - A SUCCESSFUL forced-inclusion transaction IS an ordinary Ethereum
-//     transaction. It sits in `transactionsRoot` / `receiptsRoot` with a
-//     standard receipt (logs, bloom, cumulative gas), so its events export
-//     through the normal receipt proof. No divergence.
+//   - A forced-inclusion transaction that is VALID at its turn IS an ordinary
+//     Ethereum transaction — whether it then succeeds or EVM-reverts. It sits
+//     in `transactionsRoot` / `receiptsRoot` with a standard receipt (logs,
+//     bloom, cumulative gas), so its events export through the normal receipt
+//     proof. No receipt-encoding divergence.
+//   - Its EXECUTION GAS is charged to the reserved `g_fi` budget
+//     (`Work.Forced`), NOT to ordinary capacity: a forced tx the D5 inbox
+//     admitted (`declaredGas <= g_fi`) stays includable no matter how much
+//     discretionary demand there is, and its gas never moves the EIP-1559
+//     base fee. Ordinary gas (`Work.Ordinary`) is the receipt gas of the
+//     NON-forced transactions only (`DiscretionaryGasUsed`).
 //   - Only two things cannot be ordinary transactions: the privileged seal
-//     call (no fee payer, no signature) and a REJECTED forced-inbox entry
-//     (an authenticated rejection record — not an EVM transaction, so it
-//     has no receipt). These are committed by a value the system call
-//     writes into the seal-registry contract's storage — the
-//     `sealRegistryCommitment` — which is already covered by the block's
-//     `stateRoot` and provable via `eth_getProof`. There is NO new header
-//     field. `extraData` (D1) hashes only the rootInput and never claimed
-//     to cover these.
-//   - `header.gasUsed` is the standard cumulative gas over the transaction
-//     list (now including successful forced txs) PLUS the seal call's
-//     `g_sys` work. It is NOT "entirely unchanged"; it includes the
-//     system-call gas, which is bounded by `g_sys` and recoverable.
+//     call (no fee payer, no signature) and a forced-inbox entry INVALID at
+//     its turn (an authenticated rejection record — not an EVM transaction,
+//     so it has no receipt; it is consumed for `RejectedConsumptionGas`).
+//     These are committed by a value the FinalizeStep writes into the
+//     seal-registry contract's storage — the `sealRegistryCommitment` —
+//     already covered by the block's `stateRoot` and provable via
+//     `eth_getProof`. There is NO new header field. `extraData` (D1) hashes
+//     only the rootInput and never claimed to cover these.
+//   - `header.gasUsed` = `g_system_actual` (open + finalize) + `g_forced_actual`
+//     (executed valid prefix + rejected-entry charges) + `g_ordinary_actual`
+//     (discretionary receipt gas). It is NOT "entirely unchanged"; every
+//     bucket is DERIVED by `reconcileWork` and recoverable.
 //
 // Normative source: docs/design/d2-reth-system-call-fee-profile.md §3.
 
@@ -74,10 +81,13 @@ type FinalizeStep struct {
 // Whether it is valid is decided AT ITS TURN, against the running pre-state
 // the earlier prefix entries left — never at admission.
 type ForcedEntry struct {
-	Sender     string
-	ValueDelta int64  // net balance effect if it executes (negative = a spend)
-	Reason     string // the rejection reason it carries if invalid at its turn
-	Digest     []byte // 32-byte canonical-payload digest
+	Sender      string
+	ValueDelta  int64  // net balance effect if it executes (negative = a spend)
+	DeclaredGas uint64 // the D5 admission limit this entry booked; declaredGas <= g_fi. The reserved g_fi capacity it holds.
+	ExecGas     uint64 // gas consumed at its turn if VALID at its turn (<= DeclaredGas), whether it succeeds or EVM-reverts. MUST be 0 for an entry invalid at its turn (that entry is charged RejectedConsumptionGas instead).
+	Reverted    bool   // metadata: a turn-valid entry whose EVM execution reverted. Still an ordinary receipt (status 0) in the receipt trie; still charges ExecGas to g_fi.
+	Reason      string // the rejection reason it carries if invalid at its turn
+	Digest      []byte // 32-byte canonical-payload digest
 }
 
 // evalForcedPrefix walks the FIFO prefix against starting balances and
@@ -317,6 +327,14 @@ type SealBlock struct {
 	ForcedStartBalance     map[string]int64
 	RejectedConsumptionGas uint64
 
+	// DiscretionaryGasUsed is the Σ receipt gasUsed of the NON-forced
+	// (discretionary) transactions only — the authenticated value a
+	// re-executor sums from receipts. reconcileWork takes g_ordinary_actual
+	// from here; a valid forced tx's gas is g_forced_actual (charged against
+	// the reserved g_fi budget), never ordinary capacity. b.Work.Ordinary is
+	// only the builder's advisory claim and is not consulted for validation.
+	DiscretionaryGasUsed uint64
+
 	SystemCall SystemCall   // the presence-only open step (first)
 	Finalize   FinalizeStep // the post-prefix commitment write
 
@@ -381,6 +399,28 @@ func ValidateImport(b SealBlock, cfg ExecConfig) ImportResult {
 		return reject("tx_list_shape", "negative transaction count")
 	}
 
+	// Every forced entry valid at its turn is an ordinary tx in the receipt
+	// trie (whether it then succeeds or EVM-reverts). A builder cannot drop
+	// one the D5 inbox admitted, nor claim extra ones.
+	turnValid := 0
+	for _, ok := range evalForcedPrefix(b.ForcedPrefix, b.ForcedStartBalance) {
+		if ok {
+			turnValid++
+		}
+	}
+	if b.ForcedTxCount != turnValid {
+		return reject("forced_tx_count_mismatch",
+			fmt.Sprintf("ForcedTxCount %d != %d forced entries valid at their turn", b.ForcedTxCount, turnValid))
+	}
+	// D5 admission invariant: every admitted entry's declaredGas <= g_fi, so
+	// its reserved execution capacity is real.
+	for i := range b.ForcedPrefix {
+		if b.ForcedPrefix[i].DeclaredGas > cfg.GFI {
+			return reject("forced_declared_over_g_fi",
+				fmt.Sprintf("forced entry %d declared gas %d exceeds g_fi %d (D5 admission invariant)", i, b.ForcedPrefix[i].DeclaredGas, cfg.GFI))
+		}
+	}
+
 	// The first system call is presence-only.
 	sc := b.SystemCall
 	switch {
@@ -428,10 +468,13 @@ func ValidateImport(b SealBlock, cfg ExecConfig) ImportResult {
 	if b.BlobTxCount != 0 {
 		return reject("blob_tx_present", "blob transactions are disabled in the initial profile")
 	}
-	// Gas: the system split is DERIVED from the two executed privileged
-	// steps and the turn-determined rejection set, not taken from a
-	// caller-supplied total. An independently supplied Work.System /
-	// Work.Forced cannot defeat the g_sys / g_fi split.
+	// Gas: every bucket is DERIVED by reconcileWork from block content — the
+	// two executed privileged steps, the re-executed valid forced prefix
+	// (its per-entry ExecGas), the turn-determined rejection set, and the
+	// discretionary receipt-gas sum. A caller-supplied Work.System /
+	// Work.Forced that does not reconcile is rejected; Work.Ordinary is
+	// advisory only. This is what keeps the reserved g_fi capacity real: a
+	// valid forced tx's gas is g_forced_actual, never ordinary capacity.
 	work, wreason := reconcileWork(b)
 	if wreason != "" {
 		return reject("gas_split_unreconciled", wreason)
@@ -442,39 +485,63 @@ func ValidateImport(b SealBlock, cfg ExecConfig) ImportResult {
 	return ImportResult{OK: true}
 }
 
-// reconcileWork derives the system and forced gas from the block's actual
-// steps and checks that the caller-supplied Work.System / Work.Forced match
-// them, with overflow-safe arithmetic:
+// reconcileWork derives every gas bucket from the block's own content, with
+// overflow-safe arithmetic, and reconciles the two caller-supplied claims:
 //
-//	System = SystemCall.GasUsed + Finalize.GasUsed   (both privileged steps)
-//	Forced = (# entries invalid at their turn) * RejectedConsumptionGas
-//	Ordinary = Work.Ordinary   (the standard transaction-list cumulative
-//	           gas, incl. successful forced txs — a re-executor reproduces it)
+//	System   = SystemCall.GasUsed + Finalize.GasUsed   (both privileged steps)      <= g_sys
+//	Forced   = Σ ExecGas over forced entries VALID at their turn (a valid entry
+//	           that EVM-reverts still consumed its gas here)
+//	         + (# entries INVALID at their turn) * RejectedConsumptionGas           <= g_fi
+//	Ordinary = DiscretionaryGasUsed   (Σ receipt gasUsed of the NON-forced txs)     <= g_ordinary_capacity
 //
-// Returns the derived BlockWork and "" on success, or a non-empty reason.
+// A valid forced transaction's execution gas is therefore charged to the
+// reserved g_fi budget, not to ordinary capacity, so discretionary demand
+// cannot crowd out a forced tx the D5 inbox admitted, and forced-tx gas
+// never enters the EIP-1559 feedback loop. Work.System and Work.Forced must
+// equal the derived values (else the reason is non-empty -> gas_split_unreconciled);
+// Work.Ordinary is advisory. Returns the derived BlockWork and "" on success.
 func reconcileWork(b SealBlock) (BlockWork, string) {
 	sysGas, carry := bits.Add64(b.SystemCall.GasUsed, b.Finalize.GasUsed, 0)
 	if carry != 0 {
 		return BlockWork{}, "system + finalize gas overflows uint64"
 	}
-	rejected := uint64(0)
-	for _, valid := range evalForcedPrefix(b.ForcedPrefix, b.ForcedStartBalance) {
-		if !valid {
-			rejected++
-		}
-	}
-	fHi, forcedGas := bits.Mul64(rejected, b.RejectedConsumptionGas)
-	if fHi != 0 {
-		return BlockWork{}, "rejected-entry consumption charge overflows uint64"
-	}
-	derived := BlockWork{System: sysGas, Forced: forcedGas, Ordinary: b.Work.Ordinary}
 	if b.Work.System != sysGas {
-		return derived, fmt.Sprintf("Work.System %d != SystemCall.GasUsed %d + Finalize.GasUsed %d",
+		return BlockWork{System: sysGas}, fmt.Sprintf(
+			"Work.System %d != SystemCall.GasUsed %d + Finalize.GasUsed %d",
 			b.Work.System, b.SystemCall.GasUsed, b.Finalize.GasUsed)
 	}
-	if b.Work.Forced != forcedGas {
-		return derived, fmt.Sprintf("Work.Forced %d != %d turn-rejected entries * %d consumption charge",
-			b.Work.Forced, rejected, b.RejectedConsumptionGas)
+
+	var execForced, rejected uint64
+	for i, valid := range evalForcedPrefix(b.ForcedPrefix, b.ForcedStartBalance) {
+		e := b.ForcedPrefix[i]
+		if !valid {
+			if e.ExecGas != 0 {
+				return BlockWork{}, fmt.Sprintf("forced entry %d is invalid at its turn but carries %d exec gas", i, e.ExecGas)
+			}
+			rejected++
+			continue
+		}
+		if e.ExecGas > e.DeclaredGas {
+			return BlockWork{}, fmt.Sprintf("forced entry %d exec gas %d exceeds its declared limit %d", i, e.ExecGas, e.DeclaredGas)
+		}
+		var c uint64
+		execForced, c = bits.Add64(execForced, e.ExecGas, 0)
+		if c != 0 {
+			return BlockWork{}, "executed forced-prefix gas overflows uint64"
+		}
 	}
-	return derived, ""
+	rejHi, rejGas := bits.Mul64(rejected, b.RejectedConsumptionGas)
+	if rejHi != 0 {
+		return BlockWork{}, "rejected-entry consumption charge overflows uint64"
+	}
+	forcedGas, fCarry := bits.Add64(execForced, rejGas, 0)
+	if fCarry != 0 {
+		return BlockWork{}, "forced-inclusion gas overflows uint64"
+	}
+	if b.Work.Forced != forcedGas {
+		return BlockWork{System: sysGas, Forced: forcedGas}, fmt.Sprintf(
+			"Work.Forced %d != %d executed forced-prefix gas + %d turn-rejected * %d consumption charge",
+			b.Work.Forced, execForced, rejected, b.RejectedConsumptionGas)
+	}
+	return BlockWork{System: sysGas, Forced: forcedGas, Ordinary: b.DiscretionaryGasUsed}, ""
 }

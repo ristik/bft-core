@@ -111,10 +111,12 @@ func TestD2_FinalizerGasBoundToBudget(t *testing.T) {
 	fc := cfg
 	fc.GFI = 2_000_000
 	b, _ = validSealBlock(fc)
+	b.ForcedTxCount = 1
+	b.DiscretionaryGasUsed = 10_000_000
 	b.ForcedStartBalance = map[string]int64{"a": 100}
 	b.ForcedPrefix = []ForcedEntry{
-		{Sender: "a", ValueDelta: -100, Reason: ""},
-		{Sender: "a", ValueDelta: -50, Reason: "insufficient_balance_at_turn"}, // 1 rejected
+		{Sender: "a", ValueDelta: -100, DeclaredGas: 400_000, ExecGas: 0, Reason: ""}, // valid at turn, no EVM gas recorded
+		{Sender: "a", ValueDelta: -50, Reason: "insufficient_balance_at_turn"},        // 1 rejected
 	}
 	b.RejectedConsumptionGas = 21_000
 	b.SystemCall.GasUsed = 1_500_000
@@ -137,6 +139,134 @@ func TestD2_FinalizerGasBoundToBudget(t *testing.T) {
 	b.Work.System = 1_500_000
 	if r := ValidateImport(b, fc); r.OK || r.Code != "gas_split_unreconciled" {
 		t.Fatalf("hidden finalizer charge accepted on a forced-prefix block: %+v", r)
+	}
+}
+
+// TestReview6SuccessfulForcedPrefixUsesReservedCapacity is the sixth-review
+// reproduction, carried onto the DeclaredGas / ExecGas / DiscretionaryGasUsed
+// fields the review asked for (a forced entry now declares the reserved g_fi
+// capacity it consumed). A valid forced tx of 9M gas under a 20M g_fi, with
+// zero discretionary demand and only 8M ordinary capacity, must import.
+func TestReview6SuccessfulForcedPrefixUsesReservedCapacity(t *testing.T) {
+	cfg := DefaultExecConfig()
+	cfg.GFI = 20_000_000
+	if err := cfg.Valid(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := validSealBlock(cfg)
+	b.OrdinaryTxCount, b.ForcedTxCount = 0, 1
+	b.DiscretionaryGasUsed = 0
+	b.ForcedPrefix = []ForcedEntry{{Sender: "alice", ValueDelta: -1, DeclaredGas: 9_000_000, ExecGas: 9_000_000, Digest: rep(0x31, 32)}}
+	b.ForcedStartBalance = map[string]int64{"alice": 1}
+	b.Finalize = finalizeFor(b)
+	b.SealRegistryStateValue = b.Finalize.Committed
+	b.Work = BlockWork{System: b.SystemCall.GasUsed + b.Finalize.GasUsed, Forced: 9_000_000, Ordinary: 0}
+	if got := ValidateImport(b, cfg); !got.OK {
+		t.Fatalf("reserved forced capacity unusable: %+v", got)
+	}
+}
+
+// TestD2_ForcedPrefixGasUsesReservedBudget pins the sixth-review accounting:
+// a valid forced tx's execution gas (success or EVM-revert) is charged to
+// g_forced_actual against the reserved g_fi budget, never ordinary capacity;
+// it does not move the base fee; charging it to the discretionary bucket or
+// exceeding g_fi is rejected.
+func TestD2_ForcedPrefixGasUsesReservedBudget(t *testing.T) {
+	cfg := DefaultExecConfig()
+	cfg.GFI = 20_000_000 // ordinary capacity is now 8M
+	base := func() SealBlock {
+		b, _ := validSealBlock(cfg)
+		b.OrdinaryTxCount, b.ForcedTxCount = 0, 1
+		b.DiscretionaryGasUsed = 0
+		b.ForcedStartBalance = map[string]int64{"a": 100}
+		b.ForcedPrefix = []ForcedEntry{{Sender: "a", ValueDelta: -1, DeclaredGas: 9_000_000, ExecGas: 9_000_000}}
+		b.SystemCall.GasUsed = 1_500_000
+		b.Finalize = finalizeFor(b)
+		b.Finalize.GasUsed = 30_000
+		b.SealRegistryStateValue = b.Finalize.Committed
+		b.Work = BlockWork{System: 1_530_000, Forced: 9_000_000, Ordinary: 0}
+		return b
+	}
+
+	// 9M forced tx fits despite ordinary capacity being only 8M.
+	b := base()
+	if r := ValidateImport(b, cfg); !r.OK {
+		t.Fatalf("9M forced tx did not fit despite 20M reserved g_fi: %s (%s)", r.Code, r.Reason)
+	}
+	w, reason := reconcileWork(b)
+	if reason != "" || w.Forced != 9_000_000 || w.Ordinary != 0 {
+		t.Fatalf("forced gas not charged to the reserved budget: work=%+v reason=%q", w, reason)
+	}
+	if w.HeaderGasUsed() != 1_530_000+9_000_000+0 {
+		t.Fatalf("header gas wrong: %d", w.HeaderGasUsed())
+	}
+
+	// The 9M does not enter the EIP-1559 feedback loop.
+	withForced := cfg.NextBaseFee(1_000_000_000, w)
+	control := cfg.NextBaseFee(1_000_000_000, BlockWork{System: w.System, Ordinary: w.Ordinary})
+	if withForced != control {
+		t.Fatalf("forced-tx gas moved the base fee: %d vs %d", withForced, control)
+	}
+
+	// A valid forced tx that EVM-reverts still consumes reserved capacity.
+	rv := base()
+	rv.ForcedPrefix[0] = ForcedEntry{Sender: "a", ValueDelta: -1, DeclaredGas: 9_000_000, ExecGas: 8_400_000, Reverted: true}
+	rv.Finalize = finalizeFor(rv)
+	rv.SealRegistryStateValue = rv.Finalize.Committed
+	rv.Work.Forced = 8_400_000
+	if r := ValidateImport(rv, cfg); !r.OK {
+		t.Fatalf("a reverted forced tx did not draw on reserved capacity: %s (%s)", r.Code, r.Reason)
+	}
+
+	// Charging that gas to the discretionary bucket is rejected.
+	bad := base()
+	bad.DiscretionaryGasUsed = 9_000_000
+	bad.Work = BlockWork{System: 1_530_000, Forced: 0, Ordinary: 9_000_000}
+	if r := ValidateImport(bad, cfg); r.OK || r.Code != "gas_split_unreconciled" {
+		t.Fatalf("forced-tx gas charged to the discretionary bucket was accepted: %+v", r)
+	}
+
+	// A forced prefix whose executed gas exceeds g_fi is rejected.
+	over := base()
+	over.ForcedPrefix[0].DeclaredGas = 20_000_000
+	over.ForcedPrefix[0].ExecGas = 20_000_001
+	over.Finalize = finalizeFor(over)
+	over.SealRegistryStateValue = over.Finalize.Committed
+	over.Work.Forced = 20_000_001
+	if r := ValidateImport(over, cfg); r.OK || (r.Code != "gas_budget" && r.Code != "gas_split_unreconciled") {
+		t.Fatalf("an over-g_fi forced prefix was accepted: %+v", r)
+	}
+}
+
+// TestD2_ForcedTxCountMustMatchTurnValidSet: a builder cannot drop an
+// admitted forced tx from the receipt trie, nor claim extra ones.
+func TestD2_ForcedTxCountMustMatchTurnValidSet(t *testing.T) {
+	cfg := DefaultExecConfig()
+	cfg.GFI = 2_000_000
+	b, _ := validSealBlock(cfg)
+	b.DiscretionaryGasUsed = 10_000_000
+	b.ForcedStartBalance = map[string]int64{"a": 100}
+	b.ForcedPrefix = []ForcedEntry{
+		{Sender: "a", ValueDelta: -100, DeclaredGas: 500_000, ExecGas: 400_000},
+		{Sender: "a", ValueDelta: -50, Reason: "insufficient_balance_at_turn"},
+	}
+	b.RejectedConsumptionGas = 21_000
+	b.SystemCall.GasUsed = 1_500_000
+	b.Finalize = finalizeFor(b)
+	b.Finalize.GasUsed = 30_000
+	b.SealRegistryStateValue = b.Finalize.Committed
+	b.Work = BlockWork{System: 1_530_000, Forced: 421_000, Ordinary: 10_000_000}
+	b.ForcedTxCount = 1
+	if r := ValidateImport(b, cfg); !r.OK {
+		t.Fatalf("well-formed forced-prefix block rejected: %s (%s)", r.Code, r.Reason)
+	}
+	b.ForcedTxCount = 0
+	if r := ValidateImport(b, cfg); r.OK || r.Code != "forced_tx_count_mismatch" {
+		t.Fatalf("a dropped admitted forced tx was accepted: %+v", r)
+	}
+	b.ForcedTxCount = 2
+	if r := ValidateImport(b, cfg); r.OK || r.Code != "forced_tx_count_mismatch" {
+		t.Fatalf("an inflated forced-tx count was accepted: %+v", r)
 	}
 }
 
@@ -301,15 +431,16 @@ func TestD2_ForcedPrefixOutcomesDeterminedAtTurn(t *testing.T) {
 	cfg.GFI = 2_000_000
 
 	b, _ := validSealBlock(cfg)
+	b.DiscretionaryGasUsed = 10_000_000
 	b.ForcedStartBalance = map[string]int64{"alice": 100}
 	b.ForcedPrefix = []ForcedEntry{
-		{Sender: "alice", ValueDelta: -100, Reason: ""},
+		{Sender: "alice", ValueDelta: -100, DeclaredGas: 900_000, ExecGas: 700_000, Reason: ""},
 		{Sender: "alice", ValueDelta: -50, Reason: "insufficient_balance_at_turn"},
 	}
 	b.RejectedConsumptionGas = 21_000
 	b.ForcedTxCount = 1
 	b.SystemCall.GasUsed = 1_500_000
-	b.Work = BlockWork{System: 1_530_000, Forced: 21_000, Ordinary: 10_000_000}
+	b.Work = BlockWork{System: 1_530_000, Forced: 721_000, Ordinary: 10_000_000}
 	b.Finalize = finalizeFor(b)
 	b.SealRegistryStateValue = b.Finalize.Committed
 
@@ -365,9 +496,13 @@ func TestD2_SealOutcomeListSeparateFromTxList(t *testing.T) {
 		!v.OutcomeDeterminedAtTurn || !v.CommitmentWrittenPostPrefix {
 		t.Fatalf("forced-prefix turn semantics not demonstrated: %+v", v)
 	}
-	if v.HeaderGasUsed != v.SystemGas+v.RejectedConsumptionGas+v.RecoveredOrdinary {
-		t.Fatalf("gas does not close: header %d != %d + %d + %d",
-			v.HeaderGasUsed, v.SystemGas, v.RejectedConsumptionGas, v.RecoveredOrdinary)
+	if v.HeaderGasUsed != v.SystemGas+v.ForcedExecGas+v.RejectedConsumptionGas+v.RecoveredOrdinary {
+		t.Fatalf("gas does not close: header %d != %d + %d + %d + %d",
+			v.HeaderGasUsed, v.SystemGas, v.ForcedExecGas, v.RejectedConsumptionGas, v.RecoveredOrdinary)
+	}
+	// The valid forced entry's ExecGas is charged to g_fi, not ordinary.
+	if v.ForcedExecGas == 0 {
+		t.Fatal("the valid forced entry recorded no execution gas against the reserved budget")
 	}
 }
 

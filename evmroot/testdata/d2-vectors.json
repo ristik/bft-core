@@ -8,7 +8,7 @@
     "ordinary_target": 14000000
   },
   "gas_accounting": {
-    "note": "g_system_actual is DERIVED as SystemCall.GasUsed (open) + Finalize.GasUsed (write); g_forced_actual as turn-rejected count * RejectedConsumptionGas. header.gasUsed is their sum plus the transaction-list cumulative gas. Base fee updates from ordinary vs ordinary target only.",
+    "note": "g_system_actual is DERIVED as SystemCall.GasUsed (open) + Finalize.GasUsed (write); g_forced_actual as Σ ExecGas of the valid forced prefix + turn-rejected count * RejectedConsumptionGas; g_ordinary_actual as DiscretionaryGasUsed (the NON-forced receipt gas). header.gasUsed is their sum. Base fee updates from ordinary vs ordinary target only (this g_fi=0 profile has no forced prefix).",
     "system_open_gas": 1780000,
     "system_finalize_gas": 20000,
     "system_gas": 1800000,
@@ -22,6 +22,53 @@
     "next_base_fee": 1008928571,
     "budget_ok": true,
     "closes_exactly": true
+  },
+  "forced_prefix_accounting": {
+    "note": "g_fi 20M reserved. A valid forced tx (success OR EVM-revert) charges its ExecGas to g_forced_actual against g_fi, keeping a standard receipt; an entry invalid at its turn is consumed for RejectedConsumptionGas. g_ordinary_actual is DiscretionaryGasUsed (NON-forced receipt gas) only. The 8M executed forced gas exceeds the 8M ordinary capacity once discretionary demand is present — proving reserved capacity is what makes an admitted forced tx includable — and it does not enter the EIP-1559 feedback loop.",
+    "g_fi": 20000000,
+    "ordinary_capacity": 8000000,
+    "entries": [
+      {
+        "sender": "succeeds",
+        "valid_at_its_turn": true,
+        "evm_reverted": false,
+        "declared_gas": 4000000,
+        "exec_gas": 3000000,
+        "in_receipt_trie": true
+      },
+      {
+        "sender": "reverts",
+        "valid_at_its_turn": true,
+        "evm_reverted": true,
+        "declared_gas": 6000000,
+        "exec_gas": 5000000,
+        "in_receipt_trie": true
+      },
+      {
+        "sender": "poison",
+        "valid_at_its_turn": false,
+        "evm_reverted": false,
+        "declared_gas": 0,
+        "exec_gas": 0,
+        "in_receipt_trie": false
+      }
+    ],
+    "forced_exec_gas": 8000000,
+    "rejected_consumption_gas": 21000,
+    "work_forced": 8021000,
+    "discretionary_gas_used": 4000000,
+    "system_gas": 1530000,
+    "header_gas_used": 13551000,
+    "recovered_ordinary_gas": 4000000,
+    "parent_base_fee": 1000000000,
+    "next_base_fee": 1000000000,
+    "next_base_fee_if_forced_gas_wrongly_counted": 1125000000,
+    "base_fee_ignores_forced_gas": true,
+    "forced_gas_within_g_fi": true,
+    "nine_million_forced_tx_fits_with_ordinary_full": true,
+    "work_split_reconciles": true,
+    "header_gas_closes_exactly": true,
+    "import_ok": true
   },
   "base_fee_series": [
     {
@@ -103,7 +150,7 @@
     }
   ],
   "seal_outcome_list": {
-    "note": "The forced prefix runs FIFO; each entry's validity is decided AT ITS TURN against the running pre-state. Entry 1 spends alice's balance, so entry 2 — fine at admission — is invalid at its turn. The rejection set is knowable only after the prefix, so a post-prefix FinalizeStep (a second, gas-charged system op) writes sealRegistryCommitment into seal-registry contract storage; the first system call carries NO forced-outcome input. The successful forced entry (entry 1) is an ordinary transaction in transactionsRoot / receiptsRoot with a standard receipt. header.gasUsed = ordinary cumulative + g_sys (open + finalize) + the g_fi consumption charge for rejected entries.",
+    "note": "The forced prefix runs FIFO; each entry's validity is decided AT ITS TURN against the running pre-state. Entry 1 spends alice's balance, so entry 2 — fine at admission — is invalid at its turn. The rejection set is knowable only after the prefix, so a post-prefix FinalizeStep (a second, gas-charged system op) writes sealRegistryCommitment into seal-registry contract storage; the first system call carries NO forced-outcome input. The valid forced entry (entry 1) is an ordinary transaction in transactionsRoot / receiptsRoot with a standard receipt, but its ExecGas is charged to g_forced_actual against the reserved g_fi budget. header.gasUsed = discretionary receipt gas + g_sys (open + finalize) + executed valid prefix + the g_fi consumption charge for rejected entries.",
     "seal_registry_records": [
       {
         "Kind": "system",
@@ -123,8 +170,9 @@
     "seal_registry_commitment": "8ac7edd0cb6c68c88ade5df1f2feb804963677f6708b0cb3f9174b4b70eeb0c7",
     "ordinary_tx_count": 3,
     "successful_forced_tx_count_in_receipt_trie": 1,
-    "header_gas_used": 11951000,
+    "header_gas_used": 12451000,
     "system_gas": 1530000,
+    "forced_exec_gas": 500000,
     "rejected_entry_consumption_gas": 21000,
     "recovered_ordinary_gas": 10400000,
     "forced_entry_1_valid_at_its_turn": true,
@@ -373,6 +421,78 @@
     },
     {
       "name": "work_forced_mismatch",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    },
+    {
+      "name": "valid_forced_prefix",
+      "want_ok": true,
+      "want_code": "",
+      "got_ok": true,
+      "got_code": "",
+      "matches": true
+    },
+    {
+      "name": "forced_prefix_uses_reserved_capacity",
+      "want_ok": true,
+      "want_code": "",
+      "got_ok": true,
+      "got_code": "",
+      "matches": true
+    },
+    {
+      "name": "reverted_forced_tx_uses_reserved_capacity",
+      "want_ok": true,
+      "want_code": "",
+      "got_ok": true,
+      "got_code": "",
+      "matches": true
+    },
+    {
+      "name": "forced_prefix_over_g_fi",
+      "want_ok": false,
+      "want_code": "gas_budget",
+      "got_ok": false,
+      "got_code": "gas_budget",
+      "matches": true
+    },
+    {
+      "name": "forced_declared_over_g_fi",
+      "want_ok": false,
+      "want_code": "forced_declared_over_g_fi",
+      "got_ok": false,
+      "got_code": "forced_declared_over_g_fi",
+      "matches": true
+    },
+    {
+      "name": "forced_gas_charged_to_discretionary",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    },
+    {
+      "name": "forced_exec_over_declared",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    },
+    {
+      "name": "forced_tx_count_drops_admitted_entry",
+      "want_ok": false,
+      "want_code": "forced_tx_count_mismatch",
+      "got_ok": false,
+      "got_code": "forced_tx_count_mismatch",
+      "matches": true
+    },
+    {
+      "name": "rejected_entry_carries_exec_gas",
       "want_ok": false,
       "want_code": "gas_split_unreconciled",
       "got_ok": false,

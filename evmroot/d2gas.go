@@ -84,25 +84,32 @@ func (c ExecConfig) OrdinaryCapacity() uint64 { return c.GMax - c.GSys - c.GFI }
 func (c ExecConfig) OrdinaryTarget() uint64 { return c.OrdinaryCapacity() / c.ElasticityDenom }
 
 // BlockWork is the gas consumed in one produced block, split by origin.
-// Only Ordinary feeds the base-fee update. System and Forced are DERIVED
-// and checked by ValidateImport / reconcileWork — a caller cannot supply a
-// System / Forced total that does not match the two privileged steps and
-// the turn-determined rejection set:
+// Only Ordinary feeds the base-fee update. All three fields are DERIVED by
+// ValidateImport / reconcileWork from block content — the two privileged
+// steps, the re-executed valid forced prefix, the turn-determined rejection
+// set, and the discretionary receipt-gas sum:
 //
-//	System = SystemCall.GasUsed (open step) + Finalize.GasUsed (write step); <= GSys
-//	Forced = (# forced entries invalid at their turn) * RejectedConsumptionGas; <= GFI
-//	Ordinary = the transaction-list cumulative gas incl. successful forced txs; <= OrdinaryCapacity
+//	System   = SystemCall.GasUsed (open) + Finalize.GasUsed (write);            <= GSys
+//	Forced   = Σ ExecGas of forced entries valid at their turn (incl. a valid
+//	           entry that EVM-reverts)
+//	         + (# entries invalid at their turn) * RejectedConsumptionGas;      <= GFI
+//	Ordinary = DiscretionaryGasUsed — Σ receipt gasUsed of the NON-forced txs; <= OrdinaryCapacity
+//
+// A valid forced transaction stays an ordinary tx in transactionsRoot /
+// receiptsRoot, but its execution gas is charged to Forced (the reserved
+// g_fi budget), never to ordinary capacity.
 type BlockWork struct {
 	System   uint64
 	Forced   uint64
 	Ordinary uint64
 }
 
-// HeaderGasUsed is the block header's gasUsed field: the transaction-list
-// cumulative gas (Ordinary, incl. successful forced txs) PLUS BOTH
-// privileged g_sys steps (open + finalize) PLUS the g_fi consumption charge
-// for turn-rejected entries. It is NOT "entirely unchanged" vs a vanilla
-// block.
+// HeaderGasUsed is the block header's gasUsed field: System + Forced +
+// Ordinary. Equivalently, the discretionary transaction receipt gas PLUS
+// both privileged g_sys steps PLUS the executed valid forced prefix PLUS the
+// g_fi consumption charge for turn-rejected entries. A valid forced tx's
+// receipt gas is counted once, in Forced. It is NOT "entirely unchanged" vs
+// a vanilla block.
 func (w BlockWork) HeaderGasUsed() uint64 { return w.System + w.Forced + w.Ordinary }
 
 // GasCheck is the per-block gas validity result.
@@ -122,7 +129,7 @@ func (c ExecConfig) CheckGas(w BlockWork) GasCheck {
 	case w.System > c.GSys:
 		return GasCheck{Reason: "combined system gas (open + finalize) exceeds reserved g_sys — block invalid, not silently truncated"}
 	case w.Forced > c.GFI:
-		return GasCheck{Reason: "forced-inclusion gas exceeds reserved g_fi"}
+		return GasCheck{Reason: "forced-inclusion gas (executed valid prefix + rejected-entry charges) exceeds reserved g_fi"}
 	case w.Ordinary > c.OrdinaryCapacity():
 		return GasCheck{Reason: "ordinary gas exceeds g_max - g_sys - g_fi"}
 	case w.HeaderGasUsed() > c.GMax:
@@ -189,15 +196,16 @@ func (c ExecConfig) NextBaseFee(parentBaseFee uint64, w BlockWork) uint64 {
 	return child
 }
 
-// RecoverOrdinaryGas reconstructs the ordinary gas used from the header and
-// the system / forced-prefix receipts — the value that feeds the next base
-// fee. It is authenticated, not trusted: header gasUsed and each receipt's
-// cumulativeGasUsed are part of the block, and the forced-prefix boundary
-// is the deterministic inbox watermark (D5). Returns (0, false) if the
-// receipts do not fit inside the header total.
-func RecoverOrdinaryGas(headerGasUsed, systemReceiptGas, forcedReceiptGasSum uint64) (uint64, bool) {
-	if systemReceiptGas+forcedReceiptGasSum > headerGasUsed {
+// RecoverOrdinaryGas reconstructs the discretionary ordinary gas that feeds
+// the next base fee: header gasUsed minus both privileged g_sys steps minus
+// the full forced-inclusion charge (g_forced_actual — executed valid prefix
+// gas plus rejected-entry consumption charges). Every input is authenticated
+// block content, and the forced-prefix boundary is the deterministic inbox
+// watermark (D5). Returns (0, false) if the parts do not fit inside the
+// header total.
+func RecoverOrdinaryGas(headerGasUsed, systemStepsGas, forcedGasTotal uint64) (uint64, bool) {
+	if systemStepsGas+forcedGasTotal > headerGasUsed {
 		return 0, false
 	}
-	return headerGasUsed - systemReceiptGas - forcedReceiptGasSum, true
+	return headerGasUsed - systemStepsGas - forcedGasTotal, true
 }

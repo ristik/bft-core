@@ -65,6 +65,35 @@ Proposed (D2, issue #4). Revised twice:
     peer-deserialized; full UC inclusion / config / TR / committed-body
     derivation is a mandatory adapter integration test before F1.
 
+- After the sixth review #78:
+  - **A valid forced transaction's execution gas draws on the reserved `g_fi`
+    budget, not ordinary capacity.** The fifth-review model counted a successful
+    forced tx's gas in `Work.Ordinary` and derived `Work.Forced` from rejected
+    entries only, so with `g_fi` never consumed by successful entries,
+    discretionary demand filling `g_ordinary_capacity` could make a D5-admitted
+    forced transaction (`declaredGas ≤ g_fi`) unincludable while the whole `g_fi`
+    reservation sat unused — a valid 9M forced tx was rejected under a 20M `g_fi`
+    / 8M ordinary-capacity profile with an otherwise empty block. `reconcileWork`
+    now derives `Work.Forced = Σ ExecGas(forced entries valid at their turn — a
+    valid entry that EVM-reverts included) + turn-rejected count ×
+    RejectedConsumptionGas` and `Work.Ordinary = DiscretionaryGasUsed` (the Σ
+    receipt gasUsed of the NON-forced transactions), overflow-checked, and
+    reconciles `Work.System` / `Work.Forced` (`gas_split_unreconciled`).
+    `ForcedEntry` gains `DeclaredGas` (the D5 admission limit, `≤ g_fi`) and
+    `ExecGas` (`≤ DeclaredGas`); a turn-rejected entry carries no `ExecGas`; the
+    count of forced txs in the receipt trie must equal the turn-valid set
+    (`forced_tx_count_mismatch`). `CheckGas` caps the derived `g_forced_actual`
+    at `g_fi`. Forced-tx gas is now genuinely outside the EIP-1559 loop, and
+    ordinary-gas recovery nets out the full `g_forced_actual`. New:
+    `forced_prefix_accounting` vector (mixed success / EVM-revert / rejected),
+    the `forced_prefix_*` / `forced_declared_over_g_fi` /
+    `forced_gas_charged_to_discretionary` import checks,
+    `TestD2_ForcedPrefixGasUsesReservedBudget`,
+    `TestD2_ForcedTxCountMustMatchTurnValidSet`,
+    `TestReview6SuccessfulForcedPrefixUsesReservedCapacity`. D2 §3 and D5 §4 are
+    reconciled — D2 charges each executed prefix entry's gas against the same
+    `g_fi` D5 admits it under.
+
 Freeze once re-reviewed by a Go-adapter + reth reviewer other than the author.
 Depends on ADR 0003 (D1).
 
@@ -103,13 +132,18 @@ Adopt the profile in
    partition `version` record and the startup capability check.
 
 3. **Gas separation** — `g_sys + g_fi + g_ordinary_capacity = g_max` exactly.
-   `g_system_actual` and `g_forced_actual` are **derived** by `reconcileWork`
-   (open + finalize; turn-rejected count × charge), not taken from a
-   caller-supplied `Work` total; a mismatch is `gas_split_unreconciled`. Header
-   `gasUsed` = ordinary cumulative gas (transaction list, incl. successful forced
-   txs) + `g_system_actual` (both `g_sys` steps) + `g_forced_actual`. The
-   EIP-1559 update uses **ordinary** gas against an **ordinary** target only;
-   protocol-mandated gas is recovered as
+   All three buckets are **derived** by `reconcileWork` from block content, not
+   taken from a caller-supplied `Work` total; `Work.System` / `Work.Forced` are
+   reconciled and a mismatch is `gas_split_unreconciled`:
+   - `g_system_actual` = `SystemCall.GasUsed + Finalize.GasUsed` (both `g_sys` steps);
+   - `g_forced_actual` = `Σ ExecGas` of the forced entries valid at their turn
+     (a valid entry that EVM-reverts included) + turn-rejected count × charge —
+     charged against the reserved `g_fi`, **never** ordinary capacity;
+   - `g_ordinary_actual` = `DiscretionaryGasUsed`, the Σ receipt gasUsed of the
+     NON-forced transactions.
+   Header `gasUsed` = the sum. The EIP-1559 update uses `g_ordinary_actual`
+   against an ordinary target only; protocol-mandated gas — the system steps
+   **and** all forced work — is recovered as
    `header.gasUsed − (open + finalize) − g_forced_actual`.
 
 3b. **Off-trie commitment in contract state, not a header field, written after
@@ -137,27 +171,37 @@ Adopt the profile in
 
 - `evmroot/d2gas.go` — budgets, header `gasUsed`, EIP-1559 update with the
   ordinary-only substitution and the floor clamp; `BlockWork.System` / `.Forced`
-  are DERIVED and checked (see `d2import.go` `reconcileWork`).
+  / `.Ordinary` are DERIVED (see `d2import.go` `reconcileWork`);
+  `RecoverOrdinaryGas` nets out both `g_sys` steps and the full `g_forced_actual`.
 - `evmroot/d2import.go` — the ordered import-validation predicate set with stable
   rejection codes; `SealRegistryCommitment` (contract-state value);
-  `FinalizeStep` + `ForcedEntry` / `evalForcedPrefix` / `DerivedSealOutcomes`
-  (turn-determined outcomes); `reconcileWork` (derives `Work.System` /
-  `Work.Forced`, overflow-checked, `gas_split_unreconciled`);
+  `FinalizeStep` + `ForcedEntry` (now with `DeclaredGas` / `ExecGas` / `Reverted`)
+  / `evalForcedPrefix` / `DerivedSealOutcomes` (turn-determined outcomes);
+  `SealBlock.DiscretionaryGasUsed`; `reconcileWork` (derives `Work.System` /
+  `Work.Forced` / `Work.Ordinary`, overflow-checked, `gas_split_unreconciled`);
+  `forced_tx_count_mismatch` and `forced_declared_over_g_fi` predicates;
   `VerifyCompanionWitnesses(witness, rootInput, lastAppliedRootRound)` consuming
   D1's `VerifiedCert` via `ValidateBoundCertificate`, the TE↔TRHash binding, and
   position-by-position `ExpectedTransitions` matching. (The invented `d2seal.go`
   seal-witness statement + keys are removed.)
 - `evmroot/testdata/d2-vectors.json` — exec config, a `gas_accounting` vector
-  that shows the open/finalize split and closes exactly, a base-fee series
-  (up/flat/down/floor), the `seal_outcome_list` vector (a sequential forced
-  prefix where entry 1 changes entry 2's
-  turn-validity; successful forced tx stays ordinary; commitment written
-  post-prefix), and import-check vectors including `cert_not_verified`,
-  `cert_stale_root_round`, `transition_inserted_body`,
+  that shows the open/finalize split and closes exactly, the
+  `forced_prefix_accounting` vector (a mixed success / EVM-revert / rejected
+  forced prefix under `g_fi = 20M`: valid-entry `ExecGas` charged to `g_fi`,
+  discretionary gas from receipts only, header closes, base fee ignores forced
+  work, the 9M/20M/8M counterexample), a base-fee series (up/flat/down/floor),
+  the `seal_outcome_list` vector (a sequential forced prefix where entry 1
+  changes entry 2's turn-validity; entry 1 stays ordinary, its `ExecGas` charged
+  to `g_fi`; commitment written post-prefix), and import-check vectors including
+  `cert_not_verified`, `cert_stale_root_round`, `transition_inserted_body`,
   `transition_substituted_body`, `seal_finalize_missing`,
   `finalize_wrong_commitment`, `finalizer_gas_hidden_from_work`,
   `work_system_mismatch`, `work_forced_mismatch`, `combined_system_over_g_sys`,
-  `system_plus_finalize_overflow`.
+  `system_plus_finalize_overflow`, `forced_prefix_uses_reserved_capacity`,
+  `reverted_forced_tx_uses_reserved_capacity`, `forced_prefix_over_g_fi`,
+  `forced_declared_over_g_fi`, `forced_gas_charged_to_discretionary`,
+  `forced_exec_over_declared`, `forced_tx_count_drops_admitted_entry`,
+  `rejected_entry_carries_exec_gas`.
 - `evmroot/cmd/d2vectors` + `TestD2_VectorsMatchGolden`.
 
 ## Consequences
@@ -209,3 +253,13 @@ Adopt the profile in
   `g_sys` budget imported successfully because nothing tied `Work.System` to
   `SystemCall.GasUsed + Finalize.GasUsed`. Both are now derived (`reconcileWork`),
   a mismatch is rejected, and the `g_sys` cap is applied to the derived sum.
+- **Charge a successful forced transaction's execution gas to ordinary capacity
+  (fifth-review model).** Rejected on the sixth review: with `g_fi` then consumed
+  only by *rejected* entries, discretionary demand filling `g_ordinary_capacity`
+  could permanently exclude a forced transaction the D5 inbox had admitted
+  (`declaredGas ≤ g_fi`) — the reservation protected nothing it was for (a valid
+  9M forced tx rejected under 20M `g_fi` / 8M ordinary capacity, empty block).
+  `g_forced_actual` is now `Σ ExecGas` of the valid prefix (EVM-reverting entries
+  included) + rejected charges, charged against `g_fi`; `g_ordinary_actual` is
+  `DiscretionaryGasUsed` (NON-forced receipt gas) only. Any alternative policy
+  must revise D5 admission, reservation, `K` and the fee rationale together.
