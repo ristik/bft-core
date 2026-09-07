@@ -22,6 +22,14 @@ type Subscriptions struct {
 	subs   map[partitionShard]map[peer.ID]int
 	sender func(ctx context.Context, msg any, receivers ...peer.ID) error
 
+	// sending tracks the goroutines spawned by Send. Without it those goroutines
+	// outlive their caller unobserved: the node has no way to drain them at
+	// shutdown, and a test has no way to know the send it triggered has finished
+	// logging - which is how CI run 34102642015 attempt 1 died, with the testing
+	// package panicking on "Log in goroutine after Test_Subscriptions/send,_not_
+	// subscribed has completed".
+	sending sync.WaitGroup
+
 	log *slog.Logger
 
 	bcRespSent metric.Int64Counter // number of Block Certification Responses sent
@@ -78,7 +86,9 @@ func (s *Subscriptions) Send(ctx context.Context, cr *certification.Certificatio
 		recipients = append(recipients, peerID)
 	}
 
+	s.sending.Add(1)
 	go func() {
+		defer s.sending.Done()
 		s.log.DebugContext(ctx, fmt.Sprintf("sending CertificationResponse, %d receivers, R_next: %d, IR Hash: %X, Block Hash: %X",
 			len(recipients), cr.Technical.Round, cr.UC.InputRecord.Hash, cr.UC.InputRecord.BlockHash), logger.Shard(cr.Partition, cr.Shard))
 		if len(recipients) > 0 {
@@ -89,3 +99,10 @@ func (s *Subscriptions) Send(ctx context.Context, cr *certification.Certificatio
 		}
 	}()
 }
+
+/*
+Wait blocks until every goroutine spawned by Send so far has finished. It does not
+stop new Sends - the caller is responsible for having closed the path that triggers
+them (cancelling the context the node runs under) before waiting.
+*/
+func (s *Subscriptions) Wait() { s.sending.Wait() }

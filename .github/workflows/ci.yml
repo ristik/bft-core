@@ -1,6 +1,14 @@
 name: ci
 
-on: [push]
+# F1 (#9) requires PR-triggered CI for the integration branch. Per the owner's 2026-09-06 decision
+# this does not enable branch protection or required-check rules — the checks run and are visible on
+# every PR, and merging stays a human decision. See docs/design/f1-baseline.md §6.
+on:
+  push:
+  pull_request:
+    branches:
+      - integration/enshrined-evm
+      - main
 
 env:
   GO_VERSION: 1.24
@@ -112,6 +120,12 @@ jobs:
   # topologies respectively, which `go test` alone doesn't reach. Both run against
   # `--executor fake` only — neither has a reth image to test against; see
   # docs/engine-api-adapter-plan.md §10 and scripts/reth-by-hand.sh.
+  #
+  # These are NOT real-execution evidence, and F1 (#9) requires that distinction be explicit: the
+  # fake executor models no header economics at all, which is where the deviations in
+  # docs/design/f1-baseline.md §4 live. The real-execution lane is scripts/reth-baseline.sh, run
+  # locally against a pinned reth (§5.3) — it is not a job here because there is no approved
+  # execution-client fork to pin a binary from yet. Wiring it in is F3 (#11).
   evm-shard-chaos:
     runs-on: ubuntu-latest
     steps:

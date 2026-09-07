@@ -44,6 +44,7 @@ func Test_Subscriptions(t *testing.T) {
 		}
 		subs, err := NewSubscriptions(sender, observability.Default(t))
 		require.NoError(t, err)
+		t.Cleanup(subs.Wait)
 		require.NotNil(t, subs)
 
 		// attempt to subscribe invalid node ID
@@ -88,6 +89,10 @@ func Test_Subscriptions(t *testing.T) {
 		obs := observability.New(t, "", "", logger.HookedLoggerBuilder(t, logHook))
 		subs, err := NewSubscriptions(sender, obs)
 		require.NoError(t, err)
+		// Send's goroutine keeps logging after the hook below has released this
+		// test; without draining it the log record lands on a completed t and the
+		// testing package panics (CI run 34102642015 attempt 1).
+		t.Cleanup(subs.Wait)
 		require.NotNil(t, subs)
 
 		// no subscribers so should not trigger sender callback
@@ -121,6 +126,7 @@ func Test_Subscriptions(t *testing.T) {
 
 		subs, err := NewSubscriptions(sender, observability.Default(t))
 		require.NoError(t, err)
+		t.Cleanup(subs.Wait)
 		require.NotNil(t, subs)
 
 		require.NoError(t, subs.Subscribe(certResp.Partition, certResp.Shard, nodeIdA.String()))
@@ -146,6 +152,7 @@ func Test_Subscriptions(t *testing.T) {
 
 		subs, err := NewSubscriptions(sender, observability.Default(t))
 		require.NoError(t, err)
+		t.Cleanup(subs.Wait)
 		require.NoError(t, subs.Subscribe(certResp.Partition, certResp.Shard, nodeIdA.String()))
 		require.NoError(t, subs.Subscribe(certResp.Partition, certResp.Shard, nodeIdB.String()))
 
@@ -177,6 +184,7 @@ func Test_Subscriptions(t *testing.T) {
 
 		subs, err := NewSubscriptions(sender, observability.Default(t))
 		require.NoError(t, err)
+		t.Cleanup(subs.Wait)
 		require.NoError(t, subs.Subscribe(certResp.Partition, certResp.Shard, nodeIdA.String()))
 		require.NoError(t, subs.Subscribe(certResp.Partition, certResp.Shard, nodeIdB.String()))
 
@@ -226,4 +234,58 @@ func generateNodeID(t *testing.T) peer.ID {
 	nodeID, err := network.NodeIDFromPublicKeyBytes(authKey)
 	require.NoError(t, err)
 	return nodeID
+}
+
+// Test_Subscriptions_Wait pins the contract that fixed CI run 34102642015 attempt 1:
+// Send hands the logging, sending and metering off to a goroutine, and Wait must not
+// return while that goroutine is still running. Before Wait existed there was nothing
+// holding the test (or Node.Run) open across that hand-off, so the goroutine's log
+// record could land on an already-completed testing.T and panic the whole package.
+func Test_Subscriptions_Wait(t *testing.T) {
+	certResp := &certification.CertificationResponse{
+		Partition: 1,
+		Shard:     types.ShardID{},
+		Technical: certification.TechnicalRecord{Round: 666},
+		UC: types.UnicityCertificate{
+			InputRecord: &types.InputRecord{
+				Hash:      []byte{1, 1, 1, 1, 1},
+				BlockHash: []byte{2, 2, 2, 2, 2},
+			},
+		},
+	}
+
+	release := make(chan struct{})
+	var senderDone atomic.Bool
+	sender := func(ctx context.Context, msg any, receivers ...peer.ID) error {
+		<-release
+		senderDone.Store(true)
+		return nil
+	}
+
+	subs, err := NewSubscriptions(sender, observability.Default(t))
+	require.NoError(t, err)
+	require.NoError(t, subs.Subscribe(certResp.Partition, certResp.Shard, generateNodeID(t).String()))
+
+	subs.Send(t.Context(), certResp)
+
+	waited := make(chan struct{})
+	go func() {
+		subs.Wait()
+		close(waited)
+	}()
+
+	// the send goroutine is parked in sender, so Wait must still be blocked
+	select {
+	case <-waited:
+		t.Fatal("Wait returned while a Send goroutine was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-waited:
+		require.True(t, senderDone.Load(), "Wait returned before the send goroutine finished")
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return after the send goroutine finished")
+	}
 }
