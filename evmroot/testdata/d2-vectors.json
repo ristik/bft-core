@@ -1,0 +1,519 @@
+{
+  "exec_config": {
+    "g_max": 30000000,
+    "g_sys": 2000000,
+    "g_fi": 0,
+    "base_fee_floor": 7,
+    "ordinary_capacity": 28000000,
+    "ordinary_target": 14000000
+  },
+  "gas_accounting": {
+    "note": "g_system_actual is DERIVED as SystemCall.GasUsed (open) + Finalize.GasUsed (write); g_forced_actual as Σ ExecGas of the valid forced prefix + turn-rejected count * RejectedConsumptionGas; g_ordinary_actual as DiscretionaryGasUsed (the NON-forced receipt gas). header.gasUsed is their sum. Base fee updates from ordinary vs ordinary target only (this g_fi=0 profile has no forced prefix).",
+    "system_open_gas": 1780000,
+    "system_finalize_gas": 20000,
+    "system_gas": 1800000,
+    "forced_gas": 0,
+    "ordinary_gas": 15000000,
+    "header_gas_used": 16800000,
+    "recovered_ordinary_gas": 15000000,
+    "work_split_reconciles": true,
+    "system_within_g_sys": true,
+    "parent_base_fee": 1000000000,
+    "next_base_fee": 1008928571,
+    "budget_ok": true,
+    "closes_exactly": true
+  },
+  "forced_prefix_accounting": {
+    "note": "g_fi 20M reserved. A valid forced tx (success OR EVM-revert) charges its ExecGas to g_forced_actual against g_fi, keeping a standard receipt; an entry invalid at its turn is consumed for RejectedConsumptionGas. g_ordinary_actual is DiscretionaryGasUsed (NON-forced receipt gas) only. The 8M executed forced gas exceeds the 8M ordinary capacity once discretionary demand is present — proving reserved capacity is what makes an admitted forced tx includable — and it does not enter the EIP-1559 feedback loop.",
+    "g_fi": 20000000,
+    "ordinary_capacity": 8000000,
+    "entries": [
+      {
+        "sender": "succeeds",
+        "valid_at_its_turn": true,
+        "evm_reverted": false,
+        "declared_gas": 4000000,
+        "exec_gas": 3000000,
+        "in_receipt_trie": true
+      },
+      {
+        "sender": "reverts",
+        "valid_at_its_turn": true,
+        "evm_reverted": true,
+        "declared_gas": 6000000,
+        "exec_gas": 5000000,
+        "in_receipt_trie": true
+      },
+      {
+        "sender": "poison",
+        "valid_at_its_turn": false,
+        "evm_reverted": false,
+        "declared_gas": 0,
+        "exec_gas": 0,
+        "in_receipt_trie": false
+      }
+    ],
+    "forced_exec_gas": 8000000,
+    "rejected_consumption_gas": 21000,
+    "work_forced": 8021000,
+    "discretionary_gas_used": 4000000,
+    "system_gas": 1530000,
+    "header_gas_used": 13551000,
+    "recovered_ordinary_gas": 4000000,
+    "parent_base_fee": 1000000000,
+    "next_base_fee": 1000000000,
+    "next_base_fee_if_forced_gas_wrongly_counted": 1125000000,
+    "base_fee_ignores_forced_gas": true,
+    "forced_gas_within_g_fi": true,
+    "nine_million_forced_tx_fits_with_ordinary_full": true,
+    "work_split_reconciles": true,
+    "header_gas_closes_exactly": true,
+    "import_ok": true
+  },
+  "base_fee_series": [
+    {
+      "parent_base_fee": 1000000000,
+      "ordinary_used": 14000000,
+      "ordinary_target": 14000000,
+      "next_base_fee": 1000000000,
+      "note": "used == target -\u003e unchanged"
+    },
+    {
+      "parent_base_fee": 1000000000,
+      "ordinary_used": 21000000,
+      "ordinary_target": 14000000,
+      "next_base_fee": 1062500000,
+      "note": "used \u003e target -\u003e base fee rises"
+    },
+    {
+      "parent_base_fee": 1000000000,
+      "ordinary_used": 7000000,
+      "ordinary_target": 14000000,
+      "next_base_fee": 937500000,
+      "note": "used \u003c target -\u003e base fee falls"
+    },
+    {
+      "parent_base_fee": 8,
+      "ordinary_used": 0,
+      "ordinary_target": 14000000,
+      "next_base_fee": 7,
+      "note": "tiny parent fee, zero ordinary demand -\u003e clamps to positive floor"
+    }
+  ],
+  "base_fee_arithmetic_oracle": [
+    {
+      "parent_base_fee": 10000000000000,
+      "ordinary_used": 28000000,
+      "model_next_base_fee": 11250000000000,
+      "bigint_oracle_next_base_fee": 11250000000000,
+      "match": true,
+      "note": "parent 1e13, ordinary at 2x target: naive uint64 parent*(used-target) overflows"
+    },
+    {
+      "parent_base_fee": 1152921504606846976,
+      "ordinary_used": 3500000,
+      "model_next_base_fee": 1044835113549955072,
+      "bigint_oracle_next_base_fee": 1044835113549955072,
+      "match": true,
+      "note": "parent 2^60, quarter target: down-step, still exact"
+    },
+    {
+      "parent_base_fee": 4611686018427387904,
+      "ordinary_used": 28000000,
+      "model_next_base_fee": 4611686018427387904,
+      "bigint_oracle_next_base_fee": 4611686018427387904,
+      "match": true,
+      "note": "parent at MaxBaseFee: result stays clamped and exact"
+    }
+  ],
+  "ordinary_gas_recovery": [
+    {
+      "header_gas_used": 16800000,
+      "system_receipt_gas": 1800000,
+      "forced_receipt_gas_sum": 0,
+      "recovered_ordinary_gas": 15000000,
+      "ok": true
+    },
+    {
+      "header_gas_used": 20000000,
+      "system_receipt_gas": 2000000,
+      "forced_receipt_gas_sum": 3000000,
+      "recovered_ordinary_gas": 15000000,
+      "ok": true
+    },
+    {
+      "header_gas_used": 1000000,
+      "system_receipt_gas": 2000000,
+      "forced_receipt_gas_sum": 0,
+      "recovered_ordinary_gas": 0,
+      "ok": false
+    }
+  ],
+  "seal_outcome_list": {
+    "note": "The forced prefix runs FIFO; each entry's validity is decided AT ITS TURN against the running pre-state. Entry 1 spends alice's balance, so entry 2 — fine at admission — is invalid at its turn. The rejection set is knowable only after the prefix, so a post-prefix FinalizeStep (a second, gas-charged system op) writes sealRegistryCommitment into seal-registry contract storage; the first system call carries NO forced-outcome input. The valid forced entry (entry 1) is an ordinary transaction in transactionsRoot / receiptsRoot with a standard receipt, but its ExecGas is charged to g_forced_actual against the reserved g_fi budget. header.gasUsed = discretionary receipt gas + g_sys (open + finalize) + executed valid prefix + the g_fi consumption charge for rejected entries.",
+    "seal_registry_records": [
+      {
+        "Kind": "system",
+        "GasUsed": 1500000,
+        "Status": 1,
+        "Reason": "",
+        "Digest": "43i01JF/3p9b0KirvFvH37nyBF4fRmKTjGD00NhbZiA="
+      },
+      {
+        "Kind": "forced_rejected",
+        "GasUsed": 21000,
+        "Status": 0,
+        "Reason": "insufficient_balance_at_turn",
+        "Digest": "TXvFUykwpDdiHISW2bcWYSYow0GJcLe2cDjL/RIsswA="
+      }
+    ],
+    "seal_registry_commitment": "8ac7edd0cb6c68c88ade5df1f2feb804963677f6708b0cb3f9174b4b70eeb0c7",
+    "ordinary_tx_count": 3,
+    "successful_forced_tx_count_in_receipt_trie": 1,
+    "header_gas_used": 12451000,
+    "system_gas": 1530000,
+    "forced_exec_gas": 500000,
+    "rejected_entry_consumption_gas": 21000,
+    "recovered_ordinary_gas": 10400000,
+    "forced_entry_1_valid_at_its_turn": true,
+    "forced_entry_2_valid_at_its_turn": false,
+    "forced_entry_2_valid_at_admission": true,
+    "rejection_set_determined_only_at_turn_not_admission": true,
+    "commitment_written_by_post_prefix_finalization": true,
+    "rejection_record_is_not_an_evm_revert": true,
+    "system_or_rejected_record_in_a_trie": false,
+    "successful_forced_tx_in_tx_and_receipt_trie": true,
+    "commitment_is_a_contract_state_value_not_a_header_field": true,
+    "import_ok": true
+  },
+  "import_checks": [
+    {
+      "name": "valid",
+      "want_ok": true,
+      "want_code": "",
+      "got_ok": true,
+      "got_code": "",
+      "matches": true
+    },
+    {
+      "name": "companion_missing",
+      "want_ok": false,
+      "want_code": "companion_missing",
+      "got_ok": false,
+      "got_code": "companion_missing",
+      "matches": true
+    },
+    {
+      "name": "cert_not_verified",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "cert_wrong_origin",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "cert_wrong_authorized_round",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "cert_stale_root_round",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "witness_te_not_bound_to_trhash",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "transition_inserted_body",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "transition_substituted_body",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "rootinput_invalid_epoch",
+      "want_ok": false,
+      "want_code": "rootinput_invalid",
+      "got_ok": false,
+      "got_code": "rootinput_invalid",
+      "matches": true
+    },
+    {
+      "name": "rootinput_short_parent_hash",
+      "want_ok": false,
+      "want_code": "rootinput_invalid",
+      "got_ok": false,
+      "got_code": "rootinput_invalid",
+      "matches": true
+    },
+    {
+      "name": "malformed_origin_breaks_ref",
+      "want_ok": false,
+      "want_code": "companion_unauthenticated",
+      "got_ok": false,
+      "got_code": "companion_unauthenticated",
+      "matches": true
+    },
+    {
+      "name": "context_mismatch_round",
+      "want_ok": false,
+      "want_code": "context_mismatch",
+      "got_ok": false,
+      "got_code": "context_mismatch",
+      "matches": true
+    },
+    {
+      "name": "context_mismatch_parent",
+      "want_ok": false,
+      "want_code": "context_mismatch",
+      "got_ok": false,
+      "got_code": "context_mismatch",
+      "matches": true
+    },
+    {
+      "name": "extradata_mismatch",
+      "want_ok": false,
+      "want_code": "extradata_mismatch",
+      "got_ok": false,
+      "got_code": "extradata_mismatch",
+      "matches": true
+    },
+    {
+      "name": "seal_finalize_missing",
+      "want_ok": false,
+      "want_code": "seal_finalize_missing",
+      "got_ok": false,
+      "got_code": "seal_finalize_missing",
+      "matches": true
+    },
+    {
+      "name": "seal_finalize_not_after_prefix",
+      "want_ok": false,
+      "want_code": "seal_finalize_missing",
+      "got_ok": false,
+      "got_code": "seal_finalize_missing",
+      "matches": true
+    },
+    {
+      "name": "seal_registry_commitment_mismatch",
+      "want_ok": false,
+      "want_code": "seal_registry_commitment_mismatch",
+      "got_ok": false,
+      "got_code": "seal_registry_commitment_mismatch",
+      "matches": true
+    },
+    {
+      "name": "finalize_wrong_commitment",
+      "want_ok": false,
+      "want_code": "seal_registry_commitment_mismatch",
+      "got_ok": false,
+      "got_code": "seal_registry_commitment_mismatch",
+      "matches": true
+    },
+    {
+      "name": "system_origin_forged",
+      "want_ok": false,
+      "want_code": "system_origin_forged",
+      "got_ok": false,
+      "got_code": "system_origin_forged",
+      "matches": true
+    },
+    {
+      "name": "system_value_nonzero",
+      "want_ok": false,
+      "want_code": "system_value_nonzero",
+      "got_ok": false,
+      "got_code": "system_value_nonzero",
+      "matches": true
+    },
+    {
+      "name": "system_from_pool",
+      "want_ok": false,
+      "want_code": "system_from_pool",
+      "got_ok": false,
+      "got_code": "system_from_pool",
+      "matches": true
+    },
+    {
+      "name": "system_failed",
+      "want_ok": false,
+      "want_code": "system_failed",
+      "got_ok": false,
+      "got_code": "system_failed",
+      "matches": true
+    },
+    {
+      "name": "base_fee_below_floor",
+      "want_ok": false,
+      "want_code": "base_fee_below_floor",
+      "got_ok": false,
+      "got_code": "base_fee_below_floor",
+      "matches": true
+    },
+    {
+      "name": "withdrawals_nonempty",
+      "want_ok": false,
+      "want_code": "withdrawals_nonempty",
+      "got_ok": false,
+      "got_code": "withdrawals_nonempty",
+      "matches": true
+    },
+    {
+      "name": "blob_tx_present",
+      "want_ok": false,
+      "want_code": "blob_tx_present",
+      "got_ok": false,
+      "got_code": "blob_tx_present",
+      "matches": true
+    },
+    {
+      "name": "ordinary_gas_over_capacity",
+      "want_ok": false,
+      "want_code": "gas_budget",
+      "got_ok": false,
+      "got_code": "gas_budget",
+      "matches": true
+    },
+    {
+      "name": "finalizer_gas_hidden_from_work",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    },
+    {
+      "name": "work_system_mismatch",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    },
+    {
+      "name": "work_forced_mismatch",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    },
+    {
+      "name": "valid_forced_prefix",
+      "want_ok": true,
+      "want_code": "",
+      "got_ok": true,
+      "got_code": "",
+      "matches": true
+    },
+    {
+      "name": "forced_prefix_uses_reserved_capacity",
+      "want_ok": true,
+      "want_code": "",
+      "got_ok": true,
+      "got_code": "",
+      "matches": true
+    },
+    {
+      "name": "reverted_forced_tx_uses_reserved_capacity",
+      "want_ok": true,
+      "want_code": "",
+      "got_ok": true,
+      "got_code": "",
+      "matches": true
+    },
+    {
+      "name": "forced_prefix_over_g_fi",
+      "want_ok": false,
+      "want_code": "gas_budget",
+      "got_ok": false,
+      "got_code": "gas_budget",
+      "matches": true
+    },
+    {
+      "name": "forced_declared_over_g_fi",
+      "want_ok": false,
+      "want_code": "forced_declared_over_g_fi",
+      "got_ok": false,
+      "got_code": "forced_declared_over_g_fi",
+      "matches": true
+    },
+    {
+      "name": "forced_gas_charged_to_discretionary",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    },
+    {
+      "name": "forced_exec_over_declared",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    },
+    {
+      "name": "forced_tx_count_drops_admitted_entry",
+      "want_ok": false,
+      "want_code": "forced_tx_count_mismatch",
+      "got_ok": false,
+      "got_code": "forced_tx_count_mismatch",
+      "matches": true
+    },
+    {
+      "name": "rejected_entry_carries_exec_gas",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    },
+    {
+      "name": "combined_system_over_g_sys",
+      "want_ok": false,
+      "want_code": "gas_budget",
+      "got_ok": false,
+      "got_code": "gas_budget",
+      "matches": true
+    },
+    {
+      "name": "system_plus_finalize_overflow",
+      "want_ok": false,
+      "want_code": "gas_split_unreconciled",
+      "got_ok": false,
+      "got_code": "gas_split_unreconciled",
+      "matches": true
+    }
+  ]
+}

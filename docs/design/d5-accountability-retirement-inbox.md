@@ -120,6 +120,16 @@ Each entry has three states.
 entry (`nonce_already_used`, `insufficient_balance`, `fee_cap_below_base_fee`,
 `incompatible_activated_rules`, `higher_nonce_not_ready`) is consumed with its
 authenticated reason and does **not** stall the queue.
+
+**D2 gas accounting (reconciled).** When the produced EVM block is imported, D2
+§3 charges *each executed prefix entry's* gas — the actual gas an entry valid at
+its turn consumed, whether it succeeded or EVM-reverted (`ExecGas ≤ declaredGas`)
+— to `g_forced_actual` against the **same reserved `g_fi`**, plus
+`RejectedConsumptionGas` for each entry invalid at its turn. It is **never**
+charged to ordinary block capacity, so the reservation this section relies on is
+real: a discretionary-transaction backlog can never make an admitted prefix
+unincludable. See [ADR 0004](../adr/0004-reth-system-call-fee-profile.md) §3 and
+`evmroot/d2import.go` `reconcileWork`.
 `AcknowledgeConsumption(throughSeq)` moves every live entry with `seq ≤ throughSeq`
 to `entryCertifiedConsumed`, **removes it from the executable queue, releases its
 per-sender / global slot, and archives it** (retained for proof export, never
