@@ -259,8 +259,21 @@ func TestProvidesAndDiscoverNodes(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = peer3.Close() }()
 
-	require.Eventually(t, func() bool { return peer2.dht.RoutingTable().Size() == 3 }, 2*test.WaitDuration, test.WaitTick)
-	require.Eventually(t, func() bool { return peer1.dht.RoutingTable().Size() == 3 }, 2*test.WaitDuration, test.WaitTick)
+	// peer1 and peer2 were already up when peer3 joined, so neither learns about it
+	// from its own bootstrap - it has to reach them through the bootstrap node's
+	// gossip, and how long that takes is a property of the machine, not of the code
+	// under test. At 2*WaitDuration this was an 8s coin flip on a loaded runner: it
+	// is the "discovery timeout" recorded against F1 (#9), and it failed again in run
+	// 34105234592 while the identical job on the same commit passed.
+	//
+	// The budget is raised rather than the wait made active: dht.RefreshRoutingTable
+	// does force the lookup, but the queries it spawns outlive the test and log
+	// through newDHT's routing-table callback after it completes, which panics the
+	// package the same way the Subscriptions leak did. Nothing here is asserting how
+	// *fast* discovery converges, only that it does, so waiting longer costs a slow
+	// machine some seconds and costs a fast one nothing.
+	require.Eventually(t, func() bool { return peer2.dht.RoutingTable().Size() == 3 }, 8*test.WaitDuration, test.WaitTick)
+	require.Eventually(t, func() bool { return peer1.dht.RoutingTable().Size() == 3 }, 8*test.WaitDuration, test.WaitTick)
 	testTopic := "ab/test/test_topic"
 	require.NoError(t, peer2.Advertise(ctx, testTopic))
 	require.NoError(t, peer1.Advertise(ctx, testTopic))
