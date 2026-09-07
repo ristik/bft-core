@@ -325,6 +325,55 @@ Two things about this lane are worth stating plainly:
   from RLP, Keccak-256 and a recoverable secp256k1 signature using packages already in the module
   graph; `go.sum` is unchanged and no new module is added.
 
+### 5.8 Configured execution identity, and one gap that standard interfaces cannot close
+
+F1b (#89) binds what the node can actually verify before it votes, and records what it cannot.
+
+**What is enforced at startup**, all before any certification request is submitted:
+
+| Check | Source of truth | Refuses on |
+| --- | --- | --- |
+| Engine capability set | `engine_exchangeCapabilities` | any required V3 method missing, exchange failure, malformed response |
+| Chain id | `eth_chainId` vs the shard conf's `chain_id` param | mismatch, or the id being unreadable |
+| **Genesis identity** | `eth_getBlockByNumber("0x0")` vs `--expected-genesis-hash` | mismatch, unreadable genesis, malformed expected value |
+
+`--expected-genesis-hash` is **operator-configured**. It is deliberately not derived from the client
+under test, which would compare a value with itself and prove nothing, and it is not derivable from
+the shard conf either — `ubft engine-api genesis` builds the chain spec from the shard conf but the
+allocation is not part of it, and the allocation changes the genesis hash. A same-chain-id
+/different-genesis client is therefore a real deployment mistake, and it is refused: proven against
+real reth in `scripts/reth-paired-devnet.sh` §3d, with a client on chainId 31337 differing only in
+its allocation.
+
+**What none of this establishes.** A matching genesis hash binds the genesis *block*; it says
+nothing about a fork scheduled by timestamp later in the chain's life. The adapter's fork-schedule
+guarantee comes from `ubft engine-api genesis` pinning shanghai+cancun at genesis and scheduling
+nothing after, plus the capability check — see ADR 0001 decision 3. Neither chain id nor genesis
+should be described as full spec agreement.
+
+**The gap: `--engine-url` and `--eth-url` are not bound to each other.** Every identity check above
+reads from the **plain RPC** endpoint. The Engine endpoint is only asked for its capability list,
+which is identical on every chain. So a correct plain RPC paired with an Engine endpoint belonging
+to a *different* client passes every startup check.
+
+Standard interfaces cannot close this: the Engine API has no chain-identity read.
+`engine_exchangeCapabilities` and `engine_getClientVersionV1` identify software, not chains, and
+#89 rules out inventing an Engine method for local deployment wiring. So this is documented as a
+**constrained supported configuration** rather than papered over:
+
+> Both `--engine-url` and `--eth-url` must address the **same execution client instance**. The node
+> cannot verify this, and does not claim to.
+
+The gap is evidenced rather than asserted: `TestShardNodeRun_EngineAndEthMayDisagree` starts the CLI
+with a correct plain RPC and a mismatched Engine endpoint and asserts that it currently **starts**.
+If a future change closes the gap, that test fails and is inverted, rather than the gap quietly
+persisting because nothing tested it.
+
+Smallest options if this needs closing, for design review rather than unilateral choice: require the
+two URLs to share a host/authority and reject otherwise (cheap, catches the common misconfiguration,
+not a security control); or have deployment tooling assert the pairing, which moves the trust rather
+than removing it.
+
 ### 5.6 What this lane still does not cover
 
 It exercises one transaction through one leader. It is not a load test, not a fault-injection

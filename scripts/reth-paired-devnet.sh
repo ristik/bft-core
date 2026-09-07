@@ -202,6 +202,47 @@ else
 fi
 kill "$(cat test-nodes/reth-wrongchain/pid)" 2>/dev/null; rm -f test-nodes/reth-wrongchain/pid
 
+# 3d. Same chain id, DIFFERENT genesis (#89 item 2). Chain id does not establish genesis identity:
+# this client is on chainId 31337 exactly as configured, and differs only in its allocation, which
+# is what a genesis generated for a different deployment looks like. The expected value is supplied
+# by the operator, never read from the client under test.
+mkdir -p test-nodes/reth-othergenesis
+python3 - <<'PYGEN'
+import json
+g = json.load(open("test-nodes/evm-genesis-funded.json"))
+# Same chainId, different allocation -> different genesis hash.
+g["alloc"]["0x00000000000000000000000000000000000000aa"] = {"balance": "0x1"}
+json.dump(g, open("test-nodes/other-genesis.json", "w"))
+PYGEN
+reth node --chain test-nodes/other-genesis.json --datadir test-nodes/reth-othergenesis/dd \
+  --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18851 \
+  --http --http.addr 127.0.0.1 --http.port 18845 --http.api eth,net,web3 \
+  --port 30699 --disable-discovery --ipcdisable \
+  >test-nodes/reth-othergenesis/reth.log 2>&1 &
+echo $! >test-nodes/reth-othergenesis/pid
+for _ in $(seq 1 60); do
+  rpc http://127.0.0.1:18845 eth_chainId '[]' 2>/dev/null | grep -q result && break
+  sleep 1
+done
+expectedGenesis=$(rpc "$(echo http://127.0.0.1:$rethEthBase)" eth_getBlockByNumber '["0x0", false]' | pyget "['result']['hash']")
+otherChainID=$(rpc http://127.0.0.1:18845 eth_chainId '[]' | pyget "['result']")
+otherGenesis=$(rpc http://127.0.0.1:18845 eth_getBlockByNumber '["0x0", false]' | pyget "['result']['hash']")
+info "configured expectation: chainId 31337, genesis $expectedGenesis"
+info "the other client reports: chainId $otherChainID (same), genesis $otherGenesis (different)"
+genOut=$(build/ubft shard-node run --home test-nodes/evm1 --executor engine-api \
+  --address /ip4/127.0.0.1/tcp/28002 --trust-base test-nodes/trust-base.json \
+  --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
+  --engine-url http://127.0.0.1:18851 --eth-url http://127.0.0.1:18845 \
+  --expected-genesis-hash "$expectedGenesis" \
+  --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info 2>&1)
+genStatus=$?
+if [ "$genStatus" -ne 0 ] && echo "$genOut" | grep -q 'startup genesis check'; then
+  pass "shard-node run refused a same-chainId/different-genesis client (exit $genStatus), before voting"
+else
+  fail "same chain id with a different genesis was NOT refused (exit $genStatus): $(echo "$genOut" | tail -3)"
+fi
+kill "$(cat test-nodes/reth-othergenesis/pid)" 2>/dev/null; rm -f test-nodes/reth-othergenesis/pid
+
 echo
 echo "=== 4. start the root chain and the shard validators on --executor engine-api ==="
 source helper.sh

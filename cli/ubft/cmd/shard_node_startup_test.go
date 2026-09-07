@@ -36,6 +36,7 @@ type engineFixture struct {
 	chainID      string   // hex, e.g. "0x7a69"; empty means eth_chainId returns an error
 	capErr       bool     // engine_exchangeCapabilities returns HTTP 500
 	malformed    bool     // engine_exchangeCapabilities returns unparseable JSON
+	genesisHash  string   // 0x-prefixed; empty means eth_getBlockByNumber returns an error
 }
 
 func (f engineFixture) start(t *testing.T) *httptest.Server {
@@ -61,6 +62,17 @@ func (f engineFixture) start(t *testing.T) *httptest.Server {
 				return
 			}
 			writeResult(w, req.ID, f.capabilities)
+		case "eth_getBlockByNumber":
+			if f.genesisHash == "" {
+				writeError(w, req.ID, "block unavailable")
+				return
+			}
+			writeResult(w, req.ID, map[string]any{
+				"number": "0x0", "hash": f.genesisHash,
+				"parentHash": "0x" + strings.Repeat("00", 32),
+				"stateRoot":  "0x" + strings.Repeat("00", 32),
+				"timestamp":  "0x0",
+			})
 		case "eth_chainId":
 			if f.chainID == "" {
 				writeError(w, req.ID, "chain id unavailable")
@@ -263,4 +275,132 @@ func TestShardNodeRun_AcceptsACompatibleFixture(t *testing.T) {
 		"startup must get past its compatibility checks with a compatible fixture:\n%s", out)
 	require.NotContains(t, out, "missing required capabilities", out)
 	require.NotContains(t, out, "chain-identity check", out)
+}
+
+const (
+	expectedGenesis = "0x1111111111111111111111111111111111111111111111111111111111111111"
+	otherGenesis    = "0x2222222222222222222222222222222222222222222222222222222222222222"
+)
+
+// runShardNodeWithGenesis is runShardNode plus --expected-genesis-hash.
+func runShardNodeWithGenesis(t *testing.T, bin, home, shardConf, trustBase, engineURL, ethURL, wantGenesis string, budget time.Duration) (string, int, bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	args := []string{"shard-node", "run",
+		"--home", home, "--executor", "engine-api",
+		"--address", "/ip4/127.0.0.1/tcp/0",
+		"--shard-conf", shardConf, "--trust-base", trustBase,
+		"--engine-url", engineURL, "--eth-url", ethURL,
+		"--jwt-secret", filepath.Join(home, "jwt.hex"),
+		"--log-format", "text", "--log-level", "info",
+	}
+	if wantGenesis != "" {
+		args = append(args, "--expected-genesis-hash", wantGenesis)
+	}
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = repoRoot(t)
+	raw, _ := cmd.CombinedOutput()
+
+	code := -1
+	if ee, ok := errExit(cmd); ok {
+		code = ee
+	}
+	return string(raw), code, ctx.Err() == context.DeadlineExceeded
+}
+
+/*
+TestShardNodeRun_GenesisBinding covers #89 item 2: an operator-configured expected genesis hash,
+validated before the node can vote.
+
+Chain id does not establish genesis identity — the same-chain-id/different-genesis case below is
+the point. The expected value is operator-supplied; deriving it from the client under test would
+compare a value with itself.
+*/
+func TestShardNodeRun_GenesisBinding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the CLI binary")
+	}
+	bin := buildUbft(t)
+	home, shardConf, trustBase := shardHome(t, bin)
+	all := []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3"}
+
+	t.Run("same chain id, different genesis is refused before voting", func(t *testing.T) {
+		srv := engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: otherGenesis}.start(t)
+		out, code, timedOut := runShardNodeWithGenesis(t, bin, home, shardConf, trustBase,
+			srv.URL, srv.URL, expectedGenesis, 45*time.Second)
+
+		require.False(t, timedOut, "must fail closed promptly:\n%s", out)
+		require.NotEqual(t, 0, code, "must exit non-zero:\n%s", out)
+		require.Contains(t, out, "startup genesis check", out)
+		require.Contains(t, out, "configured expectation is", out)
+		require.NotContains(t, out, "shard node starting", "must refuse before announcing it is running")
+		require.NotContains(t, out, "submitting block certification request")
+	})
+
+	t.Run("genesis unavailable is refused, not skipped", func(t *testing.T) {
+		srv := engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: ""}.start(t)
+		out, code, _ := runShardNodeWithGenesis(t, bin, home, shardConf, trustBase,
+			srv.URL, srv.URL, expectedGenesis, 45*time.Second)
+		require.NotEqual(t, 0, code, out)
+		require.Contains(t, out, "reading genesis block", out)
+	})
+
+	t.Run("malformed expected value is refused", func(t *testing.T) {
+		srv := engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: expectedGenesis}.start(t)
+		out, code, _ := runShardNodeWithGenesis(t, bin, home, shardConf, trustBase,
+			srv.URL, srv.URL, "0xdeadbeef", 45*time.Second)
+		require.NotEqual(t, 0, code, out)
+		require.Contains(t, out, "expected-genesis-hash", out)
+	})
+
+	t.Run("matching genesis lets startup proceed", func(t *testing.T) {
+		srv := engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: expectedGenesis}.start(t)
+		out, _, timedOut := runShardNodeWithGenesis(t, bin, home, shardConf, trustBase,
+			srv.URL, srv.URL, expectedGenesis, 20*time.Second)
+		require.True(t, timedOut, "a matching genesis must let startup proceed; it exited:\n%s", out)
+		require.Contains(t, out, "shard node starting", out)
+	})
+}
+
+/*
+TestShardNodeRun_EngineAndEthMayDisagree documents #89 item 3 as an EVIDENCED GAP rather than a
+claim.
+
+`--engine-url` and `--eth-url` are configured independently. Every startup check this node performs
+reads chain identity from the PLAIN RPC endpoint: chain id and genesis both come from `eth_*`. The
+Engine endpoint is only asked for its capability list, which is identical on every chain.
+
+So a correct plain RPC paired with an Engine endpoint belonging to a different client passes every
+startup check. This test asserts that current behaviour, so the gap is recorded and any future fix
+has a failing case to flip.
+
+Standard Engine API offers no chain-identity read to close this — `engine_exchangeCapabilities` and
+`engine_getClientVersionV1` identify software, not chains — and #89 says not to invent an Engine
+method for local deployment wiring. The supported configuration is therefore constrained and
+documented: both URLs must address the same execution client instance. See
+docs/design/f1-baseline.md §5.8.
+*/
+func TestShardNodeRun_EngineAndEthMayDisagree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the CLI binary")
+	}
+	bin := buildUbft(t)
+	home, shardConf, trustBase := shardHome(t, bin)
+	all := []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3"}
+
+	// The plain RPC endpoint the operator intended: right chain, right genesis.
+	correct := engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: expectedGenesis}.start(t)
+	// A different client entirely, which happens to speak the same Engine methods — as every
+	// V3-capable client does — and is on a different chain.
+	wrongEngine := engineFixture{capabilities: all, chainID: "0x7a6a", genesisHash: otherGenesis}.start(t)
+
+	out, _, timedOut := runShardNodeWithGenesis(t, bin, home, shardConf, trustBase,
+		wrongEngine.URL, correct.URL, expectedGenesis, 20*time.Second)
+
+	require.True(t, timedOut,
+		"RECORDED GAP: startup accepts a mismatched Engine endpoint. If this now exits, the gap is closed and this test should be inverted:\n%s", out)
+	require.Contains(t, out, "shard node starting",
+		"the node starts despite its Engine endpoint belonging to a different chain:\n%s", out)
 }

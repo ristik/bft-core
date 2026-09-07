@@ -93,6 +93,37 @@ func (a *Adapter) CheckChainID(ctx context.Context, want uint64) error {
 	return nil
 }
 
+// CheckGenesisHash verifies the execution client's block 0 is the one this deployment was
+// configured for.
+//
+// Chain id does not establish this: two chains can share a chain id and differ in allocation,
+// fork schedule or any other genesis field, and `ubft engine-api genesis` derives the chain spec
+// from the shard conf but not the allocation, so a same-chainId/different-genesis client is a real
+// deployment mistake rather than a hypothetical.
+//
+// `want` must be operator-configured. Deriving it from the client under test would compare a value
+// with itself and prove nothing (issue #89 item 2).
+//
+// Scope, stated because it is easy to overclaim: this binds the genesis BLOCK. It does not
+// establish agreement on every future fork activation — a matching genesis hash says nothing about
+// a fork scheduled by timestamp later in the chain's life. The adapter's own fork-schedule
+// guarantee comes from `ubft engine-api genesis` pinning shanghai+cancun at genesis and nothing
+// after, plus the capability check; see docs/adr/0001-executor-boundary.md decision 3.
+func (a *Adapter) CheckGenesisHash(ctx context.Context, want shardnode.Hash) error {
+	if len(want) == 0 {
+		return fmt.Errorf("engineapi: no expected genesis hash configured")
+	}
+	genesis, err := a.eth.GetBlockByNumber(ctx, "0x0")
+	if err != nil {
+		return fmt.Errorf("engineapi: reading genesis block: %w", err)
+	}
+	if !bytes.Equal(genesis.Hash[:], want) {
+		return fmt.Errorf("engineapi: execution client genesis is %x, configured expectation is %x",
+			genesis.Hash[:], want)
+	}
+	return nil
+}
+
 func (a *Adapter) Head(ctx context.Context) (shardnode.BlockRef, error) {
 	h, err := a.eth.GetBlockByNumber(ctx, "latest")
 	if err != nil {
