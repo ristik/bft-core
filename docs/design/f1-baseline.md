@@ -345,7 +345,8 @@ negotiation.
 | Two `l1` commits unmerged; consistency-proof fixtures not retained | §3.2 | F8 (#16) |
 | FFI CI lane disabled (`if: false`) | §5.2 | F8 (#16) |
 | `rootchain/consensus` `Test_recoverState`, `Test_rootNetworkRunning`, `Test_ConsensusManager_messages` fail on a slow/loaded host: they assert round progress against wall-clock deadlines and reach only rounds 2–3 within them. Pass in CI (run 34102642015 attempt 2) and fail reproducibly on the F1 development host, in isolation as well as in the full suite. Not a protocol defect; a test-harness timing assumption. | §5.1 | F1 records; retest under F8 (#16)'s fixture work |
-| `scripts/chaos-evm.sh`'s `cold-restart` verdict came from a 15s race while its reported number came from a measurement 5s later, so the two contradicted each other in CI ("no progress" alongside "a 7-round outage"). **Fixed:** the verdict now comes from the measurement, and the wait is 45s rather than 5×T2. | §6.3 | F1 fixed |
+| `evm-shard-chaos` still stalls intermittently in CI after the leader is killed (`round stuck at 4 for 30s`) with a 3-of-4 quorum live. **Unexplained.** Three test bugs that were masking and partly causing it are fixed; the budget was deliberately not raised again, and the stall paths now dump per-validator round/submit/error evidence so the next occurrence is decidable. May belong to root-chain leader rotation rather than the shard. | §6.3 | Open, F8 (#16) |
+| Stale certification responses are classified as `ErrEquivocatingUC` at ERROR, indistinguishable from genuine equivocation | §6.3 | F2 (#10), F6 (#14) |
 | `gosec` reports 28 findings (analyzer job is `continue-on-error`) | §6.3 | F1 records; see §6.3 |
 | Certified head still in latest-only JSON persistence | `shardnode/store.go` | F6 (#14) |
 | Canonical root input unauthenticated at the executor boundary | §4.4 | F2 (#10) |
@@ -403,15 +404,38 @@ The D2 handoff requires these be recorded or fixed rather than waived.
   This was first recorded here as "environment-sensitive", which was a hypothesis stated as a
   diagnosis. Instrumenting it produced an actual answer.
 
-  **The failure was the test contradicting itself.** `cold-restart` took its verdict from whether a
-  15-second `wait_for_progress` won its race, but took the number it *reported* from a measurement
-  five seconds later. So CI runs 101730435909 and 101730449401 both printed `shard made no progress
-  during validator N's outage` immediately followed by `resumed certifying after a 7-round outage`.
-  The shard had progressed; only the race had been lost. 15s was too tight for what the scenario
-  deliberately provokes: `wait_for_progress`'s own comment notes that a round assigned to a
-  currently-dead leader recovers only after the root chain's T2 timeout reissues it to the next
-  leader, "a few multiples of T2" — and T2 is 3000ms here, so 15s allowed five, with nothing spare
-  for a loaded runner. The verdict now comes from the measurement and the wait is 45s.
+  **Three test bugs were found and fixed, in the same masking family.**
+
+  1. *The verdict contradicted the number.* `cold-restart` decided from whether a 15s
+     `wait_for_progress` won its race, but reported a measurement taken five seconds later. CI runs
+     101730435909 and 101730449401 both printed `shard made no progress during validator N's
+     outage` immediately followed by `resumed certifying after a 7-round outage`. The verdict now
+     comes from the measurement, and the wait is 45s — 15s allowed only five multiples of the
+     3000ms T2, and `wait_for_progress`'s own comment says a round assigned to a dead leader needs
+     "a few multiples of T2" to be reissued.
+  2. *Restart checks passed on pre-kill log lines.* Logs are opened with `>>`, so
+     `wait_for 'accepted certificate'` after a restart matched a certificate from **before** the
+     kill and returned instantly. Every "rejoined and resumed certifying" assertion was vacuous —
+     and worse, it let the script stop the next validator while the previous one had not actually
+     rejoined, leaving two of four live, below the 3-of-4 quorum. That produced a real stall caused
+     by the test itself. `wait_for_after` now requires a certificate logged past a marker captured
+     before the restart.
+  3. *The divergence check scanned the whole log.* See below.
+
+  **After all three, an intermittent stall still reproduces in CI, and it is not explained.** On
+  `c16d4fbf` one check set reported `quorum stalled after killing leader 2 (round stuck at 4 for
+  30s)`, with the subsequent cold-restart failure following from it. Killing one of four validators
+  should not stall a 3-of-4 quorum for 30 seconds. Two explanations remain open and the pass/fail
+  line cannot separate them: the shard genuinely wedged, or 30s (10×T2) is still too short for the
+  root chain to reissue the dead leader's round to the next leader in rotation.
+
+  **I deliberately did not tune the budget again**, because raising it is exactly what would hide
+  the first explanation. Instead the three stall paths now call `dump_stall_evidence`, which prints
+  each live validator's recent rounds, its recent `submitting block certification request` lines
+  (with `round=`, `quiet=`, `leader=`) and its last error. Rising round numbers there mean the
+  shard was working and the budget was tight; their absence means it was genuinely stuck. The next
+  CI occurrence will say which. **Open, owner F8 (#16)**, with the caveat that it may belong to
+  root-chain leader rotation rather than to the shard.
 
   **The instrumentation then caught the message the original check had hidden.** On `b9c1ae53`:
 

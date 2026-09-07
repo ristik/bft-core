@@ -106,6 +106,28 @@ check_divergence() {
   fi
 }
 
+# dump_stall_evidence <observed-validator> - print what the live validators were doing when a
+# progress assertion failed.
+#
+# A stall here has two very different explanations and the pass/fail line alone cannot separate
+# them: the shard genuinely wedged, or the budget was too short for the root chain's T2 timeout to
+# reissue the dead leader's round to the next leader in rotation. "Submitting block certification
+# request" lines with rising round numbers mean the shard is working and the budget was tight;
+# their absence means it is actually stuck. Print both, plus any error, so the next occurrence in
+# CI is decidable instead of another round of timeout guessing.
+dump_stall_evidence() {
+  local observed=$1 i
+  echo "  --- stall evidence ---" >&2
+  for i in $(seq 1 "$validators"); do
+    [ -f "test-nodes/evm$i/pid" ] || { echo "  evm$i: stopped" >&2; continue; }
+    echo "  evm$i last rounds: $(grep -o 'partitionRound=[0-9]*' "test-nodes/evm$i/debug.log" 2>/dev/null | tail -3 | tr '\n' ' ')" >&2
+    echo "  evm$i last submits: $(grep 'submitting block certification request' "test-nodes/evm$i/debug.log" 2>/dev/null | tail -2 | grep -oE 'round=[0-9]+ quiet=\w+ leader=\w+' | tr '\n' ' ')" >&2
+    echo "  evm$i last error: $(grep -iE 'level=(ERROR|WARN)' "test-nodes/evm$i/debug.log" 2>/dev/null | tail -1 | cut -c1-200)" >&2
+  done
+  echo "  observed validator was evm$observed" >&2
+  echo "  --- end ---" >&2
+}
+
 # log_lines - current line count of validator $1's log, for use as a "everything before here is
 # history" marker across a restart.
 log_lines() {
@@ -243,6 +265,7 @@ if wait_for_progress "$survivor" "$survivorBefore" 30; then
   pass "remaining $((validators - 1)) validators kept certifying without validator $follower (round $survivorBefore -> $(latest_round "$survivor"))"
 else
   fail "quorum stalled after killing validator $follower (round stuck at $survivorBefore for 30s)"
+  dump_stall_evidence "$survivor"
 fi
 echo "restarting validator $follower ..."
 followerMark=$(log_lines "$follower")
@@ -272,6 +295,7 @@ if wait_for_progress "$survivor" "$survivorBefore" 30; then
   pass "remaining $((validators - 1)) validators kept certifying without leader $leader (round $survivorBefore -> $(latest_round "$survivor"), leader rotation recovered)"
 else
   fail "quorum stalled after killing leader $leader (round stuck at $survivorBefore for 30s)"
+  dump_stall_evidence "$survivor"
 fi
 echo "restarting validator $leader ..."
 leaderMark=$(log_lines "$leader")
@@ -309,6 +333,7 @@ if [ "$otherRoundDuringOutage" -gt "$otherBefore" ]; then
   pass "shard progressed well past validator $target's last round ($before -> $otherRoundDuringOutage) while it was down"
 else
   fail "shard made no progress during validator $target's outage (validator $other stuck at round $otherBefore for 50s)"
+  dump_stall_evidence "$other"
 fi
 targetMark=$(log_lines "$target")
 start_one_evm_validator "$target" "$validators" "$partition_id" "$rootBoot" fake rpc
