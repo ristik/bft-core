@@ -291,13 +291,18 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 // MEASURED CORRECTION (issue #92 stage 2, scripts/reth-payload-retention.sh).
 // This used to assert that "reth writes a block to disk the moment
 // newPayload succeeds, before any forkchoiceUpdate makes it canonical".
-// Against the pinned client that is true only WITHIN a process lifetime:
-// forkchoiceUpdated to an accepted-but-unfinalised block returns VALID
-// while the client lives, and after a restart with the same datadir the
-// block is gone and forkchoiceUpdated returns SYNCING. So this path
-// recovers a lost in-memory pending record against a live executor; it
-// does not recover a shard-node restart, where the payload has to be
-// re-acquired. See docs/design/f6b-quiet-uc-recovery.md §1.
+// Against the pinned client that holds only WITHIN an execution-client
+// process lifetime: forkchoiceUpdated to an accepted-but-unfinalised block
+// returns VALID while the client lives, and after restarting the CLIENT on
+// the same datadir the same target returns SYNCING — unavailable for
+// immediate forkchoice, which is not a claim that it is invalid or
+// physically gone.
+//
+// Which restart happened therefore matters. A shard-node-only restart
+// leaves the executor running and still holding the block, so this path
+// works. An execution-client restart does not, and the payload has to be
+// re-acquired. See docs/design/f6b-quiet-uc-recovery.md §1.1 for the
+// restart matrix.
 //
 // So Commit is retried directly against the root-chain-certified hash
 // before giving up. This is the one place the framework calls Commit with

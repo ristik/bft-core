@@ -33,6 +33,14 @@ if [ "$rethCommit" != "$pinnedRethCommit" ]; then
   [ "${F1_ALLOW_UNPINNED_RETH:-0}" = "1" ] || exit 1
 fi
 echo "reth: $rethCommit"
+outDir=test-nodes/payload-retention-evidence
+rm -rf "$outDir"; mkdir -p "$outDir"
+{
+  echo "reth=$rethCommit"
+  echo "genesis=$genesis"
+  echo "genesisSha256=$(shasum -a 256 "$genesis" | cut -d' ' -f1)"
+  echo "bft=$(git rev-parse HEAD 2>/dev/null)"
+} | tee "$outDir/pins.txt"
 
 work=$(mktemp -d)
 jwt=$work/jwt.hex
@@ -49,7 +57,13 @@ stopReth() {
   done
   rethPid=""
 }
-cleanup() { stopReth; rm -rf "$work"; }
+cleanup() {
+  stopReth
+  # Preserve raw evidence before the temp directory goes away.
+  mkdir -p "$outDir"
+  cp "$work/reth.log" "$outDir/reth.log" 2>/dev/null || true
+  rm -rf "$work"
+}
 trap cleanup EXIT
 
 startReth() {
@@ -84,6 +98,35 @@ rpc() {
 }
 pyget() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d$1)" 2>/dev/null; }
 
+# lookupBlock <hash> - classify an eth_getBlockByHash outcome precisely. "null" (the block is not
+# known to this client) is a different fact from "error" (the query failed), and only the first is
+# evidence about retention. Prints: found:<hash> | null | error:<message>
+lookupBlock() {
+  local body
+  body=$(rpc "$eth" eth_getBlockByHash "[\"$1\", false]")
+  [ -n "$body" ] || { echo "error:empty response"; return; }
+  python3 - "$body" <<'PYEOF'
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception as e:
+    print("error:unparseable (%s)" % e); raise SystemExit
+if d.get("error") is not None:
+    print("error:%s" % d["error"].get("message", "unknown")); raise SystemExit
+r = d.get("result", "missing")
+if r is None:
+    print("null")
+elif r == "missing":
+    print("error:no result field")
+else:
+    print("found:%s" % r.get("hash"))
+PYEOF
+}
+
+# saveArtifact - keep raw evidence outside the temp dir, which cleanup deletes.
+outDir=test-nodes/payload-retention-evidence
+saveArtifact() { mkdir -p "$outDir"; printf '%s\n' "$2" >"$outDir/$1"; }
+
 engine="http://127.0.0.1:$enginePort"
 eth="http://127.0.0.1:$ethPort"
 
@@ -111,9 +154,13 @@ canon=$(rpc "$eth" eth_getBlockByNumber '["latest", false]' | pyget "['result'][
 [ "$canon" = "0x0" ] && pass "the block is accepted but NOT canonical (head still genesis)" \
   || fail "expected head to still be genesis, got $canon"
 
-byHash=$(rpc "$eth" eth_getBlockByHash "[\"$blockHash\", false]" | pyget "['result']['hash']")
-[ "$byHash" = "$blockHash" ] && pass "before restart: the non-canonical block is retrievable by hash" \
-  || info "before restart: eth_getBlockByHash does not return it (result was '$byHash')"
+byHash=$(lookupBlock "$blockHash")
+saveArtifact "B1-before-restart-getBlockByHash.txt" "$byHash"
+case "$byHash" in
+  found:*) info "B1 before restart: eth_getBlockByHash returns the non-canonical block" ;;
+  null)    info "B1 before restart: eth_getBlockByHash returns null — this public RPC does not expose a non-canonical block, which is NOT evidence about what is on disk" ;;
+  error:*) info "B1 before restart: eth_getBlockByHash $byHash" ;;
+esac
 
 echo
 echo "=== 1b. CONTROL: the same block is recoverable WITHOUT a restart ==="
@@ -121,8 +168,9 @@ echo "=== 1b. CONTROL: the same block is recoverable WITHOUT a restart ==="
 # If forkchoiceUpdated succeeds here and fails after the restart, the payload was live-process
 # state, not durable state — which is exactly the distinction #92 stage 2 has to design against.
 ctlStatus=$(rpc "$engine" engine_forkchoiceUpdatedV3 "[{\"headBlockHash\":\"$blockHash\",\"safeBlockHash\":\"$blockHash\",\"finalizedBlockHash\":\"$blockHash\"},null]" | pyget "['result']['payloadStatus']['status']")
+canonicalParentHash=$blockHash   # B1 is now finalized; it is the parent B2 builds on
 if [ "$ctlStatus" = "VALID" ]; then
-  pass "in-process: forkchoiceUpdated to the non-canonical block returns VALID (recovery works while the process lives)"
+  pass "B1 in-process: forkchoiceUpdated to the non-canonical block returns VALID (recovery works while the process lives)"
 else
   fail "in-process: forkchoiceUpdated returned $ctlStatus — the block is not usable even without a restart"
 fi
@@ -150,13 +198,18 @@ pass "reth restarted on the retained datadir"
 canonAfter=$(rpc "$eth" eth_getBlockByNumber '["latest", false]' | pyget "['result']['number']")
 info "canonical head after restart: $canonAfter"
 
-byHashAfter=$(rpc "$eth" eth_getBlockByHash "[\"$blockHash\", false]" | pyget "['result']['hash']")
-if [ "$byHashAfter" = "$blockHash" ]; then
-  pass "RETAINED: the non-canonical block survives the restart and is retrievable by hash"
-  retained=yes
+byHashAfter=$(lookupBlock "$blockHash")
+saveArtifact "B2-after-restart-getBlockByHash.txt" "$byHashAfter"
+info "B2 after restart: eth_getBlockByHash -> $byHashAfter (this RPC does not expose non-canonical blocks even before a restart, so it cannot by itself prove the bytes are gone)"
+
+# The load-bearing assertion is about the finalized parent, by HASH not by number: whatever
+# happened to B2, the canonical chain must be intact and identified exactly.
+parentAfter=$(rpc "$eth" eth_getBlockByNumber '["latest", false]' | pyget "['result']['hash']")
+saveArtifact "canonical-head-after-restart.txt" "$parentAfter"
+if [ "$parentAfter" = "$canonicalParentHash" ]; then
+  pass "the finalized canonical parent survives the restart, by hash ($parentAfter)"
 else
-  fail "NOT RETAINED: the block is gone after restart (eth_getBlockByHash returned '$byHashAfter')"
-  retained=no
+  fail "canonical head after restart is $parentAfter, expected the finalized parent $canonicalParentHash"
 fi
 
 echo
@@ -166,16 +219,29 @@ fcuStatus=$(echo "$fcu" | pyget "['result']['payloadStatus']['status']")
 info "forkchoiceUpdated -> $fcuStatus"
 if [ "$fcuStatus" = "VALID" ]; then
   finalHead=$(rpc "$eth" eth_getBlockByNumber '["latest", false]' | pyget "['result']['hash']")
-  [ "$finalHead" = "$blockHash" ] && pass "RECOVERABLE: the retained block became canonical after restart" \
+  [ "$finalHead" = "$blockHash" ] && pass "B2 became canonical after the restart — it WAS available" \
     || fail "forkchoiceUpdated reported VALID but head is $finalHead"
 else
-  fail "forkchoiceUpdated returned $fcuStatus — a retained payload is NOT directly recoverable this way"
+  info "B2 forkchoiceUpdated returned $fcuStatus — unavailable for immediate forkchoice after this execution-client restart (not a claim that the payload is invalid or physically absent)"
 fi
 
 echo
 echo "=== conclusion ==="
-echo "  payload retained across restart: ${retained}"
-echo "  forkchoiceUpdated after restart: ${fcuStatus}"
-[ "$failures" -eq 0 ] && echo "=== retained-local-payload recovery is viable against this pinned client ===" \
-  || echo "=== $failures check(s) failed — see above ==="
+cat <<CONCLUSION
+  Scope of this measurement: it restarts the EXECUTION CLIENT. No shard node is involved, so it
+  says nothing about a shard-process restart while reth stays alive — in that case the executor is
+  the same live process and B1's control applies.
+
+  B1 (built, accepted, then explicitly finalized in-process): forkchoiceUpdated -> VALID.
+  B2 (built, accepted, never made canonical, then reth restarted): forkchoiceUpdated -> ${fcuStatus}.
+
+  Exact conclusion: after this execution-client restart, B2 is UNAVAILABLE FOR IMMEDIATE
+  FORKCHOICE. SYNCING reports incomplete validation/availability; it is not proof that the payload
+  is invalid, and not a disk-state diagnosis. eth_getBlockByHash does not expose a non-canonical
+  block even before the restart, so it cannot independently show the bytes are gone.
+
+  The finalized canonical parent survived, asserted by hash.
+  Evidence retained in ${outDir}.
+CONCLUSION
+[ "$failures" -eq 0 ] && echo "=== measurement complete ===" || echo "=== $failures check(s) failed — see above ==="
 exit $((failures > 0))

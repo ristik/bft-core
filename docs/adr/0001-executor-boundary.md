@@ -81,12 +81,15 @@ because the certificate that just arrived already carries it. If the executor st
 > **Measured correction (issue #92).** This paragraph used to justify itself with "reth's
 > `newPayload` persists to disk *before* any `forkchoiceUpdate` makes a block canonical, so a crash
 > between submitting and certifying does not lose it". Against the pinned client that holds only
-> *within a process lifetime*: `forkchoiceUpdated` to an accepted-but-unfinalised block returns
-> `VALID` while the client lives, and after a restart with the same datadir the block is gone and
-> `forkchoiceUpdated` returns `SYNCING`. Measured by `scripts/reth-payload-retention.sh`. So this
-> recovery covers a lost in-memory pending record against a live executor — which is real and worth
-> having — but not a shard-node restart, where the payload must be re-acquired. See
-> `docs/design/f6b-quiet-uc-recovery.md` §1. If the executor doesn't have it, `Commit` reports `Syncing` and the
+> *within an execution-client process lifetime*: `forkchoiceUpdated` to an accepted-but-unfinalised
+> block returns `VALID` while the client lives, and after restarting the **client** on the same
+> datadir the same target returns `SYNCING` — unavailable for immediate forkchoice, which is not a
+> claim that it is invalid or physically absent. Measured by `scripts/reth-payload-retention.sh`.
+>
+> Which process restarted therefore matters, and the two must not be conflated: a **shard-node-only**
+> restart leaves the executor alive and still holding the block, so this recovery works; an
+> **execution-client** restart does not, and the payload must be re-acquired. See
+> `docs/design/f6b-quiet-uc-recovery.md` §1.1 for the restart matrix. If the executor doesn't have it, `Commit` reports `Syncing` and the
 framework fails loudly — the same "needs recovery" message as before, not a regression, just no longer
 the *only* outcome.
 
