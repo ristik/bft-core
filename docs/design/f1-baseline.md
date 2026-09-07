@@ -302,8 +302,8 @@ against reth `189c0df3` — all checks pass:
 | Check | Result |
 | --- | --- |
 | 4 reth instances on the generated chain spec, statically peered (§5 of `docs/engine-api-adapter.md`) | up |
-| **Negative:** chainId mismatch refused before voting | `execution client reports chainId=31338, shard conf says 31337` |
-| **Negative:** unreachable Engine API refused before voting | refused |
+| **Doctor preflight negative:** chainId mismatch rejected | `execution client reports chainId=31338, shard conf says 31337` |
+| **Doctor preflight negative:** unreachable Engine API rejected | refused |
 | Shard certifies with `--executor engine-api` against real reth | `partitionRound=14 rootRound=67` |
 | Idle rounds are `quiet=true` and reth stays at block 0 | as expected — see §3.3 |
 | A funded transaction is executed and certified | reth block 1, `status=0x1`, `gasUsed=0x5208` |
@@ -491,9 +491,20 @@ obligations below stay open on #9 with named owners rather than being reassigned
   one transaction through one leader (§5.6). Mixed cadence and multiple partitions are F8 (#16);
   the rest stays open on #9.
 - **Mismatch detection before voting:** §5.5 demonstrates two real negatives (chainId mismatch, an
-  unreachable Engine API), both refused by `shard-node doctor` before the node votes. F1 adds no
-  *new* detection mechanism — it exercises what already exists. A client speaking a different
-  Engine API version set is untested and needs F3 (#11)'s version negotiation to be meaningful.
+  unreachable Engine API), both rejected by `shard-node doctor`. This is preflight evidence, not a test that
+  `shard-node run` enforces chain identity before voting: startup currently calls
+  `CheckCapabilities`, while the chain-ID check is in doctor. F1 adds no new detection
+  mechanism. An automatic startup chain/spec-mismatch rejection and a differing Engine API
+  capability-set negative remain open on #9, with F3 (#11) as integration owner.
 - **The `l1` merge** (§3.2) is not done; F8 (#16) owns it.
 - **Cross-client execution fixtures** go to their implementation owners, and real UC / config / TR /
   transition derivation fixtures go to F2 (#10), per the D2 handoff.
+
+
+### Review validation clarification
+
+The paired negative assertions require a nonzero doctor exit and the specific failing
+`chain identity` / `engine link` diagnostic. An unrelated framework failure cannot satisfy them.
+The chaos divergence filter includes `cannot safely build round` explicitly: a fatal recovery
+error must fail even without the words `diverges` or `equivocat`. These checks were tightened
+during review; they do not change runtime protocol behavior or resolve the open leader stall.

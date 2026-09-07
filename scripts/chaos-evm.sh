@@ -82,7 +82,7 @@ check_divergence() {
   # attributes startup-time messages to whatever scenario happens to be running: CI job on
   # b9c1ae53 reported a FATAL equivocation "during outage-and-catchup" from line 8 of the log,
   # which was the node's very first startup, minutes earlier.
-  hits=$(awk -v n="$after" 'NR > n && tolower($0) ~ /diverges|equivocat/ {print NR ":" $0}' "$log" 2>/dev/null || true)
+  hits=$(awk -v n="$after" 'NR > n && tolower($0) ~ /diverges|equivocat|cannot safely build round/ {print NR ":" $0}' "$log" 2>/dev/null || true)
   if [ -z "$hits" ]; then
     pass "validator $v's $context logged no divergence or equivocation error"
     return

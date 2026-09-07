@@ -8,8 +8,8 @@
 # them through engineapi/'s own JWT minting, encoding, round-params derivation and
 # Build/Seal/Verify/Commit calls, certifying against a real root chain.
 #
-# It also runs the two negative cases F1 owes for "a version/spec mismatch is detected before
-# voting" (§5.5 of docs/design/f1-baseline.md).
+# It also tests two doctor preflight failures. These do not establish that shard-node run
+# enforces every corresponding check before voting (§5.5 of docs/design/f1-baseline.md).
 #
 # Usage:
 #   ./scripts/reth-paired-devnet.sh [validators] [rounds]      # defaults: 4 validators, 5 rounds
@@ -115,7 +115,7 @@ done
 pass "reth instances statically peered"
 
 echo
-echo "=== 3. version/spec mismatch is detected before voting (negative cases) ==="
+echo "=== 3. doctor preflight detects chainId mismatch and unreachable Engine API ==="
 
 # 3a. chainId mismatch. shard-node doctor compares the client's eth_chainId against the shard
 # conf; point it at a reth running a different chain and it must refuse.
@@ -144,21 +144,24 @@ doctorOut=$(build/ubft shard-node doctor --home test-nodes/evm1 --executor engin
   --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
   --engine-url http://127.0.0.1:18651 --eth-url http://127.0.0.1:18645 \
   --jwt-secret test-nodes/evm1/jwt.hex 2>&1)
-if echo "$doctorOut" | grep -q "chainId=31338"; then
-  pass "chainId mismatch refused before voting: $(echo "$doctorOut" | grep -o 'execution client reports chainId=[0-9]*, shard conf says [0-9]*' | head -1)"
+doctorStatus=$?
+if [ "$doctorStatus" -ne 0 ] && echo "$doctorOut" | grep -qE '^\[FAIL\] chain identity[[:space:]]+execution client reports chainId=31338, shard conf says 31337'; then
+  pass "doctor rejected chainId mismatch: $(echo "$doctorOut" | grep -o 'execution client reports chainId=[0-9]*, shard conf says [0-9]*' | head -1)"
 else
   fail "chainId mismatch NOT detected; doctor said: $(echo "$doctorOut" | tail -3)"
 fi
 kill "$(cat test-nodes/reth-wrong/pid)" 2>/dev/null; rm -f test-nodes/reth-wrong/pid
 
 # 3b. no Engine API at all behind the URL. CheckCapabilities must fail closed rather than
-# starting and stalling; the adapter calls it before the first round.
+# starting and stalling. Require the specific engine-link failure, not another doctor failure
+# (for example, the intentionally absent root bootnodes at this preflight stage).
 capOut=$(build/ubft shard-node doctor --home test-nodes/evm1 --executor engine-api \
   --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
   --engine-url http://127.0.0.1:18699 --eth-url "http://127.0.0.1:$rethEthBase" \
   --jwt-secret test-nodes/evm1/jwt.hex 2>&1)
-if echo "$capOut" | grep -qiE "fail|error|refused|cannot|unreachable"; then
-  pass "unreachable Engine API refused before voting"
+capStatus=$?
+if [ "$capStatus" -ne 0 ] && echo "$capOut" | grep -qE '^\[FAIL\] engine link[[:space:]]+engineapi: checking capabilities:'; then
+  pass "doctor rejected unreachable Engine API at its capability check"
 else
   fail "unreachable Engine API not detected; doctor said: $(echo "$capOut" | tail -3)"
 fi
