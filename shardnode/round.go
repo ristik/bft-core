@@ -306,12 +306,27 @@ func (r *Round) reconcile(ctx context.Context, uc *types.UnicityCertificate, exp
 	// pendingSubmission.hash, always a Block.Hash) — never by state root.
 	// uc.InputRecord.BlockHash is the certificate's own copy of that same
 	// value, which is why it's usable here even though r.pending (the only
-	// other place this framework remembers a block hash) is gone. A quiet
-	// certificate carries a nil BlockHash by construction (see
-	// BuildInputRecord) — there is no block to retry, and Commit will
-	// correctly report StatusSyncing for it, which is the right outcome:
-	// no amount of retrying recovers a round this node never built or
-	// verified at all.
+	// other place this framework remembers a block hash) is gone.
+	//
+	// KNOWN DEFECT (issue #92, reproduced by
+	// shardnode/round_quiet_recovery_test.go). A quiet certificate carries a
+	// nil BlockHash by construction (see BuildInputRecord), so when a node
+	// that is behind a state-changing block processes a quiet certificate,
+	// the target below is EMPTY. This comment used to claim that was
+	// harmless because "Commit will correctly report StatusSyncing for it".
+	// That is true of the in-memory fake executor and false of the Engine
+	// API adapter, which rejects a non-32-byte hash outright
+	// ("expected a 32-byte hash, got 0 bytes" — see
+	// engineapi.TestAdapterCommitRejectsEmptyHash). It is why a fake-only
+	// chaos suite never surfaced this path.
+	//
+	// An earlier non-quiet certificate can identify a block target, but this
+	// Round has no retained certificate-chain/anchor interface after restart.
+	// The reproduction keeps that earlier signed certificate in the test,
+	// not in the restarted Round. Acquiring, retaining and authenticating an
+	// anchor and binding it to the current certified context are stage 2 of
+	// #92. The empty-target failure occurs both when the fake retains the
+	// payload and when it does not; real-client durability is separate.
 	blockHash := Hash(uc.InputRecord.BlockHash)
 	if r.log != nil {
 		r.log.WarnContext(ctx, "executor head diverges from certified state — attempting recovery via Commit before giving up",
