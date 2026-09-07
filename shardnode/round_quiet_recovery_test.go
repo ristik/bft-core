@@ -2,6 +2,7 @@ package shardnode_test
 
 import (
 	"context"
+	"crypto"
 	"sync"
 	"testing"
 
@@ -10,6 +11,8 @@ import (
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
+	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
 )
@@ -72,9 +75,9 @@ misses one real block and then sees a quiet round lands here.
 
 Two sub-cases are covered separately, as #92 requires, because they need different fixes:
 
-	(a) the certified payload IS present locally, merely not canonical — the exact situation a
-	    restarted node is in, since reth stores a block on newPayload before any forkchoiceUpdate
-	    makes it canonical. Recovery is possible in principle and still fails.
+	(a) the certified payload IS present locally, merely not canonical. This models one possible
+	    restart state; it does not prove reth payload durability across process/power failure.
+	    A separate control establishes that the fake can apply the explicit block target.
 	(b) the certified payload is absent — recovery genuinely cannot proceed locally, but the node
 	    should say so precisely rather than reporting an empty commit target.
 
@@ -116,8 +119,8 @@ func TestRound_QuietUCAfterMissedBlock_RecoveryTargetIsEmpty(t *testing.T) {
 			req2 := sub.last(t)
 			require.NotEmpty(t, req2.InputRecord.BlockHash, "round 2 must be non-quiet for this scenario")
 
-			// The block is Verified but never Committed — exactly a node that died between
-			// submitting and processing the confirming certificate.
+			// The fake block is Verified but never Committed. This models retained local data;
+			// the real client's restart/durability guarantees require separate evidence.
 			headBefore, err := exec.Head(ctx)
 			require.NoError(t, err)
 			require.Empty(t, headBefore.Hash, "round 2's block is not canonical yet")
@@ -134,14 +137,25 @@ func TestRound_QuietUCAfterMissedBlock_RecoveryTargetIsEmpty(t *testing.T) {
 
 			// The root chain certified round 2, and round 3 was QUIET — nothing to execute, so
 			// its input record carries a nil BlockHash while still advancing the certified state.
-			uc2 := certifyFrom(req2, 3, 1000)
-			quietUC3 := quietFrom(uc2, 4, 1000)
+			// Authenticate both fixture certificates using the actual UC verifier. The test
+			// retains uc2; roundAfter receives only quietUC3 and has no anchor store.
+			tb := testtrustbase.NewTrustBase(t, signer)
+			pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8}
+			tr3Hash, err := tr(3, 0, nodeID).Hash()
+			require.NoError(t, err)
+			uc2 := testcertificates.CreateUnicityCertificate(t, signer, req2.InputRecord, pdr, 3, make([]byte, 32), tr3Hash)
+			require.NoError(t, uc2.Verify(tb, crypto.SHA256, 8, types.ShardID{}, uc2.ShardConfHash))
+			nextTR := tr(4, 0, nodeID)
+			tr4Hash, err := nextTR.Hash()
+			require.NoError(t, err)
+			quietUC3 := testcertificates.CreateUnicityCertificate(t, signer, quietFrom(uc2, 4, 1000).InputRecord, pdr, 4, uc2.UnicitySeal.Hash, tr4Hash)
+			require.NoError(t, quietUC3.Verify(tb, crypto.SHA256, 8, types.ShardID{}, uc2.ShardConfHash))
 			require.Empty(t, quietUC3.InputRecord.BlockHash, "round 3 is quiet: nil BlockHash by construction")
 			require.Equal(t, []byte(req2.InputRecord.Hash), []byte(quietUC3.InputRecord.PreviousHash),
 				"the quiet round still extends round 2's certified state, which this node never applied")
 
 			before := len(exec.commitTargets())
-			err = roundAfter.HandleCertificate(ctx, quietUC3, tr(4, 0, nodeID))
+			err = roundAfter.HandleCertificate(ctx, quietUC3, nextTR)
 
 			// The defect: recovery is attempted with an EMPTY target.
 			targets := exec.commitTargets()
@@ -151,13 +165,26 @@ func TestRound_QuietUCAfterMissedBlock_RecoveryTargetIsEmpty(t *testing.T) {
 
 			require.Error(t, err, "the node cannot build on a state it never applied")
 
-			// The certified block this node needed is round 2's, and it is named in the
-			// certificate chain the node already holds — uc2's BlockHash. Recovery had a
-			// usable, authenticated target available and did not use it.
+			// The fixture holds a verified UC naming the earlier block. It is NOT supplied
+			// to roundAfter: this does not prove a restarted node has retained that anchor.
+			// Stage 2 must define its authenticated acquisition/persistence and binding.
 			require.NotEmpty(t, uc2.InputRecord.BlockHash)
-			t.Logf("#92 trace: executorHead=%x certifiedPrevious=%x quietUC.BlockHash=%v commitTarget=%v recoverableTarget(uc2.BlockHash)=%x payloadPresent=%t err=%v",
+			t.Logf("#92 trace: executorHead=%x certifiedPrevious=%x quietUC.BlockHash=%v commitTarget=%v fixtureAnchor(uc2.BlockHash)=%x payloadPresent=%t err=%v",
 				headBefore.StateRoot, quietUC3.InputRecord.PreviousHash, quietUC3.InputRecord.BlockHash,
 				targets[len(targets)-1], uc2.InputRecord.BlockHash, tc.payloadPresent, err)
+
+			// Control: with the explicit fixture target, the two availability cases differ.
+			// This is a test-only direct commit after observing the defect, not a repair.
+			controlStatus, controlErr := fake.Commit(ctx, shardnode.Hash(uc2.InputRecord.BlockHash))
+			require.NoError(t, controlErr)
+			if tc.payloadPresent {
+				require.Equal(t, shardnode.StatusValid, controlStatus)
+				applied, err := fake.Head(ctx)
+				require.NoError(t, err)
+				require.Equal(t, []byte(uc2.InputRecord.Hash), []byte(applied.StateRoot))
+			} else {
+				require.Equal(t, shardnode.StatusSyncing, controlStatus)
+			}
 
 			// And nothing was signed from the unreconciled executor.
 			for _, req := range subAfter.got {
