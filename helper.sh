@@ -280,7 +280,7 @@ function start_one_evm_validator() {
     --address "/ip4/127.0.0.1/tcp/$port" --bootnodes "$bootnodes" \
     --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-    --log-format text --log-level info "${executorArgs[@]}" "${rpcArgs[@]}" \
+    --log-format text --log-level "${EVM_VALIDATOR_LOG_LEVEL:-info}" "${executorArgs[@]}" "${rpcArgs[@]}" \
     >> "test-nodes/evm$i/debug.log" 2>&1 &
   echo $! > "test-nodes/evm$i/pid"
 }
