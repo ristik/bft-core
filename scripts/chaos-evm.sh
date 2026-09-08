@@ -377,6 +377,42 @@ fi
 # that already exited.
 rm -f "test-nodes/evm$victim/pid"
 
+# Stale-delivery observation (#93). A delayed certificate cannot be FORCED here — it happens when a
+# node subscribed to several root nodes receives the certified sequence out of order, which is
+# timing-dependent — so this reports what the run actually saw rather than asserting a count. What it
+# does assert is the part that must always hold: whatever stale deliveries occurred were classified
+# as routine, never as a fatal conflict.
+#
+# The routine diagnostic is DEBUG, and validators run at INFO unless EVM_VALIDATOR_LOG_LEVEL says
+# otherwise, so say plainly when the run could not have observed it either way. Reporting "0" without
+# that caveat would read as coverage when it is only silence.
+echo
+echo "=== stale-delivery observation (#93) ==="
+staleTotal=0
+for i in $(seq 1 "$validators"); do
+  # NOT `|| echo 0`: grep -c prints "0" AND exits 1 when nothing matches, so the fallback appends a
+  # second zero and the arithmetic below fails with a syntax error. Let grep's own "0" stand, and
+  # only substitute when the file is missing entirely (grep prints nothing).
+  n=$(grep -c 'stale UC, ignoring' "test-nodes/evm$i/debug.log" 2>/dev/null)
+  [ -n "$n" ] || n=0
+  staleTotal=$((staleTotal + n))
+done
+if [ "${EVM_VALIDATOR_LOG_LEVEL:-info}" != "debug" ]; then
+  info_line="validators ran at ${EVM_VALIDATOR_LOG_LEVEL:-info}; the routine stale diagnostic is DEBUG, so this run could not observe the path either way"
+  echo "  ..   $info_line"
+  echo "  ..   re-run with EVM_VALIDATOR_LOG_LEVEL=debug to record stale deliveries"
+elif [ "$staleTotal" -eq 0 ]; then
+  echo "  ..   no stale deliveries occurred in this run (routine: they are timing-dependent and cannot be forced)"
+else
+  pass "observed $staleTotal stale delivery/deliveries, all classified as routine"
+fi
+# Independent of log level: a stale certificate must never have been reported as a fatal conflict.
+if grep -qiE 'equivocat|impossible certificate ordering' test-nodes/evm*/debug.log 2>/dev/null; then
+  fail "a certificate was reported as a fatal conflict during this run — see test-nodes/evm*/debug.log"
+else
+  pass "no certificate was reported as a fatal conflict in any validator"
+fi
+
 echo
 if [ "$failures" -eq 0 ]; then
   echo "=== chaos-evm.sh: all scenarios passed ==="
