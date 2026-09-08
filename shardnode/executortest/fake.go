@@ -31,8 +31,11 @@ import (
 // (leader side); a Fake driven only through Verify/Commit (follower side)
 // never needs entries queued locally.
 type Fake struct {
-	mu   sync.Mutex
-	head shardnode.BlockRef
+	mu sync.Mutex
+	// genesis is fixed at construction and never moves, so GenesisBlock answers from
+	// configuration the way a real client does rather than from anything that has happened.
+	genesis shardnode.BlockRef
+	head    shardnode.BlockRef
 
 	// committed indexes blocks Verify has accepted but Commit has not yet
 	// finalized, keyed by hash, so Commit (follower path) can find them.
@@ -50,6 +53,7 @@ func New() *Fake {
 	genesisRoot := make(shardnode.Hash, 32)
 	genesis := shardnode.BlockRef{Number: 0, Hash: nil, StateRoot: genesisRoot}
 	return &Fake{
+		genesis:   genesis,
 		head:      genesis,
 		committed: make(map[string]shardnode.Block),
 		builds:    make(map[shardnode.BuildID]shardnode.Block),
@@ -68,6 +72,12 @@ func (f *Fake) Head(_ context.Context) (shardnode.BlockRef, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.head, nil
+}
+
+func (f *Fake) GenesisBlock(_ context.Context) (shardnode.BlockRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.genesis, nil
 }
 
 func (f *Fake) Build(_ context.Context, p shardnode.RoundParams) (shardnode.BuildID, error) {

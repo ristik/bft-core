@@ -383,6 +383,15 @@ Forbidden in every row: `Commit(nil)`, substituting a state root for a block has
 validation, clearing stored authority to proceed, and **accepting a continuity claim that was not
 re-derived from retained certificates** (§3.3).
 
+**Building is not a neutral act, so leadership is gated where voting is.** `Executor.Build` asks the
+execution client to move its forkchoice to the parent — engineapi sends head, safe **and finalized**
+as `p.Parent.Hash` — so a leader that builds on a head it cannot prove is certified has already made
+the client finalize that head before any vote is withheld, and nothing later undoes a finalization.
+A node that fails P-id therefore declines to LEAD. It still follows: `Verify` is `newPayload` only,
+which stores the payload without moving the forkchoice, so an abstaining follower keeps receiving
+payloads and stays able to recover. Every finality-changing Engine call is reached only from
+authenticated certified ancestry.
+
 **Row 2 has no recovery path in stage 3, and that is not an oversight.** A node whose executor sits
 on a different block at the certified state has diverged in a way no target this design can name will
 fix: it is not behind, so there is nothing to commit forward to, and stage 4's payload acquisition
@@ -679,6 +688,24 @@ persisted half.
   repeat certificates (§3.3.2's "running — deciding");
 - `reconcile` taking its recovery target from that anchor instead of the certificate in hand, which
   is the #92 defect: `Commit(nil)` is now unrepresentable, not merely avoided;
+- **a commit target that comes from the certificate, never from the pending proposal.** `r.pending`
+  is what this node built or verified for the round it last submitted; committing is a different act
+  — for the Engine adapter it sets head, safe and FINALIZED — and may only apply to a block the root
+  chain has certified. The two were conflated, and a transport failure was enough to expose it: a
+  failed `Submit` ended the round with the next proposal installed as pending, the delivery layer
+  recorded the certificate as unapplied, the retransmission re-entered the round, and the
+  uncertified proposal was finalized. `commitPrevious` now commits only when the certificate is for
+  the round this node proposed for, commits the block the certificate names rather than the one this
+  node proposed, and commits nothing at all when the round was certified quiet;
+- **the send separated from the application.** `ErrSubmissionFailed` marks a failure to put an
+  already-applied round's request on the wire. The delivery layer treats it as applied, so a
+  retransmission is not re-driven; the send itself is retried, bounded, with the identical signed
+  bytes, because a retry must never put different bytes for one round on the wire;
+- **the genesis identity read from the executor's chain configuration** (`Executor.GenesisBlock`,
+  block zero), not from the first head this process observed. A new process can attach to an
+  executor that has already committed blocks, so "this process has not committed" is not "nothing
+  has committed" — an arbitrary tip was accepted as genesis. The nil-state genesis path additionally
+  refuses to run at all unless the executor is at that block;
 - **continuity keyed on the round the previous certificate ASSIGNED** (§3.3.2), not on consecutive
   round numbers, and the genesis exception compared against the executor's own genesis block rather
   than against "block number 0". Both corrections come from the real-reth lane, and both were

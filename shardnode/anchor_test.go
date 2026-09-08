@@ -232,7 +232,15 @@ func TestCheckHeadIdentity(t *testing.T) {
 		require.ErrorContains(t,
 			c.checkHeadIdentity(genesis, s0, nil),
 			"head-identity-mismatch",
-			"and with no genesis head captured there is nothing to compare against")
+			"and with no genesis identity established there is nothing to compare against")
+
+		// Two genesis headers can share a state root — the state root does not commit to the
+		// header — so the comparison must be by the whole block reference and not by state.
+		otherGenesis := BlockRef{Number: 0, Hash: []byte{0xee}, StateRoot: s0}
+		require.ErrorContains(t,
+			c.checkHeadIdentity(otherGenesis, s0, &genesis),
+			"head-identity-mismatch",
+			"a different genesis header with the same state root is a different chain")
 	})
 
 	t.Run("the exception does not outlive the genesis anchor", func(t *testing.T) {

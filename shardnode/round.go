@@ -81,12 +81,14 @@ type Round struct {
 	// resumed from (node.go's LoadLUC / verifyRestoredLUC / SeedLUC sequence). A Round marked this
 	// way observes, reconciles and stays diagnosable, but never signs — see abstainRestored.
 	restoredFrom *uint64
-	// genesisHead is the executor's head as it was before this node processed any certificate —
-	// the configured genesis block, since nothing can have been committed yet. It is the only
-	// thing §4 row 13's exception is allowed to accept as "the executor is still at genesis", and
-	// capturing it here is what makes that comparison possible without plumbing chain
-	// configuration into the round loop.
-	genesisHead *BlockRef
+	// executorGenesis is the executor's block ZERO, read from it once via Executor.GenesisBlock.
+	//
+	// It is deliberately NOT "the first head this process observed". That was the previous
+	// revision and it was unsound: a new process can attach to an executor that has already
+	// committed blocks, so "this process has not committed" does not imply "nothing has
+	// committed", and an arbitrary observed tip — block 99 with an arbitrary hash — was accepted
+	// as the configured genesis. Block zero comes from the chain configuration and does not move.
+	executorGenesis *BlockRef
 	// warnedRestored keeps the abstention out of the log on every subsequent round; it is a
 	// steady state for as long as the process lives, not an event.
 	warnedRestored bool
@@ -260,11 +262,23 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("reading executor head: %w", err)
 	}
 	r.health.updateExecutorStatus(true, "")
-	if r.genesisHead == nil {
-		// The first head this process ever read. commitPrevious above cannot have moved it: on the
-		// first certificate there is nothing pending to commit.
-		first := head
-		r.genesisHead = &first
+	if r.executorGenesis == nil {
+		g, gerr := r.executor.GenesisBlock(ctx)
+		if gerr != nil {
+			return fmt.Errorf("reading executor genesis block: %w", gerr)
+		}
+		r.executorGenesis = &g
+	}
+
+	// THE GENESIS PATH, gated. exp.PreviousHash is empty exactly when the root chain has certified
+	// nothing for this shard, so the executor must still be at its own genesis block. Without this
+	// a node whose executor is at some arbitrary later block signs the shard's first round on it,
+	// and every check downstream is then anchored to that block.
+	if len(exp.PreviousHash) == 0 && !sameBlockRef(head, *r.executorGenesis) {
+		r.metrics.recordIRDivergence(ctx, "identity_genesis_head_mismatch")
+		r.health.updateVoting(false, "executor is not at its configured genesis block")
+		return fmt.Errorf("shardnode: the root chain has certified nothing for this shard yet, so the executor must be at its genesis block %d/%x, but its head is %d/%x — refusing to build round %d",
+			r.executorGenesis.Number, r.executorGenesis.Hash, head.Number, head.Hash, exp.Round)
 	}
 	// exp.PreviousHash is nil exactly when the root chain has never
 	// certified anything for this shard yet (its genesis IR.Hash is nil —
@@ -307,7 +321,25 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("reading certificate seal hash: %w", err)
 	}
 
-	block, params, err := r.produceBlock(ctx, head, exp, sealHash, tr.Leader)
+	// LEADERSHIP REQUIRES P-id, because building is not a neutral act. Executor.Build asks the
+	// execution client to move its forkchoice to the parent — engineapi sends head, safe AND
+	// finalized as p.Parent.Hash — so a leader that builds on a head it cannot prove is certified
+	// makes the client finalize that head, before any vote is withheld and beyond any later
+	// undoing. Following is different: a follower awaits and verifies, and engineapi's Verify is
+	// newPayload only, which stores the payload without moving the forkchoice. So an abstaining
+	// node keeps receiving payloads — which is what lets it recover — and does not lead.
+	leader := tr.Leader
+	if identityErr != nil && leader == r.nodeID {
+		r.metrics.recordIRDivergence(ctx, "identity_declined_leadership")
+		if r.log != nil {
+			r.log.WarnContext(ctx, "declining to lead this round: cannot prove the executor is on the certified block, and building would finalize it",
+				slog.Uint64("round", exp.Round), slog.String("reason", identityErr.Error()))
+		}
+		r.health.updateVoting(false, identityErr.Error())
+		return nil
+	}
+
+	block, params, err := r.produceBlock(ctx, head, exp, sealHash, leader)
 	if err != nil {
 		return fmt.Errorf("producing round %d block: %w", exp.Round, err)
 	}
@@ -417,9 +449,49 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 
 	if r.log != nil {
 		r.log.InfoContext(ctx, "submitting block certification request",
-			slog.Uint64("round", exp.Round), slog.Bool("quiet", irQuiet), slog.Bool("leader", tr.Leader == r.nodeID))
+			slog.Uint64("round", exp.Round), slog.Bool("quiet", irQuiet), slog.Bool("leader", leader == r.nodeID))
 	}
-	return r.submitter.Submit(ctx, req)
+	return r.send(ctx, req, exp.Round)
+}
+
+// ErrSubmissionFailed marks a failure to SEND an already-applied round's certification request.
+//
+// It exists so the delivery layer can tell the two halves of HandleCertificate apart. Everything
+// before the send is APPLICATION — observing the certificate, committing what it certified,
+// reconciling — and if that fails the certificate should be retried. The send is not: by the time
+// it runs, the certificate in hand has been fully applied, and what failed belongs to the NEXT
+// round's proposal. Treating the two the same is what let a transport error cause a
+// retransmission to re-enter the round and commit an uncertified proposal.
+var ErrSubmissionFailed = errors.New("shardnode: certification request was not sent")
+
+// submitRetries is how many extra times an uncertain send is retried with the SAME signed bytes.
+// Small on purpose: the request is only useful while its round is current, and the root chain
+// discards a stale one. Re-signing is never an option — a retry must not put different bytes for
+// the same round on the wire.
+const submitRetries = 2
+
+const submitRetryInterval = 100 * time.Millisecond
+
+func (r *Round) send(ctx context.Context, req *certification.BlockCertificationRequest, round uint64) error {
+	var err error
+	for attempt := 0; ; attempt++ {
+		if err = r.submitter.Submit(ctx, req); err == nil {
+			return nil
+		}
+		if attempt >= submitRetries || ctx.Err() != nil {
+			break
+		}
+		if r.log != nil {
+			r.log.WarnContext(ctx, "retrying the certification request send with the same signed bytes",
+				slog.Uint64("round", round), slog.Int("attempt", attempt+1), slog.String("err", err.Error()))
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(submitRetryInterval):
+		}
+	}
+	r.metrics.recordIRDivergence(ctx, "submit_failed")
+	return fmt.Errorf("%w for round %d after %d attempts: %w", ErrSubmissionFailed, round, submitRetries+1, err)
 }
 
 // identityCheck evaluates P-id (§4 rows 1, 2, 8, 10, 13) and returns the named refusal, or nil.
@@ -427,7 +499,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 // diagnostic is computed from the head as it was BEFORE this round's block was built while the
 // consequence lands where it belongs.
 func (r *Round) identityCheck(ctx context.Context, head BlockRef, exp Expectation) error {
-	err := r.continuity.checkHeadIdentity(head, Hash(exp.PreviousHash), r.genesisHead)
+	err := r.continuity.checkHeadIdentity(head, Hash(exp.PreviousHash), r.executorGenesis)
 	if err == nil {
 		return nil
 	}
@@ -486,20 +558,62 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 	if !p.needsCommit {
 		return nil
 	}
-	status, err := r.executor.Commit(ctx, p.hash)
+
+	// NOTHING IS COMMITTED THAT THIS CERTIFICATE DOES NOT CERTIFY.
+	//
+	// r.pending is a PROPOSAL: the block this node built or verified for the round it last
+	// submitted. Committing is a different act — for the Engine adapter it sets head, safe and
+	// FINALIZED — and it may only ever apply to a block the root chain has certified.
+	//
+	// The two were conflated, and a plain transport failure was enough to expose it. Submit
+	// returning an error ended HandleCertificate with the next round's proposal already installed
+	// as pending; BFTClient recorded the certificate as unapplied; the retransmission re-entered
+	// HandleCertificate; and commitPrevious finalised that uncertified proposal. Nothing later can
+	// undo a finalisation.
+	//
+	// So the target comes from the certificate, and only when the certificate is about the round
+	// this node proposed for. A certificate for another round — a replay of the one before it, a
+	// repeat of an earlier round — certifies nothing about the proposal and commits nothing.
+	ir := uc.InputRecord
+	if ir.RoundNumber != p.round {
+		r.metrics.recordIRDivergence(ctx, "commit_not_certified")
+		if r.log != nil {
+			r.log.DebugContext(ctx, "not committing: this certificate is not about the round this node proposed for",
+				slog.Uint64("proposedRound", p.round), slog.Uint64("certifiedRound", ir.RoundNumber))
+		}
+		return nil
+	}
+	if len(ir.BlockHash) == 0 {
+		// The round was certified QUIET: the root chain says no block was produced, whatever this
+		// node built. There is nothing certified to commit.
+		r.metrics.recordIRDivergence(ctx, "commit_certified_quiet")
+		return nil
+	}
+	target := Hash(ir.BlockHash)
+	if !bytes.Equal(target, p.hash) && r.log != nil {
+		// Following the root chain's decision means committing ITS block, not this node's. The
+		// previous revision logged this line and then committed p.hash anyway — and compared the
+		// certified STATE root against a BLOCK hash to decide whether to log it, so it fired on
+		// every ordinary non-quiet round against a real executor.
+		r.log.WarnContext(ctx, "the certified block differs from the one this node proposed — committing the certified one",
+			slog.String("certified", fmt.Sprintf("%x", target)), slog.String("proposed", fmt.Sprintf("%x", p.hash)))
+	}
+	status, err := r.executor.Commit(ctx, target)
 	if err != nil {
 		return err
 	}
 	if status != StatusValid {
 		r.metrics.recordIRDivergence(ctx, "commit_failed")
 		return fmt.Errorf("shardnode: executor could not commit round %d (hash %x, status %s) — this node has fallen behind and needs to resync (see docs/troubleshooting.md)",
-			p.round, p.hash, status)
-	}
-	if !bytes.Equal(uc.InputRecord.Hash, p.hash) && r.log != nil {
-		r.log.WarnContext(ctx, "certified hash differs from what this node submitted — following the root chain's decision",
-			slog.String("certified", fmt.Sprintf("%x", uc.InputRecord.Hash)), slog.String("submitted", fmt.Sprintf("%x", p.hash)))
+			p.round, target, status)
 	}
 	return nil
+}
+
+// sameBlockRef compares two heads by every field that identifies a block. Number and state root
+// alone are not identity — that is the whole subject of P-id — and neither is a hash on its own.
+func sameBlockRef(a, b BlockRef) bool {
+	return a.Number == b.Number && bytes.Equal(a.Hash, b.Hash) && bytes.Equal(a.StateRoot, b.StateRoot)
 }
 
 // reconcile is the crash-recovery path: head diverges from what uc just

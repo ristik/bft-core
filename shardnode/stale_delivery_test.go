@@ -44,6 +44,10 @@ func newSeqExecutor() *seqExecutor {
 	return &seqExecutor{building: map[BuildID]Block{}, blocks: map[string]Block{}}
 }
 
+func (e *seqExecutor) GenesisBlock(context.Context) (BlockRef, error) {
+	return BlockRef{Number: 0}, nil
+}
+
 func (e *seqExecutor) addEntries(b []byte) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

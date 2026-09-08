@@ -259,20 +259,18 @@ func (c *continuityState) checkHeadIdentity(head BlockRef, certifiedState Hash, 
 	// there is nothing to compare it against — and the row says what to compare instead: the
 	// executor's own genesis block, BY HASH.
 	//
-	// `genesis` is the head this node's executor reported before it had processed any certificate,
-	// which is the configured genesis block by construction: nothing has been committed yet. It is
-	// compared in full — number, block hash and state root — and that completeness is what keeps
-	// this from being a bypass. An earlier revision accepted any head at block NUMBER 0 whose state
-	// matched, which let a head with a fabricated block hash through: the reviewer's own
-	// same-state/different-block reproduction passed again. Only the actual genesis block is the
-	// genesis block.
+	// `genesis` is the executor's block ZERO, read from it through Executor.GenesisBlock, and it
+	// is compared in full — number, block hash and state root. Two earlier revisions were weaker
+	// and both were wrong: accepting any head at block NUMBER 0 whose state matched let a
+	// fabricated block hash through, and taking "the first head this process observed" as genesis
+	// let an executor that had already committed blocks present its tip as one. Only the block the
+	// executor's own chain configuration starts from is the genesis block.
 	//
 	// This is not a standing exemption either. It applies to one anchor — the one installed by the
 	// round the root chain certified against a nil PreviousHash — and the first state-changing
 	// round replaces it, after which every comparison is by block hash.
 	if c.anchor.fromGenesisRound && genesis != nil &&
-		head.Number == genesis.Number && bytes.Equal(head.Hash, genesis.Hash) &&
-		bytes.Equal(head.StateRoot, genesis.StateRoot) && bytes.Equal(head.StateRoot, c.anchor.StateRoot) {
+		sameBlockRef(head, *genesis) && bytes.Equal(head.StateRoot, c.anchor.StateRoot) {
 		return nil
 	}
 	return &recoveryTargetError{"head-identity-mismatch",

@@ -169,6 +169,66 @@ func TestRound_IdentityGate(t *testing.T) {
 	})
 }
 
+// buildRecordingExecutor records the parent every Build is asked to extend. Build is not a neutral
+// observation: engineapi's implementation sends forkchoiceUpdated with head, safe AND finalized set
+// to the parent, so recording what reaches it is recording what the execution client is told to
+// finalize.
+type buildRecordingExecutor struct {
+	shardnode.Executor
+	parents []shardnode.BlockRef
+}
+
+func (e *buildRecordingExecutor) Build(ctx context.Context, p shardnode.RoundParams) (shardnode.BuildID, error) {
+	e.parents = append(e.parents, p.Parent)
+	return e.Executor.Build(ctx, p)
+}
+
+/*
+TestRound_DoesNotBuildOnAnIdentityRejectedParent closes the boundary that moving the P-id verdict to
+the signing gate opened.
+
+Withholding the vote is not enough on its own, because building is itself a finality-changing act:
+Executor.Build asks the client to move its forkchoice to the parent, and engineapi sends head, safe
+and finalized as that parent's hash. A leader that builds on a head it cannot prove is certified has
+already made the client finalize it before any vote is withheld, and no later check can undo that.
+
+Following is different, and deliberately still allowed: a follower awaits and verifies, and
+engineapi's Verify is newPayload only, which stores the payload without moving the forkchoice. That
+is what keeps an abstaining node supplied with payloads so it can recover.
+*/
+func TestRound_DoesNotBuildOnAnIdentityRejectedParent(t *testing.T) {
+	ctx := context.Background()
+	fake := executortest.New()
+	rewind := &rewindableExecutor{Executor: fake}
+	exec := &buildRecordingExecutor{Executor: rewind}
+	sub := &recordingSubmitter{}
+	round, nodeID := newTestRound(t, exec, sub)
+	health := shardnode.NewHealth()
+	round.SetHealth(health)
+
+	require.NoError(t, round.HandleCertificate(ctx, genesisUC(1000), tr(1, 0, nodeID)))
+	fake.AddEntries([]byte("block A"))
+	require.NoError(t, round.HandleCertificate(ctx, certifyFrom(sub.last(t), 2, 1000), tr(2, 0, nodeID)))
+	require.NoError(t, round.HandleCertificate(ctx, certifyFrom(sub.last(t), 3, 1000), tr(3, 0, nodeID)))
+	quiet := certifyFrom(sub.last(t), 4, 1000)
+
+	// The executor reports the certified state on a different block.
+	head, err := exec.Head(ctx)
+	require.NoError(t, err)
+	head.Hash = make([]byte, 32)
+	head.Hash[0] = 0xff
+	rewind.rewindTo(head)
+
+	builds, votes := len(exec.parents), len(sub.got)
+	require.NoError(t, round.HandleCertificate(ctx, quiet, tr(4, 0, nodeID)),
+		"declining to lead is not a processing error")
+	require.Len(t, sub.got, votes, "no vote")
+	require.Len(t, exec.parents, builds,
+		"and no Build: the rejected parent must never reach an Engine call that finalizes it")
+	require.False(t, health.Snapshot().Voting)
+	require.Contains(t, health.Snapshot().NonVotingReason, "head-identity-mismatch")
+}
+
 /*
 TestRound_TransientCommitFailureKeepsTheAnchor pins the ordering that makes a failed apply
 recoverable at all (design §5, §5.1).
@@ -217,4 +277,53 @@ func TestRound_TransientCommitFailureKeepsTheAnchor(t *testing.T) {
 		"P-id: the executor is at the certified BLOCK, not merely at a matching state")
 	require.Equal(t, []byte(uc2.InputRecord.Hash), []byte(head.StateRoot))
 	require.Equal(t, uint64(4), sub.last(t).InputRecord.RoundNumber, "and the node is voting again")
+}
+
+/*
+TestRound_GenesisPathRequiresTheConfiguredGenesisBlock covers the other half of §4 row 13: not the
+exception's shape, but who is allowed to invoke it.
+
+`exp.PreviousHash` is empty exactly when the root chain has certified nothing for this shard, so the
+executor must still be at its own genesis block. Two earlier revisions took the executor's word for
+that in ways that do not hold: one accepted any head at block NUMBER 0 with a matching state root,
+the other took "the first head this process observed" as genesis — but a new process can attach to
+an executor that has already committed blocks, so "this process has not committed" is not "nothing
+has committed". The identity now comes from Executor.GenesisBlock, which answers from the client's
+chain configuration.
+*/
+func TestRound_GenesisPathRequiresTheConfiguredGenesisBlock(t *testing.T) {
+	t.Run("an executor sitting on a later block cannot start a shard", func(t *testing.T) {
+		ctx := context.Background()
+		fake := executortest.New()
+		exec := &rewindableExecutor{Executor: fake}
+		sub := &recordingSubmitter{}
+
+		// The reviewer's reproduction: an arbitrary tip presented at the first certificate.
+		head, err := exec.Head(ctx)
+		require.NoError(t, err)
+		head.Number = 99
+		head.Hash = make([]byte, 32)
+		head.Hash[0] = 0xab
+		exec.rewindTo(head)
+
+		round, nodeID := newTestRound(t, exec, sub)
+		err = round.HandleCertificate(ctx, genesisUC(1000), tr(1, 0, nodeID))
+		require.Error(t, err)
+		require.ErrorContains(t, err, "must be at its genesis block")
+		require.Empty(t, sub.got, "nothing may be signed on an execution head the shard never certified")
+	})
+
+	t.Run("the ordinary idle start is unaffected", func(t *testing.T) {
+		// The positive control, and the shape a real client presents on a fresh shard: the
+		// executor is at its configured genesis and the first rounds proceed normally.
+		ctx := context.Background()
+		fake := executortest.New()
+		sub := &recordingSubmitter{}
+		round, nodeID := newTestRound(t, fake, sub)
+
+		require.NoError(t, round.HandleCertificate(ctx, genesisUC(1000), tr(1, 0, nodeID)))
+		require.Len(t, sub.got, 1)
+		require.NoError(t, round.HandleCertificate(ctx, certifyFrom(sub.last(t), 2, 1000), tr(2, 0, nodeID)))
+		require.Len(t, sub.got, 2)
+	})
 }
