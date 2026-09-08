@@ -654,6 +654,91 @@ and the root chain's databases. Signing keys are deliberately excluded. Retentio
 **Open, and blocking.** Owner: F2 (#10) for classification, F8 (#16) and root consensus for the
 stall. Per the review, budgets were not raised and no diagnostic was suppressed.
 
+### 5.7 Real-reth workload and fault harness (F1a #88) — evidence pending isolated reruns
+
+`scripts/reth-chaos.sh` is the real-execution counterpart to `scripts/chaos-evm.sh`: four pinned
+reth instances, one per validator, driven by the actual Go adapter, with a funded transaction
+workload so recovery is judged by executed blocks and receipts rather than by round counters that
+advance whether or not anything ran. No fake fallback; a wrong client revision fails.
+
+```bash
+./scripts/reth-chaos.sh -v 4 -t 2      # -F injects a failure to exercise evidence collection
+./scripts/reth-chaos-selftest.sh       # the assertion oracle's own regression tests, no devnet
+```
+
+**A previous revision of this section drew a conclusion this harness could not support, and it is
+withdrawn.** It claimed three independent scenarios showed an executor that "never catches up", and
+attributed it to blocks never being gossiped over devp2p. Review 5134687869 found two defects that
+invalidate that reading:
+
+- **Scenarios continued after a failed recovery**, so each later fault was injected into an already
+  degraded cluster. The retained `convergence.txt` shows node 1 stuck at block 4 while others
+  reached 6 and 7 — the later scenarios were measuring the earlier unrecovered state, not the fault
+  they named.
+- **A failed observation could satisfy an assertion.** With every block and receipt RPC returning a
+  JSON-RPC error, all four nodes produced the same empty observation, so "all clients agree on the
+  canonical head", "…on the sender nonce" and "…on every receipt" all passed with zero failures.
+
+The devp2p attribution was also asserted without tracing it, and is withdrawn on that ground alone.
+
+**What the harness now guarantees.** Every observation goes through `rpcField`, which fails on a
+transport error, a JSON-RPC error, a null result or a missing field, so an unobservable client is a
+failure rather than a value that matches other failures. `assertConvergence` additionally requires
+every live participant to answer and every recorded transaction to have a receipt matching the
+block and status it was recorded with. `scripts/reth-chaos-selftest.sh` pins all of this, including
+the reviewer's exact reproduction, and runs without a devnet. After any failed recovery the
+remaining scenarios are reported **NOT RUN** rather than producing contaminated evidence. The
+leader-kill target is taken from the authenticated technical record (the leader named for the next
+round by the latest accepted certificate) and that boundary is recorded; if it cannot be read the
+run says so and labels the scenario a shard-process restart. Evidence collection and teardown run
+on success, failure and cancellation, and the archive is verified before it is claimed.
+
+**A failure to retain the evidence fails the run.** Evidence collection happens in the supervisor
+process, so it reports through the same `fail()` the scenarios use, while the child writes its own
+count to a file. Those are two independent counts and `superviseResult` adds them; an earlier
+revision assigned the child's over the supervisor's, so a successful run whose archive could not be
+written printed the FAIL line and then exited 0 saying "evidence complete" (review 5144079322).
+Since the evidence *is* the deliverable of this lane, that direction is the one that matters, and
+the summary now attributes each side — `N from the run, M from evidence collection`.
+`scripts/reth-chaos-selftest.sh` executes the real `superviseResult` and the real `collectEvidence`
+against a fabricated tree, provoking a failed archive, a failed copy and a planted secret file with
+a **successful** child, plus a clean positive control.
+
+**The concrete runtime lead**, which is more specific than anything this harness had concluded, came
+from the retained `evm1` log: a divergent state with `certifiedBlockHash=""` followed by
+`engineapi: commit: expected a 32-byte hash, got 0 bytes` — `Round.reconcile` passing a quiet
+certificate's nil `BlockHash` into `Commit`. That is **#92**, with its own deterministic regression
+and local-payload-present versus absent cases. The stale-certificate-versus-equivocation taxonomy is
+**#93**. Neither is claimed here.
+
+**First isolated run, at an exact committed revision.** bft `f1d8a1c3c0a97bbb5d17bb3213479b213984335b`,
+reth `189c0df32617afc488e0f091dbface1bd72cceb4`, clean tree, genesis
+`efe500c5…`, funded genesis `f68ca0e5…`, evidence archive sha256 `98eed1d3f13e980e…`.
+Result: 12 pass, 3 fail, 5 NOT RUN.
+
+The isolation changed the finding, and not in my favour. The **follower restart with its reth
+retained** — the one case the previous revision reported as recovering fully — now **fails**:
+
+```
+PASS: follower-restart: validator 2 accepted a new certificate after returning
+FAIL: follower-restart: validator 2's executor did not apply the new block (still 2:0x8655ef86…)
+FAIL: post-follower-restart: validator 2 has no receipt for 0xcbed4193… (executed and recorded earlier)
+FAIL: post-follower-restart: 1 of 4 live clients could not be observed; convergence NOT established
+```
+
+It passed before because the weak oracle accepted an unobservable client as agreement. So the
+correct statement is narrower than either previous version: **one fault, the mildest of the four,
+already leaves a returning node's executor behind**, and scenarios 3 to 6 are honestly NOT RUN
+rather than reported. Nothing here says the other three faults behave the same way; that needs
+per-scenario clean fixtures.
+
+**Status.** The harness is corrected and its oracle is regression-tested; this single isolated run
+is the only scenario evidence, and it covers exactly one fault. #88 stays open. The likely runtime
+cause is #92 (`Round.reconcile` passing a quiet certificate's nil `BlockHash` into `Commit`), which
+fits a node that accepts certificates but never applies a block. Owners: F6 (#14) for the executor
+recovery contract, F2 (#10) for what a returning node should do about a certified head it cannot
+reach, F8 (#16) — which should not treat this as an explanation for the unexplained stall.
+
 ### 6.4 Real-reth in CI
 
 `.github/workflows/reth-smoke.yml` runs the adapter against the **approved pinned execution client**
