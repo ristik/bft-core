@@ -284,10 +284,28 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 // certified, and r.pending — the in-memory record commitPrevious would
 // normally use — is empty, because it never survives a restart. That does
 // not necessarily mean the certified block is lost: an Executor backed by
-// a persistent store (reth writes a block to disk the moment newPayload
-// succeeds, before any forkchoiceUpdate makes it canonical) may still have
-// it sitting right there, simply never finalized because the process died
-// between submitting the request and processing the confirming UC.
+// a persistent store may still have it sitting right there, simply never
+// finalized because the process died between submitting the request and
+// processing the confirming UC.
+//
+// MEASURED CORRECTION (issue #92 stage 2, scripts/reth-payload-retention.sh).
+// This used to assert that "reth writes a block to disk the moment
+// newPayload succeeds, before any forkchoiceUpdate makes it canonical".
+// Against the pinned client that holds only WITHIN an execution-client
+// process lifetime: forkchoiceUpdated to an accepted-but-unfinalised block
+// returns VALID while the client lives, and after restarting the CLIENT on
+// the same datadir the same target returns SYNCING — unavailable for
+// immediate forkchoice, which is not a claim that it is invalid or
+// physically gone.
+//
+// Which restart happened therefore matters. A shard-node-only restart
+// leaves the executor running, so it does not by itself destroy the block
+// and this path can work — but that is not a guarantee the executor ever
+// received or still holds the payload; only the executor's own answer
+// establishes that. An execution-client restart leaves the target
+// unavailable for immediate forkchoice, and the payload has to be
+// re-acquired. See docs/design/f6b-quiet-uc-recovery.md §1.1 for the
+// restart matrix.
 //
 // So Commit is retried directly against the root-chain-certified hash
 // before giving up. This is the one place the framework calls Commit with

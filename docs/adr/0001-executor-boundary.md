@@ -75,12 +75,26 @@ restarted process can replay or discard it deliberately.
 
 The narrower one, which is what's implemented: on divergence, retry `Commit` once, using the
 certificate's own `InputRecord.BlockHash` field — a value the framework didn't need to remember,
-because the certificate that just arrived already carries it. If the executor still holds that block
-(reth's `newPayload` persists to disk *before* any `forkchoiceUpdate` makes a block canonical, so a
-crash between submitting and certifying does not lose it), `Commit` succeeds and the round proceeds
-exactly as if nothing happened. If the executor doesn't have it, `Commit` reports `Syncing` and the
-framework fails loudly — the same "needs recovery" message as before, not a regression, just no longer
-the *only* outcome.
+because the certificate that just arrived already carries it. If the executor still holds that block,
+`Commit` succeeds and the round proceeds exactly as if nothing happened.
+
+> **Measured correction (issue #92).** This paragraph used to justify itself with "reth's
+> `newPayload` persists to disk *before* any `forkchoiceUpdate` makes a block canonical, so a crash
+> between submitting and certifying does not lose it". Against the pinned client that holds only
+> *within an execution-client process lifetime*: `forkchoiceUpdated` to an accepted-but-unfinalised
+> block returns `VALID` while the client lives, and after restarting the **client** on the same
+> datadir the same target returns `SYNCING` — unavailable for immediate forkchoice, which is not a
+> claim that it is invalid or physically absent. Measured by `scripts/reth-payload-retention.sh`.
+>
+> Which process restarted therefore matters, and the two must not be conflated: a **shard-node-only**
+> restart leaves the executor alive, so it does not *by itself* destroy the block and this recovery
+> can work — though it is no guarantee the executor ever received or still holds that payload, which
+> only the executor's own answer establishes. An **execution-client** restart leaves the target
+> unavailable for immediate forkchoice, and the payload must be re-acquired. See
+> `docs/design/f6b-quiet-uc-recovery.md` §1.1 for the restart matrix.
+
+If the executor doesn't have it, `Commit` reports `Syncing` and the framework fails loudly — the same
+"needs recovery" message as before, not a regression, just no longer the *only* outcome.
 
 ```go
 // shardnode/round.go, reconcile — the recovery path
@@ -104,12 +118,21 @@ against the actual `Fake` executor rather than reasoning abstractly:
    available precisely because the certificate that triggers reconciliation is the same certificate
    that would have supplied it to `pendingSubmission.hash` in the non-crash path.
 
-2. **Quiet certificates have no block to recover.** `InputRecord.BlockHash` is nil by construction
-   whenever a round was quiet (state didn't move — see `shardnode/inputrecord.go`'s `BuildInputRecord`).
-   `Commit(ctx, nil)` correctly reports `Syncing` in that case, and reconciliation correctly fails: a
-   quiet round has nothing to recover *because there was nothing built*, and if the executor's head is
-   still wrong after that, the actual problem is that several rounds' worth of state were missed
-   entirely — a genuine resync gap, not something a single retry can paper over.
+2. **Quiet certificates have no block to recover** — and this reasoning turned out to be wrong.
+   `InputRecord.BlockHash` is nil by construction whenever a round was quiet (state didn't move — see
+   `shardnode/inputrecord.go`'s `BuildInputRecord`).
+
+   > **Corrected (issue #92, reproduced in `shardnode/round_quiet_recovery_test.go`).** The claim
+   > that "`Commit(ctx, nil)` correctly reports `Syncing`" is true of the in-memory fake and false of
+   > the Engine API adapter, which rejects a non-32-byte hash outright ("expected a 32-byte hash, got
+   > 0 bytes"). That divergence is why a fake-only chaos suite never surfaced this path.
+   >
+   > The deeper error is the "nothing to recover" premise. A quiet certificate does not mean this
+   > node built nothing worth recovering — it means *the quiet round* built nothing. A node that
+   > missed an earlier **non-quiet** round and then receives a quiet certificate still has a real
+   > block to recover, and its hash is simply not in the certificate in hand. Recovery needs a
+   > retained authenticated anchor from the last non-quiet certificate; see
+   > `docs/design/f6b-quiet-uc-recovery.md` §3.
 
 This was proven, not asserted: `shardnode/round_recovery_test.go` reproduces exactly the scenario
 review specified as an acceptance gate — build a round with real state-changing entries, discard the
@@ -181,7 +204,11 @@ since it was already written above the Engine API's own versioning.
   conformance suite in `shardnode/executortest` is the only contract between them.
 - Recovery correctness depends on the executor's own durability guarantees, which must be documented
   per-implementation (this ADR does it for `engineapi`; a future aggregator `Executor` would need the
-  equivalent statement for its own storage).
+  equivalent statement for its own storage). **Those guarantees must be measured, not assumed**: the
+  pinned reth retains an accepted-but-unfinalised payload only within a process lifetime, not across
+  a restart, which narrows what the framework's `Commit`-based recovery can achieve. Measured by
+  `scripts/reth-payload-retention.sh`; consequences in `docs/design/f6b-quiet-uc-recovery.md` §1
+  (issue #92).
 - Fork-schedule pinning means this adapter does not "just work" against an arbitrary reth chain spec —
   deployment tooling (`ubft engine-api genesis`, `doctor`) exists specifically because that failure
   mode is otherwise silent until a scheduled fork activates mid-operation.
