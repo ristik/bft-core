@@ -406,14 +406,20 @@ fi
 echo
 echo "=== 5. an idle shard certifies quiet rounds and builds no EVM block ==="
 echo "waiting for $rounds certified rounds ..."
+# The wait and the verdict must measure the SAME thing. This used to wait for `rounds` accepted
+# certificates and then assert on the number of quiet SUBMISSIONS, which is a different count made
+# a moment later: a run where the certificates had arrived but the submission for the current round
+# had not yet been logged failed with "quiet=0" while the shard was behaving perfectly. Waiting for
+# the asserted condition itself removes the race without weakening anything — the budget is
+# unchanged and a shard that genuinely never submits a quiet round still fails.
 for _ in $(seq 1 120); do
   n=$(grep -c 'accepted certificate' test-nodes/evm1/debug.log 2>/dev/null || echo 0)
-  [ "$n" -ge "$rounds" ] && break
+  quiet=$(grep -c 'quiet=true' test-nodes/evm1/debug.log 2>/dev/null || echo 0)
+  [ "$n" -ge "$rounds" ] && [ "$quiet" -gt 0 ] && break
   sleep 2
 done
 idleHead=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBlockByNumber '["latest", false]' | pyget "['result']['number']")
 idleDec=$(python3 -c "print(int('${idleHead:-0x0}', 16))" 2>/dev/null || echo 0)
-quiet=$(grep -c 'quiet=true' test-nodes/evm1/debug.log 2>/dev/null || echo 0)
 if [ "$idleDec" = "0" ] && [ "$quiet" -gt 0 ]; then
   pass "idle rounds are quiet ($quiet of them) and reth stays at block 0 - the baseline builds no block without a transaction"
 else

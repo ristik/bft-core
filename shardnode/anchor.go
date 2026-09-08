@@ -59,6 +59,23 @@ type continuityState struct {
 	// anchor.Round when no quiet round has followed the anchor yet — the ordinary state of a
 	// shard that just certified a block (§3.3.4's empty interval).
 	through uint64
+	// expectedNext is the partition round the LAST observed certificate assigned as the next one,
+	// taken from its TechnicalRecord. It is what "the next round" means; `through+1` is not.
+	//
+	// MEASURED CORRECTION. §3.3.3 and the first implementation both tested consecutiveness as
+	// `RoundNumber == through+1`. Certified partition rounds are not consecutive integers: the root
+	// chain assigns the next round in the technical record, and it skips numbers whenever a round
+	// is abandoned. On a four-validator devnet the very first certificate did it —
+	// `partitionRound=0 ... nextRound=2` — and a later one went `partitionRound=5 ... nextRound=7`.
+	// Every such skip invalidated the anchor of every honest node, which under the P-id gate meant
+	// they stopped voting, and the shard stalled below quorum within two minutes.
+	//
+	// The technical record is authenticated: its hash is committed in the certificate
+	// (CertificationResponse.IsValid checks it against UC.TRHash before anything here runs), so
+	// "the round the previous certificate said would come next" is evidence, not a guess. It is
+	// also strictly tighter than a round-number gap test: a certificate for any round OTHER than
+	// the assigned one means a certificate was genuinely missed.
+	expectedNext uint64
 	// broken distinguishes the two ways there can be no anchor, because they are different
 	// operator situations with different answers: this process has never observed a certified
 	// block (row 8, `no-anchor` — ordinary after a restart, and it resolves itself when the next
@@ -92,15 +109,21 @@ func (u anchorUpdate) String() string {
 	}
 }
 
-// observe folds one verified certificate into the continuity state and reports what happened.
-//
 // The caller must already have authenticated uc (P-ctx). This function decides only where the
 // certificate sits in the chain, never whether it is genuine.
-func (c *continuityState) observe(uc *types.UnicityCertificate) anchorUpdate {
+// observe folds one verified certificate into the continuity state and reports what happened.
+//
+// assignedNextRound is the certificate's own TechnicalRecord.Round — the partition round the root
+// chain has just told this shard to submit next, and therefore the only round whose certificate may
+// legitimately follow this one. See continuityState.expectedNext.
+func (c *continuityState) observe(uc *types.UnicityCertificate, assignedNextRound uint64) anchorUpdate {
 	if uc == nil || uc.InputRecord == nil {
 		return anchorUnchanged
 	}
 	ir := uc.InputRecord
+	// Whatever this certificate does to the anchor, it re-states what comes next.
+	prevExpected := c.expectedNext
+	c.expectedNext = assignedNextRound
 
 	// A non-quiet certificate carries its own block hash: it IS the new anchor, and it resets the
 	// interval — nothing before it matters any more.
@@ -136,16 +159,20 @@ func (c *continuityState) observe(uc *types.UnicityCertificate) anchorUpdate {
 		}
 		return anchorUnchanged
 
-	case ir.RoundNumber == c.through+1 && bytes.Equal(ir.Hash, ir.PreviousHash) && bytes.Equal(ir.Hash, c.anchor.StateRoot):
-		// The next round, quiet, at the anchor's state: the interval extends by exactly one.
+	case prevExpected != 0 && ir.RoundNumber == prevExpected &&
+		bytes.Equal(ir.Hash, ir.PreviousHash) && bytes.Equal(ir.Hash, c.anchor.StateRoot):
+		// THE round the previous certificate assigned, quiet, at the anchor's state: nothing was
+		// missed, and the interval extends to cover it. Round numbers may jump — the root chain
+		// abandons rounds — so what makes this contiguous is the assignment, not the arithmetic.
 		c.through = ir.RoundNumber
 		return anchorExtended
 
 	default:
-		// A gap, or a quiet certificate at a state the anchor does not explain. Either way this
-		// node can no longer say what happened in between, and a matching state root would prove
-		// nothing — a missed non-quiet interval can return to the same state root by a DIFFERENT
-		// block (§3.3.1). Fail closed.
+		// A certificate for a round other than the one assigned — so at least one certificate was
+		// missed — or one at a state the anchor does not explain. Either way this node can no
+		// longer say what happened in between, and a matching state root would prove nothing: a
+		// missed non-quiet interval can return to the same state root by a DIFFERENT block
+		// (§3.3.1). Fail closed.
 		c.invalidate()
 		return anchorInvalidated
 	}
@@ -155,6 +182,8 @@ func (c *continuityState) invalidate() {
 	c.anchor = nil
 	c.through = 0
 	c.broken = true
+	// expectedNext is deliberately NOT cleared: it is a fact about the certified sequence, not
+	// about the anchor, and the next certificate is judged against it either way.
 }
 
 // recoveryTargetError says why no anchor could be offered, using the diagnostic names from the
@@ -213,7 +242,7 @@ func (c *continuityState) recoveryTarget(certifiedState Hash) (Hash, error) {
 // certifiedState is exp.PreviousHash. The caller must have established that the executor's head
 // state already equals it — either it always did (row 1) or reconcile just made it so (rows 3/6).
 // The refusals reuse recoveryTarget's names so a log line still maps to a row.
-func (c *continuityState) checkHeadIdentity(head BlockRef, certifiedState Hash) error {
+func (c *continuityState) checkHeadIdentity(head BlockRef, certifiedState Hash, genesis *BlockRef) error {
 	target, err := c.recoveryTarget(certifiedState)
 	if err != nil {
 		// Rows 8 and 9. Reaching them here rather than in reconcile means the executor's STATE
@@ -226,16 +255,24 @@ func (c *continuityState) checkHeadIdentity(head BlockRef, certifiedState Hash) 
 	}
 	// Row 13, and nothing wider: "permitted only when the executor head is the configured genesis
 	// block and the certificate is the shard's first". The first certified round's block hash may
-	// name a block no executor ever made canonical (see ExecutionAnchor.fromGenesisRound), so the
-	// comparison is made against the executor's genesis block instead — block NUMBER 0, at the
-	// certified state root. Number, not "reports no hash": only genesis is block 0, whereas
-	// accepting any head whose state matches would be the state-equality bypass this whole check
-	// exists to remove.
+	// name a block no executor ever made canonical (see ExecutionAnchor.fromGenesisRound), so
+	// there is nothing to compare it against — and the row says what to compare instead: the
+	// executor's own genesis block, BY HASH.
 	//
-	// This is not a standing exemption. It applies to one anchor — the one installed by the round
-	// the root chain certified against a nil PreviousHash — and the first state-changing round
-	// replaces it with an ordinary anchor, after which every comparison is by block hash.
-	if c.anchor.fromGenesisRound && head.Number == 0 && bytes.Equal(head.StateRoot, c.anchor.StateRoot) {
+	// `genesis` is the head this node's executor reported before it had processed any certificate,
+	// which is the configured genesis block by construction: nothing has been committed yet. It is
+	// compared in full — number, block hash and state root — and that completeness is what keeps
+	// this from being a bypass. An earlier revision accepted any head at block NUMBER 0 whose state
+	// matched, which let a head with a fabricated block hash through: the reviewer's own
+	// same-state/different-block reproduction passed again. Only the actual genesis block is the
+	// genesis block.
+	//
+	// This is not a standing exemption either. It applies to one anchor — the one installed by the
+	// round the root chain certified against a nil PreviousHash — and the first state-changing
+	// round replaces it, after which every comparison is by block hash.
+	if c.anchor.fromGenesisRound && genesis != nil &&
+		head.Number == genesis.Number && bytes.Equal(head.Hash, genesis.Hash) &&
+		bytes.Equal(head.StateRoot, genesis.StateRoot) && bytes.Equal(head.StateRoot, c.anchor.StateRoot) {
 		return nil
 	}
 	return &recoveryTargetError{"head-identity-mismatch",

@@ -164,23 +164,43 @@ runtime path, and **this PR still changes no behaviour**.
 
 Only the certificates. A UC at round `k` with `PreviousHash == Hash == S` is the root chain's signed
 statement that round `k` did not change state. A **contiguous** run of such certificates covering
-every round from `r_a + 1` through `r_n` is a proof of the interval; nothing shorter is.
+every certified round after `r_a` up to `r_n` is a proof of the interval; nothing shorter is.
 
 There is no chaining shortcut available. A quiet UC does not reference the previous round's
 certificate, so round `k`'s certificate says nothing about round `k − 1`. The evidence must therefore
 be the sequence itself, and it must be **complete** — never sampled, never summarised, never
 truncated with the endpoints reconciled by arithmetic.
 
+**"Contiguous" is not "consecutive", and the difference is not academic.** Certified partition
+rounds are not consecutive integers: the root chain names the next round in each certificate's
+`TechnicalRecord`, and it skips numbers whenever a round is abandoned. Measured on a four-validator
+real-reth devnet, the very first certificate of the run did it — `partitionRound=0 … nextRound=2` —
+and a later one went `partitionRound=5 … nextRound=7`.
+
+So the contiguity test is **"is this the round the previous certificate assigned"**, not "is this
+number one higher". The assignment is authenticated: the technical record's hash is committed in the
+certificate and checked before classification, so the expected next round is evidence rather than a
+guess. It is also *stricter* than the arithmetic version in the direction that matters — any
+certificate other than the assigned one means one was genuinely missed, including a repeat that
+would have reassigned the number.
+
+A first implementation used `through + 1`, and every routine skip therefore invalidated the anchor of
+every honest node at the same moment. Under the voting gate below that stopped them all voting, and
+the shard fell under quorum within two minutes of starting. `TestContinuityState` now pins both
+directions.
+
 **In-memory versus on-disk is the distinction that makes this affordable.** While the process runs,
 in-process state is sound evidence: this node verified each certificate as it arrived, and process
 memory is not an attacker-supplied input. The counterexample attacks the **restore** path
 specifically, where the file is the only witness. So:
 
-- **running — deciding.** Keep the anchor plus `continuityThrough`, the highest partition round
-  through which the interval has been verified quiet. Each observed certificate either extends it by
-  exactly one round (quiet, at the anchor's state root), leaves it unchanged (a repeat of a round
-  already covered), replaces the anchor (non-quiet), or **invalidates** it (a round gap, or a quiet
-  certificate at a different state root). The live vote decision reads this, not the file.
+- **running — deciding.** Keep the anchor, `continuityThrough` (the highest partition round through
+  which the interval has been verified quiet) and the round the last certificate **assigned** as
+  next. Each observed certificate either extends the interval to the assigned round (quiet, at the
+  anchor's state root), leaves it unchanged (a repeat of a round already covered), replaces the
+  anchor (non-quiet), or **invalidates** it (a certificate for a round that was not the assigned
+  one, or a quiet certificate at a different state root). The live vote decision reads this, not the
+  file.
 - **running — recording.** The same certificates are appended to the persisted evidence set as they
   are verified, because the *next* restart can only use what was written before it. Accumulation is
   a write-path concern; it is not what the running node consults to decide.
@@ -328,7 +348,17 @@ anchor and no context check — contradicting §3. It is removed; the already-ap
 ordinary row with the same preconditions as every other.
 
 `certifiedPrev` = `exp.PreviousHash` (the state the next round builds on). **Abstain** = do not
-build, do not submit, retain evidence, stay recoverable.
+submit, retain evidence, stay recoverable.
+
+**What "abstain" withholds, corrected by measurement.** This said "do not build, do not submit". The
+first clause defeats the third. A node that does not build also never runs `Verify`, so its execution
+client never receives the round's payload, so it can never commit that block and is permanently
+behind — the opposite of "stay recoverable", and on a real devnet it is what turned a single
+unprovable head into a node that never rejoined. So an abstaining node still builds or verifies the
+round's block, disseminates it if it is the leader, and commits what the shard certifies; what it
+withholds is the **signed certification request**. Nothing is signed while the node cannot prove
+which certified block it stands on, which is the entire safety content of these rows, and the next
+non-quiet certificate installs an anchor matching its head and re-arms it with no operator action.
 
 | # | Situation | Anchor | Executor payload | Action | Vote? |
 | --- | --- | --- | --- | --- | --- |
@@ -649,12 +679,21 @@ persisted half.
   repeat certificates (§3.3.2's "running — deciding");
 - `reconcile` taking its recovery target from that anchor instead of the certificate in hand, which
   is the #92 defect: `Commit(nil)` is now unrepresentable, not merely avoided;
+- **continuity keyed on the round the previous certificate ASSIGNED** (§3.3.2), not on consecutive
+  round numbers, and the genesis exception compared against the executor's own genesis block rather
+  than against "block number 0". Both corrections come from the real-reth lane, and both were
+  defects that a fake-executor suite could not show: the first stalled a live shard under quorum in
+  two minutes, the second re-opened the same-state/different-block hole the P-id check exists to
+  close;
 - **P-id enforced on every round that could end in a vote**, not only on the recovery path.
   `HandleCertificate` used to consult this file only when the state roots differed, so a round whose
   state root already matched was built and signed with no anchor, identity or continuity check at
   all — the unsound fast path this table removed, still present in the code. Rows 1, 2, 8 and 13 are
   now decided at the same state root, by what the node can prove about the BLOCK
-  (`continuityState.checkHeadIdentity`, `shardnode/round_identity_gate_test.go`);
+  (`continuityState.checkHeadIdentity`, `shardnode/round_identity_gate_test.go`). The verdict is
+  applied at the signing gate — the round is still built, verified and committed — for the reason
+  recorded under the transition table: refusing to build makes the node unrecoverable rather than
+  safe, and the failing node re-arms itself once a non-quiet certificate matches its head;
 - row 13's genesis exception, narrowed and made structural. It is needed for a reason the fake never
   showed: "genesis is always non-quiet" makes the shard's first certified round carry a block hash
   even when nothing moved, while `round.go` does not commit a round whose state did not move — so
