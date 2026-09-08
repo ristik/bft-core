@@ -615,6 +615,17 @@ round by the latest accepted certificate) and that boundary is recorded; if it c
 run says so and labels the scenario a shard-process restart. Evidence collection and teardown run
 on success, failure and cancellation, and the archive is verified before it is claimed.
 
+**A failure to retain the evidence fails the run.** Evidence collection happens in the supervisor
+process, so it reports through the same `fail()` the scenarios use, while the child writes its own
+count to a file. Those are two independent counts and `superviseResult` adds them; an earlier
+revision assigned the child's over the supervisor's, so a successful run whose archive could not be
+written printed the FAIL line and then exited 0 saying "evidence complete" (review 5144079322).
+Since the evidence *is* the deliverable of this lane, that direction is the one that matters, and
+the summary now attributes each side — `N from the run, M from evidence collection`.
+`scripts/reth-chaos-selftest.sh` executes the real `superviseResult` and the real `collectEvidence`
+against a fabricated tree, provoking a failed archive, a failed copy and a planted secret file with
+a **successful** child, plus a clean positive control.
+
 **The concrete runtime lead**, which is more specific than anything this harness had concluded, came
 from the retained `evm1` log: a divergent state with `certifiedBlockHash=""` followed by
 `engineapi: commit: expected a 32-byte hash, got 0 bytes` — `Round.reconcile` passing a quiet

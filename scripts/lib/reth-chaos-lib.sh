@@ -177,6 +177,60 @@ finish() {
   cleanup
 }
 
+# superviseResult <childStatus> <failuresFile> - the supervisor's verdict, as one function so it
+# can be executed by scripts/reth-chaos-selftest.sh rather than only read.
+#
+# It collects evidence (finish), then combines TWO INDEPENDENT failure counts and prints the
+# summary. Returns 0 only if both are zero.
+#
+# The two counts must stay separate, and conflating them was a real defect (#91 review 5144079322).
+# finish -> collectEvidence reports through the same fail() the scenarios use, so it increments
+# `failures` in THIS process: a failed copy, an archive tar could not write, or a secret file found
+# in the archive. The supervisor then used to do `failures=$(cat "$failuresFile")`, overwriting its
+# own count with the child's. A successful child plus a failed archive therefore printed the FAIL
+# line and exited 0 with "evidence complete" — silently defeating the evidence-failure gate #88
+# asks for, in the one direction that matters, since the evidence is the deliverable.
+#
+# Order is forced: finish must run before the child's count can be trusted anyway (it is what
+# retains the evidence), so the fix is to snapshot the supervisor's own count immediately after it
+# and add, never assign.
+superviseResult() {
+  local childStatus=$1 file=$2 childFailures supervisorFailures
+
+  failures=0
+  finish
+  supervisorFailures=$failures
+
+  if [ -s "$file" ]; then
+    childFailures=$(cat "$file")
+  else
+    # The child never got far enough to record a count. That is itself a failure: the run did not
+    # complete, and reporting 0 would read as success.
+    echo "  FAIL: the scenario process ended without recording a result (exit $childStatus) — the run did not complete"
+    childFailures=1
+  fi
+  # A result file that is not a number is not a result. Without this the arithmetic below fails at
+  # runtime and the verdict is decided by whatever the shell does next, which is not a verdict.
+  case "$childFailures" in
+    "" | *[!0-9]*)
+      echo "  FAIL: the scenario process recorded an unreadable result ('$childFailures') — the run did not complete"
+      childFailures=1
+      ;;
+  esac
+  if [ "$childStatus" -ne 0 ] && [ "$childFailures" -eq 0 ]; then
+    echo "  FAIL: the scenario process exited $childStatus with no assertion failure recorded — treating as a harness failure"
+    childFailures=1
+  fi
+
+  failures=$((childFailures + supervisorFailures))
+  if [ "$failures" -gt 0 ]; then
+    echo "=== reth-chaos.sh: $failures failure(s) — $childFailures from the run, $supervisorFailures from evidence collection — evidence retained ==="
+    return 1
+  fi
+  echo "=== reth-chaos.sh: real-reth workload and fault evidence complete ==="
+  return 0
+}
+
 # --- observation helpers ----------------------------------------------------------------------
 log() { echo "test-nodes/evm$1/debug.log"; }
 logLines() { wc -l <"$(log "$1")" 2>/dev/null | tr -d ' ' || echo 0; }

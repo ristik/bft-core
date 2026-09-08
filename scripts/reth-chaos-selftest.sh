@@ -236,5 +236,76 @@ echo "=== execHead ==="
 ) && selfPass=$((selfPass + 1)) || selfFail=$((selfFail + 1))
 
 echo
+echo "=== supervisor verdict: the supervisor's own failures survive combining ==="
+
+# The boundary the oracle cases above cannot reach. superviseResult runs in the PARENT process,
+# where evidence collection reports through the same fail() the scenarios use, and then combines
+# that with the child's recorded count. Conflating the two is what let a successful child plus a
+# failed archive print FAIL and exit 0 (#91 review 5144079322).
+#
+# These execute the real superviseResult and the real collectEvidence, against a fabricated
+# test-nodes tree. Only cleanup is stubbed: tearing down a devnet is not what is under test, and
+# there is none here. The failures are provoked with real filesystem permissions rather than by
+# stubbing tar or cp, so the case fails for the reason it claims to.
+runSupervisorCase() {
+  local name=$1 childStatus=$2 childResult=$3 setup=$4 expectRc=$5 expectText=$6
+  local out rc
+  out=$(
+    cd "$work" || exit 1
+    rm -rf super && mkdir super && cd super || exit 1
+    validators=2
+    # shellcheck disable=SC1090
+    set +u; source "$harness" >/dev/null 2>&1; set -u
+    keep=false
+    cleanup() { :; }
+
+    mkdir -p test-nodes/evidence
+    for i in 1 2; do
+      mkdir -p "test-nodes/evm$i" "test-nodes/reth$i"
+      echo x >"test-nodes/evm$i/debug.log"
+      echo x >"test-nodes/reth$i/reth.log"
+    done
+    for i in 1 2 3; do mkdir -p "test-nodes/root$i"; echo x >"test-nodes/root$i/debug.log"; done
+
+    resultFile=test-nodes/evidence/.failures
+    [ "$childResult" = none ] || echo "$childResult" >"$resultFile"
+    eval "$setup"
+    superviseResult "$childStatus" "$resultFile"
+    echo "RC=$?"
+  )
+  chmod -R u+w "$work/super" 2>/dev/null
+  rc=$(echo "$out" | sed -n 's/^RC=//p')
+  if [ "${rc:-x}" = "$expectRc" ] && echo "$out" | grep -q "$expectText"; then
+    ok "$name: returned $rc"
+  else
+    bad "$name: returned ${rc:-?}, expected $expectRc matching '$expectText' — got: $(echo "$out" | tr '\n' '|')"
+  fi
+}
+
+# The positive control. Without it every case below could pass because the verdict is always 1.
+runSupervisorCase "clean child, clean evidence" 0 0 ':' 0 'evidence complete'
+
+# The reviewer's reproduction: a successful child must not erase the supervisor's own failures.
+# test-nodes is made read-only AFTER the artefacts exist, so the copies still succeed and only the
+# archive cannot be written — the exact shape of "the run worked, the evidence did not survive".
+runSupervisorCase "clean child, archive cannot be written" 0 0 'chmod 555 test-nodes' 1 'archive was not produced'
+
+# A required artefact that exists but cannot be copied.
+runSupervisorCase "clean child, evidence copy fails" 0 0 'chmod 555 test-nodes/evidence' 1 'evidence collection incomplete'
+
+# The secret check, with a successful child. keys.json is never copied; this is the backstop for
+# one arriving by some other route, and it must fail the run rather than be reported and dropped.
+runSupervisorCase "clean child, secret file in the archive" 0 0 'touch test-nodes/evidence/keys.json' 1 'secret file'
+
+# The child's own count still decides when the supervisor is clean, and the summary attributes
+# each side, so a reader can tell an evidence failure from a scenario failure.
+runSupervisorCase "child reported failures, clean evidence" 0 2 ':' 1 '2 from the run, 0 from evidence'
+
+# Abnormal endings, unchanged in behaviour but now covered.
+runSupervisorCase "child never recorded a result" 0 none ':' 1 'without recording a result'
+runSupervisorCase "child exited nonzero with nothing recorded" 7 0 ':' 1 'exited 7 with no assertion failure'
+runSupervisorCase "child recorded an unreadable result" 0 banana ':' 1 'unreadable result'
+
+echo
 echo "selftest: $selfPass ok, $selfFail bad"
 [ "$selfFail" -eq 0 ]

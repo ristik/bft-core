@@ -85,26 +85,12 @@ if [ "${F1_CHAOS_SUPERVISED:-0}" != "1" ]; then
 
   echo
   echo "=== evidence (collected by the supervisor, whatever happened to the run) ==="
-  finish
-
-  if [ -s "$failuresFile" ]; then
-    failures=$(cat "$failuresFile")
-  else
-    # The child never got far enough to record a count. That is itself a failure: the run did not
-    # complete, and reporting 0 would read as success.
-    echo "  FAIL: the scenario process ended without recording a result (exit $childStatus) — the run did not complete"
-    failures=1
-  fi
-  if [ "$childStatus" -ne 0 ] && [ "$failures" -eq 0 ]; then
-    echo "  FAIL: the scenario process exited $childStatus with no assertion failure recorded — treating as a harness failure"
-    failures=1
-  fi
-  if [ "$failures" -gt 0 ]; then
-    echo "=== reth-chaos.sh: $failures assertion(s)/failure(s) — evidence retained ==="
-    exit 1
-  fi
-  echo "=== reth-chaos.sh: real-reth workload and fault evidence complete ==="
-  exit 0
+  # The verdict lives in superviseResult (scripts/lib/reth-chaos-lib.sh) rather than here, so that
+  # the self-test can execute it. It combines the supervisor's OWN failures — evidence collection
+  # runs in this process and reports through the same fail() — with the child's, and returns
+  # nonzero if either is nonzero.
+  superviseResult "$childStatus" "$failuresFile"
+  exit $?
 fi
 
 # F1_CHAOS_ABORT_AFTER lets the supervisor boundary itself be tested, which #88 requires: a passing
