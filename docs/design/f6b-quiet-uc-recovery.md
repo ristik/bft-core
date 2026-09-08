@@ -631,8 +631,43 @@ Stage 3 may demonstrate reconciliation; resumed voting additionally waits for P-
 reach a clean fail-closed `unavailable` until stage 4 exists, and that is the correct intermediate
 result rather than a failure of stage 3.
 
-## 8. Scope held open
+## 8. Implementation status
 
-This record does not implement anything. It does not explain any particular real-reth scenario in
-#88, does not claim #16's fake-executor stall shares this cause, and does not address power-loss
-durability (#14) or the stale-certificate taxonomy (#93).
+Stage 3 (first PR) implements the **live** half of this design and stops deliberately short of the
+persisted half.
+
+**Implemented** — `shardnode/anchor.go`, `Round.reconcile`:
+
+- the execution anchor and the verified quiet interval, maintained in process across quiet and
+  repeat certificates (§3.3.2's "running — deciding");
+- `reconcile` taking its recovery target from that anchor instead of the certificate in hand, which
+  is the #92 defect: `Commit(nil)` is now unrepresentable, not merely avoided;
+- both P-id post-conditions after a `VALID` commit — the executor's head must match the certified
+  **block hash** *and* the certified state root;
+- `unavailable` (retryable, anchor retained) kept distinct from `invalid` (a fault);
+- the refusal rows named individually — `no-anchor`, `anchor-mismatch` — so a log line maps to a
+  transition-table row.
+
+**Not implemented, and the two belong together:**
+
+- **Persisting the anchor and its evidence** (§3.3.4, §6). Not in this PR.
+- **P-sign enforcement** (§6.1, #105). Also not in this PR — and this is the reason the two are
+  paired rather than separable.
+
+A restored anchor is precisely what P-sign exists to gate: an older checkpoint replays perfectly, so
+resuming from one can re-enter rounds this node has already voted in. Because nothing is restored
+today, there is no restored anchor to gate, and the gate is trivially satisfied. **The moment
+persistence lands, the gate must land with it**; `TestAnchorIsNotRestoredFromDisk` exists so that
+"we persisted the anchor" cannot quietly become "restored nodes may vote". It should be replaced by
+the P-sign gate, not deleted.
+
+The consequence for restarts is visible and intended: a node that restarts mid-interval has no
+anchor, so a quiet certificate makes it abstain with `no-anchor` rather than resuming. That is the
+fail-closed intermediate result stage 3 is allowed to deliver — a refusal with a named reason, in
+place of a `Commit(nil)` that could not have worked either.
+
+## 9. Scope held open
+
+This record does not address power-loss durability (#14), the signing contract (#105), missing-payload
+acquisition (stage 4), any particular real-reth scenario in #88, or the stale-certificate taxonomy
+(#93); nor does it claim #16's fake-executor stall shares this cause.

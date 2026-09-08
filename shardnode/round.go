@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,6 +60,18 @@ type Round struct {
 
 	mu      sync.Mutex
 	pending *pendingSubmission // what we last submitted, awaiting certification
+
+	// continuity is the live execution anchor and the interval this node has itself verified
+	// quiet since it (see anchor.go, and docs/design/f6b-quiet-uc-recovery.md §3.3). It is what
+	// gives reconcile a block hash to recover to when the certificate in hand is quiet and
+	// therefore carries none — issue #92.
+	//
+	// In-process only. It is deliberately NOT restored from the checkpoint: an older checkpoint
+	// replays perfectly (§6.1), so a restored anchor may only authorize a vote once the
+	// independent monotonic signing contract (P-sign, #105) exists. Persisting it and gating on
+	// P-sign belong together, in a later PR; retaining it across quiet rounds WITHIN a process
+	// is what this one delivers.
+	continuity continuityState
 }
 
 // DefaultAwaitTimeout is used when NewRound is not given a more specific
@@ -133,6 +146,17 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 
 	if err := r.commitPrevious(ctx, uc); err != nil {
 		return fmt.Errorf("committing previously certified round: %w", err)
+	}
+
+	// Fold this certificate into the live continuity state BEFORE anything can need a recovery
+	// target. If uc is non-quiet it becomes the anchor, so reconcile targets this very block —
+	// the behaviour that always worked. If uc is quiet the anchor stays where the last
+	// state-changing round put it, which is exactly the target that used to be missing.
+	if update := r.continuity.observe(uc); update != anchorUnchanged && r.log != nil {
+		r.log.DebugContext(ctx, "execution anchor "+update.String(),
+			slog.Uint64("partitionRound", uc.GetRoundNumber()),
+			slog.Uint64("continuityThrough", r.continuity.through),
+			slog.String("anchorBlockHash", anchorHashForLog(r.continuity.anchor)))
 	}
 
 	exp, err := ExpectationFromCertificate(uc, tr.Round, tr.Epoch)
@@ -320,55 +344,85 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 // for exec-mode).
 func (r *Round) reconcile(ctx context.Context, uc *types.UnicityCertificate, exp Expectation, head BlockRef) (BlockRef, error) {
 	r.metrics.recordIRDivergence(ctx, "head_diverged")
-	// Commit is keyed by block hash everywhere else in this file (see
-	// pendingSubmission.hash, always a Block.Hash) — never by state root.
-	// uc.InputRecord.BlockHash is the certificate's own copy of that same
-	// value, which is why it's usable here even though r.pending (the only
-	// other place this framework remembers a block hash) is gone.
+
+	// THE TARGET. Commit is keyed by block hash everywhere in this file, never by state root.
 	//
-	// KNOWN DEFECT (issue #92, reproduced by
-	// shardnode/round_quiet_recovery_test.go). A quiet certificate carries a
-	// nil BlockHash by construction (see BuildInputRecord), so when a node
-	// that is behind a state-changing block processes a quiet certificate,
-	// the target below is EMPTY. This comment used to claim that was
-	// harmless because "Commit will correctly report StatusSyncing for it".
-	// That is true of the in-memory fake executor and false of the Engine
-	// API adapter, which rejects a non-32-byte hash outright
-	// ("expected a 32-byte hash, got 0 bytes" — see
-	// engineapi.TestAdapterCommitRejectsEmptyHash). It is why a fake-only
-	// chaos suite never surfaced this path.
+	// This used to be uc.InputRecord.BlockHash unconditionally, which is the #92 defect: a quiet
+	// certificate carries nil there by construction (BuildInputRecord), so a node behind a
+	// state-changing block that received a quiet certificate asked its executor to commit
+	// nothing. The fake tolerated it by reporting SYNCING; the Engine API adapter rejects a
+	// non-32-byte hash outright, which is why a fake-only chaos suite never surfaced it.
 	//
-	// An earlier non-quiet certificate can identify a block target, but this
-	// Round has no retained certificate-chain/anchor interface after restart.
-	// The reproduction keeps that earlier signed certificate in the test,
-	// not in the restarted Round. Acquiring, retaining and authenticating an
-	// anchor and binding it to the current certified context are stage 2 of
-	// #92. The empty-target failure occurs both when the fake retains the
-	// payload and when it does not; real-client durability is separate.
-	blockHash := Hash(uc.InputRecord.BlockHash)
+	// The target now comes from the live continuity state (anchor.go). When uc is NON-QUIET this
+	// is uc's own block — observe installed it a moment ago, so the previous behaviour is
+	// unchanged. When uc is QUIET it is the last state-changing certified block, which is the
+	// value that was missing. Commit(nil) is unreachable: recoveryTarget refuses rather than
+	// returning an empty hash.
+	blockHash, targetErr := r.continuity.recoveryTarget(Hash(exp.PreviousHash))
+	if targetErr != nil {
+		var rte *recoveryTargetError
+		reason := "unknown"
+		if errors.As(targetErr, &rte) {
+			reason = rte.reason
+		}
+		r.metrics.recordIRDivergence(ctx, "recovery_"+strings.ReplaceAll(reason, "-", "_"))
+		return head, fmt.Errorf("shardnode: executor head %x diverges from root-chain-certified state %x and this node cannot identify the certified block to recover to (%w) — refusing to build round %d; it must resync (see docs/troubleshooting.md)",
+			head.StateRoot, exp.PreviousHash, targetErr, exp.Round)
+	}
+
 	if r.log != nil {
 		r.log.WarnContext(ctx, "executor head diverges from certified state — attempting recovery via Commit before giving up",
-			slog.String("executorHead", fmt.Sprintf("%x", head.StateRoot)), slog.String("certifiedStateRoot", fmt.Sprintf("%x", exp.PreviousHash)),
-			slog.String("certifiedBlockHash", fmt.Sprintf("%x", blockHash)))
+			slog.String("executorHead", fmt.Sprintf("%x", head.StateRoot)),
+			slog.String("certifiedStateRoot", fmt.Sprintf("%x", exp.PreviousHash)),
+			slog.String("recoveryBlockHash", fmt.Sprintf("%x", blockHash)),
+			slog.Uint64("anchorRound", r.continuity.anchor.Round),
+			slog.Bool("targetFromQuietInterval", len(uc.InputRecord.BlockHash) == 0))
 	}
+
+	// Idempotent by contract: Commit on an already-canonical hash is a no-op returning VALID, so
+	// a retry after a failed apply is safe and does not double-execute anything.
 	status, err := r.executor.Commit(ctx, blockHash)
 	if err != nil {
 		return head, fmt.Errorf("shardnode: recovery commit failed: %w", err)
 	}
-	if status != StatusValid {
-		return head, fmt.Errorf("shardnode: executor head %x diverges from root-chain-certified state %x and recovery commit(blockHash=%x) returned %s (not %s) — cannot safely build round %d; this node has fallen out of sync and needs manual recovery (see docs/troubleshooting.md)",
-			head.StateRoot, exp.PreviousHash, blockHash, status, StatusValid, exp.Round)
+	switch status {
+	case StatusValid:
+		// proceed to the post-conditions below
+	case StatusSyncing, StatusAccepted:
+		// UNAVAILABLE, NOT INVALID. The executor does not have the payload — expected after an
+		// execution-client restart (§1.1) and retryable. The anchor is deliberately RETAINED:
+		// the authority to retry is exactly what would be lost by dropping it, and the next
+		// certificate (likely a repeat) is the next attempt.
+		r.metrics.recordIRDivergence(ctx, "recovery_unavailable")
+		return head, fmt.Errorf("shardnode: certified block %x is unavailable in the executor (status %s) — cannot build round %d yet; retaining the anchor and retrying on the next certificate",
+			blockHash, status, exp.Round)
+	default:
+		// StatusInvalid: the executor rejected the payload. A fault, not a wait.
+		r.metrics.recordIRDivergence(ctx, "recovery_invalid_payload")
+		return head, fmt.Errorf("shardnode: executor REJECTED certified block %x with status %s while recovering round %d — this is a fault, not an availability problem; manual recovery required (see docs/troubleshooting.md)",
+			blockHash, status, exp.Round)
 	}
+
 	newHead, err := r.executor.Head(ctx)
 	if err != nil {
 		return head, fmt.Errorf("reading executor head after recovery commit: %w", err)
 	}
+	// BOTH post-conditions, per P-id (§4). State-root equality alone is not sufficient: two
+	// different blocks can share a post-state, so a node that checked only the state root could
+	// resume on the wrong block and vote on it.
+	if !bytes.Equal(newHead.Hash, blockHash) {
+		return head, fmt.Errorf("shardnode: recovery commit reported %s but executor head block is %x, not the certified %x — refusing to build round %d",
+			StatusValid, newHead.Hash, blockHash, exp.Round)
+	}
 	if !bytes.Equal(newHead.StateRoot, exp.PreviousHash) {
-		return head, fmt.Errorf("shardnode: recovery commit reported %s but executor head is still %x, not the certified %x — refusing to build round %d",
+		return head, fmt.Errorf("shardnode: recovery commit reported %s but executor head state is %x, not the certified %x — refusing to build round %d",
 			StatusValid, newHead.StateRoot, exp.PreviousHash, exp.Round)
 	}
 	if r.log != nil {
-		r.log.InfoContext(ctx, "recovered: executor already held the certified block, now committed", slog.Uint64("round", exp.Round))
+		r.log.InfoContext(ctx, "recovered: executor held the certified block, now committed",
+			slog.Uint64("round", exp.Round),
+			slog.String("blockHash", fmt.Sprintf("%x", blockHash)),
+			slog.Uint64("anchorRound", r.continuity.anchor.Round))
 	}
 	return newHead, nil
 }
