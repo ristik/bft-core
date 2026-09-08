@@ -479,11 +479,11 @@ if [ -n "$certRoot" ]; then
 fi
 
 for i in $(seq 1 "$validators"); do
-  if grep -qiE 'diverge|equivocat' "test-nodes/evm$i/debug.log" 2>/dev/null; then
+  if grep -qiE 'diverge|equivocat|impossible certificate ordering' "test-nodes/evm$i/debug.log" 2>/dev/null; then
     fail "validator $i logged divergence/equivocation"
   fi
 done
-grep -qiE 'diverge|equivocat' test-nodes/evm*/debug.log 2>/dev/null || pass "no validator logged divergence or equivocation"
+grep -qiE 'diverge|equivocat|impossible certificate ordering' test-nodes/evm*/debug.log 2>/dev/null || pass "no validator logged divergence or equivocation"
 
 echo
 if [ "$failures" -gt 0 ]; then

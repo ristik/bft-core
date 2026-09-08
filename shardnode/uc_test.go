@@ -82,11 +82,16 @@ func TestClassifyUC(t *testing.T) {
 		require.Equal(t, UCRepeat, class)
 	})
 
-	t.Run("older root round than previous is equivocating", func(t *testing.T) {
+	t.Run("an older certificate is stale, not equivocating", func(t *testing.T) {
+		// This test asserted the OPPOSITE until issue #93. A node subscribed to several root
+		// nodes receives the certified sequence more than once, and retransmissions do not
+		// arrive in issue order, so an authentic certificate for a round already passed is
+		// routine — not a fault, and not something to report at ERROR.
 		prev := uc(2, 11, h1, h2, blk2)
 		older := uc(1, 10, h0, h1, blk1)
-		_, err := ClassifyUC(prev, older)
-		require.ErrorIs(t, err, ErrEquivocatingUC)
+		class, err := ClassifyUC(prev, older)
+		require.NoError(t, err)
+		require.Equal(t, UCStale, class)
 	})
 
 	t.Run("different input record for the same round is equivocating", func(t *testing.T) {

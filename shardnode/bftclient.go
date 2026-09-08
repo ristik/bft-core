@@ -266,10 +266,22 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 		}
 		return fmt.Errorf("classifying certificate: %w", err)
 	}
-	if class == UCDuplicate {
+	if class == UCDuplicate || class == UCStale {
+		// Neither advances nor reverts anything: c.luc stays where it is, the driver is not
+		// called, and no error is returned. A stale certificate is an authentic statement about
+		// a round this node has already moved past — see ClassifyUC on why that is routine
+		// rather than a fault (#93). Kept observable: a counter, and DEBUG rather than ERROR.
+		metrics := c.metrics
 		c.mu.Unlock()
+		if class == UCStale {
+			metrics.recordStaleUC(ctx)
+		}
 		if c.log != nil {
-			c.log.DebugContext(ctx, "duplicate UC, ignoring", slog.Uint64("rootRound", cr.UC.GetRootRoundNumber()))
+			c.log.DebugContext(ctx, class.String()+" UC, ignoring",
+				slog.Uint64("rootRound", cr.UC.GetRootRoundNumber()),
+				slog.Uint64("partitionRound", cr.UC.GetRoundNumber()),
+				slog.Uint64("heldRootRound", prevLUC.GetRootRoundNumber()),
+				slog.Uint64("heldPartitionRound", prevLUC.GetRoundNumber()))
 		}
 		return nil
 	}
