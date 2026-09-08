@@ -819,6 +819,7 @@ The follower-restart row is new. Every previous revision of this lane reported i
 | F6b stage 3 at `ea608abc` | recovers | recovers |
 | plus the certified-commit binding (`8e2599ca`) | `continuity-gap`, no recovery | `continuity-gap`, no recovery |
 | plus the T2-bounded await budget (#107) | **recovers**, converged | `continuity-gap`, no recovery |
+| plus the replay/leadership gates (`b20eaf4f`, T2 now 5s) | `no-anchor`, no recovery | `continuity-gap`, no recovery |
 
 The middle row is the stricter commit rule doing what it should: a returning node used to advance
 its executor by committing its own pending proposal on any certificate, which is precisely the
@@ -827,7 +828,14 @@ the recovery path, which needs an unbroken chain of observed certificates — an
 an await budget longer than the shard's T2 consumes certificates more slowly than they arrive, misses
 one, and reports `continuity-gap`. Bounding the budget by T2 restores the follower case.
 
-The leader case does not recover even then, and is not explained here. Its snapshot records
+The fourth row is the current state and it is worse than the third, which is recorded rather than
+smoothed over. Both restarted nodes now end with a *named* refusal — `no-anchor` on the follower,
+`continuity-gap` on the leader — so neither is a mystery about what the node decided; what is not
+traced is the certificate history that led each one there. Two things changed under it at once (the
+replay/leadership gates and T2 moving to 5 seconds), so nothing here attributes the difference to
+either.
+
+The leader case does not recover in any revision after the commit binding, and is not explained here. Its snapshot records
 `continuity-gap` on the returning node as well, so it is the same shape at a different scale — the
 node was the round leader when it was killed, so it has more to catch up on. Owner: #92 stage 4 and
 F6 (#14), with #105 for what a restored node may then do.
