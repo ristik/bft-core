@@ -77,6 +77,10 @@ type Round struct {
 	// whether the process restarted or not.
 	continuity continuityState
 
+	// completed is the last round this node signed a request for, together with the certificate
+	// that authorized it. A re-delivery of that same certificate re-sends those exact bytes
+	// instead of rebuilding — see the replay guard in HandleCertificate.
+	completed *completedRound
 	// restoredFrom, when non-nil, is the partition round of the certificate this process was
 	// resumed from (node.go's LoadLUC / verifyRestoredLUC / SeedLUC sequence). A Round marked this
 	// way observes, reconciles and stays diagnosable, but never signs — see abstainRestored.
@@ -97,6 +101,34 @@ type Round struct {
 // DefaultAwaitTimeout is used when NewRound is not given a more specific
 // value — see Round.awaitTimeout.
 const DefaultAwaitTimeout = 5 * time.Second
+
+/*
+completedRound is one round this node has already built, signed and attempted to send, keyed by the
+authorization that produced it.
+
+It exists because a re-delivery must not produce a SECOND, DIFFERENT signed request for the same
+round. The delivery layer re-drives a certificate whose application failed, and a checkpoint write
+is part of applying one — so an ordinary "the store was full" failure, after the round had been
+built and sent, re-entered HandleCertificate. The round was then rebuilt against whatever the
+executor had by then, and a mempool that had gained one transaction was enough to make the node sign
+a different input record for the same round under the same authorizing certificate. Two conflicting
+signed statements for one round is what non-equivocation means, whatever the cause.
+
+So the round is made idempotent in its authorization: the same certificate, assigning the same next
+round, replays as the same bytes. A genuinely new authorization — a repeat certificate at a later
+root round, which assigns a fresh round — is a different key and rebuilds, which is correct.
+*/
+type completedRound struct {
+	round          uint64 // the round this request is for (TechnicalRecord.Round)
+	partitionRound uint64 // the certificate that authorized it
+	rootRound      uint64
+	req            *certification.BlockCertificationRequest
+}
+
+func (c *completedRound) authorizes(uc *types.UnicityCertificate, exp Expectation) bool {
+	return c != nil && c.round == exp.Round &&
+		c.partitionRound == uc.GetRoundNumber() && c.rootRound == uc.GetRootRoundNumber()
+}
 
 type pendingSubmission struct {
 	round uint64
@@ -295,25 +327,39 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		}
 	}
 
-	// P-id is a precondition on VOTING, so it is checked for a node that may vote. A restored
-	// process may not (see abstainRestored, below, and MarkRestored) and has no anchor to be
-	// checked against anyway, since the anchor is in-process state a restart loses; holding it to
-	// a check it cannot pass would only stop it building the blocks it still owes the shard as
-	// leader.
-	// P-id, evaluated for EVERY round that could end in a vote (§4). The state root is now equal —
-	// either it always was, or reconcile just made it so — and that is not sufficient on its own:
-	// two different blocks can share a post-state, so a node that missed a non-quiet interval and
-	// came back to the same state root by a different block would otherwise sign on the wrong
-	// block (§3.3.1, row 2). An earlier revision of the transition table had precisely that fast
-	// path and it was removed as unsound.
+	// P-id, evaluated for EVERY round and EVERY process (§4). The state root is now equal — either
+	// it always was, or reconcile just made it so — and that is not sufficient on its own: two
+	// different blocks can share a post-state, so a node that missed a non-quiet interval and came
+	// back to the same state root by a different block would otherwise sign on the wrong block
+	// (§3.3.1, row 2). An earlier revision of the transition table had precisely that fast path
+	// and it was removed as unsound.
 	//
-	// The VERDICT is applied further down, immediately before signing, and the round is otherwise
-	// driven to completion. See the gate there for why refusing to build was measurably worse.
-	// A restored process is exempt from the check itself: it may not vote for a different reason
-	// and holds no anchor to be checked against.
+	// The VOTING verdict is applied further down, immediately before signing, and the round is
+	// otherwise driven to completion — see the gate there for why refusing to build was measurably
+	// worse. The LEADERSHIP verdict is applied before Build, below.
+	//
+	// A restored process is NOT exempt from the check, though an earlier revision made it so on
+	// the grounds that it may not vote anyway. That confused two requirements: P-sign decides
+	// whether a node may SIGN, P-id decides whether it may make its execution client FINALIZE a
+	// block. A restored node holds no anchor and so cannot satisfy P-id, which is precisely why it
+	// must not lead — skipping the check let it reach Build, and Build sets head, safe and
+	// finalized to the parent. Being unable to vote is not an exemption from the identity
+	// requirement for finality-changing Engine calls.
 	var identityErr error
-	if len(exp.PreviousHash) > 0 && r.restoredFrom == nil {
+	if len(exp.PreviousHash) > 0 {
 		identityErr = r.identityCheck(ctx, head, exp)
+	}
+
+	// REPLAY OF AN AUTHORIZATION ALREADY ANSWERED. Everything above this point is idempotent by
+	// construction — observing a certificate twice changes nothing, and commitPrevious commits only
+	// what the certificate certifies — but building is not: it would produce a fresh candidate from
+	// whatever the executor holds now. Re-send exactly what was signed for this authorization.
+	if r.completed.authorizes(uc, exp) {
+		if r.log != nil {
+			r.log.DebugContext(ctx, "re-delivery of an authorization already answered: re-sending the identical signed request",
+				slog.Uint64("round", exp.Round), slog.Uint64("partitionRound", uc.GetRoundNumber()))
+		}
+		return r.send(ctx, r.completed.req, exp.Round)
 	}
 
 	sealHash, err := SealHash(uc)
@@ -333,9 +379,10 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		r.metrics.recordIRDivergence(ctx, "identity_declined_leadership")
 		if r.log != nil {
 			r.log.WarnContext(ctx, "declining to lead this round: cannot prove the executor is on the certified block, and building would finalize it",
-				slog.Uint64("round", exp.Round), slog.String("reason", identityErr.Error()))
+				slog.Uint64("round", exp.Round), slog.String("reason", identityErr.Error()),
+				slog.Bool("restored", r.restoredFrom != nil))
 		}
-		r.health.updateVoting(false, identityErr.Error())
+		r.health.updateVoting(false, r.nonVotingReason(identityErr))
 		return nil
 	}
 
@@ -405,7 +452,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// voting on its own. The safety property is untouched: no certification request is signed
 	// while this node cannot prove which certified block it stands on.
 	if identityErr != nil {
-		r.health.updateVoting(false, identityErr.Error())
+		r.health.updateVoting(false, r.nonVotingReason(identityErr))
 		if r.log != nil {
 			r.log.WarnContext(ctx, "abstaining from the vote: this node cannot prove its executor is on the certified block",
 				slog.Uint64("round", exp.Round), slog.String("reason", identityErr.Error()))
@@ -444,6 +491,14 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("signing certification request: %w", err)
 	}
 
+	// Retained before the send, not after it: what must not change on a replay is the SIGNED
+	// bytes, and they exist from here on whether or not the send succeeds.
+	r.completed = &completedRound{
+		round:          exp.Round,
+		partitionRound: uc.GetRoundNumber(),
+		rootRound:      uc.GetRootRoundNumber(),
+		req:            req,
+	}
 	r.health.updateSubmitted(exp.Round)
 	r.health.updateVoting(true, "")
 
@@ -492,6 +547,19 @@ func (r *Round) send(ctx context.Context, req *certification.BlockCertificationR
 	}
 	r.metrics.recordIRDivergence(ctx, "submit_failed")
 	return fmt.Errorf("%w for round %d after %d attempts: %w", ErrSubmissionFailed, round, submitRetries+1, err)
+}
+
+// nonVotingReason reports the most actionable reason this node is not voting. A restored process is
+// non-voting for its whole lifetime whatever else is true, so that fact leads; an identity refusal
+// on top of it is the detail.
+func (r *Round) nonVotingReason(identityErr error) string {
+	if r.restoredFrom != nil {
+		if identityErr != nil {
+			return nonVotingRestored + " (and " + identityErr.Error() + ")"
+		}
+		return nonVotingRestored
+	}
+	return identityErr.Error()
 }
 
 // identityCheck evaluates P-id (§4 rows 1, 2, 8, 10, 13) and returns the named refusal, or nil.
@@ -546,6 +614,19 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 		return nil
 	}
 	p := r.pending
+
+	// Does this certificate decide the round this node proposed for? If not, the proposal is still
+	// outstanding and must be left where it is: consuming it here meant that one re-delivery of an
+	// earlier certificate silently discarded the record of a round that was about to be certified.
+	ir := uc.InputRecord
+	if ir == nil || ir.RoundNumber != p.round {
+		r.metrics.recordIRDivergence(ctx, "commit_not_certified")
+		if r.log != nil {
+			r.log.DebugContext(ctx, "not committing: this certificate is not about the round this node proposed for",
+				slog.Uint64("proposedRound", p.round), slog.Uint64("certifiedRound", uc.GetRoundNumber()))
+		}
+		return nil
+	}
 	r.pending = nil
 
 	// Recorded for every confirmed round, quiet or not — both are "this
@@ -574,15 +655,6 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 	// So the target comes from the certificate, and only when the certificate is about the round
 	// this node proposed for. A certificate for another round — a replay of the one before it, a
 	// repeat of an earlier round — certifies nothing about the proposal and commits nothing.
-	ir := uc.InputRecord
-	if ir.RoundNumber != p.round {
-		r.metrics.recordIRDivergence(ctx, "commit_not_certified")
-		if r.log != nil {
-			r.log.DebugContext(ctx, "not committing: this certificate is not about the round this node proposed for",
-				slog.Uint64("proposedRound", p.round), slog.Uint64("certifiedRound", ir.RoundNumber))
-		}
-		return nil
-	}
 	if len(ir.BlockHash) == 0 {
 		// The round was certified QUIET: the root chain says no block was produced, whatever this
 		// node built. There is nothing certified to commit.

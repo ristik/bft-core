@@ -383,6 +383,24 @@ Forbidden in every row: `Commit(nil)`, substituting a state root for a block has
 validation, clearing stored authority to proceed, and **accepting a continuity claim that was not
 re-derived from retained certificates** (§3.3).
 
+**P-id is required of every process, including one that may not vote.** P-sign and P-id answer
+different questions — whether this node may SIGN, and whether it may make its execution client
+FINALIZE — and an intermediate revision collapsed them by skipping the identity check entirely for a
+restored process, on the grounds that it could not vote anyway. That exempted exactly the node with
+no anchor from the check that stops it finalizing an unproven parent. Inability to vote is not
+standing to finalize.
+
+**Replay of one authorization produces one signed request.** The delivery layer re-drives a
+certificate whose application failed, and writing the checkpoint is part of applying one — so an
+ordinary store failure after a round had been built and sent re-entered the round, rebuilt the
+candidate against whatever the executor held by then, and signed a DIFFERENT input record for the
+same round under the same authorizing certificate. A single transaction arriving between the two
+deliveries is enough. The round is therefore idempotent in its authorization: the certificate, its
+root round and the round it assigns are retained with the signed request, and a re-delivery of that
+same authorization re-sends those exact bytes rather than rebuilding. A genuinely new authorization —
+a repeat certificate at a later root round, assigning a fresh round — is a different key and
+rebuilds, which is correct.
+
 **Building is not a neutral act, so leadership is gated where voting is.** `Executor.Build` asks the
 execution client to move its forkchoice to the parent — engineapi sends head, safe **and finalized**
 as `p.Parent.Hash` — so a leader that builds on a head it cannot prove is certified has already made
