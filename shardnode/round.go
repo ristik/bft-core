@@ -299,8 +299,11 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 // physically gone.
 //
 // Which restart happened therefore matters. A shard-node-only restart
-// leaves the executor running and still holding the block, so this path
-// works. An execution-client restart does not, and the payload has to be
+// leaves the executor running, so it does not by itself destroy the block
+// and this path can work — but that is not a guarantee the executor ever
+// received or still holds the payload; only the executor's own answer
+// establishes that. An execution-client restart leaves the target
+// unavailable for immediate forkchoice, and the payload has to be
 // re-acquired. See docs/design/f6b-quiet-uc-recovery.md §1.1 for the
 // restart matrix.
 //

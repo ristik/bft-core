@@ -229,8 +229,10 @@ echo
 echo "=== conclusion ==="
 cat <<CONCLUSION
   Scope of this measurement: it restarts the EXECUTION CLIENT. No shard node is involved, so it
-  says nothing about a shard-process restart while reth stays alive — in that case the executor is
-  the same live process and B1's control applies.
+  says nothing about a shard-process restart while reth stays alive. What B1 supports for that case
+  is only that such a restart does not BY ITSELF destroy the payload — the executor is the same live
+  process. It is not a guarantee that the executor received and retained every payload the shard
+  needs: availability is what the executor reports, never what the restart category implies.
 
   B1 (built, accepted, then explicitly finalized in-process): forkchoiceUpdated -> VALID.
   B2 (built, accepted, never made canonical, then reth restarted): forkchoiceUpdated -> ${fcuStatus}.

@@ -87,11 +87,14 @@ because the certificate that just arrived already carries it. If the executor st
 > claim that it is invalid or physically absent. Measured by `scripts/reth-payload-retention.sh`.
 >
 > Which process restarted therefore matters, and the two must not be conflated: a **shard-node-only**
-> restart leaves the executor alive and still holding the block, so this recovery works; an
-> **execution-client** restart does not, and the payload must be re-acquired. See
-> `docs/design/f6b-quiet-uc-recovery.md` §1.1 for the restart matrix. If the executor doesn't have it, `Commit` reports `Syncing` and the
-framework fails loudly — the same "needs recovery" message as before, not a regression, just no longer
-the *only* outcome.
+> restart leaves the executor alive, so it does not *by itself* destroy the block and this recovery
+> can work — though it is no guarantee the executor ever received or still holds that payload, which
+> only the executor's own answer establishes. An **execution-client** restart leaves the target
+> unavailable for immediate forkchoice, and the payload must be re-acquired. See
+> `docs/design/f6b-quiet-uc-recovery.md` §1.1 for the restart matrix.
+
+If the executor doesn't have it, `Commit` reports `Syncing` and the framework fails loudly — the same
+"needs recovery" message as before, not a regression, just no longer the *only* outcome.
 
 ```go
 // shardnode/round.go, reconcile — the recovery path
