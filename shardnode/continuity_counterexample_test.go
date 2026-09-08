@@ -106,6 +106,9 @@ func continuityByArithmetic(t *testing.T, cp checkpoint, tb types.RootTrustBase,
 
 // continuityByEvidence is the CORRECTED rule: the retained certificates must themselves prove every
 // round in (r_a, r_n] was quiet at the anchor's state. Counters are not read at all.
+// This counterexample model is not a production restore verifier: configured epoch selection,
+// resource limits and independent signing authorization remain required by the design and the
+// stage-3 fixture contract. A true result here grants no authority to resume voting.
 func continuityByEvidence(t *testing.T, cp checkpoint, tb types.RootTrustBase, shardConfHash []byte) bool {
 	t.Helper()
 	if !verifyUC(t, cp.sourceUC, tb, shardConfHash) || !verifyUC(t, cp.latestUC, tb, shardConfHash) {
@@ -155,8 +158,7 @@ func continuityByEvidence(t *testing.T, cp checkpoint, tb types.RootTrustBase, s
 		}
 	}
 	// Condition 6: the evidence must end at the latest certificate.
-	return bytes.Equal(cp.evidence[len(cp.evidence)-1].InputRecord.Hash, cp.latestUC.InputRecord.Hash) &&
-		cp.evidence[len(cp.evidence)-1].InputRecord.RoundNumber == last
+	return sameIR(cp.evidence[len(cp.evidence)-1], cp.latestUC)
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +363,12 @@ func TestContinuityAlignment(t *testing.T) {
 		// A shard that just certified a block and has seen no quiet round since. Ordinary, and the
 		// listed conditions would reject it if they assumed at least one continuity certificate.
 		cp := checkpoint{sourceUC: anchor, latestUC: anchor, evidence: nil}
+		require.True(t, continuityByEvidence(t, cp, tb, shardConfHash))
+	})
+
+	t.Run("a reissued source record does not invent a quiet round", func(t *testing.T) {
+		repeat := sign(anchor.InputRecord, 21)
+		cp := checkpoint{sourceUC: anchor, latestUC: repeat, evidence: nil}
 		require.True(t, continuityByEvidence(t, cp, tb, shardConfHash))
 	})
 

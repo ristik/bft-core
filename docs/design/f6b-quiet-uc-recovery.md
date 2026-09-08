@@ -287,7 +287,9 @@ following must hold, re-derived from the retained certificates alone:
    certificate in the set is a contradiction, not a gap.
 5. Their partition rounds are exactly `r_a + 1, r_a + 2, …, r_n` — contiguous, strictly increasing,
    no duplicates, no gaps.
-6. The final continuity UC **is** the latest UC.
+6. The final continuity UC carries the **same canonical input-record bytes** as the latest UC,
+   under the verified context in conditions 1-2. A repeat may have a later root seal without
+   changing that record; retain at most one verified representative for that partition round.
 7. The declared and actual set sizes are within the **locally configured** capacity limits (§3.3.3),
    checked before the sequence is allocated or verified.
 
@@ -295,17 +297,17 @@ following must hold, re-derived from the retained certificates alone:
 certificate, which is wrong when the source UC *is* the latest UC — the anchor was established by the
 most recent certificate and no quiet rounds have followed it. That is the ordinary state of a shard
 that just certified a block, not a degenerate one. So, explicitly: when `r_n == r_a`, the source and
-latest UC must be **the same certificate**, the evidence set must be **empty**, and conditions 4-6 do
+latest UC must carry **the same canonical input record** under conditions 1-2 (a reissued root seal
+is allowed), the evidence set must be **empty**, and conditions 4-6 do
 not apply; conditions 1-3 and 7 still do. A non-empty evidence set with `r_n == r_a`, or a source and
-latest that differ while claiming the same round, is rejected.
+latest whose input records differ while claiming the same round, is rejected.
 
 Any failure means **no continuity claim**, not a downgraded one: the node abstains with a diagnostic
 naming which condition failed, and retains the file for diagnosis rather than rewriting it.
 
 ## 4. Transition table
 
-Two preconditions apply to **every** row that ends in a vote. Neither is optional and neither is
-implied by state equality:
+Three preconditions apply to **every** row that ends in a vote. None is optional or implied by state equality:
 
 - **P-ctx — authenticated context.** The certificate verified against the configured trust base for
   its root epoch, for this partition and shard, with partition epoch and `shardConfHash` matching the
@@ -314,6 +316,11 @@ implied by state equality:
   certified block hash for the state being built on — the anchor's `blockHash`, or this UC's own
   `InputRecord.BlockHash` when it is non-quiet. Comparing state roots is not sufficient: two blocks
   can share a post-state.
+
+- **P-sign — signing authorization.** A restored node must satisfy the independent monotonic signing
+  contract in §6.1 before voting. A verified checkpoint and matching executor head alone do not
+  satisfy it. Until #14 supplies that contract, restored nodes may observe and reconcile but remain
+  non-voting; every “yes” below is conditional on this gate.
 
 An earlier revision of this table had a fast path keyed on `head == certifiedPrev`. Since
 `certifiedPrev` is `exp.PreviousHash`, a **state root**, that row permitted voting with no verified
@@ -335,7 +342,7 @@ build, do not submit, retain evidence, stay recoverable.
 | 8 | head behind, UC quiet | **no anchor retained** | — | abstain, `no-anchor` — *today this row is `Commit(nil)`* | **no** |
 | 9 | head behind, any UC | retained but `anchor.stateRoot != certifiedPrev` | — | abstain, `anchor-mismatch`; do not apply | **no** |
 | 10 | head behind, any UC | retained, state root matches, but **continuity not established** (§3.3.4 conditions 4-6 — a gap, a non-quiet certificate in the set, or a set not ending at the latest UC) | — | abstain, `continuity-gap`; **do not** accept on matching state root (§3.3) | **no** |
-| 10a | **live**, head behind, UC quiet | anchor present; the *persisted* evidence set would exceed a bound | — | **vote normally** — in-process continuity is unaffected by a persistence limit. Persist the non-restorable state (source UC retained, sequence dropped, `continuityExhausted` recorded), **never truncate the evidence** (§3.3.3) | **yes** |
+| 10a | **live**, UC quiet | in-process continuity intact; the *persisted* evidence set would exceed a bound | as in rows 1/6/7 | Persist the non-restorable state (source UC retained, sequence dropped, `continuityExhausted` recorded). Then apply the normal head/availability checks: row 1 if already reconciled, row 6 if recovery succeeds, row 7 if unavailable. Capacity exhaustion grants no exception to P-ctx, P-id or P-sign | **only after the applicable row permits it** |
 | 10a-r | **restored**, head behind, UC quiet | checkpoint records `continuityExhausted`; anchor present, no sequence | — | abstain, `continuity-capacity-exhausted` — an availability limit this node chose, distinct from row 10's soundness refusal | **no** |
 | 10b | head behind, UC quiet | anchor and evidence present on disk, but a retained certificate **fails re-verification** on restore | — | abstain, `continuity-unverified`; retain the file for diagnosis, do not rewrite it | **no** |
 | 11 | **repeat** UC | as for the round it repeats | as for that row | same as the row it repeats; a repeat neither advances nor invalidates the anchor, and never extends the covered interval — evidence is keyed by partition round (§3.3.3) | per row |
@@ -619,8 +626,8 @@ interesting case.
 
 Real-client evidence, separate from the unit fixtures: an isolated `scripts/reth-chaos.sh`
 **shard-only** restart showing positive work before and after, and agreement on certified target,
-canonical block, state and receipts. Per §1.1 that case does **not** need acquisition, so it is the
-scenario stage 3 can actually close. The execution-client and full-pair restarts are expected to
+canonical block, state and receipts. Per §1.1 that case needs no acquisition **if the executor retains the payload**.
+Stage 3 may demonstrate reconciliation; resumed voting additionally waits for P-sign / #14. The execution-client and full-pair restarts are expected to
 reach a clean fail-closed `unavailable` until stage 4 exists, and that is the correct intermediate
 result rather than a failure of stage 3.
 
