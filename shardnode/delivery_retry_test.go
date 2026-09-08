@@ -3,6 +3,9 @@ package shardnode
 import (
 	"bytes"
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -32,6 +35,10 @@ func (e *retryExecutor) Head(context.Context) (BlockRef, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.head, nil
+}
+
+func (e *retryExecutor) GenesisBlock(context.Context) (BlockRef, error) {
+	return BlockRef{Number: 0, Hash: []byte{0x00}, StateRoot: []byte{0x00}}, nil
 }
 
 func (e *retryExecutor) Commit(_ context.Context, hash Hash) (Status, error) {
@@ -74,6 +81,25 @@ func (e *retryExecutor) snapshot() (BlockRef, int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.head, len(e.commits)
+}
+
+// refusingSubmitter is a transport that never delivers, recording what it was asked to send.
+type refusingSubmitter struct {
+	mu   sync.Mutex
+	sent []*certification.BlockCertificationRequest
+}
+
+func (s *refusingSubmitter) Submit(_ context.Context, req *certification.BlockCertificationRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sent = append(s.sent, req)
+	return errors.New("transport failure")
+}
+
+func (s *refusingSubmitter) requests() []*certification.BlockCertificationRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*certification.BlockCertificationRequest(nil), s.sent...)
 }
 
 // countingDriver wraps a RoundDriver and counts deliveries, so a test can distinguish "the handler
@@ -198,4 +224,116 @@ func TestFailedDeliveryIsRetriedByDuplicate(t *testing.T) {
 	require.Equal(t, []uint64{6}, sub.rounds(), "and must not produce a second signature")
 	_, commitsAfter := exec.snapshot()
 	require.Equal(t, commits, commitsAfter, "nor touch the executor")
+}
+
+/*
+TestDeliverySeparatesApplicationFromSending drives the real handler over a real Round through the
+two failures that look alike from the outside and must not be treated alike.
+
+An application failure means the certificate was not applied and the retransmission should retry it.
+A SEND failure means it was applied and the next round's request did not reach the root chain — and
+retrying that delivery would re-enter the round with a proposal the root chain has certified nothing
+about, which is the path that finalised an uncertified block. The two are separated by
+ErrSubmissionFailed.
+*/
+func TestDeliverySeparatesApplicationFromSending(t *testing.T) {
+	ctx := context.Background()
+
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	tb, ok := testtrustbase.NewTrustBase(t, signer).(*types.RootTrustBaseV1)
+	require.True(t, ok)
+	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: authPartitionID}
+	zero := make([]byte, 32)
+
+	s0 := bytes.Repeat([]byte{0xe0}, 32)
+	s1 := bytes.Repeat([]byte{0xe1}, 32)
+	b0 := bytes.Repeat([]byte{0xf0}, 32)
+	b1 := bytes.Repeat([]byte{0xf1}, 32)
+
+	technicalFor := func(round uint64) *certification.TechnicalRecord {
+		return &certification.TechnicalRecord{Round: round, Epoch: 0, Leader: "send-node", StatHash: zero, FeeHash: zero}
+	}
+	trHash, err := technicalFor(6).Hash()
+	require.NoError(t, err)
+	// Round 5 certified the block this executor is already on, so the round applies cleanly and
+	// the only thing that can fail is the send.
+	ir5 := &types.InputRecord{
+		Version: 1, RoundNumber: 5, PreviousHash: s0, Hash: s1, BlockHash: b1,
+		SummaryValue: []byte{}, Timestamp: 1,
+	}
+	uc5 := testcertificates.CreateUnicityCertificate(t, signer, ir5, pdr, 41, zero, trHash)
+
+	newFixture := func(sub Submitter) (*BFTClient, *countingDriver, *retryExecutor) {
+		exec := &retryExecutor{
+			head:      BlockRef{Number: 5, Hash: b1, StateRoot: s1},
+			held:      map[string]BlockRef{string(b0): {Number: 4, Hash: b0, StateRoot: s0}},
+			available: true,
+		}
+		round := NewRound("send-node", authPartitionID, types.ShardID{}, exec, NewLoopbackDisseminator(), signer, sub, nil)
+		drv := &countingDriver{inner: round}
+		return &BFTClient{
+			partitionID:    authPartitionID,
+			shardID:        types.ShardID{},
+			nodeID:         "send-node",
+			trustBaseStore: stubTrustBaseStore{tb: tb},
+			driver:         drv,
+		}, drv, exec
+	}
+	respond := func(uc *types.UnicityCertificate) *certification.CertificationResponse {
+		return &certification.CertificationResponse{
+			Partition: authPartitionID, Shard: types.ShardID{}, Technical: *technicalFor(6), UC: *uc,
+		}
+	}
+
+	t.Run("a send failure leaves the certificate applied, so its duplicate is not re-driven", func(t *testing.T) {
+		sub := &refusingSubmitter{}
+		client, drv, exec := newFixture(sub)
+
+		err := client.handleCertificationResponse(ctx, respond(uc5))
+		require.ErrorIs(t, err, ErrSubmissionFailed)
+		require.Equal(t, 1, drv.count())
+		require.Nil(t, client.unapplied, "the certificate WAS applied; only the send failed")
+
+		_, commits := exec.snapshot()
+		sent := sub.requests()
+		require.Len(t, sent, 3, "the same request is retried, bounded")
+		for _, again := range sent[1:] {
+			require.Equal(t, sent[0].Signature, again.Signature, "identical bytes, never a re-sign")
+		}
+
+		// The retransmission, which is what used to re-enter the round.
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(uc5)))
+		require.Equal(t, 1, drv.count(), "a duplicate of an APPLIED certificate must not reach the driver")
+		afterHead, afterCommits := exec.snapshot()
+		require.Equal(t, commits, afterCommits, "and must not commit anything")
+		require.Equal(t, b1, []byte(afterHead.Hash), "the executor is where the certificate left it")
+		require.Len(t, sub.requests(), 3, "no second signed request for the same round")
+	})
+
+	t.Run("a persistence failure after a successful send is an application failure, and retrying it commits nothing uncertified", func(t *testing.T) {
+		// persistingDriver saves the certificate after the driver returns. A failure there means
+		// the round ran but the checkpoint did not survive, so the delivery is retried — and the
+		// retry must not mistake the next round's proposal for something certified.
+		sub := &countingSubmitter{}
+		client, drv, exec := newFixture(sub)
+		// A directory the process may enter but not write in: SaveLUC creates its directory if it
+		// is missing, so an absent path is not a failure — an unwritable one is.
+		roDir := filepath.Join(t.TempDir(), "read-only")
+		require.NoError(t, os.Mkdir(roDir, 0o500))
+		t.Cleanup(func() { _ = os.Chmod(roDir, 0o700) })
+		client.driver = &persistingDriver{driver: drv, store: NewFileStore(filepath.Join(roDir, "luc.cbor"))}
+
+		err := client.handleCertificationResponse(ctx, respond(uc5))
+		require.ErrorContains(t, err, "persisting certificate")
+		require.NotNil(t, client.unapplied, "the checkpoint is part of applying it")
+		require.Equal(t, []uint64{6}, sub.rounds(), "the round was submitted before the store failed")
+
+		_, commits := exec.snapshot()
+		_ = client.handleCertificationResponse(ctx, respond(uc5))
+		require.Equal(t, 2, drv.count(), "the duplicate retries the delivery, which is the point")
+		_, afterCommits := exec.snapshot()
+		require.Equal(t, commits, afterCommits,
+			"but the round-6 proposal is not certified by round 5's certificate and must not be committed")
+	})
 }

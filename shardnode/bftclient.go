@@ -340,11 +340,23 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	// This is the whole of the applied-versus-observed split at this layer: on failure the
 	// certificate stays marked unapplied so a retransmission retries it, and on success the mark
 	// is cleared so later duplicates go back to being no-ops.
+	// APPLIED is not the same as SENT, and only the first one decides whether to retry.
+	//
+	// A driver error that is ErrSubmissionFailed means the certificate WAS applied — observed,
+	// committed, reconciled — and that the next round's certification request did not reach the
+	// root chain. Retrying the delivery would not resend that request (it belongs to a round the
+	// driver has already moved past); it would re-enter the round with a proposal the root chain
+	// has certified nothing about. That is exactly the path that finalised an uncertified block,
+	// so a send failure is reported and the certificate stays applied.
 	c.mu.Lock()
-	if err != nil {
-		c.unapplied = &deliveryAttempt{partitionRound: cr.UC.GetRoundNumber(), rootRound: cr.UC.GetRootRoundNumber()}
-	} else {
+	switch {
+	case err == nil:
 		c.unapplied = nil
+	case errors.Is(err, ErrSubmissionFailed):
+		c.unapplied = nil
+		metrics.recordIRDivergence(ctx, "delivery_send_failed")
+	default:
+		c.unapplied = &deliveryAttempt{partitionRound: cr.UC.GetRoundNumber(), rootRound: cr.UC.GetRootRoundNumber()}
 	}
 	c.mu.Unlock()
 	return err

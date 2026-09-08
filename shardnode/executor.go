@@ -128,6 +128,21 @@ type Executor interface {
 	// Called once per round to learn what the next round builds on.
 	Head(ctx context.Context) (BlockRef, error)
 
+	// GenesisBlock reports the executor's block ZERO — the block its chain
+	// configuration starts from, not whatever it has committed since.
+	//
+	// It exists because the framework needs an execution identity it can
+	// state independently of anything this process has done. The shard's
+	// first certified round is non-quiet by convention even when nothing
+	// moved, so it carries a block hash the executor may never make
+	// canonical (see BlockHashOrFallback and Round's P-id check); deciding
+	// "the executor is still at its configured genesis" from the first head
+	// this process happened to observe is not the same claim, because a new
+	// process can attach to an executor that has already committed blocks.
+	// Implementations must answer from configuration — an Ethereum client
+	// by asking for block 0 — never by caching an observed head.
+	GenesisBlock(ctx context.Context) (BlockRef, error)
+
 	// Commit makes the block identified by hash canonical and final. Called
 	// only after a Unicity Certificate has certified it — an Executor
 	// implementation never needs to un-commit a block, because the

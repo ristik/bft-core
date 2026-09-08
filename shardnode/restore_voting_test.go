@@ -37,6 +37,12 @@ func (e *steadyExecutor) Head(context.Context) (BlockRef, error) {
 	return e.head, nil
 }
 
+// GenesisBlock answers from configuration, not from the head: this stub is pinned at one block, so
+// its genesis is the block zero it was configured with.
+func (e *steadyExecutor) GenesisBlock(context.Context) (BlockRef, error) {
+	return BlockRef{Number: 0, Hash: []byte{0x00}, StateRoot: []byte{0x00}}, nil
+}
+
 func (e *steadyExecutor) Commit(_ context.Context, hash Hash) (Status, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
