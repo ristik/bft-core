@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
 // ethStub serves just enough eth_chainId for CheckChainID.
@@ -57,4 +59,33 @@ func TestAdapterCheckChainID(t *testing.T) {
 		srv := ethStub(t, "", http.StatusInternalServerError)
 		require.Error(t, newAdapter(srv.URL).CheckChainID(context.Background(), 31337))
 	})
+}
+
+// TestAdapterCommitRejectsEmptyHash is the adapter half of issue #92's reproduction.
+//
+// shardnode/round.go's reconcile takes its recovery target from the certificate's
+// InputRecord.BlockHash, which a quiet certificate carries as nil, and its comment asserts that
+// this is harmless because "Commit will correctly report StatusSyncing for it". That is true of
+// the in-memory fake executor and false of this adapter, which is why the fake-only chaos suite
+// never surfaced the path. The adapter rejects the empty hash before any RPC is attempted — the
+// error seen in the retained real-reth logs.
+func TestAdapterCommitRejectsEmptyHash(t *testing.T) {
+	// No server: the failure happens in argument conversion, before any request is made.
+	a := NewAdapter(Config{EngineURL: "http://127.0.0.1:1", EthURL: "http://127.0.0.1:1", Secret: Secret{}}, nil)
+
+	for _, tc := range []struct {
+		name string
+		hash []byte
+	}{
+		{"nil hash, as a quiet certificate carries", nil},
+		{"empty hash", []byte{}},
+		{"short hash", []byte{0x01, 0x02}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, err := a.Commit(context.Background(), tc.hash)
+			require.Error(t, err, "the adapter must not accept a non-32-byte commit target")
+			require.ErrorContains(t, err, "expected a 32-byte hash")
+			require.Equal(t, shardnode.StatusInvalid, status)
+		})
+	}
 }

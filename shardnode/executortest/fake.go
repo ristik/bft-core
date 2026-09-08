@@ -171,6 +171,17 @@ func (f *Fake) Commit(_ context.Context, hash shardnode.Hash) (shardnode.Status,
 	return shardnode.StatusValid, nil
 }
 
+// ForgetUncommitted drops every block that was Verified but never Committed, modelling an
+// executor that no longer holds a payload it once accepted — a replaced datadir, a pruned
+// non-canonical block, or a client that simply never received it. Distinguishing this from
+// "the payload is right there, merely not canonical" is what issue #92 stage 1 needs, because
+// the two cases have different recovery answers.
+func (f *Fake) ForgetUncommitted() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.committed = map[string]shardnode.Block{}
+}
+
 // CommitSealed is the leader-side equivalent of Commit: after Seal, the
 // leader already holds the Block value and doesn't need the hash-indexed
 // lookup that the follower path (Verify, then Commit-by-hash) requires.

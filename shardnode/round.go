@@ -284,10 +284,28 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 // certified, and r.pending — the in-memory record commitPrevious would
 // normally use — is empty, because it never survives a restart. That does
 // not necessarily mean the certified block is lost: an Executor backed by
-// a persistent store (reth writes a block to disk the moment newPayload
-// succeeds, before any forkchoiceUpdate makes it canonical) may still have
-// it sitting right there, simply never finalized because the process died
-// between submitting the request and processing the confirming UC.
+// a persistent store may still have it sitting right there, simply never
+// finalized because the process died between submitting the request and
+// processing the confirming UC.
+//
+// MEASURED CORRECTION (issue #92 stage 2, scripts/reth-payload-retention.sh).
+// This used to assert that "reth writes a block to disk the moment
+// newPayload succeeds, before any forkchoiceUpdate makes it canonical".
+// Against the pinned client that holds only WITHIN an execution-client
+// process lifetime: forkchoiceUpdated to an accepted-but-unfinalised block
+// returns VALID while the client lives, and after restarting the CLIENT on
+// the same datadir the same target returns SYNCING — unavailable for
+// immediate forkchoice, which is not a claim that it is invalid or
+// physically gone.
+//
+// Which restart happened therefore matters. A shard-node-only restart
+// leaves the executor running, so it does not by itself destroy the block
+// and this path can work — but that is not a guarantee the executor ever
+// received or still holds the payload; only the executor's own answer
+// establishes that. An execution-client restart leaves the target
+// unavailable for immediate forkchoice, and the payload has to be
+// re-acquired. See docs/design/f6b-quiet-uc-recovery.md §1.1 for the
+// restart matrix.
 //
 // So Commit is retried directly against the root-chain-certified hash
 // before giving up. This is the one place the framework calls Commit with
@@ -306,12 +324,27 @@ func (r *Round) reconcile(ctx context.Context, uc *types.UnicityCertificate, exp
 	// pendingSubmission.hash, always a Block.Hash) — never by state root.
 	// uc.InputRecord.BlockHash is the certificate's own copy of that same
 	// value, which is why it's usable here even though r.pending (the only
-	// other place this framework remembers a block hash) is gone. A quiet
-	// certificate carries a nil BlockHash by construction (see
-	// BuildInputRecord) — there is no block to retry, and Commit will
-	// correctly report StatusSyncing for it, which is the right outcome:
-	// no amount of retrying recovers a round this node never built or
-	// verified at all.
+	// other place this framework remembers a block hash) is gone.
+	//
+	// KNOWN DEFECT (issue #92, reproduced by
+	// shardnode/round_quiet_recovery_test.go). A quiet certificate carries a
+	// nil BlockHash by construction (see BuildInputRecord), so when a node
+	// that is behind a state-changing block processes a quiet certificate,
+	// the target below is EMPTY. This comment used to claim that was
+	// harmless because "Commit will correctly report StatusSyncing for it".
+	// That is true of the in-memory fake executor and false of the Engine
+	// API adapter, which rejects a non-32-byte hash outright
+	// ("expected a 32-byte hash, got 0 bytes" — see
+	// engineapi.TestAdapterCommitRejectsEmptyHash). It is why a fake-only
+	// chaos suite never surfaced this path.
+	//
+	// An earlier non-quiet certificate can identify a block target, but this
+	// Round has no retained certificate-chain/anchor interface after restart.
+	// The reproduction keeps that earlier signed certificate in the test,
+	// not in the restarted Round. Acquiring, retaining and authenticating an
+	// anchor and binding it to the current certified context are stage 2 of
+	// #92. The empty-target failure occurs both when the fake retains the
+	// payload and when it does not; real-client durability is separate.
 	blockHash := Hash(uc.InputRecord.BlockHash)
 	if r.log != nil {
 		r.log.WarnContext(ctx, "executor head diverges from certified state — attempting recovery via Commit before giving up",
