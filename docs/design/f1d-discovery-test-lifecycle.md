@@ -111,15 +111,17 @@ measurable. Two sweeps, both on the merged fix, both with the §2 diagnostics ar
 | 2 cores (`GOMAXPROCS=2`), 4 × `-count=5` | 20 | **0** | 0 |
 | | **56** | **0** | **0** |
 
-The 2-core sweep is the more interesting half. A GitHub-hosted runner has 2-4 cores, so restricting
-`GOMAXPROCS` emulates the failing environment far more faithfully than loading a 12-core machine —
-and loading the 12-core machine with ten busy cores had already failed to reproduce anything (§3).
-Neither sweep produced a single failure.
+The second sweep restricts Go execution parallelism with `GOMAXPROCS=2`. This is a useful
+additional scheduling control, not an emulation of the CI environment: it does not reproduce the
+runner's OS, CPU quota, networking, or competing workloads. Loading the 12-core machine with ten
+busy cores had also failed to reproduce the timeout (§3). Neither reported sweep produced a failure.
+An independent review control, `GOMAXPROCS=2 go test ./network -count=3`, also passed all three
+iterations (56.8 seconds) on the review host.
 
 **What this does and does not establish.** It does not prove the timeouts are gone; 56 passes cannot
 prove the absence of a timing failure, and #100 says so explicitly. What it does establish is that
-they are **no longer reproducible locally by the two levers that were available** — repetition and
-core count — which is a different and weaker statement than "fixed".
+they were **not reproduced in these local sweeps** of repetition and Go execution parallelism.
+This does not establish that other local schedules cannot reproduce them, or that they are fixed.
 
 It also means the next occurrence, wherever it happens, will arrive with the routing/connection state
 attached (§2) rather than as "Condition never satisfied". That was the point of the diagnostics: the
@@ -144,7 +146,7 @@ exactly as it was.
 ## 5. Open
 
 - **The timeout cause (§1.2), still unresolved.** 56 post-fix iterations across two core counts
-  produced no failure (§3.1), so it is no longer locally reproducible — which is not the same as
+  produced no failure (§3.1), so these sweeps did not reproduce it — which is not the same as
   fixed. The evidence to decide it is collected automatically on the next occurrence.
 - `newDHT`'s routing-table callback logs through a caller-supplied logger with no lifetime relation
   to the DHT. In production that is harmless; in tests it converts any leaked peer into a package
