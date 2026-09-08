@@ -803,17 +803,34 @@ two transactions per burst.
 | Scenario | Outcome |
 | --- | --- |
 | baseline workload | **pass** — 2/2 executed and certified, all four clients agree on head, nonce and every receipt |
-| shard follower restart, reth retained | **recovers** — accepted a new certificate *and executed new work* (`3:0xc473e899… → 4:0xf5801df7…`). One check failed: canonical heads disagreed at the moment convergence was sampled, while the nonce and all four receipts agreed |
-| shard leader kill, quorum live | **pass, end to end** — shard rotated past the killed leader (round 15 → 17), a transaction executed while it was absent, the returning node accepted a certificate, executed new work, and all four clients converged |
+| shard follower restart, reth retained | **recovers** — accepted a new certificate *and executed new work* (`2:0xca7d5744… → 4:0x20fce7f9…`), and all four clients converged on head, nonce and every receipt. **Requires the T2-bounded await budget** (#107): with the 5s default this scenario fails with `continuity-gap` |
+| shard leader kill, quorum live | shard rotates past the killed leader and a transaction executes while it is absent; the returning node accepts a certificate but **its executor does not apply the new block**, with `lastRecoveryDiagnostic=continuity-gap`. Open |
 | reth-only restart, datadir retained | **fails** — safe abstention observed (the node reported its executor unavailable rather than proceeding), the rest of the shard kept certifying, but the recovery transaction never executed within 120s |
 | complete shard+reth pair restart | **fails** — shard kept certifying with the pair down, a transaction executed while it was absent, the returning node accepted a certificate, but the recovery transaction never executed within 120s |
 | multi-leader execution | **pass** — see below |
 
-The first two rows are new. Every previous revision of this lane reported the follower restart as
-failing ("validator 2's executor did not apply the new block") and scenarios 3-6 as `NOT RUN`. What
-changed is not the harness: it is F6b stage 3's correction that an abstaining node still builds,
-verifies and commits, so a node that cannot yet prove its head keeps receiving payloads and can
-apply the certified block when it can.
+The follower-restart row is new. Every previous revision of this lane reported it as failing
+("validator 2's executor did not apply the new block") and scenarios 3-6 as `NOT RUN`.
+
+**What makes the difference is measurable, and it is not the harness.** Three runs, same scenarios:
+
+| runtime | follower restart | leader restart |
+| --- | --- | --- |
+| F6b stage 3 at `ea608abc` | recovers | recovers |
+| plus the certified-commit binding (`8e2599ca`) | `continuity-gap`, no recovery | `continuity-gap`, no recovery |
+| plus the T2-bounded await budget (#107) | **recovers**, converged | `continuity-gap`, no recovery |
+
+The middle row is the stricter commit rule doing what it should: a returning node used to advance
+its executor by committing its own pending proposal on any certificate, which is precisely the
+finalization of uncertified blocks that #106 closes. With that route gone, catching up depends on
+the recovery path, which needs an unbroken chain of observed certificates — and a node running with
+an await budget longer than the shard's T2 consumes certificates more slowly than they arrive, misses
+one, and reports `continuity-gap`. Bounding the budget by T2 restores the follower case.
+
+The leader case does not recover even then, and is not explained here. Its snapshot records
+`continuity-gap` on the returning node as well, so it is the same shape at a different scale — the
+node was the round leader when it was killed, so it has more to catch up on. Owner: #92 stage 4 and
+F6 (#14), with #105 for what a restored node may then do.
 
 **The two failures, stated as what was observed rather than as a diagnosis.** Both end the same way
 — the transaction submitted to prove the returning node does new work is never executed — and the
