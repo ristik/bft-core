@@ -16,6 +16,7 @@ import (
 type Metrics struct {
 	roundsCertified metric.Int64Counter
 	repeatUCs       metric.Int64Counter
+	staleUCs        metric.Int64Counter
 	buildDuration   metric.Float64Histogram
 	verifyDuration  metric.Float64Histogram
 	quorumLatency   metric.Float64Histogram
@@ -35,6 +36,10 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	if m.repeatUCs, err = meter.Int64Counter("shardnode.uc.repeat",
 		metric.WithDescription("Repeat UCs received — each one is a round the root chain timed out waiting for quorum on")); err != nil {
 		return nil, fmt.Errorf("creating uc.repeat counter: %w", err)
+	}
+	if m.staleUCs, err = meter.Int64Counter("shardnode.uc.stale",
+		metric.WithDescription("Authentic certificates for rounds already passed — routine on a node subscribed to several root nodes, but a sharp rise means retransmission churn (#93)")); err != nil {
+		return nil, fmt.Errorf("creating uc.stale counter: %w", err)
 	}
 	if m.buildDuration, err = meter.Float64Histogram("shardnode.build.duration",
 		metric.WithDescription("Time from Build to Seal returning, leader rounds only"), metric.WithUnit("s"),
@@ -70,6 +75,13 @@ func (m *Metrics) recordRepeatUC(ctx context.Context) {
 		return
 	}
 	m.repeatUCs.Add(ctx, 1)
+}
+
+func (m *Metrics) recordStaleUC(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.staleUCs.Add(ctx, 1)
 }
 
 func (m *Metrics) recordBuildDuration(ctx context.Context, d time.Duration) {
