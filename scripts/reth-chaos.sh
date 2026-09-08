@@ -11,9 +11,14 @@
 # There is deliberately no fake fallback: a missing or unpinned reth binary fails.
 #
 # Usage:
-#   ./scripts/reth-chaos.sh [-v validators] [-t workload-txs] [-k] [-F]
+#   ./scripts/reth-chaos.sh [-v validators] [-t workload-txs] [-s scenarios] [-k] [-F]
 #     -v  validators, each with its own reth (default 4; >=4 to tolerate one fault)
 #     -t  transactions per workload burst (default 3)
+#     -s  comma-separated scenarios to run, out of
+#           baseline,follower-restart,leader-kill,reth-only-restart,pair-restart,multi-leader
+#         Each runs on its own devnet, so any subset is a complete run of those scenarios and not
+#         a partial run of all of them. Re-running one scenario is minutes rather than half an hour,
+#         which is the difference between investigating a failure and guessing at it.
 #     -k  keep everything running afterwards
 #     -F  inject a harness failure, to exercise the evidence-collection path on purpose
 #         (#88 requires that path be tested; a passing run never proves it)
@@ -31,13 +36,14 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # shellcheck source=lib/reth-chaos-lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/reth-chaos-lib.sh"
 
-while getopts "hv:t:kF" o; do
+while getopts "hv:t:s:kF" o; do
   case "${o}" in
   v) validators=${OPTARG} ;;
   t) workloadTxs=${OPTARG} ;;
+  s) scenarios=${OPTARG} ;;
   k) keep=true ;;
   F) injectFailure=true ;;
-  h | *) sed -n '2,21p' "$0"; exit 0 ;;
+  h | *) sed -n '2,33p' "$0"; exit 0 ;;
   esac
 done
 
@@ -126,54 +132,29 @@ echo
 abortIf startup
 
 echo "=== 0. clean fixtures ==="
-./stop-evm.sh -a >/dev/null 2>&1
-for i in $(seq 1 "$validators"); do stopReth "$i"; done
-./setup-evm-nodes.sh -r 3 -v "$validators" >/dev/null || { echo "setup failed" >&2; cleanup; exit 1; }  # nothing to collect yet
-mkdir -p test-nodes/evidence
+if ! wantScenario baseline; then
+  echo "  --  skipped by -s $scenarios"
+else
+# The cluster comes up first: setup-evm-nodes.sh runs `make clean`, so anything written to
+# test-nodes before it is deleted, and the chain fixtures it hashes below do not exist until after.
+bringUpCluster || { finish; exit 1; }
 : >test-nodes/evidence/workload.txt
 : >test-nodes/evidence/convergence.txt
-
-python3 - <<'PY'
-import json, subprocess
-g = json.load(open("test-nodes/evm-genesis.json"))
-g["alloc"] = json.loads(subprocess.check_output(["go", "run", "./scripts/evmtx", "-alloc"]))
-json.dump(g, open("test-nodes/evm-genesis-funded.json", "w"), indent=2)
-PY
 {
   echo "reth=$rethCommit"
   echo "bft=$(git rev-parse HEAD)"
+  echo "validators=$validators workloadTxs=$workloadTxs chainID=$chainID"
+  echo "sender=$senderAcct (nonce read from eth_getTransactionCount pending before each send)"
+  echo "logLevel=$EVM_VALIDATOR_LOG_LEVEL (debug is required: leader/block correlation reads it)"
   echo "genesis=$(shasum -a 256 test-nodes/evm-genesis.json | cut -d' ' -f1)"
   echo "fundedGenesis=$(shasum -a 256 test-nodes/evm-genesis-funded.json | cut -d' ' -f1)"
   echo "shardConf=$(shasum -a 256 "test-nodes/shard-conf-${partitionID}_0.json" | cut -d' ' -f1)"
-  echo "validators=$validators workloadTxs=$workloadTxs chainID=$chainID"
-  echo "sender=$senderAcct (nonce read from eth_getTransactionCount pending before each send)"
+  echo "NOTE: each fault scenario below runs on its OWN cluster, regenerated the same way; the"
+  echo "      genesis/shard-conf hashes are per-cluster and are re-recorded in each scenario's"
+  echo "      snapshot directory."
 } | tee test-nodes/evidence/pins.txt
-
-for i in $(seq 1 "$validators"); do
-  openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
-  startReth "$i"
-done
-for i in $(seq 1 "$validators"); do
-  waitReth "$i" 90 || { fail "reth$i did not start"; finish; exit 1; }
-done
-peerReths
-pass "$validators pinned reth instances up and statically peered"
-
-source helper.sh
-for i in $(seq 1 "$validators"); do
-  export "EVM_ENGINE_URL_$i=$(engineURL "$i")"
-  export "EVM_ETH_URL_$i=$(ethURL "$i")"
-done
-./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1
-rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
-
-waited=0
-until grep -q 'accepted certificate' "$(log 1)" 2>/dev/null; do
-  [ "$waited" -ge 180 ] && { fail "shard never certified"; finish; exit 1; }
-  sleep 2; waited=$((waited + 2))
-done
-pass "shard certifying on --executor engine-api against real reth"
 snapshot 00-baseline
+fi
 echo
 # ==============================================================================================
 # Scenarios. One failure at a time; the returning node must demonstrably execute and certify NEW
@@ -182,16 +163,24 @@ echo
 
 
 echo "=== 1. workload before any fault ==="
+if ! wantScenario baseline; then
+  echo "  --  skipped by -s $scenarios"
+else
 runWorkload "pre-fault" "$workloadTxs"
 leadersBefore=$(cat test-nodes/evidence/.leaders-pre-fault)
 # The pre-fault baseline is itself a gate: injecting a fault into a cluster that does not already
 # agree cannot produce evidence about the fault.
 convergenceGate "pre-fault" || true
 snapshot 01-pre-fault
+fi
 echo
 
 echo "=== 2. shard follower process restart, its reth retained ==="
-if skipIfUnrecovered "follower restart"; then :; else
+if ! wantScenario "follower-restart"; then
+  echo "  --  skipped by -s $scenarios"
+elif ! freshCluster "follower-restart"; then
+  fail "follower-restart: NOT RUN — its own clean cluster did not execute and converge before the fault, so nothing here would be about this fault"
+else
 # The shard process dies; its execution client keeps running and keeps its datadir. This is the
 # same-host retained-data case. Disk loss / replacement host is #14 and is NOT claimed here.
 follower=2
@@ -222,7 +211,11 @@ fi
 echo
 
 echo "=== 3. shard leader process kill, quorum of others live ==="
-if skipIfUnrecovered "leader kill"; then :; else
+if ! wantScenario "leader-kill"; then
+  echo "  --  skipped by -s $scenarios"
+elif ! freshCluster "leader-kill"; then
+  fail "leader-kill: NOT RUN — its own clean cluster did not execute and converge before the fault, so nothing here would be about this fault"
+else
 # Take the target from the authenticated technical record — the leader the shard's own latest
 # accepted certificate names for the next round — and record that boundary as evidence.
 leaderCtx=$(currentShardLeader 1) || leaderCtx=""
@@ -253,7 +246,11 @@ fi
 echo
 
 echo "=== 4. reth-only restart, datadir retained (the shard process stays up) ==="
-if skipIfUnrecovered "reth-only restart"; then :; else
+if ! wantScenario "reth-only-restart"; then
+  echo "  --  skipped by -s $scenarios"
+elif ! freshCluster "reth-only-restart"; then
+  fail "reth-only-restart: NOT RUN — its own clean cluster did not execute and converge before the fault, so nothing here would be about this fault"
+else
 # The executor disappears from under a running shard node. Two things matter: the shard must
 # abstain rather than certify something it cannot execute, and it must resume once the client
 # returns with its retained data.
@@ -286,7 +283,11 @@ fi
 echo
 
 echo "=== 5. complete shard+reth pair restart, both datadirs retained ==="
-if skipIfUnrecovered "shard+reth pair restart"; then :; else
+if ! wantScenario "pair-restart"; then
+  echo "  --  skipped by -s $scenarios"
+elif ! freshCluster "pair-restart"; then
+  fail "pair-restart: NOT RUN — its own clean cluster did not execute and converge before the fault, so nothing here would be about this fault"
+else
 pair=2
 snapshot 05a-before-pair-restart
 mark=$(logLines "$pair")
@@ -308,10 +309,13 @@ snapshot 05b-after-pair-restart
 fi
 echo
 
-echo "=== 6. final workload and multi-leader evidence ==="
-if skipIfUnrecovered "final workload"; then
-  echo "  SKIP: multi-leader and EVM-block-count evidence NOT RUN for the same reason."
+echo "=== 6. multi-leader execution evidence (#88 stage 1) ==="
+if ! wantScenario "multi-leader"; then
+  echo "  --  skipped by -s $scenarios"
+elif ! freshCluster "multi-leader"; then
+  fail "multi-leader: NOT RUN — its own clean cluster did not execute and converge first"
 else
+leadersBefore=$(cat test-nodes/evidence/.leaders-multi-leader-pre)
 runWorkload "post-fault" "$workloadTxs"
 leadersAfter=$(cat test-nodes/evidence/.leaders-post-fault)
 convergenceGate "final" || true
@@ -329,10 +333,11 @@ convergenceGate "final" || true
 # larger change than this harness repair.
 allLeaders=$(echo "$leadersBefore $leadersAfter" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ')
 leaderCount=$(echo "$allLeaders" | wc -w | tr -d ' ')
-info "distinct nodes that SUBMITTED as leader across the run: $leaderCount ($allLeaders)"
-info "#88's multi-leader EXECUTION requirement is NOT satisfied by this count and remains outstanding:"
-info "  a submission is not an executed certified block, and this harness does not correlate leaders"
-info "  with the workload's block hashes and certifying certificates"
+info "distinct nodes that SUBMITTED as leader on this cluster: $leaderCount ($allLeaders)"
+info "a submission is not an executed certified block, so that count decides nothing on its own;"
+info "the assertion below correlates each executed block with the round that certified it and the"
+info "leader that produced it, and is what #88 stage 1 asks for."
+assertMultiLeaderExecution 1 2 6
 
 blocks=$(hexToDec "$(rpc "$(ethURL 1)" eth_getBlockByNumber '["latest", false]' | pyget "['result']['number']")")
 expected=${#txHashes[@]}

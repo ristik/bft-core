@@ -18,6 +18,7 @@
 : "${workloadTxs:=3}"
 : "${keep:=false}"
 : "${injectFailure:=false}"
+: "${scenarios:=}"   # empty = run them all; see wantScenario
 : "${partitionID:=8}"
 : "${chainID:=31337}"
 : "${pinnedRethCommit:=189c0df32617afc488e0f091dbface1bd72cceb4}"   # ristik/ureth, branch unicity/main
@@ -55,7 +56,12 @@ rpc() {
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}" 2>/dev/null
 }
 
-# rpcField <url> <method> <params> <python-index-expr>
+# rpcField <url> <method> <params> <json-array-of-keys>
+#
+# The fourth argument is a JSON ARRAY of keys — '["result","blockHash"]' — not a Python index
+# expression, whatever the older wording suggested. Passing the wrong shape makes every call fail
+# and every caller take its "could not observe" branch, which is silent by design; that is exactly
+# what happened to the first version of the leader correlation below.
 # Prints the field on success. Returns 1 on transport failure, JSON-RPC error, null result, or a
 # missing/null field, printing nothing.
 rpcField() {
@@ -231,6 +237,260 @@ superviseResult() {
   return 0
 }
 
+# --- cluster lifecycle (#88 stage 2: "independent scenarios from clean fixtures") --------------
+#
+# Every fault scenario gets its OWN devnet: fresh keys, fresh reth datadirs, fresh chain, fresh
+# certified history. Two separate reasons, and both were learned the hard way here:
+#
+#   Evidence. Scenarios used to share one long-lived cluster, so a node that failed to recover in
+#   scenario 2 was still broken in scenarios 3-5 and every later assertion measured that instead of
+#   the fault it named. The harness compensated by refusing to run them at all (skipIfUnrecovered),
+#   which is honest but produces no evidence for four of the six scenarios.
+#
+#   Quorum. Since F6b stage 3 a shard node resumed from a persisted certificate is NON-VOTING for
+#   the rest of its process (#105 owns the contract that lifts it). Shard quorum is n/2+1, so on a
+#   shared cluster each restart permanently spends part of the fault budget and the run stalls after
+#   the second one — not because the fault under test broke anything, but because of the fault
+#   before it. A fresh cluster per scenario restores the full budget to each.
+#
+# The cost is one devnet bring-up per scenario. That is the price of a per-scenario result.
+bringUpCluster() {
+  local i waited=0 stash=""
+
+  ./stop-evm.sh -a >/dev/null 2>&1
+  for i in $(seq 1 "$validators"); do stopReth "$i"; done
+
+  # setup-evm-nodes.sh runs `make clean`, which DELETES test-nodes entirely — datadirs, keys and
+  # the evidence directory alike. That is what makes each cluster genuinely clean, and it is also
+  # why the evidence has to be carried across by hand: without this every scenario but the last
+  # would archive nothing, and the run would look complete while having thrown its own results away.
+  if [ -d test-nodes/evidence ]; then
+    stash=$(mktemp -d)
+    cp -R test-nodes/evidence "$stash/" 2>/dev/null || true
+  fi
+
+  ./setup-evm-nodes.sh -r 3 -v "$validators" >/dev/null || { echo "setup failed" >&2; return 1; }
+  mkdir -p test-nodes/evidence
+  if [ -n "$stash" ]; then
+    cp -R "$stash/evidence/." test-nodes/evidence/ 2>/dev/null || true
+    rm -rf "$stash"
+  fi
+
+  python3 - <<'PY'
+import json, subprocess
+g = json.load(open("test-nodes/evm-genesis.json"))
+g["alloc"] = json.loads(subprocess.check_output(["go", "run", "./scripts/evmtx", "-alloc"]))
+json.dump(g, open("test-nodes/evm-genesis-funded.json", "w"), indent=2)
+PY
+
+  for i in $(seq 1 "$validators"); do
+    openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
+    startReth "$i"
+  done
+  for i in $(seq 1 "$validators"); do
+    waitReth "$i" 90 || { fail "reth$i did not start"; return 1; }
+  done
+  peerReths
+  pass "$validators pinned reth instances up and statically peered"
+
+  # shellcheck source=/dev/null
+  source helper.sh
+  for i in $(seq 1 "$validators"); do
+    export "EVM_ENGINE_URL_$i=$(engineURL "$i")"
+    export "EVM_ETH_URL_$i=$(ethURL "$i")"
+  done
+  # Debug, not info: evidence for #88 depends on it. "execution anchor installed" is the only line
+  # that carries a partition round and the certified EVM block hash together, and correlating a
+  # leader with an executed block is impossible without it (see assertMultiLeaderExecution, which
+  # fails loudly rather than quietly finding nothing if the level is wrong).
+  export EVM_VALIDATOR_LOG_LEVEL="${EVM_VALIDATOR_LOG_LEVEL:-debug}"
+  ./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1
+  rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
+
+  until grep -q 'accepted certificate' "$(log 1)" 2>/dev/null; do
+    [ "$waited" -ge 180 ] && { fail "shard never certified"; return 1; }
+    sleep 2; waited=$((waited + 2))
+  done
+  pass "shard certifying on --executor engine-api against real reth"
+
+  # Per-cluster state. txHashes MUST be reset: the receipts it names live on the chain that was
+  # just discarded, so carrying them into the next cluster would fail every convergence assertion
+  # for a reason that has nothing to do with the scenario.
+  txHashes=()
+  recoveryFailed=""
+  return 0
+}
+
+# wantScenario <name> - true unless -s named a set this scenario is not in. Selection is by name
+# rather than by number so a subset stays meaningful when scenarios are added or reordered.
+wantScenario() {
+  [ -n "$scenarios" ] || return 0
+  case ",$scenarios," in
+    *",$1,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# freshCluster <label> - tear the previous cluster down and bring a new one up for <label>, then
+# establish that it works BEFORE any fault: a scenario opening on a cluster that is not already
+# converged cannot produce evidence about its fault.
+freshCluster() {
+  local label=$1
+  echo "  --  fresh fixtures for '$label' (independent scenario, #88 stage 2)"
+  bringUpCluster || { fail "$label: could not bring up a clean cluster"; return 1; }
+  # Each cluster is a different chain with different keys, so its own pins are recorded rather than
+  # letting the run's first set stand for all of them.
+  {
+    echo "scenario=$label"
+    echo "genesis=$(shasum -a 256 test-nodes/evm-genesis.json | cut -d' ' -f1)"
+    echo "fundedGenesis=$(shasum -a 256 test-nodes/evm-genesis-funded.json | cut -d' ' -f1)"
+    echo "shardConf=$(shasum -a 256 "test-nodes/shard-conf-${partitionID}_0.json" | cut -d' ' -f1)"
+  } >"test-nodes/evidence/$label-pins.txt"
+  runWorkload "$label-pre" "$workloadTxs"
+  convergenceGate "$label-pre" || return 1
+  return 0
+}
+
+# --- leader <-> executed block correlation (#88 stage 1) ---------------------------------------
+#
+# #88 asks for "at least two distinct shard leaders producing executed, certified blocks", and is
+# explicit that counting submissions does not answer it: a submission is not an executed block, and
+# quiet rounds and uncertified attempts count the same as real work. The correlation below joins
+# three facts that are each recorded independently, so the claim is assembled from evidence rather
+# than assumed:
+#
+#   receipt        tx -> EVM block hash               (eth_getTransactionReceipt, the execution client)
+#   anchor line    EVM block hash -> partition round  (shard node, AFTER UC.Verify — see below)
+#   submit line    partition round -> leader          (shard node, from the technical record)
+#
+# The middle step is why this lane runs its validators at debug. "execution anchor installed" is
+# logged by shardnode/round.go when a verified NON-QUIET certificate is folded into the continuity
+# state, and it is the only place a partition round and the certified EVM block hash appear
+# together. It is written after the certificate verified against the trust base, so the round-to-
+# block binding is authenticated, not inferred from timing.
+
+# hexNoPrefix - the shard node logs hashes as raw %x (no 0x); JSON-RPC returns them 0x-prefixed.
+hexNoPrefix() { local h=${1#0x}; echo "$h" | tr 'A-F' 'a-f'; }
+
+# certifiedRoundOfBlock <validator> <blockHash> - the partition round in which that EVM block was
+# certified, according to <validator>'s own verified-certificate log. Empty and nonzero if unknown.
+certifiedRoundOfBlock() {
+  local from=$1 want round
+  want=$(hexNoPrefix "$2")
+  round=$(grep 'execution anchor installed' "$(log "$from")" 2>/dev/null |
+    grep "anchorBlockHash=$want" | tail -1 |
+    grep -o 'partitionRound=[0-9]*' | cut -d= -f2)
+  [ -n "$round" ] || return 1
+  echo "$round"
+}
+
+# leaderOfRound <round> - the validator that submitted for that round AS LEADER.
+#
+# Exactly one node leads a round, but a round can be re-attempted after a timeout with a different
+# leader, and then two nodes have legitimately submitted as leader for it. That is reported as
+# ambiguous and attributed to nobody rather than resolved by guessing: a wrong attribution is worse
+# than a missing one for evidence whose whole point is which node produced which block.
+leaderOfRound() {
+  local round=$1 i found="" n=0
+  for i in $(seq 1 "$validators"); do
+    if grep 'submitting block certification request' "$(log "$i")" 2>/dev/null |
+       grep -q "round=$round .*leader=true"; then
+      found=$i; n=$((n + 1))
+    fi
+  done
+  [ "$n" -eq 1 ] || return 1
+  echo "$found"
+}
+
+# certifyingRootRound <validator> <partitionRound> - the root round of the certificate that
+# certified that partition round, from the accepted-certificate line. Identifies the UC.
+certifyingRootRound() {
+  local from=$1 round=$2 r
+  r=$(grep 'accepted certificate' "$(log "$from")" 2>/dev/null |
+    grep "partitionRound=$round " | tail -1 | grep -o 'rootRound=[0-9]*' | cut -d= -f2)
+  [ -n "$r" ] || return 1
+  echo "$r"
+}
+
+# multiLeaderEvidence - the file every claim below is made from.
+multiLeaderEvidence=test-nodes/evidence/multi-leader.txt
+
+# correlateExecutedBlocks <observer> - for every transaction executed so far, print and record
+# "txHash blockHash partitionRound leaderValidator leaderPeer rootRound", skipping any that cannot
+# be correlated. Prints the distinct leader indices it established, one per line.
+correlateExecutedBlocks() {
+  local from=$1 h blk round who peer root
+  for h in ${txHashes[@]+"${txHashes[@]}"}; do
+    if ! blk=$(rpcField "$(ethURL "$from")" eth_getTransactionReceipt "[\"$h\"]" '["result","blockHash"]'); then
+      echo "SKIP $h no-receipt" >&2
+      continue
+    fi
+    if ! round=$(certifiedRoundOfBlock "$from" "$blk"); then
+      echo "SKIP $h no-certified-round-for-$blk" >&2
+      continue
+    fi
+    if ! who=$(leaderOfRound "$round"); then
+      echo "SKIP $h no-unambiguous-leader-for-round-$round" >&2
+      continue
+    fi
+    peer=$(peerIDOf "$who")
+    peer=${peer:-unknown}
+    root=$(certifyingRootRound "$from" "$round" || echo unknown)
+    grep -q "^$h " "$multiLeaderEvidence" 2>/dev/null ||
+      echo "$h $blk $round $who $peer $root" >>"$multiLeaderEvidence"
+    echo "$who"
+  done | sort -u
+}
+
+# assertMultiLeaderExecution <observer> <minLeaders> <extraTxBudget>
+#
+# Drives the workload until <minLeaders> DISTINCT shard leaders have each produced an executed,
+# certified EVM block, then asserts it. Bounded: at most <extraTxBudget> additional transactions,
+# each individually bounded by submitAndConfirm. It does not wait for luck — leader rotation is per
+# round, so sending more transactions is what makes a second leader produce one — and if the budget
+# runs out it FAILS with what it actually observed.
+assertMultiLeaderExecution() {
+  local from=$1 minLeaders=${2:-2} budget=${3:-6} leaders count sent=0 via
+  : >"$multiLeaderEvidence"
+
+  if ! grep -q 'execution anchor installed' "$(log "$from")" 2>/dev/null; then
+    fail "multi-leader: validator $from logged no 'execution anchor installed' line, so no executed block can be tied to a certified round — this lane requires debug logging (EVM_VALIDATOR_LOG_LEVEL)"
+    return 1
+  fi
+
+  while :; do
+    leaders=$(correlateExecutedBlocks "$from" 2>/dev/null)
+    count=$(echo "$leaders" | grep -c '[0-9]' || true)
+    [ "$count" -ge "$minLeaders" ] && break
+    [ "$sent" -ge "$budget" ] && break
+    via=$(( sent % validators + 1 ))
+    [ -f "test-nodes/reth$via/pid" ] || via=$from
+    sent=$((sent + 1))
+    info "multi-leader: $count of $minLeaders distinct leaders so far; sending transaction $sent/$budget"
+    submitAndConfirm "$via" >/dev/null || break
+  done
+
+  # Skipped transactions are reported, never swallowed. "0 leaders" and "0 transactions that could
+  # be correlated" are different findings and the second one is a broken harness, not a shard
+  # result — the first version of this function could not tell them apart and reported the wrong
+  # one.
+  local skipped
+  skipped=$(correlateExecutedBlocks "$from" 2>&1 >/dev/null | grep -c '^SKIP ' || true)
+  if [ "${skipped:-0}" -gt 0 ]; then
+    fail "multi-leader: $skipped executed transaction(s) could not be correlated to a leader at all — the correlation itself is broken, so no leader claim can be made either way"
+    correlateExecutedBlocks "$from" 2>&1 >/dev/null | sed 's/^/  ..   /'
+  fi
+
+  leaders=$(correlateExecutedBlocks "$from" 2>/dev/null | tr '\n' ' ')
+  count=$(echo "$leaders" | wc -w | tr -d ' ')
+  if [ "$count" -ge "$minLeaders" ]; then
+    pass "multi-leader: $count distinct shard leaders each produced an executed, certified EVM block (validators:$leaders) — correlated per block in evidence/multi-leader.txt"
+  else
+    fail "multi-leader: only $count distinct leader(s) produced an executed certified block after $sent extra transaction(s) (validators:$leaders); #88 requires $minLeaders"
+  fi
+  while read -r line; do [ -n "$line" ] && info "  block correlation: $line"; done <"$multiLeaderEvidence"
+}
+
 # --- observation helpers ----------------------------------------------------------------------
 log() { echo "test-nodes/evm$1/debug.log"; }
 logLines() { wc -l <"$(log "$1")" 2>/dev/null | tr -d ' ' || echo 0; }
@@ -270,6 +530,12 @@ shardLeadersSince() {
 
 # validatorForPeer - map a peer ID (as it appears in TechnicalRecord.Leader) to a validator index,
 # using each node's own node-info.json. Prints nothing if unknown.
+# peerIDOf <validator> - that validator's libp2p node id, from the identity file it wrote. Used to
+# record WHICH node a correlated block is attributed to in terms the certificates also use.
+peerIDOf() {
+  python3 -c "import json;print(json.load(open('test-nodes/evm$1/node-info.json'))['nodeId'])" 2>/dev/null
+}
+
 validatorForPeer() {
   local want=$1 i id
   for i in $(seq 1 "$validators"); do
@@ -607,6 +873,11 @@ snapshot() {
       echo "shardRunning=$([ -f "test-nodes/evm$i/pid" ] && echo yes || echo no)"
       echo "lastCertLine=$(grep 'accepted certificate' "$(log "$i")" 2>/dev/null | tail -1)"
       echo "lastRootRound=$(grep -o 'rootRound=[0-9]*' "$(log "$i")" 2>/dev/null | tail -1)"
+      # The decisive datum when a node does not catch up: WHICH named refusal it is sitting on.
+      # Since F6b stage 3 every one of these maps to a row of the recovery transition table, so an
+      # unrecovered node is a diagnosis rather than a mystery.
+      echo "lastRecoveryDiagnostic=$(grep -Eo 'no-anchor|continuity-gap|anchor-mismatch|head-identity-mismatch|unavailable in the executor \(status [a-z]*\)' "$(log "$i")" 2>/dev/null | tail -1)"
+      echo "nonVotingAfterRestart=$(grep -c 'will NOT vote' "$(log "$i")" 2>/dev/null | tr -d ' ')"
     } >"$dir/evm$i.txt"
     # The persisted certificate is one half of any conflict comparison and appears in no log.
     cp "test-nodes/evm$i/shard-node-luc.json" "$dir/evm$i-luc.bin" 2>/dev/null || true
