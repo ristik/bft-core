@@ -52,10 +52,12 @@ type Round struct {
 	// missed proposal should cost this validator one round (it abstains,
 	// the timeout fires, the next UC — likely a repeat — starts the next
 	// attempt), not the rest of its lifetime. This is a coarser version of
-	// C2.5's full policy — a fixed timeout rather than one derived from T2
-	// with SYNCING/ACCEPTED-aware retry — good enough to make the failure
-	// mode "abstain and recover" instead of "hang," which is what a live
-	// multi-validator run needs to not be fatal on its own.
+	// C2.5's full policy — SYNCING/ACCEPTED-aware retry is still missing —
+	// but it is no longer a fixed value: cli/ubft derives it from the shard
+	// conf's T2 via AwaitTimeoutForT2, because a budget longer than T2 makes
+	// a validator consume certificates slower than the root chain issues
+	// them and fall permanently behind. That was measured, not predicted;
+	// see AwaitTimeoutForT2.
 	awaitTimeout time.Duration
 
 	mu      sync.Mutex
@@ -94,9 +96,53 @@ type Round struct {
 	warnedRestored bool
 }
 
-// DefaultAwaitTimeout is used when NewRound is not given a more specific
-// value — see Round.awaitTimeout.
+// DefaultAwaitTimeout is the fallback when nothing better is known about the shard — see
+// Round.awaitTimeout and AwaitTimeoutForT2, which is what production actually uses.
 const DefaultAwaitTimeout = 5 * time.Second
+
+// MinAwaitTimeout floors the derived budget. A shard with a very short T2 still has to allow the
+// leader time to build, seal and publish a block over the local network; below this the follower
+// would abstain from rounds nobody was late for.
+const MinAwaitTimeout = 200 * time.Millisecond
+
+/*
+AwaitTimeoutForT2 derives a follower's await budget from the shard's own T2 timeout, and it must be
+SHORTER than T2.
+
+Why, measured rather than argued. A follower waits for the leader's block SYNCHRONOUSLY: while it
+waits it processes nothing else, because HandleCertificate is called from BFTClient's single message
+loop. So the await budget is an upper bound on how fast the node can consume certificates. The root
+chain issues one per T2 when a shard is not reaching quorum — exactly the situation a dead or silent
+leader creates — so a budget longer than T2 means the node consumes certificates strictly slower
+than they arrive. It does not merely lose the round it is waiting on; it falls further behind on
+every round after it, and never catches up while the condition lasts.
+
+That is not hypothetical. On a four-validator shard with T2=3s and the 5s default, a validator whose
+leader had stopped publishing accepted exactly one certificate every 5.00s — the await budget, not
+the round rate — logging "awaiting round N: context deadline exceeded" and immediately accepting the
+next queued certificate, for as long as it was observed. See docs/design/f1-baseline.md §5.8.
+
+Nothing in the framework was choosing this value: NewRound installed DefaultAwaitTimeout and
+SetAwaitTimeout had no caller outside tests, so every deployment ran at 5s whatever its T2 was,
+including the ones whose own comment said to set it lower.
+
+Half of T2 is deliberate rather than tuned: it leaves the node the other half to finish the round
+and be ready for the next certificate, and it makes the relationship to T2 visible instead of
+encoding a constant that happens to work at one configuration.
+*/
+func AwaitTimeoutForT2(t2 time.Duration) time.Duration {
+	if t2 <= 0 {
+		return DefaultAwaitTimeout
+	}
+	d := t2 / 2
+	if d < MinAwaitTimeout {
+		d = MinAwaitTimeout
+	}
+	if d > DefaultAwaitTimeout {
+		d = DefaultAwaitTimeout
+	}
+	return d
+}
 
 type pendingSubmission struct {
 	round uint64

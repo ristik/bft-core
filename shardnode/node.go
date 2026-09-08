@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -117,6 +118,14 @@ See Round.MarkRestored for why an authenticated checkpoint is not authorization 
 func resumeFrom(client *BFTClient, round *Round, luc *types.UnicityCertificate) {
 	client.SeedLUC(luc)
 	round.MarkRestored(luc.GetRoundNumber())
+}
+
+// SetAwaitTimeout bounds how long this node waits for the round leader's disseminated block before
+// abstaining. Call after New, before Run. Callers should derive it from the shard's T2 with
+// AwaitTimeoutForT2 rather than picking a value: see that function for what a budget longer than T2
+// does to a validator whose leader has gone quiet.
+func (n *Node) SetAwaitTimeout(d time.Duration) {
+	n.round.SetAwaitTimeout(d)
 }
 
 // SetMetrics attaches an optional Metrics recorder to both the round loop
