@@ -74,34 +74,88 @@ Revisions read 2026-09-06 from the public GitHub API.
 | `matic-contracts` | `github.com/maticnetwork/contracts` | `eef5359…` (`main`, 2024‑03‑01); tag `v0.3.11` = `9564ece3…` | **GPL‑3.0‑only** | 0.5.17 / ^0.5.2 | **archived** ~2024‑03; no upstream security stream |
 | `pos-contracts` | `github.com/0xPolygon/pos-contracts` | `ffa83a7…` (`main`, 2026‑08‑05, "main mirrors deployed on‑chain bytecode") | **GPL‑3.0‑only** | 0.5.17 (staking set unchanged) | maintained; same `StakeManager` / `ValidatorShare` / `StakingInfo` units |
 
-Both depend on `openzeppelin-solidity` 0.5.x (`SafeMath`, `ERC20`, `Ownable`,
-`ReentrancyGuard`).
+**Dependency layout — corrected.** An earlier revision of this section said both
+pins "depend on `openzeppelin-solidity` 0.5.x". That was wrong on both halves and
+conflated two separate axes:
 
-**Licence finding.** The entire Polygon PoS staking contract lineage is
-**GPL‑3.0‑only** copyleft. `bft-core` is **Apache‑2.0**, and its custody
-contracts are immutable. GPL‑3.0 → Apache‑2.0 relicensing is not permitted, so
-**no upstream source can be copied or adapted into the Apache‑2.0 contract
-set.** The roadmap's phrasing ("pin candidate Polygon source revisions and
-licenses… vendor only the justified components") assumed a permissive upstream;
-that assumption does not hold. A separately-housed GPL‑3.0 staking package built
-by porting is theoretically possible, but that is an owner/governance decision
-about a new distributable artifact and is **out of P1 scope** — this assessment
-does not choose it and flags it for the owner.
+- `matic-contracts` pins **`openzeppelin-solidity` 2.2.0** in `package.json`
+  (verified at `eef53596`). `0.5.x` is the **Solidity pragma generation**, not
+  the dependency version.
+- `pos-contracts` pins **no `openzeppelin-solidity` at all** (verified at
+  `ffa83a74`). The OZ sources are **vendored** under `contracts/common/oz` and
+  imported by relative path; the only OZ package present is
+  `@openzeppelin/test-helpers`, a test dependency. The two pins therefore do
+  **not** share a dependency layout, and each vendored file needs its own licence
+  notice recorded.
+
+### 2.1 Licence: what is established, and what is not
+
+**Corrected finding.** The earlier revision inferred that the staking contracts
+must be Apache‑2.0 because `bft-core` is Apache‑2.0 and the custody contracts are
+immutable, and concluded from that that no upstream source could ever be used.
+**Neither premise supports the conclusion, and it is withdrawn.** Immutability is
+a property of deployed bytecode and says nothing about licensing; a platform's
+licence does not determine the licence of a separate artifact.
+
+**The destination is now declared rather than inferred** (`Destination` in
+`evmroot/p1reuse.go`, and a required field of the matrix):
+
+| Field | Value |
+|---|---|
+| Repository | `unicity-pos-contracts` — separate from `bft-core` |
+| Licence | **GPL‑3.0‑only** |
+| Boundary | Separate repository, source tree and build; **no linking**. The platform interacts with deployed contracts only across the EVM ABI and the certified-input boundary. It does not import, compile or link contract source, and neither side derives from the other's source. |
+| Determination owner | Repository owner, before any file is copied |
+
+Under that boundary a GPL‑3.0 contract set and an Apache‑2.0 platform can
+coexist, and **a GPL‑3.0 source port is licence-permitted**. Separate
+repositories are not by themselves a legal determination — the boundary above is
+what the conclusion rests on, and the owner confirms it. This document is an
+engineering assessment, not legal advice.
+
+**Licence facts at the pins, with their uncertainty retained.**
+
+- Both `package.json` files declare `"license": "MIT"` while both root `LICENSE`
+  files are **GPLv3** (all four verified). This conflict is **recorded, not
+  resolved**. It does not establish MIT permission; equally, it means a
+  repository-level label is **not** a complete per-file `GPL-3.0-only`
+  provenance analysis.
+- `pos-contracts` `StakeManager.sol` at `ffa83a74` has **no SPDX header** — it
+  begins directly with `pragma solidity 0.5.17;`. Its per-file licence is
+  inherited by argument, not stated.
+- Before any file is copied: record per-file notices and the licences of every
+  imported dependency, and resolve the conflicting repository-level scope.
+
+References for the compatibility direction used above:
+[ASF](https://www.apache.org/licenses/GPL-compatibility),
+[FSF](https://www.gnu.org/licenses/gpl-faq.en.html#MereAggregation).
 
 ## 3. Component reuse matrix
 
-Dispositions: **clean-room-reference** (study the public algorithm, re-implement
-locally under Apache‑2.0 — no upstream bytes), **remove** (drop; name any
-accounting duty it carried and where that duty goes), **defer-not-applicable**
-(out of scope for self-bond; kept as a reference for a later optional upgrade).
-**vendor-port** is unavailable here — see §2.
+Dispositions: **independent-implementation** (study the publicly documented
+algorithm and implement it locally, recording where the understanding came from —
+no upstream bytes), **remove** (drop; name any accounting duty it carried and
+where that duty goes), **defer-not-applicable** (out of scope for self-bond; kept
+as a reference for a later optional upgrade), **vendor-port** (copy upstream
+source, gated on compatibility with the *declared* destination licence).
+
+**`vendor-port` is available** under the GPL‑3.0 destination (§2.1). No row uses
+it at this revision, and that is an engineering judgement about these particular
+units (§4), **not** a licence prohibition.
+
+**Not "clean-room".** The earlier revision called the first disposition
+clean-room. No clean-room process was performed: there was no separated
+specification team, no separated implementation team that never saw the original,
+and no records proving separation. "No verbatim copying" is not a clean-room
+process, and the term is withdrawn in favour of independent implementation with
+documented provenance.
 
 | # | Upstream unit | Purpose | Disposition | Replacement / where the duty goes | Removed upstream test |
 |---|---|---|---|---|---|
-| 1 | `StakeManager.stakeFor/restake/unstake/unstakeClaim`; `WITHDRAWAL_DELAY = 2¹³` epochs | Bonding + fixed-delay unbond claim | clean-room-reference | D5 `Reservation` + `ProtectionParams`; delay is `Δ_hold` in **certified root rounds** with `Δ_hold > Δ_ev+Δ_incl+Δ_exec`, plus the forced-inbox position cutoff and the pending-evidence gate. Requesting retirement does not start the clock. Local home: **P2**. | `StakeManager` unstake/unstakeClaim dynasty & `WITHDRAWAL_DELAY` cases → D5 `TestD5_WithdrawalGates` |
+| 1 | `StakeManager.stakeFor/restake/unstake/unstakeClaim`; `WITHDRAWAL_DELAY = 2¹³` epochs | Bonding + fixed-delay unbond claim | independent-implementation | D5 `Reservation` + `ProtectionParams`; delay is `Δ_hold` in **certified root rounds** with `Δ_hold > Δ_ev+Δ_incl+Δ_exec`, plus the forced-inbox position cutoff and the pending-evidence gate. Requesting retirement does not start the clock. Local home: **P2**. | `StakeManager` unstake/unstakeClaim dynasty & `WITHDRAWAL_DELAY` cases → D5 `TestD5_WithdrawalGates` |
 | 2 | `StakeManager.checkSignatures/_increaseRewardAndAssertConsensus/rewardPerStake/CHECKPOINT_REWARD/_updateRewardsAndCommit`; proposer bonus + `combinedStakePower` split | Checkpoint-submission-driven reward accrual & consensus assertion | **remove** (checkpoint coupling) | Duty *(sizes a per-interval pool, applies a proposer bonus, splits by validator vs delegator stake power every checkpoint)* → accounting replacement **`assigned-weight-reward`**: `R_ν(I)=min(ρ_e·\|I\|,Pool_free)·b_ν/W_e` over certified root-round progress; no proposer bonus. | checkpoint reward / proposer-bonus / stake-power split cases |
 | 3 | `StakeManager.slash` + `SlashingManager.updateSlashedAmounts` + `verifyConsensus` (Heimdall-checkpoint-signed batch) | Apply a slashing batch validated by Heimdall consensus signatures | **remove** (Heimdall/checkpoint path) | Duty *(debit offender validator+delegation stake, credit a reporter, update totals, jail)* → accounting replacement **`objective-slashing-penalty`**: D5 `SlashableConflict` + S1/S2; charge attributable collateral once, bounded bounty, remainder to treasury, duplicate-offence guard, jail excludes future elections. | `SlashingManager` slash-list & checkpoint-signature tests → D5 `TestD5_SlashableConflictDomain`, S1/S2 vectors |
-| 4 | `SlashingManager` penalty arithmetic: amount cap, reporter bounty, remainder routing, per-offence dedupe | Penalty arithmetic + anti-double-charge | clean-room-reference | Re-implemented in **S2** against D5 collateral attribution; CEI on the bounty credit; dedupe keyed by the D5 conflict identity. Local home: **S2**. | `SlashingManager` slash-list & checkpoint-signature tests → S2 objective-slashing vectors |
+| 4 | `SlashingManager.updateSlashedAmounts`: amount cap, reporter bounty, remainder routing | Penalty arithmetic for an authenticated batch | independent-implementation | Re-implemented in **S2** against D5 collateral attribution; CEI on the bounty credit. Local home: **S2**. See §3.1 — de-duplication is **not** upstream. | `test/units/staking/SlashingManager.test.js` @ `eef53596`; see §3.1 for the invariants and which are retained |
 | 5 | `ValidatorShare` — `exchangeRate`, `withdrawExchangeRate`, `buyVoucher`/`sellVoucher(_new)`, `commissionRate`, `_calculateReward`, `_calculateRewardPerShareWithRewards`, `EXCHANGE_RATE_PRECISION`, `getLiquidRewards` | Delegation share issuance, commission, per-delegator reward math | **defer-not-applicable** | Initial mode is self-bond only; delegation calls are rejected (roadmap P2). Deferred to a future delegation upgrade, which carries **its own** historical share/commission-loss tests through rotations and exits. Kept as an algorithm reference (exchange-rate accumulator; `reward.sub(validatorReward).mul(commissionRate).div(MAX_COMMISION_RATE)`). | entire `ValidatorShare` / voucher suite — out of scope for M4S self-bond; re-added only if delegation is enabled |
 | 6 | `StakingNFT` (ERC‑721 validator ownership) + `validatorAuction` (`startAuction`/`confirmAuctionBid`/`dethroneAndStake`) | Transferable validator slots + slot auctions | **remove** | Duty *(move reward/stake bookkeeping on NFT transfer; auction escrow; dethrone refund)* → accounting replacement **`validator-identity-bookkeeping`**: P3 stable **non-transferable** staking account, owner key, distinct consensus/node roles, proof-of-possession, unique active bindings; membership changes only through the certified election. | NFT transfer/approval, auction, dethrone cases |
 | 7 | `StakingInfo` — `getStakerDetails`, `getAccountStateRoot`, `verifyConsensus`, `updateNonce` (checkpoint Merkle account-root helpers + event logger) | Off-chain indexing events + checkpoint account-state-root verification | **remove** (checkpoint helpers) | Duty → accounting replacement **`root-certified-lifecycle`**: the root consumes the **certified contract output** and does not re-run the staking algorithm (`governance.tex` §"Trust Base Derivation" step 1). P5 emits the deterministic snapshot identity + candidate fields; P2 emits a minimal bonded/reserved/slashed event set. | `StakingInfo` Merkle-proof / account-state-root cases |
@@ -109,28 +163,94 @@ accounting duty it carried and where that duty goes), **defer-not-applicable**
 | 9 | `StateSender` / `IStateReceiver` (state-sync to Bor) + `topUpForFee` / `claimFee` (Heimdall fee token) | Cross-chain state sync + separate Heimdall fee balance | **remove** (bridge coupling) | State-sync unneeded in Setup 2 (each operator runs a paired reth node; the root feeds certified progress through the mandatory state feed). Duty *(Heimdall fee escrow)* → accounting replacement **`fee-accounting`**: T3 `FeeCollector` + independent `Treasury`; priority fees via protocol balance accounting without calling contract code. | `StateSender` sync + `topUpForFee`/`claimFee` cases |
 | 10 | `openzeppelin-solidity` 0.5.x — `SafeMath`, `ERC20`, `Ownable`, `ReentrancyGuard`, `Math` | Checked arithmetic, access control, reentrancy guards at solc 0.5 | **remove** (library swap, no accounting change) | solc ≥ 0.8 built-in checked arithmetic + a current audited library (OpenZeppelin 5.x or Solady) pinned in **P2**; explicit `unchecked` only where proven safe. `SafeMath` 0.5 is obsolete. | OZ 0.5 `SafeMath`/`ReentrancyGuard` unit tests |
 
-Disposition counts: 3 clean-room-reference, 6 remove, 1 defer-not-applicable, 0
-vendor-port.
+Disposition counts: 3 independent-implementation, 6 remove, 1
+defer-not-applicable, 0 vendor-port.
 
-## 4. Self-bond vs port comparison
+### 3.1 Row 4 correction: what is upstream and what is new
 
-| Axis | Port the Polygon staking set | Minimal self-bond, clean-room |
+The earlier revision attributed **per-offence de-duplication** to upstream
+`SlashingManager`. **It does not exist upstream.** Reading
+`updateSlashedAmounts` at `eef53596` shows exactly two guards:
+
+```solidity
+slashingNonce = slashingNonce.add(1);
+require(slashingNonce == _slashingNonce, "Invalid slashing nonce");
+...
+require(verifyConsensus(keccak256(abi.encodePacked(bytes(hex"01"), data)), sigs), "2/3+1 Power required");
+```
+
+A monotonically increasing **batch** nonce, and authentication of a
+consensus-signed **batch**. Neither derives a canonical offence identity, so the
+same offence appearing in two different batches would be charged twice; nothing
+upstream prevents it. It is therefore not evidence for D5 canonical-offence
+de-duplication.
+
+**Further:** there is **no `SlashingManager` at the `pos-contracts` pin at all** —
+`contracts/staking` has no slashing directory there. This unit is attributable
+only to `matic-contracts`, and only at that pin.
+
+**New Unicity design and new tests**, with no upstream counterpart to reference
+and no upstream review to inherit:
+
+1. **Objective evidence validation** — authenticated conflicting votes, not a
+   consensus-signed batch.
+2. **Canonical offence identity** — D5 `SlashableConflict` over
+   (`accountableKey`, `network`, `messageDomain`, `votingEpoch`, `votingRound`),
+   and de-duplication keyed by it.
+3. **Historical collateral attribution** through key rotation, delegation change
+   and queued withdrawal.
+
+Only the cap / bounty / remainder **arithmetic shape** is a reference.
+
+### 3.2 Removed upstream tests: pinned references
+
+The "removed upstream test" column named broad suites. For row 4, the pinned
+reference and per-invariant disposition:
+
+| Upstream test | Invariant | Local disposition |
 |---|---|---|
-| Licence | GPL‑3.0‑only into an Apache‑2.0 immutable-custody set — **not permitted** | Apache‑2.0, written locally |
-| Compiler | solc 0.5.17 + OZ 0.5.x; a move to ≥ 0.8 is a rewrite (built-in overflow checks, `address payable`, ABI v2, constructor/visibility syntax) | targets the P2 toolchain directly |
-| Upstream support | `maticnetwork/contracts` archived; `pos-contracts` tracks *deployed* bytecode, not this use | n/a |
-| Unused surface imported | validator NFT + auctions + `dethrone`, delegation vouchers, Heimdall fee token, `StateSender`, upgradeable proxies, checkpoint Merkle plumbing — all dead in self-bond, all still on the audit surface | only what the D4/D5 lifecycle needs |
-| Behaviour actually reused | delayed-unbond state machine; `rewardPerStake` accumulator pattern (accrual without per-account loops); cap/bounty/remainder penalty split; CEI claim pattern | same, re-implemented against root rounds and D5 collateral attribution |
-| Review inheritance | none — a modernised rewrite is not the audited artifact | none claimed; audit is X-series |
+| `test/units/staking/SlashingManager.test.js` @ `eef53596` | `updateSlashedAmounts` rejects a batch whose `_slashingNonce` ≠ stored + 1 | **not retained** — the trigger is replaced by D5 authenticated conflicting votes; there is no batch and no nonce |
+| same | rejects a batch without 2/3+1 consensus signatures | **not retained** — same reason |
+| same | slashed total splits into reporter bounty, proposer share, remainder | **retained**, as an S2 arithmetic vector over D5 collateral attribution |
+| — | canonical offence identity / de-duplication | **new** (§3.1) — no upstream counterpart |
+| — | objective evidence validation | **new** (§3.1) |
+| — | historical collateral attribution through rotation | **new** (§3.1) |
 
-**Conclusion.** Port is not on the table (licence), and even setting licence
-aside it would be a modernising rewrite of mostly-unused code. The reused
-behaviours are small and better expressed against the frozen D4/D5 lifecycle.
-**Decision: clean-room minimal self-bond, no upstream source vendored**, with a
-short named reference list (rows 1, 4, and the row 5 formulas kept dormant for a
-future delegation upgrade).
+The remaining rows' suite-level references are still coarse; they are adequate
+for `remove` rows, where the duty rather than the test is what must be re-homed,
+and each such duty is named in §5.
 
-## 5. Explicit accounting replacements
+## 4. Three options, compared on engineering merit
+
+The earlier revision compared two options and eliminated one on a licence ground
+that has been withdrawn (§2.1). With a GPL‑3.0 destination declared, **all three
+of the reviewer's options are licence-permitted**, so the comparison is now on
+engineering merit alone.
+
+| Axis | (a) Focused port of `StakeManager`/`ValidatorShare` | (b) Selective reuse of compatible primitives | (c) Independent implementation of the profile's behaviours |
+|---|---|---|---|
+| Licence | **permitted** — GPL‑3.0 into a GPL‑3.0 destination | permitted under either destination licence | permitted |
+| What it buys | real deployed-bytecode provenance | small, well-understood, low-risk building blocks | exactly the surface the profile needs |
+| Toolchain | solc 0.5.17 → ≥0.8 is a rewrite (built-in overflow checks, `address payable`, ABI v2, constructor/visibility syntax) | same migration, far less code | targets the P2 toolchain directly |
+| Unused surface | validator NFT, auctions, `dethrone`, delegation vouchers, Heimdall fee token, `StateSender`, upgradeable proxies, checkpoint Merkle plumbing — dead in self-bond, still on the audit surface | none | none |
+| Storage coupling | the storage layout is entangled with those features; deleting them means keeping their assumptions | none | none |
+| Upstream support | `matic-contracts` archived; `pos-contracts` tracks *deployed* bytecode, not this use | vendored `common/oz` tree, stable | n/a |
+| Review inheritance | **forfeited in practice** — once most of the contract is deleted and the compiler moved, the artifact is no longer the audited one | none claimed | none claimed |
+
+**Decision: (c) for the staking logic, with (b) available for primitives.**
+
+The deciding argument is that (a)'s only real advantage is provenance, and the
+work needed to fit these units to the self-bond profile — delete most of the
+contract, keep its storage assumptions, move two compiler generations — destroys
+exactly that advantage. The four behaviours actually reused (delayed unbond,
+reward-per-weight accumulator, cap/bounty/remainder split, CEI claim pattern) are
+small and must be rewritten against the D4/D5 certified lifecycle regardless,
+which upstream does not have.
+
+**(a) is not excluded.** It is rejected for *these* units on the surface,
+storage-coupling and toolchain grounds above. A later unit with a closer surface
+match — and the vendored `common/oz` primitives in particular — can revisit it,
+and the matrix's licence gate will admit it under the declared destination.## 5. Explicit accounting replacements
 
 Every duty a removed Polygon unit performed is re-homed. Full text and spec
 references live in `evmroot/testdata/p1-reuse-matrix.json`

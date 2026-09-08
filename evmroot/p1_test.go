@@ -2,6 +2,7 @@ package evmroot
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -15,24 +16,81 @@ func TestP1_ReuseMatrixValidates(t *testing.T) {
 	}
 }
 
-// TestP1_NoUpstreamSourceIsPorted encodes the licence finding: every pinned
-// Polygon revision is copyleft-incompatible with the Apache-2.0 contract set,
-// so the decision must not vendor or port any of them.
-func TestP1_NoUpstreamSourceIsPorted(t *testing.T) {
+// TestP1_LicenceGateDependsOnTheDeclaredDestination is the corrected licence finding.
+//
+// The previous test asserted that "every pinned Polygon revision is copyleft-incompatible with the
+// Apache-2.0 contract set, so the decision must not vendor or port any of them". That conclusion
+// was reached by ASSUMING the destination licence from the platform's, which review rejected. The
+// contracts live in a separate repository, and a separate repository may carry a different licence.
+//
+// What is asserted now is the actual rule: portability is a function of BOTH licences. Under the
+// declared GPL-3.0-only destination a GPL-3.0 source port is permitted; under a permissive
+// destination it is not. So "nothing is vendored at this revision" is an ENGINEERING choice about
+// which units are worth porting, and this test proves the licence gate is not what is making it.
+func TestP1_LicenceGateDependsOnTheDeclaredDestination(t *testing.T) {
 	m := BuildP1ReuseMatrix()
-	if !m.SourcesAllCopyleft() {
-		t.Fatalf("expected every pinned source to be Apache-incompatible copyleft; sources=%+v", m.Sources)
+
+	if m.Destination.SPDX == "" || m.Destination.Repository == "" || m.Destination.Boundary == "" {
+		t.Fatalf("the destination must be declared as data, not inferred: %+v", m.Destination)
 	}
-	if m.AnyVendored() {
-		t.Fatalf("a component is marked vendor-port while every source is GPL-3.0-only")
-	}
-	if m.Decision.Vendored {
-		t.Fatalf("decision claims a source was vendored")
+	if !m.SourcesPortableIntoDestination() {
+		t.Fatalf("every pinned source should be portable into the declared %s destination; sources=%+v",
+			m.Destination.SPDX, m.Sources)
 	}
 	for _, s := range m.Sources {
 		if !strings.HasPrefix(s.SPDX, "GPL-3.0") {
 			t.Errorf("source %q: expected a GPL-3.0 SPDX id, got %q", s.Key, s.SPDX)
 		}
+	}
+
+	// The decision still ports nothing, and that must remain an engineering choice.
+	if m.AnyVendored() || m.Decision.Vendored {
+		t.Fatalf("this revision vendors no upstream source; the matrix disagrees")
+	}
+
+	// A vendor-port row must VALIDATE under the GPL destination...
+	ported := BuildP1ReuseMatrix()
+	ported.Components = append(ported.Components, Component{
+		UpstreamRef:         "matic-contracts",
+		Unit:                "hypothetical port, present only in this test",
+		Purpose:             "prove the gate admits a GPL source into a GPL destination",
+		Target:              "n/a",
+		Disposition:         DispositionVendorPort,
+		LocalHome:           "n/a",
+		RemovedUpstreamTest: "n/a",
+		Replacement:         "n/a",
+	})
+	ported.Decision.Vendored = true
+	if err := ported.Validate(); err != nil {
+		t.Fatalf("a GPL-3.0 source port into a GPL-3.0 destination must be licence-permitted, got: %v", err)
+	}
+
+	// ...and must be REFUSED if the destination were permissive. This is the half the earlier
+	// revision hard-coded as the only case.
+	apache := ported
+	apache.Destination.SPDX = "Apache-2.0"
+	err := apache.Validate()
+	if err == nil {
+		t.Fatal("a GPL-3.0 source port into an Apache-2.0 destination must be refused")
+	}
+	if !strings.Contains(err.Error(), "not licence-compatible with a Apache-2.0 destination") {
+		t.Fatalf("the refusal must name the destination licence it was judged against, got: %v", err)
+	}
+}
+
+// TestP1_DispositionIsNotCalledCleanRoom guards the provenance wording.
+//
+// No clean-room process was performed: there was no separated specification team, no separated
+// implementation team, and no records proving separation. "No verbatim copying" is not that, and
+// naming it so would overstate what this assessment can support.
+func TestP1_DispositionIsNotCalledCleanRoom(t *testing.T) {
+	m := BuildP1ReuseMatrix()
+	blob, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(bytes.ToLower(blob), []byte("clean-room")) || bytes.Contains(bytes.ToLower(blob), []byte("clean room")) {
+		t.Error("the matrix claims a clean-room process; use independent implementation with documented provenance")
 	}
 }
 
@@ -68,7 +126,7 @@ func TestP1_ReferenceRowsDropAnUpstreamTestAndReHomeIt(t *testing.T) {
 	m := BuildP1ReuseMatrix()
 	seen := 0
 	for _, c := range m.Components {
-		if c.Disposition != DispositionCleanRoomReference && c.Disposition != DispositionVendorPort {
+		if c.Disposition != DispositionIndependentImplementation && c.Disposition != DispositionVendorPort {
 			continue
 		}
 		seen++
@@ -160,8 +218,13 @@ func TestP1_VectorsMatchGolden(t *testing.T) {
 // TestP1_ValidateRejectsABrokenMatrix guards the guard: a matrix that ports a
 // GPL source, or removes a coupling without naming its duty, must fail.
 func TestP1_ValidateRejectsABrokenMatrix(t *testing.T) {
-	t.Run("ported copyleft source", func(t *testing.T) {
+	t.Run("copyleft port into a permissive destination", func(t *testing.T) {
+		// The gate still has teeth — but against the DECLARED destination. Porting GPL-3.0 into
+		// an Apache-2.0 destination is refused; porting it into the GPL-3.0 destination this
+		// assessment actually declares is not, which is what
+		// TestP1_LicenceGateDependsOnTheDeclaredDestination covers.
 		m := BuildP1ReuseMatrix()
+		m.Destination.SPDX = "Apache-2.0"
 		cp := make([]Component, len(m.Components))
 		copy(cp, m.Components)
 		cp[0].Disposition = DispositionVendorPort
@@ -171,7 +234,16 @@ func TestP1_ValidateRejectsABrokenMatrix(t *testing.T) {
 		m.Components = cp
 		m.Decision.Vendored = true
 		if err := m.Validate(); err == nil {
-			t.Fatal("expected validation to reject a GPL-3.0 vendor-port")
+			t.Fatal("expected validation to reject a GPL-3.0 vendor-port into an Apache-2.0 destination")
+		}
+	})
+	t.Run("undeclared destination", func(t *testing.T) {
+		// The destination must be stated. Leaving it empty used to be impossible because it was
+		// hard-coded; now that it is data, an unstated destination must fail rather than default.
+		m := BuildP1ReuseMatrix()
+		m.Destination.SPDX = ""
+		if err := m.Validate(); err == nil {
+			t.Fatal("expected validation to reject a matrix with no declared destination licence")
 		}
 	})
 	t.Run("removal without a named duty", func(t *testing.T) {

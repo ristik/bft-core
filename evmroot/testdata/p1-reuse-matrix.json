@@ -1,30 +1,36 @@
 {
   "ticket": "P1 — Staking component reuse assessment (issue #27)",
   "base_revision": "integration/enshrined-evm @ 28459b85 (D4 #6, D5 #7 merged)",
+  "destination": {
+    "repository": "github.com/ristik/unicity-pos-contracts (separate from bft-core; created under P1 for exactly this reason)",
+    "spdx": "GPL-3.0-only",
+    "boundary": "The contracts are a SEPARATE ARTIFACT from the Apache-2.0 platform: separate repository, separate source tree, separate build, and no linking. The platform interacts with the deployed contracts only across the EVM ABI and the certified-input boundary -- it does not import, compile or link contract source. Nothing in the platform derives from contract source, and nothing in the contracts derives from platform source. That separation is what allows GPL-3.0 contracts and an Apache-2.0 platform to coexist; the earlier revision assumed the opposite without examining the boundary.",
+    "legal_review_owner": "Repository owner, before any upstream file is copied. This matrix narrows the engineering options and records the boundary; it does not make the licence determination and must not be read as legal advice."
+  },
   "sources": [
     {
       "key": "matic-contracts",
       "repo": "github.com/maticnetwork/contracts",
       "revision": "eef53596046eda70a53653a8e5ff79b1cbf0a4f9",
       "revision_as": "main @ 2024-03-01 (last commit before archival); release tag v0.3.11 = 9564ece3a0647b0da18a1a2a51baffb5f661893f",
-      "license": "GNU General Public License v3.0",
+      "license": "root LICENSE is GNU GPL v3; package.json declares \"license\": \"MIT\"",
       "spdx": "GPL-3.0-only",
       "archived": true,
       "solc_pragma": "0.5.17 / ^0.5.2",
-      "deps": "openzeppelin-solidity 0.5.x (SafeMath, ERC20, Ownable, ReentrancyGuard)",
-      "note": "Original Matic/Polygon PoS staking contract set. Repository archived by upstream ~2024-03; no upstream security response stream."
+      "deps": "package.json pins openzeppelin-solidity 2.2.0 (verified). NOT 0.5.x -- 0.5.x is the Solidity pragma generation, a separate axis that an earlier revision of this matrix conflated with the dependency version.",
+      "note": "Original Matic/Polygon PoS staking set; archived by upstream ~2024-03, so no upstream security response stream. LICENCE LABELS CONFLICT AT THIS PIN: the root LICENSE is GPLv3 while package.json says MIT. That conflict is recorded, not resolved: it does not establish MIT permission, and it equally means the repository-level label is not by itself a complete per-file provenance analysis. Per-file notices and the licences of imported dependencies must be recorded before any file is copied."
     },
     {
       "key": "pos-contracts",
       "repo": "github.com/0xPolygon/pos-contracts",
       "revision": "ffa83a740dff3f4764277d855faf6c9388e06d90",
       "revision_as": "main @ 2026-08-05 (\"main mirrors deployed on-chain bytecode\")",
-      "license": "GNU General Public License v3.0",
+      "license": "root LICENSE is GNU GPL v3; package.json declares \"license\": \"MIT\"",
       "spdx": "GPL-3.0-only",
       "archived": false,
-      "solc_pragma": "0.5.17 (staking set unchanged from matic-contracts)",
-      "deps": "openzeppelin-solidity 0.5.x",
-      "note": "Maintained successor of the same 0.5.x codebase; same StakeManager / ValidatorShare / StakingInfo units. Still GPL-3.0-only."
+      "solc_pragma": "0.5.17",
+      "deps": "No openzeppelin-solidity dependency at all (verified): the OZ sources are VENDORED under contracts/common/oz and imported by relative path; the only OZ package present is @openzeppelin/test-helpers, a test dependency. The dependency layout therefore differs from matic-contracts and each vendored file needs its own licence notice recorded.",
+      "note": "Maintained successor carrying StakeManager / ValidatorShare / StakingInfo. Same licence-label conflict as the older pin. StakeManager.sol at this revision has NO SPDX header -- it begins directly with `pragma solidity 0.5.17;` (verified) -- so its per-file licence is inherited by argument from the repository, not stated in the file. NOTE ALSO: there is no SlashingManager at this pin; contracts/staking contains no slashing directory. SlashingManager exists only at the matic-contracts pin."
     }
   ],
   "components": [
@@ -33,7 +39,7 @@
       "unit": "StakeManager.stakeFor / restake / unstake / unstakeClaim; WITHDRAWAL_DELAY = 2**13 epochs",
       "purpose": "Validator bonding and a fixed-delay unbond claim.",
       "target_obligation": "The D5 collateral-reservation lifecycle: reserve on election, protect after acknowledged retirement, release only past every gate.",
-      "disposition": "clean-room-reference",
+      "disposition": "independent-implementation",
       "removed_upstream_test": "StakeManager unstake / unstakeClaim dynasty and WITHDRAWAL_DELAY test cases.",
       "local_home": "P2 (immutable native stake custody), contract repo chosen in P2; gate model already in evmroot/d5retire.go and testdata/d5-vectors.json.",
       "replacement": "evmroot/d5retire.go Reservation + ProtectionParams. Delay is Delta_hold in certified root rounds with Delta_hold \u003e Delta_ev + Delta_incl + Delta_exec, plus the forced-inbox position cutoff and the pending-evidence gate; not a single fixed epoch count, and requesting retirement does not start the clock.",
@@ -61,14 +67,14 @@
     },
     {
       "upstream_ref": "matic-contracts",
-      "unit": "SlashingManager penalty arithmetic: amount cap, reporter bounty, remainder routing, and the per-offence de-duplication guard",
-      "purpose": "Penalty arithmetic and the anti-double-charge guard.",
+      "unit": "SlashingManager.updateSlashedAmounts: amount cap, reporter bounty and remainder routing",
+      "purpose": "Penalty arithmetic for an authenticated slashing batch.",
       "target_obligation": "S2 objective-slashing arithmetic against D5 collateral attribution.",
-      "disposition": "clean-room-reference",
-      "removed_upstream_test": "SlashingManager slash-list and checkpoint-signature verification tests.",
+      "disposition": "independent-implementation",
+      "removed_upstream_test": "matic-contracts test/units/staking/SlashingManager.test.js at pin eef53596. Invariants it covers: (i) updateSlashedAmounts rejects a batch whose _slashingNonce is not exactly the stored nonce + 1; (ii) it rejects a batch without 2/3+1 consensus signatures; (iii) the slashed total is split into reporter bounty, proposer share and remainder. Local acceptance: (i) and (ii) are NOT retained -- the trigger is replaced entirely by D5 authenticated conflicting votes, so there is no batch and no nonce; (iii) is retained as an S2 arithmetic vector over D5 collateral attribution. New cases with no upstream counterpart are listed in the note below.",
       "local_home": "S2 (objective slashing and liability holds), contract repo chosen in P2.",
-      "replacement": "Re-implemented in S2: charge attributable active/retiring collateral once, bounded submitter bounty, remainder to treasury, duplicate-offence guard keyed by the D5 conflict identity, checks-effects-interactions on the bounty credit.",
-      "note": "Reference the arithmetic shape (cap / bounty / remainder / dedupe). The trigger and the collateral model are new."
+      "replacement": "Re-implemented in S2: charge attributable active/retiring collateral once, bounded submitter bounty, remainder to treasury, checks-effects-interactions on the bounty credit.",
+      "note": "CORRECTION. An earlier revision of this row attributed PER-OFFENCE DE-DUPLICATION to upstream. It does not exist upstream. SlashingManager.updateSlashedAmounts (read at pin eef53596) does two things: `slashingNonce = slashingNonce.add(1); require(slashingNonce == _slashingNonce)`, a monotonically increasing BATCH nonce; and verifyConsensus over the batch payload. Neither derives a canonical offence identity, so the same offence appearing in two different batches would be charged twice. Nothing upstream prevents that. FURTHER: there is no SlashingManager at the pos-contracts pin at all -- contracts/staking has no slashing directory there -- so this unit is attributable only to matic-contracts, and only that pin. THE FOLLOWING ARE THEREFORE NEW UNICITY DESIGN AND NEW TESTS, with no upstream counterpart to reference or inherit review from: (1) objective evidence validation (authenticated conflicting votes rather than a consensus-signed batch); (2) canonical OFFENCE IDENTITY, i.e. D5 SlashableConflict over (accountableKey, network, messageDomain, votingEpoch, votingRound), and de-duplication keyed by it; (3) historical collateral attribution through key rotation, delegation change and queued withdrawal. Only the cap/bounty/remainder arithmetic shape is a reference."
     },
     {
       "upstream_ref": "matic-contracts",
@@ -167,12 +173,12 @@
     }
   ],
   "decision": {
-    "choice": "Clean-room minimal self-bond. No Polygon source is vendored or ported into the contract set. A short, named list of algorithm shapes is used as reference only; every line of staking-contract code for M4S is written locally under Apache-2.0 in the repository chosen by P2.",
-    "rationale": "Three independent reasons point the same way. (1) Licence: every pinned Polygon staking revision is GPL-3.0-only; bft-core is Apache-2.0 and its custody contracts are immutable, so a copyleft port cannot land in that set. (2) Toolchain: the code is solc 0.5.17 with openzeppelin-solidity 0.5.x; moving it to a modern compiler is a rewrite, not a port, and a rewrite carries no upstream review. (3) Surface: auctions, the validator NFT, delegation vouchers, Heimdall fee tokens and checkpoint state-sync are all unused in the initial self-bond profile, so a port would import dead, audit-bearing code. The reused behaviours (delayed unbond, a reward-per-weight accumulator, a cap/bounty/remainder penalty split, the checks-effects-interactions claim pattern) are small, well understood, and cheaper to re-implement against the D4/D5 lifecycle than to retrofit.",
+    "choice": "INDEPENDENT IMPLEMENTATION of a minimal self-bond set, in a separate GPL-3.0-only repository, with a focused port kept open as a live option for specific units rather than excluded on licence grounds. No upstream source is copied at this revision; that is an engineering choice about which units are worth porting, NOT a licence prohibition.",
+    "rationale": "The destination is a separate GPL-3.0-only repository, so a GPL-3.0 source port is LICENCE-PERMITTED. An earlier revision of this assessment concluded otherwise by assuming the contracts had to be Apache-2.0 because the platform is; that inference was wrong and is withdrawn. The three options were therefore compared on engineering merit. (a) FOCUSED PORT of StakeManager/ValidatorShare: licence-permitted, and it would carry real deployed-bytecode provenance, but the units are solc 0.5.17 built around auctions, a validator NFT, delegation vouchers, Heimdall fee tokens and checkpoint state-sync -- none of which the self-bond profile uses -- and their storage layout is entangled with those features. Porting means deleting most of the contract and keeping its storage assumptions, which forfeits the provenance that made the port attractive. (b) SELECTIVE REUSE OF COMPATIBLE PRIMITIVES: the vendored contracts/common/oz tree is small and well understood; taking those primitives is cheap and low-risk, and remains available under both destination licences. (c) INDEPENDENT IMPLEMENTATION of the four behaviours the profile actually needs (delayed unbond, reward-per-weight accumulator, cap/bounty/remainder split, CEI claim pattern): each is small, and each must be rewritten anyway against the D4/D5 certified lifecycle, which upstream does not have. (c) is chosen for the staking logic and (b) remains available for primitives. (a) is not excluded; it is rejected for THESE units on the surface/toolchain grounds above, and a later unit with a better surface match could revisit it.",
     "any_upstream_source_vendored": false,
-    "licence_constraint": "maticnetwork/contracts and 0xPolygon/pos-contracts are both GPL-3.0-only. GPL-3.0 -\u003e Apache-2.0 relicensing is not permitted, so no upstream source is copied into the Apache-2.0 contract set. A separately-housed GPL-3.0 staking package built by porting is theoretically possible but is an owner / governance decision about a new distributable artifact and is out of P1 scope; this assessment does not choose it.",
+    "licence_constraint": "Both pinned sources are GPL-3.0-only at the repository level, and both package.json files declare \"license\": \"MIT\" (verified at each pin). That conflict is recorded and NOT resolved here: it does not establish MIT permission, and it equally means a repository-level label is not a per-file provenance analysis. The successor StakeManager.sol carries no SPDX header at all. Before any file is copied, per-file notices and the licences of every imported dependency must be recorded, and the owner must confirm the destination boundary in Destination.Boundary. A GPL-3.0-only destination can absorb GPL-3.0 and permissive sources; an Apache-2.0 destination could not absorb the GPL ones -- which is why the destination is declared as data rather than assumed.",
     "upstream_test_suite_is_not_a_security_audit": true,
     "compiler_modernization_is_not_a_security_audit": true,
-    "security_audit_owner": "roadmap X-series — X2 (pre-TGE audit and remediation) and X4 / X5 (PoS shadow audit and integrated activation gate). Not upstream Polygon review, and not a green local test run."
+    "security_audit_owner": "roadmap X-series -- X2 (pre-TGE audit and remediation) and X4 / X5 (PoS shadow audit and integrated activation gate). Not upstream Polygon review, and not a green local test run. The Go validator in this package is SCHEMA validation of this assessment's own consistency: it checks that required fields are present, well-formed and mutually consistent. It establishes nothing about licence correctness, upstream provenance or accounting completeness."
   }
 }

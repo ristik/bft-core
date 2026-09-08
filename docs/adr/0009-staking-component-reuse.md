@@ -1,4 +1,4 @@
-# ADR 0009: Staking component reuse — clean-room self-bond, no source port (P1)
+# ADR 0009: Staking component reuse — independent implementation in a separate GPL-3.0 repository (P1)
 
 ## Status
 
@@ -17,34 +17,63 @@ Facts as read on 2026-09-06 (public GitHub API):
 
 - `github.com/maticnetwork/contracts` — `main` @ `eef53596046eda70a53653a8e5ff79b1cbf0a4f9`
   (2024-03-01), release tag `v0.3.11` = `9564ece3a0647b0da18a1a2a51baffb5f661893f`.
-  Licence **GPL-3.0-only**. **Archived** by upstream ~2024-03. Solidity 0.5.17,
-  `openzeppelin-solidity` 0.5.x.
+  Root `LICENSE` is **GPLv3**; `package.json` declares `"license": "MIT"`.
+  **Archived** by upstream ~2024-03. Solidity 0.5.17; `package.json` pins
+  `openzeppelin-solidity` **2.2.0** (not 0.5.x — that is the Solidity generation).
 - `github.com/0xPolygon/pos-contracts` — `main` @ `ffa83a740dff3f4764277d855faf6c9388e06d90`
-  (2026-08-05, "main mirrors deployed on-chain bytecode"). Licence
-  **GPL-3.0-only**. Same 0.5.x `StakeManager` / `ValidatorShare` / `StakingInfo`
-  units.
+  (2026-08-05, "main mirrors deployed on-chain bytecode"). Root `LICENSE` is
+  **GPLv3**; `package.json` declares `"license": "MIT"`. Carries
+  `StakeManager` / `ValidatorShare` / `StakingInfo`; **no `SlashingManager`**.
+  `StakeManager.sol` has **no SPDX header**. OZ sources are **vendored** under
+  `contracts/common/oz`; no `openzeppelin-solidity` dependency.
 
-`bft-core` is **Apache-2.0**, and `governance.tex` §"Upgrade and Delivery
-Boundaries" makes money custody, withdrawal accounting, allocation, wrapper and
-vault contracts **immutable** in the initial profile. GPL-3.0 → Apache-2.0
-relicensing is not permitted, so a source port into that contract set is not
-available. Independently, the code is solc 0.5.17 and most of its surface
+All of the above verified at the pins on 2026-09-08.
+
+**The licence conflict is recorded, not resolved.** MIT in `package.json` against
+GPLv3 at the root does not establish MIT permission; it equally means the
+repository-level label is not a per-file provenance analysis. Per-file notices
+and imported-dependency licences must be recorded before any file is copied.
+
+**Withdrawn premise.** An earlier revision of this ADR reasoned that `bft-core`
+is Apache-2.0 and the custody contracts are immutable, therefore the contracts
+must be Apache-2.0, therefore no GPL source could ever be used. **That inference
+does not hold.** Immutability is a property of deployed bytecode, not a licence
+constraint, and a platform's licence does not determine a separate artifact's.
+
+The contracts live in **`unicity-pos-contracts`**, a separate repository, under
+**GPL-3.0-only**. The boundary the conclusion rests on: separate repository,
+source tree and build; **no linking**; the platform touches the deployed
+contracts only across the EVM ABI and the certified-input boundary, and neither
+side derives from the other's source. Under that boundary a GPL-3.0 contract set
+and an Apache-2.0 platform coexist and **a GPL-3.0 source port is
+licence-permitted**. Separate repositories alone are not a determination — the
+owner confirms the boundary, and this ADR is an engineering assessment, not legal
+advice ([ASF](https://www.apache.org/licenses/GPL-compatibility),
+[FSF](https://www.gnu.org/licenses/gpl-faq.en.html#MereAggregation)).
+
+Independently of licence, the code is solc 0.5.17 and most of its surface
 (validator NFT, slot auctions, `dethrone`, delegation vouchers, Heimdall fee
 token, `StateSender` state-sync, upgradeable proxies, checkpoint Merkle
-verification) is unused under the initial self-bond profile.
+verification) is unused under the initial self-bond profile, and its storage
+layout is entangled with those features.
 
 ## Decision
 
 Adopt the assessment in
 [`docs/design/p1-staking-component-reuse-assessment.md`](../design/p1-staking-component-reuse-assessment.md):
 
-1. **No source is vendored or ported.** Every pinned Polygon staking revision is
-   GPL-3.0-only; none is copied or adapted into the Apache-2.0 contract set. A
-   separately-housed GPL-3.0 ported package is an owner/governance decision about
-   a new distributable artifact and is out of P1 scope.
-2. **Clean-room minimal self-bond.** All M4S staking-contract code is written
-   locally under Apache-2.0 in the repository chosen by P2, against the frozen
-   D4/D5 lifecycle.
+1. **No source is vendored at this revision — an engineering choice, not a
+   licence bar.** A GPL-3.0 port into the GPL-3.0 destination is permitted. It is
+   not taken for `StakeManager`/`ValidatorShare` because fitting them to the
+   self-bond profile means deleting most of each contract while keeping its
+   storage assumptions and moving two compiler generations, which destroys the
+   deployed-bytecode provenance that was the only reason to port. Selective reuse
+   of the vendored `common/oz` primitives remains available and is not excluded.
+2. **Independent implementation of the minimal self-bond set**, in
+   `unicity-pos-contracts` under GPL-3.0-only, against the frozen D4/D5
+   lifecycle. Not a clean-room process: no separated specification and
+   implementation teams and no separation records, so provenance is documented
+   rather than certified.
 3. **Reference-only list** (public algorithm shapes, no upstream bytes):
    `StakeManager` delayed-unbond state machine (row 1); the `SlashingManager`
    cap/bounty/remainder penalty split and per-offence dedupe (row 4); and the
@@ -69,8 +98,10 @@ Adopt the assessment in
 
 - `evmroot/p1reuse.go` — `ReuseMatrix` / `Component` / `UpstreamSource` /
   `AccountingReplacement` / `ReuseDecision` and `ReuseMatrix.Validate`, which
-  enforces: 40-hex pinned revisions + SPDX ids; no `vendor-port` while sources
-  are copyleft-incompatible; every removal names its accounting duty (or is
+  enforces: 40-hex pinned revisions + SPDX ids; a **declared destination**
+  (repository, SPDX, boundary, determination owner) with `vendor-port` gated by
+  `portableInto(destination, source)` rather than a hard-coded Apache-2.0 table;
+  every removal names its accounting duty (or is
   flagged as carrying none, with a note); every reference/port row names a
   removed upstream test and a local home; the two required accounting
   replacements are present with `governance.tex` spec refs; both audit guards
@@ -79,7 +110,15 @@ Adopt the assessment in
 - `evmroot/testdata/p1-reuse-matrix.json` — golden fixture.
 - `evmroot/cmd/p1matrix` — print / `-update`.
 - `evmroot/p1_test.go` — `TestP1_*` acceptance invariants, negative tests, and
-  `TestP1_VectorsMatchGolden`.
+  `TestP1_VectorsMatchGolden`. Notably `TestP1_LicenceGateDependsOnTheDeclaredDestination`,
+  which asserts a GPL-3.0 port is admitted into the GPL-3.0 destination and
+  refused into a permissive one — the earlier revision hard-coded only the second
+  half — and `TestP1_DispositionIsNotCalledCleanRoom`.
+
+  **This is schema validation of the assessment's own consistency.** It checks
+  that required fields are present, well-formed and mutually consistent. Green
+  tests establish nothing about licence correctness, upstream provenance or
+  accounting completeness, and must not be cited as if they did.
 
 ## Consequences
 

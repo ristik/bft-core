@@ -36,9 +36,17 @@ import (
 type ReuseDisposition string
 
 const (
-	// DispositionCleanRoomReference: study the public algorithm and re-implement
-	// it locally under the project licence. No upstream bytes are copied.
-	DispositionCleanRoomReference ReuseDisposition = "clean-room-reference"
+	// DispositionIndependentImplementation: study the publicly documented
+	// algorithm and implement it locally, recording where the understanding came
+	// from. No upstream bytes are copied.
+	//
+	// It is deliberately NOT called "clean-room". A clean-room process is a
+	// specific discipline — a separated specification team, a separated
+	// implementation team that never sees the original, and records proving the
+	// separation. None of that was performed here, and "no verbatim copying" does
+	// not amount to it. Claiming the term would overstate the provenance
+	// guarantee this assessment can actually support.
+	DispositionIndependentImplementation ReuseDisposition = "independent-implementation"
 	// DispositionVendorPort: copy upstream source (adapted) into the project.
 	// Gated on licence compatibility with the destination contract set.
 	DispositionVendorPort ReuseDisposition = "vendor-port"
@@ -52,10 +60,10 @@ const (
 
 var (
 	hex40Re = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	// SPDX ids that the Apache-2.0 contract set could absorb by a source port.
-	// The entire Polygon PoS staking lineage is GPL-3.0-only, so this set is
-	// deliberately narrow and the licence gate below has real teeth.
-	apachePortableSPDX = map[string]bool{
+
+	// permissiveSPDX are licences that impose no copyleft on a combined work, so
+	// they can be absorbed by a destination under any of the licences below.
+	permissiveSPDX = map[string]bool{
 		"Apache-2.0":   true,
 		"MIT":          true,
 		"BSD-2-Clause": true,
@@ -65,6 +73,43 @@ var (
 		"Unlicense":    true,
 	}
 )
+
+// portableInto reports whether source SPDX src may be copied into a destination
+// licensed dst.
+//
+// THIS USED TO BE A SINGLE Apache-2.0 TABLE, and that was the central defect of
+// the first revision: it assumed the destination licence rather than taking it
+// as an input, which made "GPL source cannot be ported" look like a property of
+// the source when it was a property of an assumption. The destination is now
+// declared per matrix and this function is a function of both.
+//
+// The table is small and deliberately conservative:
+//
+//   - into a permissive destination (Apache-2.0, MIT, …): permissive sources
+//     only. A GPL-3.0 source cannot be relicensed permissively.
+//   - into GPL-3.0-only or GPL-3.0-or-later: GPL-3.0 sources, and permissive
+//     sources, which are one-way compatible with the GPL.
+//     Apache-2.0 is GPL-3.0-compatible in that direction (ASF and FSF both say
+//     so); it is not compatible with GPLv2.
+//
+// References, cited because a licence claim should be checkable rather than
+// asserted: https://www.apache.org/licenses/GPL-compatibility and
+// https://www.gnu.org/licenses/license-list.html#GPLCompatibleLicenses
+//
+// This is an engineering-side compatibility check, not legal advice, and the
+// matrix says so in its own decision record.
+func portableInto(dst, src string) bool {
+	switch dst {
+	case "GPL-3.0-only", "GPL-3.0-or-later":
+		if src == "GPL-3.0-only" || src == "GPL-3.0-or-later" {
+			return true
+		}
+		return permissiveSPDX[src]
+	default:
+		// A permissive destination can only absorb permissive sources.
+		return permissiveSPDX[src]
+	}
+}
 
 // UpstreamSource is one pinned candidate revision the assessment considered.
 type UpstreamSource struct {
@@ -125,10 +170,32 @@ type ReuseDecision struct {
 	SecurityAuditOwner                   string `json:"security_audit_owner"`
 }
 
+// Destination is where the contracts will live, and under which licence. It is
+// DATA, not an assumption baked into the validator.
+//
+// The first revision inferred that the contracts had to be Apache-2.0 because
+// bft-core is Apache-2.0, and that immutability forced the same conclusion.
+// Neither follows. The contracts live in a separate repository, and a separate
+// repository may carry a different licence; immutability is a property of the
+// deployed bytecode and says nothing about licensing. Recording the destination
+// explicitly is what lets the GPL option be assessed at all.
+type Destination struct {
+	Repository string `json:"repository"`
+	SPDX       string `json:"spdx"`
+	// Boundary describes the actual source/artifact/interface relationship
+	// between this destination and the Apache-2.0 platform, which is what a
+	// licence conclusion has to rest on.
+	Boundary string `json:"boundary"`
+	// LegalReviewOwner names who must confirm the boundary. An engineering
+	// assessment can narrow the options; it cannot make the determination.
+	LegalReviewOwner string `json:"legal_review_owner"`
+}
+
 // ReuseMatrix is the whole assessment as data.
 type ReuseMatrix struct {
 	Ticket                 string                  `json:"ticket"`
 	BaseRevision           string                  `json:"base_revision"`
+	Destination            Destination             `json:"destination"`
 	Sources                []UpstreamSource        `json:"sources"`
 	Components             []Component             `json:"components"`
 	AccountingReplacements []AccountingReplacement `json:"accounting_replacements"`
@@ -171,14 +238,19 @@ func (m ReuseMatrix) AnyVendored() bool {
 	return false
 }
 
-// SourcesAllCopyleft reports whether every pinned source is licence-incompatible
-// with an Apache-2.0 source port.
-func (m ReuseMatrix) SourcesAllCopyleft() bool {
+// SourcesPortableIntoDestination reports whether every pinned source could be
+// copied into the DECLARED destination licence.
+//
+// The predicate used to be "are all sources copyleft", which only made sense
+// while the destination was assumed permissive. Copyleft is not a defect of a
+// source; it is a constraint that binds or does not bind depending on where the
+// source is going.
+func (m ReuseMatrix) SourcesPortableIntoDestination() bool {
 	if len(m.Sources) == 0 {
 		return false
 	}
 	for _, s := range m.Sources {
-		if apachePortableSPDX[s.SPDX] {
+		if !portableInto(m.Destination.SPDX, s.SPDX) {
 			return false
 		}
 	}
@@ -234,7 +306,7 @@ func (m ReuseMatrix) Validate() error {
 					return fmt.Errorf("%s: replaces_duty_key %q has no entry in accounting_replacements", where, c.ReplacesDutyKey)
 				}
 			}
-		case DispositionCleanRoomReference, DispositionVendorPort:
+		case DispositionIndependentImplementation, DispositionVendorPort:
 			if c.RemovedUpstreamTest == "" || c.LocalHome == "" || c.Replacement == "" {
 				return fmt.Errorf("%s: reference/port row needs removed_upstream_test, local_home and replacement", where)
 			}
@@ -247,15 +319,23 @@ func (m ReuseMatrix) Validate() error {
 		}
 	}
 
-	// Licence gate: a source port must target a licence the Apache-2.0 contract
-	// set can absorb.
+	// Destination must be declared before any licence conclusion can be checked.
+	if m.Destination.SPDX == "" {
+		return fmt.Errorf("destination.spdx is empty: the destination licence must be stated, not inferred from the platform")
+	}
+	if m.Destination.Repository == "" || m.Destination.Boundary == "" || m.Destination.LegalReviewOwner == "" {
+		return fmt.Errorf("destination must state repository, boundary and legal_review_owner")
+	}
+
+	// Licence gate, now a function of the DECLARED destination rather than an
+	// assumed Apache-2.0 one.
 	for i, c := range m.Components {
 		if c.Disposition != DispositionVendorPort {
 			continue
 		}
 		s, _ := m.sourceByKey(c.UpstreamRef)
-		if !apachePortableSPDX[s.SPDX] {
-			return fmt.Errorf("component[%d] %q: vendor-port of %s (%s) is not licence-compatible with an Apache-2.0 contract set", i, c.Unit, s.Key, s.SPDX)
+		if !portableInto(m.Destination.SPDX, s.SPDX) {
+			return fmt.Errorf("component[%d] %q: vendor-port of %s (%s) is not licence-compatible with a %s destination", i, c.Unit, s.Key, s.SPDX, m.Destination.SPDX)
 		}
 	}
 	if m.Decision.Vendored != m.AnyVendored() {
