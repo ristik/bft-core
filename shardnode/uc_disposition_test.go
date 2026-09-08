@@ -181,3 +181,12 @@ func TestUCDispositionNilInputRecord(t *testing.T) {
 		require.ErrorIs(t, err, ErrImpossibleUCOrder)
 	})
 }
+
+func TestUCDispositionEqualRootRoundBothOrders(t *testing.T) {
+	a := uc(5, 40, []byte{0}, []byte{1}, []byte{0xb1})
+	b := uc(6, 40, []byte{1}, []byte{2}, []byte{0xb2})
+	for _, pair := range [][2]*types.UnicityCertificate{{a, b}, {b, a}} {
+		_, err := ClassifyUC(pair[0], pair[1])
+		require.ErrorIs(t, err, ErrImpossibleUCOrder)
+	}
+}

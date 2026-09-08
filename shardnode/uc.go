@@ -65,7 +65,7 @@ var ErrEquivocatingUC = errors.New("shardnode: equivocating unicity certificate"
 // ErrImpossibleUCOrder is returned when two authentic certificates carry a
 // combination of partition and root rounds the root chain cannot produce —
 // a later partition round certified at an earlier-or-equal root round, or an
-// earlier partition round certified at a later root round.
+// earlier partition round certified at a later-or-equal root round.
 //
 // This is kept distinct from ErrEquivocatingUC on purpose (issue #93). Neither
 // is routine, but they mean different things: equivocation is two conflicting
@@ -160,8 +160,8 @@ func ClassifyUC(prevUC, newUC *types.UnicityCertificate) (UCClass, error) {
 	}
 
 	if newPR < prevPR {
-		if newRR > prevRR {
-			// An EARLIER partition round certified at a LATER root round than one already held.
+		if newRR >= prevRR {
+			// An EARLIER partition round certified at a LATER-OR-EQUAL root round than one already held.
 			// The root chain does not go backwards, so this is not a late delivery.
 			return UCValid, fmt.Errorf("%w: partition round %d at root round %d, after partition round %d at root round %d",
 				ErrImpossibleUCOrder, newPR, newRR, prevPR, prevRR)

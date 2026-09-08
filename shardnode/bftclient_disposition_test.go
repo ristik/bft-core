@@ -197,6 +197,29 @@ func TestHandlerDisposition(t *testing.T) {
 		require.Empty(t, logs.atLevel(slog.LevelError))
 	})
 
+	t.Run("different partition rounds at one root round are refused in both orders", func(t *testing.T) {
+		a := sign(5, 40, zero, []byte{0x01}, []byte{0xb1})
+		b := sign(6, 40, []byte{0x01}, []byte{0x02}, []byte{0xb2})
+		for _, pair := range [][2]*types.UnicityCertificate{{a, b}, {b, a}} {
+			c, drv, _ := newClient(pair[0])
+			err := c.handleCertificationResponse(ctx, respond(pair[1]))
+			require.ErrorIs(t, err, ErrImpossibleUCOrder)
+			require.Same(t, pair[0], c.luc)
+			require.Empty(t, drv.rounds())
+		}
+	})
+
+	t.Run("unauthenticated stale input is rejected before the stale disposition", func(t *testing.T) {
+		held := sign(9, 70, zero, []byte{0x02}, []byte{0xb2})
+		delayed := sign(8, 67, zero, []byte{0x01}, []byte{0xb1})
+		delayed.UnicitySeal.Signatures = nil
+		c, drv, logs := newClient(held)
+		require.Error(t, c.handleCertificationResponse(ctx, respond(delayed)))
+		require.Same(t, held, c.luc)
+		require.Empty(t, drv.rounds())
+		require.NotContains(t, logs.atLevel(slog.LevelDebug), "stale UC, ignoring")
+	})
+
 	t.Run("an exact duplicate is still ignored", func(t *testing.T) {
 		held := sign(5, 40, zero, []byte{0x01}, []byte{0xb1})
 		c, drv, logs := newClient(held)
