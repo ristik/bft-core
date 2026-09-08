@@ -155,6 +155,14 @@ V4, silently requiring calls this adapter never makes.
   set — refusing to start if a required method is missing, and logging (not silently ignoring) any
   additional capability offered that this build doesn't use, since that's the signal a newer fork was
   scheduled than the adapter was built for.
+- **What this does and does not establish.** These are two separate things and only one is a check.
+  Generating the chain spec is a local act: it produces the intended file, and is no evidence that
+  the remote endpoint *loaded* it. `engine_exchangeCapabilities` reports what a client **build**
+  supports, not what its loaded spec has **scheduled**, and two specs with identical genesis state
+  and identical current capabilities can still schedule different future forks. So the fork schedule
+  is an **operator constraint of the pinned deployment profile**, not a verified guarantee — see
+  `docs/design/f1-baseline.md` §5.8. What the capability check genuinely buys is refusing a client
+  build that cannot speak the V3 set at all.
 - The reth release is pinned to an exact version in deployment tooling, not left to float — two builds
   disagreeing on an edge case is indistinguishable from a real state-transition bug until you already
   suspect a version mismatch.

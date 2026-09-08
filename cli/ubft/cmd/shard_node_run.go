@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ainvaltin/httpsrv"
@@ -38,9 +40,10 @@ type shardNodeRunFlags struct {
 	Executor string // "fake" or "engine-api"
 
 	// engine-api executor only — see engineapi.Config.
-	EngineURL string
-	EthURL    string
-	JWTSecret string
+	EngineURL           string
+	EthURL              string
+	JWTSecret           string
+	ExpectedGenesisHash string
 
 	LUCStoreFile string
 
@@ -76,6 +79,10 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"engine-api executor only: URL of the execution client's authenticated Engine API endpoint")
 	cmd.Flags().StringVar(&flags.EthURL, "eth-url", "http://127.0.0.1:8545",
 		"engine-api executor only: URL of the execution client's plain eth_* JSON-RPC endpoint")
+	cmd.Flags().StringVar(&flags.ExpectedGenesisHash, "expected-genesis-hash", "",
+		"engine-api executor only: the execution client's expected genesis block hash (0x-prefixed). "+
+			"Operator-configured; when set it is verified before the node can vote. A chain id does not "+
+			"establish genesis identity, and a matching genesis does not establish agreement on future forks")
 	cmd.Flags().StringVar(&flags.JWTSecret, "jwt-secret", "",
 		"engine-api executor only: path to the 32-byte hex JWT secret shared with the execution client (default: $UBFT_HOME/jwt.hex)")
 	cmd.Flags().StringVar(&flags.LUCStoreFile, "luc-store", "",
@@ -255,6 +262,18 @@ func buildDisseminator(p *network.Peer, obs Observability, validators []*types.N
 	return shardnode.NewNetDisseminator(p, obs, peers)
 }
 
+// hexToHash parses a 0x-prefixed 32-byte hash from configuration.
+func hexToHash(s string) (shardnode.Hash, error) {
+	b, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("not hex: %w", err)
+	}
+	if len(b) != 32 {
+		return nil, fmt.Errorf("expected 32 bytes, got %d", len(b))
+	}
+	return b, nil
+}
+
 func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *types.PartitionDescriptionRecord) (shardnode.Executor, error) {
 	switch flags.Executor {
 	case "fake":
@@ -299,6 +318,31 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 		if err := adapter.CheckChainID(ctx, wantChainID); err != nil {
 			return nil, fmt.Errorf("engine-api executor failed its startup chain-identity check "+
 				"(the wrong execution client, or a genesis generated for a different shard conf): %w", err)
+		}
+
+		// Endpoint pairing, unconditionally. The chain-id check above already refuses two
+		// clients on different chains; this refuses two clients on the SAME chain id that
+		// were started from different genesis states, without requiring the operator to have
+		// configured an expected hash. If --expected-genesis-hash is set, CheckGenesisHash
+		// below subsumes this — it is still run first so the diagnostic an operator sees for
+		// a mispairing is the mispairing, not a genesis mismatch against one of the two.
+		if _, err := adapter.CheckEndpointsPaired(ctx); err != nil {
+			return nil, fmt.Errorf("engine-api executor failed its startup endpoint-pairing check "+
+				"(--engine-url and --eth-url must address the same execution client): %w", err)
+		}
+
+		// Genesis binding, when the operator configured one. Chain id does not establish it: two
+		// chains can share a chain id and differ in allocation or any other genesis field, which
+		// is exactly what a genesis generated for a different deployment looks like. The expected
+		// value must come from configuration, never from the client under test.
+		if flags.ExpectedGenesisHash != "" {
+			want, err := hexToHash(flags.ExpectedGenesisHash)
+			if err != nil {
+				return nil, fmt.Errorf("parsing --expected-genesis-hash: %w", err)
+			}
+			if err := adapter.CheckGenesisHash(ctx, want); err != nil {
+				return nil, fmt.Errorf("engine-api executor failed its startup genesis check: %w", err)
+			}
 		}
 		return adapter, nil
 
