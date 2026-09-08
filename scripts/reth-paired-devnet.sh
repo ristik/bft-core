@@ -145,7 +145,7 @@ doctorOut=$(build/ubft shard-node doctor --home test-nodes/evm1 --executor engin
   --engine-url http://127.0.0.1:18651 --eth-url http://127.0.0.1:18645 \
   --jwt-secret test-nodes/evm1/jwt.hex 2>&1)
 doctorStatus=$?
-if [ "$doctorStatus" -ne 0 ] && echo "$doctorOut" | grep -qE '^\[FAIL\] chain identity[[:space:]]+execution client reports chainId=31338, shard conf says 31337'; then
+if [ "$doctorStatus" -ne 0 ] && echo "$doctorOut" | grep -qE '^\[FAIL\] chain identity[[:space:]]+engineapi: execution client reports chainId=31338, shard conf says 31337'; then
   pass "doctor rejected chainId mismatch: $(echo "$doctorOut" | grep -o 'execution client reports chainId=[0-9]*, shard conf says [0-9]*' | head -1)"
 else
   fail "chainId mismatch NOT detected; doctor said: $(echo "$doctorOut" | tail -3)"
