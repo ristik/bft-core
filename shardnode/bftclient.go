@@ -69,8 +69,23 @@ type BFTClient struct {
 
 	mu  sync.Mutex
 	luc *types.UnicityCertificate
+	// unapplied names the certificate whose delivery to the driver FAILED, and is cleared as soon
+	// as one succeeds. It is the applied cursor kept separate from the observation cursor `luc`
+	// (design §5): a driver error leaves `luc` ahead of what was actually applied, and without
+	// this the retransmission that would retry it is classified UCDuplicate and dropped, so the
+	// failure is never retried by any route. It is not a queue — only the latest failure is worth
+	// retrying, since a later certificate supersedes an earlier one.
+	unapplied *deliveryAttempt
 
 	lastCertResponseTime atomic.Int64
+}
+
+// deliveryAttempt identifies one certificate for retry purposes. Rounds are enough: a UCDuplicate
+// has, by classification, the same partition round, the same root round and a byte-identical input
+// record as the certificate held, so a duplicate matching these is the same certified statement.
+type deliveryAttempt struct {
+	partitionRound uint64
+	rootRound      uint64
 }
 
 func NewBFTClient(
@@ -266,10 +281,32 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 		}
 		return fmt.Errorf("classifying certificate: %w", err)
 	}
-	if class == UCDuplicate {
+	// A duplicate of a certificate this node OBSERVED but failed to APPLY is a retry opportunity,
+	// not a no-op (design §5 point 5). The round driver's steps are all idempotent — Commit on an
+	// already-canonical hash returns VALID, observation of an already-observed certificate is a
+	// no-op — so re-running the delivery is safe, and it is the only route by which a transient
+	// executor failure recovers on its own. A duplicate arriving after a SUCCESSFUL delivery is
+	// still dropped: `unapplied` is cleared the moment one succeeds, so a completed round is never
+	// driven, or signed, twice.
+	retryOfFailedApply := class == UCDuplicate && c.unapplied != nil &&
+		c.unapplied.partitionRound == cr.UC.GetRoundNumber() && c.unapplied.rootRound == cr.UC.GetRootRoundNumber()
+
+	if (class == UCDuplicate || class == UCStale) && !retryOfFailedApply {
+		// Neither advances nor reverts anything: c.luc stays where it is, the driver is not
+		// called, and no error is returned. A stale certificate is an authentic statement about
+		// a round this node has already moved past — see ClassifyUC on why that is routine
+		// rather than a fault (#93). Kept observable: a counter, and DEBUG rather than ERROR.
+		metrics := c.metrics
 		c.mu.Unlock()
+		if class == UCStale {
+			metrics.recordStaleUC(ctx)
+		}
 		if c.log != nil {
-			c.log.DebugContext(ctx, "duplicate UC, ignoring", slog.Uint64("rootRound", cr.UC.GetRootRoundNumber()))
+			c.log.DebugContext(ctx, class.String()+" UC, ignoring",
+				slog.Uint64("rootRound", cr.UC.GetRootRoundNumber()),
+				slog.Uint64("partitionRound", cr.UC.GetRoundNumber()),
+				slog.Uint64("heldRootRound", prevLUC.GetRootRoundNumber()),
+				slog.Uint64("heldPartitionRound", prevLUC.GetRoundNumber()))
 		}
 		return nil
 	}
@@ -286,6 +323,7 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	if c.log != nil {
 		c.log.InfoContext(ctx, "accepted certificate",
 			slog.String("class", class.String()),
+			slog.Bool("retryOfFailedApply", retryOfFailedApply),
 			slog.Uint64("partitionRound", cr.UC.GetRoundNumber()),
 			slog.Uint64("rootRound", cr.UC.GetRootRoundNumber()),
 			slog.Uint64("nextRound", cr.Technical.Round),
@@ -295,7 +333,21 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	c.mu.Lock()
 	driver := c.driver
 	c.mu.Unlock()
-	return driver.HandleCertificate(ctx, &cr.UC, &cr.Technical)
+
+	err = driver.HandleCertificate(ctx, &cr.UC, &cr.Technical)
+
+	// Record whether this certificate was actually applied, separately from having been observed.
+	// This is the whole of the applied-versus-observed split at this layer: on failure the
+	// certificate stays marked unapplied so a retransmission retries it, and on success the mark
+	// is cleared so later duplicates go back to being no-ops.
+	c.mu.Lock()
+	if err != nil {
+		c.unapplied = &deliveryAttempt{partitionRound: cr.UC.GetRoundNumber(), rootRound: cr.UC.GetRootRoundNumber()}
+	} else {
+		c.unapplied = nil
+	}
+	c.mu.Unlock()
+	return err
 }
 
 // Submit implements shardnode.Submitter. It selects root nodes

@@ -4,17 +4,104 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"sort"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	test "github.com/unicitynetwork/bft-core/internal/testutils"
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 )
 
 const randomTestAddressStr = "/ip4/127.0.0.1/tcp/0"
+
+// --- discovery diagnostics (issue #100) --------------------------------------
+//
+// These tests assert an EXACT routing-table size, and until now a failure reported only
+// "Condition never satisfied": no routing-table membership, no connection state, nothing to
+// distinguish "the peer was never reached" from "the table converged to a different size".
+// #100 asks that the negative case show routing/connection/query state, so every wait below goes
+// through requireRoutingTable, which dumps that state on failure.
+
+// peerLabel gives short, stable names to the peers a test cares about, so a dump reads as
+// "bootstrap, peer1, peer2" rather than as base58 keys.
+type peerLabel struct {
+	id   peer.ID
+	name string
+}
+
+func shortID(id peer.ID) string {
+	s := id.String()
+	if len(s) > 8 {
+		return s[len(s)-8:]
+	}
+	return s
+}
+
+// describePeer renders everything that decides whether the assertion below can ever hold.
+func describePeer(p *Peer, name string, known []peerLabel) string {
+	rt := p.dht.RoutingTable()
+	members := rt.ListPeers()
+	seen := make(map[peer.ID]bool, len(members))
+	for _, m := range members {
+		seen[m] = true
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "  %s (%s): routingTable size=%d mode=%v\n", name, shortID(p.host.ID()), rt.Size(), p.dht.Mode())
+	for _, m := range members {
+		label := shortID(m)
+		for _, k := range known {
+			if k.id == m {
+				label = k.name + "/" + shortID(m)
+			}
+		}
+		fmt.Fprintf(&b, "      in table: %s connectedness=%v\n", label, p.host.Network().Connectedness(m))
+	}
+	// An expected peer that is absent from the table is the interesting case: say whether we are
+	// even connected to it, which separates "never dialled" from "dialled but not admitted".
+	for _, k := range known {
+		if k.id == p.host.ID() || seen[k.id] {
+			continue
+		}
+		fmt.Fprintf(&b, "      MISSING:  %s/%s connectedness=%v addrsKnown=%d\n",
+			k.name, shortID(k.id), p.host.Network().Connectedness(k.id), len(p.host.Peerstore().Addrs(k.id)))
+	}
+	// Peers this host is connected to but which are NOT in its routing table, and peers in the
+	// table that no test created: either one means this test is not running in isolation.
+	for _, c := range p.host.Network().Peers() {
+		if !seen[c] {
+			fmt.Fprintf(&b, "      connected but not in table: %s\n", shortID(c))
+		}
+	}
+	return b.String()
+}
+
+// requireRoutingTable waits for p's routing table to reach exactly want entries, and on failure
+// prints the routing/connection state of every peer the test knows about.
+func requireRoutingTable(t *testing.T, p *Peer, name string, want int, budget time.Duration, all map[string]*Peer) {
+	t.Helper()
+	known := make([]peerLabel, 0, len(all))
+	for n, q := range all {
+		known = append(known, peerLabel{id: q.host.ID(), name: n})
+	}
+	sort.Slice(known, func(i, j int) bool { return known[i].name < known[j].name })
+
+	if assert.Eventually(t, func() bool { return p.dht.RoutingTable().Size() == want }, budget, test.WaitTick) {
+		return
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s routing table never reached exactly %d entries within %s\n", name, want, budget)
+	for _, k := range known {
+		b.WriteString(describePeer(all[k.name], k.name, known))
+	}
+	t.Fatal(b.String())
+}
 
 func TestNewPeer_PeerConfigurationIsNil(t *testing.T) {
 	p, err := NewPeer(context.Background(), nil, nil, nil)
@@ -84,12 +171,21 @@ func TestNewPeer_LoadsKeyPairCorrectly(t *testing.T) {
 
 func TestBootstrapNodes(t *testing.T) {
 	log := logger.New(t)
-	ctx := context.Background()
+	// Scoped, not Background: the DHT and its background workers are built from this context
+	// (NewPeer passes it to newDHT), so a package-lifetime context leaves them running after the
+	// test returns. Cancelling on cleanup bounds them to the test that created them (#100).
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	bootStrapPeerConf, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), nil, nil)
 	require.NoError(t, err)
 
 	bootstrapNode, err := NewPeer(ctx, bootStrapPeerConf, log, nil)
 	require.NoError(t, err)
+	// The bootstrap node was created and never closed, unlike peer1/peer2 (#100 item 2). A leaked
+	// libp2p host keeps its listener, its peerstore and its DHT workers alive for the rest of the
+	// package run.
+	t.Cleanup(func() { _ = bootstrapNode.Close() })
 	bootstrapNodeAddrInfo := []peer.AddrInfo{{ID: bootstrapNode.ID(), Addrs: bootstrapNode.MultiAddresses()}}
 
 	peerConf1, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), bootstrapNodeAddrInfo, nil)
@@ -97,18 +193,21 @@ func TestBootstrapNodes(t *testing.T) {
 
 	peer1, err := NewPeer(ctx, peerConf1, log, nil)
 	require.NoError(t, err)
-	defer func() { _ = peer1.Close() }()
-	require.Eventually(t, func() bool { return peer1.dht.RoutingTable().Size() == 1 }, test.WaitDuration, test.WaitTick)
+	t.Cleanup(func() { _ = peer1.Close() })
+
+	all := map[string]*Peer{"bootstrap": bootstrapNode, "peer1": peer1}
+	requireRoutingTable(t, peer1, "peer1", 1, test.WaitDuration, all)
 
 	peerConf2, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), bootstrapNodeAddrInfo, nil)
 	require.NoError(t, err)
 
 	peer2, err := NewPeer(ctx, peerConf2, log, nil)
 	require.NoError(t, err)
-	defer func() { _ = peer2.Close() }()
+	t.Cleanup(func() { _ = peer2.Close() })
+	all["peer2"] = peer2
 
-	require.Eventually(t, func() bool { return peer2.dht.RoutingTable().Size() == 2 }, test.WaitDuration, test.WaitTick)
-	require.Eventually(t, func() bool { return peer1.dht.RoutingTable().Size() == 2 }, test.WaitDuration, test.WaitTick)
+	requireRoutingTable(t, peer2, "peer2", 2, test.WaitDuration, all)
+	requireRoutingTable(t, peer1, "peer1", 2, test.WaitDuration, all)
 	require.Eventually(t, func() bool { return peer2.dht.RoutingTable().Find(peer1.dht.Host().ID()) != "" }, test.WaitDuration, test.WaitTick)
 	require.Eventually(t, func() bool { return peer1.dht.RoutingTable().Find(peer2.dht.Host().ID()) != "" }, test.WaitDuration, test.WaitTick)
 }
@@ -125,6 +224,7 @@ func TestBootstrap_OneBootStrapConnectionFails_StillOK(t *testing.T) {
 	require.NoError(t, err)
 	bootstrapNode2, err := NewPeer(ctx, bootStrapPeer2Conf, log, nil)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = bootstrapNode2.Close() }) // was leaked (#100)
 	// set bootstrap info
 	bootstrapNodeAddrInfo := []peer.AddrInfo{
 		{ID: bootStrapPeer1Conf.ID, Addrs: []ma.Multiaddr{bootstrap1NodeAddr}},
@@ -167,6 +267,7 @@ func TestBootstrap_AllConnectionsFail(t *testing.T) {
 
 	peer1, err := NewPeer(ctx, peerConf1, log, nil)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = peer1.Close() }) // was leaked (#100)
 	require.NotNil(t, peer1)
 	err = peer1.BootstrapConnect(ctx, log)
 	require.ErrorContains(t, err, fmt.Sprintf("failed to bootstrap: failed to dial: failed to dial %s: all dials failed", bootStrapPeer1Conf.ID))
@@ -233,31 +334,40 @@ func TestBootstrapConnect_BootnodeIgnoresConnectionFailure(t *testing.T) {
 
 func TestProvidesAndDiscoverNodes(t *testing.T) {
 	log := logger.New(t)
-	ctx := context.Background()
+	// See TestBootstrapNodes: scoped so the DHT workers built from this context do not outlive
+	// the test (#100 item 2).
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
 	bootStrapPeerConf, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), nil, nil)
 	require.NoError(t, err)
 	bootstrapNode, err := NewPeer(ctx, bootStrapPeerConf, log, nil)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = bootstrapNode.Close() }) // was leaked
 	bootstrapNodeAddrInfo := []peer.AddrInfo{{ID: bootstrapNode.ID(), Addrs: bootstrapNode.MultiAddresses()}}
 
 	peerConf1, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), bootstrapNodeAddrInfo, nil)
 	require.NoError(t, err)
 	peer1, err := NewPeer(ctx, peerConf1, log, nil)
 	require.NoError(t, err)
-	defer func() { _ = peer1.Close() }()
-	require.Eventually(t, func() bool { return peer1.dht.RoutingTable().Size() == 1 }, test.WaitDuration, test.WaitTick)
+	t.Cleanup(func() { _ = peer1.Close() })
+
+	all := map[string]*Peer{"bootstrap": bootstrapNode, "peer1": peer1}
+	requireRoutingTable(t, peer1, "peer1", 1, test.WaitDuration, all)
 
 	peerConf2, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), bootstrapNodeAddrInfo, nil)
 	require.NoError(t, err)
 	peer2, err := NewPeer(ctx, peerConf2, log, nil)
 	require.NoError(t, err)
-	defer func() { _ = peer2.Close() }()
+	t.Cleanup(func() { _ = peer2.Close() })
+	all["peer2"] = peer2
 
 	peerConf3, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), bootstrapNodeAddrInfo, nil)
 	require.NoError(t, err)
 	peer3, err := NewPeer(ctx, peerConf3, log, nil)
 	require.NoError(t, err)
-	defer func() { _ = peer3.Close() }()
+	t.Cleanup(func() { _ = peer3.Close() })
+	all["peer3"] = peer3
 
 	// peer1 and peer2 were already up when peer3 joined, so neither learns about it
 	// from its own bootstrap - it has to reach them through the bootstrap node's
@@ -272,8 +382,8 @@ func TestProvidesAndDiscoverNodes(t *testing.T) {
 	// package the same way the Subscriptions leak did. Nothing here is asserting how
 	// *fast* discovery converges, only that it does, so waiting longer costs a slow
 	// machine some seconds and costs a fast one nothing.
-	require.Eventually(t, func() bool { return peer2.dht.RoutingTable().Size() == 3 }, 8*test.WaitDuration, test.WaitTick)
-	require.Eventually(t, func() bool { return peer1.dht.RoutingTable().Size() == 3 }, 8*test.WaitDuration, test.WaitTick)
+	requireRoutingTable(t, peer2, "peer2", 3, 8*test.WaitDuration, all)
+	requireRoutingTable(t, peer1, "peer1", 3, 8*test.WaitDuration, all)
 	testTopic := "ab/test/test_topic"
 	require.NoError(t, peer2.Advertise(ctx, testTopic))
 	require.NoError(t, peer1.Advertise(ctx, testTopic))
@@ -301,6 +411,7 @@ func TestAnnounceAddrs(t *testing.T) {
 
 	peer1, err := NewPeer(ctx, conf, logger.New(t), nil)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = peer1.Close() }) // was leaked (#100)
 
 	actualAddrs := peer1.host.Addrs()
 	require.Len(t, actualAddrs, 2)

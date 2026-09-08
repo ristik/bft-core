@@ -172,13 +172,18 @@ func Test_Subscriptions(t *testing.T) {
 		var sendCalls, receiverCnt atomic.Int32
 		done := make(chan struct{})
 		sender := func(ctx context.Context, msg any, receivers ...peer.ID) error {
+			// Count BEFORE signalling. Both branches below hand control back to the test — the
+			// unbuffered send blocks until it is received, and the close releases it — so a
+			// receiverCnt.Add placed after them races the assertion that reads it. CI caught
+			// exactly that: "last call had one receiver: expected 5, actual 4", the count for
+			// the very call whose close(done) had already let the test proceed.
+			receiverCnt.Add(int32(len(receivers)))
 			switch sendCalls.Add(1) {
 			case responsesPerSubscription:
 				done <- struct{}{}
 			case responsesPerSubscription + 1:
 				close(done)
 			}
-			receiverCnt.Add(int32(len(receivers)))
 			return nil
 		}
 

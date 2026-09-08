@@ -185,6 +185,61 @@ func RunConformance(t *testing.T, newExecutor Factory) {
 		require.Equal(t, leaderHead, followerHead)
 	})
 
+	t.Run("commit is idempotent: re-committing the canonical head returns valid", func(t *testing.T) {
+		// The Executor contract requires Commit to be safe to call speculatively
+		// (docs/adr/0001-executor-boundary.md decision 2), and #92's recovery path depends on it:
+		// it re-commits the retained anchor on every certificate until it succeeds, so an
+		// executor that reported "not found" for a block it had already made canonical would make
+		// every retry after the first look like an unavailable payload.
+		//
+		// A real client agrees — forkchoiceUpdated to the current canonical head returns VALID —
+		// and the in-memory Fake did not until this case was added, which is exactly the
+		// fake-versus-adapter divergence that let #92 go unnoticed by a fake-only suite.
+		leader := newExecutor(t)
+		follower := newExecutor(t)
+		head, err := leader.Head(ctx)
+		require.NoError(t, err)
+
+		addEntries(t, leader, []byte("payload"))
+		id, err := leader.Build(ctx, shardnode.RoundParams{Round: 1, Parent: head})
+		require.NoError(t, err)
+		block, err := leader.Seal(ctx, id)
+		require.NoError(t, err)
+
+		status, err := follower.Verify(ctx, block, shardnode.RoundParams{})
+		require.NoError(t, err)
+		require.Equal(t, shardnode.StatusValid, status)
+
+		status, err = follower.Commit(ctx, block.Hash)
+		require.NoError(t, err)
+		require.Equal(t, shardnode.StatusValid, status)
+		first, err := follower.Head(ctx)
+		require.NoError(t, err)
+
+		// Twice more: the head must not move and the status must not degrade.
+		for i := 0; i < 2; i++ {
+			status, err = follower.Commit(ctx, block.Hash)
+			require.NoError(t, err)
+			require.Equal(t, shardnode.StatusValid, status, "re-committing the canonical head must stay valid")
+			again, err := follower.Head(ctx)
+			require.NoError(t, err)
+			require.Equal(t, first, again, "a repeated commit must have no additional effect")
+		}
+	})
+
+	t.Run("commit of an empty hash is never valid", func(t *testing.T) {
+		// #92: a quiet certificate carries a nil BlockHash, and the framework used to pass it
+		// straight to Commit. The framework no longer does, but an Executor must not report
+		// success for it either — an empty hash is not the canonical head, even at genesis where
+		// the head's own hash is empty too.
+		e := newExecutor(t)
+		status, err := e.Commit(ctx, nil)
+		if err == nil {
+			require.NotEqual(t, shardnode.StatusValid, status,
+				"an empty commit target must never be reported as valid")
+		}
+	})
+
 	t.Run("commit of a hash never verified reports syncing, not an error", func(t *testing.T) {
 		e := newExecutor(t)
 		status, err := e.Commit(ctx, shardnode.Hash{0x01, 0x02, 0x03})

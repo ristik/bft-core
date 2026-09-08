@@ -325,6 +325,82 @@ Two things about this lane are worth stating plainly:
   from RLP, Keccak-256 and a recoverable secp256k1 signature using packages already in the module
   graph; `go.sum` is unchanged and no new module is added.
 
+### 5.8 Configured execution identity
+
+F1b (#89) binds what the node can actually verify before it votes, and records what it cannot.
+
+> **Correction.** An earlier revision of this section claimed the Engine endpoint could not be
+> identity-checked because "standard interfaces cannot close this: the Engine API has no
+> chain-identity read." That was **false**, and review caught it. The Engine API specification's
+> [underlying protocol](https://github.com/ethereum/execution-apis/blob/main/src/engine/common.md#underlying-protocol)
+> section requires an execution client to serve a named subset of `eth_*` on the same authenticated
+> port as `engine_*`, and `eth_chainId` and `eth_getBlockByNumber` are both in it. The pinned client
+> implements them: `EngineEthApi`, `crates/rpc/rpc-api/src/engine.rs`. Closing the gap needed no new
+> Engine method and no divergence from upstream reth, and it is closed below.
+
+**What is enforced at startup**, all before any certification request is submitted:
+
+| Check | Source of truth | Refuses on |
+| --- | --- | --- |
+| Engine capability set | `engine_exchangeCapabilities` | any required V3 method missing, exchange failure, malformed response |
+| Chain id | `eth_chainId` **on both the authenticated Engine connection and the plain one**, vs the shard conf's `chain_id` param | mismatch on either connection, the id being unreadable, a `null` id, or the two connections disagreeing |
+| **Endpoint pairing** | `eth_getBlockByNumber("0x0")` on both connections, compared to each other | the two connections reporting different genesis blocks. Runs unconditionally — no operator configuration needed |
+| **Genesis identity** | `eth_getBlockByNumber("0x0")` **on both connections**, vs `--expected-genesis-hash` | mismatch, unreadable genesis, a `null` result, malformed expected value |
+
+Why both connections. `--engine-url` and `--eth-url` are separate flags, so nothing structurally
+stops an operator from pointing them at two different execution clients — and the Engine connection
+is the one that decides what this node votes for: `Build`, `Seal` and `Commit` all go over it, while
+the plain connection only answers header lookups. Checking the plain endpoint alone verifies the
+chain of a client that does not produce our blocks.
+
+The pairing check is deliberately unconditional and runs *before* the genesis check, so an operator
+who has mispaired two endpoints is told they disagree rather than being told one of them mismatches
+an expected value and left to work out which. `cli/ubft/cmd/shard_node_startup_test.go`'s
+`TestShardNodeRun_EndpointPairing` pins that ordering.
+
+`--expected-genesis-hash` is **operator-configured**. It is deliberately not derived from the client
+under test, which would compare a value with itself and prove nothing, and it is not derivable from
+the shard conf either — `ubft engine-api genesis` builds the chain spec from the shard conf but the
+allocation is not part of it, and the allocation changes the genesis hash. A same-chain-id
+/different-genesis client is therefore a real deployment mistake, and it is refused: proven against
+real reth in `scripts/reth-paired-devnet.sh` §3d, with a client on chainId 31337 differing only in
+its allocation. §3e proves the pairing check on the same two real clients, with `--eth-url` on the
+correct one and `--engine-url` on the other and no `--expected-genesis-hash` configured — the case
+an earlier revision of this section recorded as accepted.
+
+Both negatives assert the **specific** diagnostic carrying both hashes rather than merely "a startup
+check failed", and establish their premise first (two clients that really are up, really share a
+chain id and really differ in genesis), so neither can pass on an unreadable fixture or an
+unreachable client. Both `shard-node run` invocations are time-bounded: every section-3 case asserts
+a refusal, so a regression that lets startup proceed must be a failure rather than a hang.
+
+**What none of this establishes**, kept narrow deliberately:
+
+- **Not same-process identity.** Agreement on chain id and genesis across the two connections rules
+  out the mispairing that actually happens in deployment — an endpoint left pointing at another
+  shard's client, or at a client started from a different genesis. It does *not* prove the two URLs
+  address the same client **process**: two clients started from the same genesis agree on both
+  values and only diverge once they build different blocks. Requiring the two URLs to share a
+  host/authority would not help either — that is a string comparison, not a check on the client.
+- **Not fork-schedule agreement.** A matching genesis hash binds the genesis *block*; it says
+  nothing about a fork scheduled by timestamp later in the chain's life.
+
+**The fork schedule is an operator constraint, not a verified guarantee.** An earlier revision of
+this section credited `ubft engine-api genesis` plus the capability check with a fork-schedule
+guarantee. That is also wrong, for two reasons: generating the intended chain spec file locally is
+no evidence that the remote endpoint *loaded* it, and two specs with identical genesis state and
+identical current capabilities can still schedule different future forks —
+`engine_exchangeCapabilities` reports what a client *build* supports, not what its loaded spec has
+scheduled. So the pinned deployment profile records it as a constraint an operator must satisfy:
+
+> The execution client must be started from a chain spec that activates shanghai and cancun at
+> genesis and schedules nothing after. No startup check verifies this; a spec that activates a later
+> fork by timestamp will pass every check above and then require Engine methods this adapter does
+> not call.
+
+Closing *that* would need a fork-schedule read the Engine API does not offer — unlike the endpoint
+pairing above, which the standard already supported all along.
+
 ### 5.6 What this lane still does not cover
 
 It exercises one transaction through one leader. It is not a load test, not a fault-injection
@@ -342,7 +418,9 @@ negotiation.
 | Our own builder's gas limit needs `--builder.gaslimit` in deployment config (D-2, part 1 — a standard flag, no client change) | §4.3, `reth-baseline.sh` control B | F5 (#13) |
 | No evidence that a follower rejects a peer block carrying a different gas limit / over-capacity (D-2, part 2 — the part that may need a validity rule) | §4.3 | F5 (#13), F3 (#11) |
 | Adapter integration is exercised by one transaction through one leader; no load, fault injection or mixed cadence against real reth | §5.6 | F8 (#16) |
-| Startup enforces chain id but not genesis *state*: two chain specs can share an id and differ elsewhere, so cross-validator genesis-hash comparison is still an operator step | §5.5 | F1 records; operator procedure |
+| Startup binds chain id and genesis on both connections, but cross-validator genesis comparison is still an operator step: each node checks its own client against its own configured value, and nothing compares the value across validators | §5.8 | F1 records; operator procedure |
+| Startup cannot verify the execution client's **fork schedule**. The capability set reports what a client build supports, not what its loaded spec scheduled, and generating the chain spec locally is no evidence the endpoint loaded it. Recorded as an operator constraint of the pinned deployment profile | §5.8, ADR 0001 decision 3 | F3 (#11) |
+| Startup cannot establish that `--engine-url` and `--eth-url` address the same client **process** — only that they agree on chain id and genesis. Two clients from the same genesis agree until they build different blocks | §5.8 | Accepted limitation |
 | No negative for a client speaking a differing Engine API capability set (needs a second reth build) | §5.6 | F3 (#11) |
 | Two `l1` commits unmerged; consistency-proof fixtures not retained | §3.2 | F8 (#16) |
 | FFI CI lane disabled (`if: false`) | §5.2 | F8 (#16) |
@@ -663,11 +741,45 @@ reach, F8 (#16) — which should not treat this as an explanation for the unexpl
 
 ### 6.4 Real-reth in CI
 
-Neither `scripts/reth-baseline.sh` nor `scripts/reth-paired-devnet.sh` is wired into the GitHub
-workflow. Both need a reth binary at the pinned revision; the approved fork now exists
-(`ristik/ureth`, §2), so the remaining obstacle is the Rust build and cache cost, which belongs with
-the change that first makes the fork differ from upstream. Wiring them in is F3 (#11)'s job. Until
-then they are documented local gates, run and recorded here (§5.3, §5.5).
+`.github/workflows/reth-smoke.yml` runs the adapter against the **approved pinned execution client**
+on every PR to `integration/enshrined-evm`, and on manual dispatch (F1c, #90). It is a separate
+workflow with a distinct name on purpose: a green `ci` run must never be read as real-execution
+evidence, because every job there uses `--executor fake`.
+
+**Provenance instead of a 40-minute Rust build.** The pin `189c0df3` *is* upstream tag `v2.5.0` —
+verified: `git/refs/tags/v2.5.0` resolves to that commit — and `ristik/ureth`'s `unicity/main` is
+byte-identical to it (§2), so the upstream release artifact is a legitimate source for it today.
+The workflow records the source URL, the exact asset name and its SHA-256
+(`6719ec67…`, GitHub's own reported asset digest), verifies the archive against it, and then
+**verifies the extracted binary reports the pinned commit — on cache hits as well as fresh
+downloads**. A cache is a convenience, never an authority.
+
+That choice is only valid while the fork has not diverged. **The moment `ureth` carries its own
+commits, this lane must build from source** (or publish its own artifact with equivalent provenance),
+and the digest and tag pins here stop being meaningful. F3 (#11) extends this workflow rather than
+starting a second one.
+
+Budget, measured against the artifact path rather than estimated:
+
+| Step | Cost |
+| --- | --- |
+| Artifact download + digest verify (cache miss) | ~52 MB, well under a minute |
+| Cache hit | negligible; the revision check still runs |
+| Rust build | **none** — avoided entirely by the artifact path |
+| `reth-baseline.sh 20` (stock control) | ~1 minute |
+| `reth-paired-devnet.sh 4 5` (4 validators, 4 clients, funded transaction) | several minutes |
+| Job timeout | 45 minutes |
+
+The 160-block baseline run stays a local gate (§5.3); CI runs 20 blocks, which still exercises both
+controls. Longer repeat and fault runs belong on a separate bounded lane (#90 stage 3) so that a
+green PR check never implies fault coverage that did not run.
+
+Evidence: collection and teardown run on success, failure **and cancellation**. The archive carries
+root, shard and reth logs, shard conf, trust base, both genesis files and a provenance record
+(BFT commit, reth commit/tag/asset/digest, run id and attempt). Signing keys and JWT secrets are
+never copied and their absence is asserted, failing the job if one appears. Retention 14 days. The
+upload path can be exercised deliberately via the `inject_failure` dispatch input rather than
+waiting for a real failure to discover it does not work.
 
 ## 7. What F1 does not cover
 

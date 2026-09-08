@@ -19,8 +19,24 @@
 # where a real non-quiet round can be constructed. See
 # docs/adr/0001-executor-boundary.md.
 #
+# VALIDATOR COUNT AND THE RESTART GATE. This script used to run on 4 validators. It needs 7 as of
+# F6b stage 3 (#92/#105), and the reason is a deliberate behaviour change, not a flaky lane: a shard
+# node resumed from a persisted certificate is NON-VOTING for the rest of that process (design
+# docs/design/f6b-quiet-uc-recovery.md §6.1 — an authenticated checkpoint proves genuine, not
+# current, so restarting is not by itself authorization to sign). It still handshakes, accepts
+# certificates and reconciles its executor, which is what every "rejoined" assertion below checks;
+# it contributes nothing to quorum.
+#
+# So each of the three restart scenarios permanently removes one voter. Shard quorum is n/2+1
+# (rootchain/consensus/storage/sharding.go GetQuorum), and the tightest moment is the cold-restart
+# scenario: two validators already restarted and a third deliberately down, needing n-3 >= n/2+1,
+# i.e. n >= 7. At n=4 this run stalls at kill-leader with 2 voters of 4 — measured, not predicted.
+# When #105 supplies the monotonic signing record and a restarted node may vote again, this can go
+# back to 4.
+#
 # Usage: scripts/chaos-evm.sh [-v validators] [-p partition id] [-k]
-#   -v  number of validators (default 4; needs >=4 to tolerate one fault)
+#   -v  number of validators (default 7; see VALIDATOR COUNT above — 4 tolerates one fault but
+#       cannot complete the restart scenarios while restarted nodes stay non-voting)
 #   -p  partition id (default 8)
 #   -k  keep test-nodes/ and the running processes afterwards (default:
 #       stop everything and exit)
@@ -30,7 +46,7 @@
 set -e
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-validators=4
+validators=7
 partition_id=8
 keep=false
 
@@ -51,6 +67,14 @@ done
 if [ "$validators" -lt 4 ]; then
   echo "need at least 4 validators to tolerate one fault (got $validators)" >&2
   exit 1
+fi
+if [ "$validators" -lt 7 ]; then
+  # Not fatal — a smaller run is still useful for the first scenario and for reproducing the
+  # stall itself — but say plainly which assertions cannot hold, so a quorum stall here is read
+  # as the restart gate rather than as a consensus defect.
+  echo "NOTE: $validators validators; quorum is $((validators / 2 + 1)) and every restarted" >&2
+  echo "      validator stays non-voting until #105 (see VALIDATOR COUNT in this script)." >&2
+  echo "      Expect the kill-leader and cold-restart progress assertions to stall below 7." >&2
 fi
 
 failures=0
@@ -82,7 +106,7 @@ check_divergence() {
   # attributes startup-time messages to whatever scenario happens to be running: CI job on
   # b9c1ae53 reported a FATAL equivocation "during outage-and-catchup" from line 8 of the log,
   # which was the node's very first startup, minutes earlier.
-  hits=$(awk -v n="$after" 'NR > n && tolower($0) ~ /diverges|equivocat|cannot safely build round/ {print NR ":" $0}' "$log" 2>/dev/null || true)
+  hits=$(awk -v n="$after" 'NR > n && tolower($0) ~ /diverges|equivocat|impossible certificate ordering|cannot safely build round/ {print NR ":" $0}' "$log" 2>/dev/null || true)
   if [ -z "$hits" ]; then
     pass "validator $v's $context logged no divergence or equivocation error"
     return
@@ -90,7 +114,7 @@ check_divergence() {
   echo "  --- divergence/equivocation lines from validator $v ---" >&2
   echo "$hits" >&2
   echo "  --- end ---" >&2
-  if echo "$hits" | grep -qi 'equivocat\|cannot safely build round'; then
+  if echo "$hits" | grep -qi 'equivocat\|impossible certificate ordering\|cannot safely build round'; then
     fail "validator $v logged a FATAL divergence/equivocation during $context (see lines above)"
     return
   fi
@@ -376,6 +400,42 @@ fi
 # file so the final stop_evm_validators sweep doesn't try to kill a pid
 # that already exited.
 rm -f "test-nodes/evm$victim/pid"
+
+# Stale-delivery observation (#93). A delayed certificate cannot be FORCED here — it happens when a
+# node subscribed to several root nodes receives the certified sequence out of order, which is
+# timing-dependent — so this reports what the run actually saw rather than asserting a count. What it
+# does assert is the part that must always hold: whatever stale deliveries occurred were classified
+# as routine, never as a fatal conflict.
+#
+# The routine diagnostic is DEBUG, and validators run at INFO unless EVM_VALIDATOR_LOG_LEVEL says
+# otherwise, so say plainly when the run could not have observed it either way. Reporting "0" without
+# that caveat would read as coverage when it is only silence.
+echo
+echo "=== stale-delivery observation (#93) ==="
+staleTotal=0
+for i in $(seq 1 "$validators"); do
+  # NOT `|| echo 0`: grep -c prints "0" AND exits 1 when nothing matches, so the fallback appends a
+  # second zero and the arithmetic below fails with a syntax error. Let grep's own "0" stand, and
+  # only substitute when the file is missing entirely (grep prints nothing).
+  n=$(grep -c 'stale UC, ignoring' "test-nodes/evm$i/debug.log" 2>/dev/null || true)
+  [ -n "$n" ] || n=0
+  staleTotal=$((staleTotal + n))
+done
+if [ "${EVM_VALIDATOR_LOG_LEVEL:-info}" != "debug" ]; then
+  info_line="validators ran at ${EVM_VALIDATOR_LOG_LEVEL:-info}; the routine stale diagnostic is DEBUG, so this run could not observe the path either way"
+  echo "  ..   $info_line"
+  echo "  ..   re-run with EVM_VALIDATOR_LOG_LEVEL=debug to record stale deliveries"
+elif [ "$staleTotal" -eq 0 ]; then
+  echo "  ..   no stale deliveries occurred in this run (routine: they are timing-dependent and cannot be forced)"
+else
+  pass "observed $staleTotal stale delivery/deliveries, all classified as routine"
+fi
+# Independent of log level: a stale certificate must never have been reported as a fatal conflict.
+if grep -qiE 'equivocat|impossible certificate ordering' test-nodes/evm*/debug.log 2>/dev/null; then
+  fail "a certificate was reported as a fatal conflict during this run — see test-nodes/evm*/debug.log"
+else
+  pass "no certificate was reported as a fatal conflict in any validator"
+fi
 
 echo
 if [ "$failures" -eq 0 ]; then

@@ -39,15 +39,76 @@ fi
 failures=0
 pass() { echo "  PASS: $1"; }
 fail() { echo "  FAIL: $1"; failures=$((failures + 1)); }
+info() { echo "  info: $1"; }
+
+# The extra single-purpose reth instances the section-3 negatives start, by directory. They are
+# killed inline on the happy path; listing them here is what stops an interrupted or failed run
+# from leaving them holding their ports and datadirs.
+negativeReths="reth-wrong reth-wrongchain reth-othergenesis"
 
 cleanup() {
   ./stop-evm.sh -a >/dev/null 2>&1 || true
   for i in $(seq 1 "$validators"); do
     [ -f "test-nodes/reth$i/pid" ] && kill "$(cat "test-nodes/reth$i/pid")" 2>/dev/null
   done
+  for d in $negativeReths; do
+    [ -f "test-nodes/$d/pid" ] && kill "$(cat "test-nodes/$d/pid")" 2>/dev/null
+  done
   wait 2>/dev/null || true
 }
+
+
+# boundedRun runs `ubft shard-node run` with the given arguments and a hard time budget, capturing
+# its combined output in $boundedOut and its exit status in $boundedStatus.
+#
+# Every section-3 negative asserts that startup REFUSES, so an unbounded run is a hazard rather
+# than a convenience: the day a check regresses, the node starts, blocks waiting for a root chain
+# that is not up yet, and the script hangs forever instead of failing. A regression must be a
+# failure, not a hang. $boundedStatus is 124 (the conventional timeout status) if the budget was
+# hit, which the assertions treat as "did not refuse".
+boundedRun() {
+  budget=$1; shift
+  rm -f test-nodes/.bounded.out
+  ( exec "$@" >test-nodes/.bounded.out 2>&1 ) &
+  boundedPid=$!
+  boundedStatus=124
+  for _ in $(seq 1 "$budget"); do
+    if ! kill -0 "$boundedPid" 2>/dev/null; then
+      wait "$boundedPid"; boundedStatus=$?
+      break
+    fi
+    sleep 1
+  done
+  if [ "$boundedStatus" -eq 124 ]; then
+    kill "$boundedPid" 2>/dev/null
+    for _ in $(seq 1 5); do
+      kill -0 "$boundedPid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL "$boundedPid" 2>/dev/null || true
+    wait "$boundedPid" 2>/dev/null || true
+  fi
+  boundedOut=$(cat test-nodes/.bounded.out 2>/dev/null)
+}
+
+# Refuse to run alongside a shard node left over from an earlier run. Sections 4-7 take their
+# evidence from test-nodes/evmN/debug.log by grep, so a stale process still appending to that file
+# can supply the "accepted certificate" line this lane treats as proof — and a stale process holding
+# one of the validator ports silently reduces the cluster this lane claims to have started. Found
+# for real: a `shard-node run` from the previous day was still writing to evm1/debug.log during a
+# passing run. Fail loudly instead of producing evidence of unclear provenance.
+stale=$(pgrep -f 'ubft shard-node run' 2>/dev/null || true)
+if [ -n "$stale" ]; then
+  echo "refusing to start: shard-node processes are already running (pids: $(echo $stale | tr '\n' ' '))" >&2
+  echo "their logs would mix with this run's evidence. stop them first:" >&2
+  echo "  pkill -f 'ubft shard-node run'" >&2
+  exit 1
+fi
+
+# Install cleanup only after the refusal guard: a refused run owns no processes.
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "=== 1. generate the shard topology and chain spec ==="
 ./setup-evm-nodes.sh -r 3 -v "$validators" >/dev/null || { echo "setup failed" >&2; exit 1; }
@@ -145,7 +206,7 @@ doctorOut=$(build/ubft shard-node doctor --home test-nodes/evm1 --executor engin
   --engine-url http://127.0.0.1:18651 --eth-url http://127.0.0.1:18645 \
   --jwt-secret test-nodes/evm1/jwt.hex 2>&1)
 doctorStatus=$?
-if [ "$doctorStatus" -ne 0 ] && echo "$doctorOut" | grep -qE '^\[FAIL\] chain identity[[:space:]]+execution client reports chainId=31338, shard conf says 31337'; then
+if [ "$doctorStatus" -ne 0 ] && echo "$doctorOut" | grep -qE '^\[FAIL\] chain identity[[:space:]]+engineapi: execution client reports chainId=31338, shard conf says 31337'; then
   pass "doctor rejected chainId mismatch: $(echo "$doctorOut" | grep -o 'execution client reports chainId=[0-9]*, shard conf says [0-9]*' | head -1)"
 else
   fail "chainId mismatch NOT detected; doctor said: $(echo "$doctorOut" | tail -3)"
@@ -188,19 +249,136 @@ for _ in $(seq 1 60); do
   rpc http://127.0.0.1:18745 eth_chainId '[]' 2>/dev/null | grep -q result && break
   sleep 1
 done
-runOut=$(build/ubft shard-node run --home test-nodes/evm1 --executor engine-api \
+boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api \
   --address /ip4/127.0.0.1/tcp/28001 --trust-base test-nodes/trust-base.json \
   --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
   --engine-url http://127.0.0.1:18751 --eth-url http://127.0.0.1:18745 \
-  --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info 2>&1)
-runStatus=$?
-if [ "$runStatus" -ne 0 ] && echo "$runOut" | grep -q 'startup chain-identity check' &&
+  --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
+runOut=$boundedOut; runStatus=$boundedStatus
+if [ "$runStatus" -ne 0 ] && [ "$runStatus" -ne 124 ] && echo "$runOut" | grep -q 'startup chain-identity check' &&
    echo "$runOut" | grep -q 'chainId=31338, shard conf says 31337'; then
   pass "shard-node run itself refused to start against chainId 31338 (exit $runStatus), before voting"
 else
   fail "shard-node run did not refuse the wrong chain (exit $runStatus): $(echo "$runOut" | tail -3)"
 fi
 kill "$(cat test-nodes/reth-wrongchain/pid)" 2>/dev/null; rm -f test-nodes/reth-wrongchain/pid
+
+# 3d. Same chain id, DIFFERENT genesis (#89 item 2). Chain id does not establish genesis identity:
+# this client is on chainId 31337 exactly as configured, and differs only in its allocation, which
+# is what a genesis generated for a different deployment looks like. The expected value is supplied
+# by the operator, never read from the client under test.
+mkdir -p test-nodes/reth-othergenesis
+python3 - <<'PYGEN'
+import json
+g = json.load(open("test-nodes/evm-genesis-funded.json"))
+# Same chainId, different allocation -> different genesis hash.
+g["alloc"]["0x00000000000000000000000000000000000000aa"] = {"balance": "0x1"}
+json.dump(g, open("test-nodes/other-genesis.json", "w"))
+PYGEN
+reth node --chain test-nodes/other-genesis.json --datadir test-nodes/reth-othergenesis/dd \
+  --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18851 \
+  --http --http.addr 127.0.0.1 --http.port 18845 --http.api eth,net,web3 \
+  --port 30699 --disable-discovery --ipcdisable \
+  >test-nodes/reth-othergenesis/reth.log 2>&1 &
+echo $! >test-nodes/reth-othergenesis/pid
+for _ in $(seq 1 60); do
+  rpc http://127.0.0.1:18845 eth_chainId '[]' 2>/dev/null | grep -q result && break
+  sleep 1
+done
+expectedGenesis=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBlockByNumber '["0x0", false]' | pyget "['result']['hash']")
+otherChainID=$(rpc http://127.0.0.1:18845 eth_chainId '[]' | pyget "['result']")
+otherGenesis=$(rpc http://127.0.0.1:18845 eth_getBlockByNumber '["0x0", false]' | pyget "['result']['hash']")
+info "configured expectation: chainId 31337, genesis $expectedGenesis"
+info "the other client reports: chainId $otherChainID (same), genesis $otherGenesis (different)"
+
+# Establish the PREMISE before asserting the refusal. Without this the negative below passes on a
+# vacuous run: if either client failed to start, or the allocation edit did not actually change the
+# genesis hash, both reads could be empty or equal and the "refusal" would just be the node failing
+# to read a genesis at all. That is a different bug wearing this test's PASS.
+if [ -z "$expectedGenesis" ] || [ -z "$otherGenesis" ]; then
+  fail "3d premise: could not read both genesis hashes (expected='$expectedGenesis' other='$otherGenesis')"
+elif [ "$expectedGenesis" = "$otherGenesis" ]; then
+  fail "3d premise: the two clients report the SAME genesis $expectedGenesis, so this is not a different-genesis case"
+elif [ "$otherChainID" != "0x7a69" ]; then
+  fail "3d premise: the other client reports chainId $otherChainID, not 0x7a69 — this would be caught by the chain-id check, not the genesis check"
+else
+  boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api \
+    --address /ip4/127.0.0.1/tcp/28002 --trust-base test-nodes/trust-base.json \
+    --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
+    --engine-url http://127.0.0.1:18851 --eth-url http://127.0.0.1:18845 \
+    --expected-genesis-hash "$expectedGenesis" \
+    --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
+  genOut=$boundedOut; genStatus=$boundedStatus
+  # Assert the SPECIFIC mismatch diagnostic carrying both hashes, not merely "a genesis check
+  # failed" — an unreadable fixture, an unreachable client or a malformed expected value all
+  # produce a startup-genesis-check error too, and none of them is what this case is about.
+  wantMsg="execution client genesis is ${otherGenesis#0x}, configured expectation is ${expectedGenesis#0x}"
+  if [ "$genStatus" -ne 0 ] && [ "$genStatus" -ne 124 ] &&
+     echo "$genOut" | grep -q -- 'startup genesis check' && echo "$genOut" | grep -qF -- "$wantMsg"; then
+    pass "shard-node run refused a same-chainId/different-genesis client (exit $genStatus), before voting"
+  elif [ "$genStatus" -eq 124 ]; then
+    fail "same chain id with a different genesis was NOT refused: startup ran past its budget"
+  else
+    fail "same chain id with a different genesis was NOT refused with the expected diagnostic (exit $genStatus); wanted '$wantMsg'"
+    echo "--- captured output ---"; echo "$genOut" | tail -15; echo "--- end ---"
+  fi
+
+  # 3e. THE ENDPOINT-PAIRING NEGATIVE (#89 item 3), against real reth. --eth-url addresses the
+  # correct client and --engine-url addresses the other one: same chain id, different genesis. The
+  # Engine connection is the one that would build our blocks, so checking only the plain endpoint
+  # would accept this. It is refused because both identity checks now read the authenticated Engine
+  # connection too — standard eth_chainId/eth_getBlockByNumber on the authrpc port, which the
+  # Engine API's underlying-protocol section requires and this pinned client serves.
+  boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api \
+    --address /ip4/127.0.0.1/tcp/28003 --trust-base test-nodes/trust-base.json \
+    --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
+    --engine-url http://127.0.0.1:18851 --eth-url "http://127.0.0.1:$rethEthBase" \
+    --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
+  pairOut=$boundedOut; pairStatus=$boundedStatus
+  # The "--" before the pattern is load-bearing: this message STARTS with "--eth-url", and without
+  # it grep parses the pattern as an option bundle and never matches. That produced a FAIL against
+  # output that in fact contained the expected diagnostic verbatim.
+  pairMsg="--eth-url genesis is ${expectedGenesis#0x} but --engine-url genesis is ${otherGenesis#0x}"
+  if [ "$pairStatus" -ne 0 ] && [ "$pairStatus" -ne 124 ] &&
+     echo "$pairOut" | grep -q -- 'startup endpoint-pairing check' && echo "$pairOut" | grep -qF -- "$pairMsg"; then
+    pass "shard-node run refused a mispaired --engine-url/--eth-url (exit $pairStatus), with no --expected-genesis-hash configured"
+  elif [ "$pairStatus" -eq 124 ]; then
+    fail "mispaired endpoints were NOT refused: startup ran past its budget"
+  else
+    fail "mispaired endpoints were NOT refused with the expected diagnostic (exit $pairStatus); wanted '$pairMsg'"
+    echo "--- captured output ---"; echo "$pairOut" | tail -15; echo "--- end ---"
+  fi
+
+  # And the doctor preflight for the same mispairing. doctor's "genesis hash" check calls the same
+  # Adapter.CheckEndpointsPaired the node enforces, so the two cannot drift — the reason #89 item 4
+  # de-duplicated the chain-id check applies here too.
+  pairDoctor=$(build/ubft shard-node doctor --home test-nodes/evm1 --executor engine-api \
+    --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
+    --engine-url http://127.0.0.1:18851 --eth-url "http://127.0.0.1:$rethEthBase" \
+    --jwt-secret test-nodes/evm1/jwt.hex 2>&1)
+  pairDoctorStatus=$?
+  if [ "$pairDoctorStatus" -ne 0 ] && echo "$pairDoctor" | grep -qE '^\[FAIL\] genesis hash' &&
+     echo "$pairDoctor" | grep -qF -- "$pairMsg"; then
+    pass "doctor rejected the same mispairing at its genesis-hash check"
+  else
+    fail "doctor did not reject the mispairing (exit $pairDoctorStatus)"
+    echo "--- captured output ---"; echo "$pairDoctor" | tail -15; echo "--- end ---"
+  fi
+
+  # Positive control for doctor: one client behind both URLs must PASS the genesis check and report
+  # the hash it agreed on. Without this the negative above could be passing on any doctor failure.
+  okDoctor=$(build/ubft shard-node doctor --home test-nodes/evm1 --executor engine-api \
+    --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
+    --engine-url "http://127.0.0.1:$rethEngineBase" --eth-url "http://127.0.0.1:$rethEthBase" \
+    --jwt-secret test-nodes/evm1/jwt.hex 2>&1)
+  if echo "$okDoctor" | grep -qE "^\[PASS\] genesis hash[[:space:]]+block 0 hash=$expectedGenesis, agreed by both endpoints"; then
+    pass "doctor passed the genesis-hash check on a correctly paired client, reporting the agreed hash"
+  else
+    fail "doctor did not pass the genesis-hash check on a correctly paired client"
+    echo "--- captured output ---"; echo "$okDoctor" | grep -i genesis; echo "--- end ---"
+  fi
+fi
+kill "$(cat test-nodes/reth-othergenesis/pid)" 2>/dev/null; rm -f test-nodes/reth-othergenesis/pid
 
 echo
 echo "=== 4. start the root chain and the shard validators on --executor engine-api ==="
@@ -301,11 +479,11 @@ if [ -n "$certRoot" ]; then
 fi
 
 for i in $(seq 1 "$validators"); do
-  if grep -qiE 'diverge|equivocat' "test-nodes/evm$i/debug.log" 2>/dev/null; then
+  if grep -qiE 'diverge|equivocat|impossible certificate ordering' "test-nodes/evm$i/debug.log" 2>/dev/null; then
     fail "validator $i logged divergence/equivocation"
   fi
 done
-grep -qiE 'diverge|equivocat' test-nodes/evm*/debug.log 2>/dev/null || pass "no validator logged divergence or equivocation"
+grep -qiE 'diverge|equivocat|impossible certificate ordering' test-nodes/evm*/debug.log 2>/dev/null || pass "no validator logged divergence or equivocation"
 
 echo
 if [ "$failures" -gt 0 ]; then

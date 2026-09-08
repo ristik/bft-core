@@ -28,6 +28,14 @@ const (
 	// must not treat this as a committed block; it starts the next round
 	// fresh, from the TechnicalRecord this UC carries.
 	UCRepeat
+	// UCStale: an authentic certificate this node has already moved past —
+	// an older partition round, or the same partition round with the same
+	// input record from an earlier root round. Routine: a node subscribed
+	// to several root nodes receives the same certified sequence more than
+	// once, and retransmissions do not arrive in issue order. The caller
+	// ignores it: no cursor advances, nothing is reverted, and it is NOT a
+	// fault (issue #93).
+	UCStale
 )
 
 func (c UCClass) String() string {
@@ -38,6 +46,8 @@ func (c UCClass) String() string {
 		return "duplicate"
 	case UCRepeat:
 		return "repeat"
+	case UCStale:
+		return "stale"
 	default:
 		return "unknown"
 	}
@@ -51,6 +61,33 @@ func (c UCClass) String() string {
 // both, and continuing to certify on top of an unverified sequence is
 // unsafe.
 var ErrEquivocatingUC = errors.New("shardnode: equivocating unicity certificate")
+
+// ErrImpossibleUCOrder is returned when two authentic certificates carry a
+// combination of partition and root rounds the root chain cannot produce —
+// a later partition round certified at an earlier-or-equal root round, or an
+// earlier partition round certified at a later-or-equal root round.
+//
+// This is kept distinct from ErrEquivocatingUC on purpose (issue #93). Neither
+// is routine, but they mean different things: equivocation is two conflicting
+// certified statements about the same round, while this is a sequence that no
+// honest root chain could have issued at all. Collapsing them costs an operator
+// the one word that says where to look.
+var ErrImpossibleUCOrder = errors.New("shardnode: impossible certificate ordering")
+
+// sameInputRecord compares the canonical CBOR the signatures actually cover,
+// never a field-by-field scan — see DescribeUCConflict for why that distinction
+// is load-bearing (nil versus empty byte strings).
+func sameInputRecord(a, b *types.UnicityCertificate) (bool, error) {
+	aBytes, err := a.InputRecord.Bytes()
+	if err != nil {
+		return false, fmt.Errorf("encoding previous input record: %w", err)
+	}
+	bBytes, err := b.InputRecord.Bytes()
+	if err != nil {
+		return false, fmt.Errorf("encoding new input record: %w", err)
+	}
+	return bytes.Equal(aBytes, bBytes), nil
+}
 
 // ClassifyUC determines what newUC is relative to prevUC (the last UC this
 // node accepted; nil if this is the first UC received since startup).
@@ -70,18 +107,80 @@ func ClassifyUC(prevUC, newUC *types.UnicityCertificate) (UCClass, error) {
 		return UCValid, nil
 	}
 
+	// A nil InputRecord makes every round getter answer 0, which would send two structurally
+	// broken certificates down the "same partition round" path and into a nil dereference.
+	// Reject it as what it is instead.
+	if prevUC.InputRecord == nil || newUC.InputRecord == nil {
+		return UCValid, fmt.Errorf("%w: input record missing (previous nil=%t, new nil=%t)",
+			ErrImpossibleUCOrder, prevUC.InputRecord == nil, newUC.InputRecord == nil)
+	}
+
+	prevPR, newPR := prevUC.GetRoundNumber(), newUC.GetRoundNumber()
+	prevRR, newRR := prevUC.GetRootRoundNumber(), newUC.GetRootRoundNumber()
+
+	// ORDER MATTERS HERE, and it is the whole of issue #93.
+	//
+	// types.CheckNonEquivocatingCertificates tests "older root round" FIRST and returns a plain
+	// error for it, which this function used to wrap as ErrEquivocatingUC. Two consequences, both
+	// wrong:
+	//
+	//   1. A delayed certificate — root round 67 arriving after 70, from a second root node or a
+	//      retransmission — was reported as equivocation at ERROR. It is routine.
+	//   2. Worse, the verdict depended on ARRIVAL ORDER. Two authentic, genuinely conflicting
+	//      certificates for the same partition round are caught when the newer arrives second, but
+	//      when the older arrives second the root-round test fires first and the conflict is
+	//      reported as (what looked like) the same generic equivocation — never actually compared.
+	//
+	// So the same-partition-round comparison runs BEFORE any ordering test, and ordering is
+	// classified rather than treated as a fault.
+	if newPR == prevPR {
+		same, err := sameInputRecord(prevUC, newUC)
+		if err != nil {
+			return UCValid, err
+		}
+		if !same {
+			// A real conflict, whichever certificate arrived first. This must stay fatal.
+			// Wording deliberately identical to what types.CheckNonEquivocatingCertificates
+			// produced, so operator runbooks and the chaos harness's case-insensitive
+			// "equivocat" match keep working unchanged (#93 keeps that detection intact).
+			return UCValid, fmt.Errorf("%w: equivocating UC, different input records for same partition round %d",
+				ErrEquivocatingUC, newPR)
+		}
+		switch {
+		case newRR == prevRR:
+			return UCDuplicate, nil
+		case newRR < prevRR:
+			// The same certified statement, re-issued earlier and delivered late.
+			return UCStale, nil
+		default:
+			// Same input record, later root round: the root chain re-certified this round
+			// because it timed out waiting for the next one.
+			return UCRepeat, nil
+		}
+	}
+
+	if newPR < prevPR {
+		if newRR >= prevRR {
+			// An EARLIER partition round certified at a LATER-OR-EQUAL root round than one already held.
+			// The root chain does not go backwards, so this is not a late delivery.
+			return UCValid, fmt.Errorf("%w: partition round %d at root round %d, after partition round %d at root round %d",
+				ErrImpossibleUCOrder, newPR, newRR, prevPR, prevRR)
+		}
+		// Routine: an authentic certificate for a round this node has already moved past.
+		return UCStale, nil
+	}
+
+	// newPR > prevPR from here.
+	if newRR <= prevRR {
+		// A LATER partition round certified at an earlier-or-equal root round.
+		return UCValid, fmt.Errorf("%w: partition round %d at root round %d, but partition round %d was already certified at root round %d",
+			ErrImpossibleUCOrder, newPR, newRR, prevPR, prevRR)
+	}
+
+	// A genuine successor. The remaining checks (state-hash continuity, empty/non-empty block
+	// consistency, repeated block hash) are unchanged and still delegated.
 	if err := types.CheckNonEquivocatingCertificates(prevUC, newUC); err != nil {
 		return UCValid, fmt.Errorf("%w: %w", ErrEquivocatingUC, err)
-	}
-	if newUC.IsDuplicate(prevUC) {
-		return UCDuplicate, nil
-	}
-	repeat, err := newUC.IsRepeat(prevUC)
-	if err != nil {
-		return UCValid, fmt.Errorf("checking for repeat UC: %w", err)
-	}
-	if repeat {
-		return UCRepeat, nil
 	}
 	return UCValid, nil
 }

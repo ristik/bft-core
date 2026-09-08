@@ -15,6 +15,8 @@ haven't already.
 - [`trust-base generate` fails: "genesis trust base epoch must be 1"](#trust-base-generate-fails-genesis-trust-base-epoch-must-be-1)
 - [An `engine-api` executor reports SYNCING and never recovers](#an-engine-api-executor-reports-syncing-and-never-recovers)
 - [Engine API startup fails closed](#engine-api-startup-fails-closed)
+- [A restarted validator follows the shard but never submits again](#a-restarted-validator-follows-the-shard-but-never-submits-again)
+- [A validator refuses to build a round: `no-anchor`, `continuity-gap`, `anchor-mismatch`, `head-identity-mismatch`](#a-validator-refuses-to-build-a-round-no-anchor-continuity-gap-anchor-mismatch-head-identity-mismatch)
 
 ---
 
@@ -134,3 +136,62 @@ or whose chain spec schedules a fork past Cancun. See `docs/engine-api-adapter.m
 deliberate rather than a bug to work around — the fix is regenerating `genesis.json` via
 `ubft engine-api genesis` (not hand-editing a fork schedule) and/or checking the reth build's own
 version against what V3 requires, not loosening the check.
+
+## A restarted validator follows the shard but never submits again
+
+Expected, deliberate, and temporary — not a bug to work around. A shard node that resumed from a
+persisted certificate logs, once:
+
+```
+resumed from a persisted certificate: this node follows and reconciles but will NOT vote until the
+monotonic signing record (#105) exists
+```
+
+and its health endpoint reports `"voting": false` with that reason. It still receives and verifies
+certificates, maintains its execution anchor, reconciles its executor to the certified head and
+reports status; it contributes no certification requests.
+
+Why: authenticating a checkpoint proves it genuine, not current. An older checkpoint verifies
+perfectly, and resuming from one rolls this node's observation cursor backwards — so it could
+re-enter a partition round it has already voted in and sign a second, different statement for it.
+Nothing in the file, the certificates or the executor can rule that out; closing it needs a
+monotonic, crash-safe record of the highest round this node has signed in, which is issue #105. See
+`docs/design/f6b-quiet-uc-recovery.md` §6.1 and §8.
+
+What to do: nothing to the node — it will not vote again in this process, and restarting it does not
+help. Plan around it operationally. Shard quorum is `n/2+1`, so keep enough
+validators that your expected number of restarts stays inside that margin; exceeding it stalls
+certification until #105 lands. `scripts/chaos-evm.sh` had to move from 4 validators to 7 for
+exactly this reason.
+
+**Do not delete the checkpoint to get the node voting again.** It works, and it is the one thing
+that must not be done: a node started with no persisted certificate has no non-equivocation
+authority at all, so it will vote in whatever round arrives next — including one it has already
+signed in. That is the exact hazard the gate exists for, reached by a shorter route.
+
+## A validator refuses to build a round: `no-anchor`, `continuity-gap`, `anchor-mismatch`, `head-identity-mismatch`
+
+Four distinct refusals, all meaning "this node will not sign a round it cannot prove it is standing
+in the right place for". Each names its row in `docs/design/f6b-quiet-uc-recovery.md` §4, so the
+message tells you which one you have:
+
+- **`no-anchor`** — this process has not observed a state-changing certificate, so it cannot say
+  which certified block produced the state it is being asked to build on. Ordinary right after a
+  restart (see the entry above). It resolves on its own once a non-quiet certificate arrives,
+  provided the executor can then be reconciled.
+- **`continuity-gap`** — this node DID hold a certified block and then lost the thread of evidence
+  for it: a partition round it never saw, or a certificate at a state that block cannot explain. A
+  state root that still matches proves nothing here, because a missed interval can return to the
+  same state root behind a different block. Unlike `no-anchor` this does not clear by waiting —
+  the node has missed certified history and needs to resync.
+- **`anchor-mismatch`** — this node holds a certified block, but it produced a different state from
+  the one this round builds on. It has missed certified history. It needs to resync; do not try to
+  force the commit.
+- **`head-identity-mismatch`** — the executor's state root matches the certified one, but its head
+  is a *different block*. Two blocks can share a post-state, so this is a real divergence that state
+  comparison alone would not have caught, and it does not clear by waiting: the executor is on a
+  block the root chain did not certify. Resync the execution client against the certified chain.
+
+In all four the node abstains — it does not build, does not submit, and does not apply anything —
+so it is safe to leave running while you investigate. `head_diverged`, `recovery_*` and `identity_*`
+appear as reasons on the IR-divergence metric if you would rather alert on them than grep logs.
