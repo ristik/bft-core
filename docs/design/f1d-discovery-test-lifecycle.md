@@ -99,6 +99,33 @@ The isolation runs matter: the named tests do **not** fail alone even on a delib
 machine, but the package fails. That is what moved the investigation from "slow host" to
 "cross-test lifetime", and it is why raising a budget again would have been the wrong repair.
 
+### 3.1 The timeout, measured after the leak fix
+
+The panic used to abort every long run, so the timeouts had few opportunities to appear. With the
+leaks fixed the package completes, and the question "do the timeouts still happen?" became
+measurable. Two sweeps, both on the merged fix, both with the §2 diagnostics armed:
+
+| Conditions | Iterations | Failures | Diagnostic dumps |
+| --- | --- | --- | --- |
+| 12 cores (`GOMAXPROCS` unset), 6 × `-count=6` | 36 | **0** | 0 |
+| 2 cores (`GOMAXPROCS=2`), 4 × `-count=5` | 20 | **0** | 0 |
+| | **56** | **0** | **0** |
+
+The 2-core sweep is the more interesting half. A GitHub-hosted runner has 2-4 cores, so restricting
+`GOMAXPROCS` emulates the failing environment far more faithfully than loading a 12-core machine —
+and loading the 12-core machine with ten busy cores had already failed to reproduce anything (§3).
+Neither sweep produced a single failure.
+
+**What this does and does not establish.** It does not prove the timeouts are gone; 56 passes cannot
+prove the absence of a timing failure, and #100 says so explicitly. What it does establish is that
+they are **no longer reproducible locally by the two levers that were available** — repetition and
+core count — which is a different and weaker statement than "fixed".
+
+It also means the next occurrence, wherever it happens, will arrive with the routing/connection state
+attached (§2) rather than as "Condition never satisfied". That was the point of the diagnostics: the
+boundary stays open, but it is now decidable on first sight rather than requiring this investigation
+to be repeated.
+
 ## 4. What changed
 
 Test-only. No production lifecycle change, and no assertion weakened:
@@ -116,8 +143,9 @@ exactly as it was.
 
 ## 5. Open
 
-- The timeout cause (§1.2). The evidence to decide it is now collected automatically on the next
-  occurrence.
+- **The timeout cause (§1.2), still unresolved.** 56 post-fix iterations across two core counts
+  produced no failure (§3.1), so it is no longer locally reproducible — which is not the same as
+  fixed. The evidence to decide it is collected automatically on the next occurrence.
 - `newDHT`'s routing-table callback logs through a caller-supplied logger with no lifetime relation
   to the DHT. In production that is harmless; in tests it converts any leaked peer into a package
   panic. Whether the callback should be silenced at `Close`, or the logger's lifetime tied to the
