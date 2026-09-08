@@ -354,7 +354,7 @@ wait_for_progress "$other" "$otherBefore" 45 || true
 sleep 5 # let a few more rounds pass while target is still down, for a real "outage", not a blink
 otherRoundDuringOutage=$(latest_round "$other")
 if [ "$otherRoundDuringOutage" -gt "$otherBefore" ]; then
-  pass "shard progressed well past validator $target's last round ($before -> $otherRoundDuringOutage) while it was down"
+  pass "shard progressed while validator $target was down (validator $other: round $otherBefore -> $otherRoundDuringOutage; the target's own last round was $before)"
 else
   fail "shard made no progress during validator $target's outage (validator $other stuck at round $otherBefore for 50s)"
   dump_stall_evidence "$other"
@@ -362,7 +362,12 @@ fi
 targetMark=$(log_lines "$target")
 start_one_evm_validator "$target" "$validators" "$partition_id" "$rootBoot" fake rpc
 if wait_for_after 'accepted certificate' 30 "test-nodes/evm$target/debug.log" "$targetMark"; then
-  pass "validator $target caught up and resumed certifying after a $((otherRoundDuringOutage - before))-round outage"
+  # The number reported is the one the verdict above was made from — the survivor's own progress
+  # while the target was down — not a subtraction across two validators' counters. Those can run
+  # in either direction relative to each other, and the old form printed "a -1-round outage" on a
+  # run where every assertion passed. An assertion whose reported number comes from a different
+  # measurement than its verdict is the recurring defect in this harness family.
+  pass "validator $target caught up and resumed certifying; the shard advanced from round $otherBefore to $otherRoundDuringOutage while it was down"
 else
   fail "validator $target did not resume after its outage"
 fi
