@@ -77,8 +77,10 @@ func TestRound_IdentityGate(t *testing.T) {
 		require.Equal(t, uint64(4), sub.last(t).InputRecord.RoundNumber)
 	})
 
-	t.Run("row 2: same state, different block — refused, and nothing is signed", func(t *testing.T) {
+	t.Run("row 2: same state, different block — the vote is withheld, the node is not", func(t *testing.T) {
 		ctx, _, exec, round, sub, nodeID, quiet := identityFixture(t)
+		health := shardnode.NewHealth()
+		round.SetHealth(health)
 
 		// The executor reports the certified STATE on a different block. This is the shape a
 		// missed non-quiet interval leaves behind, and the one state-root equality cannot see.
@@ -89,13 +91,14 @@ func TestRound_IdentityGate(t *testing.T) {
 		exec.rewindTo(head)
 
 		before, commits := len(sub.got), len(exec.commitTargets())
-		err = round.HandleCertificate(ctx, quiet, tr(4, 0, nodeID))
-		require.Error(t, err)
-		require.ErrorContains(t, err, "head-identity-mismatch",
-			"the refusal must name its transition-table row, not fail generically")
+		require.NoError(t, round.HandleCertificate(ctx, quiet, tr(4, 0, nodeID)),
+			"abstaining from a vote is not a processing error")
 		require.Len(t, sub.got, before, "a node on an uncertified block must not sign")
+		require.False(t, health.Snapshot().Voting)
+		require.Contains(t, health.Snapshot().NonVotingReason, "head-identity-mismatch",
+			"the refusal names its transition-table row, and an operator can see it without logs")
 		require.Equal(t, commits, len(exec.commitTargets()),
-			"row 2 abstains; it does not apply anything to an executor whose state already matches")
+			"nothing is applied to an executor whose state already matches")
 	})
 
 	t.Run("row 8: no anchor is a voting barrier even when the state agrees", func(t *testing.T) {
@@ -107,11 +110,39 @@ func TestRound_IdentityGate(t *testing.T) {
 		// run of quiet rounds the executor's head is the same whatever round it is (§6.1).
 		restartedSub := &recordingSubmitter{}
 		restarted, restartedID := newTestRound(t, exec, restartedSub)
+		health := shardnode.NewHealth()
+		restarted.SetHealth(health)
 
-		err := restarted.HandleCertificate(ctx, quiet, tr(4, 0, restartedID))
-		require.Error(t, err)
-		require.ErrorContains(t, err, "no-anchor", "nothing observed in this process: row 8")
+		require.NoError(t, restarted.HandleCertificate(ctx, quiet, tr(4, 0, restartedID)))
 		require.Empty(t, restartedSub.got, "no anchor, no vote")
+		require.Contains(t, health.Snapshot().NonVotingReason, "no-anchor", "nothing observed in this process: row 8")
+	})
+
+	t.Run("an abstaining node keeps up, and starts voting again on its own", func(t *testing.T) {
+		// The reason the verdict is applied at the signing gate rather than before block
+		// production. A node that refuses to build never runs Verify, so its execution client
+		// never receives the payload, so it can never commit the block and is permanently behind
+		// — measured on a real devnet. Here the node abstains, stays in lockstep, and the next
+		// state-changing certificate re-arms it with no operator action.
+		ctx, fake, exec, round, sub, nodeID, quiet := identityFixture(t)
+		health := shardnode.NewHealth()
+		round.SetHealth(health)
+
+		head, err := exec.Head(ctx)
+		require.NoError(t, err)
+		head.Hash = make([]byte, 32)
+		head.Hash[0] = 0xff
+		exec.rewindTo(head)
+		require.NoError(t, round.HandleCertificate(ctx, quiet, tr(4, 0, nodeID)))
+		require.False(t, health.Snapshot().Voting)
+
+		// The executor is put back where the shard is, and a state-changing round follows.
+		exec.rewindTo(shardnode.BlockRef{})
+		fake.AddEntries([]byte("the round that re-arms this node"))
+		next := certifyFrom(sub.last(t), 5, 1000)
+		require.NoError(t, round.HandleCertificate(ctx, next, tr(5, 0, nodeID)))
+		require.True(t, health.Snapshot().Voting, "an anchor that matches the head re-arms voting")
+		require.Equal(t, uint64(5), sub.last(t).InputRecord.RoundNumber)
 	})
 
 	t.Run("a gap that returns to the same state root is refused", func(t *testing.T) {
@@ -127,12 +158,13 @@ func TestRound_IdentityGate(t *testing.T) {
 		require.Equal(t, []byte(quiet.InputRecord.Hash), []byte(gapped.InputRecord.Hash),
 			"the fixture's point: the certified state root is unchanged across the gap")
 
+		health := shardnode.NewHealth()
+		round.SetHealth(health)
 		before, commits := len(sub.got), len(exec.commitTargets())
-		err := round.HandleCertificate(ctx, gapped, tr(6, 0, nodeID))
-		require.Error(t, err)
-		require.ErrorContains(t, err, "continuity-gap",
+		require.NoError(t, round.HandleCertificate(ctx, gapped, tr(6, 0, nodeID)))
+		require.Contains(t, health.Snapshot().NonVotingReason, "continuity-gap",
 			"the gap is named as such (row 10) rather than reported as never having had an anchor")
-		require.Len(t, sub.got, before)
+		require.Len(t, sub.got, before, "and nothing is signed while it holds")
 		require.Equal(t, commits, len(exec.commitTargets()))
 	})
 }

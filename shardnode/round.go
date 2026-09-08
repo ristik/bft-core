@@ -81,6 +81,12 @@ type Round struct {
 	// resumed from (node.go's LoadLUC / verifyRestoredLUC / SeedLUC sequence). A Round marked this
 	// way observes, reconciles and stays diagnosable, but never signs — see abstainRestored.
 	restoredFrom *uint64
+	// genesisHead is the executor's head as it was before this node processed any certificate —
+	// the configured genesis block, since nothing can have been committed yet. It is the only
+	// thing §4 row 13's exception is allowed to accept as "the executor is still at genesis", and
+	// capturing it here is what makes that comparison possible without plumbing chain
+	// configuration into the round loop.
+	genesisHead *BlockRef
 	// warnedRestored keeps the abstention out of the log on every subsequent round; it is a
 	// steady state for as long as the process lives, not an event.
 	warnedRestored bool
@@ -232,7 +238,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// If uc is non-quiet it becomes the anchor, so reconcile targets this very block — the
 	// behaviour that always worked. If uc is quiet the anchor stays where the last state-changing
 	// round put it, which is exactly the target that used to be missing.
-	if update := r.continuity.observe(uc); update != anchorUnchanged && r.log != nil {
+	if update := r.continuity.observe(uc, tr.Round); update != anchorUnchanged && r.log != nil {
 		r.log.DebugContext(ctx, "execution anchor "+update.String(),
 			slog.Uint64("partitionRound", uc.GetRoundNumber()),
 			slog.Uint64("continuityThrough", r.continuity.through),
@@ -254,6 +260,12 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("reading executor head: %w", err)
 	}
 	r.health.updateExecutorStatus(true, "")
+	if r.genesisHead == nil {
+		// The first head this process ever read. commitPrevious above cannot have moved it: on the
+		// first certificate there is nothing pending to commit.
+		first := head
+		r.genesisHead = &first
+	}
 	// exp.PreviousHash is nil exactly when the root chain has never
 	// certified anything for this shard yet (its genesis IR.Hash is nil —
 	// see rootchain/consensus/storage/sharding.go NewShardInfo). An
@@ -274,20 +286,20 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// checked against anyway, since the anchor is in-process state a restart loses; holding it to
 	// a check it cannot pass would only stop it building the blocks it still owes the shard as
 	// leader.
+	// P-id, evaluated for EVERY round that could end in a vote (§4). The state root is now equal —
+	// either it always was, or reconcile just made it so — and that is not sufficient on its own:
+	// two different blocks can share a post-state, so a node that missed a non-quiet interval and
+	// came back to the same state root by a different block would otherwise sign on the wrong
+	// block (§3.3.1, row 2). An earlier revision of the transition table had precisely that fast
+	// path and it was removed as unsound.
+	//
+	// The VERDICT is applied further down, immediately before signing, and the round is otherwise
+	// driven to completion. See the gate there for why refusing to build was measurably worse.
+	// A restored process is exempt from the check itself: it may not vote for a different reason
+	// and holds no anchor to be checked against.
+	var identityErr error
 	if len(exp.PreviousHash) > 0 && r.restoredFrom == nil {
-		// P-id, applied to EVERY round that could end in a vote (§4). The state root is now equal
-		// — either it always was, or reconcile just made it so — and that is not sufficient on its
-		// own: two different blocks can share a post-state, so a node that missed a non-quiet
-		// interval and came back to the same state root by a different block would otherwise build
-		// and sign on the wrong block (§3.3.1, row 2). An earlier revision of the transition table
-		// had precisely that fast path and it was removed as unsound.
-		//
-		// It is also where a node with no usable anchor stops. Reaching this with the state root
-		// already matching used to skip every check in this file, so an absent or invalidated
-		// anchor was not a voting barrier at all as long as the states agreed.
-		if err := r.identityCheck(ctx, head, exp); err != nil {
-			return err
-		}
+		identityErr = r.identityCheck(ctx, head, exp)
 	}
 
 	sealHash, err := SealHash(uc)
@@ -348,6 +360,27 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// recovery on every round.
 	r.pending = &pendingSubmission{round: exp.Round, hash: block.Hash, needsCommit: executorChanged, submittedAt: time.Now()}
 
+	// P-id's verdict (§4 rows 2, 8, 10). Withholding the SIGNATURE is the whole of it; the block
+	// above was still built or verified, and commitPrevious will still apply what the shard
+	// certifies, so this node stays with the chain instead of falling off it.
+	//
+	// It used to refuse before produceBlock, which is what the transition table's "abstain: do not
+	// build" says. Measured on a four-validator real-reth devnet, that reading is self-defeating:
+	// a node that does not build also never runs Verify, so its execution client never receives the
+	// payload, so it cannot commit the block, so it is permanently behind — and the row's own
+	// requirement to "stay recoverable" fails. Building keeps the executor in lockstep, and the
+	// next non-quiet certificate then installs an anchor that matches its head, which re-arms
+	// voting on its own. The safety property is untouched: no certification request is signed
+	// while this node cannot prove which certified block it stands on.
+	if identityErr != nil {
+		r.health.updateVoting(false, identityErr.Error())
+		if r.log != nil {
+			r.log.WarnContext(ctx, "abstaining from the vote: this node cannot prove its executor is on the certified block",
+				slog.Uint64("round", exp.Round), slog.String("reason", identityErr.Error()))
+		}
+		return nil
+	}
+
 	// P-sign (§4, §6.1). THE VOTE is what a restored process withholds — not its participation.
 	// It has by now observed the certificate, reconciled, and built or verified this round's block
 	// and disseminated it if it is the leader; what it does not do is sign a certification request
@@ -380,6 +413,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	}
 
 	r.health.updateSubmitted(exp.Round)
+	r.health.updateVoting(true, "")
 
 	if r.log != nil {
 		r.log.InfoContext(ctx, "submitting block certification request",
@@ -388,12 +422,12 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	return r.submitter.Submit(ctx, req)
 }
 
-// identityCheck enforces P-id for a round that is otherwise ready to be built (§4 rows 1, 2, 13).
-// The refusal is an error rather than a silent abstention because it means this node's executor is
-// on a block the root chain did not certify for this state — recoverable only by resync or, once
-// stage 4 lands, by acquiring the certified payload.
+// identityCheck evaluates P-id (§4 rows 1, 2, 8, 10, 13) and returns the named refusal, or nil.
+// It decides nothing on its own: HandleCertificate applies the verdict at the signing gate, so the
+// diagnostic is computed from the head as it was BEFORE this round's block was built while the
+// consequence lands where it belongs.
 func (r *Round) identityCheck(ctx context.Context, head BlockRef, exp Expectation) error {
-	err := r.continuity.checkHeadIdentity(head, Hash(exp.PreviousHash))
+	err := r.continuity.checkHeadIdentity(head, Hash(exp.PreviousHash), r.genesisHead)
 	if err == nil {
 		return nil
 	}
