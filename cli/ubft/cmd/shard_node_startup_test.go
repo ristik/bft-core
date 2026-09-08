@@ -45,9 +45,10 @@ func (f engineFixture) start(t *testing.T) *httptest.Server {
 			Method string `json:"method"`
 			ID     any    `json:"id"`
 		}
-		body := make([]byte, r.ContentLength)
-		_, _ = r.Body.Read(body)
-		_ = json.Unmarshal(body, &req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
 
 		switch req.Method {
 		case "engine_exchangeCapabilities":
