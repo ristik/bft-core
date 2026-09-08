@@ -160,3 +160,41 @@ func (c *Client) NewPayloadV3(ctx context.Context, payload ExecutionPayloadV3, e
 	err := c.call(ctx, "engine_newPayloadV3", []any{payload, expectedBlobVersionedHashes, parentBeaconBlockRoot}, &resp)
 	return resp, err
 }
+
+// ChainID and GetBlockByNumber call the standard eth_* methods on the
+// AUTHENTICATED Engine endpoint, not the plain RPC port.
+//
+// This is not a reth extension and needs no divergence from upstream. The
+// Engine API specification's "underlying protocol" section
+// (execution-apis/src/engine/common.md) requires an execution client to
+// serve a named subset of the eth_* namespace on the same authenticated
+// port as engine_*, and eth_chainId and eth_getBlockByNumber are both in
+// that subset. The pinned client implements them: see EngineEthApi in
+// crates/rpc/rpc-api/src/engine.rs, where `chainId` and `getBlockByNumber`
+// sit alongside the engine_* methods.
+//
+// Why the adapter wants them: --engine-url and --eth-url are configured
+// separately, so nothing structurally prevents an operator from pointing
+// them at two DIFFERENT execution clients. Everything that decides what
+// this node votes for goes over the Engine connection; everything the
+// startup checks previously inspected went over the plain one. Reading the
+// chain id and genesis over the Engine connection is what makes the
+// startup checks describe the client that actually builds our blocks.
+//
+// What agreement between the two connections does and does not establish
+// is documented on Adapter.CheckChainID.
+func (c *Client) ChainID(ctx context.Context) (uint64, error) {
+	var raw json.RawMessage
+	if err := c.call(ctx, "eth_chainId", nil, &raw); err != nil {
+		return 0, err
+	}
+	return decodeChainID(raw)
+}
+
+func (c *Client) GetBlockByNumber(ctx context.Context, tag string) (blockHeaderJSON, error) {
+	var raw json.RawMessage
+	if err := c.call(ctx, "eth_getBlockByNumber", []any{tag, false}, &raw); err != nil {
+		return blockHeaderJSON{}, err
+	}
+	return decodeBlockHeader(raw)
+}

@@ -49,13 +49,25 @@ func NewAdapter(cfg Config, log *slog.Logger) *Adapter {
 }
 
 // CheckCapabilities is the startup check from
-// docs/adr/0001-executor-boundary.md decision 3: capability exchange is
-// necessary but not sufficient on its own (a chain spec that scheduled
-// Prague at genesis would still pass it on a reth build that also speaks
-// V4), so this is paired with T1.2's explicit fork-schedule generation —
-// but the capability check is what actually stops the process from
-// starting against a clearly incompatible execution client. Call it once,
-// before Run.
+// docs/adr/0001-executor-boundary.md decision 3: it refuses to start
+// against a client that does not offer the exact V3 method set this
+// adapter speaks.
+//
+// What it establishes is narrow, and was previously overstated here.
+// engine_exchangeCapabilities reports what a client BUILD supports, not
+// what the loaded chain spec has SCHEDULED. A client whose spec activates
+// Prague at genesis offers the V3 set too, and passes this check. Nor does
+// generating a chain spec with `ubft engine-api genesis` establish
+// anything about the remote client: producing the intended file locally is
+// not evidence that this endpoint loaded it, and two specs with identical
+// genesis state and identical current capabilities can still schedule
+// different future forks.
+//
+// So the fork schedule is an OPERATOR CONSTRAINT of the pinned deployment
+// profile (docs/design/f1-baseline.md §5.8), not a property any startup
+// check verifies. What this check does buy is catching the wrong URL, the
+// wrong JWT and a clearly incompatible client build before the node can
+// vote. Call it once, before Run.
 func (a *Adapter) CheckCapabilities(ctx context.Context) error {
 	missing, err := a.engine.ExchangeCapabilities(ctx)
 	if err != nil {
@@ -69,32 +81,49 @@ func (a *Adapter) CheckCapabilities(ctx context.Context) error {
 
 // CheckChainID verifies the execution client is running the chain this shard is
 // configured for, by comparing eth_chainId against the shard conf's chain_id
-// partition param.
+// partition param — over BOTH configured connections.
 //
-// This is a startup check with real consequences, not a convenience. A node pointed
-// at an execution client for a different chain passes CheckCapabilities happily — the
-// Engine API method set is identical — and then builds and certifies blocks against
-// the wrong state, which the shard cannot detect for it. `ubft shard-node doctor` has
-// checked this since the adapter was written, but doctor is an optional preflight an
-// operator has to remember to run; F1 (#9) requires the node itself to refuse before
-// it can vote. Call it alongside CheckCapabilities, before Run.
+// Why both. --engine-url and --eth-url are separate flags, so nothing structurally
+// stops an operator from pointing them at two different execution clients. The Engine
+// connection is the one that decides what this node votes for: Build, Seal and Commit
+// all go over it. The plain connection only answers header lookups. Checking the plain
+// endpoint alone therefore verifies the chain of a client that does not produce our
+// blocks. Asking the same question on the authenticated Engine port needs no new Engine
+// method and no client divergence — the Engine API specification's "underlying protocol"
+// section requires eth_chainId there, and the pinned client serves it (see Client.ChainID).
 //
-// It does not establish that the genesis *state* matches, only the chain id. Two
-// chain specs can share a chain id and differ elsewhere; comparing genesis hashes
-// across validators remains an operator step (see doctor's "genesis hash" check).
+// Requiring both to equal the configured value also makes them equal to each other, so a
+// mispaired pair of clients on different chains is refused here rather than surviving to
+// produce blocks nobody certifies.
+//
+// Scope, stated because it is easy to overclaim. Agreement on chain id establishes
+// agreement on chain id. It does NOT establish that the two URLs address the same client
+// PROCESS — two clients on the same chain agree on this value and on genesis (see
+// CheckGenesisHash), and only diverge once they build different blocks. It also says
+// nothing about future fork activations. What it does rule out is the mispairing that
+// actually happens in deployment: an endpoint left pointing at another shard's client, or
+// at a client started from a different genesis.
 func (a *Adapter) CheckChainID(ctx context.Context, want uint64) error {
-	got, err := a.eth.ChainID(ctx)
+	engineID, err := a.engine.ChainID(ctx)
 	if err != nil {
-		return fmt.Errorf("engineapi: reading chain id: %w", err)
+		return fmt.Errorf("engineapi: reading chain id over the Engine connection: %w", err)
 	}
-	if got != want {
-		return fmt.Errorf("engineapi: execution client reports chainId=%d, shard conf says %d", got, want)
+	if engineID != want {
+		return fmt.Errorf("engineapi: execution client reports chainId=%d, shard conf says %d", engineID, want)
+	}
+	ethID, err := a.eth.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("engineapi: reading chain id over the plain connection: %w", err)
+	}
+	if ethID != want {
+		return fmt.Errorf("engineapi: --eth-url reports chainId=%d but --engine-url reports %d "+
+			"(shard conf says %d): the two URLs address different execution clients", ethID, engineID, want)
 	}
 	return nil
 }
 
 // CheckGenesisHash verifies the execution client's block 0 is the one this deployment was
-// configured for.
+// configured for — again over both connections, for the reasons on CheckChainID.
 //
 // Chain id does not establish this: two chains can share a chain id and differ in allocation,
 // fork schedule or any other genesis field, and `ubft engine-api genesis` derives the chain spec
@@ -104,24 +133,61 @@ func (a *Adapter) CheckChainID(ctx context.Context, want uint64) error {
 // `want` must be operator-configured. Deriving it from the client under test would compare a value
 // with itself and prove nothing (issue #89 item 2).
 //
-// Scope, stated because it is easy to overclaim: this binds the genesis BLOCK. It does not
-// establish agreement on every future fork activation — a matching genesis hash says nothing about
-// a fork scheduled by timestamp later in the chain's life. The adapter's own fork-schedule
-// guarantee comes from `ubft engine-api genesis` pinning shanghai+cancun at genesis and nothing
-// after, plus the capability check; see docs/adr/0001-executor-boundary.md decision 3.
+// Scope: this binds the genesis BLOCK on both connections. It does not establish same-process
+// identity, and it does not establish agreement on any fork activation after genesis — a matching
+// genesis hash says nothing about a fork scheduled by timestamp later in the chain's life. See
+// CheckCapabilities on why no startup check can supply that guarantee.
 func (a *Adapter) CheckGenesisHash(ctx context.Context, want shardnode.Hash) error {
 	if len(want) == 0 {
 		return fmt.Errorf("engineapi: no expected genesis hash configured")
 	}
-	genesis, err := a.eth.GetBlockByNumber(ctx, "0x0")
+	engineGenesis, err := a.engine.GetBlockByNumber(ctx, "0x0")
 	if err != nil {
-		return fmt.Errorf("engineapi: reading genesis block: %w", err)
+		return fmt.Errorf("engineapi: reading genesis block over the Engine connection: %w", err)
 	}
-	if !bytes.Equal(genesis.Hash[:], want) {
+	if !bytes.Equal(engineGenesis.Hash[:], want) {
 		return fmt.Errorf("engineapi: execution client genesis is %x, configured expectation is %x",
-			genesis.Hash[:], want)
+			engineGenesis.Hash[:], want)
+	}
+	ethGenesis, err := a.eth.GetBlockByNumber(ctx, "0x0")
+	if err != nil {
+		return fmt.Errorf("engineapi: reading genesis block over the plain connection: %w", err)
+	}
+	if !bytes.Equal(ethGenesis.Hash[:], engineGenesis.Hash[:]) {
+		return fmt.Errorf("engineapi: --eth-url genesis is %x but --engine-url genesis is %x: "+
+			"the two URLs address different execution clients", ethGenesis.Hash[:], engineGenesis.Hash[:])
 	}
 	return nil
+}
+
+// CheckEndpointsPaired compares the genesis block the two configured URLs report, without
+// needing an operator-supplied expectation, and returns the hash they agreed on.
+//
+// CheckChainID and CheckGenesisHash already cross-compare, but the first is coarse (two
+// clients on one chain id agree) and the second only runs when --expected-genesis-hash is
+// set. This makes the pairing check unconditional: it costs one extra request and catches
+// the same-chain-id/different-genesis mispairing on a deployment that has not configured an
+// expected hash. It is strictly a pairing check — it asserts nothing about whether that
+// shared genesis is the RIGHT one, which is what CheckGenesisHash is for.
+//
+// It returns the agreed hash so a caller that wants to REPORT the genesis (doctor does) can
+// use the value this check actually validated rather than issuing another request. That
+// matters for the same reason #89 item 4 did: two requests can disagree, and a report built
+// from a second query can describe a state the check never saw.
+func (a *Adapter) CheckEndpointsPaired(ctx context.Context) (shardnode.Hash, error) {
+	engineGenesis, err := a.engine.GetBlockByNumber(ctx, "0x0")
+	if err != nil {
+		return nil, fmt.Errorf("engineapi: reading genesis block over the Engine connection: %w", err)
+	}
+	ethGenesis, err := a.eth.GetBlockByNumber(ctx, "0x0")
+	if err != nil {
+		return nil, fmt.Errorf("engineapi: reading genesis block over the plain connection: %w", err)
+	}
+	if !bytes.Equal(ethGenesis.Hash[:], engineGenesis.Hash[:]) {
+		return nil, fmt.Errorf("engineapi: --eth-url genesis is %x but --engine-url genesis is %x: "+
+			"the two URLs address different execution clients", ethGenesis.Hash[:], engineGenesis.Hash[:])
+	}
+	return shardnode.Hash(engineGenesis.Hash[:]), nil
 }
 
 func (a *Adapter) Head(ctx context.Context) (shardnode.BlockRef, error) {

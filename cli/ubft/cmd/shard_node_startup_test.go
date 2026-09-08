@@ -30,13 +30,22 @@ nothing else. It proves the CLI's refusal behaviour; it does not prove interoper
 other real execution client, which #89 keeps as a separate optional test.
 */
 
-// engineFixture is a scriptable stand-in for an execution client's two startup endpoints.
+// engineFixture is a scriptable stand-in for ONE execution client.
+//
+// A single fixture server answers both engine_* and the eth_* subset, which is what a real client
+// does: the Engine API specification's "underlying protocol" section requires eth_chainId and
+// eth_getBlockByNumber on the authenticated port alongside engine_*, and the pinned client serves
+// them there (EngineEthApi, crates/rpc/rpc-api/src/engine.rs). Pointing --engine-url and --eth-url
+// at the SAME fixture therefore models a correctly paired deployment, and pointing them at TWO
+// fixtures models a mispaired one — which is the whole subject of TestShardNodeRun_EndpointPairing.
 type engineFixture struct {
 	capabilities []string // what engine_exchangeCapabilities offers
-	chainID      string   // hex, e.g. "0x7a69"; empty means eth_chainId returns an error
+	chainID      string   // hex, e.g. "0x7a69"; empty means eth_chainId returns an RPC error
 	capErr       bool     // engine_exchangeCapabilities returns HTTP 500
 	malformed    bool     // engine_exchangeCapabilities returns unparseable JSON
-	genesisHash  string   // 0x-prefixed; empty means eth_getBlockByNumber returns an error
+	genesisHash  string   // 0x-prefixed; empty means eth_getBlockByNumber returns an RPC error
+	nullChainID  bool     // eth_chainId succeeds with a JSON null result
+	nullBlock    bool     // eth_getBlockByNumber succeeds with a JSON null result
 }
 
 func (f engineFixture) start(t *testing.T) *httptest.Server {
@@ -63,6 +72,10 @@ func (f engineFixture) start(t *testing.T) *httptest.Server {
 			}
 			writeResult(w, req.ID, f.capabilities)
 		case "eth_getBlockByNumber":
+			if f.nullBlock {
+				writeResult(w, req.ID, nil)
+				return
+			}
 			if f.genesisHash == "" {
 				writeError(w, req.ID, "block unavailable")
 				return
@@ -74,6 +87,10 @@ func (f engineFixture) start(t *testing.T) *httptest.Server {
 				"timestamp":  "0x0",
 			})
 		case "eth_chainId":
+			if f.nullChainID {
+				writeResult(w, req.ID, nil)
+				return
+			}
 			if f.chainID == "" {
 				writeError(w, req.ID, "chain id unavailable")
 				return
@@ -222,12 +239,20 @@ func TestShardNodeRun_RefusesIncompatibleExecutionClient(t *testing.T) {
 		{"offers nothing at all", engineFixture{capabilities: []string{}, chainID: "0x7a69"}, "missing required capabilities"},
 		{"capability exchange fails", engineFixture{capErr: true, chainID: "0x7a69"}, "checking capabilities"},
 		{"capability response is malformed", engineFixture{malformed: true, chainID: "0x7a69"}, "checking capabilities"},
-		{"chain id unavailable", engineFixture{capabilities: all, chainID: ""}, "reading chain id"},
+		{"chain id unavailable", engineFixture{capabilities: all, chainID: ""}, "reading chain id over the Engine connection"},
+		{"chain id is null", engineFixture{capabilities: all, nullChainID: true}, "client reports no chain id"},
 		{"chain id mismatch", engineFixture{capabilities: all, chainID: "0x7a6a"}, "chainId=31338, shard conf says 31337"},
+		{"genesis is null", engineFixture{capabilities: all, chainID: "0x7a69", nullBlock: true}, "no such block"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Every case must fail for the reason it names, so give each fixture a valid genesis
+			// unless the case is specifically about the genesis read. Without this a capability
+			// case could pass on the unconditional pairing check's error instead of its own.
+			if tc.fixture.genesisHash == "" && !tc.fixture.nullBlock {
+				tc.fixture.genesisHash = expectedGenesis
+			}
 			srv := tc.fixture.start(t)
 			out, code, timedOut := runShardNode(t, bin, home, shardConf, trustBase, srv.URL, srv.URL, 45*time.Second)
 
@@ -265,6 +290,7 @@ func TestShardNodeRun_AcceptsACompatibleFixture(t *testing.T) {
 	srv := engineFixture{
 		capabilities: []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3"},
 		chainID:      "0x7a69",
+		genesisHash:  expectedGenesis,
 	}.start(t)
 
 	out, _, timedOut := runShardNode(t, bin, home, shardConf, trustBase, srv.URL, srv.URL, 20*time.Second)
@@ -275,6 +301,7 @@ func TestShardNodeRun_AcceptsACompatibleFixture(t *testing.T) {
 		"startup must get past its compatibility checks with a compatible fixture:\n%s", out)
 	require.NotContains(t, out, "missing required capabilities", out)
 	require.NotContains(t, out, "chain-identity check", out)
+	require.NotContains(t, out, "endpoint-pairing check", out)
 }
 
 const (
@@ -344,7 +371,7 @@ func TestShardNodeRun_GenesisBinding(t *testing.T) {
 		out, code, _ := runShardNodeWithGenesis(t, bin, home, shardConf, trustBase,
 			srv.URL, srv.URL, expectedGenesis, 45*time.Second)
 		require.NotEqual(t, 0, code, out)
-		require.Contains(t, out, "reading genesis block", out)
+		require.Contains(t, out, "reading genesis block over the Engine connection", out)
 	})
 
 	t.Run("malformed expected value is refused", func(t *testing.T) {
@@ -365,24 +392,26 @@ func TestShardNodeRun_GenesisBinding(t *testing.T) {
 }
 
 /*
-TestShardNodeRun_EngineAndEthMayDisagree documents #89 item 3 as an EVIDENCED GAP rather than a
-claim.
+TestShardNodeRun_EndpointPairing covers #89 item 3: --engine-url and --eth-url are configured
+independently, so nothing structurally stops an operator from pointing them at two different
+execution clients — and the Engine connection is the one that decides what this node votes for
+(Build, Seal and Commit all go over it).
 
-`--engine-url` and `--eth-url` are configured independently. Every startup check this node performs
-reads chain identity from the PLAIN RPC endpoint: chain id and genesis both come from `eth_*`. The
-Engine endpoint is only asked for its capability list, which is identical on every chain.
+An earlier revision of this file asserted the OPPOSITE: that startup accepted a mismatched Engine
+endpoint, on the stated rationale that standard Engine API offers no chain-identity read. That
+rationale was wrong. The Engine API specification's "underlying protocol" section requires an
+execution client to serve eth_chainId and eth_getBlockByNumber on the same authenticated port as
+engine_*, and the pinned client does (EngineEthApi, crates/rpc/rpc-api/src/engine.rs). Closing this
+needs no new Engine method and no divergence from upstream reth, so the gap is now closed and these
+cases assert refusal.
 
-So a correct plain RPC paired with an Engine endpoint belonging to a different client passes every
-startup check. This test asserts that current behaviour, so the gap is recorded and any future fix
-has a failing case to flip.
-
-Standard Engine API offers no chain-identity read to close this — `engine_exchangeCapabilities` and
-`engine_getClientVersionV1` identify software, not chains — and #89 says not to invent an Engine
-method for local deployment wiring. The supported configuration is therefore constrained and
-documented: both URLs must address the same execution client instance. See
-docs/design/f1-baseline.md §5.8.
+What refusal establishes, and what it does not. Matching chain id and genesis across the two
+connections establishes agreement on chain and genesis. It does NOT establish that the two URLs
+address the same client PROCESS — two clients started from the same genesis agree on both values
+until they build different blocks — and it says nothing about future fork activations. That
+narrower limitation is retained deliberately; see docs/design/f1-baseline.md §5.8.
 */
-func TestShardNodeRun_EngineAndEthMayDisagree(t *testing.T) {
+func TestShardNodeRun_EndpointPairing(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the CLI binary")
 	}
@@ -391,16 +420,125 @@ func TestShardNodeRun_EngineAndEthMayDisagree(t *testing.T) {
 	all := []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3"}
 
 	// The plain RPC endpoint the operator intended: right chain, right genesis.
-	correct := engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: expectedGenesis}.start(t)
-	// A different client entirely, which happens to speak the same Engine methods — as every
-	// V3-capable client does — and is on a different chain.
-	wrongEngine := engineFixture{capabilities: all, chainID: "0x7a6a", genesisHash: otherGenesis}.start(t)
+	correct := engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: expectedGenesis}
 
-	out, _, timedOut := runShardNodeWithGenesis(t, bin, home, shardConf, trustBase,
-		wrongEngine.URL, correct.URL, expectedGenesis, 20*time.Second)
+	cases := []struct {
+		name string
+		// engine and eth are separate fixtures — a mispaired deployment — unless samePair is set.
+		engine, eth engineFixture
+		samePair    bool
+		wantGenesis string // passed as --expected-genesis-hash; empty means the flag is omitted
+		refuse      bool
+		expect      string
+	}{
+		{
+			// The case the earlier revision recorded as accepted.
+			name:   "engine endpoint is on a different chain",
+			engine: engineFixture{capabilities: all, chainID: "0x7a6a", genesisHash: otherGenesis},
+			eth:    correct, wantGenesis: expectedGenesis, refuse: true,
+			expect: "chainId=31338, shard conf says 31337",
+		},
+		{
+			// Reverse direction: the Engine endpoint is right and the plain one is wrong. The
+			// diagnostic must name the mispairing rather than blame the shard conf, because the
+			// client that builds our blocks is on the configured chain.
+			name:        "plain endpoint is on a different chain",
+			engine:      correct,
+			eth:         engineFixture{capabilities: all, chainID: "0x7a6a", genesisHash: otherGenesis},
+			wantGenesis: expectedGenesis, refuse: true,
+			expect: "the two URLs address different execution clients",
+		},
+		{
+			// Same chain id, different genesis, and NO operator-configured expectation. This is
+			// what makes the pairing check unconditional worth having: nothing else catches it.
+			name:   "same chain id, different genesis, no expected hash configured",
+			engine: engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: otherGenesis},
+			eth:    correct, wantGenesis: "", refuse: true,
+			expect: "the two URLs address different execution clients",
+		},
+		{
+			// Same, with an expected hash configured. The PAIRING diagnostic must win: the
+			// pairing check runs first precisely so an operator is told the two URLs disagree,
+			// rather than being told one of them mismatches an expected value and left to work
+			// out which. If that ordering is ever changed, this case fails.
+			name:   "same chain id, different genesis, with an expected hash",
+			engine: engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: otherGenesis},
+			eth:    correct, wantGenesis: expectedGenesis, refuse: true,
+			expect: "the two URLs address different execution clients",
+		},
+		{
+			// Correctly PAIRED but wrong: both URLs address one client, whose genesis is not the
+			// configured one. Pairing passes and the genesis check refuses — which is what shows
+			// CheckGenesisHash still does its own job now that a pairing check precedes it.
+			name:     "both URLs agree on the wrong genesis",
+			engine:   engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: otherGenesis},
+			samePair: true, wantGenesis: expectedGenesis, refuse: true,
+			expect: "execution client genesis is",
+		},
+		{
+			// An RPC error on the Engine connection must fail closed, not fall back to the plain
+			// endpoint's answer.
+			name:   "engine connection errors on the genesis read",
+			engine: engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: ""},
+			eth:    correct, wantGenesis: expectedGenesis, refuse: true,
+			expect: "reading genesis block over the Engine connection",
+		},
+		{
+			// Same, for a JSON null result — which decodes to a zero-valued header and would
+			// otherwise be compared as if it were a real answer.
+			name:   "engine connection returns null for the genesis read",
+			engine: engineFixture{capabilities: all, chainID: "0x7a69", nullBlock: true},
+			eth:    correct, wantGenesis: expectedGenesis, refuse: true,
+			expect: "no such block",
+		},
+		{
+			name:   "engine connection returns null for the chain id",
+			engine: engineFixture{capabilities: all, nullChainID: true, genesisHash: expectedGenesis},
+			eth:    correct, wantGenesis: expectedGenesis, refuse: true,
+			expect: "client reports no chain id",
+		},
+		{
+			// POSITIVE CONTROL. Without it the refusals above could all be passing because
+			// startup fails for some unrelated reason: one fixture serving both URLs is a
+			// correctly paired client, and startup must proceed.
+			name: "one client behind both URLs is accepted", engine: correct, samePair: true,
+			wantGenesis: expectedGenesis, refuse: false,
+		},
+		{
+			// Second positive control: correctly paired, and no expected genesis configured. The
+			// unconditional pairing check must not turn into a hard requirement for the flag.
+			name: "one client behind both URLs, no expected hash", engine: correct, samePair: true,
+			wantGenesis: "", refuse: false,
+		},
+	}
 
-	require.True(t, timedOut,
-		"RECORDED GAP: startup accepts a mismatched Engine endpoint. If this now exits, the gap is closed and this test should be inverted:\n%s", out)
-	require.Contains(t, out, "shard node starting",
-		"the node starts despite its Engine endpoint belonging to a different chain:\n%s", out)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			engineSrv := tc.engine.start(t)
+			ethURL := engineSrv.URL
+			if !tc.samePair {
+				ethURL = tc.eth.start(t).URL
+			}
+
+			budget := 45 * time.Second
+			if !tc.refuse {
+				budget = 20 * time.Second
+			}
+			out, code, timedOut := runShardNodeWithGenesis(t, bin, home, shardConf, trustBase,
+				engineSrv.URL, ethURL, tc.wantGenesis, budget)
+
+			if !tc.refuse {
+				require.True(t, timedOut, "a correctly paired client must let startup proceed; it exited:\n%s", out)
+				require.Contains(t, out, "shard node starting", out)
+				require.NotContains(t, out, "endpoint-pairing check", out)
+				return
+			}
+
+			require.False(t, timedOut, "must fail closed promptly, not hang or proceed:\n%s", out)
+			require.NotEqual(t, 0, code, "must exit non-zero:\n%s", out)
+			require.Contains(t, out, tc.expect, "expected the specific diagnostic:\n%s", out)
+			require.NotContains(t, out, "shard node starting", "must refuse before announcing it is running")
+			require.NotContains(t, out, "submitting block certification request")
+		})
+	}
 }

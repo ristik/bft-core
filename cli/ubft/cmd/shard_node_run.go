@@ -320,6 +320,17 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 				"(the wrong execution client, or a genesis generated for a different shard conf): %w", err)
 		}
 
+		// Endpoint pairing, unconditionally. The chain-id check above already refuses two
+		// clients on different chains; this refuses two clients on the SAME chain id that
+		// were started from different genesis states, without requiring the operator to have
+		// configured an expected hash. If --expected-genesis-hash is set, CheckGenesisHash
+		// below subsumes this — it is still run first so the diagnostic an operator sees for
+		// a mispairing is the mispairing, not a genesis mismatch against one of the two.
+		if _, err := adapter.CheckEndpointsPaired(ctx); err != nil {
+			return nil, fmt.Errorf("engine-api executor failed its startup endpoint-pairing check "+
+				"(--engine-url and --eth-url must address the same execution client): %w", err)
+		}
+
 		// Genesis binding, when the operator configured one. Chain id does not establish it: two
 		// chains can share a chain id and differ in allocation or any other genesis field, which
 		// is exactly what a genesis generated for a different deployment looks like. The expected

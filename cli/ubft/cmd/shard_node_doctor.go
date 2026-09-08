@@ -257,12 +257,26 @@ func adapterChecks(flags *shardNodeDoctorFlags) []doctorCheck {
 		{
 			name: "genesis hash",
 			run: func(ctx context.Context) (bool, string, string) {
-				eth := engineapi.NewEthClient(flags.EthURL)
-				block, err := eth.GetBlockByNumber(ctx, "0x0")
+				// The same Adapter.CheckEndpointsPaired that `shard-node run` enforces, so
+				// doctor cannot drift from what the node refuses to start on. It reads block 0
+				// over BOTH configured connections and requires them to agree, which is what
+				// catches --engine-url and --eth-url addressing different execution clients
+				// (issue #89 item 3).
+				a, err := newAdapter()
 				if err != nil {
-					return false, err.Error(), "check --eth-url points at a running execution client"
+					return false, err.Error(), ""
 				}
-				return true, fmt.Sprintf("block 0 hash=0x%x — compare this across every validator by hand; doctor runs per-node and cannot do that comparison itself", block.Hash), ""
+				//
+				// The reported hash is the one the check itself agreed on, not the result of a
+				// third query. Re-reading for the report text is how #89 item 4's bug worked:
+				// two requests can disagree, and a report built from a later one can describe a
+				// state the check never saw.
+				genesis, err := a.CheckEndpointsPaired(ctx)
+				if err != nil {
+					return false, err.Error(),
+						"--engine-url and --eth-url must address the same execution client, and both must be reachable"
+				}
+				return true, fmt.Sprintf("block 0 hash=0x%x, agreed by both endpoints — compare this across every validator by hand; doctor runs per-node and cannot do that comparison itself", genesis), ""
 			},
 		},
 	}
