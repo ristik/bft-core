@@ -24,7 +24,8 @@ func TestAwaitTimeoutForT2(t *testing.T) {
 		t2   time.Duration
 		want time.Duration
 	}{
-		{"the shard's configured T2, halved", 3 * time.Second, 1500 * time.Millisecond},
+		{"test-lane T2, halved", 5 * time.Second, 2500 * time.Millisecond},
+		{"historical 3s reproduction", 3 * time.Second, 1500 * time.Millisecond},
 		{"a long T2 is capped at the default rather than scaling with it", time.Minute, DefaultAwaitTimeout},
 		{"a very short T2 is floored so a punctual leader is not abstained from", 100 * time.Millisecond, MinAwaitTimeout},
 		{"an unset T2 falls back to the default", 0, DefaultAwaitTimeout},

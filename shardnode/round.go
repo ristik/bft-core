@@ -73,8 +73,12 @@ const DefaultAwaitTimeout = 5 * time.Second
 const MinAwaitTimeout = 200 * time.Millisecond
 
 /*
-AwaitTimeoutForT2 derives a follower's await budget from the shard's own T2 timeout, and it must be
-SHORTER than T2.
+AwaitTimeoutForT2 derives a follower's missing-leader await budget from the shard's own T2 timeout.
+T2 is the inactivity timeout before the root chain instructs the shard to retry, NOT the normal
+root or shard round interval. Test lanes use at least 5 seconds. Production should choose T2 with
+a substantial margin over both normal round durations (approximately 10x as a starting sizing
+rule, to be validated against execution and network latency). This helper does not choose T2.
+For valid shard configurations the returned wait is SHORTER than T2.
 
 Why, measured rather than argued. A follower waits for the leader's block SYNCHRONOUSLY: while it
 waits it processes nothing else, because HandleCertificate is called from BFTClient's single message
