@@ -238,7 +238,7 @@ source helper.sh
 
 init_root_nodes 3
 init_evm_validators "$validators"
-generate_evm_shard_conf "$validators" "$partition_id" 31337 3000 exec
+generate_evm_shard_conf "$validators" "$partition_id" 31337 5000 exec
 generate_log_configuration "test-nodes/*/"
 
 echo -n "starting root nodes..." && start_root_nodes
@@ -346,7 +346,7 @@ otherBefore=$(latest_round "$other")
 #
 # 15s was too tight for what this scenario deliberately provokes. wait_for_progress's own comment
 # says a round assigned to a currently-dead leader recovers only once the root chain's T2 timeout
-# reissues it to the next leader in rotation, "a few multiples of T2" — and T2 here is 3000ms
+# reissues it to the next leader in rotation, "a few multiples of T2" — and T2 here is 5000ms
 # (see generate_evm_shard_conf above), so 15s is five of them, with no allowance for a loaded
 # runner. The wait is now 45s and exists only to avoid sleeping the full budget when the shard
 # recovers quickly.
