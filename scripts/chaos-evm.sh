@@ -393,7 +393,7 @@ for i in $(seq 1 "$validators"); do
   # NOT `|| echo 0`: grep -c prints "0" AND exits 1 when nothing matches, so the fallback appends a
   # second zero and the arithmetic below fails with a syntax error. Let grep's own "0" stand, and
   # only substitute when the file is missing entirely (grep prints nothing).
-  n=$(grep -c 'stale UC, ignoring' "test-nodes/evm$i/debug.log" 2>/dev/null)
+  n=$(grep -c 'stale UC, ignoring' "test-nodes/evm$i/debug.log" 2>/dev/null || true)
   [ -n "$n" ] || n=0
   staleTotal=$((staleTotal + n))
 done

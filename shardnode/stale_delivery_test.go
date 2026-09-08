@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
@@ -119,7 +121,7 @@ in isolation.
 
 The unit tests decide what ClassifyUC returns and what the handler does with one certificate. This
 one runs an actual round sequence — the real BFTClient dispatch entry point, the real Round driver
-and a real Executor — certifies several rounds, injects an authentic certificate the node has already
+and an in-memory test Executor — certifies several rounds, injects an authentic certificate the node has already
 moved past, and asserts the shard carries on exactly as if it had never arrived.
 
 Why not the chaos harness: a stale delivery cannot be forced there. It happens when a node subscribed
@@ -169,7 +171,30 @@ func TestStaleDeliveryDuringRoundSequence(t *testing.T) {
 	nodeID := "stale-delivery-node"
 
 	logs := &capturingHandler{}
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	metrics, err := NewMetrics(provider.Meter("stale-delivery-test"))
+	require.NoError(t, err)
+	staleCount := func() int64 {
+		var data metricdata.ResourceMetrics
+		require.NoError(t, reader.Collect(ctx, &data))
+		var total int64
+		for _, scope := range data.ScopeMetrics {
+			for _, m := range scope.Metrics {
+				if m.Name == "shardnode.uc.stale" {
+					sum, ok := m.Data.(metricdata.Sum[int64])
+					require.True(t, ok)
+					for _, point := range sum.DataPoints {
+						total += point.Value
+					}
+				}
+			}
+		}
+		return total
+	}
 	c := &BFTClient{
+		metrics:        metrics,
 		partitionID:    authPartitionID,
 		shardID:        types.ShardID{},
 		nodeID:         nodeID,
@@ -199,7 +224,7 @@ func TestStaleDeliveryDuringRoundSequence(t *testing.T) {
 		}
 	}
 
-	// --- genesis and three certified rounds, two of them with real entries ---
+	// --- genesis and three certified rounds, including a non-quiet block ---
 	genesisTR := technicalFor(1)
 	genesisTRHash, err := genesisTR.Hash()
 	require.NoError(t, err)
@@ -235,12 +260,14 @@ func TestStaleDeliveryDuringRoundSequence(t *testing.T) {
 	require.NotEmpty(t, beforeHead.Hash,
 		"the sequence must contain a real committed block, or 'the executor is unchanged' proves nothing")
 
+	require.EqualValues(t, 0, staleCount())
 	t.Run("a delayed certificate changes nothing", func(t *testing.T) {
 		// The first round's certificate, re-delivered after the node has moved two rounds past
 		// it — exactly what a second root node or a retransmission produces.
 		// handleMessage is the real dispatch entry point Run feeds from the network, so this
 		// exercises type dispatch and error reporting, not just the response handler.
 		c.handleMessage(ctx, responses[0])
+		require.EqualValues(t, 1, staleCount(), "the stale metric must record the injected delivery")
 
 		require.Same(t, beforeLUC, c.luc, "the observation cursor must not move")
 		head, err := fake.Head(ctx)
@@ -265,6 +292,14 @@ func TestStaleDeliveryDuringRoundSequence(t *testing.T) {
 		fake.addEntries([]byte("another real block, after the stale delivery"))
 		req := sub.last(t)
 		require.NoError(t, c.handleCertificationResponse(ctx, certify(req, rootRound)))
+		// The response above certifies the already-built quiet round and builds the next
+		// non-quiet block. Certify that block too, so recovery means executed progress.
+		require.NoError(t, c.handleCertificationResponse(ctx, certify(sub.last(t), rootRound+1)))
+		afterHead, err := fake.Head(ctx)
+		require.NoError(t, err)
+		require.NotEqual(t, beforeHead.Hash, afterHead.Hash)
+		require.Greater(t, afterHead.Number, beforeHead.Number)
+		require.Equal(t, beforeSubmissions+2, sub.count())
 		require.Greater(t, c.luc.GetRoundNumber(), beforeLUC.GetRoundNumber(),
 			"the sequence continued past the round it was at when the stale certificate arrived")
 		require.Empty(t, logs.atLevel(slog.LevelError))
