@@ -443,7 +443,9 @@ func TestRound_QuietUCRecoversViaLiveAnchor(t *testing.T) {
 		require.Error(t, err)
 		require.Equal(t, before, len(exec.commitTargets()),
 			"a mismatched anchor must not be applied: no Commit may be attempted")
-		require.ErrorContains(t, err, "no-anchor",
-			"continuity broke, so there is no anchor to offer — named, not generic")
+		require.ErrorContains(t, err, "continuity-gap",
+			"continuity broke, so there is no anchor to offer — and the name distinguishes that "+
+				"(row 10, this node has missed certified history) from never having had one "+
+				"(row 8, ordinary after a restart)")
 	})
 }

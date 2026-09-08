@@ -140,7 +140,10 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
       - name: kill-leader / kill-follower / cold-restart / corrupted-store scenarios
-        run: ./scripts/chaos-evm.sh -v 4 -k
+        # 7, not 4: a restarted validator is non-voting until #105 (see VALIDATOR COUNT in
+        # scripts/chaos-evm.sh), so the three restart scenarios need a shard that can lose three
+        # voters and keep quorum.
+        run: ./scripts/chaos-evm.sh -v 7 -k
 
       # The intermittent leader-kill stall and the same-partition-round certificate conflict
       # cannot be settled from the truncated snippets in the step log (F1 #9, review 5132493933).

@@ -353,6 +353,12 @@ Forbidden in every row: `Commit(nil)`, substituting a state root for a block has
 validation, clearing stored authority to proceed, and **accepting a continuity claim that was not
 re-derived from retained certificates** (§3.3).
 
+**Row 2 has no recovery path in stage 3, and that is not an oversight.** A node whose executor sits
+on a different block at the certified state has diverged in a way no target this design can name will
+fix: it is not behind, so there is nothing to commit forward to, and stage 4's payload acquisition
+does not apply either. It abstains, says so, and needs a resync. What matters here is that it stops
+rather than signs.
+
 **Unavailable is not invalid.** `SYNCING` means the executor does not have the payload — expected
 after an execution-client restart (§1.1) and retryable. `INVALID` means it rejected the payload — a
 fault. They must never share a diagnostic, and an `unavailable` result must **not** erase the anchor:
@@ -636,35 +642,95 @@ result rather than a failure of stage 3.
 Stage 3 (first PR) implements the **live** half of this design and stops deliberately short of the
 persisted half.
 
-**Implemented** — `shardnode/anchor.go`, `Round.reconcile`:
+**Implemented** — `shardnode/anchor.go`, `Round.HandleCertificate`, `Round.reconcile`,
+`BFTClient.handleCertificationResponse`:
 
 - the execution anchor and the verified quiet interval, maintained in process across quiet and
   repeat certificates (§3.3.2's "running — deciding");
 - `reconcile` taking its recovery target from that anchor instead of the certificate in hand, which
   is the #92 defect: `Commit(nil)` is now unrepresentable, not merely avoided;
+- **P-id enforced on every round that could end in a vote**, not only on the recovery path.
+  `HandleCertificate` used to consult this file only when the state roots differed, so a round whose
+  state root already matched was built and signed with no anchor, identity or continuity check at
+  all — the unsound fast path this table removed, still present in the code. Rows 1, 2, 8 and 13 are
+  now decided at the same state root, by what the node can prove about the BLOCK
+  (`continuityState.checkHeadIdentity`, `shardnode/round_identity_gate_test.go`);
+- row 13's genesis exception, narrowed and made structural. It is needed for a reason the fake never
+  showed: "genesis is always non-quiet" makes the shard's first certified round carry a block hash
+  even when nothing moved, while `round.go` does not commit a round whose state did not move — so
+  against reth the certificate names a block the client built and discarded, and the executor sits
+  at genesis. For that one anchor the comparison is therefore made against the executor's own
+  genesis block, **by block number 0 at the certified state root**, not by block hash and not by
+  state equality alone. The first state-changing round replaces the anchor and every comparison
+  after it is by block hash. Measured on `scripts/reth-paired-devnet.sh`, which is where a
+  hash-only check would have stopped every validator from round 2 onward on an idle shard;
 - both P-id post-conditions after a `VALID` commit — the executor's head must match the certified
   **block hash** *and* the certified state root;
+- **P-sign enforced for restored processes** (below);
+- **observation ordered before application.** The certificate is folded into the continuity state
+  before the fallible `commitPrevious`, so a transient `SYNCING` no longer discards the certified
+  block hash that the retry needs. `anchor.round > appliedRound` is §5.1's normal retryable state,
+  and it is now reachable rather than lost;
+- **applied kept separate from observed at the delivery layer** (§5 point 5). A certificate whose
+  delivery to the driver failed is recorded as unapplied, so its retransmission is a retry instead
+  of a suppressed duplicate; the mark is cleared on success, so a completed round is never driven —
+  or signed — twice;
 - `unavailable` (retryable, anchor retained) kept distinct from `invalid` (a fault);
-- the refusal rows named individually — `no-anchor`, `anchor-mismatch` — so a log line maps to a
-  transition-table row.
+- the refusal rows named individually — `no-anchor`, `continuity-gap`, `anchor-mismatch`,
+  `head-identity-mismatch` — so a log line maps to a transition-table row. `no-anchor` (row 8) and
+  `continuity-gap` (row 10) are kept apart on the live path too, because they are different operator
+  situations: never having observed a certified block resolves itself on the next non-quiet
+  certificate, while having lost the thread of evidence for one means this node has missed certified
+  history and needs to resync.
 
-**Not implemented, and the two belong together:**
+**Not implemented:** persisting the anchor and its evidence (§3.3.4, §6), and stage 4's
+missing-payload acquisition. Both stay out of this PR.
 
-- **Persisting the anchor and its evidence** (§3.3.4, §6). Not in this PR.
-- **P-sign enforcement** (§6.1, #105). Also not in this PR — and this is the reason the two are
-  paired rather than separable.
+### P-sign, and the claim that was wrong
 
-A restored anchor is precisely what P-sign exists to gate: an older checkpoint replays perfectly, so
-resuming from one can re-enter rounds this node has already voted in. Because nothing is restored
-today, there is no restored anchor to gate, and the gate is trivially satisfied. **The moment
-persistence lands, the gate must land with it**; `TestAnchorIsNotRestoredFromDisk` exists so that
-"we persisted the anchor" cannot quietly become "restored nodes may vote". It should be replaced by
-the P-sign gate, not deleted.
+An earlier revision of this section said that because nothing is restored today there is no restored
+anchor to gate, so "the gate is trivially satisfied". **That was false, and the code matched it.**
+`Node.New` already loads a persisted certificate, authenticates it, calls `SeedLUC` — and then built
+an unrestricted `Round`. A restarted node therefore resumed voting from its next certificate, on the
+strength of a checkpoint that verification proves *genuine* but never proves *current*: an entire
+older checkpoint replays perfectly (§6.1), restoring one rolls the observation cursor backwards, and
+that cursor is what stops this node acting twice in a round. The absence of a restored *anchor* was
+never the barrier — nothing consulted the anchor before signing (see P-id above), and one non-quiet
+certificate installs one a round later anyway.
 
-The consequence for restarts is visible and intended: a node that restarts mid-interval has no
-anchor, so a quiet certificate makes it abstain with `no-anchor` rather than resuming. That is the
-fail-closed intermediate result stage 3 is allowed to deliver — a refusal with a named reason, in
-place of a `Commit(nil)` that could not have worked either.
+And the gap is not hypothetical. The checkpoint is written by `persistingDriver` *after*
+`HandleCertificate` returns, and `HandleCertificate` has by then already submitted for the next
+round. A stored certificate for round N therefore always coexists with a vote cast in round N+1:
+`luc.RoundNumber` is behind the highest signed round **by construction**, not by accident. Restart,
+receive the repeat certificate for N+1 that the root chain sends on timeout, and the node is back in
+a round it has already voted in — free to submit a different input record for it, from a different
+executor state or a different leader's block. §6.1's "an older checkpoint replays perfectly" is the
+general statement; this is the ordinary case of it that happens on every clean restart.
+
+So P-sign is now enforced, in the only way available before #105 exists: `Node.New` marks a resumed
+process **non-voting for its lifetime** (`Round.MarkRestored`), and `resumeFrom` performs that and
+`SeedLUC` together so restoring the cursor without the gate is not expressible in the file. Such a
+node observes every certificate, maintains its continuity state, reconciles its executor and reports
+its status — a warm follower, not a dead one — and its refusal to vote is visible in `Health`
+(`voting: false` with a reason) rather than only in logs.
+
+The cost is deliberate and larger than the previous revision implied: **a restarted validator
+contributes nothing to quorum until it is restarted again with #105's contract in place.** A shard
+that restarts more than `f` validators has a liveness problem until then. That is the fail-closed
+side of a safety question the design cannot answer today, and it is the side this document requires;
+the alternative is a node that may sign twice in one round, which no operator can detect.
+
+`TestRestoredNodeIsNonVoting` drives the real sequence — `LoadLUC`, `verifyRestoredLUC`,
+`resumeFrom`, then certificates through the real `Round` — and asserts both halves: nothing is
+signed, and a subsequent non-quiet certificate does not re-authorize. It replaces
+`TestAnchorIsNotRestoredFromDisk`'s signing half, which asserted only that two zero-valued `Round`
+structs had no anchor and so passed while the node signed. When #105 lands, both tests must be
+**replaced** by assertions that a restored node votes exactly when the monotonic record permits —
+not deleted.
+
+The remaining visible consequence is unchanged and still intended: a node that restarts mid-interval
+has no anchor, so a quiet certificate makes it abstain with `no-anchor` rather than resuming — a
+refusal with a named reason, in place of a `Commit(nil)` that could not have worked either.
 
 ## 9. Scope held open
 

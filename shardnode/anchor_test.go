@@ -71,8 +71,10 @@ func TestContinuityState(t *testing.T) {
 		require.Nil(t, c.anchor)
 
 		_, err := c.recoveryTarget(s0)
-		require.ErrorContains(t, err, "no-anchor",
-			"a coincidentally matching state root must not resurrect the anchor")
+		require.ErrorContains(t, err, "continuity-gap",
+			"a coincidentally matching state root must not resurrect the anchor — and the refusal "+
+				"says the evidence chain BROKE (row 10), not that none was ever established (row 8): "+
+				"the first needs a resync, the second resolves itself on the next non-quiet certificate")
 	})
 
 	t.Run("a quiet certificate at a different state invalidates", func(t *testing.T) {
@@ -111,7 +113,7 @@ func TestContinuityState(t *testing.T) {
 	t.Run("recoveryTarget names the row that refused", func(t *testing.T) {
 		var c continuityState
 		_, err := c.recoveryTarget(s0)
-		require.ErrorContains(t, err, "no-anchor")
+		require.ErrorContains(t, err, "no-anchor", "nothing observed yet: row 8")
 
 		c.observe(nonQuietIR(10, nil, s0, blockA))
 		_, err = c.recoveryTarget(s1)
@@ -145,28 +147,88 @@ func TestContinuityState(t *testing.T) {
 	})
 }
 
-// TestAnchorIsNotRestoredFromDisk pins the boundary this PR deliberately stops at.
+/*
+TestCheckHeadIdentity is P-id (§4) at the level it is decided: the executor's head against the
+certified block, with the state root already equal in every case.
+
+Every case here has head.StateRoot == the certified state. That is the point — state equality was
+the condition the round loop used to treat as "already reconciled, go ahead and sign", and it
+decides nothing on its own, because two blocks can share a post-state.
+*/
+func TestCheckHeadIdentity(t *testing.T) {
+	s0 := []byte{0x51}
+	blockA := []byte{0x0a}
+	blockB := []byte{0x0b}
+
+	t.Run("row 1: the head is the certified block", func(t *testing.T) {
+		var c continuityState
+		c.observe(nonQuietIR(10, s0, s0, blockA))
+		require.NoError(t, c.checkHeadIdentity(BlockRef{Number: 7, Hash: blockA, StateRoot: s0}, s0))
+	})
+
+	t.Run("row 2: same state, different block", func(t *testing.T) {
+		var c continuityState
+		c.observe(nonQuietIR(10, s0, s0, blockA))
+		err := c.checkHeadIdentity(BlockRef{Number: 7, Hash: blockB, StateRoot: s0}, s0)
+		require.ErrorContains(t, err, "head-identity-mismatch")
+	})
+
+	t.Run("row 8: no anchor is refused even at the certified state", func(t *testing.T) {
+		var c continuityState
+		require.ErrorContains(t, c.checkHeadIdentity(BlockRef{Number: 7, Hash: blockA, StateRoot: s0}, s0), "no-anchor")
+	})
+
+	t.Run("row 13: the genesis round, and only at block 0", func(t *testing.T) {
+		// The shard's first certified round (nil PreviousHash) may name a block the executor
+		// never made canonical — round.go does not commit a round whose state did not move, and
+		// "genesis is always non-quiet" means such a round still carries a block hash. Against
+		// reth that is every idle shard. So the comparison degenerates to the executor's own
+		// genesis block.
+		var c continuityState
+		c.observe(nonQuietIR(1, nil, s0, blockA))
+		require.True(t, c.anchor.fromGenesisRound)
+		require.NoError(t, c.checkHeadIdentity(BlockRef{Number: 0, Hash: blockB, StateRoot: s0}, s0),
+			"the executor is at its genesis block, at the certified state")
+
+		require.ErrorContains(t,
+			c.checkHeadIdentity(BlockRef{Number: 3, Hash: blockB, StateRoot: s0}, s0),
+			"head-identity-mismatch",
+			"and it is not a licence to accept any head whose state root happens to match")
+	})
+
+	t.Run("the exception does not outlive the genesis anchor", func(t *testing.T) {
+		var c continuityState
+		c.observe(nonQuietIR(1, nil, s0, blockA))
+		c.observe(nonQuietIR(2, s0, s0, blockB)) // the first state-changing round replaces it
+		require.False(t, c.anchor.fromGenesisRound)
+		require.ErrorContains(t,
+			c.checkHeadIdentity(BlockRef{Number: 0, Hash: nil, StateRoot: s0}, s0),
+			"head-identity-mismatch")
+	})
+}
+
+// TestAnchorIsNotRestoredFromDisk pins the persistence half of the boundary this PR stops at: no
+// path installs an execution anchor from disk. The SIGNING half — that restoring a certificate is
+// not authorization to vote — is no longer left to follow from the anchor's absence; it is enforced
+// and tested at the real restore-to-signing boundary in TestRestoredNodeIsNonVoting.
 //
-// A restored checkpoint proves historical continuity, NOT authorization to sign (#105, design
-// §6.1): an older checkpoint replays perfectly, and resuming from one can re-enter rounds this node
-// has already voted in. So the anchor is in-process only, and there is no path that loads one.
-//
-// When persistence lands, this test must be replaced by the P-sign gate — not simply deleted. It is
-// here so that "we persisted the anchor" cannot silently become "restored nodes may vote".
+// Both must be replaced together, not deleted, when persistence and #105's monotonic signing record
+// land: the restored anchor is precisely what that record exists to gate.
 func TestAnchorIsNotRestoredFromDisk(t *testing.T) {
 	r := &Round{}
-	require.Nil(t, r.continuity.anchor,
-		"a freshly constructed Round has no anchor")
+	require.Nil(t, r.continuity.anchor, "a freshly constructed Round has no anchor")
 
-	// SeedLUC is the only restore entry point on the client side, and it seeds the certificate
-	// cursor — never an execution anchor.
+	// SeedLUC seeds the certificate cursor, and only that.
 	c := &BFTClient{}
 	c.SeedLUC(nonQuietIR(10, nil, []byte{0x51}, []byte{0x0a}))
 	require.NotNil(t, c.luc, "the certificate cursor is restored")
 
 	r2 := &Round{}
+	resumeFrom(c, r2, nonQuietIR(10, nil, []byte{0x51}, []byte{0x0a}))
 	require.Nil(t, r2.continuity.anchor,
-		"restoring a certificate must not install an execution anchor: until #105 supplies the "+
-			"monotonic signing contract, a restored node may observe and reconcile but not vote on "+
-			"the strength of retained evidence")
+		"restoring a certificate must not install an execution anchor")
+	require.NotNil(t, r2.restoredFrom,
+		"and it must mark the process non-voting: until #105 supplies the monotonic signing "+
+			"contract, a restored node may observe and reconcile but not vote on the strength of "+
+			"retained evidence")
 }

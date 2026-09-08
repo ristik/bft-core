@@ -68,10 +68,22 @@ type Round struct {
 	//
 	// In-process only. It is deliberately NOT restored from the checkpoint: an older checkpoint
 	// replays perfectly (§6.1), so a restored anchor may only authorize a vote once the
-	// independent monotonic signing contract (P-sign, #105) exists. Persisting it and gating on
-	// P-sign belong together, in a later PR; retaining it across quiet rounds WITHIN a process
-	// is what this one delivers.
+	// independent monotonic signing contract (#105) exists. Persisting it is a later PR;
+	// retaining it across quiet rounds WITHIN a process is what this one delivers.
+	//
+	// Note that the anchor is NOT the P-sign gate and never was: it says which block the executor
+	// must be at, not whether this process is allowed to vote at all. That gate is restoredFrom
+	// below, and it is enforced separately — an anchor arrives from the next non-quiet certificate
+	// whether the process restarted or not.
 	continuity continuityState
+
+	// restoredFrom, when non-nil, is the partition round of the certificate this process was
+	// resumed from (node.go's LoadLUC / verifyRestoredLUC / SeedLUC sequence). A Round marked this
+	// way observes, reconciles and stays diagnosable, but never signs — see abstainRestored.
+	restoredFrom *uint64
+	// warnedRestored keeps the abstention out of the log on every subsequent round; it is a
+	// steady state for as long as the process lives, not an event.
+	warnedRestored bool
 }
 
 // DefaultAwaitTimeout is used when NewRound is not given a more specific
@@ -134,29 +146,101 @@ func (r *Round) SetHealth(h *Health) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.health = h
+	if r.restoredFrom != nil {
+		// Report it immediately rather than on the first certificate: a node that is up but not
+		// yet receiving UCs must not read as a voting validator in the meantime.
+		r.health.updateVoting(false, nonVotingRestored)
+	}
 }
 
-// HandleCertificate is the framework's single entry point, called once for
-// every UC classified as UCValid or UCRepeat (UCDuplicate is filtered out
-// before reaching here — see BFTClient). It commits the previous round's
-// result, then drives the round tr describes.
+// nonVotingRestored is the health reason for the P-sign gate — see MarkRestored.
+const nonVotingRestored = "restored from a persisted certificate: non-voting until the monotonic signing contract (#105) exists"
+
+/*
+MarkRestored records that this process resumed from a persisted certificate for partition round
+`round`, which makes it NON-VOTING for its whole lifetime. Call before Run; node.go calls it exactly
+when the checkpoint produced a certificate that authenticated (see New).
+
+Why a node that just proved its checkpoint genuine may not vote (design §6.1, #105). Verification
+establishes that the file is authentic, not that it is CURRENT. An entire older checkpoint replays
+perfectly: every signature, context check and consecutive-round check holds for a file whose latest
+certificate is round 12 while the shard has reached round 13. Restoring it rolls the observation
+cursor backwards, and that cursor is what stops this node acting twice in one round — so a node
+resumed from a stale file can re-enter partition rounds it has already voted in and sign again.
+That is a safety problem, not a liveness one, and it is not detectable from the file, from the
+certificates, or from the executor (after a run of quiet rounds the executor's head is the same
+whatever the current round is).
+
+This is not a hypothetical staleness either: the checkpoint is written by persistingDriver AFTER
+HandleCertificate returns, and HandleCertificate has by then already SUBMITTED for the next round.
+So a saved certificate for round N always coexists with a vote this node cast in round N+1, and
+`luc.RoundNumber` is by construction behind the highest round it has signed in. A restart followed
+by a repeat certificate for N+1 — which is exactly what the root chain sends when it times out
+waiting — puts the node back in a round it has already voted in, free to submit a different input
+record for it.
+
+Closing it needs a monotonic, crash-safe, non-rollback record of the highest round this node has
+SIGNED in, held independently of the replayable evidence file — #105's subject, not this PR's. Until
+that exists the fail-closed side is the only sound one, and this is that side, made explicit rather
+than left to be implied by the absence of an anchor: an anchor gate alone lets one non-quiet
+certificate re-authorize a restored process a round later, which is the same hazard with a delay.
+
+What it withholds is exactly the vote. It still observes every certificate, keeps its continuity
+state, reconciles and commits so its executor stays with the shard, and — this matters for liveness —
+still builds and disseminates the block in the rounds it leads, because publishing a block is not
+signing a statement about one. See the gate in HandleCertificate for what happened when it withheld
+that too.
+
+The cost is real and deliberate: a restarted validator contributes no certification requests until
+it is restarted again with #105's contract in place, so a shard that restarts more than its quorum
+margin stalls.
+*/
+func (r *Round) MarkRestored(round uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.restoredFrom = &round
+	// Reported as soon as it is known, in whichever order the two are wired: a node that is up
+	// but not yet receiving certificates must not read as a voting validator in the meantime.
+	r.health.updateVoting(false, nonVotingRestored)
+}
+
+// HandleCertificate is the framework's single entry point, called for every
+// UC classified as UCValid or UCRepeat — and, once, for a UCDuplicate of a
+// certificate whose previous delivery failed, which is how a failed apply is
+// retried (see BFTClient.handleCertificationResponse). It observes the
+// certificate, commits the previous round's result, and then drives the round
+// tr describes. Every step is idempotent, because that retry re-runs all of
+// them.
 func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if err := r.commitPrevious(ctx, uc); err != nil {
-		return fmt.Errorf("committing previously certified round: %w", err)
-	}
-
-	// Fold this certificate into the live continuity state BEFORE anything can need a recovery
-	// target. If uc is non-quiet it becomes the anchor, so reconcile targets this very block —
-	// the behaviour that always worked. If uc is quiet the anchor stays where the last
-	// state-changing round put it, which is exactly the target that used to be missing.
+	// OBSERVATION COMES FIRST, BEFORE ANY FALLIBLE APPLICATION. uc is authenticated evidence
+	// (P-ctx, verified by BFTClient) about what the root chain certified; whether this node then
+	// manages to apply it is a separate question with a separate answer. Folding it in here means
+	// a certified block hash is recorded even when the Commit below fails.
+	//
+	// This ordering is load-bearing, not cosmetic (design §5, §5.1). commitPrevious clears
+	// r.pending and then commits; when that Commit returns SYNCING it returns an error and the
+	// round ends. With observation after it, the certificate that named the block was never
+	// recorded, so the next quiet certificate found no anchor and refused `no-anchor` — a
+	// transient, retryable executor failure turned into a permanent inability to recover, with
+	// the payload sitting right there. `anchor.round > appliedRound` is the normal retryable
+	// state; the anchor must therefore be written when its certificate verifies, never when it
+	// is applied.
+	//
+	// If uc is non-quiet it becomes the anchor, so reconcile targets this very block — the
+	// behaviour that always worked. If uc is quiet the anchor stays where the last state-changing
+	// round put it, which is exactly the target that used to be missing.
 	if update := r.continuity.observe(uc); update != anchorUnchanged && r.log != nil {
 		r.log.DebugContext(ctx, "execution anchor "+update.String(),
 			slog.Uint64("partitionRound", uc.GetRoundNumber()),
 			slog.Uint64("continuityThrough", r.continuity.through),
 			slog.String("anchorBlockHash", anchorHashForLog(r.continuity.anchor)))
+	}
+
+	if err := r.commitPrevious(ctx, uc); err != nil {
+		return fmt.Errorf("committing previously certified round: %w", err)
 	}
 
 	exp, err := ExpectationFromCertificate(uc, tr.Round, tr.Epoch)
@@ -181,6 +265,27 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	if len(exp.PreviousHash) > 0 && !bytes.Equal(head.StateRoot, exp.PreviousHash) {
 		head, err = r.reconcile(ctx, uc, exp, head)
 		if err != nil {
+			return err
+		}
+	}
+
+	// P-id is a precondition on VOTING, so it is checked for a node that may vote. A restored
+	// process may not (see abstainRestored, below, and MarkRestored) and has no anchor to be
+	// checked against anyway, since the anchor is in-process state a restart loses; holding it to
+	// a check it cannot pass would only stop it building the blocks it still owes the shard as
+	// leader.
+	if len(exp.PreviousHash) > 0 && r.restoredFrom == nil {
+		// P-id, applied to EVERY round that could end in a vote (§4). The state root is now equal
+		// — either it always was, or reconcile just made it so — and that is not sufficient on its
+		// own: two different blocks can share a post-state, so a node that missed a non-quiet
+		// interval and came back to the same state root by a different block would otherwise build
+		// and sign on the wrong block (§3.3.1, row 2). An earlier revision of the transition table
+		// had precisely that fast path and it was removed as unsound.
+		//
+		// It is also where a node with no usable anchor stops. Reaching this with the state root
+		// already matching used to skip every check in this file, so an absent or invalidated
+		// anchor was not a voting barrier at all as long as the states agreed.
+		if err := r.identityCheck(ctx, head, exp); err != nil {
 			return err
 		}
 	}
@@ -238,6 +343,25 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("shardnode: locally-built input record for round %d would be rejected by the root chain: %w", exp.Round, err)
 	}
 
+	// Recorded before the gate below, and deliberately: a non-voting node still commits what the
+	// shard certifies, so it stays a warm follower rather than drifting behind and needing
+	// recovery on every round.
+	r.pending = &pendingSubmission{round: exp.Round, hash: block.Hash, needsCommit: executorChanged, submittedAt: time.Now()}
+
+	// P-sign (§4, §6.1). THE VOTE is what a restored process withholds — not its participation.
+	// It has by now observed the certificate, reconciled, and built or verified this round's block
+	// and disseminated it if it is the leader; what it does not do is sign a certification request
+	// for it. Nothing below this line runs, so no request is ever signed, not merely never sent.
+	//
+	// That distinction is load-bearing and was measured, not assumed. An earlier revision returned
+	// before produceBlock, so a restored LEADER published nothing and every validator in the rounds
+	// it led timed out awaiting a proposal: scripts/chaos-evm.sh -v 7 stalled at the cold-restart
+	// scenario with quorum numerically intact. Disseminating a block is not signing a statement
+	// about it, so withholding it buys no safety and costs the shard every round this node leads.
+	if r.abstainRestored(ctx, exp) {
+		return nil
+	}
+
 	req := &certification.BlockCertificationRequest{
 		PartitionID: r.partitionID,
 		ShardID:     r.shardID,
@@ -255,7 +379,6 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("signing certification request: %w", err)
 	}
 
-	r.pending = &pendingSubmission{round: exp.Round, hash: block.Hash, needsCommit: executorChanged, submittedAt: time.Now()}
 	r.health.updateSubmitted(exp.Round)
 
 	if r.log != nil {
@@ -263,6 +386,47 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 			slog.Uint64("round", exp.Round), slog.Bool("quiet", irQuiet), slog.Bool("leader", tr.Leader == r.nodeID))
 	}
 	return r.submitter.Submit(ctx, req)
+}
+
+// identityCheck enforces P-id for a round that is otherwise ready to be built (§4 rows 1, 2, 13).
+// The refusal is an error rather than a silent abstention because it means this node's executor is
+// on a block the root chain did not certify for this state — recoverable only by resync or, once
+// stage 4 lands, by acquiring the certified payload.
+func (r *Round) identityCheck(ctx context.Context, head BlockRef, exp Expectation) error {
+	err := r.continuity.checkHeadIdentity(head, Hash(exp.PreviousHash))
+	if err == nil {
+		return nil
+	}
+	var rte *recoveryTargetError
+	reason := "unknown"
+	if errors.As(err, &rte) {
+		reason = rte.reason
+	}
+	r.metrics.recordIRDivergence(ctx, "identity_"+strings.ReplaceAll(reason, "-", "_"))
+	return fmt.Errorf("shardnode: executor head is not the certified execution head for round %d (%w) — refusing to build or sign; a matching state root is not evidence of the same block (see docs/troubleshooting.md)",
+		exp.Round, err)
+}
+
+// abstainRestored reports whether this round must stop short of building and signing because the
+// process was resumed from a persisted certificate — see MarkRestored for why that is a safety
+// gate and not a convenience. Everything before it in HandleCertificate (observation, commit,
+// reconciliation) has already happened; only the vote is withheld.
+func (r *Round) abstainRestored(ctx context.Context, exp Expectation) bool {
+	if r.restoredFrom == nil {
+		return false
+	}
+	r.metrics.recordIRDivergence(ctx, "restored_non_voting")
+	r.health.updateVoting(false, nonVotingRestored)
+	if r.log != nil {
+		if !r.warnedRestored {
+			r.warnedRestored = true
+			r.log.WarnContext(ctx, "resumed from a persisted certificate: this node follows and reconciles but will NOT vote until the monotonic signing record (#105) exists — restart is not by itself authorization to sign (design §6.1)",
+				slog.Uint64("restoredFromRound", *r.restoredFrom), slog.Uint64("round", exp.Round))
+		} else {
+			r.log.DebugContext(ctx, "abstaining: restored process is non-voting", slog.Uint64("round", exp.Round))
+		}
+	}
+	return true
 }
 
 // commitPrevious finalizes what uc just certified. It is a no-op the very

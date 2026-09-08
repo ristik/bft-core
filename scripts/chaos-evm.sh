@@ -19,8 +19,24 @@
 # where a real non-quiet round can be constructed. See
 # docs/adr/0001-executor-boundary.md.
 #
+# VALIDATOR COUNT AND THE RESTART GATE. This script used to run on 4 validators. It needs 7 as of
+# F6b stage 3 (#92/#105), and the reason is a deliberate behaviour change, not a flaky lane: a shard
+# node resumed from a persisted certificate is NON-VOTING for the rest of that process (design
+# docs/design/f6b-quiet-uc-recovery.md §6.1 — an authenticated checkpoint proves genuine, not
+# current, so restarting is not by itself authorization to sign). It still handshakes, accepts
+# certificates and reconciles its executor, which is what every "rejoined" assertion below checks;
+# it contributes nothing to quorum.
+#
+# So each of the three restart scenarios permanently removes one voter. Shard quorum is n/2+1
+# (rootchain/consensus/storage/sharding.go GetQuorum), and the tightest moment is the cold-restart
+# scenario: two validators already restarted and a third deliberately down, needing n-3 >= n/2+1,
+# i.e. n >= 7. At n=4 this run stalls at kill-leader with 2 voters of 4 — measured, not predicted.
+# When #105 supplies the monotonic signing record and a restarted node may vote again, this can go
+# back to 4.
+#
 # Usage: scripts/chaos-evm.sh [-v validators] [-p partition id] [-k]
-#   -v  number of validators (default 4; needs >=4 to tolerate one fault)
+#   -v  number of validators (default 7; see VALIDATOR COUNT above — 4 tolerates one fault but
+#       cannot complete the restart scenarios while restarted nodes stay non-voting)
 #   -p  partition id (default 8)
 #   -k  keep test-nodes/ and the running processes afterwards (default:
 #       stop everything and exit)
@@ -30,7 +46,7 @@
 set -e
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-validators=4
+validators=7
 partition_id=8
 keep=false
 
@@ -51,6 +67,14 @@ done
 if [ "$validators" -lt 4 ]; then
   echo "need at least 4 validators to tolerate one fault (got $validators)" >&2
   exit 1
+fi
+if [ "$validators" -lt 7 ]; then
+  # Not fatal — a smaller run is still useful for the first scenario and for reproducing the
+  # stall itself — but say plainly which assertions cannot hold, so a quorum stall here is read
+  # as the restart gate rather than as a consensus defect.
+  echo "NOTE: $validators validators; quorum is $((validators / 2 + 1)) and every restarted" >&2
+  echo "      validator stays non-voting until #105 (see VALIDATOR COUNT in this script)." >&2
+  echo "      Expect the kill-leader and cold-restart progress assertions to stall below 7." >&2
 fi
 
 failures=0
