@@ -651,8 +651,52 @@ deserves a deliberate decision from F2 (#10) regardless of what caused the confl
 `shard-node-luc.json` (the stored half of every conflict comparison, unavailable from logs alone),
 and the root chain's databases. Signing keys are deliberately excluded. Retention 14 days.
 
-**Open, and blocking.** Owner: F2 (#10) for classification, F8 (#16) and root consensus for the
-stall. Per the review, budgets were not raised and no diagnostic was suppressed.
+**A second mechanism, measured, and now fixed: the leader-await budget exceeded the shard's T2.**
+
+`Round.awaitTimeout` bounds how long a follower waits for the round leader's disseminated block.
+The wait is **synchronous** — `HandleCertificate` runs on `BFTClient`'s single message loop — so
+that budget is also an upper bound on how fast the node can consume certificates. The root chain
+issues one certificate per T2 while a shard is not reaching quorum, which is exactly what a dead or
+silent leader produces. A budget longer than T2 therefore does not cost the node one round; it costs
+it every round after that one as well.
+
+`DefaultAwaitTimeout` is 5s. Both chaos lanes generate `t2timeout = 3000ms`. And nothing chose the
+value: `SetAwaitTimeout` had no caller outside tests, so every deployment ran at 5s whatever its T2
+was — including the deployments whose own source comment says to set it below T2.
+
+The measurement, from a retained real-reth run (`evidence/evm2-debug.log`, PR #91's archive), with
+the leader silent:
+
+```
+19:50:38.366  accepted certificate
+19:50:43.409  ERROR producing round 34 block: awaiting round 34: context deadline exceeded
+19:50:43.414  accepted certificate          <- the next one, already queued
+19:50:48.416  ERROR ... awaiting round 34: context deadline exceeded
+19:50:48.428  accepted certificate
+19:50:53.450  ERROR ...
+```
+
+One certificate every **5.00s** — the await budget, not the round rate — while the root chain issued
+them every 3s. The node was not idle and not stuck on any single certificate; it was consuming them
+at a fixed rate slower than they arrived, and the gap widened for as long as the leader stayed
+silent.
+
+**Fix.** `shardnode.AwaitTimeoutForT2` derives the budget from the shard conf's `T2Timeout` (half of
+it, floored at 200ms and capped at the 5s default), and `ubft shard-node run` applies it, logging
+both values at startup. `TestAwaitTimeoutForT2` asserts the property the value exists for — shorter
+than T2 across the range of real configurations — rather than the arithmetic.
+
+**What this does and does not claim.** It establishes a mechanism, with a measurement, by which a
+validator whose leader has gone quiet falls progressively behind and stops contributing to quorum
+in time; that is sufficient to produce a stall of the recorded shape, and the 30s and 50s budgets in
+the chaos lanes were never the issue. It does **not** establish that every recorded leader-kill
+stall had this cause. The disseminator does buffer a block published before `Await` is called (a
+per-round channel of capacity one, `NetDisseminator.deliver`), so "the follower arrived after the
+publish and missed it" was considered and ruled out.
+
+**Open, and blocking.** Owner: F2 (#10) for classification, F8 (#16) and root consensus for whatever
+remains of the stall after the await budget is bounded by T2. Per the review, budgets were not
+raised and no diagnostic was suppressed.
 
 ### 6.4 Real-reth in CI
 

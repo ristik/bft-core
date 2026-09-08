@@ -189,6 +189,14 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 		return fmt.Errorf("creating shard node: %w", err)
 	}
 
+	// The follower's wait for the leader's block comes from the shard's own T2, never from a
+	// framework default: a budget longer than T2 makes this node consume certificates more slowly
+	// than the root chain issues them, so a silent leader leaves it permanently behind instead of
+	// costing it one round. See shardnode.AwaitTimeoutForT2 — nothing configured this before, so
+	// every deployment ran the 5s default whatever its T2 was.
+	awaitTimeout := shardnode.AwaitTimeoutForT2(shardConf.T2Timeout)
+	node.SetAwaitTimeout(awaitTimeout)
+
 	metrics, err := shardnode.NewMetrics(flags.observe.Meter("shardnode"))
 	if err != nil {
 		return fmt.Errorf("creating metrics: %w", err)
@@ -200,7 +208,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 	}
 
 	flags.observe.Logger().Info("shard node starting",
-		"nodeID", peer.ID().String(), "partitionID", shardConf.PartitionID, "executor", flags.Executor)
+		"nodeID", peer.ID().String(), "partitionID", shardConf.PartitionID, "executor", flags.Executor,
+		"t2Timeout", shardConf.T2Timeout, "leaderAwaitTimeout", awaitTimeout)
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return node.Run(gctx) })
