@@ -3,6 +3,7 @@ package shardnode
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ type retryExecutor struct {
 	head      BlockRef
 	held      map[string]BlockRef
 	available bool
+	queued    []byte
 	commits   []Hash
 }
 
@@ -61,10 +63,27 @@ func (e *retryExecutor) Commit(_ context.Context, hash Hash) (Status, error) {
 
 func (e *retryExecutor) Build(context.Context, RoundParams) (BuildID, error) { return "b", nil }
 
+// Seal returns a candidate that CHANGES when the executor's queue does, which is what a real
+// executor does between one round attempt and the next. A replay that rebuilds instead of re-sending
+// therefore produces different bytes, and a test can see it.
 func (e *retryExecutor) Seal(context.Context, BuildID) (Block, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return Block{Number: e.head.Number, Hash: e.head.Hash, StateRoot: e.head.StateRoot, ParentHash: e.head.Hash}, nil
+	if len(e.queued) == 0 {
+		return Block{Number: e.head.Number, Hash: e.head.Hash, StateRoot: e.head.StateRoot, ParentHash: e.head.Hash}, nil
+	}
+	sum := sha256.Sum256(append(append([]byte(nil), e.head.StateRoot...), e.queued...))
+	return Block{
+		Number: e.head.Number + 1, Hash: sum[:], StateRoot: sum[:], ParentHash: e.head.Hash,
+		Raw: e.queued, BlockSize: uint64(len(e.queued)),
+	}, nil
+}
+
+// queue makes the next candidate different, the way an arriving transaction would.
+func (e *retryExecutor) queue(b []byte) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.queued = append(e.queued, b...)
 }
 
 func (e *retryExecutor) Verify(context.Context, Block, RoundParams) (Status, error) {
@@ -330,10 +349,26 @@ func TestDeliverySeparatesApplicationFromSending(t *testing.T) {
 		require.Equal(t, []uint64{6}, sub.rounds(), "the round was submitted before the store failed")
 
 		_, commits := exec.snapshot()
+		// The executor's next candidate would now be a DIFFERENT block — a transaction arrived
+		// between the two deliveries, which is the ordinary case, not a contrived one.
+		exec.queue([]byte("a transaction that arrived between the two deliveries"))
+		first := sub.requests()[0]
+
 		_ = client.handleCertificationResponse(ctx, respond(uc5))
 		require.Equal(t, 2, drv.count(), "the duplicate retries the delivery, which is the point")
 		_, afterCommits := exec.snapshot()
 		require.Equal(t, commits, afterCommits,
-			"but the round-6 proposal is not certified by round 5's certificate and must not be committed")
+			"the round-6 proposal is not certified by round 5's certificate and must not be committed")
+
+		// And the part the previous revision missed: the retry must not REBUILD. Two different
+		// signed input records for one round, under one authorizing certificate, is equivocation
+		// however it came about — a full mempool between two deliveries is enough to produce it.
+		sent := sub.requests()
+		require.Len(t, sent, 2, "the identical request is re-sent")
+		require.Equal(t, first.InputRecord.RoundNumber, sent[1].InputRecord.RoundNumber)
+		require.Equal(t, []byte(first.InputRecord.Hash), []byte(sent[1].InputRecord.Hash),
+			"the same round under the same certificate must produce the same input record")
+		require.Equal(t, []byte(first.InputRecord.BlockHash), []byte(sent[1].InputRecord.BlockHash))
+		require.Equal(t, first.Signature, sent[1].Signature, "and the same signature over it")
 	})
 }

@@ -227,6 +227,17 @@ func TestRound_DoesNotBuildOnAnIdentityRejectedParent(t *testing.T) {
 		"and no Build: the rejected parent must never reach an Engine call that finalizes it")
 	require.False(t, health.Snapshot().Voting)
 	require.Contains(t, health.Snapshot().NonVotingReason, "head-identity-mismatch")
+
+	// The same requirement, for a process that may not vote at all. P-sign and P-id answer
+	// different questions: one decides whether this node may SIGN, the other whether it may make
+	// its execution client FINALIZE. An earlier revision skipped the identity check entirely when
+	// the node was restored — on the grounds that it could not vote anyway — which let exactly the
+	// node with no anchor reach Build and finalize an unproven parent.
+	round.MarkRestored(2)
+	builds, votes = len(exec.parents), len(sub.got)
+	require.NoError(t, round.HandleCertificate(ctx, certifyFrom(sub.got[len(sub.got)-1], 5, 1000), tr(5, 0, nodeID)))
+	require.Len(t, sub.got, votes, "a restored node does not vote")
+	require.Len(t, exec.parents, builds, "and does not lead either, because leading would finalize the parent")
 }
 
 /*

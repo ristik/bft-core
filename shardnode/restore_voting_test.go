@@ -74,13 +74,21 @@ func (e *steadyExecutor) observed() (heads, seals int) {
 type countingSubmitter struct {
 	mu   sync.Mutex
 	sent []uint64
+	reqs []*certification.BlockCertificationRequest
 }
 
 func (s *countingSubmitter) Submit(_ context.Context, req *certification.BlockCertificationRequest) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sent = append(s.sent, req.InputRecord.RoundNumber)
+	s.reqs = append(s.reqs, req)
 	return nil
+}
+
+func (s *countingSubmitter) requests() []*certification.BlockCertificationRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*certification.BlockCertificationRequest(nil), s.reqs...)
 }
 
 func (s *countingSubmitter) rounds() []uint64 {

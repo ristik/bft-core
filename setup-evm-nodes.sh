@@ -3,7 +3,7 @@ root_nodes=3
 validators=4
 partition_id=8
 chain_id=31337
-t2_timeout=3000
+t2_timeout=5000
 proof_type=exec
 # exit on error
 set -e

@@ -660,7 +660,7 @@ issues one certificate per T2 while a shard is not reaching quorum, which is exa
 silent leader produces. A budget longer than T2 therefore does not cost the node one round; it costs
 it every round after that one as well.
 
-`DefaultAwaitTimeout` is 5s. Both chaos lanes generate `t2timeout = 3000ms`. And nothing chose the
+`DefaultAwaitTimeout` is 5s. The historical chaos lanes generated `t2timeout = 3000ms`. And nothing chose the
 value: `SetAwaitTimeout` had no caller outside tests, so every deployment ran at 5s whatever its T2
 was — including the deployments whose own source comment says to set it below T2.
 
@@ -972,3 +972,20 @@ The paired negative assertions require a nonzero doctor exit and the specific fa
 The chaos divergence filter includes `cannot safely build round` explicitly: a fatal recovery
 error must fail even without the words `diverges` or `equivocat`. These checks were tightened
 during review; they do not change runtime protocol behavior or resolve the open leader stall.
+
+
+### T2 policy clarification (2026-09-09 review)
+
+T2 is the inactivity timeout after which BFT Core instructs a partition/shard to retry a round; it
+is not the normal BFT or shard round interval. The EVM setup default and fake-chaos fixture now use
+**5000 ms**, the minimum for these test lanes. Production T2 should be substantially longer than
+both normal round durations: approximately 10x is a starting sizing rule, not a hard-coded protocol
+ratio, and must account for execution and network latency. Do not lower T2 to make a recovery test
+finish sooner. Explicit older values remain available for reproducing historical failures only.
+
+The #107 helper chooses the local missing-leader wait, not T2; at test T2=5s it waits up to 2.5s.
+That improves the silent-leader timeout path but does not bound total per-certificate processing
+(Build, Verify, RPC, signing, send and persistence), nor prove the cause of every observed stall.
+A healthy shard may deliver certificates much faster than T2. The historical 3s evidence above is
+retained as historical evidence; new recovery acceptance runs must record T2 >= 5s and both normal
+round durations. #16 remains open.
