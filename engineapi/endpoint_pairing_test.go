@@ -3,6 +3,7 @@ package engineapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -138,12 +139,14 @@ func TestCheckEndpointsPaired(t *testing.T) {
 
 	t.Run("one client behind both URLs passes", func(t *testing.T) {
 		url := a.start(t)
-		require.NoError(t, adapterFor(url, url).CheckEndpointsPaired(ctx))
+		hash, err := adapterFor(url, url).CheckEndpointsPaired(ctx)
+		require.NoError(t, err)
+		require.Equal(t, strings.Repeat("11", 32), fmt.Sprintf("%x", hash))
 	})
 
 	t.Run("same chain id, different genesis is refused with no operator configuration", func(t *testing.T) {
 		// Nothing else catches this: the chain ids agree, and --expected-genesis-hash is unset.
-		err := adapterFor(b.start(t), a.start(t)).CheckEndpointsPaired(ctx)
+		_, err := adapterFor(b.start(t), a.start(t)).CheckEndpointsPaired(ctx)
 		require.ErrorContains(t, err, "the two URLs address different execution clients")
 	})
 
@@ -152,7 +155,7 @@ func TestCheckEndpointsPaired(t *testing.T) {
 		// compared as if it were a real answer — and against a client whose genesis happens to be
 		// unavailable, two nulls would even AGREE and pass.
 		nullBoth := clientStub{chainID: "0x7a69", genesis: "null"}.start(t)
-		err := adapterFor(nullBoth, nullBoth).CheckEndpointsPaired(ctx)
+		_, err := adapterFor(nullBoth, nullBoth).CheckEndpointsPaired(ctx)
 		require.ErrorContains(t, err, "no such block")
 	})
 }
@@ -186,4 +189,13 @@ func TestCheckGenesisHash_ReadsBothConnections(t *testing.T) {
 		require.ErrorContains(t, adapterFor(url, url).CheckGenesisHash(ctx, nil),
 			"no expected genesis hash configured")
 	})
+}
+
+func TestDecodeBlockHeaderRejectsMissingIdentity(t *testing.T) {
+	for _, raw := range []string{`{}`, `{"hash":null}`, `{"number":"0x0"}`} {
+		t.Run(raw, func(t *testing.T) {
+			_, err := decodeBlockHeader(json.RawMessage(raw))
+			require.ErrorContains(t, err, "missing block hash")
+		})
+	}
 }

@@ -92,6 +92,17 @@ func decodeBlockHeader(raw json.RawMessage) (blockHeaderJSON, error) {
 	if isJSONNull(raw) {
 		return blockHeaderJSON{}, errNoSuchBlock
 	}
+	// A non-null object can still omit its identity. Never turn two incomplete
+	// responses into apparent agreement on a zero-valued hash.
+	var identity struct {
+		Hash *data32 `json:"hash"`
+	}
+	if err := json.Unmarshal(raw, &identity); err != nil {
+		return blockHeaderJSON{}, fmt.Errorf("decoding block header: %w", err)
+	}
+	if identity.Hash == nil {
+		return blockHeaderJSON{}, errors.New("missing block hash")
+	}
 	var h blockHeaderJSON
 	if err := json.Unmarshal(raw, &h); err != nil {
 		return blockHeaderJSON{}, fmt.Errorf("decoding block header: %w", err)

@@ -56,7 +56,7 @@ cleanup() {
   done
   wait 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+
 
 # boundedRun runs `ubft shard-node run` with the given arguments and a hard time budget, capturing
 # its combined output in $boundedOut and its exit status in $boundedStatus.
@@ -69,7 +69,7 @@ trap cleanup EXIT INT TERM
 boundedRun() {
   budget=$1; shift
   rm -f test-nodes/.bounded.out
-  ( "$@" >test-nodes/.bounded.out 2>&1 ) &
+  ( exec "$@" >test-nodes/.bounded.out 2>&1 ) &
   boundedPid=$!
   boundedStatus=124
   for _ in $(seq 1 "$budget"); do
@@ -81,6 +81,11 @@ boundedRun() {
   done
   if [ "$boundedStatus" -eq 124 ]; then
     kill "$boundedPid" 2>/dev/null
+    for _ in $(seq 1 5); do
+      kill -0 "$boundedPid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL "$boundedPid" 2>/dev/null || true
     wait "$boundedPid" 2>/dev/null || true
   fi
   boundedOut=$(cat test-nodes/.bounded.out 2>/dev/null)
@@ -99,6 +104,11 @@ if [ -n "$stale" ]; then
   echo "  pkill -f 'ubft shard-node run'" >&2
   exit 1
 fi
+
+# Install cleanup only after the refusal guard: a refused run owns no processes.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "=== 1. generate the shard topology and chain spec ==="
 ./setup-evm-nodes.sh -r 3 -v "$validators" >/dev/null || { echo "setup failed" >&2; exit 1; }
@@ -245,7 +255,7 @@ boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine
   --engine-url http://127.0.0.1:18751 --eth-url http://127.0.0.1:18745 \
   --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
 runOut=$boundedOut; runStatus=$boundedStatus
-if [ "$runStatus" -ne 0 ] && echo "$runOut" | grep -q 'startup chain-identity check' &&
+if [ "$runStatus" -ne 0 ] && [ "$runStatus" -ne 124 ] && echo "$runOut" | grep -q 'startup chain-identity check' &&
    echo "$runOut" | grep -q 'chainId=31338, shard conf says 31337'; then
   pass "shard-node run itself refused to start against chainId 31338 (exit $runStatus), before voting"
 else
