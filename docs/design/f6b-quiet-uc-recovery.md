@@ -821,3 +821,11 @@ refusal with a named reason, in place of a `Commit(nil)` that could not have wor
 This record does not address power-loss durability (#14), the signing contract (#105), missing-payload
 acquisition (stage 4), any particular real-reth scenario in #88, or the stale-certificate taxonomy
 (#93); nor does it claim #16's fake-executor stall shares this cause.
+
+**Stage 4 continues in `f6b-quiet-tail-anchor-recovery.md`.** The live half implemented here recovers
+a node once a certificate NAMES a block. Measurement then established the case it cannot reach: a
+node that returns during a quiet interval receives an unbounded number of authentic certificates,
+none of which names anything, and stays at `no-anchor` indefinitely. That record specifies the
+authenticated evidence chain a returning node must obtain from outside itself, and explains why the
+retained-history direction sketched in §6 cannot close it — the block was certified while the node
+was down, so no local file can hold evidence for it.
