@@ -883,6 +883,7 @@ The follower-restart row is new. Every previous revision of this lane reported i
 | plus the T2-bounded await budget (#107) | **recovers**, converged | `continuity-gap`, no recovery |
 | plus the replay/leadership gates (`b20eaf4f`), T2 still 3s | `no-anchor`, no recovery | `continuity-gap`, no recovery |
 | merged integration (#106 + #107), **T2 5s** | **intermittent** — recovers and converges in one run, `continuity-gap` in another | **intermittent** — same |
+| plus subscription renewal decoupled from voting (#109) | **recovers**, converged | **recovers**, converged |
 
 The middle row is the stricter commit rule doing what it should: a returning node used to advance
 its executor by committing its own pending proposal on any certificate, which is precisely the
@@ -891,7 +892,17 @@ the recovery path, which needs an unbroken chain of observed certificates — an
 an await budget longer than the shard's T2 consumes certificates more slowly than they arrive, misses
 one, and reports `continuity-gap`. Bounding the budget by T2 restores the follower case.
 
-**The last row is the current state, and the honest word for it is intermittent.** On merged
+**What the last row rests on.** The restarted validator in that run received **12 certificates after
+its restart with a maximum gap of 2.3 seconds** and **no gap over 10s**, while submitting **nothing**
+— and its continuity state was invalidated **zero** times. Compare the traced run before the fix: a
+34-second gap, six missed partition rounds, and an invalidation. That is the mechanism removed, in
+the terms it was traced in, rather than a scenario that happened to pass.
+
+It is one run of an intermittent symptom, so it is evidence about the mechanism and not proof that
+no path to `continuity-gap` remains. Preventing the starvation also does not recover evidence a node
+already missed while disconnected; that is a separate question and #16 stays open.
+
+**The row before it was intermittent, and that is why the fix is measured this way.** On merged
 integration with T2 at 5s, a two-scenario run had both the follower restart and the leader restart
 recover, execute new work and converge on all four clients; an earlier run at the same T2 had the
 leader restart refuse with `continuity-gap`. Nothing about the runtime differs between them. That is
