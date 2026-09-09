@@ -269,7 +269,10 @@ bringUpCluster() {
     cp -R test-nodes/evidence "$stash/" 2>/dev/null || true
   fi
 
-  ./setup-evm-nodes.sh -r 3 -v "$validators" >/dev/null || { echo "setup failed" >&2; return 1; }
+  # T2 is the inactivity timeout before the root chain tells the shard to retry, not the round
+  # interval, and it must leave room above both. 5000ms matches scripts/chaos-evm.sh so the two
+  # lanes are comparable, and the follower await budget is derived from it (AwaitTimeoutForT2).
+  ./setup-evm-nodes.sh -r 3 -v "$validators" -t 5000 >/dev/null || { echo "setup failed" >&2; return 1; }
   mkdir -p test-nodes/evidence
   if [ -n "$stash" ]; then
     cp -R "$stash/evidence/." test-nodes/evidence/ 2>/dev/null || true
