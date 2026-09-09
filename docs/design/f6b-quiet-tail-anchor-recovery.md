@@ -9,8 +9,10 @@ The serving buffer of §6.1 shipped next, without transport or recovery wiring. 
 serving integration of §6.2 shipped after it: a node retains what it observes and answers requests
 for it. The requester coordinator of §6.3 shipped next, against injected transport and observation
 interfaces: a node can now obtain and verify an anchor for the certificate it holds, and hold it as a
-READY TARGET. Nothing applies that target to an executor and nothing is wired into production
-startup; both are the next unit. The scope paragraph below describes #112 and is kept as written at
+READY TARGET. The target applier of §6.4 shipped after it, against an injected executor and target
+source. Production startup still constructs none of it and `Round` calls none of it, so no deployed
+node recovers anything yet; that wiring, and the measured run against a real client, are the next
+unit. The scope paragraph below describes #112 and is kept as written at
 the time.
 
 **Scope of the PR this record ships in: design and fixtures only.** It adds a pure verification
@@ -575,7 +577,12 @@ the failure path runs only after that I/O has already returned. The client there
 context and **resets the stream** when it ends, which is what unblocks the I/O; the watcher is
 stopped and joined before the call returns, so a completed exchange leaves nothing behind that could
 reset a stream later. A cancelled or expired context is reported as itself rather than as whatever
-I/O error the reset produced, because the latter says nothing about why the attempt ended.
+I/O error the reset produced, because the latter says nothing about why the attempt ended. "Expired"
+is decided from the DEADLINE, not from `ctx.Err()` alone: the stream's deadline is the context's, so
+at the instant it passes two timers are due, and when the connection's fires first the I/O returns
+`i/o timeout` while `ctx.Err()` is briefly still nil. A deadline that has passed is an expired
+context whether or not its goroutine has run yet, and the caller is owed its own budget as the
+reason rather than a socket error.
 
 **One budget, not two.** The whole call — dialing included — runs under the caller's context narrowed
 by `Deadline`, and the stream's deadline is that derived context's deadline. Setting `now + Deadline`
@@ -727,6 +734,25 @@ a different authenticated statement and gets its own attempt. Equivocation insid
 kept on the same terms and is **not** terminal: both halves came from one provider, and neither is a
 statement this node made.
 
+**Readiness is decided from the whole certificate, because the applier decides from the whole
+certificate.** Review found the two halves disagreeing: readiness was keyed on the certificate's
+IDENTITY and application on the full binding, and a repeat falls exactly in that gap — same round,
+same input record, so the same identity, certified at a LATER root round. The requester answered
+"already ready" and did nothing; the applier answered "that target was verified against another
+certificate" and refused; the node sat between them making no progress while every unit fixture on
+both sides passed. A repeat is an ordinary product of a root-chain timeout, so this is what a quiet
+shard does whenever the root chain misses a round, not an edge case. `Need` and `Target` now compare
+bindings, and the retained bundle is carried across the repeat locally, with no request.
+
+Terminal conflicts keep the NARROWER key — the identity — and the difference is not an oversight.
+Readiness asks *which certificate a target was verified against*, and a repeat is a different
+certificate. A conflict asks *what was signed*, and a repeat re-certifies the byte-identical input
+record: it is the same contradiction, and re-deriving it would spend attempts reaching a conclusion
+already reached. Both are fixtures.
+
+There is now a fixture that runs the real requester as the real applier's `TargetSource` over signed
+certificates, because that disagreement is invisible to any test that asks only one half a question.
+
 **Readiness is not application.** A verified anchor is stored as a target and answered against the
 certificate actually held; it is retained, not discarded, when that certificate moves, so a caller
 part-way through applying one does not lose it, and the next trigger can usually carry it forward
@@ -741,6 +767,86 @@ constructs no requester, `Round` neither observes into one nor asks it for a tar
 recovers anything from this code yet. The remaining decisions — which peers a node asks, how the
 target reaches `reconcile`, and how the whole path behaves against a real reth node across a measured
 quiet tail — are the next unit, and each of them is a policy question rather than a mechanism one.
+
+### 6.4 Applying a verified target
+
+Implemented in `shardnode/evidenceapply.go`. The requester holds a verified anchor; this decides
+whether and how it reaches the executor. They are separate because §5's cursors are separate — a
+target can be verified long before an executor can act on it, and "payload unavailable" is precisely
+the state in which both are true at once. Collapsing them would mean either discarding proven evidence
+because a client is still syncing, or reporting a node recovered because its evidence was good.
+
+**A certificate, not a state root.** `Apply` takes a `CertificateBinding` — round, root round,
+canonical input-record identity, and the state that round builds on — and this is a correction review
+forced. The first revision compared `target.StateRoot` against the certified state, which is state
+equality wearing a different hat: **across a quiet tail every certificate carries the same state
+root**, so that comparison is equally true of a target verified three rounds ago against a certificate
+this node has since moved past. §3.3.1 is why that is not good enough, and it is the same argument
+this design uses everywhere else. The requester returns the binding WITH the target (§6.3), and the
+two bindings are compared directly. A repeat — same round, same input record, a later root round — is
+a different certificate, so the root round is part of the binding.
+
+Three questions state equality cannot answer, and the binding does:
+
+  - *Was this target verified against THIS certificate?* Compared as bindings, before anything is
+    sent. A target for another certificate is not *wrong*; it is an answer to a question nobody asked.
+  - *Is this a new opportunity to try?* Only a new certificate is one — see the budget below.
+  - *Did the answer go stale while the attempt was in the executor?* Re-read after the commit and
+    compared. A commit takes time, and the requester installing a target for a newer certificate
+    meanwhile is its ordinary behaviour across a quiet tail, not a fault. If the target still names
+    the same block, the commit was correct and the application stands; if it names a different one,
+    the node is **not** reported recovered for a question the answer was never about.
+
+**Three executor situations, kept apart.** They arrive looking alike — the node did not recover — and
+each calls for a different response, so none may be reported as another:
+
+| Situation | Executor said | Verdict | Target |
+|---|---|---|---|
+| **Unreachable** | nothing — the RPC failed | retryable; *nothing at all* is known, not even whether it applied the block | kept |
+| **Payload unavailable** | `SYNCING` / `ACCEPTED` | retryable; the ordinary state after an execution-client restart (§1.1) | kept |
+| **Payload invalid** | `INVALID` | a fault, not a wait; no number of attempts makes it valid | kept, and not retried |
+
+Retaining the target through the first two is the load-bearing part: the authority to retry is exactly
+what dropping it would remove, and this is the same stance the live path already takes ("retaining the
+anchor and retrying on the next certificate"). Reading the head after a `VALID` commit can fail too,
+and that is *unreachable* rather than success — whether this node recovered is then unknown, and
+unknown is retryable.
+
+**P-id is enforced by the comparison the live path uses**, not by a second copy of it: `reconcile` and
+this both call `anchorHeadIdentity`, which was extracted for that reason. Two copies of a comparison
+that gates signing is one copy too many — the weaker of them becomes the one that matters. Both halves
+apply: the head must be the certified BLOCK, and it must be at the certified STATE. A commit reporting
+success while the head is elsewhere is what P-id exists to catch, so it is a fault, and it is recorded
+against the BLOCK HASH rather than the state — a later target naming a different block for the same
+state is §3.3.1's own case and gets its own attempt. Row 13's genesis exception applies exactly where
+it did before, and the executor's block zero is read only when that exception could apply.
+
+**Bounded without stranding a recoverable node — and the budget is keyed on the CERTIFICATE.** The
+first revision keyed it on the certified state, and review reproduced what that means: across a quiet
+tail the state never changes, so the budget never renews, and a node whose executor was still syncing
+spent its attempts and could never get another however available the payload had since become. That is
+exactly the permanent failure the cap was meant to avoid, reached by the cap itself — and it strands
+precisely the node this design exists for. Renewal is per certificate, which is the rhythm the live
+path already has ("retaining the anchor and retrying on the next certificate") and is still bounded,
+because certificates arrive at the shard's cadence rather than a retry loop's. Within one certificate,
+attempts are spaced by a backoff and capped by `MaxAttempts`.
+
+**One attempt is inside the executor at a time.** A commit is not a read: two in flight make "what did
+the executor do" unanswerable, and the head read afterwards belongs to neither of them. The first
+revision counted the attempt under the lock and released it before calling, so two callers could both
+be admitted — review reproduced that too. It is a non-blocking slot rather than a mutex held across
+the call, because a mutex would park whichever goroutine asked next behind a slow executor and the
+caller is a round loop, and it is released on every exit path.
+
+**What it never does.** It does not sign and does not make a node eligible to (P-sign, #105 — a
+recovered executor is not a licence to vote). It does not re-verify evidence: `VerifyAnchorEvidence`
+did that, and doing it again would be a second place where evidence is judged. It does not fetch
+payloads — the executor's own ancestor acquisition is what obtained the missing block in every run
+measured so far (§8), and that stays its business.
+
+**Still unwired.** The executor and target source are interfaces; production startup constructs no
+applier and `Round` calls none of it. What remains is the wiring itself and the measured acceptance
+run against a real client across a quiet tail.
 
 ## 7. Acceptance fixtures
 
@@ -880,9 +986,8 @@ anchor cursor in §5 is for, and what `VerifiedTargetSurvivesAnUnavailablePayloa
 ## 10. Scope held open
 
 Recovery across an epoch transition (§3.1); which peers a node asks and how that set is chosen
-(§6.3 takes it as an injected source and decides nothing about it); applying a verified target to an
-executor, and the RPC-unreachable / payload-missing / payload-invalid distinctions that belong to
-doing so (§5, §6.3); production startup wiring for the buffer, the server and the requester alike;
+(§6.3 takes it as an injected source and decides nothing about it); production startup wiring for the buffer, the server, the requester
+and the applier alike, and the measured acceptance run against a real client across a quiet tail;
 whether the serving buffer of §6.1 is ever persisted; whether the root chain should serve historical certificates as a second source
 (§6c); durable retained history and the signing record (#14, #105); and the acquisition-source
 measurement §8 does not have. #16 remains open, including "Too deep reorg", and nothing here claims
