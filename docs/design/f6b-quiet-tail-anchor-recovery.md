@@ -6,10 +6,12 @@ Issue #92. Companion to `docs/design/f6b-quiet-uc-recovery.md` (stage 2/3, refer
 
 **Scope note.** The predicate (§2–§5) and this record shipped in #112 as design and fixtures only.
 The serving buffer of §6.1 shipped next, without transport or recovery wiring. The transport and the
-serving integration of §6.2 shipped after it: a node now retains what it observes and answers
-requests for it, and still recovers nothing itself — the requester side, which decides who to ask and
-what to do with an answer, is the next unit. The scope paragraph below describes #112 and is kept as
-written at the time.
+serving integration of §6.2 shipped after it: a node retains what it observes and answers requests
+for it. The requester coordinator of §6.3 shipped next, against injected transport and observation
+interfaces: a node can now obtain and verify an anchor for the certificate it holds, and hold it as a
+READY TARGET. Nothing applies that target to an executor and nothing is wired into production
+startup; both are the next unit. The scope paragraph below describes #112 and is kept as written at
+the time.
 
 **Scope of the PR this record ships in: design and fixtures only.** It adds a pure verification
 predicate (`shardnode/anchorevidence.go`) and its acceptance fixtures
@@ -606,6 +608,104 @@ deployed node serves evidence until that is wired — its own decision (which no
 bounds, and how the buffer's memory is accounted alongside the round path). Stated here so the gap
 between "implemented" and "in service" is not mistaken for an oversight.
 
+### 6.3 The requester coordinator
+
+Implemented in `shardnode/evidencerequester.go`. The transport asks one provider once (§6.2) and the
+predicate decides whether an answer is worth anything (§2–§4); neither of them decides *policy*, and
+this is where that policy lives — in one place, so it can be reviewed apart from framing and apart
+from verification.
+
+**One feed, and it is what this node authenticated.** `Observe` takes every certificate the node
+verifies, the same feed the serving buffer gets. The certificate the node is being asked to build on
+is the last of them, rather than a second input that could disagree with the first. Bounded by
+`MaxWitness`; an exact re-delivery is dropped, because appending it would make the witnessed sequence
+unrepresentable as a chain — repeat normalisation requires a strictly later root round (§2.3), so a
+duplicate reads as a gap.
+
+**`Need` is the deduplication point, and it never waits for the network.** It decides whether to
+start a recovery and returns; the outcome arrives through `Target` and `Status`. A caller holding the
+Round lock therefore never blocks on I/O, and a shard delivering the same certificate to several call
+sites — or one certificate per round while a fetch is out — cannot spawn parallel recoveries. Four
+distinct reasons not to start, each a different situation:
+
+| Reason | Meaning |
+|---|---|
+| already fetching | one recovery at a time; the running one re-checks the current certificate when it finishes |
+| target already ready for this certificate | nothing to obtain |
+| terminal conflict decided for this certificate | no provider can change it |
+| backoff not elapsed | an explicit failure, **not** a quieter refetch |
+
+The backoff earns its place: without it, a node that failed once would ask again on the next
+certificate delivery, and a shard certifies a round every few seconds. One node's recovery would
+become a load pattern on every other node, which is the availability loss this protocol exists to
+repair, arriving from the inside.
+
+**The predicate is the authority; nothing else is.** Transport success is not evidence — a bundle
+that arrives intact from a well-behaved peer means nothing until `VerifyAnchorEvidence` accepts it
+against this node's own partition, shard, configuration hash and trust-base store. A peer's refusal
+DETAIL string is never consulted at all: it is diagnostic (§6.2), and a decision made from it would
+be a decision made by the peer. A fixture states it directly — a structurally perfect chain, of
+exactly the shape being asked for, signed by a root chain this node does not trust, delivered without
+a single wire error, and refused.
+
+**One bounded budget, spent across providers.** `MaxProviders` attempts, one pinned candidate at a
+time, under one `Overall` deadline that `PerAttempt` narrows but never extends — so a single silent
+peer spends its own share and not the recovery's. A refusal decided from bundle content costs one
+attempt and moves on; only a contradiction with this node's own certificate ends the attempt (§4.1).
+The epoch crossing is the case worth restating: it says *this candidate* crosses a boundary, not that
+every candidate does, so the next provider is still asked — and a fixture has the second provider
+recover from a same-epoch source after the first offered an older one.
+
+**Carrying a result across a moving certificate is re-verification, never inference.** A fetch takes
+time, and the certificate this node is being asked to build on can move while it is out. A result
+verified against the older one does not authorise the newer one — *and matching state roots are not
+an argument*, because a missed non-quiet interval can return to the same state root by a different
+block (§3.3.1). So the bundle is EXTENDED with the certificates this node itself observed since, and
+handed back to `VerifyAnchorEvidence` against the certificate now held. Every property that made the
+original acceptable is re-decided over the longer chain; a second, weaker rule written here would be
+a second place where history is inferred, and §3.3.1 is the counterexample to every version of it.
+
+The fixture is that counterexample run forwards: while the fetch is out, two certified rounds move
+the state away from B and back to B by a *different* block. The state root the node holds is the one
+it asked about; the anchor it ends with is the block that actually produced it, reached by a second
+request pinned to the new certificate — not the block the first answer named.
+
+The extension is located in the witness by POSITION and takes the FIRST match, not the last. A repeat
+of the snapshot's own round carries a new assignment, and the rounds after it are contiguous with
+*that* assignment; starting after a later repeat would drop the link that makes the rest join up and
+turn an honest tail into a gap.
+
+**Restarts are bounded, because a correct loop can still be a livelock.** A shard certifying blocks
+faster than a fetch completes would restart the same recovery forever, every individual step
+deciding correctly. `MaxRestarts` ends it and the node waits out the backoff. An interval that is no
+longer witnessed — the snapshot evicted under `MaxWitness` — is refetched rather than assumed: this
+node can no longer say what happened in between, and that is the whole of what it may conclude.
+
+**Authenticated contradictions are kept, not logged away.** Two conflicting statements about one
+round, both verified against this node's own trust base, are evidence that something unprovable
+happened; a log line asserting it is not. The bundle is retained as it arrived, bounded to the first
+such contradiction per recovery with later ones counted, so a provider cannot make a node retain
+memory by disagreeing repeatedly. Only the contradiction with this node's OWN certificate is
+terminal, and terminal for that certificate *by identity* — a later certificate for the same round is
+a different authenticated statement and gets its own attempt. Equivocation inside a single bundle is
+kept on the same terms and is **not** terminal: both halves came from one provider, and neither is a
+statement this node made.
+
+**Readiness is not application.** A verified anchor is stored as a target and answered against the
+certificate actually held; it is retained, not discarded, when that certificate moves, so a caller
+part-way through applying one does not lose it, and the next trigger can usually carry it forward
+with no request at all. Committing it to an executor is a separate cursor (§5) and a separate unit,
+and it is where the distinctions that belong to it live — an executor RPC that cannot be reached, a
+payload that has not arrived, and a payload that is invalid are three different situations, and none
+of them is a fact about the evidence. Nothing here authorises signing: P-sign (#105) is untouched, and
+a recovered executor is not a licence to vote.
+
+**Still unwired, deliberately.** The fetcher and provider source are interfaces; production startup
+constructs no requester, `Round` neither observes into one nor asks it for a target, and no node
+recovers anything from this code yet. The remaining decisions — which peers a node asks, how the
+target reaches `reconcile`, and how the whole path behaves against a real reth node across a measured
+quiet tail — are the next unit, and each of them is a policy question rather than a mechanism one.
+
 ## 7. Acceptance fixtures
 
 `shardnode/anchorevidence_test.go`. Every certificate is genuinely signed and genuinely verified
@@ -743,10 +843,11 @@ anchor cursor in §5 is for, and what `VerifiedTargetSurvivesAnUnavailablePayloa
 
 ## 10. Scope held open
 
-Recovery across an epoch transition (§3.1); provider selection, rate limiting and the transport's own
-frame cap and the attempt budget for peer evidence retrieval (§4, §4.1); implementing the serving
-buffer of §6.1, and whether it
-is ever persisted; whether the root chain should serve historical certificates as a second source
+Recovery across an epoch transition (§3.1); which peers a node asks and how that set is chosen
+(§6.3 takes it as an injected source and decides nothing about it); applying a verified target to an
+executor, and the RPC-unreachable / payload-missing / payload-invalid distinctions that belong to
+doing so (§5, §6.3); production startup wiring for the buffer, the server and the requester alike;
+whether the serving buffer of §6.1 is ever persisted; whether the root chain should serve historical certificates as a second source
 (§6c); durable retained history and the signing record (#14, #105); and the acquisition-source
 measurement §8 does not have. #16 remains open, including "Too deep reorg", and nothing here claims
 to explain it.
