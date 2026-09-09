@@ -867,6 +867,15 @@ func TestEvidenceRequester_TerminalConflictEndsTheAttemptAndIsKept(t *testing.T)
 	asked, _ = rf.fetcher.calls()
 	require.Len(t, asked, 1)
 
+	// A REPEAT of the refused round is not a different question. It re-certifies the byte-identical
+	// input record, so it is the same contradiction, and re-deriving it would spend attempts to
+	// reach a conclusion already reached. (Readiness is keyed more finely — a repeat IS a different
+	// certificate to verify a target against — and the two keys answer different questions.)
+	rf.observe(t, f.cert(16, 121, stateB, stateB, nil, 19))
+	require.ErrorIs(t, rf.req.Need(), ErrRecoveryConflict)
+	asked, _ = rf.fetcher.calls()
+	require.Len(t, asked, 1, "a repeat re-signs the same statement this node already contradicted")
+
 	// A different certificate is a different question and gets its own attempt.
 	rf.observe(t, f.cert(19, 130, stateB, stateB, nil, 23))
 	require.NoError(t, rf.req.Need())

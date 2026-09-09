@@ -734,6 +734,25 @@ a different authenticated statement and gets its own attempt. Equivocation insid
 kept on the same terms and is **not** terminal: both halves came from one provider, and neither is a
 statement this node made.
 
+**Readiness is decided from the whole certificate, because the applier decides from the whole
+certificate.** Review found the two halves disagreeing: readiness was keyed on the certificate's
+IDENTITY and application on the full binding, and a repeat falls exactly in that gap — same round,
+same input record, so the same identity, certified at a LATER root round. The requester answered
+"already ready" and did nothing; the applier answered "that target was verified against another
+certificate" and refused; the node sat between them making no progress while every unit fixture on
+both sides passed. A repeat is an ordinary product of a root-chain timeout, so this is what a quiet
+shard does whenever the root chain misses a round, not an edge case. `Need` and `Target` now compare
+bindings, and the retained bundle is carried across the repeat locally, with no request.
+
+Terminal conflicts keep the NARROWER key — the identity — and the difference is not an oversight.
+Readiness asks *which certificate a target was verified against*, and a repeat is a different
+certificate. A conflict asks *what was signed*, and a repeat re-certifies the byte-identical input
+record: it is the same contradiction, and re-deriving it would spend attempts reaching a conclusion
+already reached. Both are fixtures.
+
+There is now a fixture that runs the real requester as the real applier's `TargetSource` over signed
+certificates, because that disagreement is invisible to any test that asks only one half a question.
+
 **Readiness is not application.** A verified anchor is stored as a target and answered against the
 certificate actually held; it is retained, not discarded, when that certificate moves, so a caller
 part-way through applying one does not lose it, and the next trigger can usually carry it forward
