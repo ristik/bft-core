@@ -822,8 +822,174 @@ already leaves a returning node's executor behind**, and scenarios 3 to 6 are ho
 rather than reported. Nothing here says the other three faults behave the same way; that needs
 per-scenario clean fixtures.
 
-**Status.** The harness is corrected and its oracle is regression-tested; this single isolated run
-is the only scenario evidence, and it covers exactly one fault. #88 stays open. The likely runtime
+### 5.7.1 Per-scenario matrix, on independent clusters (#88 stages 1-3)
+
+The harness now runs **each fault scenario on its own devnet** — fresh keys, fresh reth datadirs,
+fresh chain — which is what #88 stage 2 means by "independent scenarios from clean fixtures". Two
+things forced it, and both were learned by running the thing:
+
+- a node that failed to recover in scenario 2 was still broken in scenarios 3-5, so the harness had
+  to refuse to run them (`NOT RUN`) and four of six scenarios produced no evidence at all;
+- since F6b stage 3 a resumed shard node is non-voting for the rest of its process (#105). Shard
+  quorum is `n/2+1`, so on a shared cluster each restart permanently spends part of the fault budget
+  and a later scenario stalls because of the scenario before it, not because of its own fault.
+
+`-s <names>` runs any subset. Because every scenario builds its own cluster, a subset is a complete
+run of those scenarios rather than a partial run of all of them, and re-running one is minutes
+instead of half an hour. A name that is not a scenario is refused **before** anything is started or
+stopped, and a run that executes no scenario fails: an unknown selection used to skip everything,
+write no failures, archive an empty directory and exit 0 saying the evidence was complete.
+
+**Where the evidence lives, and why not under `test-nodes/`.** `setup-evm-nodes.sh` runs `make
+clean`, which deletes that directory whole — and with a cluster per scenario, that happens at every
+scenario boundary. An earlier revision stashed only `test-nodes/evidence` across the reset and lost
+everything else with it: the full shard, root and reth logs, the trust base, the identities and the
+chain configuration, which are exactly what a `continuity-gap` or a `Too deep reorg` has to be
+explained from. The surviving summaries cannot reconstruct a certificate history.
+
+Each run therefore writes to `evidence-runs/<runID>/`, outside the blast radius and unique per
+invocation, so a run can neither lose its own evidence nor inherit a previous run's:
+
+```
+evidence-runs/<runID>/manifest.txt          revisions, dirty-tree status, invocation, T2, selection
+evidence-runs/<runID>/scenarios/<label>/    that scenario's FULL logs and configuration, sealed
+                                            before its cluster was destroyed
+evidence-runs/<runID>/snapshots/<label>/    the per-validator summaries
+evidence-runs/<runID>/workload.txt, multi-leader.txt, convergence.txt
+evidence-runs/<runID>.tar.gz                the archive, every scenario in it
+```
+
+Sealing happens **before** each reset and the reset is **aborted** if it fails: losing the evidence
+is worse than not running the next scenario. The manifest is written unconditionally, before any
+scenario is selected, so a subset run records the revisions it measured rather than leaving them to
+a report written afterwards.
+
+```bash
+./scripts/reth-chaos.sh -v 4 -t 2                      # all six
+./scripts/reth-chaos.sh -s multi-leader -t 2           # just this one, on its own cluster
+```
+
+**Results.** bft `bba665a7` + the F6b corrections (`ea608abc`), reth `189c0df3`, four validators,
+two transactions per burst.
+
+| Scenario | Outcome |
+| --- | --- |
+| baseline workload | **pass** — 2/2 executed and certified, all four clients agree on head, nonce and every receipt |
+| shard follower restart, reth retained | **recovers** — accepted a new certificate *and executed new work* (`2:0xca7d5744… → 4:0x20fce7f9…`), and all four clients converged on head, nonce and every receipt. **Requires the T2-bounded await budget** (#107): with the 5s default this scenario fails with `continuity-gap` |
+| shard leader kill, quorum live | shard rotates past the killed leader and a transaction executes while it is absent; the returning node accepts a certificate but **its executor does not apply the new block**, with `lastRecoveryDiagnostic=continuity-gap`. Open |
+| reth-only restart, datadir retained | **fails** — safe abstention observed (the node reported its executor unavailable rather than proceeding), the rest of the shard kept certifying, but the recovery transaction never executed within 120s |
+| complete shard+reth pair restart | **fails** — shard kept certifying with the pair down, a transaction executed while it was absent, the returning node accepted a certificate, but the recovery transaction never executed within 120s |
+| multi-leader execution | **pass** — see below |
+
+The follower-restart row is new. Every previous revision of this lane reported it as failing
+("validator 2's executor did not apply the new block") and scenarios 3-6 as `NOT RUN`.
+
+**What makes the difference is measurable, and it is not the harness.** Three runs, same scenarios:
+
+| runtime | follower restart | leader restart |
+| --- | --- | --- |
+| F6b stage 3 at `ea608abc` | recovers | recovers |
+| plus the certified-commit binding (`8e2599ca`) | `continuity-gap`, no recovery | `continuity-gap`, no recovery |
+| plus the T2-bounded await budget (#107) | **recovers**, converged | `continuity-gap`, no recovery |
+| plus the replay/leadership gates (`b20eaf4f`), T2 still 3s | `no-anchor`, no recovery | `continuity-gap`, no recovery |
+| merged integration (#106 + #107), **T2 5s** | **intermittent** — recovers and converges in one run, `continuity-gap` in another | **intermittent** — same |
+| plus subscription renewal decoupled from voting (#109) | **recovers**, converged | **recovers**, converged |
+
+The middle row is the stricter commit rule doing what it should: a returning node used to advance
+its executor by committing its own pending proposal on any certificate, which is precisely the
+finalization of uncertified blocks that #106 closes. With that route gone, catching up depends on
+the recovery path, which needs an unbroken chain of observed certificates — and a node running with
+an await budget longer than the shard's T2 consumes certificates more slowly than they arrive, misses
+one, and reports `continuity-gap`. Bounding the budget by T2 restores the follower case.
+
+**What the last row rests on.** The restarted validator in that run received **12 certificates after
+its restart with a maximum gap of 2.3 seconds** and **no gap over 10s**, while submitting **nothing**
+— and its continuity state was invalidated **zero** times. Compare the traced run before the fix: a
+34-second gap, six missed partition rounds, and an invalidation. That is the mechanism removed, in
+the terms it was traced in, rather than a scenario that happened to pass.
+
+It is one run of an intermittent symptom, so it is evidence about the mechanism and not proof that
+no path to `continuity-gap` remains. Preventing the starvation also does not recover evidence a node
+already missed while disconnected; that is a separate question and #16 stays open.
+
+**The row before it was intermittent, and that is why the fix is measured this way.** On merged
+integration with T2 at 5s, a two-scenario run had both the follower restart and the leader restart
+recover, execute new work and converge on all four clients; an earlier run at the same T2 had the
+leader restart refuse with `continuity-gap`. Nothing about the runtime differs between them. That is
+what #109's trace predicts: whether a restarted node loses its certificate feed at a moment that
+costs it an assignment is a timing question, so the same scenario can pass and fail without anything
+changing. The row is not "fixed" and must not be reported as such.
+
+The fourth row is worse than the third and is recorded rather than smoothed over. Both restarted nodes now end with a *named* refusal — `no-anchor` on the follower,
+`continuity-gap` on the leader — so neither is a mystery about what the node decided; what is not
+traced is the certificate history that led each one there. Two things changed under it at once (the
+replay/leadership gates and T2 moving to 5 seconds), so nothing here attributes the difference to
+either.
+
+The leader case does not recover in any revision after the commit binding, and is not explained here. Its snapshot records
+`continuity-gap` on the returning node as well, so it is the same shape at a different scale — the
+node was the round leader when it was killed, so it has more to catch up on. Owner: #92 stage 4 and
+F6 (#14), with #105 for what a restored node may then do.
+
+**The two failures, stated as what was observed rather than as a diagnosis.** Both end the same way
+— the transaction submitted to prove the returning node does new work is never executed — and the
+retained snapshots say more than the failure line does:
+
+- `04b-after-reth-restart`: all four validators at `certifiedRound=5` and the *same* execution head
+  (`2:0xa3f7ca9c…`), and all four reporting `lastRecoveryDiagnostic=unavailable in the executor
+  (status syncing)`. So the shard is not split: it certified a round whose block no executor
+  reports holding, and every node is retrying for it.
+- `05b-after-pair-restart`: `certifiedRound=21` on all four; the restarted node at execution head
+  `2:0xa148fb21…` while the other three are at `3:0x851a7bd3…`, with no recovery diagnostic
+  recorded and the restart gate active on it (`nonVotingAfterRestart=1`).
+
+Neither is claimed to be understood here. They are the missing-payload-acquisition case (#92 stage
+4) as far as the diagnostics go, and they belong to F6 (#14) and #92 rather than to this harness.
+
+**One further observation, retained because it is not explained.** In the six-scenario run's last
+cluster, every validator logged, repeatedly, `engine_forkchoiceUpdatedV3: engine API error -38006:
+Too deep reorg` from a recovery `Commit`, and the cluster stopped executing transactions. The same
+scenario run again on its own cluster (`-s multi-leader`) passed completely, so it is intermittent.
+The adapter pins head, safe and finalized to the same hash on every commit, so a commit that asks
+reth to move to any block that is not a descendant of what it has already finalised is refused and
+cannot succeed on retry — that is a plausible shape for it, and it is **not** established. Owner:
+#92 with F6 (#14); the archive is retained.
+
+**Multi-leader execution (#88 stage 1) — satisfied.** The requirement is two distinct shard leaders
+each producing an *executed, certified* block, and counting submissions does not answer it. The
+harness now joins three independently recorded facts:
+
+```
+receipt      tx            -> EVM block hash        (eth_getTransactionReceipt, the execution client)
+anchor line  EVM block hash -> partition round      (shard node, logged after UC.Verify)
+submit line  partition round -> leader              (shard node, from the technical record)
+```
+
+and drives the workload, bounded, until two distinct leaders have each produced one. The middle step
+is why this lane runs its validators at debug: `execution anchor installed` is the only line carrying
+a partition round and a certified EVM block hash together. If it is absent the assertion **fails**
+rather than quietly finding nothing, and any executed transaction that cannot be correlated is
+reported as a skip with its reason — the first version of that function passed the wrong argument
+shape to `rpcField`, correlated nothing, and reported "0 leaders", which is a broken harness rather
+than a shard result.
+
+Result (`evidence/multi-leader.txt`, tx / block hash / partition round / leader validator / leader
+peer / certifying root round):
+
+```
+0x7ea8b9b5… 0x76ad3e85…  9 1 16Uiu2HAkvFP8rKKxa9NTp5y5h5AqD2LApSvamcReywt9Zn89pWCQ  51
+0x7126d65f… 0x17dc9f88… 12 1 16Uiu2HAkvFP8rKKxa9NTp5y5h5AqD2LApSvamcReywt9Zn89pWCQ  60
+0xcbed4193… 0x161dc4c9… 19 1 16Uiu2HAkvFP8rKKxa9NTp5y5h5AqD2LApSvamcReywt9Zn89pWCQ  81
+0xc66546da… 0xacefa193… 22 1 16Uiu2HAkvFP8rKKxa9NTp5y5h5AqD2LApSvamcReywt9Zn89pWCQ  90
+0xf65b2d22… 0x3b0eb5c0… 32 1 16Uiu2HAkvFP8rKKxa9NTp5y5h5AqD2LApSvamcReywt9Zn89pWCQ 120
+0x311b2ed3… 0xa16dcec5… 36 4 16Uiu2HAmPSun6d1PyGjghD7t7QzAF9KaE11dPa4jsk1iukoPp3uR 132
+```
+
+Six transactions, six EVM blocks, two distinct leaders, each block tied to the round that certified
+it and the certificate that did so.
+
+**Status.** The harness is corrected, its oracle and its supervisor are regression-tested, and every
+scenario now produces a per-scenario result instead of four `NOT RUN`s. #88 stays open. The likely runtime
 cause is #92 (`Round.reconcile` passing a quiet certificate's nil `BlockHash` into `Commit`), which
 fits a node that accepts certificates but never applies a block. Owners: F6 (#14) for the executor
 recovery contract, F2 (#10) for what a returning node should do about a certified head it cannot
