@@ -4,6 +4,10 @@ Issue #92. Companion to `docs/design/f6b-quiet-uc-recovery.md` (stage 2/3, refer
 **the stage-2 record**), which this record extends rather than replaces. Section numbers of the form
 §3.3.1 refer to that document; sections of this one are numbered plainly.
 
+**Scope note.** The predicate (§2–§5) and this record shipped in #112 as design and fixtures only.
+The serving buffer of §6.1 shipped next, also without transport or recovery wiring. The scope
+paragraph below describes #112 and is kept as written at the time.
+
 **Scope of the PR this record ships in: design and fixtures only.** It adds a pure verification
 predicate (`shardnode/anchorevidence.go`) and its acceptance fixtures
 (`shardnode/anchorevidence_test.go`). Nothing calls the predicate from production code, no transport
@@ -363,8 +367,10 @@ serving buffer, specified here and implemented in a later PR:
 **Contents.** A ring of `(UC, TechnicalRecord)` pairs in observation order, plus a pointer to the
 most recent **non-quiet** entry — the source. Both halves are needed: the source names the block, the
 ring supplies the tail. Nothing is added that the node does not already receive and authenticate.
+(Refined below: non-quiet entries live *in the ring* rather than behind a single pointer.)
 
-**Bounds and eviction.** Bounded by entry count and by bytes, oldest-evicted-first, and sized so that
+**Bounds and eviction.** Bounded by entry count and by bytes — **both hard**, with no "keep at least
+one entry" floor (see the correction below) — oldest-evicted-first, and sized so that
 the buffer can serve a tail at least as long as `AnchorEvidenceLimits.MaxCertificates`. If evicting
 would drop the current source, the buffer drops **the whole interval** and reports itself unable to
 serve, rather than retaining a source it can no longer connect to the present. Bounded memory is not
@@ -405,6 +411,55 @@ view has moved past the requester's held round, that is normal and harmless: the
 outside the requested window. If the provider is *behind* the requester, it says so rather than
 serving a short chain, because a short chain is refused at the far end anyway (§2.2) and saying so
 lets the requester pick a better peer immediately.
+
+**Implemented in `shardnode/evidencebuffer.go`** (`EvidenceBuffer.Observe` / `.Assemble`), with two
+refinements that only became visible while writing it, both recorded here because they change the
+contract rather than the code:
+
+- **Sequence, epoch and repeat handling happen at observation time, not at assembly time.** The ring
+  is therefore at all times a single unbroken same-epoch interval, one entry per partition round,
+  each carrying the latest assignment for that round. Assembly reduces to choosing a window, which
+  is what makes "never synthesise a proof" checkable by reading one function instead of auditing
+  every path through two.
+- **A duplicate is distinguished from a look-alike by the committed assignment.** Two certificates
+  can carry the same input record at the same root round and still commit to *different* technical
+  records. That is not a retransmission, it is a contradiction, and treating it as a duplicate would
+  silently retain whichever arrived first. Duplicate requires identical input record, identical root
+  round **and** identical `TRHash`; anything else for an already-retained round abandons the
+  interval and rebuilds from the newest observation. Whether a shard node should also raise
+  equivocation from that is #93's taxonomy and is not decided here.
+
+Two further points the implementation makes explicit. Eviction is plain oldest-first, with no
+special case for a source, because assembly asks the sharper question anyway — whether a source
+survives *at or before the requested round*. And an observation is refused outright (rather than
+retained) in exactly one case beyond malformed input: a technical record the certificate does not
+commit to. The caller has already authenticated the certificate; that binding is re-checked because
+what is retained will later be handed to somebody else, and the assignment inside it is what
+contiguity is judged against at both ends.
+
+**A bound with a floor is not a bound.** The first implementation kept the newest entry even when it
+exceeded `MaxBytes`, so retention could sit a whole certificate above the configured limit — and
+exactly where certificates are largest, since per-certificate size is driven by validator-set size.
+Both bounds are now hard, and a pair that alone cannot fit is **refused** with a named outcome rather
+than retained in violation of the limit: that is a *configuration* result, not malformed input (the
+certificate may be perfectly genuine and simply larger than this node was configured to hold, and the
+actionable response is to raise `MaxBytes`). The interval is abandoned with it, because a round this
+node cannot retain is a round it can no longer prove an interval across, and the alternative — a
+served chain with a hole where that certificate belongs — is precisely what the far end must refuse.
+
+**Quiet means quiet *at the interval's state*, and both ends must say so identically.** The predicate
+requires every certificate after the source to name no block **and** to stand at the source's state,
+carried forward round by round (`ErrEvidenceNotQuiet`, §2). The first implementation classified
+retention on the block hash alone, which is strictly weaker: a certificate that names no block and
+stands at a state this interval never reached is quiet by that test, was retained as an ordinary
+link, and could be served inside a window — a chain the buffer assembled successfully and the far end
+then refused. That is not merely wasted work; it spends one of the requester's bounded attempts
+(§4) on evidence the provider could see was unusable, and a provider that does that is
+indistinguishable from one that is stalling. Observation therefore applies the predicate's own test,
+and an interval that cannot satisfy it is abandoned rather than bridged. (An input record whose state
+*changed* must name a block, so the shape that authenticates and still breaks this rule is the one
+standing at another state, not the one that moves it — the moving one never verifies at all. The
+buffer authenticates nothing itself, so it enforces both arms regardless.)
 
 **Why in-memory is enough for now.** The measured failure is a node returning into a *live* shard,
 where peers have been running throughout — exactly the case an in-memory buffer covers. Persisting
