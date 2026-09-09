@@ -177,6 +177,19 @@ func (b *EvidenceBuffer) Observe(uc *types.UnicityCertificate, tr *certification
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	// A pair that alone exceeds MaxBytes can never be retained within the bound, so it is refused
+	// rather than kept in violation of it. This is a CONFIGURATION outcome, not malformed input: the
+	// certificate may be perfectly genuine and simply larger than this node was configured to hold,
+	// and the actionable response is to raise MaxBytes. The interval is abandoned with it, because
+	// a round this node cannot retain is a round it can no longer prove the interval across, and
+	// the alternative — serving a chain with a hole where this certificate should be — is precisely
+	// what the far end must refuse.
+	if e.size > b.limits.MaxBytes {
+		b.reset()
+		return fmt.Errorf("%w: round %d encodes to %d bytes with its technical record, which alone exceeds MaxBytes=%d",
+			ErrObservationRejected, e.round, e.size, b.limits.MaxBytes)
+	}
+
 	// A shard epoch change moves the validator set and the configuration with it, and the predicate
 	// refuses a chain that crosses one (§3.1). Retaining across the boundary could therefore only
 	// produce chains nobody may use, so the interval restarts in the new epoch. Keeping this scope
@@ -243,6 +256,23 @@ func (b *EvidenceBuffer) Observe(uc *types.UnicityCertificate, tr *certification
 		return nil
 	}
 
+	// QUIET MEANS QUIET AT THE INTERVAL'S STATE, not merely "names no block". The predicate requires
+	// every certificate after the source to satisfy `BlockHash empty AND Hash == PreviousHash ==
+	// the source's state` (ErrEvidenceNotQuiet), and the source's state is carried forward by each
+	// quiet round in turn. Classifying on the block hash alone was weaker than that at this end, so
+	// a certificate that named no block but moved the state was retained as an ordinary quiet link
+	// and served inside a window — a chain this buffer assembled successfully and the far end then
+	// refused. A provider must never spend a requester's attempt on evidence it could see was
+	// unusable, so the two ends classify identically and the interval is abandoned here instead.
+	if !e.nonQuiet {
+		state := last.uc.InputRecord.Hash
+		if !bytes.Equal(e.uc.InputRecord.Hash, state) || !bytes.Equal(e.uc.InputRecord.PreviousHash, state) {
+			b.reset()
+			b.append(e)
+			return nil
+		}
+	}
+
 	b.append(e)
 	return nil
 }
@@ -256,8 +286,13 @@ func (b *EvidenceBuffer) append(e bufferEntry) {
 	b.evict()
 }
 
+// evict trims to the bounds. BOTH bounds are hard: there is no "keep at least one entry" floor,
+// because a floor would let retention exceed MaxBytes by the size of one certificate — a bound that
+// can be exceeded is not a bound, and the one place it would be exceeded is exactly the place the
+// certificates are largest. Nothing is retained beyond MaxBytes; Observe refuses a pair that cannot
+// fit at all, so this loop always terminates at one entry or more rather than emptying the ring.
 func (b *EvidenceBuffer) evict() {
-	for len(b.entries) > b.limits.MaxEntries || (b.bytes > b.limits.MaxBytes && len(b.entries) > 1) {
+	for len(b.entries) > 0 && (len(b.entries) > b.limits.MaxEntries || b.bytes > b.limits.MaxBytes) {
 		b.bytes -= b.entries[0].size
 		b.entries = b.entries[1:]
 		b.evicted = true

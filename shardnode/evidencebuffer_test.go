@@ -335,15 +335,101 @@ func TestEvidenceBuffer_Eviction(t *testing.T) {
 		require.ErrorIs(t, err, ErrProviderEvicted)
 	})
 
-	t.Run("the byte bound evicts too, and never below one entry", func(t *testing.T) {
+	t.Run("the byte bound is hard: retention never exceeds it", func(t *testing.T) {
+		// The bound has no one-entry floor. A floor would let retention sit above MaxBytes by a
+		// whole certificate, which is not a bound at all, and would do so exactly where
+		// certificates are largest.
 		f := newEvidenceFixture(t)
-		obs := build(t, f, 4)
-		b, err := NewEvidenceBuffer(EvidenceBufferLimits{MaxEntries: 512, MaxBytes: 1})
+		obs := build(t, f, 6)
+
+		one, err := NewEvidenceBuffer(EvidenceBufferLimits{MaxEntries: 512, MaxBytes: 1 << 20})
+		require.NoError(t, err)
+		require.NoError(t, one.Observe(obs[0].UC, obs[0].Technical))
+		pairSize := one.bytes
+		require.Positive(t, pairSize)
+
+		for _, budget := range []int{pairSize, pairSize + 1, 2 * pairSize, 3*pairSize + 7} {
+			b, err := NewEvidenceBuffer(EvidenceBufferLimits{MaxEntries: 512, MaxBytes: budget})
+			require.NoError(t, err)
+			for _, l := range obs {
+				require.NoError(t, b.Observe(l.UC, l.Technical))
+				require.LessOrEqual(t, b.bytes, budget, "retained bytes must never exceed MaxBytes")
+			}
+			count, _, to := b.Retained()
+			require.Positive(t, count)
+			require.LessOrEqual(t, count, budget/pairSize+1)
+			require.EqualValues(t, obs[len(obs)-1].UC.InputRecord.RoundNumber, to,
+				"the newest observation is always the one kept")
+		}
+	})
+
+	t.Run("the trimming loop itself leaves nothing above the bound", func(t *testing.T) {
+		// Asserted on the loop directly, because Observe's refusal of an oversized pair means the
+		// ring never legitimately reaches this state. Both are needed: the refusal is the named
+		// outcome an operator can act on, and this is the invariant that holds even if a future
+		// caller finds a way past it.
+		f := newEvidenceFixture(t)
+		obs := build(t, f, 3)
+		b, err := NewEvidenceBuffer(EvidenceBufferLimits{MaxEntries: 512, MaxBytes: 1 << 20})
 		require.NoError(t, err)
 		mustObserve(t, b, obs...)
-		count, _, to := b.Retained()
-		require.Equal(t, 1, count, "a single entry is retained even under an impossible byte bound")
-		require.EqualValues(t, obs[len(obs)-1].UC.InputRecord.RoundNumber, to)
+
+		b.limits.MaxBytes = b.bytes/2 + 1
+		b.evict()
+		require.LessOrEqual(t, b.bytes, b.limits.MaxBytes)
+
+		b.limits.MaxBytes = 1
+		b.evict()
+		require.LessOrEqual(t, b.bytes, 1, "no entry survives a bound it does not fit")
+		count, _, _ := b.Retained()
+		require.Zero(t, count)
+	})
+
+	t.Run("a pair that alone exceeds the byte bound is refused, not retained in violation of it", func(t *testing.T) {
+		// The old floor accepted this and reported a healthy interval while holding more than the
+		// configuration allows. It is a configuration outcome, not malformed input, so it is named
+		// as one — and the interval goes with it, because a round that cannot be retained is a
+		// round the interval can no longer be proved across.
+		f := newEvidenceFixture(t)
+		obs := build(t, f, 3)
+		b, err := NewEvidenceBuffer(EvidenceBufferLimits{MaxEntries: 512, MaxBytes: 1})
+		require.NoError(t, err)
+
+		err = b.Observe(obs[0].UC, obs[0].Technical)
+		require.ErrorIs(t, err, ErrObservationRejected)
+		require.ErrorContains(t, err, "exceeds MaxBytes=1")
+		count, _, _ := b.Retained()
+		require.Zero(t, count)
+		require.Zero(t, b.bytes)
+		require.False(t, b.Ready())
+
+		_, err = b.Assemble(requestFor(t, obs[0].UC))
+		require.ErrorIs(t, err, ErrProviderNotReady, "it never held anything to lose")
+	})
+
+	t.Run("an oversized round abandons the interval it interrupts", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		obs := build(t, f, 4)
+
+		sized, err := NewEvidenceBuffer(EvidenceBufferLimits{MaxEntries: 512, MaxBytes: 1 << 20})
+		require.NoError(t, err)
+		require.NoError(t, sized.Observe(obs[3].UC, obs[3].Technical))
+		pairSize := sized.bytes
+
+		// A bound that admits the first rounds and then, hypothetically, not this one: constructed
+		// by tightening the bound to just below one pair once the interval is established.
+		b, err := NewEvidenceBuffer(EvidenceBufferLimits{MaxEntries: 512, MaxBytes: 8 * pairSize})
+		require.NoError(t, err)
+		mustObserve(t, b, obs[0], obs[1], obs[2])
+		require.True(t, b.Ready())
+
+		b.limits.MaxBytes = pairSize - 1
+		require.ErrorIs(t, b.Observe(obs[3].UC, obs[3].Technical), ErrObservationRejected)
+		count, _, _ := b.Retained()
+		require.Zero(t, count, "the interval is abandoned rather than left with a hole in it")
+
+		_, err = b.Assemble(requestFor(t, obs[2].UC))
+		require.ErrorIs(t, err, ErrProviderEvicted, "it had an interval and no longer has it")
 	})
 
 	t.Run("as long as a source survives, the window it can serve is served in full", func(t *testing.T) {
@@ -378,6 +464,118 @@ func TestEvidenceBuffer_Eviction(t *testing.T) {
 			_, err := NewEvidenceBuffer(l)
 			require.Error(t, err)
 		}
+	})
+}
+
+/*
+TestEvidenceBuffer_QuietMeansQuietAtTheIntervalState pins the two ends to ONE definition of quiet.
+
+The predicate requires every certificate after the source to name no block AND to stand at the
+source's state (ErrEvidenceNotQuiet). Classifying retention on the block hash alone was weaker than
+that: a certificate that named no block but moved the state was retained as an ordinary quiet link,
+and the buffer assembled a window containing it — a chain it built successfully and the far end
+refused. A provider must not spend a requester's attempt on evidence it could see was unusable.
+*/
+func TestEvidenceBuffer_QuietMeansQuietAtTheIntervalState(t *testing.T) {
+	stateA, stateB, stateC, blockB := h32(0x0a), h32(0x0b), h32(0x0c), h32(0xbb)
+
+	// elsewhere is a certificate that names no block and stands at a state the interval never
+	// reached: internally consistent (Hash == PreviousHash, so a valid input record that
+	// authenticates), quiet by the block-hash test, and not quiet at the source's state.
+	elsewhere := func(f *evidenceFixture) EvidenceLink { return f.cert(16, 120, stateC, stateC, nil, 21) }
+
+	t.Run("the predicate refuses a quiet round standing at another state", func(t *testing.T) {
+		// The reproduction, stated at the far end first: this is the bundle the old classification
+		// let a provider assemble, authenticate by authenticate, and serve.
+		f := newEvidenceFixture(t)
+		source := f.cert(10, 100, stateA, stateB, blockB, 12)
+		quiet := f.cert(12, 110, stateB, stateB, nil, 16)
+		off := elsewhere(f)
+
+		_, err := verifyAssembled(t, f, AnchorEvidence{
+			Source:          source.UC,
+			SourceTechnical: source.Technical,
+			Tail:            []EvidenceLink{quiet, off},
+		}, off.UC)
+		require.ErrorIs(t, err, ErrEvidenceNotQuiet)
+	})
+
+	t.Run("so the buffer abandons the interval rather than serving it", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		b := newTestBuffer(t)
+		off := elsewhere(f)
+		mustObserve(t, b,
+			f.cert(10, 100, stateA, stateB, blockB, 12),
+			f.cert(12, 110, stateB, stateB, nil, 16),
+			off,
+		)
+
+		count, from, to := b.Retained()
+		require.Equal(t, 1, count, "only the certificate that broke the interval remains")
+		require.EqualValues(t, 16, from)
+		require.EqualValues(t, 16, to)
+		require.False(t, b.Ready(), "it names no block, so it can anchor nobody")
+
+		_, err := b.Assemble(requestFor(t, off.UC))
+		require.ErrorIs(t, err, ErrProviderEvicted)
+	})
+
+	t.Run("a quiet round whose predecessor state is not the interval's is refused as well", func(t *testing.T) {
+		// Hash is the interval's state but PreviousHash is not, so the certificate claims to have
+		// arrived at that state from somewhere this interval never was. No authentic certificate
+		// has this shape — an input record whose state changed must name a block — but the buffer
+		// authenticates nothing itself, and its contract is not to serve what the predicate
+		// refuses even when the caller handed it something it should not have.
+		f := newEvidenceFixture(t)
+		b := newTestBuffer(t)
+		mustObserve(t, b,
+			f.cert(10, 100, stateA, stateB, blockB, 12),
+			f.cert(12, 110, stateC, stateB, nil, 16),
+		)
+		count, from, _ := b.Retained()
+		require.Equal(t, 1, count, "the interval is abandoned, not bridged")
+		require.EqualValues(t, 12, from)
+	})
+
+	t.Run("a state move that names no block never authenticates in the first place", func(t *testing.T) {
+		// Worth stating, because it says which defence is load-bearing: an input record whose state
+		// changed must name a block, so this shape is refused by verification and the buffer's rule
+		// is not the only thing standing between it and a served chain. The shape the buffer's rule
+		// exists for is the one above, which authenticates perfectly.
+		f := newEvidenceFixture(t)
+		source := f.cert(10, 100, stateA, stateB, blockB, 12)
+		moves := f.cert(12, 110, stateB, stateC, nil, 16)
+		_, err := verifyAssembled(t, f, AnchorEvidence{
+			Source:          source.UC,
+			SourceTechnical: source.Technical,
+			Tail:            []EvidenceLink{moves},
+		}, moves.UC)
+		require.ErrorIs(t, err, ErrEvidenceUnauthenticated)
+		require.ErrorContains(t, err, "block hash is nil but state hash changed")
+	})
+
+	t.Run("a state move that does name a block is a new source, not a break", func(t *testing.T) {
+		// The distinction that makes the rule safe to apply: the shard producing blocks again is
+		// ordinary, and it starts a fresh interval rather than ending one.
+		f := newEvidenceFixture(t)
+		b := newTestBuffer(t)
+		newSource := f.cert(16, 120, stateB, stateC, h32(0xcc), 21)
+		head := f.cert(21, 130, stateC, stateC, nil, 25)
+		mustObserve(t, b,
+			f.cert(10, 100, stateA, stateB, blockB, 12),
+			f.cert(12, 110, stateB, stateB, nil, 16),
+			newSource, head,
+		)
+		count, from, to := b.Retained()
+		require.Equal(t, 4, count)
+		require.EqualValues(t, 10, from)
+		require.EqualValues(t, 21, to)
+
+		ev, err := b.Assemble(requestFor(t, head.UC))
+		require.NoError(t, err)
+		anchor, err := verifyAssembled(t, f, ev, head.UC)
+		require.NoError(t, err)
+		require.Equal(t, Hash(h32(0xcc)), anchor.BlockHash)
 	})
 }
 
