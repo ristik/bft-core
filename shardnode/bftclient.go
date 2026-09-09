@@ -214,6 +214,9 @@ func (c *BFTClient) Run(ctx context.Context) error {
 				if c.log != nil {
 					c.log.WarnContext(ctx, "inactivity timeout exceeded, re-sending handshake")
 				}
+				if c.log != nil {
+					c.log.DebugContext(ctx, "renewing the certificate subscription: this node submitted nothing for the last certificate")
+				}
 				if err := c.sendHandshake(ctx); err != nil && c.log != nil {
 					c.log.ErrorContext(ctx, "re-handshake failed", slog.String("err", err.Error()))
 				}
