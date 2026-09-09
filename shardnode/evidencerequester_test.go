@@ -656,6 +656,125 @@ func TestEvidenceRequester_TargetIsPinnedToTheCertificateHeld(t *testing.T) {
 	require.Len(t, asked, 1, "carrying a retained result forward is local work")
 }
 
+/*
+A repeat this node ALREADY holds must not be appended to evidence that already ends at it.
+
+The provider's buffer retains repeats, so a correct answer to a request pinned to a repeated round
+ends at the repeat. Extending it with "the repeat, again" produces a tail whose second copy is at the
+SAME root round as the first, and repeat normalisation requires a strictly later one (§2.3) — so a
+correct answer is refused as a gap, and the retry budget is spent obtaining it again and again.
+
+The cause is that a snapshot cannot be keyed on content: a repeat has the same round and the same
+input record as the certificate it repeats. It is keyed on the observation's own version instead, and
+the fixture in HeldCertificateMovesUnderTheFetch pins the opposite direction — a repeat observed
+AFTER the snapshot, which must be appended, because it carries the assignment the rest follows.
+*/
+func TestEvidenceRequester_EvidenceThatAlreadyEndsAtTheHeldRepeat(t *testing.T) {
+	stateB := h32(0x0b)
+	var full AnchorEvidence
+	rf := newRecoveryFixture(t, []peer.ID{"a"}, testBudget(),
+		func(context.Context, peer.ID, EvidenceRequest) (AnchorEvidence, error) { return full, nil })
+	f := rf.evidenceFixture
+	source, mid, head := quietTailChain(f)
+	// Round 16 again: same input record, a later root round, a new assignment. Both this node and
+	// the provider retained it, so the chain the provider serves ends at it.
+	repeat := f.cert(16, 125, stateB, stateB, nil, 21)
+	full = bundleOf(source, mid, head, repeat)
+
+	rf.observe(t, source, mid, head, repeat)
+	require.NoError(t, rf.req.Need())
+	st := rf.settled(t)
+
+	require.Equal(t, RecoveryReady, st.State, "err: %v", st.LastErr)
+	require.Zero(t, st.Restarts, "the answer was correct; nothing needed re-obtaining")
+	asked, _ := rf.fetcher.calls()
+	require.Len(t, asked, 1)
+	anchor, ok := rf.req.Target()
+	require.True(t, ok)
+	require.Equal(t, Hash(h32(0xbb)), anchor.BlockHash)
+}
+
+/*
+What a caller is handed is its own. ExecutionAnchor's hashes are byte slices and Contradiction holds
+certificate pointers, so returning a struct copy hands out the retained values themselves: a caller
+that overwrites a returned hash would be editing this node's verified target, and the next reader
+would be told the edited value had been verified.
+*/
+func TestEvidenceRequester_ReturnedValuesDoNotAliasWhatIsRetained(t *testing.T) {
+	t.Run("a returned target", func(t *testing.T) {
+		var full AnchorEvidence
+		rf := newRecoveryFixture(t, []peer.ID{"a"}, testBudget(),
+			func(context.Context, peer.ID, EvidenceRequest) (AnchorEvidence, error) { return full, nil })
+		source, mid, head := quietTailChain(rf.evidenceFixture)
+		full = bundleOf(source, mid, head)
+		rf.observe(t, source, mid, head)
+		require.NoError(t, rf.req.Need())
+		require.Equal(t, RecoveryReady, rf.settled(t).State)
+
+		anchor, ok := rf.req.Target()
+		require.True(t, ok)
+		anchor.BlockHash[0] ^= 0xff
+		anchor.StateRoot[0] ^= 0xff
+		anchor.Round = 999
+
+		again, ok := rf.req.Target()
+		require.True(t, ok)
+		require.Equal(t, Hash(h32(0xbb)), again.BlockHash, "the retained target is what was verified")
+		require.Equal(t, Hash(h32(0x0b)), again.StateRoot)
+		require.EqualValues(t, 10, again.Round)
+	})
+
+	t.Run("a returned contradiction", func(t *testing.T) {
+		stateA, stateC := h32(0x0a), h32(0x0c)
+		var conflicting AnchorEvidence
+		rf := newRecoveryFixture(t, []peer.ID{"a"}, testBudget(),
+			func(context.Context, peer.ID, EvidenceRequest) (AnchorEvidence, error) { return conflicting, nil })
+		f := rf.evidenceFixture
+		_, _, head := quietTailChain(f)
+		other := f.cert(10, 100, stateA, stateC, h32(0xcc), 12)
+		conflicting = bundleOf(other, f.cert(12, 110, stateC, stateC, nil, 16), f.cert(16, 120, stateC, stateC, nil, 19))
+
+		rf.observe(t, head)
+		require.NoError(t, rf.req.Need())
+		require.Equal(t, RecoveryRefused, rf.settled(t).State)
+
+		c, ok := rf.req.Contradiction()
+		require.True(t, ok)
+		c.Count = 99
+		c.HeldRound = 999
+		c.Evidence.Source.InputRecord.Hash[0] ^= 0xff
+		c.Evidence.Tail = nil
+
+		again, ok := rf.req.Contradiction()
+		require.True(t, ok)
+		require.Equal(t, 1, again.Count)
+		require.EqualValues(t, 16, again.HeldRound)
+		require.Equal(t, stateC, []byte(again.Evidence.Source.InputRecord.Hash), "the record of a disagreement cannot be rewritten")
+		require.Len(t, again.Evidence.Tail, 2)
+	})
+
+	t.Run("the recorded bundle does not alias what the provider handed over", func(t *testing.T) {
+		stateA, stateC := h32(0x0a), h32(0x0c)
+		var conflicting AnchorEvidence
+		rf := newRecoveryFixture(t, []peer.ID{"a"}, testBudget(),
+			func(context.Context, peer.ID, EvidenceRequest) (AnchorEvidence, error) { return conflicting, nil })
+		f := rf.evidenceFixture
+		_, _, head := quietTailChain(f)
+		other := f.cert(10, 100, stateA, stateC, h32(0xcc), 12)
+		conflicting = bundleOf(other, f.cert(12, 110, stateC, stateC, nil, 16), f.cert(16, 120, stateC, stateC, nil, 19))
+
+		rf.observe(t, head)
+		require.NoError(t, rf.req.Need())
+		require.Equal(t, RecoveryRefused, rf.settled(t).State)
+
+		// The decoder's buffers are not this node's to rely on staying still.
+		conflicting.Source.InputRecord.BlockHash[0] ^= 0xff
+		c, ok := rf.req.Contradiction()
+		require.True(t, ok)
+		require.Equal(t, h32(0xcc), []byte(c.Evidence.Source.InputRecord.BlockHash))
+	})
+}
+
 // --- authenticated disagreement ------------------------------------------------------------------
 
 /*
@@ -689,11 +808,13 @@ func TestEvidenceRequester_TerminalConflictEndsTheAttemptAndIsKept(t *testing.T)
 	asked, _ := rf.fetcher.calls()
 	require.Equal(t, []peer.ID{"a"}, asked, "no third party can adjudicate it, so nobody else is asked")
 
-	require.NotNil(t, st.Contradiction)
-	require.Equal(t, peer.ID("a"), st.Contradiction.Provider)
-	require.EqualValues(t, 16, st.Contradiction.HeldRound)
-	require.NotNil(t, st.Contradiction.Evidence.Source, "the bundle is kept as it arrived")
-	require.Len(t, st.Contradiction.Evidence.Tail, 2)
+	require.Equal(t, 1, st.Contradictions)
+	c, ok := rf.req.Contradiction()
+	require.True(t, ok)
+	require.Equal(t, peer.ID("a"), c.Provider)
+	require.EqualValues(t, 16, c.HeldRound)
+	require.NotNil(t, c.Evidence.Source, "the bundle is kept as it arrived")
+	require.Len(t, c.Evidence.Tail, 2)
 
 	// Terminal for THAT certificate, and only it.
 	require.ErrorIs(t, rf.req.Need(), ErrRecoveryConflict)
@@ -734,9 +855,11 @@ func TestEvidenceRequester_ASplitInsideOneBundleIsKeptButNotTerminal(t *testing.
 	require.Equal(t, RecoveryReady, st.State, "err: %v", st.LastErr)
 	asked, _ := rf.fetcher.calls()
 	require.Equal(t, []peer.ID{"a", "b"}, asked, "the second provider is still consulted")
-	require.NotNil(t, st.Contradiction)
-	require.ErrorIs(t, st.Contradiction.Err, ErrEvidenceCandidateSplit)
-	require.Equal(t, 1, st.Contradiction.Count)
+	require.Equal(t, 1, st.Contradictions)
+	c, ok := rf.req.Contradiction()
+	require.True(t, ok)
+	require.ErrorIs(t, c.Err, ErrEvidenceCandidateSplit)
+	require.Equal(t, 1, c.Count)
 }
 
 // --- context the node supplies itself -------------------------------------------------------------

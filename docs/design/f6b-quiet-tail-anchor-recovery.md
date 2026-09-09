@@ -670,10 +670,30 @@ the state away from B and back to B by a *different* block. The state root the n
 it asked about; the anchor it ends with is the block that actually produced it, reached by a second
 request pinned to the new certificate — not the block the first answer named.
 
-The extension is located in the witness by POSITION and takes the FIRST match, not the last. A repeat
-of the snapshot's own round carries a new assignment, and the rounds after it are contiguous with
-*that* assignment; starting after a later repeat would drop the link that makes the rest join up and
-turn an honest tail into a gap.
+**A snapshot is a VERSION of an observation, not its content.** Each observation carries a
+monotonic sequence number, and the extension starts after the entry with the snapshot's number.
+Review found the content key — round plus canonical identity — wrong in both directions, and a repeat
+certificate is what exposes it, because a repeat has the *same* round and the *same* input record as
+the certificate it repeats. That is what makes it a repeat, so a content key names two observations
+and something has to break the tie:
+
+- taking the *first* match appends a repeat this node already holds to evidence that already ends at
+  it. The duplicate sits at the same root round as the copy before it, and repeat normalisation
+  requires a strictly later one (§2.3), so a **correct** answer is refused as a gap — and the retry
+  budget is then spent obtaining the same correct answer again, until recovery fails;
+- taking the *last* match drops a repeat observed after the snapshot, and with it the assignment the
+  rounds after it are contiguous with, turning an honest tail into a gap.
+
+There is no content key that separates the two cases. Both directions are fixtures.
+
+**What a caller is handed is its own.** `ExecutionAnchor`'s hashes are byte slices and a contradiction
+holds certificate pointers, so returning a struct copy hands out the retained values themselves:
+a caller that overwrote a returned hash would be editing this node's verified target, and the next
+reader would be told the edited value had been verified. `Target` clones the hashes, `Contradiction`
+re-decodes the bundle, and the bundle is re-decoded on the way IN as well — it arrives through a
+decoder whose buffers this node does not own, and a record meant to outlive the attempt cannot rest on
+them. `Status` carries only a count of contradictions, so the cheap, frequent snapshot stays cheap and
+the copying is behind the call that needs it.
 
 **Restarts are bounded, because a correct loop can still be a livelock.** A shard certifying blocks
 faster than a fetch completes would restart the same recovery forever, every individual step

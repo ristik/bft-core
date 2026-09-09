@@ -210,17 +210,21 @@ type Contradiction struct {
 // RecoveryStatus is a snapshot for logs and tests: enough to reconstruct what the coordinator did
 // without inferring it from a later effect.
 type RecoveryStatus struct {
-	State         RecoveryState
-	HeldRound     uint64
-	Attempts      int
-	Restarts      int
-	Fetches       int
-	LastErr       error
-	NextAttempt   time.Time
-	TargetRound   uint64 // the SOURCE round the ready target names, zero if none
-	TargetFor     uint64 // the held round the target was verified against, zero if none
-	Contradiction *Contradiction
-	Witness       int
+	State       RecoveryState
+	HeldRound   uint64
+	Attempts    int
+	Restarts    int
+	Fetches     int
+	LastErr     error
+	NextAttempt time.Time
+	TargetRound uint64 // the SOURCE round the ready target names, zero if none
+	TargetFor   uint64 // the held round the target was verified against, zero if none
+	// Contradictions counts the authenticated disagreements seen. The disagreement ITSELF is behind
+	// Contradiction(), which copies it: a status snapshot is taken often and cheaply, and a bundle
+	// of up to MaxCertificates certificates does not belong in one — nor does a pointer into the
+	// retained record, which would let a reader rewrite the evidence it came to read.
+	Contradictions int
+	Witness        int
 }
 
 // witnessEntry is one certificate this node observed, kept so that a result obtained for an older
@@ -229,6 +233,12 @@ type witnessEntry struct {
 	link     EvidenceLink
 	round    uint64
 	identity []byte // InputRecord.Bytes(), the identity the predicate binds to
+	// seq numbers this observation within the process, monotonically and without reuse. It is what
+	// a snapshot is taken OF, and content is not a substitute for it: a repeat certificate has the
+	// same round AND the same identity as the certificate it repeats — that is what makes it a
+	// repeat — so a snapshot keyed on either names two different observations, and extending from
+	// the wrong one either drops a link or appends one twice.
+	seq uint64
 }
 
 // EvidenceRequester is the coordinator. One fetch at a time, by construction: `Need` is idempotent
@@ -248,6 +258,7 @@ type EvidenceRequester struct {
 	closed  bool
 	state   RecoveryState
 	witness []witnessEntry
+	nextSeq uint64
 
 	// retained is the last bundle that VERIFIED, with the held identity it verified against. It is
 	// kept after success so that a held certificate advancing over a quiet tail can be answered by
@@ -341,10 +352,12 @@ func (r *EvidenceRequester) Observe(uc *types.UnicityCertificate, tr *certificat
 		bytes.Equal(last.identity, identity) && last.link.UC.GetRootRoundNumber() == uc.GetRootRoundNumber() {
 		return nil
 	}
+	r.nextSeq++
 	r.witness = append(r.witness, witnessEntry{
 		link:     EvidenceLink{UC: ucCopy, Technical: trCopy},
 		round:    ucCopy.InputRecord.RoundNumber,
 		identity: identity,
+		seq:      r.nextSeq,
 	})
 	for len(r.witness) > r.cfg.Budget.MaxWitness {
 		r.witness[0] = witnessEntry{}
@@ -379,8 +392,22 @@ func (r *EvidenceRequester) Target() (*ExecutionAnchor, bool) {
 	if !ok || r.target == nil || !bytes.Equal(r.targetFor, held.identity) {
 		return nil, false
 	}
-	anchor := *r.target
-	return &anchor, true
+	return copyAnchor(r.target), true
+}
+
+// copyAnchor returns an anchor that shares nothing with the retained one. ExecutionAnchor's fields
+// are byte SLICES, so a struct copy hands the caller the same backing arrays: a caller that trims,
+// re-slices or overwrites a returned hash would be editing this node's own verified target, and the
+// next call would return the edited value as though it had been verified. The struct copy was
+// exactly that defect.
+func copyAnchor(a *ExecutionAnchor) *ExecutionAnchor {
+	if a == nil {
+		return nil
+	}
+	out := *a
+	out.BlockHash = Hash(bytes.Clone(a.BlockHash))
+	out.StateRoot = Hash(bytes.Clone(a.StateRoot))
+	return &out
 }
 
 // Status is a diagnostic snapshot. The contradiction, if there is one, is returned by pointer to the
@@ -389,15 +416,17 @@ func (r *EvidenceRequester) Status() RecoveryStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	st := RecoveryStatus{
-		State:         r.state,
-		Attempts:      r.attempts,
-		Restarts:      r.restarts,
-		Fetches:       r.fetches,
-		LastErr:       r.lastErr,
-		NextAttempt:   r.nextAttempt,
-		TargetFor:     r.targetForRnd,
-		Contradiction: r.contradiction,
-		Witness:       len(r.witness),
+		State:       r.state,
+		Attempts:    r.attempts,
+		Restarts:    r.restarts,
+		Fetches:     r.fetches,
+		LastErr:     r.lastErr,
+		NextAttempt: r.nextAttempt,
+		TargetFor:   r.targetForRnd,
+		Witness:     len(r.witness),
+	}
+	if r.contradiction != nil {
+		st.Contradictions = r.contradiction.Count
 	}
 	if held, ok := r.current(); ok {
 		st.HeldRound = held.round
@@ -715,13 +744,17 @@ func (r *EvidenceRequester) extension(from witnessEntry) (witnessEntry, []Eviden
 	if !ok {
 		return witnessEntry{}, nil, false
 	}
-	// FORWARD, and the first match, not the last. A repeat of the snapshot's own round carries a
-	// NEW assignment, and the certificates after it are contiguous with THAT assignment rather than
-	// with the one the snapshot carried — so starting after a later repeat would drop the link that
-	// makes the rest of the interval join up, and turn an honest tail into a gap.
+	// By SEQUENCE — the exact observation the snapshot was taken of. Matching on round and identity
+	// instead was wrong in both directions, and a repeat certificate is what exposes it: it carries
+	// the same round and the same input record as the certificate it repeats, and a NEW assignment.
+	// Taking the first content match appends a later repeat to evidence that already ends at it,
+	// and the duplicate is refused as a gap (a repeat must be at a STRICTLY later root round), so a
+	// correct answer is discarded and the retry budget is spent re-obtaining it. Taking the last
+	// content match instead drops the repeat that supplies the assignment the rest of the interval
+	// follows. There is no content key that separates the two; the version is the answer.
 	at := -1
 	for i := range r.witness {
-		if r.witness[i].round == from.round && bytes.Equal(r.witness[i].identity, from.identity) {
+		if r.witness[i].seq == from.seq {
 			at = i
 			break
 		}
@@ -765,6 +798,45 @@ func isContradiction(err error) bool {
 	return errors.Is(err, ErrEvidenceConflict) || errors.Is(err, ErrEvidenceCandidateSplit)
 }
 
+// Contradiction returns the first authenticated disagreement this requester saw, as an independent
+// copy: the certificates are re-decoded rather than shared, so examining the evidence — or handing
+// it to something that writes to it — cannot change what this node retained as the record of it.
+func (r *EvidenceRequester) Contradiction() (Contradiction, bool) {
+	r.mu.Lock()
+	c := r.contradiction
+	r.mu.Unlock()
+	if c == nil {
+		return Contradiction{}, false
+	}
+	out := *c
+	out.Evidence = copyEvidence(c.Evidence)
+	return out, true
+}
+
+// copyEvidence re-decodes a bundle so the copy shares no memory with it. It is the same mechanism
+// the serving buffer uses for the same reason: evidence that can change after it was recorded is not
+// evidence of anything.
+func copyEvidence(ev AnchorEvidence) AnchorEvidence {
+	out := AnchorEvidence{}
+	if ev.Source != nil && ev.SourceTechnical != nil {
+		if uc, tr, _, err := copyPair(ev.Source, ev.SourceTechnical); err == nil {
+			out.Source, out.SourceTechnical = uc, tr
+		}
+	}
+	out.Tail = make([]EvidenceLink, 0, len(ev.Tail))
+	for _, l := range ev.Tail {
+		if l.UC == nil || l.Technical == nil {
+			continue
+		}
+		uc, tr, _, err := copyPair(l.UC, l.Technical)
+		if err != nil {
+			continue
+		}
+		out.Tail = append(out.Tail, EvidenceLink{UC: uc, Technical: tr})
+	}
+	return out
+}
+
 func (r *EvidenceRequester) recordContradiction(p peer.ID, heldRound uint64, ev AnchorEvidence, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -772,8 +844,10 @@ func (r *EvidenceRequester) recordContradiction(p peer.ID, heldRound uint64, ev 
 		r.contradiction.Count++
 		return
 	}
+	// Copied on the way IN as well: the bundle came from a provider through a decoder this node does
+	// not own the buffers of, and the record is meant to outlive the attempt that produced it.
 	r.contradiction = &Contradiction{
-		Provider: p, HeldRound: heldRound, Err: err, Evidence: ev, At: r.cfg.Now(), Count: 1,
+		Provider: p, HeldRound: heldRound, Err: err, Evidence: copyEvidence(ev), At: r.cfg.Now(), Count: 1,
 	}
 	if r.cfg.Log != nil {
 		r.cfg.Log.LogAttrs(context.Background(), slog.LevelError, "authenticated certificates disagree",
