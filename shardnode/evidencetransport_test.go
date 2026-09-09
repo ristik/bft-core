@@ -656,11 +656,15 @@ func TestEvidenceTransport_CancellationAfterDialing(t *testing.T) {
 
 		// The peer reads the request and then holds the response forever.
 		read := make(chan struct{})
+		release := make(chan struct{})
+		peerDone := make(chan struct{})
+		defer func() { close(release); _ = server.Close(); <-peerDone }()
 		go func() {
+			defer close(peerDone)
 			var got evidenceRequestMsg
 			_ = readFrame(bufio.NewReader(server), &got, 4096)
 			close(read)
-			select {}
+			<-release
 		}()
 
 		ctx, cancel := context.WithTimeout(context.Background(), patient.Deadline)
