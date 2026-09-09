@@ -49,6 +49,10 @@ done
 
 [ "$validators" -ge 4 ] || { echo "need at least 4 validators to tolerate one fault" >&2; exit 1; }
 
+# Validate the selection BEFORE anything is started, stopped or deleted. An unknown name used to
+# select nothing and still exit 0 with "evidence complete".
+validateScenarios || exit 2
+
 # --- pinned client, no fake fallback ----------------------------------------------------------
 command -v reth >/dev/null || { echo "no reth binary on PATH; this lane has no fake fallback" >&2; exit 1; }
 rethCommit=$(reth --version | sed -n 's/^Commit SHA: //p')
@@ -79,10 +83,16 @@ fi
 # What this still does not claim: the parent itself being SIGKILLed leaves the clients running.
 # That is recoverable with ./stop-evm.sh -a and is the more useful outcome anyway (#88 wants the
 # evidence kept), but it is a limitation, not universal teardown.
-failuresFile=test-nodes/evidence/.failures
+failuresFile=$runDir/.failures
 
 if [ "${F1_CHAOS_SUPERVISED:-0}" != "1" ]; then
   childStatus=0
+  # The manifest is this run's identity and is written once, by the supervisor, before any scenario
+  # is selected — so a subset run records the revisions it measured just as a full run does.
+  writeRunManifest "$@"
+  # The child must write into the SAME run directory; it re-executes this script, which would
+  # otherwise generate a new id.
+  export F1_CHAOS_RUN_DIR="$runDir"
   F1_CHAOS_SUPERVISED=1 "$0" "$@" &
   childPid=$!
   trap 'echo; echo "=== interrupted ==="; kill "$childPid" 2>/dev/null; wait "$childPid" 2>/dev/null; finish; exit 130' INT TERM
@@ -132,14 +142,18 @@ echo
 abortIf startup
 
 echo "=== 0. clean fixtures ==="
+mkdir -p "$runDir"
+: >"$runDir/workload.txt"
+: >"$runDir/convergence.txt"
 if ! wantScenario baseline; then
   echo "  --  skipped by -s $scenarios"
 else
 # The cluster comes up first: setup-evm-nodes.sh runs `make clean`, so anything written to
 # test-nodes before it is deleted, and the chain fixtures it hashes below do not exist until after.
 bringUpCluster || { finish; exit 1; }
-: >test-nodes/evidence/workload.txt
-: >test-nodes/evidence/convergence.txt
+currentScenario=baseline
+scenariosRun=$((scenariosRun + 1))
+echo baseline >"$runDir/.scenario"
 {
   echo "reth=$rethCommit"
   echo "bft=$(git rev-parse HEAD)"
@@ -152,7 +166,7 @@ bringUpCluster || { finish; exit 1; }
   echo "NOTE: each fault scenario below runs on its OWN cluster, regenerated the same way; the"
   echo "      genesis/shard-conf hashes are per-cluster and are re-recorded in each scenario's"
   echo "      snapshot directory."
-} | tee test-nodes/evidence/pins.txt
+} | tee "$runDir/baseline-pins.txt"
 snapshot 00-baseline
 fi
 echo
@@ -167,7 +181,7 @@ if ! wantScenario baseline; then
   echo "  --  skipped by -s $scenarios"
 else
 runWorkload "pre-fault" "$workloadTxs"
-leadersBefore=$(cat test-nodes/evidence/.leaders-pre-fault)
+leadersBefore=$(cat "$runDir/.leaders-pre-fault")
 # The pre-fault baseline is itself a gate: injecting a fault into a cluster that does not already
 # agree cannot produce evidence about the fault.
 convergenceGate "pre-fault" || true
@@ -222,7 +236,7 @@ leaderCtx=$(currentShardLeader 1) || leaderCtx=""
 if [ -n "$leaderCtx" ]; then
   leader=$(echo "$leaderCtx" | awk '{print $1}')
   info "assigned shard leader from the latest technical record: validator $leader (peer $(echo "$leaderCtx" | awk '{print $2}'), nextRound $(echo "$leaderCtx" | awk '{print $3}'))"
-  echo "leader-kill target: $leaderCtx" >>test-nodes/evidence/workload.txt
+  echo "leader-kill target: $leaderCtx" >>"$runDir/workload.txt"
 else
   leader=1
   info "could not read an assigned leader from the technical record; falling back to validator 1 — this scenario is then a shard-process restart, not a verified leader experiment"
@@ -315,9 +329,9 @@ if ! wantScenario "multi-leader"; then
 elif ! freshCluster "multi-leader"; then
   fail "multi-leader: NOT RUN — its own clean cluster did not execute and converge first"
 else
-leadersBefore=$(cat test-nodes/evidence/.leaders-multi-leader-pre)
+leadersBefore=$(cat "$runDir/.leaders-multi-leader-pre")
 runWorkload "post-fault" "$workloadTxs"
-leadersAfter=$(cat test-nodes/evidence/.leaders-post-fault)
+leadersAfter=$(cat "$runDir/.leaders-post-fault")
 convergenceGate "final" || true
 
 # MULTI-LEADER COVERAGE IS NOT CLAIMED HERE, and this used to assert it.
@@ -360,6 +374,10 @@ echo
 # Hand the result to the supervisor, which owns evidence, teardown and the exit code. Writing the
 # count is the child's LAST act: if it dies before this, the parent reports an incomplete run
 # rather than a clean one.
+if [ "$scenariosRun" -eq 0 ]; then
+  fail "no scenario executed: -s '$scenarios' selected nothing, and a run that did no work is not evidence"
+fi
+
 mkdir -p "$(dirname "$failuresFile")"
 echo "$failures" >"$failuresFile"
 exit 0

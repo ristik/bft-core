@@ -790,7 +790,33 @@ things forced it, and both were learned by running the thing:
 
 `-s <names>` runs any subset. Because every scenario builds its own cluster, a subset is a complete
 run of those scenarios rather than a partial run of all of them, and re-running one is minutes
-instead of half an hour.
+instead of half an hour. A name that is not a scenario is refused **before** anything is started or
+stopped, and a run that executes no scenario fails: an unknown selection used to skip everything,
+write no failures, archive an empty directory and exit 0 saying the evidence was complete.
+
+**Where the evidence lives, and why not under `test-nodes/`.** `setup-evm-nodes.sh` runs `make
+clean`, which deletes that directory whole — and with a cluster per scenario, that happens at every
+scenario boundary. An earlier revision stashed only `test-nodes/evidence` across the reset and lost
+everything else with it: the full shard, root and reth logs, the trust base, the identities and the
+chain configuration, which are exactly what a `continuity-gap` or a `Too deep reorg` has to be
+explained from. The surviving summaries cannot reconstruct a certificate history.
+
+Each run therefore writes to `evidence-runs/<runID>/`, outside the blast radius and unique per
+invocation, so a run can neither lose its own evidence nor inherit a previous run's:
+
+```
+evidence-runs/<runID>/manifest.txt          revisions, dirty-tree status, invocation, T2, selection
+evidence-runs/<runID>/scenarios/<label>/    that scenario's FULL logs and configuration, sealed
+                                            before its cluster was destroyed
+evidence-runs/<runID>/snapshots/<label>/    the per-validator summaries
+evidence-runs/<runID>/workload.txt, multi-leader.txt, convergence.txt
+evidence-runs/<runID>.tar.gz                the archive, every scenario in it
+```
+
+Sealing happens **before** each reset and the reset is **aborted** if it fails: losing the evidence
+is worse than not running the next scenario. The manifest is written unconditionally, before any
+scenario is selected, so a subset run records the revisions it measured rather than leaving them to
+a report written afterwards.
 
 ```bash
 ./scripts/reth-chaos.sh -v 4 -t 2                      # all six
@@ -819,7 +845,8 @@ The follower-restart row is new. Every previous revision of this lane reported i
 | F6b stage 3 at `ea608abc` | recovers | recovers |
 | plus the certified-commit binding (`8e2599ca`) | `continuity-gap`, no recovery | `continuity-gap`, no recovery |
 | plus the T2-bounded await budget (#107) | **recovers**, converged | `continuity-gap`, no recovery |
-| plus the replay/leadership gates (`b20eaf4f`, T2 now 5s) | `no-anchor`, no recovery | `continuity-gap`, no recovery |
+| plus the replay/leadership gates (`b20eaf4f`), T2 still 3s | `no-anchor`, no recovery | `continuity-gap`, no recovery |
+| merged integration (#106 + #107), **T2 5s** | **intermittent** — recovers and converges in one run, `continuity-gap` in another | **intermittent** — same |
 
 The middle row is the stricter commit rule doing what it should: a returning node used to advance
 its executor by committing its own pending proposal on any certificate, which is precisely the
@@ -828,8 +855,15 @@ the recovery path, which needs an unbroken chain of observed certificates — an
 an await budget longer than the shard's T2 consumes certificates more slowly than they arrive, misses
 one, and reports `continuity-gap`. Bounding the budget by T2 restores the follower case.
 
-The fourth row is the current state and it is worse than the third, which is recorded rather than
-smoothed over. Both restarted nodes now end with a *named* refusal — `no-anchor` on the follower,
+**The last row is the current state, and the honest word for it is intermittent.** On merged
+integration with T2 at 5s, a two-scenario run had both the follower restart and the leader restart
+recover, execute new work and converge on all four clients; an earlier run at the same T2 had the
+leader restart refuse with `continuity-gap`. Nothing about the runtime differs between them. That is
+what #109's trace predicts: whether a restarted node loses its certificate feed at a moment that
+costs it an assignment is a timing question, so the same scenario can pass and fail without anything
+changing. The row is not "fixed" and must not be reported as such.
+
+The fourth row is worse than the third and is recorded rather than smoothed over. Both restarted nodes now end with a *named* refusal — `no-anchor` on the follower,
 `continuity-gap` on the leader — so neither is a mystery about what the node decided; what is not
 traced is the certificate history that led each one there. Two things changed under it at once (the
 replay/leadership gates and T2 moving to 5 seconds), so nothing here attributes the difference to

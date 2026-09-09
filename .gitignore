@@ -16,6 +16,9 @@ test-coverage.html
 gosec_report.json
 .trivycache/
 /test-nodes/
+# One directory per reth-chaos run, deliberately outside test-nodes so `make clean` cannot
+# delete a run's evidence at a scenario boundary — see scripts/lib/reth-chaos-lib.sh.
+/evidence-runs/
 
 *.log
 

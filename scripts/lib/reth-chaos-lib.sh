@@ -19,6 +19,32 @@
 : "${keep:=false}"
 : "${injectFailure:=false}"
 : "${scenarios:=}"   # empty = run them all; see wantScenario
+
+# --- where the evidence lives -----------------------------------------------------------------
+#
+# NOT under test-nodes/. setup-evm-nodes.sh runs `make clean`, which deletes that directory whole,
+# and this harness now rebuilds a cluster per scenario — so anything kept there is destroyed at
+# every scenario boundary, before it can be collected. Earlier revisions stashed test-nodes/evidence
+# across the reset and lost everything else with it: the full shard, root and reth logs, the trust
+# base, the identities and the chain configuration, which are exactly what a continuity-gap or a
+# "Too deep reorg" needs to be explained from. The summaries that survived cannot reconstruct a
+# certificate history.
+#
+# So the run writes to its own directory, outside the blast radius, one per invocation. A previous
+# run's artefacts can therefore never be inherited by this one either.
+: "${runID:=$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+: "${runDir:=${F1_CHAOS_RUN_DIR:-evidence-runs/$runID}}"
+evidenceDir=$runDir
+
+# knownScenarios is the authority for -s. A name not in it is a mistake, not a filter.
+knownScenarios="baseline follower-restart leader-kill reth-only-restart pair-restart multi-leader"
+
+# currentScenario names the cluster that is up, so it can be sealed under the right label before the
+# next reset destroys it. Empty means no cluster has been built yet.
+: "${currentScenario:=}"
+# scenariosRun counts scenarios that actually executed. A run that executed none is not a pass.
+: "${scenariosRun:=0}"
+
 : "${partitionID:=8}"
 : "${chainID:=31337}"
 : "${pinnedRethCommit:=189c0df32617afc488e0f091dbface1bd72cceb4}"   # ristik/ureth, branch unicity/main
@@ -179,7 +205,16 @@ cleanup() {
 finish() {
   [ -z "$finished" ] || return 0
   finished=yes
-  collectEvidence
+  # The cluster still standing belongs to whichever scenario was running when the run ended,
+  # however it ended. Everything before it was sealed at its own boundary, so the archive below
+  # contains every scenario's full evidence and not just the last one's.
+  # The supervisor is a different process from the child that ran the scenarios, so it cannot know
+  # from a variable which one was live. The child records it; without that the last scenario's
+  # evidence is filed under a name that says nothing about what it contains.
+  local last=$currentScenario
+  [ -n "$last" ] || last=$(cat "$runDir/.scenario" 2>/dev/null)
+  collectEvidence "${last:-final}" || true
+  archiveEvidence
   cleanup
 }
 
@@ -255,29 +290,29 @@ superviseResult() {
 #
 # The cost is one devnet bring-up per scenario. That is the price of a per-scenario result.
 bringUpCluster() {
-  local i waited=0 stash=""
+  local i waited=0
 
   ./stop-evm.sh -a >/dev/null 2>&1
   for i in $(seq 1 "$validators"); do stopReth "$i"; done
 
-  # setup-evm-nodes.sh runs `make clean`, which DELETES test-nodes entirely — datadirs, keys and
-  # the evidence directory alike. That is what makes each cluster genuinely clean, and it is also
-  # why the evidence has to be carried across by hand: without this every scenario but the last
-  # would archive nothing, and the run would look complete while having thrown its own results away.
-  if [ -d test-nodes/evidence ]; then
-    stash=$(mktemp -d)
-    cp -R test-nodes/evidence "$stash/" 2>/dev/null || true
+  # SEAL BEFORE DESTROYING. setup-evm-nodes.sh runs `make clean`, which deletes test-nodes whole:
+  # every shard, root and reth log, the trust base, the identities and the chain configuration. If
+  # the outgoing scenario is not sealed first, the run ends holding detailed evidence for only its
+  # LAST cluster — which is what happened, and why an earlier continuity-gap could not be explained
+  # from the archive. The reset is ABORTED when sealing fails: losing the evidence is worse than
+  # not running the next scenario.
+  if [ -n "$currentScenario" ]; then
+    if ! collectEvidence "$currentScenario"; then
+      fail "refusing to reset the cluster: '$currentScenario' evidence was not sealed and the reset would destroy it"
+      return 1
+    fi
   fi
 
   # T2 is the inactivity timeout before the root chain tells the shard to retry, not the round
   # interval, and it must leave room above both. 5000ms matches scripts/chaos-evm.sh so the two
   # lanes are comparable, and the follower await budget is derived from it (AwaitTimeoutForT2).
   ./setup-evm-nodes.sh -r 3 -v "$validators" -t 5000 >/dev/null || { echo "setup failed" >&2; return 1; }
-  mkdir -p test-nodes/evidence
-  if [ -n "$stash" ]; then
-    cp -R "$stash/evidence/." test-nodes/evidence/ 2>/dev/null || true
-    rm -rf "$stash"
-  fi
+  mkdir -p "$runDir"
 
   python3 - <<'PY'
 import json, subprocess
@@ -324,6 +359,58 @@ PY
   return 0
 }
 
+# validateScenarios - check every name given to -s against knownScenarios BEFORE anything is started
+# or stopped. An unknown name used to select nothing: the run then executed no scenario, wrote no
+# failures, archived an empty directory and exited 0 saying the evidence was complete. A selection
+# that matches nothing is a mistake in the invocation, not a filter.
+validateScenarios() {
+  local name known found bad=""
+  [ -n "$scenarios" ] || return 0
+  # An empty token — "-s a,,b" or "-s ," — is not a name either.
+  case ",$scenarios," in
+    *,,*) echo "empty scenario name in -s '$scenarios'" >&2; return 1 ;;
+  esac
+  # Commas to spaces rather than IFS surgery: setting IFS=, would also split knownScenarios, which
+  # is space-separated, and every valid name would then be reported as unknown.
+  for name in $(echo "$scenarios" | tr ',' ' '); do
+    found=no
+    for known in $knownScenarios; do
+      [ "$name" = "$known" ] && { found=yes; break; }
+    done
+    [ "$found" = yes ] || bad="$bad $name"
+  done
+  if [ -n "$bad" ]; then
+    echo "unknown scenario(s):$bad" >&2
+    echo "known scenarios: $knownScenarios" >&2
+    return 1
+  fi
+  return 0
+}
+
+# writeRunManifest - the one artefact that says what this run measured, written unconditionally
+# before any scenario is selected. A subset run used to record only per-cluster genesis hashes, so
+# its archive could not establish the revisions it ran against; and because the evidence directory
+# was reused, it could inherit a PREVIOUS run's pins and appear to.
+writeRunManifest() {
+  local rethVersion="not on PATH"
+  command -v reth >/dev/null && rethVersion=$(reth --version | tr '\n' ' ')
+  mkdir -p "$runDir"
+  {
+    echo "runID=$runID"
+    echo "startedUTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "invocation=$0 $*"
+    echo "bft=$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+    echo "bftDirty=$([ -n "$(git status --porcelain 2>/dev/null)" ] && echo yes || echo no)"
+    echo "reth=$rethVersion"
+    echo "rethPinned=$pinnedRethCommit"
+    echo "validators=$validators workloadTxs=$workloadTxs partitionID=$partitionID chainID=$chainID"
+    echo "t2Timeout=5000ms (generated by bringUpCluster)"
+    echo "scenariosSelected=${scenarios:-all}"
+    echo "logLevel=${EVM_VALIDATOR_LOG_LEVEL:-debug}"
+  } >"$runDir/manifest.txt"
+  cat "$runDir/manifest.txt"
+}
+
 # wantScenario <name> - true unless -s named a set this scenario is not in. Selection is by name
 # rather than by number so a subset stays meaningful when scenarios are added or reordered.
 wantScenario() {
@@ -341,6 +428,9 @@ freshCluster() {
   local label=$1
   echo "  --  fresh fixtures for '$label' (independent scenario, #88 stage 2)"
   bringUpCluster || { fail "$label: could not bring up a clean cluster"; return 1; }
+  currentScenario=$label
+  scenariosRun=$((scenariosRun + 1))
+  echo "$label" >"$runDir/.scenario"
   # Each cluster is a different chain with different keys, so its own pins are recorded rather than
   # letting the run's first set stand for all of them.
   {
@@ -348,7 +438,7 @@ freshCluster() {
     echo "genesis=$(shasum -a 256 test-nodes/evm-genesis.json | cut -d' ' -f1)"
     echo "fundedGenesis=$(shasum -a 256 test-nodes/evm-genesis-funded.json | cut -d' ' -f1)"
     echo "shardConf=$(shasum -a 256 "test-nodes/shard-conf-${partitionID}_0.json" | cut -d' ' -f1)"
-  } >"test-nodes/evidence/$label-pins.txt"
+  } >"$runDir/$label-pins.txt"
   runWorkload "$label-pre" "$workloadTxs"
   convergenceGate "$label-pre" || return 1
   return 0
@@ -416,7 +506,7 @@ certifyingRootRound() {
 }
 
 # multiLeaderEvidence - the file every claim below is made from.
-multiLeaderEvidence=test-nodes/evidence/multi-leader.txt
+multiLeaderEvidence=$runDir/multi-leader.txt
 
 # correlateExecutedBlocks <observer> - for every transaction executed so far, print and record
 # "txHash blockHash partitionRound leaderValidator leaderPeer rootRound", skipping any that cannot
@@ -621,7 +711,7 @@ submitAndConfirm() {
   status=$(echo "$rcpt" | pyget "['result']['status']")
   gas=$(echo "$rcpt" | pyget "['result']['gasUsed']")
   txHashes+=("$h")
-  echo "$h $nonce $(hexToDec "$blkHex") $status $gas" >>test-nodes/evidence/workload.txt
+  echo "$h $nonce $(hexToDec "$blkHex") $status $gas" >>"$runDir/workload.txt"
   info "tx $h nonce=$nonce -> block $(hexToDec "$blkHex") status=$status gasUsed=$gas"
   [ "$status" = "0x1" ] || { fail "tx $h reverted (status $status)"; return 1; }
   return 0
@@ -636,16 +726,16 @@ submitAndConfirm() {
 # that and the next burst failed with "nonce too low: next nonce 2, tx nonce 0".
 runWorkload() {
   local label=$1 count=$2 via i ok=0 leaders
-  markAll test-nodes/evidence/.marks
+  markAll "$runDir/.marks"
   for i in $(seq 1 "$count"); do
     via=$(( (i - 1) % validators + 1 ))
     # only submit through a validator whose client is up
     [ -f "test-nodes/reth$via/pid" ] || via=1
     submitAndConfirm "$via" && ok=$((ok + 1))
   done
-  leaders=$(shardLeadersSince test-nodes/evidence/.marks)
-  echo "$label leaders:$leaders executed:$ok/$count" >>test-nodes/evidence/workload.txt
-  echo "$leaders" >"test-nodes/evidence/.leaders-$label"
+  leaders=$(shardLeadersSince "$runDir/.marks")
+  echo "$label leaders:$leaders executed:$ok/$count" >>"$runDir/workload.txt"
+  echo "$leaders" >"$runDir/.leaders-$label"
   if [ "$ok" -eq "$count" ]; then
     pass "$label: $ok/$count transactions executed and certified (shard leaders seen:$leaders)"
   else
@@ -710,7 +800,7 @@ assertConvergence() {
       fi
       # Cross-check against what was recorded when the transaction executed, so a client that
       # agrees with its peers but disagrees with history is still caught.
-      expected=$(awk -v hh="$h" '$1==hh {print $3" "$4}' test-nodes/evidence/workload.txt | tail -1)
+      expected=$(awk -v hh="$h" '$1==hh {print $3" "$4}' "$runDir/workload.txt" | tail -1)
       if [ -n "$expected" ] && [ "$(hexToDec "$blk") $st" != "$expected" ]; then
         fail "$label: validator $i has $h at block $(hexToDec "$blk") status $st, recorded as $expected"
         bad=$((bad + 1))
@@ -725,7 +815,7 @@ assertConvergence() {
     echo "heads:"; printf '%s' "$heads"
     echo "nonces:"; printf '%s' "$nonces"
     echo "receipts:"; printf '%s' "$rcpts"
-  } >>test-nodes/evidence/convergence.txt
+  } >>"$runDir/convergence.txt"
 
   if [ "$live" -eq 0 ]; then
     fail "$label: no live execution clients to compare — convergence is unproven, not satisfied"
@@ -867,7 +957,7 @@ snapshot() {
   local label=$1 i
   # Split deliberately: bash expands every assignment word before performing any of them, so
   # referring to $label in the same `local` that assigns it fails under `set -u`.
-  local dir="test-nodes/evidence/$label"
+  local dir="$runDir/snapshots/$label"
   mkdir -p "$dir"
   for i in $(seq 1 "$validators"); do
     {
@@ -887,9 +977,16 @@ snapshot() {
   done
 }
 
+# collectEvidence [label] - copy the LIVE cluster's full artefacts into the run directory under
+# <label>, verifying every required copy. Called once per scenario, before that scenario's cluster
+# is destroyed, and once for the last cluster at the end of the run. Returns nonzero if anything
+# that exists could not be copied — the caller must not destroy a cluster whose evidence did not
+# survive.
 collectEvidence() {
-  local out=test-nodes/evidence
+  local label=${1:-final}
+  local out=$runDir/scenarios/$label
   local i missing=0 copied=0
+  mkdir -p "$out" || { fail "evidence: cannot create $out"; return 1; }
 
   # copyRequired records whether each expected artefact actually arrived. Completeness used to be
   # inferred from "the archive has more than five entries", which cannot distinguish a complete run
@@ -921,15 +1018,33 @@ collectEvidence() {
 
   # Secrets are excluded by construction, never filtered after the fact: keys.json and jwt.hex
   # are simply not copied. The check below fails the run if one ever appears anyway.
-  if find "$out" -name 'keys.json' -o -name 'jwt.hex' | grep -q .; then
+  if find "$runDir" -name 'keys.json' -o -name 'jwt.hex' | grep -q .; then
     fail "evidence archive contains a secret file"
   else
     pass "evidence archive contains no keys.json or jwt.hex"
   fi
 
   if [ "$missing" -gt 0 ]; then
-    fail "evidence collection incomplete: $missing required artefact(s) present but not copied ($copied succeeded)"
+    fail "evidence collection incomplete for '$label': $missing required artefact(s) present but not copied ($copied succeeded)"
+    return 1
   fi
+  info "evidence sealed for '$label': $copied artefact(s) under $out"
+  return 0
+}
+
+# archiveEvidence - one archive of the whole run directory, every scenario in it.
+archiveEvidence() {
+  local archive=$runDir.tar.gz
+  if tar czf "$archive" -C "$(dirname "$runDir")" "$(basename "$runDir")" 2>/dev/null && [ -s "$archive" ]; then
+    pass "evidence archived: $archive ($(du -h "$archive" | cut -f1), scenarios: $(ls "$runDir/scenarios" 2>/dev/null | tr '\n' ' '))"
+  else
+    fail "evidence archive was not produced — the run's evidence is only in $runDir/"
+  fi
+}
+
+# collectEvidenceLegacyTail is what the old single-directory collection did after copying. It is
+# kept only so the shape of the function below stays readable; see archiveEvidence.
+collectEvidenceLegacyTail() {
 
   # The archive claim is made from tar's own exit status, not from counting what ended up inside.
   if tar czf test-nodes/reth-chaos-evidence.tar.gz -C test-nodes evidence 2>/dev/null &&
@@ -944,7 +1059,7 @@ collectEvidence() {
       pass "evidence archived: test-nodes/reth-chaos-evidence.tar.gz ($(du -h test-nodes/reth-chaos-evidence.tar.gz | cut -f1), $copied artefact(s))"
     fi
   else
-    fail "evidence archive was not produced — the run's evidence is only in test-nodes/evidence/"
+    fail "evidence archive was not produced — the run's evidence is only in $runDir/"
   fi
 }
 
