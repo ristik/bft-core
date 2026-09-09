@@ -385,6 +385,34 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 	}
 
 	/*
+	   ENTER THE GUARDS FIRST, and only then ask whether anything needs doing.
+
+	   Review found the "already there" answer given BEFORE any of them: no fault check, no in-flight
+	   slot, no gate, and no revalidation of the target afterwards. Reading a head is not a finality
+	   change, but ADOPTING an anchor is a decision the round then acts on — Round.applyVerifiedAnchor
+	   installs it into the live continuity state on the strength of this outcome — so it belongs
+	   under the same protection as the path that commits. In particular a target already determined
+	   to be a fault could be adopted if the head happened to match, and the head could be moving
+	   under a concurrent commit while it was being read.
+	*/
+	enter, err := a.enter(held, target)
+	if err != nil {
+		return a.record(outcomeForAdmission(err), head, target, err)
+	}
+	defer enter()
+
+	if a.gate != nil {
+		gateRelease, gerr := a.gate.tryAcquire("recovery-apply")
+		if gerr != nil {
+			// The round is doing something of its own. Not an answer about the executor and not an
+			// attempt spent against it — the next certificate is the next opportunity.
+			return a.retryable(ApplyBusy, head, target, a.attemptNumber(),
+				fmt.Errorf("%w: %w", ErrApplyBusy, gerr))
+		}
+		defer gateRelease()
+	}
+
+	/*
 	   IS THERE ANYTHING TO DO? The caller has just read the executor's head, so this costs no RPC on
 	   the common path, and a node already at the certified block needs no finality-changing call at
 	   all — adopting a verified statement is not the same as changing what the executor considers
@@ -398,106 +426,78 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 	   ExecutionAnchor.fromGenesisRound and row 13). On a devnet with no transactions that is the
 	   only anchor there is, and a node restarted across the quiet tail asked reth to commit
 	   0x56e81f17… — the empty-trie state root — which reth answered SYNCING, correctly, for ever.
-	   The node retried on every certificate and recovered nothing, while the evidence it held was
-	   perfectly good and its executor was already exactly where the certificate said it should be.
 
 	   So the question is asked in the right order: first "is the executor already there", and only
-	   then "make it be there".
+	   then "make it be there". The budget is NOT spent on the first: a node that is already correct
+	   must not be kept from saying so by an earlier failure's backoff.
 	*/
-	if satisfied, gerr := a.headSatisfies(ctx, target, held, head); gerr != nil {
+	satisfied, gerr := a.headSatisfies(ctx, target, held, head)
+	if gerr != nil {
 		return a.retryable(ApplyExecutorUnreachable, head, target, a.attemptNumber(),
 			fmt.Errorf("%w: reading the executor genesis block: %w", ErrApplyExecutorUnreachable, gerr))
-	} else if satisfied {
-		a.mu.Lock()
-		a.applied++
-		a.mu.Unlock()
-		if a.log != nil {
-			a.log.LogAttrs(ctx, slog.LevelInfo, "the executor is already on the certified block; the verified anchor is adopted without a commit",
-				slog.String("blockHash", fmt.Sprintf("%x", target.BlockHash)),
-				slog.Uint64("anchorRound", target.Round),
-				slog.Uint64("heldRound", held.Round))
-		}
-		return a.record(ApplyApplied, head, target, nil)
 	}
 
-	release, err := a.admit(held, target)
-	if err != nil {
-		return a.record(outcomeForAdmission(err), head, target, err)
+	newHead := head
+	if !satisfied {
+		// Only a path that COMMANDS the executor spends the attempt budget and the backoff.
+		attempt, serr := a.spend(held)
+		if serr != nil {
+			return a.record(outcomeForAdmission(serr), head, target, serr)
+		}
+
+		// Idempotent by contract (see Round.reconcile): Commit on an already-canonical hash is a
+		// no-op returning VALID, so an attempt after a failed one does not double-execute anything.
+		status, cerr := a.commit(ctx, target.BlockHash)
+		if cerr != nil {
+			// UNREACHABLE, not unavailable and not invalid. The executor said nothing, so nothing is
+			// known — including whether it applied the block. The target is kept.
+			return a.retryable(ApplyExecutorUnreachable, head, target, attempt,
+				fmt.Errorf("%w: committing certified block %x: %w", ErrApplyExecutorUnreachable, target.BlockHash, cerr))
+		}
+		switch status {
+		case StatusValid:
+			// on, to the post-conditions
+		case StatusSyncing, StatusAccepted:
+			return a.retryable(ApplyPayloadUnavailable, head, target, attempt,
+				fmt.Errorf("%w: certified block %x reported %s", ErrApplyPayloadUnavailable, target.BlockHash, status))
+		default:
+			return a.fault(ApplyPayloadInvalid, head, target, attempt,
+				fmt.Errorf("%w: certified block %x reported %s — this is a fault, not an availability problem",
+					ErrApplyPayloadInvalid, target.BlockHash, status))
+		}
 	}
-	defer release()
 
 	attempt := a.attemptNumber()
-
-	/*
-	   THE GATE COVERS THE WHOLE SEQUENCE, not just the commit.
-
-	   Review found it held for the Commit alone and released before the head was read, which made
-	   the confirmation meaningless in the one case it exists for: between the two calls the round
-	   could commit something of its own, the head would then be that other block, and this code
-	   treats a head that is not the committed block as a FAULT — recorded against the block hash and
-	   never retried. Interference by a correct round therefore permanently refused a target that was
-	   correct too.
-
-	   "Commit this block and confirm the executor is now at it" is one operation. It is held across
-	   the commit, the head read and the genesis read, and released when the answer is known.
-	*/
-	if a.gate != nil {
-		gateRelease, gerr := a.gate.tryAcquire("recovery-apply")
-		if gerr != nil {
-			// The round is doing something of its own. Not an answer about the executor and not an
-			// attempt spent against it — the next certificate is the next opportunity.
-			return a.retryable(ApplyBusy, head, target, attempt,
-				fmt.Errorf("%w: %w", ErrApplyBusy, gerr))
+	if !satisfied {
+		// THE CONFIRMATION. Read under the same gate the commit was made under, so nothing can have
+		// moved the head in between (see the gate comment above).
+		confirmed, herr := a.head(ctx)
+		if herr != nil {
+			// The commit reported VALID and the head could not be read, so whether this node is
+			// recovered is unknown. Unknown is retryable, and the next attempt's commit is a no-op.
+			return a.retryable(ApplyExecutorUnreachable, head, target, attempt,
+				fmt.Errorf("%w: reading head after committing %x: %w", ErrApplyExecutorUnreachable, target.BlockHash, herr))
 		}
-		defer gateRelease()
+		newHead = confirmed
 	}
 
-	// Idempotent by contract (see Round.reconcile): Commit on an already-canonical hash is a no-op
-	// returning VALID, so an attempt after a failed one does not double-execute anything.
-	status, err := a.commit(ctx, target.BlockHash)
-	if err != nil {
-		// UNREACHABLE, not unavailable and not invalid. The executor said nothing, so nothing is
-		// known — including whether it applied the block. The target is kept.
-		return a.retryable(ApplyExecutorUnreachable, head, target, attempt,
-			fmt.Errorf("%w: committing certified block %x: %w", ErrApplyExecutorUnreachable, target.BlockHash, err))
-	}
-	switch status {
-	case StatusValid:
-		// on, to the post-conditions
-	case StatusSyncing, StatusAccepted:
-		return a.retryable(ApplyPayloadUnavailable, head, target, attempt,
-			fmt.Errorf("%w: certified block %x reported %s", ErrApplyPayloadUnavailable, target.BlockHash, status))
-	default:
-		return a.fault(ApplyPayloadInvalid, head, target, attempt,
-			fmt.Errorf("%w: certified block %x reported %s — this is a fault, not an availability problem",
-				ErrApplyPayloadInvalid, target.BlockHash, status))
-	}
-
-	newHead, err := a.head(ctx)
-	if err != nil {
-		// The commit reported VALID and the head could not be read, so whether this node is
-		// recovered is unknown. Unknown is retryable, and the next attempt's commit is a no-op.
-		return a.retryable(ApplyExecutorUnreachable, head, target, attempt,
-			fmt.Errorf("%w: reading head after committing %x: %w", ErrApplyExecutorUnreachable, target.BlockHash, err))
-	}
-
-	// TIME PASSED INSIDE THE EXECUTOR. A commit is not instantaneous, and the requester may have
-	// installed a target for a newer certificate while this one was in flight — that is its ordinary
-	// behaviour across a quiet tail, not a fault. Committing the block was still correct if the
-	// target still names the same block; what must not happen is reporting this node RECOVERED for a
-	// certificate the answer was never about.
+	// THE TARGET IS RE-READ, on BOTH paths. After a commit because time passed inside the executor
+	// and the requester may have installed a target for a newer certificate meanwhile — its ordinary
+	// behaviour across a quiet tail, not a fault. And on the no-commit path because the target was
+	// read before the gate was taken, so the same window exists there, only narrower. Adopting an
+	// anchor is a decision the round acts on either way, so either way it is revalidated first.
 	if now, ok := a.source.Target(); !ok || now.Anchor == nil || !bytes.Equal(now.Anchor.BlockHash, target.BlockHash) {
 		return a.retryable(ApplyTargetMoved, newHead, target, attempt,
-			fmt.Errorf("%w: %x was committed for round %d", ErrApplyTargetMoved, target.BlockHash, held.Round))
+			fmt.Errorf("%w: %x was applied for round %d", ErrApplyTargetMoved, target.BlockHash, held.Round))
 	}
 
 	// P-id, and by the SAME comparison the live path uses — anchorHeadIdentity, not a second copy of
 	// it written here. A commit that reports success while the head is another block is exactly what
-	// P-id exists to catch, so it is a fault rather than something to wait through.
+	// P-id exists to catch, so it is a fault rather than something to wait through. On the no-commit
+	// path this re-states what headSatisfies established, against a genesis block that is cached, so
+	// it costs nothing and there is exactly one place that decides the question.
 	var genesis *BlockRef
 	if target.fromGenesisRound {
-		// Read only when the exception could apply. It is one round per shard, and an executor that
-		// cannot answer for its own block zero must not silently widen the check.
 		g, gerr := a.genesis(ctx)
 		if gerr != nil {
 			return a.retryable(ApplyExecutorUnreachable, newHead, target, attempt,
@@ -571,17 +571,17 @@ func (a *TargetApplier) headSatisfies(ctx context.Context, target *ExecutionAnch
 }
 
 /*
-admit applies everything that can refuse an attempt before the executor is touched, and returns the
-release for the in-flight slot it takes.
+enter takes the guards every attempt needs regardless of what it ends up doing: the fault this node
+has already concluded about this block, and the in-flight slot.
 
-The slot is the answer to concurrency: two callers were previously both admitted and both entered
-Commit, because the lock was released between counting the attempt and making the call. A commit is
-not a read — two in flight make "what did the executor do" unanswerable, and the head read afterwards
+The slot is the answer to concurrency: two callers were once both admitted and both entered Commit,
+because the lock was released between counting the attempt and making the call. A commit is not a
+read — two in flight make "what did the executor do" unanswerable, and the head read afterwards
 belongs to neither of them. It is a NON-BLOCKING slot rather than a mutex held across the call: a
 mutex would park whichever goroutine asked next behind a slow executor, and the caller is a round
 loop.
 */
-func (a *TargetApplier) admit(held CertificateBinding, target *ExecutionAnchor) (func(), error) {
+func (a *TargetApplier) enter(held CertificateBinding, target *ExecutionAnchor) (func(), error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -591,6 +591,26 @@ func (a *TargetApplier) admit(held CertificateBinding, target *ExecutionAnchor) 
 	if a.inFlight {
 		return nil, fmt.Errorf("%w: round %d", ErrApplyInFlight, held.Round)
 	}
+	a.inFlight = true
+	return func() {
+		a.mu.Lock()
+		a.inFlight = false
+		a.mu.Unlock()
+	}, nil
+}
+
+/*
+spend takes one attempt out of the budget for this certificate, and is called ONLY on the path that
+commands the executor.
+
+A node that is already on the certified block must not be kept from saying so by an earlier failure's
+backoff: nothing is being asked of the executor, so nothing needs rationing. Keeping the two apart is
+what stops a bounded retry policy from also bounding the free answer.
+*/
+func (a *TargetApplier) spend(held CertificateBinding) (int, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
 	if !a.forCert.same(held) {
 		// A NEW CERTIFICATE is a new opportunity — not a new certified state, which across a quiet
 		// tail never comes. The counters belong to the certificate, so the shard advancing at all is
@@ -600,18 +620,13 @@ func (a *TargetApplier) admit(held CertificateBinding, target *ExecutionAnchor) 
 		a.nextAttempt = time.Time{}
 	}
 	if a.attempts >= a.budget.MaxAttempts {
-		return nil, fmt.Errorf("%w: %d attempts spent on round %d", ErrApplyExhausted, a.attempts, held.Round)
+		return a.attempts, fmt.Errorf("%w: %d attempts spent on round %d", ErrApplyExhausted, a.attempts, held.Round)
 	}
 	if now := a.now(); !a.nextAttempt.IsZero() && now.Before(a.nextAttempt) {
-		return nil, fmt.Errorf("%w: %s remaining", ErrApplyBackoff, a.nextAttempt.Sub(now).Round(time.Millisecond))
+		return a.attempts, fmt.Errorf("%w: %s remaining", ErrApplyBackoff, a.nextAttempt.Sub(now).Round(time.Millisecond))
 	}
 	a.attempts++
-	a.inFlight = true
-	return func() {
-		a.mu.Lock()
-		a.inFlight = false
-		a.mu.Unlock()
-	}, nil
+	return a.attempts, nil
 }
 
 func (a *TargetApplier) attemptNumber() int {

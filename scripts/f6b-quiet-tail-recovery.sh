@@ -99,6 +99,34 @@ rpc() { curl -sS --max-time 10 -X POST "$1" -H "Content-Type: application/json" 
   -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}"; }
 pyget() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1)" 2>/dev/null; }
 
+# rpcRequire is rpc that FAILS the run rather than returning empty.
+#
+# Review found the difference load-bearing: `${c:-0}` over a failed read counted as zero
+# transactions, so an unreachable node produced a PASS asserting that nothing had executed. An
+# assertion that cannot tell "I looked and saw none" from "I could not look" is not evidence, and
+# this lane's whole claim is a negative one.
+rpcRequire() { # rpcRequire <url> <method> <params> <pyget-path> <what>
+  local out value
+  out=$(rpc "$1" "$2" "$3") || { fail "RPC $2 to $1 failed ($5)"; return 1; }
+  value=$(printf '%s' "$out" | pyget "$4")
+  if [ -z "$value" ]; then
+    fail "RPC $2 to $1 returned no $5: $(printf '%s' "$out" | head -c 200)"
+    return 1
+  fi
+  printf '%s' "$value"
+}
+
+# countTransactions echoes the total transaction count from genesis to head, or fails the run.
+countTransactions() { # countTransactions <ethURL>
+  local url=$1 headHex total=0 n c
+  headHex=$(rpcRequire "$url" eth_getBlockByNumber '["latest", false]' "['result']['number']" "head block number") || return 1
+  for n in $(python3 -c "print(' '.join(hex(i) for i in range(0, int('$headHex', 16) + 1)))"); do
+    c=$(rpcRequire "$url" eth_getBlockTransactionCountByNumber "[\"$n\"]" "['result']" "transaction count for block $n") || return 1
+    total=$((total + $((c))))
+  done
+  echo "$total $headHex"
+}
+
 for i in $(seq 1 "$validators"); do
   up=false
   for _ in $(seq 1 60); do
@@ -147,16 +175,12 @@ fi
 # MEASURED CORRECTION, from this lane's own first run: a round can be non-quiet WITHOUT a
 # transaction. "No transaction" is therefore asserted against the executor's own blocks rather than
 # against the shard's quietness, which is a statement about the state root and not about activity.
-txs=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBlockByNumber '["latest", true]' | pyget "['result']['number']")
-txCount=0
-for n in $(python3 -c "print(' '.join(hex(i) for i in range(0, int('${txs:-0x0}', 16) + 1)))"); do
-  c=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBlockTransactionCountByNumber "[\"$n\"]" | pyget "['result']")
-  txCount=$((txCount + $((${c:-0x0}))))
-done
-if [ "$txCount" -eq 0 ]; then
-  pass "no transaction was executed: every canonical block on the executor, genesis through ${txs:-0x0}, contains zero transactions"
-else
-  fail "$txCount transactions executed — this lane must demonstrate recovery with no new activity"
+if read -r txCount headHex < <(countTransactions "http://127.0.0.1:$rethEthBase"); then
+  if [ "$txCount" -eq 0 ]; then
+    pass "no transaction was executed: every canonical block on the executor, genesis through $headHex, contains zero transactions"
+  else
+    fail "$txCount transactions executed — this lane must demonstrate recovery with no new activity"
+  fi
 fi
 
 # The root bootnode, computed the way helper.sh computes it rather than scraped from a log: the log
@@ -235,7 +259,12 @@ if [ -n "$adoptLine" ]; then
   after=$(tail -n +"$adoptLine" test-nodes/evm1/debug.log | countIn /dev/stdin "abstaining from the vote")
   certsAfter=$(tail -n +"$adoptLine" test-nodes/evm1/debug.log | countIn /dev/stdin "accepted certificate")
   if [ "$after" -eq 0 ] && [ "$certsAfter" -ge 2 ]; then
-    pass "exact-block recovery: not one abstention in the $certsAfter certificates after the anchor was adopted (of $recoveryCerts) — P-id is satisfied for the block the evidence named"
+    # NAMED PRECISELY. On a shard with no transactions the only anchor is the shard's FIRST
+    # certified round, so what satisfies P-id here is row 13's genesis exception — the executor is
+    # at its own block zero, at the certified state — not an exact head-hash match against an
+    # ordinary certified block. Reporting the stronger claim would be reporting more than was
+    # measured; the ordinary path is fixture-covered and is separate acceptance work.
+    pass "recovery to the certified anchor: not one abstention in the $certsAfter certificates after adoption (of $recoveryCerts) — P-id satisfied via the genesis-round exception, which is the only anchor a transaction-free shard has"
   else
     fail "still abstaining after recovery: $after abstentions over the $certsAfter certificates that followed"
   fi
@@ -257,31 +286,65 @@ providerRefusals=0
 for i in $(seq 2 "$validators"); do
   providerRefusals=$((providerRefusals + $(countIn "test-nodes/evm$i/debug.log" "evidence buffer refused\|stream not admitted")))
 done
-if [ "$providerRefusals" -eq 0 ]; then
-  pass "immutable evidence: the providers refused nothing they had retained, and serving it changed nothing they hold"
+# What this MEASURES is that serving cost the providers nothing: they refused no observation and no
+# stream, and went on certifying. That evidence is not MUTATED by being served is a stronger claim,
+# and it is established by fixtures that mutate a served bundle and re-read it
+# (TestEvidenceRequester_ReturnedValuesDoNotAliasWhatIsRetained and the buffer's aliasing tests) —
+# not by this lane, which cannot see inside a provider's buffer. Naming it accurately is the point.
+providerCerts=0
+for i in $(seq 2 "$validators"); do
+  providerCerts=$((providerCerts + $(countIn "test-nodes/evm$i/debug.log" "accepted certificate")))
+done
+if [ "$providerRefusals" -eq 0 ] && [ "$providerCerts" -ge 4 ]; then
+  pass "serving cost the providers nothing: no observation or stream refused, and $providerCerts certificates still accepted across them while they served"
 else
-  fail "providers refused $providerRefusals observations or streams while serving"
+  fail "providers refused $providerRefusals observations or streams while serving ($providerCerts certificates accepted)"
 fi
 
 # NO TRANSACTION, restated over the whole run rather than only the first window.
 # The no-transaction property is asserted in section 1 against the executor's own blocks, which is a
-# stronger statement than the shard's quietness. Restate it here over the whole run.
-headNum=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBlockByNumber '["latest", false]' | pyget "['result']['number']")
-finalTx=0
-for n in $(python3 -c "print(' '.join(hex(i) for i in range(0, int('${headNum:-0x0}', 16) + 1)))"); do
-  c=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBlockTransactionCountByNumber "[\"$n\"]" | pyget "['result']")
-  finalTx=$((finalTx + $((${c:-0x0}))))
+# stronger statement than the shard's quietness. Restate it here over the whole run, on every
+# executor rather than only the recovering node's.
+for i in $(seq 1 "$validators"); do
+  if read -r finalTx finalHead < <(countTransactions "http://127.0.0.1:$((rethEthBase + i - 1))"); then
+    if [ "$finalTx" -eq 0 ]; then
+      pass "executor $i: still no transaction at the end of the run, across genesis..$finalHead"
+    else
+      fail "executor $i executed $finalTx transactions during the run"
+    fi
+  fi
 done
-if [ "$finalTx" -eq 0 ]; then
-  pass "and still no transaction at the end of the run: $finalTx across genesis..${headNum:-0x0}"
-else
-  fail "$finalTx transactions executed during the run"
-fi
+
+echo
+echo "=== 4. provenance ==="
+# A lane whose result is a negative claim has to say what it was run against, and leave behind
+# something that can be checked afterwards rather than a scrollback. The manifest names the revision,
+# the client, the flags, and a digest of every log the assertions above actually read — so a later
+# reader can tell whether the evidence they are looking at is the evidence that was measured.
+manifest=test-nodes/f6b-acceptance-manifest.txt
+{
+  echo "f6b quiet-tail recovery acceptance run"
+  echo "finished:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "repository:      $(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "worktree clean:  $([ -z "$(git status --porcelain 2>/dev/null)" ] && echo yes || echo NO — this run is not reproducible from the recorded revision)"
+  echo "ubft:            $(shasum -a 256 build/ubft | cut -d' ' -f1)"
+  echo "reth:            $rethCommit$([ "$rethCommit" = "$pinnedRethCommit" ] && echo " (pinned)" || echo " (NOT the pinned baseline)")"
+  echo "validators:      $validators"
+  echo "control flags:   (defaults: --evidence-serve on, --evidence-recover off)"
+  echo "recovery flags:  --evidence-recover"
+  echo "checks failed:   $failures"
+  echo
+  echo "digests of the logs these assertions read:"
+  for f in test-nodes/evm1/control.log test-nodes/evm1/debug.log $(seq -f "test-nodes/evm%g/debug.log" 2 "$validators"); do
+    [ -f "$f" ] && echo "  $(shasum -a 256 "$f")"
+  done
+} >"$manifest"
+cat "$manifest"
 
 echo
 if [ "$failures" -eq 0 ]; then
-  echo "ALL CHECKS PASSED (reth $rethCommit)"
+  echo "ALL CHECKS PASSED (reth $rethCommit) — manifest: $manifest"
 else
-  echo "$failures CHECK(S) FAILED"
+  echo "$failures CHECK(S) FAILED — manifest: $manifest"
 fi
 exit $((failures > 0))

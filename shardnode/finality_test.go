@@ -325,11 +325,11 @@ func TestTargetApplier_HoldsTheGateThroughTheConfirmation(t *testing.T) {
 
 	require.Equal(t, "recovery-apply", duringCommit, "held for the commit")
 	require.Equal(t, "recovery-apply", duringHead, "and still held when the head that confirms it is read")
-	// The executor's block zero is immutable configuration, read once and cached, so it is asked for
-	// before the gate is taken and never again — the gate covers what can CHANGE under the
-	// confirmation, and configuration cannot.
-	require.Equal(t, "", duringGenesis)
-	require.Equal(t, 1, ex.geneses)
+	// The gate is taken for the WHOLE attempt now — the pre-check that asks whether anything needs
+	// doing included — so every executor call an attempt makes happens under it. The genesis read is
+	// still one RPC per applier: it is immutable configuration and is cached after the first ask.
+	require.Equal(t, "recovery-apply", duringGenesis, "the gate covers the whole attempt")
+	require.Equal(t, 1, ex.geneses, "block zero is configuration: read once, not once per question")
 
 	_, _, stillHeld := gate.Holder()
 	require.False(t, stillHeld, "and released once the answer is known")

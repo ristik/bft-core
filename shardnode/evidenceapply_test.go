@@ -660,6 +660,72 @@ func TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere(t *t
 		require.Zero(t, f.applier.Status().Applied)
 	})
 
+	/*
+	   Adopting without commanding the executor is still an ADOPTION, and the round acts on it — so it
+	   sits inside the same guards as the path that commits. Review found it given before all of them.
+	*/
+	t.Run("a faulted target is not adopted just because the head happens to match", func(t *testing.T) {
+		ex := &stubExecutor{commit: func(context.Context, Hash) (Status, error) { return StatusInvalid, nil }}
+		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+
+		// First, make it a fault the ordinary way: behind the block, and the executor rejects it.
+		require.Equal(t, ApplyPayloadInvalid, f.applier.Apply(context.Background(), heldBinding(), behindHead()).Outcome)
+
+		// Now the executor's head matches the target. The block is still one this node has concluded
+		// it cannot apply, and a matching head is not a reason to forget that.
+		res := f.applier.Apply(context.Background(), heldBinding(), recoveredHead())
+		require.Equal(t, ApplyPayloadInvalid, res.Outcome)
+		require.Zero(t, f.applier.Status().Applied)
+	})
+
+	t.Run("it is not adopted while the round holds the gate", func(t *testing.T) {
+		gate := NewFinalityGate()
+		ex := &stubExecutor{}
+		clock := &testClock{at: time.Unix(1_700_000_000, 0)}
+		src := &stubTarget{anchor: recoveredAnchor(), verifiedFor: heldBinding()}
+		a, err := NewTargetApplier(ApplyConfig{Executor: ex, Source: src, Budget: testApplyBudget(), Gate: gate, Now: clock.now})
+		require.NoError(t, err)
+
+		release, err := gate.acquire(context.Background(), "round-commit")
+		require.NoError(t, err)
+		res := a.Apply(context.Background(), heldBinding(), recoveredHead())
+		require.Equal(t, ApplyBusy, res.Outcome, "the head can be moving under a commit this node did not make")
+		require.Zero(t, a.Status().Applied)
+		release()
+
+		require.Equal(t, ApplyApplied, a.Apply(context.Background(), heldBinding(), recoveredHead()).Outcome)
+	})
+
+	t.Run("it is revalidated against a target that moved", func(t *testing.T) {
+		ex := &stubExecutor{}
+		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+		// The requester installs a target for a newer certificate naming a different block, in the
+		// window between the source being read and the anchor being adopted.
+		ex.genesis = func(context.Context) (BlockRef, error) {
+			f.src.set(&ExecutionAnchor{BlockHash: Hash(h32(0xee)), StateRoot: Hash(h32(0x0c)), Round: 21}, bind(21, 140, h32(0x0c)))
+			return BlockRef{}, nil
+		}
+		f.src.set(&ExecutionAnchor{BlockHash: Hash(h32(0xbb)), StateRoot: Hash(h32(0x0b)), Round: 1, fromGenesisRound: true}, heldBinding())
+
+		res := f.applier.Apply(context.Background(), heldBinding(), BlockRef{Number: 5, Hash: Hash(h32(0xbb)), StateRoot: Hash(h32(0x0b))})
+		require.Equal(t, ApplyTargetMoved, res.Outcome)
+		require.Zero(t, f.applier.Status().Applied)
+	})
+
+	t.Run("an earlier failure's backoff does not withhold a free answer", func(t *testing.T) {
+		// Nothing is asked of the executor on this path, so nothing needs rationing — and a node that
+		// is already correct must not be kept from saying so by a retry policy for commands.
+		ex := &stubExecutor{commit: func(context.Context, Hash) (Status, error) { return StatusSyncing, nil }}
+		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+
+		require.Equal(t, ApplyPayloadUnavailable, f.applier.Apply(context.Background(), heldBinding(), behindHead()).Outcome)
+		require.Equal(t, ApplyBackoff, f.applier.Apply(context.Background(), heldBinding(), behindHead()).Outcome)
+
+		// The payload arrived and the executor moved itself; the clock has not.
+		res := f.applier.Apply(context.Background(), heldBinding(), recoveredHead())
+		require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
+	})
+
 	t.Run("and it still commits when the executor is NOT already there", func(t *testing.T) {
 		ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())

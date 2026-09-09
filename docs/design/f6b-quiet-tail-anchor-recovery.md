@@ -964,12 +964,40 @@ anchor with **no finality-changing call at all**, which is also the correct answ
 recovery attempt races a commit that already succeeded. The executor's block zero is read once and
 cached, since it is configuration and does not move.
 
-**What the run does not establish.** It exercises the genesis-round anchor, because that is the only
-anchor a shard with no transactions ever has — so row 13's exception is the path that satisfied P-id
-here, not an exact head-hash match against an ordinary certified block. The ordinary path is covered
-by fixtures (§7) and over real libp2p in `TestRecoveryLifecycle_AQuietTailIsRecoveredOverRealLibp2p`,
-not by this run. Saying so is the point: a lane that reported "exact-block recovery" without naming
-which comparison satisfied it would be claiming more than it measured.
+**Adopting is still an adoption, so it happens inside the guards.** The first version answered
+"already there" before all of them — no fault check, no in-flight slot, no gate, and no revalidation
+of the target afterwards. Reading a head is not a finality change, but adopting an anchor is a
+decision the round then acts on: `Round.applyVerifiedAnchor` installs it into the live continuity
+state on the strength of this outcome. So a target already determined to be a fault could be adopted
+if the head happened to match, and the head could be moving under a concurrent commit while it was
+read. Both paths now enter the fault and in-flight guards, take the gate, and re-read the target
+before the anchor is adopted.
+
+The one thing kept apart is the attempt BUDGET, and deliberately: only a path that COMMANDS the
+executor spends it. A node that is already correct must not be kept from saying so by an earlier
+failure's backoff — nothing is being asked of the executor, so nothing needs rationing.
+
+**Provenance.** The run writes a manifest naming the repository revision, whether the worktree was
+clean, the `ubft` binary's digest, the reth commit and whether it is the pinned one, the flags each
+arm ran with, and a SHA-256 of every log the assertions actually read. A lane whose result is a
+negative claim has to leave behind something a later reader can check, rather than a scrollback.
+
+**A failed read is not a zero.** `${c:-0}` over a failed RPC counted as zero transactions, so an
+unreachable node produced a PASS asserting that nothing had executed. An assertion that cannot tell
+"I looked and saw none" from "I could not look" is not evidence, and this lane's whole claim is a
+negative one. Every read now fails the run rather than defaulting.
+
+**What the run does NOT establish**, named rather than glossed:
+
+  - *Not exact-block recovery against an ordinary block.* It exercises the genesis-round anchor,
+    because that is the only anchor a shard with no transactions ever has — so row 13's exception is
+    what satisfied P-id here, not a head-hash match against an ordinary certified block. Recovery
+    after a genuinely missed block is separate acceptance work: transactions BEFORE the outage are
+    legitimate there, with none injected during recovery itself.
+  - *Not evidence immutability.* What this measures is that serving cost the providers nothing —
+    no observation or stream refused, and they went on certifying. That served evidence is not
+    MUTATED is a stronger claim, established by fixtures that mutate a bundle and re-read it, not by
+    a lane that cannot see inside a provider's buffer.
 
 ## 7. Acceptance fixtures
 
