@@ -5,8 +5,11 @@ Issue #92. Companion to `docs/design/f6b-quiet-uc-recovery.md` (stage 2/3, refer
 §3.3.1 refer to that document; sections of this one are numbered plainly.
 
 **Scope note.** The predicate (§2–§5) and this record shipped in #112 as design and fixtures only.
-The serving buffer of §6.1 shipped next, also without transport or recovery wiring. The scope
-paragraph below describes #112 and is kept as written at the time.
+The serving buffer of §6.1 shipped next, without transport or recovery wiring. The transport and the
+serving integration of §6.2 shipped after it: a node now retains what it observes and answers
+requests for it, and still recovers nothing itself — the requester side, which decides who to ask and
+what to do with an answer, is the next unit. The scope paragraph below describes #112 and is kept as
+written at the time.
 
 **Scope of the PR this record ships in: design and fixtures only.** It adds a pure verification
 predicate (`shardnode/anchorevidence.go`) and its acceptance fixtures
@@ -250,6 +253,9 @@ The size and shape of the bundle are chosen by whoever serves it, so it is attac
 - **Cancellation** is by `context.Context`, threaded to the trust-base lookup, so a caller waiting on
   a provider is not pinned by one.
 
+The independent transport cap is now implemented; §6.2 records what it is and why it is not the
+repository's shared framing helper.
+
 ### 4.1 Outcomes, and which of them another provider could fix
 
 Retry is the caller's, not the predicate's. The predicate is pure and deterministic — the same
@@ -476,6 +482,81 @@ truncated, re-contexted, epoch-shifted, replayed or oversized bundle all fail, a
 distinct names.
 
 ---
+
+### 6.2 The wire, and the serving integration
+
+Implemented in `shardnode/evidencetransport.go` (`ProtocolAnchorEvidence`,
+`/unicity/shard-anchor-evidence/1.0.0`), with the retention side wired in `Round.HandleCertificate`.
+One request, one response, one stream. What the transport decides and what it refuses to decide:
+
+**It carries; it does not judge.** No signature is checked on this path, no trust base is consulted,
+and the bundle is handed to the caller exactly as it arrived. Verification is
+`VerifyAnchorEvidence` against the receiving node's OWN configuration (§3), and duplicating any part
+of it here would create a second place where "is this evidence true" is answered — the place an
+attacker would then work on. The transport's contract stops at delivery, and a test states it
+directly: a bundle that arrives intact, within every bound, from a signer outside this node's trust
+base is delivered by the wire and refused by the predicate.
+
+**Bounds, and why they are the transport's own.** §4's bounds apply to a bundle this process already
+holds, so by the time they run a decoder has allocated whatever arrived. These apply first:
+
+| Bound | Default | What it stops |
+|---|---|---|
+| `MaxRequestBytes` | 4 KiB | an expensive "request" |
+| `MaxResponseBytes` | `AnchorEvidenceLimits.MaxBytes` + 4 KiB | decoding a bundle the predicate would refuse anyway |
+| `MaxCertificates` | 512, the predicate's own | carrying a chain already established as unacceptable |
+| `Deadline` | 5 s | a stream opened and then left silent |
+| `MaxConcurrentServes` | 4 | one peer occupying a provider |
+
+The order inside `readFrame` is the point: the DECLARED length is checked against the bound before
+anything is allocated and before the decoder sees a byte, so a peer announcing a gigabyte costs one
+varint. A fixture proves the ordering rather than asserting it — the reader refuses to yield
+anything past the length prefix, so a bound applied after the body would fail loudly. The shared
+helper (`network.deserializeMsg`) has no such cap, which is correct for protocols whose messages are
+bounded by construction and wrong for this one; it is deliberately not reused, and the framing
+convention it defines (uvarint length, CBOR body) is kept so the wire style stays the repository's.
+
+**The response bound is not tighter than the predicate's**, and that is asserted, not assumed: two
+bounds that disagree about the same bundle would mean a chain the predicate accepts being refused by
+the transport carrying it. Hence the explicit wrapper allowance rather than a shared constant used
+twice.
+
+**Refusals are codes, not prose.** The outcome code is the whole of a response's meaning; the detail
+string is diagnostic and is read by nothing on either side. An UNRECOGNISED code is a transport
+failure — never silently mapped to a particular refusal, and never to success. Success is code zero
+with a bundle, so a truncated or empty response cannot be mistaken for an answer, and a refusal that
+arrives carrying a bundle is still a refusal. Each of those is a fixture, because each is a way a
+hostile provider could otherwise steer a requester without forging anything.
+
+**One request per stream, and the request is read first.** No loop: "how many requests may one
+connection cost" is answered by construction rather than by policy. The concurrency bound is applied
+AFTER the request frame is read, which is deliberate — refusing before reading leaves a requester
+writing into a stream nobody drains, which deadlocks on any transport that does not buffer, and the
+read being refused is one bounded frame, far cheaper than the assembly the bound protects. Over the
+bound, a request is refused immediately rather than queued: a queue is somewhere for an attacker's
+work to accumulate.
+
+**A provider applies the requester's bounds to its own answer.** Both ends know the shared defaults,
+so a provider that can see its answer would be refused sends a named outcome instead — that is one
+attempt saved for a requester whose attempts are bounded (§4).
+
+**Requests are pinned, on the wire as in the buffer.** Round plus canonical input-record identity; a
+request naming only a round is refused, because answering it would mean choosing which certificate
+for that round the requester "probably" meant (§2.2).
+
+**What this transport does NOT do.** It asks ONE provider, ONCE. Which providers to ask, in what
+order, and how many attempts to spend are the requester's decisions, and they depend on what the
+predicate said about the last candidate (§4.1) — a transport that also made them would be a recovery
+mechanism whose policy could not be reviewed apart from its framing.
+
+**The serving integration.** `Round.SetEvidenceBuffer` attaches a buffer, and
+`Round.HandleCertificate` feeds it, before any fallible work and never able to fail the round — the
+same ordering the anchor itself depends on (§5), for the same reason: a certificate that names a
+block is retained when it VERIFIES, not when this node manages to act on it, so a transient executor
+failure does not also erase this node's ability to help somebody else. A node with no buffer never
+registers the protocol and serves nobody, and no round outcome changes either way. Nothing here
+recovers anything: using somebody else's buffer to repair this node's own anchor is the next unit,
+and P-id and P-sign are untouched.
 
 ## 7. Acceptance fixtures
 
