@@ -156,8 +156,10 @@ The rule, in full:
 
 Two failure modes fall out of it and are fixtures:
 
-- **same round, different input record** → `Conflict`, exactly as at the terminal binding. The
-  provider has handed over two authenticated statements that disagree.
+- **same round, different input record** → `CandidateSplit`. The provider has handed over two
+  authenticated statements that disagree; the bundle is evidence of equivocation and is refused. It
+  is a *different* outcome from the terminal `Conflict` of §2.2, because both halves came from this
+  provider and neither is a statement this node made — see §4.1.
 - **same round, same input record, root round not strictly later** → `Gap`. Without this, a provider
   could replay one repeat to rewrite the assignment freely, which is the value contiguity is judged
   against.
@@ -187,17 +189,32 @@ epoch reproduction is what happens when only the bundle is checked.
 Fixtures: `another partition`, `another shard of this partition`, `another shard configuration`,
 `a held certificate is authenticated against this node's own context`.
 
-### 3.1 Epoch transitions are refused, not guessed
+### 3.1 Epoch transitions refuse the candidate — and only the candidate
 
 A shard epoch change moves the validator set and the configuration with it. A chain that crosses one
 is refused with a distinct outcome, `ErrEvidenceEpochChange`, rather than being decided by this
 predicate. Saying "unsupported" is safe; a wrong answer here chooses a block hash. The epoch compared
 is the **source's**, and every certificate in the bundle *and the held certificate* is held to it, so
-an epoch change at either end of the chain fires the contract. Fixtures:
-`a chain crossing a shard epoch boundary is unsupported, not guessed at`,
-`a held certificate in another epoch fires the epoch contract`.
+an epoch change at either end fires the contract.
 
-Recovery across an epoch boundary is left open (§10).
+Two corrections from review, both about how far that refusal reaches:
+
+**The comparison happens AFTER signature verification, not before.** `InputRecord.Epoch` is a field
+in a signed structure, but a provider can alter it in transit; checking it first meant one flipped,
+unsigned byte of an otherwise genuine certificate produced `EpochChange` instead of
+`Unauthenticated`. An altered certificate is a forgery and must be reported as one. Only a
+certificate that actually verifies is allowed to say anything about epochs.
+
+**An epoch-crossing candidate is not a fact about the shard.** Ordering alone would not have been
+enough. *The source is selected by the provider*, so even a perfectly genuine old-epoch chain shows
+only that **this** candidate crosses a boundary — another provider may hold a same-epoch source for
+the very same held round. `EpochChange` is therefore **retryable** (§4.1): it refuses the candidate
+and does not end the recovery attempt.
+
+Fixtures: `a chain crossing a shard epoch boundary is unsupported, not guessed at`,
+`a held certificate in another epoch fires the epoch contract`,
+`a tampered epoch is a forgery, and the next provider is still consulted`,
+`a genuine epoch-crossing candidate does not prove every candidate crosses one`.
 
 ---
 
@@ -235,10 +252,19 @@ Retry is the caller's, not the predicate's. The predicate is pure and determinis
 bundle yields the same verdict every time — and it exports `Retryable(err)` so the classification
 lives with the outcomes rather than being re-derived at each call site.
 
-Getting this wrong in the strict direction is the expensive one: **`Unconnected` is the ordinary case
-of a peer that holds less than the requester needs**, and treating it as fatal would let a single
-unhelpful or malicious peer end a recovery that its neighbour would have completed. Only refusals
-that state something about the shard's own history, or about the caller, are non-retryable.
+**The rule**, stated so it can be applied to outcomes added later:
+
+> A refusal may terminate the whole recovery attempt **only** if it is a conclusion about the shard's
+> certified history drawn from something this node authenticated **independently of the candidate** —
+> in practice, its own held certificate. Everything decided from bundle content is a statement about
+> *this candidate*, and a candidate is chosen by the provider.
+
+Getting this wrong in the strict direction is the expensive one: treating a candidate refusal as
+fatal lets a single unhelpful or malicious peer end a recovery that its neighbour would have
+completed. Review found exactly that, twice over, behind `EpochChange` — first reachable from an
+unsigned byte, and then still wrong even once signed, because the provider chooses the source.
+
+Applied, the rule leaves **two** non-retryable outcomes:
 
 | Outcome | Meaning | Another provider could help |
 |---|---|---|
@@ -249,10 +275,25 @@ that state something about the shard's own history, or about the caller, are non
 | `ErrEvidenceGap` | a certificate is not the round its predecessor assigned, or a repeat did not follow at a later root round | yes |
 | `ErrEvidenceNotQuiet` | a certificate after the source moved the state, so the source is not the last block | yes |
 | `ErrEvidenceExhausted` | over the configured bounds | yes |
-| `ErrEvidenceUnconnected` | the chain does not **reach** the round this node holds — stale or truncated | **yes** |
-| `ErrEvidenceEpochChange` | the chain, or the held certificate, crosses an epoch boundary | no — every honest provider will say the same |
-| `ErrEvidenceConflict` | two authenticated certificates disagree about one round | no — no third party can adjudicate this |
+| `ErrEvidenceUnconnected` | the chain does not **reach** the round this node holds — stale or truncated | yes |
+| `ErrEvidenceEpochChange` | **this candidate** crosses an epoch boundary | **yes** — the source is the provider's choice |
+| `ErrEvidenceCandidateSplit` | two certificates **inside the bundle** disagree about one round | **yes** — both halves came from this provider |
+| `ErrEvidenceConflict` | the candidate's terminal certificate and **this node's own** authenticated certificate disagree | no — one half of the contradiction is ours |
 | `ErrEvidenceLimitsInvalid` | the caller passed no positive bound | no — a caller bug |
+
+`CandidateSplit` is a refusal in its own right: two authenticated certificates for one round that
+disagree are evidence of equivocation and the bundle must not be used. It is separated from
+`Conflict` because the two differ precisely in whether this node contributed half of the
+contradiction, which is the rule above.
+
+**Retrying must be bounded.** `Retryable` says a further attempt is *not pointless*; it does not say
+"loop". The caller carries a fixed attempt budget across providers, so that a supply of retryable
+refusals cannot keep a recovery attempt alive indefinitely — which is the same reasoning as the
+resource bounds in §4, applied to attempts instead of bytes.
+
+Fixture `ACandidateRefusalDoesNotEndTheAttempt` models a caller consulting providers in turn and
+asserts the observable consequence: the second provider **is** consulted after a tampered-epoch and
+after a genuine epoch-crossing candidate, and is **not** consulted after a terminal conflict.
 
 ## 5. Four cursors, kept separate
 
@@ -338,8 +379,22 @@ requester should treat as "ask someone else":
 | Provider outcome | When |
 |---|---|
 | `not-ready` | no non-quiet source observed since this process started |
-| `evicted` | the requester's held round is older than the buffer's oldest entry |
+| `evicted` | the requester's held round, or the source that round needs, has fallen out of the ring |
 | `behind` | the requester's held round is newer than anything this provider has observed |
+
+**Older sources, not just the latest one.** A single "latest non-quiet source" pointer is not enough,
+and the reason is worth stating because it is easy to get wrong: once a newer non-quiet certificate
+arrives, a request pinned to an *older* held round can no longer be answered from that pointer — the
+window `[source … older held round]` needs the source that was current *then*. The buffer therefore
+retains non-quiet entries in the ring like any other, and assembly selects **the latest non-quiet
+entry at or before the requester's held round**. If no such entry survives in the buffer, the answer
+is an explicit unavailable outcome, never a chain from a source the requester's round does not follow.
+
+**Eviction maps to a named outcome, not to silence.** Dropping the oldest entries can remove the
+source a given request would have needed, and the provider must say which case it is rather than
+serving something shorter: `evicted` when the requester's held round, or the source it would need,
+has fallen out of the ring; `not-ready` when this process has observed no non-quiet source at all
+since it started; `behind` when the provider has not itself reached the requester's held round.
 
 **Assembling a chain while new certificates keep arriving.** The requester pins the request to the
 certificate **it** holds — partition round plus the canonical input-record identity of §2.2 — and the
@@ -403,11 +458,19 @@ Added in this revision, from review:
 | Held repeat certificate (must be accepted) | `a repeat certificate for the held round…` | — |
 | Repeat inside the tail updating the assignment (must be accepted) | `a repeat that updates the assignment is accepted` | — |
 | Repeat replayed at the same root round | `a repeat must follow at a strictly later root round` | `Gap` |
-| Two disagreeing certificates for one round inside the tail | `two certificates for one round that disagree are a conflict, not a repeat` | `Conflict` |
+| Two disagreeing certificates for one round inside the tail | `two certificates for one round that disagree are a conflict, not a repeat` | `CandidateSplit` (retryable) |
 | Oversized technical record | `an oversized technical record is refused before any trust-base work` | `Exhausted`, trust base asserted never consulted |
 | Bound measured over the whole bundle | `the bound is measured over certificates and technical records together` | `Exhausted` |
 | Missing (non-positive) bound | `a missing bound is a refusal, not unlimited` | `LimitsInvalid` |
 | Retry classification of every outcome | `RetryClassification` | — |
+
+Added after the second review round:
+
+| Case | Fixture | Refusal |
+|---|---|---|
+| Tampered (unsigned) epoch byte, then a valid provider | `a tampered epoch is a forgery, and the next provider is still consulted` | `Unauthenticated`; second provider consulted |
+| Genuine epoch-crossing candidate, then a suitable one | `a genuine epoch-crossing candidate does not prove every candidate crosses one` | `EpochChange`; second provider consulted |
+| Terminal conflict must end the attempt | `a terminal conflict with this node's own certificate does end the attempt` | `Conflict`; second provider **not** consulted |
 
 **Mutation check.** Each load-bearing check was individually disabled and the suite re-run, to
 confirm the fixtures are not passing for an unrelated reason:
@@ -421,10 +484,14 @@ confirm the fixtures are not passing for an unrelated reason:
 | repeat input-record identity | `two certificates for one round that disagree are a conflict, not a repeat` |
 | repeat root-round monotonicity | `a repeat must follow at a strictly later root round` |
 | bundle size bound covering technical records | `an oversized technical record…`, `the bound is measured over certificates and technical records together` |
+| epoch comparison placed after signature verification | `a tampered epoch is a forgery, and the next provider is still consulted` |
+| `EpochChange` retryable | `RetryClassification`, `a genuine epoch-crossing candidate…` |
+| `CandidateSplit` retryable | `RetryClassification`, `two certificates for one round that disagree…` |
+| terminal `Conflict` non-retryable | `RetryClassification`, `a held certificate naming a block…`, `a terminal conflict … does end the attempt` |
 
-The reviewer's three independent reproductions (`review112_test.go`) were also run against this
-revision: all three now fail their `require.NoError` / `require.ErrorIs(Gap)` assertions, which is
-the direction that means the reproduced behaviour is gone.
+The reviewer's independent reproductions were also run against each revision unchanged
+(`review112_test.go`, then `review112_epoch_retry_test.go`): all four now fail their assertions,
+which is the direction that means the reproduced behaviour is gone.
 
 ---
 
@@ -493,7 +560,8 @@ anchor cursor in §5 is for, and what `VerifiedTargetSurvivesAnUnavailablePayloa
 ## 10. Scope held open
 
 Recovery across an epoch transition (§3.1); provider selection, rate limiting and the transport's own
-frame cap for peer evidence retrieval (§4); implementing the serving buffer of §6.1, and whether it
+frame cap and the attempt budget for peer evidence retrieval (§4, §4.1); implementing the serving
+buffer of §6.1, and whether it
 is ever persisted; whether the root chain should serve historical certificates as a second source
 (§6c); durable retained history and the signing record (#14, #105); and the acquisition-source
 measurement §8 does not have. #16 remains open, including "Too deep reorg", and nothing here claims

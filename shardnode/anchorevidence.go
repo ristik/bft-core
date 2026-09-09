@@ -100,6 +100,7 @@ var (
 	ErrEvidenceSourceQuiet     = errors.New("anchor evidence: the source certificate names no block")
 	ErrEvidenceUnconnected     = errors.New("anchor evidence: the chain does not reach the round this node holds")
 	ErrEvidenceConflict        = errors.New("anchor evidence: the chain and this node's own certificate make conflicting authenticated statements about the same round")
+	ErrEvidenceCandidateSplit  = errors.New("anchor evidence: two certificates inside the bundle make conflicting statements about the same round")
 	ErrEvidenceExhausted       = errors.New("anchor evidence: the bundle exceeds the configured bounds")
 	ErrEvidenceEpochChange     = errors.New("anchor evidence: the chain crosses an epoch boundary, which this predicate does not support")
 	ErrEvidenceMalformed       = errors.New("anchor evidence: the bundle is structurally incomplete")
@@ -114,23 +115,39 @@ costs: treating every refusal as fatal lets one unhelpful or malicious peer end 
 that a second peer would have completed, and treating every refusal as retryable spends bandwidth
 re-asking about facts of the shard's own history that no provider can change.
 
-Everything a provider controls — what it serves, how much of it, whether it is honest, whether it
-is current — is retryable. A truncated or stale chain (Unconnected) is the ordinary case of a peer
-that simply has less than the requester needs, and is emphatically NOT evidence that other peers are
-equally unhelpful. Only two outcomes are not about the provider:
+THE RULE, stated so it can be applied to outcomes added later:
 
-  - EpochChange: the shard's history genuinely crosses an epoch boundary. Every honest provider will
-    say the same thing, because it is true.
-  - Conflict: this node's own authenticated certificate and an authenticated chain disagree about
-    one round. That is a statement about the certified history, and no third party can adjudicate
-    it. It must surface as a refusal, not as a reason to shop for a provider that agrees.
+	A refusal may terminate the whole recovery attempt ONLY if it is a conclusion about the shard's
+	certified history drawn from something this node authenticated INDEPENDENTLY of the candidate —
+	in practice, its own held certificate. Everything decided from bundle content is a statement
+	about THIS CANDIDATE, and a candidate is chosen by the provider.
+
+Applied, that leaves exactly two non-retryable outcomes:
+
+  - Conflict: the candidate's terminal certificate and THIS NODE'S OWN authenticated certificate
+    make different statements about the same round. One half of that contradiction is ours, so no
+    third party can adjudicate it and no other provider can make it go away.
+  - LimitsInvalid: the caller passed no positive bound. A caller bug is not fixed by asking a peer.
+
+Everything else is retryable, including two that look like history conclusions and are not:
+
+  - EpochChange says THIS candidate crosses an epoch boundary. The source is selected by the
+    provider, so a genuine old-epoch candidate does not establish that every candidate crosses one;
+    another provider may hold a same-epoch source for the round this node holds. (It was also
+    reachable from an UNSIGNED byte before the epoch comparison was moved after verification —
+    provider-controlled bytes must never reach a global decision.)
+  - CandidateSplit says two certificates INSIDE the bundle disagree. Both are authenticated, so the
+    bundle is evidence of equivocation and must be refused — but both came from the same provider,
+    and neither is a statement this node made.
+
+Retrying is still the caller's business and must be BOUNDED: a fixed attempt budget across
+providers, not a loop that a supply of retryable refusals can keep alive.
 */
 func Retryable(err error) bool {
 	switch {
 	case err == nil:
 		return false
-	case errors.Is(err, ErrEvidenceEpochChange), errors.Is(err, ErrEvidenceConflict),
-		errors.Is(err, ErrEvidenceLimitsInvalid):
+	case errors.Is(err, ErrEvidenceConflict), errors.Is(err, ErrEvidenceLimitsInvalid):
 		return false
 	default:
 		return true
@@ -197,9 +214,6 @@ func VerifyAnchorEvidence(ctx context.Context, ev AnchorEvidence, c AnchorEviden
 		if uc == nil || uc.InputRecord == nil {
 			return ErrEvidenceMalformed
 		}
-		if uc.InputRecord.Epoch != sourceEpoch {
-			return fmt.Errorf("%w: source epoch %d, certificate epoch %d", ErrEvidenceEpochChange, sourceEpoch, uc.InputRecord.Epoch)
-		}
 		// The context checks come FIRST and are their own refusal. uc.Verify would also reject a
 		// certificate for another partition, shard or configuration, but it reports that the same
 		// way it reports a bad signature — and the two are different situations: one is a provider
@@ -224,6 +238,15 @@ func VerifyAnchorEvidence(ctx context.Context, ev AnchorEvidence, c AnchorEviden
 		}
 		if err := uc.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, c.ShardConfHash); err != nil {
 			return fmt.Errorf("%w: %w", ErrEvidenceUnauthenticated, err)
+		}
+		// The epoch comparison comes LAST, AFTER the signature. It used to come first, which meant
+		// a provider could flip one unsigned byte of a genuine certificate and get back an outcome
+		// the caller treated as a conclusion about the shard's history. An altered certificate is a
+		// forgery, and must be reported as one; only a certificate that actually verifies is
+		// allowed to say anything about epochs at all. (Ordering alone is not the whole fix — see
+		// Retryable — but a forgery must never be able to reach that decision either way.)
+		if uc.InputRecord.Epoch != sourceEpoch {
+			return fmt.Errorf("%w: source epoch %d, certificate epoch %d", ErrEvidenceEpochChange, sourceEpoch, uc.InputRecord.Epoch)
 		}
 		return nil
 	}
@@ -275,7 +298,9 @@ func VerifyAnchorEvidence(ctx context.Context, ev AnchorEvidence, c AnchorEviden
 		// gap would make honest evidence unrepresentable.
 		//
 		// The rule: same partition round as the certificate just accepted, byte-identical input
-		// record, strictly later root round. It supersedes only the ASSIGNMENT; it does not extend
+		// record, strictly later root round. Two authenticated certificates for one round that
+		// DISAGREE are refused as CandidateSplit — evidence of equivocation, but evidence supplied
+		// entirely by this provider, so it says nothing about what another provider holds. It supersedes only the ASSIGNMENT; it does not extend
 		// the interval, because the interval is keyed by partition round (§3.3.3) and a repeat
 		// covers a round already covered. Requiring a strictly later root round is what stops a
 		// provider replaying one repeat to rewrite the assignment freely.
@@ -285,8 +310,8 @@ func VerifyAnchorEvidence(ctx context.Context, ev AnchorEvidence, c AnchorEviden
 				return nil, fmt.Errorf("tail[%d]: %w: %w", i, ErrEvidenceMalformed, err)
 			}
 			if !sameIR {
-				return nil, fmt.Errorf("tail[%d]: %w: two certificates for round %d disagree",
-					i, ErrEvidenceConflict, ir.RoundNumber)
+				return nil, fmt.Errorf("tail[%d]: %w: round %d",
+					i, ErrEvidenceCandidateSplit, ir.RoundNumber)
 			}
 			if link.UC.GetRootRoundNumber() <= last.GetRootRoundNumber() {
 				return nil, fmt.Errorf("tail[%d]: %w: repeat of round %d at root round %d does not follow root round %d",

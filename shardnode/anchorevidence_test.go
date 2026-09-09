@@ -420,7 +420,6 @@ func TestAnchorEvidence_TerminalBindingToTheHeldCertificate(t *testing.T) {
 		c.Held = f.certAtEpoch(16, 125, h32(0x0b), h32(0x0b), nil, 19, 1).UC
 		_, err := verifyFixture(t, ev, c)
 		require.ErrorIs(t, err, ErrEvidenceEpochChange)
-		require.False(t, Retryable(err))
 	})
 
 	t.Run("a held certificate differing only in a field the state does not show conflicts", func(t *testing.T) {
@@ -500,8 +499,10 @@ func TestAnchorEvidence_RepeatsInsideTheTail(t *testing.T) {
 		disagree := f.cert(12, 115, h32(0x0b), h32(0x0c), h32(0xdd), 15)
 		ev.Tail = []EvidenceLink{ev.Tail[0], disagree, ev.Tail[1]}
 		_, err := verifyFixture(t, ev, c)
-		require.ErrorIs(t, err, ErrEvidenceConflict)
-		require.False(t, Retryable(err))
+		require.ErrorIs(t, err, ErrEvidenceCandidateSplit)
+		// Both halves of the contradiction came from this provider. The bundle is refused, but
+		// nothing about it says another provider cannot serve a consistent chain.
+		require.True(t, Retryable(err))
 	})
 }
 
@@ -587,7 +588,8 @@ func TestAnchorEvidence_RetryClassification(t *testing.T) {
 		{ErrEvidenceWrongContext, true},
 		{ErrEvidenceExhausted, true},
 		{ErrEvidenceMalformed, true},
-		{ErrEvidenceEpochChange, false},
+		{ErrEvidenceEpochChange, true},
+		{ErrEvidenceCandidateSplit, true},
 		{ErrEvidenceConflict, false},
 		{ErrEvidenceLimitsInvalid, false},
 	} {
@@ -605,4 +607,90 @@ func TestAnchorEvidence_RetryClassification(t *testing.T) {
 			require.Equal(t, tc.retryable, Retryable(fmt.Errorf("tail[3]: %w", tc.err)))
 		})
 	}
+}
+
+/*
+A candidate is chosen by the provider, so a refusal decided from candidate content is a statement
+about THAT CANDIDATE and never about what other providers hold.
+
+Review reproduced the sharpest version: incrementing one UNSIGNED epoch byte of an otherwise valid
+certificate returned EpochChange, which the caller treated as a conclusion about the shard's
+history — so a provider could suppress every alternate provider with a byte it did not have to sign.
+Both halves are fixed here: an altered certificate is reported as the forgery it is, and even a
+GENUINE epoch-crossing candidate no longer terminates the attempt.
+*/
+func TestAnchorEvidence_ACandidateRefusalDoesNotEndTheAttempt(t *testing.T) {
+	// attempt models what a caller does: try providers in turn, stopping only on success or on a
+	// refusal that Retryable says no other provider can fix. It returns how many were consulted.
+	attempt := func(t *testing.T, c AnchorEvidenceContext, bundles ...AnchorEvidence) (*ExecutionAnchor, error, int) {
+		t.Helper()
+		var err error
+		for i, ev := range bundles {
+			var anchor *ExecutionAnchor
+			anchor, err = verifyFixture(t, ev, c)
+			if err == nil {
+				return anchor, nil, i + 1
+			}
+			if !Retryable(err) {
+				return nil, err, i + 1
+			}
+		}
+		return nil, err, len(bundles)
+	}
+
+	t.Run("a tampered epoch is a forgery, and the next provider is still consulted", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		good, c := f.quietTail()
+		tampered, _ := f.quietTail()
+		tampered.Tail[0].UC.InputRecord.Epoch++ // provider alteration, no new signature
+
+		// On its own: reported as what it is.
+		_, err := verifyFixture(t, tampered, c)
+		require.ErrorIs(t, err, ErrEvidenceUnauthenticated)
+		require.NotErrorIs(t, err, ErrEvidenceEpochChange, "an unsigned byte must not reach the epoch decision")
+
+		anchor, err, tried := attempt(t, c, tampered, good)
+		require.NoError(t, err)
+		require.Equal(t, 2, tried, "the second provider must still be consulted")
+		require.Equal(t, Hash(h32(0xbb)), anchor.BlockHash)
+	})
+
+	t.Run("a genuine epoch-crossing candidate does not prove every candidate crosses one", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		good, c := f.quietTail()
+
+		// A real, correctly signed chain whose source is in an older shard epoch. It is genuinely
+		// unsupported — and it is one provider's choice of source, not a fact about the shard.
+		stateA, stateB := h32(0x0a), h32(0x0b)
+		oldSource := f.certAtEpoch(10, 100, stateA, stateB, h32(0xbb), 12, 0)
+		crossing := AnchorEvidence{
+			Source:          oldSource.UC,
+			SourceTechnical: oldSource.Technical,
+			Tail: []EvidenceLink{
+				f.certAtEpoch(12, 110, stateB, stateB, nil, 16, 1),
+				f.certAtEpoch(16, 120, stateB, stateB, nil, 19, 1),
+			},
+		}
+		_, err := verifyFixture(t, crossing, c)
+		require.ErrorIs(t, err, ErrEvidenceEpochChange)
+		require.True(t, Retryable(err), "the source is the provider's choice, not the shard's history")
+
+		anchor, err, tried := attempt(t, c, crossing, good)
+		require.NoError(t, err)
+		require.Equal(t, 2, tried)
+		require.Equal(t, Hash(h32(0xbb)), anchor.BlockHash)
+	})
+
+	t.Run("a terminal conflict with this node's own certificate does end the attempt", func(t *testing.T) {
+		// The one contradiction where half the evidence is ours. No provider can adjudicate it, so
+		// the loop must stop rather than shop for a provider that agrees — and it must stop even
+		// though a "good" bundle is queued behind it.
+		f := newEvidenceFixture(t)
+		good, c := f.quietTail()
+		c.Held = f.cert(16, 121, h32(0x0b), h32(0x0c), h32(0xdd), 19).UC
+
+		_, err, tried := attempt(t, c, good, good)
+		require.ErrorIs(t, err, ErrEvidenceConflict)
+		require.Equal(t, 1, tried, "the attempt stops at the first provider")
+	})
 }
