@@ -345,6 +345,13 @@ observerCase "most polls fail: not enough to conclude anything" '
     [ "$n" = 1 ] && { echo "2:0xdef"; return 0; }
     return 1
   }' 2
+observerCase "an exact half-and-half split is not a majority" '
+  echo 0 >calls
+  execHead() {
+    n=$(( $(cat calls) + 1 )); echo "$n" >calls
+    [ $(( n % 2 )) = 1 ] && { echo "2:0xdef"; return 0; }
+    return 1
+  }' 2
 observerCase "a transient failure must not hide a recovery" '
   echo 0 >calls
   execHead() {

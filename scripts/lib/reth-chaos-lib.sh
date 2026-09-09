@@ -935,7 +935,10 @@ observeQuietRecovery() {
   done
 
   quietSamples=$samples; quietFailures=$failures; quietLastHead=$lastGood; quietWaited=$waited
-  if [ "$samples" -eq 0 ] || [ $((failures * 2)) -gt $((samples + failures)) ] || [ "$finalOK" != true ]; then
+  # A STRICT majority, so an exact 50/50 split is refused rather than counted as observed. Half the
+  # window unreadable is not a basis for saying what the executor did in it, and "not a majority of
+  # failures" quietly admitted the tie.
+  if [ "$samples" -eq 0 ] || [ $((samples * 2)) -le $((samples + failures)) ] || [ "$finalOK" != true ]; then
     info "quiet observation: INVALID — validator $v gave $samples valid sample(s) and $failures failed one(s) over ${budget}s (final poll ok: $finalOK)"
     return 2
   fi
@@ -977,25 +980,28 @@ quietPrecondition() {
 # certified rounds overstates the shard's progress. Both numbers are reported.
 quietObservationRecord() {
   local v=$1 mark=$2 verdict=$3 lg out
+  # EVERY COUNT BELOW IS CUMULATIVE FROM <mark>, not per observation window. The control phase
+  # reuses the restart mark on purpose — the point there is the node's whole history since it
+  # returned — so the field names say so rather than inviting the reader to subtract two records.
   lg=$(log "$v")
   out=$runDir/quiet-observation.txt
   {
     echo "verdict=$verdict"
     echo "validator=$v"
-    echo "windowSeconds=${quietWaited:-0} validSamples=${quietSamples:-0} failedSamples=${quietFailures:-0}"
+    echo "thisWindowSeconds=${quietWaited:-0} thisWindowValidSamples=${quietSamples:-0} thisWindowFailedSamples=${quietFailures:-0}"
     echo "lastObservedHead=${quietLastHead:-none}"
-    echo "deliveries=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
-    echo "distinctPartitionRounds=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | grep -oE 'partitionRound=[0-9]+' | sort -u | wc -l | tr -d ' ')"
-    echo "distinctRootRounds=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | grep -oE 'rootRound=[0-9]+' | sort -u | wc -l | tr -d ' ')"
-    echo "retriedDeliveries=$(awk -v n="$mark" 'NR > n && /retryOfFailedApply=true/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
-    echo "firstAccepted=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | head -1 | grep -oE 'partitionRound=[0-9]+ rootRound=[0-9]+' | head -1)"
-    echo "lastAccepted=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | tail -1 | grep -oE 'partitionRound=[0-9]+ rootRound=[0-9]+' | head -1)"
-    echo "anchorDecisions=$(awk -v n="$mark" 'NR > n && /continuity: observed certificate/' "$lg" 2>/dev/null | grep -oE 'transition=[a-z]+' | sort | uniq -c | tr '\n' ' ')"
-    echo "nonQuietCertificates=$(awk -v n="$mark" 'NR > n && /continuity: observed certificate/ && /quiet=false/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
-    echo "firstRefusal=$(awk -v n="$mark" 'NR > n' "$lg" 2>/dev/null | grep -oE 'no-anchor|continuity-gap|anchor-mismatch|head-identity-mismatch|unavailable in the executor \(status [a-z]+\)|engine API error [-0-9]+|reading executor head' | head -1)"
-    echo "refusalOccurrences=$(awk -v n="$mark" 'NR > n' "$lg" 2>/dev/null | grep -cE 'no-anchor|continuity-gap|anchor-mismatch|head-identity-mismatch|unavailable in the executor|engine API error|reading executor head' | tr -d ' ')"
-    echo "nonVotingGateLines=$(awk -v n="$mark" 'NR > n && /will NOT vote/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
-    echo "certificationRequests=$(awk -v n="$mark" 'NR > n && /submitting block certification/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "deliveriesSinceRestart=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "distinctPartitionRoundsSinceRestart=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | grep -oE 'partitionRound=[0-9]+' | sort -u | wc -l | tr -d ' ')"
+    echo "distinctRootRoundsSinceRestart=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | grep -oE 'rootRound=[0-9]+' | sort -u | wc -l | tr -d ' ')"
+    echo "retriedDeliveriesSinceRestart=$(awk -v n="$mark" 'NR > n && /retryOfFailedApply=true/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "firstAcceptedSinceRestart=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | head -1 | grep -oE 'partitionRound=[0-9]+ rootRound=[0-9]+' | head -1)"
+    echo "lastAcceptedSinceRestart=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | tail -1 | grep -oE 'partitionRound=[0-9]+ rootRound=[0-9]+' | head -1)"
+    echo "anchorDecisionsSinceRestart=$(awk -v n="$mark" 'NR > n && /continuity: observed certificate/' "$lg" 2>/dev/null | grep -oE 'transition=[a-z]+' | sort | uniq -c | tr '\n' ' ')"
+    echo "nonQuietCertificatesSinceRestart=$(awk -v n="$mark" 'NR > n && /continuity: observed certificate/ && /quiet=false/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "firstRefusalSinceRestart=$(awk -v n="$mark" 'NR > n' "$lg" 2>/dev/null | grep -oE 'no-anchor|continuity-gap|anchor-mismatch|head-identity-mismatch|unavailable in the executor \(status [a-z]+\)|engine API error [-0-9]+|reading executor head' | head -1)"
+    echo "refusalOccurrencesSinceRestart=$(awk -v n="$mark" 'NR > n' "$lg" 2>/dev/null | grep -cE 'no-anchor|continuity-gap|anchor-mismatch|head-identity-mismatch|unavailable in the executor|engine API error|reading executor head' | tr -d ' ')"
+    echo "nonVotingGateLinesSinceRestart=$(awk -v n="$mark" 'NR > n && /will NOT vote/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "certificationRequestsSinceRestart=$(awk -v n="$mark" 'NR > n && /submitting block certification/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
     echo "executorHeadNow=$(execHead "$v" || echo UNOBSERVABLE)"
     echo "rethTail=$(grep -iE 'canonical|forkchoice|sync' "test-nodes/reth$v/reth.log" 2>/dev/null | tail -1 | cut -c1-160)"
   } | tee -a "$out" | sed 's/^/  ..     /'
