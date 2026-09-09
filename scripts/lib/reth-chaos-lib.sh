@@ -337,8 +337,8 @@ PY
     export "EVM_ENGINE_URL_$i=$(engineURL "$i")"
     export "EVM_ETH_URL_$i=$(ethURL "$i")"
   done
-  # Debug, not info: evidence for #88 depends on it. "execution anchor installed" is the only line
-  # that carries a partition round and the certified EVM block hash together, and correlating a
+  # Debug, not info: evidence for #88 depends on it. "continuity: observed certificate" is the only
+  # line that carries a partition round and the certified EVM block hash together, and correlating a
   # leader with an executed block is impossible without it (see assertMultiLeaderExecution, which
   # fails loudly rather than quietly finding nothing if the level is wrong).
   export EVM_VALIDATOR_LOG_LEVEL="${EVM_VALIDATOR_LOG_LEVEL:-debug}"
@@ -456,11 +456,17 @@ freshCluster() {
 #   anchor line    EVM block hash -> partition round  (shard node, AFTER UC.Verify — see below)
 #   submit line    partition round -> leader          (shard node, from the technical record)
 #
-# The middle step is why this lane runs its validators at debug. "execution anchor installed" is
-# logged by shardnode/round.go when a verified NON-QUIET certificate is folded into the continuity
-# state, and it is the only place a partition round and the certified EVM block hash appear
-# together. It is written after the certificate verified against the trust base, so the round-to-
-# block binding is authenticated, not inferred from timing.
+# The middle step is why this lane runs its validators at debug. "continuity: observed certificate"
+# is logged by shardnode/round.go for every verified certificate, and it is the only place a
+# partition round and the certified EVM block hash appear together. It is written after the
+# certificate verified against the trust base, so the round-to-block binding is authenticated, not
+# inferred from timing.
+#
+# THE FIELD NAMES ARE A CONTRACT WITH THE RUNTIME. This line replaced an older
+# "execution anchor installed" one in #109, and the parser below had to move with it; nothing else
+# ties these two changes together, so a rename on either side must update the other. Both the field
+# it reads (blockHash=) and the transition it filters on (transition=installed) are asserted by
+# scripts/reth-chaos-selftest.sh against a recorded sample of the real line.
 
 # hexNoPrefix - the shard node logs hashes as raw %x (no 0x); JSON-RPC returns them 0x-prefixed.
 hexNoPrefix() { local h=${1#0x}; echo "$h" | tr 'A-F' 'a-f'; }
@@ -470,8 +476,12 @@ hexNoPrefix() { local h=${1#0x}; echo "$h" | tr 'A-F' 'a-f'; }
 certifiedRoundOfBlock() {
   local from=$1 want round
   want=$(hexNoPrefix "$2")
-  round=$(grep 'execution anchor installed' "$(log "$from")" 2>/dev/null |
-    grep "anchorBlockHash=$want" | tail -1 |
+  # An empty hash matches every line, including the quiet rounds that name no block at all — so a
+  # failed receipt lookup would correlate to whatever round happened to be last. Refuse it.
+  [ -n "$want" ] || return 1
+  round=$(grep 'continuity: observed certificate' "$(log "$from")" 2>/dev/null |
+    grep 'transition=installed' |
+    grep -F "blockHash=$want " | tail -1 |
     grep -o 'partitionRound=[0-9]*' | cut -d= -f2)
   [ -n "$round" ] || return 1
   echo "$round"
@@ -546,8 +556,8 @@ assertMultiLeaderExecution() {
   local from=$1 minLeaders=${2:-2} budget=${3:-6} leaders count sent=0 via
   : >"$multiLeaderEvidence"
 
-  if ! grep -q 'execution anchor installed' "$(log "$from")" 2>/dev/null; then
-    fail "multi-leader: validator $from logged no 'execution anchor installed' line, so no executed block can be tied to a certified round — this lane requires debug logging (EVM_VALIDATOR_LOG_LEVEL)"
+  if ! grep -q 'continuity: observed certificate' "$(log "$from")" 2>/dev/null; then
+    fail "multi-leader: validator $from logged no 'continuity: observed certificate' line, so no executed block can be tied to a certified round — this lane requires debug logging (EVM_VALIDATOR_LOG_LEVEL)"
     return 1
   fi
 

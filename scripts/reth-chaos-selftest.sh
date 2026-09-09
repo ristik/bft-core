@@ -311,6 +311,38 @@ runSupervisorCase "child exited nonzero with nothing recorded" 7 0 ':' 1 'exited
 runSupervisorCase "child recorded an unreadable result" 0 banana ':' 1 'unreadable result'
 
 echo
+echo "=== leader/block correlation reads the runtime's real log line ==="
+
+# The correlation joins a receipt to a partition round through a line the SHARD NODE writes, so its
+# field names are a contract with shardnode/round.go. #109 replaced "execution anchor installed"
+# with "continuity: observed certificate" and this parser had to move with it; nothing but this case
+# ties the two together. The sample below is a verbatim line from a real validator's debug log.
+correlationOut=$(
+  cd "$work" || exit 1
+  rm -rf correlate && mkdir correlate && cd correlate || exit 1
+  validators=1
+  # shellcheck disable=SC1090
+  set +u; source "$harness" >/dev/null 2>&1; set -u
+  mkdir -p test-nodes/evm1
+  cat >test-nodes/evm1/debug.log <<'LOG'
+time=2026-09-09T09:01:04.2920+0300 level=DEBUG source=/x/shardnode/round.go:331 msg="continuity: observed certificate" transition=installed reason="non-quiet certificate: this block becomes the anchor" partitionRound=1 assignedNext=2 quiet=false blockHash=bf375b629e8a70c291209cd8c7a3926beae26136fa0ce9fc476bfaf2a7094b22 stateRoot=bf375b629e8a70c291209cd8c7a3926beae26136fa0ce9fc476bfaf2a7094b22 previousHash= expectedNextBefore=0 throughBefore=0 anchorRoundBefore=0 anchorBlockBefore= brokenBefore=false expectedNextAfter=2 throughAfter=1 anchorRoundAfter=1 rootRound=4 nodeID=16Uiu2
+time=2026-09-09T09:01:09.1000+0300 level=DEBUG source=/x/shardnode/round.go:331 msg="continuity: observed certificate" transition=extended reason="the assigned next round, quiet, at the anchor's state" partitionRound=2 assignedNext=3 quiet=true blockHash= stateRoot=bf375b629e8a70c291209cd8c7a3926beae26136fa0ce9fc476bfaf2a7094b22 previousHash=bf375b629e8a70c291209cd8c7a3926beae26136fa0ce9fc476bfaf2a7094b22 expectedNextBefore=2 throughBefore=1 anchorRoundBefore=1 anchorBlockBefore=bf375b62 brokenBefore=false expectedNextAfter=3 throughAfter=2 anchorRoundAfter=1 rootRound=7 nodeID=16Uiu2
+time=2026-09-09T09:01:11.5000+0300 level=INFO source=/x/shardnode/round.go:400 msg="submitting block certification request" round=1 quiet=false leader=true go_id=402
+LOG
+  echo "round=$(certifiedRoundOfBlock 1 0xbf375b629e8a70c291209cd8c7a3926beae26136fa0ce9fc476bfaf2a7094b22 || echo NOTFOUND)"
+  echo "leader=$(leaderOfRound 1 || echo NOTFOUND)"
+  # A quiet round names no block, so it must not be matched by an empty hash.
+  echo "quiet=$(certifiedRoundOfBlock 1 0x || echo REFUSED)"
+)
+if [ "$(echo "$correlationOut" | sed -n 's/^round=//p')" = "1" ] &&
+   [ "$(echo "$correlationOut" | sed -n 's/^leader=//p')" = "1" ] &&
+   [ "$(echo "$correlationOut" | sed -n 's/^quiet=//p')" = "REFUSED" ]; then
+  ok "the parser reads a verbatim runtime log line: block -> round -> leader"
+else
+  bad "correlation against the real line: $(echo "$correlationOut" | tr '\n' ' ')"
+fi
+
+echo
 echo "=== evidence retention across cluster resets ==="
 
 # A cluster whose logs, trust base and identities live under test-nodes/ is destroyed by
