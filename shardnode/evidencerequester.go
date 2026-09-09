@@ -268,7 +268,7 @@ type EvidenceRequester struct {
 	retainedFor   witnessEntry // the certificate the retained bundle was VERIFIED against
 	target        *ExecutionAnchor
 	targetFor     []byte
-	targetForRnd  uint64
+	targetBinding CertificateBinding
 	refusedFor    []byte // the held identity a terminal conflict was decided for
 	nextAttempt   time.Time
 	lastErr       error
@@ -383,16 +383,20 @@ what this returns is never "an anchor whose state root happens to match". A targ
 matches is retained, not discarded — the caller's next Need can usually carry it forward locally —
 which is what lets a target outlive an application that has not finished.
 
+The target is returned WITH the certificate binding it was verified against, so a consumer never has
+to reconstruct that from a state root. Across a quiet tail every certificate carries the same state
+root, so state equality cannot say which certificate an anchor was verified for.
+
 It does no I/O and takes only the coordinator's own lock, so it is safe to call under the Round lock.
 */
-func (r *EvidenceRequester) Target() (*ExecutionAnchor, bool) {
+func (r *EvidenceRequester) Target() (VerifiedTarget, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	held, ok := r.current()
 	if !ok || r.target == nil || !bytes.Equal(r.targetFor, held.identity) {
-		return nil, false
+		return VerifiedTarget{}, false
 	}
-	return copyAnchor(r.target), true
+	return VerifiedTarget{Anchor: copyAnchor(r.target), For: r.targetBinding.clone()}, true
 }
 
 // copyAnchor returns an anchor that shares nothing with the retained one. ExecutionAnchor's fields
@@ -422,7 +426,7 @@ func (r *EvidenceRequester) Status() RecoveryStatus {
 		Fetches:     r.fetches,
 		LastErr:     r.lastErr,
 		NextAttempt: r.nextAttempt,
-		TargetFor:   r.targetForRnd,
+		TargetFor:   r.targetBinding.Round,
 		Witness:     len(r.witness),
 	}
 	if r.contradiction != nil {
@@ -743,7 +747,10 @@ func (r *EvidenceRequester) carry(ctx context.Context, bundle AnchorEvidence, fr
 	r.retainedFor = held
 	r.target = anchor
 	r.targetFor = held.identity
-	r.targetForRnd = held.round
+	// The binding travels WITH the target. What the anchor was verified against is a fact about the
+	// anchor, and a consumer that had to re-derive it from a state root would be inferring history
+	// from state equality — the one thing this whole design refuses (§3.3.1).
+	r.targetBinding = bindingOf(held)
 	r.refusedFor = nil
 	return nil
 }

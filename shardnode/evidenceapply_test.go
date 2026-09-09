@@ -3,6 +3,8 @@ package shardnode
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,22 +69,49 @@ func (e *stubExecutor) Verify(context.Context, Block, RoundParams) (Status, erro
 // stubTarget is the requester's half, reduced to what the applier is allowed to use: it holds a
 // target and answers for it. It cannot be asked to fetch anything, which is the point.
 type stubTarget struct {
+	mu     sync.Mutex
 	anchor *ExecutionAnchor
+	// verifiedFor is the certificate the anchor was verified against. It travels with the anchor
+	// because the applier compares bindings, never state roots.
+	verifiedFor CertificateBinding
 	// shared makes Target hand out the record itself rather than a copy. EvidenceRequester does
 	// copy, but the applier must not DEPEND on that: it takes a TargetSource, and a source that
 	// returns its own record is the naive implementation of one.
 	shared bool
 }
 
-func (s *stubTarget) Target() (*ExecutionAnchor, bool) {
+func (s *stubTarget) Target() (VerifiedTarget, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.anchor == nil {
-		return nil, false
+		return VerifiedTarget{}, false
 	}
 	if s.shared {
-		return s.anchor, true
+		return VerifiedTarget{Anchor: s.anchor, For: s.verifiedFor}, true
 	}
-	return copyAnchor(s.anchor), true
+	return VerifiedTarget{Anchor: copyAnchor(s.anchor), For: s.verifiedFor.clone()}, true
 }
+
+func (s *stubTarget) set(anchor *ExecutionAnchor, for_ CertificateBinding) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.anchor, s.verifiedFor = anchor, for_
+}
+
+// bind names a certificate the way the applier is given one. Identities are synthetic here and real
+// in TestBindingFor; what matters to these fixtures is that two certificates of a quiet tail differ
+// in their rounds while sharing a state root, which is exactly what defeats a state-keyed rule.
+func bind(round, rootRound uint64, state []byte) CertificateBinding {
+	return CertificateBinding{
+		Round:     round,
+		RootRound: rootRound,
+		Identity:  []byte(fmt.Sprintf("ir(round=%d,state=%x)", round, state)),
+		State:     Hash(state),
+	}
+}
+
+// heldBinding is the certificate this node holds throughout: round 16, quiet at state 0b.
+func heldBinding() CertificateBinding { return bind(16, 120, h32(0x0b)) }
 
 type applyFixture struct {
 	applier *TargetApplier
@@ -94,7 +123,7 @@ type applyFixture struct {
 func newApplyFixture(t *testing.T, budget ApplyBudget, ex *stubExecutor, anchor *ExecutionAnchor) *applyFixture {
 	t.Helper()
 	clock := &testClock{at: time.Unix(1_700_000_000, 0)}
-	src := &stubTarget{anchor: anchor}
+	src := &stubTarget{anchor: anchor, verifiedFor: heldBinding()}
 	a, err := NewTargetApplier(ApplyConfig{Executor: ex, Source: src, Budget: budget, Now: clock.now})
 	require.NoError(t, err)
 	return &applyFixture{applier: a, ex: ex, src: src, clock: clock}
@@ -124,7 +153,7 @@ func TestTargetApplier_CommitsTheCertifiedBlock(t *testing.T) {
 	ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
 	f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
-	res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+	res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 
 	require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
 	require.NoError(t, res.Err)
@@ -147,23 +176,63 @@ about another state is not an answer to it — matching hashes would be the only
 it as one, and §3.3.1 is the counterexample to that argument.
 */
 func TestTargetApplier_RechecksTheCertificateBeforeCommitting(t *testing.T) {
-	t.Run("a target for another state is never sent to the executor", func(t *testing.T) {
+	/*
+	   The reproduction review published: a state root cannot bind an anchor to a certificate. Rounds
+	   12 and 16 of a quiet tail carry the SAME state root — that is what quiet means — so a target
+	   verified against round 12 passes any state comparison for round 16 while being an answer about
+	   a certificate this node has moved past. What separates them is the certificate itself.
+	*/
+	t.Run("a target verified against an earlier certificate at the same state is refused", func(t *testing.T) {
 		ex := &stubExecutor{}
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+		f.src.set(recoveredAnchor(), bind(12, 110, h32(0x0b))) // same state, earlier certificate
 
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0c)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 
 		require.Equal(t, ApplyStaleTarget, res.Outcome)
 		require.ErrorIs(t, res.Err, ErrApplyStaleTarget)
+		require.ErrorContains(t, res.Err, "verified against round 12")
 		require.Empty(t, ex.commits, "nothing was sent to the executor")
-		require.False(t, res.Outcome.Retryable(), "another attempt at the same question changes nothing")
+	})
+
+	t.Run("a repeat of the held round is a different certificate", func(t *testing.T) {
+		ex := &stubExecutor{}
+		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+		// Same partition round and the same input record, certified at a LATER root round. The
+		// requester carries a target across it; until it has, this is not the same question.
+		res := f.applier.Apply(context.Background(), bind(16, 130, h32(0x0b)), behindHead())
+
+		require.Equal(t, ApplyStaleTarget, res.Outcome)
+		require.Empty(t, ex.commits)
+	})
+
+	t.Run("a target for another state is never sent to the executor", func(t *testing.T) {
+		ex := &stubExecutor{}
+		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+		// The binding matches and the anchor disagrees with it about the state: a bug on this node
+		// rather than anything a peer did, and named separately from staleness.
+		f.src.set(&ExecutionAnchor{BlockHash: Hash(h32(0xbb)), StateRoot: Hash(h32(0x0c)), Round: 10}, heldBinding())
+
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
+
+		require.Equal(t, ApplyStaleTarget, res.Outcome)
+		require.ErrorContains(t, res.Err, "the certificate for that round builds on 0b0b")
+		require.Empty(t, ex.commits, "nothing was sent to the executor")
+	})
+
+	t.Run("no certificate named is refused before the source is consulted", func(t *testing.T) {
+		ex := &stubExecutor{}
+		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+		res := f.applier.Apply(context.Background(), CertificateBinding{}, behindHead())
+		require.Equal(t, ApplyNoTarget, res.Outcome)
+		require.Empty(t, ex.commits)
 	})
 
 	t.Run("no verified target is its own answer", func(t *testing.T) {
 		ex := &stubExecutor{}
 		f := newApplyFixture(t, testApplyBudget(), ex, nil)
 
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 
 		require.Equal(t, ApplyNoTarget, res.Outcome)
 		require.ErrorIs(t, res.Err, ErrApplyNoTarget)
@@ -173,7 +242,7 @@ func TestTargetApplier_RechecksTheCertificateBeforeCommitting(t *testing.T) {
 	t.Run("the head reported back is the one the caller had", func(t *testing.T) {
 		ex := &stubExecutor{}
 		f := newApplyFixture(t, testApplyBudget(), ex, nil)
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 		require.Equal(t, behindHead(), res.Head, "an attempt that read no head does not invent one")
 		require.Zero(t, ex.heads)
 	})
@@ -192,7 +261,7 @@ func TestTargetApplier_TheThreeExecutorSituationsStayApart(t *testing.T) {
 		}}
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 
 		require.Equal(t, ApplyExecutorUnreachable, res.Outcome)
 		require.ErrorIs(t, res.Err, ErrApplyExecutorUnreachable)
@@ -208,7 +277,7 @@ func TestTargetApplier_TheThreeExecutorSituationsStayApart(t *testing.T) {
 			ex := &stubExecutor{commit: func(context.Context, Hash) (Status, error) { return status, nil }}
 			f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
-			res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+			res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 
 			require.Equal(t, ApplyPayloadUnavailable, res.Outcome)
 			require.ErrorIs(t, res.Err, ErrApplyPayloadUnavailable)
@@ -223,7 +292,7 @@ func TestTargetApplier_TheThreeExecutorSituationsStayApart(t *testing.T) {
 		ex := &stubExecutor{commit: func(context.Context, Hash) (Status, error) { return StatusInvalid, nil }}
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 
 		require.Equal(t, ApplyPayloadInvalid, res.Outcome)
 		require.ErrorIs(t, res.Err, ErrApplyPayloadInvalid)
@@ -231,18 +300,18 @@ func TestTargetApplier_TheThreeExecutorSituationsStayApart(t *testing.T) {
 		require.False(t, res.Outcome.Retryable(), "no number of attempts makes a rejected payload valid")
 
 		// Terminal for THIS block, and the executor is not asked again about it.
-		again := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		again := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 		require.Equal(t, ApplyPayloadInvalid, again.Outcome)
 		require.Len(t, ex.commits, 1, "a fault is not re-litigated against the executor")
 
 		// A DIFFERENT block for the same state is a different claim — §3.3.1's whole point — and
 		// gets its own attempt.
-		f.src.anchor = &ExecutionAnchor{BlockHash: Hash(h32(0xee)), StateRoot: Hash(h32(0x0b)), Round: 12}
+		f.src.set(&ExecutionAnchor{BlockHash: Hash(h32(0xee)), StateRoot: Hash(h32(0x0b)), Round: 12}, heldBinding())
 		ex.commit = func(context.Context, Hash) (Status, error) { return StatusValid, nil }
 		ex.head = func(context.Context) (BlockRef, error) {
 			return BlockRef{Number: 6, Hash: Hash(h32(0xee)), StateRoot: Hash(h32(0x0b))}, nil
 		}
-		third := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		third := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 		require.Equal(t, ApplyApplied, third.Outcome, "err: %v", third.Err)
 		require.Len(t, ex.commits, 2)
 	})
@@ -253,7 +322,7 @@ func TestTargetApplier_TheThreeExecutorSituationsStayApart(t *testing.T) {
 		}}
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 
 		require.Equal(t, ApplyExecutorUnreachable, res.Outcome)
 		require.True(t, res.Outcome.Retryable(), "whether this node recovered is unknown, and unknown is retryable")
@@ -275,7 +344,7 @@ func TestTargetApplier_EnforcesHeadIdentityAfterAValidCommit(t *testing.T) {
 		}}
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 
 		require.Equal(t, ApplyHeadMismatch, res.Outcome)
 		require.ErrorIs(t, res.Err, ErrApplyHeadMismatch)
@@ -288,7 +357,7 @@ func TestTargetApplier_EnforcesHeadIdentityAfterAValidCommit(t *testing.T) {
 		}}
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 
 		require.Equal(t, ApplyHeadMismatch, res.Outcome)
 		require.ErrorContains(t, res.Err, "is at state 0c0c")
@@ -309,7 +378,7 @@ func TestTargetApplier_EnforcesHeadIdentityAfterAValidCommit(t *testing.T) {
 			BlockHash: Hash(h32(0xbb)), StateRoot: Hash(h32(0x0b)), Round: 1, fromGenesisRound: true,
 		})
 
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 		require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
 		require.Equal(t, 1, ex.geneses)
 	})
@@ -327,7 +396,7 @@ func TestTargetApplier_EnforcesHeadIdentityAfterAValidCommit(t *testing.T) {
 			BlockHash: Hash(h32(0xbb)), StateRoot: Hash(h32(0x0b)), Round: 1, fromGenesisRound: true,
 		})
 
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 		require.Equal(t, ApplyHeadMismatch, res.Outcome)
 	})
 
@@ -344,7 +413,7 @@ func TestTargetApplier_EnforcesHeadIdentityAfterAValidCommit(t *testing.T) {
 			BlockHash: Hash(h32(0xbb)), StateRoot: Hash(h32(0x0b)), Round: 1, fromGenesisRound: true,
 		})
 
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 		require.Equal(t, ApplyExecutorUnreachable, res.Outcome)
 		require.True(t, res.Outcome.Retryable())
 	})
@@ -361,14 +430,14 @@ func TestTargetApplier_AttemptsAreBoundedAndSpaced(t *testing.T) {
 		ex := unavailable()
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
-		require.Equal(t, ApplyPayloadUnavailable, f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead()).Outcome)
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		require.Equal(t, ApplyPayloadUnavailable, f.applier.Apply(context.Background(), heldBinding(), behindHead()).Outcome)
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 		require.Equal(t, ApplyBackoff, res.Outcome)
 		require.ErrorIs(t, res.Err, ErrApplyBackoff)
 		require.Len(t, ex.commits, 1, "the backoff is a refusal to ask, not a quieter way of asking")
 
 		f.clock.advance(2 * time.Second)
-		require.Equal(t, ApplyPayloadUnavailable, f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead()).Outcome)
+		require.Equal(t, ApplyPayloadUnavailable, f.applier.Apply(context.Background(), heldBinding(), behindHead()).Outcome)
 		require.Len(t, ex.commits, 2)
 	})
 
@@ -377,10 +446,10 @@ func TestTargetApplier_AttemptsAreBoundedAndSpaced(t *testing.T) {
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
 		for i := 0; i < testApplyBudget().MaxAttempts; i++ {
-			require.Equal(t, ApplyPayloadUnavailable, f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead()).Outcome, "attempt %d", i)
+			require.Equal(t, ApplyPayloadUnavailable, f.applier.Apply(context.Background(), heldBinding(), behindHead()).Outcome, "attempt %d", i)
 			f.clock.advance(2 * time.Second)
 		}
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 		require.Equal(t, ApplyExhausted, res.Outcome)
 		require.ErrorIs(t, res.Err, ErrApplyExhausted)
 		require.Len(t, ex.commits, testApplyBudget().MaxAttempts)
@@ -392,20 +461,24 @@ func TestTargetApplier_AttemptsAreBoundedAndSpaced(t *testing.T) {
 	   recoverable situation into a permanent one. The shard advancing is what supplies the next
 	   attempts — the same rhythm the live path already has.
 	*/
-	t.Run("the next certified state brings a fresh budget", func(t *testing.T) {
+	t.Run("the next certificate brings a fresh budget, even a quiet one", func(t *testing.T) {
 		ex := unavailable()
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 		for i := 0; i < testApplyBudget().MaxAttempts; i++ {
-			f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+			f.applier.Apply(context.Background(), heldBinding(), behindHead())
 			f.clock.advance(2 * time.Second)
 		}
-		require.Equal(t, ApplyExhausted, f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead()).Outcome)
+		require.Equal(t, ApplyExhausted, f.applier.Apply(context.Background(), heldBinding(), behindHead()).Outcome)
 
-		// The shard certified a state-changing round; the requester verified a target for it.
-		f.src.anchor = &ExecutionAnchor{BlockHash: Hash(h32(0xee)), StateRoot: Hash(h32(0x0c)), Round: 12}
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0c)), behindHead())
+		// The shard certified another QUIET round: same state root, a new certificate. This is the
+		// case review reproduced — a state-keyed budget never renews here, and the node that most
+		// needs to retry is the one that can no longer.
+		quiet := bind(19, 130, h32(0x0b))
+		f.src.set(recoveredAnchor(), quiet)
+		res := f.applier.Apply(context.Background(), quiet, behindHead())
 		require.Equal(t, ApplyPayloadUnavailable, res.Outcome, "err: %v", res.Err)
-		require.Len(t, ex.commits, testApplyBudget().MaxAttempts+1)
+		require.Len(t, ex.commits, testApplyBudget().MaxAttempts+1,
+			"a quiet certificate is a new opportunity, and the state root never changes across one")
 	})
 
 	t.Run("one executor call cannot hold the caller", func(t *testing.T) {
@@ -418,7 +491,7 @@ func TestTargetApplier_AttemptsAreBoundedAndSpaced(t *testing.T) {
 		f := newApplyFixture(t, budget, ex, recoveredAnchor())
 
 		started := time.Now()
-		res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 		require.Less(t, time.Since(started), 2*time.Second)
 		require.Equal(t, ApplyExecutorUnreachable, res.Outcome)
 		require.ErrorIs(t, res.Err, context.DeadlineExceeded)
@@ -433,9 +506,99 @@ func TestTargetApplier_AttemptsAreBoundedAndSpaced(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		res := f.applier.Apply(ctx, Hash(h32(0x0b)), behindHead())
+		res := f.applier.Apply(ctx, heldBinding(), behindHead())
 		require.Equal(t, ApplyExecutorUnreachable, res.Outcome)
 		require.ErrorIs(t, res.Err, context.Canceled)
+	})
+}
+
+/*
+A commit is not a read. Two attempts inside the executor at once make "what did the executor do"
+unanswerable, and the head read afterwards belongs to neither of them — so a second caller is turned
+away rather than admitted alongside the first.
+*/
+func TestTargetApplier_OneAttemptIsInsideTheExecutorAtATime(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	ex := &stubExecutor{
+		commit: func(ctx context.Context, _ Hash) (Status, error) {
+			close(entered)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return StatusValid, ctx.Err()
+			}
+			return StatusValid, nil
+		},
+		head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil },
+	}
+	f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+
+	first := make(chan ApplyResult, 1)
+	go func() { first <- f.applier.Apply(context.Background(), heldBinding(), behindHead()) }()
+	<-entered
+
+	second := f.applier.Apply(context.Background(), heldBinding(), behindHead())
+	require.Equal(t, ApplyInFlight, second.Outcome)
+	require.ErrorIs(t, second.Err, ErrApplyInFlight)
+	require.True(t, second.Outcome.Retryable())
+	require.True(t, f.applier.Status().InFlight)
+
+	close(release)
+	select {
+	case res := <-first:
+		require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first attempt never finished")
+	}
+	require.Len(t, ex.commits, 1, "two callers, one commit")
+	require.False(t, f.applier.Status().InFlight, "the slot is released on every exit")
+
+	// And the slot is released after a refusal too, not only after a success.
+	ex.commit = func(context.Context, Hash) (Status, error) { return StatusInvalid, nil }
+	f.src.set(&ExecutionAnchor{BlockHash: Hash(h32(0xee)), StateRoot: Hash(h32(0x0b)), Round: 12}, heldBinding())
+	f.applier.Apply(context.Background(), heldBinding(), behindHead())
+	require.False(t, f.applier.Status().InFlight)
+}
+
+/*
+A commit takes time, and the requester's ordinary behaviour across a quiet tail is to install a
+target for a newer certificate while one is in flight. Committing was still correct if the target
+still names the same block; what must not happen is reporting this node RECOVERED for a question the
+answer was never about.
+*/
+func TestTargetApplier_NoticesTheTargetMovingUnderTheCommit(t *testing.T) {
+	t.Run("a different block arrives while the commit is in the executor", func(t *testing.T) {
+		var f *applyFixture
+		ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
+		ex.commit = func(context.Context, Hash) (Status, error) {
+			// The shard certified a state-changing round; the requester verified a new target.
+			f.src.set(&ExecutionAnchor{BlockHash: Hash(h32(0xee)), StateRoot: Hash(h32(0x0c)), Round: 21}, bind(21, 140, h32(0x0c)))
+			return StatusValid, nil
+		}
+		f = newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
+
+		require.Equal(t, ApplyTargetMoved, res.Outcome)
+		require.ErrorIs(t, res.Err, ErrApplyTargetMoved)
+		require.True(t, res.Outcome.Retryable(), "the next attempt names the certificate now held")
+		require.Zero(t, f.applier.Status().Applied, "nothing was recovered for the round that was asked about")
+	})
+
+	t.Run("the same block carried onto a later certificate is still an application", func(t *testing.T) {
+		var f *applyFixture
+		ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
+		ex.commit = func(context.Context, Hash) (Status, error) {
+			// A quiet round: the requester carried the SAME anchor onto the newer certificate.
+			f.src.set(recoveredAnchor(), bind(19, 130, h32(0x0b)))
+			return StatusValid, nil
+		}
+		f = newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
+		require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
+		require.Equal(t, 1, f.applier.Status().Applied)
 	})
 }
 
@@ -468,7 +631,7 @@ func TestTargetApplier_ReturnedTargetDoesNotAliasTheSource(t *testing.T) {
 	f := newApplyFixture(t, testApplyBudget(), ex, anchor)
 	f.src.shared = true // a source that hands out its own record, which the applier may not rely on
 
-	res := f.applier.Apply(context.Background(), Hash(h32(0x0b)), behindHead())
+	res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 	require.Equal(t, ApplyApplied, res.Outcome)
 	res.Target.BlockHash[0] ^= 0xff
 	res.Target.StateRoot[0] ^= 0xff

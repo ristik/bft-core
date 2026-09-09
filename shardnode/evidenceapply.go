@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 /*
@@ -60,6 +62,12 @@ var (
 	// ErrApplyExhausted — this certified state has had its attempts. The target is kept; the next
 	// certificate brings a fresh budget.
 	ErrApplyExhausted = errors.New("anchor application: the attempts for this certified state are spent")
+	// ErrApplyInFlight — another attempt is inside the executor right now. A commit is not a read,
+	// and two of them in flight would make "what did the executor do" unanswerable.
+	ErrApplyInFlight = errors.New("anchor application: another attempt is already in the executor")
+	// ErrApplyTargetMoved — the verified target changed while this attempt was in the executor, so
+	// what was committed is no longer what this node is being asked to build on.
+	ErrApplyTargetMoved = errors.New("anchor application: the verified target moved while the attempt was in flight")
 	// ErrApplyBudgetInvalid — a caller bug, reported the way the rest of #92 reports its own.
 	ErrApplyBudgetInvalid = errors.New("anchor application: the configured budget is not usable")
 )
@@ -79,6 +87,8 @@ const (
 	ApplyHeadMismatch
 	ApplyBackoff
 	ApplyExhausted
+	ApplyInFlight
+	ApplyTargetMoved
 )
 
 func (o ApplyOutcome) String() string {
@@ -101,6 +111,10 @@ func (o ApplyOutcome) String() string {
 		return "backoff"
 	case ApplyExhausted:
 		return "exhausted"
+	case ApplyInFlight:
+		return "in-flight"
+	case ApplyTargetMoved:
+		return "target-moved"
 	default:
 		return "not-attempted"
 	}
@@ -113,7 +127,8 @@ func (o ApplyOutcome) String() string {
 // told this node nothing about the evidence.
 func (o ApplyOutcome) Retryable() bool {
 	switch o {
-	case ApplyExecutorUnreachable, ApplyPayloadUnavailable, ApplyBackoff, ApplyExhausted:
+	case ApplyExecutorUnreachable, ApplyPayloadUnavailable, ApplyBackoff, ApplyExhausted,
+		ApplyInFlight, ApplyTargetMoved:
 		return true
 	default:
 		return false
@@ -122,11 +137,18 @@ func (o ApplyOutcome) Retryable() bool {
 
 // ApplyBudget bounds what applying one target may cost.
 type ApplyBudget struct {
-	// MaxAttempts is how many attempts one CERTIFIED STATE may spend. It is deliberately not a
-	// lifetime cap on a target: an unavailable payload is the expected state after an
-	// execution-client restart, and a node that stopped trying for good would have turned a
-	// recoverable situation into a permanent one. Each new certificate resets it, which is the same
-	// rhythm the live path already has ("retaining the anchor and retrying on the next certificate").
+	// MaxAttempts is how many attempts one CERTIFICATE may spend, and a new certificate renews it.
+	//
+	// Keyed on the certificate and NOT on the certified state, which is the correction review
+	// found: across a quiet tail every certificate carries the same state root — that is what quiet
+	// MEANS — so a state-keyed budget never renews for exactly the node this design exists for. A
+	// node whose executor was still syncing spent its attempts, and then no number of quiet
+	// certificates could give it another, however available the payload had since become. That is
+	// the permanent failure the cap was supposed to avoid, reached by the cap itself.
+	//
+	// Renewing per certificate is the rhythm the live path already has ("retaining the anchor and
+	// retrying on the next certificate"), and it is still bounded: a certificate arrives at the
+	// shard's cadence, not at a retry loop's.
 	MaxAttempts int
 	// Backoff spaces attempts within one certified state, so a fast round cadence cannot turn into a
 	// tight loop against an executor that is busy syncing.
@@ -152,11 +174,78 @@ func (b ApplyBudget) validate() error {
 	return nil
 }
 
+/*
+CertificateBinding names the exact certificate an application attempt is for.
+
+It is a CERTIFICATE, not a state root, and that distinction is the whole of it. Across a quiet tail
+every certificate carries the same state root — that is what "quiet" means — so state equality cannot
+say which certificate an anchor was verified against, cannot say whether the certificate has advanced
+since, and cannot renew anything. Every one of those questions is answered here instead.
+
+Identity is `InputRecord.Bytes()`, the canonical encoding the root chain's signatures cover, the same
+identity the predicate binds to (§2.2) and the requester pins its requests with. RootRound is carried
+because it is the one field that advances even for a REPEAT — same round, same input record, a later
+root round — and a repeat is a new certificate, so it is a new opportunity to try.
+*/
+type CertificateBinding struct {
+	Round     uint64 // partition round
+	RootRound uint64 // the root round that certified it
+	Identity  []byte // InputRecord.Bytes()
+	State     Hash   // InputRecord.Hash — the state the next round builds on
+}
+
+// BindingFor derives the binding from a certificate this node has verified.
+func BindingFor(uc *types.UnicityCertificate) (CertificateBinding, error) {
+	if uc == nil || uc.InputRecord == nil {
+		return CertificateBinding{}, fmt.Errorf("%w: certificate carries no input record", ErrEvidenceMalformed)
+	}
+	identity, err := uc.InputRecord.Bytes()
+	if err != nil {
+		return CertificateBinding{}, fmt.Errorf("%w: %w", ErrEvidenceMalformed, err)
+	}
+	return CertificateBinding{
+		Round:     uc.InputRecord.RoundNumber,
+		RootRound: uc.GetRootRoundNumber(),
+		Identity:  identity,
+		State:     Hash(bytes.Clone(uc.InputRecord.Hash)),
+	}, nil
+}
+
+func bindingOf(w witnessEntry) CertificateBinding {
+	return CertificateBinding{
+		Round:     w.round,
+		RootRound: w.link.UC.GetRootRoundNumber(),
+		Identity:  bytes.Clone(w.identity),
+		State:     Hash(bytes.Clone(w.link.UC.InputRecord.Hash)),
+	}
+}
+
+// same reports whether two bindings name the same certificate.
+func (b CertificateBinding) same(o CertificateBinding) bool {
+	return b.Round == o.Round && b.RootRound == o.RootRound && bytes.Equal(b.Identity, o.Identity)
+}
+
+func (b CertificateBinding) valid() bool { return len(b.Identity) != 0 }
+
+func (b CertificateBinding) clone() CertificateBinding {
+	b.Identity = bytes.Clone(b.Identity)
+	b.State = Hash(bytes.Clone(b.State))
+	return b
+}
+
+// VerifiedTarget is an anchor together with the certificate it was verified against. The two travel
+// together because neither is usable without the other: an anchor says which block, and the binding
+// says which question that block is the answer to.
+type VerifiedTarget struct {
+	Anchor *ExecutionAnchor
+	For    CertificateBinding
+}
+
 // TargetSource is what holds a verified anchor — `*EvidenceRequester` in production. Behind an
 // interface so the application policy can be tested without a network, and so the two halves stay
 // separable: this one never asks the source to fetch anything.
 type TargetSource interface {
-	Target() (*ExecutionAnchor, bool)
+	Target() (VerifiedTarget, bool)
 }
 
 // ApplyResult is one attempt, reported in full.
@@ -186,9 +275,12 @@ type TargetApplier struct {
 	log      *slog.Logger
 
 	mu sync.Mutex
-	// forState is the certified state the counters below belong to. A new certified state is a new
-	// question, and gets a new budget.
-	forState    Hash
+	// inFlight is set while an attempt is inside the executor. Not a mutex held across the call: a
+	// slow executor would then hold whatever goroutine asked next, and the caller is a round loop.
+	inFlight bool
+	// forCert is the certificate the counters below belong to. A new certificate is a new
+	// opportunity, and gets a new budget.
+	forCert     CertificateBinding
 	attempts    int
 	nextAttempt time.Time
 	last        ApplyOutcome
@@ -231,47 +323,56 @@ func NewTargetApplier(cfg ApplyConfig) (*TargetApplier, error) {
 }
 
 /*
-Apply makes one bounded attempt to bring the executor to the certified block for certifiedState.
+Apply makes one bounded attempt to bring the executor to the certified block for `held`.
 
-certifiedState is what the round being built builds on — `Expectation.PreviousHash` — and it is
-RECHECKED against the target before anything is committed. That recheck is the point of taking it as
-an argument rather than reading it from the target: a target verified against a certificate this node
-has since moved past may name a block that is no longer the last certified one, and a state root that
-happens to match is not an argument (§3.3.1). If the target does not explain THIS state, nothing is
-sent to the executor.
+`held` is the certificate this node is being asked to build on, named in full — round, root round,
+canonical identity and state. It is a certificate rather than a state root because state equality
+cannot answer any of the questions this function has to answer:
+
+  - Was this target verified against THIS certificate? Across a quiet tail every certificate carries
+    the same state root, so "the target explains this state" is true of a target verified three
+    rounds ago against a certificate this node has since moved past — and §3.3.1 is why that is not
+    good enough. The requester returns the binding WITH the target; the two are compared directly.
+  - Is this a new opportunity to try? Only a new certificate is, and across a quiet tail the state
+    does not change while certificates keep arriving.
+  - Did the answer go stale while the attempt was in the executor? Re-read afterwards and compare.
 
 The head passed in is the executor's head as the caller already read it. Apply does not re-read it
 first: the caller has it, a second read would be a second RPC, and the answer that matters is the one
 taken AFTER the commit.
 */
-func (a *TargetApplier) Apply(ctx context.Context, certifiedState Hash, head BlockRef) ApplyResult {
-	target, ok := a.source.Target()
-	if !ok || target == nil {
-		return a.record(ApplyNoTarget, head, nil, fmt.Errorf("%w: state %x", ErrApplyNoTarget, certifiedState))
+func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head BlockRef) ApplyResult {
+	if !held.valid() {
+		return a.record(ApplyNoTarget, head, nil,
+			fmt.Errorf("%w: no certificate was named to apply against", ErrApplyNoTarget))
 	}
-	// THE RECHECK. Not "the target is recent" — the target must be about the state this node is
-	// being asked to build on. A verified anchor for another state is not stale in the sense of
-	// being wrong; it is an answer to a question nobody asked.
-	if !bytes.Equal(target.StateRoot, certifiedState) {
+	vt, ok := a.source.Target()
+	if !ok || vt.Anchor == nil {
+		return a.record(ApplyNoTarget, head, nil, fmt.Errorf("%w: round %d", ErrApplyNoTarget, held.Round))
+	}
+	target := vt.Anchor
+
+	// THE BINDING CHECK. Not "the target explains this state" — the target must have been VERIFIED
+	// against the certificate this node is being asked to build on. Anything weaker is inferring
+	// what a target is about from a hash it happens to share.
+	if !vt.For.same(held) {
 		return a.record(ApplyStaleTarget, head, target,
-			fmt.Errorf("%w: target produces state %x for round %d, this round builds on %x",
-				ErrApplyStaleTarget, target.StateRoot, target.Round, certifiedState))
+			fmt.Errorf("%w: the target was verified against round %d (root round %d), this node holds round %d (root round %d)",
+				ErrApplyStaleTarget, vt.For.Round, vt.For.RootRound, held.Round, held.RootRound))
+	}
+	// And the two must agree about what that certificate says. A disagreement here is a bug on this
+	// node, not a peer's doing, so it is named separately rather than folded into staleness.
+	if !bytes.Equal(target.StateRoot, held.State) {
+		return a.record(ApplyStaleTarget, head, target,
+			fmt.Errorf("%w: target produces state %x for round %d, the certificate for that round builds on %x",
+				ErrApplyStaleTarget, target.StateRoot, target.Round, held.State))
 	}
 
-	if err := a.admit(certifiedState, target); err != nil {
-		var outcome ApplyOutcome
-		switch {
-		case errors.Is(err, ErrApplyBackoff):
-			outcome = ApplyBackoff
-		case errors.Is(err, ErrApplyExhausted):
-			outcome = ApplyExhausted
-		case errors.Is(err, ErrApplyPayloadInvalid):
-			outcome = ApplyPayloadInvalid
-		default:
-			outcome = ApplyHeadMismatch
-		}
-		return a.record(outcome, head, target, err)
+	release, err := a.admit(held, target)
+	if err != nil {
+		return a.record(outcomeForAdmission(err), head, target, err)
 	}
+	defer release()
 
 	attempt := a.attemptNumber()
 
@@ -304,6 +405,16 @@ func (a *TargetApplier) Apply(ctx context.Context, certifiedState Hash, head Blo
 			fmt.Errorf("%w: reading head after committing %x: %w", ErrApplyExecutorUnreachable, target.BlockHash, err))
 	}
 
+	// TIME PASSED INSIDE THE EXECUTOR. A commit is not instantaneous, and the requester may have
+	// installed a target for a newer certificate while this one was in flight — that is its ordinary
+	// behaviour across a quiet tail, not a fault. Committing the block was still correct if the
+	// target still names the same block; what must not happen is reporting this node RECOVERED for a
+	// certificate the answer was never about.
+	if now, ok := a.source.Target(); !ok || now.Anchor == nil || !bytes.Equal(now.Anchor.BlockHash, target.BlockHash) {
+		return a.retryable(ApplyTargetMoved, newHead, target, attempt,
+			fmt.Errorf("%w: %x was committed for round %d", ErrApplyTargetMoved, target.BlockHash, held.Round))
+	}
+
 	// P-id, and by the SAME comparison the live path uses — anchorHeadIdentity, not a second copy of
 	// it written here. A commit that reports success while the head is another block is exactly what
 	// P-id exists to catch, so it is a fault rather than something to wait through.
@@ -324,10 +435,10 @@ func (a *TargetApplier) Apply(ctx context.Context, certifiedState Hash, head Blo
 	}
 	// And the state, which is the other half of P-id: the same block hash at another state would
 	// mean the executor and the certificate disagree about what that block produced.
-	if !bytes.Equal(newHead.StateRoot, certifiedState) {
+	if !bytes.Equal(newHead.StateRoot, held.State) {
 		return a.fault(ApplyHeadMismatch, newHead, target, attempt,
 			fmt.Errorf("%w: head block %x is at state %x, the certified state is %x",
-				ErrApplyHeadMismatch, newHead.Hash, newHead.StateRoot, certifiedState))
+				ErrApplyHeadMismatch, newHead.Hash, newHead.StateRoot, held.State))
 	}
 
 	a.mu.Lock()
@@ -339,36 +450,69 @@ func (a *TargetApplier) Apply(ctx context.Context, certifiedState Hash, head Blo
 		a.log.LogAttrs(ctx, slog.LevelInfo, "recovered from authenticated evidence: the certified block is committed",
 			slog.String("blockHash", fmt.Sprintf("%x", target.BlockHash)),
 			slog.String("stateRoot", fmt.Sprintf("%x", target.StateRoot)),
-			slog.Uint64("anchorRound", target.Round))
+			slog.Uint64("anchorRound", target.Round),
+			slog.Uint64("heldRound", held.Round))
 	}
 	return a.record(ApplyApplied, newHead, target, nil)
 }
 
-// admit applies everything that can refuse an attempt before the executor is touched: a target this
-// node has already concluded it cannot apply, the attempt budget for this certified state, and the
-// backoff. It also rolls the budget over when the certified state changes.
-func (a *TargetApplier) admit(certifiedState Hash, target *ExecutionAnchor) error {
+func outcomeForAdmission(err error) ApplyOutcome {
+	switch {
+	case errors.Is(err, ErrApplyInFlight):
+		return ApplyInFlight
+	case errors.Is(err, ErrApplyBackoff):
+		return ApplyBackoff
+	case errors.Is(err, ErrApplyExhausted):
+		return ApplyExhausted
+	case errors.Is(err, ErrApplyPayloadInvalid):
+		return ApplyPayloadInvalid
+	default:
+		return ApplyHeadMismatch
+	}
+}
+
+/*
+admit applies everything that can refuse an attempt before the executor is touched, and returns the
+release for the in-flight slot it takes.
+
+The slot is the answer to concurrency: two callers were previously both admitted and both entered
+Commit, because the lock was released between counting the attempt and making the call. A commit is
+not a read — two in flight make "what did the executor do" unanswerable, and the head read afterwards
+belongs to neither of them. It is a NON-BLOCKING slot rather than a mutex held across the call: a
+mutex would park whichever goroutine asked next behind a slow executor, and the caller is a round
+loop.
+*/
+func (a *TargetApplier) admit(held CertificateBinding, target *ExecutionAnchor) (func(), error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.faultedFor != nil && bytes.Equal(a.faultedFor, target.BlockHash) {
-		return a.faultErr
+		return nil, a.faultErr
 	}
-	if !bytes.Equal(a.forState, certifiedState) {
-		// A new certified state is a new question. The counters belong to the question, not to the
-		// process, so the shard advancing is what gives a stuck node its next attempts.
-		a.forState = bytes.Clone(certifiedState)
+	if a.inFlight {
+		return nil, fmt.Errorf("%w: round %d", ErrApplyInFlight, held.Round)
+	}
+	if !a.forCert.same(held) {
+		// A NEW CERTIFICATE is a new opportunity — not a new certified state, which across a quiet
+		// tail never comes. The counters belong to the certificate, so the shard advancing at all is
+		// what gives a node whose executor was syncing its next attempts.
+		a.forCert = held.clone()
 		a.attempts = 0
 		a.nextAttempt = time.Time{}
 	}
 	if a.attempts >= a.budget.MaxAttempts {
-		return fmt.Errorf("%w: %d attempts spent on state %x", ErrApplyExhausted, a.attempts, certifiedState)
+		return nil, fmt.Errorf("%w: %d attempts spent on round %d", ErrApplyExhausted, a.attempts, held.Round)
 	}
 	if now := a.now(); !a.nextAttempt.IsZero() && now.Before(a.nextAttempt) {
-		return fmt.Errorf("%w: %s remaining", ErrApplyBackoff, a.nextAttempt.Sub(now).Round(time.Millisecond))
+		return nil, fmt.Errorf("%w: %s remaining", ErrApplyBackoff, a.nextAttempt.Sub(now).Round(time.Millisecond))
 	}
 	a.attempts++
-	return nil
+	a.inFlight = true
+	return func() {
+		a.mu.Lock()
+		a.inFlight = false
+		a.mu.Unlock()
+	}, nil
 }
 
 func (a *TargetApplier) attemptNumber() int {
@@ -442,8 +586,9 @@ type ApplyStatus struct {
 	Attempts    int
 	Applied     int
 	NextAttempt time.Time
-	ForState    Hash
+	ForCert     CertificateBinding
 	FaultedFor  Hash
+	InFlight    bool
 }
 
 func (a *TargetApplier) Status() ApplyStatus {
@@ -452,7 +597,8 @@ func (a *TargetApplier) Status() ApplyStatus {
 	return ApplyStatus{
 		Last: a.last, LastErr: a.lastErr, Attempts: a.attempts, Applied: a.applied,
 		NextAttempt: a.nextAttempt,
-		ForState:    Hash(bytes.Clone(a.forState)),
+		ForCert:     a.forCert.clone(),
 		FaultedFor:  Hash(bytes.Clone(a.faultedFor)),
+		InFlight:    a.inFlight,
 	}
 }

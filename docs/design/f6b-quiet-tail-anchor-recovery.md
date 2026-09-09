@@ -757,12 +757,26 @@ target can be verified long before an executor can act on it, and "payload unava
 the state in which both are true at once. Collapsing them would mean either discarding proven evidence
 because a client is still syncing, or reporting a node recovered because its evidence was good.
 
-**The recheck comes before the executor is touched.** `Apply` takes the certified state the round is
-building on — `Expectation.PreviousHash` — rather than reading it from the target, and refuses a
-target that explains a different state. That is the application-layer half of §6.3's rule: a target
-verified against a certificate this node has since moved past may name a block that is no longer the
-last certified one, and a state root that happens to match is not an argument (§3.3.1). A target for
-another state is not *wrong*; it is an answer to a question nobody asked, so nothing is sent.
+**A certificate, not a state root.** `Apply` takes a `CertificateBinding` — round, root round,
+canonical input-record identity, and the state that round builds on — and this is a correction review
+forced. The first revision compared `target.StateRoot` against the certified state, which is state
+equality wearing a different hat: **across a quiet tail every certificate carries the same state
+root**, so that comparison is equally true of a target verified three rounds ago against a certificate
+this node has since moved past. §3.3.1 is why that is not good enough, and it is the same argument
+this design uses everywhere else. The requester returns the binding WITH the target (§6.3), and the
+two bindings are compared directly. A repeat — same round, same input record, a later root round — is
+a different certificate, so the root round is part of the binding.
+
+Three questions state equality cannot answer, and the binding does:
+
+  - *Was this target verified against THIS certificate?* Compared as bindings, before anything is
+    sent. A target for another certificate is not *wrong*; it is an answer to a question nobody asked.
+  - *Is this a new opportunity to try?* Only a new certificate is one — see the budget below.
+  - *Did the answer go stale while the attempt was in the executor?* Re-read after the commit and
+    compared. A commit takes time, and the requester installing a target for a newer certificate
+    meanwhile is its ordinary behaviour across a quiet tail, not a fault. If the target still names
+    the same block, the commit was correct and the application stands; if it names a different one,
+    the node is **not** reported recovered for a question the answer was never about.
 
 **Three executor situations, kept apart.** They arrive looking alike — the node did not recover — and
 each calls for a different response, so none may be reported as another:
@@ -788,12 +802,22 @@ against the BLOCK HASH rather than the state — a later target naming a differe
 state is §3.3.1's own case and gets its own attempt. Row 13's genesis exception applies exactly where
 it did before, and the executor's block zero is read only when that exception could apply.
 
-**Bounded, without turning a recoverable node into a stuck one.** One executor call at a time under a
-per-call deadline; attempts within one certified state spaced by a backoff and capped by
-`MaxAttempts`. The cap is deliberately per certified STATE and not per target: an unavailable payload
-is the *expected* state after an execution-client restart, and a lifetime cap would convert a
-recoverable situation into a permanent one. Each new certificate resets the budget, which is the
-rhythm the live path already has.
+**Bounded without stranding a recoverable node — and the budget is keyed on the CERTIFICATE.** The
+first revision keyed it on the certified state, and review reproduced what that means: across a quiet
+tail the state never changes, so the budget never renews, and a node whose executor was still syncing
+spent its attempts and could never get another however available the payload had since become. That is
+exactly the permanent failure the cap was meant to avoid, reached by the cap itself — and it strands
+precisely the node this design exists for. Renewal is per certificate, which is the rhythm the live
+path already has ("retaining the anchor and retrying on the next certificate") and is still bounded,
+because certificates arrive at the shard's cadence rather than a retry loop's. Within one certificate,
+attempts are spaced by a backoff and capped by `MaxAttempts`.
+
+**One attempt is inside the executor at a time.** A commit is not a read: two in flight make "what did
+the executor do" unanswerable, and the head read afterwards belongs to neither of them. The first
+revision counted the attempt under the lock and released it before calling, so two callers could both
+be admitted — review reproduced that too. It is a non-blocking slot rather than a mutex held across
+the call, because a mutex would park whichever goroutine asked next behind a slow executor and the
+caller is a round loop, and it is released on every exit path.
 
 **What it never does.** It does not sign and does not make a node eligible to (P-sign, #105 — a
 recovered executor is not a licence to vote). It does not re-verify evidence: `VerifyAnchorEvidence`

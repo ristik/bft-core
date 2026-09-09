@@ -10,6 +10,8 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 /*
@@ -196,9 +198,9 @@ func TestEvidenceRequester_RecoversFromTheFirstProviderThatCanVerify(t *testing.
 
 	anchor, ok := rf.req.Target()
 	require.True(t, ok)
-	require.Equal(t, Hash(h32(0xbb)), anchor.BlockHash)
-	require.Equal(t, Hash(h32(0x0b)), anchor.StateRoot)
-	require.EqualValues(t, 10, anchor.Round)
+	require.Equal(t, Hash(h32(0xbb)), anchor.Anchor.BlockHash)
+	require.Equal(t, Hash(h32(0x0b)), anchor.Anchor.StateRoot)
+	require.EqualValues(t, 10, anchor.Anchor.Round)
 }
 
 // Transport success is not evidence, and the requester must not be steered by a peer that behaves
@@ -417,7 +419,7 @@ func TestEvidenceRequester_HeldCertificateMovesUnderTheFetch(t *testing.T) {
 		require.EqualValues(t, 19, st.TargetFor, "the target is verified against the certificate now held")
 		anchor, ok := rf.req.Target()
 		require.True(t, ok)
-		require.Equal(t, Hash(blockB), anchor.BlockHash)
+		require.Equal(t, Hash(blockB), anchor.Anchor.BlockHash)
 		asked, _ := rf.fetcher.calls()
 		require.Len(t, asked, 1, "extending what was already obtained needs no second request")
 	})
@@ -463,10 +465,10 @@ func TestEvidenceRequester_HeldCertificateMovesUnderTheFetch(t *testing.T) {
 		require.Equal(t, RecoveryReady, st.State, "err: %v", st.LastErr)
 		anchor, ok := rf.req.Target()
 		require.True(t, ok)
-		require.Equal(t, Hash(blockE), anchor.BlockHash,
+		require.Equal(t, Hash(blockE), anchor.Anchor.BlockHash,
 			"the anchor is the block that actually produced the state now held")
-		require.NotEqual(t, Hash(blockB), anchor.BlockHash)
-		require.EqualValues(t, 21, anchor.Round)
+		require.NotEqual(t, Hash(blockB), anchor.Anchor.BlockHash)
+		require.EqualValues(t, 21, anchor.Anchor.Round)
 		require.EqualValues(t, 1, st.Restarts, "the stale result was discarded and the request re-pinned")
 		asked, reqs := rf.fetcher.calls()
 		require.Len(t, asked, 2)
@@ -499,7 +501,7 @@ func TestEvidenceRequester_HeldCertificateMovesUnderTheFetch(t *testing.T) {
 		require.Zero(t, st.Restarts, "the repeat supplied the assignment round 21 follows")
 		anchor, ok := rf.req.Target()
 		require.True(t, ok)
-		require.Equal(t, Hash(blockB), anchor.BlockHash)
+		require.Equal(t, Hash(blockB), anchor.Anchor.BlockHash)
 	})
 
 	t.Run("an interval no longer witnessed is refetched rather than assumed", func(t *testing.T) {
@@ -541,7 +543,7 @@ func TestEvidenceRequester_HeldCertificateMovesUnderTheFetch(t *testing.T) {
 		require.EqualValues(t, 27, reqs[1].HeldRound)
 		anchor, ok := rf.req.Target()
 		require.True(t, ok)
-		require.Equal(t, Hash(blockB), anchor.BlockHash)
+		require.Equal(t, Hash(blockB), anchor.Anchor.BlockHash)
 	})
 
 	/*
@@ -651,7 +653,7 @@ func TestEvidenceRequester_TargetIsPinnedToTheCertificateHeld(t *testing.T) {
 	require.Equal(t, RecoveryReady, rf.settled(t).State)
 	anchor, ok := rf.req.Target()
 	require.True(t, ok)
-	require.Equal(t, Hash(h32(0xbb)), anchor.BlockHash)
+	require.Equal(t, Hash(h32(0xbb)), anchor.Anchor.BlockHash)
 	asked, _ := rf.fetcher.calls()
 	require.Len(t, asked, 1, "carrying a retained result forward is local work")
 }
@@ -691,7 +693,7 @@ func TestEvidenceRequester_EvidenceThatAlreadyEndsAtTheHeldRepeat(t *testing.T) 
 	require.Len(t, asked, 1)
 	anchor, ok := rf.req.Target()
 	require.True(t, ok)
-	require.Equal(t, Hash(h32(0xbb)), anchor.BlockHash)
+	require.Equal(t, Hash(h32(0xbb)), anchor.Anchor.BlockHash)
 }
 
 /*
@@ -713,15 +715,15 @@ func TestEvidenceRequester_ReturnedValuesDoNotAliasWhatIsRetained(t *testing.T) 
 
 		anchor, ok := rf.req.Target()
 		require.True(t, ok)
-		anchor.BlockHash[0] ^= 0xff
-		anchor.StateRoot[0] ^= 0xff
-		anchor.Round = 999
+		anchor.Anchor.BlockHash[0] ^= 0xff
+		anchor.Anchor.StateRoot[0] ^= 0xff
+		anchor.Anchor.Round = 999
 
 		again, ok := rf.req.Target()
 		require.True(t, ok)
-		require.Equal(t, Hash(h32(0xbb)), again.BlockHash, "the retained target is what was verified")
-		require.Equal(t, Hash(h32(0x0b)), again.StateRoot)
-		require.EqualValues(t, 10, again.Round)
+		require.Equal(t, Hash(h32(0xbb)), again.Anchor.BlockHash, "the retained target is what was verified")
+		require.Equal(t, Hash(h32(0x0b)), again.Anchor.StateRoot)
+		require.EqualValues(t, 10, again.Anchor.Round)
 	})
 
 	t.Run("a returned contradiction", func(t *testing.T) {
@@ -780,8 +782,8 @@ func TestEvidenceRequester_ReturnedValuesDoNotAliasWhatIsRetained(t *testing.T) 
 
 		anchor, ok := rf.req.Target()
 		require.True(t, ok)
-		require.Equal(t, Hash(h32(0xbb)), anchor.BlockHash, "the target was verified from memory this node owns")
-		require.Equal(t, Hash(h32(0x0b)), anchor.StateRoot)
+		require.Equal(t, Hash(h32(0xbb)), anchor.Anchor.BlockHash, "the target was verified from memory this node owns")
+		require.Equal(t, Hash(h32(0x0b)), anchor.Anchor.StateRoot)
 
 		// And the retained bundle is intact too: a further quiet round is carried forward from it
 		// with no second request, which it could not be if its certificates had been rewritten.
@@ -792,7 +794,7 @@ func TestEvidenceRequester_ReturnedValuesDoNotAliasWhatIsRetained(t *testing.T) 
 		require.EqualValues(t, 19, st.TargetFor)
 		again, ok := rf.req.Target()
 		require.True(t, ok)
-		require.Equal(t, Hash(h32(0xbb)), again.BlockHash)
+		require.Equal(t, Hash(h32(0xbb)), again.Anchor.BlockHash)
 		asked, _ := rf.fetcher.calls()
 		require.Len(t, asked, 1)
 	})
@@ -996,7 +998,7 @@ func TestEvidenceRequester_ConfigurationAndEpochAreThisNodesOwn(t *testing.T) {
 			"an epoch-crossing candidate is the provider's choice of source, not a fact about the shard")
 		anchor, ok := rf.req.Target()
 		require.True(t, ok)
-		require.EqualValues(t, 14, anchor.Round)
+		require.EqualValues(t, 14, anchor.Anchor.Round)
 	})
 }
 
@@ -1147,4 +1149,73 @@ func TestEvidenceRequester_DiagnosticsAreSafeWhileRecovering(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, 8, c.Count)
 	require.ErrorIs(t, c.Err, ErrEvidenceCandidateSplit)
+}
+
+/*
+The target and the certificate it was verified against travel together, because a consumer that had
+to reconstruct the second from the first would be inferring it from a state root — and across a quiet
+tail every certificate carries the same one.
+*/
+func TestEvidenceRequester_TargetCarriesTheCertificateItWasVerifiedAgainst(t *testing.T) {
+	stateB := h32(0x0b)
+	var full AnchorEvidence
+	rf := newRecoveryFixture(t, []peer.ID{"a"}, testBudget(),
+		func(context.Context, peer.ID, EvidenceRequest) (AnchorEvidence, error) { return full, nil })
+	f := rf.evidenceFixture
+	source, mid, head := quietTailChain(f)
+	full = bundleOf(source, mid, head)
+	rf.observe(t, source, mid, head)
+
+	require.NoError(t, rf.req.Need())
+	require.Equal(t, RecoveryReady, rf.settled(t).State)
+
+	vt, ok := rf.req.Target()
+	require.True(t, ok)
+	want, err := BindingFor(head.UC)
+	require.NoError(t, err)
+	require.True(t, vt.For.same(want), "the binding names the certificate the anchor was verified against")
+	require.Equal(t, []byte(want.State), []byte(vt.For.State))
+
+	// A further quiet round: the anchor is unchanged and the BINDING advances, which is the only
+	// thing that distinguishes the two certificates.
+	next := f.cert(19, 130, stateB, stateB, nil, 23)
+	rf.observe(t, next)
+	require.NoError(t, rf.req.Need())
+	require.Equal(t, RecoveryReady, rf.settled(t).State)
+
+	after, ok := rf.req.Target()
+	require.True(t, ok)
+	require.Equal(t, after.Anchor.BlockHash, vt.Anchor.BlockHash, "the same block")
+	require.False(t, after.For.same(vt.For), "and a different certificate")
+	require.EqualValues(t, 19, after.For.Round)
+	require.Equal(t, []byte(vt.For.State), []byte(after.For.State), "at the same state root, which is why state cannot say which")
+
+	// And the binding a caller is handed is its own.
+	wantNext, err := BindingFor(next.UC)
+	require.NoError(t, err)
+	after.For.Identity[0] ^= 0xff
+	after.For.State[0] ^= 0xff
+	again, ok := rf.req.Target()
+	require.True(t, ok)
+	require.True(t, again.For.same(wantNext), "editing a returned binding does not edit the retained one")
+	require.Equal(t, []byte(wantNext.State), []byte(again.For.State))
+}
+
+func TestBindingFor(t *testing.T) {
+	f := newEvidenceFixture(t)
+	_, _, head := quietTailChain(f)
+
+	b, err := BindingFor(head.UC)
+	require.NoError(t, err)
+	require.EqualValues(t, 16, b.Round)
+	require.EqualValues(t, 120, b.RootRound)
+	require.Equal(t, h32(0x0b), []byte(b.State))
+	identity, err := head.UC.InputRecord.Bytes()
+	require.NoError(t, err)
+	require.Equal(t, identity, b.Identity, "identity is the canonical encoding the signatures cover")
+
+	_, err = BindingFor(nil)
+	require.ErrorIs(t, err, ErrEvidenceMalformed)
+	_, err = BindingFor(&types.UnicityCertificate{})
+	require.ErrorIs(t, err, ErrEvidenceMalformed)
 }
