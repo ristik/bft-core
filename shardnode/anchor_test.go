@@ -77,6 +77,18 @@ func TestContinuityState(t *testing.T) {
 				"the first needs a resync, the second resolves itself on the next non-quiet certificate")
 	})
 
+	t.Run("the trace records the state a certificate left behind, not zeros", func(t *testing.T) {
+		// The positive half of the same check: on a transition that KEEPS the anchor, the after
+		// fields must show it rather than the zero value an uncopied deferred update produced.
+		var c continuityState
+		c.observe(nonQuietIR(2, nil, s0, blockA), 3)
+		got := c.observeTraced(quietIR(3, s0), 4)
+		require.Equal(t, anchorExtended, got.update)
+		require.Equal(t, uint64(3), got.afterThrough)
+		require.Equal(t, uint64(4), got.afterExpectedNext)
+		require.Equal(t, uint64(2), got.afterAnchorRound)
+	})
+
 	t.Run("a skipped round NUMBER is not a gap when the technical record assigned it", func(t *testing.T) {
 		// MEASURED on a four-validator real-reth devnet: certified partition rounds are not
 		// consecutive integers. The first certificate of the run was `partitionRound=0 ...
@@ -132,6 +144,13 @@ func TestContinuityState(t *testing.T) {
 		require.Equal(t, uint64(16), got.beforeExpectedNext, "the assignment is what the gap is measured against")
 		require.Equal(t, uint64(15), got.beforeThrough)
 		require.Equal(t, uint64(13), got.beforeAnchorRound)
+
+		// The "after" fields are part of the same record and must actually be filled in. They were
+		// not: an unnamed result copied the value before the deferred update ran, so every one of
+		// them logged zero.
+		require.Equal(t, uint64(24), got.afterExpectedNext, "the assignment this certificate carries")
+		require.Equal(t, uint64(0), got.afterThrough, "invalidation resets the covered interval")
+		require.Equal(t, uint64(0), got.afterAnchorRound, "and drops the anchor")
 
 		// And the refusal that follows, with the executor still sitting on the anchor block:
 		// the node cannot say which certified block produced the state this round builds on.

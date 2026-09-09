@@ -13,10 +13,23 @@ import (
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/libp2p/go-libp2p/core/peer"
+
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
 )
+
+/*
+RootNetwork is the part of the shard network BFTClient uses: send to root nodes, and read what they
+send back. Narrow on purpose — the concrete network.ShardNetwork satisfies it, and depending on the
+interface is what lets the subscription-renewal path below be tested against a real BFTClient rather
+than only read.
+*/
+type RootNetwork interface {
+	Send(ctx context.Context, msg any, receivers ...peer.ID) error
+	ReceivedChannel() <-chan any
+}
 
 // RoundDriver is what BFTClient hands every accepted certificate to. Round
 // implements it; BFTClient depends only on this interface so the root-chain
@@ -58,7 +71,7 @@ type BFTClient struct {
 	nodeID      string
 
 	peer           *network.Peer
-	net            *network.ShardNetwork
+	net            RootNetwork
 	signer         abcrypto.Signer
 	trustBaseStore TrustBaseStore
 	driver         RoundDriver
@@ -69,6 +82,9 @@ type BFTClient struct {
 
 	mu  sync.Mutex
 	luc *types.UnicityCertificate
+	// submittedSinceHandshake tracks whether this node has given the root chain a reason to renew
+	// its subscription since the last time it asked for one. See renewSubscriptionIfIdle.
+	submittedSinceHandshake bool
 	// unapplied names the certificate whose delivery to the driver FAILED, and is cleared as soon
 	// as one succeeds. It is the applied cursor kept separate from the observation cursor `luc`
 	// (design §5): a driver error leaves `luc` ahead of what was actually applied, and without
@@ -90,7 +106,7 @@ type deliveryAttempt struct {
 
 func NewBFTClient(
 	peer *network.Peer,
-	net *network.ShardNetwork,
+	net RootNetwork,
 	signer abcrypto.Signer,
 	partitionID types.PartitionID,
 	shardID types.ShardID,
@@ -203,6 +219,46 @@ func (c *BFTClient) Run(ctx context.Context) error {
 				}
 			}
 		}
+	}
+}
+
+/*
+renewSubscriptionIfIdle keeps a node that is not submitting from silently falling off the root
+chain's certificate feed.
+
+A subscription carries a bounded quota (rootchain: responsesPerSubscription), refilled only by
+Subscribe — which the root chain calls from exactly two places: the handshake handler, and the block
+certification request handler. A validator that submits every round therefore renews itself as a side
+effect of voting. One that does not submit renews only when it handshakes, which until now happened
+at startup and then only after InactivityTimeout, 30 seconds by default.
+
+That case is now reachable in production: a node resumed from a persisted certificate is non-voting
+until #105 supplies the monotonic signing record. Traced on a real devnet (#109): such a node
+received three certificates after restarting, then nothing for 34 seconds, then a certificate six
+partition rounds later — and the assignments lost in that window invalidated its continuity state,
+leaving it unable to recover at all.
+
+So renewal is decoupled from voting: after a certificate this node did not submit for, it asks for a
+subscription again. It reuses the existing handshake, so the root chain's membership check and the
+existing expiry both still apply; nothing is refilled on delivery, and no vote is fabricated to
+provoke a refill. The cost is one handshake per certified round for a node that is not voting, which
+is the same order as the certification request a voting node sends anyway — and a node that stops
+entirely still stops renewing, so it still expires.
+*/
+func (c *BFTClient) renewSubscriptionIfIdle(ctx context.Context) {
+	// The credit is CONSUMED, not merely read. One submitted request refills the quota once and
+	// one delivered certificate spends one response, so a single submission covers exactly one
+	// round — the same accounting the root chain does.
+	c.mu.Lock()
+	submitted := c.submittedSinceHandshake
+	c.submittedSinceHandshake = false
+	c.mu.Unlock()
+	if submitted {
+		return
+	}
+	if err := c.sendHandshake(ctx); err != nil && c.log != nil {
+		c.log.WarnContext(ctx, "could not renew the certificate subscription; this node may stop receiving certificates until the inactivity timer fires",
+			slog.String("err", err.Error()))
 	}
 }
 
@@ -336,6 +392,10 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 
 	err = driver.HandleCertificate(ctx, &cr.UC, &cr.Technical)
 
+	// Renew before returning, and only on a certificate that actually reached the driver: a
+	// duplicate returns earlier, so the handshake's own answer cannot provoke another handshake.
+	c.renewSubscriptionIfIdle(ctx)
+
 	// Record whether this certificate was actually applied, separately from having been observed.
 	// This is the whole of the applied-versus-observed split at this layer: on failure the
 	// certificate stays marked unapplied so a retransmission retries it, and on success the mark
@@ -382,5 +442,13 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 	if err != nil {
 		return fmt.Errorf("selecting root nodes for certification: %w", err)
 	}
-	return c.net.Send(ctx, req, rootIDs...)
+	if err := c.net.Send(ctx, req, rootIDs...); err != nil {
+		return err
+	}
+	// A submitted request refills this node's subscription at the root chain, so nothing else needs
+	// to ask for one this round.
+	c.mu.Lock()
+	c.submittedSinceHandshake = true
+	c.mu.Unlock()
+	return nil
 }

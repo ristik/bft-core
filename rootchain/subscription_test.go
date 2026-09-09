@@ -320,8 +320,15 @@ func Test_Subscriptions_QuotaStarvesANonSubmittingNode(t *testing.T) {
 	partition, shard := types.PartitionID(8), types.ShardID{}
 	node := generateNodeID(t)
 
+<<<<<<< HEAD
 	var sent int
 	subs, err := NewSubscriptions(func(context.Context, any, ...peer.ID) error { sent++; return nil }, observability.Default(t))
+=======
+	// Send delivers on its own goroutine, so the counter is shared across goroutines and the race
+	// detector is right to object to sent++.
+	var sent atomic.Int64
+	subs, err := NewSubscriptions(func(context.Context, any, ...peer.ID) error { sent.Add(1); return nil }, observability.Default(t))
+>>>>>>> f6b/stage4-trace
 	require.NoError(t, err)
 	require.NoError(t, subs.Subscribe(partition, shard, node.String()))
 
@@ -336,6 +343,7 @@ func Test_Subscriptions_QuotaStarvesANonSubmittingNode(t *testing.T) {
 		subs.Send(context.Background(), cr)
 	}
 	subs.Wait()
+<<<<<<< HEAD
 	require.Equal(t, responsesPerSubscription, sent, "the quota is spent one response at a time")
 
 	// The node is still a subscriber, and receives nothing.
@@ -344,11 +352,25 @@ func Test_Subscriptions_QuotaStarvesANonSubmittingNode(t *testing.T) {
 	subs.Send(context.Background(), cr)
 	subs.Wait()
 	require.Equal(t, before, sent,
+=======
+	require.Equal(t, int64(responsesPerSubscription), sent.Load(), "the quota is spent one response at a time")
+
+	// The node is still a subscriber, and receives nothing.
+	before := sent.Load()
+	subs.Send(context.Background(), cr)
+	subs.Send(context.Background(), cr)
+	subs.Wait()
+	require.Equal(t, before, sent.Load(),
+>>>>>>> f6b/stage4-trace
 		"with the quota spent, certificates are no longer delivered to this node — this is the window in which a non-voting validator misses the assignments its continuity depends on")
 
 	// Only Subscribe refills it. For a node that submits nothing, that means only a handshake.
 	require.NoError(t, subs.Subscribe(partition, shard, node.String()))
 	subs.Send(context.Background(), cr)
 	subs.Wait()
+<<<<<<< HEAD
 	require.Equal(t, before+1, sent, "and delivery resumes only after a fresh subscription")
+=======
+	require.Equal(t, before+1, sent.Load(), "and delivery resumes only after a fresh subscription")
+>>>>>>> f6b/stage4-trace
 }
