@@ -74,6 +74,17 @@ type Round struct {
 	// this node's own anchor — is a separate decision and is not wired anywhere yet.
 	evidence *EvidenceBuffer
 
+	// finality serializes every executor call that changes what the executor considers canonical or
+	// final — this file's commits and Build, and the recovery applier's commit. See finality.go for
+	// why Round.mu is not that guarantee: it is a round lock, and it stopped being sufficient the
+	// moment a second thing could commit.
+	finality *FinalityGate
+
+	// recovery is the authenticated-evidence recovery lifecycle (§6.3, §6.4), attached by
+	// SetRecovery. Nil on a node that does not run it, and every use below is guarded: a node
+	// without it behaves exactly as it did before, refusing rather than recovering.
+	recovery *RecoveryStack
+
 	// continuity is the live execution anchor and the interval this node has itself verified
 	// quiet since it (see anchor.go, and docs/design/f6b-quiet-uc-recovery.md §3.3). It is what
 	// gives reconcile a block hash to recover to when the certificate in hand is quiet and
@@ -235,6 +246,28 @@ func (r *Round) SetAwaitTimeout(d time.Duration) {
 
 // SetEvidenceBuffer attaches the optional serving buffer, which is then fed by every certificate
 // this node handles. Safe to call, or not, at any point before Run starts.
+/*
+SetRecovery attaches the authenticated-evidence recovery lifecycle, and the finality gate it shares
+with this round's own executor calls.
+
+Call after NewRound, before Run. A Round with none behaves exactly as it did before any of §6 existed
+— it observes, reconciles from what it saw itself, and refuses when it cannot — which is what makes
+this a deployment decision rather than a change to the protocol.
+*/
+func (r *Round) SetRecovery(s *RecoveryStack) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.recovery = s
+	if s != nil {
+		r.finality = s.Gate
+		// The stack owns the buffer's feed, so the standalone one is cleared rather than left to
+		// run alongside it. Two feeds would hand the buffer every certificate twice; it refuses the
+		// duplicate correctly, but a design that relies on a component refusing what we chose to
+		// send it twice is one bug away from relying on it accepting.
+		r.evidence = nil
+	}
+}
+
 func (r *Round) SetEvidenceBuffer(b *EvidenceBuffer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -367,6 +400,12 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 				slog.String("nodeID", r.nodeID))
 		}
 	}
+	// The recovery lifecycle observes here too, and for the same reason: this is the one place a
+	// certificate and the technical record bound to it arrive together, already authenticated. Both
+	// halves get the same feed — what a node retains for others and what it may later reason from
+	// about itself are the same certificates, and letting them diverge would mean a node able to
+	// prove something to a peer that it could not prove to itself.
+	r.recovery.observe(ctx, uc, tr, r.nodeID)
 
 	if err := r.commitPrevious(ctx, uc); err != nil {
 		return fmt.Errorf("committing previously certified round: %w", err)
@@ -436,7 +475,9 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// requirement for finality-changing Engine calls.
 	var identityErr error
 	if len(exp.PreviousHash) > 0 {
-		identityErr = r.identityCheck(ctx, head, exp)
+		// head may move: a successful evidence recovery commits the certified block, and the parent
+		// every later step builds on is the executor's head AFTER that, not before.
+		head, identityErr = r.identityCheck(ctx, uc, head, exp)
 	}
 	if identityErr != nil && r.log != nil {
 		// The other half of the trace: what the executor actually reported when the refusal was
@@ -670,18 +711,38 @@ func (r *Round) nonVotingReason(identityErr error) string {
 // It decides nothing on its own: HandleCertificate applies the verdict at the signing gate, so the
 // diagnostic is computed from the head as it was BEFORE this round's block was built while the
 // consequence lands where it belongs.
-func (r *Round) identityCheck(ctx context.Context, head BlockRef, exp Expectation) error {
+func (r *Round) identityCheck(ctx context.Context, uc *types.UnicityCertificate, head BlockRef, exp Expectation) (BlockRef, error) {
 	err := r.continuity.checkHeadIdentity(head, Hash(exp.PreviousHash), r.executorGenesis)
 	if err == nil {
-		return nil
+		return head, nil
 	}
 	var rte *recoveryTargetError
 	reason := "unknown"
 	if errors.As(err, &rte) {
 		reason = rte.reason
 	}
+	// The state agrees and this node still cannot name the block that produced it — row 8 after a
+	// restart, row 10 after a missed certificate. reconcile is never entered on this path, because
+	// there is nothing to reconcile: the executor is exactly where the certificate says. What is
+	// missing is the IDENTITY, and authenticated evidence supplies precisely that.
+	//
+	// Applying it here commits a block the executor may already hold as canonical, which the
+	// Executor contract makes a no-op returning VALID. It restores P-id and NOTHING ELSE: a
+	// restored process still does not vote, because that gate is restoredFrom and #105, and it is
+	// enforced separately further down. Recovering an execution identity is not re-authorization.
+	if newHead, res, ok := r.applyVerifiedAnchor(ctx, uc, exp, head); ok {
+		if idErr := r.continuity.checkHeadIdentity(newHead, Hash(exp.PreviousHash), r.executorGenesis); idErr == nil {
+			r.metrics.recordIRDivergence(ctx, "identity_recovered_from_evidence")
+			return newHead, nil
+		}
+		head = newHead
+	} else if res.Outcome != ApplyNotAttempted {
+		r.metrics.recordIRDivergence(ctx, "identity_evidence_"+strings.ReplaceAll(res.Outcome.String(), "-", "_"))
+	}
+	r.recovery.seek(ctx, reason, r.nodeID)
+
 	r.metrics.recordIRDivergence(ctx, "identity_"+strings.ReplaceAll(reason, "-", "_"))
-	return fmt.Errorf("shardnode: executor head is not the certified execution head for round %d (%w) — refusing to build or sign; a matching state root is not evidence of the same block (see docs/troubleshooting.md)",
+	return head, fmt.Errorf("shardnode: executor head is not the certified execution head for round %d (%w) — refusing to build or sign; a matching state root is not evidence of the same block (see docs/troubleshooting.md)",
 		exp.Round, err)
 }
 
@@ -774,7 +835,7 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 		r.log.WarnContext(ctx, "the certified block differs from the one this node proposed — committing the certified one",
 			slog.String("certified", fmt.Sprintf("%x", target)), slog.String("proposed", fmt.Sprintf("%x", p.hash)))
 	}
-	status, err := r.executor.Commit(ctx, target)
+	status, err := r.commitFinal(ctx, "round-commit", target)
 	if err != nil {
 		return err
 	}
@@ -788,6 +849,65 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 
 // sameBlockRef compares two heads by every field that identifies a block. Number and state root
 // alone are not identity — that is the whole subject of P-id — and neither is a hash on its own.
+/*
+commitFinal and buildFinal are the only ways this file reaches a finality-changing executor call.
+
+The gate is taken per OPERATION rather than for the whole round. Holding it across HandleCertificate
+would be simpler and wrong in one specific way: recovery from authenticated evidence is applied from
+inside reconcile, and the applier takes the gate for its own commit — a round-wide hold would have
+the round waiting on itself.
+
+A nil gate means an unwired node, where Round.mu is still the only concurrency there is. That is the
+pre-recovery arrangement and it stays correct on its own; the gate is what keeps it correct once a
+second thing can commit.
+*/
+/*
+applyVerifiedAnchor makes one bounded recovery attempt and, if the executor reaches the certified
+block, adopts the verified anchor as this node's own.
+
+BOTH HALVES, OR NEITHER. Committing the block without installing the anchor leaves this node at the
+right block and still unable to say which block produced the state — so P-id goes on refusing and the
+next certificate re-commits a block the executor already holds. Installing the anchor without the
+commit would be worse: it would claim an execution identity the executor does not have. The predicate
+established both facts at once, so they are adopted together.
+
+The interval adopted is exactly what was verified: the anchor's block, quiet through the round this
+certificate carries, with the next round taken from the authenticated technical record (exp.Round) —
+the same assignment the live path uses, never round+1.
+*/
+func (r *Round) applyVerifiedAnchor(ctx context.Context, uc *types.UnicityCertificate, exp Expectation, head BlockRef) (BlockRef, ApplyResult, bool) {
+	newHead, res, ok := r.recovery.apply(ctx, uc, head, r.nodeID)
+	if !ok {
+		return newHead, res, false
+	}
+	r.continuity.installVerified(res.Target, uc.GetRoundNumber(), exp.Round)
+	return newHead, res, true
+}
+
+func (r *Round) commitFinal(ctx context.Context, who string, hash Hash) (Status, error) {
+	if r.finality != nil {
+		release, err := r.finality.acquire(ctx, who)
+		if err != nil {
+			return StatusSyncing, err
+		}
+		defer release()
+	}
+	return r.executor.Commit(ctx, hash)
+}
+
+func (r *Round) buildFinal(ctx context.Context, params RoundParams) (BuildID, error) {
+	// Build sets head, safe and finalized on the parent before any payload exists, so it changes
+	// finality even though it reads as "start a block".
+	if r.finality != nil {
+		release, err := r.finality.acquire(ctx, "build")
+		if err != nil {
+			return "", err
+		}
+		defer release()
+	}
+	return r.executor.Build(ctx, params)
+}
+
 func sameBlockRef(a, b BlockRef) bool {
 	return a.Number == b.Number && bytes.Equal(a.Hash, b.Hash) && bytes.Equal(a.StateRoot, b.StateRoot)
 }
@@ -853,6 +973,33 @@ func (r *Round) reconcile(ctx context.Context, uc *types.UnicityCertificate, exp
 		if errors.As(targetErr, &rte) {
 			reason = rte.reason
 		}
+
+		// THE #92 PATH. This node cannot say which certified block produced the state it is being
+		// asked to build on — `no-anchor` after a restart, or `continuity-gap` after a missed
+		// certificate. Everything it observed itself is exhausted; authenticated evidence from a
+		// peer is the remaining way to name that block, and it is subject to exactly the same
+		// checks its own observations were (§3, §6.3).
+		//
+		// The attempt comes BEFORE the refusal and the refusal still stands if it fails, so a node
+		// without the lifecycle wired, or one whose peers cannot help, ends exactly where it did
+		// before: refusing, with the reason named.
+		if newHead, res, ok := r.applyVerifiedAnchor(ctx, uc, exp, head); ok {
+			r.metrics.recordIRDivergence(ctx, "recovery_from_evidence")
+			if r.log != nil {
+				r.log.InfoContext(ctx, "recovered from authenticated peer evidence: the certified block is committed",
+					slog.Uint64("round", exp.Round),
+					slog.String("blockHash", fmt.Sprintf("%x", newHead.Hash)),
+					slog.String("liveAnchorRefusal", reason))
+			}
+			return newHead, nil
+		} else if res.Outcome != ApplyNotAttempted {
+			r.metrics.recordIRDivergence(ctx, "recovery_evidence_"+strings.ReplaceAll(res.Outcome.String(), "-", "_"))
+		}
+		// Ask for evidence for NEXT time. A fetch does not complete inside this round — it is
+		// bounded background work off this lock (§6.3) — so the certificate that discovers the gap
+		// starts the attempt and a later one applies it. That is the same rhythm the live path has.
+		r.recovery.seek(ctx, reason, r.nodeID)
+
 		r.metrics.recordIRDivergence(ctx, "recovery_"+strings.ReplaceAll(reason, "-", "_"))
 		return head, fmt.Errorf("shardnode: executor head %x diverges from root-chain-certified state %x and this node cannot identify the certified block to recover to (%w) — refusing to build round %d; it must resync (see docs/troubleshooting.md)",
 			head.StateRoot, exp.PreviousHash, targetErr, exp.Round)
@@ -869,7 +1016,7 @@ func (r *Round) reconcile(ctx context.Context, uc *types.UnicityCertificate, exp
 
 	// Idempotent by contract: Commit on an already-canonical hash is a no-op returning VALID, so
 	// a retry after a failed apply is safe and does not double-execute anything.
-	status, err := r.executor.Commit(ctx, blockHash)
+	status, err := r.commitFinal(ctx, "reconcile", blockHash)
 	if err != nil {
 		return head, fmt.Errorf("shardnode: recovery commit failed: %w", err)
 	}
@@ -966,7 +1113,7 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 
 	if leader == r.nodeID {
 		buildStart := time.Now()
-		id, err := r.executor.Build(ctx, params)
+		id, err := r.buildFinal(ctx, params)
 		if err != nil {
 			return Block{}, params, fmt.Errorf("build: %w", err)
 		}

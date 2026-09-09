@@ -68,6 +68,10 @@ var (
 	// ErrApplyTargetMoved — the verified target changed while this attempt was in the executor, so
 	// what was committed is no longer what this node is being asked to build on.
 	ErrApplyTargetMoved = errors.New("anchor application: the verified target moved while the attempt was in flight")
+	// ErrApplyBusy — another finality-changing executor operation is in progress. Distinct from
+	// ErrApplyInFlight, which is another APPLICATION: this one is the round itself committing, and
+	// the applier waits for no round.
+	ErrApplyBusy = errors.New("anchor application: the executor is busy with another finality-changing operation")
 	// ErrApplyBudgetInvalid — a caller bug, reported the way the rest of #92 reports its own.
 	ErrApplyBudgetInvalid = errors.New("anchor application: the configured budget is not usable")
 )
@@ -89,6 +93,7 @@ const (
 	ApplyExhausted
 	ApplyInFlight
 	ApplyTargetMoved
+	ApplyBusy
 )
 
 func (o ApplyOutcome) String() string {
@@ -115,6 +120,8 @@ func (o ApplyOutcome) String() string {
 		return "in-flight"
 	case ApplyTargetMoved:
 		return "target-moved"
+	case ApplyBusy:
+		return "busy"
 	default:
 		return "not-attempted"
 	}
@@ -128,7 +135,7 @@ func (o ApplyOutcome) String() string {
 func (o ApplyOutcome) Retryable() bool {
 	switch o {
 	case ApplyExecutorUnreachable, ApplyPayloadUnavailable, ApplyBackoff, ApplyExhausted,
-		ApplyInFlight, ApplyTargetMoved:
+		ApplyInFlight, ApplyTargetMoved, ApplyBusy:
 		return true
 	default:
 		return false
@@ -271,6 +278,7 @@ type TargetApplier struct {
 	executor Executor
 	source   TargetSource
 	budget   ApplyBudget
+	gate     *FinalityGate
 	now      func() time.Time
 	log      *slog.Logger
 
@@ -298,6 +306,10 @@ type ApplyConfig struct {
 	Executor Executor
 	Source   TargetSource
 	Budget   ApplyBudget
+	// Gate serializes this commit against every other finality-changing executor operation. Nil is
+	// allowed and means "this applier is the only thing that commits", which is true in fixtures
+	// and false in a wired node — see finality.go.
+	Gate *FinalityGate
 	// Now is the clock, injectable so the backoff is testable without sleeping.
 	Now func() time.Time
 	Log *slog.Logger
@@ -317,7 +329,7 @@ func NewTargetApplier(cfg ApplyConfig) (*TargetApplier, error) {
 		cfg.Now = time.Now
 	}
 	return &TargetApplier{
-		executor: cfg.Executor, source: cfg.Source, budget: cfg.Budget,
+		executor: cfg.Executor, source: cfg.Source, budget: cfg.Budget, gate: cfg.Gate,
 		now: cfg.Now, log: cfg.Log,
 	}, nil
 }
@@ -379,6 +391,12 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 	// Idempotent by contract (see Round.reconcile): Commit on an already-canonical hash is a no-op
 	// returning VALID, so an attempt after a failed one does not double-execute anything.
 	status, err := a.commit(ctx, target.BlockHash)
+	if errors.Is(err, ErrFinalityBusy) {
+		// The round is committing something of its own. Not an answer about the executor and not an
+		// attempt spent against it — the next certificate is the next opportunity.
+		return a.retryable(ApplyBusy, head, target, attempt,
+			fmt.Errorf("%w: %w", ErrApplyBusy, err))
+	}
 	if err != nil {
 		// UNREACHABLE, not unavailable and not invalid. The executor said nothing, so nothing is
 		// known — including whether it applied the block. The target is kept.
@@ -524,6 +542,15 @@ func (a *TargetApplier) attemptNumber() int {
 // commit, head and genesis each bound ONE executor call. A context that is already done is passed
 // through rather than replaced, so a caller cancelling still cancels.
 func (a *TargetApplier) commit(ctx context.Context, hash Hash) (Status, error) {
+	// TRY, never wait. This runs from a round loop, and its contract is one bounded attempt with an
+	// answer — not a queue behind whatever the round is doing to the executor.
+	if a.gate != nil {
+		release, err := a.gate.tryAcquire("recovery-apply")
+		if err != nil {
+			return StatusSyncing, err
+		}
+		defer release()
+	}
 	cctx, cancel := context.WithTimeout(ctx, a.budget.Timeout)
 	defer cancel()
 	return a.executor.Commit(cctx, hash)

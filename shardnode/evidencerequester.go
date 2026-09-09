@@ -500,6 +500,56 @@ func (r *EvidenceRequester) Need() error {
 	return nil
 }
 
+/*
+Refresh carries an already-verified bundle onto the certificate this node holds NOW, using only what
+this node has itself observed. No network, no provider, no attempt budget — so it is bounded work
+that is safe to call under the round lock, and it is the difference between recovering and
+permanently trailing by one certificate.
+
+WHY IT EXISTS. Wiring made a lag visible that the unit fixtures could not: a certificate is observed
+at the top of a round, and the recovery attempt happens inside the same round. An asynchronous carry
+completes microseconds later — long before the next certificate, and still after the attempt that
+needed it. So every attempt found a target for the PREVIOUS certificate, refused it as stale
+(correctly), started a carry, and the next attempt found a target for the certificate before it. The
+node would have gone on doing that forever on a shard that was doing nothing wrong.
+
+The cost is re-verifying a bounded chain — the predicate over at most MaxCertificates certificates,
+which is what carrying means (§6.3) — against a certificate arriving at the shard's cadence. That is
+the right trade against never recovering.
+*/
+func (r *EvidenceRequester) Refresh(ctx context.Context) error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return ErrRecoveryClosed
+	}
+	held, ok := r.current()
+	if !ok {
+		r.mu.Unlock()
+		return ErrRecoveryNoObservation
+	}
+	if r.target != nil && r.targetBinding.same(bindingOf(held)) {
+		r.mu.Unlock()
+		return nil // already an answer to this question
+	}
+	if r.refusedFor != nil && bytes.Equal(r.refusedFor, held.identity) {
+		r.mu.Unlock()
+		return fmt.Errorf("%w: round %d", ErrRecoveryConflict, held.round)
+	}
+	bundle, from, ok := r.retainedLocked()
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("%w: nothing verified has been retained to carry", ErrRecoveryUnavailable)
+	}
+	if err := r.carry(ctx, bundle, from); err != nil {
+		if errors.Is(err, ErrEvidenceConflict) {
+			return fmt.Errorf("%w: %w", ErrRecoveryConflict, err)
+		}
+		return err
+	}
+	return nil
+}
+
 // run is the whole recovery, off the caller's goroutine and outside any lock the caller holds.
 func (r *EvidenceRequester) run() {
 	ctx, cancel := context.WithTimeout(r.life, r.cfg.Budget.Overall)
@@ -610,6 +660,11 @@ func (r *EvidenceRequester) snapshot() (witnessEntry, bool) {
 func (r *EvidenceRequester) retainedBundle() (AnchorEvidence, witnessEntry, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.retainedLocked()
+}
+
+// retainedLocked is retainedBundle with the lock already held.
+func (r *EvidenceRequester) retainedLocked() (AnchorEvidence, witnessEntry, bool) {
 	if r.retained == nil {
 		return AnchorEvidence{}, witnessEntry{}, false
 	}

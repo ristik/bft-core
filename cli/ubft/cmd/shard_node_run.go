@@ -52,6 +52,11 @@ type shardNodeRunFlags struct {
 	HeartbeatInterval time.Duration
 	InactivityTimeout time.Duration
 
+	// EvidenceServe / EvidenceRecover switch the two halves of authenticated-evidence anchor
+	// recovery (#92) independently — see the flag help and shardnode.RecoveryOptions.
+	EvidenceServe   bool
+	EvidenceRecover bool
+
 	RPCServerAddress string // exposes /api/v1/metrics and /api/v1/health when set
 }
 
@@ -91,6 +96,10 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 	cmd.Flags().IntVar(&flags.CertNodes, "cert-nodes", shardnode.DefaultBFTClientOptions.CertNodes, "number of root nodes to submit each certification request to")
 	cmd.Flags().DurationVar(&flags.HeartbeatInterval, "heartbeat-interval", shardnode.DefaultBFTClientOptions.HeartbeatInterval, "how often to check for root-chain inactivity")
 	cmd.Flags().DurationVar(&flags.InactivityTimeout, "inactivity-timeout", shardnode.DefaultBFTClientOptions.InactivityTimeout, "re-handshake if no certificate has been received for this long")
+	cmd.Flags().BoolVar(&flags.EvidenceServe, "evidence-serve", true,
+		"retain observed certificates and answer other validators' requests for anchor evidence (#92)")
+	cmd.Flags().BoolVar(&flags.EvidenceRecover, "evidence-recover", false,
+		"obtain and apply authenticated evidence for this node's own missing execution anchor (#92); off by default — it depends on peers answering and ends in a finality-changing executor call")
 	cmd.Flags().StringVar(&flags.RPCServerAddress, "rpc-server-address", "",
 		`address for the metrics/health HTTP server, in the form "host:port". Not started if empty.`)
 
@@ -197,6 +206,24 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 	awaitTimeout := shardnode.AwaitTimeoutForT2(shardConf.T2Timeout)
 	node.SetAwaitTimeout(awaitTimeout)
 
+	// Authenticated-evidence anchor recovery (#92, docs/design/f6b-quiet-tail-anchor-recovery.md).
+	// Two switches, because they cost different things: serving retains certificates this node has
+	// already authenticated and answers bounded requests from peers, taking no new dependency;
+	// recovering depends on peers answering and ends in a finality-changing executor call.
+	recoveryOpts := shardnode.DefaultRecoveryOptions()
+	recoveryOpts.Serve = flags.EvidenceServe
+	recoveryOpts.Recover = flags.EvidenceRecover
+	if recoveryOpts.Recover {
+		providers, perr := shardPeers(peer, shardConf.Validators)
+		if perr != nil {
+			return fmt.Errorf("resolving evidence providers: %w", perr)
+		}
+		recoveryOpts.Providers = providers
+	}
+	if err := node.EnableRecovery(recoveryOpts); err != nil {
+		return fmt.Errorf("enabling anchor recovery: %w", err)
+	}
+
 	metrics, err := shardnode.NewMetrics(flags.observe.Meter("shardnode"))
 	if err != nil {
 		return fmt.Errorf("creating metrics: %w", err)
@@ -253,6 +280,22 @@ func serveShardNodeRPC(ctx context.Context, flags *shardNodeRunFlags, node *shar
 // a real multi-validator shard (C2), which needs NetDisseminator's actual
 // libp2p connection to the others.
 func buildDisseminator(p *network.Peer, obs Observability, validators []*types.NodeInfo) (shardnode.Disseminator, error) {
+	peers, err := shardPeers(p, validators)
+	if err != nil {
+		return nil, err
+	}
+	if len(peers) == 0 {
+		return shardnode.NewLoopbackDisseminator(), nil
+	}
+	return shardnode.NewNetDisseminator(p, obs, peers)
+}
+
+// shardPeers is the shard's other validators from the shard conf, excluding this node. It is the
+// set the leader disseminates blocks to and the set a returning node asks for anchor evidence —
+// deliberately the same set, because both are "the validators of this shard" and a node that is
+// trusted to send blocks is no more trusted to serve evidence: the evidence predicate authenticates
+// everything against this node's own trust base regardless of who supplied it (§3).
+func shardPeers(p *network.Peer, validators []*types.NodeInfo) ([]peer.ID, error) {
 	selfID := p.ID().String()
 	var peers []peer.ID
 	for _, v := range validators {
@@ -265,10 +308,7 @@ func buildDisseminator(p *network.Peer, obs Observability, validators []*types.N
 		}
 		peers = append(peers, id)
 	}
-	if len(peers) == 0 {
-		return shardnode.NewLoopbackDisseminator(), nil
-	}
-	return shardnode.NewNetDisseminator(p, obs, peers)
+	return peers, nil
 }
 
 // hexToHash parses a 0x-prefixed 32-byte hash from configuration.

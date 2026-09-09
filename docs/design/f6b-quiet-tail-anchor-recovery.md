@@ -844,9 +844,60 @@ did that, and doing it again would be a second place where evidence is judged. I
 payloads — the executor's own ancestor acquisition is what obtained the missing block in every run
 measured so far (§8), and that stays its business.
 
-**Still unwired.** The executor and target source are interfaces; production startup constructs no
-applier and `Round` calls none of it. What remains is the wiring itself and the measured acceptance
-run against a real client across a quiet tail.
+### 6.5 The lifecycle, wired
+
+Implemented in `shardnode/evidencerecovery.go` (`RecoveryStack`), `shardnode/finality.go`
+(`FinalityGate`), `Node.EnableRecovery`, and the two call sites in `Round`. `ubft shard-node run`
+gains `--evidence-serve` (default **on**) and `--evidence-recover` (default **off**).
+
+**Two switches, because they cost different things.** Serving retains certificates this node has
+already authenticated and answers bounded requests: no new dependency, memory it can measure, and it
+helps peers it could not otherwise help. Recovering depends on peers answering and ends in a
+finality-changing executor call. A node that enables neither behaves exactly as it did before any of
+§6 existed — same refusals, same names — which is what makes this a deployment decision rather than a
+protocol change.
+
+**Where recovery is attempted, and where it is not.** Only on the paths that already refuse:
+`reconcile` when the live anchor cannot explain the state (`no-anchor`, `continuity-gap`), and the
+identity check when the state agrees and this node still cannot name the block. Not on every
+certificate — a node that can explain what it is being asked to build on needs no evidence, and
+asking anyway would make every healthy node a permanent load on every other. The refusal still stands
+if recovery fails, with the same name it had before.
+
+**The finality gate.** Until now one lock did this job by accident: `Round.mu` is held across
+`HandleCertificate`, and every finality-changing call happened inside it. That was never a statement
+about finality — it is a round lock — and it stopped being sufficient the moment a second thing could
+commit. Every call that makes the executor treat a block as canonical or final now takes the gate:
+the round's own commit, reconcile's, `Build` (which sets head, safe and finalized on the parent
+before any payload exists), and the applier's. Reads and `Verify` do not: `newPayload` tells the
+executor about a block without making it canonical, and a validator's per-round Verify must not queue
+behind a recovery commit. The round WAITS for the gate because it must proceed; the applier does NOT,
+because its contract is one bounded attempt with an answer and its caller is a round loop — it
+reports `busy` and the next certificate is the next opportunity.
+
+**Two defects only wiring could show.** Both were invisible to all four unit suites, each of which
+was correct about its own half:
+
+  - *The one-certificate lag.* A certificate is observed at the top of a round and the recovery
+    attempt happens inside that same round. An asynchronous carry finishes microseconds later — long
+    before the next certificate and still after the attempt that needed it — so every attempt found a
+    target for the PREVIOUS certificate, refused it as stale (correctly), started a carry, and the
+    next attempt found a target for the certificate before it. Forever, on a shard doing nothing
+    wrong. `EvidenceRequester.Refresh` carries a retained bundle onto the certificate held now,
+    synchronously, using only what this node observed: bounded work, no network, safe under the round
+    lock.
+  - *Half a recovery.* Committing the certified block left the executor in the right place while
+    `continuityState` still held no anchor — so P-id went on refusing, and the next certificate
+    re-committed a block the executor already had. `continuityState.installVerified` adopts the
+    anchor the predicate established, together with the interval it verified quiet. §5 already said
+    the verified-anchor cursor is moved by "this predicate, or a live non-quiet certificate"; this is
+    that sentence implemented. It authorizes no signing: P-sign is `restoredFrom` and #105, enforced
+    separately, and a restored process that recovers its execution identity still does not vote.
+
+**What is deliberately still open.** The measured acceptance run against a real reth across a quiet
+tail, with no transaction injected — the demonstration that the measurement in §1 now ends
+differently. That is a measurement of this wiring rather than a change to it, and it belongs in its
+own unit with its own evidence.
 
 ## 7. Acceptance fixtures
 
