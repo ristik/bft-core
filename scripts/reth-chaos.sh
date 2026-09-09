@@ -356,7 +356,10 @@ if submitAndConfirm "$survivor"; then
 else
   fail "quiet-restart: could not certify a block while the pair was absent"
 fi
-targetHead=$(execHead "$survivor") || targetHead=UNOBSERVABLE
+if ! targetHead=$(execHead "$survivor"); then
+  fail "quiet-restart: the shard's canonical head is unobservable, so there is nothing to measure recovery against"
+  targetHead=UNOBSERVABLE
+fi
 info "quiet-restart: the shard's canonical head is now $targetHead; no further work will be submitted"
 
 startReth "$pair"
@@ -365,13 +368,26 @@ start_one_evm_validator "$pair" "$validators" "$partitionID" "$rootBoot" engine-
 
 echo "  --  OBSERVATION: quiet rounds only, nothing injected"
 quietRecovered=no
-if observeQuietRecovery "$pair" "$targetHead" "$mark" 120; then
-  quietRecovered=yes
-  pass "quiet-restart: validator $pair recovered to the certified head during a QUIET interval, with no new work"
-else
-  info "quiet-restart: validator $pair did NOT recover during the quiet interval — recorded, not asserted; establishing this is the point of the scenario"
-fi
-quietObservationRecord "$pair" "$mark"
+observeQuietRecovery "$pair" "$targetHead" 120
+case $? in
+  0)
+    quietRecovered=yes
+    pass "quiet-restart: validator $pair recovered to the certified head during a QUIET interval, with no new work"
+    quietObservationRecord "$pair" "$mark" recovered
+    ;;
+  1)
+    info "quiet-restart: validator $pair did NOT recover during the quiet interval — recorded, not asserted; establishing this is the point of the scenario"
+    quietObservationRecord "$pair" "$mark" observed-behind
+    ;;
+  *)
+    # NOT a result. An executor that could not be read says nothing about recovery, and the
+    # positive control below can bring the client back and leave the run green having measured
+    # nothing — which is why this counts as a failure of the run and not as the negative outcome.
+    fail "quiet-restart: the observation was INVALID — validator $pair's executor could not be read well enough during the window to say whether it recovered"
+    quietObservationRecord "$pair" "$mark" invalid-observation
+    ;;
+esac
+quietPrecondition "$pair" "$survivor" "$targetHead" "$mark" || true
 snapshot 5b-b-after-quiet-observation
 
 # Safety must hold either way: a node that has not caught up must not be voting.
@@ -388,12 +404,15 @@ else
   fail "quiet-restart control: the control transaction did not execute"
 fi
 controlTarget=$(execHead "$survivor") || controlTarget=UNOBSERVABLE
-if observeQuietRecovery "$pair" "$controlTarget" "$mark" 120; then
-  pass "quiet-restart control: validator $pair reached $controlTarget after the control transaction"
-else
-  fail "quiet-restart control: validator $pair did not reach $controlTarget even after a non-quiet round"
-fi
-quietObservationRecord "$pair" "$mark"
+observeQuietRecovery "$pair" "$controlTarget" 120
+case $? in
+  0) pass "quiet-restart control: validator $pair reached $controlTarget after the control transaction"
+     quietObservationRecord "$pair" "$mark" control-recovered ;;
+  1) fail "quiet-restart control: validator $pair did not reach $controlTarget even after a non-quiet round"
+     quietObservationRecord "$pair" "$mark" control-behind ;;
+  *) fail "quiet-restart control: the control observation was INVALID — validator $pair's executor could not be read"
+     quietObservationRecord "$pair" "$mark" control-invalid ;;
+esac
 snapshot 5b-c-after-control
 info "quiet-restart summary: recovered without new work = $quietRecovered"
 convergenceGate "post-quiet-restart" || true
