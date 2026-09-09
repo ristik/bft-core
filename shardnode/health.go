@@ -21,11 +21,20 @@ type Health struct {
 	currentLeader      string
 	isLeader           bool
 
+	// voting is false while this node deliberately withholds certification requests — today only
+	// the restored-process gate (Round.MarkRestored, design §6.1). It is a status an operator must
+	// be able to see without reading logs: such a node looks healthy in every other field, follows
+	// the shard, and reconciles its executor, while contributing nothing to quorum.
+	voting          bool
+	nonVotingReason string
+
 	updatedAt time.Time
 }
 
 func NewHealth() *Health {
-	return &Health{}
+	// Voting until something says otherwise: the default is the ordinary validator, and every
+	// refusal to vote is recorded by the code that decides it.
+	return &Health{voting: true}
 }
 
 // Snapshot is Health's JSON-marshalable value form — a copy, so it can be
@@ -38,6 +47,8 @@ type Snapshot struct {
 	LastSubmittedRound uint64    `json:"lastSubmittedRound"`
 	CurrentLeader      string    `json:"currentLeader"`
 	IsLeader           bool      `json:"isLeader"`
+	Voting             bool      `json:"voting"`
+	NonVotingReason    string    `json:"nonVotingReason,omitempty"`
 	UpdatedAt          time.Time `json:"updatedAt"`
 
 	// SecondsSinceUpdate is computed at snapshot time, not stored — see
@@ -72,6 +83,23 @@ func (h *Health) updateCertificate(ucRound, ucRootRound uint64, leader string, s
 	h.updatedAt = time.Now()
 }
 
+// updateVoting records whether this node is contributing certification requests, and why not when
+// it is not. Idempotent: the round loop calls it every round, so it must not churn updatedAt or the
+// reason for an unchanged state.
+func (h *Health) updateVoting(voting bool, reason string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.voting == voting && h.nonVotingReason == reason {
+		return
+	}
+	h.voting = voting
+	h.nonVotingReason = reason
+	h.updatedAt = time.Now()
+}
+
 func (h *Health) updateSubmitted(round uint64) {
 	if h == nil {
 		return
@@ -98,6 +126,8 @@ func (h *Health) Snapshot() Snapshot {
 		LastSubmittedRound: h.lastSubmittedRound,
 		CurrentLeader:      h.currentLeader,
 		IsLeader:           h.isLeader,
+		Voting:             h.voting,
+		NonVotingReason:    h.nonVotingReason,
 		UpdatedAt:          h.updatedAt,
 	}
 	if !h.updatedAt.IsZero() {

@@ -202,6 +202,23 @@ func (a *Adapter) Head(ctx context.Context) (shardnode.BlockRef, error) {
 	}, nil
 }
 
+// GenesisBlock answers from the client's chain configuration: block number zero, which is fixed by
+// the chain spec this client was started with and does not move with what it has committed. That is
+// what makes it usable as an execution identity — see shardnode.Executor.GenesisBlock, and note that
+// `ubft shard-node run` separately refuses to start when this hash does not match a configured
+// --expected-genesis-hash, so the value the round loop compares against is the configured one.
+func (a *Adapter) GenesisBlock(ctx context.Context) (shardnode.BlockRef, error) {
+	h, err := a.eth.GetBlockByNumber(ctx, "0x0")
+	if err != nil {
+		return shardnode.BlockRef{}, fmt.Errorf("engineapi: reading genesis block: %w", err)
+	}
+	return shardnode.BlockRef{
+		Number:    uint64(h.Number),
+		Hash:      shardnode.Hash(h.Hash[:]),
+		StateRoot: shardnode.Hash(h.StateRoot[:]),
+	}, nil
+}
+
 // Commit issues a forkchoiceUpdated pinning head/safe/finalized to hash —
 // see ForkchoiceStateV1's doc comment for why all three are always the same
 // value here. This is also round.go's crash-recovery retry target (see

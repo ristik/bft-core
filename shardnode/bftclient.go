@@ -69,8 +69,23 @@ type BFTClient struct {
 
 	mu  sync.Mutex
 	luc *types.UnicityCertificate
+	// unapplied names the certificate whose delivery to the driver FAILED, and is cleared as soon
+	// as one succeeds. It is the applied cursor kept separate from the observation cursor `luc`
+	// (design §5): a driver error leaves `luc` ahead of what was actually applied, and without
+	// this the retransmission that would retry it is classified UCDuplicate and dropped, so the
+	// failure is never retried by any route. It is not a queue — only the latest failure is worth
+	// retrying, since a later certificate supersedes an earlier one.
+	unapplied *deliveryAttempt
 
 	lastCertResponseTime atomic.Int64
+}
+
+// deliveryAttempt identifies one certificate for retry purposes. Rounds are enough: a UCDuplicate
+// has, by classification, the same partition round, the same root round and a byte-identical input
+// record as the certificate held, so a duplicate matching these is the same certified statement.
+type deliveryAttempt struct {
+	partitionRound uint64
+	rootRound      uint64
 }
 
 func NewBFTClient(
@@ -266,7 +281,17 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 		}
 		return fmt.Errorf("classifying certificate: %w", err)
 	}
-	if class == UCDuplicate || class == UCStale {
+	// A duplicate of a certificate this node OBSERVED but failed to APPLY is a retry opportunity,
+	// not a no-op (design §5 point 5). The round driver's steps are all idempotent — Commit on an
+	// already-canonical hash returns VALID, observation of an already-observed certificate is a
+	// no-op — so re-running the delivery is safe, and it is the only route by which a transient
+	// executor failure recovers on its own. A duplicate arriving after a SUCCESSFUL delivery is
+	// still dropped: `unapplied` is cleared the moment one succeeds, so a completed round is never
+	// driven, or signed, twice.
+	retryOfFailedApply := class == UCDuplicate && c.unapplied != nil &&
+		c.unapplied.partitionRound == cr.UC.GetRoundNumber() && c.unapplied.rootRound == cr.UC.GetRootRoundNumber()
+
+	if (class == UCDuplicate || class == UCStale) && !retryOfFailedApply {
 		// Neither advances nor reverts anything: c.luc stays where it is, the driver is not
 		// called, and no error is returned. A stale certificate is an authentic statement about
 		// a round this node has already moved past — see ClassifyUC on why that is routine
@@ -298,6 +323,7 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	if c.log != nil {
 		c.log.InfoContext(ctx, "accepted certificate",
 			slog.String("class", class.String()),
+			slog.Bool("retryOfFailedApply", retryOfFailedApply),
 			slog.Uint64("partitionRound", cr.UC.GetRoundNumber()),
 			slog.Uint64("rootRound", cr.UC.GetRootRoundNumber()),
 			slog.Uint64("nextRound", cr.Technical.Round),
@@ -307,7 +333,33 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	c.mu.Lock()
 	driver := c.driver
 	c.mu.Unlock()
-	return driver.HandleCertificate(ctx, &cr.UC, &cr.Technical)
+
+	err = driver.HandleCertificate(ctx, &cr.UC, &cr.Technical)
+
+	// Record whether this certificate was actually applied, separately from having been observed.
+	// This is the whole of the applied-versus-observed split at this layer: on failure the
+	// certificate stays marked unapplied so a retransmission retries it, and on success the mark
+	// is cleared so later duplicates go back to being no-ops.
+	// APPLIED is not the same as SENT, and only the first one decides whether to retry.
+	//
+	// A driver error that is ErrSubmissionFailed means the certificate WAS applied — observed,
+	// committed, reconciled — and that the next round's certification request did not reach the
+	// root chain. Retrying the delivery would not resend that request (it belongs to a round the
+	// driver has already moved past); it would re-enter the round with a proposal the root chain
+	// has certified nothing about. That is exactly the path that finalised an uncertified block,
+	// so a send failure is reported and the certificate stays applied.
+	c.mu.Lock()
+	switch {
+	case err == nil:
+		c.unapplied = nil
+	case errors.Is(err, ErrSubmissionFailed):
+		c.unapplied = nil
+		metrics.recordIRDivergence(ctx, "delivery_send_failed")
+	default:
+		c.unapplied = &deliveryAttempt{partitionRound: cr.UC.GetRoundNumber(), rootRound: cr.UC.GetRootRoundNumber()}
+	}
+	c.mu.Unlock()
+	return err
 }
 
 // Submit implements shardnode.Submitter. It selects root nodes

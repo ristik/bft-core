@@ -64,6 +64,8 @@ func New(
 		return nil, fmt.Errorf("creating BFT client: %w", err)
 	}
 
+	round := NewRound(peer.ID().String(), partitionID, shardID, executor, disseminator, signer, client, log)
+
 	if store != nil {
 		luc, err := store.LoadLUC()
 		if err != nil {
@@ -83,15 +85,14 @@ func New(
 				return nil, fmt.Errorf("authenticating persisted certificate (round %d, root round %d): %w",
 					luc.GetRoundNumber(), luc.GetRootRoundNumber(), err)
 			}
-			client.SeedLUC(luc)
+			resumeFrom(client, round, luc)
 			if log != nil {
-				log.Info("resumed from persisted certificate",
+				log.Info("resumed from persisted certificate — this node is NON-VOTING for the rest of this process",
 					slog.Uint64("round", luc.GetRoundNumber()), slog.Uint64("rootRound", luc.GetRootRoundNumber()))
 			}
 		}
 	}
 
-	round := NewRound(peer.ID().String(), partitionID, shardID, executor, disseminator, signer, client, log)
 	client.SetDriver(&persistingDriver{driver: round, store: store})
 
 	health := NewHealth()
@@ -99,6 +100,24 @@ func New(
 	round.SetHealth(health)
 
 	return &Node{client: client, round: round, store: store, disseminator: disseminator, health: health}, nil
+}
+
+/*
+resumeFrom installs an authenticated persisted certificate, and is the only place production code
+calls SeedLUC.
+
+The two calls are here together, in one function, on purpose. They are two halves of one decision —
+"this process is a resumption" — and the defect they fix was precisely that the first half was
+performed and the second was not: New verified the checkpoint, seeded the certificate cursor, and
+then built an unrestricted Round that signed from the next certificate onward. Restoring the cursor
+without applying the signing gate should not be expressible in this file, so it is not.
+
+See Round.MarkRestored for why an authenticated checkpoint is not authorization to vote, and design
+§6.1 for the contract (#105) that will eventually let a restored node vote again.
+*/
+func resumeFrom(client *BFTClient, round *Round, luc *types.UnicityCertificate) {
+	client.SeedLUC(luc)
+	round.MarkRestored(luc.GetRoundNumber())
 }
 
 // SetAwaitTimeout bounds how long this node waits for the round leader's disseminated block before

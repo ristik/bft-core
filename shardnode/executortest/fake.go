@@ -31,8 +31,11 @@ import (
 // (leader side); a Fake driven only through Verify/Commit (follower side)
 // never needs entries queued locally.
 type Fake struct {
-	mu   sync.Mutex
-	head shardnode.BlockRef
+	mu sync.Mutex
+	// genesis is fixed at construction and never moves, so GenesisBlock answers from
+	// configuration the way a real client does rather than from anything that has happened.
+	genesis shardnode.BlockRef
+	head    shardnode.BlockRef
 
 	// committed indexes blocks Verify has accepted but Commit has not yet
 	// finalized, keyed by hash, so Commit (follower path) can find them.
@@ -50,6 +53,7 @@ func New() *Fake {
 	genesisRoot := make(shardnode.Hash, 32)
 	genesis := shardnode.BlockRef{Number: 0, Hash: nil, StateRoot: genesisRoot}
 	return &Fake{
+		genesis:   genesis,
 		head:      genesis,
 		committed: make(map[string]shardnode.Block),
 		builds:    make(map[shardnode.BuildID]shardnode.Block),
@@ -68,6 +72,12 @@ func (f *Fake) Head(_ context.Context) (shardnode.BlockRef, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.head, nil
+}
+
+func (f *Fake) GenesisBlock(_ context.Context) (shardnode.BlockRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.genesis, nil
 }
 
 func (f *Fake) Build(_ context.Context, p shardnode.RoundParams) (shardnode.BuildID, error) {
@@ -162,6 +172,29 @@ func (f *Fake) Commit(_ context.Context, hash shardnode.Hash) (shardnode.Status,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	// IDEMPOTENT BY CONTRACT. Committing the block that is ALREADY canonical is a no-op that
+	// returns VALID, not SYNCING.
+	//
+	// This fake used to delete the block on commit, so a second Commit of the same hash fell
+	// through to the "not found" branch and reported SYNCING — an executor that had the block
+	// claiming not to. Both the Executor contract (docs/adr/0001-executor-boundary.md decision 2:
+	// "Commit must be idempotent and safe to call speculatively") and the recovery design
+	// (docs/design/f6b-quiet-uc-recovery.md §5, "Commit on an already-canonical hash is a no-op
+	// returning VALID, so repeating it is safe") require VALID, and a real client agrees:
+	// forkchoiceUpdated to the current canonical head returns VALID.
+	//
+	// It matters because retry is built on it. #92's recovery path re-commits the anchor on every
+	// certificate until it succeeds; against the old behaviour the first success made every later
+	// attempt look like an unavailable payload. This is the same class of fake-versus-adapter
+	// divergence that let #92 itself go unnoticed by a fake-only chaos suite.
+	//
+	// The len(hash) > 0 guard is load-bearing: sameHash treats two empty hashes as equal, so
+	// without it Commit(nil) against a genesis head (whose Hash is nil) would report VALID —
+	// turning the exact call #92 is about into an apparent success. An empty hash is never
+	// canonical.
+	if len(hash) > 0 && sameHash(f.head.Hash, hash) {
+		return shardnode.StatusValid, nil
+	}
 	b, ok := f.committed[string(hash)]
 	if !ok {
 		return shardnode.StatusSyncing, nil

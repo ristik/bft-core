@@ -19,8 +19,24 @@
 # where a real non-quiet round can be constructed. See
 # docs/adr/0001-executor-boundary.md.
 #
+# VALIDATOR COUNT AND THE RESTART GATE. This script used to run on 4 validators. It needs 7 as of
+# F6b stage 3 (#92/#105), and the reason is a deliberate behaviour change, not a flaky lane: a shard
+# node resumed from a persisted certificate is NON-VOTING for the rest of that process (design
+# docs/design/f6b-quiet-uc-recovery.md §6.1 — an authenticated checkpoint proves genuine, not
+# current, so restarting is not by itself authorization to sign). It still handshakes, accepts
+# certificates and reconciles its executor, which is what every "rejoined" assertion below checks;
+# it contributes nothing to quorum.
+#
+# So each of the three restart scenarios permanently removes one voter. Shard quorum is n/2+1
+# (rootchain/consensus/storage/sharding.go GetQuorum), and the tightest moment is the cold-restart
+# scenario: two validators already restarted and a third deliberately down, needing n-3 >= n/2+1,
+# i.e. n >= 7. At n=4 this run stalls at kill-leader with 2 voters of 4 — measured, not predicted.
+# When #105 supplies the monotonic signing record and a restarted node may vote again, this can go
+# back to 4.
+#
 # Usage: scripts/chaos-evm.sh [-v validators] [-p partition id] [-k]
-#   -v  number of validators (default 4; needs >=4 to tolerate one fault)
+#   -v  number of validators (default 7; see VALIDATOR COUNT above — 4 tolerates one fault but
+#       cannot complete the restart scenarios while restarted nodes stay non-voting)
 #   -p  partition id (default 8)
 #   -k  keep test-nodes/ and the running processes afterwards (default:
 #       stop everything and exit)
@@ -30,7 +46,7 @@
 set -e
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-validators=4
+validators=7
 partition_id=8
 keep=false
 
@@ -51,6 +67,14 @@ done
 if [ "$validators" -lt 4 ]; then
   echo "need at least 4 validators to tolerate one fault (got $validators)" >&2
   exit 1
+fi
+if [ "$validators" -lt 7 ]; then
+  # Not fatal — a smaller run is still useful for the first scenario and for reproducing the
+  # stall itself — but say plainly which assertions cannot hold, so a quorum stall here is read
+  # as the restart gate rather than as a consensus defect.
+  echo "NOTE: $validators validators; quorum is $((validators / 2 + 1)) and every restarted" >&2
+  echo "      validator stays non-voting until #105 (see VALIDATOR COUNT in this script)." >&2
+  echo "      Expect the kill-leader and cold-restart progress assertions to stall below 7." >&2
 fi
 
 failures=0
@@ -330,7 +354,7 @@ wait_for_progress "$other" "$otherBefore" 45 || true
 sleep 5 # let a few more rounds pass while target is still down, for a real "outage", not a blink
 otherRoundDuringOutage=$(latest_round "$other")
 if [ "$otherRoundDuringOutage" -gt "$otherBefore" ]; then
-  pass "shard progressed well past validator $target's last round ($before -> $otherRoundDuringOutage) while it was down"
+  pass "shard progressed while validator $target was down (validator $other: round $otherBefore -> $otherRoundDuringOutage; the target's own last round was $before)"
 else
   fail "shard made no progress during validator $target's outage (validator $other stuck at round $otherBefore for 50s)"
   dump_stall_evidence "$other"
@@ -338,7 +362,12 @@ fi
 targetMark=$(log_lines "$target")
 start_one_evm_validator "$target" "$validators" "$partition_id" "$rootBoot" fake rpc
 if wait_for_after 'accepted certificate' 30 "test-nodes/evm$target/debug.log" "$targetMark"; then
-  pass "validator $target caught up and resumed certifying after a $((otherRoundDuringOutage - before))-round outage"
+  # The number reported is the one the verdict above was made from — the survivor's own progress
+  # while the target was down — not a subtraction across two validators' counters. Those can run
+  # in either direction relative to each other, and the old form printed "a -1-round outage" on a
+  # run where every assertion passed. An assertion whose reported number comes from a different
+  # measurement than its verdict is the recurring defect in this harness family.
+  pass "validator $target caught up and resumed certifying; the shard advanced from round $otherBefore to $otherRoundDuringOutage while it was down"
 else
   fail "validator $target did not resume after its outage"
 fi

@@ -13,6 +13,7 @@ import (
 
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
 )
@@ -157,21 +158,33 @@ func TestRound_QuietUCAfterMissedBlock_RecoveryTargetIsEmpty(t *testing.T) {
 			before := len(exec.commitTargets())
 			err = roundAfter.HandleCertificate(ctx, quietUC3, nextTR)
 
-			// The defect: recovery is attempted with an EMPTY target.
+			// STAGE 3 REPAIR. This block asserted the defect until #92 stage 3: reconcile used
+			// to attempt a Commit with an EMPTY target, taken from the quiet certificate's nil
+			// BlockHash. It must not any more.
 			targets := exec.commitTargets()
-			require.Greater(t, len(targets), before, "reconcile must have attempted a recovery Commit")
-			require.Empty(t, targets[len(targets)-1],
-				"#92: the recovery Commit target is empty — Round.reconcile used the quiet certificate's nil BlockHash")
+			for _, target := range targets {
+				require.NotEmpty(t, target, "Commit(nil) must be unreachable (#92)")
+			}
+			require.Equal(t, before, len(targets),
+				"with no anchor there is no certified block to recover to, so no Commit is attempted at all")
 
+			// It still fails — correctly. This roundAfter models a RESTART, and the anchor is
+			// in-process state that a restart loses. Retaining it across a restart needs the
+			// persisted evidence sequence AND the independent signing contract (#105) before a
+			// restored node may vote, so the fail-closed refusal below is the intended stage-3
+			// outcome for this scenario, not an unfixed defect. The live-anchor path — where the
+			// node did observe the state-changing certificate — is
+			// TestRound_QuietUCRecoversViaLiveAnchor.
 			require.Error(t, err, "the node cannot build on a state it never applied")
+			require.ErrorContains(t, err, "no-anchor",
+				"the refusal must name which transition-table row rejected, not fail generically")
 
 			// The fixture holds a verified UC naming the earlier block. It is NOT supplied
 			// to roundAfter: this does not prove a restarted node has retained that anchor.
-			// Stage 2 must define its authenticated acquisition/persistence and binding.
 			require.NotEmpty(t, uc2.InputRecord.BlockHash)
-			t.Logf("#92 trace: executorHead=%x certifiedPrevious=%x quietUC.BlockHash=%v commitTarget=%v fixtureAnchor(uc2.BlockHash)=%x payloadPresent=%t err=%v",
+			t.Logf("#92 trace: executorHead=%x certifiedPrevious=%x quietUC.BlockHash=%v commitTargets=%d fixtureAnchor(uc2.BlockHash)=%x payloadPresent=%t err=%v",
 				headBefore.StateRoot, quietUC3.InputRecord.PreviousHash, quietUC3.InputRecord.BlockHash,
-				targets[len(targets)-1], uc2.InputRecord.BlockHash, tc.payloadPresent, err)
+				len(targets), uc2.InputRecord.BlockHash, tc.payloadPresent, err)
 
 			// Control: with the explicit fixture target, the two availability cases differ.
 			// This is a test-only direct commit after observing the defect, not a repair.
@@ -211,4 +224,228 @@ func TestRound_ReconcileCommentIsWrongAboutSyncing(t *testing.T) {
 	// The adapter's behaviour is asserted in engineapi (TestAdapterCommitRejectsEmptyHash):
 	// "engineapi: commit: expected a 32-byte hash, got 0 bytes". The divergence between the two
 	// is the reason this path survived the fake-only suite.
+}
+
+/*
+rewindableExecutor models the one situation in which a node holding a LIVE anchor still finds its
+executor behind: the execution client restarted while the shard node kept running (design §1.1's
+restart matrix, row 2). The shard process never lost the anchor — it observed the state-changing
+certificate itself — but the executor's head went backwards.
+
+Head reports the rewound reference until a Commit succeeds — modelling a client that reports an
+older head while the data is still present, which is what a restarting or syncing client does.
+commitStatus lets a test make the payload unavailable without touching the underlying store, which
+is how "unavailable" is separated from "invalid" here.
+*/
+type rewindableExecutor struct {
+	shardnode.Executor
+	mu           sync.Mutex
+	stale        *shardnode.BlockRef
+	commits      []shardnode.Hash
+	commitStatus *shardnode.Status // when set, Commit returns this instead of delegating
+}
+
+func (r *rewindableExecutor) rewindTo(ref shardnode.BlockRef) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stale = &ref
+}
+
+func (r *rewindableExecutor) forceCommitStatus(s shardnode.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.commitStatus = &s
+}
+
+func (r *rewindableExecutor) Head(ctx context.Context) (shardnode.BlockRef, error) {
+	r.mu.Lock()
+	stale := r.stale
+	r.mu.Unlock()
+	if stale != nil {
+		return *stale, nil
+	}
+	return r.Executor.Head(ctx)
+}
+
+func (r *rewindableExecutor) Commit(ctx context.Context, hash shardnode.Hash) (shardnode.Status, error) {
+	r.mu.Lock()
+	r.commits = append(r.commits, hash)
+	forced := r.commitStatus
+	r.mu.Unlock()
+	if forced != nil {
+		return *forced, nil
+	}
+	status, err := r.Executor.Commit(ctx, hash)
+	if err == nil && status == shardnode.StatusValid {
+		r.mu.Lock()
+		r.stale = nil // the executor caught up
+		r.mu.Unlock()
+	}
+	return status, err
+}
+
+func (r *rewindableExecutor) commitTargets() []shardnode.Hash {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]shardnode.Hash(nil), r.commits...)
+}
+
+/*
+TestRound_QuietUCRecoversViaLiveAnchor is the #92 stage-3 repair, in the case stage 3 actually
+closes: the node OBSERVED the state-changing certificate, so it holds the anchor in process, and a
+later QUIET certificate can still identify the block to recover to.
+
+Stage 1 established the failure and stage 2 the design; this establishes the fix. It is deliberately
+the same shape as the stage-1 reproduction except for one thing — the Round that receives the quiet
+certificate is the one that saw the non-quiet certificate, rather than a fresh one modelling a
+restart. That single difference is what the in-process anchor is.
+
+Three cases, because they must not be conflated (design §4 rows 6, 7, 9):
+
+	payload present  -> recovery succeeds via the anchor, and BOTH post-conditions hold
+	payload absent   -> UNAVAILABLE, retryable, anchor retained; never reported as invalid
+	anchor mismatch  -> refused by name, with no Commit attempted at all
+*/
+func TestRound_QuietUCRecoversViaLiveAnchor(t *testing.T) {
+	// newFixture drives a live Round to the state that matters: it has OBSERVED the state-changing
+	// certificate (so it holds the anchor in process and has committed round 2), and its executor
+	// has then gone backwards — the execution-client restart of §1.1. The next certificate it sees
+	// is QUIET, which is precisely the case that used to strand it.
+	newFixture := func(t *testing.T) (context.Context, *executortest.Fake, *rewindableExecutor, *shardnode.Round, *types.UnicityCertificate, *certification.TechnicalRecord) {
+		t.Helper()
+		ctx := context.Background()
+		fake := executortest.New()
+		exec := &rewindableExecutor{Executor: fake}
+
+		signer, err := abcrypto.NewInMemorySecp256K1Signer()
+		require.NoError(t, err)
+		verifier, err := signer.Verifier()
+		require.NoError(t, err)
+		pk, err := verifier.MarshalPublicKey()
+		require.NoError(t, err)
+		nodeID := "node-" + string(pk[:8])
+
+		sub := &recordingSubmitter{}
+		round := shardnode.NewRound(nodeID, types.PartitionID(8), types.ShardID{}, exec,
+			shardnode.NewLoopbackDisseminator(), signer, sub, nil)
+
+		// Round 1: genesis, quiet.
+		require.NoError(t, round.HandleCertificate(ctx, genesisUC(1000), tr(1, 0, nodeID)))
+		uc1 := certifyFrom(sub.last(t), 2, 1000)
+
+		// Round 2: real entries, so the certificate is NON-QUIET and installs the anchor.
+		fake.AddEntries([]byte("the block that becomes the anchor"))
+		require.NoError(t, round.HandleCertificate(ctx, uc1, tr(2, 0, nodeID)))
+		req2 := sub.last(t)
+		require.NotEmpty(t, req2.InputRecord.BlockHash, "round 2 must be non-quiet for this scenario")
+
+		uc2 := certifyFrom(req2, 3, 1000)
+		require.NoError(t, round.HandleCertificate(ctx, uc2, tr(3, 0, nodeID)))
+
+		applied, err := exec.Head(ctx)
+		require.NoError(t, err)
+		require.Equal(t, []byte(uc2.InputRecord.Hash), []byte(applied.StateRoot),
+			"the node applied round 2 while it was live — the anchor is real, not hypothetical")
+
+		// THE EXECUTION CLIENT RESTARTS. The shard process keeps running, so it still holds the
+		// anchor; the executor's head goes back to before round 2.
+		exec.rewindTo(shardnode.BlockRef{})
+
+		nextTR := tr(4, 0, nodeID)
+		quietUC3 := quietFrom(uc2, 4, 1000)
+		require.Empty(t, quietUC3.InputRecord.BlockHash, "round 3 is quiet: nil BlockHash by construction")
+		return ctx, fake, exec, round, quietUC3, nextTR
+	}
+
+	t.Run("payload present: recovers via the anchor across the quiet round", func(t *testing.T) {
+		ctx, fake, exec, round, quietUC3, nextTR := newFixture(t)
+
+		before := len(exec.commitTargets())
+		require.NoError(t, round.HandleCertificate(ctx, quietUC3, nextTR),
+			"the quiet certificate must no longer strand the node: the anchor names the block")
+
+		targets := exec.commitTargets()
+		require.Greater(t, len(targets), before, "a recovery Commit must have been attempted")
+		for _, target := range targets {
+			require.NotEmpty(t, target, "Commit(nil) must be unreachable (#92)")
+		}
+
+		// P-id: the executor is at the certified BLOCK, not merely at a matching state root.
+		head, err := fake.Head(ctx)
+		require.NoError(t, err)
+		require.Equal(t, []byte(quietUC3.InputRecord.Hash), []byte(head.StateRoot))
+		require.NotEmpty(t, head.Hash, "the executor head is a real block, not just a state")
+	})
+
+	t.Run("payload absent: unavailable and retryable, never reported as invalid", func(t *testing.T) {
+		ctx, _, exec, round, quietUC3, nextTR := newFixture(t)
+		exec.forceCommitStatus(shardnode.StatusSyncing) // the executor does not have the payload
+
+		before := len(exec.commitTargets())
+		err := round.HandleCertificate(ctx, quietUC3, nextTR)
+		require.Error(t, err)
+
+		targets := exec.commitTargets()
+		require.Greater(t, len(targets), before, "the anchor must still supply a real target")
+		require.NotEmpty(t, targets[len(targets)-1])
+
+		require.ErrorContains(t, err, "unavailable in the executor")
+		require.NotContains(t, err.Error(), "REJECTED",
+			"an unavailable payload must never be reported as a rejected one")
+		require.ErrorContains(t, err, "retaining the anchor")
+	})
+
+	t.Run("payload invalid is a fault, reported differently from unavailable", func(t *testing.T) {
+		ctx, _, exec, round, quietUC3, nextTR := newFixture(t)
+		exec.forceCommitStatus(shardnode.StatusInvalid)
+
+		err := round.HandleCertificate(ctx, quietUC3, nextTR)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "REJECTED")
+		require.NotContains(t, err.Error(), "unavailable in the executor",
+			"a rejected payload must never be reported as merely unavailable")
+	})
+
+	t.Run("the anchor survives a failed attempt, so the next certificate retries it", func(t *testing.T) {
+		// "Unavailable is not invalid": the authority to retry is exactly what dropping the
+		// anchor would lose (design §4). After a failed attempt the anchor must still be there,
+		// and the next certificate must attempt the SAME target rather than refusing no-anchor.
+		ctx, _, exec, round, quietUC3, nextTR := newFixture(t)
+		exec.forceCommitStatus(shardnode.StatusSyncing)
+
+		require.Error(t, round.HandleCertificate(ctx, quietUC3, nextTR))
+		first := exec.commitTargets()
+		require.NotEmpty(t, first)
+		attempted := first[len(first)-1]
+
+		// A repeat certificate for the same round — what the root chain sends on timeout.
+		repeat := quietFrom(quietUC3, 5, 1000)
+		repeat.InputRecord.RoundNumber = quietUC3.InputRecord.RoundNumber
+		err := round.HandleCertificate(ctx, repeat, nextTR)
+		require.Error(t, err, "the payload is still absent, so this attempt fails too")
+
+		second := exec.commitTargets()
+		require.Greater(t, len(second), len(first), "the retry must reach Commit again")
+		require.Equal(t, []byte(attempted), []byte(second[len(second)-1]),
+			"the retry must use the SAME anchor: a failed attempt must not discard it")
+		require.ErrorContains(t, err, "unavailable in the executor")
+	})
+
+	t.Run("a quiet certificate at a state the anchor cannot explain is refused, with no Commit", func(t *testing.T) {
+		ctx, _, exec, round, quietUC3, _ := newFixture(t)
+
+		diverged := quietFrom(quietUC3, 5, 1000)
+		diverged.InputRecord.Hash = []byte{0xDE, 0xAD, 0xBE, 0xEF}
+		diverged.InputRecord.PreviousHash = diverged.InputRecord.Hash
+
+		before := len(exec.commitTargets())
+		err := round.HandleCertificate(ctx, diverged, tr(6, 0, "irrelevant"))
+		require.Error(t, err)
+		require.Equal(t, before, len(exec.commitTargets()),
+			"a mismatched anchor must not be applied: no Commit may be attempted")
+		require.ErrorContains(t, err, "continuity-gap",
+			"continuity broke, so there is no anchor to offer — and the name distinguishes that "+
+				"(row 10, this node has missed certified history) from never having had one "+
+				"(row 8, ordinary after a restart)")
+	})
 }
