@@ -85,6 +85,12 @@ type BFTClient struct {
 	// submittedSinceHandshake tracks whether this node has given the root chain a reason to renew
 	// its subscription since the last time it asked for one. See renewSubscriptionIfIdle.
 	submittedSinceHandshake bool
+	// lastRenewedFor coalesces renewal per CERTIFICATE: several deliveries about the same one — a
+	// retransmission, a retry of a failed application — ask for a subscription at most once.
+	lastRenewedFor deliveryAttempt
+	// nextRenewalAllowed and renewalBackoff bound retrying a handshake that is failing.
+	nextRenewalAllowed time.Time
+	renewalBackoff     time.Duration
 	// unapplied names the certificate whose delivery to the driver FAILED, and is cleared as soon
 	// as one succeeds. It is the applied cursor kept separate from the observation cursor `luc`
 	// (design §5): a driver error leaves `luc` ahead of what was actually applied, and without
@@ -248,21 +254,71 @@ provoke a refill. The cost is one handshake per certified round for a node that 
 is the same order as the certification request a voting node sends anyway — and a node that stops
 entirely still stops renewing, so it still expires.
 */
-func (c *BFTClient) renewSubscriptionIfIdle(ctx context.Context) {
+// renewalBackoffStart and renewalBackoffMax bound retrying a handshake that is FAILING. A failed
+// renewal is a network or trust-base problem and retrying it per certificate helps nothing; the
+// inactivity timer remains the long stop.
+const (
+	renewalBackoffStart = 1 * time.Second
+	renewalBackoffMax   = 30 * time.Second
+)
+
+// renewSubscriptionIfIdle asks the root chain for a subscription again when this node has given it
+// no other reason to renew one.
+//
+// newEvidence says whether this delivery carried something this node had not already observed. It
+// is the difference between renewal and a feedback loop, and the loop is not hypothetical: a
+// duplicate of a certificate whose APPLICATION failed is deliberately re-delivered to the driver
+// (that is how a transient executor failure recovers), the root chain answers a handshake
+// immediately with its current certificate and outside the subscription quota, and that answer is
+// the very certificate being retried. Renewing on it closed the circle — failed application,
+// handshake, the same certificate back, failed application — with no new certificate and no timer
+// needed to keep it spinning.
+//
+// So an already-observed certificate may retry application as often as it likes and never renews.
+// Renewal tracks certified PROGRESS, which is what consumes the subscription's quota in the first
+// place; a node whose executor is failing still renews on every new certificate, so it does not
+// need to succeed at anything to keep its feed.
+func (c *BFTClient) renewSubscriptionIfIdle(ctx context.Context, uc *types.UnicityCertificate, newEvidence bool) {
+	if !newEvidence {
+		return
+	}
+	this := deliveryAttempt{partitionRound: uc.GetRoundNumber(), rootRound: uc.GetRootRoundNumber()}
 	// The credit is CONSUMED, not merely read. One submitted request refills the quota once and
 	// one delivered certificate spends one response, so a single submission covers exactly one
 	// round — the same accounting the root chain does.
+	// Credit, coalescing and backoff are decided under one lock, so two deliveries about the same
+	// certificate cannot both conclude they should renew.
 	c.mu.Lock()
 	submitted := c.submittedSinceHandshake
 	c.submittedSinceHandshake = false
+	alreadyRenewed := c.lastRenewedFor == this
+	backedOff := time.Now().Before(c.nextRenewalAllowed)
+	if !submitted && !alreadyRenewed && !backedOff {
+		c.lastRenewedFor = this
+	}
 	c.mu.Unlock()
-	if submitted {
+	if submitted || alreadyRenewed || backedOff {
 		return
 	}
-	if err := c.sendHandshake(ctx); err != nil && c.log != nil {
-		c.log.WarnContext(ctx, "could not renew the certificate subscription; this node may stop receiving certificates until the inactivity timer fires",
-			slog.String("err", err.Error()))
+	if err := c.sendHandshake(ctx); err != nil {
+		c.mu.Lock()
+		if c.renewalBackoff == 0 {
+			c.renewalBackoff = renewalBackoffStart
+		} else if c.renewalBackoff < renewalBackoffMax {
+			c.renewalBackoff *= 2
+		}
+		backoff := c.renewalBackoff
+		c.nextRenewalAllowed = time.Now().Add(backoff)
+		c.mu.Unlock()
+		if c.log != nil {
+			c.log.WarnContext(ctx, "could not renew the certificate subscription; this node may stop receiving certificates until the inactivity timer fires",
+				slog.String("err", err.Error()), slog.Duration("backoff", backoff))
+		}
+		return
 	}
+	c.mu.Lock()
+	c.renewalBackoff = 0
+	c.mu.Unlock()
 }
 
 func (c *BFTClient) sendHandshake(ctx context.Context) error {
@@ -395,9 +451,10 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 
 	err = driver.HandleCertificate(ctx, &cr.UC, &cr.Technical)
 
-	// Renew before returning, and only on a certificate that actually reached the driver: a
-	// duplicate returns earlier, so the handshake's own answer cannot provoke another handshake.
-	c.renewSubscriptionIfIdle(ctx)
+	// Renew before returning. Only a certificate carrying something this node had not already
+	// observed counts: a retry of one it has is not progress, and treating it as progress is what
+	// let a failing application drive a handshake loop.
+	c.renewSubscriptionIfIdle(ctx, &cr.UC, !retryOfFailedApply)
 
 	// Record whether this certificate was actually applied, separately from having been observed.
 	// This is the whole of the applied-versus-observed split at this layer: on failure the

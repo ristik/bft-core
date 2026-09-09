@@ -725,6 +725,16 @@ refill. A submitted request still counts — the credit is consumed one round at
 quota's own accounting — so a voting node adds no traffic, and a node that stops entirely still
 stops renewing and still expires.
 
+**Renewal is driven by certified progress, not by retries.** A duplicate of a certificate whose
+application FAILED is deliberately re-delivered to the driver — that is how a transient executor
+failure recovers — and the root chain answers a handshake immediately with its current certificate,
+outside the subscription quota. Renewing on those re-deliveries closes a circle that needs neither a
+new certificate nor a timer to keep spinning: failed application, handshake, the same certificate
+back, failed application. So an already-observed certificate never renews, renewal is coalesced per
+certificate, and a failing handshake backs off (1s doubling to 30s) instead of being retried per
+delivery. A node whose executor is failing still renews on every NEW certificate, so it does not
+have to succeed at anything to keep its feed.
+
 **This does not recover evidence already missed.** A node disconnected long enough to miss an
 assignment still has to re-establish continuity by some other route; preventing the starvation stops
 the hole being dug, it does not fill one in.

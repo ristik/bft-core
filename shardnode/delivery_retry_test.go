@@ -375,6 +375,14 @@ func TestDeliverySeparatesApplicationFromSending(t *testing.T) {
 	})
 }
 
+// failingDriver models an executor that cannot apply anything — the state in which a certificate
+// stays unapplied and its retransmissions are deliberately re-delivered.
+type failingDriver struct{}
+
+func (failingDriver) HandleCertificate(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error {
+	return errors.New("executor unavailable")
+}
+
 // recordingNet is a RootNetwork that records what was sent to the root chain, so a test can tell a
 // handshake from a certification request without a libp2p network.
 type recordingNet struct {
@@ -492,6 +500,43 @@ func TestSubscriptionRenewalIsIndependentOfVoting(t *testing.T) {
 		// per lifetime.
 		require.NoError(t, client.handleCertificationResponse(ctx, respond(sign(6, 42))))
 		require.Equal(t, before+1, net.handshakes())
+	})
+
+	t.Run("a failing application does not turn renewal into a handshake loop", func(t *testing.T) {
+		/*
+			The reviewer's reproduction, and the case the previous revision's duplicate test could
+			not see because it only covered successful application.
+
+			A duplicate of a certificate whose APPLICATION failed is deliberately re-delivered to
+			the driver — that is how a transient executor failure recovers. The root chain answers
+			a handshake immediately with its current certificate, outside the subscription quota,
+			and that answer is the very certificate being retried. Renewing on it closed the circle:
+			failed application, handshake, the same certificate back, failed application, with no
+			new certificate and no timer needed to keep it spinning.
+		*/
+		net := &recordingNet{}
+		client, _ := newClient(net)
+		client.driver = failingDriver{}
+
+		uc := sign(5, 41)
+		for i := 0; i < 5; i++ {
+			require.Error(t, client.handleCertificationResponse(ctx, respond(uc)),
+				"application keeps failing, and the certificate stays unapplied and retryable")
+		}
+		require.Equal(t, 1, net.handshakes(),
+			"five deliveries of one certificate ask for a subscription once: a retry of something already observed is not progress")
+		require.NotNil(t, client.unapplied, "and the retry path itself is untouched")
+
+		// New certified progress still renews, which is the property the loop fix must not cost:
+		// a node whose executor is failing must not lose its feed as well.
+		require.Error(t, client.handleCertificationResponse(ctx, respond(sign(6, 42))))
+		require.Equal(t, 2, net.handshakes(), "a new certificate renews even though applying it failed")
+
+		// And when application finally succeeds, nothing about renewal changes.
+		client.driver = &countingDriver{inner: &recordingDriver{}}
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(sign(7, 43))))
+		require.Equal(t, 3, net.handshakes())
+		require.Nil(t, client.unapplied, "the certificate applied")
 	})
 
 	t.Run("a duplicate does not provoke a handshake, so a renewal cannot loop", func(t *testing.T) {
