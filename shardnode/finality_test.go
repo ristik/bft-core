@@ -314,7 +314,7 @@ func TestTargetApplier_HoldsTheGateThroughTheConfirmation(t *testing.T) {
 		},
 	}
 	clock := &testClock{at: time.Unix(1_700_000_000, 0)}
-	// A genesis-round anchor, so the genesis read happens too and is covered as well.
+	// A genesis-round anchor, so the genesis read the row-13 exception needs happens too.
 	anchor := &ExecutionAnchor{BlockHash: Hash(h32(0xbb)), StateRoot: Hash(h32(0x0b)), Round: 1, fromGenesisRound: true}
 	src := &stubTarget{anchor: anchor, verifiedFor: heldBinding()}
 	a, err := NewTargetApplier(ApplyConfig{Executor: ex, Source: src, Budget: testApplyBudget(), Gate: gate, Now: clock.now})
@@ -325,7 +325,11 @@ func TestTargetApplier_HoldsTheGateThroughTheConfirmation(t *testing.T) {
 
 	require.Equal(t, "recovery-apply", duringCommit, "held for the commit")
 	require.Equal(t, "recovery-apply", duringHead, "and still held when the head that confirms it is read")
-	require.Equal(t, "recovery-apply", duringGenesis, "and for the genesis read the exception needs")
+	// The executor's block zero is immutable configuration, read once and cached, so it is asked for
+	// before the gate is taken and never again — the gate covers what can CHANGE under the
+	// confirmation, and configuration cannot.
+	require.Equal(t, "", duringGenesis)
+	require.Equal(t, 1, ex.geneses)
 
 	_, _, stillHeld := gate.Holder()
 	require.False(t, stillHeld, "and released once the answer is known")

@@ -155,7 +155,13 @@ evmRPCPortStart=28311
 # evm_validator_rpc_addr - this validator's metrics/health address, for
 # scripts/chaos-evm.sh's post-restart health checks.
 function evm_validator_rpc_addr() {
-  local i=$1 port=$((evmRPCPortStart + i - 1))
+  # Two statements, not one: bash expands EVERY word of a `local` before performing any of its
+  # assignments, so `local i=$1 port=$((... i ...))` computes port from the CALLER's i, not from the
+  # one being assigned. Found while wiring the anchor-evidence acceptance run — evm_validator_addr
+  # below had the same shape, and every validator was therefore handed its OWN port as each
+  # sibling's address, so the "full mesh" this file documents was never formed.
+  local i=$1
+  local port=$((evmRPCPortStart + i - 1))
   echo "127.0.0.1:$port"
 }
 
@@ -211,7 +217,9 @@ function evm_validator_id() {
 # evm_validator_addr - this validator's own dialable multiaddress, for
 # other validators' bootnode lists
 function evm_validator_addr() {
-  local i=$1 port=$((evmValidatorPortStart + i - 1))
+  # See evm_validator_rpc_addr for why this is two statements rather than one.
+  local i=$1
+  local port=$((evmValidatorPortStart + i - 1))
   echo "/ip4/127.0.0.1/tcp/$port/p2p/$(evm_validator_id "$i")"
 }
 

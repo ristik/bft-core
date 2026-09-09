@@ -380,7 +380,7 @@ func TestTargetApplier_EnforcesHeadIdentityAfterAValidCommit(t *testing.T) {
 
 		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 		require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
-		require.Equal(t, 1, ex.geneses)
+		require.Equal(t, 1, ex.geneses, "block zero is configuration: read once, not once per question")
 	})
 
 	t.Run("a head that is not the executor's block zero is still refused", func(t *testing.T) {
@@ -599,6 +599,75 @@ func TestTargetApplier_NoticesTheTargetMovingUnderTheCommit(t *testing.T) {
 		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 		require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
 		require.Equal(t, 1, f.applier.Status().Applied)
+	})
+}
+
+/*
+A node already on the certified block needs no finality-changing call at all: adopting a verified
+statement is not the same as changing what the executor considers canonical.
+
+The second case is the one the real-reth acceptance run found, and it is not a corner: the shard's
+first certified round is non-quiet by convention, so it names a block a client builds and discards,
+and against an executor with no block identity at genesis BlockHashOrFallback puts the STATE ROOT in
+the certificate's block-hash field. On a shard with no transactions that is the only anchor there is.
+Committing it asked reth to make the empty-trie state root canonical, which it answered SYNCING —
+correctly, for ever — while the executor was already exactly where the certificate said.
+*/
+func TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere(t *testing.T) {
+	t.Run("an ordinary anchor the executor already holds", func(t *testing.T) {
+		ex := &stubExecutor{}
+		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+
+		res := f.applier.Apply(context.Background(), heldBinding(), recoveredHead())
+
+		require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
+		require.Empty(t, ex.commits, "nothing needed to change, so nothing was changed")
+		require.Zero(t, ex.heads, "and the head the caller already read was enough")
+		require.Equal(t, 1, f.applier.Status().Applied)
+	})
+
+	t.Run("the genesis-round anchor, whose block hash is a state root", func(t *testing.T) {
+		// Exactly the shape measured against reth: the certificate names 0x56e8… (a state root via
+		// BlockHashOrFallback), and the executor sits at its own genesis block, at that state.
+		stateRoot := h32(0x0b)
+		genesis := BlockRef{Number: 0, Hash: Hash(h32(0x59)), StateRoot: Hash(stateRoot)}
+		ex := &stubExecutor{genesis: func(context.Context) (BlockRef, error) { return genesis, nil }}
+		anchor := &ExecutionAnchor{
+			BlockHash: Hash(stateRoot), StateRoot: Hash(stateRoot), Round: 1, fromGenesisRound: true,
+		}
+		f := newApplyFixture(t, testApplyBudget(), ex, anchor)
+
+		res := f.applier.Apply(context.Background(), heldBinding(), genesis)
+
+		require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
+		require.Empty(t, ex.commits,
+			"committing a state root as though it were a block is what reth answered SYNCING to, for ever")
+		require.Equal(t, 1, ex.geneses, "block zero is read once, for the row-13 exception")
+	})
+
+	t.Run("the right block at the wrong state is not already there", func(t *testing.T) {
+		// Both halves of P-id, in the pre-check as everywhere else: the same block hash at another
+		// state would mean the executor and the certificate disagree about what that block produced,
+		// and adopting it would claim an execution identity the executor does not have.
+		wrongState := BlockRef{Number: 5, Hash: Hash(h32(0xbb)), StateRoot: Hash(h32(0x0c))}
+		ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return wrongState, nil }}
+		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+
+		res := f.applier.Apply(context.Background(), heldBinding(), wrongState)
+
+		require.NotEqual(t, ApplyApplied, res.Outcome, "the state must be checked, not just the block")
+		require.Equal(t, ApplyHeadMismatch, res.Outcome)
+		require.Zero(t, f.applier.Status().Applied)
+	})
+
+	t.Run("and it still commits when the executor is NOT already there", func(t *testing.T) {
+		ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
+		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
+
+		require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
+		require.Len(t, ex.commits, 1, "a node behind the certified block still has to be moved to it")
 	})
 }
 

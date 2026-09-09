@@ -299,6 +299,10 @@ type TargetApplier struct {
 	faultedFor Hash
 	faultErr   error
 	applied    int
+	// genesisRef is the executor's block ZERO, read once. It is configuration and it does not move,
+	// which is why Round caches it too — and an attempt now asks about it twice (before the commit
+	// and after), so caching is what keeps that from being two RPCs.
+	genesisRef *BlockRef
 }
 
 // ApplyConfig is what the applier needs that it cannot observe for itself.
@@ -378,6 +382,42 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 		return a.record(ApplyStaleTarget, head, target,
 			fmt.Errorf("%w: target produces state %x for round %d, the certificate for that round builds on %x",
 				ErrApplyStaleTarget, target.StateRoot, target.Round, held.State))
+	}
+
+	/*
+	   IS THERE ANYTHING TO DO? The caller has just read the executor's head, so this costs no RPC on
+	   the common path, and a node already at the certified block needs no finality-changing call at
+	   all — adopting a verified statement is not the same as changing what the executor considers
+	   canonical.
+
+	   MEASURED CORRECTION (the real-reth acceptance run for #92). Committing unconditionally was
+	   wrong for the one anchor whose block the executor is NOT expected to hold: the shard's first
+	   certified round is non-quiet by convention, so it names a block a real client builds and
+	   discards without ever making canonical — and against an executor with no block identity at
+	   genesis, BlockHashOrFallback puts the STATE ROOT there, which is not a block hash at all (see
+	   ExecutionAnchor.fromGenesisRound and row 13). On a devnet with no transactions that is the
+	   only anchor there is, and a node restarted across the quiet tail asked reth to commit
+	   0x56e81f17… — the empty-trie state root — which reth answered SYNCING, correctly, for ever.
+	   The node retried on every certificate and recovered nothing, while the evidence it held was
+	   perfectly good and its executor was already exactly where the certificate said it should be.
+
+	   So the question is asked in the right order: first "is the executor already there", and only
+	   then "make it be there".
+	*/
+	if satisfied, gerr := a.headSatisfies(ctx, target, held, head); gerr != nil {
+		return a.retryable(ApplyExecutorUnreachable, head, target, a.attemptNumber(),
+			fmt.Errorf("%w: reading the executor genesis block: %w", ErrApplyExecutorUnreachable, gerr))
+	} else if satisfied {
+		a.mu.Lock()
+		a.applied++
+		a.mu.Unlock()
+		if a.log != nil {
+			a.log.LogAttrs(ctx, slog.LevelInfo, "the executor is already on the certified block; the verified anchor is adopted without a commit",
+				slog.String("blockHash", fmt.Sprintf("%x", target.BlockHash)),
+				slog.Uint64("anchorRound", target.Round),
+				slog.Uint64("heldRound", held.Round))
+		}
+		return a.record(ApplyApplied, head, target, nil)
 	}
 
 	release, err := a.admit(held, target)
@@ -508,6 +548,29 @@ func outcomeForAdmission(err error) ApplyOutcome {
 }
 
 /*
+headSatisfies reports whether the head the caller already read is the certified execution head for
+this target — P-id in full, by the same comparison the live path uses, plus the state.
+
+The executor's genesis block is read only when the target is the shard's first certified round, which
+is the one case where row 13's exception can apply. That read is the only RPC this function can make,
+and it is skipped for every ordinary anchor.
+*/
+func (a *TargetApplier) headSatisfies(ctx context.Context, target *ExecutionAnchor, held CertificateBinding, head BlockRef) (bool, error) {
+	var genesis *BlockRef
+	if target.fromGenesisRound {
+		g, err := a.genesis(ctx)
+		if err != nil {
+			return false, err
+		}
+		genesis = &g
+	}
+	if anchorHeadIdentity(target, head, genesis) != nil {
+		return false, nil
+	}
+	return bytes.Equal(head.StateRoot, held.State), nil
+}
+
+/*
 admit applies everything that can refuse an attempt before the executor is touched, and returns the
 release for the in-flight slot it takes.
 
@@ -572,9 +635,22 @@ func (a *TargetApplier) head(ctx context.Context) (BlockRef, error) {
 }
 
 func (a *TargetApplier) genesis(ctx context.Context) (BlockRef, error) {
+	a.mu.Lock()
+	cached := a.genesisRef
+	a.mu.Unlock()
+	if cached != nil {
+		return *cached, nil
+	}
 	cctx, cancel := context.WithTimeout(ctx, a.budget.Timeout)
 	defer cancel()
-	return a.executor.GenesisBlock(cctx)
+	g, err := a.executor.GenesisBlock(cctx)
+	if err != nil {
+		return BlockRef{}, err
+	}
+	a.mu.Lock()
+	a.genesisRef = &g
+	a.mu.Unlock()
+	return g, nil
 }
 
 // retryable records an outcome that another attempt could resolve, and schedules the next one. The

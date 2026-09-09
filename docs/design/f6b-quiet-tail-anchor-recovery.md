@@ -920,10 +920,56 @@ was correct about its own half:
     that sentence implemented. It authorizes no signing: P-sign is `restoredFrom` and #105, enforced
     separately, and a restored process that recovers its execution identity still does not vote.
 
-**What is deliberately still open.** The measured acceptance run against a real reth across a quiet
-tail, with no transaction injected — the demonstration that the measurement in §1 now ends
-differently. That is a measurement of this wiring rather than a change to it, and it belongs in its
-own unit with its own evidence.
+### 6.6 The acceptance run, measured
+
+`scripts/f6b-quiet-tail-recovery.sh`, against reth at the pinned commit
+`189c0df32617afc488e0f091dbface1bd72cceb4`. Three validators, one reth each, on the shard's own
+generated chain spec. It runs **two arms against the same devnet**, which is what makes it evidence
+rather than a demonstration.
+
+| | Control (`--evidence-recover` off, the default) | Recovery (`--evidence-recover`) |
+|---|---|---|
+| certificates after restart | 5, all quiet | 6, all quiet |
+| anchor adopted | none | yes, one attempt, zero restarts |
+| refusals | throughout: refused, adopted nothing, signed nothing | none in the certificates after adoption |
+| voting | NON-VOTING | NON-VOTING |
+| transactions executed | 0 | 0 |
+
+The control arm is §1 reproduced on the merged revision: a node that returns behind a quiet tail
+refuses for as long as the shard stays quiet, because nothing a quiet shard delivers can name the
+block. The recovery arm is the same node, on the same devnet, differing by one flag.
+
+**Two things the run corrected that no fixture had.**
+
+*A round can be non-quiet without a transaction.* The first version of this lane asserted "no
+transaction" by counting non-quiet rounds, and a run produced a non-quiet round 4 with an empty
+chain spec on which no account can pay for gas. Quietness is a statement about the state root, not
+about activity. The property is now asserted where it actually lives: **every canonical block on the
+executor, genesis through head, contains zero transactions.**
+
+*The applier committed unconditionally.* This is the defect the run existed to find, and it is
+specific to the one anchor whose block the executor is not expected to hold. The shard's first
+certified round is non-quiet by convention, so it names a block a real client builds and discards
+without ever making canonical — and against an executor with no block identity at genesis,
+`BlockHashOrFallback` puts the STATE ROOT in the certificate's block-hash field. On a devnet with no
+transactions that is the only anchor there is. The node therefore asked reth to commit
+`0x56e81f17…`, the empty-trie state root, and reth answered `SYNCING` — correctly, for ever. The
+recovery was verified, the evidence was good, the executor was already exactly where the certificate
+said, and the node recovered nothing.
+
+`Apply` now asks the questions in the right order: *is the executor already on the certified block*,
+using the head the caller has already read and the same `anchorHeadIdentity` comparison the live path
+uses — and only then *make it be there*. A node already at the certified block adopts the verified
+anchor with **no finality-changing call at all**, which is also the correct answer whenever a
+recovery attempt races a commit that already succeeded. The executor's block zero is read once and
+cached, since it is configuration and does not move.
+
+**What the run does not establish.** It exercises the genesis-round anchor, because that is the only
+anchor a shard with no transactions ever has — so row 13's exception is the path that satisfied P-id
+here, not an exact head-hash match against an ordinary certified block. The ordinary path is covered
+by fixtures (§7) and over real libp2p in `TestRecoveryLifecycle_AQuietTailIsRecoveredOverRealLibp2p`,
+not by this run. Saying so is the point: a lane that reported "exact-block recovery" without naming
+which comparison satisfied it would be claiming more than it measured.
 
 ## 7. Acceptance fixtures
 
