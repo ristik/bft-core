@@ -110,6 +110,13 @@ func (p stubProvider) Assemble(EvidenceRequest) (AnchorEvidence, error) { return
 // side made of the answer.
 func exchange(t *testing.T, s *EvidenceServer, req EvidenceRequest, limits EvidenceTransportLimits) (AnchorEvidence, error) {
 	t.Helper()
+	return exchangeFrom(t, s, "test-peer", req, limits)
+}
+
+// exchangeFrom is the same, naming the peer the request appears to come from, so that admission can
+// be exercised with more than one of them.
+func exchangeFrom(t *testing.T, s *EvidenceServer, from string, req EvidenceRequest, limits EvidenceTransportLimits) (AnchorEvidence, error) {
+	t.Helper()
 	client, server := net.Pipe()
 	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
 
@@ -117,7 +124,7 @@ func exchange(t *testing.T, s *EvidenceServer, req EvidenceRequest, limits Evide
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_ = s.Serve(context.Background(), server)
+		_ = s.Serve(context.Background(), server, from)
 		_ = server.Close()
 	}()
 	require.NoError(t, client.SetDeadline(time.Now().Add(5*time.Second)))
@@ -245,11 +252,12 @@ func TestEvidenceTransport_RefusesWhatItCannotStandBehind(t *testing.T) {
 		s, err := NewEvidenceServer(p, EvidenceTransportLimits{
 			MaxRequestBytes: 4096, MaxResponseBytes: 4096, MaxCertificates: 8,
 			Deadline: 5 * time.Second, MaxConcurrentServes: 1,
+			MaxPendingStreams: 8, MaxPendingStreamsPerPeer: 8,
 		}, nil)
 		require.NoError(t, err)
 
 		first, firstServer := net.Pipe()
-		go func() { _ = s.Serve(context.Background(), firstServer) }()
+		go func() { _ = s.Serve(context.Background(), firstServer, "peer-a") }()
 		require.NoError(t, first.SetDeadline(time.Now().Add(5*time.Second)))
 		go func() {
 			_, _ = exchangeEvidence(first, EvidenceRequest{HeldRound: 1, HeldIdentity: []byte{1}}, DefaultEvidenceTransportLimits)
@@ -405,4 +413,341 @@ func TestEvidenceTransport_Limits(t *testing.T) {
 func mutate(l EvidenceTransportLimits, f func(*EvidenceTransportLimits)) EvidenceTransportLimits {
 	f(&l)
 	return l
+}
+
+/*
+Admission: the tier that bounds streams which never become requests.
+
+The second tier (MaxConcurrentServes) counts assembly, which only a well-formed request reaches, so
+by itself it bounds nothing against a peer that opens streams and sends nothing, half a length
+prefix, or a body it never finishes. libp2p multiplexes as many streams as a peer likes over one
+connection, so "one request per stream" is not "one request per connection".
+*/
+
+// stalledStreams starts n Serve calls from one peer whose clients never write, and returns a
+// function that closes them. Each Serve that is admitted blocks inside readFrame.
+func stalledStreams(t *testing.T, s *EvidenceServer, from string, n int) func() {
+	t.Helper()
+	var conns []net.Conn
+	for i := 0; i < n; i++ {
+		client, server := net.Pipe()
+		conns = append(conns, client, server)
+		go func() { _ = s.Serve(context.Background(), server, from) }()
+	}
+	return func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}
+}
+
+func admissionServer(t *testing.T, provider EvidenceProvider, total, perPeer int) *EvidenceServer {
+	t.Helper()
+	limits := DefaultEvidenceTransportLimits
+	limits.MaxPendingStreams = total
+	limits.MaxPendingStreamsPerPeer = perPeer
+	s, err := NewEvidenceServer(provider, limits, nil)
+	require.NoError(t, err)
+	return s
+}
+
+// serveExpectingRefusal runs one Serve that admission should turn away, with a ceiling: a bound that
+// stops working shows up as an admitted stream blocked on a read that nobody will ever satisfy, and
+// this reports that as a wrong answer rather than hanging the suite.
+func serveExpectingRefusal(t *testing.T, s *EvidenceServer, from string) error {
+	t.Helper()
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(context.Background(), server, from) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(2 * time.Second):
+		return errors.New("Serve did not return: the stream was admitted and is blocked reading")
+	}
+}
+
+func waitForPending(t *testing.T, s *EvidenceServer, want int) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		got, _ := s.Pending()
+		return got == want
+	}, 3*time.Second, 5*time.Millisecond, "expected %d admitted streams", want)
+}
+
+func TestEvidenceTransport_Admission(t *testing.T) {
+	f := newEvidenceFixture(t)
+	buffer := newTestBuffer(t)
+	obs := quietTailObserved(t, f)
+	mustObserve(t, buffer, obs...)
+	held := obs[2].UC
+
+	t.Run("stalled streams are counted before anything is read", func(t *testing.T) {
+		// The reproduction: with the bound applied only after readFrame, every one of these reaches
+		// a blocked reader and none of them is counted anywhere.
+		s := admissionServer(t, buffer, 2, 2)
+		closeAll := stalledStreams(t, s, "peer-a", 2)
+		defer closeAll()
+		waitForPending(t, s, 2)
+
+		require.ErrorIs(t, serveExpectingRefusal(t, s, "peer-a"), ErrNotAdmitted)
+
+		got, _ := s.Pending()
+		require.Equal(t, 2, got, "a refused stream takes no slot")
+	})
+
+	t.Run("a peer cannot spend more than its own share", func(t *testing.T) {
+		// Without a per-peer bound, one peer holding the whole global budget refuses every honest
+		// validator — the availability loss this protocol exists to repair, from the other side.
+		s := admissionServer(t, buffer, 8, 2)
+		closeAll := stalledStreams(t, s, "greedy", 2)
+		defer closeAll()
+		waitForPending(t, s, 2)
+
+		require.ErrorIs(t, serveExpectingRefusal(t, s, "greedy"), ErrNotAdmitted)
+
+		// And the honest peer is served, over the same server, at the same moment.
+		ev, err := exchangeFrom(t, s, "honest", requestFor(t, held), DefaultEvidenceTransportLimits)
+		require.NoError(t, err)
+		_, err = verifyAssembled(t, f, ev, held)
+		require.NoError(t, err)
+	})
+
+	t.Run("the global bound applies to a peer still inside its own share", func(t *testing.T) {
+		s := admissionServer(t, buffer, 2, 2)
+		closeA := stalledStreams(t, s, "peer-a", 1)
+		defer closeA()
+		closeB := stalledStreams(t, s, "peer-b", 1)
+		defer closeB()
+		waitForPending(t, s, 2)
+
+		require.ErrorIs(t, serveExpectingRefusal(t, s, "peer-c"), ErrNotAdmitted)
+	})
+
+	t.Run("a stream that is not admitted is told nothing", func(t *testing.T) {
+		// No busy frame: writing a refusal into a stream whose peer may still be writing its own
+		// request is the deadlock the read-first ordering exists to avoid, and the reset says all
+		// there is to say.
+		s := admissionServer(t, buffer, 1, 1)
+		closeAll := stalledStreams(t, s, "peer-a", 1)
+		defer closeAll()
+		waitForPending(t, s, 1)
+
+		client, server := net.Pipe()
+		defer func() { _ = client.Close(); _ = server.Close() }()
+		done := make(chan error, 1)
+		go func() { done <- s.Serve(context.Background(), server, "peer-b") }()
+
+		// Read first, and concurrently with the handler: a server that answers a stream it did not
+		// admit would block here writing, which is the deadlock this rule avoids.
+		require.NoError(t, client.SetReadDeadline(time.Now().Add(300*time.Millisecond)))
+		buf := make([]byte, 1)
+		_, err := client.Read(buf)
+		require.Error(t, err, "nothing may be written to a stream that was not admitted")
+
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, ErrNotAdmitted)
+		case <-time.After(2 * time.Second):
+			t.Fatal("Serve did not return")
+		}
+	})
+
+	t.Run("every exit path releases its slot", func(t *testing.T) {
+		// A slot leaked by one early return is a bound that erodes to zero over a process's life.
+		s := admissionServer(t, buffer, 4, 4)
+
+		// success
+		_, err := exchangeFrom(t, s, "p", requestFor(t, held), DefaultEvidenceTransportLimits)
+		require.NoError(t, err)
+		// a malformed request
+		_, err = exchangeFrom(t, s, "p", EvidenceRequest{HeldRound: 3}, DefaultEvidenceTransportLimits)
+		require.Error(t, err)
+		// a provider refusal
+		_, err = exchangeFrom(t, s, "p", EvidenceRequest{HeldRound: 99, HeldIdentity: []byte{9}}, DefaultEvidenceTransportLimits)
+		require.Error(t, err)
+		// a read that fails: the client closes without writing anything
+		client, server := net.Pipe()
+		go func() { _ = client.Close() }()
+		require.Error(t, s.Serve(context.Background(), server, "p"))
+		_ = server.Close()
+
+		streams, peers := s.Pending()
+		require.Zero(t, streams)
+		require.Zero(t, peers, "the per-peer map does not grow with every peer ever seen")
+	})
+
+	t.Run("admission bounds are validated", func(t *testing.T) {
+		good := DefaultEvidenceTransportLimits
+		for _, l := range []EvidenceTransportLimits{
+			mutate(good, func(l *EvidenceTransportLimits) { l.MaxPendingStreams = 0 }),
+			mutate(good, func(l *EvidenceTransportLimits) { l.MaxPendingStreamsPerPeer = 0 }),
+			// A per-peer bound above the global one could never apply.
+			mutate(good, func(l *EvidenceTransportLimits) { l.MaxPendingStreamsPerPeer = l.MaxPendingStreams + 1 }),
+		} {
+			_, err := NewEvidenceServer(stubProvider{}, l, nil)
+			require.Error(t, err)
+		}
+	})
+
+	t.Run("the assembly bound is not the stream bound", func(t *testing.T) {
+		require.LessOrEqual(t, DefaultEvidenceTransportLimits.MaxConcurrentServes, DefaultEvidenceTransportLimits.MaxPendingStreams,
+			"a server that admits fewer streams than it will assemble has one tier, not two")
+	})
+}
+
+/*
+Cancellation and deadlines, after the stream is open.
+
+A context cannot interrupt a read or a write already inside the transport; only acting on the stream
+can. These tests drive requestOverStream — the whole client half except CreateStream — over a pipe,
+so what is asserted is that a cancelled caller is released promptly, and that the budget the caller
+set is the budget the stream gets.
+*/
+
+// pipeStream adapts a net.Pipe end to the small stream contract the client half needs. Reset closes
+// the connection, which is what a libp2p reset does to I/O in flight: aborts it.
+type pipeStream struct {
+	net.Conn
+	mu       sync.Mutex
+	deadline time.Time
+	reset    bool
+}
+
+func (p *pipeStream) CloseWrite() error { return nil }
+
+func (p *pipeStream) SetDeadline(t time.Time) error {
+	p.mu.Lock()
+	p.deadline = t
+	p.mu.Unlock()
+	return p.Conn.SetDeadline(t)
+}
+
+func (p *pipeStream) Reset() error {
+	p.mu.Lock()
+	p.reset = true
+	p.mu.Unlock()
+	return p.Conn.Close()
+}
+
+func (p *pipeStream) state() (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.deadline, p.reset
+}
+
+func TestEvidenceTransport_CancellationAfterDialing(t *testing.T) {
+	f := newEvidenceFixture(t)
+	buffer := newTestBuffer(t)
+	obs := quietTailObserved(t, f)
+	mustObserve(t, buffer, obs...)
+	held := obs[2].UC
+	req := requestFor(t, held)
+
+	// A deadline long enough that nothing but cancellation could end these calls.
+	patient := DefaultEvidenceTransportLimits
+	patient.Deadline = 30 * time.Second
+
+	t.Run("a cancelled caller is released from a blocked read", func(t *testing.T) {
+		client, server := net.Pipe()
+		defer func() { _ = server.Close() }()
+		st := &pipeStream{Conn: client}
+
+		// The peer reads the request and then holds the response forever.
+		read := make(chan struct{})
+		go func() {
+			var got evidenceRequestMsg
+			_ = readFrame(bufio.NewReader(server), &got, 4096)
+			close(read)
+			select {}
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), patient.Deadline)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, err := requestOverStream(ctx, st, req, patient)
+			done <- err
+		}()
+		<-read
+		cancel()
+
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, ErrEvidenceTransport)
+			require.ErrorIs(t, err, context.Canceled, "the reason is reported, not whatever I/O error the reset produced")
+		case <-time.After(5 * time.Second):
+			t.Fatal("cancellation did not interrupt the blocked read")
+		}
+		_, wasReset := st.state()
+		require.True(t, wasReset)
+	})
+
+	t.Run("a cancelled caller is released from a blocked write", func(t *testing.T) {
+		// Nobody ever reads, so the request write itself blocks on an unbuffered stream.
+		client, server := net.Pipe()
+		defer func() { _ = server.Close() }()
+		st := &pipeStream{Conn: client}
+
+		ctx, cancel := context.WithTimeout(context.Background(), patient.Deadline)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, err := requestOverStream(ctx, st, req, patient)
+			done <- err
+		}()
+		time.Sleep(50 * time.Millisecond) // let the write block
+		cancel()
+
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, context.Canceled)
+		case <-time.After(5 * time.Second):
+			t.Fatal("cancellation did not interrupt the blocked write")
+		}
+	})
+
+	t.Run("the caller's own deadline is the stream's, not a fresh interval", func(t *testing.T) {
+		// A budget restarted after dialing is a budget the caller did not set. The stream gets the
+		// derived context's deadline, so dialing and the exchange spend the same one.
+		client, server := net.Pipe()
+		defer func() { _ = server.Close() }()
+		st := &pipeStream{Conn: client}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+		defer cancel()
+		want, ok := ctx.Deadline()
+		require.True(t, ok)
+
+		start := time.Now()
+		_, err := requestOverStream(ctx, st, req, patient) // nobody reads; only the deadline can end this
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Less(t, time.Since(start), 5*time.Second, "the 30s transport deadline must not have replaced the caller's")
+
+		got, _ := st.state()
+		require.WithinDuration(t, want, got, time.Millisecond, "the stream deadline is the context's")
+	})
+
+	t.Run("a completed exchange leaves nothing that could reset the stream later", func(t *testing.T) {
+		s := admissionServer(t, buffer, 4, 4)
+		client, server := net.Pipe()
+		defer func() { _ = server.Close() }()
+		st := &pipeStream{Conn: client}
+		go func() { _ = s.Serve(context.Background(), server, "peer") }()
+
+		ctx, cancel := context.WithTimeout(context.Background(), patient.Deadline)
+		ev, err := requestOverStream(ctx, st, req, patient)
+		require.NoError(t, err)
+		_, err = verifyAssembled(t, f, ev, held)
+		require.NoError(t, err)
+
+		_, wasReset := st.state()
+		require.False(t, wasReset, "a successful exchange is closed, not reset")
+
+		cancel() // the watcher is stopped and joined before the call returned, so this does nothing
+		time.Sleep(50 * time.Millisecond)
+		_, wasReset = st.state()
+		require.False(t, wasReset, "cancelling afterwards must not reach a stream this call has finished with")
+	})
 }

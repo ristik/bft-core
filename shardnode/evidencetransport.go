@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	libp2pnetwork "github.com/libp2p/go-libp2p/core/network"
@@ -81,10 +82,25 @@ type EvidenceTransportLimits struct {
 	// writes nothing costs the provider this much and no more.
 	Deadline time.Duration
 
-	// MaxConcurrentServes caps how many requests one provider answers at once. Beyond it, requests
-	// are refused immediately with a named busy outcome rather than queued: a queue is a place for
-	// an attacker to accumulate work, and a fast refusal lets an honest requester ask elsewhere.
+	// MaxConcurrentServes caps how many requests one provider ASSEMBLES at once — the second of two
+	// tiers, applied once a request has been read and understood. Beyond it, requests are refused
+	// immediately with a named busy outcome rather than queued: a queue is a place for an attacker
+	// to accumulate work, and a fast refusal lets an honest requester ask elsewhere.
 	MaxConcurrentServes int
+
+	// MaxPendingStreams caps how many streams this server is willing to hold AT ALL — counted from
+	// before the first byte is read, through the read, the assembly and the response write, to the
+	// handler's exit. It is the tier MaxConcurrentServes cannot be: a peer that opens streams and
+	// then sends nothing, or half a frame, never reaches the second tier, so without this one its
+	// cost is bounded only per stream (by the deadline) and not in aggregate. libp2p multiplexes
+	// arbitrarily many streams over one connection, so "one request per stream" bounds nothing by
+	// itself.
+	MaxPendingStreams int
+
+	// MaxPendingStreamsPerPeer caps how many of those one peer may hold. Without it, one peer can
+	// occupy the whole global budget and every other validator is refused — which is the same
+	// availability loss this protocol exists to repair, arriving from the other direction.
+	MaxPendingStreamsPerPeer int
 }
 
 // evidenceResponseOverhead is the allowance MaxResponseBytes adds over the predicate's byte bound:
@@ -118,6 +134,13 @@ var DefaultEvidenceTransportLimits = EvidenceTransportLimits{
 	MaxCertificates:     DefaultAnchorEvidenceLimits.MaxCertificates,
 	Deadline:            5 * time.Second,
 	MaxConcurrentServes: 4,
+
+	// Room for several validators to be mid-request while a few peers stall, and no more. These are
+	// THIS protocol's own bounds. A libp2p resource manager, where one is configured, may refuse
+	// streams before the handler ever runs, but nothing here depends on that: an unconfigured or
+	// permissive host must not remove this protocol's limits.
+	MaxPendingStreams:        32,
+	MaxPendingStreamsPerPeer: 4,
 }
 
 func (l EvidenceTransportLimits) validate() error {
@@ -131,6 +154,12 @@ func (l EvidenceTransportLimits) validate() error {
 		return fmt.Errorf("evidence transport: deadline must be positive, got %s", l.Deadline)
 	case l.MaxConcurrentServes <= 0:
 		return fmt.Errorf("evidence transport: MaxConcurrentServes must be positive, got %d", l.MaxConcurrentServes)
+	case l.MaxPendingStreams <= 0, l.MaxPendingStreamsPerPeer <= 0:
+		return fmt.Errorf("evidence transport: stream admission bounds must be positive, got MaxPendingStreams=%d MaxPendingStreamsPerPeer=%d",
+			l.MaxPendingStreams, l.MaxPendingStreamsPerPeer)
+	case l.MaxPendingStreamsPerPeer > l.MaxPendingStreams:
+		return fmt.Errorf("evidence transport: MaxPendingStreamsPerPeer=%d exceeds MaxPendingStreams=%d, so the per-peer bound could never apply",
+			l.MaxPendingStreamsPerPeer, l.MaxPendingStreams)
 	}
 	return nil
 }
@@ -224,12 +253,81 @@ type EvidenceProvider interface {
 	Assemble(EvidenceRequest) (AnchorEvidence, error)
 }
 
+// ErrNotAdmitted is the refusal that reaches no peer. A stream turned away by admission is reset
+// without a response, deliberately: writing a refusal means writing into a stream whose peer may
+// still be writing its own request, which is the deadlock the read-first ordering exists to avoid,
+// and a peer that opened more streams than it is allowed has already been told everything it needs
+// to know by the reset.
+var ErrNotAdmitted = errors.New("evidence transport: stream not admitted")
+
+/*
+streamAdmission is the FIRST of the server's two tiers, and the one that bounds work an attacker can
+cause without ever completing a request.
+
+It counts streams, not requests: a slot is taken before a single byte is read and released when the
+handler exits, so a peer that opens a stream and sends nothing, or half a length prefix, or a body it
+never finishes, occupies exactly one slot for at most one deadline. The second tier
+(MaxConcurrentServes) counts assembly, which only a well-formed request reaches.
+
+Per-peer as well as global, because a global bound alone is a bound on the whole shard's access to
+one provider: one peer holding all of it refuses every honest validator, which is the availability
+loss this protocol exists to repair, arriving from the other direction.
+*/
+type streamAdmission struct {
+	mu         sync.Mutex
+	total      int
+	perPeer    map[string]int
+	maxTotal   int
+	maxPerPeer int
+}
+
+func newStreamAdmission(maxTotal, maxPerPeer int) *streamAdmission {
+	return &streamAdmission{perPeer: make(map[string]int), maxTotal: maxTotal, maxPerPeer: maxPerPeer}
+}
+
+// acquire takes a slot for one stream, or reports that there is none. It never blocks: waiting for a
+// slot IS the queue this bound exists to prevent.
+func (a *streamAdmission) acquire(from string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.total >= a.maxTotal {
+		return fmt.Errorf("%w: %d streams already pending, the limit", ErrNotAdmitted, a.total)
+	}
+	if a.perPeer[from] >= a.maxPerPeer {
+		return fmt.Errorf("%w: %s already holds %d of its %d streams", ErrNotAdmitted, from, a.perPeer[from], a.maxPerPeer)
+	}
+	a.total++
+	a.perPeer[from]++
+	return nil
+}
+
+// release must run on EVERY exit from a handler — a slot leaked by a path that returns early is a
+// bound that erodes to zero over the life of the process.
+func (a *streamAdmission) release(from string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.total--
+	if n := a.perPeer[from] - 1; n > 0 {
+		a.perPeer[from] = n
+	} else {
+		// Removed rather than left at zero, so the map does not grow with every peer ever seen.
+		delete(a.perPeer, from)
+	}
+}
+
+func (a *streamAdmission) pending() (total int, peers int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.total, len(a.perPeer)
+}
+
 // EvidenceServer answers evidence requests from a provider, under its own bounds.
 type EvidenceServer struct {
-	provider EvidenceProvider
-	limits   EvidenceTransportLimits
-	log      *slog.Logger
-	inFlight chan struct{}
+	provider  EvidenceProvider
+	limits    EvidenceTransportLimits
+	log       *slog.Logger
+	admission *streamAdmission
+	inFlight  chan struct{}
 }
 
 func NewEvidenceServer(provider EvidenceProvider, limits EvidenceTransportLimits, log *slog.Logger) (*EvidenceServer, error) {
@@ -240,10 +338,11 @@ func NewEvidenceServer(provider EvidenceProvider, limits EvidenceTransportLimits
 		return nil, err
 	}
 	return &EvidenceServer{
-		provider: provider,
-		limits:   limits,
-		log:      log,
-		inFlight: make(chan struct{}, limits.MaxConcurrentServes),
+		provider:  provider,
+		limits:    limits,
+		log:       log,
+		admission: newStreamAdmission(limits.MaxPendingStreams, limits.MaxPendingStreamsPerPeer),
+		inFlight:  make(chan struct{}, limits.MaxConcurrentServes),
 	}, nil
 }
 
@@ -255,8 +354,10 @@ func (s *EvidenceServer) Register(h EvidenceHost) {
 }
 
 func (s *EvidenceServer) handleStream(stream libp2pnetwork.Stream) {
-	// The deadline covers reading the request and writing the response together, so a peer that
-	// opens a stream and stalls costs one slot for one deadline and nothing more.
+	from := stream.Conn().RemotePeer().String()
+
+	// The deadline covers reading the request and writing the response together, so an admitted
+	// peer that opens a stream and then stalls costs one slot for one deadline and nothing more.
 	if err := stream.SetDeadline(time.Now().Add(s.limits.Deadline)); err != nil {
 		_ = stream.Reset()
 		return
@@ -264,9 +365,9 @@ func (s *EvidenceServer) handleStream(stream libp2pnetwork.Stream) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.limits.Deadline)
 	defer cancel()
 
-	if err := s.Serve(ctx, stream); err != nil {
+	if err := s.Serve(ctx, stream, from); err != nil {
 		if s.log != nil {
-			s.log.Debug("serving anchor evidence", "peer", stream.Conn().RemotePeer().String(), "err", err.Error())
+			s.log.Debug("serving anchor evidence", "peer", from, "err", err.Error())
 		}
 		_ = stream.Reset()
 		return
@@ -276,19 +377,39 @@ func (s *EvidenceServer) handleStream(stream libp2pnetwork.Stream) {
 }
 
 /*
-Serve reads one request and writes one response. One of each, then done: there is no loop, so a
-stream cannot be held open feeding a provider work, and "how many requests may one connection cost"
-has the answer "one" by construction rather than by policy.
+Serve reads one request from one stream and writes one response. One of each, then done: there is no
+loop, so a stream cannot be held open feeding a provider work.
 
-A returned error means the exchange itself failed and nothing useful was written. A refusal by the
-provider is NOT an error here — it is a named outcome, written to the peer, and the exchange
-succeeded in delivering it.
+TWO TIERS, AND WHY. `from` identifies the peer on the other end (its libp2p ID in production), and
+admission is taken BEFORE the first byte is read — that is the tier that bounds streams which never
+become requests at all: no prefix, half a prefix, a body that never arrives. Reading first and
+bounding afterwards left those outside every bound but the per-stream deadline, and libp2p
+multiplexes as many streams as a peer likes over one connection, so "one request per stream" bounds
+nothing on its own. A stream that is not admitted is reset by the caller and told nothing: writing a
+refusal into a stream whose peer is still writing its request is the deadlock the read-first ordering
+inside this function exists to avoid.
+
+INTERRUPTIBILITY IS THE TRANSPORT'S, NOT THIS FUNCTION'S. Serve does bounded, blocking I/O on
+whatever it is given, and a context cannot interrupt a read that has already begun on an
+io.ReadWriter. What makes a stalled peer bounded here is the DEADLINE the caller sets on the stream
+(handleStream does), plus the admission slot being finite; the ctx check below only stops work that
+has not started. A transport with no deadline support gives this function no cancellation contract at
+all, and that is a property of the transport, not something Serve can promise.
+
+A returned error means the exchange failed and nothing useful was written — including ErrNotAdmitted,
+which means nothing was even read. A refusal by the provider is NOT an error here: it is a named
+outcome, written to the peer, and the exchange succeeded in delivering it.
 */
-func (s *EvidenceServer) Serve(ctx context.Context, rw io.ReadWriter) error {
-	// THE REQUEST IS READ FIRST, even when this server is at its concurrency bound. Refusing before
-	// reading would leave a requester still writing into a stream nobody is draining, which
-	// deadlocks on any transport that does not buffer, and the read being refused is one frame
-	// bounded by MaxRequestBytes — far cheaper than the assembly the bound actually protects.
+func (s *EvidenceServer) Serve(ctx context.Context, rw io.ReadWriter, from string) error {
+	if err := s.admission.acquire(from); err != nil {
+		return err
+	}
+	defer s.admission.release(from)
+
+	// THE REQUEST IS READ FIRST, once admitted, even when this server is at its ASSEMBLY bound.
+	// Refusing after admission but before reading would leave a requester still writing into a
+	// stream nobody is draining, which deadlocks on any transport that does not buffer; the read is
+	// one frame bounded by MaxRequestBytes, far cheaper than the assembly the second tier protects.
 	var req evidenceRequestMsg
 	if err := readFrame(bufio.NewReader(rw), &req, s.limits.MaxRequestBytes); err != nil {
 		return fmt.Errorf("reading request: %w", err)
@@ -336,6 +457,12 @@ func (s *EvidenceServer) Serve(ctx context.Context, rw io.ReadWriter) error {
 	return nil
 }
 
+// Pending reports how many streams this server currently holds admitted, and how many distinct peers
+// hold them. For diagnostics and for tests that assert slots are released on every exit path.
+func (s *EvidenceServer) Pending() (streams int, peers int) {
+	return s.admission.pending()
+}
+
 // refuse writes one named outcome. It is the only way a refusal reaches the wire, so the detail cap
 // that keeps a refusal inside the frame bound cannot be forgotten at one call site.
 func (s *EvidenceServer) refuse(w io.Writer, outcome uint64, why string) error {
@@ -349,6 +476,10 @@ ONE provider and ONE attempt, deliberately. Trying several, in some order, until
 requester's policy — it depends on what the predicate said about the last candidate (§4.1: a
 candidate refusal ends the candidate, not the attempt), and that is a decision this file must not
 make on the requester's behalf. What is returned here is a bundle nobody has verified.
+
+The whole call, dialing included, runs under the caller's context narrowed by limits.Deadline, so an
+earlier caller deadline wins and dialing spends the same budget as the exchange rather than resetting
+it.
 */
 func RequestAnchorEvidence(ctx context.Context, h EvidenceHost, p peer.ID, req EvidenceRequest, limits EvidenceTransportLimits) (AnchorEvidence, error) {
 	if err := limits.validate(); err != nil {
@@ -365,24 +496,75 @@ func RequestAnchorEvidence(ctx context.Context, h EvidenceHost, p peer.ID, req E
 	if err != nil {
 		return AnchorEvidence{}, fmt.Errorf("%w: opening a stream to %s: %w", ErrEvidenceTransport, p, err)
 	}
-	// Reset on every failure path, so a provider is not left holding a slot for a requester that
-	// has stopped listening; a completed exchange closes cleanly instead.
-	done := false
-	defer func() {
-		if !done {
-			_ = stream.Reset()
-		}
-	}()
-	if err := stream.SetDeadline(time.Now().Add(limits.Deadline)); err != nil {
-		return AnchorEvidence{}, fmt.Errorf("%w: setting stream deadline: %w", ErrEvidenceTransport, err)
-	}
 
-	ev, err := exchangeEvidence(stream, req, limits)
+	ev, err := requestOverStream(ctx, stream, req, limits)
 	if err != nil {
 		return AnchorEvidence{}, fmt.Errorf("requesting anchor evidence from %s: %w", p, err)
 	}
-	done = true
-	_ = stream.Close()
+	return ev, nil
+}
+
+/*
+evidenceStream is what the client half needs of a stream: bounded I/O, a deadline, and a reset that
+aborts I/O already in progress. A libp2p stream provides all three; narrowing to them is what lets
+the cancellation behaviour below be tested over a pipe rather than only over a real host.
+*/
+type evidenceStream interface {
+	io.ReadWriter
+	SetDeadline(t time.Time) error
+	CloseWrite() error
+	Close() error
+	Reset() error
+}
+
+/*
+requestOverStream runs one exchange on an already-open stream, and is where cancellation is made real.
+
+WHY A WATCHDOG AND NOT A CHECK. Once a read or a write on a stream has begun, no context check can
+interrupt it: the goroutine is inside the transport. Cancellation has to act on the STREAM, so a
+watcher resets it when the context ends, which is what unblocks the I/O — the deferred reset on the
+failure path cannot, because it only runs once that I/O has already returned. The watcher is stopped
+and joined before this function returns, so a completed exchange leaves nothing behind that could
+reset a stream later.
+
+WHY THE DEADLINE IS THE CONTEXT'S. Setting `now + limits.Deadline` after dialing restarts the budget
+the caller already began spending, and ignores an earlier deadline the caller may have set. The
+stream deadline is therefore the derived context's own deadline, so both ends of the exchange and the
+dial that preceded it are inside one budget.
+*/
+func requestOverStream(ctx context.Context, st evidenceStream, req EvidenceRequest, limits EvidenceTransportLimits) (AnchorEvidence, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		if err := st.SetDeadline(dl); err != nil {
+			_ = st.Reset()
+			return AnchorEvidence{}, fmt.Errorf("%w: setting stream deadline: %w", ErrEvidenceTransport, err)
+		}
+	}
+
+	stop := make(chan struct{})
+	watching := make(chan struct{})
+	go func() {
+		defer close(watching)
+		select {
+		case <-ctx.Done():
+			// The reset is the cancellation: it aborts whatever read or write is in flight.
+			_ = st.Reset()
+		case <-stop:
+		}
+	}()
+	ev, err := exchangeEvidence(st, req, limits)
+	close(stop)
+	<-watching
+
+	if err != nil {
+		_ = st.Reset()
+		// A cancelled or expired context is reported as what it is. Without this the caller sees
+		// whatever I/O error the reset produced, which says nothing about why the attempt ended.
+		if cerr := ctx.Err(); cerr != nil {
+			return AnchorEvidence{}, fmt.Errorf("%w: %w", ErrEvidenceTransport, cerr)
+		}
+		return AnchorEvidence{}, err
+	}
+	_ = st.Close()
 	return ev, nil
 }
 

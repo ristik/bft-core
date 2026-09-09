@@ -506,7 +506,9 @@ holds, so by the time they run a decoder has allocated whatever arrived. These a
 | `MaxResponseBytes` | `AnchorEvidenceLimits.MaxBytes` + 4 KiB | decoding a bundle the predicate would refuse anyway |
 | `MaxCertificates` | 512, the predicate's own | carrying a chain already established as unacceptable |
 | `Deadline` | 5 s | a stream opened and then left silent |
-| `MaxConcurrentServes` | 4 | one peer occupying a provider |
+| `MaxPendingStreams` | 32 | streams that never become requests at all |
+| `MaxPendingStreamsPerPeer` | 4 | one peer occupying the whole global budget |
+| `MaxConcurrentServes` | 4 | one peer occupying a provider's assembly |
 
 The order inside `readFrame` is the point: the DECLARED length is checked against the bound before
 anything is allocated and before the decoder sees a byte, so a peer announcing a gigabyte costs one
@@ -528,13 +530,34 @@ with a bundle, so a truncated or empty response cannot be mistaken for an answer
 arrives carrying a bundle is still a refusal. Each of those is a fixture, because each is a way a
 hostile provider could otherwise steer a requester without forging anything.
 
-**One request per stream, and the request is read first.** No loop: "how many requests may one
-connection cost" is answered by construction rather than by policy. The concurrency bound is applied
-AFTER the request frame is read, which is deliberate — refusing before reading leaves a requester
-writing into a stream nobody drains, which deadlocks on any transport that does not buffer, and the
-read being refused is one bounded frame, far cheaper than the assembly the bound protects. Over the
-bound, a request is refused immediately rather than queued: a queue is somewhere for an attacker's
-work to accumulate.
+**Admission is two tiers, and the first one is before the first byte.** Review found the original
+single tier insufficient, and the reasoning is worth keeping: `MaxConcurrentServes` counts
+*assembly*, which only a well-formed request reaches, so a peer that opens streams and sends nothing,
+half a length prefix, or a body it never finishes never reaches it. Those streams were then bounded
+only per stream, by the deadline, and not in aggregate — and **one request per stream is not one
+request per connection**, because libp2p multiplexes as many streams over one connection as a peer
+likes.
+
+So a stream takes a slot *before anything is read* and holds it until the handler exits — through the
+read, the assembly and the response write alike — and the slot is bounded **globally and per peer**.
+Per peer matters on its own: a global bound alone is a bound on the whole shard's access to one
+provider, and one peer holding all of it refuses every honest validator, which is the same
+availability loss this protocol exists to repair arriving from the other direction. A stream that is
+not admitted is **reset and told nothing** — writing a refusal into a stream whose peer may still be
+writing its request is exactly the deadlock the read-first ordering avoids, and the reset says all
+there is to say. Slots are released on every exit path, because one leaked by an early return is a
+bound that erodes to zero over a process's life.
+
+**These are this protocol's own bounds.** A libp2p resource manager, where one is configured, may
+refuse streams before the handler runs, but nothing here relies on that: an unconfigured or
+permissive host must not remove this protocol's limits.
+
+**Within an admitted stream the request is read first, and only then is the assembly tier applied.**
+Refusing after admission but before reading would leave a requester writing into a stream nobody
+drains, which deadlocks on any transport that does not buffer; the read being refused is one bounded
+frame, far cheaper than the assembly the second tier protects. Over that bound a request is refused
+immediately rather than queued: a queue is somewhere for an attacker's work to accumulate. No loop,
+so one stream is one request by construction rather than by policy.
 
 **A provider applies the requester's bounds to its own answer.** Both ends know the shared defaults,
 so a provider that can see its answer would be refused sends a named outcome instead — that is one
@@ -543,6 +566,25 @@ attempt saved for a requester whose attempts are bounded (§4).
 **Requests are pinned, on the wire as in the buffer.** Round plus canonical input-record identity; a
 request naming only a round is refused, because answering it would mean choosing which certificate
 for that round the requester "probably" meant (§2.2).
+
+**Cancellation acts on the stream, because nothing else can.** Once a read or a write has begun, a
+context check cannot interrupt it — the goroutine is inside the transport, and a deferred reset on
+the failure path runs only after that I/O has already returned. The client therefore watches the
+context and **resets the stream** when it ends, which is what unblocks the I/O; the watcher is
+stopped and joined before the call returns, so a completed exchange leaves nothing behind that could
+reset a stream later. A cancelled or expired context is reported as itself rather than as whatever
+I/O error the reset produced, because the latter says nothing about why the attempt ended.
+
+**One budget, not two.** The whole call — dialing included — runs under the caller's context narrowed
+by `Deadline`, and the stream's deadline is that derived context's deadline. Setting `now + Deadline`
+after dialing restarted a budget the caller had already begun spending, and ignored an earlier
+deadline the caller had set.
+
+The server half makes no such promise about an `io.ReadWriter`, and says so: `Serve` does bounded
+blocking I/O on whatever it is given, and what makes a stalled peer bounded there is the deadline the
+caller sets on the stream plus the finite admission slot — its context check only stops work that has
+not started. A transport with no deadline support gives `Serve` no cancellation contract at all, and
+that is a property of the transport rather than something `Serve` can supply.
 
 **What this transport does NOT do.** It asks ONE provider, ONCE. Which providers to ask, in what
 order, and how many attempts to spend are the requester's decisions, and they depend on what the
@@ -557,6 +599,12 @@ failure does not also erase this node's ability to help somebody else. A node wi
 registers the protocol and serves nobody, and no round outcome changes either way. Nothing here
 recovers anything: using somebody else's buffer to repair this node's own anchor is the next unit,
 and P-id and P-sign are untouched.
+
+**Deployment activation is deliberately still open.** `SetEvidenceBuffer` and
+`EvidenceServer.Register` are API integration points; production startup calls neither yet, so no
+deployed node serves evidence until that is wired — its own decision (which nodes serve, under which
+bounds, and how the buffer's memory is accounted alongside the round path). Stated here so the gap
+between "implemented" and "in service" is not mistaken for an oversight.
 
 ## 7. Acceptance fixtures
 
