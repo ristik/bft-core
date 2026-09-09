@@ -9,8 +9,10 @@ The serving buffer of §6.1 shipped next, without transport or recovery wiring. 
 serving integration of §6.2 shipped after it: a node retains what it observes and answers requests
 for it. The requester coordinator of §6.3 shipped next, against injected transport and observation
 interfaces: a node can now obtain and verify an anchor for the certificate it holds, and hold it as a
-READY TARGET. Nothing applies that target to an executor and nothing is wired into production
-startup; both are the next unit. The scope paragraph below describes #112 and is kept as written at
+READY TARGET. The target applier of §6.4 shipped after it, against an injected executor and target
+source. Production startup still constructs none of it and `Round` calls none of it, so no deployed
+node recovers anything yet; that wiring, and the measured run against a real client, are the next
+unit. The scope paragraph below describes #112 and is kept as written at
 the time.
 
 **Scope of the PR this record ships in: design and fixtures only.** It adds a pure verification
@@ -575,7 +577,12 @@ the failure path runs only after that I/O has already returned. The client there
 context and **resets the stream** when it ends, which is what unblocks the I/O; the watcher is
 stopped and joined before the call returns, so a completed exchange leaves nothing behind that could
 reset a stream later. A cancelled or expired context is reported as itself rather than as whatever
-I/O error the reset produced, because the latter says nothing about why the attempt ended.
+I/O error the reset produced, because the latter says nothing about why the attempt ended. "Expired"
+is decided from the DEADLINE, not from `ctx.Err()` alone: the stream's deadline is the context's, so
+at the instant it passes two timers are due, and when the connection's fires first the I/O returns
+`i/o timeout` while `ctx.Err()` is briefly still nil. A deadline that has passed is an expired
+context whether or not its goroutine has run yet, and the caller is owed its own budget as the
+reason rather than a socket error.
 
 **One budget, not two.** The whole call — dialing included — runs under the caller's context narrowed
 by `Deadline`, and the stream's deadline is that derived context's deadline. Setting `now + Deadline`
@@ -742,6 +749,62 @@ recovers anything from this code yet. The remaining decisions — which peers a 
 target reaches `reconcile`, and how the whole path behaves against a real reth node across a measured
 quiet tail — are the next unit, and each of them is a policy question rather than a mechanism one.
 
+### 6.4 Applying a verified target
+
+Implemented in `shardnode/evidenceapply.go`. The requester holds a verified anchor; this decides
+whether and how it reaches the executor. They are separate because §5's cursors are separate — a
+target can be verified long before an executor can act on it, and "payload unavailable" is precisely
+the state in which both are true at once. Collapsing them would mean either discarding proven evidence
+because a client is still syncing, or reporting a node recovered because its evidence was good.
+
+**The recheck comes before the executor is touched.** `Apply` takes the certified state the round is
+building on — `Expectation.PreviousHash` — rather than reading it from the target, and refuses a
+target that explains a different state. That is the application-layer half of §6.3's rule: a target
+verified against a certificate this node has since moved past may name a block that is no longer the
+last certified one, and a state root that happens to match is not an argument (§3.3.1). A target for
+another state is not *wrong*; it is an answer to a question nobody asked, so nothing is sent.
+
+**Three executor situations, kept apart.** They arrive looking alike — the node did not recover — and
+each calls for a different response, so none may be reported as another:
+
+| Situation | Executor said | Verdict | Target |
+|---|---|---|---|
+| **Unreachable** | nothing — the RPC failed | retryable; *nothing at all* is known, not even whether it applied the block | kept |
+| **Payload unavailable** | `SYNCING` / `ACCEPTED` | retryable; the ordinary state after an execution-client restart (§1.1) | kept |
+| **Payload invalid** | `INVALID` | a fault, not a wait; no number of attempts makes it valid | kept, and not retried |
+
+Retaining the target through the first two is the load-bearing part: the authority to retry is exactly
+what dropping it would remove, and this is the same stance the live path already takes ("retaining the
+anchor and retrying on the next certificate"). Reading the head after a `VALID` commit can fail too,
+and that is *unreachable* rather than success — whether this node recovered is then unknown, and
+unknown is retryable.
+
+**P-id is enforced by the comparison the live path uses**, not by a second copy of it: `reconcile` and
+this both call `anchorHeadIdentity`, which was extracted for that reason. Two copies of a comparison
+that gates signing is one copy too many — the weaker of them becomes the one that matters. Both halves
+apply: the head must be the certified BLOCK, and it must be at the certified STATE. A commit reporting
+success while the head is elsewhere is what P-id exists to catch, so it is a fault, and it is recorded
+against the BLOCK HASH rather than the state — a later target naming a different block for the same
+state is §3.3.1's own case and gets its own attempt. Row 13's genesis exception applies exactly where
+it did before, and the executor's block zero is read only when that exception could apply.
+
+**Bounded, without turning a recoverable node into a stuck one.** One executor call at a time under a
+per-call deadline; attempts within one certified state spaced by a backoff and capped by
+`MaxAttempts`. The cap is deliberately per certified STATE and not per target: an unavailable payload
+is the *expected* state after an execution-client restart, and a lifetime cap would convert a
+recoverable situation into a permanent one. Each new certificate resets the budget, which is the
+rhythm the live path already has.
+
+**What it never does.** It does not sign and does not make a node eligible to (P-sign, #105 — a
+recovered executor is not a licence to vote). It does not re-verify evidence: `VerifyAnchorEvidence`
+did that, and doing it again would be a second place where evidence is judged. It does not fetch
+payloads — the executor's own ancestor acquisition is what obtained the missing block in every run
+measured so far (§8), and that stays its business.
+
+**Still unwired.** The executor and target source are interfaces; production startup constructs no
+applier and `Round` calls none of it. What remains is the wiring itself and the measured acceptance
+run against a real client across a quiet tail.
+
 ## 7. Acceptance fixtures
 
 `shardnode/anchorevidence_test.go`. Every certificate is genuinely signed and genuinely verified
@@ -880,9 +943,8 @@ anchor cursor in §5 is for, and what `VerifiedTargetSurvivesAnUnavailablePayloa
 ## 10. Scope held open
 
 Recovery across an epoch transition (§3.1); which peers a node asks and how that set is chosen
-(§6.3 takes it as an injected source and decides nothing about it); applying a verified target to an
-executor, and the RPC-unreachable / payload-missing / payload-invalid distinctions that belong to
-doing so (§5, §6.3); production startup wiring for the buffer, the server and the requester alike;
+(§6.3 takes it as an injected source and decides nothing about it); production startup wiring for the buffer, the server, the requester
+and the applier alike, and the measured acceptance run against a real client across a quiet tail;
 whether the serving buffer of §6.1 is ever persisted; whether the root chain should serve historical certificates as a second source
 (§6c); durable retained history and the signing record (#14, #105); and the acquisition-source
 measurement §8 does not have. #16 remains open, including "Too deep reorg", and nothing here claims

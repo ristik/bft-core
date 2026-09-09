@@ -559,7 +559,7 @@ func requestOverStream(ctx context.Context, st evidenceStream, req EvidenceReque
 		_ = st.Reset()
 		// A cancelled or expired context is reported as what it is. Without this the caller sees
 		// whatever I/O error the reset produced, which says nothing about why the attempt ended.
-		if cerr := ctx.Err(); cerr != nil {
+		if cerr := contextEnded(ctx); cerr != nil {
 			return AnchorEvidence{}, fmt.Errorf("%w: %w", ErrEvidenceTransport, cerr)
 		}
 		return AnchorEvidence{}, err
@@ -570,6 +570,24 @@ func requestOverStream(ctx context.Context, st evidenceStream, req EvidenceReque
 
 // exchangeEvidence is the client half without libp2p: write the request, read the response, check
 // what can be checked without trusting anything.
+// contextEnded reports why the context is over, and does not depend on WHICH timer fired first.
+//
+// ctx.Err() alone was not enough, and the gap is exactly one race: the stream deadline is the
+// context's deadline, so at the moment it expires two timers are due — the connection's and the
+// context's. When the connection's fires first the I/O returns `i/o timeout` while ctx.Err() is
+// still nil for a few microseconds, and the caller is told about a socket instead of about its own
+// expired budget. A deadline that has passed IS an expired context whether or not its goroutine has
+// run yet, so that is what this reports.
+func contextEnded(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if dl, ok := ctx.Deadline(); ok && !time.Now().Before(dl) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
 func exchangeEvidence(rw io.ReadWriter, req EvidenceRequest, limits EvidenceTransportLimits) (AnchorEvidence, error) {
 	if err := writeFrame(rw, &evidenceRequestMsg{HeldRound: req.HeldRound, HeldIdentity: req.HeldIdentity}, limits.MaxRequestBytes); err != nil {
 		return AnchorEvidence{}, fmt.Errorf("sending request: %w", err)
