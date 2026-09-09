@@ -117,6 +117,11 @@ type Round struct {
 	// committed", and an arbitrary observed tip — block 99 with an arbitrary hash — was accepted
 	// as the configured genesis. Block zero comes from the chain configuration and does not move.
 	executorGenesis *BlockRef
+	// inRecovery is set while HandleCertificate has DROPPED r.mu to run a recovery attempt against
+	// the executor. BFTClient.Run drives certificates sequentially from one goroutine, so a second
+	// entry cannot happen — and dropping a lock on the strength of "cannot happen" is exactly the
+	// kind of claim that should be enforced rather than believed.
+	inRecovery bool
 	// warnedRestored keeps the abstention out of the log on every subsequent round; it is a
 	// steady state for as long as the process lives, not an event.
 	warnedRestored bool
@@ -356,6 +361,13 @@ func (r *Round) MarkRestored(round uint64) {
 func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.inRecovery {
+		// See Round.inRecovery. Reaching this means a second certificate is being handled while the
+		// first has the lock dropped, which BFTClient.Run does not do — so it is a wiring fault in
+		// whatever is driving this Round, and continuing would interleave two rounds.
+		return fmt.Errorf("shardnode: HandleCertificate re-entered while a recovery attempt is running off the round lock — certificates must be driven sequentially")
+	}
 
 	// OBSERVATION COMES FIRST, BEFORE ANY FALLIBLE APPLICATION. uc is authenticated evidence
 	// (P-ctx, verified by BFTClient) about what the root chain certified; whether this node then
@@ -865,6 +877,22 @@ second thing can commit.
 applyVerifiedAnchor makes one bounded recovery attempt and, if the executor reaches the certified
 block, adopts the verified anchor as this node's own.
 
+IT RUNS OFF THE ROUND LOCK. Review found the attempt — Commit, Head, sometimes GenesisBlock, plus
+re-verifying a retained bundle — running under r.mu, where nothing else about this node can be read
+or configured until an executor answers. The shape is snapshot, execute, revalidate, install:
+
+  - SNAPSHOT while the lock is held. Everything the attempt is about is already a value: the
+    certificate, the expectation derived from it, and the head just read. Nothing is re-read
+    off-lock.
+  - EXECUTE with the lock dropped, so a slow or unreachable executor delays only this round.
+  - REVALIDATE and INSTALL under the lock again. The anchor is adopted only if it still explains the
+    state THIS round is building on — the snapshot's, not whatever is current — so an attempt that
+    was overtaken installs nothing rather than installing something about another round.
+
+DROPPING A LOCK MID-OPERATION IS A CLAIM, so it is enforced rather than assumed: BFTClient.Run calls
+HandleCertificate sequentially from one goroutine, and inRecovery below makes a second entry while
+the lock is dropped a loud refusal instead of a silent interleaving.
+
 BOTH HALVES, OR NEITHER. Committing the block without installing the anchor leaves this node at the
 right block and still unable to say which block produced the state — so P-id goes on refusing and the
 next certificate re-commits a block the executor already holds. Installing the anchor without the
@@ -876,12 +904,52 @@ certificate carries, with the next round taken from the authenticated technical 
 the same assignment the live path uses, never round+1.
 */
 func (r *Round) applyVerifiedAnchor(ctx context.Context, uc *types.UnicityCertificate, exp Expectation, head BlockRef) (BlockRef, ApplyResult, bool) {
+	if r.recovery == nil || r.recovery.Applier == nil {
+		return head, ApplyResult{Outcome: ApplyNotAttempted}, false
+	}
+	// The snapshot. Every operand is copied out before the lock is dropped; nothing below reads
+	// Round state until it is held again.
+	snapCertifiedState := Hash(bytes.Clone(exp.PreviousHash))
+	snapRound, snapNext := uc.GetRoundNumber(), exp.Round
+
+	r.inRecovery = true
+	r.mu.Unlock()
 	newHead, res, ok := r.recovery.apply(ctx, uc, head, r.nodeID)
+	r.mu.Lock()
+	r.inRecovery = false
+
 	if !ok {
 		return newHead, res, false
 	}
-	r.continuity.installVerified(res.Target, uc.GetRoundNumber(), exp.Round)
+	// Revalidate against the SNAPSHOT. The anchor must explain the state this round was asked to
+	// build on; anything else is an answer about a different question, and installing it would put
+	// this node's own cursor somewhere no certificate it holds points.
+	//
+	// Redundant as the code stands, and kept deliberately: TargetApplier.Apply already refuses a
+	// target whose state does not match the binding it was given, and that binding is built from
+	// the same certificate this snapshot came from. What this line states is the property that
+	// makes dropping the lock safe, so that a future change to either side has to break it visibly
+	// rather than silently. No fixture reaches it, and no mutation of it fails a test — that is a
+	// property of it being unreachable, not of it being untested, and it is recorded here rather
+	// than implied.
+	if res.Target == nil || !bytes.Equal(res.Target.StateRoot, snapCertifiedState) {
+		if r.log != nil {
+			r.log.WarnContext(ctx, "a recovery attempt completed for a state this round is not building on; nothing installed",
+				slog.String("certifiedState", fmt.Sprintf("%x", snapCertifiedState)),
+				slog.String("anchorState", fmt.Sprintf("%x", anchorStateForLog(res.Target))),
+				slog.Uint64("round", snapRound))
+		}
+		return newHead, res, false
+	}
+	r.continuity.installVerified(res.Target, snapRound, snapNext)
 	return newHead, res, true
+}
+
+func anchorStateForLog(a *ExecutionAnchor) string {
+	if a == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%x", a.StateRoot)
 }
 
 func (r *Round) commitFinal(ctx context.Context, who string, hash Hash) (Status, error) {

@@ -388,15 +388,33 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 
 	attempt := a.attemptNumber()
 
+	/*
+	   THE GATE COVERS THE WHOLE SEQUENCE, not just the commit.
+
+	   Review found it held for the Commit alone and released before the head was read, which made
+	   the confirmation meaningless in the one case it exists for: between the two calls the round
+	   could commit something of its own, the head would then be that other block, and this code
+	   treats a head that is not the committed block as a FAULT — recorded against the block hash and
+	   never retried. Interference by a correct round therefore permanently refused a target that was
+	   correct too.
+
+	   "Commit this block and confirm the executor is now at it" is one operation. It is held across
+	   the commit, the head read and the genesis read, and released when the answer is known.
+	*/
+	if a.gate != nil {
+		gateRelease, gerr := a.gate.tryAcquire("recovery-apply")
+		if gerr != nil {
+			// The round is doing something of its own. Not an answer about the executor and not an
+			// attempt spent against it — the next certificate is the next opportunity.
+			return a.retryable(ApplyBusy, head, target, attempt,
+				fmt.Errorf("%w: %w", ErrApplyBusy, gerr))
+		}
+		defer gateRelease()
+	}
+
 	// Idempotent by contract (see Round.reconcile): Commit on an already-canonical hash is a no-op
 	// returning VALID, so an attempt after a failed one does not double-execute anything.
 	status, err := a.commit(ctx, target.BlockHash)
-	if errors.Is(err, ErrFinalityBusy) {
-		// The round is committing something of its own. Not an answer about the executor and not an
-		// attempt spent against it — the next certificate is the next opportunity.
-		return a.retryable(ApplyBusy, head, target, attempt,
-			fmt.Errorf("%w: %w", ErrApplyBusy, err))
-	}
 	if err != nil {
 		// UNREACHABLE, not unavailable and not invalid. The executor said nothing, so nothing is
 		// known — including whether it applied the block. The target is kept.
@@ -539,18 +557,9 @@ func (a *TargetApplier) attemptNumber() int {
 	return a.attempts
 }
 
-// commit, head and genesis each bound ONE executor call. A context that is already done is passed
-// through rather than replaced, so a caller cancelling still cancels.
+// commit, head and genesis each bound ONE executor call. The gate is taken by Apply around all
+// three — see the comment there for why holding it for the commit alone was not enough.
 func (a *TargetApplier) commit(ctx context.Context, hash Hash) (Status, error) {
-	// TRY, never wait. This runs from a round loop, and its contract is one bounded attempt with an
-	// answer — not a queue behind whatever the round is doing to the executor.
-	if a.gate != nil {
-		release, err := a.gate.tryAcquire("recovery-apply")
-		if err != nil {
-			return StatusSyncing, err
-		}
-		defer release()
-	}
 	cctx, cancel := context.WithTimeout(ctx, a.budget.Timeout)
 	defer cancel()
 	return a.executor.Commit(cctx, hash)

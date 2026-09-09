@@ -287,3 +287,46 @@ func TestRound_LeaderBuildIsGated(t *testing.T) {
 	require.ErrorContains(t, err, "recovery-apply")
 	release()
 }
+
+/*
+The gate covers the whole commit-and-confirm sequence, not just the commit.
+
+Held for the Commit alone and released before the head was read, the confirmation was meaningless in
+the one case it exists for: the round could commit something of its own in between, the head would
+then be that other block, and a head that is not the committed block is recorded as a FAULT and never
+retried. Interference by a correct round permanently refused a target that was correct too.
+*/
+func TestTargetApplier_HoldsTheGateThroughTheConfirmation(t *testing.T) {
+	gate := NewFinalityGate()
+	var duringCommit, duringHead, duringGenesis string
+	ex := &stubExecutor{
+		commit: func(context.Context, Hash) (Status, error) {
+			duringCommit, _, _ = gate.Holder()
+			return StatusValid, nil
+		},
+		head: func(context.Context) (BlockRef, error) {
+			duringHead, _, _ = gate.Holder()
+			return BlockRef{Number: 0, Hash: Hash(h32(0x01)), StateRoot: Hash(h32(0x0b))}, nil
+		},
+		genesis: func(context.Context) (BlockRef, error) {
+			duringGenesis, _, _ = gate.Holder()
+			return BlockRef{Number: 0, Hash: Hash(h32(0x01)), StateRoot: Hash(h32(0x0b))}, nil
+		},
+	}
+	clock := &testClock{at: time.Unix(1_700_000_000, 0)}
+	// A genesis-round anchor, so the genesis read happens too and is covered as well.
+	anchor := &ExecutionAnchor{BlockHash: Hash(h32(0xbb)), StateRoot: Hash(h32(0x0b)), Round: 1, fromGenesisRound: true}
+	src := &stubTarget{anchor: anchor, verifiedFor: heldBinding()}
+	a, err := NewTargetApplier(ApplyConfig{Executor: ex, Source: src, Budget: testApplyBudget(), Gate: gate, Now: clock.now})
+	require.NoError(t, err)
+
+	res := a.Apply(context.Background(), heldBinding(), behindHead())
+	require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
+
+	require.Equal(t, "recovery-apply", duringCommit, "held for the commit")
+	require.Equal(t, "recovery-apply", duringHead, "and still held when the head that confirms it is read")
+	require.Equal(t, "recovery-apply", duringGenesis, "and for the genesis read the exception needs")
+
+	_, _, stillHeld := gate.Holder()
+	require.False(t, stillHeld, "and released once the answer is known")
+}

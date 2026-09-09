@@ -3,10 +3,12 @@ package shardnode
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/stretchr/testify/require"
 
@@ -168,8 +170,8 @@ func TestRecoveryLifecycle_AQuietTailIsRecoveredOverRealLibp2p(t *testing.T) {
 	stack, err := NewRecoveryStack(
 		RecoveryOptions{
 			Serve: true, Recover: true,
-			Providers: EvidenceProviders{providerHost.ID()},
-			Buffer:    DefaultEvidenceBufferLimits, Transport: DefaultEvidenceTransportLimits,
+			Providers: EvidenceProviders{providerHost.ID()}, ShardConfHash: f.conf,
+			Buffer: DefaultEvidenceBufferLimits, Transport: DefaultEvidenceTransportLimits,
 			Evidence: DefaultAnchorEvidenceLimits, Budget: DefaultRecoveryBudget, Apply: DefaultApplyBudget,
 		},
 		RecoveryDeps{Host: requesterHost, Executor: exec, PartitionID: evidencePartitionID,
@@ -229,8 +231,68 @@ func TestRecoveryStack_RefusesConfigurationsThatCannotDoWhatTheySay(t *testing.T
 		opts := DefaultRecoveryOptions()
 		opts.Recover = true
 		opts.Providers = nil
+		opts.ShardConfHash = f.conf
 		_, err := NewRecoveryStack(opts, deps())
 		require.ErrorContains(t, err, "no providers to ask")
+	})
+
+	/*
+	   An absent shard-configuration hash does not make that check lenient — it removes it. The
+	   predicate compares the configuration only when it has something to compare against (§3), so a
+	   node started this way would accept a bundle certified under a configuration it does not run.
+	   Refusing to start is the only honest answer.
+	*/
+	t.Run("recovery without the configured shard hash is refused", func(t *testing.T) {
+		opts := DefaultRecoveryOptions()
+		opts.Recover = true
+		opts.Providers = EvidenceProviders{host.ID()}
+		opts.ShardConfHash = nil
+		_, err := NewRecoveryStack(opts, deps())
+		require.ErrorContains(t, err, "no shard configuration hash")
+
+		opts.ShardConfHash = f.conf
+		st, err := NewRecoveryStack(opts, deps())
+		require.NoError(t, err)
+		t.Cleanup(st.Close)
+	})
+
+	t.Run("the configured hash reaches the requester that verifies with it", func(t *testing.T) {
+		// Asserted on the constructed requester rather than through a round trip: the option is only
+		// worth requiring if it arrives where the comparison happens, and the stack builds the
+		// requester with the real transport, which a fixture cannot substitute for.
+		opts := DefaultRecoveryOptions()
+		opts.Recover = true
+		opts.Providers = EvidenceProviders{host.ID()}
+		opts.ShardConfHash = f.conf
+		st, err := NewRecoveryStack(opts, deps())
+		require.NoError(t, err)
+		t.Cleanup(st.Close)
+		require.Equal(t, f.conf, st.Requester.cfg.ShardConfHash,
+			"the hash the deployment supplied is the one the predicate will compare against")
+		require.Equal(t, evidencePartitionID, st.Requester.cfg.PartitionID)
+	})
+
+	t.Run("a chain for another shard configuration is refused by a node that was told its own", func(t *testing.T) {
+		// End to end through the constructed stack: the option is not decoration, it reaches the
+		// predicate. The requester is built with a configuration hash this shard's certificates do
+		// not carry, so every candidate fails the context check.
+		opts := DefaultRecoveryOptions()
+		opts.Recover = true
+		opts.Providers = EvidenceProviders{host.ID()}
+		opts.ShardConfHash = h32(0x77)
+		st, err := NewRecoveryStack(opts, deps())
+		require.NoError(t, err)
+		t.Cleanup(st.Close)
+
+		source, mid, held := quietTailChain(f)
+		require.NoError(t, st.Requester.Observe(held.UC, held.Technical))
+		bundle := bundleOf(source, mid, held)
+		_, verr := VerifyAnchorEvidence(context.Background(), bundle,
+			AnchorEvidenceContext{PartitionID: evidencePartitionID, ShardConfHash: opts.ShardConfHash,
+				TrustBases: f.trust, Held: held.UC},
+			DefaultAnchorEvidenceLimits)
+		require.ErrorIs(t, verr, ErrEvidenceWrongContext,
+			"the hash the stack was given is the one the predicate compares against")
 	})
 
 	t.Run("no host means it can neither serve nor ask", func(t *testing.T) {
@@ -296,4 +358,85 @@ func TestRound_SetRecoveryOwnsTheBufferFeed(t *testing.T) {
 	require.Nil(t, r.evidence, "the standalone feed is cleared, not left to run alongside the stack's")
 	require.NotNil(t, r.recovery.Buffer)
 	require.Same(t, stack.Gate, r.finality, "and the round shares the stack's gate")
+}
+
+/*
+The recovery attempt runs OFF the round lock.
+
+Executor RPCs under r.mu mean nothing about this node can be read or configured until an executor
+answers, and a recovery attempt is up to three calls plus a chain re-verification. The assertion is
+direct rather than inferred: from inside the executor call, the round's own mutex must be available.
+*/
+func TestRound_RecoveryRunsOffTheRoundLock(t *testing.T) {
+	f := newEvidenceFixture(t)
+	stateA, stateB, blockB := h32(0x0a), h32(0x0b), h32(0xbb)
+	source := f.cert(10, 100, stateA, stateB, blockB, 12)
+	mid := f.cert(12, 110, stateB, stateB, nil, 16)
+	held := f.cert(16, 120, stateB, stateB, nil, 19)
+
+	host := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	genesis := BlockRef{Number: 0, Hash: Hash(h32(0x01)), StateRoot: Hash(h32(0x02))}
+	exec := newTrackingExecutor(BlockRef{Number: 4, Hash: Hash(h32(0xaa)), StateRoot: Hash(stateA)}, genesis)
+	exec.blocks[string(blockB)] = BlockRef{Number: 5, Hash: Hash(blockB), StateRoot: Hash(stateB)}
+
+	r := NewRound("n", evidencePartitionID, types.ShardID{}, exec, NewLoopbackDisseminator(), nil, nil, nil)
+	r.SetAwaitTimeout(50 * time.Millisecond)
+
+	// A stack whose fetcher answers from memory: this test is about the lock, not the wire.
+	stack, err := NewRecoveryStack(
+		RecoveryOptions{Recover: true, Providers: EvidenceProviders{host.ID()}, ShardConfHash: f.conf,
+			Transport: DefaultEvidenceTransportLimits, Evidence: DefaultAnchorEvidenceLimits,
+			Budget: DefaultRecoveryBudget, Apply: DefaultApplyBudget},
+		RecoveryDeps{Host: host, Executor: exec, PartitionID: evidencePartitionID,
+			TrustBases: f.trust, Gate: NewFinalityGate()})
+	require.NoError(t, err)
+	t.Cleanup(stack.Close)
+	// Replace the wire with a local answer, so the fixture turns on the lock and nothing else.
+	stack.Requester, err = NewEvidenceRequester(RecoveryConfig{
+		PartitionID: evidencePartitionID, ShardConfHash: f.conf, TrustBases: f.trust,
+		Fetcher: &recordingFetcher{fn: func(context.Context, peer.ID, EvidenceRequest) (AnchorEvidence, error) {
+			return bundleOf(source, mid, held), nil
+		}},
+		Providers: EvidenceProviders{host.ID()}, Limits: DefaultAnchorEvidenceLimits,
+		Budget: DefaultRecoveryBudget,
+	})
+	require.NoError(t, err)
+	applier, err := NewTargetApplier(ApplyConfig{Executor: exec, Source: stack.Requester,
+		Budget: DefaultApplyBudget, Gate: stack.Gate})
+	require.NoError(t, err)
+	stack.Applier = applier
+	r.SetRecovery(stack)
+
+	var lockWasFree, reentryRefused bool
+	exec.onCommit = func() {
+		// The round's own lock must be available while the executor is being driven.
+		if r.mu.TryLock() {
+			lockWasFree = true
+			r.mu.Unlock()
+		}
+		// And a second certificate arriving here is REFUSED rather than interleaved — or blocked,
+		// which is what happens when the attempt still holds the lock. Under a ceiling, because a
+		// suite that hangs does not say which property broke: a blocked re-entry is a wrong answer
+		// here, not a reason to wait.
+		done := make(chan error, 1)
+		go func() { done <- r.HandleCertificate(context.Background(), held.UC, held.Technical) }()
+		select {
+		case err := <-done:
+			reentryRefused = err != nil && strings.Contains(err.Error(), "re-entered while a recovery attempt")
+		case <-time.After(2 * time.Second):
+			reentryRefused = false // blocked on the round lock: the attempt is not off-lock
+		}
+	}
+
+	ctx := context.Background()
+	require.Error(t, r.HandleCertificate(ctx, held.UC, held.Technical), "no anchor yet: it asks")
+	st := waitRecovered(t, stack.Requester)
+	require.Equal(t, RecoveryReady, st.State, "err: %v", st.LastErr)
+
+	next := f.cert(19, 130, stateB, stateB, nil, 23)
+	_ = r.HandleCertificate(ctx, next.UC, next.Technical)
+
+	require.True(t, lockWasFree, "the round lock was held across the executor call")
+	require.True(t, reentryRefused, "a concurrent certificate must be refused, not interleaved")
+	require.Equal(t, []Hash{Hash(blockB)}, exec.committed())
 }

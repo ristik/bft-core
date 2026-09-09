@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"crypto"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -219,6 +220,14 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 			return fmt.Errorf("resolving evidence providers: %w", perr)
 		}
 		recoveryOpts.Providers = providers
+		// The configuration THIS node was started with, hashed the way certificates commit to it.
+		// The evidence predicate compares only when it has something to compare against, so this is
+		// what makes the shard-configuration check exist at all rather than be skipped.
+		confHash, cerr := shardConf.Hash(crypto.SHA256)
+		if cerr != nil {
+			return fmt.Errorf("hashing the shard configuration for evidence verification: %w", cerr)
+		}
+		recoveryOpts.ShardConfHash = confHash
 	}
 	if err := node.EnableRecovery(recoveryOpts); err != nil {
 		return fmt.Errorf("enabling anchor recovery: %w", err)

@@ -853,7 +853,15 @@ gains `--evidence-serve` (default **on**) and `--evidence-recover` (default **of
 **Two switches, because they cost different things.** Serving retains certificates this node has
 already authenticated and answers bounded requests: no new dependency, memory it can measure, and it
 helps peers it could not otherwise help. Recovering depends on peers answering and ends in a
-finality-changing executor call. A node that enables neither behaves exactly as it did before any of
+finality-changing executor call.
+
+**Recovery refuses to start without the configured shard hash.** It is one of the four things a
+bundle is judged against (§3), and the predicate compares it only when it has something to compare
+against — so omitting it does not make that check lenient, it REMOVES it, and a node started that way
+would accept a bundle certified under a configuration it does not run. The hash comes from the
+deployment because that is where the shard configuration is; `Node.New` does not receive it (the gap
+`verifyRestoredLUC` documents, F2/#10), and deriving it from a certificate would be exactly the
+mistake — the certificate's own claim about its configuration is what is in question. A node that enables neither behaves exactly as it did before any of
 §6 existed — same refusals, same names — which is what makes this a deployment decision rather than a
 protocol change.
 
@@ -874,6 +882,24 @@ executor about a block without making it canonical, and a validator's per-round 
 behind a recovery commit. The round WAITS for the gate because it must proceed; the applier does NOT,
 because its contract is one bounded attempt with an answer and its caller is a round loop — it
 reports `busy` and the next certificate is the next opportunity.
+
+**The gate spans the whole commit-and-confirm sequence**, not the commit alone. Held for the `Commit`
+and released before the head was read, the confirmation was meaningless in the one case it exists
+for: the round could commit something of its own in between, the head would then be that other block,
+and a head that is not the committed block is recorded as a FAULT and never retried — so interference
+by a perfectly correct round permanently refused a target that was correct too. "Commit this block
+and confirm the executor is now at it" is one operation, and the gate is held across the commit, the
+head read and the genesis read the row-13 exception may need.
+
+**The attempt runs off the round lock.** `HandleCertificate` holds `Round.mu` throughout, and a
+recovery attempt is up to three executor calls plus a chain re-verification — so under the lock,
+nothing about this node could be read or configured until an executor answered. The shape is snapshot
+→ execute → revalidate → install: every operand is copied out while the lock is held, the attempt runs
+with it dropped, and the anchor is adopted only after the lock is taken again and the result still
+explains the state THIS round was building on. Dropping a lock mid-operation is a claim about the
+caller, so it is enforced rather than believed: `BFTClient.Run` drives certificates sequentially from
+one goroutine, and a re-entry while the lock is dropped is a loud refusal instead of two interleaved
+rounds.
 
 **Two defects only wiring could show.** Both were invisible to all four unit suites, each of which
 was correct about its own half:

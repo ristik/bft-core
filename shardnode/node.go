@@ -112,13 +112,9 @@ func New(
 			Executor:    executor,
 			PartitionID: partitionID,
 			ShardID:     shardID,
-			// ShardConfHash is deliberately absent, and the omission is the same one
-			// verifyRestoredLUC documents: plumbing the shard configuration through here is F2
-			// (#10). The evidence predicate treats an absent hash as "do not compare" rather than
-			// as "matches", so this is a check not yet performed, not a check that passes.
-			TrustBases: trustBaseStore,
-			Gate:       NewFinalityGate(),
-			Log:        log,
+			TrustBases:  trustBaseStore,
+			Gate:        NewFinalityGate(),
+			Log:         log,
 		},
 	}, nil
 }
@@ -174,6 +170,9 @@ executor call. A node that enables neither behaves exactly as it did before any 
 The finality gate is installed with the stack, and it is what keeps a recovery commit from
 interleaving with the round's own (finality.go).
 */
+// The shard configuration hash travels in RecoveryOptions rather than through New: New does not
+// receive the shard configuration (the gap verifyRestoredLUC documents, F2/#10), and recovery refuses
+// to start without it — an absent hash does not make that check lenient, it removes it.
 func (n *Node) EnableRecovery(opts RecoveryOptions) error {
 	stack, err := NewRecoveryStack(opts, n.recoveryDeps)
 	if err != nil {
