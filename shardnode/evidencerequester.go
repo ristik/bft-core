@@ -708,7 +708,23 @@ func (r *EvidenceRequester) carry(ctx context.Context, bundle AnchorEvidence, fr
 		tail = append(tail, links...)
 		extended = AnchorEvidence{Source: bundle.Source, SourceTechnical: bundle.SourceTechnical, Tail: tail}
 	}
-	anchor, err := VerifyAnchorEvidence(ctx, extended, r.verifyContext(held.link.UC), r.cfg.Limits)
+
+	// CLONE FIRST, then verify the clone, then retain the clone. The order is the point, and getting
+	// it wrong is subtle in a way that survives review: a bundle arrives through a decoder whose
+	// buffers this node does not own, and ExecutionAnchor's hashes are SLICES INTO the certificate
+	// the anchor was derived from. Retaining what was handed over therefore left both the verified
+	// target and the bundle future extensions are built on aliasing memory a provider could still be
+	// writing to — Target cloning on the way out does not help, because what it clones is already
+	// the provider's.
+	//
+	// Cloning AFTER verifying would be no better in kind, only smaller: the window between the two
+	// is a window in which the bytes that were verified and the bytes that are kept can differ. So
+	// what is verified is the copy this node owns, and that same copy is what it keeps.
+	owned, err := copyEvidence(extended)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrEvidenceMalformed, err)
+	}
+	anchor, err := VerifyAnchorEvidence(ctx, owned, r.verifyContext(held.link.UC), r.cfg.Limits)
 	if err != nil {
 		if errors.Is(err, ErrEvidenceConflict) {
 			r.markRefused(held.identity)
@@ -722,7 +738,7 @@ func (r *EvidenceRequester) carry(ctx context.Context, bundle AnchorEvidence, fr
 	// target for the certificate it was VERIFIED against — not for whatever is current now — is what
 	// keeps Target honest: a caller asking with a newer certificate is told there is no target, and
 	// the next Need carries this bundle forward properly rather than silently reusing it.
-	kept := extended
+	kept := owned
 	r.retained = &kept
 	r.retainedFor = held
 	r.target = anchor
@@ -802,39 +818,57 @@ func isContradiction(err error) bool {
 // copy: the certificates are re-decoded rather than shared, so examining the evidence — or handing
 // it to something that writes to it — cannot change what this node retained as the record of it.
 func (r *EvidenceRequester) Contradiction() (Contradiction, bool) {
+	// The RECORD is copied under the lock and the BUNDLE outside it. Taking the pointer under the
+	// lock and dereferencing after was a data race on every scalar field: Count is incremented under
+	// this lock by a recovery still running, so a reader that unlocked first read it concurrently.
+	// The lock is released before the re-decode because that is the expensive part and it touches
+	// only memory this node already owns.
 	r.mu.Lock()
-	c := r.contradiction
-	r.mu.Unlock()
-	if c == nil {
+	if r.contradiction == nil {
+		r.mu.Unlock()
 		return Contradiction{}, false
 	}
-	out := *c
-	out.Evidence = copyEvidence(c.Evidence)
+	out := *r.contradiction
+	r.mu.Unlock()
+
+	// The bundle was copied when it was recorded, so this cannot fail on anything a provider chose.
+	// If it somehow does, the bundle is DROPPED rather than shared: sharing it is the defect this
+	// copy exists to prevent, and a caller that finds no evidence attached has been told the truth.
+	if ev, err := copyEvidence(out.Evidence); err == nil {
+		out.Evidence = ev
+	} else {
+		out.Evidence = AnchorEvidence{}
+	}
 	return out, true
 }
 
 // copyEvidence re-decodes a bundle so the copy shares no memory with it. It is the same mechanism
 // the serving buffer uses for the same reason: evidence that can change after it was recorded is not
 // evidence of anything.
-func copyEvidence(ev AnchorEvidence) AnchorEvidence {
+// A failure is REPORTED rather than skipped: silently omitting a link would turn a chain into a
+// shorter one that is still structurally a chain, and a shortened chain is not evidence of anything
+// (§4). Callers treat it as a malformed bundle, which is retryable against another provider.
+func copyEvidence(ev AnchorEvidence) (AnchorEvidence, error) {
 	out := AnchorEvidence{}
 	if ev.Source != nil && ev.SourceTechnical != nil {
-		if uc, tr, _, err := copyPair(ev.Source, ev.SourceTechnical); err == nil {
-			out.Source, out.SourceTechnical = uc, tr
+		uc, tr, _, err := copyPair(ev.Source, ev.SourceTechnical)
+		if err != nil {
+			return AnchorEvidence{}, fmt.Errorf("copying evidence source: %w", err)
 		}
+		out.Source, out.SourceTechnical = uc, tr
 	}
 	out.Tail = make([]EvidenceLink, 0, len(ev.Tail))
-	for _, l := range ev.Tail {
+	for i, l := range ev.Tail {
 		if l.UC == nil || l.Technical == nil {
-			continue
+			return AnchorEvidence{}, fmt.Errorf("copying evidence: tail[%d] is structurally incomplete", i)
 		}
 		uc, tr, _, err := copyPair(l.UC, l.Technical)
 		if err != nil {
-			continue
+			return AnchorEvidence{}, fmt.Errorf("copying evidence tail[%d]: %w", i, err)
 		}
 		out.Tail = append(out.Tail, EvidenceLink{UC: uc, Technical: tr})
 	}
-	return out
+	return out, nil
 }
 
 func (r *EvidenceRequester) recordContradiction(p peer.ID, heldRound uint64, ev AnchorEvidence, err error) {
@@ -846,8 +880,14 @@ func (r *EvidenceRequester) recordContradiction(p peer.ID, heldRound uint64, ev 
 	}
 	// Copied on the way IN as well: the bundle came from a provider through a decoder this node does
 	// not own the buffers of, and the record is meant to outlive the attempt that produced it.
+	owned, cerr := copyEvidence(ev)
+	if cerr != nil {
+		// The disagreement still happened, and saying so without the bundle is better than either
+		// losing the record or retaining a bundle that can change under it.
+		owned, err = AnchorEvidence{}, fmt.Errorf("%w (the bundle could not be retained: %w)", err, cerr)
+	}
 	r.contradiction = &Contradiction{
-		Provider: p, HeldRound: heldRound, Err: err, Evidence: copyEvidence(ev), At: r.cfg.Now(), Count: 1,
+		Provider: p, HeldRound: heldRound, Err: err, Evidence: owned, At: r.cfg.Now(), Count: 1,
 	}
 	if r.cfg.Log != nil {
 		r.cfg.Log.LogAttrs(context.Background(), slog.LevelError, "authenticated certificates disagree",

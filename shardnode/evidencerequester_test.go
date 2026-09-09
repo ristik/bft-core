@@ -753,6 +753,50 @@ func TestEvidenceRequester_ReturnedValuesDoNotAliasWhatIsRetained(t *testing.T) 
 		require.Len(t, again.Evidence.Tail, 2)
 	})
 
+	/*
+	   The bundle a provider hands over is not this node's memory, and a SUCCESSFUL one was the case
+	   left aliasing it: ExecutionAnchor's hashes are slices INTO the certificate the anchor came
+	   from, so retaining what arrived left the verified target — and the bundle future extensions
+	   are built on — pointing at bytes the provider could still be writing to. Cloning on the way
+	   out of Target does not help, because what it clones is already the provider's.
+	*/
+	t.Run("a successful bundle is owned before it is retained", func(t *testing.T) {
+		stateB := h32(0x0b)
+		var full AnchorEvidence
+		rf := newRecoveryFixture(t, []peer.ID{"a"}, testBudget(),
+			func(context.Context, peer.ID, EvidenceRequest) (AnchorEvidence, error) { return full, nil })
+		f := rf.evidenceFixture
+		source, mid, head := quietTailChain(f)
+		full = bundleOf(source, mid, head)
+		rf.observe(t, source, mid, head)
+		require.NoError(t, rf.req.Need())
+		require.Equal(t, RecoveryReady, rf.settled(t).State)
+
+		// The provider's copy changes after it was handed over — a decoder's buffer reused, or a
+		// peer that simply keeps writing.
+		full.Source.InputRecord.BlockHash[0] ^= 0xff
+		full.Source.InputRecord.Hash[0] ^= 0xff
+		full.Tail[1].UC.InputRecord.Hash[0] ^= 0xff
+
+		anchor, ok := rf.req.Target()
+		require.True(t, ok)
+		require.Equal(t, Hash(h32(0xbb)), anchor.BlockHash, "the target was verified from memory this node owns")
+		require.Equal(t, Hash(h32(0x0b)), anchor.StateRoot)
+
+		// And the retained bundle is intact too: a further quiet round is carried forward from it
+		// with no second request, which it could not be if its certificates had been rewritten.
+		rf.observe(t, f.cert(19, 130, stateB, stateB, nil, 23))
+		require.NoError(t, rf.req.Need())
+		st := rf.settled(t)
+		require.Equal(t, RecoveryReady, st.State, "err: %v", st.LastErr)
+		require.EqualValues(t, 19, st.TargetFor)
+		again, ok := rf.req.Target()
+		require.True(t, ok)
+		require.Equal(t, Hash(h32(0xbb)), again.BlockHash)
+		asked, _ := rf.fetcher.calls()
+		require.Len(t, asked, 1)
+	})
+
 	t.Run("the recorded bundle does not alias what the provider handed over", func(t *testing.T) {
 		stateA, stateC := h32(0x0a), h32(0x0c)
 		var conflicting AnchorEvidence
@@ -1027,4 +1071,80 @@ func TestEvidenceRequester_ObservationFeed(t *testing.T) {
 		}
 		require.Equal(t, 3, rf.req.Status().Witness)
 	})
+}
+
+// Copying evidence must not be able to SHORTEN it. A shortened chain is still structurally a chain,
+// and §4 is explicit that it is not evidence of anything — so a copy that cannot be completed is a
+// refusal rather than a smaller bundle.
+func TestEvidenceRequester_CopyingEvidenceCannotShortenIt(t *testing.T) {
+	f := newEvidenceFixture(t)
+	source, mid, head := quietTailChain(f)
+
+	ok, err := copyEvidence(bundleOf(source, mid, head))
+	require.NoError(t, err)
+	require.Len(t, ok.Tail, 2)
+	require.NotSame(t, source.UC, ok.Source, "the copy shares nothing with what it was made from")
+
+	_, err = copyEvidence(AnchorEvidence{
+		Source: source.UC, SourceTechnical: source.Technical,
+		Tail: []EvidenceLink{mid, {UC: head.UC}},
+	})
+	require.ErrorContains(t, err, "tail[1] is structurally incomplete")
+}
+
+// The diagnostic accessors are read while a recovery is running — that is what they are for — so
+// they must be safe to call then. Taking the record's POINTER under the lock and dereferencing it
+// after was a race on every scalar field of it, Count included, because a running recovery
+// increments Count under that same lock.
+func TestEvidenceRequester_DiagnosticsAreSafeWhileRecovering(t *testing.T) {
+	stateA, stateB, stateC := h32(0x0a), h32(0x0b), h32(0x0c)
+	budget := testBudget()
+	budget.MaxProviders = 8
+
+	var split AnchorEvidence
+	rf := newRecoveryFixture(t, []peer.ID{"a", "b", "c", "d", "e", "f", "g", "h"}, budget,
+		func(context.Context, peer.ID, EvidenceRequest) (AnchorEvidence, error) {
+			time.Sleep(time.Millisecond) // widen the window the reader has to hit
+			return split, nil
+		})
+	f := rf.evidenceFixture
+	source, mid, head := quietTailChain(f)
+	// Two authenticated certificates for round 12 that disagree: a candidate split, which is
+	// retryable — so every provider is asked and every one of them records a disagreement.
+	split = bundleOf(source, mid, f.cert(12, 111, stateB, stateC, h32(0xcc), 16), head)
+	_ = stateA
+	rf.observe(t, source, mid, head)
+
+	require.NoError(t, rf.req.Need())
+
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = rf.req.Status()
+				if c, ok := rf.req.Contradiction(); ok {
+					require.GreaterOrEqual(t, c.Count, 1)
+				}
+				_, _ = rf.req.Target()
+			}
+		}()
+	}
+	st := rf.settled(t)
+	close(stop)
+	readers.Wait()
+
+	require.Equal(t, RecoveryFailed, st.State)
+	require.Equal(t, 8, st.Contradictions, "every provider disagreed, and every disagreement was counted")
+	c, ok := rf.req.Contradiction()
+	require.True(t, ok)
+	require.Equal(t, 8, c.Count)
+	require.ErrorIs(t, c.Err, ErrEvidenceCandidateSplit)
 }

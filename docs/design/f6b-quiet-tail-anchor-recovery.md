@@ -686,14 +686,30 @@ and something has to break the tie:
 
 There is no content key that separates the two cases. Both directions are fixtures.
 
-**What a caller is handed is its own.** `ExecutionAnchor`'s hashes are byte slices and a contradiction
-holds certificate pointers, so returning a struct copy hands out the retained values themselves:
-a caller that overwrote a returned hash would be editing this node's verified target, and the next
-reader would be told the edited value had been verified. `Target` clones the hashes, `Contradiction`
-re-decodes the bundle, and the bundle is re-decoded on the way IN as well — it arrives through a
-decoder whose buffers this node does not own, and a record meant to outlive the attempt cannot rest on
-them. `Status` carries only a count of contradictions, so the cheap, frequent snapshot stays cheap and
-the copying is behind the call that needs it.
+**What this node retains is its own, and so is what a caller is handed.** Two halves, and review
+found each of them separately, which is the reason both are written out here.
+
+*Retention.* A bundle arrives through a decoder whose buffers this node does not own, and
+`ExecutionAnchor`'s hashes are **slices into the certificate the anchor was derived from**. Retaining
+a successful bundle as it arrived therefore left the verified target — and the bundle every later
+extension is built on — aliasing memory a provider could still be writing to; cloning on the way out
+of `Target` does not repair that, because what it clones is already the provider's. So the extended
+bundle is CLONED FIRST, the clone is what `VerifyAnchorEvidence` is given, and that same clone is what
+is kept. Cloning after verifying would be no better in kind, only smaller: the gap between the two is
+a window in which the bytes verified and the bytes retained can differ. A copy that cannot be
+completed is a refusal rather than a shorter bundle — a shortened chain is still structurally a chain,
+and §4 is explicit that it is not evidence of anything.
+
+*Handing out.* `Target` clones the hashes and `Contradiction` re-decodes the bundle, so a caller that
+overwrites what it was given is not editing this node's verified target. The contradiction's bundle is
+re-decoded on the way IN as well, for the same reason retention is: the record is meant to outlive the
+attempt that produced it. `Status` carries only a COUNT of contradictions, so the cheap, frequent
+snapshot stays cheap and the copying sits behind the call that needs it.
+
+*And the lock.* The contradiction record is copied UNDER the lock, the bundle outside it. Taking the
+record's pointer under the lock and dereferencing after was a data race on every scalar field of it,
+`Count` included, because a running recovery increments `Count` under that same lock — and a
+diagnostic read during a recovery is exactly what these accessors are for.
 
 **Restarts are bounded, because a correct loop can still be a livelock.** A shard certifying blocks
 faster than a fetch completes would restart the same recovery forever, every individual step
