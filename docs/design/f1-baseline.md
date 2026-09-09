@@ -877,8 +877,9 @@ two transactions per burst.
 | baseline workload | **pass** — 2/2 executed and certified, all four clients agree on head, nonce and every receipt |
 | shard follower restart, reth retained | **recovers** — accepted a new certificate *and executed new work* (`2:0xca7d5744… → 4:0x20fce7f9…`), and all four clients converged on head, nonce and every receipt. **Requires the T2-bounded await budget** (#107): with the 5s default this scenario fails with `continuity-gap` |
 | shard leader kill, quorum live | shard rotates past the killed leader and a transaction executes while it is absent; the returning node accepts a certificate but **its executor does not apply the new block**, with `lastRecoveryDiagnostic=continuity-gap`. Open |
-| reth-only restart, datadir retained | **fails** — safe abstention observed (the node reported its executor unavailable rather than proceeding), the rest of the shard kept certifying, but the recovery transaction never executed within 120s |
-| complete shard+reth pair restart | **fails** — shard kept certifying with the pair down, a transaction executed while it was absent, the returning node accepted a certificate, but the recovery transaction never executed within 120s |
+| reth-only restart, datadir retained | measured separately below — **passes** on clean `d14f3bf7` |
+| complete shard+reth pair restart | measured separately below — **passes** on clean `d14f3bf7` |
+| *(both, as first measured)* | **failed** — safe abstention was observed and the rest of the shard kept certifying, but the recovery transaction never executed within 120s. Superseded by §5.7.2 |
 | multi-leader execution | **pass** — see below |
 
 The follower-restart row is new. Every previous revision of this lane reported it as failing
@@ -954,6 +955,54 @@ The adapter pins head, safe and finalized to the same hash on every commit, so a
 reth to move to any block that is not a descendant of what it has already finalised is refused and
 cannot succeed on retry — that is a plausible shape for it, and it is **not** established. Owner:
 #92 with F6 (#14); the archive is retained.
+
+#### 5.7.2 Executor-only and pair restart, and what the first refusal actually was
+
+Measured from clean `integration/enshrined-evm` at `d14f3bf7` (manifest `bftDirty=no`), pinned reth
+`189c0df3`, T2 5000ms, four validators, `./scripts/reth-chaos.sh -s reth-only-restart,pair-restart
+-t 2`. **No recovery behaviour was changed to obtain this**; the build is the merged one.
+
+**Both scenarios pass.** The returning node accepted a new certificate, executed new work, and all
+four clients agreed on the canonical head, the sender nonce and every recorded receipt:
+
+- reth-only restart: `2:0xb5d81acd… → 3:0xacd97b81…`
+- pair restart: `2:0x537f2536… → 4:0xef9abe3b…`, with the shard certifying throughout and a
+  transaction executing while the whole pair was absent.
+
+Both previously failed with the recovery transaction never executing. Two things changed underneath
+between then and now — T2 moved from 3s to 5s, and subscription renewal was decoupled from voting —
+so this is not attributed to either on its own, and one run of each is not a claim that the failure
+cannot recur.
+
+**The first refusal, classified.** This is the part worth having, and it differs per scenario:
+
+| scenario | first refusal | what it was |
+| --- | --- | --- |
+| reth-only restart | `reading executor head: … connection refused` (×29) | the executor is **not reachable at all** |
+| pair restart | `no-anchor` (×12, ~11s) | **missing authenticated evidence** |
+| pair restart, then | `certified block ef9abe3b… is unavailable in the executor (status syncing)` (×1) | **authenticated target, payload unavailable** |
+| either | — | **a rejected forkchoice did not occur**, in any validator's log, at any point |
+
+The reth-only case does not fit the three-way split, and that is the finding rather than a gap in
+the measurement. Its node never asks any of the three questions: with its client down it cannot read
+a head, so it abstains before evidence, payload or forkchoice can come into it. Nor did it need
+recovery afterwards — the shard process never died, so it kept its in-process anchor and its
+certificate feed, and when the client returned with its retained datadir the node simply resumed.
+Not one recovery `Commit` was attempted in that scenario.
+
+The pair-restart case is the three-stage progression the design predicts, and the trace dates each
+step:
+
+```
+15:24:40.19  no-anchor ×12          the in-process anchor died with the process
+15:24:51.27  transition=installed   a non-quiet certificate for round 23 supplies an authenticated target
+15:24:51.31  unavailable ×1         the executor does not have THAT block yet
+             ...                     and then it does, and the node recovers to 0xef9abe3b…
+```
+
+So the two refusals are different in kind and neither is a forkchoice rejection: one is a node
+without an executor, the other a node without evidence and then, briefly, without a payload. The
+`Too deep reorg` investigation is untouched by this and stays open under #16.
 
 **Multi-leader execution (#88 stage 1) — satisfied.** The requirement is two distinct shard leaders
 each producing an *executed, certified* block, and counting submissions does not answer it. The
