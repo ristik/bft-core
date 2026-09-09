@@ -5,8 +5,11 @@ Issue #92. Companion to `docs/design/f6b-quiet-uc-recovery.md` (stage 2/3, refer
 §3.3.1 refer to that document; sections of this one are numbered plainly.
 
 **Scope note.** The predicate (§2–§5) and this record shipped in #112 as design and fixtures only.
-The serving buffer of §6.1 shipped next, also without transport or recovery wiring. The scope
-paragraph below describes #112 and is kept as written at the time.
+The serving buffer of §6.1 shipped next, without transport or recovery wiring. The transport and the
+serving integration of §6.2 shipped after it: a node now retains what it observes and answers
+requests for it, and still recovers nothing itself — the requester side, which decides who to ask and
+what to do with an answer, is the next unit. The scope paragraph below describes #112 and is kept as
+written at the time.
 
 **Scope of the PR this record ships in: design and fixtures only.** It adds a pure verification
 predicate (`shardnode/anchorevidence.go`) and its acceptance fixtures
@@ -250,6 +253,9 @@ The size and shape of the bundle are chosen by whoever serves it, so it is attac
 - **Cancellation** is by `context.Context`, threaded to the trust-base lookup, so a caller waiting on
   a provider is not pinned by one.
 
+The independent transport cap is now implemented; §6.2 records what it is and why it is not the
+repository's shared framing helper.
+
 ### 4.1 Outcomes, and which of them another provider could fix
 
 Retry is the caller's, not the predicate's. The predicate is pure and deterministic — the same
@@ -476,6 +482,129 @@ truncated, re-contexted, epoch-shifted, replayed or oversized bundle all fail, a
 distinct names.
 
 ---
+
+### 6.2 The wire, and the serving integration
+
+Implemented in `shardnode/evidencetransport.go` (`ProtocolAnchorEvidence`,
+`/unicity/shard-anchor-evidence/1.0.0`), with the retention side wired in `Round.HandleCertificate`.
+One request, one response, one stream. What the transport decides and what it refuses to decide:
+
+**It carries; it does not judge.** No signature is checked on this path, no trust base is consulted,
+and the bundle is handed to the caller exactly as it arrived. Verification is
+`VerifyAnchorEvidence` against the receiving node's OWN configuration (§3), and duplicating any part
+of it here would create a second place where "is this evidence true" is answered — the place an
+attacker would then work on. The transport's contract stops at delivery, and a test states it
+directly: a bundle that arrives intact, within every bound, from a signer outside this node's trust
+base is delivered by the wire and refused by the predicate.
+
+**Bounds, and why they are the transport's own.** §4's bounds apply to a bundle this process already
+holds, so by the time they run a decoder has allocated whatever arrived. These apply first:
+
+| Bound | Default | What it stops |
+|---|---|---|
+| `MaxRequestBytes` | 4 KiB | an expensive "request" |
+| `MaxResponseBytes` | `AnchorEvidenceLimits.MaxBytes` + 4 KiB | decoding a bundle the predicate would refuse anyway |
+| `MaxCertificates` | 512, the predicate's own | carrying a chain already established as unacceptable |
+| `Deadline` | 5 s | a stream opened and then left silent |
+| `MaxPendingStreams` | 32 | streams that never become requests at all |
+| `MaxPendingStreamsPerPeer` | 4 | one peer occupying the whole global budget |
+| `MaxConcurrentServes` | 4 | one peer occupying a provider's assembly |
+
+The order inside `readFrame` is the point: the DECLARED length is checked against the bound before
+anything is allocated and before the decoder sees a byte, so a peer announcing a gigabyte costs one
+varint. A fixture proves the ordering rather than asserting it — the reader refuses to yield
+anything past the length prefix, so a bound applied after the body would fail loudly. The shared
+helper (`network.deserializeMsg`) has no such cap, which is correct for protocols whose messages are
+bounded by construction and wrong for this one; it is deliberately not reused, and the framing
+convention it defines (uvarint length, CBOR body) is kept so the wire style stays the repository's.
+
+**The response bound is not tighter than the predicate's**, and that is asserted, not assumed: two
+bounds that disagree about the same bundle would mean a chain the predicate accepts being refused by
+the transport carrying it. Hence the explicit wrapper allowance rather than a shared constant used
+twice.
+
+**Refusals are codes, not prose.** The outcome code is the whole of a response's meaning; the detail
+string is diagnostic and is read by nothing on either side. An UNRECOGNISED code is a transport
+failure — never silently mapped to a particular refusal, and never to success. Success is code zero
+with a bundle, so a truncated or empty response cannot be mistaken for an answer, and a refusal that
+arrives carrying a bundle is still a refusal. Each of those is a fixture, because each is a way a
+hostile provider could otherwise steer a requester without forging anything.
+
+**Admission is two tiers, and the first one is before the first byte.** Review found the original
+single tier insufficient, and the reasoning is worth keeping: `MaxConcurrentServes` counts
+*assembly*, which only a well-formed request reaches, so a peer that opens streams and sends nothing,
+half a length prefix, or a body it never finishes never reaches it. Those streams were then bounded
+only per stream, by the deadline, and not in aggregate — and **one request per stream is not one
+request per connection**, because libp2p multiplexes as many streams over one connection as a peer
+likes.
+
+So a stream takes a slot *before anything is read* and holds it until the handler exits — through the
+read, the assembly and the response write alike — and the slot is bounded **globally and per peer**.
+Per peer matters on its own: a global bound alone is a bound on the whole shard's access to one
+provider, and one peer holding all of it refuses every honest validator, which is the same
+availability loss this protocol exists to repair arriving from the other direction. A stream that is
+not admitted is **reset and told nothing** — writing a refusal into a stream whose peer may still be
+writing its request is exactly the deadlock the read-first ordering avoids, and the reset says all
+there is to say. Slots are released on every exit path, because one leaked by an early return is a
+bound that erodes to zero over a process's life.
+
+**These are this protocol's own bounds.** A libp2p resource manager, where one is configured, may
+refuse streams before the handler runs, but nothing here relies on that: an unconfigured or
+permissive host must not remove this protocol's limits.
+
+**Within an admitted stream the request is read first, and only then is the assembly tier applied.**
+Refusing after admission but before reading would leave a requester writing into a stream nobody
+drains, which deadlocks on any transport that does not buffer; the read being refused is one bounded
+frame, far cheaper than the assembly the second tier protects. Over that bound a request is refused
+immediately rather than queued: a queue is somewhere for an attacker's work to accumulate. No loop,
+so one stream is one request by construction rather than by policy.
+
+**A provider applies the requester's bounds to its own answer.** Both ends know the shared defaults,
+so a provider that can see its answer would be refused sends a named outcome instead — that is one
+attempt saved for a requester whose attempts are bounded (§4).
+
+**Requests are pinned, on the wire as in the buffer.** Round plus canonical input-record identity; a
+request naming only a round is refused, because answering it would mean choosing which certificate
+for that round the requester "probably" meant (§2.2).
+
+**Cancellation acts on the stream, because nothing else can.** Once a read or a write has begun, a
+context check cannot interrupt it — the goroutine is inside the transport, and a deferred reset on
+the failure path runs only after that I/O has already returned. The client therefore watches the
+context and **resets the stream** when it ends, which is what unblocks the I/O; the watcher is
+stopped and joined before the call returns, so a completed exchange leaves nothing behind that could
+reset a stream later. A cancelled or expired context is reported as itself rather than as whatever
+I/O error the reset produced, because the latter says nothing about why the attempt ended.
+
+**One budget, not two.** The whole call — dialing included — runs under the caller's context narrowed
+by `Deadline`, and the stream's deadline is that derived context's deadline. Setting `now + Deadline`
+after dialing restarted a budget the caller had already begun spending, and ignored an earlier
+deadline the caller had set.
+
+The server half makes no such promise about an `io.ReadWriter`, and says so: `Serve` does bounded
+blocking I/O on whatever it is given, and what makes a stalled peer bounded there is the deadline the
+caller sets on the stream plus the finite admission slot — its context check only stops work that has
+not started. A transport with no deadline support gives `Serve` no cancellation contract at all, and
+that is a property of the transport rather than something `Serve` can supply.
+
+**What this transport does NOT do.** It asks ONE provider, ONCE. Which providers to ask, in what
+order, and how many attempts to spend are the requester's decisions, and they depend on what the
+predicate said about the last candidate (§4.1) — a transport that also made them would be a recovery
+mechanism whose policy could not be reviewed apart from its framing.
+
+**The serving integration.** `Round.SetEvidenceBuffer` attaches a buffer, and
+`Round.HandleCertificate` feeds it, before any fallible work and never able to fail the round — the
+same ordering the anchor itself depends on (§5), for the same reason: a certificate that names a
+block is retained when it VERIFIES, not when this node manages to act on it, so a transient executor
+failure does not also erase this node's ability to help somebody else. A node with no buffer never
+registers the protocol and serves nobody, and no round outcome changes either way. Nothing here
+recovers anything: using somebody else's buffer to repair this node's own anchor is the next unit,
+and P-id and P-sign are untouched.
+
+**Deployment activation is deliberately still open.** `SetEvidenceBuffer` and
+`EvidenceServer.Register` are API integration points; production startup calls neither yet, so no
+deployed node serves evidence until that is wired — its own decision (which nodes serve, under which
+bounds, and how the buffer's memory is accounted alongside the round path). Stated here so the gap
+between "implemented" and "in service" is not mistaken for an oversight.
 
 ## 7. Acceptance fixtures
 

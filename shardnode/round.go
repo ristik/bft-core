@@ -63,6 +63,17 @@ type Round struct {
 	mu      sync.Mutex
 	pending *pendingSubmission // what we last submitted, awaiting certification
 
+	// evidence is the optional serving buffer (evidencebuffer.go): what this node retains so that
+	// it can SERVE the evidence chain a returning peer needs, over ProtocolAnchorEvidence. It is
+	// fed here because HandleCertificate is the one place a certificate and the technical record
+	// bound to it arrive together, already authenticated by BFTClient.
+	//
+	// It is a provider-side concern only. Nothing in this node's own round depends on it, no round
+	// outcome changes with it present or absent, and a node that never sets one simply never
+	// registers the protocol and serves nobody. Recovery — using somebody else's buffer to repair
+	// this node's own anchor — is a separate decision and is not wired anywhere yet.
+	evidence *EvidenceBuffer
+
 	// continuity is the live execution anchor and the interval this node has itself verified
 	// quiet since it (see anchor.go, and docs/design/f6b-quiet-uc-recovery.md §3.3). It is what
 	// gives reconcile a block hash to recover to when the certificate in hand is quiet and
@@ -222,6 +233,14 @@ func (r *Round) SetAwaitTimeout(d time.Duration) {
 	r.awaitTimeout = d
 }
 
+// SetEvidenceBuffer attaches the optional serving buffer, which is then fed by every certificate
+// this node handles. Safe to call, or not, at any point before Run starts.
+func (r *Round) SetEvidenceBuffer(b *EvidenceBuffer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.evidence = b
+}
+
 // SetMetrics attaches an optional Metrics recorder. Safe to call, or not, at
 // any point before Run starts — round.go never assumes it's set.
 func (r *Round) SetMetrics(m *Metrics) {
@@ -332,6 +351,21 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 			append(obs.LogAttrs(),
 				slog.Uint64("rootRound", uc.GetRootRoundNumber()),
 				slog.String("nodeID", r.nodeID))...)
+	}
+
+	// RETENTION FOR OTHER NODES, alongside this node's own observation and under the same rule:
+	// before anything fallible, and never able to fail the round. What is retained is what this
+	// node has already authenticated, so retaining it costs no trust; failing to retain it costs
+	// only this node's ability to help somebody else recover, which is an availability property and
+	// is logged rather than escalated. A refusal here means the buffer would not stand behind what
+	// it was handed — a defect on this delivery path, not a reason to stop building rounds.
+	if r.evidence != nil {
+		if err := r.evidence.Observe(uc, tr); err != nil && r.log != nil {
+			r.log.LogAttrs(ctx, slog.LevelWarn, "evidence buffer refused an observation",
+				slog.String("err", err.Error()),
+				slog.Uint64("round", uc.GetRoundNumber()),
+				slog.String("nodeID", r.nodeID))
+		}
 	}
 
 	if err := r.commitPrevious(ctx, uc); err != nil {
