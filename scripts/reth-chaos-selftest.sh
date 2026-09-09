@@ -380,61 +380,101 @@ SH
   openssl() { echo fake-test-secret; }
 }
 
-retentionOut=$(
-  cd "$work" || exit 1
-  rm -rf retention && mkdir retention && cd retention || exit 1
-  validators=1
-  # shellcheck disable=SC1090
-  set +u; source "$harness" >/dev/null 2>&1; set -u
-  runID=selftest-retention
-  runDir=$PWD/evidence-runs/$runID
-  keep=false
-  cleanup() { :; }
-  stubCluster
+# scenarioLifecycle <body> - run <body> against a stubbed cluster in a fresh directory, with the
+# REAL bringUpCluster/collectEvidence/archiveEvidence/finish. Only process and chain startup are
+# stubbed; every lifecycle decision under test is the harness's own.
+scenarioLifecycle() {
+  local dir=$1 body=$2
+  (
+    cd "$work" || exit 1
+    rm -rf "$dir" && mkdir "$dir" && cd "$dir" || exit 1
+    validators=1
+    # shellcheck disable=SC1090
+    set +u; source "$harness" >/dev/null 2>&1; set -u
+    runID=selftest
+    runDir=$PWD/evidence-runs/$runID
+    keep=false
+    cleanup() { :; }
+    stubCluster
+    eval "$body"
+  )
+}
 
-  SENTINEL=SCENARIO_ONE bringUpCluster >/dev/null 2>&1 || echo "BRINGUP1_FAILED"
-  currentScenario=scenario-one
-  SENTINEL=SCENARIO_TWO bringUpCluster >/dev/null 2>&1 || echo "BRINGUP2_FAILED"
-  currentScenario=scenario-two
+retentionOut=$(scenarioLifecycle retention '
+  SENTINEL=SCENARIO_ONE bringUpCluster scenario-one >/dev/null 2>&1 || echo BRINGUP1_FAILED
+  SENTINEL=SCENARIO_TWO bringUpCluster scenario-two >/dev/null 2>&1 || echo BRINGUP2_FAILED
   finish >/dev/null 2>&1
-
-  # What survived?
-  grep -Rl SCENARIO_ONE "$runDir" >/dev/null 2>&1 && echo ONE_KEPT || echo ONE_LOST
-  grep -Rl SCENARIO_TWO "$runDir" >/dev/null 2>&1 && echo TWO_KEPT || echo TWO_LOST
+  grep -Rl SCENARIO_ONE "$runDir/scenarios/scenario-one" >/dev/null 2>&1 && echo ONE_KEPT || echo ONE_LOST
+  grep -Rl SCENARIO_TWO "$runDir/scenarios/scenario-two" >/dev/null 2>&1 && echo TWO_KEPT || echo TWO_LOST
   [ -s "$runDir.tar.gz" ] && echo ARCHIVED || echo NO_ARCHIVE
-)
+')
 if echo "$retentionOut" | grep -q ONE_KEPT && echo "$retentionOut" | grep -q TWO_KEPT &&
    echo "$retentionOut" | grep -q ARCHIVED; then
-  ok "two scenarios: the FULL logs of the first survive the second cluster's reset"
+  ok "two scenarios: each is sealed under its own name and the first survives the second's reset"
 else
   bad "two scenarios: $(echo "$retentionOut" | tr '\n' ' ')"
 fi
 
-abortOut=$(
-  cd "$work" || exit 1
-  rm -rf abort && mkdir abort && cd abort || exit 1
-  validators=1
-  # shellcheck disable=SC1090
-  set +u; source "$harness" >/dev/null 2>&1; set -u
-  runID=selftest-abort
-  runDir=$PWD/evidence-runs/$runID
-  keep=false
-  cleanup() { :; }
-  stubCluster
-
-  SENTINEL=SCENARIO_ONE bringUpCluster >/dev/null 2>&1
-  currentScenario=scenario-one
+abortOut=$(scenarioLifecycle abort '
+  SENTINEL=SCENARIO_ONE bringUpCluster scenario-one >/dev/null 2>&1
   # The destination cannot be written: sealing must fail, and the reset must NOT happen.
-  mkdir -p "$runDir/scenarios"
-  chmod 500 "$runDir/scenarios"
-  if SENTINEL=SCENARIO_TWO bringUpCluster >/dev/null 2>&1; then echo "RESET_PROCEEDED"; else echo "RESET_ABORTED"; fi
+  mkdir -p "$runDir/scenarios"; chmod 500 "$runDir/scenarios"
+  if SENTINEL=SCENARIO_TWO bringUpCluster scenario-two >/dev/null 2>&1; then echo RESET_PROCEEDED; else echo RESET_ABORTED; fi
   chmod 700 "$runDir/scenarios" 2>/dev/null
   grep -q SCENARIO_ONE test-nodes/evm1/debug.log 2>/dev/null && echo CLUSTER_INTACT || echo CLUSTER_DESTROYED
-)
+')
 if echo "$abortOut" | grep -q RESET_ABORTED && echo "$abortOut" | grep -q CLUSTER_INTACT; then
   ok "a failed seal aborts the reset and leaves the cluster it could not preserve"
 else
   bad "failed seal: $(echo "$abortOut" | tr '\n' ' ')"
+fi
+
+# THE OWNERSHIP CASE. The reset succeeded and the STARTUP failed, so the previous scenario's name
+# must already have moved on: filing this cluster under it would write a broken cluster over the
+# evidence of the one that worked.
+startupOut=$(scenarioLifecycle startup '
+  SENTINEL=SCENARIO_ONE bringUpCluster scenario-one >/dev/null 2>&1
+  waitReth() { return 1; }   # the new cluster never comes up, after the old one is already gone
+  SENTINEL=SCENARIO_TWO bringUpCluster scenario-two >/dev/null 2>&1 || echo BRINGUP2_FAILED
+  finish >/dev/null 2>&1
+  grep -Rl SCENARIO_ONE "$runDir/scenarios/scenario-one" >/dev/null 2>&1 && echo ONE_INTACT || echo ONE_CLOBBERED
+  grep -Rq SCENARIO_TWO "$runDir/scenarios/scenario-one" 2>/dev/null && echo ONE_HAS_TWOS_LOGS || echo ONE_CLEAN
+  [ -d "$runDir/scenarios/scenario-two" ] && echo TWO_FILED || echo TWO_MISSING
+')
+if echo "$startupOut" | grep -q BRINGUP2_FAILED && echo "$startupOut" | grep -q ONE_INTACT &&
+   echo "$startupOut" | grep -q ONE_CLEAN && echo "$startupOut" | grep -q TWO_FILED; then
+  ok "a failed startup files the broken cluster under its OWN scenario, not over the previous one"
+else
+  bad "startup failure: $(echo "$startupOut" | tr '\n' ' ')"
+fi
+
+# Cancellation: the INT/TERM trap calls finish while a scenario is live. It must be sealed under its
+# own name, and the scenario before it must not be touched.
+cancelOut=$(scenarioLifecycle cancel '
+  SENTINEL=SCENARIO_ONE bringUpCluster scenario-one >/dev/null 2>&1
+  SENTINEL=SCENARIO_TWO bringUpCluster scenario-two >/dev/null 2>&1
+  finish >/dev/null 2>&1   # as the interrupt handler does, mid-scenario
+  grep -Rl SCENARIO_ONE "$runDir/scenarios/scenario-one" >/dev/null 2>&1 && echo ONE_INTACT || echo ONE_CLOBBERED
+  grep -Rl SCENARIO_TWO "$runDir/scenarios/scenario-two" >/dev/null 2>&1 && echo TWO_SEALED || echo TWO_LOST
+  [ -d "$runDir/scenarios/final" ] && echo FILED_AS_FINAL || echo NAMED_PROPERLY
+')
+if echo "$cancelOut" | grep -q ONE_INTACT && echo "$cancelOut" | grep -q TWO_SEALED &&
+   echo "$cancelOut" | grep -q NAMED_PROPERLY; then
+  ok "an interrupted run seals the live scenario under its own name and leaves the earlier one alone"
+else
+  bad "cancellation: $(echo "$cancelOut" | tr '\n' ' ')"
+fi
+
+overwriteOut=$(scenarioLifecycle overwrite '
+  SENTINEL=SCENARIO_ONE bringUpCluster scenario-one >/dev/null 2>&1
+  collectEvidence scenario-one >/dev/null 2>&1 || echo FIRST_SEAL_FAILED
+  if collectEvidence scenario-one >/dev/null 2>&1; then echo OVERWROTE; else echo REFUSED; fi
+  grep -Rl SCENARIO_ONE "$runDir/scenarios/scenario-one" >/dev/null 2>&1 && echo STILL_THERE || echo LOST
+')
+if echo "$overwriteOut" | grep -q REFUSED && echo "$overwriteOut" | grep -q STILL_THERE; then
+  ok "sealing the same scenario twice is refused rather than silently overwriting it"
+else
+  bad "overwrite: $(echo "$overwriteOut" | tr '\n' ' ')"
 fi
 
 echo

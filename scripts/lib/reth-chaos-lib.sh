@@ -289,8 +289,16 @@ superviseResult() {
 #   before it. A fresh cluster per scenario restores the full budget to each.
 #
 # The cost is one devnet bring-up per scenario. That is the price of a per-scenario result.
+# bringUpCluster <label> - destroy the current cluster and build a clean one for <label>.
+#
+# The label is an argument because OWNERSHIP MUST TRANSFER AT THE RESET, not after the new cluster
+# turns out to be healthy. An earlier revision took ownership after bring-up succeeded, so a startup
+# failure — a reth that would not come up, a shard that never certified — left the PREVIOUS
+# scenario's name attached to a cluster that no longer existed, and the final collection then wrote
+# the broken cluster's artefacts over that scenario's sealed evidence. The failure destroyed the
+# record of the thing that had worked.
 bringUpCluster() {
-  local i waited=0
+  local label=${1:-} i waited=0
 
   ./stop-evm.sh -a >/dev/null 2>&1
   for i in $(seq 1 "$validators"); do stopReth "$i"; done
@@ -308,11 +316,17 @@ bringUpCluster() {
     fi
   fi
 
+  # The outgoing scenario's evidence is safely sealed, so this cluster is now the incoming one's —
+  # whatever happens to it from here. Everything below can fail; none of it may be filed under the
+  # scenario that just ended.
+  currentScenario=$label
+  mkdir -p "$runDir"
+  echo "$label" >"$runDir/.scenario"
+
   # T2 is the inactivity timeout before the root chain tells the shard to retry, not the round
   # interval, and it must leave room above both. 5000ms matches scripts/chaos-evm.sh so the two
   # lanes are comparable, and the follower await budget is derived from it (AwaitTimeoutForT2).
   ./setup-evm-nodes.sh -r 3 -v "$validators" -t 5000 >/dev/null || { echo "setup failed" >&2; return 1; }
-  mkdir -p "$runDir"
 
   python3 - <<'PY'
 import json, subprocess
@@ -427,10 +441,10 @@ wantScenario() {
 freshCluster() {
   local label=$1
   echo "  --  fresh fixtures for '$label' (independent scenario, #88 stage 2)"
-  bringUpCluster || { fail "$label: could not bring up a clean cluster"; return 1; }
-  currentScenario=$label
+  # The count is incremented BEFORE the bring-up, and the label is taken inside it: a scenario that
+  # failed to start is a scenario that ran and failed, not a scenario that never happened.
   scenariosRun=$((scenariosRun + 1))
-  echo "$label" >"$runDir/.scenario"
+  bringUpCluster "$label" || { fail "$label: could not bring up a clean cluster"; return 1; }
   # Each cluster is a different chain with different keys, so its own pins are recorded rather than
   # letting the run's first set stand for all of them.
   {
@@ -996,6 +1010,15 @@ collectEvidence() {
   local label=${1:-final}
   local out=$runDir/scenarios/$label
   local i missing=0 copied=0
+
+  # SEALED MEANS SEALED. A scenario is collected once, at the boundary that ends it, and a second
+  # attempt on the same label is a lifecycle bug — the one that let a failed bring-up file a broken
+  # cluster over the evidence of the scenario before it. Refuse rather than overwrite: the run can
+  # lose a scenario it never captured, but not one it did.
+  if [ -d "$out" ] && [ -n "$(ls -A "$out" 2>/dev/null)" ]; then
+    fail "evidence: '$label' is already sealed at $out — refusing to overwrite it"
+    return 1
+  fi
   mkdir -p "$out" || { fail "evidence: cannot create $out"; return 1; }
 
   # copyRequired records whether each expected artefact actually arrived. Completeness used to be

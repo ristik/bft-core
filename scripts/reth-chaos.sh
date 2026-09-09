@@ -150,10 +150,8 @@ if ! wantScenario baseline; then
 else
 # The cluster comes up first: setup-evm-nodes.sh runs `make clean`, so anything written to
 # test-nodes before it is deleted, and the chain fixtures it hashes below do not exist until after.
-bringUpCluster || { finish; exit 1; }
-currentScenario=baseline
 scenariosRun=$((scenariosRun + 1))
-echo baseline >"$runDir/.scenario"
+bringUpCluster baseline || { finish; exit 1; }
 {
   echo "reth=$rethCommit"
   echo "bft=$(git rev-parse HEAD)"
