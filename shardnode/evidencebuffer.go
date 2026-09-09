@@ -294,6 +294,8 @@ func (b *EvidenceBuffer) append(e bufferEntry) {
 func (b *EvidenceBuffer) evict() {
 	for len(b.entries) > 0 && (len(b.entries) > b.limits.MaxEntries || b.bytes > b.limits.MaxBytes) {
 		b.bytes -= b.entries[0].size
+		// The surviving slice keeps this backing array alive; release the evicted references.
+		b.entries[0] = bufferEntry{}
 		b.entries = b.entries[1:]
 		b.evicted = true
 	}

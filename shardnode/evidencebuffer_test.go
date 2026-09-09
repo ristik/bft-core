@@ -680,3 +680,19 @@ func TestEvidenceBuffer_ConcurrentAppendAndAssemble(t *testing.T) {
 	_, err = verifyAssembled(t, f, ev, held.UC)
 	require.NoError(t, err)
 }
+
+// Eviction must release references as well as decrement its byte accounting. A slice of the
+// remaining entries still keeps the original backing array alive.
+func TestEvidenceBuffer_EvictionClearsRemovedReferences(t *testing.T) {
+	f := newEvidenceFixture(t)
+	b, err := NewEvidenceBuffer(EvidenceBufferLimits{MaxEntries: 1, MaxBytes: 1 << 20})
+	require.NoError(t, err)
+	b.entries = make([]bufferEntry, 0, 2)
+	obs := quietTailObserved(t, f)
+	mustObserve(t, b, obs[0])
+	backing := b.entries[:cap(b.entries)]
+	mustObserve(t, b, obs[1])
+	require.Equal(t, bufferEntry{}, backing[0], "eviction must clear every pointer in the removed slot")
+	require.Len(t, b.entries, 1)
+	require.EqualValues(t, 12, b.entries[0].round)
+}
