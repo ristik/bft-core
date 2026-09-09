@@ -177,8 +177,12 @@ func (o observation) LogAttrs() []slog.Attr {
 	}
 }
 
-func (c *continuityState) observeTraced(uc *types.UnicityCertificate, assignedNextRound uint64) observation {
-	o := observation{
+// The return value is NAMED on purpose. Every branch below returns early, and the deferred call
+// records the resulting state — with an unnamed result, `return o` copies the value first and the
+// defer then updates a local nobody reads, so every "after" field logged was zero. A diagnostic
+// that silently reports zeros is worse than one that is missing.
+func (c *continuityState) observeTraced(uc *types.UnicityCertificate, assignedNextRound uint64) (o observation) {
+	o = observation{
 		beforeExpectedNext: c.expectedNext,
 		beforeThrough:      c.through,
 		beforeBroken:       c.broken,
