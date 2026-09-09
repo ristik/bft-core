@@ -289,6 +289,36 @@ func (c *continuityState) observeTraced(uc *types.UnicityCertificate, assignedNe
 	}
 }
 
+/*
+installVerified adopts an anchor established by the authenticated-evidence predicate.
+
+WHY THIS IS SOUND, and why it is not a back door. §5 names the verified-anchor cursor as one moved by
+"this predicate, or a live non-quiet certificate" — the two are the same cursor, established two
+ways, and VerifyAnchorEvidence establishes exactly the invariant this struct maintains: a
+block-naming source certificate, and every certificate from the round it assigned through the one
+this node holds, quiet at the source's state, each authenticated against this node's OWN configured
+trust base (§3). That is what `anchor` plus `through` mean. Nothing weaker is accepted here, because
+nothing weaker reaches here.
+
+WHY IT IS NEEDED. Recovery that reaches only the executor is half a recovery: the executor ends up at
+the certified block while this node still cannot SAY which block produced the state, so P-id keeps
+refusing and the node keeps re-committing a block it already holds. Wiring made that visible; no unit
+fixture could, because each half was correct on its own.
+
+WHAT IT DOES NOT DO. It does not authorize signing. P-sign is `restoredFrom` and #105, enforced
+separately and untouched by this: a restored process that recovers its execution identity still does
+not vote. An anchor says which block the executor must be at, never whether this process may sign.
+*/
+func (c *continuityState) installVerified(anchor *ExecutionAnchor, through, expectedNext uint64) {
+	if anchor == nil || len(anchor.BlockHash) == 0 {
+		return
+	}
+	c.anchor = anchor
+	c.through = through
+	c.expectedNext = expectedNext
+	c.broken = false
+}
+
 func (c *continuityState) invalidate() {
 	c.anchor = nil
 	c.through = 0

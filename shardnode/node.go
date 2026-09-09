@@ -28,6 +28,12 @@ type Node struct {
 	store        *FileStore
 	disseminator Disseminator
 	health       *Health
+
+	// recoveryDeps is what EnableRecovery needs and New already has. Kept rather than added to
+	// New's signature because whether a node serves or recovers is a deployment decision made after
+	// the node is wired, alongside SetAwaitTimeout and SetMetrics.
+	recoveryDeps RecoveryDeps
+	recovery     *RecoveryStack
 }
 
 // runnable is implemented by Disseminators with their own background
@@ -99,7 +105,18 @@ func New(
 	client.SetHealth(health)
 	round.SetHealth(health)
 
-	return &Node{client: client, round: round, store: store, disseminator: disseminator, health: health}, nil
+	return &Node{
+		client: client, round: round, store: store, disseminator: disseminator, health: health,
+		recoveryDeps: RecoveryDeps{
+			Host:        peer,
+			Executor:    executor,
+			PartitionID: partitionID,
+			ShardID:     shardID,
+			TrustBases:  trustBaseStore,
+			Gate:        NewFinalityGate(),
+			Log:         log,
+		},
+	}, nil
 }
 
 /*
@@ -142,9 +159,40 @@ func (n *Node) Health() *Health {
 	return n.health
 }
 
+/*
+EnableRecovery turns on authenticated-evidence anchor recovery (#92, design §6), either half of it.
+
+Call after New, before Run. Serving and recovering are separate switches because they have different
+costs: serving retains certificates this node has already authenticated and answers bounded requests,
+taking no new dependency; recovering depends on peers answering and ends in a finality-changing
+executor call. A node that enables neither behaves exactly as it did before any of this existed.
+
+The finality gate is installed with the stack, and it is what keeps a recovery commit from
+interleaving with the round's own (finality.go).
+*/
+// The shard configuration hash travels in RecoveryOptions rather than through New: New does not
+// receive the shard configuration (the gap verifyRestoredLUC documents, F2/#10), and recovery refuses
+// to start without it — an absent hash does not make that check lenient, it removes it.
+func (n *Node) EnableRecovery(opts RecoveryOptions) error {
+	stack, err := NewRecoveryStack(opts, n.recoveryDeps)
+	if err != nil {
+		return err
+	}
+	if stack == nil {
+		return nil
+	}
+	n.recovery = stack
+	n.round.SetRecovery(stack)
+	return nil
+}
+
 // Run blocks until ctx is done or either the client or the disseminator's
 // own delivery loop (if it has one — see runnable) hits a fatal error.
+//
+// The recovery lifecycle's background work is stopped on the way out, so a node that returns from
+// Run leaves no fetch running against a peer that is no longer being listened to.
 func (n *Node) Run(ctx context.Context) error {
+	defer n.recovery.Close()
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return n.client.Run(gctx) })
 	if r, ok := n.disseminator.(runnable); ok {

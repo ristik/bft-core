@@ -68,6 +68,10 @@ var (
 	// ErrApplyTargetMoved — the verified target changed while this attempt was in the executor, so
 	// what was committed is no longer what this node is being asked to build on.
 	ErrApplyTargetMoved = errors.New("anchor application: the verified target moved while the attempt was in flight")
+	// ErrApplyBusy — another finality-changing executor operation is in progress. Distinct from
+	// ErrApplyInFlight, which is another APPLICATION: this one is the round itself committing, and
+	// the applier waits for no round.
+	ErrApplyBusy = errors.New("anchor application: the executor is busy with another finality-changing operation")
 	// ErrApplyBudgetInvalid — a caller bug, reported the way the rest of #92 reports its own.
 	ErrApplyBudgetInvalid = errors.New("anchor application: the configured budget is not usable")
 )
@@ -89,6 +93,7 @@ const (
 	ApplyExhausted
 	ApplyInFlight
 	ApplyTargetMoved
+	ApplyBusy
 )
 
 func (o ApplyOutcome) String() string {
@@ -115,6 +120,8 @@ func (o ApplyOutcome) String() string {
 		return "in-flight"
 	case ApplyTargetMoved:
 		return "target-moved"
+	case ApplyBusy:
+		return "busy"
 	default:
 		return "not-attempted"
 	}
@@ -128,7 +135,7 @@ func (o ApplyOutcome) String() string {
 func (o ApplyOutcome) Retryable() bool {
 	switch o {
 	case ApplyExecutorUnreachable, ApplyPayloadUnavailable, ApplyBackoff, ApplyExhausted,
-		ApplyInFlight, ApplyTargetMoved:
+		ApplyInFlight, ApplyTargetMoved, ApplyBusy:
 		return true
 	default:
 		return false
@@ -271,6 +278,7 @@ type TargetApplier struct {
 	executor Executor
 	source   TargetSource
 	budget   ApplyBudget
+	gate     *FinalityGate
 	now      func() time.Time
 	log      *slog.Logger
 
@@ -298,6 +306,10 @@ type ApplyConfig struct {
 	Executor Executor
 	Source   TargetSource
 	Budget   ApplyBudget
+	// Gate serializes this commit against every other finality-changing executor operation. Nil is
+	// allowed and means "this applier is the only thing that commits", which is true in fixtures
+	// and false in a wired node — see finality.go.
+	Gate *FinalityGate
 	// Now is the clock, injectable so the backoff is testable without sleeping.
 	Now func() time.Time
 	Log *slog.Logger
@@ -317,7 +329,7 @@ func NewTargetApplier(cfg ApplyConfig) (*TargetApplier, error) {
 		cfg.Now = time.Now
 	}
 	return &TargetApplier{
-		executor: cfg.Executor, source: cfg.Source, budget: cfg.Budget,
+		executor: cfg.Executor, source: cfg.Source, budget: cfg.Budget, gate: cfg.Gate,
 		now: cfg.Now, log: cfg.Log,
 	}, nil
 }
@@ -375,6 +387,30 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 	defer release()
 
 	attempt := a.attemptNumber()
+
+	/*
+	   THE GATE COVERS THE WHOLE SEQUENCE, not just the commit.
+
+	   Review found it held for the Commit alone and released before the head was read, which made
+	   the confirmation meaningless in the one case it exists for: between the two calls the round
+	   could commit something of its own, the head would then be that other block, and this code
+	   treats a head that is not the committed block as a FAULT — recorded against the block hash and
+	   never retried. Interference by a correct round therefore permanently refused a target that was
+	   correct too.
+
+	   "Commit this block and confirm the executor is now at it" is one operation. It is held across
+	   the commit, the head read and the genesis read, and released when the answer is known.
+	*/
+	if a.gate != nil {
+		gateRelease, gerr := a.gate.tryAcquire("recovery-apply")
+		if gerr != nil {
+			// The round is doing something of its own. Not an answer about the executor and not an
+			// attempt spent against it — the next certificate is the next opportunity.
+			return a.retryable(ApplyBusy, head, target, attempt,
+				fmt.Errorf("%w: %w", ErrApplyBusy, gerr))
+		}
+		defer gateRelease()
+	}
 
 	// Idempotent by contract (see Round.reconcile): Commit on an already-canonical hash is a no-op
 	// returning VALID, so an attempt after a failed one does not double-execute anything.
@@ -521,8 +557,8 @@ func (a *TargetApplier) attemptNumber() int {
 	return a.attempts
 }
 
-// commit, head and genesis each bound ONE executor call. A context that is already done is passed
-// through rather than replaced, so a caller cancelling still cancels.
+// commit, head and genesis each bound ONE executor call. The gate is taken by Apply around all
+// three — see the comment there for why holding it for the commit alone was not enough.
 func (a *TargetApplier) commit(ctx context.Context, hash Hash) (Status, error) {
 	cctx, cancel := context.WithTimeout(ctx, a.budget.Timeout)
 	defer cancel()
