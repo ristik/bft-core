@@ -354,13 +354,28 @@ func (c *continuityState) recoveryTarget(certifiedState Hash) (Hash, error) {
 // state already equals it — either it always did (row 1) or reconcile just made it so (rows 3/6).
 // The refusals reuse recoveryTarget's names so a log line still maps to a row.
 func (c *continuityState) checkHeadIdentity(head BlockRef, certifiedState Hash, genesis *BlockRef) error {
-	target, err := c.recoveryTarget(certifiedState)
-	if err != nil {
+	// recoveryTarget is still what decides whether there IS a usable anchor for this state, and its
+	// refusals (rows 8, 9 and 10) are the ones reported here. The block hash it returns is
+	// c.anchor.BlockHash, which the comparison below reads from the anchor itself.
+	if _, err := c.recoveryTarget(certifiedState); err != nil {
 		// Rows 8 and 9. Reaching them here rather than in reconcile means the executor's STATE
 		// agrees while this node cannot say which certified block produced it — no weaker a
 		// refusal, because a matching state root proves nothing on its own.
 		return err
 	}
+	return anchorHeadIdentity(c.anchor, head, genesis)
+}
+
+/*
+anchorHeadIdentity is P-id's comparison itself, separated from where the anchor came from.
+
+It exists as its own function because there are now two callers with the same question and no licence
+to answer it differently: the live path, where the anchor was installed by a certificate this node
+observed, and the recovery path, where it was verified from evidence (§6.4). Two copies of a
+comparison that gates signing is one copy too many — the weaker of them becomes the one that matters.
+*/
+func anchorHeadIdentity(a *ExecutionAnchor, head BlockRef, genesis *BlockRef) error {
+	target := a.BlockHash
 	if bytes.Equal(head.Hash, target) {
 		return nil // row 1
 	}
@@ -380,8 +395,8 @@ func (c *continuityState) checkHeadIdentity(head BlockRef, certifiedState Hash, 
 	// This is not a standing exemption either. It applies to one anchor — the one installed by the
 	// round the root chain certified against a nil PreviousHash — and the first state-changing
 	// round replaces it, after which every comparison is by block hash.
-	if c.anchor.fromGenesisRound && genesis != nil &&
-		sameBlockRef(head, *genesis) && bytes.Equal(head.StateRoot, c.anchor.StateRoot) {
+	if a.fromGenesisRound && genesis != nil &&
+		sameBlockRef(head, *genesis) && bytes.Equal(head.StateRoot, a.StateRoot) {
 		return nil
 	}
 	return &recoveryTargetError{"head-identity-mismatch",
