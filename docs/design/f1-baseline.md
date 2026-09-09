@@ -694,8 +694,54 @@ stall had this cause. The disseminator does buffer a block published before `Awa
 per-round channel of capacity one, `NetDisseminator.deliver`), so "the follower arrived after the
 publish and missed it" was considered and ruled out.
 
+**A third mechanism, traced and now removed: certificate delivery depended on continuing to vote.**
+
+Root-chain subscriptions carry a quota of `responsesPerSubscription` (2), refilled only by
+`Subscribe` — which `rootchain/node.go` calls from exactly two places, the handshake handler and the
+block certification request handler. A validator that submits every round therefore renews itself as
+a side effect of voting. One that does not submit renewed only when its own `InactivityTimeout`
+(30s) provoked a handshake.
+
+That became reachable when F6b stage 3 made a node resumed from a persisted certificate non-voting
+until #105. Traced on a real devnet: such a node received three certificates after restarting, then
+nothing for 34 seconds, then a certificate six partition rounds later —
+
+```
+09:01:37  extended    partitionRound=15 assignedNext=16
+── 34 seconds, no certificate delivered ──
+09:02:11  WARN  inactivity timeout exceeded, re-sending handshake
+09:02:11  invalidated partitionRound=22 assignedNext=24
+          reason: "round 22 arrived where 16 was assigned: at least one certificate was missed"
+```
+
+— and the assignments lost in that window are what invalidate its continuity state and leave it
+refusing with `no-anchor` or `continuity-gap`. The refusals are a **missing-evidence** condition,
+not a missing payload: with no anchor for the current state there is nothing to ask a payload for.
+
+`BFTClient.renewSubscriptionIfIdle` decouples renewal from voting: after a certificate this node did
+not submit for, it asks for a subscription again, using the same handshake the root chain already
+authorizes and expires. Nothing is refilled on delivery, and no vote is fabricated to provoke a
+refill. A submitted request still counts — the credit is consumed one round at a time, matching the
+quota's own accounting — so a voting node adds no traffic, and a node that stops entirely still
+stops renewing and still expires.
+
+**Renewal is driven by certified progress, not by retries.** A duplicate of a certificate whose
+application FAILED is deliberately re-delivered to the driver — that is how a transient executor
+failure recovers — and the root chain answers a handshake immediately with its current certificate,
+outside the subscription quota. Renewing on those re-deliveries closes a circle that needs neither a
+new certificate nor a timer to keep spinning: failed application, handshake, the same certificate
+back, failed application. So an already-observed certificate never renews, renewal is coalesced per
+certificate, and a failing handshake backs off (1s doubling to 30s) instead of being retried per
+delivery. A node whose executor is failing still renews on every NEW certificate, so it does not
+have to succeed at anything to keep its feed.
+
+**This does not recover evidence already missed.** A node disconnected long enough to miss an
+assignment still has to re-establish continuity by some other route; preventing the starvation stops
+the hole being dug, it does not fill one in.
+
 **Open, and blocking.** Owner: F2 (#10) for classification, F8 (#16) and root consensus for whatever
-remains of the stall after the await budget is bounded by T2. Per the review, budgets were not
+remains of the stall after the await budget is bounded by T2 and the subscription renewal no longer
+depends on voting. Per the review, budgets were not
 raised and no diagnostic was suppressed.
 
 ### 5.7 Real-reth workload and fault harness (F1a #88) — evidence pending isolated reruns

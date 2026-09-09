@@ -15,9 +15,11 @@ import (
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
 )
 
 // retryExecutor holds a block that is present but not yet canonical, and can be made to report it
@@ -370,5 +372,183 @@ func TestDeliverySeparatesApplicationFromSending(t *testing.T) {
 			"the same round under the same certificate must produce the same input record")
 		require.Equal(t, []byte(first.InputRecord.BlockHash), []byte(sent[1].InputRecord.BlockHash))
 		require.Equal(t, first.Signature, sent[1].Signature, "and the same signature over it")
+	})
+}
+
+// failingDriver models an executor that cannot apply anything — the state in which a certificate
+// stays unapplied and its retransmissions are deliberately re-delivered.
+type failingDriver struct{}
+
+func (failingDriver) HandleCertificate(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error {
+	return errors.New("executor unavailable")
+}
+
+// recordingNet is a RootNetwork that records what was sent to the root chain, so a test can tell a
+// handshake from a certification request without a libp2p network.
+type recordingNet struct {
+	mu   sync.Mutex
+	sent []any
+}
+
+func (n *recordingNet) Send(_ context.Context, msg any, _ ...peer.ID) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.sent = append(n.sent, msg)
+	return nil
+}
+
+func (n *recordingNet) ReceivedChannel() <-chan any { return nil }
+
+func (n *recordingNet) handshakes() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	count := 0
+	for _, m := range n.sent {
+		if _, ok := m.(handshake.Handshake); ok {
+			count++
+		}
+	}
+	return count
+}
+
+/*
+TestSubscriptionRenewalIsIndependentOfVoting is the shard half of #92's traced restart refusal.
+
+The root chain refills a subscription's quota only from the handshake handler and the block
+certification request handler. A validator that submits every round renews itself as a side effect
+of voting; one that does not submit renewed only on its 30-second inactivity timer, and the
+certificates it missed in that window invalidated its continuity state.
+
+So a node that did not submit for a certificate asks for its subscription again, using the same
+handshake the root chain already authorizes and expires. A node that did submit does not: its
+request already refilled the quota, and a second ask would be traffic for nothing.
+*/
+func TestSubscriptionRenewalIsIndependentOfVoting(t *testing.T) {
+	ctx := context.Background()
+
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	tb, ok := testtrustbase.NewTrustBase(t, signer).(*types.RootTrustBaseV1)
+	require.True(t, ok)
+	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: authPartitionID}
+	zero := make([]byte, 32)
+	s0 := bytes.Repeat([]byte{0xa0}, 32)
+
+	technicalFor := func(round uint64) *certification.TechnicalRecord {
+		return &certification.TechnicalRecord{Round: round, Epoch: 0, Leader: "renew-node", StatHash: zero, FeeHash: zero}
+	}
+	sign := func(round, rootRound uint64) *types.UnicityCertificate {
+		t.Helper()
+		trHash, err := technicalFor(round + 1).Hash()
+		require.NoError(t, err)
+		ir := &types.InputRecord{
+			Version: 1, RoundNumber: round, PreviousHash: s0, Hash: s0, BlockHash: nil,
+			SummaryValue: []byte{}, Timestamp: 1,
+		}
+		return testcertificates.CreateUnicityCertificate(t, signer, ir, pdr, rootRound, zero, trHash)
+	}
+	respond := func(uc *types.UnicityCertificate) *certification.CertificationResponse {
+		return &certification.CertificationResponse{
+			Partition: authPartitionID, Shard: types.ShardID{},
+			Technical: *technicalFor(uc.GetRoundNumber() + 1), UC: *uc,
+		}
+	}
+
+	newClient := func(net RootNetwork) (*BFTClient, *countingDriver) {
+		drv := &countingDriver{inner: &recordingDriver{}}
+		c := &BFTClient{
+			partitionID:    authPartitionID,
+			shardID:        types.ShardID{},
+			nodeID:         "renew-node",
+			net:            net,
+			trustBaseStore: stubTrustBaseStore{tb: tb},
+			driver:         drv,
+			opts:           DefaultBFTClientOptions,
+		}
+		c.SeedLUC(sign(4, 40))
+		return c, drv
+	}
+
+	t.Run("a node that submits nothing renews its own subscription", func(t *testing.T) {
+		net := &recordingNet{}
+		client, drv := newClient(net)
+
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(sign(5, 41))))
+		require.Equal(t, 1, drv.count())
+		require.Equal(t, 1, net.handshakes(),
+			"nothing refilled this node's quota at the root chain, so it asks for a subscription itself")
+
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(sign(6, 42))))
+		require.Equal(t, 2, net.handshakes(), "and again on the next certificate it did not submit for")
+	})
+
+	t.Run("a node that submitted does not ask again", func(t *testing.T) {
+		// Submitting a certification request is itself what refills the quota at the root chain,
+		// so a voting node must not add a handshake per round on top of it.
+		net := &recordingNet{}
+		client, _ := newClient(net)
+		require.NoError(t, client.Submit(ctx, &certification.BlockCertificationRequest{
+			PartitionID: authPartitionID, ShardID: types.ShardID{}, NodeID: "renew-node",
+			InputRecord: &types.InputRecord{Version: 1, RoundNumber: 5, Hash: s0, PreviousHash: s0, SummaryValue: []byte{}, Timestamp: 1},
+		}))
+		before := net.handshakes()
+
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(sign(5, 41))))
+		require.Equal(t, before, net.handshakes(), "the request already refilled the quota")
+
+		// The next round, having submitted nothing, it asks again — the state is per round, not
+		// per lifetime.
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(sign(6, 42))))
+		require.Equal(t, before+1, net.handshakes())
+	})
+
+	t.Run("a failing application does not turn renewal into a handshake loop", func(t *testing.T) {
+		/*
+			The reviewer's reproduction, and the case the previous revision's duplicate test could
+			not see because it only covered successful application.
+
+			A duplicate of a certificate whose APPLICATION failed is deliberately re-delivered to
+			the driver — that is how a transient executor failure recovers. The root chain answers
+			a handshake immediately with its current certificate, outside the subscription quota,
+			and that answer is the very certificate being retried. Renewing on it closed the circle:
+			failed application, handshake, the same certificate back, failed application, with no
+			new certificate and no timer needed to keep it spinning.
+		*/
+		net := &recordingNet{}
+		client, _ := newClient(net)
+		client.driver = failingDriver{}
+
+		uc := sign(5, 41)
+		for i := 0; i < 5; i++ {
+			require.Error(t, client.handleCertificationResponse(ctx, respond(uc)),
+				"application keeps failing, and the certificate stays unapplied and retryable")
+		}
+		require.Equal(t, 1, net.handshakes(),
+			"five deliveries of one certificate ask for a subscription once: a retry of something already observed is not progress")
+		require.NotNil(t, client.unapplied, "and the retry path itself is untouched")
+
+		// New certified progress still renews, which is the property the loop fix must not cost:
+		// a node whose executor is failing must not lose its feed as well.
+		require.Error(t, client.handleCertificationResponse(ctx, respond(sign(6, 42))))
+		require.Equal(t, 2, net.handshakes(), "a new certificate renews even though applying it failed")
+
+		// And when application finally succeeds, nothing about renewal changes.
+		client.driver = &countingDriver{inner: &recordingDriver{}}
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(sign(7, 43))))
+		require.Equal(t, 3, net.handshakes())
+		require.Nil(t, client.unapplied, "the certificate applied")
+	})
+
+	t.Run("a duplicate does not provoke a handshake, so a renewal cannot loop", func(t *testing.T) {
+		// The root chain answers a handshake with the current certificate. If that answer provoked
+		// another handshake the two would chase each other forever; duplicates return before the
+		// driver, and renewal happens only after a delivery.
+		net := &recordingNet{}
+		client, _ := newClient(net)
+		uc := sign(5, 41)
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(uc)))
+		after := net.handshakes()
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(uc)))
+		require.Equal(t, after, net.handshakes(), "the same certificate again changes nothing")
 	})
 }

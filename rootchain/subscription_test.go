@@ -294,3 +294,63 @@ func Test_Subscriptions_Wait(t *testing.T) {
 		t.Fatal("Wait did not return after the send goroutine finished")
 	}
 }
+
+/*
+Test_Subscriptions_QuotaStarvesANonSubmittingNode pins the mechanism behind #92's traced restart
+refusals, at the layer that produces it rather than at the layer that reports it.
+
+A subscription carries a quota of responsesPerSubscription, and Subscribe is the ONLY thing that
+refills it. Subscribe is called from exactly two places (rootchain/node.go): the handshake handler,
+and the block-certification-request handler. So a shard node that submits requests refills its own
+quota every round, and one that does not submit refills only when it handshakes.
+
+That second case is now reachable in production. Since F6b stage 3 a node resumed from a persisted
+certificate is non-voting until #105, so it sends no certification requests at all — and its
+certificate feed therefore stops after this many responses, until its own inactivity timer
+(BFTClientOptions.InactivityTimeout, 30s by default) provokes a fresh handshake. Traced on merged
+integration: a restarted validator received partition rounds 13, 14 and 15, then nothing for 34
+seconds, then round 22 — and its continuity state was invalidated by the missed assignment, which is
+what leaves it unable to recover.
+
+This test asserts only the quota behaviour. It is deliberately not a fix: which layer should change
+— refill on delivery, refresh subscriptions independently of submission, or let a non-voting node
+subscribe explicitly — is the decision #92 asks be made after the trace, not before it.
+*/
+func Test_Subscriptions_QuotaStarvesANonSubmittingNode(t *testing.T) {
+	partition, shard := types.PartitionID(8), types.ShardID{}
+	node := generateNodeID(t)
+
+	// Send delivers on its own goroutine, so the counter is shared across goroutines and the race
+	// detector is right to object to sent++.
+	var sent atomic.Int64
+	subs, err := NewSubscriptions(func(context.Context, any, ...peer.ID) error { sent.Add(1); return nil }, observability.Default(t))
+	require.NoError(t, err)
+	require.NoError(t, subs.Subscribe(partition, shard, node.String()))
+
+	cr := &certification.CertificationResponse{
+		Partition: partition, Shard: shard,
+		Technical: certification.TechnicalRecord{Round: 16},
+		UC: types.UnicityCertificate{
+			InputRecord: &types.InputRecord{Hash: []byte{0x52}, BlockHash: []byte{0x95}},
+		},
+	}
+	for i := 0; i < responsesPerSubscription; i++ {
+		subs.Send(context.Background(), cr)
+	}
+	subs.Wait()
+	require.Equal(t, int64(responsesPerSubscription), sent.Load(), "the quota is spent one response at a time")
+
+	// The node is still a subscriber, and receives nothing.
+	before := sent.Load()
+	subs.Send(context.Background(), cr)
+	subs.Send(context.Background(), cr)
+	subs.Wait()
+	require.Equal(t, before, sent.Load(),
+		"with the quota spent, certificates are no longer delivered to this node — this is the window in which a non-voting validator misses the assignments its continuity depends on")
+
+	// Only Subscribe refills it. For a node that submits nothing, that means only a handshake.
+	require.NoError(t, subs.Subscribe(partition, shard, node.String()))
+	subs.Send(context.Background(), cr)
+	subs.Wait()
+	require.Equal(t, before+1, sent.Load(), "and delivery resumes only after a fresh subscription")
+}

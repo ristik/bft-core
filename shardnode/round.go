@@ -322,11 +322,16 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// If uc is non-quiet it becomes the anchor, so reconcile targets this very block — the
 	// behaviour that always worked. If uc is quiet the anchor stays where the last state-changing
 	// round put it, which is exactly the target that used to be missing.
-	if update := r.continuity.observe(uc, tr.Round); update != anchorUnchanged && r.log != nil {
-		r.log.DebugContext(ctx, "execution anchor "+update.String(),
-			slog.Uint64("partitionRound", uc.GetRoundNumber()),
-			slog.Uint64("continuityThrough", r.continuity.through),
-			slog.String("anchorBlockHash", anchorHashForLog(r.continuity.anchor)))
+	// EVERY certificate is traced, not only the ones that change something. #92's open restart
+	// refusals turn on which round arrived versus which round the previous certificate ASSIGNED,
+	// and on whether an anchor was ever held — none of which can be recovered afterwards from a
+	// line that was only written when the state moved. The cost is one debug line per certificate.
+	obs := r.continuity.observeTraced(uc, tr.Round)
+	if r.log != nil {
+		r.log.LogAttrs(ctx, slog.LevelDebug, "continuity: observed certificate",
+			append(obs.LogAttrs(),
+				slog.Uint64("rootRound", uc.GetRootRoundNumber()),
+				slog.String("nodeID", r.nodeID))...)
 	}
 
 	if err := r.commitPrevious(ctx, uc); err != nil {
@@ -398,6 +403,21 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	var identityErr error
 	if len(exp.PreviousHash) > 0 {
 		identityErr = r.identityCheck(ctx, head, exp)
+	}
+	if identityErr != nil && r.log != nil {
+		// The other half of the trace: what the executor actually reported when the refusal was
+		// decided. Without it the log says which rule fired but not against what.
+		r.log.LogAttrs(ctx, slog.LevelDebug, "continuity: refusal operands",
+			slog.Uint64("round", exp.Round),
+			slog.String("refusal", identityErr.Error()),
+			slog.Uint64("headNumber", head.Number),
+			slog.String("headBlock", fmt.Sprintf("%x", head.Hash)),
+			slog.String("headStateRoot", fmt.Sprintf("%x", head.StateRoot)),
+			slog.String("certifiedPreviousHash", fmt.Sprintf("%x", exp.PreviousHash)),
+			slog.Uint64("continuityThrough", r.continuity.through),
+			slog.Uint64("expectedNext", r.continuity.expectedNext),
+			slog.Bool("anchorHeld", r.continuity.anchor != nil),
+			slog.String("anchorBlock", anchorHashForLog(r.continuity.anchor)))
 	}
 
 	// REPLAY OF AN AUTHORIZATION ALREADY ANSWERED. Everything above this point is idempotent by

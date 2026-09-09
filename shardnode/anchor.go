@@ -3,6 +3,7 @@ package shardnode
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -117,10 +118,99 @@ func (u anchorUpdate) String() string {
 // chain has just told this shard to submit next, and therefore the only round whose certificate may
 // legitimately follow this one. See continuityState.expectedNext.
 func (c *continuityState) observe(uc *types.UnicityCertificate, assignedNextRound uint64) anchorUpdate {
+	return c.observeTraced(uc, assignedNextRound).update
+}
+
+/*
+observation is what one certificate did to the continuity state, with the operands it was decided
+from — enough to reconstruct the decision afterwards from a log instead of re-deriving it from
+state that has since moved on.
+
+It exists because "the anchor was invalidated" is not a finding. #92's open restart refusals need to
+distinguish evidence that was never delivered, evidence lost only on restart, and an interval
+invalidated by a missed ASSIGNMENT — and those differ only in which round the certificate carried
+versus which one the previous certificate named. Both numbers are here, at the moment the decision
+was made.
+*/
+type observation struct {
+	update anchorUpdate
+	reason string // why this update, for the branches where the numbers alone do not say
+
+	partitionRound uint64 // this certificate's round
+	assignedNext   uint64 // the round IT assigns as next (authenticated TechnicalRecord)
+	quiet          bool
+	blockHash      Hash
+	stateRoot      Hash
+	previousHash   Hash
+
+	beforeExpectedNext uint64 // the round the PREVIOUS certificate assigned
+	beforeThrough      uint64
+	beforeAnchorRound  uint64
+	beforeAnchorBlock  Hash
+	beforeBroken       bool
+
+	afterExpectedNext uint64
+	afterThrough      uint64
+	afterAnchorRound  uint64
+}
+
+// LogAttrs renders the observation for a structured log line, in the order a reader reconstructs
+// the decision in: what arrived, what was expected, what was held, what resulted.
+func (o observation) LogAttrs() []slog.Attr {
+	return []slog.Attr{
+		slog.String("transition", o.update.String()),
+		slog.String("reason", o.reason),
+		slog.Uint64("partitionRound", o.partitionRound),
+		slog.Uint64("assignedNext", o.assignedNext),
+		slog.Bool("quiet", o.quiet),
+		slog.String("blockHash", fmt.Sprintf("%x", o.blockHash)),
+		slog.String("stateRoot", fmt.Sprintf("%x", o.stateRoot)),
+		slog.String("previousHash", fmt.Sprintf("%x", o.previousHash)),
+		slog.Uint64("expectedNextBefore", o.beforeExpectedNext),
+		slog.Uint64("throughBefore", o.beforeThrough),
+		slog.Uint64("anchorRoundBefore", o.beforeAnchorRound),
+		slog.String("anchorBlockBefore", fmt.Sprintf("%x", o.beforeAnchorBlock)),
+		slog.Bool("brokenBefore", o.beforeBroken),
+		slog.Uint64("expectedNextAfter", o.afterExpectedNext),
+		slog.Uint64("throughAfter", o.afterThrough),
+		slog.Uint64("anchorRoundAfter", o.afterAnchorRound),
+	}
+}
+
+// The return value is NAMED on purpose. Every branch below returns early, and the deferred call
+// records the resulting state — with an unnamed result, `return o` copies the value first and the
+// defer then updates a local nobody reads, so every "after" field logged was zero. A diagnostic
+// that silently reports zeros is worse than one that is missing.
+func (c *continuityState) observeTraced(uc *types.UnicityCertificate, assignedNextRound uint64) (o observation) {
+	o = observation{
+		beforeExpectedNext: c.expectedNext,
+		beforeThrough:      c.through,
+		beforeBroken:       c.broken,
+		assignedNext:       assignedNextRound,
+	}
+	if c.anchor != nil {
+		o.beforeAnchorRound = c.anchor.Round
+		o.beforeAnchorBlock = c.anchor.BlockHash
+	}
+	defer func() {
+		o.afterExpectedNext = c.expectedNext
+		o.afterThrough = c.through
+		if c.anchor != nil {
+			o.afterAnchorRound = c.anchor.Round
+		}
+	}()
+
 	if uc == nil || uc.InputRecord == nil {
-		return anchorUnchanged
+		o.update, o.reason = anchorUnchanged, "certificate carries no input record"
+		return o
 	}
 	ir := uc.InputRecord
+	o.partitionRound = ir.RoundNumber
+	o.quiet = len(ir.BlockHash) == 0
+	o.blockHash = Hash(ir.BlockHash)
+	o.stateRoot = Hash(ir.Hash)
+	o.previousHash = Hash(ir.PreviousHash)
+
 	// Whatever this certificate does to the anchor, it re-states what comes next.
 	prevExpected := c.expectedNext
 	c.expectedNext = assignedNextRound
@@ -139,13 +229,19 @@ func (c *continuityState) observe(uc *types.UnicityCertificate, assignedNextRoun
 		}
 		c.through = ir.RoundNumber
 		c.broken = false
-		return anchorInstalled
+		o.update, o.reason = anchorInstalled, "non-quiet certificate: this block becomes the anchor"
+		return o
 	}
 
 	// Quiet from here. Nothing to extend without an anchor — a shard whose first certificates are
 	// quiet (sync/genesis) has no certified block yet, which is not a fault.
 	if c.anchor == nil {
-		return anchorUnchanged
+		o.update = anchorUnchanged
+		o.reason = "quiet certificate with no anchor held"
+		if c.broken {
+			o.reason = "quiet certificate, and the anchor was already invalidated"
+		}
+		return o
 	}
 
 	switch {
@@ -155,9 +251,11 @@ func (c *continuityState) observe(uc *types.UnicityCertificate, assignedNextRoun
 		// record must still agree, or the two certificates disagree about one round.
 		if !bytes.Equal(ir.Hash, c.anchor.StateRoot) {
 			c.invalidate()
-			return anchorInvalidated
+			o.update, o.reason = anchorInvalidated, "repeat of the covered round at a DIFFERENT state than the anchor"
+			return o
 		}
-		return anchorUnchanged
+		o.update, o.reason = anchorUnchanged, "repeat of the round already covered"
+		return o
 
 	case prevExpected != 0 && ir.RoundNumber == prevExpected &&
 		bytes.Equal(ir.Hash, ir.PreviousHash) && bytes.Equal(ir.Hash, c.anchor.StateRoot):
@@ -165,7 +263,8 @@ func (c *continuityState) observe(uc *types.UnicityCertificate, assignedNextRoun
 		// missed, and the interval extends to cover it. Round numbers may jump — the root chain
 		// abandons rounds — so what makes this contiguous is the assignment, not the arithmetic.
 		c.through = ir.RoundNumber
-		return anchorExtended
+		o.update, o.reason = anchorExtended, "the assigned next round, quiet, at the anchor's state"
+		return o
 
 	default:
 		// A certificate for a round other than the one assigned — so at least one certificate was
@@ -174,7 +273,19 @@ func (c *continuityState) observe(uc *types.UnicityCertificate, assignedNextRoun
 		// missed non-quiet interval can return to the same state root by a DIFFERENT block
 		// (§3.3.1). Fail closed.
 		c.invalidate()
-		return anchorInvalidated
+		o.update = anchorInvalidated
+		switch {
+		case prevExpected == 0:
+			o.reason = "no assignment held: this process has observed no earlier certificate to chain from"
+		case ir.RoundNumber != prevExpected:
+			o.reason = fmt.Sprintf("round %d arrived where %d was assigned: at least one certificate was missed",
+				ir.RoundNumber, prevExpected)
+		case !bytes.Equal(ir.Hash, ir.PreviousHash):
+			o.reason = "the assigned round is not quiet after all"
+		default:
+			o.reason = "the assigned round is quiet at a state the anchor does not explain"
+		}
+		return o
 	}
 }
 

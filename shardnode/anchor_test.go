@@ -77,6 +77,18 @@ func TestContinuityState(t *testing.T) {
 				"the first needs a resync, the second resolves itself on the next non-quiet certificate")
 	})
 
+	t.Run("the trace records the state a certificate left behind, not zeros", func(t *testing.T) {
+		// The positive half of the same check: on a transition that KEEPS the anchor, the after
+		// fields must show it rather than the zero value an uncopied deferred update produced.
+		var c continuityState
+		c.observe(nonQuietIR(2, nil, s0, blockA), 3)
+		got := c.observeTraced(quietIR(3, s0), 4)
+		require.Equal(t, anchorExtended, got.update)
+		require.Equal(t, uint64(3), got.afterThrough)
+		require.Equal(t, uint64(4), got.afterExpectedNext)
+		require.Equal(t, uint64(2), got.afterAnchorRound)
+	})
+
 	t.Run("a skipped round NUMBER is not a gap when the technical record assigned it", func(t *testing.T) {
 		// MEASURED on a four-validator real-reth devnet: certified partition rounds are not
 		// consecutive integers. The first certificate of the run was `partitionRound=0 ...
@@ -90,6 +102,60 @@ func TestContinuityState(t *testing.T) {
 		require.Equal(t, anchorExtended, c.observe(quietIR(5, s0), 6),
 			"round 4 was abandoned by the root chain, not missed by this node: 5 is what it assigned")
 		require.Equal(t, uint64(5), c.through)
+	})
+
+	t.Run("the traced first transition from the #92 restart reproduction", func(t *testing.T) {
+		/*
+			The exact sequence a restarted validator went through on merged integration
+			(`reth-chaos.sh -s leader-kill`, T2 5s), taken from its own trace rather than
+			reconstructed:
+
+			  09:01:31  installed   partitionRound=13 assignedNext=14  block 95859b70…  (state 521e82f0…)
+			  09:01:3x  extended    partitionRound=14 assignedNext=15
+			  09:01:37  extended    partitionRound=15 assignedNext=16
+			  ── 34 seconds with no certificate delivered at all ──
+			  09:02:11  invalidated partitionRound=22 assignedNext=24  quiet at state ec687588…
+
+			Three things this pins, and they are the answer to "which of the four is it":
+			the source anchor WAS delivered after the restart, so this is not lost-on-restart
+			and not never-delivered; the interval died because a round arrived where another
+			was ASSIGNED; and the state at round 22 differs from the anchor's, so the shard
+			really did move during the gap — the node is genuinely behind, not merely unable
+			to prove that it is not.
+
+			Payload availability is a separate and later question. The node never gets to ask
+			for a payload: with no anchor for the current state there is no target to ask for.
+		*/
+		anchorState := []byte{0x52}
+		anchorBlock := []byte{0x95}
+		movedState := []byte{0xec}
+
+		var c continuityState
+		require.Equal(t, anchorInstalled, c.observe(nonQuietIR(13, []byte{0x75}, anchorState, anchorBlock), 14))
+		require.Equal(t, anchorExtended, c.observe(quietIR(14, anchorState), 15))
+		require.Equal(t, anchorExtended, c.observe(quietIR(15, anchorState), 16))
+		require.Equal(t, uint64(15), c.through)
+
+		// Rounds 16-21 are never delivered. Round 22 arrives, quiet at a state the anchor
+		// cannot explain, assigning 24.
+		got := c.observeTraced(quietIR(22, movedState), 24)
+		require.Equal(t, anchorInvalidated, got.update)
+		require.Contains(t, got.reason, "round 22 arrived where 16 was assigned")
+		require.Equal(t, uint64(16), got.beforeExpectedNext, "the assignment is what the gap is measured against")
+		require.Equal(t, uint64(15), got.beforeThrough)
+		require.Equal(t, uint64(13), got.beforeAnchorRound)
+
+		// The "after" fields are part of the same record and must actually be filled in. They were
+		// not: an unnamed result copied the value before the deferred update ran, so every one of
+		// them logged zero.
+		require.Equal(t, uint64(24), got.afterExpectedNext, "the assignment this certificate carries")
+		require.Equal(t, uint64(0), got.afterThrough, "invalidation resets the covered interval")
+		require.Equal(t, uint64(0), got.afterAnchorRound, "and drops the anchor")
+
+		// And the refusal that follows, with the executor still sitting on the anchor block:
+		// the node cannot say which certified block produced the state this round builds on.
+		_, err := c.recoveryTarget(Hash(movedState))
+		require.ErrorContains(t, err, "continuity-gap")
 	})
 
 	t.Run("a certificate for a round that was NOT assigned still invalidates", func(t *testing.T) {
