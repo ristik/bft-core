@@ -311,6 +311,49 @@ runSupervisorCase "child exited nonzero with nothing recorded" 7 0 ':' 1 'exited
 runSupervisorCase "child recorded an unreadable result" 0 banana ':' 1 'unreadable result'
 
 echo
+echo "=== the quiet observer: an unreadable executor is not a result ==="
+
+# observeQuietRecovery decides whether a returning node recovered during a quiet interval. Its
+# failure mode is the one this harness has been caught by before: treating a failed observation as
+# an observation. Every case below runs the REAL helper with only execHead and sleep stubbed.
+observerCase() {
+  local name=$1 stub=$2 expect=$3 got
+  got=$(
+    cd "$work" || exit 1
+    # shellcheck disable=SC1090
+    set +u; source "$harness" >/dev/null 2>&1; set -u
+    sleep() { :; }              # the window is exercised, not waited out
+    eval "$stub"
+    observeQuietRecovery 2 "3:0xabc" 6 >/dev/null 2>&1
+    echo $?
+  )
+  if [ "$got" = "$expect" ]; then
+    ok "observer, $name: status $got"
+  else
+    bad "observer, $name: status $got, expected $expect"
+  fi
+}
+
+# 0 recovered, 1 observed but behind, 2 invalid observation.
+observerCase "the executor answers and is at the target" 'execHead() { echo "3:0xabc"; }' 0
+observerCase "the executor answers and stays behind" 'execHead() { echo "2:0xdef"; }' 1
+observerCase "every RPC fails — nothing was observed at all" 'execHead() { return 1; }' 2
+observerCase "most polls fail: not enough to conclude anything" '
+  echo 0 >calls
+  execHead() {
+    n=$(( $(cat calls) + 1 )); echo "$n" >calls
+    [ "$n" = 1 ] && { echo "2:0xdef"; return 0; }
+    return 1
+  }' 2
+observerCase "a transient failure must not hide a recovery" '
+  echo 0 >calls
+  execHead() {
+    n=$(( $(cat calls) + 1 )); echo "$n" >calls
+    [ "$n" = 1 ] && return 1
+    echo "3:0xabc"
+  }' 0
+
+echo
 echo "=== leader/block correlation reads the runtime's real log line ==="
 
 # The correlation joins a receipt to a partition round through a line the SHARD NODE writes, so its
@@ -495,6 +538,7 @@ selectionCase "unknown only" "bogus" rejected
 selectionCase "mixed valid and unknown" "follower-restart,bogus" rejected
 selectionCase "empty token" "follower-restart,,leader-kill" rejected
 selectionCase "valid subset" "follower-restart,multi-leader" accepted
+selectionCase "the quiet-tail control" "quiet-restart" accepted
 selectionCase "all" "" accepted
 
 # And through the real entrypoint, which is where the empty run reported success.

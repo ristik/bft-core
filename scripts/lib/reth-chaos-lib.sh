@@ -37,7 +37,7 @@
 evidenceDir=$runDir
 
 # knownScenarios is the authority for -s. A name not in it is a mistake, not a filter.
-knownScenarios="baseline follower-restart leader-kill reth-only-restart pair-restart multi-leader"
+knownScenarios="baseline follower-restart leader-kill reth-only-restart pair-restart multi-leader quiet-restart"
 
 # currentScenario names the cluster that is up, so it can be sealed under the right label before the
 # next reset destroys it. Empty means no cluster has been built yet.
@@ -890,6 +890,118 @@ assertConvergence() {
 # cluster already known to disagree, and the retained convergence.txt from the first run showed
 # exactly that contamination (node 1 stuck at block 4 while the others advanced, across three
 # "independent" scenarios).
+# observeQuietRecovery <validator> <target-head> <budget> - watch a returning node during a QUIET
+# interval and report whether it recovers on its own, INJECTING NOTHING.
+#
+# This is deliberately not recoveredAndWorking. That helper submits a transaction as part of its
+# check, which is fine for "does the node do new work" and useless for the question here: a
+# transaction produces a non-quiet round, a non-quiet round carries a block hash, and a block hash
+# is exactly the evidence a returning node is missing. Measuring recovery with a helper that
+# supplies the missing evidence cannot distinguish "it recovered" from "it was given what it
+# lacked".
+#
+# THREE OUTCOMES, because two of them used to be one:
+#
+#   0  RECOVERED            a valid observation equal to the target
+#   1  OBSERVED, BEHIND     enough valid observations to say so, none of them the target
+#   2  INVALID OBSERVATION  the executor could not be read well enough to say anything
+#
+# The third is a failure of the measurement, not a result. An earlier revision returned 1 for both
+# "the node is behind" and "every RPC failed", so a scenario in which no executor was observed at
+# all read as the interesting negative — and the positive control that follows could then bring the
+# client back and leave the run green, having measured nothing. That is the same defect this
+# harness's oracle was corrected for once already: a failed observation must never satisfy or refute
+# an assertion.
+#
+# A partial outage is accounted for rather than papered over with the last good sample: the negative
+# verdict requires a majority of polls to have succeeded AND the final poll to have succeeded.
+observeQuietRecovery() {
+  local v=$1 target=$2 budget=${3:-120}
+  local waited=0 samples=0 failures=0 lastGood="" finalOK=false head
+  quietSamples=0; quietFailures=0; quietLastHead=""; quietWaited=0   # for the caller's record
+
+  while [ "$waited" -lt "$budget" ]; do
+    if head=$(execHead "$v"); then
+      samples=$((samples + 1)); lastGood=$head; finalOK=true
+      if [ "$head" = "$target" ]; then
+        quietSamples=$samples; quietFailures=$failures; quietLastHead=$head; quietWaited=$waited
+        info "quiet observation: validator $v reached $target after ${waited}s with no new work ($samples valid sample(s), $failures failed)"
+        return 0
+      fi
+    else
+      failures=$((failures + 1)); finalOK=false
+    fi
+    sleep 3; waited=$((waited + 3))
+  done
+
+  quietSamples=$samples; quietFailures=$failures; quietLastHead=$lastGood; quietWaited=$waited
+  if [ "$samples" -eq 0 ] || [ $((failures * 2)) -gt $((samples + failures)) ] || [ "$finalOK" != true ]; then
+    info "quiet observation: INVALID — validator $v gave $samples valid sample(s) and $failures failed one(s) over ${budget}s (final poll ok: $finalOK)"
+    return 2
+  fi
+  info "quiet observation: after ${budget}s of quiet rounds validator $v is at ${lastGood}, the shard at $target ($samples valid sample(s), $failures failed)"
+  return 1
+}
+
+# quietPrecondition <victim> <survivor> <survivor-head-before> <mark> - establish that the interval
+# really was quiet, from the shard's own behaviour rather than from "we did not submit anything":
+# the survivor's canonical head must not have moved, every certificate the victim verified in the
+# window must have been quiet, and rounds must have progressed.
+quietPrecondition() {
+  local victim=$1 survivor=$2 before=$3 mark=$4 after nonQuiet rounds ok=true
+  after=$(execHead "$survivor") || { fail "quiet precondition: survivor $survivor's head is unobservable"; return 1; }
+  if [ "$after" != "$before" ]; then
+    fail "quiet precondition: the shard produced a block during the observation window ($before -> $after) — the interval was not quiet"
+    ok=false
+  fi
+  nonQuiet=$(awk -v n="$mark" 'NR > n && /continuity: observed certificate/ && /quiet=false/' "$(log "$victim")" 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$nonQuiet" != "0" ]; then
+    fail "quiet precondition: validator $victim verified $nonQuiet non-quiet certificate(s) during the window"
+    ok=false
+  fi
+  rounds=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$(log "$victim")" 2>/dev/null | grep -oE 'partitionRound=[0-9]+' | sort -u | wc -l | tr -d ' ')
+  if [ "${rounds:-0}" -lt 2 ]; then
+    fail "quiet precondition: only ${rounds:-0} distinct partition round(s) were certified during the window — the shard was not live"
+    ok=false
+  fi
+  [ "$ok" = true ] && pass "quiet precondition: the shard stayed at $after, certified $rounds distinct rounds, and every certificate validator $victim saw was quiet"
+  [ "$ok" = true ]
+}
+
+# quietObservationRecord <validator> <mark> <verdict> - the structured record of one observation
+# window, written to the run directory as well as printed, so the interval and its result are
+# archived rather than reconstructed from a log afterwards.
+#
+# DELIVERIES ARE NOT ROUNDS. An accepted-certificate line is one delivery, and a duplicate
+# re-delivered after a failed application produces another; counting lines and calling them
+# certified rounds overstates the shard's progress. Both numbers are reported.
+quietObservationRecord() {
+  local v=$1 mark=$2 verdict=$3 lg out
+  lg=$(log "$v")
+  out=$runDir/quiet-observation.txt
+  {
+    echo "verdict=$verdict"
+    echo "validator=$v"
+    echo "windowSeconds=${quietWaited:-0} validSamples=${quietSamples:-0} failedSamples=${quietFailures:-0}"
+    echo "lastObservedHead=${quietLastHead:-none}"
+    echo "deliveries=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "distinctPartitionRounds=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | grep -oE 'partitionRound=[0-9]+' | sort -u | wc -l | tr -d ' ')"
+    echo "distinctRootRounds=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | grep -oE 'rootRound=[0-9]+' | sort -u | wc -l | tr -d ' ')"
+    echo "retriedDeliveries=$(awk -v n="$mark" 'NR > n && /retryOfFailedApply=true/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "firstAccepted=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | head -1 | grep -oE 'partitionRound=[0-9]+ rootRound=[0-9]+' | head -1)"
+    echo "lastAccepted=$(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | tail -1 | grep -oE 'partitionRound=[0-9]+ rootRound=[0-9]+' | head -1)"
+    echo "anchorDecisions=$(awk -v n="$mark" 'NR > n && /continuity: observed certificate/' "$lg" 2>/dev/null | grep -oE 'transition=[a-z]+' | sort | uniq -c | tr '\n' ' ')"
+    echo "nonQuietCertificates=$(awk -v n="$mark" 'NR > n && /continuity: observed certificate/ && /quiet=false/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "firstRefusal=$(awk -v n="$mark" 'NR > n' "$lg" 2>/dev/null | grep -oE 'no-anchor|continuity-gap|anchor-mismatch|head-identity-mismatch|unavailable in the executor \(status [a-z]+\)|engine API error [-0-9]+|reading executor head' | head -1)"
+    echo "refusalOccurrences=$(awk -v n="$mark" 'NR > n' "$lg" 2>/dev/null | grep -cE 'no-anchor|continuity-gap|anchor-mismatch|head-identity-mismatch|unavailable in the executor|engine API error|reading executor head' | tr -d ' ')"
+    echo "nonVotingGateLines=$(awk -v n="$mark" 'NR > n && /will NOT vote/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "certificationRequests=$(awk -v n="$mark" 'NR > n && /submitting block certification/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
+    echo "executorHeadNow=$(execHead "$v" || echo UNOBSERVABLE)"
+    echo "rethTail=$(grep -iE 'canonical|forkchoice|sync' "test-nodes/reth$v/reth.log" 2>/dev/null | tail -1 | cut -c1-160)"
+  } | tee -a "$out" | sed 's/^/  ..     /'
+  echo "  ..     (recorded in $out)"
+}
+
 # recoveredAndWorking - the returning node must (a) accept a certificate logged after its restart
 # and (b) participate in executing a NEW transaction, agreeing with everyone else afterwards.
 # A restart that merely re-reads an old certificate is not recovery.

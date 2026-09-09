@@ -15,7 +15,8 @@
 #     -v  validators, each with its own reth (default 4; >=4 to tolerate one fault)
 #     -t  transactions per workload burst (default 3)
 #     -s  comma-separated scenarios to run, out of
-#           baseline,follower-restart,leader-kill,reth-only-restart,pair-restart,multi-leader
+#           baseline,follower-restart,leader-kill,reth-only-restart,pair-restart,quiet-restart,
+#           multi-leader
 #         Each runs on its own devnet, so any subset is a complete run of those scenarios and not
 #         a partial run of all of them. Re-running one scenario is minutes rather than half an hour,
 #         which is the difference between investigating a failure and guessing at it.
@@ -318,6 +319,103 @@ waitReth "$pair" 90 || fail "reth$pair did not come back"
 start_one_evm_validator "$pair" "$validators" "$partitionID" "$rootBoot" engine-api ""
 recoveredAndWorking "$pair" "$mark" "pair-restart" && convergenceGate "post-pair-restart"
 snapshot 05b-after-pair-restart
+fi
+echo
+
+echo "=== 5b. quiet-tail recovery control (#92): does a returning pair recover with NO new work? ==="
+if ! wantScenario "quiet-restart"; then
+  echo "  --  skipped by -s $scenarios"
+elif ! freshCluster "quiet-restart"; then
+  fail "quiet-restart: NOT RUN — its own clean cluster did not execute and converge before the fault"
+else
+# The pair-restart shape with the recovery transaction REMOVED. #110 established that a returning
+# pair recovers after a fresh non-quiet round supplies it with an anchor; it did not establish
+# whether the pair recovers when the shard stays quiet, because the harness's own recovery
+# transaction was the fresh non-quiet round. This scenario separates the two: observe first,
+# inject afterwards, and label the injection as the control it is.
+pair=2
+survivor=1
+snapshot 5b-a-before-quiet-restart
+mark=$(logLines "$pair")
+stop_one_evm_validator "$pair"
+stopReth "$pair"
+info "validator $pair and reth$pair both stopped"
+
+otherRound=$(certifiedRound "$survivor")
+if waitForCertifiedProgress "$survivor" "$otherRound" 120; then
+  pass "quiet-restart: shard kept certifying with the whole pair $pair down"
+else
+  fail "quiet-restart: shard stalled with one complete pair down"
+fi
+
+# The LAST transaction of this scenario's fault phase: a state-changing block certified while the
+# pair is absent, so the returning node is genuinely behind a certified block. Nothing is submitted
+# after this until the control below.
+if submitAndConfirm "$survivor"; then
+  pass "quiet-restart: a state-changing block was certified while pair $pair was absent"
+else
+  fail "quiet-restart: could not certify a block while the pair was absent"
+fi
+if ! targetHead=$(execHead "$survivor"); then
+  fail "quiet-restart: the shard's canonical head is unobservable, so there is nothing to measure recovery against"
+  targetHead=UNOBSERVABLE
+fi
+info "quiet-restart: the shard's canonical head is now $targetHead; no further work will be submitted"
+
+startReth "$pair"
+waitReth "$pair" 90 || fail "quiet-restart: reth$pair did not come back"
+start_one_evm_validator "$pair" "$validators" "$partitionID" "$rootBoot" engine-api ""
+
+echo "  --  OBSERVATION: quiet rounds only, nothing injected"
+quietRecovered=no
+observeQuietRecovery "$pair" "$targetHead" 120
+case $? in
+  0)
+    quietRecovered=yes
+    pass "quiet-restart: validator $pair recovered to the certified head during a QUIET interval, with no new work"
+    quietObservationRecord "$pair" "$mark" recovered
+    ;;
+  1)
+    info "quiet-restart: validator $pair did NOT recover during the quiet interval — recorded, not asserted; establishing this is the point of the scenario"
+    quietObservationRecord "$pair" "$mark" observed-behind
+    ;;
+  *)
+    # NOT a result. An executor that could not be read says nothing about recovery, and the
+    # positive control below can bring the client back and leave the run green having measured
+    # nothing — which is why this counts as a failure of the run and not as the negative outcome.
+    fail "quiet-restart: the observation was INVALID — validator $pair's executor could not be read well enough during the window to say whether it recovered"
+    quietObservationRecord "$pair" "$mark" invalid-observation
+    ;;
+esac
+quietPrecondition "$pair" "$survivor" "$targetHead" "$mark" || true
+snapshot 5b-b-after-quiet-observation
+
+# Safety must hold either way: a node that has not caught up must not be voting.
+if [ "$(awk -v n="$mark" 'NR > n && /submitting block certification/' "$(log "$pair")" 2>/dev/null | wc -l | tr -d ' ')" = "0" ]; then
+  pass "quiet-restart: validator $pair signed nothing while it was behind"
+else
+  fail "quiet-restart: validator $pair submitted a certification request while behind the certified head"
+fi
+
+echo "  --  POSITIVE CONTROL: one transaction, so a non-quiet round supplies an anchor"
+if submitAndConfirm "$survivor"; then
+  pass "quiet-restart control: a transaction executed and certified"
+else
+  fail "quiet-restart control: the control transaction did not execute"
+fi
+controlTarget=$(execHead "$survivor") || controlTarget=UNOBSERVABLE
+observeQuietRecovery "$pair" "$controlTarget" 120
+case $? in
+  0) pass "quiet-restart control: validator $pair reached $controlTarget after the control transaction"
+     quietObservationRecord "$pair" "$mark" control-recovered ;;
+  1) fail "quiet-restart control: validator $pair did not reach $controlTarget even after a non-quiet round"
+     quietObservationRecord "$pair" "$mark" control-behind ;;
+  *) fail "quiet-restart control: the control observation was INVALID — validator $pair's executor could not be read"
+     quietObservationRecord "$pair" "$mark" control-invalid ;;
+esac
+snapshot 5b-c-after-control
+info "quiet-restart summary: recovered without new work = $quietRecovered"
+convergenceGate "post-quiet-restart" || true
 fi
 echo
 

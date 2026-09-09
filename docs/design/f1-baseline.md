@@ -1004,6 +1004,83 @@ So the two refusals are different in kind and neither is a forkchoice rejection:
 without an executor, the other a node without evidence and then, briefly, without a payload. The
 `Too deep reorg` investigation is untouched by this and stays open under #16.
 
+#### 5.7.3 The quiet-tail control: recovery depends on fresh non-quiet evidence
+
+#110 established that a returning pair recovers *after* a non-quiet round supplies it with an
+anchor. It could not establish what happens when the shard stays quiet, because the harness's own
+recovery transaction **was** that non-quiet round. This scenario separates the two: observe first
+with nothing injected, then inject one transaction as a separately labelled control.
+
+`observeQuietRecovery` exists precisely so the observation does not run through
+`recoveredAndWorking`, which submits a transaction as part of its check — measuring recovery with a
+helper that supplies the missing evidence cannot distinguish "it recovered" from "it was given what
+it lacked". It reports three outcomes, not two: recovered, observable-but-behind, and **invalid
+observation**, the last being a failure of the run rather than the negative result. An executor that
+cannot be read says nothing about recovery, and the control that follows can bring the client back
+and leave the run green having measured nothing.
+
+**Provenance.** `bft=bba34435`, `bftDirty=no`, pinned reth `189c0df3`, T2 5000ms, run
+`20260909T130136Z-28752` (archive sha256 `c581fc0c…`). An earlier exploratory run of this scenario
+(`20260909T124228Z-18571`) was made from a **dirty** tree — its manifest says so — and is retained
+as exploratory evidence rather than rewritten; the numbers below are from the clean run.
+
+**The observation window: 120 seconds, quiet rounds only, nothing injected, 40 valid samples and 0
+failed.**
+
+```
+deliveries:               168        accepted-certificate lines
+distinctPartitionRounds:   20        what the shard actually certified
+distinctRootRounds:        28
+retriedDeliveries:        140        duplicates re-delivered after a failed application
+anchorDecisions:          168 x transition=unchanged
+nonQuietCertificates:       0        not one certificate named a block
+firstRefusal:             no-anchor  168 occurrences
+certificationRequests:      0        it signed nothing while behind
+executor head:            2:0xb8412b5f…        the shard's head: 3:0xc4942523…
+```
+
+**Deliveries are not rounds**, and the difference is large here: 168 deliveries over **20** distinct
+certified partition rounds, because a refusal marks the certificate unapplied and every
+retransmission of it is re-delivered — 140 of the 168. The shard's progress in that window is 20
+rounds, not 168.
+
+**The quiet precondition is established, not assumed:** the survivor's canonical head did not move
+for the whole window, every certificate the returning node verified was quiet, and 20 distinct
+rounds were certified — so the shard was live, quiet, and the node was watching it.
+
+**The node is not short of certificates. It is short of the one kind of certificate that names a
+block.** Its feed is healthy — the renewal fix working — and every certificate it received left the
+anchor `unchanged`, so it kept refusing `no-anchor`. It never even reached the P-sign gate; the
+identity refusal comes first, which is why no "will NOT vote" line appears until after it recovers.
+
+**The positive control: one transaction.** Block 4 was certified and the node reached
+`4:0xfe3e6308…` on the first poll after it. The dependency is causal, not incidental.
+
+The recovery sequence, from the earlier run's logs (the clean run reproduces the outcome; this trace
+is the one with the reth side aligned):
+
+```
+15:46:01.40  shard  transition=installed  partitionRound=45   an authenticated target at last
+15:46:01.44  shard  executor head diverges — attempting recovery via Commit
+15:46:01.46  shard  certified block 14d5db02… is unavailable in the executor (status syncing)
+12:46:01.467 reth   Received forkchoice updated message when syncing  head=0x14d5db02
+12:46:01.486 reth   Block added to canonical chain  number=3  hash=0x8ead20d7
+12:46:01.506 reth   Block added to canonical chain  number=4  hash=0x14d5db02
+12:46:01.507 reth   Canonical chain committed       number=4
+15:46:01.50  shard  accepted certificate class=duplicate retryOfFailedApply=true → the retry applies it
+```
+
+**What these logs do not show is where block 3 came from.** As in #110 they record that reth acquired
+it, not how. That is the payload/ancestor acquisition path to trace before any custom mechanism is
+designed, and it is **not** traced here.
+
+**What this establishes, and what it does not.** It establishes that a node returning behind a
+certified block does not recover from quiet certificates alone, and that a single non-quiet round is
+sufficient — so the missing capability is **authenticated evidence that names a block**. It does not
+establish how the executor obtained the ancestor, it does not show that payload acquisition is
+solved in general, and it is one run of each phase. The three categories the evidence supports —
+RPC unavailable, missing authenticated target, and target `SYNCING` — remain distinct.
+
 **Multi-leader execution (#88 stage 1) — satisfied.** The requirement is two distinct shard leaders
 each producing an *executed, certified* block, and counting submissions does not answer it. The
 harness now joins three independently recorded facts:
