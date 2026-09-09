@@ -3,6 +3,7 @@ package shardnode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -70,20 +71,7 @@ func h32(tag byte) []byte {
 // devnet (docs/design/f6b-quiet-uc-recovery.md §3.3.2).
 func (f *evidenceFixture) cert(round, rootRound uint64, prev, state, block []byte, assignedNext uint64) EvidenceLink {
 	f.t.Helper()
-	tr := &certification.TechnicalRecord{
-		Round: assignedNext, Epoch: 0, Leader: "leader",
-		StatHash: h32(0xa1), FeeHash: h32(0xa2),
-	}
-	trHash, err := tr.Hash()
-	require.NoError(f.t, err)
-	ir := &types.InputRecord{
-		Version: 1, RoundNumber: round, Epoch: 0,
-		PreviousHash: prev, Hash: state, BlockHash: block,
-		SummaryValue: []byte{}, Timestamp: 1,
-	}
-	uc := testcertificates.CreateUnicityCertificate(f.t, f.sign, ir, f.pdr, rootRound, h32(0xb0), trHash)
-	require.NotNil(f.t, uc)
-	return EvidenceLink{UC: uc, Technical: tr}
+	return f.certAt(round, rootRound, prev, state, block, assignedNext, 0, 1)
 }
 
 // quietTail is the situation the whole design exists for: a block was certified in round 10, and
@@ -279,7 +267,7 @@ func TestAnchorEvidence_ReplayOfAnOlderCompleteBundle(t *testing.T) {
 		short.Tail = ev.Tail[:1] // ends at round 12; this node holds round 16
 		_, err := verifyFixture(t, short, c)
 		require.ErrorIs(t, err, ErrEvidenceUnconnected)
-		require.ErrorContains(t, err, "chain ends at partition round 12")
+		require.ErrorContains(t, err, "chain reaches partition round 12")
 	})
 
 	t.Run("a repeat certificate for the held round is still the round the node holds", func(t *testing.T) {
@@ -294,17 +282,6 @@ func TestAnchorEvidence_ReplayOfAnOlderCompleteBundle(t *testing.T) {
 		anchor, err := verifyFixture(t, ev, moved)
 		require.NoError(t, err)
 		require.Equal(t, Hash(h32(0xbb)), anchor.BlockHash)
-	})
-
-	t.Run("a chain ending at the held round but a different state is refused", func(t *testing.T) {
-		// Both certificates authenticate and both are for round 16; they disagree about the state.
-		// This is the check that stops the round test alone from being the whole answer.
-		conflicting := f.cert(16, 140, h32(0x0c), h32(0x0c), nil, 19)
-		moved := c
-		moved.Held = conflicting.UC
-		_, err := verifyFixture(t, ev, moved)
-		require.ErrorIs(t, err, ErrEvidenceUnconnected)
-		require.ErrorContains(t, err, "for round 16")
 	})
 
 	t.Run("the same chain replayed after the node has moved on is refused", func(t *testing.T) {
@@ -328,13 +305,13 @@ func TestAnchorEvidence_ExhaustedBounds(t *testing.T) {
 	ev, c := f.quietTail()
 
 	t.Run("too many certificates", func(t *testing.T) {
-		_, err := VerifyAnchorEvidence(context.Background(), ev, c, AnchorEvidenceLimits{MaxCertificates: 2})
+		_, err := VerifyAnchorEvidence(context.Background(), ev, c, AnchorEvidenceLimits{MaxCertificates: 2, MaxBytes: 1 << 20})
 		require.ErrorIs(t, err, ErrEvidenceExhausted)
 		require.ErrorContains(t, err, "3 certificates, limit 2")
 	})
 
 	t.Run("too many bytes", func(t *testing.T) {
-		_, err := VerifyAnchorEvidence(context.Background(), ev, c, AnchorEvidenceLimits{MaxBytes: 64})
+		_, err := VerifyAnchorEvidence(context.Background(), ev, c, AnchorEvidenceLimits{MaxCertificates: 512, MaxBytes: 64})
 		require.ErrorIs(t, err, ErrEvidenceExhausted)
 	})
 
@@ -343,7 +320,7 @@ func TestAnchorEvidence_ExhaustedBounds(t *testing.T) {
 		// so that an oversized bundle costs no verification.
 		big := ev
 		big.Tail[0].UC.UnicitySeal.Signatures = nil
-		_, err := VerifyAnchorEvidence(context.Background(), big, c, AnchorEvidenceLimits{MaxCertificates: 1})
+		_, err := VerifyAnchorEvidence(context.Background(), big, c, AnchorEvidenceLimits{MaxCertificates: 1, MaxBytes: 1 << 20})
 		require.ErrorIs(t, err, ErrEvidenceExhausted)
 	})
 }
@@ -377,8 +354,8 @@ func mustTechnical(t *testing.T, assignedNext uint64) *certification.TechnicalRe
 	}
 }
 
-// certAtEpoch is cert() with the shard epoch chosen, for the epoch-transition fixture.
-func (f *evidenceFixture) certAtEpoch(round, rootRound uint64, prev, state, block []byte, assignedNext, epoch uint64) EvidenceLink {
+// certAt is the general form: cert() with the shard epoch and the input-record timestamp chosen.
+func (f *evidenceFixture) certAt(round, rootRound uint64, prev, state, block []byte, assignedNext, epoch, timestamp uint64) EvidenceLink {
 	f.t.Helper()
 	tr := &certification.TechnicalRecord{
 		Round: assignedNext, Epoch: epoch, Leader: "leader",
@@ -389,9 +366,243 @@ func (f *evidenceFixture) certAtEpoch(round, rootRound uint64, prev, state, bloc
 	ir := &types.InputRecord{
 		Version: 1, RoundNumber: round, Epoch: epoch,
 		PreviousHash: prev, Hash: state, BlockHash: block,
-		SummaryValue: []byte{}, Timestamp: 1,
+		SummaryValue: []byte{}, Timestamp: timestamp,
 	}
 	uc := testcertificates.CreateUnicityCertificate(f.t, f.sign, ir, f.pdr, rootRound, h32(0xb0), trHash)
 	require.NotNil(f.t, uc)
 	return EvidenceLink{UC: uc, Technical: tr}
+}
+
+// certAtEpoch is certAt() in a chosen shard epoch, for the epoch-transition fixtures.
+func (f *evidenceFixture) certAtEpoch(round, rootRound uint64, prev, state, block []byte, assignedNext, epoch uint64) EvidenceLink {
+	f.t.Helper()
+	return f.certAt(round, rootRound, prev, state, block, assignedNext, epoch, 1)
+}
+
+/*
+The terminal binding: the chain must end at THE certificate this node holds, not at "a certificate
+with the same round number and state root".
+
+Round-and-state equality was the first form of this check, and review reproduced two ways past it
+with genuinely signed certificates. Both are here, plus the honest cases the check must not break.
+*/
+func TestAnchorEvidence_TerminalBindingToTheHeldCertificate(t *testing.T) {
+	t.Run("a held certificate naming a block is a different statement about that round", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		// Round 16 again, genuinely signed, and it says round 16 CERTIFIED BLOCK dd, moving the
+		// state to C. The evidence says round 16 was quiet at B. Accepting would hand back anchor
+		// bb for a round this node's own certificate says produced a different block — and the
+		// block hash is exactly what P-id gates signing on.
+		c.Held = f.cert(16, 121, h32(0x0b), h32(0x0c), h32(0xdd), 19).UC
+		_, err := verifyFixture(t, ev, c)
+		require.ErrorIs(t, err, ErrEvidenceConflict)
+		require.ErrorContains(t, err, "block dddd")
+		require.False(t, Retryable(err), "no other provider can adjudicate this")
+	})
+
+	t.Run("a held certificate naming a block at an UNCHANGED state cannot exist", func(t *testing.T) {
+		// The exact construction review used. It is refused, but on the earlier and stronger
+		// ground: an input record whose state did not move may not name a block (bft-go-base
+		// input_record.go), so no root chain would have signed it and it fails authentication.
+		// Recorded so its reason is not mistaken for the conflict check above.
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		c.Held = f.cert(16, 121, h32(0x0b), h32(0x0b), h32(0xdd), 19).UC
+		_, err := verifyFixture(t, ev, c)
+		require.ErrorIs(t, err, ErrEvidenceUnauthenticated)
+		require.ErrorContains(t, err, "held certificate")
+	})
+
+	t.Run("a held certificate in another epoch fires the epoch contract", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		c.Held = f.certAtEpoch(16, 125, h32(0x0b), h32(0x0b), nil, 19, 1).UC
+		_, err := verifyFixture(t, ev, c)
+		require.ErrorIs(t, err, ErrEvidenceEpochChange)
+		require.False(t, Retryable(err))
+	})
+
+	t.Run("a held certificate differing only in a field the state does not show conflicts", func(t *testing.T) {
+		// Same round, same state, same (nil) block, validly signed — and a different timestamp, so
+		// it is a different signed statement about round 16. Comparing round and state would miss
+		// it; comparing the canonical encoding the signatures cover does not, which is why the
+		// comparison is that encoding rather than a hand-written list of fields.
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		c.Held = f.certAt(16, 120, h32(0x0b), h32(0x0b), nil, 19, 0, 2).UC
+		_, err := verifyFixture(t, ev, c)
+		require.ErrorIs(t, err, ErrEvidenceConflict)
+	})
+
+	t.Run("a held certificate at a different state conflicts", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		c.Held = f.cert(16, 140, h32(0x0c), h32(0x0c), nil, 19).UC
+		_, err := verifyFixture(t, ev, c)
+		require.ErrorIs(t, err, ErrEvidenceConflict)
+	})
+
+	t.Run("a held certificate is authenticated against this node's own context", func(t *testing.T) {
+		// "Held" means this node verified it on delivery. The recovery context is a different
+		// question, and the cost of asking it again is one signature verification.
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		forged := f.cert(16, 120, h32(0x0b), h32(0x0b), nil, 19)
+		forged.UC.UnicitySeal.Signatures = nil
+		c.Held = forged.UC
+		_, err := verifyFixture(t, ev, c)
+		require.ErrorIs(t, err, ErrEvidenceUnauthenticated)
+		require.ErrorContains(t, err, "held certificate")
+	})
+}
+
+/*
+Repeat normalisation inside the tail.
+
+A repeat certificate re-certifies a round the root chain already certified, at a later root round,
+with the same input record and a NEW technical record — so a new assignment. It is the ordinary
+product of a root-chain timeout, which means a literal transcript of what a provider observed
+contains repeats, and a predicate that rejected them as a gap would make honest evidence
+unrepresentable. Review reproduced exactly that.
+*/
+func TestAnchorEvidence_RepeatsInsideTheTail(t *testing.T) {
+	t.Run("a repeat that updates the assignment is accepted", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		// Round 12 was certified assigning 16; a timeout re-certified it at root round 115
+		// assigning 15 instead, then 15 came and assigned 16.
+		repeat := f.cert(12, 115, h32(0x0b), h32(0x0b), nil, 15)
+		quiet := f.cert(15, 118, h32(0x0b), h32(0x0b), nil, 16)
+		ev.Tail = []EvidenceLink{ev.Tail[0], repeat, quiet, ev.Tail[1]}
+
+		anchor, err := verifyFixture(t, ev, c)
+		require.NoError(t, err)
+		require.Equal(t, Hash(h32(0xbb)), anchor.BlockHash)
+	})
+
+	t.Run("a repeat must follow at a strictly later root round", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		// Root round 110 is the round-12 certificate's own; replaying it would let a provider
+		// rewrite the assignment freely.
+		replay := f.cert(12, 110, h32(0x0b), h32(0x0b), nil, 15)
+		quiet := f.cert(15, 118, h32(0x0b), h32(0x0b), nil, 16)
+		ev.Tail = []EvidenceLink{ev.Tail[0], replay, quiet, ev.Tail[1]}
+		_, err := verifyFixture(t, ev, c)
+		require.ErrorIs(t, err, ErrEvidenceGap)
+		require.ErrorContains(t, err, "does not follow root round 110")
+	})
+
+	t.Run("two certificates for one round that disagree are a conflict, not a repeat", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		disagree := f.cert(12, 115, h32(0x0b), h32(0x0c), h32(0xdd), 15)
+		ev.Tail = []EvidenceLink{ev.Tail[0], disagree, ev.Tail[1]}
+		_, err := verifyFixture(t, ev, c)
+		require.ErrorIs(t, err, ErrEvidenceConflict)
+		require.False(t, Retryable(err))
+	})
+}
+
+// countingTrustBaseStore records whether it was consulted, so a fixture can assert that a refusal
+// happened before any cryptographic work was paid for.
+type countingTrustBaseStore struct {
+	inner stubTrustBaseStore
+	calls int
+}
+
+func (s *countingTrustBaseStore) GetByEpoch(ctx context.Context, e uint64) (*types.RootTrustBaseV1, error) {
+	s.calls++
+	return s.inner.GetByEpoch(ctx, e)
+}
+
+func TestAnchorEvidence_BoundsCoverTheWholeBundle(t *testing.T) {
+	t.Run("an oversized technical record is refused before any trust-base work", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		counting := &countingTrustBaseStore{inner: f.trust}
+		c.TrustBases = counting
+
+		// The certificate is small; the technical record travelling with it is a megabyte of
+		// attacker-chosen leader identifier. Bounding only the certificates left tr.Hash() to be
+		// handed this, after the certificate's signatures had already been verified.
+		ev.Tail[0].Technical = &certification.TechnicalRecord{
+			Round: 16, Epoch: 0, Leader: string(make([]byte, 1<<20)),
+			StatHash: h32(0xa1), FeeHash: h32(0xa2),
+		}
+		_, err := VerifyAnchorEvidence(context.Background(), ev, c, DefaultAnchorEvidenceLimits)
+		require.ErrorIs(t, err, ErrEvidenceExhausted)
+		require.Zero(t, counting.calls, "the bound must be applied before any signature or hash work")
+	})
+
+	t.Run("the bound is measured over certificates and technical records together", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		encoded, err := types.Cbor.Marshal(ev)
+		require.NoError(t, err)
+		certsOnly := 0
+		for _, uc := range []*types.UnicityCertificate{ev.Source, ev.Tail[0].UC, ev.Tail[1].UC} {
+			b, err := types.Cbor.Marshal(uc)
+			require.NoError(t, err)
+			certsOnly += len(b)
+		}
+		require.Greater(t, len(encoded), certsOnly, "the bundle is larger than its certificates alone")
+
+		// A limit that the certificates alone would satisfy must still refuse the whole bundle.
+		_, err = VerifyAnchorEvidence(context.Background(), ev, c, AnchorEvidenceLimits{MaxCertificates: 512, MaxBytes: certsOnly})
+		require.ErrorIs(t, err, ErrEvidenceExhausted)
+	})
+
+	t.Run("a missing bound is a refusal, not unlimited", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		for _, l := range []AnchorEvidenceLimits{{}, {MaxCertificates: 512}, {MaxBytes: 1 << 20}} {
+			_, err := VerifyAnchorEvidence(context.Background(), ev, c, l)
+			require.ErrorIs(t, err, ErrEvidenceLimitsInvalid)
+			require.False(t, Retryable(err), "a caller bug is not fixed by asking another peer")
+		}
+	})
+}
+
+/*
+Retry classification.
+
+A refusal is a property of the bundle, and only a few kinds say something no other provider can
+change. Getting this wrong in the strict direction is the expensive one: an Unconnected result is
+the ordinary case of a peer holding less than the requester needs, and treating it as fatal would
+let a single unhelpful peer end a recovery that its neighbour would have completed.
+*/
+func TestAnchorEvidence_RetryClassification(t *testing.T) {
+	for _, tc := range []struct {
+		err       error
+		retryable bool
+	}{
+		{nil, false},
+		{ErrEvidenceUnconnected, true},
+		{ErrEvidenceGap, true},
+		{ErrEvidenceNotQuiet, true},
+		{ErrEvidenceSourceQuiet, true},
+		{ErrEvidenceUnauthenticated, true},
+		{ErrEvidenceWrongContext, true},
+		{ErrEvidenceExhausted, true},
+		{ErrEvidenceMalformed, true},
+		{ErrEvidenceEpochChange, false},
+		{ErrEvidenceConflict, false},
+		{ErrEvidenceLimitsInvalid, false},
+	} {
+		name := "nil"
+		if tc.err != nil {
+			name = tc.err.Error()
+		}
+		t.Run(name, func(t *testing.T) {
+			if tc.err == nil {
+				require.False(t, Retryable(nil))
+				return
+			}
+			require.Equal(t, tc.retryable, Retryable(tc.err))
+			// The classification must survive the wrapping every call site adds.
+			require.Equal(t, tc.retryable, Retryable(fmt.Errorf("tail[3]: %w", tc.err)))
+		})
+	}
 }
