@@ -37,7 +37,7 @@
 evidenceDir=$runDir
 
 # knownScenarios is the authority for -s. A name not in it is a mistake, not a filter.
-knownScenarios="baseline follower-restart leader-kill reth-only-restart pair-restart multi-leader"
+knownScenarios="baseline follower-restart leader-kill reth-only-restart pair-restart multi-leader quiet-restart"
 
 # currentScenario names the cluster that is up, so it can be sealed under the right label before the
 # next reset destroys it. Empty means no cluster has been built yet.
@@ -890,6 +890,50 @@ assertConvergence() {
 # cluster already known to disagree, and the retained convergence.txt from the first run showed
 # exactly that contamination (node 1 stuck at block 4 while the others advanced, across three
 # "independent" scenarios).
+# observeQuietRecovery <validator> <target-head> <mark> <budget> - watch a returning node during a
+# QUIET interval and report whether it recovers on its own, INJECTING NOTHING.
+
+#
+# This is deliberately not recoveredAndWorking. That helper submits a transaction as part of its
+# check, which is fine for "does the node do new work" and useless for the question here: a
+# transaction produces a non-quiet round, a non-quiet round carries a block hash, and a block hash
+# is exactly the evidence a returning node is missing. Measuring recovery with a helper that
+# supplies the missing evidence cannot distinguish "it recovered" from "it was given what it
+# lacked".
+#
+# So this observes only. It returns 0 if the node's executor reaches the target head with no new
+# work at all, 1 if the window closes first, and the caller records what the node was doing either
+# way — because on this path the interesting outcome is the one that does not recover.
+observeQuietRecovery() {
+  local v=$1 target=$2 mark=$3 budget=${4:-120} waited=0 head observed=UNOBSERVABLE
+  while [ "$waited" -lt "$budget" ]; do
+    if head=$(execHead "$v"); then
+      observed=$head
+      [ "$head" = "$target" ] && { info "quiet observation: validator $v reached $target after ${waited}s with no new work"; return 0; }
+    fi
+    sleep 3; waited=$((waited + 3))
+  done
+  info "quiet observation: after ${budget}s of quiet rounds validator $v is at ${observed}, the shard at $target"
+  return 1
+}
+
+# quietObservationRecord <validator> <mark> - everything the review asked be recorded for the first
+# refusal, taken from the node's own log after <mark> and from its executor directly.
+quietObservationRecord() {
+  local v=$1 mark=$2 lg
+  lg=$(log "$v")
+  info "  certificates accepted:   $(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
+  info "  first accepted:          $(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | head -1 | grep -oE 'partitionRound=[0-9]+ rootRound=[0-9]+ nextRound=[0-9]+' | head -1)"
+  info "  last accepted:           $(awk -v n="$mark" 'NR > n && /accepted certificate/' "$lg" 2>/dev/null | tail -1 | grep -oE 'partitionRound=[0-9]+ rootRound=[0-9]+ nextRound=[0-9]+' | head -1)"
+  info "  anchor decisions:        $(awk -v n="$mark" 'NR > n && /continuity: observed certificate/' "$lg" 2>/dev/null | grep -oE 'transition=[a-z]+' | sort | uniq -c | tr '\n' ' ')"
+  info "  first refusal:           $(awk -v n="$mark" 'NR > n' "$lg" 2>/dev/null | grep -oE 'no-anchor|continuity-gap|anchor-mismatch|head-identity-mismatch|unavailable in the executor \(status [a-z]+\)|engine API error [-0-9]+|reading executor head' | head -1)"
+  info "  refusal occurrences:     $(awk -v n="$mark" 'NR > n' "$lg" 2>/dev/null | grep -cE 'no-anchor|continuity-gap|anchor-mismatch|head-identity-mismatch|unavailable in the executor|engine API error|reading executor head' | tr -d ' ')"
+  info "  non-voting gate:         $(awk -v n="$mark" 'NR > n && /will NOT vote/' "$lg" 2>/dev/null | wc -l | tr -d ' ') line(s)"
+  info "  certification requests:  $(awk -v n="$mark" 'NR > n && /submitting block certification/' "$lg" 2>/dev/null | wc -l | tr -d ' ')"
+  info "  executor head now:       $(execHead "$v" || echo UNOBSERVABLE)"
+  info "  reth sync tail:          $(grep -iE 'sync|forkchoice|canonical' "test-nodes/reth$v/reth.log" 2>/dev/null | tail -1 | cut -c1-150)"
+}
+
 # recoveredAndWorking - the returning node must (a) accept a certificate logged after its restart
 # and (b) participate in executing a NEW transaction, agreeing with everyone else afterwards.
 # A restart that merely re-reads an old certificate is not recovery.

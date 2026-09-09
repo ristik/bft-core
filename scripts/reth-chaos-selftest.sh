@@ -495,6 +495,7 @@ selectionCase "unknown only" "bogus" rejected
 selectionCase "mixed valid and unknown" "follower-restart,bogus" rejected
 selectionCase "empty token" "follower-restart,,leader-kill" rejected
 selectionCase "valid subset" "follower-restart,multi-leader" accepted
+selectionCase "the quiet-tail control" "quiet-restart" accepted
 selectionCase "all" "" accepted
 
 # And through the real entrypoint, which is where the empty run reported success.

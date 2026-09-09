@@ -1004,6 +1004,65 @@ So the two refusals are different in kind and neither is a forkchoice rejection:
 without an executor, the other a node without evidence and then, briefly, without a payload. The
 `Too deep reorg` investigation is untouched by this and stays open under #16.
 
+#### 5.7.3 The quiet-tail control: recovery depends on fresh non-quiet evidence
+
+#110 established that a returning pair recovers *after* a non-quiet round supplies it with an
+anchor. It could not establish what happens when the shard stays quiet, because the harness's own
+recovery transaction **was** that non-quiet round. This scenario separates the two: observe first
+with nothing injected, then inject one transaction as a separately labelled control.
+
+Measured from clean `integration/enshrined-evm` at `1fe7f899`, pinned reth `189c0df3`, T2 5000ms:
+`./scripts/reth-chaos.sh -s quiet-restart -t 2`. `observeQuietRecovery` exists precisely so the
+observation does not run through `recoveredAndWorking`, which submits a transaction as part of its
+check — measuring recovery with a helper that supplies the missing evidence cannot distinguish "it
+recovered" from "it was given what it lacked".
+
+**The observation window: 120 seconds, quiet rounds only, nothing injected.**
+
+```
+certificates accepted:   162          partition rounds 17 -> 42, so the shard is alive throughout
+anchor decisions:        162 x transition=unchanged      not one of them named a block
+first refusal:           no-anchor    162 occurrences
+certification requests:  0            it signed nothing while behind
+executor head:           2:0x1072c390…       the shard's head: 3:0x8ead20d7…
+```
+
+**The node is not short of certificates. It is short of the one kind of certificate that names a
+block.** It received 162 of them in two minutes — its feed is healthy, which is the renewal fix
+working — and every single one was quiet, so every one left the anchor `unchanged` and the node kept
+refusing `no-anchor`. It never even reached the P-sign gate: the identity refusal comes first, which
+is why no "will NOT vote" line appears until after it recovers.
+
+**The positive control: one transaction.** Block 4 was certified at 15:46:01.40, the non-quiet
+certificate for round 45 installed an anchor, and the node reached `4:0x14d5db02…` on the next poll.
+The dependency is causal, not incidental.
+
+The recovery itself is worth recording in full, because it is the acquisition question #92 flags:
+
+```
+15:46:01.40  shard  transition=installed  partitionRound=45   an authenticated target at last
+15:46:01.44  shard  executor head diverges — attempting recovery via Commit
+15:46:01.46  shard  certified block 14d5db02… is unavailable in the executor (status syncing)
+12:46:01.467 reth   Received forkchoice updated message when syncing  head=0x14d5db02
+12:46:01.486 reth   Block added to canonical chain  number=3  hash=0x8ead20d7
+12:46:01.506 reth   Block added to canonical chain  number=4  hash=0x14d5db02
+12:46:01.507 reth   Canonical chain committed       number=4
+15:46:01.50  shard  accepted certificate class=duplicate retryOfFailedApply=true → the retry applies it
+```
+
+So the first `Commit` was answered `SYNCING`, the client then canonicalised block 3 — which this
+node was **down** for and never received by `newPayload` — and block 4 within 40ms, and the delivery
+layer's retry of the same certificate applied it. **What these logs do not show is where block 3
+came from.** As in #110, they record that reth acquired it, not how. That is the payload/ancestor
+acquisition path #92 asks be traced before any custom mechanism is designed, and it is not traced
+here.
+
+**What this scenario establishes, and what it does not.** It establishes that a node returning
+behind a certified block does not recover from quiet certificates alone, and that a single non-quiet
+round is sufficient — so the missing capability is **authenticated evidence that names a block**,
+not the payload, which turned out to be obtainable the moment a target existed. It does not
+establish how the executor obtained the ancestor, and it is one run.
+
 **Multi-leader execution (#88 stage 1) — satisfied.** The requirement is two distinct shard leaders
 each producing an *executed, certified* block, and counting submissions does not answer it. The
 harness now joins three independently recorded facts:
