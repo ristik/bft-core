@@ -991,7 +991,22 @@ arm's flags, how far the run got, and a SHA-256 of each copied log. Three detail
 point, and review found all three: it lives outside `test-nodes/`, which this lane and every other
 one in the repository delete; it hashes copies, because a digest of a file a running node is still
 appending to describes nothing anybody can check later; and it is written from the EXIT trap, so a
-run that fails early still leaves a record of what it was.
+run that fails early still leaves a record of what it was. And failing to write one **fails the
+run**: the first version returned success when `mkdir` failed, having already set its once-flag, so a
+run with no artifact at all reported ALL CHECKS PASSED and no later attempt was made. For a lane
+whose output IS the artifact, silently producing none is the same defect as counting a failed read as
+a zero.
+
+**The failure paths are self-tested, because a passing run does not exercise them.** Every defect
+review found in this harness was in a path that only runs when something has already gone wrong: a
+read that failed, a number that was malformed, a directory that could not be created. Those never
+execute on a good run, so a green acceptance run says nothing about them — and each one turned a
+failure into a PASS. `--self-test` exercises them with no reth and no root chain, asserting that each
+failure path fails. It has already caught itself twice: helpers defined after the block made its
+checks inert, and they reported PASS while testing nothing, which is the same class of defect as
+everything they test. It asserts the PROPERTY rather than any particular guard — several guards are
+mutually redundant, so removing one changes nothing while removing all of them fails the self-test by
+name.
 
 **A failed read is not a zero, and a failure in a subshell is not a failure.** `${c:-0}` over a
 failed RPC counted as zero transactions, so an unreachable node produced a PASS asserting nothing had

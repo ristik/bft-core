@@ -42,6 +42,221 @@ pass() { echo "  PASS: $1"; }
 fail() { echo "  FAIL: $1"; failures=$((failures + 1)); }
 info() { echo "  info: $1"; }
 
+# --- helpers, defined before anything uses them (the self-test below included) ---
+
+rpc() { curl -sS --max-time 10 -X POST "$1" -H "Content-Type: application/json" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}"; }
+pyget() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1)" 2>/dev/null; }
+
+# rpcRequire is rpc that REPORTS a failure instead of returning empty, and it reports it on stderr
+# with a non-zero status rather than by calling fail().
+#
+# Both halves matter, and review found both. `${c:-0}` over a failed read counted as zero
+# transactions, so an unreachable node produced a PASS asserting nothing had executed — an assertion
+# that cannot tell "I looked and saw none" from "I could not look" is not evidence, and this lane's
+# claim is a negative one. And calling fail() from here would increment $failures inside a COMMAND
+# SUBSTITUTION, which is a subshell: the parent's counter never moved and the run exited 0 with
+# failures on screen. Anything that must change $failures has to run in the parent shell.
+rpcRequire() { # rpcRequire <url> <method> <params> <pyget-path> <what>
+  local out value
+  out=$(rpc "$1" "$2" "$3") || { echo "RPC $2 to $1 failed ($5)" >&2; return 1; }
+  value=$(printf '%s' "$out" | pyget "$4")
+  if [ -z "$value" ]; then
+    echo "RPC $2 to $1 returned no $5: $(printf '%s' "$out" | head -c 200)" >&2
+    return 1
+  fi
+  printf '%s' "$value"
+}
+
+# countTransactions echoes "<total> <headHex>" and returns non-zero if any read failed. It never
+# touches $failures: see rpcRequire.
+countTransactions() { # countTransactions <ethURL>
+  local url=$1 headHex numbers total=0 n c
+  headHex=$(rpcRequire "$url" eth_getBlockByNumber '["latest", false]' "['result']['number']" "head block number") || return 1
+
+  # VALIDATE THE NUMBER BEFORE COUNTING FROM IT. A malformed head — "0x", a decimal, an error string
+  # that json-decoded fine — made the python expansion below raise, which emptied the loop, which
+  # left total at 0, which read as "no transactions". A range this lane could not construct is a
+  # question it could not ask, and it must say so rather than answer it with a zero.
+  case "$headHex" in
+    0x[0-9a-fA-F]*) ;;
+    *) echo "head block number from $url is not a hex quantity: '$headHex'" >&2; return 1 ;;
+  esac
+  numbers=$(python3 -c "print(' '.join(hex(i) for i in range(0, int('$headHex', 16) + 1)))" 2>/dev/null) || {
+    echo "could not enumerate blocks 0..$headHex from $url" >&2; return 1; }
+  [ -n "$numbers" ] || { echo "no block numbers to check between 0 and $headHex from $url" >&2; return 1; }
+
+  for n in $numbers; do
+    c=$(rpcRequire "$url" eth_getBlockTransactionCountByNumber "[\"$n\"]" "['result']" "transaction count for block $n") || return 1
+    case "$c" in
+      0x[0-9a-fA-F]*) ;;
+      *) echo "transaction count for block $n from $url is not a hex quantity: '$c'" >&2; return 1 ;;
+    esac
+    total=$((total + $((c))))
+  done
+  echo "$total $headHex"
+}
+
+# assertNoTransactions runs entirely in the PARENT shell, so its fail() actually counts.
+assertNoTransactions() { # assertNoTransactions <label> <ethURL>
+  local label=$1 url=$2 out rc total headHex
+  out=$(countTransactions "$url" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "$label: could not read the executor's blocks, so 'no transactions' is unproven: $(echo "$out" | tail -1)"
+    return 1
+  fi
+  total=$(echo "$out" | tail -1 | cut -d' ' -f1)
+  headHex=$(echo "$out" | tail -1 | cut -d' ' -f2)
+  if [ "$total" -eq 0 ]; then
+    pass "$label: every canonical block, genesis through $headHex, contains zero transactions"
+  else
+    fail "$label: $total transactions executed — this lane must demonstrate recovery with no new activity"
+  fi
+}
+# countIn is grep -c that always prints exactly one integer. `grep -c` exits 1 when the count is
+# zero, so the obvious `$(grep -c ... || echo 0)` prints "0\n0" and every numeric test after it is a
+# syntax error rather than a false — which is how a broken wait loop reads as "no certificates".
+countIn() { local n; n=$(grep -c "$2" "$1" 2>/dev/null | head -1); echo "${n:-0}"; }
+
+waitFor() { # waitFor <file> <pattern> <count> <seconds>
+  for _ in $(seq 1 "$4"); do
+    [ "$(countIn "$1" "$2")" -ge "$3" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+artifactDir="${F6B_ARTIFACT_DIR:-artifacts/f6b-acceptance/$(date -u +%Y%m%dT%H%M%SZ)}"
+manifestWritten=0
+# writeManifest returns non-zero if it could not leave an artifact behind, and marks itself done
+# only when it actually wrote one.
+#
+# It used to return SUCCESS when mkdir failed, having already set the once-flag — so a run with no
+# artifact at all reported ALL CHECKS PASSED, no later attempt was made, and nothing said the
+# provenance was missing. For a lane whose output IS the artifact, silently producing none is the
+# same class of defect as counting a failed read as a zero.
+writeManifest() {
+  [ "$manifestWritten" -eq 1 ] && return 0
+  if ! mkdir -p "$artifactDir/logs" 2>/dev/null; then
+    echo "  FAIL: could not create the run artifact directory $artifactDir — this run leaves no provenance" >&2
+    return 1
+  fi
+  # Copy first, then hash the copies: a digest of a file a running node is still appending to
+  # describes nothing anybody can check later.
+  for f in test-nodes/evm1/control.log $(seq -f "test-nodes/evm%g/debug.log" 1 "$validators"); do
+    [ -f "$f" ] && cp "$f" "$artifactDir/logs/$(echo "$f" | tr '/' '_')" 2>/dev/null
+  done
+  {
+    echo "f6b quiet-tail recovery acceptance run"
+    echo "finished:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "repository:      $(git rev-parse HEAD 2>/dev/null || echo unknown)"
+    echo "worktree clean:  $([ -z "$(git status --porcelain 2>/dev/null)" ] && echo yes || echo "NO — this run is not reproducible from the recorded revision")"
+    echo "ubft:            $( [ -x build/ubft ] && shasum -a 256 build/ubft | cut -d' ' -f1 || echo missing)"
+    echo "reth:            ${rethCommit:-unknown}$([ "${rethCommit:-}" = "$pinnedRethCommit" ] && echo " (pinned)" || echo " (NOT the pinned baseline)")"
+    echo "validators:      $validators"
+    echo "control flags:   (defaults: --evidence-serve on, --evidence-recover off)"
+    echo "recovery flags:  --evidence-recover"
+    echo "checks failed:   $failures"
+    echo "reached:         ${reached:-startup}"
+    echo
+    echo "digests of the COPIED logs in $artifactDir/logs:"
+    for f in "$artifactDir"/logs/*; do
+      [ -f "$f" ] && echo "  $(shasum -a 256 "$f")"
+    done
+  } >"$artifactDir/manifest.txt" || {
+    echo "  FAIL: could not write $artifactDir/manifest.txt — this run leaves no provenance" >&2
+    return 1
+  }
+  manifestWritten=1
+  return 0
+}
+
+# --- the lane's own failure paths, tested without a devnet ------------------------------------------
+#
+# WHY THIS EXISTS. Every defect review has found in this harness was in a path that only runs when
+# something has ALREADY gone wrong: a read that failed, a number that was malformed, a directory that
+# could not be created. Those paths never execute on a good run, so a passing acceptance run says
+# nothing at all about them — and each one turned a failure into a PASS or a zero. So they are
+# exercised deliberately, in a mode that needs no reth and no root chain:
+#
+#   ./scripts/f6b-quiet-tail-recovery.sh --self-test
+#
+# It asserts that each failure path FAILS, which is the only property that matters about them — the
+# PROPERTY, not any particular guard. Several of the guards below are mutually redundant (a malformed
+# head is caught by the pattern check, by the enumeration failing, and by the empty range), so
+# removing any one of them individually changes nothing; removing all three makes this self-test fail
+# by name. That is defence in depth, and it is worth stating rather than reporting per-guard coverage
+# nobody has.
+#
+# It has already caught itself twice: helpers defined AFTER this block made the checks inert, and
+# they reported PASS while testing nothing — which is the same class of defect as everything below.
+# Anything this mode uses has to be defined above it.
+if [ "${1:-}" = "--self-test" ]; then
+  selfFailures=0
+  echo "=== self-test: the lane's failure paths ==="
+
+  desc="an executor that cannot be reached is not zero transactions"
+  before=$failures
+  assertNoTransactions "unreachable" "http://127.0.0.1:9" >/dev/null 2>&1
+  [ "$failures" -gt "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); }
+
+  desc="a malformed head number is not zero transactions"
+  before=$failures
+  rpc() { echo '{"jsonrpc":"2.0","id":1,"result":{"number":"not-a-number"}}'; }
+  assertNoTransactions "malformed head" "http://127.0.0.1:9" >/dev/null 2>&1
+  [ "$failures" -gt "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); }
+
+  desc="an empty head number is not zero transactions"
+  before=$failures
+  rpc() { echo '{"jsonrpc":"2.0","id":1,"result":{"number":"0x"}}'; }
+  assertNoTransactions "empty head" "http://127.0.0.1:9" >/dev/null 2>&1
+  [ "$failures" -gt "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); }
+
+  desc="a malformed transaction count is not zero transactions"
+  before=$failures
+  rpc() {
+    case "$2" in
+      eth_getBlockByNumber) echo '{"jsonrpc":"2.0","id":1,"result":{"number":"0x1"}}' ;;
+      *) echo '{"jsonrpc":"2.0","id":1,"result":"lots"}' ;;
+    esac
+  }
+  assertNoTransactions "malformed count" "http://127.0.0.1:9" >/dev/null 2>&1
+  [ "$failures" -gt "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); }
+
+  desc="a well-formed answer of zero still passes"
+  before=$failures
+  rpc() {
+    case "$2" in
+      eth_getBlockByNumber) echo '{"jsonrpc":"2.0","id":1,"result":{"number":"0x1"}}' ;;
+      *) echo '{"jsonrpc":"2.0","id":1,"result":"0x0"}' ;;
+    esac
+  }
+  assertNoTransactions "genuinely empty" "http://127.0.0.1:9" >/dev/null 2>&1
+  [ "$failures" -eq "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc — a good answer was rejected"; selfFailures=$((selfFailures + 1)); }
+
+  desc="an artifact directory that cannot be created fails the run"
+  artifactDir=/dev/null/not-a-directory
+  manifestWritten=0
+  if writeManifest >/dev/null 2>&1; then
+    echo "  FAIL: $desc — writeManifest reported success"
+    selfFailures=$((selfFailures + 1))
+  elif [ "$manifestWritten" -eq 1 ]; then
+    echo "  FAIL: $desc — it marked itself done without writing anything"
+    selfFailures=$((selfFailures + 1))
+  else
+    echo "  PASS: $desc"
+  fi
+
+  echo
+  if [ "$selfFailures" -eq 0 ]; then
+    echo "SELF-TEST PASSED"
+  else
+    echo "$selfFailures SELF-TEST CHECK(S) FAILED"
+  fi
+  exit $((selfFailures > 0))
+fi
+
 command -v reth >/dev/null || { echo "no reth binary on PATH - this lane has no fake fallback" >&2; exit 1; }
 rethCommit=$(reth --version | sed -n 's/^Commit SHA: //p')
 if [ "$rethCommit" != "$pinnedRethCommit" ]; then
@@ -66,39 +281,20 @@ fi
 # a node that is still running; and written from the EXIT trap, so a run that fails early still
 # leaves a record of what it was and how far it got. Review found all three, and each of them makes
 # the difference between an artifact and a scrollback.
-artifactDir="${F6B_ARTIFACT_DIR:-artifacts/f6b-acceptance/$(date -u +%Y%m%dT%H%M%SZ)}"
-manifestWritten=0
-writeManifest() {
-  [ "$manifestWritten" -eq 1 ] && return 0
-  manifestWritten=1
-  mkdir -p "$artifactDir/logs" || return 0
-  # Copy first, then hash the copies: a digest of a file a running node is still appending to
-  # describes nothing anybody can check later.
-  for f in test-nodes/evm1/control.log $(seq -f "test-nodes/evm%g/debug.log" 1 "$validators"); do
-    [ -f "$f" ] && cp "$f" "$artifactDir/logs/$(echo "$f" | tr '/' '_')" 2>/dev/null
-  done
-  {
-    echo "f6b quiet-tail recovery acceptance run"
-    echo "finished:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "repository:      $(git rev-parse HEAD 2>/dev/null || echo unknown)"
-    echo "worktree clean:  $([ -z "$(git status --porcelain 2>/dev/null)" ] && echo yes || echo "NO — this run is not reproducible from the recorded revision")"
-    echo "ubft:            $( [ -x build/ubft ] && shasum -a 256 build/ubft | cut -d' ' -f1 || echo missing)"
-    echo "reth:            ${rethCommit:-unknown}$([ "${rethCommit:-}" = "$pinnedRethCommit" ] && echo " (pinned)" || echo " (NOT the pinned baseline)")"
-    echo "validators:      $validators"
-    echo "control flags:   (defaults: --evidence-serve on, --evidence-recover off)"
-    echo "recovery flags:  --evidence-recover"
-    echo "checks failed:   $failures"
-    echo "reached:         ${reached:-startup}"
-    echo
-    echo "digests of the COPIED logs in $artifactDir/logs:"
-    for f in "$artifactDir"/logs/*; do
-      [ -f "$f" ] && echo "  $(shasum -a 256 "$f")"
-    done
-  } >"$artifactDir/manifest.txt"
-}
-
 cleanup() {
-  writeManifest
+  # The artifact is part of the result, so failing to write one fails the run — including from here,
+  # where the exit status has otherwise already been decided. A trap can still set it.
+  if ! writeManifest; then
+    failures=$((failures + 1))
+    echo "$failures CHECK(S) FAILED — no run artifact was written" >&2
+    trap - EXIT
+    ./stop-evm.sh -a >/dev/null 2>&1 || true
+    pkill -f 'ubft shard-node run' 2>/dev/null
+    for i in $(seq 1 "$validators"); do
+      [ -f "test-nodes/reth$i/pid" ] && kill "$(cat "test-nodes/reth$i/pid")" 2>/dev/null
+    done
+    exit 1
+  fi
   ./stop-evm.sh -a >/dev/null 2>&1 || true
   pkill -f 'ubft shard-node run' 2>/dev/null
   for i in $(seq 1 "$validators"); do
@@ -134,59 +330,6 @@ for i in $(seq 1 "$validators"); do
   echo $! >"test-nodes/reth$i/pid"
 done
 
-rpc() { curl -sS --max-time 10 -X POST "$1" -H "Content-Type: application/json" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}"; }
-pyget() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1)" 2>/dev/null; }
-
-# rpcRequire is rpc that REPORTS a failure instead of returning empty, and it reports it on stderr
-# with a non-zero status rather than by calling fail().
-#
-# Both halves matter, and review found both. `${c:-0}` over a failed read counted as zero
-# transactions, so an unreachable node produced a PASS asserting nothing had executed — an assertion
-# that cannot tell "I looked and saw none" from "I could not look" is not evidence, and this lane's
-# claim is a negative one. And calling fail() from here would increment $failures inside a COMMAND
-# SUBSTITUTION, which is a subshell: the parent's counter never moved and the run exited 0 with
-# failures on screen. Anything that must change $failures has to run in the parent shell.
-rpcRequire() { # rpcRequire <url> <method> <params> <pyget-path> <what>
-  local out value
-  out=$(rpc "$1" "$2" "$3") || { echo "RPC $2 to $1 failed ($5)" >&2; return 1; }
-  value=$(printf '%s' "$out" | pyget "$4")
-  if [ -z "$value" ]; then
-    echo "RPC $2 to $1 returned no $5: $(printf '%s' "$out" | head -c 200)" >&2
-    return 1
-  fi
-  printf '%s' "$value"
-}
-
-# countTransactions echoes "<total> <headHex>" and returns non-zero if any read failed. It never
-# touches $failures: see rpcRequire.
-countTransactions() { # countTransactions <ethURL>
-  local url=$1 headHex total=0 n c
-  headHex=$(rpcRequire "$url" eth_getBlockByNumber '["latest", false]' "['result']['number']" "head block number") || return 1
-  for n in $(python3 -c "print(' '.join(hex(i) for i in range(0, int('$headHex', 16) + 1)))"); do
-    c=$(rpcRequire "$url" eth_getBlockTransactionCountByNumber "[\"$n\"]" "['result']" "transaction count for block $n") || return 1
-    total=$((total + $((c))))
-  done
-  echo "$total $headHex"
-}
-
-# assertNoTransactions runs entirely in the PARENT shell, so its fail() actually counts.
-assertNoTransactions() { # assertNoTransactions <label> <ethURL>
-  local label=$1 url=$2 out rc total headHex
-  out=$(countTransactions "$url" 2>&1)
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    fail "$label: could not read the executor's blocks, so 'no transactions' is unproven: $(echo "$out" | tail -1)"
-    return 1
-  fi
-  total=$(echo "$out" | tail -1 | cut -d' ' -f1)
-  headHex=$(echo "$out" | tail -1 | cut -d' ' -f2)
-  if [ "$total" -eq 0 ]; then
-    pass "$label: every canonical block, genesis through $headHex, contains zero transactions"
-  else
-    fail "$label: $total transactions executed — this lane must demonstrate recovery with no new activity"
-  fi
-}
 
 for i in $(seq 1 "$validators"); do
   up=false
@@ -212,18 +355,6 @@ done
 ./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1 || {
   fail "devnet did not start"; tail -20 test-nodes/start-evm.log >&2; exit 1; }
 
-# countIn is grep -c that always prints exactly one integer. `grep -c` exits 1 when the count is
-# zero, so the obvious `$(grep -c ... || echo 0)` prints "0\n0" and every numeric test after it is a
-# syntax error rather than a false — which is how a broken wait loop reads as "no certificates".
-countIn() { local n; n=$(grep -c "$2" "$1" 2>/dev/null | head -1); echo "${n:-0}"; }
-
-waitFor() { # waitFor <file> <pattern> <count> <seconds>
-  for _ in $(seq 1 "$4"); do
-    [ "$(countIn "$1" "$2")" -ge "$3" ] && return 0
-    sleep 1
-  done
-  return 1
-}
 waitFor test-nodes/evm1/debug.log "accepted certificate" 6 120 || { fail "the shard never certified 6 rounds"; exit 1; }
 
 nonQuiet=$(countIn test-nodes/evm1/debug.log "quiet=false")
@@ -369,8 +500,12 @@ done
 reached="all sections"
 echo
 echo "=== 4. provenance ==="
-writeManifest
-cat "$artifactDir/manifest.txt"
+if writeManifest; then
+  pass "run artifact written to $artifactDir"
+  cat "$artifactDir/manifest.txt"
+else
+  fail "no run artifact could be written, so this run is not evidence"
+fi
 
 echo
 if [ "$failures" -eq 0 ]; then
