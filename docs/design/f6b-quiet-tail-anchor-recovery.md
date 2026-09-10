@@ -1030,7 +1030,7 @@ Helpers now return non-zero and print to stderr; only the parent shell counts.
 ### 6.7 The missed-block acceptance run, measured
 
 `scripts/f6b-missed-block-recovery.sh`, same pinned reth, same three-validator topology, run
-`20260910T071425Z`, whose manifest records repository revision `05c9e417` and a clean worktree —
+`20260910T072801Z`, whose manifest records repository revision `3afd705b` and a clean worktree —
 the only later commit on this branch is this entry. Every number below is that run's, and the run was
 repeated three times consecutively with the same result. It exists for the one thing §6.6 names and cannot show: **P-id's ordinary
 comparison**, a head-hash match against a certified block that is not the shard's first.
@@ -1056,9 +1056,9 @@ must be unable to report that result by accident.
 
 | | Control (`--evidence-recover` off, the default) | Recovery (`--evidence-recover`) |
 |---|---|---|
-| certificates after restart | 6 | 11 |
-| executor head | block 1, unchanged, while the shard is certified through block 3 | block 3 `0x997c974f…`, the certified block |
-| refusals | 6 × `cannot identify the certified block to recover to` | 2 while evidence was being fetched, none in the 6 certificates after adoption |
+| certificates after restart | 6 | 8 |
+| executor head | block 1, unchanged, while the shard is certified through block 3 | block 3 `0x0fcbe243…`, the certified block |
+| refusals | 6 × `cannot identify the certified block to recover to` | 2 while evidence was being fetched, none in the 3 certificates after adoption |
 | anchor adopted | none | yes, one attempt, zero restarts |
 | voting | NON-VOTING | NON-VOTING, signed nothing |
 | transactions executed | 3, all before the restart | 3, all before the restart |
@@ -1073,13 +1073,13 @@ node obtained authenticated evidence in one attempt, drove its executor from blo
 satisfied P-id by an exact block-hash match against the block the validators that stayed up agree
 they certified — a value read from *them*, not from the recovering node's own log, and re-read at the
 end of the run so a head that moved underneath the comparison could not have been the claim. It then
-refused nothing over the six certificates that followed, and it still did not vote.
+refused nothing over the certificates that followed, and it still did not vote.
 
 **What it does not establish.** The acquisition source, still — see §8, which this run does not
 close. reth1 logged `Received forkchoice updated message when syncing` and added blocks 2 and 3
-within 62 ms of the commit, so it did not hold them *canonically* during the outage; whether it
-fetched them then or already had the bodies buffered from gossip is not something that distinguishes,
-and no inference is drawn from it here. The run preserves `reth1.log` in its artifact so the
+within 40 ms of the commit, so it did not hold them *canonically* during the outage; whether it
+fetched them then or already had the bodies buffered from gossip is not something a few tens of
+milliseconds distinguishes, and no inference is drawn from it here. The run preserves `reth1.log` in its artifact so the
 controlled peer-connectivity experiment §8 asks for has a starting point rather than a guess.
 
 **The defect this lane found in itself, which is the same one twice over.** Its precondition —
@@ -1219,12 +1219,12 @@ payload-fetch mechanism is justified yet**, and the way to establish the existin
 RPC/network trace of the execution client, or a controlled peer-connectivity experiment that varies
 which peers hold the missing block. That is the next measurement, not a design conclusion.
 
-**§6.7's run does not close it either, and adds one fact to it.** In run `20260910T071425Z` the
+**§6.7's run does not close it either, and adds one fact to it.** In run `20260910T072801Z` the
 recovering reth was running, peered to two others and gossiping for the whole outage, and its
 canonical head did not move: it reported `Received forkchoice updated message when syncing` at the
-commit, then added blocks 2 and 3 and committed the chain within 62 ms. So the missed blocks were
+commit, then added blocks 2 and 3 and committed the chain within 40 ms. So the missed blocks were
 not canonical during the outage — which is a statement about the fork-choice head and nothing more.
-Sixty-two milliseconds does not distinguish a fetch from a buffered body, and the experiment that would
+Forty milliseconds does not distinguish a fetch from a buffered body, and the experiment that would
 is still the one described above: vary which peers hold the missing block.
 
 **Consequence for the design, which is unaffected either way.** Evidence retrieval and payload
