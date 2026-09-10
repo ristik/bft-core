@@ -195,6 +195,56 @@ waitForHead() { # waitForHead <ethURL> <decimalNumber> <seconds>
   return 1
 }
 
+# --- quietness, measured as a TAIL rather than as a total ---------------------------------------
+#
+# A shard is quiet NOW or it is not, and "there are four quiet rounds in this log" does not say
+# which. Counting cumulatively was a real defect: the missed-block lane waited for four quiet rounds
+# in a log that already held nine from before the transactions were submitted, so the wait returned
+# instantly and the node was restarted while the certificate naming the block it had missed was
+# still the newest one. The root chain hands a returning node the LATEST certificate, so that node
+# was handed the answer — which is precisely the F1 baseline's "recovery from new activity" (§1),
+# arriving by accident inside the lane built to rule it out. One run in four lost that race.
+#
+# Both functions below therefore measure against the most recent NON-quiet round in any of the given
+# logs, not against the start of the file. Quietness is only logged by the round's LEADER
+# (round.go's "submitting block certification request"), so several logs are read together: no
+# single validator leads every round.
+#
+# Log lines begin `time=<RFC3339 with a fixed offset>`, which sorts lexically in timestamp order, and
+# all of these logs are written by the same process family with the same format.
+markNow() { date +time=%Y-%m-%dT%H:%M:%S; }
+
+# nonQuietSince counts non-quiet rounds logged after <mark> across <log...>. A line from the same
+# whole second as the mark counts as after it, which can only produce a false FAILURE, never a false
+# pass — the direction an assertion about "nothing happened" has to err in.
+nonQuietSince() { # nonQuietSince <mark> <log...>
+  local mark=$1; shift
+  grep -h "quiet=false" "$@" 2>/dev/null | awk -v t="$mark" '$1 > t' | wc -l | tr -d ' '
+}
+
+quietSince() { # quietSince <mark> <log...>
+  local mark=$1; shift
+  grep -h "quiet=true" "$@" 2>/dev/null | awk -v t="$mark" '$1 > t' | wc -l | tr -d ' '
+}
+
+# waitForQuietTail blocks until at least <want> quiet rounds have been logged across <log...> SINCE
+# the most recent non-quiet round in any of them — that is, until the shard has a quiet tail of that
+# length right now. If a block is certified while it waits, the boundary moves and the count starts
+# again, which is the correct behaviour and not something the caller has to arrange. It echoes the
+# tail length it settled on.
+waitForQuietTail() { # waitForQuietTail <want> <seconds> <log...>
+  local want=$1 secs=$2; shift 2
+  local last n=0
+  for _ in $(seq 1 "$secs"); do
+    last=$(grep -h "quiet=false" "$@" 2>/dev/null | awk '{print $1}' | sort | tail -1)
+    n=$(quietSince "${last:-time=0}" "$@")
+    [ "${n:-0}" -ge "$want" ] && { echo "$n"; return 0; }
+    sleep 1
+  done
+  echo "${n:-0}"
+  return 1
+}
+
 manifestWritten=0
 # writeManifest returns non-zero if it could not leave an artifact behind, and marks itself done
 # only when it actually wrote one.
@@ -393,6 +443,40 @@ f6bSelfTest() {
     echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
   else echo "  PASS: $desc"; fi
   unset -f rpc
+
+  # THE STALE-QUIETNESS DEFECT, reproduced. A log holding four quiet rounds followed by a block must
+  # report a quiet TAIL of zero. Reading it as four is what restarted the recovering node while the
+  # certificate naming its missed block was still the newest one.
+  desc="quiet rounds before a block are not a quiet tail"
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/f6b-quiet.XXXXXX") || return 1
+  {
+    echo 'time=2026-01-01T00:00:01.0000+0000 msg="submitting block certification request" quiet=true'
+    echo 'time=2026-01-01T00:00:02.0000+0000 msg="submitting block certification request" quiet=true'
+    echo 'time=2026-01-01T00:00:03.0000+0000 msg="submitting block certification request" quiet=true'
+    echo 'time=2026-01-01T00:00:04.0000+0000 msg="submitting block certification request" quiet=true'
+    echo 'time=2026-01-01T00:00:05.0000+0000 msg="submitting block certification request" quiet=false'
+  } >"$scratch/stale.log"
+  if [ "$(waitForQuietTail 1 1 "$scratch/stale.log")" = "0" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc — reported $(waitForQuietTail 1 1 "$scratch/stale.log")"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="quiet rounds after the last block are a quiet tail"
+  echo 'time=2026-01-01T00:00:06.0000+0000 msg="submitting block certification request" quiet=true' >>"$scratch/stale.log"
+  echo 'time=2026-01-01T00:00:07.0000+0000 msg="submitting block certification request" quiet=true' >>"$scratch/stale.log"
+  if [ "$(waitForQuietTail 2 1 "$scratch/stale.log")" = "2" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="a block after the mark is counted, one before it is not"
+  a=$(nonQuietSince "time=2026-01-01T00:00:04" "$scratch/stale.log")
+  b=$(nonQuietSince "time=2026-01-01T00:00:06" "$scratch/stale.log")
+  if [ "$a" = "1" ] && [ "$b" = "0" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc — since 00:00:04 saw $a, since 00:00:06 saw $b"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="the tail is read across every log, not just the first"
+  cp "$scratch/stale.log" "$scratch/other.log"
+  echo 'time=2026-01-01T00:00:08.0000+0000 msg="submitting block certification request" quiet=false' >>"$scratch/other.log"
+  if [ "$(waitForQuietTail 1 1 "$scratch/stale.log" "$scratch/other.log")" = "0" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc — a block seen only by the second validator did not move the boundary"; selfFailures=$((selfFailures + 1)); fi
+  rm -rf "$scratch"
 
   desc="an artifact directory that cannot be created fails the run"
   artifactDir=/dev/null/not-a-directory

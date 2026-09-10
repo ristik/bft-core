@@ -318,14 +318,24 @@ fi
 # AND THE SHARD IS QUIET AGAIN, so the returning node is not handed a non-quiet certificate that
 # would name the block for it. That is how the F1 baseline "recovered" (§1) and it is the one way
 # this lane must not.
-waitFor "test-nodes/evm2/debug.log" "quiet=true" 4 120 || { fail "the shard never went quiet after the last transaction"; exit 1; }
-pass "the shard is quiet again: $(countIn test-nodes/evm2/debug.log 'quiet=true') quiet rounds, so nothing arriving names the missed block"
+# A QUIET TAIL AS OF NOW, not four quiet rounds somewhere in the file. The root chain hands a
+# returning node the LATEST certificate, so if the newest certificate is still the non-quiet one that
+# names the missed block, the node is handed the answer and recovers by the live path — the F1
+# baseline's "recovery from new activity" (§1), inside the lane built to rule it out. An earlier
+# version of this wait counted cumulatively, was satisfied by quiet rounds from before the
+# transactions were even submitted, and lost that race once in four runs.
+providerLogs=""
+for i in $(seq 2 "$validators"); do providerLogs="$providerLogs test-nodes/evm$i/debug.log"; done
+quietTail=$(waitForQuietTail 4 180 $providerLogs) \
+  || { fail "the shard never went quiet after the last transaction: tail is $quietTail quiet round(s)"; exit 1; }
+pass "the shard is quiet again: $quietTail quiet rounds since the last block, so the newest certificate names nothing"
 
 assertTransactionCount "before the first restart" "$peerEth" "$setupTxs" "all of them submitted before validator 1 returned"
 
 echo
 reached="section 3: control arm"
 echo "=== 3. CONTROL: the same node with recovery off stays behind for ever ==="
+controlMark=$(markNow)
 restartValidator1
 waitFor test-nodes/evm1/debug.log "accepted certificate" 5 120 || { fail "the restarted node received no certificates"; exit 1; }
 
@@ -357,11 +367,21 @@ grep -q "NON-VOTING" test-nodes/evm1/debug.log \
   && pass "control: the resumed process is NON-VOTING (P-sign, #105)" \
   || fail "control: the resumed process did not declare itself non-voting"
 assertTransactionCount "control arm" "$peerEth" "$setupTxs" "nothing new executed while the node was refusing"
+# AND NO BLOCK WAS CERTIFIED WHILE THE ARM RAN. This is the direct form of "no new activity helped
+# it": not "no transaction was submitted", which is a statement about what this script did, but "no
+# non-quiet round was certified", which is a statement about what the shard did.
+controlBlocks=$(nonQuietSince "$controlMark" $providerLogs)
+if [ "$controlBlocks" = "0" ]; then
+  pass "control arm: not one non-quiet round was certified while it ran — nothing arriving could have named the missed block"
+else
+  fail "control arm: $controlBlocks non-quiet round(s) were certified while it ran, so the arm was not run over a quiet shard"
+fi
 cp test-nodes/evm1/debug.log test-nodes/evm1/control.log
 
 echo
 reached="section 4: recovery arm"
 echo "=== 4. RECOVERY: the same node, same devnet, --evidence-recover ==="
+recoveryMark=$(markNow)
 restartValidator1 --evidence-recover
 waitFor test-nodes/evm1/debug.log "accepted certificate" 6 180 || { fail "the restarted node received no certificates"; exit 1; }
 # The applier commits, and a reth that does not hold the block reports SYNCING — a retryable outcome
@@ -435,6 +455,16 @@ if grep -q "NON-VOTING" test-nodes/evm1/debug.log && [ "$signed" -eq 0 ]; then
   pass "signing refusal unchanged: still NON-VOTING, and it signed nothing after recovering (P-sign, #105)"
 else
   fail "a recovered node must not sign: NON-VOTING=$(countIn test-nodes/evm1/debug.log NON-VOTING) submissions=$signed"
+fi
+
+# THE SAME QUESTION FOR THE ARM THAT MATTERS. If a block had been certified while this arm ran, the
+# recovery would be attributable to a certificate that names the block rather than to the evidence,
+# and every claim above it would be about the wrong thing.
+recoveryBlocks=$(nonQuietSince "$recoveryMark" $providerLogs)
+if [ "$recoveryBlocks" = "0" ]; then
+  pass "recovery arm: not one non-quiet round was certified while it ran — the anchor came from the evidence, not from a certificate that named the block"
+else
+  fail "recovery arm: $recoveryBlocks non-quiet round(s) were certified while it ran, so this run does not separate evidence from new activity"
 fi
 
 # THE SUBJECT OF THE COMPARISON DID NOT MOVE UNDER THE LANE. certifiedHash was read at the end of

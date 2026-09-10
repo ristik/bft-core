@@ -161,12 +161,18 @@ done
 
 waitFor test-nodes/evm1/debug.log "accepted certificate" 6 120 || { fail "the shard never certified 6 rounds"; exit 1; }
 
-nonQuiet=$(countIn test-nodes/evm1/debug.log "quiet=false")
-quiet=$(countIn test-nodes/evm1/debug.log "quiet=true")
+# Measured as a TAIL — quiet rounds since the last non-quiet one — rather than as a total. On this
+# lane the two happen to agree, because nothing here can ever execute and only the shard's first
+# round is non-quiet; the weaker form is dropped anyway, because it is the form that let the
+# missed-block lane restart its node while the certificate naming the missed block was still the
+# newest one. See the library.
+allLogs=""
+for i in $(seq 1 "$validators"); do allLogs="$allLogs test-nodes/evm$i/debug.log"; done
+quiet=$(waitForQuietTail 4 120 $allLogs)
 if [ "$quiet" -ge 4 ]; then
-  pass "a quiet tail formed: $quiet quiet rounds and $nonQuiet non-quiet"
+  pass "a quiet tail formed: $quiet quiet rounds since the last non-quiet one"
 else
-  fail "no quiet tail formed; saw non-quiet=$nonQuiet quiet=$quiet"
+  fail "no quiet tail formed; the tail is $quiet quiet round(s)"
 fi
 # MEASURED CORRECTION, from this lane's own first run: a round can be non-quiet WITHOUT a
 # transaction. "No transaction" is therefore asserted against the executor's own blocks rather than
