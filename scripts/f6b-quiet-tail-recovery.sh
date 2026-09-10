@@ -78,21 +78,22 @@ countTransactions() { # countTransactions <ethURL>
   # that json-decoded fine — made the python expansion below raise, which emptied the loop, which
   # left total at 0, which read as "no transactions". A range this lane could not construct is a
   # question it could not ask, and it must say so rather than answer it with a zero.
-  case "$headHex" in
-    0x[0-9a-fA-F]*) ;;
-    *) echo "head block number from $url is not a hex quantity: '$headHex'" >&2; return 1 ;;
-  esac
+  if ! [[ "$headHex" =~ ^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$ ]]; then
+    echo "head block number from $url is not a hex quantity: '$headHex'" >&2
+    return 1
+  fi
   numbers=$(python3 -c "print(' '.join(hex(i) for i in range(0, int('$headHex', 16) + 1)))" 2>/dev/null) || {
     echo "could not enumerate blocks 0..$headHex from $url" >&2; return 1; }
   [ -n "$numbers" ] || { echo "no block numbers to check between 0 and $headHex from $url" >&2; return 1; }
 
   for n in $numbers; do
     c=$(rpcRequire "$url" eth_getBlockTransactionCountByNumber "[\"$n\"]" "['result']" "transaction count for block $n") || return 1
-    case "$c" in
-      0x[0-9a-fA-F]*) ;;
-      *) echo "transaction count for block $n from $url is not a hex quantity: '$c'" >&2; return 1 ;;
-    esac
-    total=$((total + $((c))))
+    if ! [[ "$c" =~ ^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$ ]]; then
+      echo "transaction count for block $n from $url is not a hex quantity: '$c'" >&2
+      return 1
+    fi
+    # Do not interpret RPC text as shell arithmetic or allow machine-integer wraparound.
+    total=$(python3 -c "print(int('$total') + int('$c', 16))") || return 1
   done
   echo "$total $headHex"
 }
@@ -108,7 +109,7 @@ assertNoTransactions() { # assertNoTransactions <label> <ethURL>
   fi
   total=$(echo "$out" | tail -1 | cut -d' ' -f1)
   headHex=$(echo "$out" | tail -1 | cut -d' ' -f2)
-  if [ "$total" -eq 0 ]; then
+  if [ "$total" = "0" ]; then
     pass "$label: every canonical block, genesis through $headHex, contains zero transactions"
   else
     fail "$label: $total transactions executed — this lane must demonstrate recovery with no new activity"
@@ -127,7 +128,7 @@ waitFor() { # waitFor <file> <pattern> <count> <seconds>
   return 1
 }
 
-artifactDir="${F6B_ARTIFACT_DIR:-artifacts/f6b-acceptance/$(date -u +%Y%m%dT%H%M%SZ)}"
+artifactDir="${F6B_ARTIFACT_DIR:-artifacts/f6b-acceptance/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 manifestWritten=0
 # writeManifest returns non-zero if it could not leave an artifact behind, and marks itself done
 # only when it actually wrote one.
@@ -144,8 +145,22 @@ writeManifest() {
   fi
   # Copy first, then hash the copies: a digest of a file a running node is still appending to
   # describes nothing anybody can check later.
+  local f digest logDigests=""
   for f in test-nodes/evm1/control.log $(seq -f "test-nodes/evm%g/debug.log" 1 "$validators"); do
-    [ -f "$f" ] && cp "$f" "$artifactDir/logs/$(echo "$f" | tr '/' '_')" 2>/dev/null
+    if [ ! -f "$f" ]; then
+      if [ "${reached:-startup}" = "all sections" ]; then
+        echo "  FAIL: required evidence log is missing: $f" >&2
+        return 1
+      fi
+      continue # an early failure may precede this arm's startup
+    fi
+    if ! cp "$f" "$artifactDir/logs/$(echo "$f" | tr '/' '_')"; then
+      echo "  FAIL: could not preserve evidence log: $f" >&2
+      return 1
+    fi
+    digest=$(shasum -a 256 "$artifactDir/logs/$(echo "$f" | tr '/' '_')") || return 1
+    logDigests="$logDigests  $digest
+"
   done
   {
     echo "f6b quiet-tail recovery acceptance run"
@@ -161,9 +176,7 @@ writeManifest() {
     echo "reached:         ${reached:-startup}"
     echo
     echo "digests of the COPIED logs in $artifactDir/logs:"
-    for f in "$artifactDir"/logs/*; do
-      [ -f "$f" ] && echo "  $(shasum -a 256 "$f")"
-    done
+    printf '%s' "$logDigests"
   } >"$artifactDir/manifest.txt" || {
     echo "  FAIL: could not write $artifactDir/manifest.txt — this run leaves no provenance" >&2
     return 1
@@ -224,6 +237,17 @@ if [ "${1:-}" = "--self-test" ]; then
   assertNoTransactions "malformed count" "http://127.0.0.1:9" >/dev/null 2>&1
   [ "$failures" -gt "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); }
 
+  desc="a hex-prefixed expression is not a transaction quantity"
+  before=$failures
+  rpc() {
+    case "$2" in
+      eth_getBlockByNumber) echo '{"result":{"number":"0x0"}}' ;;
+      *) echo '{"result":"0x1-1"}' ;;
+    esac
+  }
+  assertNoTransactions "expression count" unused >/dev/null 2>&1
+  [ "$failures" -gt "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); }
+
   desc="a well-formed answer of zero still passes"
   before=$failures
   rpc() {
@@ -247,6 +271,46 @@ if [ "${1:-}" = "--self-test" ]; then
   else
     echo "  PASS: $desc"
   fi
+
+  # Run the real writer in an isolated tree. A stale artifact must not mask a failed copy.
+  desc="a required copy failure cannot produce a successful manifest"
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/f6b-selftest.XXXXXX") || exit 1
+  if (
+    cd "$scratch" || exit 1
+    validators=1; reached="all sections"; manifestWritten=0
+    artifactDir="$scratch/artifact"
+    mkdir -p test-nodes/evm1 "$artifactDir/logs"
+    printf control > test-nodes/evm1/control.log
+    printf recovery > test-nodes/evm1/debug.log
+    printf stale > "$artifactDir/logs/stale.log"
+    # Inject a copy failure independently of user/root filesystem privileges.
+    cp() { return 1; }
+    if writeManifest >/dev/null 2>&1; then exit 1; fi
+    [ "$manifestWritten" -eq 0 ]
+  ); then echo "  PASS: $desc"; else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="a completed run requires every assertion log"
+  if (
+    cd "$scratch" || exit 1
+    validators=1; reached="all sections"; manifestWritten=0
+    artifactDir="$scratch/missing"
+    rm test-nodes/evm1/debug.log
+    if writeManifest >/dev/null 2>&1; then exit 1; fi
+    [ "$manifestWritten" -eq 0 ]
+  ); then echo "  PASS: $desc"; else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
+  desc="a complete artifact contains verifiable copied logs"
+  if (
+    cd "$scratch" || exit 1
+    validators=1; reached="all sections"; manifestWritten=0
+    artifactDir="$scratch/complete"
+    printf recovery > test-nodes/evm1/debug.log
+    writeManifest >/dev/null 2>&1 || exit 1
+    [ "$manifestWritten" -eq 1 ] || exit 1
+    cmp test-nodes/evm1/control.log "$artifactDir/logs/test-nodes_evm1_control.log" || exit 1
+    cmp test-nodes/evm1/debug.log "$artifactDir/logs/test-nodes_evm1_debug.log" || exit 1
+    grep '^  [0-9a-f]' "$artifactDir/manifest.txt" | shasum -a 256 -c >/dev/null
+  ); then echo "  PASS: $desc"; else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
+  rm -rf "$scratch"
 
   echo
   if [ "$selfFailures" -eq 0 ]; then
