@@ -1233,8 +1233,9 @@ forkchoice update and the two blocks appearing does not distinguish a fetch from
 ### 8.1 The experiment, run — and the answer
 
 `scripts/f6b-execution-peer-isolation.sh` is that controlled experiment, and it settles the question
-for this configuration. One variable changes across its two arms: the returning client's
-**execution-layer** peering. BFT transport is untouched throughout — libp2p bootnodes and localhost
+for this configuration. Run `20260910T082058Z`, whose manifest records repository revision
+`83fbfefd` and a clean worktree; three consecutive runs produced the same outcome. One variable
+changes across its two arms: the returning client's **execution-layer** peering. BFT transport is untouched throughout — libp2p bootnodes and localhost
 engine/eth endpoints — so evidence retrieval has exactly the connectivity it always had.
 
 Isolation is **read, never assumed.** `admin_removePeer` returns true for a peer that was never
@@ -1257,14 +1258,17 @@ flag changed. Within about two seconds the client established its sessions and t
 mechanism itself:
 
 ```
-08:12:41.154  DEBUG net: Session established  remote_addr=127.0.0.1:63655  client_version=reth/v2.5.0-189c0df
-08:12:41.167  DEBUG net: Session established  remote_addr=127.0.0.1:63658
-08:12:41.189  DEBUG engine::tree: received new engine message msg=DownloadedBlocks(1 blocks)
-08:12:41.208  DEBUG on_downloaded_block{block_hash=0xbb5f6ba1… block_num=3}
-08:12:41.251  DEBUG on_downloaded_block{block_hash=0x18aa9cf2… block_num=2}
-08:12:41.399  INFO  Block added to canonical chain number=2
-08:12:41.401  INFO  Block added to canonical chain number=3
-08:12:41.401  INFO  Canonical chain committed number=3
+08:22:34  isolation confirmed: subject peers=0, survivors peers=1 (still peered with each other)
+08:23:12  blocks 2 and 3 certified by the survivors; subject still peers=0, logs no block beyond 1
+08:23:42  execution peers restored — no transaction submitted, no restart, no flag changed
+08:23:44.555  DEBUG net: Session established  remote_addr=127.0.0.1:64598  client_version=reth/v2.5.0-189c0df
+08:23:44.574  DEBUG net: Session established  remote_addr=127.0.0.1:30403
+08:23:44.616  DEBUG engine::tree: received new engine message msg=DownloadedBlocks(1 blocks)
+08:23:44.636  DEBUG on_downloaded_block{block_hash=0xc21ca5bf… block_num=3}
+08:23:44.678  DEBUG on_downloaded_block{block_hash=0xda80922a… block_num=2}
+08:23:44.681  INFO  Block added to canonical chain number=2
+08:23:44.682  INFO  Block added to canonical chain number=3
+08:23:44.682  INFO  Canonical chain committed number=3
 ```
 
 **The answer, stated no wider than the evidence.** In this configuration the missed blocks are
@@ -1272,7 +1276,9 @@ acquired by the execution client's **own block download from its execution-layer
 a forkchoice update naming a descendant it does not hold — not from gossip received during the
 outage, which the isolation rules out, and not by any BFT-side fetch, of which there is none. The
 receipts for both missed transactions on the recovered subject name the same block number and block
-hash as on a survivor, so this is the same chain and not merely the same head hash.
+hash as on a survivor, so this is the same chain and not merely the same head hash. The interval
+from the last confirmed isolation reading to the first session is a minute and eight seconds; the
+interval from the first session to the committed chain is 127 ms.
 
 **What it still does not establish.** One run, three validators, a two-block gap, and peers that all
 held the missing blocks. It says nothing about a longer outage, a subject whose only peers do *not*
