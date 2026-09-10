@@ -1106,8 +1106,8 @@ while it ran.
 This observes the provider processes rather than inferring quietness solely from the script
 refraining from transaction submission.
 
-**One implementation of the assertions, not two.** Both lanes now source
-`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on either runs the same twenty-three checks over
+**One implementation of the assertions, not three.** All three lanes source
+`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same twenty-nine checks over
 the same helpers. Every one of those helpers guards a NEGATIVE claim, every one of them has been a
 defect at least once, and a second copy in a second lane is the argument `anchorHeadIdentity` settles
 in `shardnode/anchor.go`: two copies of a comparison that gates a conclusion is one copy too many,
@@ -1221,18 +1221,67 @@ about **availability in general**:
   partitioned peer set, or a node with no peers holding the block.
 
 An earlier revision of this record said "ancestor acquisition is already solved by the execution
-client". That overstates the evidence and has been withdrawn. The accurate statement is: **no custom
-payload-fetch mechanism is justified yet**, and the way to establish the existing path properly is an
-RPC/network trace of the execution client, or a controlled peer-connectivity experiment that varies
-which peers hold the missing block. That is the next measurement, not a design conclusion.
+client". That overstated the evidence and was withdrawn; the replacement statement was that the way
+to establish the existing path properly is a network trace of the execution client, or a controlled
+peer-connectivity experiment that varies which peers hold the missing block.
 
-**§6.7's run does not close it either, and adds one fact to it.** In run `20260910T072801Z` the
-recovering reth was running, peered to two others and gossiping for the whole outage, and its
-canonical head did not move: it reported `Received forkchoice updated message when syncing` at the
-commit, then added blocks 2 and 3 and committed the chain within 40 ms. So the missed blocks were
-not canonical during the outage — which is a statement about the fork-choice head and nothing more.
-Forty milliseconds does not distinguish a fetch from a buffered body, and the experiment that would
-is still the one described above: vary which peers hold the missing block.
+**§6.7's run did not close it either**, and added one fact: in run `20260910T072801Z` the recovering
+reth was running, peered and gossiping for the whole outage, and its canonical head did not move —
+which is a statement about the fork-choice head and nothing more. Forty milliseconds between the
+forkchoice update and the two blocks appearing does not distinguish a fetch from a buffered body.
+
+### 8.1 The experiment, run — and the answer
+
+`scripts/f6b-execution-peer-isolation.sh` is that controlled experiment, and it settles the question
+for this configuration. One variable changes across its two arms: the returning client's
+**execution-layer** peering. BFT transport is untouched throughout — libp2p bootnodes and localhost
+engine/eth endpoints — so evidence retrieval has exactly the connectivity it always had.
+
+Isolation is **read, never assumed.** `admin_removePeer` returns true for a peer that was never
+connected, for one already gone, and for one it will re-dial a second later, so the premise is
+established from both ends — the subject's own peer count, its own session list, and every
+survivor's session list — and re-read for ten seconds before the window opens and again after the
+missed blocks exist. The survivors keep their peering with **each other**, checked, so this is a
+targeted isolation and not a network partition. reth is run with `--no-persist-peers` for exactly
+this reason: a client that reloads its peer file re-dials the sessions the experiment severed.
+
+**Isolated arm.** With the subject's client holding zero execution peers for the whole window in
+which blocks 2 and 3 were certified — and its own log recording no block beyond 1 — the node still
+obtained and verified the anchor over BFT in one attempt, and named the survivors' certified block.
+It then **failed closed**: `payload-unavailable`, `retryable=true`, the verified target retained and
+retried, nothing adopted, the executor unmoved, nothing signed. The anchor was correct and the block
+was simply not obtainable, which is the distinction the outcome vocabulary of §4.1 exists to make.
+
+**Reconnected arm.** Execution peers restored; no transaction submitted, no shard node restarted, no
+flag changed. Within about two seconds the client established its sessions and the trace names the
+mechanism itself:
+
+```
+08:12:41.154  DEBUG net: Session established  remote_addr=127.0.0.1:63655  client_version=reth/v2.5.0-189c0df
+08:12:41.167  DEBUG net: Session established  remote_addr=127.0.0.1:63658
+08:12:41.189  DEBUG engine::tree: received new engine message msg=DownloadedBlocks(1 blocks)
+08:12:41.208  DEBUG on_downloaded_block{block_hash=0xbb5f6ba1… block_num=3}
+08:12:41.251  DEBUG on_downloaded_block{block_hash=0x18aa9cf2… block_num=2}
+08:12:41.399  INFO  Block added to canonical chain number=2
+08:12:41.401  INFO  Block added to canonical chain number=3
+08:12:41.401  INFO  Canonical chain committed number=3
+```
+
+**The answer, stated no wider than the evidence.** In this configuration the missed blocks are
+acquired by the execution client's **own block download from its execution-layer peers**, prompted by
+a forkchoice update naming a descendant it does not hold — not from gossip received during the
+outage, which the isolation rules out, and not by any BFT-side fetch, of which there is none. The
+receipts for both missed transactions on the recovered subject name the same block number and block
+hash as on a survivor, so this is the same chain and not merely the same head hash.
+
+**What it still does not establish.** One run, three validators, a two-block gap, and peers that all
+held the missing blocks. It says nothing about a longer outage, a subject whose only peers do *not*
+hold the block, a partitioned survivor set, or a client other than reth at this commit. The negative
+arm was never exercised against a peer set that could not help — that variation, not this one, is
+what would bound the mechanism rather than identify it.
+
+**So: no custom payload-fetch mechanism is justified.** The existing path is now identified rather
+than assumed, and the fail-closed behaviour when it cannot deliver is measured rather than argued.
 
 **Consequence for the design, which is unaffected either way.** Evidence retrieval and payload
 acquisition stay separate decisions. The predicate answers only the first. A node that has a verified
@@ -1263,8 +1312,8 @@ anchor cursor in §5 is for, and what `VerifiedTargetSurvivesAnUnavailablePayloa
 Recovery across an epoch transition (§3.1); which peers a node asks and how that set is chosen
 (§6.3 takes it as an injected source and decides nothing about it); production startup wiring for the buffer, the server, the requester
 and the applier alike, and the measured acceptance runs against a real client across a quiet tail
-(§6.6) and after a genuinely missed block (§6.7);
+(§6.6), after a genuinely missed block (§6.7), and under controlled execution-peer isolation (§8.1);
 whether the serving buffer of §6.1 is ever persisted; whether the root chain should serve historical certificates as a second source
-(§6c); durable retained history and the signing record (#14, #105); and the acquisition-source
-measurement §8 does not have. #16 remains open, including "Too deep reorg", and nothing here claims
+(§6c); durable retained history and the signing record (#14, #105); and the bound on payload acquisition that
+§8.1 identifies but does not measure — a subject whose peers do not hold the missing block. #16 remains open, including "Too deep reorg", and nothing here claims
 to explain it.

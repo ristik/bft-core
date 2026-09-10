@@ -267,6 +267,105 @@ waitForLinesAfter() { # waitForLinesAfter <file> <mark> <after> <want> <seconds>
   return 1
 }
 
+# --- execution-layer peer connectivity, confirmed rather than assumed --------------------------
+#
+# `admin_removePeer` returns `true` for a peer that was never connected, for one that is already
+# gone, and for one it will re-dial a second later. An experiment whose premise is "this client
+# could not have obtained the block from anywhere" cannot rest on the return value of the call that
+# was supposed to arrange that: it has to READ the connectivity afterwards, from both ends, and keep
+# reading it while the window it matters in is open.
+
+peerCount() { # peerCount <ethURL> — echoes a decimal count, non-zero status if it could not be read
+  local n
+  n=$(rpcRequire "$1" net_peerCount '[]' "['result']" "peer count") || return 1
+  isQuantity "$n" || { echo "peer count from $1 is not a hex quantity: '$n'" >&2; return 1; }
+  python3 -c "print(int('$n', 16))"
+}
+
+# peerIds echoes the peer ids this client currently holds, one per line — the second, independent
+# reading of the same fact. net_peerCount and admin_peers are maintained separately, and a client
+# that reports zero while still listing a session has not been isolated.
+peerIds() { # peerIds <ethURL>
+  local out
+  out=$(rpc "$1" admin_peers '[]') || { echo "admin_peers to $1 failed" >&2; return 1; }
+  printf '%s' "$out" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for p in d.get('result') or []:
+    print(p.get('id', ''))
+" 2>/dev/null
+}
+
+# nodeEnodeID echoes this client's own enode ID (the 128 hex chars between // and @), which is what
+# a peer lists it as.
+nodeEnodeID() { # nodeEnodeID <ethURL>
+  local e
+  e=$(rpcRequire "$1" admin_nodeInfo '[]' "['result']['enode']" "enode") || return 1
+  printf '%s' "$e" | sed -n 's|^enode://\([0-9a-fA-F]*\)@.*|\1|p'
+}
+
+# holdsIsolation reads the isolation from BOTH ends and echoes "ok" or the reason it is not held.
+# It never touches $failures — the caller asserts.
+holdsIsolation() { # holdsIsolation <subjectEthURL> <subjectID> <peerEthURL...>
+  local url=$1 id=$2; shift 2
+  local n other ids
+  n=$(peerCount "$url") || { echo "could not read the subject's peer count"; return 1; }
+  [ "$n" = "0" ] || { echo "the subject still has $n execution peer(s)"; return 1; }
+  ids=$(peerIds "$url") || { echo "could not read the subject's peer list"; return 1; }
+  [ -z "$ids" ] || { echo "the subject reports no peer count but still lists sessions"; return 1; }
+  for other in "$@"; do
+    ids=$(peerIds "$other") || { echo "could not read $other's peer list"; return 1; }
+    if printf '%s' "$ids" | grep -qi "$id"; then
+      echo "$other still lists the subject as a peer"; return 1
+    fi
+  done
+  echo ok
+}
+
+# waitForIsolation polls holdsIsolation until it holds, then keeps reading for <hold> more seconds to
+# catch a client that re-dials a moment later. A single sample is not isolation.
+waitForIsolation() { # waitForIsolation <subjectEthURL> <subjectID> <secs> <hold> <peerEthURL...>
+  local url=$1 id=$2 secs=$3 hold=$4; shift 4
+  local r
+  for _ in $(seq 1 "$secs"); do
+    r=$(holdsIsolation "$url" "$id" "$@")
+    [ "$r" = "ok" ] && break
+    sleep 1
+  done
+  [ "$r" = "ok" ] || { echo "$r"; return 1; }
+  for _ in $(seq 1 "$hold"); do
+    sleep 1
+    r=$(holdsIsolation "$url" "$id" "$@")
+    [ "$r" = "ok" ] || { echo "isolation did not hold: $r"; return 1; }
+  done
+  echo ok
+}
+
+waitForPeers() { # waitForPeers <ethURL> <want> <secs> — echoes the count it settled on
+  local url=$1 want=$2 secs=$3 n=0
+  for _ in $(seq 1 "$secs"); do
+    n=$(peerCount "$url") || n=0
+    [ "$n" -ge "$want" ] && { echo "$n"; return 0; }
+    sleep 1
+  done
+  echo "$n"
+  return 1
+}
+
+# receiptIdentity echoes "<blockNumber> <blockHash>" for a transaction, both validated. It is the
+# identity check that head-hash equality cannot make: two clients agreeing on a head hash while
+# disagreeing about which block a transaction landed in would be a client defect this lane should
+# report rather than pass over.
+receiptIdentity() { # receiptIdentity <ethURL> <txHash>
+  local out num hash
+  out=$(rpc "$1" eth_getTransactionReceipt "[\"$2\"]") || { echo "receipt RPC to $1 failed" >&2; return 1; }
+  num=$(printf '%s' "$out" | pyget "['result']['blockNumber']")
+  hash=$(printf '%s' "$out" | pyget "['result']['blockHash']")
+  isQuantity "${num:-}" || { echo "receipt for $2 from $1 has no block number: '${num:-}'" >&2; return 1; }
+  isHash32 "${hash:-}" || { echo "receipt for $2 from $1 has no block hash: '${hash:-}'" >&2; return 1; }
+  echo "$num $hash"
+}
+
 manifestWritten=0
 # writeManifest returns non-zero if it could not leave an artifact behind, and marks itself done
 # only when it actually wrote one.
@@ -514,6 +613,71 @@ f6bSelfTest() {
     echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
   else echo "  PASS: $desc"; fi
   rm -rf "$scratch"
+
+  # ISOLATION IS READ, NEVER ASSUMED, AND READ FROM BOTH ENDS. Each of these is a way the premise
+  # "this client could not have obtained the block from anywhere" fails while a single reading says
+  # it holds.
+  desc="a peer count that is not a quantity is not zero peers"
+  rpc() { echo '{"result":"none"}'; }
+  if peerCount unused >/dev/null 2>&1; then echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a client reporting no peers while still listing a session is not isolated"
+  rpc() {
+    case "$2" in
+      net_peerCount) echo '{"result":"0x0"}' ;;
+      admin_peers) echo '{"result":[{"id":"beef"}]}' ;;
+    esac
+  }
+  if [ "$(holdsIsolation subject aaaa 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a survivor that still lists the subject means the subject is not isolated"
+  rpc() {
+    case "$1:$2" in
+      subject:net_peerCount) echo '{"result":"0x0"}' ;;
+      subject:admin_peers) echo '{"result":[]}' ;;
+      *:admin_peers) echo '{"result":[{"id":"AAAA"}]}' ;;
+    esac
+  }
+  if [ "$(holdsIsolation subject aaaa survivor 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc — the subject's own reading was taken as the whole answer"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="isolation confirmed from both ends reads as isolated"
+  rpc() {
+    case "$1:$2" in
+      subject:net_peerCount) echo '{"result":"0x0"}' ;;
+      *:admin_peers) echo '{"result":[]}' ;;
+    esac
+  }
+  if [ "$(holdsIsolation subject aaaa survivor 2>/dev/null)" = "ok" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc — a good isolation was rejected"; selfFailures=$((selfFailures + 1)); fi
+
+  # A SINGLE SAMPLE IS NOT ISOLATION. A client that re-dials a second later was never isolated for
+  # the window the experiment needs, and the whole result would rest on when the sample was taken.
+  desc="a client that re-dials during the hold window is not isolated"
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/f6b-peers.XXXXXX") || return 1
+  echo 0 >"$scratch/n"
+  rpc() {
+    local k; k=$(cat "$scratch/n"); echo $((k + 1)) >"$scratch/n"
+    case "$1:$2" in
+      subject:net_peerCount) [ "$k" -lt 4 ] && echo '{"result":"0x0"}' || echo '{"result":"0x1"}' ;;
+      *:admin_peers) echo '{"result":[]}' ;;
+    esac
+  }
+  if waitForIsolation subject aaaa 2 3 survivor >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+  rm -rf "$scratch"
+
+  desc="a receipt without a full block hash is not an identity"
+  rpc() { echo '{"result":{"blockNumber":"0x3","blockHash":"0xdead"}}'; }
+  if receiptIdentity unused 0xtx >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+  unset -f rpc
 
   desc="an artifact directory that cannot be created fails the run"
   artifactDir=/dev/null/not-a-directory
