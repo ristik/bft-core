@@ -920,10 +920,113 @@ was correct about its own half:
     that sentence implemented. It authorizes no signing: P-sign is `restoredFrom` and #105, enforced
     separately, and a restored process that recovers its execution identity still does not vote.
 
-**What is deliberately still open.** The measured acceptance run against a real reth across a quiet
-tail, with no transaction injected — the demonstration that the measurement in §1 now ends
-differently. That is a measurement of this wiring rather than a change to it, and it belongs in its
-own unit with its own evidence.
+### 6.6 The acceptance run, measured
+
+`scripts/f6b-quiet-tail-recovery.sh`, against reth at the pinned commit
+`189c0df32617afc488e0f091dbface1bd72cceb4`. Three validators, one reth each, on the shard's own
+generated chain spec. It runs **two arms against the same devnet**, which is what makes it evidence
+rather than a demonstration.
+
+| | Control (`--evidence-recover` off, the default) | Recovery (`--evidence-recover`) |
+|---|---|---|
+| certificates after restart | 5, all quiet | 6, all quiet |
+| anchor adopted | none | yes, one attempt, zero restarts |
+| refusals | throughout: refused, adopted nothing, signed nothing | none in the certificates after adoption |
+| voting | NON-VOTING | NON-VOTING |
+| transactions executed | 0 | 0 |
+
+The control arm is §1 reproduced on the merged revision: a node that returns behind a quiet tail
+refuses for as long as the shard stays quiet, because nothing a quiet shard delivers can name the
+block. The recovery arm is the same node, on the same devnet, differing by one flag.
+
+**Two things the run corrected that no fixture had.**
+
+*A round can be non-quiet without a transaction.* The first version of this lane asserted "no
+transaction" by counting non-quiet rounds, and a run produced a non-quiet round 4 with an empty
+chain spec on which no account can pay for gas. Quietness is a statement about the state root, not
+about activity. The property is now asserted where it actually lives: **every canonical block on the
+executor, genesis through head, contains zero transactions.**
+
+*The applier committed unconditionally.* This is the defect the run existed to find, and it is
+specific to the one anchor whose block the executor is not expected to hold. The shard's first
+certified round is non-quiet by convention, so it names a block a real client builds and discards
+without ever making canonical — and against an executor with no block identity at genesis,
+`BlockHashOrFallback` puts the STATE ROOT in the certificate's block-hash field. On a devnet with no
+transactions that is the only anchor there is. The node therefore asked reth to commit
+`0x56e81f17…`, the empty-trie state root, and reth answered `SYNCING` — correctly, for ever. The
+recovery was verified, the evidence was good, the executor was already exactly where the certificate
+said, and the node recovered nothing.
+
+`Apply` now asks the questions in the right order: *is the executor already on the certified block*,
+using the head the caller has already read and the same `anchorHeadIdentity` comparison the live path
+uses — and only then *make it be there*. A node already at the certified block adopts the verified
+anchor with **no finality-changing call at all**, which is also the correct answer whenever a
+recovery attempt races a commit that already succeeded. The executor's block zero is read once and
+cached, since it is configuration and does not move.
+
+**Adopting is still an adoption, so it happens inside the guards.** The first version answered
+"already there" before all of them — no fault check, no in-flight slot, no gate, and no revalidation
+of the target afterwards. Reading a head is not a finality change, but adopting an anchor is a
+decision the round then acts on: `Round.applyVerifiedAnchor` installs it into the live continuity
+state on the strength of this outcome. So a target already determined to be a fault could be adopted
+if the head happened to match, and the head could be moving under a concurrent commit while it was
+read. Both paths now enter the fault and in-flight guards, take the gate, and re-read the target
+before the anchor is adopted.
+
+The one thing kept apart is the attempt BUDGET, and deliberately: only a path that COMMANDS the
+executor spends it. A node that is already correct must not be kept from saying so by an earlier
+failure's backoff — nothing is being asked of the executor, so nothing needs rationing.
+
+**And the head it decides from is read under the gate.** The first version used the one the caller
+passed, which was read BEFORE the gate was taken — so between that read and the decision another
+actor could have committed, and the anchor would be adopted on the strength of a head that no longer
+exists. Under the gate nothing can move it, which is the only condition that makes "the executor is
+already there" a fact rather than a recollection. The caller's head is still what an attempt REPORTS
+when it refuses before reading one; it is no longer what any decision is made from.
+
+**Provenance is an artifact, not a scrollback.** The run writes `artifacts/f6b-acceptance/<utc>/`
+containing **copies** of every log the assertions read and a manifest naming the repository revision,
+whether the worktree was clean, the `ubft` digest, the reth commit and whether it is pinned, each
+arm's flags, how far the run got, and a SHA-256 of each copied log. Three details are the whole
+point, and review found all three: it lives outside `test-nodes/`, which this lane and every other
+one in the repository delete; it hashes copies, because a digest of a file a running node is still
+appending to describes nothing anybody can check later; and it is written from the EXIT trap, so a
+run that fails early still leaves a record of what it was. And failing to write one **fails the
+run**: the first version returned success when `mkdir` failed, having already set its once-flag, so a
+run with no artifact at all reported ALL CHECKS PASSED and no later attempt was made. For a lane
+whose output IS the artifact, silently producing none is the same defect as counting a failed read as
+a zero.
+
+**The failure paths are self-tested, because a passing run does not exercise them.** Every defect
+review found in this harness was in a path that only runs when something has already gone wrong: a
+read that failed, a number that was malformed, a directory that could not be created. Those never
+execute on a good run, so a green acceptance run says nothing about them — and each one turned a
+failure into a PASS. `--self-test` exercises them with no reth and no root chain, asserting that each
+failure path fails. It has already caught itself twice: helpers defined after the block made its
+checks inert, and they reported PASS while testing nothing, which is the same class of defect as
+everything they test. It asserts the PROPERTY rather than any particular guard — several guards are
+mutually redundant, so removing one changes nothing while removing all of them fails the self-test by
+name.
+
+**A failed read is not a zero, and a failure in a subshell is not a failure.** `${c:-0}` over a
+failed RPC counted as zero transactions, so an unreachable node produced a PASS asserting nothing had
+executed — an assertion that cannot tell "I looked and saw none" from "I could not look" is not
+evidence, and this lane's claim is a negative one. Worse, the helper reported it by calling `fail`
+from inside a command substitution: that is a subshell, so `$failures` was incremented in a process
+that then exited, the parent's counter never moved, and **the run exited 0 with failures on screen**.
+Helpers now return non-zero and print to stderr; only the parent shell counts.
+
+**What the run does NOT establish**, named rather than glossed:
+
+  - *Not exact-block recovery against an ordinary block.* It exercises the genesis-round anchor,
+    because that is the only anchor a shard with no transactions ever has — so row 13's exception is
+    what satisfied P-id here, not a head-hash match against an ordinary certified block. Recovery
+    after a genuinely missed block is separate acceptance work: transactions BEFORE the outage are
+    legitimate there, with none injected during recovery itself.
+  - *Not evidence immutability.* What this measures is that serving cost the providers nothing —
+    no observation or stream refused, and they went on certifying. That served evidence is not
+    MUTATED is a stronger claim, established by fixtures that mutate a bundle and re-read it, not by
+    a lane that cannot see inside a provider's buffer.
 
 ## 7. Acceptance fixtures
 

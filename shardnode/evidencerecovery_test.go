@@ -158,7 +158,13 @@ func TestAnchorRecovery_ASyncingExecutorKeepsGettingAttempts(t *testing.T) {
 		}
 		return StatusValid, nil
 	}
+	// Behind for as long as the executor is syncing: the applier reads the head itself now, so an
+	// executor that claims to be recovered while reporting SYNCING is not a situation worth
+	// modelling — it is two different answers to the same question.
 	p.ex.head = func(context.Context) (BlockRef, error) {
+		if syncing {
+			return behind, nil
+		}
 		return BlockRef{Number: 5, Hash: Hash(blockB), StateRoot: Hash(stateB)}, nil
 	}
 

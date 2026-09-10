@@ -302,6 +302,20 @@ func (s *RecoveryStack) apply(ctx context.Context, uc *types.UnicityCertificate,
 			slog.Bool("retryable", res.Outcome.Retryable()),
 			slog.Uint64("heldRound", binding.Round),
 			slog.String("nodeID", nodeID),
+			// The operands, not just the verdict. A recovery that declines says nothing useful
+			// without them: every refusal here is a comparison between what the evidence proved and
+			// what the executor reports, and an operator cannot reconstruct either afterwards.
+			slog.String("heldState", fmt.Sprintf("%x", binding.State)),
+			slog.String("headBlock", fmt.Sprintf("%x", res.Head.Hash)),
+			slog.String("headState", fmt.Sprintf("%x", res.Head.StateRoot)),
+			slog.Uint64("headNumber", res.Head.Number),
+		}
+		if res.Target != nil {
+			attrs = append(attrs,
+				slog.String("targetBlock", fmt.Sprintf("%x", res.Target.BlockHash)),
+				slog.String("targetState", fmt.Sprintf("%x", res.Target.StateRoot)),
+				slog.Uint64("targetRound", res.Target.Round),
+				slog.Bool("targetFromGenesisRound", res.Target.fromGenesisRound))
 		}
 		if res.Err != nil {
 			attrs = append(attrs, slog.String("err", res.Err.Error()))
