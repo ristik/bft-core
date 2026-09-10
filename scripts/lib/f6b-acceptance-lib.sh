@@ -455,8 +455,35 @@ linesSince() { # linesSince <mark> <pattern> <file...>
 
 # linesBetween counts lines matching <pattern> logged in [from, to] across <file...>.
 linesBetween() { # linesBetween <from> <to> <pattern> <file...>
-  local from=$1 to=$2 pat=$3; shift 3
-  grep -h "$pat" "$@" 2>/dev/null | awk -v a="$from" -v b="$to" '$1 >= a && $1 <= b' | wc -l | tr -d ' '
+  # Compare instants, not RFC3339 strings: .500Z sorts before Z in the same second.
+  # Whole-second end markers include that complete second. The caller snapshots the trace
+  # before intentionally reconnecting, so events recorded later cannot enter this snapshot.
+  # Missing/unreadable files and malformed timestamps are failed observations, never zero.
+  python3 - "$@" <<'PYTIME'
+import sys
+from datetime import datetime, timedelta
+from_ts, to_ts, pattern, *paths = sys.argv[1:]
+def instant(value):
+    return datetime.fromisoformat(value.removeprefix('time=').replace('Z', '+00:00'))
+try:
+    start, end = instant(from_ts), instant(to_ts)
+    whole_end = '.' not in to_ts
+    if whole_end:
+        end += timedelta(seconds=1)
+    count = 0
+    for path in paths:
+        with open(path) as source:
+            for line in source:
+                if pattern not in line:
+                    continue
+                stamp = instant(line.split()[0])
+                if start <= stamp and (stamp < end if whole_end else stamp <= end):
+                    count += 1
+    print(count)
+except (OSError, ValueError, IndexError, TypeError) as err:
+    print('cannot read event window: %s' % err, file=sys.stderr)
+    sys.exit(1)
+PYTIME
 }
 
 # receiptIdentity echoes "<blockNumber> <blockHash>" for a transaction, both validated. It is the
@@ -938,6 +965,23 @@ f6bSelfTest() {
   b=$(linesBetween 2026-01-01T00:00:03Z 2026-01-01T00:09:00Z "Session established" "$scratch/reth.log")
   if [ "$a" = "1" ] && [ "$b" = "0" ]; then echo "  PASS: $desc"
   else echo "  FAIL: $desc — in-window=$a (want 1), out-of-window=$b (want 0)"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="a session in the first fractional second is inside the window"
+  echo "2026-01-01T00:00:01.500Z DEBUG net: Session established" >"$scratch/fraction.log"
+  if [ "$(linesBetween 2026-01-01T00:00:01Z 2026-01-01T00:00:03Z "Session established" "$scratch/fraction.log")" = "1" ]; then
+    echo "  PASS: $desc"
+  else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="a session in the final marked second is still inside the snapshot"
+  echo "2026-01-01T00:00:03.500Z DEBUG net: Session established" >"$scratch/fraction.log"
+  if [ "$(linesBetween 2026-01-01T00:00:01Z 2026-01-01T00:00:03Z "Session established" "$scratch/fraction.log")" = "1" ]; then
+    echo "  PASS: $desc"
+  else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="a missing session trace is not zero session events"
+  if linesBetween 2026-01-01T00:00:01Z 2026-01-01T00:00:03Z "Session established" "$scratch/absent.log" >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
 
   desc="a phase-bound count ignores what happened in the phase before it"
   {

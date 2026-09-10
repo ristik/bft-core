@@ -509,8 +509,10 @@ fi
 # The second record, of a different kind: the client logs every session it establishes, so this is
 # an event trace rather than a sample, and a transient connection that opened and closed between two
 # samples would still appear here.
-sed $'s/\033\\[[0-9;]*m//g' test-nodes/reth1/reth.log >test-nodes/reth1/reth-plain.log 2>/dev/null
-sessionsInWindow=$(linesBetween "$isolationAt" "$reconnectAt" "Session established" test-nodes/reth1/reth-plain.log)
+sed $'s/\033\\[[0-9;]*m//g' test-nodes/reth1/reth.log >test-nodes/reth1/reth-plain.log 2>/dev/null \
+  || { fail "could not snapshot the session trace"; exit 1; }
+sessionsInWindow=$(linesBetween "$isolationAt" "$reconnectAt" "Session established" test-nodes/reth1/reth-plain.log) \
+  || { fail "could not verify the session-event window"; exit 1; }
 if [ "${sessionsInWindow:-1}" = "0" ]; then
   pass "and the client's own session-event trace records no session established at any point in that window — a transient connection between two samples would still have been logged"
 else

@@ -1265,6 +1265,11 @@ Three things that review found, each of which let a reading say `ok` while estab
   samples would still be logged. The run below observed 54 s with 42 readings, all readable, all
   zero peers, and no session established at any point.
 
+Reviewer follow-up: session-window timestamps are parsed as instants, including fractional seconds
+at the start and the complete final marked second. Missing or unreadable event traces fail the
+observation. The retained run above was checked against these corrected boundaries; it was not
+rerun for this helper-only change.
+
 The survivors keep their peering with **each other**, checked, so this is a targeted isolation and
 not a network partition.
 
