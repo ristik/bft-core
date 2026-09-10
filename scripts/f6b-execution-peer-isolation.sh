@@ -573,9 +573,19 @@ if waitForHead "http://127.0.0.1:$rethEthBase" "$certifiedNum" 180; then
   # distinguish, and it is why this lane runs the client at debug: reth reports the missed blocks
   # arriving as DOWNLOADED blocks after the sessions are established, not as blocks it already held.
   # Together with the isolation that preceded it, that is the acquisition source.
-  trace=$(sed $'s/\033\\[[0-9;]*m//g' test-nodes/reth1/reth.log 2>/dev/null | awk -v t="$reconnectAt" '$1 >= t')
-  sessions=$(printf '%s\n' "$trace" | grep -c "Session established")
-  downloadedTarget=$(printf '%s\n' "$trace" | grep -c "on_downloaded_block{block_hash=$certifiedHash")
+  # Counted by INSTANT, not by string: an event inside the marked second sorts before it as text,
+  # and the whole trace can then read as empty. See linesFrom.
+  # A FRESH SNAPSHOT. reth-plain.log was taken deliberately BEFORE the reconnect, so that the
+  # isolation window could not be contaminated by events the reconnect itself caused; that same file
+  # therefore cannot contain the download this check is looking for. Reading it here found nothing
+  # and reported it as "the trace does not show it" — a stale snapshot answering a question about
+  # the present.
+  sed $'s/\033\\[[0-9;]*m//g' test-nodes/reth1/reth.log >test-nodes/reth1/reth-after.log 2>/dev/null \
+    || { fail "could not snapshot the client trace after the reconnect"; exit 1; }
+  sessions=$(linesFrom "$reconnectAt" "Session established" test-nodes/reth1/reth-after.log) \
+    || { fail "could not read the client's session trace"; exit 1; }
+  downloadedTarget=$(linesFrom "$reconnectAt" "on_downloaded_block{block_hash=$certifiedHash" test-nodes/reth1/reth-after.log) \
+    || { fail "could not read the client's download trace"; exit 1; }
   if [ "$sessions" -ge 1 ] && [ "$downloadedTarget" -ge 1 ]; then
     pass "the client names the source: $sessions execution session(s) established, then the certified block ${certifiedHash:0:18}… arrives as a DOWNLOADED block — acquired from execution peers after the forkchoice update, not held from gossip"
   else
@@ -632,8 +642,7 @@ info "the subject's execution client, from the reconnect at $reconnectAt onwards
 # of field one and every comparison against it silently matches nothing.
 # One line per distinct event: the repeated per-span entries for a single downloaded block are the
 # same fact many times over, and a trace nobody can read is not evidence anybody can check.
-sed $'s/\033\\[[0-9;]*m//g' test-nodes/reth1/reth.log 2>/dev/null \
-  | awk -v t="$reconnectAt" '$1 >= t' \
+printLinesFrom "$reconnectAt" test-nodes/reth1/reth-after.log 2>/dev/null \
   | grep -Ei "Session established|DownloadedBlocks|on_downloaded_block\{|Received forkchoice|Block added to canonical chain|Canonical chain committed" \
   | sed -E 's/(on_downloaded_block\{[^}]*\}).*/\1/' \
   | awk '{ k = $0; sub(/^[^ ]+ /, "", k); if (!(k in seen)) { seen[k]; print } }' \

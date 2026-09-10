@@ -195,6 +195,8 @@ waitForHead() { # waitForHead <ethURL> <decimalNumber> <seconds>
   return 1
 }
 
+f6bEvents="$(dirname "${BASH_SOURCE[0]}")/f6b_events.py"
+
 # --- quietness, measured as a TAIL rather than as a total ---------------------------------------
 #
 # A shard is quiet NOW or it is not, and "there are four quiet rounds in this log" does not say
@@ -212,19 +214,22 @@ waitForHead() { # waitForHead <ethURL> <decimalNumber> <seconds>
 #
 # Log lines begin `time=<RFC3339 with a fixed offset>`, which sorts lexically in timestamp order, and
 # all of these logs are written by the same process family with the same format.
-markNow() { date +time=%Y-%m-%dT%H:%M:%S; }
+# The offset is part of the mark. Without it the mark is a NAIVE instant while every log line
+# carries one, and any real comparison between them raises rather than answers — so the mark has to
+# be as well-formed as the thing it is compared against.
+markNow() { date +time=%Y-%m-%dT%H:%M:%S%z; }
 
 # nonQuietSince counts non-quiet rounds logged after <mark> across <log...>. A line from the same
 # whole second as the mark counts as after it, which can only produce a false FAILURE, never a false
 # pass — the direction an assertion about "nothing happened" has to err in.
 nonQuietSince() { # nonQuietSince <mark> <log...>
   local mark=$1; shift
-  grep -h "quiet=false" "$@" 2>/dev/null | awk -v t="$mark" '$1 > t' | wc -l | tr -d ' '
+  python3 "$f6bEvents" --mode count --from "$mark" --pattern "quiet=false" "$@"
 }
 
 quietSince() { # quietSince <mark> <log...>
   local mark=$1; shift
-  grep -h "quiet=true" "$@" 2>/dev/null | awk -v t="$mark" '$1 > t' | wc -l | tr -d ' '
+  python3 "$f6bEvents" --mode count --from "$mark" --pattern "quiet=true" "$@"
 }
 
 # waitForQuietTail blocks until at least <want> quiet rounds have been logged across <log...> SINCE
@@ -237,7 +242,7 @@ waitForQuietTail() { # waitForQuietTail <want> <seconds> <log...>
   local last n=0
   for _ in $(seq 1 "$secs"); do
     last=$(grep -h "quiet=false" "$@" 2>/dev/null | awk '{print $1}' | sort | tail -1)
-    n=$(quietSince "${last:-time=0}" "$@")
+    n=$(quietSince "${last:-time=1970-01-01T00:00:00+0000}" "$@")
     [ "${n:-0}" -ge "$want" ] && { echo "$n"; return 0; }
     sleep 1
   done
@@ -445,45 +450,197 @@ monitorClean() { # monitorClean <file> <fromTS> <toTS> <minSamples>
   echo ok
 }
 
+# blockPresence answers whether a client HOLDS a block, by hash, independently of what its head is:
+# "present" or "absent", and a non-zero status for anything it could not read. A null result is a
+# real answer — the client does not have it — while an error, a missing result field or a body that
+# is neither a block nor null is not an answer at all. The whole point of the unhelpful-peer
+# experiment is a checked claim that a peer does NOT hold something, so "I could not ask" must never
+# read as "it does not have it".
+blockPresence() { # blockPresence <ethURL> <blockHash>
+  local out
+  out=$(rpc "$1" eth_getBlockByHash "[\"$2\", false]") || { echo "eth_getBlockByHash to $1 failed" >&2; return 1; }
+  printf '%s' "$out" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception as e:
+    sys.stderr.write('eth_getBlockByHash returned no JSON: %s\n' % e); sys.exit(1)
+if not isinstance(d, dict):
+    sys.stderr.write('eth_getBlockByHash returned %s, not a JSON-RPC object\n' % type(d).__name__); sys.exit(1)
+if d.get('error') is not None:
+    sys.stderr.write('eth_getBlockByHash returned an error: %r\n' % (d['error'],)); sys.exit(1)
+if 'result' not in d:
+    sys.stderr.write('eth_getBlockByHash returned no result field\n'); sys.exit(1)
+r = d['result']
+if r is None:
+    print('absent')
+elif isinstance(r, dict) and isinstance(r.get('hash'), str) and r['hash']:
+    print('present')
+else:
+    sys.stderr.write('eth_getBlockByHash result is neither a block nor null\n'); sys.exit(1)
+"
+}
+
+# monitorConnectedWithout is monitorClean's opposite for the arm where the subject is deliberately
+# CONNECTED: every sample in the window must be readable, must show at least one execution peer, and
+# must not list any of the forbidden ids. It is what makes "connected to peers that cannot help"
+# a measured condition rather than a description of how the script was written.
+monitorConnectedWithout() { # monitorConnectedWithout <file> <fromTS> <toTS> <minSamples> <forbiddenID...>
+  local f=$1 from=$2 to=$3 want=$4; shift 4
+  python3 - "$f" "$from" "$to" "$want" "$@" <<'PYMON'
+import sys
+from datetime import datetime, timedelta
+path, from_ts, to_ts, want, *forbidden = sys.argv[1:]
+def instant(v):
+    return datetime.fromisoformat(v.replace('Z', '+00:00'))
+try:
+    start, end = instant(from_ts), instant(to_ts)
+    if '.' not in to_ts:
+        end += timedelta(seconds=1)
+    n = unread = lonely = tainted = 0
+    with open(path) as src:
+        for line in src:
+            parts = line.split()
+            if not parts:
+                continue
+            stamp = instant(parts[0])
+            if not (start <= stamp < end):
+                continue
+            n += 1
+            if 'status=ok' not in line:
+                unread += 1
+                continue
+            peers = 0
+            for field in parts:
+                if field.startswith('peers='):
+                    peers = int(field.split('=', 1)[1])
+            if peers < 1:
+                lonely += 1
+            if any(bad and bad in line for bad in forbidden):
+                tainted += 1
+    if n < int(want):
+        print('only %d connectivity samples cover the window, at least %s were required' % (n, want)); sys.exit(1)
+    if unread:
+        print('%d sample(s) in the window could not read the client' % unread); sys.exit(1)
+    if lonely:
+        print('%d sample(s) in the window show no execution peer at all' % lonely); sys.exit(1)
+    if tainted:
+        print('%d sample(s) in the window list a peer this arm forbids' % tainted); sys.exit(1)
+    print('ok')
+except (OSError, ValueError, IndexError, TypeError) as err:
+    print('cannot read connectivity window: %s' % err); sys.exit(1)
+PYMON
+}
+
 # linesSince counts lines matching <pattern> logged after <mark> across <file...>. The mark must be
 # in the same form as the log's first field: `time=...` for the node's own logs (markNow), a bare
 # RFC3339 stamp for the execution client's.
 linesSince() { # linesSince <mark> <pattern> <file...>
   local mark=$1 pat=$2; shift 2
-  grep -h "$pat" "$@" 2>/dev/null | awk -v t="$mark" '$1 > t' | wc -l | tr -d ' '
+  python3 "$f6bEvents" --mode count --from "$mark" --pattern "$pat" "$@"
 }
 
-# linesBetween counts lines matching <pattern> logged in [from, to] across <file...>.
+# linesBetween counts lines matching <pattern> logged in [from, to] across <file...>. A whole-second
+# end marker covers that complete second; see f6b_events.py.
 linesBetween() { # linesBetween <from> <to> <pattern> <file...>
-  # Compare instants, not RFC3339 strings: .500Z sorts before Z in the same second.
-  # Whole-second end markers include that complete second. The caller snapshots the trace
-  # before intentionally reconnecting, so events recorded later cannot enter this snapshot.
-  # Missing/unreadable files and malformed timestamps are failed observations, never zero.
-  python3 - "$@" <<'PYTIME'
+  local from=$1 to=$2 pat=$3; shift 3
+  python3 "$f6bEvents" --mode count --from "$from" --to "$to" --pattern "$pat" "$@"
+}
+
+# blockPresence answers whether a client HOLDS a block, by hash, independently of what its head is:
+# "present" or "absent", and a non-zero status for anything it could not read. A null result is a
+# real answer — the client does not have it — while an error, a missing result field or a body that
+# is neither a block nor null is not an answer at all. The whole point of the unhelpful-peer
+# experiment is a checked claim that a peer does NOT hold something, so "I could not ask" must never
+# read as "it does not have it".
+blockPresence() { # blockPresence <ethURL> <blockHash>
+  local out
+  out=$(rpc "$1" eth_getBlockByHash "[\"$2\", false]") || { echo "eth_getBlockByHash to $1 failed" >&2; return 1; }
+  printf '%s' "$out" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception as e:
+    sys.stderr.write('eth_getBlockByHash returned no JSON: %s\n' % e); sys.exit(1)
+if not isinstance(d, dict):
+    sys.stderr.write('eth_getBlockByHash returned %s, not a JSON-RPC object\n' % type(d).__name__); sys.exit(1)
+if d.get('error') is not None:
+    sys.stderr.write('eth_getBlockByHash returned an error: %r\n' % (d['error'],)); sys.exit(1)
+if 'result' not in d:
+    sys.stderr.write('eth_getBlockByHash returned no result field\n'); sys.exit(1)
+r = d['result']
+if r is None:
+    print('absent')
+elif isinstance(r, dict) and isinstance(r.get('hash'), str) and r['hash']:
+    print('present')
+else:
+    sys.stderr.write('eth_getBlockByHash result is neither a block nor null\n'); sys.exit(1)
+"
+}
+
+# monitorConnectedWithout is monitorClean's opposite for the arm where the subject is deliberately
+# CONNECTED: every sample in the window must be readable, must show at least one execution peer, and
+# must not list any of the forbidden ids. It is what makes "connected to peers that cannot help"
+# a measured condition rather than a description of how the script was written.
+monitorConnectedWithout() { # monitorConnectedWithout <file> <fromTS> <toTS> <minSamples> <forbiddenID...>
+  local f=$1 from=$2 to=$3 want=$4; shift 4
+  python3 - "$f" "$from" "$to" "$want" "$@" <<'PYMON'
 import sys
 from datetime import datetime, timedelta
-from_ts, to_ts, pattern, *paths = sys.argv[1:]
-def instant(value):
-    return datetime.fromisoformat(value.removeprefix('time=').replace('Z', '+00:00'))
+path, from_ts, to_ts, want, *forbidden = sys.argv[1:]
+def instant(v):
+    return datetime.fromisoformat(v.replace('Z', '+00:00'))
 try:
     start, end = instant(from_ts), instant(to_ts)
-    whole_end = '.' not in to_ts
-    if whole_end:
+    if '.' not in to_ts:
         end += timedelta(seconds=1)
-    count = 0
-    for path in paths:
-        with open(path) as source:
-            for line in source:
-                if pattern not in line:
-                    continue
-                stamp = instant(line.split()[0])
-                if start <= stamp and (stamp < end if whole_end else stamp <= end):
-                    count += 1
-    print(count)
+    n = unread = lonely = tainted = 0
+    with open(path) as src:
+        for line in src:
+            parts = line.split()
+            if not parts:
+                continue
+            stamp = instant(parts[0])
+            if not (start <= stamp < end):
+                continue
+            n += 1
+            if 'status=ok' not in line:
+                unread += 1
+                continue
+            peers = 0
+            for field in parts:
+                if field.startswith('peers='):
+                    peers = int(field.split('=', 1)[1])
+            if peers < 1:
+                lonely += 1
+            if any(bad and bad in line for bad in forbidden):
+                tainted += 1
+    if n < int(want):
+        print('only %d connectivity samples cover the window, at least %s were required' % (n, want)); sys.exit(1)
+    if unread:
+        print('%d sample(s) in the window could not read the client' % unread); sys.exit(1)
+    if lonely:
+        print('%d sample(s) in the window show no execution peer at all' % lonely); sys.exit(1)
+    if tainted:
+        print('%d sample(s) in the window list a peer this arm forbids' % tainted); sys.exit(1)
+    print('ok')
 except (OSError, ValueError, IndexError, TypeError) as err:
-    print('cannot read event window: %s' % err, file=sys.stderr)
-    sys.exit(1)
-PYTIME
+    print('cannot read connectivity window: %s' % err); sys.exit(1)
+PYMON
+}
+
+# linesFrom counts, and printLinesFrom echoes, the lines of <file...> at or after <mark>.
+# linesBetween counts those inside [from, to]. All three are one implementation — see
+# scripts/lib/f6b_events.py for why comparing RFC3339 as text is wrong, why a banner line is not
+# corruption, and why an unreadable stream is a failed observation rather than a zero.
+linesFrom() { # linesFrom <mark> <pattern> <file...>
+  local mark=$1 pat=$2; shift 2
+  python3 "$f6bEvents" --mode count --from "$mark" --pattern "$pat" "$@"
+}
+
+printLinesFrom() { # printLinesFrom <mark> <file...>
+  local mark=$1; shift
+  python3 "$f6bEvents" --mode show --from "$mark" "$@"
 }
 
 # receiptIdentity echoes "<blockNumber> <blockHash>" for a transaction, both validated. It is the
@@ -721,8 +878,8 @@ f6bSelfTest() {
   else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
 
   desc="a block after the mark is counted, one before it is not"
-  a=$(nonQuietSince "time=2026-01-01T00:00:04" "$scratch/stale.log")
-  b=$(nonQuietSince "time=2026-01-01T00:00:06" "$scratch/stale.log")
+  a=$(nonQuietSince "time=2026-01-01T00:00:04+0000" "$scratch/stale.log")
+  b=$(nonQuietSince "time=2026-01-01T00:00:06+0000" "$scratch/stale.log")
   if [ "$a" = "1" ] && [ "$b" = "0" ]; then echo "  PASS: $desc"
   else echo "  FAIL: $desc — since 00:00:04 saw $a, since 00:00:06 saw $b"; selfFailures=$((selfFailures + 1)); fi
 
@@ -983,15 +1140,118 @@ f6bSelfTest() {
     echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
   else echo "  PASS: $desc"; fi
 
+  # THE SAME BOUNDARY, IN THE OTHER DIRECTION. An event inside the marked second is at or after that
+  # second's start; string comparison puts it before, and a trace extraction written that way
+  # produced no lines at all for a run in which everything happened inside one second.
+  desc="an event in the marked second is at or after the mark"
+  {
+    echo "2026-09-10T22:03:20.000000Z DEBUG net: Session established"
+    echo "2026-09-10T22:03:24.575417Z DEBUG net: Session established"
+  } >"$scratch/from.log"
+  a=$(linesFrom 2026-09-10T22:03:24Z "Session established" "$scratch/from.log")
+  b=$(linesFrom 2026-09-10T22:03:20Z "Session established" "$scratch/from.log")
+  if [ "$a" = "1" ] && [ "$b" = "2" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc — from the marked second counted $a (want 1), from earlier $b (want 2)"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="a missing event stream is not an empty one"
+  if linesFrom 2026-09-10T22:03:24Z "x" "$scratch/absent-stream.log" >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+  if printLinesFrom 2026-09-10T22:03:24Z "$scratch/absent-stream.log" >/dev/null 2>&1; then
+    echo "  FAIL: $desc (printLinesFrom)"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc (printLinesFrom)"; fi
+
+  # A LOG HAS LINES THAT ARE NOT EVENTS. reth prints its chain-spec banner before anything
+  # timestamped; a parser that treats those as corruption declares the file unreadable and every
+  # window over it fails. A file with NO timestamped line at all is a different thing and is refused.
+  desc="a banner before the first event does not make the log unreadable"
+  {
+    echo "Pre-merge hard forks (block based):"
+    echo "2026-01-01T00:00:02.500Z DEBUG net: Session established"
+  } >"$scratch/banner.log"
+  if [ "$(linesFrom 2026-01-01T00:00:01Z "Session established" "$scratch/banner.log" 2>/dev/null)" = "1" ]; then
+    echo "  PASS: $desc"
+  else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="a file with no timestamped line at all is not an event log"
+  printf 'Pre-merge hard forks (block based):\nMerge hard forks:\n' >"$scratch/nostamps.log"
+  if linesFrom 2026-01-01T00:00:01Z "" "$scratch/nostamps.log" >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
   desc="a phase-bound count ignores what happened in the phase before it"
   {
-    echo "time=2026-01-01T00:00:01Z outcome=payload-unavailable"
-    echo "time=2026-01-01T00:00:02Z outcome=payload-unavailable"
-    echo "time=2026-01-01T00:00:09Z outcome=payload-unavailable"
+    echo "time=2026-01-01T00:00:01.0+0000 outcome=payload-unavailable"
+    echo "time=2026-01-01T00:00:02.0+0000 outcome=payload-unavailable"
+    echo "time=2026-01-01T00:00:09.0+0000 outcome=payload-unavailable"
   } >"$scratch/node.log"
-  a=$(linesSince "time=2026-01-01T00:00:05" "outcome=payload-unavailable" "$scratch/node.log")
+  a=$(linesSince "time=2026-01-01T00:00:05+0000" "outcome=payload-unavailable" "$scratch/node.log")
   if [ "$a" = "1" ]; then echo "  PASS: $desc"
   else echo "  FAIL: $desc — counted $a, want 1"; selfFailures=$((selfFailures + 1)); fi
+
+  # A CLAIM THAT A PEER DOES NOT HOLD SOMETHING IS A NEGATIVE, so an unreadable answer must never
+  # become it. Only an explicit null is "absent".
+  desc="an eth_getBlockByHash error is not an absent block"
+  rpc() { echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"nope"}}'; }
+  if blockPresence unused 0xabc >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a missing result field is not an absent block"
+  rpc() { echo '{"jsonrpc":"2.0","id":1}'; }
+  if blockPresence unused 0xabc >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a null result is an absent block, and a block is a present one"
+  rpc() { echo '{"jsonrpc":"2.0","id":1,"result":null}'; }
+  a=$(blockPresence unused 0xabc 2>/dev/null)
+  rpc() { echo '{"jsonrpc":"2.0","id":1,"result":{"hash":"0xabc","number":"0x3"}}'; }
+  b=$(blockPresence unused 0xabc 2>/dev/null)
+  if [ "$a" = "absent" ] && [ "$b" = "present" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc — got '$a' and '$b'"; selfFailures=$((selfFailures + 1)); fi
+  unset -f rpc
+
+  # THE CONNECTED WINDOW, which is monitorClean's opposite and fails in the opposite directions.
+  desc="a window with a sample showing no peer is not a connected window"
+  {
+    echo "2026-01-01T00:00:01Z status=ok peers=2 sessions=aa,bb,"
+    echo "2026-01-01T00:00:02Z status=ok peers=0 sessions="
+    echo "2026-01-01T00:00:03Z status=ok peers=2 sessions=aa,bb,"
+  } >"$scratch/conn.log"
+  if [ "$(monitorConnectedWithout "$scratch/conn.log" 2026-01-01T00:00:01Z 2026-01-01T00:00:03Z 3 cc 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a window listing a forbidden peer is not a window without it"
+  {
+    echo "2026-01-01T00:00:01Z status=ok peers=2 sessions=aa,bb,"
+    echo "2026-01-01T00:00:02Z status=ok peers=3 sessions=aa,bb,cc,"
+    echo "2026-01-01T00:00:03Z status=ok peers=2 sessions=aa,bb,"
+  } >"$scratch/conn2.log"
+  if [ "$(monitorConnectedWithout "$scratch/conn2.log" 2026-01-01T00:00:01Z 2026-01-01T00:00:03Z 3 cc 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc — a peer the arm forbids passed unnoticed"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="an unreadable sample is not a connected sample either"
+  {
+    echo "2026-01-01T00:00:01Z status=ok peers=2 sessions=aa,bb,"
+    echo "2026-01-01T00:00:02Z status=unreadable"
+    echo "2026-01-01T00:00:03Z status=ok peers=2 sessions=aa,bb,"
+  } >"$scratch/conn3.log"
+  if [ "$(monitorConnectedWithout "$scratch/conn3.log" 2026-01-01T00:00:01Z 2026-01-01T00:00:03Z 3 cc 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a missing connectivity record is not a connected window"
+  if monitorConnectedWithout "$scratch/absent-monitor.log" 2026-01-01T00:00:01Z 2026-01-01T00:00:03Z 3 cc >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a fully covered, readable, connected window without the forbidden peer reads as ok"
+  if [ "$(monitorConnectedWithout "$scratch/conn.log" 2026-01-01T00:00:03Z 2026-01-01T00:00:03Z 1 cc 2>/dev/null)" = "ok" ]; then
+    echo "  PASS: $desc"
+  else echo "  FAIL: $desc — a good window was rejected"; selfFailures=$((selfFailures + 1)); fi
 
   desc="a receipt without a full block hash is not an identity"
   rpc() { echo '{"result":{"blockNumber":"0x3","blockHash":"0xdead"}}'; }

@@ -1106,8 +1106,8 @@ while it ran.
 This observes the provider processes rather than inferring quietness solely from the script
 refraining from transaction submission.
 
-**One implementation of the assertions, not three.** All three lanes source
-`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same forty-five checks over
+**One implementation of the assertions, not four.** All four lanes source
+`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same 61 checks over
 the same helpers. Every one of those helpers guards a NEGATIVE claim, every one of them has been a
 defect at least once, and a second copy in a second lane is the argument `anchorHeadIdentity` settles
 in `shardnode/anchor.go`: two copies of a comparison that gates a conclusion is one copy too many,
@@ -1310,10 +1310,10 @@ from the reconnect to the first session is about two seconds; from the first ses
 chain, 251 ms.
 
 **What it still does not establish.** One run, three validators, a two-block gap, and peers that all
-held the missing blocks. It says nothing about a longer outage, a subject whose only peers do *not*
-hold the block, a partitioned survivor set, or a client other than reth at this commit. The negative
-arm was never exercised against a peer set that could not help — that variation, not this one, is
-what would bound the mechanism rather than identify it.
+held the missing blocks. It says nothing about a longer outage, a partitioned survivor set, or a
+client other than reth at this commit. Its negative arm was never exercised against a peer set that
+could not help — that variation, not this one, is what bounds the mechanism rather than identifying
+it, and §8.2 is that measurement.
 
 **A negative would have been a result, and is separated from a broken observation.** The
 not-acquired branch does not simply call the run a failure: it takes four fresh readings bounded to
@@ -1325,6 +1325,62 @@ restarted between the arms, so a whole-log count in the second arm is satisfied 
 
 **So: no custom payload-fetch mechanism is justified.** The existing path is now identified rather
 than assumed, and the fail-closed behaviour when it cannot deliver is measured rather than argued.
+
+### 8.2 The bound: connected to peers that do not have the block
+
+`scripts/f6b-unhelpful-peers.sh`. §8.1 separated CONNECTED from DISCONNECTED and identified the
+acquisition path; it said nothing about connected-but-unhelpful, because every peer in it held the
+missing blocks. A mechanism that is identified is not thereby bounded.
+
+The subject is given execution peers that provably cannot help: two **bystander** reth clients on the
+same chain spec, driven by no shard node, never peered to a validator. Three states of one variable
+in one run — **isolated** while the blocks it will miss are created, **unhelpful** (connected only to
+the bystanders), then **helpful** (the survivors added, nothing else changed).
+
+The bystanders' ignorance is a checked premise, not a description of how the script was written:
+every one of them is asked **by hash**, for the certified block *and its parent*, before the arm, at
+its start and at its end — twelve lookups per run, every one answering `null`. `blockPresence`
+refuses anything that is not an explicit null-or-block answer, because "I could not ask" must never
+become "it does not have it". Connectivity is observed across the whole arm the same way §8.1
+observes isolation, in the opposite direction: every sample readable, every sample holding at least
+one peer, and no sample listing a survivor.
+
+| | UNHELPFUL (bystanders only) | HELPFUL (survivors added) |
+|---|---|---|
+| execution peers | 2, for every one of 134 readings over 180 s | the same 2, plus survivors |
+| anchor over BFT | obtained and verified in one attempt, naming the certified block | unchanged, retained |
+| client behaviour | entered syncing on the forkchoice update; **no** block bearing the certified hash downloaded | sessions established, then the certified block and its parent arrive as **downloaded blocks** |
+| executor head | block 1, unmoved | block 3, the certified block, at the certified state |
+| outcome | 30 × `payload-unavailable`, never `payload-invalid`, nothing adopted, nothing signed | adopted in this arm, receipts matching a survivor's |
+
+**The bound, stated no wider than the evidence.** Payload acquisition succeeds when — and in this
+configuration only when — a connected execution peer holds the block. Being connected is not
+sufficient. When no peer can supply it the node **fails closed indefinitely**: it keeps the verified
+target, reports the payload unavailable rather than invalid, does not move its executor, and does not
+vote. That is `VerifiedTargetSurvivesAnUnavailablePayload` (§7) measured against a real client
+instead of a fixture, and it is the behaviour §4.1's outcome vocabulary exists to make possible.
+
+**Why the third arm is not decoration.** "It did not acquire the blocks" and "it had stopped trying"
+produce the same head. The control arm changes one thing — peers that have the data — with no
+restart, no flag change and no transaction, and the same client then downloads the same target
+immediately. Without it the negative would be uninterpretable; the client's own trace, which shows it
+entering syncing during the unhelpful arm and downloading nothing, says the same thing from the other
+side.
+
+**What it still does not establish.** Two bystanders, one gap of two blocks, one client at one
+commit. It does not measure how long a node stays fail-closed before anything else degrades, a peer
+set that holds *some* of the missing ancestors, or recovery once a helpful peer appears after a much
+longer interval.
+
+**One implementation of "which log lines fall in this interval".** There were three, and the
+differences between them were defects rather than choices: `scripts/lib/f6b_events.py` now answers
+that question for every lane. Comparing RFC3339 as text is wrong at second boundaries — review found
+it in the window count, and the same line written again in a trace extraction produced an **empty
+trace** for a run in which every event happened inside one second, which is evidence that looks like
+"nothing happened" and means "nothing was compared". A banner line is not corruption, but a file with
+no timestamped line at all is not an event log. And an unreadable stream is a failed observation,
+never a zero. `markNow` now carries its UTC offset, because a naive mark compared against an aware
+log line cannot answer at all.
 
 **Consequence for the design, which is unaffected either way.** Evidence retrieval and payload
 acquisition stay separate decisions. The predicate answers only the first. A node that has a verified
@@ -1357,6 +1413,7 @@ Recovery across an epoch transition (§3.1); which peers a node asks and how tha
 and the applier alike, and the measured acceptance runs against a real client across a quiet tail
 (§6.6), after a genuinely missed block (§6.7), and under controlled execution-peer isolation (§8.1);
 whether the serving buffer of §6.1 is ever persisted; whether the root chain should serve historical certificates as a second source
-(§6c); durable retained history and the signing record (#14, #105); and the bound on payload acquisition that
-§8.1 identifies but does not measure — a subject whose peers do not hold the missing block. #16 remains open, including "Too deep reorg", and nothing here claims
+(§6c); durable retained history and the signing record (#14, #105); and how long a node stays fail-closed when no peer can
+supply the payload (§8.2 measures that it does, not for how long, nor against a peer set holding only
+some of the missing ancestors). #16 remains open, including "Too deep reorg", and nothing here claims
 to explain it.
