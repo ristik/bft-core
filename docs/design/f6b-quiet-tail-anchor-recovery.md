@@ -1107,7 +1107,7 @@ This observes the provider processes rather than inferring quietness solely from
 refraining from transaction submission.
 
 **One implementation of the assertions, not three.** All three lanes source
-`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same twenty-nine checks over
+`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same forty-five checks over
 the same helpers. Every one of those helpers guards a NEGATIVE claim, every one of them has been a
 defect at least once, and a second copy in a second lane is the argument `anchorHeadIdentity` settles
 in `shardnode/anchor.go`: two copies of a comparison that gates a conclusion is one copy too many,
@@ -1238,13 +1238,35 @@ for this configuration. Run `20260910T082058Z`, whose manifest records repositor
 changes across its two arms: the returning client's **execution-layer** peering. BFT transport is untouched throughout — libp2p bootnodes and localhost
 engine/eth endpoints — so evidence retrieval has exactly the connectivity it always had.
 
-Isolation is **read, never assumed.** `admin_removePeer` returns true for a peer that was never
-connected, for one already gone, and for one it will re-dial a second later, so the premise is
-established from both ends — the subject's own peer count, its own session list, and every
-survivor's session list — and re-read for ten seconds before the window opens and again after the
-missed blocks exist. The survivors keep their peering with **each other**, checked, so this is a
-targeted isolation and not a network partition. reth is run with `--no-persist-peers` for exactly
-this reason: a client that reloads its peer file re-dials the sessions the experiment severed.
+Isolation is **read, never assumed, and read over the whole window rather than at its ends.**
+`admin_removePeer` returns true for a peer that was never connected, for one already gone, and for
+one it will re-dial a second later, so the premise is established from the subject's own peer count,
+its own session list, and every survivor's session list. reth is run with `--no-persist-peers` for
+the same reason: a client that reloads its peer file re-dials the sessions the experiment severed.
+
+Three things that review found, each of which let a reading say `ok` while establishing nothing:
+
+- **A failed read is not an empty peer list.** `admin_peers` parsed as `result or []` turned a
+  JSON-RPC error, a missing result, an explicit null and a malformed body into "this client has no
+  peers" — and with the peer count also unreadable, the check passed for a client nobody could see
+  at all. It is the `${c:-0}` defect again, in the one place where the whole premise is a negative.
+- **Both sides of an identity comparison have to be the same kind of thing.** The subject was
+  identified by the 128-hex public key from its enode URL, while a peer list contains the 64-hex
+  `admin_nodeInfo.id` — measured here as exactly that. The survivor-side half of the check could
+  never match and was inert while reading as PASS. The lane now uses the admin id, compares whole
+  lines case-normalised, and **proves the identity is one that can match** by requiring a survivor
+  to list the subject by it while still peered.
+- **Two samples either side of an interval say nothing about the interval.** The ten-second hold
+  finished before the transactions were submitted and the next reading was taken after both
+  receipts, so a connection that opened and closed in between passed both. Two independent records
+  now cover the window from isolation to reconnect: a **monitor** sampling every second, where too
+  few samples or a single unreadable one disqualifies the window, and the client's own **session
+  events**, which are a complete record rather than a sample — a transient session between two
+  samples would still be logged. The run below observed 46 s with 36 readings, all readable, all
+  zero peers, and no session established at any point.
+
+The survivors keep their peering with **each other**, checked, so this is a targeted isolation and
+not a network partition.
 
 **Isolated arm.** With the subject's client holding zero execution peers for the whole window in
 which blocks 2 and 3 were certified — and its own log recording no block beyond 1 — the node still
@@ -1285,6 +1307,14 @@ held the missing blocks. It says nothing about a longer outage, a subject whose 
 hold the block, a partitioned survivor set, or a client other than reth at this commit. The negative
 arm was never exercised against a peer set that could not help — that variation, not this one, is
 what would bound the mechanism rather than identify it.
+
+**A negative would have been a result, and is separated from a broken observation.** The
+not-acquired branch does not simply call the run a failure: it takes four fresh readings bounded to
+the phase after the reconnect — the client is reachable, the certified block is still its verified
+target, the outcome is still `payload-unavailable`, and it is never `payload-invalid` — and reports
+a measurement of the mechanism's limit if they hold, or a failed observation if they do not. The
+counts are phase-bound for the same reason the quietness check is a tail: the shard node is not
+restarted between the arms, so a whole-log count in the second arm is satisfied by the first.
 
 **So: no custom payload-fetch mechanism is justified.** The existing path is now identified rather
 than assumed, and the fail-closed behaviour when it cannot deliver is measured rather than argued.

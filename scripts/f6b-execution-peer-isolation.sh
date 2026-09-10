@@ -52,7 +52,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/f6b-acceptance-lib.sh"
 
 artifactDir="${F6B_ARTIFACT_DIR:-artifacts/f6b-peer-isolation/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 manifestTitle="f6b execution-peer isolation: payload acquisition experiment"
-manifestLogs="test-nodes/connectivity.log test-nodes/evm1/isolated.log $(seq -f "test-nodes/evm%g/debug.log" 1 "$validators" | tr '\n' ' ')$(seq -f " test-nodes/reth%g/reth.log" 1 "$validators" | tr -d '\n')"
+manifestLogs="test-nodes/connectivity.log test-nodes/peermon.log test-nodes/evm1/isolated.log $(seq -f "test-nodes/evm%g/debug.log" 1 "$validators" | tr '\n' ' ')$(seq -f " test-nodes/reth%g/reth.log" 1 "$validators" | tr -d '\n')"
 manifestLines=()
 
 $selfTest && { f6bSelfTest; exit $?; }
@@ -74,6 +74,7 @@ if [ -n "$stale" ]; then
 fi
 
 cleanup() {
+  stopPeerMonitor
   if ! writeManifest; then
     failures=$((failures + 1))
     echo "$failures CHECK(S) FAILED — no run artifact was written" >&2
@@ -194,8 +195,8 @@ for i in $(seq 1 "$validators"); do
   enodes[$i]=$(rpcRequire "http://127.0.0.1:$((rethEthBase + i - 1))" admin_nodeInfo '[]' "['result']['enode']" "enode") \
     || { fail "could not read reth $i's enode"; exit 1; }
 done
-subjectID=$(nodeEnodeID "http://127.0.0.1:$rethEthBase") || { fail "could not read the subject's enode id"; exit 1; }
-[ -n "$subjectID" ] || { fail "the subject's enode id is empty"; exit 1; }
+# The id the SURVIVORS list it as, not the enode public key: see nodeAdminID.
+subjectID=$(nodeAdminID "http://127.0.0.1:$rethEthBase") || { fail "could not read the subject's admin node id"; exit 1; }
 survivorEth=()
 for i in $(seq 2 "$validators"); do survivorEth+=("http://127.0.0.1:$((rethEthBase + i - 1))"); done
 
@@ -232,6 +233,21 @@ if $meshed; then
 else
   fail "the execution mesh never formed: $(for i in $(seq 1 "$validators"); do printf "reth%s=%s " "$i" "$(peerCount "http://127.0.0.1:$((rethEthBase + i - 1))" 2>/dev/null || echo unreadable)"; done)"
   snapshot "phase=peering-failed"
+  exit 1
+fi
+# AND THE IDENTITY THE ISOLATION CHECK USES IS ONE THAT CAN MATCH. Proved here, while the subject is
+# still peered: it must appear by this exact id in a survivor's list. An identity that never matches
+# anything is indistinguishable from an isolation that holds, and the earlier revision compared a
+# 128-character enode key against 64-character admin ids — so that half of the check was inert while
+# reading as PASS.
+seen=false
+for u in "${survivorEth[@]}"; do
+  peerIds "$u" 2>/dev/null | grep -qx "$subjectID" && { seen=true; break; }
+done
+if $seen; then
+  pass "a survivor lists the subject by the exact id the isolation check looks for (${subjectID:0:16}…, 32 bytes) — the comparison is one that can match"
+else
+  fail "no survivor lists the subject as $subjectID while it is peered, so the isolation check has no identity it could ever match"
   exit 1
 fi
 snapshot "phase=peered-at-start"
@@ -299,6 +315,11 @@ else
 fi
 snapshot "phase=isolated"
 note "isolation established"
+# FROM HERE THE WINDOW IS OBSERVED, not sampled at its ends. The monitor records a reading every
+# second — including the readings it could not take — and the client's own session events are
+# checked over the same window when it closes. See monitorClean.
+isolationAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+startPeerMonitor "http://127.0.0.1:$rethEthBase" test-nodes/peermon.log 1
 
 rootBoot=$(boot_node test-nodes/root1 "$rootBootPort")
 [ -n "$rootBoot" ] || { fail "could not determine the root bootnode address"; exit 1; }
@@ -360,10 +381,13 @@ done
 
 # ISOLATION HELD ACROSS THE WINDOW THAT MATTERS. Confirming it before the blocks existed says
 # nothing about whether it was still true while they were being gossiped.
+# An ENDPOINT reading. It says the isolation still holds now, and nothing about the interval just
+# passed; the window record checked at the reconnect is what covers that, and this must not be
+# described as if it did.
 isolation=$(holdsIsolation "http://127.0.0.1:$rethEthBase" "$subjectID" "${survivorEth[@]}")
 [ "$isolation" = "ok" ] \
-  && pass "the subject was still execution-isolated after the blocks were created — it cannot have received them by gossip" \
-  || fail "isolation lapsed while the missed blocks were created: $isolation — this run cannot separate gossip from acquisition"
+  && pass "the subject still has no execution peers now that the blocks exist (an endpoint reading; the window is checked at the reconnect)" \
+  || fail "isolation lapsed by the time the missed blocks were created: $isolation"
 snapshot "phase=blocks-created-while-isolated"
 
 # AND THE CLIENT ITSELF SAYS IT NEVER SAW THEM. Independent of the peer readings: reth logs every
@@ -418,9 +442,12 @@ else
 fi
 
 # 3. FAIL CLOSED. Unavailable, retryable, retried, and nothing adopted, moved or signed.
-unavailable=$(countIn test-nodes/evm1/debug.log "outcome=payload-unavailable")
-adopted=$(countIn test-nodes/evm1/debug.log "recovered from authenticated")
-signed=$(countIn test-nodes/evm1/debug.log "submitting block certification request")
+# COUNTED SINCE THIS ARM BEGAN, not over the whole file. The shard node is not restarted between
+# the two arms, so a whole-log count in the reconnected arm below is satisfied by outcomes from this
+# one — an assertion about a phase that its own predecessor can satisfy.
+unavailable=$(linesSince "$isolatedMark" "outcome=payload-unavailable" test-nodes/evm1/debug.log)
+adopted=$(linesSince "$isolatedMark" "recovered from authenticated" test-nodes/evm1/debug.log)
+signed=$(linesSince "$isolatedMark" "submitting block certification request" test-nodes/evm1/debug.log)
 if [ "$unavailable" -ge 2 ] && [ "$adopted" -eq 0 ] && [ "$signed" -eq 0 ]; then
   pass "fail-closed: $unavailable payload-unavailable outcomes, target retained and retried, nothing adopted and nothing signed"
 else
@@ -460,6 +487,36 @@ echo "=== 5. RECONNECTED: execution peers restored, no transaction submitted ===
 # already verified and retained, and nothing is submitted. The only difference is devp2p.
 reconnectMark=$(markNow)
 reconnectAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+stopPeerMonitor
+
+# THE WINDOW, CLOSED AND CHECKED. Everything above this line happened between $isolationAt and
+# $reconnectAt: the missed blocks were created, the subject returned, it verified its anchor and it
+# failed closed. The claim the whole experiment rests on is that it had no execution connectivity at
+# ANY point in that interval, and two independent records are required to say so.
+windowSecs=$(python3 -c "
+from datetime import datetime
+f='%Y-%m-%dT%H:%M:%SZ'
+print(int((datetime.strptime('$reconnectAt',f)-datetime.strptime('$isolationAt',f)).total_seconds()))
+" 2>/dev/null)
+minSamples=$(( ${windowSecs:-0} / 2 ))
+[ "$minSamples" -lt 20 ] && minSamples=20
+window=$(monitorClean test-nodes/peermon.log "$isolationAt" "$reconnectAt" "$minSamples")
+if [ "$window" = "ok" ]; then
+  pass "connectivity was OBSERVED for the whole ${windowSecs}s window, not sampled at its ends: $(linesBetween "$isolationAt" "$reconnectAt" "status=" test-nodes/peermon.log) readings, every one of them readable, every one of them zero peers and no session"
+else
+  fail "the isolation window is not an observed window: $window"
+fi
+# The second record, of a different kind: the client logs every session it establishes, so this is
+# an event trace rather than a sample, and a transient connection that opened and closed between two
+# samples would still appear here.
+sed $'s/\033\\[[0-9;]*m//g' test-nodes/reth1/reth.log >test-nodes/reth1/reth-plain.log 2>/dev/null
+sessionsInWindow=$(linesBetween "$isolationAt" "$reconnectAt" "Session established" test-nodes/reth1/reth-plain.log)
+if [ "${sessionsInWindow:-1}" = "0" ]; then
+  pass "and the client's own session-event trace records no session established at any point in that window — a transient connection between two samples would still have been logged"
+else
+  fail "the client established $sessionsInWindow execution session(s) inside the isolation window, so the blocks may have been received over one"
+fi
+
 note "reconnecting execution peers"
 reconnected=0
 for _ in $(seq 1 20); do
@@ -506,9 +563,9 @@ if waitForHead "http://127.0.0.1:$rethEthBase" "$certifiedNum" 180; then
   [ "$same" = "${#missedTx[@]}" ] \
     && pass "every missed transaction has the same receipt identity on the subject as on a survivor ($same of ${#missedTx[@]}): same block number, same block hash" \
     || true
-  grep -q "recovered from authenticated" test-nodes/evm1/debug.log \
-    && pass "and the anchor verified during the isolated arm is what was applied — the same target, retained across the whole isolation" \
-    || fail "the executor reached the block but no anchor was ever adopted"
+  [ "$(linesSince "$reconnectMark" "recovered from authenticated" test-nodes/evm1/debug.log)" -ge 1 ] \
+    && pass "and the adoption happened AFTER the reconnect, applying the target verified while isolated — the same anchor, retained across the whole isolation" \
+    || fail "the executor reached the block but no anchor was adopted after the reconnect"
 
   # THE MECHANISM, NAMED BY THE CLIENT ITSELF. This is what §8 said forty milliseconds could not
   # distinguish, and it is why this lane runs the client at debug: reth reports the missed blocks
@@ -524,13 +581,28 @@ if waitForHead "http://127.0.0.1:$rethEthBase" "$certifiedNum" 180; then
   fi
 else
   acquisitionResult="not-acquired"
+  # A NEGATIVE IS A RESULT — BUT ONLY IF THE OBSERVATION BEHIND IT WAS VALID. An earlier version
+  # called fail() here while saying in the same sentence that this was not a harness failure, and
+  # checked unavailability over the WHOLE log, which the isolated arm alone already satisfies. So it
+  # could neither tell a measured "the client did not obtain the block" from "the experiment did not
+  # run", nor notice that its evidence predated the phase it was describing.
+  #
+  # Four readings, all taken now and all bounded to this phase, decide which this is. If they hold,
+  # the client was reachable, still held the right verified target, and was still reporting the
+  # payload unavailable rather than invalid — a real measurement of the mechanism's limit, and not a
+  # check failure. If any of them does not, the observation is invalid and that IS a failure.
   stuck=$(blockAt "http://127.0.0.1:$rethEthBase" latest) || { fail "could not read the subject's executor"; exit 1; }
   stuckNum=$(dec "$(echo "$stuck" | cut -d' ' -f1)")
-  fail "RESULT — NOT ACQUIRED: 180s after execution peers were restored the subject is still on block $stuckNum, not $certifiedNum. Reported as a measurement, not as a harness failure: the existing client mechanism did not obtain the missed blocks under these conditions"
-  if [ "$stuckNum" = "$preOutageNum" ] && [ "$(countIn test-nodes/evm1/debug.log 'outcome=payload-unavailable')" -ge 2 ]; then
-    pass "and it stayed fail-closed throughout: the verified target is retained and still reported unavailable, never invalid"
+  nowPeers=$(peerCount "http://127.0.0.1:$rethEthBase" 2>/dev/null) || nowPeers=0
+  freshTarget=$(linesSince "$reconnectMark" "targetBlock=${certifiedHash#0x}" test-nodes/evm1/debug.log)
+  freshUnavailable=$(linesSince "$reconnectMark" "outcome=payload-unavailable" test-nodes/evm1/debug.log)
+  freshInvalid=$(linesSince "$reconnectMark" "outcome=payload-invalid" test-nodes/evm1/debug.log)
+  if [ "$nowPeers" -ge 1 ] && [ "$freshTarget" -ge 1 ] && [ "$freshUnavailable" -ge 1 ] \
+     && [ "$freshInvalid" = "0" ] && [ "$stuckNum" = "$preOutageNum" ]; then
+    info "RESULT — NOT ACQUIRED: 180s after execution peers were restored the subject is still on block $stuckNum, not $certifiedNum"
+    pass "and this is a valid negative measurement, not a broken observation: $nowPeers execution peer(s) reachable now, the certified block still the verified target after the reconnect ($freshTarget reading(s)), still reported unavailable ($freshUnavailable) and never invalid ($freshInvalid). The existing client mechanism did not obtain the missed blocks under these conditions"
   else
-    fail "the subject neither acquired the block nor stayed fail-closed: head $stuckNum"
+    fail "the reconnected arm neither acquired the block nor produced a valid negative observation: head=$stuckNum (expected $preOutageNum) peers=$nowPeers target-after-reconnect=$freshTarget unavailable-after-reconnect=$freshUnavailable invalid-after-reconnect=$freshInvalid"
   fi
 fi
 

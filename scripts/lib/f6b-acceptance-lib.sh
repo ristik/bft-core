@@ -282,40 +282,76 @@ peerCount() { # peerCount <ethURL> — echoes a decimal count, non-zero status i
   python3 -c "print(int('$n', 16))"
 }
 
-# peerIds echoes the peer ids this client currently holds, one per line — the second, independent
-# reading of the same fact. net_peerCount and admin_peers are maintained separately, and a client
-# that reports zero while still listing a session has not been isolated.
+# peerIds echoes the peer ids this client currently holds, one per line, lower-cased — the second,
+# independent reading of the same fact. net_peerCount and admin_peers are maintained separately, and
+# a client that reports zero while still listing a session has not been isolated.
+#
+# IT REFUSES ANYTHING THAT IS NOT A PEER LIST. The first version read the answer as
+# `d.get('result') or []`, so a JSON-RPC error, a missing result, an explicit null and a malformed
+# body were all rendered as "this client has no peers" — and with net_peerCount also unreadable,
+# holdsIsolation printed `ok` for a client nobody could see at all. That is the same defect as
+# counting a failed transaction read as a zero, in the one place where the whole experiment's
+# premise is a negative. An entry without a usable id is refused for the same reason: it used to
+# become the empty string, which matches nothing and therefore proves nothing.
 peerIds() { # peerIds <ethURL>
   local out
   out=$(rpc "$1" admin_peers '[]') || { echo "admin_peers to $1 failed" >&2; return 1; }
   printf '%s' "$out" | python3 -c "
 import sys, json
-d = json.load(sys.stdin)
-for p in d.get('result') or []:
-    print(p.get('id', ''))
-" 2>/dev/null
+try:
+    d = json.load(sys.stdin)
+except Exception as e:
+    sys.stderr.write('admin_peers returned no JSON: %s\n' % e); sys.exit(1)
+if not isinstance(d, dict):
+    sys.stderr.write('admin_peers returned %s, not a JSON-RPC object\n' % type(d).__name__); sys.exit(1)
+if d.get('error') is not None:
+    sys.stderr.write('admin_peers returned an error: %r\n' % (d['error'],)); sys.exit(1)
+if 'result' not in d:
+    sys.stderr.write('admin_peers returned no result field\n'); sys.exit(1)
+r = d['result']
+if not isinstance(r, list):
+    sys.stderr.write('admin_peers result is %s, not a list\n' % type(r).__name__); sys.exit(1)
+for p in r:
+    if not isinstance(p, dict):
+        sys.stderr.write('admin_peers entry is not an object\n'); sys.exit(1)
+    i = p.get('id')
+    if not isinstance(i, str) or not i.strip():
+        sys.stderr.write('admin_peers entry has no usable id\n'); sys.exit(1)
+    print(i.strip().lower())
+" || { echo "admin_peers from $1 was not a readable peer list" >&2; return 1; }
 }
 
-# nodeEnodeID echoes this client's own enode ID (the 128 hex chars between // and @), which is what
-# a peer lists it as.
-nodeEnodeID() { # nodeEnodeID <ethURL>
-  local e
-  e=$(rpcRequire "$1" admin_nodeInfo '[]' "['result']['enode']" "enode") || return 1
-  printf '%s' "$e" | sed -n 's|^enode://\([0-9a-fA-F]*\)@.*|\1|p'
+# nodeAdminID echoes the id this client is listed as BY ITS PEERS, lower-cased.
+#
+# NOT the enode public key. At the pinned reth commit the admin API reports a peer as
+# hex(keccak256(remote_id)) — 64 hex characters — while the enode URL carries the 128-character
+# public key, and the two are measured here to be exactly that: a 128-character key and a
+# 64-character id. An earlier revision compared the key against the peer list, which cannot match
+# anything, so the survivor-side half of the isolation check was inert while reading as PASS. Both
+# sides of a comparison have to be the same kind of thing.
+nodeAdminID() { # nodeAdminID <ethURL>
+  local id
+  id=$(rpcRequire "$1" admin_nodeInfo '[]' "['result']['id']" "node id") || return 1
+  id=$(printf '%s' "$id" | tr 'A-Z' 'a-z')
+  [[ "$id" =~ ^[0-9a-f]{64}$ ]] || { echo "node id from $1 is not a 32-byte hex id: '$id'" >&2; return 1; }
+  printf '%s' "$id"
 }
 
 # holdsIsolation reads the isolation from BOTH ends and echoes "ok" or the reason it is not held.
 # It never touches $failures — the caller asserts.
-holdsIsolation() { # holdsIsolation <subjectEthURL> <subjectID> <peerEthURL...>
+holdsIsolation() { # holdsIsolation <subjectEthURL> <subjectAdminID> <peerEthURL...>
   local url=$1 id=$2; shift 2
   local n other ids
-  n=$(peerCount "$url") || { echo "could not read the subject's peer count"; return 1; }
+  n=$(peerCount "$url" 2>/dev/null) || { echo "could not read the subject's peer count"; return 1; }
   [ "$n" = "0" ] || { echo "the subject still has $n execution peer(s)"; return 1; }
-  ids=$(peerIds "$url") || { echo "could not read the subject's peer list"; return 1; }
+  ids=$(peerIds "$url" 2>/dev/null) || { echo "could not read the subject's peer list"; return 1; }
   [ -z "$ids" ] || { echo "the subject reports no peer count but still lists sessions"; return 1; }
   for other in "$@"; do
-    ids=$(peerIds "$other") || { echo "could not read $other's peer list"; return 1; }
-    if printf '%s' "$ids" | grep -qi "$id"; then
+    ids=$(peerIds "$other" 2>/dev/null) || { echo "could not read $other's peer list"; return 1; }
+    # Exact equality on a whole line, both sides lower-cased by peerIds and nodeAdminID. A substring
+    # match would also have accepted a prefix, which is how an id of the wrong length can look
+    # absent when the harness never had a comparable value to look for.
+    if printf '%s\n' "$ids" | grep -qx "$id"; then
       echo "$other still lists the subject as a peer"; return 1
     fi
   done
@@ -350,6 +386,77 @@ waitForPeers() { # waitForPeers <ethURL> <want> <secs> — echoes the count it s
   done
   echo "$n"
   return 1
+}
+
+# --- observation over a WINDOW, not at its endpoints ---------------------------------------------
+#
+# Two samples either side of an interval say nothing about the interval. A connection that opens and
+# closes between them passes both, and the whole premise of the isolation experiment is that no
+# connection existed at any point while the missed blocks were being created. Review found exactly
+# that gap: the ten-second hold finished before the transactions were submitted and the next reading
+# was taken after both receipts.
+#
+# Two independent records cover it, and the lane requires both. The MONITOR samples connectivity on
+# a fixed interval and records every sample, including the ones it could not take — a window with
+# too few samples, or with one unreadable sample, is not an observed window. The client's own
+# SESSION EVENTS are the complete record: reth logs every session it establishes, so their absence
+# over the window is evidence of a different kind from a sample, and neither substitutes for the
+# other.
+
+peerMonitorPID=""
+startPeerMonitor() { # startPeerMonitor <ethURL> <outfile> <intervalSecs>
+  : >"$2"
+  (
+    while :; do
+      pmN=$(peerCount "$1" 2>/dev/null) || pmN=""
+      pmIDs=$(peerIds "$1" 2>/dev/null) || pmIDs="__unreadable__"
+      if [ -z "$pmN" ] || [ "$pmIDs" = "__unreadable__" ]; then
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) status=unreadable"
+      else
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) status=ok peers=$pmN sessions=$(printf '%s' "$pmIDs" | tr '\n' ',')"
+      fi
+      sleep "$3"
+    done
+  ) >>"$2" 2>/dev/null &
+  peerMonitorPID=$!
+}
+
+stopPeerMonitor() {
+  [ -n "$peerMonitorPID" ] && kill "$peerMonitorPID" 2>/dev/null
+  peerMonitorPID=""
+}
+
+# monitorClean echoes "ok", or the reason the window is not an observed window of no connectivity.
+# An unreadable sample is a failure, not a gap: "I could not look" is not "there was nothing there".
+monitorClean() { # monitorClean <file> <fromTS> <toTS> <minSamples>
+  local f=$1 from=$2 to=$3 want=$4 r
+  r=$(awk -v a="$from" -v b="$to" '
+    $1 >= a && $1 <= b {
+      n++
+      if ($0 !~ /status=ok/) { unread++ }
+      else if ($0 !~ /peers=0 sessions=$/) { conn++ }
+    }
+    END { printf "%d %d %d", n+0, unread+0, conn+0 }
+  ' "$f" 2>/dev/null)
+  set -- $r
+  [ "${1:-0}" -ge "$want" ] || { echo "only ${1:-0} connectivity samples cover the window, at least $want were required"; return 1; }
+  [ "${2:-1}" = "0" ] || { echo "${2} sample(s) in the window could not read the client"; return 1; }
+  [ "${3:-1}" = "0" ] || { echo "${3} sample(s) in the window show an execution peer or a session"; return 1; }
+  echo ok
+}
+
+# linesSince counts lines matching <pattern> logged after <mark> across <file...>. The mark must be
+# in the same form as the log's first field: `time=...` for the node's own logs (markNow), a bare
+# RFC3339 stamp for the execution client's.
+linesSince() { # linesSince <mark> <pattern> <file...>
+  local mark=$1 pat=$2; shift 2
+  grep -h "$pat" "$@" 2>/dev/null | awk -v t="$mark" '$1 > t' | wc -l | tr -d ' '
+}
+
+# linesBetween counts lines matching <pattern> logged in [from, to] across <file...>.
+linesBetween() { # linesBetween <from> <to> <pattern> <file...>
+  local from=$1 to=$2 pat=$3; shift 3
+  grep -h "$pat" "$@" 2>/dev/null | awk -v a="$from" -v b="$to" '$1 >= a && $1 <= b' | wc -l | tr -d ' '
 }
 
 # receiptIdentity echoes "<blockNumber> <blockHash>" for a transaction, both validated. It is the
@@ -616,43 +723,145 @@ f6bSelfTest() {
 
   # ISOLATION IS READ, NEVER ASSUMED, AND READ FROM BOTH ENDS. Each of these is a way the premise
   # "this client could not have obtained the block from anywhere" fails while a single reading says
-  # it holds.
+  # it holds. The identities below are REAL-SHAPED and distinct: a 64-hex admin id, which is what a
+  # peer list contains, and the 128-hex enode public key for the same node, which is not. An earlier
+  # fixture used `aaaa`/`AAAA` for both, and that is precisely why it hid a comparison between two
+  # representations that can never be equal.
+  local subjID="7abda841d17f3b44f9c5365b18529d5777cfc70928da8cb129760f601b6a1866"
+  local subjKey="6ae135ef47ede8f445f7$(printf '0%.0s' $(seq 1 108))"
+  local otherID="c0ffee11d17f3b44f9c5365b18529d5777cfc70928da8cb129760f601b6a9999"
+
   desc="a peer count that is not a quantity is not zero peers"
   rpc() { echo '{"result":"none"}'; }
   if peerCount unused >/dev/null 2>&1; then echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  # THE DEFECT REVIEW REPRODUCED. With net_peerCount answering 0 and admin_peers answering a
+  # JSON-RPC error on BOTH ends, the earlier holdsIsolation printed `ok` and exited 0 — a client
+  # nobody could see at all, reported as a client provably alone.
+  desc="an admin_peers error is not an empty peer list"
+  rpc() {
+    case "$2" in
+      net_peerCount) echo '{"jsonrpc":"2.0","id":1,"result":"0x0"}' ;;
+      admin_peers) echo '{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}' ;;
+    esac
+  }
+  if [ "$(holdsIsolation subject "$subjID" survivor 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a null admin_peers result is not an empty peer list"
+  rpc() {
+    case "$2" in
+      net_peerCount) echo '{"result":"0x0"}' ;;
+      admin_peers) echo '{"result":null}' ;;
+    esac
+  }
+  if [ "$(holdsIsolation subject "$subjID" survivor 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="an admin_peers response with no result field is not an empty peer list"
+  rpc() {
+    case "$2" in
+      net_peerCount) echo '{"result":"0x0"}' ;;
+      admin_peers) echo '{"jsonrpc":"2.0","id":1}' ;;
+    esac
+  }
+  if [ "$(holdsIsolation subject "$subjID" survivor 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a peer entry with no id is not a readable peer list"
+  rpc() {
+    case "$1:$2" in
+      subject:net_peerCount) echo '{"result":"0x0"}' ;;
+      subject:admin_peers) echo '{"result":[]}' ;;
+      *:admin_peers) echo '{"result":[{"name":"reth","id":""}]}' ;;
+    esac
+  }
+  if [ "$(holdsIsolation subject "$subjID" survivor 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc — an unusable id was read as 'not the subject'"; selfFailures=$((selfFailures + 1))
   else echo "  PASS: $desc"; fi
 
   desc="a client reporting no peers while still listing a session is not isolated"
   rpc() {
     case "$2" in
       net_peerCount) echo '{"result":"0x0"}' ;;
-      admin_peers) echo '{"result":[{"id":"beef"}]}' ;;
+      admin_peers) echo "{\"result\":[{\"id\":\"$otherID\"}]}" ;;
     esac
   }
-  if [ "$(holdsIsolation subject aaaa 2>/dev/null)" = "ok" ]; then
+  if [ "$(holdsIsolation subject "$subjID" 2>/dev/null)" = "ok" ]; then
     echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
   else echo "  PASS: $desc"; fi
 
-  desc="a survivor that still lists the subject means the subject is not isolated"
+  # THE SECOND DEFECT REVIEW REPRODUCED, with values of the real shapes. The survivor lists the
+  # subject by its 64-hex admin id; a check comparing the 128-hex enode key finds nothing and reads
+  # as isolated.
+  desc="a survivor that lists the subject's admin id means the subject is not isolated"
   rpc() {
     case "$1:$2" in
       subject:net_peerCount) echo '{"result":"0x0"}' ;;
       subject:admin_peers) echo '{"result":[]}' ;;
-      *:admin_peers) echo '{"result":[{"id":"AAAA"}]}' ;;
+      *:admin_peers) echo "{\"result\":[{\"id\":\"$subjID\"}]}" ;;
     esac
   }
-  if [ "$(holdsIsolation subject aaaa survivor 2>/dev/null)" = "ok" ]; then
+  if [ "$(holdsIsolation subject "$subjID" survivor 2>/dev/null)" = "ok" ]; then
     echo "  FAIL: $desc — the subject's own reading was taken as the whole answer"; selfFailures=$((selfFailures + 1))
   else echo "  PASS: $desc"; fi
 
-  desc="isolation confirmed from both ends reads as isolated"
+  # CASE IS NOT IDENTITY. A survivor that reports the id in another case still lists the subject,
+  # and a comparison that misses it reads as isolated — a false pass in the direction that matters.
+  desc="a survivor listing the subject's id in another case still means it is not isolated"
   rpc() {
     case "$1:$2" in
       subject:net_peerCount) echo '{"result":"0x0"}' ;;
-      *:admin_peers) echo '{"result":[]}' ;;
+      subject:admin_peers) echo '{"result":[]}' ;;
+      *:admin_peers) echo "{\"result\":[{\"id\":\"$(printf '%s' "$subjID" | tr 'a-f' 'A-F')\"}]}" ;;
     esac
   }
-  if [ "$(holdsIsolation subject aaaa survivor 2>/dev/null)" = "ok" ]; then echo "  PASS: $desc"
+  if [ "$(holdsIsolation subject "$subjID" survivor 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  # A DIFFERENT PEER IS NOT THE SUBJECT. Ids are fixed-width, so one that merely CONTAINS the
+  # subject's belongs to somebody else; a substring or prefix comparison would call that a lapsed
+  # isolation and stop a valid run. Exact, whole-line equality is what the check is entitled to.
+  desc="a peer whose id merely contains the subject's is a different peer"
+  rpc() {
+    case "$1:$2" in
+      subject:net_peerCount) echo '{"result":"0x0"}' ;;
+      subject:admin_peers) echo '{"result":[]}' ;;
+      *:admin_peers) echo "{\"result\":[{\"id\":\"${subjID}0\"}]}" ;;
+    esac
+  }
+  if [ "$(holdsIsolation subject "$subjID" survivor 2>/dev/null)" = "ok" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc — the comparison is not exact"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="the enode public key is not the identity a peer list can be searched for"
+  if [ "$(holdsIsolation subject "$subjKey" survivor 2>/dev/null)" = "ok" ]; then
+    echo "  PASS: $desc"   # searching for the key finds nothing — which is exactly why the key must never be used
+  else
+    echo "  FAIL: $desc — the fixture no longer distinguishes the two representations"; selfFailures=$((selfFailures + 1))
+  fi
+  desc="and nodeAdminID refuses a value of the enode key's shape"
+  rpc() { echo "{\"result\":{\"id\":\"$subjKey\"}}"; }
+  if nodeAdminID unused >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+  desc="nodeAdminID accepts a 32-byte id and lower-cases it"
+  rpc() { echo "{\"result\":{\"id\":\"$(printf '%s' "$subjID" | tr 'a-f' 'A-F')\"}}"; }
+  if [ "$(nodeAdminID unused 2>/dev/null)" = "$subjID" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="isolation confirmed from both ends, with a genuinely empty list, reads as isolated"
+  rpc() {
+    case "$1:$2" in
+      subject:net_peerCount) echo '{"result":"0x0"}' ;;
+      *:admin_peers) echo '{"jsonrpc":"2.0","id":1,"result":[]}' ;;
+    esac
+  }
+  if [ "$(holdsIsolation subject "$subjID" survivor 2>/dev/null)" = "ok" ]; then echo "  PASS: $desc"
   else echo "  FAIL: $desc — a good isolation was rejected"; selfFailures=$((selfFailures + 1)); fi
 
   # A SINGLE SAMPLE IS NOT ISOLATION. A client that re-dials a second later was never isolated for
@@ -667,10 +876,78 @@ f6bSelfTest() {
       *:admin_peers) echo '{"result":[]}' ;;
     esac
   }
-  if waitForIsolation subject aaaa 2 3 survivor >/dev/null 2>&1; then
+  if waitForIsolation subject "$subjID" 2 3 survivor >/dev/null 2>&1; then
     echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
   else echo "  PASS: $desc"; fi
-  rm -rf "$scratch"
+  unset -f rpc
+
+  # THE THIRD DEFECT REVIEW REPRODUCED: endpoint samples do not cover an interval. A connection that
+  # opens and closes between the ends passes both readings, and the whole premise is that none
+  # existed at any point.
+  desc="a connection that opens and closes mid-window is not an isolated window"
+  {
+    echo "2026-01-01T00:00:01Z status=ok peers=0 sessions="
+    echo "2026-01-01T00:00:02Z status=ok peers=0 sessions="
+    echo "2026-01-01T00:00:03Z status=ok peers=1 sessions=$otherID,"
+    echo "2026-01-01T00:00:04Z status=ok peers=0 sessions="
+    echo "2026-01-01T00:00:05Z status=ok peers=0 sessions="
+  } >"$scratch/mon.log"
+  if [ "$(monitorClean "$scratch/mon.log" 2026-01-01T00:00:01Z 2026-01-01T00:00:05Z 3 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a sample that could not read the client is not a sample of no connectivity"
+  {
+    echo "2026-01-01T00:00:01Z status=ok peers=0 sessions="
+    echo "2026-01-01T00:00:02Z status=unreadable"
+    echo "2026-01-01T00:00:03Z status=ok peers=0 sessions="
+  } >"$scratch/mon2.log"
+  if [ "$(monitorClean "$scratch/mon2.log" 2026-01-01T00:00:01Z 2026-01-01T00:00:03Z 3 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a window with too few samples is not an observed window"
+  if [ "$(monitorClean "$scratch/mon2.log" 2026-01-01T00:00:01Z 2026-01-01T00:00:03Z 10 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="samples outside the window do not fill it in"
+  {
+    echo "2026-01-01T00:00:01Z status=ok peers=0 sessions="
+    echo "2026-01-01T00:00:02Z status=ok peers=0 sessions="
+    echo "2026-01-01T00:00:03Z status=ok peers=0 sessions="
+    echo "2026-01-01T00:09:00Z status=ok peers=0 sessions="
+    echo "2026-01-01T00:09:01Z status=ok peers=0 sessions="
+  } >"$scratch/mon3.log"
+  if [ "$(monitorClean "$scratch/mon3.log" 2026-01-01T00:00:01Z 2026-01-01T00:00:03Z 5 2>/dev/null)" = "ok" ]; then
+    echo "  FAIL: $desc — readings from outside the interval were counted towards covering it"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a fully covered, readable, unconnected window reads as isolated"
+  if [ "$(monitorClean "$scratch/mon3.log" 2026-01-01T00:00:01Z 2026-01-01T00:00:03Z 3 2>/dev/null)" = "ok" ]; then
+    echo "  PASS: $desc"
+  else echo "  FAIL: $desc — a good window was rejected"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="a session event inside the window is found by the event trace"
+  {
+    echo "2026-01-01T00:00:00.5Z DEBUG net: Session established remote_addr=1"
+    echo "2026-01-01T00:00:02.5Z DEBUG net: Session established remote_addr=2"
+    echo "2026-01-01T00:09:30.0Z DEBUG net: Session established remote_addr=3"
+  } >"$scratch/reth.log"
+  a=$(linesBetween 2026-01-01T00:00:01Z 2026-01-01T00:00:03Z "Session established" "$scratch/reth.log")
+  b=$(linesBetween 2026-01-01T00:00:03Z 2026-01-01T00:09:00Z "Session established" "$scratch/reth.log")
+  if [ "$a" = "1" ] && [ "$b" = "0" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc — in-window=$a (want 1), out-of-window=$b (want 0)"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="a phase-bound count ignores what happened in the phase before it"
+  {
+    echo "time=2026-01-01T00:00:01Z outcome=payload-unavailable"
+    echo "time=2026-01-01T00:00:02Z outcome=payload-unavailable"
+    echo "time=2026-01-01T00:00:09Z outcome=payload-unavailable"
+  } >"$scratch/node.log"
+  a=$(linesSince "time=2026-01-01T00:00:05" "outcome=payload-unavailable" "$scratch/node.log")
+  if [ "$a" = "1" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc — counted $a, want 1"; selfFailures=$((selfFailures + 1)); fi
 
   desc="a receipt without a full block hash is not an identity"
   rpc() { echo '{"result":{"blockNumber":"0x3","blockHash":"0xdead"}}'; }
@@ -678,6 +955,7 @@ f6bSelfTest() {
     echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
   else echo "  PASS: $desc"; fi
   unset -f rpc
+  rm -rf "$scratch"
 
   desc="an artifact directory that cannot be created fails the run"
   artifactDir=/dev/null/not-a-directory
