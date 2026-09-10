@@ -583,6 +583,14 @@ if waitForHead "http://127.0.0.1:$rethEthBase" "$certifiedNum" 180; then
   done
   [ "$same" = "${#missedTx[@]}" ] \
     && pass "every missed transaction has the same receipt identity on the subject as on a survivor ($same of ${#missedTx[@]})" || true
+  controlAdoptedAt=$(python3 "$(dirname "${BASH_SOURCE[0]}")/lib/f6b_events.py" --mode show \
+      --from "$controlMark" --pattern "recovered from authenticated evidence" \
+      --pattern "blockHash=${certifiedHash#0x}" test-nodes/evm1/debug.log 2>/dev/null \
+    | head -1 | awk '{print $1}' | sed 's/^time=//')
+  # THE TWO INSTANTS, recorded separately because they are separate completion conditions: the
+  # executor canonicalising the block, and the node recording that it adopted the anchor for it.
+  controlAcquiredAt=$(printLinesFrom "$controlAt" test-nodes/reth1/reth-plain.log 2>/dev/null \
+    | grep "Canonical chain committed.*hash=$certifiedHash" | head -1 | awk '{print $1}')
   [ "$(waitForLinesSinceAll "$controlMark" test-nodes/evm1/debug.log 1 60 \
         "recovered from authenticated evidence" "blockHash=${certifiedHash#0x}")" -ge 1 ] \
     && pass "and ADOPTION followed ACQUISITION in this arm: the node recorded adopting ${certifiedHash:0:18}…, the same block the client downloaded — two separate completion conditions, both reached" \
@@ -648,8 +656,16 @@ manifestLines=(
   "executor before: block $preOutageNum $preOutageHash"
   "certified head:  block $certifiedNum $certifiedHash"
   "missing blocks:  $certifiedHash and its parent $missedParentHash"
-  "UNHELPFUL arm:   $armResult (head stayed at ${unhelpfulNum:-unknown})"
-  "HELPFUL control: ${controlResult:-not-run} (head ${recoveredNum:-${stuckNum:-unknown}})"
+  "expected block:  $certifiedHash"
+  "phase isolated:  $isolationAt -> $isolationEnd"
+  "phase unhelpful: $unhelpfulAt -> $unhelpfulEnd"
+  "phase control:   from $controlAt"
+  "UNHELPFUL arm:   $armResult"
+  "  ACQUIRED:      no — no canonical commit of the expected block in the arm; ${unavailable:-?} payload-unavailable outcomes"
+  "  ADOPTED:       no — nothing adopted, nothing signed, head stayed at ${unhelpfulNum:-unknown}"
+  "HELPFUL control: ${controlResult:-not-run}"
+  "  ACQUIRED:      ${controlAcquiredAt:-none} (executor canonicalised the expected block)"
+  "  ADOPTED:       ${controlAdoptedAt:-none} (node recorded adopting that block hash)"
 )
 if writeManifest; then
   pass "run artifact written to $artifactDir"
