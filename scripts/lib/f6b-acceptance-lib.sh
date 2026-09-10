@@ -638,6 +638,25 @@ linesFrom() { # linesFrom <mark> <pattern> <file...>
   python3 "$f6bEvents" --mode count --from "$mark" --pattern "$pat" "$@"
 }
 
+# waitForLinesSince blocks until <want> lines matching <pattern> have been logged after <mark>, and
+# echoes the count it settled on.
+#
+# It exists because an executor's head moving and the NODE saying so are two events, and the second
+# one comes later. The control arm waited for the head, then immediately asserted that the node had
+# logged its adoption — which it had not yet, eight seconds before it did. Two runs in three failed
+# on that, and neither failure was about the property being asserted. It is the same lesson as
+# waitForLinesAfter: anchor the wait on the event, never on the clock.
+waitForLinesSince() { # waitForLinesSince <mark> <pattern> <file> <want> <seconds>
+  local mark=$1 pat=$2 f=$3 want=$4 secs=$5 n=0
+  for _ in $(seq 1 "$secs"); do
+    n=$(linesSince "$mark" "$pat" "$f" 2>/dev/null) || n=0
+    [ "${n:-0}" -ge "$want" ] && { echo "$n"; return 0; }
+    sleep 1
+  done
+  echo "${n:-0}"
+  return 1
+}
+
 printLinesFrom() { # printLinesFrom <mark> <file...>
   local mark=$1; shift
   python3 "$f6bEvents" --mode show --from "$mark" "$@"
@@ -1178,6 +1197,20 @@ f6bSelfTest() {
   if linesFrom 2026-01-01T00:00:01Z "" "$scratch/nostamps.log" >/dev/null 2>&1; then
     echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
   else echo "  PASS: $desc"; fi
+
+  desc="a wait anchored on a phase mark returns when the line arrives, not before"
+  {
+    echo "time=2026-01-01T00:00:01.0+0000 recovered from authenticated"
+  } >"$scratch/late.log"
+  # Nothing after the mark yet: the wait must time out rather than report success.
+  if waitForLinesSince "time=2026-01-01T00:00:05+0000" "recovered from authenticated" "$scratch/late.log" 1 1 >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else
+    echo "time=2026-01-01T00:00:09.0+0000 recovered from authenticated" >>"$scratch/late.log"
+    if [ "$(waitForLinesSince "time=2026-01-01T00:00:05+0000" "recovered from authenticated" "$scratch/late.log" 1 2)" = "1" ]; then
+      echo "  PASS: $desc"
+    else echo "  FAIL: $desc — it did not see the line once it arrived"; selfFailures=$((selfFailures + 1)); fi
+  fi
 
   desc="a phase-bound count ignores what happened in the phase before it"
   {

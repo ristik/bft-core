@@ -578,7 +578,7 @@ if waitForHead "http://127.0.0.1:$rethEthBase" "$certifiedNum" 180; then
   done
   [ "$same" = "${#missedTx[@]}" ] \
     && pass "every missed transaction has the same receipt identity on the subject as on a survivor ($same of ${#missedTx[@]})" || true
-  [ "$(linesSince "$controlMark" "recovered from authenticated" test-nodes/evm1/debug.log)" -ge 1 ] \
+  [ "$(waitForLinesSince "$controlMark" "recovered from authenticated" test-nodes/evm1/debug.log 1 60)" -ge 1 ] \
     && pass "and the adoption happened in THIS arm, applying the target verified while its peers could not help" \
     || fail "the executor reached the block but no anchor was adopted in the control arm"
 else

@@ -565,7 +565,7 @@ if waitForHead "http://127.0.0.1:$rethEthBase" "$certifiedNum" 180; then
   [ "$same" = "${#missedTx[@]}" ] \
     && pass "every missed transaction has the same receipt identity on the subject as on a survivor ($same of ${#missedTx[@]}): same block number, same block hash" \
     || true
-  [ "$(linesSince "$reconnectMark" "recovered from authenticated" test-nodes/evm1/debug.log)" -ge 1 ] \
+  [ "$(waitForLinesSince "$reconnectMark" "recovered from authenticated" test-nodes/evm1/debug.log 1 60)" -ge 1 ] \
     && pass "and the adoption happened AFTER the reconnect, applying the target verified while isolated — the same anchor, retained across the whole isolation" \
     || fail "the executor reached the block but no anchor was adopted after the reconnect"
 

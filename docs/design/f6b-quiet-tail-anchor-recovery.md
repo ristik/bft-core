@@ -1107,7 +1107,7 @@ This observes the provider processes rather than inferring quietness solely from
 refraining from transaction submission.
 
 **One implementation of the assertions, not four.** All four lanes source
-`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same 61 checks over
+`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same 62 checks over
 the same helpers. Every one of those helpers guards a NEGATIVE claim, every one of them has been a
 defect at least once, and a second copy in a second lane is the argument `anchorHeadIdentity` settles
 in `shardnode/anchor.go`: two copies of a comparison that gates a conclusion is one copy too many,
@@ -1359,6 +1359,12 @@ sufficient. When no peer can supply it the node **fails closed indefinitely**: i
 target, reports the payload unavailable rather than invalid, does not move its executor, and does not
 vote. That is `VerifiedTargetSurvivesAnUnavailablePayload` (§7) measured against a real client
 instead of a fixture, and it is the behaviour §4.1's outcome vocabulary exists to make possible.
+
+**And the wait is anchored on the event, not the clock.** An executor's head moving and the node
+saying so are two events, and the second comes later: the control arm waited for the head and then
+immediately asserted the node had logged its adoption — eight seconds before it did. Two runs in
+three failed on that, and neither failure was about the property being asserted. `waitForLinesSince`
+is the fix, and it is the same lesson as the post-adoption certificate count in §6.7.
 
 **Why the third arm is not decoration.** "It did not acquire the blocks" and "it had stopped trying"
 produce the same head. The control arm changes one thing — peers that have the data — with no
