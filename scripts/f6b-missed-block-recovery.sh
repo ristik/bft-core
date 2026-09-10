@@ -437,6 +437,20 @@ else
   fail "a recovered node must not sign: NON-VOTING=$(countIn test-nodes/evm1/debug.log NON-VOTING) submissions=$signed"
 fi
 
+# THE SUBJECT OF THE COMPARISON DID NOT MOVE UNDER THE LANE. certifiedHash was read at the end of
+# the outage, and everything since has been compared against it. If a peer had certified another
+# block in the meantime — a leader building on a transaction this lane did not submit, say — that
+# value would be stale and "exact-block recovery" would be a claim about a block that is no longer
+# the head. Re-read it from the same validators and require the same answer.
+for i in $(seq 2 "$validators"); do
+  b=$(blockAt "http://127.0.0.1:$((rethEthBase + i - 1))" latest) || { fail "could not re-read executor $i's head"; continue; }
+  if [ "$(echo "$b" | cut -d' ' -f2)" = "$certifiedHash" ]; then
+    pass "executor $i is still on block $certifiedNum ${certifiedHash:0:18}…: the block this run compared against never moved"
+  else
+    fail "executor $i moved during the arms: head is $(echo "$b" | cut -d' ' -f2), the comparison used $certifiedHash"
+  fi
+done
+
 # NO NEW ACTIVITY, on every executor. This is the assertion that separates this run from the F1
 # baseline, where recovery came only from a non-quiet round — that is, from a new transaction.
 for i in $(seq 1 "$validators"); do
