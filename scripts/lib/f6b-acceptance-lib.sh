@@ -219,6 +219,22 @@ f6bEvents="$(dirname "${BASH_SOURCE[0]}")/f6b_events.py"
 # be as well-formed as the thing it is compared against.
 markNow() { date +time=%Y-%m-%dT%H:%M:%S%z; }
 
+# markNowUTC is the same idea for the marks compared against the EXECUTION CLIENT's log, and it is
+# deliberately SUB-SECOND.
+#
+# A whole-second end marker covers that whole second (see f6b_events.py), which is right for "was
+# anything logged in this second" and wrong for a PHASE BOUNDARY: if one arm ends and the next arm's
+# first download lands in the same second — which is what happens when a reconnect takes 700 ms —
+# the event belongs to both windows, and the arm that must show nothing reports the next arm's work.
+# One run of the unhelpful lane came within 254 ms of failing on exactly that. A boundary between two
+# phases has to be an instant, not a second.
+markNowUTC() {
+  python3 -c "
+from datetime import datetime, timezone
+print(datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z')
+"
+}
+
 # nonQuietSince counts non-quiet rounds logged after <mark> across <log...>. A line from the same
 # whole second as the mark counts as after it, which can only produce a false FAILURE, never a false
 # pass — the direction an assertion about "nothing happened" has to err in.
@@ -1317,6 +1333,22 @@ time.sleep(20)
     echo "  FAIL: $desc — could not open a port to test with"; selfFailures=$((selfFailures + 1))
   fi
   kill "$holder" 2>/dev/null
+
+  # A PHASE BOUNDARY IS AN INSTANT, NOT A SECOND. The whole-second convention is right for "was
+  # anything logged in this second" and wrong for separating two arms: an event 700 ms into the next
+  # arm belongs to both windows if the boundary is a whole second, and the arm that must show nothing
+  # then reports the next arm's work.
+  desc="a whole-second boundary would attribute the next phase's event to this one"
+  echo "2026-01-01T00:00:10.746Z DEBUG on_downloaded_block{block_hash=beef}" >"$scratch/boundary.log"
+  wide=$(linesBetween 2026-01-01T00:00:05Z 2026-01-01T00:00:10Z "on_downloaded_block" "$scratch/boundary.log")
+  tight=$(linesBetween 2026-01-01T00:00:05.000Z 2026-01-01T00:00:10.000Z "on_downloaded_block" "$scratch/boundary.log")
+  if [ "$wide" = "1" ] && [ "$tight" = "0" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc — whole-second window saw $wide (want 1), instant window saw $tight (want 0)"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="markNowUTC produces an instant, not a second"
+  m=$(markNowUTC)
+  if [[ "$m" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$ ]]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc — got '$m'"; selfFailures=$((selfFailures + 1)); fi
 
   desc="a phase-bound count ignores what happened in the phase before it"
   {

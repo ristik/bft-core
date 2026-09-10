@@ -1107,7 +1107,7 @@ This observes the provider processes rather than inferring quietness solely from
 refraining from transaction submission.
 
 **One implementation of the assertions, not four.** All four lanes source
-`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same 67 checks over
+`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same 69 checks over
 the same helpers. Every one of those helpers guards a NEGATIVE claim, every one of them has been a
 defect at least once, and a second copy in a second lane is the argument `anchorHeadIdentity` settles
 in `shardnode/anchor.go`: two copies of a comparison that gates a conclusion is one copy too many,
@@ -1371,6 +1371,13 @@ and only the second supports the conclusion. Fixtures pin both ways the weaker f
 adoption of another block after the mark, and an adoption of the right block before it, and a head
 that advances with no adoption at all. It is the same lesson as the post-adoption certificate count
 in §6.7.
+
+**A phase boundary is an instant, not a second.** The whole-second convention that makes
+`--to 22:03:24Z` cover that complete second is right for "was anything logged in this second" and
+wrong for separating two arms: with a whole-second boundary, a download 700 ms into the next arm
+belongs to both windows, and the arm that must show nothing reports the next arm's work. One run came
+within 254 ms of failing on exactly that. The marks compared against the execution client's log are
+now sub-second instants (`markNowUTC`), so the phases cannot overlap.
 
 **And nothing may already be listening on the ports a run needs.** One rerun reported "the execution
 mesh never formed"; the cause was a previous run's clients still bound to the same ports, answering

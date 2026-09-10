@@ -323,7 +323,7 @@ note "isolation established"
 # FROM HERE THE WINDOW IS OBSERVED, not sampled at its ends. The monitor records a reading every
 # second — including the readings it could not take — and the client's own session events are
 # checked over the same window when it closes. See monitorClean.
-isolationAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+isolationAt=$(markNowUTC)
 startPeerMonitor "http://127.0.0.1:$rethEthBase" test-nodes/peermon.log 1
 
 rootBoot=$(boot_node test-nodes/root1 "$rootBootPort")
@@ -491,7 +491,7 @@ echo "=== 5. RECONNECTED: execution peers restored, no transaction submitted ===
 # ONE VARIABLE CHANGES. The shard node is not restarted, the flags are identical, the anchor is
 # already verified and retained, and nothing is submitted. The only difference is devp2p.
 reconnectMark=$(markNow)
-reconnectAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+reconnectAt=$(markNowUTC)
 stopPeerMonitor
 
 # THE WINDOW, CLOSED AND CHECKED. Everything above this line happened between $isolationAt and
@@ -500,8 +500,8 @@ stopPeerMonitor
 # ANY point in that interval, and two independent records are required to say so.
 windowSecs=$(python3 -c "
 from datetime import datetime
-f='%Y-%m-%dT%H:%M:%SZ'
-print(int((datetime.strptime('$reconnectAt',f)-datetime.strptime('$isolationAt',f)).total_seconds()))
+i=lambda v: datetime.fromisoformat(v.replace('Z','+00:00'))
+print(int((i('$reconnectAt')-i('$isolationAt')).total_seconds()))
 " 2>/dev/null)
 minSamples=$(( ${windowSecs:-0} / 2 ))
 [ "$minSamples" -lt 20 ] && minSamples=20

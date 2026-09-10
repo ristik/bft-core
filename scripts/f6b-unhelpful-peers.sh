@@ -338,7 +338,7 @@ isolation=$(waitForIsolation "http://127.0.0.1:$rethEthBase" "$subjectID" 60 10 
   || { fail "execution isolation could not be established: $isolation"; snapshot "phase=isolation-failed"; exit 1; }
 snapshot "phase=isolated"
 note "isolation established"
-isolationAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+isolationAt=$(markNowUTC)
 startPeerMonitor "http://127.0.0.1:$rethEthBase" test-nodes/peermon-isolated.log 1
 
 stopValidator1
@@ -389,11 +389,11 @@ stopPeerMonitor
 # Close the isolation window before opening the connected one: the premise of this arm is that the
 # subject held nothing it could have obtained earlier, and that is a claim about the interval just
 # passed, not about this instant.
-isolationEnd=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+isolationEnd=$(markNowUTC)
 windowSecs=$(python3 -c "
 from datetime import datetime
-f='%Y-%m-%dT%H:%M:%SZ'
-print(int((datetime.strptime('$isolationEnd',f)-datetime.strptime('$isolationAt',f)).total_seconds()))
+i=lambda v: datetime.fromisoformat(v.replace('Z','+00:00'))
+print(int((i('$isolationEnd')-i('$isolationAt')).total_seconds()))
 " 2>/dev/null)
 minSamples=$(( ${windowSecs:-0} / 2 )); [ "$minSamples" -lt 20 ] && minSamples=20
 window=$(monitorClean test-nodes/peermon-isolated.log "$isolationAt" "$isolationEnd" "$minSamples")
@@ -450,7 +450,7 @@ $onlyBystanders \
 assertBystandersLack "at the start of the arm" "$certifiedHash" "$missedParentHash"
 
 unhelpfulMark=$(markNow)
-unhelpfulAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+unhelpfulAt=$(markNowUTC)
 startPeerMonitor "http://127.0.0.1:$rethEthBase" test-nodes/peermon-unhelpful.log 1
 restartValidator1 --evidence-recover
 waitFor test-nodes/evm1/debug.log "accepted certificate" 6 180 || { fail "the restarted node received no certificates"; exit 1; }
@@ -462,14 +462,14 @@ waitForLinesAfter test-nodes/evm1/debug.log "anchor recovery finished" "outcome=
 waitForHead "http://127.0.0.1:$rethEthBase" "$certifiedNum" 120 && acquiredFromBystanders=true || acquiredFromBystanders=false
 
 stopPeerMonitor
-unhelpfulEnd=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+unhelpfulEnd=$(markNowUTC)
 
 # THE ARM'S PREMISE, over its whole length rather than at its ends: connected the entire time, and
 # never to a survivor.
 armSecs=$(python3 -c "
 from datetime import datetime
-f='%Y-%m-%dT%H:%M:%SZ'
-print(int((datetime.strptime('$unhelpfulEnd',f)-datetime.strptime('$unhelpfulAt',f)).total_seconds()))
+i=lambda v: datetime.fromisoformat(v.replace('Z','+00:00'))
+print(int((i('$unhelpfulEnd')-i('$unhelpfulAt')).total_seconds()))
 " 2>/dev/null)
 armMin=$(( ${armSecs:-0} / 2 )); [ "$armMin" -lt 20 ] && armMin=20
 armWindow=$(monitorConnectedWithout test-nodes/peermon-unhelpful.log "$unhelpfulAt" "$unhelpfulEnd" "$armMin" "${survivorIDs[@]}")
@@ -547,7 +547,7 @@ echo "=== 4. HELPFUL: the survivors are added, and nothing else changes ==="
 # submitted, the bystanders stay connected — the only difference is that peers which HAVE the blocks
 # are now among its sessions.
 controlMark=$(markNow)
-controlAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+controlAt=$(markNowUTC)
 note "adding the survivors as execution peers"
 for _ in $(seq 1 20); do
   for i in $(seq 2 "$validators"); do
