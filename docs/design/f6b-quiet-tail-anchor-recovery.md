@@ -1030,8 +1030,9 @@ Helpers now return non-zero and print to stderr; only the parent shell counts.
 ### 6.7 The missed-block acceptance run, measured
 
 `scripts/f6b-missed-block-recovery.sh`, same pinned reth, same three-validator topology, run
-`20260910T065719Z`, whose manifest records repository revision `24c1eb51` and a clean worktree —
-the only later commit on this branch is this entry. Every number below is that run's. It exists for the one thing §6.6 names and cannot show: **P-id's ordinary
+`20260910T071425Z`, whose manifest records repository revision `05c9e417` and a clean worktree —
+the only later commit on this branch is this entry. Every number below is that run's, and the run was
+repeated three times consecutively with the same result. It exists for the one thing §6.6 names and cannot show: **P-id's ordinary
 comparison**, a head-hash match against a certified block that is not the shard's first.
 
 Row 13's exception is deliberately narrow — "the executor is at its own genesis block, at the
@@ -1055,8 +1056,8 @@ must be unable to report that result by accident.
 
 | | Control (`--evidence-recover` off, the default) | Recovery (`--evidence-recover`) |
 |---|---|---|
-| certificates after restart | 6 | 10 |
-| executor head | block 1, unchanged, while the shard is certified through block 3 | block 3 `0x6b321d0b…`, the certified block |
+| certificates after restart | 6 | 11 |
+| executor head | block 1, unchanged, while the shard is certified through block 3 | block 3 `0x997c974f…`, the certified block |
 | refusals | 6 × `cannot identify the certified block to recover to` | 2 while evidence was being fetched, none in the 6 certificates after adoption |
 | anchor adopted | none | yes, one attempt, zero restarts |
 | voting | NON-VOTING | NON-VOTING, signed nothing |
@@ -1077,12 +1078,29 @@ refused nothing over the six certificates that followed, and it still did not vo
 **What it does not establish.** The acquisition source, still — see §8, which this run does not
 close. reth1 logged `Received forkchoice updated message when syncing` and added blocks 2 and 3
 within 62 ms of the commit, so it did not hold them *canonically* during the outage; whether it
-fetched them then or already had the bodies buffered from gossip is not something 62 ms distinguishes,
+fetched them then or already had the bodies buffered from gossip is not something that distinguishes,
 and no inference is drawn from it here. The run preserves `reth1.log` in its artifact so the
 controlled peer-connectivity experiment §8 asks for has a starting point rather than a guess.
 
+**The defect this lane found in itself, which is the same one twice over.** Its precondition —
+"the shard is quiet again before the node comes back" — was written as *four quiet rounds in the
+log*, and the log already held nine from before the transactions were submitted. The wait therefore
+returned instantly, and one run in four restarted the node while the certificate naming the block it
+had missed was still the newest one. The root chain hands a returning node the LATEST certificate,
+so that node was handed the answer: it recovered by the live path with recovery OFF, its executor
+went to block 3, and the control arm failed — correctly, and for the right reason, which is the only
+part of this that went well. **That is the F1 baseline's recovery-from-new-activity (§1) arriving by
+accident inside the lane built to rule it out**, and it is the same defect as counting a failed read
+as a zero: an assertion satisfied by evidence from before the thing it is asserting about.
+
+Quietness is now measured as a **tail** — quiet rounds since the most recent non-quiet round in any
+provider's log, so a block certified while the lane waits moves the boundary and the count starts
+again — and each arm additionally asserts that **no non-quiet round was certified while it ran**.
+That second form is the direct one: not "this script submitted no transaction", which is a statement
+about the script, but "the shard certified no block", which is a statement about the shard.
+
 **One implementation of the assertions, not two.** Both lanes now source
-`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on either runs the same seventeen checks over
+`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on either runs the same twenty-one checks over
 the same helpers. Every one of those helpers guards a NEGATIVE claim, every one of them has been a
 defect at least once, and a second copy in a second lane is the argument `anchorHeadIdentity` settles
 in `shardnode/anchor.go`: two copies of a comparison that gates a conclusion is one copy too many,
@@ -1201,7 +1219,7 @@ payload-fetch mechanism is justified yet**, and the way to establish the existin
 RPC/network trace of the execution client, or a controlled peer-connectivity experiment that varies
 which peers hold the missing block. That is the next measurement, not a design conclusion.
 
-**§6.7's run does not close it either, and adds one fact to it.** In run `20260910T065719Z` the
+**§6.7's run does not close it either, and adds one fact to it.** In run `20260910T071425Z` the
 recovering reth was running, peered to two others and gossiping for the whole outage, and its
 canonical head did not move: it reported `Received forkchoice updated message when syncing` at the
 commit, then added blocks 2 and 3 and committed the chain within 62 ms. So the missed blocks were
