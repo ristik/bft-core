@@ -37,6 +37,7 @@ rethP2PBase=30401
 rootBootPort=26662
 
 failures=0
+reached="startup"
 pass() { echo "  PASS: $1"; }
 fail() { echo "  FAIL: $1"; failures=$((failures + 1)); }
 info() { echo "  info: $1"; }
@@ -60,7 +61,44 @@ if [ -n "$stale" ]; then
   exit 1
 fi
 
+# THE RUN ARTIFACT. Written OUTSIDE test-nodes/, which this script and every other lane in this
+# repository delete; hashing COPIES of the logs rather than the live files, which keep growing under
+# a node that is still running; and written from the EXIT trap, so a run that fails early still
+# leaves a record of what it was and how far it got. Review found all three, and each of them makes
+# the difference between an artifact and a scrollback.
+artifactDir="${F6B_ARTIFACT_DIR:-artifacts/f6b-acceptance/$(date -u +%Y%m%dT%H%M%SZ)}"
+manifestWritten=0
+writeManifest() {
+  [ "$manifestWritten" -eq 1 ] && return 0
+  manifestWritten=1
+  mkdir -p "$artifactDir/logs" || return 0
+  # Copy first, then hash the copies: a digest of a file a running node is still appending to
+  # describes nothing anybody can check later.
+  for f in test-nodes/evm1/control.log $(seq -f "test-nodes/evm%g/debug.log" 1 "$validators"); do
+    [ -f "$f" ] && cp "$f" "$artifactDir/logs/$(echo "$f" | tr '/' '_')" 2>/dev/null
+  done
+  {
+    echo "f6b quiet-tail recovery acceptance run"
+    echo "finished:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "repository:      $(git rev-parse HEAD 2>/dev/null || echo unknown)"
+    echo "worktree clean:  $([ -z "$(git status --porcelain 2>/dev/null)" ] && echo yes || echo "NO — this run is not reproducible from the recorded revision")"
+    echo "ubft:            $( [ -x build/ubft ] && shasum -a 256 build/ubft | cut -d' ' -f1 || echo missing)"
+    echo "reth:            ${rethCommit:-unknown}$([ "${rethCommit:-}" = "$pinnedRethCommit" ] && echo " (pinned)" || echo " (NOT the pinned baseline)")"
+    echo "validators:      $validators"
+    echo "control flags:   (defaults: --evidence-serve on, --evidence-recover off)"
+    echo "recovery flags:  --evidence-recover"
+    echo "checks failed:   $failures"
+    echo "reached:         ${reached:-startup}"
+    echo
+    echo "digests of the COPIED logs in $artifactDir/logs:"
+    for f in "$artifactDir"/logs/*; do
+      [ -f "$f" ] && echo "  $(shasum -a 256 "$f")"
+    done
+  } >"$artifactDir/manifest.txt"
+}
+
 cleanup() {
+  writeManifest
   ./stop-evm.sh -a >/dev/null 2>&1 || true
   pkill -f 'ubft shard-node run' 2>/dev/null
   for i in $(seq 1 "$validators"); do
@@ -74,6 +112,7 @@ trap 'exit 143' TERM
 
 source ./helper.sh
 
+reached="section 1: devnet and quiet tail"
 echo "=== 1. a shard with no transactions in it ==="
 rm -rf test-nodes
 ./setup-evm-nodes.sh -r 3 -v "$validators" >/dev/null || { echo "setup failed" >&2; exit 1; }
@@ -99,24 +138,28 @@ rpc() { curl -sS --max-time 10 -X POST "$1" -H "Content-Type: application/json" 
   -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}"; }
 pyget() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1)" 2>/dev/null; }
 
-# rpcRequire is rpc that FAILS the run rather than returning empty.
+# rpcRequire is rpc that REPORTS a failure instead of returning empty, and it reports it on stderr
+# with a non-zero status rather than by calling fail().
 #
-# Review found the difference load-bearing: `${c:-0}` over a failed read counted as zero
-# transactions, so an unreachable node produced a PASS asserting that nothing had executed. An
-# assertion that cannot tell "I looked and saw none" from "I could not look" is not evidence, and
-# this lane's whole claim is a negative one.
+# Both halves matter, and review found both. `${c:-0}` over a failed read counted as zero
+# transactions, so an unreachable node produced a PASS asserting nothing had executed — an assertion
+# that cannot tell "I looked and saw none" from "I could not look" is not evidence, and this lane's
+# claim is a negative one. And calling fail() from here would increment $failures inside a COMMAND
+# SUBSTITUTION, which is a subshell: the parent's counter never moved and the run exited 0 with
+# failures on screen. Anything that must change $failures has to run in the parent shell.
 rpcRequire() { # rpcRequire <url> <method> <params> <pyget-path> <what>
   local out value
-  out=$(rpc "$1" "$2" "$3") || { fail "RPC $2 to $1 failed ($5)"; return 1; }
+  out=$(rpc "$1" "$2" "$3") || { echo "RPC $2 to $1 failed ($5)" >&2; return 1; }
   value=$(printf '%s' "$out" | pyget "$4")
   if [ -z "$value" ]; then
-    fail "RPC $2 to $1 returned no $5: $(printf '%s' "$out" | head -c 200)"
+    echo "RPC $2 to $1 returned no $5: $(printf '%s' "$out" | head -c 200)" >&2
     return 1
   fi
   printf '%s' "$value"
 }
 
-# countTransactions echoes the total transaction count from genesis to head, or fails the run.
+# countTransactions echoes "<total> <headHex>" and returns non-zero if any read failed. It never
+# touches $failures: see rpcRequire.
 countTransactions() { # countTransactions <ethURL>
   local url=$1 headHex total=0 n c
   headHex=$(rpcRequire "$url" eth_getBlockByNumber '["latest", false]' "['result']['number']" "head block number") || return 1
@@ -125,6 +168,24 @@ countTransactions() { # countTransactions <ethURL>
     total=$((total + $((c))))
   done
   echo "$total $headHex"
+}
+
+# assertNoTransactions runs entirely in the PARENT shell, so its fail() actually counts.
+assertNoTransactions() { # assertNoTransactions <label> <ethURL>
+  local label=$1 url=$2 out rc total headHex
+  out=$(countTransactions "$url" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "$label: could not read the executor's blocks, so 'no transactions' is unproven: $(echo "$out" | tail -1)"
+    return 1
+  fi
+  total=$(echo "$out" | tail -1 | cut -d' ' -f1)
+  headHex=$(echo "$out" | tail -1 | cut -d' ' -f2)
+  if [ "$total" -eq 0 ]; then
+    pass "$label: every canonical block, genesis through $headHex, contains zero transactions"
+  else
+    fail "$label: $total transactions executed — this lane must demonstrate recovery with no new activity"
+  fi
 }
 
 for i in $(seq 1 "$validators"); do
@@ -175,13 +236,7 @@ fi
 # MEASURED CORRECTION, from this lane's own first run: a round can be non-quiet WITHOUT a
 # transaction. "No transaction" is therefore asserted against the executor's own blocks rather than
 # against the shard's quietness, which is a statement about the state root and not about activity.
-if read -r txCount headHex < <(countTransactions "http://127.0.0.1:$rethEthBase"); then
-  if [ "$txCount" -eq 0 ]; then
-    pass "no transaction was executed: every canonical block on the executor, genesis through $headHex, contains zero transactions"
-  else
-    fail "$txCount transactions executed — this lane must demonstrate recovery with no new activity"
-  fi
-fi
+assertNoTransactions "no transaction has executed" "http://127.0.0.1:$rethEthBase"
 
 # The root bootnode, computed the way helper.sh computes it rather than scraped from a log: the log
 # format is not a contract, and a scrape that silently returns empty produces a validator with no
@@ -209,6 +264,7 @@ restartValidator1() {
 }
 
 echo
+reached="section 2: control arm"
 echo "=== 2. CONTROL: the same node with recovery off refuses for ever ==="
 # Its reth keeps running, so this is the shard-node-only restart of the §1.1 matrix: the executor
 # still holds everything, and what the node lost is its own in-process anchor.
@@ -236,6 +292,7 @@ grep -q "NON-VOTING" test-nodes/evm1/debug.log \
 cp test-nodes/evm1/debug.log test-nodes/evm1/control.log
 
 echo
+reached="section 3: recovery arm"
 echo "=== 3. RECOVERY: the same node, same devnet, --evidence-recover ==="
 restartValidator1 --evidence-recover
 waitFor test-nodes/evm1/debug.log "accepted certificate" 6 120 || { fail "the restarted node received no certificates"; exit 1; }
@@ -306,45 +363,19 @@ fi
 # stronger statement than the shard's quietness. Restate it here over the whole run, on every
 # executor rather than only the recovering node's.
 for i in $(seq 1 "$validators"); do
-  if read -r finalTx finalHead < <(countTransactions "http://127.0.0.1:$((rethEthBase + i - 1))"); then
-    if [ "$finalTx" -eq 0 ]; then
-      pass "executor $i: still no transaction at the end of the run, across genesis..$finalHead"
-    else
-      fail "executor $i executed $finalTx transactions during the run"
-    fi
-  fi
+  assertNoTransactions "executor $i at the end of the run" "http://127.0.0.1:$((rethEthBase + i - 1))"
 done
 
+reached="all sections"
 echo
 echo "=== 4. provenance ==="
-# A lane whose result is a negative claim has to say what it was run against, and leave behind
-# something that can be checked afterwards rather than a scrollback. The manifest names the revision,
-# the client, the flags, and a digest of every log the assertions above actually read — so a later
-# reader can tell whether the evidence they are looking at is the evidence that was measured.
-manifest=test-nodes/f6b-acceptance-manifest.txt
-{
-  echo "f6b quiet-tail recovery acceptance run"
-  echo "finished:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "repository:      $(git rev-parse HEAD 2>/dev/null || echo unknown)"
-  echo "worktree clean:  $([ -z "$(git status --porcelain 2>/dev/null)" ] && echo yes || echo NO — this run is not reproducible from the recorded revision)"
-  echo "ubft:            $(shasum -a 256 build/ubft | cut -d' ' -f1)"
-  echo "reth:            $rethCommit$([ "$rethCommit" = "$pinnedRethCommit" ] && echo " (pinned)" || echo " (NOT the pinned baseline)")"
-  echo "validators:      $validators"
-  echo "control flags:   (defaults: --evidence-serve on, --evidence-recover off)"
-  echo "recovery flags:  --evidence-recover"
-  echo "checks failed:   $failures"
-  echo
-  echo "digests of the logs these assertions read:"
-  for f in test-nodes/evm1/control.log test-nodes/evm1/debug.log $(seq -f "test-nodes/evm%g/debug.log" 2 "$validators"); do
-    [ -f "$f" ] && echo "  $(shasum -a 256 "$f")"
-  done
-} >"$manifest"
-cat "$manifest"
+writeManifest
+cat "$artifactDir/manifest.txt"
 
 echo
 if [ "$failures" -eq 0 ]; then
-  echo "ALL CHECKS PASSED (reth $rethCommit) — manifest: $manifest"
+  echo "ALL CHECKS PASSED (reth $rethCommit) — artifact: $artifactDir"
 else
-  echo "$failures CHECK(S) FAILED — manifest: $manifest"
+  echo "$failures CHECK(S) FAILED — artifact: $artifactDir"
 fi
 exit $((failures > 0))

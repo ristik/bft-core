@@ -141,7 +141,7 @@ func TestFinalityGate(t *testing.T) {
 // answer, and the caller is a round loop — so a gate it cannot have is reported, not waited for.
 func TestTargetApplier_DoesNotWaitForTheRoundsOwnCommit(t *testing.T) {
 	gate := NewFinalityGate()
-	ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
+	ex := behindThenRecovered()
 	clock := &testClock{at: time.Unix(1_700_000_000, 0)}
 	src := &stubTarget{anchor: recoveredAnchor(), verifiedFor: heldBinding()}
 	a, err := NewTargetApplier(ApplyConfig{Executor: ex, Source: src, Budget: testApplyBudget(), Gate: gate, Now: clock.now})
@@ -298,6 +298,7 @@ retried. Interference by a correct round permanently refused a target that was c
 */
 func TestTargetApplier_HoldsTheGateThroughTheConfirmation(t *testing.T) {
 	gate := NewFinalityGate()
+	headReads := 0
 	var duringCommit, duringHead, duringGenesis string
 	ex := &stubExecutor{
 		commit: func(context.Context, Hash) (Status, error) {
@@ -306,6 +307,12 @@ func TestTargetApplier_HoldsTheGateThroughTheConfirmation(t *testing.T) {
 		},
 		head: func(context.Context) (BlockRef, error) {
 			duringHead, _, _ = gate.Holder()
+			headReads++
+			if headReads == 1 {
+				// Behind, so the attempt actually reaches the commit; the applier decides from the
+				// head IT reads under the gate, not from the one the caller passed.
+				return BlockRef{Number: 4, Hash: Hash(h32(0xaa)), StateRoot: Hash(h32(0x0a))}, nil
+			}
 			return BlockRef{Number: 0, Hash: Hash(h32(0x01)), StateRoot: Hash(h32(0x0b))}, nil
 		},
 		genesis: func(context.Context) (BlockRef, error) {

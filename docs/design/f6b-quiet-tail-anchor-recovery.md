@@ -977,15 +977,29 @@ The one thing kept apart is the attempt BUDGET, and deliberately: only a path th
 executor spends it. A node that is already correct must not be kept from saying so by an earlier
 failure's backoff — nothing is being asked of the executor, so nothing needs rationing.
 
-**Provenance.** The run writes a manifest naming the repository revision, whether the worktree was
-clean, the `ubft` binary's digest, the reth commit and whether it is the pinned one, the flags each
-arm ran with, and a SHA-256 of every log the assertions actually read. A lane whose result is a
-negative claim has to leave behind something a later reader can check, rather than a scrollback.
+**And the head it decides from is read under the gate.** The first version used the one the caller
+passed, which was read BEFORE the gate was taken — so between that read and the decision another
+actor could have committed, and the anchor would be adopted on the strength of a head that no longer
+exists. Under the gate nothing can move it, which is the only condition that makes "the executor is
+already there" a fact rather than a recollection. The caller's head is still what an attempt REPORTS
+when it refuses before reading one; it is no longer what any decision is made from.
 
-**A failed read is not a zero.** `${c:-0}` over a failed RPC counted as zero transactions, so an
-unreachable node produced a PASS asserting that nothing had executed. An assertion that cannot tell
-"I looked and saw none" from "I could not look" is not evidence, and this lane's whole claim is a
-negative one. Every read now fails the run rather than defaulting.
+**Provenance is an artifact, not a scrollback.** The run writes `artifacts/f6b-acceptance/<utc>/`
+containing **copies** of every log the assertions read and a manifest naming the repository revision,
+whether the worktree was clean, the `ubft` digest, the reth commit and whether it is pinned, each
+arm's flags, how far the run got, and a SHA-256 of each copied log. Three details are the whole
+point, and review found all three: it lives outside `test-nodes/`, which this lane and every other
+one in the repository delete; it hashes copies, because a digest of a file a running node is still
+appending to describes nothing anybody can check later; and it is written from the EXIT trap, so a
+run that fails early still leaves a record of what it was.
+
+**A failed read is not a zero, and a failure in a subshell is not a failure.** `${c:-0}` over a
+failed RPC counted as zero transactions, so an unreachable node produced a PASS asserting nothing had
+executed — an assertion that cannot tell "I looked and saw none" from "I could not look" is not
+evidence, and this lane's claim is a negative one. Worse, the helper reported it by calling `fail`
+from inside a command substitution: that is a subshell, so `$failures` was incremented in a process
+that then exited, the parent's counter never moved, and **the run exited 0 with failures on screen**.
+Helpers now return non-zero and print to stderr; only the parent shell counts.
 
 **What the run does NOT establish**, named rather than glossed:
 

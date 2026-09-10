@@ -147,10 +147,29 @@ func recoveredHead() BlockRef {
 	return BlockRef{Number: 5, Hash: Hash(h32(0xbb)), StateRoot: Hash(h32(0x0b))}
 }
 
+/*
+behindThenRecovered is an executor that is GENUINELY behind until it is told to commit.
+
+It exists because the applier no longer decides from the head its caller passed in — it reads one
+itself, under the gate — so an executor stub whose Head always answered "already recovered" makes
+every attempt a no-commit adoption regardless of what the fixture passes. Modelling the executor
+honestly is what keeps "already there" and "not there yet" distinguishable.
+*/
+func behindThenRecovered() *stubExecutor {
+	ex := &stubExecutor{}
+	ex.head = func(context.Context) (BlockRef, error) {
+		if len(ex.commits) == 0 {
+			return behindHead(), nil
+		}
+		return recoveredHead(), nil
+	}
+	return ex
+}
+
 // --- the ordinary case -------------------------------------------------------------------------
 
 func TestTargetApplier_CommitsTheCertifiedBlock(t *testing.T) {
-	ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
+	ex := behindThenRecovered()
 	f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
 	res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
@@ -269,7 +288,8 @@ func TestTargetApplier_TheThreeExecutorSituationsStayApart(t *testing.T) {
 		require.NotErrorIs(t, res.Err, ErrApplyPayloadInvalid)
 		require.True(t, res.Outcome.Retryable())
 		require.NotNil(t, res.Target, "the target is kept: the authority to retry is what dropping it would lose")
-		require.Zero(t, ex.heads, "no head is read after a commit that did not report")
+		require.Equal(t, 1, ex.heads,
+			"the head is read once, under the gate, to decide whether anything needed doing — and not again after a commit that did not report")
 	})
 
 	for _, status := range []Status{StatusSyncing, StatusAccepted} {
@@ -308,7 +328,11 @@ func TestTargetApplier_TheThreeExecutorSituationsStayApart(t *testing.T) {
 		// gets its own attempt.
 		f.src.set(&ExecutionAnchor{BlockHash: Hash(h32(0xee)), StateRoot: Hash(h32(0x0b)), Round: 12}, heldBinding())
 		ex.commit = func(context.Context, Hash) (Status, error) { return StatusValid, nil }
+		// Behind the NEW block until it is committed, so the attempt has something to do.
 		ex.head = func(context.Context) (BlockRef, error) {
+			if len(ex.commits) < 2 {
+				return behindHead(), nil
+			}
 			return BlockRef{Number: 6, Hash: Hash(h32(0xee)), StateRoot: Hash(h32(0x0b))}, nil
 		}
 		third := f.applier.Apply(context.Background(), heldBinding(), behindHead())
@@ -530,7 +554,15 @@ func TestTargetApplier_OneAttemptIsInsideTheExecutorAtATime(t *testing.T) {
 			}
 			return StatusValid, nil
 		},
-		head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil },
+		// Behind until the commit lands, so the attempt reaches Commit at all — the applier reads
+		// the head itself now and would otherwise adopt without commanding anything.
+		head: func(context.Context) (BlockRef, error) { return behindHead(), nil },
+	}
+	ex.head = func(context.Context) (BlockRef, error) {
+		if len(ex.commits) == 0 {
+			return behindHead(), nil
+		}
+		return recoveredHead(), nil
 	}
 	f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
@@ -570,7 +602,7 @@ answer was never about.
 func TestTargetApplier_NoticesTheTargetMovingUnderTheCommit(t *testing.T) {
 	t.Run("a different block arrives while the commit is in the executor", func(t *testing.T) {
 		var f *applyFixture
-		ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
+		ex := behindThenRecovered()
 		ex.commit = func(context.Context, Hash) (Status, error) {
 			// The shard certified a state-changing round; the requester verified a new target.
 			f.src.set(&ExecutionAnchor{BlockHash: Hash(h32(0xee)), StateRoot: Hash(h32(0x0c)), Round: 21}, bind(21, 140, h32(0x0c)))
@@ -588,7 +620,7 @@ func TestTargetApplier_NoticesTheTargetMovingUnderTheCommit(t *testing.T) {
 
 	t.Run("the same block carried onto a later certificate is still an application", func(t *testing.T) {
 		var f *applyFixture
-		ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
+		ex := behindThenRecovered()
 		ex.commit = func(context.Context, Hash) (Status, error) {
 			// A quiet round: the requester carried the SAME anchor onto the newer certificate.
 			f.src.set(recoveredAnchor(), bind(19, 130, h32(0x0b)))
@@ -615,14 +647,17 @@ correctly, for ever — while the executor was already exactly where the certifi
 */
 func TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere(t *testing.T) {
 	t.Run("an ordinary anchor the executor already holds", func(t *testing.T) {
-		ex := &stubExecutor{}
+		ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
-		res := f.applier.Apply(context.Background(), heldBinding(), recoveredHead())
+		// The caller's head is STALE and says the node is behind; the executor says otherwise. The
+		// decision must come from the executor, read under the gate.
+		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
 
 		require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
 		require.Empty(t, ex.commits, "nothing needed to change, so nothing was changed")
-		require.Zero(t, ex.heads, "and the head the caller already read was enough")
+		require.Equal(t, 1, ex.heads,
+			"one head read, taken under the gate — the caller's was read before it and is not what this is decided from")
 		require.Equal(t, 1, f.applier.Status().Applied)
 	})
 
@@ -631,7 +666,10 @@ func TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere(t *t
 		// BlockHashOrFallback), and the executor sits at its own genesis block, at that state.
 		stateRoot := h32(0x0b)
 		genesis := BlockRef{Number: 0, Hash: Hash(h32(0x59)), StateRoot: Hash(stateRoot)}
-		ex := &stubExecutor{genesis: func(context.Context) (BlockRef, error) { return genesis, nil }}
+		ex := &stubExecutor{
+			head:    func(context.Context) (BlockRef, error) { return genesis, nil },
+			genesis: func(context.Context) (BlockRef, error) { return genesis, nil },
+		}
 		anchor := &ExecutionAnchor{
 			BlockHash: Hash(stateRoot), StateRoot: Hash(stateRoot), Round: 1, fromGenesisRound: true,
 		}
@@ -643,6 +681,24 @@ func TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere(t *t
 		require.Empty(t, ex.commits,
 			"committing a state root as though it were a block is what reth answered SYNCING to, for ever")
 		require.Equal(t, 1, ex.geneses, "block zero is read once, for the row-13 exception")
+	})
+
+	/*
+	   And the other direction, which is the one review reproduced: the caller's head says the node is
+	   already on the certified block, and the executor says it is not. A head read before the gate
+	   was taken is a recollection — another actor may have committed since — so adopting on the
+	   strength of it would claim an execution identity the executor does not have.
+	*/
+	t.Run("a stale caller head claiming the node is already there does not adopt", func(t *testing.T) {
+		ex := behindThenRecovered()
+		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
+
+		res := f.applier.Apply(context.Background(), heldBinding(), recoveredHead())
+
+		require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
+		require.Len(t, ex.commits, 1,
+			"the executor was behind, whatever the caller's head remembered, so it had to be commanded")
+		require.Equal(t, Hash(h32(0xbb)), res.Head.Hash, "and the head reported is the one read under the gate")
 	})
 
 	t.Run("the right block at the wrong state is not already there", func(t *testing.T) {
@@ -665,7 +721,14 @@ func TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere(t *t
 	   sits inside the same guards as the path that commits. Review found it given before all of them.
 	*/
 	t.Run("a faulted target is not adopted just because the head happens to match", func(t *testing.T) {
+		matched := false
 		ex := &stubExecutor{commit: func(context.Context, Hash) (Status, error) { return StatusInvalid, nil }}
+		ex.head = func(context.Context) (BlockRef, error) {
+			if matched {
+				return recoveredHead(), nil
+			}
+			return behindHead(), nil
+		}
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
 		// First, make it a fault the ordinary way: behind the block, and the executor rejects it.
@@ -673,6 +736,7 @@ func TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere(t *t
 
 		// Now the executor's head matches the target. The block is still one this node has concluded
 		// it cannot apply, and a matching head is not a reason to forget that.
+		matched = true
 		res := f.applier.Apply(context.Background(), heldBinding(), recoveredHead())
 		require.Equal(t, ApplyPayloadInvalid, res.Outcome)
 		require.Zero(t, f.applier.Status().Applied)
@@ -680,7 +744,7 @@ func TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere(t *t
 
 	t.Run("it is not adopted while the round holds the gate", func(t *testing.T) {
 		gate := NewFinalityGate()
-		ex := &stubExecutor{}
+		ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
 		clock := &testClock{at: time.Unix(1_700_000_000, 0)}
 		src := &stubTarget{anchor: recoveredAnchor(), verifiedFor: heldBinding()}
 		a, err := NewTargetApplier(ApplyConfig{Executor: ex, Source: src, Budget: testApplyBudget(), Gate: gate, Now: clock.now})
@@ -697,7 +761,9 @@ func TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere(t *t
 	})
 
 	t.Run("it is revalidated against a target that moved", func(t *testing.T) {
-		ex := &stubExecutor{}
+		ex := &stubExecutor{head: func(context.Context) (BlockRef, error) {
+			return BlockRef{Number: 5, Hash: Hash(h32(0xbb)), StateRoot: Hash(h32(0x0b))}, nil
+		}}
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 		// The requester installs a target for a newer certificate naming a different block, in the
 		// window between the source being read and the anchor being adopted.
@@ -715,19 +781,27 @@ func TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere(t *t
 	t.Run("an earlier failure's backoff does not withhold a free answer", func(t *testing.T) {
 		// Nothing is asked of the executor on this path, so nothing needs rationing — and a node that
 		// is already correct must not be kept from saying so by a retry policy for commands.
+		arrived := false
 		ex := &stubExecutor{commit: func(context.Context, Hash) (Status, error) { return StatusSyncing, nil }}
+		ex.head = func(context.Context) (BlockRef, error) {
+			if arrived {
+				return recoveredHead(), nil
+			}
+			return behindHead(), nil
+		}
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
 		require.Equal(t, ApplyPayloadUnavailable, f.applier.Apply(context.Background(), heldBinding(), behindHead()).Outcome)
 		require.Equal(t, ApplyBackoff, f.applier.Apply(context.Background(), heldBinding(), behindHead()).Outcome)
 
 		// The payload arrived and the executor moved itself; the clock has not.
+		arrived = true
 		res := f.applier.Apply(context.Background(), heldBinding(), recoveredHead())
 		require.Equal(t, ApplyApplied, res.Outcome, "err: %v", res.Err)
 	})
 
 	t.Run("and it still commits when the executor is NOT already there", func(t *testing.T) {
-		ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
+		ex := behindThenRecovered()
 		f := newApplyFixture(t, testApplyBudget(), ex, recoveredAnchor())
 
 		res := f.applier.Apply(context.Background(), heldBinding(), behindHead())
@@ -761,7 +835,7 @@ func TestTargetApplier_RefusesAnUnusableConfiguration(t *testing.T) {
 // What a caller is handed is its own, here as everywhere else in this path: ExecutionAnchor's hashes
 // are byte slices, and the result carries one.
 func TestTargetApplier_ReturnedTargetDoesNotAliasTheSource(t *testing.T) {
-	ex := &stubExecutor{head: func(context.Context) (BlockRef, error) { return recoveredHead(), nil }}
+	ex := behindThenRecovered()
 	anchor := recoveredAnchor()
 	f := newApplyFixture(t, testApplyBudget(), ex, anchor)
 	f.src.shared = true // a source that hands out its own record, which the applier may not rely on

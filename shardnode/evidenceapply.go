@@ -413,10 +413,19 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 	}
 
 	/*
-	   IS THERE ANYTHING TO DO? The caller has just read the executor's head, so this costs no RPC on
-	   the common path, and a node already at the certified block needs no finality-changing call at
-	   all — adopting a verified statement is not the same as changing what the executor considers
-	   canonical.
+	   IS THERE ANYTHING TO DO? Decided from a head read HERE, under the gate — not from the one the
+	   caller passed in.
+
+	   Review found the difference load-bearing, and it is the same lesson as the gate itself: the
+	   caller's head was read before the gate was taken, so between that read and this decision
+	   another actor could have committed, and the anchor would be adopted on the strength of a head
+	   that no longer exists. Under the gate nothing can move it, which is the only condition that
+	   makes "the executor is already there" a fact rather than a recollection. The head the caller
+	   passed is still what gets REPORTED by an attempt that refuses before reading one; it is no
+	   longer what any decision is made from.
+
+	   A node already at the certified block needs no finality-changing call at all — adopting a
+	   verified statement is not the same as changing what the executor considers canonical.
 
 	   MEASURED CORRECTION (the real-reth acceptance run for #92). Committing unconditionally was
 	   wrong for the one anchor whose block the executor is NOT expected to hold: the shard's first
@@ -431,13 +440,18 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 	   then "make it be there". The budget is NOT spent on the first: a node that is already correct
 	   must not be kept from saying so by an earlier failure's backoff.
 	*/
-	satisfied, gerr := a.headSatisfies(ctx, target, held, head)
-	if gerr != nil {
+	current, herr := a.head(ctx)
+	if herr != nil {
 		return a.retryable(ApplyExecutorUnreachable, head, target, a.attemptNumber(),
+			fmt.Errorf("%w: reading the executor head: %w", ErrApplyExecutorUnreachable, herr))
+	}
+	satisfied, gerr := a.headSatisfies(ctx, target, held, current)
+	if gerr != nil {
+		return a.retryable(ApplyExecutorUnreachable, current, target, a.attemptNumber(),
 			fmt.Errorf("%w: reading the executor genesis block: %w", ErrApplyExecutorUnreachable, gerr))
 	}
 
-	newHead := head
+	newHead := current
 	if !satisfied {
 		// Only a path that COMMANDS the executor spends the attempt budget and the backoff.
 		attempt, serr := a.spend(held)
@@ -451,17 +465,17 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 		if cerr != nil {
 			// UNREACHABLE, not unavailable and not invalid. The executor said nothing, so nothing is
 			// known — including whether it applied the block. The target is kept.
-			return a.retryable(ApplyExecutorUnreachable, head, target, attempt,
+			return a.retryable(ApplyExecutorUnreachable, current, target, attempt,
 				fmt.Errorf("%w: committing certified block %x: %w", ErrApplyExecutorUnreachable, target.BlockHash, cerr))
 		}
 		switch status {
 		case StatusValid:
 			// on, to the post-conditions
 		case StatusSyncing, StatusAccepted:
-			return a.retryable(ApplyPayloadUnavailable, head, target, attempt,
+			return a.retryable(ApplyPayloadUnavailable, current, target, attempt,
 				fmt.Errorf("%w: certified block %x reported %s", ErrApplyPayloadUnavailable, target.BlockHash, status))
 		default:
-			return a.fault(ApplyPayloadInvalid, head, target, attempt,
+			return a.fault(ApplyPayloadInvalid, current, target, attempt,
 				fmt.Errorf("%w: certified block %x reported %s — this is a fault, not an availability problem",
 					ErrApplyPayloadInvalid, target.BlockHash, status))
 		}
@@ -471,12 +485,12 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 	if !satisfied {
 		// THE CONFIRMATION. Read under the same gate the commit was made under, so nothing can have
 		// moved the head in between (see the gate comment above).
-		confirmed, herr := a.head(ctx)
-		if herr != nil {
+		confirmed, cherr := a.head(ctx)
+		if cherr != nil {
 			// The commit reported VALID and the head could not be read, so whether this node is
 			// recovered is unknown. Unknown is retryable, and the next attempt's commit is a no-op.
-			return a.retryable(ApplyExecutorUnreachable, head, target, attempt,
-				fmt.Errorf("%w: reading head after committing %x: %w", ErrApplyExecutorUnreachable, target.BlockHash, herr))
+			return a.retryable(ApplyExecutorUnreachable, current, target, attempt,
+				fmt.Errorf("%w: reading head after committing %x: %w", ErrApplyExecutorUnreachable, target.BlockHash, cherr))
 		}
 		newHead = confirmed
 	}
