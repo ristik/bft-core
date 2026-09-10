@@ -328,13 +328,13 @@ providerLogs=""
 for i in $(seq 2 "$validators"); do providerLogs="$providerLogs test-nodes/evm$i/debug.log"; done
 quietTail=$(waitForQuietTail 4 180 $providerLogs) \
   || { fail "the shard never went quiet after the last transaction: tail is $quietTail quiet round(s)"; exit 1; }
-pass "the shard is quiet again: $quietTail quiet rounds since the last block, so the newest certificate names nothing"
+pass "the shard is quiet again: $quietTail quiet request entries since the last non-quiet request, so the newest certificate names nothing"
 
 assertTransactionCount "before the first restart" "$peerEth" "$setupTxs" "all of them submitted before validator 1 returned"
 
 echo
 reached="section 3: control arm"
-echo "=== 3. CONTROL: the same node with recovery off stays behind for ever ==="
+echo "=== 3. CONTROL: the same node with recovery off remains behind during the observation ==="
 controlMark=$(markNow)
 restartValidator1
 waitFor test-nodes/evm1/debug.log "accepted certificate" 5 120 || { fail "the restarted node received no certificates"; exit 1; }
@@ -348,13 +348,13 @@ controlCerts=$(countIn test-nodes/evm1/debug.log "accepted certificate")
 controlAdopted=$(countIn test-nodes/evm1/debug.log "recovered from authenticated")
 controlSigned=$(countIn test-nodes/evm1/debug.log "submitting block certification request")
 if [ "$controlRefusals" -ge 1 ] && [ "$controlAdopted" -eq 0 ] && [ "$controlSigned" -eq 0 ]; then
-  pass "recovery off: refused over $controlCerts certificates, adopted no anchor and signed nothing"
+  pass "recovery off: refused over $controlCerts certificate deliveries, adopted no anchor and signed nothing"
 else
-  fail "control arm did not refuse as §1 describes: refusals=$controlRefusals adopted=$controlAdopted signed=$controlSigned over $controlCerts certificates"
+  fail "control arm did not refuse as §1 describes: refusals=$controlRefusals adopted=$controlAdopted signed=$controlSigned over $controlCerts certificate deliveries"
 fi
 
 # THE CONTROL'S REAL CONTENT. A node that refuses is not interesting on its own; a node whose
-# EXECUTOR is still on the wrong block after five certificates is. This is what the recovery arm has
+# EXECUTOR is still on the wrong block after five certificate deliveries is. This is what the recovery arm has
 # to change, and it is measured on the same executor, the same devnet, one flag apart.
 controlHead=$(blockAt "http://127.0.0.1:$rethEthBase" latest) || { fail "could not read validator 1's executor in the control arm"; exit 1; }
 controlNum=$(dec "$(echo "$controlHead" | cut -d' ' -f1)")

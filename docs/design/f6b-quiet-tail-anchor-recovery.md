@@ -1031,8 +1031,9 @@ Helpers now return non-zero and print to stderr; only the parent shell counts.
 
 `scripts/f6b-missed-block-recovery.sh`, same pinned reth, same three-validator topology, run
 `20260910T072801Z`, whose manifest records repository revision `3afd705b` and a clean worktree —
-the only later commit on this branch is this entry. Every number below is that run's, and the run was
-repeated three times consecutively with the same result. It exists for the one thing §6.6 names and cannot show: **P-id's ordinary
+the later changes on this branch are documentation and reporting clarifications. Every number below
+is that run's; three consecutive runs produced the same outcome. It exists for the one thing §6.6
+names and cannot show: **P-id's ordinary
 comparison**, a head-hash match against a certified block that is not the shard's first.
 
 Row 13's exception is deliberately narrow — "the executor is at its own genesis block, at the
@@ -1049,24 +1050,28 @@ submitted, all of them before the recovering node returns: one while every valid
 what moves every executor off genesis and gives the run an ordinary anchor, and two into a peer's
 mempool while validator 1 is stopped, which are what produce the blocks it misses. Injection then
 stops, the shard is allowed to go quiet, and **nothing is submitted from the moment the node comes
-back, in either arm**. That is asserted by counting rather than by intent: the transaction total on
-every executor must be exactly three, before the first restart and again at the end. The F1
+back, in either arm**. The checked surviving executor holds exactly three transactions before the
+first restart and during the
+control; every executor holds exactly three at the end. The returning executor still holds only
+the first transaction during the control, which is the lag this run measures. The F1
 baseline's "recovery" came from a non-quiet round — that is, from new activity (§1) — and this lane
 must be unable to report that result by accident.
 
 | | Control (`--evidence-recover` off, the default) | Recovery (`--evidence-recover`) |
 |---|---|---|
-| certificates after restart | 6 | 8 |
+| certificate deliveries after restart | 6 (one distinct partition round, 21) | 8 (six distinct partition rounds, 21–26) |
 | executor head | block 1, unchanged, while the shard is certified through block 3 | block 3 `0x0fcbe243…`, the certified block |
 | refusals | 6 × `cannot identify the certified block to recover to` | 2 while evidence was being fetched, none in the 3 certificates after adoption |
 | anchor adopted | none | yes, one attempt, zero restarts |
 | voting | NON-VOTING | NON-VOTING, signed nothing |
-| transactions executed | 3, all before the restart | 3, all before the restart |
+| canonical transaction count | 3 on the checked survivor; 1 on the returning executor | 3 on every executor; all submitted before the restart |
 
-**What the control arm establishes, which the quiet-tail lane could not.** A returning node does not
-catch up by returning. Its reth was running, peered and gossiping throughout the outage, and its
-canonical head stayed at block 1 across six certificates — because nothing told it to move. The
-refusal is not a formality standing in front of a client that would have recovered anyway.
+**What the control arm establishes, which the quiet-tail lane could not.** Returning did not itself
+recover the missed block during this observation. Its reth was running and peered throughout the
+outage, and its
+canonical head stayed at block 1 across six deliveries of the same certificate. This is a short
+control observation, not a sustained multi-round recovery test or proof that it would remain behind
+indefinitely. The refusal accompanied an executor observably behind the certified head.
 
 **What the recovery arm establishes.** One flag apart, on the same devnet and the same executor, the
 node obtained authenticated evidence in one attempt, drove its executor from block 1 to block 3, and
@@ -1093,11 +1098,13 @@ part of this that went well. **That is the F1 baseline's recovery-from-new-activ
 accident inside the lane built to rule it out**, and it is the same defect as counting a failed read
 as a zero: an assertion satisfied by evidence from before the thing it is asserting about.
 
-Quietness is now measured as a **tail** — quiet rounds since the most recent non-quiet round in any
-provider's log, so a block certified while the lane waits moves the boundary and the count starts
-again — and each arm additionally asserts that **no non-quiet round was certified while it ran**.
-That second form is the direct one: not "this script submitted no transaction", which is a statement
-about the script, but "the shard certified no block", which is a statement about the shard.
+Quietness is now measured as a **tail** of quiet certification-request log entries after the most
+recent non-quiet request in any provider's log. Both leaders and followers log requests, so this
+count is not a count of distinct certified rounds. A new non-quiet request moves the boundary and
+the count starts again. Each arm additionally checks that no provider logged a non-quiet request
+while it ran.
+This observes the provider processes rather than inferring quietness solely from the script
+refraining from transaction submission.
 
 **One implementation of the assertions, not two.** Both lanes now source
 `scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on either runs the same twenty-three checks over

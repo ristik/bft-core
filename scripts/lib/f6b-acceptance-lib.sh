@@ -206,9 +206,9 @@ waitForHead() { # waitForHead <ethURL> <decimalNumber> <seconds>
 # arriving by accident inside the lane built to rule it out. One run in four lost that race.
 #
 # Both functions below therefore measure against the most recent NON-quiet round in any of the given
-# logs, not against the start of the file. Quietness is only logged by the round's LEADER
-# (round.go's "submitting block certification request"), so several logs are read together: no
-# single validator leads every round.
+# logs, not against the start of the file. Both leaders and followers log "submitting block certification request". These helpers count
+# request log entries, not distinct certified rounds; several logs are read together so a
+# non-quiet request seen by any provider moves the boundary.
 #
 # Log lines begin `time=<RFC3339 with a fixed offset>`, which sorts lexically in timestamp order, and
 # all of these logs are written by the same process family with the same format.
