@@ -80,6 +80,11 @@ if [ "$rethCommit" != "$pinnedRethCommit" ]; then
 fi
 [ -x build/ubft ] || { echo "build/ubft missing - run 'make build' first" >&2; exit 1; }
 
+# Nothing may already be listening on the ports this run needs. A previous run's clients would
+# answer every probe while this run's own clients failed to bind, and the result would describe a
+# devnet this run did not create. See refuseStaleListeners.
+refuseStaleListeners $(seq -s" " "$rethEngineBase" $((rethEngineBase + validators - 1))) $(seq -s" " "$rethEthBase" $((rethEthBase + validators - 1))) || exit 1
+
 stale=$(pgrep -f 'ubft shard-node run' 2>/dev/null || true)
 if [ -n "$stale" ]; then
   echo "refusing to start: shard-node processes are already running (pids: $(echo $stale | tr '\n' ' '))" >&2

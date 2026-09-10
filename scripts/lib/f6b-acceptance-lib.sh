@@ -646,6 +646,54 @@ linesFrom() { # linesFrom <mark> <pattern> <file...>
 # logged its adoption — which it had not yet, eight seconds before it did. Two runs in three failed
 # on that, and neither failure was about the property being asserted. It is the same lesson as
 # waitForLinesAfter: anchor the wait on the event, never on the clock.
+# linesSinceAll and waitForLinesSinceAll are the same, for a line that must match SEVERAL patterns
+# at once. One file, many patterns — because the thing being waited for is usually "this event, about
+# this subject", and matching only the event is how a wait is satisfied by the right kind of line
+# about the wrong thing.
+linesSinceAll() { # linesSinceAll <mark> <file> <pattern...>
+  local mark=$1 f=$2; shift 2
+  local args=() pat
+  for pat in "$@"; do args+=(--pattern "$pat"); done
+  python3 "$f6bEvents" --mode count --from "$mark" "${args[@]}" "$f"
+}
+
+waitForLinesSinceAll() { # waitForLinesSinceAll <mark> <file> <want> <seconds> <pattern...>
+  local mark=$1 f=$2 want=$3 secs=$4; shift 4
+  local n=0
+  for _ in $(seq 1 "$secs"); do
+    n=$(linesSinceAll "$mark" "$f" "$@" 2>/dev/null) || n=0
+    [ "${n:-0}" -ge "$want" ] && { echo "$n"; return 0; }
+    sleep 1
+  done
+  echo "${n:-0}"
+  return 1
+}
+
+# refuseStaleListeners exits the caller if anything already holds one of the TCP ports this lane
+# needs.
+#
+# A run that starts while the previous run's clients are still bound does not fail cleanly: the new
+# clients die, the old ones answer every probe, and the lane then measures a devnet it did not create
+# and cannot describe. That is an observation of the wrong thing reading as an observation, which is
+# the defect this whole family of lanes keeps being corrected for. One rerun loop hit it and reported
+# "the execution mesh never formed", which named the symptom and not the cause.
+refuseStaleListeners() { # refuseStaleListeners <port...>
+  local port busy=""
+  for port in "$@"; do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      exec 3>&- 2>/dev/null
+      busy="$busy $port"
+    fi
+  done
+  [ -z "$busy" ] && return 0
+  echo "refusing to start: something is already listening on$busy" >&2
+  if command -v lsof >/dev/null; then
+    for port in $busy; do lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | tail -n +2 | sed 's/^/  /' >&2; done
+  fi
+  echo "  a previous run's clients would answer this one's probes, and the result would describe a devnet this run did not create" >&2
+  return 1
+}
+
 waitForLinesSince() { # waitForLinesSince <mark> <pattern> <file> <want> <seconds>
   local mark=$1 pat=$2 f=$3 want=$4 secs=$5 n=0
   for _ in $(seq 1 "$secs"); do
@@ -1211,6 +1259,64 @@ f6bSelfTest() {
       echo "  PASS: $desc"
     else echo "  FAIL: $desc — it did not see the line once it arrived"; selfFailures=$((selfFailures + 1)); fi
   fi
+
+  # THE WAIT MUST BE ABOUT THE RIGHT BLOCK. "The node logged an adoption" and "the node logged the
+  # adoption of the block this arm is about" are different claims, and only the second one supports
+  # the conclusion. Both ways the weaker form goes wrong are pinned: an adoption of another block
+  # after the mark, and an adoption of the right block before it.
+  want="aa11bb22cc33dd44ee55ff6677889900aa11bb22cc33dd44ee55ff6677889900"
+  other="ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  {
+    echo "time=2026-01-01T00:00:01.0+0000 msg=\"recovered from authenticated evidence\" blockHash=$want"
+    echo "time=2026-01-01T00:00:09.0+0000 msg=\"recovered from authenticated evidence\" blockHash=$other"
+  } >"$scratch/adopt.log"
+
+  desc="an adoption of another block does not satisfy a wait for this one"
+  if waitForLinesSinceAll "time=2026-01-01T00:00:05+0000" "$scratch/adopt.log" 1 1 "recovered from authenticated evidence" "blockHash=$want" >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="an adoption in an earlier phase does not satisfy a wait in this one"
+  if waitForLinesSinceAll "time=2026-01-01T00:00:05+0000" "$scratch/adopt.log" 1 1 "blockHash=$want" >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="a head that advances with no adoption at all satisfies nothing"
+  echo "time=2026-01-01T00:00:09.0+0000 msg=\"accepted certificate\"" >"$scratch/noadopt.log"
+  if waitForLinesSinceAll "time=2026-01-01T00:00:05+0000" "$scratch/noadopt.log" 1 1 "recovered from authenticated evidence" "blockHash=$want" >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
+
+  desc="the adoption of this block in this phase does satisfy it"
+  echo "time=2026-01-01T00:00:09.0+0000 msg=\"recovered from authenticated evidence\" blockHash=$want" >>"$scratch/adopt.log"
+  if [ "$(waitForLinesSinceAll "time=2026-01-01T00:00:05+0000" "$scratch/adopt.log" 1 2 "recovered from authenticated evidence" "blockHash=$want" 2>/dev/null)" = "1" ]; then
+    echo "  PASS: $desc"
+  else echo "  FAIL: $desc — a correct adoption was not recognised"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="a port something else is listening on is refused"
+  if refuseStaleListeners 1 >/dev/null 2>&1; then
+    : # nothing listening on port 1, as expected
+  else
+    echo "  FAIL: $desc — a free port was reported busy"; selfFailures=$((selfFailures + 1))
+  fi
+  # A listener that outlives the check, so the probe has something real to find.
+  python3 -c "
+import socket, sys, time
+s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen(1)
+open(sys.argv[1], 'w').write(str(s.getsockname()[1]))
+time.sleep(20)
+" "$scratch/port" >/dev/null 2>&1 &
+  holder=$!
+  for _ in $(seq 1 20); do [ -s "$scratch/port" ] && break; sleep 0.2; done
+  busyPort=$(cat "$scratch/port" 2>/dev/null)
+  if [ -n "$busyPort" ]; then
+    if refuseStaleListeners "$busyPort" >/dev/null 2>&1; then
+      echo "  FAIL: $desc — a port in use was reported free"; selfFailures=$((selfFailures + 1))
+    else echo "  PASS: $desc"; fi
+  else
+    echo "  FAIL: $desc — could not open a port to test with"; selfFailures=$((selfFailures + 1))
+  fi
+  kill "$holder" 2>/dev/null
 
   desc="a phase-bound count ignores what happened in the phase before it"
   {

@@ -37,7 +37,8 @@ def main():
     ap.add_argument("--mode", choices=("count", "show"), required=True)
     ap.add_argument("--from", dest="start", required=True)
     ap.add_argument("--to", dest="end")
-    ap.add_argument("--pattern", default="")
+    ap.add_argument("--pattern", action="append", default=[],
+                    help="may be repeated; a line must contain ALL of them")
     ap.add_argument("files", nargs="+")
     args = ap.parse_args()
 
@@ -65,7 +66,7 @@ def main():
                     except ValueError:
                         continue  # a banner line, not an event
                     parsed += 1
-                    if args.pattern and args.pattern not in line:
+                    if any(pattern not in line for pattern in args.pattern):
                         continue
                     if stamp < start:
                         continue

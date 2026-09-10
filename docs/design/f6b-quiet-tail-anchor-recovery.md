@@ -1107,7 +1107,7 @@ This observes the provider processes rather than inferring quietness solely from
 refraining from transaction submission.
 
 **One implementation of the assertions, not four.** All four lanes source
-`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same 62 checks over
+`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same 67 checks over
 the same helpers. Every one of those helpers guards a NEGATIVE claim, every one of them has been a
 defect at least once, and a second copy in a second lane is the argument `anchorHeadIdentity` settles
 in `shardnode/anchor.go`: two copies of a comparison that gates a conclusion is one copy too many,
@@ -1360,11 +1360,23 @@ target, reports the payload unavailable rather than invalid, does not move its e
 vote. That is `VerifiedTargetSurvivesAnUnavailablePayload` (§7) measured against a real client
 instead of a fixture, and it is the behaviour §4.1's outcome vocabulary exists to make possible.
 
-**And the wait is anchored on the event, not the clock.** An executor's head moving and the node
-saying so are two events, and the second comes later: the control arm waited for the head and then
+**ACQUISITION AND ADOPTION ARE SEPARATE COMPLETION CONDITIONS, and the lane now says which it is
+talking about.** The executor canonicalising the block and the node recording that it adopted the
+anchor are two events, and the second comes later: the control arm waited for the head and then
 immediately asserted the node had logged its adoption — eight seconds before it did. Two runs in
-three failed on that, and neither failure was about the property being asserted. `waitForLinesSince`
-is the fix, and it is the same lesson as the post-adoption certificate count in §6.7.
+three failed on that, and neither failure was about the property being asserted. The wait is now
+bounded, anchored on the phase mark, and **specific to the expected block hash** — "the node logged
+an adoption" and "the node logged the adoption of the block this arm is about" are different claims,
+and only the second supports the conclusion. Fixtures pin both ways the weaker form goes wrong: an
+adoption of another block after the mark, and an adoption of the right block before it, and a head
+that advances with no adoption at all. It is the same lesson as the post-adoption certificate count
+in §6.7.
+
+**And nothing may already be listening on the ports a run needs.** One rerun reported "the execution
+mesh never formed"; the cause was a previous run's clients still bound to the same ports, answering
+every probe while this run's own clients failed to start. A lane that attaches to a devnet it did not
+create is measuring something it cannot describe, so every lane now refuses to start in that
+situation rather than reporting the symptom.
 
 **Why the third arm is not decoration.** "It did not acquire the blocks" and "it had stopped trying"
 produce the same head. The control arm changes one thing — peers that have the data — with no

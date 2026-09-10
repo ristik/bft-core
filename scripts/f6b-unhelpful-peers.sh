@@ -71,6 +71,11 @@ if [ "$rethCommit" != "$pinnedRethCommit" ]; then
 fi
 [ -x build/ubft ] || { echo "build/ubft missing - run 'make build' first" >&2; exit 1; }
 
+# Nothing may already be listening on the ports this run needs. A previous run's clients would
+# answer every probe while this run's own clients failed to bind, and the result would describe a
+# devnet this run did not create. See refuseStaleListeners.
+refuseStaleListeners $(seq -s" " "$rethEngineBase" $((rethEngineBase + validators - 1))) $(seq -s" " "$rethEthBase" $((rethEthBase + validators - 1))) $(seq -s" " "$bystEthBase" $((bystEthBase + bystanders - 1))) || exit 1
+
 stale=$(pgrep -f 'ubft shard-node run' 2>/dev/null || true)
 if [ -n "$stale" ]; then
   echo "refusing to start: shard-node processes are already running (pids: $(echo $stale | tr '\n' ' '))" >&2
@@ -578,9 +583,10 @@ if waitForHead "http://127.0.0.1:$rethEthBase" "$certifiedNum" 180; then
   done
   [ "$same" = "${#missedTx[@]}" ] \
     && pass "every missed transaction has the same receipt identity on the subject as on a survivor ($same of ${#missedTx[@]})" || true
-  [ "$(waitForLinesSince "$controlMark" "recovered from authenticated" test-nodes/evm1/debug.log 1 60)" -ge 1 ] \
-    && pass "and the adoption happened in THIS arm, applying the target verified while its peers could not help" \
-    || fail "the executor reached the block but no anchor was adopted in the control arm"
+  [ "$(waitForLinesSinceAll "$controlMark" test-nodes/evm1/debug.log 1 60 \
+        "recovered from authenticated evidence" "blockHash=${certifiedHash#0x}")" -ge 1 ] \
+    && pass "and ADOPTION followed ACQUISITION in this arm: the node recorded adopting ${certifiedHash:0:18}…, the same block the client downloaded — two separate completion conditions, both reached" \
+    || fail "the executor ACQUIRED block $certifiedNum but the node never recorded ADOPTING ${certifiedHash:0:18}… in this arm within 60s: canonicalisation and adoption are separate, and only the first happened"
 else
   controlResult="not-acquired"
   stuckNum=$(dec "$(blockAt "http://127.0.0.1:$rethEthBase" latest | cut -d' ' -f1)")
