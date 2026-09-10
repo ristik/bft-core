@@ -1020,13 +1020,100 @@ Helpers now return non-zero and print to stderr; only the parent shell counts.
 
   - *Not exact-block recovery against an ordinary block.* It exercises the genesis-round anchor,
     because that is the only anchor a shard with no transactions ever has — so row 13's exception is
-    what satisfied P-id here, not a head-hash match against an ordinary certified block. Recovery
-    after a genuinely missed block is separate acceptance work: transactions BEFORE the outage are
-    legitimate there, with none injected during recovery itself.
+    what satisfied P-id here, not a head-hash match against an ordinary certified block. That is now
+    measured separately, by the lane in §6.7.
   - *Not evidence immutability.* What this measures is that serving cost the providers nothing —
     no observation or stream refused, and they went on certifying. That served evidence is not
     MUTATED is a stronger claim, established by fixtures that mutate a bundle and re-read it, not by
     a lane that cannot see inside a provider's buffer.
+
+### 6.7 The missed-block acceptance run, measured
+
+`scripts/f6b-missed-block-recovery.sh`, same pinned reth, same three-validator topology, run
+`20260910T072801Z`, whose manifest records repository revision `3afd705b` and a clean worktree —
+the later changes on this branch are documentation and reporting clarifications. Every number below
+is that run's; three consecutive runs produced the same outcome. It exists for the one thing §6.6
+names and cannot show: **P-id's ordinary
+comparison**, a head-hash match against a certified block that is not the shard's first.
+
+Row 13's exception is deliberately narrow — "the executor is at its own genesis block, at the
+certified state", for one anchor only — but a lane that only ever exercises it has not measured the
+ordinary path at all. So this lane is built so the exception *cannot* apply, and it asserts each
+clause of that rather than assuming it: before the outage the executor is already past its genesis
+block, and after recovery its head is block 3, whose hash is neither the executor's genesis hash nor
+any state root. **If row 13 were widened to admit this run, the run would still pass** — which is
+why the assertions read the executor's head number and hash directly instead of inferring recovery
+from the absence of a refusal.
+
+**Where the transactions are, and why that is the whole design of the lane.** Three transfers are
+submitted, all of them before the recovering node returns: one while every validator is up, which is
+what moves every executor off genesis and gives the run an ordinary anchor, and two into a peer's
+mempool while validator 1 is stopped, which are what produce the blocks it misses. Injection then
+stops, the shard is allowed to go quiet, and **nothing is submitted from the moment the node comes
+back, in either arm**. The checked surviving executor holds exactly three transactions before the
+first restart and during the
+control; every executor holds exactly three at the end. The returning executor still holds only
+the first transaction during the control, which is the lag this run measures. The F1
+baseline's "recovery" came from a non-quiet round — that is, from new activity (§1) — and this lane
+must be unable to report that result by accident.
+
+| | Control (`--evidence-recover` off, the default) | Recovery (`--evidence-recover`) |
+|---|---|---|
+| certificate deliveries after restart | 6 (one distinct partition round, 21) | 8 (six distinct partition rounds, 21–26) |
+| executor head | block 1, unchanged, while the shard is certified through block 3 | block 3 `0x0fcbe243…`, the certified block |
+| refusals | 6 × `cannot identify the certified block to recover to` | 2 while evidence was being fetched, none in the 3 certificates after adoption |
+| anchor adopted | none | yes, one attempt, zero restarts |
+| voting | NON-VOTING | NON-VOTING, signed nothing |
+| canonical transaction count | 3 on the checked survivor; 1 on the returning executor | 3 on every executor; all submitted before the restart |
+
+**What the control arm establishes, which the quiet-tail lane could not.** Returning did not itself
+recover the missed block during this observation. Its reth was running and peered throughout the
+outage, and its
+canonical head stayed at block 1 across six deliveries of the same certificate. This is a short
+control observation, not a sustained multi-round recovery test or proof that it would remain behind
+indefinitely. The refusal accompanied an executor observably behind the certified head.
+
+**What the recovery arm establishes.** One flag apart, on the same devnet and the same executor, the
+node obtained authenticated evidence in one attempt, drove its executor from block 1 to block 3, and
+satisfied P-id by an exact block-hash match against the block the validators that stayed up agree
+they certified — a value read from *them*, not from the recovering node's own log, and re-read at the
+end of the run so a head that moved underneath the comparison could not have been the claim. It then
+refused nothing over the certificates that followed, and it still did not vote.
+
+**What it does not establish.** The acquisition source, still — see §8, which this run does not
+close. reth1 logged `Received forkchoice updated message when syncing` and added blocks 2 and 3
+within 40 ms of the commit, so it did not hold them *canonically* during the outage; whether it
+fetched them then or already had the bodies buffered from gossip is not something a few tens of
+milliseconds distinguishes, and no inference is drawn from it here. The run preserves `reth1.log` in its artifact so the
+controlled peer-connectivity experiment §8 asks for has a starting point rather than a guess.
+
+**The defect this lane found in itself, which is the same one twice over.** Its precondition —
+"the shard is quiet again before the node comes back" — was written as *four quiet rounds in the
+log*, and the log already held nine from before the transactions were submitted. The wait therefore
+returned instantly, and one run in four restarted the node while the certificate naming the block it
+had missed was still the newest one. The root chain hands a returning node the LATEST certificate,
+so that node was handed the answer: it recovered by the live path with recovery OFF, its executor
+went to block 3, and the control arm failed — correctly, and for the right reason, which is the only
+part of this that went well. **That is the F1 baseline's recovery-from-new-activity (§1) arriving by
+accident inside the lane built to rule it out**, and it is the same defect as counting a failed read
+as a zero: an assertion satisfied by evidence from before the thing it is asserting about.
+
+Quietness is now measured as a **tail** of quiet certification-request log entries after the most
+recent non-quiet request in any provider's log. Both leaders and followers log requests, so this
+count is not a count of distinct certified rounds. A new non-quiet request moves the boundary and
+the count starts again. Each arm additionally checks that no provider logged a non-quiet request
+while it ran.
+This observes the provider processes rather than inferring quietness solely from the script
+refraining from transaction submission.
+
+**One implementation of the assertions, not two.** Both lanes now source
+`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on either runs the same twenty-three checks over
+the same helpers. Every one of those helpers guards a NEGATIVE claim, every one of them has been a
+defect at least once, and a second copy in a second lane is the argument `anchorHeadIdentity` settles
+in `shardnode/anchor.go`: two copies of a comparison that gates a conclusion is one copy too many,
+because the weaker of them becomes the one that matters. The exactness cuts both ways there — a lane
+that expected three setup transactions and found four has had activity it did not authorise, which is
+the same defect as finding zero because the read failed.
 
 ## 7. Acceptance fixtures
 
@@ -1139,6 +1226,14 @@ payload-fetch mechanism is justified yet**, and the way to establish the existin
 RPC/network trace of the execution client, or a controlled peer-connectivity experiment that varies
 which peers hold the missing block. That is the next measurement, not a design conclusion.
 
+**§6.7's run does not close it either, and adds one fact to it.** In run `20260910T072801Z` the
+recovering reth was running, peered to two others and gossiping for the whole outage, and its
+canonical head did not move: it reported `Received forkchoice updated message when syncing` at the
+commit, then added blocks 2 and 3 and committed the chain within 40 ms. So the missed blocks were
+not canonical during the outage — which is a statement about the fork-choice head and nothing more.
+Forty milliseconds does not distinguish a fetch from a buffered body, and the experiment that would
+is still the one described above: vary which peers hold the missing block.
+
 **Consequence for the design, which is unaffected either way.** Evidence retrieval and payload
 acquisition stay separate decisions. The predicate answers only the first. A node that has a verified
 anchor but cannot yet obtain the block body **keeps the verified target** and retries acquisition,
@@ -1167,7 +1262,8 @@ anchor cursor in §5 is for, and what `VerifiedTargetSurvivesAnUnavailablePayloa
 
 Recovery across an epoch transition (§3.1); which peers a node asks and how that set is chosen
 (§6.3 takes it as an injected source and decides nothing about it); production startup wiring for the buffer, the server, the requester
-and the applier alike, and the measured acceptance run against a real client across a quiet tail;
+and the applier alike, and the measured acceptance runs against a real client across a quiet tail
+(§6.6) and after a genuinely missed block (§6.7);
 whether the serving buffer of §6.1 is ever persisted; whether the root chain should serve historical certificates as a second source
 (§6c); durable retained history and the signing record (#14, #105); and the acquisition-source
 measurement §8 does not have. #16 remains open, including "Too deep reorg", and nothing here claims
