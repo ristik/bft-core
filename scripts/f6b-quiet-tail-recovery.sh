@@ -28,6 +28,11 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# Argument handling before anything reads $1: --self-test is a mode, not a validator count, and an
+# earlier arrangement let it be read as one.
+selfTest=false
+if [ "${1:-}" = "--self-test" ]; then selfTest=true; shift; fi
+
 validators=${1:-3}
 partitionID=8
 pinnedRethCommit=189c0df32617afc488e0f091dbface1bd72cceb4
@@ -38,288 +43,28 @@ rootBootPort=26662
 
 failures=0
 reached="startup"
-pass() { echo "  PASS: $1"; }
-fail() { echo "  FAIL: $1"; failures=$((failures + 1)); }
-info() { echo "  info: $1"; }
 
-# --- helpers, defined before anything uses them (the self-test below included) ---
+# The assertion helpers, the manifest writer and the self-test are SHARED with
+# scripts/f6b-missed-block-recovery.sh. See the library header for why there is exactly one copy of
+# them: every one of these helpers guards a negative claim, every one of them has been a defect at
+# least once, and a second copy in a second lane is the weaker copy that ends up mattering.
+# Sourcing has no side effects.
+source "$(dirname "${BASH_SOURCE[0]}")/lib/f6b-acceptance-lib.sh"
 
-rpc() { curl -sS --max-time 10 -X POST "$1" -H "Content-Type: application/json" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}"; }
-pyget() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1)" 2>/dev/null; }
-
-# rpcRequire is rpc that REPORTS a failure instead of returning empty, and it reports it on stderr
-# with a non-zero status rather than by calling fail().
-#
-# Both halves matter, and review found both. `${c:-0}` over a failed read counted as zero
-# transactions, so an unreachable node produced a PASS asserting nothing had executed — an assertion
-# that cannot tell "I looked and saw none" from "I could not look" is not evidence, and this lane's
-# claim is a negative one. And calling fail() from here would increment $failures inside a COMMAND
-# SUBSTITUTION, which is a subshell: the parent's counter never moved and the run exited 0 with
-# failures on screen. Anything that must change $failures has to run in the parent shell.
-rpcRequire() { # rpcRequire <url> <method> <params> <pyget-path> <what>
-  local out value
-  out=$(rpc "$1" "$2" "$3") || { echo "RPC $2 to $1 failed ($5)" >&2; return 1; }
-  value=$(printf '%s' "$out" | pyget "$4")
-  if [ -z "$value" ]; then
-    echo "RPC $2 to $1 returned no $5: $(printf '%s' "$out" | head -c 200)" >&2
-    return 1
-  fi
-  printf '%s' "$value"
-}
-
-# countTransactions echoes "<total> <headHex>" and returns non-zero if any read failed. It never
-# touches $failures: see rpcRequire.
-countTransactions() { # countTransactions <ethURL>
-  local url=$1 headHex numbers total=0 n c
-  headHex=$(rpcRequire "$url" eth_getBlockByNumber '["latest", false]' "['result']['number']" "head block number") || return 1
-
-  # VALIDATE THE NUMBER BEFORE COUNTING FROM IT. A malformed head — "0x", a decimal, an error string
-  # that json-decoded fine — made the python expansion below raise, which emptied the loop, which
-  # left total at 0, which read as "no transactions". A range this lane could not construct is a
-  # question it could not ask, and it must say so rather than answer it with a zero.
-  if ! [[ "$headHex" =~ ^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$ ]]; then
-    echo "head block number from $url is not a hex quantity: '$headHex'" >&2
-    return 1
-  fi
-  numbers=$(python3 -c "print(' '.join(hex(i) for i in range(0, int('$headHex', 16) + 1)))" 2>/dev/null) || {
-    echo "could not enumerate blocks 0..$headHex from $url" >&2; return 1; }
-  [ -n "$numbers" ] || { echo "no block numbers to check between 0 and $headHex from $url" >&2; return 1; }
-
-  for n in $numbers; do
-    c=$(rpcRequire "$url" eth_getBlockTransactionCountByNumber "[\"$n\"]" "['result']" "transaction count for block $n") || return 1
-    if ! [[ "$c" =~ ^0x(0|[1-9a-fA-F][0-9a-fA-F]*)$ ]]; then
-      echo "transaction count for block $n from $url is not a hex quantity: '$c'" >&2
-      return 1
-    fi
-    # Do not interpret RPC text as shell arithmetic or allow machine-integer wraparound.
-    total=$(python3 -c "print(int('$total') + int('$c', 16))") || return 1
-  done
-  echo "$total $headHex"
-}
-
-# assertNoTransactions runs entirely in the PARENT shell, so its fail() actually counts.
-assertNoTransactions() { # assertNoTransactions <label> <ethURL>
-  local label=$1 url=$2 out rc total headHex
-  out=$(countTransactions "$url" 2>&1)
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    fail "$label: could not read the executor's blocks, so 'no transactions' is unproven: $(echo "$out" | tail -1)"
-    return 1
-  fi
-  total=$(echo "$out" | tail -1 | cut -d' ' -f1)
-  headHex=$(echo "$out" | tail -1 | cut -d' ' -f2)
-  if [ "$total" = "0" ]; then
-    pass "$label: every canonical block, genesis through $headHex, contains zero transactions"
-  else
-    fail "$label: $total transactions executed — this lane must demonstrate recovery with no new activity"
-  fi
-}
-# countIn is grep -c that always prints exactly one integer. `grep -c` exits 1 when the count is
-# zero, so the obvious `$(grep -c ... || echo 0)` prints "0\n0" and every numeric test after it is a
-# syntax error rather than a false — which is how a broken wait loop reads as "no certificates".
-countIn() { local n; n=$(grep -c "$2" "$1" 2>/dev/null | head -1); echo "${n:-0}"; }
-
-waitFor() { # waitFor <file> <pattern> <count> <seconds>
-  for _ in $(seq 1 "$4"); do
-    [ "$(countIn "$1" "$2")" -ge "$3" ] && return 0
-    sleep 1
-  done
-  return 1
-}
-
+# THE RUN ARTIFACT. Written OUTSIDE test-nodes/, which this script and every other lane in this
+# repository delete; hashing COPIES of the logs rather than the live files, which keep growing under
+# a node that is still running; and written from the EXIT trap, so a run that fails early still
+# leaves a record of what it was and how far it got. Review found all three, and each of them makes
+# the difference between an artifact and a scrollback.
 artifactDir="${F6B_ARTIFACT_DIR:-artifacts/f6b-acceptance/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
-manifestWritten=0
-# writeManifest returns non-zero if it could not leave an artifact behind, and marks itself done
-# only when it actually wrote one.
-#
-# It used to return SUCCESS when mkdir failed, having already set the once-flag — so a run with no
-# artifact at all reported ALL CHECKS PASSED, no later attempt was made, and nothing said the
-# provenance was missing. For a lane whose output IS the artifact, silently producing none is the
-# same class of defect as counting a failed read as a zero.
-writeManifest() {
-  [ "$manifestWritten" -eq 1 ] && return 0
-  if ! mkdir -p "$artifactDir/logs" 2>/dev/null; then
-    echo "  FAIL: could not create the run artifact directory $artifactDir — this run leaves no provenance" >&2
-    return 1
-  fi
-  # Copy first, then hash the copies: a digest of a file a running node is still appending to
-  # describes nothing anybody can check later.
-  local f digest logDigests=""
-  for f in test-nodes/evm1/control.log $(seq -f "test-nodes/evm%g/debug.log" 1 "$validators"); do
-    if [ ! -f "$f" ]; then
-      if [ "${reached:-startup}" = "all sections" ]; then
-        echo "  FAIL: required evidence log is missing: $f" >&2
-        return 1
-      fi
-      continue # an early failure may precede this arm's startup
-    fi
-    if ! cp "$f" "$artifactDir/logs/$(echo "$f" | tr '/' '_')"; then
-      echo "  FAIL: could not preserve evidence log: $f" >&2
-      return 1
-    fi
-    digest=$(shasum -a 256 "$artifactDir/logs/$(echo "$f" | tr '/' '_')") || return 1
-    logDigests="$logDigests  $digest
-"
-  done
-  {
-    echo "f6b quiet-tail recovery acceptance run"
-    echo "finished:        $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "repository:      $(git rev-parse HEAD 2>/dev/null || echo unknown)"
-    echo "worktree clean:  $([ -z "$(git status --porcelain 2>/dev/null)" ] && echo yes || echo "NO — this run is not reproducible from the recorded revision")"
-    echo "ubft:            $( [ -x build/ubft ] && shasum -a 256 build/ubft | cut -d' ' -f1 || echo missing)"
-    echo "reth:            ${rethCommit:-unknown}$([ "${rethCommit:-}" = "$pinnedRethCommit" ] && echo " (pinned)" || echo " (NOT the pinned baseline)")"
-    echo "validators:      $validators"
-    echo "control flags:   (defaults: --evidence-serve on, --evidence-recover off)"
-    echo "recovery flags:  --evidence-recover"
-    echo "checks failed:   $failures"
-    echo "reached:         ${reached:-startup}"
-    echo
-    echo "digests of the COPIED logs in $artifactDir/logs:"
-    printf '%s' "$logDigests"
-  } >"$artifactDir/manifest.txt" || {
-    echo "  FAIL: could not write $artifactDir/manifest.txt — this run leaves no provenance" >&2
-    return 1
-  }
-  manifestWritten=1
-  return 0
-}
+manifestTitle="f6b quiet-tail recovery acceptance run"
+manifestLogs="test-nodes/evm1/control.log $(seq -f "test-nodes/evm%g/debug.log" 1 "$validators" | tr '\n' ' ')"
+manifestLines=(
+  "control flags:   (defaults: --evidence-serve on, --evidence-recover off)"
+  "recovery flags:  --evidence-recover"
+)
 
-# --- the lane's own failure paths, tested without a devnet ------------------------------------------
-#
-# WHY THIS EXISTS. Every defect review has found in this harness was in a path that only runs when
-# something has ALREADY gone wrong: a read that failed, a number that was malformed, a directory that
-# could not be created. Those paths never execute on a good run, so a passing acceptance run says
-# nothing at all about them — and each one turned a failure into a PASS or a zero. So they are
-# exercised deliberately, in a mode that needs no reth and no root chain:
-#
-#   ./scripts/f6b-quiet-tail-recovery.sh --self-test
-#
-# It asserts that each failure path FAILS, which is the only property that matters about them — the
-# PROPERTY, not any particular guard. Several of the guards below are mutually redundant (a malformed
-# head is caught by the pattern check, by the enumeration failing, and by the empty range), so
-# removing any one of them individually changes nothing; removing all three makes this self-test fail
-# by name. That is defence in depth, and it is worth stating rather than reporting per-guard coverage
-# nobody has.
-#
-# It has already caught itself twice: helpers defined AFTER this block made the checks inert, and
-# they reported PASS while testing nothing — which is the same class of defect as everything below.
-# Anything this mode uses has to be defined above it.
-if [ "${1:-}" = "--self-test" ]; then
-  selfFailures=0
-  echo "=== self-test: the lane's failure paths ==="
-
-  desc="an executor that cannot be reached is not zero transactions"
-  before=$failures
-  assertNoTransactions "unreachable" "http://127.0.0.1:9" >/dev/null 2>&1
-  [ "$failures" -gt "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); }
-
-  desc="a malformed head number is not zero transactions"
-  before=$failures
-  rpc() { echo '{"jsonrpc":"2.0","id":1,"result":{"number":"not-a-number"}}'; }
-  assertNoTransactions "malformed head" "http://127.0.0.1:9" >/dev/null 2>&1
-  [ "$failures" -gt "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); }
-
-  desc="an empty head number is not zero transactions"
-  before=$failures
-  rpc() { echo '{"jsonrpc":"2.0","id":1,"result":{"number":"0x"}}'; }
-  assertNoTransactions "empty head" "http://127.0.0.1:9" >/dev/null 2>&1
-  [ "$failures" -gt "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); }
-
-  desc="a malformed transaction count is not zero transactions"
-  before=$failures
-  rpc() {
-    case "$2" in
-      eth_getBlockByNumber) echo '{"jsonrpc":"2.0","id":1,"result":{"number":"0x1"}}' ;;
-      *) echo '{"jsonrpc":"2.0","id":1,"result":"lots"}' ;;
-    esac
-  }
-  assertNoTransactions "malformed count" "http://127.0.0.1:9" >/dev/null 2>&1
-  [ "$failures" -gt "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); }
-
-  desc="a hex-prefixed expression is not a transaction quantity"
-  before=$failures
-  rpc() {
-    case "$2" in
-      eth_getBlockByNumber) echo '{"result":{"number":"0x0"}}' ;;
-      *) echo '{"result":"0x1-1"}' ;;
-    esac
-  }
-  assertNoTransactions "expression count" unused >/dev/null 2>&1
-  [ "$failures" -gt "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); }
-
-  desc="a well-formed answer of zero still passes"
-  before=$failures
-  rpc() {
-    case "$2" in
-      eth_getBlockByNumber) echo '{"jsonrpc":"2.0","id":1,"result":{"number":"0x1"}}' ;;
-      *) echo '{"jsonrpc":"2.0","id":1,"result":"0x0"}' ;;
-    esac
-  }
-  assertNoTransactions "genuinely empty" "http://127.0.0.1:9" >/dev/null 2>&1
-  [ "$failures" -eq "$before" ] && echo "  PASS: $desc" || { echo "  FAIL: $desc — a good answer was rejected"; selfFailures=$((selfFailures + 1)); }
-
-  desc="an artifact directory that cannot be created fails the run"
-  artifactDir=/dev/null/not-a-directory
-  manifestWritten=0
-  if writeManifest >/dev/null 2>&1; then
-    echo "  FAIL: $desc — writeManifest reported success"
-    selfFailures=$((selfFailures + 1))
-  elif [ "$manifestWritten" -eq 1 ]; then
-    echo "  FAIL: $desc — it marked itself done without writing anything"
-    selfFailures=$((selfFailures + 1))
-  else
-    echo "  PASS: $desc"
-  fi
-
-  # Run the real writer in an isolated tree. A stale artifact must not mask a failed copy.
-  desc="a required copy failure cannot produce a successful manifest"
-  scratch=$(mktemp -d "${TMPDIR:-/tmp}/f6b-selftest.XXXXXX") || exit 1
-  if (
-    cd "$scratch" || exit 1
-    validators=1; reached="all sections"; manifestWritten=0
-    artifactDir="$scratch/artifact"
-    mkdir -p test-nodes/evm1 "$artifactDir/logs"
-    printf control > test-nodes/evm1/control.log
-    printf recovery > test-nodes/evm1/debug.log
-    printf stale > "$artifactDir/logs/stale.log"
-    # Inject a copy failure independently of user/root filesystem privileges.
-    cp() { return 1; }
-    if writeManifest >/dev/null 2>&1; then exit 1; fi
-    [ "$manifestWritten" -eq 0 ]
-  ); then echo "  PASS: $desc"; else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
-
-  desc="a completed run requires every assertion log"
-  if (
-    cd "$scratch" || exit 1
-    validators=1; reached="all sections"; manifestWritten=0
-    artifactDir="$scratch/missing"
-    rm test-nodes/evm1/debug.log
-    if writeManifest >/dev/null 2>&1; then exit 1; fi
-    [ "$manifestWritten" -eq 0 ]
-  ); then echo "  PASS: $desc"; else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
-  desc="a complete artifact contains verifiable copied logs"
-  if (
-    cd "$scratch" || exit 1
-    validators=1; reached="all sections"; manifestWritten=0
-    artifactDir="$scratch/complete"
-    printf recovery > test-nodes/evm1/debug.log
-    writeManifest >/dev/null 2>&1 || exit 1
-    [ "$manifestWritten" -eq 1 ] || exit 1
-    cmp test-nodes/evm1/control.log "$artifactDir/logs/test-nodes_evm1_control.log" || exit 1
-    cmp test-nodes/evm1/debug.log "$artifactDir/logs/test-nodes_evm1_debug.log" || exit 1
-    grep '^  [0-9a-f]' "$artifactDir/manifest.txt" | shasum -a 256 -c >/dev/null
-  ); then echo "  PASS: $desc"; else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
-  rm -rf "$scratch"
-
-  echo
-  if [ "$selfFailures" -eq 0 ]; then
-    echo "SELF-TEST PASSED"
-  else
-    echo "$selfFailures SELF-TEST CHECK(S) FAILED"
-  fi
-  exit $((selfFailures > 0))
-fi
+$selfTest && { f6bSelfTest; exit $?; }
 
 command -v reth >/dev/null || { echo "no reth binary on PATH - this lane has no fake fallback" >&2; exit 1; }
 rethCommit=$(reth --version | sed -n 's/^Commit SHA: //p')
@@ -340,11 +85,6 @@ if [ -n "$stale" ]; then
   exit 1
 fi
 
-# THE RUN ARTIFACT. Written OUTSIDE test-nodes/, which this script and every other lane in this
-# repository delete; hashing COPIES of the logs rather than the live files, which keep growing under
-# a node that is still running; and written from the EXIT trap, so a run that fails early still
-# leaves a record of what it was and how far it got. Review found all three, and each of them makes
-# the difference between an artifact and a scrollback.
 cleanup() {
   # The artifact is part of the result, so failing to write one fails the run — including from here,
   # where the exit status has otherwise already been decided. A trap can still set it.
