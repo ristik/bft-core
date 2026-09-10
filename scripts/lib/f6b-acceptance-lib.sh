@@ -245,6 +245,28 @@ waitForQuietTail() { # waitForQuietTail <want> <seconds> <log...>
   return 1
 }
 
+# waitForLinesAfter blocks until <want> lines matching <after> have been logged in <file> AFTER the
+# first line matching <mark>, and echoes how many there are.
+#
+# It exists because "wait for three more certificates, then count the ones after adoption" is not the
+# same wait: if adoption happens near the end of that window, the three certificates are mostly
+# BEFORE it and the assertion fails on its own timing rather than on the node's behaviour. One run
+# reported "0 refusals over the 2 certificates that followed" — a passing property failed by an
+# impatient wait, which is a false failure and the mirror image of every false pass above it.
+waitForLinesAfter() { # waitForLinesAfter <file> <mark> <after> <want> <seconds>
+  local f=$1 mark=$2 after=$3 want=$4 secs=$5 line n=0
+  for _ in $(seq 1 "$secs"); do
+    line=$(grep -n "$mark" "$f" 2>/dev/null | head -1 | cut -d: -f1)
+    if [ -n "$line" ]; then
+      n=$(tail -n +"$line" "$f" | countIn /dev/stdin "$after")
+      [ "$n" -ge "$want" ] && { echo "$n"; return 0; }
+    fi
+    sleep 1
+  done
+  echo "$n"
+  return 1
+}
+
 manifestWritten=0
 # writeManifest returns non-zero if it could not leave an artifact behind, and marks itself done
 # only when it actually wrote one.
@@ -476,6 +498,21 @@ f6bSelfTest() {
   echo 'time=2026-01-01T00:00:08.0000+0000 msg="submitting block certification request" quiet=false' >>"$scratch/other.log"
   if [ "$(waitForQuietTail 1 1 "$scratch/stale.log" "$scratch/other.log")" = "0" ]; then echo "  PASS: $desc"
   else echo "  FAIL: $desc — a block seen only by the second validator did not move the boundary"; selfFailures=$((selfFailures + 1)); fi
+  rm -rf "$scratch"
+
+  # A WAIT ANCHORED ON THE WRONG POINT IS A FALSE FAILURE. Lines before the mark must not count
+  # towards it, and a mark that has not appeared yet must not satisfy it at all.
+  desc="lines before the mark do not count towards the wait"
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/f6b-after.XXXXXX") || return 1
+  printf 'cert\ncert\ncert\nADOPTED\ncert\n' >"$scratch/after.log"
+  if [ "$(waitForLinesAfter "$scratch/after.log" ADOPTED cert 1 1)" = "1" ]; then echo "  PASS: $desc"
+  else echo "  FAIL: $desc — counted $(waitForLinesAfter "$scratch/after.log" ADOPTED cert 1 1)"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="a mark that never appears never satisfies the wait"
+  printf 'cert\ncert\ncert\n' >"$scratch/none.log"
+  if waitForLinesAfter "$scratch/none.log" ADOPTED cert 1 1 >/dev/null 2>&1; then
+    echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
+  else echo "  PASS: $desc"; fi
   rm -rf "$scratch"
 
   desc="an artifact directory that cannot be created fails the run"

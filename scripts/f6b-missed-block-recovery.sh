@@ -391,9 +391,9 @@ waitForHead "http://127.0.0.1:$rethEthBase" "$certifiedNum" 120 \
 # Then give the node several more certificates to refuse on if it is still going to. "It stopped
 # refusing" measured over one certificate is not a measurement, and the fetch is background work, so
 # the first certificates after the restart legitimately refuse while evidence is still being obtained.
-waitFor test-nodes/evm1/debug.log "accepted certificate" \
-  "$(( $(countIn test-nodes/evm1/debug.log 'accepted certificate') + 3 ))" 120 \
-  || info "fewer than 3 further certificates arrived after recovery; the count below says how many"
+# Counted from the ADOPTION, not from here: see waitForLinesAfter.
+waitForLinesAfter test-nodes/evm1/debug.log "recovered from authenticated" "accepted certificate" 3 120 >/dev/null \
+  || info "fewer than 3 certificates arrived after adoption within 120s; the count below says how many"
 
 grep -q "anchor recovery finished.*state=ready" test-nodes/evm1/debug.log \
   && pass "authenticated evidence obtained from a peer: $(grep -o 'attempts=[0-9]* restarts=[0-9]*' test-nodes/evm1/debug.log | head -1)" \

@@ -1100,7 +1100,7 @@ That second form is the direct one: not "this script submitted no transaction", 
 about the script, but "the shard certified no block", which is a statement about the shard.
 
 **One implementation of the assertions, not two.** Both lanes now source
-`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on either runs the same twenty-one checks over
+`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on either runs the same twenty-three checks over
 the same helpers. Every one of those helpers guards a NEGATIVE claim, every one of them has been a
 defect at least once, and a second copy in a second lane is the argument `anchorHeadIdentity` settles
 in `shardnode/anchor.go`: two copies of a comparison that gates a conclusion is one copy too many,

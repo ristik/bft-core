@@ -252,6 +252,8 @@ fi
 # EXACT-BLOCK RECOVERY. The node stops refusing, which is only possible if P-id is satisfied for the
 # block the evidence named — the identity check is the thing that was refusing.
 recoveryCerts=$(countIn test-nodes/evm1/debug.log "accepted certificate")
+waitForLinesAfter test-nodes/evm1/debug.log "adopted without a commit\|recovered from authenticated" "accepted certificate" 2 120 >/dev/null \
+  || info "fewer than 2 certificates arrived after adoption within 120s; the count below says how many"
 adoptLine=$(grep -n "adopted without a commit\|recovered from authenticated" test-nodes/evm1/debug.log | head -1 | cut -d: -f1)
 if [ -n "$adoptLine" ]; then
   after=$(tail -n +"$adoptLine" test-nodes/evm1/debug.log | countIn /dev/stdin "abstaining from the vote")
