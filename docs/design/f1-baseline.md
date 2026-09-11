@@ -1153,47 +1153,84 @@ fits a node that accepts certificates but never applies a block. Owners: F6 (#14
 recovery contract, F2 (#10) for what a returning node should do about a certified head it cannot
 reach, F8 (#16) — which should not treat this as an explanation for the unexplained stall.
 
-### 6.4 Real-reth in CI
+### 6.4 Real-reth in CI, and the same lane locally
 
-`.github/workflows/reth-smoke.yml` runs the adapter against the **approved pinned execution client**
-on every PR to `integration/enshrined-evm`, and on manual dispatch (F1c, #90). It is a separate
-workflow with a distinct name on purpose: a green `ci` run must never be read as real-execution
-evidence, because every job there uses `--executor fake`.
+Two workflows run the adapter against the **approved pinned execution client**, each named for what it
+proves, because a green `ci` run (every job `--executor fake`) must never be read as real-execution
+evidence and a green smoke run must never be read as fault coverage:
+
+| workflow | runs | trigger |
+| --- | --- | --- |
+| `real-reth-smoke` (`.github/workflows/reth-smoke.yml`) | stock-client control (20 blocks) and the paired funded-transaction devnet | every PR to `integration/enshrined-evm`; manual dispatch, optionally with a deliberate failure |
+| `real-reth-fault` (`.github/workflows/reth-fault.yml`) | bounded `scripts/reth-chaos.sh` scenarios, each on its own cluster (default `reth-only-restart,pair-restart`) | **manual dispatch only** — before accepting a change to the executor, adapter or recovery paths, or when a fault result is needed; never on PRs |
+
+**One implementation, locally and in CI (#90).** Everything the lanes do beyond the scenarios —
+obtaining and verifying the client, the cache, evidence collection, archive validation and teardown —
+is `scripts/lib/reth-pin.sh` (definitions only), behind two entry points: `scripts/reth-smoke.sh`, the
+supervised smoke lane, and `scripts/reth-pin.sh`, the same functions for workflow steps. The workflows
+are thin wrappers, so the refusal and collection paths are exercised locally and by
+`scripts/reth-smoke-selftest.sh` rather than only ever read in YAML. An earlier revision had them inline
+in the workflow, where they could run only on a hosted runner, and had never run.
 
 **Provenance instead of a 40-minute Rust build.** The pin `189c0df3` *is* upstream tag `v2.5.0` —
-verified: `git/refs/tags/v2.5.0` resolves to that commit — and `ristik/ureth`'s `unicity/main` is
-byte-identical to it (§2), so the upstream release artifact is a legitimate source for it today.
-The workflow records the source URL, the exact asset name and its SHA-256
-(`6719ec67…`, GitHub's own reported asset digest), verifies the archive against it, and then
-**verifies the extracted binary reports the pinned commit — on cache hits as well as fresh
-downloads**. A cache is a convenience, never an authority.
+`git/refs/tags/v2.5.0` resolves to that commit — and `ristik/ureth`'s `unicity/main` is byte-identical
+to it (§2), so the upstream release artifact is a legitimate source for it today. The library records
+each platform's asset and GitHub's own reported digest:
 
-That choice is only valid while the fork has not diverged. **The moment `ureth` carries its own
-commits, this lane must build from source** (or publish its own artifact with equivalent provenance),
-and the digest and tag pins here stop being meaningful. F3 (#11) extends this workflow rather than
-starting a second one.
+| platform | asset | sha256 (GitHub-reported) |
+| --- | --- | --- |
+| linux-x86_64 (hosted runners) | `reth-v2.5.0-x86_64-unknown-linux-gnu.tar.gz` | `6719ec67…f48f47f` |
+| linux-aarch64 | `reth-v2.5.0-aarch64-unknown-linux-gnu.tar.gz` | `47fcc389…6625c3d` |
+| darwin-arm64 | `reth-v2.5.0-aarch64-apple-darwin.tar.gz` | `0a43ae85…067cf202` |
 
-Budget, measured against the artifact path rather than estimated:
+Upstream publishes **no x86_64 macOS asset**, so on such a host `--fetch` refuses and names the
+alternative: `--reth-bin` with a binary built from the pinned commit, which is accepted only if it
+reports that commit and is recorded in the provenance as an operator-supplied binary, verified by
+revision rather than by a release digest.
 
-| Step | Cost |
-| --- | --- |
-| Artifact download + digest verify (cache miss) | ~52 MB, well under a minute |
-| Cache hit | negligible; the revision check still runs |
-| Rust build | **none** — avoided entirely by the artifact path |
-| `reth-baseline.sh 20` (stock control) | ~1 minute |
-| `reth-paired-devnet.sh 4 5` (4 validators, 4 clients, funded transaction) | several minutes |
-| Job timeout | 45 minutes |
+**The cache is a convenience, never an authority.** It holds the release *archive*, not an extracted
+binary, keyed from the library (commit, asset, digest, platform) so the key cannot drift from the pin.
+On every use — hit or miss — the archive's sha256 is re-checked, and the extracted binary must report
+the pinned commit. A cached archive whose digest no longer matches is **refused and left in place**
+rather than silently refetched, so whatever changed it is seen. That check on the binary itself runs on
+every path, including an operator-supplied binary; a cache, a tag or a file name never substitutes for it.
 
-The 160-block baseline run stays a local gate (§5.3); CI runs 20 blocks, which still exercises both
-controls. Longer repeat and fault runs belong on a separate bounded lane (#90 stage 3) so that a
-green PR check never implies fault coverage that did not run.
+**Evidence and teardown.** The smoke lane runs its scenarios in a child process in its own process
+group, and the supervising parent collects, tears down, archives and validates **however the child
+ended** — success, failure, a SIGKILL, or cancellation (SIGINT/SIGTERM to the supervisor). Teardown is by
+ownership: the child's whole process group, the pids recorded under `test-nodes/`, and any `ubft`/`reth`
+process whose working directory is this checkout — never every `reth node` on the host, which on a
+shared machine belongs to other sessions. (The hosted workflows add a broad sweep afterwards, which is
+safe only on a disposable runner.) Teardown is then verified: a process of the run still alive fails the
+lane. The archive is validated independently of the collector: required files (`provenance.txt`,
+`run.log` for smoke; `manifest.txt` for fault), node logs present when scenarios ran, and no secret —
+by name (`keys.json`, `jwt.hex`, `*.key`), by content (any `"privateKey"` field), and by value (every
+JWT and private key under `test-nodes/`, searched verbatim, so a secret leaked into a log line fails
+the lane). Retention 14 days.
 
-Evidence: collection and teardown run on success, failure **and cancellation**. The archive carries
-root, shard and reth logs, shard conf, trust base, both genesis files and a provenance record
-(BFT commit, reth commit/tag/asset/digest, run id and attempt). Signing keys and JWT secrets are
-never copied and their absence is asserted, failing the job if one appears. Retention 14 days. The
-upload path can be exercised deliberately via the `inject_failure` dispatch input rather than
-waiting for a real failure to discover it does not work.
+**Local commands**, from the repository root:
+
+```bash
+./scripts/reth-smoke-selftest.sh                                   # every refusal and collection path; no reth, no network
+./scripts/reth-smoke.sh --reth-bin "$(command -v reth)"            # the smoke lane with a source build of the pin
+./scripts/reth-smoke.sh --fetch                                    # the release artifact (linux-x86_64/aarch64, darwin-arm64)
+./scripts/reth-smoke.sh --reth-bin "$(command -v reth)" --inject-failure   # the deliberate-failure path
+./scripts/reth-pin.sh obtain --cache-dir ~/.cache/reth-pin --dest /tmp/reth-bin   # the fault workflow's client step
+./scripts/reth-chaos.sh -s reth-only-restart,pair-restart -t 2     # the fault workflow's scenario step
+./scripts/reth-pin.sh validate-archive evidence-runs/<run>.tar.gz --require manifest.txt --min-node-logs 1
+```
+
+Budget, measured against the artifact path rather than estimated: artifact download plus digest check
+~52 MB, well under a minute; cache hit negligible, with the digest and revision checks still running;
+no Rust build; `reth-baseline.sh 20` ~1 minute; `reth-paired-devnet.sh 4 5` several minutes; smoke job
+timeout 45 minutes, fault job 120.
+
+That choice of source is valid only while the fork has not diverged. **The moment `ureth` carries its
+own commits, these lanes must build from source** (or publish their own artifact with equivalent
+provenance), and the asset and digest pins stop being meaningful. F3 (#11) extends these workflows
+rather than starting new ones.
+
+<!-- F1C-EVIDENCE -->
 
 ## 7. What F1 does not cover
 

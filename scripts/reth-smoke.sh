@@ -144,7 +144,10 @@ if [ "${RETH_SMOKE_SUPERVISED:-0}" != "1" ]; then
 
   # Teardown by ownership, then verify it: a lane that leaves clients running holds ports and
   # datadirs the next run will trip over, and on a shared host belongs to somebody else's session.
-  # First the run's own process group, then anything recorded or started from this checkout.
+  # First the run's own process group, then anything recorded or started from this checkout. Both
+  # are counted separately: reporting only the sweep once said "0 stopped" for a cancelled run in
+  # which the group signal had just stopped eleven processes.
+  grouped=$(pgrep -g "$childPid" 2>/dev/null | wc -l | tr -d ' ')
   kill -TERM -- "-$childPid" 2>/dev/null
   for _ in $(seq 1 20); do pgrep -g "$childPid" >/dev/null 2>&1 || break; sleep 0.5; done
   kill -KILL -- "-$childPid" 2>/dev/null
@@ -161,7 +164,7 @@ if [ "${RETH_SMOKE_SUPERVISED:-0}" != "1" ]; then
     say "reth-smoke: FAIL teardown left process(es) of this run alive: $(echo $left)"
     verdict=1
   else
-    say "reth-smoke: teardown complete ($(echo $owned | wc -w | tr -d ' ') process(es) stopped, none of this run left)"
+    say "reth-smoke: teardown complete — $grouped process(es) still in the run's group when it was signalled, $(echo $owned | wc -w | tr -d ' ') more stopped by the ownership sweep, none of this run left"
   fi
   rm -rf "$binDir"
 

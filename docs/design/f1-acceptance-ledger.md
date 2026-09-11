@@ -170,35 +170,31 @@ them; until it is reviewed and merged they are a proposal like the rest of this 
 
 ## 4. F1c #90 — pinned real-reth smoke and fault evidence in CI
 
-Merged: **#97** (stages 1, 2 and 4, `dc233fff`).
+Merged: **#97** (stages 1, 2 and 4, `dc233fff`). Proposed: **#131** (local packaging, the fault lane,
+and exercised refusal and collection paths). Verdicts marked "(with #131)" are what it would make
+them. **Hosted execution remains pending**: no line below that needs a hosted run is marked met on the
+strength of local evidence, however close the local run is to the workflow.
 
 | stage | status | evidence |
 |---|---|---|
-| 1 — paired lane and stock control in a separately named CI job; pinned build or provenance-recorded artifact; cache key includes commit/toolchain/target/flags; revision validated on cache hits; no unpinned images, no fake fallback | **met** | `.github/workflows/reth-smoke.yml`: pin `189c0df3` (= upstream `v2.5.0`), asset name and sha256 recorded in `env`, `sha256sum -c` on download, and a `reth --version` commit check that runs **on cache hits too**. Cache key is commit + asset + digest + OS + arch |
-| 2 — trigger on relevant PRs plus manual dispatch; keep fake checks and protection off; record budget and timings | **met in part** | triggers are `pull_request` to `integration/enshrined-evm` and `workflow_dispatch`; `ci.yml` retained; protection off. Budget is recorded from the one executed run; **no cache-hit execution is established by the cited evidence** — run 34161538859 took the fetch path |
-| 3 — add real-reth fault scenarios on a separate bounded lane | **not met** | #91's harness now has a sound oracle, so the blocker named on #90 is gone, but no fault lane exists in any workflow |
-| 4 — exercise a deliberate controlled failure to prove collection and upload | **met in part** | the `inject_failure` dispatch input and the deliberate-failure step exist and the collection/upload steps are `if: always()`; the upload path is proven only by run 34161538859, where the failure step was **skipped**. No run has exercised it deliberately |
+| 1 — paired lane and stock control in a separately named CI job; pinned build or provenance-recorded artifact; cache key includes commit/toolchain/target/flags; revision validated on cache hits; no unpinned images, no fake fallback | **met** | `real-reth-smoke`; since #131 the cache holds the archive and re-checks its digest on every hit as well as the binary's revision, keyed from `scripts/lib/reth-pin.sh`; `f1-baseline.md` §6.4 |
+| 2 — trigger on relevant PRs plus manual dispatch; keep fake checks and protection off; record budget and timings | **met in part** | triggers unchanged; budget recorded. The cache-hit path is now **tested** — by `scripts/reth-smoke-selftest.sh` and on the real Linux artifact in a container (§6.4) — but a **hosted** cache hit is still unobserved |
+| 3 — add real-reth fault scenarios on a separate bounded lane | **met in part** (with #131) | `real-reth-fault`, dispatch-only, bounded default scenarios, 120-minute budget, validated uploads; its exact client and scenario commands run locally (§6.4). Not yet dispatched on a hosted runner |
+| 4 — exercise a deliberate controlled failure to prove collection and upload | **met in part** (with #131) | exercised locally with real processes: `--inject-failure` exits nonzero with a validated archive holding the node logs; cancellation mid-devnet likewise. The hosted **upload and download** of a failure artifact remains pending |
 
 ### Acceptance
 
 | line | status |
 |---|---|
-| a PR run proves a funded transaction executed in real reth and certified by BFT; hashes/receipts agree across four instances | **met, once** — run **34161538859**, 2026-09-07, head `a2e801db`, all steps green including the paired devnet. Not continuous: §0 |
-| wrong pin, bad/missing binary and RPC failures fail visibly, never silently skip | **met in part** — the checks are written to fail closed (digest mismatch, commit mismatch, no fallback path anywhere), but the workflow packaging negatives are not independently established by the cited run. Local harness pin/RPC refusals are separate evidence; exercise the exact packaging paths rather than claiming all negatives are untested |
-| cache-hit and fresh-build paths documented and tested; failure artifact demonstrably downloadable and useful | **not met** — fresh path executed once; cache-hit path unestablished; artifact downloaded once, from a successful run |
-| smoke/fault/fake results named distinctly; analyzer findings retained with individual dispositions | **met in part** — naming yes (`ci` vs `real-reth-smoke`, with the reason stated at the top of the workflow); the advisory `analyze` job's G115/G404/G301/G306 findings still have no per-finding disposition recorded, and #9 asked for one |
-| link the exact workflow run, BFT/reth commit and artifact provenance in #9 | **met in part** — recorded in `f1-baseline.md` §6.4 and in #97; the deliberate-failure run has nothing to link |
+| a PR run proves a funded transaction executed in real reth and certified by BFT; hashes/receipts agree across four instances | **met, once, hosted** — run **34161538859** (2026-09-07). The same lane now runs locally through the same script (§6.4); that is local evidence, not a hosted run |
+| wrong pin, bad/missing binary and RPC failures fail visibly, never silently skip | **met** (with #131) — the packaging refusals are exercised, not read: missing, non-executable, wrong-commit, revision-less, unrunnable and hanging binaries; wrong download digest; tampered cache; archive without a binary; failed download; unsupported platform (self-test), plus the tampered real archive in a container and the real `darwin-x86_64` refusal. RPC failures are the paired devnet's own §3 negatives |
+| cache-hit and fresh-build paths documented and tested; failure artifact demonstrably downloadable and useful | **met in part** (with #131) — both paths documented and tested locally, on the real artifact; a failure artifact is produced and validated locally. **Hosted**: cache hit via `actions/cache`, and downloading a failure artifact from a run, remain pending |
+| smoke/fault/fake results named distinctly; analyzer findings retained with individual dispositions | **met in part** — three distinctly named workflows (`ci`, `real-reth-smoke`, `real-reth-fault`); the `analyze` findings still have no per-finding disposition, which is outside #90 |
+| link the exact workflow run, BFT/reth commit and artifact provenance in #9 | **met in part** — the smoke run of 2026-09-07 is linked; the deliberate-failure and fault runs have nothing hosted to link yet |
 
-**What #90 still needs, and the constraint that shapes it.** Three of the four open lines need a
-hosted run, and the cited recent hosted jobs executed no steps (§0). The 2026-09-11 sequencing is
-explicit that CI credits may *delay* hosted execution but do not license a protocol change, and that
-exact local revisions and commands are to be recorded meanwhile. So the next #90 unit is **local
-packaging**: make the lane's provenance, verification, evidence-collection and teardown steps
-runnable locally against the same pin, exercise the negatives that have only been read (wrong
-digest, wrong commit, missing binary) and the deliberate-failure collection path, and record the
-results with exact commands — leaving hosted execution evidence open for when jobs run again. Cache-hit logic, fault-lane
-packaging and local deliberate-failure collection can be implemented and tested now; actual
-hosted cache hits, workflow triggering and downloadable failure upload remain distinct evidence.
+**What #90 still needs**: hosted execution — a PR-triggered smoke run on the packaged workflow, a
+hosted cache hit, a dispatched deliberate failure whose artifact is downloaded and inspected, and a
+dispatched fault run. None needs further code; each needs jobs that execute.
 
 ---
 
@@ -247,8 +243,8 @@ consensus failures in §1 are not thereby explained.
 | #89 | which fork/config parameters are pinned beyond the genesis hash is undefined | code + design record | proposed in #129: eth_config profile check |
 | #89 | operator configuration and compatibility guidance unwritten | operator docs | proposed in #129: `engine-api-adapter.md` §4.1 |
 | #89 | differing capability-set negative | covered by controlled fixture | no second-client prerequisite; alternate-client interoperability is separate |
-| **#90** | deliberate-failure upload never exercised; cache-hit path never observed | hosted run | local packaging now, hosted lines when jobs run |
-| **#90** | no fault lane | CI | after the local packaging unit; #91's oracle no longer blocks it |
+| **#90** | hosted smoke on the packaged workflow, hosted cache hit, hosted failure-artifact download | hosted run | #131 packages and exercises these locally; hosted lines pending until jobs execute |
+| #90 | no fault lane | CI | #131 adds `real-reth-fault` (dispatch-only); a hosted dispatch is pending |
 | #100 | timeout cause and rate | unresolved | local or representative-runner tracing remains eligible; hosted validation pending |
 | — | expected `shardConfHash` on live and restored UCs | separate ticket | #10 |
 | — | write ordering / fsync durability | separate ticket | #14 |
