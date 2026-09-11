@@ -159,7 +159,11 @@ if [ "${RETH_SMOKE_SUPERVISED:-0}" != "1" ]; then
     grouped=$(pgrep -g "$childPid" 2>/dev/null | wc -l | tr -d ' ')
     stopMoment="at teardown"
   fi
-  kill -TERM -- "-$childPid" 2>/dev/null
+  # After an interrupt the group has already had its TERM, and is running its own cleanups — the
+  # paired devnet's EXIT trap among them. A second TERM here cut that cleanup short (seen on Linux:
+  # the self-test's cancellation case never saw it finish), so it only gets the time to drain,
+  # bounded, before the KILL.
+  [ "$stopMoment" = "on interrupt" ] || kill -TERM -- "-$childPid" 2>/dev/null
   for _ in $(seq 1 20); do pgrep -g "$childPid" >/dev/null 2>&1 || break; sleep 0.5; done
   kill -KILL -- "-$childPid" 2>/dev/null
   owned=$(ownedPids | sort -u)
