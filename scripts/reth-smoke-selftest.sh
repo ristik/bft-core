@@ -148,6 +148,14 @@ refuses "a collection whose copy fails returns nonzero, naming what is missing" 
 check "…having still copied everything else it could" test -f "$T/obst/evm2/debug.log"
 check "…and a successful collection still returns 0" bash -c "rm -rf '$T/obst2'; . scripts/lib/reth-pin.sh; rethEvidenceCollect '$N2' '$T/obst2'"
 
+# A read error must not become a successful empty capture. Inject it at the JWT reader
+# so this assertion also runs as root, where chmod alone cannot make a file unreadable.
+failedJWTRead() (
+  tr() { echo "injected JWT read failure" >&2; return 1; }
+  rethScanInputsCapture "$N" "$T/unreadable-jwt.scan"
+)
+refuses "an unreadable JWT fails scan-input capture instead of recording zero values" "cannot read every secret" failedJWTRead
+
 # Scan inputs: sealing is refused once a capture failed, and nothing is appended; validation rejects
 # such a record on its own as well, so either check alone keeps it from reading as secret-free.
 printf '%s\n' abc '#failed cluster two' >"$T/failed.scan"

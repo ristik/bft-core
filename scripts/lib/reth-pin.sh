@@ -484,7 +484,10 @@ rethEvidenceSelect() {
 # be read cannot be searched for, and must not be silently skipped.
 rethEvidenceSecretValues() {
   local f status=0
-  for f in "$1"/*/jwt.hex; do [ -f "$f" ] && tr -d ' \n' <"$f" && echo; done
+  for f in "$1"/*/jwt.hex; do
+    [ -f "$f" ] || continue
+    if tr -d ' \n' <"$f"; then echo; else status=1; fi
+  done
   for f in "$1"/*/keys.json "$1"/keys.json; do
     [ -f "$f" ] || continue
     python3 -c 'import json,sys
