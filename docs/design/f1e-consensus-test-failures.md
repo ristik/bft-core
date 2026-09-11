@@ -5,8 +5,9 @@
 commit), and a node makes several synced commits on a round's critical path before its vote leaves. At
 the fixtures' four nodes those commits cost ~115 ms each, so rounds take 500–600 ms where the tests were
 calibrated for ~100 ms, and their fixed budgets run out. On Linux the same commits cost ~4 ms and the
-tests pass. This is a test-fixture assumption about the host's disk-flush cost — **not a consensus
-defect, not a toolchain defect, and not a timeout that is too short**. The repair is a separate change:
+tests pass. The intervention identifies disk-flush cost as sufficient to explain the measured fixture failures.
+It supports decoupling these accelerated consensus tests from durable-write latency, without changing
+their deadlines. It does not establish that all consensus timing defects are absent. The repair is a separate change:
 the fixture opens its throwaway stores without syncing, production stores keep syncing
 (§6).
 
@@ -29,11 +30,10 @@ running on the host.
 | 6 | `Test_recoverState/late_joiner_catches_up`, debug log | go1.27.1 darwin/amd64 | **FAIL** 5.54 s at `consensus_recovery_test.go:314`, "waiting for sleepy consensus manager to catch up" |
 | L1 | both | go1.24.13 **linux/amd64** (`golang:1.24` image, 2 CPUs, Docker on the same Mac) | **all pass**: `Test_rootNetworkRunning` 1.41 s; `Test_recoverState` 9/9 in 0.49–5.07 s |
 
-The reviewer's retained run on darwin/arm64 (`consensus.jsonl`, sha256 `f032ad1a…`) and the ledger
-author's three earlier runs on this host show the same failing set. CI's `make test` (Go 1.24 on Linux)
-has passed these tests throughout.
+The reviewer's retained run on this darwin/amd64 host (`consensus.jsonl`, sha256 `f032ad1a…`) and the ledger
+author's three earlier runs on this host show the same failing set. The retained Linux-container run passes; this investigation does not audit every historical CI run.
 
-**The toolchain is not the cause.** Go 1.24.6 passes `Test_rootNetworkRunning` once where Go 1.27.1
+**The failure is not specific to one tested Go toolchain.** Go 1.24.6 passes `Test_rootNetworkRunning` once where Go 1.27.1
 failed once, but Go 1.27.1 also passed it once (run 5), and `Test_recoverState` fails identically on
 both. `Test_rootNetworkRunning` sits on a knife edge on this host whatever the toolchain;
 `Test_recoverState`'s budgets are further out of reach.
@@ -42,8 +42,8 @@ both. `Test_rootNetworkRunning` sits on a knife edge on this host whatever the t
 subtests fail at their *first* `Eventually` — "waiting for rounds to be processed", i.e. round ≥ 6 within
 5–6 s with three or four live nodes — before any fault is injected. `late_joiner_catches_up` passes that
 step (round 6 at 2.2 s) and fails the recovery step: the late node's recovery and catch-up must fit a
-2 s window while each of its synced commits costs ~115 ms. Neither is a recovery-logic failure; with
-cheap commits (§4) every subtest passes, recovery included.
+2 s window while each of its synced commits costs ~115 ms. With cheap commits (§4) every measured subtest passes, recovery included; no independent
+recovery-logic defect was demonstrated by this investigation.
 
 ## 2. The cost, measured directly
 
@@ -58,8 +58,8 @@ node), against `NoSync`:
 | Linux container on the same Mac, 1 store | mean 3.03 ms | 0.32 ms |
 | Linux container, 4 stores concurrently | mean **4.21 ms**, p95 8.73 | 0.68 ms |
 
-On darwin bbolt syncs with `F_FULLFSYNC`, which flushes the drive's whole write cache, and concurrent
-flushes serialize — hence the fourfold stores costing ~2.5× the single one. Linux `fdatasync` in the
+On darwin bbolt syncs with `F_FULLFSYNC`, which requests a drive-cache flush. The concurrent probe shows higher commit latency,
+consistent with contention; it does not directly trace device-level serialization. Linux `fdatasync` in the
 container is ~27× cheaper here. (That container's disk is itself virtualised; the point is the ratio on
 the same hardware, not an absolute Linux figure.)
 
@@ -102,12 +102,13 @@ Linux container's ~1.1–1.4 s. With the correlation in §§2–3, that makes th
 
 ## 5. What this does not claim
 
-- **Not production behaviour.** Root nodes run on Linux, with a production `BlockRate` ten times the
-  fixtures'. Three or four synced commits per round cost ~4 ms each there. That a macOS host would make a
-  production root node slow is true and irrelevant to deployment; whether fewer commits per round would be
-  better is a storage-design question for F6 (#14), not something these tests establish.
-- **Not every macOS configuration.** Measured on one Intel Mac with its internal SSD, plus the reviewer's
-  darwin/arm64 runs of the tests (not of the probe). An external or slower drive would be worse.
+- **Not a production storage benchmark.** The ~4 ms figure is from one Linux container on this
+  machine, not production disks. Production uses a slower configured round cadence, but that alone
+  establishes no durable-throughput or tail-latency guarantee. Any write batching or production
+  latency work must preserve safety-critical persistence ordering and get its own acceptance scope.
+- **Not every macOS configuration.** Measured on one Intel Mac with its internal SSD. The reviewer's
+  earlier test runs were on the same darwin/amd64 host, not independent ARM hardware; other disks and
+  virtualization/storage stacks were not measured.
 - **Not the other consensus tests.** `consensus_manager_test.go`'s own fixture also opens real bbolt
   stores; the tests using it pass here, so it is left as it is.
 - **Not #100, #16 or #14.** No shared cause with discovery flakiness, mixed cadence or F6 storage was
@@ -126,7 +127,7 @@ both; until then the failure has a named cause rather than an anonymous exceptio
 ## Retained evidence
 
 `docs/design/f1e/f1e-runs.tar.gz` (sha256 `bb76bcb24db0481dffaf9d1fc9891f6a948bbe8907a50527b5e79174c7e5714a`,
-17 files) holds the manifest and the full JSON output of runs 1–6 and of the four intervention samples.
+17 payload files, plus macOS archive metadata entries) holds the manifest and the full JSON output of runs 1–6 and of the four intervention samples.
 The probe's outputs are `docs/design/f1e/probe-macos.txt` and `probe-linux-container.txt`. No key
 material: the fixtures generate their keys in memory and the logs carry node IDs only (checked for
 `privateKey`, `sigKey` and PEM markers).
