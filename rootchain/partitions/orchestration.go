@@ -29,10 +29,21 @@ NewOrchestration creates new boltDB implementation of shard validator orchestrat
   - dbFile is filename (full path) to the Bolt DB file to use for storage,
     if the file does not exist it will be created;
 */
-func NewOrchestration(networkID types.NetworkID, dbFile string, log *slog.Logger) (*Orchestration, error) {
+// StoreOption configures the database opened by NewOrchestration.
+type StoreOption func(*bolt.DB)
+
+// WithNoSync opens the orchestration database without syncing each commit to disk (bbolt's NoSync).
+// For throwaway test stores only; see storage.WithNoSync in rootchain/consensus/storage for why it
+// exists (#127). Production callers never pass it, and TestNewOrchestration_Sync pins that the default syncs.
+func WithNoSync() StoreOption { return func(db *bolt.DB) { db.NoSync = true } }
+
+func NewOrchestration(networkID types.NetworkID, dbFile string, log *slog.Logger, opts ...StoreOption) (*Orchestration, error) {
 	db, err := bolt.Open(dbFile, 0600, &bolt.Options{Timeout: 3 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("opening bolt DB: %w", err)
+	}
+	for _, opt := range opts {
+		opt(db)
 	}
 
 	// ensure root bucket exists
