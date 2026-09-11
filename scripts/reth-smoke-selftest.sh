@@ -139,8 +139,13 @@ rm -rf "$SN"; refuses "an injected failure exits nonzero" "reth-smoke: FAIL" smo
 check "…and still produces a validated archive recording the injection" sh -c "tar xzf '$T/ev/inject.tar.gz' -O inject/run.log | grep -q 'INJECTED FAILURE'"
 check "…with the node logs in it" sh -c "tar tzf '$T/ev/inject.tar.gz' | grep -q 'inject/nodes/evm1/debug.log'"
 check "…and teardown stopped the recorded process" stoppedRecorded
-rm -rf "$SN"; refuses "a scenario process killed outright is an incomplete run, not a pass" "incomplete run" smoke "$stub"' && kill -9 $RETH_SMOKE_CHILD_PID' killed
+# The orphan: the scenario process starts something that is recorded nowhere — as reth-paired-devnet.sh
+# is, beneath the lane's own process — and is then killed outright. Killing only the scenario process
+# would leave that orphan running, able to start clients after teardown has finished.
+rm -rf "$SN"; refuses "a scenario process killed outright is an incomplete run, not a pass" "incomplete run" smoke "$stub"' && { sleep 301 & echo $! >'"$T"'/orphan.pid; } && kill -9 $RETH_SMOKE_CHILD_PID' killed
 check "…whose evidence is still archived" test -s "$T/ev/killed.tar.gz"
+orphanStopped() { local p; p=$(cat "$T/orphan.pid" 2>/dev/null) && [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null; }
+check "…and whatever it had started, recorded or not, is stopped too" orphanStopped
 rm -rf "$SN"; refuses "a leaked secret fails the lane even when the scenarios pass" "appears verbatim" smoke "$stub"' && echo "jwt $(cat $NODES/evm1/jwt.hex)" >>"$NODES/evm1/debug.log"' leak
 rm -rf "$SN"
 refuses "the wrong client stops the lane before any scenario" "reth-smoke: FAIL" \

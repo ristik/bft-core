@@ -73,6 +73,7 @@ binDir=$(dirname "$runDir")/.bin-$(basename "$runDir")
 # recorded under the nodes directory that is still alive.
 ownedPids() {
   local p cwd f
+  [ -n "${childPid:-}" ] && pgrep -g "$childPid" 2>/dev/null
   for f in "$nodesDir"/*/pid; do
     [ -f "$f" ] || continue
     p=$(cat "$f" 2>/dev/null)
@@ -110,10 +111,16 @@ if [ "${RETH_SMOKE_SUPERVISED:-0}" != "1" ]; then
     [ -n "${RETH_SMOKE_TEST_SCENARIOS:-}" ] && echo "scenarios=SELF-TEST STUB — this archive is not real-execution evidence"
   } >"$prov"
 
+  # The child gets its own process group (job control on, for this one launch), and teardown signals
+  # the WHOLE group. Killing only the child's pid would orphan whatever it had started — the paired
+  # devnet script, and the clients that script starts — which could go on starting clients after
+  # teardown had finished. The self-test pins this with a process recorded nowhere.
+  set -m
   RETH_SMOKE_SUPERVISED=1 "$0" "${origArgs[@]}" --run-dir "$runDir" --archive "$archive" &
   childPid=$!
+  set +m
   interrupted=false
-  trap 'interrupted=true; echo; echo "=== interrupted: stopping the run, then collecting ==="; kill "$childPid" 2>/dev/null' INT TERM
+  trap 'interrupted=true; echo; echo "=== interrupted: stopping the run, then collecting ==="; kill -TERM -- "-$childPid" 2>/dev/null' INT TERM
   wait "$childPid"; childStatus=$?
   # wait returns early when a trapped signal arrives; wait again for the child itself.
   while kill -0 "$childPid" 2>/dev/null; do wait "$childPid"; childStatus=$?; done
@@ -137,6 +144,10 @@ if [ "${RETH_SMOKE_SUPERVISED:-0}" != "1" ]; then
 
   # Teardown by ownership, then verify it: a lane that leaves clients running holds ports and
   # datadirs the next run will trip over, and on a shared host belongs to somebody else's session.
+  # First the run's own process group, then anything recorded or started from this checkout.
+  kill -TERM -- "-$childPid" 2>/dev/null
+  for _ in $(seq 1 20); do pgrep -g "$childPid" >/dev/null 2>&1 || break; sleep 0.5; done
+  kill -KILL -- "-$childPid" 2>/dev/null
   owned=$(ownedPids | sort -u)
   [ -n "$owned" ] && kill $owned 2>/dev/null
   for _ in $(seq 1 20); do
