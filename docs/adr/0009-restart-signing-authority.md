@@ -1,6 +1,7 @@
 # ADR 0009: independent signing authority for shard-process restart
 
-Status: **Proposed**, #105 design review. No activation or runtime change.
+Status: **Accepted** (design) by the owner on 2026-09-11, #105. Q1–Q3 approved as
+recorded below. No activation or runtime change.
 
 ## Context
 
@@ -9,7 +10,7 @@ process what that validator previously signed. A valid older UC and an unchanged
 executor through quiet rounds can both be replayed. A local signing file alone
 has the same problem under whole-store rollback.
 
-## Proposed decision
+## Decision
 
 Adopt the narrowly supported private profile in
 [the F6c signing-state contract](../design/f6c-signing-state-contract.md): an
@@ -40,18 +41,23 @@ The test-only model is design evidence, not proof of a storage backend, host
 isolation or production certificate verification. #14 retains full crash-durability
 scope. #105 remains open.
 
-## Review disposition
+## Owner decisions (2026-09-11)
 
-Q2 (one statement per assigned round) and Q3 (no silent import of exported keys)
-are accepted as the proposed design rules. Q1 is recommended only for disposable
-private deployments: **every authority restart, including planned maintenance,
-permanently loses that voter from the current assignment**. No key-replacement
-procedure is implemented yet; the initial recovery option is separately authorized
-fresh genesis, pending H-series/#10 replacement support. This is not a production
-availability profile.
+- **Q1 approved for disposable private deployments only.** **Every authority
+  restart, including planned maintenance, permanently loses that voter from the
+  current assignment.** No key-replacement procedure is implemented yet; the
+  initial recovery option is separately authorized fresh genesis, pending
+  H-series/#10 replacement support. This is not a production availability profile.
+- **Q2 approved.** One complete request per assigned partition round, locked
+  across all root authorizations.
+- **Q3 approved.** Existing exported keys are not silently imported and are given
+  no reconstructed signing history.
+
+Acceptance approves the design, so implementation step 1 of the contract (§8) may
+start. It does not authorize key generation, deployment, activation or restored
+voting; each implementation step still needs independent review.
 
 The signing record is now in memory, in the same process lifetime as the key.
 A durable journal adds no safety to a non-recoverable key and must not add a
 mandatory write-failure path. A future key-surviving profile must establish both
 persistence and freshness anew. Optional diagnostic exports are not signing state.
-Status remains Proposed; #126 merged the proposal, not its activation.

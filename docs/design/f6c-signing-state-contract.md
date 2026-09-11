@@ -1,10 +1,11 @@
 # F6c: signing authority across shard-process restart
 
-Status: **proposed**, first deliverable of #105; independent review required.
+Status: **accepted** (design) by the owner on 2026-09-11, first deliverable of #105;
+Q1–Q3 approved as recorded in §9. Each implementation step still needs independent review.
 Base: `fbc4d08b1a2bf7b3e8b58b5632d02053d6789535`. This document and its
 executable model enable nothing. #92 is complete; #14 and #105 remain open.
 
-## 1. Decision proposed for the first private profile
+## 1. Decision for the first private profile
 
 Use one independent, fenced signing authority per validator signing key. The
 authority owns the key and the signing journal; the shard process owns neither.
@@ -287,27 +288,30 @@ atomic block/UC/TR persistence; changing that format requires rechecking the R2/
 cold-start equivalences in #92's ledger. No new Engine methods, reth changes, root
 quorums, currency issuance or production activation are included.
 
-## 9. Answers to the three review questions
+## 9. Owner decisions on the three review questions (2026-09-11)
 
-1. **Recommend Q1 only for a disposable private profile.** Its availability cost is
+All three were approved by the owner as answered below.
+
+1. **Q1 approved for a disposable private profile only.** Its availability cost is
    permanent voter loss on any authority restart until an authorized replacement
    mechanism exists. Planned maintenance has the same consequence as a crash.
    An operationally recoverable service requires the later key-custody/freshness
    design; do not promote this profile to that role. Remove disk durability from
    this profile because key and record die together.
-2. **Accept Q2's conservative assigned-round lock.** The root's
+2. **Q2 approved: the conservative assigned-round lock.** The root's
    `block_executor.go` certification flow calls `ShardInfo.nextRound`, which
    increments `TR.Round` even when the request is nil for a timeout. The same
    assigned round never needs a new conflict namespace under a later root
    authorization. The journal rule is stricter than the in-memory replay cache
    without restricting that valid progression.
-3. **Accept Q3's migration restriction.** Old exported keys have no trustworthy
+3. **Q3 approved: the migration restriction.** Old exported keys have no trustworthy
    reconstructed signing history; neither importing them nor replaying a UC is
    migration authority. Fresh genesis or an authorized key/assignment replacement
    remains a separate action.
 
-ADR 0009 remains Proposed pending review of this revised profile. These answers
-select the author's recommended design, not deployment or restored-voting approval.
-The model now verifies the actual released BCR before comparing its canonical
+With these decisions ADR 0009 is Accepted as a design, and implementation step 1
+(§8) may start. The acceptance does not approve key generation, deployment,
+activation or restored voting. #105 stays open until all four steps pass
+independent review. The model now verifies the actual released BCR before comparing its canonical
 bytes in the 256 schedules. The rollback negative control explicitly requires two
 valid, different statements at the same round under the same key.
