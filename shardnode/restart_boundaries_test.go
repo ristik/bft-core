@@ -344,12 +344,12 @@ func (s *restartScenario) newProcess(t *testing.T, exec Executor) (*Round, *Reco
 	stack, err := NewRecoveryStack(
 		RecoveryOptions{
 			Serve: true, Recover: true,
-			Providers: EvidenceProviders{s.providerHost.ID()}, ShardConfHash: s.f.conf,
-			Buffer: DefaultEvidenceBufferLimits, Transport: DefaultEvidenceTransportLimits,
+			Providers: EvidenceProviders{s.providerHost.ID()},
+			Buffer:    DefaultEvidenceBufferLimits, Transport: DefaultEvidenceTransportLimits,
 			Evidence: DefaultAnchorEvidenceLimits, Budget: DefaultRecoveryBudget, Apply: DefaultApplyBudget,
 		},
 		RecoveryDeps{Host: h, Executor: exec, PartitionID: evidencePartitionID,
-			TrustBases: s.f.trust, Gate: NewFinalityGate()})
+			ShardConfHash: s.f.conf, TrustBases: s.f.trust, Gate: NewFinalityGate()})
 	require.NoError(t, err)
 	round.SetRecovery(stack)
 	stop := func() {
@@ -368,7 +368,7 @@ func (s *restartScenario) restore(t *testing.T, round *Round, checkpoint Evidenc
 
 	loaded, err := store.LoadLUC()
 	require.NoError(t, err)
-	require.NoError(t, verifyRestoredLUC(loaded, s.f.trust, evidencePartitionID, types.ShardID{}),
+	require.NoError(t, verifyRestoredLUC(loaded, s.f.trust, evidencePartitionID, types.ShardID{}, s.f.conf),
 		"the checkpoint is genuine — authenticity is not currency, which is the next assertion's subject")
 
 	client := &BFTClient{}

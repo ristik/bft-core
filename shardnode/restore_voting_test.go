@@ -3,6 +3,7 @@ package shardnode
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -127,6 +128,8 @@ func TestRestoredNodeIsNonVoting(t *testing.T) {
 	tb, ok := testtrustbase.NewTrustBase(t, signer).(*types.RootTrustBaseV1)
 	require.True(t, ok)
 	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: authPartitionID}
+	confHash, err := pdr.Hash(crypto.SHA256)
+	require.NoError(t, err)
 
 	prevState := bytes.Repeat([]byte{0xa0}, 32)
 	stateRoot := bytes.Repeat([]byte{0xa1}, 32)
@@ -182,7 +185,7 @@ func TestRestoredNodeIsNonVoting(t *testing.T) {
 		// --- restart: exactly what Node.New does, in the same order ---
 		loaded, err := store.LoadLUC()
 		require.NoError(t, err)
-		require.NoError(t, verifyRestoredLUC(loaded, stubTrustBaseStore{tb: tb}, authPartitionID, types.ShardID{}),
+		require.NoError(t, verifyRestoredLUC(loaded, stubTrustBaseStore{tb: tb}, authPartitionID, types.ShardID{}, confHash),
 			"the checkpoint is genuine — which is the whole point: authenticity is not currency")
 
 		exec, sub := newExecutor(), &countingSubmitter{}

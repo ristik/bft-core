@@ -62,17 +62,6 @@ type RecoveryOptions struct {
 	// and has nobody to ask, which is reported as such rather than silently doing nothing.
 	Providers EvidenceProviders
 
-	// ShardConfHash is the hash of the shard configuration THIS NODE was started with. It is one of
-	// the four things a bundle is judged against (§3), and the predicate treats an absent hash as
-	// "do not compare" — so omitting it does not weaken a check, it removes one. Recovery therefore
-	// REFUSES to start without it rather than running with a check quietly disabled.
-	//
-	// It comes from the deployment because that is where the shard configuration is: Node.New does
-	// not receive it (the same gap verifyRestoredLUC documents, which is F2/#10), and inventing it
-	// here from a certificate would be exactly the mistake — the certificate's own claim about its
-	// configuration is what is in question.
-	ShardConfHash []byte
-
 	Buffer    EvidenceBufferLimits
 	Transport EvidenceTransportLimits
 	Evidence  AnchorEvidenceLimits
@@ -119,9 +108,16 @@ type RecoveryDeps struct {
 	Executor    Executor
 	PartitionID types.PartitionID
 	ShardID     types.ShardID
-	TrustBases  TrustBaseStore
-	Gate        *FinalityGate
-	Log         *slog.Logger
+	// ShardConfHash is the hash of the shard configuration THIS NODE was started with, supplied by
+	// Node.New (#134) — the same value the client and restoration enforce, so enabling recovery
+	// cannot create a different expected identity. It is one of the four things a bundle is judged
+	// against (§3), and the predicate treats an absent hash as "do not compare", so recovery REFUSES
+	// to start without it rather than running with a check quietly disabled. It is never taken from a
+	// certificate or a peer: their claim about the configuration is what is in question.
+	ShardConfHash []byte
+	TrustBases    TrustBaseStore
+	Gate          *FinalityGate
+	Log           *slog.Logger
 }
 
 /*
@@ -166,7 +162,7 @@ func NewRecoveryStack(opts RecoveryOptions, deps RecoveryDeps) (*RecoveryStack, 
 		if len(opts.Providers) == 0 {
 			return nil, fmt.Errorf("recovery lifecycle: recovery is enabled with no providers to ask — a node that cannot ask anybody recovers nothing, which is the situation this exists to fix")
 		}
-		if len(opts.ShardConfHash) == 0 {
+		if len(deps.ShardConfHash) == 0 {
 			// Not a warning. An absent configuration hash does not make the check lenient, it
 			// removes it: the predicate compares only when it has something to compare against
 			// (§3), so a node started this way would accept a bundle certified under a shard
@@ -176,7 +172,7 @@ func NewRecoveryStack(opts RecoveryOptions, deps RecoveryDeps) (*RecoveryStack, 
 		req, err := NewEvidenceRequester(RecoveryConfig{
 			PartitionID:   deps.PartitionID,
 			ShardID:       deps.ShardID,
-			ShardConfHash: opts.ShardConfHash,
+			ShardConfHash: deps.ShardConfHash,
 			TrustBases:    deps.TrustBases,
 			Fetcher:       &transportFetcher{host: deps.Host, limits: opts.Transport},
 			Providers:     opts.Providers,

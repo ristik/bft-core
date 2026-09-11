@@ -1,6 +1,7 @@
 package shardnode
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"errors"
@@ -58,6 +59,7 @@ func New(
 	signer abcrypto.Signer,
 	partitionID types.PartitionID,
 	shardID types.ShardID,
+	shardConfHash []byte,
 	trustBaseStore TrustBaseStore,
 	executor Executor,
 	disseminator Disseminator,
@@ -65,7 +67,16 @@ func New(
 	log *slog.Logger,
 	clientOpts BFTClientOptions,
 ) (*Node, error) {
-	client, err := NewBFTClient(peer, net, signer, partitionID, shardID, trustBaseStore, nil, log, clientOpts)
+	// Checked before anything is built: a node with no configured shard configuration cannot check
+	// what configuration a certificate was issued under, live or restored (#134). One value, cloned
+	// once here, is then used by the client, by restoration and by recovery — enabling serving or
+	// recovery cannot introduce a second, different expected identity.
+	if len(shardConfHash) == 0 {
+		return nil, errors.New("no shard configuration hash: this node could not tell a certificate for its own shard configuration from one issued under another")
+	}
+	shardConfHash = bytes.Clone(shardConfHash)
+
+	client, err := NewBFTClient(peer, net, signer, partitionID, shardID, shardConfHash, trustBaseStore, nil, log, clientOpts)
 	if err != nil {
 		return nil, fmt.Errorf("creating BFT client: %w", err)
 	}
@@ -87,7 +98,7 @@ func New(
 			// The trust base comes from the configured store, never from the checkpoint —
 			// the checkpoint names a root epoch, and that name is exactly what is in
 			// question, so an unknown or untrusted epoch must fail rather than be adopted.
-			if err := verifyRestoredLUC(luc, trustBaseStore, partitionID, shardID); err != nil {
+			if err := verifyRestoredLUC(luc, trustBaseStore, partitionID, shardID, shardConfHash); err != nil {
 				return nil, fmt.Errorf("authenticating persisted certificate (round %d, root round %d): %w",
 					luc.GetRoundNumber(), luc.GetRootRoundNumber(), err)
 			}
@@ -108,13 +119,14 @@ func New(
 	return &Node{
 		client: client, round: round, store: store, disseminator: disseminator, health: health,
 		recoveryDeps: RecoveryDeps{
-			Host:        peer,
-			Executor:    executor,
-			PartitionID: partitionID,
-			ShardID:     shardID,
-			TrustBases:  trustBaseStore,
-			Gate:        NewFinalityGate(),
-			Log:         log,
+			Host:          peer,
+			Executor:      executor,
+			PartitionID:   partitionID,
+			ShardID:       shardID,
+			ShardConfHash: shardConfHash,
+			TrustBases:    trustBaseStore,
+			Gate:          NewFinalityGate(),
+			Log:           log,
 		},
 	}, nil
 }
@@ -248,15 +260,21 @@ names its own epoch, and that name is precisely what is in question.
 Startup is a synchronous, local operation and the configured store is file-backed, so
 this uses a background context rather than threading one through New.
 */
-func verifyRestoredLUC(uc *types.UnicityCertificate, trustBaseStore TrustBaseStore, partitionID types.PartitionID, shardID types.ShardID) error {
+func verifyRestoredLUC(uc *types.UnicityCertificate, trustBaseStore TrustBaseStore, partitionID types.PartitionID, shardID types.ShardID, shardConfHash []byte) error {
 	if trustBaseStore == nil {
 		return errors.New("no trust base store configured")
+	}
+	// Without the configured hash the comparison is not lenient, it is absent (#134): the checkpoint
+	// on disk is exactly the thing whose configuration is in question, so its own claim cannot supply
+	// the expectation.
+	if len(shardConfHash) == 0 {
+		return errors.New("no shard configuration hash configured, so the certificate's shard configuration cannot be checked")
 	}
 	tb, err := trustBaseStore.GetByEpoch(context.Background(), uc.GetRootEpoch())
 	if err != nil {
 		return fmt.Errorf("loading trust base for root epoch %d: %w", uc.GetRootEpoch(), err)
 	}
-	if err := uc.Verify(tb, crypto.SHA256, partitionID, shardID, nil); err != nil {
+	if err := uc.Verify(tb, crypto.SHA256, partitionID, shardID, shardConfHash); err != nil {
 		return fmt.Errorf("verifying certificate: %w", err)
 	}
 	return nil

@@ -2,6 +2,7 @@ package rootchain
 
 import (
 	"context"
+	"crypto"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -130,7 +131,10 @@ func Test_RenewalDoesNotLoopAgainstTheRealHandshake(t *testing.T) {
 	net.onHandshake = func(h *handshake.Handshake) { require.NoError(t, rootNode.onHandshake(t.Context(), h)) }
 
 	driver := &unapplicableDriver{}
-	client, err := shardnode.NewBFTClient(shardPeer, net, signer, partition, types.ShardID{},
+	// The configuration this shard's certificates commit to — the client enforces it (#134).
+	confHash, err := pdr.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	client, err := shardnode.NewBFTClient(shardPeer, net, signer, partition, types.ShardID{}, confHash,
 		staticTrustBase{tb: tb}, driver, nil, shardnode.DefaultBFTClientOptions)
 	require.NoError(t, err)
 	client.SeedLUC(&response(4, 40).UC)

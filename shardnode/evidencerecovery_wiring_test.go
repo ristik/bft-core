@@ -170,12 +170,12 @@ func TestRecoveryLifecycle_AQuietTailIsRecoveredOverRealLibp2p(t *testing.T) {
 	stack, err := NewRecoveryStack(
 		RecoveryOptions{
 			Serve: true, Recover: true,
-			Providers: EvidenceProviders{providerHost.ID()}, ShardConfHash: f.conf,
-			Buffer: DefaultEvidenceBufferLimits, Transport: DefaultEvidenceTransportLimits,
+			Providers: EvidenceProviders{providerHost.ID()},
+			Buffer:    DefaultEvidenceBufferLimits, Transport: DefaultEvidenceTransportLimits,
 			Evidence: DefaultAnchorEvidenceLimits, Budget: DefaultRecoveryBudget, Apply: DefaultApplyBudget,
 		},
 		RecoveryDeps{Host: requesterHost, Executor: exec, PartitionID: evidencePartitionID,
-			TrustBases: f.trust, Gate: NewFinalityGate()})
+			ShardConfHash: f.conf, TrustBases: f.trust, Gate: NewFinalityGate()})
 	require.NoError(t, err)
 	t.Cleanup(stack.Close)
 	returning.SetRecovery(stack)
@@ -217,7 +217,7 @@ func TestRecoveryStack_RefusesConfigurationsThatCannotDoWhatTheySay(t *testing.T
 	exec := newTrackingExecutor(BlockRef{}, BlockRef{})
 	deps := func() RecoveryDeps {
 		return RecoveryDeps{Host: host, Executor: exec, PartitionID: evidencePartitionID,
-			TrustBases: f.trust, Gate: NewFinalityGate()}
+			ShardConfHash: f.conf, TrustBases: f.trust, Gate: NewFinalityGate()}
 	}
 
 	t.Run("neither half is not an error, it is a node that does not run this", func(t *testing.T) {
@@ -231,7 +231,6 @@ func TestRecoveryStack_RefusesConfigurationsThatCannotDoWhatTheySay(t *testing.T
 		opts := DefaultRecoveryOptions()
 		opts.Recover = true
 		opts.Providers = nil
-		opts.ShardConfHash = f.conf
 		_, err := NewRecoveryStack(opts, deps())
 		require.ErrorContains(t, err, "no providers to ask")
 	})
@@ -246,11 +245,11 @@ func TestRecoveryStack_RefusesConfigurationsThatCannotDoWhatTheySay(t *testing.T
 		opts := DefaultRecoveryOptions()
 		opts.Recover = true
 		opts.Providers = EvidenceProviders{host.ID()}
-		opts.ShardConfHash = nil
-		_, err := NewRecoveryStack(opts, deps())
+		d := deps()
+		d.ShardConfHash = nil
+		_, err := NewRecoveryStack(opts, d)
 		require.ErrorContains(t, err, "no shard configuration hash")
 
-		opts.ShardConfHash = f.conf
 		st, err := NewRecoveryStack(opts, deps())
 		require.NoError(t, err)
 		t.Cleanup(st.Close)
@@ -263,7 +262,6 @@ func TestRecoveryStack_RefusesConfigurationsThatCannotDoWhatTheySay(t *testing.T
 		opts := DefaultRecoveryOptions()
 		opts.Recover = true
 		opts.Providers = EvidenceProviders{host.ID()}
-		opts.ShardConfHash = f.conf
 		st, err := NewRecoveryStack(opts, deps())
 		require.NoError(t, err)
 		t.Cleanup(st.Close)
@@ -279,8 +277,9 @@ func TestRecoveryStack_RefusesConfigurationsThatCannotDoWhatTheySay(t *testing.T
 		opts := DefaultRecoveryOptions()
 		opts.Recover = true
 		opts.Providers = EvidenceProviders{host.ID()}
-		opts.ShardConfHash = h32(0x77)
-		st, err := NewRecoveryStack(opts, deps())
+		d := deps()
+		d.ShardConfHash = h32(0x77)
+		st, err := NewRecoveryStack(opts, d)
 		require.NoError(t, err)
 		t.Cleanup(st.Close)
 
@@ -288,7 +287,7 @@ func TestRecoveryStack_RefusesConfigurationsThatCannotDoWhatTheySay(t *testing.T
 		require.NoError(t, st.Requester.Observe(held.UC, held.Technical))
 		bundle := bundleOf(source, mid, held)
 		_, verr := VerifyAnchorEvidence(context.Background(), bundle,
-			AnchorEvidenceContext{PartitionID: evidencePartitionID, ShardConfHash: opts.ShardConfHash,
+			AnchorEvidenceContext{PartitionID: evidencePartitionID, ShardConfHash: d.ShardConfHash,
 				TrustBases: f.trust, Held: held.UC},
 			DefaultAnchorEvidenceLimits)
 		require.ErrorIs(t, verr, ErrEvidenceWrongContext,
@@ -384,11 +383,11 @@ func TestRound_RecoveryRunsOffTheRoundLock(t *testing.T) {
 
 	// A stack whose fetcher answers from memory: this test is about the lock, not the wire.
 	stack, err := NewRecoveryStack(
-		RecoveryOptions{Recover: true, Providers: EvidenceProviders{host.ID()}, ShardConfHash: f.conf,
+		RecoveryOptions{Recover: true, Providers: EvidenceProviders{host.ID()},
 			Transport: DefaultEvidenceTransportLimits, Evidence: DefaultAnchorEvidenceLimits,
 			Budget: DefaultRecoveryBudget, Apply: DefaultApplyBudget},
 		RecoveryDeps{Host: host, Executor: exec, PartitionID: evidencePartitionID,
-			TrustBases: f.trust, Gate: NewFinalityGate()})
+			ShardConfHash: f.conf, TrustBases: f.trust, Gate: NewFinalityGate()})
 	require.NoError(t, err)
 	t.Cleanup(stack.Close)
 	// Replace the wire with a local answer, so the fixture turns on the lock and nothing else.
