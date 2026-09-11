@@ -138,44 +138,33 @@ are #89 and #90 by the 2026-09-11 sequencing; it records it as what #88 still ne
 
 ## 3. F1b #89 — startup capability, genesis and execution-endpoint binding
 
-Merged: **#96** (items 1 and 4, `5eb8bbe5`), **#99** (items 2 and 3, `80974c48`).
+Merged: **#96** (items 1 and 4, `5eb8bbe5`), **#99** (items 2 and 3, `80974c48`). Proposed: **#129**
+(the three residuals this section named at `936e1237`). The verdicts below are what #129 would make
+them; until it is reviewed and merged they are a proposal like the rest of this ledger.
 
 ### Delivery
 
 | item | status | evidence |
 |---|---|---|
-| 1 — the real binary against a controlled JSON-RPC fixture, per missing capability, bounded nonzero exit, specific diagnostic, before any submission; exchange failure, malformed response, missing chain id | **met in part** | `TestShardNodeRun_RefusesIncompatibleExecutionClient` covers each missing V3 method, a client offering nothing, HTTP 500, a malformed response, an erroring `eth_chainId` and a chain-id mismatch, each asserting nothing was submitted; `TestShardNodeRun_AcceptsACompatibleFixture` is the positive control that keeps them meaningful. **The missing configured `chain_id` case is not covered** — see below |
-| 2 — operator-configured expected genesis / chain-profile binding, validated before voting; same chain id with different genesis as a real-reth negative | **met in part** | `TestShardNodeRun_GenesisBinding` (four subtests, including the matching case proceeding); `TestCheckGenesisHash_ReadsBothConnections`; `TestDecodeBlockHeaderRejectsMissingIdentity` refuses `null` rather than decoding it to a plausible zero; real-reth negative 3d in `scripts/reth-paired-devnet.sh` (`reth-othergenesis`: same chain id, different allocation). **"Which fork/config parameters are additionally pinned" is not defined** — see below |
-| 3 — independently configured Engine and plain RPC: correct plain paired with wrong Engine; how the deployment binds the pair using standard interfaces | **met** | `TestShardNodeRun_EndpointPairing`; `TestCheckChainID_ReadsBothConnections`; `TestCheckEndpointsPaired`. The binding uses `eth_chainId` and `eth_getBlockByNumber` on the authenticated Engine port, which the Engine API's underlying-protocol section requires the client to serve — no new Engine method, no reth divergence |
-| 4 — remove `doctor`'s duplicate `eth_chainId` and preserve the shared `CheckChainID` error | **met** | `doctor` calls the check once and reports the check's own error, so preflight cannot print a mismatch built from an earlier response |
+| 1 — the real binary against a controlled JSON-RPC fixture, per missing capability, bounded nonzero exit, specific diagnostic, before any submission; exchange failure, malformed response, missing chain id | **met** (with #129) | `TestShardNodeRun_RefusesIncompatibleExecutionClient` covers each missing V3 method, a client offering nothing, HTTP 500, a malformed response, an erroring and a `null` `eth_chainId`, and a chain-id mismatch, each asserting nothing was submitted; `TestShardNodeRun_AcceptsACompatibleFixture` is the positive control. The missing *local* `chain_id` is `TestShardNodeRun_RefusesAShardConfWithNoChainID` (#129), which first asserts the generated shard conf really carries no `chain_id` |
+| 2 — operator-configured expected genesis / chain-profile binding, validated before voting; same chain id with different genesis as a real-reth negative; define which fork/config parameters are additionally pinned | **met** (with #129) | genesis: `TestShardNodeRun_GenesisBinding`, `TestCheckGenesisHash_ReadsBothConnections`, `TestDecodeBlockHeaderRejectsMissingIdentity`, real-reth 3d. **Fork/config profile** (#129): `engineapi/profile.go` pins eth_config's `current` (activation at genesis, Cancun's system contract, blob schedule and precompiles, the configured chain id) and requires `next`/`last` null; `TestCheckProfile_*` enforce each field one at a time from a recorded real response; real-reth 3f refuses a client whose chain id **and genesis** match but which schedules Prague later. `f1-baseline.md` §5.8 tabulates what is pinned and why `forkId` is not |
+| 3 — independently configured Engine and plain RPC: correct plain paired with wrong Engine; how the deployment binds the pair using standard interfaces | **met** | `TestShardNodeRun_EndpointPairing`; `TestCheckChainID_ReadsBothConnections`; `TestCheckEndpointsPaired`. The binding uses `eth_chainId` and `eth_getBlockByNumber` on the authenticated Engine port — no new Engine method, no reth divergence |
+| 4 — remove `doctor`'s duplicate `eth_chainId` and preserve the shared `CheckChainID` error | **met** | `doctor` calls the check once and reports the check's own error; its new `execution profile` line follows the same rule |
 
 ### Acceptance
 
 | line | status |
 |---|---|
-| binary refuses unsupported/malformed exchange and missing configured identity; matching endpoints still execute a funded transaction | **met in part** — the refusals and the funded-transaction positive are both established; "missing configured identity" is covered for a missing *client* answer but not for a missing *local* `chain_id` configuration |
-| same chain id / different genesis refused before voting, against an independently configured expected value | **met** — the expected value is `--expected-genesis-hash`, supplied by the operator, not learned from the client under test |
-| Engine/plain-RPC pairing coverage and trust assumptions explicit; no claims stronger than the checked relation | **met in part** — the checks are explicit and the pairing check is unconditional; the residual assumptions (same-process wiring, future-fork agreement) are recorded in review but not yet in the design record as operator-facing guidance |
-| error/timeout/JSON-RPC failure paths fail closed with accurate diagnostics; subprocesses bounded and cleaned up | **met** — each negative additionally asserts it did not hit its deadline, so a regression that lets startup hang fails rather than stalls |
-| CLI tests, real-reth fixture commands, exact manifests and compatibility/migration guidance attached | **met in part** — tests and commands yes; **compatibility/configuration guidance is missing** |
+| binary refuses unsupported/malformed exchange and missing configured identity; matching endpoints still execute a funded transaction | **met** (with #129) — the missing local `chain_id` now has its own CLI test; the funded-transaction positive is the paired devnet |
+| same chain id / different genesis refused before voting, against an independently configured expected value | **met** — `--expected-genesis-hash`, supplied by the operator |
+| Engine/plain-RPC pairing coverage and trust assumptions explicit; no claims stronger than the checked relation | **met** (with #129) — `docs/engine-api-adapter.md` §4.1 states, for operators, that passing every check does not establish same-process wiring, and that the profile is read over `--eth-url` and binds the Engine connection only through that same assumption |
+| error/timeout/JSON-RPC failure paths fail closed with accurate diagnostics; subprocesses bounded and cleaned up | **met** — including a client without `eth_config`, which is refused rather than assumed compliant |
+| CLI tests, real-reth fixture commands, exact manifests and compatibility/migration guidance attached | **met** (with #129) — compatibility and migration are §4.1's last paragraph: the profile check is new and can refuse a node that previously started |
 
-**What #89 still needs — the next bounded code unit under #9:**
-
-1. **The missing `chain_id` partition param has no CLI test.** `cli/ubft/cmd/shard_node_run.go:372`
-   refuses with "engine-api executor requires a chain_id partition param in the shard conf, which has
-   none", and nothing exercises it: the only `chain_id` string in `cli/ubft/cmd/*_test.go` is the
-   `--partition-params` used to *build* a correct node home. The reviewer's own wording on #89 is the
-   distinction to keep — an endpoint RPC unavailability test does not substitute for a missing local
-   configuration.
-2. **Which parameters beyond the genesis hash are pinned is undefined.** A matching genesis hash does
-   not bind future fork activations, and #89 asks for this to be named rather than implied.
-3. **Operator configuration and compatibility guidance is unwritten**: what `--expected-genesis-hash`
-   is for, what happens to a node started without it, and the two assumptions the checks do not
-   discharge (the Engine and plain connections being the same process; agreement on future forks).
-4. **No second-client prerequisite:** the controlled JSON-RPC fixture already exercises differing
-   capability sets through the actual binary, as #89 explicitly permits. Alternate-client
-   interoperability and F3's future custom profile are separate questions. Authenticating expected
-   `shardConfHash` on live and restored UCs remains **#10**.
+**What #89 does not cover, and should not be read to:** interoperability with a second real client
+(the controlled fixture is what #89 asks for); F3's future custom profile, which will revise
+`engineapi/profile.go` as a reviewed compatibility change; and authenticating the expected
+`shardConfHash` on live and restored UCs, which remains **#10**.
 
 ---
 
@@ -254,9 +243,9 @@ consensus failures in §1 are not thereby explained.
 | #9 | advisory `analyze` findings (G115, G404, G301, G306) have no per-finding disposition | hygiene | one disposition each; no blanket disablement |
 | #88 | leader kill has no passing measurement at a current head | measurement | one clean matrix run at the merged head, pin, T2 ≥ 5 s |
 | #88 | no full matrix at `fbc4d08b`; every recorded outcome is a single run | measurement | same run; repetition counts stated |
-| **#89** | missing `chain_id` partition param has no CLI test | code | next unit, §3 |
-| **#89** | which fork/config parameters are pinned beyond the genesis hash is undefined | design record | next unit, §3 |
-| **#89** | operator configuration and compatibility guidance unwritten | design record | next unit, §3 |
+| #89 | missing `chain_id` partition param has no CLI test | code | proposed in #129 |
+| #89 | which fork/config parameters are pinned beyond the genesis hash is undefined | code + design record | proposed in #129: eth_config profile check |
+| #89 | operator configuration and compatibility guidance unwritten | operator docs | proposed in #129: `engine-api-adapter.md` §4.1 |
 | #89 | differing capability-set negative | covered by controlled fixture | no second-client prerequisite; alternate-client interoperability is separate |
 | **#90** | deliberate-failure upload never exercised; cache-hit path never observed | hosted run | local packaging now, hosted lines when jobs run |
 | **#90** | no fault lane | CI | after the local packaging unit; #91's oracle no longer blocks it |
