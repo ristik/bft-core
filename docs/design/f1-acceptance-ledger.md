@@ -79,7 +79,7 @@ The #96 review recorded this test family failing on baseline `0d9c6ee6` with and
 that PR. This establishes an older occurrence, not that every later failure has the same cause
 or that all F1/F6b changes are exonerated. Three failing runs are repeatable local evidence, not
 proof of deterministic behavior on every schedule. The author observations are one host,
-darwin/arm64; hosted corroboration is presently unavailable (§0).
+darwin/x86_64 (Intel Core i7-8850H; an earlier revision of this ledger said darwin/arm64, which was wrong); hosted corroboration is presently unavailable (§0).
 
 **The failed-suite investigation is now #127 under #9.** Reviewer reproduction at docs-only
 `6735fdd1` failed both top-level tests and all eight recovery cases once (21.135 s); JSON output
