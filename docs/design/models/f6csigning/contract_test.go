@@ -1,9 +1,10 @@
 // Package f6csigning is an executable design, not a production signer or storage implementation.
-// The authority's atomic durable store and authenticated enrollment are premises, not verified here.
+// The authority's isolated process memory and authenticated enrollment are premises, not verified here.
 package f6csigning
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"sync"
@@ -21,7 +22,7 @@ var (
 	errConflict  = errors.New("signing-conflict")
 	errUntrusted = errors.New("signing-state-untrusted")
 	errLost      = errors.New("signing-key-lost")
-	errStage     = errors.New("response-not-durable")
+	errStage     = errors.New("response-not-retained")
 )
 
 // Policy fields are immutable enrollment, not caller-selected conflict namespaces.
@@ -33,8 +34,8 @@ type policy struct {
 var enrolled = policy{"private-network-A", "config-A", "legacy-bcr-v1", 1, 7}
 
 type record struct {
-	round                             uint64
-	unsigned, signed, durableResponse []byte
+	round                              uint64
+	unsigned, signed, retainedResponse []byte
 }
 
 type authority struct {
@@ -83,7 +84,7 @@ func (a *authority) guard(session uint64, p policy) error {
 	return nil
 }
 
-// reserve models a successful ATOMIC DURABLE compare-and-reserve. The real implementation must
+// reserve models a successful atomic in-memory compare-and-reserve. The real implementation must
 // authenticate UC/TR before calling it. No client-supplied authenticated boolean exists here.
 func (a *authority) reserve(session uint64, p policy, req *certification.BlockCertificationRequest) error {
 	a.mu.Lock()
@@ -128,7 +129,7 @@ func (a *authority) sign(session uint64) error {
 	if len(a.record.unsigned) == 0 {
 		return errStage
 	}
-	if len(a.record.durableResponse) != 0 {
+	if len(a.record.retainedResponse) != 0 {
 		return nil
 	}
 	var req certification.BlockCertificationRequest
@@ -146,7 +147,7 @@ func (a *authority) sign(session uint64) error {
 	return nil
 }
 
-func (a *authority) persistResponse(session uint64) error {
+func (a *authority) retainResponse(session uint64) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.guard(session, a.policy); err != nil {
@@ -155,11 +156,11 @@ func (a *authority) persistResponse(session uint64) error {
 	if len(a.record.signed) == 0 {
 		return errStage
 	}
-	a.record.durableResponse = bytes.Clone(a.record.signed)
+	a.record.retainedResponse = bytes.Clone(a.record.signed)
 	return nil
 }
 
-func (a *authority) release(session uint64, round uint64) ([]byte, error) {
+func (a *authority) release(session uint64, round uint64, digest [32]byte) ([]byte, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err := a.guard(session, a.policy); err != nil {
@@ -168,16 +169,20 @@ func (a *authority) release(session uint64, round uint64) ([]byte, error) {
 	if round != a.record.round {
 		return nil, errStale
 	}
-	if len(a.record.durableResponse) == 0 {
+	if digest != sha256.Sum256(a.record.unsigned) {
+		return nil, errConflict
+	}
+	if len(a.record.retainedResponse) == 0 {
 		return nil, errStage
 	}
-	return bytes.Clone(a.record.durableResponse), nil
+	return bytes.Clone(a.record.retainedResponse), nil
 }
 
 func (a *authority) loseAuthority() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.signer = nil // journal survives, but this profile has no way to import/recover the old key
+	a.signer = nil // no key recovery; discarded process memory cannot recreate the old identity
+	a.record = record{}
 }
 
 func proposal(round uint64, size uint64) *certification.BlockCertificationRequest {
@@ -191,17 +196,26 @@ func proposal(round uint64, size uint64) *certification.BlockCertificationReques
 
 func complete(t *testing.T, a *authority, session uint64, req *certification.BlockCertificationRequest) []byte {
 	t.Helper()
-	for _, step := range []func() error{func() error { return a.reserve(session, enrolled, req) }, func() error { return a.sign(session) }, func() error { return a.persistResponse(session) }} {
+	for _, step := range []func() error{func() error { return a.reserve(session, enrolled, req) }, func() error { return a.sign(session) }, func() error { return a.retainResponse(session) }} {
 		if err := step(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	b, err := a.release(session, req.IRRound())
+	b, err := a.release(session, req.IRRound(), sha256.Sum256(mustBytes(t, req)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	actual := decodeReleased(t, a, b)
+	if !bytes.Equal(mustBytes(t, actual), mustBytes(t, req)) {
+		t.Fatal("released response does not match requested preimage")
+	}
+	return b
+}
+
+func decodeReleased(t *testing.T, a *authority, wire []byte) *certification.BlockCertificationRequest {
+	t.Helper()
 	var signed certification.BlockCertificationRequest
-	if err := types.Cbor.Unmarshal(b, &signed); err != nil {
+	if err := types.Cbor.Unmarshal(wire, &signed); err != nil {
 		t.Fatal(err)
 	}
 	v, err := a.signer.Verifier()
@@ -211,11 +225,11 @@ func complete(t *testing.T, a *authority, session uint64, req *certification.Blo
 	if err := signed.IsValid(v); err != nil {
 		t.Fatal(err)
 	}
-	return b
+	return &signed
 }
 
 func TestCrashBoundariesKeepOnePreimage(t *testing.T) {
-	// Cuts: before reserve, after durable reserve, after private signing, after durable response,
+	// Cuts: before reserve, after reservation, after private signing, after retained response,
 	// after release. The shard is discarded; only the independent authority survives each cut.
 	for cut := 0; cut <= 4; cut++ {
 		t.Run(fmt.Sprint(cut), func(t *testing.T) {
@@ -233,21 +247,21 @@ func TestCrashBoundariesKeepOnePreimage(t *testing.T) {
 				}
 			}
 			if cut >= 3 {
-				if err := a.persistResponse(old); err != nil {
+				if err := a.retainResponse(old); err != nil {
 					t.Fatal(err)
 				}
 			}
 			var before []byte
 			if cut >= 4 {
-				before, _ = a.release(old, 12)
+				before, _ = a.release(old, 12, sha256.Sum256(mustBytes(t, proposal(12, 1))))
 			}
 			if cut < 3 {
-				if _, err := a.release(old, 12); !errors.Is(err, errStage) && !errors.Is(err, errStale) {
-					t.Fatal("released before durable response", err)
+				if _, err := a.release(old, 12, sha256.Sum256(mustBytes(t, proposal(12, 1)))); !errors.Is(err, errStage) && !errors.Is(err, errStale) {
+					t.Fatal("released before retained response", err)
 				}
 			}
 			fresh := a.fence()
-			if _, err := a.release(old, 12); !errors.Is(err, errFenced) {
+			if _, err := a.release(old, 12, sha256.Sum256(mustBytes(t, proposal(12, 1)))); !errors.Is(err, errFenced) {
 				t.Fatal("old client survived fence", err)
 			}
 			if cut >= 1 {
@@ -314,7 +328,7 @@ func TestScopeIsEnrollmentNotAResetNamespace(t *testing.T) {
 	}
 }
 
-func TestAuthorityLossAndUncertainStorageNeverBootstrap(t *testing.T) {
+func TestAuthorityLossAndDetectedStateFaultNeverBootstrap(t *testing.T) {
 	for _, lose := range []bool{false, true} {
 		a := newAuthority(t)
 		s := a.fence()
@@ -330,7 +344,7 @@ func TestAuthorityLossAndUncertainStorageNeverBootstrap(t *testing.T) {
 		if err := a.reserve(fresh, enrolled, proposal(16, 1)); !errors.Is(err, want) {
 			t.Fatal(err)
 		}
-		if _, err := a.release(fresh, 12); !errors.Is(err, want) {
+		if _, err := a.release(fresh, 12, sha256.Sum256(mustBytes(t, proposal(12, 1)))); !errors.Is(err, want) {
 			t.Fatal(err)
 		}
 		// A perfectly decoded historical journal cannot resurrect a key or clear uncertainty.
@@ -374,19 +388,20 @@ func TestConcurrentCandidatesAndFencedRelease(t *testing.T) {
 	if err := a.sign(s); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.persistResponse(s); err != nil {
+	if err := a.retainResponse(s); err != nil {
 		t.Fatal(err)
 	}
+	expectedDigest := sha256.Sum256(a.record.unsigned)
 	fresh := a.fence()
-	if _, err := a.release(s, 12); !errors.Is(err, errFenced) {
+	if _, err := a.release(s, 12, expectedDigest); !errors.Is(err, errFenced) {
 		t.Fatal(err)
 	}
-	b, err := a.release(fresh, 12)
+	b, err := a.release(fresh, 12, expectedDigest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b[0] ^= 0xff
-	again, err := a.release(fresh, 12)
+	again, err := a.release(fresh, 12, expectedDigest)
 	if err != nil || bytes.Equal(b, again) {
 		t.Fatal("response aliases authority state", err)
 	}
@@ -409,24 +424,31 @@ func TestAdversarialOrdersNeverReleaseTwoStatements(t *testing.T) {
 				}
 				continue
 			}
-			complete(t, a, s, r)
-			b := mustBytes(t, r)
-			if prior, ok := emitted[r.IRRound()]; ok && !bytes.Equal(prior, b) {
+			wire := complete(t, a, s, r)
+			actual := decodeReleased(t, a, wire)
+			b := mustBytes(t, actual)
+			if prior, ok := emitted[actual.IRRound()]; ok && !bytes.Equal(prior, b) {
 				t.Fatalf("schedule %d equivocated", schedule)
 			}
-			emitted[r.IRRound()] = b
+			emitted[actual.IRRound()] = b
 		}
 	}
 }
 
 func TestReplayableLocalJournalIsNotFreshness(t *testing.T) {
-	// Negative control: give a key-holding signer an older journal. BOTH conflicting signatures
-	// verify. This is why arbitrary authority rollback is excluded rather than 'detected by fsync'.
+	// Deliberately violate the independent-memory assumption. Compare actual released messages,
+	// not requested candidates; both must verify under the SAME key and conflict at the same round.
 	a := newAuthority(t)
 	s := a.fence()
-	complete(t, a, s, proposal(12, 1))
-	a.record = record{} // deliberately break the independent-authority assumption
-	complete(t, a, s, proposal(12, 2))
+	first := decodeReleased(t, a, complete(t, a, s, proposal(12, 1)))
+	a.record = record{}
+	second := decodeReleased(t, a, complete(t, a, s, proposal(12, 2)))
+	if first.IRRound() != second.IRRound() {
+		t.Fatal("negative control changed round")
+	}
+	if bytes.Equal(mustBytes(t, first), mustBytes(t, second)) {
+		t.Fatal("negative control released the same statement twice")
+	}
 }
 
 func TestLaterReservationCannotAnswerAnEarlierCall(t *testing.T) {
@@ -434,8 +456,26 @@ func TestLaterReservationCannotAnswerAnEarlierCall(t *testing.T) {
 	s := a.fence()
 	complete(t, a, s, proposal(12, 1))
 	complete(t, a, s, proposal(16, 1))
-	if _, err := a.release(s, 12); !errors.Is(err, errStale) {
+	if _, err := a.release(s, 12, sha256.Sum256(mustBytes(t, proposal(12, 1)))); !errors.Is(err, errStale) {
 		t.Fatal("a delayed round-12 caller received round-16's response", err)
+	}
+}
+
+func TestReleaseBindsRoundAndRequestDigest(t *testing.T) {
+	a := newAuthority(t)
+	s := a.fence()
+	complete(t, a, s, proposal(12, 1))
+	wrong := sha256.Sum256(mustBytes(t, proposal(12, 2)))
+	if _, err := a.release(s, 12, wrong); !errors.Is(err, errConflict) {
+		t.Fatal("same round with a different request digest received a response", err)
+	}
+	right := sha256.Sum256(mustBytes(t, proposal(12, 1)))
+	wire, err := a.release(s, 12, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha256.Sum256(mustBytes(t, decodeReleased(t, a, wire))) != right {
+		t.Fatal("released bytes do not satisfy the requested digest")
 	}
 }
 
