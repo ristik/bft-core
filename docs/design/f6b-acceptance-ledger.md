@@ -27,26 +27,57 @@ behaved a particular way once, and neither is the other.
 |---|---|---|
 | the failure, reproduced | `TestRound_QuietUCAfterMissedBlock_RecoveryTargetIsEmpty` | #94 |
 | it passes after the repair | `TestRound_QuietUCRecoversViaLiveAnchor` (payload present, payload absent, payload invalid, and the anchor surviving a failed attempt) | #106 |
-| certificate equality not relaxed | `sameInputRecord` is untouched by this work (last modified in #93, before stage 3); `TestAnchorEvidence_SameStateDifferentBlockIsNotHistory` refuses a chain that returns to a state by another block; `TestCheckHeadIdentity` keeps the block-hash comparison | #112, #106 |
+| certificate equality not relaxed | `sameInputRecord` is untouched by this work (last changed in `a0730c1b`, merged by PR #102 under issue #93, before stage 3 — the issue and the PR are different numbers and the distinction matters when chasing the commit); `TestAnchorEvidence_SameStateDifferentBlockIsNotHistory` refuses a chain that returns to a state by another block; `TestCheckHeadIdentity` keeps the block-hash comparison | #112, #106 |
 
 The repair does not substitute a state root for a block hash and does not call `Commit(nil)`:
 `recoveryTarget` refuses with a named reason rather than returning an empty hash.
 
 ### 1.2 "Quiet and non-quiet UC recovery cases; local payload present/absent; invalid payload/anchor/config/epoch; retry and process restart at each relevant boundary."
 
-**Met.**
+**Met in part.** Every case up to and including retry is met. The final clause — "process restart at
+each relevant boundary" — is met for some boundaries by fixture, for others by a reviewed equivalence
+argument, and for two it is not established; §1.2.1 enumerates them rather than leaving the clause to
+be read as a whole. An earlier revision of this ledger recorded the clause as met on the strength of
+three fixtures that prove different properties; that verdict was wrong.
 
 | case | evidence | merged in |
 |---|---|---|
 | quiet UC | `TestRound_QuietUCRecoversViaLiveAnchor`; `TestAnchorEvidence_QuietTailRecoversWithoutNewTransactions`; real client `f6b-quiet-tail-recovery.sh` | #106, #112, #118 |
 | non-quiet UC | `TestTargetApplier_CommitsTheCertifiedBlock`; real client `f6b-missed-block-recovery.sh`, where P-id is satisfied by an exact block-hash match and row 13 cannot apply | #116, #119 |
-| payload present locally | `TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere` | #118 |
+| payload present locally | `TestRound_QuietUCRecoversViaLiveAnchor` / "payload present: recovers via the anchor across the quiet round" — the executor head is rewound while payload state is retained, and a recovery `Commit` is asserted; complementary to it, `TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere` starts from `recoveredHead()` and asserts *no* `Commit`, which is recognising an already-canonical block rather than making a retained payload canonical | #106, #118 |
 | payload absent | `TestAnchorEvidence_VerifiedTargetSurvivesAnUnavailablePayload`; `TestTargetApplier_TheThreeExecutorSituationsStayApart`; real client `f6b-execution-peer-isolation.sh` and `f6b-unhelpful-peers.sh` | #112, #116, #120, #121 |
 | invalid payload | `TestTargetApplier_TheThreeExecutorSituationsStayApart` — invalid is a fault, unavailable is retryable, and the two never merge | #116 |
 | invalid anchor | `TestAnchorEvidence_MiddleEvidenceMissingOrAltered`; `TestAnchorEvidence_ReplayOfAnOlderCompleteBundle`; `TestContinuityState_InstallVerifiedRefusesAnAnchorWithNoBlock` | #112, #117 |
 | invalid config / epoch | `TestAnchorEvidence_WrongPartitionShardConfigOrEpoch`; `TestEvidenceRequester_ConfigurationAndEpochAreThisNodesOwn`; `TestTargetApplier_RefusesAnUnusableConfiguration`; `TestRecoveryStack_RefusesConfigurationsThatCannotDoWhatTheySay` | #112, #115, #116, #117 |
 | retry | `TestTargetApplier_AttemptsAreBoundedAndSpaced`; `TestAnchorRecovery_ASyncingExecutorKeepsGettingAttempts`; `TestAnchorEvidence_RetryClassification` | #116, #112 |
-| process restart | `TestRestoredNodeIsNonVoting`; `TestAnchorIsNotRestoredFromDisk`; `TestRound_CrashAfterSubmitBeforeUC_RecoversWithoutEquivocatingOrDoubleBuilding` | #106, #77 |
+| process restart at each relevant boundary | enumerated in §1.2.1 — partly met | #106, #77 |
+
+#### 1.2.1 The restart boundaries, enumerated
+
+A restart is "relevant" at a point where this node holds recovery state that a restart would destroy,
+or where the executor and this node can disagree about what happened. The recovery lifecycle has
+seven such points. What makes most of them answerable without a fixture apiece is a single reviewed
+fact about what survives a restart: **exactly one certificate is persisted and nothing else.**
+`FileStore.SaveLUC` keeps one certificate (`store.go`, and the note in `evidencebuffer.go`), and
+`resumeFrom` installs no execution anchor from it — `TestAnchorIsNotRestoredFromDisk` drives the
+production seeding path and asserts both that the certificate cursor is restored and that
+`continuity.anchor` stays nil. The requester's witness entry and retained bundle, the verified
+target, the applier's attempt budget, and the round's continuity anchor are all process memory.
+
+| # | boundary | status | basis |
+|---|---|---|---|
+| R1 | start with no recovery state at all | met | `TestAnchorIsNotRestoredFromDisk`; every real-client lane restarts here (#118–#121) |
+| R2 | evidence received or buffered, verification not finished | met by equivalence | nothing of the bundle is persisted, so the restart discards it and the process re-enters at R1; no executor call has been made, so there is nothing to reconcile that a cold start does not already do |
+| R3 | a verified target is held, `Commit` not yet called | met by equivalence | same: the verified target is memory-only, and the executor has not moved. The target is re-derived from the next certificate, and re-derivation is exactly what R1 covers |
+| R4 | `Commit` in flight when the process dies | **not established** | no fixture restarts across an in-flight executor call. Both executor outcomes have fixtures once the process is back (`TestTargetApplier_CommitsTheCertifiedBlock`, `…AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere`), and an executor still working is `executor-unreachable`/SYNCING and retryable — but nothing tests the crossing itself |
+| R5 | `Commit` succeeded, the anchor not yet adopted | met by equivalence, with a fixture for the resulting state | the adoption is memory-only and lost; the executor, however, did move. On restart the node re-reads the head and the already-canonical path applies without a second `Commit` — `TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere`. `applyVerifiedAnchor` also refuses the inverse ("both halves, or neither"): it never installs an anchor without the commit |
+| R6 | adopted, certificate not yet persisted | **not established** | adoption happens inside `HandleCertificate`; `persistingDriver` calls `SaveLUC` only after it returns (`node.go`). A restart in between resumes from an *older* certificate with the executor ahead of it. `TestRound_CrashAfterSubmitBeforeUC_RecoversWithoutEquivocatingOrDoubleBuilding` is adjacent but is not evidence for this boundary: it constructs a bare `NewRound` rather than running `LoadLUC` → `verifyRestoredLUC` → `resumeFrom`, and it submits after its simulated restart |
+| R7 | restarted from a persisted certificate | met | `TestRestoredNodeIsNonVoting` drives the production sequence and asserts the node follows, reconciles and does not vote, against a control that does vote |
+
+The equivalence argument is the load-bearing claim in R2, R3 and R5, so it is stated as a claim to
+disagree with rather than as a result: *if* something later persists verified evidence or an applied
+cursor — which is #14's work — every one of those three rows stops being an equivalence and becomes a
+boundary needing its own fixture. R4 and R6 are open regardless, and are carried as **B2** in §3.1.
 
 **One boundary is deliberately out of scope rather than missing.** Recovery *across a legitimate
 epoch transition* is refused by design (§3.1 of the design record: a chain crossing an epoch change
@@ -62,16 +93,28 @@ for crossing one belongs to #10 and is listed in §3 below.
 |---|---|---|
 | no signing from an unreconciled executor | `TestRound_IdentityGate`; `TestRestoredNodeIsNonVoting`; every real-client lane asserts the node declares itself NON-VOTING and logs zero `submitting block certification request` | #106, #118–#121 |
 | no unverified forkchoice target | one comparison, `anchorHeadIdentity`, used by both the live and the recovery path; `TestCheckHeadIdentity`; `TestTargetApplier_EnforcesHeadIdentityAfterAValidCommit`; the evidence predicate refuses anything it cannot authenticate against locally configured trust | #117, #106, #116, #112 |
-| no duplicate execution effects | `TestTargetApplier_OneAttemptIsInsideTheExecutorAtATime`; the finality gate serialises every finality-changing executor call (`TestFinalityGate`, `TestRound_TakesTheFinalityGateForItsOwnCommits`); `TestRound_RepeatUC_DoesNotCommitButAdvancesRound` | #116, #117, #77 |
+| no duplicate execution effects | *serialisation*: `TestTargetApplier_OneAttemptIsInsideTheExecutorAtATime`, and the finality gate over every finality-changing executor call (`TestFinalityGate`, `TestRound_TakesTheFinalityGateForItsOwnCommits`). *Replay and idempotency*, which a one-at-a-time gate does not prove: `TestDeliverySeparatesApplicationFromSending` — a send failure leaves the certificate applied so its duplicate is not re-driven, and a persistence failure after a successful send is an application failure whose retry commits nothing uncertified — with `TestFailedDeliveryIsRetriedByDuplicate` and `TestRound_RepeatUC_DoesNotCommitButAdvancesRound` | #116, #117, #77 |
 
 The signing gate withholds the **signed certification request** and nothing else: a restored node
-still observes, reconciles, builds and disseminates. That is a measured decision, not an oversight —
-an earlier revision that also withheld block production stalled every round a restored node led.
+still observes, reconciles, and — *once P-id is satisfied* — builds and disseminates. That is a
+measured decision, not an oversight: an earlier revision that withheld block production
+unconditionally stalled every round a restored node led.
+
+**P-id restricts building independently, and that is not a consequence of P-sign.** The two answer
+different questions — P-sign decides whether this node may SIGN, P-id whether it may make its
+execution client FINALIZE — and `round.go` evaluates identity for *every* process, declining
+leadership before `Build` when it fails, because `Build` itself changes forkchoice and finality:
+`TestRound_DoesNotBuildOnAnIdentityRejectedParent` (including its restored-process half) and
+`TestRound_TakesTheFinalityGateForBuild`. So a restored node may lead after satisfying P-id while
+remaining non-voting under P-sign, and a node that has not satisfied P-id does not build at all. The
+earlier interpretation — withhold only the signature, even on an unverified parent — let exactly the
+node with no anchor reach `Build` and finalize an unproven parent; it must not be revived by reading
+this row as unconditional permission to build.
 
 ### 1.4 "Real-reth isolated restart scenario demonstrates positive work before/after and agreement on certified target, canonical block, state and receipts."
 
-**Met in part.** One clause of it is not demonstrated, and it is the only unmet line in the whole
-acceptance list.
+**Met in part.** One clause of it is not demonstrated. It is the only unmet clause outside §1.2's
+restart-boundary reconciliation (R4 and R6 there are the others).
 
 | clause | status | evidence |
 |---|---|---|
@@ -103,8 +146,8 @@ way around it.
 
 | clause | status | evidence |
 |---|---|---|
-| process-restart evidence | met | all four lanes restart the shard-node process with its executor left running; `TestAnchorIsNotRestoredFromDisk` pins that the anchor is *not* restored from disk, so what the process loses it must re-derive |
-| crash durability / fsync | not claimed, and not required here | no lane simulates power loss or an interrupted write; `TestRound_CrashAfterSubmitBeforeUC_…` covers one crash *boundary* deterministically, not the storage guarantee |
+| process-restart evidence | met | all four lanes restart the shard-node process with its executor left running; `TestAnchorIsNotRestoredFromDisk` pins that the anchor is *not* restored from disk, so what the process loses it must re-derive. Which restart *boundaries* that evidence covers is the separate question answered in §1.2.1 |
+| crash durability / fsync | not claimed, and not required here | no lane simulates power loss or an interrupted write. `TestRound_CrashAfterSubmitBeforeUC_…` is about a crash *boundary* and not the storage guarantee — and, as §1.2.1 records, it constructs a bare `NewRound` rather than running the production restoration sequence, so it is weaker evidence than its name suggests |
 | full durability remains #14 | recorded | the design record says a restored checkpoint proves historical continuity and not authorisation to sign, and that persistence of verified evidence is out of scope |
 | logs and no-secret artifacts preserved | met | every run writes `artifacts/<lane>/<utc>-<pid>/` outside `test-nodes/`, with revision, worktree cleanliness, `ubft` and reth hashes, and SHA-256 digests of **copied** logs; JWT secrets are never among the copied files |
 
@@ -142,12 +185,19 @@ seen in this programme remains unexplained and is recorded as such.
 
 ### 3.1 Release blocker for #92 — one item
 
-**B1. Positive work after recovery, measured once against a real client.** The only unmet acceptance
-clause (§1.4). A bounded run: recover as #119 does, then submit one transaction *after* the recovered
+**B1. Positive work after recovery, measured once against a real client.** The unmet clause of §1.4. A bounded run: recover as #119 does, then submit one transaction *after* the recovered
 node has adopted its anchor, and assert that the recovered node reaches the new certified block and
 agrees with the survivors on block hash, state root and receipts — while still not voting. It reuses
 the existing lane's machinery; what it must not do is let the new transaction be what recovers the
 node, so the assertion order matters: adoption first, injection second, agreement third.
+
+**B2. The two unestablished restart boundaries (§1.2.1, R4 and R6).** Deterministic fixtures, not a
+runtime redesign and not #14's durability work: one that restarts the node across an in-flight
+`Commit` and asserts the outcome is decided by re-reading the executor head rather than by anything
+retained, and one that runs the production `LoadLUC` → `verifyRestoredLUC` → `resumeFrom` sequence
+from a certificate *older* than the executor's state and asserts the node reconciles forward without
+re-committing or equivocating. Whether B2 blocks #92 or is carried as a named follow-up is a review
+decision, not this ledger's: it is listed here so that the choice is made explicitly.
 
 ### 3.2 Not blockers — named follow-up scope
 
@@ -170,9 +220,11 @@ intermittency is a repair to the harness rather than a measurement.
 ## 4. Proposal
 
 1. Deliver **B1** as one bounded run, in the shape described in §3.1.
-2. On its acceptance, #92's five acceptance lines are met, and the issue can be **proposed** for
-   closure — by review, not by the measurement PR that finishes it.
-3. Carry §3.2 on the issues named there. Nothing in §3.2 blocks #92, and #92 closing does not
+2. Decide, by review, whether **B2** blocks #92 or becomes a named follow-up. The ledger does not
+   award itself that decision, and #92 should not be proposed for closure while it is open.
+3. On the acceptance of B1 and the resolution of B2, #92's five acceptance lines are met, and the
+   issue can be **proposed** for closure — by review, not by the measurement PR that finishes it.
+4. Carry §3.2 on the issues named there. Nothing in §3.2 blocks #92, and #92 closing does not
    discharge any of them.
 
 ## 5. What this ledger does not do
