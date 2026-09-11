@@ -217,7 +217,7 @@ f6bEvents="$(dirname "${BASH_SOURCE[0]}")/f6b_events.py"
 # The offset is part of the mark. Without it the mark is a NAIVE instant while every log line
 # carries one, and any real comparison between them raises rather than answers — so the mark has to
 # be as well-formed as the thing it is compared against.
-markNow() { date +time=%Y-%m-%dT%H:%M:%S%z; }
+markNow() { printf 'time=%s\n' "$(markNowUTC)"; }
 
 # markNowUTC is the same idea for the marks compared against the EXECUTION CLIENT's log, and it is
 # deliberately SUB-SECOND.
@@ -464,88 +464,6 @@ monitorClean() { # monitorClean <file> <fromTS> <toTS> <minSamples>
   [ "${2:-1}" = "0" ] || { echo "${2} sample(s) in the window could not read the client"; return 1; }
   [ "${3:-1}" = "0" ] || { echo "${3} sample(s) in the window show an execution peer or a session"; return 1; }
   echo ok
-}
-
-# blockPresence answers whether a client HOLDS a block, by hash, independently of what its head is:
-# "present" or "absent", and a non-zero status for anything it could not read. A null result is a
-# real answer — the client does not have it — while an error, a missing result field or a body that
-# is neither a block nor null is not an answer at all. The whole point of the unhelpful-peer
-# experiment is a checked claim that a peer does NOT hold something, so "I could not ask" must never
-# read as "it does not have it".
-blockPresence() { # blockPresence <ethURL> <blockHash>
-  local out
-  out=$(rpc "$1" eth_getBlockByHash "[\"$2\", false]") || { echo "eth_getBlockByHash to $1 failed" >&2; return 1; }
-  printf '%s' "$out" | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-except Exception as e:
-    sys.stderr.write('eth_getBlockByHash returned no JSON: %s\n' % e); sys.exit(1)
-if not isinstance(d, dict):
-    sys.stderr.write('eth_getBlockByHash returned %s, not a JSON-RPC object\n' % type(d).__name__); sys.exit(1)
-if d.get('error') is not None:
-    sys.stderr.write('eth_getBlockByHash returned an error: %r\n' % (d['error'],)); sys.exit(1)
-if 'result' not in d:
-    sys.stderr.write('eth_getBlockByHash returned no result field\n'); sys.exit(1)
-r = d['result']
-if r is None:
-    print('absent')
-elif isinstance(r, dict) and isinstance(r.get('hash'), str) and r['hash']:
-    print('present')
-else:
-    sys.stderr.write('eth_getBlockByHash result is neither a block nor null\n'); sys.exit(1)
-"
-}
-
-# monitorConnectedWithout is monitorClean's opposite for the arm where the subject is deliberately
-# CONNECTED: every sample in the window must be readable, must show at least one execution peer, and
-# must not list any of the forbidden ids. It is what makes "connected to peers that cannot help"
-# a measured condition rather than a description of how the script was written.
-monitorConnectedWithout() { # monitorConnectedWithout <file> <fromTS> <toTS> <minSamples> <forbiddenID...>
-  local f=$1 from=$2 to=$3 want=$4; shift 4
-  python3 - "$f" "$from" "$to" "$want" "$@" <<'PYMON'
-import sys
-from datetime import datetime, timedelta
-path, from_ts, to_ts, want, *forbidden = sys.argv[1:]
-def instant(v):
-    return datetime.fromisoformat(v.replace('Z', '+00:00'))
-try:
-    start, end = instant(from_ts), instant(to_ts)
-    if '.' not in to_ts:
-        end += timedelta(seconds=1)
-    n = unread = lonely = tainted = 0
-    with open(path) as src:
-        for line in src:
-            parts = line.split()
-            if not parts:
-                continue
-            stamp = instant(parts[0])
-            if not (start <= stamp < end):
-                continue
-            n += 1
-            if 'status=ok' not in line:
-                unread += 1
-                continue
-            peers = 0
-            for field in parts:
-                if field.startswith('peers='):
-                    peers = int(field.split('=', 1)[1])
-            if peers < 1:
-                lonely += 1
-            if any(bad and bad in line for bad in forbidden):
-                tainted += 1
-    if n < int(want):
-        print('only %d connectivity samples cover the window, at least %s were required' % (n, want)); sys.exit(1)
-    if unread:
-        print('%d sample(s) in the window could not read the client' % unread); sys.exit(1)
-    if lonely:
-        print('%d sample(s) in the window show no execution peer at all' % lonely); sys.exit(1)
-    if tainted:
-        print('%d sample(s) in the window list a peer this arm forbids' % tainted); sys.exit(1)
-    print('ok')
-except (OSError, ValueError, IndexError, TypeError) as err:
-    print('cannot read connectivity window: %s' % err); sys.exit(1)
-PYMON
 }
 
 # linesSince counts lines matching <pattern> logged after <mark> across <file...>. The mark must be
@@ -1349,6 +1267,16 @@ time.sleep(20)
   m=$(markNowUTC)
   if [[ "$m" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$ ]]; then echo "  PASS: $desc"
   else echo "  FAIL: $desc — got '$m'"; selfFailures=$((selfFailures + 1)); fi
+
+  desc="the node phase mark excludes an earlier adoption in the same second"
+  if (
+    markNowUTC() { echo '2026-01-01T00:00:05.750Z'; }
+    # This also pins the old date-based implementation if restored by a mutation.
+    date() { echo 'time=2026-01-01T00:00:05+0000'; }
+    printf '%s\n' 'time=2026-01-01T00:00:05.250+0000 recovered from authenticated evidence blockHash=abc' >"$scratch/subsecond.log"
+    [ "$(linesSinceAll "$(markNow)" "$scratch/subsecond.log" 'recovered from authenticated evidence' 'blockHash=abc')" = 0 ]
+  ); then echo "  PASS: $desc"
+  else echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1)); fi
 
   desc="a phase-bound count ignores what happened in the phase before it"
   {

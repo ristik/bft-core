@@ -1332,7 +1332,7 @@ than assumed, and the fail-closed behaviour when it cannot deliver is measured r
 acquisition path; it said nothing about connected-but-unhelpful, because every peer in it held the
 missing blocks. A mechanism that is identified is not thereby bounded.
 
-The subject is given execution peers that provably cannot help: two **bystander** reth clients on the
+The subject is given execution peers that return absent for the requested blocks: two **bystander** reth clients on the
 same chain spec, driven by no shard node, never peered to a validator. Three states of one variable
 in one run — **isolated** while the blocks it will miss are created, **unhelpful** (connected only to
 the bystanders), then **helpful** (the survivors added, nothing else changed).
@@ -1345,17 +1345,23 @@ become "it does not have it". Connectivity is observed across the whole arm the 
 observes isolation, in the opposite direction: every sample readable, every sample holding at least
 one peer, and no sample listing a survivor.
 
+The table below describes clean run `20260911T005012Z-55649` at `452f6281`.
+Two other clean runs at the same revision (`20260911T003905Z-36931` and
+`20260911T004425Z-46124`) also reported not-acquired then acquired. Their acquisition-to-adoption
+gaps were 6.081338 s and 0.722362 s; this run's was 0.920202 s. The failed mesh setup in
+`20260911T003729Z-35393` is excluded from this result.
+
 | | UNHELPFUL (bystanders only) | HELPFUL (survivors added) |
 |---|---|---|
-| execution peers | 2, for every one of 134 readings over 180 s | the same 2, plus survivors |
+| execution peers | 2, for every one of 134 readings over 171 s | the same 2, plus survivors |
 | anchor over BFT | obtained and verified in one attempt, naming the certified block | unchanged, retained |
 | client behaviour | entered syncing on the forkchoice update; **no** block bearing the certified hash downloaded | sessions established, then the certified block and its parent arrive as **downloaded blocks** |
 | executor head | block 1, unmoved | block 3, the certified block, at the certified state |
-| outcome | 30 × `payload-unavailable`, never `payload-invalid`, nothing adopted, nothing signed | adopted in this arm, receipts matching a survivor's |
+| outcome | 29 × `payload-unavailable`, never `payload-invalid`, nothing adopted, nothing signed | adopted in this arm, receipts matching a survivor's |
 
 **The bound, stated no wider than the evidence.** Payload acquisition succeeds when — and in this
 configuration only when — a connected execution peer holds the block. Being connected is not
-sufficient. When no peer can supply it the node **fails closed indefinitely**: it keeps the verified
+sufficient. During the measured unhelpful-peer window the node **remained fail-closed**: it keeps the verified
 target, reports the payload unavailable rather than invalid, does not move its executor, and does not
 vote. That is `VerifiedTargetSurvivesAnUnavailablePayload` (§7) measured against a real client
 instead of a fixture, and it is the behaviour §4.1's outcome vocabulary exists to make possible.
@@ -1377,7 +1383,8 @@ in §6.7.
 wrong for separating two arms: with a whole-second boundary, a download 700 ms into the next arm
 belongs to both windows, and the arm that must show nothing reports the next arm's work. One run came
 within 254 ms of failing on exactly that. The marks compared against the execution client's log are
-now sub-second instants (`markNowUTC`), so the phases cannot overlap.
+now sub-second instants (`markNowUTC`). The node-log marks use the same precision; review added a
+regression rejecting an adoption earlier in the same second as the phase mark.
 
 **And nothing may already be listening on the ports a run needs.** One rerun reported "the execution
 mesh never formed"; the cause was a previous run's clients still bound to the same ports, answering
@@ -1404,8 +1411,8 @@ it in the window count, and the same line written again in a trace extraction pr
 trace** for a run in which every event happened inside one second, which is evidence that looks like
 "nothing happened" and means "nothing was compared". A banner line is not corruption, but a file with
 no timestamped line at all is not an event log. And an unreadable stream is a failed observation,
-never a zero. `markNow` now carries its UTC offset, because a naive mark compared against an aware
-log line cannot answer at all.
+never a zero. `markNow` now carries a sub-second UTC instant, because a naive mark cannot be
+compared with an offset-bearing log line and a rounded mark can include events from the prior phase.
 
 **Consequence for the design, which is unaffected either way.** Evidence retrieval and payload
 acquisition stay separate decisions. The predicate answers only the first. A node that has a verified
