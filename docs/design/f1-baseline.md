@@ -1165,6 +1165,11 @@ waiting for a real failure to discover it does not work.
 
 ## 7. What F1 does not cover
 
+**The line-by-line reconciliation of #9 and its children (#88, #89, #90, #100) against merged
+evidence lives in [`f1-acceptance-ledger.md`](f1-acceptance-ledger.md).** This section records what
+*this* document's own lanes do not cover; the ledger is the wider accounting, including the items
+that are met in part and the ones with no owner yet.
+
 **This PR is a partial deliverable against #9.** It does not close the ticket, and the acceptance
 obligations below stay open on #9 with named owners rather than being reassigned away from it.
 
