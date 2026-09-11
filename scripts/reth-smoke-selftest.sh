@@ -148,6 +148,16 @@ refuses "a collection whose copy fails returns nonzero, naming what is missing" 
 check "…having still copied everything else it could" test -f "$T/obst/evm2/debug.log"
 check "…and a successful collection still returns 0" bash -c "rm -rf '$T/obst2'; . scripts/lib/reth-pin.sh; rethEvidenceCollect '$N2' '$T/obst2'"
 
+# Scan inputs: sealing is refused once a capture failed, and nothing is appended; validation rejects
+# such a record on its own as well, so either check alone keeps it from reading as secret-free.
+printf '%s\n' abc '#failed cluster two' >"$T/failed.scan"
+refuses "sealing scan inputs that record a failed capture is refused" "record a failed capture" rethScanInputsSeal "$T/failed.scan"
+check "…and appends no seal" sh -c "! grep -qx '#sealed' '$T/failed.scan'"
+printf '%s\n' abc >"$T/ok.scan"
+check "sealing complete scan inputs appends the seal as the last line" bash -c ". scripts/lib/reth-pin.sh 2>/dev/null; rethScanInputsSeal '$T/ok.scan' >/dev/null && [ \"\$(tail -n 1 '$T/ok.scan')\" = '#sealed' ]"
+echo late >>"$T/ok.scan"
+refuses "scan inputs appended to after sealing no longer count as sealed" "not sealed (or were appended to after sealing)" rethScanInputsCheck "$T/ok.scan"
+
 echo "=== the lane's supervisor (stub scenarios; no reth, no devnet) ==="
 SN=$T/snodes
 stub='mkdir -p "$NODES/evm1" && echo "certified" >"$NODES/evm1/debug.log" && echo '"$jwt"' >"$NODES/evm1/jwt.hex" && { sleep 300 & echo $! >"$NODES/evm1/pid"; }'
