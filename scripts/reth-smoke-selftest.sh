@@ -289,7 +289,10 @@ mode=\$1
 . ./helper.sh
 validators=2 negativeReths="reth-wrong reth-laterfork"
 . ./paired-cleanup.sh
-trap 'cleanup; echo ran >"$T/nested-\$mode.ran"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+# The cleanup takes a while, as stopping real clients does (2s here). A supervisor that signals the
+# group again during it cuts it short, and then no "ran" marker is written — deterministically, where
+# a fast stand-in cleanup let that race be won or lost by timing.
+trap 'cleanup; sleep 2; echo ran >"$T/nested-\$mode.ran"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 mkdir -p test-nodes/root1 test-nodes/root2 test-nodes/evm1 test-nodes/evm2 test-nodes/reth1 test-nodes/reth2 test-nodes/reth-wrong
 build/ubft root-node run --home test-nodes/root1 >test-nodes/root1/debug.log 2>&1 & echo \$! >test-nodes/root1/pid; echo \$! >"$T/nested-\$mode.owned"
 build/ubft shard-node run --home test-nodes/evm1 >test-nodes/evm1/debug.log 2>&1 & echo \$! >test-nodes/evm1/pid; echo \$! >>"$T/nested-\$mode.owned"
