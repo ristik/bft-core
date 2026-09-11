@@ -1,0 +1,5 @@
+dir /tmp/fsyncprobe263677584
+1 db,  sync   : n=60 mean=3.03ms p50=2.22ms p95=6.39ms max=7.13ms
+1 db,  NoSync : n=60 mean=320µs p50=170µs p95=2.15ms max=4.07ms
+4 dbs, sync   : n=120 mean=4.21ms p50=3.63ms p95=8.73ms max=11.39ms
+4 dbs, NoSync : n=120 mean=680µs p50=180µs p95=3.69ms max=13.39ms
