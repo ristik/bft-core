@@ -1238,21 +1238,21 @@ exercise only them still describe the head.
 
 | # | what | revision | result |
 |---|---|---|---|
-| — | `scripts/reth-smoke-selftest.sh` | head | **54 ok, 0 bad**, no stand-in process left |
+| — | `scripts/reth-smoke-selftest.sh` | head | **58 ok, 0 bad**, no stand-in process left |
 | K | real Linux artifact in a container (`ubuntu:24.04`, Docker 29.5.2): cold cache, then warm, then a tampered copy | library `d8f45a70…` (= head) | miss: fetched, sha256 `6719ec67…` verified, binary reports `189c0df3`; hit: digest **re-verified**, revision re-verified; tampered: **refused**, nothing left at the destination |
 | A | `--fetch` on this host | `d2fb721b` | **refused** — "no pinned release artifact for platform 'darwin-x86_64'" — exit 1, archive validated |
 | B | `--reth-bin` | `d2fb721b`, `146ef80e` | PASS, exit 0; devnet 20 PASS / 0 FAIL; archive 15 node logs |
-B3ROW
+| B | `--reth-bin`, at the head | `99fa36a3` | PASS, exit 0; devnet 20 PASS / 0 FAIL; archive `eda6501d…` validated, 15 node logs. Teardown reports 0 in the run's group at teardown — correctly: the devnet had stopped its own processes |
 | C | `--inject-failure` | `d2fb721b`, `146ef80e` | exit 1 as intended; archive validated with 15 node logs and the injection in `run.log` |
 | E | SIGTERM to the supervisor with 7 `ubft` + 4 `reth` running | `146ef80e` | exit 1, "run interrupted", "incomplete run"; archive validated, 15 node logs; **no process left** |
-E2ROW
+| E | the same cancellation, at the head | `99fa36a3` | exit 1, "run interrupted"; **16 processes in the run's group at the interrupt** (the 11 clients among them), 0 left for the ownership sweep, none left at all; archive `98e8ac3e…` validated, 15 node logs. At `146ef80e` and `618c86af` the same run had reported 0, the count being taken after the interrupt's own signal had stopped them — fixed at `99fa36a3`, and pinned by a deterministic cancellation case in the self-test |
 | D | fault lane, the workflow's own commands: `reth-pin.sh verify`, `make build`, `reth-chaos.sh -s reth-only-restart -t 2`, `validate-archive --require manifest.txt --min-node-logs 1` | `d2fb721b` | chaos exit 0; archive validated, 11 node logs |
 
 No `ubft` or `reth` process was left after any run. Production mutations, each alone, against the
 self-test: skipping the digest re-check on a cache hit, skipping the verbatim secret scan, treating an
 incomplete run as complete, not comparing the reported revision, copying `jwt.hex`, not checking a
-download's digest, removing every teardown kill, and removing the child's process group — **all
-caught**. Two mutations survived and are recorded as such: one removed only the polite TERM (the KILL
+download's digest, removing every teardown kill, removing the child's process group, and counting
+the group only at teardown — **all caught**. Two mutations survived and are recorded as such: one removed only the polite TERM (the KILL
 fallback still stopped everything, so it tested nothing), and one removed only the group kills (the
 group-aware ownership sweep still stopped the orphan — redundancy, confirmed by removing both).
 
