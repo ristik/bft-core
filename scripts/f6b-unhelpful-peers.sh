@@ -603,12 +603,29 @@ if waitForHead "http://127.0.0.1:$rethEthBase" "$certifiedNum" 180; then
       --from "$controlMark" --pattern "recovered from authenticated evidence" \
       --pattern "blockHash=${certifiedHash#0x}" test-nodes/evm1/debug.log 2>/dev/null \
     | head -1 | awk '{print $1}' | sed 's/^time=//')
-  # AND THE RECORD MUST NOT BE EMPTY WHERE SOMETHING HAPPENED. A manifest that says "none" for a fact
-  # the run asserted is a worse outcome than a failing check, because it reads as a measurement.
-  if [ -n "$controlAcquiredAt" ] && [ -n "$controlAdoptedAt" ]; then
-    pass "and both instants are recorded: ACQUIRED at $controlAcquiredAt, ADOPTED at $controlAdoptedAt"
-  else
+  # ONE CLOCK. The execution client logs UTC and the node logs local time with an offset; recording
+  # them side by side as they come makes a two-millisecond gap read as a three-hour one. The raw node
+  # stamp is kept alongside so the artifact can still be grepped for it.
+  controlAdoptedRaw=$controlAdoptedAt
+  controlAdoptedAt=$(python3 -c "
+import sys
+from datetime import datetime, timezone
+v = '$controlAdoptedRaw'
+print(datetime.fromisoformat(v).astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z' if v else '')
+" 2>/dev/null)
+
+  # AND THE RECORD MUST NOT BE EMPTY WHERE SOMETHING HAPPENED, NOR OUT OF ORDER. A manifest that says
+  # "none" for a fact the run asserted is worse than a failing check, because it reads as a
+  # measurement; one that puts adoption before acquisition would be describing something that did not
+  # happen.
+  if [ -z "$controlAcquiredAt" ] || [ -z "$controlAdoptedAt" ]; then
     fail "the control arm succeeded but its record is incomplete: ACQUIRED='${controlAcquiredAt:-none}' ADOPTED='${controlAdoptedAt:-none}'"
+  elif ! [[ "$controlAcquiredAt" =~ Z$ && "$controlAdoptedAt" =~ Z$ ]]; then
+    fail "the two recorded instants are not both UTC: ACQUIRED='$controlAcquiredAt' ADOPTED='$controlAdoptedAt'"
+  elif [[ "$controlAcquiredAt" > "$controlAdoptedAt" ]]; then
+    fail "the record puts ADOPTED ($controlAdoptedAt) before ACQUIRED ($controlAcquiredAt), which is not the order these happen in"
+  else
+    pass "and both instants are recorded on one clock and in order: ACQUIRED $controlAcquiredAt, then ADOPTED $controlAdoptedAt"
   fi
 else
   controlResult="not-acquired"
@@ -680,7 +697,7 @@ manifestLines=(
   "  ADOPTED:       no — nothing adopted, nothing signed, head stayed at ${unhelpfulNum:-unknown}"
   "HELPFUL control: ${controlResult:-not-run}"
   "  ACQUIRED:      ${controlAcquiredAt:-none} (executor canonicalised the expected block)"
-  "  ADOPTED:       ${controlAdoptedAt:-none} (node recorded adopting that block hash)"
+  "  ADOPTED:       ${controlAdoptedAt:-none} (node recorded adopting that block hash; node log reads ${controlAdoptedRaw:-none})"
 )
 if writeManifest; then
   pass "run artifact written to $artifactDir"
