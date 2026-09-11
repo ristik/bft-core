@@ -144,7 +144,14 @@ if [ "${RETH_SMOKE_SUPERVISED:-0}" != "1" ]; then
     verdict=1
   fi
 
-  say "$(rethEvidenceCollect "$nodesDir" "$runDir/nodes")"
+  # The collector's status is judged here, not discarded: its output is captured separately so a
+  # failed copy fails the lane even though the archive, with whatever WAS copied, is still produced.
+  collectOut=$(rethEvidenceCollect "$nodesDir" "$runDir/nodes"); collectStatus=$?
+  say "$collectOut"
+  if [ "$collectStatus" -ne 0 ]; then
+    say "reth-smoke: FAIL evidence collection incomplete (status $collectStatus) — the archive holds what could be copied"
+    verdict=1
+  fi
 
   # Teardown by ownership, then verify it: a lane that leaves clients running holds ports and
   # datadirs the next run will trip over, and on a shared host belongs to somebody else's session.
@@ -234,7 +241,7 @@ if [ -n "${RETH_SMOKE_TEST_SCENARIOS:-}" ]; then
   # Test-only: scripts/reth-smoke-selftest.sh substitutes a stub for the scenarios so the supervisor
   # can be exercised without reth. The provenance record marks such an archive as not evidence.
   step "SELF-TEST STUB scenarios"
-  NODES=$nodesDir bash -c "$RETH_SMOKE_TEST_SCENARIOS" || failures=$((failures + 1))
+  NODES=$nodesDir RUN_DIR=$runDir bash -c "$RETH_SMOKE_TEST_SCENARIOS" || failures=$((failures + 1))
 else
   step "stock-client control (reth-baseline, $baselineBlocks blocks)"
   if ./setup-evm-nodes.sh -r 3 -v 4 >"$runDir/setup-evm-nodes.log" 2>&1 && ./scripts/reth-baseline.sh "$baselineBlocks"; then

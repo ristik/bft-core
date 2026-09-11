@@ -123,6 +123,15 @@ printf 'not a tarball' >"$T/junk.tar.gz"
 refuses "an unreadable archive is refused" "is unreadable" rethEvidenceValidate "$T/junk.tar.gz" "" 0
 refuses "a missing archive is refused" "is missing or empty" rethEvidenceValidate "$T/none.tar.gz" "" 0
 
+# A copy that fails is a failed collection, even when another node's log would satisfy the minimum
+# log count (the review's reproduction of #131: a regular file where the first node's destination
+# directory should be).
+N2=$T/nodes2; mkdir -p "$N2/evm1" "$N2/evm2"; echo one >"$N2/evm1/debug.log"; echo two >"$N2/evm2/debug.log"
+rm -rf "$T/obst"; mkdir -p "$T/obst"; : >"$T/obst/evm1"
+refuses "a collection whose copy fails returns nonzero, naming what is missing" "cannot create $T/obst/evm1" rethEvidenceCollect "$N2" "$T/obst"
+check "…having still copied everything else it could" test -f "$T/obst/evm2/debug.log"
+check "…and a successful collection still returns 0" sh -c "rm -rf '$T/obst2'; . scripts/lib/reth-pin.sh; rethEvidenceCollect '$N2' '$T/obst2'"
+
 echo "=== the lane's supervisor (stub scenarios; no reth, no devnet) ==="
 SN=$T/snodes
 stub='mkdir -p "$NODES/evm1" && echo "certified" >"$NODES/evm1/debug.log" && echo '"$jwt"' >"$NODES/evm1/jwt.hex" && { sleep 300 & echo $! >"$NODES/evm1/pid"; }'
@@ -165,6 +174,15 @@ check "…counting the run's processes at the interrupt itself, not after they h
 interruptStopped() { local a b; a=$(cat "$T/orphan2.pid" 2>/dev/null) && b=$(cat "$SN/evm1/pid" 2>/dev/null) && [ -n "$a" ] && [ -n "$b" ] && ! kill -0 "$a" 2>/dev/null && ! kill -0 "$b" 2>/dev/null; }
 check "…stopping both the recorded and the unrecorded process" interruptStopped
 check "…and still archiving validated evidence" grep -q "reth-evidence: archive .*interrupt.tar.gz validated" "$T/interrupt.out"
+# The same obstruction inside the real supervisor: the scenarios pass and the archive validates (the
+# remaining node log meets the minimum), and the lane must still fail because a required copy failed.
+obstruct='mkdir -p "$NODES/evm1" "$NODES/evm2" && echo one >"$NODES/evm1/debug.log" && echo two >"$NODES/evm2/debug.log" && mkdir -p "$RUN_DIR/nodes" && : >"$RUN_DIR/nodes/evm1"'
+rm -rf "$SN"; refuses "a supervised run whose evidence copy fails exits nonzero, though its scenarios passed" "reth-smoke: FAIL evidence collection incomplete" smoke "$obstruct" obstructed
+cp "$T/.out" "$T/obstructed.out"
+check "…the scenarios did pass, so collection is what failed it" grep -q "reth-smoke: scenario failures: 0" "$T/obstructed.out"
+check "…the archive is still produced and inspectable, holding what could be copied" sh -c "tar tzf '$T/ev/obstructed.tar.gz' | grep -q 'obstructed/nodes/evm2/debug.log'"
+check "…it validates on its own, which is why validation alone was not enough" grep -q "reth-evidence: archive .*obstructed.tar.gz validated" "$T/obstructed.out"
+check "…and the failed copy is recorded in the archived run log" sh -c "tar xzf '$T/ev/obstructed.tar.gz' -O obstructed/run.log | grep -q 'cannot create .*nodes/evm1'"
 rm -rf "$SN"; refuses "a leaked secret fails the lane even when the scenarios pass" "appears verbatim" smoke "$stub"' && echo "jwt $(cat $NODES/evm1/jwt.hex)" >>"$NODES/evm1/debug.log"' leak
 rm -rf "$SN"
 refuses "the wrong client stops the lane before any scenario" "reth-smoke: FAIL" \

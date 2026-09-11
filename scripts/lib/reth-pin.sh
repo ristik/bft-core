@@ -187,25 +187,39 @@ rethPinObtainPinned() {
 # CONSTRUCTION — keys.json and jwt.hex are never copied — and reth datadirs (directories) are not
 # copied at all. rethEvidenceValidate then checks the result independently, rather than trusting
 # this function to have been right.
+#
+# Every copy it attempts is required: a directory it cannot create or a file it cannot copy is
+# named on stdout and makes it return nonzero, having still copied everything else it could. A
+# collector that swallowed those failures once reported success for a collection that had silently
+# dropped a node's log, and the archive then validated because ANOTHER node's log met the minimum
+# log count. A log count is not a completeness check; this status is.
 rethEvidenceCollect() {
-  local nodes=$1 out=$2 d name n=0
-  mkdir -p "$out" || return 1
+  local nodes=$1 out=$2 d f name n=0 failed=0
+  mkdir -p "$out" || { echo "reth-evidence: FAIL cannot create $out — nothing collected"; return 1; }
   [ -d "$nodes" ] || { echo "reth-evidence: no $nodes directory — the run produced no node state to collect"; return 0; }
   for d in "$nodes"/*/; do
     [ -d "$d" ] || continue
     name=$(basename "$d")
-    mkdir -p "$out/$name"
+    if ! mkdir -p "$out/$name" 2>/dev/null || [ ! -d "$out/$name" ]; then
+      echo "reth-evidence: FAIL cannot create $out/$name — every file of $name is missing from the collection"
+      failed=$((failed + 1))
+      continue
+    fi
     for f in "$d"*; do
       [ -f "$f" ] || continue
       case "$(basename "$f")" in keys.json | jwt.hex | pid | *.key) continue ;; esac
-      cp "$f" "$out/$name/" 2>/dev/null && n=$((n + 1))
+      if cp "$f" "$out/$name/" 2>/dev/null; then n=$((n + 1)); else echo "reth-evidence: FAIL could not copy $f"; failed=$((failed + 1)); fi
     done
   done
   for f in "$nodes"/*.json "$nodes"/*.log; do
     [ -f "$f" ] || continue
     case "$(basename "$f")" in keys.json) continue ;; esac
-    cp "$f" "$out/" 2>/dev/null && n=$((n + 1))
+    if cp "$f" "$out/" 2>/dev/null; then n=$((n + 1)); else echo "reth-evidence: FAIL could not copy $f"; failed=$((failed + 1)); fi
   done
+  if [ "$failed" -ne 0 ]; then
+    echo "reth-evidence: FAIL collection incomplete — $n file(s) copied from $nodes, $failed required cop(ies) failed"
+    return 1
+  fi
   echo "reth-evidence: collected $n file(s) from $nodes"
 }
 
