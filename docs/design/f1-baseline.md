@@ -1210,7 +1210,10 @@ if it is in the child's process group, or is a `ubft`/`reth` process whose worki
 checkout — never because of its name, and never because a pid file holds its number (a stale integer
 may by now be anything, another checkout's node included). The same rule is in `helper.sh`
 ("ownership") and so in `stop-evm.sh -a`, which `reth-paired-devnet.sh`'s cleanup calls from inside the
-lane: it stops this checkout's validators and root nodes, recorded or not, and nothing else. Until the
+lane: it stops this checkout's validators and root nodes, recorded or not, and nothing else. A pid
+file is acted on only if its process is still a node or client running from this checkout — in the
+lane's own sweep too, which until the second #131 review checked the working directory but not the
+command, and so stopped an unrelated process started from the same checkout. Until the
 #131 review it stopped every `build/ubft root-node` on the machine, which the lane's own sweep could not
 undo. Root nodes now record pids; the paired devnet's cleanup, `reth-chaos-lib.sh`'s `stopReth` and the
 lane's sweep act on a pid file only when its process is still this checkout's. (The hosted workflows
@@ -1223,7 +1226,8 @@ present when scenarios ran, and no secret — by name (`keys.json`, `jwt.hex`, `
 `"privateKey"` field), and by value (every JWT and private key under `test-nodes/`, searched verbatim, so
 a secret leaked into a log line fails the lane). Validation answers two questions separately: exit 0
 validated, 1 incomplete but secret-free, 2 **not publishable** (a secret, or an archive that cannot be
-read and so cannot be vouched for). Publication is `reth-pin.sh select-upload`, per archive: a
+read and so cannot be vouched for, or whose secrets cannot all be known). Publication is
+`reth-pin.sh select-upload`, per archive: a
 publishable archive is copied, with its validation report, into `evidence-upload/` — **the only path
 either workflow uploads** — and a rejected one is moved to `evidence-quarantine/`, never uploaded, with
 only a diagnostic naming what was found where (never the value) published in its place.
@@ -1232,10 +1236,23 @@ scanned once more for every secret value. Until the #131 review a rejected archi
 the workflow uploaded with `always()`. The fault workflow selects each archive on its own, so one run's
 leak does not withhold another run's evidence. Retention 14 days.
 
-*Limit of the by-value check.* It knows the secrets present under `test-nodes/` when it runs. The fault
-lane rebuilds its cluster per scenario, so by then only the last cluster's JWTs and keys exist; an
-earlier cluster's secret that leaked into a log line would be caught by name or field only if it had
-the form of one. The smoke lane has one cluster, so there the check is complete.
+*Every cluster's secrets are searched for, not just the last one's (scan inputs).* The by-value check
+can only search for secrets it knows, and both lanes replace a cluster while keeping its logs: the
+fault lane rebuilds one per scenario, and the smoke lane's stock control runs before the paired
+devnet's setup wipes `test-nodes/` (its JWTs live in a temporary directory besides). Until the second
+#131 review, selection searched only the secrets left at the end, so a first cluster's JWT in an
+ordinary log line was published as "validated". Now every secret is **recorded before any process
+can use it** — `reth-chaos-lib.sh`'s `bringUpCluster` after generating a cluster's JWTs and before
+starting its clients, `reth-baseline.sh` after generating each control's JWT, the smoke lane between
+its two scenarios and again at the end — into a private scan-inputs file beside the archive and never
+in it: `<archive dir>/.scan-inputs/<archive>.scan` (directory 700, file 600, git-ignored, never under
+the upload directory). A value that cannot be recorded is never used: the cluster or control is not
+started. A failed capture is written into the file, and the supervisor seals it (`#sealed` as the last
+line) only if nothing failed. Selection with `--require-scan-inputs`, which both workflows pass,
+searches each archive — aggregate logs included — for every value in its own sealed scan inputs, and
+an archive whose scan inputs are missing, unsealed or record a failure is **not publishable**. The
+bytes validated are the bytes published: each archive is copied into the private quarantine
+directory, that copy is validated, and it is that copy which is renamed into `evidence-upload/`.
 
 *The version check is bounded as a whole.* `reth --version` runs as the leader of its own process
 group with its output going to a file; the budget kills the group. An earlier revision killed only the
