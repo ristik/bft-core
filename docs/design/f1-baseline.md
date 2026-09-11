@@ -1197,16 +1197,50 @@ every path, including an operator-supplied binary; a cache, a tag or a file name
 
 **Evidence and teardown.** The smoke lane runs its scenarios in a child process in its own process
 group, and the supervising parent collects, tears down, archives and validates **however the child
-ended** — success, failure, a SIGKILL, or cancellation (SIGINT/SIGTERM to the supervisor). Teardown is by
-ownership: the child's whole process group, the pids recorded under `test-nodes/`, and any `ubft`/`reth`
-process whose working directory is this checkout — never every `reth node` on the host, which on a
-shared machine belongs to other sessions. (The hosted workflows add a broad sweep afterwards, which is
-safe only on a disposable runner.) Teardown is then verified: a process of the run still alive fails the
-lane. The archive is validated independently of the collector: required files (`provenance.txt`,
-`run.log` for smoke; `manifest.txt` for fault), node logs present when scenarios ran, and no secret —
-by name (`keys.json`, `jwt.hex`, `*.key`), by content (any `"privateKey"` field), and by value (every
-JWT and private key under `test-nodes/`, searched verbatim, so a secret leaked into a log line fails
-the lane). Retention 14 days.
+ended** — success, failure, a SIGKILL, or cancellation (SIGINT/SIGTERM to the supervisor).
+
+*Collection is complete or the lane fails.* Every copy the collector attempts is required: a node
+directory it cannot create or a file it cannot copy is named, and fails the lane, while the archive —
+with whatever could be copied — is still produced for inspection. A minimum node-log count is not a
+completeness check: one revision reported success for a collection that had dropped a node's log,
+because another node's log met the minimum.
+
+*Teardown is by ownership, including every cleanup nested beneath the lane.* A process is this run's
+if it is in the child's process group, or is a `ubft`/`reth` process whose working directory is this
+checkout — never because of its name, and never because a pid file holds its number (a stale integer
+may by now be anything, another checkout's node included). The same rule is in `helper.sh`
+("ownership") and so in `stop-evm.sh -a`, which `reth-paired-devnet.sh`'s cleanup calls from inside the
+lane: it stops this checkout's validators and root nodes, recorded or not, and nothing else. Until the
+#131 review it stopped every `build/ubft root-node` on the machine, which the lane's own sweep could not
+undo. Root nodes now record pids; the paired devnet's cleanup, `reth-chaos-lib.sh`'s `stopReth` and the
+lane's sweep act on a pid file only when its process is still this checkout's. (The hosted workflows
+add a broad sweep afterwards, which is safe only on a disposable runner.) Teardown is then verified: a
+process of the run still alive fails the lane.
+
+*Validation, then a separate decision to publish.* The archive is validated independently of the
+collector: required files (`provenance.txt`, `run.log` for smoke; `manifest.txt` for fault), node logs
+present when scenarios ran, and no secret — by name (`keys.json`, `jwt.hex`, `*.key`), by content (any
+`"privateKey"` field), and by value (every JWT and private key under `test-nodes/`, searched verbatim, so
+a secret leaked into a log line fails the lane). Validation answers two questions separately: exit 0
+validated, 1 incomplete but secret-free, 2 **not publishable** (a secret, or an archive that cannot be
+read and so cannot be vouched for). Publication is `reth-pin.sh select-upload`, per archive: a
+publishable archive is copied, with its validation report, into `evidence-upload/` — **the only path
+either workflow uploads** — and a rejected one is moved to `evidence-quarantine/`, never uploaded, with
+only a diagnostic naming what was found where (never the value) published in its place.
+`evidence-upload/MANIFEST.txt` records every verdict with its sha256, and the upload directory is
+scanned once more for every secret value. Until the #131 review a rejected archive stayed at the path
+the workflow uploaded with `always()`. The fault workflow selects each archive on its own, so one run's
+leak does not withhold another run's evidence. Retention 14 days.
+
+*Limit of the by-value check.* It knows the secrets present under `test-nodes/` when it runs. The fault
+lane rebuilds its cluster per scenario, so by then only the last cluster's JWTs and keys exist; an
+earlier cluster's secret that leaked into a log line would be caught by name or field only if it had
+the form of one. The smoke lane has one cluster, so there the check is complete.
+
+*The version check is bounded as a whole.* `reth --version` runs as the leader of its own process
+group with its output going to a file; the budget kills the group. An earlier revision killed only the
+direct child and let it inherit the caller's pipe, so a shell whose child hung held the lane for as long
+as the child did.
 
 **Local commands**, from the repository root:
 
@@ -1218,6 +1252,8 @@ the lane). Retention 14 days.
 ./scripts/reth-pin.sh obtain --cache-dir ~/.cache/reth-pin --dest /tmp/reth-bin   # the fault workflow's client step
 ./scripts/reth-chaos.sh -s reth-only-restart,pair-restart -t 2     # the fault workflow's scenario step
 ./scripts/reth-pin.sh validate-archive evidence-runs/<run>.tar.gz --require manifest.txt --min-node-logs 1
+./scripts/reth-pin.sh select-upload --out evidence-upload --quarantine evidence-quarantine \
+    --nodes test-nodes --require manifest.txt --min-node-logs 1 evidence-runs/*.tar.gz   # the workflows' publication step
 ```
 
 Budget, measured against the artifact path rather than estimated: artifact download plus digest check
@@ -1232,14 +1268,25 @@ rather than starting new ones.
 
 **Evidence recorded for #131** — all local; nothing here ran on a hosted runner. Host: macOS on
 Intel (darwin/x86_64); reth `189c0df3` built from source for the host, and the upstream Linux artifact
-for the container. `scripts/lib/reth-pin.sh`, `scripts/reth-pin.sh`, `reth-chaos.sh` and
-`reth-fault.yml` are byte-identical from `d2fb721b` through the head, so the rows at `d2fb721b` that
-exercise only them still describe the head.
+for the container. The review of `af2a6159` found four defects (§6.4 above: collection completeness,
+publication, nested teardown ownership, the version-check bound), repaired in `8f0c52e9`, `bd2a50b0`,
+`77daaf11` and `b7d4ed3c`. Running the self-test in a Linux container then found two self-test defects
+(`c611b38e`) and one production one (`fdc3dd43`: after an interrupt, teardown signalled the run's
+group a second time, which could cut the paired devnet's own cleanup short), and a mutation of that fix
+survived until the self-test's stand-in cleanup was made to take time (`3f3e01c1`). Those commits
+change the library, the smoke supervisor, both workflows and the teardown helpers, so **only the rows
+at `3f3e01c1` describe the head**; the earlier rows are kept as the history they are, at the revisions
+they name.
 
 | # | what | revision | result |
 |---|---|---|---|
-| — | `scripts/reth-smoke-selftest.sh` | head | **58 ok, 0 bad**, no stand-in process left |
-| K | real Linux artifact in a container (`ubuntu:24.04`, Docker 29.5.2): cold cache, then warm, then a tampered copy | library `d8f45a70…` (= head) | miss: fetched, sha256 `6719ec67…` verified, binary reports `189c0df3`; hit: digest **re-verified**, revision re-verified; tampered: **refused**, nothing left at the destination |
+| — | `scripts/reth-smoke-selftest.sh` on this host | `3f3e01c1` | **102 ok, 0 bad**, no stand-in process left; the bounded version check took 1118 ms against a 1 s budget. At `af2a6159` it was 58 ok and missed all four review findings |
+| L | the same self-test in `ubuntu:24.04` (bash 5.2, perl 5.38; `/proc`, not `lsof`, for working directories), the checkout mounted read-only; then the real Linux artifact cold and warm, and a hanging binary whose child holds the output | `3f3e01c1` | **102 ok, 0 bad**; artifact miss then hit, digest and revision verified both times; the hang refused (exit 124) in 1050 ms with its child gone. At `b7d4ed3c` the same run gave 99 ok, 2 bad and a vacuous "0ms" — the self-test defects fixed in `c611b38e` — and at `c611b38e` 101 ok, 1 bad: the second-TERM race fixed in `fdc3dd43` |
+| — | `scripts/reth-chaos-selftest.sh` (its library's `stopReth` changed), with no reth on `PATH` | `b7d4ed3c` | 38 ok, 0 bad (chaos files unchanged since) |
+| B″ | `--reth-bin`, from a clean detached worktree at the fixed head, `ubft` built once for this row and the next; two harmless sentinels in another directory whose command lines match `build/ubft root-node` and `reth node` | `3f3e01c1` | PASS, exit 0, 193 s; stock control passed; devnet **20 PASS / 0 FAIL**; 51 files collected; archive `aea9f274…` validated, 15 node logs; **both sentinels survived**; no `ubft`/`reth` of the run left. The workflow's selection step on it: published (validated), exit 0 |
+| E′ | the same binary and sentinels; SIGTERM to the supervisor once the paired devnet was waiting for certification, with 4 shard nodes, 3 root nodes and 4 reth running | `3f3e01c1` | exit 1, "run interrupted", "incomplete run (status 143)"; **16 processes in the run's group at the interrupt**, 0 left for the ownership sweep, none left; archive `0bcb12be…` validated, 15 node logs; **both sentinels survived**; the selection step published it (validated), exit 0. No `ubft`/`reth` process on the host after both rows |
+| B′ | `--reth-bin`, from a clean detached worktree at the review-repair head, `ubft` built once; two harmless sentinels running in another directory whose command lines match `build/ubft root-node` and `reth node` | `b7d4ed3c` | PASS, exit 0, 144 s; stock control passed; devnet **20 PASS / 0 FAIL**; 51 files collected; archive `8605288c…` validated, 15 node logs; **both sentinels survived**; no `ubft`/`reth` process left on the host. The workflow's selection step on that archive: published (validated), exit 0 |
+| K | real Linux artifact in a container (`ubuntu:24.04`, Docker 29.5.2): cold cache, then warm, then a tampered copy | library `d8f45a70…` (before the review repairs; the Linux artifact path is re-run at the head in row L) | miss: fetched, sha256 `6719ec67…` verified, binary reports `189c0df3`; hit: digest **re-verified**, revision re-verified; tampered: **refused**, nothing left at the destination |
 | A | `--fetch` on this host | `d2fb721b` | **refused** — "no pinned release artifact for platform 'darwin-x86_64'" — exit 1, archive validated |
 | B | `--reth-bin` | `d2fb721b`, `146ef80e` | PASS, exit 0; devnet 20 PASS / 0 FAIL; archive 15 node logs |
 | B | `--reth-bin`, at the head | `99fa36a3` | PASS, exit 0; devnet 20 PASS / 0 FAIL; archive `eda6501d…` validated, 15 node logs. Teardown reports 0 in the run's group at teardown — correctly: the devnet had stopped its own processes |
@@ -1255,6 +1302,25 @@ download's digest, removing every teardown kill, removing the child's process gr
 the group only at teardown — **all caught**. Two mutations survived and are recorded as such: one removed only the polite TERM (the KILL
 fallback still stopped everything, so it tested nothing), and one removed only the group kills (the
 group-aware ownership sweep still stopped the orphan — redundancy, confirmed by removing both).
+
+**Mutations of the #131 review repairs**, each alone, against the self-test (in a throwaway worktree,
+serially): a supervisor that ignores the collector's status, and a collector that swallows copy
+failures (at `8f0c52e9`); a paired-devnet cleanup that kills by pid file alone, a `stop_pidfile` that
+trusts any live pid, a supervisor sweep that trusts a pid file alone, a version check that kills only
+its pid, the version check as it was (the caller's pipe and no group), a secret classed as merely
+incomplete, a selection that publishes every archive, a smoke workflow uploading the raw archive path,
+and a selection that leaves a rejected archive in place (at `b7d4ed3c`) — **all caught**. Two first
+survived and were caught only after the self-test was fixed, and are recorded as such: the
+supervisor sweep trusting a pid file alone (the nested cleanups had removed every stale pid file before
+the sweep; caught at `c611b38e`), and restoring teardown's second TERM after an interrupt (the stand-in
+cleanup finished first; survived two Linux runs at `fdc3dd43`, caught on both platforms at `3f3e01c1`).
+**Not run as a live mutation, deliberately:** restoring the machine-wide `build/ubft root-node` sweep
+in `stop-evm.sh`, which on this shared host could stop another session's real root nodes. The self-test
+shows instead that a name-based sweep would match every sentinel.
+
+**Invalidated attempt**, kept labelled: a real-run batch at `fdc3dd43` stopped at a syntax error in
+the local driver script (a function named `select`, a bash keyword) after starting its sentinels and
+before any lane ran; the sentinels were stopped by pid. No evidence was produced.
 
 **What remains hosted-only, and pending until jobs execute:** a PR-triggered run of the packaged
 smoke workflow; a cache hit through `actions/cache`; a dispatched deliberate failure whose artifact is
