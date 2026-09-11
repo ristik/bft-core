@@ -238,26 +238,101 @@ rethEvidenceCollect() {
   echo "reth-evidence: collected $n file(s) from $nodes"
 }
 
-# rethEvidenceValidate <archive> <nodes-dir|""> <min-node-logs> [required-name...]
+# --- scan inputs: every secret an archive must be searched for ------------------------------------
+#
+# The by-value check can only search for secrets it knows. A lane that REPLACES its cluster destroys
+# that cluster's JWTs and keys while its logs stay in the evidence: the fault lane rebuilds a cluster
+# per scenario, and the smoke lane's stock control runs before the paired devnet wipes test-nodes/.
+# Searching only the secrets left at the end once let a first cluster's leaked JWT through selection
+# as "validated". So every lane RECORDS each secret before any process can use it, into a private
+# scan-inputs file that lives outside every archive and every upload path:
+#
+#   <archive's directory>/.scan-inputs/<archive name without .tar.gz>.scan    (directory 700, file 600)
+#
+# One value per line, plus '#' lines. A capture that fails is written "#failed <what>"; the
+# supervisor appends "#sealed" as the LAST line only if nothing failed. Validation with scan inputs
+# requires exactly that: a missing, failed, unsealed or later-appended file never reads as secret-free.
+
+# rethScanInputsPath <archive> prints the scan-inputs file that belongs to <archive>.
+rethScanInputsPath() {
+  local b; b=$(basename "$1")
+  echo "$(dirname "$1")/.scan-inputs/${b%.tar.gz}.scan"
+}
+
+# rethScanInputsInit <scan-file> creates it empty and private (truncating a stale one).
+rethScanInputsInit() {
+  ( umask 077; mkdir -p "$(dirname "$1")" && chmod 700 "$(dirname "$1")" && : >"$1" ) 2>/dev/null ||
+    { echo "reth-evidence: FAIL cannot create scan inputs $1"; return 1; }
+}
+
+# rethScanInputsRecord <scan-file> <value...> appends each value and confirms it is there. It creates
+# the file (privately) if needed.
+rethScanInputsRecord() {
+  local f=$1 v; shift
+  [ -f "$f" ] || rethScanInputsInit "$f" || return 1
+  for v in "$@"; do
+    [ -n "$v" ] || continue
+    ( umask 077; printf '%s\n' "$v" >>"$f" ) 2>/dev/null || { echo "reth-evidence: FAIL cannot append to scan inputs $f"; return 1; }
+    grep -qxF -- "$v" "$f" || { echo "reth-evidence: FAIL a value did not reach scan inputs $f"; return 1; }
+  done
+}
+
+# rethScanInputsCapture <nodes-dir> <scan-file> records every secret now under <nodes-dir>. Fails if
+# any of them cannot be read (a keys.json that does not parse is a secret that cannot be recorded).
+rethScanInputsCapture() {
+  local vals v n=0
+  local -a all=()
+  vals=$(rethEvidenceSecretValues "$1") || { echo "reth-evidence: FAIL cannot read every secret under $1"; return 1; }
+  while IFS= read -r v; do [ -n "$v" ] && { all+=("$v"); n=$((n + 1)); }; done <<<"$vals"
+  rethScanInputsRecord "$2" ${all[@]+"${all[@]}"} || return 1
+  echo "reth-evidence: recorded $n secret value(s) from $1 as scan inputs"
+}
+
+rethScanInputsFail() { ( umask 077; printf '#failed %s\n' "$2" >>"$1" ) 2>/dev/null; return 0; }
+
+# rethScanInputsSeal <scan-file> appends "#sealed", unless a capture failed.
+rethScanInputsSeal() {
+  local f=$1
+  [ -f "$f" ] || { echo "reth-evidence: FAIL no scan inputs at $f to seal"; return 1; }
+  if grep -q '^#failed' "$f"; then
+    echo "reth-evidence: FAIL scan inputs $f record a failed capture ($(grep '^#failed' "$f" | tr '\n' ';')) — not sealed"
+    return 1
+  fi
+  ( umask 077; echo '#sealed' >>"$f" ) 2>/dev/null || { echo "reth-evidence: FAIL cannot seal $f"; return 1; }
+  echo "reth-evidence: scan inputs sealed: $(grep -vc '^#' "$f") value(s) in $f"
+}
+
+# rethScanInputsCheck <scan-file> succeeds only for a sealed file with no failed capture.
+rethScanInputsCheck() {
+  local f=$1
+  [ -f "$f" ] || { echo "reth-evidence: FAIL scan inputs $f are missing — the secrets of any replaced cluster are unknown"; return 1; }
+  grep -q '^#failed' "$f" && { echo "reth-evidence: FAIL scan inputs $f record a failed capture"; return 1; }
+  [ "$(tail -n 1 "$f")" = "#sealed" ] || { echo "reth-evidence: FAIL scan inputs $f are not sealed (or were appended to after sealing)"; return 1; }
+  return 0
+}
+
+# rethEvidenceValidate <archive> <nodes-dir|""> <scan-file|""> <min-node-logs> [required-name...]
 #
 # Checks an evidence archive is readable, carries every required file (by base name, anywhere in the
 # archive — the smoke lane requires provenance.txt and run.log, the fault lane reth-chaos's
 # manifest.txt), holds at least <min-node-logs> shard/root/reth logs, and contains no secret: by name
-# (keys.json, jwt.hex, *.key), by content (any "privateKey" field), and by value — every jwt.hex and
-# private key found under <nodes-dir> is searched for verbatim, so a secret that leaked into a log
-# line is caught too. It is deliberately independent of the collector: it re-reads the archive rather
-# than trusting what was meant to be copied.
+# (keys.json, jwt.hex, *.key, *.scan), by content (any "privateKey" field), and by value — every JWT
+# and private key under <nodes-dir> AND every value in <scan-file> (see "scan inputs") is searched for
+# verbatim in every file, aggregate logs included, so a secret that leaked into a log line is caught
+# even after its cluster was replaced. It is deliberately independent of the collector: it re-reads
+# the archive rather than trusting what was meant to be copied.
 #
 # Exit status separates the two questions a caller asks of an archive:
 #   0  validated: complete and secret-free
 #   1  incomplete but secret-free: a required file or node log is missing, and it is still safe to
 #      publish — a failed run's partial evidence is exactly what must reach whoever diagnoses it
-#   2  NOT publishable: a secret was found, or the archive is missing, unreadable or does not
-#      extract, so its contents cannot be vouched for
+#   2  NOT publishable: a secret was found; or the archive is missing, unreadable or does not
+#      extract; or the secrets it must be searched for cannot all be known (unreadable secrets, or
+#      scan inputs missing, failed or unsealed) — in each case its contents cannot be vouched for
 # rethEvidenceSelect publishes on 0 and 1 and quarantines on 2.
 rethEvidenceValidate() {
-  local archive=$1 nodes=${2:-} minLogs=${3:-0} tmp bad=0 unsafe=0 names v logs req
-  shift 3 2>/dev/null || shift $#
+  local archive=$1 nodes=${2:-} scan=${3:-} minLogs=${4:-0} tmp bad=0 unsafe=0 names v vals logs req
+  shift 4 2>/dev/null || shift $#
   if [ ! -s "$archive" ]; then echo "reth-evidence: FAIL archive $archive is missing or empty"; return 2; fi
   if ! names=$(tar tzf "$archive" 2>/dev/null); then echo "reth-evidence: FAIL archive $archive is unreadable"; return 2; fi
   tmp=$(mktemp -d) || return 2
@@ -268,23 +343,32 @@ rethEvidenceValidate() {
   for req in "$@"; do
     echo "$names" | grep -qE "(^|/)${req//./\\.}\$" || { echo "reth-evidence: FAIL no $req in $archive"; bad=1; }
   done
-  if echo "$names" | grep -qE '(^|/)(keys\.json|jwt\.hex|[^/]*\.key)$'; then
-    echo "reth-evidence: FAIL secret file(s) in archive: $(echo "$names" | grep -E '(^|/)(keys\.json|jwt\.hex|[^/]*\.key)$' | tr '\n' ' ')"
+  if echo "$names" | grep -qE '(^|/)(keys\.json|jwt\.hex|[^/]*\.key|[^/]*\.scan)$'; then
+    echo "reth-evidence: FAIL secret file(s) in archive: $(echo "$names" | grep -E '(^|/)(keys\.json|jwt\.hex|[^/]*\.key|[^/]*\.scan)$' | tr '\n' ' ')"
     unsafe=1
   fi
   if grep -rlq '"privateKey"' "$tmp" 2>/dev/null; then
     echo "reth-evidence: FAIL a \"privateKey\" field appears in: $(grep -rl '"privateKey"' "$tmp" | sed "s|$tmp/||" | tr '\n' ' ')"
     unsafe=1
   fi
+  vals=
   if [ -n "$nodes" ] && [ -d "$nodes" ]; then
-    while IFS= read -r v; do
-      [ -n "$v" ] || continue
-      if grep -rlqF -- "$v" "$tmp" 2>/dev/null; then
-        echo "reth-evidence: FAIL a secret value from $nodes appears verbatim in: $(grep -rlF -- "$v" "$tmp" | sed "s|$tmp/||" | tr '\n' ' ')"
-        unsafe=1
-      fi
-    done < <(rethEvidenceSecretValues "$nodes")
+    vals=$(rethEvidenceSecretValues "$nodes") || { echo "reth-evidence: FAIL cannot read every secret under $nodes, so they cannot all be searched for"; unsafe=1; }
   fi
+  if [ -n "$scan" ]; then
+    if rethScanInputsCheck "$scan"; then
+      vals=$(printf '%s\n%s\n' "$vals" "$(grep -v '^#' "$scan")")
+    else
+      unsafe=1
+    fi
+  fi
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    if grep -rlqF -- "$v" "$tmp" 2>/dev/null; then
+      echo "reth-evidence: FAIL a recorded secret value appears verbatim in: $(grep -rlF -- "$v" "$tmp" | sed "s|$tmp/||" | tr '\n' ' ')"
+      unsafe=1
+    fi
+  done < <(printf '%s\n' "$vals" | sort -u)
   logs=$(echo "$names" | grep -cE '(debug|reth)[^/]*\.log$')
   if [ "$logs" -lt "$minLogs" ]; then
     echo "reth-evidence: FAIL $archive holds $logs node log(s), at least $minLogs required — an archive without the logs is not useful evidence"
@@ -292,35 +376,40 @@ rethEvidenceValidate() {
   fi
   rm -rf "$tmp"
   if [ "$unsafe" -ne 0 ]; then
-    echo "reth-evidence: $archive is NOT publishable: it contains a secret"
+    echo "reth-evidence: $archive is NOT publishable: it contains a secret, or its secrets cannot all be searched for"
     return 2
   fi
   [ "$bad" -eq 0 ] || return 1
-  echo "reth-evidence: archive $archive validated: ${*:-no required files}, $logs node log(s), no secret by name, field or value"
+  echo "reth-evidence: archive $archive validated: ${*:-no required files}, $logs node log(s), no secret by name, field or value${scan:+ (including every recorded scan input)}"
 }
 
-# rethEvidenceSelect <out-dir> <quarantine-dir> <nodes-dir|""> <min-node-logs> <required-names> <archive...>
+# rethEvidenceSelect <out-dir> <quarantine-dir> <nodes-dir|""> <require-scan-inputs: yes|no>
+#                    <min-node-logs> <required-names> <archive...>
 #
 # Decides, per archive, what may be published, and puts exactly that into <out-dir> — the only
-# directory a workflow uploads. <required-names> is one space-separated word list.
+# directory a workflow uploads. <required-names> is one space-separated word list. With scan inputs
+# required, each archive is searched for every value in its own scan-inputs file
+# (rethScanInputsPath), and an archive without a sealed one is not publishable.
 #
-#   validated, or incomplete but secret-free  -> copied into <out-dir>, its validation report beside it
+#   validated, or incomplete but secret-free  -> published into <out-dir>, its validation report beside it
 #   not publishable (secret, unreadable, ...) -> MOVED into <quarantine-dir>, never uploaded; a
 #                                                <name>.REJECTED.txt diagnostic is published instead,
 #                                                naming what was found where, never the value
 #   missing                                   -> recorded as missing
 #
-# <out-dir>/MANIFEST.txt records every verdict with the archive's sha256. The published directory is
-# then scanned once more for every secret value, so a diagnostic cannot carry what it reports. Returns
-# nonzero if anything was rejected or missing (a secret in the evidence is itself a failure), zero if
-# everything given was published.
+# The bytes validated are the bytes published: each archive is first copied into the (private)
+# quarantine directory, that copy is validated, and it is that copy which is renamed into <out-dir>.
+# <out-dir>/MANIFEST.txt records every verdict with its sha256, and the published directory is then
+# scanned once more for every secret value. Returns nonzero if anything was rejected or missing (a
+# secret in the evidence is itself a failure), zero if everything given was published.
 #
 # Why this exists: validation used to set a failure status and leave the archive where it was, and
 # the workflow uploaded that path with always() — so a job would have published the very archive it
 # had just found a JWT in.
 rethEvidenceSelect() {
-  local out=$1 quar=$2 nodes=$3 minLogs=$4 required=$5 a name report rc sha verdict v bad=0 n=0
-  shift 5
+  local out=$1 quar=$2 nodes=$3 needScan=$4 minLogs=$5 required=$6 a name stage scan report rc sha verdict v vals bad=0 n=0
+  local -a scans=()
+  shift 6
   mkdir -p "$out" "$quar" || { echo "reth-evidence: FAIL cannot create $out or $quar"; return 1; }
   chmod 700 "$quar" 2>/dev/null
   : >>"$out/MANIFEST.txt"
@@ -333,22 +422,31 @@ rethEvidenceSelect() {
       bad=1
       continue
     fi
+    scan=
+    if [ "$needScan" = yes ]; then scan=$(rethScanInputsPath "$a"); scans+=("$scan"); fi
+    stage=$quar/.stage-$name
+    if ! ( umask 077; cp "$a" "$stage" ); then
+      echo "$name NOT published — could not be staged for validation" >>"$out/MANIFEST.txt"
+      echo "reth-evidence: FAIL could not stage $a"; bad=1; continue
+    fi
     # shellcheck disable=SC2086 # required is a word list by contract
-    report=$(rethEvidenceValidate "$a" "$nodes" "$minLogs" $required 2>&1); rc=$?
-    sha=$(rethPinSha256 "$a")
+    report=$(rethEvidenceValidate "$stage" "$nodes" "$scan" "$minLogs" $required 2>&1); rc=$?
+    report=${report//$stage/$a}
+    sha=$(rethPinSha256 "$stage")
     if [ "$rc" -le 1 ]; then
       verdict=validated; [ "$rc" -eq 1 ] && verdict="incomplete, secret-free"
-      if cp "$a" "$out/$name" && echo "$report" >"$out/$name.validation.txt"; then
+      if mv "$stage" "$out/$name" && echo "$report" >"$out/$name.validation.txt"; then
         echo "$name sha256=$sha published ($verdict)" >>"$out/MANIFEST.txt"
         echo "reth-evidence: publishing $name ($verdict)"
         n=$((n + 1))
       else
-        rm -f "$out/$name" "$out/$name.validation.txt"
-        echo "$name sha256=$sha NOT published — could not be copied into $out" >>"$out/MANIFEST.txt"
-        echo "reth-evidence: FAIL could not copy $name into $out"
+        rm -f "$stage" "$out/$name" "$out/$name.validation.txt"
+        echo "$name sha256=$sha NOT published — could not be moved into $out" >>"$out/MANIFEST.txt"
+        echo "reth-evidence: FAIL could not publish $name into $out"
         bad=1
       fi
     else
+      rm -f "$stage"
       if ! mv "$a" "$quar/$name"; then
         # It stays where it is — which is never the upload directory — but say so loudly.
         echo "reth-evidence: FAIL could not move rejected $a into $quar; it is NOT in $out, and must not be shared"
@@ -364,24 +462,28 @@ rethEvidenceSelect() {
       bad=1
     fi
   done
-  if [ -n "$nodes" ] && [ -d "$nodes" ]; then
-    while IFS= read -r v; do
-      [ -n "$v" ] || continue
-      if grep -rlqF -- "$v" "$out" 2>/dev/null; then
-        echo "reth-evidence: FAIL a secret value appears in the upload directory itself: $(grep -rlF -- "$v" "$out" | tr '\n' ' ') — removed"
-        grep -rlF -- "$v" "$out" | while IFS= read -r f; do rm -f "$f"; done
-        bad=1
-      fi
-    done < <(rethEvidenceSecretValues "$nodes")
-  fi
+  vals=
+  [ -n "$nodes" ] && [ -d "$nodes" ] && vals=$(rethEvidenceSecretValues "$nodes")
+  for scan in ${scans[@]+"${scans[@]}"}; do
+    [ -f "$scan" ] && vals=$(printf '%s\n%s\n' "$vals" "$(grep -v '^#' "$scan")")
+  done
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    if grep -rlqF -- "$v" "$out" 2>/dev/null; then
+      echo "reth-evidence: FAIL a secret value appears in the upload directory itself: $(grep -rlF -- "$v" "$out" | tr '\n' ' ') — removed"
+      grep -rlF -- "$v" "$out" | while IFS= read -r f; do rm -f "$f"; done
+      bad=1
+    fi
+  done < <(printf '%s\n' "$vals" | sort -u)
   echo "reth-evidence: $n archive(s) published to $out; see $out/MANIFEST.txt"
   return $bad
 }
 
 # rethEvidenceSecretValues <nodes-dir> prints, one per line, every JWT secret and private key found
-# under <nodes-dir>, without 0x prefixes, for rethEvidenceValidate's verbatim search.
+# under <nodes-dir>, without 0x prefixes. Fails if a keys.json cannot be read: a secret that cannot
+# be read cannot be searched for, and must not be silently skipped.
 rethEvidenceSecretValues() {
-  local f
+  local f status=0
   for f in "$1"/*/jwt.hex; do [ -f "$f" ] && tr -d ' \n' <"$f" && echo; done
   for f in "$1"/*/keys.json "$1"/keys.json; do
     [ -f "$f" ] || continue
@@ -391,6 +493,9 @@ def walk(o):
         for k,v in o.items():
             if k=="privateKey" and isinstance(v,str): print(v[2:] if v.startswith("0x") else v)
             else: walk(v)
-walk(json.load(open(sys.argv[1])))' "$f" 2>/dev/null
+    elif isinstance(o,list):
+        for v in o: walk(v)
+walk(json.load(open(sys.argv[1])))' "$f" 2>/dev/null || status=1
   done
+  return $status
 }

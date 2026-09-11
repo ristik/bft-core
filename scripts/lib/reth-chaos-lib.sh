@@ -36,6 +36,14 @@
 : "${runDir:=${F1_CHAOS_RUN_DIR:-evidence-runs/$runID}}"
 evidenceDir=$runDir
 
+# Scan inputs (scripts/lib/reth-pin.sh, "scan inputs"): every cluster's secrets are recorded before
+# use into a private file beside the run's archive, so publication can search the whole run's
+# evidence for secrets of clusters that no longer exist. Derived from runDir, never cached, so a
+# caller that sets runDir after sourcing still gets the matching file.
+# shellcheck source=scripts/lib/reth-pin.sh
+. "$(dirname "${BASH_SOURCE[0]}")/reth-pin.sh"
+chaosScanFile() { rethScanInputsPath "$runDir.tar.gz"; }
+
 # knownScenarios is the authority for -s. A name not in it is a mistake, not a filter.
 knownScenarios="baseline follower-restart leader-kill reth-only-restart pair-restart multi-leader quiet-restart"
 
@@ -218,6 +226,15 @@ finish() {
   local last=$currentScenario
   [ -n "$last" ] || last=$(cat "$runDir/.scenario" 2>/dev/null)
   collectEvidence "${last:-final}" || true
+  # The cluster still standing was recorded at its bring-up; recording it again costs nothing and
+  # covers a secret written after that. Sealed only if no capture failed — unsealed scan inputs mean
+  # the workflow's selection will not publish this archive.
+  if rethScanInputsCapture test-nodes "$(chaosScanFile)" >/dev/null && rethScanInputsSeal "$(chaosScanFile)" >/dev/null; then
+    pass "scan inputs recorded for every cluster and sealed, outside the archive: $(chaosScanFile)"
+  else
+    rethScanInputsFail "$(chaosScanFile)" "final capture"
+    fail "scan inputs not sealed — this archive's secrets cannot all be searched for, and it will not be published"
+  fi
   archiveEvidence
   cleanup
 }
@@ -341,6 +358,16 @@ PY
 
   for i in $(seq 1 "$validators"); do
     openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
+  done
+  # RECORD BEFORE USE. The next reset destroys this cluster's JWTs and keys while its logs stay in the
+  # evidence; publication can only search that evidence for secrets recorded here. Nothing has used
+  # them yet, so a failure to record means the cluster is not started at all.
+  if ! rethScanInputsCapture test-nodes "$(chaosScanFile)" >/dev/null; then
+    rethScanInputsFail "$(chaosScanFile)" "cluster '$label'"
+    fail "could not record cluster '$label''s secrets as scan inputs; not starting it — its logs could carry secrets no scan would know"
+    return 1
+  fi
+  for i in $(seq 1 "$validators"); do
     startReth "$i"
   done
   for i in $(seq 1 "$validators"); do

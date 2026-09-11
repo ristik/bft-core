@@ -28,3 +28,5 @@ go.work.sum
 # stray binary if someone runs `go build ./scripts/...` instead of `go run`
 /evmtx
 artifacts/
+# private scan inputs of the real-reth lanes: secret values, never committed or uploaded
+.scan-inputs/

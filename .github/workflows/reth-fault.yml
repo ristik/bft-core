@@ -72,12 +72,14 @@ jobs:
 
       # Every archive is validated and selected for publication on its own: a secret found in one
       # quarantines that archive (never uploaded; a diagnostic is published instead) without
-      # withholding the others. See reth-smoke.yml for why upload is never of the raw paths.
+      # withholding the others. See reth-smoke.yml for why upload is never of the raw paths. Each
+      # scenario rebuilds the cluster, so an archive is searched for every cluster's secrets, recorded
+      # before use in evidence-runs/.scan-inputs/ (private, never uploaded), not just the last one's.
       - name: Validate and select publishable evidence
         if: always()
         run: >-
           ./scripts/reth-pin.sh select-upload --out evidence-upload --quarantine evidence-quarantine
-          --nodes test-nodes --require manifest.txt --min-node-logs 1
+          --nodes test-nodes --require-scan-inputs --require manifest.txt --min-node-logs 1
           evidence-runs/*.tar.gz
 
       - name: Upload evidence

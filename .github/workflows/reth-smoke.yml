@@ -74,11 +74,14 @@ jobs:
       # incomplete: a failed run's evidence must still be published); a rejected archive is moved to a
       # quarantine directory that is never uploaded, and only a diagnostic naming what was found — no
       # secret value — is published in its place. evidence-upload/MANIFEST.txt records each verdict.
+      # --require-scan-inputs: the archive is searched for every secret the lane recorded before use,
+      # including the stock control's, whose cluster the paired devnet replaced; the private record
+      # (.scan-inputs/, never archived or uploaded) must be sealed or nothing is published.
       - name: Select publishable evidence
         if: always()
         run: >-
           ./scripts/reth-pin.sh select-upload --out evidence-upload --quarantine evidence-quarantine
-          --nodes test-nodes --require provenance.txt --require run.log
+          --nodes test-nodes --require-scan-inputs --require provenance.txt --require run.log
           reth-smoke-evidence.tar.gz
 
       - name: Upload evidence

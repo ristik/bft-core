@@ -465,6 +465,55 @@ else
   bad "two scenarios: $(echo "$retentionOut" | tr '\n' ' ')"
 fi
 
+# Scan inputs across a cluster reset (the review of a02899ba): the first cluster leaks ITS JWT into a
+# log, the second cluster replaces it, so test-nodes/ holds only the second one's secrets. The REAL
+# bringUpCluster must record each cluster's JWT before its reth is started, finish must seal the
+# record, and the fault workflow's own selection step — extracted verbatim from the YAML — must then
+# refuse to publish the archive. Without the record, that selection published it as "validated".
+repoRoot=$(cd "$(dirname "$harness")/../.." && pwd)
+faultSelect=$(awk 'index($0,"name: Validate and select publishable evidence"){f=1} f&&/run: >-/{r=1;next} r&&NF==0{exit} r{printf "%s ",$0}' "$repoRoot/.github/workflows/reth-fault.yml")
+scanOut=$(scenarioLifecycle scaninputs '
+  openssl() { echo "jwt-for-$SENTINEL"; }
+  startReth() { grep -qxF "$(tr -d " \n" <test-nodes/evm1/jwt.hex)" "$(chaosScanFile)" 2>/dev/null || echo USED_BEFORE_RECORDED; }
+  SENTINEL=CLUSTER_ONE bringUpCluster scenario-one >/dev/null 2>&1 || echo BRINGUP1_FAILED
+  echo "authorization $(cat test-nodes/evm1/jwt.hex)" >>test-nodes/evm1/debug.log
+  SENTINEL=CLUSTER_TWO bringUpCluster scenario-two >/dev/null 2>&1 || echo BRINGUP2_FAILED
+  finish >/dev/null 2>&1
+  f=$(chaosScanFile)
+  grep -qx jwt-for-CLUSTER_ONE "$f" && echo ONE_RECORDED
+  grep -qx jwt-for-CLUSTER_TWO "$f" && echo TWO_RECORDED
+  [ "$(tail -n 1 "$f")" = "#sealed" ] && echo SEALED
+  grep -rqF jwt-for-CLUSTER_ONE test-nodes || echo OLD_GONE_FROM_NODES
+  tar tzf "$runDir.tar.gz" | grep -q scan || echo NOT_IN_ARCHIVE
+  ln -s "'"$repoRoot"'/scripts" scripts
+  bash -c "'"$faultSelect"'" >select.out 2>&1 && echo SELECTION_PASSED || echo SELECTION_REFUSED
+  ls evidence-upload | grep -q "tar.gz$" && echo LEAK_PUBLISHED
+  [ -s "evidence-quarantine/$(basename "$runDir").tar.gz" ] && echo QUARANTINED
+  grep -q "appears verbatim in: .*scenario-one" evidence-upload/*.REJECTED.txt 2>/dev/null && echo NAMED_WHERE
+  grep -rqF jwt-for-CLUSTER_ONE evidence-upload && echo TOKEN_IN_UPLOAD
+')
+for want in ONE_RECORDED TWO_RECORDED SEALED OLD_GONE_FROM_NODES NOT_IN_ARCHIVE SELECTION_REFUSED QUARANTINED NAMED_WHERE; do
+  if echo "$scanOut" | grep -qx "$want"; then ok "replaced cluster, scan inputs: $want"; else bad "replaced cluster, scan inputs: missing $want ($(echo "$scanOut" | tr '\n' ' '))"; fi
+done
+for unwanted in USED_BEFORE_RECORDED BRINGUP1_FAILED BRINGUP2_FAILED LEAK_PUBLISHED TOKEN_IN_UPLOAD; do
+  if echo "$scanOut" | grep -qx "$unwanted"; then bad "replaced cluster, scan inputs: $unwanted"; else ok "replaced cluster, scan inputs: not $unwanted"; fi
+done
+
+# A cluster whose secrets cannot be recorded is never started: its logs could otherwise carry secrets
+# that no scan will know. Then nothing seals the record, so nothing of the run can be published.
+unrecOut=$(scenarioLifecycle unrecordable '
+  startReth() { echo STARTED; }
+  mkdir -p "$(dirname "$(chaosScanFile)")" && : >"$(chaosScanFile)" && chmod 400 "$(chaosScanFile)"
+  SENTINEL=CLUSTER_ONE bringUpCluster scenario-one 2>/dev/null || echo BRINGUP_REFUSED
+  chmod 600 "$(chaosScanFile)"
+  rethScanInputsCheck "$(chaosScanFile)" >/dev/null 2>&1 || echo NOT_SEALABLE
+')
+if echo "$unrecOut" | grep -qx BRINGUP_REFUSED && ! echo "$unrecOut" | grep -qx STARTED && echo "$unrecOut" | grep -qx NOT_SEALABLE; then
+  ok "a cluster whose secrets cannot be recorded is refused before any client starts, and the record is left unsealed"
+else
+  bad "unrecordable cluster: $(echo "$unrecOut" | tr '\n' ' ')"
+fi
+
 abortOut=$(scenarioLifecycle abort '
   SENTINEL=SCENARIO_ONE bringUpCluster scenario-one >/dev/null 2>&1
   # The destination cannot be written: sealing must fail, and the reset must NOT happen.

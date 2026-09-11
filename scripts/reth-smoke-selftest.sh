@@ -124,20 +124,20 @@ mkrun
 check "collection copies logs and configuration" test -f "$T/run/nodes/evm1/debug.log" -a -f "$T/run/nodes/reth1/reth.log" -a -f "$T/run/nodes/trust-base.json"
 check "collection never copies keys.json, jwt.hex, pid files or datadirs" test ! -e "$T/run/nodes/evm1/keys.json" -a ! -e "$T/run/nodes/evm1/jwt.hex" -a ! -e "$T/run/nodes/evm1/pid" -a ! -e "$T/run/nodes/evm1/dd"
 tar czf "$T/run.tar.gz" -C "$T" run
-check "a clean archive validates" rethEvidenceValidate "$T/run.tar.gz" "$N" 2 provenance.txt run.log
+check "a clean archive validates" rethEvidenceValidate "$T/run.tar.gz" "$N" "" 2 provenance.txt run.log
 cp "$N/evm1/jwt.hex" "$T/run/nodes/evm1/"; tar czf "$T/run.tar.gz" -C "$T" run
-refuses "an archive containing jwt.hex is refused by name" "secret file(s) in archive" rethEvidenceValidate "$T/run.tar.gz" "" 0
+refuses "an archive containing jwt.hex is refused by name" "secret file(s) in archive" rethEvidenceValidate "$T/run.tar.gz" "" "" 0
 mkrun; echo '{"privateKey":"0x01"}' >"$T/run/nodes/evm1/node-info.json"; tar czf "$T/run.tar.gz" -C "$T" run
-refuses "an archive containing a privateKey field is refused by content" 'a "privateKey" field appears' rethEvidenceValidate "$T/run.tar.gz" "" 0
+refuses "an archive containing a privateKey field is refused by content" 'a "privateKey" field appears' rethEvidenceValidate "$T/run.tar.gz" "" "" 0
 mkrun; echo "authorization header $jwt" >>"$T/run/nodes/evm1/debug.log"; tar czf "$T/run.tar.gz" -C "$T" run
-refuses "a JWT secret leaked into a log line is refused by value" "appears verbatim in: run/nodes/evm1/debug.log" rethEvidenceValidate "$T/run.tar.gz" "$N" 0
+refuses "a JWT secret leaked into a log line is refused by value" "appears verbatim in: run/nodes/evm1/debug.log" rethEvidenceValidate "$T/run.tar.gz" "$N" "" 0
 mkrun; rm "$T/run/provenance.txt"; tar czf "$T/run.tar.gz" -C "$T" run
-refuses "an archive missing a required file is refused" "no provenance.txt" rethEvidenceValidate "$T/run.tar.gz" "" 0 provenance.txt run.log
+refuses "an archive missing a required file is refused" "no provenance.txt" rethEvidenceValidate "$T/run.tar.gz" "" "" 0 provenance.txt run.log
 mkrun; rm "$T/run/nodes/evm1/debug.log" "$T/run/nodes/reth1/reth.log"; tar czf "$T/run.tar.gz" -C "$T" run
-refuses "an archive without node logs is refused when logs are required" "0 node log(s), at least 1 required" rethEvidenceValidate "$T/run.tar.gz" "" 1
+refuses "an archive without node logs is refused when logs are required" "0 node log(s), at least 1 required" rethEvidenceValidate "$T/run.tar.gz" "" "" 1
 printf 'not a tarball' >"$T/junk.tar.gz"
-refuses "an unreadable archive is refused" "is unreadable" rethEvidenceValidate "$T/junk.tar.gz" "" 0
-refuses "a missing archive is refused" "is missing or empty" rethEvidenceValidate "$T/none.tar.gz" "" 0
+refuses "an unreadable archive is refused" "is unreadable" rethEvidenceValidate "$T/junk.tar.gz" "" "" 0
+refuses "a missing archive is refused" "is missing or empty" rethEvidenceValidate "$T/none.tar.gz" "" "" 0
 
 # A copy that fails is a failed collection, even when another node's log would satisfy the minimum
 # log count (the review's reproduction of #131: a regular file where the first node's destination
@@ -216,27 +216,66 @@ wfDir() { rm -rf "$T/wf"; mkdir -p "$T/wf"; ln -s "$PWD/scripts" "$T/wf/scripts"
 smokeSelect=$(wfStep .github/workflows/reth-smoke.yml "Select publishable evidence")
 faultSelect=$(wfStep .github/workflows/reth-fault.yml "Validate and select publishable evidence")
 check "both workflows have a selection step, and upload only its directory" sh -c "[ -n '$smokeSelect' ] && [ -n '$faultSelect' ] && [ \$(grep -c 'path: evidence-upload/' .github/workflows/reth-smoke.yml) -eq 1 ] && [ \$(grep -c 'path: evidence-upload/' .github/workflows/reth-fault.yml) -eq 1 ] && ! grep -q 'path: .*tar.gz' .github/workflows/reth-smoke.yml .github/workflows/reth-fault.yml"
-wfDir; cp "$T/ev/leak.tar.gz" "$T/wf/reth-smoke-evidence.tar.gz"; leakSha=$(rethPinSha256 "$T/wf/reth-smoke-evidence.tar.gz")
+wfScan() { mkdir -p "$T/wf/$(dirname "$2")/.scan-inputs"; cp "$1" "$T/wf/$(dirname "$2")/.scan-inputs/$(basename "$2" .tar.gz).scan"; }
+wfDir; cp "$T/ev/leak.tar.gz" "$T/wf/reth-smoke-evidence.tar.gz"; wfScan "$T/ev/.scan-inputs/leak.scan" reth-smoke-evidence.tar.gz; leakSha=$(rethPinSha256 "$T/wf/reth-smoke-evidence.tar.gz")
 refuses "the smoke workflow's selection rejects the archive with the leaked JWT" "is not publishable" sh -c "cd '$T/wf' && $smokeSelect"
 check "…nothing of it is in the upload directory" sh -c "! ls '$T/wf/evidence-upload' | grep -q 'tar.gz\$'"
 check "…it is quarantined, intact, outside the upload directory" test "$(rethPinSha256 "$T/wf/evidence-quarantine/reth-smoke-evidence.tar.gz" 2>/dev/null)" = "$leakSha" -a ! -e "$T/wf/reth-smoke-evidence.tar.gz"
 check "…a diagnostic is published in its place, naming where the secret was" grep -q "appears verbatim in: .*debug.log" "$T/wf/evidence-upload/reth-smoke-evidence.tar.gz.REJECTED.txt"
 check "…and no published file carries the secret value" sh -c "! grep -rqF '$jwt' '$T/wf/evidence-upload'"
 check "…the manifest records the rejection" grep -q "reth-smoke-evidence.tar.gz sha256=$leakSha REJECTED" "$T/wf/evidence-upload/MANIFEST.txt"
-wfDir; cp "$T/ev/inject.tar.gz" "$T/wf/reth-smoke-evidence.tar.gz"; injSha=$(rethPinSha256 "$T/wf/reth-smoke-evidence.tar.gz")
+wfDir; cp "$T/ev/inject.tar.gz" "$T/wf/reth-smoke-evidence.tar.gz"; wfScan "$T/ev/.scan-inputs/inject.scan" reth-smoke-evidence.tar.gz; injSha=$(rethPinSha256 "$T/wf/reth-smoke-evidence.tar.gz")
 check "the smoke workflow's selection publishes an ordinary failed run's evidence" sh -c "cd '$T/wf' && $smokeSelect"
 check "…byte-identical, and recorded as published" bash -c "[ \"\$(. scripts/lib/reth-pin.sh; rethPinSha256 '$T/wf/evidence-upload/reth-smoke-evidence.tar.gz')\" = '$injSha' ] && grep -q 'sha256=$injSha published (validated)' '$T/wf/evidence-upload/MANIFEST.txt'"
 # The fault lane selects per archive: one run's leak must not withhold another run's evidence.
 wfDir; mkdir -p "$T/wf/evidence-runs"
 fa() { local d; d=$(mktemp -d "$T/fa.XXXX"); mkdir -p "$d/$1/nodes/evm1"; echo "run $1" >"$d/$1/manifest.txt"; echo "certified ${2:-}" >"$d/$1/nodes/evm1/debug.log"; tar czf "$T/wf/evidence-runs/$1.tar.gz" -C "$d" "$1"; }
+sealedScan() { mkdir -p "$T/wf/evidence-runs/.scan-inputs"; printf '%s\n' "$@" '#sealed' >"$T/wf/evidence-runs/.scan-inputs/$1.scan.tmp"; sed 1d "$T/wf/evidence-runs/.scan-inputs/$1.scan.tmp" >"$T/wf/evidence-runs/.scan-inputs/$1.scan"; rm "$T/wf/evidence-runs/.scan-inputs/$1.scan.tmp"; }
 fa run-a; fa run-b "authorization $jwt"; fa run-c; printf 'not a tarball' >"$T/wf/evidence-runs/run-d.tar.gz"
+for r in run-a run-b run-c run-d; do sealedScan "$r" "$jwt"; done
 refuses "the fault workflow's selection rejects only the leaking and the unreadable archive" "run-b.tar.gz is not publishable" sh -c "cd '$T/wf' && $faultSelect"
 check "…publishing the other two" test -s "$T/wf/evidence-upload/run-a.tar.gz" -a -s "$T/wf/evidence-upload/run-c.tar.gz"
 check "…quarantining the leaking one and the unreadable one, which cannot be vouched for" test -s "$T/wf/evidence-quarantine/run-b.tar.gz" -a -s "$T/wf/evidence-quarantine/run-d.tar.gz" -a ! -e "$T/wf/evidence-upload/run-b.tar.gz" -a ! -e "$T/wf/evidence-upload/run-d.tar.gz"
 check "…and no published file carries the secret value" sh -c "! grep -rqF '$jwt' '$T/wf/evidence-upload'"
+# The review's reproduction of a02899ba: a first cluster's log leaks ITS token, the cluster is then
+# replaced, and test-nodes/ holds only the new cluster's secrets. Only the run's recorded scan inputs
+# know the old token. And an archive whose scan inputs are missing, unsealed or record a failed
+# capture cannot be vouched for, however clean it looks.
+old=$(printf 'ef%.0s' $(seq 1 32))
+wfDir; mkdir -p "$T/wf/evidence-runs"
+fa run-e "authorization $old"; sealedScan run-e "$old" "$jwt"
+fa run-f; fa run-g; fa run-h; fa run-i; sealedScan run-i "$old" "$jwt"
+mkdir -p "$T/wf/evidence-runs/.scan-inputs"; printf '%s\n' "$old" >"$T/wf/evidence-runs/.scan-inputs/run-g.scan"
+printf '%s\n' "$old" '#failed cluster two' '#sealed' >"$T/wf/evidence-runs/.scan-inputs/run-h.scan"
+refuses "the fault workflow's selection rejects a replaced cluster's leaked token, known only from the scan inputs" "run-e.tar.gz is not publishable" sh -c "cd '$T/wf' && $faultSelect"
+check "…the old token is not in the nodes directory the selection was given" sh -c "! grep -rqF '$old' '$SN'"
+check "…the leaking archive is quarantined, not published" test -s "$T/wf/evidence-quarantine/run-e.tar.gz" -a ! -e "$T/wf/evidence-upload/run-e.tar.gz"
+check "…an archive with no scan inputs is not publishable" grep -q "run-f.tar.gz sha256=.* REJECTED" "$T/wf/evidence-upload/MANIFEST.txt"
+check "…nor one whose scan inputs are unsealed" grep -q "run-g.tar.gz sha256=.* REJECTED" "$T/wf/evidence-upload/MANIFEST.txt"
+check "…nor one whose scan inputs record a failed capture" grep -q "run-h.tar.gz sha256=.* REJECTED" "$T/wf/evidence-upload/MANIFEST.txt"
+check "…while a clean archive with sealed scan inputs is published" test -s "$T/wf/evidence-upload/run-i.tar.gz"
+check "…and no published file carries either token" sh -c "! grep -rqF -e '$old' -e '$jwt' '$T/wf/evidence-upload'"
 wfDir
 refuses "the fault workflow's selection with no archive at all fails, and says so" "no archive at" sh -c "cd '$T/wf' && $faultSelect"
 check "…still leaving a manifest to upload" grep -q "MISSING" "$T/wf/evidence-upload/MANIFEST.txt"
+# Two scenarios through the real supervisor, as the real lane has (the stock control, then the paired
+# devnet whose setup wipes test-nodes/): the first prints its token into the lane's aggregate run log,
+# the second replaces the cluster. The child records the first cluster's secrets between them.
+first='mkdir -p "$NODES/evm1" && echo "certified" >"$NODES/evm1/debug.log" && echo '"$old"' >"$NODES/evm1/jwt.hex"'
+second='rm -rf "$NODES" && mkdir -p "$NODES/evm1" && echo "certified" >"$NODES/evm1/debug.log" && echo '"$jwt"' >"$NODES/evm1/jwt.hex"'
+twoRun() { rm -rf "$SN"; RETH_SMOKE_NODES_DIR=$SN RETH_SMOKE_TEST_SCENARIOS=$1 RETH_SMOKE_TEST_SCENARIOS2=$2 ./scripts/reth-smoke.sh --reth-bin "$T/good/reth" --run-dir "$T/ev/$3"; }
+check "a clean two-scenario run passes" twoRun "$first" "$second" two-clean
+check "…its scan inputs hold both clusters' tokens and are sealed" sh -c "grep -qx '$old' '$T/ev/.scan-inputs/two-clean.scan' && grep -qx '$jwt' '$T/ev/.scan-inputs/two-clean.scan' && [ \"\$(tail -n 1 '$T/ev/.scan-inputs/two-clean.scan')\" = '#sealed' ]"
+check "…and they are nowhere in the archive" sh -c "! tar tzf '$T/ev/two-clean.tar.gz' | grep -q 'scan'"
+refuses "a first scenario whose token reached the aggregate run log fails the lane, though its cluster was replaced" "appears verbatim in: two-leak/run.log" twoRun "$first"' && echo "bearer '"$old"'"' "$second" two-leak
+check "…the leaked token is in no nodes directory any more" sh -c "! grep -rqF '$old' '$SN'"
+wfDir; cp "$T/ev/two-leak.tar.gz" "$T/wf/reth-smoke-evidence.tar.gz"; wfScan "$T/ev/.scan-inputs/two-leak.scan" reth-smoke-evidence.tar.gz
+refuses "…and the smoke workflow's selection quarantines it" "is not publishable" sh -c "cd '$T/wf' && $smokeSelect"
+check "…publishing nothing of it" sh -c "! ls '$T/wf/evidence-upload' | grep -q 'tar.gz\$' && ! grep -rqF '$old' '$T/wf/evidence-upload'"
+wfDir; cp "$T/ev/two-clean.tar.gz" "$T/wf/reth-smoke-evidence.tar.gz"
+refuses "the smoke workflow's selection refuses even a clean archive whose scan inputs are missing" "is not publishable" sh -c "cd '$T/wf' && $smokeSelect"
+check "…saying why in the published diagnostic" grep -q "scan inputs .* are missing" "$T/wf/evidence-upload/reth-smoke-evidence.tar.gz.REJECTED.txt"
+
 rm -rf "$SN"
 refuses "the wrong client stops the lane before any scenario" "reth-smoke: FAIL" \
   env RETH_SMOKE_NODES_DIR=$SN RETH_SMOKE_TEST_SCENARIOS="touch $T/scenario-ran" ./scripts/reth-smoke.sh --reth-bin "$T/wrong/reth" --run-dir "$T/ev/wrongpin"

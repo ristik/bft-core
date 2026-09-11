@@ -70,6 +70,10 @@ export RETH_SMOKE_RUN_ID
 runDir=${runDir:-evidence-runs/smoke-$RETH_SMOKE_RUN_ID}
 archive=${archive:-$runDir.tar.gz}
 nodesDir=${RETH_SMOKE_NODES_DIR:-test-nodes}
+# The private record of every secret this run creates (scripts/lib/reth-pin.sh, "scan inputs"),
+# beside the archive and outside it. The stock control's cluster is replaced by the paired devnet's,
+# so without it the archive could only be searched for the secrets left at the end.
+scanFile=$(rethScanInputsPath "$archive")
 binDir=$(dirname "$runDir")/.bin-$(basename "$runDir")
 
 # ownedPids prints every process this run owns: the child's process group; every pid recorded under
@@ -101,6 +105,9 @@ if [ "${RETH_SMOKE_SUPERVISED:-0}" != "1" ]; then
     exit 2
   fi
   mkdir -p "$runDir" || exit 1
+  rethScanInputsInit "$scanFile" || exit 1
+  RETH_EVIDENCE_SCAN_FILE=$(cd "$(dirname "$scanFile")" && pwd -P)/$(basename "$scanFile")
+  export RETH_EVIDENCE_SCAN_FILE # reth-baseline.sh records its JWTs here, before using them
   prov=$runDir/provenance.txt
   {
     echo "lane=real-reth-smoke"
@@ -185,13 +192,22 @@ if [ "${RETH_SMOKE_SUPERVISED:-0}" != "1" ]; then
   fi
   rm -rf "$binDir"
 
+  # The cluster still standing is the last one; record its secrets, then seal the scan inputs —
+  # only if no capture failed anywhere in the run. Unsealed inputs make the archive unpublishable.
+  capOut=$(rethScanInputsCapture "$nodesDir" "$scanFile"); capStatus=$?
+  say "$capOut"
+  [ "$capStatus" -eq 0 ] || { rethScanInputsFail "$scanFile" "final capture"; verdict=1; }
+  sealOut=$(rethScanInputsSeal "$scanFile"); sealStatus=$?
+  say "$sealOut"
+  [ "$sealStatus" -eq 0 ] || verdict=1
+
   echo "child_status=$childStatus supervisor_verdict_before_archive=$verdict" >>"$prov"
   minLogs=0
   [ -f "$runDir/.scenarios-started" ] && minLogs=1
   rm -f "$runDir/.finished" "$runDir/.scenarios-started"
   mkdir -p "$(dirname "$archive")"
   if tar czf "$archive" -C "$(dirname "$runDir")" "$(basename "$runDir")" 2>/dev/null; then
-    rethEvidenceValidate "$archive" "$nodesDir" "$minLogs" provenance.txt run.log; validStatus=$?
+    rethEvidenceValidate "$archive" "$nodesDir" "$scanFile" "$minLogs" provenance.txt run.log; validStatus=$?
     [ "$validStatus" -eq 0 ] || verdict=1
     [ "$validStatus" -eq 2 ] && echo "reth-smoke: $archive must NOT be shared; the workflows publish only what 'reth-pin.sh select-upload' selects, and it quarantines this"
   else
@@ -242,12 +258,27 @@ if [ "$(command -v reth)" != "$(cd "$binDir" && pwd -P)/reth" ]; then
   touch "$runDir/.finished"; exit 1
 fi
 
+# recordCluster <what> records every secret now under the nodes directory, before the next scenario
+# replaces the cluster holding them. If that fails the next scenario is not run: it would destroy
+# secrets no scan could then know, and the scan inputs are marked failed so they are never sealed.
+recordCluster() {
+  if rethScanInputsCapture "$nodesDir" "$scanFile"; then return 0; fi
+  rethScanInputsFail "$scanFile" "$1"
+  echo "reth-smoke: FAIL could not record the secrets of $1 as scan inputs; the next scenario would destroy them, so it is not run"
+  failures=$((failures + 1))
+  return 1
+}
+
 touch "$runDir/.scenarios-started"
 if [ -n "${RETH_SMOKE_TEST_SCENARIOS:-}" ]; then
-  # Test-only: scripts/reth-smoke-selftest.sh substitutes a stub for the scenarios so the supervisor
-  # can be exercised without reth. The provenance record marks such an archive as not evidence.
+  # Test-only: scripts/reth-smoke-selftest.sh substitutes stubs for the scenarios so the supervisor
+  # can be exercised without reth — two of them, like the real lane, with the same record between.
+  # The provenance record marks such an archive as not evidence.
   step "SELF-TEST STUB scenarios"
   NODES=$nodesDir RUN_DIR=$runDir bash -c "$RETH_SMOKE_TEST_SCENARIOS" || failures=$((failures + 1))
+  if [ -n "${RETH_SMOKE_TEST_SCENARIOS2:-}" ] && recordCluster "the first stub scenario's cluster"; then
+    NODES=$nodesDir RUN_DIR=$runDir bash -c "$RETH_SMOKE_TEST_SCENARIOS2" || failures=$((failures + 1))
+  fi
 else
   step "stock-client control (reth-baseline, $baselineBlocks blocks)"
   if ./setup-evm-nodes.sh -r 3 -v 4 >"$runDir/setup-evm-nodes.log" 2>&1 && ./scripts/reth-baseline.sh "$baselineBlocks"; then
@@ -255,11 +286,14 @@ else
   else
     echo "reth-smoke: stock-client control FAILED"; failures=$((failures + 1))
   fi
-  step "paired real-reth devnet (4 validators, funded transaction)"
-  if ./scripts/reth-paired-devnet.sh 4 5; then
-    echo "reth-smoke: paired devnet passed"
-  else
-    echo "reth-smoke: paired devnet FAILED"; failures=$((failures + 1))
+  # The paired devnet's setup wipes test-nodes/; its cluster's secrets are recorded first.
+  if recordCluster "the stock control's cluster"; then
+    step "paired real-reth devnet (4 validators, funded transaction)"
+    if ./scripts/reth-paired-devnet.sh 4 5; then
+      echo "reth-smoke: paired devnet passed"
+    else
+      echo "reth-smoke: paired devnet FAILED"; failures=$((failures + 1))
+    fi
   fi
 fi
 
