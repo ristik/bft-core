@@ -583,18 +583,33 @@ if waitForHead "http://127.0.0.1:$rethEthBase" "$certifiedNum" 180; then
   done
   [ "$same" = "${#missedTx[@]}" ] \
     && pass "every missed transaction has the same receipt identity on the subject as on a survivor ($same of ${#missedTx[@]})" || true
-  controlAdoptedAt=$(python3 "$(dirname "${BASH_SOURCE[0]}")/lib/f6b_events.py" --mode show \
-      --from "$controlMark" --pattern "recovered from authenticated evidence" \
-      --pattern "blockHash=${certifiedHash#0x}" test-nodes/evm1/debug.log 2>/dev/null \
-    | head -1 | awk '{print $1}' | sed 's/^time=//')
-  # THE TWO INSTANTS, recorded separately because they are separate completion conditions: the
-  # executor canonicalising the block, and the node recording that it adopted the anchor for it.
-  controlAcquiredAt=$(printLinesFrom "$controlAt" test-nodes/reth1/reth-plain.log 2>/dev/null \
-    | grep "Canonical chain committed.*hash=$certifiedHash" | head -1 | awk '{print $1}')
   [ "$(waitForLinesSinceAll "$controlMark" test-nodes/evm1/debug.log 1 60 \
         "recovered from authenticated evidence" "blockHash=${certifiedHash#0x}")" -ge 1 ] \
     && pass "and ADOPTION followed ACQUISITION in this arm: the node recorded adopting ${certifiedHash:0:18}…, the same block the client downloaded — two separate completion conditions, both reached" \
     || fail "the executor ACQUIRED block $certifiedNum but the node never recorded ADOPTING ${certifiedHash:0:18}… in this arm within 60s: canonicalisation and adoption are separate, and only the first happened"
+
+  # THE TWO INSTANTS, read only NOW — after the wait above has established that both happened, and
+  # from a FRESH snapshot of the client's log.
+  #
+  # An earlier revision recorded them before the wait and from the snapshot taken in the previous
+  # section, so the manifest said "none" for facts the assertions had just confirmed: a record
+  # written before the thing it records, out of a file older than the event. Two of four runs showed
+  # it for adoption and all four for acquisition, and neither was a failure of the run.
+  sed $'s/\033\\[[0-9;]*m//g' test-nodes/reth1/reth.log >test-nodes/reth1/reth-plain.log 2>/dev/null \
+    || { fail "could not snapshot the client trace after the control arm"; exit 1; }
+  controlAcquiredAt=$(printLinesFrom "$controlAt" test-nodes/reth1/reth-plain.log 2>/dev/null \
+    | grep "Canonical chain committed.*hash=$certifiedHash" | head -1 | awk '{print $1}')
+  controlAdoptedAt=$(python3 "$f6bEvents" --mode show \
+      --from "$controlMark" --pattern "recovered from authenticated evidence" \
+      --pattern "blockHash=${certifiedHash#0x}" test-nodes/evm1/debug.log 2>/dev/null \
+    | head -1 | awk '{print $1}' | sed 's/^time=//')
+  # AND THE RECORD MUST NOT BE EMPTY WHERE SOMETHING HAPPENED. A manifest that says "none" for a fact
+  # the run asserted is a worse outcome than a failing check, because it reads as a measurement.
+  if [ -n "$controlAcquiredAt" ] && [ -n "$controlAdoptedAt" ]; then
+    pass "and both instants are recorded: ACQUIRED at $controlAcquiredAt, ADOPTED at $controlAdoptedAt"
+  else
+    fail "the control arm succeeded but its record is incomplete: ACQUIRED='${controlAcquiredAt:-none}' ADOPTED='${controlAdoptedAt:-none}'"
+  fi
 else
   controlResult="not-acquired"
   stuckNum=$(dec "$(blockAt "http://127.0.0.1:$rethEthBase" latest | cut -d' ' -f1)")
