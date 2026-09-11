@@ -1250,7 +1250,10 @@ time.sleep(20)
   else
     echo "  FAIL: $desc — could not open a port to test with"; selfFailures=$((selfFailures + 1))
   fi
+  # Reap it quietly: the shell prints a job-termination line otherwise, and self-test output that
+  # looks like an error is output a reader has to learn to ignore.
   kill "$holder" 2>/dev/null
+  wait "$holder" 2>/dev/null
 
   # A PHASE BOUNDARY IS AN INSTANT, NOT A SECOND. The whole-second convention is right for "was
   # anything logged in this second" and wrong for separating two arms: an event 700 ms into the next
