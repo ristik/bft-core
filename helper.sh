@@ -109,6 +109,7 @@ function start_root_nodes() {
                     --metrics prometheus \
                     >> test-nodes/root$i/debug.log 2>&1 &
     nodePID=$!
+    echo "$nodePID" > "test-nodes/root$i/pid"
     # wait until node starts listening on RPC port OR exits because of some error
     until lsof -i:$rpcPort >/dev/null || ! ps -p $nodePID >/dev/null
     do
@@ -298,17 +299,80 @@ function start_one_evm_validator() {
   echo $! > "test-nodes/evm$i/pid"
 }
 
-# stop_evm_validators - kill every started validator by its recorded pid
-function stop_evm_validators() {
-  for pidfile in test-nodes/evm*/pid; do
-    [ -f "$pidfile" ] || continue
-    local pid
-    pid=$(cat "$pidfile")
-    if ps -p "$pid" >/dev/null 2>&1; then
-      kill "$pid"
-    fi
-    rm -f "$pidfile"
+# --- ownership -------------------------------------------------------------------------------
+#
+# Teardown stops only what this checkout started. A process is this checkout's only if it is alive,
+# runs the expected command, AND has this checkout as its working directory (every node and client
+# the scripts here start is started from the repository root). A pid file alone is not proof: the
+# integer in it may be stale and reused by anything — on a shared host, another checkout's node. And
+# a command name alone is not proof either: stop-evm.sh -a once stopped every `build/ubft root-node`
+# on the machine, which on a shared host includes other people's root chains.
+
+# proc_cwd <pid> prints the working directory of a process, or nothing.
+function proc_cwd() {
+  if [ -d "/proc/$1" ]; then
+    readlink "/proc/$1/cwd" 2>/dev/null
+  else
+    lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1
+  fi
+}
+
+# owned_pid <pid> <command-regex> succeeds only if <pid> is alive, its command line matches the
+# regex, and its working directory is this checkout.
+function owned_pid() {
+  local pid=$1 pattern=$2
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  ps -o command= -p "$pid" 2>/dev/null | grep -qE -- "$pattern" || return 1
+  [ "$(proc_cwd "$pid")" = "$(pwd -P)" ]
+}
+
+# owned_pids <command-regex> prints every process of this checkout whose command line matches, pid
+# file or not — the nodes a pid file was never written for, or was lost for.
+function owned_pids() {
+  local p
+  for p in $(pgrep -f -- "$1" 2>/dev/null); do
+    owned_pid "$p" "$1" && echo "$p"
   done
+  return 0
+}
+
+# stop_pidfile <pidfile> <command-regex> [signal] signals the process a pid file records only if it
+# is this checkout's (see owned_pid), and removes the pid file either way: a stale one is never
+# acted on, and never left for the next caller to act on.
+function stop_pidfile() {
+  local pidfile=$1 pattern=$2 sig=${3:-TERM} pid
+  [ -f "$pidfile" ] || return 0
+  pid=$(cat "$pidfile" 2>/dev/null)
+  if owned_pid "$pid" "$pattern"; then
+    kill "-$sig" "$pid" 2>/dev/null
+  fi
+  rm -f "$pidfile"
+  return 0
+}
+
+# stop_evm_validators - stop every started validator by its recorded pid, if it is still this
+# checkout's
+function stop_evm_validators() {
+  local pidfile
+  for pidfile in test-nodes/evm*/pid; do
+    stop_pidfile "$pidfile" 'ubft shard-node run'
+  done
+  return 0
+}
+
+# stop_root_nodes - stop this checkout's root nodes: those with a recorded pid, and any other
+# `ubft root-node` whose working directory is this checkout (nodes started before pids were
+# recorded). Never a root node by name alone.
+function stop_root_nodes() {
+  local pidfile p
+  for pidfile in test-nodes/root*/pid; do
+    stop_pidfile "$pidfile" 'ubft root-node'
+  done
+  for p in $(owned_pids 'ubft root-node'); do
+    kill "$p" 2>/dev/null
+  done
+  return 0
 }
 
 # stop_one_evm_validator - kill validator $1 by its recorded pid, e.g. for
@@ -319,10 +383,5 @@ function stop_one_evm_validator() {
   local i=$1 sig=${2:-TERM}
   local pidfile="test-nodes/evm$i/pid"
   [ -f "$pidfile" ] || { echo "no pid file for validator $i (already stopped?)" >&2; return 1; }
-  local pid
-  pid=$(cat "$pidfile")
-  if ps -p "$pid" >/dev/null 2>&1; then
-    kill "-$sig" "$pid"
-  fi
-  rm -f "$pidfile"
+  stop_pidfile "$pidfile" 'ubft shard-node run' "$sig"
 }

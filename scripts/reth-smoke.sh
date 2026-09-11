@@ -27,17 +27,20 @@
 # source build of the pinned commit is the supported path. The provenance record says which was used:
 # an operator-supplied binary is verified by the revision it reports, not by a release digest.
 #
-# Teardown is by ownership, not by name. It kills the pids this run recorded under the nodes
-# directory and any ubft/reth process whose working directory is this checkout — never every
-# `reth node` on the host, which on a shared machine would include other people's clients. (The
-# hosted workflow adds a broader sweep afterwards, which is safe only on a disposable runner.)
+# Teardown is by ownership, not by name — here and in every cleanup the scenarios run nested inside
+# this one (reth-paired-devnet.sh's, and the stop-evm.sh -a it calls). A process is this run's if it
+# is in the run's process group, or is running from this checkout (recorded pid or not) — never
+# because of its name, and never because a pid file holds its number: on a shared machine every
+# `reth node` or `ubft root-node` may be somebody else's. (The hosted workflows add a broader sweep
+# afterwards, which is safe only on a disposable runner.)
 
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 repoRoot=$(pwd -P)
 . scripts/lib/reth-pin.sh
+. ./helper.sh # definitions only: the ownership checks (proc_cwd, owned_pids) stop-evm.sh uses too
 
-usage() { sed -n '2,33p' "$0"; exit 2; }
+usage() { sed -n '2,35p' "$0"; exit 2; }
 
 # The option loop below shifts every argument away; the supervisor re-executes itself with the
 # ORIGINAL arguments, so keep them.
@@ -69,24 +72,19 @@ archive=${archive:-$runDir.tar.gz}
 nodesDir=${RETH_SMOKE_NODES_DIR:-test-nodes}
 binDir=$(dirname "$runDir")/.bin-$(basename "$runDir")
 
-# ownedPids prints the pid of every ubft/reth process started from this checkout, plus every pid
-# recorded under the nodes directory that is still alive.
+# ownedPids prints every process this run owns: the child's process group, every pid recorded under
+# the nodes directory that is still alive AND running from this checkout, and every ubft/reth process
+# whose working directory is this checkout. A recorded integer alone is never proof: a stale pid file
+# can name a process that has since been reused by anything, another checkout's node included.
 ownedPids() {
-  local p cwd f
+  local p f
   [ -n "${childPid:-}" ] && pgrep -g "$childPid" 2>/dev/null
   for f in "$nodesDir"/*/pid; do
     [ -f "$f" ] || continue
     p=$(cat "$f" 2>/dev/null)
-    [ -n "$p" ] && kill -0 "$p" 2>/dev/null && echo "$p"
+    [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null && [ "$(proc_cwd "$p")" = "$repoRoot" ] && echo "$p"
   done
-  for p in $(pgrep -f 'ubft (root-node|shard-node)|reth node' 2>/dev/null); do
-    if [ -d "/proc/$p" ]; then
-      cwd=$(readlink "/proc/$p/cwd" 2>/dev/null)
-    else
-      cwd=$(lsof -a -p "$p" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
-    fi
-    [ "$cwd" = "$repoRoot" ] && echo "$p"
-  done
+  owned_pids 'ubft (root-node|shard-node)|reth node'
 }
 
 # ======================================================================= supervisor ============

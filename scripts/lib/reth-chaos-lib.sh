@@ -140,6 +140,10 @@ stopReth() {
   [ -f "test-nodes/reth$i/pid" ] || return 0
   pid=$(cat "test-nodes/reth$i/pid")
   rm -f "test-nodes/reth$i/pid"
+  # Only a pid that is still a `reth node` running from this checkout (helper.sh, "ownership"): the
+  # integer in a stale pid file may by now belong to anything.
+  declare -F owned_pid >/dev/null || source helper.sh
+  owned_pid "$pid" 'reth node' || return 0
   kill "$pid" 2>/dev/null || return 0
   while ps -p "$pid" >/dev/null 2>&1; do
     if [ "$waited" -ge 30 ]; then

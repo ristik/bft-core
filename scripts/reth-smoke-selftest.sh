@@ -14,7 +14,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 ok=0 bad=0
 T=$(mktemp -d)
-trap 'rm -rf "$T"' EXIT
+spawned= # every stand-in process this test starts itself, stopped on exit whatever happened
+trap 'kill $spawned 2>/dev/null; rm -rf "$T"' EXIT
 check() { # check <description> <command...> : passes when the command succeeds
   local d=$1; shift
   if "$@" >"$T/.out" 2>&1; then ok=$((ok + 1)); echo "  ok   $d"; else bad=$((bad + 1)); echo "  BAD  $d"; sed 's/^/         /' "$T/.out" | tail -5; fi
@@ -222,6 +223,90 @@ check "…and the refusal is in the archived run log" sh -c "tar xzf '$T/ev/wron
 refuses "neither --reth-bin nor --fetch is a usage error" "exactly one of" ./scripts/reth-smoke.sh --run-dir "$T/ev/usage"
 check "…that creates nothing" test ! -e "$T/ev/usage"
 refuses "an existing run directory is never written into" "already exists" smoke "$stub" pass
+
+echo "=== teardown is this checkout's, nested cleanups included: a separately owned sentinel survives ==="
+# A scratch checkout holding the real teardown code — the lane, its library, helper.sh and
+# stop-evm.sh — and an "other checkout" running harmless sentinels whose command lines match every
+# name a sweep might look for: `build/ubft root-node`, `build/ubft shard-node run`, `reth node`. They
+# are perl sleeps, not nodes: nothing of anybody else's is touched. stop-evm.sh -a once stopped every
+# `build/ubft root-node` on the machine, from inside reth-paired-devnet.sh's cleanup, beneath this lane.
+CO=$T/co OTHER=$T/other
+mkdir -p "$CO/scripts/lib" "$CO/build" "$CO/fake" "$OTHER/build" "$OTHER/fake"
+cp scripts/reth-smoke.sh "$CO/scripts/"; cp scripts/lib/reth-pin.sh "$CO/scripts/lib/"; cp helper.sh stop-evm.sh "$CO/"
+for d in "$CO" "$OTHER"; do
+  printf '#!/usr/bin/perl\nsleep 600;\n' >"$d/build/ubft"; cp "$d/build/ubft" "$d/fake/reth"; chmod +x "$d/build/ubft" "$d/fake/reth"
+done
+startIn() { (cd "$1" && exec "${@:2}" >/dev/null 2>&1 </dev/null) & echo $!; }
+execd() { local i; for i in $(seq 1 50); do ps -o command= -p "$1" 2>/dev/null | grep -q perl && return 0; sleep 0.1; done; return 1; }
+sentinels=()
+for c in "build/ubft root-node run --home test-nodes/root1" "build/ubft shard-node run --home test-nodes/evm1" "fake/reth node --datadir dd"; do
+  sentinels+=("$(startIn "$OTHER" $c)")
+done
+spawned="$spawned ${sentinels[*]}"
+for p in "${sentinels[@]}"; do execd "$p"; done
+sentinelsAlive() { local p; for p in "${sentinels[@]}"; do kill -0 "$p" 2>/dev/null || { echo "sentinel $p was stopped"; return 1; }; done; }
+allStopped() { local p i; for i in $(seq 1 30); do for p in "$@"; do kill -0 "$p" 2>/dev/null && break; done; kill -0 "$p" 2>/dev/null || return 0; sleep 0.1; done; echo "still alive: $(for p in "$@"; do kill -0 "$p" 2>/dev/null && echo "$p"; done)"; return 1; }
+check "the sentinels are running, and a name-based sweep would match every one of them" sh -c "pgrep -f 'build/ubft root-node' | grep -qx ${sentinels[0]} && pgrep -f 'ubft shard-node run' | grep -qx ${sentinels[1]} && pgrep -f 'reth node' | grep -qx ${sentinels[2]}"
+
+# stop-evm.sh -a directly: this checkout's nodes with a pid file, one without, and stale pid files in
+# this checkout naming the sentinels.
+mkdir -p "$CO/test-nodes/root1" "$CO/test-nodes/root2" "$CO/test-nodes/evm1" "$CO/test-nodes/evm2"
+own=()
+for c in "build/ubft root-node run --home test-nodes/root1" "build/ubft shard-node run --home test-nodes/evm1" "build/ubft root-node run --home test-nodes/root3"; do
+  own+=("$(startIn "$CO" $c)")
+done
+spawned="$spawned ${own[*]}"
+for p in "${own[@]}"; do execd "$p"; done
+echo "${own[0]}" >"$CO/test-nodes/root1/pid"; echo "${own[1]}" >"$CO/test-nodes/evm1/pid"
+echo "${sentinels[0]}" >"$CO/test-nodes/root2/pid"; echo "${sentinels[1]}" >"$CO/test-nodes/evm2/pid"
+check "stop-evm.sh -a runs" sh -c "cd '$CO' && ./stop-evm.sh -a"
+check "…stopping this checkout's nodes, with a pid file or without" allStopped "${own[@]}"
+check "…and no sentinel, not even those named by stale pid files in this checkout" sentinelsAlive
+check "…whose stale pid files are removed rather than left for the next caller" test ! -e "$CO/test-nodes/root2/pid" -a ! -e "$CO/test-nodes/evm2/pid"
+
+# The lane itself, with scenarios that tear down with reth-paired-devnet.sh's OWN cleanup function —
+# extracted from that script, not re-typed — on an EXIT trap, reached on success, on failure and when
+# the lane is cancelled. The stale pid files here also reach the supervisor's own ownership sweep.
+sed -n '/^cleanup() {/,/^}/p' scripts/reth-paired-devnet.sh >"$CO/paired-cleanup.sh"
+check "reth-paired-devnet.sh's cleanup is extracted for the nested case" grep -q 'stop-evm.sh -a' "$CO/paired-cleanup.sh"
+cat >"$T/nested.sh" <<STUB
+mode=\$1
+. ./helper.sh
+validators=2 negativeReths="reth-wrong reth-laterfork"
+. ./paired-cleanup.sh
+trap 'cleanup; echo ran >"$T/nested-\$mode.ran"' EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+mkdir -p test-nodes/root1 test-nodes/root2 test-nodes/evm1 test-nodes/evm2 test-nodes/reth1 test-nodes/reth2 test-nodes/reth-wrong
+build/ubft root-node run --home test-nodes/root1 >test-nodes/root1/debug.log 2>&1 & echo \$! >test-nodes/root1/pid; echo \$! >"$T/nested-\$mode.owned"
+build/ubft shard-node run --home test-nodes/evm1 >test-nodes/evm1/debug.log 2>&1 & echo \$! >test-nodes/evm1/pid; echo \$! >>"$T/nested-\$mode.owned"
+fake/reth node --datadir test-nodes/reth1/dd >test-nodes/reth1/reth.log 2>&1 & echo \$! >test-nodes/reth1/pid; echo \$! >>"$T/nested-\$mode.owned"
+echo ${sentinels[0]} >test-nodes/root2/pid; echo ${sentinels[1]} >test-nodes/evm2/pid
+echo ${sentinels[2]} >test-nodes/reth2/pid; echo ${sentinels[2]} >test-nodes/reth-wrong/pid
+case \$mode in
+  fail) exit 1 ;;
+  cancel) touch "$T/nested-cancel.up"; sleep 300 ;;
+esac
+STUB
+nestedRun() { rm -rf "$CO/test-nodes" "$T/nested-$1".*; RETH_SMOKE_TEST_SCENARIOS="bash $T/nested.sh $1" "$CO/scripts/reth-smoke.sh" --reth-bin "$T/good/reth" --run-dir "$T/ev/nested-$1"; }
+nestedCancel() {
+  rm -rf "$CO/test-nodes" "$T/nested-cancel".*
+  RETH_SMOKE_TEST_SCENARIOS="bash $T/nested.sh cancel" "$CO/scripts/reth-smoke.sh" --reth-bin "$T/good/reth" --run-dir "$T/ev/nested-cancel" &
+  local sup=$! i
+  for i in $(seq 1 100); do [ -e "$T/nested-cancel.up" ] && break; sleep 0.1; done
+  kill -TERM "$sup"; wait "$sup"
+}
+ownedStopped() { local p; [ -s "$T/nested-$1.owned" ] || { echo "nothing was started"; return 1; }; for p in $(cat "$T/nested-$1.owned"); do kill -0 "$p" 2>/dev/null && { echo "$p still alive"; return 1; }; done; return 0; }
+check "a passing run whose scenarios clean up with the paired devnet's cleanup passes" nestedRun pass
+check "…the nested cleanup did run" test -e "$T/nested-pass.ran"
+check "…its own processes were stopped" ownedStopped pass
+check "…and every sentinel survived" sentinelsAlive
+refuses "a failing run whose scenarios clean up with the paired devnet's cleanup fails" "reth-smoke: FAIL" nestedRun fail
+check "…the nested cleanup did run" test -e "$T/nested-fail.ran"
+check "…its own processes were stopped" ownedStopped fail
+check "…and every sentinel survived" sentinelsAlive
+refuses "a cancelled run whose scenarios clean up with the paired devnet's cleanup fails as interrupted" "reth-smoke: FAIL run interrupted" nestedCancel
+check "…the nested cleanup did run, on the cancellation" test -e "$T/nested-cancel.ran"
+check "…its own processes were stopped" ownedStopped cancel
+check "…and every sentinel survived" sentinelsAlive
 
 echo
 echo "selftest: $ok ok, $bad bad"

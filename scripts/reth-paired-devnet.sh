@@ -18,6 +18,8 @@
 # Run from the repository root. Leaves test-nodes/ and its reth datadirs in place for inspection.
 
 set -uo pipefail
+# Definitions only; sourced here, before cleanup can run, for its ownership-scoped stop functions.
+source helper.sh
 
 validators=${1:-4}
 rounds=${2:-5}
@@ -46,13 +48,17 @@ info() { echo "  info: $1"; }
 # from leaving them holding their ports and datadirs.
 negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 
+# Everything here is ownership-scoped (helper.sh, "ownership"): stop-evm.sh -a stops this checkout's
+# nodes only, and a reth is stopped by its pid file only if that pid is still a `reth node` running
+# from this checkout. This runs nested inside scripts/reth-smoke.sh, whose own teardown cannot undo
+# anything a machine-wide sweep here had already killed.
 cleanup() {
   ./stop-evm.sh -a >/dev/null 2>&1 || true
   for i in $(seq 1 "$validators"); do
-    [ -f "test-nodes/reth$i/pid" ] && kill "$(cat "test-nodes/reth$i/pid")" 2>/dev/null
+    stop_pidfile "test-nodes/reth$i/pid" 'reth node'
   done
   for d in $negativeReths; do
-    [ -f "test-nodes/$d/pid" ] && kill "$(cat "test-nodes/$d/pid")" 2>/dev/null
+    stop_pidfile "test-nodes/$d/pid" 'reth node'
   done
   wait 2>/dev/null || true
 }
