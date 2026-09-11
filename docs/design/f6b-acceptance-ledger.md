@@ -70,7 +70,7 @@ target, the applier's attempt budget, and the round's continuity anchor are all 
 
 | # | boundary | status | basis |
 |---|---|---|---|
-| R1 | start with no recovery state at all | met | `TestAnchorIsNotRestoredFromDisk`; every real-client lane restarts here (#118–#121) |
+| R1 | start with no recovery state at all | met | `TestAnchorIsNotRestoredFromDisk`; every real-client lane restarts here (#118–#121, #124) |
 | R2 | evidence received or buffered, verification not finished | met by equivalence | nothing of the bundle is persisted, so the restart discards it and the process re-enters at R1; no executor call has been made, so there is nothing to reconcile that a cold start does not already do |
 | R3 | a verified target is held, `Commit` not yet called | met by equivalence | same: the verified target is memory-only, and the executor has not moved. The target must be re-derived from authenticated incoming evidence (a quiet certificate alone does not name it), as in R1 |
 | R4 | `Commit` in flight when the process dies | met | `TestRestart_InFlightCommitIsDecidedByTheLiveExecutorHead` covers the two resolved outcomes — the call did not apply (the returning process redoes it) and it applied while the answer was lost (no second execution, because the applier asks the executor before commanding it) — plus a fresh attempt the executor cannot satisfy yet. `TestRestart_AnAdmittedCommitCompletesAfterTheProcessIsGone` covers the third, genuinely delayed outcome: the executor admits one operation, the caller dies, the operation keeps running across the restart, answers every later request SYNCING without starting a second one, and applies the block on its own — so the head moves with **no new request behind it**, which is asserted by counting | #123 |
@@ -104,7 +104,7 @@ for crossing one belongs to #10 and is listed in §3 below.
 
 | clause | evidence | merged in |
 |---|---|---|
-| no signing from an unreconciled executor | `TestRound_IdentityGate`; `TestRestoredNodeIsNonVoting`; every real-client lane asserts the node declares itself NON-VOTING and logs zero `submitting block certification request` | #106, #118–#121 |
+| no signing from an unreconciled executor | `TestRound_IdentityGate`; `TestRestoredNodeIsNonVoting`; every real-client lane asserts the node declares itself NON-VOTING and logs zero `submitting block certification request` | #106, #118–#121, #124 |
 | no unverified forkchoice target | one comparison, `anchorHeadIdentity`, used by both the live and the recovery path; `TestCheckHeadIdentity`; `TestTargetApplier_EnforcesHeadIdentityAfterAValidCommit`; the evidence predicate refuses anything it cannot authenticate against locally configured trust | #117, #106, #116, #112 |
 | no duplicate execution effects | *serialisation*: `TestTargetApplier_OneAttemptIsInsideTheExecutorAtATime`, and the finality gate over every finality-changing executor call (`TestFinalityGate`, `TestRound_TakesTheFinalityGateForItsOwnCommits`). *Replay and idempotency*, which a one-at-a-time gate does not prove: `TestDeliverySeparatesApplicationFromSending` — a send failure leaves the certificate applied so its duplicate is not re-driven, and a persistence failure after a successful send is an application failure whose retry commits nothing uncertified — with `TestFailedDeliveryIsRetriedByDuplicate` and `TestRound_RepeatUC_DoesNotCommitButAdvancesRound` | #116, #117, #77 |
 
@@ -126,24 +126,40 @@ this row as unconditional permission to build.
 
 ### 1.4 "Real-reth isolated restart scenario demonstrates positive work before/after and agreement on certified target, canonical block, state and receipts."
 
-**Met in part.** One clause of it is not demonstrated, and with B2 delivered it is now the only unmet
-clause in the acceptance list.
+**Met.** The last clause — positive work *after* recovery — was the acceptance list's final gap and
+is closed by B1 (#124), a fifth lane built for it alone.
 
 | clause | status | evidence |
 |---|---|---|
-| isolated restart against a real reth | met | four lanes, pinned reth `189c0df3`, sealed artifacts (#118–#121) |
+| isolated restart against a real reth | met | five lanes, pinned reth `189c0df3`, sealed artifacts (#118–#121, #124) |
 | positive work **before** | met | #119, #120, #121 each execute real transactions before the outage; the recovered anchor is an ordinary certified block, not the genesis-round exception |
 | agreement on the certified target | met | the recovered block hash is compared against the value the surviving validators agree on, read from *them*, and re-read at the end of the run so a head that moved underneath could not have been the claim (#119) |
-| agreement on canonical block and state | met | exact head hash and state root (#119, #120, #121) |
-| agreement on receipts | met | receipts for every missed transaction name the same block number and hash on the recovered node as on a survivor (#120, #121) |
+| agreement on canonical block and state | met | exact head hash and state root (#119, #120, #121), and for a block produced after the recovery (#124) |
+| agreement on receipts | met | receipts for every missed transaction name the same block number and hash on the recovered node as on a survivor (#120, #121), and the same for the post-recovery transaction against every survivor (#124) |
 | a clean fail-closed result as an intermediate milestone | met | #120 with no execution peers, #121 with peers that provably do not hold the block: anchor verified over BFT, `payload-unavailable` and never `payload-invalid`, target retained, executor unmoved, nothing signed |
-| positive work **after** | **not met** | no lane demonstrates it — see below |
+| positive work **after** | met | `f6b-positive-work-after-recovery.sh` (#124): after the anchor is adopted, one transaction is submitted **to a peer**, the shard certifies a block beyond the recovered one, and the restored node follows it, executes it, and agrees with every survivor on block hash, state root and the transaction's receipt — while signing nothing |
 
-**What is missing, precisely.** Every lane deliberately stops all transaction injection at the moment
-the recovering node returns, and asserts by counting that nothing new executed in either arm. That
-is what makes recovery attributable to the authenticated evidence rather than to new activity, and it
-is the whole reason the F1 baseline's "recovery" was not recovery. The cost is that no run shows the
-recovered node taking part in work produced *after* it recovered.
+**Why this needed its own lane, and how the order is held.** The first four lanes stop all transaction
+injection at the moment the recovering node returns, and assert by counting that nothing new
+executed. That is what makes recovery attributable to the authenticated evidence rather than to new
+activity, and it is the whole reason the F1 baseline's "recovery" was not recovery — so the fifth
+lane could not simply inject earlier. It keeps that phase intact, asserts the recovery, and only then
+injects. Two checks hold the order rather than leaving it to the reader:
+
+- not one non-quiet request entry was logged in the **closed window** from the restart to the
+  injection mark, so no block was certified that could have named the missed block; the window is
+  closed rather than open-ended because "since the restart", evaluated later, would be a statement
+  about an interval that by then contains the new work;
+- the pre-injection snapshot already contains adoption of the expected block. This check runs
+  before submission; it does not measure adoptions across the subsequent interval.
+
+The injection mark is a sub-second instant, not a whole second, for the reason #121 established — a
+block certified 700 ms into the next phase would otherwise belong to both windows.
+
+The transaction goes to a **peer**, not to the recovered node's own executor, so nothing about the
+result depends on the recovered node being the entry point. And the final transaction total on every
+executor must be the setup total plus **exactly one**. This checks canonical transaction inclusions;
+it does not count internal execution attempts. Replay idempotency has separate fixture evidence.
 
 **And what "after" can mean here, which is not obvious.** P-sign (#105) keeps a restored process
 non-voting for its whole lifetime, so the recovered node cannot contribute a signature to new work
@@ -151,7 +167,9 @@ no matter how well it recovered. "Positive work after" therefore means: the shar
 block after the node has recovered, and the recovered node follows it, executes it, and agrees with
 the survivors on the resulting block, state and receipts. It does not, and under #105 cannot, mean
 that the recovered node votes for it. Stating that distinction is part of satisfying the line, not a
-way around it.
+way around it — and the lane asserts both halves, the agreement and the continued silence, with a
+companion check that the silence is not the node having gone back to refusing rounds, which would be
+following nothing.
 
 ### 1.5 "Explicit distinction between process-restart evidence and crash durability/fsync; full durability remains parent #14. Preserve logs and no-secret artifacts."
 
@@ -159,7 +177,7 @@ way around it.
 
 | clause | status | evidence |
 |---|---|---|
-| process-restart evidence | met | all four lanes restart the shard-node process with its executor left running; `TestAnchorIsNotRestoredFromDisk` pins that the anchor is *not* restored from disk, so what the process loses it must re-derive. Which restart *boundaries* that evidence covers is the separate question answered in §1.2.1 |
+| process-restart evidence | met | all five lanes restart the shard-node process with its executor left running; `TestAnchorIsNotRestoredFromDisk` pins that the anchor is *not* restored from disk, so what the process loses it must re-derive. Which restart *boundaries* that evidence covers is the separate question answered in §1.2.1 |
 | crash durability / fsync | not claimed, and not required here | no lane simulates power loss or an interrupted write. `TestRound_CrashAfterSubmitBeforeUC_…` is about a crash *boundary* and not the storage guarantee — and, as §1.2.1 records, it constructs a bare `NewRound` rather than running the production restoration sequence, so it is weaker evidence than its name suggests |
 | full durability remains #14 | recorded | the design record says a restored checkpoint proves historical continuity and not authorisation to sign, and that persistence of verified evidence is out of scope |
 | logs and no-secret artifacts preserved | met | every run writes `artifacts/<lane>/<utc>-<pid>/` outside `test-nodes/`, with revision, worktree cleanliness, `ubft` and reth hashes, and SHA-256 digests of **copied** logs; JWT secrets are never among the copied files |
@@ -196,13 +214,14 @@ seen in this programme remains unexplained and is recorded as such.
 
 ## 3. Remaining gaps, separated
 
-### 3.1 Required acceptance work for #92 — B1 remains, B2 delivered
+### 3.1 Required acceptance work for #92 — both delivered
 
-**B1. Positive work after recovery, measured once against a real client.** The unmet clause of §1.4. A bounded run: recover as #119 does, then submit one transaction *after* the recovered
-node has adopted its anchor, and assert that the recovered node reaches the new certified block and
-agrees with the survivors on block hash, state root and receipts — while still not voting. It reuses
-the existing lane's machinery; what it must not do is let the new transaction be what recovers the
-node, so the assertion order matters: adoption first, injection second, agreement third.
+**B1. Positive work after recovery, measured against a real client. Delivered in #124.** The lane
+`scripts/f6b-positive-work-after-recovery.sh` recovers as #119 does, asserts the recovery, and only
+then submits one transaction to a peer; it then requires the restored node to follow the new
+certified block and agree with every survivor on block hash, state root and receipt, while still not
+voting. The two ordering checks described in §1.4 are what keep the new transaction from being the
+thing that recovers the node — adoption first, injection second, agreement third.
 
 **B2. The two restart states (R4 and shared R5/R6). Delivered in #123.** Three deterministic
 test functions in `shardnode/restart_boundaries_test.go`, in the shape the review specified:
@@ -254,10 +273,11 @@ intermittency is a repair to the harness rather than a measurement.
 
 ## 4. Proposal
 
-1. Deliver **B1** as one bounded run, in the shape described in §3.1. It is the last outstanding item.
-2. **B2** is delivered in #123 and is no longer outstanding.
-3. On the acceptance of B1, #92's five acceptance lines are met, and the issue can be **proposed**
-   for closure — by review, not by the measurement PR that finishes it.
+1. **B1** is delivered in #124 and **B2** in #123. Nothing in §3.1 is outstanding.
+2. With B1 accepted, all five of #92's acceptance lines are met, and the issue can be **proposed**
+   for closure — by review, not by the measurement PR that finishes it. This ledger does not close
+   it and does not propose closure on its own authority; that was true of its first revision and is
+   still true of this one.
 4. Carry §3.2 on the issues named there. Nothing in §3.2 blocks #92, and #92 closing does not
    discharge any of them.
 

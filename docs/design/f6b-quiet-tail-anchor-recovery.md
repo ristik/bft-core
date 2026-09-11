@@ -1106,14 +1106,62 @@ while it ran.
 This observes the provider processes rather than inferring quietness solely from the script
 refraining from transaction submission.
 
-**One implementation of the assertions, not four.** All four lanes source
-`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same 69 checks over
+**One implementation of the assertions, not five.** All five lanes source
+`scripts/lib/f6b-acceptance-lib.sh`, and `--self-test` on any of them runs the same 71 checks over
 the same helpers. Every one of those helpers guards a NEGATIVE claim, every one of them has been a
 defect at least once, and a second copy in a second lane is the argument `anchorHeadIdentity` settles
 in `shardnode/anchor.go`: two copies of a comparison that gates a conclusion is one copy too many,
 because the weaker of them becomes the one that matters. The exactness cuts both ways there — a lane
 that expected three setup transactions and found four has had activity it did not authorise, which is
 the same defect as finding zero because the read failed.
+
+### 6.8 Positive work after recovery, measured
+
+`scripts/f6b-positive-work-after-recovery.sh`, same pinned reth `189c0df3`, same three-validator
+topology. It answers the one acceptance clause the other four lanes are constructed so as not to
+answer: **does a node that has recovered take part in work the shard produces afterwards?**
+
+The other lanes stop transaction injection the moment the recovering node returns, and assert by
+counting that nothing new executed. That is not a limitation to be relaxed — it is what makes
+recovery attributable to the authenticated evidence rather than to new activity, and it is the whole
+reason the F1 baseline's "recovery" was not recovery (§1). A lane that simply injected earlier would
+be the baseline again under a new name: the certificate naming the new block would name the missed
+block too, and the node would recover by the live path.
+
+So this lane keeps that phase exactly as §6.7 built it, asserts the recovery in full, and only then
+injects. **The order is the measurement**, and two checks hold it rather than leaving it to the
+reader:
+
+- not one non-quiet request entry is logged in the **closed window** from the restart to the
+  injection mark. Closed, not open-ended: "since the restart" evaluated afterwards would be a
+  statement about an interval that by then contains the new work. Counted in request entries and
+  said so — quietness is logged by the leader and by every follower, so one certified round
+  contributes several, and the first run of this lane reported "4 non-quiet rounds" for a phase that
+  produced one block. The number was right and the unit was wrong; it is the correction §6.7 took.
+- the pre-injection snapshot already contains adoption of the expected block. This check runs
+  before submission; it does not measure adoptions across the subsequent interval.
+
+The mark itself is a sub-second instant for the reason §8.1 established — a block certified 700 ms
+into the next phase would otherwise belong to both windows.
+
+The transaction goes to a **peer**, never to the recovered node's own executor, so no part of the
+result depends on the recovered node being the entry point. What is then required of it: the shard
+certifies a block beyond the recovered one; the recovered node's executor reaches it; and it agrees
+with **every** survivor — read from them, at the same height — on block hash, on state root, and on
+the receipt for the new transaction. The final transaction total on every executor must be the setup
+total plus exactly one. This checks canonical transaction inclusions, not internal execution
+attempts; replay idempotency is covered by the separate runtime fixtures.
+
+**And it still does not vote.** Under P-sign (#105) a restored process is non-voting for its
+lifetime, so "positive work after" cannot mean the recovered node signs the new block; it means the
+node follows it, executes it, and agrees about it. Both halves are asserted — the agreement and the
+continued silence — together with a check that the silence is not the node having gone back to
+refusing rounds, which would be following nothing at all.
+
+There is no control arm, deliberately. That a node with recovery off stayed behind during the observation window is §6.7's
+result, measured on the same devnet one flag apart; repeating it here would double the runtime
+without adding to this claim. What this lane must establish instead is that the node had *already*
+recovered before the transaction existed, and that is what the two ordering checks do.
 
 ## 7. Acceptance fixtures
 
@@ -1442,14 +1490,15 @@ anchor cursor in §5 is for, and what `VerifiedTargetSurvivesAnUnavailablePayloa
 
 The reconciliation of #92's acceptance list against this work — which lines are met, by which merged
 pull requests and which evidence, and what remains — is `docs/design/f6b-acceptance-ledger.md`. It
-names one unmet acceptance clause and separates it from the follow-up scope carried on #10, #14,
-#105 and #16.
+records every acceptance line as met and separates #92 from the follow-up scope carried on #10, #14,
+#105 and #16. It does not close #92 and does not propose closure on its own authority.
 
 
 Recovery across an epoch transition (§3.1); which peers a node asks and how that set is chosen
 (§6.3 takes it as an injected source and decides nothing about it); production startup wiring for the buffer, the server, the requester
 and the applier alike, and the measured acceptance runs against a real client across a quiet tail
-(§6.6), after a genuinely missed block (§6.7), and under controlled execution-peer isolation (§8.1);
+(§6.6), after a genuinely missed block (§6.7), on work produced after the recovery (§6.8), and under
+controlled execution-peer isolation (§8.1);
 whether the serving buffer of §6.1 is ever persisted; whether the root chain should serve historical certificates as a second source
 (§6c); durable retained history and the signing record (#14, #105); and how long a node stays fail-closed when no peer can
 supply the payload (§8.2 measures that it does, not for how long, nor against a peer set holding only

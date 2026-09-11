@@ -125,26 +125,7 @@ snapshot() { # snapshot <label>
   done
 }
 
-sendTx() { # sendTx <ethURL> <nonce>
-  local out
-  out=$(go run ./scripts/evmtx -send -eth-url "$1" -chain-id "$chainID" -nonce "$2" 2>&1) || {
-    echo "evmtx failed for nonce $2: $out" >&2; return 1; }
-  isHash32 "$out" || { echo "evmtx returned no transaction hash for nonce $2: $out" >&2; return 1; }
-  printf '%s' "$out"
-}
-
-waitForReceipt() { # waitForReceipt <ethURL> <txHash> <seconds>
-  local url=$1 tx=$2 secs=$3 n
-  for _ in $(seq 1 "$secs"); do
-    n=$(rpc "$url" eth_getTransactionReceipt "[\"$tx\"]" | pyget "['result']['blockNumber']")
-    if isQuantity "${n:-}"; then printf '%s' "$n"; return 0; fi
-    sleep 2
-  done
-  echo "transaction $tx was never executed within $((secs * 2))s" >&2
-  return 1
-}
-
-dec() { python3 -c "print(int('$1', 16))" 2>/dev/null; }
+# sendTx, waitForReceipt and dec now live in the shared library: one copy, see its header.
 
 reached="section 1: a funded chain with a real block"
 echo "=== 1. a funded chain, one real block, every executor on it ==="

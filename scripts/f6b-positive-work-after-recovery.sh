@@ -1,44 +1,43 @@
 #!/bin/bash
-# f6b-missed-block-recovery.sh - the second acceptance run for #92: does a node that was DOWN while a
-# real block was certified recover to that exact block, against a real reth, with no new activity
-# helping it?
+# f6b-positive-work-after-recovery.sh - the fifth and final acceptance run for #92 (B1): after a node
+# has recovered its execution anchor from authenticated evidence, does it take part in work the shard
+# produces AFTERWARDS - and still not vote?
 #
-# WHY A SECOND LANE. scripts/f6b-quiet-tail-recovery.sh answers the quiet-tail question and says so,
-# but it names one thing it does NOT establish (§6.6 of the design, and the run's own output):
+# WHY A FIFTH LANE. The four merged lanes all stop transaction injection at the moment the recovering
+# node returns, and assert by counting that nothing new executed. That is what makes recovery
+# attributable to the evidence rather than to new activity, and it is the whole reason the F1
+# baseline's "recovery" was not recovery. The cost is that none of them shows the recovered node
+# taking part in work produced AFTER it recovered - the one unmet clause of #92's acceptance line 4,
+# recorded as B1 in docs/design/f6b-acceptance-ledger.md.
 #
-#     Not exact-block recovery against an ordinary block. It exercises the genesis-round anchor,
-#     because that is the only anchor a shard with no transactions ever has — so row 13's exception
-#     is what satisfied P-id there, not a head-hash match against an ordinary certified block.
+# THE ORDER IS THE MEASUREMENT. Adoption first, injection second, agreement third. If the transaction
+# were submitted before the node had adopted its anchor, the certificate naming its block would name
+# the missed block too, the node would recover by the live path, and this lane would be the F1
+# baseline again wearing a different name. So the recovery phase below is preserved exactly as
+# #119 built it - no transaction from the outage until adoption is established - and the injection
+# mark is taken only after every recovery assertion has been made. Two checks hold the order:
 #
-# That exception is deliberately narrow (shardnode/anchor.go: "the executor is at its own genesis
-# block, at the certified state"), and a lane that only ever exercises it has not measured P-id's
-# ordinary comparison at all. THIS lane is constructed so the exception cannot apply: by the time
-# the outage begins the executor is past its genesis block, and the anchor recovered is an ordinary
-# certified block whose hash is a real EVM block hash. If the genesis exception were widened to
-# admit this run, the run would still pass — which is why the assertions below check the executor's
-# head number and hash directly rather than inferring recovery from the absence of a refusal.
+#   * not one non-quiet round was certified between the restart and the injection mark, so nothing
+#     arriving in that window could have named the missed block; and
+#   * an adoption of the expected block is already present in the pre-injection snapshot, so
+#     the transaction cannot be what caused that adoption.
 #
-# THE SHAPE, and where the transactions are allowed to be:
+# WHAT "POSITIVE WORK AFTER" CAN MEAN HERE, which is not obvious. P-sign (#105) keeps a restored
+# process non-voting for its whole lifetime, so the recovered node cannot contribute a signature to
+# new work however well it recovered. "Positive work after" therefore means: the shard certifies a
+# new block after the node has recovered, and the recovered node follows it, executes it, and agrees
+# with the survivors on the resulting block, state and receipts. It does not, and under #105 must
+# not, mean that the recovered node votes for it. That distinction is part of satisfying the line,
+# and this lane asserts both halves - the agreement AND the continued silence.
 #
-#   SETUP     a funded chain spec, and one transaction that makes the shard build, certify and
-#             commit a real block on every executor. This is what gives the run an ordinary anchor.
-#   OUTAGE    validator 1's shard node is stopped. Its reth keeps running and is NOT told anything,
-#             so it stays at the block it had. More transactions are submitted to a peer, the
-#             remaining validators certify further real blocks, and validator 1's executor misses
-#             them. Injection STOPS here, and the shard is allowed to go quiet.
-#   CONTROL   validator 1 returns with recovery off (the default). It must refuse for ever, and its
-#             executor must not advance on its own.
-#   RECOVERY  validator 1 returns with --evidence-recover, and nothing else differs. It must obtain
-#             authenticated evidence, drive its executor to the certified block, satisfy P-id by an
-#             exact block-hash match, and STILL not vote.
+# NO CONTROL ARM, deliberately, and this is the one thing this lane leaves to another. That a node
+# with recovery off stayed behind during the observation window is #119's result, measured on the same devnet one flag
+# apart, and repeating it here would double the runtime without adding to this claim. What this lane
+# must establish instead is that the node had ALREADY recovered before the transaction existed, and
+# that is what the two ordering checks above do.
 #
-# No transaction is submitted from the moment validator 1 comes back, in either arm, and the lane
-# asserts that by counting: the transaction total on every executor must be exactly the setup total,
-# before and after. "Recovery came from new activity" is the F1 baseline's failure (§1) and it is
-# the one result this lane must be unable to report by accident.
-#
-# Usage:  ./scripts/f6b-missed-block-recovery.sh [validators]   # default 3
-#         ./scripts/f6b-missed-block-recovery.sh --self-test    # no reth, no root chain
+# Usage:  ./scripts/f6b-positive-work-after-recovery.sh [validators]   # default 3
+#         ./scripts/f6b-positive-work-after-recovery.sh --self-test    # no reth, no root chain
 # Needs:  a pinned reth, curl, openssl, python3, go, and a built ./build/ubft. Run from the repo root.
 
 set -uo pipefail
@@ -60,13 +59,13 @@ rootBootPort=26662
 failures=0
 reached="startup"
 
-# The assertion helpers, the manifest writer and the self-test are SHARED with
-# scripts/f6b-quiet-tail-recovery.sh — see the library header for why there is exactly one copy.
+# The assertion helpers, the transaction helpers, the manifest writer and the self-test are SHARED
+# with every other lane — see the library header for why there is exactly one copy.
 source "$(dirname "${BASH_SOURCE[0]}")/lib/f6b-acceptance-lib.sh"
 
-artifactDir="${F6B_ARTIFACT_DIR:-artifacts/f6b-missed-block/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
-manifestTitle="f6b missed-block recovery acceptance run"
-manifestLogs="test-nodes/evm1/control.log $(seq -f "test-nodes/evm%g/debug.log" 1 "$validators" | tr '\n' ' ')$(seq -f " test-nodes/reth%g/reth.log" 1 "$validators" | tr -d '\n')"
+artifactDir="${F6B_ARTIFACT_DIR:-artifacts/f6b-positive-work/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+manifestTitle="f6b positive-work-after-recovery acceptance run (B1)"
+manifestLogs="$(seq -f "test-nodes/evm%g/debug.log" 1 "$validators" | tr '\n' ' ')$(seq -f " test-nodes/reth%g/reth.log" 1 "$validators" | tr -d '\n')"
 manifestLines=()
 
 $selfTest && { f6bSelfTest; exit $?; }
@@ -122,7 +121,7 @@ source ./helper.sh
 # sendTx, waitForReceipt and dec now live in the shared library: one copy, see its header.
 
 reached="section 1: a funded chain with a real, ordinary block"
-echo "=== 1. a real block, so the anchor is an ordinary one ==="
+echo "=== 1. a funded chain with a real, ordinary block ==="
 rm -rf test-nodes
 ./setup-evm-nodes.sh -r 3 -v "$validators" >/dev/null || { echo "setup failed" >&2; exit 1; }
 
@@ -249,9 +248,10 @@ stopValidator1
 pass "validator 1's shard node stopped at executor block $preOutageNum — its reth keeps running and is told nothing"
 
 # THE TRANSACTIONS THAT CREATE THE MISSED BLOCKS, submitted to a PEER while validator 1 is down, and
-# the last ones this run submits at all. Everything after this point — both arms — happens on a shard
-# with nothing left to execute, which is what makes the recovery attributable to the evidence rather
-# than to new activity.
+# the last ones this run submits until the recovery is established. Everything from here to the
+# injection mark in section 4 happens on a shard with nothing left to execute, which is what makes
+# the recovery attributable to the evidence rather than to new activity. Section 4 is where that
+# stops being true, deliberately, and only after the recovery has been asserted.
 peerEth="http://127.0.0.1:$((rethEthBase + 1))"
 for nonce in 1 2; do
   tx=$(sendTx "$peerEth" "$nonce") || { fail "could not submit setup transaction $((nonce + 1))"; exit 1; }
@@ -259,7 +259,7 @@ for nonce in 1 2; do
   blk=$(waitForReceipt "$peerEth" "$tx" 120) || { fail "setup transaction $((nonce + 1)) was never certified"; exit 1; }
   info "transaction $((nonce + 1)) executed in block $(dec "$blk") on a peer, with validator 1 down"
 done
-info "no transaction is submitted from here on, in either arm"
+info "no transaction is submitted from here until the recovery has been established in section 3"
 
 # EVERY REMAINING VALIDATOR AGREES ON THE CERTIFIED HEAD. The lane compares validator 1's recovered
 # anchor against this block, so reading it from ONE peer would compare the recovering node against a
@@ -312,57 +312,11 @@ quietTail=$(waitForQuietTail 4 180 $providerLogs) \
   || { fail "the shard never went quiet after the last transaction: tail is $quietTail quiet round(s)"; exit 1; }
 pass "the shard is quiet again: $quietTail quiet request entries since the last non-quiet request, so the newest certificate names nothing"
 
-assertTransactionCount "before the first restart" "$peerEth" "$setupTxs" "all of them submitted before validator 1 returned"
+assertTransactionCount "before validator 1 returned" "$peerEth" "$setupTxs" "all of them submitted while it was down"
 
 echo
-reached="section 3: control arm"
-echo "=== 3. CONTROL: the same node with recovery off remains behind during the observation ==="
-controlMark=$(markNow)
-restartValidator1
-waitFor test-nodes/evm1/debug.log "accepted certificate" 5 120 || { fail "the restarted node received no certificates"; exit 1; }
-
-# The refusal here is NOT the quiet-tail lane's abstention. This node's executor state does not match
-# the certified state at all, so it refuses inside reconcile — "cannot identify the certified block
-# to recover to" — and never reaches the vote. Both texts are matched because both are refusals of
-# the same question, and which one a given round produces depends on where the node is standing.
-controlRefusals=$(countIn test-nodes/evm1/debug.log "cannot identify the certified block to recover to\|cannot prove the executor is on the certified block\|cannot prove its executor is on the certified block")
-controlCerts=$(countIn test-nodes/evm1/debug.log "accepted certificate")
-controlAdopted=$(countIn test-nodes/evm1/debug.log "recovered from authenticated")
-controlSigned=$(countIn test-nodes/evm1/debug.log "submitting block certification request")
-if [ "$controlRefusals" -ge 1 ] && [ "$controlAdopted" -eq 0 ] && [ "$controlSigned" -eq 0 ]; then
-  pass "recovery off: refused over $controlCerts certificate deliveries, adopted no anchor and signed nothing"
-else
-  fail "control arm did not refuse as §1 describes: refusals=$controlRefusals adopted=$controlAdopted signed=$controlSigned over $controlCerts certificate deliveries"
-fi
-
-# THE CONTROL'S REAL CONTENT. A node that refuses is not interesting on its own; a node whose
-# EXECUTOR is still on the wrong block after five certificate deliveries is. This is what the recovery arm has
-# to change, and it is measured on the same executor, the same devnet, one flag apart.
-controlHead=$(blockAt "http://127.0.0.1:$rethEthBase" latest) || { fail "could not read validator 1's executor in the control arm"; exit 1; }
-controlNum=$(dec "$(echo "$controlHead" | cut -d' ' -f1)")
-if [ "$controlNum" = "$preOutageNum" ] && [ "$(echo "$controlHead" | cut -d' ' -f2)" = "$preOutageHash" ]; then
-  pass "recovery off: the executor is STILL at block $controlNum while the shard is certified through $certifiedNum — the missed block is not recovered by returning"
-else
-  fail "the executor moved with recovery off: block $controlNum, expected to still be $preOutageNum"
-fi
-grep -q "NON-VOTING" test-nodes/evm1/debug.log \
-  && pass "control: the resumed process is NON-VOTING (P-sign, #105)" \
-  || fail "control: the resumed process did not declare itself non-voting"
-assertTransactionCount "control arm" "$peerEth" "$setupTxs" "nothing new executed while the node was refusing"
-# AND NO BLOCK WAS CERTIFIED WHILE THE ARM RAN. This is the direct form of "no new activity helped
-# it": not "no transaction was submitted", which is a statement about what this script did, but "no
-# non-quiet round was certified", which is a statement about what the shard did.
-controlBlocks=$(nonQuietSince "$controlMark" $providerLogs)
-if [ "$controlBlocks" = "0" ]; then
-  pass "control arm: not one non-quiet round was certified while it ran — nothing arriving could have named the missed block"
-else
-  fail "control arm: $controlBlocks non-quiet round(s) were certified while it ran, so the arm was not run over a quiet shard"
-fi
-cp test-nodes/evm1/debug.log test-nodes/evm1/control.log
-
-echo
-reached="section 4: recovery arm"
-echo "=== 4. RECOVERY: the same node, same devnet, --evidence-recover ==="
+reached="section 3: recovery from evidence, with nothing new happening"
+echo "=== 3. RECOVERY: the node returns with --evidence-recover, on a quiet shard ==="
 recoveryMark=$(markNow)
 restartValidator1 --evidence-recover
 waitFor test-nodes/evm1/debug.log "accepted certificate" 6 180 || { fail "the restarted node received no certificates"; exit 1; }
@@ -439,56 +393,180 @@ else
   fail "a recovered node must not sign: NON-VOTING=$(countIn test-nodes/evm1/debug.log NON-VOTING) submissions=$signed"
 fi
 
-# THE SAME QUESTION FOR THE ARM THAT MATTERS. If a block had been certified while this arm ran, the
-# recovery would be attributable to a certificate that names the block rather than to the evidence,
-# and every claim above it would be about the wrong thing.
-recoveryBlocks=$(nonQuietSince "$recoveryMark" $providerLogs)
-if [ "$recoveryBlocks" = "0" ]; then
-  pass "recovery arm: not one non-quiet round was certified while it ran — the anchor came from the evidence, not from a certificate that named the block"
+echo
+reached="section 4: positive work after recovery"
+echo "=== 4. POSITIVE WORK AFTER RECOVERY: one transaction, submitted only now ==="
+
+# THE PHASE BOUNDARY. A sub-second instant, not a whole second: a block certified 700ms into the next
+# phase would otherwise belong to both windows, and one earlier run in this programme came within
+# 254ms of exactly that. Everything above this mark is recovery; everything below it is new work.
+injectMark=$(markNowUTC)
+
+# ORDERING GATE 1 — NOTHING WAS CERTIFIED BEFORE THIS INSTANT. Counted over the closed window from
+# the restart to the mark, not "since the restart": the latter would be evaluated later, after the
+# transaction below has certified a block, and would then be a statement about the wrong interval.
+# Counted in REQUEST LOG ENTRIES, not rounds. Quietness is logged by the leader and by every
+# follower, so one certified round contributes several entries; #119's review corrected exactly this
+# reading. Zero entries means zero rounds either way, which is what this gate needs, and the wording
+# says which unit it is so the non-zero failure message cannot be misread as a round count.
+quietWindow=$(linesBetween "$recoveryMark" "$injectMark" "quiet=false" $providerLogs)
+if [ "$quietWindow" = "0" ]; then
+  pass "ordering: not one non-quiet request entry between the restart and this instant — no block was certified in that window, so nothing arriving could have named the missed block"
 else
-  fail "recovery arm: $recoveryBlocks non-quiet round(s) were certified while it ran, so this run does not separate evidence from new activity"
+  fail "ordering: $quietWindow non-quiet request entr(ies) were logged before the injection, so recovery is not separated from new activity"
 fi
 
-# THE SUBJECT OF THE COMPARISON DID NOT MOVE UNDER THE LANE. certifiedHash was read at the end of
-# the outage, and everything since has been compared against it. If a peer had certified another
-# block in the meantime — a leader building on a transaction this lane did not submit, say — that
-# value would be stale and "exact-block recovery" would be a claim about a block that is no longer
-# the head. Re-read it from the same validators and require the same answer.
+# ORDERING GATE 2 — a pre-injection snapshot contains the adoption checked above. This runs
+# before sendTx; it does not assert that the subsequent interval contains no further adoptions.
+lateAdoptions=$(linesSince "$injectMark" "recovered from authenticated evidence" test-nodes/evm1/debug.log)
+totalAdoptions=$(countIn test-nodes/evm1/debug.log "recovered from authenticated evidence")
+if [ "$totalAdoptions" -ge 1 ] && [ "$lateAdoptions" = "0" ]; then
+  pass "ordering: the pre-injection snapshot contains $totalAdoptions adoption(s), all before the mark"
+else
+  fail "ordering: adoptions=$totalAdoptions of which $lateAdoptions after the injection mark — the transaction may be what recovered this node"
+fi
+
+# AND THE NODE IS STANDING ON THE CERTIFIED BLOCK AS THIS PHASE OPENS, re-read now rather than
+# carried down from the assertions above: the claim below is about a head that moves FROM here.
+atInjection=$(blockAt "http://127.0.0.1:$rethEthBase" latest) || { fail "could not read validator 1's executor at the injection mark"; exit 1; }
+atInjectionNum=$(dec "$(echo "$atInjection" | cut -d' ' -f1)")
+if [ "$atInjectionNum" = "$certifiedNum" ] && [ "$(echo "$atInjection" | cut -d' ' -f2)" = "$certifiedHash" ]; then
+  pass "the recovered node is on block $atInjectionNum ${certifiedHash:0:18}… as the new work begins"
+else
+  fail "the recovered node is not on the certified block as this phase opens: $atInjectionNum vs $certifiedNum"
+  exit 1
+fi
+
+# THE TRANSACTION. One, submitted to a PEER — not to the recovered node's own executor, so that
+# nothing about this depends on the recovered node being the entry point. It is the first and only
+# transaction of the run that is submitted after validator 1 returned.
+newTx=$(sendTx "$peerEth" 3) || { fail "could not submit the post-recovery transaction"; exit 1; }
+afterTxs=$((setupTxs + 1))
+info "post-recovery transaction $newTx submitted to a peer"
+newBlkHex=$(waitForReceipt "$peerEth" "$newTx" 120) || { fail "the post-recovery transaction was never executed"; exit 1; }
+newNum=$(dec "$newBlkHex")
+if [ "$newNum" -gt "$certifiedNum" ]; then
+  pass "the shard certified a NEW block $newNum after the recovery — $((newNum - certifiedNum)) block(s) beyond the one that was recovered"
+else
+  fail "no new block was produced: the transaction landed in block $newNum, at or below the recovered block $certifiedNum"
+  exit 1
+fi
+
+# And the shard really did do state-changing work in this window, said as a property of the SHARD
+# rather than of this script: a non-quiet round was certified after the mark.
+# Again in request log entries: several per certified round, so this says "state-changing work was
+# certified here", not how many blocks. How many blocks is the height comparison just above.
+newWork=$(nonQuietSince "$injectMark" $providerLogs)
+if [ "$newWork" -ge 1 ]; then
+  pass "$newWork non-quiet request entr(ies) logged after the injection mark — this phase contains state-changing work certified by the shard, unlike every phase before it"
+else
+  fail "not one non-quiet request entry after the injection mark, so the shard certified no new work to follow"
+fi
+
+# THE RECOVERED NODE FOLLOWS IT. Waited for on the executor, because reaching the block is the claim;
+# a log line saying the certificate arrived is not.
+waitForHead "http://127.0.0.1:$rethEthBase" "$newNum" 120 \
+  || info "validator 1's executor had not reached block $newNum within 120s; the assertions below say what it did reach"
+
+followed=$(blockAt "http://127.0.0.1:$rethEthBase" latest) || { fail "could not read validator 1's executor after the new block"; exit 1; }
+followedNum=$(dec "$(echo "$followed" | cut -d' ' -f1)")
+followedHash=$(echo "$followed" | cut -d' ' -f2)
+followedRoot=$(echo "$followed" | cut -d' ' -f3)
+if [ "$followedNum" -ge "$newNum" ]; then
+  pass "POSITIVE WORK AFTER RECOVERY: the restored node followed the shard to block $followedNum, produced entirely after it recovered"
+else
+  fail "the restored node did not follow the new work: its head is block $followedNum, the new block is $newNum"
+fi
+
+# AGREEMENT, BLOCK BY BLOCK, against every validator that stayed up — read from THEM, at the same
+# height, rather than from one opinion or from the recovered node's own view of itself.
+mine=$(blockAt "http://127.0.0.1:$rethEthBase" "$newBlkHex") || { fail "the recovered node has no block $newNum"; exit 1; }
+mineHash=$(echo "$mine" | cut -d' ' -f2)
+mineRoot=$(echo "$mine" | cut -d' ' -f3)
+agreed=0
 for i in $(seq 2 "$validators"); do
-  b=$(blockAt "http://127.0.0.1:$((rethEthBase + i - 1))" latest) || { fail "could not re-read executor $i's head"; continue; }
-  if [ "$(echo "$b" | cut -d' ' -f2)" = "$certifiedHash" ]; then
-    pass "executor $i is still on block $certifiedNum ${certifiedHash:0:18}…: the block this run compared against never moved"
+  theirs=$(blockAt "http://127.0.0.1:$((rethEthBase + i - 1))" "$newBlkHex") || { fail "survivor $i has no block $newNum"; continue; }
+  tHash=$(echo "$theirs" | cut -d' ' -f2)
+  tRoot=$(echo "$theirs" | cut -d' ' -f3)
+  if [ "$mineHash" = "$tHash" ] && [ "$mineRoot" = "$tRoot" ]; then
+    agreed=$((agreed + 1))
   else
-    fail "executor $i moved during the arms: head is $(echo "$b" | cut -d' ' -f2), the comparison used $certifiedHash"
+    fail "block $newNum differs from survivor $i: recovered node $mineHash/$mineRoot, survivor $tHash/$tRoot"
   fi
 done
+if [ "$agreed" -eq $((validators - 1)) ]; then
+  pass "exact agreement on the new block with all $agreed survivor(s): same block hash ${mineHash:0:18}… and same state root ${mineRoot:0:18}…"
+fi
 
-# NO NEW ACTIVITY, on every executor. This is the assertion that separates this run from the F1
-# baseline, where recovery came only from a non-quiet round — that is, from a new transaction.
+# RECEIPTS. Head-hash equality cannot make this check: two clients agreeing on a head while
+# disagreeing about which block a transaction landed in would be a defect this lane must report.
+mineReceipt=$(receiptIdentity "http://127.0.0.1:$rethEthBase" "$newTx") || { fail "the recovered node has no receipt for the post-recovery transaction"; mineReceipt=""; }
+if [ -n "$mineReceipt" ]; then
+  same=0
+  for i in $(seq 2 "$validators"); do
+    theirs=$(receiptIdentity "http://127.0.0.1:$((rethEthBase + i - 1))" "$newTx") || { fail "survivor $i has no receipt for the post-recovery transaction"; continue; }
+    if [ "$mineReceipt" = "$theirs" ]; then same=$((same + 1)); else fail "receipt differs: recovered node '$mineReceipt', survivor $i '$theirs'"; fi
+  done
+  [ "$same" -eq $((validators - 1)) ] \
+    && pass "the recovered node EXECUTED the new transaction: its receipt names the same block number and hash as on all $same survivor(s) — $mineReceipt"
+fi
+
+# THE WHOLE SHARD, INCLUDING THE RECOVERED NODE, HAS EXECUTED EXACTLY ONE MORE TRANSACTION than the
+# setup submitted. This counts canonical transaction inclusions, not internal execution attempts;
+# replay idempotency is established by the separate runtime fixtures in the acceptance ledger.
 for i in $(seq 1 "$validators"); do
-  assertTransactionCount "executor $i at the end of the run" "http://127.0.0.1:$((rethEthBase + i - 1))" "$setupTxs" \
-    "the same $setupTxs submitted before validator 1 returned, and nothing since"
+  assertTransactionCount "executor $i at the end of the run" "http://127.0.0.1:$((rethEthBase + i - 1))" "$afterTxs" \
+    "the $setupTxs submitted before validator 1 returned, plus the one submitted after it recovered"
 done
 
-# WHERE THE BLOCK BODY CAME FROM — recorded, not claimed. §8 of the design leaves this open: the
-# logs cannot distinguish "reth backfilled the missed block on receiving the forkchoice update" from
-# "reth already held it via P2P gossip and merely canonicalised it now". This lane does not settle
-# that either; it preserves reth1's log in the artifact and prints what it says, so the next
-# measurement — a controlled peer-connectivity experiment — has a starting point rather than a guess.
-info "how validator 1's reth reacted to the commit (its log is in the artifact):"
-grep -E "forkchoice updated message when syncing|Block added to canonical chain|Canonical chain committed" \
-  test-nodes/reth1/reth.log 2>/dev/null | tail -6 | sed $'s/\033\\[[0-9;]*m//g' | sed 's/^/    /'
+# AND STILL NOT VOTING. This is the half of the acceptance line that is easiest to lose: following
+# new work is not authorization to sign it, and a run that showed agreement while the node had
+# quietly started voting would be reporting a P-sign regression as a success.
+signedAfter=$(countIn test-nodes/evm1/debug.log "submitting block certification request")
+signedSince=$(linesSince "$injectMark" "submitting block certification request" test-nodes/evm1/debug.log)
+if grep -q "NON-VOTING" test-nodes/evm1/debug.log && [ "$signedAfter" -eq 0 ] && [ "$signedSince" = "0" ]; then
+  pass "STILL NON-VOTING: the recovered node followed, executed and agreed on new work and signed none of it — $signedSince submissions since the injection, $signedAfter in the whole run (P-sign, #105)"
+else
+  fail "a recovered node must not sign, even for work it followed correctly: submissions=$signedAfter since-injection=$signedSince"
+fi
+
+# AND IT WAS NOT REFUSING EITHER. Silence could also mean the node had gone back to refusing rounds,
+# which would be following nothing; the identity check must still be passing over the new work.
+refusalsSince=$(linesSince "$injectMark" "cannot identify the certified block to recover to" test-nodes/evm1/debug.log)
+refusalsSince=$((refusalsSince + $(linesSince "$injectMark" "cannot prove the executor is on the certified block" test-nodes/evm1/debug.log)))
+certsSince=$(linesSince "$injectMark" "accepted certificate" test-nodes/evm1/debug.log)
+if [ "$refusalsSince" -eq 0 ] && [ "$certsSince" -ge 1 ]; then
+  pass "and it was not silent by refusing: $certsSince certificate(s) accepted since the injection, not one identity refusal among them"
+else
+  fail "the node refused $refusalsSince time(s) over the $certsSince certificate(s) after the injection"
+fi
+
+# THE SHARD AGREES WITH ITSELF AT THE END, the recovered node included. The comparison above was made
+# at one height; this one is made on whatever every client now calls its head, so a node that agreed
+# about block $newNum and then diverged is caught.
+endHash=""
+for i in $(seq 1 "$validators"); do
+  b=$(blockAt "http://127.0.0.1:$((rethEthBase + i - 1))" latest) || { fail "could not re-read executor $i's head"; continue; }
+  h=$(echo "$b" | cut -d' ' -f2)
+  if [ -z "$endHash" ]; then endHash=$h; endNum=$(dec "$(echo "$b" | cut -d' ' -f1)")
+  elif [ "$h" != "$endHash" ]; then fail "executor $i disagrees about the head at the end of the run: $h vs $endHash"; fi
+done
+[ -n "$endHash" ] && pass "every executor, the recovered one included, ends on block ${endNum} ${endHash:0:18}…"
 
 reached="all sections"
 echo
 echo "=== 5. provenance ==="
 manifestLines=(
-  "control flags:   (defaults: --evidence-serve on, --evidence-recover off)"
   "recovery flags:  --evidence-recover"
   "setup txs:       $setupTxs, all before validator 1 returned"
+  "post-recovery:   1, submitted after adoption was established"
   "executor before: block $preOutageNum $preOutageHash"
-  "certified head:  block $certifiedNum $certifiedHash"
-  "executor after:  block ${recoveredNum:-unknown} ${recoveredHash:-unknown}"
+  "recovered block: block $certifiedNum $certifiedHash"
+  "injection mark:  $injectMark"
+  "new block:       block ${newNum:-unknown} ${mineHash:-unknown}"
+  "new state root:  ${mineRoot:-unknown}"
+  "receipt:         ${mineReceipt:-unknown}"
+  "submissions:     ${signedAfter:-unknown} (P-sign, #105)"
 )
 if writeManifest; then
   pass "run artifact written to $artifactDir"

@@ -644,6 +644,38 @@ printLinesFrom() { # printLinesFrom <mark> <file...>
   python3 "$f6bEvents" --mode show --from "$mark" "$@"
 }
 
+# TRANSACTION HELPERS. These were three byte-identical copies, one in each lane that submits a
+# transaction, which is exactly the arrangement the library header exists to prevent: a correction to
+# one copy is a divergence from the other two, and nothing detects it. The bodies are unchanged from
+# those copies, so no lane's behaviour moves with this consolidation.
+#
+# sendTx reads the lane's $chainID rather than taking it as an argument, which is how the copies were
+# written and is therefore kept — but the coupling is now CHECKED instead of assumed. An unset or
+# empty chainID used to reach evmtx as -chain-id "", and a lane that forgot to set it would report a
+# transaction failure rather than a wiring mistake.
+sendTx() { # sendTx <ethURL> <nonce>   [reads $chainID from the lane]
+  local out
+  [ -n "${chainID:-}" ] || { echo "sendTx: the lane set no chainID" >&2; return 1; }
+  out=$(go run ./scripts/evmtx -send -eth-url "$1" -chain-id "$chainID" -nonce "$2" 2>&1) || {
+    echo "evmtx failed for nonce $2: $out" >&2; return 1; }
+  isHash32 "$out" || { echo "evmtx returned no transaction hash for nonce $2: $out" >&2; return 1; }
+  printf '%s' "$out"
+}
+
+# waitForReceipt echoes the block number the transaction landed in.
+waitForReceipt() { # waitForReceipt <ethURL> <txHash> <seconds>
+  local url=$1 tx=$2 secs=$3 n
+  for _ in $(seq 1 "$secs"); do
+    n=$(rpc "$url" eth_getTransactionReceipt "[\"$tx\"]" | pyget "['result']['blockNumber']")
+    if isQuantity "${n:-}"; then printf '%s' "$n"; return 0; fi
+    sleep 2
+  done
+  echo "transaction $tx was never executed within $((secs * 2))s" >&2
+  return 1
+}
+
+dec() { python3 -c "print(int('$1', 16))" 2>/dev/null; }
+
 # receiptIdentity echoes "<blockNumber> <blockHash>" for a transaction, both validated. It is the
 # identity check that head-hash equality cannot make: two clients agreeing on a head hash while
 # disagreeing about which block a transaction landed in would be a client defect this lane should
@@ -1361,6 +1393,21 @@ time.sleep(20)
     echo "  FAIL: $desc"; selfFailures=$((selfFailures + 1))
   else echo "  PASS: $desc"; fi
   unset -f rpc
+
+  # sendTx reads the lane's chainID. That coupling is only safe if a lane that never set one is
+  # refused rather than silently sending -chain-id "" — which would surface as an evmtx transaction
+  # failure, blamed on the devnet, in a lane whose wiring was wrong.
+  #
+  # The refusal is checked by its REASON, not by its exit status. An unreachable URL fails too, so a
+  # status-only check would pass with no guard at all — the same "satisfied by the wrong evidence"
+  # shape this suite keeps finding. It must also never reach the network.
+  desc="sendTx refuses to submit when the lane set no chainID, and says why"
+  selfOut=$( unset chainID; sendTx http://127.0.0.1:1 0 2>&1 >/dev/null )
+  if [ -n "$selfOut" ] && [ "${selfOut#*the lane set no chainID}" != "$selfOut" ]; then
+    echo "  PASS: $desc"
+  else
+    echo "  FAIL: $desc (said: '${selfOut:-nothing}')"; selfFailures=$((selfFailures + 1))
+  fi
   rm -rf "$scratch"
 
   desc="an artifact directory that cannot be created fails the run"
