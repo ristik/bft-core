@@ -129,6 +129,7 @@ and it changes the hash.
   on checks 3 and 4, and would agree on 6 if both loaded the pinned spec. Check 6 reads only
   `--eth-url`, so it binds the Engine connection's schedule through that same assumption. Configure the
   two URLs for one client, on one host.
+- **Every chain-spec parameter or the full fork checksum.** The profile checks the listed EIP-7910 fields; it does not attest to arbitrary execution-client configuration or implementation correctness.
 - **Anything about UC configuration.** Checking that certificates carry the expected shard
   configuration hash is #10, and none of these checks discharges it.
 

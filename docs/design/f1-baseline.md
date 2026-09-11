@@ -415,7 +415,7 @@ report (`engineapi/profile.go`):
 | `current.blobSchedule` | target 3, max 6, update fraction 3338477 | Cancun's |
 | `current.precompiles` | exactly the ten Cancun precompiles, `0x01`–`0x0a` | no BLS12 set (Prague), nothing custom |
 | `current.chainId` | the shard conf's `chain_id` | a third, independent chain-identity read |
-| `current.forkId` | **not pinned** — reported | a checksum over the genesis hash and activated forks, so it varies per deployment genesis; the genesis checks bind that |
+| `current.forkId` | **not pinned** — reported | a checksum over the genesis hash and activated forks, so it varies per deployment; the genesis checks bind only its genesis contribution, not the full checksum |
 
 Refused on the real client in `scripts/reth-paired-devnet.sh` §3f: a client started from the funded
 spec plus a future `pragueTime`, whose chain id **and genesis hash** both equal the configured ones —
