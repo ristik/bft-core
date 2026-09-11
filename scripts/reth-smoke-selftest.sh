@@ -59,11 +59,18 @@ fakereth "$T/hangs/reth" --hang
 # The hang is a shell whose CHILD holds the output: killing only the shell once left that child
 # holding the $(...) pipe, and a 1-second budget took as long as the child did. Measured, not assumed:
 # wall time and the child's survival, not just the exit status.
-nowMs() { perl -MTime::HiRes=time -e 'printf "%d", time * 1000'; }
+# Milliseconds: bash 5's EPOCHREALTIME, else perl's Time::HiRes (macOS's bash 3.2 has no
+# EPOCHREALTIME; a minimal Linux perl may lack Time::HiRes). Neither available is a failure, never a
+# silent 0 — an earlier revision measured "0ms" on such a host and passed a timing check vacuously.
+nowMs() {
+  if [ -n "${EPOCHREALTIME:-}" ]; then local t=${EPOCHREALTIME/,/.}; echo $(( ${t%.*} * 1000 + 10#$(printf '%.3s' "${t#*.}") ))
+  else perl -MTime::HiRes=time -e 'printf "%d", time * 1000' 2>/dev/null; fi
+}
 t0=$(nowMs)
 RETH_PIN_VERSION_BUDGET=1 refuses "a binary that hangs is refused within its budget" "--version' failed (exit 124)" rethPinVerifyBinary "$T/hangs/reth"
-hangMs=$(( $(nowMs) - t0 ))
-check "…within bounded wall time (budget 1s; took ${hangMs}ms, must be under 3000)" test "$hangMs" -lt 3000
+t1=$(nowMs)
+case "$t0$t1" in *[!0-9]* | "") hangMs=unmeasured ;; *) hangMs=$((t1 - t0)) ;; esac
+check "…within bounded wall time (budget 1s; took ${hangMs}ms, must be measured and under 3000)" sh -c "[ '$hangMs' != unmeasured ] && [ '$hangMs' -gt 0 ] && [ '$hangMs' -lt 3000 ]"
 check "…and nothing it started survives, the child holding its output included" sh -c "p=\$(cat '$T/hangs/child.pid') && [ -n \"\$p\" ] && ! kill -0 \"\$p\" 2>/dev/null"
 
 echo "=== the archive cache: a hit is verified exactly as thoroughly as a download ==="
@@ -139,7 +146,7 @@ N2=$T/nodes2; mkdir -p "$N2/evm1" "$N2/evm2"; echo one >"$N2/evm1/debug.log"; ec
 rm -rf "$T/obst"; mkdir -p "$T/obst"; : >"$T/obst/evm1"
 refuses "a collection whose copy fails returns nonzero, naming what is missing" "cannot create $T/obst/evm1" rethEvidenceCollect "$N2" "$T/obst"
 check "…having still copied everything else it could" test -f "$T/obst/evm2/debug.log"
-check "…and a successful collection still returns 0" sh -c "rm -rf '$T/obst2'; . scripts/lib/reth-pin.sh; rethEvidenceCollect '$N2' '$T/obst2'"
+check "…and a successful collection still returns 0" bash -c "rm -rf '$T/obst2'; . scripts/lib/reth-pin.sh; rethEvidenceCollect '$N2' '$T/obst2'"
 
 echo "=== the lane's supervisor (stub scenarios; no reth, no devnet) ==="
 SN=$T/snodes
@@ -211,7 +218,7 @@ check "…and no published file carries the secret value" sh -c "! grep -rqF '$j
 check "…the manifest records the rejection" grep -q "reth-smoke-evidence.tar.gz sha256=$leakSha REJECTED" "$T/wf/evidence-upload/MANIFEST.txt"
 wfDir; cp "$T/ev/inject.tar.gz" "$T/wf/reth-smoke-evidence.tar.gz"; injSha=$(rethPinSha256 "$T/wf/reth-smoke-evidence.tar.gz")
 check "the smoke workflow's selection publishes an ordinary failed run's evidence" sh -c "cd '$T/wf' && $smokeSelect"
-check "…byte-identical, and recorded as published" sh -c "[ \"\$(. scripts/lib/reth-pin.sh; rethPinSha256 '$T/wf/evidence-upload/reth-smoke-evidence.tar.gz')\" = '$injSha' ] && grep -q 'sha256=$injSha published (validated)' '$T/wf/evidence-upload/MANIFEST.txt'"
+check "…byte-identical, and recorded as published" bash -c "[ \"\$(. scripts/lib/reth-pin.sh; rethPinSha256 '$T/wf/evidence-upload/reth-smoke-evidence.tar.gz')\" = '$injSha' ] && grep -q 'sha256=$injSha published (validated)' '$T/wf/evidence-upload/MANIFEST.txt'"
 # The fault lane selects per archive: one run's leak must not withhold another run's evidence.
 wfDir; mkdir -p "$T/wf/evidence-runs"
 fa() { local d; d=$(mktemp -d "$T/fa.XXXX"); mkdir -p "$d/$1/nodes/evm1"; echo "run $1" >"$d/$1/manifest.txt"; echo "certified ${2:-}" >"$d/$1/nodes/evm1/debug.log"; tar czf "$T/wf/evidence-runs/$1.tar.gz" -C "$d" "$1"; }
@@ -289,6 +296,8 @@ build/ubft shard-node run --home test-nodes/evm1 >test-nodes/evm1/debug.log 2>&1
 fake/reth node --datadir test-nodes/reth1/dd >test-nodes/reth1/reth.log 2>&1 & echo \$! >test-nodes/reth1/pid; echo \$! >>"$T/nested-\$mode.owned"
 echo ${sentinels[0]} >test-nodes/root2/pid; echo ${sentinels[1]} >test-nodes/evm2/pid
 echo ${sentinels[2]} >test-nodes/reth2/pid; echo ${sentinels[2]} >test-nodes/reth-wrong/pid
+# ...and one in a directory no nested cleanup touches, so it is still there for the supervisor's sweep
+mkdir -p test-nodes/leftover; echo ${sentinels[0]} >test-nodes/leftover/pid
 case \$mode in
   fail) exit 1 ;;
   cancel) touch "$T/nested-cancel.up"; sleep 300 ;;
@@ -307,6 +316,7 @@ check "a passing run whose scenarios clean up with the paired devnet's cleanup p
 check "…the nested cleanup did run" test -e "$T/nested-pass.ran"
 check "…its own processes were stopped" ownedStopped pass
 check "…and every sentinel survived" sentinelsAlive
+check "…the stale pid file no nested cleanup removed was still there for the supervisor's sweep" test -f "$CO/test-nodes/leftover/pid"
 refuses "a failing run whose scenarios clean up with the paired devnet's cleanup fails" "reth-smoke: FAIL" nestedRun fail
 check "…the nested cleanup did run" test -e "$T/nested-fail.ran"
 check "…its own processes were stopped" ownedStopped fail
