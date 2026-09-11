@@ -405,11 +405,15 @@ injectMark=$(markNowUTC)
 # ORDERING GATE 1 — NOTHING WAS CERTIFIED BEFORE THIS INSTANT. Counted over the closed window from
 # the restart to the mark, not "since the restart": the latter would be evaluated later, after the
 # transaction below has certified a block, and would then be a statement about the wrong interval.
+# Counted in REQUEST LOG ENTRIES, not rounds. Quietness is logged by the leader and by every
+# follower, so one certified round contributes several entries; #119's review corrected exactly this
+# reading. Zero entries means zero rounds either way, which is what this gate needs, and the wording
+# says which unit it is so the non-zero failure message cannot be misread as a round count.
 quietWindow=$(linesBetween "$recoveryMark" "$injectMark" "quiet=false" $providerLogs)
 if [ "$quietWindow" = "0" ]; then
-  pass "ordering: not one non-quiet round was certified between the restart and this instant — nothing arriving could have named the missed block"
+  pass "ordering: not one non-quiet request entry between the restart and this instant — no block was certified in that window, so nothing arriving could have named the missed block"
 else
-  fail "ordering: $quietWindow non-quiet round(s) were certified before the injection, so recovery is not separated from new activity"
+  fail "ordering: $quietWindow non-quiet request entr(ies) were logged before the injection, so recovery is not separated from new activity"
 fi
 
 # ORDERING GATE 2 — THE ANCHOR WAS ADOPTED BEFORE THE TRANSACTION EXISTED. The count is of adoption
@@ -451,11 +455,13 @@ fi
 
 # And the shard really did do state-changing work in this window, said as a property of the SHARD
 # rather than of this script: a non-quiet round was certified after the mark.
+# Again in request log entries: several per certified round, so this says "state-changing work was
+# certified here", not how many blocks. How many blocks is the height comparison just above.
 newWork=$(nonQuietSince "$injectMark" $providerLogs)
 if [ "$newWork" -ge 1 ]; then
-  pass "$newWork non-quiet round(s) were certified after the injection mark — this phase contains real work, unlike every phase before it"
+  pass "$newWork non-quiet request entr(ies) logged after the injection mark — this phase contains state-changing work certified by the shard, unlike every phase before it"
 else
-  fail "no non-quiet round was certified after the injection mark, so there is no new work to follow"
+  fail "not one non-quiet request entry after the injection mark, so the shard certified no new work to follow"
 fi
 
 # THE RECOVERED NODE FOLLOWS IT. Waited for on the executor, because reaching the block is the claim;
