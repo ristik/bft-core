@@ -133,6 +133,9 @@ func NewBFTClient(
 	if len(shardConfHash) == 0 {
 		return nil, errors.New("no shard configuration hash: a certificate would then be accepted whatever configuration it was issued under")
 	}
+	if err := validateShardConfHashWidth(shardConfHash); err != nil {
+		return nil, err
+	}
 	if peer == nil {
 		return nil, errors.New("peer is nil")
 	}

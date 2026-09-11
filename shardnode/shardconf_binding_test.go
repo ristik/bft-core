@@ -237,3 +237,16 @@ func TestNewBFTClientRequiresTheConfiguredShardConfiguration(t *testing.T) {
 		stubTrustBaseStore{tb: f.tb}, &recordingDriver{}, nil, DefaultBFTClientOptions)
 	require.ErrorContains(t, err, "no shard configuration hash")
 }
+
+func TestMalformedConfiguredShardHashRefusedBeforeUse(t *testing.T) {
+	for _, size := range []int{1, 31, 33} {
+		hash := make([]byte, size)
+		_, err := New(nil, nil, nil, authPartitionID, types.ShardID{}, hash, nil, nil, nil, nil, nil, BFTClientOptions{})
+		require.ErrorContains(t, err, "malformed shard configuration hash")
+		_, err = NewBFTClient(nil, nil, nil, authPartitionID, types.ShardID{}, hash, nil, nil, nil, BFTClientOptions{})
+		require.ErrorContains(t, err, "malformed shard configuration hash")
+		// A malformed expectation is refused before dereferencing the certificate or looking up trust.
+		err = verifyRestoredLUC(nil, stubTrustBaseStore{}, authPartitionID, types.ShardID{}, hash)
+		require.ErrorContains(t, err, "malformed shard configuration hash")
+	}
+}

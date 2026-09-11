@@ -74,6 +74,9 @@ func New(
 	if len(shardConfHash) == 0 {
 		return nil, errors.New("no shard configuration hash: this node could not tell a certificate for its own shard configuration from one issued under another")
 	}
+	if err := validateShardConfHashWidth(shardConfHash); err != nil {
+		return nil, err
+	}
 	shardConfHash = bytes.Clone(shardConfHash)
 
 	client, err := NewBFTClient(peer, net, signer, partitionID, shardID, shardConfHash, trustBaseStore, nil, log, clientOpts)
@@ -245,13 +248,9 @@ seal's root-quorum signatures against the trust base for the certificate's root 
 the shard-tree and unicity-tree inclusion paths against the sealed root hash, and that
 the certificate is for this node's partition and shard.
 
-What it does NOT check, stated plainly rather than implied: the expected shard
-configuration hash. Verify takes a shardConfHash argument and the live network path
-passes nil, which means "accept the certificate's own ShardConfHash without comparing it
-to the configuration this node was started with". Passing the configured hash here would
-require plumbing the shard conf into New, which is an interface change belonging to
-F2 (#10) — it is split out deliberately rather than papered over. Nothing in this
-function should be described as enforcing the configured shard hash.
+The expected shard configuration hash is supplied from this node's startup configuration,
+not the checkpoint. Both live delivery and restoration compare it through UC.Verify.
+An absent or malformed expected hash is refused before it can disable that comparison.
 
 The trust base is taken from the configured store, never from the checkpoint. An epoch
 the store does not know is a failure, not a reason to trust the file: the checkpoint
@@ -270,12 +269,24 @@ func verifyRestoredLUC(uc *types.UnicityCertificate, trustBaseStore TrustBaseSto
 	if len(shardConfHash) == 0 {
 		return errors.New("no shard configuration hash configured, so the certificate's shard configuration cannot be checked")
 	}
+	if err := validateShardConfHashWidth(shardConfHash); err != nil {
+		return err
+	}
 	tb, err := trustBaseStore.GetByEpoch(context.Background(), uc.GetRootEpoch())
 	if err != nil {
 		return fmt.Errorf("loading trust base for root epoch %d: %w", uc.GetRootEpoch(), err)
 	}
 	if err := uc.Verify(tb, crypto.SHA256, partitionID, shardID, shardConfHash); err != nil {
 		return fmt.Errorf("verifying certificate: %w", err)
+	}
+	return nil
+}
+
+// validateShardConfHashWidth rejects malformed local expectations before network work.
+// The certificate profile and configuration hash routine both use SHA-256.
+func validateShardConfHashWidth(hash []byte) error {
+	if len(hash) != crypto.SHA256.Size() {
+		return fmt.Errorf("malformed shard configuration hash: got %d bytes, want %d", len(hash), crypto.SHA256.Size())
 	}
 	return nil
 }

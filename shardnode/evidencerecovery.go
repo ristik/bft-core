@@ -169,6 +169,9 @@ func NewRecoveryStack(opts RecoveryOptions, deps RecoveryDeps) (*RecoveryStack, 
 			// configuration it does not run.
 			return nil, fmt.Errorf("recovery lifecycle: recovery is enabled with no shard configuration hash — the evidence predicate would then not check the configuration at all")
 		}
+		if err := validateShardConfHashWidth(deps.ShardConfHash); err != nil {
+			return nil, err
+		}
 		req, err := NewEvidenceRequester(RecoveryConfig{
 			PartitionID:   deps.PartitionID,
 			ShardID:       deps.ShardID,
