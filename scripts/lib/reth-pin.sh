@@ -232,14 +232,22 @@ rethEvidenceCollect() {
 # private key found under <nodes-dir> is searched for verbatim, so a secret that leaked into a log
 # line is caught too. It is deliberately independent of the collector: it re-reads the archive rather
 # than trusting what was meant to be copied.
+#
+# Exit status separates the two questions a caller asks of an archive:
+#   0  validated: complete and secret-free
+#   1  incomplete but secret-free: a required file or node log is missing, and it is still safe to
+#      publish — a failed run's partial evidence is exactly what must reach whoever diagnoses it
+#   2  NOT publishable: a secret was found, or the archive is missing, unreadable or does not
+#      extract, so its contents cannot be vouched for
+# rethEvidenceSelect publishes on 0 and 1 and quarantines on 2.
 rethEvidenceValidate() {
-  local archive=$1 nodes=${2:-} minLogs=${3:-0} tmp bad=0 names v logs req
+  local archive=$1 nodes=${2:-} minLogs=${3:-0} tmp bad=0 unsafe=0 names v logs req
   shift 3 2>/dev/null || shift $#
-  if [ ! -s "$archive" ]; then echo "reth-evidence: FAIL archive $archive is missing or empty"; return 1; fi
-  if ! names=$(tar tzf "$archive" 2>/dev/null); then echo "reth-evidence: FAIL archive $archive is unreadable"; return 1; fi
-  tmp=$(mktemp -d) || return 1
+  if [ ! -s "$archive" ]; then echo "reth-evidence: FAIL archive $archive is missing or empty"; return 2; fi
+  if ! names=$(tar tzf "$archive" 2>/dev/null); then echo "reth-evidence: FAIL archive $archive is unreadable"; return 2; fi
+  tmp=$(mktemp -d) || return 2
   if ! tar xzf "$archive" -C "$tmp" 2>/dev/null; then
-    echo "reth-evidence: FAIL archive $archive does not extract"; rm -rf "$tmp"; return 1
+    echo "reth-evidence: FAIL archive $archive does not extract"; rm -rf "$tmp"; return 2
   fi
 
   for req in "$@"; do
@@ -247,18 +255,18 @@ rethEvidenceValidate() {
   done
   if echo "$names" | grep -qE '(^|/)(keys\.json|jwt\.hex|[^/]*\.key)$'; then
     echo "reth-evidence: FAIL secret file(s) in archive: $(echo "$names" | grep -E '(^|/)(keys\.json|jwt\.hex|[^/]*\.key)$' | tr '\n' ' ')"
-    bad=1
+    unsafe=1
   fi
   if grep -rlq '"privateKey"' "$tmp" 2>/dev/null; then
     echo "reth-evidence: FAIL a \"privateKey\" field appears in: $(grep -rl '"privateKey"' "$tmp" | sed "s|$tmp/||" | tr '\n' ' ')"
-    bad=1
+    unsafe=1
   fi
   if [ -n "$nodes" ] && [ -d "$nodes" ]; then
     while IFS= read -r v; do
       [ -n "$v" ] || continue
       if grep -rlqF -- "$v" "$tmp" 2>/dev/null; then
         echo "reth-evidence: FAIL a secret value from $nodes appears verbatim in: $(grep -rlF -- "$v" "$tmp" | sed "s|$tmp/||" | tr '\n' ' ')"
-        bad=1
+        unsafe=1
       fi
     done < <(rethEvidenceSecretValues "$nodes")
   fi
@@ -268,8 +276,91 @@ rethEvidenceValidate() {
     bad=1
   fi
   rm -rf "$tmp"
+  if [ "$unsafe" -ne 0 ]; then
+    echo "reth-evidence: $archive is NOT publishable: it contains a secret"
+    return 2
+  fi
   [ "$bad" -eq 0 ] || return 1
   echo "reth-evidence: archive $archive validated: ${*:-no required files}, $logs node log(s), no secret by name, field or value"
+}
+
+# rethEvidenceSelect <out-dir> <quarantine-dir> <nodes-dir|""> <min-node-logs> <required-names> <archive...>
+#
+# Decides, per archive, what may be published, and puts exactly that into <out-dir> — the only
+# directory a workflow uploads. <required-names> is one space-separated word list.
+#
+#   validated, or incomplete but secret-free  -> copied into <out-dir>, its validation report beside it
+#   not publishable (secret, unreadable, ...) -> MOVED into <quarantine-dir>, never uploaded; a
+#                                                <name>.REJECTED.txt diagnostic is published instead,
+#                                                naming what was found where, never the value
+#   missing                                   -> recorded as missing
+#
+# <out-dir>/MANIFEST.txt records every verdict with the archive's sha256. The published directory is
+# then scanned once more for every secret value, so a diagnostic cannot carry what it reports. Returns
+# nonzero if anything was rejected or missing (a secret in the evidence is itself a failure), zero if
+# everything given was published.
+#
+# Why this exists: validation used to set a failure status and leave the archive where it was, and
+# the workflow uploaded that path with always() — so a job would have published the very archive it
+# had just found a JWT in.
+rethEvidenceSelect() {
+  local out=$1 quar=$2 nodes=$3 minLogs=$4 required=$5 a name report rc sha verdict v bad=0 n=0
+  shift 5
+  mkdir -p "$out" "$quar" || { echo "reth-evidence: FAIL cannot create $out or $quar"; return 1; }
+  chmod 700 "$quar" 2>/dev/null
+  : >>"$out/MANIFEST.txt"
+  [ $# -gt 0 ] || { echo "(no archive was given)" >>"$out/MANIFEST.txt"; echo "reth-evidence: FAIL no archive to select"; return 1; }
+  for a in "$@"; do
+    name=$(basename "$a")
+    if [ ! -e "$a" ]; then
+      echo "$name MISSING — no archive at $a" >>"$out/MANIFEST.txt"
+      echo "reth-evidence: FAIL no archive at $a — nothing to publish for it"
+      bad=1
+      continue
+    fi
+    # shellcheck disable=SC2086 # required is a word list by contract
+    report=$(rethEvidenceValidate "$a" "$nodes" "$minLogs" $required 2>&1); rc=$?
+    sha=$(rethPinSha256 "$a")
+    if [ "$rc" -le 1 ]; then
+      verdict=validated; [ "$rc" -eq 1 ] && verdict="incomplete, secret-free"
+      if cp "$a" "$out/$name" && echo "$report" >"$out/$name.validation.txt"; then
+        echo "$name sha256=$sha published ($verdict)" >>"$out/MANIFEST.txt"
+        echo "reth-evidence: publishing $name ($verdict)"
+        n=$((n + 1))
+      else
+        rm -f "$out/$name" "$out/$name.validation.txt"
+        echo "$name sha256=$sha NOT published — could not be copied into $out" >>"$out/MANIFEST.txt"
+        echo "reth-evidence: FAIL could not copy $name into $out"
+        bad=1
+      fi
+    else
+      if ! mv "$a" "$quar/$name"; then
+        # It stays where it is — which is never the upload directory — but say so loudly.
+        echo "reth-evidence: FAIL could not move rejected $a into $quar; it is NOT in $out, and must not be shared"
+      fi
+      {
+        echo "REJECTED: $name (sha256 $sha) was not published."
+        echo "It was moved to $quar/$name on the machine that ran the lane, and was not uploaded."
+        echo "Validation found:"
+        echo "$report"
+      } >"$out/$name.REJECTED.txt"
+      echo "$name sha256=$sha REJECTED — quarantined, not published; see $name.REJECTED.txt" >>"$out/MANIFEST.txt"
+      echo "reth-evidence: FAIL $name is not publishable — quarantined in $quar, a diagnostic published instead"
+      bad=1
+    fi
+  done
+  if [ -n "$nodes" ] && [ -d "$nodes" ]; then
+    while IFS= read -r v; do
+      [ -n "$v" ] || continue
+      if grep -rlqF -- "$v" "$out" 2>/dev/null; then
+        echo "reth-evidence: FAIL a secret value appears in the upload directory itself: $(grep -rlF -- "$v" "$out" | tr '\n' ' ') — removed"
+        grep -rlF -- "$v" "$out" | while IFS= read -r f; do rm -f "$f"; done
+        bad=1
+      fi
+    done < <(rethEvidenceSecretValues "$nodes")
+  fi
+  echo "reth-evidence: $n archive(s) published to $out; see $out/MANIFEST.txt"
+  return $bad
 }
 
 # rethEvidenceSecretValues <nodes-dir> prints, one per line, every JWT secret and private key found

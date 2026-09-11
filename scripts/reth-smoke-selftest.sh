@@ -184,6 +184,36 @@ check "…the archive is still produced and inspectable, holding what could be c
 check "…it validates on its own, which is why validation alone was not enough" grep -q "reth-evidence: archive .*obstructed.tar.gz validated" "$T/obstructed.out"
 check "…and the failed copy is recorded in the archived run log" sh -c "tar xzf '$T/ev/obstructed.tar.gz' -O obstructed/run.log | grep -q 'cannot create .*nodes/evm1'"
 rm -rf "$SN"; refuses "a leaked secret fails the lane even when the scenarios pass" "appears verbatim" smoke "$stub"' && echo "jwt $(cat $NODES/evm1/jwt.hex)" >>"$NODES/evm1/debug.log"' leak
+# Publication. Each workflow's selection step is run here verbatim — extracted from the YAML, in a
+# directory laid out the way the runner's checkout is — against archives the real supervisor just
+# produced: one whose scenarios leaked the JWT, and one of an ordinary (injected) failure, whose safe
+# evidence must still be published. The stub writes the same JWT on every run, so $SN holds it.
+wfStep() { awk -v n="name: $2" 'index($0,n){f=1} f&&/run: >-/{r=1;next} r&&NF==0{exit} r{printf "%s ",$0}' "$1"; }
+wfDir() { rm -rf "$T/wf"; mkdir -p "$T/wf"; ln -s "$PWD/scripts" "$T/wf/scripts"; ln -s "$SN" "$T/wf/test-nodes"; }
+smokeSelect=$(wfStep .github/workflows/reth-smoke.yml "Select publishable evidence")
+faultSelect=$(wfStep .github/workflows/reth-fault.yml "Validate and select publishable evidence")
+check "both workflows have a selection step, and upload only its directory" sh -c "[ -n '$smokeSelect' ] && [ -n '$faultSelect' ] && [ \$(grep -c 'path: evidence-upload/' .github/workflows/reth-smoke.yml) -eq 1 ] && [ \$(grep -c 'path: evidence-upload/' .github/workflows/reth-fault.yml) -eq 1 ] && ! grep -q 'path: .*tar.gz' .github/workflows/reth-smoke.yml .github/workflows/reth-fault.yml"
+wfDir; cp "$T/ev/leak.tar.gz" "$T/wf/reth-smoke-evidence.tar.gz"; leakSha=$(rethPinSha256 "$T/wf/reth-smoke-evidence.tar.gz")
+refuses "the smoke workflow's selection rejects the archive with the leaked JWT" "is not publishable" sh -c "cd '$T/wf' && $smokeSelect"
+check "…nothing of it is in the upload directory" sh -c "! ls '$T/wf/evidence-upload' | grep -q 'tar.gz\$'"
+check "…it is quarantined, intact, outside the upload directory" test "$(rethPinSha256 "$T/wf/evidence-quarantine/reth-smoke-evidence.tar.gz" 2>/dev/null)" = "$leakSha" -a ! -e "$T/wf/reth-smoke-evidence.tar.gz"
+check "…a diagnostic is published in its place, naming where the secret was" grep -q "appears verbatim in: .*debug.log" "$T/wf/evidence-upload/reth-smoke-evidence.tar.gz.REJECTED.txt"
+check "…and no published file carries the secret value" sh -c "! grep -rqF '$jwt' '$T/wf/evidence-upload'"
+check "…the manifest records the rejection" grep -q "reth-smoke-evidence.tar.gz sha256=$leakSha REJECTED" "$T/wf/evidence-upload/MANIFEST.txt"
+wfDir; cp "$T/ev/inject.tar.gz" "$T/wf/reth-smoke-evidence.tar.gz"; injSha=$(rethPinSha256 "$T/wf/reth-smoke-evidence.tar.gz")
+check "the smoke workflow's selection publishes an ordinary failed run's evidence" sh -c "cd '$T/wf' && $smokeSelect"
+check "…byte-identical, and recorded as published" sh -c "[ \"\$(. scripts/lib/reth-pin.sh; rethPinSha256 '$T/wf/evidence-upload/reth-smoke-evidence.tar.gz')\" = '$injSha' ] && grep -q 'sha256=$injSha published (validated)' '$T/wf/evidence-upload/MANIFEST.txt'"
+# The fault lane selects per archive: one run's leak must not withhold another run's evidence.
+wfDir; mkdir -p "$T/wf/evidence-runs"
+fa() { local d; d=$(mktemp -d "$T/fa.XXXX"); mkdir -p "$d/$1/nodes/evm1"; echo "run $1" >"$d/$1/manifest.txt"; echo "certified ${2:-}" >"$d/$1/nodes/evm1/debug.log"; tar czf "$T/wf/evidence-runs/$1.tar.gz" -C "$d" "$1"; }
+fa run-a; fa run-b "authorization $jwt"; fa run-c; printf 'not a tarball' >"$T/wf/evidence-runs/run-d.tar.gz"
+refuses "the fault workflow's selection rejects only the leaking and the unreadable archive" "run-b.tar.gz is not publishable" sh -c "cd '$T/wf' && $faultSelect"
+check "…publishing the other two" test -s "$T/wf/evidence-upload/run-a.tar.gz" -a -s "$T/wf/evidence-upload/run-c.tar.gz"
+check "…quarantining the leaking one and the unreadable one, which cannot be vouched for" test -s "$T/wf/evidence-quarantine/run-b.tar.gz" -a -s "$T/wf/evidence-quarantine/run-d.tar.gz" -a ! -e "$T/wf/evidence-upload/run-b.tar.gz" -a ! -e "$T/wf/evidence-upload/run-d.tar.gz"
+check "…and no published file carries the secret value" sh -c "! grep -rqF '$jwt' '$T/wf/evidence-upload'"
+wfDir
+refuses "the fault workflow's selection with no archive at all fails, and says so" "no archive at" sh -c "cd '$T/wf' && $faultSelect"
+check "…still leaving a manifest to upload" grep -q "MISSING" "$T/wf/evidence-upload/MANIFEST.txt"
 rm -rf "$SN"
 refuses "the wrong client stops the lane before any scenario" "reth-smoke: FAIL" \
   env RETH_SMOKE_NODES_DIR=$SN RETH_SMOKE_TEST_SCENARIOS="touch $T/scenario-ran" ./scripts/reth-smoke.sh --reth-bin "$T/wrong/reth" --run-dir "$T/ev/wrongpin"

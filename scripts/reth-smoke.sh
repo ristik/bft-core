@@ -187,7 +187,9 @@ if [ "${RETH_SMOKE_SUPERVISED:-0}" != "1" ]; then
   rm -f "$runDir/.finished" "$runDir/.scenarios-started"
   mkdir -p "$(dirname "$archive")"
   if tar czf "$archive" -C "$(dirname "$runDir")" "$(basename "$runDir")" 2>/dev/null; then
-    rethEvidenceValidate "$archive" "$nodesDir" "$minLogs" provenance.txt run.log || verdict=1
+    rethEvidenceValidate "$archive" "$nodesDir" "$minLogs" provenance.txt run.log; validStatus=$?
+    [ "$validStatus" -eq 0 ] || verdict=1
+    [ "$validStatus" -eq 2 ] && echo "reth-smoke: $archive must NOT be shared; the workflows publish only what 'reth-pin.sh select-upload' selects, and it quarantines this"
   else
     echo "reth-smoke: FAIL the evidence archive could not be written; the evidence is only in $runDir"
     verdict=1

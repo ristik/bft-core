@@ -70,25 +70,22 @@ jobs:
           INJECT: ${{ inputs.inject_failure && '-F' || '' }}
         run: ./scripts/reth-chaos.sh -s "$SCENARIOS" -t 2 $INJECT
 
-      - name: Validate evidence archives
+      # Every archive is validated and selected for publication on its own: a secret found in one
+      # quarantines that archive (never uploaded; a diagnostic is published instead) without
+      # withholding the others. See reth-smoke.yml for why upload is never of the raw paths.
+      - name: Validate and select publishable evidence
         if: always()
-        run: |
-          set -uo pipefail
-          status=0 found=0
-          for a in evidence-runs/*.tar.gz; do
-            [ -f "$a" ] || continue
-            found=1
-            ./scripts/reth-pin.sh validate-archive "$a" --require manifest.txt --min-node-logs 1 || status=1
-          done
-          [ "$found" -eq 1 ] || { echo "::error::no evidence archive was produced"; exit 1; }
-          exit $status
+        run: >-
+          ./scripts/reth-pin.sh select-upload --out evidence-upload --quarantine evidence-quarantine
+          --nodes test-nodes --require manifest.txt --min-node-logs 1
+          evidence-runs/*.tar.gz
 
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: reth-fault-evidence
-          path: evidence-runs/*.tar.gz
+          path: evidence-upload/
           if-no-files-found: error
           retention-days: 14
 

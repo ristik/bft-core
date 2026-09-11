@@ -67,14 +67,26 @@ jobs:
           INJECT: ${{ github.event_name == 'workflow_dispatch' && inputs.inject_failure && '--inject-failure' || '' }}
         run: ./scripts/reth-smoke.sh --fetch --cache-dir ~/.cache/reth-pin --archive reth-smoke-evidence.tar.gz $INJECT
 
-      # The archive is produced and validated by the lane itself (secrets excluded by construction
-      # and their absence checked by name, field and value), on success, failure and cancellation.
+      # Publication is a separate, explicit decision per archive. The lane validates its archive, but a
+      # validation failure leaves the archive where it was — so uploading that path with always() once
+      # meant a job would upload the very archive it had just found a JWT in. Only an archive
+      # re-validated here as secret-free is copied into the upload directory (complete or, labelled,
+      # incomplete: a failed run's evidence must still be published); a rejected archive is moved to a
+      # quarantine directory that is never uploaded, and only a diagnostic naming what was found — no
+      # secret value — is published in its place. evidence-upload/MANIFEST.txt records each verdict.
+      - name: Select publishable evidence
+        if: always()
+        run: >-
+          ./scripts/reth-pin.sh select-upload --out evidence-upload --quarantine evidence-quarantine
+          --nodes test-nodes --require provenance.txt --require run.log
+          reth-smoke-evidence.tar.gz
+
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: reth-smoke-evidence
-          path: reth-smoke-evidence.tar.gz
+          path: evidence-upload/
           if-no-files-found: error
           retention-days: 14
 
