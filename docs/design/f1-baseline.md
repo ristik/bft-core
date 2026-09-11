@@ -346,6 +346,13 @@ F1b (#89) binds what the node can actually verify before it votes, and records w
 | Chain id | `eth_chainId` **on both the authenticated Engine connection and the plain one**, vs the shard conf's `chain_id` param | mismatch on either connection, the id being unreadable, a `null` id, or the two connections disagreeing |
 | **Endpoint pairing** | `eth_getBlockByNumber("0x0")` on both connections, compared to each other | the two connections reporting different genesis blocks. Runs unconditionally — no operator configuration needed |
 | **Genesis identity** | `eth_getBlockByNumber("0x0")` **on both connections**, vs `--expected-genesis-hash` | mismatch, unreadable genesis, a `null` result, malformed expected value |
+| **Execution profile** | `eth_config` (EIP-7910) on the plain connection, vs the pinned profile in `engineapi/profile.go` | a fork scheduled after the current one (`next`/`last` not null, or absent), a current fork activated after genesis, system contracts, blob schedule or precompiles other than Cancun's, a chain id other than the shard conf's, or no `eth_config` at all. Unconditional |
+
+The configured-identity input itself is also refused when absent: a shard conf with no `chain_id`
+partition param stops startup with "requires a chain_id partition param in the shard conf, which has
+none" (`TestShardNodeRun_RefusesAShardConfWithNoChainID`). That is a local configuration failure, and
+it is tested separately from every client-side chain-id failure because an unavailable RPC cannot
+stand in for it.
 
 Why both connections. `--engine-url` and `--eth-url` are separate flags, so nothing structurally
 stops an operator from pointing them at two different execution clients — and the Engine connection
@@ -382,33 +389,58 @@ a refusal, so a regression that lets startup proceed must be a failure rather th
   address the same client **process**: two clients started from the same genesis agree on both
   values and only diverge once they build different blocks. Requiring the two URLs to share a
   host/authority would not help either — that is a string comparison, not a check on the client.
-- **Not fork-schedule agreement.** A matching genesis hash binds the genesis *block*; it says
-  nothing about a fork scheduled by timestamp later in the chain's life.
+- **Not fork-schedule agreement from genesis alone.** A matching genesis hash binds the genesis
+  *block*; a fork that has not activated changes no genesis header field. Measured on the pinned
+  client: the generated spec with and without `pragueTime: 4102444800` gives the same chain id and
+  the same block-0 hash. The execution-profile check below is what binds the schedule.
 
-**The fork schedule is an operator constraint, not a verified guarantee.** An earlier revision of
-this section credited `ubft engine-api genesis` plus the capability check with a fork-schedule
-guarantee. That is also wrong, for two reasons: generating the intended chain spec file locally is
-no evidence that the remote endpoint *loaded* it, and two specs with identical genesis state and
-identical current capabilities can still schedule different future forks —
-`engine_exchangeCapabilities` reports what a client *build* supports, not what its loaded spec has
-scheduled. So the pinned deployment profile records it as a constraint an operator must satisfy:
+**The fork schedule is verified, not assumed — a second correction.** Earlier revisions of this
+section first credited `ubft engine-api genesis` plus the capability check with a fork-schedule
+guarantee, which was wrong (generating a file locally is no evidence the remote client loaded it, and
+`engine_exchangeCapabilities` reports what a *build* supports, not what a loaded spec schedules), and
+then recorded the schedule as an operator constraint that "would need a fork-schedule read the Engine
+API does not offer". The second statement was true of the Engine API and wrong as a conclusion, the
+same way the endpoint-pairing gap was: the standard `eth_*` namespace has had the read since EIP-7910.
+`eth_config` reports the loaded spec's current fork and the next and last scheduled ones, and the
+pinned client implements it (`EthConfigApi`, `crates/rpc/rpc-eth-api/src/helpers/config.rs`).
 
-> The execution client must be started from a chain spec that activates shanghai and cancun at
-> genesis and schedules nothing after. No startup check verifies this; a spec that activates a later
-> fork by timestamp will pass every check above and then require Engine methods this adapter does
-> not call.
+**The pinned profile** — what this adapter can drive, and so what startup now requires eth_config to
+report (`engineapi/profile.go`):
 
-Closing *that* would need a fork-schedule read the Engine API does not offer — unlike the endpoint
-pairing above, which the standard already supported all along.
+| field of `eth_config` | pinned value | why |
+|---|---|---|
+| `next`, `last` | present and `null` | nothing scheduled after the current fork; absence is refused, not read as "nothing" |
+| `current.activationTime` | `0` | every timestamp fork active from genesis |
+| `current.systemContracts` | exactly `BEACON_ROOTS_ADDRESS` = `0x000f3df6…beac02` | Cancun's, and none of Prague's |
+| `current.blobSchedule` | target 3, max 6, update fraction 3338477 | Cancun's |
+| `current.precompiles` | exactly the ten Cancun precompiles, `0x01`–`0x0a` | no BLS12 set (Prague), nothing custom |
+| `current.chainId` | the shard conf's `chain_id` | a third, independent chain-identity read |
+| `current.forkId` | **not pinned** — reported | a checksum over the genesis hash and activated forks, so it varies per deployment; the genesis checks bind only its genesis contribution, not the full checksum |
+
+Refused on the real client in `scripts/reth-paired-devnet.sh` §3f: a client started from the funded
+spec plus a future `pragueTime`, whose chain id **and genesis hash** both equal the configured ones —
+the premise is asserted before the refusal — is refused at the execution-profile check, and not at the
+genesis check. `engineapi/testdata/` holds both clients' recorded `eth_config` results, which the unit
+and CLI fixtures replay.
+
+**Which connection, and what that leaves.** `eth_config` is not in the `eth_*` subset the Engine API
+requires on the authenticated port, and the pinned client answers `Method not found` there
+(measured). So the profile is read over `--eth-url`, and it binds the Engine connection's schedule only
+through the pairing checks — which is the same-process assumption in the first bullet above, not a
+new one. What remains an operator constraint is therefore narrower than before: configure the two
+URLs for one client. Operator-facing guidance, including compatibility for existing deployments, is
+`docs/engine-api-adapter.md` §4.1.
 
 ### 5.6 What this lane still does not cover
 
 It exercises one transaction through one leader. It is not a load test, not a fault-injection
 exercise against real reth (`scripts/chaos-evm.sh` remains fake-executor only), and it does not
-exercise mixed cadence or multiple partitions — F8 (#16). The mismatch negatives cover chainId and
-an unreachable Engine API; they do not cover a client that speaks a *different* Engine API version
-set, which needs a second reth build to test against and belongs with F3 (#11)'s version
-negotiation.
+exercise mixed cadence or multiple partitions — F8 (#16). The mismatch negatives against real reth
+cover chain id, an unreachable Engine API, a different genesis, a mispaired Engine endpoint and a
+later scheduled fork (§5.8). A client offering a different Engine API *capability set* is covered by
+the controlled fixture in `TestShardNodeRun_RefusesIncompatibleExecutionClient`, which is what #89
+asks for; interoperability with another real client is a separate question, and F3 (#11)'s future
+custom profile is another.
 
 ### 5.4 Known-limitations register
 

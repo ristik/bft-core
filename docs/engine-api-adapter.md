@@ -85,16 +85,61 @@ calls `engine_exchangeCapabilities` at startup with that list and fails closed i
 the wrong URL, a rejected JWT, or a reth build that doesn't speak V3 at all are caught before the
 first round, not discovered as a mysteriously stalled one.
 
-Capability exchange alone isn't sufficient, though: a chain spec that schedules Prague (or later) at
-genesis would still pass that check on a reth build that *also* speaks V4 — reth would silently
-require `engine_newPayloadV4`+ for any block once that fork activates, and this adapter would start
-failing with no signal pointing at why. `ubft engine-api genesis` is the other half of the guarantee:
-it derives `genesis.json` from the shard conf (so `chainId` cannot drift between the two files) and
-explicitly schedules **Shanghai and Cancun at genesis (timestamp 0)**, leaving every fork after Cancun
-— Prague, Osaka, and so on — out of the schedule entirely. See
-`docs/adr/0001-executor-boundary.md` decision 3 for the full reasoning, including what upgrading past
-Cancun would require (a new adapter capability list, a new genesis fork schedule, and a version bump
-treated as a real compatibility change, not a config tweak).
+Capability exchange alone isn't sufficient, though: it reports what a client *build* supports, not
+what its loaded chain spec has *scheduled*. A spec that schedules Prague (or later) would pass it on a
+reth build that also speaks V4, and reth would then require `engine_newPayloadV4`+ once that fork
+activates. `ubft engine-api genesis` generates the intended spec — it derives `genesis.json` from the
+shard conf (so `chainId` cannot drift between the two files) and schedules **Shanghai and Cancun at
+genesis (timestamp 0)**, leaving every fork after Cancun out of the schedule entirely — but generating
+a file locally is no evidence that the remote client loaded it. So startup also reads the loaded
+schedule back from the client with the standard `eth_config` (EIP-7910), and refuses anything other
+than the pinned profile; §4.1 lists every check. See `docs/adr/0001-executor-boundary.md` decision 3
+for what upgrading past Cancun would require (a new adapter capability list, a new genesis fork
+schedule, a new pinned profile in `engineapi/profile.go`, and a version bump treated as a real
+compatibility change, not a config tweak).
+
+### 4.1 Binding a shard node to its execution client (operator guidance)
+
+`shard-node run --executor engine-api` refuses to start — before it can submit anything or vote —
+unless every check below passes, in this order. `shard-node doctor` runs the same checks, through the
+same code, and reports each one.
+
+| # | Check | Reads | Refuses when | Fix |
+|---|---|---|---|---|
+| 1 | Capability set | `engine_exchangeCapabilities` on `--engine-url` | a required V3 method is missing; the exchange fails; the answer is malformed | point `--engine-url` at the client's **authenticated** port with the right `--jwt-secret` |
+| 2 | Configured chain id | the shard conf's `chain_id` partition param — **local configuration** | the param is absent | regenerate the shard conf with `--partition-params …,chain_id=<id>`; there is no default |
+| 3 | Chain id | `eth_chainId` on **both** URLs | either differs from the shard conf, is unreadable or `null` | the wrong client, or a genesis generated for a different shard conf |
+| 4 | Endpoint pairing | `eth_getBlockByNumber("0x0")` on both URLs | the two report different genesis blocks. Always on | `--engine-url` and `--eth-url` must address the same client |
+| 5 | Expected genesis | block 0 on both URLs vs `--expected-genesis-hash` | set, and different, unreadable or malformed | see below |
+| 6 | Execution profile | `eth_config` (EIP-7910) on `--eth-url` | the loaded spec is not **Cancun at genesis, nothing scheduled after** — a scheduled fork, a later activation, other system contracts, blob schedule or precompiles — or the client does not serve `eth_config` | start the client from a `genesis.json` produced by `ubft engine-api genesis`, **unedited** apart from the allocation |
+
+**`--eth-url` must expose the `eth` namespace** (`--http.api eth,…` on reth). `eth_config` lives there;
+the authenticated port does not serve it (the pinned client answers `Method not found`).
+
+**`--expected-genesis-hash` is optional, and should be set on every validator.** Without it, check 4
+still refuses two URLs that disagree with each other, but nothing establishes that the genesis they
+agree on is *this deployment's*. The value must come from the deployment's own records — the hash
+published with its `genesis.json` — never from the client being configured, which would compare a value
+with itself. `ubft` has no offline command that computes it; the allocation is not in the shard conf,
+and it changes the hash.
+
+**What passing all six does not establish**, so that nobody relies on it:
+
+- **That both URLs address the same client process.** Two clients started from the same genesis agree
+  on checks 3 and 4, and would agree on 6 if both loaded the pinned spec. Check 6 reads only
+  `--eth-url`, so it binds the Engine connection's schedule through that same assumption. Configure the
+  two URLs for one client, on one host.
+- **Every chain-spec parameter or the full fork checksum.** The profile checks the listed EIP-7910 fields; it does not attest to arbitrary execution-client configuration or implementation correctness.
+- **Anything about UC configuration.** Checking that certificates carry the expected shard
+  configuration hash is #10, and none of these checks discharges it.
+
+**Compatibility and migration.** Check 2 has always been enforced; this revision adds its test.
+Check 6 is **new**: a node whose client has loaded a spec scheduling any fork after Cancun, or
+activating Cancun after genesis, or that does not implement EIP-7910, now refuses to start where it
+previously started. The pinned client (`189c0df3`, reth v2.5.0) implements `eth_config`, and a spec
+generated by `ubft engine-api genesis` passes unchanged — every lane in `scripts/` was checked to
+generate its spec that way and to expose `eth` on its plain port. There is no flag to skip the check,
+no on-disk format change and no protocol change; `doctor` gains an `execution profile` line.
 
 ## 5. The devp2p decision
 

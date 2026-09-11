@@ -46,10 +46,22 @@ type engineFixture struct {
 	genesisHash  string   // 0x-prefixed; empty means eth_getBlockByNumber returns an RPC error
 	nullChainID  bool     // eth_chainId succeeds with a JSON null result
 	nullBlock    bool     // eth_getBlockByNumber succeeds with a JSON null result
+	// ethConfig names an eth_config result recorded from the pinned client, under
+	// engineapi/testdata; empty means the pinned profile's own recording, so every case that is
+	// not about the fork schedule gets past that check for its own reason.
+	ethConfig    string
+	ethConfigErr bool // eth_config returns "Method not found", as a client without EIP-7910 would
 }
 
 func (f engineFixture) start(t *testing.T) *httptest.Server {
 	t.Helper()
+	cfgName := f.ethConfig
+	if cfgName == "" {
+		cfgName = "eth_config_cancun_at_genesis.json"
+	}
+	ethConfig, err := os.ReadFile(filepath.Join(repoRoot(t), "engineapi", "testdata", cfgName))
+	require.NoError(t, err)
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Method string `json:"method"`
@@ -61,6 +73,12 @@ func (f engineFixture) start(t *testing.T) *httptest.Server {
 		}
 
 		switch req.Method {
+		case "eth_config":
+			if f.ethConfigErr {
+				writeError(w, req.ID, "Method not found")
+				return
+			}
+			writeResult(w, req.ID, json.RawMessage(ethConfig))
 		case "engine_exchangeCapabilities":
 			if f.capErr {
 				w.WriteHeader(http.StatusInternalServerError)
@@ -141,6 +159,12 @@ func repoRoot(t *testing.T) string {
 // chain_id partition param is the real thing rather than a hand-written stand-in.
 func shardHome(t *testing.T, bin string) (home, shardConf, trustBase string) {
 	t.Helper()
+	return shardHomeWithParams(t, bin, "proof_type=exec,chain_id=31337")
+}
+
+// shardHomeWithParams is shardHome with the shard conf's partition params chosen by the caller.
+func shardHomeWithParams(t *testing.T, bin, partitionParams string) (home, shardConf, trustBase string) {
+	t.Helper()
 	root := repoRoot(t)
 	home = t.TempDir()
 
@@ -150,7 +174,7 @@ func shardHome(t *testing.T, bin string) (home, shardConf, trustBase string) {
 	run(t, root, bin, "shard-conf", "generate", "--home", home,
 		"--network-id", "3", "--partition-id", "8", "--partition-type-id", "8",
 		"--shard-id", "0x80", "--epoch-start", "1", "--t2-timeout", "2500",
-		"--partition-params", "proof_type=exec,chain_id=31337",
+		"--partition-params", partitionParams,
 		"--node-info", nodeInfo)
 	shardConf = filepath.Join(home, "shard-conf-8_0.json")
 	require.FileExists(t, shardConf)
@@ -243,6 +267,13 @@ func TestShardNodeRun_RefusesIncompatibleExecutionClient(t *testing.T) {
 		{"chain id is null", engineFixture{capabilities: all, nullChainID: true}, "client reports no chain id"},
 		{"chain id mismatch", engineFixture{capabilities: all, chainID: "0x7a6a"}, "chainId=31338, shard conf says 31337"},
 		{"genesis is null", engineFixture{capabilities: all, chainID: "0x7a69", nullBlock: true}, "no such block"},
+		// The fork schedule (#89 item 2). The recording is from a real client whose genesis is
+		// identical to the pinned profile's — only a later Prague is scheduled — so nothing before
+		// this check can refuse it.
+		{"a fork scheduled after Cancun", engineFixture{capabilities: all, chainID: "0x7a69", ethConfig: "eth_config_prague_scheduled.json"},
+			"startup execution-profile check"},
+		{"fork schedule unreadable", engineFixture{capabilities: all, chainID: "0x7a69", ethConfigErr: true},
+			"reading eth_config (EIP-7910) over the plain connection"},
 	}
 
 	for _, tc := range cases {
@@ -302,6 +333,44 @@ func TestShardNodeRun_AcceptsACompatibleFixture(t *testing.T) {
 	require.NotContains(t, out, "missing required capabilities", out)
 	require.NotContains(t, out, "chain-identity check", out)
 	require.NotContains(t, out, "endpoint-pairing check", out)
+	require.NotContains(t, out, "execution-profile check", out)
+}
+
+/*
+TestShardNodeRun_RefusesAShardConfWithNoChainID covers the one identity input that comes from local
+configuration rather than from the client: the shard conf's chain_id partition param.
+
+Every other chain-id case in this file is about the CLIENT's answer — unavailable, null, different.
+None of them shows what happens when the node itself has nothing to compare against, and an
+unavailable-RPC refusal cannot stand in for that: the failure is in the operator's file, and the
+diagnostic has to say so. The fixture here is fully compatible, so the refusal cannot come from it.
+*/
+func TestShardNodeRun_RefusesAShardConfWithNoChainID(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the CLI binary")
+	}
+	bin := buildUbft(t)
+	home, shardConf, trustBase := shardHomeWithParams(t, bin, "proof_type=exec")
+
+	// The premise: the generated shard conf really has no chain_id, rather than the test passing
+	// because the generator quietly supplied one.
+	raw, err := os.ReadFile(shardConf)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "chain_id", "premise: the shard conf must carry no chain_id param")
+	require.Contains(t, string(raw), "proof_type", "premise: the partition params were written at all")
+
+	srv := engineFixture{
+		capabilities: []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3"},
+		chainID:      "0x7a69",
+		genesisHash:  expectedGenesis,
+	}.start(t)
+	out, code, timedOut := runShardNode(t, bin, home, shardConf, trustBase, srv.URL, srv.URL, 45*time.Second)
+
+	require.False(t, timedOut, "must fail closed promptly, not hang or proceed:\n%s", out)
+	require.NotEqual(t, 0, code, "must exit non-zero:\n%s", out)
+	require.Contains(t, out, "requires a chain_id partition param in the shard conf, which has none", out)
+	require.NotContains(t, out, "shard node starting", "must refuse before announcing it is running")
+	require.NotContains(t, out, "submitting block certification request")
 }
 
 const (

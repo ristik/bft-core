@@ -125,17 +125,20 @@ one block, not just racing dissemination by a few hundred milliseconds — check
   for why devp2p, not the Unicity-side dissemination, is what backfills a validator that fell behind
   the *certified* chain.
 - That this reth instance's genesis hash matches every other validator's (`doctor`'s "genesis
-  agreement" check) — a validator on a different chain will report `SYNCING`/reject everything
+  hash" check, or `--expected-genesis-hash` set to the deployment's value on every node) — a validator on a different chain will report `SYNCING`/reject everything
   forever, not just transiently.
 
 ## Engine API startup fails closed
 
-`Adapter.CheckCapabilities` (also `doctor`'s "engine link" and "capability set" checks) refuses to
-start against an execution client that doesn't speak exactly the V3 method set this adapter requires,
-or whose chain spec schedules a fork past Cancun. See `docs/engine-api-adapter.md` §4 for why that's
-deliberate rather than a bug to work around — the fix is regenerating `genesis.json` via
-`ubft engine-api genesis` (not hand-editing a fork schedule) and/or checking the reth build's own
-version against what V3 requires, not loosening the check.
+Startup runs six checks before the node can vote; `docs/engine-api-adapter.md` §4.1 lists them in
+order, with what each reads and how to fix it, and `shard-node doctor` reports each one by name. Two
+are easy to confuse. `Adapter.CheckCapabilities` (doctor's "engine link") refuses a client that
+doesn't speak the V3 method set; it cannot see the chain spec's fork schedule, whatever an earlier
+revision of this entry said. `Adapter.CheckExecutionProfile` (doctor's "execution profile") is the
+check that refuses a spec scheduling a fork past Cancun, by reading `eth_config` from `--eth-url`.
+Both are deliberate rather than bugs to work around — the fix is regenerating `genesis.json` via
+`ubft engine-api genesis` (not hand-editing a fork schedule), exposing the `eth` namespace on the
+plain port, and/or checking the reth build against what V3 requires, not loosening a check.
 
 ## A restarted validator follows the shard but never submits again
 

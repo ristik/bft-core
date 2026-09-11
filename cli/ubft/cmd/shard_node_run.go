@@ -402,6 +402,16 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 				return nil, fmt.Errorf("engine-api executor failed its startup genesis check: %w", err)
 			}
 		}
+
+		// The loaded fork schedule, unconditionally. Neither chain id nor genesis binds it: a spec
+		// that schedules Prague for a later timestamp has the same genesis block as one that
+		// schedules nothing, and would pass every check above before requiring Engine methods this
+		// adapter does not call. eth_config (EIP-7910) is the standard read for it. Last, so that a
+		// mispairing or a wrong genesis is reported as that rather than as a profile difference.
+		if _, err := adapter.CheckExecutionProfile(ctx, wantChainID); err != nil {
+			return nil, fmt.Errorf("engine-api executor failed its startup execution-profile check "+
+				"(the execution client's chain spec is not the pinned %s profile): %w", engineapi.PinnedProfileName, err)
+		}
 		return adapter, nil
 
 	default:

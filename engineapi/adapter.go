@@ -63,9 +63,11 @@ func NewAdapter(cfg Config, log *slog.Logger) *Adapter {
 // genesis state and identical current capabilities can still schedule
 // different future forks.
 //
-// So the fork schedule is an OPERATOR CONSTRAINT of the pinned deployment
-// profile (docs/design/f1-baseline.md §5.8), not a property any startup
-// check verifies. What this check does buy is catching the wrong URL, the
+// So the fork schedule is verified separately, by CheckExecutionProfile
+// reading the standard eth_config (EIP-7910) — see profile.go. An earlier
+// revision of this comment called it an operator constraint no startup
+// check could verify; the Engine API offers no such read, but the eth_*
+// namespace does. What this check buys is catching the wrong URL, the
 // wrong JWT and a clearly incompatible client build before the node can
 // vote. Call it once, before Run.
 func (a *Adapter) CheckCapabilities(ctx context.Context) error {
@@ -135,8 +137,8 @@ func (a *Adapter) CheckChainID(ctx context.Context, want uint64) error {
 //
 // Scope: this binds the genesis BLOCK on both connections. It does not establish same-process
 // identity, and it does not establish agreement on any fork activation after genesis — a matching
-// genesis hash says nothing about a fork scheduled by timestamp later in the chain's life. See
-// CheckCapabilities on why no startup check can supply that guarantee.
+// genesis hash says nothing about a fork scheduled by timestamp later in the chain's life, because
+// a fork that has not activated changes no genesis header field. CheckExecutionProfile binds that.
 func (a *Adapter) CheckGenesisHash(ctx context.Context, want shardnode.Hash) error {
 	if len(want) == 0 {
 		return fmt.Errorf("engineapi: no expected genesis hash configured")
