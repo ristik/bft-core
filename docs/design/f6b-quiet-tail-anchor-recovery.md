@@ -1138,8 +1138,8 @@ reader:
   said so — quietness is logged by the leader and by every follower, so one certified round
   contributes several, and the first run of this lane reported "4 non-quiet rounds" for a phase that
   produced one block. The number was right and the unit was wrong; it is the correction §6.7 took.
-- **zero** adoption lines fall after the injection mark. That direction is deliberate: "an adoption
-  exists" would be satisfied by an adoption at any time, including one the transaction caused.
+- the pre-injection snapshot already contains adoption of the expected block. This check runs
+  before submission; it does not measure adoptions across the subsequent interval.
 
 The mark itself is a sub-second instant for the reason §8.1 established — a block certified 700 ms
 into the next phase would otherwise belong to both windows.
@@ -1149,8 +1149,8 @@ result depends on the recovered node being the entry point. What is then require
 certifies a block beyond the recovered one; the recovered node's executor reaches it; and it agrees
 with **every** survivor — read from them, at the same height — on block hash, on state root, and on
 the receipt for the new transaction. The final transaction total on every executor must be the setup
-total plus exactly one, so a node that replayed or double-executed is caught by a wrong total rather
-than passing as agreement.
+total plus exactly one. This checks canonical transaction inclusions, not internal execution
+attempts; replay idempotency is covered by the separate runtime fixtures.
 
 **And it still does not vote.** Under P-sign (#105) a restored process is non-voting for its
 lifetime, so "positive work after" cannot mean the recovered node signs the new block; it means the
@@ -1158,7 +1158,7 @@ node follows it, executes it, and agrees about it. Both halves are asserted — 
 continued silence — together with a check that the silence is not the node having gone back to
 refusing rounds, which would be following nothing at all.
 
-There is no control arm, deliberately. That a node with recovery off stays behind for ever is §6.7's
+There is no control arm, deliberately. That a node with recovery off stayed behind during the observation window is §6.7's
 result, measured on the same devnet one flag apart; repeating it here would double the runtime
 without adding to this claim. What this lane must establish instead is that the node had *already*
 recovered before the transaction existed, and that is what the two ordering checks do.

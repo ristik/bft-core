@@ -150,16 +150,16 @@ injects. Two checks hold the order rather than leaving it to the reader:
   injection mark, so no block was certified that could have named the missed block; the window is
   closed rather than open-ended because "since the restart", evaluated later, would be a statement
   about an interval that by then contains the new work;
-- **zero** adoption lines fall after the injection mark. Counted that way round deliberately: "an
-  adoption exists" is satisfied by an adoption at any time, including one the transaction caused.
+- the pre-injection snapshot already contains adoption of the expected block. This check runs
+  before submission; it does not measure adoptions across the subsequent interval.
 
 The injection mark is a sub-second instant, not a whole second, for the reason #121 established — a
 block certified 700 ms into the next phase would otherwise belong to both windows.
 
 The transaction goes to a **peer**, not to the recovered node's own executor, so nothing about the
 result depends on the recovered node being the entry point. And the final transaction total on every
-executor must be the setup total plus **exactly one**: a node that replayed or double-executed shows
-up as a wrong total rather than passing as agreement.
+executor must be the setup total plus **exactly one**. This checks canonical transaction inclusions;
+it does not count internal execution attempts. Replay idempotency has separate fixture evidence.
 
 **And what "after" can mean here, which is not obvious.** P-sign (#105) keeps a restored process
 non-voting for its whole lifetime, so the recovered node cannot contribute a signature to new work

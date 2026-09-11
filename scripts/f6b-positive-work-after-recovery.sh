@@ -19,8 +19,8 @@
 #
 #   * not one non-quiet round was certified between the restart and the injection mark, so nothing
 #     arriving in that window could have named the missed block; and
-#   * not one adoption line falls AFTER the injection mark, so the anchor this run reports was not
-#     adopted on the strength of the transaction.
+#   * an adoption of the expected block is already present in the pre-injection snapshot, so
+#     the transaction cannot be what caused that adoption.
 #
 # WHAT "POSITIVE WORK AFTER" CAN MEAN HERE, which is not obvious. P-sign (#105) keeps a restored
 # process non-voting for its whole lifetime, so the recovered node cannot contribute a signature to
@@ -31,7 +31,7 @@
 # and this lane asserts both halves - the agreement AND the continued silence.
 #
 # NO CONTROL ARM, deliberately, and this is the one thing this lane leaves to another. That a node
-# with recovery off stays behind for ever is #119's result, measured on the same devnet one flag
+# with recovery off stayed behind during the observation window is #119's result, measured on the same devnet one flag
 # apart, and repeating it here would double the runtime without adding to this claim. What this lane
 # must establish instead is that the node had ALREADY recovered before the transaction existed, and
 # that is what the two ordering checks above do.
@@ -416,13 +416,12 @@ else
   fail "ordering: $quietWindow non-quiet request entr(ies) were logged before the injection, so recovery is not separated from new activity"
 fi
 
-# ORDERING GATE 2 — THE ANCHOR WAS ADOPTED BEFORE THE TRANSACTION EXISTED. The count is of adoption
-# lines AFTER the mark, and it must be zero. Stated this way round deliberately: "an adoption exists"
-# is satisfied by an adoption at any time, including one the transaction caused.
+# ORDERING GATE 2 — a pre-injection snapshot contains the adoption checked above. This runs
+# before sendTx; it does not assert that the subsequent interval contains no further adoptions.
 lateAdoptions=$(linesSince "$injectMark" "recovered from authenticated evidence" test-nodes/evm1/debug.log)
 totalAdoptions=$(countIn test-nodes/evm1/debug.log "recovered from authenticated evidence")
 if [ "$totalAdoptions" -ge 1 ] && [ "$lateAdoptions" = "0" ]; then
-  pass "ordering: all $totalAdoptions adoption(s) happened before the injection mark, and none after it"
+  pass "ordering: the pre-injection snapshot contains $totalAdoptions adoption(s), all before the mark"
 else
   fail "ordering: adoptions=$totalAdoptions of which $lateAdoptions after the injection mark — the transaction may be what recovered this node"
 fi
@@ -513,8 +512,8 @@ if [ -n "$mineReceipt" ]; then
 fi
 
 # THE WHOLE SHARD, INCLUDING THE RECOVERED NODE, HAS EXECUTED EXACTLY ONE MORE TRANSACTION than the
-# setup submitted. Not "at least one": a recovered node that replayed or double-executed anything
-# would show a different total, and that is the failure this counts for.
+# setup submitted. This counts canonical transaction inclusions, not internal execution attempts;
+# replay idempotency is established by the separate runtime fixtures in the acceptance ledger.
 for i in $(seq 1 "$validators"); do
   assertTransactionCount "executor $i at the end of the run" "http://127.0.0.1:$((rethEthBase + i - 1))" "$afterTxs" \
     "the $setupTxs submitted before validator 1 returned, plus the one submitted after it recovered"
