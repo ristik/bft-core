@@ -1290,13 +1290,20 @@ publication, nested teardown ownership, the version-check bound), repaired in `8
 `77daaf11` and `b7d4ed3c`. Running the self-test in a Linux container then found two self-test defects
 (`c611b38e`) and one production one (`fdc3dd43`: after an interrupt, teardown signalled the run's
 group a second time, which could cut the paired devnet's own cleanup short), and a mutation of that fix
-survived until the self-test's stand-in cleanup was made to take time (`3f3e01c1`). Those commits
-change the library, the smoke supervisor, both workflows and the teardown helpers, so **only the rows
-at `3f3e01c1` describe the head**; the earlier rows are kept as the history they are, at the revisions
-they name.
+survived until the self-test's stand-in cleanup was made to take time (`3f3e01c1`). The second
+review, of `a02899ba`, found two more — an earlier cluster's leaked JWT passing selection, and the
+supervisor's pid-file sweep lacking the command check — repaired in `a1f50d5b` and `88a00c2d` (scan
+inputs, above), with `d6e46f6b` adding a self-test for the seal's own refusal. **Only the rows at
+`a1f50d5b`–`d6e46f6b` describe the head** (`023fcacb` differs from them in docs only, `d6e46f6b` in the
+self-test only); the earlier rows are kept as the history they are, at the revisions they name.
 
 | # | what | revision | result |
 |---|---|---|---|
+| — | `scripts/reth-smoke-selftest.sh` on this host | `d6e46f6b` | **125 ok, 0 bad**, no stand-in left |
+| L′ | the smoke and chaos self-tests in `ubuntu:24.04` as a **non-root** user (as root, chmod-based fixtures cannot fail; hosted runners are not root), checkout mounted read-only | `d6e46f6b` | smoke **125 ok, 0 bad** twice with nothing else running; chaos **52 ok, 0 bad**. One earlier run, concurrent with two other self-test suites on the same machine, gave 124 ok, 1 bad: the nested cancellation cleanup (a 2 s stand-in plus a nested `stop-evm.sh -a`) did not finish inside teardown's bounded 10 s drain before the KILL. No process leaked — the KILL and the ownership sweep still stopped only the run's own — and it did not recur unloaded; recorded, not tuned |
+| — | `scripts/reth-chaos-selftest.sh` on this host, no reth on `PATH` | `a1f50d5b` | **52 ok, 0 bad** |
+| B‴ | `--reth-bin`, clean detached worktree, `ubft` built once for this row and the next; two harmless sentinels in another directory | `023fcacb` (production code = `a1f50d5b`) | PASS, 171 s, devnet **20 PASS / 0 FAIL**; archive `bc66d349…` validated against **34 recorded scan-input values**, 16 of which no longer existed anywhere under `test-nodes/` (the stock control's JWTs and the first cluster's keys); scan inputs sealed, file 600 / directory 700, not in the archive; the workflow's selection step with `--require-scan-inputs` published it; both sentinels survived |
+| E‴ | the same, SIGTERM to the supervisor with 4 shard, 3 root and 4 reth running | `023fcacb` | exit 1, "run interrupted"; **16 processes in the run's group at the interrupt**, none left; 34 scan inputs sealed; archive `58950e55…` validated and published by the selection step; both sentinels survived; nothing left on the host |
 | — | `scripts/reth-smoke-selftest.sh` on this host | `3f3e01c1` | **102 ok, 0 bad**, no stand-in process left; the bounded version check took 1118 ms against a 1 s budget. At `af2a6159` it was 58 ok and missed all four review findings |
 | L | the same self-test in `ubuntu:24.04` (bash 5.2, perl 5.38; `/proc`, not `lsof`, for working directories), the checkout mounted read-only; then the real Linux artifact cold and warm, and a hanging binary whose child holds the output | `3f3e01c1` | **102 ok, 0 bad**; artifact miss then hit, digest and revision verified both times; the hang refused (exit 124) in 1050 ms with its child gone. At `b7d4ed3c` the same run gave 99 ok, 2 bad and a vacuous "0ms" — the self-test defects fixed in `c611b38e` — and at `c611b38e` 101 ok, 1 bad: the second-TERM race fixed in `fdc3dd43` |
 | — | `scripts/reth-chaos-selftest.sh` (its library's `stopReth` changed), with no reth on `PATH` | `b7d4ed3c` | 38 ok, 0 bad (chaos files unchanged since) |
@@ -1334,6 +1341,20 @@ cleanup finished first; survived two Linux runs at `fdc3dd43`, caught on both pl
 **Not run as a live mutation, deliberately:** restoring the machine-wide `build/ubft root-node` sweep
 in `stop-evm.sh`, which on this shared host could stop another session's real root nodes. The self-test
 shows instead that a name-based sweep would match every sentinel.
+
+**Mutations of the second-review repairs** (at `a1f50d5b`, each alone, both self-tests): the supervisor's
+pid-file sweep without the command check; the chaos bring-up recording nothing; the smoke child
+recording nothing between scenarios; validation ignoring the scan-inputs check; selection never
+requiring scan inputs; the check accepting unsealed inputs; each workflow without
+`--require-scan-inputs` — **all caught**. Sealing despite a failed capture **survived** — validation
+rejects a `#failed` record on its own, so the seal's refusal was untested — and is caught since
+`d6e46f6b`.
+
+**Driver stall**, kept labelled: after row B‴ had finished, my local driver's own inspection step
+grepped each recorded value through `test-nodes/` including the reth datadirs, whose sparse `mdbx.dat`
+files have an apparent size of 4 GiB each; it ran for over 50 minutes and was stopped by pid, and the
+remainder (the inspection with datadirs excluded, the selection, row E‴ and the mutations) was rerun
+from that point with the same binary. The lanes never search datadirs.
 
 **Invalidated attempt**, kept labelled: a real-run batch at `fdc3dd43` stopped at a syntax error in
 the local driver script (a function named `select`, a bash keyword) after starting its sentinels and
