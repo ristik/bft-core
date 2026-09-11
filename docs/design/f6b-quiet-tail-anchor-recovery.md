@@ -1440,6 +1440,12 @@ anchor cursor in §5 is for, and what `VerifiedTargetSurvivesAnUnavailablePayloa
 
 ## 10. Scope held open
 
+The reconciliation of #92's acceptance list against this work — which lines are met, by which merged
+pull requests and which evidence, and what remains — is `docs/design/f6b-acceptance-ledger.md`. It
+names one unmet acceptance clause and separates it from the follow-up scope carried on #10, #14,
+#105 and #16.
+
+
 Recovery across an epoch transition (§3.1); which peers a node asks and how that set is chosen
 (§6.3 takes it as an injected source and decides nothing about it); production startup wiring for the buffer, the server, the requester
 and the applier alike, and the measured acceptance runs against a real client across a quiet tail
