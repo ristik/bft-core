@@ -101,6 +101,18 @@ run_control() {
   local engineURL="http://127.0.0.1:$enginePort" ethURL="http://127.0.0.1:$ethPort"
 
   openssl rand -hex 32 >"$jwt"
+  # Inside a packaged lane (scripts/reth-smoke.sh) the JWT is recorded as a scan input BEFORE any
+  # process can use it: it lives in a temporary directory deleted at exit, while this script's output
+  # stays in the lane's run log, so otherwise nothing would know to search that log for it. A value
+  # that cannot be recorded is never used — the control stops here.
+  if [ -n "${RETH_EVIDENCE_SCAN_FILE:-}" ]; then
+    local secret; secret=$(tr -d ' \n' <"$jwt")
+    if ! { ( umask 077; printf '%s\n' "$secret" >>"$RETH_EVIDENCE_SCAN_FILE" ) 2>/dev/null && grep -qxF -- "$secret" "$RETH_EVIDENCE_SCAN_FILE"; }; then
+      echo "reth-baseline: FAIL could not record control '$label''s JWT as a scan input; not starting reth with it" >&2
+      rm -f "$jwt"
+      return 1
+    fi
+  fi
   reth node --chain "$genesis" --datadir "$dd" \
     --authrpc.jwtsecret "$jwt" --authrpc.addr 127.0.0.1 --authrpc.port "$enginePort" \
     --http --http.addr 127.0.0.1 --http.port "$ethPort" --http.api eth,net,web3 \

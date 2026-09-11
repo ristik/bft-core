@@ -91,6 +91,11 @@ store), run `./scripts/chaos-evm.sh` — it does exactly this, with assertions, 
 ./stop-evm.sh -a
 ```
 
+This stops what *this checkout* started — the validators and root nodes whose recorded pid is still a
+node running from this directory, and any other `ubft root-node`/`shard-node run` whose working
+directory is this checkout. It never stops a node by name alone, so another checkout's devnet on the
+same machine is left alone.
+
 Leaves `test-nodes/` on disk — `./start-evm.sh -r -a -e fake -v 4` again resumes the same shard from
 where it left off (each validator persists its last certificate; see `docs/shard-protocol.md` §7).
 To start completely fresh, re-run `./setup-evm-nodes.sh -r 3 -v 4` first, which clears and

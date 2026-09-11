@@ -1153,47 +1153,217 @@ fits a node that accepts certificates but never applies a block. Owners: F6 (#14
 recovery contract, F2 (#10) for what a returning node should do about a certified head it cannot
 reach, F8 (#16) — which should not treat this as an explanation for the unexplained stall.
 
-### 6.4 Real-reth in CI
+### 6.4 Real-reth in CI, and the same lane locally
 
-`.github/workflows/reth-smoke.yml` runs the adapter against the **approved pinned execution client**
-on every PR to `integration/enshrined-evm`, and on manual dispatch (F1c, #90). It is a separate
-workflow with a distinct name on purpose: a green `ci` run must never be read as real-execution
-evidence, because every job there uses `--executor fake`.
+Two workflows run the adapter against the **approved pinned execution client**, each named for what it
+proves, because a green `ci` run (every job `--executor fake`) must never be read as real-execution
+evidence and a green smoke run must never be read as fault coverage:
+
+| workflow | runs | trigger |
+| --- | --- | --- |
+| `real-reth-smoke` (`.github/workflows/reth-smoke.yml`) | stock-client control (20 blocks) and the paired funded-transaction devnet | every PR to `integration/enshrined-evm`; manual dispatch, optionally with a deliberate failure |
+| `real-reth-fault` (`.github/workflows/reth-fault.yml`) | bounded `scripts/reth-chaos.sh` scenarios, each on its own cluster (default `reth-only-restart,pair-restart`) | **manual dispatch only** — before accepting a change to the executor, adapter or recovery paths, or when a fault result is needed; never on PRs |
+
+**One implementation, locally and in CI (#90).** Everything the lanes do beyond the scenarios —
+obtaining and verifying the client, the cache, evidence collection, archive validation and teardown —
+is `scripts/lib/reth-pin.sh` (definitions only), behind two entry points: `scripts/reth-smoke.sh`, the
+supervised smoke lane, and `scripts/reth-pin.sh`, the same functions for workflow steps. The workflows
+are thin wrappers, so the refusal and collection paths are exercised locally and by
+`scripts/reth-smoke-selftest.sh` rather than only ever read in YAML. An earlier revision had them inline
+in the workflow, where they could run only on a hosted runner, and had never run.
 
 **Provenance instead of a 40-minute Rust build.** The pin `189c0df3` *is* upstream tag `v2.5.0` —
-verified: `git/refs/tags/v2.5.0` resolves to that commit — and `ristik/ureth`'s `unicity/main` is
-byte-identical to it (§2), so the upstream release artifact is a legitimate source for it today.
-The workflow records the source URL, the exact asset name and its SHA-256
-(`6719ec67…`, GitHub's own reported asset digest), verifies the archive against it, and then
-**verifies the extracted binary reports the pinned commit — on cache hits as well as fresh
-downloads**. A cache is a convenience, never an authority.
+`git/refs/tags/v2.5.0` resolves to that commit — and `ristik/ureth`'s `unicity/main` is byte-identical
+to it (§2), so the upstream release artifact is a legitimate source for it today. The library records
+each platform's asset and GitHub's own reported digest:
 
-That choice is only valid while the fork has not diverged. **The moment `ureth` carries its own
-commits, this lane must build from source** (or publish its own artifact with equivalent provenance),
-and the digest and tag pins here stop being meaningful. F3 (#11) extends this workflow rather than
-starting a second one.
+| platform | asset | sha256 (GitHub-reported) |
+| --- | --- | --- |
+| linux-x86_64 (hosted runners) | `reth-v2.5.0-x86_64-unknown-linux-gnu.tar.gz` | `6719ec67…f48f47f` |
+| linux-aarch64 | `reth-v2.5.0-aarch64-unknown-linux-gnu.tar.gz` | `47fcc389…6625c3d` |
+| darwin-arm64 | `reth-v2.5.0-aarch64-apple-darwin.tar.gz` | `0a43ae85…067cf202` |
 
-Budget, measured against the artifact path rather than estimated:
+Upstream publishes **no x86_64 macOS asset**, so on such a host `--fetch` refuses and names the
+alternative: `--reth-bin` with a binary built from the pinned commit, which is accepted only if it
+reports that commit and is recorded in the provenance as an operator-supplied binary, verified by
+revision rather than by a release digest.
 
-| Step | Cost |
-| --- | --- |
-| Artifact download + digest verify (cache miss) | ~52 MB, well under a minute |
-| Cache hit | negligible; the revision check still runs |
-| Rust build | **none** — avoided entirely by the artifact path |
-| `reth-baseline.sh 20` (stock control) | ~1 minute |
-| `reth-paired-devnet.sh 4 5` (4 validators, 4 clients, funded transaction) | several minutes |
-| Job timeout | 45 minutes |
+**The cache is a convenience, never an authority.** It holds the release *archive*, not an extracted
+binary, keyed from the library (commit, asset, digest, platform) so the key cannot drift from the pin.
+On every use — hit or miss — the archive's sha256 is re-checked, and the extracted binary must report
+the pinned commit. A cached archive whose digest no longer matches is **refused and left in place**
+rather than silently refetched, so whatever changed it is seen. That check on the binary itself runs on
+every path, including an operator-supplied binary; a cache, a tag or a file name never substitutes for it.
 
-The 160-block baseline run stays a local gate (§5.3); CI runs 20 blocks, which still exercises both
-controls. Longer repeat and fault runs belong on a separate bounded lane (#90 stage 3) so that a
-green PR check never implies fault coverage that did not run.
+**Evidence and teardown.** The smoke lane runs its scenarios in a child process in its own process
+group, and the supervising parent collects, tears down, archives and validates **however the child
+ended** — success, failure, a SIGKILL, or cancellation (SIGINT/SIGTERM to the supervisor).
 
-Evidence: collection and teardown run on success, failure **and cancellation**. The archive carries
-root, shard and reth logs, shard conf, trust base, both genesis files and a provenance record
-(BFT commit, reth commit/tag/asset/digest, run id and attempt). Signing keys and JWT secrets are
-never copied and their absence is asserted, failing the job if one appears. Retention 14 days. The
-upload path can be exercised deliberately via the `inject_failure` dispatch input rather than
-waiting for a real failure to discover it does not work.
+*Collection is complete or the lane fails.* Every copy the collector attempts is required: a node
+directory it cannot create or a file it cannot copy is named, and fails the lane, while the archive —
+with whatever could be copied — is still produced for inspection. A minimum node-log count is not a
+completeness check: one revision reported success for a collection that had dropped a node's log,
+because another node's log met the minimum.
+
+*Teardown is by ownership, including every cleanup nested beneath the lane.* A process is this run's
+if it is in the child's process group, or is a `ubft`/`reth` process whose working directory is this
+checkout — never because of its name, and never because a pid file holds its number (a stale integer
+may by now be anything, another checkout's node included). The same rule is in `helper.sh`
+("ownership") and so in `stop-evm.sh -a`, which `reth-paired-devnet.sh`'s cleanup calls from inside the
+lane: it stops this checkout's validators and root nodes, recorded or not, and nothing else. A pid
+file is acted on only if its process is still a node or client running from this checkout — in the
+lane's own sweep too, which until the second #131 review checked the working directory but not the
+command, and so stopped an unrelated process started from the same checkout. Until the
+#131 review it stopped every `build/ubft root-node` on the machine, which the lane's own sweep could not
+undo. Root nodes now record pids; the paired devnet's cleanup, `reth-chaos-lib.sh`'s `stopReth` and the
+lane's sweep act on a pid file only when its process is still this checkout's. (The hosted workflows
+add a broad sweep afterwards, which is safe only on a disposable runner.) Teardown is then verified: a
+process of the run still alive fails the lane.
+
+*Validation, then a separate decision to publish.* The archive is validated independently of the
+collector: required files (`provenance.txt`, `run.log` for smoke; `manifest.txt` for fault), node logs
+present when scenarios ran, and no secret — by name (`keys.json`, `jwt.hex`, `*.key`), by content (any
+`"privateKey"` field), and by value (every JWT and private key under `test-nodes/`, searched verbatim, so
+a secret leaked into a log line fails the lane). Validation answers two questions separately: exit 0
+validated, 1 incomplete but secret-free, 2 **not publishable** (a secret, or an archive that cannot be
+read and so cannot be vouched for, or whose secrets cannot all be known). Publication is
+`reth-pin.sh select-upload`, per archive: a
+publishable archive is copied, with its validation report, into `evidence-upload/` — **the only path
+either workflow uploads** — and a rejected one is moved to `evidence-quarantine/`, never uploaded, with
+only a diagnostic naming what was found where (never the value) published in its place.
+`evidence-upload/MANIFEST.txt` records every verdict with its sha256, and the upload directory is
+scanned once more for every secret value. Until the #131 review a rejected archive stayed at the path
+the workflow uploaded with `always()`. The fault workflow selects each archive on its own, so one run's
+leak does not withhold another run's evidence. Retention 14 days.
+
+*Every cluster's secrets are searched for, not just the last one's (scan inputs).* The by-value check
+can only search for secrets it knows, and both lanes replace a cluster while keeping its logs: the
+fault lane rebuilds one per scenario, and the smoke lane's stock control runs before the paired
+devnet's setup wipes `test-nodes/` (its JWTs live in a temporary directory besides). Until the second
+#131 review, selection searched only the secrets left at the end, so a first cluster's JWT in an
+ordinary log line was published as "validated". Now every secret is **recorded before any process
+can use it** — `reth-chaos-lib.sh`'s `bringUpCluster` after generating a cluster's JWTs and before
+starting its clients, `reth-baseline.sh` after generating each control's JWT, the smoke lane between
+its two scenarios and again at the end — into a private scan-inputs file beside the archive and never
+in it: `<archive dir>/.scan-inputs/<archive>.scan` (directory 700, file 600, git-ignored, never under
+the upload directory). A value that cannot be recorded is never used: the cluster or control is not
+started. A failed capture is written into the file, and the supervisor seals it (`#sealed` as the last
+line) only if nothing failed. Selection with `--require-scan-inputs`, which both workflows pass,
+searches each archive — aggregate logs included — for every value in its own sealed scan inputs, and
+an archive whose scan inputs are missing, unsealed or record a failure is **not publishable**. The
+bytes validated are the bytes published: each archive is copied into the private quarantine
+directory, that copy is validated, and it is that copy which is renamed into `evidence-upload/`.
+
+*The version check is bounded as a whole.* `reth --version` runs as the leader of its own process
+group with its output going to a file; the budget kills the group. An earlier revision killed only the
+direct child and let it inherit the caller's pipe, so a shell whose child hung held the lane for as long
+as the child did.
+
+**Local commands**, from the repository root:
+
+```bash
+./scripts/reth-smoke-selftest.sh                                   # every refusal and collection path; no reth, no network
+./scripts/reth-smoke.sh --reth-bin "$(command -v reth)"            # the smoke lane with a source build of the pin
+./scripts/reth-smoke.sh --fetch                                    # the release artifact (linux-x86_64/aarch64, darwin-arm64)
+./scripts/reth-smoke.sh --reth-bin "$(command -v reth)" --inject-failure   # the deliberate-failure path
+./scripts/reth-pin.sh obtain --cache-dir ~/.cache/reth-pin --dest /tmp/reth-bin   # the fault workflow's client step
+./scripts/reth-chaos.sh -s reth-only-restart,pair-restart -t 2     # the fault workflow's scenario step
+./scripts/reth-pin.sh validate-archive evidence-runs/<run>.tar.gz --require manifest.txt --min-node-logs 1
+./scripts/reth-pin.sh select-upload --out evidence-upload --quarantine evidence-quarantine \
+    --nodes test-nodes --require manifest.txt --min-node-logs 1 evidence-runs/*.tar.gz   # the workflows' publication step
+```
+
+Budget, measured against the artifact path rather than estimated: artifact download plus digest check
+~52 MB, well under a minute; cache hit negligible, with the digest and revision checks still running;
+no Rust build; `reth-baseline.sh 20` ~1 minute; `reth-paired-devnet.sh 4 5` several minutes; smoke job
+timeout 45 minutes, fault job 120.
+
+That choice of source is valid only while the fork has not diverged. **The moment `ureth` carries its
+own commits, these lanes must build from source** (or publish their own artifact with equivalent
+provenance), and the asset and digest pins stop being meaningful. F3 (#11) extends these workflows
+rather than starting new ones.
+
+**Evidence recorded for #131** — all local; nothing here ran on a hosted runner. Host: macOS on
+Intel (darwin/x86_64); reth `189c0df3` built from source for the host, and the upstream Linux artifact
+for the container. The review of `af2a6159` found four defects (§6.4 above: collection completeness,
+publication, nested teardown ownership, the version-check bound), repaired in `8f0c52e9`, `bd2a50b0`,
+`77daaf11` and `b7d4ed3c`. Running the self-test in a Linux container then found two self-test defects
+(`c611b38e`) and one production one (`fdc3dd43`: after an interrupt, teardown signalled the run's
+group a second time, which could cut the paired devnet's own cleanup short), and a mutation of that fix
+survived until the self-test's stand-in cleanup was made to take time (`3f3e01c1`). The second
+review, of `a02899ba`, found two more — an earlier cluster's leaked JWT passing selection, and the
+supervisor's pid-file sweep lacking the command check — repaired in `a1f50d5b` and `88a00c2d` (scan
+inputs, above), with `d6e46f6b` adding a self-test for the seal's own refusal. **Only the rows at
+`a1f50d5b`–`d6e46f6b` describe the head** (`023fcacb` differs from them in docs only, `d6e46f6b` in the
+self-test only); the earlier rows are kept as the history they are, at the revisions they name.
+
+| # | what | revision | result |
+|---|---|---|---|
+| — | `scripts/reth-smoke-selftest.sh` on this host | `d6e46f6b` | **125 ok, 0 bad**, no stand-in left |
+| L′ | the smoke and chaos self-tests in `ubuntu:24.04` as a **non-root** user (as root, chmod-based fixtures cannot fail; hosted runners are not root), checkout mounted read-only | `d6e46f6b` | smoke **125 ok, 0 bad** twice with nothing else running; chaos **52 ok, 0 bad**. One earlier run, concurrent with two other self-test suites on the same machine, gave 124 ok, 1 bad: the nested cancellation cleanup (a 2 s stand-in plus a nested `stop-evm.sh -a`) did not finish inside teardown's bounded 10 s drain before the KILL. No process leaked — the KILL and the ownership sweep still stopped only the run's own — and it did not recur unloaded; recorded, not tuned |
+| — | `scripts/reth-chaos-selftest.sh` on this host, no reth on `PATH` | `a1f50d5b` | **52 ok, 0 bad** |
+| B‴ | `--reth-bin`, clean detached worktree, `ubft` built once for this row and the next; two harmless sentinels in another directory | `023fcacb` (production code = `a1f50d5b`) | PASS, 171 s, devnet **20 PASS / 0 FAIL**; archive `bc66d349…` validated against **34 recorded scan-input values**, 16 of which no longer existed anywhere under `test-nodes/` (the stock control's JWTs and the first cluster's keys); scan inputs sealed, file 600 / directory 700, not in the archive; the workflow's selection step with `--require-scan-inputs` published it; both sentinels survived |
+| E‴ | the same, SIGTERM to the supervisor with 4 shard, 3 root and 4 reth running | `023fcacb` | exit 1, "run interrupted"; **16 processes in the run's group at the interrupt**, none left; 34 scan inputs sealed; archive `58950e55…` validated and published by the selection step; both sentinels survived; nothing left on the host |
+| — | `scripts/reth-smoke-selftest.sh` on this host | `3f3e01c1` | **102 ok, 0 bad**, no stand-in process left; the bounded version check took 1118 ms against a 1 s budget. At `af2a6159` it was 58 ok and missed all four review findings |
+| L | the same self-test in `ubuntu:24.04` (bash 5.2, perl 5.38; `/proc`, not `lsof`, for working directories), the checkout mounted read-only; then the real Linux artifact cold and warm, and a hanging binary whose child holds the output | `3f3e01c1` | **102 ok, 0 bad**; artifact miss then hit, digest and revision verified both times; the hang refused (exit 124) in 1050 ms with its child gone. At `b7d4ed3c` the same run gave 99 ok, 2 bad and a vacuous "0ms" — the self-test defects fixed in `c611b38e` — and at `c611b38e` 101 ok, 1 bad: the second-TERM race fixed in `fdc3dd43` |
+| — | `scripts/reth-chaos-selftest.sh` (its library's `stopReth` changed), with no reth on `PATH` | `b7d4ed3c` | 38 ok, 0 bad (chaos files unchanged since) |
+| B″ | `--reth-bin`, from a clean detached worktree at the fixed head, `ubft` built once for this row and the next; two harmless sentinels in another directory whose command lines match `build/ubft root-node` and `reth node` | `3f3e01c1` | PASS, exit 0, 193 s; stock control passed; devnet **20 PASS / 0 FAIL**; 51 files collected; archive `aea9f274…` validated, 15 node logs; **both sentinels survived**; no `ubft`/`reth` of the run left. The workflow's selection step on it: published (validated), exit 0 |
+| E′ | the same binary and sentinels; SIGTERM to the supervisor once the paired devnet was waiting for certification, with 4 shard nodes, 3 root nodes and 4 reth running | `3f3e01c1` | exit 1, "run interrupted", "incomplete run (status 143)"; **16 processes in the run's group at the interrupt**, 0 left for the ownership sweep, none left; archive `0bcb12be…` validated, 15 node logs; **both sentinels survived**; the selection step published it (validated), exit 0. No `ubft`/`reth` process on the host after both rows |
+| B′ | `--reth-bin`, from a clean detached worktree at the review-repair head, `ubft` built once; two harmless sentinels running in another directory whose command lines match `build/ubft root-node` and `reth node` | `b7d4ed3c` | PASS, exit 0, 144 s; stock control passed; devnet **20 PASS / 0 FAIL**; 51 files collected; archive `8605288c…` validated, 15 node logs; **both sentinels survived**; no `ubft`/`reth` process left on the host. The workflow's selection step on that archive: published (validated), exit 0 |
+| K | real Linux artifact in a container (`ubuntu:24.04`, Docker 29.5.2): cold cache, then warm, then a tampered copy | library `d8f45a70…` (before the review repairs; the Linux artifact path is re-run at the head in row L) | miss: fetched, sha256 `6719ec67…` verified, binary reports `189c0df3`; hit: digest **re-verified**, revision re-verified; tampered: **refused**, nothing left at the destination |
+| A | `--fetch` on this host | `d2fb721b` | **refused** — "no pinned release artifact for platform 'darwin-x86_64'" — exit 1, archive validated |
+| B | `--reth-bin` | `d2fb721b`, `146ef80e` | PASS, exit 0; devnet 20 PASS / 0 FAIL; archive 15 node logs |
+| B | `--reth-bin`, at the head | `99fa36a3` | PASS, exit 0; devnet 20 PASS / 0 FAIL; archive `eda6501d…` validated, 15 node logs. Teardown reports 0 in the run's group at teardown — correctly: the devnet had stopped its own processes |
+| C | `--inject-failure` | `d2fb721b`, `146ef80e` | exit 1 as intended; archive validated with 15 node logs and the injection in `run.log` |
+| E | SIGTERM to the supervisor with 7 `ubft` + 4 `reth` running | `146ef80e` | exit 1, "run interrupted", "incomplete run"; archive validated, 15 node logs; **no process left** |
+| E | the same cancellation, at the head | `99fa36a3` | exit 1, "run interrupted"; **16 processes in the run's group at the interrupt** (the 11 clients among them), 0 left for the ownership sweep, none left at all; archive `98e8ac3e…` validated, 15 node logs. At `146ef80e` and `618c86af` the same run had reported 0, the count being taken after the interrupt's own signal had stopped them — fixed at `99fa36a3`, and pinned by a deterministic cancellation case in the self-test |
+| D | fault lane, the workflow's own commands: `reth-pin.sh verify`, `make build`, `reth-chaos.sh -s reth-only-restart -t 2`, `validate-archive --require manifest.txt --min-node-logs 1` | `d2fb721b` | chaos exit 0; archive validated, 11 node logs |
+
+No `ubft` or `reth` process was left after any run. Production mutations, each alone, against the
+self-test: skipping the digest re-check on a cache hit, skipping the verbatim secret scan, treating an
+incomplete run as complete, not comparing the reported revision, copying `jwt.hex`, not checking a
+download's digest, removing every teardown kill, removing the child's process group, and counting
+the group only at teardown — **all caught**. Two mutations survived and are recorded as such: one removed only the polite TERM (the KILL
+fallback still stopped everything, so it tested nothing), and one removed only the group kills (the
+group-aware ownership sweep still stopped the orphan — redundancy, confirmed by removing both).
+
+**Mutations of the #131 review repairs**, each alone, against the self-test (in a throwaway worktree,
+serially): a supervisor that ignores the collector's status, and a collector that swallows copy
+failures (at `8f0c52e9`); a paired-devnet cleanup that kills by pid file alone, a `stop_pidfile` that
+trusts any live pid, a supervisor sweep that trusts a pid file alone, a version check that kills only
+its pid, the version check as it was (the caller's pipe and no group), a secret classed as merely
+incomplete, a selection that publishes every archive, a smoke workflow uploading the raw archive path,
+and a selection that leaves a rejected archive in place (at `b7d4ed3c`) — **all caught**. Two first
+survived and were caught only after the self-test was fixed, and are recorded as such: the
+supervisor sweep trusting a pid file alone (the nested cleanups had removed every stale pid file before
+the sweep; caught at `c611b38e`), and restoring teardown's second TERM after an interrupt (the stand-in
+cleanup finished first; survived two Linux runs at `fdc3dd43`, caught on both platforms at `3f3e01c1`).
+**Not run as a live mutation, deliberately:** restoring the machine-wide `build/ubft root-node` sweep
+in `stop-evm.sh`, which on this shared host could stop another session's real root nodes. The self-test
+shows instead that a name-based sweep would match every sentinel.
+
+**Mutations of the second-review repairs** (at `a1f50d5b`, each alone, both self-tests): the supervisor's
+pid-file sweep without the command check; the chaos bring-up recording nothing; the smoke child
+recording nothing between scenarios; validation ignoring the scan-inputs check; selection never
+requiring scan inputs; the check accepting unsealed inputs; each workflow without
+`--require-scan-inputs` — **all caught**. Sealing despite a failed capture **survived** — validation
+rejects a `#failed` record on its own, so the seal's refusal was untested — and is caught since
+`d6e46f6b`.
+
+**Driver stall**, kept labelled: after row B‴ had finished, my local driver's own inspection step
+grepped each recorded value through `test-nodes/` including the reth datadirs, whose sparse `mdbx.dat`
+files have an apparent size of 4 GiB each; it ran for over 50 minutes and was stopped by pid, and the
+remainder (the inspection with datadirs excluded, the selection, row E‴ and the mutations) was rerun
+from that point with the same binary. The lanes never search datadirs.
+
+**Invalidated attempt**, kept labelled: a real-run batch at `fdc3dd43` stopped at a syntax error in
+the local driver script (a function named `select`, a bash keyword) after starting its sentinels and
+before any lane ran; the sentinels were stopped by pid. No evidence was produced.
+
+**What remains hosted-only, and pending until jobs execute:** a PR-triggered run of the packaged
+smoke workflow; a cache hit through `actions/cache`; a dispatched deliberate failure whose artifact is
+downloaded and inspected; and a dispatched fault run. The local runs above exercise the same scripts
+and do not substitute for any of them.
 
 ## 7. What F1 does not cover
 

@@ -91,6 +91,8 @@ if [ "${F1_CHAOS_SUPERVISED:-0}" != "1" ]; then
   # The manifest is this run's identity and is written once, by the supervisor, before any scenario
   # is selected — so a subset run records the revisions it measured just as a full run does.
   writeRunManifest "$@"
+  # A fresh, private scan-inputs file for this run; the child records each cluster's secrets into it.
+  rethScanInputsInit "$(chaosScanFile)" || exit 1
   # The child must write into the SAME run directory; it re-executes this script, which would
   # otherwise generate a new id.
   export F1_CHAOS_RUN_DIR="$runDir"
