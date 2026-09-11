@@ -34,11 +34,12 @@ The repair does not substitute a state root for a block hash and does not call `
 
 ### 1.2 "Quiet and non-quiet UC recovery cases; local payload present/absent; invalid payload/anchor/config/epoch; retry and process restart at each relevant boundary."
 
-**Met in part.** Every case up to and including retry is met. The final clause — "process restart at
-each relevant boundary" — is met for some boundaries by fixture, for others by a reviewed equivalence
-argument, and for three it is not established; §1.2.1 enumerates them rather than leaving the clause to
-be read as a whole. An earlier revision of this ledger recorded the clause as met on the strength of
-three fixtures that prove different properties; that verdict was wrong.
+**Met.** Every case up to and including retry is met. The final clause — "process restart at each
+relevant boundary" — is met for five boundaries by fixture and for two by a reviewed equivalence
+argument; §1.2.1 enumerates them rather than leaving the clause to be read as a whole. Two revisions
+of this ledger were wrong about it: the first recorded it as met on the strength of three fixtures
+that prove different properties, and the second left R4, R5 and R6 unestablished. B2 (#123) closed
+them with the two fixtures the review specified.
 
 | case | evidence | merged in |
 |---|---|---|
@@ -69,15 +70,23 @@ target, the applier's attempt budget, and the round's continuity anchor are all 
 | R1 | start with no recovery state at all | met | `TestAnchorIsNotRestoredFromDisk`; every real-client lane restarts here (#118–#121) |
 | R2 | evidence received or buffered, verification not finished | met by equivalence | nothing of the bundle is persisted, so the restart discards it and the process re-enters at R1; no executor call has been made, so there is nothing to reconcile that a cold start does not already do |
 | R3 | a verified target is held, `Commit` not yet called | met by equivalence | same: the verified target is memory-only, and the executor has not moved. The target must be re-derived from authenticated incoming evidence (a quiet certificate alone does not name it), as in R1 |
-| R4 | `Commit` in flight when the process dies | **not established** | no fixture restarts across an in-flight executor call. Both executor outcomes have fixtures once the process is back (`TestTargetApplier_CommitsTheCertifiedBlock`, `…AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere`), and an executor still working is `executor-unreachable`/SYNCING and retryable — but nothing tests the crossing itself |
-| R5 | `Commit` succeeded, the anchor not yet adopted | **pending the same B2 fixture as R6** | the executor has moved but the persisted certificate can still be older. R5 and R6 become the same restart state because adoption is memory-only. `TestTargetApplier_AdoptsWithoutCommittingWhenTheExecutorIsAlreadyThere` covers the final application decision once a target is verified; it does not cover restoring the older checkpoint and re-deriving that target. The R6 fixture must assert this shared state |
-| R6 | adopted, certificate not yet persisted | **not established** | adoption happens inside `HandleCertificate`; `persistingDriver` calls `SaveLUC` only after it returns (`node.go`). A restart in between resumes from an *older* certificate with the executor ahead of it. `TestRound_CrashAfterSubmitBeforeUC_RecoversWithoutEquivocatingOrDoubleBuilding` is adjacent but is not evidence for this boundary: it constructs a bare `NewRound` rather than running `LoadLUC` → `verifyRestoredLUC` → `resumeFrom`, and it submits after its simulated restart |
+| R4 | `Commit` in flight when the process dies | met | `TestRestart_InFlightCommitIsDecidedByTheLiveExecutorHead` destroys a process while a Commit is in flight and builds a second one over the same executor, for all three outcomes: the call did not apply (the returning process redoes it), it applied and the answer was lost (no second execution — the executor is asked before it is commanded), and the executor is still working when the new process asks (`payload-unavailable`, retryable, verified target retained) | #123 |
+| R5 | `Commit` succeeded, the anchor not yet adopted | met, with R6 | `TestRestart_ResumingOlderThanTheExecutor`. That R5 and R6 are one state is no longer assumed: the fixture kills a process in each and requires the resumed process's observations to be *equal*, so the claim that the adoption difference is memory-only is measured rather than asserted | #123 |
+| R6 | adopted, certificate not yet persisted | met | adoption happens inside `HandleCertificate`; `persistingDriver` calls `SaveLUC` only after it returns (`node.go`), so the restart resumes from an *older* certificate with the executor ahead of it. `TestRestart_ResumingOlderThanTheExecutor` runs the production `LoadLUC` → `verifyRestoredLUC` → `resumeFrom` from exactly that checkpoint: the target is re-derived from authenticated evidence, no Commit is issued at all, the head does not move in either direction, and nothing is signed — against a control, over the same certificates and the same executor, that does sign. `TestRound_CrashAfterSubmitBeforeUC_…` remains adjacent and is not cited here: it constructs a bare `NewRound` and submits after its simulated restart | #123 |
 | R7 | restarted from a persisted certificate | met | `TestRestoredNodeIsNonVoting` drives the production sequence and asserts the node follows, reconciles and does not vote, against a control that does vote |
 
-The cold-start equivalence argument is the load-bearing claim in R2 and R3, so it is stated as a claim to
-disagree with rather than as a result: *if* something later persists verified evidence or an applied
-cursor — which is #14's work — those equivalences and the grouping of R5 with R6 must be re-reviewed. R4 and the shared
-R5/R6 restart state remain open and are carried as **B2** in §3.1.
+The cold-start equivalence argument is the load-bearing claim in R2 and R3, so it is stated as a claim
+to disagree with rather than as a result: *if* something later persists verified evidence or an applied
+cursor — which is #14's work — those two equivalences must be re-reviewed. They are the only rows in
+the table that rest on an argument rather than on a fixture.
+
+Two things the B2 fixtures deliberately do not model, so they are not over-read: power loss, an
+interrupted write or any fsync guarantee (the executor is a live process that keeps its state across
+the shard node's restart, which is the deployment #92 is about — storage durability is #14's); and a
+Commit still executing inside the executor concurrently with the new process's first call, which is
+covered as an answer the new process can receive (SYNCING) rather than as concurrency. The rollback
+the fixtures assert against is one their executor can actually perform, and that capability is
+asserted too — otherwise "it did not roll back" would be a property of the stub.
 
 **One boundary is deliberately out of scope rather than missing.** Recovery *across a legitimate
 epoch transition* is refused by design (§3.1 of the design record: a chain crossing an epoch change
@@ -113,8 +122,8 @@ this row as unconditional permission to build.
 
 ### 1.4 "Real-reth isolated restart scenario demonstrates positive work before/after and agreement on certified target, canonical block, state and receipts."
 
-**Met in part.** One clause of it is not demonstrated. It is the only unmet clause outside §1.2's
-restart-boundary reconciliation (R4 and the shared R5/R6 state remain open).
+**Met in part.** One clause of it is not demonstrated, and with B2 delivered it is now the only unmet
+clause in the acceptance list.
 
 | clause | status | evidence |
 |---|---|---|
@@ -183,7 +192,7 @@ seen in this programme remains unexplained and is recorded as such.
 
 ## 3. Remaining gaps, separated
 
-### 3.1 Required acceptance work for #92 — B1 and B2
+### 3.1 Required acceptance work for #92 — B1 remains, B2 delivered
 
 **B1. Positive work after recovery, measured once against a real client.** The unmet clause of §1.4. A bounded run: recover as #119 does, then submit one transaction *after* the recovered
 node has adopted its anchor, and assert that the recovered node reaches the new certified block and
@@ -191,9 +200,8 @@ agrees with the survivors on block hash, state root and receipts — while still
 the existing lane's machinery; what it must not do is let the new transaction be what recovers the
 node, so the assertion order matters: adoption first, injection second, agreement third.
 
-**B2. The two unestablished restart states (R4 and shared R5/R6). Required before #92 closure.**
-This follows directly from §1.2's process-restart acceptance clause; it is not deferred to #14.
-Two bounded deterministic fixtures suffice:
+**B2. The two restart states (R4 and shared R5/R6). Delivered in #123.** Two deterministic
+fixtures in `shardnode/restart_boundaries_test.go`, in the shape the review specified:
 
 - Restart across an in-flight `Commit`. Exercise both executor outcomes: the request did not apply,
   and it applied despite the caller losing the response. Include a delayed completion where
@@ -205,8 +213,14 @@ Two bounded deterministic fixtures suffice:
   checkpoint, and assert exact head/state, no duplicate execution effects and zero signed requests.
   An idempotent retry of a certified `Commit` is not itself a duplicate execution effect.
 
-These are process-boundary fixtures, not power-loss/fsync tests or a runtime redesign. If they expose
-an implementation defect, keep the reproduction and review the repair as a separate bounded change.
+These are process-boundary fixtures, not power-loss/fsync tests or a runtime redesign. They exposed no
+implementation defect: every assertion passed against the code as merged, which is itself a result
+worth naming rather than assuming. Each load-bearing assertion was checked against a deliberate
+mutation of the production code — removing the signing gate on restore, committing without first
+asking whether the executor is already there, discarding the verified target after one use, and
+installing an execution anchor from the restored checkpoint — and every one of those mutations is
+caught. The mutations were reverted; they are recorded here as the reason to believe the fixtures
+can fail.
 
 ### 3.2 Not blockers — named follow-up scope
 
@@ -228,10 +242,10 @@ intermittency is a repair to the harness rather than a measurement.
 
 ## 4. Proposal
 
-1. Deliver **B1** as one bounded run, in the shape described in §3.1.
-2. Deliver **B2**. Review requires it before #92 closure; it is not an optional resilience experiment.
-3. On the acceptance of both B1 and B2, #92's five acceptance lines are met, and the
-   issue can be **proposed** for closure — by review, not by the measurement PR that finishes it.
+1. Deliver **B1** as one bounded run, in the shape described in §3.1. It is the last outstanding item.
+2. **B2** is delivered in #123 and is no longer outstanding.
+3. On the acceptance of B1, #92's five acceptance lines are met, and the issue can be **proposed**
+   for closure — by review, not by the measurement PR that finishes it.
 4. Carry §3.2 on the issues named there. Nothing in §3.2 blocks #92, and #92 closing does not
    discharge any of them.
 
