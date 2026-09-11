@@ -36,10 +36,13 @@ The repair does not substitute a state root for a block hash and does not call `
 
 **Met.** Every case up to and including retry is met. The final clause — "process restart at each
 relevant boundary" — is met for five boundaries by fixture and for two by a reviewed equivalence
-argument; §1.2.1 enumerates them rather than leaving the clause to be read as a whole. Two revisions
-of this ledger were wrong about it: the first recorded it as met on the strength of three fixtures
-that prove different properties, and the second left R4, R5 and R6 unestablished. B2 (#123) closed
-them with the two fixtures the review specified.
+argument; §1.2.1 enumerates them rather than leaving the clause to be read as a whole.
+
+Two earlier verdicts on this clause are worth keeping straight, because only one of them was an
+error. The first recorded the clause as met on the strength of three fixtures that prove different
+properties: that was wrong when it was written. The second marked R4, R5 and R6 unestablished: that
+was **correct at its revision**, and it did not become wrong when later fixtures supplied the
+evidence — a boundary with no fixture is unestablished, and saying so is the ledger working.
 
 | case | evidence | merged in |
 |---|---|---|
@@ -70,7 +73,7 @@ target, the applier's attempt budget, and the round's continuity anchor are all 
 | R1 | start with no recovery state at all | met | `TestAnchorIsNotRestoredFromDisk`; every real-client lane restarts here (#118–#121) |
 | R2 | evidence received or buffered, verification not finished | met by equivalence | nothing of the bundle is persisted, so the restart discards it and the process re-enters at R1; no executor call has been made, so there is nothing to reconcile that a cold start does not already do |
 | R3 | a verified target is held, `Commit` not yet called | met by equivalence | same: the verified target is memory-only, and the executor has not moved. The target must be re-derived from authenticated incoming evidence (a quiet certificate alone does not name it), as in R1 |
-| R4 | `Commit` in flight when the process dies | met | `TestRestart_InFlightCommitIsDecidedByTheLiveExecutorHead` destroys a process while a Commit is in flight and builds a second one over the same executor, for all three outcomes: the call did not apply (the returning process redoes it), it applied and the answer was lost (no second execution — the executor is asked before it is commanded), and the executor is still working when the new process asks (`payload-unavailable`, retryable, verified target retained) | #123 |
+| R4 | `Commit` in flight when the process dies | met | `TestRestart_InFlightCommitIsDecidedByTheLiveExecutorHead` covers the two resolved outcomes — the call did not apply (the returning process redoes it) and it applied while the answer was lost (no second execution, because the applier asks the executor before commanding it) — plus a fresh attempt the executor cannot satisfy yet. `TestRestart_AnAdmittedCommitCompletesAfterTheProcessIsGone` covers the third, genuinely delayed outcome: the executor admits one operation, the caller dies, the operation keeps running across the restart, answers every later request SYNCING without starting a second one, and applies the block on its own — so the head moves with **no new request behind it**, which is asserted by counting | #123 |
 | R5 | `Commit` succeeded, the anchor not yet adopted | met, with R6 | `TestRestart_ResumingOlderThanTheExecutor`. That R5 and R6 are one state is no longer assumed: the fixture kills a process in each and requires the resumed process's observations to be *equal*, so the claim that the adoption difference is memory-only is measured rather than asserted | #123 |
 | R6 | adopted, certificate not yet persisted | met | adoption happens inside `HandleCertificate`; `persistingDriver` calls `SaveLUC` only after it returns (`node.go`), so the restart resumes from an *older* certificate with the executor ahead of it. `TestRestart_ResumingOlderThanTheExecutor` runs the production `LoadLUC` → `verifyRestoredLUC` → `resumeFrom` from exactly that checkpoint: the target is re-derived from authenticated evidence, no Commit is issued at all, the head does not move in either direction, and nothing is signed — against a control, over the same certificates and the same executor, that does sign. `TestRound_CrashAfterSubmitBeforeUC_…` remains adjacent and is not cited here: it constructs a bare `NewRound` and submits after its simulated restart | #123 |
 | R7 | restarted from a persisted certificate | met | `TestRestoredNodeIsNonVoting` drives the production sequence and asserts the node follows, reconciles and does not vote, against a control that does vote |
@@ -80,11 +83,12 @@ to disagree with rather than as a result: *if* something later persists verified
 cursor — which is #14's work — those two equivalences must be re-reviewed. They are the only rows in
 the table that rest on an argument rather than on a fixture.
 
-Two things the B2 fixtures deliberately do not model, so they are not over-read: power loss, an
-interrupted write or any fsync guarantee (the executor is a live process that keeps its state across
-the shard node's restart, which is the deployment #92 is about — storage durability is #14's); and a
-Commit still executing inside the executor concurrently with the new process's first call, which is
-covered as an answer the new process can receive (SYNCING) rather than as concurrency. The rollback
+One thing the B2 fixtures deliberately do not model, so it is not over-read: power loss, an
+interrupted write or any fsync guarantee. The executor is a live process that keeps its state across
+the shard node's restart, which is the deployment #92 is about; storage durability is #14's. What
+they *do* model, after review found the first attempt insufficient, is an executor-side operation
+that outlives the process that asked for it and completes on its own — bounded and joined, so a
+failure cannot hang the suite. The rollback
 the fixtures assert against is one their executor can actually perform, and that capability is
 asserted too — otherwise "it did not roll back" would be a property of the stub.
 
@@ -203,10 +207,17 @@ node, so the assertion order matters: adoption first, injection second, agreemen
 **B2. The two restart states (R4 and shared R5/R6). Delivered in #123.** Two deterministic
 fixtures in `shardnode/restart_boundaries_test.go`, in the shape the review specified:
 
-- Restart across an in-flight `Commit`. Exercise both executor outcomes: the request did not apply,
-  and it applied despite the caller losing the response. Include a delayed completion where
-  applicable. Recover from authenticated evidence and the live executor head, not an assumed RPC
-  result; preserve unavailable versus invalid and the non-voting gate.
+- Restart across an in-flight `Commit`. Exercise both resolved executor outcomes — the request did
+  not apply, and it applied despite the caller losing the response — and, separately, the delayed
+  completion: one bounded executor-side operation admitted by the dead process, still pending when
+  its successor starts, released independently of any new `Commit`. Recover from authenticated
+  evidence and the live executor head, not an assumed RPC result; preserve unavailable versus invalid
+  and the non-voting gate.
+
+  Review found the first attempt at the delayed case short of this: a scripted SYNCING answer to a
+  *new* request looks like an old operation still in flight and is not one, because the head then
+  moves on a later request rather than on the admitted operation. The distinction is the whole
+  boundary, and the fixture now asserts it by counting requests across the completion.
 - Use production `LoadLUC` → `verifyRestoredLUC` → `resumeFrom` with a checkpoint older than the
   executor's state. This covers both R5 and R6 because their only difference is lost memory.
   Re-derive the authenticated target before adoption, reconcile without rolling back to the stale
@@ -215,7 +226,8 @@ fixtures in `shardnode/restart_boundaries_test.go`, in the shape the review spec
 
 These are process-boundary fixtures, not power-loss/fsync tests or a runtime redesign. They exposed no
 implementation defect: every assertion passed against the code as merged, which is itself a result
-worth naming rather than assuming. Each load-bearing assertion was checked against a deliberate
+worth naming rather than assuming. The one defect the work did surface was in the fixtures, and
+review found it. Each load-bearing assertion was checked against a deliberate
 mutation of the production code — removing the signing gate on restore, committing without first
 asking whether the executor is already there, discarding the verified target after one use, and
 installing an execution anchor from the restored checkpoint — and every one of those mutations is

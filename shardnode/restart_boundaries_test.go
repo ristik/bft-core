@@ -66,10 +66,29 @@ type restartExecutor struct {
 	// interrupt, when set, is consumed by the next Commit and models the process dying during it.
 	// applies says what the EXECUTOR did with the call whose answer was lost.
 	interrupt *struct{ applies bool }
+	// latchNext makes the next Commit ADMIT the operation and leave it running. This is the third
+	// thing that can happen to a call whose caller dies: not "it applied" and not "it did not", but
+	// "it is still going". The operation belongs to the executor from that moment on — it outlives
+	// the process that asked for it and completes on its own, which is what makes it different from
+	// a later request that happens to succeed.
+	latchNext bool
+	pending   *pendingCommit
 	// syncingFor makes the next n commits answer SYNCING with no error: the executor is still
 	// working and does not have the block canonical yet. This is the delayed-completion case.
 	syncingFor int
 }
+
+// pendingCommit is one executor-side operation still in progress. release lets the test decide when
+// the executor finishes it; done is how the test joins the worker, so a failure cannot leave a
+// goroutine running past the test that made it.
+type pendingCommit struct {
+	hash      Hash
+	release   chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func (p *pendingCommit) finish() { p.closeOnce.Do(func() { close(p.release) }) }
 
 func newRestartExecutor(head, genesis BlockRef) *restartExecutor {
 	return &restartExecutor{head: head, genesis: genesis, blocks: map[string]BlockRef{}}
@@ -97,6 +116,31 @@ func (e *restartExecutor) Commit(_ context.Context, hash Hash) (Status, error) {
 			e.applyLocked(hash)
 		}
 		return StatusSyncing, errCommitInterrupted
+	}
+	if e.latchNext {
+		e.latchNext = false
+		p := &pendingCommit{
+			hash:    Hash(append([]byte(nil), hash...)),
+			release: make(chan struct{}),
+			done:    make(chan struct{}),
+		}
+		e.pending = p
+		go func() {
+			defer close(p.done)
+			<-p.release
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			e.applyLocked(p.hash)
+			e.pending = nil
+		}()
+		// The caller is about to die and learns nothing. The operation does not die with it.
+		return StatusSyncing, errCommitInterrupted
+	}
+	if e.pending != nil {
+		// A request for a block the executor is already working on starts nothing and applies
+		// nothing: it is answered SYNCING, and the operation that will change the head is still the
+		// one admitted before the restart.
+		return StatusSyncing, nil
 	}
 	if e.syncingFor > 0 {
 		e.syncingFor--
@@ -142,6 +186,53 @@ func (e *restartExecutor) dieDuringNextCommit(applies bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.interrupt = &struct{ applies bool }{applies: applies}
+}
+
+// admitAndKeepRunning arms the next Commit to be admitted and left in progress, so that the
+// operation survives the process that asked for it.
+func (e *restartExecutor) admitAndKeepRunning(t *testing.T) {
+	e.mu.Lock()
+	e.latchNext = true
+	e.mu.Unlock()
+	// Whatever the test does or fails to do, the worker is released and joined before the test ends.
+	t.Cleanup(func() {
+		e.mu.Lock()
+		p := e.pending
+		e.mu.Unlock()
+		if p == nil {
+			return
+		}
+		p.finish()
+		select {
+		case <-p.done:
+		case <-time.After(5 * time.Second):
+			t.Error("the executor's pending operation never finished")
+		}
+	})
+}
+
+func (e *restartExecutor) pendingCommitHash(t *testing.T) Hash {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	require.NotNil(t, e.pending, "the executor should still be working on the admitted operation")
+	return e.pending.hash
+}
+
+// completePending releases the operation the executor admitted before the restart and waits for it,
+// bounded. Nothing else in the test may move the head while this runs.
+func (e *restartExecutor) completePending(t *testing.T) {
+	t.Helper()
+	e.mu.Lock()
+	p := e.pending
+	e.mu.Unlock()
+	require.NotNil(t, p, "there is no pending operation to complete")
+	p.finish()
+	select {
+	case <-p.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the executor's pending operation never completed")
+	}
 }
 
 func (e *restartExecutor) answerSyncing(n int) {
@@ -323,6 +414,28 @@ func (s *restartScenario) interruptedCommitInFlight(t *testing.T, exec *restartE
 	stop() // the process dies here: the verified target, the anchor and the attempt go with it
 }
 
+// admittedCommitStillRunning is interruptedCommitInFlight's third sibling: the executor ADMITS the
+// Commit and is still working on it when the caller dies. What survives the process is the
+// operation, not the Round — the dead process's Go stack unwinds exactly as it would when its
+// transport is cancelled.
+func (s *restartScenario) admittedCommitStillRunning(t *testing.T, exec *restartExecutor) {
+	t.Helper()
+	round, stack, sub, stop := s.newProcess(t, exec)
+
+	require.Error(t, s.deliver(t, round, 0))
+	st := waitRecovered(t, stack.Requester)
+	require.Equal(t, RecoveryReady, st.State, "err: %v", st.LastErr)
+
+	exec.admitAndKeepRunning(t)
+	require.Error(t, s.deliver(t, round, 1), "the Commit was admitted, not answered")
+	require.Equal(t, Hash(s.blockB), exec.pendingCommitHash(t),
+		"and the executor is still working on the certified block")
+	require.Equal(t, Hash(s.blockA), exec.currentHead().Hash, "which has not changed the head yet")
+	require.Empty(t, sub.rounds())
+
+	stop()
+}
+
 /*
 R4: a Commit interrupted in flight, decided after the restart by reading the live executor head.
 
@@ -386,7 +499,12 @@ func TestRestart_InFlightCommitIsDecidedByTheLiveExecutorHead(t *testing.T) {
 		require.Empty(t, sub.rounds())
 	})
 
-	t.Run("the executor is still working when the new process asks: retryable, and the target is kept", func(t *testing.T) {
+	t.Run("a fresh attempt the executor cannot satisfy yet: retryable, and the target is kept", func(t *testing.T) {
+		// Note what this case is and is not. The operation the dead process started is over; what
+		// the returning process meets is a NEW request that the executor cannot satisfy yet, and
+		// the head later moves because a later request succeeds. The genuinely delayed completion —
+		// where the operation admitted before the restart is still running and finishes on its own —
+		// is the case below, and review was right that this one does not stand in for it.
 		s := newRestartScenario(t)
 		exec := s.newExecutor(s.behind)
 		s.interruptedCommitInFlight(t, exec, false)
@@ -587,4 +705,67 @@ func TestRestart_ResumingOlderThanTheExecutor(t *testing.T) {
 		require.Empty(t, exec.commitTargets()[1:],
 			"and it too committed nothing: being already canonical is not a restoration-only property")
 	})
+}
+
+/*
+R4, the delayed completion: the operation the dead process started is STILL RUNNING when its
+successor starts, and finishes on its own.
+
+This is the case the first revision of these fixtures missed, and the miss is worth naming because
+it is the recurring one in this programme: a scripted SYNCING answer to a NEW request looks exactly
+like an old operation still in flight, and it is not — in that version the head moved because a later
+Commit succeeded, so nothing was being carried across the restart at all. Here the executor admits
+one operation before the process dies, answers every later request SYNCING without starting a second
+one, and applies the block only when the original operation completes. The head therefore moves with
+no new request behind it, which is asserted directly by counting.
+*/
+func TestRestart_AnAdmittedCommitCompletesAfterTheProcessIsGone(t *testing.T) {
+	s := newRestartScenario(t)
+	exec := s.newExecutor(s.behind)
+	s.admittedCommitStillRunning(t, exec)
+
+	round, stack, sub, _ := s.newProcess(t, exec)
+	s.restore(t, round, s.older)
+
+	require.Error(t, s.deliver(t, round, 0), "the new process holds no anchor and says so")
+	st := waitRecovered(t, stack.Requester)
+	require.Equal(t, RecoveryReady, st.State, "err: %v", st.LastErr)
+
+	// The returning process meets the executor exactly as it is: an old head, and an operation it
+	// knows nothing about still running underneath.
+	require.Equal(t, Hash(s.blockA), exec.currentHead().Hash)
+	require.Equal(t, Hash(s.blockB), exec.pendingCommitHash(t))
+
+	err := s.deliver(t, round, 1)
+	require.Error(t, err, "the certified block is not canonical yet, so identity cannot be proven")
+	require.ErrorContains(t, err, "no-anchor")
+	require.Equal(t, ApplyPayloadUnavailable, stack.Applier.Status().Last,
+		"an executor still working is UNAVAILABLE — retryable, never a fault")
+	require.True(t, stack.Applier.Status().Last.Retryable())
+
+	target, ok := stack.Requester.Target()
+	require.True(t, ok, "the authenticated target is retained across the wait")
+	require.Equal(t, Hash(s.blockB), target.Anchor.BlockHash)
+	require.Empty(t, sub.rounds(), "and nothing is signed while the node cannot prove where it is")
+
+	// THE OPERATION COMPLETES, on the executor's own schedule and with no request behind it.
+	requestsBefore := len(exec.commitTargets())
+	exec.completePending(t)
+	require.Equal(t, requestsBefore, len(exec.commitTargets()),
+		"no new Commit was issued: the head is about to move because the operation admitted BEFORE "+
+			"the restart finished, which is the whole point of this case")
+	require.Equal(t, s.ahead, exec.currentHead(), "and it moved to the certified block")
+
+	// The next certificate finds the executor already there. Adoption comes from the authenticated
+	// evidence the node retained, not from a request that produced the state.
+	require.NoError(t, s.deliver(t, round, 2))
+	require.Equal(t, requestsBefore, len(exec.commitTargets()),
+		"and no Commit was needed to adopt a block the executor already holds")
+	require.NotNil(t, round.continuity.anchor)
+	require.Equal(t, Hash(s.blockB), round.continuity.anchor.BlockHash)
+	require.Equal(t, s.ahead, exec.currentHead(), "exact head and state, unchanged by the adoption")
+	require.Empty(t, sub.rounds(), "and a restored process still signs nothing")
+	require.False(t, round.health.Snapshot().Voting)
+
+	s.requireNoRollback(t, exec, 0)
 }
