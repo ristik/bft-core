@@ -38,9 +38,9 @@ asserts that equality directly rather than assuming it.
 
 WHAT THESE FIXTURES DO NOT MODEL, stated so they are not over-read: power loss, an interrupted
 write, or any fsync guarantee. The executor is a live process that keeps its state across the shard
-node's restart, which is the deployment #92 is about; storage durability is #14's. Nor do they model
-a Commit still executing inside the executor while the new process makes its first call — that is
-covered as an answer the new process can get, SYNCING, rather than as concurrency.
+node's restart, which is the deployment #92 is about; storage durability is #14's. The delayed case
+does retain an executor-side operation across restart and releases its completion independently
+of the new process's requests.
 */
 
 // errCommitInterrupted is what an in-flight Commit "returns" when the process it was running in
@@ -73,8 +73,8 @@ type restartExecutor struct {
 	// a later request that happens to succeed.
 	latchNext bool
 	pending   *pendingCommit
-	// syncingFor makes the next n commits answer SYNCING with no error: the executor is still
-	// working and does not have the block canonical yet. This is the delayed-completion case.
+	// syncingFor makes the next n fresh requests answer SYNCING without applying the block.
+	// It tests a retry, not an operation surviving restart; pending models the latter.
 	syncingFor int
 }
 
@@ -439,9 +439,9 @@ func (s *restartScenario) admittedCommitStillRunning(t *testing.T, exec *restart
 /*
 R4: a Commit interrupted in flight, decided after the restart by reading the live executor head.
 
-The returning process cannot know what happened to the call — that is what "in flight" means — so it
-must not carry an assumption either way. Both outcomes are covered, and the third case is the one
-that is neither: the executor is still working on it when the new process asks.
+The returning process cannot know what happened to the call, so it must not carry an assumption
+either way. These cases cover both resolved outcomes and a fresh request answered SYNCING.
+TestRestart_AnAdmittedCommitCompletesAfterTheProcessIsGone covers an operation still pending at restart.
 
 What must hold in every case: the executor ends on the certified block, no Commit ever names the
 block the persisted checkpoint remembers, and nothing is signed.

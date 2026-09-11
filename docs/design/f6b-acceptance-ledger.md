@@ -204,8 +204,8 @@ agrees with the survivors on block hash, state root and receipts — while still
 the existing lane's machinery; what it must not do is let the new transaction be what recovers the
 node, so the assertion order matters: adoption first, injection second, agreement third.
 
-**B2. The two restart states (R4 and shared R5/R6). Delivered in #123.** Two deterministic
-fixtures in `shardnode/restart_boundaries_test.go`, in the shape the review specified:
+**B2. The two restart states (R4 and shared R5/R6). Delivered in #123.** Three deterministic
+test functions in `shardnode/restart_boundaries_test.go`, in the shape the review specified:
 
 - Restart across an in-flight `Commit`. Exercise both resolved executor outcomes — the request did
   not apply, and it applied despite the caller losing the response — and, separately, the delayed
