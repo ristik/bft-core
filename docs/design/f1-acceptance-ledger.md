@@ -28,16 +28,16 @@ appear:
 |---|---|
 | `./scripts/reth-chaos-selftest.sh` | **38 ok, 0 bad** (PR #108 recorded 31; the suite has grown since) |
 | `go test ./rootchain/consensus -run 'Test_rootNetworkRunning\|Test_recoverState' -count=1`, 3× | **FAIL 3/3** — see §1, acceptance line 1 |
-| hosted CI job history since 2026-09-08 | every job **zero steps**, 2–5 s, `failure` — no job has started |
-| `go build ./...`, `go vet ./...`, `go test ./cli/... ./engineapi/... ./shardnode/... ./network/... -count=1` | **all pass** — which is what isolates the failure above to `rootchain/consensus` |
+| sampled hosted CI runs listed below | **zero steps**, 2–5 s, `failure` — those jobs did not execute |
+| `go build ./...`, `go vet ./...`, `go test ./cli/... ./engineapi/... ./shardnode/... ./network/... -count=1` | **all pass** in that session — identifies a failing package, not a causal isolation |
 
 The hosted-CI observation matters to three separate lines below, so it is stated once here. Runs
 34270713889, 34283525433 and 34362021522 (`real-reth-smoke`) and 34356066113 (`ci`) all report
 `steps=0` and complete within seconds. That signature is consistent with the account
 billing/spending condition recorded on #9 on 2026-09-08, but this ledger did not independently
-diagnose it: what is established is that **no hosted job has executed a step since 2026-09-08**, so
-no CI line below may be read as currently continuous. The last hosted run that actually executed
-anything is `real-reth-smoke` **34161538859** (2026-09-07, head `a2e801db`, success).
+diagnose it. The cited samples establish failures before any step executed; they are not an
+exhaustive audit of every workflow run since that date. No CI line below establishes continuous
+coverage. The last successful executed run identified in this reconciliation is `real-reth-smoke` **34161538859** (2026-09-07, head `a2e801db`, success).
 
 ---
 
@@ -62,9 +62,9 @@ gaps have ticket owners; a version/spec mismatch is detected before voting."**
 
 | clause | status |
 |---|---|
-| paired devnet passes | **met** — `scripts/reth-paired-devnet.sh` at the pin, four validators, four clients, funded transaction executed and certified, all four agreeing (§5.5). Last exercised as its own lane during the #99 review; the F6b lanes use the same topology but are not this script |
+| paired devnet passes | **met** — `scripts/reth-paired-devnet.sh` at the pin, four validators, four clients, funded transaction executed and certified, all four agreeing (§5.5). Last exercised as its own lane during the #99 review; the F6b lanes also pair validators with clients but are not this four-validator script |
 | known protocol gaps have ticket owners | **met** — §5.4 known-limitations register, one named owner per row (#10, #11, #13, #14, #16) |
-| version/spec mismatch detected before voting | **met** — §5.8 and §3 of this ledger; the node itself refuses, not only `doctor` |
+| version/spec mismatch detected before voting | **met in part** — the node refuses checked capability/chain/genesis/pairing mismatches (§5.8); the complete supported profile and missing-local-configuration test still require #89 (§3) |
 | **the existing Go suite passes** | **not met at this baseline** |
 
 *(measured for this ledger)* `go test ./rootchain/consensus -run 'Test_rootNetworkRunning|Test_recoverState' -count=1`
@@ -72,19 +72,22 @@ fails 3/3 on this host at `fbc4d08b`. `Test_rootNetworkRunning` fails after ~11 
 fails in all eight subtests — `recovery_triggered_by_vote`, `recovery_triggered_by_timeout`,
 `recovery_triggered_by_missing_proposal`, `recovery_triggered_by_missing_proposal_-_delay_proposal`,
 `recover_from_different_timeout_rounds`, `late_joiner_catches_up`,
-`less_than_quorum_nodes_are_live_for_a_period`, `peer_drops_out_of_network` — each with
-"Condition never satisfied … waiting for progress to be made".
+`less_than_quorum_nodes_are_live_for_a_period`, `peer_drops_out_of_network` — with unsatisfied progress/recovery assertions. The exact messages and first failed conditions
+differ across subtests; preserve the JSON output rather than treating them as one diagnosis.
 
-This is the same pair the #96 review recorded on 2026-09-08 as reproducing on baseline `0d9c6ee6`
-with and without the PR under review. It is therefore **not** a regression introduced by any F1 or
-F6b work, and this ledger does not claim to have diagnosed it. What has changed since that record is
-only that it is now reproduced deterministically (3/3) at the current merged head. Two honest limits:
-it is one host, darwin/arm64, and hosted CI cannot presently corroborate or contradict it (§0).
+The #96 review recorded this test family failing on baseline `0d9c6ee6` with and without
+that PR. This establishes an older occurrence, not that every later failure has the same cause
+or that all F1/F6b changes are exonerated. Three failing runs are repeatable local evidence, not
+proof of deterministic behavior on every schedule. The author observations are one host,
+darwin/arm64; hosted corroboration is presently unavailable (§0).
 
-**This is the largest open item under #9 and it has no ticket.** It is not #100 (that is the
-`network` package, which passes here), not #16 (that is the real-reth leader-kill stall) and not
-#14. Recommended: open a child for it rather than letting F1's own acceptance line rest on a
-"recorded baseline exception".
+**The failed-suite investigation is now #127 under #9.** Reviewer reproduction at docs-only
+`6735fdd1` failed both top-level tests and all eight recovery cases once (21.135 s); JSON output
+SHA-256 `f032ad1a45ae3e6f5413814c5fb879de516edfc80ee3a484fd639c800fc67c58`.
+Passing other packages does not exclude shared causes. Track #127 separately until a trace
+establishes any relationship to #100, #16 or #14. #16's scope includes mixed-cadence/partition
+integration and consistency-proof retention, not only the recorded leader-kill stall. A named
+issue is not a waiver of F1's passing-suite acceptance clause.
 
 **Line 2 — "Merging alone is not evidence of production readiness."** Observed throughout: §7 of
 `f1-baseline.md`, the "Not claimed" sections of #96, #97, #99 and #110, and §7 below.
@@ -103,7 +106,7 @@ Merged: **#91** (harness, `e7d36a78`), **#108** (per-scenario clusters and the f
 | 1 — bounded funded-transaction sequence, at least two distinct leaders producing executed certified blocks; count EVM blocks and receipts, not quiet rounds | **met** | `multi-leader` scenario in `scripts/reth-chaos.sh`; receipts correlated to authenticated anchor logs and the technical-record leader, with empty and prefix-only block-hash matches rejected (#108); recorded in `f1-baseline.md` §5.7.1 |
 | 2 — independent scenarios from clean fixtures: follower restart, leader kill, reth-only restart, pair restart; one failure at a time | **met** | each scenario builds its own devnet; a scenario whose clean cluster did not execute and converge is reported `NOT RUN` rather than silently attributed to the fault (`freshCluster` gates in `scripts/reth-chaos.sh`) |
 | 3 — before/after cursors, applied head, persisted UC, root round/leader, authenticated context; convergence **and** state/receipt agreement; safe abstention recorded; a missing payload never becomes VALID | **met** | per-scenario sealed archives under `evidence-runs/<runID>/`; `convergenceGate`; §5.7.2's refusal classification, where the pair-restart node abstains on `no-anchor` and then on an authenticated target whose payload is unavailable |
-| 4 — preserve evidence, minimal deterministic reproduction for any failure, no silent skipping or budget raising | **met** | supervisor-owned collection and teardown, exercised on purpose in three abort modes (`nounset`, `kill`, `hang`+SIGTERM) in #91; a child that dies without a result is an *incomplete run*, never zero failures |
+| 4 — preserve evidence, minimal deterministic reproduction for any failure, no silent skipping or budget raising | **met in part** | supervisor-owned collection and teardown, exercised on purpose in three abort modes (`nounset`, `kill`, `hang`+SIGTERM) in #91; a child that dies without a result is an *incomplete run*, never zero failures. Collection is established; this does not supply a deterministic reproduction for every unresolved runtime failure (#16) |
 
 ### Acceptance
 
@@ -123,8 +126,8 @@ Merged: **#91** (harness, `e7d36a78`), **#108** (per-scenario clusters and the f
    `continuity-gap`, open; the later row showing it recovering is from the #109-era run, and #110
    measured only `reth-only-restart` and `pair-restart`. So the "positive execution after each
    fault" line is unestablished for this one scenario at `fbc4d08b`.
-2. **No full matrix has been run at the current merged head.** The most recent scenario evidence is
-   #110's, at `d14f3bf7` — before #111–#124. Each recorded outcome is also a single run, which #110
+2. **No full matrix has been run at the current merged head.** The cited full-matrix work is #108, supplemented by #110 at `d14f3bf7`.
+   #111–#124 add narrower recovery measurements, not a fresh run of the entire fault matrix. Each recorded outcome is also a single run, which #110
    itself says is not a claim that the failure cannot recur.
 
 Both are measurement, not repair: the cost is one clean `./scripts/reth-chaos.sh -t 2` run at
@@ -169,9 +172,10 @@ Merged: **#96** (items 1 and 4, `5eb8bbe5`), **#99** (items 2 and 3, `80974c48`)
 3. **Operator configuration and compatibility guidance is unwritten**: what `--expected-genesis-hash`
    is for, what happens to a node started without it, and the two assumptions the checks do not
    discharge (the Engine and plain connections being the same process; agreement on future forks).
-4. **Not in scope here:** a differing *capability-set* negative needs a second, differently-built
-   client and is meaningful only with F3 (#11) version negotiation. Authenticating the expected
-   `shardConfHash` on live and restored UCs is **#10** and is not discharged by any of this.
+4. **No second-client prerequisite:** the controlled JSON-RPC fixture already exercises differing
+   capability sets through the actual binary, as #89 explicitly permits. Alternate-client
+   interoperability and F3's future custom profile are separate questions. Authenticating expected
+   `shardConfHash` on live and restored UCs remains **#10**.
 
 ---
 
@@ -182,7 +186,7 @@ Merged: **#97** (stages 1, 2 and 4, `dc233fff`).
 | stage | status | evidence |
 |---|---|---|
 | 1 — paired lane and stock control in a separately named CI job; pinned build or provenance-recorded artifact; cache key includes commit/toolchain/target/flags; revision validated on cache hits; no unpinned images, no fake fallback | **met** | `.github/workflows/reth-smoke.yml`: pin `189c0df3` (= upstream `v2.5.0`), asset name and sha256 recorded in `env`, `sha256sum -c` on download, and a `reth --version` commit check that runs **on cache hits too**. Cache key is commit + asset + digest + OS + arch |
-| 2 — trigger on relevant PRs plus manual dispatch; keep fake checks and protection off; record budget and timings | **met in part** | triggers are `pull_request` to `integration/enshrined-evm` and `workflow_dispatch`; `ci.yml` retained; protection off. Budget is recorded from the one executed run; **no cache-hit execution has ever been observed** — run 34161538859 took the fetch path |
+| 2 — trigger on relevant PRs plus manual dispatch; keep fake checks and protection off; record budget and timings | **met in part** | triggers are `pull_request` to `integration/enshrined-evm` and `workflow_dispatch`; `ci.yml` retained; protection off. Budget is recorded from the one executed run; **no cache-hit execution is established by the cited evidence** — run 34161538859 took the fetch path |
 | 3 — add real-reth fault scenarios on a separate bounded lane | **not met** | #91's harness now has a sound oracle, so the blocker named on #90 is gone, but no fault lane exists in any workflow |
 | 4 — exercise a deliberate controlled failure to prove collection and upload | **met in part** | the `inject_failure` dispatch input and the deliberate-failure step exist and the collection/upload steps are `if: always()`; the upload path is proven only by run 34161538859, where the failure step was **skipped**. No run has exercised it deliberately |
 
@@ -191,20 +195,21 @@ Merged: **#97** (stages 1, 2 and 4, `dc233fff`).
 | line | status |
 |---|---|
 | a PR run proves a funded transaction executed in real reth and certified by BFT; hashes/receipts agree across four instances | **met, once** — run **34161538859**, 2026-09-07, head `a2e801db`, all steps green including the paired devnet. Not continuous: §0 |
-| wrong pin, bad/missing binary and RPC failures fail visibly, never silently skip | **met in part** — the checks are written to fail closed (digest mismatch, commit mismatch, no fallback path anywhere), but none has been *exercised*; this is code-reading evidence, not a run |
-| cache-hit and fresh-build paths documented and tested; failure artifact demonstrably downloadable and useful | **not met** — fresh path executed once; cache-hit path never; artifact downloaded once, from a successful run |
+| wrong pin, bad/missing binary and RPC failures fail visibly, never silently skip | **met in part** — the checks are written to fail closed (digest mismatch, commit mismatch, no fallback path anywhere), but the workflow packaging negatives are not independently established by the cited run. Local harness pin/RPC refusals are separate evidence; exercise the exact packaging paths rather than claiming all negatives are untested |
+| cache-hit and fresh-build paths documented and tested; failure artifact demonstrably downloadable and useful | **not met** — fresh path executed once; cache-hit path unestablished; artifact downloaded once, from a successful run |
 | smoke/fault/fake results named distinctly; analyzer findings retained with individual dispositions | **met in part** — naming yes (`ci` vs `real-reth-smoke`, with the reason stated at the top of the workflow); the advisory `analyze` job's G115/G404/G301/G306 findings still have no per-finding disposition recorded, and #9 asked for one |
 | link the exact workflow run, BFT/reth commit and artifact provenance in #9 | **met in part** — recorded in `f1-baseline.md` §6.4 and in #97; the deliberate-failure run has nothing to link |
 
 **What #90 still needs, and the constraint that shapes it.** Three of the four open lines need a
-hosted run, and no hosted job has started since 2026-09-08 (§0). The 2026-09-11 sequencing is
+hosted run, and the cited recent hosted jobs executed no steps (§0). The 2026-09-11 sequencing is
 explicit that CI credits may *delay* hosted execution but do not license a protocol change, and that
 exact local revisions and commands are to be recorded meanwhile. So the next #90 unit is **local
 packaging**: make the lane's provenance, verification, evidence-collection and teardown steps
 runnable locally against the same pin, exercise the negatives that have only been read (wrong
 digest, wrong commit, missing binary) and the deliberate-failure collection path, and record the
-results with exact commands — leaving the hosted-run lines (cache hit, PR-triggered failure upload,
-fault lane) explicitly open for when jobs run again.
+results with exact commands — leaving hosted execution evidence open for when jobs run again. Cache-hit logic, fault-lane
+packaging and local deliberate-failure collection can be implemented and tested now; actual
+hosted cache hits, workflow triggering and downloadable failure upload remain distinct evidence.
 
 ---
 
@@ -230,12 +235,13 @@ Merged: **#101** (leak repair and diagnostics, `a424be58`), **#104** (measuremen
 | small independently reviewed PR; production lifecycle changes separately explained | **met** — the one production question found (`newDHT`'s callback logging through a caller-supplied logger with no lifetime relation to the DHT) is written up and deliberately **not** changed |
 | closing record links before/after runs and preserves the failure evidence | **met** |
 
-**The residual is one line and it is not advanceable here.** The reported timeouts
+**The residual is unresolved, but local investigation is still eligible.** The reported timeouts
 (`TestBootstrapNodes` at 4.13 s, `TestProvidesAndDiscoverNodes` at 32.23 s, run 34158584395) have no
-established cause or rate. Deciding it needs a failing run on the hardware where it failed, and no
-hosted job has started since 2026-09-08 (§0). The diagnostics are armed for that run. #100 stays
+established cause or rate. A trace reproducing the missing prerequisite locally or on a
+representative runner can advance the diagnosis; the original hosted hardware is not a prerequisite.
+Hosted validation remains outstanding. The diagnostics are armed for the next failure. #100 stays
 open, and it is a named disposition for one boundary, not a blanket CI waiver — the #96-era baseline
-consensus failures in §1 are **not** it.
+consensus failures in §1 are not thereby explained.
 
 ---
 
@@ -243,7 +249,7 @@ consensus failures in §1 are **not** it.
 
 | # | gap | kind | next step |
 |---|---|---|---|
-| **#9** | `Test_rootNetworkRunning` and all eight `Test_recoverState` subtests fail 3/3 at `fbc4d08b` | runtime or test defect, **unowned** | open a child; do not record it indefinitely as a "baseline exception" |
+| **#9** | `Test_rootNetworkRunning` and all eight `Test_recoverState` subtests fail 3/3 at `fbc4d08b` | runtime or test defect | #127: trace the first missing progress prerequisite; not a baseline waiver |
 | #9 | the `l1` merge (§3.2) | integration | F8 #16, unchanged |
 | #9 | advisory `analyze` findings (G115, G404, G301, G306) have no per-finding disposition | hygiene | one disposition each; no blanket disablement |
 | #88 | leader kill has no passing measurement at a current head | measurement | one clean matrix run at the merged head, pin, T2 ≥ 5 s |
@@ -251,10 +257,10 @@ consensus failures in §1 are **not** it.
 | **#89** | missing `chain_id` partition param has no CLI test | code | next unit, §3 |
 | **#89** | which fork/config parameters are pinned beyond the genesis hash is undefined | design record | next unit, §3 |
 | **#89** | operator configuration and compatibility guidance unwritten | design record | next unit, §3 |
-| #89 | differing capability-set negative | blocked | needs a second client; F3 #11 |
+| #89 | differing capability-set negative | covered by controlled fixture | no second-client prerequisite; alternate-client interoperability is separate |
 | **#90** | deliberate-failure upload never exercised; cache-hit path never observed | hosted run | local packaging now, hosted lines when jobs run |
 | **#90** | no fault lane | CI | after the local packaging unit; #91's oracle no longer blocks it |
-| #100 | timeout cause and rate | blocked | needs a failing hosted run; diagnostics armed |
+| #100 | timeout cause and rate | unresolved | local or representative-runner tracing remains eligible; hosted validation pending |
 | — | expected `shardConfHash` on live and restored UCs | separate ticket | #10 |
 | — | write ordering / fsync durability | separate ticket | #14 |
 | — | unexplained leader-kill stall, "Too deep reorg" | separate ticket | #16 |
