@@ -72,17 +72,19 @@ archive=${archive:-$runDir.tar.gz}
 nodesDir=${RETH_SMOKE_NODES_DIR:-test-nodes}
 binDir=$(dirname "$runDir")/.bin-$(basename "$runDir")
 
-# ownedPids prints every process this run owns: the child's process group, every pid recorded under
-# the nodes directory that is still alive AND running from this checkout, and every ubft/reth process
-# whose working directory is this checkout. A recorded integer alone is never proof: a stale pid file
-# can name a process that has since been reused by anything, another checkout's node included.
+# ownedPids prints every process this run owns: the child's process group; every pid recorded under
+# the nodes directory that is still a ubft node or reth client running from this checkout (helper.sh
+# owned_pid: alive, expected command, this working directory); and every ubft/reth process whose
+# working directory is this checkout. A recorded integer alone is never proof, and nor is a working
+# directory: a stale pid file can name anything since reused — another checkout's node, or an
+# unrelated process started from this very checkout.
 ownedPids() {
   local p f
   [ -n "${childPid:-}" ] && pgrep -g "$childPid" 2>/dev/null
   for f in "$nodesDir"/*/pid; do
     [ -f "$f" ] || continue
     p=$(cat "$f" 2>/dev/null)
-    [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null && [ "$(proc_cwd "$p")" = "$repoRoot" ] && echo "$p"
+    owned_pid "$p" 'ubft (root-node|shard-node)|reth node' && echo "$p"
   done
   owned_pids 'ubft (root-node|shard-node)|reth node'
 }

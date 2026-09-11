@@ -199,6 +199,13 @@ check "…the scenarios did pass, so collection is what failed it" grep -q "reth
 check "…the archive is still produced and inspectable, holding what could be copied" sh -c "tar tzf '$T/ev/obstructed.tar.gz' | grep -q 'obstructed/nodes/evm2/debug.log'"
 check "…it validates on its own, which is why validation alone was not enough" grep -q "reth-evidence: archive .*obstructed.tar.gz validated" "$T/obstructed.out"
 check "…and the failed copy is recorded in the archived run log" sh -c "tar xzf '$T/ev/obstructed.tar.gz' -O obstructed/run.log | grep -q 'cannot create .*nodes/evm1'"
+# A process that is not a node, started from THIS checkout in its own process group, whose pid a
+# stale pid file names. Working directory alone would call it the run's; the command says otherwise.
+samePid=$(perl -e 'setpgrp(0, 0); exec "sleep", "601"' >/dev/null 2>&1 </dev/null & echo $!)
+spawned="$spawned $samePid"
+for _ in $(seq 1 30); do ps -o command= -p "$samePid" 2>/dev/null | grep -q '^sleep' && break; sleep 0.1; done
+rm -rf "$SN"; check "a passing run whose nodes directory names an unrelated same-checkout process passes" smoke "$stub"' && mkdir -p "$NODES/evm9" && echo '"$samePid"' >"$NODES/evm9/pid"' samecheckout
+check "…and that process survived the ownership sweep" kill -0 "$samePid"
 rm -rf "$SN"; refuses "a leaked secret fails the lane even when the scenarios pass" "appears verbatim" smoke "$stub"' && echo "jwt $(cat $NODES/evm1/jwt.hex)" >>"$NODES/evm1/debug.log"' leak
 # Publication. Each workflow's selection step is run here verbatim — extracted from the YAML, in a
 # directory laid out the way the runner's checkout is — against archives the real supervisor just
@@ -259,6 +266,12 @@ for c in "build/ubft root-node run --home test-nodes/root1" "build/ubft shard-no
 done
 spawned="$spawned ${sentinels[*]}"
 for p in "${sentinels[@]}"; do execd "$p"; done
+# ...and one that is not a node at all, started from the scratch checkout itself in its own group
+# (Braced: a bare `cd && perl … &` backgrounds the whole list, whose subshell then holds the $(...)
+# pipe for the sleep's lifetime — which once blocked this test for ten minutes.)
+sentinels+=("$(cd "$CO" && { perl -e 'setpgrp(0, 0); exec "sleep", "602"' >/dev/null 2>&1 </dev/null & echo $!; })")
+spawned="$spawned ${sentinels[3]}"
+for _ in $(seq 1 30); do ps -o command= -p "${sentinels[3]}" 2>/dev/null | grep -q '^sleep' && break; sleep 0.1; done
 sentinelsAlive() { local p; for p in "${sentinels[@]}"; do kill -0 "$p" 2>/dev/null || { echo "sentinel $p was stopped"; return 1; }; done; }
 allStopped() { local p i; for i in $(seq 1 30); do for p in "$@"; do kill -0 "$p" 2>/dev/null && break; done; kill -0 "$p" 2>/dev/null || return 0; sleep 0.1; done; echo "still alive: $(for p in "$@"; do kill -0 "$p" 2>/dev/null && echo "$p"; done)"; return 1; }
 check "the sentinels are running, and a name-based sweep would match every one of them" sh -c "pgrep -f 'build/ubft root-node' | grep -qx ${sentinels[0]} && pgrep -f 'ubft shard-node run' | grep -qx ${sentinels[1]} && pgrep -f 'reth node' | grep -qx ${sentinels[2]}"
@@ -274,6 +287,7 @@ spawned="$spawned ${own[*]}"
 for p in "${own[@]}"; do execd "$p"; done
 echo "${own[0]}" >"$CO/test-nodes/root1/pid"; echo "${own[1]}" >"$CO/test-nodes/evm1/pid"
 echo "${sentinels[0]}" >"$CO/test-nodes/root2/pid"; echo "${sentinels[1]}" >"$CO/test-nodes/evm2/pid"
+mkdir -p "$CO/test-nodes/evm3"; echo "${sentinels[3]}" >"$CO/test-nodes/evm3/pid"
 check "stop-evm.sh -a runs" sh -c "cd '$CO' && ./stop-evm.sh -a"
 check "…stopping this checkout's nodes, with a pid file or without" allStopped "${own[@]}"
 check "…and no sentinel, not even those named by stale pid files in this checkout" sentinelsAlive
@@ -300,7 +314,7 @@ fake/reth node --datadir test-nodes/reth1/dd >test-nodes/reth1/reth.log 2>&1 & e
 echo ${sentinels[0]} >test-nodes/root2/pid; echo ${sentinels[1]} >test-nodes/evm2/pid
 echo ${sentinels[2]} >test-nodes/reth2/pid; echo ${sentinels[2]} >test-nodes/reth-wrong/pid
 # ...and one in a directory no nested cleanup touches, so it is still there for the supervisor's sweep
-mkdir -p test-nodes/leftover; echo ${sentinels[0]} >test-nodes/leftover/pid
+mkdir -p test-nodes/leftover test-nodes/leftover2; echo ${sentinels[0]} >test-nodes/leftover/pid; echo ${sentinels[3]} >test-nodes/leftover2/pid
 case \$mode in
   fail) exit 1 ;;
   cancel) touch "$T/nested-cancel.up"; sleep 300 ;;
@@ -319,7 +333,7 @@ check "a passing run whose scenarios clean up with the paired devnet's cleanup p
 check "…the nested cleanup did run" test -e "$T/nested-pass.ran"
 check "…its own processes were stopped" ownedStopped pass
 check "…and every sentinel survived" sentinelsAlive
-check "…the stale pid file no nested cleanup removed was still there for the supervisor's sweep" test -f "$CO/test-nodes/leftover/pid"
+check "…the stale pid files no nested cleanup removed were still there for the supervisor's sweep" test -f "$CO/test-nodes/leftover/pid" -a -f "$CO/test-nodes/leftover2/pid"
 refuses "a failing run whose scenarios clean up with the paired devnet's cleanup fails" "reth-smoke: FAIL" nestedRun fail
 check "…the nested cleanup did run" test -e "$T/nested-fail.ran"
 check "…its own processes were stopped" ownedStopped fail
