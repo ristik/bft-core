@@ -1,6 +1,7 @@
 package shardnode
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"errors"
@@ -68,7 +69,14 @@ var DefaultBFTClientOptions = BFTClientOptions{
 type BFTClient struct {
 	partitionID types.PartitionID
 	shardID     types.ShardID
-	nodeID      string
+	// shardConfHash is the hash of the shard configuration THIS NODE was started with, and every
+	// certificate must commit to it (#134). It is owned by this client — cloned on the way in — so a
+	// caller that later mutates its own slice cannot change what this node enforces, and it is never
+	// derived from a certificate, a checkpoint, a peer or the execution client: those are the claims
+	// under test. UnicityCertificate.IsValid compares it only when it is non-nil, so an empty value
+	// would not weaken the check, it would remove it; the constructor refuses one.
+	shardConfHash []byte
+	nodeID        string
 
 	peer           *network.Peer
 	net            RootNetwork
@@ -116,11 +124,18 @@ func NewBFTClient(
 	signer abcrypto.Signer,
 	partitionID types.PartitionID,
 	shardID types.ShardID,
+	shardConfHash []byte,
 	trustBaseStore TrustBaseStore,
 	driver RoundDriver,
 	log *slog.Logger,
 	opts BFTClientOptions,
 ) (*BFTClient, error) {
+	if len(shardConfHash) == 0 {
+		return nil, errors.New("no shard configuration hash: a certificate would then be accepted whatever configuration it was issued under")
+	}
+	if err := validateShardConfHashWidth(shardConfHash); err != nil {
+		return nil, err
+	}
 	if peer == nil {
 		return nil, errors.New("peer is nil")
 	}
@@ -137,6 +152,7 @@ func NewBFTClient(
 	c := &BFTClient{
 		partitionID:    partitionID,
 		shardID:        shardID,
+		shardConfHash:  bytes.Clone(shardConfHash),
 		nodeID:         peer.ID().String(),
 		peer:           peer,
 		net:            net,
@@ -372,7 +388,16 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	if err != nil {
 		return fmt.Errorf("loading trust base for epoch %d: %w", cr.UC.GetRootEpoch(), err)
 	}
-	if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, nil); err != nil {
+	// The configured shard configuration is part of what is verified: a certificate correctly signed
+	// by the trusted root quorum, for this partition and shard, but issued under another shard
+	// configuration is a certificate about a different chain (#134). Refused here, before
+	// classification, so it never becomes the cursor `luc`, never reaches the driver and never
+	// advances the applied cursor. The expected value is this node's own; the certificate's claim
+	// about its configuration is exactly what is being checked.
+	if len(c.shardConfHash) == 0 {
+		return errors.New("this client has no configured shard configuration hash, so a certificate's configuration cannot be checked")
+	}
+	if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, c.shardConfHash); err != nil {
 		return fmt.Errorf("verifying unicity certificate: %w", err)
 	}
 

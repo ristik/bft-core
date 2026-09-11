@@ -29,7 +29,9 @@ func (s stubTrustBaseStore) GetByEpoch(context.Context, uint64) (*types.RootTrus
 	return s.tb, nil
 }
 
-func authFixture(t *testing.T) (abcrypto.Signer, *types.RootTrustBaseV1, *types.UnicityCertificate) {
+// authFixture returns the signer, trust base, an authentic certificate, and the hash of the shard
+// configuration those certificates commit to — what a node configured for this shard would enforce.
+func authFixture(t *testing.T) (abcrypto.Signer, *types.RootTrustBaseV1, *types.UnicityCertificate, []byte) {
 	t.Helper()
 	signer, err := abcrypto.NewInMemorySecp256K1Signer()
 	require.NoError(t, err)
@@ -42,18 +44,20 @@ func authFixture(t *testing.T) (abcrypto.Signer, *types.RootTrustBaseV1, *types.
 	}
 	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: authPartitionID}
 	uc := testcertificates.CreateUnicityCertificate(t, signer, ir, pdr, 50, h, h)
-	return signer, tb, uc
+	confHash, err := pdr.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	return signer, tb, uc, confHash
 }
 
 // TestVerifyRestoredLUC covers issue #86 delivery step 4: nothing malformed, unsigned,
 // wrong-shard or from an untrusted epoch may become this node's non-equivocation
 // authority. Before this, LoadLUC's JSON decode was the only gate.
 func TestVerifyRestoredLUC(t *testing.T) {
-	_, tb, authentic := authFixture(t)
+	_, tb, authentic, confHash := authFixture(t)
 	store := stubTrustBaseStore{tb: tb}
 
 	t.Run("an authentic certificate is accepted", func(t *testing.T) {
-		require.NoError(t, verifyRestoredLUC(authentic, store, authPartitionID, types.ShardID{}))
+		require.NoError(t, verifyRestoredLUC(authentic, store, authPartitionID, types.ShardID{}, confHash))
 	})
 
 	t.Run("an unsigned certificate is rejected", func(t *testing.T) {
@@ -65,20 +69,20 @@ func TestVerifyRestoredLUC(t *testing.T) {
 				Hash: make([]byte, 32), Signatures: nil,
 			},
 		}
-		require.Error(t, verifyRestoredLUC(forged, store, authPartitionID, types.ShardID{}))
+		require.Error(t, verifyRestoredLUC(forged, store, authPartitionID, types.ShardID{}, confHash))
 	})
 
 	t.Run("a certificate for another partition is rejected", func(t *testing.T) {
-		require.Error(t, verifyRestoredLUC(authentic, store, authPartitionID+1, types.ShardID{}))
+		require.Error(t, verifyRestoredLUC(authentic, store, authPartitionID+1, types.ShardID{}, confHash))
 	})
 
 	t.Run("an unavailable or untrusted epoch is rejected, not adopted", func(t *testing.T) {
-		err := verifyRestoredLUC(authentic, stubTrustBaseStore{err: errors.New("unknown epoch")}, authPartitionID, types.ShardID{})
+		err := verifyRestoredLUC(authentic, stubTrustBaseStore{err: errors.New("unknown epoch")}, authPartitionID, types.ShardID{}, confHash)
 		require.ErrorContains(t, err, "loading trust base for root epoch")
 	})
 
 	t.Run("no configured trust base store is rejected", func(t *testing.T) {
-		require.ErrorContains(t, verifyRestoredLUC(authentic, nil, authPartitionID, types.ShardID{}), "no trust base store")
+		require.ErrorContains(t, verifyRestoredLUC(authentic, nil, authPartitionID, types.ShardID{}, confHash), "no trust base store")
 	})
 
 	t.Run("a tampered but decodable certificate is rejected", func(t *testing.T) {
@@ -89,13 +93,13 @@ func TestVerifyRestoredLUC(t *testing.T) {
 		require.NoError(t, s.SaveLUC(authentic))
 		restored, err := s.LoadLUC()
 		require.NoError(t, err)
-		require.NoError(t, verifyRestoredLUC(restored, store, authPartitionID, types.ShardID{}))
+		require.NoError(t, verifyRestoredLUC(restored, store, authPartitionID, types.ShardID{}, confHash))
 
 		restored.InputRecord.RoundNumber = 5
 		require.NoError(t, s.SaveLUC(restored))
 		reloaded, err := s.LoadLUC()
 		require.NoError(t, err, "it decodes")
-		require.Error(t, verifyRestoredLUC(reloaded, store, authPartitionID, types.ShardID{}), "but must not be authoritative")
+		require.Error(t, verifyRestoredLUC(reloaded, store, authPartitionID, types.ShardID{}, confHash), "but must not be authoritative")
 	})
 }
 
@@ -108,7 +112,7 @@ func TestVerifyRestoredLUC(t *testing.T) {
 // networking, so it does not cover the transport. The chaos suite's restart scenarios
 // cover that end; this covers the logic that wedged.
 func TestRestartLoadSeedReplay(t *testing.T) {
-	signer, tb, authentic := authFixture(t)
+	signer, tb, authentic, confHash := authFixture(t)
 	store := stubTrustBaseStore{tb: tb}
 
 	path := filepath.Join(t.TempDir(), "luc.cbor")
@@ -118,7 +122,7 @@ func TestRestartLoadSeedReplay(t *testing.T) {
 	// --- restart ---
 	loaded, err := fs.LoadLUC()
 	require.NoError(t, err)
-	require.NoError(t, verifyRestoredLUC(loaded, store, authPartitionID, types.ShardID{}))
+	require.NoError(t, verifyRestoredLUC(loaded, store, authPartitionID, types.ShardID{}, confHash))
 
 	c := &BFTClient{}
 	c.SeedLUC(loaded)

@@ -91,6 +91,8 @@ func TestHandlerDisposition(t *testing.T) {
 	tb, ok := testtrustbase.NewTrustBase(t, signer).(*types.RootTrustBaseV1)
 	require.True(t, ok)
 	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: authPartitionID}
+	confHash, err := pdr.Hash(crypto.SHA256)
+	require.NoError(t, err)
 	zero := make([]byte, 32)
 
 	// technicalFor is the TechnicalRecord that accompanies a certificate for `round`. It is built
@@ -123,6 +125,7 @@ func TestHandlerDisposition(t *testing.T) {
 		c := &BFTClient{
 			partitionID:    authPartitionID,
 			shardID:        types.ShardID{},
+			shardConfHash:  confHash,
 			nodeID:         "test-node",
 			trustBaseStore: stubTrustBaseStore{tb: tb},
 			driver:         drv,

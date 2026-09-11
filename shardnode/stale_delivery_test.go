@@ -168,6 +168,8 @@ func TestStaleDeliveryDuringRoundSequence(t *testing.T) {
 	tb, ok := testtrustbase.NewTrustBase(t, signer).(*types.RootTrustBaseV1)
 	require.True(t, ok)
 	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: authPartitionID}
+	confHash, err := pdr.Hash(crypto.SHA256)
+	require.NoError(t, err)
 	zero := make([]byte, 32)
 
 	fake := newSeqExecutor()
@@ -201,6 +203,7 @@ func TestStaleDeliveryDuringRoundSequence(t *testing.T) {
 		metrics:        metrics,
 		partitionID:    authPartitionID,
 		shardID:        types.ShardID{},
+		shardConfHash:  confHash,
 		nodeID:         nodeID,
 		trustBaseStore: stubTrustBaseStore{tb: tb},
 		log:            slog.New(logs),
