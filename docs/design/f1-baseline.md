@@ -1230,7 +1230,36 @@ own commits, these lanes must build from source** (or publish their own artifact
 provenance), and the asset and digest pins stop being meaningful. F3 (#11) extends these workflows
 rather than starting new ones.
 
-<!-- F1C-EVIDENCE -->
+**Evidence recorded for #131** — all local; nothing here ran on a hosted runner. Host: macOS on
+Intel (darwin/x86_64); reth `189c0df3` built from source for the host, and the upstream Linux artifact
+for the container. `scripts/lib/reth-pin.sh`, `scripts/reth-pin.sh`, `reth-chaos.sh` and
+`reth-fault.yml` are byte-identical from `d2fb721b` through the head, so the rows at `d2fb721b` that
+exercise only them still describe the head.
+
+| # | what | revision | result |
+|---|---|---|---|
+| — | `scripts/reth-smoke-selftest.sh` | head | **54 ok, 0 bad**, no stand-in process left |
+| K | real Linux artifact in a container (`ubuntu:24.04`, Docker 29.5.2): cold cache, then warm, then a tampered copy | library `d8f45a70…` (= head) | miss: fetched, sha256 `6719ec67…` verified, binary reports `189c0df3`; hit: digest **re-verified**, revision re-verified; tampered: **refused**, nothing left at the destination |
+| A | `--fetch` on this host | `d2fb721b` | **refused** — "no pinned release artifact for platform 'darwin-x86_64'" — exit 1, archive validated |
+| B | `--reth-bin` | `d2fb721b`, `146ef80e` | PASS, exit 0; devnet 20 PASS / 0 FAIL; archive 15 node logs |
+B3ROW
+| C | `--inject-failure` | `d2fb721b`, `146ef80e` | exit 1 as intended; archive validated with 15 node logs and the injection in `run.log` |
+| E | SIGTERM to the supervisor with 7 `ubft` + 4 `reth` running | `146ef80e` | exit 1, "run interrupted", "incomplete run"; archive validated, 15 node logs; **no process left** |
+E2ROW
+| D | fault lane, the workflow's own commands: `reth-pin.sh verify`, `make build`, `reth-chaos.sh -s reth-only-restart -t 2`, `validate-archive --require manifest.txt --min-node-logs 1` | `d2fb721b` | chaos exit 0; archive validated, 11 node logs |
+
+No `ubft` or `reth` process was left after any run. Production mutations, each alone, against the
+self-test: skipping the digest re-check on a cache hit, skipping the verbatim secret scan, treating an
+incomplete run as complete, not comparing the reported revision, copying `jwt.hex`, not checking a
+download's digest, removing every teardown kill, and removing the child's process group — **all
+caught**. Two mutations survived and are recorded as such: one removed only the polite TERM (the KILL
+fallback still stopped everything, so it tested nothing), and one removed only the group kills (the
+group-aware ownership sweep still stopped the orphan — redundancy, confirmed by removing both).
+
+**What remains hosted-only, and pending until jobs execute:** a PR-triggered run of the packaged
+smoke workflow; a cache hit through `actions/cache`; a dispatched deliberate failure whose artifact is
+downloaded and inspected; and a dispatched fault run. The local runs above exercise the same scripts
+and do not substitute for any of them.
 
 ## 7. What F1 does not cover
 

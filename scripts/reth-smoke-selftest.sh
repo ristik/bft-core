@@ -146,6 +146,25 @@ rm -rf "$SN"; refuses "a scenario process killed outright is an incomplete run, 
 check "…whose evidence is still archived" test -s "$T/ev/killed.tar.gz"
 orphanStopped() { local p; p=$(cat "$T/orphan.pid" 2>/dev/null) && [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null; }
 check "…and whatever it had started, recorded or not, is stopped too" orphanStopped
+# Cancellation: the supervisor itself is signalled, as a CI cancel or ^C does, while the scenarios hold
+# a recorded process and an unrecorded one. The count it reports must be taken at that first stop
+# signal — an earlier revision counted later, at teardown, and reported 0 for a real cancelled run
+# whose eleven clients the signal had just stopped.
+interruptRun() {
+  rm -rf "$SN" "$T/orphan2.pid"
+  RETH_SMOKE_NODES_DIR=$SN RETH_SMOKE_TEST_SCENARIOS="$stub"' && { sleep 301 & echo $! >'"$T"'/orphan2.pid; } && sleep 300' \
+    ./scripts/reth-smoke.sh --reth-bin "$T/good/reth" --run-dir "$T/ev/interrupt" >"$T/interrupt.out" 2>&1 &
+  local sup=$! i
+  for i in $(seq 1 100); do [ -s "$T/orphan2.pid" ] && [ -s "$SN/evm1/pid" ] && break; sleep 0.1; done
+  kill -TERM "$sup"; wait "$sup"
+}
+interruptRun; interruptStatus=$?
+check "an interrupted run exits nonzero, reported as interrupted" sh -c "[ $interruptStatus -ne 0 ] && grep -q 'reth-smoke: FAIL run interrupted' '$T/interrupt.out'"
+groupedAtInterrupt() { local n; n=$(sed -n "s/.*teardown complete — \([0-9]*\) process(es) in the run's group at its first stop signal (on interrupt).*/\1/p" "$T/interrupt.out"); [ -n "$n" ] && [ "$n" -ge 2 ]; }
+check "…counting the run's processes at the interrupt itself, not after they had gone" groupedAtInterrupt
+interruptStopped() { local a b; a=$(cat "$T/orphan2.pid" 2>/dev/null) && b=$(cat "$SN/evm1/pid" 2>/dev/null) && [ -n "$a" ] && [ -n "$b" ] && ! kill -0 "$a" 2>/dev/null && ! kill -0 "$b" 2>/dev/null; }
+check "…stopping both the recorded and the unrecorded process" interruptStopped
+check "…and still archiving validated evidence" grep -q "reth-evidence: archive .*interrupt.tar.gz validated" "$T/interrupt.out"
 rm -rf "$SN"; refuses "a leaked secret fails the lane even when the scenarios pass" "appears verbatim" smoke "$stub"' && echo "jwt $(cat $NODES/evm1/jwt.hex)" >>"$NODES/evm1/debug.log"' leak
 rm -rf "$SN"
 refuses "the wrong client stops the lane before any scenario" "reth-smoke: FAIL" \
