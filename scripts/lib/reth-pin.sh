@@ -59,23 +59,38 @@ rethPinSha256() { # rethPinSha256 <file>
 # and the self-test can tell this library's verdicts from anything else on stderr.
 rethPinErr() { echo "reth-pin: $*" >&2; }
 
-# rethPinRunBounded <seconds> <cmd...> runs cmd with a hard budget, output on stdout, and returns its
-# status (124 if the budget was hit). `timeout` is not on every host this runs on (macOS has none),
-# and a binary that hangs on --version must be a refusal, not a stalled lane.
+# rethPinRunBounded <seconds> <cmd...> runs cmd with a hard budget, prints its combined output, and
+# returns its status (124 if the budget was hit). `timeout` is not on every host this runs on (macOS
+# has none), and a binary that hangs on --version must be a refusal, not a stalled lane.
+#
+# The budget bounds the whole command, not just its first process. cmd runs as the leader of its own
+# process group (perl's setpgrp, then exec) and the budget kills that group, so a shell script whose
+# child does the hanging dies with it. Its output goes to a file, never to the caller's pipe: an
+# earlier revision let the command inherit the $(...) pipe, killed only the direct child, and the
+# caller then waited for a surviving grandchild to close the pipe — a 1-second budget took 4.4s
+# against `sleep 4`, and would have taken forever against a hang.
 rethPinRunBounded() {
-  local budget=$1 pid status=124 i
+  local budget=$1 pid i out rc
   shift
-  "$@" 2>&1 &
+  out=$(mktemp) || return 1
+  perl -e 'setpgrp(0, 0); exec @ARGV or die "exec $ARGV[0]: $!\n"' -- "$@" >"$out" 2>&1 </dev/null &
   pid=$!
+  rc=124
   for ((i = 0; i < budget * 10; i++)); do
     if ! kill -0 "$pid" 2>/dev/null; then
-      wait "$pid"; return $?
+      wait "$pid"; rc=$?
+      break
     fi
     sleep 0.1
   done
-  kill -KILL "$pid" 2>/dev/null
-  wait "$pid" 2>/dev/null
-  return $status
+  if [ "$rc" -eq 124 ]; then
+    kill -KILL -- "-$pid" 2>/dev/null
+    kill -KILL "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+  fi
+  cat "$out"
+  rm -f "$out"
+  return $rc
 }
 
 # rethPinVerifyBinary <path> [expected-commit] succeeds only if <path> is an executable that runs and

@@ -32,7 +32,7 @@ fakereth() { # fakereth <path> <commit|--no-commit|--fail|--hang>
   case "$2" in
     --no-commit) printf '#!/bin/sh\necho "reth Version: 2.5.0"\n' >"$1" ;;
     --fail) printf '#!/bin/sh\necho "cannot execute binary file" >&2\nexit 126\n' >"$1" ;;
-    --hang) printf '#!/bin/sh\nsleep 100\n' >"$1" ;;
+    --hang) printf '#!/bin/sh\nsleep 177 &\necho $! >"$(dirname "$0")/child.pid"\nwait\n' >"$1" ;;
     *) printf '#!/bin/sh\necho "reth Version: 2.5.0"\necho "Commit SHA: %s"\n' "$2" >"$1" ;;
   esac
   chmod +x "$1"
@@ -56,7 +56,15 @@ refuses "a binary that reports no revision is refused" "reports no 'Commit SHA:'
 fakereth "$T/fails/reth" --fail
 refuses "a binary that cannot run (e.g. another platform's) is refused" "--version' failed (exit 126)" rethPinVerifyBinary "$T/fails/reth"
 fakereth "$T/hangs/reth" --hang
-RETH_PIN_VERSION_BUDGET=2 refuses "a binary that hangs is refused within its budget" "--version' failed (exit 124)" rethPinVerifyBinary "$T/hangs/reth"
+# The hang is a shell whose CHILD holds the output: killing only the shell once left that child
+# holding the $(...) pipe, and a 1-second budget took as long as the child did. Measured, not assumed:
+# wall time and the child's survival, not just the exit status.
+nowMs() { perl -MTime::HiRes=time -e 'printf "%d", time * 1000'; }
+t0=$(nowMs)
+RETH_PIN_VERSION_BUDGET=1 refuses "a binary that hangs is refused within its budget" "--version' failed (exit 124)" rethPinVerifyBinary "$T/hangs/reth"
+hangMs=$(( $(nowMs) - t0 ))
+check "…within bounded wall time (budget 1s; took ${hangMs}ms, must be under 3000)" test "$hangMs" -lt 3000
+check "…and nothing it started survives, the child holding its output included" sh -c "p=\$(cat '$T/hangs/child.pid') && [ -n \"\$p\" ] && ! kill -0 \"\$p\" 2>/dev/null"
 
 echo "=== the archive cache: a hit is verified exactly as thoroughly as a download ==="
 mkdir -p "$T/mirror"
