@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	gocrypto "crypto"
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -36,6 +37,12 @@ type Authority struct {
 	// signer is nil once the authority is closed. Nothing can put a key back.
 	signer abcrypto.Signer
 
+	// instance is this authority lifetime's own identity, drawn at random and never published. It is
+	// what makes a session token a capability for THIS authority rather than a number: every
+	// authority starts its counter at the same value, so a generation alone is admitted by any
+	// authority that happens to be at the same count. It is deliberately not in Status, not in
+	// Enrollment and not derived from anything an operator can name.
+	instance [16]byte
 	// generation is the current client session. Only the operator control plane advances it, and a
 	// client cannot mint one: Session carries no exported field to set. Time is never used as proof
 	// that an old process has stopped; the key owner checks this counter on every operation (§5).
@@ -51,7 +58,15 @@ type Authority struct {
 // Its zero value is never admitted, and outside this package there is no way to construct a
 // non-zero one: taking over from an old client is an operator operation (ReplaceSession), not
 // something a client can do by presenting a number it chose.
-type Session struct{ generation uint64 }
+//
+// It names the authority that issued it as well as the generation. Without that, a token is only a
+// counter, and every authority starts counting at the same place: a token issued by one authority
+// was admitted by another that happened to be at the same generation, which is not the "one
+// generation of one authority" scope this is supposed to express.
+type Session struct {
+	authority  [16]byte
+	generation uint64
+}
 
 // Generation reports which generation this token belongs to, for diagnostics and logging.
 func (s Session) Generation() uint64 { return s.generation }
@@ -76,6 +91,10 @@ func New(enroll Enrollment, trust TrustBases) (*Authority, error) {
 	if err != nil {
 		return nil, fmt.Errorf("signingauthority: generating the signing key: %w", err)
 	}
+	var instance [16]byte
+	if _, err := rand.Read(instance[:]); err != nil {
+		return nil, fmt.Errorf("signingauthority: drawing this authority's identity: %w", err)
+	}
 	pub, err := publicKeyOf(signer)
 	if err != nil {
 		return nil, fmt.Errorf("signingauthority: %w", err)
@@ -83,7 +102,7 @@ func New(enroll Enrollment, trust TrustBases) (*Authority, error) {
 	fingerprint := sha256.Sum256(pub)
 	enroll = enroll.clone()
 	enroll.SigningKeyFingerprint = fingerprint[:]
-	return &Authority{enroll: enroll, trust: trust, signer: signer}, nil
+	return &Authority{enroll: enroll, trust: trust, signer: signer, instance: instance}, nil
 }
 
 // Enrollment returns a copy of the immutable scope this authority signs for.
@@ -143,7 +162,7 @@ func (a *Authority) ReplaceSession() (Session, error) {
 		return Session{}, fmt.Errorf("%w: the generation space is exhausted", ErrStateUntrusted)
 	}
 	a.generation++
-	return Session{generation: a.generation}, nil
+	return Session{authority: a.instance, generation: a.generation}, nil
 }
 
 // MarkUntrusted latches this authority faulted, for an operator or a caller that has detected an
@@ -175,7 +194,7 @@ func (a *Authority) Status() Status {
 		Generation:       a.generation,
 		ReservedRound:    a.rec.reserved,
 		HasReservation:   !a.rec.empty(),
-		ResponseRetained: len(a.rec.retained) != 0,
+		ResponseRetained: a.rec.releasable,
 		Faulted:          a.state != healthActive,
 		KeyLost:          a.signer == nil,
 	}
@@ -193,6 +212,10 @@ func (a *Authority) admitLocked(s Session) error {
 	if err := a.rec.checkInvariants(); err != nil {
 		a.state = healthFaulted
 		return fmt.Errorf("%w: %w", ErrStateUntrusted, err)
+	}
+	if s.authority != a.instance {
+		// Including a token from a different authority that happens to hold the same generation.
+		return fmt.Errorf("%w: this session was not issued by this authority", ErrFenced)
 	}
 	if s.generation == 0 || s.generation != a.generation {
 		return fmt.Errorf("%w: session %d, current generation is %d", ErrFenced, s.generation, a.generation)
@@ -241,16 +264,25 @@ func (a *Authority) Reserve(ctx context.Context, s Session, req Request) (*Autho
 		// A higher round replaces the record, including any response for the older one: the slot is
 		// bounded, and the older work is superseded rather than kept. Gaps are permitted, because an
 		// authenticated technical record assigns the round and those are not consecutive integers.
-		next := record{
+		// What this record will hold once the request has been signed, checked before the round is
+		// locked to it. Admitting work that cannot be completed would leave the round answerable by
+		// nothing, which is worse than refusing it now.
+		//
+		// Recorded as untested: it cannot fire while MaxRecordBytes is derived from
+		// MaxUnsignedRequestBytes, because the snapshot already refused anything larger. It is here
+		// so that raising one cap without the other fails closed rather than admitting work that
+		// cannot be retained, which is the defect this repair came from. A mutation disabling it
+		// therefore survives the suite; TestAnAdmittedRequestCanAlwaysBeCompleted checks the same
+		// property statically instead.
+		if size := projectedSize(auth.Unsigned, auth.ID); size > MaxRecordBytes {
+			return nil, fmt.Errorf("%w: the completed record would be %d bytes, limit is %d", ErrRequestTooLarge, size, MaxRecordBytes)
+		}
+		a.rec = record{
 			reserved:        auth.AssignedRound,
 			unsigned:        bytes.Clone(auth.Unsigned),
 			digest:          auth.UnsignedDigest,
 			authorizationID: bytes.Clone(auth.ID),
 		}
-		if size := next.size(); size > MaxRecordBytes {
-			return nil, fmt.Errorf("%w: record would be %d bytes, limit is %d", ErrRequestTooLarge, size, MaxRecordBytes)
-		}
-		a.rec = next
 		return auth, nil
 	case auth.AssignedRound < a.rec.reserved:
 		return nil, fmt.Errorf("%w: round %d is below the reserved round %d", ErrStale, auth.AssignedRound, a.rec.reserved)
@@ -276,7 +308,7 @@ func (a *Authority) Sign(s Session) error {
 	if a.rec.empty() {
 		return fmt.Errorf("%w: nothing is reserved", ErrNoReservation)
 	}
-	if len(a.rec.retained) != 0 {
+	if a.rec.releasable {
 		return nil
 	}
 	var proposed certification.BlockCertificationRequest
@@ -291,7 +323,15 @@ func (a *Authority) Sign(s Session) error {
 	if err != nil {
 		return fmt.Errorf("encoding the signed request: %w", err)
 	}
-	a.rec.signed = signed
+	candidate := a.rec
+	candidate.signed = signed
+	if size := candidate.size(); size > MaxRecordBytes {
+		// Unreachable for an admitted request, since Reserve projected this size with room for the
+		// signature. Refusing here rather than storing keeps that guarantee checkable instead of
+		// assumed, and leaves the reservation intact.
+		return fmt.Errorf("%w: the signed record would be %d bytes, limit is %d", ErrRequestTooLarge, size, MaxRecordBytes)
+	}
+	a.rec = candidate
 	return nil
 }
 
@@ -311,15 +351,10 @@ func (a *Authority) RetainResponse(s Session) error {
 	if len(a.rec.signed) == 0 {
 		return fmt.Errorf("%w: nothing has been signed for round %d", ErrResponseNotRetained, a.rec.reserved)
 	}
-	if len(a.rec.retained) != 0 {
-		return nil
-	}
-	candidate := a.rec
-	candidate.retained = bytes.Clone(candidate.signed)
-	if size := candidate.size(); size > MaxRecordBytes {
-		return fmt.Errorf("%w: record would be %d bytes, limit is %d", ErrRequestTooLarge, size, MaxRecordBytes)
-	}
-	a.rec = candidate
+	// Retention marks the response releasable. It does not copy it again: the copy is what made the
+	// record three copies of the request, so that a request this authority had already admitted and
+	// signed could not be retained at all.
+	a.rec.releasable = true
 	return nil
 }
 
@@ -345,10 +380,10 @@ func (a *Authority) Release(s Session, round uint64, digest [32]byte) ([]byte, e
 	if digest != a.rec.digest {
 		return nil, fmt.Errorf("%w: round %d is reserved for different bytes", ErrConflict, a.rec.reserved)
 	}
-	if len(a.rec.retained) == 0 {
+	if !a.rec.releasable {
 		return nil, fmt.Errorf("%w: round %d has no retained response", ErrResponseNotRetained, a.rec.reserved)
 	}
-	return bytes.Clone(a.rec.retained), nil
+	return bytes.Clone(a.rec.signed), nil
 }
 
 /*

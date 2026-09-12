@@ -471,3 +471,123 @@ func TestGenerationsNeverWrap(t *testing.T) {
 	require.ErrorIs(t, err, ErrStateUntrusted, "exhaustion disables admission rather than reusing an old generation")
 	require.True(t, a.Status().Faulted)
 }
+
+// sizedRequest returns an assignment whose complete encoding is as close to `target` bytes as the
+// proof field allows, without exceeding it. The proof is the only field whose size a caller chooses.
+func (f *fixture) sizedRequest(t *testing.T, round uint64, target int) Request {
+	t.Helper()
+	req := f.assignment(t, round, 11)
+	req.Proposed.ZkProof = make([]byte, 1)
+	for i := 0; i < 4; i++ {
+		encoded, err := req.Proposed.Bytes()
+		require.NoError(t, err)
+		gap := target - len(encoded)
+		if gap == 0 {
+			break
+		}
+		size := len(req.Proposed.ZkProof) + gap
+		require.Greater(t, size, 0, "the target is smaller than an empty request")
+		req.Proposed.ZkProof = make([]byte, size)
+	}
+	encoded, err := req.Proposed.Bytes()
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(encoded), target)
+	return req
+}
+
+func TestASessionBelongsToTheAuthorityThatIssuedIt(t *testing.T) {
+	// Every authority starts its generation counter at the same place, so a token that is only a
+	// counter is admitted by any authority that happens to be at the same count. A token names the
+	// authority that issued it, and a foreign token is refused on every client operation.
+	ctx := context.Background()
+	f := newFixture(t, 1)
+	first, firstSession := f.session(t)
+	second, secondSession := f.session(t)
+	t.Cleanup(first.Close)
+	t.Cleanup(second.Close)
+
+	require.Equal(t, firstSession.Generation(), secondSession.Generation(),
+		"the two authorities are at the same generation, which is what made the counter alone insufficient")
+
+	// Give the second authority a reservation, so every operation below has something to act on.
+	auth, err := second.Reserve(ctx, secondSession, f.assignment(t, 5, 11))
+	require.NoError(t, err)
+	require.NoError(t, second.Sign(secondSession))
+
+	for _, op := range []struct {
+		name string
+		call func() error
+	}{
+		{"reserve", func() error { _, err := second.Reserve(ctx, firstSession, f.assignment(t, 6, 11)); return err }},
+		{"sign", func() error { return second.Sign(firstSession) }},
+		{"retain", func() error { return second.RetainResponse(firstSession) }},
+		{"release", func() error {
+			_, err := second.Release(firstSession, auth.AssignedRound, auth.UnsignedDigest)
+			return err
+		}},
+	} {
+		t.Run("a foreign session cannot "+op.name, func(t *testing.T) {
+			require.ErrorIs(t, op.call(), ErrFenced)
+		})
+	}
+
+	require.EqualValues(t, 5, second.Status().ReservedRound, "and none of it moved the second authority's record")
+}
+
+func TestAnAdmittedRequestCanAlwaysBeCompleted(t *testing.T) {
+	// The request cap and the record cap have to compose: a request this authority admits must be
+	// signable, retainable and releasable. A 750,000 byte proof was admitted and signed and then
+	// could never be retained, which left the round locked and answerable by nothing.
+	ctx := context.Background()
+
+	t.Run("the largest admitted request completes", func(t *testing.T) {
+		f := newFixture(t, 1)
+		a, s := f.session(t)
+		req := f.sizedRequest(t, 5, MaxUnsignedRequestBytes)
+		encoded, err := req.Proposed.Bytes()
+		require.NoError(t, err)
+		require.Greater(t, len(encoded), MaxUnsignedRequestBytes-64, "this test is about the upper edge")
+
+		auth, err := a.Reserve(ctx, s, req)
+		require.NoError(t, err)
+		require.NoError(t, a.Sign(s))
+		require.NoError(t, a.RetainResponse(s))
+		response, err := a.Release(s, auth.AssignedRound, auth.UnsignedDigest)
+		require.NoError(t, err)
+		require.NotEmpty(t, response)
+		require.False(t, a.Status().Faulted, "a valid request at the size boundary is not an inconsistency")
+	})
+
+	t.Run("the review's 750 KB proof completes too", func(t *testing.T) {
+		f := newFixture(t, 1)
+		a, s := f.session(t)
+		req := f.assignment(t, 5, 11)
+		req.Proposed.ZkProof = bytes.Repeat([]byte{1}, 750000)
+		auth, err := a.Reserve(ctx, s, req)
+		require.NoError(t, err)
+		require.NoError(t, a.Sign(s))
+		require.NoError(t, a.RetainResponse(s), "an admitted and signed request must be retainable")
+		_, err = a.Release(s, auth.AssignedRound, auth.UnsignedDigest)
+		require.NoError(t, err)
+	})
+
+	t.Run("an oversize request is refused before it is reserved", func(t *testing.T) {
+		f := newFixture(t, 1)
+		a, s := f.session(t)
+		req := f.assignment(t, 5, 11)
+		req.Proposed.ZkProof = make([]byte, MaxUnsignedRequestBytes)
+
+		_, err := a.Reserve(ctx, s, req)
+		require.ErrorIs(t, err, ErrRequestTooLarge)
+		status := a.Status()
+		require.False(t, status.HasReservation, "a refused request locks nothing")
+		require.False(t, status.Faulted, "and refusing it is not a fault")
+	})
+
+	t.Run("the caps compose by construction", func(t *testing.T) {
+		// The record bound is derived from the request bound rather than chosen independently, so
+		// this cannot drift back into two numbers that do not fit together.
+		require.GreaterOrEqual(t, MaxRecordBytes, projectedSize(make([]byte, MaxUnsignedRequestBytes), make([]byte, maxAuthorizationIDBytes)),
+			"the largest admitted request plus its response must fit the record")
+	})
+}

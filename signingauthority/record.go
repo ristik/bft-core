@@ -7,10 +7,25 @@ import (
 	"fmt"
 )
 
-// MaxRecordBytes bounds one active record, including the retained response and metadata (§5). The
-// request bound is MaxUnsignedRequestBytes; a signed response is that request plus a signature, so
-// this leaves room for one of each rather than for an unbounded history.
-const MaxRecordBytes = 2 << 20
+// maxResponseOverheadBytes covers what signing adds to a request: a secp256k1 signature and its CBOR
+// framing, with room to spare. It is a bound, not a measurement.
+const maxResponseOverheadBytes = 1024
+
+// maxAuthorizationIDBytes is the authorization identity kept beside the request. It is a SHA-256
+// digest, and naming it here keeps the record bound below derived from every part it holds rather
+// than from most of them: leaving this term out is exactly the kind of arithmetic that made the two
+// caps fail to compose in the first place.
+const maxAuthorizationIDBytes = sha256.Size
+
+// MaxRecordBytes bounds one active record: the reserved request, the signed response and the
+// metadata naming them (§5).
+//
+// It is DERIVED from the request bound rather than chosen independently, because two independent
+// caps do not compose. With a 1 MiB request cap and a flat 2 MiB record cap, a 750 KB request was
+// admitted and signed and then could never be retained, leaving a round locked and unanswerable.
+// Anything this authority admits must be completable, so the record bound is whatever one admitted
+// request plus its response needs.
+const MaxRecordBytes = 2*MaxUnsignedRequestBytes + maxAuthorizationIDBytes + maxResponseOverheadBytes
 
 // health is the authority's own view of itself (§5).
 type health int
@@ -38,16 +53,25 @@ type record struct {
 	// authorizationID is the identity of the authorization that admitted it, kept for diagnostics.
 	// It explains a decision and never partitions the lock (§4).
 	authorizationID []byte
-	// signed is the private result of signing `unsigned`. It is not releasable until retained.
+	// signed is the result of signing `unsigned`. There is one copy, and `releasable` says whether it
+	// may leave: an earlier revision kept a second, identical copy to express the same thing, which
+	// made the record three copies of the request and broke the size composition above.
 	signed []byte
-	// retained is the exact response that may be released, and replayed identically afterwards.
-	retained []byte
+	// releasable is set by retention, before any response can be released, so a caller that
+	// disappears mid-answer replays identical bytes rather than causing a second signature.
+	releasable bool
 }
 
 func (r *record) empty() bool { return r.reserved == 0 && len(r.unsigned) == 0 }
 
 func (r *record) size() int {
-	return len(r.unsigned) + len(r.signed) + len(r.retained) + len(r.authorizationID)
+	return len(r.unsigned) + len(r.signed) + len(r.authorizationID)
+}
+
+// projectedSize is what this record will hold once the request it admits has been signed. Reserve
+// checks it, so an admitted request is never one that cannot be completed.
+func projectedSize(unsigned, authorizationID []byte) int {
+	return 2*len(unsigned) + len(authorizationID) + maxResponseOverheadBytes
 }
 
 // checkInvariants reports the inconsistencies this authority can actually detect. Memory corruption
@@ -55,7 +79,7 @@ func (r *record) size() int {
 // record's own parts agree with each other.
 func (r *record) checkInvariants() error {
 	if r.empty() {
-		if len(r.signed) != 0 || len(r.retained) != 0 {
+		if len(r.signed) != 0 || r.releasable {
 			return errors.New("a response exists with no reservation")
 		}
 		return nil
@@ -69,8 +93,8 @@ func (r *record) checkInvariants() error {
 	if r.digest != sha256.Sum256(r.unsigned) {
 		return errors.New("the reserved request does not match its digest")
 	}
-	if len(r.retained) != 0 && len(r.signed) == 0 {
-		return errors.New("a retained response with nothing signed")
+	if r.releasable && len(r.signed) == 0 {
+		return errors.New("a releasable response with nothing signed")
 	}
 	if size := r.size(); size > MaxRecordBytes {
 		return fmt.Errorf("record is %d bytes, limit is %d", size, MaxRecordBytes)

@@ -376,6 +376,22 @@ perform, and a key outliving its record could sign a round again.
 concurrency and queue length is the transport's job (§5) and is not implemented here; a mutex
 serialises operations and callers wait.
 
+Repairs after the first review of step 2 (PR #140, head `17be3393`):
+
+- **A session names the authority that issued it.** `Session` carried only a generation, and every
+  authority starts counting at the same place, so a token issued by one authority was admitted by
+  another that happened to be at the same generation. Each authority now draws a private 128-bit
+  identity for its lifetime, and a token carries it; a foreign token is refused on every client
+  operation. The identity is not in `Status`, not in `Enrollment` and not derived from anything an
+  operator can name, because a published identifier would not be a capability.
+- **The caps compose.** The record kept the request, the signed response and a second copy of that
+  response, so a 750 KB proof was admitted and signed and then could never be retained, leaving a
+  round locked and answerable by nothing. Retention is now a flag on the one response copy rather
+  than a second copy, and `MaxRecordBytes` is derived from `MaxUnsignedRequestBytes` plus the
+  authorization identity and a signing allowance rather than being an independent number. `Reserve`
+  also projects the completed record before locking the round, so anything admitted can be
+  completed.
+
 **What step 2 does not establish.** No round is wired to the authority and the restored non-voting
 gate is untouched, so this changes no runtime behaviour. There is no transport, so nothing here tests
 RPC authentication, wire-size admission or operation correlation. There is no durable journal, by
