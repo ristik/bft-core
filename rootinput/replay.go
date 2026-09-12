@@ -9,6 +9,11 @@ answers a different question (which certified block an executor must commit to a
 it authenticates no EVM payload and derives no canonical root input, so it is not a replay acceptance
 test and this is not built on it.
 
+WHAT IT OWNS. The block binding is copied at entry, before any authentication, and every comparison
+reads the copy. Derive performs an external trust lookup, so a caller holding the original slices has
+a window in which to change them, and a check made against bytes the caller can still change is not a
+check.
+
 WHAT THIS DECIDES. Given a block's header binding and the stored authorization for its round, does
 that block commit to the canonical root input this configuration derives? That is the D1 half:
 authorization, commitment and parent binding.
@@ -72,28 +77,41 @@ The returned Result is the authenticated derivation, so a caller that accepts a 
 verified representation rather than having to re-derive it.
 */
 func AcceptBlock(ctx context.Context, c Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord, b BlockBinding) (Result, error) {
+	// The binding is taken before anything is authenticated, and every comparison below reads only
+	// these owned bytes. Derive performs an external trust lookup, and a caller that still holds
+	// these slices can change them while that lookup is in flight: without the snapshot, a header
+	// that was invalid on arrival becomes acceptable, or an accepted one stops being the header that
+	// was judged. This is the same ownership requirement the certificate inputs already have.
+	parentHash := bytes.Clone(b.ParentHash)
+	extraData := bytes.Clone(b.ExtraData)
+
 	res, err := Derive(ctx, c, uc, tr)
 	if err != nil {
 		return Result{}, err
 	}
 
-	// The parent is checked before the commitment even though the commitment already covers it. A
-	// block built on the wrong parent and a block whose commitment is wrong for the right parent are
-	// different faults, and collapsing them into one comparison would report the first as the second.
-	if len(b.ParentHash) != 32 {
-		return Result{}, fmt.Errorf("%w: header parent hash must be 32 bytes, got %d", ErrBindingMismatch, len(b.ParentHash))
+	// The parent equality check is substantive, not a diagnostic convenience. The commitment covers
+	// c.ParentHash, the parent this node pinned, which is carried inside the canonical rootInput; it
+	// says nothing about the parent the header itself names. A header can therefore carry exactly the
+	// expected extraData while naming a different parent, and only this comparison rejects it.
+	//
+	// Checking it before the commitment also keeps the two faults apart: a block built on another
+	// parent and a block whose commitment is wrong for the right parent are different situations, and
+	// an operator needs to tell a divergent chain from a forged commitment.
+	if len(parentHash) != 32 {
+		return Result{}, fmt.Errorf("%w: header parent hash must be 32 bytes, got %d", ErrBindingMismatch, len(parentHash))
 	}
-	if !bytes.Equal(b.ParentHash, res.Input.ParentHash) {
+	if !bytes.Equal(parentHash, res.Input.ParentHash) {
 		return Result{}, fmt.Errorf("%w: header parent %x is not the certified parent %x this round builds on",
-			ErrBindingMismatch, b.ParentHash, res.Input.ParentHash)
+			ErrBindingMismatch, parentHash, res.Input.ParentHash)
 	}
 
-	if len(b.ExtraData) != 32 {
-		return Result{}, fmt.Errorf("%w: extraData must be the 32-byte input commitment, got %d bytes", ErrBindingMismatch, len(b.ExtraData))
+	if len(extraData) != 32 {
+		return Result{}, fmt.Errorf("%w: extraData must be the 32-byte input commitment, got %d bytes", ErrBindingMismatch, len(extraData))
 	}
-	if !bytes.Equal(b.ExtraData, res.Commitment[:]) {
+	if !bytes.Equal(extraData, res.Commitment[:]) {
 		return Result{}, fmt.Errorf("%w: extraData %x is not SHA-256(CBOR(rootInput)) %x for this authorization",
-			ErrBindingMismatch, b.ExtraData, res.Commitment[:])
+			ErrBindingMismatch, extraData, res.Commitment[:])
 	}
 	return res, nil
 }

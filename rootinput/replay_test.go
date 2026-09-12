@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 func TestAcceptBlock_AcceptsTheBlockItsAuthorizationDescribes(t *testing.T) {
@@ -179,4 +180,99 @@ func TestAcceptBlock_OwnsWhatItReturns(t *testing.T) {
 	require.Equal(t, derived.Encoded, res.Encoded)
 	require.Equal(t, derived.Commitment, res.Commitment)
 	require.NotEqual(t, parent, res.Input.ParentHash, "the caller's slice really was mutated")
+}
+
+// mutatingTrust runs a caller's change at the moment the derivation looks up its trust base. That is
+// the one point in AcceptBlock where an external call yields control, so it is where a caller holding
+// the header slices could change them underneath the check.
+type mutatingTrust struct {
+	inner  TrustBases
+	mutate func()
+}
+
+func (m mutatingTrust) GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	if m.mutate != nil {
+		m.mutate()
+	}
+	return m.inner.GetByEpoch(ctx, epoch)
+}
+
+func TestAcceptBlock_OwnsTheBindingBeforeAuthenticating(t *testing.T) {
+	ctx := context.Background()
+
+	// setup returns a fixture, the context, the correct binding for it, and a helper that builds an
+	// authority whose trust lookup runs `mutate`.
+	setup := func(t *testing.T) (*fixture, Context, BlockBinding, Result) {
+		t.Helper()
+		f := newFixture(t)
+		c := f.context()
+		uc, tr := f.successful(t)
+		derived, err := Derive(ctx, c, uc, tr)
+		require.NoError(t, err)
+		return f, c, BlockBinding{ParentHash: bytes.Clone(c.ParentHash), ExtraData: bytes.Clone(derived.Commitment[:])}, derived
+	}
+
+	t.Run("an invalid parent made valid during the lookup is still refused", func(t *testing.T) {
+		f, c, good, _ := setup(t)
+		uc, tr := f.successful(t)
+		b := good
+		b.ParentHash = bytes.Repeat([]byte{0x55}, 32)
+
+		// Premise: as it arrives, this binding is refused.
+		_, err := AcceptBlock(ctx, c, uc, tr, b)
+		require.ErrorIs(t, err, ErrBindingMismatch)
+
+		mut := c
+		mut.TrustBases = mutatingTrust{inner: c.TrustBases, mutate: func() { copy(b.ParentHash, c.ParentHash) }}
+		_, err = AcceptBlock(ctx, mut, uc, tr, b)
+		require.ErrorIs(t, err, ErrBindingMismatch,
+			"the header taken at entry names another parent, so it cannot become correct mid-check")
+		require.Equal(t, c.ParentHash, b.ParentHash, "and the caller's slice really was changed")
+	})
+
+	t.Run("a valid parent made invalid during the lookup is still accepted", func(t *testing.T) {
+		f, c, good, derived := setup(t)
+		uc, tr := f.successful(t)
+		b := good
+
+		mut := c
+		mut.TrustBases = mutatingTrust{inner: c.TrustBases, mutate: func() {
+			copy(b.ParentHash, bytes.Repeat([]byte{0x55}, 32))
+		}}
+		res, err := AcceptBlock(ctx, mut, uc, tr, b)
+		require.NoError(t, err, "what was judged is the header as taken at entry")
+		require.Equal(t, derived.Commitment, res.Commitment)
+	})
+
+	t.Run("an invalid extraData made valid during the lookup is still refused", func(t *testing.T) {
+		f, c, good, _ := setup(t)
+		uc, tr := f.successful(t)
+		correct := bytes.Clone(good.ExtraData)
+		b := good
+		b.ExtraData = bytes.Repeat([]byte{0x66}, 32)
+
+		_, err := AcceptBlock(ctx, c, uc, tr, b)
+		require.ErrorIs(t, err, ErrBindingMismatch)
+
+		mut := c
+		mut.TrustBases = mutatingTrust{inner: c.TrustBases, mutate: func() { copy(b.ExtraData, correct) }}
+		_, err = AcceptBlock(ctx, mut, uc, tr, b)
+		require.ErrorIs(t, err, ErrBindingMismatch,
+			"a commitment that arrived wrong cannot become right while the trust base is fetched")
+		require.Equal(t, correct, b.ExtraData, "and the caller's slice really was changed")
+	})
+
+	t.Run("a valid extraData made invalid during the lookup is still accepted", func(t *testing.T) {
+		f, c, good, derived := setup(t)
+		uc, tr := f.successful(t)
+		b := good
+
+		mut := c
+		mut.TrustBases = mutatingTrust{inner: c.TrustBases, mutate: func() {
+			copy(b.ExtraData, bytes.Repeat([]byte{0x66}, 32))
+		}}
+		res, err := AcceptBlock(ctx, mut, uc, tr, b)
+		require.NoError(t, err)
+		require.Equal(t, derived.Commitment, res.Commitment, "the accepted commitment is the one taken at entry")
+	})
 }
