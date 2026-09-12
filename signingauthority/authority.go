@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -34,7 +35,26 @@ type Authority struct {
 	trust  TrustBases
 	// signer is nil once the authority is closed. Nothing can put a key back.
 	signer abcrypto.Signer
+
+	// generation is the current client session. Only the operator control plane advances it, and a
+	// client cannot mint one: Session carries no exported field to set. Time is never used as proof
+	// that an old process has stopped; the key owner checks this counter on every operation (§5).
+	generation uint64
+	// state latches faulted on a detected inconsistency and never recovers within this lifetime.
+	state health
+	// rec is the one reservation this authority holds.
+	rec record
 }
+
+// Session is a client's admission token for one generation of one authority.
+//
+// Its zero value is never admitted, and outside this package there is no way to construct a
+// non-zero one: taking over from an old client is an operator operation (ReplaceSession), not
+// something a client can do by presenting a number it chose.
+type Session struct{ generation uint64 }
+
+// Generation reports which generation this token belongs to, for diagnostics and logging.
+func (s Session) Generation() uint64 { return s.generation }
 
 // New enrolls a fresh authority lifetime and generates its signing key.
 //
@@ -85,13 +105,250 @@ func (a *Authority) SigningPublicKey() ([]byte, error) {
 	return publicKeyOf(a.signer)
 }
 
-// Close discards the key. It models the end of an authority lifetime, and there is deliberately no
-// counterpart that restores one: a closed authority cannot be revived, only replaced by a new
-// enrollment with a new key.
+// Close discards the key and the signing record together. It models the end of an authority
+// lifetime, and there is deliberately no counterpart that restores one: a closed authority cannot be
+// revived, only replaced by a new enrollment with a new key.
+//
+// The two go together on purpose (§6). A record that outlived its key would describe signing that
+// nothing can perform, and a key that outlived its record would be able to sign a round again.
 func (a *Authority) Close() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.signer = nil
+	a.rec = record{}
+}
+
+/*
+ReplaceSession fences the current client and admits a new one.
+
+This is the operator control plane, not something a client may invoke on its own behalf in a
+deployment: separating those credentials is what stops a stale shard process from taking itself back
+into service. It advances the generation, so every token issued earlier stops being admitted, and it
+changes nothing else. In particular it does not clear the record: a new client inherits the same
+history, which is the point of fencing rather than restarting.
+*/
+func (a *Authority) ReplaceSession() (Session, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.signer == nil {
+		return Session{}, fmt.Errorf("%w: this authority has no key for %s", ErrKeyLost, a.enroll.NodeID)
+	}
+	if a.state != healthActive {
+		return Session{}, fmt.Errorf("%w: this authority has latched faulted", ErrStateUntrusted)
+	}
+	if a.generation == math.MaxUint64 {
+		// Exhaustion disables admission rather than wrapping: a wrapped generation would admit a
+		// token that was fenced long ago (§5).
+		a.state = healthFaulted
+		return Session{}, fmt.Errorf("%w: the generation space is exhausted", ErrStateUntrusted)
+	}
+	a.generation++
+	return Session{generation: a.generation}, nil
+}
+
+// MarkUntrusted latches this authority faulted, for an operator or a caller that has detected an
+// inconsistency the authority itself cannot see. It is one way: the record is kept, the key is kept,
+// and nothing further is signed (§5, §6).
+func (a *Authority) MarkUntrusted(reason string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.state = healthFaulted
+	_ = reason
+}
+
+// Status is a diagnostic view of the authority. It deliberately carries no request bytes and no
+// response: it says what is reserved, not what was signed.
+type Status struct {
+	Generation       uint64
+	ReservedRound    uint64
+	HasReservation   bool
+	ResponseRetained bool
+	Faulted          bool
+	KeyLost          bool
+}
+
+// Status reports what this authority is holding.
+func (a *Authority) Status() Status {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return Status{
+		Generation:       a.generation,
+		ReservedRound:    a.rec.reserved,
+		HasReservation:   !a.rec.empty(),
+		ResponseRetained: len(a.rec.retained) != 0,
+		Faulted:          a.state != healthActive,
+		KeyLost:          a.signer == nil,
+	}
+}
+
+// admitLocked is the guard every client operation shares: a key, a healthy record, and the current
+// generation. It latches faulted when the record's own parts disagree, and it never clears them.
+func (a *Authority) admitLocked(s Session) error {
+	if a.signer == nil {
+		return fmt.Errorf("%w: this authority has no key for %s", ErrKeyLost, a.enroll.NodeID)
+	}
+	if a.state != healthActive {
+		return fmt.Errorf("%w: this authority has latched faulted and signs nothing further", ErrStateUntrusted)
+	}
+	if err := a.rec.checkInvariants(); err != nil {
+		a.state = healthFaulted
+		return fmt.Errorf("%w: %w", ErrStateUntrusted, err)
+	}
+	if s.generation == 0 || s.generation != a.generation {
+		return fmt.Errorf("%w: session %d, current generation is %d", ErrFenced, s.generation, a.generation)
+	}
+	return nil
+}
+
+/*
+Reserve authenticates a request and locks the assigned partition round to its complete bytes.
+
+The conflict key is that round, together with the enrolled key and profile. For one round there is
+at most one unsigned request: a second authorization for the same round, however genuine, cannot
+authorize different bytes, and a round below the highest reserved one is refused even when the bytes
+are identical. Reserving is idempotent for the same bytes, so a client that lost its answer retries
+rather than rebuilding.
+
+A cancelled caller does not undo an admitted reservation (§6). Cancellation stops waiting; it does
+not return the round.
+*/
+func (a *Authority) Reserve(ctx context.Context, s Session, req Request) (*Authorization, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Admission is checked before the work, so a fenced client cannot make this authority
+	// authenticate anything on its behalf. It is checked again below, because fencing may win while
+	// the trust lookup is in flight.
+	a.mu.Lock()
+	err := a.admitLocked(s)
+	a.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+
+	auth, err := a.Authenticate(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.admitLocked(s); err != nil {
+		return nil, err
+	}
+	switch {
+	case a.rec.empty() || auth.AssignedRound > a.rec.reserved:
+		// A higher round replaces the record, including any response for the older one: the slot is
+		// bounded, and the older work is superseded rather than kept. Gaps are permitted, because an
+		// authenticated technical record assigns the round and those are not consecutive integers.
+		next := record{
+			reserved:        auth.AssignedRound,
+			unsigned:        bytes.Clone(auth.Unsigned),
+			digest:          auth.UnsignedDigest,
+			authorizationID: bytes.Clone(auth.ID),
+		}
+		if size := next.size(); size > MaxRecordBytes {
+			return nil, fmt.Errorf("%w: record would be %d bytes, limit is %d", ErrRequestTooLarge, size, MaxRecordBytes)
+		}
+		a.rec = next
+		return auth, nil
+	case auth.AssignedRound < a.rec.reserved:
+		return nil, fmt.Errorf("%w: round %d is below the reserved round %d", ErrStale, auth.AssignedRound, a.rec.reserved)
+	case !a.rec.sameRequest(auth.Unsigned):
+		return nil, fmt.Errorf("%w: round %d is reserved for different bytes", ErrConflict, a.rec.reserved)
+	default:
+		return auth, nil
+	}
+}
+
+// Sign signs the reserved request, and nothing else.
+//
+// It signs the bytes this authority owns, not bytes supplied now, so a caller cannot present
+// something else to be signed under a reservation it made earlier. A signature that has already
+// been retained makes this a no-op, and a failure leaves the reservation in place: the round is
+// never reclaimed for different bytes (§5).
+func (a *Authority) Sign(s Session) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.admitLocked(s); err != nil {
+		return err
+	}
+	if a.rec.empty() {
+		return fmt.Errorf("%w: nothing is reserved", ErrNoReservation)
+	}
+	if len(a.rec.retained) != 0 {
+		return nil
+	}
+	var proposed certification.BlockCertificationRequest
+	if err := types.Cbor.Unmarshal(a.rec.unsigned, &proposed); err != nil {
+		a.state = healthFaulted
+		return fmt.Errorf("%w: the reserved request does not decode: %w", ErrStateUntrusted, err)
+	}
+	if err := proposed.Sign(a.signer); err != nil {
+		return fmt.Errorf("signing the reserved request: %w", err)
+	}
+	signed, err := types.Cbor.Marshal(proposed)
+	if err != nil {
+		return fmt.Errorf("encoding the signed request: %w", err)
+	}
+	a.rec.signed = signed
+	return nil
+}
+
+// RetainResponse makes the signed response replayable before any of it can leave.
+//
+// Retention comes before release so that a caller which disappears mid-answer gets identical bytes
+// when it asks again, rather than a second signature over the same round (§6).
+func (a *Authority) RetainResponse(s Session) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.admitLocked(s); err != nil {
+		return err
+	}
+	if a.rec.empty() {
+		return fmt.Errorf("%w: nothing is reserved", ErrNoReservation)
+	}
+	if len(a.rec.signed) == 0 {
+		return fmt.Errorf("%w: nothing has been signed for round %d", ErrResponseNotRetained, a.rec.reserved)
+	}
+	if len(a.rec.retained) != 0 {
+		return nil
+	}
+	candidate := a.rec
+	candidate.retained = bytes.Clone(candidate.signed)
+	if size := candidate.size(); size > MaxRecordBytes {
+		return fmt.Errorf("%w: record would be %d bytes, limit is %d", ErrRequestTooLarge, size, MaxRecordBytes)
+	}
+	a.rec = candidate
+	return nil
+}
+
+/*
+Release hands back the retained response for one named reservation.
+
+The caller names both the round and the digest of the request it asked about, and both must be the
+reservation this authority is holding. That is what stops a delayed call for an older reservation
+from receiving the response of the newer one now occupying the slot (§5).
+*/
+func (a *Authority) Release(s Session, round uint64, digest [32]byte) ([]byte, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.admitLocked(s); err != nil {
+		return nil, err
+	}
+	if a.rec.empty() {
+		return nil, fmt.Errorf("%w: nothing is reserved", ErrNoReservation)
+	}
+	if round != a.rec.reserved {
+		return nil, fmt.Errorf("%w: asked for round %d, the reservation is round %d", ErrStale, round, a.rec.reserved)
+	}
+	if digest != a.rec.digest {
+		return nil, fmt.Errorf("%w: round %d is reserved for different bytes", ErrConflict, a.rec.reserved)
+	}
+	if len(a.rec.retained) == 0 {
+		return nil, fmt.Errorf("%w: round %d has no retained response", ErrResponseNotRetained, a.rec.reserved)
+	}
+	return bytes.Clone(a.rec.retained), nil
 }
 
 /*
