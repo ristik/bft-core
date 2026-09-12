@@ -12,7 +12,10 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -97,6 +100,23 @@ func newWiringFixture(t *testing.T) *wiringFixture {
 	}
 	f.uc = testcertificates.CreateUnicityCertificate(t, signer, ir, pdr, 41, zero, trHash)
 	return f
+}
+
+// next is the authorization that follows an unanswered round: a repeat certificate at a later root
+// round, certifying the same state and assigning a fresh round. It is a different authorization, so
+// a round that abstained on the previous one builds normally for this one.
+func (f *wiringFixture) next(t *testing.T) *wiringFixture {
+	t.Helper()
+	zero := make([]byte, 32)
+	nextTR := &certification.TechnicalRecord{Round: 7, Epoch: 0, Leader: wiringNodeID, StatHash: zero, FeeHash: zero}
+	trHash, err := nextTR.Hash()
+	require.NoError(t, err)
+	repeat := *f.uc.InputRecord
+	return &wiringFixture{
+		signer: f.signer, tb: f.tb, pdr: f.pdr, confHash: f.confHash,
+		stateRoot: f.stateRoot, blockHash: f.blockHash, tr: nextTR,
+		uc: testcertificates.CreateUnicityCertificate(t, f.signer, &repeat, f.pdr, 42, zero, trHash),
+	}
 }
 
 // round builds a node whose executor is already on the certified block, so the round reaches the
@@ -245,6 +265,34 @@ func (f *wiringFixture) authorityFor(t *testing.T) (*signingauthority.Authority,
 	return authority, session
 }
 
+// authoritySignerFor builds the signer under test, failing the test rather than the round if the
+// wiring itself is wrong.
+func authoritySignerFor(t *testing.T, client SigningAuthorityClient, session signingauthority.Session, key abcrypto.Verifier) CertificationSigner {
+	t.Helper()
+	signer, err := NewAuthoritySigner(client, session, key)
+	require.NoError(t, err)
+	return signer
+}
+
+// authorityKey is the enrolled authority's key as a deployment would provision it: read from the
+// authority at wiring time, never from a response.
+func (f *wiringFixture) authorityKey(t *testing.T, authority *signingauthority.Authority) abcrypto.Verifier {
+	t.Helper()
+	pub, err := authority.SigningPublicKey()
+	require.NoError(t, err)
+	verifier, err := abcrypto.NewVerifierSecp256k1(pub)
+	require.NoError(t, err)
+	return verifier
+}
+
+// localVerifier is the fixture's own key, which the scripted clients below sign with.
+func (f *wiringFixture) localVerifier(t *testing.T) abcrypto.Verifier {
+	t.Helper()
+	verifier, err := f.signer.Verifier()
+	require.NoError(t, err)
+	return verifier
+}
+
 type staticTrust struct{ tb *types.RootTrustBaseV1 }
 
 func (s staticTrust) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error) {
@@ -256,7 +304,7 @@ func TestARoundSignsThroughARealAuthority(t *testing.T) {
 	f := newWiringFixture(t)
 	r, sub, health := f.round(t)
 	authority, session := f.authorityFor(t)
-	r.SetCertificationSigner(NewAuthoritySigner(authority, session))
+	r.SetCertificationSigner(authoritySignerFor(t, authority, session, f.authorityKey(t, authority)))
 
 	require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
 	require.Len(t, sub.reqs, 1)
@@ -294,7 +342,7 @@ func TestARebuiltCandidateNeverOverwritesAReservation(t *testing.T) {
 	require.NoError(t, err)
 
 	r, sub, health := f.round(t)
-	r.SetCertificationSigner(NewAuthoritySigner(authority, session))
+	r.SetCertificationSigner(authoritySignerFor(t, authority, session, f.authorityKey(t, authority)))
 	require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
 
 	require.Empty(t, sub.sent, "the rebuilt candidate is not signed")
@@ -309,17 +357,20 @@ func TestARebuiltCandidateNeverOverwritesAReservation(t *testing.T) {
 	require.EqualValues(t, 6, authority.Status().ReservedRound)
 }
 
-func TestAShardNodeCannotMintItsOwnSession(t *testing.T) {
-	// The interface a round is given deliberately omits ReplaceSession. Session replacement is the
-	// operator control plane, and a shard process that could call it could take itself back into
-	// service after being fenced.
+func TestTheClientInterfaceOmitsSessionReplacement(t *testing.T) {
+	// The interface a round is given omits ReplaceSession, which narrows what this code can call.
+	// That is all this test establishes: a declared method set. It is not process isolation and not
+	// a capability boundary, because a value whose dynamic type is *signingauthority.Authority can
+	// be asserted to an interface that does have ReplaceSession, and in this unactivated profile the
+	// round holds the legacy key as well. Separate credentials and an authority lifetime independent
+	// of the shard process remain prerequisites for activation.
 	var methods []string
 	iface := reflect.TypeOf((*SigningAuthorityClient)(nil)).Elem()
 	for i := 0; i < iface.NumMethod(); i++ {
 		methods = append(methods, iface.Method(i).Name)
 	}
 	require.ElementsMatch(t, []string{"Release", "Reserve", "RetainResponse", "Sign"}, methods,
-		"a shard node reserves, signs, retains and releases; it does not replace sessions or hold a key")
+		"the declared method set is reserve, sign, retain and release, and nothing else")
 }
 
 // scriptedClient is a signing authority that answers the protocol correctly up to the released
@@ -337,8 +388,9 @@ func (c *scriptedClient) Reserve(_ context.Context, _ signingauthority.Session, 
 	}
 	c.lastUnsigned = unsigned
 	return &signingauthority.Authorization{
-		AssignedRound: req.Proposed.InputRecord.RoundNumber,
-		Unsigned:      unsigned,
+		AssignedRound:  req.Proposed.InputRecord.RoundNumber,
+		Unsigned:       unsigned,
+		UnsignedDigest: sha256.Sum256(unsigned),
 	}, nil
 }
 
@@ -389,7 +441,7 @@ func TestAnAuthorityResponseIsCheckedBeforeItGoesOnTheWire(t *testing.T) {
 				// the only thing missing is the signature the authority was asked to produce.
 				return nil
 			},
-			reason: "unsigned request",
+			reason: "does not verify under the enrolled signing key",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -402,7 +454,7 @@ func TestAnAuthorityResponseIsCheckedBeforeItGoesOnTheWire(t *testing.T) {
 				}
 				return client.lastUnsigned
 			}
-			r.SetCertificationSigner(NewAuthoritySigner(client, signingauthority.Session{}))
+			r.SetCertificationSigner(authoritySignerFor(t, client, signingauthority.Session{}, f.localVerifier(t)))
 
 			require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
 			require.Empty(t, sub.sent, "an unchecked response must never reach the root chain")
@@ -427,4 +479,277 @@ func TestReplacingTheSignerWithNothingIsIgnored(t *testing.T) {
 	require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
 	require.Equal(t, 1, signer.calls(), "the configured signer is still the one that signs")
 	require.Len(t, sub.reqs, 1)
+}
+
+/*
+substitutingClient answers CONSISTENTLY for a request this round did not propose: its reservation
+and its release both describe the substituted request, and it signs that request properly. Nothing
+in the exchange disagrees with itself, which is the point. The first revision of this signer compared
+the released response with the reservation, so two remote answers agreeing established the response,
+and a mis-correlated or compromised client's request was forwarded to the root chain as this node's
+own signed statement.
+
+The repair compares both answers with the proposal this round owns.
+*/
+type substitutingClient struct {
+	t        *testing.T
+	signer   abcrypto.Signer
+	saw      int // how often this round's own proposal reached the client
+	response []byte
+}
+
+func (c *substitutingClient) substitute(proposed *certification.BlockCertificationRequest) *certification.BlockCertificationRequest {
+	c.t.Helper()
+	c.saw++
+	other := *proposed
+	other.BlockSize += 100
+	require.NoError(c.t, other.Sign(c.signer))
+	return &other
+}
+
+func (c *substitutingClient) Reserve(_ context.Context, _ signingauthority.Session, req signingauthority.Request) (*signingauthority.Authorization, error) {
+	other := c.substitute(req.Proposed)
+	unsigned, err := other.Bytes()
+	require.NoError(c.t, err)
+	c.response, err = types.Cbor.Marshal(other)
+	require.NoError(c.t, err)
+	return &signingauthority.Authorization{
+		AssignedRound:  other.InputRecord.RoundNumber,
+		Unsigned:       unsigned,
+		UnsignedDigest: sha256.Sum256(unsigned),
+	}, nil
+}
+
+func (c *substitutingClient) Sign(signingauthority.Session) error           { return nil }
+func (c *substitutingClient) RetainResponse(signingauthority.Session) error { return nil }
+
+func (c *substitutingClient) Release(signingauthority.Session, uint64, [32]byte) ([]byte, error) {
+	return c.response, nil
+}
+
+func TestAConsistentlySubstitutedExchangeIsRefused(t *testing.T) {
+	ctx := context.Background()
+	f := newWiringFixture(t)
+	r, sub, health := f.round(t)
+	client := &substitutingClient{t: t, signer: f.signer}
+	r.SetCertificationSigner(authoritySignerFor(t, client, signingauthority.Session{}, f.localVerifier(t)))
+
+	require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
+	require.Empty(t, sub.sent, "a request this round did not propose must never be sent as this node's vote")
+	require.Contains(t, health.Snapshot().NonVotingReason, "different request than the one proposed",
+		"the refusal is decided against the local proposal, not against the other answer")
+	require.Equal(t, 1, client.saw, "this round's own proposal did reach the client, so the substitution was reachable")
+}
+
+func TestASignatureThatDoesNotVerifyIsRefused(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		// response builds the released bytes from the reserved unsigned preimage.
+		response func(t *testing.T, f *wiringFixture, unsigned []byte) []byte
+	}{
+		{
+			name: "a signature that is present but not a signature",
+			response: func(t *testing.T, f *wiringFixture, unsigned []byte) []byte {
+				var req certification.BlockCertificationRequest
+				require.NoError(t, types.Cbor.Unmarshal(unsigned, &req))
+				req.Signature = []byte{1}
+				b, err := types.Cbor.Marshal(req)
+				require.NoError(t, err)
+				return b
+			},
+		},
+		{
+			name: "a valid signature by a key this node did not enrol",
+			response: func(t *testing.T, f *wiringFixture, unsigned []byte) []byte {
+				var req certification.BlockCertificationRequest
+				require.NoError(t, types.Cbor.Unmarshal(unsigned, &req))
+				stranger, err := abcrypto.NewInMemorySecp256K1Signer()
+				require.NoError(t, err)
+				require.NoError(t, req.Sign(stranger))
+				b, err := types.Cbor.Marshal(req)
+				require.NoError(t, err)
+				return b
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newWiringFixture(t)
+			r, sub, health := f.round(t)
+			client := &scriptedClient{}
+			client.release = func([]byte) []byte { return tc.response(t, f, client.lastUnsigned) }
+			// The expected key is this node's configured one, read at wiring time.
+			r.SetCertificationSigner(authoritySignerFor(t, client, signingauthority.Session{}, f.localVerifier(t)))
+
+			require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
+			require.Empty(t, sub.sent, "an answer that does not verify is not cached as a completed round")
+			require.Contains(t, health.Snapshot().NonVotingReason, "does not verify under the enrolled signing key")
+		})
+	}
+}
+
+func TestTheSignerIsWiredWithAnExpectedKeyAndAClient(t *testing.T) {
+	f := newWiringFixture(t)
+	_, err := NewAuthoritySigner(nil, signingauthority.Session{}, f.localVerifier(t))
+	require.ErrorContains(t, err, "no signing authority client")
+	_, err = NewAuthoritySigner(&scriptedClient{}, signingauthority.Session{}, nil)
+	require.ErrorContains(t, err, "no expected signing key",
+		"the key a response is checked against is provisioned, never taken from the response")
+}
+
+func TestARefusedAuthorizationStaysRefusedOnRedelivery(t *testing.T) {
+	ctx := context.Background()
+	f := newWiringFixture(t)
+	r, sub, health := f.round(t)
+	signer := &recordingSigner{refuse: errors.New("authority unavailable")}
+	r.SetCertificationSigner(signer)
+
+	require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
+	require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
+	require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
+
+	require.Equal(t, 1, signer.calls(),
+		"the authority may already hold a reservation for the first candidate; a second attempt for the same round is not this node's to make")
+	require.Empty(t, sub.sent)
+	snapshot := health.Snapshot()
+	require.False(t, snapshot.Voting)
+	require.Contains(t, snapshot.NonVotingReason, "authority unavailable",
+		"the reason recorded at the refusal is the one reported afterwards")
+}
+
+func TestARefusedAuthorizationIsNotRebuiltAfterAPersistenceFailure(t *testing.T) {
+	/*
+		The production path the review named: persistingDriver saves the certificate after the round
+		returns, so a failed checkpoint write re-delivers a certificate the round already handled. If
+		the signer refused the first time and the executor's mempool has moved on, rebuilding would
+		take a DIFFERENT candidate to the authority for the same round — which strands the first
+		answer behind a conflict at best, and is a second signed statement for one round at worst.
+	*/
+	ctx := context.Background()
+	f := newWiringFixture(t)
+	exec := &retryExecutor{
+		head:      BlockRef{Number: 5, Hash: f.blockHash, StateRoot: f.stateRoot},
+		held:      map[string]BlockRef{},
+		available: true,
+	}
+	sub := &countingSubmitter{}
+	round := NewRound(wiringNodeID, authPartitionID, types.ShardID{}, exec, NewLoopbackDisseminator(), f.signer, sub, nil)
+	round.SetHealth(NewHealth())
+	signer := &recordingSigner{refuse: signingauthority.ErrFenced}
+	round.SetCertificationSigner(signer)
+
+	roDir := filepath.Join(t.TempDir(), "read-only")
+	require.NoError(t, os.Mkdir(roDir, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(roDir, 0o700) })
+
+	client := &BFTClient{
+		partitionID:    authPartitionID,
+		shardID:        types.ShardID{},
+		shardConfHash:  f.confHash,
+		nodeID:         wiringNodeID,
+		trustBaseStore: stubTrustBaseStore{tb: f.tb},
+		driver:         &persistingDriver{driver: round, store: NewFileStore(filepath.Join(roDir, "luc.cbor"))},
+	}
+	client.lastCertResponseTime.Store(1)
+	respond := &certification.CertificationResponse{
+		Partition: authPartitionID, Shard: types.ShardID{}, Technical: *f.tr, UC: *f.uc,
+	}
+
+	require.ErrorContains(t, client.handleCertificationResponse(ctx, respond), "persisting certificate")
+	require.Equal(t, 1, signer.calls())
+
+	// A transaction arrives between the two deliveries, so a rebuild would produce other bytes.
+	exec.queue([]byte("a transaction that arrived between the two deliveries"))
+	_ = client.handleCertificationResponse(ctx, respond)
+
+	require.Equal(t, 1, signer.calls(), "the re-delivery does not take a second candidate to the signer")
+	require.Empty(t, sub.sent, "and nothing is sent for a round that was never signed")
+}
+
+func TestANewAuthorizationIsBuiltAfterARefusedOne(t *testing.T) {
+	// The refusal is retained for the authorization that produced it, not for the node. A repeat
+	// certificate at a later root round assigns a fresh round, and that is ordinary work.
+	ctx := context.Background()
+	f := newWiringFixture(t)
+	r, sub, health := f.round(t)
+	other, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	signer := &recordingSigner{refuse: signingauthority.ErrStale}
+	r.SetCertificationSigner(signer)
+	require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
+	require.Empty(t, sub.sent)
+
+	signer.mu.Lock()
+	signer.refuse = nil
+	signer.signer = other
+	signer.mu.Unlock()
+
+	next := f.next(t)
+	require.NoError(t, r.HandleCertificate(ctx, next.uc, next.tr))
+	require.Equal(t, 2, signer.calls())
+	require.Len(t, sub.reqs, 1, "the next authorization is answered normally")
+	require.True(t, health.Snapshot().Voting)
+}
+
+// mismatchedReservationClient reserves something other than what this round proposed, and then
+// releases the correct signed response. The release alone would pass every check; the reservation is
+// the part that disagrees with this round's work, and a client whose two answers disagree is one
+// this node cannot correlate, whichever of them is right.
+type mismatchedReservationClient struct {
+	scriptedClient
+	round  uint64
+	digest [32]byte
+	bytes  []byte
+}
+
+func (c *mismatchedReservationClient) Reserve(ctx context.Context, s signingauthority.Session, req signingauthority.Request) (*signingauthority.Authorization, error) {
+	authorization, err := c.scriptedClient.Reserve(ctx, s, req)
+	if err != nil {
+		return nil, err
+	}
+	if c.round != 0 {
+		authorization.AssignedRound = c.round
+	}
+	if c.digest != [32]byte{} {
+		authorization.UnsignedDigest = c.digest
+	}
+	if c.bytes != nil {
+		authorization.Unsigned = c.bytes
+	}
+	return authorization, nil
+}
+
+func TestAReservationThatDoesNotNameThisRoundsWorkIsRefused(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		set    func(c *mismatchedReservationClient)
+		reason string
+	}{
+		{"another round", func(c *mismatchedReservationClient) { c.round = 99 }, "reserved round 99"},
+		{"another digest", func(c *mismatchedReservationClient) { c.digest = sha256.Sum256([]byte("elsewhere")) }, "digest that does not name"},
+		{"another preimage", func(c *mismatchedReservationClient) { c.bytes = []byte("elsewhere") }, "reserved a different request"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newWiringFixture(t)
+			r, sub, health := f.round(t)
+			client := &mismatchedReservationClient{}
+			tc.set(client)
+			// The release is the correct, properly signed answer: only the reservation disagrees.
+			client.release = func([]byte) []byte {
+				var req certification.BlockCertificationRequest
+				require.NoError(t, types.Cbor.Unmarshal(client.lastUnsigned, &req))
+				require.NoError(t, req.Sign(f.signer))
+				b, err := types.Cbor.Marshal(req)
+				require.NoError(t, err)
+				return b
+			}
+			r.SetCertificationSigner(authoritySignerFor(t, client, signingauthority.Session{}, f.localVerifier(t)))
+
+			require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
+			require.Empty(t, sub.sent)
+			require.Contains(t, health.Snapshot().NonVotingReason, tc.reason)
+		})
+	}
 }

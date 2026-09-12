@@ -109,6 +109,10 @@ type Round struct {
 	// that authorized it. A re-delivery of that same certificate re-sends those exact bytes
 	// instead of rebuilding — see the replay guard in HandleCertificate.
 	completed *completedRound
+	// attempted is the last authorization this node built a candidate for and asked the signer to
+	// sign, whether or not the signer agreed. A re-delivery of that same certificate must not
+	// build a second candidate or ask a second time — see the refusal guard in HandleCertificate.
+	attempted *attemptedRound
 	// restoredFrom, when non-nil, is the partition round of the certificate this process was
 	// resumed from (node.go's LoadLUC / verifyRestoredLUC / SeedLUC sequence). A Round marked this
 	// way observes, reconciles and stays diagnosable, but never signs — see abstainRestored.
@@ -161,6 +165,39 @@ type completedRound struct {
 func (c *completedRound) authorizes(uc *types.UnicityCertificate, exp Expectation) bool {
 	return c != nil && c.round == exp.Round &&
 		c.partitionRound == uc.GetRoundNumber() && c.rootRound == uc.GetRootRoundNumber()
+}
+
+/*
+attemptedRound is one authorization this node has already built a candidate for and taken to the
+signer, together with what the signer answered.
+
+A refusal is final for the authorization that produced it, and staying refused is a requirement
+rather than a convenience. The delivery layer re-drives a certificate whose application failed, so
+the same authorization arrives again; without this record the round would build a fresh candidate
+from whatever the executor holds now and ask again. That is the same defect completedRound exists
+for, on the path where nothing was signed: a signing authority may already hold a reservation for
+the first candidate (its response can be lost after it was made), and a second, different candidate
+for that round is refused as a conflict at best, and is a second signed statement at worst.
+
+So the candidate is retained with the refusal. The round abstains again, with the reason it first
+recorded, without rebuilding and without asking again. A genuinely new authorization is a different
+key and builds normally.
+*/
+type attemptedRound struct {
+	round          uint64
+	partitionRound uint64
+	rootRound      uint64
+	// req is the candidate that was taken to the signer, retained so that the round that was
+	// attempted is knowable and cannot be replaced by a later rebuild.
+	req *certification.BlockCertificationRequest
+	// reason is the health reason recorded when the signer refused; it is empty while the attempt
+	// is in flight and on an attempt that succeeded.
+	reason string
+}
+
+func (a *attemptedRound) answers(uc *types.UnicityCertificate, exp Expectation) bool {
+	return a != nil && a.round == exp.Round &&
+		a.partitionRound == uc.GetRoundNumber() && a.rootRound == uc.GetRootRoundNumber()
 }
 
 // MinAwaitTimeout floors the derived budget. A shard with a very short T2 still has to allow the
@@ -300,8 +337,12 @@ of the local key. Call after NewRound, before Run.
 
 This is how a deployment turns on an independent signing authority (#105), and it is deliberately a
 separate, explicit step: nothing about constructing a round switches it on, and the round is handed a
-signer it cannot create, cannot configure and cannot bypass. If the signer refuses, this node
-abstains; it never falls back to the local key.
+signer it does not create or configure. If the signer refuses, this node abstains; there is no code
+path here that falls back to the local key.
+
+This is wiring, not isolation. The round still holds the legacy key in this unactivated profile, and
+an authority in its own process, with its own credentials and lifetime, remains a prerequisite for
+activation.
 */
 func (r *Round) SetCertificationSigner(s CertificationSigner) {
 	r.mu.Lock()
@@ -542,6 +583,19 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return r.send(ctx, r.completed.req, exp.Round)
 	}
 
+	// RE-DELIVERY OF AN AUTHORIZATION THE SIGNER ALREADY REFUSED. Nothing was signed, so there is
+	// nothing to re-send; what must not happen is a second candidate for the same round. The round
+	// abstains again with the reason it recorded the first time, and the signer is not asked again.
+	if r.attempted.answers(uc, exp) {
+		if r.log != nil {
+			r.log.DebugContext(ctx, "re-delivery of an authorization already refused: abstaining again without rebuilding",
+				slog.Uint64("round", exp.Round), slog.Uint64("partitionRound", uc.GetRoundNumber()),
+				slog.String("reason", r.attempted.reason))
+		}
+		r.health.updateVoting(false, r.attempted.reason)
+		return nil
+	}
+
 	sealHash, err := SealHash(uc)
 	if err != nil {
 		return fmt.Errorf("reading certificate seal hash: %w", err)
@@ -674,10 +728,23 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// vote. What it must not do is get a different answer — rebuilding the candidate, retrying with
 	// other bytes, or signing locally because the authority said no would each defeat the record
 	// that produced the refusal (§8.3).
+	//
+	// The attempt is retained BEFORE the signer is called, because the interesting failure is the
+	// one where the answer is lost: the authority may have reserved and signed this candidate and
+	// this node never learned it. Retaining the candidate first means a re-delivery abstains on it
+	// rather than building another one.
+	r.attempted = &attemptedRound{
+		round:          exp.Round,
+		partitionRound: uc.GetRoundNumber(),
+		rootRound:      uc.GetRootRoundNumber(),
+		req:            req,
+	}
 	signed, err := r.certSigner.Sign(ctx, uc, tr, req)
 	if err != nil {
+		reason := signingDeclinedReason(err)
+		r.attempted.reason = reason
 		r.metrics.recordIRDivergence(ctx, "signing_declined")
-		r.health.updateVoting(false, signingDeclinedReason(err))
+		r.health.updateVoting(false, reason)
 		if r.log != nil {
 			r.log.WarnContext(ctx, "abstaining from the vote: the certification request was not signed",
 				slog.Uint64("round", exp.Round), slog.String("err", err.Error()))

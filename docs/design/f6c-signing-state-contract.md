@@ -426,16 +426,35 @@ It does not rebuild the candidate, retry with other bytes, or sign locally. `sig
 unreachable authority are distinguishable in the health reason, because they are different situations
 for an operator, and none of them is a reason to find another way to sign.
 
-**What the shard process cannot do.** The round is given `SigningAuthorityClient`, which has
-`Reserve`, `Sign`, `RetainResponse` and `Release` and nothing else. It has no `ReplaceSession`, so a
-shard process cannot mint a session for itself or take itself back into service after being fenced;
-it has no constructor and no key, so a restarting shard process cannot reconstruct an authority. The
-session is issued elsewhere and handed in.
+**What the wiring narrows, and what it does not.** The round is given `SigningAuthorityClient`,
+which declares `Reserve`, `Sign`, `RetainResponse` and `Release` and nothing else. Omitting
+`ReplaceSession` narrows what this code can call, and the type carries no constructor and no key, so
+there is no path here that mints a session or rebuilds an authority after a restart. That is API
+narrowing, not process isolation and not a capability boundary: a value whose dynamic type is
+`*Authority` can be asserted to an interface that does have `ReplaceSession`, and in this
+unactivated profile the round still holds the legacy key. An authority in a separate process, with
+operator credentials separate from the shard's and a lifetime independent of it, remains a
+prerequisite for activation (§6, §8.3) rather than something the interface provides.
 
-**The client checks the response.** After Release, the round's signer decodes the released bytes and
-requires that they re-encode to exactly the reserved unsigned request and carry a signature, before
-anything goes on the wire. An authority that answered for another candidate, or returned an unsigned
-response, is refused by this node rather than forwarded.
+**The client checks every answer against its own work.** The signer takes its own copy of the
+proposal before it calls the client, and that copy's preimage, digest and assigned round are the
+expectation. The reservation must name them; the release is asked for by them; the released bytes
+must re-encode to that same preimage and must verify under the enrolled authority's signing key,
+provisioned with this node's configuration and never read from the response being checked. Two
+remote answers agreeing with each other establishes nothing, so a consistently substituted exchange
+is refused, and a present-but-invalid signature is refused rather than cached as a completed round.
+Verifying the response does not stop an authority from signing two different requests, which is what
+the record inside the authority is for; it stops a corrupt or misrouted answer from becoming this
+node's vote.
+
+**A refusal is retained.** The candidate taken to the signer is recorded before the call, with the
+refusal recorded on it. A re-delivery of the same authorization, which the delivery layer produces
+whenever applying a certificate fails after the round ran (a failed checkpoint write, for example),
+abstains again with the reason first recorded, without building a second candidate and without
+asking again. This matters most where the answer was lost rather than refused: the authority may
+already hold a reservation for the first candidate, and a rebuild against a mempool that has moved
+on would strand it behind a conflict. A genuinely new authorization is a different key and builds
+normally.
 
 **What step 3 does not establish.** There is still no transport, no durable journal, no production
 activation and no key replacement: nothing in a deployed configuration selects the authority signer,
