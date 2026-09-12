@@ -25,11 +25,16 @@ payload; see the design record in docs/design/f6b-quiet-tail-anchor-recovery.md.
 
 WHAT THIS FILE IS, AND IS NOT. It is the predicate: given a candidate evidence bundle, does it
 authenticate an execution anchor for the state this node is currently being asked to build on? It is
-deliberately NOT wired into Round: nothing calls VerifyAnchorEvidence in production yet, because the
-transport that fetches a bundle, the resource policy around it and the decision of who may serve one
-are all still design questions. The predicate is here first because it is the part whose correctness
-is decidable now, in fixtures, and because every one of those later decisions has to be checked
-against it rather than the other way round.
+not called by Round directly. It reaches production through EvidenceRequester (evidencerequester.go),
+which NewRecoveryStack builds and Node.EnableRecovery installs from shard-node startup: the requester
+owns the transport, the resource policy and the choice of provider, and calls this predicate to decide
+whether what arrived means anything. The predicate was written first because it is the part whose
+correctness is decidable in fixtures, and every one of those later decisions is checked against it
+rather than the other way round.
+
+It is an anchor-recovery predicate and nothing else. It authenticates no EVM payload, derives no
+canonical root input (D1/#10) and validates no block body, so it is not a replay acceptance test and
+must not be used as one.
 
 WHAT IT NEVER DOES. It authorizes no signing (P-sign, #105, is untouched: a recovered executor is
 not a licence to vote), it fetches no payload (a separate decision — the client's own ancestor
