@@ -113,14 +113,14 @@ Merged: **#91** (harness, `e7d36a78`), **#108** (per-scenario clusters and the f
 | line | status | note |
 |---|---|---|
 | exact revisions, hashes, seed, commands recorded; wrong pin fails; fake fallback impossible | **met** | unconditional manifest written before scenario selection; `-s` with an unknown name is refused before anything starts or stops |
-| positive execution before **and** after each fault; multiple leaders; unique transactions; duplicate delivery never duplicates effects; receipts/nonces/commitments agree | **met in part** | established for baseline, multi-leader, follower restart, reth-only restart and pair restart. **Leader kill is the exception** — see below |
+| positive execution before **and** after each fault; multiple leaders; unique transactions; duplicate delivery never duplicates effects; receipts/nonces/commitments agree | **met** | the `dd9e6975` matrix records all four fault scenarios, including leader kill, plus multi-leader execution; restored processes follow/execute but remain non-voting. See the dated reconciliation below |
 | progress with one shard validator absent; returning node verified separately; shard leader distinguished from root leader | **met** | leader-kill scenario: the shard rotates past the killed leader and a transaction executes while it is absent |
 | bounded condition-driven waits; negative subprocess tests time out and clean up; traps stop every created process | **met** | the #91 oracle repairs — an unobservable head is no longer recovery, and `assertConvergence` now returns failure and sets the sticky state |
 | complete compared certificates at rejection time, configuration, root/shard/reth logs, persistent state; JWT/keys redacted | **met** | sealing happens before each cluster reset and the reset is aborted if sealing fails |
 | artifact collection exercised deliberately, archive verified, preserved | **met** | *(measured for this ledger)* `./scripts/reth-chaos-selftest.sh` → **38 ok, 0 bad**, including failed startup, cancellation, archive-overwrite refusal, selection validation and real-log correlation |
 | same-host retained-data recovery distinguished from disk-loss/replacement-host recovery | **met** | #110 §5.7.2 is explicit that the reth-only case retained its datadir; replacement-host recovery stays #14 |
 
-**The two gaps under #88, stated plainly.**
+**The two gaps recorded at the original ledger revision (resolved by the dated measurement below).**
 
 1. **Leader kill has no passing measurement at a current head.** §5.7.1 records it as
    `continuity-gap`, open; the later row showing it recovering is from the #109-era run, and #110
@@ -133,6 +133,15 @@ Merged: **#91** (harness, `e7d36a78`), **#108** (per-scenario clusters and the f
 Both are measurement, not repair: the cost is one clean `./scripts/reth-chaos.sh -t 2` run at
 `fbc4d08b` with the pin and T2 ≥ 5 s. This ledger does not schedule it, because #9's next two units
 are #89 and #90 by the 2026-09-11 sequencing; it records it as what #88 still needs.
+
+**Both were measured on 2026-09-12 at `dd9e6975`** and are recorded in
+`docs/design/f1a-fault-matrix-dd9e6975.md`: the five-scenario matrix (follower restart, leader kill,
+reth-only restart, pair restart, multi-leader) passed in one invocation under one manifest, 71
+assertions, no failures; baseline passed in a separate invocation, with the pin matched and T2 at 5000 ms. Leader kill passed there, closing
+gap 1. That record carries its own limitation forward rather than dropping it: each outcome is still
+a single run, so neither closure is a claim that the failure cannot recur, and the restored nodes in
+it are non-voting (`abstaining: restored process is non-voting`), which is #105 rather than anything
+this matrix establishes.
 
 ---
 
