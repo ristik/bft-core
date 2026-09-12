@@ -1,0 +1,213 @@
+\chapter{Introduction}
+
+Governance manages validator assignments, partition configurations, incentives and protocol upgrades. The \emph{Governance Body}\index{Governance Body} produces authenticated change records. Under PoA these originate from a disclosed authority; under PoS they are outputs of contracts executing on the enshrined governance EVM shard (Chapter~\ref{ch:evm}). Root consensus adopts valid changes; possession of an agent key or access to a configuration API is not a separate authority to choose the set.
+
+The initial public currency deployment may remain under PoA. Authoritative PoS is activated only after weighted consensus, the epoch handoff, objective slashing, retirement protection, forced inclusion and checkpoint recovery are enabled and validated together. Merely running staking contracts or observing their output in shadow mode does not activate PoS.
+
+\chapter{Data Flow}
+
+\section{Governance Body}
+
+Each BFT Core operator runs a paired execution node. A configuration agent may obtain certified records, proofs and state snapshots from any available source. It verifies these inputs before proposing a change or starting a joining node (Sec.~\ref{sec:shard-node-joining}). Proof verification itself does not require an execution client; producing and validating EVM blocks does.
+
+\section{Information Flows}\label{sec:gov-flows}
+
+\begin{description}
+ \item[Root origin and acknowledgement.] The root sends certified progress, configuration transitions and the governance-shard assignment through the mandatory state feed. EVM clocks observe root progress at EVM execution boundaries, not at every root tick.
+ \item[Candidate and adoption.] Contracts commit an election candidate in EVM storage. An agent supplies its body and state proof to the root, which validates the certified output and commits the handoff. The root's adoption acknowledgement returns through the feed.
+ \item[Evidence.] Anyone may submit authenticated conflicting consensus votes to the slashing contract. A bounded forced-inclusion path protects access against an EVM producer.
+ \item[Value.] Native UCT is locked in a vault to back Execution-layer tokens, and certified burns authorize release credits (Sec.~\ref{sec:bridge-enshrined}).
+\end{description}
+
+The feed does not infer missing votes from a quorum signature subset. A future performance-accounting flow requires a separately specified root-certified duty record with completeness and challenge rules. It is not part of the initial reward or slashing mechanism.
+
+\chapter{Governance Mechanisms}
+
+\section{Proof of Authority}\label{sec:gov-poa}
+
+The authority specifies the validator set and all effective weights are $1$. Configuration changes still use the committed handoff and authenticated acknowledgement. The authority, its scope and any emergency procedure are disclosed at launch. PoA does not claim stake-backed accountability.
+
+\section{Proof of Stake}\label{sec:gov-pos}
+
+Let $b_\nu$ be a validator's effective bonded voting weight in the epoch snapshot and $W_e=\sum_\nu b_\nu$. Root consensus requires $\lfloor2W_e/3\rfloor+1$ weight; the paired EVM predicate attestation requires $\lfloor W_e/2\rfloor+1$. The same identity can contribute only once to either threshold. Identity count and stake cannot be mixed. Minimum self-bond filters eligibility but is not used to prove a majority of seats from a stake assumption.
+
+\subsection{Stake Registry}
+
+The registry $\mathcal{G}$ binds a stable staking account to owner and consensus-key roles, bonded self-stake, delegated shares when delegation is enabled, and status. Registration proves possession of each signing key and uniqueness of active key bindings. Node identifiers and key rotation follow a pinned mapping. Historical bindings survive rotation and exit for accountability.
+
+Bonding changes available collateral. Election fixes the effective weight and reserves the corresponding collateral for that assignment. An unbond request queues an exit; it cannot release collateral backing an active or committed future assignment. Slashing applies to that collateral and its attributable unbonding shares, not merely the account's current free balance. Delegation and commission rules must preserve proportional loss and historical entitlement through rotations and exits. The first PoS deployment MAY disable delegation and use self-bond only.
+
+\subsection{Election}\label{sec:gov-election}
+
+Each epoch schedules a snapshot threshold $S_e$ in certified root rounds. The snapshot operation runs automatically after root-origin import and before user transactions in the first EVM block whose imported root round is at least $S_e$. It snapshots the pre-user registry at that boundary, including deterministic protocol effects ordered before it. It does not require a block at exactly $S_e$.
+
+Election selects at most $N_\mathsf{max}$ eligible validators by effective stake descending, with ties broken by canonical identity bytes. An empty or below-minimum safe set is rejected and the incumbent assignment persists. The candidate commits the snapshot's shard round and observed root round, the next epoch, configuration version, complete identity/key/weight records, thresholds and predecessor trust-base body hash. Its hash is written to a fixed slot and its body is made available (Appendix~\ref{app:gov-candidate}).
+
+The candidate includes an earliest activation bound, not a prediction of the actual activation round. Only one candidate is pending for an epoch. Stake changes after the snapshot do not modify it. Cancellation or replacement requires a root-certified abort of any prepared handoff and an EVM acknowledgement that releases its reservations. An agent cannot choose whichever historical candidate it prefers.
+
+\begin{ruledef*}{Epoch Extension} \\
+ Until a successor handoff is committed, the incumbent set remains authoritative. Extension does not make its collateral withdrawable. A timeout never installs a successor or unlocks stake by local decision.
+\end{ruledef*}
+
+An extension alert is operational information, not a promised upper bound on finality. Under loss of the root quorum, neither governance execution nor forced inclusion can guarantee recovery. Recovery then follows the disclosed checkpoint/emergency procedure, without pretending that a stalled chain can slash itself into progress.
+
+\section{Trust Base Derivation}\label{sec:gov-trust-base}
+
+The root handoff is an ordered state transition, with these requirements:
+\begin{enumerate}
+ \item Verify the governance UC, network/partition/configuration binding, candidate body and storage proof. Require the expected predecessor, next epoch and pending candidate. The certified contract output is authoritative; root validators do not independently rerun the staking algorithm.
+ \item Commit a prepare record under the old root quorum. Close admission of new old-assignment governance proposals and drain or cancel in-flight work. Record the last certified EVM block/state and the frozen root state summary. Other aggregator shards retain their independent assignments.
+ \item Construct the next trust-base body from this agreed boundary and candidate. Its activation condition and state summary are determined by the root handoff, not by an agent's local clock or an unknown future EVM state. Old validators endorse only that agreed body, with a domain-separated signature and durable non-equivocation protection.
+ \item Commit the endorsed handoff under the old consensus rules, binding the new trust-base body, actual activation boundary and successor technical record. The selected protocol version must specify how activation follows this commit and how the endorsement is bound to that boundary. A locally submitted trust base cannot activate merely because a round counter reaches its proposed start.
+ \item The new root set resumes from the certified handoff state. The next governance proposal uses the new assignment and last certified EVM parent. Its mandatory system operation acknowledges the handoff before user transactions, closing the old assignment's liabilities.
+\end{enumerate}
+
+An incomplete prepare may be aborted only by an old-quorum committed abort; conflicting prepare, abort and activate records cannot all become effective. If old quorum is unavailable after preparation, safety takes precedence over progress. Joining nodes must synchronize the certified root and EVM states before their votes count. A production version needs an explicit handoff state machine and safety/liveness validation, including crash points; these requirements do not assume the current REST intake already implements it.
+
+Trust-base identity is the hash of its canonical body excluding endorsement signatures in the new protocol version. Proofs authenticate that body; valid signature subsets do not change its identity. Legacy formats retain their legacy verification rules and cannot be silently reinterpreted. Appendix~\ref{app:gov-trust-base} defines the body mapping.
+
+\section{Rewards}\label{sec:gov-rewards}
+
+The initial policy rewards assigned root voting weight, not measured availability. For a closed reward interval $I$ wholly within one acknowledged assignment $e$,
+\[
+ R_\nu(I)=\mathcal{E}(I)\frac{b_\nu}{W_e},\qquad
+ \mathcal{E}(I)=\min(\rho_e\,|I|,\mathsf{Pool}_{\mathsf{free}}),
+\]
+where $\rho_e$ is the governed release per certified root round, $|I|$ counts root-round progress, and $\mathsf{Pool}_{\mathsf{free}}$ excludes already credited liabilities. PoA uses unit weights. Boundaries split intervals when assignment or rate changes. Skipped root rounds are accounted as one interval; retries never accrue it twice. Idle assigned validators can receive this reward, an explicit limitation of the initial policy.
+
+Fees observed by the EVM are accounted to the assignment active in the block that receives them, including deterministic handling of fees in the closing block. Emission and fee credits use integer arithmetic; rounding remainder remains in its source pot. Settlement is idempotent, bounded and permissionless, and cannot process an unacknowledged future interval. Claims use checks-effects-interactions and reentrancy protection. No recipient's failing claim blocks another recipient.
+
+A quorum seal identifies some signers, not everyone who performed a duty. Neither its omitted signers nor the subset of root rounds sampled by the EVM establishes downtime. Performance rewards require a future separately activated accounting protocol.
+
+\section{Slashing}\label{sec:gov-slashing}
+
+Initial PoS supports objective double-signing evidence over the precise vote domain in Appendix~\ref{app:gov-evidence}. Anyone may submit evidence; the forced inbox can preserve a timely commitment while execution is delayed. Accepted evidence charges the attributable active or retiring collateral once, credits a bounded submitter bounty and transfers the remainder to treasury. Jailing excludes the validator from future elections; its current consensus weight changes only at a committed handoff.
+
+Downtime slashing and automatic jailing for absence from seal signatures are disabled. A future mechanism must specify duties, deadlines, accountable delivery, evidence availability and challenges before any absence-based penalty is enabled.
+
+\begin{ruledef*}{Slashed Stake} \\
+ Slashing transfers collateral and never creates or destroys native UCT. Key rotation, delegation changes and queued withdrawals cannot remove liability for an earlier attributable offense.
+\end{ruledef*}
+
+\section{Fees}\label{sec:gov-fees}
+
+The configured fee collector receives priority fees through protocol balance accounting; receiving those credits does not call its contract code. Permissionless settlement splits attributable receipts between the reward pot and treasury. Unexpected transfers are accounted separately. Base fees and any other enabled native-balance destruction are included in the supply accounting of Sec.~\ref{sec:evm-native-currency}. A positive base-fee floor is a custom execution validity rule, not merely a genesis initial value.
+
+\section{Economic Invariants}\label{sec:gov-invariants}
+
+Governance checks parameter proposals when submitted, when executed and at each affected election, activation or withdrawal. Parameter changes cannot shorten protection already attached to collateral or bypass pending evidence.
+\begin{enumerate}
+ \item A collateral reservation ends only after an authenticated acknowledgement that the stake no longer backs any active or prepared successor assignment. Let $R_\mathsf{ret}$ be that acknowledged retirement round.
+ \item The earliest withdrawal is after $R_\mathsf{ret}+\Delta_\mathsf{hold}$. Require $\Delta_\mathsf{hold}>\Delta_\mathsf{ev}+\Delta_\mathsf{incl}+\Delta_\mathsf{exec}$, with all values in certified root rounds. The latter two are inclusion and processing allowances under the stated liveness assumptions. Unresolved timely evidence or an unprocessed inbox watermark blocks withdrawal even if these allowances are exceeded.
+ \item Live certificate admission uses a round-denominated window $W_\mathsf{cert}\le\Delta_\mathsf{ev}<\Delta_\mathsf{hold}$. It verifies that the signer epoch was active at the claimed root round and that the round is not ahead of the imported origin. Historical authentication outside this window requires an authenticated checkpoint/ancestry path, not signatures of expired keys alone.
+ \item Evidence verification keys remain available until every associated evidence and retirement obligation is discharged, even when they leave the ordinary certificate-admission cache. Retention is bounded by governed validator/transition/evidence limits and must not be curtailed to permit withdrawal.
+ \item Positive weights, key uniqueness, minimum eligible set, checked total-weight arithmetic and the exact root/shard thresholds hold at every activation. Weight units and rounding are fixed by configuration.
+ \item Emission plus outstanding credits never exceeds its allocated pool; rewards, treasury and bridge liabilities cannot spend one another's backing.
+\end{enumerate}
+
+The weak-subjectivity checkpoint freshness limit is a client policy measured in elapsed time, derived from the minimum real-time protection implied by configured round pacing and collateral retention. Changing pacing, churn or protection requires re-evaluating this limit. It is distinct from $W_\mathsf{cert}$ and the number of keys cached in EVM state. No safety claim relies on an unbounded epoch having a fixed duration.
+
+\section{Upgrade and Delivery Boundaries}\label{sec:gov-delivery}
+
+Money custody, withdrawal accounting, allocation, wrapper and vault contracts are immutable in the initial profile. Stake custody and its fixed slash/exit rules are separated from election policy; changing policy cannot grant arbitrary withdrawal or arbitrary slashing authority. Policy changes have bounded permissions and timelocks. Changes to execution semantics, encodings, immutable custody or the proof relation require a versioned protocol upgrade or a new deployment with an explicit migration path. Parameter governance is not a treasury spending key.
+
+PoA/TGE, bridge activation and authoritative PoS are separate gates. Bridge launch requires redemption for every token shape the launched token type admits; an unavailable succinct path cannot be used to promise redemption beyond a direct verifier's limits. Future execution proofs, delegation, performance rewards and downtime penalties are optional upgrades, not implicit guarantees of the initial release.
+
+\chapter{Governance Processes}\label{ch:gov-processes}
+
+Governance is divided into independent processes. The following sections define the interface between the platform and each process: the expectations on the process and the records it produces. This interface lets the Governance Body be replaced as a component, for example moving from Proof of Authority to Proof of Stake, without change to the consumers of its records.
+
+\section{Validator Assignment}\label{sec:gov-validator-assignment}
+
+The process produces \emph{Validator Assignment Records}\index{Validator Assignment Record}, which assign validators to the BFT Core or to specific partitions and shards, as shown in Table~\ref{ta:var}.
+
+\begin{table}[!htbp]
+	\begin{center}
+		\caption{Change Record: Validator Assignment Record}\label{ta:var}
+		\begin{tabular}{|p{0.5cm}|p{8cm}|p{1.7cm}|p{3.5cm}|}\hline
+			No & Field                      & Notation      & Type                        \\\hline\hline
+			1. & Network Identifier         & $\alpha$      & $\mathbb{A}$                \\\hline
+			2. & Partition Identifier       & $\beta$       & $\mathbb{C}\opt$            \\\hline
+			3. & Shard Identifier           & $\sigma$      & $\bits{\le \mathcal{SH}.k}\opt$ \\\hline
+			4. & Epoch Number               & $e$           & $\uint{64}$                 \\\hline
+			5. & Epoch Switching Condition  & $\varphi_e$   & $\mathbb{L}$               \\\hline
+			6. & Validator identifiers and stakes& $\{\nu, b_\nu\}_e$ & $\{ (\bytestr, \uint{64}) \} \opt$ \\\hline
+			7. & Quorum Size (Voting power) & $k_e$         & $\uint{64} \opt$                 \\\hline
+			8. & Hash of Previous Record    & $h_{e-1}$     & $\hashtype$                \\\hline
+		\end{tabular}
+	\end{center}
+\end{table}
+
+Fields 2 and 3 are absent for a record addressing the BFT Core. The assignment of a particular validator is revoked by issuing a new record that no longer includes it.
+
+If a shard or partition stops operating at the start of an epoch, the corresponding record has empty validator and quorum fields ($\{\nu, b_\nu\}_e = \bot \land k_e = \bot$). At all other times these fields are present.
+
+The Epoch Switching Condition for the BFT Core is the committed handoff of Sec.~\ref{sec:gov-trust-base}. A proposed root round is only an earliest activation bound. Shard switching is authorized by its committed technical record and assignment, not inferred from a local root clock.
+
+Quorum size is a sum of stakes. For the BFT Core, $k_e > \tfrac{2}{3}\sum b_\nu$. For a shard, $k_e > \tfrac{1}{2}\sum b_\nu$, since a shard attests to a predicate that the BFT Core orders and counts, for which an honest majority suffices.
+
+For the BFT Core under Proof of Stake, the record is the candidate of Sec.~\ref{sec:gov-election}, and the derivation of the Unicity Trust Base record from it is Sec.~\ref{sec:gov-trust-base}. For the enshrined EVM partition, the record is derived from the Unicity Trust Base of the same epoch (Sec.~\ref{sec:evm-validators}).
+
+\section{Aggregation Layer Partition Lifecycle Management}
+
+This process creates, modifies and deletes partitions. The output is a Partition Update Record carrying the partition description and the configuration of the consensus layer, as illustrated by Table~\ref{ta:pcr}.
+
+\begin{table}[!htbp]
+	\begin{center}
+		\caption{Change Record: Partition Update}\label{ta:pcr}
+		\begin{tabular}{|p{0.6cm}|p{8cm}|p{1.7cm}|p{3.5cm}|}\hline
+			No & Field                 & Notation & Type \\\hline\hline
+			1. & Network Identifier    & $\alpha$ & $\mathbb{A}$       \\\hline
+			2. & Partition Identifier  & $\beta$  & $\mathbb{C}$      \\\hline
+			3. & Partition Description & $\mathcal{CD}[\beta]$ & $\mathbb{CD}$ \\\hline
+			4. & Operation: \{\textsc{create|change|destroy}\} & $op$   &  \\\hline
+			5. & Hash of Genesis       & $h_g$    &  $\hashtype\opt$\\\hline
+			6. & Switching Condition   & $\varphi_e$ & $\mathbb{L}$   \\\hline
+			7. & Number of Nodes       & $k$      & $\uint{32}$       \\\hline
+			8. & Target Round Rate     & $\mathtt{t}$ & $\uint{32}$(ms)    \\\hline
+			9. & Time-outs             & $\mathtt{t2}, \mathtt{t3}$ & $\uint{32}$(ms)    \\\hline
+			10. & Hash of previous record & $h_{e-1}$& $\hashtype$  \\\hline
+		\end{tabular}
+	\end{center}
+\end{table}
+
+The set of required fields depends on the operation. The switching condition is a shard round number, a BFT Core round number, or a shard epoch number.
+
+\section{Shard Management}
+
+This process creates and updates sharding schemes for partitions. The switch to a new sharding scheme is executed at an epoch change; see Table~\ref{ta:ssu}.
+
+\begin{table}[!htbp]
+	\begin{center}
+		\caption{Change Record: Sharding Scheme Update}\label{ta:ssu}
+		\begin{tabular}{|p{0.5cm}|p{8cm}|p{1.7cm}|p{3.5cm}|}\hline
+			No & Field                      & Notation       & Type          \\\hline\hline
+			1. & Network Identifier         & $\alpha$       & $\mathbb{A}$  \\\hline
+			2. & Partition Identifier       & $\beta$        & $\mathbb{C}$  \\\hline
+			3. & Sharding Scheme            & $\mathcal{SH}$ & $\mathbb{SH}$ \\\hline
+			4. & Switching Epoch Number     & $e$            & $\uint{64}$   \\\hline
+			5. & Hash of previous record    & $h_{e-1}$      & $\hashtype$  \\\hline
+		\end{tabular}
+	\end{center}
+\end{table}
+
+The input data for shard management is collected by the BFT Core. It maintains a rolling statistical record for every shard for the ongoing shard epoch and keeps the aggregates of the previous epoch (Sec.~\ref{statistical-record}). Each shard is responsible for fetching the record certifying the previous epoch's aggregate and submitting it as a transaction to the Governance Body.
+
+\subsection{Shard Split}
+
+If a sharding scheme update replaces a shard $\sigma$ by child shards $\sigma\|0$ and $\sigma\|1$, then the change is executed at the epoch boundary using the last certified state of $\sigma$ as the split source.
+
+The orchestration of a shard split is executed as follows:
+\begin{enumerate}
+	\item Governance publishes the new sharding scheme and validator assignments for the child shards for epoch $e+1$.
+	\item During epoch $e$, the validators of shard $\sigma$ continue normal operation and finalize the last round of $\sigma$.
+	\item At the epoch switch, the validators joining $\sigma\|0$ and $\sigma\|1$ obtain the last certified state of $\sigma$. A majority of the validators after the split should be pre-existing; these are already synchronized and known to be able to execute.
+	\item Each joining validator creates a local copy of the full RSMT state of $\sigma$ in memory or on disk.
+	\item Each validator computes the child shard states by running the split procedure from Section~\ref{sec:rsmt-shard-split} against the synchronized state.
+	\item The child shards start epoch $e+1$ from the derived roots $h_{\sigma\|0}$ and $h_{\sigma\|1}$ and accept only requests whose state identifiers map to the respective child shard under the new sharding scheme.
+	\item Removal of branches and leaves that do not belong to the local child shard may be performed asynchronously after the child shard is already in service.
+\end{enumerate}
+
+This approach allows existing in-sync validators to reuse the already materialized tree topology. The split can be executed by local replication first and garbage collection later, instead of requiring an immediate computation of the minimal child tree before the epoch can advance.
+
+From the viewpoint of availability, the old shard validators are expected to keep serving the certified pre-split state briefly after the epoch switch so that joining validators can synchronize. After the child shards have demonstrated successful operation, obsolete local data of the parent shard can be deleted according to the operator's retention policy.

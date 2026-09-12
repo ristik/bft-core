@@ -355,3 +355,17 @@ func Test_BoltDB_SafetyModule_API(t *testing.T) {
 	require.Equal(t, rctypes.GenesisRootRound, db.GetHighestVotedRound())
 	require.ErrorIs(t, db.SetHighestQcRound(20, 21), errNoSafetyBucket)
 }
+
+// TestNewBoltStorage_Sync pins the durability default: a store opened without options syncs every
+// commit, and only WithNoSync — meant for throwaway test fixtures (#127) — turns that off.
+func TestNewBoltStorage_Sync(t *testing.T) {
+	durable, err := NewBoltStorage(filepath.Join(t.TempDir(), "durable.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = durable.Close() })
+	require.False(t, durable.db.NoSync, "a store opened without options must sync every commit")
+
+	throwaway, err := NewBoltStorage(filepath.Join(t.TempDir(), "throwaway.db"), WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = throwaway.Close() })
+	require.True(t, throwaway.db.NoSync, "WithNoSync must disable syncing")
+}

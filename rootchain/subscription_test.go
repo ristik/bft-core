@@ -44,6 +44,7 @@ func Test_Subscriptions(t *testing.T) {
 		}
 		subs, err := NewSubscriptions(sender, observability.Default(t))
 		require.NoError(t, err)
+		t.Cleanup(subs.Wait)
 		require.NotNil(t, subs)
 
 		// attempt to subscribe invalid node ID
@@ -88,6 +89,10 @@ func Test_Subscriptions(t *testing.T) {
 		obs := observability.New(t, "", "", logger.HookedLoggerBuilder(t, logHook))
 		subs, err := NewSubscriptions(sender, obs)
 		require.NoError(t, err)
+		// Send's goroutine keeps logging after the hook below has released this
+		// test; without draining it the log record lands on a completed t and the
+		// testing package panics (CI run 34102642015 attempt 1).
+		t.Cleanup(subs.Wait)
 		require.NotNil(t, subs)
 
 		// no subscribers so should not trigger sender callback
@@ -121,6 +126,7 @@ func Test_Subscriptions(t *testing.T) {
 
 		subs, err := NewSubscriptions(sender, observability.Default(t))
 		require.NoError(t, err)
+		t.Cleanup(subs.Wait)
 		require.NotNil(t, subs)
 
 		require.NoError(t, subs.Subscribe(certResp.Partition, certResp.Shard, nodeIdA.String()))
@@ -146,6 +152,7 @@ func Test_Subscriptions(t *testing.T) {
 
 		subs, err := NewSubscriptions(sender, observability.Default(t))
 		require.NoError(t, err)
+		t.Cleanup(subs.Wait)
 		require.NoError(t, subs.Subscribe(certResp.Partition, certResp.Shard, nodeIdA.String()))
 		require.NoError(t, subs.Subscribe(certResp.Partition, certResp.Shard, nodeIdB.String()))
 
@@ -165,18 +172,24 @@ func Test_Subscriptions(t *testing.T) {
 		var sendCalls, receiverCnt atomic.Int32
 		done := make(chan struct{})
 		sender := func(ctx context.Context, msg any, receivers ...peer.ID) error {
+			// Count BEFORE signalling. Both branches below hand control back to the test — the
+			// unbuffered send blocks until it is received, and the close releases it — so a
+			// receiverCnt.Add placed after them races the assertion that reads it. CI caught
+			// exactly that: "last call had one receiver: expected 5, actual 4", the count for
+			// the very call whose close(done) had already let the test proceed.
+			receiverCnt.Add(int32(len(receivers)))
 			switch sendCalls.Add(1) {
 			case responsesPerSubscription:
 				done <- struct{}{}
 			case responsesPerSubscription + 1:
 				close(done)
 			}
-			receiverCnt.Add(int32(len(receivers)))
 			return nil
 		}
 
 		subs, err := NewSubscriptions(sender, observability.Default(t))
 		require.NoError(t, err)
+		t.Cleanup(subs.Wait)
 		require.NoError(t, subs.Subscribe(certResp.Partition, certResp.Shard, nodeIdA.String()))
 		require.NoError(t, subs.Subscribe(certResp.Partition, certResp.Shard, nodeIdB.String()))
 
@@ -226,4 +239,118 @@ func generateNodeID(t *testing.T) peer.ID {
 	nodeID, err := network.NodeIDFromPublicKeyBytes(authKey)
 	require.NoError(t, err)
 	return nodeID
+}
+
+// Test_Subscriptions_Wait pins the contract that fixed CI run 34102642015 attempt 1:
+// Send hands the logging, sending and metering off to a goroutine, and Wait must not
+// return while that goroutine is still running. Before Wait existed there was nothing
+// holding the test (or Node.Run) open across that hand-off, so the goroutine's log
+// record could land on an already-completed testing.T and panic the whole package.
+func Test_Subscriptions_Wait(t *testing.T) {
+	certResp := &certification.CertificationResponse{
+		Partition: 1,
+		Shard:     types.ShardID{},
+		Technical: certification.TechnicalRecord{Round: 666},
+		UC: types.UnicityCertificate{
+			InputRecord: &types.InputRecord{
+				Hash:      []byte{1, 1, 1, 1, 1},
+				BlockHash: []byte{2, 2, 2, 2, 2},
+			},
+		},
+	}
+
+	release := make(chan struct{})
+	var senderDone atomic.Bool
+	sender := func(ctx context.Context, msg any, receivers ...peer.ID) error {
+		<-release
+		senderDone.Store(true)
+		return nil
+	}
+
+	subs, err := NewSubscriptions(sender, observability.Default(t))
+	require.NoError(t, err)
+	require.NoError(t, subs.Subscribe(certResp.Partition, certResp.Shard, generateNodeID(t).String()))
+
+	subs.Send(t.Context(), certResp)
+
+	waited := make(chan struct{})
+	go func() {
+		subs.Wait()
+		close(waited)
+	}()
+
+	// the send goroutine is parked in sender, so Wait must still be blocked
+	select {
+	case <-waited:
+		t.Fatal("Wait returned while a Send goroutine was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-waited:
+		require.True(t, senderDone.Load(), "Wait returned before the send goroutine finished")
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return after the send goroutine finished")
+	}
+}
+
+/*
+Test_Subscriptions_QuotaStarvesANonSubmittingNode pins the mechanism behind #92's traced restart
+refusals, at the layer that produces it rather than at the layer that reports it.
+
+A subscription carries a quota of responsesPerSubscription, and Subscribe is the ONLY thing that
+refills it. Subscribe is called from exactly two places (rootchain/node.go): the handshake handler,
+and the block-certification-request handler. So a shard node that submits requests refills its own
+quota every round, and one that does not submit refills only when it handshakes.
+
+That second case is now reachable in production. Since F6b stage 3 a node resumed from a persisted
+certificate is non-voting until #105, so it sends no certification requests at all — and its
+certificate feed therefore stops after this many responses, until its own inactivity timer
+(BFTClientOptions.InactivityTimeout, 30s by default) provokes a fresh handshake. Traced on merged
+integration: a restarted validator received partition rounds 13, 14 and 15, then nothing for 34
+seconds, then round 22 — and its continuity state was invalidated by the missed assignment, which is
+what leaves it unable to recover.
+
+This test asserts only the quota behaviour. It is deliberately not a fix: which layer should change
+— refill on delivery, refresh subscriptions independently of submission, or let a non-voting node
+subscribe explicitly — is the decision #92 asks be made after the trace, not before it.
+*/
+func Test_Subscriptions_QuotaStarvesANonSubmittingNode(t *testing.T) {
+	partition, shard := types.PartitionID(8), types.ShardID{}
+	node := generateNodeID(t)
+
+	// Send delivers on its own goroutine, so the counter is shared across goroutines and the race
+	// detector is right to object to sent++.
+	var sent atomic.Int64
+	subs, err := NewSubscriptions(func(context.Context, any, ...peer.ID) error { sent.Add(1); return nil }, observability.Default(t))
+	require.NoError(t, err)
+	require.NoError(t, subs.Subscribe(partition, shard, node.String()))
+
+	cr := &certification.CertificationResponse{
+		Partition: partition, Shard: shard,
+		Technical: certification.TechnicalRecord{Round: 16},
+		UC: types.UnicityCertificate{
+			InputRecord: &types.InputRecord{Hash: []byte{0x52}, BlockHash: []byte{0x95}},
+		},
+	}
+	for i := 0; i < responsesPerSubscription; i++ {
+		subs.Send(context.Background(), cr)
+	}
+	subs.Wait()
+	require.Equal(t, int64(responsesPerSubscription), sent.Load(), "the quota is spent one response at a time")
+
+	// The node is still a subscriber, and receives nothing.
+	before := sent.Load()
+	subs.Send(context.Background(), cr)
+	subs.Send(context.Background(), cr)
+	subs.Wait()
+	require.Equal(t, before, sent.Load(),
+		"with the quota spent, certificates are no longer delivered to this node — this is the window in which a non-voting validator misses the assignments its continuity depends on")
+
+	// Only Subscribe refills it. For a node that submits nothing, that means only a handshake.
+	require.NoError(t, subs.Subscribe(partition, shard, node.String()))
+	subs.Send(context.Background(), cr)
+	subs.Wait()
+	require.Equal(t, before+1, sent.Load(), "and delivery resumes only after a fresh subscription")
 }

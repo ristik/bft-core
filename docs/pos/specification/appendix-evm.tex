@@ -1,0 +1,224 @@
+\chapter{Enshrined EVM Partition and Governance Records}\label{app:evm}
+
+This appendix defines the protocol requirements for staged implementation. Deterministic CBOR structures (Appendix~\ref{app:encodings}) are consumed completely. A release pins its wire version, limits, addresses and execution rules before activation; the current Engine API adapter is not presumed to implement these additions.
+
+\section{Partition Configuration}\label{app:evm-config}
+
+\begin{longtable}{p{2.8cm}p{6.4cm}p{4.0cm}}
+\caption{Enshrined EVM configuration.}\label{ta:evm-config}\\
+\textbf{Parameter} & \textbf{Meaning} & \textbf{Constraint}\\ \hline
+\endfirsthead
+\textbf{Parameter} & \textbf{Meaning} & \textbf{Constraint}\\ \hline
+\endhead
+$\mathsf{st},\alpha,\beta,\sigma$ & type, network, partition, shard & type $8$; explicit bindings\\
+$\chi$ & EVM chain identifier & fixed, network-unique\\
+$\mathsf{version}$ & execution and root-input profile & explicit activation record\\
+$\mathsf{forks}$ & pinned EVM fork schedule & no unscheduled fork\\
+$g_\mathsf{max},g_\mathsf{sys}$ & block and reserved system work budgets & bounded; user capacity reserved\\
+$f_\mathsf{base}^\mathsf{min}$ & custom base-fee floor & positive; validated on every block\\
+$\mathsf{validity}$ & attested, witness or succinct & witness mandatory if configured\\
+$a_\mathsf{sys},a_\mathsf{sr}$ & system origin and registry & fixed; no system-origin key\\
+$a_\mathsf{bi}$ & builtin address assignments & fixed, versioned interfaces\\
+$W_\mathsf{cert}$ & ordinary certificate age limit & certified root rounds\\
+$E_\mathsf{cache}$ & recent trust-base cache target & obligations override eviction\\
+$q_\mathsf{trans}$ & transitions per system input & bounded; no silent truncation\\
+\end{longtable}
+
+The chain ID is assigned and checked against existing network allocations; a truncated hash alone is not a uniqueness proof. All certificate and bridge proofs also bind the full network/partition/shard configuration. Changing fixed fields requires a new chain or an explicit migration; governance policy fields change only through the specified activation path.
+
+\section{Certification Request}\label{app:evm-cr}
+
+The EVM-specific input is $(n,e,h',h,t,h_b)$ with $h_b$ a 32-byte string or null. The wire profile defines request-size fields from canonical serialized data, separately from Ethereum gas and transaction counts; their names must not be used to infer a different unit. Quiet/repeat requests carry no newly executed block. Every successful block includes the system operation even when the ordinary transaction count is zero.
+
+Attested verification enforces the record's extension and quiet-round constraints and requires weighted matching requests. Witness and succinct verification additionally establish the full relation of Sec.~\ref{sec:evm-validity}, including the root input commitment and configured forced-inbox relation. The verification key and execution configuration hash are public bindings. Absence or failure of a required proof never falls back to attestation.
+
+\section{Round Parameter Derivation}\label{app:evm-round-params}
+
+\begin{longtable}{p{3.0cm}p{6.4cm}p{3.8cm}}
+\caption{Deterministic block parameters.}\label{ta:evm-round-params}\\
+\textbf{Field} & \textbf{Derivation} & \textbf{Meaning}\\ \hline
+\endfirsthead
+\textbf{Field} & \textbf{Derivation} & \textbf{Meaning}\\ \hline
+\endhead
+timestamp & $\max(C^\mathsf{r}_-.t_r,t_{b-1}+1)$ & monotone EVM counter\\
+prevRandao & $H(\mathsf{DOM}_\rho,r,n)$ & not secure randomness\\
+parentBeacon\-BlockRoot & $H(\mathsf{DOM}_\beta,r,n)$ & derived field\\
+fee recipient & configured fee collector & protocol credits\\
+withdrawals & empty & no external balance issuance\\
+extraData & $H(\mathsf{CBOR}(\mathsf{rootInput}))$ & 32-byte input commitment\\
+gas limit, base fee & versioned execution rules & builder cannot override\\
+leader & $\mathsf{TE}_-.\nu_\ell$ & shard leader, not root leader\\
+\end{longtable}
+
+Here $r=C^\mathsf{r}_-.r$ and $n$ is the authorized shard round. The domain strings are ASCII \texttt{UNICITY\_EVM\_RANDAO} and \texttt{UNICITY\_EVM\_BEACON}; hashing uses deterministic CBOR in the stated order. This is a versioned change from any adapter using different prefixes or concatenation. The deployment must not mix derivations within an assignment.
+
+\section{Seal Transaction}\label{app:evm-seal-tx}
+
+The initial execution profile uses a protocol call before ordinary transactions. The canonical input is
+\[
+ \mathsf{rootInput}=(v,\alpha,\beta,\sigma,n,e,h_\mathsf{parent},O_-,\mathsf{TE}_-,D),
+\]
+where $D$ is the ordered sequence of missing committed trust-base bodies and handoff acknowledgements. $O_-$ contains the authorizing seal's signed statement and certified shard input/configuration commitments, excluding all signatures and transport proofs. The profile fixes every constituent field and its encoding. A supplied UC authenticates this statement, its tree paths and technical record; transition proofs authenticate $D$. Such proofs are external witnesses and are not re-hashed into the canonical input.
+
+The header's \texttt{extraData} commits the input. The block's required companion data carries the input and witnesses, and is retained and served for import, synchronization and proof export. A block missing this data cannot be certified merely because its Ethereum payload executes. The execution-client interface and block transport must explicitly support it; stock Engine API V3 payload attributes alone do not.
+
+The adapter verifies root authentication against the committed certification/transition state. Execution receives the verified canonical input, checks its header commitment and all parent/round bindings, and invokes only $a_\mathsf{sr}$ as $a_\mathsf{sys}$ with value zero. The call has no EOA signature or nonce, cannot enter through the transaction pool, cannot be repeated by an ordinary transaction, and cannot mint value. A forged ordinary sender is rejected. Historical import and replay apply the same rules and obtain the same state root.
+
+System work consumes a separate deterministic budget $g_\mathsf{sys}$, reserved from the configured block work capacity, without debiting a fee payer. Ordinary transactions remain bounded by $g_\mathsf{max}-g_\mathsf{sys}$ and pay normal fees. The profile fixes gas-used/receipt accounting and fee-target derivation consistently with this separation. System failure or excess work invalidates the whole block, rather than silently skipping the call. Authentication-witness sizes and verification work have separate bounded admission costs.
+
+\begin{longtable}{p{3.8cm}p{9.4cm}}
+\caption{Seal registry state.}\label{ta:evm-seal-state}\\
+\textbf{State} & \textbf{Rule}\\ \hline
+\endfirsthead
+\textbf{State} & \textbf{Rule}\\ \hline
+\endhead
+root origin & latest imported root round, epoch, time, tree root and certified EVM state\\
+assignment & committed identities, effective weights, thresholds and body hash\\
+transition cursor & last acknowledged handoff; ordered import with no gaps\\
+reward cursor & last accounted root interval; no signer-based participation counters\\
+trust-base history & recent bodies plus all bodies required for outstanding liabilities\\
+inbox watermark & committed enqueue and acknowledged consumption positions when enabled\\
+\end{longtable}
+
+A duplicate input cannot advance cursors twice. A repeat UC does not create a second reward claim for an already imported interval. The source is the certificate authorizing the proposed shard round, not the newest message locally observed. Alternative valid signature subsets for that statement yield identical state.
+
+A normal handoff waits for the previous EVM acknowledgement before preparing another, bounding live transition backlog. A restored node replays canonical inputs in order or installs an authenticated checkpoint. If missing history exceeds input limits, it catches up before voting; it may not drop transitions or manufacture authority from local configuration. Ordinary contract calls cannot advance these cursors.
+
+Genesis includes the initial committed assignment, origin and empty cursors under a pinned genesis commitment. Genesis authentication is an explicit rule, not a fabricated quorum signature. The first ordinary block follows the same system-operation format.
+
+\section{Built-in Functions}\label{app:evm-builtins}
+
+Builtins read authenticated registry state and their arguments only. They never read local files, networking or wall time. Their gas schedules meter decoding, signatures, tree paths and historical-key reads, with bounds on all collections and strict errors for inactive versions.
+
+\begin{longtable}{p{2.0cm}p{5.2cm}p{6.0cm}}
+\caption{Builtin interfaces.}\label{ta:evm-builtins}\\
+\textbf{Address} & \textbf{Input} & \textbf{Result}\\ \hline
+\endfirsthead
+\textbf{Address} & \textbf{Input} & \textbf{Result}\\ \hline
+\endhead
+$a_{0x0100}$ & complete UC or shared-seal proof bundle & validity and authenticated context, IR and included signers\\
+$a_{0x0101}$ & version, domain, validator, canonical vote metadata, signed commit info and signature & validity, voting epoch/round and conflict identifier\\
+$a_{0x0102}$ & authenticated shard root, leaf key/value and inclusion path & validity\\
+\end{longtable}
+
+Certificate verification sums unique authorized signer weights, checks the epoch's active round interval, age, network and configuration, and rejects future rounds beyond the imported root origin. Newer certificates can be retried after privileged progress catches up. Historical evidence uses retained historical bindings and its own admissibility rules; ordinary certificate age rejection does not erase slashability. Included signers may be returned for inspection but do not prove absence of other votes.
+
+\section{Genesis State}\label{app:evm-genesis}
+
+The allocation manifest lists every balance, including a small disclosed bootstrap allocation to EOAs that pay for first claims and transactions. Contract and EOA allocations together equal $S_0$ exactly. Predeploy bytecode, storage, addresses, fork rules and build artifacts are reproducible.
+
+\begin{longtable}{p{3.2cm}p{7.0cm}p{3.0cm}}
+\caption{Contracts and activation scope.}\label{ta:evm-genesis}\\
+\textbf{Contract} & \textbf{Role} & \textbf{Upgrade rule}\\ \hline
+\endfirsthead
+\textbf{Contract} & \textbf{Role} & \textbf{Upgrade rule}\\ \hline
+\endhead
+seal registry & authenticated root state and cursors & protocol upgrade\\
+WUCT & wrapped native balance & immutable\\
+fee collector & accounts priority fees and split credits & immutable custody\\
+treasury & independent, timelocked spending & immutable custody\\
+emission pool & capped release of genesis allocation & immutable custody\\
+allocation contracts & disclosed release schedules & immutable\\
+stake custody & bonded reservations, slash and exit rules & immutable\\
+epoch policy & election with bounded authority & timelocked policy\\
+slashing verifier & objective evidence interface & pinned custody permission\\
+parameter governance & validates bounded policy updates & timelocked policy\\
+forced inbox & ordered queue and acknowledgements & protocol upgrade\\
+bridge vault & native custody and redemption & immutable\\
+\end{longtable}
+
+PoS and bridge contracts may be deployed later at reserved addresses under an explicit activation. Unused addresses confer no authority. Deploying a new policy cannot replace immutable custody checks. A defect in immutable code requires a specified migration or coordinated protocol upgrade; immutability is not a claim that defects cannot occur.
+
+\section{Candidate Record}\label{app:gov-candidate}
+
+A versioned candidate body contains
+\[
+ c=(v,\alpha,\beta,\sigma,e+1,j,S_e,n_\mathsf{snap},r_\mathsf{obs},
+       A_\mathsf{min},h_e,h_\mathsf{cfg},\mathsf{members},k_\mathsf{root},k_\mathsf{shard}),
+\]
+where $j$ is the attempt number and $h_e$ the preceding trust-base body hash. The complete member records bind staking identity, node identity, consensus public key and effective weight, ordered bytewise by canonical identity. $A_\mathsf{min}$ is an earliest activation bound, not an actual epoch start. The snapshot operation writes $H(c)$ to fixed slot $\kappa_c$ at the configured epoch-manager account and retains the body for retrieval. Its storage proof, not an unauthenticated event, establishes authenticity.
+
+Weights are unsigned 64-bit counts of a configured atomic UCT denomination $u$. Eligible collateral must reserve at least $u\,b_\nu$ per assignment. The profile defines flooring, minimum effective weight, maximum individual/total weight and overflow rejection; fractional residual collateral has no extra voting power. Sum and threshold computation use checked wide intermediates. No agent silently rescales the contract's result.
+
+\section{Trust Base Record Derivation}\label{app:gov-trust-base}
+
+\begin{longtable}{p{3.6cm}p{9.6cm}}
+\caption{Candidate and handoff to trust-base body.}\label{ta:gov-derive}\\
+\textbf{Field} & \textbf{Source}\\ \hline
+\endfirsthead
+\textbf{Field} & \textbf{Source}\\ \hline
+\endhead
+network, epoch & verified candidate and expected successor\\
+epoch start & actual boundary fixed by committed handoff\\
+members and weights & complete candidate member records\\
+root threshold & $\lfloor2\sum b_\nu/3\rfloor+1$\\
+state summary & agreed frozen transition state\\
+change-record hash & candidate body hash and committed handoff binding\\
+predecessor hash & canonical body identity of the current trust base\\
+endorsement & old-epoch unique signer weight meeting the old root threshold\\
+\end{longtable}
+
+An agent verifies the account/storage proof for $(a_\mathsf{em},\kappa_c,H(c))$ against the certified governance state and submits the candidate as a proposed root transition. It need not recompute election. An independently implemented election is useful for testing the contract, not an alternative root authority. Endorsements compose only after consensus has selected the same handoff body. The signature domain binds network, protocol version, predecessor and transition attempt. Endorsement serialization is separate from body identity.
+
+The root validates transition legality on proposal and commit. Runtime configuration APIs transport evidence; they cannot select or activate an uncommitted epoch. The wire version must reconcile root pipelining, old-quorum endorsement and actual activation without requiring a signature over unknown future state. Until that state machine is implemented and validated, automatic PoS handoff is disabled.
+
+\section{Evidence}\label{app:gov-evidence}
+
+Double-signing evidence carries two complete vote statements and their signatures, plus the accountable validator identity. Verification authenticates the canonical \texttt{VoteInfo} hash inside signed \texttt{LedgerCommitInfo}, then extracts the \emph{voting} epoch and round from \texttt{VoteInfo}. It does not confuse them with the seal's older committed round. A non-committing vote may have empty commit fields and is still accountable through its authenticated voting metadata.
+
+The initial slashable relation requires the same network, protocol/message domain, accountable key, voting epoch and voting round, with different canonical signed vote statements that the root safety rules prohibit signing together. Repeated encodings, malleable signatures or duplicate delivery of one statement are not two votes. Different message domains and different voting rounds are not this offense. The PoS vote-signing profile binds network and message domain inside the signed preimage, including non-committing votes. A caller-supplied domain is not authentication. Legacy votes use their explicit legacy rules and cannot be reinterpreted as domain-bound PoS votes. The builtin returns authenticated conflict identifiers; custody checks the historical key/reservation binding and records an offense identifier once.
+
+Evidence is timely if executed within $\Delta_\mathsf{ev}$ root rounds of the offense or if its complete payload was committed to the forced inbox within that window. Mere local submission or an unavailable hash does not preserve timeliness. A timely queued case prevents related retirement withdrawal until processed. Bounties and total penalties are bounded by attributable collateral, with no double debit across rotated keys.
+
+Absence from a QC or timeout certificate is not objective downtime evidence. No initial contract accepts it for jailing or slashing.
+
+\section{Forced Inclusion}\label{app:gov-forced-inclusion}
+
+The root commits a bounded ordered queue for the governance shard. Its sequence number, payload digest, admission round and consumption watermark form a separately domain-separated extension of certified root data. A local HTTP response or shard statistics field alone is not a consensus enqueue.
+
+Before admission, the root checks network/chain and signature syntax, supported transaction type, maximum encoded bytes and gas, per-sender and global queue limits, and the admission charge or reserved fee credit. It does not execute application logic or predict future balances. Full payloads are disseminated before enqueue votes, retained until certified consumption and a recovery horizon, and retrievable by joining nodes. The admission-credit mechanism and its anti-spam cost must be specified before enabling the endpoint.
+
+The initial service processes a FIFO prefix within a reserved per-block forced gas budget $g_\mathsf{fi}$, with every admitted transaction's declared gas limit at most $g_\mathsf{fi}$. The total budget obeys
+\[
+ g_\mathsf{sys}+g_\mathsf{fi}+g_\mathsf{ordinary}\le g_\mathsf{max}.
+\]
+After system import and before discretionary transactions, followers independently determine the due prefix and execute its valid entries in order. Admission bounds and reserved capacity determine a published worst-case $K$ in produced EVM blocks, including input-observation lag; a root-round allowance also requires a bounded EVM progress assumption.
+
+An entry that is invalid at its deterministic turn (nonce already used, insufficient balance, fee cap below the current base fee, or incompatible activated rules) is consumed with an authenticated rejection reason and normal validation semantics; it cannot make all future blocks invalid. An executable transaction that reverts consumes gas and has the usual failed receipt. Validity is evaluated before discretionary transactions can change its preconditions. A higher nonce may be rejected rather than blocking FIFO progress. Users can resubmit corrected transactions.
+
+The next EVM certification authenticates processed sequence numbers and results; the root verifies the acknowledgement and advances its consumption watermark exactly once. Retries, duplicate transactions, epoch changes and crashes preserve queue ordering and charges. Local receipt of a request is not a liveness promise: bounded inclusion assumes root enqueue progress and enough honest execution weight producing blocks. A root quorum failure cannot be repaired by this queue.
+
+\section{Execution Proof Export}\label{app:evm-proof-export}
+
+Nodes persist the certified block/UC association and canonical root inputs atomically with their finality cursor, retaining recovery data across crashes. An archival proof service retains headers, receipts, transactions, certificate witnesses and required historical state proofs, indexed by full chain context. Pruning ordinary execution state must not silently destroy promised proof availability; nodes publish retention limits and archive responsibilities. Proof export returns a typed unavailable result rather than an incomplete proof.
+
+A bundle includes its version, chain context, subject block/header, UC, authentication path to a trusted checkpoint, and the requested receipt/transaction or account/storage path. For an old block outside live certificate admission, the initial historical path is an Ethereum parent-header chain from a recently authenticated EVM head to that block. Hash linkage, heights and chain configuration are checked. This costs linear headers in the distance and is explicitly not a constant-size historical proof. A future accumulator can compress that path.
+
+An alternative for permanent storage commitments, such as a lock digest, is a fresh proof of that value under a recent certified EVM state. The token's immutable identity does not include the refreshed witness. Offline verification requires no network query once the recipient has the bundle and a sufficiently recent trusted checkpoint. Checkpoint distribution/freshness is external client trust initialization, not an oracle called during contract execution.
+
+\section{Parameters}\label{app:gov-params}
+
+All consensus deadlines below are certified root rounds unless expressly stated otherwise. A deployment publishes values and the invariants of Sec.~\ref{sec:gov-invariants} before activation.
+
+\begin{longtable}{p{3.2cm}p{6.4cm}p{3.6cm}}
+\caption{Governance parameters.}\label{ta:gov-params}\\
+\textbf{Parameter} & \textbf{Meaning} & \textbf{Constraint}\\ \hline
+\endfirsthead
+\textbf{Parameter} & \textbf{Meaning} & \textbf{Constraint}\\ \hline
+\endhead
+$L$ & target interval between snapshots & progress target, not fixed duration\\
+$\Delta_\mathsf{act}$ & minimum snapshot-to-activation allowance & committed handoff still required\\
+$\Delta_\mathsf{hold}$ & protection after acknowledged retirement & exceeds evidence and processing allowances\\
+$\Delta_\mathsf{ev}$ & evidence commitment window & timely inbox cases remain protected\\
+$\Delta_\mathsf{incl},\Delta_\mathsf{exec}$ & inclusion and processing allowances & overruns never unlock unresolved liabilities\\
+$W_\mathsf{cert}$ & live certificate age & less than retirement protection\\
+$N_\mathsf{min},N_\mathsf{max}$ & eligible assignment bounds & nonempty safe set required\\
+$b_\mathsf{min},u$ & self-bond minimum and weight unit & deterministic checked conversion\\
+$\rho_e$ & emission per root round & pool-limited, non-performance policy\\
+$\phi_\mathsf{ds}$ & objective slashing fraction & bounded by attributable collateral\\
+$K$ & forced-inclusion bound & produced EVM blocks, conditional on progress\\
+$g_\mathsf{fi}$ & reserved forced execution work & bounded within total block capacity\\*
+$B_\mathsf{verify}$ & direct verification budget & deployment-pinned or versioned relation\\
+\end{longtable}
+
+Downtime thresholds and penalties have no initial active values. A checkpoint freshness policy is published in elapsed-time units separately from these execution parameters. Changes to timing, key retention or churn require reviewing the checkpoint policy and preserving existing collateral obligations.

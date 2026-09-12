@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -281,6 +282,123 @@ func Test_onHandshake(t *testing.T) {
 		}
 		require.NoError(t, node.onHandshake(t.Context(), &msg))
 	})
+
+	// Regression: a partition that has already produced certified blocks must
+	// still be (re)subscribed on handshake. The subscription has a bounded
+	// per-peer response quota (see responsesPerSubscription) which repeat UCs
+	// on T2 timeout drain without refilling; handshake is the only refresh
+	// mechanism for an idle partition. If onHandshake skips Subscribe once
+	// LastCR.UC.GetRoundNumber() > 0, the partition silently falls off the
+	// subscriber map and BFT Core logs "0 receivers" on subsequent repeat UCs.
+	t.Run("post-genesis handshake re-subscribes", func(t *testing.T) {
+		cr := validCertificationResponse(t)
+		cr.UC.InputRecord.RoundNumber = 42 // post-genesis: GetRoundNumber() > 0
+
+		partNet := mockPartitionNet{
+			send: func(ctx context.Context, msg any, receivers ...p2peer.ID) error {
+				return nil
+			},
+		}
+		cm := mockConsensusManager{
+			shardInfo: func(partition types.PartitionID, shard types.ShardID) (*storage.ShardInfo, error) {
+				return newMockShardInfo(t, nodeID.String(), publicKey, cr), nil
+			},
+		}
+		node, err := New(&nwPeer, partNet, cm, nopObs)
+		require.NoError(t, err)
+
+		msg := handshake.Handshake{
+			PartitionID: cr.Partition,
+			ShardID:     cr.Shard,
+			NodeID:      nodeID.String(),
+		}
+		require.NoError(t, node.onHandshake(t.Context(), &msg))
+
+		// Subscribe must have been called — the peer should be registered with
+		// a full response quota, not absent from the subs map.
+		key := partitionShard{cr.Partition, cr.Shard.Key()}
+		node.subscription.mu.RLock()
+		defer node.subscription.mu.RUnlock()
+		peers, ok := node.subscription.subs[key]
+		require.True(t, ok, "partition must be present in subs map after post-genesis handshake")
+		require.Equal(t, responsesPerSubscription, peers[nodeID],
+			"peer quota must be refilled by handshake")
+	})
+}
+
+/*
+Test_SubscriptionRenewalDependsOnSubmitting is the integration reproduction for #92's traced restart
+refusals, at the layer that produces them: the root chain's own handshake and subscription handling,
+driven through Node.onHandshake and the real Subscriptions.
+
+The sequence is the one a restarted shard node actually goes through. It handshakes, which sends it
+the current certificate and grants a subscription; the subscription then carries
+responsesPerSubscription further certificates; and after that it receives nothing, because the only
+two things that refill the quota are a handshake and a block certification request — and a node that
+is non-voting under #105 sends neither. Delivery resumes only when its own inactivity timer provokes
+a fresh handshake, which by default is 30 seconds later.
+
+The certificates lost in that window are what invalidate the node's continuity state and leave it
+refusing with no-anchor or continuity-gap, which is the shard-side symptom traced in #109.
+*/
+func Test_SubscriptionRenewalDependsOnSubmitting(t *testing.T) {
+	nwPeer := network.Peer{}
+	nodeID := generateNodeID(t)
+	certResp := validCertificationResponse(t)
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	verifier, err := signer.Verifier()
+	require.NoError(t, err)
+	publicKey, err := verifier.MarshalPublicKey()
+	require.NoError(t, err)
+
+	var delivered atomic.Int64
+	partNet := mockPartitionNet{
+		send: func(ctx context.Context, msg any, receivers ...p2peer.ID) error {
+			delivered.Add(int64(len(receivers)))
+			return nil
+		},
+	}
+	cm := mockConsensusManager{
+		shardInfo: func(partition types.PartitionID, shard types.ShardID) (*storage.ShardInfo, error) {
+			return newMockShardInfo(t, nodeID.String(), publicKey, certResp), nil
+		},
+	}
+	node, err := New(&nwPeer, partNet, cm, testobservability.NOPObservability())
+	require.NoError(t, err)
+
+	hs := handshake.Handshake{PartitionID: certResp.Partition, ShardID: certResp.Shard, NodeID: nodeID.String()}
+
+	// 1. The handshake: the node is authorized, subscribed, and sent the current certificate.
+	require.NoError(t, node.onHandshake(t.Context(), &hs))
+	node.subscription.Wait()
+	require.EqualValues(t, 1, delivered.Load(), "the handshake itself answers with the last certificate")
+
+	// 2. The subscription then carries exactly responsesPerSubscription certificates.
+	for i := 0; i < responsesPerSubscription; i++ {
+		node.subscription.Send(t.Context(), &certResp)
+	}
+	node.subscription.Wait()
+	require.EqualValues(t, 1+responsesPerSubscription, delivered.Load())
+
+	// 3. Exhaustion. The shard submits nothing — this node is non-voting — so nothing refills the
+	//    quota, and further certificates are simply not delivered to it. It is still a subscriber;
+	//    it just receives no evidence.
+	before := delivered.Load()
+	for i := 0; i < 5; i++ {
+		node.subscription.Send(t.Context(), &certResp)
+	}
+	node.subscription.Wait()
+	require.Equal(t, before, delivered.Load(),
+		"five certified rounds pass and the node is told about none of them")
+
+	// 4. Delayed renewal. In production this is BFTClient's inactivity timer, 30s by default.
+	require.NoError(t, node.onHandshake(t.Context(), &hs))
+	node.subscription.Wait()
+	require.Equal(t, before+1, delivered.Load(), "the handshake answers again")
+	node.subscription.Send(t.Context(), &certResp)
+	node.subscription.Wait()
+	require.Equal(t, before+2, delivered.Load(), "and delivery resumes — for another two certificates")
 }
 
 func Test_handlePartitionMsg(t *testing.T) {
@@ -544,10 +662,18 @@ func Test_onBlockCertificationRequest(t *testing.T) {
 
 	t.Run("invalid request", func(t *testing.T) {
 		// in case of invalid request we respond with the latest cert of the shard
+		// wrapped in a rejection envelope (Status=RequestInvalid, Message=why).
 		sendCallCnt := 0
 		partNet := mockPartitionNet{
 			send: func(ctx context.Context, msg any, receivers ...p2peer.ID) error {
-				require.Equal(t, &certResp, msg)
+				resp, ok := msg.(*certification.CertificationResponse)
+				require.True(t, ok, "expected *CertificationResponse, got %T", msg)
+				require.Equal(t, certification.CertStatusRequestInvalid, resp.Status)
+				require.NotEmpty(t, resp.Message)
+				// The wrapped UC/Technical must still be the last-good certificate.
+				require.Equal(t, certResp.Partition, resp.Partition)
+				require.Equal(t, certResp.Technical, resp.Technical)
+				require.Equal(t, certResp.UC.TRHash, resp.UC.TRHash)
 				sendCallCnt++
 				return nil
 			},

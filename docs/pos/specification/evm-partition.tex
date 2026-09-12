@@ -1,0 +1,104 @@
+\chapter{Enshrined EVM Partition}\label{ch:evm}
+
+\section{Overview}
+
+An \emph{enshrined EVM partition}\index{enshrined EVM partition}\index{partition!enshrined EVM} is a partition of standard type $\mathsf{st}=8$ (Sec.~\ref{sec:standard-partition-types}) whose shard state is an account-based execution environment compatible with the Ethereum Virtual Machine. Its state is certified by the BFT Core through the certification interface used by other partitions. The initial deployment has one governance EVM shard. Each BFT Core operator runs a paired execution node. Aggregator partitions, with their own shards and consistency proofs, continue independently alongside it.
+
+The Consensus Layer orders and certifies state commitments. The EVM executes governance, including the Proof of Stake contracts, and holds the native currency UCT. The Unicity Execution Layer continues to execute token transactions peer-to-peer. The EVM is an enshrined service of this architecture; it does not turn each Unicity layer into an Ethereum consensus/execution pair.
+
+The partition is \emph{enshrined}\index{enshrined} because its voting weights and assignment derive from the BFT Core configuration, and its execution rules require an authenticated root-origin input (Sec.~\ref{sec:evm-seal-feed}). This is an internal protocol channel, with no independently trusted bridge operator.
+
+\section{Rounds and Blocks}\label{sec:evm-rounds}
+
+Root round $n_r$, shard round $n$, and EVM block height $b$ are different counters. A shard round produces at most one block, and root rounds can advance several times while that block is built and verified. The leader is the one named in the technical record authorizing the shard round; root leader rotation does not change an in-flight shard leader.
+
+A block $\mathcal{B}=(\mathsf{hdr},\langle\mathsf{tx}_1,\ldots,\mathsf{tx}_m\rangle)$ has Ethereum header hash $h_b=\mathsf{Keccak256}(\mathsf{RLP}(\mathsf{hdr}))$. Its header authenticates the parent block, execution state, transactions and receipts. Ethereum trie and header hashing are distinct from the Unicity hash $H$. The type-specific shard input record is
+\[
+ \mathcal{IR}=(n,e,h',h,t,h_b),\qquad h_b\in\hashtype\opt,
+\]
+where $h',h$ are the previous and resulting execution state roots, and $t$ is the reference time of the authorizing certificate.
+
+\begin{ruledef*}{Quiet Round} \\
+ $\mathcal{IR}.h=\mathcal{IR}.h' \iff \mathcal{IR}.h_b=\bot$.
+\end{ruledef*}
+
+A successful governance-shard round produces a block even with no user transactions: its mandatory system input advances protocol state. A timeout or rejected proposal may produce a repeat certificate without executing a block. Such a certificate must not be represented as a newly executed empty block. Certification, retries and crash recovery never authorize two committed blocks for one shard round.
+
+\section{Round Parameters}\label{sec:evm-round-params}
+
+Let $UC_-$ and $\mathsf{TE}_-$ be the certificate and technical record authorizing the next shard round, and $C^\mathsf{r}_-$ its seal. Deterministic parameters are the shard round and assignment from $\mathsf{TE}_-$, timestamp $\max(C^\mathsf{r}_-.t_r,t_{b-1}+1)$, the domain-separated fields of Appendix~\ref{app:evm-round-params}, the configured fee collector, and an empty protocol withdrawal list. Every validator checks these values. Gas-limit and base-fee rules are fixed by the versioned execution configuration and checked independently of builder preferences.
+
+The timestamp is strictly increasing but can run ahead of real time at sub-second block cadence. The derived \texttt{prevRandao} is a deterministic, potentially biasable value, not a cryptographic randomness beacon. Applications requiring unpredictable randomness need a separately specified mechanism.
+
+\begin{ruledef*}{Certified Round Clock} \\
+ Protocol deadlines use the certified root round recorded in state, with comparisons against thresholds rather than equality to an expected round. They do not use the EVM timestamp or block height as elapsed real time.
+\end{ruledef*}
+
+Allocation schedules state their units explicitly. A round-denominated vesting schedule promises progress in certified rounds, not calendar duration. Any future calendar schedule requires a separately reviewed certified-time rule. A client may use wall time to check the freshness of its trusted checkpoint; that is not a source of EVM execution input.
+
+\section{Validity}\label{sec:evm-validity}
+
+Let $W_e=\sum_{\nu\in\mathcal{V}_e}b_\nu$. Under PoA all $b_\nu=1$. Under PoS the EVM uses exactly the same effective weights as the root assignment that authorizes its shard round. Its attestation threshold is $\lfloor W_e/2\rfloor+1$; the BFT Core consensus threshold is $\lfloor2W_e/3\rfloor+1$. Each distinct authorized signer contributes its weight once. Signature counts cannot substitute for weights in quorum formation, timeout handling or quorum-impossibility reasoning.
+
+\begin{description}
+ \item[Attested.] Each validator executes the full block, including the authenticated system input, before submitting an identical certification request. An honest majority of voting power suffices to establish the execution predicate, while the BFT Core separately orders the requests and selects one extension of the certified parent. With paired assignments and weights, the root's less-than-one-third Byzantine stake assumption implies this majority assumption. Correct execution software remains part of the implementation assumptions.
+ \item[Proven.] A stateless execution witness or succinct proof establishes the same full protocol relation. It binds the network, partition, shard, execution version, parent block and state, authorizing root input and technical record, shard round and assignment, transactions, receipts and resulting block/state hashes. The proof checks privileged-input authentication, header derivation and forced inclusion when enabled. Ordinary EVM execution of caller-chosen system data is insufficient. Root ordering and data availability remain necessary.
+\end{description}
+
+The configured proof mode is mandatory. A proven-mode request without its required witness is rejected, not treated as attested. The initial deployment uses attested execution; a proven mode requires a separately activated and reviewed proof relation.
+
+\section{Seal Feed}\label{sec:evm-seal-feed}
+
+The \emph{seal feed}\index{seal feed} imports a canonical \emph{root origin} $O_-$ derived from the committed certification statement authorizing the shard round. It identifies the network, root round and epoch, reference time, Unicity Tree root, certified shard input and technical-record commitment. It also imports the committed configuration transitions needed to interpret that origin. Appendix~\ref{app:evm-seal-tx} defines the execution boundary.
+
+Certificates and their signature sets are authentication witnesses. Different valid signature subsets or transport encodings for the same committed statement MUST produce the same $O_-$ and execution result. Signer subsets are not stored as canonical participation data. A certificate proving a different statement is not an interchangeable witness.
+
+\begin{ruledef*}{Seal Transaction} \\
+ Before any user transaction, the execution environment performs exactly one protocol system operation with the canonical root input. Its origin, destination, data and position are fixed by protocol. Missing, forged, stale or inconsistent input, or failure of the operation, invalidates the block.
+\end{ruledef*}
+
+The name \emph{seal transaction} includes this protocol operation; it does not mean an ordinary signed zero-price Ethereum transaction. The execution client must implement its privileged origin and fee exemption, deterministic resource limit, and identical replay semantics. The block commits the canonical input; associated authentication witnesses are retained for verification and synchronization. No private key confers the right to originate this operation.
+
+The seal registry records the last imported root round, root epoch, reference time, tree root and certified EVM state, together with authenticated assignment and transition records. An epoch acknowledgement is imported before user transactions in the first EVM block executing under that acknowledged assignment. This can lag root activation and does not claim simultaneity of the clocks.
+
+\begin{ruledef*}{Seal Feed} \\
+ Contracts and builtins obtain protocol authority only from authenticated state written by the system operation. Execution never reads a node-local trust base, clock, file or network response. Permissionless certificate verification cannot advance the privileged root clock or activate a validator set.
+\end{ruledef*}
+
+The feed may skip root rounds but may not silently skip configuration transitions or double-count an imported interval. Bounded catch-up and epoch acknowledgements are specified in Appendix~\ref{app:evm-seal-tx}. A lagging EVM does not block certification of unrelated aggregator shards.
+
+\section{Validator Set}\label{sec:evm-validators}
+
+\begin{ruledef*}{Enshrined Validator Set} \\
+ Each EVM shard round names one root assignment and uses its validator identities and effective weights. A new root assignment becomes the EVM assignment at the committed shard handoff, before its first new proposal is authorized.
+\end{ruledef*}
+
+The root epoch handoff drains or cancels outstanding governance-shard work and records its last certified block (Sec.~\ref{sec:gov-trust-base}). There is no interval in which a removed set can authorize a new governance block. A canceled proposal is never revived under the new assignment. The shard resumes from the certified parent under the leader selected by the new technical record. Other aggregator assignments change only through their own configuration records.
+
+\section{Native Currency}\label{sec:evm-native-currency}
+
+UCT is the native currency used for EVM fees, bonded stake and rewards. Its supply $S_0$ is allocated at genesis, including a bounded, disclosed allocation to bootstrap accounts able to pay for initial claims. There is no earlier supply to migrate. Protocol execution creates no additional UCT.
+\[
+ \mathsf{Supply}(n)=S_0-\mathsf{Burn}(n).
+\]
+Here supply is the sum of native account balances and burn includes every enabled execution rule that actually destroys balance. The initial profile prohibits blob transactions and protocol issuance, and accounts for base-fee burn and any balance destruction permitted by the pinned EVM semantics. Sending value to an inaccessible account is not itself deletion of account balance. Staking rewards are transfers from an allocated pool; slashing transfers to treasury and bridging holds custody.
+
+WUCT is an EVM wrapped-native contract for composability. The Unicity Execution Layer representation is a separate token claim backed by native UCT held in a bridge vault. Neither representation increases native supply, and their backing must not be counted twice.
+
+\section{Built-in Functions}\label{sec:evm-builtins}
+
+The functions have versioned encodings, fixed addresses and deterministic resource charging (Appendix~\ref{app:evm-builtins}):
+\begin{description}
+ \item[$\mathsf{VerifyUnicityCert}$] verifies the complete certificate against authenticated trust-base state and returns its network, partition, shard, configuration, root round, epoch and certified input. Reported signers identify included signatures only.
+ \item[$\mathsf{VerifyValidatorSignature}$] verifies a canonical consensus vote, including the signed commitment to its voting metadata, and returns its domain, voting epoch, voting round and conflict identifier.
+ \item[$\mathsf{VerifyInclusion}$] verifies an inclusion proof against an explicitly supplied, authenticated shard root.
+\end{description}
+Only enabled builtins are callable. Their existence in this specification does not imply activation at TGE.
+
+\section{Execution Evidence and Historical Trust}\label{sec:evm-evidence}
+
+A UC for block $B$ is produced after $B$ is executed. It is stored alongside $B$ as a certificate record, indexed by network, partition, shard and block hash. It cannot be included in the contents determining its own block hash. The next block's root input and the external UC record have different purposes.
+
+An offline event proof includes the header authenticated by the UC's block hash, a receipt-trie proof, transaction and log indices, success status where required, and the emitting address, topics and data. A transaction inclusion proof alone does not establish successful execution. A state proof authenticates account/storage values directly against the certified state root. Appendix~\ref{app:evm-proof-export} defines retention and historical anchoring.
+
+Recent trust-base retention is an execution-state policy, not a complete weak-subjectivity rule. New or long-offline nodes and recipients start from a sufficiently recent trusted checkpoint containing network identity, a committed root/configuration commitment and an authenticated EVM head. They verify subsequent transitions, not an arbitrary history signed by retired keys. Old execution evidence is linked to that trusted history, or refreshed under a recent certified state. An MMR is an optional compression of historical authentication; it is not required for the initial header-chain and state-proof paths.

@@ -1,0 +1,98 @@
+# Real-reth fault lane (F1c, #90 stage 3).
+#
+# scripts/reth-chaos.sh's fault scenarios against the pinned execution client, each on its own
+# cluster. Deliberately NOT triggered by pull requests: a fault run takes far longer than the smoke
+# lane, and a PR check must never imply fault coverage that did not run. It runs only when
+# dispatched, with the scenario list recorded in the run's own manifest. See
+# docs/design/f1-baseline.md §6.4 for when to run it.
+#
+# Distinct names, distinct evidence: `ci` is fake execution, `real-reth-smoke` is the funded
+# transaction lane, and this is `real-reth-fault`.
+name: real-reth-fault
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: "Comma-separated reth-chaos.sh scenarios (each on its own cluster)"
+        type: string
+        default: "reth-only-restart,pair-restart"
+      inject_failure:
+        description: "Inject a harness failure to prove evidence collection and upload"
+        type: boolean
+        default: false
+
+env:
+  GO_VERSION: 1.24
+
+jobs:
+  real-reth-fault:
+    name: real-reth fault (pinned client, bounded scenarios)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Derive the pinned-client cache key
+        id: pin
+        run: |
+          set -euo pipefail
+          . scripts/lib/reth-pin.sh
+          platform=$(rethPinPlatform)
+          entry=$(rethPinAsset "$platform")
+          echo "key=reth-pin-${RETH_PIN_COMMIT}-${entry// /-}-${platform}" >>"$GITHUB_OUTPUT"
+
+      - name: Cache the pinned reth archive
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/reth-pin
+          key: ${{ steps.pin.outputs.key }}
+
+      - name: Obtain and verify the pinned client
+        run: |
+          set -euo pipefail
+          ./scripts/reth-pin.sh obtain --cache-dir ~/.cache/reth-pin --dest "$RUNNER_TEMP/reth-bin"
+          echo "$RUNNER_TEMP/reth-bin" >>"$GITHUB_PATH"
+
+      - name: Build ubft
+        run: make build
+
+      # Inputs reach the shell through the environment, never by template substitution into the
+      # script text. reth-chaos.sh refuses an unknown scenario name before starting anything.
+      - name: Fault scenarios
+        env:
+          SCENARIOS: ${{ inputs.scenarios }}
+          INJECT: ${{ inputs.inject_failure && '-F' || '' }}
+        run: ./scripts/reth-chaos.sh -s "$SCENARIOS" -t 2 $INJECT
+
+      # Every archive is validated and selected for publication on its own: a secret found in one
+      # quarantines that archive (never uploaded; a diagnostic is published instead) without
+      # withholding the others. See reth-smoke.yml for why upload is never of the raw paths. Each
+      # scenario rebuilds the cluster, so an archive is searched for every cluster's secrets, recorded
+      # before use in evidence-runs/.scan-inputs/ (private, never uploaded), not just the last one's.
+      - name: Validate and select publishable evidence
+        if: always()
+        run: >-
+          ./scripts/reth-pin.sh select-upload --out evidence-upload --quarantine evidence-quarantine
+          --nodes test-nodes --require-scan-inputs --require manifest.txt --min-node-logs 1
+          evidence-runs/*.tar.gz
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reth-fault-evidence
+          path: evidence-upload/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Tear down (runner only)
+        if: always()
+        run: |
+          ./stop-evm.sh -a || true
+          pkill -f 'reth node' || true

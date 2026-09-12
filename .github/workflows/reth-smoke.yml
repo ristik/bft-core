@@ -1,0 +1,102 @@
+# Real-reth smoke lane (F1c, #90).
+#
+# The `ci` workflow's compose and chaos jobs run `--executor fake`, which models no execution at
+# all — they cannot say anything about the Engine API path. This workflow is the counterpart that
+# runs the Go adapter against the APPROVED PINNED execution client.
+#
+# Named separately and deliberately: a green `ci` run must never be read as real-execution
+# evidence, and this job's name says which it is. Fault scenarios are NOT run here; they are the
+# separately named real-reth-fault workflow, so a green smoke check never implies fault coverage.
+#
+# Every step of the lane — obtaining and verifying the pinned client, the scenarios, evidence
+# collection, archive validation and teardown — is scripts/reth-smoke.sh, the same script a local
+# run executes, so the refusal and collection paths are exercised locally and by
+# scripts/reth-smoke-selftest.sh rather than only ever read here. There is no fake fallback: a wrong
+# pin, a bad or missing binary or an RPC failure fails the job visibly.
+name: real-reth-smoke
+
+on:
+  pull_request:
+    branches:
+      - integration/enshrined-evm
+  workflow_dispatch:
+    inputs:
+      inject_failure:
+        description: "Fail the lane deliberately after the scenarios, to prove the evidence upload path (#90 stage 4)"
+        type: boolean
+        default: false
+
+env:
+  GO_VERSION: 1.24
+
+jobs:
+  real-reth-smoke:
+    name: real-reth smoke (pinned client, funded transaction)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go ${{ env.GO_VERSION }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # The cache key is derived from scripts/lib/reth-pin.sh — commit, asset, digest and platform —
+      # so it cannot drift from the pin the lane verifies against.
+      - name: Derive the pinned-client cache key
+        id: pin
+        run: |
+          set -euo pipefail
+          . scripts/lib/reth-pin.sh
+          platform=$(rethPinPlatform)
+          entry=$(rethPinAsset "$platform")
+          echo "key=reth-pin-${RETH_PIN_COMMIT}-${entry// /-}-${platform}" >>"$GITHUB_OUTPUT"
+
+      # The cache holds the release ARCHIVE, never an extracted binary. On a hit the lane re-checks
+      # the archive's sha256 and the extracted binary's reported commit exactly as on a download; a
+      # cache is a convenience, never an authority.
+      - name: Cache the pinned reth archive
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/reth-pin
+          key: ${{ steps.pin.outputs.key }}
+
+      - name: Real-reth smoke lane
+        env:
+          INJECT: ${{ github.event_name == 'workflow_dispatch' && inputs.inject_failure && '--inject-failure' || '' }}
+        run: ./scripts/reth-smoke.sh --fetch --cache-dir ~/.cache/reth-pin --archive reth-smoke-evidence.tar.gz $INJECT
+
+      # Publication is a separate, explicit decision per archive. The lane validates its archive, but a
+      # validation failure leaves the archive where it was — so uploading that path with always() once
+      # meant a job would upload the very archive it had just found a JWT in. Only an archive
+      # re-validated here as secret-free is copied into the upload directory (complete or, labelled,
+      # incomplete: a failed run's evidence must still be published); a rejected archive is moved to a
+      # quarantine directory that is never uploaded, and only a diagnostic naming what was found — no
+      # secret value — is published in its place. evidence-upload/MANIFEST.txt records each verdict.
+      # --require-scan-inputs: the archive is searched for every secret the lane recorded before use,
+      # including the stock control's, whose cluster the paired devnet replaced; the private record
+      # (.scan-inputs/, never archived or uploaded) must be sealed or nothing is published.
+      - name: Select publishable evidence
+        if: always()
+        run: >-
+          ./scripts/reth-pin.sh select-upload --out evidence-upload --quarantine evidence-quarantine
+          --nodes test-nodes --require-scan-inputs --require provenance.txt --require run.log
+          reth-smoke-evidence.tar.gz
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reth-smoke-evidence
+          path: evidence-upload/
+          if-no-files-found: error
+          retention-days: 14
+
+      # The lane tears down its own processes by their recorded pids. This broader sweep is safe only
+      # because a hosted runner is disposable; the local script deliberately does not do it.
+      - name: Tear down (runner only)
+        if: always()
+        run: |
+          ./stop-evm.sh -a || true
+          pkill -f 'reth node' || true

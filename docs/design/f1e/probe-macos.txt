@@ -1,0 +1,5 @@
+dir /var/folders/zz/30twnj4j6bq1hc4vgbj3dl6r0000gp/T/fsyncprobe3002670398
+1 db,  sync   : n=60 mean=45.11ms p50=43.4ms p95=65.83ms max=80.94ms
+1 db,  NoSync : n=60 mean=1.15ms p50=40µs p95=21.23ms max=22.73ms
+4 dbs, sync   : n=120 mean=115.32ms p50=107.59ms p95=194.95ms max=296.13ms
+4 dbs, NoSync : n=120 mean=3.83ms p50=70µs p95=22.84ms max=58.9ms

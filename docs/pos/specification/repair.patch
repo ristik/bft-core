@@ -1,0 +1,979 @@
+diff --git a/appendix-bridging.tex b/appendix-bridging.tex
+index 3f58b6b..e8082bc 100644
+--- a/appendix-bridging.tex
++++ b/appendix-bridging.tex
+@@ -170,9 +170,13 @@ The relation MUST derive $\mathsf{sid}_\mathsf{b}$ and $\txhash_\mathsf{b}$ from
+ 
+ \section{Shared Anchor for Inclusion Checking}\label{app:bridging-anchor}
+ 
+-Because the SMT is add-only, a single recent certificate suffices for proof validation. Fix an \emph{anchor certificate} $UC^*$ and its root $h^* = UC^*.IR.h$. For each certified transaction needed from a token, with leaf $L = (\mathsf{sid},H(\txhash,\tau))$, an \emph{anchored inclusion proof} is an RSMT inclusion certificate $C^\mathsf{inc}$ for $L$ against $h^*$. The relation verifies $UC^*$ once via $\mathsf{VerifyUnicityCert}$ (Sec.~\ref{VerifyUnicityCert}) and each $L$ by $\mathsf{VerifyMember}(h^*,L,C^\mathsf{inc})$---the inclusion check of Sec.~\ref{VerifyInclusionProof} with the shared root $h^*$ substituted for the per-proof one. This replaces $m$ Unicity Certificate verifications by one certificate plus $m$ hash-path checks.
++Because aggregation state is add-only within its authenticated shard lineage, historical leaves can be proved under recent state. The general anchor is a root seal $C^*$ and its Unicity Tree root $r^*$. An anchor bundle supplies the certified input/configuration records for each required partition and shard, with their paths through the shard tree and Unicity Tree to $r^*$. The seal's unique weighted signatures are verified once. Each transaction leaf is then checked under its authenticated shard state root, not directly under the Unicity Tree root.
+ 
+-Anchored verification carries each transaction's request timeout and request-validation reference time and applies the ordinary transaction-verification relation.
++Write $h^*$ for this authenticated anchor context and $\mathsf{VerifyAnchoredLeaf}(h^*,L,\pi)$ for the complete check: the proof binds network, partition, shard, configuration, routing key, state root and leaf. The one-shard case is the earlier $\mathsf{VerifyMember}(UC^*.IR.h,L,\pi)$ specialization. A multi-shard history or recursive source history supplies all required shard paths; their number grows with the touched shards, even when seal verification is shared.
++
++The proof service must retain or reconstruct the selected anchor and the shard-lineage proofs after splits. Partition retirement or state pruning cannot discard a leaf still required by an admitted token type without an authenticated successor proof path and available data. A client does not assume every transition resides under one shard's root.
++
++Anchored verification carries each transaction's request timeout and authenticated request-validation reference time and applies the ordinary transaction-verification relation. Any predicate that depends on historical context must receive authenticated original context; rebasing inclusion is not permission to replace that context with the anchor's newer time.
+ 
+ \section{Public Statement and Public Calldata}\label{app:bridging-public}
+ 
+@@ -191,7 +195,7 @@ The nullifier $\eta$ is included in the leaf, and emitted on settlement, so any
+ 
+ \section{Batch Proving Relation}\label{app:bridging-relation}
+ 
+-Algorithm~\ref{alg:bridge-relation} defines $\mathfrak{R}$: the relation holds iff every check passes. The witness $\mathsf{w}$ comprises the bridge configuration $\mathcal{C}$, the trust base $\mathcal{T}$, the anchor certificate $UC^*$, and for each burn $i$: the source token $\mathcal{L}_i$, its anchored inclusion proofs, the lock record(s) backing its genesis, and the accumulator non-membership witness $w_i$. The first check binds the private configuration to the public statement by recomputing $h_\mathsf{cfg}$ exactly as in Sec.~\ref{app:bridging-config}; $\mathcal{C}$ is then safe to use for all per-burn checks. $\Call{VerifyToken}{}$ (Sec.~\ref{sec:token-verification}) is invoked in \emph{anchored} mode: wherever it would verify a certified transaction's own Unicity Certificate, it instead verifies an anchored inclusion proof against $h^*$ (Sec.~\ref{app:bridging-anchor}); its recursive split-reason checks (Sec.~\ref{sec:split-verification}) are unchanged and supply value conservation. The anchored mode accepts only time-independent predicate checks, as noted in Sec.~\ref{app:bridging-anchor}. The genesis backing verifier is \emph{structural}: it checks the binding to the lock record and exports the lock reference as a public obligation, leaving the existence of the lock to the vault's recorded digest (Sec.~\ref{app:bridging-in-security}). The external finality of the lock was already established at mint time by the bridge-in verifier (Sec.~\ref{app:bridging-backing}), so it need not be re-checked inside the proof.
++Algorithm~\ref{alg:bridge-relation} defines $\mathfrak{R}$: the relation holds iff every check passes. The witness $\mathsf{w}$ comprises the bridge configuration $\mathcal{C}$, the trust base $\mathcal{T}$, the anchor bundle $UC^*$, and for each burn $i$: the source token $\mathcal{L}_i$, its anchored inclusion proofs, the lock record(s) backing its genesis, and the accumulator non-membership witness $w_i$. The first check binds the private configuration to the public statement by recomputing $h_\mathsf{cfg}$ exactly as in Sec.~\ref{app:bridging-config}; $\mathcal{C}$ is then safe to use for all per-burn checks. $\Call{VerifyToken}{}$ (Sec.~\ref{sec:token-verification}) is invoked in \emph{anchored} mode: wherever it would verify a certified transaction's own Unicity Certificate, it instead verifies an anchored inclusion proof using $h^*$ (Sec.~\ref{app:bridging-anchor}); its recursive split-reason checks (Sec.~\ref{sec:split-verification}) are unchanged and supply value conservation. Anchored mode preserves authenticated historical predicate context as required by Sec.~\ref{app:bridging-anchor}. The genesis backing verifier is \emph{structural}: it checks the binding to the lock record and exports the lock reference as a public obligation, leaving the existence of the lock to the vault's recorded digest (Sec.~\ref{app:bridging-in-security}). The external finality of the lock was already established at mint time by the bridge-in verifier (Sec.~\ref{app:bridging-backing}), so it need not be re-checked inside the proof.
+ 
+ \begin{algorithm}[!htbp]
+ \caption{Batch Return Relation $\mathfrak{R}(\mathsf{x},\mathsf{w})$}\label{alg:bridge-relation}
+@@ -201,7 +205,7 @@ Algorithm~\ref{alg:bridge-relation} defines $\mathfrak{R}$: the relation holds i
+   \State ensure($H_\mathsf{cfg}(\mathcal{C}) = \mathsf{x}.h_\mathsf{cfg}$)
+   \State $(\chi,a_\mathsf{V},a_\mathsf{A},\mathsf{ty},\mathsf{aid},d_\mathsf{lock},d_\mathsf{nul},t_\mathsf{reason}) \gets \mathcal{C}$
+   \State ensure($H(\mathcal{T}) = \mathsf{x}.h_\mathcal{T}$)
+-  \State ensure($\mathsf{VerifyUnicityCert}(UC^*,\mathcal{T}) = 1$);\quad $h^* \gets UC^*.IR.h$
++  \State ensure($\mathsf{VerifyAnchorBundle}(UC^*,\mathcal{T}) = 1$);\quad $h^* \gets \mathsf{Context}(UC^*)$
+   \State $A \gets \mathsf{x}.A_\mathsf{old}$;\quad $V \gets 0$;\quad $\mathsf{leaves} \gets \langle\rangle$;\quad $\mathsf{lref} \gets \langle\rangle$
+   \For{$i \gets 1 \ldots \mathsf{x}.B$}
+     \State \textbf{Finality:} ensure($\Call{VerifyToken}{\mathcal{L}_i,\mathcal{T}} = 1$ in anchored mode against $h^*$)
+@@ -210,7 +214,7 @@ Algorithm~\ref{alg:bridge-relation} defines $\mathfrak{R}$: the relation holds i
+     \State $(\predi_{\mathsf{b},i},h_{\mathsf{b},i}) \gets$ state spent by $T_{\mathsf{b},i}$ in $\mathcal{L}_i$
+     \State ensure($T_{\mathsf{b},i}.\sthash = h_{\mathsf{b},i}$)
+     \State $\mathsf{sid}_{\mathsf{b},i} \gets H(\predi_{\mathsf{b},i},\;T_{\mathsf{b},i}.\sthash)$;\quad $\txhash_{\mathsf{b},i} \gets H(T_{\mathsf{b},i}.D,\tau_{Q,\mathsf{b},i})$
+-    \State ensure($\tau_{\mathsf{b},i}<\tau_{Q,\mathsf{b},i}$ and $\pi_{\mathsf{b},i}$ proves $(\mathsf{sid}_{\mathsf{b},i},H(\txhash_{\mathsf{b},i},\tau_{\mathsf{b},i}))$ under $h^*$)
++    \State ensure($\tau_{\mathsf{b},i}<\tau_{Q,\mathsf{b},i}$ and $\mathsf{VerifyAnchoredLeaf}(h^*,(\mathsf{sid}_{\mathsf{b},i},H(\txhash_{\mathsf{b},i},\tau_{\mathsf{b},i})),\pi_{\mathsf{b},i})=1$)
+     \State $\mathcal{R}_i \gets \Call{DecodeReason}{T_{\mathsf{b},i}.D.\auxd'}$ such that $T_{\mathsf{b},i}.D.\predi' = \predi_\mathsf{burn}(H(T_{\mathsf{b},i}.D.\auxd'))$
+     \State \textbf{Destination:} ensure($\mathcal{R}_i.(\chi,a_\mathsf{V},a_\mathsf{A},\mathsf{ty},\mathsf{aid}) = (\chi,a_\mathsf{V},a_\mathsf{A},\mathsf{ty},\mathsf{aid})$)
+     \State \textbf{Value:} $v_i \gets$ value of $D_{\mathsf{mint},i}.\auxd'$ for $\mathsf{aid}$ via $\Call{Assets}{D_{\mathsf{mint},i}.\mathsf{ty},D_{\mathsf{mint},i}.\auxd'}$
+@@ -306,81 +310,73 @@ This rigidity is the direct consequence of $\mathsf{vk}$ being immutable, which
+ 
+ \section{Enshrined Settlement Chain}\label{app:bridging-enshrined}
+ 
+-This section instantiates the bridge for a settlement chain that is an enshrined EVM partition of the same network (Sec.~\ref{sec:bridge-enshrined}). Every structure of the preceding sections is retained; what changes is the realization of $\Call{LockFinal}{}$, the source of $\mathcal{T}$ in the vault, and the admissible settlement paths.
++The enshrined bridge uses the same root authority for EVM custody and Execution-layer unicity. It replaces the external-chain finality oracle with certified EVM state and preserves the configuration, amount and replay bindings of the return relation. Certification is final under the active root/paired-execution assumptions; it does not remove checkpoint or data-availability requirements.
++
++\subsection{Configuration and Initial Profile}
++
++The configuration binds the full network, EVM partition/shard and genesis/execution identity in addition to $\chi$, vault, asset and token type. The initial vault holds native UCT only, with $a_\mathsf{A}$ the zero address. WUCT is a separate composability wrapper. A later WUCT custody path must explicitly unwrap or account ERC-20 custody; it cannot call an ERC-20 balance native custody.
+ 
+-\subsection{Configuration}
++The initial enshrined token type permits whole-token transfers and burns, but no split, merge or arbitrary mint-reason extension. Its type verifier, all SDKs and both redemption relations enforce that restriction. The single-source-lock return algorithm above applies to this profile. Supporting splits later requires a versioned type/relation that follows recursive provenance to original locks and compares a descendant's conserved value with its share of backing, not with the full original lock amount. It is not enabled merely by importing a generic split verifier.
+ 
+-The chain identifier $\chi$ is that of the partition (Appendix~\ref{app:evm-config}). The asset address $a_\mathsf{A}$ is the wrapped UCT contract, or the zero address denoting native balance; either way custody is a native balance of the vault. The remaining fields of $\mathcal{C}$ and the derivation of $h_\mathsf{cfg}$ are unchanged.
++A public bridge must redeem every history admitted by its token type. Direct verification has finite resource limits; the succinct fallback is therefore required before public launch of a type with unbounded transfer histories. A direct-only deployment remains a private test deployment. The proving relation and verifier key, type restrictions, decoder and verification semantics are pinned by the deployment configuration.
+ 
+ \subsection{State Proof}
+ 
+-Let $\mathsf{VerifyStateProof}(h, a, \kappa, v, \pi_\mathsf{s}) \in \bool$ denote the execution environment's authenticated key-value proof: it holds iff, under the state root $h$, the storage of account $a$ maps key $\kappa$ to value $v$, as witnessed by $\pi_\mathsf{s}$. For the EVM this is the Merkle-Patricia account and storage proof. The primitive is fixed by the execution environment and treated as a black box here.
++Let $\mathsf{VerifyStateProof}(h,a,\kappa,v,\pi_\mathsf{s})$ verify an EVM account and storage Merkle-Patricia proof under state root $h$. Account, key and value encodings, empty storage and non-membership are checked canonically. Ethereum proofs use their native Keccak/RLP rules; bridge digests use $H$ as specified below.
+ 
+-The vault stores the lock digest of nonce $n$ (Sec.~\ref{app:bridging-lock-op}) in its storage at key $\kappa(n) = H(\mathsf{LOCK\_DOMAIN}, n)$, so that a lock is provable by one state proof against $UC.\mathcal{IR}.h$ and no block header, receipt trie or event log is involved.
++A Solidity mapping at slot $p_\mathsf{lock}$ stores each nonce's digest. Its logical storage key is
++\[
++ \kappa(n)=\mathsf{Keccak256}(\mathsf{ABI}_{32}(n)\mathbin\Vert
++                                      \mathsf{ABI}_{32}(p_\mathsf{lock})).
++\]
++The storage trie then applies Ethereum's hashed-key rule to this logical key. This layout is a consumed interface. Lock digests remain provable after redemption and cannot be deleted to reclaim storage.
+ 
+ \subsection{Enshrined Backing Reason}
+ 
+-The genesis mint reason of a token backed by an enshrined lock is a CBOR array under $\mathsf{ENSHRINED\_TAG}$:
+-
+-\begin{longtable}{clp{8.4cm}}
+-\textbf{Index} & \textbf{Field} & \textbf{Description} \\
+-\hline
+-\endhead
+-0 & $\mathsf{ver}$ & version, $=1$ \\
+-1 & $\chi$ & chain identifier of the enshrined partition \\
+-2 & $a_\mathsf{V}$ & vault address \\
+-3 & $a_\mathsf{A}$ & asset address \\
+-4 & $n$ & lock nonce \\
+-5 & $\pi_\mathsf{s}$ & state proof of $\mathsf{lockDigest}[n]$ under $UC.\mathcal{IR}.h$ \\
+-6 & $UC$ & Unicity Certificate of the partition certifying $\mathcal{IR}.h$ \\
+-\end{longtable}
++The immutable mint reason under tag $\mathsf{ENSHRINED\_TAG}$ is the CBOR array $(1,\chi,a_\mathsf{V},a_\mathsf{A},n)$. A separate attached backing witness contains a recent EVM UC and the account/storage proof of $\mathsf{lockDigest}[n]$. Witness replacement does not change the reason, token identifier, signed transaction or certified history.
+ 
+-Fields 0 to 4 are those of the external backing reason (Sec.~\ref{app:bridging-backing-reason}). Fields 5 and 6 carry the evidence that the external variant delegates to $\Call{LockFinal}{}$.
++Every recipient verifies the witness against its authenticated current root history and the pinned chain configuration. A recent proof of the permanent digest refreshes historical backing without changing token identity. Alternatively, an old proof must be authenticated through the checkpoint/ancestry path of Appendix~\ref{app:evm-proof-export}. An old certificate signed by retired keys alone is insufficient. The bundle is self-contained for offline verification once the recipient has a sufficiently recent trusted checkpoint; assembling a fresh bundle may require a proof service.
+ 
+ \subsection{Verification}
+ 
+-Algorithm~\ref{alg:bridge-backing-enshrined} replaces Algorithm~\ref{alg:bridge-backing} for $\mathsf{ENSHRINED\_TAG}$. It requires no external query and no finality wait: a certified round of the partition cannot be reorganised.
+-
+ \begin{algorithm}[!htbp]
+ \caption{Enshrined Backing Mint-Reason Verification}\label{alg:bridge-backing-enshrined}
+ \begin{algorithmic}[0]
+-\Function{VerifyEnshrinedBackingReason}{$D_\mathsf{mint},\mathcal{T},\mathcal{C}$}
+-  \State $(\mathsf{ver},\chi',a'_\mathsf{V},a'_\mathsf{A},n,\pi_\mathsf{s},UC) \gets \Call{DecodeEnshrinedReason}{D_\mathsf{mint}.\mathsf{reason}}$
+-  \State ensure($\mathsf{ver} = 1$)
+-  \State ensure($(\chi',a'_\mathsf{V},a'_\mathsf{A}) = (\mathcal{C}.\chi,\mathcal{C}.a_\mathsf{V},\mathcal{C}.a_\mathsf{A})$)
+-  \State ensure($D_\mathsf{mint}.\mathsf{ty} = \mathcal{C}.\mathsf{ty}$ \textbf{and} $D_\mathsf{mint}.\alpha = \mathcal{T}.\alpha$)
+-  \State ensure($\mathsf{VerifyUnicityCert}(UC, \mathcal{T}) = 1$ \textbf{and} $UC$ certifies the partition of $\chi'$) \Comment{Sec.~\ref{se:unicity-tree-certificate}}
+-  \State $h \gets UC.\mathcal{IR}.h$
+-  \State $\mathsf{id} \gets H(D_\mathsf{mint}.\mathsf{salt},D_\mathsf{mint}.\alpha)$;\quad $h_\mathsf{rcpt} \gets H(\mathsf{CBOR}(D_\mathsf{mint}.\predi'))$
+-  \State $v_g \gets$ value of $D_\mathsf{mint}.\auxd'$ for $\mathcal{C}.\mathsf{aid}$ via $\Call{Assets}{D_\mathsf{mint}.\mathsf{ty},D_\mathsf{mint}.\auxd'}$
+-  \State $\mathcal{K} \gets (a'_\mathsf{A},\mathcal{C}.\mathsf{ty},\mathcal{C}.\mathsf{aid},v_g,\mathsf{id},h_\mathsf{rcpt})$
+-  \State $d \gets H(\mathsf{LOCK\_DOMAIN},\chi',a'_\mathsf{V},n,\mathcal{K})$
+-  \State ensure($\mathsf{VerifyStateProof}(h,a'_\mathsf{V},\kappa(n),d,\pi_\mathsf{s}) = 1$) \Comment{lock exists with these fields}
+-  \State \Return $1$
++\Function{VerifyEnshrinedBackingReason}{$D_\mathsf{mint},\mathcal{T},\mathcal{C},w_\mathsf{lock}$}
++ \State $(\mathsf{ver},\chi',a'_\mathsf{V},a'_\mathsf{A},n)\gets\Call{DecodeEnshrinedReason}{D_\mathsf{mint}.\mathsf{reason}}$
++ \State ensure($\mathsf{ver}=1$ and $(\chi',a'_\mathsf{V},a'_\mathsf{A})=(\mathcal{C}.\chi,\mathcal{C}.a_\mathsf{V},\mathcal{C}.a_\mathsf{A})$)
++ \State ensure($D_\mathsf{mint}.\mathsf{ty}=\mathcal{C}.\mathsf{ty}$ and $D_\mathsf{mint}.\alpha=\mathcal{T}.\alpha$)
++ \State $(h,\pi_\mathsf{s})\gets\Call{AuthenticateEVMState}{w_\mathsf{lock},\mathcal{T},\mathcal{C}}$
++ \State $\mathsf{id}\gets H(D_\mathsf{mint}.\mathsf{salt},D_\mathsf{mint}.\alpha)$
++ \State $h_\mathsf{rcpt}\gets H(\mathsf{CBOR}(D_\mathsf{mint}.\predi'))$
++ \State $v_g\gets$ value for $\mathcal{C}.\mathsf{aid}$ in $\Call{Assets}{D_\mathsf{mint}.\mathsf{ty},D_\mathsf{mint}.\auxd'}$
++ \State $\mathcal{K}\gets(a'_\mathsf{A},\mathcal{C}.\mathsf{ty},\mathcal{C}.\mathsf{aid},v_g,\mathsf{id},h_\mathsf{rcpt})$
++ \State $d\gets H(\mathsf{LOCK\_DOMAIN},\chi',a'_\mathsf{V},n,\mathcal{K})$
++ \State ensure($\mathsf{VerifyStateProof}(h,a'_\mathsf{V},\kappa(n),d,\pi_\mathsf{s})=1$)
++ \State \Return $1$
+ \EndFunction
+ \end{algorithmic}
+ \end{algorithm}
+ 
+-The lock record $\mathcal{K}$ is reconstructed from the genesis and the configuration rather than read from the chain, so the state proof simultaneously establishes existence of the lock and equality of its identifier, recipient commitment and amount with the genesis. The security properties of Sec.~\ref{app:bridging-in-security} hold with ``final on $\chi$'' read as ``certified by the BFT Core''.
++$\mathsf{AuthenticateEVMState}$ verifies the complete certificate and full chain/configuration binding, then applies recent-checkpoint or historical-ancestry authentication. It returns the state root whose storage is proved. It makes no external query during verification. Mint backing witnesses and aggregator leaf anchors are different proofs, even when both rely on the same root authority.
+ 
+ \subsection{Settlement}
+ 
+-The vault holds $\mathcal{T}$ through the seal feed (Sec.~\ref{sec:evm-seal-feed}) and accepts a certificate iff its epoch is among the $E_\mathsf{tb}$ most recent recorded trust base records; $\mathsf{trustBaseAllowed}$ of Algorithm~\ref{alg:bridge-settle} is this set. The anchor certificate $UC^*$ of the relation is verified by the built-in $\mathsf{VerifyUnicityCert}$ (Appendix~\ref{app:evm-builtins}), at native cost.
++The vault obtains trust-base bodies only from authenticated registry state. Live anchors must pass the round age, epoch-interval and future-round checks of Sec.~\ref{sec:gov-invariants}. A stale anchor must be refreshed and a not-yet-imported future anchor retried after root progress; carrying a signature does not remove these conditions. A multi-shard return bundle verifies one shared seal and all required shard paths (Sec.~\ref{app:bridging-anchor}).
+ 
+-Two settlement paths are admitted and MUST accept exactly the same inputs:
+-\begin{description}
+-  \item[Succinct] Algorithm~\ref{alg:bridge-settle}, unchanged.
+-  \item[Direct] For $B = 1$, the vault evaluates $\mathfrak{R}$ (Algorithm~\ref{alg:bridge-relation}) itself, with $\Call{VerifyToken}{}$ run in anchored mode by the vault and inclusion checks by the built-in $\mathsf{VerifyInclusion}$. Evaluation is metered by a step budget fixed by governance (Appendix~\ref{app:gov-params}); a token whose verification exceeds the budget is rejected with a distinguishable error and MUST be settled by the succinct path. The submitter bears the cost of a rejected evaluation.
+-\end{description}
+-Batch atomicity (Sec.~\ref{app:bridging-settlement}) is a property of the succinct path only; direct settlements are independent transactions. Releases credit a withdrawable balance rather than transferring, so a recipient that rejects receipt affects no other release.
++Direct and succinct paths implement the same semantic redemption relation on their common admitted token profile. They have different witness formats, budgets and batching limits. Direct verification is atomic and metered; an over-budget history uses the succinct path. The succinct verifier must bind the same network/configuration, live trust-base context, nullifier transition, lock references and release leaves. The vault's permanent lock mapping discharges structural backing obligations during redemption, so redemption does not need to reverify an aged mint witness.
+ 
+-\subsection{Properties}
++Releases first consume the nullifier and credit a withdrawable balance, with reentrancy-safe claims. The enshrined interpretation of Algorithm~\ref{alg:bridge-settle} replaces its transfers with these credits and uses certified root rounds for the optional relayer-fee deadline. A direct or succinct failure changes neither nullifiers nor credits. Concurrent proofs against an old nullifier root require rebasing; services cannot promise absence of retries.
+ 
+-\begin{description}
+-  \item[No external assumption.] Both directions are verified under $\mathcal{T}$ alone. The bridge introduces no assumption beyond the BFT Core's own, since the partition's validators are the BFT Core validators (Sec.~\ref{sec:evm-validators}).
+-  \item[No finality wait.] The bridge-in wait of Sec.~\ref{sec:bridge-in} is absent, and the first recipient after the locker needs no oracle of its own.
+-  \item[Custody preserves supply.] Locked value is native balance of the vault; $\sum$ (circulating tokens of type $\mathsf{ty}$ on the Execution Layer) $\le$ vault balance by the solvency argument of Sec.~\ref{app:bridging-security}, and both sides are readable in one query each.
+-\end{description}
++\subsection{Custody Accounting}
++
++Let $L$ be cumulative locked native value, $D$ cumulative redemption value already credited after verified burns, and $P$ cumulative value actually paid to claimants, including relayer shares. Define outstanding backing $O=L-D$ and unpaid credits $C=D-P$. Then
++\[
++ \mathsf{vaultBalance}=O+C+X=L-P+X,\qquad 0\le P\le D\le L,
++\]
++where $X$ accounts for unexpected incoming value separately. Neither credits nor $X$ create a new mint entitlement. The Execution-layer circulating supply is at most $O$, allowing locks not yet minted and burns not yet redeemed. It is not generally equal to vault balance and is not automatically observable by one global query in a peer-to-peer execution system.
++
++The invariants are checked over local ledgers and complete controlled histories in tests. Public monitoring reports known liabilities and coverage of off-chain observations rather than claiming exhaustive circulating-supply measurement. One-way launch is not a public bridge milestone; both mint backing and redemption must work.
+ 
+ \section{Shared Parameters}\label{app:bridging-params}
+ 
+diff --git a/appendix-evm.tex b/appendix-evm.tex
+index 3b25096..596b2ba 100644
+--- a/appendix-evm.tex
++++ b/appendix-evm.tex
+@@ -1,214 +1,224 @@
+ \chapter{Enshrined EVM Partition and Governance Records}\label{app:evm}
+ 
+-This appendix specifies the concrete parameters, encodings and algorithms of the enshrined EVM partition (Chapter~\ref{ch:evm}) and of the governance records it produces (Chapter~\ref{ch:governance}). Structures use deterministic CBOR (Appendix~\ref{app:encodings}) and MUST be consumed completely.
++This appendix defines the protocol requirements for staged implementation. Deterministic CBOR structures (Appendix~\ref{app:encodings}) are consumed completely. A release pins its wire version, limits, addresses and execution rules before activation; the current Engine API adapter is not presumed to implement these additions.
+ 
+ \section{Partition Configuration}\label{app:evm-config}
+ 
+-The partition description record of an enshrined EVM partition carries, in addition to the fields of Sec.~\ref{sec:standard-partition-types}, the parameters of Table~\ref{ta:evm-config}. Every value is fixed at partition creation and changes only by a partition update record (Table~\ref{ta:pcr}) taking effect at an epoch boundary.
+-
+-\begin{longtable}{p{2.4cm}p{6.0cm}p{1.4cm}p{3.6cm}}
+-\caption{Enshrined EVM partition parameters.}\label{ta:evm-config}\\
+-\textbf{Parameter} & \textbf{Value} & \textbf{Status} & \textbf{Notes} \\
+-\hline
++\begin{longtable}{p{2.8cm}p{6.4cm}p{4.0cm}}
++\caption{Enshrined EVM configuration.}\label{ta:evm-config}\\
++\textbf{Parameter} & \textbf{Meaning} & \textbf{Constraint}\\ \hline
+ \endfirsthead
+-\textbf{Parameter} & \textbf{Value} & \textbf{Status} & \textbf{Notes} \\
+-\hline
++\textbf{Parameter} & \textbf{Meaning} & \textbf{Constraint}\\ \hline
+ \endhead
+-$\mathsf{st}$ & $8$ & Fixed & standard type \\
+-$\chi$ & EVM chain id of the execution environment, $H(\mathsf{DOM}_\chi, \alpha, \beta) \bmod 2^{64}$ & Rule & binds the chain to $(\alpha,\beta)$ \\
+-$\mathsf{forks}$ & named, pinned activation schedule of the execution environment & Chain & no unscheduled activation \\
+-$g_\mathsf{max}$ & block gas limit & Policy & bounded by the round period \\
+-$f_\mathsf{base}^\mathsf{min}$ & base fee floor & Policy & non-zero \\
+-$\mathsf{validity}$ & $\{\textsc{attested}, \textsc{witness}, \textsc{succinct}\}$ & Policy & Sec.~\ref{sec:evm-validity} \\
+-$a_\mathsf{sys}$ & reserved system address of the seal transaction & Fixed & Sec.~\ref{app:evm-seal-tx} \\
+-$a_\mathsf{bi}$ & addresses of the built-in functions & Fixed & Sec.~\ref{app:evm-builtins} \\
+-$E_\mathsf{tb}$ & number of past epochs whose trust base records are retained in state & Policy & $\ge \Delta_\mathsf{ws}$ in epochs \\
++$\mathsf{st},\alpha,\beta,\sigma$ & type, network, partition, shard & type $8$; explicit bindings\\
++$\chi$ & EVM chain identifier & fixed, network-unique\\
++$\mathsf{version}$ & execution and root-input profile & explicit activation record\\
++$\mathsf{forks}$ & pinned EVM fork schedule & no unscheduled fork\\
++$g_\mathsf{max},g_\mathsf{sys}$ & block and reserved system work budgets & bounded; user capacity reserved\\
++$f_\mathsf{base}^\mathsf{min}$ & custom base-fee floor & positive; validated on every block\\
++$\mathsf{validity}$ & attested, witness or succinct & witness mandatory if configured\\
++$a_\mathsf{sys},a_\mathsf{sr}$ & system origin and registry & fixed; no system-origin key\\
++$a_\mathsf{bi}$ & builtin address assignments & fixed, versioned interfaces\\
++$W_\mathsf{cert}$ & ordinary certificate age limit & certified root rounds\\
++$E_\mathsf{cache}$ & recent trust-base cache target & obligations override eviction\\
++$q_\mathsf{trans}$ & transitions per system input & bounded; no silent truncation\\
+ \end{longtable}
+ 
++The chain ID is assigned and checked against existing network allocations; a truncated hash alone is not a uniqueness proof. All certificate and bridge proofs also bind the full network/partition/shard configuration. Changing fixed fields requires a new chain or an explicit migration; governance policy fields change only through the specified activation path.
++
+ \section{Certification Request}\label{app:evm-cr}
+ 
+-The shard input record is encoded as the array $(n, e, h', h, t, h_b)$, with $h_b$ encoded as a 32-byte string or CBOR null. In the certification request $\mathsf{CR}$ (Sec.~\ref{certification-request}), $\ell_B$ is the number of transactions in the block including the seal transaction, $\ell_S$ is the length in bytes of the block's canonical encoding, and $\pi_{CP}$ is the validity witness $w$ or absent. All three are derived from the block alone; two validators reporting different values for the same block do not form a quorum.
++The EVM-specific input is $(n,e,h',h,t,h_b)$ with $h_b$ a 32-byte string or null. The wire profile defines request-size fields from canonical serialized data, separately from Ethereum gas and transaction counts; their names must not be used to infer a different unit. Quiet/repeat requests carry no newly executed block. Every successful block includes the system operation even when the ordinary transaction count is zero.
+ 
+-The Quiet Round rule of Sec.~\ref{sec:evm-rounds} is checked by the BFT Core as part of $\gamma_{CP}$. For $\mathsf{validity} = \textsc{attested}$, $\gamma_{CP}$ consists of that check alone. For $\textsc{witness}$, $w$ is the execution witness of the block and $\gamma_{CP}$ re-executes it statelessly. For $\textsc{succinct}$, $w$ is a proof for the relation ``execution of the block with hash $h_b$ transforms the state committed by $h'$ into the state committed by $h$'', with public inputs $(\chi, h', h, h_b)$, verified under a verification key fixed in the partition description.
++Attested verification enforces the record's extension and quiet-round constraints and requires weighted matching requests. Witness and succinct verification additionally establish the full relation of Sec.~\ref{sec:evm-validity}, including the root input commitment and configured forced-inbox relation. The verification key and execution configuration hash are public bindings. Absence or failure of a required proof never falls back to attestation.
+ 
+ \section{Round Parameter Derivation}\label{app:evm-round-params}
+ 
+-Table~\ref{ta:evm-round-params} fixes the derivation of every header field that is not a function of the transaction list. $n$ denotes $\mathsf{TE}_-.n_r$ and $r$ denotes $C^\mathsf{r}_-.r$.
+-
+-\begin{longtable}{p{2.8cm}p{5.6cm}p{5.0cm}}
+-\caption{Header fields derived from the previous certificate.}\label{ta:evm-round-params}\\
+-\textbf{Header field} & \textbf{Derivation} & \textbf{Notes} \\
+-\hline
++\begin{longtable}{p{3.0cm}p{6.4cm}p{3.8cm}}
++\caption{Deterministic block parameters.}\label{ta:evm-round-params}\\
++\textbf{Field} & \textbf{Derivation} & \textbf{Meaning}\\ \hline
+ \endfirsthead
+-\textbf{Header field} & \textbf{Derivation} & \textbf{Notes} \\
+-\hline
++\textbf{Field} & \textbf{Derivation} & \textbf{Meaning}\\ \hline
+ \endhead
+-timestamp & $\max(C^\mathsf{r}_-.t_r,\; t_{b-1}+1)$ & strictly increasing \\
+-randomness & $H(\mathsf{DOM}_\rho, r, n)$ & \texttt{prevRandao} \\
+-beacon root & $H(\mathsf{DOM}_\beta, r, n)$ & \texttt{parentBeaconBlockRoot} \\
+-fee recipient & fee collector address (Sec.~\ref{app:evm-genesis}) & constant \\
+-balance credits & empty list & \texttt{withdrawals} \\
+-producer & $\mathsf{TE}_-.\nu_\ell$ & constant per round \\
++timestamp & $\max(C^\mathsf{r}_-.t_r,t_{b-1}+1)$ & monotone EVM counter\\
++prevRandao & $H(\mathsf{DOM}_\rho,r,n)$ & not secure randomness\\
++parentBeacon\-BlockRoot & $H(\mathsf{DOM}_\beta,r,n)$ & derived field\\
++fee recipient & configured fee collector & protocol credits\\
++withdrawals & empty & no external balance issuance\\
++extraData & $H(\mathsf{CBOR}(\mathsf{rootInput}))$ & 32-byte input commitment\\
++gas limit, base fee & versioned execution rules & builder cannot override\\
++leader & $\mathsf{TE}_-.\nu_\ell$ & shard leader, not root leader\\
+ \end{longtable}
+ 
+-Domain separators are ASCII strings:
+-\begin{itemize}
+-	\item $\mathsf{DOM}_\rho = \texttt{"UNICITY\_EVM\_RANDAO"}$
+-	\item $\mathsf{DOM}_\beta = \texttt{"UNICITY\_EVM\_BEACON"}$
+-	\item $\mathsf{DOM}_\chi = \texttt{"UNICITY\_EVM\_CHAIN"}$
+-\end{itemize}
+-The inputs are hashed as a CBOR array in the stated order. A validator MUST recompute every field of Table~\ref{ta:evm-round-params} from its own copy of $UC_-$ and reject a block whose header differs.
++Here $r=C^\mathsf{r}_-.r$ and $n$ is the authorized shard round. The domain strings are ASCII \texttt{UNICITY\_EVM\_RANDAO} and \texttt{UNICITY\_EVM\_BEACON}; hashing uses deterministic CBOR in the stated order. This is a versioned change from any adapter using different prefixes or concatenation. The deployment must not mix derivations within an assignment.
+ 
+ \section{Seal Transaction}\label{app:evm-seal-tx}
+ 
+-The seal transaction is the first transaction of every block. It has sender $a_\mathsf{sys}$, gas price $0$, value $0$, and calldata $\mathsf{CBOR}(UC_-, \mathsf{TE}_-)$. The execution environment MUST admit a transaction from $a_\mathsf{sys}$ only in the first position of a block, and MUST reject a block whose first transaction is not from $a_\mathsf{sys}$.
++The initial execution profile uses a protocol call before ordinary transactions. The canonical input is
++\[
++ \mathsf{rootInput}=(v,\alpha,\beta,\sigma,n,e,h_\mathsf{parent},O_-,\mathsf{TE}_-,D),
++\]
++where $D$ is the ordered sequence of missing committed trust-base bodies and handoff acknowledgements. $O_-$ contains the authorizing seal's signed statement and certified shard input/configuration commitments, excluding all signatures and transport proofs. The profile fixes every constituent field and its encoding. A supplied UC authenticates this statement, its tree paths and technical record; transition proofs authenticate $D$. Such proofs are external witnesses and are not re-hashed into the canonical input.
++
++The header's \texttt{extraData} commits the input. The block's required companion data carries the input and witnesses, and is retained and served for import, synchronization and proof export. A block missing this data cannot be certified merely because its Ethereum payload executes. The execution-client interface and block transport must explicitly support it; stock Engine API V3 payload attributes alone do not.
++
++The adapter verifies root authentication against the committed certification/transition state. Execution receives the verified canonical input, checks its header commitment and all parent/round bindings, and invokes only $a_\mathsf{sr}$ as $a_\mathsf{sys}$ with value zero. The call has no EOA signature or nonce, cannot enter through the transaction pool, cannot be repeated by an ordinary transaction, and cannot mint value. A forged ordinary sender is rejected. Historical import and replay apply the same rules and obtain the same state root.
+ 
+-The transaction is executed by the \emph{seal registry}\index{seal registry} contract, which verifies that the sender is $a_\mathsf{sys}$ and records the values of Table~\ref{ta:evm-seal-state}. It performs no signature verification of $UC_-$: the transaction's authenticity is established by the Seal Transaction rule of Sec.~\ref{sec:evm-seal-feed}, since every validator compares the calldata against the certificate it received.
++System work consumes a separate deterministic budget $g_\mathsf{sys}$, reserved from the configured block work capacity, without debiting a fee payer. Ordinary transactions remain bounded by $g_\mathsf{max}-g_\mathsf{sys}$ and pay normal fees. The profile fixes gas-used/receipt accounting and fee-target derivation consistently with this separation. System failure or excess work invalidates the whole block, rather than silently skipping the call. Authentication-witness sizes and verification work have separate bounded admission costs.
+ 
+-\begin{longtable}{p{3.8cm}p{5.4cm}p{4.2cm}}
+-\caption{State recorded by the seal transaction.}\label{ta:evm-seal-state}\\
+-\textbf{State} & \textbf{Update} & \textbf{Notes} \\
+-\hline
++\begin{longtable}{p{3.8cm}p{9.4cm}}
++\caption{Seal registry state.}\label{ta:evm-seal-state}\\
++\textbf{State} & \textbf{Rule}\\ \hline
+ \endfirsthead
+-\textbf{State} & \textbf{Update} & \textbf{Notes} \\
+-\hline
++\textbf{State} & \textbf{Rule}\\ \hline
+ \endhead
+-$n_r, e_r, t_r, r$ & latest values from $C^\mathsf{r}_-$ & the certified round clock is $n_r$ \\
+-$h_-$ & $UC_-.\mathcal{IR}.h$ & certified state root of the previous round \\
+-$P_{e}[\nu]$ & $P_{e}[\nu] + 1$ for every $\nu \in \mathsf{Signers}(C^\mathsf{r}_-)$, with $e = C^\mathsf{r}_-.e_r$ & participation accumulator \\
+-$N_e$ & $N_e + 1$ & seals recorded in epoch $e$ \\
+-$\mathcal{T}[e]$ & $T_e$ from calldata, when absent & retained for the last $E_\mathsf{tb}$ epochs \\
++root origin & latest imported root round, epoch, time, tree root and certified EVM state\\
++assignment & committed identities, effective weights, thresholds and body hash\\
++transition cursor & last acknowledged handoff; ordered import with no gaps\\
++reward cursor & last accounted root interval; no signer-based participation counters\\
++trust-base history & recent bodies plus all bodies required for outstanding liabilities\\
++inbox watermark & committed enqueue and acknowledged consumption positions when enabled\\
+ \end{longtable}
+ 
+-$\mathsf{Signers}(C^\mathsf{r})$ is the set of validators identified by the signer bit-field of the seal's aggregate signature (Sec.~\ref{sec:signature-aggregation}), ordered as in $T_{e}$. Participation of Sec.~\ref{sec:gov-rewards} is read from $P_e$ and $N_e$; a query for a completed epoch costs a number of operations linear in the validator count and independent of the number of rounds.
++A duplicate input cannot advance cursors twice. A repeat UC does not create a second reward claim for an already imported interval. The source is the certificate authorizing the proposed shard round, not the newest message locally observed. Alternative valid signature subsets for that statement yield identical state.
+ 
+-Any account MAY submit an additional certificate of any partition to the seal registry. The registry verifies it by $\mathsf{VerifyUnicityCert}$ against $\mathcal{T}$ and records $(\beta, \sigma, n, h)$; such records serve contracts that need a certified root of another partition and carry no obligation of the block producer.
++A normal handoff waits for the previous EVM acknowledgement before preparing another, bounding live transition backlog. A restored node replays canonical inputs in order or installs an authenticated checkpoint. If missing history exceeds input limits, it catches up before voting; it may not drop transitions or manufacture authority from local configuration. Ordinary contract calls cannot advance these cursors.
++
++Genesis includes the initial committed assignment, origin and empty cursors under a pinned genesis commitment. Genesis authentication is an explicit rule, not a fabricated quorum signature. The first ordinary block follows the same system-operation format.
+ 
+ \section{Built-in Functions}\label{app:evm-builtins}
+ 
+-The functions of Sec.~\ref{sec:evm-builtins} are provided at the fixed addresses of Table~\ref{ta:evm-builtins}. Each MUST be deterministic in its arguments and partition state, MUST NOT read node-local configuration, wall-clock time or the network, and MUST read the trust base only from the seal registry. Gas is charged proportionally to the work performed, calibrated by measurement and fixed in the partition description.
++Builtins read authenticated registry state and their arguments only. They never read local files, networking or wall time. Their gas schedules meter decoding, signatures, tree paths and historical-key reads, with bounds on all collections and strict errors for inactive versions.
+ 
+-\begin{longtable}{p{2.0cm}p{4.6cm}p{6.8cm}}
+-\caption{Built-in functions.}\label{ta:evm-builtins}\\
+-\textbf{Address} & \textbf{Input} & \textbf{Output} \\
+-\hline
++\begin{longtable}{p{2.0cm}p{5.2cm}p{6.0cm}}
++\caption{Builtin interfaces.}\label{ta:evm-builtins}\\
++\textbf{Address} & \textbf{Input} & \textbf{Result}\\ \hline
+ \endfirsthead
+-\textbf{Address} & \textbf{Input} & \textbf{Output} \\
+-\hline
++\textbf{Address} & \textbf{Input} & \textbf{Result}\\ \hline
+ \endhead
+-$a_{0x0100}$ & $\mathsf{CBOR}(UC)$ & $(\mathsf{ok}, \mathcal{IR}, e_r, \mathsf{bitmap})$, where $\mathsf{bitmap}$ identifies $\mathsf{Signers}(UC.C^\mathsf{r})$ in the order of $T_{e_r}$ \\
+-$a_{0x0101}$ & $(e, \nu, m, s)$: epoch, validator, vote payload, partial signature & $(\mathsf{ok}, n, h_\mathsf{vote})$, the voted round and state authenticator parsed from $m$ \\
+-$a_{0x0102}$ & $(h, \mathsf{sid}, v, \pinc)$: root, key, value, inclusion certificate & $\mathsf{ok}$, per Sec.~\ref{VerifyInclusionProof} \\
++$a_{0x0100}$ & complete UC or shared-seal proof bundle & validity and authenticated context, IR and included signers\\
++$a_{0x0101}$ & version, domain, validator, canonical vote metadata, signed commit info and signature & validity, voting epoch/round and conflict identifier\\
++$a_{0x0102}$ & authenticated shard root, leaf key/value and inclusion path & validity\\
+ \end{longtable}
+ 
++Certificate verification sums unique authorized signer weights, checks the epoch's active round interval, age, network and configuration, and rejects future rounds beyond the imported root origin. Newer certificates can be retried after privileged progress catches up. Historical evidence uses retained historical bindings and its own admissibility rules; ordinary certificate age rejection does not erase slashability. Included signers may be returned for inspection but do not prove absence of other votes.
++
+ \section{Genesis State}\label{app:evm-genesis}
+ 
+-The genesis state of the partition consists of the contracts of Table~\ref{ta:evm-genesis} at reserved addresses, and the allocation of the genesis supply $S_0$ to the allocation contracts among them. No externally owned account holds a genesis balance.
++The allocation manifest lists every balance, including a small disclosed bootstrap allocation to EOAs that pay for first claims and transactions. Contract and EOA allocations together equal $S_0$ exactly. Predeploy bytecode, storage, addresses, fork rules and build artifacts are reproducible.
+ 
+-\begin{longtable}{p{3.4cm}p{7.2cm}p{2.8cm}}
+-\caption{Genesis contracts.}\label{ta:evm-genesis}\\
+-\textbf{Contract} & \textbf{Role} & \textbf{Upgradeable} \\
+-\hline
++\begin{longtable}{p{3.2cm}p{7.0cm}p{3.0cm}}
++\caption{Contracts and activation scope.}\label{ta:evm-genesis}\\
++\textbf{Contract} & \textbf{Role} & \textbf{Upgrade rule}\\ \hline
+ \endfirsthead
+-\textbf{Contract} & \textbf{Role} & \textbf{Upgradeable} \\
+-\hline
++\textbf{Contract} & \textbf{Role} & \textbf{Upgrade rule}\\ \hline
+ \endhead
+-seal registry & Sec.~\ref{app:evm-seal-tx} & no \\
+-wrapped UCT & fungible-interface claim on native balance & no \\
+-fee collector & receives priority fees; splits to reward pot and treasury & no \\
+-treasury & receives slashed stake and the treasury fee share; timelocked spending under an authority separate from parameter governance & no \\
+-emission pool & holds the reward allocation; releases per Sec.~\ref{sec:gov-rewards} & no \\
+-allocation contracts & one per genesis allocation, releasing on a schedule keyed to $n_r$ & no \\
+-stake registry & $\mathcal{G}$ of Sec.~\ref{sec:gov-pos}, with per-validator share accounting & by governance \\
+-epoch manager & election and candidate record, Sec.~\ref{sec:gov-election} & by governance \\
+-slashing & Sec.~\ref{sec:gov-slashing} & by governance \\
+-governance & parameter registry with timelock; enforces Sec.~\ref{sec:gov-invariants} at proposal time & by governance \\
+-inbox & Sec.~\ref{app:gov-forced-inclusion} & by governance \\
+-vault & Appendix~\ref{app:bridging-enshrined} & no \\
++seal registry & authenticated root state and cursors & protocol upgrade\\
++WUCT & wrapped native balance & immutable\\
++fee collector & accounts priority fees and split credits & immutable custody\\
++treasury & independent, timelocked spending & immutable custody\\
++emission pool & capped release of genesis allocation & immutable custody\\
++allocation contracts & disclosed release schedules & immutable\\
++stake custody & bonded reservations, slash and exit rules & immutable\\
++epoch policy & election with bounded authority & timelocked policy\\
++slashing verifier & objective evidence interface & pinned custody permission\\
++parameter governance & validates bounded policy updates & timelocked policy\\
++forced inbox & ordered queue and acknowledgements & protocol upgrade\\
++bridge vault & native custody and redemption & immutable\\
+ \end{longtable}
+ 
+-A contract that holds or moves native balance is not upgradeable. Every schedule in a genesis contract is expressed in certified rounds (Sec.~\ref{sec:evm-round-params}).
++PoS and bridge contracts may be deployed later at reserved addresses under an explicit activation. Unused addresses confer no authority. Deploying a new policy cannot replace immutable custody checks. A defect in immutable code requires a specified migration or coordinated protocol upgrade; immutability is not a claim that defects cannot occur.
+ 
+ \section{Candidate Record}\label{app:gov-candidate}
+ 
+-The candidate record of Sec.~\ref{sec:gov-election} is the CBOR array
++A versioned candidate body contains
+ \[
+-	c_{e+1} = (\alpha,\; e+1,\; A_e,\; \langle (\nu_1, b_{\nu_1}), \ldots, (\nu_N, b_{\nu_N}) \rangle,\; k_{e+1},\; h_e) ,
++ c=(v,\alpha,\beta,\sigma,e+1,j,S_e,n_\mathsf{snap},r_\mathsf{obs},
++       A_\mathsf{min},h_e,h_\mathsf{cfg},\mathsf{members},k_\mathsf{root},k_\mathsf{shard}),
+ \]
+-with entries sorted by $\nu$ bytewise and each $b_\nu$ the bonded stake in whole units of UCT, as an unsigned 64-bit integer. The epoch manager writes $h_c = H(c_{e+1})$ to storage slot $\kappa_c$ of its own account at round $S_e$, and emits $c_{e+1}$ in full as an event. $\kappa_c$ is a constant of the partition description.
++where $j$ is the attempt number and $h_e$ the preceding trust-base body hash. The complete member records bind staking identity, node identity, consensus public key and effective weight, ordered bytewise by canonical identity. $A_\mathsf{min}$ is an earliest activation bound, not an actual epoch start. The snapshot operation writes $H(c)$ to fixed slot $\kappa_c$ at the configured epoch-manager account and retains the body for retrieval. Its storage proof, not an unauthenticated event, establishes authenticity.
+ 
+-\section{Trust Base Record Derivation}\label{app:gov-trust-base}
++Weights are unsigned 64-bit counts of a configured atomic UCT denomination $u$. Eligible collateral must reserve at least $u\,b_\nu$ per assignment. The profile defines flooring, minimum effective weight, maximum individual/total weight and overflow rejection; fractional residual collateral has no extra voting power. Sum and threshold computation use checked wide intermediates. No agent silently rescales the contract's result.
+ 
+-A BFT Core validator derives $T_{e+1}$ (Table~\ref{ta:t-drc}) from a verified candidate as in Table~\ref{ta:gov-derive}. Stakes are copied without scaling.
++\section{Trust Base Record Derivation}\label{app:gov-trust-base}
+ 
+-\begin{longtable}{p{2.6cm}p{5.4cm}p{5.4cm}}
+-\caption{Candidate to trust base record.}\label{ta:gov-derive}\\
+-\textbf{$T_{e+1}$ field} & \textbf{Source} & \textbf{Notes} \\
+-\hline
++\begin{longtable}{p{3.6cm}p{9.6cm}}
++\caption{Candidate and handoff to trust-base body.}\label{ta:gov-derive}\\
++\textbf{Field} & \textbf{Source}\\ \hline
+ \endfirsthead
+-\textbf{$T_{e+1}$ field} & \textbf{Source} & \textbf{Notes} \\
+-\hline
++\textbf{Field} & \textbf{Source}\\ \hline
+ \endhead
+-1. $\alpha$ & $c_{e+1}.\alpha$ & must equal $\mathcal{T}.\alpha$ \\
+-2. $e$ & $c_{e+1}.(e+1)$ & must equal $T_e.e + 1$ \\
+-3. $n_e$ & $c_{e+1}.A_e$ & activation round \\
+-4. $\{\nu, b_\nu\}_e$ & $c_{e+1}$ entries & \\
+-5. $k_e$ & $c_{e+1}.k_{e+1}$ & must equal $\lfloor \tfrac{2}{3}\sum b_\nu\rfloor + 1$ \\
+-6. $r$ & state summary at activation & per Sec.~\ref{sec:bft-epoch-change} \\
+-7. $h_\mathsf{cr}$ & $h_c$ & \\
+-8. $h_{e-1}$ & $H(T_e)$ & must equal $c_{e+1}.h_e$ \\
+-9. $s_{e-1}$ & assembled signatures & $\ge k_e$ of epoch-$e$ stake \\
++network, epoch & verified candidate and expected successor\\
++epoch start & actual boundary fixed by committed handoff\\
++members and weights & complete candidate member records\\
++root threshold & $\lfloor2\sum b_\nu/3\rfloor+1$\\
++state summary & agreed frozen transition state\\
++change-record hash & candidate body hash and committed handoff binding\\
++predecessor hash & canonical body identity of the current trust base\\
++endorsement & old-epoch unique signer weight meeting the old root threshold\\
+ \end{longtable}
+ 
+-The validator verifies the candidate before signing by
+-\[
+-	\mathsf{VerifyStateProof}(UC.\mathcal{IR}.h,\; a_\mathsf{em},\; \kappa_c,\; h_c,\; \pi_\mathsf{s}) = 1
+-\]
+-(Appendix~\ref{app:bridging-enshrined}) for a certificate $UC$ of the governance partition it holds, where $a_\mathsf{em}$ is the epoch manager address. Signatures are exchanged among the validators of epoch $e$ over the BFT Core's communication layer. Any validator holding signatures of at least $k_e$ stake submits the record as the epoch change of Sec.~\ref{sec:bft-epoch-change}.
++An agent verifies the account/storage proof for $(a_\mathsf{em},\kappa_c,H(c))$ against the certified governance state and submits the candidate as a proposed root transition. It need not recompute election. An independently implemented election is useful for testing the contract, not an alternative root authority. Endorsements compose only after consensus has selected the same handoff body. The signature domain binds network, protocol version, predecessor and transition attempt. Endorsement serialization is separate from body identity.
++
++The root validates transition legality on proposal and commit. Runtime configuration APIs transport evidence; they cannot select or activate an uncommitted epoch. The wire version must reconcile root pipelining, old-quorum endorsement and actual activation without requiring a signature over unknown future state. Until that state machine is implemented and validated, automatic PoS handoff is disabled.
+ 
+ \section{Evidence}\label{app:gov-evidence}
+ 
+-Double-signing evidence is the CBOR array $(e, \nu, m_1, s_1, m_2, s_2)$ where $m_1 \ne m_2$ are consensus vote payloads of the same round and $s_1, s_2$ are $\nu$'s partial signatures over them. The slashing contract accepts it iff $a_{0x0101}$ returns $\mathsf{ok}$ for both pairs with equal voted rounds and different state authenticators, $\nu \in T_e$, and the round is within $\Delta_\mathsf{ev}$ of the current certified round. Each accepted evidence is recorded by $(e, \nu, n)$ and not accepted twice.
++Double-signing evidence carries two complete vote statements and their signatures, plus the accountable validator identity. Verification authenticates the canonical \texttt{VoteInfo} hash inside signed \texttt{LedgerCommitInfo}, then extracts the \emph{voting} epoch and round from \texttt{VoteInfo}. It does not confuse them with the seal's older committed round. A non-committing vote may have empty commit fields and is still accountable through its authenticated voting metadata.
++
++The initial slashable relation requires the same network, protocol/message domain, accountable key, voting epoch and voting round, with different canonical signed vote statements that the root safety rules prohibit signing together. Repeated encodings, malleable signatures or duplicate delivery of one statement are not two votes. Different message domains and different voting rounds are not this offense. The PoS vote-signing profile binds network and message domain inside the signed preimage, including non-committing votes. A caller-supplied domain is not authentication. Legacy votes use their explicit legacy rules and cannot be reinterpreted as domain-bound PoS votes. The builtin returns authenticated conflict identifiers; custody checks the historical key/reservation binding and records an offense identifier once.
++
++Evidence is timely if executed within $\Delta_\mathsf{ev}$ root rounds of the offense or if its complete payload was committed to the forced inbox within that window. Mere local submission or an unavailable hash does not preserve timeliness. A timely queued case prevents related retirement withdrawal until processed. Bounties and total penalties are bounded by attributable collateral, with no double debit across rotated keys.
+ 
+-Downtime is established from $P_e[\nu]$ and $N_e$ for a completed epoch $e$ and requires no submission.
++Absence from a QC or timeout certificate is not objective downtime evidence. No initial contract accepts it for jailing or slashing.
+ 
+ \section{Forced Inclusion}\label{app:gov-forced-inclusion}
+ 
+-A transaction addressed to the governance partition MAY be submitted to any BFT Core validator. The BFT Core maintains an ordered list of pending submissions and includes its digest $h_\mathsf{fi}$ in the governance partition's statistical record (Sec.~\ref{statistical-record}), which is bound by $\mathsf{TE}.h_\mathsf{sr}$ and thus certified. A submission is \emph{due} $K$ blocks after the first certificate whose $h_\mathsf{fi}$ covers it. The inbox contract records included submissions.
++The root commits a bounded ordered queue for the governance shard. Its sequence number, payload digest, admission round and consumption watermark form a separately domain-separated extension of certified root data. A local HTTP response or shard statistics field alone is not a consensus enqueue.
++
++Before admission, the root checks network/chain and signature syntax, supported transaction type, maximum encoded bytes and gas, per-sender and global queue limits, and the admission charge or reserved fee credit. It does not execute application logic or predict future balances. Full payloads are disseminated before enqueue votes, retained until certified consumption and a recovery horizon, and retrievable by joining nodes. The admission-credit mechanism and its anti-spam cost must be specified before enabling the endpoint.
++
++The initial service processes a FIFO prefix within a reserved per-block forced gas budget $g_\mathsf{fi}$, with every admitted transaction's declared gas limit at most $g_\mathsf{fi}$. The total budget obeys
++\[
++ g_\mathsf{sys}+g_\mathsf{fi}+g_\mathsf{ordinary}\le g_\mathsf{max}.
++\]
++After system import and before discretionary transactions, followers independently determine the due prefix and execute its valid entries in order. Admission bounds and reserved capacity determine a published worst-case $K$ in produced EVM blocks, including input-observation lag; a root-round allowance also requires a bounded EVM progress assumption.
++
++An entry that is invalid at its deterministic turn (nonce already used, insufficient balance, fee cap below the current base fee, or incompatible activated rules) is consumed with an authenticated rejection reason and normal validation semantics; it cannot make all future blocks invalid. An executable transaction that reverts consumes gas and has the usual failed receipt. Validity is evaluated before discretionary transactions can change its preconditions. A higher nonce may be rejected rather than blocking FIFO progress. Users can resubmit corrected transactions.
++
++The next EVM certification authenticates processed sequence numbers and results; the root verifies the acknowledgement and advances its consumption watermark exactly once. Retries, duplicate transactions, epoch changes and crashes preserve queue ordering and charges. Local receipt of a request is not a liveness promise: bounded inclusion assumes root enqueue progress and enough honest execution weight producing blocks. A root quorum failure cannot be repaired by this queue.
+ 
+-\begin{ruledef*}{Forced Inclusion} \\
+-	A block of the governance partition that does not include every due submission is invalid.
+-\end{ruledef*}
++\section{Execution Proof Export}\label{app:evm-proof-export}
+ 
+-The rule is enforced by the validators of the partition in the same manner as the Seal Transaction rule: each validator knows the certified $h_\mathsf{fi}$ from $UC_-$ and rejects a proposed block that omits a due entry.
++Nodes persist the certified block/UC association and canonical root inputs atomically with their finality cursor, retaining recovery data across crashes. An archival proof service retains headers, receipts, transactions, certificate witnesses and required historical state proofs, indexed by full chain context. Pruning ordinary execution state must not silently destroy promised proof availability; nodes publish retention limits and archive responsibilities. Proof export returns a typed unavailable result rather than an incomplete proof.
++
++A bundle includes its version, chain context, subject block/header, UC, authentication path to a trusted checkpoint, and the requested receipt/transaction or account/storage path. For an old block outside live certificate admission, the initial historical path is an Ethereum parent-header chain from a recently authenticated EVM head to that block. Hash linkage, heights and chain configuration are checked. This costs linear headers in the distance and is explicitly not a constant-size historical proof. A future accumulator can compress that path.
++
++An alternative for permanent storage commitments, such as a lock digest, is a fresh proof of that value under a recent certified EVM state. The token's immutable identity does not include the refreshed witness. Offline verification requires no network query once the recipient has the bundle and a sufficiently recent trusted checkpoint. Checkpoint distribution/freshness is external client trust initialization, not an oracle called during contract execution.
+ 
+ \section{Parameters}\label{app:gov-params}
+ 
+-Table~\ref{ta:gov-params} lists the free parameters of the governance mechanisms. \emph{Fixed} values are set by this specification; \emph{Rule} entries are mandatory constraints; \emph{Policy} values are chosen by governance within the rules and published. Round-denominated values are certified BFT Core rounds.
++All consensus deadlines below are certified root rounds unless expressly stated otherwise. A deployment publishes values and the invariants of Sec.~\ref{sec:gov-invariants} before activation.
+ 
+-\begin{longtable}{p{2.4cm}p{6.2cm}p{1.4cm}p{3.4cm}}
++\begin{longtable}{p{3.2cm}p{6.4cm}p{3.6cm}}
+ \caption{Governance parameters.}\label{ta:gov-params}\\
+-\textbf{Parameter} & \textbf{Meaning} & \textbf{Status} & \textbf{Constraint} \\
+-\hline
++\textbf{Parameter} & \textbf{Meaning} & \textbf{Constraint}\\ \hline
+ \endfirsthead
+-\textbf{Parameter} & \textbf{Meaning} & \textbf{Status} & \textbf{Constraint} \\
+-\hline
++\textbf{Parameter} & \textbf{Meaning} & \textbf{Constraint}\\ \hline
+ \endhead
+-$L$ & epoch length in rounds & Policy & \\
+-$\Delta_\mathsf{act}$ & rounds from snapshot to activation & Policy & covers derivation and signature exchange \\
+-$\Delta_\mathsf{unbond}$ & unbonding delay & Policy & Sec.~\ref{sec:gov-invariants} (1), (2) \\
+-$\Delta_\mathsf{ev}$ & double-signing evidence window & Policy & \\
+-$\Delta_\mathsf{down}$ & downtime window & Policy & \\
+-$\Delta_\mathsf{ext}$ & maximum tolerated epoch extension & Policy & \\
+-$\Delta_\mathsf{ws}$ & weak-subjectivity window & Policy & $\le E_\mathsf{tb}$ epochs \\
+-$\Delta_\mathsf{jail}$ & minimum jail duration & Policy & \\
+-$\theta$ & downtime participation threshold & Policy & $0 < \theta < 1$ \\
+-$N_\mathsf{max}$ & maximum elected validators & Policy & Sec.~\ref{sec:gov-invariants} (3) \\
+-$b_\mathsf{min}$ & minimum self-bonded stake & Policy & Sec.~\ref{sec:gov-invariants} (3) \\
+-$\phi_\mathsf{ds}, \phi_\mathsf{down}$ & slash fractions per evidence kind & Policy & $\phi_\mathsf{down} < \phi_\mathsf{ds} \le 1$ \\
+-commission bound & maximum commission and per-epoch change & Policy & \\
+-$\mathcal{E}_\mathsf{sched}$ & emission schedule & Policy & capped by the pool \\
+-fee split & collector share to reward pot and treasury & Policy & sums to $1$ \\
+-$K$ & forced-inclusion deadline in blocks & Policy & \\
+-step budget & maximum verification steps of a direct deposit & Policy & Appendix~\ref{app:bridging-enshrined} \\
++$L$ & target interval between snapshots & progress target, not fixed duration\\
++$\Delta_\mathsf{act}$ & minimum snapshot-to-activation allowance & committed handoff still required\\
++$\Delta_\mathsf{hold}$ & protection after acknowledged retirement & exceeds evidence and processing allowances\\
++$\Delta_\mathsf{ev}$ & evidence commitment window & timely inbox cases remain protected\\
++$\Delta_\mathsf{incl},\Delta_\mathsf{exec}$ & inclusion and processing allowances & overruns never unlock unresolved liabilities\\
++$W_\mathsf{cert}$ & live certificate age & less than retirement protection\\
++$N_\mathsf{min},N_\mathsf{max}$ & eligible assignment bounds & nonempty safe set required\\
++$b_\mathsf{min},u$ & self-bond minimum and weight unit & deterministic checked conversion\\
++$\rho_e$ & emission per root round & pool-limited, non-performance policy\\
++$\phi_\mathsf{ds}$ & objective slashing fraction & bounded by attributable collateral\\
++$K$ & forced-inclusion bound & produced EVM blocks, conditional on progress\\
++$g_\mathsf{fi}$ & reserved forced execution work & bounded within total block capacity\\*
++$B_\mathsf{verify}$ & direct verification budget & deployment-pinned or versioned relation\\
+ \end{longtable}
++
++Downtime thresholds and penalties have no initial active values. A checkpoint freshness policy is published in elapsed-time units separately from these execution parameters. Changes to timing, key retention or churn require reviewing the checkpoint policy and preserving existing collateral obligations.
+diff --git a/appendix-token.tex b/appendix-token.tex
+index 588fed2..c0e75d6 100644
+--- a/appendix-token.tex
++++ b/appendix-token.tex
+@@ -278,6 +278,12 @@ All standard predicates that verify digital signatures ($\predi_\mathsf{sig}$, $
+ \end{itemize}
+ 
+ 
++\section{Mint-Reason Dispatch}\label{app:mint-reason-dispatch}
++
++Mint reasons are dispatched by CBOR semantic tag under the token type's pinned issuance policy. Tag \texttt{39044} denotes the split reason below; \texttt{39047} denotes external-chain backing; \texttt{39049} denotes enshrined backing (Appendix~\ref{app:bridging-enshrined}). Tag \texttt{39048} is a return reason, not an alternative mint authorization. An unknown tag, unsupported version or reason forbidden by the token type is rejected even if another registered verifier recognizes it.
++
++For enshrined backing, the immutable reason is the lock-reference array. Its refreshable UC and EVM state proof are supplied in the token verification context, not in the signed mint bytes or token identifier. A recipient requires a complete authenticated witness but may replace that witness without changing the certified token. The initial enshrined type forbids split and merge reasons; generic split support does not override that policy.
++
+ \section{Split Proof Encoding}\label{app:split-proof-encoding}
+ 
+ This section specifies the split mint reason described in Sec.~\ref{sec:token-splitting}. The split manifest and mint reason are identified by their distinct CBOR semantic tags.
+diff --git a/bft.tex b/bft.tex
+index 573f5f8..d51de38 100644
+--- a/bft.tex
++++ b/bft.tex
+@@ -1335,6 +1335,9 @@ Adding and removing of validators may incur changes in the respective quorum siz
+ 
+ \section{BFT Core Epoch Change}\label{sec:bft-epoch-change}
+ 
++For an enshrined governance deployment, the committed handoff of Sec.~\ref{sec:gov-trust-base} refines the generic procedure below. A candidate supplies election output and an earliest activation bound. Its actual activation, frozen state summary and next governance-shard assignment are agreed by root consensus. Configuration API delivery or local round passage cannot independently activate it. Old and new assignments cannot both authorize an extension after the handoff boundary.
++
++
+ In order to facilitate a dynamic, responsive BFT Core, it is necessary to adjust its parameters on the fly. In particular, it is necessary to add new validators and retire some existing ones to maintain a healthy validator set, due to changing requirements and operating conditions.
+ 
+ The configuration can be changed once per epoch. The source information comes from an Governance Process whose output is change records called Validator Assignment Records.
+@@ -1376,6 +1379,9 @@ Validators must not execute invalid change records and approve proposals with in
+ 
+ \section{Shard Epoch Change}
+ 
++For the enshrined EVM shard, the root handoff records the last certified execution parent and drains or cancels outstanding old-assignment proposals before authorizing a successor. The EVM imports this acknowledgement before its next user transactions (Sec.~\ref{sec:evm-validators}). This does not synchronize ordinary root and shard rounds or change unrelated aggregator assignments.
++
++
+ Shard Epoch Change is triggered by the BFT Core, by incrementing the Epoch number field in Technical Record, returned with a UC.
+ 
+ The next shard round after finalizing a round with UC with incremented Epoch value is processed according to the configuration of the next epoch. Leader and validators are selected according to next epoch configuration.
+@@ -1721,6 +1727,9 @@ Fields 1, 2, 4 and 5 are copied from the referenced Governance Record. Under Pro
+ 
+ Unicity Trust Base is a chain of records defined by Table~\ref{ta:t-drc}.
+ 
++In the PoS-capable version, the member field of Table~\ref{ta:t-drc} includes each signing key and accountable staking identity as well as node identifier and effective weight; it is not a legacy identifier/weight pair with an unauthenticated key lookup. The PoS-capable protocol version must distinguish canonical trust-base body identity from its endorsement witnesses (Appendix~\ref{app:gov-trust-base}), bind complete signing-key records, and use checked effective-weight arithmetic throughout. Root QC and timeout-certificate formation and verification sum unique signer weights. The timeout amplification threshold is weight greater than the configured Byzantine weight bound. Shard attestation and impossibility checks use the weights of that shard's assignment. Legacy unit-weight networks retain their versioned rules; changing a stake validation constraint alone does not enable PoS.
++
++
+ Unicity Seal is a record signed by the validator set of the respective epoch as defined in \ref{ch:m-rc}, with an additional requirement of using the required multi-party signature scheme.
+ 
+ The verification functions are as defined in \ref{ch:m-rc}, where the signatures are interpreted in broader sense as multi-party signatures, created by respective quorums of validators.
+diff --git a/evm-partition.tex b/evm-partition.tex
+index 26be7de..72b3f47 100644
+--- a/evm-partition.tex
++++ b/evm-partition.tex
+@@ -2,105 +2,103 @@
+ 
+ \section{Overview}
+ 
+-An \emph{enshrined EVM partition}\index{enshrined EVM partition}\index{partition!enshrined EVM} is a partition of standard type $\mathsf{st} = 8$ (Sec.~\ref{sec:standard-partition-types}) whose shard state is an account-based execution environment compatible with the Ethereum Virtual Machine. A shard of the partition is operated by a set of validators $\mathcal{V}$ and certified by the BFT Core through the same certification request and Unicity Certificate as any other partition. Each partition round produces at most one \emph{block}\index{block}, an ordered list of transactions together with the execution state that results from applying them to the previously certified state.
++An \emph{enshrined EVM partition}\index{enshrined EVM partition}\index{partition!enshrined EVM} is a partition of standard type $\mathsf{st}=8$ (Sec.~\ref{sec:standard-partition-types}) whose shard state is an account-based execution environment compatible with the Ethereum Virtual Machine. Its state is certified by the BFT Core through the certification interface used by other partitions. The initial deployment has one governance EVM shard. Each BFT Core operator runs a paired execution node. Aggregator partitions, with their own shards and consistency proofs, continue independently alongside it.
+ 
+-The partition is \emph{enshrined}\index{enshrined}: its validator set is the BFT Core validator set of the same epoch (Sec.~\ref{sec:evm-validators}), and its state receives the Unicity Seal of its own previous round as a mandatory input of every block (Sec.~\ref{sec:evm-seal-feed}). This establishes an authenticated channel from the Consensus Layer into the execution environment. The partition executes Unicity Tokenomics: the Governance contracts (Chapter~\ref{ch:governance}) and the native currency (Sec.~\ref{sec:evm-native-currency}).
++The Consensus Layer orders and certifies state commitments. The EVM executes governance, including the Proof of Stake contracts, and holds the native currency UCT. The Unicity Execution Layer continues to execute token transactions peer-to-peer. The EVM is an enshrined service of this architecture; it does not turn each Unicity layer into an Ethereum consensus/execution pair.
++
++The partition is \emph{enshrined}\index{enshrined} because its voting weights and assignment derive from the BFT Core configuration, and its execution rules require an authenticated root-origin input (Sec.~\ref{sec:evm-seal-feed}). This is an internal protocol channel, with no independently trusted bridge operator.
+ 
+ \section{Rounds and Blocks}\label{sec:evm-rounds}
+ 
+-A block is a tuple $\mathcal{B} = (\mathsf{hdr}, \langle \mathsf{tx}_1, \ldots, \mathsf{tx}_m \rangle)$ with header $\mathsf{hdr}$ and block hash $h_b = H(\mathsf{hdr})$\index{$h_b$ (block hash)}. The header commits to the parent block hash, the post-execution state root, and the round parameters of Sec.~\ref{sec:evm-round-params}. The execution semantics of transactions and the derivation of the state root from the previous state and the transaction list are those of the execution environment, fixed by the partition's configuration (Appendix~\ref{app:evm-config}).
++Root round $n_r$, shard round $n$, and EVM block height $b$ are different counters. A shard round produces at most one block, and root rounds can advance several times while that block is built and verified. The leader is the one named in the technical record authorizing the shard round; root leader rotation does not change an in-flight shard leader.
+ 
+-The shard input record of the partition (Sec.~\ref{shard-input-record}) is extended by the partition type with the block hash of the round:
++A block $\mathcal{B}=(\mathsf{hdr},\langle\mathsf{tx}_1,\ldots,\mathsf{tx}_m\rangle)$ has Ethereum header hash $h_b=\mathsf{Keccak256}(\mathsf{RLP}(\mathsf{hdr}))$. Its header authenticates the parent block, execution state, transactions and receipts. Ethereum trie and header hashing are distinct from the Unicity hash $H$. The type-specific shard input record is
+ \[
+-	\mathcal{IR} = (n, e, h', h, t, h_b), \qquad h_b \in \hashtype\opt ,
++ \mathcal{IR}=(n,e,h',h,t,h_b),\qquad h_b\in\hashtype\opt,
+ \]
+-where $h'$ and $h$ are the execution state roots before and after the round, and $t$ is the reference time of the previous Unicity Seal. A round in which no block is produced is a \emph{quiet round}\index{quiet round}.
++where $h',h$ are the previous and resulting execution state roots, and $t$ is the reference time of the authorizing certificate.
+ 
+ \begin{ruledef*}{Quiet Round} \\
+-	$\mathcal{IR}.h = \mathcal{IR}.h' \iff \mathcal{IR}.h_b = \bot$. A certification request violating this pairing is invalid.
++ $\mathcal{IR}.h=\mathcal{IR}.h' \iff \mathcal{IR}.h_b=\bot$.
+ \end{ruledef*}
+ 
+-The leader of a round is $\mathsf{TE}.\nu_\ell$ of the technical record delivered with the previous Unicity Certificate. The leader builds the block and disseminates it to the other validators of the shard; every validator, the leader included, executes the block against its own copy of the certified state and submits a certification request only if the resulting state root is the one the block claims.
++A successful governance-shard round produces a block even with no user transactions: its mandatory system input advances protocol state. A timeout or rejected proposal may produce a repeat certificate without executing a block. Such a certificate must not be represented as a newly executed empty block. Certification, retries and crash recovery never authorize two committed blocks for one shard round.
+ 
+ \section{Round Parameters}\label{sec:evm-round-params}
+ 
+-Every header field that a stand-alone EVM chain obtains from an external beacon or from the discretion of the block producer is instead derived deterministically from the Unicity Certificate $UC_-$ that concluded the previous round. Let $C^\mathsf{r}_- = UC_-.C^\mathsf{r}$ and let $\mathsf{TE}_-$ be the technical record delivered with $UC_-$. Then:
+-\begin{itemize}
+-	\item the round number is $\mathsf{TE}_-.n_r$ and the epoch is $\mathsf{TE}_-.e_r$;
+-	\item the block producer is $\mathsf{TE}_-.\nu_\ell$;
+-	\item the block timestamp is $t_b = \max(C^\mathsf{r}_-.t_r,\; t_{b-1} + 1)$, where $t_{b-1}$ is the timestamp of the parent block;
+-	\item every beacon-derived field $x$ is $H(\mathsf{DOM}_x, C^\mathsf{r}_-.r, \mathsf{TE}_-.n_r)$, with a field-specific domain separator $\mathsf{DOM}_x$ (Appendix~\ref{app:evm-round-params});
+-	\item the fee recipient is the fee collector contract of Sec.~\ref{sec:gov-fees};
+-	\item the list of protocol-level balance credits is empty.
+-\end{itemize}
+-Every validator derives these values independently from its own copy of $UC_-$ and rejects a proposed block whose header disagrees in any of them. The block producer has no discretion over the header beyond the transaction list.
++Let $UC_-$ and $\mathsf{TE}_-$ be the certificate and technical record authorizing the next shard round, and $C^\mathsf{r}_-$ its seal. Deterministic parameters are the shard round and assignment from $\mathsf{TE}_-$, timestamp $\max(C^\mathsf{r}_-.t_r,t_{b-1}+1)$, the domain-separated fields of Appendix~\ref{app:evm-round-params}, the configured fee collector, and an empty protocol withdrawal list. Every validator checks these values. Gas-limit and base-fee rules are fixed by the versioned execution configuration and checked independently of builder preferences.
+ 
+-\paragraph{Block clock.} Since $C^\mathsf{r}.t_r$ has one-second precision and rounds may be shorter than one second, $t_b$ advances by at least one per block and may run ahead of $t_r$. The block timestamp is a monotone counter, not a clock.
++The timestamp is strictly increasing but can run ahead of real time at sub-second block cadence. The derived \texttt{prevRandao} is a deterministic, potentially biasable value, not a cryptographic randomness beacon. Applications requiring unpredictable randomness need a separately specified mechanism.
+ 
+ \begin{ruledef*}{Certified Round Clock} \\
+-	Every time-dependent rule of a contract hosted by the partition, including the governance and currency mechanisms of Chapter~\ref{ch:governance}, is expressed in terms of the certified BFT Core round number $n_r$ available from partition state (Sec.~\ref{sec:evm-seal-feed}), and never in terms of $t_b$.
++ Protocol deadlines use the certified root round recorded in state, with comparisons against thresholds rather than equality to an expected round. They do not use the EVM timestamp or block height as elapsed real time.
+ \end{ruledef*}
+ 
+-\section{Validity}\label{sec:evm-validity}
++Allocation schedules state their units explicitly. A round-denominated vesting schedule promises progress in certified rounds, not calendar duration. Any future calendar schedule requires a separately reviewed certified-time rule. A client may use wall time to check the freshness of its trusted checkpoint; that is not a source of EVM execution input.
+ 
+-The consistency proof type of the partition (Sec.~\ref{sec:consistency-proof}) is $\mathbb{CP} = \mathbb{W}\opt$: a certification request carries an optional \emph{validity witness}\index{validity witness} $w$. The verification predicate $\gamma_{CP}(\mathcal{IR}, w)$ holds iff the Quiet Round rule holds for $\mathcal{IR}$ and, when $w \ne \bot$, $w$ establishes that executing the block with hash $\mathcal{IR}.h_b$ against the state committed by $\mathcal{IR}.h'$ yields the state committed by $\mathcal{IR}.h$.
++\section{Validity}\label{sec:evm-validity}
+ 
+-The type of consistency proof is fixed by partition description record:
++Let $W_e=\sum_{\nu\in\mathcal{V}_e}b_\nu$. Under PoA all $b_\nu=1$. Under PoS the EVM uses exactly the same effective weights as the root assignment that authorizes its shard round. Its attestation threshold is $\lfloor W_e/2\rfloor+1$; the BFT Core consensus threshold is $\lfloor2W_e/3\rfloor+1$. Each distinct authorized signer contributes its weight once. Signature counts cannot substitute for weights in quorum formation, timeout handling or quorum-impossibility reasoning.
+ 
+ \begin{description}
+-	\item[Attested] $w = \bot$. The BFT Core certifies $\mathcal{IR}.h$ when a majority of $\mathcal{V}$ submits identical requests (Sec.~\ref{sec:bft-functional}), each validator having re-executed the block before submitting. The safety assumption is an honest majority of $\mathcal{V}$. For an enshrined partition $\mathcal{V}$ is the BFT Core validator set, whose fault assumption is stronger, so no new trust assumption is introduced.
+-	\item[Proven] $w$ is an execution witness permitting stateless re-execution, or a succinct validity proof (Appendix~\ref{app:bridging-primitives}) of the transition. The BFT Core verifies $w$. The majority rule ensures availability, not safety.
++ \item[Attested.] Each validator executes the full block, including the authenticated system input, before submitting an identical certification request. An honest majority of voting power suffices to establish the execution predicate, while the BFT Core separately orders the requests and selects one extension of the certified parent. With paired assignments and weights, the root's less-than-one-third Byzantine stake assumption implies this majority assumption. Correct execution software remains part of the implementation assumptions.
++ \item[Proven.] A stateless execution witness or succinct proof establishes the same full protocol relation. It binds the network, partition, shard, execution version, parent block and state, authorizing root input and technical record, shard round and assignment, transactions, receipts and resulting block/state hashes. The proof checks privileged-input authentication, header derivation and forced inclusion when enabled. Ordinary EVM execution of caller-chosen system data is insufficient. Root ordering and data availability remain necessary.
+ \end{description}
+ 
+-Both types certify the same relation. A partition may move from one to the other at an epoch boundary.
++The configured proof mode is mandatory. A proven-mode request without its required witness is rejected, not treated as attested. The initial deployment uses attested execution; a proven mode requires a separately activated and reviewed proof relation.
+ 
+ \section{Seal Feed}\label{sec:evm-seal-feed}
+ 
+-The first transaction of every block is the \emph{seal transaction}\index{seal transaction}: a transaction from a reserved system address, consuming no fee, whose payload is $UC_-$. Executing it records in partition state:
+-\begin{itemize}
+-	\item the seal $C^\mathsf{r}_-$: its round $n_r$, epoch $e_r$, time $t_r$, and Unicity Tree root $r$;
+-	\item the set $\mathsf{Signers}(C^\mathsf{r}_-) \subseteq \mathcal{V}^\mathsf{r}_{e_r}$\index{$\mathsf{Signers}$ (seal signer set)} of BFT Core validators whose partial signatures form $C^\mathsf{r}_-.s$, which the signature scheme of the BFT Core exposes (Sec.~\ref{sec:signature-aggregation});
+-	\item the Unicity Trust Base record $T_{e_r}$ of the seal's epoch (when not yet recorded).
+-\end{itemize}
++The \emph{seal feed}\index{seal feed} imports a canonical \emph{root origin} $O_-$ derived from the committed certification statement authorizing the shard round. It identifies the network, root round and epoch, reference time, Unicity Tree root, certified shard input and technical-record commitment. It also imports the committed configuration transitions needed to interpret that origin. Appendix~\ref{app:evm-seal-tx} defines the execution boundary.
++
++Certificates and their signature sets are authentication witnesses. Different valid signature subsets or transport encodings for the same committed statement MUST produce the same $O_-$ and execution result. Signer subsets are not stored as canonical participation data. A certificate proving a different statement is not an interchangeable witness.
+ 
+ \begin{ruledef*}{Seal Transaction} \\
+-	A block whose first transaction is absent, malformed, or records a certificate other than the one each validator received for the previous round is invalid. A validator does not submit a certification request for an invalid block.
++ Before any user transaction, the execution environment performs exactly one protocol system operation with the canonical root input. Its origin, destination, data and position are fixed by protocol. Missing, forged, stale or inconsistent input, or failure of the operation, invalidates the block.
+ \end{ruledef*}
+ 
+-Partition state therefore holds an authenticated copy of the Consensus Layer's recent history: the certified round clock, the per-round signer sets, and the trust base. Contracts and built-in functions read these values. Certificates other than $UC_-$ may additionally be recorded by any transaction that presents a certificate verifying under the recorded trust base.
++The name \emph{seal transaction} includes this protocol operation; it does not mean an ordinary signed zero-price Ethereum transaction. The execution client must implement its privileged origin and fee exemption, deterministic resource limit, and identical replay semantics. The block commits the canonical input; associated authentication witnesses are retained for verification and synchronization. No private key confers the right to originate this operation.
++
++The seal registry records the last imported root round, root epoch, reference time, tree root and certified EVM state, together with authenticated assignment and transition records. An epoch acknowledgement is imported before user transactions in the first EVM block executing under that acknowledged assignment. This can lag root activation and does not claim simultaneity of the clocks.
+ 
+ \begin{ruledef*}{Seal Feed} \\
+-	The Unicity Trust Base, the certified round number, and signer participation available to a contract or built-in function are recorded by seal transactions. No node-local source is consulted.
++ Contracts and builtins obtain protocol authority only from authenticated state written by the system operation. Execution never reads a node-local trust base, clock, file or network response. Permissionless certificate verification cannot advance the privileged root clock or activate a validator set.
+ \end{ruledef*}
+ 
++The feed may skip root rounds but may not silently skip configuration transitions or double-count an imported interval. Bounded catch-up and epoch acknowledgements are specified in Appendix~\ref{app:evm-seal-tx}. A lagging EVM does not block certification of unrelated aggregator shards.
++
+ \section{Validator Set}\label{sec:evm-validators}
+ 
+ \begin{ruledef*}{Enshrined Validator Set} \\
+-	For every BFT Core epoch $e$, the validator set of every shard of the enshrined EVM partition is $\mathcal{V}^\mathsf{r}_e = \{\nu \colon (\nu, b_\nu) \in T_e\}$, and the partition's epoch changes at round $n_e$ of Table~\ref{ta:t-drc}.
++ Each EVM shard round names one root assignment and uses its validator identities and effective weights. A new root assignment becomes the EVM assignment at the committed shard handoff, before its first new proposal is authorized.
+ \end{ruledef*}
+ 
+-The partition's validator assignment records (Chapter~\ref{ch:governance}) are consequently derived from the Unicity Trust Base rather than produced independently. Each BFT Core validator operates one execution node of the partition. The identity of the execution node is the identity of the validator; its signing key may differ and is bound through the validator's registration (Sec.~\ref{sec:gov-pos}).
++The root epoch handoff drains or cancels outstanding governance-shard work and records its last certified block (Sec.~\ref{sec:gov-trust-base}). There is no interval in which a removed set can authorize a new governance block. A canceled proposal is never revived under the new assignment. The shard resumes from the certified parent under the leader selected by the new technical record. Other aggregator assignments change only through their own configuration records.
+ 
+ \section{Native Currency}\label{sec:evm-native-currency}
+ 
+-The native currency of the enshrined partition is \emph{UCT}\index{UCT}\index{native currency}. Transaction fees are paid in it, stakes are bonded in it, and rewards are denominated in it.
+-
+-The total supply is fixed at genesis. Let $S_0$ denote the genesis supply, allocated in full to contracts fixed by the genesis state (Appendix~\ref{app:evm-genesis}). No transition of the partition creates UCT. The only transition that destroys UCT is the protocol base fee of transaction execution. For every certified round $n$,
++UCT is the native currency used for EVM fees, bonded stake and rewards. Its supply $S_0$ is allocated at genesis, including a bounded, disclosed allocation to bootstrap accounts able to pay for initial claims. There is no earlier supply to migrate. Protocol execution creates no additional UCT.
+ \[
+-	\mathsf{Supply}(n) = S_0 - \mathsf{Burn}(n) ,
++ \mathsf{Supply}(n)=S_0-\mathsf{Burn}(n).
+ \]
+-where $\mathsf{Burn}(n)$ is the cumulative base fee consumed up to round $n$. Every other movement of value, including staking rewards, fee distribution, slashing, and bridging (Sec.~\ref{sec:bridge-enshrined}), is a transfer between accounts and preserves $\mathsf{Supply}$.
++Here supply is the sum of native account balances and burn includes every enabled execution rule that actually destroys balance. The initial profile prohibits blob transactions and protocol issuance, and accounts for base-fee burn and any balance destruction permitted by the pinned EVM semantics. Sending value to an inaccessible account is not itself deletion of account balance. Staking rewards are transfers from an allocated pool; slashing transfers to treasury and bridging holds custody.
+ 
+-At the Unicity Execution layer, a wrapped representation of UCT, conforming to the fungible token interface is used. It is a claim on native balance held by the wrapper contract and does not change $\mathsf{Supply}$.
++WUCT is an EVM wrapped-native contract for composability. The Unicity Execution Layer representation is a separate token claim backed by native UCT held in a bridge vault. Neither representation increases native supply, and their backing must not be counted twice.
+ 
+ \section{Built-in Functions}\label{sec:evm-builtins}
+ 
+-The execution environment provides the following functions natively, at fixed addresses (Appendix~\ref{app:evm-builtins}). Each is a pure function of its arguments and of partition state.
+-
++The functions have versioned encodings, fixed addresses and deterministic resource charging (Appendix~\ref{app:evm-builtins}):
+ \begin{description}
+-	\item[$\mathsf{VerifyUnicityCert}$] as in Sec.~\ref{VerifyUnicityCert}, against the trust base recorded by the seal feed. Returns validity, the certified $\mathcal{IR}$, and $\mathsf{Signers}(C^\mathsf{r})$.
+-	\item[$\mathsf{VerifyValidatorSignature}$] verifies one BFT Core validator's partial signature over a consensus vote against the trust base of the vote's epoch, and returns the voted round and state authenticator. This is the primitive of double-signing evidence (Sec.~\ref{sec:gov-slashing}).
+-	\item[$\mathsf{VerifyInclusion}$] the inclusion certificate verification of Sec.~\ref{VerifyInclusionProof} against a supplied root.
++ \item[$\mathsf{VerifyUnicityCert}$] verifies the complete certificate against authenticated trust-base state and returns its network, partition, shard, configuration, root round, epoch and certified input. Reported signers identify included signatures only.
++ \item[$\mathsf{VerifyValidatorSignature}$] verifies a canonical consensus vote, including the signed commitment to its voting metadata, and returns its domain, voting epoch, voting round and conflict identifier.
++ \item[$\mathsf{VerifyInclusion}$] verifies an inclusion proof against an explicitly supplied, authenticated shard root.
+ \end{description}
++Only enabled builtins are callable. Their existence in this specification does not imply activation at TGE.
++
++\section{Execution Evidence and Historical Trust}\label{sec:evm-evidence}
++
++A UC for block $B$ is produced after $B$ is executed. It is stored alongside $B$ as a certificate record, indexed by network, partition, shard and block hash. It cannot be included in the contents determining its own block hash. The next block's root input and the external UC record have different purposes.
++
++An offline event proof includes the header authenticated by the UC's block hash, a receipt-trie proof, transaction and log indices, success status where required, and the emitting address, topics and data. A transaction inclusion proof alone does not establish successful execution. A state proof authenticates account/storage values directly against the certified state root. Appendix~\ref{app:evm-proof-export} defines retention and historical anchoring.
+ 
+-Together these make Unicity Certificates, inclusion proofs, and therefore Unicity tokens (Chapter~\ref{ch:execution-layer}) verifiable by contracts at native cost. The partition and the Execution Layer share one root of trust, so value moves between them by cryptographic verification rather than through a bridge operator (Sec.~\ref{sec:bridge-enshrined}).
++Recent trust-base retention is an execution-state policy, not a complete weak-subjectivity rule. New or long-offline nodes and recipients start from a sufficiently recent trusted checkpoint containing network identity, a committed root/configuration commitment and an authenticated EVM head. They verify subsequent transitions, not an arbitrary history signed by retired keys. Old execution evidence is linked to that trusted history, or refreshed under a recent certified state. An MMR is an optional compression of historical authentication; it is not required for the initial header-chain and state-proof paths.
+diff --git a/execution-layer.tex b/execution-layer.tex
+index 62f4220..b1ee573 100644
+--- a/execution-layer.tex
++++ b/execution-layer.tex
+@@ -613,11 +613,11 @@ The vault verifies the proof, checks $h_\mathsf{cfg}$ and that $h_\mathcal{T}$ i
+ 
+ \subsection{Enshrined Settlement Chain}\label{sec:bridge-enshrined}
+ 
+-When the settlement chain $\chi$ is an enshrined EVM partition of the same network (Chapter~\ref{ch:evm}), then there are following simplifications.
++When the settlement chain is an enshrined EVM partition of the same network (Chapter~\ref{ch:evm}), a lock is authenticated by a Unicity Certificate and an account/storage proof. There is no external-chain confirmation wait or independently trusted bridge operator. Recipients still authenticate the root history from their checkpoint and require available proof data.
+ 
+-No wait for external finality. A lock recorded in the partition's state is final once the round containing it is certified, since a certified block cannot be reorganised. The oracle $\Call{LockFinal}{}$ is realized by verifying a Unicity Certificate of the partition against $\mathcal{T}$ together with a state proof of the lock record under the certified state root $UC.\mathcal{IR}.h$. Both are present in the backing reason, so it is self-contained, and every recipient verifies it against their existing trust base.
++The immutable mint reason references the lock; a separately carried witness may be refreshed under a recent certified EVM state without changing the token. The vault reads its trust-base context from the mandatory system feed. Direct and succinct redemption implement the same admitted relation, subject to different resource limits. The initial enshrined type restricts operations as specified in Appendix~\ref{app:bridging-enshrined}; no unsupported split or history may be admitted on a promise of a future verifier.
+ 
+-The vault holds $\mathcal{T}$ in its contract state (Sec.~\ref{sec:evm-seal-feed}) and verifies certificates natively (Sec.~\ref{sec:evm-builtins}). The allow-list of trust base hashes is replaced by the recorded trust base bounded by the weak-subjectivity window, and the return relation may be evaluated by the vault directly, one burn at a time under a verification budget, with the succinct proof retained for token histories that exceed it. Solvency, replay-freeness and authenticity hold as in Sec.~\ref{sec:bridge-security}, and custody preserves $\mathsf{Supply}$ (Sec.~\ref{sec:evm-native-currency}).
++Native custody, outstanding backing and unpaid withdrawal credits are accounted separately. Neither WUCT nor the Execution-layer claim adds native supply. Appendix~\ref{app:bridging-enshrined} specifies the proof hierarchy, checkpoint handling and liability equations.
+ 
+ The full data structures, the proving relation, the settlement procedure, and the batched proving mechanism are in Appendix~\ref{app:bridging}.
+ 
+diff --git a/governance.tex b/governance.tex
+index 5c47562..dacce55 100644
+--- a/governance.tex
++++ b/governance.tex
+@@ -1,144 +1,117 @@
+ \chapter{Introduction}
+ 
+-By \emph{governance}\index{governance}, we mean the operational management and re-configuration of a running Unicity Platform instance: the validator sets of the BFT Core and of the partitions, the lifecycle of partitions and shards, incentives to participants, and updates to the system. Governance parameters and algorithms change only through governance.
+-
+-Governance is architected in a modular way. The \emph{Governance Body}\index{Governance Body} is an abstract entity that produces change records consumed by the rest of the platform. It may implement different mechanisms, Proof of Authority or Proof of Stake, behind the same record formats. The Governance Body implements a number of independent \emph{Governance Processes}\index{Governance Process}, each defined by the records it produces.
+-
+-On the Unicity mainnet the Governance Body is instantiated as a set of contracts hosted by the enshrined EVM partition (Chapter~\ref{ch:evm}), called the \emph{governance partition}\index{governance partition} in this chapter. Its state is certified by the BFT Core every round, and the BFT Core's own seals are fed back into it, so the two layers observe each other through certified data alone.
++Governance manages validator assignments, partition configurations, incentives and protocol upgrades. The \emph{Governance Body}\index{Governance Body} produces authenticated change records. Under PoA these originate from a disclosed authority; under PoS they are outputs of contracts executing on the enshrined governance EVM shard (Chapter~\ref{ch:evm}). Root consensus adopts valid changes; possession of an agent key or access to a configuration API is not a separate authority to choose the set.
+ 
++The initial public currency deployment may remain under PoA. Authoritative PoS is activated only after weighted consensus, the epoch handoff, objective slashing, retirement protection, forced inclusion and checkpoint recovery are enabled and validated together. Merely running staking contracts or observing their output in shadow mode does not activate PoS.
+ 
+ \chapter{Data Flow}
+ 
+-This chapter describes the ``control plane'' of the Unicity Distributed Machine, complementing the ``data plane'' of user transaction processing.
+-
+ \section{Governance Body}
+ 
+-The Governance Body manages the configuration of a Unicity Network. It produces \emph{change records}\index{change record}, whose formats per Governance Process are documented in Chapter~\ref{ch:gov-processes}. A change record becomes effective when the component it addresses adopts it at an epoch boundary (Sec.~\ref{sec:bft-epoch-change}).
+-
+-\subsection{How a Validator joins a Partition}
+-
+-Validators rely on \emph{configuration agents}\index{configuration agent} for performing steps that involve user-level communication with other partitions and shards. The process works like this:
+-
+-\begin{itemize}
+-	\item The configuration agent detects a new change record it is involved with, and learns the partition identifier and shard identifier.
+-	\item The configuration agent obtains the current epoch number from the shard.
+-	\item The configuration agent obtains the change records from the current one to the joining one, if not yet known.
+-	\item The configuration agent activates the node process, providing the necessary configuration.
+-	\item The node continues as described in Sec.~\ref{sec:shard-node-joining}.
+-\end{itemize}
++Each BFT Core operator runs a paired execution node. A configuration agent may obtain certified records, proofs and state snapshots from any available source. It verifies these inputs before proposing a change or starting a joining node (Sec.~\ref{sec:shard-node-joining}). Proof verification itself does not require an execution client; producing and validating EVM blocks does.
+ 
+ \section{Information Flows}\label{sec:gov-flows}
+ 
+-Four flows connect the governance partition to the rest of the platform. Each is authenticated by certified data, and none relies on a trusted intermediary.
+-
+ \begin{description}
+-	\item[Seal feed] Consensus Layer to governance partition. Every block of the governance partition records the Unicity Seal of the partition's previous round, its signer set, and the trust base of the seal's epoch (Sec.~\ref{sec:evm-seal-feed}). This is the source of the certified round clock, of participation accounting (Sec.~\ref{sec:gov-rewards}), and of the trust base used by built-in verification.
+-	\item[Validator assignment] Governance partition to Consensus Layer. The elected validator set of the next epoch is committed in the certified state of the governance partition. Each BFT Core validator reads and verifies it against a state root it has itself certified, and co-signs the resulting Unicity Trust Base record (Sec.~\ref{sec:gov-trust-base}). No validator requires an execution node for this step.
+-	\item[Evidence] Consensus Layer to governance partition. A validator that observes conflicting consensus votes submits them as a transaction; verification is by built-in function (Sec.~\ref{sec:gov-slashing}). Submission is permissionless.
+-	\item[Value] Between the governance partition and the Execution Layer, in both directions, by lock on the partition and mint on the Execution Layer, and by burn on the Execution Layer and release on the partition (Sec.~\ref{sec:bridge-enshrined}).
++ \item[Root origin and acknowledgement.] The root sends certified progress, configuration transitions and the governance-shard assignment through the mandatory state feed. EVM clocks observe root progress at EVM execution boundaries, not at every root tick.
++ \item[Candidate and adoption.] Contracts commit an election candidate in EVM storage. An agent supplies its body and state proof to the root, which validates the certified output and commits the handoff. The root's adoption acknowledgement returns through the feed.
++ \item[Evidence.] Anyone may submit authenticated conflicting consensus votes to the slashing contract. A bounded forced-inclusion path protects access against an EVM producer.
++ \item[Value.] Native UCT is locked in a vault to back Execution-layer tokens, and certified burns authorize release credits (Sec.~\ref{sec:bridge-enshrined}).
+ \end{description}
+ 
+-A fifth flow, \emph{forced inclusion}\index{forced inclusion}, protects the second and third: a transaction addressed to the governance partition may be submitted to the BFT Core, which commits an ordered digest of pending submissions into the data it certifies; a block of the governance partition that omits a due submission is invalid (Appendix~\ref{app:gov-forced-inclusion}). A block producer therefore cannot control the validator set by withholding transactions.
+-
++The feed does not infer missing votes from a quorum signature subset. A future performance-accounting flow requires a separately specified root-certified duty record with completeness and challenge rules. It is not part of the initial reward or slashing mechanism.
+ 
+ \chapter{Governance Mechanisms}
+ 
+ \section{Proof of Authority}\label{sec:gov-poa}
+ 
+-Under \emph{Proof of Authority}\index{PoA (Proof of Authority)}, the validator sets are fixed by a permissioned entity, every stake $b_\nu$ equals $1$, and the Governance Body's records are produced by that entity. The reward and fee mechanisms of Sections~\ref{sec:gov-rewards} and~\ref{sec:gov-fees} apply unchanged, with equal weights.
++The authority specifies the validator set and all effective weights are $1$. Configuration changes still use the committed handoff and authenticated acknowledgement. The authority, its scope and any emergency procedure are disclosed at launch. PoA does not claim stake-backed accountability.
+ 
+ \section{Proof of Stake}\label{sec:gov-pos}
+ 
+-\emph{Proof of Stake}\index{PoS (Proof of Stake)} bases the right to validate on a bonded amount of the native currency UCT (Sec.~\ref{sec:evm-native-currency}), so that acquiring voting power has a capital cost and misbehaviour has a capital penalty. Voting power is proportional to bonded stake: the quorum of an epoch is a sum of stakes, $k_e > \tfrac{2}{3}\sum_\nu b_\nu$ for the BFT Core.
++Let $b_\nu$ be a validator's effective bonded voting weight in the epoch snapshot and $W_e=\sum_\nu b_\nu$. Root consensus requires $\lfloor2W_e/3\rfloor+1$ weight; the paired EVM predicate attestation requires $\lfloor W_e/2\rfloor+1$. The same identity can contribute only once to either threshold. Identity count and stake cannot be mixed. Minimum self-bond filters eligibility but is not used to prove a majority of seats from a stake assumption.
+ 
+ \subsection{Stake Registry}
+ 
+-The \emph{stake registry}\index{stake registry ($\mathcal{G}$)} $\mathcal{G}$ is part of the state of the governance partition. For each registered validator $\nu$ it records the consensus public key $\mathsf{pk}_\nu$, the self-bonded stake $b^\mathsf{self}_\nu$, the delegated stake $b^\mathsf{del}_\nu$, and a status in $\{\textsc{active}, \textsc{jailed}, \textsc{exiting}\}$. The bonded stake of $\nu$ is $b_\nu = b^\mathsf{self}_\nu + b^\mathsf{del}_\nu$.
++The registry $\mathcal{G}$ binds a stable staking account to owner and consensus-key roles, bonded self-stake, delegated shares when delegation is enabled, and status. Registration proves possession of each signing key and uniqueness of active key bindings. Node identifiers and key rotation follow a pinned mapping. Historical bindings survive rotation and exit for accountability.
+ 
+-The registry changes only by transactions of the governance partition:
+-\begin{description}
+-	\item[Register] binds a validator identity to a consensus key and an owner account, with $b^\mathsf{self}_\nu \ge b_\mathsf{min}$.
+-	\item[Bond, Delegate] increase $b^\mathsf{self}_\nu$ or $b^\mathsf{del}_\nu$ by transfer of UCT into the registry.
+-	\item[Unbond] moves stake into an unbonding queue; it becomes withdrawable after $\Delta_\mathsf{unbond}$ certified rounds and remains slashable until then.
+-	\item[Rotate] replaces $\mathsf{pk}_\nu$; the new key takes effect at the next epoch.
+-	\item[Unassign] marks $\nu$ as exiting; it is excluded from the next election.
+-\end{description}
+-Delegated stake is accounted per validator by shares, so that rewards and slashing apply proportionally to delegators, less a commission fixed by the validator and bounded by governance.
++Bonding changes available collateral. Election fixes the effective weight and reserves the corresponding collateral for that assignment. An unbond request queues an exit; it cannot release collateral backing an active or committed future assignment. Slashing applies to that collateral and its attributable unbonding shares, not merely the account's current free balance. Delegation and commission rules must preserve proportional loss and historical entitlement through rotations and exits. The first PoS deployment MAY disable delegation and use self-bond only.
+ 
+ \subsection{Election}\label{sec:gov-election}
+ 
+-Epoch $e$ of the BFT Core has a \emph{snapshot round}\index{snapshot round ($S_e$)} $S_e$ and an \emph{activation round}\index{activation round ($A_e$)} $A_e = S_e + \Delta_\mathsf{act}$, both certified round numbers. At round $S_e$ the governance partition evaluates the election function on the registry:
+-\[
+-	(\{\nu, b_\nu\}_{e+1},\; k_{e+1}) = \mathsf{Elect}(\mathcal{G}_{S_e}) ,
+-\]
+-where $\{\nu, b_\nu\}_{e+1}$ consists of the at most $N_\mathsf{max}$ active validators with $b^\mathsf{self}_\nu \ge b_\mathsf{min}$, ordered by $b_\nu$ descending with ties broken by $\nu$, and $k_{e+1} = \lfloor \tfrac{2}{3}\sum b_\nu \rfloor + 1$. $\mathsf{Elect}$ is a pure function of $\mathcal{G}_{S_e}$; stake changes after $S_e$ take effect in epoch $e+2$.
++Each epoch schedules a snapshot threshold $S_e$ in certified root rounds. The snapshot operation runs automatically after root-origin import and before user transactions in the first EVM block whose imported root round is at least $S_e$. It snapshots the pre-user registry at that boundary, including deterministic protocol effects ordered before it. It does not require a block at exactly $S_e$.
+ 
+-The result is committed as the \emph{candidate record}\index{candidate record}
+-\[
+-	c_{e+1} = (\alpha,\; e+1,\; A_e,\; \{\nu, b_\nu\}_{e+1},\; k_{e+1},\; h_e), \qquad h_e = H(T_e) ,
+-\]
+-and its hash $h_c = H(c_{e+1})$ is written to a fixed location of the governance partition's state (Appendix~\ref{app:gov-candidate}).
++Election selects at most $N_\mathsf{max}$ eligible validators by effective stake descending, with ties broken by canonical identity bytes. An empty or below-minimum safe set is rejected and the incumbent assignment persists. The candidate commits the snapshot's shard round and observed root round, the next epoch, configuration version, complete identity/key/weight records, thresholds and predecessor trust-base body hash. Its hash is written to a fixed slot and its body is made available (Appendix~\ref{app:gov-candidate}).
++
++The candidate includes an earliest activation bound, not a prediction of the actual activation round. Only one candidate is pending for an epoch. Stake changes after the snapshot do not modify it. Cancellation or replacement requires a root-certified abort of any prepared handoff and an EVM acknowledgement that releases its reservations. An agent cannot choose whichever historical candidate it prefers.
+ 
+ \begin{ruledef*}{Epoch Extension} \\
+-	If no Unicity Trust Base record $T_{e+1}$ is committed by round $A_e$, epoch $e$ continues under $T_e$. A later candidate is issued with a fresh activation round.
++ Until a successor handoff is committed, the incumbent set remains authoritative. Extension does not make its collateral withdrawable. A timeout never installs a successor or unlocks stake by local decision.
+ \end{ruledef*}
+ 
++An extension alert is operational information, not a promised upper bound on finality. Under loss of the root quorum, neither governance execution nor forced inclusion can guarantee recovery. Recovery then follows the disclosed checkpoint/emergency procedure, without pretending that a stalled chain can slash itself into progress.
++
+ \section{Trust Base Derivation}\label{sec:gov-trust-base}
+ 
+-The Unicity Trust Base record of epoch $e+1$ (Table~\ref{ta:t-drc}) is derived from the candidate by every BFT Core validator of epoch $e$ independently:
++The root handoff is an ordered state transition, with these requirements:
+ \begin{enumerate}
+-	\item Obtain a Unicity Certificate $UC$ of the governance partition certifying a state root $h$ at a round no earlier than $S_e$. The validator co-signed this certificate; no execution node is required.
+-	\item Verify by state proof (Appendix~\ref{app:bridging-enshrined}) that the fixed location holds $h_c$ under $h$, and that $H(c_{e+1}) = h_c$.
+-	\item Construct $T_{e+1}$ from $c_{e+1}$ per Appendix~\ref{app:gov-trust-base}, with $h_\mathsf{cr} = h_c$ and $h_e = H(T_e)$.
+-	\item Sign $T_{e+1}$ and exchange signatures with the other validators of epoch $e$.
++ \item Verify the governance UC, network/partition/configuration binding, candidate body and storage proof. Require the expected predecessor, next epoch and pending candidate. The certified contract output is authoritative; root validators do not independently rerun the staking algorithm.
++ \item Commit a prepare record under the old root quorum. Close admission of new old-assignment governance proposals and drain or cancel in-flight work. Record the last certified EVM block/state and the frozen root state summary. Other aggregator shards retain their independent assignments.
++ \item Construct the next trust-base body from this agreed boundary and candidate. Its activation condition and state summary are determined by the root handoff, not by an agent's local clock or an unknown future EVM state. Old validators endorse only that agreed body, with a domain-separated signature and durable non-equivocation protection.
++ \item Commit the endorsed handoff under the old consensus rules, binding the new trust-base body, actual activation boundary and successor technical record. The selected protocol version must specify how activation follows this commit and how the endorsement is bound to that boundary. A locally submitted trust base cannot activate merely because a round counter reaches its proposed start.
++ \item The new root set resumes from the certified handoff state. The next governance proposal uses the new assignment and last certified EVM parent. Its mandatory system operation acknowledges the handoff before user transactions, closing the old assignment's liabilities.
+ \end{enumerate}
+-When signatures of validators holding at least $k_e$ of the stake of epoch $e$ are assembled, the record is submitted as the BFT Core epoch change (Sec.~\ref{sec:bft-epoch-change}). Because construction is deterministic, all honest validators produce byte-identical records and signatures compose without further coordination.
+ 
+-The derivation is the induction step of the chained trust base: $T_{e+1}$ is computed from state certified under $T_e$ and signed by a quorum of $T_e$. Its security is that of the chain of records (Sec.~\ref{protocol-get-trust-base}), and relying parties bound the age of the records they accept by the weak-subjectivity window $\Delta_\mathsf{ws}$ (Sec.~\ref{sec:gov-invariants}).
++An incomplete prepare may be aborted only by an old-quorum committed abort; conflicting prepare, abort and activate records cannot all become effective. If old quorum is unavailable after preparation, safety takes precedence over progress. Joining nodes must synchronize the certified root and EVM states before their votes count. A production version needs an explicit handoff state machine and safety/liveness validation, including crash points; these requirements do not assume the current REST intake already implements it.
++
++Trust-base identity is the hash of its canonical body excluding endorsement signatures in the new protocol version. Proofs authenticate that body; valid signature subsets do not change its identity. Legacy formats retain their legacy verification rules and cannot be silently reinterpreted. Appendix~\ref{app:gov-trust-base} defines the body mapping.
+ 
+ \section{Rewards}\label{sec:gov-rewards}
+ 
+-Rewards are paid to BFT Core validators for participation in consensus, measured from the seals recorded by the seal feed. For epoch $e$ let $N_e$ be the number of seals with $e_r = e$ recorded, and for validator $\nu$ let
++The initial policy rewards assigned root voting weight, not measured availability. For a closed reward interval $I$ wholly within one acknowledged assignment $e$,
+ \[
+-	p_\nu(e) = \bigl|\{\, C^\mathsf{r} \colon C^\mathsf{r}.e_r = e \;\land\; \nu \in \mathsf{Signers}(C^\mathsf{r}) \,\}\bigr|
++ R_\nu(I)=\mathcal{E}(I)\frac{b_\nu}{W_e},\qquad
++ \mathcal{E}(I)=\min(\rho_e\,|I|,\mathsf{Pool}_{\mathsf{free}}),
+ \]
+-be its \emph{participation}\index{participation ($p_\nu$)}. With weight $w_\nu = 1$ under Proof of Authority and $w_\nu = b_\nu$ under Proof of Stake, the entitlement of $\nu$ for epoch $e$ is
+-\[
+-	R_\nu(e) = \mathcal{E}(e) \cdot \frac{w_\nu\, p_\nu(e)}{\sum_{\mu} w_\mu\, p_\mu(e)} ,
+-	\qquad
+-	\mathcal{E}(e) = \min\bigl(\mathcal{E}_\mathsf{sched}(e),\; \mathsf{Pool}(e)\bigr) ,
+-\]
+-where $\mathcal{E}_\mathsf{sched}$ is the emission schedule and $\mathsf{Pool}(e)$ the balance of the \emph{emission pool}\index{emission pool}, a contract funded at genesis. Emission is release from the pool, never creation, and stops when the pool is exhausted. The fee share of Sec.~\ref{sec:gov-fees} is distributed by the same formula.
++where $\rho_e$ is the governed release per certified root round, $|I|$ counts root-round progress, and $\mathsf{Pool}_{\mathsf{free}}$ excludes already credited liabilities. PoA uses unit weights. Boundaries split intervals when assignment or rate changes. Skipped root rounds are accounted as one interval; retries never accrue it twice. Idle assigned validators can receive this reward, an explicit limitation of the initial policy.
++
++Fees observed by the EVM are accounted to the assignment active in the block that receives them, including deterministic handling of fees in the closing block. Emission and fee credits use integer arithmetic; rounding remainder remains in its source pot. Settlement is idempotent, bounded and permissionless, and cannot process an unacknowledged future interval. Claims use checks-effects-interactions and reentrancy protection. No recipient's failing claim blocks another recipient.
+ 
+-Entitlements accrue in partition state and are withdrawn by the validator; no payout is pushed. Delegators receive their share through the validator's share accounting less commission. Because participation is measured from seals, the same mechanism applies under Proof of Authority and Proof of Stake, differing only in $w_\nu$.
++A quorum seal identifies some signers, not everyone who performed a duty. Neither its omitted signers nor the subset of root rounds sampled by the EVM establishes downtime. Performance rewards require a future separately activated accounting protocol.
+ 
+ \section{Slashing}\label{sec:gov-slashing}
+ 
+-Two kinds of \emph{evidence}\index{slashing!evidence} are recognised:
+-\begin{description}
+-	\item[Double signing] two partial signatures of $\nu$ over conflicting consensus votes of the same round, each verified by $\mathsf{VerifyValidatorSignature}$ (Sec.~\ref{sec:evm-builtins}). Submission is permissionless and rewarded by a bounty.
+-	\item[Downtime] $p_\nu(e) < \theta \cdot N_e$ for a completed epoch $e$, established from partition state without external input.
+-\end{description}
+-On accepted evidence a fraction of $b_\nu$, fixed per evidence kind, is transferred to the \emph{treasury}\index{treasury} and $\nu$ is jailed until it re-registers after $\Delta_\mathsf{jail}$ rounds. Double-signing evidence is accepted within $\Delta_\mathsf{ev}$ rounds of the offending round.
++Initial PoS supports objective double-signing evidence over the precise vote domain in Appendix~\ref{app:gov-evidence}. Anyone may submit evidence; the forced inbox can preserve a timely commitment while execution is delayed. Accepted evidence charges the attributable active or retiring collateral once, credits a bounded submitter bounty and transfers the remainder to treasury. Jailing excludes the validator from future elections; its current consensus weight changes only at a committed handoff.
++
++Downtime slashing and automatic jailing for absence from seal signatures are disabled. A future mechanism must specify duties, deadlines, accountable delivery, evidence availability and challenges before any absence-based penalty is enabled.
+ 
+ \begin{ruledef*}{Slashed Stake} \\
+-	Slashed stake is transferred, never destroyed. $\mathsf{Supply}$ (Sec.~\ref{sec:evm-native-currency}) is unaffected by slashing.
++ Slashing transfers collateral and never creates or destroys native UCT. Key rotation, delegation changes and queued withdrawals cannot remove liability for an earlier attributable offense.
+ \end{ruledef*}
+ 
+ \section{Fees}\label{sec:gov-fees}
+ 
+-The priority fee of every transaction of the governance partition is paid to the \emph{fee collector}\index{fee collector} contract named as fee recipient in every block (Sec.~\ref{sec:evm-round-params}). The collector splits its balance between the reward pot and the treasury in a proportion fixed by governance. The base fee is destroyed by the execution environment and is the only sink of $\mathsf{Supply}$.
++The configured fee collector receives priority fees through protocol balance accounting; receiving those credits does not call its contract code. Permissionless settlement splits attributable receipts between the reward pot and treasury. Unexpected transfers are accounted separately. Base fees and any other enabled native-balance destruction are included in the supply accounting of Sec.~\ref{sec:evm-native-currency}. A positive base-fee floor is a custom execution validity rule, not merely a genesis initial value.
+ 
+ \section{Economic Invariants}\label{sec:gov-invariants}
+ 
+-The Governance Body rejects any parameter change that would violate the following. Round-denominated quantities are certified BFT Core rounds.
++Governance checks parameter proposals when submitted, when executed and at each affected election, activation or withdrawal. Parameter changes cannot shorten protection already attached to collateral or bypass pending evidence.
+ \begin{enumerate}
+-	\item $\Delta_\mathsf{unbond} > \Delta_\mathsf{ev} + \Delta_\mathsf{down} + \Delta_\mathsf{ext}$, where $\Delta_\mathsf{down}$ is the downtime window and $\Delta_\mathsf{ext}$ the maximum tolerated epoch extension. Stake that misbehaved while active is still bonded when evidence can be presented.
+-	\item $\Delta_\mathsf{unbond} > \Delta_\mathsf{ws}$. A validator cannot exit before the last trust base it signed leaves the window in which relying parties still accept it.
+-	\item $\dfrac{\sum_\nu b_\nu}{3\, b_\mathsf{min}} < \left\lfloor \dfrac{N}{2} \right\rfloor + 1$ for the elected size $N$. An adversary bounded to one third of stake cannot occupy a majority of seats, so the attested instantiation of Sec.~\ref{sec:evm-validity} keeps its honest-majority precondition.
+-	\item $\mathcal{E}(e) \le \mathsf{Pool}(e)$, enforced by construction in Sec.~\ref{sec:gov-rewards}.
++ \item A collateral reservation ends only after an authenticated acknowledgement that the stake no longer backs any active or prepared successor assignment. Let $R_\mathsf{ret}$ be that acknowledged retirement round.
++ \item The earliest withdrawal is after $R_\mathsf{ret}+\Delta_\mathsf{hold}$. Require $\Delta_\mathsf{hold}>\Delta_\mathsf{ev}+\Delta_\mathsf{incl}+\Delta_\mathsf{exec}$, with all values in certified root rounds. The latter two are inclusion and processing allowances under the stated liveness assumptions. Unresolved timely evidence or an unprocessed inbox watermark blocks withdrawal even if these allowances are exceeded.
++ \item Live certificate admission uses a round-denominated window $W_\mathsf{cert}\le\Delta_\mathsf{ev}<\Delta_\mathsf{hold}$. It verifies that the signer epoch was active at the claimed root round and that the round is not ahead of the imported origin. Historical authentication outside this window requires an authenticated checkpoint/ancestry path, not signatures of expired keys alone.
++ \item Evidence verification keys remain available until every associated evidence and retirement obligation is discharged, even when they leave the ordinary certificate-admission cache. Retention is bounded by governed validator/transition/evidence limits and must not be curtailed to permit withdrawal.
++ \item Positive weights, key uniqueness, minimum eligible set, checked total-weight arithmetic and the exact root/shard thresholds hold at every activation. Weight units and rounding are fixed by configuration.
++ \item Emission plus outstanding credits never exceeds its allocated pool; rewards, treasury and bridge liabilities cannot spend one another's backing.
+ \end{enumerate}
+ 
++The weak-subjectivity checkpoint freshness limit is a client policy measured in elapsed time, derived from the minimum real-time protection implied by configured round pacing and collateral retention. Changing pacing, churn or protection requires re-evaluating this limit. It is distinct from $W_\mathsf{cert}$ and the number of keys cached in EVM state. No safety claim relies on an unbounded epoch having a fixed duration.
++
++\section{Upgrade and Delivery Boundaries}\label{sec:gov-delivery}
++
++Money custody, withdrawal accounting, allocation, wrapper and vault contracts are immutable in the initial profile. Stake custody and its fixed slash/exit rules are separated from election policy; changing policy cannot grant arbitrary withdrawal or arbitrary slashing authority. Policy changes have bounded permissions and timelocks. Changes to execution semantics, encodings, immutable custody or the proof relation require a versioned protocol upgrade or a new deployment with an explicit migration path. Parameter governance is not a treasury spending key.
++
++PoA/TGE, bridge activation and authoritative PoS are separate gates. Bridge launch requires redemption for every token shape the launched token type admits; an unavailable succinct path cannot be used to promise redemption beyond a direct verifier's limits. Future execution proofs, delegation, performance rewards and downtime penalties are optional upgrades, not implicit guarantees of the initial release.
+ 
+ \chapter{Governance Processes}\label{ch:gov-processes}
+ 
+@@ -169,7 +142,7 @@ Fields 2 and 3 are absent for a record addressing the BFT Core. The assignment o
+ 
+ If a shard or partition stops operating at the start of an epoch, the corresponding record has empty validator and quorum fields ($\{\nu, b_\nu\}_e = \bot \land k_e = \bot$). At all other times these fields are present.
+ 
+-The Epoch Switching Condition is a certified round number: $\varphi_e = (n_r \ge A_e)$ for the BFT Core, and a shard round number for a shard.
++The Epoch Switching Condition for the BFT Core is the committed handoff of Sec.~\ref{sec:gov-trust-base}. A proposed root round is only an earliest activation bound. Shard switching is authorized by its committed technical record and assignment, not inferred from a local root clock.
+ 
+ Quorum size is a sum of stakes. For the BFT Core, $k_e > \tfrac{2}{3}\sum b_\nu$. For a shard, $k_e > \tfrac{1}{2}\sum b_\nu$, since a shard attests to a predicate that the BFT Core orders and counts, for which an honest majority suffices.
+ 

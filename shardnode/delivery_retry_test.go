@@ -1,0 +1,564 @@
+package shardnode
+
+import (
+	"bytes"
+	"context"
+	"crypto"
+	"crypto/sha256"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
+	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
+	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
+)
+
+// retryExecutor holds a block that is present but not yet canonical, and can be made to report it
+// unavailable — the difference between "the executor does not have the payload" and "it rejected
+// the payload", which is what the retry contract turns on. Written in-package for the same reason
+// as steadyExecutor: executortest imports shardnode.
+type retryExecutor struct {
+	mu        sync.Mutex
+	head      BlockRef
+	held      map[string]BlockRef
+	available bool
+	queued    []byte
+	commits   []Hash
+}
+
+func (e *retryExecutor) Head(context.Context) (BlockRef, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.head, nil
+}
+
+func (e *retryExecutor) GenesisBlock(context.Context) (BlockRef, error) {
+	return BlockRef{Number: 0, Hash: []byte{0x00}, StateRoot: []byte{0x00}}, nil
+}
+
+func (e *retryExecutor) Commit(_ context.Context, hash Hash) (Status, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.commits = append(e.commits, hash)
+	if bytes.Equal(e.head.Hash, hash) {
+		return StatusValid, nil // already canonical: idempotent by contract
+	}
+	if !e.available {
+		return StatusSyncing, nil // unavailable, not invalid — retryable
+	}
+	b, ok := e.held[string(hash)]
+	if !ok {
+		return StatusSyncing, nil
+	}
+	e.head = b
+	return StatusValid, nil
+}
+
+func (e *retryExecutor) Build(context.Context, RoundParams) (BuildID, error) { return "b", nil }
+
+// Seal returns a candidate that CHANGES when the executor's queue does, which is what a real
+// executor does between one round attempt and the next. A replay that rebuilds instead of re-sending
+// therefore produces different bytes, and a test can see it.
+func (e *retryExecutor) Seal(context.Context, BuildID) (Block, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.queued) == 0 {
+		return Block{Number: e.head.Number, Hash: e.head.Hash, StateRoot: e.head.StateRoot, ParentHash: e.head.Hash}, nil
+	}
+	sum := sha256.Sum256(append(append([]byte(nil), e.head.StateRoot...), e.queued...))
+	return Block{
+		Number: e.head.Number + 1, Hash: sum[:], StateRoot: sum[:], ParentHash: e.head.Hash,
+		Raw: e.queued, BlockSize: uint64(len(e.queued)),
+	}, nil
+}
+
+// queue makes the next candidate different, the way an arriving transaction would.
+func (e *retryExecutor) queue(b []byte) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.queued = append(e.queued, b...)
+}
+
+func (e *retryExecutor) Verify(context.Context, Block, RoundParams) (Status, error) {
+	return StatusValid, nil
+}
+
+func (e *retryExecutor) makeAvailable() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.available = true
+}
+
+func (e *retryExecutor) snapshot() (BlockRef, int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.head, len(e.commits)
+}
+
+// refusingSubmitter is a transport that never delivers, recording what it was asked to send.
+type refusingSubmitter struct {
+	mu   sync.Mutex
+	sent []*certification.BlockCertificationRequest
+}
+
+func (s *refusingSubmitter) Submit(_ context.Context, req *certification.BlockCertificationRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sent = append(s.sent, req)
+	return errors.New("transport failure")
+}
+
+func (s *refusingSubmitter) requests() []*certification.BlockCertificationRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*certification.BlockCertificationRequest(nil), s.sent...)
+}
+
+// countingDriver wraps a RoundDriver and counts deliveries, so a test can distinguish "the handler
+// dropped it" from "the driver ran and failed".
+type countingDriver struct {
+	inner RoundDriver
+	mu    sync.Mutex
+	calls int
+}
+
+func (d *countingDriver) HandleCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
+	d.mu.Lock()
+	d.calls++
+	d.mu.Unlock()
+	return d.inner.HandleCertificate(ctx, uc, tr)
+}
+
+func (d *countingDriver) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.calls
+}
+
+/*
+TestFailedDeliveryIsRetriedByDuplicate drives the REAL handler and a REAL Round through the sequence
+the retry contract is written for (design §5): an authenticated certificate whose application fails
+because the executor does not yet have the payload, the retransmissions that follow, the payload
+becoming available, and recovery to the exact certified head.
+
+The gap it closes. handleCertificationResponse advances `c.luc` — the observation cursor — before
+calling the driver, and returned early for every UCDuplicate. So a driver failure left the cursor
+ahead of what was actually applied, and the retransmission that would retry it was classified a
+duplicate and dropped: the failure was never retried by any route, and the node stayed behind while
+holding, or about to hold, the very block it needed. Observed and applied are different facts and
+only the first had a cursor.
+
+The other half matters as much: a duplicate arriving after a SUCCESSFUL delivery must still be
+dropped, or a node would drive — and sign — a completed round twice. The last step asserts that.
+*/
+func TestFailedDeliveryIsRetriedByDuplicate(t *testing.T) {
+	ctx := context.Background()
+
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	tb, ok := testtrustbase.NewTrustBase(t, signer).(*types.RootTrustBaseV1)
+	require.True(t, ok)
+	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: authPartitionID}
+	confHash, err := pdr.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	zero := make([]byte, 32)
+
+	s0 := bytes.Repeat([]byte{0xc0}, 32)
+	s1 := bytes.Repeat([]byte{0xc1}, 32)
+	b0 := bytes.Repeat([]byte{0xd0}, 32)
+	b1 := bytes.Repeat([]byte{0xd1}, 32)
+
+	technicalFor := func(round uint64) *certification.TechnicalRecord {
+		return &certification.TechnicalRecord{Round: round, Epoch: 0, Leader: "retry-node", StatHash: zero, FeeHash: zero}
+	}
+	trHash, err := technicalFor(6).Hash()
+	require.NoError(t, err)
+	ir5 := &types.InputRecord{
+		Version: 1, RoundNumber: 5, PreviousHash: s0, Hash: s1, BlockHash: b1,
+		SummaryValue: []byte{}, Timestamp: 1,
+	}
+	uc5 := testcertificates.CreateUnicityCertificate(t, signer, ir5, pdr, 41, zero, trHash)
+
+	// The executor is one certified block behind and does not yet have the payload.
+	exec := &retryExecutor{
+		head:      BlockRef{Number: 4, Hash: b0, StateRoot: s0},
+		held:      map[string]BlockRef{string(b1): {Number: 5, Hash: b1, StateRoot: s1}},
+		available: false,
+	}
+	sub := &countingSubmitter{}
+	round := NewRound("retry-node", authPartitionID, types.ShardID{}, exec, NewLoopbackDisseminator(), signer, sub, nil)
+	drv := &countingDriver{inner: round}
+
+	client := &BFTClient{
+		partitionID:    authPartitionID,
+		shardID:        types.ShardID{},
+		shardConfHash:  confHash,
+		nodeID:         "retry-node",
+		trustBaseStore: stubTrustBaseStore{tb: tb},
+		driver:         drv,
+	}
+	respond := func(uc *types.UnicityCertificate) *certification.CertificationResponse {
+		return &certification.CertificationResponse{
+			Partition: authPartitionID, Shard: types.ShardID{}, Technical: *technicalFor(6), UC: *uc,
+		}
+	}
+
+	// 1. First delivery: authenticated, observed, and it fails to apply — the payload is not there.
+	err = client.handleCertificationResponse(ctx, respond(uc5))
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unavailable in the executor",
+		"unavailable is not invalid: this is the retryable case")
+	require.Equal(t, 1, drv.count())
+	require.NotNil(t, client.unapplied, "the certificate is observed but NOT applied, and that is recorded")
+	require.Equal(t, uint64(5), client.luc.GetRoundNumber(), "the observation cursor did advance")
+	require.Empty(t, sub.rounds(), "nothing may be signed from an unreconciled executor")
+
+	// 2. A retransmission of the same certificate, still unavailable. This is the delivery that
+	//    used to be dropped as a duplicate, taking the only retry route with it.
+	err = client.handleCertificationResponse(ctx, respond(uc5))
+	require.Error(t, err)
+	require.Equal(t, 2, drv.count(), "a duplicate of an unapplied certificate is a retry, not a no-op")
+	require.Empty(t, sub.rounds())
+
+	// 3. The payload arrives (a resync completes, a peer serves the block). The next
+	//    retransmission recovers to the EXACT certified head and the node votes again.
+	exec.makeAvailable()
+	require.NoError(t, client.handleCertificationResponse(ctx, respond(uc5)))
+	require.Equal(t, 3, drv.count())
+	require.Nil(t, client.unapplied, "applied: the retry marker is cleared")
+
+	head, commits := exec.snapshot()
+	require.Equal(t, b1, []byte(head.Hash), "P-id: recovery lands on the certified BLOCK")
+	require.Equal(t, s1, []byte(head.StateRoot))
+	require.Equal(t, []uint64{6}, sub.rounds(), "and exactly one round is signed")
+
+	// 4. A further duplicate of the now-applied certificate is an ordinary no-op. Without this,
+	//    the retry route would drive and sign a completed round again on every retransmission.
+	require.NoError(t, client.handleCertificationResponse(ctx, respond(uc5)))
+	require.Equal(t, 3, drv.count(), "a duplicate of an APPLIED certificate must not reach the driver")
+	require.Equal(t, []uint64{6}, sub.rounds(), "and must not produce a second signature")
+	_, commitsAfter := exec.snapshot()
+	require.Equal(t, commits, commitsAfter, "nor touch the executor")
+}
+
+/*
+TestDeliverySeparatesApplicationFromSending drives the real handler over a real Round through the
+two failures that look alike from the outside and must not be treated alike.
+
+An application failure means the certificate was not applied and the retransmission should retry it.
+A SEND failure means it was applied and the next round's request did not reach the root chain — and
+retrying that delivery would re-enter the round with a proposal the root chain has certified nothing
+about, which is the path that finalised an uncertified block. The two are separated by
+ErrSubmissionFailed.
+*/
+func TestDeliverySeparatesApplicationFromSending(t *testing.T) {
+	ctx := context.Background()
+
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	tb, ok := testtrustbase.NewTrustBase(t, signer).(*types.RootTrustBaseV1)
+	require.True(t, ok)
+	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: authPartitionID}
+	confHash, err := pdr.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	zero := make([]byte, 32)
+
+	s0 := bytes.Repeat([]byte{0xe0}, 32)
+	s1 := bytes.Repeat([]byte{0xe1}, 32)
+	b0 := bytes.Repeat([]byte{0xf0}, 32)
+	b1 := bytes.Repeat([]byte{0xf1}, 32)
+
+	technicalFor := func(round uint64) *certification.TechnicalRecord {
+		return &certification.TechnicalRecord{Round: round, Epoch: 0, Leader: "send-node", StatHash: zero, FeeHash: zero}
+	}
+	trHash, err := technicalFor(6).Hash()
+	require.NoError(t, err)
+	// Round 5 certified the block this executor is already on, so the round applies cleanly and
+	// the only thing that can fail is the send.
+	ir5 := &types.InputRecord{
+		Version: 1, RoundNumber: 5, PreviousHash: s0, Hash: s1, BlockHash: b1,
+		SummaryValue: []byte{}, Timestamp: 1,
+	}
+	uc5 := testcertificates.CreateUnicityCertificate(t, signer, ir5, pdr, 41, zero, trHash)
+
+	newFixture := func(sub Submitter) (*BFTClient, *countingDriver, *retryExecutor) {
+		exec := &retryExecutor{
+			head:      BlockRef{Number: 5, Hash: b1, StateRoot: s1},
+			held:      map[string]BlockRef{string(b0): {Number: 4, Hash: b0, StateRoot: s0}},
+			available: true,
+		}
+		round := NewRound("send-node", authPartitionID, types.ShardID{}, exec, NewLoopbackDisseminator(), signer, sub, nil)
+		drv := &countingDriver{inner: round}
+		return &BFTClient{
+			partitionID:    authPartitionID,
+			shardID:        types.ShardID{},
+			shardConfHash:  confHash,
+			nodeID:         "send-node",
+			trustBaseStore: stubTrustBaseStore{tb: tb},
+			driver:         drv,
+		}, drv, exec
+	}
+	respond := func(uc *types.UnicityCertificate) *certification.CertificationResponse {
+		return &certification.CertificationResponse{
+			Partition: authPartitionID, Shard: types.ShardID{}, Technical: *technicalFor(6), UC: *uc,
+		}
+	}
+
+	t.Run("a send failure leaves the certificate applied, so its duplicate is not re-driven", func(t *testing.T) {
+		sub := &refusingSubmitter{}
+		client, drv, exec := newFixture(sub)
+
+		err := client.handleCertificationResponse(ctx, respond(uc5))
+		require.ErrorIs(t, err, ErrSubmissionFailed)
+		require.Equal(t, 1, drv.count())
+		require.Nil(t, client.unapplied, "the certificate WAS applied; only the send failed")
+
+		_, commits := exec.snapshot()
+		sent := sub.requests()
+		require.Len(t, sent, 3, "the same request is retried, bounded")
+		for _, again := range sent[1:] {
+			require.Equal(t, sent[0].Signature, again.Signature, "identical bytes, never a re-sign")
+		}
+
+		// The retransmission, which is what used to re-enter the round.
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(uc5)))
+		require.Equal(t, 1, drv.count(), "a duplicate of an APPLIED certificate must not reach the driver")
+		afterHead, afterCommits := exec.snapshot()
+		require.Equal(t, commits, afterCommits, "and must not commit anything")
+		require.Equal(t, b1, []byte(afterHead.Hash), "the executor is where the certificate left it")
+		require.Len(t, sub.requests(), 3, "no second signed request for the same round")
+	})
+
+	t.Run("a persistence failure after a successful send is an application failure, and retrying it commits nothing uncertified", func(t *testing.T) {
+		// persistingDriver saves the certificate after the driver returns. A failure there means
+		// the round ran but the checkpoint did not survive, so the delivery is retried — and the
+		// retry must not mistake the next round's proposal for something certified.
+		sub := &countingSubmitter{}
+		client, drv, exec := newFixture(sub)
+		// A directory the process may enter but not write in: SaveLUC creates its directory if it
+		// is missing, so an absent path is not a failure — an unwritable one is.
+		roDir := filepath.Join(t.TempDir(), "read-only")
+		require.NoError(t, os.Mkdir(roDir, 0o500))
+		t.Cleanup(func() { _ = os.Chmod(roDir, 0o700) })
+		client.driver = &persistingDriver{driver: drv, store: NewFileStore(filepath.Join(roDir, "luc.cbor"))}
+
+		err := client.handleCertificationResponse(ctx, respond(uc5))
+		require.ErrorContains(t, err, "persisting certificate")
+		require.NotNil(t, client.unapplied, "the checkpoint is part of applying it")
+		require.Equal(t, []uint64{6}, sub.rounds(), "the round was submitted before the store failed")
+
+		_, commits := exec.snapshot()
+		// The executor's next candidate would now be a DIFFERENT block — a transaction arrived
+		// between the two deliveries, which is the ordinary case, not a contrived one.
+		exec.queue([]byte("a transaction that arrived between the two deliveries"))
+		first := sub.requests()[0]
+
+		_ = client.handleCertificationResponse(ctx, respond(uc5))
+		require.Equal(t, 2, drv.count(), "the duplicate retries the delivery, which is the point")
+		_, afterCommits := exec.snapshot()
+		require.Equal(t, commits, afterCommits,
+			"the round-6 proposal is not certified by round 5's certificate and must not be committed")
+
+		// And the part the previous revision missed: the retry must not REBUILD. Two different
+		// signed input records for one round, under one authorizing certificate, is equivocation
+		// however it came about — a full mempool between two deliveries is enough to produce it.
+		sent := sub.requests()
+		require.Len(t, sent, 2, "the identical request is re-sent")
+		require.Equal(t, first.InputRecord.RoundNumber, sent[1].InputRecord.RoundNumber)
+		require.Equal(t, []byte(first.InputRecord.Hash), []byte(sent[1].InputRecord.Hash),
+			"the same round under the same certificate must produce the same input record")
+		require.Equal(t, []byte(first.InputRecord.BlockHash), []byte(sent[1].InputRecord.BlockHash))
+		require.Equal(t, first.Signature, sent[1].Signature, "and the same signature over it")
+	})
+}
+
+// failingDriver models an executor that cannot apply anything — the state in which a certificate
+// stays unapplied and its retransmissions are deliberately re-delivered.
+type failingDriver struct{}
+
+func (failingDriver) HandleCertificate(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error {
+	return errors.New("executor unavailable")
+}
+
+// recordingNet is a RootNetwork that records what was sent to the root chain, so a test can tell a
+// handshake from a certification request without a libp2p network.
+type recordingNet struct {
+	mu   sync.Mutex
+	sent []any
+}
+
+func (n *recordingNet) Send(_ context.Context, msg any, _ ...peer.ID) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.sent = append(n.sent, msg)
+	return nil
+}
+
+func (n *recordingNet) ReceivedChannel() <-chan any { return nil }
+
+func (n *recordingNet) handshakes() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	count := 0
+	for _, m := range n.sent {
+		if _, ok := m.(handshake.Handshake); ok {
+			count++
+		}
+	}
+	return count
+}
+
+/*
+TestSubscriptionRenewalIsIndependentOfVoting is the shard half of #92's traced restart refusal.
+
+The root chain refills a subscription's quota only from the handshake handler and the block
+certification request handler. A validator that submits every round renews itself as a side effect
+of voting; one that does not submit renewed only on its 30-second inactivity timer, and the
+certificates it missed in that window invalidated its continuity state.
+
+So a node that did not submit for a certificate asks for its subscription again, using the same
+handshake the root chain already authorizes and expires. A node that did submit does not: its
+request already refilled the quota, and a second ask would be traffic for nothing.
+*/
+func TestSubscriptionRenewalIsIndependentOfVoting(t *testing.T) {
+	ctx := context.Background()
+
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	tb, ok := testtrustbase.NewTrustBase(t, signer).(*types.RootTrustBaseV1)
+	require.True(t, ok)
+	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: authPartitionID}
+	confHash, err := pdr.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	zero := make([]byte, 32)
+	s0 := bytes.Repeat([]byte{0xa0}, 32)
+
+	technicalFor := func(round uint64) *certification.TechnicalRecord {
+		return &certification.TechnicalRecord{Round: round, Epoch: 0, Leader: "renew-node", StatHash: zero, FeeHash: zero}
+	}
+	sign := func(round, rootRound uint64) *types.UnicityCertificate {
+		t.Helper()
+		trHash, err := technicalFor(round + 1).Hash()
+		require.NoError(t, err)
+		ir := &types.InputRecord{
+			Version: 1, RoundNumber: round, PreviousHash: s0, Hash: s0, BlockHash: nil,
+			SummaryValue: []byte{}, Timestamp: 1,
+		}
+		return testcertificates.CreateUnicityCertificate(t, signer, ir, pdr, rootRound, zero, trHash)
+	}
+	respond := func(uc *types.UnicityCertificate) *certification.CertificationResponse {
+		return &certification.CertificationResponse{
+			Partition: authPartitionID, Shard: types.ShardID{},
+			Technical: *technicalFor(uc.GetRoundNumber() + 1), UC: *uc,
+		}
+	}
+
+	newClient := func(net RootNetwork) (*BFTClient, *countingDriver) {
+		drv := &countingDriver{inner: &recordingDriver{}}
+		c := &BFTClient{
+			partitionID:    authPartitionID,
+			shardID:        types.ShardID{},
+			shardConfHash:  confHash,
+			nodeID:         "renew-node",
+			net:            net,
+			trustBaseStore: stubTrustBaseStore{tb: tb},
+			driver:         drv,
+			opts:           DefaultBFTClientOptions,
+		}
+		c.SeedLUC(sign(4, 40))
+		return c, drv
+	}
+
+	t.Run("a node that submits nothing renews its own subscription", func(t *testing.T) {
+		net := &recordingNet{}
+		client, drv := newClient(net)
+
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(sign(5, 41))))
+		require.Equal(t, 1, drv.count())
+		require.Equal(t, 1, net.handshakes(),
+			"nothing refilled this node's quota at the root chain, so it asks for a subscription itself")
+
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(sign(6, 42))))
+		require.Equal(t, 2, net.handshakes(), "and again on the next certificate it did not submit for")
+	})
+
+	t.Run("a node that submitted does not ask again", func(t *testing.T) {
+		// Submitting a certification request is itself what refills the quota at the root chain,
+		// so a voting node must not add a handshake per round on top of it.
+		net := &recordingNet{}
+		client, _ := newClient(net)
+		require.NoError(t, client.Submit(ctx, &certification.BlockCertificationRequest{
+			PartitionID: authPartitionID, ShardID: types.ShardID{}, NodeID: "renew-node",
+			InputRecord: &types.InputRecord{Version: 1, RoundNumber: 5, Hash: s0, PreviousHash: s0, SummaryValue: []byte{}, Timestamp: 1},
+		}))
+		before := net.handshakes()
+
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(sign(5, 41))))
+		require.Equal(t, before, net.handshakes(), "the request already refilled the quota")
+
+		// The next round, having submitted nothing, it asks again — the state is per round, not
+		// per lifetime.
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(sign(6, 42))))
+		require.Equal(t, before+1, net.handshakes())
+	})
+
+	t.Run("a failing application does not turn renewal into a handshake loop", func(t *testing.T) {
+		/*
+			The reviewer's reproduction, and the case the previous revision's duplicate test could
+			not see because it only covered successful application.
+
+			A duplicate of a certificate whose APPLICATION failed is deliberately re-delivered to
+			the driver — that is how a transient executor failure recovers. The root chain answers
+			a handshake immediately with its current certificate, outside the subscription quota,
+			and that answer is the very certificate being retried. Renewing on it closed the circle:
+			failed application, handshake, the same certificate back, failed application, with no
+			new certificate and no timer needed to keep it spinning.
+		*/
+		net := &recordingNet{}
+		client, _ := newClient(net)
+		client.driver = failingDriver{}
+
+		uc := sign(5, 41)
+		for i := 0; i < 5; i++ {
+			require.Error(t, client.handleCertificationResponse(ctx, respond(uc)),
+				"application keeps failing, and the certificate stays unapplied and retryable")
+		}
+		require.Equal(t, 1, net.handshakes(),
+			"five deliveries of one certificate ask for a subscription once: a retry of something already observed is not progress")
+		require.NotNil(t, client.unapplied, "and the retry path itself is untouched")
+
+		// New certified progress still renews, which is the property the loop fix must not cost:
+		// a node whose executor is failing must not lose its feed as well.
+		require.Error(t, client.handleCertificationResponse(ctx, respond(sign(6, 42))))
+		require.Equal(t, 2, net.handshakes(), "a new certificate renews even though applying it failed")
+
+		// And when application finally succeeds, nothing about renewal changes.
+		client.driver = &countingDriver{inner: &recordingDriver{}}
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(sign(7, 43))))
+		require.Equal(t, 3, net.handshakes())
+		require.Nil(t, client.unapplied, "the certificate applied")
+	})
+
+	t.Run("a duplicate does not provoke a handshake, so a renewal cannot loop", func(t *testing.T) {
+		// The root chain answers a handshake with the current certificate. If that answer provoked
+		// another handshake the two would chase each other forever; duplicates return before the
+		// driver, and renewal happens only after a delivery.
+		net := &recordingNet{}
+		client, _ := newClient(net)
+		uc := sign(5, 41)
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(uc)))
+		after := net.handshakes()
+		require.NoError(t, client.handleCertificationResponse(ctx, respond(uc)))
+		require.Equal(t, after, net.handshakes(), "the same certificate again changes nothing")
+	})
+}

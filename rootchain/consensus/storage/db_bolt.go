@@ -39,13 +39,30 @@ type BoltDB struct {
 
 const currentDBVersion uint64 = 1
 
-func NewBoltStorage(file string) (db BoltDB, err error) {
+// BoltOption configures a store opened by NewBoltStorage.
+type BoltOption func(*bbolt.DB)
+
+// WithNoSync opens the store without syncing each commit to disk (bbolt's NoSync). It is for throwaway
+// stores only — test fixtures whose assertions are about consensus rather than durability: a crash can
+// lose or corrupt any commit made this way. Production callers never pass it, and TestNewBoltStorage_Sync
+// pins that a store opened without it syncs.
+//
+// Why it exists (#127): the consensus round path makes several synced commits per node per round
+// before a vote is sent. On macOS a bbolt sync is F_FULLFSYNC — measured at ~115 ms mean with four
+// stores committing concurrently, against ~4 ms in Linux on the same machine — so the four-node test
+// fixtures ran rounds of 500–600 ms instead of ~100 ms and ran out of their Linux-calibrated budgets.
+func WithNoSync() BoltOption { return func(db *bbolt.DB) { db.NoSync = true } }
+
+func NewBoltStorage(file string, opts ...BoltOption) (db BoltDB, err error) {
 	_, err = os.Stat(file)
 	newDB := err != nil && errors.Is(err, fs.ErrNotExist)
 
 	db.db, err = bbolt.Open(file, 0600, &bbolt.Options{Timeout: 3 * time.Second})
 	if err != nil {
 		return db, fmt.Errorf("open database: %w", err)
+	}
+	for _, opt := range opts {
+		opt(db.db)
 	}
 	defer func() {
 		if err != nil {

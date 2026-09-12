@@ -235,3 +235,17 @@ func createShardConf(t *testing.T, partitionID types.PartitionID, shardID types.
 		Validators:      []*types.NodeInfo{validator.NodeInfo(t)},
 	}
 }
+
+// TestNewOrchestration_Sync pins the durability default: the orchestration database syncs every
+// commit unless WithNoSync — meant for throwaway test fixtures (#127) — is passed.
+func TestNewOrchestration_Sync(t *testing.T) {
+	durable, err := NewOrchestration(5, filepath.Join(t.TempDir(), "durable.db"), logger.New(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = durable.Close() })
+	require.False(t, durable.db.NoSync, "the orchestration database must sync every commit by default")
+
+	throwaway, err := NewOrchestration(5, filepath.Join(t.TempDir(), "throwaway.db"), logger.New(t), WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = throwaway.Close() })
+	require.True(t, throwaway.db.NoSync, "WithNoSync must disable syncing")
+}

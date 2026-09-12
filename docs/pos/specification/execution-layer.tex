@@ -1,0 +1,726 @@
+\chapter{Execution Layer}\label{ch:execution-layer}
+
+The execution layer handles off-chain transaction processing and business logic. Tokens are self-contained digital assets transferred peer-to-peer between users. Only cryptographic commitments to state transitions are submitted to the Aggregation Layer for double-spending prevention. Transaction execution and verification are performed by the interested parties (recipients), not by consensus participants. This design moves computational overhead off-chain while maintaining trustless guarantees against double-spending.
+
+\section{Execution Model}
+
+In the Unicity execution model, digital assets called \emph{tokens}\index{token} are bearer instruments: whoever holds the token data and can satisfy the spending condition is the owner. Transactions occur directly between parties using any communication channel, with the Unicity Service consulted only to prevent double-spending.
+
+The model relies on three key principles:
+\begin{enumerate}
+	\item \textbf{Off-chain execution}: Transaction creation, validation, and verification happen between sender and recipient without consensus participation.
+	\item \textbf{On-chain uniqueness}: The Unicity Service maintains an append-only registry of spent token states, ensuring each state can be spent at most once.
+	\item \textbf{Recipient verification}: The recipient (relying party) independently verifies the complete token history before accepting a transfer.
+\end{enumerate}
+
+\subsection{Token Lifecycle}\label{sec:token-lifecycle}
+
+A token progresses through the following stages:
+\begin{description}
+\item[Minting]\index{mint transaction} Creates a new token with an initial state. Minting uses a publicly known minting key pair $(\mathsf{sk}_\mathsf{mint}, \mathsf{pk}_\mathsf{mint})$ which MAY be network specific.
+\item[Transfer]\index{transfer transaction} Changes ownership by spending the current state and creating a new state with a new owner predicate.
+\item[Compression]\index{token compression} Compacts the token by replacing a set of transactions with a cryptographic proof of validity of these transactions.
+\item[Split]\index{split transaction} (Fungible tokens only.) Burns the original token and mints new tokens, with a cryptographic value conservation proof ensuring no value is created or destroyed. See Sec.~\ref{sec:token-splitting}.
+\item[Burn]\index{burn transaction} Permanently locks a token by transferring it to a burn predicate that cannot be unlocked. See Sec.~\ref{sec:burn-transaction}.
+\end{description}
+
+\subsection{Token State}\label{sec:token-state}
+
+\index{token!state}
+A \emph{token state} is a pair $(\predi, \sthash)$, where:
+\begin{itemize}
+	\item $\predi$ -- the spending predicate (defines who can spend the token); see Sec.~\ref{sec:predicates}
+	\item $\sthash \in \hashtype$ -- the state hash, linking the token's transaction history
+\end{itemize}
+
+The \emph{state identifier}\index{state identifier}\index{$\mathsf{sid}$ (state identifier)} is the key used in the Unicity Service registry:
+\[
+\mathsf{sid} = H(\predi, \sthash)
+\]
+
+When a transaction with random value $x \gets \{0,1\}^\ell$ is executed, the next state hash is computed as:
+\[
+\sthash' = H(\sthash, x)
+\]
+
+The randomness of \emph{state mask}\index{state mask} $x$ ensures that the next state identifier $H(\predi', \sthash')$ is unpredictable, preventing the Unicity Service from linking consecutive states of the same token.
+
+The state mask $x$ MUST be sampled with at least 128 bits of min-entropy.
+
+\subsection{Token Structure}\label{sec:token-structure}
+
+A \emph{token}\index{token!structure} is a self-contained data structure carrying its complete provenance. Any party can independently verify the entire history without consulting external state. Formally, a token is a sequence:
+\[
+\mathcal{L} = (T_0^\mathsf{cert}, T_1^\mathsf{cert}, \ldots, T_n^\mathsf{cert})
+\]
+where $T_0^\mathsf{cert}$ is a certified mint transaction and $T_i^\mathsf{cert}$ for $i > 0$ are certified transfer transactions.
+
+Let $\mathbb{T}_\bot=\mathbb{T}\cup\{\bot\}$. Every transaction $T$ carries an exclusive request timeout $\tau_Q(T)\in\mathbb{T}_\bot$, where $\tau_Q(T)=\bot$ delegates the choice of deadline to the Unicity Service and requires no client clock. The timeout occupies a fixed position in the transaction encoding and is committed by the transaction hash in either case (Appendix~\ref{app:encodings}). A certified transaction carries its transaction, the reference time $\tau$ at which its leaf was created, and its inclusion proof. The concrete proof representation also carries the certification data needed to reconstruct the service request and the same reference time. Both must match. (Appendix~\ref{app:execution-layer}).
+
+\subsubsection{Mint Transaction}\label{sec:mint-tx}
+
+\index{mint transaction!structure}
+A \emph{certified mint transaction} is a tuple $(T_0, \tau_0, \pi_0)$, where $T_0$ consists of the source state hash, the common data
+\[
+D_\mathsf{mint} = (\alpha, \predi', \mathsf{salt}, \mathsf{ty}, \mathsf{reason}, \auxd') .
+\]
+\begin{itemize}
+	\item $\sthash = H(\mathsf{id}, \mathsf{MINT\_SUFFIX})$ -- source state hash, for state identifier derivation
+	\item $D_\mathsf{mint}$ -- mint transaction data, containing in this order:
+	\begin{itemize}
+		\item $\alpha \in \mathbb{A}$ -- network identifier, binding the token to a specific Unicity network instance
+		\item $\predi'$ -- spending predicate of the first owner
+		\item $\mathsf{salt} \in \{0,1\}^{256}$ -- token identifier salt, chosen by the minter and required to be unique among the minter's salt choices (e.g.\ by uniform random sampling or by a local counter); $\mathsf{salt}$ has no masking role and need not be high-entropy
+		\item $\mathsf{ty}$ -- token type, classifying the token category, defining its mandatory validation rules
+		\item $\mathsf{reason}$ -- mint reason; content depends on the token type. Justifies minting this token, e.g., by proving minting authority
+		\item $\auxd'$ -- auxiliary payload (application-specific; e.g. asset value for fungible tokens)
+	\end{itemize}
+	\item $\tau_Q(T_0)$ -- optional explicit timeout of the mint certification request
+	\item $\tau_0\in\mathbb T$ -- reference time of the round in which the mint leaf was created
+	\item $\pi_0$ -- inclusion proof from the Unicity Service
+\end{itemize}
+
+The \emph{token identifier}\index{token!identifier} is derived as
+\[
+\mathsf{id} \;:=\; H(\mathsf{salt}, \alpha) \;\in\; \idtype \;.
+\]
+This ensures that two tokens minted on different networks cannot induce colliding state identifiers.
+
+$\mathsf{MINT\_SUFFIX}$\index{MINT\_SUFFIX} is a fixed domain separator constant. The minting key pair $(\mathsf{sk}_\mathsf{mint}, \mathsf{pk}_\mathsf{mint})$ is a public constant; it serves only to provide a uniform request interface with the Unicity Service. Values: Appendix~\ref{app:el-constants}.
+
+\paragraph{Certifying a mint transaction} $T_0$:
+\begin{enumerate}
+	\item Choose $\tau_Q(T_0)\in\mathbb{T}_\bot$; choosing $\bot$ delegates timeout assignment to the service and requires no local clock
+	\item $\txhash \gets H(D_\mathsf{mint}, \tau_Q(T_0))$
+	\item $h_T \gets H(\sthash, \txhash)$
+	\item $\sigma \gets \mathsf{Sign}(\mathsf{sk}_\mathsf{mint}, h_T)$
+	\item $Q \gets (\mathsf{pk}_\mathsf{mint}, \sthash, \txhash, \tau_Q(T_0), \sigma)$
+	\item $\pi_0 \gets \unisrv(Q)$
+\end{enumerate}
+
+\paragraph{Verifying a certified mint transaction} $(T_0, \tau_0, \pi_0)$ against trust base $\mathcal{T}$, using known, fixed mint keys:
+\begin{enumerate}
+	\item require $T_0.D_\mathsf{mint}.\alpha = \pi_0.UC.C^\mathsf{r}.\alpha = \mathcal{T}.\alpha$
+	\item derive $\mathsf{id} \gets H(T_0.D_\mathsf{mint}.\mathsf{salt}, T_0.D_\mathsf{mint}.\alpha)$;\; require $T_0.\sthash = H(\mathsf{id}, \mathsf{MINT\_SUFFIX})$
+	\item require $\tau_0=\tau(\pi_0)$; derive $\txhash=H(D_\mathsf{mint},\tau_Q(T_0))$ and $v=H(\txhash,\tau_0)$
+	\item if $\tau_Q(T_0)\ne\bot$, require $\tau_0 < \tau_Q(T_0)$
+	\item require $v = \pi_0.v$ and $\mathcal{V}(H(\mathsf{pk}_\mathsf{mint}, \sthash), v, \pi_0, \mathcal{CD}_\beta, \mathcal{T}) = 1$
+	\item Token type-specific checks on $\mathsf{reason}$ and $\auxd'$ (e.g. mint reason validity and auxiliary payload format and semantics check)
+\end{enumerate}
+
+Correctness of the token id derivation is enforced implicitly by step~2: $\sthash$ is bound to $\mathsf{id}$ by the source-state-hash check, and $\mathsf{id}$ is recomputed from $(\mathsf{salt}, \alpha)$.
+
+
+\subsubsection{Transfer Transaction}\label{sec:transfer-tx}
+
+\index{transfer transaction!structure}
+A \emph{certified transfer transaction} is a tuple $(T, \tau, \pi)$, where $T$ consists of the source state hash, the common transaction data $D$, and its request timeout:
+\begin{itemize}
+	\item $D = (\predi', x, \auxd')$ -- transaction data:
+	\begin{itemize}
+		\item $\predi'$ -- spending predicate of the next owner
+		\item $x \gets \{0,1\}^\ell$ -- random value for state hash derivation
+		\item $\auxd'$ -- auxiliary data for the next state
+	\end{itemize}
+	\item $\tau_Q(T)\in\mathbb{T}_\bot$ -- optional explicit timeout of the certification request
+	\item $\tau\in\mathbb T$ -- reference time of the round in which the leaf was created
+	\item $\pi$ -- inclusion proof and associated certification data, including the unlocking argument $u$
+\end{itemize}
+
+\paragraph{Certifying a transfer transaction} $T$ in the current state $(\predi, h)$:
+\begin{enumerate}
+	\item Choose $\tau_Q(T)\in\mathbb{T}_\bot$; choosing $\bot$ delegates timeout assignment to the service and requires no local clock
+	\item $\txhash \gets H(D, \tau_Q(T))$
+	\item $h_T \gets H(\sthash, \txhash)$
+	\item Create $u$ such that $\predi(\tau_\mathsf{exp}, h_T, u) = 1$ for an expected system time $\tau_\mathsf{exp}$
+	\item $Q \gets (\predi, \sthash, \txhash, \tau_Q(T), u)$
+	\item $\pi \gets \unisrv(Q)$
+\end{enumerate}
+
+\paragraph{Verifying a certified transfer transaction} $(T, \tau, \pi)$ in state $(\predi, h)$:
+\begin{enumerate}
+	\item $T.\sthash = h$ \quad (state hash matches expected)
+	\item $\pi.UC.C^\mathsf{r}.\alpha = \mathcal{T}.\alpha$ \quad (inclusion proof is from the same network as the trust base)
+	\item require $\tau=\tau(\pi)$; derive $\txhash=H(T.D,\tau_Q(T))$ and $v=H(\txhash,\tau)$
+	\item if $\tau_Q(T)\ne\bot$, require $\tau < \tau_Q(T)$
+	\item require $\predi(\tau, H(\sthash, \txhash), u) = 1$, where $u$ is recovered from the certification data accompanying $\pi$
+	\item $\mathcal{V}(H(\predi, T.\sthash), v, \pi, \mathcal{CD}_\beta, \mathcal{T}) = 1$ \quad (inclusion proof valid and certified by the correct shard)
+	\item Additional token type-specific checks
+\end{enumerate}
+
+\subsection{Token Verification}\label{sec:token-verification}
+
+\index{token!verification}\index{functions!VerifyToken}
+$\mathsf{VerifyToken}$ -- token verification function of type $\mathbb{L} \times \mathbb{UB} \to \bool$
+
+\textbf{Input}:
+\begin{enumerate}
+	\item $\mathcal{L} = (T_0^\mathsf{cert}, T_1^\mathsf{cert}, \ldots, T_n^\mathsf{cert})$ -- token
+	\item $\mathcal{T}$ -- trust base
+\end{enumerate}
+
+\textbf{Output}: \TRUE or \FALSE
+
+\textbf{Computation}:
+\begin{algorithmic}[0]
+	\State \Parse $T_0^\mathsf{cert}$ \textbf{as} $(T_0, \tau_0, \pi_0)$
+	\If {$T_0.D_\mathsf{mint}.\alpha \ne \mathcal{T}.\alpha$} \Return \FALSE \EndIf
+	\If {$\neg \Call{VerifyMintTransaction}{T_0, \tau_0, \pi_0, \mathcal{T}}$} \Return \FALSE \EndIf
+	\State $\predi^0 \gets T_0.D_\mathsf{mint}.\predi'$
+	\State $h^0 \gets H(H(T_0.D_\mathsf{mint}.\mathsf{salt}, T_0.D_\mathsf{mint}.\alpha), \mathsf{MINT\_SUFFIX})$
+	\For {$i \gets 1 \ldots n$}
+		\State \Parse $T_i^\mathsf{cert}$ \textbf{as} $(T_i, \tau_i, \pi_i)$
+		\If {$\neg \Call{VerifyTransferTransaction}{T_i, \tau_i, \pi_i, \predi^{i-1}, h^{i-1}, \mathcal{T}}$} \Return \FALSE \EndIf
+		\State $\predi^{i} \gets T_i.D.\predi'$
+		\State $h^{i} \gets H(h^{i-1}, T_i.D.x)$
+	\EndFor
+	\State \Return \TRUE
+\end{algorithmic}
+
+$\Call{VerifyMintTransaction}{}$ and $\Call{VerifyTransferTransaction}{}$ are defined by verification steps in chapters \ref{sec:mint-tx}, \ref{sec:transfer-tx}.
+
+\section{Programmable Spending Conditions}\label{sec:predicates}
+
+Instead of restricting ownership to a single public key, the Unicity execution layer generalizes ownership to \emph{predicates}\index{predicate} -- programmable boolean functions that define the conditions under which a token state can be spent. This enables smart-contract-like functionality executed off-chain by relying parties rather than by consensus participants.
+
+\subsection{Predicate Framework}\label{sec:predicate-framework}
+
+\index{predicate!framework}
+A \emph{predicate} $\predi_\mathsf{name}(\mathsf{par}; \cdot)$ is a boolean function with:
+\begin{itemize}
+	\item \textbf{Name} $\mathsf{name}$ -- identifies the predicate type
+	\item \textbf{Parameters} $\mathsf{par}$ -- type-dependent configuration (e.g. a public key)
+	\item \textbf{Arguments} $(\tau, m, u)$:
+	\begin{itemize}
+		\item $\tau \in \mathbb{T}$ -- certified request-validation reference time (Sec.~\ref{sec:time-extraction})
+		\item $m \in \hashtype$ -- message hash $H(\sthash, \txhash)$, where $\txhash$ commits to the request timeout
+		\item $u$ -- unlocking argument, structure depends on predicate type
+	\end{itemize}
+\end{itemize}
+
+The predicate evaluates to $\predi_\mathsf{name}(\mathsf{par}; \tau, m, u) \in \{0, 1\}$.
+
+
+\subsubsection{Time Reference}\label{sec:time-extraction}
+
+\index{$\tau$}\index{time extraction}
+Predicate evaluation must be deterministic and transparent: the Unicity Service (at certification time) and any later verifier (re-validating from an inclusion proof) must agree on the exact value of $\tau$ used. The system therefore fixes $\tau$ per Aggregator round, with the value coming through BFT Core consensus.
+
+\paragraph{Per-round fixed reference time.}
+The BFT Core's Unicity Seal carries a wall-clock round-creation timestamp $C^\mathsf{r}.t_r$ (Sec.~\ref{se:unicity-certificate}), with one-second precision, agreed by BFT Core consensus. When Aggregator assembles a certification request for its round $n{+}1$, it copies the timestamp from the Unicity Seal of the \emph{previous} UC it is extending into the Shard Input Record field $\mathcal{IR}.t$ (Sec.~\ref{shard-input-record}):
+\[
+	\mathsf{CR}.\mathcal{IR}.t \;\gets\; UC_-.C^\mathsf{r}.t_r
+\]
+where $UC_-$ is the last valid Unicity Certificate of that shard (which the Aggregator is \emph{extending}). This is the \emph{reference time for request validation} of the round being validated. All predicates evaluated against Unicity Service requests in that round use this single value as $\tau$.
+
+\paragraph{BFT Core enforcement.}
+The BFT Core verifies the Aggregator's choice of reference time as part of request admission (Sec.~\ref{certification-request}, check $\mathsf{CR}.\mathcal{IR}.t = \mathcal{SI}[\beta,\sigma].UC_-.C^\mathsf{r}.t_r$).
+
+\paragraph{Binding to the certified leaf.}
+For every request, $\tau$ is committed by the leaf value $H(\txhash, \tau)$ (Sec.~\ref{sec:request-validation}) and is carried with the transition. A verifier recomputes that value from the transaction data and the carried $\tau$ and requires it to equal the certified leaf value; a mismatch rejects. This makes re-validation deterministic and independent of which inclusion proof establishes the leaf. The invariant applies equally when the request timeout is omitted and assigned by the service.
+
+Reading the time only from $UC.\mathcal{IR}.t$ identifies the validation time for a proof issued in the transition's own round. The SMT is append-only, so a leaf can be certified afresh against any later root, whose Input Record carries another round's reference time. The carried value $\tau(\pi)$ is therefore a property of the certified leaf rather than of the replaceable certificate chain.
+
+Note that $UC.\mathcal{IR}.t \ne UC.C^\mathsf{r}.t_r$ in general: $\mathcal{IR}.t$ is the reference time of the round \emph{being} certified (taken from the prior seal), whereas $C^\mathsf{r}.t_r$ is the wall-clock time at which the new seal itself was produced. It is $\mathcal{IR}.t$ that enters the leaf value.
+
+\subsection{Standard Predicates}\label{sec:standard-predicates}
+
+\subsubsection{Signature Predicate}
+
+\index{predicate!signature ($\predi_\mathsf{sig}$)}
+The \emph{signature predicate} $\predi_\mathsf{sig}(\mathsf{pk};\cdot)$ with a single public key $\mathsf{pk}$ as parameter is equivalent to digital signature verification. This is the basic ``pay to public key'' ownership model.
+
+\begin{itemize}
+	\item \textbf{Parameters}: $\mathsf{pk}$ (public key)
+	\item \textbf{Unlocking argument}: $u = \sigma$ (digital signature)
+	\item \textbf{Definition}: $\predi_\mathsf{sig}(\mathsf{pk}; \tau, m, \sigma) = 1$ iff $\mathsf{Verify}(\mathsf{pk}, m, \sigma) = 1$
+\end{itemize}
+
+\subsubsection{P2PKH Predicate}
+
+\index{predicate!P2PKH ($\predi_\mathsf{p2pkh}$)}
+The \emph{Pay-to-Public-Key-Hash} predicate $\predi_\mathsf{p2pkh}(h_\mathsf{pk};\cdot)$ stores only the hash of the public key, requiring the spender to reveal the full public key alongside the signature.
+
+\begin{itemize}
+	\item \textbf{Parameters}: $h_\mathsf{pk} \in \hashtype$ (public key hash)
+	\item \textbf{Unlocking argument}: $u = (\mathsf{pk}, \sigma)$
+	\item \textbf{Definition}: $\predi_\mathsf{p2pkh}(h_\mathsf{pk}; \tau, m, (\mathsf{pk}, \sigma)) = 1$ iff $H(\mathsf{pk}) = h_\mathsf{pk} \;\land\; \mathsf{Verify}(\mathsf{pk}, m, \sigma) = 1$
+\end{itemize}
+
+\subsubsection{P2SH Predicate}\label{sec:p2sh}
+
+\index{predicate!P2SH ($\predi_\mathsf{p2sh}$)}
+The \emph{Pay-to-Script-Hash} predicate $\predi_\mathsf{p2sh}(h_\predi;\cdot)$ generalizes P2PKH by storing the hash of an arbitrary predicate rather than just a public key hash. The recipient is identified by $h_\predi = H(\mathsf{CBOR}(\predi'))$, which provides a uniform-size recipient field regardless of predicate complexity and preserves privacy by hiding the predicate type until the token is spent.
+
+\begin{itemize}
+	\item \textbf{Parameters}: $h_\predi \in \hashtype$ (predicate hash)
+	\item \textbf{Unlocking argument}: $u = (\predi', u')$ where $\predi'$ is the full predicate and $u'$ is its unlocking argument
+	\item \textbf{Definition}: $\predi_\mathsf{p2sh}(h_\predi; \tau, m, (\predi', u')) = 1$ iff $H(\mathsf{CBOR}(\predi')) = h_\predi \;\land\; \predi'(\tau, m, u') = 1$
+\end{itemize}
+
+When spending, the full predicate $\predi'$ is revealed in the lock script field of the transfer transaction, and verifiers check that $H(\mathsf{CBOR}(\predi'))$ matches the recipient hash from the previous transaction.
+
+\subsubsection{Multi-Signature Predicate}
+
+\index{predicate!multi-signature ($\predi_\mathsf{msig}$)}
+The \emph{multi-signature predicate} $\predi_\mathsf{msig}(\mathsf{pk}_1, \ldots, \mathsf{pk}_n;\cdot)$ requires $n$ valid signatures from $n$ specified public keys (all-of-$n$).
+
+\begin{itemize}
+	\item \textbf{Parameters}: $(\mathsf{pk}_1, \ldots, \mathsf{pk}_n)$
+	\item \textbf{Unlocking argument}: $u = (\sigma_1, \ldots, \sigma_n)$
+	\item \textbf{Definition}: $\predi_\mathsf{msig}(\mathsf{pk}_1, \ldots, \mathsf{pk}_n; \tau, m, u) = 1$ iff $\mathsf{Verify}(\mathsf{pk}_i, m, \sigma_i) = 1$ for every $i \in \{1, \ldots, n\}$
+\end{itemize}
+
+
+\subsubsection{Threshold-Signature Predicate}
+
+\index{predicate!threshold-signature ($\predi_\mathsf{tsig}$)}
+The \emph{threshold-signature predicate} $\predi_\mathsf{tsig}(k, \mathsf{pk}_1, \ldots, \mathsf{pk}_n;\cdot)$ requires $k$-of-$n$ valid signatures from distinct public keys.
+
+\begin{itemize}
+	\item \textbf{Parameters}: $(k, \mathsf{pk}_1, \ldots, \mathsf{pk}_n)$ where $k \in \{1, \ldots, n\}$
+	\item \textbf{Unlocking argument}: $u = ((\sigma_1, j_1), \ldots, (\sigma_k, j_k))$ where $j_i$ is the index of the public key used for $\sigma_i$
+	\item \textbf{Definition}: $\predi_\mathsf{tsig}(k, \mathsf{pk}_1, \ldots, \mathsf{pk}_n; \tau, m, u) = 1$ iff:
+	\begin{enumerate}
+		\item $\mathsf{Verify}(\mathsf{pk}_{j_i}, m, \sigma_i) = 1$ for every $i \in \{1, \ldots, k\}$
+		\item All indices $j_i$ are distinct: $j_i = j_{i'}$ implies $i = i'$
+	\end{enumerate}
+\end{itemize}
+
+The distinctness requirement prevents satisfying the predicate by presenting $k$ copies of the same signature.
+
+
+\subsubsection{Burn Predicate}\label{sec:burn-predicate}
+
+\index{predicate!burn ($\predi_\mathsf{burn}$)}
+The \emph{burn predicate} $\predi_\mathsf{burn}(h_\mathsf{reason})$ cannot be unlocked. A token transferred to a burn predicate is permanently spent.
+
+\begin{itemize}
+	\item \textbf{Parameters}: $h_\mathsf{reason} \in \hashtype$ (reason hash, linking the burn to its purpose)
+	\item \textbf{Unlocking argument}: none
+	\item \textbf{Definition}: $\predi_\mathsf{burn}(h_\mathsf{reason}; \tau, m, u) = 0$ for all arguments
+\end{itemize}
+
+The burn predicate is used in token splitting (Sec.~\ref{sec:token-splitting}), where the reason hash is $\mathsf{SHA\text{-}256}(b_\mathcal{M})$ for the complete canonical split-manifest encoding $b_\mathcal{M}$.
+
+
+\subsubsection{Timelock Predicate}
+
+\index{predicate!timelock ($\predi_\mathsf{tlock}$)}
+The \emph{timelock predicate} $\predi_\mathsf{tlock}(\mathsf{pk}, \tau_\mathsf{min};\cdot)$ prevents spending until the system time reaches a specified threshold. This is used to implement e.g. vesting schedules and lock-up periods for tokens.
+
+\begin{itemize}
+	\item \textbf{Parameters}: $(\mathsf{pk}, \tau_\mathsf{min})$ where $\mathsf{pk}$ is a public key and $\tau_\mathsf{min} \in \mathbb{T}$ is the unlock time
+	\item \textbf{Unlocking argument}: $u = \sigma$ (digital signature)
+	\item \textbf{Definition}: $\predi_\mathsf{tlock}(\mathsf{pk}, \tau_\mathsf{min}; \tau, m, \sigma) = 1$ iff $\tau \ge \tau_\mathsf{min} \;\land\; \mathsf{Verify}(\mathsf{pk}, m, \sigma) = 1$
+\end{itemize}
+
+The token remains locked until system time $\tau \ge \tau_\mathsf{min}$, after which it can be spent by producing a valid signature under $\mathsf{pk}$ and forming a witness unlocking the predicate and appending a spending transaction to the token ledger.
+
+
+\subsubsection{Hashed Timelock Predicate}
+
+\index{predicate!hashed timelock ($\predi_\mathsf{htlc}$)}
+The \emph{hashed timelock predicate} $\predi_\mathsf{htlc}(\mathsf{pk}, \mathsf{pk}', y, \tau_\mathsf{max};\cdot)$ combines hash-locked and time-locked spending paths. The parameter $\mathsf{pk}$ is the refund key (original sender), $\mathsf{pk}'$ is the claim key (intended recipient), $y \in \hashtype$ is a hash lock, and $\tau_\mathsf{max} \in \mathbb{T}$ is a timeout.
+
+\begin{itemize}
+	\item \textbf{Parameters}: $(\mathsf{pk}, \mathsf{pk}', y, \tau_\mathsf{max})$
+	\item \textbf{Unlocking argument}: $u = (x, \sigma)$ where $x$ is a preimage candidate and $\sigma$ is a digital signature
+	\item \textbf{Definition}: $\predi_\mathsf{htlc}(\mathsf{pk}, \mathsf{pk}', y, \tau_\mathsf{max}; \tau, m, (x, \sigma)) = 1$ iff (a) or (b):
+	\begin{itemize}
+		\item[(a)] \emph{Claim path}: $\mathsf{Verify}(\mathsf{pk}', m, \sigma) = 1 \;\land\; y = H(x) \;\land\; \tau \le \tau_\mathsf{max}$
+		\item[(b)] \emph{Refund path}: $\mathsf{Verify}(\mathsf{pk}, m, \sigma) = 1 \;\land\; \tau > \tau_\mathsf{max}$
+	\end{itemize}
+\end{itemize}
+
+Clause~(a) allows the recipient to claim the token before the timeout by revealing the $H$-preimage $x$ of $y$ and signing with $\mathsf{pk}'$. Clause~(b) allows the sender to reclaim the token after the timeout by signing with $\mathsf{pk}$.
+
+Example use-case is atomic swap, where two HTLC predicates on different ledgers/partitions share the same hash lock $y$; claiming on one ledger reveals $x$, enabling the counterparty to claim on the other. Note that this assumes ledgers to be public, which is not always the case on p2p networks.
+
+
+\section{Interaction with Unicity Service}\label{sec:el-us-interaction}
+
+\index{Unicity Service!execution layer interaction}
+This section describes how the execution layer interacts with the Unicity Service (Sec.~\ref{sec:request-validation}) for state transition certification.
+
+\subsection{Certification Request}
+
+A certification request from the execution layer is a tuple $Q = (\predi, \sthash, \txhash, \bar\tau_Q, u)$, where:
+\begin{itemize}
+	\item $\predi$ -- spending predicate of the current owner
+	\item $\sthash$ -- current state hash
+	\item $\txhash$ -- transaction hash, committing to transaction data and the timeout when one is explicit
+	\item $\bar\tau_Q\in\mathbb{T}_\bot$ -- optional explicit, exclusive request timeout
+	\item $u$ -- unlocking argument satisfying $\predi$
+\end{itemize}
+
+\subsection{Processing}\label{sec:us-processing}
+
+The Unicity Service processes the request as follows:
+\begin{enumerate}
+	\item Compute state identifier: $\mathsf{sid} \gets H(\predi, \sthash)$
+	\item Compute message hash: $m \gets H(\sthash, \txhash)$
+	\item Assign or recover the effective timeout $\widehat\tau_Q$ and verify $\tau < \widehat\tau_Q$
+	\item Evaluate predicate: verify $\predi(\tau, m, u) = 1$
+	\item Check uniqueness: verify $R[\mathsf{sid}] = \bot$
+	\item If all checks pass: $R[\mathsf{sid}] \gets \lambda(Q,\tau)$
+\end{enumerate}
+
+For every request, the leaf value binds the reference time under which the request was validated. The BFT Core derives all leaf values from the declared transaction hashes and $\mathsf{CR}.\mathcal{IR}.t$ before verifying the consistency proof (Sec.~\ref{sec:derived-leaf-values}). Timeout omission affects transaction construction and admission policy, but not this commitment.
+
+If the request is accepted, the Unicity Service returns an inclusion proof $\pinc$. If the request is expired, the state has already been spent, or the predicate evaluation fails, the request is rejected.
+
+
+\section{Transaction Flow}\label{sec:transaction-flow}
+
+Figure~\ref{fi:exec-transaction-flow} illustrates one complete token transfer, from the recipient preparing ownership information through certification to final verification.
+
+\begin{figure}[!htb]
+    \begin{center}
+        \begin{sequencediagram}
+            \newthread{S}{Sender}
+            \newinst[3]{R}{Recipient}
+            \newinst[2]{US}{Unicity Service}
+
+            % Recipient prepares predicate and auxiliary data
+            \begin{call}{R}{Prepare $\predi'$, $\auxd'$}{R}{}
+            \end{call}
+
+            % Recipient sends predicate to sender
+            \begin{messcall}{R}{$\predi'$, $\auxd'$}{S}
+            \end{messcall}
+
+            % Sender creates transaction data
+            \postlevel
+            \postlevel
+            \postlevel
+            \begin{call}{S}{\shortstack[l]{
+                    $x \gets \{0,1\}^\ell$     \\
+                    $D = (\predi', x, \auxd')$ \\
+                    $T = (\sthash, D)$         \\
+                    choose $\bar\tau_Q\in\mathbb{T}_\bot$ \\
+                    $\txhash \gets H(D,\bar\tau_Q)$ \\
+                    $h_T = H(\sthash, \txhash)$ \\
+                    $u$ such that $\predi(\tau_\mathsf{exp}, h_T, u) = 1$
+                }
+                }{S}{}
+            \end{call}
+
+            % Sender requests certification from Unicity Service
+            \begin{messcall}{S}{$Q = (\predi, \sthash, \txhash, \bar\tau_Q, u)$}{US}
+                \postlevel
+                \begin{call}{US}{\shortstack[l]{
+                    $\tau < \widehat\tau_Q$ \\
+                    $\predi(\tau, H(\sthash, \txhash), u) \stackrel{?}{=} 1$ \\
+                    $R[H(\predi, \sthash)] \stackrel{?}{=} \bot$ \\
+                    $R[H(\predi, \sthash)] \gets \lambda(Q,\tau)$
+                    }}{US}{}
+                \end{call}
+            \end{messcall}
+            \prelevel
+            \begin{messcall}{US}{$\pinc$ (with $\tau$)}{S}
+            \end{messcall}
+
+            % Sender sends certified transaction to recipient
+            \begin{messcall}{S}{$\mathcal{L} \cup (T, \tau, \pinc)$}{R}
+                \postlevel
+                \postlevel
+                \postlevel
+                \postlevel
+                \begin{call}{R}{\shortstack[l]{
+                    $T.\sthash \stackrel{?}{=} H(h^\textsf{prev}_\mathsf{st}, x_\textsf{prev})$ \\
+                    $\tau \stackrel{?}{=} \tau(\pinc)$ \\
+                    derive $(\txhash,v)$ \\
+                    $v \stackrel{?}{=} \pinc.v$ \\
+                    $\predi(\tau, H(\sthash, \txhash), u) \stackrel{?}{=} 1$ \\
+                    $\mathcal{V}(H(\predi, T.\sthash), v, \pinc, \mathcal{CD}_\beta, \mathcal{T}) \stackrel{?}{=} 1$ \\
+                    Accept if all checks pass
+                    }}{R}{}
+                \end{call}
+            \end{messcall}
+        \end{sequencediagram}
+        \caption{One Unicity transaction. The predicate $\predi$ represents the current ownership condition, and the capability to unlock $\predi'$ defines the new owner. The request is valid only for a round whose reference time $\tau$ satisfies $\tau<\widehat\tau_Q$.}\label{fi:exec-transaction-flow}
+    \end{center}
+\end{figure}
+
+
+\section{Fungible Token Payload}\label{sec:fungible-tokens}
+
+For fungible tokens (e.g. digital currency), the execution layer defines additional structure within the token's auxiliary data to support money-like operations: value tracking, splitting, and value conservation proofs.
+
+\subsection{Asset Structure}\label{sec:asset-structure}
+
+\index{asset}
+An \emph{asset} is a pair $(\mathsf{aid}, v)$, where:
+\begin{itemize}
+	\item $\mathsf{aid}$ -- asset identifier, specifying the asset type (e.g. currency)
+	\item $v \in \mathbb{N}$ -- asset value (non-negative integer amount)
+\end{itemize}
+
+A token may carry multiple assets, represented as a collection:
+\[
+\mathcal{A} = \{(\mathsf{aid}_1, v_1), \ldots, (\mathsf{aid}_m, v_m)\}
+\]
+where all asset identifiers $\mathsf{aid}_i$ are distinct.
+
+\subsection{Mint Reason and Initial Payload}\label{sec:mint-justification}
+
+\index{mint justification}\index{mint reason}
+The following fields provide additional meta-data necessary for token validation:
+\begin{itemize}
+	\item $\mathsf{reason}$ -- mint justification, such as backing proof, authorization data, or a split reason proof
+	\item $\auxd'$ -- initial auxiliary payload, e.g., encapsulated asset metadata
+\end{itemize}
+
+The token type identifier $\mathsf{ty}$ in the mint transaction classifies the token (e.g. a specific currency or asset class) and defines the validation rules which both $\mathsf{reason}$ and $\auxd'$ must satisfy and provide all sufficient data.
+
+\subsection{Token Splitting}\label{sec:token-splitting}
+
+\index{token!splitting}
+Splitting allows a fungible token to be divided into multiple new tokens while preserving the amount of every enclosed asset independently.  The protocol uses one \emph{Radix Sparse Merkle Sum Tree}\index{Radix Sparse Merkle Sum Tree} (RSMST) per asset identifier.  An RSMST reuses the radix sparse Merkle tree structure with sums committed next to every child hash, so verification of any output proves that its amount is included in a committed allocation whose total equals the source amount.
+
+Each fractional token is self-contained and carries the complete certified burned source token in its mint reason. Implementations may deduplicate identical source-token bytes internally.
+
+\subsubsection{Split Protocol}
+
+Let $\Call{Assets}{\mathsf{ty},\auxd'}$ denote the token-type-specific, deterministic decoding and validation of a fungible payload.  Asset identifiers in the resulting collection are non-empty, distinct and placed in canonical bytewise order, and every amount is positive.  A payload containing a zero-valued entry is rejected rather than normalized.  Given a valid token $\mathcal{L}$ on network $\alpha$ carrying
+\[
+\mathcal{A}=\Call{Assets}{\mathsf{ty},\auxd'},
+\]
+the owner prepares $k \geq 1$ output mint transactions on the same network and with exactly the same token type $\mathsf{ty}$, with canonical asset collections $\mathcal{A}_1,\ldots,\mathcal{A}_k$.  Splitting is not a token-type conversion mechanism.  For every source asset identifier $\mathsf{aid}$ the allocations must satisfy
+\[
+\sum_{j=1}^{k} v_j(\mathsf{aid}) = v(\mathsf{aid})
+\]
+where a missing entry has value zero.  No output may introduce an asset identifier absent from $\mathcal{A}$.  Amounts of different asset identifiers are never added to or substituted for one another.
+
+For output $j$, let $D_{\mathsf{out},j}$ consist of the source token identifier and all output mint fields except the mint reason.  Its commitment
+\[
+d_j = H(\mathsf{SPLIT\_OUTPUT},D_{\mathsf{out},j})
+\]
+binds the allocation to the source token, network, recipient predicate, salt and resulting token identifier, token type, and the complete canonical auxiliary payload.  In particular, a proof prepared for one recipient or token type cannot authorize a mint to another, even though the standard minting key is public.
+
+The split proceeds as follows:
+\begin{enumerate}
+	\item Verify $\mathcal{L}$ completely, including its fungible payload, mint reason and issuer policy, before submitting any irreversible burn request.  Derive pairwise distinct output token identifiers $\mathsf{id}_j=H(\mathsf{salt}_j,\alpha)$ and the corresponding commitments $d_j$.
+	\item For every source asset $\mathsf{aid}_i$ in canonical order, construct an RSMST $\mathcal{S}_i$.  For each output carrying that asset, insert the leaf
+	\[
+	(\mathsf{id}_j,d_j,v_j(\mathsf{aid}_i)).
+	\]
+	Require the RSMST root sum to equal $v(\mathsf{aid}_i)$.  Let $r_i$ be its root hash.
+	\item Construct the \emph{split manifest}
+	\[
+	\mathcal{M}=\langle r_1,\ldots,r_m\rangle,
+	\]
+	where the roots are positionally aligned with the canonical source asset collection.  The manifest contains no repeated source identifier, asset identifiers or amounts: all are already authenticated by the burned token.  Its precise encoding $b_\mathcal{M}$ is defined in Appendix~\ref{app:split-proof-encoding}.  Extract and durably store every output's RSMST proofs and mint fields, together with the manifest and complete burn-transfer fields, before proceeding.
+	\item Burn the source by creating and certifying a transfer whose auxiliary data is exactly $b_\mathcal{M}$ and whose recipient is $\predi_\mathsf{burn}(\mathsf{SHA\text{-}256}(b_\mathcal{M}))$.  The resulting certified burned token is denoted $\mathcal{L}_\mathsf{burn}$.
+	\item Mint each output token $j$ with the exact fields committed by $d_j$.  Its mint reason contains $\mathcal{L}_\mathsf{burn}$ and, in canonical output-asset order, one RSMST inclusion proof for every asset it carries.  The proof contains only leaf-to-root sibling entries $(\delta,s,w)$ with explicit bifurcation depth, sibling hash and sibling sum; it omits the asset identifier, output identifier, output commitment, leaf amount and root hash because the verifier derives them respectively from the output payload, mint transaction, and split manifest.
+\end{enumerate}
+
+
+\subsubsection{Split Verification}\label{sec:split-verification}
+
+Given a token whose mint reason claims split origin, the verifier must perform all of the following checks.  Failure of any check rejects the token.
+\begin{enumerate}
+	\item Decode the mint reason, manifest, payloads and proofs using deterministic CBOR.  Reject wrong or unknown tags, non-canonical integers or byte strings, duplicate or unordered asset identifiers, invalid field counts or types, trailing bytes, arithmetic overflow and any input exceeding the protocol's decoding and verification limits.
+	\item Verify the output mint transaction and its Unicity Certificate.  Decode and validate its auxiliary payload according to its token type; the payload must contain a non-empty canonical collection of distinct, positive-valued assets.
+	\item Recursively verify the complete burned source token, including every Unicity Certificate, transaction, nested mint reason, fungible payload and token type specific issuance policy, under the same trust base $\mathcal{T}$, verifier registry and cumulative resource limits used for the output.  Both tokens must have network identifier $\mathcal{T}.\alpha$.
+	\item Require the source token to end in a certified transfer whose auxiliary data is the exact canonical split-manifest encoding $b_\mathcal{M}$ and whose recipient predicate is exactly $\predi_\mathsf{burn}(\mathsf{SHA\text{-}256}(b_\mathcal{M}))$.
+	\item Decode the source fungible payload, place its distinct asset identifiers in canonical order, and require the manifest to contain exactly one root hash for each source asset in that order.
+	\item Require the output token type to be byte-identical to the source token type.  A split proof cannot authorize minting under any other token type, even if that type would decode the same asset identifiers and amounts.
+	\item Recompute $d_j$ from the verified source identifier and the output mint fields other than $\mathsf{reason}$.  The recomputation must cover the exact canonical recipient predicate, network, salt, token identifier, token type and complete auxiliary payload.
+	\item Require the proof count to equal the number of assets in the output payload.  Associate proofs with assets only by their canonical order; reject missing, duplicate or additional proofs.
+	\item For every output asset $(\mathsf{aid}_i,v_j(\mathsf{aid}_i))$, require that $\mathsf{aid}_i$ occurs in the source payload.  Verify its RSMST proof using key $\mathsf{id}_j$, leaf data $d_j$, leaf value $v_j(\mathsf{aid}_i)$ and expected root $r_i$ selected from the manifest.  Require both inclusion and root-hash equality.
+	\item Require the root sum reconstructed by that proof to equal the source amount $v(\mathsf{aid}_i)$.  This equality is checked independently for every asset identifier and is the verifier-side value-conservation rule; successful construction by a wallet is not evidence of conservation.
+\end{enumerate}
+
+These checks establish that the source was authentic and irreversibly spent, the burn committed to the exact set of per-asset allocation roots, every accepted output and its ownership were fixed before the burn, and no accepted output can create value.  The protocol does not guarantee that every prepared output will subsequently be minted or delivered: failure to mint an output can destroy value but cannot transfer or inflate it.  The party performing the irreversible burn is responsible for durably retaining the manifest, output salts and proofs required to resume minting.
+
+\subsection{Burn Transaction}\label{sec:burn-transaction}
+
+\index{burn transaction}
+A \emph{burn transaction} is a transfer transaction where the recipient predicate is $\predi_\mathsf{burn}(h_\mathsf{reason})$ (Sec.~\ref{sec:burn-predicate}). Since the burn predicate cannot be unlocked, the token is permanently spent and cannot be transferred further.
+
+The reason hash $h_\mathsf{reason}$ links the burn to its purpose. In a split operation, it is the hash of the complete canonical split-manifest encoding $b_\mathcal{M}$, enabling verifiers of the resulting tokens to bind the source burn to the exact ordered vector of per-asset allocation roots.
+
+
+\section{Bridged Assets}\label{sec:bridged-assets}
+
+\index{bridge}\index{bridged asset}
+A fungible token may represent an asset held in custody on an \emph{external chain} (e.g.\ an account-based EVM chain). Bridging is bi-directional. \emph{Bridge-in} locks the external asset in a settlement contract (the \emph{vault}) and mints a Unicity token whose mint reason (Sec.~\ref{sec:mint-justification}) is a \emph{backing proof} binding the token to that lock. \emph{Bridge-out}, or \emph{return}, burns the Unicity token and releases the matching external asset. Both directions are realized without a trusted bridge operator or committee: bridge-in as a token-type specific mint-reason verifier that every recipient re-runs, and bridge-out as a succinct validity proof the vault verifies. This section specifies both; concrete data structures and algorithms are in Appendix~\ref{app:bridging}.
+
+\subsection{Bridge-In: Lock and Mint}\label{sec:bridge-in}
+
+To bring an asset in, the locker fixes the recipient's first-owner predicate $\predi'_0$ and a token salt, determining the token identifier $\mathsf{id} = H(\mathsf{salt},\alpha)$ (Sec.~\ref{sec:mint-tx}) and the recipient commitment $h_\mathsf{rcpt} = H(\mathsf{CBOR}(\predi'_0))$. The locker calls the vault on the external chain, which escrows the asset into pooled custody, assigns a monotone lock nonce $n$, and emits a \emph{lock event} committing to $\mathsf{id}$, $h_\mathsf{rcpt}$, and the locked amount. The locker then mints a Unicity token of type $\mathsf{ty}$ to $\predi'_0$ whose genesis carries a \emph{backing reason} that references the lock by $(\chi, a_\mathsf{V}, a_\mathsf{A}, n)$ (Appendix~\ref{app:bridging-lock}).
+
+Minting is permissionless: the minter key is a public constant derived from $\mathsf{id}$ (Appendix~\ref{app:el-constants}), so a valid genesis signature conveys no authority by itself. Authority comes entirely from the backing reason, verified by every recipient as the token-type specific mint-reason check (Sec.~\ref{sec:mint-tx}, step~5). The verifier (Appendix~\ref{app:bridging-backing}) confirms that a \emph{final} lock with nonce $n$ exists at the configured vault and asset on the configured chain, and binds it to the genesis: the lock's committed identifier equals $\mathsf{id}$, its recipient commitment equals $h_\mathsf{rcpt}$, and its amount equals the genesis's declared value for $\mathsf{aid}$. The reason body carries only the lock locator and the trust anchors; every security-relevant value is read from the certified genesis and the lock event and validated cryptographically.
+
+Bridge-in cannot be instantaneous. A reorganization of the external chain could undo the lock after the token is minted and in circulation, so a recipient must wait for the lock to be final on the external chain before treating the token as good. This finality wait is intrinsic to accepting a deposit from a chain with probabilistic finality. Confirming the lock requires reading external-chain state: the recipient does so either by querying an external-chain node, or by verifying an external-chain inclusion proof carried in the backing reason against a pinned external-chain anchor (Appendix~\ref{app:bridging-finality}). Either way each recipient is its own verifier, so bridge-in introduces no trusted bridge party; its only assumption is the external chain's own consensus.
+
+The wait is enforced by each verifier for itself, not attached to the token as a global condition. In particular, the locker minting to a predicate it already controls needs no wait: it already knows whether its own deposit exists, so no reorganization can surprise it, and a wallet may show such a token to its own owner immediately. The wait binds the first party that did \emph{not} witness the lock --- typically the first recipient the token reaches after leaving the locker's own custody --- since only that party's own $\Call{LockFinal}{}$ check protects it from a lock later undone by a reorganization.
+
+\paragraph{Security.}
+\begin{description}
+\item[No mint without a lock] The backing verifier accepts the genesis only if a matching final lock exists on the configured chain and asset; a token minted without a lock fails verification and is never accepted.
+\item[No double mint] The genesis of a token with identifier $\mathsf{id}$ is recorded at a single state determined by $\mathsf{id}$ (Sec.~\ref{sec:mint-tx},~\ref{sec:request-validation}); since the lock commits to $\mathsf{id}$, one lock funds exactly one token and cannot be replayed for a second mint.
+\item[No theft] Although anyone may construct the genesis, $h_\mathsf{rcpt}$ binds ownership to the predicate the locker named on the external chain, so only the intended recipient can spend the minted token.
+\item[No value inflation] The declared genesis value for $\mathsf{aid}$ must equal the locked amount, so minted value never exceeds custody.
+\item[No rogue contract] The chain, vault, and asset in the reason must equal the pinned configuration, so a genesis pointing at an unauthorized contract is rejected.
+\item[No reorged lock] The lock must be final on the external chain, so a deposit that could still be reversed is not accepted.
+\end{description}
+
+\subsection{Bridge-Out: Setting}\label{sec:bridge-setting}
+
+A Unicity burn is final the instant it is certified by the BFT Consensus layer and is verifiable offline by $\Call{VerifyToken}{}$ (Sec.~\ref{sec:token-verification}) against the trust base $\mathcal{T}$ alone: there is no source-finality wait, no validator node, and no external RPC query. The limitation is that the external vault is computationally weak --- re-running $\Call{VerifyToken}{}$ on-chain incurs cost which grows with token history. A \emph{succinct validity proof} (a SNARK, see Appendix~\ref{app:bridging-primitives}) compresses that token history-dependent check into a single verification of constant cost.
+
+The vault holds pooled custody of one asset, has persistent storage, can verify a succinct proof for constant cost, and pins (i)~an allow-listed trust-base hash $h_\mathcal{T} = H(\mathcal{T})$, selecting \emph{which} Unicity Service instance is authoritative, and (ii)~an immutable configuration hash $h_\mathsf{cfg}$ committing the external chain identifier, the vault and asset addresses, the bridged token type $\mathsf{ty}$, the asset identifier $\mathsf{aid}$, and the protocol's domain separators (Appendix~\ref{app:bridging-config}). There is no trusted operator, committee, or challenge window: the vault releases funds only against a valid proof.
+
+The return proof is structured in layers: a shared Unicity anchor authenticates historical transition leaves; token-lineage verification checks ownership and chain linkage; value/backing verification ties the burned value to a recorded source-chain lock; replay verification advances the spent-burn accumulator; and the settlement layer binds the public release leaves to the vault transfers. Only the final settlement layer touches source-chain state.
+
+\subsection{Return Authorization}\label{sec:bridge-return-reason}
+
+To return value, the holder forms a \emph{return reason} $\mathcal{R}$ and its canonical encoding $b_\mathcal{R}$. The holder then burns the token (Sec.~\ref{sec:burn-transaction}) with auxiliary data $b_\mathcal{R}$ and recipient predicate $\predi_\mathsf{burn}(H(b_\mathcal{R}))$. The reason commits to the external release: the recipient, a gross amount $v$ equal to the burned token's certified value for $\mathsf{aid}$, an optional relayer fee, a fee deadline, and the pinned configuration fields (Appendix~\ref{app:bridging-reason}). A fungible token might have been split (Sec.~\ref{sec:token-splitting}), causing fractional returns.
+
+\subsection{Replay Prevention}\label{sec:bridge-replay}
+
+Replay prevention is implemented via a \emph{nullifier accumulator}, whose root $A$ is stored on-chain by the vault: an authenticated set (implemented by the sparse Merkle tree of Sec.~\ref{sec:smt}, which already provides inclusion and non-inclusion certificates) of the burns already released. The \emph{nullifier} of a burn is derived from its certified leaf, whose state identifier the Unicity Service records at most once (Sec.~\ref{sec:request-validation}); it is therefore globally unique by the same mechanism that prevents double-spending. A release proves the nullifier is \emph{absent} from $A$ and inserts it, and the vault advances $A$. Consequently, the on-chain state necessary for replay prevention is \emph{constant} --- one root.
+
+The nullifier accumulator can be deterministically rebuilt by anybody based on transaction history of the source blockchain.
+
+\subsection{Validity Statement}\label{sec:bridge-statement}
+
+For a batch of $B$ burns, the proof attests the conjunction of the following claims:
+
+\begin{description}
+\item[Anchor.] A single recent Unicity Certificate $UC^*$ certifies an SMT root $h^* = UC^*.IR.h$ under $\mathcal{T}$, and $H(\mathcal{T}) = h_\mathcal{T}$. Because the SMT is add-only (Sec.~\ref{sec:smt}), every state a token ever occupied remains provable under any later root, so one $UC^*$ anchors entire token histories. The proof verifies this BFT certificate \emph{once} per batch, instead of one certificate per transition.
+\item[Finality.] Each burned token verifies by $\Call{VerifyToken}{}$, with every certified transaction's leaf shown included under the shared root $h^*$; in particular the final state is a burn whose auxiliary data is the encoded return reason and whose recipient predicate binds its hash. This anchored mode is restricted to predicates whose validation does not depend on the original Unicity request-validation time.
+\item[Value and backing.] Each burned amount equals the token's certified value for $\mathsf{aid}$, which traces --- through split value-conservation (Sec.~\ref{sec:split-verification}) --- to a genesis whose backing proof references a lock the vault recorded at bridge-in.
+\item[Destination.] Each $\mathcal{R}$ matches the pinned configuration and yields a public \emph{release leaf} (recipient, amount, fee).
+\item[Replay.] Each nullifier is absent from the input accumulator root $A_\mathsf{old}$; inserting them yields $A_\mathsf{new}$.
+\end{description}
+
+The vault verifies the proof, checks $h_\mathsf{cfg}$ and that $h_\mathcal{T}$ is allow-listed, requires $A_\mathsf{old}$ to equal its stored root, confirms each referenced lock digest against its own bridge-in records, advances the root to $A_\mathsf{new}$, and pays each release leaf. No external query is made at return time: backing was committed locally when the asset was locked.
+
+\subsection{Security}\label{sec:bridge-security}
+
+\begin{description}
+\item[Solvency.] Every bridged token in circulation is backed by an equal external lock (bridge-in), and split verification guarantees children never exceed their parent (Sec.~\ref{sec:split-verification}). Hence $\sum(\text{valid burns}) \le \sum(\text{locks})$, and valid releases can never drain custody below zero. Over-release would require a burn of an unbacked token, which the backing claim and the vault's lock-digest check exclude.
+\item[No double release.] The nullifier is unique (single-spend, Sec.~\ref{sec:request-validation}); a release both proves its non-membership and inserts it, and the vault gates on $A_\mathsf{old}$ equal to its current root. A replayed proof is rejected because the root has advanced, and a freshly built one cannot prove non-membership of an inserted nullifier.
+\item[Authenticity.] The proof embeds $\Call{VerifyToken}{}$ against the pinned $\mathcal{T}$, so a forged, malformed, or non-final burn is unrepresentable under proof-system soundness.
+\item[No trusted parties.] The prover cannot alter the recipient or amount (fixed in the certified $\mathcal{R}$) nor fabricate a release; it can only stall, and any party holding the burned token can reproduce the proof.
+\end{description}
+
+\paragraph{Relation upgrades.} The verification key $\mathsf{vk}$ is immutable once a vault is deployed: this is what makes proof verification trustworthy, since no party --- including the deployer --- can silently swap in a different relation later. The consequence is that fixing a bug in the proving relation, or extending it, requires deploying a \emph{new} vault under a new $\mathsf{vk}$; it cannot be done in place. The old and new vaults share no state, so value locked under the superseded configuration must be returned under the old relation before, or independently of, adopting the new one. Appendix~\ref{app:bridging-upgrades} details the upgrade procedure.
+
+\subsection{Enshrined Settlement Chain}\label{sec:bridge-enshrined}
+
+When the settlement chain is an enshrined EVM partition of the same network (Chapter~\ref{ch:evm}), a lock is authenticated by a Unicity Certificate and an account/storage proof. There is no external-chain confirmation wait or independently trusted bridge operator. Recipients still authenticate the root history from their checkpoint and require available proof data.
+
+The immutable mint reason references the lock; a separately carried witness may be refreshed under a recent certified EVM state without changing the token. The vault reads its trust-base context from the mandatory system feed. Direct and succinct redemption implement the same admitted relation, subject to different resource limits. The initial enshrined type restricts operations as specified in Appendix~\ref{app:bridging-enshrined}; no unsupported split or history may be admitted on a promise of a future verifier.
+
+Native custody, outstanding backing and unpaid withdrawal credits are accounted separately. Neither WUCT nor the Execution-layer claim adds native supply. Appendix~\ref{app:bridging-enshrined} specifies the proof hierarchy, checkpoint handling and liability equations.
+
+The full data structures, the proving relation, the settlement procedure, and the batched proving mechanism are in Appendix~\ref{app:bridging}.
+
+\section{Private Transactions}\label{sec:private-transactions}
+
+In the transaction flow described above, Sec.~\ref{sec:transaction-flow}, the Unicity Service learns only the public key and signature (predicate and unlock data in general) of the token spending party; but it is not possible to associate transactions with tokens. Looking at a token it is possible to associate transactions if made by the same party using the same key. In order to achieve perfect privacy it is necessary to generate a fresh predicate $\predi'$ for every transaction. This requires generating and storing a fresh keypair per transaction, which may be impractical when the recipient's secure storage is limited, and forces the transaction sender to obtain recipient's key for every transaction, making the transacting protocol interactive.
+
+This section presents protocols that allow the recipient to derive unlinkable predicates from a single persistent keypair, requiring no persistent state beyond the keypair itself. Also, this persistent keypair can be used as a persistent address (recipient's identifier).
+
+The protocols below are implemented at the ``wallet'' level and need no support by the execution layer and Unicity Service. User can choose selectively wheter to make fully private transactions or not.
+
+The privacy protocols produce a transaction-specific public key $\mathsf{pk}_{tx}$ that the sender embeds in the predicate $\predi' = \predi_\mathsf{sig}(\mathsf{pk}_{tx})$. An ephemeral public key $R$ is included in the auxiliary data $\auxd'$ of the transaction, enabling the recipient to reconstruct the corresponding private key $\mathsf{sk}_{tx}$ when spending.
+
+The protocols below assume an elliptic curve group of order $n$ with generator $G$, and that the signature predicate $\predi_\mathsf{sig}$ uses a compatible scheme (e.g. ECDSA). The persistent keypair is $(\mathsf{sk}, \mathsf{pk})$ where $\mathsf{pk} = \mathsf{sk} \cdot G$.
+
+\subsection{Interactive Protocol}\label{sec:private-interactive}
+
+For each incoming transaction, the recipient generates an ephemeral blinding factor $r$ and derives a transaction-specific public key $\mathsf{pk}_{tx} = (\mathsf{sk} + r) \cdot G$. The protocol is shown in Figure~\ref{fig:private-interactive}.
+
+\begin{figure}[!htb]
+\centering
+\fbox{
+\begin{minipage}{0.9\textwidth}
+
+\underline{Setup:} Recipient holds persistent keypair $(\mathsf{sk}, \mathsf{pk} = \mathsf{sk} \cdot G)$
+
+\vspace{3mm}
+\begin{tabular}{lcl}
+\textbf{Sender} & & \textbf{Recipient}\\
+\hline
+\\[-2mm]
+  & & $r \stackrel{\$}{\gets} \mathbb{Z}_n$ \\
+  & & $\mathsf{pk}_{tx} \gets (\mathsf{sk} + r) \cdot G$ \\
+  & & $R \gets r \cdot G$ \\
+  & $\xleftarrow{\hspace{0.6cm} \predi_\mathsf{sig}(\mathsf{pk}_{tx}),\; R \hspace{0.6cm}}$ & \\[2mm]
+$\predi' \gets \predi_\mathsf{sig}(\mathsf{pk}_{tx})$ & & \\
+$\auxd' \gets \{\ldots, R\}$ & & \\
+Create and certify $T$ & & \\
+  & $\xrightarrow{\hspace{0.8cm} \mathcal{L}\; \cup\; T^\mathsf{cert} \hspace{0.8cm}}$ & \\[2mm]
+  & & $r' \gets H(\mathsf{sk} \,\|\, R)$ \\
+  & & $\mathsf{sk}_{tx} \gets \mathsf{sk} + r' \bmod n$ \\
+  & & Sign next transaction using $\mathsf{sk}_{tx}$ \\
+\end{tabular}
+\end{minipage}
+}
+\caption{Interactive protocol for generating unlinkable predicates.}
+\label{fig:private-interactive}
+\end{figure}
+
+The recipient sends $\predi_\mathsf{sig}(\mathsf{pk}_{tx})$ and the ephemeral public key $R$ to the sender, who includes $R$ in the auxiliary data $\auxd'$ of the transfer transaction. When spending the received token, the recipient reconstructs the blinding factor $r' = H(\mathsf{sk} \,\|\, R)$ from the persistent private key and $R$ (read from $\auxd'$), and computes the transaction-specific private key $\mathsf{sk}_{tx} = \mathsf{sk} + r' \bmod n$.
+
+\subsection{Non-Interactive Protocol}\label{sec:private-non-interactive}
+
+For applications where the recipient publishes a persistent public key $\mathsf{pk}$ as an address, the sender can derive unlinkable predicates without interaction using Diffie-Hellman key exchange inspired protocol, shown in Figure~\ref{fig:private-non-interactive}.
+
+The key challenge is protecting against a malicious sender who might choose a predictable ephemeral key $r$ or leak it to compromise unlinkability. The construction addresses this by binding the blinding factor to both the shared secret and public transaction data.
+
+\begin{figure}[!htb]
+\centering
+\fbox{
+\begin{minipage}{0.95\textwidth}
+
+\underline{Setup:} Recipient publishes persistent public key $\mathsf{pk} = \mathsf{sk} \cdot G$
+
+\vspace{3mm}
+\begin{tabular}{lcl}
+\textbf{Sender} & & \textbf{Recipient} \\
+\hline
+\\[-2mm]
+$r \stackrel{\$}{\gets} \mathbb{Z}_n^*$ & & \\
+$R \gets r \cdot G$ & & \\
+$s \gets H(r \cdot \mathsf{pk} \,\|\, R \,\|\, \sthash)$ & & \\
+$\mathsf{pk}_{tx} \gets \mathsf{pk} + s \cdot G$ & & \\
+$\predi' \gets \predi_\mathsf{sig}(\mathsf{pk}_{tx})$ & & \\
+$\auxd' \gets \{\ldots, R\}$ & & \\
+Create and certify $T$ & & \\
+& $\xrightarrow{\hspace{0.6cm} \mathcal{L}\; \cup\; T^\mathsf{cert} \hspace{0.6cm}}$ & \\[3mm]
+& & \textbf{if} $R = \mathcal{O}$ \textbf{then abort} \\
+& & $s' \gets H(\mathsf{sk} \cdot R \,\|\, R \,\|\, \sthash)$ \\
+& & \textbf{if} $\mathsf{pk} + s' \cdot G \neq \mathsf{pk}_{tx}$ \textbf{then abort} \\
+& & $\mathsf{sk}_{tx} \gets \mathsf{sk} + s' \bmod n$ \\
+& & Sign next transaction using $\mathsf{sk}_{tx}$ \\
+\end{tabular}
+\end{minipage}
+}
+\caption{Non-interactive protocol for generating unlinkable predicates.}
+\label{fig:private-non-interactive}
+\end{figure}
+
+The sender generates an ephemeral keypair $(r, R = r \cdot G)$ and computes a Diffie-Hellman shared secret $r \cdot \mathsf{pk}$. The blinding factor is derived by hashing the shared secret together with $R$ and the current state hash $\sthash$:
+$$s = H(r \cdot \mathsf{pk} \,\|\, R \,\|\, \sthash)$$
+
+The transaction-specific public key is $\mathsf{pk}_{tx} = \mathsf{pk} + s \cdot G$, and $R$ is included in $\auxd'$. The sender sets $\predi' = \predi_\mathsf{sig}(\mathsf{pk}_{tx})$ in the transaction data. Upon receiving the transaction, the recipient:
+\begin{enumerate}
+\item Verifies $R \neq \mathcal{O}$ (not trivially insecure)
+\item Computes the shared secret $\mathsf{sk} \cdot R = r \cdot \mathsf{pk}$ using the persistent private key
+\item Derives $s' = H(\mathsf{sk} \cdot R \,\|\, R \,\|\, \sthash)$ and verifies $\mathsf{pk} + s' \cdot G = \mathsf{pk}_{tx}$
+\item Computes $\mathsf{sk}_{tx} = \mathsf{sk} + s' \bmod n$
+\end{enumerate}
+
+Including both $R$ and $\sthash$ in the hash input ensures that:
+\begin{itemize}
+\item Even if the sender chooses a predictable $r$, the blinding factor $s$ remains unpredictable to external observers
+\item The recipient can verify that the sender correctly computed $\mathsf{pk}_{tx}$ without learning $r$
+\item Each transaction uses a unique blinding factor, since $\sthash$ is unique by construction (Sec.~\ref{sec:token-state}), preventing linkability even if the sender reuses the same $r$
+\end{itemize}

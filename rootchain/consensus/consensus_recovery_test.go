@@ -851,13 +851,19 @@ func (cl constLeader) UpdateWithTrustBase(trustBase types.RootTrustBase, current
 func createStorage(t *testing.T, shardConf *types.PartitionDescriptionRecord, signers map[string]abcrypto.Signer, obs Observability) (PersistentStore, *partitions.Orchestration) {
 	dir := t.TempDir()
 
-	rootDB, err := storage.NewBoltStorage(filepath.Join(dir, "rootchain.db"))
+	// These stores are throwaway: the tests using this fixture assert consensus and recovery behaviour,
+	// not durability, and every commit syncing made them measure the host's disk-flush cost instead.
+	// On macOS a synced bbolt commit costs ~115 ms with four stores committing at once (F_FULLFSYNC),
+	// against ~4 ms on Linux, and a node makes several before each vote — so rounds ran at 500–600 ms and
+	// Test_rootNetworkRunning and Test_recoverState missed their budgets there while passing on Linux
+	// (#127; docs/design/f1e-consensus-test-failures.md). Production stores keep syncing.
+	rootDB, err := storage.NewBoltStorage(filepath.Join(dir, "rootchain.db"), storage.WithNoSync())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rootDB.Close() })
 	genesisBlock := newTestGenesisBlock(t, shardConf, signers)
 	require.NoError(t, rootDB.WriteBlock(genesisBlock, true))
 
-	orchestration, err := partitions.NewOrchestration(5, filepath.Join(dir, "orchestration.db"), obs.Logger())
+	orchestration, err := partitions.NewOrchestration(5, filepath.Join(dir, "orchestration.db"), obs.Logger(), partitions.WithNoSync())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = orchestration.Close() })
 	require.NoError(t, orchestration.AddShardConfig(shardConf))
