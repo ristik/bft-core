@@ -159,6 +159,9 @@ func Derive(ctx context.Context, c Context, uc *types.UnicityCertificate, tr *ce
 	if err != nil {
 		return Result{}, fmt.Errorf("%w: no trust base for root epoch %d: %w", ErrUnauthenticated, ownedUC.GetRootEpoch(), err)
 	}
+	if tb == nil {
+		return Result{}, fmt.Errorf("%w: no trust base for root epoch %d", ErrUnauthenticated, ownedUC.GetRootEpoch())
+	}
 	// Quorum signatures, both inclusion paths, the partition and shard, and the configuration
 	// commitment — all against values this node was configured with, never the certificate's own.
 	if err := ownedUC.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, confHash); err != nil {
