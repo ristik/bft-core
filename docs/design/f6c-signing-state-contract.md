@@ -338,6 +338,65 @@ than importing them, because step 3 wires `shardnode.Round` to this package and 
 here would be a cycle. `TestExpectationMatchesTheShardNodeRule`, in the external test package, holds
 the two rules against each other so the copy cannot drift silently.
 
+### Step 2 as implemented
+
+The signing record lives in `signingauthority/record.go` and the operations on it in `authority.go`.
+
+**Sessions and fencing.** `ReplaceSession` is the operator control plane: it advances the generation,
+so every token issued earlier stops being admitted, and it changes nothing else. A client cannot mint
+a session, and that is enforced by the type rather than by convention: `Session` has no exported
+field, so outside this package only its zero value can be constructed, and the zero value is never
+admitted. Fencing does not clear the record; the replacement client inherits the same history, which
+is the point of fencing rather than restarting.
+
+**The record.** One reservation, for the highest assigned partition round admitted so far, holding
+the complete unsigned request, its digest, the authorization identity that admitted it, the private
+signature and the retained response. The conflict key is the assigned round with the enrolled key and
+profile, so a different root round produces no second record.
+
+`Reserve` authenticates first (step 1) and then compares: the same bytes at the reserved round are
+admitted again and answer identically, different bytes at that round are `signing-conflict`, a lower
+round is `signing-stale` even for identical bytes, and a higher round replaces the record including
+any response for the older one. Gaps are permitted, because an authenticated technical record assigns
+the round and assigned rounds are not consecutive integers. A cancelled caller stops waiting and does
+not return a round it already holds.
+
+`Sign` signs the bytes the authority owns and takes no bytes from the caller. `RetainResponse` makes
+the response replayable before any of it can leave. `Release` requires the caller to name both the
+round and the request digest, so a delayed call for an older reservation is refused rather than
+answered from the newer one now occupying the slot.
+
+**Faults and death.** A detected inconsistency between the record's own parts latches the authority
+faulted: the record is kept, the key is kept, nothing further is signed, and there is no reset.
+Generation exhaustion latches the same way rather than wrapping into an old session. `Close` discards
+key and record together, because a record outliving its key would describe signing that nothing can
+perform, and a key outliving its record could sign a round again.
+
+**Bounds.** 1 MiB per complete request, 2 MiB per record including the retained response. Bounding
+concurrency and queue length is the transport's job (§5) and is not implemented here; a mutex
+serialises operations and callers wait.
+
+Repairs after the first review of step 2 (PR #140, head `17be3393`):
+
+- **A session names the authority that issued it.** `Session` carried only a generation, and every
+  authority starts counting at the same place, so a token issued by one authority was admitted by
+  another that happened to be at the same generation. Each authority now draws a private 128-bit
+  identity for its lifetime, and a token carries it; a foreign token is refused on every client
+  operation. The identity is not in `Status`, not in `Enrollment` and not derived from anything an
+  operator can name, because a published identifier would not be a capability.
+- **The caps compose.** The record kept the request, the signed response and a second copy of that
+  response, so a 750 KB proof was admitted and signed and then could never be retained, leaving a
+  round locked and answerable by nothing. Retention is now a flag on the one response copy rather
+  than a second copy, and `MaxRecordBytes` is derived from `MaxUnsignedRequestBytes` plus the
+  authorization identity and a signing allowance rather than being an independent number. `Reserve`
+  also projects the completed record before locking the round, so anything admitted can be
+  completed.
+
+**What step 2 does not establish.** No round is wired to the authority and the restored non-voting
+gate is untouched, so this changes no runtime behaviour. There is no transport, so nothing here tests
+RPC authentication, wire-size admission or operation correlation. There is no durable journal, by
+§6: with a key that cannot survive process death, making the record survive it adds no safety.
+
 #105 closes only after all four steps and independent review. #14 still owns
 atomic block/UC/TR persistence; changing that format requires rechecking the R2/R3
 cold-start equivalences in #92's ledger. No new Engine methods, reth changes, root

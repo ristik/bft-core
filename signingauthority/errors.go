@@ -35,3 +35,32 @@ var (
 	// a closed authority; there is no import path that could recover one.
 	ErrKeyLost = errors.New("signing-key-lost")
 )
+
+// Step 2 adds the signing record's own refusals (§4, §5 and §6).
+var (
+	// ErrFenced is an operation from a client generation that is no longer current. Only the
+	// operator control plane advances the generation, and a client cannot mint one.
+	ErrFenced = errors.New("signing-session-fenced")
+
+	// ErrStale is work below the highest reserved round, even when the bytes are identical. Keeping
+	// only the highest reservation is what makes the record bounded; the cost is that old delivery
+	// retries stop once newer signing work has superseded them.
+	ErrStale = errors.New("signing-stale")
+
+	// ErrConflict is different complete bytes for the round that is already reserved. It is never a
+	// reason to rebuild or retry with something else: one assigned partition round admits exactly
+	// one unsigned request, whatever authorization is presented for it.
+	ErrConflict = errors.New("signing-conflict")
+
+	// ErrNoReservation is signing or releasing when nothing is reserved.
+	ErrNoReservation = errors.New("signing-no-reservation")
+
+	// ErrResponseNotRetained is a release before the signed response has been retained. Retention
+	// happens before any response can leave, so that a lost caller replays identical bytes.
+	ErrResponseNotRetained = errors.New("response-not-retained")
+
+	// ErrStateUntrusted is latched when an invariant of the record fails, and when the generation
+	// space is exhausted. It is deliberately terminal for this authority lifetime: the record is
+	// never cleared and reused while the same key is held, and there is no reset.
+	ErrStateUntrusted = errors.New("signing-state-untrusted")
+)

@@ -445,8 +445,18 @@ func TestAuthorityOffersNoGenericSigningOrKeyImport(t *testing.T) {
 	for i := 0; i < at.NumMethod(); i++ {
 		methods = append(methods, at.Method(i).Name)
 	}
-	require.ElementsMatch(t, []string{"Authenticate", "Close", "Enrollment", "SigningPublicKey"}, methods,
+	require.ElementsMatch(t, []string{
+		"Authenticate", "Close", "Enrollment", "MarkUntrusted", "Release", "ReplaceSession",
+		"Reserve", "RetainResponse", "Sign", "SigningPublicKey", "Status",
+	}, methods,
 		"this authority admits structured requests only: no generic signing, key import, key export or journal load")
+
+	// Sign takes no bytes. It signs the request this authority reserved and owns, so the method name
+	// is not a way back to caller-supplied signing; the signature below is what makes that checkable.
+	signMethod, ok := at.MethodByName("Sign")
+	require.True(t, ok)
+	require.Equal(t, 2, signMethod.Type.NumIn(), "Sign takes the receiver and a session, and nothing else")
+	require.Equal(t, reflect.TypeOf(Session{}), signMethod.Type.In(1))
 
 	f := newFixture(t, 1)
 	t.Run("an enrollment naming a key is refused", func(t *testing.T) {
