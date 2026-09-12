@@ -50,7 +50,7 @@ are recorded per scenario in `<runID>/<scenario>-pins.txt`.
 
 | scenario | shard progress during the fault | the returning node | agreement after |
 |---|---|---|---|
-| baseline | 3/3 transactions executed and certified, leaders 1 2 3 4 | n/a | head, nonce, 3 receipts across 4 clients |
+| baseline | 3/3 transactions executed and certified | n/a | head, nonce, 3 receipts across 4 clients |
 | follower-restart (reth retained) | certified rounds 15 → 17 with validator 2 down; a transaction executed while it was absent | accepted a new certificate, then executed new work, block 4 → 5 | head, nonce, 5 receipts |
 | leader-kill | rotated past killed leader 2, rounds 18 → 19; a transaction executed with it absent | accepted a new certificate, then executed new work, block 4 → 5 | head, nonce, 5 receipts |
 | reth-only-restart (datadir retained, shard process up) | the rest of the shard kept certifying while reth4 was down | validator 4 executed new work, block 3 → 4 | head, nonce, 4 receipts |
@@ -68,30 +68,30 @@ that the limitation be mapped rather than glossed. The run measures the distinct
 Every restarted **shard process** logs `abstaining: restored process is non-voting`
 (`shardnode/round.go:777`) for the rounds after it returns:
 
-| scenario | rounds abstained | why |
+| scenario | restored-gate log messages | why |
 |---|---|---|
 | follower-restart | 10 | the shard process was restarted |
 | leader-kill | 11 | same |
 | pair-restart | 8 | same |
-| reth-only-restart | **0** | only reth restarted; the shard process kept running, so it never stopped voting |
+| reth-only-restart | **0** | only reth restarted; the shard process kept running, so it did not enter the restored-process gate; executor availability still gates voting |
 | multi-leader | **0** | no restart |
 
 So what these scenarios establish is that a restored node **follows the chain and executes new
 certified work**. They do not establish restored signing, and the zero rows are what make that a
 measurement rather than an assumption: the one scenario that did not restart a shard process is the
-one with no abstention at all.
+one with no restored-process abstention messages. This does not establish uninterrupted voting: executor-read failures still prevent that round from reaching a vote.
 
 Restoring signing is #105 (F6c). Its step 1 and step 2 are merged (`4f0ec961`, `dd9e6975`); step 3
-wires the shard node's round to the authority and is open. Nothing in this matrix depends on that
-work or anticipates it.
+was open at the measured revision and subsequently merged as #142 (`3d75e55e`). Nothing in this
+matrix measures that later integration or establishes restored signing.
 
 ## 3. Named refusals observed
 
 | refusal | count | where | reading |
 |---|---|---|---|
 | `no-anchor` | 12 | pair-restart, validator 2 | the returning process holds no anchor, so it cannot name the certified block its executor must reach, and it refuses to build rather than guessing. It recovered once a non-quiet certificate arrived, which is what the scenario's later assertions record |
-| `connection refused` on `eth_getBlockByNumber` | 36 | reth-only-restart | the shard process polling its own stopped reth. Expected for this scenario, and the reason it is the one fault where the shard node keeps voting |
-| `connection refused` on `eth_getBlockByNumber` | 3, 3, 4 | follower-restart, leader-kill, pair-restart | transient, during the restart window |
+| `connection refused` on `eth_getBlockByNumber` | 36 | reth-only-restart | the shard process polling its own stopped reth. Expected while the executor is unavailable; these are failed head reads, not evidence that the node votes during the outage |
+| `connection refused` on `eth_getBlockByNumber` | 3, 3, 4 | follower-restart, leader-kill, pair-restart | aggregate scenario-log counts; not individually attributed to the fault window |
 | `/unicity/shard-payload/1.0.0` dial failures | a few per restart scenario | dissemination to the absent validator | expected while it is down |
 
 `no-anchor` appearing only in pair-restart is the #92 shape: a process that restarts alongside its
@@ -139,9 +139,19 @@ supplies a repetition count or a flake rate.
 |---|---|
 | same-host retained-data recovery is measured; disk-loss and replacement-host recovery are not | #14 |
 | no deterministic reproduction is supplied for an unresolved runtime failure, because this run produced none | #16 |
-| a restored node is non-voting; restoring signing is not measured and is not claimed | #105, step 3 open |
-| authenticated-evidence anchor recovery is off in these runs and is therefore unmeasured here | #92 lifecycle work |
+| a restored node is non-voting; restoring signing is not measured and is not claimed | #105; later step 3 is not measured here |
+| authenticated-evidence anchor recovery is off in these runs and is therefore unmeasured here | separate accepted #92 evidence; not re-measured here |
 | repetition: every scenario is one run | #88, if repetition is wanted as acceptance |
 | hosted smoke, cache hit, downloadable failure artifact, dispatched fault run | #90, credit-dependent, nothing here substitutes |
 
 #88 stays open until this reconciliation is reviewed.
+
+## 7. Independent review of retained evidence
+
+The reviewer checked all three committed archives against the corresponding sealed private per-run
+scan records (36, 108 and 36 recorded values respectively), with no value matches. Filename,
+private-key-field and PEM-marker checks also found no matches. The private scan records remain
+outside the repository. This is artifact inspection, not another devnet run. The retained manifests
+confirm a separate baseline invocation, one five-scenario matrix invocation, and a separate injected
+failure invocation. Restored-gate counts above are log-message counts, not a claim of continuous
+voting or a distinct-partition-round count.
