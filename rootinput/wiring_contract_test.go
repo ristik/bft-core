@@ -15,6 +15,7 @@ Nothing here activates anything. No production call site changes and v0 still go
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"encoding/binary"
 	"reflect"
@@ -24,7 +25,9 @@ import (
 
 	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	"github.com/unicitynetwork/bft-core/shardnode"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 // v0PrevRandao and v0BeaconRoot restate what engineapi/params.go computes today, so this file can
@@ -141,23 +144,149 @@ func TestWiring_ExecutorHeadIsAcceptedAsTheCertifiedParent(t *testing.T) {
 }
 
 // 4. The committed cursor cannot be replaced by the highest observed root round.
+//
+// The history is realizable, and that matters: the node has APPLIED up to root round 40, the block
+// binds an authorization at 50, and a valid repeat at 60 has been observed but not applied. That is
+// the ordering D1 §5.3 describes, and it is the one where substituting an observed maximum does
+// damage — it rejects a good block, and two nodes that observed different things disagree.
 func TestWiring_ObservedMaximumIsNotTheCommittedCursor(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	// An authorization from root round 50, and a node whose committed cursor has already advanced
-	// past it: the binding is stale and must be refused.
+	// The bound authorization: root round 50, authorizing shard round 5.
+	bound, boundTR := f.successful(t)
+	require.EqualValues(t, 50, bound.UnicitySeal.RootChainRoundNumber)
+
+	// A later valid repeat of the same work at root round 60, which the proposer did not bind. Same
+	// input record and same technical record, so it is a repeat rather than new work.
+	repeat, _ := f.cert(t, 4, 5, 60,
+		bytes.Repeat([]byte{0xa0}, 32), bytes.Repeat([]byte{0xa1}, 32), bytes.Repeat([]byte{0xb1}, 32), 1, 2)
+	require.EqualValues(t, 60, repeat.UnicitySeal.RootChainRoundNumber)
+	require.Equal(t, bound.InputRecord.Hash, repeat.InputRecord.Hash, "the repeat certifies the same work")
+
+	// Committed state: the node has applied up to root round 40. The bound certificate is current.
+	committed := f.context()
+	committed.LastAppliedRootRound = 40
+	_, err := Derive(ctx, committed, bound, boundTR)
+	require.NoError(t, err, "against committed state the bound authorization is accepted")
+
+	// Substituting the highest root round this node has OBSERVED — which includes the unapplied
+	// repeat at 60 — rejects a block that committed state accepts.
+	observed := f.context()
+	observed.LastAppliedRootRound = 60
+	_, err = Derive(ctx, observed, bound, boundTR)
+	require.ErrorIs(t, err, ErrNotPinned,
+		"the observed maximum rejects a good block, because an unapplied repeat is not applied history")
+
+	// And two nodes disagree about the same block purely from what each happened to receive: the one
+	// that never saw the repeat observes 50 and accepts.
+	unaware := f.context()
+	unaware.LastAppliedRootRound = 50
+	_, err = Derive(ctx, unaware, bound, boundTR)
+	require.NoError(t, err, "a node that did not observe the repeat accepts the same block")
+}
+
+// 4b. A cursor BELOW the committed value is a different failure, kept separate so it is not mistaken
+// for the observed-maximum case above: it is arbitrary or stale context, and it silently removes a
+// refusal that committed state would have made.
+func TestWiring_ArbitraryLowCursorRemovesARefusal(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
 	uc, tr := f.successful(t)
+
 	committed := f.context()
 	committed.LastAppliedRootRound = 60
 	_, err := Derive(ctx, committed, uc, tr)
-	require.ErrorIs(t, err, ErrNotPinned, "against the committed cursor the stale binding is refused")
+	require.ErrorIs(t, err, ErrNotPinned, "committed state has moved past this binding, so it is stale")
 
-	// The same certificate, with the cursor taken from what this node happens to have observed.
-	observed := f.context()
-	observed.LastAppliedRootRound = 40
-	_, err = Derive(ctx, observed, uc, tr)
-	require.NoError(t, err, "substituting an observed value makes the refusal disappear, and Derive cannot tell")
+	stale := f.context()
+	stale.LastAppliedRootRound = 40
+	_, err = Derive(ctx, stale, uc, tr)
+	require.NoError(t, err, "an arbitrary lower cursor makes that refusal disappear, and Derive cannot tell")
+}
+
+// 7. Asymmetric delivery agrees, because both nodes validate the binding rather than re-picking.
+func TestWiring_AsymmetricDeliveryAgreesOnTheBoundCertificate(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	bound, boundTR := f.successful(t)
+	repeat, repeatTR := f.cert(t, 4, 5, 60,
+		bytes.Repeat([]byte{0xa0}, 32), bytes.Repeat([]byte{0xa1}, 32), bytes.Repeat([]byte{0xb1}, 32), 1, 2)
+
+	// Node A observed only the bound certificate; node B also holds the later repeat. Neither has
+	// applied it, so both have the same committed cursor.
+	nodeA := f.context()
+	nodeA.LastAppliedRootRound = 40
+	nodeB := f.context()
+	nodeB.LastAppliedRootRound = 40
+
+	resA, err := Derive(ctx, nodeA, bound, boundTR)
+	require.NoError(t, err)
+	resB, err := Derive(ctx, nodeB, bound, boundTR)
+	require.NoError(t, err)
+	require.Equal(t, resA.Encoded, resB.Encoded, "both validate the one bound certificate, so they agree")
+	require.Equal(t, resA.Commitment, resB.Commitment)
+
+	// If node B had re-picked from its own view — the rule this contract rejected — it would commit
+	// to something else entirely for the same block.
+	rePicked, err := Derive(ctx, nodeB, repeat, repeatTR)
+	require.NoError(t, err, "the repeat is itself perfectly valid, which is what makes re-picking tempting")
+	require.NotEqual(t, resA.Commitment, rePicked.Commitment,
+		"re-picking from the local view makes the commitment depend on delivery order")
+}
+
+// 8. Evidence is permitted; a verdict is not.
+func TestWiring_CompanionEvidenceIsReVerifiedNotTrusted(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	t.Run("a substituted companion certificate is refused", func(t *testing.T) {
+		// A genuine certificate for another shard configuration: authentic, signed by the same
+		// quorum, and not this node's authority. A follower that trusted the proposer's choice would
+		// take it.
+		other := &types.PartitionDescriptionRecord{
+			Version: 1, NetworkID: testNetworkID, PartitionID: testPartitionID, T2Timeout: 5000000000,
+		}
+		otherHash, err := other.Hash(crypto.SHA256)
+		require.NoError(t, err)
+		require.NotEqual(t, f.confHash, otherHash)
+
+		tr := f.technical(5)
+		trHash, err := tr.Hash()
+		require.NoError(t, err)
+		ir := &types.InputRecord{
+			Version: 1, RoundNumber: 4, Epoch: 0,
+			PreviousHash: bytes.Repeat([]byte{0xa0}, 32), Hash: bytes.Repeat([]byte{0xa1}, 32),
+			BlockHash: bytes.Repeat([]byte{0xb1}, 32), SummaryValue: []byte{}, Timestamp: 1,
+		}
+		uc := testcertificates.CreateUnicityCertificate(t, f.signers[0], ir, other, 50, make([]byte, 32), trHash)
+		f.sealWith(t, uc, 1, 2)
+
+		_, err = Derive(ctx, f.context(), uc, tr)
+		require.ErrorIs(t, err, ErrUnauthenticated, "authenticity is not authority: it is not this shard's certificate")
+	})
+
+	t.Run("an unauthenticated companion certificate is refused", func(t *testing.T) {
+		// Sub-quorum: two of four signatures where three are required.
+		uc, tr := f.cert(t, 4, 5, 50,
+			bytes.Repeat([]byte{0xa0}, 32), bytes.Repeat([]byte{0xa1}, 32), bytes.Repeat([]byte{0xb1}, 32), 1)
+		_, err := Derive(ctx, f.context(), uc, tr)
+		require.ErrorIs(t, err, ErrUnauthenticated)
+	})
+
+	t.Run("the API exposes no way to assert that something was already verified", func(t *testing.T) {
+		// The structural half of "evidence yes, verdict no": there is no field a caller could set to
+		// say the proposer checked it. If one is ever added, this is what should fail.
+		rt := reflect.TypeOf(Context{})
+		for i := 0; i < rt.NumField(); i++ {
+			name := rt.Field(i).Name
+			for _, banned := range []string{"Verified", "Authenticated", "Trusted", "Checked", "Valid"} {
+				require.NotContains(t, name, banned,
+					"Context.%s looks like a caller-supplied verdict; the derivation must re-verify instead", name)
+			}
+		}
+	})
 }
 
 // 5. extraData is checkable on a payload, and absent from the attributes that would produce one.

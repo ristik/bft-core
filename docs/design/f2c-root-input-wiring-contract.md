@@ -61,11 +61,45 @@ trusted" below means: not read from the thing being validated, and not inferred 
 
 | Pinned input | Builder | Follower / import | Replay (when built) |
 |---|---|---|---|
-| **authorization** (`uc`, `tr`) | the certificate that opened this round, as delivered and authenticated by `BFTClient.handleCertificationResponse` against the configured trust base and configuration hash (#135) | the same certificate this node authenticated for this round, never the proposer's copy and never anything travelling with the block | the stored certificate for the replayed round, re-authenticated on load |
-| **certified parent** `h_parent` | the last state-changing certified block, from `continuityState.anchor` via `recoveryTarget`, which is what `Round.reconcile` already uses. **Not** `uc.InputRecord.BlockHash` read unconditionally: a quiet certificate carries none by construction, which is the #92 defect (`shardnode/round.go:380`). For the first post-genesis payload it is the pinned genesis block hash | identical rule, computed locally, then cross-checked against the payload's own `parentHash` | the parent recorded for that round in the replayed chain, cross-checked the same way |
+| **authorization** (`uc`, `tr`) | any certificate that is valid, authorizes round `n`, and is not behind this node's own cursor. The builder **binds** it: its `O_-` is committed in `extraData` and the full `UC_-`/`TE_-` travel in the D2 companion (D1 §5.1) | **the certificate the block binds**, read from the companion and authenticated here against this node's own trust base, configured identity and committed cursor. Never re-picked from this node's own inbox (§3.1) | the certificate the stored block binds, re-authenticated on load against the same configured context |
+| **certified parent** `h_parent` | the last state-changing certified block, from `continuityState.anchor` via `recoveryTarget`, which is what `Round.reconcile` already uses. **Not** `uc.InputRecord.BlockHash` read unconditionally: a quiet certificate carries none by construction, which is the #92 defect (`shardnode/round.go:380`). For the first post-genesis payload it is the pinned genesis block hash | the same rule applied to the **bound** certificate's certified state (D1 §5.4: continuity is checked against `O_-.IR.Hash`, never a later local execution head), then cross-checked against the payload header's own `parentHash` | the parent recorded for that round in the replayed chain, cross-checked the same way |
 | **configuration** | the node's configured `ShardConfHash`, threaded from startup (#134/#135). Never the certificate's own value | same | same |
 | **committed seal-registry cursor** `lastAppliedRootRound` | **not available on this branch**: no seal registry exists, so the builder cannot source it from committed state. See §6 | same | same |
 | **round** `n` | `TechnicalRecord.Round`, stated by the caller and cross-checked by `Derive` (`ErrNotPinned`), never read out of the record and trusted | same | same |
+
+### 3.1 The follower validates a binding; it does not re-select
+
+An earlier revision of this table said the follower uses "the same certificate this node authenticated
+for this round, never the proposer's copy and never anything travelling with the block". That is wrong,
+and it contradicts D1 §5.
+
+Two honest nodes hold different valid certificates for the same shard round: duplicates from several
+root nodes, and repeat certificates after a shard timeout. If each derived from whichever it holds,
+they would compute different `extraData` for the same block, or a follower would refuse a valid
+proposal because of delivery order. D1 §5 resolves this by making the choice part of the block: the
+proposer binds one valid certificate, and the follower **validates that binding** rather than making
+its own.
+
+So the follower's contract is chosen-witness verification, and it is stricter than trusting the
+proposer, not looser:
+
+1. read the bound `UC_-`/`TE_-` from the companion;
+2. authenticate them here, against this node's own configured trust base, partition, shard and
+   configuration hash — the same `rootinput.Derive` path a builder uses, with nothing accepted on the
+   proposer's word;
+3. recompute `extraData` and require it to equal the block's;
+4. run `evmroot.ValidateBoundCertificate(ref, cert, n, lastAppliedRootRound)` against this node's own
+   **committed** cursor, which is the single view-dependent input and is shared state rather than
+   arrival order.
+
+The distinction to keep: **peer-provided evidence is permitted; a peer-provided verdict is not.** A
+certificate arriving in a companion is evidence, and it is re-verified here. A field, flag or type
+saying the proposer already verified it is a verdict, and there is no parameter on `Derive` that
+accepts one (§10, negative 8).
+
+A later valid repeat the proposer did not bind is simply unused for this block. A repeat the follower
+has *already applied* moves its committed cursor past the bound certificate, and then the block is
+rejected and re-proposed against a current certificate — deterministic given committed state.
 
 The negative case that matters for all three: the executor's current head is not a substitute for the
 certified parent, and the highest root round this node has observed is not a substitute for the
@@ -94,6 +128,29 @@ that produced it. An executor that wants to check rather than trust can re-deriv
 can read the commitment. Either way the value it acts on is one the framework has authenticated
 against its own configured trust, and the scalars `v0` needed become derived views of it rather than
 the interface.
+
+On the follower side the same rule applies to a different object: what travels is the **block-bound**
+authorization from the companion (§3.1), and the follower re-derives from that rather than from the
+certificate its own inbox happens to hold. The parameter contract therefore carries the bound witness
+on both paths; it is the same shape, sourced differently.
+
+**`r` identifies an authorization; it is not a namespace and not a lock.** `v1` needs the root round
+because it keys its derivations on `(r, n)`, and `r` is part of what identifies one authorization. It
+must not be read as a key that partitions anything. A repeat certificate (identical input record, higher
+`r`) is the same work, carrying no new commitment; treat `r` as a partitioning key and a repeat becomes
+a second authorization able to license different bytes for a round already answered.
+
+The seal-registry cursor is not the missing lock either. Its comparison is a freshness rule about
+committed state, and freshness alone cannot stop two different requests under two successive valid
+authorizations. The one-message-per-assigned-round lock belongs to the signing authority's record
+(#140), keyed by the enrolled key and profile together with the assigned shard round. Root round
+identifies derivation and authorization; it is never an independent signing namespace.
+
+**Each boundary owns and checks its own snapshot.** That two call sites may hold the same certificate
+value guarantees nothing on its own: a shared object or a shared type is not a shared check. Every
+boundary takes its own copy, authenticates against its own configured context, and validates its own
+binding, exactly as `rootinput.Derive` and the signing authority each do today. Consistency between
+them is a property of both performing the check, never of one having performed it.
 
 Two consequences to settle in the wiring unit, not here: whether `RoundParams` gains that field or is
 replaced, and what the `executortest` fake does with it, since `Executor` is a published boundary
@@ -141,6 +198,13 @@ them is a design decision rather than an implementation detail: refuse to activa
 (and say so), or pin the cursor from committed execution state once that state exists. Reading the
 node's observed maximum is not a third option, and `evmroot.ValidateBoundCertificate` cannot detect
 the substitution because the value arrives as an input.
+
+The failure it causes is not the obvious one. An observed maximum includes valid certificates this
+node has *not applied* — a repeat at root round 60 while its applied history ends at 40. Substituting
+it does not let something through; it **rejects a block that committed state accepts**, and it makes
+two nodes disagree about the same block according to what each happened to receive. A cursor set
+below the committed value is the opposite and separate failure: it removes a refusal that committed
+state would have made. Negatives 4 and 4b keep the two apart.
 
 ## 7. Genesis initialization
 
@@ -206,14 +270,26 @@ the current tree, so each one is decidable now:
 3. **The executor head is not the certified parent.** A pinned parent taken from the executor's head
    after a quiet tail differs from the last state-changing certified block, and `Derive` accepts the
    wrong one without complaint, because it is a pinned input (§3).
-4. **The observed maximum is not the cursor.** A binding that `ValidateBoundCertificate` refuses
-   against the committed cursor is accepted when the cursor is replaced by the highest observed root
-   round (§6).
+4. **The observed maximum is not the cursor.** A realizable history: committed cursor at root round
+   40, the block-bound authorization at 50, and a valid repeat at 60 observed but not applied.
+   Validating against the committed cursor accepts; substituting the highest observed root round
+   rejects a good block, and two nodes with different observations disagree about the same block. A
+   cursor below the committed value is a separate case (4b), labelled as arbitrary or stale context
+   rather than as the observed-maximum failure (§6).
+4b. **An arbitrary low cursor removes a refusal.** Committed state has moved past a binding and
+   refuses it; a lower cursor makes that refusal disappear. Distinct from 4 in both direction and
+   cause.
 5. **A payload whose `extraData` does not match is rejected**, and — the point of the negative — a
    payload built through stock `PayloadAttributesV3` carries no commitment to match, so enforcement
    without the execution-side provision mechanism halts the builder rather than protecting it (§5).
 6. **Refusals stay distinct** across the wiring boundary: each `rootinput` error class still arrives
    at the call site as itself (§8).
+7. **Asymmetric delivery agrees.** Two nodes with different observed sets, one holding a later valid
+   repeat the proposer did not bind, derive byte-identical commitments from the block-bound
+   certificate — and would derive different ones if either re-picked from its own view (§3.1).
+8. **Evidence yes, verdict no.** A substituted or unauthenticated companion certificate is refused
+   here rather than accepted on the proposer's word, and the derivation API exposes no parameter by
+   which a caller could assert that something was already verified (§3.1).
 
 ## 11. What this unit does not do
 
