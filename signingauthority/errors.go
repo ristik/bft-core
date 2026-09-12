@@ -64,3 +64,17 @@ var (
 	// never cleared and reused while the same key is held, and there is no reset.
 	ErrStateUntrusted = errors.New("signing-state-untrusted")
 )
+
+// The authority process boundary adds the outcome that only exists once the authority is somewhere
+// else (§3, §6).
+var (
+	// ErrUnavailable is the authority not answering: no process listening, a connection that died
+	// mid-operation, a refused or timed-out call. It is deliberately distinct from every refusal
+	// above, because those are decisions the authority made and this one is the absence of a
+	// decision. Both make the node non-voting; only one of them says something about the work.
+	//
+	// There is no fallback local signer, so unavailability is a liveness cost taken on purpose
+	// (§3): a node that cannot reach its authority keeps observing and reconciling, and does not
+	// vote.
+	ErrUnavailable = errors.New("signing-authority-unavailable")
+)

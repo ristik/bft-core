@@ -267,9 +267,9 @@ func (f *wiringFixture) authorityFor(t *testing.T) (*signingauthority.Authority,
 
 // authoritySignerFor builds the signer under test, failing the test rather than the round if the
 // wiring itself is wrong.
-func authoritySignerFor(t *testing.T, client SigningAuthorityClient, session signingauthority.Session, key abcrypto.Verifier) CertificationSigner {
+func authoritySignerFor(t *testing.T, client SigningAuthorityClient, key abcrypto.Verifier) CertificationSigner {
 	t.Helper()
-	signer, err := NewAuthoritySigner(client, session, key)
+	signer, err := NewAuthoritySigner(client, key)
 	require.NoError(t, err)
 	return signer
 }
@@ -304,7 +304,7 @@ func TestARoundSignsThroughARealAuthority(t *testing.T) {
 	f := newWiringFixture(t)
 	r, sub, health := f.round(t)
 	authority, session := f.authorityFor(t)
-	r.SetCertificationSigner(authoritySignerFor(t, authority, session, f.authorityKey(t, authority)))
+	r.SetCertificationSigner(authoritySignerFor(t, signingauthority.NewLocalClient(authority, session), f.authorityKey(t, authority)))
 
 	require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
 	require.Len(t, sub.reqs, 1)
@@ -342,7 +342,7 @@ func TestARebuiltCandidateNeverOverwritesAReservation(t *testing.T) {
 	require.NoError(t, err)
 
 	r, sub, health := f.round(t)
-	r.SetCertificationSigner(authoritySignerFor(t, authority, session, f.authorityKey(t, authority)))
+	r.SetCertificationSigner(authoritySignerFor(t, signingauthority.NewLocalClient(authority, session), f.authorityKey(t, authority)))
 	require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
 
 	require.Empty(t, sub.sent, "the rebuilt candidate is not signed")
@@ -381,7 +381,7 @@ type scriptedClient struct {
 	lastUnsigned []byte
 }
 
-func (c *scriptedClient) Reserve(_ context.Context, _ signingauthority.Session, req signingauthority.Request) (*signingauthority.Authorization, error) {
+func (c *scriptedClient) Reserve(_ context.Context, req signingauthority.Request) (*signingauthority.Authorization, error) {
 	unsigned, err := req.Proposed.Bytes()
 	if err != nil {
 		return nil, err
@@ -394,10 +394,10 @@ func (c *scriptedClient) Reserve(_ context.Context, _ signingauthority.Session, 
 	}, nil
 }
 
-func (c *scriptedClient) Sign(signingauthority.Session) error           { return nil }
-func (c *scriptedClient) RetainResponse(signingauthority.Session) error { return nil }
+func (c *scriptedClient) Sign(context.Context) error           { return nil }
+func (c *scriptedClient) RetainResponse(context.Context) error { return nil }
 
-func (c *scriptedClient) Release(_ signingauthority.Session, _ uint64, _ [32]byte) ([]byte, error) {
+func (c *scriptedClient) Release(context.Context, uint64, [32]byte) ([]byte, error) {
 	return c.release(nil), nil
 }
 
@@ -454,7 +454,7 @@ func TestAnAuthorityResponseIsCheckedBeforeItGoesOnTheWire(t *testing.T) {
 				}
 				return client.lastUnsigned
 			}
-			r.SetCertificationSigner(authoritySignerFor(t, client, signingauthority.Session{}, f.localVerifier(t)))
+			r.SetCertificationSigner(authoritySignerFor(t, client, f.localVerifier(t)))
 
 			require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
 			require.Empty(t, sub.sent, "an unchecked response must never reach the root chain")
@@ -507,7 +507,7 @@ func (c *substitutingClient) substitute(proposed *certification.BlockCertificati
 	return &other
 }
 
-func (c *substitutingClient) Reserve(_ context.Context, _ signingauthority.Session, req signingauthority.Request) (*signingauthority.Authorization, error) {
+func (c *substitutingClient) Reserve(_ context.Context, req signingauthority.Request) (*signingauthority.Authorization, error) {
 	other := c.substitute(req.Proposed)
 	unsigned, err := other.Bytes()
 	require.NoError(c.t, err)
@@ -520,10 +520,10 @@ func (c *substitutingClient) Reserve(_ context.Context, _ signingauthority.Sessi
 	}, nil
 }
 
-func (c *substitutingClient) Sign(signingauthority.Session) error           { return nil }
-func (c *substitutingClient) RetainResponse(signingauthority.Session) error { return nil }
+func (c *substitutingClient) Sign(context.Context) error           { return nil }
+func (c *substitutingClient) RetainResponse(context.Context) error { return nil }
 
-func (c *substitutingClient) Release(signingauthority.Session, uint64, [32]byte) ([]byte, error) {
+func (c *substitutingClient) Release(context.Context, uint64, [32]byte) ([]byte, error) {
 	return c.response, nil
 }
 
@@ -532,7 +532,7 @@ func TestAConsistentlySubstitutedExchangeIsRefused(t *testing.T) {
 	f := newWiringFixture(t)
 	r, sub, health := f.round(t)
 	client := &substitutingClient{t: t, signer: f.signer}
-	r.SetCertificationSigner(authoritySignerFor(t, client, signingauthority.Session{}, f.localVerifier(t)))
+	r.SetCertificationSigner(authoritySignerFor(t, client, f.localVerifier(t)))
 
 	require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
 	require.Empty(t, sub.sent, "a request this round did not propose must never be sent as this node's vote")
@@ -580,7 +580,7 @@ func TestASignatureThatDoesNotVerifyIsRefused(t *testing.T) {
 			client := &scriptedClient{}
 			client.release = func([]byte) []byte { return tc.response(t, f, client.lastUnsigned) }
 			// The expected key is this node's configured one, read at wiring time.
-			r.SetCertificationSigner(authoritySignerFor(t, client, signingauthority.Session{}, f.localVerifier(t)))
+			r.SetCertificationSigner(authoritySignerFor(t, client, f.localVerifier(t)))
 
 			require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
 			require.Empty(t, sub.sent, "an answer that does not verify is not cached as a completed round")
@@ -591,9 +591,9 @@ func TestASignatureThatDoesNotVerifyIsRefused(t *testing.T) {
 
 func TestTheSignerIsWiredWithAnExpectedKeyAndAClient(t *testing.T) {
 	f := newWiringFixture(t)
-	_, err := NewAuthoritySigner(nil, signingauthority.Session{}, f.localVerifier(t))
+	_, err := NewAuthoritySigner(nil, f.localVerifier(t))
 	require.ErrorContains(t, err, "no signing authority client")
-	_, err = NewAuthoritySigner(&scriptedClient{}, signingauthority.Session{}, nil)
+	_, err = NewAuthoritySigner(&scriptedClient{}, nil)
 	require.ErrorContains(t, err, "no expected signing key",
 		"the key a response is checked against is provisioned, never taken from the response")
 }
@@ -703,8 +703,8 @@ type mismatchedReservationClient struct {
 	bytes  []byte
 }
 
-func (c *mismatchedReservationClient) Reserve(ctx context.Context, s signingauthority.Session, req signingauthority.Request) (*signingauthority.Authorization, error) {
-	authorization, err := c.scriptedClient.Reserve(ctx, s, req)
+func (c *mismatchedReservationClient) Reserve(ctx context.Context, req signingauthority.Request) (*signingauthority.Authorization, error) {
+	authorization, err := c.scriptedClient.Reserve(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -745,7 +745,7 @@ func TestAReservationThatDoesNotNameThisRoundsWorkIsRefused(t *testing.T) {
 				require.NoError(t, err)
 				return b
 			}
-			r.SetCertificationSigner(authoritySignerFor(t, client, signingauthority.Session{}, f.localVerifier(t)))
+			r.SetCertificationSigner(authoritySignerFor(t, client, f.localVerifier(t)))
 
 			require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
 			require.Empty(t, sub.sent)

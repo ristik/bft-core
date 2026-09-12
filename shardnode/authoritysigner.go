@@ -15,29 +15,29 @@ import (
 /*
 SigningAuthorityClient is the part of a signing authority a shard node is given.
 
-It omits ReplaceSession, which narrows what this code can call: session replacement is the operator
-control plane, and a shard process that replaced its own session could take itself back into service
-after being fenced. That is API narrowing and nothing more. It is not process isolation and not a
-capability boundary: a value whose dynamic type is *signingauthority.Authority can be asserted to an
+It declares the four client operations and nothing else: no session replacement, no key, no
+constructor. That narrows what this code can call, which is worth having and is not by itself a
+trust boundary — a value whose dynamic type is *signingauthority.Authority can be asserted to an
 interface that does have ReplaceSession, and in this unactivated profile the round still holds the
-legacy key as well. An authority in a separate process, with operator credentials separate from the
-shard's and a lifetime independent of it, remains a prerequisite for activation rather than
-something this type provides.
+legacy key. The boundary is the authority being somewhere else, with its own credentials and its own
+lifetime (§3, §6); this interface is what the shard node is allowed to say across it.
 
-There is no constructor and no key here: a restarting shard node does not bring an authority back
-with it. If the authority is gone, this node does not sign (§1, §6).
+The session is deliberately absent from these methods. A client is admitted for one generation, and
+which session that is belongs to whoever provisioned the client: an in-process deployment binds it
+with signingauthority.NewLocalClient, and a shard node talking to an authority process holds a
+credential its operator issued and no session at all.
 */
 type SigningAuthorityClient interface {
-	Reserve(ctx context.Context, session signingauthority.Session, req signingauthority.Request) (*signingauthority.Authorization, error)
-	Sign(session signingauthority.Session) error
-	RetainResponse(session signingauthority.Session) error
-	Release(session signingauthority.Session, round uint64, digest [32]byte) ([]byte, error)
+	Reserve(ctx context.Context, req signingauthority.Request) (*signingauthority.Authorization, error)
+	Sign(ctx context.Context) error
+	RetainResponse(ctx context.Context) error
+	Release(ctx context.Context, round uint64, digest [32]byte) ([]byte, error)
 }
 
 /*
 NewAuthoritySigner routes this round's certification requests through a signing authority.
 
-The session and the expected signing key are both supplied, never taken from a response. The
+The client is provisioned, and so is the expected signing key: neither is taken from a response. The
 sequence is the contract's: reserve the complete request for its assigned round, sign what the
 authority now owns, retain the response before any of it can leave, and only then release it.
 
@@ -46,19 +46,18 @@ takes its own copy of the proposed request before it calls the client at all, an
 preimage, its digest and its assigned round — is what both the reservation and the released response
 have to match. Two remote answers agreeing with each other establishes nothing about either.
 */
-func NewAuthoritySigner(client SigningAuthorityClient, session signingauthority.Session, authorityKey abcrypto.Verifier) (CertificationSigner, error) {
+func NewAuthoritySigner(client SigningAuthorityClient, authorityKey abcrypto.Verifier) (CertificationSigner, error) {
 	if client == nil {
 		return nil, fmt.Errorf("shardnode: no signing authority client")
 	}
 	if authorityKey == nil {
 		return nil, fmt.Errorf("shardnode: no expected signing key for the authority")
 	}
-	return &authoritySigner{client: client, session: session, authorityKey: authorityKey}, nil
+	return &authoritySigner{client: client, authorityKey: authorityKey}, nil
 }
 
 type authoritySigner struct {
-	client  SigningAuthorityClient
-	session signingauthority.Session
+	client SigningAuthorityClient
 	// authorityKey is the enrolled authority's signing key, provisioned with this node's
 	// configuration. It is never read out of a response: a key carried by the answer being checked
 	// would verify any answer.
@@ -86,7 +85,7 @@ func (a *authoritySigner) Sign(ctx context.Context, uc *types.UnicityCertificate
 	expectedRound := owned.InputRecord.RoundNumber
 	expectedDigest := sha256.Sum256(expectedUnsigned)
 
-	authorization, err := a.client.Reserve(ctx, a.session, signingauthority.Request{UC: uc, Technical: tr, Proposed: owned})
+	authorization, err := a.client.Reserve(ctx, signingauthority.Request{UC: uc, Technical: tr, Proposed: owned})
 	if err != nil {
 		return nil, fmt.Errorf("reserving the round with the signing authority: %w", err)
 	}
@@ -104,15 +103,15 @@ func (a *authoritySigner) Sign(ctx context.Context, uc *types.UnicityCertificate
 		return nil, fmt.Errorf("the signing authority reserved a digest that does not name the request proposed for round %d", expectedRound)
 	}
 
-	if err := a.client.Sign(a.session); err != nil {
+	if err := a.client.Sign(ctx); err != nil {
 		return nil, fmt.Errorf("signing at the signing authority: %w", err)
 	}
-	if err := a.client.RetainResponse(a.session); err != nil {
+	if err := a.client.RetainResponse(ctx); err != nil {
 		return nil, fmt.Errorf("retaining the signed response: %w", err)
 	}
 	// Released by the local round and digest, so a client that answered with someone else's round
 	// cannot also choose which response is asked for.
-	released, err := a.client.Release(a.session, expectedRound, expectedDigest)
+	released, err := a.client.Release(ctx, expectedRound, expectedDigest)
 	if err != nil {
 		return nil, fmt.Errorf("releasing the signed response: %w", err)
 	}

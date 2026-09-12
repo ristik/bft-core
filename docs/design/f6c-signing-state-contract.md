@@ -461,6 +461,59 @@ activation and no key replacement: nothing in a deployed configuration selects t
 and no existing KeyConf file is converted. Restored voting remains disabled. Step 4 (private
 acceptance) is separate and gated.
 
+### The authority process boundary, before step 4
+
+Step 4 exercises an authority an operator can kill, race and re-provision. Steps 1 to 3 left the
+authority a library, so its lifetime was the shard process's lifetime and both sides drew on one
+credential space. §3 asks for the opposite: a host outside the shard's backup, snapshot and
+process-cloning domains, where a same-directory sidecar does not qualify merely by having a
+different PID. `signingauthority/service` is that boundary, and it comes before step 4 rather than
+inside it.
+
+**What crosses.** A length-prefixed CBOR message naming one of four operations: reserve, sign,
+retain, release. There is no message that carries bytes to sign, none that reads or writes a key,
+and none on the client endpoint that replaces a session. A frame larger than the derived maximum is
+refused on its header, before its body is read or allocated, and the connection ends there because
+it is no longer at a known boundary. A frame of another protocol version is refused rather than
+coerced. Connections are bounded per endpoint, one request is served at a time on each, and a
+connection that does not produce a complete message within the idle deadline is closed.
+
+**Two credentials, two endpoints.** The client endpoint admits the current client credential only,
+and anything else — an old credential, an operator credential, no credential — is
+`signing-session-fenced`, the same answer an old generation gets in one process. The operator
+endpoint has its own credential and is the only place session replacement, status and enrollment
+live. Neither endpoint falls back to the other, and the endpoint refusal is decided before any
+credential is compared, so a misconfiguration is diagnosable without one being involved in the
+answer.
+
+**Where the session lives.** The shard process holds no `signingauthority.Session`. Replacement
+mints the session inside the authority process and returns a bearer credential the server maps to
+it; the unmintable type stays where the key is. Replacing fences the old credential in the same step
+that advances the generation, so the two cannot disagree about who is admitted, and a fenced shard
+process cannot unfence itself because what it holds is the thing that was invalidated.
+
+**Unavailability is not a refusal.** No process listening, a connection that died mid-exchange, a
+deadline: all of these are `signing-authority-unavailable`, distinct from every decision the
+authority makes. The round abstains either way, and an operator can tell "the authority said no"
+from "the authority said nothing". A connection that was already cached and turns out to be dead is
+retried once on a fresh one, which is safe because every operation here replays rather than repeats.
+There is no fallback local signer at any point.
+
+**What the tests establish.** A real second operating-system process holds the key: killing it makes
+every client operation unavailable and nothing else; restarting it produces a DIFFERENT key for the
+same enrollment, the old client credential is refused, and returning to service is a fresh operator
+assignment rather than a reset. A shard-side client going away leaves the authority holding its
+reservation.
+
+**What it does not do.** It does not authenticate hosts or encrypt the wire: it is a local transport
+for a private profile, and a socket in a directory only the two parties may enter is the isolation
+it assumes, on top of the host separation §3 already requires of the operator. It activates nothing:
+no command runs a server, no deployment flag selects an authority for a shard node, no KeyConf file
+is converted, and the restored non-voting gate is untouched. The shard node's own interface lost its
+session argument in this change, because a shard process that talks to an authority holds a
+credential rather than a token, and binding a session is the local adapter's job
+(`signingauthority.NewLocalClient`).
+
 #105 closes only after all four steps and independent review. #14 still owns
 atomic block/UC/TR persistence; changing that format requires rechecking the R2/R3
 cold-start equivalences in #92's ledger. No new Engine methods, reth changes, root
