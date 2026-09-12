@@ -57,7 +57,11 @@ does not quietly acquire one.
 ## 3. Where each pinned input comes from, per call site
 
 `Derive` refuses rather than selecting, so every one of these is the caller's to source. "Independently
-trusted" below means: not read from the thing being validated, and not inferred from the executor.
+trusted" below is about the *check*, not about where the bytes arrived from: a value may travel with the
+block, but nothing about it may be taken on the sender's word, and nothing may be inferred from the
+executor's own state. A certificate read out of a companion is evidence that this node then
+authenticates against its own configured trust; that is why §3.1 is a stricter rule than local
+re-selection, not a looser one.
 
 | Pinned input | Builder | Follower / import | Replay (when built) |
 |---|---|---|---|
