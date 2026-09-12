@@ -134,6 +134,15 @@ Both are measurement, not repair: the cost is one clean `./scripts/reth-chaos.sh
 `fbc4d08b` with the pin and T2 ≥ 5 s. This ledger does not schedule it, because #9's next two units
 are #89 and #90 by the 2026-09-11 sequencing; it records it as what #88 still needs.
 
+**Both were measured on 2026-09-12 at `dd9e6975`** and are recorded in
+`docs/design/f1a-fault-matrix-dd9e6975.md`: the full matrix (baseline, follower restart, leader kill,
+reth-only restart, pair restart, multi-leader) passed in one invocation under one manifest, 71
+assertions, no failures, with the pin matched and T2 at 5000 ms. Leader kill passed there, closing
+gap 1. That record carries its own limitation forward rather than dropping it: each outcome is still
+a single run, so neither closure is a claim that the failure cannot recur, and the restored nodes in
+it are non-voting (`abstaining: restored process is non-voting`), which is #105 rather than anything
+this matrix establishes.
+
 ---
 
 ## 3. F1b #89 — startup capability, genesis and execution-endpoint binding
