@@ -161,10 +161,16 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 	// The root epoch is frozen by enrollment, and this refusal is deliberately not an
 	// authentication failure: a certificate from the next genuine root epoch verifies perfectly
 	// against that epoch's trust base, which is precisely why accepting it here would carry this
-	// key across a transition the profile does not support (§4). An unknown or forged epoch is a
-	// different outcome and is reported as one, below.
+	// key across a transition the profile does not support (§4).
+	//
+	// The check comes BEFORE the trust lookup on purpose, so that an epoch chosen by whoever sent
+	// the request cannot drive which trust base this authority fetches. The cost is that a forged
+	// certificate which also names another epoch is refused here, before anything about it has been
+	// authenticated, so the message says what the certificate CLAIMS and does not assert that the
+	// certificate is genuine. A certificate naming the enrolled epoch reaches verification below,
+	// where a forgery is reported as one.
 	if own.UC.GetRootEpoch() != *enroll.RootEpoch {
-		return nil, fmt.Errorf("%w: certificate is for root epoch %d, this authority is enrolled for %d and does not follow a transition", ErrContextMismatch, own.UC.GetRootEpoch(), *enroll.RootEpoch)
+		return nil, fmt.Errorf("%w: certificate claims root epoch %d, this authority is enrolled for %d and does not follow a transition; refused before authentication, so the claim is not established", ErrContextMismatch, own.UC.GetRootEpoch(), *enroll.RootEpoch)
 	}
 
 	// Authentication against the authority's own trust, for the root epoch the certificate names.

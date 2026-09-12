@@ -312,6 +312,14 @@ Repairs after the first review of step 1 (PR #137, head `818add57`):
   pointer so that "not stated" and "pinned to epoch 0" stay distinct: nothing rejects epoch 0 in a
   seal, and an enrollment that never named one is refused.
 
+  The freeze is checked **before** the trust lookup, so that an epoch chosen by whoever sent the
+  request cannot select which trust base the authority fetches. One consequence is worth stating,
+  because §4 asks for the freeze to stay separate from authentication failures: a certificate that is
+  forged *and* names another root epoch is refused by the freeze, at a point where nothing about it
+  has been authenticated. The refusal therefore reports what the certificate **claims** and says so,
+  rather than asserting that it is genuinely from that epoch. A certificate naming the enrolled epoch
+  reaches verification, where a forgery is reported as `signing-unauthenticated-input`.
+
 Refusal names raised by this step: `signing-context-mismatch` for enrollment substitution (node,
 partition, shard, network, configuration, shard epoch or profile), `signing-unauthenticated-input`
 for a certificate, quorum, inclusion path or technical-record binding that does not verify,

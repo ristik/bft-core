@@ -616,6 +616,37 @@ func TestRootEpochIsFrozenByEnrollment(t *testing.T) {
 		"and it is not an authentication failure: the certificate verifies, which is why this refusal has to exist")
 }
 
+func TestTheFreezeRefusalDoesNotAssertAuthenticity(t *testing.T) {
+	// The freeze is checked before the trust lookup, so that an epoch chosen by the sender cannot
+	// select which trust base is fetched. A certificate that is forged AND names another epoch is
+	// therefore refused by the freeze, at a point where nothing about it has been authenticated.
+	// The refusal must not read as a statement that the certificate is genuinely from that epoch.
+	f := newFixture(t, 1)
+	a := f.authority(t)
+	req := f.request()
+	req.UC.UnicitySeal.Epoch = 99 // not re-signed: this seal verifies against nothing
+
+	_, err := a.Authenticate(context.Background(), req)
+	require.ErrorIs(t, err, ErrContextMismatch)
+	require.NotErrorIs(t, err, ErrUnauthenticated)
+	require.Contains(t, err.Error(), "claims root epoch 99")
+	require.Contains(t, err.Error(), "not established")
+	require.NotContains(t, err.Error(), "is for root epoch",
+		"the authority has verified nothing at this point and must not say the certificate is from that epoch")
+
+	// A forgery that names the ENROLLED epoch does reach verification, and is reported as a forgery.
+	// This needs its own fixture: the certificate above was mutated in place.
+	g := newFixture(t, 1)
+	sameEpoch := g.request()
+	forgedSeal := *g.uc.UnicitySeal
+	forgedSeal.Signatures = types.SignatureMap{"nobody": []byte("not a signature")}
+	forged := *g.uc
+	forged.UnicitySeal = &forgedSeal
+	sameEpoch.UC = &forged
+	_, err = g.authority(t).Authenticate(context.Background(), sameEpoch)
+	require.ErrorIs(t, err, ErrUnauthenticated)
+}
+
 func TestEnrollmentMustStateItsRootEpoch(t *testing.T) {
 	// "Not stated" and "pinned to epoch 0" are different, and nothing rejects epoch 0 in a seal, so
 	// an enrollment that never named one is refused rather than defaulted.
