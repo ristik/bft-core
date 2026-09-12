@@ -296,6 +296,22 @@ signature-free preimage with its digest.
 The package has four exported methods, pinned by a test: `Authenticate`, `Close`, `Enrollment` and
 `SigningPublicKey`. There is no `SignBytes`, no key import or export, and no journal load.
 
+Repairs after the first review of step 1 (PR #137, head `818add57`):
+
+- **One owned snapshot before any check.** `Authenticate` encodes the proposal once, bounds that
+  encoding, decodes it back into a structure the authority owns, and copies the certificate and
+  technical record. Every check, the authorization identity and the returned preimage come from that
+  snapshot. Previously the proposal was encoded first and the caller's structure validated
+  afterwards, so a change during the trust lookup could separate validated content from returned
+  bytes in either direction.
+- **The root epoch is enrollment context.** §4 makes root-epoch transitions unsupported, but
+  enrollment pinned only the shard epoch, so the next genuine root epoch was accepted in the same
+  authority lifetime. `Enrollment.RootEpoch` now states the permitted epoch, is never inferred or
+  reset per request, and a certificate from another epoch is refused as `signing-context-mismatch`
+  rather than as an authentication failure, because such a certificate verifies perfectly. It is a
+  pointer so that "not stated" and "pinned to epoch 0" stay distinct: nothing rejects epoch 0 in a
+  seal, and an enrollment that never named one is refused.
+
 Refusal names raised by this step: `signing-context-mismatch` for enrollment substitution (node,
 partition, shard, network, configuration, shard epoch or profile), `signing-unauthenticated-input`
 for a certificate, quorum, inclusion path or technical-record binding that does not verify,
