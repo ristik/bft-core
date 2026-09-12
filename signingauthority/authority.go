@@ -114,94 +114,104 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 	if err := req.validate(); err != nil {
 		return nil, err
 	}
-	if req.UC.Version != 1 {
-		return nil, fmt.Errorf("%w: certificate version %d", ErrUnsupportedVersion, req.UC.Version)
+
+	// One owned snapshot, taken before any check. Everything below reads `own` and nothing reads
+	// the caller's structures, because the caller may change them while this authority is waiting
+	// for its trust base. An earlier revision encoded the proposal first and validated the caller's
+	// structure afterwards, so a change during that window produced an authorization whose
+	// validated content and returned preimage were two different messages.
+	own, unsigned, err := req.snapshot()
+	if err != nil {
+		return nil, err
 	}
-	if req.Proposed.InputRecord.Version != 1 {
-		return nil, fmt.Errorf("%w: input record version %d", ErrUnsupportedVersion, req.Proposed.InputRecord.Version)
+
+	if own.UC.Version != 1 {
+		return nil, fmt.Errorf("%w: certificate version %d", ErrUnsupportedVersion, own.UC.Version)
+	}
+	if own.Proposed.InputRecord.Version != 1 {
+		return nil, fmt.Errorf("%w: input record version %d", ErrUnsupportedVersion, own.Proposed.InputRecord.Version)
 	}
 
 	// Enrollment guards. These compare the request against fixed values, so a caller cannot reach a
 	// different record by naming a different node, partition or shard.
-	if req.Proposed.NodeID != enroll.NodeID {
-		return nil, fmt.Errorf("%w: proposal is for node %q, this authority signs for %q", ErrContextMismatch, req.Proposed.NodeID, enroll.NodeID)
+	if own.Proposed.NodeID != enroll.NodeID {
+		return nil, fmt.Errorf("%w: proposal is for node %q, this authority signs for %q", ErrContextMismatch, own.Proposed.NodeID, enroll.NodeID)
 	}
-	if req.Proposed.PartitionID != enroll.PartitionID {
-		return nil, fmt.Errorf("%w: proposal is for partition %d, this authority signs for %d", ErrContextMismatch, req.Proposed.PartitionID, enroll.PartitionID)
+	if own.Proposed.PartitionID != enroll.PartitionID {
+		return nil, fmt.Errorf("%w: proposal is for partition %d, this authority signs for %d", ErrContextMismatch, own.Proposed.PartitionID, enroll.PartitionID)
 	}
-	if !req.Proposed.ShardID.Equal(enroll.ShardID) {
-		return nil, fmt.Errorf("%w: proposal is for shard %s, this authority signs for %s", ErrContextMismatch, req.Proposed.ShardID, enroll.ShardID)
-	}
-
-	// The complete signature-free preimage, and its size, before anything is retained (§5 bounds).
-	unsigned, err := req.Proposed.Bytes()
-	if err != nil {
-		return nil, fmt.Errorf("%w: encoding the proposal: %w", ErrProposalMismatch, err)
-	}
-	if len(unsigned) > MaxUnsignedRequestBytes {
-		return nil, fmt.Errorf("%w: %d bytes, limit is %d", ErrRequestTooLarge, len(unsigned), MaxUnsignedRequestBytes)
+	if !own.Proposed.ShardID.Equal(enroll.ShardID) {
+		return nil, fmt.Errorf("%w: proposal is for shard %s, this authority signs for %s", ErrContextMismatch, own.Proposed.ShardID, enroll.ShardID)
 	}
 
 	// Context checks come first and are their own refusal. UC.Verify would also reject a certificate
 	// for another partition, shard or configuration, but it reports that the way it reports a bad
 	// signature, and the two are different situations: one is a root chain or peer serving another
 	// chain, the other is a forgery. The values compared are this authority's own enrollment.
-	if req.UC.GetPartitionID() != enroll.PartitionID {
-		return nil, fmt.Errorf("%w: certificate is for partition %d, this authority signs for %d", ErrContextMismatch, req.UC.GetPartitionID(), enroll.PartitionID)
+	if own.UC.GetPartitionID() != enroll.PartitionID {
+		return nil, fmt.Errorf("%w: certificate is for partition %d, this authority signs for %d", ErrContextMismatch, own.UC.GetPartitionID(), enroll.PartitionID)
 	}
-	if !req.UC.GetShardID().Equal(enroll.ShardID) {
-		return nil, fmt.Errorf("%w: certificate is for shard %s, this authority signs for %s", ErrContextMismatch, req.UC.GetShardID(), enroll.ShardID)
+	if !own.UC.GetShardID().Equal(enroll.ShardID) {
+		return nil, fmt.Errorf("%w: certificate is for shard %s, this authority signs for %s", ErrContextMismatch, own.UC.GetShardID(), enroll.ShardID)
 	}
-	if !bytes.Equal(req.UC.ShardConfHash, enroll.ShardConfHash) {
-		return nil, fmt.Errorf("%w: certificate names shard configuration %x, this authority is enrolled for %x", ErrContextMismatch, req.UC.ShardConfHash, enroll.ShardConfHash)
+	if !bytes.Equal(own.UC.ShardConfHash, enroll.ShardConfHash) {
+		return nil, fmt.Errorf("%w: certificate names shard configuration %x, this authority is enrolled for %x", ErrContextMismatch, own.UC.ShardConfHash, enroll.ShardConfHash)
+	}
+
+	// The root epoch is frozen by enrollment, and this refusal is deliberately not an
+	// authentication failure: a certificate from the next genuine root epoch verifies perfectly
+	// against that epoch's trust base, which is precisely why accepting it here would carry this
+	// key across a transition the profile does not support (§4). An unknown or forged epoch is a
+	// different outcome and is reported as one, below.
+	if own.UC.GetRootEpoch() != *enroll.RootEpoch {
+		return nil, fmt.Errorf("%w: certificate is for root epoch %d, this authority is enrolled for %d and does not follow a transition", ErrContextMismatch, own.UC.GetRootEpoch(), *enroll.RootEpoch)
 	}
 
 	// Authentication against the authority's own trust, for the root epoch the certificate names.
 	// An unknown epoch is a refusal rather than a reason to trust the certificate's own claim.
-	tb, err := trust.GetByEpoch(ctx, req.UC.GetRootEpoch())
+	tb, err := trust.GetByEpoch(ctx, own.UC.GetRootEpoch())
 	if err != nil {
-		return nil, fmt.Errorf("%w: root epoch %d: %w", ErrUnauthenticated, req.UC.GetRootEpoch(), err)
+		return nil, fmt.Errorf("%w: root epoch %d: %w", ErrUnauthenticated, own.UC.GetRootEpoch(), err)
 	}
 	if tb == nil {
-		return nil, fmt.Errorf("%w: no trust base for root epoch %d", ErrUnauthenticated, req.UC.GetRootEpoch())
+		return nil, fmt.Errorf("%w: no trust base for root epoch %d", ErrUnauthenticated, own.UC.GetRootEpoch())
 	}
 	// The legacy preimage carries no network identifier, so the network is enforced as an enrollment
 	// guard against the provisioned trust base rather than read off the message (§2).
 	if tb.GetNetworkID() != enroll.NetworkID {
 		return nil, fmt.Errorf("%w: trust base is for network %d, this authority is enrolled for %d", ErrContextMismatch, tb.GetNetworkID(), enroll.NetworkID)
 	}
-	if err := req.UC.Verify(tb, gocrypto.SHA256, enroll.PartitionID, enroll.ShardID, enroll.ShardConfHash); err != nil {
+	if err := own.UC.Verify(tb, gocrypto.SHA256, enroll.PartitionID, enroll.ShardID, enroll.ShardConfHash); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 	}
-	if err := req.Technical.IsValid(); err != nil {
+	if err := own.Technical.IsValid(); err != nil {
 		return nil, fmt.Errorf("%w: technical record: %w", ErrUnauthenticated, err)
 	}
-	if err := req.Technical.HashMatches(req.UC.TRHash); err != nil {
+	if err := own.Technical.HashMatches(own.UC.TRHash); err != nil {
 		return nil, fmt.Errorf("%w: technical record is not the one this certificate binds: %w", ErrUnauthenticated, err)
 	}
 
-	// Epoch is frozen by enrollment. A transition is refused here rather than served under a new
-	// scope, because a new scope is exactly how an old decision would be escaped (§4).
-	if req.Technical.Epoch != enroll.ShardEpoch {
-		return nil, fmt.Errorf("%w: assignment is for shard epoch %d, this authority is enrolled for %d", ErrContextMismatch, req.Technical.Epoch, enroll.ShardEpoch)
+	// Shard epoch is frozen by enrollment for the same reason as the root epoch above.
+	if own.Technical.Epoch != enroll.ShardEpoch {
+		return nil, fmt.Errorf("%w: assignment is for shard epoch %d, this authority is enrolled for %d", ErrContextMismatch, own.Technical.Epoch, enroll.ShardEpoch)
 	}
-	if req.UC.InputRecord.Epoch != enroll.ShardEpoch {
-		return nil, fmt.Errorf("%w: certificate is for shard epoch %d, this authority is enrolled for %d", ErrContextMismatch, req.UC.InputRecord.Epoch, enroll.ShardEpoch)
+	if own.UC.InputRecord.Epoch != enroll.ShardEpoch {
+		return nil, fmt.Errorf("%w: certificate is for shard epoch %d, this authority is enrolled for %d", ErrContextMismatch, own.UC.InputRecord.Epoch, enroll.ShardEpoch)
 	}
 
 	// The proposal must be the one this authorization assigns. Round and epoch come from the
 	// authenticated technical record, never from the proposal itself.
-	if err := validateProposal(req.Proposed.InputRecord, expectationFrom(req.UC, req.Technical)); err != nil {
+	if err := validateProposal(own.Proposed.InputRecord, expectationFrom(own.UC, own.Technical)); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrProposalMismatch, err)
 	}
 
-	id, err := authorizationID(req.UC, req.Technical)
+	id, err := authorizationID(own.UC, own.Technical)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 	}
 	return &Authorization{
-		AssignedRound:  req.Technical.Round,
-		AssignedEpoch:  req.Technical.Epoch,
+		AssignedRound:  own.Technical.Round,
+		AssignedEpoch:  own.Technical.Epoch,
 		ID:             id,
 		Unsigned:       unsigned,
 		UnsignedDigest: sha256.Sum256(unsigned),

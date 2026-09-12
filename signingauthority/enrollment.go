@@ -37,6 +37,18 @@ type Enrollment struct {
 	ShardEpoch    uint64
 	ShardConfHash []byte
 
+	// RootEpoch is the one root epoch this authority admits. The design makes root-epoch
+	// transitions unsupported in this profile, and the response to one is to freeze rather than to
+	// carry on under a new scope (§4). It is therefore authority-owned enrollment context: it is
+	// fixed here, never taken from a request and never reset per request, so the next genuine root
+	// epoch is a refusal in this authority lifetime rather than ordinary work.
+	//
+	// It is a pointer because "not stated" and "pinned to epoch 0" are different, and only one of
+	// them is acceptable: nothing in UnicitySeal.IsValid rejects epoch 0, so a plain zero value
+	// would silently pin an epoch instead of refusing an enrollment that never named one. Use
+	// PinRootEpoch.
+	RootEpoch *uint64
+
 	// Profile must be ProfileLegacyBCRv1.
 	Profile string
 
@@ -55,6 +67,8 @@ func (e Enrollment) validate() error {
 		return errors.New("enrollment has no network id")
 	case e.PartitionID == 0:
 		return errors.New("enrollment has no partition id")
+	case e.RootEpoch == nil:
+		return errors.New("enrollment states no root epoch, and this profile freezes on a root-epoch transition rather than accepting whichever epoch arrives")
 	case len(e.ShardConfHash) == 0:
 		return errors.New("enrollment has no shard configuration hash, so a certificate's configuration could not be checked")
 	case e.Profile != ProfileLegacyBCRv1:
@@ -65,8 +79,14 @@ func (e Enrollment) validate() error {
 
 // clone copies the mutable bytes, so neither the caller's slice nor a later reader of Enrollment can
 // change what this authority enforces.
+// PinRootEpoch states the root epoch an authority is enrolled for.
+func PinRootEpoch(epoch uint64) *uint64 { return &epoch }
+
 func (e Enrollment) clone() Enrollment {
 	e.ShardConfHash = bytes.Clone(e.ShardConfHash)
+	if e.RootEpoch != nil {
+		e.RootEpoch = PinRootEpoch(*e.RootEpoch)
+	}
 	e.SigningKeyFingerprint = bytes.Clone(e.SigningKeyFingerprint)
 	return e
 }
@@ -74,6 +94,14 @@ func (e Enrollment) clone() Enrollment {
 func (e Enrollment) sameShardAs(other Enrollment) bool {
 	return e.NodeID == other.NodeID && e.NetworkID == other.NetworkID &&
 		e.PartitionID == other.PartitionID && e.ShardID.Equal(other.ShardID) &&
-		e.ShardEpoch == other.ShardEpoch && bytes.Equal(e.ShardConfHash, other.ShardConfHash) &&
+		e.ShardEpoch == other.ShardEpoch && samePin(e.RootEpoch, other.RootEpoch) &&
+		bytes.Equal(e.ShardConfHash, other.ShardConfHash) &&
 		e.Profile == other.Profile
+}
+
+func samePin(a, b *uint64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }

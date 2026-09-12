@@ -62,8 +62,9 @@ func TestExpectationMatchesTheShardNodeRule(t *testing.T) {
 
 	authority, err := signingauthority.New(signingauthority.Enrollment{
 		AuthorityID: "authority-1", NodeID: nodeID, NetworkID: networkID, PartitionID: partitionID,
-		ShardID: types.ShardID{}, ShardEpoch: epoch, ShardConfHash: confHash,
-		Profile: signingauthority.ProfileLegacyBCRv1,
+		ShardID: types.ShardID{}, ShardEpoch: epoch, RootEpoch: signingauthority.PinRootEpoch(1),
+		ShardConfHash: confHash,
+		Profile:       signingauthority.ProfileLegacyBCRv1,
 	}, oneTrustBase{tb: tb})
 	require.NoError(t, err)
 

@@ -1,6 +1,7 @@
 package signingauthority
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -29,6 +30,69 @@ type Request struct {
 	// Proposed is the complete certification request, with its Signature left unset. The authority
 	// derives the bytes to sign from this structure itself.
 	Proposed *certification.BlockCertificationRequest
+}
+
+// snapshot returns a copy of the request that this authority owns, together with the complete
+// signature-free preimage it encodes.
+//
+// It exists because the caller keeps its own structures and may change them at any time, including
+// while the authority waits for its trust base. Everything the authority checks, and the preimage it
+// returns, must be one message rather than two: the proposal is serialized once, and the structure
+// that is then validated is decoded back from exactly those bytes, so "what was checked" and "what
+// is returned" cannot drift apart in either direction. The certificate and technical record are
+// copied for the same reason.
+func (r Request) snapshot() (Request, []byte, error) {
+	// The size bound is applied to the encoding, before anything is decoded or retained (§5).
+	unsigned, err := r.Proposed.Bytes()
+	if err != nil {
+		return Request{}, nil, fmt.Errorf("%w: encoding the proposal: %w", ErrProposalMismatch, err)
+	}
+	if len(unsigned) > MaxUnsignedRequestBytes {
+		return Request{}, nil, fmt.Errorf("%w: %d bytes, limit is %d", ErrRequestTooLarge, len(unsigned), MaxUnsignedRequestBytes)
+	}
+
+	var proposed certification.BlockCertificationRequest
+	if err := types.Cbor.Unmarshal(unsigned, &proposed); err != nil {
+		return Request{}, nil, fmt.Errorf("%w: decoding the proposal: %w", ErrProposalMismatch, err)
+	}
+	// The decoded copy must encode back to the same bytes. Without this, a decoder that normalised
+	// anything would leave the validated structure and the returned preimage different again, which
+	// is the defect this function exists to remove rather than to move.
+	//
+	// It is defence in depth against a future encoder, and it is deliberately recorded as untested:
+	// the bytes checked here were produced by the canonical encoder a few lines above, so no input
+	// reachable through this package can make the comparison fail. A mutation that disables it
+	// therefore survives the suite. Removing it would be reasonable only alongside a decision that
+	// the encoding is canonical by contract.
+	again, err := proposed.Bytes()
+	if err != nil {
+		return Request{}, nil, fmt.Errorf("%w: re-encoding the proposal: %w", ErrProposalMismatch, err)
+	}
+	if !bytes.Equal(again, unsigned) {
+		return Request{}, nil, fmt.Errorf("%w: the proposal does not re-encode to the bytes it was read from", ErrProposalMismatch)
+	}
+
+	uc, err := cborCopy[types.UnicityCertificate](r.UC)
+	if err != nil {
+		return Request{}, nil, fmt.Errorf("%w: copying the certificate: %w", ErrUnauthenticated, err)
+	}
+	tr, err := cborCopy[certification.TechnicalRecord](r.Technical)
+	if err != nil {
+		return Request{}, nil, fmt.Errorf("%w: copying the technical record: %w", ErrUnauthenticated, err)
+	}
+	return Request{UC: uc, Technical: tr, Proposed: &proposed}, unsigned, nil
+}
+
+func cborCopy[T any](v *T) (*T, error) {
+	encoded, err := types.Cbor.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var out T
+	if err := types.Cbor.Unmarshal(encoded, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 func (r Request) validate() error {

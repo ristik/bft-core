@@ -19,8 +19,12 @@ var (
 	// timestamp that is not the seal's.
 	ErrProposalMismatch = errors.New("signing-proposal-mismatch")
 
-	// ErrRequestTooLarge is refused before the request is decoded or retained, so an oversize
-	// message cannot cost the authority memory (§5 bounds).
+	// ErrRequestTooLarge bounds the complete signature-free request (§5). The bound is measured on
+	// the encoding the authority has taken, which is the same byte string it would return, and it is
+	// measured before that encoding is decoded into an owned structure. Encoding the caller's
+	// request is what makes its size knowable at all, so this is not a promise that nothing is
+	// allocated for an oversize message; it is a promise that nothing larger than the bound is
+	// decoded, validated or retained beyond that one encoding.
 	ErrRequestTooLarge = errors.New("signing-request-too-large")
 
 	// ErrUnsupportedVersion is a structure whose version this profile does not implement. Nothing is

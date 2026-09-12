@@ -38,6 +38,7 @@ const (
 	certifiedRound                    = 4
 	assignedRound                     = 5
 	shardEpoch                        = 1
+	rootEpoch                         = 1
 )
 
 type trustStub struct {
@@ -113,7 +114,7 @@ func newFixture(t *testing.T, rootNodes int) *fixture {
 	f.enroll = Enrollment{
 		AuthorityID: "authority-1", NodeID: testNodeID, NetworkID: testNetworkID,
 		PartitionID: testPartitionID, ShardID: types.ShardID{}, ShardEpoch: shardEpoch,
-		ShardConfHash: f.confHash, Profile: ProfileLegacyBCRv1,
+		RootEpoch: PinRootEpoch(rootEpoch), ShardConfHash: f.confHash, Profile: ProfileLegacyBCRv1,
 	}
 	return f
 }
@@ -495,6 +496,138 @@ func TestEnrollmentBytesAreOwnedByTheAuthority(t *testing.T) {
 
 	returned := a.Enrollment()
 	returned.ShardConfHash[0] ^= 0xff
+	*returned.RootEpoch = rootEpoch + 99
 	_, err = a.Authenticate(context.Background(), f.request())
-	require.NoError(t, err, "nor can mutating a copy handed back by Enrollment")
+	require.NoError(t, err, "nor can mutating a copy handed back by Enrollment, including its pinned root epoch")
+
+	// The pinned epoch the caller passed in is owned too. This starts from a clean enrollment,
+	// because the one above has had its configuration hash mutated on purpose.
+	callerEpoch := PinRootEpoch(rootEpoch)
+	pinned := f.enroll
+	pinned.RootEpoch = callerEpoch
+	withPinnedEpoch, err := New(pinned, trustStub{tb: f.tb})
+	require.NoError(t, err)
+	*callerEpoch = rootEpoch + 99
+	_, err = withPinnedEpoch.Authenticate(context.Background(), f.request())
+	require.NoError(t, err, "mutating the caller's pinned epoch cannot move the freeze")
+}
+
+// mutatingTrust runs a caller's change at the moment the authority looks up its trust base. That is
+// the widest window in Authenticate, and it is exactly where the review's reproductions struck.
+type mutatingTrust struct {
+	tb     *types.RootTrustBaseV1
+	mutate func()
+}
+
+func (m mutatingTrust) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error) {
+	if m.mutate != nil {
+		m.mutate()
+	}
+	return m.tb, nil
+}
+
+func TestTheRequestIsOwnedBeforeItIsChecked(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a proposal made valid during the check is judged as it arrived", func(t *testing.T) {
+		// The review's reproduction. An invalid round-999 proposal becomes the assigned round while
+		// the authority waits for its trust base. What is judged, and what would be returned, is the
+		// proposal as taken at entry, so this is refused.
+		f := newFixture(t, 1)
+		req := f.request()
+		req.Proposed.InputRecord.RoundNumber = 999
+		asArrived, err := req.Proposed.Bytes()
+		require.NoError(t, err)
+
+		a, err := New(f.enroll, mutatingTrust{tb: f.tb, mutate: func() {
+			req.Proposed.InputRecord.RoundNumber = assignedRound
+		}})
+		require.NoError(t, err)
+
+		_, authErr := a.Authenticate(ctx, req)
+		require.ErrorIs(t, authErr, ErrProposalMismatch,
+			"the proposal taken at entry names round 999, so it cannot become authentic mid-check")
+
+		// And the caller's structure really was changed underneath, so the test is not vacuous.
+		nowValid, err := req.Proposed.Bytes()
+		require.NoError(t, err)
+		require.NotEqual(t, asArrived, nowValid)
+	})
+
+	t.Run("a proposal made invalid during the check is still the one returned", func(t *testing.T) {
+		// The other direction. A valid proposal is broken while the authority waits; the
+		// authorization must still describe, and return, the proposal as taken at entry.
+		f := newFixture(t, 1)
+		req := f.request()
+		asArrived, err := req.Proposed.Bytes()
+		require.NoError(t, err)
+
+		a, err := New(f.enroll, mutatingTrust{tb: f.tb, mutate: func() {
+			req.Proposed.InputRecord.RoundNumber = 999
+			req.Proposed.BlockSize = 4242
+		}})
+		require.NoError(t, err)
+
+		auth, err := a.Authenticate(ctx, req)
+		require.NoError(t, err)
+		require.EqualValues(t, assignedRound, auth.AssignedRound)
+		require.Equal(t, asArrived, auth.Unsigned, "the returned preimage is what was validated")
+	})
+
+	t.Run("the certificate and technical record are copies too", func(t *testing.T) {
+		f := newFixture(t, 1)
+		req := f.request()
+		unchanged, err := New(f.enroll, trustStub{tb: f.tb})
+		require.NoError(t, err)
+		expected, err := unchanged.Authenticate(ctx, f.request())
+		require.NoError(t, err)
+
+		a, err := New(f.enroll, mutatingTrust{tb: f.tb, mutate: func() {
+			// Both would break authentication if they were read after this point.
+			req.UC.InputRecord.Hash = bytes.Repeat([]byte{0xee}, 32)
+			req.Technical.Leader = "validator-B"
+		}})
+		require.NoError(t, err)
+
+		auth, err := a.Authenticate(ctx, req)
+		require.NoError(t, err, "the certificate and technical record are read from the snapshot")
+		require.Equal(t, expected.ID, auth.ID, "including the authorization identity derived from them")
+	})
+}
+
+func TestRootEpochIsFrozenByEnrollment(t *testing.T) {
+	// The review's second reproduction. The next root epoch is genuine: it verifies against the
+	// trust base the authority is given. This profile does not follow a transition, so the authority
+	// refuses rather than carrying the same key into the new epoch.
+	f := newFixture(t, 1)
+	ctx := context.Background()
+	a := f.authority(t)
+
+	_, err := a.Authenticate(ctx, f.request())
+	require.NoError(t, err, "the enrolled epoch is ordinary work")
+
+	f.uc.UnicitySeal.Epoch++
+	f.tb.Epoch++
+	f.signSealTo(t, f.uc, quorum(1))
+
+	_, err = a.Authenticate(ctx, f.request())
+	require.ErrorIs(t, err, ErrContextMismatch, "a genuine next root epoch is a freeze, not ordinary work")
+	require.NotErrorIs(t, err, ErrUnauthenticated,
+		"and it is not an authentication failure: the certificate verifies, which is why this refusal has to exist")
+}
+
+func TestEnrollmentMustStateItsRootEpoch(t *testing.T) {
+	// "Not stated" and "pinned to epoch 0" are different, and nothing rejects epoch 0 in a seal, so
+	// an enrollment that never named one is refused rather than defaulted.
+	f := newFixture(t, 1)
+	enroll := f.enroll
+	enroll.RootEpoch = nil
+	_, err := New(enroll, trustStub{tb: f.tb})
+	require.ErrorContains(t, err, "states no root epoch")
+
+	enroll.RootEpoch = PinRootEpoch(0)
+	pinnedToZero, err := New(enroll, trustStub{tb: f.tb})
+	require.NoError(t, err, "epoch 0 is a pin like any other")
+	_, err = pinnedToZero.Authenticate(context.Background(), f.request())
+	require.ErrorIs(t, err, ErrContextMismatch)
 }
