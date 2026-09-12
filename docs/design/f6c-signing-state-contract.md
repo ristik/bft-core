@@ -283,6 +283,61 @@ Run `go test -race ./docs/design/models/f6csigning -count=5`.
    sends. This is the step that may replace the unconditional restored gate under
    the accepted profile; no earlier PR may do so.
 
+### Step 1 as implemented
+
+`signingauthority/` is the boundary and nothing more. `New` enrolls one immutable scope and
+generates the key for that authority lifetime; an enrollment that names a key is refused, because
+there is no import path to honour it. `Authenticate` takes a structured request (certificate, bound
+technical record, proposed certification request), checks it against the authority's own provisioned
+trust and its enrollment, and returns the authorization: assigned round and epoch from the
+authenticated technical record, the canonical authorization identity, and the complete
+signature-free preimage with its digest.
+
+The package has four exported methods, pinned by a test: `Authenticate`, `Close`, `Enrollment` and
+`SigningPublicKey`. There is no `SignBytes`, no key import or export, and no journal load.
+
+Repairs after the first review of step 1 (PR #137, head `818add57`):
+
+- **One owned snapshot before any check.** `Authenticate` encodes the proposal once, bounds that
+  encoding, decodes it back into a structure the authority owns, and copies the certificate and
+  technical record. Every check, the authorization identity and the returned preimage come from that
+  snapshot. Previously the proposal was encoded first and the caller's structure validated
+  afterwards, so a change during the trust lookup could separate validated content from returned
+  bytes in either direction.
+- **The root epoch is enrollment context.** §4 makes root-epoch transitions unsupported, but
+  enrollment pinned only the shard epoch, so the next genuine root epoch was accepted in the same
+  authority lifetime. `Enrollment.RootEpoch` now states the permitted epoch, is never inferred or
+  reset per request, and a certificate from another epoch is refused as `signing-context-mismatch`
+  rather than as an authentication failure, because such a certificate verifies perfectly. It is a
+  pointer so that "not stated" and "pinned to epoch 0" stay distinct: nothing rejects epoch 0 in a
+  seal, and an enrollment that never named one is refused.
+
+  The freeze is checked **before** the trust lookup, so that an epoch chosen by whoever sent the
+  request cannot select which trust base the authority fetches. One consequence is worth stating,
+  because §4 asks for the freeze to stay separate from authentication failures: a certificate that is
+  forged *and* names another root epoch is refused by the freeze, at a point where nothing about it
+  has been authenticated. The refusal therefore reports what the certificate **claims** and says so,
+  rather than asserting that it is genuinely from that epoch. A certificate naming the enrolled epoch
+  reaches verification, where a forgery is reported as `signing-unauthenticated-input`.
+
+Refusal names raised by this step: `signing-context-mismatch` for enrollment substitution (node,
+partition, shard, network, configuration, shard epoch or profile), `signing-unauthenticated-input`
+for a certificate, quorum, inclusion path or technical-record binding that does not verify,
+`signing-proposal-mismatch` for an authentic authorization whose proposal is not the one it assigns,
+`signing-request-too-large` for a request over the 1 MiB bound, `signing-unsupported-version`, and
+`signing-key-lost` for a closed authority. `signing-unauthenticated-input` and
+`signing-proposal-mismatch` are new here: §6 named the outcomes, not these two codes.
+
+What step 1 does not do, and what therefore cannot be claimed from it: there is no signing record, so
+a replayed but genuine authorization passes `Authenticate` every time. Nothing is reserved, signed,
+retained or released, no round is wired to the authority, and the restored non-voting gate is
+untouched. Authenticity is checked here; freshness is step 2.
+
+The authority restates `shardnode.ExpectationFromCertificate` and `shardnode.ValidateLocal` rather
+than importing them, because step 3 wires `shardnode.Round` to this package and importing `shardnode`
+here would be a cycle. `TestExpectationMatchesTheShardNodeRule`, in the external test package, holds
+the two rules against each other so the copy cannot drift silently.
+
 #105 closes only after all four steps and independent review. #14 still owns
 atomic block/UC/TR persistence; changing that format requires rechecking the R2/R3
 cold-start equivalences in #92's ledger. No new Engine methods, reth changes, root
