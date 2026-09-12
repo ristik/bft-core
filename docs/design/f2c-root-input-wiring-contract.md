@@ -17,7 +17,7 @@ to F6c.
 |---|---|---|
 | **builder** | `Round.produceBlock` (`shardnode/round.go:1172`) on the leader, through `Executor.Build`/`Seal`; the Engine API implementation is `engineapi.Adapter.Build` (`adapter.go:244`) | the commitment the block must carry, and the round parameters `v1` derives from `(r, n)` |
 | **follower / import** | `Round.verifyWithRetry` → `Executor.Verify` on every validator including the leader over its own output; `engineapi.Adapter.Verify` (`adapter.go:~380`) re-derives attributes rather than trusting the envelope | an independently derived commitment to compare against `ExecutionPayloadV3.ExtraData`, and the same `v1` parameters |
-| **replay** | **no such call path exists in this repository** | — see §2 |
+| **replay** | **no such call path exists in this repository** | see §2 |
 
 ### 2. Replay is missing, and is not the recovery predicate
 
@@ -85,7 +85,7 @@ proposer, not looser:
 
 1. read the bound `UC_-`/`TE_-` from the companion;
 2. authenticate them here, against this node's own configured trust base, partition, shard and
-   configuration hash — the same `rootinput.Derive` path a builder uses, with nothing accepted on the
+   configuration hash, by the same `rootinput.Derive` path a builder uses, with nothing accepted on the
    proposer's word;
 3. recompute `extraData` and require it to equal the block's;
 4. run `evmroot.ValidateBoundCertificate(ref, cert, n, lastAppliedRootRound)` against this node's own
@@ -99,7 +99,7 @@ accepts one (§10, negative 8).
 
 A later valid repeat the proposer did not bind is simply unused for this block. A repeat the follower
 has *already applied* moves its committed cursor past the bound certificate, and then the block is
-rejected and re-proposed against a current certificate — deterministic given committed state.
+rejected and re-proposed against a current certificate, deterministically given committed state.
 
 The negative case that matters for all three: the executor's current head is not a substitute for the
 certified parent, and the highest root round this node has observed is not a substitute for the
@@ -200,7 +200,7 @@ node's observed maximum is not a third option, and `evmroot.ValidateBoundCertifi
 the substitution because the value arrives as an input.
 
 The failure it causes is not the obvious one. An observed maximum includes valid certificates this
-node has *not applied* — a repeat at root round 60 while its applied history ends at 40. Substituting
+node has *not applied* (a repeat at root round 60 while its applied history ends at 40). Substituting
 it does not let something through; it **rejects a block that committed state accepts**, and it makes
 two nodes disagree about the same block according to what each happened to receive. A cursor set
 below the committed value is the opposite and separate failure: it removes a refusal that committed
@@ -261,7 +261,7 @@ the current tree, so each one is decidable now:
 
 1. **`v0` and `v1` disagree for the same round.** Same `(SealHash, r, n)`, different `prevRandao` and
    `parentBeaconBlockRoot`. Establishes that a mixed deployment is a consensus split rather than a
-   cosmetic difference, which is what makes §9's single-implementation-point requirement load.
+   cosmetic difference, which is why §9 requires a single implementation point.
 2. **Today's parameters cannot authenticate.** A fabricated `RoundParams`, authorized by nothing, is
    structurally indistinguishable from a genuine one: a seal hash is a value, not a certificate, so it
    carries no quorum, no inclusion path and no trust base for an executor to check. The same case
@@ -276,17 +276,18 @@ the current tree, so each one is decidable now:
    rejects a good block, and two nodes with different observations disagree about the same block. A
    cursor below the committed value is a separate case (4b), labelled as arbitrary or stale context
    rather than as the observed-maximum failure (§6).
-4b. **An arbitrary low cursor removes a refusal.** Committed state has moved past a binding and
-   refuses it; a lower cursor makes that refusal disappear. Distinct from 4 in both direction and
-   cause.
-5. **A payload whose `extraData` does not match is rejected**, and — the point of the negative — a
-   payload built through stock `PayloadAttributesV3` carries no commitment to match, so enforcement
-   without the execution-side provision mechanism halts the builder rather than protecting it (§5).
+   - **4b, an arbitrary low cursor removes a refusal.** Committed state has moved past a binding
+     and refuses it; a lower cursor makes that refusal disappear. Distinct from 4 in both direction
+     and cause.
+5. **A payload whose `extraData` does not match is rejected**, and, which is the point of the
+   negative, a payload built through stock `PayloadAttributesV3` carries no commitment to match, so
+   enforcement without the execution-side provision mechanism halts the builder rather than
+   protecting it (§5).
 6. **Refusals stay distinct** across the wiring boundary: each `rootinput` error class still arrives
    at the call site as itself (§8).
 7. **Asymmetric delivery agrees.** Two nodes with different observed sets, one holding a later valid
    repeat the proposer did not bind, derive byte-identical commitments from the block-bound
-   certificate — and would derive different ones if either re-picked from its own view (§3.1).
+   certificate, and would derive different ones if either re-picked from its own view (§3.1).
 8. **Evidence yes, verdict no.** A substituted or unauthenticated companion certificate is refused
    here rather than accepted on the proposer's word, and the derivation API exposes no parameter by
    which a caller could assert that something was already verified (§3.1).

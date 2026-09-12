@@ -148,7 +148,7 @@ func TestWiring_ExecutorHeadIsAcceptedAsTheCertifiedParent(t *testing.T) {
 // The history is realizable, and that matters: the node has APPLIED up to root round 40, the block
 // binds an authorization at 50, and a valid repeat at 60 has been observed but not applied. That is
 // the ordering D1 §5.3 describes, and it is the one where substituting an observed maximum does
-// damage — it rejects a good block, and two nodes that observed different things disagree.
+// damage: it rejects a good block, and two nodes that observed different things disagree.
 func TestWiring_ObservedMaximumIsNotTheCommittedCursor(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -170,8 +170,8 @@ func TestWiring_ObservedMaximumIsNotTheCommittedCursor(t *testing.T) {
 	_, err := Derive(ctx, committed, bound, boundTR)
 	require.NoError(t, err, "against committed state the bound authorization is accepted")
 
-	// Substituting the highest root round this node has OBSERVED — which includes the unapplied
-	// repeat at 60 — rejects a block that committed state accepts.
+	// Substituting the highest root round this node has OBSERVED, which includes the unapplied
+	// repeat at 60, rejects a block that committed state accepts.
 	observed := f.context()
 	observed.LastAppliedRootRound = 60
 	_, err = Derive(ctx, observed, bound, boundTR)
@@ -228,7 +228,7 @@ func TestWiring_AsymmetricDeliveryAgreesOnTheBoundCertificate(t *testing.T) {
 	require.Equal(t, resA.Encoded, resB.Encoded, "both validate the one bound certificate, so they agree")
 	require.Equal(t, resA.Commitment, resB.Commitment)
 
-	// If node B had re-picked from its own view — the rule this contract rejected — it would commit
+	// If node B had re-picked from its own view (the rule this contract rejects), it would commit
 	// to something else entirely for the same block.
 	rePicked, err := Derive(ctx, nodeB, repeat, repeatTR)
 	require.NoError(t, err, "the repeat is itself perfectly valid, which is what makes re-picking tempting")
