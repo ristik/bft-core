@@ -397,6 +397,51 @@ gate is untouched, so this changes no runtime behaviour. There is no transport, 
 RPC authentication, wire-size admission or operation correlation. There is no durable journal, by
 §6: with a key that cannot survive process death, making the record survive it adds no safety.
 
+### Step 3 as implemented
+
+Step 3 wires the round to a signer. `shardnode.CertificationSigner` is the single funnel every
+certification request goes through, `LocalKeySigner` is the default and preserves exactly today's
+behaviour, and `NewAuthoritySigner` routes the request through a signing authority instead. A round
+is switched over by an explicit `SetCertificationSigner` call at wiring time; nothing about
+constructing a round enables it.
+
+**Where the signer sits in a round.** After the certificate has been observed, classified, committed
+and reconciled, and after the P-id identity gate; before anything is retained as the completed round
+and before the send. So:
+
+- P-id is still retained before Build and before any signature is requested: a node that cannot prove
+  its executor is on the certified block never reaches the signer at all.
+- The restored non-voting gate (P-sign) is unchanged and still earlier, so a restored process does not
+  request a signature. Step 3 does not re-enable restored voting.
+- The root feed is untouched by signing outcomes. A refusal returns nil from `HandleCertificate`, not
+  an error: the certificate was already applied, and a refusal must not present itself as a delivery
+  failure that re-drives the round or drops the subscription.
+- A re-delivered round replays the retained signed request through `completed`, without asking the
+  signer again.
+
+**A refusal is an abstention.** When the signer refuses, for any reason, the round records an IR
+divergence, sets the node non-voting with a reason naming the refusal, logs it, and sends nothing.
+It does not rebuild the candidate, retry with other bytes, or sign locally. `signing-conflict`,
+`signing-stale`, `signing-session-fenced`, `signing-state-untrusted`, `signing-key-lost` and an
+unreachable authority are distinguishable in the health reason, because they are different situations
+for an operator, and none of them is a reason to find another way to sign.
+
+**What the shard process cannot do.** The round is given `SigningAuthorityClient`, which has
+`Reserve`, `Sign`, `RetainResponse` and `Release` and nothing else. It has no `ReplaceSession`, so a
+shard process cannot mint a session for itself or take itself back into service after being fenced;
+it has no constructor and no key, so a restarting shard process cannot reconstruct an authority. The
+session is issued elsewhere and handed in.
+
+**The client checks the response.** After Release, the round's signer decodes the released bytes and
+requires that they re-encode to exactly the reserved unsigned request and carry a signature, before
+anything goes on the wire. An authority that answered for another candidate, or returned an unsigned
+response, is refused by this node rather than forwarded.
+
+**What step 3 does not establish.** There is still no transport, no durable journal, no production
+activation and no key replacement: nothing in a deployed configuration selects the authority signer,
+and no existing KeyConf file is converted. Restored voting remains disabled. Step 4 (private
+acceptance) is separate and gated.
+
 #105 closes only after all four steps and independent review. #14 still owns
 atomic block/UC/TR persistence; changing that format requires rechecking the R2/R3
 cold-start equivalences in #92's ledger. No new Engine methods, reth changes, root

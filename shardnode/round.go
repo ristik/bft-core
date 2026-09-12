@@ -38,10 +38,14 @@ type Round struct {
 	executor     Executor
 	disseminator Disseminator
 	signer       abcrypto.Signer
-	submitter    Submitter
-	log          *slog.Logger
-	metrics      *Metrics // optional; every use is nil-safe, see metrics.go
-	health       *Health  // optional; every use is nil-safe, see health.go
+	// certSigner is the single funnel every certification request goes through (#105 step 3).
+	// It starts as the local key, which is what deployments do today; SetCertificationSigner
+	// replaces it with a signing authority, and that is an explicit deployment decision.
+	certSigner CertificationSigner
+	submitter  Submitter
+	log        *slog.Logger
+	metrics    *Metrics // optional; every use is nil-safe, see metrics.go
+	health     *Health  // optional; every use is nil-safe, see health.go
 
 	// awaitTimeout bounds how long a follower waits for the leader's
 	// disseminated block before giving up on this round. Without a bound,
@@ -233,6 +237,7 @@ func NewRound(nodeID string, partitionID types.PartitionID, shardID types.ShardI
 		executor:     executor,
 		disseminator: disseminator,
 		signer:       signer,
+		certSigner:   LocalKeySigner(signer),
 		submitter:    submitter,
 		log:          log,
 		awaitTimeout: DefaultAwaitTimeout,
@@ -289,6 +294,24 @@ func (r *Round) SetMetrics(m *Metrics) {
 
 // SetHealth attaches an optional Health snapshot. Safe to call, or not, at
 // any point before Run starts.
+/*
+SetCertificationSigner routes this round's certification requests through the given signer, in place
+of the local key. Call after NewRound, before Run.
+
+This is how a deployment turns on an independent signing authority (#105), and it is deliberately a
+separate, explicit step: nothing about constructing a round switches it on, and the round is handed a
+signer it cannot create, cannot configure and cannot bypass. If the signer refuses, this node
+abstains; it never falls back to the local key.
+*/
+func (r *Round) SetCertificationSigner(s CertificationSigner) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s == nil {
+		return
+	}
+	r.certSigner = s
+}
+
 func (r *Round) SetHealth(h *Health) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -644,9 +667,24 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		BlockSize: block.BlockSize,
 		StateSize: block.StateSize,
 	}
-	if err := req.Sign(r.signer); err != nil {
-		return fmt.Errorf("signing certification request: %w", err)
+	// Signing goes through the configured signer, and its refusal is final for this round.
+	//
+	// A refusal is not a delivery failure: the certificate has been observed, committed and
+	// reconciled by everything above, so this node keeps following the shard and abstains from the
+	// vote. What it must not do is get a different answer — rebuilding the candidate, retrying with
+	// other bytes, or signing locally because the authority said no would each defeat the record
+	// that produced the refusal (§8.3).
+	signed, err := r.certSigner.Sign(ctx, uc, tr, req)
+	if err != nil {
+		r.metrics.recordIRDivergence(ctx, "signing_declined")
+		r.health.updateVoting(false, signingDeclinedReason(err))
+		if r.log != nil {
+			r.log.WarnContext(ctx, "abstaining from the vote: the certification request was not signed",
+				slog.Uint64("round", exp.Round), slog.String("err", err.Error()))
+		}
+		return nil
 	}
+	req = signed
 
 	// Retained before the send, not after it: what must not change on a replay is the SIGNED
 	// bytes, and they exist from here on whether or not the send succeeds.
@@ -709,6 +747,15 @@ func (r *Round) send(ctx context.Context, req *certification.BlockCertificationR
 // nonVotingReason reports the most actionable reason this node is not voting. A restored process is
 // non-voting for its whole lifetime whatever else is true, so that fact leads; an identity refusal
 // on top of it is the detail.
+// nonVotingSigningDeclined prefixes the health reason when the signer refused, so an operator can
+// tell "this node could not prove where it stands" (P-id) from "this node was not permitted to sign"
+// (the authority's record, fencing, or its absence).
+const nonVotingSigningDeclined = "the certification request was not signed"
+
+func signingDeclinedReason(err error) string {
+	return nonVotingSigningDeclined + ": " + err.Error()
+}
+
 func (r *Round) nonVotingReason(identityErr error) string {
 	if r.restoredFrom != nil {
 		if identityErr != nil {
