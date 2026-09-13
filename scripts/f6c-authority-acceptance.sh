@@ -1414,6 +1414,13 @@ f6c_self_test() {
 
 # --- main -----------------------------------------------------------------------------------------
 
+# Library mode: scripts/f6c-reth-backup-acceptance.sh sources this file with F6C_LANE_LIBRARY=1 to use
+# the fail-closed observation, process and evidence helpers above without a second copy of them. It
+# stops here, before any argument is parsed or anything is created.
+if [ "${F6C_LANE_LIBRARY:-0}" = 1 ]; then
+  return 0
+fi
+
 if [ "${1:-}" = "--self-test" ]; then
   f6c_self_test
   exit $?
