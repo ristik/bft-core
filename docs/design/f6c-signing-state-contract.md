@@ -637,7 +637,93 @@ shard-side signer built by the same function `shard-node run` uses. Its response
 configured key and not under the key configuration's key; replacing the session fences it; stopping
 the authority makes it unavailable. The selection rules have their own cases. The tests do not run
 the `shard-node run` binary against an authority, so the two lines in `shardNodeRun` that pass no
-local signer and install the authority signer are checked by review rather than by a test.
+local signer and install the authority signer are checked by review rather than by a test. The
+process acceptance below exercises both with the real binary.
+
+### Process acceptance, before step 4
+
+The deployment tests above run the authority's `run` command in a goroutine of the test binary and
+build the shard-side signer by calling `buildCertificationSigning` directly. The acceptance lane
+`scripts/f6c-authority-acceptance.sh` runs the same sequence with separate operating-system
+processes: one `root-node run`, one `signing-authority run` and one `shard-node run` with the fake
+executor, each a `build/ubft` process started from the checkout, and the operator commands as
+separate invocations. Each scenario uses a fresh cluster in which this node is the shard's only
+validator, because fencing, authority loss and a restart each end the node's voting for the life of
+its process.
+
+**Setup in every scenario.**
+
+- The authority process starts pending. `replace-session` is refused with
+  `signing-enrollment-incomplete`, and no client credential file exists.
+- A configuration generated from the node info `shard-node init` wrote is refused by
+  `complete-enrollment` with `signing-context-mismatch`.
+- The configuration generated from `signing-authority node-info` names the node with the authority's
+  key. Its fingerprint equals the one the authority process logged and differs from the key
+  configuration's key. Completion and `replace-session` then succeed at session generation 1.
+- A control against the root verifier: the same node started without the authority flags, signing
+  with its local key and using a separate checkpoint file, has its request rejected by the root chain
+  with `signature verification: verification failed`, and the root reaches no consensus. Every
+  consensus the root reaches afterwards is on a request from this node that passed the same check
+  under the key the configuration names.
+- `shard-node run` with the authority flags logs the authority signer pinned to that fingerprint.
+
+**Positive control** (fencing, authority loss and restart). The node submits three requests through
+the authority, the root reaches consensus three times after the control and rejects no request, and
+the node accepts three valid certificates. The authority's record holds a round for which the node
+logged a submission, and health reports `voting=true`.
+
+**Fencing.** `replace-session` moves the authority to generation 2 while the node still holds the
+credential it loaded. The node abstains on every following round with `signing-session-fenced`,
+submits nothing after its first abstention, and keeps accepting certificates. The root reaches no
+consensus after that point and rejects no request. The authority process logs the refused operations
+and stays unfaulted.
+
+**Authority loss.** The authority process is killed with SIGKILL. The operator `status` command and
+the node both report `signing-authority-unavailable`. The node abstains on every following round,
+submits nothing and keeps following the shard, and the root certifies nothing and rejects nothing.
+
+In both cases no request signed under any other key reached the root chain, which is how the absence
+of a local fallback is observed from outside the node.
+
+**Restart from a retained checkpoint.** There are two scenarios, because which check stops a
+restarted node depends on what the restarted process observes.
+
+- `restart`: after the positive control the node is stopped with SIGTERM and started again with the
+  same flags and credential. It resumes from its checkpoint, follows the shard, submits nothing and
+  never calls the signer. The check that refuses first is P-id, with `no-anchor`: the fake executor
+  produces no non-quiet round after genesis, so the restarted process observes no certificate that
+  names a block. The restored gate is not reached in this scenario, although the health reason names
+  the restored state first.
+- `restart-at-anchor`: the node is frozen with SIGSTOP once its first authority-signed request has
+  been sent and its checkpoint written, and then killed with SIGKILL. The root certifies that round
+  (round 2) while the checkpoint still holds the round-0 certificate. The restarted process resumes
+  from round 0, installs an anchor from the non-quiet round-2 certificate, passes P-id, and is stopped
+  by the restored gate itself (`restoredFromRound=0`). Health gives the restored reason alone. The
+  freeze has to reach the process before it accepts the certificate for its own request, and the
+  script fails the scenario when it did not. The freeze was in time in the recorded run and in three
+  repeats. An earlier trial, which started watching only after a two-second startup wait, was late
+  and failed as intended.
+
+In both scenarios the authority status is identical before and after the restart (enrollment,
+configuration hash, session generation 1, reserved round and retained response), the same authority
+process runs throughout, and it refuses no operation. The shard restart changed nothing in the
+authority's record or session. The restored non-voting gate is unchanged.
+
+**Recorded run.** Revision `cfb132b4` with a clean worktree passed all four scenarios: fencing with 25
+assertions, authority loss with 24, restart with 27 and restart-at-anchor with 25. The evidence
+directory holds a manifest (revision, binary digest, Go version, host, ports and T2), every command as
+run, process start and stop records with PIDs, the logs, the status and health snapshots, and a digest
+list. Credential and key files are removed after every process has stopped. Cleanup signals only the
+PIDs the run recorded, after `owned_pid` confirms each command and working directory. The run is
+repeated with `scripts/f6c-authority-acceptance.sh` and writes under `evidence-runs/`.
+
+**What this does not show.** The lane has one validator and the fake executor, and no reth. The
+authority and the shard node run on one host and reach each other over a local Unix socket, so it says
+nothing about §3's host, backup and snapshot isolation, which the private test deployment must state
+and supply. It does not exercise a concurrent second shard instance, an identical retry, a conflicting
+request for the same round, or an old checkpoint against the authority's record. Those cases belong to
+step 4, which must connect restored signing to P-id and to the authority's record and session
+guarantees, and which remains gated.
 
 #105 closes only after all four steps and independent review. #14 still owns
 atomic block/UC/TR persistence; changing that format requires rechecking the R2/R3
