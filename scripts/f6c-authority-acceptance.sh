@@ -63,7 +63,7 @@ source helper.sh
 
 partitionID=8
 networkID=3
-# The owner's floor for test lanes is 5000ms (production uses 10 to 15 seconds). Do not lower it.
+# The owner's test floor is 5000ms. Production T2 must be sized well above normal round timing.
 t2Millis=5000
 rootP2PPort=36662
 rootRPCPort=36866
@@ -115,10 +115,11 @@ logcmd() {
     printf '%s [%s] ' "$(stamp)" "${scenario:-run}"
     printf '%q ' "$@"
     echo
-  } >>"$runDir/commands.log" || artifact_error "commands.log"
+  } >>"$runDir/commands.log" || { artifact_error "commands.log"; return 1; }
 }
 ubft() {
-  logcmd build/ubft "$@"
+  # A counter changed inside $(ubft ...) is lost; return the failure to the caller instead.
+  logcmd build/ubft "$@" || return 1
   build/ubft "$@"
 }
 
@@ -501,7 +502,8 @@ setup_cluster() {
     --node-info "$scen/root/node-info.json" >>"$scen/setup.log" 2>&1 || { fail "trust-base generate"; return 1; }
   ubft trust-base sign --home "$scen/root" --trust-base "$scen/trust-base.json" >>"$scen/setup.log" 2>&1 || { fail "trust-base sign"; return 1; }
   ubft shard-node init --home "$scen/shard" -g >>"$scen/setup.log" 2>&1 || { fail "shard-node init"; return 1; }
-  nodeID=$(ubft node-id --home "$scen/shard" | tail -n1)
+  nodeID=$(ubft node-id --home "$scen/shard" | tail -n1) ||
+    { fail "could not record or read the shard node identity"; return 1; }
   localSigKey=$(jq -r .sigKey "$scen/shard/node-info.json" | sed 's/^0x//')
   [ -n "$nodeID" ] && [ -n "$localSigKey" ] || { fail "could not read the shard node's identity"; return 1; }
 
@@ -601,7 +603,8 @@ setup_cluster() {
   logcmd curl -X PUT -H "Content-Type: application/json" -d "@$scen/shard-conf-${partitionID}_0.json" "http://127.0.0.1:$rootRPCPort/api/v1/configurations"
   curl -fsS -X PUT -H "Content-Type: application/json" -d "@$scen/shard-conf-${partitionID}_0.json" \
     "http://127.0.0.1:$rootRPCPort/api/v1/configurations" >>"$scen/setup.log" 2>&1 || { fail "registering the shard configuration"; return 1; }
-  rootBoot="/ip4/127.0.0.1/tcp/$rootP2PPort/p2p/$(ubft node-id --home "$scen/root" | tail -n1)"
+  rootBoot="/ip4/127.0.0.1/tcp/$rootP2PPort/p2p/$(ubft node-id --home "$scen/root" | tail -n1)" ||
+    { fail "could not record or read the root node identity"; return 1; }
   sleep 5 # wait_for_root_chain_settle in helper.sh explains this
 
   # Control against the root verifier: the same node, started without the authority flags, signs
@@ -1190,6 +1193,10 @@ f6c_self_test() {
 
   desc="a run log that cannot be written fails the verdict"
   out=$(verdict_probe runlog 'rm -f "$runDir/run.log" && mkdir "$runDir/run.log" && pass "an assertion whose record was lost"')
+  st "$desc" "$(echo "$out" | grep -q '^RESULT: FAIL' && ! echo "$out" | grep -q '^exit=0$' && echo 0 || echo 1)"
+
+  desc="a command-log failure inside a captured ubft call reaches the parent verdict"
+  out=$(verdict_probe captured-command 'rm -f "$runDir/commands.log" && mkdir "$runDir/commands.log"; build/ubft() { echo node-id; }; nodeID=$(ubft node-id) || fail "captured command could not be recorded"; rmdir "$runDir/commands.log"; : >"$runDir/commands.log"')
   st "$desc" "$(echo "$out" | grep -q '^RESULT: FAIL' && ! echo "$out" | grep -q '^exit=0$' && echo 0 || echo 1)"
 
   desc="a counted assertion failure fails the verdict"

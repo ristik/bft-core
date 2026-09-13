@@ -724,6 +724,13 @@ snapshots, and injected write failures through the real cleanup and verdict. Rem
 turn fails the self-test in 15 of 16 cases. The remaining one, the root-mark check in the abstention
 assertion, is redundant with the later root-log assertion, which fails closed on the empty mark.
 
+**Reviewer failure-path repair.** A command-log write inside `$(ubft ...)` originally incremented
+an evidence counter only in the subshell, allowing the parent to report success. `logcmd` and `ubft`
+now propagate that failure, and both node-ID captures stop the scenario on error. The offline suite
+has 30 cases; restoring the ignored return status fails the captured-command case. This repair was
+verified offline, not by relabelling the live run below. The test floor is T2 = 5 seconds; production
+T2 must be selected well above normal round timing, not assumed universally to be 10–15 seconds.
+
 **Recorded run.** Revision `7b797b28` with a clean worktree and T2 5000ms (checked against the generated
 configuration) passed all four scenarios: fencing with 27 assertions, authority loss with 26, restart
 with 29 and restart-at-anchor with 27. The evidence directory holds a manifest (revision, binary digest,
