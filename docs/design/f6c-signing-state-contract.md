@@ -600,8 +600,11 @@ comes from its own configuration:
   the same key the root chain uses. It is never read from the authority.
 - A configuration naming the key configuration's own signing key is refused, as is a configuration
   that does not name this node.
-- No local signer is constructed. `shardnode.New` receives none, and `LocalKeySigner` refuses to sign
-  without a key rather than panicking, so there is no local key for the round to fall back to.
+- No local signer is retained or passed to the round. `shardnode.New` receives none, and
+  `LocalKeySigner` refuses to sign without a key rather than panicking, so there is no local key for
+  the round to fall back to. (Correction, 2026-09-13: this bullet first said no local signer is
+  constructed. `localSigningKey` does construct a temporary signer from the key configuration, only
+  to derive its public key for the comparison above, and does not keep it.)
 - The node holds the client credential only. The operator credential is not a flag of this command.
 - An authority flag without the socket is refused, so a mistyped deployment does not start signing
   with the local key.

@@ -131,7 +131,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 
 	// How certification requests are signed is decided once, here, before anything is built: with the
 	// key configuration's signing key as before, or through a signing authority when one is configured
-	// (#105). In the second case no local signer is constructed.
+	// (#105). In the second case no local signer is kept or passed to the round.
 	signing, err := buildCertificationSigning(&flags.shardNodeSigningFlags, keyConf, shardConf)
 	if err != nil {
 		return fmt.Errorf("configuring certification signing: %w", err)
