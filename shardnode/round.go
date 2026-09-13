@@ -340,9 +340,11 @@ separate, explicit step: nothing about constructing a round switches it on, and 
 signer it does not create or configure. If the signer refuses, this node abstains; there is no code
 path here that falls back to the local key.
 
-This is wiring, not isolation. The round still holds the legacy key in this unactivated profile, and
-an authority in its own process, with its own credentials and lifetime, remains a prerequisite for
-activation.
+This is wiring, not isolation. The independence the private profile relies on (an authority in its
+own process on a host outside the shard's backup, snapshot and cloning domains, with its own
+credentials and lifetime) is a deployment premise that nothing here can check. Only a signer built by
+NewAuthoritySigner lets a restored process sign (abstainRestored); any other signer leaves it
+non-voting.
 */
 func (r *Round) SetCertificationSigner(s CertificationSigner) {
 	r.mu.Lock()
@@ -364,13 +366,26 @@ func (r *Round) SetHealth(h *Health) {
 	}
 }
 
-// nonVotingRestored is the health reason for the P-sign gate — see MarkRestored.
-const nonVotingRestored = "restored from a persisted certificate: non-voting until the monotonic signing contract (#105) exists"
+// nonVotingRestored is the health reason a restored process reports until it has signed: it signs only
+// through a signing authority's independent record, after P-id, and a local signing key does not vote
+// at all (#105). See MarkRestored and abstainRestored.
+const nonVotingRestored = "restored from a persisted certificate: signs only what a signing authority's independent record admits, after P-id; a local signing key does not vote (#105)"
+
+// nonVotingRestoredLocal is the reason once a restored process has reached the signing gate with a
+// signer that keeps no independent record.
+const nonVotingRestoredLocal = "restored from a persisted certificate: this signer keeps no independent signing record, so this process does not vote (#105)"
 
 /*
 MarkRestored records that this process resumed from a persisted certificate for partition round
-`round`, which makes it NON-VOTING for its whole lifetime. Call before Run; node.go calls it exactly
-when the checkpoint produced a certificate that authenticated (see New).
+`round`. Call before Run; node.go calls it exactly when the checkpoint produced a certificate that
+authenticated (see New).
+
+Since #105 step 4 the consequence depends on the signer. With a signer that keeps no independent
+record (the local key, or anything other than NewAuthoritySigner) the process is NON-VOTING for its
+whole lifetime, for the reasons below. With the authority signer it signs only what the authority's
+record admits, and only after P-id: that record is the monotonic, non-rollback record of what this
+validator has signed that the reasons below call for, held outside the shard's backup and restore
+domain under the private profile's deployment premise. See abstainRestored.
 
 Why a node that just proved its checkpoint genuine may not vote (design §6.1, #105). Verification
 establishes that the file is authentic, not that it is CURRENT. An entire older checkpoint replays
@@ -880,12 +895,25 @@ func (r *Round) abstainRestored(ctx context.Context, exp Expectation) bool {
 	if r.restoredFrom == nil {
 		return false
 	}
+	// A restored process may sign only through a signer whose every signature is admitted by an
+	// independent record (#105 step 4). That record is what the checkpoint cannot provide: it refuses
+	// a lower assigned round and different bytes for the round it holds, whatever this process
+	// re-enters after restoring an older file. P-id has already been required above; this does not
+	// replace it. Every other signer keeps the blanket refusal.
+	if _, ok := r.certSigner.(recordKeepingSigner); ok {
+		if r.log != nil && !r.warnedRestored {
+			r.warnedRestored = true
+			r.log.InfoContext(ctx, "resumed from a persisted certificate: signing only what the signing authority's record admits (#105)",
+				slog.Uint64("restoredFromRound", *r.restoredFrom), slog.Uint64("round", exp.Round))
+		}
+		return false
+	}
 	r.metrics.recordIRDivergence(ctx, "restored_non_voting")
-	r.health.updateVoting(false, nonVotingRestored)
+	r.health.updateVoting(false, nonVotingRestoredLocal)
 	if r.log != nil {
 		if !r.warnedRestored {
 			r.warnedRestored = true
-			r.log.WarnContext(ctx, "resumed from a persisted certificate: this node follows and reconciles but will NOT vote until the monotonic signing record (#105) exists — restart is not by itself authorization to sign (design §6.1)",
+			r.log.WarnContext(ctx, "resumed from a persisted certificate with a signer that keeps no independent signing record: this node follows and reconciles but will NOT vote in this process (#105, design §6.1)",
 				slog.Uint64("restoredFromRound", *r.restoredFrom), slog.Uint64("round", exp.Round))
 		} else {
 			r.log.DebugContext(ctx, "abstaining: restored process is non-voting", slog.Uint64("round", exp.Round))

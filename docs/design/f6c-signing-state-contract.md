@@ -820,6 +820,108 @@ test deployment's to state and supply. The restored non-voting gate is unchanged
 restored-voting integration, with old-checkpoint, restart, key-loss and concurrent-instance
 acceptance, remains a separate reviewed change.
 
+### Step 4 as implemented: restored voting through the authority's record
+
+A process resumed from a checkpoint was non-voting whatever signer it had (`Round.abstainRestored`).
+That refusal was reproduced first at `f6d674cf`. `TestRestoredVotingThroughAnIndependentAuthority`
+failed in every authority-mode case on it, while its P-id and local-key cases passed.
+
+**Admission conditions.** A restored process asks for a signature only when all of the following
+hold, in this order:
+
+1. **P-id.** P-id holds for the round, as for any process: an authenticated certificate, valid
+   continuity, a held anchor, and the executor on the certified block rather than only at the same
+   state root. It is decided before leadership and Build, and before any signer call.
+2. **Record-keeping signer.** The round's signer keeps an independent signing record. That is a
+   sealed property of the signer `NewAuthoritySigner` builds: an unexported method, so no other
+   `CertificationSigner` has it. The local key, a test double and a wrapper keep the blanket restored
+   refusal.
+3. **Authority admission, per request.**
+   - The server admits only the current credential, and the authority only its current generation.
+   - The authority still holds the key of its lifetime.
+   - The request authenticates against the authority's own trust and frozen enrollment.
+   - The record admits the request: a round above the reservation, or identical bytes for the
+     reserved round, which are answered with the retained response.
+4. **Configured key.** The response verifies under the key the node's own shard configuration names,
+   and is exactly the proposal.
+
+A restored checkpoint, a matching executor head, or a health report of voting grants nothing.
+
+**Why the record replaces the refusal for this signer.** The refusal exists because an older
+checkpoint rolls back the observation cursor, so a restarted node can re-enter a round it has already
+signed (see `MarkRestored`). The authority's record does not roll back with the checkpoint:
+
+- a lower assigned round is `signing-stale`;
+- different bytes for the reserved round are `signing-conflict`, whatever the root authorization;
+- identical bytes return the single retained signature.
+
+A new authority lifetime has a new key, so its responses fail condition 4. It can take over the
+validator assignment only through a new shard configuration, which is an explicit operator act.
+
+All of this holds only under the private profile's premise (§3): the authority runs outside the
+shard's backup, snapshot and cloning domains. Same-host tests do not establish that premise.
+
+**Evidence, in package, against a real authority process.** The test runs:
+
+- the production restore sequence (`FileStore.LoadLUC`, `verifyRestoredLUC`, `resumeFrom`);
+- the real `ubft signing-authority run`, enrolled with the operator commands;
+- `NewAuthoritySigner` over the real client transport.
+
+It shows:
+
+- **Older checkpoint.** A first process signs rounds 6 and 7. A second process, restored from the
+  round-4 checkpoint:
+  - is refused round 6 as stale;
+  - receives the retained round-7 bytes, byte for byte;
+  - is refused changed round-7 bytes as a conflict, under the same and under a different root
+    authorization;
+  - then signs round 8.
+- **P-id before the authority.** The real client is wrapped with a counter.
+  - As leader, a restored process on the wrong block at the same state root, or with no anchor, makes
+    no client call and does not seal.
+  - A restored follower on the wrong block makes no client call.
+  - The same follower on the certified block signs.
+- **Local key.** The local key and a wrapper signer stay non-voting.
+- **Lost response and concurrent instances.**
+  - A response the authority signed and retained but never released is recovered by a restored
+    instance.
+  - An old instance racing a session replacement is fenced, and the record survives.
+  - The new instance then signs fresh work.
+- **Failures that abstain.** A response under another key, an unreachable authority, and a new
+  authority lifetime each abstain. A new lifetime refuses the old configuration and issues no
+  session. None of these falls back to the local key or replaces a key or enrollment automatically.
+
+Removing the gate's type check, disabling it for the authority signer, skipping P-id for a restored
+process, skipping the vote-level P-id verdict for a restored process, and skipping verification under
+the configured key each fail the test. The fourth mutation first survived, because both P-id cases
+made the restored node the round's leader. The follower cases were added for it.
+
+**Evidence across processes.** In `scripts/f6c-authority-acceptance.sh`:
+
+- **`restart-at-anchor`.** The shard node is frozen after its first authority-signed request and
+  killed. It is restarted from the older round-0 checkpoint while the authority holds round 1. It
+  then:
+  - installs an anchor and passes P-id;
+  - signs fresh rounds from round 2 through the same authority, under the same session;
+  - has three root-chain consensuses on those requests;
+  - reports voting in health.
+- **`local-restart-at-anchor`.** The same restart with the local key and no authority: P-id passes,
+  the restored refusal withholds the vote, and nothing is submitted.
+- **`restart`.** Unchanged: P-id refuses first (`no-anchor`).
+
+The recorded run at `bc56b0f5` (clean worktree, T2 5000ms) passed all five scenarios: fencing 27
+assertions, authority loss 26, restart 30, restart-at-anchor 27, local-restart-at-anchor 13.
+
+**Unchanged.**
+
+- No #14 checkpoint format or durability change.
+- No key conversion, public assignment, PoS activation or Engine API/reth change.
+- The conflict key stays the assigned round.
+- Log and health wording keep "NON-VOTING" and "will NOT vote" on the local-key path, which the f6b
+  and reth-chaos lanes read.
+- The step 4 item in §8 lists actual reth and old shard-backup restoration, which this change does not
+  run. The lanes use the fake executor, and the in-package test substitutes an older checkpoint file.
+
 #105 closes only after all four steps and independent review. #14 still owns
 atomic block/UC/TR persistence; changing that format requires rechecking the R2/R3
 cold-start equivalences in #92's ledger. No new Engine methods, reth changes, root

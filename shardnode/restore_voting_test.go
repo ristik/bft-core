@@ -116,9 +116,10 @@ The predecessor of this test asserted that two zero-valued Round structs had no 
 of any zero-valued struct and exercised no signing path at all, which is why it passed while the
 node signed.
 
-Per design §8, this test replaces it and must itself be replaced — not deleted — when #105 supplies
-the monotonic signing record: at that point a restored node may vote again, and what has to be
-asserted here is that it does so only when that record permits it.
+Since #105 step 4 this test covers the signer that keeps no independent record, which is still refused
+unconditionally: the round here signs with the local key. A restored round signing through a signing
+authority's record, and only what that record admits, is asserted in
+restore_authority_process_test.go against a real authority process.
 */
 func TestRestoredNodeIsNonVoting(t *testing.T) {
 	ctx := context.Background()

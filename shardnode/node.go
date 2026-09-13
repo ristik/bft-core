@@ -107,7 +107,7 @@ func New(
 			}
 			resumeFrom(client, round, luc)
 			if log != nil {
-				log.Info("resumed from persisted certificate — this node is NON-VOTING for the rest of this process",
+				log.Info("resumed from persisted certificate: with a local signing key this node is NON-VOTING for the rest of this process; through a signing authority it signs only what the authority's record admits, after P-id (#105)",
 					slog.Uint64("round", luc.GetRoundNumber()), slog.Uint64("rootRound", luc.GetRootRoundNumber()))
 			}
 		}
@@ -168,8 +168,9 @@ func (n *Node) SetMetrics(m *Metrics) {
 }
 
 // SetCertificationSigner routes this node's certification requests through the given signer. Call
-// after New, before Run. See Round.SetCertificationSigner: it is an explicit deployment step, the
-// restored non-voting gate still applies ahead of it, and a refusal is an abstention.
+// after New, before Run. See Round.SetCertificationSigner: it is an explicit deployment step, P-id
+// still applies ahead of it, a refusal is an abstention, and a node resumed from its checkpoint signs
+// only through a signer built by NewAuthoritySigner (Round.abstainRestored).
 func (n *Node) SetCertificationSigner(s CertificationSigner) {
 	n.round.SetCertificationSigner(s)
 }
