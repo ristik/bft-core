@@ -397,6 +397,153 @@ gate is untouched, so this changes no runtime behaviour. There is no transport, 
 RPC authentication, wire-size admission or operation correlation. There is no durable journal, by
 §6: with a key that cannot survive process death, making the record survive it adds no safety.
 
+### Step 3 as implemented
+
+Step 3 wires the round to a signer. `shardnode.CertificationSigner` is the single funnel every
+certification request goes through, `LocalKeySigner` is the default and preserves exactly today's
+behaviour, and `NewAuthoritySigner` routes the request through a signing authority instead. A round
+is switched over by an explicit `SetCertificationSigner` call at wiring time; nothing about
+constructing a round enables it.
+
+**Where the signer sits in a round.** After the certificate has been observed, classified, committed
+and reconciled, and after the P-id identity gate; before anything is retained as the completed round
+and before the send. So:
+
+- P-id is still retained before Build and before any signature is requested: a node that cannot prove
+  its executor is on the certified block never reaches the signer at all.
+- The restored non-voting gate (P-sign) is unchanged and still earlier, so a restored process does not
+  request a signature. Step 3 does not re-enable restored voting.
+- The root feed is untouched by signing outcomes. A refusal returns nil from `HandleCertificate`, not
+  an error: the certificate was already applied, and a refusal must not present itself as a delivery
+  failure that re-drives the round or drops the subscription.
+- A re-delivered round replays the retained signed request through `completed`, without asking the
+  signer again.
+
+**A refusal is an abstention.** When the signer refuses, for any reason, the round records an IR
+divergence, sets the node non-voting with a reason naming the refusal, logs it, and sends nothing.
+It does not rebuild the candidate, retry with other bytes, or sign locally. `signing-conflict`,
+`signing-stale`, `signing-session-fenced`, `signing-state-untrusted`, `signing-key-lost` and an
+unreachable authority are distinguishable in the health reason, because they are different situations
+for an operator, and none of them is a reason to find another way to sign.
+
+**What the wiring narrows, and what it does not.** The round is given `SigningAuthorityClient`,
+which declares `Reserve`, `Sign`, `RetainResponse` and `Release` and nothing else. Omitting
+`ReplaceSession` narrows what this code can call, and the type carries no constructor and no key, so
+there is no path here that mints a session or rebuilds an authority after a restart. That is API
+narrowing, not process isolation and not a capability boundary: a value whose dynamic type is
+`*Authority` can be asserted to an interface that does have `ReplaceSession`, and in this
+unactivated profile the round still holds the legacy key. An authority in a separate process, with
+operator credentials separate from the shard's and a lifetime independent of it, remains a
+prerequisite for activation (§6, §8.3) rather than something the interface provides.
+
+**The client checks every answer against its own work.** The signer takes its own copy of the
+proposal before it calls the client, and that copy's preimage, digest and assigned round are the
+expectation. The reservation must name them; the release is asked for by them; the released bytes
+must re-encode to that same preimage and must verify under the enrolled authority's signing key,
+provisioned with this node's configuration and never read from the response being checked. Two
+remote answers agreeing with each other establishes nothing, so a consistently substituted exchange
+is refused, and a present-but-invalid signature is refused rather than cached as a completed round.
+Verifying the response does not stop an authority from signing two different requests, which is what
+the record inside the authority is for; it stops a corrupt or misrouted answer from becoming this
+node's vote.
+
+**A refusal is retained.** The candidate taken to the signer is recorded before the call, with the
+refusal recorded on it. A re-delivery of the same authorization, which the delivery layer produces
+whenever applying a certificate fails after the round ran (a failed checkpoint write, for example),
+abstains again with the reason first recorded, without building a second candidate and without
+asking again. This matters most where the answer was lost rather than refused: the authority may
+already hold a reservation for the first candidate, and a rebuild against a mempool that has moved
+on would strand it behind a conflict. A genuinely new authorization is a different key and builds
+normally.
+
+**What step 3 does not establish.** There is still no transport, no durable journal, no production
+activation and no key replacement: nothing in a deployed configuration selects the authority signer,
+and no existing KeyConf file is converted. Restored voting remains disabled. Step 4 (private
+acceptance) is separate and gated.
+
+### The authority process boundary, before step 4
+
+Step 4 exercises an authority an operator can kill, race and re-provision. Steps 1 to 3 left the
+authority a library, so its lifetime was the shard process's lifetime and both sides drew on one
+credential space. §3 asks for the opposite: a host outside the shard's backup, snapshot and
+process-cloning domains, where a same-directory sidecar does not qualify merely by having a
+different PID. `signingauthority/service` is that boundary, and it comes before step 4 rather than
+inside it.
+
+**What crosses.** A length-prefixed CBOR message naming one of four operations: reserve, sign,
+retain, release. There is no message that carries bytes to sign, none that reads or writes a key,
+and none on the client endpoint that replaces a session. A frame larger than the derived maximum is
+refused on its header, before its body is read or allocated, and the connection ends there because
+it is no longer at a known boundary. A frame of another protocol version is refused rather than
+coerced. Connections are bounded per endpoint, one request is served at a time on each, and a
+connection that does not produce a complete message within the idle deadline is closed.
+
+**One authority per path.** A socket path is claimed with an exclusive lock on a file beside it, held
+for as long as the listener is open. A second authority started on a path that a running one serves
+is refused (`ErrPathHeld`) rather than removing the socket and listening in its place: the shard node
+dialling that path could not tell the two apart, since the operations and refusals are identical, and
+two keys for one enrolled node is what §3 exists to prevent. The kernel releases the lock when its
+process dies, and that is the only condition under which an existing socket file is removed.
+
+**Two credentials, two endpoints.** The client endpoint admits the current client credential only.
+Anything else (an old credential, an operator credential, no credential) is
+`signing-session-fenced`, the same answer an old generation gets in one process. The operator
+endpoint has its own credential and is the only place session replacement, status and enrollment
+live. Neither endpoint falls back to the other, and the endpoint refusal is decided before any
+credential is compared, so a misconfiguration is diagnosable without one being involved in the
+answer.
+
+**Where the session lives.** The shard process holds no `signingauthority.Session`. Replacement
+mints the session inside the authority process and returns a bearer credential the server maps to
+it; the unmintable type stays where the key is. Replacing fences the old credential in the same step
+that advances the generation, so the two cannot disagree about who is admitted, and a fenced shard
+process cannot unfence itself because what it holds is the thing that was invalidated. The whole
+replacement (advancing the generation, drawing the credential, installing both) is one critical
+section. The authority orders concurrent replacements, and the server must install them in that
+order; otherwise a replacement that won inside the authority can lose the race to install its
+credential, and the server ends up admitting a credential the authority has already fenced, leaving
+no returned credential usable. With the section held, concurrent replacements leave exactly one.
+
+**Unavailability is not a refusal.** No process listening, a connection that died mid-exchange, a
+deadline, a caller that cancelled: all of these are `signing-authority-unavailable`, distinct from
+every decision the authority makes. The round abstains either way, and an operator can tell "the
+authority said no" from "the authority said nothing". A connection that was already cached and turns
+out to be dead is retried once on a fresh one, which is safe because every operation here replays
+rather than repeats. There is no fallback local signer at any point.
+
+**One deadline per operation, and cancellation reaches the socket.** The client's timeout bounds the
+whole operation: waiting behind another operation for the connection, connecting, sending, reading
+the answer and the single retry share one deadline, the earlier of the caller's and the configured
+one, and the retry is not attempted once it has passed. A cancelled context wakes a call blocked in a read or write by moving the connection's
+deadline into the past, because a `net.Conn` takes no context; waiting for the next operation slot is
+interruptible for the same reason. A cancelled caller stops waiting. As §6 already states, that does
+not undo a reservation the authority has admitted.
+
+**Server operations are bounded and end with the server.** Socket deadlines bound reading and
+writing, but a reserve can wait on something other than the connection, such as the trust lookup
+that authenticates its certificate. Each dispatched operation therefore runs under a context derived
+from the server's own lifetime, bounded by `OperationTimeout` and cancelled by `Close`, so a lookup
+that never returns can neither hold a connection's handler indefinitely nor keep shutdown waiting.
+That context is not tied to the connection: a client that goes away mid-request withdraws nothing,
+and cancellation stops waiting without undoing anything the authority has already admitted. A
+lookup that runs out of time is refused as `signing-unauthenticated-input`, because the input was not
+authenticated, and the connection and server continue serving.
+
+**What the tests establish.** A real second operating-system process holds the key: killing it makes
+every client operation unavailable and nothing else; restarting it produces a DIFFERENT key for the
+same enrollment, the old client credential is refused, and returning to service is a fresh operator
+assignment rather than a reset. A shard-side client going away leaves the authority holding its
+reservation.
+
+**What it does not do.** It does not authenticate hosts or encrypt the wire: it is a local transport
+for a private profile, and a socket in a directory only the two parties may enter is the isolation
+it assumes, on top of the host separation §3 already requires of the operator. It activates nothing:
+no command runs a server, no deployment flag selects an authority for a shard node, no KeyConf file
+is converted, and the restored non-voting gate is untouched. The shard node's own interface lost its
+session argument in this change, because a shard process that talks to an authority holds a
+credential rather than a token, and binding a session is the local adapter's job
+(`signingauthority.NewLocalClient`).
+
 #105 closes only after all four steps and independent review. #14 still owns
 atomic block/UC/TR persistence; changing that format requires rechecking the R2/R3
 cold-start equivalences in #92's ledger. No new Engine methods, reth changes, root
