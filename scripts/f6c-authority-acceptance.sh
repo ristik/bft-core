@@ -24,8 +24,13 @@
 #   restart-at-anchor  the shard node is frozen (SIGSTOP) right after its first authority-signed
 #                      request is sent, so the root certifies that round while the node's checkpoint
 #                      is still the round before it, and then killed. The restarted process observes
-#                      the non-quiet certificate, holds an anchor, passes P-id, and is stopped by the
-#                      restored gate itself.
+#                      the non-quiet certificate, holds an anchor and passes P-id. Since #105 step 4 it
+#                      then signs through the surviving authority's record: its requests are above the
+#                      round that record already held, and the root chain certifies them.
+#   local-restart-at-anchor
+#                      the same restart with the local signing key and no authority. The restored
+#                      process passes P-id and is stopped by the restored refusal, which step 4 keeps
+#                      for every signer that does not keep an independent record.
 #
 # In both restart scenarios the authority's enrollment, session generation and record are compared
 # before and after the restart, and the same authority process runs throughout.
@@ -849,7 +854,9 @@ scenario_restart() {
   assert_restored "$mark" "$rootMark" "$authMark" "$authorityPid" restart || return 1
   # Which check stopped the vote, stated rather than assumed.
   if assert_count ge 1 "restart: P-id refused first (no-anchor: the restarted process observed no certificate naming a block)" "$log" "$mark" "cannot prove" "no-anchor"; [ $? -eq 2 ]; then return 1; fi
-  if assert_none "restart: the restored gate was not reached in this scenario (see restart-at-anchor)" "$log" "$mark" "will NOT vote until the monotonic signing record"; [ $? -eq 2 ]; then return 1; fi
+  # P-id refuses before the signing gate, so neither branch of the restored gate is reached here.
+  if assert_none "restart: the refusal for a signer without a record was not reached (P-id refused first)" "$log" "$mark" "will NOT vote"; [ $? -eq 2 ]; then return 1; fi
+  if assert_none "restart: signing through the authority was not reached either (P-id refused first)" "$log" "$mark" "signing only what the signing authority's record admits"; [ $? -eq 2 ]; then return 1; fi
   if health restored && json_true "$scen/health-restored.json" '.voting == false' &&
     jq -r .nonVotingReason "$scen/health-restored.json" 2>/dev/null | grep -q "^restored from a persisted certificate"; then
     pass "restart: health reports voting=false: $(jq -r .nonVotingReason "$scen/health-restored.json")"
@@ -868,46 +875,87 @@ freeze_in_time() {
   [ "$n" -eq 0 ]
 }
 
-scenario_restart_at_anchor() {
-  setup_cluster || return 1
-  local log="$scen/shard/debug.log" rootLog="$scen/root/debug.log" authorityPid mark rootMark authMark n i round resumed line
-  authorityPid=$(pid_of authority)
-  # Watched from the moment the process starts: the first round is certified within about two
-  # seconds of startup. Freeze once the first request has been sent AND the certificate it followed
-  # has been saved (persistingDriver saves after the round handler, which sends): the checkpoint then
-  # predates the certificate the root is about to issue for that request.
-  start_shard || { fail "could not start the shard node"; return 1; }
-  i=0
+# freeze_after_first_submission <label>: waits, from the moment the shard process starts, for its first
+# submission and its checkpoint, freezes it (SIGSTOP), and fails unless the freeze came before the node
+# accepted the certificate for that submission. Sets frozenRound.
+#
+# The first round is certified within about two seconds of startup. persistingDriver saves the
+# checkpoint after the round handler, which has already sent: the checkpoint then predates the
+# certificate the root is about to issue for that request.
+freeze_after_first_submission() {
+  local label=$1 log="$scen/shard/debug.log" n i=0
+  frozenRound=""
   while :; do
     if n=$(count_after "$log" 0 "submitting block certification request"); then
       [ "$n" -ge 1 ] && [ -s "$scen/shard/shard-node-luc.json" ] && break
     elif [ "$i" -ge 20 ]; then
       # The log is created before the process starts, so a second of it being unreadable is a failure.
-      fail "restart-at-anchor: the shard log could not be observed while waiting to freeze"
+      fail "$label: the shard log could not be observed while waiting to freeze"
       return 1
     fi
     if [ "$i" -ge 2400 ]; then
-      fail "restart-at-anchor: no submission and checkpoint within 120s"
+      fail "$label: no submission and checkpoint within 120s"
       return 1
     fi
     sleep 0.05
     i=$((i + 1))
   done
-  signal_owned shard 'ubft shard-node run' STOP || { fail "restart-at-anchor: could not freeze the shard node"; return 1; }
+  signal_owned shard 'ubft shard-node run' STOP || { fail "$label: could not freeze the shard node"; return 1; }
   note "froze the shard node after its first submission"
-  round=$(grep -o 'msg="submitting block certification request" round=[0-9]*' "$log" | head -1 | grep -o '[0-9]*$')
-  freeze_in_time "$log" "$round"
+  frozenRound=$(grep -o 'msg="submitting block certification request" round=[0-9]*' "$log" | head -1 | grep -o '[0-9]*$')
+  freeze_in_time "$log" "$frozenRound"
   case $? in
-  0) pass "restart-at-anchor: the node was frozen after submitting round $round through the authority and before accepting its certificate" ;;
+  0) pass "$label: the node was frozen after submitting round $frozenRound and before accepting its certificate" ;;
   1)
-    fail "restart-at-anchor: the node had already accepted the certificate for round $round when it was frozen (late freeze; rerun)"
+    fail "$label: the node had already accepted the certificate for round $frozenRound when it was frozen (late freeze; rerun)"
     return 1
     ;;
   *)
-    fail "restart-at-anchor: could not establish whether the freeze was in time (round '$round', log $log)"
+    fail "$label: could not establish whether the freeze was in time (round '$frozenRound', log $log)"
     return 1
     ;;
   esac
+  return 0
+}
+
+# restart_frozen_shard <label> <start function>: kills the frozen shard, keeps its checkpoint, takes
+# marks, starts it again with the given function, and checks it resumed from a checkpoint older than
+# frozenRound. Sets mark, rootMark and resumedRound.
+restart_frozen_shard() {
+  local label=$1 starter=$2 log="$scen/shard/debug.log"
+  note "killing the frozen shard node (SIGKILL)"
+  stop_proc "$scen" shard 'ubft shard-node run' KILL
+  cp "$scen/shard/shard-node-luc.json" "$scen/checkpoint-at-restart.json" || artifact_error "could not preserve the checkpoint"
+  mark=$(take_mark "$log") || return 1
+  rootMark=$(take_mark "$scen/root/debug.log") || return 1
+  note "starting the shard node again with the same flags"
+  "$starter" || { fail "$label: could not restart the shard node"; return 1; }
+  wait_count "$log" "$mark" 1 30 "resumed from persisted certificate"
+  case $? in 1) fail "$label: the node did not resume from its checkpoint"; return 1 ;; 2) return 1 ;; esac
+  resumedRound=$(line_after "$log" "$mark" "resumed from persisted certificate" | grep -o ' round=[0-9]*' | grep -o '[0-9]*$')
+  if is_count "$resumedRound" && [ "$resumedRound" -lt "$frozenRound" ]; then
+    pass "$label: the node resumed from its checkpoint at round $resumedRound, older than the certified round $frozenRound"
+  else
+    fail "$label: the node resumed at round '$resumedRound', not older than round $frozenRound"
+    return 1
+  fi
+  # The anchor comes from the first certificate after the restart, which arrives after the resume line.
+  wait_count "$log" "$mark" 1 60 "transition=installed"
+  [ $? -eq 2 ] && return 1
+  if assert_count ge 1 "$label: the restarted process installed an anchor from the non-quiet certificate" "$log" "$mark" "transition=installed"; [ $? -eq 2 ]; then return 1; fi
+  return 0
+}
+
+# restart-at-anchor (#105 step 4): a restored process with an anchor, signing through the surviving
+# authority, signs fresh work that the root chain certifies. Its checkpoint is older than the round
+# the authority's record holds, so this also shows the older checkpoint did not lower that record.
+scenario_restart_at_anchor() {
+  setup_cluster || return 1
+  local log="$scen/shard/debug.log" rootLog="$scen/root/debug.log" authorityPid round line first reserved i ok=0
+  authorityPid=$(pid_of authority)
+  start_shard || { fail "could not start the shard node"; return 1; }
+  freeze_after_first_submission restart-at-anchor || return 1
+  round=$frozenRound
   check_shard_started || return 1
   wait_count "$rootLog" "$rootControlMark" 1 30 "reached consensus, new InputHash"
   case $? in
@@ -918,8 +966,6 @@ scenario_restart_at_anchor() {
     ;;
   *) return 1 ;;
   esac
-  if assert_none "restart-at-anchor: the root chain rejected no certification request as invalid after the control" "$rootLog" "$rootControlMark" "invalid block certification request"; [ $? -eq 2 ]; then return 1; fi
-  note "killing the frozen shard node (SIGKILL)"
   stop_proc "$scen" shard 'ubft shard-node run' KILL
   authority_status anchor-after-stop || { fail "status after stopping the shard node"; return 1; }
   if json_true "$scen/status-anchor-after-stop.json" ".generation == 1 and .reservedRound == $round and .responseRetained and (.faulted | not)"; then
@@ -927,36 +973,162 @@ scenario_restart_at_anchor() {
   else
     fail "restart-at-anchor: unexpected status: $(cat "$scen/status-anchor-after-stop.json" 2>/dev/null)"
   fi
-  cp "$scen/shard/shard-node-luc.json" "$scen/checkpoint-at-restart.json" || artifact_error "could not preserve the checkpoint"
-  mark=$(take_mark "$log") || return 1
-  rootMark=$(take_mark "$rootLog") || return 1
-  authMark=$(take_mark "$scen/authority/authority.log") || return 1
-  note "starting the shard node again with the same flags and credential"
-  start_shard || { fail "could not restart the shard node"; return 1; }
-  wait_count "$log" "$mark" 1 30 "resumed from persisted certificate"
-  case $? in 1) fail "restart-at-anchor: the node did not resume from its checkpoint"; return 1 ;; 2) return 1 ;; esac
-  resumed=$(line_after "$log" "$mark" "resumed from persisted certificate" | grep -o ' round=[0-9]*' | grep -o '[0-9]*$')
-  if is_count "$resumed" && [ "$resumed" -lt "$round" ]; then
-    pass "restart-at-anchor: the node resumed from its checkpoint at round $resumed, older than the certified round $round"
-  else
-    fail "restart-at-anchor: the node resumed at round '$resumed', not older than round $round"
-  fi
-  wait_count "$log" "$mark" 1 60 "will NOT vote until the monotonic signing record"
+  restart_frozen_shard restart-at-anchor start_shard || return 1
+
+  wait_count "$log" "$mark" 1 60 "signing only what the signing authority's record admits"
   case $? in
   0)
-    line=$(line_after "$log" "$mark" "will NOT vote until the monotonic signing record")
-    pass "restart-at-anchor: the restored gate withheld the vote: $(echo "$line" | grep -o 'restoredFromRound=[0-9]* round=[0-9]*')"
+    line=$(line_after "$log" "$mark" "signing only what the signing authority's record admits")
+    pass "restart-at-anchor: the restored process signs through the authority's record: $(echo "$line" | grep -o 'restoredFromRound=[0-9]* round=[0-9]*')"
     ;;
-  1) fail "restart-at-anchor: the restored gate was not reached within 60s" ;;
+  1)
+    fail "restart-at-anchor: the restored process did not reach signing through the authority within 60s"
+    return 1
+    ;;
   *) return 1 ;;
   esac
-  if assert_count ge 1 "restart-at-anchor: the restarted process installed an anchor from the non-quiet certificate" "$log" "$mark" "transition=installed"; [ $? -eq 2 ]; then return 1; fi
-  assert_restored "$mark" "$rootMark" "$authMark" "$authorityPid" anchor || return 1
-  if assert_none "restart-at-anchor: P-id refused nothing after the restart, so the restored gate alone withheld the vote" "$log" "$mark" "cannot prove"; [ $? -eq 2 ]; then return 1; fi
-  if health restored && json_true "$scen/health-restored.json" '.voting == false and .nonVotingReason == "restored from a persisted certificate: non-voting until the monotonic signing contract (#105) exists"'; then
-    pass "restart-at-anchor: health reports voting=false with the restored reason alone: $(jq -r .nonVotingReason "$scen/health-restored.json")"
+  if assert_none "restart-at-anchor: the refusal for a signer without a record was not applied" "$log" "$mark" "will NOT vote"; [ $? -eq 2 ]; then return 1; fi
+  wait_count "$log" "$mark" 3 120 "submitting block certification request"
+  case $? in 1) fail "restart-at-anchor: the restored node did not submit three requests within 120s"; return 1 ;; 2) return 1 ;; esac
+  if assert_count ge 3 "restart-at-anchor: the restored node signed and submitted fresh requests through the authority" "$log" "$mark" "submitting block certification request"; [ $? -eq 2 ]; then return 1; fi
+  first=$(line_after "$log" "$mark" "submitting block certification request" | grep -o ' round=[0-9]*' | grep -o '[0-9]*$')
+  if is_count "$first" && [ "$first" -gt "$round" ]; then
+    pass "restart-at-anchor: the restored node's first request is for round $first, above the round $round the authority already held"
+  else
+    fail "restart-at-anchor: the restored node's first request is for round '$first', not above round $round"
+  fi
+  wait_count "$rootLog" "$rootMark" 3 60 "reached consensus, new InputHash"
+  [ $? -eq 2 ] && return 1
+  if assert_count ge 3 "restart-at-anchor: the root chain reached consensus on the restored node's requests" "$rootLog" "$rootMark" "reached consensus, new InputHash"; [ $? -eq 2 ]; then return 1; fi
+  wait_count "$log" "$mark" 3 60 "accepted certificate" "class=valid"
+  [ $? -eq 2 ] && return 1
+  if assert_count ge 3 "restart-at-anchor: the restored node accepted valid certificates for its fresh work" "$log" "$mark" "accepted certificate" "class=valid"; [ $? -eq 2 ]; then return 1; fi
+  if assert_none "restart-at-anchor: the root chain rejected no request as invalid after the restart" "$rootLog" "$rootMark" "invalid block certification request"; [ $? -eq 2 ]; then return 1; fi
+  if assert_none "restart-at-anchor: no signing refusal after the restart" "$log" "$mark" "the certification request was not signed"; [ $? -eq 2 ]; then return 1; fi
+  if assert_none "restart-at-anchor: P-id refused nothing after the restart" "$log" "$mark" "cannot prove"; [ $? -eq 2 ]; then return 1; fi
+  authority_status anchor-after-restart || { fail "restart-at-anchor: status after the restart"; return 1; }
+  if json_true "$scen/status-anchor-after-restart.json" ".generation == 1 and .reservedRound > $round and (.faulted | not)"; then
+    reserved=$(jq -r .reservedRound "$scen/status-anchor-after-restart.json")
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      submitted_round "$reserved" && { ok=1; break; }
+      sleep 1
+    done
+    if [ "$ok" -eq 1 ]; then
+      pass "restart-at-anchor: the authority's record moved from round $round to $reserved under the same session, and the node submitted round $reserved"
+    else
+      fail "restart-at-anchor: the authority holds round $reserved, for which the node's log shows no submission"
+    fi
+  else
+    fail "restart-at-anchor: unexpected status after the restart: $(cat "$scen/status-anchor-after-restart.json" 2>/dev/null)"
+  fi
+  if health restored && json_true "$scen/health-restored.json" '.voting == true'; then
+    pass "restart-at-anchor: health reports voting=true, after the root certified the restored node's requests"
   else
     fail "restart-at-anchor: unexpected health: $(cat "$scen/health-restored.json" 2>/dev/null)"
+  fi
+  if [ "$(pid_of authority)" = "$authorityPid" ] && alive "$authorityPid"; then
+    pass "restart-at-anchor: the same authority process (pid $authorityPid) ran throughout"
+  else
+    fail "restart-at-anchor: the authority process changed or exited"
+  fi
+  return 0
+}
+
+start_local_shard() {
+  start_bg shard "$scen/shard/debug.log" shard-node run --home "$scen/shard" --executor fake \
+    --address "/ip4/127.0.0.1/tcp/$shardP2PPort" --bootnodes "$rootBoot" \
+    --trust-base "$scen/trust-base.json" --shard-conf "$scen/shard-conf-${partitionID}_0.json" \
+    --rpc-server-address "127.0.0.1:$shardRPCPort" --log-format text --log-level debug
+}
+
+# setup_local_cluster is a cluster whose shard configuration names the node's local signing key and
+# which runs no signing authority: the legacy deployment.
+setup_local_cluster() {
+  local p waited=0 rootLog="$scen/root/debug.log"
+  for p in $rootP2PPort $rootRPCPort $shardP2PPort $shardRPCPort; do
+    if port_listening "$p"; then
+      fail "port $p is already in use by another process; this run does not stop processes it did not start"
+      return 1
+    fi
+  done
+  mkdir -p "$scen/root" "$scen/shard" || { artifact_error "could not create the scenario directories"; return 1; }
+  ubft root-node init --home "$scen/root" -g >>"$scen/setup.log" 2>&1 || { fail "root-node init"; return 1; }
+  ubft trust-base generate --home "$scen" --epoch 1 --epoch-start 1 --network-id "$networkID" \
+    --node-info "$scen/root/node-info.json" >>"$scen/setup.log" 2>&1 || { fail "trust-base generate"; return 1; }
+  ubft trust-base sign --home "$scen/root" --trust-base "$scen/trust-base.json" >>"$scen/setup.log" 2>&1 || { fail "trust-base sign"; return 1; }
+  ubft shard-node init --home "$scen/shard" -g >>"$scen/setup.log" 2>&1 || { fail "shard-node init"; return 1; }
+  ubft shard-conf generate --home "$scen" --network-id "$networkID" --partition-id "$partitionID" --partition-type-id "$partitionID" \
+    --shard-id 0x80 --epoch-start 1 --t2-timeout "$t2Millis" --partition-params "proof_type=exec,chain_id=31337" \
+    --node-info "$scen/shard/node-info.json" >>"$scen/setup.log" 2>&1 || { fail "shard-conf generate"; return 1; }
+  if conf_t2_ok "$scen/shard-conf-${partitionID}_0.json"; then
+    pass "the shard configuration's T2 is ${t2Millis}ms, at least the 5000ms floor for test lanes"
+  else
+    fail "the shard configuration's T2 is not ${t2Millis}ms at or above the 5000ms floor"
+    return 1
+  fi
+  start_bg root "$rootLog" root-node run --home "$scen/root" --address "/ip4/127.0.0.1/tcp/$rootP2PPort" \
+    --trust-base "$scen/trust-base.json" --rpc-server-address "127.0.0.1:$rootRPCPort" --log-format text --log-level debug ||
+    { fail "could not start the root node"; return 1; }
+  until port_listening "$rootRPCPort"; do
+    if ! alive "$(pid_of root)" || [ "$waited" -ge 30 ]; then
+      fail "the root node did not start: $(tail -3 "$rootLog" 2>/dev/null)"
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  logcmd curl -X PUT -H "Content-Type: application/json" -d "@$scen/shard-conf-${partitionID}_0.json" "http://127.0.0.1:$rootRPCPort/api/v1/configurations"
+  curl -fsS -X PUT -H "Content-Type: application/json" -d "@$scen/shard-conf-${partitionID}_0.json" \
+    "http://127.0.0.1:$rootRPCPort/api/v1/configurations" >>"$scen/setup.log" 2>&1 || { fail "registering the shard configuration"; return 1; }
+  rootBoot="/ip4/127.0.0.1/tcp/$rootP2PPort/p2p/$(ubft node-id --home "$scen/root" | tail -n1)" ||
+    { fail "could not record or read the root node identity"; return 1; }
+  sleep 5 # wait_for_root_chain_settle in helper.sh explains this
+  rootControlMark=0
+  return 0
+}
+
+# local-restart-at-anchor: the same restart with the local signing key and no authority. The restored
+# process passes P-id and is stopped by the restored refusal, which step 4 keeps for every signer that
+# does not keep an independent record.
+scenario_local_restart_at_anchor() {
+  setup_local_cluster || return 1
+  local log="$scen/shard/debug.log" rootLog="$scen/root/debug.log" line
+  start_local_shard || { fail "could not start the shard node"; return 1; }
+  freeze_after_first_submission local-restart-at-anchor || return 1
+  if assert_count ge 1 "local-restart-at-anchor: the node signs with its local key" "$log" 0 'certificationSigning="local key"'; [ $? -eq 2 ]; then return 1; fi
+  wait_count "$rootLog" 0 1 30 "reached consensus, new InputHash"
+  case $? in
+  0) pass "local-restart-at-anchor: the root chain reached consensus on the locally signed request for round $frozenRound" ;;
+  1)
+    fail "local-restart-at-anchor: the root chain reached no consensus on round $frozenRound"
+    return 1
+    ;;
+  *) return 1 ;;
+  esac
+  restart_frozen_shard local-restart-at-anchor start_local_shard || return 1
+  wait_count "$log" "$mark" 1 60 "will NOT vote"
+  case $? in
+  0)
+    line=$(line_after "$log" "$mark" "will NOT vote")
+    pass "local-restart-at-anchor: the restored refusal withheld the vote: $(echo "$line" | grep -o 'restoredFromRound=[0-9]* round=[0-9]*')"
+    ;;
+  1)
+    fail "local-restart-at-anchor: the restored refusal was not reached within 60s"
+    return 1
+    ;;
+  *) return 1 ;;
+  esac
+  wait_count "$log" "$mark" 4 120 "accepted certificate"
+  [ $? -eq 2 ] && return 1
+  if assert_count ge 4 "local-restart-at-anchor: the restored node kept following the shard" "$log" "$mark" "accepted certificate"; [ $? -eq 2 ]; then return 1; fi
+  if assert_none "local-restart-at-anchor: P-id refused nothing after the restart, so the restored refusal alone withheld the vote" "$log" "$mark" "cannot prove"; [ $? -eq 2 ]; then return 1; fi
+  if assert_none "local-restart-at-anchor: the restored node submitted no certification request" "$log" "$mark" "submitting block certification request"; [ $? -eq 2 ]; then return 1; fi
+  if assert_none "local-restart-at-anchor: the root chain reached no consensus after the restart" "$rootLog" "$rootMark" "reached consensus, new InputHash"; [ $? -eq 2 ]; then return 1; fi
+  if assert_none "local-restart-at-anchor: the authority path was not taken" "$log" "$mark" "signing only what the signing authority's record admits"; [ $? -eq 2 ]; then return 1; fi
+  if health restored && json_true "$scen/health-restored.json" '.voting == false and .nonVotingReason == "restored from a persisted certificate: this signer keeps no independent signing record, so this process does not vote (#105)"'; then
+    pass "local-restart-at-anchor: health reports voting=false: $(jq -r .nonVotingReason "$scen/health-restored.json")"
+  else
+    fail "local-restart-at-anchor: unexpected health: $(cat "$scen/health-restored.json" 2>/dev/null)"
   fi
   return 0
 }
@@ -977,6 +1149,7 @@ run_scenarios() {
     authority-loss) scenario_authority_loss ;;
     restart) scenario_restart ;;
     restart-at-anchor) scenario_restart_at_anchor ;;
+    local-restart-at-anchor) scenario_local_restart_at_anchor ;;
     *) false ;;
     esac
     rc=$?
@@ -1256,10 +1429,10 @@ while getopts "hs:o:" o; do
     ;;
   esac
 done
-[ ${#scenarios[@]} -eq 0 ] && scenarios=(fencing authority-loss restart restart-at-anchor)
+[ ${#scenarios[@]} -eq 0 ] && scenarios=(fencing authority-loss restart restart-at-anchor local-restart-at-anchor)
 for s in "${scenarios[@]}"; do
   case "$s" in
-  fencing | authority-loss | restart | restart-at-anchor) ;;
+  fencing | authority-loss | restart | restart-at-anchor | local-restart-at-anchor) ;;
   *)
     echo "unknown scenario: $s" >&2
     exit 2

@@ -216,8 +216,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 		return fmt.Errorf("creating shard node: %w", err)
 	}
 	if signing.authority != nil {
-		// Before Run, and before anything else is attached. The restored non-voting gate is part of
-		// the node already and still applies ahead of this signer.
+		// Before Run, and before anything else is attached. P-id still applies ahead of this signer. A
+		// node resumed from its checkpoint signs only through this signer's authority record; with the
+		// local key it stays non-voting (#105 step 4).
 		node.SetCertificationSigner(signing.authority)
 	}
 

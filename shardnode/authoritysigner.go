@@ -64,6 +64,25 @@ type authoritySigner struct {
 	authorityKey abcrypto.Verifier
 }
 
+/*
+recordKeepingSigner is a CertificationSigner whose every signature is admitted by an independent
+signing record: the authority's, which refuses a lower assigned round, refuses different bytes for the
+round it holds, and answers identical bytes with the one response it retained (#105 step 4).
+
+It is sealed on purpose. The method is unexported, so only this package can implement it, and only
+authoritySigner does. A restored Round signs through a signer only if it has this property (see
+Round.abstainRestored); a local key, a test double or a wrapper does not have it and cannot claim it.
+What the property does not include, and what each request establishes for itself: that the credential
+is current, that the authority still holds the key of its lifetime, that the request authenticates,
+and that the response verifies under the configured key.
+*/
+type recordKeepingSigner interface {
+	CertificationSigner
+	signsOnlyWhatAnIndependentRecordAdmits()
+}
+
+func (a *authoritySigner) signsOnlyWhatAnIndependentRecordAdmits() {}
+
 func (a *authoritySigner) Sign(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord, proposed *certification.BlockCertificationRequest) (*certification.BlockCertificationRequest, error) {
 	if proposed == nil {
 		return nil, fmt.Errorf("shardnode: no proposal to sign")
