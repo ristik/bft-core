@@ -495,6 +495,40 @@ func TestRestoredVotingThroughAnIndependentAuthority(t *testing.T) {
 		require.Zero(t, seals, "and a node that fails P-id does not lead")
 
 		require.False(t, c.auth.mustStatus().HasReservation, "the authority was asked for nothing")
+
+		// The same two checks for a restored FOLLOWER. A leader that fails P-id stops at the leadership
+		// check before Build; a follower awaits the leader's block and reaches the vote-level P-id
+		// verdict, which must also come before the authority.
+		followerCert5, followerTR6 := c.certificateLedBy(5, 41, 6, followerLeader)
+		followerCert6, followerTR7 := c.certificateLedBy(6, 42, 7, followerLeader)
+		leaders := leaderBlock{block: Block{Number: 5, Hash: c.blockHash, StateRoot: c.stateRoot, ParentHash: c.blockHash}}
+		follower := func(exec *changingExecutor) (*Round, *countingSubmitter, *countingClient) {
+			sub := &countingSubmitter{}
+			round := NewRound(restoredNodeID, authPartitionID, types.ShardID{}, exec, leaders, nil, sub, nil)
+			round.SetHealth(NewHealth())
+			client := c.auth.client(credential)
+			signer, err := NewAuthoritySigner(client, c.auth.verifier)
+			require.NoError(t, err)
+			round.SetCertificationSigner(signer)
+			c.restore(round, checkpoint)
+			return round, sub, client
+		}
+
+		wrongFollower := &changingExecutor{steadyExecutor: steadyExecutor{head: BlockRef{Number: 5, Hash: bytes.Repeat([]byte{0xcc}, 32), StateRoot: c.stateRoot}}}
+		round, sub, client := follower(wrongFollower)
+		require.NoError(t, round.HandleCertificate(ctx, followerCert5, followerTR6))
+		require.NoError(t, round.HandleCertificate(ctx, followerCert6, followerTR7))
+		require.Zero(t, client.Calls(), "a restored follower on the wrong block does not reach the authority")
+		require.Empty(t, sub.rounds())
+		require.False(t, c.auth.mustStatus().HasReservation)
+
+		// Positive control: the same follower fixture on the certified block reaches the authority and
+		// signs, so the case above was stopped by P-id and not by the fixture.
+		round, sub, client = follower(c.executorOnCertifiedBlock())
+		require.NoError(t, round.HandleCertificate(ctx, followerCert5, followerTR6))
+		require.NotZero(t, client.Calls())
+		require.Equal(t, []uint64{6}, sub.rounds(), "a restored follower on the certified block signs through the authority")
+		require.NoError(t, sub.requests()[0].IsValid(c.auth.verifier))
 	})
 
 	t.Run("the local key keeps the blanket restored refusal", func(t *testing.T) {
@@ -631,6 +665,35 @@ func TestRestoredVotingThroughAnIndependentAuthority(t *testing.T) {
 		require.False(t, c.auth.mustStatus().EnrollmentComplete)
 	})
 }
+
+// followerLeader is the validator that leads the rounds in the follower cases, so that the restored
+// node under test follows: it awaits the leader's block instead of building one, and so reaches the
+// vote-level P-id verdict rather than the leadership check that precedes Build.
+const followerLeader = "another-validator"
+
+// certificateLedBy is certificate with a technical record naming another leader.
+func (c *restoreChain) certificateLedBy(round, rootRound, next uint64, leader string) (*types.UnicityCertificate, *certification.TechnicalRecord) {
+	t := c.t
+	t.Helper()
+	zero := make([]byte, 32)
+	tr := &certification.TechnicalRecord{Round: next, Epoch: 0, Leader: leader, StatHash: zero, FeeHash: zero}
+	var ir *types.InputRecord
+	if round <= 5 {
+		ir = &types.InputRecord{Version: 1, RoundNumber: round, PreviousHash: c.prevState, Hash: c.stateRoot, BlockHash: c.blockHash, SummaryValue: []byte{}, Timestamp: 1}
+	} else {
+		ir = &types.InputRecord{Version: 1, RoundNumber: round, PreviousHash: c.stateRoot, Hash: c.stateRoot, SummaryValue: []byte{}, Timestamp: 1}
+	}
+	trHash, err := tr.Hash()
+	require.NoError(t, err)
+	return testcertificates.CreateUnicityCertificate(t, c.rootSigner, ir, c.auth.conf, rootRound, zero, trHash), tr
+}
+
+// leaderBlock is a Disseminator that hands a follower the leader's block for any round: a quiet block
+// on the certified state, as the leader of an idle round would publish.
+type leaderBlock struct{ block Block }
+
+func (d leaderBlock) Publish(context.Context, uint64, Block) error { return nil }
+func (d leaderBlock) Await(context.Context, uint64) (Block, error) { return d.block, nil }
 
 // signerFunc adapts a function to CertificationSigner, for the lost-response step only.
 type signerFunc func(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord, proposed *certification.BlockCertificationRequest) (*certification.BlockCertificationRequest, error)
