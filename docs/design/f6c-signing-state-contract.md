@@ -156,7 +156,7 @@ separate; an unchanged executor head cannot advance or rewind the signing cursor
 
 | Transition | In-memory authority state / response |
 |---|---|
-| Enroll fresh authority lifetime | Generate non-exported key; fix enrollment in memory before returning its public key. No existing-key import or bootstrap from UC history. |
+| Enroll fresh authority lifetime | Generate non-exported key; fix enrollment in memory before returning its public key, except the shard configuration hash. That hash commits to the validators' signing keys, including this one, so it is stated once afterwards from a configuration the authority checks names its own key, and no session exists before then (amended 2026-09-13; see "Deployment wiring, before step 4" in §8). No existing-key import or bootstrap from UC history. |
 | Replace shard client | Operator-authenticated control operation increments generation atomically; old tokens cannot reserve/sign/release new work. Client cannot mint a generation. |
 | Validate request | Check enrollment, client generation, authenticated context and size; no journal mutation on refusal. |
 | Reserve new higher round | Serialize compare-and-reserve; retain the full preimage, new round and metadata atomically before invoking signing. Lower rounds become refused even if no signature was ever produced. |
@@ -543,6 +543,98 @@ is converted, and the restored non-voting gate is untouched. The shard node's ow
 session argument in this change, because a shard process that talks to an authority holds a
 credential rather than a token, and binding a session is the local adapter's job
 (`signingauthority.NewLocalClient`).
+
+### Deployment wiring, before step 4
+
+Step 4 needs an authority an operator can start and a shard node that can be pointed at it. This
+section is that wiring. It changes one enrollment rule, by owner decision on 2026-09-13, because the
+rule as first written could not be deployed.
+
+**Enrollment is completed after the key exists.** The shard configuration hash that every
+certificate commits to covers each validator's `SigKey`, and the root chain verifies a validator's
+certification requests under that key. The authority generates its key in `New`, and §5 fixed the
+enrollment, hash included, before the public key was returned. So no configuration naming an
+authority's key could exist when that authority was enrolled, and an authority enrolled for any
+existing configuration signed under a key that configuration does not name. The two-phase rule
+resolves this without taking a hash from the operator:
+
+- An enrollment without a `ShardConfHash` is pending. The authority generates its key, publishes the
+  public half through the operator endpoint, and admits nothing: `ReplaceSession` and `Authenticate`
+  refuse with `signing-enrollment-incomplete`, so no client credential exists yet.
+- `CompleteEnrollment`, on the operator endpoint only, carries the whole configuration. The authority
+  checks that it is valid, that it is for the enrolled network, partition, shard and shard epoch,
+  and that it names the enrolled node with this authority's own public key. Only then does it compute
+  the hash and fix it. A refused completion changes nothing, and the reason is logged by the
+  authority process, since the operator's client receives only the refusal name.
+- A second completion is refused (`signing-context-mismatch`), including one with the same
+  configuration, so the enrollment cannot be moved to another configuration within a lifetime.
+- An enrollment given a hash at `New` is complete from the start. That hash was computed before the
+  key existed, so a configuration with that hash cannot name the key, and anything signed under it
+  fails the root chain's check. It remains for in-process use and fixtures; the command below never
+  uses it.
+
+**The authority command.** `ubft signing-authority run` generates the key and serves the client and
+operator sockets, each claimed as before. Every enrollment field is a required flag, including the
+shard epoch and root epoch, whose zero values are meaningful and therefore not defaults. No flag names
+a key, a key file or a seed. The trust base must be for the enrolled network and root epoch. The
+operator commands reach the authority only through the operator socket with the operator credential:
+
+- `credential` creates an operator credential file and does not overwrite an existing one.
+- `node-info` writes the enrolled node ID with the authority's public key, which is what
+  `shard-conf generate --node-info` takes. The node info `shard-node init` writes names the key
+  configuration's own signing key, which the authority does not hold, and a configuration generated
+  from it is refused by both sides. An existing node-info file is not overwritten, because a file
+  from an earlier authority lifetime names a key that no longer exists.
+- `complete-enrollment` sends the configuration; `replace-session` writes the client credential by
+  renaming a new file over the old one, and the previous credential is fenced in the same step;
+  `status` prints the enrollment and the record's state, without request bytes or credentials.
+
+Credential files are hex text of `CredentialBytes`, created readable by the owner only, and refused
+when other users can read them.
+
+**The shard node.** `shard-node run --signing-authority-socket ... --signing-authority-credential ...`
+selects the authority signer at startup, before anything else is built. What the shard side trusts
+comes from its own configuration:
+
+- The key responses must verify under is the one the shard configuration names for this node's ID,
+  the same key the root chain uses. It is never read from the authority.
+- A configuration naming the key configuration's own signing key is refused, as is a configuration
+  that does not name this node.
+- No local signer is constructed. `shardnode.New` receives none, and `LocalKeySigner` refuses to sign
+  without a key rather than panicking, so there is no local key for the round to fall back to.
+- The node holds the client credential only. The operator credential is not a flag of this command.
+- An authority flag without the socket is refused, so a mistyped deployment does not start signing
+  with the local key.
+- One authority operation is bounded by the shard's T2 unless `--signing-authority-timeout` says
+  otherwise, because a signature arriving after T2 is of no use to that round.
+
+The key configuration is not converted. Its authentication key remains the node's libp2p identity
+and node ID, and its signing key stays in the file, unused while an authority is configured.
+
+**What this does not change.** Without the new flags a shard node signs with its local key exactly as
+before, so no existing deployment changes behaviour. The restored non-voting gate is untouched: a
+node resumed from a persisted certificate still requests no signature, with or without an authority,
+and step 4 remains the only step that may replace it. The transport is still a local Unix socket, so
+§3's host separation remains the operator's to provide; nothing here carries the socket between
+hosts. Stopping the authority loses its key, as §1 states. An authority's key reaches a validator set
+only through a newly generated shard configuration, which needs the separately authorized fresh
+genesis or assignment of §1 and Q3; this wiring authorizes neither, and replaces no existing
+validator's key.
+
+**What the tests establish.** In `signingauthority`: a pending authority issues no session and
+authenticates nothing; completion checks node, key, network, partition, shard epoch and validity, a
+refusal leaves it completable, and completion does not reopen; a request under the completed
+configuration is reserved, signed and released, and the response verifies under the key that
+configuration names. Across the service boundary: the refusal name crosses the wire, the client
+endpoint does not serve completion, and the same exchange completes. In the CLI, the deployment order
+runs with the real commands: an authority started by `run` in its own goroutine, a second `run` on
+its sockets refused, `replace-session` refused while pending, `node-info` feeding `shard-conf
+generate`, a configuration from the local node info refused, completion, a client credential, and a
+shard-side signer built by the same function `shard-node run` uses. Its response verifies under the
+configured key and not under the key configuration's key; replacing the session fences it; stopping
+the authority makes it unavailable. The selection rules have their own cases. The tests do not run
+the `shard-node run` binary against an authority, so the two lines in `shardNodeRun` that pass no
+local signer and install the authority signer are checked by review rather than by a test.
 
 #105 closes only after all four steps and independent review. #14 still owns
 atomic block/UC/TR persistence; changing that format requires rechecking the R2/R3

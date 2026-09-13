@@ -31,6 +31,14 @@ type Enrollment struct {
 	// NetworkID, PartitionID, ShardID, ShardEpoch and ShardConfHash are the shard identity. The
 	// network is checked against the authority's provisioned trust base rather than against anything
 	// a requester says, because the legacy preimage carries no network identifier.
+	//
+	// ShardConfHash is the one field that may be absent at New, and in a deployment it must be. The
+	// hash commits to the validators' signing keys, and one of those is the key New is about to
+	// generate, so no configuration naming it can exist yet. An authority enrolled without the hash
+	// is pending: it generates its key and publishes the public half, and admits nothing until
+	// CompleteEnrollment states the configuration, once, after checking that it names this
+	// authority's own key for the enrolled node. A hash given at New was necessarily computed
+	// before this key existed, so a configuration with that hash cannot name this key.
 	NetworkID     types.NetworkID
 	PartitionID   types.PartitionID
 	ShardID       types.ShardID
@@ -69,13 +77,15 @@ func (e Enrollment) validate() error {
 		return errors.New("enrollment has no partition id")
 	case e.RootEpoch == nil:
 		return errors.New("enrollment states no root epoch, and this profile freezes on a root-epoch transition rather than accepting whichever epoch arrives")
-	case len(e.ShardConfHash) == 0:
-		return errors.New("enrollment has no shard configuration hash, so a certificate's configuration could not be checked")
 	case e.Profile != ProfileLegacyBCRv1:
 		return fmt.Errorf("%w: signing profile %q, this implementation offers only %q", ErrUnsupportedVersion, e.Profile, ProfileLegacyBCRv1)
 	}
 	return nil
 }
+
+// complete reports whether the shard configuration has been stated. An enrollment without it is
+// pending, and an authority with a pending enrollment admits nothing (see CompleteEnrollment).
+func (e Enrollment) complete() bool { return len(e.ShardConfHash) != 0 }
 
 // clone copies the mutable bytes, so neither the caller's slice nor a later reader of Enrollment can
 // change what this authority enforces.

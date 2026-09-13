@@ -167,6 +167,13 @@ func (n *Node) SetMetrics(m *Metrics) {
 	n.round.SetMetrics(m)
 }
 
+// SetCertificationSigner routes this node's certification requests through the given signer. Call
+// after New, before Run. See Round.SetCertificationSigner: it is an explicit deployment step, the
+// restored non-voting gate still applies ahead of it, and a refusal is an abstention.
+func (n *Node) SetCertificationSigner(s CertificationSigner) {
+	n.round.SetCertificationSigner(s)
+}
+
 // Health returns this node's live status snapshot — see health.go. Always
 // non-nil; wire it into an HTTP handler to expose it (see
 // cli/ubft/cmd/shard_node_run.go).

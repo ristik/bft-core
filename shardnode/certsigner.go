@@ -45,6 +45,11 @@ func (l localKeySigner) Sign(_ context.Context, _ *types.UnicityCertificate, _ *
 	if proposed == nil {
 		return nil, fmt.Errorf("shardnode: no proposal to sign")
 	}
+	if l.signer == nil {
+		// A node started for a signing authority is given no local key, so this signer is never the
+		// one installed there. Refusing is what keeps a wiring mistake from becoming a panic.
+		return nil, fmt.Errorf("shardnode: this node holds no local signing key")
+	}
 	signed := *proposed
 	if err := signed.Sign(l.signer); err != nil {
 		return nil, fmt.Errorf("signing certification request: %w", err)
