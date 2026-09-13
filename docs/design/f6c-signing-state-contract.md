@@ -752,6 +752,74 @@ request for the same round, or an old checkpoint against the authority's record.
 step 4, which must connect restored signing to P-id and to the authority's record and session
 guarantees, and which remains gated.
 
+### The signing record across processes, before step 4
+
+The acceptance lane above does not put identical or conflicting requests for one assigned round, or a
+race between client instances and a session replacement, through the process boundary.
+`TestSigningRecordAtTheProcessBoundary` in `cli/ubft/cmd` does, without a root chain or a shard node.
+
+**What runs.** Each authority is `ubft signing-authority run`, built from the checkout and started as
+its own process, enrolled with the real `credential`, `node-info`, `shard-conf generate` (T2 5000ms)
+and `complete-enrollment` commands; sessions are replaced with the real `replace-session` command.
+Each client is a separate process as well: the test binary re-executed with a job file, holding a
+socket path and a client credential and nothing else, and using `service.Client`. Every request is a
+valid authenticated input: a certificate signed by the root key of the authority's trust base under
+the configuration that names the authority's key, the technical record it binds, and a proposal for
+that assignment. Every released response is decoded and verified under the enrolled key, and must be
+the reserved proposal.
+
+**Identical requests.** A second client instance with the same credential, repeated releases (by the
+reservation and by the request's own round and digest), and a different root authorization for the
+same assigned round whose proposal bytes are identical all receive the retained signed bytes. They
+receive no new signature: one signature for round 6 answered eight releases from three client
+processes and two root authorizations.
+
+**Conflicting requests.** A different proposal under the same authorization and a different root
+authorization whose bytes differ are refused with `signing-conflict`; a lower assigned round is refused
+with `signing-stale`. A release naming the refused request's own digest obtains nothing, and the
+original response stays retained, byte for byte. To show that these refusals are the record's
+decisions and not authentication failures, fresh authority processes admit and sign each of the
+refused requests when it is the first request they see for its round, and then refuse the request
+that was admitted first above.
+
+**Races.**
+
+- Two client processes with the same credential, one proposing `x` and one `y` for round 6, start
+  together and run 40 exchanges each; their exchange times overlap. Exactly one proposal is ever
+  reserved and released, as one signature, and every exchange of the other is `signing-conflict`. Two
+  processes racing identical requests for round 7 release one signature between 80 exchanges.
+- An old client instance loops on round 6 while the operator runs `replace-session`; a marker written
+  after that command returns separates exchanges that began after the old session ended. In the
+  recorded run the old instance made 70 exchanges before the marker and 1622 after, every one of the
+  latter fenced. The new instance made 1308 exchanges, all admitted, each releasing the signature
+  issued to the old instance before it was fenced, and the status keeps generation 2 with round 6
+  retained. As a positive control, the current credential then completes round 7, and the old
+  credential is fenced on the same request.
+- Two concurrent `replace-session` processes each succeed; exactly one of their credentials is
+  admitted, and it completes round 7.
+
+Teardown is bounded: each authority gets SIGTERM and then SIGKILL after five seconds, and any client
+still running is killed. `BFT_F6C_PROCESS_EVIDENCE` keeps each lane's commands, authority log, client
+jobs and results.
+
+**Which guard is exercised.** Removing one runtime guard at a time fails the test for a conflicting
+reservation that overwrites the round, a release that ignores the digest, a lower round admitted, and a
+`Sign` that signs again after retention. Removing only the authority's generation comparison in
+`admitLocked` does not fail it, because across the transport the server's `sessionFor` refuses any
+credential other than the current one before the authority is asked; removing the server's check,
+with or without the authority's, fails both fencing cases. At this boundary the generation comparison
+is therefore a second guard, tested in process by the authority's own tests.
+
+**Recorded run.** Revision `a17951fd`, clean worktree, macOS x86_64, Go 1.27.1: all five scenarios
+passed, and three further repetitions passed. No runtime code changed.
+
+**What this does not show.** It uses no root chain and no shard node, so it says nothing about the
+round's use of these answers (that is step 3's wiring and the restored gate). The authority and the
+clients share one host and a Unix socket, so host, backup and snapshot isolation remain the private
+test deployment's to state and supply. The restored non-voting gate is unchanged. The P-id and
+restored-voting integration, with old-checkpoint, restart, key-loss and concurrent-instance
+acceptance, remains a separate reviewed change.
+
 #105 closes only after all four steps and independent review. #14 still owns
 atomic block/UC/TR persistence; changing that format requires rechecking the R2/R3
 cold-start equivalences in #92's ledger. No new Engine methods, reth changes, root
