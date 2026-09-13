@@ -689,33 +689,53 @@ of a local fallback is observed from outside the node.
 restarted node depends on what the restarted process observes.
 
 - `restart`: after the positive control the node is stopped with SIGTERM and started again with the
-  same flags and credential. It resumes from its checkpoint, follows the shard, submits nothing and
-  never calls the signer. The check that refuses first is P-id, with `no-anchor`: the fake executor
-  produces no non-quiet round after genesis, so the restarted process observes no certificate that
-  names a block. The restored gate is not reached in this scenario, although the health reason names
-  the restored state first.
+  same flags and credential. It resumes from its checkpoint and follows the shard. Its log shows no
+  submission and no signing refusal. The check that refuses first is P-id, with `no-anchor`: the fake
+  executor produces no non-quiet round after genesis, so the restarted process observes no
+  certificate that names a block. The restored gate is not reached in this scenario, although the
+  health reason names the restored state first.
 - `restart-at-anchor`: the node is frozen with SIGSTOP once its first authority-signed request has
   been sent and its checkpoint written, and then killed with SIGKILL. The root certifies that round
-  (round 2) while the checkpoint still holds the round-0 certificate. The restarted process resumes
-  from round 0, installs an anchor from the non-quiet round-2 certificate, passes P-id, and is stopped
-  by the restored gate itself (`restoredFromRound=0`). Health gives the restored reason alone. The
-  freeze has to reach the process before it accepts the certificate for its own request, and the
-  script fails the scenario when it did not. The freeze was in time in the recorded run and in three
-  repeats. An earlier trial, which started watching only after a two-second startup wait, was late
-  and failed as intended.
+  while the checkpoint still holds the earlier round-0 certificate. The restarted process resumes from
+  round 0, installs an anchor from the non-quiet certificate for its own request, passes P-id, and is
+  stopped by the restored gate itself (`restoredFromRound=0`). Health gives the restored reason alone.
+  The freeze has to reach the process before it accepts the certificate for its own request, and the
+  script fails the scenario when it did not. An earlier trial, which started watching only after a
+  two-second startup wait, was late and failed as intended.
 
 In both scenarios the authority status is identical before and after the restart (enrollment,
 configuration hash, session generation 1, reserved round and retained response), the same authority
-process runs throughout, and it refuses no operation. The shard restart changed nothing in the
-authority's record or session. The restored non-voting gate is unchanged.
+process runs throughout, and its log shows no refused operation. The shard restart changed nothing in
+the authority's record or session that its status reports. What is measured is the node's log (no
+submission, no signing refusal) and the authority's status. That the restarted node did not call the
+signer at all is an inference from the code path, where P-id and the restored gate both return before
+`CertificationSigner.Sign`; a successful identical retry would leave the same observations. The
+restored non-voting gate is unchanged.
 
-**Recorded run.** Revision `cfb132b4` with a clean worktree passed all four scenarios: fencing with 25
-assertions, authority loss with 24, restart with 27 and restart-at-anchor with 25. The evidence
-directory holds a manifest (revision, binary digest, Go version, host, ports and T2), every command as
-run, process start and stop records with PIDs, the logs, the status and health snapshots, and a digest
-list. Credential and key files are removed after every process has stopped. Cleanup signals only the
-PIDs the run recorded, after `owned_pid` confirms each command and working directory. The run is
-repeated with `scripts/f6c-authority-acceptance.sh` and writes under `evidence-runs/`.
+**How the lane fails.** A log that is missing, unreadable, or shorter than the mark a window was
+measured from is a failed observation and fails its scenario; it is never read as a count of zero. A
+negative assertion also requires its window to contain at least one line. A failure to write evidence
+(the evidence directory, a pid file, the run or command log, a summary, the list of removed secrets, a
+secret that could not be removed, the manifest or the digest list) fails the verdict, and so does a
+scenario that stops early. The exit status and the final RESULT line are the verdict.
+`scripts/f6c-authority-acceptance.sh --self-test` drives these paths with the real functions and no
+processes, including a root log that disappears or is truncated after its mark, missing status
+snapshots, and injected write failures through the real cleanup and verdict. Removing each guard in
+turn fails the self-test in 15 of 16 cases. The remaining one, the root-mark check in the abstention
+assertion, is redundant with the later root-log assertion, which fails closed on the empty mark.
+
+**Recorded run.** Revision `7b797b28` with a clean worktree and T2 5000ms (checked against the generated
+configuration) passed all four scenarios: fencing with 27 assertions, authority loss with 26, restart
+with 29 and restart-at-anchor with 27. The evidence directory holds a manifest (revision, binary digest,
+Go version, host, ports and T2), every command as run, process start and stop records with PIDs, the
+logs, the status and health snapshots, and a digest list that includes the manifest. Credential and key
+files are removed after every process has stopped. Cleanup signals only the PIDs the run recorded, after
+`owned_pid` confirms each command and working directory. The run is repeated with
+`scripts/f6c-authority-acceptance.sh` and writes under `evidence-runs/`.
+
+An earlier run at revision `cfb132b4` used T2 3000ms, below the 5000ms floor for test lanes, with the
+harness before the fail-closed repairs. It passed the same four scenarios and remains earlier evidence
+at that setting; it does not stand in for the run above.
 
 **What this does not show.** The lane has one validator and the fake executor, and no reth. The
 authority and the shard node run on one host and reach each other over a local Unix socket, so it says
