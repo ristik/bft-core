@@ -77,6 +77,11 @@ func (s Session) Generation() uint64 { return s.generation }
 // fingerprint. An enrollment that names a signing key is refused rather than honoured, because the
 // only way to hold a key here is to have generated it (Q3: existing exported keys are not silently
 // imported and are given no reconstructed signing history).
+//
+// An enrollment without a ShardConfHash is pending, and that is how a deployment starts one: the
+// configuration that names this key cannot exist before the key does. The public key is available
+// at once, the configuration is stated afterwards with CompleteEnrollment, and every other field is
+// fixed here.
 func New(enroll Enrollment, trust TrustBases) (*Authority, error) {
 	if len(enroll.SigningKeyFingerprint) != 0 {
 		return nil, errors.New("signingauthority: enrollment names a signing key, and this profile has no key-import path: it generates a key per authority lifetime")
@@ -155,6 +160,11 @@ func (a *Authority) ReplaceSession() (Session, error) {
 	if a.state != healthActive {
 		return Session{}, fmt.Errorf("%w: this authority has latched faulted", ErrStateUntrusted)
 	}
+	if !a.enroll.complete() {
+		// No client is admitted to an authority that cannot yet say which configuration it signs
+		// for. Issuing a session first would hand out a credential for work that is refused anyway.
+		return Session{}, fmt.Errorf("%w: no session is issued before the shard configuration is stated", ErrEnrollmentIncomplete)
+	}
 	if a.generation == math.MaxUint64 {
 		// Exhaustion disables admission rather than wrapping: a wrapped generation would admit a
 		// token that was fenced long ago (§5).
@@ -163,6 +173,84 @@ func (a *Authority) ReplaceSession() (Session, error) {
 	}
 	a.generation++
 	return Session{authority: a.instance, generation: a.generation}, nil
+}
+
+/*
+CompleteEnrollment states the shard configuration of a pending authority, once.
+
+The configuration hash a certificate commits to covers every validator's signing key, and this
+authority generated its key in New, so the configuration naming that key can only be written after
+New has returned. This is the step that closes that gap, and it is deliberately narrow:
+
+  - It is accepted only while the enrollment is pending. A second call is refused, including one with
+    the same configuration: enrollment is not reopened within an authority lifetime, and a caller
+    that could restate it could move the authority to another configuration.
+  - The authority checks the configuration against its own state rather than taking a hash from the
+    operator. It must be a valid configuration for the enrolled network, partition, shard and shard
+    epoch, and it must name the enrolled node with THIS authority's signing public key. A
+    configuration that names the node with another key describes a validator this authority cannot
+    sign for.
+  - The hash is computed here, from the configuration that passed those checks, and becomes the
+    enrolled ShardConfHash. From then on it is immutable like every other enrollment field.
+
+Nothing is admitted before this succeeds: ReplaceSession and Authenticate refuse with
+ErrEnrollmentIncomplete. A refused completion changes nothing, so the operator can correct the
+configuration and try again.
+*/
+func (a *Authority) CompleteEnrollment(conf *types.PartitionDescriptionRecord) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.signer == nil {
+		return fmt.Errorf("%w: this authority has no key for %s", ErrKeyLost, a.enroll.NodeID)
+	}
+	if a.state != healthActive {
+		return fmt.Errorf("%w: this authority has latched faulted", ErrStateUntrusted)
+	}
+	enroll := a.enroll
+	if enroll.complete() {
+		return fmt.Errorf("%w: the enrollment is already complete for shard configuration %x and is not reopened", ErrContextMismatch, enroll.ShardConfHash)
+	}
+	if conf == nil {
+		return fmt.Errorf("%w: no shard configuration", ErrContextMismatch)
+	}
+	if err := conf.IsValid(); err != nil {
+		return fmt.Errorf("%w: the shard configuration is not valid: %w", ErrContextMismatch, err)
+	}
+	switch {
+	case conf.NetworkID != enroll.NetworkID:
+		return fmt.Errorf("%w: shard configuration is for network %d, this authority is enrolled for %d", ErrContextMismatch, conf.NetworkID, enroll.NetworkID)
+	case conf.PartitionID != enroll.PartitionID:
+		return fmt.Errorf("%w: shard configuration is for partition %d, this authority is enrolled for %d", ErrContextMismatch, conf.PartitionID, enroll.PartitionID)
+	case !conf.ShardID.Equal(enroll.ShardID):
+		return fmt.Errorf("%w: shard configuration is for shard %s, this authority is enrolled for %s", ErrContextMismatch, conf.ShardID, enroll.ShardID)
+	case conf.Epoch != enroll.ShardEpoch:
+		return fmt.Errorf("%w: shard configuration is for shard epoch %d, this authority is enrolled for %d", ErrContextMismatch, conf.Epoch, enroll.ShardEpoch)
+	}
+	pub, err := publicKeyOf(a.signer)
+	if err != nil {
+		return err
+	}
+	// IsValid has already refused duplicate node identifiers, so the first match is the only one.
+	var named *types.NodeInfo
+	for _, v := range conf.Validators {
+		if v.NodeID == enroll.NodeID {
+			named = v
+			break
+		}
+	}
+	if named == nil {
+		return fmt.Errorf("%w: shard configuration does not name node %s", ErrContextMismatch, enroll.NodeID)
+	}
+	if !bytes.Equal(named.SigKey, pub) {
+		given, own := sha256.Sum256(named.SigKey), sha256.Sum256(pub)
+		return fmt.Errorf("%w: shard configuration names node %s with signing key %x, this authority's key is %x", ErrContextMismatch, enroll.NodeID, given, own)
+	}
+	hash, err := conf.Hash(gocrypto.SHA256)
+	if err != nil {
+		return fmt.Errorf("hashing the shard configuration: %w", err)
+	}
+	a.enroll.ShardConfHash = hash
+	return nil
 }
 
 // MarkUntrusted latches this authority faulted, for an operator or a caller that has detected an
@@ -402,6 +490,9 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 
 	if !hasKey {
 		return nil, fmt.Errorf("%w: this authority has no key for %s", ErrKeyLost, enroll.NodeID)
+	}
+	if !enroll.complete() {
+		return nil, fmt.Errorf("%w: no shard configuration has been stated, so no certificate's configuration can be checked", ErrEnrollmentIncomplete)
 	}
 	if err := req.validate(); err != nil {
 		return nil, err

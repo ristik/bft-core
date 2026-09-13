@@ -56,6 +56,9 @@ const (
 	opReplaceSession op = 101
 	opStatus         op = 102
 	opEnrollment     op = 103
+	// opCompleteEnrollment states a pending authority's shard configuration. It carries the whole
+	// configuration, never a hash, because the authority checks the configuration names its own key.
+	opCompleteEnrollment op = 104
 )
 
 func (o op) servedToClient() bool {
@@ -68,7 +71,7 @@ func (o op) servedToClient() bool {
 
 func (o op) servedToOperator() bool {
 	switch o {
-	case opReplaceSession, opStatus, opEnrollment:
+	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment:
 		return true
 	}
 	return false
@@ -90,6 +93,8 @@ func (o op) String() string {
 		return "status"
 	case opEnrollment:
 		return "enrollment"
+	case opCompleteEnrollment:
+		return "complete-enrollment"
 	}
 	return fmt.Sprintf("unknown(%d)", uint64(o))
 }

@@ -54,6 +54,26 @@ func (o *OperatorClient) ReplaceSession(ctx context.Context) ([]byte, error) {
 	return o.ex.call(ctx, opReplaceSession, nil)
 }
 
+/*
+CompleteEnrollment states the shard configuration of a pending authority.
+
+The authority checks the configuration itself: it must name the enrolled node with this authority's
+own signing key, for the enrolled network, partition, shard and shard epoch. Only then does the
+authority compute the configuration hash and fix it. A second completion is refused, including one
+with the same configuration, because enrollment is not reopened within an authority lifetime.
+*/
+func (o *OperatorClient) CompleteEnrollment(ctx context.Context, conf *types.PartitionDescriptionRecord) error {
+	if conf == nil {
+		return errors.New("service: no shard configuration")
+	}
+	payload, err := types.Cbor.Marshal(conf)
+	if err != nil {
+		return fmt.Errorf("encoding the shard configuration: %w", err)
+	}
+	_, err = o.ex.call(ctx, opCompleteEnrollment, payload)
+	return err
+}
+
 // Status reports what the authority is holding.
 func (o *OperatorClient) Status(ctx context.Context) (signingauthority.Status, error) {
 	answer, err := o.ex.call(ctx, opStatus, nil)

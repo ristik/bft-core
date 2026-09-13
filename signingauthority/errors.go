@@ -78,3 +78,13 @@ var (
 	// vote.
 	ErrUnavailable = errors.New("signing-authority-unavailable")
 )
+
+// Deployment adds the outcome of an authority that exists but cannot admit anything yet.
+var (
+	// ErrEnrollmentIncomplete is an authority whose shard configuration has not been stated. The
+	// configuration a certificate commits to names every validator's signing key, including the key
+	// this authority generates, so it can only be written down after that key exists. Until the
+	// operator completes the enrollment (CompleteEnrollment), no session is issued and no request is
+	// authenticated or reserved.
+	ErrEnrollmentIncomplete = errors.New("signing-enrollment-incomplete")
+)

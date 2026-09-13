@@ -59,6 +59,8 @@ type shardNodeRunFlags struct {
 	EvidenceRecover bool
 
 	RPCServerAddress string // exposes /api/v1/metrics and /api/v1/health when set
+
+	shardNodeSigningFlags
 }
 
 func shardNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
@@ -103,6 +105,7 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"obtain and apply authenticated evidence for this node's own missing execution anchor (#92); off by default — it depends on peers answering and ends in a finality-changing executor call")
 	cmd.Flags().StringVar(&flags.RPCServerAddress, "rpc-server-address", "",
 		`address for the metrics/health HTTP server, in the form "host:port". Not started if empty.`)
+	flags.addSigningAuthorityFlags(cmd)
 
 	return cmd
 }
@@ -111,10 +114,6 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 	keyConf, err := flags.loadKeyConf(flags.baseFlags, false)
 	if err != nil {
 		return fmt.Errorf("loading key configuration: %w", err)
-	}
-	signer, err := keyConf.Signer()
-	if err != nil {
-		return fmt.Errorf("creating signer: %w", err)
 	}
 	authKeyPair, err := keyConf.AuthKeyPair()
 	if err != nil {
@@ -129,6 +128,15 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 		return fmt.Errorf("shard-node run requires exactly one --shard-conf, got %d", len(shardConfs))
 	}
 	shardConf := shardConfs[0]
+
+	// How certification requests are signed is decided once, here, before anything is built: with the
+	// key configuration's signing key as before, or through a signing authority when one is configured
+	// (#105). In the second case no local signer is constructed.
+	signing, err := buildCertificationSigning(&flags.shardNodeSigningFlags, keyConf, shardConf)
+	if err != nil {
+		return fmt.Errorf("configuring certification signing: %w", err)
+	}
+	defer signing.close()
 
 	trustBases, err := flags.loadTrustBases(flags.baseFlags)
 	if err != nil {
@@ -188,7 +196,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 	node, err := shardnode.New(
 		peer,
 		shardNet,
-		signer,
+		signing.local,
 		shardConf.PartitionID,
 		shardConf.ShardID,
 		confHash,
@@ -206,6 +214,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 	)
 	if err != nil {
 		return fmt.Errorf("creating shard node: %w", err)
+	}
+	if signing.authority != nil {
+		// Before Run, and before anything else is attached. The restored non-voting gate is part of
+		// the node already and still applies ahead of this signer.
+		node.SetCertificationSigner(signing.authority)
 	}
 
 	// The follower's wait for the leader's block comes from the shard's own T2, never from a
@@ -246,7 +259,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 
 	flags.observe.Logger().Info("shard node starting",
 		"nodeID", peer.ID().String(), "partitionID", shardConf.PartitionID, "executor", flags.Executor,
-		"t2Timeout", shardConf.T2Timeout, "leaderAwaitTimeout", awaitTimeout)
+		"t2Timeout", shardConf.T2Timeout, "leaderAwaitTimeout", awaitTimeout, "certificationSigning", signing.describe)
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return node.Run(gctx) })

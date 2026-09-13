@@ -391,7 +391,7 @@ func TestTheClientOffersTheFourOperationsAndNothingElse(t *testing.T) {
 	for i := 0; i < reflect.TypeOf(&OperatorClient{}).NumMethod(); i++ {
 		operatorMethods = append(operatorMethods, reflect.TypeOf(&OperatorClient{}).Method(i).Name)
 	}
-	require.ElementsMatch(t, []string{"Close", "Enrollment", "ReplaceSession", "Status"}, operatorMethods,
+	require.ElementsMatch(t, []string{"Close", "CompleteEnrollment", "Enrollment", "ReplaceSession", "Status"}, operatorMethods,
 		"and the control plane does not sign")
 }
 

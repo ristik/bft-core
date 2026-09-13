@@ -381,8 +381,22 @@ func (s *Server) clientOp(ctx context.Context, session signingauthority.Session,
 	return nil, fmt.Errorf("%w: %s", errWrongEndpoint, operation)
 }
 
-func (s *Server) operatorOp(operation op, _ []byte) ([]byte, error) {
+func (s *Server) operatorOp(operation op, payload []byte) ([]byte, error) {
 	switch operation {
+	case opCompleteEnrollment:
+		var conf types.PartitionDescriptionRecord
+		if err := types.Cbor.Unmarshal(payload, &conf); err != nil {
+			return nil, fmt.Errorf("%w: shard configuration: %v", errMalformed, err)
+		}
+		if err := s.authority.CompleteEnrollment(&conf); err != nil {
+			// The operator's client receives only the refusal's name, so the reason is logged here,
+			// where whoever runs this process can read which check the configuration failed.
+			s.log.Warn("refusing to complete the enrollment", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("enrollment complete",
+			slog.String("shardConfHash", fmt.Sprintf("%x", s.authority.Enrollment().ShardConfHash)))
+		return nil, nil
 	case opReplaceSession:
 		return s.replaceSession()
 	case opStatus:
