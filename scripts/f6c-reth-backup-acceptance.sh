@@ -250,7 +250,7 @@ remove_secrets() {
 }
 
 cleanup() {
-  local rc=$? d reasons=""
+  local rc=$? d reasons="" sealed=1
   trap - EXIT INT TERM
   for d in "$runDir"/*/; do
     [ -d "$d/pids" ] && teardown_arm "${d%/}"
@@ -259,12 +259,16 @@ cleanup() {
     rm -rf "$d" || artifact_error "could not remove socket directory $d"
   done
   remove_secrets
-  write_manifest || artifact_error "could not write $runDir/manifest.txt"
-  write_digests || artifact_error "could not write $runDir/sha256sums.txt"
-  # Destructive cleanup only after the seal: reth datadirs are large and not evidence.
-  for d in "$runDir"/*/reth*/dd; do
-    [ -d "$d" ] && rm -rf "$d"
-  done
+  write_manifest || { artifact_error "could not write $runDir/manifest.txt"; sealed=0; }
+  write_digests || { artifact_error "could not write $runDir/sha256sums.txt"; sealed=0; }
+  # Preserve the stopped clients' datadirs if the evidence could not be sealed.
+  if [ "$sealed" -eq 1 ]; then
+    for d in "$runDir"/*/reth*/dd; do
+      if [ -d "$d" ]; then
+        rm -rf "$d" || artifact_error "could not remove sealed run datadir $d"
+      fi
+    done
+  fi
   echo
   echo "evidence: $runDir"
   [ "$failures" -gt 0 ] && reasons="$reasons $failures failed assertions;"
@@ -756,7 +760,7 @@ reth_lane_self_test() {
   mkdir -p "$d/arm/reth1/dd" && : >"$d/run.log" && : >"$d/commands.log" && echo big >"$d/arm/reth1/dd/mdbx.dat" && echo log >"$d/arm/reth1/reth.log"
   (runDir=$d; write_digests) >/dev/null 2>&1
   st "the digests cover the reth log and exclude the datadir" "$(grep -q 'reth1/reth.log' "$d/sha256sums.txt" && ! grep -q 'dd/mdbx.dat' "$d/sha256sums.txt" && echo 0 || echo 1)"
-  mkdir -p "$scratch/v2/arm/v1" && : >"$scratch/v2/run.log" && : >"$scratch/v2/commands.log" && echo s >"$scratch/v2/arm/v1/jwt.hex" && mkdir "$scratch/v2/sha256sums.txt"
+  mkdir -p "$scratch/v2/arm/v1" "$scratch/v2/arm/reth1/dd" && echo retained >"$scratch/v2/arm/reth1/dd/sentinel" && : >"$scratch/v2/run.log" && : >"$scratch/v2/commands.log" && echo s >"$scratch/v2/arm/v1/jwt.hex" && mkdir "$scratch/v2/sha256sums.txt"
   out=$(
     (
       runDir="$scratch/v2" scen="" scenario="" socketDirs=() arms=(backup-restore) failures=0 artifactErrors=0
@@ -766,6 +770,7 @@ reth_lane_self_test() {
     echo "exit=$?"
   )
   st "a digest list that cannot be written fails the verdict" "$(echo "$out" | grep -q '^RESULT: FAIL' && ! echo "$out" | grep -q '^exit=0$' && echo 0 || echo 1)"
+  st "a failed seal preserves the stopped execution datadir" "$([ -f "$scratch/v2/arm/reth1/dd/sentinel" ] && echo 0 || echo 1)"
   st "a JWT secret is removed and listed before sealing" "$([ ! -e "$scratch/v2/arm/v1/jwt.hex" ] && grep -q 'arm/v1/jwt.hex' "$scratch/v2/removed-secrets.txt" && echo 0 || echo 1)"
 
   chmod -R u+rwx "$scratch" 2>/dev/null
