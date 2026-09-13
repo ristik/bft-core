@@ -17,7 +17,7 @@ SigningAuthorityClient is the part of a signing authority a shard node is given.
 
 It declares the four client operations and nothing else: no session replacement, no key, no
 constructor. That narrows what this code can call, which is worth having and is not by itself a
-trust boundary — a value whose dynamic type is *signingauthority.Authority can be asserted to an
+trust boundary: a value whose dynamic type is *signingauthority.Authority can be asserted to an
 interface that does have ReplaceSession, and in this unactivated profile the round still holds the
 legacy key. The boundary is the authority being somewhere else, with its own credentials and its own
 lifetime (§3, §6); this interface is what the shard node is allowed to say across it.
@@ -42,8 +42,8 @@ sequence is the contract's: reserve the complete request for its assigned round,
 authority now owns, retain the response before any of it can leave, and only then release it.
 
 Every answer is checked against this round's own work rather than against another answer. The signer
-takes its own copy of the proposed request before it calls the client at all, and that copy — its
-preimage, its digest and its assigned round — is what both the reservation and the released response
+takes its own copy of the proposed request before it calls the client at all, and that copy (its
+preimage, its digest and its assigned round) is what both the reservation and the released response
 have to match. Two remote answers agreeing with each other establishes nothing about either.
 */
 func NewAuthoritySigner(client SigningAuthorityClient, authorityKey abcrypto.Verifier) (CertificationSigner, error) {

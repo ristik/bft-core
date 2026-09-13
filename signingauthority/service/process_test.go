@@ -280,7 +280,7 @@ func TestTheShardSideHoldsNoKeyAndNoSession(t *testing.T) {
 	// What the shard side has is a socket path and a bearer credential. With both, it can reserve,
 	// sign, retain and release; it cannot replace its session, read the key, or start an authority.
 	stray, err := NewOperatorClient(ClientConfig{
-		Dial: UnixDialer(filepath.Join(authority.dir, "client.sock")), Credential: client.credential,
+		Dial: UnixDialer(filepath.Join(authority.dir, "client.sock")), Credential: client.ex.credential,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = stray.Close() })
@@ -290,7 +290,7 @@ func TestTheShardSideHoldsNoKeyAndNoSession(t *testing.T) {
 	require.ErrorIs(t, err, errWrongEndpoint)
 
 	// And the operator credential is a different secret: holding the client's does not produce it.
-	require.NotEqual(t, operatorCredential, client.credential)
+	require.NotEqual(t, operatorCredential, client.ex.credential)
 
 	// Killing the shard's client changes nothing about the authority: it keeps the reservation and
 	// the same operator connection keeps working.
@@ -300,6 +300,39 @@ func TestTheShardSideHoldsNoKeyAndNoSession(t *testing.T) {
 	require.True(t, status.HasReservation)
 	require.EqualValues(t, 6, status.ReservedRound,
 		"the authority's lifetime is its own; a client going away does not end it")
+}
+
+func TestARunningAuthorityKeepsItsSocketPath(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	authority, _ := f.provision(t)
+	client := authority.admit(t)
+	authorization, err := client.Reserve(ctx, f.request())
+	require.NoError(t, err)
+
+	// A second authority started on the same path would be a second key for one enrolled node, and
+	// the shard node dialling that path could not tell which one it had reached: same operations,
+	// same refusals, a different signer holding a different reservation.
+	path := filepath.Join(authority.dir, "client.sock")
+	second, err := ListenUnix(path)
+	require.ErrorIs(t, err, ErrPathHeld)
+	require.Nil(t, second)
+
+	// The process that owns the path is still the one serving it, and still holding its reservation.
+	status, err := authority.operator.Status(ctx)
+	require.NoError(t, err)
+	require.True(t, status.HasReservation)
+	require.NoError(t, client.Sign(ctx))
+	require.NoError(t, client.RetainResponse(ctx))
+	_, err = client.Release(ctx, authorization.AssignedRound, authorization.UnsignedDigest)
+	require.NoError(t, err)
+
+	// When that process is gone the path is free, and the socket it left behind is removed rather
+	// than inherited: the claim is what separates the two cases.
+	authority.kill(t)
+	third, err := ListenUnix(path)
+	require.NoError(t, err)
+	require.NoError(t, third.Close())
 }
 
 func mustVerifier(t *testing.T, key []byte) abcrypto.Verifier {

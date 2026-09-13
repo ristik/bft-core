@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -371,13 +372,23 @@ func (s *Server) operatorOp(operation op, _ []byte) ([]byte, error) {
 /*
 replaceSession fences the current client and issues the credential for the new one.
 
-The authority advances its generation first. If that fails there is no new credential, and the old
-one keeps working, because the old generation is still the current one inside the authority: the two
-must not disagree about who is admitted. If it succeeds, the old credential stops being accepted in
-the same step, and the new credential is returned exactly once — the server keeps only what it needs
-to compare against, and cannot produce it again for anyone who missed it.
+The whole replacement is one critical section, and this is the reason: the authority decides the
+order of two concurrent replacements, and the server must store them in that same order. Advancing
+the generation outside the lock lets a replacement that won inside the authority lose the race to
+install its credential, which leaves the server admitting a credential the authority has already
+fenced. Both operators would then hold a credential that cannot be used, and an operator would read
+that as an authority that has broken rather than as one it has to ask again.
+
+Within the section the authority advances its generation first. If that fails there is no new
+credential and the old one keeps working, because the old generation is still the current one inside
+the authority: the two must not disagree about who is admitted. If it succeeds, the old credential
+stops being accepted in the same step, and the new credential is returned exactly once. The server
+keeps only what it needs to compare against, and cannot produce it again for anyone who missed it.
 */
 func (s *Server) replaceSession() ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	session, err := s.authority.ReplaceSession()
 	if err != nil {
 		return nil, err
@@ -387,17 +398,13 @@ func (s *Server) replaceSession() ([]byte, error) {
 		// The generation has already advanced, so the previous client is fenced whatever happens
 		// here. Leaving the server with no admitted credential is the safe side of that: nothing is
 		// admitted until the operator asks again and gets one.
-		s.mu.Lock()
 		s.hasSession = false
 		s.credential = nil
-		s.mu.Unlock()
 		return nil, err
 	}
-	s.mu.Lock()
 	s.session = session
 	s.hasSession = true
 	s.credential = append([]byte(nil), credential...)
-	s.mu.Unlock()
 	return credential, nil
 }
 
@@ -419,12 +426,31 @@ func decodeRequest(wire reservePayload) (signingauthority.Request, error) {
 	return signingauthority.Request{UC: &uc, Technical: &technical, Proposed: &proposed}, nil
 }
 
+// ErrPathHeld is a socket path an authority process is already serving. It is reported rather than
+// taken over: see ListenUnix.
+var ErrPathHeld = errors.New("service: the socket path is held by a running authority")
+
+// lockSuffix names the file whose lock is a claim on one socket path. It sits next to the socket
+// rather than inside it, because the socket is removed and recreated and the claim must outlive that.
+const lockSuffix = ".lock"
+
 /*
 ListenUnix creates a Unix domain socket for one endpoint, in a directory only its owner may enter.
 
 The socket file itself is created with the process umask applied, so the directory is what carries
 the access decision: 0700, owned by the user running the authority. Credentials admit operations;
 the file mode is what keeps a stranger from reaching the endpoint to present one.
+
+Claiming the path comes first, and it is an exclusive lock on a file beside it, held for as long as
+the listener is open. Without it, a second authority started on the same path would remove the socket
+and listen on it, and the shard node dialling that path would then be reaching a different authority
+with a different key while the first one was still running and still holding its reservation. There
+is nothing in the exchange that would notice: the operations are the same and the refusals are the
+same. Two authorities for one enrolled node is the condition §3 exists to prevent, so this is refused
+as ErrPathHeld rather than resolved in favour of whoever started last.
+
+The lock is what tells a socket left by a process that is gone from one a process is still serving:
+the kernel releases it when that process dies, and only then is removing the socket file correct.
 */
 func ListenUnix(path string) (net.Listener, error) {
 	dir := filepath.Dir(path)
@@ -434,23 +460,49 @@ func ListenUnix(path string) (net.Listener, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("restricting the socket directory: %w", err)
 	}
-	// A stale socket from a process that died is removed rather than inherited: a listener that
-	// silently reused it could serve a second authority on the path of a first.
+	lock, err := os.OpenFile(path+lockSuffix, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("opening the socket claim: %w", err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lock.Close()
+		return nil, fmt.Errorf("%w: %s (%v)", ErrPathHeld, path, err)
+	}
+	// Past the claim, an existing socket is one nobody is serving.
 	if info, err := os.Stat(path); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
+			_ = lock.Close()
 			return nil, fmt.Errorf("%s exists and is not a socket", path)
 		}
 		if err := os.Remove(path); err != nil {
+			_ = lock.Close()
 			return nil, fmt.Errorf("removing a stale socket: %w", err)
 		}
 	}
 	l, err := net.Listen("unix", path)
 	if err != nil {
+		_ = lock.Close()
 		return nil, fmt.Errorf("listening on %s: %w", path, err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = l.Close()
+		_ = lock.Close()
 		return nil, fmt.Errorf("restricting the socket: %w", err)
 	}
-	return l, nil
+	return &claimedListener{Listener: l, lock: lock}, nil
+}
+
+// claimedListener holds the claim on its path for as long as it is open. The lock file is left in
+// place on close: what matters is the lock, and the next authority on this path locks the same file.
+type claimedListener struct {
+	net.Listener
+	lock *os.File
+}
+
+func (l *claimedListener) Close() error {
+	err := l.Listener.Close()
+	if lockErr := l.lock.Close(); err == nil {
+		err = lockErr
+	}
+	return err
 }

@@ -478,8 +478,15 @@ it is no longer at a known boundary. A frame of another protocol version is refu
 coerced. Connections are bounded per endpoint, one request is served at a time on each, and a
 connection that does not produce a complete message within the idle deadline is closed.
 
-**Two credentials, two endpoints.** The client endpoint admits the current client credential only,
-and anything else — an old credential, an operator credential, no credential — is
+**One authority per path.** A socket path is claimed with an exclusive lock on a file beside it, held
+for as long as the listener is open. A second authority started on a path that a running one serves
+is refused (`ErrPathHeld`) rather than removing the socket and listening in its place: the shard node
+dialling that path could not tell the two apart, since the operations and refusals are identical, and
+two keys for one enrolled node is what §3 exists to prevent. The kernel releases the lock when its
+process dies, and that is the only condition under which an existing socket file is removed.
+
+**Two credentials, two endpoints.** The client endpoint admits the current client credential only.
+Anything else (an old credential, an operator credential, no credential) is
 `signing-session-fenced`, the same answer an old generation gets in one process. The operator
 endpoint has its own credential and is the only place session replacement, status and enrollment
 live. Neither endpoint falls back to the other, and the endpoint refusal is decided before any
@@ -490,14 +497,27 @@ answer.
 mints the session inside the authority process and returns a bearer credential the server maps to
 it; the unmintable type stays where the key is. Replacing fences the old credential in the same step
 that advances the generation, so the two cannot disagree about who is admitted, and a fenced shard
-process cannot unfence itself because what it holds is the thing that was invalidated.
+process cannot unfence itself because what it holds is the thing that was invalidated. The whole
+replacement (advancing the generation, drawing the credential, installing both) is one critical
+section. The authority orders concurrent replacements, and the server must install them in that
+order; otherwise a replacement that won inside the authority can lose the race to install its
+credential, and the server ends up admitting a credential the authority has already fenced, leaving
+no returned credential usable. With the section held, concurrent replacements leave exactly one.
 
 **Unavailability is not a refusal.** No process listening, a connection that died mid-exchange, a
-deadline: all of these are `signing-authority-unavailable`, distinct from every decision the
-authority makes. The round abstains either way, and an operator can tell "the authority said no"
-from "the authority said nothing". A connection that was already cached and turns out to be dead is
-retried once on a fresh one, which is safe because every operation here replays rather than repeats.
-There is no fallback local signer at any point.
+deadline, a caller that cancelled: all of these are `signing-authority-unavailable`, distinct from
+every decision the authority makes. The round abstains either way, and an operator can tell "the
+authority said no" from "the authority said nothing". A connection that was already cached and turns
+out to be dead is retried once on a fresh one, which is safe because every operation here replays
+rather than repeats. There is no fallback local signer at any point.
+
+**One deadline per operation, and cancellation reaches the socket.** The client's timeout bounds the
+whole operation: connecting, sending, reading the answer and the single retry share one deadline,
+the earlier of the caller's and the configured one, and the retry is not attempted once it has
+passed. A cancelled context wakes a call blocked in a read or write by moving the connection's
+deadline into the past, because a `net.Conn` takes no context; waiting for the next operation slot is
+interruptible for the same reason. A cancelled caller stops waiting. As §6 already states, that does
+not undo a reservation the authority has admitted.
 
 **What the tests establish.** A real second operating-system process holds the key: killing it makes
 every client operation unavailable and nothing else; restarting it produces a DIFFERENT key for the

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/unicitynetwork/bft-core/signingauthority"
@@ -31,7 +30,8 @@ type ClientConfig struct {
 	// Credential is the client credential the operator issued when it replaced the session. The
 	// shard node holds this and nothing else: no key, no session, no operator credential.
 	Credential []byte
-	// Timeout bounds one operation when the caller's context has no earlier deadline.
+	// Timeout bounds one whole operation, the reconnect below included. A caller's own deadline
+	// applies when it is earlier. Zero means DefaultTimeout.
 	Timeout time.Duration
 }
 
@@ -40,24 +40,19 @@ Client is a shard node's end of the boundary.
 
 It implements the four client operations of shardnode.SigningAuthorityClient and nothing else.
 Anything that is not an answer from the authority is signingauthority.ErrUnavailable: no process
-listening, a connection that died, a deadline. That distinction matters at the round, which abstains
-either way but records what happened, and it is the reason this type never invents an outcome when
-it does not have one.
+listening, a connection that died, a deadline, a caller that cancelled. That distinction matters at
+the round, which abstains either way but records what happened, and it is the reason this type never
+invents an outcome when it does not have one.
 
 One connection is kept and reused. If a call fails on a cached connection before any answer arrives,
 it is retried once on a fresh one: an authority that closed an idle connection, or was restarted,
 must not read as unavailable to a node that has simply not spoken for a while. The retry is safe
-because every operation here is idempotent by contract — the same reservation, the same signature
-over it and the same retained response replay rather than repeat — and it happens at most once, so a
-genuinely unreachable authority is still reported promptly.
+because every operation here is idempotent by contract (the same reservation, the same signature over
+it and the same retained response replay rather than repeat), it happens at most once, and it runs
+under the same deadline as the attempt it follows.
 */
 type Client struct {
-	dial       Dialer
-	credential []byte
-	timeout    time.Duration
-
-	mu   sync.Mutex
-	conn net.Conn
+	ex *exchange
 }
 
 // NewClient provisions a client. It does not connect: an authority that is not up yet is a liveness
@@ -69,22 +64,12 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if len(cfg.Credential) < CredentialBytes {
 		return nil, fmt.Errorf("service: the client credential must be at least %d bytes", CredentialBytes)
 	}
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	return &Client{
-		dial:       cfg.Dial,
-		credential: append([]byte(nil), cfg.Credential...),
-		timeout:    timeout,
-	}, nil
+	return &Client{ex: newExchange(cfg)}, nil
 }
 
 // Close drops the connection. The session and the key are not the client's to end.
 func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.dropLocked()
+	return c.ex.close()
 }
 
 func (c *Client) Reserve(ctx context.Context, req signingauthority.Request) (*signingauthority.Authorization, error) {
@@ -92,7 +77,7 @@ func (c *Client) Reserve(ctx context.Context, req signingauthority.Request) (*si
 	if err != nil {
 		return nil, err
 	}
-	answer, err := c.call(ctx, opReserve, payload)
+	answer, err := c.ex.call(ctx, opReserve, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -114,12 +99,12 @@ func (c *Client) Reserve(ctx context.Context, req signingauthority.Request) (*si
 }
 
 func (c *Client) Sign(ctx context.Context) error {
-	_, err := c.call(ctx, opSign, nil)
+	_, err := c.ex.call(ctx, opSign, nil)
 	return err
 }
 
 func (c *Client) RetainResponse(ctx context.Context) error {
-	_, err := c.call(ctx, opRetainResponse, nil)
+	_, err := c.ex.call(ctx, opRetainResponse, nil)
 	return err
 }
 
@@ -128,76 +113,7 @@ func (c *Client) Release(ctx context.Context, round uint64, digest [32]byte) ([]
 	if err != nil {
 		return nil, fmt.Errorf("encoding the release: %w", err)
 	}
-	return c.call(ctx, opRelease, payload)
-}
-
-// call runs one operation, retrying once on a cached connection that turned out to be dead.
-func (c *Client) call(ctx context.Context, operation op, payload []byte) ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	cached := c.conn != nil
-	answer, err := c.attemptLocked(ctx, operation, payload)
-	if err == nil {
-		return answer, nil
-	}
-	if !errors.Is(err, signingauthority.ErrUnavailable) || !cached {
-		return nil, err
-	}
-	_ = c.dropLocked()
-	return c.attemptLocked(ctx, operation, payload)
-}
-
-func (c *Client) attemptLocked(ctx context.Context, operation op, payload []byte) ([]byte, error) {
-	conn, err := c.connectLocked(ctx)
-	if err != nil {
-		return nil, err
-	}
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(c.timeout)
-	}
-	_ = conn.SetDeadline(deadline)
-
-	request := wireRequest{Version: protocolVersion, Op: uint64(operation), Credential: c.credential, Payload: payload}
-	if err := writeFrame(conn, request); err != nil {
-		_ = c.dropLocked()
-		return nil, fmt.Errorf("%w: sending %s: %v", signingauthority.ErrUnavailable, operation, err)
-	}
-	var response wireResponse
-	if err := readFrame(conn, &response); err != nil {
-		_ = c.dropLocked()
-		return nil, fmt.Errorf("%w: reading the answer to %s: %v", signingauthority.ErrUnavailable, operation, err)
-	}
-	if response.Version != protocolVersion {
-		_ = c.dropLocked()
-		return nil, fmt.Errorf("%w: the authority answered version %d", signingauthority.ErrUnsupportedVersion, response.Version)
-	}
-	if response.Refusal != "" {
-		return nil, refusalError(response.Refusal)
-	}
-	return response.Payload, nil
-}
-
-func (c *Client) connectLocked(ctx context.Context) (net.Conn, error) {
-	if c.conn != nil {
-		return c.conn, nil
-	}
-	conn, err := c.dial(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", signingauthority.ErrUnavailable, err)
-	}
-	c.conn = conn
-	return conn, nil
-}
-
-func (c *Client) dropLocked() error {
-	if c.conn == nil {
-		return nil
-	}
-	err := c.conn.Close()
-	c.conn = nil
-	return err
+	return c.ex.call(ctx, opRelease, payload)
 }
 
 func encodeRequest(req signingauthority.Request) ([]byte, error) {
