@@ -922,6 +922,73 @@ assertions, authority loss 26, restart 30, restart-at-anchor 27, local-restart-a
 - The step 4 item in §8 lists actual reth and old shard-backup restoration, which this change does not
   run. The lanes use the fake executor, and the in-package test substitutes an older checkpoint file.
 
+### Step 4 against actual reth and an older shard-home backup
+
+`scripts/f6c-reth-backup-acceptance.sh` runs the step 4 path against real processes. It changes no
+runtime code.
+
+**What runs.**
+
+- The pinned reth, `189c0df3`, one per validator.
+- One root node and one `signing-authority run`.
+- Two `shard-node run --executor engine-api` validators. v1 signs through the authority and v2 with
+  its local key.
+
+The shard quorum is 2 of 2. Every round certified after v1 returns therefore needed v1's
+authority-signed request, which makes the certificate the root chain's acceptance of that request.
+Each arm runs on a fresh cluster with T2 5000ms.
+
+**Arms.**
+
+- **`ordinary-restart`.** v1 signs work on ordinary blocks, is stopped once the shard is quiet, and
+  starts again from its own home with `--evidence-recover`.
+- **`backup-restore`.** v1 signs the block of a first transaction, and its home is copied while it is
+  frozen. The certified chain and the same authority's record then advance with v1 signing a second
+  block. v1 is stopped and its home is replaced by the older copy: the checkpoint is byte-identical to
+  the backup and differs from the one replaced. v1 then starts again with `--evidence-recover`. The
+  authority process and its record run throughout, and nothing of the authority is copied or restored.
+
+In both arms v1's execution client keeps its datadir, and its head is unchanged across the shard stop.
+
+**Events, reported separately.**
+
+1. **Acquisition.** The requester finishes with `state=ready`.
+2. **Adoption.** The adopted block and state equal the ordinary head both execution clients hold,
+   which is not the execution genesis.
+3. **P-id before signing.** No v1 submission comes between the restart and the adoption line. Signing
+   then resumes through the authority's record, for a round above the one the authority held before
+   the stop.
+4. **Certification.** The root chain certifies rounds that need v1's request, and the authority's
+   status keeps the same generation with a higher reserved round.
+5. **Fresh work, only after adoption.** One transaction is injected. v1 logs a non-quiet
+   authority-signed request for it, and the root certifies a round that needs that request. Both
+   clients agree on the block and the receipt, and hold exactly the arm's transactions.
+
+**Recorded run.** Revision `26118279`, clean worktree, T2 5000ms, macOS x86_64, reth `189c0df3`.
+
+- `ordinary-restart` passed 39 assertions. v1 resumed from partition round 10 while the authority
+  held round 11, adopted the exact block 2, and signed from round 13. The record moved 11, then 14.
+- `backup-restore` passed 42 assertions. The backup was taken while the record held round 8, which then
+  advanced to round 12. v1 resumed from the older checkpoint at partition round 7, adopted the exact
+  block 2, and signed from round 14. The record moved 12, then 15.
+- In both arms the post-adoption transaction's block 3 carried the same receipt on both clients.
+- The seal covers 113 files, with the reth datadirs removed after it, and 18 secret files were
+  removed.
+
+The lane's offline `--self-test` covers its own assertions. It uses the authority lane's fail-closed
+helpers in library mode (`F6C_LANE_LIBRARY=1`).
+
+**What this does not show.**
+
+- **Execution rollback and durability.** Neither rolling back the execution datadir nor power-loss
+  durability is tested.
+- **Re-entering a reserved round.** A restored node never re-entered a round at or below the
+  authority's reservation: while v1 was down the root timed rounds out, so its first request was
+  already above that reservation. The identical, conflicting and lower-round refusals remain evidenced
+  by `shardnode/restore_authority_process_test.go` and the process-boundary tests.
+- **Authority isolation.** Host, backup and snapshot isolation of the authority remains a deployment
+  premise.
+
 #105 closes only after all four steps and independent review. #14 still owns
 atomic block/UC/TR persistence; changing that format requires rechecking the R2/R3
 cold-start equivalences in #92's ledger. No new Engine methods, reth changes, root
