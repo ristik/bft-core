@@ -54,6 +54,11 @@ type Config struct {
 	IdleTimeout  time.Duration
 	WriteTimeout time.Duration
 
+	// OperationTimeout bounds the work one request does inside the authority, such as the trust
+	// lookup behind a reserve. It is separate from the socket deadlines because those bound reading
+	// and writing, and cannot reach work that is waiting on something other than the connection.
+	OperationTimeout time.Duration
+
 	Log *slog.Logger
 }
 
@@ -61,9 +66,10 @@ type Config struct {
 // for a secret.
 func DefaultConfig() Config {
 	return Config{
-		MaxConnections: 8,
-		IdleTimeout:    5 * time.Minute,
-		WriteTimeout:   30 * time.Second,
+		MaxConnections:   8,
+		IdleTimeout:      5 * time.Minute,
+		WriteTimeout:     30 * time.Second,
+		OperationTimeout: 30 * time.Second,
 	}
 }
 
@@ -88,6 +94,11 @@ type Server struct {
 
 	closeOnce sync.Once
 	closed    chan struct{}
+	// lifetime is the parent of every dispatched operation, and Close cancels it. Closing a
+	// connection wakes a handler blocked on the socket, but not one waiting inside the authority, so
+	// shutdown has to reach that work through its context.
+	lifetime context.Context
+	end      context.CancelFunc
 	// draining is set under mu before the wait below begins. A connection accepted after that point
 	// is not tracked and not served: adding to a WaitGroup that is already being waited on is a race
 	// whether or not it is ever observed, and "the listener is about to close anyway" is not a
@@ -115,12 +126,19 @@ func NewServer(authority *signingauthority.Authority, cfg Config) (*Server, erro
 	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = defaults.WriteTimeout
 	}
+	if cfg.OperationTimeout <= 0 {
+		cfg.OperationTimeout = defaults.OperationTimeout
+	}
 	log := cfg.Log
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 	cfg.OperatorCredential = append([]byte(nil), cfg.OperatorCredential...)
-	return &Server{authority: authority, cfg: cfg, log: log, closed: make(chan struct{})}, nil
+	lifetime, end := context.WithCancel(context.Background())
+	return &Server{
+		authority: authority, cfg: cfg, log: log, closed: make(chan struct{}),
+		lifetime: lifetime, end: end,
+	}, nil
 }
 
 // NewCredential draws a bearer credential from the system random source.
@@ -175,14 +193,21 @@ func (s *Server) Serve(l net.Listener, endpoint Endpoint) error {
 	}
 }
 
-// Close stops serving. It does NOT close the authority: the key's lifetime is the authority's, and
-// deciding it ends belongs to whoever created it.
+/*
+Close stops serving. It does NOT close the authority: the key's lifetime is the authority's, and
+deciding it ends belongs to whoever created it.
+
+Operations still running are cancelled rather than waited for, so a trust lookup that never returns
+cannot hold shutdown open. Cancelling one stops its waiting and nothing else: a reservation the
+authority has already admitted stays admitted (§6).
+*/
 func (s *Server) Close() {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		s.draining = true
 		s.mu.Unlock()
 		close(s.closed)
+		s.end()
 	})
 	s.wg.Wait()
 }
@@ -225,7 +250,7 @@ func (s *Server) serveConn(conn net.Conn, endpoint Endpoint) {
 			}
 			return
 		}
-		payload, err := s.dispatch(context.Background(), endpoint, req)
+		payload, err := s.operate(endpoint, req)
 		if err != nil {
 			s.log.Debug("refusing an operation",
 				slog.String("endpoint", endpoint.String()), slog.String("op", op(req.Op).String()),
@@ -239,6 +264,20 @@ func (s *Server) serveConn(conn net.Conn, endpoint Endpoint) {
 			return
 		}
 	}
+}
+
+/*
+operate runs one dispatched request under the server's own context: bounded by OperationTimeout and
+cancelled by Close.
+
+It is deliberately not tied to the connection. A client that goes away mid-request has not withdrawn
+anything, and the authority decides for itself what an admitted reservation means; what the server
+bounds is how long it will work, and whether it is still running at all.
+*/
+func (s *Server) operate(endpoint Endpoint, req wireRequest) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(s.lifetime, s.cfg.OperationTimeout)
+	defer cancel()
+	return s.dispatch(ctx, endpoint, req)
 }
 
 func (s *Server) respond(conn net.Conn, refusal string, payload []byte) bool {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto"
 	"encoding/binary"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -678,6 +679,151 @@ func TestTheConfiguredTimeoutBoundsTheWholeOperationIncludingTheRetry(t *testing
 	require.GreaterOrEqual(t, elapsed, timeout, "the timeout is what bounds it")
 	require.Less(t, elapsed, 2*timeout,
 		"and it bounds the operation, not each attempt: a round waiting on this was promised one timeout")
+}
+
+func TestTheClientBudgetIncludesWaitingForTheSlot(t *testing.T) {
+	ex := newExchange(ClientConfig{
+		Credential: make([]byte, CredentialBytes), Timeout: 50 * time.Millisecond,
+		Dial: func(context.Context) (net.Conn, error) { return nil, errors.New("never reached") },
+	})
+	// Another operation holds the slot for longer than this call's whole budget.
+	ex.sem <- struct{}{}
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() {
+		_, err := ex.call(context.Background(), opSign, nil)
+		done <- err
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(2 * time.Second):
+	}
+	elapsed := time.Since(started)
+	<-ex.sem
+	if err == nil {
+		// Unwind the queued call before failing, so the goroutine does not outlive the test.
+		err = <-done
+		t.Fatalf("a call queued behind another waited %s past a 50ms budget, and returned %v once released", elapsed, err)
+	}
+	require.ErrorIs(t, err, signingauthority.ErrUnavailable)
+	require.ErrorIs(t, err, context.DeadlineExceeded,
+		"a round queued behind another operation is waiting on its authority, and its timeout counts that wait")
+}
+
+// blockedTrust is a trust source whose lookup waits until its context ends or the test releases it:
+// a root chain the authority cannot currently reach.
+type blockedTrust struct {
+	entered chan struct{}
+	release chan struct{}
+	free    func()
+}
+
+func (b blockedTrust) GetByEpoch(ctx context.Context, _ uint64) (*types.RootTrustBaseV1, error) {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-b.release:
+		return nil, errors.New("released by the test")
+	}
+}
+
+// blockedServer serves an authority whose trust lookups block, on one end of a pipe, and returns the
+// other end with a client credential for it.
+func (f *fixture) blockedServer(t *testing.T, cfg Config) (*Server, blockedTrust, net.Conn, []byte) {
+	t.Helper()
+	release := make(chan struct{})
+	var once sync.Once
+	trust := blockedTrust{
+		entered: make(chan struct{}, 1), release: release,
+		free: func() { once.Do(func() { close(release) }) },
+	}
+	enrollment := f.authority.Enrollment()
+	enrollment.SigningKeyFingerprint = nil
+	authority, err := signingauthority.New(enrollment, trust)
+	require.NoError(t, err)
+	t.Cleanup(authority.Close)
+
+	cfg.OperatorCredential = f.operatorCredential
+	server, err := NewServer(authority, cfg)
+	require.NoError(t, err)
+	t.Cleanup(server.Close)
+	// Registered after Close so it runs before it: a test that fails with a lookup still blocked must
+	// not leave its own cleanup waiting on that lookup.
+	t.Cleanup(trust.free)
+	credential, err := server.replaceSession()
+	require.NoError(t, err)
+
+	local, remote := net.Pipe()
+	t.Cleanup(func() { _ = local.Close(); _ = remote.Close() })
+	require.True(t, server.track())
+	go func() {
+		defer server.wg.Done()
+		server.serveConn(remote, ClientEndpoint)
+	}()
+	require.NoError(t, local.SetDeadline(time.Now().Add(10*time.Second)))
+	return server, trust, local, credential
+}
+
+func (f *fixture) sendReserve(t *testing.T, conn net.Conn, credential []byte) {
+	t.Helper()
+	payload, err := encodeRequest(f.request())
+	require.NoError(t, err)
+	require.NoError(t, writeFrame(conn, wireRequest{
+		Version: protocolVersion, Op: uint64(opReserve), Credential: credential, Payload: payload,
+	}))
+}
+
+func TestClosingTheServerCancelsWorkWaitingInsideTheAuthority(t *testing.T) {
+	f := newFixture(t)
+	// An operation deadline far beyond the test, so what ends the lookup has to be Close.
+	server, trust, conn, credential := f.blockedServer(t, Config{OperationTimeout: time.Hour})
+	f.sendReserve(t, conn, credential)
+	select {
+	case <-trust.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reserve did not reach the trust lookup")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		server.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close waited on an operation blocked inside the authority instead of cancelling it")
+	}
+	require.False(t, server.authority.Status().HasReservation,
+		"the cancelled lookup authenticated nothing, so nothing was admitted")
+}
+
+func TestAnOperationWaitingInsideTheAuthorityHasADeadline(t *testing.T) {
+	f := newFixture(t)
+	const timeout = 200 * time.Millisecond
+	server, trust, conn, credential := f.blockedServer(t, Config{OperationTimeout: timeout})
+
+	started := time.Now()
+	f.sendReserve(t, conn, credential)
+	var answer wireResponse
+	require.NoError(t, readFrame(conn, &answer), "the server answers once its own deadline passes")
+	elapsed := time.Since(started)
+	<-trust.entered
+	require.Equal(t, signingauthority.ErrUnauthenticated.Error(), answer.Refusal,
+		"an input the authority could not authenticate in time was not authenticated")
+	require.GreaterOrEqual(t, elapsed, timeout)
+	require.Less(t, elapsed, 5*time.Second)
+	require.False(t, server.authority.Status().HasReservation)
+
+	// The deadline belongs to that operation, not to the connection or the server: both keep serving.
+	require.NoError(t, writeFrame(conn, wireRequest{Version: protocolVersion, Op: uint64(opSign), Credential: credential}))
+	require.NoError(t, readFrame(conn, &answer))
+	require.Equal(t, signingauthority.ErrNoReservation.Error(), answer.Refusal)
 }
 
 // rawCall sends one frame exactly as given, bypassing the clients, so a test can present a message

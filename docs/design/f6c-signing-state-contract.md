@@ -512,12 +512,22 @@ out to be dead is retried once on a fresh one, which is safe because every opera
 rather than repeats. There is no fallback local signer at any point.
 
 **One deadline per operation, and cancellation reaches the socket.** The client's timeout bounds the
-whole operation: connecting, sending, reading the answer and the single retry share one deadline,
-the earlier of the caller's and the configured one, and the retry is not attempted once it has
-passed. A cancelled context wakes a call blocked in a read or write by moving the connection's
+whole operation: waiting behind another operation for the connection, connecting, sending, reading
+the answer and the single retry share one deadline, the earlier of the caller's and the configured
+one, and the retry is not attempted once it has passed. A cancelled context wakes a call blocked in a read or write by moving the connection's
 deadline into the past, because a `net.Conn` takes no context; waiting for the next operation slot is
 interruptible for the same reason. A cancelled caller stops waiting. As §6 already states, that does
 not undo a reservation the authority has admitted.
+
+**Server operations are bounded and end with the server.** Socket deadlines bound reading and
+writing, but a reserve can wait on something other than the connection, such as the trust lookup
+that authenticates its certificate. Each dispatched operation therefore runs under a context derived
+from the server's own lifetime, bounded by `OperationTimeout` and cancelled by `Close`, so a lookup
+that never returns can neither hold a connection's handler indefinitely nor keep shutdown waiting.
+That context is not tied to the connection: a client that goes away mid-request withdraws nothing,
+and cancellation stops waiting without undoing anything the authority has already admitted. A
+lookup that runs out of time is refused as `signing-unauthenticated-input`, because the input was not
+authenticated, and the connection and server continue serving.
 
 **What the tests establish.** A real second operating-system process holds the key: killing it makes
 every client operation unavailable and nothing else; restarting it produces a DIFFERENT key for the

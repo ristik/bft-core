@@ -62,15 +62,17 @@ func (e *exchange) call(ctx context.Context, operation op, payload []byte) ([]by
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %w", signingauthority.ErrUnavailable, err)
 	}
+	// The budget starts before waiting for the slot. A call queued behind another is still a round
+	// waiting on its authority, and its timeout has to count that wait too.
+	ctx, cancel := context.WithDeadline(ctx, e.deadline(ctx))
+	defer cancel()
+
 	select {
 	case e.sem <- struct{}{}:
 	case <-ctx.Done():
 		return nil, fmt.Errorf("%w: waiting for the previous operation: %w", signingauthority.ErrUnavailable, ctx.Err())
 	}
 	defer func() { <-e.sem }()
-
-	ctx, cancel := context.WithDeadline(ctx, e.deadline(ctx))
-	defer cancel()
 
 	cached := e.conn != nil
 	answer, err := e.attempt(ctx, operation, payload)
