@@ -122,7 +122,7 @@ func TestShardNodeSigningSelection(t *testing.T) {
 		require.Nil(t, signing.authority)
 	})
 
-	t.Run("with an authority no local signer is constructed", func(t *testing.T) {
+	t.Run("with an authority no local signer is kept", func(t *testing.T) {
 		signing, err := buildCertificationSigning(&shardNodeSigningFlags{
 			SigningAuthoritySocket: socket, SigningAuthorityCredential: credentialPath,
 		}, keyConf, conf)

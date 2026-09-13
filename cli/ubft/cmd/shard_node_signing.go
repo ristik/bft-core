@@ -25,7 +25,7 @@ type shardNodeSigningFlags struct {
 
 func (f *shardNodeSigningFlags) addSigningAuthorityFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.SigningAuthoritySocket, "signing-authority-socket", "",
-		"sign certification requests through the signing authority on this Unix socket (#105). The node then constructs no local signer, "+
+		"sign certification requests through the signing authority on this Unix socket (#105). The node then keeps no local signer, "+
 			"and abstains whenever the authority refuses or cannot be reached. Not set: the key configuration's signing key signs, as before")
 	cmd.Flags().StringVar(&f.SigningAuthorityCredential, "signing-authority-credential", "",
 		"with --signing-authority-socket: path to the client credential written by `signing-authority replace-session`")
@@ -36,8 +36,9 @@ func (f *shardNodeSigningFlags) addSigningAuthorityFlags(cmd *cobra.Command) {
 // certificationSigning is how this node signs certification requests. Exactly one of local and
 // authority is set.
 type certificationSigning struct {
-	// local is the key configuration's signer. It is nil when an authority signs: that node does not
-	// construct a local signer, so the round has none to fall back to.
+	// local is the key configuration's signer. It is nil when an authority signs: that node neither
+	// keeps nor passes on a local signer, so the round has none to fall back to. (localSigningKey
+	// builds a temporary one only to derive the public key it compares against the configuration.)
 	local abcrypto.Signer
 	// authority is installed on the round in place of the local key.
 	authority shardnode.CertificationSigner
