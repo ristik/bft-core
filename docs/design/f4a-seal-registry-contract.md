@@ -750,9 +750,15 @@ word.
 - A layout version change is a protocol upgrade: it needs a new genesis record or an explicit migration
   record, a new code hash, updated vectors for all three encodings, and the same reviewed activation
   path as any other fixed configuration field.
-- The Solidity compiler pin in `ristik/unicity-pos-contracts` (`solc 0.8.28`, `evm_version = "cancun"`)
-  affects the bytecode and therefore the code hash, not the layout. A compiler change is reviewed as a
-  code-hash change.
+- The Solidity compiler pin in `ristik/unicity-pos-contracts` affects the bytecode and therefore the code
+  hash, not the layout or the ABI. A compiler change is reviewed as a code-hash change.
+- **Amended by the SealRegistry implementation (#12):** the registry is compiled with `solc 0.8.37`,
+  `evm_version = "cancun"`, optimizer 200 runs, and the IR pipeline (`via_ir = true`, ordinary Yul IR, no
+  experimental features), with no metadata hash or CBOR trailer. The legacy code generator fails with
+  "stack too deep" on the ABI decoder of the sixteen-argument `open` of §6.1. The owner chose the IR
+  pipeline over changing the ABI, so the §6.1 signatures and selectors and the §4 layout are unchanged.
+  The compiler settings affect only the code hash, and through it the genesis record built over it
+  (§5.3).
 
 ## 12. Who checks what
 
