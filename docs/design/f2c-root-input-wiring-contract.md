@@ -54,6 +54,18 @@ borrowed:
 Whether the replay consumer is built at all is a separate unit. It is named here so the wiring unit
 does not quietly acquire one.
 
+**Built as `rootinput.AcceptBlock`** (F2d). It is the D1 half only: it takes its own copy of the block
+binding before authenticating anything, establishes the authorization through `Derive`, then checks
+the block's certified parent and its `extraData` commitment, reporting those two as separate failures
+from each other and from a derivation refusal. Both checks are substantive: the commitment covers the
+parent this node **pinned**, carried inside the canonical input, and says nothing about the parent the
+header itself names, so a header can carry exactly the right `extraData` while naming another parent
+and only the equality check rejects it. It stops at the header,
+so it cannot be mistaken for a body check, and the body stays with `evmroot.ValidateImport`. It is
+memoryless and grants nothing: a genuine block replays every time it is offered, and whether a round
+may be answered again is the caller's applied state and, for signing, the record in #105 step 2. It is
+wired nowhere.
+
 ## 3. Where each pinned input comes from, per call site
 
 `Derive` refuses rather than selecting, so every one of these is the caller's to source. "Independently
