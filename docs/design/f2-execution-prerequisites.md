@@ -55,6 +55,17 @@ Reading of the table: F2's verifier-owned derivation, its contract and its repla
 pure APIs with negative fixtures. None of #10's acceptance lines is demonstrated on a running node,
 and §2 shows why that cannot change inside F2 alone.
 
+### 1.3 Additional D2 integration obligations on #10
+
+The issue also carries the D2 integration checklist added after its original acceptance list. These
+remain open; the narrower tables above do not discharge them.
+
+| Obligation | Current evidence and remaining work |
+| --- | --- |
+| Verifier-owned `VerifiedCert` and `ExpectedTransitions`, from full UC and committed-body validation | `Derive` authenticates its supported certificate context; non-empty transitions remain unsupported. The D2 model is not a wired runtime verdict. Implement the actual boundary without accepting peer-supplied authentication flags. |
+| Real UC positives/negatives through build, follower import, sync and replay, including transition ordering and parent cursor | API/model fixtures exist, but the integrated paths and authenticated historical cursor are still missing. Retain the build/import/sync/replay cases on #10 until measured. |
+| Certified FIFO payload sequence and consumption cursor; verifier-derived gas and receipt results | D2 has model coverage, not a running forced-inbox implementation. The runtime must bind the ordered entries and consumption state and derive execution results itself; a count or caller-supplied gas summary is insufficient. Any initial empty-prefix profile must be explicit and reject unsupported non-empty input, not silently claim this obligation complete. |
+
 ## 2. The prerequisites that gate activation
 
 Each row is a guarantee that a merged contract names as a precondition for activating the canonical
@@ -142,7 +153,9 @@ input. "Source" is where the requirement is stated; "D2 row" refers to the devia
 - **Required guarantee.** `v0` and `v1` never both govern a block. Source: D1 §4, contract §9,
   `TestWiring_V0AndV1DisagreeForTheSameRound`.
 - **Dependency.** Replacing `DeriveAttributes` changes build and verify together, and a `v1` builder
-  without G1 produces no valid block. `v0` removal therefore lands with G1, not before it.
+  without G1 produces no valid block. `v0` removal is an activation change: it requires G1 through G4 together, including
+  the authenticated committed cursor, system operation and import checks. Provision code may land
+  earlier behind an inactive development path; it does not justify removing the working `v0` path.
 
 ## 3. Dependency order, and the decision it forces on #10
 
@@ -158,20 +171,23 @@ This is a decision for the owner, not something to settle by closing or relabell
 - **(b)** Keep #10 open as the owner of the wired acceptance lines, delivered by the F3/F4 slices
   below and recorded back on #10.
 
-Recommendation: **(b)**. Closing under (a) would leave "rejected before certification" satisfied by
-fixtures with no call site, which is the gap §1.2 records. Under (b) nothing is claimed that has not
-run.
+Review decision: **(b)**. Keep #10 open as the acceptance owner. F3/F4 implementation slices may
+proceed against the accepted F2 API contract without waiting for #10 closure; that is a bounded
+dependency split, not acceptance of unwired fixtures as running-node evidence. Option (a) would also
+require an explicit transfer of every remaining obligation rather than treating it as already met.
 
 ## 4. Proposed next bounded units
 
-Each is a proposal for the owner to accept, amend or reorder. None is claimed.
+Review sequencing: **U3 first**, then the inert U1 carrier and inactive U2 provision work, then U4
+integration. None is claimed by this document. U3 is design work allowed before the F3 implementation
+prerequisite of F4; it does not close or activate F4.
 
 | Unit | Repositories | Adds divergence? | Delivers |
 | --- | --- | --- | --- |
-| **U1. Canonical input on the shard protocol, inert** | bft-core | none in the execution client; a new version of the shard-internal dissemination protocol | G2's shard leg: the proposer binds its authorization to the disseminated block; followers authenticate it with `Derive` and check the header with `AcceptBlock` against `ExecutionPayloadV3.ExtraData`. The check is exercised with a test executor that writes the commitment (the existing `executortest` fake would need that ability added, which this document has not checked), and stays disabled against `engineapi`, because enabling it there halts the builder (contract §5). The cursor rule stays inactive and is refused by name until G4 exists (contract §6, first option). |
-| **U2. Build-path provision (first F3 slice)** | ureth, bft-core | yes: D2 row 6 (`engine_forkchoiceUpdatedWithSealV1` and `engine_getPayloadWithSealV1`, capability-negotiated) | G1 and G6 together: reth writes the commitment it is given; the adapter negotiates the capability at startup, derives through `v1`, and deletes `v0`. A real-reth lane shows builder provision and follower acceptance through the U1 check. It must also state, as a measured gap, that reth-only import paths still accept any 32-byte `extraData` until the import hook exists. |
+| **U1. Canonical input on the shard protocol, inert** | bft-core | none in the execution client; a new version of the shard-internal dissemination protocol | G2's shard leg: the proposer binds its authorization to the disseminated block; followers authenticate it with `Derive` and check the header with `AcceptBlock` against `ExecutionPayloadV3.ExtraData`. The check is exercised with a test executor that writes the commitment (the existing `executortest` fake would need that ability added, which this document has not checked), and stays disabled against `engineapi`, because enabling it there halts the builder (contract §5). Until G4 exists this is a bounded, versioned evidence carrier and fixture-only verification path, not an active production header check. Use explicit authenticated fixture context, never a dummy live cursor. No new message is permitted to change signing, execution or certification decisions before activation. |
+| **U2. Build-path provision (first F3 slice)** | ureth, bft-core | yes: D2 row 6 (`engine_forkchoiceUpdatedWithSealV1` and `engine_getPayloadWithSealV1`, capability-negotiated) | G1 provision implementation only, inactive in normal node operation: reth writes the per-block commitment in an isolated test path. Retain `v0` until U4 passes all activation gates. Do not advertise the accepted `WithSealV1` capabilities as implemented while their required system operation and import semantics are missing. A partial build-path experiment is not a D2-valid block or follower/import acceptance. The implementation must include a narrow upstream-delta review before enabling RPC exposure. |
 | **U3. SealRegistry storage layout** | bft-core (design), unicity-pos-contracts | no client change | a reviewed layout statement for G4 before any contract or system call writes to it |
-| **U4. System operation and registry (F3 then F4)** | ureth, unicity-pos-contracts, bft-core | yes: D2 rows 1, 3 and the import side of row 6 | G3 and G4: open and finalize steps, the committed cursor read through `eth_getProof`, and the cursor rule activated |
+| **U4. System operation and registry (F3 then F4)** | ureth, unicity-pos-contracts, bft-core | yes: D2 rows 1, 3 and the import side of row 6 | G3 and G4 plus coordinated G6 activation: open and finalize steps, authenticated initialization, parent-state cursor proof verification, complete D2 builder/follower/import/replay checks and companion availability. Only after G1–G4 work together may a separately reviewed activation replace `v0` with `v1`; never accept a zero/observed cursor as a temporary substitute |
 
 Two observations about minimizing divergence, recorded for the owner rather than acted on:
 
