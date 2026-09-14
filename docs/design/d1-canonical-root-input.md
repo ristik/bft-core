@@ -64,7 +64,7 @@ header commits:
 | authorized shard round | n | `TechnicalRecord.Round` | uint |
 | certified epoch | e_cert | `O_-.IR.Epoch` (the outgoing epoch the previous IR belongs to) | uint |
 | authorized epoch | e_auth | `TechnicalRecord.Epoch` (the epoch the authorized round runs under) | uint |
-| last certified EVM parent hash | h_parent | previous certified block's `h_b` (Ethereum); the pinned genesis block hash for the first post-genesis payload | bytes(32); null **only** for genesis installation (authorized round 0) |
+| last certified EVM parent hash | h_parent | previous certified block's `h_b` (Ethereum); the pinned genesis block hash for every payload authorized before any post-genesis block has been certified, whatever its authorized round (amended by F4a #153, `f4a-seal-registry-contract.md` §7.3) | bytes(32); null **only** for genesis installation (authorized round 0) |
 | root origin | O_- | §2 above | array |
 | technical record | TE_- | `TechnicalRecord` `(Round,Epoch,Leader,StatHash,FeeHash)` | array |
 | pending transitions | D | ordered committed trust-base bodies + handoff acks the EVM is still missing | array of bytes |
@@ -103,7 +103,7 @@ tags, no floats, no negative integers, no indefinite lengths. Adding any of thes
 is a version bump.
 
 `null` vs empty byte string is meaningful: `IR.h_b` is `null` **iff** the round
-is quiet (`IR.h == IR.h'`); `h_parent` is `null` **iff** the authorized shard round is 0 (genesis installation) — the first post-genesis payload authorizes round 1 and carries the real pinned genesis block hash. A present digest
+is quiet (`IR.h == IR.h'`); `h_parent` is `null` **iff** the authorized shard round is 0 (genesis installation) — the first post-genesis payload authorizes round `n ≥ 1` (round 1 unless root timeouts advanced the technical record first) and carries the real pinned genesis block hash. A present digest
 is always exactly 32 bytes. `h'` and `h` are never `null` — at genesis they carry
 the pinned genesis commitment.
 
@@ -224,7 +224,7 @@ selection.
 | Kind | `IR` shape | Block committed? | Cursors advanced | `rootInput` built? |
 |---|---|---|---|---|
 | **genesis installation** | authorized round `n = 0`; certified `IR.Round = 0`; `IR.h'`,`IR.h` = pinned genesis commitment; `IR.h_b` = null; **`h_parent` = null** (no block yet) | the pinned genesis block is installed, not executed | origin + assignment installed; transition/reward cursors empty | yes — but it installs, it does not execute a payload |
-| **first post-genesis payload** | authorized round `n = 1`; certified `IR.Round` still `0` (nothing certified after round 0); **`h_parent` = the real 32-byte pinned EVM genesis block hash** | yes — the first executed block | root origin (new seal) | yes — committed in `extraData`; the header parent equals `h_parent` (D2 checks this exactly) |
+| **first post-genesis payload** | authorized round `n ≥ 1`: round 1, or a later round when earlier assigned rounds timed out without a block (`ShardInfo.nextRound` advances the technical record on a timeout too); the certified input record is still genesis history (the genesis record, a repeat of it, or a quiet record extending it; nothing certified names a block); **`h_parent` = the real 32-byte pinned EVM genesis block hash**. Amended by F4a (#153), which states the eligibility rule in `f4a-seal-registry-contract.md` §7.3 | yes — the first executed block | root origin (new seal) | yes — committed in `extraData`; the header parent equals `h_parent` (D2 checks this exactly) |
 | **successful** | `h ≠ h'`; `h_b` present (32 bytes) | yes | root origin + transition cursor (if `D` non-empty) + reward cursor, **each once** | yes — committed in `extraData` |
 | **quiet** | `h = h'` ⇔ `h_b = null` | no block executed this shard round | root origin only (new seal); **not** transition/reward | yes — but no block carries it |
 | **repeat** | `IR` byte-identical to previous; strictly greater `r` | no | **none** — no second reward claim for an already-imported interval | no new commitment; the earlier block's `extraData` stands |
@@ -285,7 +285,7 @@ Notes:
 | … same commitment on all validators | `RootOriginFromCertificate` reads only committed content (no `Signatures`, no tree paths). The `O_-` projection is the signature-free view; full UC authentication (shard-tree / unicity-tree paths + `seal.Verify`) is a separate step the consumer performs — the two are not conflated |
 | … a different authenticated statement | `TestRootOrigin_DifferentAuthenticatedStatementDiffers` — the IR is mutated **and re-certified** (new seal recommitted over the mutated IR, re-signed to quorum, `seal.Verify(tb)` passes) before comparing identities |
 | … an independent derivation of the expected canonical bytes | `TestRootOrigin_IndependentCBOROracle`, `TestExtraData_IndependentOracle` — hand-rolled `evmroot/cbor.go` cross-checked against bft-go-base's fxamacker `CoreDetEnc` for the same logical arrays |
-| genesis installation distinct from the first post-genesis payload | §6 round-type table; `RootInput.Validate` keys the parent-null rule on the **authorized round** (`ri.Round`), not `Origin.IR.Round`; vectors `root_inputs.genesis_installation` (round 0, null parent) and `root_inputs.first_post_genesis_payload` (round 1, `Origin.IR.Round` still 0, real 32-byte pinned genesis parent); `TestRootInput_RejectsMalformedWidths` |
+| genesis installation distinct from the first post-genesis payload | §6 round-type table; `RootInput.Validate` keys the parent-null rule on the **authorized round** (`ri.Round`), not `Origin.IR.Round`; vectors `root_inputs.genesis_installation` (round 0, null parent) and `root_inputs.first_post_genesis_payload` (round 1, `Origin.IR.Round` still 0, real 32-byte pinned genesis parent; one instance of the row, which since F4a #153 does not require round 1); `TestRootInput_RejectsMalformedWidths` |
 | … malformed widths | `RootOrigin.Validate` / `RootInput.Validate` reject non-32-byte digests; `TestRootInput_RejectsMalformedWidths` |
 | … genesis, retries, root rounds skipped by the EVM | `root_origins`/`root_inputs` genesis + repeat + `root_rounds_skipped`; round-type table §6 |
 | a certified outgoing-IR / new-TR fixture imports the successor assignment, keeps the actual last certified parent | `root_inputs.epoch_handoff_boundary` (`e_cert=1`, `e_auth=2`, `h_parent` unchanged); `epoch_boundary` group; `TestRootInput_EpochBoundaryNotEqualityImposed` |

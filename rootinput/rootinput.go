@@ -124,7 +124,9 @@ func Derive(ctx context.Context, c Context, uc *types.UnicityCertificate, tr *ce
 	// Genesis installation (authorized round 0) is defined by D1 §6 but cannot be sourced from a live
 	// technical record: certification.TechnicalRecord.IsValid rejects round 0, so no such record
 	// exists on this pipeline. The first tuple this boundary produces is the first post-genesis
-	// payload at round 1, whose parent is the pinned EVM genesis block hash. See the mapping §5.1.
+	// payload, whose parent is the pinned EVM genesis block hash. That payload is authorized for
+	// round 1 unless root timeouts advanced the technical record first, so no rule here may assume
+	// round 1 (F4a #153, docs/design/f4a-seal-registry-contract.md §7.3). See the mapping §5.1.
 	if c.Round == 0 {
 		return Result{}, fmt.Errorf("%w: genesis installation (authorized round 0) is not derived here — no technical record can authorize round 0", ErrUnsupported)
 	}
