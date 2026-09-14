@@ -90,7 +90,7 @@ Only then are `Encode()`/`ExtraData()` meaningful, and the verified representati
 | successful (`h ≠ h'`, `h_b` present) | yes | all fields available from the certificate and the pinned parent |
 | quiet (`h = h'`, `h_b` null) | yes | same; no block carries the commitment, but the tuple is well defined |
 | repeat (identical `IR`, higher `r`) | yes, as input | D1: no new commitment; the earlier block's `extraData` stands. The cursor rule in §3.5 is what distinguishes a stale binding from a current one |
-| first post-genesis payload (`n = 1`, certified `IR.Round` 0, `h_parent` = pinned genesis block hash) | yes | the pinned genesis hash is deployment context the node already binds at startup (#89's expected-genesis check) |
+| first post-genesis payload (`n ≥ 1`, certified input record still genesis history, `h_parent` = pinned genesis block hash; `n` exceeds 1 when initial rounds timed out, amended by F4a #153) | yes | the pinned genesis hash is deployment context the node already binds at startup (#89's expected-genesis check) |
 
 **Refused, by name, rather than approximated:**
 
@@ -107,7 +107,7 @@ Only then are `Encode()`/`ExtraData()` meaningful, and the verified representati
 1. **Genesis installation vs `TechnicalRecord.IsValid`.** D1 §6's genesis-installation row authorizes
    shard round 0 with a null parent, while the live technical record type refuses `Round == 0`. Either
    the row is not produced by this boundary (genesis is installed from deployment configuration, and
-   the first tuple this API ever produces is the first post-genesis payload at `n = 1`), or D1/the
+   the first tuple this API ever produces is the first post-genesis payload at `n ≥ 1`, round 1 unless root timeouts came first, as amended by F4a #153), or D1/the
    record type needs an explicit statement of how a round-0 authorization is represented. F2b will
    implement the first reading and refuse `n = 0` with that named reason; changing it is a D1 revision.
 2. **Seal-registry cursor.** D1 §5 makes `lastAppliedRootRound` committed state. No such registry

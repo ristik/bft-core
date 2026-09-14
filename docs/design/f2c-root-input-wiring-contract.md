@@ -78,7 +78,7 @@ re-selection, not a looser one.
 | Pinned input | Builder | Follower / import | Replay (when built) |
 |---|---|---|---|
 | **authorization** (`uc`, `tr`) | any certificate that is valid, authorizes round `n`, and is not behind this node's own cursor. The builder **binds** it: its `O_-` is committed in `extraData` and the full `UC_-`/`TE_-` travel in the D2 companion (D1 §5.1) | **the certificate the block binds**, read from the companion and authenticated here against this node's own trust base, configured identity and committed cursor. Never re-picked from this node's own inbox (§3.1) | the certificate the stored block binds, re-authenticated on load against the same configured context |
-| **certified parent** `h_parent` | the last state-changing certified block, from `continuityState.anchor` via `recoveryTarget`, which is what `Round.reconcile` already uses. **Not** `uc.InputRecord.BlockHash` read unconditionally: a quiet certificate carries none by construction, which is the #92 defect (`shardnode/round.go:380`). For the first post-genesis payload it is the pinned genesis block hash | the same rule applied to the **bound** certificate's certified state (D1 §5.4: continuity is checked against `O_-.IR.Hash`, never a later local execution head), then cross-checked against the payload header's own `parentHash` | the parent recorded for that round in the replayed chain, cross-checked the same way |
+| **certified parent** `h_parent` | the last state-changing certified block, from `continuityState.anchor` via `recoveryTarget`, which is what `Round.reconcile` already uses. **Not** `uc.InputRecord.BlockHash` read unconditionally: a quiet certificate carries none by construction, which is the #92 defect (`shardnode/round.go:380`). Until a certificate names a post-genesis block, the anchor is the authenticated genesis and the parent is the pinned genesis block hash, for whatever round the first payload is authorized, not only round 1 (amended by F4a #153, `f4a-seal-registry-contract.md` §7.3) | the same rule applied to the **bound** certificate's certified state (D1 §5.4: continuity is checked against `O_-.IR.Hash`, never a later local execution head), then cross-checked against the payload header's own `parentHash` | the parent recorded for that round in the replayed chain, cross-checked the same way |
 | **configuration** | the node's configured `ShardConfHash`, threaded from startup (#134/#135). Never the certificate's own value | same | same |
 | **committed seal-registry cursor** `lastAppliedRootRound` | **not available on this branch**: no seal registry exists, so the builder cannot source it from committed state. See §6 | same | same |
 | **round** `n` | `TechnicalRecord.Round`, stated by the caller and cross-checked by `Derive` (`ErrNotPinned`), never read out of the record and trusted | same | same |
@@ -233,7 +233,7 @@ not a derived tuple: the executor's block zero, reported by `Executor.GenesisBlo
 configuration rather than from an observed head, and already bound at startup by the expected-genesis
 check (#89).
 
-The first tuple this API ever produces is the first post-genesis payload at `n = 1`, whose
+The first tuple this API ever produces is the first post-genesis payload, at `n = 1` unless root timeouts advanced the technical record first (amended by F4a #153, §7.3 there), whose
 `h_parent` is that pinned genesis block hash. The wiring unit inherits that rule; changing it is a
 D1 revision, recorded in `docs/design/f2b-root-input-derivation-mapping.md` §5.1.
 

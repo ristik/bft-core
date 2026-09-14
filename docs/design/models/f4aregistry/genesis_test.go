@@ -1,12 +1,14 @@
 // Package f4aregistry is an executable design for docs/design/f4a-seal-registry-contract.md. It is not
 // a registry implementation, a genesis generator or a proof reader. It pins the non-circular genesis
-// construction (§5), the slot-key derivation (§4.1) and the worked vector (§5.4), so the document's
-// bytes are reproducible with:
+// construction and its startup context check (§5), the slot-key derivation (§4.1), the worked vector
+// (§5.4) and the genesis-parent eligibility rule (§7.3), so the document's bytes and rules are
+// reproducible with:
 //
 //	go test ./docs/design/models/f4aregistry/ -v
 package f4aregistry
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/sha256"
 	"encoding/hex"
@@ -36,6 +38,7 @@ var (
 	errGenesisEncoding = errors.New("seal_registry_genesis is not 64 lowercase hex characters")
 	errGenesisMismatch = errors.New("seal_registry_genesis does not equal the commitment recomputed from G")
 	errChainIDMismatch = errors.New("G chain id does not equal the configured chain_id")
+	errContextMismatch = errors.New("G does not match the configured context")
 
 	lowerHex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -87,6 +90,19 @@ func (g genesis) commitment() ([]byte, error) {
 	return sum[:], nil
 }
 
+// pins are the expected values that do not come from the shard configuration record: the epoch of
+// the node's configured root trust base, and the deployment's registry code hash and addresses. They
+// are configured independently of G, so a G that names other values is refused even when its own
+// commitment is internally consistent.
+type pins struct {
+	RootEpoch        uint64
+	RegistryCodeHash []byte
+	ASys, ASr        [20]byte
+}
+
+// deploymentPins are the vector deployment's independent pins.
+var deploymentPins = pins{RootEpoch: 1, RegistryCodeHash: keccak(placeholderCode), ASys: aSys, ASr: aSr}
+
 // baseConfig is step 1 of §5.3: the record with only seal_registry_genesis removed. chain_id must
 // remain, so the reduced map is never empty and nil-versus-empty map encoding never arises.
 func baseConfig(pdr *types.PartitionDescriptionRecord) (*types.PartitionDescriptionRecord, error) {
@@ -103,9 +119,17 @@ func configHash(pdr *types.PartitionDescriptionRecord) ([]byte, error) {
 	return pdr.Hash(crypto.SHA256)
 }
 
-// verifyConfiguredGenesis is the startup check of §5.3 over a full configuration and a configured G.
-// It returns the full shard configuration hash, which is what registry storage must hold.
-func verifyConfiguredGenesis(full *types.PartitionDescriptionRecord, g genesis) ([]byte, error) {
+/*
+verifyGenesisContext is the startup check of §5.3 over a full configuration, the independent pins and
+a configured G. It returns the full shard configuration hash, which is what registry storage must hold.
+
+Identity is compared field by field BEFORE any digest is trusted. Hash consistency shows only that G,
+its commitment and the configuration parameter agree with one another; a G for another network, with
+the parameter updated to match, is exactly as consistent. Every G field is therefore checked against a
+value that does not come from G: the configuration record for network, partition, shard, chain id and
+shard epoch, and the independent pins for root epoch, code hash and addresses.
+*/
+func verifyGenesisContext(full *types.PartitionDescriptionRecord, p pins, g genesis) ([]byte, error) {
 	raw, ok := full.PartitionParams[genesisParam]
 	if !ok || !lowerHex64.MatchString(raw) {
 		return nil, errGenesisEncoding
@@ -118,11 +142,28 @@ func verifyConfiguredGenesis(full *types.PartitionDescriptionRecord, g genesis) 
 	if err != nil || chainID != g.ChainID {
 		return nil, errChainIDMismatch
 	}
+	for _, c := range []struct {
+		name string
+		ok   bool
+	}{
+		{"network", g.NetworkID == uint64(full.NetworkID)},
+		{"partition", g.PartitionID == uint64(full.PartitionID)},
+		{"shard", bytes.Equal(g.ShardID, full.ShardID.Bytes())},
+		{"shard epoch", g.ShardEpoch == full.Epoch},
+		{"root epoch", g.RootEpoch == p.RootEpoch},
+		{"registry code hash", bytes.Equal(g.RegistryCodeHash, p.RegistryCodeHash)},
+		{"a_sys", g.ASys == p.ASys},
+		{"a_sr", g.ASr == p.ASr},
+	} {
+		if !c.ok {
+			return nil, fmt.Errorf("%w: %s", errContextMismatch, c.name)
+		}
+	}
 	baseHash, err := configHash(base)
 	if err != nil {
 		return nil, err
 	}
-	if hex.EncodeToString(baseHash) != hex.EncodeToString(g.BaseConfigHash) {
+	if !bytes.Equal(baseHash, g.BaseConfigHash) {
 		return nil, fmt.Errorf("G base configuration hash %x is not the configuration's %x", g.BaseConfigHash, baseHash)
 	}
 	c, err := g.commitment()
@@ -133,6 +174,11 @@ func verifyConfiguredGenesis(full *types.PartitionDescriptionRecord, g genesis) 
 		return nil, errGenesisMismatch
 	}
 	return configHash(full)
+}
+
+// verifyConfiguredGenesis runs the §5.3 check against the vector deployment's pins.
+func verifyConfiguredGenesis(full *types.PartitionDescriptionRecord, g genesis) ([]byte, error) {
+	return verifyGenesisContext(full, deploymentPins, g)
 }
 
 // build runs steps 1 to 4 of §5.3 from a configuration that does not yet carry the parameter.
@@ -146,9 +192,9 @@ func build(t *testing.T, withoutParam *types.PartitionDescriptionRecord) (genesi
 	require.NoError(t, err)
 	g := genesis{
 		NetworkID: uint64(base.NetworkID), PartitionID: uint64(base.PartitionID), ShardID: base.ShardID.Bytes(),
-		ChainID: chainID, ASys: aSys, ASr: aSr,
-		RegistryCodeHash: keccak(placeholderCode), BaseConfigHash: baseHash,
-		ShardEpoch: base.Epoch, RootEpoch: 1,
+		ChainID: chainID, ASys: deploymentPins.ASys, ASr: deploymentPins.ASr,
+		RegistryCodeHash: deploymentPins.RegistryCodeHash, BaseConfigHash: baseHash,
+		ShardEpoch: base.Epoch, RootEpoch: deploymentPins.RootEpoch,
 	}
 	c, err := g.commitment()
 	require.NoError(t, err)
@@ -158,6 +204,18 @@ func build(t *testing.T, withoutParam *types.PartitionDescriptionRecord) (genesi
 	fullHash, err := configHash(&full)
 	require.NoError(t, err)
 	return g, c, &full, fullHash
+}
+
+// withCommitment returns full with the parameter set to g's commitment: the self-consistent form of a
+// possibly wrong G.
+func withCommitment(t *testing.T, full *types.PartitionDescriptionRecord, g genesis) *types.PartitionDescriptionRecord {
+	t.Helper()
+	c, err := g.commitment()
+	require.NoError(t, err)
+	altered := *full
+	altered.PartitionParams = maps.Clone(full.PartitionParams)
+	altered.PartitionParams[genesisParam] = hex.EncodeToString(c)
+	return &altered
 }
 
 // vectorConfig is the illustrative configuration of §5.4.
@@ -260,16 +318,19 @@ func TestGenesisRefusals(t *testing.T) {
 	}
 	t.Run("configuration names a commitment for a different G", func(t *testing.T) {
 		other := g
-		other.RootEpoch = 2
+		other.BaseConfigHash = keccak([]byte("another base"))
 		_, err := verifyConfiguredGenesis(full, other)
-		require.ErrorIs(t, err, errGenesisMismatch)
+		require.Error(t, err)
+		// The parameter still names the original G, so only the base-hash or commitment check can
+		// refuse; neither is the context check.
+		require.NotErrorIs(t, err, errContextMismatch)
 	})
 	t.Run("G built over the full hash instead of the base hash", func(t *testing.T) {
 		fullHash, err := configHash(full)
 		require.NoError(t, err)
 		circular := g
 		circular.BaseConfigHash = fullHash
-		_, err = verifyConfiguredGenesis(full, circular)
+		_, err = verifyConfiguredGenesis(withCommitment(t, full, circular), circular)
 		require.Error(t, err)
 	})
 	t.Run("another configuration field changed after G was built", func(t *testing.T) {
@@ -279,6 +340,41 @@ func TestGenesisRefusals(t *testing.T) {
 		_, err := verifyConfiguredGenesis(&bad, g)
 		require.Error(t, err)
 	})
+}
+
+// TestSelfConsistentWrongContextIsRefused is review 5195786713's finding, generalized to every G field
+// that has an independent expected value. Each case first establishes that the altered configuration
+// parameter really is G's own commitment, so the refusal cannot come from a hash mismatch.
+func TestSelfConsistentWrongContextIsRefused(t *testing.T) {
+	g, _, full, _ := build(t, vectorConfig())
+	for name, c := range map[string]struct {
+		mutate func(*genesis)
+		want   error
+	}{
+		"network":            {func(x *genesis) { x.NetworkID++ }, errContextMismatch},
+		"partition":          {func(x *genesis) { x.PartitionID++ }, errContextMismatch},
+		"shard":              {func(x *genesis) { x.ShardID = []byte{0xc0} }, errContextMismatch},
+		"shard epoch":        {func(x *genesis) { x.ShardEpoch++ }, errContextMismatch},
+		"root epoch":         {func(x *genesis) { x.RootEpoch++ }, errContextMismatch},
+		"registry code hash": {func(x *genesis) { x.RegistryCodeHash = keccak([]byte{0x01}) }, errContextMismatch},
+		"a_sys":              {func(x *genesis) { x.ASys[19] ^= 0xff }, errContextMismatch},
+		"a_sr":               {func(x *genesis) { x.ASr[19] ^= 0xff }, errContextMismatch},
+		"chain id":           {func(x *genesis) { x.ChainID++ }, errChainIDMismatch},
+	} {
+		t.Run(name, func(t *testing.T) {
+			wrong := g
+			wrong.ShardID = append([]byte(nil), g.ShardID...)
+			c.mutate(&wrong)
+			altered := withCommitment(t, full, wrong)
+
+			wc, err := wrong.commitment()
+			require.NoError(t, err)
+			require.Equal(t, hex.EncodeToString(wc), altered.PartitionParams[genesisParam], "premise: self-consistent")
+
+			_, err = verifyConfiguredGenesis(altered, wrong)
+			require.ErrorIs(t, err, c.want)
+		})
+	}
 }
 
 func TestEveryGenesisFieldIsCommitted(t *testing.T) {

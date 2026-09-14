@@ -259,8 +259,12 @@ A node refuses to start the canonical-input path unless all of these hold, each 
 never a reset:
 
 - the configured `seal_registry_genesis` is correctly encoded (§5.2);
-- the configured `G` fields match the node's own configuration: `α`, `β`, `σ`, `χ`, `a_sys`, `a_sr`,
-  `registryCodeHash`, `shardEpoch`, and `rootEpoch` equal to the configured trust base's epoch;
+- every configured `G` field equals a value that does not come from `G`, compared field by field
+  before any digest is trusted: `α`, `β`, `σ`, `χ` and `shardEpoch` against the configuration record,
+  and `rootEpoch`, `registryCodeHash`, `a_sys` and `a_sr` against independent pins (the configured
+  root trust base's epoch, and the deployment's code hash and addresses). Hash consistency is not
+  identity: a `G` for another network, with the parameter updated to its commitment, is exactly as
+  self-consistent (review 5195786713, P2);
 - `baseConfig`, recomputed by the omission rule from the configured record, hashes to `G.baseConfigHash`;
 - `SHA-256(CBOR(G))` equals the configured parameter;
 - the configured record hashes to the configured `ShardConfHash` (#134 already enforces this);
@@ -434,7 +438,7 @@ caller needs, for the block that builds on that parent.
 
 | Input | Source | Not acceptable |
 | --- | --- | --- |
-| `parentHash` | the certified parent for the round being built, validated or replayed: the last state-changing certified block (`continuityState.anchor`, contract §3), or `evmGenesisHash` for `n = 1` (D1 §6) | the executor's head; "latest"; a block number |
+| `parentHash` | the certified parent for the round being built, validated or replayed: the last state-changing certified block (`continuityState.anchor`, contract §3); before any post-genesis block is certified, `evmGenesisHash` for whatever round is authorized, under the eligibility rule of §7.3 | the executor's head; "latest"; a block number; a rule keyed on `n = 1` |
 | configured `G`, `genesisCommitment`, `fullShardConfHash` | node configuration, verified by §5.3 | anything returned by the execution client |
 | account and slot keys | `a_sr` and the fixed §4.1 key list | an address or key supplied at runtime |
 
@@ -461,10 +465,46 @@ caller needs, for the block that builds on that parent.
    their genesis values. A zero `layoutVersion` or `genesisCommitment` is "registry not initialized at
    this block", a refusal.
 6. **Parent consistency.** Unless the parent is `evmGenesisHash`, require
-   `outcomes.round == round.authorized` and `outcomes.commitment != 0`.
+   `outcomes.round == round.authorized` and `outcomes.commitment != 0`. If the parent is
+   `evmGenesisHash`, apply the genesis-parent eligibility rule below instead.
 7. **Result.** Return a typed value carrying the decoded fields together with `parentHash`,
    `header.number` and `header.stateRoot` as provenance. `LastAppliedRootRound` for the next derivation
    is `clock.rootRound` from this result and from nowhere else.
+
+**Genesis as the initial certified parent.** The certified parent is the last certified block that
+changed state. Until a certificate names a post-genesis block, that block is the authenticated EVM
+genesis, and it stays the parent **for every authorized round**, however many rounds time out first.
+A rule keyed on shard round 1 is wrong: on a root timeout, `Extend` passes a nil certification request
+(`rootchain/consensus/storage/block_executor.go`, "timeout IR change request do not have BCR") and
+`ShardInfo.nextRound` still increments the technical-record round (`sharding.go:547`), so the first
+payload can be authorized for round 2 or later with no block certified in between (review 5195786713,
+P1). The registry imposes no round-1 assumption either: O4 requires only `n > round.authorized`, which
+is `0` at genesis.
+
+`evmGenesisHash` is an eligible parent for authorized round `n` only when all of these hold, each
+established from authenticated evidence:
+
+| # | Condition | Evidence |
+| --- | --- | --- |
+| E1 | `n > 0`; round 0 is installation, not a payload | the authenticated technical record (`Derive`) |
+| E2 | the bound certificate's input record is genesis history: `IR.h_b` null, `IR.h` and `IR.h'` equal the pinned genesis state commitment, `IR.n < n`. This is the genesis installation record, a repeat of it after timeouts, or a quiet record extending it | the authenticated, block-bound certificate |
+| E3 | the parent header hashes to `evmGenesisHash` and has number 0 | §7.3 step 1 |
+| E4 | the registry proven at that parent has `round.authorized = 0` and `certified.round = 0` | §7.3 steps 2 to 5 |
+
+State-root equality alone is not the rule. E2 authenticates that the certificate names no block, E3
+binds the exact block, and E4 authenticates that the parent's registry executed no round. As a
+supporting property, not a check: in `sealRegistry/v1` every successful block strictly increases
+`round.authorized` (O4), so no post-genesis state can equal the genesis state.
+
+`genesisParentEligible` in `docs/design/models/f4aregistry/genesisparent_test.go` states the rule;
+`TestGenesisParentDoesNotDependOnRoundOne` accepts first payloads at rounds 1, 2 and 4 and after a quiet
+genesis-state round, and shows a round-1 rule would reject the later ones;
+`TestGenesisParentRefusals` covers each of E1 to E4 with its premise established first.
+
+This amends the round-1 wording inherited from D1 §2, §3 and §6, `f2b-root-input-derivation-mapping.md`
+§4 and §5.1, `f2c-root-input-wiring-contract.md` §3 and §7, and the `rootinput.Derive` comment; each of
+those now states the rule explicitly and refers here. D1's vector `root_inputs.first_post_genesis_payload`
+stays as it is: it is one instance, at round 1, of the amended row.
 
 ### 7.4 The verifier and the wrapper around it
 
@@ -537,19 +577,40 @@ The requirement has two parts, and the first does not substitute for the second:
    execution lag and recovery envelope, chosen per deployment with its rationale recorded in the
    implementation unit. A window only permits historical requests. It does not guarantee the client
    still holds the underlying state, which depends on its pruning configuration.
-2. **Retained verified proof material.** For every certified block it has applied, a node retains the
-   parent-state witness that §7 needs for the next round:
-   - the RLP header of the parent block;
-   - the account proof for `a_sr` and the storage proofs for the fixed key list;
-   - indexed by the parent block hash;
-   - stored next to the D2 companion data it already retains (D2 §2 "Companion retention", row 7);
-   - with a stated per-entry size bound (from §7.4's bounds) and the same published retention horizon
-     as companions, owned by the shard node's storage and composed with F6 (#14) durable certification
-     storage and F7 (#15) archive serving;
-   - re-verified by §7.3 on every reuse.
+2. **Retained verified proof material.**
 
-   The node also retains the proof at `evmGenesisHash`, so that §5.3's startup check still works after
-   genesis has left every client's proof window.
+**One witness per block, named by the block whose post-state it proves.** `witness(X)` is the RLP
+header of block `X` together with the account proof for `a_sr` and the storage proofs for the fixed key
+list, taken at `X`'s `stateRoot`, and indexed by `X`'s hash. Two block relationships use it, and they
+must not be confused:
+
+| Operation | Needs | Because |
+| --- | --- | --- |
+| **replay or re-validate** a certified block `B` whose parent is `P` | `witness(P)` | `B`'s derivation reads the registry as of `B`'s parent (§8.1) |
+| **build, validate or sign for** the child `C` of a certified block `B` | `witness(B)` | `C`'s derivation reads the registry as of `B` |
+
+So `witness(B)` is first needed for the round after `B` and is needed again whenever `C` is replayed.
+
+**Acquisition.** A node captures `witness(B)` when it applies `B`'s certificate and commits `B`, which
+is when `B` becomes the certified anchor. At that moment `B` is its execution client's best block, so
+even a zero proof window can serve the request. The node verifies it by §7.3 and stores it in the same
+write that records `B`'s certified association: F6 (#14) requires "certified head, UC, technical record,
+canonical inputs and replay cursors" to be associated atomically, and `witness(B)` belongs to that
+record. `witness(evmGenesisHash)` is captured during the §5.3 startup check.
+
+**Readiness.** A node that holds no verified `witness(B)` is not ready for `C`'s round: it does not
+build, validate or sign for `C`, and reports "proof unavailable" rather than falling back. If `B` has
+already left the client's window, or the state was pruned, before the node captured the witness (for
+example because the node was down), the node obtains `witness(B)` from retained storage on another
+node through F7 (#15) archive serving, re-verifies it by §7.3 against `B`'s authenticated hash, and
+stays not ready until that succeeds. Serving witnesses to such nodes is part of F7's availability
+obligation; durable local association is part of F6's.
+
+**Bounds and retention.** Each entry is bounded by §7.4's size limits. Witnesses follow the same
+published retention horizon as D2 companions (D2 §2 "Companion retention", row 7), stored alongside
+them, and every reuse re-verifies by §7.3. A node keeps `witness(evmGenesisHash)` for as long as it
+may run the §5.3 startup check, so startup still works after genesis has left every client's proof
+window.
 
 Retained proofs are **auxiliary witnesses, not consensus fields**. They are not hashed into `rootInput`,
 `extraData`, the block or any certificate. Two different valid encodings of a proof for the same account
@@ -596,6 +657,23 @@ transactions.
 
 The block changes state (the registry words), so its certification is a successful round, not a quiet
 one (D1 §6 note on governance-shard rounds).
+
+### 9.2a Initial timeout: first payload for shard round 2 (EVM block 1)
+
+An alternative to §9.2. Round 1's certification times out at the root. The root repeats the genesis
+input record (`IR.n = 0`, `IR.h' = IR.h = S0`, `IR.h_b = null`) at root round `r = 7`, with a
+technical record for round 2. No block is certified for round 1, and the registry is untouched.
+
+- Parent selection: E1 `2 > 0`; E2 the bound record names no block, its states are `S0` and
+  `IR.n = 0 < 2`; E3 the parent header is `evmGenesisHash`, number 0; E4 the registry at genesis has
+  `round.authorized = 0`, `certified.round = 0`. The parent is `evmGenesisHash`.
+- `open(n=2, rootRound=7, …, certifiedRound=0, stateHash=S0, hasBlockHash=false, blockHash=0,
+  inputCommitment=X2', transitionCount=0)`. O4 `2 > 0`, O5 `7 >= 0`. Then `finalize(n=2, R2')`.
+- Post-state: `clock.rootRound = 7`, `round.authorized = 2`, `certified.round = 0`. The EVM block is
+  number 1 and its shard round is 2.
+
+A rule that permitted `evmGenesisHash` only for `n = 1` would give this payload no permitted parent, and
+the shard would halt after a single initial timeout.
 
 ### 9.3 Ordinary block (shard round 2, EVM block 2)
 
@@ -695,7 +773,10 @@ word.
 
 In this document's model (`docs/design/models/f4aregistry`, run by `go test`):
 `TestGenesisVector` (§5.4 bytes), `TestSlotKeys` (§4.1 keys, no collision), `TestGenesisRefusals`
-(§5.3 refusals), `TestEveryGenesisFieldIsCommitted`.
+(§5.3 refusals), `TestSelfConsistentWrongContextIsRefused` (every `G` field against its independent
+expected value, each case with a self-consistent commitment), `TestEveryGenesisFieldIsCommitted`,
+`TestGenesisParentDoesNotDependOnRoundOne` and `TestGenesisParentRefusals` (§7.3 genesis-parent rule),
+and `TestReview153SelfConsistentWrongGenesisContext` (the review's reproducer, unchanged).
 
 For the implementation units (inert U1 carrier, inactive U2 provision, U4 integration), listed so each is
 decidable from this document:
@@ -737,6 +818,14 @@ decidable from this document:
 | Contract re-checks | keep the bounded invariant checks; signature verification and derivation stay outside Solidity; state what the checks cannot prove; "one epoch" includes the root epoch | §0, §6.2, §9.5 |
 | Go proof verifier | go-ethereum RLP/trie primitives behind a narrow interface, pinned, subject to dependency and licence review; the wrapper owns block, account, keys, bounds, absence and decoding | §7.4, §13 item 11 |
 | Proof availability | a supported live window plus retained, re-verified historical proof material alongside D2 companions, including a retained genesis proof; auxiliary witnesses, not consensus fields; retained proofs distinguished from unverified cached values | §7.5, §8.2, §13 item 9 |
+
+Review 5195786713 (of `c2a8398b`):
+
+| Finding | Resolution | Applied in |
+| --- | --- | --- |
+| P1: genesis-parent eligibility keyed on `n = 1` strands the shard after an initial timeout | eligibility from authenticated history (E1 to E4), independent of the round number and not state-root equality alone; worked initial-timeout example; round-1 wording amended explicitly in D1, F2b, F2c and the `rootinput.Derive` comment | §7.2, §7.3, §9.2a, D1 §2/§3/§6/§9, F2b §4/§5.1, F2c §3/§7, `rootinput/rootinput.go`, model `genesisparent_test.go` |
+| P2: a self-consistent `G` for another context passed the startup check | every `G` field compared with an independent expected value before digests are trusted | §5.3, model `verifyGenesisContext` and `TestSelfConsistentWrongContextIsRefused` |
+| Retention indexing off-by-one | `witness(X)` names the block whose post-state it proves; replaying `B` needs `witness(P)`, building `B`'s child needs `witness(B)`; acquisition at commit, readiness, recovery through F7, atomic association with F6 | §8.2 |
 
 Still to be settled in the implementation units, not here: the deployment's proof-window size and
 retention horizon, the numeric proof bounds, and the outcome of the dependency review.
