@@ -466,7 +466,9 @@ caller needs, for the block that builds on that parent.
    this block", a refusal.
 6. **Parent consistency.** Unless the parent is `evmGenesisHash`, require
    `outcomes.round == round.authorized` and `outcomes.commitment != 0`. If the parent is
-   `evmGenesisHash`, apply the genesis-parent eligibility rule below instead.
+   `evmGenesisHash`, its authenticated initialization values are checked instead. Genesis proof
+   verification at startup requires no execution authorization. When a caller proposes to use genesis
+   as a payload parent, it additionally applies E1–E4 below; that is a separate eligibility decision.
 7. **Result.** Return a typed value carrying the decoded fields together with `parentHash`,
    `header.number` and `header.stateRoot` as provenance. `LastAppliedRootRound` for the next derivation
    is `clock.rootRound` from this result and from nowhere else.
@@ -592,8 +594,9 @@ must not be confused:
 So `witness(B)` is first needed for the round after `B` and is needed again whenever `C` is replayed.
 
 **Acquisition.** A node captures `witness(B)` when it applies `B`'s certificate and commits `B`, which
-is when `B` becomes the certified anchor. At that moment `B` is its execution client's best block, so
-even a zero proof window can serve the request. The node verifies it by §7.3 and stores it in the same
+is when `B` becomes the certified anchor. The request names `B` by hash; it must not assume that the
+client still reports `B` as its best block when the request runs. The supported proof window and the
+unavailable-witness rules below apply. The node verifies it by §7.3 and stores it in the same
 write that records `B`'s certified association: F6 (#14) requires "certified head, UC, technical record,
 canonical inputs and replay cursors" to be associated atomically, and `witness(B)` belongs to that
 record. `witness(evmGenesisHash)` is captured during the §5.3 startup check.
