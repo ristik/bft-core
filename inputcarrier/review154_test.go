@@ -24,7 +24,8 @@ func TestReview154RejectedFirstDeliveryDoesNotPoisonRound(t *testing.T) {
 	_, err := inputcarrier.Verify(context.Background(), s.ctx, s.env, s.header)
 	require.NoError(t, err)
 	r := newReceiver(t, inputcarrier.DefaultTransportLimits)
-	require.NoError(t, r.Expect(s.env.ShardRound, inputcarrier.Expectation{BlockHash: s.env.BlockHash})) // the one added line
+	// The one added line. Since review 5196862602 it also pins the finite eligible sender set.
+	require.NoError(t, r.Expect(s.env.ShardRound, inputcarrier.Expectation{BlockHash: s.env.BlockHash, Senders: []string{"attacker", "honest-proposer"}}))
 	bad := s.env
 	bad.Certificate = []byte{0x80}
 	require.NoError(t, r.Serve(bytes.NewReader(frame(t, bad)), "attacker"))

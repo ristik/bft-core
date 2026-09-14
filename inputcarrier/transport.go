@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -25,20 +26,28 @@ against its own configured trust. The shape follows shardnode/evidencetransport.
 network.deserializeMsg, which decodes whatever length a peer declares: here the declared length is
 checked before a body byte is read.
 
-ADMISSION IS SCOPED BY THE CALLER, AND ARRIVAL ORDER DECIDES NOTHING (review 5196428126, P1). A receiver
-accepts deliveries only for rounds the caller has declared with Expect, and only for the block that
-declaration names (and, when given, from the expected proposer). Within a declared round it holds a
-bounded set of distinct candidates, at most one pending per peer. The caller examines candidates with
-Await, and answers each with Reject or Accept after verifying it. A rejected candidate is removed and
-remembered, so it cannot occupy the round again, and its sender is charged for it; an honest witness
-that arrives before or after the rejection still has room. Nothing here chooses between candidates by
-arrival or replaces one with a later one: only the caller's verdict settles a round.
+ADMISSION IS SCOPED BY THE CALLER, AND ARRIVAL ORDER DECIDES NOTHING (review 5196428126). A receiver
+accepts deliveries only for rounds the caller has declared with Expect, only for the block that
+declaration names, and only from the finite set of eligible senders it pins (review 5196862602). Within a
+declared round each eligible sender holds at most one pending candidate. The caller examines candidates
+with Await, and answers each with Reject or Accept after verifying it. A rejected candidate is removed
+and remembered, so it cannot occupy the round again, and its sender is charged for it. Nothing here
+chooses between candidates by arrival or replaces one with a later one: only the caller's verdict
+settles a round.
 
-WHAT AN UNTRUSTED PEER CAN DO THROUGH THIS FILE. Hold at most its per-peer share of the stream bound,
-each stream for at most one deadline; send a frame that is discarded without being decoded; place at
-most one pending candidate in a round the caller declared, and at most MaxRejectsPerPeer rejected ones;
-and cost the caller one verification per candidate. It cannot open a round, fill rounds the caller did
-not declare, or keep an honest witness out of a declared round. Availability, never finality.
+EVERY RETAINED STRUCTURE IS BOUNDED. Declared rounds by MaxPendingRounds; per round, eligible senders by
+MaxSendersPerRound, and therefore pending candidates and rejection counters by the same bound, since
+both are keyed by eligible sender; rejected digests by MaxRejectedPerRound. A delivery from a sender
+outside the pinned set changes no retained state at all.
+
+WHAT A PEER CAN DO THROUGH THIS FILE. Any peer: hold at most its per-peer share of the stream bound,
+each stream for at most one deadline, and have one frame of at most FrameBytes read and decoded. A peer
+outside a round's eligible set can do nothing more in that round. An eligible sender can additionally
+hold one pending candidate and have at most MaxRejectsPerPeer candidates rejected, costing the caller at
+most MaxRejectsPerPeer+1 verifications in the round. The honest-witness guarantee is stated on that
+premise: an honest sender in the caller-pinned set always has its own candidate slot, whatever the other
+eligible senders do, so its witness is examined. If the honest proposer is not in the set, or the set is
+wrong, the caller has chosen not to receive its witness. Availability, never finality.
 */
 
 // Protocol is the carrier's protocol. It is separate from shardnode.ProtocolShardPayload, whose
@@ -53,22 +62,22 @@ var (
 	ErrNotAdmitted = errors.New("inputcarrier: stream not admitted")
 	// ErrTooManyRounds is an Expect for a new round when MaxPendingRounds rounds are declared.
 	ErrTooManyRounds = errors.New("inputcarrier: too many declared rounds")
+	// ErrBadExpectation is an Expect whose block hash or sender set is outside its bounds.
+	ErrBadExpectation = errors.New("inputcarrier: invalid expectation")
 	// ErrUnexpectedRound is a delivery, Await, Reject or Accept for a round the caller has not declared.
 	ErrUnexpectedRound = errors.New("inputcarrier: round not declared")
 	// ErrUnexpectedBlock is a delivery bound to another block than the declared one.
 	ErrUnexpectedBlock = errors.New("inputcarrier: envelope for another block")
-	// ErrUnexpectedSender is a delivery from another sender than the declared proposer.
-	ErrUnexpectedSender = errors.New("inputcarrier: envelope from another sender")
+	// ErrUnexpectedSender is a delivery from a sender outside the round's eligible set.
+	ErrUnexpectedSender = errors.New("inputcarrier: envelope from an ineligible sender")
 	// ErrDuplicate is a delivery of bytes identical to a candidate already pending.
 	ErrDuplicate = errors.New("inputcarrier: identical candidate already pending")
-	// ErrRejected is a delivery of bytes identical to a candidate the caller rejected.
+	// ErrRejected is a delivery of bytes identical to a remembered rejected candidate.
 	ErrRejected = errors.New("inputcarrier: candidate already rejected")
-	// ErrPeerHasCandidate is a delivery from a peer that already has a candidate pending in the round.
+	// ErrPeerHasCandidate is a delivery from a sender that already has a candidate pending in the round.
 	ErrPeerHasCandidate = errors.New("inputcarrier: sender already has a pending candidate")
-	// ErrPeerExhausted is a delivery from a peer whose candidates were rejected MaxRejectsPerPeer times.
+	// ErrPeerExhausted is a delivery from a sender whose candidates were rejected MaxRejectsPerPeer times.
 	ErrPeerExhausted = errors.New("inputcarrier: sender exhausted its rejections for the round")
-	// ErrCandidatesFull is a delivery when MaxCandidatesPerRound candidates are pending.
-	ErrCandidatesFull = errors.New("inputcarrier: round holds its maximum candidates")
 	// ErrRoundSettled is a delivery, Reject or Accept for a round the caller already settled.
 	ErrRoundSettled = errors.New("inputcarrier: round already settled")
 	// ErrNoSuchCandidate is a Reject or Accept for bytes that are not a pending candidate.
@@ -101,26 +110,28 @@ type TransportLimits struct {
 	// MaxPendingRounds bounds how many rounds the caller may have declared and not yet pruned.
 	MaxPendingRounds int
 
-	// MaxCandidatesPerRound bounds pending candidates in one round.
-	MaxCandidatesPerRound int
+	// MaxSendersPerRound bounds a round's eligible sender set, and with it the round's pending
+	// candidates and rejection counters, both of which are keyed by eligible sender.
+	MaxSendersPerRound int
 
 	// MaxRejectsPerPeer bounds how many of one sender's candidates may be rejected in one round before
 	// that sender is refused for the round.
 	MaxRejectsPerPeer int
 
 	// MaxRejectedPerRound bounds how many rejected digests one round remembers. Past it, the oldest is
-	// forgotten; the per-peer rejection bound still charges its sender.
+	// forgotten; the per-sender rejection bound still charges a sender that resends it.
 	MaxRejectedPerRound int
 }
 
-// DefaultTransportLimits are starting values.
+// DefaultTransportLimits are starting values. The protocol is proposer to validator, so a round's
+// eligible set is normally the one proposer the technical record names.
 var DefaultTransportLimits = TransportLimits{
 	Envelope:                 DefaultLimits,
 	Deadline:                 2 * time.Second,
 	MaxPendingStreams:        32,
 	MaxPendingStreamsPerPeer: 4,
 	MaxPendingRounds:         8,
-	MaxCandidatesPerRound:    4,
+	MaxSendersPerRound:       4,
 	MaxRejectsPerPeer:        2,
 	MaxRejectedPerRound:      16,
 }
@@ -133,7 +144,7 @@ func (l TransportLimits) validate() error {
 	case l.Deadline <= 0:
 		return fmt.Errorf("inputcarrier: deadline must be positive, got %s", l.Deadline)
 	case l.MaxPendingStreams <= 0, l.MaxPendingStreamsPerPeer <= 0, l.MaxPendingRounds <= 0,
-		l.MaxCandidatesPerRound <= 0, l.MaxRejectsPerPeer <= 0, l.MaxRejectedPerRound <= 0:
+		l.MaxSendersPerRound <= 0, l.MaxRejectsPerPeer <= 0, l.MaxRejectedPerRound <= 0:
 		return fmt.Errorf("inputcarrier: bounds must be positive, got %+v", l)
 	case l.MaxPendingStreamsPerPeer > l.MaxPendingStreams:
 		return fmt.Errorf("inputcarrier: MaxPendingStreamsPerPeer=%d exceeds MaxPendingStreams=%d", l.MaxPendingStreamsPerPeer, l.MaxPendingStreams)
@@ -224,8 +235,10 @@ type Expectation struct {
 	// BlockHash is the 32-byte hash of the block the caller holds for the round. Only envelopes bound
 	// to it are admitted.
 	BlockHash []byte
-	// Proposer, when non-empty, is the only sender whose deliveries are admitted.
-	Proposer string
+	// Senders is the finite set of senders whose deliveries are admitted: normally just the proposer
+	// the round's technical record names. It is required, holds between 1 and MaxSendersPerRound
+	// distinct non-empty identifiers, and a delivery from anyone else changes no retained state.
+	Senders []string
 }
 
 type candidate struct {
@@ -235,11 +248,12 @@ type candidate struct {
 }
 
 type roundState struct {
-	expect        Expectation
+	blockHash     []byte
+	senders       []string // sorted, distinct; the round's eligible set
 	pending       []candidate
 	rejected      map[[32]byte]struct{}
 	rejectedOrder [][32]byte
-	rejectsByPeer map[string]int
+	rejectsByPeer map[string]int // keys are always members of senders
 	accepted      *Envelope
 	changed       chan struct{} // closed and replaced whenever the round's state changes
 }
@@ -256,6 +270,11 @@ func (rs *roundState) find(d [32]byte) int {
 		}
 	}
 	return -1
+}
+
+func (rs *roundState) eligible(from string) bool {
+	_, found := slices.BinarySearch(rs.senders, from)
+	return found
 }
 
 // Receiver holds candidates for rounds the caller declared, until the caller settles or prunes them.
@@ -366,14 +385,26 @@ func (r *Receiver) PendingRounds() int {
 	return len(r.rounds)
 }
 
-// Candidates reports how many candidates are pending in round.
-func (r *Receiver) Candidates(round uint64) int {
+// RoundUsage is what one declared round currently retains.
+type RoundUsage struct {
+	Senders         int // the eligible set
+	Pending         int // pending candidates
+	RejectedDigests int // remembered rejected digests
+	RejectCounters  int // senders with a rejection charged
+}
+
+// Usage reports what round retains, and whether it is declared.
+func (r *Receiver) Usage(round uint64) (RoundUsage, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if rs, ok := r.rounds[round]; ok {
-		return len(rs.pending)
+	rs, ok := r.rounds[round]
+	if !ok {
+		return RoundUsage{}, false
 	}
-	return 0
+	return RoundUsage{
+		Senders: len(rs.senders), Pending: len(rs.pending),
+		RejectedDigests: len(rs.rejected), RejectCounters: len(rs.rejectsByPeer),
+	}, true
 }
 
 // roundLocked returns the declared round's state. r.mu must be held.
@@ -391,12 +422,34 @@ func (r *Receiver) roundLocked(round uint64) (*roundState, error) {
 	return rs, nil
 }
 
-// Expect declares a round, and the block and optionally the proposer its witness must be bound to.
-// Declaring the same round again with the same expectation is a no-op; with a different one it is an
-// error.
+// normalizeSenders returns the sorted, distinct eligible set, or refuses one outside its bounds.
+func (r *Receiver) normalizeSenders(senders []string) ([]string, error) {
+	if len(senders) == 0 || len(senders) > r.limits.MaxSendersPerRound {
+		return nil, fmt.Errorf("%w: %d eligible senders, bound 1..%d", ErrBadExpectation, len(senders), r.limits.MaxSendersPerRound)
+	}
+	out := slices.Clone(senders)
+	slices.Sort(out)
+	for i, s := range out {
+		if s == "" {
+			return nil, fmt.Errorf("%w: an eligible sender is empty", ErrBadExpectation)
+		}
+		if i > 0 && out[i-1] == s {
+			return nil, fmt.Errorf("%w: eligible sender %q listed twice", ErrBadExpectation, s)
+		}
+	}
+	return out, nil
+}
+
+// Expect declares a round, the block its witness must be bound to, and the finite set of senders it
+// may come from. Declaring the same round again with the same expectation is a no-op; with a different
+// one it is an error.
 func (r *Receiver) Expect(round uint64, x Expectation) error {
 	if len(x.BlockHash) != 32 {
-		return fmt.Errorf("inputcarrier: expected block hash must be 32 bytes, got %d", len(x.BlockHash))
+		return fmt.Errorf("%w: block hash must be 32 bytes, got %d", ErrBadExpectation, len(x.BlockHash))
+	}
+	senders, err := r.normalizeSenders(x.Senders)
+	if err != nil {
+		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -407,8 +460,8 @@ func (r *Receiver) Expect(round uint64, x Expectation) error {
 		return fmt.Errorf("%w: round %d, watermark %d", ErrPruned, round, r.watermark)
 	}
 	if rs, ok := r.rounds[round]; ok {
-		if string(rs.expect.BlockHash) != string(x.BlockHash) || rs.expect.Proposer != x.Proposer {
-			return fmt.Errorf("inputcarrier: round %d is already declared with another expectation", round)
+		if string(rs.blockHash) != string(x.BlockHash) || !slices.Equal(rs.senders, senders) {
+			return fmt.Errorf("%w: round %d is already declared with another expectation", ErrBadExpectation, round)
 		}
 		return nil
 	}
@@ -416,7 +469,8 @@ func (r *Receiver) Expect(round uint64, x Expectation) error {
 		return fmt.Errorf("%w: %d rounds declared", ErrTooManyRounds, len(r.rounds))
 	}
 	r.rounds[round] = &roundState{
-		expect:        Expectation{BlockHash: append([]byte(nil), x.BlockHash...), Proposer: x.Proposer},
+		blockHash:     slices.Clone(x.BlockHash),
+		senders:       senders,
 		rejected:      map[[32]byte]struct{}{},
 		rejectsByPeer: map[string]int{},
 		changed:       make(chan struct{}),
@@ -431,13 +485,14 @@ func (r *Receiver) offer(e Envelope, digest [32]byte, from string) error {
 	if err != nil {
 		return err
 	}
+	// Eligibility first: nothing below may touch retained state for a sender outside the set.
 	switch {
 	case rs.accepted != nil:
 		return fmt.Errorf("%w: round %d", ErrRoundSettled, e.ShardRound)
-	case string(e.BlockHash) != string(rs.expect.BlockHash):
+	case !rs.eligible(from):
+		return fmt.Errorf("%w: %s in round %d", ErrUnexpectedSender, from, e.ShardRound)
+	case string(e.BlockHash) != string(rs.blockHash):
 		return fmt.Errorf("%w: round %d", ErrUnexpectedBlock, e.ShardRound)
-	case rs.expect.Proposer != "" && from != rs.expect.Proposer:
-		return fmt.Errorf("%w: %s, expected %s", ErrUnexpectedSender, from, rs.expect.Proposer)
 	}
 	if _, bad := rs.rejected[digest]; bad {
 		return fmt.Errorf("%w: round %d", ErrRejected, e.ShardRound)
@@ -453,9 +508,7 @@ func (r *Receiver) offer(e Envelope, digest [32]byte, from string) error {
 			return fmt.Errorf("%w: %s in round %d", ErrPeerHasCandidate, from, e.ShardRound)
 		}
 	}
-	if len(rs.pending) >= r.limits.MaxCandidatesPerRound {
-		return fmt.Errorf("%w: round %d", ErrCandidatesFull, e.ShardRound)
-	}
+	// At most one pending candidate per eligible sender, so pending never exceeds the sender set.
 	rs.pending = append(rs.pending, candidate{digest: digest, env: e, from: from})
 	rs.notify()
 	return nil
@@ -534,7 +587,7 @@ func (r *Receiver) Reject(round uint64, e Envelope) error {
 	}
 	rs.rejected[d] = struct{}{}
 	rs.rejectedOrder = append(rs.rejectedOrder, d)
-	rs.rejectsByPeer[c.from]++
+	rs.rejectsByPeer[c.from]++ // c.from was eligible when admitted, so this map stays within the set
 	rs.notify()
 	return nil
 }

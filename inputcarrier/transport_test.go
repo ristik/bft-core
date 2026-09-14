@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"runtime"
@@ -42,11 +43,11 @@ func newReceiver(t *testing.T, l inputcarrier.TransportLimits) *inputcarrier.Rec
 	return r
 }
 
-// expectSample declares the sample envelope's round and block.
-func expectSample(t *testing.T, r *inputcarrier.Receiver) {
+// expectSample declares the sample envelope's round and block, eligible from senders.
+func expectSample(t *testing.T, r *inputcarrier.Receiver, senders ...string) {
 	t.Helper()
 	e := sampleEnvelope()
-	require.NoError(t, r.Expect(e.ShardRound, inputcarrier.Expectation{BlockHash: e.BlockHash}))
+	require.NoError(t, r.Expect(e.ShardRound, inputcarrier.Expectation{BlockHash: e.BlockHash, Senders: senders}))
 }
 
 // variant is a distinct, well-formed candidate for the sample round and block.
@@ -70,7 +71,7 @@ func TestTransport_TwoRealPeers(t *testing.T) {
 	r := newReceiver(t, inputcarrier.DefaultTransportLimits)
 	r.Register(follower)
 	e := sampleEnvelope()
-	require.NoError(t, r.Expect(e.ShardRound, inputcarrier.Expectation{BlockHash: e.BlockHash, Proposer: leader.ID().String()}))
+	require.NoError(t, r.Expect(e.ShardRound, inputcarrier.Expectation{BlockHash: e.BlockHash, Senders: []string{leader.ID().String()}}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -82,8 +83,9 @@ func TestTransport_TwoRealPeers(t *testing.T) {
 }
 
 // TestReceiver_RejectedCandidateDoesNotExcludeTheHonestWitness runs receiver, verifier and retry end to
-// end: an unauthenticated candidate arriving first is examined, verified, rejected and removed, and the
-// genuine witness, arriving either before or after that rejection, is then examined and accepted.
+// end: an unauthenticated candidate from another eligible sender arriving first is examined, verified,
+// rejected and removed, and the genuine witness, arriving either before or after that rejection, is then
+// examined and accepted.
 func TestReceiver_RejectedCandidateDoesNotExcludeTheHonestWitness(t *testing.T) {
 	for _, honestFirst := range []bool{false, true} {
 		name := "honest witness arrives after the rejection"
@@ -93,7 +95,9 @@ func TestReceiver_RejectedCandidateDoesNotExcludeTheHonestWitness(t *testing.T) 
 		t.Run(name, func(t *testing.T) {
 			s := newScenario(t)
 			r := newReceiver(t, inputcarrier.DefaultTransportLimits)
-			require.NoError(t, r.Expect(s.env.ShardRound, inputcarrier.Expectation{BlockHash: s.env.BlockHash}))
+			require.NoError(t, r.Expect(s.env.ShardRound, inputcarrier.Expectation{
+				BlockHash: s.env.BlockHash, Senders: []string{"attacker", "another-attacker", "honest-proposer"},
+			}))
 
 			bad := s.env
 			bad.Certificate = []byte{0x80}
@@ -110,7 +114,7 @@ func TestReceiver_RejectedCandidateDoesNotExcludeTheHonestWitness(t *testing.T) 
 			require.Error(t, err)
 			require.NoError(t, r.Reject(s.env.ShardRound, got))
 
-			// The same bytes cannot occupy the round again.
+			// The same bytes cannot occupy the round again, from any eligible sender.
 			require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, bad)), "another-attacker"), inputcarrier.ErrRejected)
 
 			if !honestFirst {
@@ -128,7 +132,7 @@ func TestReceiver_RejectedCandidateDoesNotExcludeTheHonestWitness(t *testing.T) 
 			settled, err := r.Await(settledCtx, s.env.ShardRound)
 			require.NoError(t, err)
 			require.Equal(t, s.env, settled)
-			require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, variant(0x09))), "late"), inputcarrier.ErrRoundSettled)
+			require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, variant(0x09))), "another-attacker"), inputcarrier.ErrRoundSettled)
 		})
 	}
 }
@@ -147,43 +151,58 @@ func TestReceiver_UndeclaredRoundsCannotBeFilled(t *testing.T) {
 	}
 	require.Zero(t, r.PendingRounds())
 
-	expectSample(t, r)
+	expectSample(t, r, "honest-proposer")
 	require.NoError(t, r.Serve(bytes.NewReader(frame(t, sampleEnvelope())), "honest-proposer"))
-	require.Equal(t, 1, r.Candidates(sampleEnvelope().ShardRound))
+	u, _ := r.Usage(sampleEnvelope().ShardRound)
+	require.Equal(t, 1, u.Pending)
 
+	one := []string{"p"}
 	// Only the caller declares rounds, within its own bound.
-	require.NoError(t, r.Expect(6, inputcarrier.Expectation{BlockHash: bytes.Repeat([]byte{6}, 32)}))
-	require.ErrorIs(t, r.Expect(7, inputcarrier.Expectation{BlockHash: bytes.Repeat([]byte{7}, 32)}), inputcarrier.ErrTooManyRounds)
+	require.NoError(t, r.Expect(6, inputcarrier.Expectation{BlockHash: bytes.Repeat([]byte{6}, 32), Senders: one}))
+	require.ErrorIs(t, r.Expect(7, inputcarrier.Expectation{BlockHash: bytes.Repeat([]byte{7}, 32), Senders: one}), inputcarrier.ErrTooManyRounds)
 	r.Prune(6)
 	require.Zero(t, r.PendingRounds())
-	require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, sampleEnvelope())), "late"), inputcarrier.ErrPruned)
-	require.ErrorIs(t, r.Expect(5, inputcarrier.Expectation{BlockHash: sampleEnvelope().BlockHash}), inputcarrier.ErrPruned)
-	require.NoError(t, r.Expect(7, inputcarrier.Expectation{BlockHash: bytes.Repeat([]byte{7}, 32)}))
+	require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, sampleEnvelope())), "honest-proposer"), inputcarrier.ErrPruned)
+	require.ErrorIs(t, r.Expect(5, inputcarrier.Expectation{BlockHash: sampleEnvelope().BlockHash, Senders: one}), inputcarrier.ErrPruned)
+	require.NoError(t, r.Expect(7, inputcarrier.Expectation{BlockHash: bytes.Repeat([]byte{7}, 32), Senders: one}))
 }
 
 func TestReceiver_ExpectationNarrowsAdmission(t *testing.T) {
 	r := newReceiver(t, inputcarrier.DefaultTransportLimits)
 	e := sampleEnvelope()
-	require.NoError(t, r.Expect(e.ShardRound, inputcarrier.Expectation{BlockHash: e.BlockHash, Proposer: "proposer"}))
+	proposer := []string{"proposer"}
+	require.NoError(t, r.Expect(e.ShardRound, inputcarrier.Expectation{BlockHash: e.BlockHash, Senders: proposer}))
 
 	other := e
 	other.BlockHash = bytes.Repeat([]byte{0xcc}, 32)
 	require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, other)), "proposer"), inputcarrier.ErrUnexpectedBlock)
 	require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, e)), "not-the-proposer"), inputcarrier.ErrUnexpectedSender)
-	require.Zero(t, r.Candidates(e.ShardRound), "refused deliveries occupy nothing")
+	u, _ := r.Usage(e.ShardRound)
+	require.Equal(t, inputcarrier.RoundUsage{Senders: 1}, u, "refused deliveries retain nothing")
 	require.NoError(t, r.Serve(bytes.NewReader(frame(t, e)), "proposer"))
 
-	require.Error(t, r.Expect(e.ShardRound, inputcarrier.Expectation{BlockHash: other.BlockHash}), "a declared round cannot be redeclared differently")
-	require.NoError(t, r.Expect(e.ShardRound, inputcarrier.Expectation{BlockHash: e.BlockHash, Proposer: "proposer"}), "the same declaration is a no-op")
-	require.Error(t, r.Expect(9, inputcarrier.Expectation{BlockHash: e.BlockHash[:31]}))
+	require.ErrorIs(t, r.Expect(e.ShardRound, inputcarrier.Expectation{BlockHash: other.BlockHash, Senders: proposer}), inputcarrier.ErrBadExpectation, "a declared round cannot be redeclared differently")
+	require.ErrorIs(t, r.Expect(e.ShardRound, inputcarrier.Expectation{BlockHash: e.BlockHash, Senders: []string{"proposer", "x"}}), inputcarrier.ErrBadExpectation)
+	require.NoError(t, r.Expect(e.ShardRound, inputcarrier.Expectation{BlockHash: e.BlockHash, Senders: proposer}), "the same declaration is a no-op")
+
+	for name, x := range map[string]inputcarrier.Expectation{
+		"short block hash":      {BlockHash: e.BlockHash[:31], Senders: proposer},
+		"no eligible senders":   {BlockHash: e.BlockHash},
+		"too many senders":      {BlockHash: e.BlockHash, Senders: []string{"a", "b", "c", "d", "e"}},
+		"an empty sender":       {BlockHash: e.BlockHash, Senders: []string{""}},
+		"a sender listed twice": {BlockHash: e.BlockHash, Senders: []string{"a", "a"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.ErrorIs(t, r.Expect(9, x), inputcarrier.ErrBadExpectation)
+		})
+	}
 }
 
 func TestReceiver_CandidateBounds(t *testing.T) {
 	l := inputcarrier.DefaultTransportLimits
-	l.MaxCandidatesPerRound = 2
 	l.MaxRejectsPerPeer = 2
 	r := newReceiver(t, l)
-	expectSample(t, r)
+	expectSample(t, r, "a", "b", "c")
 	round := sampleEnvelope().ShardRound
 
 	t.Run("identical bytes are one candidate", func(t *testing.T) {
@@ -193,17 +212,19 @@ func TestReceiver_CandidateBounds(t *testing.T) {
 	t.Run("one pending candidate per sender", func(t *testing.T) {
 		require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, variant(2))), "a"), inputcarrier.ErrPeerHasCandidate)
 	})
-	t.Run("the round's candidate bound, released by rejection", func(t *testing.T) {
+	t.Run("pending candidates never exceed the eligible set", func(t *testing.T) {
 		require.NoError(t, r.Serve(bytes.NewReader(frame(t, variant(3))), "b"))
-		require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, variant(4))), "c"), inputcarrier.ErrCandidatesFull)
-		require.NoError(t, r.Reject(round, variant(1)))
 		require.NoError(t, r.Serve(bytes.NewReader(frame(t, variant(4))), "c"))
+		require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, variant(7))), "d"), inputcarrier.ErrUnexpectedSender)
+		u, _ := r.Usage(round)
+		require.Equal(t, 3, u.Pending)
 	})
 	t.Run("a sender is refused after its rejection bound", func(t *testing.T) {
-		require.NoError(t, r.Reject(round, variant(4)))
+		require.NoError(t, r.Reject(round, variant(1)))
 		require.NoError(t, r.Serve(bytes.NewReader(frame(t, variant(5))), "a"))
 		require.NoError(t, r.Reject(round, variant(5)))
 		require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, variant(6))), "a"), inputcarrier.ErrPeerExhausted)
+		require.NoError(t, r.Reject(round, variant(4)))
 	})
 	t.Run("arrival order decides nothing: examination is oldest first, settlement is the caller's", func(t *testing.T) {
 		got, err := r.Await(context.Background(), round)
@@ -222,10 +243,91 @@ func TestReceiver_CandidateBounds(t *testing.T) {
 	})
 }
 
+// TestReceiver_RetainedStateIsBoundedWhateverSendersDo drives many distinct identities and many
+// rejections at one declared round and requires every retained structure to stay within its bound,
+// while the honest eligible sender's witness is still admitted and examined at the end (review
+// 5196862602).
+func TestReceiver_RetainedStateIsBoundedWhateverSendersDo(t *testing.T) {
+	l := inputcarrier.DefaultTransportLimits
+	r := newReceiver(t, l)
+	eligible := []string{"honest", "byzantine-1", "byzantine-2", "byzantine-3"}
+	require.Len(t, eligible, l.MaxSendersPerRound)
+	expectSample(t, r, eligible...)
+	round := sampleEnvelope().ShardRound
+
+	check := func() {
+		t.Helper()
+		u, ok := r.Usage(round)
+		require.True(t, ok)
+		require.LessOrEqual(t, u.Pending, l.MaxSendersPerRound)
+		require.LessOrEqual(t, u.RejectCounters, l.MaxSendersPerRound)
+		require.LessOrEqual(t, u.RejectedDigests, l.MaxRejectedPerRound)
+	}
+
+	// A thousand distinct identities outside the set.
+	for i := 0; i < 1000; i++ {
+		err := r.Serve(bytes.NewReader(frame(t, variant(byte(i)))), fmt.Sprintf("outsider-%d", i))
+		require.ErrorIs(t, err, inputcarrier.ErrUnexpectedSender)
+	}
+	u, _ := r.Usage(round)
+	require.Equal(t, inputcarrier.RoundUsage{Senders: len(eligible)}, u, "outsiders retain nothing")
+
+	// The byzantine eligible senders send invalid candidates until each is exhausted.
+	sent := 0
+	for i := 0; i < 1000; i++ {
+		from := eligible[1+i%3]
+		e := sampleEnvelope()
+		e.Certificate = []byte(fmt.Sprintf("invalid-%d", i))
+		err := r.Serve(bytes.NewReader(frame(t, e)), from)
+		if errors.Is(err, inputcarrier.ErrPeerExhausted) {
+			continue
+		}
+		require.NoError(t, err)
+		sent++
+		require.NoError(t, r.Reject(round, e))
+		check()
+	}
+	require.Equal(t, 3*l.MaxRejectsPerPeer, sent, "each byzantine sender costs at most MaxRejectsPerPeer verifications")
+
+	// The honest witness is still admitted and is the candidate examined.
+	require.NoError(t, r.Serve(bytes.NewReader(frame(t, sampleEnvelope())), "honest"))
+	got, err := r.Await(context.Background(), round)
+	require.NoError(t, err)
+	require.Equal(t, sampleEnvelope(), got)
+	check()
+}
+
+// TestReceiver_RejectedDigestHistoryIsBounded fills the rejected-digest history past its bound: the
+// oldest digest is forgotten, and a sender resending forgotten bytes is still charged for them.
+func TestReceiver_RejectedDigestHistoryIsBounded(t *testing.T) {
+	l := inputcarrier.DefaultTransportLimits
+	l.MaxRejectedPerRound = 2
+	l.MaxRejectsPerPeer = 5
+	r := newReceiver(t, l)
+	expectSample(t, r, "s")
+	round := sampleEnvelope().ShardRound
+
+	for b := byte(1); b <= 4; b++ {
+		require.NoError(t, r.Serve(bytes.NewReader(frame(t, variant(b))), "s"))
+		require.NoError(t, r.Reject(round, variant(b)))
+		u, _ := r.Usage(round)
+		require.LessOrEqual(t, u.RejectedDigests, l.MaxRejectedPerRound)
+	}
+	u, _ := r.Usage(round)
+	require.Equal(t, l.MaxRejectedPerRound, u.RejectedDigests)
+
+	// The two most recent are remembered; the oldest was forgotten and is admitted again, and charged.
+	require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, variant(4))), "s"), inputcarrier.ErrRejected)
+	require.NoError(t, r.Serve(bytes.NewReader(frame(t, variant(1))), "s"))
+	require.NoError(t, r.Reject(round, variant(1)))
+	require.ErrorIs(t, r.Serve(bytes.NewReader(frame(t, variant(9))), "s"), inputcarrier.ErrPeerExhausted, "five rejections exhaust the sender")
+}
+
 func TestReceiver_AwaitWaitsForACandidateAndEndsOnPruneOrClose(t *testing.T) {
 	r := newReceiver(t, inputcarrier.DefaultTransportLimits)
-	expectSample(t, r)
+	expectSample(t, r, "proposer")
 	round := sampleEnvelope().ShardRound
+	one := []string{"p"}
 
 	got := make(chan error, 1)
 	go func() {
@@ -236,7 +338,7 @@ func TestReceiver_AwaitWaitsForACandidateAndEndsOnPruneOrClose(t *testing.T) {
 	require.NoError(t, r.Serve(bytes.NewReader(frame(t, sampleEnvelope())), "proposer"))
 	require.NoError(t, <-got)
 
-	require.NoError(t, r.Expect(6, inputcarrier.Expectation{BlockHash: bytes.Repeat([]byte{6}, 32)}))
+	require.NoError(t, r.Expect(6, inputcarrier.Expectation{BlockHash: bytes.Repeat([]byte{6}, 32), Senders: one}))
 	go func() {
 		_, err := r.Await(context.Background(), 6)
 		got <- err
@@ -248,7 +350,7 @@ func TestReceiver_AwaitWaitsForACandidateAndEndsOnPruneOrClose(t *testing.T) {
 	_, err := r.Await(context.Background(), 99)
 	require.ErrorIs(t, err, inputcarrier.ErrUnexpectedRound)
 
-	require.NoError(t, r.Expect(7, inputcarrier.Expectation{BlockHash: bytes.Repeat([]byte{7}, 32)}))
+	require.NoError(t, r.Expect(7, inputcarrier.Expectation{BlockHash: bytes.Repeat([]byte{7}, 32), Senders: one}))
 	go func() {
 		_, err := r.Await(context.Background(), 7)
 		got <- err
@@ -269,7 +371,7 @@ func (endless) Read(p []byte) (int, error) {
 
 func TestReceiver_FrameOverTheBoundIsRefusedBeforeItsBodyIsRead(t *testing.T) {
 	r := newReceiver(t, inputcarrier.DefaultTransportLimits)
-	expectSample(t, r)
+	expectSample(t, r, "peer-a")
 	prefix := binary.AppendUvarint(nil, 1<<40)
 
 	done := make(chan error, 1)
@@ -280,21 +382,23 @@ func TestReceiver_FrameOverTheBoundIsRefusedBeforeItsBodyIsRead(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve kept reading a frame whose declared length is over the bound")
 	}
-	require.Zero(t, r.Candidates(sampleEnvelope().ShardRound))
+	u, _ := r.Usage(sampleEnvelope().ShardRound)
+	require.Zero(t, u.Pending)
 	streams, _ := r.PendingStreams()
 	require.Zero(t, streams, "the admission slot is released on the refusal path")
 }
 
 func TestReceiver_NonCanonicalFrameIsNotDelivered(t *testing.T) {
 	r := newReceiver(t, inputcarrier.DefaultTransportLimits)
-	expectSample(t, r)
+	expectSample(t, r, "peer-a")
 	body, err := inputcarrier.Encode(sampleEnvelope(), inputcarrier.DefaultLimits)
 	require.NoError(t, err)
 	body = append(body, 0x00)
 	f := append(binary.AppendUvarint(nil, uint64(len(body))), body...)
 
 	require.ErrorIs(t, r.Serve(bytes.NewReader(f), "peer-a"), inputcarrier.ErrMalformedEnvelope)
-	require.Zero(t, r.Candidates(sampleEnvelope().ShardRound))
+	u, _ := r.Usage(sampleEnvelope().ShardRound)
+	require.Zero(t, u.Pending)
 }
 
 func TestReceiver_StreamAdmissionIsBoundedPerPeerAndReleased(t *testing.T) {
@@ -302,7 +406,7 @@ func TestReceiver_StreamAdmissionIsBoundedPerPeerAndReleased(t *testing.T) {
 	l.MaxPendingStreams = 3
 	l.MaxPendingStreamsPerPeer = 1
 	r := newReceiver(t, l)
-	expectSample(t, r)
+	expectSample(t, r, "peer-a")
 
 	// hold opens a stream from a peer that has sent nothing yet, and returns its writer and result.
 	hold := func(from string) (*io.PipeWriter, chan error) {
@@ -395,12 +499,11 @@ type pipeStream struct {
 	resets atomic.Int32
 }
 
-func (s *pipeStream) Write(b []byte) (int, error)      { return s.c.Write(b) }
-func (s *pipeStream) SetDeadline(d time.Time) error    { return s.c.SetDeadline(d) }
-func (s *pipeStream) Reset() error                     { s.resets.Add(1); return s.c.Close() }
-func (s *pipeStream) Close() error                     { return s.c.Close() }
-func (s *pipeStream) CloseWrite() error                { return nil }
-func (s *pipeStream) SetWriteDeadline(time.Time) error { return nil }
+func (s *pipeStream) Write(b []byte) (int, error)   { return s.c.Write(b) }
+func (s *pipeStream) SetDeadline(d time.Time) error { return s.c.SetDeadline(d) }
+func (s *pipeStream) Reset() error                  { s.resets.Add(1); return s.c.Close() }
+func (s *pipeStream) Close() error                  { return s.c.Close() }
+func (s *pipeStream) CloseWrite() error             { return nil }
 
 // resetIgnoringStream is a pipeStream whose Reset does nothing, so a blocked write can end only at the
 // stream's own deadline. It separates that deadline from the cancellation watcher, which resets the
