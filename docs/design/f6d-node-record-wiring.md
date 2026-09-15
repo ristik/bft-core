@@ -357,6 +357,10 @@ certificate bytes and copied before its lock is released.
    genesis state. It then calls `GenesisParentEligible` with the held certificate's authenticated assignment
    and the record's verified snapshot, enforcing E1 through E4.
 
+After authentication, every continuity certificate must name the deployment's pinned root epoch and every
+bound technical record must name its pinned shard epoch. An authentic chain from another registry profile is
+not readiness evidence for this deployment.
+
 The ordinary #92 predicate still refuses a no-block source. State equality never selects a source or terminal.
 The returned `PreparedReadiness` is opaque and bound to the `Readiness` instance that created it.
 `Revalidate` performs only mutable checks: exact held bytes, unchanged observation version, byte-identical

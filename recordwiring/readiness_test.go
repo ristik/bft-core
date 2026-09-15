@@ -33,15 +33,21 @@ func TestReadinessReverifiesDurableRecordAndExactObservedContinuity(t *testing.T
 	h.exec.set(h.c.Blocks[1])
 	source, sourceTR := h.c.Certificate(1)
 	state := bytes.Clone(source.InputRecord.Hash)
+	repeatTR := &certification.TechnicalRecord{Round: 7, Epoch: source.InputRecord.Epoch, Leader: "leader",
+		StatHash: bytes.Repeat([]byte{0xa1}, 32), FeeHash: bytes.Repeat([]byte{0xa2}, 32)}
+	repeatIR := *source.InputRecord
+	repeat := h.c.Certify(h.c.Signer, &repeatIR, repeatTR, source.GetRootRoundNumber()+1)
 	quietTR := &certification.TechnicalRecord{Round: 7, Epoch: source.InputRecord.Epoch, Leader: "leader",
 		StatHash: bytes.Repeat([]byte{0xa1}, 32), FeeHash: bytes.Repeat([]byte{0xa2}, 32)}
-	quietIR := &types.InputRecord{Version: 1, RoundNumber: sourceTR.Round, Epoch: source.InputRecord.Epoch,
+	quietTR.Round = 9
+	quietIR := &types.InputRecord{Version: 1, RoundNumber: repeatTR.Round, Epoch: source.InputRecord.Epoch,
 		PreviousHash: state, Hash: state, SummaryValue: []byte{}, Timestamp: source.InputRecord.Timestamp + 1}
-	quiet := h.c.Certify(h.c.Signer, quietIR, quietTR, source.GetRootRoundNumber()+1)
+	quiet := h.c.Certify(h.c.Signer, quietIR, quietTR, repeat.GetRootRoundNumber()+1)
 
 	obs, err := recordwiring.NewObservations(recordwiring.DefaultObservationLimits)
 	require.NoError(t, err)
 	require.NoError(t, obs.Observe(source, sourceTR))
+	require.NoError(t, obs.Observe(repeat, repeatTR))
 	require.NoError(t, obs.Observe(quiet, quietTR))
 	r, err := recordwiring.NewReadiness(h.d, h.store, h.exec, obs)
 	require.NoError(t, err)
@@ -49,14 +55,20 @@ func TestReadinessReverifiesDurableRecordAndExactObservedContinuity(t *testing.T
 	require.NoError(t, err)
 	require.True(t, p.Valid())
 	require.NoError(t, r.Revalidate(context.Background(), p, quiet))
+	require.ErrorIs(t, r.Revalidate(context.Background(), recordwiring.PreparedReadiness{}, quiet), recordwiring.ErrReadinessUnavailable)
 	foreignObs, err := recordwiring.NewObservations(recordwiring.DefaultObservationLimits)
 	require.NoError(t, err)
 	require.NoError(t, foreignObs.Observe(source, sourceTR))
+	require.NoError(t, foreignObs.Observe(repeat, repeatTR))
 	require.NoError(t, foreignObs.Observe(quiet, quietTR))
 	foreign, err := recordwiring.NewReadiness(h.d, h.store, h.exec, foreignObs)
 	require.NoError(t, err)
 	require.ErrorIs(t, foreign.Revalidate(context.Background(), p, quiet), recordwiring.ErrReadinessUnavailable,
 		"equal store, executor, held certificate and observation version do not make another owner authoritative")
+	h.exec.set(h.c.Blocks[2])
+	require.ErrorIs(t, r.Revalidate(context.Background(), p, quiet), recordwiring.ErrReadinessUnavailable,
+		"executor movement alone invalidates preparation")
+	h.exec.set(h.c.Blocks[1])
 	mutated := *quiet
 	mutatedIR := *quiet.InputRecord
 	mutatedIR.Timestamp++
@@ -72,10 +84,15 @@ func TestReadinessReverifiesDurableRecordAndExactObservedContinuity(t *testing.T
 	conflict := h.c.Certify(h.c.Signer, &conflictIR, quietTR, quiet.GetRootRoundNumber()+1)
 	_, err = r.Prepare(context.Background(), conflict)
 	require.ErrorIs(t, err, recordwiring.ErrContinuity)
+	require.NoError(t, obs.Observe(conflict, quietTR))
+	require.ErrorIs(t, r.Revalidate(context.Background(), p, quiet), recordwiring.ErrReadinessUnavailable,
+		"a new observation alone invalidates preparation even when the held argument is unchanged")
+	p, err = r.Prepare(context.Background(), quiet)
+	require.NoError(t, err)
 
 	// A newer durable head invalidates the prepared result even if B's old record remains retained.
 	h.publish(2)
-	h.exec.set(h.c.Blocks[2])
+	// Keep the executor at B: this isolates durable-head revalidation from executor revalidation.
 	require.ErrorIs(t, r.Revalidate(context.Background(), p, quiet), recordwiring.ErrReadinessUnavailable)
 }
 
@@ -223,7 +240,9 @@ func TestGenesisPreparationAppliesE1ThroughE4(t *testing.T) {
 
 func TestObservationsRejectUnboundAndBoundMemory(t *testing.T) {
 	h := newCaptureHarness(t, 1)
-	uc, tr := h.c.Certificate(0)
+	h.publish(0, 1)
+	h.exec.set(h.c.Blocks[1])
+	uc, tr := h.c.Certificate(1)
 	obs, err := recordwiring.NewObservations(recordwiring.ObservationLimits{MaxCertificates: 1, MaxBytes: 1 << 20})
 	require.NoError(t, err)
 	bad := *tr
@@ -232,6 +251,56 @@ func TestObservationsRejectUnboundAndBoundMemory(t *testing.T) {
 	require.NoError(t, obs.Observe(uc, tr))
 	// Exact redelivery is idempotent and remains representable under a one-entry bound.
 	require.NoError(t, obs.Observe(uc, tr))
+
+	state := bytes.Clone(uc.InputRecord.Hash)
+	repeatTR := &certification.TechnicalRecord{Round: tr.Round + 1, Epoch: tr.Epoch, Leader: "repeat",
+		StatHash: bytes.Repeat([]byte{0xb1}, 32), FeeHash: bytes.Repeat([]byte{0xb2}, 32)}
+	repeatIR := *uc.InputRecord
+	repeat := h.c.Certify(h.c.Signer, &repeatIR, repeatTR, uc.GetRootRoundNumber()+1)
+	quietTR := &certification.TechnicalRecord{Round: repeatTR.Round + 1, Epoch: tr.Epoch, Leader: "quiet",
+		StatHash: bytes.Repeat([]byte{0xc1}, 32), FeeHash: bytes.Repeat([]byte{0xc2}, 32)}
+	quietIR := &types.InputRecord{Version: 1, RoundNumber: repeatTR.Round, Epoch: uc.InputRecord.Epoch,
+		PreviousHash: state, Hash: state, SummaryValue: []byte{}, Timestamp: uc.InputRecord.Timestamp + 1}
+	quiet := h.c.Certify(h.c.Signer, quietIR, quietTR, repeat.GetRootRoundNumber()+1)
+
+	countBound, err := recordwiring.NewObservations(recordwiring.ObservationLimits{MaxCertificates: 2, MaxBytes: 1 << 20})
+	require.NoError(t, err)
+	require.NoError(t, countBound.Observe(uc, tr))
+	require.NoError(t, countBound.Observe(repeat, repeatTR))
+	require.NoError(t, countBound.Observe(quiet, quietTR), "the distinct third observation exceeds the count bound")
+	countReadiness, err := recordwiring.NewReadiness(h.d, h.store, h.exec, countBound)
+	require.NoError(t, err)
+	_, err = countReadiness.Prepare(context.Background(), quiet)
+	require.ErrorIs(t, err, recordwiring.ErrContinuity,
+		"evicting the source must not serve a chain assembled across the missing observation")
+
+	ucRaw, err := types.Cbor.Marshal(uc)
+	require.NoError(t, err)
+	trRaw, err := types.Cbor.Marshal(tr)
+	require.NoError(t, err)
+	quietRaw, err := types.Cbor.Marshal(quiet)
+	require.NoError(t, err)
+	quietTRRaw, err := types.Cbor.Marshal(quietTR)
+	require.NoError(t, err)
+	ucSize, quietSize := len(ucRaw)+len(trRaw), len(quietRaw)+len(quietTRRaw)
+	byteLimit := ucSize
+	if quietSize > byteLimit {
+		byteLimit = quietSize
+	}
+	byteBound, err := recordwiring.NewObservations(recordwiring.ObservationLimits{MaxCertificates: 10, MaxBytes: byteLimit})
+	require.NoError(t, err)
+	require.NoError(t, byteBound.Observe(uc, tr))
+	require.NoError(t, byteBound.Observe(quiet, quietTR), "each observation fits separately while their sum exceeds the byte bound")
+	byteReadiness, err := recordwiring.NewReadiness(h.d, h.store, h.exec, byteBound)
+	require.NoError(t, err)
+	_, err = byteReadiness.Prepare(context.Background(), quiet)
+	require.ErrorIs(t, err, recordwiring.ErrContinuity,
+		"byte eviction must not serve a chain assembled across the missing source")
+
+	tooSmall, err := recordwiring.NewObservations(recordwiring.ObservationLimits{MaxCertificates: 10, MaxBytes: ucSize - 1})
+	require.NoError(t, err)
+	require.ErrorIs(t, tooSmall.Observe(uc, tr), recordwiring.ErrObservationBound,
+		"one observation larger than the byte budget is refused instead of evicting itself")
 
 	_, err = recordwiring.NewObservations(recordwiring.ObservationLimits{})
 	require.ErrorIs(t, err, recordwiring.ErrObservationBound)
