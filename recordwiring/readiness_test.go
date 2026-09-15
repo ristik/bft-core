@@ -118,6 +118,29 @@ func TestReadinessAuthenticatesThenRefusesAContinuityTailOutsideThePinnedRootEpo
 	require.ErrorContains(t, err, "root epoch 2")
 }
 
+func TestReadinessAuthenticatesThenRefusesATechnicalRecordOutsideThePinnedShardEpoch(t *testing.T) {
+	h := newCaptureHarness(t, 1)
+	h.publish(0, 1)
+	h.exec.set(h.c.Blocks[1])
+	source, sourceTR := h.c.Certificate(1)
+	state := bytes.Clone(source.InputRecord.Hash)
+	tr := &certification.TechnicalRecord{Round: sourceTR.Round + 1, Epoch: 1, Leader: "leader",
+		StatHash: bytes.Repeat([]byte{0xa1}, 32), FeeHash: bytes.Repeat([]byte{0xa2}, 32)}
+	ir := &types.InputRecord{Version: 1, RoundNumber: sourceTR.Round, Epoch: 0,
+		PreviousHash: state, Hash: state, SummaryValue: []byte{}, Timestamp: 2}
+	held := h.c.Certify(h.c.Signer, ir, tr, source.GetRootRoundNumber()+1)
+
+	obs, err := recordwiring.NewObservations(recordwiring.DefaultObservationLimits)
+	require.NoError(t, err)
+	require.NoError(t, obs.Observe(source, sourceTR))
+	require.NoError(t, obs.Observe(held, tr))
+	r, err := recordwiring.NewReadiness(h.d, h.store, h.exec, obs)
+	require.NoError(t, err)
+	_, err = r.Prepare(context.Background(), held)
+	require.ErrorIs(t, err, recordwiring.ErrContinuity)
+	require.ErrorContains(t, err, "technical record 1 names shard epoch 1")
+}
+
 func TestGenesisPublicationRequiresRealConfigurationBoundCertification(t *testing.T) {
 	h := newCaptureHarness(t, 1)
 	genesis, tr := h.c.Certificate(0)

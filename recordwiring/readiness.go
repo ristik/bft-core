@@ -234,8 +234,23 @@ func (r *Readiness) Prepare(ctx context.Context, held *types.UnicityCertificate)
 				ErrContinuity, i, uc.GetRootEpoch(), c.Registry.RootEpoch)
 		}
 	}
+	for i, tr := range continuityTechnicalRecords(ev) {
+		if tr.Epoch != c.Registry.ShardEpoch {
+			return PreparedReadiness{}, fmt.Errorf("%w: authenticated continuity technical record %d names shard epoch %d, deployment pins %d",
+				ErrContinuity, i, tr.Epoch, c.Registry.ShardEpoch)
+		}
+	}
 	return PreparedReadiness{p: &preparedReadiness{owner: r, observationVersion: version, headToken: headToken, blockNumber: loaded.BlockNumber(),
 		blockHash: loaded.BlockHash().Bytes(), stateRoot: loaded.StateRoot().Bytes(), held: heldRaw}}, nil
+}
+
+func continuityTechnicalRecords(ev shardnode.AnchorEvidence) []*certification.TechnicalRecord {
+	out := make([]*certification.TechnicalRecord, 0, len(ev.Tail)+1)
+	out = append(out, ev.SourceTechnical)
+	for _, link := range ev.Tail {
+		out = append(out, link.Technical)
+	}
+	return out
 }
 
 func continuityCertificates(ev shardnode.AnchorEvidence, held *types.UnicityCertificate) []*types.UnicityCertificate {
