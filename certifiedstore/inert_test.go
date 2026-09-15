@@ -1,4 +1,4 @@
-package registryproof_test
+package certifiedstore_test
 
 import (
 	"go/parser"
@@ -12,12 +12,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const importPath = "github.com/unicitynetwork/bft-core/registryproof"
+const importPath = "github.com/unicitynetwork/bft-core/certifiedstore"
 
-// TestNoProductionPackageImportsTheReader is the inertness guard: no non-test Go file outside this package
-// imports it, so no node reads the registry through it and the go-ethereum trie packages it links are not
-// in any production binary yet.
-func TestNoProductionPackageImportsTheReader(t *testing.T) {
+// TestNoProductionPackageImportsTheStore is the inertness guard: no non-test Go file outside this package
+// imports it, so no node publishes or loads certified records through it yet.
+func TestNoProductionPackageImportsTheStore(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
 
@@ -39,13 +38,7 @@ func TestNoProductionPackageImportsTheReader(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		// registrygenesis, registrywitness and certifiedstore are themselves inert, and each has its own guard
-		// requiring that no production package imports it, so importing the reader from them reaches no node
-		// path.
-		if strings.HasPrefix(rel, "registryproof"+string(filepath.Separator)) ||
-			strings.HasPrefix(rel, "registrygenesis"+string(filepath.Separator)) ||
-			strings.HasPrefix(rel, "registrywitness"+string(filepath.Separator)) ||
-			strings.HasPrefix(rel, "certifiedstore"+string(filepath.Separator)) {
+		if strings.HasPrefix(rel, "certifiedstore"+string(filepath.Separator)) {
 			return nil
 		}
 		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
@@ -62,7 +55,7 @@ func TestNoProductionPackageImportsTheReader(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	for _, want := range []string{"rootinput/rootinput.go", "shardnode/round.go", "cli/ubft/cmd/shard_node_run.go", "engineapi/adapter.go"} {
+	for _, want := range []string{"shardnode/node.go", "shardnode/store.go", "cli/ubft/cmd/shard_node_run.go", "engineapi/adapter.go"} {
 		require.True(t, scanned[want], "expected to scan %s", want)
 	}
 	require.Empty(t, importers, "production packages must not import %s", importPath)
