@@ -12,17 +12,21 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
-const defaultCertifiedRecordRetain = 64
+const (
+	defaultCertifiedRecordRetain      = 64
+	recordwiringDefaultAcquireTimeout = recordwiring.DefaultAcquireTimeout
+)
 
 /*
 startCertifiedRecord is the certified-block record (#14) at startup, reached only when --certified-record-store
 is set. It checks the deployment configuration once, opens the store (syncing its directory), reloads and
-re-verifies the head record and compares it with the executor, and reports the outcome in health and the log.
+re-verifies the head record and compares it with the executor, and reports the outcome in health and the log
+(W1). It then starts witness capture and publication for every block the round commits (W2).
 
 A configuration that cannot be checked, or a store that cannot be opened, stops startup: the operator asked
 for a record store, and running without one would look the same from outside. A reload outcome other than
-durable-ready does not stop startup and changes no vote; capture, publication and child readiness are later
-units. The returned function closes the store.
+durable-ready does not stop startup and changes no vote, and neither does any capture outcome; readiness for
+a recorded block's child is W3. The returned function stops capture and then closes the store.
 */
 func startCertifiedRecord(ctx context.Context, flags *shardNodeRunFlags, shardConf *types.PartitionDescriptionRecord,
 	confHash []byte, trustBases shardnode.TrustBaseStore, rootEpoch uint64, executor shardnode.Executor, node *shardnode.Node) (func(), error) {
@@ -52,6 +56,7 @@ func startCertifiedRecord(ctx context.Context, flags *shardNodeRunFlags, shardCo
 	if err != nil {
 		return nil, fmt.Errorf("opening the certified-record store %q: %w", flags.CertifiedRecordStore, err)
 	}
+	log := flags.observe.Logger()
 
 	res := recordwiring.Reload(ctx, store, deployment, executor)
 	detail := ""
@@ -59,7 +64,6 @@ func startCertifiedRecord(ctx context.Context, flags *shardNodeRunFlags, shardCo
 		detail = res.Err.Error()
 	}
 	node.SetCertifiedRecordStatus(res.Outcome.String(), detail)
-	log := flags.observe.Logger()
 	if res.Outcome == recordwiring.OutcomeDurableReady {
 		log.Info("certified record reloaded: durable-ready for the recorded block; readiness for its child is not decided at startup and voting is unchanged",
 			"outcome", res.Outcome.String(), "block", res.Record.BlockNumber(), "hash", res.Record.BlockHash().String())
@@ -67,7 +71,28 @@ func startCertifiedRecord(ctx context.Context, flags *shardNodeRunFlags, shardCo
 		log.Warn("certified record reload did not establish durable readiness; voting is unchanged",
 			"outcome", res.Outcome.String(), "err", detail)
 	}
-	return func() { _ = store.Close() }, nil
+
+	capturer, err := recordwiring.NewCapturer(recordwiring.CaptureConfig{
+		Deployment: deployment, Store: store, Executor: executor, Finality: node.FinalityGate(), Log: log,
+		RPC:            recordwiring.HTTPWitnessCaller(flags.EthURL, flags.CertifiedRecordCaptureTimeout),
+		AcquireTimeout: flags.CertifiedRecordCaptureTimeout,
+	})
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("starting certified-record capture: %w", err)
+	}
+	node.SetCommitObserver(capturer)
+	captureCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = capturer.Run(captureCtx)
+	}()
+	return func() {
+		cancel()
+		<-done
+		_ = store.Close()
+	}, nil
 }
 
 // registryEVMParams are the EVM genesis parameters the SealRegistry deployment was generated with.

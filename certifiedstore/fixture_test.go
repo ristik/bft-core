@@ -137,6 +137,12 @@ func word(v uint64) common.Hash { return common.BigToHash(new(big.Int).SetUint64
 // executed builds the block executing partition round `round` on parent, with registry storage as a
 // successful open and finalize leave it (#153 §6.2, §6.3).
 func (f *fixture) executed(parent block, round, rootRound uint64) block {
+	return f.executedWith(parent, round, rootRound, crypto.Keccak256Hash([]byte(fmt.Sprint("X", round))).Bytes())
+}
+
+// executedWith is executed with the header's extraData given, so a test can build another block for the same
+// round, parent and state.
+func (f *fixture) executedWith(parent block, round, rootRound uint64, extra []byte) block {
 	t := f.t
 	words := f.genesis.Storage()
 	named := func(s string) common.Hash { return crypto.Keccak256Hash([]byte(s)) }
@@ -170,7 +176,7 @@ func (f *fixture) executed(parent block, round, rootRound uint64) block {
 	h := &ethtypes.Header{
 		ParentHash: parent.Hash, UncleHash: ethtypes.EmptyUncleHash, Root: state.Hash(), TxHash: ethtypes.EmptyTxsHash,
 		ReceiptHash: ethtypes.EmptyReceiptsHash, Difficulty: new(big.Int), Number: new(big.Int).SetUint64(parent.Number + 1),
-		GasLimit: 30_000_000, Time: 1_700_000_000 + parent.Number + 1, Extra: named(fmt.Sprint("X", round)).Bytes(),
+		GasLimit: 30_000_000, Time: 1_700_000_000 + parent.Number + 1, Extra: bytes.Clone(extra),
 		BaseFee: big.NewInt(7), WithdrawalsHash: &withdrawals, BlobGasUsed: &zero, ExcessBlobGas: &zero, ParentBeaconRoot: &beacon,
 	}
 	header, err := rlp.EncodeToBytes(h)

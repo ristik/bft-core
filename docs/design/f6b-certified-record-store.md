@@ -70,6 +70,17 @@ undecodable or digest-mismatched value, and a payload version that differs from 
   published, is met. It never deletes `record/genesis` or the key being published, and republishing the current
   record deletes nothing (`TestRetentionIsBoundedAndTransactional`).
 - Because the deletions are in the transaction, a failed publication cannot prune its predecessor.
+- Since node wiring W2, publication is `Prepare` followed by `Commit`, and `Publish` does both:
+  - `Prepare` verifies the record, verifies the current head record under the same context, and requires the
+    head key to be that record's canonical key. `Load` requires this binding too, because the key is unsigned
+    metadata.
+  - `Prepare` refuses a record that would replace a head of the same or a later partition round, or a genesis
+    record over an ordinary head (`ErrStaleRecord`). A missing, unverifiable or wrongly keyed head is refused
+    and not replaced.
+  - `Commit` writes in one transaction only while the head is byte for byte the one `Prepare` decided against
+    (`ErrHeadChanged`), and verifies nothing inside the transaction.
+  - Republishing the head record is allowed. Tests: `TestPublishNeverReplacesALaterHead`,
+    `TestTheHeadKeyIsBoundToItsVerifiedRecord`, `TestCommitRequiresTheHeadPrepareDecidedAgainst`.
 
 ## 4. Failure evidence
 

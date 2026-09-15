@@ -89,6 +89,10 @@ type Round struct {
 	// without it behaves exactly as it did before, refusing rather than recovering.
 	recovery *RecoveryStack
 
+	// commitObserver, when set, is told about every block commitPrevious commits on a certificate's
+	// authority (commitobserver.go). Nil on a node without a certified-record store.
+	commitObserver CommitObserver
+
 	// continuity is the live execution anchor and the interval this node has itself verified
 	// quiet since it (see anchor.go, and docs/design/f6b-quiet-uc-recovery.md §3.3). It is what
 	// gives reconcile a block hash to recover to when the certificate in hand is quiet and
@@ -301,6 +305,26 @@ Call after NewRound, before Run. A Round with none behaves exactly as it did bef
 — it observes, reconciles from what it saw itself, and refuses when it cannot — which is what makes
 this a deployment decision rather than a change to the protocol.
 */
+// SetCommitObserver attaches an observer told about every block the round commits on a certificate's
+// authority. Call before the node runs. See CommitObserver for what it may do.
+func (r *Round) SetCommitObserver(o CommitObserver) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.commitObserver = o
+}
+
+// SetFinalityGate installs the gate every finality-changing executor call takes, when none is installed yet.
+// SetRecovery installs the node's gate as part of the recovery stack; a node that runs a certified-record
+// capturer without recovery needs it installed here, because the capturer's publication decision is serialized
+// with the round's commits and builds through the same gate (#14 W2).
+func (r *Round) SetFinalityGate(g *FinalityGate) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.finality == nil {
+		r.finality = g
+	}
+}
+
 func (r *Round) SetRecovery(s *RecoveryStack) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -498,7 +522,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// prove something to a peer that it could not prove to itself.
 	r.recovery.observe(ctx, uc, tr, r.nodeID)
 
-	if err := r.commitPrevious(ctx, uc); err != nil {
+	if err := r.commitPrevious(ctx, uc, tr); err != nil {
 		return fmt.Errorf("committing previously certified round: %w", err)
 	}
 
@@ -928,7 +952,7 @@ func (r *Round) abstainRestored(ctx context.Context, exp Expectation) bool {
 // since either it's genesis or a resumed node's store already recorded it)
 // and a no-op when the last round submitted was quiet (nothing changed, so
 // nothing to commit).
-func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate) error {
+func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
 	if r.pending == nil {
 		return nil
 	}
@@ -998,6 +1022,7 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 		return fmt.Errorf("shardnode: executor could not commit round %d (hash %x, status %s) — this node has fallen behind and needs to resync (see docs/troubleshooting.md)",
 			p.round, target, status)
 	}
+	r.notifyCommit(ctx, uc, tr, target)
 	return nil
 }
 
