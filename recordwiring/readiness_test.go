@@ -274,26 +274,42 @@ func TestObservationsRejectUnboundAndBoundMemory(t *testing.T) {
 	require.ErrorIs(t, err, recordwiring.ErrContinuity,
 		"evicting the source must not serve a chain assembled across the missing observation")
 
+	directTR := &certification.TechnicalRecord{Round: tr.Round + 1, Epoch: tr.Epoch, Leader: "direct",
+		StatHash: bytes.Repeat([]byte{0xd1}, 32), FeeHash: bytes.Repeat([]byte{0xd2}, 32)}
+	directIR := &types.InputRecord{Version: 1, RoundNumber: tr.Round, Epoch: uc.InputRecord.Epoch,
+		PreviousHash: state, Hash: state, SummaryValue: []byte{}, Timestamp: uc.InputRecord.Timestamp + 1}
+	direct := h.c.Certify(h.c.Signer, directIR, directTR, uc.GetRootRoundNumber()+1)
 	ucRaw, err := types.Cbor.Marshal(uc)
 	require.NoError(t, err)
 	trRaw, err := types.Cbor.Marshal(tr)
 	require.NoError(t, err)
-	quietRaw, err := types.Cbor.Marshal(quiet)
+	directRaw, err := types.Cbor.Marshal(direct)
 	require.NoError(t, err)
-	quietTRRaw, err := types.Cbor.Marshal(quietTR)
+	directTRRaw, err := types.Cbor.Marshal(directTR)
 	require.NoError(t, err)
-	ucSize, quietSize := len(ucRaw)+len(trRaw), len(quietRaw)+len(quietTRRaw)
+	ucSize, directSize := len(ucRaw)+len(trRaw), len(directRaw)+len(directTRRaw)
+	sufficient, err := recordwiring.NewObservations(recordwiring.ObservationLimits{
+		MaxCertificates: 10, MaxBytes: ucSize + directSize,
+	})
+	require.NoError(t, err)
+	require.NoError(t, sufficient.Observe(uc, tr))
+	require.NoError(t, sufficient.Observe(direct, directTR))
+	sufficientReadiness, err := recordwiring.NewReadiness(h.d, h.store, h.exec, sufficient)
+	require.NoError(t, err)
+	_, err = sufficientReadiness.Prepare(context.Background(), direct)
+	require.NoError(t, err, "the direct source-to-quiet chain is valid before byte-bound eviction")
+
 	byteLimit := ucSize
-	if quietSize > byteLimit {
-		byteLimit = quietSize
+	if directSize > byteLimit {
+		byteLimit = directSize
 	}
 	byteBound, err := recordwiring.NewObservations(recordwiring.ObservationLimits{MaxCertificates: 10, MaxBytes: byteLimit})
 	require.NoError(t, err)
 	require.NoError(t, byteBound.Observe(uc, tr))
-	require.NoError(t, byteBound.Observe(quiet, quietTR), "each observation fits separately while their sum exceeds the byte bound")
+	require.NoError(t, byteBound.Observe(direct, directTR), "each observation fits separately while their sum exceeds the byte bound")
 	byteReadiness, err := recordwiring.NewReadiness(h.d, h.store, h.exec, byteBound)
 	require.NoError(t, err)
-	_, err = byteReadiness.Prepare(context.Background(), quiet)
+	_, err = byteReadiness.Prepare(context.Background(), direct)
 	require.ErrorIs(t, err, recordwiring.ErrContinuity,
 		"byte eviction must not serve a chain assembled across the missing source")
 
