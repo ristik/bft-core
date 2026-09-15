@@ -52,16 +52,16 @@ func TestGenesisProofDecodes(t *testing.T) {
 	c := newChain(t)
 	s, err := Verify(c.context(), c.genesis.hash, c.genesis.ev)
 	require.NoError(t, err)
-	require.True(t, s.Genesis)
-	require.Equal(t, uint64(0), s.Number)
-	require.Equal(t, c.genesis.stateRoot, s.StateRoot)
-	require.Equal(t, uint64(1), s.LayoutVersion)
-	require.Equal(t, genesisCommitment, s.GenesisCommitment)
-	require.Equal(t, fullShardConfHash, s.ShardConfHash)
-	require.Equal(t, uint64(1), s.RootEpoch)
-	require.Equal(t, uint64(2), s.Phase)
+	require.True(t, s.Fields().Genesis)
+	require.Equal(t, uint64(0), s.Fields().Number)
+	require.Equal(t, c.genesis.stateRoot, s.Fields().StateRoot)
+	require.Equal(t, uint64(1), s.Fields().LayoutVersion)
+	require.Equal(t, genesisCommitment, s.Fields().GenesisCommitment)
+	require.Equal(t, fullShardConfHash, s.Fields().ShardConfHash)
+	require.Equal(t, uint64(1), s.Fields().RootEpoch)
+	require.Equal(t, uint64(2), s.Fields().Phase)
 	require.Equal(t, uint64(0), s.LastAppliedRootRound(), "§9.1: the zero cursor, authoritative because steps 2 and 5 passed")
-	require.Equal(t, uint64(0), s.RoundAuthorized)
+	require.Equal(t, uint64(0), s.Fields().RoundAuthorized)
 }
 
 func TestExecutedBlocksDecode(t *testing.T) {
@@ -80,24 +80,24 @@ func TestExecutedBlocksDecode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := Verify(c.context(), tc.b.hash, tc.b.ev)
 			require.NoError(t, err)
-			require.False(t, s.Genesis)
-			require.Equal(t, tc.b.number, s.Number)
-			require.Equal(t, tc.b.hash, s.ParentHash)
+			require.False(t, s.Fields().Genesis)
+			require.Equal(t, tc.b.number, s.Fields().Number)
+			require.Equal(t, tc.b.hash, s.Fields().ParentHash)
 			require.Equal(t, tc.clock, s.LastAppliedRootRound())
-			require.Equal(t, tc.round, s.RoundAuthorized)
-			require.Equal(t, tc.round, s.OutcomesRound)
-			require.Equal(t, tc.certified, s.CertifiedRound)
-			require.Equal(t, named(tc.stateHash), s.CertifiedStateHash)
-			require.Equal(t, named(tc.input), s.InputCommitment)
-			require.Equal(t, named(tc.outcomesCommitment), s.OutcomesCommitment)
-			require.Equal(t, 1_700_000_000+tc.clock, s.OriginTimestamp)
-			require.Equal(t, named("U"+uitoa(tc.clock)), s.OriginTreeRoot)
+			require.Equal(t, tc.round, s.Fields().RoundAuthorized)
+			require.Equal(t, tc.round, s.Fields().OutcomesRound)
+			require.Equal(t, tc.certified, s.Fields().CertifiedRound)
+			require.Equal(t, named(tc.stateHash), s.Fields().CertifiedStateHash)
+			require.Equal(t, named(tc.input), s.Fields().InputCommitment)
+			require.Equal(t, named(tc.outcomesCommitment), s.Fields().OutcomesCommitment)
+			require.Equal(t, 1_700_000_000+tc.clock, s.Fields().OriginTimestamp)
+			require.Equal(t, named("U"+uitoa(tc.clock)), s.Fields().OriginTreeRoot)
 			if tc.blockHash == "" {
-				require.False(t, s.HasBlockHash)
-				require.Equal(t, common.Hash{}, s.CertifiedBlockHash)
+				require.False(t, s.Fields().HasBlockHash)
+				require.Equal(t, common.Hash{}, s.Fields().CertifiedBlockHash)
 			} else {
-				require.True(t, s.HasBlockHash)
-				require.Equal(t, named(tc.blockHash), s.CertifiedBlockHash)
+				require.True(t, s.Fields().HasBlockHash)
+				require.Equal(t, named(tc.blockHash), s.Fields().CertifiedBlockHash)
 			}
 		})
 	}
@@ -493,8 +493,8 @@ func TestOutputsDoNotAliasInputs(t *testing.T) {
 		}
 	}
 	require.Equal(t, uint64(6), s1.LastAppliedRootRound())
-	require.Equal(t, c.b2.stateRoot, s1.StateRoot)
-	require.Equal(t, named("B1"), s1.CertifiedBlockHash)
+	require.Equal(t, c.b2.stateRoot, s1.Fields().StateRoot)
+	require.Equal(t, named("B1"), s1.Fields().CertifiedBlockHash)
 }
 
 // §7.3 E1 to E4 over verified snapshots, including the §9.2a initial-timeout case.
@@ -531,18 +531,41 @@ func TestGenesisParentEligibility(t *testing.T) {
 		"E2 certified round not below":       {2, &bfttypes.InputRecord{RoundNumber: 2, PreviousHash: s0, Hash: s0}, genesis, ErrNotGenesisHistory},
 		"E2 previous state is not genesis":   {3, &bfttypes.InputRecord{RoundNumber: 2, PreviousHash: s1, Hash: s0}, genesis, ErrNotGenesisHistory},
 		"E3 parent is block 1":               {2, installed, b1, ErrParentNotGenesis},
-		"E3 snapshot not produced by Verify": {2, installed, Snapshot{Genesis: true}, ErrParentNotGenesis},
+		"E3 snapshot not produced by Verify": {2, installed, Snapshot{}, ErrParentNotGenesis},
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.ErrorIs(t, GenesisParentEligible(tc.n, tc.ir, s0, tc.parent), tc.want)
 		})
 	}
-	t.Run("E4 a verified genesis-hash snapshot that executed a round", func(t *testing.T) {
-		ran := genesis
-		ran.RoundAuthorized = 1
-		require.ErrorIs(t, GenesisParentEligible(2, installed, s0, ran), ErrRegistryNotAtGenesis)
-		ran = genesis
-		ran.CertifiedRound = 1
-		require.ErrorIs(t, GenesisParentEligible(2, installed, s0, ran), ErrRegistryNotAtGenesis)
+
+	// The records below cannot come from Verify, which refuses executed fields at the genesis hash and a
+	// genesis flag at any other hash. They exercise the eligibility checks as a second layer, by building
+	// the unexported record directly, which only code inside this package can do.
+	withRecord := func(change func(*record)) Snapshot {
+		r := *genesis.r
+		change(&r)
+		return Snapshot{r: &r}
+	}
+	t.Run("E3 a record flagged genesis for another parent hash", func(t *testing.T) {
+		s := withRecord(func(r *record) { r.f.ParentHash = c.b1.hash })
+		require.ErrorIs(t, GenesisParentEligible(2, installed, s0, s), ErrParentNotGenesis)
+	})
+	t.Run("E3 a record at the genesis hash not flagged genesis", func(t *testing.T) {
+		s := withRecord(func(r *record) { r.f.Genesis = false })
+		require.ErrorIs(t, GenesisParentEligible(2, installed, s0, s), ErrParentNotGenesis)
+	})
+	t.Run("E3 a record flagged genesis at a non-zero number", func(t *testing.T) {
+		s := withRecord(func(r *record) { r.f.Number = 1 })
+		require.ErrorIs(t, GenesisParentEligible(2, installed, s0, s), ErrParentNotGenesis)
+	})
+	t.Run("E4 a genesis record that executed a round", func(t *testing.T) {
+		s := withRecord(func(r *record) { r.f.RoundAuthorized = 1 })
+		require.ErrorIs(t, GenesisParentEligible(2, installed, s0, s), ErrRegistryNotAtGenesis)
+		s = withRecord(func(r *record) { r.f.CertifiedRound = 1 })
+		require.ErrorIs(t, GenesisParentEligible(2, installed, s0, s), ErrRegistryNotAtGenesis)
+	})
+	t.Run("premise: the unchanged record is eligible and was not changed by the copies", func(t *testing.T) {
+		require.NoError(t, GenesisParentEligible(2, installed, s0, withRecord(func(*record) {})))
+		require.NoError(t, GenesisParentEligible(2, installed, s0, genesis))
 	})
 }

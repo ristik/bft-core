@@ -16,8 +16,9 @@ serve witnesses, choose a parent, or wire anything into a node. Nothing in produ
 | `Verify(ctx, parentHash, Evidence)` | §7.3 steps 1 to 7. `parentHash` is a 32-byte hash the caller has already authenticated as the certified parent; a block number or tag is not representable |
 | `Evidence` | RLP header, account proof nodes, and exactly 22 storage proofs in §4.2 order. It has no field for an RPC summary value |
 | `EvidenceFromGetProof` | arranges an `eth_getProof` result by storage key; summary fields are not decoded |
-| `Snapshot` | every §4.2 field as a value, with `ParentHash`, `Number` and `StateRoot` as provenance, and `Genesis` when the parent is `evmGenesisHash`. `LastAppliedRootRound()` is `clock.rootRound` |
-| `GenesisParentEligible` | the §7.3 E1 to E4 rule, separate from verification, and refusing any snapshot not produced by `Verify` |
+| `Snapshot` | opaque: an unexported record of the verified values, never changed after `Verify` returns. Accessors `ParentHash()`, `Number()`, `StateRoot()`, `Genesis()` and `LastAppliedRootRound()` (`clock.rootRound`) return copies; the zero `Snapshot` is not `Valid()` |
+| `Fields` | a copy of every §4.2 field and the provenance, returned by `Snapshot.Fields()`. It holds only arrays, integers and booleans, and no function accepts it, so editing it changes no decision |
+| `GenesisParentEligible` | the §7.3 E1 to E4 rule, separate from verification. It reads the snapshot's verified record, refuses the zero `Snapshot`, and requires the recorded parent hash to equal the `evmGenesisHash` `Verify` compared it with |
 
 ## 2. Refusals
 

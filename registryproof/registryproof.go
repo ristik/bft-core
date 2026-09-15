@@ -311,10 +311,52 @@ func decodeWord(enc []byte) (common.Hash, error) {
 	return common.BytesToHash(b), nil
 }
 
-// Snapshot is the registry as of one verified parent block. Every field is a value, so nothing in it
-// aliases the evidence or the caller's memory. Only Verify produces a usable Snapshot: a Snapshot built
-// any other way is refused by GenesisParentEligible.
+/*
+Snapshot is the registry as of one verified parent block. It has no exported or mutable state: the values
+Verify checked live in an unexported record that nothing changes after Verify returns, and every accessor
+returns a copy. Only Verify produces a non-zero Snapshot, and GenesisParentEligible reads the record, so
+editing a copy of the values cannot change a decision (review of #156).
+*/
 type Snapshot struct {
+	r *record
+}
+
+type record struct {
+	f              Fields
+	evmGenesisHash common.Hash // the configured evmGenesisHash Verify compared the parent with
+}
+
+// Fields returns a copy of the verified values. Fields holds only arrays, integers and booleans, so the
+// copy shares no memory with the snapshot. The zero Snapshot returns zero Fields.
+func (s Snapshot) Fields() Fields {
+	if s.r == nil {
+		return Fields{}
+	}
+	return s.r.f
+}
+
+// Valid reports whether s was produced by Verify.
+func (s Snapshot) Valid() bool { return s.r != nil }
+
+// ParentHash is the verified parent block hash.
+func (s Snapshot) ParentHash() common.Hash { return s.Fields().ParentHash }
+
+// Number is the verified parent block number.
+func (s Snapshot) Number() uint64 { return s.Fields().Number }
+
+// StateRoot is the verified parent state root.
+func (s Snapshot) StateRoot() common.Hash { return s.Fields().StateRoot }
+
+// Genesis reports that the parent is the configured evmGenesisHash, whose storage was checked against §5.4.
+func (s Snapshot) Genesis() bool { return s.Fields().Genesis }
+
+// LastAppliedRootRound is the committed cursor for the next derivation: clock.rootRound of this parent,
+// and nothing else (§7.3 step 7, D1 §5).
+func (s Snapshot) LastAppliedRootRound() uint64 { return s.Fields().ClockRootRound }
+
+// Fields is a copy of a verified snapshot's values, for diagnostics and for callers that read the
+// registry. It carries no authority: no function in this package accepts it.
+type Fields struct {
 	// Provenance.
 	ParentHash common.Hash
 	Number     uint64
@@ -345,16 +387,10 @@ type Snapshot struct {
 	OutcomesCommitment common.Hash
 	TransitionCursor   uint64
 	InboxConsumed      uint64
-
-	verified bool
 }
 
-// LastAppliedRootRound is the committed cursor for the next derivation: clock.rootRound of this parent,
-// and nothing else (§7.3 step 7, D1 §5).
-func (s Snapshot) LastAppliedRootRound() uint64 { return s.ClockRootRound }
-
-func decodeSnapshot(w *[FieldCount]common.Hash) (Snapshot, error) {
-	var s Snapshot
+func decodeFields(w *[FieldCount]common.Hash) (Fields, error) {
+	var s Fields
 	scalars := []struct {
 		field int
 		dst   *uint64
@@ -367,7 +403,7 @@ func decodeSnapshot(w *[FieldCount]common.Hash) (Snapshot, error) {
 	for _, sc := range scalars {
 		word := w[sc.field]
 		if !bytes.Equal(word[:24], make([]byte, 24)) {
-			return Snapshot{}, fmt.Errorf("%w: %s does not fit uint64", ErrValue, SlotNames[sc.field])
+			return Fields{}, fmt.Errorf("%w: %s does not fit uint64", ErrValue, SlotNames[sc.field])
 		}
 		*sc.dst = binary.BigEndian.Uint64(word[24:])
 	}
@@ -379,12 +415,12 @@ func decodeSnapshot(w *[FieldCount]common.Hash) (Snapshot, error) {
 	switch flag := w[fCertifiedHasBlockHash]; flag {
 	case common.Hash{}:
 		if s.CertifiedBlockHash != (common.Hash{}) {
-			return Snapshot{}, fmt.Errorf("%w: null certified block hash is not the zero word", ErrValue)
+			return Fields{}, fmt.Errorf("%w: null certified block hash is not the zero word", ErrValue)
 		}
 	case common.BigToHash(common.Big1):
 		s.HasBlockHash = true
 	default:
-		return Snapshot{}, fmt.Errorf("%w: certified.hasBlockHash is %x", ErrValue, flag)
+		return Fields{}, fmt.Errorf("%w: certified.hasBlockHash is %x", ErrValue, flag)
 	}
 	return s, nil
 }
@@ -453,7 +489,7 @@ func (l limits) verify(c Context, parentHash common.Hash, ev Evidence) (Snapshot
 			return Snapshot{}, fmt.Errorf("%w: %s: %v", ErrValue, SlotNames[i], err)
 		}
 	}
-	s, err := decodeSnapshot(&words)
+	s, err := decodeFields(&words)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -503,8 +539,7 @@ func (l limits) verify(c Context, parentHash common.Hash, ev Evidence) (Snapshot
 			return Snapshot{}, fmt.Errorf("%w: outcomes round %d for authorized round %d", ErrNotFinalized, s.OutcomesRound, s.RoundAuthorized)
 		}
 	}
-	s.verified = true
-	return s, nil
+	return Snapshot{r: &record{f: s, evmGenesisHash: c.EVMGenesisHash}}, nil
 }
 
 func isGenesisField(i int) bool {
@@ -544,10 +579,15 @@ func GenesisParentEligible(authorizedRound uint64, bound *bfttypes.InputRecord, 
 		!bytes.Equal(bound.Hash, genesisState) || !bytes.Equal(bound.PreviousHash, genesisState) { // E2
 		return ErrNotGenesisHistory
 	}
-	if !parent.verified || !parent.Genesis || parent.Number != 0 { // E3
+	// The decision reads the record Verify produced, never a copy the caller could have edited.
+	if parent.r == nil {
+		return fmt.Errorf("%w: the snapshot was not produced by Verify", ErrParentNotGenesis)
+	}
+	p := parent.r.f
+	if !p.Genesis || p.Number != 0 || p.ParentHash != parent.r.evmGenesisHash { // E3
 		return ErrParentNotGenesis
 	}
-	if parent.RoundAuthorized != 0 || parent.CertifiedRound != 0 { // E4
+	if p.RoundAuthorized != 0 || p.CertifiedRound != 0 { // E4
 		return ErrRegistryNotAtGenesis
 	}
 	return nil

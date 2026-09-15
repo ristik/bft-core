@@ -59,24 +59,24 @@ func TestAnvilVectorVerifies(t *testing.T) {
 
 	s, err := Verify(anvilContext(), v.BlockHash, anvilEvidence(t, v, v.Proof))
 	require.NoError(t, err)
-	require.Equal(t, uint64(v.BlockNumber), s.Number)
-	require.False(t, s.Genesis)
+	require.Equal(t, uint64(v.BlockNumber), s.Fields().Number)
+	require.False(t, s.Fields().Genesis)
 
 	got := map[string]common.Hash{
-		"layoutVersion": num(s.LayoutVersion), "genesisCommitment": s.GenesisCommitment, "config.shardConfHash": s.ShardConfHash,
-		"assignment.epoch": num(s.ShardEpoch), "assignment.rootEpoch": num(s.RootEpoch), "clock.rootRound": num(s.ClockRootRound),
-		"origin.rootEpoch": num(s.OriginRootEpoch), "origin.timestamp": num(s.OriginTimestamp), "origin.treeRoot": s.OriginTreeRoot,
-		"origin.identity": s.OriginIdentity, "origin.trHash": s.OriginTRHash, "round.authorized": num(s.RoundAuthorized),
-		"input.commitment": s.InputCommitment, "certified.round": num(s.CertifiedRound), "certified.stateHash": s.CertifiedStateHash,
-		"certified.hasBlockHash": num(map[bool]uint64{false: 0, true: 1}[s.HasBlockHash]), "certified.blockHash": s.CertifiedBlockHash,
-		"phase": num(s.Phase), "outcomes.round": num(s.OutcomesRound), "outcomes.commitment": s.OutcomesCommitment,
-		"transition.cursor": num(s.TransitionCursor), "inbox.consumed": num(s.InboxConsumed),
+		"layoutVersion": num(s.Fields().LayoutVersion), "genesisCommitment": s.Fields().GenesisCommitment, "config.shardConfHash": s.Fields().ShardConfHash,
+		"assignment.epoch": num(s.Fields().ShardEpoch), "assignment.rootEpoch": num(s.Fields().RootEpoch), "clock.rootRound": num(s.Fields().ClockRootRound),
+		"origin.rootEpoch": num(s.Fields().OriginRootEpoch), "origin.timestamp": num(s.Fields().OriginTimestamp), "origin.treeRoot": s.Fields().OriginTreeRoot,
+		"origin.identity": s.Fields().OriginIdentity, "origin.trHash": s.Fields().OriginTRHash, "round.authorized": num(s.Fields().RoundAuthorized),
+		"input.commitment": s.Fields().InputCommitment, "certified.round": num(s.Fields().CertifiedRound), "certified.stateHash": s.Fields().CertifiedStateHash,
+		"certified.hasBlockHash": num(map[bool]uint64{false: 0, true: 1}[s.Fields().HasBlockHash]), "certified.blockHash": s.Fields().CertifiedBlockHash,
+		"phase": num(s.Fields().Phase), "outcomes.round": num(s.Fields().OutcomesRound), "outcomes.commitment": s.Fields().OutcomesCommitment,
+		"transition.cursor": num(s.Fields().TransitionCursor), "inbox.consumed": num(s.Fields().InboxConsumed),
 	}
 	for _, name := range SlotNames {
 		require.Equal(t, v.Words[name], got[name], name)
 	}
 	require.Equal(t, uint64(9), s.LastAppliedRootRound())
-	require.Equal(t, named("B2"), s.CertifiedBlockHash)
+	require.Equal(t, named("B2"), s.Fields().CertifiedBlockHash)
 }
 
 // The response's summary fields are rewritten to claim different values. Decoding drops them and the
