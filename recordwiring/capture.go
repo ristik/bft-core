@@ -43,7 +43,8 @@ const (
 	CaptureExecutorUnavailable
 	// CaptureExecutorMoved: the executor's head is no longer exactly B, so B is not published.
 	CaptureExecutorMoved
-	// CaptureStale: the store's head already names this round or a later one; it is not replaced.
+	// CaptureStale: the store's head already names this round or a later one, or changed between preparation
+	// and the store transaction; it is not replaced.
 	CaptureStale
 	// CapturePublishFailed: the store refused or failed the publication.
 	CapturePublishFailed
@@ -115,6 +116,12 @@ type CaptureResult struct {
 	Err         error
 }
 
+// FinalityLock serializes the publication decision with every finality-changing executor operation.
+// *shardnode.FinalityGate implements it.
+type FinalityLock interface {
+	Hold(ctx context.Context, who string) (func(), error)
+}
+
 // DefaultAcquireTimeout bounds one witness acquisition.
 const DefaultAcquireTimeout = 10 * time.Second
 
@@ -125,7 +132,10 @@ type CaptureConfig struct {
 	// RPC answers debug_getRawHeader and eth_getProof for the execution client the node commits to.
 	RPC registrywitness.Caller
 	// Executor is read with Head only; no call that changes finality is made.
-	Executor       shardnode.Executor
+	Executor shardnode.Executor
+	// Finality is the node's finality gate (Node.FinalityGate). The final head read and the store transaction
+	// run while holding it.
+	Finality       FinalityLock
 	AcquireTimeout time.Duration
 	Log            *slog.Logger
 	// OnResult, when set, receives every attempt's result. It is called from the round for duplicate,
@@ -175,6 +185,8 @@ func NewCapturer(cfg CaptureConfig) (*Capturer, error) {
 		return nil, errors.New("recordwiring: capture needs an execution client RPC caller")
 	case cfg.Executor == nil:
 		return nil, errors.New("recordwiring: capture needs the executor")
+	case cfg.Finality == nil:
+		return nil, errors.New("recordwiring: capture needs the node's finality gate")
 	}
 	if cfg.AcquireTimeout <= 0 {
 		cfg.AcquireTimeout = DefaultAcquireTimeout
@@ -314,6 +326,39 @@ func (c *Capturer) capture(ctx context.Context, a Attempt) CaptureResult {
 	}
 	c.log.Debug("certified record: witness verified", "attempt", a.ID, "round", a.Round, "block", a.BlockHash.String(), "number", s.Number())
 
+	var uc types.UnicityCertificate
+	var tr certification.TechnicalRecord
+	if err := types.Cbor.Unmarshal(a.certificate, &uc); err != nil {
+		return fail(CaptureMalformed, err)
+	}
+	if err := types.Cbor.Unmarshal(a.technical, &tr); err != nil {
+		return fail(CaptureMalformed, err)
+	}
+
+	// The expensive part of publication runs here, still off the round lock and outside the finality gate: the
+	// store verifies the record and the head it would replace, and decides staleness.
+	prepared, err := c.cfg.Store.Prepare(ctx, c.cfg.Deployment.StoreContext(), certifiedstore.Record{
+		BlockHash: a.BlockHash, BlockNumber: s.Number(), StateRoot: a.StateRoot, PartitionRound: a.Round,
+		Certificate: &uc, Technical: &tr, Witness: w.Evidence(),
+	})
+	switch {
+	case errors.Is(err, certifiedstore.ErrStaleRecord):
+		return fail(CaptureStale, err)
+	case err != nil:
+		return fail(CapturePublishFailed, err)
+	}
+
+	// THE DECISION IS SERIALIZED WITH FINALITY (review of #162). Every executor call that changes what is
+	// canonical, the round's commits and builds and recovery's commit, takes this gate. Holding it across the
+	// head read and the store transaction means the executor cannot move between "the head is exactly B" and
+	// "B's record is durable": a commit that arrives meanwhile waits, and one already in progress is seen by the
+	// read. Only the head read and the store transaction happen under it.
+	release, err := c.cfg.Finality.Hold(ctx, "certified-record-publication")
+	if err != nil {
+		return fail(CaptureStopped, fmt.Errorf("%w: waiting for the finality gate: %w", ErrCaptureStopped, err))
+	}
+	defer release()
+
 	// The executor must still be exactly B: a record claims no more than the node established.
 	head, err := c.cfg.Executor.Head(ctx)
 	if err != nil {
@@ -324,20 +369,9 @@ func (c *Capturer) capture(ctx context.Context, a Attempt) CaptureResult {
 			ErrExecutorMoved, head.Number, head.Hash, head.StateRoot, s.Number(), a.BlockHash, a.StateRoot))
 	}
 
-	var uc types.UnicityCertificate
-	var tr certification.TechnicalRecord
-	if err := types.Cbor.Unmarshal(a.certificate, &uc); err != nil {
-		return fail(CaptureMalformed, err)
-	}
-	if err := types.Cbor.Unmarshal(a.technical, &tr); err != nil {
-		return fail(CaptureMalformed, err)
-	}
-	err = c.cfg.Store.Publish(ctx, c.cfg.Deployment.StoreContext(), certifiedstore.Record{
-		BlockHash: a.BlockHash, BlockNumber: s.Number(), StateRoot: a.StateRoot, PartitionRound: a.Round,
-		Certificate: &uc, Technical: &tr, Witness: w.Evidence(),
-	})
+	err = c.cfg.Store.Commit(prepared)
 	switch {
-	case errors.Is(err, certifiedstore.ErrStaleRecord):
+	case errors.Is(err, certifiedstore.ErrHeadChanged):
 		return fail(CaptureStale, err)
 	case err != nil:
 		return fail(CapturePublishFailed, err)

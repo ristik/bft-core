@@ -26,10 +26,10 @@ WHAT MUST HOLD IT. Every call that makes the executor treat a block as canonical
   - `Build`, because starting a block sets head, safe and finalized on its parent before any
     payload exists.
 
-WHAT MUST NOT. Reads (`Head`, `GenesisBlock`) and `Verify` — `newPayload` tells the executor about a
-block without making it canonical. Putting them under the gate would serialize the round against
-recovery for no benefit, and a validator's per-round Verify is exactly the call that must not queue
-behind a recovery commit.
+Standalone reads (`Head`, `GenesisBlock`) and `Verify` do not acquire the gate: `newPayload` tells the
+executor about a block without making it canonical. A head read used to confirm a commit or decide
+certified-record publication stays inside that operation's gate. A validator's per-round Verify
+must not queue behind a recovery commit.
 
 WHY BOTH FLAVOURS OF ACQUISITION. The round MUST proceed, so it waits (with its context). The
 applier must NOT wait: it is called from a round loop and its whole contract is to make one bounded
@@ -57,6 +57,16 @@ var ErrFinalityBusy = errors.New("shardnode: another finality-changing executor 
 
 func NewFinalityGate() *FinalityGate {
 	return &FinalityGate{ready: make(chan struct{}), now: time.Now}
+}
+
+/*
+Hold waits for the gate, or for ctx to end, and returns its idempotent release. It is for a decision outside
+this package that must not interleave with a commit or a build: publishing the certified record for the
+executor's current head (#14 W2) reads the head and commits the store transaction while holding it. Hold it only
+for local, bounded work; a network acquisition or signature verification does not belong inside.
+*/
+func (g *FinalityGate) Hold(ctx context.Context, who string) (func(), error) {
+	return g.acquire(ctx, who)
 }
 
 // acquire waits for the gate, or for the context to end. The returned release is idempotent.

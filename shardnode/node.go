@@ -182,9 +182,17 @@ func (n *Node) SetCertifiedRecordStatus(outcome, detail string) {
 }
 
 // SetCommitObserver attaches an observer told about every block the round commits on a certificate's
-// authority (#14 W2). Call after New, before Run.
+// authority (#14 W2). Call after New, before Run. It also installs the node's finality gate on the round, so
+// the round's commits and builds are serialized with anything the observer decides under FinalityGate, whether
+// or not recovery is enabled.
 func (n *Node) SetCommitObserver(o CommitObserver) {
+	n.round.SetFinalityGate(n.recoveryDeps.Gate)
 	n.round.SetCommitObserver(o)
+}
+
+// FinalityGate is the gate this node's round and recovery take for every finality-changing executor call.
+func (n *Node) FinalityGate() *FinalityGate {
+	return n.recoveryDeps.Gate
 }
 
 // Health returns this node's live status snapshot — see health.go. Always

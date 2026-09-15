@@ -313,6 +313,18 @@ func (r *Round) SetCommitObserver(o CommitObserver) {
 	r.commitObserver = o
 }
 
+// SetFinalityGate installs the gate every finality-changing executor call takes, when none is installed yet.
+// SetRecovery installs the node's gate as part of the recovery stack; a node that runs a certified-record
+// capturer without recovery needs it installed here, because the capturer's publication decision is serialized
+// with the round's commits and builds through the same gate (#14 W2).
+func (r *Round) SetFinalityGate(g *FinalityGate) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.finality == nil {
+		r.finality = g
+	}
+}
+
 func (r *Round) SetRecovery(s *RecoveryStack) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -8,7 +8,7 @@ Node wiring is delivered in three reviewed units:
 | Unit | Scope |
 | --- | --- |
 | **W1** (#161, merged `30084e5f`) | deployment context built once; store opened with its directory entry durable; restart reload with the executor compared by exact identity; reported, no effect on voting |
-| **W2** (§7) | witness capture after the round commits B, and atomic publication, off the round lock and outside the finality gate |
+| **W2** (§7) | witness capture off the round lock; verification outside the finality gate, final head check and atomic publication inside it |
 | W3 | readiness for B's child: live continuity, #92 anchor evidence for ordinary records, a separate configuration-bound genesis continuity path, gating alongside P-id |
 
 ## 1. Default path
@@ -187,20 +187,38 @@ One attempt is in flight at a time, and a single pending slot keeps only the new
    proof context. There is no number, tag, head or zero-cursor fallback.
 2. **Bind:** the verified witness must prove the certificate's state root, and its `RoundAuthorized` must be the
    certificate's round (`witness-mismatch`). The block number comes from the verified witness.
-3. **Revalidate:** the executor's head must be exactly B, by the witness's number, B's hash and the state root
-   (`executor-moved`, `executor-unavailable`). `Head` is the only executor call capture makes.
-4. **Publish** B's record through `certifiedstore.Publish`, which verifies it again and writes the record, head
-   pointer and retention in one transaction.
+3. **Prepare** B's record with `certifiedstore.Prepare`, still off the round lock and outside the finality gate.
+   It verifies the record, and verifies the current head record and binds it to its key, and decides staleness
+   (§7.4).
+4. **Decide under the finality gate** (review 5215297453, P1). Capture holds the node's `FinalityGate`, which
+   every finality-changing executor call takes: the round's commits and builds, and recovery's commit. Under it:
+   - it reads the executor's head, which must be exactly B by the witness's number, B's hash and the state root
+     (`executor-moved`, `executor-unavailable`);
+   - it runs `certifiedstore.Commit`, the one store transaction.
+
+   The executor cannot move between "the head is exactly B" and "B's record is durable". A commit arriving
+   meanwhile waits for the transaction, and one already holding the gate is seen by the head read. Only the
+   head read and the store transaction happen under the gate: acquisition and all verification are done
+   before it. `Head` is the only executor call capture makes. `Node.SetCommitObserver` installs the node's
+   gate on the round even when recovery is off, so the round's commits take it in every configuration.
 
 ### 7.4 Stale and out-of-order completion
 
-`certifiedstore.Publish` refuses, inside its transaction, a record that would replace a head naming the same or a
-later partition round, or a genesis record that would replace an ordinary head (`ErrStaleRecord`, reported as
-`stale`). Republishing the head record is allowed. A head key that names no record round is refused as untrusted
-rather than overwritten.
+`certifiedstore.Prepare` reads the current head and decides from the verified head record, never from its key
+(review 5215297453, P2):
+- The head record is decoded and verified under the deployment's context, and the head key must be the
+  canonical key of that verified record. A missing, damaged, foreign, unverifiable or wrongly keyed head is
+  refused and not replaced (`ErrRecordUntrusted` or the named verification refusal). `Load` applies the same
+  binding.
+- A record that would replace a head of the same or a later partition round, or a genesis record that would
+  replace an ordinary head, is refused (`ErrStaleRecord`, reported as `stale`). Republishing the head record is
+  allowed.
 
-The check is in the store transaction rather than in the capturer, so a late or reordered completion cannot
-replace a newer durable head even if another process published it (`TestPublishNeverReplacesALaterHead`).
+`certifiedstore.Commit` then requires, inside its transaction, that the head is byte for byte the one `Prepare`
+decided against (`ErrHeadChanged`, also reported as `stale`). The transaction itself verifies nothing. A late
+or reordered completion cannot replace a newer durable head even if another process published it
+(`TestPublishNeverReplacesALaterHead`, `TestTheHeadKeyIsBoundToItsVerifiedRecord`,
+`TestCommitRequiresTheHeadPrepareDecidedAgainst`).
 
 ### 7.5 States and outcomes
 
@@ -221,7 +239,7 @@ durable-ready, and causes no executor action.
 | `witness-invalid` | the client's answer is not a valid witness for B's hash |
 | `witness-mismatch` | the witness verified but proves another state root or round |
 | `executor-unavailable`, `executor-moved` | the head could not be read, or is no longer exactly B |
-| `stale` | the store's head already names this or a later round |
+| `stale` | the verified head already names this or a later round, or the head changed after preparation |
 | `publish-failed` | the store refused the record or failed |
 | `stopped` | the capturer stopped first; a pending attempt is reported the same way |
 
@@ -250,7 +268,11 @@ Without the flag, nothing is attached.
 | `TestCaptureAcrossRestart` | stopped before publication: in-flight and pending attempts stopped, W1 reload finds the executor ahead of the prior record; stopped after publication: W1 reload is durable-ready for B |
 | `TestCaptureRefusesAMalformedCommit` | a commit naming another block than its certificate, and an empty commit |
 | `TestPublishNeverReplacesALaterHead` | the store's stale refusal for an earlier round, another block at the head's round, the genesis record, and the genesis record with its certificate round advanced past the head's; republishing and later rounds allowed; an unparsable head key |
-| `TestRound_ReportsOnlyCertifiedCommits` | the round hook with the fake executor |
+| `TestRound_ReportsOnlyCertifiedCommits`, `TestRound_AnUncopyableCommitIsNotReportedAndDoesNotFailTheRound` | the round hook with the fake executor; a commit that cannot be copied is not reported and does not fail the round |
+| `TestCapturePublicationIsSerializedWithFinality` | review 5215297453 P1: the executor moving during verification is `executor-moved`; a commit started after the final head read waits on the gate and proceeds only once B's record is durable; the store head changing after preparation is `stale` (`ErrHeadChanged`) with nothing written; a commit already holding the gate is seen by the head read |
+| `TestRound_CommitsWaitForTheFinalityGate`, `TestNodeSetCommitObserverInstallsTheNodeGate` | the round's commit waits for a held gate; attaching an observer installs the node's gate on a round without recovery and keeps an installed one |
+| `TestTheHeadKeyIsBoundToItsVerifiedRecord` | review 5215297453 P2: an authentic record under an earlier round's key, an unverifiable head, a head naming a missing record, and a head of another deployment are refused on load or publication and not replaced |
+| `TestCommitRequiresTheHeadPrepareDecidedAgainst` | `Commit` refuses a changed head, the head moved to an identical copy under another key, the head record's bytes changed under the same key, an empty store that gained a head, and another store's preparation; an unchanged head commits |
 
 The capture tests use:
 - the real bbolt store;
@@ -277,10 +299,34 @@ The first run caught 19. Four survived because each negative case changed severa
 are caught after one-condition cases were added: genesis at an advanced round, and executor heads differing only
 in number, hash or state root. One did not compile and is caught once fixed.
 
+The repair of review 5215297453 added eleven more, all caught:
+- the head key's binding to its verified record;
+- an unverifiable head replaced;
+- the same round allowed, and genesis allowed over an ordinary head;
+- `Commit` not comparing the head name, not comparing the head record's bytes, or accepting another store's
+  preparation;
+- publication decided without the finality gate;
+- `ErrHeadChanged` reported as a publish failure;
+- the round ignoring an installed gate;
+- the node not installing its gate for the observer.
+
+The first run of these caught seven. The head-name and head-bytes checks each survived because the other covered
+every case changed so far, and are caught after cases that change only one of them. The `ErrHeadChanged`
+mapping and the node's gate installation had no test reaching them, and are caught after the store-head-change
+capture case and `TestNodeSetCommitObserverInstallsTheNodeGate` were added.
+
 ### 7.8 Not in W2
 
 - Readiness for B's child, authenticated quiet continuity, the explicit genesis path including the genesis
   record, capture of recovery-applied blocks, and any voting, building or validating effect: W3.
+- **What W3 must add before it gates anything on the record** (review 5215297453). Capture is triggered only by
+  the round's own certified commits, and repeats, re-deliveries and anchor-recovery commits report nothing. An
+  attempt that fails transiently, such as `witness-unavailable`, `executor-unavailable` or `publish-failed`, is
+  therefore not retried by W2. A readiness gate built on the record needs:
+  - a bounded retry trigger for transient failures;
+  - capture after reconciliation or recovery commits.
+
+  Without these, one unavailable proof could leave a node permanently not ready.
 - Retrieving a witness after the proof window: #15.
 - Existing stock execution has no SealRegistry and is not a positive execution lane for this path.
 

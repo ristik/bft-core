@@ -132,13 +132,27 @@ type headExecutor struct {
 	head  shardnode.BlockRef
 	err   error
 	calls int
+	hook  func()
 }
 
+// Head returns the head and error as they are when called, then runs a hook set by onHead, once, outside the
+// lock.
 func (e *headExecutor) Head(context.Context) (shardnode.BlockRef, error) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.calls++
-	return e.head, e.err
+	head, err, hook := e.head, e.err, e.hook
+	e.hook = nil
+	e.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return head, err
+}
+
+func (e *headExecutor) onHead(f func()) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.hook = f
 }
 
 func (e *headExecutor) set(b certifiedchain.Block) {
@@ -155,6 +169,7 @@ type captureHarness struct {
 	store   *certifiedstore.Store
 	rpc     *witnessRPC
 	exec    *headExecutor
+	gate    *shardnode.FinalityGate
 	cap     *recordwiring.Capturer
 	results chan recordwiring.CaptureResult
 	cancel  context.CancelFunc
@@ -167,12 +182,13 @@ func newCaptureHarness(t *testing.T, blocks int) *captureHarness {
 	h := &captureHarness{
 		t: t, c: c, d: mustDeployment(t, c), path: filepath.Join(t.TempDir(), "certified.db"),
 		rpc: newWitnessRPC(c), exec: &headExecutor{head: ref(c.Blocks[0])}, results: make(chan recordwiring.CaptureResult, 64),
+		gate: shardnode.NewFinalityGate(),
 	}
 	s, err := recordwiring.OpenStore(h.path, 8)
 	require.NoError(t, err)
 	h.store = s
 	h.cap, err = recordwiring.NewCapturer(recordwiring.CaptureConfig{
-		Deployment: h.d, Store: s, RPC: h.rpc, Executor: h.exec, AcquireTimeout: 20 * time.Second,
+		Deployment: h.d, Store: s, RPC: h.rpc, Executor: h.exec, Finality: h.gate, AcquireTimeout: 20 * time.Second,
 		OnResult: func(r recordwiring.CaptureResult) { h.results <- r },
 	})
 	require.NoError(t, err)

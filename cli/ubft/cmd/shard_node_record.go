@@ -73,7 +73,7 @@ func startCertifiedRecord(ctx context.Context, flags *shardNodeRunFlags, shardCo
 	}
 
 	capturer, err := recordwiring.NewCapturer(recordwiring.CaptureConfig{
-		Deployment: deployment, Store: store, Executor: executor, Log: log,
+		Deployment: deployment, Store: store, Executor: executor, Finality: node.FinalityGate(), Log: log,
 		RPC:            recordwiring.HTTPWitnessCaller(flags.EthURL, flags.CertifiedRecordCaptureTimeout),
 		AcquireTimeout: flags.CertifiedRecordCaptureTimeout,
 	})
