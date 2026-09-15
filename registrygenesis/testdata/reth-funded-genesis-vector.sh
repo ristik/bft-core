@@ -103,9 +103,10 @@ call() {
 	alive
 	response=$(curl -s -m 10 -H 'Content-Type: application/json' \
 		--data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" "$rpc") || fail "$1: no response from $rpc"
-	jq -e 'type == "object" and .jsonrpc == "2.0" and (has("error") | not) and has("result") and .result != null' \
+	jq -e -s 'length == 1 and (.[0] | type == "object" and .jsonrpc == "2.0" and .id == 1 and
+		(has("error") | not) and has("result") and .result != null)' \
 		<<<"$response" >/dev/null 2>&1 || fail "$1: not a successful JSON-RPC result: $response"
-	jq -c .result <<<"$response"
+	jq -c -s '.[0].result' <<<"$response"
 	alive
 }
 
@@ -172,7 +173,9 @@ capture_account() {
 	local actual_balance actual_nonce actual_code expected_storage actual_storage='{}'
 	jq -e --arg a "$address" '.alloc | type == "object" and has($a) and (.[$a] | type == "object")' "$genesis" >/dev/null ||
 		fail "finalized genesis has no allocation object for $address"
-	expected_balance=$(jq -er --arg a "$address" '.alloc[$a].balance // "0x0"' "$genesis") || fail "finalized genesis has no readable balance for $address"
+	jq -e --arg a "$address" '.alloc[$a] | has("balance") and (.balance | type == "string")' "$genesis" >/dev/null ||
+		fail "finalized genesis has no explicit string balance for $address"
+	expected_balance=$(jq -er --arg a "$address" '.alloc[$a].balance' "$genesis") || fail "finalized genesis has no readable balance for $address"
 	expected_nonce=$(jq -er --arg a "$address" '.alloc[$a].nonce // "0x0"' "$genesis") || fail "finalized genesis has no readable nonce for $address"
 	expected_code=$(jq -er --arg a "$address" '.alloc[$a].code // "0x"' "$genesis") || fail "finalized genesis has no readable code for $address"
 	expected_balance=$(quantity "$expected_balance" "finalized balance for $address")

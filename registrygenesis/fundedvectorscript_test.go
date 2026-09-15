@@ -256,6 +256,13 @@ func TestRethFundedVectorScriptRefusals(t *testing.T) {
 		"node runs but never listens":         {with(func(c *fundedScriptCase) { c.lsofOwner = "" }), "did not listen"},
 		"listener is another process":         {with(func(c *fundedScriptCase) { c.lsofOwner = "other" }), "not this run's node"},
 		"every call returns a JSON-RPC error": {with(func(c *fundedScriptCase) { c.respond = errorEverywhere }), "not a successful JSON-RPC result"},
+		"response id is not one": {with(func(c *fundedScriptCase) {
+			c.respond = override("web3_clientVersion", "", `{"jsonrpc":"2.0","id":2,"result":"reth/v2.5.0-dev-189c0df/x86_64"}`)
+		}), "web3_clientVersion: not a successful JSON-RPC result"},
+		"multiple response objects": {with(func(c *fundedScriptCase) {
+			one := fundedOKResult("reth/v2.5.0-dev-189c0df/x86_64")
+			c.respond = override("web3_clientVersion", "", one+"\n"+one)
+		}), "web3_clientVersion: not a successful JSON-RPC result"},
 		"client version names another commit": {with(func(c *fundedScriptCase) {
 			c.respond = override("web3_clientVersion", "", fundedOKResult("reth/v2.5.0-dev-deadbeef/x86_64"))
 		}), "does not name"},
@@ -315,6 +322,11 @@ func TestRethFundedVectorScriptRefusals(t *testing.T) {
 				return []byte(strings.Replace(string(in), fundedAddress, "0x3000000000000000000000000000000000000001", 1))
 			}
 		}), "no allocation object for " + fundedAddress},
+		"finalized input has no explicit balance": {with(func(c *fundedScriptCase) {
+			c.mutateInput = func(in []byte) []byte {
+				return []byte(strings.Replace(string(in), `"balance":"0x123456789abcdef"`, `"balance":null`, 1))
+			}
+		}), "no explicit string balance for " + fundedAddress},
 		"finalized input has unqueried EOA storage": {with(func(c *fundedScriptCase) {
 			c.mutateInput = func(in []byte) []byte {
 				return []byte(strings.Replace(string(in), `"nonce":"0x0"`, `"nonce":"0x0","storage":{"0x01":"0x02"}`, 1))
