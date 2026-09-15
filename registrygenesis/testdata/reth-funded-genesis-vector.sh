@@ -76,7 +76,9 @@ fi
 
 rm -rf "$work/data"
 mkdir -p "$work"
-"$reth" init --chain "$genesis" --datadir "$work/data" >"$work/init.log" 2>&1 || fail "reth init failed: $(tail -5 "$work/init.log")"
+# The pinned build suppresses non-TTY informational output unless an explicit filter is present.
+# Keep the command shape used by the offline stand-ins and request the init-hash record deterministically.
+RUST_LOG=info "$reth" init --chain "$genesis" --datadir "$work/data" >"$work/init.log" 2>&1 || fail "reth init failed: $(tail -5 "$work/init.log")"
 init_hash=$(sed -e 's/\x1b\[[0-9;]*m//g' "$work/init.log" | sed -n 's/.*Genesis block written hash=\(0x[0-9a-f]\{64\}\).*/\1/p' | tail -1)
 [ -n "$init_hash" ] || fail "reth init reported no genesis hash"
 
