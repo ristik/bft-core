@@ -1,0 +1,301 @@
+{
+  "profile": "sealRegistry/v1",
+  "specification": "bft-core docs/design/f4a-seal-registry-contract.md, accepted in #153 (last changed by 9545881e5d3ce7307ebf3ec792b1ea5aa5e9d8f1)",
+  "compiler": {
+    "solc": "0.8.37",
+    "evm_version": "cancun",
+    "optimizer": true,
+    "optimizer_runs": 200,
+    "via_ir": true,
+    "bytecode_hash": "none",
+    "cbor_metadata": false
+  },
+  "abi": [
+    {
+      "type": "function",
+      "name": "finalize",
+      "inputs": [
+        {
+          "name": "n",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "sealRegistryCommitment",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "open",
+      "inputs": [
+        {
+          "name": "n",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "rootRound",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "rootEpoch",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "timestamp",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "treeRoot",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "originIdentity",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "trHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "shardConfHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "certifiedRound",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "certEpoch",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "authEpoch",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "stateHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "hasBlockHash",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "blockHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "inputCommitment",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "transitionCount",
+          "type": "uint64",
+          "internalType": "uint64"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "error",
+      "name": "ConfigurationMismatch",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NonCanonicalNullBlockHash",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NotInitialized",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NotOpen",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NotSystemCaller",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "PreviousNotFinalized",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "RootEpochMismatch",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "RoundNotAhead",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ShardEpochMismatch",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "StaleRootRound",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "TransitionsUnsupported",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "WrongOutcomeRound",
+      "inputs": []
+    }
+  ],
+  "runtimeBytecode": "0x60806040526004361015610011575f80fd5b5f3560e01c80633a6dbae4146101055763bacfb3231461002f575f80fd5b34610101576040366003190112610101576100486105ec565b60ff60981b1933016100f25760015f5160206106045f395f51905f5254036100e35767ffffffffffffffff7fa6dfb02f4e0457f6dc0ca8f4fd82b31c4a0df5261e0214610377f2af855a5ee5549116036100d4576024357f435c00c3e0bb551759ef849ef59de7b0a62c300b5c1aa3011d4363b09ddef85a5560025f5160206106045f395f51905f5255005b6328c810d960e01b5f5260045ffd5b631bb5f5b360e31b5f5260045ffd5b631e26931d60e11b5f5260045ffd5b5f80fd5b34610101576102003660031901126101015761011f6105ec565b60243567ffffffffffffffff81168091036101015760443567ffffffffffffffff81168091036101015760643567ffffffffffffffff8116809103610101576101043567ffffffffffffffff811680910361010157610124359167ffffffffffffffff831680930361010157610144359367ffffffffffffffff851680950361010157610184359384159081158603610101576101a435966101e4359167ffffffffffffffff83168093036101015760ff60981b1933016100f25760017f79b704796b8c2ee2cf835e5113e27bbaf138c9831ce0b1cc259966898323094a54148015906105c3575b6105b45760025f5160206106045f395f51905f5254036105a55767ffffffffffffffff7f14386166497930a3efb28f5976da18bcbf7bec69c7b2c449c3ce32552f037844549b169a8b1115610596577fc3adc23527bab9702dd784bd0b145d2ab1a7dce35235a0db3dbfd3da7a53143d548a10610587577fabe1d0722ec7cab6bc8be8343a4900e571bdb46fad619947267449a2b9aa74975460e43503610578577f7671d07e8accfd833bdccd596ad3a1c4a402a090b727f511a073a2498c590ae5548091149182159261056d575b505061055e577fe77628dabc86b477c0db337bda981ad320031675934be9c596d69ebbc20f1a2454830361054f576105405780610537575b610528577f1dfe98fa5011e0dbfdfc5efa804744e3497514271b58499de63781a9941c9a51557f459cf503c328e501962bcf0cd8ca53327ab531deeb9155c48d827d2478932c6c556084357f8af142b0300add3b2aec220298bb445eb0c9884bb45fcd5059be6fcd18e7090d5560a4357fbee6419aa5a12f10d4794669dbd882527b590089e967b14012543a23e0b78e725560c4357fe58f62addabf9360d9fcddf3db70a93d2b2ba476996540ecefbbed5ee3cc9c80557f47a3f86feb14af4a7e5a1a1fb3362c95b32dfbf03a7a3ca31717f8e829382b3c55610164357fe39f0827feecb5f38ffbd452e7c3556ecd0ba586a94434c3f5a10f846cbbfcea55156105205760ff60015b167f1b118c38b50e4765caa320a933997b81ec1218283e0c260e18a4609340314deb557f80ce058bdccaa08590781edd25c9005041ebaba94b6a8941896d46eb60394931557fc3adc23527bab9702dd784bd0b145d2ab1a7dce35235a0db3dbfd3da7a53143d557f14386166497930a3efb28f5976da18bcbf7bec69c7b2c449c3ce32552f0378448190556101c4357fa0cbe06c0b5a76b8d67341bd1bd8f162e5d5c6aea162604a10cec0dce4e0d060557fa6dfb02f4e0457f6dc0ca8f4fd82b31c4a0df5261e0214610377f2af855a5ee5555f7f435c00c3e0bb551759ef849ef59de7b0a62c300b5c1aa3011d4363b09ddef85a5560015f5160206106045f395f51905f5255005b60ff5f610417565b6316b07d6160e01b5f5260045ffd5b5084151561030e565b636fae6b0d60e11b5f5260045ffd5b632f81773960e21b5f5260045ffd5b6304cc6a7f60e21b5f5260045ffd5b141590508a806102d6565b634afe52a560e11b5f5260045ffd5b6330570afb60e11b5f5260045ffd5b6326a5242960e21b5f5260045ffd5b63ea34590160e01b5f5260045ffd5b6321c4e35760e21b5f5260045ffd5b507f1dc271a4e4328f3a46506e6e6e1db1488418d59ca41e005534ed0eda129e61505415610207565b6004359067ffffffffffffffff821682036101015756fe2d5c30492e4b770265db26c3b2d89794cb0435f97f91a351ae818c18236222a7",
+  "codeHash": "0x643b1b983696b0de1f67053daf65c33b55d304de79074b55ee6f8829715a267b",
+  "slotKeys": [
+    {
+      "name": "layoutVersion",
+      "key": "0x79b704796b8c2ee2cf835e5113e27bbaf138c9831ce0b1cc259966898323094a"
+    },
+    {
+      "name": "genesisCommitment",
+      "key": "0x1dc271a4e4328f3a46506e6e6e1db1488418d59ca41e005534ed0eda129e6150"
+    },
+    {
+      "name": "config.shardConfHash",
+      "key": "0xabe1d0722ec7cab6bc8be8343a4900e571bdb46fad619947267449a2b9aa7497"
+    },
+    {
+      "name": "assignment.epoch",
+      "key": "0x7671d07e8accfd833bdccd596ad3a1c4a402a090b727f511a073a2498c590ae5"
+    },
+    {
+      "name": "assignment.rootEpoch",
+      "key": "0xe77628dabc86b477c0db337bda981ad320031675934be9c596d69ebbc20f1a24"
+    },
+    {
+      "name": "clock.rootRound",
+      "key": "0xc3adc23527bab9702dd784bd0b145d2ab1a7dce35235a0db3dbfd3da7a53143d"
+    },
+    {
+      "name": "origin.rootEpoch",
+      "key": "0x1dfe98fa5011e0dbfdfc5efa804744e3497514271b58499de63781a9941c9a51"
+    },
+    {
+      "name": "origin.timestamp",
+      "key": "0x459cf503c328e501962bcf0cd8ca53327ab531deeb9155c48d827d2478932c6c"
+    },
+    {
+      "name": "origin.treeRoot",
+      "key": "0x8af142b0300add3b2aec220298bb445eb0c9884bb45fcd5059be6fcd18e7090d"
+    },
+    {
+      "name": "origin.identity",
+      "key": "0xbee6419aa5a12f10d4794669dbd882527b590089e967b14012543a23e0b78e72"
+    },
+    {
+      "name": "origin.trHash",
+      "key": "0xe58f62addabf9360d9fcddf3db70a93d2b2ba476996540ecefbbed5ee3cc9c80"
+    },
+    {
+      "name": "round.authorized",
+      "key": "0x14386166497930a3efb28f5976da18bcbf7bec69c7b2c449c3ce32552f037844"
+    },
+    {
+      "name": "input.commitment",
+      "key": "0xa0cbe06c0b5a76b8d67341bd1bd8f162e5d5c6aea162604a10cec0dce4e0d060"
+    },
+    {
+      "name": "certified.round",
+      "key": "0x47a3f86feb14af4a7e5a1a1fb3362c95b32dfbf03a7a3ca31717f8e829382b3c"
+    },
+    {
+      "name": "certified.stateHash",
+      "key": "0xe39f0827feecb5f38ffbd452e7c3556ecd0ba586a94434c3f5a10f846cbbfcea"
+    },
+    {
+      "name": "certified.hasBlockHash",
+      "key": "0x1b118c38b50e4765caa320a933997b81ec1218283e0c260e18a4609340314deb"
+    },
+    {
+      "name": "certified.blockHash",
+      "key": "0x80ce058bdccaa08590781edd25c9005041ebaba94b6a8941896d46eb60394931"
+    },
+    {
+      "name": "phase",
+      "key": "0x2d5c30492e4b770265db26c3b2d89794cb0435f97f91a351ae818c18236222a7"
+    },
+    {
+      "name": "outcomes.round",
+      "key": "0xa6dfb02f4e0457f6dc0ca8f4fd82b31c4a0df5261e0214610377f2af855a5ee5"
+    },
+    {
+      "name": "outcomes.commitment",
+      "key": "0x435c00c3e0bb551759ef849ef59de7b0a62c300b5c1aa3011d4363b09ddef85a"
+    },
+    {
+      "name": "transition.cursor",
+      "key": "0x9071048d24ef915056944fc390854c5afc82c7b780af60912f32c98b8a009850"
+    },
+    {
+      "name": "inbox.consumed",
+      "key": "0x902fa8def05f8c67caa8c59344f53ee4ebbc428d5073e5fbf37e23543232cae5"
+    }
+  ],
+  "systemCaller": "0xff00000000000000000000000000000000000001",
+  "genesisStorage": [
+    {
+      "name": "layoutVersion",
+      "value": "1"
+    },
+    {
+      "name": "genesisCommitment",
+      "value": "SHA-256(CBOR(G)), with G built over this codeHash (#153 §5.3 step 2)"
+    },
+    {
+      "name": "config.shardConfHash",
+      "value": "fullShardConfHash (#153 §5.3 step 3)"
+    },
+    {
+      "name": "assignment.epoch",
+      "value": "G.shardEpoch"
+    },
+    {
+      "name": "assignment.rootEpoch",
+      "value": "G.rootEpoch"
+    },
+    {
+      "name": "phase",
+      "value": "2"
+    }
+  ],
+  "genesisNote": "Every other field is absent (zero) at genesis. This artifact does not contain a deployable genesis record: genesisCommitment and fullShardConfHash depend on the deployment configuration and are produced by the Go construction of #153 §5.3 using codeHash above. The tests install #153 §5.4 worked-vector values as storage fixtures only."
+}
