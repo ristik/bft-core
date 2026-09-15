@@ -1,7 +1,6 @@
 package f6arecord
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -61,6 +60,8 @@ type harness struct {
 	certs    map[common.Hash]certificate
 	trs      map[common.Hash]technicalRecord
 	retain   int
+	// trByDigest finds the technical record a certificate commits to.
+	trByDigest map[string]technicalRecord
 }
 
 var modelShard = []byte{0x80}
@@ -84,9 +85,14 @@ func newHarness(t *testing.T, blocks int) *harness {
 			NetworkID: 3, PartitionID: 8, ShardID: modelShard, ShardConfHash: d.ctx.FullShardConfHash.Bytes(),
 			PartitionRound: b.PartitionRound, PreviousHash: prev.Bytes(), StateHash: b.StateRoot.Bytes(),
 			BlockHash: b.Hash.Bytes(), TRHash: tr.digest(), RootRound: 4 + b.PartitionRound,
+			Timestamp: 1_700_000_000 + b.PartitionRound,
+		}
+		if b.Number == 0 {
+			// Genesis history names no block (#153 §7.3 E2); the genesis identity comes from configuration.
+			c.BlockHash = nil
 		}
 		h.certs[b.Hash], h.trs[b.Hash] = c, tr
-		h.signed[c.digest()] = true
+		h.issue(c, tr)
 	}
 	return h
 }
@@ -226,19 +232,10 @@ func (h *harness) reload() readiness {
 	}
 }
 
-// readyForChild adds currency: the live certificate this process holds must be the recorded block's.
-func (h *harness) readyForChild(live certificate) (registryproof.Snapshot, error) {
-	r := h.reload()
-	if r.err != nil {
-		return registryproof.Snapshot{}, r.err
-	}
-	if err := h.authenticate(live); err != nil {
-		return registryproof.Snapshot{}, fmt.Errorf("%w: %v", errCertificate, err)
-	}
-	if !bytes.Equal(live.BlockHash, r.block.Hash.Bytes()) || live.PartitionRound != r.block.PartitionRound {
-		return registryproof.Snapshot{}, errStale
-	}
-	return r.snapshot, nil
+// readyForChild is readiness when the held certificate is reached from the record's certificate with no
+// intervening links: it is the record's own certificate, or a repeat of it. See readyWith (continuity_test.go).
+func (h *harness) readyForChild(held certificate) (registryproof.Snapshot, error) {
+	return h.readyWith(nil, link{cert: held, tr: h.trByDigest[string(held.TRHash)]})
 }
 
 // certify runs the whole pipeline for b without faults.

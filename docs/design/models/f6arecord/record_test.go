@@ -74,6 +74,16 @@ type certificate struct {
 	BlockHash      []byte // IR.h_b; nil for a quiet round
 	TRHash         []byte // commits to the technical record
 	RootRound      uint64
+	Epoch          uint64 // IR epoch, the shard configuration epoch
+	Timestamp      uint64 // IR timestamp
+}
+
+// inputRecordIdentity models InputRecord.Bytes(): every input-record field and nothing outside it. The root
+// round, the technical record and the signatures are not part of it, so an honest repeat of a round has
+// the same identity (#92 design, f6b-quiet-tail-anchor-recovery.md §2.2).
+func (c certificate) inputRecordIdentity() []byte {
+	b, _ := bfttypes.Cbor.Marshal([]any{c.PartitionRound, c.Epoch, c.PreviousHash, c.StateHash, c.BlockHash, c.Timestamp})
+	return b
 }
 
 func (c certificate) digest() [32]byte {
@@ -218,7 +228,17 @@ func verifyRecord(cfg config, r certifiedRecord) (registryproof.Snapshot, error)
 		!bytes.Equal(c.ShardID, cfg.context.ShardID) || !bytes.Equal(c.ShardConfHash, cfg.context.FullShardConfHash) {
 		return registryproof.Snapshot{}, fmt.Errorf("%w: certificate", errWrongContext)
 	}
-	if !bytes.Equal(c.BlockHash, r.BlockHash) || !bytes.Equal(c.StateHash, r.StateRoot) || c.PartitionRound != r.PartitionRound {
+	if r.BlockNumber == 0 {
+		// The configuration-bound genesis record. Its block identity is the configured EVM genesis, proven by
+		// the genesis witness below, and its certificate is genesis history (#153 §7.3 E2): it names no block,
+		// and its state and previous state are the genesis state.
+		if !bytes.Equal(r.BlockHash, cfg.proofContext.EVMGenesisHash.Bytes()) {
+			return registryproof.Snapshot{}, fmt.Errorf("%w: a block-0 record names %x, the configured EVM genesis is %s", errWrongBlock, r.BlockHash, cfg.proofContext.EVMGenesisHash)
+		}
+		if len(c.BlockHash) != 0 || c.PartitionRound != r.PartitionRound || !bytes.Equal(c.StateHash, r.StateRoot) || !bytes.Equal(c.PreviousHash, r.StateRoot) {
+			return registryproof.Snapshot{}, fmt.Errorf("%w: the genesis certificate is not genesis history at the genesis state", errWrongBlock)
+		}
+	} else if len(c.BlockHash) == 0 || !bytes.Equal(c.BlockHash, r.BlockHash) || !bytes.Equal(c.StateHash, r.StateRoot) || c.PartitionRound != r.PartitionRound {
 		return registryproof.Snapshot{}, fmt.Errorf("%w: certificate names round %d block %x", errWrongBlock, c.PartitionRound, c.BlockHash)
 	}
 	if !bytes.Equal(r.Technical.digest(), c.TRHash) {
