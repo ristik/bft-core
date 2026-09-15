@@ -48,6 +48,16 @@ type shardNodeRunFlags struct {
 
 	LUCStoreFile string
 
+	// CertifiedRecordStore enables the certified-block record store (#14) at this path. Empty, the default,
+	// constructs nothing, and the node runs exactly as before. See startCertifiedRecord.
+	CertifiedRecordStore  string
+	CertifiedRecordRetain int
+	// The EVM genesis parameters the SealRegistry deployment was generated with, used only with
+	// CertifiedRecordStore.
+	RegistryEVMGasLimit  uint64
+	RegistryEVMCoinbase  string
+	RegistryEVMExtraData string
+
 	HandshakeNodes    int
 	CertNodes         int
 	HeartbeatInterval time.Duration
@@ -95,6 +105,16 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"engine-api executor only: path to the 32-byte hex JWT secret shared with the execution client (default: $UBFT_HOME/jwt.hex)")
 	cmd.Flags().StringVar(&flags.LUCStoreFile, "luc-store", "",
 		fmt.Sprintf("path to the last-certificate store, for restart recovery (default: %s)", filepath.Join("$UBFT_HOME", lucStoreFileName)))
+	cmd.Flags().StringVar(&flags.CertifiedRecordStore, "certified-record-store", "",
+		"path of the certified-block record store (#14); empty leaves it off. Requires --executor engine-api and a SealRegistry shard configuration. The record is reloaded and reported at startup; it does not change voting")
+	cmd.Flags().IntVar(&flags.CertifiedRecordRetain, "certified-record-retain", defaultCertifiedRecordRetain,
+		"non-genesis certified records to retain, counting the newest")
+	cmd.Flags().Uint64Var(&flags.RegistryEVMGasLimit, "registry-evm-gas-limit", defaultGasLimit,
+		"EVM genesis gas limit the SealRegistry deployment was generated with (with --certified-record-store)")
+	cmd.Flags().StringVar(&flags.RegistryEVMCoinbase, "registry-evm-coinbase", "0x0000000000000000000000000000000000000000",
+		"EVM genesis coinbase the SealRegistry deployment was generated with (with --certified-record-store)")
+	cmd.Flags().StringVar(&flags.RegistryEVMExtraData, "registry-evm-extra-data", "0x",
+		"EVM genesis extraData the SealRegistry deployment was generated with, 0x-prefixed hex (with --certified-record-store)")
 	cmd.Flags().IntVar(&flags.HandshakeNodes, "handshake-nodes", shardnode.DefaultBFTClientOptions.HandshakeNodes, "number of root nodes to handshake with")
 	cmd.Flags().IntVar(&flags.CertNodes, "cert-nodes", shardnode.DefaultBFTClientOptions.CertNodes, "number of root nodes to submit each certification request to")
 	cmd.Flags().DurationVar(&flags.HeartbeatInterval, "heartbeat-interval", shardnode.DefaultBFTClientOptions.HeartbeatInterval, "how often to check for root-chain inactivity")
@@ -229,6 +249,16 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 	// every deployment ran the 5s default whatever its T2 was.
 	awaitTimeout := shardnode.AwaitTimeoutForT2(shardConf.T2Timeout)
 	node.SetAwaitTimeout(awaitTimeout)
+
+	// The certified-block record (#14): nothing is constructed unless a store path is configured, and then
+	// the record is reloaded and reported without changing voting. See startCertifiedRecord.
+	if flags.CertifiedRecordStore != "" {
+		closeRecord, err := startCertifiedRecord(ctx, flags, shardConf, confHash, trustBaseStore, trustBases[0].GetEpoch(), executor, node)
+		if err != nil {
+			return err
+		}
+		defer closeRecord()
+	}
 
 	// Authenticated-evidence anchor recovery (#92, docs/design/f6b-quiet-tail-anchor-recovery.md).
 	// Two switches, because they cost different things: serving retains certificates this node has

@@ -39,13 +39,15 @@ func TestNoProductionPackageImportsTheReader(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		// registrygenesis, registrywitness and certifiedstore are themselves inert, and each has its own guard
-		// requiring that no production package imports it, so importing the reader from them reaches no node
-		// path.
+		// registrygenesis, registrywitness and certifiedstore each have their own guard naming who may import
+		// them. recordwiring is reached only through the shard-node command's opt-in record store, which its
+		// own guard enforces, and internal/testutils/certifiedchain is test fixture code.
 		if strings.HasPrefix(rel, "registryproof"+string(filepath.Separator)) ||
 			strings.HasPrefix(rel, "registrygenesis"+string(filepath.Separator)) ||
 			strings.HasPrefix(rel, "registrywitness"+string(filepath.Separator)) ||
-			strings.HasPrefix(rel, "certifiedstore"+string(filepath.Separator)) {
+			strings.HasPrefix(rel, "certifiedstore"+string(filepath.Separator)) ||
+			strings.HasPrefix(rel, "recordwiring"+string(filepath.Separator)) ||
+			strings.HasPrefix(rel, filepath.Join("internal", "testutils", "certifiedchain")+string(filepath.Separator)) {
 			return nil
 		}
 		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)

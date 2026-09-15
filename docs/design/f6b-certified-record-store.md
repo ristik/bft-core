@@ -119,9 +119,18 @@ them, or see an older complete state, never a mixture.
 - The device and filesystem must honour the sync, including a volatile write cache flushed on
   `F_FULLFSYNC` or fdatasync. A device or virtualization layer that acknowledges a flush without persisting
   it can lose a committed transaction.
-- **The directory entry of a newly created file.** bbolt writes and syncs the new file's initial pages, but it
-  does not open or sync the parent directory. A crash shortly after the store is first created may lose the
-  file itself. The wiring unit should create the store before the node reports readiness, or sync the directory.
+- **The directory entry of the store file.** bbolt writes and syncs a new file's initial pages but never syncs
+  the parent directory, so a crash shortly after creation could lose the file itself. Since the node-wiring unit,
+  `Open` syncs the parent directory on every open, after the file and bucket exist, and a failed sync is an open
+  failure (`ErrDirectorySync`) that returns no store (`TestOpenSyncsTheParentDirectory`,
+  `TestOpenFailsWhenTheDirectoryCannotBeSynced`). On macOS the directory sync is `F_FULLFSYNC` on the directory
+  descriptor, measured to succeed on APFS. Because bbolt follows a symbolic link in the final path component,
+  which would create or open the database in another directory than the one synced, `Open` refuses such a path
+  before opening (`ErrStorePath`) and checks again after opening that the entry is a regular file
+  (`TestOpenRefusesSymbolicLinkStorePaths`: dangling link, link to an existing store, a path that cannot be
+  examined, link substituted between the checks). The checks cover a misconfigured or changed path, not a party racing them with write access to
+  the directory, who could delete the store anyway. `Open` does not create directories: the directory holding the store,
+  and every directory above it, must already exist durably, which is a deployment responsibility.
 - Storage errors reported asynchronously and swallowed by the filesystem after a successful sync are outside
   what this code can detect.
 - Whole-store rollback (a restored backup or cloned disk) is not detected by the store. The F6a contract
