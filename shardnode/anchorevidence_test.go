@@ -122,6 +122,33 @@ func TestAnchorEvidence_QuietTailRecoversWithoutNewTransactions(t *testing.T) {
 	require.False(t, anchor.fromGenesisRound, "round 10 builds on a certified predecessor")
 }
 
+func TestGenesisContinuity_InitialTimeoutsUseTheSameExactChainRules(t *testing.T) {
+	f := newEvidenceFixture(t)
+	state := h32(0x0a)
+	source := f.cert(0, 100, state, state, nil, 2)
+	// A root timeout repeats the exact input record and changes only the authenticated assignment.
+	repeat := f.cert(0, 101, state, state, nil, 4)
+	quiet := f.cert(4, 110, state, state, nil, 9)
+	ev := AnchorEvidence{Source: source.UC, SourceTechnical: source.Technical,
+		Tail: []EvidenceLink{repeat, quiet}}
+	c := AnchorEvidenceContext{PartitionID: evidencePartitionID, ShardID: types.ShardID{},
+		ShardConfHash: f.conf, TrustBases: f.trust, Held: quiet.UC}
+
+	require.NoError(t, VerifyGenesisContinuity(context.Background(), ev, c, DefaultAnchorEvidenceLimits, state))
+	err := VerifyGenesisContinuity(context.Background(), ev, c, DefaultAnchorEvidenceLimits, nil)
+	require.ErrorIs(t, err, ErrEvidenceWrongContext, "an absent configured state never switches to ordinary-source semantics")
+	_, err = VerifyAnchorEvidence(context.Background(), ev, c, DefaultAnchorEvidenceLimits)
+	require.ErrorIs(t, err, ErrEvidenceSourceQuiet, "the ordinary block-source predicate stays unchanged")
+
+	wrongTerminal := f.cert(4, 111, state, h32(0x0b), h32(0xbb), 9)
+	c.Held = wrongTerminal.UC
+	err = VerifyGenesisContinuity(context.Background(), ev, c, DefaultAnchorEvidenceLimits, state)
+	require.ErrorIs(t, err, ErrEvidenceConflict, "same round and source state cannot replace terminal identity")
+
+	err = VerifyGenesisContinuity(context.Background(), ev, c, DefaultAnchorEvidenceLimits, h32(0xff))
+	require.ErrorIs(t, err, ErrEvidenceNotQuiet, "configuration, not the source certificate, supplies genesis state")
+}
+
 func TestAnchorEvidence_MiddleEvidenceMissingOrAltered(t *testing.T) {
 	t.Run("a missing middle certificate is a gap, not a shortcut", func(t *testing.T) {
 		f := newEvidenceFixture(t)

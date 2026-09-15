@@ -340,10 +340,24 @@ func (s *Store) Publish(ctx context.Context, c Context, r Record) error {
 	return s.Commit(p)
 }
 
+// HeadToken is an opaque identity of the exact durable head bytes LoadWithToken verified.
+type HeadToken struct{ h *headToken }
+type headToken struct {
+	store *Store
+	name  []byte
+	sum   [sha256.Size]byte
+}
+
 // Load returns the head record, re-verified under c and bound to its key. There is no fallback: a missing,
 // damaged, foreign, unverifiable or wrongly keyed head record is a refusal, whatever older records the store
 // retains.
 func (s *Store) Load(ctx context.Context, c Context) (Loaded, error) {
+	l, _, err := s.LoadWithToken(ctx, c)
+	return l, err
+}
+
+// LoadWithToken verifies the head and returns an opaque token for a later cheap byte-identity check.
+func (s *Store) LoadWithToken(ctx context.Context, c Context) (Loaded, HeadToken, error) {
 	var name, value []byte
 	if err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
@@ -360,12 +374,35 @@ func (s *Store) Load(ctx context.Context, c Context) (Loaded, error) {
 		}
 		return nil
 	}); err != nil {
-		return Loaded{}, err
+		return Loaded{}, HeadToken{}, err
 	}
 	if name == nil {
-		return Loaded{}, ErrNoRecord
+		return Loaded{}, HeadToken{}, ErrNoRecord
 	}
-	return verifyHead(ctx, c, name, value)
+	l, err := verifyHead(ctx, c, name, value)
+	if err != nil {
+		return Loaded{}, HeadToken{}, err
+	}
+	return l, HeadToken{h: &headToken{store: s, name: name, sum: sha256.Sum256(value)}}, nil
+}
+
+// HeadUnchanged checks in one read transaction that the head pointer and record bytes are exactly
+// those LoadWithToken verified. It performs no decoding, hashing of signatures or proof work.
+func (s *Store) HeadUnchanged(token HeadToken) bool {
+	if token.h == nil || token.h.store != s {
+		return false
+	}
+	unchanged := false
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketName)
+		if b == nil || !bytes.Equal(b.Get(headKey), token.h.name) {
+			return nil
+		}
+		v := b.Get(token.h.name)
+		unchanged = v != nil && sha256.Sum256(v) == token.h.sum
+		return nil
+	})
+	return unchanged
 }
 
 // Keys lists the stored keys, for inspection and tests.

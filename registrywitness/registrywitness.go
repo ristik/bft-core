@@ -39,6 +39,11 @@ import (
 var (
 	// ErrUnavailable wraps registryproof.ErrUnavailable, so either class check reaches it.
 	ErrUnavailable = fmt.Errorf("registrywitness: %w", registryproof.ErrUnavailable)
+	// ErrProofWindow marks the unavailable case where the client states that the exact block is
+	// older than its configured proof window. Immediate retries against the same client at the
+	// unchanged window cannot satisfy the request; later reacquisition or policy belongs to the
+	// caller and #15.
+	ErrProofWindow = fmt.Errorf("registrywitness: %w", ErrUnavailable)
 	// ErrInvalid is a response that is not acceptable evidence. The registryproof refusal, when there is
 	// one, is wrapped as well.
 	ErrInvalid = errors.New("registrywitness: evidence invalid")
@@ -213,7 +218,7 @@ func classify(ctx context.Context, method string, err error) error {
 	if errors.As(err, &rpcErr) {
 		switch {
 		case strings.Contains(rpcErr.Message, proofWindowMessage):
-			return fmt.Errorf("%w: %s: the block is behind the client's proof window: %w", ErrUnavailable, method, rpcErr)
+			return fmt.Errorf("%w: %s: the block is behind the client's proof window: %w", ErrProofWindow, method, rpcErr)
 		default:
 			return fmt.Errorf("%w: %s: %w", ErrUnavailable, method, rpcErr)
 		}

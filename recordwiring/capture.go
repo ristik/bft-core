@@ -125,6 +125,11 @@ type FinalityLock interface {
 // DefaultAcquireTimeout bounds one witness acquisition.
 const DefaultAcquireTimeout = 10 * time.Second
 
+const (
+	DefaultCaptureAttempts = 3
+	DefaultRetryDelay      = 250 * time.Millisecond
+)
+
 // CaptureConfig is what a Capturer works with.
 type CaptureConfig struct {
 	Deployment Deployment
@@ -137,7 +142,11 @@ type CaptureConfig struct {
 	// run while holding it.
 	Finality       FinalityLock
 	AcquireTimeout time.Duration
-	Log            *slog.Logger
+	// MaxAttempts bounds acquisition attempts for a transient unavailable witness. Proof-window
+	// expiry and authenticated invalid evidence are terminal for one episode and are not burst-retried.
+	MaxAttempts int
+	RetryDelay  time.Duration
+	Log         *slog.Logger
 	// OnResult, when set, receives every attempt's result. It is called from the round for duplicate,
 	// superseded and malformed attempts and from Run otherwise, so it must not block.
 	OnResult func(CaptureResult)
@@ -165,6 +174,7 @@ type Capturer struct {
 	pending   *Attempt
 	inflight  *Attempt
 	published *Attempt
+	retryable *Attempt // last exhausted unavailable witness; retried only on an explicit later trigger
 
 	wake chan struct{}
 }
@@ -191,6 +201,12 @@ func NewCapturer(cfg CaptureConfig) (*Capturer, error) {
 	if cfg.AcquireTimeout <= 0 {
 		cfg.AcquireTimeout = DefaultAcquireTimeout
 	}
+	if cfg.MaxAttempts <= 0 {
+		cfg.MaxAttempts = DefaultCaptureAttempts
+	}
+	if cfg.RetryDelay <= 0 {
+		cfg.RetryDelay = DefaultRetryDelay
+	}
 	log := cfg.Log
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -216,6 +232,9 @@ func (c *Capturer) ObserveCommit(cc shardnode.CertifiedCommit) {
 		result.Outcome, result.Err = CaptureSuperseded, fmt.Errorf("%w: round %d is pending", ErrSuperseded, c.pending.Round)
 	default:
 		superseded, c.pending, accepted = c.pending, &a, true
+		if c.retryable != nil && a.Round >= c.retryable.Round {
+			c.retryable = nil
+		}
 	}
 	c.mu.Unlock()
 
@@ -272,11 +291,17 @@ func (c *Capturer) Run(ctx context.Context) error {
 			if a == nil {
 				break
 			}
-			res := c.capture(ctx, *a)
+			res := c.captureWithRetry(ctx, *a)
 			c.mu.Lock()
 			c.inflight = nil
 			if res.Outcome == CapturePublished {
 				c.published = a
+			}
+			if res.Outcome == CaptureWitnessUnavailable {
+				retry := *a
+				c.retryable = &retry
+			} else if c.retryable.sameBlock(*a) {
+				c.retryable = nil
 			}
 			c.mu.Unlock()
 			c.report(res)
@@ -286,6 +311,48 @@ func (c *Capturer) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// RetryPending starts one later bounded episode for the last attempt whose witness remained
+// unavailable after its finite burst. It reuses the immutable certificate/TR snapshot and therefore
+// needs no new transaction or commit notification. Scheduling/backoff policy belongs to W3b; calls
+// while that block is already pending or in flight coalesce.
+func (c *Capturer) RetryPending() bool {
+	c.mu.Lock()
+	if c.retryable == nil || c.pending != nil || c.inflight != nil {
+		c.mu.Unlock()
+		return false
+	}
+	a := *c.retryable
+	c.nextID++
+	a.ID = c.nextID
+	c.pending = &a
+	c.mu.Unlock()
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+func (c *Capturer) captureWithRetry(ctx context.Context, a Attempt) CaptureResult {
+	var res CaptureResult
+	for n := 1; n <= c.cfg.MaxAttempts; n++ {
+		res = c.capture(ctx, a)
+		if res.Outcome != CaptureWitnessUnavailable || errors.Is(res.Err, registrywitness.ErrProofWindow) || n == c.cfg.MaxAttempts {
+			return res
+		}
+		c.log.Debug("certified record: transient witness acquisition failed; retrying",
+			"attempt", a.ID, "captureTry", n, "round", a.Round, "block", a.BlockHash.String(), "err", res.Err)
+		t := time.NewTimer(c.cfg.RetryDelay)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return CaptureResult{Attempt: a, Outcome: CaptureStopped, Err: fmt.Errorf("%w: %w", ErrCaptureStopped, ctx.Err())}
+		case <-t.C:
+		}
+	}
+	return res
 }
 
 func (c *Capturer) stop() {

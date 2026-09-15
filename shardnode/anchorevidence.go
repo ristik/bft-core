@@ -170,6 +170,23 @@ to reading it once, and nothing an adversary puts in a bundle can buy cryptograp
 bound has been applied.
 */
 func VerifyAnchorEvidence(ctx context.Context, ev AnchorEvidence, c AnchorEvidenceContext, limits AnchorEvidenceLimits) (*ExecutionAnchor, error) {
+	return verifyContinuity(ctx, ev, c, limits, nil)
+}
+
+// VerifyGenesisContinuity verifies the same assigned-round, repeat and terminal-identity chain as
+// VerifyAnchorEvidence, but from a genuine authenticated no-block genesis-history certificate.
+// The ordinary predicate deliberately keeps requiring a block-naming source. expectedState comes
+// from the independently checked deployment configuration; this function never fills or repairs
+// certificate fields.
+func VerifyGenesisContinuity(ctx context.Context, ev AnchorEvidence, c AnchorEvidenceContext, limits AnchorEvidenceLimits, expectedState []byte) error {
+	if len(expectedState) != crypto.SHA256.Size() {
+		return fmt.Errorf("%w: configured genesis state is %d bytes", ErrEvidenceWrongContext, len(expectedState))
+	}
+	_, err := verifyContinuity(ctx, ev, c, limits, expectedState)
+	return err
+}
+
+func verifyContinuity(ctx context.Context, ev AnchorEvidence, c AnchorEvidenceContext, limits AnchorEvidenceLimits, genesisState []byte) (*ExecutionAnchor, error) {
 	if ev.Source == nil || ev.Source.InputRecord == nil || ev.SourceTechnical == nil || c.Held == nil || c.Held.InputRecord == nil {
 		return nil, ErrEvidenceMalformed
 	}
@@ -201,8 +218,14 @@ func VerifyAnchorEvidence(ctx context.Context, ev AnchorEvidence, c AnchorEviden
 		return nil, fmt.Errorf("%w: bundle encodes to %d bytes, limit %d", ErrEvidenceExhausted, len(encoded), limits.MaxBytes)
 	}
 
-	if len(ev.Source.InputRecord.BlockHash) == 0 {
-		return nil, ErrEvidenceSourceQuiet
+	if len(genesisState) == 0 {
+		if len(ev.Source.InputRecord.BlockHash) == 0 {
+			return nil, ErrEvidenceSourceQuiet
+		}
+	} else if len(ev.Source.InputRecord.BlockHash) != 0 ||
+		!bytes.Equal(ev.Source.InputRecord.Hash, genesisState) ||
+		!bytes.Equal(ev.Source.InputRecord.PreviousHash, genesisState) {
+		return nil, fmt.Errorf("%w: genesis source is not no-block history at the configured genesis state", ErrEvidenceNotQuiet)
 	}
 
 	// sourceEpoch is the shard epoch the WHOLE bundle, and this node's own held certificate, must

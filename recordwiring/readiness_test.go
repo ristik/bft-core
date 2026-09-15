@@ -1,0 +1,374 @@
+package recordwiring_test
+
+import (
+	"bytes"
+	"context"
+	"crypto"
+	"fmt"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/certifiedstore"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/recordwiring"
+	"github.com/unicitynetwork/bft-core/registryproof"
+	"github.com/unicitynetwork/bft-core/shardnode"
+)
+
+type readinessTrust []*types.RootTrustBaseV1
+
+func (m readinessTrust) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	for _, tb := range m {
+		if tb.GetEpoch() == epoch {
+			return tb, nil
+		}
+	}
+	return nil, fmt.Errorf("unknown root epoch %d", epoch)
+}
+
+func storedHeadPair(t *testing.T, h *captureHarness) (*types.UnicityCertificate, *certification.TechnicalRecord) {
+	loaded, err := h.store.Load(context.Background(), h.d.StoreContext())
+	require.NoError(t, err)
+	uc, err := loaded.Certificate()
+	require.NoError(t, err)
+	tr, err := loaded.Technical()
+	require.NoError(t, err)
+	return uc, tr
+}
+
+func TestReadinessReverifiesDurableRecordAndExactObservedContinuity(t *testing.T) {
+	h := newCaptureHarness(t, 2)
+	h.publish(0, 1)
+	h.exec.set(h.c.Blocks[1])
+	source, sourceTR := storedHeadPair(t, h)
+	state := bytes.Clone(source.InputRecord.Hash)
+	repeatTR := &certification.TechnicalRecord{Round: 7, Epoch: source.InputRecord.Epoch, Leader: "leader",
+		StatHash: bytes.Repeat([]byte{0xa1}, 32), FeeHash: bytes.Repeat([]byte{0xa2}, 32)}
+	repeatIR := *source.InputRecord
+	repeat := h.c.Certify(h.c.Signer, &repeatIR, repeatTR, source.GetRootRoundNumber()+1)
+	quietTR := &certification.TechnicalRecord{Round: 7, Epoch: source.InputRecord.Epoch, Leader: "leader",
+		StatHash: bytes.Repeat([]byte{0xa1}, 32), FeeHash: bytes.Repeat([]byte{0xa2}, 32)}
+	quietTR.Round = 9
+	quietIR := &types.InputRecord{Version: 1, RoundNumber: repeatTR.Round, Epoch: source.InputRecord.Epoch,
+		PreviousHash: state, Hash: state, SummaryValue: []byte{}, Timestamp: source.InputRecord.Timestamp + 1}
+	quiet := h.c.Certify(h.c.Signer, quietIR, quietTR, repeat.GetRootRoundNumber()+1)
+
+	obs, err := recordwiring.NewObservations(recordwiring.DefaultObservationLimits)
+	require.NoError(t, err)
+	require.NoError(t, obs.Observe(source, sourceTR))
+	require.NoError(t, obs.Observe(repeat, repeatTR))
+	require.NoError(t, obs.Observe(quiet, quietTR))
+	r, err := recordwiring.NewReadiness(h.d, h.store, h.exec, obs)
+	require.NoError(t, err)
+	p, err := r.Prepare(context.Background(), quiet)
+	require.NoError(t, err)
+	require.True(t, p.Valid())
+	require.NoError(t, r.Revalidate(context.Background(), p, quiet))
+	require.ErrorIs(t, r.Revalidate(context.Background(), recordwiring.PreparedReadiness{}, quiet), recordwiring.ErrReadinessUnavailable)
+	foreignObs, err := recordwiring.NewObservations(recordwiring.DefaultObservationLimits)
+	require.NoError(t, err)
+	require.NoError(t, foreignObs.Observe(source, sourceTR))
+	require.NoError(t, foreignObs.Observe(repeat, repeatTR))
+	require.NoError(t, foreignObs.Observe(quiet, quietTR))
+	foreign, err := recordwiring.NewReadiness(h.d, h.store, h.exec, foreignObs)
+	require.NoError(t, err)
+	require.ErrorIs(t, foreign.Revalidate(context.Background(), p, quiet), recordwiring.ErrReadinessUnavailable,
+		"equal store, executor, held certificate and observation version do not make another owner authoritative")
+	h.exec.set(h.c.Blocks[2])
+	require.ErrorIs(t, r.Revalidate(context.Background(), p, quiet), recordwiring.ErrReadinessUnavailable,
+		"executor movement alone invalidates preparation")
+	h.exec.set(h.c.Blocks[1])
+	mutated := *quiet
+	mutatedIR := *quiet.InputRecord
+	mutatedIR.Timestamp++
+	mutated.InputRecord = &mutatedIR
+	require.ErrorIs(t, r.Revalidate(context.Background(), p, &mutated), recordwiring.ErrReadinessUnavailable)
+
+	// An authenticated certificate at the same round/state but naming a different block is not the
+	// terminal statement this process observed. State equality cannot manufacture continuity.
+	conflictIR := *quietIR
+	conflictIR.PreviousHash = bytes.Repeat([]byte{0x44}, 32)
+	conflictIR.Hash = state
+	conflictIR.BlockHash = bytes.Repeat([]byte{0xcc}, 32)
+	conflict := h.c.Certify(h.c.Signer, &conflictIR, quietTR, quiet.GetRootRoundNumber()+1)
+	_, err = r.Prepare(context.Background(), conflict)
+	require.ErrorIs(t, err, recordwiring.ErrContinuity)
+	require.NoError(t, obs.Observe(conflict, quietTR))
+	require.ErrorIs(t, r.Revalidate(context.Background(), p, quiet), recordwiring.ErrReadinessUnavailable,
+		"a new observation alone invalidates preparation even when the held argument is unchanged")
+	p, err = r.Prepare(context.Background(), quiet)
+	require.NoError(t, err)
+
+	// A newer durable head invalidates the prepared result even if B's old record remains retained.
+	h.publish(2)
+	// Keep the executor at B: this isolates durable-head revalidation from executor revalidation.
+	require.ErrorIs(t, r.Revalidate(context.Background(), p, quiet), recordwiring.ErrReadinessUnavailable)
+}
+
+func TestReadinessDoesNotSubstituteAResignedSourceAtTheSameRounds(t *testing.T) {
+	h := newCaptureHarness(t, 1)
+	h.publish(0, 1)
+	h.exec.set(h.c.Blocks[1])
+	stored, sourceTR := storedHeadPair(t, h)
+	raw, err := types.Cbor.Marshal(stored)
+	require.NoError(t, err)
+	resigned := &types.UnicityCertificate{}
+	require.NoError(t, types.Cbor.Unmarshal(raw, resigned))
+	seal := *resigned.UnicitySeal
+	seal.Timestamp++
+	seal.Signatures = nil
+	resigned.UnicitySeal = &seal
+	var signerID string
+	for id := range stored.UnicitySeal.Signatures {
+		signerID = id
+	}
+	require.NoError(t, resigned.UnicitySeal.Sign(signerID, h.c.Signer))
+	require.NoError(t, resigned.Verify(h.c.TrustBase, crypto.SHA256,
+		resigned.GetPartitionID(), resigned.GetShardID(), resigned.ShardConfHash),
+		"premise: the replacement is genuinely signed but is a different root-seal statement")
+
+	state := bytes.Clone(resigned.InputRecord.Hash)
+	heldTR := &certification.TechnicalRecord{Round: sourceTR.Round + 1, Epoch: sourceTR.Epoch, Leader: "held",
+		StatHash: bytes.Repeat([]byte{0xe1}, 32), FeeHash: bytes.Repeat([]byte{0xe2}, 32)}
+	heldIR := &types.InputRecord{Version: 1, RoundNumber: sourceTR.Round, Epoch: resigned.InputRecord.Epoch,
+		PreviousHash: state, Hash: state, SummaryValue: []byte{}, Timestamp: resigned.InputRecord.Timestamp + 1}
+	held := h.c.Certify(h.c.Signer, heldIR, heldTR, resigned.GetRootRoundNumber()+1)
+	obs, err := recordwiring.NewObservations(recordwiring.DefaultObservationLimits)
+	require.NoError(t, err)
+	require.NoError(t, obs.Observe(resigned, sourceTR))
+	require.NoError(t, obs.Observe(held, heldTR))
+	r, err := recordwiring.NewReadiness(h.d, h.store, h.exec, obs)
+	require.NoError(t, err)
+	_, err = r.Prepare(context.Background(), held)
+	require.ErrorIs(t, err, recordwiring.ErrContinuity,
+		"same input, TR hash and rounds do not authorize substituting another signed root seal for the durable source")
+}
+
+func TestReadinessAuthenticatesThenRefusesAContinuityTailOutsideThePinnedRootEpoch(t *testing.T) {
+	h := newCaptureHarness(t, 1)
+	tb1, tb2 := *h.c.TrustBase, *h.c.TrustBase
+	tb1.Epoch, tb2.Epoch = 1, 2
+	cfg, genesisExec := configFor(t, h.c)
+	cfg.TrustBases = readinessTrust{&tb1, &tb2}
+	d, err := recordwiring.NewDeployment(context.Background(), cfg, genesisExec)
+	require.NoError(t, err)
+	source, sourceTR := h.c.Certificate(1)
+	b := h.c.Blocks[1]
+	require.NoError(t, h.store.Publish(context.Background(), d.StoreContext(), certifiedstore.Record{
+		BlockHash: b.Hash, BlockNumber: b.Number, StateRoot: b.StateRoot, PartitionRound: b.Round,
+		Certificate: source, Technical: sourceTR, Witness: b.Evidence,
+	}))
+	h.exec.set(b)
+	state := bytes.Clone(source.InputRecord.Hash)
+	tr := &certification.TechnicalRecord{Round: sourceTR.Round + 1, Epoch: 0, Leader: "leader",
+		StatHash: bytes.Repeat([]byte{0xa1}, 32), FeeHash: bytes.Repeat([]byte{0xa2}, 32)}
+	ir := &types.InputRecord{Version: 1, RoundNumber: sourceTR.Round, Epoch: 0,
+		PreviousHash: state, Hash: state, SummaryValue: []byte{}, Timestamp: 2}
+	held := h.c.Certify(h.c.Signer, ir, tr, source.GetRootRoundNumber()+1)
+	var nodeID string
+	for id := range held.UnicitySeal.Signatures {
+		nodeID = id
+	}
+	held.UnicitySeal.Epoch, held.UnicitySeal.Signatures = 2, nil
+	require.NoError(t, held.UnicitySeal.Sign(nodeID, h.c.Signer), "premise: epoch-2 certificate is genuinely signed")
+
+	obs, err := recordwiring.NewObservations(recordwiring.DefaultObservationLimits)
+	require.NoError(t, err)
+	require.NoError(t, obs.Observe(source, sourceTR))
+	require.NoError(t, obs.Observe(held, tr))
+	r, err := recordwiring.NewReadiness(d, h.store, h.exec, obs)
+	require.NoError(t, err)
+	_, err = r.Prepare(context.Background(), held)
+	require.ErrorIs(t, err, recordwiring.ErrContinuity)
+	require.ErrorContains(t, err, "root epoch 2")
+}
+
+func TestReadinessAuthenticatesThenRefusesATechnicalRecordOutsideThePinnedShardEpoch(t *testing.T) {
+	h := newCaptureHarness(t, 1)
+	h.publish(0, 1)
+	h.exec.set(h.c.Blocks[1])
+	source, sourceTR := storedHeadPair(t, h)
+	state := bytes.Clone(source.InputRecord.Hash)
+	tr := &certification.TechnicalRecord{Round: sourceTR.Round + 1, Epoch: 1, Leader: "leader",
+		StatHash: bytes.Repeat([]byte{0xa1}, 32), FeeHash: bytes.Repeat([]byte{0xa2}, 32)}
+	ir := &types.InputRecord{Version: 1, RoundNumber: sourceTR.Round, Epoch: 0,
+		PreviousHash: state, Hash: state, SummaryValue: []byte{}, Timestamp: 2}
+	held := h.c.Certify(h.c.Signer, ir, tr, source.GetRootRoundNumber()+1)
+
+	obs, err := recordwiring.NewObservations(recordwiring.DefaultObservationLimits)
+	require.NoError(t, err)
+	require.NoError(t, obs.Observe(source, sourceTR))
+	require.NoError(t, obs.Observe(held, tr))
+	r, err := recordwiring.NewReadiness(h.d, h.store, h.exec, obs)
+	require.NoError(t, err)
+	_, err = r.Prepare(context.Background(), held)
+	require.ErrorIs(t, err, recordwiring.ErrContinuity)
+	require.ErrorContains(t, err, "technical record 1 names shard epoch 1")
+}
+
+func TestGenesisPublicationRequiresRealConfigurationBoundCertification(t *testing.T) {
+	h := newCaptureHarness(t, 1)
+	genesis, tr := h.c.Certificate(0)
+	require.Equal(t, h.c.Blocks[0].Evidence, h.d.GenesisEvidence())
+	h.exec.set(h.c.Blocks[1])
+	err := recordwiring.PublishGenesis(context.Background(), h.store, h.d, h.exec, h.gate, genesis, tr)
+	require.ErrorIs(t, err, recordwiring.ErrReadinessUnavailable)
+	_, err = h.store.Load(context.Background(), h.d.StoreContext())
+	require.ErrorIs(t, err, certifiedstore.ErrNoRecord, "an executor that advanced cannot acquire a genesis record")
+	h.exec.set(h.c.Blocks[0])
+	require.NoError(t, recordwiring.PublishGenesis(context.Background(), h.store, h.d, h.exec, h.gate, genesis, tr))
+	h.exec.set(h.c.Blocks[0])
+	obs, err := recordwiring.NewObservations(recordwiring.DefaultObservationLimits)
+	require.NoError(t, err)
+	require.NoError(t, obs.Observe(genesis, tr))
+	r, err := recordwiring.NewReadiness(h.d, h.store, h.exec, obs)
+	require.NoError(t, err)
+	p, err := r.Prepare(context.Background(), genesis)
+	require.NoError(t, err)
+	require.True(t, p.Valid())
+
+	nilState := *genesis
+	nilIR := *genesis.InputRecord
+	nilIR.Hash, nilIR.PreviousHash = nil, nil
+	nilState.InputRecord = &nilIR
+	require.ErrorIs(t, recordwiring.PublishGenesis(context.Background(), h.store, h.d, h.exec, h.gate, &nilState, tr), recordwiring.ErrGenesisCertificate,
+		"the current root initial UC is not repaired into registry genesis certification")
+
+	blockNaming := *genesis
+	blockIR := *genesis.InputRecord
+	blockIR.BlockHash = bytes.Repeat([]byte{1}, 32)
+	blockNaming.InputRecord = &blockIR
+	require.ErrorIs(t, recordwiring.PublishGenesis(context.Background(), h.store, h.d, h.exec, h.gate, &blockNaming, tr), recordwiring.ErrGenesisCertificate)
+}
+
+func TestGenesisPreparationAppliesE1ThroughE4(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		heldRound  uint64
+		authorized uint64
+		want       error
+	}{
+		{"initial timeout authorizes round 4", 0, 4, nil},
+		{"E1 refuses installation round zero", 0, 0, registryproof.ErrGenesisInstallation},
+		{"E2 requires held round below authorization", 2, 2, registryproof.ErrNotGenesisHistory},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCaptureHarness(t, 1)
+			state := h.d.GenesisState().Bytes()
+			ir := &types.InputRecord{Version: 1, RoundNumber: tc.heldRound, Epoch: 0,
+				PreviousHash: state, Hash: state, SummaryValue: []byte{}, Timestamp: 1}
+			tr := &certification.TechnicalRecord{Round: tc.authorized, Epoch: 0, Leader: "leader",
+				StatHash: bytes.Repeat([]byte{0xa1}, 32), FeeHash: bytes.Repeat([]byte{0xa2}, 32)}
+			uc := h.c.Certify(h.c.Signer, ir, tr, 10+tc.heldRound)
+			require.NoError(t, recordwiring.PublishGenesis(context.Background(), h.store, h.d, h.exec, h.gate, uc, tr))
+			loaded, err := h.store.Load(context.Background(), h.d.StoreContext())
+			require.NoError(t, err)
+			fields := loaded.Snapshot().Fields()
+			require.True(t, fields.Genesis)
+			require.EqualValues(t, 0, fields.RoundAuthorized, "E4 uses the verified record, not a caller assertion")
+			require.EqualValues(t, 0, fields.CertifiedRound)
+			require.EqualValues(t, 0, loaded.BlockNumber(), "E3 is the exact verified block zero")
+
+			obs, err := recordwiring.NewObservations(recordwiring.DefaultObservationLimits)
+			require.NoError(t, err)
+			require.NoError(t, obs.Observe(uc, tr))
+			r, err := recordwiring.NewReadiness(h.d, h.store, h.exec, obs)
+			require.NoError(t, err)
+			p, err := r.Prepare(context.Background(), uc)
+			if tc.want == nil {
+				require.NoError(t, err)
+				require.True(t, p.Valid())
+			} else {
+				require.ErrorIs(t, err, tc.want)
+				require.False(t, p.Valid())
+			}
+		})
+	}
+}
+
+func TestObservationsRejectUnboundAndBoundMemory(t *testing.T) {
+	h := newCaptureHarness(t, 1)
+	h.publish(0, 1)
+	h.exec.set(h.c.Blocks[1])
+	uc, tr := storedHeadPair(t, h)
+	obs, err := recordwiring.NewObservations(recordwiring.ObservationLimits{MaxCertificates: 1, MaxBytes: 1 << 20})
+	require.NoError(t, err)
+	bad := *tr
+	bad.Round++
+	require.ErrorIs(t, obs.Observe(uc, &bad), recordwiring.ErrContinuity)
+	require.NoError(t, obs.Observe(uc, tr))
+	// Exact redelivery is idempotent and remains representable under a one-entry bound.
+	require.NoError(t, obs.Observe(uc, tr))
+
+	state := bytes.Clone(uc.InputRecord.Hash)
+	repeatTR := &certification.TechnicalRecord{Round: tr.Round + 1, Epoch: tr.Epoch, Leader: "repeat",
+		StatHash: bytes.Repeat([]byte{0xb1}, 32), FeeHash: bytes.Repeat([]byte{0xb2}, 32)}
+	repeatIR := *uc.InputRecord
+	repeat := h.c.Certify(h.c.Signer, &repeatIR, repeatTR, uc.GetRootRoundNumber()+1)
+	quietTR := &certification.TechnicalRecord{Round: repeatTR.Round + 1, Epoch: tr.Epoch, Leader: "quiet",
+		StatHash: bytes.Repeat([]byte{0xc1}, 32), FeeHash: bytes.Repeat([]byte{0xc2}, 32)}
+	quietIR := &types.InputRecord{Version: 1, RoundNumber: repeatTR.Round, Epoch: uc.InputRecord.Epoch,
+		PreviousHash: state, Hash: state, SummaryValue: []byte{}, Timestamp: uc.InputRecord.Timestamp + 1}
+	quiet := h.c.Certify(h.c.Signer, quietIR, quietTR, repeat.GetRootRoundNumber()+1)
+
+	countBound, err := recordwiring.NewObservations(recordwiring.ObservationLimits{MaxCertificates: 2, MaxBytes: 1 << 20})
+	require.NoError(t, err)
+	require.NoError(t, countBound.Observe(uc, tr))
+	require.NoError(t, countBound.Observe(repeat, repeatTR))
+	require.NoError(t, countBound.Observe(quiet, quietTR), "the distinct third observation exceeds the count bound")
+	countReadiness, err := recordwiring.NewReadiness(h.d, h.store, h.exec, countBound)
+	require.NoError(t, err)
+	_, err = countReadiness.Prepare(context.Background(), quiet)
+	require.ErrorIs(t, err, recordwiring.ErrContinuity,
+		"evicting the source must not serve a chain assembled across the missing observation")
+
+	directTR := &certification.TechnicalRecord{Round: tr.Round + 1, Epoch: tr.Epoch, Leader: "direct",
+		StatHash: bytes.Repeat([]byte{0xd1}, 32), FeeHash: bytes.Repeat([]byte{0xd2}, 32)}
+	directIR := &types.InputRecord{Version: 1, RoundNumber: tr.Round, Epoch: uc.InputRecord.Epoch,
+		PreviousHash: state, Hash: state, SummaryValue: []byte{}, Timestamp: uc.InputRecord.Timestamp + 1}
+	direct := h.c.Certify(h.c.Signer, directIR, directTR, uc.GetRootRoundNumber()+1)
+	ucRaw, err := types.Cbor.Marshal(uc)
+	require.NoError(t, err)
+	trRaw, err := types.Cbor.Marshal(tr)
+	require.NoError(t, err)
+	directRaw, err := types.Cbor.Marshal(direct)
+	require.NoError(t, err)
+	directTRRaw, err := types.Cbor.Marshal(directTR)
+	require.NoError(t, err)
+	ucSize, directSize := len(ucRaw)+len(trRaw), len(directRaw)+len(directTRRaw)
+	sufficient, err := recordwiring.NewObservations(recordwiring.ObservationLimits{
+		MaxCertificates: 10, MaxBytes: ucSize + directSize,
+	})
+	require.NoError(t, err)
+	require.NoError(t, sufficient.Observe(uc, tr))
+	require.NoError(t, sufficient.Observe(direct, directTR))
+	sufficientReadiness, err := recordwiring.NewReadiness(h.d, h.store, h.exec, sufficient)
+	require.NoError(t, err)
+	_, err = sufficientReadiness.Prepare(context.Background(), direct)
+	require.NoError(t, err, "the direct source-to-quiet chain is valid before byte-bound eviction")
+
+	byteLimit := ucSize
+	if directSize > byteLimit {
+		byteLimit = directSize
+	}
+	byteBound, err := recordwiring.NewObservations(recordwiring.ObservationLimits{MaxCertificates: 10, MaxBytes: byteLimit})
+	require.NoError(t, err)
+	require.NoError(t, byteBound.Observe(uc, tr))
+	require.NoError(t, byteBound.Observe(direct, directTR), "each observation fits separately while their sum exceeds the byte bound")
+	byteReadiness, err := recordwiring.NewReadiness(h.d, h.store, h.exec, byteBound)
+	require.NoError(t, err)
+	_, err = byteReadiness.Prepare(context.Background(), direct)
+	require.ErrorIs(t, err, recordwiring.ErrContinuity,
+		"byte eviction must not serve a chain assembled across the missing source")
+
+	tooSmall, err := recordwiring.NewObservations(recordwiring.ObservationLimits{MaxCertificates: 10, MaxBytes: ucSize - 1})
+	require.NoError(t, err)
+	require.ErrorIs(t, tooSmall.Observe(uc, tr), recordwiring.ErrObservationBound,
+		"one observation larger than the byte budget is refused instead of evicting itself")
+
+	_, err = recordwiring.NewObservations(recordwiring.ObservationLimits{})
+	require.ErrorIs(t, err, recordwiring.ErrObservationBound)
+	_ = shardnode.DefaultAnchorEvidenceLimits // pins the shared 512/1MiB profile in this composition test.
+}
