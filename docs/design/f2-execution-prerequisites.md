@@ -2,7 +2,9 @@
 
 Base: `integration/enshrined-evm` at `5e74dd9c` (the #162 merge). Documentation only. This
 revision reconciles the earlier #151 snapshot with merged #141, #153 through #162,
-`ristik/ureth` #4 and `ristik/unicity-pos-contracts` #1. It changes no runtime behaviour,
+[`ristik/ureth` #4](https://github.com/ristik/ureth/pull/4) and
+[`ristik/unicity-pos-contracts` #1](https://github.com/ristik/unicity-pos-contracts/pull/1).
+It changes no runtime behaviour,
 wire format, Engine API, contract, deployment or activation.
 
 F2 (#10), F3 (#11) and F4 (#12) remain open. Merged APIs and inactive artifacts establish
@@ -29,8 +31,8 @@ prerequisite in a running shard round.
 | --- | --- | --- |
 | bft-core #141, merge `59746d3d` | `rootinput.AcceptBlock` re-authenticates the historical authorization, derives canonical input, and checks the header parent and 32-byte `extraData`; repeat acceptance is memoryless | API only; no build, follower, sync or replay caller |
 | bft-core #154, merge `693b3f91` | bounded canonical envelope and `/unicity/shard-input-witness/1.0.0` transport; caller-scoped admission; `Verify` reaches `AcceptBlock` | deliberately inert; `/unicity/shard-payload/1.0.0`, `Round`, `engineapi` and certification are unchanged |
-| ureth #4, merge `7d529dcf` | `reth-unicity-payload` gives distinct jobs distinct commitment-bound payload IDs and writes each job's commitment to its block `extraData` | inactive crate; no node registration, `EngineTypes`, RPC method, capability, system operation or import hook |
-| bft-core #153/#155, merges `88998989`/`580fcaef`; contracts #1, merge `7dc63acd` | accepted `sealRegistry/v1` layout and proof contract, compiler amendment, and a tested Solidity implementation with pinned artifact/code hash | the contract cannot enforce call placement, block invalidity, gas rule, header binding, projection, or rejection of other `a_sys` transactions; those are execution-client duties |
+| [`ristik/ureth` #4](https://github.com/ristik/ureth/pull/4), merge `7d529dcf` | `reth-unicity-payload` includes the commitment and domain tag in the payload-ID derivation and writes each job's commitment to its block `extraData`; the truncated 8-byte IDs remain build-job handles, not collision-free identifiers | inactive crate; no node registration, `EngineTypes`, RPC method, capability, system operation or import hook |
+| bft-core #153/#155, merges `88998989`/`580fcaef`; [`ristik/unicity-pos-contracts` #1](https://github.com/ristik/unicity-pos-contracts/pull/1), merge `7dc63acd` | accepted `sealRegistry/v1` layout and proof contract, compiler amendment, and a tested Solidity implementation with pinned artifact/code hash | the contract cannot enforce call placement, block invalidity, gas rule, header binding, projection, or rejection of other `a_sys` transactions; those are execution-client duties |
 | bft-core #156, merge `a92188fb` | `registryproof.Verify` authenticates the exact parent header, registry account and 22 storage values and returns an opaque snapshot | no round or executor consumes the snapshot |
 | bft-core #157, merge `1f1e126e` | deterministic registry genesis and context verification; a pinned reth `189c0df3` local run matched genesis hash/state root and served a genesis proof | the existing genesis command is unchanged; generated configuration does not supply a genuine no-block genesis UC |
 | bft-core #158, merge `e2730083` | exact-hash acquisition and bounded in-memory witness retention; pinned reth measured proof window `0` and `3`, including expiry while header lookup remains available | no running node acquired it at this revision; measurement did not cover restart, pruning or an Engine-API-driven head |
@@ -39,7 +41,8 @@ prerequisite in a running shard round.
 
 Historical note: the #151 document correctly described upstream reth `v2.5.0` and the then-current
 `ristik/ureth` fork as code-identical. That observation is true only at the old fork point
-`189c0df32617afc488e0f091dbface1bd72cceb4`. After ureth #4, `unicity/main` contains the inactive
+`189c0df32617afc488e0f091dbface1bd72cceb4`. After
+[`ristik/ureth` #4](https://github.com/ristik/ureth/pull/4), `unicity/main` contains the inactive
 `reth-unicity-payload` crate and is no longer identical to upstream. The pinned upstream build remains
 the client used by the #157 and #158 measurements.
 
@@ -117,7 +120,8 @@ reth. That remains true of the upstream pin. ureth #4 implements only commitment
 
 **Current.** The earlier claim that no registry, reader or proof acquisition existed is obsolete:
 
-- contracts #1 provides the pinned `sealRegistry/v1` runtime artifact;
+- [`ristik/unicity-pos-contracts` #1](https://github.com/ristik/unicity-pos-contracts/pull/1)
+  provides the pinned `sealRegistry/v1` runtime artifact;
 - #157 produces deterministic genesis state and verified context;
 - #156 authenticates a snapshot from exact-parent header/account/storage evidence;
 - #158 acquires that evidence by block hash and records real-reth proof-window expiry;
