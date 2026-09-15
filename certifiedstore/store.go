@@ -5,11 +5,33 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
 )
+
+// ErrDirectorySync is an Open that could not make the store file's directory entry durable.
+var ErrDirectorySync = errors.New("certifiedstore: syncing the store's parent directory failed")
+
+/*
+syncDirectory makes a directory's entries durable. bbolt syncs the pages of the file it creates but never
+the directory that names the file, so without this a crash shortly after the store is first created can
+lose the file itself while every commit inside it reported success. Tests replace it to inject a failure.
+*/
+var syncDirectory = func(dir string) error {
+	d, err := os.Open(dir) // #nosec G304 -- the directory of the operator-configured store path
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
+}
 
 var (
 	bucketName = []byte("certified-record/v1")
@@ -68,6 +90,14 @@ func Open(path string, settings Settings) (*Store, error) {
 	}); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	// On every Open, not only when the file was created: a store is not usable for readiness until the
+	// entry naming it is durable, and an earlier process may have created the file and crashed before
+	// syncing. The directory itself must already exist durably; Open does not create directories.
+	dir := filepath.Dir(path)
+	if err := syncDirectory(dir); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("%w: %s: %w", ErrDirectorySync, dir, err)
 	}
 	return &Store{db: db, settings: settings}, nil
 }

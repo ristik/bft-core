@@ -175,6 +175,12 @@ func (n *Node) SetCertificationSigner(s CertificationSigner) {
 	n.round.SetCertificationSigner(s)
 }
 
+// SetCertifiedRecordStatus reports the outcome of reloading the certified-block record (#14) in health. It
+// is a status only: nothing about rounds, voting or signing reads it.
+func (n *Node) SetCertifiedRecordStatus(outcome, detail string) {
+	n.health.updateCertifiedRecord(outcome, detail)
+}
+
 // Health returns this node's live status snapshot — see health.go. Always
 // non-nil; wire it into an HTTP handler to expose it (see
 // cli/ubft/cmd/shard_node_run.go).

@@ -334,6 +334,9 @@ func TestShardNodeRun_AcceptsACompatibleFixture(t *testing.T) {
 	require.NotContains(t, out, "chain-identity check", out)
 	require.NotContains(t, out, "endpoint-pairing check", out)
 	require.NotContains(t, out, "execution-profile check", out)
+	// The default path constructs nothing of the certified-block record (#14).
+	require.NotContains(t, out, "certified record", out)
+	require.NotContains(t, out, "certified-record", out)
 }
 
 /*

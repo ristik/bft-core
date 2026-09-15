@@ -1,4 +1,4 @@
-package registrygenesis_test
+package recordwiring_test
 
 import (
 	"go/parser"
@@ -12,11 +12,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const importPath = "github.com/unicitynetwork/bft-core/registrygenesis"
+const importPath = "github.com/unicitynetwork/bft-core/recordwiring"
 
-// TestNoProductionPackageImportsTheGenerator is the inertness guard: no non-test Go file outside this
-// package imports it, so no command or node generates or checks a registry genesis through it yet.
-func TestNoProductionPackageImportsTheGenerator(t *testing.T) {
+// TestOnlyTheShardNodeCommandImportsTheWiring is the reach guard: the only production importer is the
+// shard-node command, which constructs the wiring only when a record store is configured. The round, the
+// client, recovery and the executor adapters do not import it.
+func TestOnlyTheShardNodeCommandImportsTheWiring(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
 
@@ -38,11 +39,7 @@ func TestNoProductionPackageImportsTheGenerator(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		// recordwiring is reached only through the shard-node command's opt-in record store, which its own
-		// guard enforces, and internal/testutils/certifiedchain is test fixture code.
-		if strings.HasPrefix(rel, "registrygenesis"+string(filepath.Separator)) ||
-			strings.HasPrefix(rel, "recordwiring"+string(filepath.Separator)) ||
-			strings.HasPrefix(rel, filepath.Join("internal", "testutils", "certifiedchain")+string(filepath.Separator)) {
+		if strings.HasPrefix(rel, "recordwiring"+string(filepath.Separator)) {
 			return nil
 		}
 		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
@@ -52,15 +49,17 @@ func TestNoProductionPackageImportsTheGenerator(t *testing.T) {
 		scanned[filepath.ToSlash(rel)] = true
 		for _, imp := range f.Imports {
 			if p, _ := strconv.Unquote(imp.Path.Value); p == importPath {
-				importers = append(importers, rel)
+				importers = append(importers, filepath.ToSlash(rel))
 			}
 		}
 		return nil
 	})
 	require.NoError(t, err)
 
-	for _, want := range []string{"cli/ubft/cmd/engine_api_genesis.go", "cli/ubft/cmd/shard_node_run.go", "shardnode/round.go", "engineapi/adapter.go"} {
+	for _, want := range []string{"shardnode/node.go", "shardnode/round.go", "cli/ubft/cmd/shard_node_run.go", "engineapi/adapter.go"} {
 		require.True(t, scanned[want], "expected to scan %s", want)
 	}
-	require.Empty(t, importers, "production packages must not import %s", importPath)
+	for _, imp := range importers {
+		require.True(t, strings.HasPrefix(imp, "cli/ubft/cmd/"), "only the shard-node command may import %s, found %s", importPath, imp)
+	}
 }

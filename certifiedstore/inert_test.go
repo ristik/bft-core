@@ -14,8 +14,9 @@ import (
 
 const importPath = "github.com/unicitynetwork/bft-core/certifiedstore"
 
-// TestNoProductionPackageImportsTheStore is the inertness guard: no non-test Go file outside this package
-// imports it, so no node publishes or loads certified records through it yet.
+// TestNoProductionPackageImportsTheStore is the reach guard: no non-test Go file outside this package imports
+// it except recordwiring, which the shard-node command reaches only when a record store is configured (its
+// own guard enforces that).
 func TestNoProductionPackageImportsTheStore(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
@@ -38,7 +39,8 @@ func TestNoProductionPackageImportsTheStore(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		if strings.HasPrefix(rel, "certifiedstore"+string(filepath.Separator)) {
+		if strings.HasPrefix(rel, "certifiedstore"+string(filepath.Separator)) ||
+			strings.HasPrefix(rel, "recordwiring"+string(filepath.Separator)) {
 			return nil
 		}
 		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
