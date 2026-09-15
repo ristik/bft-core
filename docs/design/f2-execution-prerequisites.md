@@ -1,212 +1,193 @@
-# F2 (#10): acceptance status, and the execution-side prerequisites it waits on
+# F2 (#10): acceptance status and remaining execution prerequisites
 
-Base: `integration/enshrined-evm` at `88f59a0e` (the #150 merge). Documentation only. Nothing here
-changes runtime behaviour, the Engine API, reth, the contracts repository, or any activation.
+Base: `integration/enshrined-evm` at `5e74dd9c` (the #162 merge). Documentation only. This
+revision reconciles the earlier #151 snapshot with merged #141, #153 through #162,
+`ristik/ureth` #4 and `ristik/unicity-pos-contracts` #1. It changes no runtime behaviour,
+wire format, Engine API, contract, deployment or activation.
 
-The owner's direction after #105 closed was to return to the foundation and enshrined-execution
-backlog, starting from the outstanding F2 replay review and the execution-side commitment and
-seal-registry prerequisites, while keeping Engine API and execution-client divergence minimal (#1,
-"Owner design constraints"). This document does three things:
-
-1. It maps #10's own work breakdown and acceptance lines to the merged and open evidence.
-2. It lists every prerequisite that the merged contracts (#138, #139) and the open replay predicate
-   (#141) name as gating activation, with what exists for each today.
-3. It proposes an order for the next bounded units, with the divergence each one adds, and names the
-   decisions that belong to the owner.
-
-It re-derives nothing already accepted. D1 (#3), D2 (#4, ADR 0004) and the F2 child contracts stand
-as merged. Where this document states a fact about reth, it refers to the pinned revision
-`189c0df32617afc488e0f091dbface1bd72cceb4` (tag `v2.5.0`), which is also the fork point of
-`ristik/ureth`.
+F2 (#10), F3 (#11) and F4 (#12) remain open. Merged APIs and inactive artifacts establish
+reviewed contracts and test evidence; they do not establish that a running node accepts canonical
+input, executes the privileged registry operations, or rejects an invalid imported block.
 
 ## 0. Evidence classes
 
 | Class | Meaning |
 | --- | --- |
-| **API** | a pure-Go fixture over `rootinput` or `evmroot`, with no call site in a running node |
-| **Wired** | a test over code that a running shard node executes |
-| **Model** | the accepted D1/D2 reference model and its vectors (`evmroot/`) |
-| **None** | no evidence exists |
+| **Model** | Accepted design model or deterministic vectors; no production caller. |
+| **API** | Implemented and tested callable code, with no production call site. |
+| **Inert** | Implemented artifact whose reachability is deliberately absent or has no effect on canonical-input execution. |
+| **Wired** | A running shard-node path calls the code. This says nothing by itself about real execution-client evidence. |
+| **Measured** | A named real-client process exercised the stated behaviour at a pinned revision. Scope is limited to the measured path. |
 
-Merged F2 children: #102 and #103 (F2a #93, `a3a5f001` and `0a4b5ec6`), #135 (F2a #134, `92c935a1`),
-#138 (F2b #136, `c0a3ef5d`), #139 (F2c contract, `377a0089`). Open: #141 (F2d replay predicate,
-head `ec6a8c73`, reconciled against `88f59a0e` on the PR).
+These classes compose. For example, the registry proof reader is an API reached by the opt-in record
+path, and the proof-window record is a real-reth measurement; neither makes registry state an execution
+prerequisite in a running shard round.
 
-## 1. #10 line by line
+## 1. Revision ledger
 
-### 1.1 Work breakdown
+| Revision | What it establishes | Boundary that remains |
+| --- | --- | --- |
+| bft-core #141, merge `59746d3d` | `rootinput.AcceptBlock` re-authenticates the historical authorization, derives canonical input, and checks the header parent and 32-byte `extraData`; repeat acceptance is memoryless | API only; no build, follower, sync or replay caller |
+| bft-core #154, merge `693b3f91` | bounded canonical envelope and `/unicity/shard-input-witness/1.0.0` transport; caller-scoped admission; `Verify` reaches `AcceptBlock` | deliberately inert; `/unicity/shard-payload/1.0.0`, `Round`, `engineapi` and certification are unchanged |
+| ureth #4, merge `7d529dcf` | `reth-unicity-payload` gives distinct jobs distinct commitment-bound payload IDs and writes each job's commitment to its block `extraData` | inactive crate; no node registration, `EngineTypes`, RPC method, capability, system operation or import hook |
+| bft-core #153/#155, merges `88998989`/`580fcaef`; contracts #1, merge `7dc63acd` | accepted `sealRegistry/v1` layout and proof contract, compiler amendment, and a tested Solidity implementation with pinned artifact/code hash | the contract cannot enforce call placement, block invalidity, gas rule, header binding, projection, or rejection of other `a_sys` transactions; those are execution-client duties |
+| bft-core #156, merge `a92188fb` | `registryproof.Verify` authenticates the exact parent header, registry account and 22 storage values and returns an opaque snapshot | no round or executor consumes the snapshot |
+| bft-core #157, merge `1f1e126e` | deterministic registry genesis and context verification; a pinned reth `189c0df3` local run matched genesis hash/state root and served a genesis proof | the existing genesis command is unchanged; generated configuration does not supply a genuine no-block genesis UC |
+| bft-core #158, merge `e2730083` | exact-hash acquisition and bounded in-memory witness retention; pinned reth measured proof window `0` and `3`, including expiry while header lookup remains available | no running node acquired it at this revision; measurement did not cover restart, pruning or an Engine-API-driven head |
+| bft-core #159/#160, merges `36427257`/`3ad216a3` | certified-record crash contract/model and durable store | store is reached only by the later opt-in CLI path and does not govern execution |
+| bft-core #161/#162, merges `30084e5f`/`5e74dd9c` | opt-in deployment checks, reload comparison, exact-block witness capture and atomic publication after certified commit | default path constructs none of it; the round/executor do not consume the record; W3a inactive readiness machinery and W3b wiring are pending |
 
-| #10 item | Status | Evidence | Class |
-| --- | --- | --- | --- |
-| Extend `RoundParams`/executor and adapter boundaries with canonical input plus a separate authentication witness | **not done** | `TestWiring_TodaysRoundParamsCannotAuthenticate` establishes why today's parameters cannot carry authentication; the `v1` parameter contract is specified in `f2c-root-input-wiring-contract.md` §4 but not implemented | API (negative only) |
-| Validate origin, context, transition chain and header commitment before requesting certification | **API done, not wired** | `rootinput.Derive` (#138): `TestDerive_Refusals`, `TestDerive_OwnsItsInputs`; header binding `rootinput.AcceptBlock` (#141, open) | API |
-| Shared builder/follower/replay vectors and rejection diagnostics without trusting ambient state | **API done** | `TestDerive_SameForBuilderFollowerAndReplay`, `TestWiring_RefusalsStayDistinct`, `TestWiring_AsymmetricDeliveryAgreesOnTheBoundCertificate`, `TestWiring_CompanionEvidenceIsReVerifiedNotTrusted` | API |
+Historical note: the #151 document correctly described upstream reth `v2.5.0` and the then-current
+`ristik/ureth` fork as code-identical. That observation is true only at the old fork point
+`189c0df32617afc488e0f091dbface1bd72cceb4`. After ureth #4, `unicity/main` contains the inactive
+`reth-unicity-payload` crate and is no longer identical to upstream. The pinned upstream build remains
+the client used by the #157 and #158 measurements.
 
-### 1.2 Acceptance lines
+## 2. #10 acceptance mapping at `5e74dd9c`
 
-| #10 acceptance line | What is shown | What is not shown | Class |
-| --- | --- | --- | --- |
-| D1 vectors match an independent implementation | `TestDerive_IndependentCBOROracle` builds the canonical array from the certificate, technical record and context and encodes it with bft-go-base's deterministic encoder; `TestPublishedVectorsUseTheSameCommitmentRule` ties the derivation's commitment rule to the published `evmroot/testdata/vectors.json` | a second client implementation (for example the reth side) producing the same bytes, which cannot exist until F3 | API, Model |
-| Different valid signer subsets produce identical input/state | `TestDerive_AlternateQuorumSubsetsAgree`: identical canonical input and commitment | identical **execution state**, which needs a block built from that input | API |
-| Omitted, wrong-parent, stale, wrong-epoch, wrong-shard and tampered transition data are rejected before certification | omitted: `TestDerive_Refusals/incomplete context`; stale: `…/stale against the seal-registry cursor`, and on the live path `TestUCDisposition`, `TestStaleDeliveryDuringRoundSequence` (#102/#103); wrong epoch: `…/unknown root epoch`, `…/unsupported: epoch handoff`; wrong shard: `…/wrong configured shard configuration`, `…/wrong configured partition`, and on the live path `TestLiveDeliveryIsBoundToTheConfiguredShardConfiguration`, `TestRestoredCertificateIsBoundToTheConfiguredShardConfiguration` (#135); wrong parent: `TestAcceptBlock_RefusesABlockThatIsNotTheOneAuthorized/a parent that is not the certified one` (#141, open) | **"before certification" in a running node**: no call site derives or checks the canonical input, so nothing is rejected before certification except the live shard-configuration and delay classification. **Wrong parent at derivation**: `TestWiring_ExecutorHeadIsAcceptedAsTheCertifiedParent` shows `Derive` cannot detect a wrong pinned parent; only the sourcing rule (contract §3) and the header check prevent it. **Wrong shard identifier** as distinct from wrong configuration has no dedicated subtest. **Tampered transition data** is refused only because any non-empty `D` is unsupported (`…/unsupported: pending committed bodies`); no authenticated transition path exists to tamper with | API; Wired only for #102/#103/#135 |
-| Duplicate/repeat imports are idempotent | `TestAcceptBlock_IsMemoryless` (#141, open): the same genuine block is accepted on every offer; `TestDerive_RoundTypes/a repeat at a higher root round derives, and the older one is refused once applied` | an **import path**: no executor import checks the commitment, so idempotency of a real duplicate import under the canonical input is unshown | API |
+### 2.1 Work breakdown
 
-Reading of the table: F2's verifier-owned derivation, its contract and its replay predicate exist as
-pure APIs with negative fixtures. None of #10's acceptance lines is demonstrated on a running node,
-and §2 shows why that cannot change inside F2 alone.
+| #10 item | Current evidence | Status |
+| --- | --- | --- |
+| Extend `RoundParams`/executor and adapter boundaries with canonical input plus a separate authentication witness | #154 supplies a separate authenticated-evidence envelope and verifier. ureth #4 supplies an inactive payload attribute and builder. `RoundParams`, the executor interface, `round.go`, `engineapi` and the live dissemination path still carry the v0 inputs and do not consume either artifact. | API/inert; live boundary not done |
+| Validate origin, context, transition chain and header commitment before requesting certification | `rootinput.Derive` validates the supported single-configuration/single-root-epoch profile and refuses non-empty transitions; #141 checks the parent and header commitment; #154 composes those checks over a bounded carrier. No running round invokes them before certification. | API; not wired |
+| Shared builder/follower/replay vectors and rejection diagnostics without trusting ambient state | `rootinput` and `inputcarrier` cover alternate quorum subsets, asymmetric delivery, historical cursor sourcing, named refusals and replay binding. ureth #4 covers builder job isolation only. There is no common running builder/follower/sync/re-execution lane. | API/model; integrated lane absent |
 
-### 1.3 Additional D2 integration obligations on #10
+### 2.2 Acceptance lines
 
-The issue also carries the D2 integration checklist added after its original acceptance list. These
-remain open; the narrower tables above do not discharge them.
+| #10 acceptance line | Established | Still required |
+| --- | --- | --- |
+| D1 vectors match an independent implementation | Go derives the published D1 vectors and checks an independently assembled deterministic-CBOR oracle. ureth #4 accepts a commitment as input; it does not independently derive canonical input. | An execution-side implementation must derive or validate the same canonical bytes/commitment in the real build/import path. |
+| Different valid signer subsets produce identical input/state | `TestDerive_AlternateQuorumSubsetsAgree` establishes identical canonical input and commitment. | Identical execution state from real blocks built/imported from those authorizations. |
+| Omitted, wrong-parent, stale, wrong-epoch, wrong-shard and tampered transition data are rejected before certification | The API suites distinguish incomplete context, stale committed cursor, unsupported epoch/handoff and transition bodies, configuration/partition mismatches, wrong header parent and wrong commitment. Existing live shard-configuration and stale-delivery checks remain separate v0 evidence. | The canonical-input checks must run on the live build/follower path before certification. A real transition chain is outside the fixed v1 profile; v1 must continue to refuse it by name. |
+| Duplicate/repeat imports are idempotent | #141 establishes memoryless header acceptance for a genuine repeat and historical cursor sourcing. | A real execution import/re-execution path must apply the complete D2 predicate and show repeated import has no second effect. |
 
-| Obligation | Current evidence and remaining work |
+No #10 acceptance line is yet established end to end on a running canonical-input node. The merged
+work removes missing API, carrier, registry-layout, proof and durability prerequisites; it does not
+turn those pieces into execution validity.
+
+### 2.3 D2 integration obligations carried by #10
+
+| Obligation | Current position |
 | --- | --- |
-| Verifier-owned `VerifiedCert` and `ExpectedTransitions`, from full UC and committed-body validation | `Derive` authenticates its supported certificate context; non-empty transitions remain unsupported. The D2 model is not a wired runtime verdict. Implement the actual boundary without accepting peer-supplied authentication flags. |
-| Real UC positives/negatives through build, follower import, sync and replay, including transition ordering and parent cursor | API/model fixtures exist, but the integrated paths and authenticated historical cursor are still missing. Retain the build/import/sync/replay cases on #10 until measured. |
-| Certified FIFO payload sequence and consumption cursor; verifier-derived gas and receipt results | D2 has model coverage, not a running forced-inbox implementation. The runtime must bind the ordered entries and consumption state and derive execution results itself; a count or caller-supplied gas summary is insufficient. Any initial empty-prefix profile must be explicit and reject unsupported non-empty input, not silently claim this obligation complete. |
+| Verifier-owned `VerifiedCert` and `ExpectedTransitions` | `rootinput.Derive` owns verification for the fixed profile; `inputcarrier` transports evidence rather than a peer verdict. Non-empty committed bodies and handoff remain explicitly unsupported. No execution importer constructs the complete D2 companion. |
+| Real UC positives/negatives through build, follower import, sync and replay | API and model fixtures exist. ureth #4 tests its builder with reth providers; #157/#158 run a real pinned reth for genesis and proof-window behaviour, not canonical-input block validity. The required integrated paths remain absent. |
+| Certified FIFO payload and cursor; verifier-derived gas and receipts | The fixed `sealRegistry/v1` profile pins an empty forced prefix and transition cursor. `evmroot.ValidateImport` remains a model/API. No reth execution hook enforces the privileged calls, `g_sys`, receipt derivation or body predicate. |
 
-## 2. The prerequisites that gate activation
+## 3. Execution prerequisites: current state
 
-Each row is a guarantee that a merged contract names as a precondition for activating the canonical
-input. "Source" is where the requirement is stated; "D2 row" refers to the deviation inventory in
-`d2-reth-system-call-fee-profile.md` §3a.
+### G1. Per-block header commitment
 
-### G1. Provision of the `extraData` commitment on the build path
+**Current.** The Go side can derive and verify `SHA-256(CBOR(rootInput))` (#138, #141, #154).
+ureth #4 can place a caller-supplied 32-byte commitment into each job's `extraData` without cross-job
+reuse. Its crate is not registered with a node or exposed through a method/capability, and bft-core
+still uses the stock Engine API types. Provision exists as inactive implementation evidence, not as a
+running build path.
 
-- **Required guarantee.** Every successful block's header `extraData` is exactly
-  `SHA-256(CBOR(rootInput))` for the round's block-bound authorization. Source: D1 §3, D2 §2,
-  contract §5. D2 rows 2 and 6.
-- **What exists.** The check exists in Go: `ExecutionPayloadV3.ExtraData` is readable
-  (`engineapi/types.go:29`) and `TestWiring_ExtraDataIsCheckableButNotProvisionable` pins that the
-  commitment can be compared but not supplied. The adapter requires only
-  `engine_forkchoiceUpdatedV3`, `engine_getPayloadV3` and `engine_newPayloadV3`
-  (`engineapi/client.go:110`), and `PayloadAttributesV3` has no `extraData` field
-  (`engineapi/types.go:67`).
-- **What the pinned client does.** The stock Ethereum payload builder copies one process-wide value,
-  `EthereumBuilderConfig.extra_data` (`crates/ethereum/payload/src/config.rs:18`), into every block it
-  builds (`crates/ethereum/payload/src/lib.rs:204`). That value is set once from the command line and
-  capped at 32 bytes (`crates/node/core/src/args/payload_builder.rs:200`). A per-round commitment
-  therefore cannot be supplied through stock configuration. On import, reth's header validation
-  enforces only the 32-byte maximum (`crates/consensus/common/src/validation.rs:273`), so a block
-  carrying the commitment is accepted by stock import without being checked against anything.
-- **What is missing.** The whole provision mechanism. `ristik/ureth` `unicity/main` is byte-identical
-  to upstream `v2.5.0` (its `UNICITY.md`).
-- **Owner.** F3 (#11), in `ristik/ureth`, with the adapter side in bft-core.
+**Historical observation at `189c0df3`.** Stock reth copied process-wide
+`EthereumBuilderConfig.extra_data` into built blocks, while stock payload attributes had no per-round
+field. Import checked the Ethereum 32-byte maximum, not the Unicity commitment. ureth #4 adds an
+isolated per-job builder without changing that upstream code or making it reachable.
 
-### G2. The block-bound authorization reaching followers
+### G2. Block-bound authorization on followers and replay
 
-- **Required guarantee.** A follower authenticates the certificate and technical record the proposer
-  bound to the block, under its own trust base, configuration and committed cursor; it never
-  re-selects from its own observed set. Source: D1 §5, contract §3.1 (review of #139).
-- **What exists.** `TestWiring_AsymmetricDeliveryAgreesOnTheBoundCertificate` and
-  `TestWiring_CompanionEvidenceIsReVerifiedNotTrusted` fix the rule as API fixtures.
-- **What is missing.** A transport for the witness. The shard-internal dissemination message
-  `disseminatedBlock` (`shardnode/net_dissemination.go:25`, protocol `/unicity/shard-payload/1.0.0`)
-  carries round, number, hash, state root, parent hash, raw block and sizes, and no certificate or
-  technical record.
-- **Divergence.** None in the execution client for the shard-node-to-shard-node leg: the message is
-  bft-core's own protocol and would need a new protocol version. Separately, reth's own import paths
-  (devp2p synchronization, historical re-execution) need the companion through D2 row 6
-  (`engine_newPayloadWithSealV1`) and row 7 (retention), which is F3 and F7 work.
-- **Owner.** bft-core for the shard protocol leg; F3 (#11) and F7 (#15) for the client leg.
+**Current.** #154 supplies the bounded envelope, separate protocol, admission rules and verifier. Its
+inertness test confirms that no production package imports `inputcarrier`; the live shard payload
+protocol is unchanged. #141 supplies the replay header predicate but no caller. The carrier and
+predicate must eventually be fed from independently trusted configuration, certified parent and
+parent-state registry snapshot; the block, peer, observed maximum and current replay-time cursor are
+not substitutes.
 
-### G3. The privileged system operation
+**Historical observation at #151.** `disseminatedBlock` carried only round, block identity and raw
+block data. That live message still has no certificate or technical record; #154 created a separate
+inactive protocol rather than changing it.
 
-- **Required guarantee.** An open step first and a finalize step after the forced prefix, from
-  `a_sys` to `a_sr`, with no key, nonce or value, and failure invalidating the block. Source: D2 §1.
-  D2 rows 1 and 3.
-- **What exists.** The accepted model only: `evmroot.ValidateImport` with the `system_*` and
-  `seal_finalize_*` rejection codes, and the `a_sr` constant (`evmroot/d2import.go:48`).
-- **What is missing.** All execution-side code.
-- **Owner.** F3 (#11).
+### G3. Privileged execution semantics
 
-### G4. The SealRegistry contract and the committed cursor
+**Current.** The accepted D2 model (`evmroot.ValidateImport`) and #153 specify the open step,
+forced-prefix position, finalize step, failure invalidity, `g_sys`, forbidden `a_sys` transactions,
+header binding and calldata projection. The merged Solidity registry enforces its O1–O10 and F1–F3
+state transition rules, but no merged ureth code implements the client rules on builder, follower
+import, sync and historical re-execution.
 
-- **Required guarantee.** `lastAppliedRootRound` is committed state, read identically by every node,
-  never the node's observed maximum. Source: D1 §5, contract §6, `TestWiring_ObservedMaximumIsNotTheCommittedCursor`,
-  `TestWiring_ArbitraryLowCursorRemovesARefusal`.
-- **What exists.** `Derive` takes the cursor as a caller-pinned input and names it as such. No
-  registry exists: `ristik/unicity-pos-contracts` holds only its README, toolchain pin and empty
-  `src/` and `test/` directories.
-- **Reading it.** ADR 0004 places registry values in contract storage, authenticated by the block's
-  `stateRoot` and provable with `eth_getProof`. That is a standard method. The adapter calls no
-  `eth_getProof` today (its `eth_*` calls are `eth_chainId`, `eth_getBlockByNumber`,
-  `eth_getBlockByHash` and `eth_config`), so reading the cursor adds a standard call and a proof
-  check to the trusted path, not a client deviation.
-- **Constraint to carry.** The storage layout is protocol surface (ADR 0004; the contracts
-  repository pins solc for that reason). A layout needs its own reviewed statement before a contract
-  is written against it.
-- **Owner.** F4 (#12), in `ristik/unicity-pos-contracts`, after F3 per the roadmap.
+**Historical observation at `189c0df3`.** No Unicity privileged system operation existed in upstream
+reth. That remains true of the upstream pin. ureth #4 implements only commitment provision.
 
-### G5. Committed trust-base bodies and handoff acknowledgements
+### G4. Registry state, proof and availability
 
-- **Required guarantee.** A non-empty `D` and the epoch handoff boundary are authenticated against the
-  ordered committed-body sequence. Source: D1 §8, F2b mapping §4.
-- **What exists.** Named refusals (`ErrUnsupported`) for both.
-- **What is missing.** An authenticated feed of committed bodies to a shard node.
-- **Owner.** H-series. Not required for the single-configuration, single-epoch private profile, and
-  the refusal must survive wiring (contract §8).
+**Current.** The earlier claim that no registry, reader or proof acquisition existed is obsolete:
 
-### G6. Removing `v0`
+- contracts #1 provides the pinned `sealRegistry/v1` runtime artifact;
+- #157 produces deterministic genesis state and verified context;
+- #156 authenticates a snapshot from exact-parent header/account/storage evidence;
+- #158 acquires that evidence by block hash and records real-reth proof-window expiry;
+- #160–#162 can durably record and atomically publish a verified witness on the opt-in CLI path.
 
-- **Required guarantee.** `v0` and `v1` never both govern a block. Source: D1 §4, contract §9,
-  `TestWiring_V0AndV1DisagreeForTheSameRound`.
-- **Dependency.** Replacing `DeriveAttributes` changes build and verify together, and a `v1` builder
-  without G1 produces no valid block. `v0` removal is an activation change: it requires G1 through G4 together, including
-  the authenticated committed cursor, system operation and import checks. Provision code may land
-  earlier behind an inactive development path; it does not justify removing the working `v0` path.
+At `5e74dd9c`, the opt-in record path captures after a certified commit; it does not make a retained
+parent snapshot a prerequisite for building or validating the child. W3a inactive readiness machinery
+and W3b node wiring are pending, not current evidence. Even after those units, an execution caller must
+consume the authenticated snapshot and apply the full D2 rules.
 
-## 3. Dependency order, and the decision it forces on #10
+**Historical observation at #151.** The contracts repository then contained no registry and bft-core
+called no `eth_getProof`. Those facts are preserved only as the pre-#153 baseline. They were superseded
+by contracts #1 and #156–#158. The #158 pinned-reth measurement found exact-hash proofs available only
+within the configured proof window; expiry is unavailable evidence, never permission to use the head or
+a zero cursor.
 
-The roadmap orders F2 before F3 (F3 depends on F2 and D2) and F3 before F4. The merged contract puts
-F2's activation after G1 (F3) and G4 (F4). Both statements are correct, and together they mean that
-**#10's remaining acceptance lines cannot be demonstrated inside F2**: rejection before
-certification on a running node, and idempotent imports, both need blocks that carry the commitment.
+### G5. Genesis certification bootstrap
 
-This is a decision for the owner, not something to settle by closing or relabelling the ticket:
+The generated registry genesis and fixture-generated UCs do not supply the first live certification
+authority. `rootchain/consensus/storage.NewShardInfo` initializes `IR` as only
+`&types.InputRecord{Version: 1}`: its `Hash` and `PreviousHash` are nil. The accepted
+`GenesisParentEligible` and certified-record genesis rules require a genuine no-block UC whose two
+hashes equal the pinned EVM genesis state. No merged configuration or runtime path constructs or
+certifies that record. This is missing bootstrap certification wiring, not evidence that genesis is
+ready and not a license to adopt a fixture UC. The source and authorization of the genuine genesis UC
+must be settled before activation.
 
-- **(a)** Close #10 on the pure API, the contract and the replay predicate, and move the wired
-  acceptance lines explicitly into F3's and F4's acceptance.
-- **(b)** Keep #10 open as the owner of the wired acceptance lines, delivered by the F3/F4 slices
-  below and recorded back on #10.
+### G6. Unsupported transitions and forced input
 
-Review decision: **(b)**. Keep #10 open as the acceptance owner. F3/F4 implementation slices may
-proceed against the accepted F2 API contract without waiting for #10 closure; that is a bounded
-dependency split, not acceptance of unwired fixtures as running-node evidence. Option (a) would also
-require an explicit transfer of every remaining obligation rather than treating it as already met.
+The fixed v1 profile deliberately supports one shard configuration, one shard epoch, one root epoch,
+empty committed transitions and an empty forced prefix. Named refusals are implemented at the API and
+registry boundaries. H-series transition authentication and a non-empty forced inbox remain later
+profiles; no current evidence should be described as silently supporting them.
 
-## 4. Proposed next bounded units
+### G7. Activation and v0 removal
 
-Review sequencing: **U3 first**, then the inert U1 carrier and inactive U2 provision work, then U4
-integration. None is claimed by this document. U3 is design work allowed before the F3 implementation
-prerequisite of F4; it does not close or activate F4.
+`v0` still governs the live executor path. #154, ureth #4 and the registry execution pieces were
+explicitly merged inactive, while the #161/#162 record path is opt-in and has no execution effect. A
+separately reviewed activation may replace v0 only after the same canonical-input and registry rules
+govern build, follower import, sync and replay. This document neither selects that activation mechanism
+nor moves it.
 
-| Unit | Repositories | Adds divergence? | Delivers |
-| --- | --- | --- | --- |
-| **U1. Canonical input on the shard protocol, inert** | bft-core | none in the execution client; a new version of the shard-internal dissemination protocol | G2's shard leg: the proposer binds its authorization to the disseminated block; followers authenticate it with `Derive` and check the header with `AcceptBlock` against `ExecutionPayloadV3.ExtraData`. The check is exercised with a test executor that writes the commitment (the existing `executortest` fake would need that ability added, which this document has not checked), and stays disabled against `engineapi`, because enabling it there halts the builder (contract §5). Until G4 exists this is a bounded, versioned evidence carrier and fixture-only verification path, not an active production header check. Use explicit authenticated fixture context, never a dummy live cursor. No new message is permitted to change signing, execution or certification decisions before activation. |
-| **U2. Build-path provision (first F3 slice)** | ureth, bft-core | yes: D2 row 6 (`engine_forkchoiceUpdatedWithSealV1` and `engine_getPayloadWithSealV1`, capability-negotiated) | G1 provision implementation only, inactive in normal node operation: reth writes the per-block commitment in an isolated test path. Retain `v0` until U4 passes all activation gates. Do not advertise the accepted `WithSealV1` capabilities as implemented while their required system operation and import semantics are missing. A partial build-path experiment is not a D2-valid block or follower/import acceptance. The implementation must include a narrow upstream-delta review before enabling RPC exposure. |
-| **U3. SealRegistry storage layout** | bft-core (design), unicity-pos-contracts | no client change | a reviewed layout statement for G4 before any contract or system call writes to it |
-| **U4. System operation and registry (F3 then F4)** | ureth, unicity-pos-contracts, bft-core | yes: D2 rows 1, 3 and the import side of row 6 | G3 and G4 plus coordinated G6 activation: open and finalize steps, authenticated initialization, parent-state cursor proof verification, complete D2 builder/follower/import/replay checks and companion availability. Only after G1–G4 work together may a separately reviewed activation replace `v0` with `v1`; never accept a zero/observed cursor as a temporary substitute |
+## 4. Exact remaining execution-side gap
 
-Two observations about minimizing divergence, recorded for the owner rather than acted on:
+After the inactive U2 builder and the merged registry artifacts, the next unresolved execution-side
+capability is the **complete D2 execution-validity implementation**:
 
-- **U1 needs no client change.** The shard-node leg of the commitment check runs in Go over a
-  standard payload field. Only provision (U2) and reth's own import validation (U4) require the
-  client.
-- **Provision has a reth-native extension point.** reth's engine payload types choose their
-  `PayloadAttributes` type (`crates/payload/primitives/src/lib.rs:49`, trait at
-  `crates/payload/primitives/src/traits.rs:71`), so a node can define attributes that carry the
-  build input. Exposing those attributes over RPC is still an Engine API change. D2 accepted explicit,
-  versioned sibling methods, which matches #1's requirement that any extension be "explicit,
-  bounded, versioned and capability-negotiated". This document does not reopen that choice. U2 should
-  record which reth mechanism implements the accepted methods and its exact upstream delta, as
-  `ureth`'s `UNICITY.md` requires.
+1. consume an independently authenticated canonical input and parent registry snapshot;
+2. execute exactly one privileged `open` and one `finalize` in the accepted positions, project their
+   calldata from that verified input, enforce failure invalidity and `g_sys`, and reject every other
+   `a_sys` transaction;
+3. require the header commitment and resulting registry state/body outcomes on builder, follower
+   import, sync and historical re-execution; and
+4. expose none of it as supported until the whole advertised method/capability contract is present and
+   the bft-core caller can exercise it.
 
-## 5. What this document does not do
+This names the missing behaviour, not a new slice, API shape or activation plan. D2 already accepts
+versioned, capability-negotiated sibling methods; ureth #4 intentionally advertises none. Choosing the
+implementation order and the point at which those accepted methods become reachable remains #11 work.
+The Go carrier, record readiness and genesis-certification wiring are coordinated but distinct gaps;
+none can substitute for execution-client validation.
 
-It does not merge, review or supersede #141. It changes no code, no Engine API, no reth revision and
-no contract. It does not close or re-scope #10, #11 or #12. It does not claim any of #10's acceptance
-lines on a running node, and it does not authorize activation, deployment or PoS work. Durable
-certification storage (#14), signing-authority durability, and the unexplained proposal-timeout
-failure from the #148 review remain where #105's closing comment left them.
+## 5. Status conclusion
+
+#141 closes the old missing replay-predicate statement. #154 closes the missing inert carrier statement.
+ureth #4 closes the claim that the fork is identical to upstream and supplies inactive per-job provision.
+contracts #1 and bft-core #153/#155–#162 close the claims that no registry artifact, proof reader,
+genesis constructor, exact-block acquisition or durable capture path exists.
+
+They do not close #10, #11 or #12. There is still no running canonical-input acceptance lane, no complete
+execution-side system-operation/import implementation, no live genesis certification bootstrap, no
+coordinated activation, and no evidence that builder, follower, sync and replay reach identical real
+execution state under the accepted rules.
