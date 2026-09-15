@@ -3,6 +3,7 @@ package recordwiring_test
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"fmt"
 	"testing"
 
@@ -27,11 +28,21 @@ func (m readinessTrust) GetByEpoch(_ context.Context, epoch uint64) (*types.Root
 	return nil, fmt.Errorf("unknown root epoch %d", epoch)
 }
 
+func storedHeadPair(t *testing.T, h *captureHarness) (*types.UnicityCertificate, *certification.TechnicalRecord) {
+	loaded, err := h.store.Load(context.Background(), h.d.StoreContext())
+	require.NoError(t, err)
+	uc, err := loaded.Certificate()
+	require.NoError(t, err)
+	tr, err := loaded.Technical()
+	require.NoError(t, err)
+	return uc, tr
+}
+
 func TestReadinessReverifiesDurableRecordAndExactObservedContinuity(t *testing.T) {
 	h := newCaptureHarness(t, 2)
 	h.publish(0, 1)
 	h.exec.set(h.c.Blocks[1])
-	source, sourceTR := h.c.Certificate(1)
+	source, sourceTR := storedHeadPair(t, h)
 	state := bytes.Clone(source.InputRecord.Hash)
 	repeatTR := &certification.TechnicalRecord{Round: 7, Epoch: source.InputRecord.Epoch, Leader: "leader",
 		StatHash: bytes.Repeat([]byte{0xa1}, 32), FeeHash: bytes.Repeat([]byte{0xa2}, 32)}
@@ -96,6 +107,45 @@ func TestReadinessReverifiesDurableRecordAndExactObservedContinuity(t *testing.T
 	require.ErrorIs(t, r.Revalidate(context.Background(), p, quiet), recordwiring.ErrReadinessUnavailable)
 }
 
+func TestReadinessDoesNotSubstituteAResignedSourceAtTheSameRounds(t *testing.T) {
+	h := newCaptureHarness(t, 1)
+	h.publish(0, 1)
+	h.exec.set(h.c.Blocks[1])
+	stored, sourceTR := storedHeadPair(t, h)
+	raw, err := types.Cbor.Marshal(stored)
+	require.NoError(t, err)
+	resigned := &types.UnicityCertificate{}
+	require.NoError(t, types.Cbor.Unmarshal(raw, resigned))
+	seal := *resigned.UnicitySeal
+	seal.Timestamp++
+	seal.Signatures = nil
+	resigned.UnicitySeal = &seal
+	var signerID string
+	for id := range stored.UnicitySeal.Signatures {
+		signerID = id
+	}
+	require.NoError(t, resigned.UnicitySeal.Sign(signerID, h.c.Signer))
+	require.NoError(t, resigned.Verify(h.c.TrustBase, crypto.SHA256,
+		resigned.GetPartitionID(), resigned.GetShardID(), resigned.ShardConfHash),
+		"premise: the replacement is genuinely signed but is a different root-seal statement")
+
+	state := bytes.Clone(resigned.InputRecord.Hash)
+	heldTR := &certification.TechnicalRecord{Round: sourceTR.Round + 1, Epoch: sourceTR.Epoch, Leader: "held",
+		StatHash: bytes.Repeat([]byte{0xe1}, 32), FeeHash: bytes.Repeat([]byte{0xe2}, 32)}
+	heldIR := &types.InputRecord{Version: 1, RoundNumber: sourceTR.Round, Epoch: resigned.InputRecord.Epoch,
+		PreviousHash: state, Hash: state, SummaryValue: []byte{}, Timestamp: resigned.InputRecord.Timestamp + 1}
+	held := h.c.Certify(h.c.Signer, heldIR, heldTR, resigned.GetRootRoundNumber()+1)
+	obs, err := recordwiring.NewObservations(recordwiring.DefaultObservationLimits)
+	require.NoError(t, err)
+	require.NoError(t, obs.Observe(resigned, sourceTR))
+	require.NoError(t, obs.Observe(held, heldTR))
+	r, err := recordwiring.NewReadiness(h.d, h.store, h.exec, obs)
+	require.NoError(t, err)
+	_, err = r.Prepare(context.Background(), held)
+	require.ErrorIs(t, err, recordwiring.ErrContinuity,
+		"same input, TR hash and rounds do not authorize substituting another signed root seal for the durable source")
+}
+
 func TestReadinessAuthenticatesThenRefusesAContinuityTailOutsideThePinnedRootEpoch(t *testing.T) {
 	h := newCaptureHarness(t, 1)
 	tb1, tb2 := *h.c.TrustBase, *h.c.TrustBase
@@ -139,7 +189,7 @@ func TestReadinessAuthenticatesThenRefusesATechnicalRecordOutsideThePinnedShardE
 	h := newCaptureHarness(t, 1)
 	h.publish(0, 1)
 	h.exec.set(h.c.Blocks[1])
-	source, sourceTR := h.c.Certificate(1)
+	source, sourceTR := storedHeadPair(t, h)
 	state := bytes.Clone(source.InputRecord.Hash)
 	tr := &certification.TechnicalRecord{Round: sourceTR.Round + 1, Epoch: 1, Leader: "leader",
 		StatHash: bytes.Repeat([]byte{0xa1}, 32), FeeHash: bytes.Repeat([]byte{0xa2}, 32)}
@@ -242,7 +292,7 @@ func TestObservationsRejectUnboundAndBoundMemory(t *testing.T) {
 	h := newCaptureHarness(t, 1)
 	h.publish(0, 1)
 	h.exec.set(h.c.Blocks[1])
-	uc, tr := h.c.Certificate(1)
+	uc, tr := storedHeadPair(t, h)
 	obs, err := recordwiring.NewObservations(recordwiring.ObservationLimits{MaxCertificates: 1, MaxBytes: 1 << 20})
 	require.NoError(t, err)
 	bad := *tr
