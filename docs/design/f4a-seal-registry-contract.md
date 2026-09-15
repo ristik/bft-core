@@ -1,5 +1,7 @@
 # F4a (#152): SealRegistry storage, initialization and parent-state proof contract
 
+> **Later genesis amendment (#167, proposed):** [F4f](f4f-standard-genesis-json-bootstrap.md). The amendment replaces the allocation-source and S0-valued genesis-UC assumptions in §§5/7–9 for the new profile; registry layout 1 is retained only subject to matching projection evidence. This note does not activate v2 or alter historical test results.
+
 Issue: #152, under F4 (#12) and F2 (#10). Base: `integration/enshrined-evm` at `ba47a890` (the #151
 merge). Status: **proposed design, revised to the review decisions of 2026-09-14** (§14). Documentation
 plus a test-only executable model (`docs/design/models/f4aregistry`).

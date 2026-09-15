@@ -15,3 +15,11 @@ This copy makes issue references available before upstream publication. Maintain
 upstream; replace this snapshot with an accepted upstream commit reference once published.
 Record every later normative change in an ADR and update affected issues, vectors and release gates.
 Do not silently edit one copy while leaving implementers to infer which version applies.
+
+## Later amendments
+
+[ADR 0010 / #167 genesis amendment](amendments/0010-standard-genesis-json-bootstrap.md) records
+replacement/additional wording for standard reth genesis JSON and configuration-authenticated bootstrap.
+It is a separate proposed normative amendment, with explicit application order and implementation gates.
+The seven `.tex` files and `repair.patch` above remain unchanged; the historical compilation claim applies
+only to that snapshot. No upstream publication or new LaTeX build is claimed.

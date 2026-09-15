@@ -1,5 +1,7 @@
 # F6d (#14): node wiring of the certified-block record, W1 and W2
 
+> **Later genesis amendment (#167, proposed):** [F4f](f4f-standard-genesis-json-bootstrap.md). The amendment replaces W3a’s unavailable S0-valued genesis UC premise and specifies a future v2 readiness/persistence unit; the implementation evidence below remains W3a evidence. This note does not activate v2 or alter historical test results.
+
 Issue: #14, node lifecycle wiring (claim issuecomment-5685890196). Base: `integration/enshrined-evm` at `3ad216a3`
 (#160). Contract: `f6a-certified-record-crash-contract.md`. Store: `f6b-certified-record-store.md`.
 

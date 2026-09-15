@@ -1,5 +1,7 @@
 # F6b (#14): the certified-record store
 
+> **Later genesis amendment (#167, proposed):** [F4f](f4f-standard-genesis-json-bootstrap.md). The amendment requires a separate configured origin and versioned progress semantics; legacy block-0 certified records are not relabelled as that origin. This note does not activate v2 or alter historical test results.
+
 Issue: #14, bounded storage slice (claim issuecomment-5680988132). Base: `integration/enshrined-evm` at
 `36427257`. Status: **inactive storage package** (`certifiedstore`). Contract: `f6a-certified-record-crash-contract.md`.
 

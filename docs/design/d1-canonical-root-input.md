@@ -1,5 +1,7 @@
 # D1 — Clock, certificate and canonical root-input profile
 
+> **Later genesis amendment (#167, proposed):** [F4f](f4f-standard-genesis-json-bootstrap.md). The v2 amendment changes initial/first-certified state-field encoding and keeps the actual signed root statement; older v1 vectors below are unchanged. This note does not activate v2 or alter historical test results.
+
 Issue: [#3 D1](https://github.com/ristik/bft-core/issues/3) · Milestone: M0 ·
 Prereq: [#2 R0](https://github.com/ristik/bft-core/issues/2) ·
 Profile version: **v1** · Status: **proposed for freeze**

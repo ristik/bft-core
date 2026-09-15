@@ -1,5 +1,7 @@
 # F4d (#12): deterministic SealRegistry genesis generation
 
+> **Later genesis amendment (#167, proposed):** [F4f](f4f-standard-genesis-json-bootstrap.md). The amendment adds a standard-JSON preparation/validation contract preserving arbitrary supported allocations; the single-account implementation and vectors below remain historical evidence. This note does not activate v2 or alter historical test results.
+
 Issue: #12. Base: `integration/enshrined-evm` at `a92188fb`. Status: **implementation unit, inert**. Normative
 source: `docs/design/f4a-seal-registry-contract.md` (#153) §5, with the §11 compiler amendment (#155).
 
