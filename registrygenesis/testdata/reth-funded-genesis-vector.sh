@@ -18,8 +18,9 @@
 # TestRethFundedVectorScript* tests exercise the refusals offline with stand-in executables.
 #
 # Usage: reth-funded-genesis-vector.sh <reth binary> <scratch directory>
-# Requires curl, jq and lsof on PATH. RETH_VECTOR_HTTP_PORT (default 18645) and RETH_VECTOR_READY_SECONDS
-# (default 60) may be overridden.
+# Requires curl, jq and lsof on PATH. RETH_VECTOR_HTTP_PORT (default 18645),
+# RETH_VECTOR_AUTH_PORT (default 18651), RETH_VECTOR_P2P_PORT (default 30399) and
+# RETH_VECTOR_READY_SECONDS (default 60) may be overridden.
 set -euo pipefail
 
 pinned_commit=189c0df32617afc488e0f091dbface1bd72cceb4
@@ -29,6 +30,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 genesis="$here/funded-genesis-vector.json"
 out="$here/reth-funded-genesis-vector.json"
 http_port=${RETH_VECTOR_HTTP_PORT:-18645}
+auth_port=${RETH_VECTOR_AUTH_PORT:-18651}
+p2p_port=${RETH_VECTOR_P2P_PORT:-30399}
 ready_seconds=${RETH_VECTOR_READY_SECONDS:-60}
 rpc="http://127.0.0.1:$http_port"
 a_sr=0xff00000000000000000000000000000000000002
@@ -78,9 +81,9 @@ init_hash=$(sed -e 's/\x1b\[[0-9;]*m//g' "$work/init.log" | sed -n 's/.*Genesis 
 [ -n "$init_hash" ] || fail "reth init reported no genesis hash"
 
 "$reth" node --chain "$genesis" --datadir "$work/data" \
-	--disable-discovery --max-outbound-peers 0 --max-inbound-peers 0 --port 30399 \
+	--disable-discovery --max-outbound-peers 0 --max-inbound-peers 0 --port "$p2p_port" \
 	--http --http.addr 127.0.0.1 --http.port "$http_port" --http.api eth,debug,web3 \
-	--authrpc.port 18651 --ipcdisable >"$work/node.log" 2>&1 &
+	--authrpc.port "$auth_port" --ipcdisable >"$work/node.log" 2>&1 &
 node_pid=$!
 
 alive() {
