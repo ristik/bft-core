@@ -1,5 +1,7 @@
 # F6a (#14): the certified-block record and crash contract
 
+> **Later genesis amendment (#167, proposed):** [F4f](f4f-standard-genesis-json-bootstrap.md). The amendment replaces the S0-valued genesis-certificate/record requirement with configured GenesisOrigin and monotonic supersession; ordinary records remain certified. This note does not activate v2 or alter historical test results.
+
 Issue: #14, bounded prerequisite slice (claim issuecomment-5680242084). Base: `integration/enshrined-evm` at
 `e2730083`. Status: **design and test-only executable model** (`docs/design/models/f6arecord`), revised for
 review 5210262067 (§11). No production change.

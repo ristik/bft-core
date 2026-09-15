@@ -1,5 +1,7 @@
 # F2c (#10): the runtime-wiring contract for the canonical root input
 
+> **Later genesis amendment (#167, proposed):** [F4f](f4f-standard-genesis-json-bootstrap.md). The v2 amendment requires configured-origin readiness and exact first-certification exit; prior genesis-history assumptions below describe the older profile. This note does not activate v2 or alter historical test results.
+
 Base integration `4f0ec961`. This is a contract, not an activation: no call site is changed, no
 derivation is switched, and `v0` still governs every block this branch builds. What it fixes is the
 shape of the later wiring unit, so that unit is a mechanical change against agreed sources rather

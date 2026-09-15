@@ -1,5 +1,7 @@
 # F2b (#136): where each canonical root-input field comes from
 
+> **Later genesis amendment (#167, proposed):** [F4f](f4f-standard-genesis-json-bootstrap.md). The v2 amendment separates configured execution parent state from nil certified state and includes first-certified origins with nil previous state. This note does not activate v2 or alter historical test results.
+
 This is the first commit of #136: the contract, traced and pinned, before any derivation code. Every
 canonical D1 field is mapped to **the signed commitment or the locally pinned context that supplies
 it**, read from the accepted profile (`docs/design/d1-canonical-root-input.md`, ADR 0003), the accepted

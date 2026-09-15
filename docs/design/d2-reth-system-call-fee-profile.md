@@ -1,5 +1,7 @@
 # D2 — Reth system-call and fee profile
 
+> **Later genesis amendment (#167, proposed):** [F4f](f4f-standard-genesis-json-bootstrap.md). The v2 amendment defines bootstrap projection and coordinated client/profile requirements; ABI/layout reuse does not imply current execution support. This note does not activate v2 or alter historical test results.
+
 Issue: [#4 D2](https://github.com/ristik/bft-core/issues/4) · Milestone: M0 ·
 Prereq: [#3 D1](https://github.com/ristik/bft-core/issues/3) ·
 Profile version: **v1** (shared with D1) · Status: **proposed for freeze**
