@@ -175,7 +175,9 @@ anchor-evidence rules (`shardnode/anchorevidence.go` `VerifyAnchorEvidence`,
   ends B's readiness.
 - The chain **ends at the held certificate**: the same partition round (`errUnconnected`) and the same input
   record, root round and signatures excluded (`errConflict`).
-- The chain is bounded at 512 certificates (`errExhausted`), as `DefaultAnchorEvidenceLimits` is.
+- The model bounds the chain at 512 certificates (`errExhausted`). Production acquisition must also retain
+  the existing 1 MiB complete-bundle bound from `DefaultAnchorEvidenceLimits`, before signature work; the
+  model does not exercise transport or serialized-chain byte accounting.
 
 State equality alone is never enough, and no unsigned counter is consulted. Every refusal is `errStale`, with
 the specific rule in the error chain.
@@ -188,8 +190,13 @@ the round the held certificate assigns, using that same certificate chain and th
 **Retained or reacquired.** Continuity is **not** in the record, and the record cannot attest to it: a stored
 chain replays exactly as a stored record does.
 - In a running process, the chain is the certificates this process observed (`shardnode` `continuityState`).
-- After a restart, it is **reacquired** as #92 anchor evidence ending at the certificate the restarted process
-  holds.
+- After a restart, ordinary-block continuity is **reacquired** as #92 anchor evidence ending at the
+  certificate the restarted process holds. The genesis case shares the continuity rules, but cannot be passed
+  directly to the existing `VerifyAnchorEvidence`: that predicate rejects a no-block source with
+  `ErrEvidenceSourceQuiet`, and its provider selects block-naming sources. Node wiring must explicitly provide
+  and test the configuration-bound genesis continuity path before claiming restart readiness for genesis.
+  This model does not establish that acquisition capability, and the ordinary anchor predicate must not be
+  weakened to manufacture a block-naming genesis source.
 - Until that evidence verifies, the restarted node is durable-ready but not ready for the child.
 
 Persisting observed links is outside this contract.
