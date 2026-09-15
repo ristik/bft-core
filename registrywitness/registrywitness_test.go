@@ -318,8 +318,8 @@ func TestInvalidEvidence(t *testing.T) {
 		"proof for another address":            {header: result(v.Header), proof: rawResult(foreign), also: registryproof.ErrAccountProof},
 		"a storage proof missing":              {header: result(v.Header), proof: rawResult(missingKey), also: registryproof.ErrStorageProof},
 		"proof result is a string":             {header: result(v.Header), proof: result("0x00")},
-		"response is not JSON-RPC":             {header: `"0x00"`, proof: rawResult(v.Proof), message: "not a JSON-RPC 2.0 object"},
-		"response without the jsonrpc version": {header: `{"id":1,"result":"0x00"}`, proof: rawResult(v.Proof), message: "not a JSON-RPC 2.0 object"},
+		"response is not JSON-RPC":             {header: `"0x00"`, proof: rawResult(v.Proof), message: "not a valid JSON-RPC 2.0 response"},
+		"response without the jsonrpc version": {header: `{"id":1,"result":"0x00"}`, proof: rawResult(v.Proof), message: "not a valid JSON-RPC 2.0 response"},
 		"response lacks result and error":      {header: `{"jsonrpc":"2.0","id":1}`, proof: rawResult(v.Proof)},
 	} {
 		t.Run(name, func(t *testing.T) {

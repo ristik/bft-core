@@ -80,15 +80,95 @@ type rpcRequest struct {
 	Params  []any  `json:"params"`
 }
 
-type rpcResponse struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Result  json.RawMessage `json:"result"`
-	Error   *RPCError       `json:"error"`
+// requestID is the id of every request. Each HTTP request carries exactly one call, so a fixed id is enough
+// to require that the response answers this request.
+const requestID = 1
+
+/*
+decodeEnvelope validates a JSON-RPC 2.0 response completely before its content is classified (review of
+#158): "jsonrpc" is exactly "2.0"; "id" is present and is the request's integer id; exactly one of "result"
+and "error" is present (a present "result" may be null); and an error is an object with an integer "code"
+and a string "message". Anything else is ErrInvalid, so a malformed envelope is never reported as a client
+that is merely unavailable. A valid error is returned as *RPCError, and a valid result as its raw value.
+*/
+func decodeEnvelope(method string, raw []byte) (json.RawMessage, error) {
+	invalid := func(why string) error {
+		return fmt.Errorf("%w: %s response is not a valid JSON-RPC 2.0 response: %s", ErrInvalid, method, why)
+	}
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &members); err != nil || members == nil {
+		return nil, invalid("not a JSON object")
+	}
+	var version string
+	if v, ok := members["jsonrpc"]; !ok || json.Unmarshal(v, &version) != nil || version != "2.0" {
+		return nil, invalid(`"jsonrpc" is not "2.0"`)
+	}
+	id, ok := members["id"]
+	if !ok || !integerEquals(id, requestID) {
+		return nil, invalid(fmt.Sprintf(`"id" is not the request id %d`, requestID))
+	}
+	result, hasResult := members["result"]
+	errObj, hasError := members["error"]
+	switch {
+	case hasResult && hasError:
+		return nil, invalid(`both "result" and "error" are present`)
+	case hasResult:
+		return result, nil
+	case !hasError:
+		return nil, invalid(`neither "result" nor "error" is present`)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(errObj, &fields); err != nil || fields == nil {
+		return nil, invalid(`"error" is not an object`)
+	}
+	code, ok := fields["code"]
+	if !ok {
+		return nil, invalid(`"error" has no "code"`)
+	}
+	c, isInt := integerValue(code)
+	if !isInt {
+		return nil, invalid(`"error.code" is not an integer`)
+	}
+	var message string
+	if m, ok := fields["message"]; !ok || !isJSONString(m) || json.Unmarshal(m, &message) != nil {
+		return nil, invalid(`"error.message" is not a string`)
+	}
+	return nil, &RPCError{Code: c, Message: message}
+}
+
+// integerValue decodes a JSON number with no fraction or exponent that fits an int.
+func integerValue(raw json.RawMessage) (int, bool) {
+	t := bytes.TrimSpace(raw)
+	// A JSON number starts with a minus sign or a digit. json.Number would also accept a quoted number, which
+	// is a string here, not an integer. Fraction and exponent forms are refused below by Int64.
+	if len(t) == 0 || !(t[0] == '-' || (t[0] >= '0' && t[0] <= '9')) {
+		return 0, false
+	}
+	var n json.Number
+	d := json.NewDecoder(bytes.NewReader(t))
+	d.UseNumber()
+	if err := d.Decode(&n); err != nil {
+		return 0, false
+	}
+	v, err := n.Int64()
+	if err != nil || int64(int(v)) != v {
+		return 0, false
+	}
+	return int(v), true
+}
+
+func integerEquals(raw json.RawMessage, want int) bool {
+	v, ok := integerValue(raw)
+	return ok && v == want
+}
+
+func isJSONString(raw json.RawMessage) bool {
+	t := bytes.TrimSpace(raw)
+	return len(t) >= 2 && t[0] == '"'
 }
 
 func (h *HTTPCaller) Call(ctx context.Context, method string, params []any) (json.RawMessage, error) {
-	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: params})
+	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: requestID, Method: method, Params: params})
 	if err != nil {
 		return nil, err
 	}
@@ -112,17 +192,7 @@ func (h *HTTPCaller) Call(ctx context.Context, method string, params []any) (jso
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s returned HTTP %d", method, resp.StatusCode)
 	}
-	var r rpcResponse
-	if err := json.Unmarshal(raw, &r); err != nil || r.JSONRPC != "2.0" {
-		return nil, fmt.Errorf("%w: %s response is not a JSON-RPC 2.0 object", ErrInvalid, method)
-	}
-	if r.Error != nil {
-		return nil, r.Error
-	}
-	if r.Result == nil {
-		return nil, fmt.Errorf("%w: %s response has neither result nor error", ErrInvalid, method)
-	}
-	return r.Result, nil
+	return decodeEnvelope(method, raw)
 }
 
 // reth's JSON-RPC errors for a block it cannot serve: an unknown block is -32001 "block not found", and a

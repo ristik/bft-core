@@ -59,6 +59,19 @@ the head, a block number or a zero cursor:
 `MaxResponseBytes` is 600 KiB, read through a limited reader: registryproof's 256 KiB node bound doubled for hex,
 plus the envelope and keys.
 
+**The JSON-RPC envelope is validated completely before its content is classified** (review of #158). A
+response must meet all of these, or it is `ErrInvalid`:
+
+- it is a JSON object whose `"jsonrpc"` is the string `"2.0"`;
+- `"id"` is present and is the integer request id, not a string, `null`, a fraction or an exponent form;
+- exactly one of `"result"` and `"error"` is present (`"result": null` is a valid result);
+- an error is an object with an integer `"code"` and a string `"message"`, and may carry `"data"`.
+
+Only a well-formed error, or a well-formed `null` result, reaches the unavailable path. So a malformed
+envelope can never be taken for a client that is merely unavailable, and a response for another request
+never yields a witness. This is stricter than the measurement script, which checks envelope exclusivity
+and a numeric error code but not the id or the message type.
+
 ## 3. Witness capture
 
 `Store` keeps at most a configured number of witnesses in memory, keyed by the parent hash:
@@ -108,6 +121,11 @@ plus the envelope and keys.
 | --- | --- | --- | --- |
 | `registrywitness.go` | 21 | 16 | 21 |
 | `testdata/reth-proof-window.sh` | 12 | 9 | 12 |
+| envelope validation (review of #158) | 13 | 10 | 13 |
+
+- **Envelope survivors:** two first forms did not compile and were rewritten. The third removed a fraction and
+  exponent check that `Int64` parsing already enforces. I deleted that check as redundant and killed a
+  mutation of the remaining `Int64` refusal instead.
 
 - **Package survivors (5):** in each case another layer produced the same error class, so the tests did not observe the change. The tests added for them are:
   - a caller that does not wrap context errors;
