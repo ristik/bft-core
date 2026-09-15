@@ -52,6 +52,8 @@ type shardNodeRunFlags struct {
 	// constructs nothing, and the node runs exactly as before. See startCertifiedRecord.
 	CertifiedRecordStore  string
 	CertifiedRecordRetain int
+	// CertifiedRecordCaptureTimeout bounds one witness acquisition over --eth-url.
+	CertifiedRecordCaptureTimeout time.Duration
 	// The EVM genesis parameters the SealRegistry deployment was generated with, used only with
 	// CertifiedRecordStore.
 	RegistryEVMGasLimit  uint64
@@ -106,9 +108,11 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 	cmd.Flags().StringVar(&flags.LUCStoreFile, "luc-store", "",
 		fmt.Sprintf("path to the last-certificate store, for restart recovery (default: %s)", filepath.Join("$UBFT_HOME", lucStoreFileName)))
 	cmd.Flags().StringVar(&flags.CertifiedRecordStore, "certified-record-store", "",
-		"path of the certified-block record store (#14); empty leaves it off. Requires --executor engine-api and a SealRegistry shard configuration. The record is reloaded and reported at startup; it does not change voting")
+		"path of the certified-block record store (#14); empty leaves it off. Requires --executor engine-api and a SealRegistry shard configuration. The record is reloaded and reported at startup, and the witness of every block the round commits is captured over --eth-url and published; none of it changes voting")
 	cmd.Flags().IntVar(&flags.CertifiedRecordRetain, "certified-record-retain", defaultCertifiedRecordRetain,
 		"non-genesis certified records to retain, counting the newest")
+	cmd.Flags().DurationVar(&flags.CertifiedRecordCaptureTimeout, "certified-record-capture-timeout", recordwiringDefaultAcquireTimeout,
+		"bound on one witness acquisition over --eth-url (with --certified-record-store)")
 	cmd.Flags().Uint64Var(&flags.RegistryEVMGasLimit, "registry-evm-gas-limit", defaultGasLimit,
 		"EVM genesis gas limit the SealRegistry deployment was generated with (with --certified-record-store)")
 	cmd.Flags().StringVar(&flags.RegistryEVMCoinbase, "registry-evm-coinbase", "0x0000000000000000000000000000000000000000",

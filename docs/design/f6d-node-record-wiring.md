@@ -1,4 +1,4 @@
-# F6d (#14): node wiring of the certified-block record, W1
+# F6d (#14): node wiring of the certified-block record, W1 and W2
 
 Issue: #14, node lifecycle wiring (claim issuecomment-5685890196). Base: `integration/enshrined-evm` at `3ad216a3`
 (#160). Contract: `f6a-certified-record-crash-contract.md`. Store: `f6b-certified-record-store.md`.
@@ -7,8 +7,8 @@ Node wiring is delivered in three reviewed units:
 
 | Unit | Scope |
 | --- | --- |
-| **W1 (this)** | deployment context built once; store opened with its directory entry durable; restart reload with the executor compared by exact identity; reported, no effect on voting |
-| W2 | witness capture after the round commits B, and atomic publication, off the round lock and outside the finality gate |
+| **W1** (#161, merged `30084e5f`) | deployment context built once; store opened with its directory entry durable; restart reload with the executor compared by exact identity; reported, no effect on voting |
+| **W2** (§7) | witness capture after the round commits B, and atomic publication, off the round lock and outside the finality gate |
 | W3 | readiness for B's child: live continuity, #92 anchor evidence for ordinary records, a separate configuration-bound genesis continuity path, gating alongside P-id |
 
 ## 1. Default path
@@ -138,5 +138,150 @@ A check that the full configuration hash equals the generated one was removed be
 - Genesis continuity acquisition (W3); the 512-certificate and 1 MiB bounds are unchanged.
 - Migration from the legacy certificate file, archive retrieval (#15), activation, `v0` removal, WithSealV1
   advertisement.
+
+## 7. W2: witness capture and atomic publication
+
+Claim: issuecomment-5687075006, base `30084e5f`. Nothing in this section changes W1's startup report, voting,
+building, validating or the signing record.
+
+### 7.1 Trigger
+
+`Round.commitPrevious` commits a block only when the certificate in hand certifies the round this node proposed
+for and names a block. After the executor's `Commit` returns `StatusValid` for that block, the round calls
+`CommitObserver.ObserveCommit` with a `CertifiedCommit`:
+- the certificate and its bound technical record, both deep-copied through canonical CBOR;
+- the committed block's hash.
+
+The call happens with the round lock held, so the observer must return promptly. `shardnode` defines the
+interface and does not import `recordwiring`. The shard-node command attaches the capturer only when a record
+store is configured.
+
+These commit nothing and report nothing (`TestRound_ReportsOnlyCertifiedCommits`):
+- a genesis round the executor did not move for;
+- a quiet round;
+- a repeat or re-delivery.
+
+Commits made by #92 anchor recovery are not reported; W3 decides them with continuity.
+
+### 7.2 The attempt snapshot
+
+`Capturer.ObserveCommit` turns the commit into an immutable `Attempt`:
+- a number;
+- B's hash, the certified state root and the partition round, taken from the certificate's input record, which
+  must name the committed 32-byte block;
+- the certificate and technical record as canonical CBOR, never shared with the round.
+
+A commit that cannot be snapshotted is `malformed` and attempts nothing.
+
+One attempt is in flight at a time, and a single pending slot keeps only the newest committed block:
+- a newer commit replaces the pending attempt, which is reported `superseded` and acquires nothing;
+- a commit older than or equal to the pending round is `superseded` on arrival;
+- a commit for a block and round already in flight, pending or published by this capturer is `duplicate`.
+
+### 7.3 The capture sequence
+
+`Capturer.Run` works off the round lock and never takes the finality gate:
+
+1. **Acquire** witness(B) with `registrywitness.Acquire` by B's exact hash (`debug_getRawHeader`, `eth_getProof`
+   by `blockHash`), bounded by `--certified-record-capture-timeout`. It is verified under the W1 deployment's
+   proof context. There is no number, tag, head or zero-cursor fallback.
+2. **Bind:** the verified witness must prove the certificate's state root, and its `RoundAuthorized` must be the
+   certificate's round (`witness-mismatch`). The block number comes from the verified witness.
+3. **Revalidate:** the executor's head must be exactly B, by the witness's number, B's hash and the state root
+   (`executor-moved`, `executor-unavailable`). `Head` is the only executor call capture makes.
+4. **Publish** B's record through `certifiedstore.Publish`, which verifies it again and writes the record, head
+   pointer and retention in one transaction.
+
+### 7.4 Stale and out-of-order completion
+
+`certifiedstore.Publish` refuses, inside its transaction, a record that would replace a head naming the same or a
+later partition round, or a genesis record that would replace an ordinary head (`ErrStaleRecord`, reported as
+`stale`). Republishing the head record is allowed. A head key that names no record round is refused as untrusted
+rather than overwritten.
+
+The check is in the store transaction rather than in the capturer, so a late or reordered completion cannot
+replace a newer durable head even if another process published it (`TestPublishNeverReplacesALaterHead`).
+
+### 7.5 States and outcomes
+
+The states stay separate:
+- **Executor-applied:** the round reported the commit.
+- **Witness-verified:** step 2 passed.
+- **Durable:** `Publish` returned nil.
+
+Every other outcome leaves the prior record as the head, writes and deletes nothing, reports nothing as
+durable-ready, and causes no executor action.
+
+| Outcome | Meaning |
+| --- | --- |
+| `published` | B's record is the durable head |
+| `duplicate`, `superseded` | not started: the block is already handled, or a newer committed block replaced it |
+| `malformed` | the commit could not be snapshotted |
+| `witness-unavailable` | the client did not provide witness(B), including a block behind its proof window (#15 owns later retrieval) |
+| `witness-invalid` | the client's answer is not a valid witness for B's hash |
+| `witness-mismatch` | the witness verified but proves another state root or round |
+| `executor-unavailable`, `executor-moved` | the head could not be read, or is no longer exactly B |
+| `stale` | the store's head already names this or a later round |
+| `publish-failed` | the store refused the record or failed |
+| `stopped` | the capturer stopped first; a pending attempt is reported the same way |
+
+Each outcome is logged with the attempt number, round and block.
+
+**Deployment requirement.** The execution client's proof window must cover the capture lag. Pinned reth's
+default window is the head only, so a child committed before capture completes makes witness(B) unavailable.
+
+### 7.6 Shard-node command
+
+With `--certified-record-store`, `startCertifiedRecord` does the following after the W1 reload:
+- builds the capturer over `--eth-url`;
+- attaches it with `Node.SetCommitObserver`;
+- runs it until the command exits, stopping it before closing the store.
+
+Without the flag, nothing is attached.
+
+### 7.7 Tests
+
+| Test | Covers |
+| --- | --- |
+| `TestCapturePublishesEachCommittedBlock` | two blocks captured and published in turn; the stored identity, number and round; exactly `debug_getRawHeader` and `eth_getProof` for B's hash, once; one head read per attempt |
+| `TestCaptureFailuresKeepThePriorRecord` | missing witness, expired proof window, another block's witness, a certificate naming another round or state than the witness, an unreadable executor head, an executor at another block, and executor heads differing from B in exactly one of hash (another block at the same height and state), number or state root; a later durable record, a record the store refuses, a store that fails; each keeps the prior head and the stored keys unchanged |
+| `TestCaptureDuplicateDeliveryAcquiresOnce` | re-delivery after publication and while in flight |
+| `TestCaptureWhileTheNodeAdvances` | the executor commits the next block while capture is in flight; newer commits replace a pending attempt; an older commit delivered after a newer one |
+| `TestCaptureAcrossRestart` | stopped before publication: in-flight and pending attempts stopped, W1 reload finds the executor ahead of the prior record; stopped after publication: W1 reload is durable-ready for B |
+| `TestCaptureRefusesAMalformedCommit` | a commit naming another block than its certificate, and an empty commit |
+| `TestPublishNeverReplacesALaterHead` | the store's stale refusal for an earlier round, another block at the head's round, the genesis record, and the genesis record with its certificate round advanced past the head's; republishing and later rounds allowed; an unparsable head key |
+| `TestRound_ReportsOnlyCertifiedCommits` | the round hook with the fake executor |
+
+The capture tests use:
+- the real bbolt store;
+- certificates signed and verified against the configured trust base;
+- a JSON-RPC stand-in that serves the signed chain's real headers and proofs by exact hash and records every call;
+- an executor stand-in that answers only `Head`, so any other executor call panics the test.
+
+**Mutations.** An uncommitted script disabled each rule in turn against its package's tests, with a 300 s timeout,
+and restored and compared the sources after each. All 24 are caught:
+- **Store (6):** the stale check removed, republishing the head refused, an ordinary record over genesis refused,
+  genesis allowed over an ordinary head, another block at the head's round allowed, and an unparsable head
+  overwritten.
+- **Capture (15):**
+  - the witness state-root and round bindings;
+  - the executor head's number, hash and state-root comparisons, and its error;
+  - duplicate detection, and remembering the published block;
+  - which commit the pending slot keeps (older and newer);
+  - stale reported as a publish failure, and unavailable reported as invalid;
+  - stopping not distinguished, and a pending attempt not reported on stop;
+  - a malformed commit accepted.
+- **Round hook (3):** the report removed, originals passed instead of copies, and an uncopyable commit reported.
+
+The first run caught 19. Four survived because each negative case changed several conditions at once, and they
+are caught after one-condition cases were added: genesis at an advanced round, and executor heads differing only
+in number, hash or state root. One did not compile and is caught once fixed.
+
+### 7.8 Not in W2
+
+- Readiness for B's child, authenticated quiet continuity, the explicit genesis path including the genesis
+  record, capture of recovery-applied blocks, and any voting, building or validating effect: W3.
+- Retrieving a witness after the proof window: #15.
+- Existing stock execution has no SealRegistry and is not a positive execution lane for this path.
 
 #10, #11, #12 and #14 stay open.

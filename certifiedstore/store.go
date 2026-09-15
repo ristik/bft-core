@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -16,6 +17,10 @@ import (
 
 // ErrDirectorySync is an Open that could not make the store file's directory entry durable.
 var ErrDirectorySync = errors.New("certifiedstore: syncing the store's parent directory failed")
+
+// ErrStaleRecord is a publication that would replace a head naming the same or a later certified round, or a
+// genesis record that would replace an ordinary head (#14 W2).
+var ErrStaleRecord = errors.New("certifiedstore: the store's head already names this round or a later one")
 
 // ErrStorePath is a store path Open will not use: its final component is a symbolic link, or is not a regular
 // file once opened.
@@ -150,6 +155,40 @@ func recordKey(r Record) []byte {
 var errPublishFailed = errors.New("certifiedstore: publication failed")
 
 /*
+notStale decides whether r, under key, may become the head the store currently names. Republishing the head
+record is allowed. An ordinary record may replace the genesis record or an ordinary record of an earlier
+partition round; a head of the same round naming another block, or of a later round, is not replaced, and
+neither is any ordinary head by the genesis record. A head that does not name a record key cannot be compared
+and is refused as untrusted rather than overwritten.
+*/
+func notStale(head, key []byte, r Record) error {
+	if head == nil || bytes.Equal(head, key) || bytes.Equal(head, genesisKey) {
+		return nil
+	}
+	headRound, ok := roundOfKey(head)
+	if !ok {
+		return fmt.Errorf("%w: head %q does not name a record key", ErrRecordUntrusted, head)
+	}
+	if r.BlockNumber == 0 {
+		return fmt.Errorf("%w: head names round %d; the genesis record does not replace it", ErrStaleRecord, headRound)
+	}
+	if headRound >= r.PartitionRound {
+		return fmt.Errorf("%w: head names round %d, the record is for round %d", ErrStaleRecord, headRound, r.PartitionRound)
+	}
+	return nil
+}
+
+// roundOfKey parses the partition round of an ordinary record key, record/<20 digits>/<block hash hex>.
+func roundOfKey(k []byte) (uint64, bool) {
+	rest, ok := bytes.CutPrefix(k, recordPfx)
+	if !ok || len(rest) < 21 || rest[20] != '/' {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(string(rest[:20]), 10, 64)
+	return n, err == nil
+}
+
+/*
 Publish writes r as the current record. The record must verify under c first: a record that would not
 load is never written, so no partial or unverifiable record becomes current. Then ONE transaction puts the
 record, points the head at it, and deletes non-genesis records beyond Settings.Retain, oldest first, never
@@ -172,6 +211,11 @@ func (s *Store) Publish(ctx context.Context, c Context, r Record) error {
 		b := tx.Bucket(bucketName)
 		if b == nil {
 			return errors.New("certifiedstore: bucket missing")
+		}
+		// Inside the transaction, so a capture that completes late or out of order cannot replace a newer
+		// durable head, whichever process published it.
+		if err := notStale(b.Get(headKey), key, r); err != nil {
+			return err
 		}
 		if err := b.Put(key, enc); err != nil {
 			return err

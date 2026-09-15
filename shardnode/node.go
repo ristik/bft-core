@@ -181,6 +181,12 @@ func (n *Node) SetCertifiedRecordStatus(outcome, detail string) {
 	n.health.updateCertifiedRecord(outcome, detail)
 }
 
+// SetCommitObserver attaches an observer told about every block the round commits on a certificate's
+// authority (#14 W2). Call after New, before Run.
+func (n *Node) SetCommitObserver(o CommitObserver) {
+	n.round.SetCommitObserver(o)
+}
+
 // Health returns this node's live status snapshot — see health.go. Always
 // non-nil; wire it into an HTTP handler to expose it (see
 // cli/ubft/cmd/shard_node_run.go).

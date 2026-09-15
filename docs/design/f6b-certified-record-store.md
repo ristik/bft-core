@@ -70,6 +70,11 @@ undecodable or digest-mismatched value, and a payload version that differs from 
   published, is met. It never deletes `record/genesis` or the key being published, and republishing the current
   record deletes nothing (`TestRetentionIsBoundedAndTransactional`).
 - Because the deletions are in the transaction, a failed publication cannot prune its predecessor.
+- Since node wiring W2, the same transaction refuses a record that would replace a head naming the same or a
+  later partition round, or a genesis record that would replace an ordinary head (`ErrStaleRecord`), so a late
+  or reordered capture cannot replace a newer durable head. Republishing the head record is allowed, and a head
+  key that names no record round is refused as untrusted rather than overwritten
+  (`TestPublishNeverReplacesALaterHead`).
 
 ## 4. Failure evidence
 
