@@ -44,6 +44,8 @@ var (
 	ErrWrongBlock      = errors.New("certifiedstore: record, certificate and witness do not name the same block")
 	ErrTechnicalRecord = errors.New("certifiedstore: technical record is not the one the certificate commits to")
 	ErrWitness         = errors.New("certifiedstore: witness does not verify")
+	ErrEpoch           = errors.New("certifiedstore: authenticated certificate is for an epoch the configuration does not support")
+	ErrWrongRound      = errors.New("certifiedstore: certified partition round is not the round the witness shows executed")
 	ErrConfig          = errors.New("certifiedstore: invalid configuration")
 	ErrSettings        = errors.New("certifiedstore: invalid settings")
 )
@@ -280,6 +282,18 @@ func verify(ctx context.Context, c Context, sr storedRecord) (Loaded, error) {
 	if err != nil || !bytes.Equal(trHash, uc.TRHash) {
 		return Loaded{}, ErrTechnicalRecord
 	}
+	// UC.Verify authenticates the statement; it does not show the statement is for this deployment's single
+	// shard epoch and root epoch (#153 O8). These come after authentication, so an authenticated certificate
+	// for an unsupported epoch and a forgery are distinct refusals.
+	if got := uc.GetRootEpoch(); got != c.Registry.RootEpoch {
+		return Loaded{}, fmt.Errorf("%w: root epoch %d, configured %d", ErrEpoch, got, c.Registry.RootEpoch)
+	}
+	if got := uc.InputRecord.Epoch; got != c.Registry.ShardEpoch {
+		return Loaded{}, fmt.Errorf("%w: input record epoch %d, configured shard epoch %d", ErrEpoch, got, c.Registry.ShardEpoch)
+	}
+	if tr.Epoch != c.Registry.ShardEpoch {
+		return Loaded{}, fmt.Errorf("%w: technical record epoch %d, configured shard epoch %d", ErrEpoch, tr.Epoch, c.Registry.ShardEpoch)
+	}
 	if len(sr.BlockHash) != common.HashLength || len(sr.StateRoot) != common.HashLength {
 		return Loaded{}, fmt.Errorf("%w: block hash or state root has the wrong width", ErrWrongBlock)
 	}
@@ -302,6 +316,14 @@ func verify(ctx context.Context, c Context, sr storedRecord) (Loaded, error) {
 	}
 	if s.Number() != sr.BlockNumber || s.StateRoot() != common.BytesToHash(sr.StateRoot) {
 		return Loaded{}, fmt.Errorf("%w: witness proves block %d state %s", ErrWrongBlock, s.Number(), s.StateRoot())
+	}
+	// An ordinary record's certified round is the round B executed: the proof reader has bound the
+	// finalized outcomes to RoundAuthorized. The genesis record is exempt, because quiet genesis history
+	// advances its certificate round without executing a block (#153 §7.3 E2).
+	if sr.BlockNumber != 0 {
+		if executed := s.Fields().RoundAuthorized; executed != sr.PartitionRound {
+			return Loaded{}, fmt.Errorf("%w: certified round %d, witness executed round %d", ErrWrongRound, sr.PartitionRound, executed)
+		}
 	}
 	return Loaded{record: sr, snapshot: s}, nil
 }

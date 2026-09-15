@@ -39,12 +39,22 @@ SHA-256 digest, bounded at 1 MiB before decoding. It has no signing state
 5. certificate authentication through `UC.Verify` against the trust base for the certificate's root epoch
    (`ErrCertificate`);
 6. technical record hash equal to `UC.TRHash` (`ErrTechnicalRecord`);
-7. the block rule (`ErrWrongBlock`):
+7. the authenticated epochs against the configured single epoch (#153 O8, `ErrEpoch`): the certificate's root
+   epoch equals the configured root epoch, and the input record's epoch and the technical record's epoch each
+   equal the configured shard epoch. `UC.Verify` authenticates these values but does not compare them with
+   configuration. The check follows authentication, so a genuinely signed certificate for an unsupported epoch
+   and a forgery are distinct refusals, including when the trust base store serves more than one root epoch;
+8. the block rule (`ErrWrongBlock`):
    - an ordinary record's certificate names B;
    - the genesis record's hash is the configured `evmGenesisHash`, and its certificate is no-block genesis
      history at the genesis state;
-8. `registryproof.Verify` of the witness (`ErrWitness`), with its number and state root equal to the record's
-   (`ErrWrongBlock`).
+9. `registryproof.Verify` of the witness (`ErrWitness`), with its number and state root equal to the record's
+   (`ErrWrongBlock`);
+10. for an ordinary record, the certified partition round equals the round the witness shows executed,
+    `RoundAuthorized`, to which the proof reader has already bound the finalized outcomes round
+    (`ErrWrongRound`). Header number and state root alone do not bind this. The genesis record is exempt:
+    quiet genesis history advances its certificate round without executing a block, and its witness shows
+    round 0.
 
 Before these, `Load` refuses a missing head (`ErrNoRecord`), a head naming an absent record, an oversized,
 undecodable or digest-mismatched value, and a payload version that differs from its envelope
@@ -119,15 +129,16 @@ them, or see an older complete state, never a mixture.
 
 ## 6. Tests
 
-`go test -race ./certifiedstore/` passes: 11 top-level tests, including 8 injected-failure and 8
+`go test -race ./certifiedstore/` passes: 12 top-level tests, including 8 injected-failure and 8
 process-termination checkpoints. `go test -race ./registryproof/` also passes.
 
 | Test | Covers |
 | --- | --- |
 | `TestPublishAndReloadAcrossReopen` | publish genesis and three blocks, close, reopen, load and verify; accessors return copies |
-| `TestGenesisRecordReloads` | the no-block genesis certificate persisted and reloaded |
-| `TestPublishRefusesARecordThatDoesNotVerify` | another block's witness, an unsigned certificate, another deployment's configuration, an uncommitted technical record, an ordinary record whose certificate names no block, a genesis record whose certificate names a block, a block-0 record for a header at the genesis state root other than the configured EVM genesis, a missing certificate; each leaves the store byte-identical |
-| `TestLoadRefusalsAndNoFallback` | missing head record, bit flip, truncation, an oversized value, an oversized envelope that would otherwise decode, a payload version that differs from its envelope, a future version, another deployment's record, a stored context naming another network while the certificate and witness still verify, another block's witness, an uncommitted technical record, a false height, an unknown root epoch, a malformed configuration, an empty store; an older record is present and never used |
+| `TestGenesisRecordReloads` | the no-block genesis certificate persisted and reloaded, then republished with its certificate round advanced to 3 while the witness shows round 0 |
+| `TestAuthenticatedRootEpochIsBoundToConfiguration` | with a trust base store serving root epochs 1 and 2: the configured epoch is accepted, a genuinely signed certificate at root epoch 2 is refused as `ErrEpoch`, a forged one as `ErrCertificate`, on publication (store unchanged) and when stored directly |
+| `TestPublishRefusesARecordThatDoesNotVerify` | another block's witness, an unsigned certificate, another deployment's configuration, an uncommitted technical record, an ordinary record whose certificate names no block, a genesis record whose certificate names a block, a block-0 record for a header at the genesis state root other than the configured EVM genesis, an authenticated input record, technical record, or both, for shard epoch 9, a certificate and record claiming partition round 9 with the witness of block 2, which executed round 2, a missing certificate; each leaves the store byte-identical |
+| `TestLoadRefusalsAndNoFallback` | missing head record, bit flip, truncation, an oversized value, an oversized envelope that would otherwise decode, a payload version that differs from its envelope, a future version, another deployment's record, a stored context naming another network while the certificate and witness still verify, the shard-epoch and certified-round cases above stored directly with a valid digest, a refused load leaving the store unchanged, another block's witness, an uncommitted technical record, a false height, an unknown root epoch, a malformed configuration, an empty store; an older record is present and never used |
 | `TestRetentionIsBoundedAndTransactional` | retain 1, 2 and 8; republishing the current record; genesis kept; settings validation |
 | `TestInjectedFailuresLeavePriorOrNewState`, `TestEveryCheckpointIsReached` | in-process failures at every checkpoint, before and after reopen |
 | `TestProcessKilledAtEachCheckpoint` | `SIGKILL` at every checkpoint, reopen of the real file |
@@ -149,6 +160,13 @@ test nothing. Survivors, each explained:
 - Keeping bbolt memory past the read transaction (S11) is not observable here: the decode copies, and no remap or
   concurrent writer occurs during it. The clone is kept because bbolt documents the memory as valid only inside
   the transaction.
+
+The repair of review 5211213526 added six mutations, all caught:
+- each of the root, input-record and technical-record epoch checks disabled;
+- the executed-round binding disabled;
+- the genesis exemption removed (`TestGenesisRecordReloads` fails at the advanced certificate round);
+- the root-epoch check moved before authentication (the forged certificate at root epoch 2 is then reported as `ErrEpoch`
+  rather than `ErrCertificate`).
 
 Certificates are really signed with a fixed secp256k1 key and verified against a test trust base. The
 deployment is the `registrygenesis` vector, and non-genesis blocks carry finalized registry storage in real

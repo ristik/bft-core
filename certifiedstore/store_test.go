@@ -65,6 +65,53 @@ func TestGenesisRecordReloads(t *testing.T) {
 	uc, err := l.Certificate()
 	require.NoError(t, err)
 	require.Empty(t, uc.InputRecord.BlockHash, "the genesis certificate names no block")
+
+	advanced := f.recordWith(0, func(ir *types.InputRecord, tr *certification.TechnicalRecord, r *Record) {
+		ir.RoundNumber, tr.Round, r.PartitionRound = 3, 4, 3
+	})
+	require.NoError(t, s.Publish(context.Background(), f.ctx, advanced), "quiet genesis history advances the certificate round without executing a block")
+	l, err = s.Load(context.Background(), f.ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), l.PartitionRound())
+	require.Equal(t, uint64(0), l.Snapshot().Fields().RoundAuthorized)
+}
+
+func TestAuthenticatedRootEpochIsBoundToConfiguration(t *testing.T) {
+	f := newFixture(t, 2)
+	stranger, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	c := f.ctx
+	c.TrustBases = multiTrust{f.trust.tb, mustTrustBaseAtEpoch(t, f, 2)}
+	atRootEpoch2 := func(signer abcrypto.Signer) Record {
+		return f.recordWith(2, func(ir *types.InputRecord, tr *certification.TechnicalRecord, r *Record) {
+			r.Certificate = f.reseal(f.certify(f.signer, ir, tr, 6), 2, signer)
+		})
+	}
+	cases := map[string]struct {
+		record Record
+		want   error
+	}{
+		"an authenticated certificate at another root epoch": {atRootEpoch2(f.signer), ErrEpoch},
+		"a forged certificate at another root epoch":         {atRootEpoch2(stranger), ErrCertificate},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := f.open(tempDB(t), 4)
+			for i := 0; i <= 1; i++ {
+				require.NoError(t, s.Publish(context.Background(), c, f.record(i)), "the configured root epoch is accepted with several trust bases")
+			}
+			before := contents(t, s)
+			err := s.Publish(context.Background(), c, tc.record)
+			require.ErrorIs(t, err, tc.want)
+			require.Equal(t, before, contents(t, s), "a refused publication changes nothing")
+
+			enc, _, err := encodeRecord(c, tc.record)
+			require.NoError(t, err)
+			putRaw(t, s, string(recordKey(f.record(1))), enc)
+			_, err = s.Load(context.Background(), c)
+			require.ErrorIs(t, err, tc.want, "the same record stored directly is refused on load")
+		})
+	}
 }
 
 func TestPublishRefusesARecordThatDoesNotVerify(t *testing.T) {
@@ -97,6 +144,18 @@ func TestPublishRefusesARecordThatDoesNotVerify(t *testing.T) {
 		"a block-0 record for a header other than the configured EVM genesis": {f.recordWith(0, func(_ *types.InputRecord, _ *certification.TechnicalRecord, r *Record) {
 			r.BlockHash, r.Witness.Header = f.genesisHeaderVariant()
 		}), ErrWrongBlock},
+		"an authenticated input record for another shard epoch": {f.recordWith(2, func(ir *types.InputRecord, _ *certification.TechnicalRecord, _ *Record) {
+			ir.Epoch = 9
+		}), ErrEpoch},
+		"an authenticated technical record for another shard epoch": {f.recordWith(2, func(_ *types.InputRecord, tr *certification.TechnicalRecord, _ *Record) {
+			tr.Epoch = 9
+		}), ErrEpoch},
+		"an authenticated certificate and technical record for another shard epoch": {f.recordWith(2, func(ir *types.InputRecord, tr *certification.TechnicalRecord, _ *Record) {
+			ir.Epoch, tr.Epoch = 9, 9
+		}), ErrEpoch},
+		"a certified round other than the round the witness executed": {f.recordWith(2, func(ir *types.InputRecord, tr *certification.TechnicalRecord, r *Record) {
+			ir.RoundNumber, tr.Round, r.PartitionRound = 9, 10, 9
+		}), ErrWrongRound},
 		"a record with no certificate": {Record{BlockHash: f.blocks[2].Hash, BlockNumber: 2, StateRoot: f.blocks[2].StateRoot, PartitionRound: 2}, ErrWrongBlock},
 	}
 	for name, tc := range cases {
@@ -118,6 +177,12 @@ func TestLoadRefusalsAndNoFallback(t *testing.T) {
 	f := newFixture(t, 2)
 	other := newFixtureFor(t, 4, 2)
 	headKeyFor := func(i int) string { return string(recordKey(f.record(i))) }
+	// storeAsHead writes r, encoded with a valid digest but not verified, under the head record's key.
+	storeAsHead := func(t *testing.T, s *Store, r Record) {
+		enc, _, err := encodeRecord(f.ctx, r)
+		require.NoError(t, err)
+		putRaw(t, s, headKeyFor(2), enc)
+	}
 
 	cases := map[string]struct {
 		damage func(t *testing.T, s *Store)
@@ -160,6 +225,17 @@ func TestLoadRefusalsAndNoFallback(t *testing.T) {
 			raw := contents(t, s)[headKeyFor(2)]
 			putRaw(t, s, headKeyFor(2), reencode(t, raw, func(sr *storedRecord) { sr.Context.NetworkID++ }))
 		}, want: ErrWrongContext},
+		"an authenticated input record for another shard epoch, stored directly": {damage: func(t *testing.T, s *Store) {
+			storeAsHead(t, s, f.recordWith(2, func(ir *types.InputRecord, _ *certification.TechnicalRecord, _ *Record) { ir.Epoch = 9 }))
+		}, want: ErrEpoch},
+		"an authenticated technical record for another shard epoch, stored directly": {damage: func(t *testing.T, s *Store) {
+			storeAsHead(t, s, f.recordWith(2, func(_ *types.InputRecord, tr *certification.TechnicalRecord, _ *Record) { tr.Epoch = 9 }))
+		}, want: ErrEpoch},
+		"a certified round other than the round the witness executed, stored directly": {damage: func(t *testing.T, s *Store) {
+			storeAsHead(t, s, f.recordWith(2, func(ir *types.InputRecord, tr *certification.TechnicalRecord, r *Record) {
+				ir.RoundNumber, tr.Round, r.PartitionRound = 9, 10, 9
+			}))
+		}, want: ErrWrongRound},
 		"the witness of another block": {damage: func(t *testing.T, s *Store) {
 			raw := contents(t, s)[headKeyFor(2)]
 			putRaw(t, s, headKeyFor(2), reencode(t, raw, func(sr *storedRecord) {
@@ -200,8 +276,10 @@ func TestLoadRefusalsAndNoFallback(t *testing.T) {
 			if tc.ctx != nil {
 				ctx = tc.ctx()
 			}
+			before := contents(t, s)
 			_, err := s.Load(context.Background(), ctx)
 			require.ErrorIs(t, err, tc.want)
+			require.Equal(t, before, contents(t, s), "a refused load changes nothing")
 			_, older := contents(t, s)[headKeyFor(1)]
 			require.True(t, older, "premise: an older record was there to substitute, and was not used")
 		})

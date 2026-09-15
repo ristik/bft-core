@@ -55,6 +55,29 @@ func (s trustStore) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrus
 	return s.tb, nil
 }
 
+// multiTrust serves several root epochs, as a trust base store that has seen an epoch change would.
+type multiTrust []*types.RootTrustBaseV1
+
+func (m multiTrust) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	for _, tb := range m {
+		if tb.GetEpoch() == epoch {
+			return tb, nil
+		}
+	}
+	return nil, fmt.Errorf("no trust base for root epoch %d", epoch)
+}
+
+// reseal re-signs uc's seal at root epoch epoch with signer, under the node id that signed it.
+func (f *fixture) reseal(uc *types.UnicityCertificate, epoch uint64, signer abcrypto.Signer) *types.UnicityCertificate {
+	var id string
+	for k := range uc.UnicitySeal.Signatures {
+		id = k
+	}
+	uc.UnicitySeal.Epoch, uc.UnicitySeal.Signatures = epoch, nil
+	require.NoError(f.t, uc.UnicitySeal.Sign(id, signer))
+	return uc
+}
+
 type fixture struct {
 	t        *testing.T
 	signer   abcrypto.Signer
