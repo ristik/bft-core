@@ -33,6 +33,7 @@ type witnessRPC struct {
 	blocks     map[common.Hash]certifiedchain.Block
 	missing    map[common.Hash]bool
 	expired    map[common.Hash]bool
+	transient  map[common.Hash]int
 	substitute map[common.Hash]common.Hash
 	gates      map[common.Hash]chan struct{}
 	entered    chan common.Hash
@@ -41,7 +42,7 @@ type witnessRPC struct {
 
 func newWitnessRPC(c *certifiedchain.Chain) *witnessRPC {
 	r := &witnessRPC{
-		blocks: map[common.Hash]certifiedchain.Block{}, missing: map[common.Hash]bool{}, expired: map[common.Hash]bool{},
+		blocks: map[common.Hash]certifiedchain.Block{}, missing: map[common.Hash]bool{}, expired: map[common.Hash]bool{}, transient: map[common.Hash]int{},
 		substitute: map[common.Hash]common.Hash{}, gates: map[common.Hash]chan struct{}{}, entered: make(chan common.Hash, 16),
 	}
 	for _, b := range c.Blocks {
@@ -84,12 +85,19 @@ func (r *witnessRPC) Call(ctx context.Context, method string, params []any) (jso
 	r.mu.Lock()
 	r.calls = append(r.calls, method+" "+h.Hex())
 	gate, missing, expired := r.gates[h], r.missing[h], r.expired[h]
+	transient := r.transient[h]
+	if transient > 0 && method == "debug_getRawHeader" {
+		r.transient[h]--
+	}
 	served := h
 	if s, ok := r.substitute[h]; ok {
 		served = s
 	}
 	b, ok := r.blocks[served]
 	r.mu.Unlock()
+	if transient > 0 && method == "debug_getRawHeader" {
+		return json.RawMessage("null"), nil
+	}
 
 	if gate != nil && method == "debug_getRawHeader" {
 		r.entered <- h
@@ -307,6 +315,42 @@ func TestCapturePublishesEachCommittedBlock(t *testing.T) {
 	require.Equal(t, 2, h.exec.calls, "one head read per attempt, and no other executor call")
 }
 
+func TestCaptureRetriesTransientWitnessWithoutANewCommit(t *testing.T) {
+	h := newCaptureHarness(t, 1)
+	h.publish(0)
+	b := h.c.Blocks[1]
+	h.exec.set(b)
+	h.rpc.transient[b.Hash] = 1
+	h.cap.ObserveCommit(h.commit(1))
+	r := h.next()
+	require.Equal(t, recordwiring.CapturePublished, r.Outcome, "%v", r.Err)
+	require.Equal(t, b.Hash, h.head())
+	require.Equal(t, []string{
+		"debug_getRawHeader " + b.Hash.Hex(),
+		"debug_getRawHeader " + b.Hash.Hex(),
+		"eth_getProof " + b.Hash.Hex(),
+	}, h.rpc.callsFor(b.Hash), "the same immutable attempt retries; no new transaction or commit notification is needed")
+}
+
+func TestCaptureCanStartALaterBoundedEpisodeWithoutANewCommit(t *testing.T) {
+	h := newCaptureHarness(t, 1)
+	h.publish(0)
+	b := h.c.Blocks[1]
+	h.exec.set(b)
+	h.rpc.missing[b.Hash] = true
+	h.cap.ObserveCommit(h.commit(1))
+	first := h.next()
+	require.Equal(t, recordwiring.CaptureWitnessUnavailable, first.Outcome)
+	require.Len(t, h.rpc.callsFor(b.Hash), 3, "the first episode spends its finite acquisition budget")
+
+	h.rpc.missing[b.Hash] = false
+	require.True(t, h.cap.RetryPending(), "a scheduler can retry the retained immutable attempt later")
+	second := h.next()
+	require.Equal(t, recordwiring.CapturePublished, second.Outcome, "%v", second.Err)
+	require.Equal(t, b.Hash, h.head())
+	require.False(t, h.cap.RetryPending(), "publication clears the retry trigger")
+}
+
 func TestCaptureFailuresKeepThePriorRecord(t *testing.T) {
 	stranger, err := abcrypto.NewInMemorySecp256K1Signer()
 	require.NoError(t, err)
@@ -326,7 +370,7 @@ func TestCaptureFailuresKeepThePriorRecord(t *testing.T) {
 			h.rpc.expired[h.c.Blocks[2].Hash] = true
 			h.exec.set(h.c.Blocks[2])
 			return h.commit(2)
-		}, recordwiring.CaptureWitnessUnavailable, registrywitness.ErrUnavailable},
+		}, recordwiring.CaptureWitnessUnavailable, registrywitness.ErrProofWindow},
 		"the client answers with another block's witness": {[]int{0, 1}, func(h *captureHarness) shardnode.CertifiedCommit {
 			h.rpc.substitute[h.c.Blocks[2].Hash] = h.c.Blocks[1].Hash
 			h.exec.set(h.c.Blocks[2])

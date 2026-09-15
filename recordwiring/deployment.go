@@ -62,6 +62,7 @@ type Deployment struct {
 type deployment struct {
 	store        certifiedstore.Context
 	genesisState common.Hash
+	genesisProof registryproof.Evidence
 }
 
 /*
@@ -135,7 +136,7 @@ func NewDeployment(ctx context.Context, cfg DeploymentConfig, executor shardnode
 			NetworkID: cfg.Shard.NetworkID, PartitionID: cfg.Shard.PartitionID, ShardID: cfg.Shard.ShardID,
 			FullShardConfHash: full.Bytes(), Registry: g.ProofContext(), TrustBases: cfg.TrustBases,
 		},
-		genesisState: g.StateRoot(),
+		genesisState: g.StateRoot(), genesisProof: g.Evidence(),
 	}}, nil
 }
 
@@ -154,3 +155,30 @@ func (d Deployment) ProofContext() registryproof.Context { return d.d.store.Regi
 
 // GenesisState is the EVM genesis state root.
 func (d Deployment) GenesisState() common.Hash { return d.d.genesisState }
+
+// GenesisEvidence is witness(evmGenesisHash), derived from the checked configuration.
+func (d Deployment) GenesisEvidence() registryproof.Evidence {
+	if !d.Valid() {
+		return registryproof.Evidence{}
+	}
+	e := d.d.genesisProof
+	e.Header = bytes.Clone(e.Header)
+	e.AccountProof = cloneProofNodes(e.AccountProof)
+	sourceProofs := e.StorageProofs
+	e.StorageProofs = make([][][]byte, len(sourceProofs))
+	for i := range sourceProofs {
+		e.StorageProofs[i] = cloneProofNodes(sourceProofs[i])
+	}
+	return e
+}
+
+func cloneProofNodes(in [][]byte) [][]byte {
+	if in == nil {
+		return nil
+	}
+	out := make([][]byte, len(in))
+	for i := range in {
+		out[i] = bytes.Clone(in[i])
+	}
+	return out
+}

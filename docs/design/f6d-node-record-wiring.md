@@ -9,7 +9,8 @@ Node wiring is delivered in three reviewed units:
 | --- | --- |
 | **W1** (#161, merged `30084e5f`) | deployment context built once; store opened with its directory entry durable; restart reload with the executor compared by exact identity; reported, no effect on voting |
 | **W2** (§7) | witness capture off the round lock; verification outside the finality gate, final head check and atomic publication inside it |
-| W3 | readiness for B's child: live continuity, #92 anchor evidence for ordinary records, a separate configuration-bound genesis continuity path, gating alongside P-id |
+| **W3a** (§8) | inactive readiness/continuity preparation and bounded capture retry machinery |
+| W3b | Round/Node gating alongside P-id, recovery-source capture and composed lifecycle tests after W3a review |
 
 ## 1. Default path
 
@@ -331,3 +332,54 @@ capture case and `TestNodeSetCommitObserverInstallsTheNodeGate` were added.
 - Existing stock execution has no SealRegistry and is not a positive execution lane for this path.
 
 #10, #11, #12 and #14 stay open.
+
+## 8. W3a: readiness preparation and bounded retry
+
+W3 is split so the evidence predicate and mutable-state boundary can be reviewed before Round uses either.
+W3a installs no runtime readiness gate. The existing opt-in W2 capturer does gain bounded retries; the default
+path without `--certified-record-store` remains unchanged.
+
+### 8.1 Observation and continuity
+
+`recordwiring.Observations` retains copied, certificate-bound UC/TR pairs under the existing 512-certificate
+and 1 MiB complete-bundle bounds. Exact redelivery is idempotent. A snapshot is keyed by exact source and held
+certificate bytes and copied before its lock is released.
+
+`Readiness.Prepare` owns a copy of the caller's held certificate before any store or trust lookup. It then:
+
+1. loads and re-verifies the durable head and obtains an opaque byte-identity token for it;
+2. requires the executor at the exact recorded number, block hash and state root;
+3. obtains the observed chain whose source is the exact record certificate and whose terminal is the exact
+   held certificate;
+4. for an ordinary record, applies `VerifyAnchorEvidence` unchanged and binds its anchor back to the record;
+5. for genesis, applies the separate `VerifyGenesisContinuity` entry point. It uses the same authentication,
+   assigned-round, repeat and terminal-identity rules, while requiring a genuine no-block source at configured
+   genesis state. It then calls `GenesisParentEligible` with the held certificate's authenticated assignment
+   and the record's verified snapshot, enforcing E1 through E4.
+
+The ordinary #92 predicate still refuses a no-block source. State equality never selects a source or terminal.
+The returned `PreparedReadiness` is opaque and bound to the `Readiness` instance that created it.
+`Revalidate` performs only mutable checks: exact held bytes, unchanged observation version, byte-identical
+durable head and exact executor identity. It performs no trust, signature or proof work; W3b owns calling it at
+the finality boundary before Build and vote.
+
+### 8.2 Genesis record
+
+The checked deployment retains a copy of `registrygenesis` witness(EVM genesis). `PublishGenesis` accepts only
+a genuine authenticated no-block UC/TR whose state and previous state equal configured genesis. It prepares
+and verifies the record off the finality gate, then under the gate requires the executor exactly at configured
+block 0 and commits it. It never fills a nil root-chain initial state or synthesizes a certificate. Current
+stock startup can therefore remain without a genesis record until the execution profile provides genuine
+configuration-bound genesis certification; fixtures establish composition only.
+
+### 8.3 Capture retry
+
+One W2 capture episode makes at most three witness-acquisition attempts, with a bounded delay. Only unavailable
+evidence is retried. Invalid evidence, certificate/witness mismatch, malformed input, staleness and executor
+movement remain terminal for that episode. A proof-window refusal stops the local episode but retains the
+immutable attempt; it is not a permanent ban on B, and #15 or a later provider may make evidence available.
+
+After an unavailable episode is exhausted, `RetryPending` starts one new bounded episode from the retained
+immutable attempt without a new transaction or commit notification. Calls coalesce while work is pending or
+in flight. W3b owns bounded backoff/scheduling, including reconciliation triggers. W3a proves the mechanism by
+making an initially unavailable proof available later and publishing the original attempt.
