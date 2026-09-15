@@ -1,4 +1,4 @@
-package registryproof_test
+package registrywitness_test
 
 import (
 	"go/parser"
@@ -12,12 +12,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const importPath = "github.com/unicitynetwork/bft-core/registryproof"
+const importPath = "github.com/unicitynetwork/bft-core/registrywitness"
 
-// TestNoProductionPackageImportsTheReader is the inertness guard: no non-test Go file outside this package
-// imports it, so no node reads the registry through it and the go-ethereum trie packages it links are not
-// in any production binary yet.
-func TestNoProductionPackageImportsTheReader(t *testing.T) {
+// TestNoProductionPackageImportsTheWitnessStore is the inertness guard: no non-test Go file outside this
+// package imports it, so no node acquires or retains witnesses through it yet.
+func TestNoProductionPackageImportsTheWitnessStore(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
 
@@ -39,11 +38,7 @@ func TestNoProductionPackageImportsTheReader(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		// registrygenesis and registrywitness are themselves inert, and each has its own guard requiring
-		// that no production package imports it, so importing the reader from them reaches no node path.
-		if strings.HasPrefix(rel, "registryproof"+string(filepath.Separator)) ||
-			strings.HasPrefix(rel, "registrygenesis"+string(filepath.Separator)) ||
-			strings.HasPrefix(rel, "registrywitness"+string(filepath.Separator)) {
+		if strings.HasPrefix(rel, "registrywitness"+string(filepath.Separator)) {
 			return nil
 		}
 		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
