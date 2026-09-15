@@ -182,6 +182,7 @@ func TestEmptyAllocationHeaderMatchesPinnedReth(t *testing.T) {
 
 type rethVector struct {
 	Generator       string          `json:"generator"`
+	ClientVersion   string          `json:"clientVersion"`
 	InitGenesisHash common.Hash     `json:"initGenesisHash"`
 	RPCBlock0Hash   common.Hash     `json:"rpcBlock0Hash"`
 	StateRoot       common.Hash     `json:"stateRoot"`

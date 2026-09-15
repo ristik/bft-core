@@ -1,5 +1,6 @@
 {
-  "generator": "Reth Version: 2.5.0-dev Commit SHA: 189c0df32617afc488e0f091dbface1bd72cceb4 ",
+  "generator": "Reth Version: 2.5.0-dev Commit SHA: 189c0df32617afc488e0f091dbface1bd72cceb4 Build Timestamp: 2026-08-19T17:53:04.724051000Z Build Features: asm_keccak,jemalloc,keccak_cache_global,min_trace_logs,otlp,otlp_logs Build Profile: release ",
+  "clientVersion": "reth/v2.5.0-189c0df/x86_64-apple-darwin",
   "initGenesisHash": "0xc6606d09de8980f7abc0861c61cf19069719181d6e2417be975039bc38b31de0",
   "rpcBlock0Hash": "0xc6606d09de8980f7abc0861c61cf19069719181d6e2417be975039bc38b31de0",
   "stateRoot": "0xddb3133acc51b92b1aef31305df41c897f378741f0e4bb1312e3c21f221fb73d",

@@ -83,6 +83,18 @@ reported for the default `ubft engine-api genesis` file with chain id 1337.
 
 This is genesis only. Proof availability for later blocks and window expiry belong to the next unit.
 
+**The script accepts evidence only from the process it started** (review of #157). It refuses:
+
+- a binary whose `--version` does not report commit `189c0df3…`, or whose `web3_clientVersion` short commit is not a prefix of it (the pinned build reports `reth/v2.5.0-189c0df/…`);
+- a port that already answers or already has a listener before the node starts;
+- a node that exits at any point, a listener on the port that is not the node's PID, or no listener within the readiness timeout;
+- a JSON-RPC response with an `error`, without a non-null `result`, or without the envelope;
+- a block 0 result without a 32-byte hash and state root, an RPC genesis hash that differs from the `reth init` hash, a header that is not hex bytes, and a proof that is not for `a_sr` with exactly the 22 keys in order.
+
+It writes to a temporary file in the same directory and replaces the retained vector only after every check passes. The vector was regenerated with the hardened script. Its hashes, state root, header and proof are unchanged, and it now also records `clientVersion`.
+
+`TestRethVectorScriptAcceptsAnHonestPinnedRun` and `TestRethVectorScriptRefusals` run copies of the script offline against a stand-in reth, `curl` and `lsof`. No port is opened. Each refusal must exit non-zero with its targeted message, leave the previous vector byte-identical and leave no temporary file. The honest case replays the retained vector through the same stand-ins, so each refusal comes from its one deviation. The cases include a failed child while another listener answers, JSON-RPC errors on every call, null and malformed results, and a publish step that fails after validation. Disabling each of the twelve checks in turn fails at least one of these tests.
+
 ## 5. Tests
 
 - Artifact: the pin loads; eleven tampered forms are refused (profile, three compiler settings, system caller,
