@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +16,14 @@ import (
 
 // ErrDirectorySync is an Open that could not make the store file's directory entry durable.
 var ErrDirectorySync = errors.New("certifiedstore: syncing the store's parent directory failed")
+
+// ErrStorePath is a store path Open will not use: its final component is a symbolic link, or is not a regular
+// file once opened.
+var ErrStorePath = errors.New("certifiedstore: the store path is not a regular file in its own directory")
+
+// afterPathCheck runs between Open's path check and the backend open. Tests replace it to change the path in
+// that interval; it does nothing otherwise.
+var afterPathCheck = func(string) {}
 
 /*
 syncDirectory makes a directory's entries durable. bbolt syncs the pages of the file it creates but never
@@ -76,6 +85,15 @@ func Open(path string, settings Settings) (*Store, error) {
 	if err := settings.validate(); err != nil {
 		return nil, err
 	}
+	// The directory synced below must be the one holding the database entry. bbolt follows a symbolic link
+	// in the final path component, so through links/db -> actual/db it would create actual/db while
+	// filepath.Dir(path) names links. Such a path is refused before anything is created through it.
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: %s is a symbolic link", ErrStorePath, path)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%w: %s: %w", ErrStorePath, path, err)
+	}
+	afterPathCheck(path)
 	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 3 * time.Second})
 	if err != nil {
 		return nil, err
@@ -90,6 +108,16 @@ func Open(path string, settings Settings) (*Store, error) {
 	}); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	// Checked again once the file exists: the entry at path must be a regular file, not a link substituted
+	// after the first check, for syncing its directory to persist it. This covers a misconfigured or changed
+	// path; a party able to rewrite the directory between these checks could also delete the store.
+	if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() {
+		_ = db.Close()
+		if err == nil {
+			err = fmt.Errorf("mode %s", fi.Mode())
+		}
+		return nil, fmt.Errorf("%w: %s after opening: %w", ErrStorePath, path, err)
 	}
 	// On every Open, not only when the file was created: a store is not usable for readiness until the
 	// entry naming it is durable, and an earlier process may have created the file and crashed before

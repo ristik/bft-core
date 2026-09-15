@@ -53,6 +53,15 @@ fails at step 6. That is the intended refusal: the record holds SealRegistry wit
 and a failed sync is an open failure (`ErrDirectorySync`) that closes the handle and returns no store. This closes
 the gap `f6b-certified-record-store.md` §5 recorded: bbolt syncs a new file's pages but never the directory entry
 naming it. On macOS the directory sync is `F_FULLFSYNC` on the directory descriptor, measured to succeed on APFS.
+
+The directory synced must be the one holding the database entry. bbolt follows a symbolic link in the final
+path component, so `links/db -> actual/db` would create `actual/db` while `filepath.Dir` names `links` (review
+5214761349). `Open` therefore refuses a path whose final component is a symbolic link, dangling or not, before
+anything is created through it, and after opening requires the entry at the path to be a regular file, which
+catches a link substituted between the two checks (`ErrStorePath`). A symbolic link in an earlier component is
+allowed: opening the parent directory for the sync resolves it to the directory that holds the entry. The
+checks cover a misconfigured or changed path, not a party racing them with write access to the directory, who
+could delete the store anyway.
 `Open` does not create directories; the directory holding the store and those above it must already exist
 durably, which the deployment provides.
 
@@ -95,6 +104,7 @@ store, and a node silently running without one looks the same from outside. A re
 | `TestReloadOutcomes` | every outcome, each on a store published through one handle, closed and reopened in a fresh handle as a restarted process does, with the store's contents unchanged by the reload |
 | `TestReloadRefusesUntrustedRecordsWithoutFallback` | a damaged head record while an older record exists and the executor is at that older block; a record published under another deployment |
 | `TestOpenSyncsTheParentDirectory`, `TestOpenFailsWhenTheDirectoryCannotBeSynced` | the directory sync on create and reopen; an injected failure refuses the open and releases the file lock |
+| `TestOpenRefusesSymbolicLinkStorePaths` | review 5214761349: a dangling final-component link and a link to an existing store are refused before anything is created or opened through them; a path that cannot be examined is refused; a link substituted after the first check is refused after opening and the backend handle is released; nothing is synced in any case |
 | `TestHealthReportsTheCertifiedRecordOutcomeWithoutChangingVoting` | the health field, with voting unchanged |
 | reach guards | only the shard-node command imports `recordwiring`; the proof, genesis and store guards admit `recordwiring` and the test fixture package |
 
@@ -112,7 +122,13 @@ and restored and compared the sources after each. All 20 were caught:
   ahead not distinguished, and the hash and state root compared at the recorded height;
 - the directory sync: not synced, the handle left open on failure, and a store returned despite failure.
 
-A check that the full configuration hash equals the generated one was removed before this run, because
+The path policy added after review 5214761349 had five more, all caught:
+- the pre-open link refusal;
+- other pre-open path errors ignored;
+- the post-open check removed, or reduced to its `Lstat` error;
+- the backend handle left open on that refusal.
+
+A check that the full configuration hash equals the generated one was removed before the first run, because
 `VerifyContext` already implies it and no test could fail on it.
 
 ## 6. Not in W1

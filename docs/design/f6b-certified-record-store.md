@@ -124,7 +124,12 @@ them, or see an older complete state, never a mixture.
   `Open` syncs the parent directory on every open, after the file and bucket exist, and a failed sync is an open
   failure (`ErrDirectorySync`) that returns no store (`TestOpenSyncsTheParentDirectory`,
   `TestOpenFailsWhenTheDirectoryCannotBeSynced`). On macOS the directory sync is `F_FULLFSYNC` on the directory
-  descriptor, measured to succeed on APFS. `Open` does not create directories: the directory holding the store,
+  descriptor, measured to succeed on APFS. Because bbolt follows a symbolic link in the final path component,
+  which would create or open the database in another directory than the one synced, `Open` refuses such a path
+  before opening (`ErrStorePath`) and checks again after opening that the entry is a regular file
+  (`TestOpenRefusesSymbolicLinkStorePaths`: dangling link, link to an existing store, a path that cannot be
+  examined, link substituted between the checks). The checks cover a misconfigured or changed path, not a party racing them with write access to
+  the directory, who could delete the store anyway. `Open` does not create directories: the directory holding the store,
   and every directory above it, must already exist durably, which is a deployment responsibility.
 - Storage errors reported asynchronously and swallowed by the filesystem after a successful sync are outside
   what this code can detect.
