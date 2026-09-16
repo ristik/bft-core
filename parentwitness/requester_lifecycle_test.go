@@ -18,6 +18,7 @@ type lifecycleOpener struct {
 	honorCancel bool
 	mu          sync.Mutex
 	calls       int
+	releaseOnce sync.Once
 }
 
 func (o *lifecycleOpener) CreateStream(ctx context.Context, _ peer.ID, _ string) (libp2pnetwork.Stream, error) {
@@ -45,6 +46,28 @@ func (o *lifecycleOpener) CreateStream(ctx context.Context, _ peer.ID, _ string)
 
 func (o *lifecycleOpener) count() int { o.mu.Lock(); defer o.mu.Unlock(); return o.calls }
 
+func (o *lifecycleOpener) unblock() { o.releaseOnce.Do(func() { close(o.release) }) }
+
+func lifecycleWait(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(3 * time.Second):
+		t.Fatal("lifecycle barrier timed out")
+	}
+}
+
+type waiterContext struct {
+	context.Context
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *waiterContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.entered) })
+	return c.Context.Done()
+}
+
 func lifecycleBudget() RequesterBudget {
 	return RequesterBudget{MaxAttempts: 2, MaxProviders: 2, Overall: time.Second, PerAttempt: time.Second, MaxDownloadedBytes: 1024, Backoff: time.Hour}
 }
@@ -56,6 +79,12 @@ func lifecycleRequester(t *testing.T, o StreamOpener, providers []peer.ID) (*Req
 	require.NoError(t, err)
 	r, err := NewRequester(context.Background(), RequesterConfig{Opener: o, Providers: providers, Budget: lifecycleBudget()})
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		if blocked, ok := o.(*lifecycleOpener); ok {
+			blocked.unblock()
+		}
+		r.Close()
+	})
 	return r, first, second
 }
 
@@ -65,10 +94,12 @@ func TestRequesterLifecycleCoalescesWaiterAndOwnerCancellationJoins(t *testing.T
 	ownerCtx, cancelOwner := context.WithCancel(context.Background())
 	ownerDone := make(chan RequesterResult, 1)
 	go func() { got, _ := r.Request(ownerCtx, target); ownerDone <- got }()
-	<-o.started
+	lifecycleWait(t, o.started)
 	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	trackedWaiter := &waiterContext{Context: waiterCtx, entered: make(chan struct{})}
 	waiterDone := make(chan RequesterResult, 1)
-	go func() { got, _ := r.Request(waiterCtx, target); waiterDone <- got }()
+	go func() { got, _ := r.Request(trackedWaiter, target); waiterDone <- got }()
+	lifecycleWait(t, trackedWaiter.entered)
 	cancelWaiter()
 	select {
 	case got := <-waiterDone:
@@ -92,7 +123,7 @@ func TestRequesterLifecycleSupersessionBackoffAndCanceledChanger(t *testing.T) {
 	r, first, second := lifecycleRequester(t, o, []peer.ID{"a"})
 	ownerDone := make(chan RequesterResult, 1)
 	go func() { got, _ := r.Request(context.Background(), first); ownerDone <- got }()
-	<-o.started
+	lifecycleWait(t, o.started)
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	got, err := r.Request(canceled, second)
@@ -122,7 +153,7 @@ func TestRequesterLifecycleConcurrentCloseJoinsBlockedOpener(t *testing.T) {
 	r, target, _ := lifecycleRequester(t, o, []peer.ID{"a"})
 	requestDone := make(chan struct{})
 	go func() { _, _ = r.Request(context.Background(), target); close(requestDone) }()
-	<-o.started
+	lifecycleWait(t, o.started)
 	closeDone := make(chan struct{}, 2)
 	go func() { r.Close(); closeDone <- struct{}{} }()
 	go func() { r.Close(); closeDone <- struct{}{} }()
@@ -131,7 +162,7 @@ func TestRequesterLifecycleConcurrentCloseJoinsBlockedOpener(t *testing.T) {
 		t.Fatal("Close returned before blocked opener released")
 	case <-time.After(20 * time.Millisecond):
 	}
-	close(o.release)
+	o.unblock()
 	for range 2 {
 		select {
 		case <-closeDone:

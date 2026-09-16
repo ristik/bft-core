@@ -133,6 +133,14 @@ func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult
 	}
 	for {
 		r.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			r.mu.Unlock()
+			return RequesterResult{Outcome: RequesterStopped, Detail: err.Error()}, err
+		}
+		if err := r.ctx.Err(); err != nil && !r.closed {
+			r.mu.Unlock()
+			return RequesterResult{Outcome: RequesterStopped, Detail: err.Error()}, err
+		}
 		if r.closed {
 			r.mu.Unlock()
 			return RequesterResult{Outcome: RequesterStopped, Detail: ErrRequesterClosed.Error()}, ErrRequesterClosed

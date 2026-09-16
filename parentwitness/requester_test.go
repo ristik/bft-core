@@ -80,7 +80,7 @@ func TestRequesterRejectsProviderListBeyondBudgetBeforeCopy(t *testing.T) {
 
 func TestBudgetedFrameCountsPrefixAndPartialBody(t *testing.T) {
 	// 0x03 declares a three-byte body; a two-byte budget must fail after consuming
-	// the prefix and the first body byte, without allocating the declared body.
+	// the prefix and the first body byte, without consuming the remaining body.
 	var used int64
 	_, err := readFrameBudgeted(bytes.NewReader([]byte{3, 1, 2, 3}), MaxResponseBytes, &used, 2)
 	require.Error(t, err)
@@ -91,8 +91,9 @@ func TestBudgetedFrameCountsPrefixAndPartialBody(t *testing.T) {
 func TestRequesterCountsEveryProviderAndAppliesBackoff(t *testing.T) {
 	o := &countingRequesterOpener{}
 	_, target := fixtureTarget(t)
-	r, err := NewRequester(context.Background(), RequesterConfig{Opener: o, Providers: []peer.ID{"a", "b"}, Budget: RequesterBudget{MaxAttempts: 2, MaxProviders: 2, Overall: time.Second, PerAttempt: time.Second, MaxDownloadedBytes: 100, Backoff: time.Millisecond}})
+	r, err := NewRequester(context.Background(), RequesterConfig{Opener: o, Providers: []peer.ID{"a", "b"}, Budget: RequesterBudget{MaxAttempts: 2, MaxProviders: 2, Overall: time.Second, PerAttempt: time.Second, MaxDownloadedBytes: 100, Backoff: time.Second}})
 	require.NoError(t, err)
+	t.Cleanup(r.Close)
 	got, err := r.Request(context.Background(), target)
 	require.NoError(t, err)
 	require.Equal(t, RequesterInvalid, got.Outcome)
@@ -109,8 +110,9 @@ func TestRequesterVerifiedProofAndInvalidThenValid(t *testing.T) {
 	bad.Header[0] ^= 1
 	responses := []Response{{Request: target.Request(), Outcome: OutcomeFound, Evidence: bad}, {Request: target.Request(), Outcome: OutcomeFound, Evidence: c.Blocks[1].Evidence}}
 	o := &scriptedOpener{target: target, responses: responses}
-	r, err := NewRequester(context.Background(), RequesterConfig{Opener: o, Providers: []peer.ID{"a", "b"}, Budget: RequesterBudget{MaxAttempts: 2, MaxProviders: 2, Overall: time.Second, PerAttempt: time.Second, MaxDownloadedBytes: MaxResponseBytes * 2, Backoff: time.Millisecond}})
+	r, err := NewRequester(context.Background(), RequesterConfig{Opener: o, Providers: []peer.ID{"a", "b"}, Budget: RequesterBudget{MaxAttempts: 2, MaxProviders: 2, Overall: time.Second, PerAttempt: time.Second, MaxDownloadedBytes: MaxResponseBytes * 2, Backoff: time.Second}})
 	require.NoError(t, err)
+	t.Cleanup(r.Close)
 	got, err := r.Request(context.Background(), target)
 	require.NoError(t, err)
 	require.Equal(t, RequesterVerified, got.Outcome)

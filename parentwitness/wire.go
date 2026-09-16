@@ -1,5 +1,5 @@
 // Package parentwitness defines the inactive parent SealRegistry witness wire boundary.
-// It registers no protocol and performs no provider lookup or retry policy.
+// It registers no protocol. Its optional requester uses caller-pinned providers and bounded retries.
 package parentwitness
 
 import (
