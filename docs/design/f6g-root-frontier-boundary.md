@@ -1,8 +1,8 @@
 # F6g: root frontier sampling boundary
 
 Refs [#176](https://github.com/ristik/bft-core/issues/176), [F6f](f6f-automatic-bootstrap-freshness.md),
-and #180. Source audit at `a9007e758e06ddbf448db20ccae47437940a2bf1`. This is an implementation plan,
-not an implemented sampler or evidence that bootstrap activation is safe. F6f's quorum/cut proof and
+and #180. Source audit at `a9007e758e06ddbf448db20ccae47437940a2bf1`. This records the implemented
+inactive unsigned sampler boundary; it is not evidence that bootstrap activation is safe. F6f's quorum/cut proof and
 fixed-deployment restrictions remain unchanged. Standard finalized genesis JSON remains the sole
 execution configuration.
 
@@ -26,7 +26,7 @@ Sources: [loop and dispatch](../../rootchain/consensus/consensus_manager.go#L344
 The pacemaker's clock goroutine emits events; it does not sign votes. The separate
 `sendCertificates` goroutine delivers already produced certificates; it is not the sampling boundary.
 
-A later enabled sampler submits a bounded request to this loop and receives one buffered reply.
+The optional sampler submits a bounded request to this loop and receives one buffered reply.
 It must not invoke consensus handlers itself or sample from a network callback. There is no separate
 query mutex: that would serialize queries with each other, not with `MakeVote` or recovery.
 Enqueue/wait respects request and manager cancellation; unavailable capacity refuses immediately.
@@ -144,10 +144,14 @@ fixtures check ownership and unchanged files, not cryptographic authentication o
 Existing pointer-returning getters still expose aliases; callers must serialize with the manager loop and
 must not mutate those aliases concurrently. No safety read, fault latch or runtime sampler is added here.
 
-The subsequent manager unit adds the bounded query path and admission state in §3, integrates the checked
-safety read, and verifies the complete sample. Its tests must exercise the real event loop, not call only a
-pure helper. Existing direct handler tests are not evidence of serialized sampling. Any new vote, timeout
-or recovery entry outside that loop would require a reviewed common serialization mechanism.
+The optional manager sampler implements the bounded query path and admission state in §3. It combines the
+checked safety read with the owned storage view in one loop turn and authenticates the complete LastCR/QC
+pair against a locally pinned, unit-weight root profile. Its store proxy makes persistence uncertainty
+sticky for that process, including recovery after replacement-root persistence begins. Real-loop tests
+cover ordinary vote/commit ordering, timeout and write failures, queue saturation, cancellation, shutdown,
+and recovery refusal through completed trigger replay. Validation tables cover the fixed QC candidates and
+profile limits. This remains unsigned diagnostic output; no caller, transport, signer, bootstrap path or
+activation default consumes it.
 
 Only after those units are reviewed should a domain-separated frontier signer be added. For the initial
 implementation, bounded local validation and response signing stay within the admitted loop turn, with

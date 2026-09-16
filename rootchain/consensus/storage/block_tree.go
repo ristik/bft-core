@@ -31,8 +31,15 @@ type (
 )
 
 var (
-	ErrCommitFailed = errors.New("commit failed")
+	ErrCommitFailed         = errors.New("commit failed")
+	ErrPersistenceUncertain = errors.New("block tree persistence uncertain")
 )
+
+type persistenceUncertainError struct{ err error }
+
+func (e persistenceUncertainError) Error() string   { return e.err.Error() }
+func (e persistenceUncertainError) Unwrap() []error { return []error{e.err, ErrPersistenceUncertain} }
+func persistenceUncertain(err error) error          { return persistenceUncertainError{err: err} }
 
 func newNode(b *ExecutedBlock) *node {
 	return &node{data: b, child: make([]*node, 0, 2)}
@@ -362,7 +369,7 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert) ([]*certification.Certif
 	// prune the chain, the committed block becomes new root of the chain
 	blocksToPrune, err := bt.findBlocksToPrune(commitRound)
 	if err != nil {
-		return nil, fmt.Errorf("finding blocks to prune on round %d: %w", commitRound, err)
+		return nil, persistenceUncertain(fmt.Errorf("finding blocks to prune on round %d: %w", commitRound, err))
 	}
 	for _, round := range blocksToPrune {
 		delete(bt.roundToNode, round)
@@ -370,13 +377,13 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert) ([]*certification.Certif
 	// generate certificates for all the shards that have changes in progress
 	ucs, err := commitNode.data.GenerateCertificates(commitQc)
 	if err != nil {
-		return nil, fmt.Errorf("generating certificates for round %d: %w", commitNode.data.GetRound(), err)
+		return nil, persistenceUncertain(fmt.Errorf("generating certificates for round %d: %w", commitNode.data.GetRound(), err))
 	}
 	// update the new root with commit QC info
 	commitNode.data.CommitQc = commitQc
 
 	if err := bt.blocksDB.WriteBlock(commitNode.data, true); err != nil {
-		return nil, err
+		return nil, persistenceUncertain(err)
 	}
 
 	bt.root = commitNode

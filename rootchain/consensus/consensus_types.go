@@ -22,7 +22,8 @@ type (
 	}
 	// Optional are common optional parameters for consensus managers
 	Optional struct {
-		Params *Parameters
+		Params          *Parameters
+		FrontierSampler *FrontierSamplerConfig
 	}
 
 	Option func(c *Optional)
@@ -40,6 +41,11 @@ func WithConsensusParams(params Parameters) Option {
 	return func(c *Optional) {
 		c.Params = &params
 	}
+}
+
+// WithFrontierSampler opts into the local, unsigned diagnostic sampler.
+func WithFrontierSampler(config FrontierSamplerConfig) Option {
+	return func(c *Optional) { c.FrontierSampler = &config }
 }
 
 func LoadConf(opts []Option) (*Optional, error) {

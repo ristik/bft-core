@@ -743,6 +743,10 @@ func Test_recoverState(t *testing.T) {
 }
 
 func createConsensusManagers(t *testing.T, count int, shardNodes []*types.NodeInfo) ([]*ConsensusManager, *mockNetwork) {
+	return createConsensusManagersWithOptions(t, count, shardNodes, nil, nil)
+}
+
+func createConsensusManagersWithOptions(t *testing.T, count int, shardNodes []*types.NodeInfo, options func(*types.RootTrustBaseV1) []Option, wrapStore func(PersistentStore) PersistentStore) ([]*ConsensusManager, *mockNetwork) {
 	t.Helper()
 	observe := testobservability.Default(t)
 
@@ -776,6 +780,9 @@ func createConsensusManagers(t *testing.T, count int, shardNodes []*types.NodeIn
 		Epoch:           0,
 		EpochStart:      1,
 	}
+	if options != nil {
+		shardConf.T2Timeout = 5 * time.Second
+	}
 
 	// Let the rounds advance 10x faster in tests
 	consensusParams := NewConsensusParams()
@@ -795,6 +802,13 @@ func createConsensusManagers(t *testing.T, count int, shardNodes []*types.NodeIn
 		require.NoError(t, trustBaseStore.Store(trustBase))
 
 		rootDB, orchestration := createStorage(t, shardConf, rootSigners, obs)
+		if wrapStore != nil {
+			rootDB = wrapStore(rootDB)
+		}
+		managerOptions := []Option{WithConsensusParams(*consensusParams)}
+		if options != nil {
+			managerOptions = append(managerOptions, options(trustBase)...)
+		}
 		cm, err := NewConsensusManager(
 			nodeID,
 			trustBaseStore,
@@ -803,7 +817,7 @@ func createConsensusManagers(t *testing.T, count int, shardNodes []*types.NodeIn
 			rootSigners[v.NodeID],
 			rootDB,
 			obs,
-			WithConsensusParams(*consensusParams),
+			managerOptions...,
 		)
 		require.NoError(t, err)
 		cms = append(cms, cm)

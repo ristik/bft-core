@@ -101,6 +101,7 @@ type (
 		voteBuffer map[string]*abdrc.VoteMsg
 		// whether the CM is in recovery mode, trying to get into the same state as other CMs
 		recovery *recoveryState
+		frontier *frontierSampler
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -150,8 +151,22 @@ func NewConsensusManager(
 	}
 	log := observe.RoundLogger(pm.GetCurrentRound)
 
+	store := rcDB
+	var frontier *frontierSampler
+	if optional.FrontierSampler != nil {
+		reader, ok := rcDB.(frontierSafetyReader)
+		if !ok {
+			return nil, errors.New("frontier sampler requires checked safety reader")
+		}
+		frontier, err = newFrontierSampler(*optional.FrontierSampler, reader)
+		if err != nil {
+			return nil, err
+		}
+		store = &frontierPersistentStore{PersistentStore: rcDB, sampler: frontier, reader: reader}
+	}
+
 	// init storage
-	bStore, err := storage.New(cParams.HashAlgorithm, rcDB, orchestration, log)
+	bStore, err := storage.New(cParams.HashAlgorithm, store, orchestration, log)
 	if err != nil {
 		return nil, fmt.Errorf("consensus block storage init failed: %w", err)
 	}
@@ -167,7 +182,7 @@ func NewConsensusManager(
 	if err != nil {
 		return nil, err
 	}
-	safetyModule, err := NewSafetyModule(trustBase.GetNetworkID(), nodeID.String(), signer, rcDB)
+	safetyModule, err := NewSafetyModule(trustBase.GetNetworkID(), nodeID.String(), signer, store)
 	if err != nil {
 		return nil, err
 	}
@@ -197,6 +212,7 @@ func NewConsensusManager(
 		t2Timeouts:     t2TimeoutGen,
 		voteBuffer:     make(map[string]*abdrc.VoteMsg),
 		recovery:       &recoveryState{},
+		frontier:       frontier,
 		log:            log,
 		tracer:         observe.Tracer("cm.distributed"),
 	}
@@ -302,6 +318,16 @@ func (x *ConsensusManager) CertificationResult() <-chan *certification.Certifica
 }
 
 func (x *ConsensusManager) Run(ctx context.Context) error {
+	if x.frontier != nil {
+		if !x.frontier.runState.CompareAndSwap(0, 1) {
+			return errors.New("frontier sampler permits only one Run owner")
+		}
+		defer func() {
+			x.frontier.eligible.Store(false)
+			x.frontier.runState.Store(2)
+			x.frontier.stopOnce.Do(func() { close(x.frontier.stopped) })
+		}()
+	}
 	g, ctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
@@ -331,6 +357,9 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 			x.log.WarnContext(ctx, "Failed to select leader when starting consensus manager", logger.Error(err))
 		}
 		x.log.InfoContext(ctx, fmt.Sprintf("CM starting, leader is %s", leader))
+		if x.frontier != nil && !x.frontier.faulted.Load() {
+			x.frontier.eligible.Store(true)
+		}
 		return x.loop(ctx)
 	})
 
@@ -361,8 +390,17 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 			}
 		case event := <-x.pacemaker.StatusEvents():
 			x.handlePacemakerEvent(ctx, event)
+		case req := <-x.frontierRequests():
+			x.handleFrontierRequest(ctx, req)
 		}
 	}
+}
+
+func (x *ConsensusManager) frontierRequests() <-chan frontierRequest {
+	if x.frontier == nil {
+		return nil
+	}
+	return x.frontier.requests
 }
 
 /*
@@ -783,6 +821,9 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 	}
 	certs, err := x.blockStore.ProcessQc(qc)
 	if err != nil {
+		if x.frontier != nil && errors.Is(err, storage.ErrPersistenceUncertain) {
+			x.frontier.latchFault()
+		}
 		x.log.WarnContext(ctx, "failure to process QC triggers recovery", logger.Error(err))
 		if err := x.sendRecoveryRequests(ctx, qc); err != nil {
 			x.log.WarnContext(ctx, "sending recovery requests failed", logger.Error(err))
@@ -996,7 +1037,7 @@ func (x *ConsensusManager) onStateReq(ctx context.Context, req *abdrc.StateReque
 	return nil
 }
 
-func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.StateMsg) error {
+func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.StateMsg) (rErr error) {
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.onStateResponse")
 	defer span.End()
 	x.log.LogAttrs(ctx, logger.LevelTrace, "received state response; recoveryState: "+x.recovery.String())
@@ -1014,6 +1055,12 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	slices.SortFunc(rsp.Pending, func(a, b *drctypes.BlockData) int {
 		return cmp.Compare(a.GetRound(), b.GetRound())
 	})
+	recoveryWriteStarted := true
+	defer func() {
+		if recoveryWriteStarted && rErr != nil && x.frontier != nil {
+			x.frontier.latchFault()
+		}
+	}()
 	blockStore, err := storage.NewFromState(x.params.HashAlgorithm, rsp.CommittedHead, x.blockStore.GetDB(), x.orchestration, x.log)
 	if err != nil {
 		return fmt.Errorf("recovery, new block store init failed: %w", err)
@@ -1058,6 +1105,9 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	// other way around as otherwise current leader goes out of sync with peers...
 	if err = x.leaderSelector.Update(x.blockStore.GetHighQc(), x.pacemaker.GetCurrentRound(), x.blockStore.Block); err != nil {
 		x.log.ErrorContext(ctx, "failed to update leader selector", logger.Error(err))
+		if x.frontier != nil {
+			x.frontier.latchFault()
+		}
 	}
 	if prop, ok := triggerMsg.(*abdrc.ProposalMsg); ok {
 		// the proposal was verified when it was received, so try and execute it now
@@ -1102,6 +1152,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		x.processTC(ctx, tmo.LastTC)
 	}
 	x.replayVoteBuffer(ctx)
+	recoveryWriteStarted = false
 	return nil
 }
 
@@ -1206,6 +1257,9 @@ func (x *ConsensusManager) Validators() peer.IDSlice {
 func (x *ConsensusManager) updateTrustBase() {
 	trustBase, err := x.trustBaseStore.GetByRound(x.pacemaker.GetCurrentRound())
 	if err != nil {
+		if x.frontier != nil {
+			x.frontier.latchFault()
+		}
 		x.log.Error("failed to update trust base", logger.Error(err))
 		return
 	}
