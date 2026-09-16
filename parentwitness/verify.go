@@ -64,6 +64,9 @@ func VerifyResponse(t Target, raw []byte) (VerifiedResponse, error) {
 	if t.request.BlockHash == (common.Hash{}) {
 		return VerifiedResponse{}, ErrContext
 	}
+	if len(raw) == 0 || len(raw) > MaxResponseBytes {
+		return VerifiedResponse{}, fmt.Errorf("%w: response is %d bytes", ErrBounds, len(raw))
+	}
 	r, err := decodeResponse(bytes.Clone(raw))
 	if err != nil {
 		return VerifiedResponse{}, err

@@ -1,7 +1,6 @@
 package parentwitness
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/binary"
 	"io"
@@ -61,6 +60,31 @@ func TestExactEchoAndLocalVerification(t *testing.T) {
 	require.ErrorIs(t, err, registryproof.ErrHeaderHash)
 }
 
+func TestHighBitsCannotAliasLocalContext(t *testing.T) {
+	_, target := fixtureTarget(t)
+	for name, mutate := range map[string]func(*contextWire){
+		"network":   func(c *contextWire) { c.NetworkID += 1 << 16 },
+		"partition": func(c *contextWire) { c.PartitionID += 1 << 32 },
+	} {
+		t.Run(name+" request", func(t *testing.T) {
+			w := requestWire{Version: Version, Context: contextToWire(target.request.Context), BlockHash: target.request.BlockHash.Bytes()}
+			mutate(&w.Context)
+			raw, err := marshalCanonical(w)
+			require.NoError(t, err)
+			_, err = DecodeRequest(raw)
+			require.ErrorIs(t, err, ErrWire)
+		})
+		t.Run(name+" response", func(t *testing.T) {
+			w := responseWire{Version: Version, Context: contextToWire(target.request.Context), BlockHash: target.request.BlockHash.Bytes(), Outcome: uint64(OutcomeBusy)}
+			mutate(&w.Context)
+			raw, err := marshalCanonical(w)
+			require.NoError(t, err)
+			_, err = VerifyResponse(target, raw)
+			require.ErrorIs(t, err, ErrWire)
+		})
+	}
+}
+
 func TestOutcomesEvidenceAndCanonicalRefusals(t *testing.T) {
 	_, target := fixtureTarget(t)
 	for outcome := OutcomeUnavailable; outcome <= OutcomeInvalidRequest; outcome++ {
@@ -97,10 +121,15 @@ func TestFramingRejectsOversizeBeforeBodyRead(t *testing.T) {
 	var prefix [binary.MaxVarintLen64]byte
 	n := binary.PutUvarint(prefix[:], MaxRequestBytes+1)
 	tracked := &oneByteReader{data: append(prefix[:n], 0xaa)}
-	r := bufio.NewReaderSize(tracked, 16)
-	_, err := ReadRequestFrame(r)
+	_, err := ReadRequestFrame(tracked)
 	require.ErrorIs(t, err, ErrBounds)
 	require.Equal(t, n, tracked.read, "oversize admission consumes only the declared-length prefix")
+}
+
+func TestVerifyResponseChecksFrameBoundBeforeDecode(t *testing.T) {
+	_, target := fixtureTarget(t)
+	_, err := VerifyResponse(target, make([]byte, MaxResponseBytes+1))
+	require.ErrorIs(t, err, ErrBounds)
 }
 
 func TestFramingRejectsShortWrites(t *testing.T) {

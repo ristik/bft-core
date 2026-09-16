@@ -1,7 +1,6 @@
 package parentwitness
 
 import (
-	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -20,7 +19,9 @@ func writeFrame(w io.Writer, body []byte, max int) error {
 	return writeExact(w, body)
 }
 
-func readFrame(r *bufio.Reader, max int) ([]byte, error) {
+// readFrame requires the raw stream reader. A caller must not wrap it in a buffering reader whose
+// private buffer could prefetch body bytes before this function admits the declared length.
+func readFrame(r io.Reader, max int) ([]byte, error) {
 	n, err := readUvarintExact(r)
 	if err != nil {
 		return nil, fmt.Errorf("%w: frame length: %v", ErrWire, err)
@@ -74,7 +75,7 @@ func WriteRequestFrame(w io.Writer, r Request) error {
 	}
 	return writeFrame(w, b, MaxRequestBytes)
 }
-func ReadRequestFrame(r *bufio.Reader) (Request, error) {
+func ReadRequestFrame(r io.Reader) (Request, error) {
 	b, err := readFrame(r, MaxRequestBytes)
 	if err != nil {
 		return Request{}, err
@@ -88,7 +89,7 @@ func WriteResponseFrame(w io.Writer, r Response) error {
 	}
 	return writeFrame(w, b, MaxResponseBytes)
 }
-func ReadVerifiedResponseFrame(r *bufio.Reader, t Target) (VerifiedResponse, error) {
+func ReadVerifiedResponseFrame(r io.Reader, t Target) (VerifiedResponse, error) {
 	b, err := readFrame(r, MaxResponseBytes)
 	if err != nil {
 		return VerifiedResponse{}, err

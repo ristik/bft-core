@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/fxamacker/cbor/v2"
@@ -118,6 +119,9 @@ func contextToWire(c Context) contextWire {
 }
 
 func contextFromWire(w contextWire) (Context, error) {
+	if w.NetworkID > math.MaxUint16 || w.PartitionID > math.MaxUint32 {
+		return Context{}, fmt.Errorf("%w: network/partition width", ErrWire)
+	}
 	if len(w.FullShardConfHash) != 32 || len(w.RegistryAddress) != 20 || len(w.RegistryCodeHash) != 32 || len(w.GenesisCommitment) != 32 || len(w.EVMGenesisHash) != 32 {
 		return Context{}, fmt.Errorf("%w: fixed context field length", ErrWire)
 	}
