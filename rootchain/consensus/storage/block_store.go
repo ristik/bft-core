@@ -188,6 +188,16 @@ func (x *BlockStore) GetHighQc() *rctypes.QuorumCert {
 	return x.blockTree.HighQc()
 }
 
+// ReadFrontierStorageView returns an owned raw storage view for one shard.
+// Callers that need consensus serialization must invoke it from the manager's
+// serialized loop; this method does not provide freshness or authority.
+func (x *BlockStore) ReadFrontierStorageView(partition types.PartitionID, shard types.ShardID) (*FrontierStorageView, error) {
+	if x == nil || x.blockTree == nil {
+		return nil, errors.New("block store is unavailable")
+	}
+	return x.blockTree.ReadFrontierStorageView(partition, shard)
+}
+
 func (x *BlockStore) GetLastTC() (*rctypes.TimeoutCert, error) {
 	return x.storage.ReadLastTC()
 }
