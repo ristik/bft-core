@@ -13,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	basetrust "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontierclient"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/internal/frontiercodec"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	rctest "github.com/unicitynetwork/bft-core/rootchain/testutils"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -430,4 +432,327 @@ func TestPairIdentityIgnoresSealSignatureSubsetAndQCDigestDoesNot(t *testing.T) 
 	qc2, err := types.Cbor.Marshal(qc)
 	require.NoError(t, err)
 	require.NotEqual(t, sha256.Sum256(qc1), sha256.Sum256(qc2))
+}
+
+func TestSignedFrontierRepliesFormClientQuorumEndToEnd(t *testing.T) {
+	shardNodes, shardInfos := rctest.CreateTestNodes(t, 1)
+	cms, _ := createConsensusManagersWithOptions(t, 4, shardInfos, func(tb *types.RootTrustBaseV1) []Option {
+		return []Option{WithFrontierSampler(FrontierSamplerConfig{TrustBase: tb, QueueSize: 2, MaxPending: 4}), WithFrontierSigning()}
+	}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	var running atomic.Int32
+	for _, cm := range cms {
+		running.Add(1)
+		go func() { defer running.Add(-1); _ = cm.Run(ctx) }()
+	}
+	t.Cleanup(func() {
+		cancel()
+		require.Eventually(t, func() bool { return running.Load() == 0 }, 3*time.Second, 20*time.Millisecond)
+	})
+	require.Eventually(t, func() bool { return cms[0].pacemaker.GetCurrentRound() >= 5 }, 5*time.Second, 20*time.Millisecond)
+	pdr, err := cms[0].orchestration.ShardConfig(partitionID, shardID, 1)
+	require.NoError(t, err)
+	conf, err := pdr.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	origin, nonce := bytes.Repeat([]byte{0xa1}, 32), bytes.Repeat([]byte{0xb2}, 32)
+	request := SignedFrontierRequest{FrontierRequest: FrontierRequest{NetworkID: pdr.NetworkID, PartitionID: pdr.PartitionID, ShardID: pdr.ShardID, FullShardConfHash: conf}, RootEpoch: cms[0].frontier.trust.Epoch, GenesisOriginIdentity: origin, Nonce: nonce}
+	collector, err := frontierclient.NewCollector(frontierclient.Profile{TrustBase: cms[0].frontier.trust, NetworkID: pdr.NetworkID, PartitionID: pdr.PartitionID, ShardID: pdr.ShardID, FullShardConfHash: conf, RootEpoch: request.RootEpoch, GenesisOriginIdentity: origin, Nonce: nonce})
+	require.NoError(t, err)
+	var maxFloor uint64
+	floors := make(map[uint64]struct{})
+	verifiedReplies := make([]frontiercodec.Reply, 0, len(cms))
+	for i, cm := range cms {
+		var response *SignedFrontierResponse
+		require.Eventually(t, func() bool {
+			response, err = cm.SampleSignedFrontier(context.Background(), request)
+			return err == nil
+		}, 3*time.Second, 20*time.Millisecond)
+		var wire frontiercodec.Reply
+		require.NoError(t, types.Cbor.Unmarshal(response.CanonicalBytes(), &wire))
+		var pair frontiercodec.Pair
+		require.NoError(t, types.Cbor.Unmarshal(wire.Pair, &pair))
+		removed := cms[(i+1)%len(cms)].frontier.author
+		delete(pair.UC.UnicitySeal.Signatures, removed)
+		require.NoError(t, pair.UC.UnicitySeal.Verify(cms[0].frontier.trust))
+		wire.Pair, err = types.Cbor.Marshal(pair)
+		require.NoError(t, err)
+		var qc drctypes.QuorumCert
+		require.NoError(t, types.Cbor.Unmarshal(wire.QC, &qc))
+		maxFloor = max(maxFloor, qc.VoteInfo.RoundNumber)
+		floors[qc.VoteInfo.RoundNumber] = struct{}{}
+		raw, err := types.Cbor.Marshal(wire)
+		require.NoError(t, err)
+		require.NoError(t, collector.Add(raw).Err)
+		verifiedReplies = append(verifiedReplies, wire)
+		if i == 0 {
+			firstRound := cms[0].pacemaker.GetCurrentRound()
+			require.Eventually(t, func() bool { return cms[0].pacemaker.GetCurrentRound() >= firstRound+2 }, 3*time.Second, 20*time.Millisecond)
+		}
+	}
+	snapshot := collector.Snapshot()
+	require.False(t, snapshot.Ordinary())
+	require.False(t, snapshot.Unsupported())
+	require.True(t, snapshot.Candidate().Valid())
+	require.Equal(t, maxFloor, snapshot.Candidate().Floor())
+	require.Len(t, snapshot.Candidate().Authors(), 4)
+	require.Greater(t, len(floors), 1)
+
+	// Two valid identities with two authors each cannot be spliced into the
+	// three-of-four response quorum.
+	split, err := frontierclient.NewCollector(frontierclient.Profile{TrustBase: cms[0].frontier.trust, NetworkID: pdr.NetworkID, PartitionID: pdr.PartitionID, ShardID: pdr.ShardID, FullShardConfHash: conf, RootEpoch: request.RootEpoch, GenesisOriginIdentity: origin, Nonce: nonce})
+	require.NoError(t, err)
+	contextValue := frontiercodec.Context{NetworkID: request.NetworkID, PartitionID: request.PartitionID, CanonicalShardBytes: request.ShardID.Bytes(), FullShardConfHash: request.FullShardConfHash, RootEpoch: request.RootEpoch, GenesisOriginIdentity: request.GenesisOriginIdentity}
+	for i, wire := range verifiedReplies {
+		if i >= 2 {
+			var pair frontiercodec.Pair
+			require.NoError(t, types.Cbor.Unmarshal(wire.Pair, &pair))
+			pair.UC.UnicitySeal.Timestamp++
+			pair.UC.UnicitySeal.Signatures = nil
+			for _, signerCM := range cms {
+				require.NoError(t, pair.UC.UnicitySeal.Sign(signerCM.frontier.author, signerCM.frontier.signer))
+			}
+			wire.Pair, err = types.Cbor.Marshal(pair)
+			require.NoError(t, err)
+			pairID, identityErr := frontiercodec.PairIdentity(pair, contextValue)
+			require.NoError(t, identityErr)
+			qcDigest := sha256.Sum256(wire.QC)
+			preimage, marshalErr := types.Cbor.Marshal(frontiercodec.SigningPreimage{Domain: frontiercodec.SigningDomain, Version: frontiercodec.Version, Context: contextValue, Nonce: request.Nonce, Author: wire.Author, PairID: pairID[:], QCDigest: qcDigest[:]})
+			require.NoError(t, marshalErr)
+			wire.Signature, err = cms[i].frontier.signer.SignBytes(preimage)
+			require.NoError(t, err)
+		}
+		raw, marshalErr := types.Cbor.Marshal(wire)
+		require.NoError(t, marshalErr)
+		require.NoError(t, split.Add(raw).Err)
+	}
+	require.False(t, split.Snapshot().Candidate().Valid())
+
+	// Negative evidence is evaluated independently even after quorum and even
+	// when it arrives from an author already counted for the initial pair.
+	si, err := cms[0].ShardInfo(partitionID, shardID)
+	require.NoError(t, err)
+	require.NoError(t, cms[0].RequestCertification(context.Background(), IRChangeRequest{Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, shardNodes, si.LastCR)}))
+	var ordinary *SignedFrontierResponse
+	require.Eventually(t, func() bool {
+		ordinary, err = cms[0].SampleSignedFrontier(context.Background(), request)
+		if err != nil {
+			return false
+		}
+		var pair frontiercodec.Pair
+		return types.Cbor.Unmarshal(decodeSignedReply(t, ordinary).Pair, &pair) == nil && pair.UC.InputRecord.RoundNumber > 0
+	}, 4*time.Second, 20*time.Millisecond)
+	result := collector.Add(ordinary.CanonicalBytes())
+	require.Equal(t, frontierclient.OrdinaryObserved, result.Status)
+	require.NoError(t, result.Err)
+	require.True(t, collector.Snapshot().Ordinary())
+	require.False(t, collector.Snapshot().Candidate().Valid())
+}
+
+func TestFrontierClientBudgetBindingAndCanonicalRejection(t *testing.T) {
+	h := newFrontierHarnessWithSigner(t, nil, true)
+	h.start(t)
+	h.commitRoundTwo(t)
+	request := signedRequest(t, h, 0x71)
+	response, err := h.cm.SampleSignedFrontier(context.Background(), request)
+	require.NoError(t, err)
+	newCollector := func(nonce []byte) *frontierclient.Collector {
+		c, err := frontierclient.NewCollector(frontierclient.Profile{TrustBase: h.trust, NetworkID: request.NetworkID, PartitionID: request.PartitionID, ShardID: request.ShardID, FullShardConfHash: request.FullShardConfHash, RootEpoch: request.RootEpoch, GenesisOriginIdentity: request.GenesisOriginIdentity, Nonce: nonce})
+		require.NoError(t, err)
+		return c
+	}
+	c := newCollector(request.Nonce)
+	raw := response.CanonicalBytes()
+	require.Equal(t, frontierclient.Counted, c.Add(raw).Status)
+	before := c.Snapshot().Candidate()
+	require.True(t, before.Valid())
+	require.NotEqual(t, [32]byte{}, before.AcquisitionBinding())
+	require.Equal(t, frontierclient.Duplicate, c.Add(raw).Status)
+
+	otherNonce := bytes.Repeat([]byte{0xcc}, 32)
+	other := newCollector(otherNonce)
+	require.ErrorIs(t, other.Add(raw).Err, frontierclient.ErrUnauthentic)
+	otherRequest := request
+	otherRequest.Nonce = otherNonce
+	otherResponse, err := h.cm.SampleSignedFrontier(context.Background(), otherRequest)
+	require.NoError(t, err)
+	require.NoError(t, other.Add(otherResponse.CanonicalBytes()).Err)
+	require.NotEqual(t, before.AcquisitionBinding(), other.Snapshot().Candidate().AcquisitionBinding())
+	trustBytes, err := types.Cbor.Marshal(h.trust)
+	require.NoError(t, err)
+	var otherTrust types.RootTrustBaseV1
+	require.NoError(t, types.Cbor.Unmarshal(trustBytes, &otherTrust))
+	otherSigner, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	otherVerifier, err := otherSigner.Verifier()
+	require.NoError(t, err)
+	otherTrust.RootNodes[0].SigKey, err = otherVerifier.MarshalPublicKey()
+	require.NoError(t, err)
+	otherProfile := frontierclient.Profile{TrustBase: &otherTrust, NetworkID: request.NetworkID, PartitionID: request.PartitionID, ShardID: request.ShardID, FullShardConfHash: request.FullShardConfHash, RootEpoch: request.RootEpoch, GenesisOriginIdentity: request.GenesisOriginIdentity, Nonce: request.Nonce}
+	otherPremise, err := frontierclient.NewCollector(otherProfile)
+	require.NoError(t, err)
+	require.NotEqual(t, c.AcquisitionBinding(), otherPremise.AcquisitionBinding())
+
+	nonCanonical := append([]byte(nil), raw...)
+	require.GreaterOrEqual(t, len(nonCanonical), 2)
+	// The reply is a five-element array followed by minimally encoded version 1.
+	require.Equal(t, byte(1), nonCanonical[1])
+	nonCanonical = append(nonCanonical[:1], append([]byte{0x18, 0x01}, nonCanonical[2:]...)...)
+	require.ErrorIs(t, newCollector(request.Nonce).Add(nonCanonical).Err, frontierclient.ErrMalformed)
+	require.ErrorIs(t, newCollector(request.Nonce).Add(append(raw, 0)).Err, frontierclient.ErrMalformed)
+	oversizedPair, err := types.Cbor.Marshal(frontiercodec.Reply{Version: 1, Author: "root", Pair: make([]byte, frontiercodec.MaxPart+1)})
+	require.NoError(t, err)
+	hostile := map[string][]byte{
+		"duplicate map key": {0xa2, 0x01, 0x01, 0x01, 0x02},
+		"indefinite array":  {0x9f, 0x01, 0xff},
+		"excessive depth":   append(bytes.Repeat([]byte{0x81}, 33), 0x01),
+		"oversized pair":    oversizedPair,
+	}
+	for name, input := range hostile {
+		t.Run(name, func(t *testing.T) {
+			require.ErrorIs(t, newCollector(request.Nonce).Add(input).Err, frontierclient.ErrMalformed)
+		})
+	}
+
+	large := make([]byte, frontiercodec.MaxReply-int(c.Snapshot().UsedBytes()))
+	require.ErrorIs(t, c.Add(large).Err, frontierclient.ErrMalformed)
+	require.ErrorIs(t, c.Add([]byte{0xff}).Err, frontierclient.ErrBudget)
+	snapshot := c.Snapshot()
+	require.True(t, snapshot.Exhausted())
+	require.Equal(t, uint64(frontiercodec.MaxReply), snapshot.UsedBytes())
+	require.False(t, snapshot.Candidate().Valid())
+	// Previously obtained snapshots are diagnostic only and remain immutable.
+	require.True(t, before.Valid())
+	mutated := before.CanonicalPair()
+	mutated[0] ^= 0xff
+	require.NotEqual(t, mutated, before.CanonicalPair())
+}
+
+func TestFrontierClientRetainsOrdinaryDespiteInvalidOuterAndExtraSealSignature(t *testing.T) {
+	h := newFrontierHarnessWithSigner(t, nil, true)
+	h.start(t)
+	request := signedRequest(t, h, 0x79)
+	si, err := h.cm.ShardInfo(partitionID, shardID)
+	require.NoError(t, err)
+	require.NoError(t, h.cm.RequestCertification(context.Background(), IRChangeRequest{Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, h.shardNodes, si.LastCR)}))
+	h.commitRoundTwo(t)
+	ordinary, err := h.cm.SampleSignedFrontier(context.Background(), request)
+	require.NoError(t, err)
+	c, err := frontierclient.NewCollector(frontierclient.Profile{TrustBase: h.trust, NetworkID: request.NetworkID, PartitionID: request.PartitionID, ShardID: request.ShardID, FullShardConfHash: request.FullShardConfHash, RootEpoch: request.RootEpoch, GenesisOriginIdentity: request.GenesisOriginIdentity, Nonce: request.Nonce})
+	require.NoError(t, err)
+	wire := decodeSignedReply(t, ordinary)
+	var pair frontierCanonicalPair
+	require.NoError(t, types.Cbor.Unmarshal(wire.Pair, &pair))
+	require.Greater(t, pair.UC.InputRecord.RoundNumber, uint64(0))
+	pair.UC.UnicitySeal.Signatures["unknown-root"] = bytes.Repeat([]byte{0x44}, 65)
+	wire.Pair, err = types.Cbor.Marshal(pair)
+	require.NoError(t, err)
+	wire.QC = nil
+	wire.Signature = nil // Negative evidence is independent of positive-only outer fields.
+	altered, err := types.Cbor.Marshal(wire)
+	require.NoError(t, err)
+	result := c.Add(altered)
+	require.Equal(t, frontierclient.OrdinaryObserved, result.Status)
+	require.NoError(t, result.Err)
+	snapshot := c.Snapshot()
+	require.True(t, snapshot.Ordinary())
+	require.True(t, snapshot.FirstOrdinary().Valid())
+	require.True(t, snapshot.LatestOrdinaryArrival().Valid())
+	require.False(t, snapshot.Candidate().Valid())
+	require.Equal(t, snapshot.FirstOrdinary().AcquisitionBinding(), snapshot.LatestOrdinaryArrival().AcquisitionBinding())
+
+	// A separately authenticated but unsupported root epoch is retained in its
+	// own slot and does not overwrite the usable ordinary observation.
+	pair.UC.UnicitySeal.Epoch++
+	pair.UC.UnicitySeal.Signatures = nil
+	require.NoError(t, pair.UC.UnicitySeal.Sign(h.author, h.rootSigner))
+	wire.Pair, err = types.Cbor.Marshal(pair)
+	require.NoError(t, err)
+	unsupportedRaw, err := types.Cbor.Marshal(wire)
+	require.NoError(t, err)
+	unsupported := c.Add(unsupportedRaw)
+	require.Equal(t, frontierclient.UnsupportedObserved, unsupported.Status)
+	require.ErrorIs(t, unsupported.Err, frontierclient.ErrUnsupported)
+	after := c.Snapshot()
+	require.True(t, after.Ordinary())
+	require.True(t, after.Unsupported())
+	require.Equal(t, snapshot.FirstOrdinary().CanonicalPair(), after.FirstOrdinary().CanonicalPair())
+}
+
+func TestFrontierClientRejectsInvalidOuterAndQCWithoutCounting(t *testing.T) {
+	h := newFrontierHarnessWithSigner(t, nil, true)
+	h.start(t)
+	h.commitRoundTwo(t)
+	request := signedRequest(t, h, 0x7d)
+	response, err := h.cm.SampleSignedFrontier(context.Background(), request)
+	require.NoError(t, err)
+	base := decodeSignedReply(t, response)
+	profile := frontierclient.Profile{TrustBase: h.trust, NetworkID: request.NetworkID, PartitionID: request.PartitionID, ShardID: request.ShardID, FullShardConfHash: request.FullShardConfHash, RootEpoch: request.RootEpoch, GenesisOriginIdentity: request.GenesisOriginIdentity, Nonce: request.Nonce}
+	newCollector := func() *frontierclient.Collector {
+		c, newErr := frontierclient.NewCollector(profile)
+		require.NoError(t, newErr)
+		return c
+	}
+	contextValue := frontiercodec.Context{NetworkID: request.NetworkID, PartitionID: request.PartitionID, CanonicalShardBytes: request.ShardID.Bytes(), FullShardConfHash: request.FullShardConfHash, RootEpoch: request.RootEpoch, GenesisOriginIdentity: request.GenesisOriginIdentity}
+	encode := func(wire frontierSignedReply, domain string) []byte {
+		var pair frontierCanonicalPair
+		require.NoError(t, types.Cbor.Unmarshal(wire.Pair, &pair))
+		pairID, identityErr := frontiercodec.PairIdentity(pair, contextValue)
+		require.NoError(t, identityErr)
+		digest := sha256.Sum256(wire.QC)
+		preimage, marshalErr := types.Cbor.Marshal(frontiercodec.SigningPreimage{Domain: domain, Version: frontiercodec.Version, Context: contextValue, Nonce: request.Nonce, Author: wire.Author, PairID: pairID[:], QCDigest: digest[:]})
+		require.NoError(t, marshalErr)
+		wire.Signature, marshalErr = h.rootSigner.SignBytes(preimage)
+		require.NoError(t, marshalErr)
+		raw, marshalErr := types.Cbor.Marshal(wire)
+		require.NoError(t, marshalErr)
+		return raw
+	}
+	mutateQC := func(mutate func(*drctypes.QuorumCert)) []byte {
+		wire := base
+		var qc drctypes.QuorumCert
+		require.NoError(t, types.Cbor.Unmarshal(wire.QC, &qc))
+		mutate(&qc)
+		voteHash, hashErr := qc.VoteInfo.Hash(crypto.SHA256)
+		require.NoError(t, hashErr)
+		qc.LedgerCommitInfo.PreviousHash = voteHash
+		qc.Signatures = nil
+		require.NoError(t, qc.LedgerCommitInfo.Sign(h.author, h.rootSigner))
+		qc.Signatures = qc.LedgerCommitInfo.Signatures
+		wire.QC, hashErr = types.Cbor.Marshal(qc)
+		require.NoError(t, hashErr)
+		return encode(wire, frontiercodec.SigningDomain)
+	}
+
+	badOuter := base
+	badOuter.Signature = bytes.Clone(base.Signature)
+	badOuter.Signature[0] ^= 1
+	badOuterRaw, err := types.Cbor.Marshal(badOuter)
+	require.NoError(t, err)
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{"outer signature", badOuterRaw},
+		{"wrong domain", encode(base, "wrong/frontier")},
+		{"qc network", mutateQC(func(qc *drctypes.QuorumCert) { qc.LedgerCommitInfo.NetworkID++ })},
+		{"qc root epoch", mutateQC(func(qc *drctypes.QuorumCert) { qc.LedgerCommitInfo.Epoch++ })},
+		{"qc non-commit", mutateQC(func(qc *drctypes.QuorumCert) { qc.LedgerCommitInfo.RootChainRoundNumber++ })},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCollector()
+			result := c.Add(tc.raw)
+			require.ErrorIs(t, result.Err, frontierclient.ErrUnauthentic)
+			require.False(t, c.Snapshot().Candidate().Valid())
+		})
+	}
+
+	unknownQC := base
+	var qc drctypes.QuorumCert
+	require.NoError(t, types.Cbor.Unmarshal(unknownQC.QC, &qc))
+	qc.Signatures["unknown-root"] = bytes.Repeat([]byte{0x33}, 65)
+	unknownQC.QC, err = types.Cbor.Marshal(qc)
+	require.NoError(t, err)
+	result := newCollector().Add(encode(unknownQC, frontiercodec.SigningDomain))
+	require.ErrorIs(t, result.Err, frontierclient.ErrUnauthentic)
 }

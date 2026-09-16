@@ -261,6 +261,15 @@ No old root speaks this new protocol; mixed deployments fail unavailable rather 
 freshness. No migration/cleanup of consensus safety state is permitted. Existing default root/shard behavior
 is unchanged by this design PR. Full #14/#167 remain incomplete; public activation remains a separate decision.
 
+The inert `frontierclient` stage now performs strict bounded decoding, independently authenticates negative
+ordinary/unsupported evidence, verifies eligible signed responses, and groups a fixed unit-weight root quorum
+by PairIdentity with the maximum observed QC vote-round floor. Its aggregate byte budget includes malformed,
+invalid, and duplicate replies without refunds. Returned candidates retain an immutable context-and-nonce
+acquisition binding and remain diagnostic evidence only; a later receipt handoff must re-read live collector
+state so an older snapshot cannot bypass subsequent ordinary evidence, unsupported evidence, or exhaustion.
+Network reads, cut membership verification, receipt construction, node integration, and activation remain
+separate work.
+
 The small [intersection model](models/bootstrap_frontier.py) enumerates unit-vote quorum/fault sets and
 checks the floor argument plus counterexamples for local-status/minimum-floor/rollback substitutions.
 It models assumptions, not real cryptography, consensus, weighted activation or execution. Required later

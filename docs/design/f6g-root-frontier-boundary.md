@@ -161,8 +161,12 @@ also verifies the returned signature against that pinned trust key. Cancellation
 rechecked before and after `SignBytes`; cancellation cannot abort cryptographic work already in progress,
 but no reply is published afterward. The signer receives an owned preimage and no caller can supply evidence
 to be signed. This API remains optional and has no registered transport or production caller. Transport
-admission/rate limits, remote reply/quorum verification, cut-proof serving/client verification and bootstrap
-activation remain later units.
+admission/rate limits, cut-proof serving/client verification and bootstrap activation remain later units.
+The separate inert `frontierclient` package now strictly verifies bounded canonical replies and groups a fixed
+unit-weight root quorum by PairIdentity. It preserves independently authenticated ordinary or unsupported
+evidence even when the outer response is ineligible, and its diagnostic candidate carries the verified
+context-and-nonce acquisition binding plus the maximum QC vote-round floor. It performs no I/O and grants no
+receipt, cut, or bootstrap authority.
 
 ## 5. Required deterministic evidence
 

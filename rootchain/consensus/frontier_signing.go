@@ -8,19 +8,19 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/internal/frontiercodec"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 const (
-	frontierSigningDomain = "root-bootstrap-admission/frontier"
-	frontierPairDomain    = "root-bootstrap-admission/pair"
-	frontierSigningV1     = uint64(1)
-	frontierMaxAuthor     = 256
-	frontierMaxSignature  = 256
-	frontierMaxSignedPart = 256 << 10
-	frontierMaxReply      = 1 << 20
+	frontierSigningDomain = frontiercodec.SigningDomain
+	frontierPairDomain    = frontiercodec.PairDomain
+	frontierSigningV1     = frontiercodec.Version
+	frontierMaxAuthor     = frontiercodec.MaxAuthor
+	frontierMaxSignature  = frontiercodec.MaxSignature
+	frontierMaxSignedPart = frontiercodec.MaxPart
+	frontierMaxReply      = frontiercodec.MaxReply
 )
 
 var ErrFrontierSigningDisabled = errors.New("root frontier signing is disabled")
@@ -48,51 +48,11 @@ func (r *SignedFrontierResponse) CanonicalBytes() []byte {
 	return bytes.Clone(r.wire)
 }
 
-type frontierSignedContext struct {
-	_                     struct{} `cbor:",toarray"`
-	NetworkID             types.NetworkID
-	PartitionID           types.PartitionID
-	CanonicalShardBytes   []byte
-	FullShardConfHash     []byte
-	RootEpoch             uint64
-	GenesisOriginIdentity []byte
-}
-
-type frontierCanonicalPair struct {
-	_  struct{} `cbor:",toarray"`
-	UC *types.UnicityCertificate
-	TR *certification.TechnicalRecord
-}
-
-type frontierPairIdentityTuple struct {
-	_            struct{} `cbor:",toarray"`
-	Domain       string
-	Version      uint64
-	InputRecord  []byte
-	SealSigBytes []byte
-	Technical    []byte
-	Context      frontierSignedContext
-}
-
-type frontierSigningPreimage struct {
-	_        struct{} `cbor:",toarray"`
-	Domain   string
-	Version  uint64
-	Context  frontierSignedContext
-	Nonce    []byte
-	Author   string
-	PairID   []byte
-	QCDigest []byte
-}
-
-type frontierSignedReply struct {
-	_         struct{} `cbor:",toarray"`
-	Version   uint64
-	Author    string
-	Pair      []byte
-	QC        []byte
-	Signature []byte
-}
+type frontierSignedContext = frontiercodec.Context
+type frontierCanonicalPair = frontiercodec.Pair
+type frontierPairIdentityTuple = frontiercodec.PairIdentityTuple
+type frontierSigningPreimage = frontiercodec.SigningPreimage
+type frontierSignedReply = frontiercodec.Reply
 
 type signedFrontierRequest struct {
 	context frontierSignedContext
@@ -230,27 +190,5 @@ func frontierSignState(callerCtx, managerCtx context.Context, s *frontierSampler
 }
 
 func frontierPairIdentity(pair frontierCanonicalPair, context frontierSignedContext) ([32]byte, error) {
-	if pair.UC == nil || pair.UC.InputRecord == nil || pair.UC.UnicitySeal == nil || pair.TR == nil {
-		return [32]byte{}, errors.New("incomplete pair")
-	}
-	ir, err := pair.UC.InputRecord.Bytes()
-	if err != nil {
-		return [32]byte{}, err
-	}
-	seal, err := pair.UC.UnicitySeal.SigBytes()
-	if err != nil {
-		return [32]byte{}, err
-	}
-	tr, err := types.Cbor.Marshal(pair.TR)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	if len(ir) > frontierMaxSignedPart || len(seal) > frontierMaxSignedPart || len(tr) > frontierMaxSignedPart {
-		return [32]byte{}, errors.New("pair identity component exceeds bounds")
-	}
-	b, err := types.Cbor.Marshal(frontierPairIdentityTuple{Domain: frontierPairDomain, Version: frontierSigningV1, InputRecord: ir, SealSigBytes: seal, Technical: tr, Context: context})
-	if err != nil || len(b) > frontierMaxReply {
-		return [32]byte{}, errors.New("pair identity encoding exceeds bounds")
-	}
-	return sha256.Sum256(b), nil
+	return frontiercodec.PairIdentity(pair, context)
 }
