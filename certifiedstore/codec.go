@@ -40,6 +40,13 @@ func VerifyEncodedRecord(ctx context.Context, c Context, raw []byte) (Loaded, er
 		return Loaded{}, fmt.Errorf("%w: record is %d bytes, bound 1..%d", ErrRecordUntrusted, len(raw), MaxRecordBytes)
 	}
 	raw = bytes.Clone(raw)
+	var bounded envelope
+	if err := embeddedRecordDec.Unmarshal(raw, &bounded); err != nil {
+		return Loaded{}, fmt.Errorf("%w: envelope bounds: %v", ErrRecordUntrusted, err)
+	}
+	if err := embeddedRecordDec.Valid(bounded.Payload); err != nil {
+		return Loaded{}, fmt.Errorf("%w: payload bounds: %v", ErrRecordUntrusted, err)
+	}
 	sr, err := decodeRecord(raw)
 	if err != nil {
 		return Loaded{}, err
