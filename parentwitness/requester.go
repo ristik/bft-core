@@ -91,7 +91,6 @@ type Requester struct {
 	closed    bool
 	active    *requesterEpisode
 	nextTry   time.Time
-	last      RequesterResult
 	closeDone chan struct{}
 	closeOnce sync.Once
 }
@@ -121,8 +120,10 @@ func NewRequester(parent context.Context, cfg RequesterConfig) (*Requester, erro
 	return &Requester{opener: cfg.Opener, providers: providers, budget: cfg.Budget, ctx: ctx, cancel: cancel, closeDone: make(chan struct{})}, nil
 }
 
-// Request runs one bounded episode. Calls for the same target coalesce. A changed target
-// supersedes the current episode and starts the explicitly requested target after cancellation.
+// Request runs one bounded episode. The first caller owns episode cancellation; later callers
+// waiting on the same target may cancel only their own wait. Calls for the same target coalesce.
+// A changed target supersedes the current episode and requires an explicit new request after
+// cancellation and backoff; no pending automatic restart is performed.
 func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult, error) {
 	if ctx == nil || !target.Valid() {
 		return RequesterResult{}, ErrContext
@@ -140,7 +141,7 @@ func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult
 				r.mu.Unlock()
 				select {
 				case <-done:
-					return cloneRequesterResult(ep.result), nil
+					return ep.result, nil
 				case <-ctx.Done():
 					return RequesterResult{Outcome: RequesterStopped, Detail: ctx.Err().Error()}, ctx.Err()
 				}
@@ -185,11 +186,10 @@ func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult
 				res = RequesterResult{Outcome: RequesterStopped, Attempts: res.Attempts, Providers: res.Providers, Downloaded: res.Downloaded, Detail: "requester stopped"}
 			}
 		}
-		ep.result = cloneRequesterResult(res)
+		ep.result = res
 		if res.Outcome != RequesterVerified {
 			r.nextTry = time.Now().Add(r.budget.Backoff)
 		}
-		r.last = ep.result
 		if r.active == ep {
 			r.active = nil
 		}
@@ -295,10 +295,4 @@ func (r *Requester) Close() {
 		<-ep.done
 	}
 	r.closeOnce.Do(func() { close(r.closeDone) })
-}
-
-func cloneRequesterResult(in RequesterResult) RequesterResult {
-	out := in
-	out.Response = in.Response
-	return out
 }
