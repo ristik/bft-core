@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -88,6 +90,25 @@ type BFTClient struct {
 	metrics        *Metrics // optional; nil-safe, see metrics.go
 	health         *Health  // optional; nil-safe, see health.go
 
+	admissionFactory     CertificateAdmissionFactory
+	admissionGate        FinalityBoundary
+	admissionSink        RoundDriver
+	admission            CertificateAdmission
+	admissionWake        chan struct{}
+	feedPending          *types.UnicityCertificate
+	feedPendingCount     uint8
+	feedHeld             *types.UnicityCertificate
+	feedHeldIdentity     [32]byte
+	configuredApplied    [32]byte
+	configuredFailed     [32]byte
+	hasConfiguredApplied bool
+	hasConfiguredFailed  bool
+	running              bool
+	seeded               bool
+	configuredStarted    bool
+	admissionEpoch       uint64
+	admissionEpochSet    bool
+
 	mu  sync.Mutex
 	luc *types.UnicityCertificate
 	// submittedSinceHandshake tracks whether this node has given the root chain a reason to renew
@@ -169,10 +190,18 @@ func NewBFTClient(
 // SeedLUC installs a previously-persisted last UC (see store.go) so a
 // restarted node's non-equivocation check and root-node selection have
 // somewhere to start from other than scratch. Call before Run.
-func (c *BFTClient) SeedLUC(uc *types.UnicityCertificate) {
+func (c *BFTClient) SeedLUC(uc *types.UnicityCertificate) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.running {
+		return ErrClientRunning
+	}
+	if c.admissionFactory != nil {
+		return fmt.Errorf("%w: legacy LUC seed after configured admission attachment", ErrAdmissionMode)
+	}
 	c.luc = uc
+	c.seeded = uc != nil
+	return nil
 }
 
 // SetDriver supplies the RoundDriver that processes accepted certificates.
@@ -182,10 +211,40 @@ func (c *BFTClient) SeedLUC(uc *types.UnicityCertificate) {
 // Round" are both partially circular; this breaks the cycle by letting
 // BFTClient exist (and be usable as a Submitter) before its driver is
 // finalized. See node.go for the wiring order this enables.
-func (c *BFTClient) SetDriver(driver RoundDriver) {
+func (c *BFTClient) SetDriver(driver RoundDriver) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.running {
+		return ErrClientRunning
+	}
+	if c.admissionFactory != nil {
+		return fmt.Errorf("%w: driver is frozen after configured admission attachment", ErrAdmissionMode)
+	}
 	c.driver = driver
+	return nil
+}
+
+// SetCertificateAdmission installs an optional pre-LUC admission boundary. It is intentionally
+// BFTClient-only: no production Node or CLI path selects it yet. The explicit sink is not the
+// legacy persisting driver and is invoked only for a durably admitted owned pair.
+func (c *BFTClient) SetCertificateAdmission(factory CertificateAdmissionFactory, gate FinalityBoundary, sink RoundDriver) error {
+	if factory == nil || gate == nil || sink == nil {
+		return fmt.Errorf("%w: factory, gate and sink are required", ErrAdmissionMode)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.running {
+		return ErrClientRunning
+	}
+	if c.seeded || c.luc != nil {
+		return fmt.Errorf("%w: legacy LUC was already seeded", ErrAdmissionMode)
+	}
+	if c.admissionFactory != nil {
+		return fmt.Errorf("%w: admission already attached", ErrAdmissionMode)
+	}
+	c.admissionFactory, c.admissionGate, c.admissionSink = factory, gate, sink
+	c.admissionWake = make(chan struct{}, 1)
+	return nil
 }
 
 // SetMetrics attaches an optional Metrics recorder.
@@ -207,10 +266,52 @@ func (c *BFTClient) SetHealth(h *Health) {
 // separate Stop; cancel ctx.
 func (c *BFTClient) Run(ctx context.Context) error {
 	c.mu.Lock()
+	if c.running {
+		c.mu.Unlock()
+		return ErrClientRunning
+	}
 	hasDriver := c.driver != nil
+	factory, gate := c.admissionFactory, c.admissionGate
+	if factory != nil && c.configuredStarted {
+		c.mu.Unlock()
+		return fmt.Errorf("%w: configured client Run is single-use", ErrAdmissionMode)
+	}
+	if factory != nil {
+		c.configuredStarted = true
+	}
+	c.running = true
 	c.mu.Unlock()
-	if !hasDriver {
+	defer func() {
+		c.mu.Lock()
+		c.running = false
+		c.mu.Unlock()
+	}()
+	if factory == nil && !hasDriver {
 		return errors.New("shardnode: no round driver configured — call SetDriver before Run")
+	}
+	if factory != nil {
+		identity, err := ownAdmissionIdentity(c.partitionID, c.shardID, c.shardConfHash, c.trustBaseStore)
+		if err != nil {
+			return err
+		}
+		admission, err := factory.Start(ctx, identity, gate, AdmissionCallbacks{AuthenticatedFeed: c.observeConfiguredFeed, DeliverDurable: c.deliverConfigured})
+		if err != nil {
+			return fmt.Errorf("starting configured certificate admission: %w", err)
+		}
+		if admission == nil {
+			return fmt.Errorf("starting configured certificate admission: nil admission")
+		}
+		c.mu.Lock()
+		c.admission = admission
+		c.admissionEpoch = admission.RootEpoch()
+		c.admissionEpochSet = true
+		c.mu.Unlock()
+		defer func() {
+			_ = admission.Close()
+			c.mu.Lock()
+			c.admission = nil
+			c.mu.Unlock()
+		}()
 	}
 
 	if err := c.sendHandshake(ctx); err != nil {
@@ -225,6 +326,16 @@ func (c *BFTClient) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-c.admissionWake:
+			c.mu.Lock()
+			uc := c.feedPending
+			count := c.feedPendingCount
+			c.feedPending = nil
+			c.feedPendingCount = 0
+			c.mu.Unlock()
+			if uc != nil {
+				c.renewSubscriptionIfIdle(ctx, uc, true, count)
+			}
 		case msg, ok := <-received:
 			if !ok {
 				return errors.New("shardnode: network received channel closed")
@@ -294,7 +405,7 @@ const (
 // Renewal tracks certified PROGRESS, which is what consumes the subscription's quota in the first
 // place; a node whose executor is failing still renews on every new certificate, so it does not
 // need to succeed at anything to keep its feed.
-func (c *BFTClient) renewSubscriptionIfIdle(ctx context.Context, uc *types.UnicityCertificate, newEvidence bool) {
+func (c *BFTClient) renewSubscriptionIfIdle(ctx context.Context, uc *types.UnicityCertificate, newEvidence bool, delivered uint8) {
 	if !newEvidence {
 		return
 	}
@@ -307,6 +418,11 @@ func (c *BFTClient) renewSubscriptionIfIdle(ctx context.Context, uc *types.Unici
 	c.mu.Lock()
 	submitted := c.submittedSinceHandshake
 	c.submittedSinceHandshake = false
+	// One submission credit covers one response. A coalesced wake represents several distinct
+	// authenticated responses, so it must renew even if one credit was pending.
+	if delivered > 1 {
+		submitted = false
+	}
 	alreadyRenewed := c.lastRenewedFor == this
 	backedOff := time.Now().Before(c.nextRenewalAllowed)
 	if !submitted && !alreadyRenewed && !backedOff {
@@ -343,7 +459,14 @@ func (c *BFTClient) sendHandshake(ctx context.Context) error {
 	c.mu.Unlock()
 
 	epoch := uint64(1)
-	if luc != nil {
+	c.mu.Lock()
+	configuredEpoch := c.admissionEpoch
+	configuredEpochSet := c.admissionEpochSet
+	c.mu.Unlock()
+	if configuredEpochSet {
+		epoch = configuredEpoch
+	}
+	if luc != nil && !configuredEpochSet {
 		epoch = luc.GetRootEpoch()
 	}
 	tb, err := c.trustBaseStore.GetByEpoch(ctx, epoch)
@@ -374,8 +497,171 @@ func (c *BFTClient) handleMessage(ctx context.Context, msg any) {
 	}
 }
 
+func configuredPairIdentity(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) ([32]byte, error) {
+	var zero [32]byte
+	if uc == nil || uc.InputRecord == nil || uc.UnicitySeal == nil || tr == nil {
+		return zero, errors.New("configured delivery pair is incomplete")
+	}
+	ir, err := uc.InputRecord.Bytes()
+	if err != nil {
+		return zero, err
+	}
+	seal, err := uc.UnicitySeal.SigBytes()
+	if err != nil {
+		return zero, err
+	}
+	tb, err := types.Cbor.Marshal(tr)
+	if err != nil {
+		return zero, err
+	}
+	h := sha256.New()
+	var n [8]byte
+	for _, part := range [][]byte{ir, seal, tb} {
+		binary.BigEndian.PutUint64(n[:], uint64(len(part)))
+		_, _ = h.Write(n[:])
+		_, _ = h.Write(part)
+	}
+	copy(zero[:], h.Sum(nil))
+	return zero, nil
+}
+
+func ownConfiguredPair(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (*types.UnicityCertificate, *certification.TechnicalRecord, error) {
+	ub, err := types.Cbor.Marshal(uc)
+	if err != nil {
+		return nil, nil, err
+	}
+	tb, err := types.Cbor.Marshal(tr)
+	if err != nil {
+		return nil, nil, err
+	}
+	var u types.UnicityCertificate
+	var t certification.TechnicalRecord
+	if err = types.Cbor.Unmarshal(ub, &u); err != nil {
+		return nil, nil, err
+	}
+	if err = types.Cbor.Unmarshal(tb, &t); err != nil {
+		return nil, nil, err
+	}
+	return &u, &t, nil
+}
+
+// observeConfiguredFeed is called only by the admission factory after bounded authentication.
+// It owns and coalesces progress, then wakes Run; it performs no network I/O in the callback.
+func (c *BFTClient) observeConfiguredFeed(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) {
+	u, _, err := ownConfiguredPair(uc, tr)
+	if err != nil {
+		return
+	}
+	id, err := configuredPairIdentity(uc, tr)
+	if err != nil {
+		return
+	}
+	c.mu.Lock()
+	progress := c.feedHeld == nil
+	if c.feedHeld != nil {
+		class, classErr := ClassifyUC(c.feedHeld, u)
+		progress = classErr == nil && (class == UCValid || class == UCRepeat)
+		if class == UCDuplicate && id != c.feedHeldIdentity {
+			progress = false
+		}
+	}
+	if progress {
+		c.feedHeld, c.feedHeldIdentity = u, id
+		c.feedPending = u
+		if c.feedPendingCount < ^uint8(0) {
+			c.feedPendingCount++
+		}
+		select {
+		case c.admissionWake <- struct{}{}:
+		default:
+		}
+	}
+	c.mu.Unlock()
+}
+
+// deliverConfigured is the sole configured-mode LUC adoption path. The coordinator calls it
+// only after durable commit and after releasing the finality gate.
+func (c *BFTClient) deliverConfigured(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
+	id, err := configuredPairIdentity(uc, tr)
+	if err != nil {
+		return err
+	}
+	cursor, _, err := ownConfiguredPair(uc, tr)
+	if err != nil {
+		return err
+	}
+	driverUC, driverTR, err := ownConfiguredPair(uc, tr)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	if c.hasConfiguredApplied && c.configuredApplied == id {
+		c.mu.Unlock()
+		return nil
+	}
+	retry := c.hasConfiguredFailed && c.configuredFailed == id
+	class, err := ClassifyUC(c.luc, cursor)
+	if err != nil {
+		c.mu.Unlock()
+		return fmt.Errorf("classifying durably admitted certificate: %w", err)
+	}
+	if class == UCDuplicate && !retry {
+		c.mu.Unlock()
+		return fmt.Errorf("%w: duplicate LUC has another full statement or technical record", ErrAdmissionMode)
+	}
+	if class == UCStale {
+		c.mu.Unlock()
+		return fmt.Errorf("%w: durable delivery regressed configured LUC", ErrAdmissionMode)
+	}
+	if class != UCDuplicate {
+		c.luc = cursor
+	}
+	sink := c.admissionSink
+	metrics, health := c.metrics, c.health
+	c.mu.Unlock()
+
+	health.updateCertificate(cursor.GetRoundNumber(), cursor.GetRootRoundNumber(), driverTR.Leader, c.nodeID)
+	err = sink.HandleCertificate(ctx, driverUC, driverTR)
+	c.mu.Lock()
+	switch {
+	case err == nil:
+		c.configuredApplied, c.hasConfiguredApplied = id, true
+		c.hasConfiguredFailed = false
+	case errors.Is(err, ErrSubmissionFailed):
+		c.configuredApplied, c.hasConfiguredApplied = id, true
+		c.hasConfiguredFailed = false
+		metrics.recordIRDivergence(ctx, "delivery_send_failed")
+	default:
+		c.configuredFailed, c.hasConfiguredFailed = id, true
+	}
+	c.mu.Unlock()
+	if errors.Is(err, ErrSubmissionFailed) {
+		if c.log != nil {
+			c.log.ErrorContext(ctx, "configured certificate applied but next request submission failed", slog.String("err", err.Error()))
+		}
+		return nil
+	}
+	return err
+}
+
 func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certification.CertificationResponse) error {
+	if cr == nil {
+		return errors.New("nil certification response")
+	}
 	c.lastCertResponseTime.Store(time.Now().UnixMilli())
+	c.mu.Lock()
+	admission := c.admission
+	c.mu.Unlock()
+	if admission != nil {
+		if cr.Partition != c.partitionID || !cr.Shard.Equal(c.shardID) {
+			return fmt.Errorf("certification response for wrong shard %s-%s", cr.Partition, cr.Shard)
+		}
+		return admission.Submit(ctx, &cr.UC, &cr.Technical)
+	}
 
 	if err := cr.IsValid(); err != nil {
 		return fmt.Errorf("invalid certification response: %w", err)
@@ -479,7 +765,7 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	// Renew before returning. Only a certificate carrying something this node had not already
 	// observed counts: a retry of one it has is not progress, and treating it as progress is what
 	// let a failing application drive a handshake loop.
-	c.renewSubscriptionIfIdle(ctx, &cr.UC, !retryOfFailedApply)
+	c.renewSubscriptionIfIdle(ctx, &cr.UC, !retryOfFailedApply, 1)
 
 	// Record whether this certificate was actually applied, separately from having been observed.
 	// This is the whole of the applied-versus-observed split at this layer: on failure the

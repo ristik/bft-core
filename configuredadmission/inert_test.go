@@ -1,4 +1,4 @@
-package configuredprogress_test
+package configuredadmission_test
 
 import (
 	"go/parser"
@@ -12,10 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNoProductionPackageImportsConfiguredProgress(t *testing.T) {
+func TestNoProductionPackageImportsConfiguredAdmission(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
-	const importPath = "github.com/unicitynetwork/bft-core/configuredprogress"
+	const importPath = "github.com/unicitynetwork/bft-core/configuredadmission"
 	var importers []string
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -31,7 +31,7 @@ func TestNoProductionPackageImportsConfiguredProgress(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		if strings.HasPrefix(rel, "configuredprogress"+string(filepath.Separator)) || rel == filepath.Join("configuredadmission", "adapter.go") {
+		if strings.HasPrefix(rel, "configuredadmission"+string(filepath.Separator)) {
 			return nil
 		}
 		f, e := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
@@ -46,5 +46,5 @@ func TestNoProductionPackageImportsConfiguredProgress(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	require.Empty(t, importers, "inactive configured-progress store must have no production importer")
+	require.Empty(t, importers, "inactive configured admission must have no production importer")
 }

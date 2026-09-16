@@ -36,14 +36,18 @@ type AdmissionGate interface {
 // AdmissionConfig creates an inactive persistence-before-delivery coordinator. Context trust
 // lookups, Gate and Deliver must honor cancellation. Invalidate is a short, synchronous,
 // non-reentrant notification of the coordinator's sticky internal refusal; it cannot grant
-// readiness. Deliver must be idempotent and must not synchronously call Close (the worker owns
-// delivery). No callback result grants freshness, continuity, execution or signing authority.
+// readiness. OnAuthenticated is an optional short, synchronous, non-reentrant notification made
+// after authentication and exact pair bounds, but before gated invalidation or persistence; its
+// opaque observation owns its evidence. Deliver must be idempotent and must not synchronously call
+// Close (the worker owns delivery). No callback result grants freshness, continuity, execution or
+// signing authority.
 type AdmissionConfig struct {
-	Store      *Store
-	Context    Context
-	Gate       AdmissionGate
-	Invalidate func()
-	Deliver    func(context.Context, rootinput.VerifiedObservationV2) error
+	Store           *Store
+	Context         Context
+	Gate            AdmissionGate
+	Invalidate      func()
+	Deliver         func(context.Context, rootinput.VerifiedObservationV2) error
+	OnAuthenticated func(rootinput.VerifiedObservationV2)
 }
 
 // AdmissionResult describes ingress handling, not persistence or readiness.
@@ -98,13 +102,14 @@ type admissionPolicy struct {
 // immutable pending first-ordinary pair and one replaceable newest pair. Episode deadlines
 // are cooperative: an operating-system-stalled syncing transaction cannot be forcibly canceled.
 type AdmissionCoordinator struct {
-	store      *Store
-	ctx        Context
-	gate       AdmissionGate
-	invalidate func()
-	deliver    func(context.Context, rootinput.VerifiedObservationV2) error
-	clock      admissionClock
-	policy     admissionPolicy
+	store           *Store
+	ctx             Context
+	gate            AdmissionGate
+	invalidate      func()
+	deliver         func(context.Context, rootinput.VerifiedObservationV2) error
+	onAuthenticated func(rootinput.VerifiedObservationV2)
+	clock           admissionClock
+	policy          admissionPolicy
 
 	ctxRun       context.Context
 	cancel       context.CancelFunc
@@ -144,7 +149,7 @@ func newAdmissionCoordinator(ctx context.Context, cfg AdmissionConfig, clock adm
 		return nil, err
 	}
 	run, cancel := context.WithCancel(ctx)
-	c := &AdmissionCoordinator{store: cfg.Store, ctx: owned, gate: cfg.Gate, invalidate: cfg.Invalidate, deliver: cfg.Deliver, clock: clock, policy: policy, ctxRun: run, cancel: cancel, done: make(chan struct{}), shutdownDone: make(chan struct{}), wake: make(chan struct{}, 1), auth: make(chan struct{}, 1)}
+	c := &AdmissionCoordinator{store: cfg.Store, ctx: owned, gate: cfg.Gate, invalidate: cfg.Invalidate, deliver: cfg.Deliver, onAuthenticated: cfg.OnAuthenticated, clock: clock, policy: policy, ctxRun: run, cancel: cancel, done: make(chan struct{}), shutdownDone: make(chan struct{}), wake: make(chan struct{}, 1), auth: make(chan struct{}, 1)}
 	if st.Ordinary() {
 		c.bootstrapInvalidated = true
 		c.firstKnown = true
@@ -196,9 +201,7 @@ func (c *AdmissionCoordinator) Submit(ctx context.Context, uc *types.UnicityCert
 		return 0, err
 	}
 	if o.Class() != evmroot.OriginBootstrapV2 {
-		if err = c.markInvalid(authCtx, false); err != nil {
-			return 0, err
-		}
+		c.latchInvalid(false)
 	} else if err = authCtx.Err(); err != nil {
 		return 0, err
 	}
@@ -207,6 +210,15 @@ func (c *AdmissionCoordinator) Submit(ctx context.Context, uc *types.UnicityCert
 			return 0, markErr
 		}
 		return AdmissionUnsupported, err
+	}
+	if c.onAuthenticated != nil {
+		c.onAuthenticated(o)
+	}
+	if o.Class() != evmroot.OriginBootstrapV2 {
+		if err = c.notifyInvalidation(authCtx); err != nil {
+			c.signal()
+			return 0, err
+		}
 	}
 	return c.queue(o)
 }
@@ -300,10 +312,7 @@ func checkAdmissionEvidenceBounds(uc *types.UnicityCertificate, tr *certificatio
 }
 
 func (c *AdmissionCoordinator) markInvalid(ctx context.Context, unsupported bool) error {
-	c.mu.Lock()
-	c.bootstrapInvalidated = true
-	c.unsupportedSeen = c.unsupportedSeen || unsupported
-	c.mu.Unlock()
+	c.latchInvalid(unsupported)
 	err := c.notifyInvalidation(ctx)
 	if err != nil {
 		c.signal()
@@ -311,17 +320,35 @@ func (c *AdmissionCoordinator) markInvalid(ctx context.Context, unsupported bool
 	return err
 }
 
+func (c *AdmissionCoordinator) latchInvalid(unsupported bool) {
+	c.mu.Lock()
+	c.bootstrapInvalidated = true
+	c.unsupportedSeen = c.unsupportedSeen || unsupported
+	c.mu.Unlock()
+}
+
 func (c *AdmissionCoordinator) notifyInvalidation(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	already := c.invalidationNotified
+	c.mu.Unlock()
+	if already {
+		return nil
+	}
 	return c.gate.WithinFinality(ctx, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		c.mu.Lock()
 		notify := !c.invalidationNotified
-		c.invalidationNotified = true
 		c.mu.Unlock()
 		if notify {
 			c.invalidate()
+			c.mu.Lock()
+			c.invalidationNotified = true
+			c.mu.Unlock()
 		}
 		return nil
 	})
