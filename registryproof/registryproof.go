@@ -322,8 +322,10 @@ type Snapshot struct {
 }
 
 type record struct {
-	f              Fields
-	evmGenesisHash common.Hash // the configured evmGenesisHash Verify compared the parent with
+	f                Fields
+	context          Context     // the complete immutable local context Verify used
+	evmGenesisHash   common.Hash // the configured evmGenesisHash Verify compared the parent with
+	headerParentHash common.Hash // decoded header.parentHash; distinct from f.ParentHash, the proof subject
 }
 
 // Fields returns a copy of the verified values. Fields holds only arrays, integers and booleans, so the
@@ -340,6 +342,24 @@ func (s Snapshot) Valid() bool { return s.r != nil }
 
 // ParentHash is the verified parent block hash.
 func (s Snapshot) ParentHash() common.Hash { return s.Fields().ParentHash }
+
+// HeaderParentHash is the verified subject header's decoded predecessor. ParentHash is the subject itself.
+func (s Snapshot) HeaderParentHash() common.Hash {
+	if s.r == nil {
+		return common.Hash{}
+	}
+	return s.r.headerParentHash
+}
+
+// VerifiedContext returns the complete local proof context under which Verify accepted the snapshot.
+// Matching proven storage values alone does not establish that two snapshots used the same code and
+// genesis pins.
+func (s Snapshot) VerifiedContext() Context {
+	if s.r == nil {
+		return Context{}
+	}
+	return s.r.context
+}
 
 // Number is the verified parent block number.
 func (s Snapshot) Number() uint64 { return s.Fields().Number }
@@ -539,7 +559,7 @@ func (l limits) verify(c Context, parentHash common.Hash, ev Evidence) (Snapshot
 			return Snapshot{}, fmt.Errorf("%w: outcomes round %d for authorized round %d", ErrNotFinalized, s.OutcomesRound, s.RoundAuthorized)
 		}
 	}
-	return Snapshot{r: &record{f: s, evmGenesisHash: c.EVMGenesisHash}}, nil
+	return Snapshot{r: &record{f: s, context: c, evmGenesisHash: c.EVMGenesisHash, headerParentHash: h.ParentHash}}, nil
 }
 
 func isGenesisField(i int) bool {
