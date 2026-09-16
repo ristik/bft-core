@@ -3,6 +3,7 @@ package registrygenesis
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"math"
 	"os"
@@ -334,4 +335,44 @@ func TestFundedGenesisFixture(t *testing.T) {
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	require.Equal(t, string(want), string(got))
+}
+
+func TestPinnedRethAgreesWithFundedGenesis(t *testing.T) {
+	raw, err := os.ReadFile("testdata/reth-funded-genesis-vector.json")
+	require.NoError(t, err)
+	var v struct {
+		Generator, ClientVersion                  string
+		InitGenesisHash, RPCBlock0Hash, StateRoot common.Hash
+		Header                                    string
+		Proof                                     json.RawMessage
+		Accounts                                  map[string]struct {
+			Balance, Nonce, Code string
+			Storage              map[string]string
+		}
+	}
+	require.NoError(t, json.Unmarshal(raw, &v))
+	require.Contains(t, v.Generator, "Commit SHA: 189c0df32617afc488e0f091dbface1bd72cceb4")
+	require.Contains(t, v.ClientVersion, "189c0df")
+	p := prepareFunded(t)
+	o := p.Origin()
+	require.Equal(t, o.BlockHash(), v.InitGenesisHash, "reth init")
+	require.Equal(t, o.BlockHash(), v.RPCBlock0Hash, "eth_getBlockByNumber(0)")
+	require.Equal(t, o.StateRoot(), v.StateRoot)
+	header, err := hex.DecodeString(strings.TrimPrefix(v.Header, "0x"))
+	require.NoError(t, err)
+	require.Equal(t, p.genesis.Header(), header, "debug_getRawHeader")
+	var proof registryproof.GetProofResult
+	require.NoError(t, json.Unmarshal(v.Proof, &proof))
+	evidence, err := registryproof.EvidenceFromGetProof(header, proof)
+	require.NoError(t, err)
+	_, err = registryproof.Verify(o.ProofContext(), o.BlockHash(), evidence)
+	require.NoError(t, err)
+	require.Equal(t, "0x123456789abcdef", v.Accounts[funded1].Balance)
+	require.Equal(t, "0x0", v.Accounts[funded1].Nonce)
+	require.Equal(t, "0x2a", v.Accounts[funded2].Balance)
+	require.Equal(t, "0x7", v.Accounts[funded2].Nonce)
+	require.Equal(t, "0x5", v.Accounts[contract1].Balance)
+	require.Equal(t, "0x3", v.Accounts[contract1].Nonce)
+	require.Equal(t, "0x6001600055", v.Accounts[contract1].Code)
+	require.Equal(t, common.HexToHash("0x2").Hex(), v.Accounts[contract1].Storage[common.HexToHash("0x1").Hex()])
 }
