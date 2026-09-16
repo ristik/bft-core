@@ -100,6 +100,7 @@ type Snapshot struct {
 	unsupportedFirst  PairEvidence
 	unsupportedLatest PairEvidence
 	candidate         Candidate
+	cut               VerifiedCut
 }
 
 func (s Snapshot) UsedBytes() uint64                      { return s.used }
@@ -111,6 +112,24 @@ func (s Snapshot) LatestOrdinaryArrival() PairEvidence    { return cloneEvidence
 func (s Snapshot) FirstUnsupported() PairEvidence         { return cloneEvidence(s.unsupportedFirst) }
 func (s Snapshot) LatestUnsupportedArrival() PairEvidence { return cloneEvidence(s.unsupportedLatest) }
 func (s Snapshot) Candidate() Candidate                   { return cloneCandidate(s.candidate) }
+func (s Snapshot) VerifiedCut() VerifiedCut               { return cloneVerifiedCut(s.cut) }
+
+// VerifiedCut is diagnostic proof evidence for the Collector's current live
+// candidate and acquisition binding. It is never a bootstrap receipt.
+type VerifiedCut struct {
+	raw     []byte
+	round   uint64
+	root    []byte
+	pairID  [32]byte
+	binding [32]byte
+}
+
+func (v VerifiedCut) Valid() bool                  { return len(v.raw) != 0 }
+func (v VerifiedCut) CanonicalBytes() []byte       { return bytes.Clone(v.raw) }
+func (v VerifiedCut) CommittedRound() uint64       { return v.round }
+func (v VerifiedCut) RootHash() []byte             { return bytes.Clone(v.root) }
+func (v VerifiedCut) PairIdentity() [32]byte       { return v.pairID }
+func (v VerifiedCut) AcquisitionBinding() [32]byte { return v.binding }
 
 type group struct {
 	pair    []byte
@@ -141,6 +160,7 @@ type Collector struct {
 	unsupportedLatest PairEvidence
 	candidate         Candidate
 	binding           [32]byte
+	cut               VerifiedCut
 }
 
 // AcquisitionBinding identifies the owned request and trust profile. It is
@@ -227,14 +247,9 @@ func (c *Collector) Add(raw []byte) AddResult {
 	if c == nil {
 		return AddResult{Err: ErrProfile}
 	}
-	n := uint64(len(raw))
-	if c.exhausted || n > maxAggregate-c.used {
-		c.exhausted = true
-		c.used = maxAggregate
-		c.candidate = Candidate{}
-		return AddResult{Err: ErrBudget}
+	if err := c.charge(raw); err != nil {
+		return AddResult{Err: err}
 	}
-	c.used += n
 	if len(raw) == 0 || len(raw) > frontiercodec.MaxReply {
 		return AddResult{Err: ErrMalformed}
 	}
@@ -303,7 +318,94 @@ func (c *Collector) Add(raw []byte) AddResult {
 		sort.Strings(authors)
 		c.candidate = Candidate{pair: bytes.Clone(g.pair), qc: bytes.Clone(g.qc), id: g.id, floor: g.floor, authors: authors, binding: c.binding}
 	}
+	c.cut = VerifiedCut{}
 	return AddResult{Status: Counted}
+}
+
+func (c *Collector) charge(raw []byte) error {
+	n := uint64(len(raw))
+	if c.exhausted || n > maxAggregate-c.used {
+		c.exhausted = true
+		c.used = maxAggregate
+		c.candidate = Candidate{}
+		c.cut = VerifiedCut{}
+		return ErrBudget
+	}
+	c.used += n
+	return nil
+}
+
+// AddCut verifies a canonical committed-root membership proof against the
+// Collector's current live candidate. The same aggregate byte budget covers
+// signed replies, malformed cuts, duplicates, and successful cuts.
+func (c *Collector) AddCut(raw []byte) (VerifiedCut, error) {
+	if c == nil {
+		return VerifiedCut{}, ErrProfile
+	}
+	if err := c.charge(raw); err != nil {
+		return VerifiedCut{}, err
+	}
+	if len(raw) == 0 || len(raw) > frontiercodec.MaxReply {
+		return VerifiedCut{}, ErrMalformed
+	}
+	var proof frontiercodec.CutProof
+	if err := strictDecode(raw, &proof, 9, false); err != nil || len(proof.AcquisitionBinding) > sha256.Size || len(proof.RootHash) > sha256.Size || len(proof.CommitQC) > frontiercodec.MaxPart || len(proof.Pair) == 0 || len(proof.Pair) > frontiercodec.MaxPart || len(proof.ShardCertificate) > frontiercodec.MaxPart || len(proof.UnicityCertificate) > frontiercodec.MaxPart {
+		return VerifiedCut{}, ErrMalformed
+	}
+	var pair frontiercodec.Pair
+	if err := strictDecode(proof.Pair, &pair, 2, true); err != nil {
+		return VerifiedCut{}, ErrMalformed
+	}
+	pairID, class, strictSeal, err := c.authenticatePair(pair)
+	if err != nil {
+		return VerifiedCut{}, err
+	}
+	if class != pairInitial {
+		c.retainNegative(PairEvidence{pair: bytes.Clone(proof.Pair), id: pairID, binding: c.binding}, class == pairOrdinary)
+		return VerifiedCut{}, ErrUnsupported
+	}
+	if c.exhausted || c.ordinary || c.unsupported || !c.candidate.Valid() {
+		return VerifiedCut{}, ErrUnsupported
+	}
+	if proof.Version != frontiercodec.Version || len(proof.AcquisitionBinding) != sha256.Size || len(proof.RootHash) != sha256.Size || proof.RootRound == 0 || proof.RootEpoch == 0 || len(proof.CommitQC) == 0 || len(proof.ShardCertificate) == 0 || len(proof.UnicityCertificate) == 0 {
+		return VerifiedCut{}, ErrMalformed
+	}
+	if strictSeal != nil || pairID != c.candidate.id {
+		return VerifiedCut{}, ErrUnauthentic
+	}
+	if !bytes.Equal(proof.AcquisitionBinding, c.binding[:]) || proof.RootEpoch != c.context.RootEpoch {
+		return VerifiedCut{}, ErrUnauthentic
+	}
+	var qc drctypes.QuorumCert
+	if err := strictDecode(proof.CommitQC, &qc, 3, true); err != nil {
+		return VerifiedCut{}, ErrMalformed
+	}
+	if err := c.verifyQC(&qc); err != nil || qc.LedgerCommitInfo.RootChainRoundNumber != proof.RootRound || qc.LedgerCommitInfo.Epoch != proof.RootEpoch || qc.LedgerCommitInfo.NetworkID != c.context.NetworkID || !bytes.Equal(qc.LedgerCommitInfo.Hash, proof.RootHash) || proof.RootRound < c.candidate.floor {
+		return VerifiedCut{}, ErrUnauthentic
+	}
+	var shardCert types.ShardTreeCertificate
+	if err := strictCanonicalDecode(proof.ShardCertificate, &shardCert, true); err != nil || shardCertificateBounds(shardCert) != nil || shardCert.IsValid(c.shard) != nil {
+		return VerifiedCut{}, ErrMalformed
+	}
+	var unicityCert types.UnicityTreeCertificate
+	if err := strictCanonicalDecode(proof.UnicityCertificate, &unicityCert, true); err != nil || unicityCertificateBounds(&unicityCert) != nil || unicityCert.IsValid(c.partition) != nil {
+		return VerifiedCut{}, ErrMalformed
+	}
+	trHash, err := pair.TR.Hash()
+	if err != nil || !bytes.Equal(trHash, pair.UC.TRHash) {
+		return VerifiedCut{}, ErrUnauthentic
+	}
+	shardRoot, err := shardCert.ComputeCertificateHash(pair.UC.InputRecord, trHash, c.conf, crypto.SHA256)
+	if err != nil {
+		return VerifiedCut{}, ErrUnauthentic
+	}
+	cutRoot, err := unicityCert.EvalAuthPath(shardRoot, crypto.SHA256)
+	if err != nil || !bytes.Equal(cutRoot, proof.RootHash) {
+		return VerifiedCut{}, ErrUnauthentic
+	}
+	v := VerifiedCut{raw: bytes.Clone(raw), round: proof.RootRound, root: bytes.Clone(proof.RootHash), pairID: pairID, binding: c.binding}
+	c.cut = cloneVerifiedCut(v)
+	return v, nil
 }
 
 type pairClass uint8
@@ -316,6 +418,9 @@ const (
 
 func (c *Collector) authenticatePair(pair frontiercodec.Pair) ([32]byte, pairClass, error, error) {
 	if pair.UC == nil || pair.TR == nil || pair.UC.InputRecord == nil || pair.UC.UnicitySeal == nil {
+		return [32]byte{}, 0, nil, ErrUnauthentic
+	}
+	if membershipBounds(pair.UC) != nil {
 		return [32]byte{}, 0, nil, ErrUnauthentic
 	}
 	if signatureBounds(pair.UC.UnicitySeal.Signatures) != nil {
@@ -367,6 +472,40 @@ func (c *Collector) authenticatePair(pair frontiercodec.Pair) ([32]byte, pairCla
 		return id, pairUnsupported, strict, nil
 	}
 	return id, pairOrdinary, strict, nil
+}
+
+func membershipBounds(uc *types.UnicityCertificate) error {
+	if uc == nil || uc.UnicityTreeCertificate == nil || len(uc.UnicityTreeCertificate.HashSteps) > 1024 || len(uc.ShardTreeCertificate.SiblingHashes) > 4096 {
+		return ErrUnauthentic
+	}
+	if unicityCertificateBounds(uc.UnicityTreeCertificate) != nil || shardCertificateBounds(uc.ShardTreeCertificate) != nil {
+		return ErrUnauthentic
+	}
+	return nil
+}
+
+func shardCertificateBounds(cert types.ShardTreeCertificate) error {
+	if len(cert.SiblingHashes) > 4096 {
+		return ErrMalformed
+	}
+	for _, hash := range cert.SiblingHashes {
+		if len(hash) != sha256.Size {
+			return ErrMalformed
+		}
+	}
+	return nil
+}
+
+func unicityCertificateBounds(cert *types.UnicityTreeCertificate) error {
+	if cert == nil || len(cert.HashSteps) > 1024 {
+		return ErrMalformed
+	}
+	for _, step := range cert.HashSteps {
+		if step == nil || len(step.Hash) != sha256.Size {
+			return ErrMalformed
+		}
+	}
+	return nil
 }
 
 func mustSealBytes(seal *types.UnicitySeal) []byte {
@@ -443,6 +582,7 @@ func (c *Collector) retainNegative(e PairEvidence, ordinary bool) {
 		c.unsupported = true
 	}
 	c.candidate = Candidate{}
+	c.cut = VerifiedCut{}
 }
 
 func (c *Collector) Snapshot() Snapshot {
@@ -452,6 +592,7 @@ func (c *Collector) Snapshot() Snapshot {
 	s := Snapshot{used: c.used, exhausted: c.exhausted, ordinary: c.ordinary, unsupported: c.unsupported, ordinaryFirst: cloneEvidence(c.ordinaryFirst), ordinaryLatest: cloneEvidence(c.ordinaryLatest), unsupportedFirst: cloneEvidence(c.unsupportedFirst), unsupportedLatest: cloneEvidence(c.unsupportedLatest)}
 	if !c.exhausted && !c.ordinary && !c.unsupported {
 		s.candidate = cloneCandidate(c.candidate)
+		s.cut = cloneVerifiedCut(c.cut)
 	}
 	return s
 }
@@ -462,6 +603,11 @@ func cloneCandidate(c Candidate) Candidate {
 	c.qc = bytes.Clone(c.qc)
 	c.authors = slices.Clone(c.authors)
 	return c
+}
+func cloneVerifiedCut(v VerifiedCut) VerifiedCut {
+	v.raw = bytes.Clone(v.raw)
+	v.root = bytes.Clone(v.root)
+	return v
 }
 
 func strictMode(tags cbor.TagsMode) cbor.DecMode {
@@ -485,6 +631,30 @@ func strictDecode(raw []byte, target any, expectedArray int, allowTags bool) err
 	arr, ok := generic.([]any)
 	if !ok || len(arr) != expectedArray {
 		return ErrMalformed
+	}
+	canonical, err := types.Cbor.Marshal(generic)
+	if err != nil || !bytes.Equal(canonical, raw) {
+		return ErrMalformed
+	}
+	if err := dm.Unmarshal(raw, target); err != nil {
+		return err
+	}
+	reencoded, err := types.Cbor.Marshal(target)
+	if err != nil || !bytes.Equal(reencoded, raw) {
+		return ErrMalformed
+	}
+	return nil
+}
+
+func strictCanonicalDecode(raw []byte, target any, allowTags bool) error {
+	tags := cbor.TagsForbidden
+	if allowTags {
+		tags = cbor.TagsAllowed
+	}
+	dm := strictMode(tags)
+	var generic any
+	if err := dm.Unmarshal(raw, &generic); err != nil {
+		return err
 	}
 	canonical, err := types.Cbor.Marshal(generic)
 	if err != nil || !bytes.Equal(canonical, raw) {
