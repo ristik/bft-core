@@ -14,6 +14,7 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/internal/frontiercodec"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -67,6 +68,27 @@ func (e PairEvidence) CanonicalPair() []byte        { return bytes.Clone(e.pair)
 func (e PairEvidence) Identity() [32]byte           { return e.id }
 func (e PairEvidence) Valid() bool                  { return len(e.pair) != 0 }
 func (e PairEvidence) AcquisitionBinding() [32]byte { return e.binding }
+
+// CertificateAndTechnical returns owned decoded evidence. Callers must still
+// authenticate it at their own authority boundary; this accessor grants none.
+func (e PairEvidence) CertificateAndTechnical() (*types.UnicityCertificate, *certification.TechnicalRecord, error) {
+	if !e.Valid() {
+		return nil, nil, ErrMalformed
+	}
+	var pair frontiercodec.Pair
+	if err := strictDecode(e.pair, &pair, 2, true); err != nil || pair.UC == nil || pair.TR == nil {
+		return nil, nil, ErrMalformed
+	}
+	b, err := types.Cbor.Marshal(pair)
+	if err != nil {
+		return nil, nil, err
+	}
+	var owned frontiercodec.Pair
+	if err = types.Cbor.Unmarshal(b, &owned); err != nil {
+		return nil, nil, err
+	}
+	return owned.UC, owned.TR, nil
+}
 
 // Candidate is quorum evidence that still requires an independently verified
 // committed cut at or above Floor. It is never a bootstrap receipt.
@@ -244,6 +266,20 @@ func NewCollector(p Profile) (*Collector, error) {
 }
 
 func (c *Collector) Add(raw []byte) AddResult {
+	return c.add(raw, "")
+}
+
+// AddFrom verifies that an eligible positive response author matches the
+// locally configured peer identity. Negative pair evidence remains retained
+// independently of outer author eligibility.
+func (c *Collector) AddFrom(raw []byte, expectedAuthor string) AddResult {
+	if expectedAuthor == "" {
+		return AddResult{Err: ErrProfile}
+	}
+	return c.add(raw, expectedAuthor)
+}
+
+func (c *Collector) add(raw []byte, expectedAuthor string) AddResult {
 	if c == nil {
 		return AddResult{Err: ErrProfile}
 	}
@@ -293,6 +329,9 @@ func (c *Collector) Add(raw []byte) AddResult {
 	}
 	verifier := c.verifiers[reply.Author]
 	if verifier == nil {
+		return AddResult{Err: ErrUnauthentic}
+	}
+	if expectedAuthor != "" && reply.Author != expectedAuthor {
 		return AddResult{Err: ErrUnauthentic}
 	}
 	qcDigest := sha256.Sum256(reply.QC)

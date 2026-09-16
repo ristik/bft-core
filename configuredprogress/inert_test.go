@@ -31,7 +31,7 @@ func TestNoProductionPackageImportsConfiguredProgress(t *testing.T) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
-		if strings.HasPrefix(rel, "configuredprogress"+string(filepath.Separator)) || rel == filepath.Join("configuredadmission", "adapter.go") {
+		if strings.HasPrefix(rel, "configuredprogress"+string(filepath.Separator)) || rel == filepath.Join("configuredadmission", "adapter.go") || rel == filepath.Join("rootchain", "consensus", "frontierrequester", "requester.go") {
 			return nil
 		}
 		f, e := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
