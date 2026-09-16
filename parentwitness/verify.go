@@ -87,12 +87,19 @@ func VerifyResponse(t Target, raw []byte) (VerifiedResponse, error) {
 	if r.Outcome != OutcomeFound {
 		return VerifiedResponse{valid: true, outcome: r.Outcome, detail: r.Detail}, nil
 	}
-	// decodeResponse has already bounded and owned every byte before proof verification begins.
-	snapshot, err := registryproof.Verify(t.registry, t.request.BlockHash, r.Evidence)
+	return verifyEvidence(t, r.Evidence, r.Detail)
+}
+
+func verifyEvidence(t Target, evidence registryproof.Evidence, detail string) (VerifiedResponse, error) {
+	owned, err := ownEvidence(evidence)
 	if err != nil {
 		return VerifiedResponse{}, err
 	}
-	return VerifiedResponse{valid: true, outcome: OutcomeFound, detail: r.Detail, snapshot: snapshot, evidence: r.Evidence}, nil
+	snapshot, err := registryproof.Verify(t.registry, t.request.BlockHash, owned)
+	if err != nil {
+		return VerifiedResponse{}, err
+	}
+	return VerifiedResponse{valid: true, outcome: OutcomeFound, detail: detail, snapshot: snapshot, evidence: owned}, nil
 }
 
 func cloneBoundedResponse(raw []byte) ([]byte, error) {

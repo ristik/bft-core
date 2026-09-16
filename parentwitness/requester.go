@@ -2,12 +2,14 @@ package parentwitness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/unicitynetwork/bft-core/registrywitness"
 )
 
 var (
@@ -48,20 +50,25 @@ func (b RequesterBudget) validate() error {
 type RequesterConfig struct {
 	Opener    StreamOpener
 	Providers []peer.ID
-	Budget    RequesterBudget
+	// LocalRPC, when set, is tried once before peers. That source attempt performs
+	// at most debug_getRawHeader and eth_getProof and shares every episode budget.
+	LocalRPC registrywitness.MeteredCaller
+	Budget   RequesterBudget
 }
 
 type RequesterResult struct {
-	Outcome    RequesterOutcome
-	Response   VerifiedResponse
-	Attempts   int
-	Providers  int
-	Downloaded int64
-	Detail     string
+	Outcome       RequesterOutcome
+	Response      VerifiedResponse
+	Attempts      int
+	LocalAttempts int
+	Providers     int
+	Downloaded    int64
+	Detail        string
 }
 
 type requesterEpisode struct {
 	target Target
+	owner  context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
 	result RequesterResult
@@ -83,6 +90,7 @@ func (e *requesterEpisode) markValue() RequesterOutcome {
 type Requester struct {
 	opener    StreamOpener
 	providers []peer.ID
+	localRPC  registrywitness.MeteredCaller
 	budget    RequesterBudget
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -96,7 +104,7 @@ type Requester struct {
 }
 
 func NewRequester(parent context.Context, cfg RequesterConfig) (*Requester, error) {
-	if parent == nil || cfg.Opener == nil || len(cfg.Providers) == 0 {
+	if parent == nil || (cfg.LocalRPC == nil && len(cfg.Providers) == 0) || (len(cfg.Providers) > 0 && cfg.Opener == nil) {
 		return nil, fmt.Errorf("%w: incomplete requester configuration", ErrTransport)
 	}
 	if err := cfg.Budget.validate(); err != nil {
@@ -117,7 +125,7 @@ func NewRequester(parent context.Context, cfg RequesterConfig) (*Requester, erro
 		seen[p] = struct{}{}
 	}
 	ctx, cancel := context.WithCancel(parent)
-	return &Requester{opener: cfg.Opener, providers: providers, budget: cfg.Budget, ctx: ctx, cancel: cancel, closeDone: make(chan struct{})}, nil
+	return &Requester{opener: cfg.Opener, providers: providers, localRPC: cfg.LocalRPC, budget: cfg.Budget, ctx: ctx, cancel: cancel, closeDone: make(chan struct{})}, nil
 }
 
 // Request runs one bounded episode. The first caller owns episode cancellation; later callers
@@ -172,7 +180,7 @@ func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult
 			r.mu.Unlock()
 			return RequesterResult{Outcome: RequesterBudgetExhausted, Detail: ErrRequesterBackoff.Error()}, ErrRequesterBackoff
 		}
-		epctx, cancel := context.WithCancel(ctx)
+		epctx, cancel := context.WithTimeout(ctx, r.budget.Overall)
 		watchStop := make(chan struct{})
 		watchDone := make(chan struct{})
 		go func() {
@@ -183,18 +191,20 @@ func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult
 			case <-watchStop:
 			}
 		}()
-		ep := &requesterEpisode{target: target, cancel: cancel, done: make(chan struct{})}
+		ep := &requesterEpisode{target: target, owner: ctx, cancel: cancel, done: make(chan struct{})}
 		r.active = ep
 		r.mu.Unlock()
 		res := r.run(epctx, ep)
 		close(watchStop)
 		<-watchDone
 		r.mu.Lock()
-		if res.Outcome == RequesterVerified && (ep.markValue() != RequesterVerified || epctx.Err() != nil || r.ctx.Err() != nil || r.closed || r.active != ep) {
+		if res.Outcome == RequesterVerified && (ep.markValue() != RequesterVerified || contextResult(epctx) != nil || r.ctx.Err() != nil || r.closed || r.active != ep) {
 			if ep.markValue() == RequesterSuperseded {
-				res = RequesterResult{Outcome: RequesterSuperseded, Attempts: res.Attempts, Providers: res.Providers, Downloaded: res.Downloaded, Detail: "target superseded"}
+				res = RequesterResult{Outcome: RequesterSuperseded, Attempts: res.Attempts, LocalAttempts: res.LocalAttempts, Providers: res.Providers, Downloaded: res.Downloaded, Detail: "target superseded"}
+			} else if ep.owner.Err() == nil && r.ctx.Err() == nil && errors.Is(contextResult(epctx), context.DeadlineExceeded) {
+				res = RequesterResult{Outcome: RequesterBudgetExhausted, Attempts: res.Attempts, LocalAttempts: res.LocalAttempts, Providers: res.Providers, Downloaded: res.Downloaded, Detail: "overall deadline"}
 			} else {
-				res = RequesterResult{Outcome: RequesterStopped, Attempts: res.Attempts, Providers: res.Providers, Downloaded: res.Downloaded, Detail: "requester stopped"}
+				res = RequesterResult{Outcome: RequesterStopped, Attempts: res.Attempts, LocalAttempts: res.LocalAttempts, Providers: res.Providers, Downloaded: res.Downloaded, Detail: "requester stopped"}
 			}
 		}
 		ep.result = res
@@ -212,9 +222,57 @@ func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult
 }
 
 func (r *Requester) run(ctx context.Context, ep *requesterEpisode) RequesterResult {
-	started := time.Now()
-	deadline := started.Add(r.budget.Overall)
+	deadline, _ := ctx.Deadline()
 	var out RequesterResult
+	if r.localRPC != nil {
+		if out.Attempts >= r.budget.MaxAttempts {
+			return budgetResult(out, "attempt limit")
+		}
+		remaining, ok := r.attemptRemaining(deadline, out.Downloaded)
+		if !ok {
+			return budgetResult(out, budgetDetail(deadline, out.Downloaded, r.budget.MaxDownloadedBytes))
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, remaining)
+		meter := &localRPCMeter{rpc: r.localRPC, left: r.budget.MaxDownloadedBytes - out.Downloaded}
+		witness, err := registrywitness.Acquire(attemptCtx, meter, ep.target.registry, ep.target.request.BlockHash)
+		out.Attempts++
+		out.LocalAttempts++
+		out.Downloaded += meter.downloaded
+		if err == nil {
+			resp, verifyErr := verifyEvidence(ep.target, witness.Evidence(), "verified from local execution RPC")
+			attemptErr := contextResult(attemptCtx)
+			if verifyErr == nil && attemptErr == nil {
+				cancel()
+				out.Outcome, out.Response, out.Detail = RequesterVerified, resp, "verified"
+				return out
+			}
+			if verifyErr != nil {
+				err = verifyErr
+			} else {
+				err = attemptErr
+			}
+		}
+		attemptErr := contextResult(attemptCtx)
+		cancel()
+		if attemptErr != nil || ctx.Err() != nil || r.ctx.Err() != nil {
+			if episodeBudgetExpired(ep, r.ctx, deadline) {
+				return budgetResult(out, "overall deadline")
+			}
+			if ctx.Err() != nil || r.ctx.Err() != nil || errors.Is(attemptErr, context.Canceled) {
+				return stoppedResult(ep, out, firstError(ctx.Err(), r.ctx.Err(), attemptErr))
+			}
+			if !time.Now().Before(deadline) {
+				return budgetResult(out, "overall deadline")
+			}
+			out.Outcome, out.Detail = RequesterUnavailable, err.Error()
+		} else if errors.Is(err, registrywitness.ErrResponseBytes) || out.Downloaded >= r.budget.MaxDownloadedBytes {
+			return budgetResult(out, ErrDownloadedBytes.Error())
+		} else if errors.Is(err, registrywitness.ErrUnavailable) {
+			out.Outcome, out.Detail = RequesterUnavailable, err.Error()
+		} else {
+			out.Outcome, out.Detail = RequesterInvalid, err.Error()
+		}
+	}
 	for i, p := range r.providers {
 		if i >= r.budget.MaxProviders || out.Attempts >= r.budget.MaxAttempts {
 			out.Outcome = RequesterBudgetExhausted
@@ -222,6 +280,9 @@ func (r *Requester) run(ctx context.Context, ep *requesterEpisode) RequesterResu
 			return out
 		}
 		if err := ctx.Err(); err != nil {
+			if episodeBudgetExpired(ep, r.ctx, deadline) {
+				return budgetResult(out, "overall deadline")
+			}
 			return stoppedResult(ep, out, err)
 		}
 		if err := r.ctx.Err(); err != nil {
@@ -281,6 +342,69 @@ func (r *Requester) run(ctx context.Context, ep *requesterEpisode) RequesterResu
 		out.Outcome, out.Detail = RequesterBudgetExhausted, "provider budget exhausted"
 	}
 	return out
+}
+
+func episodeBudgetExpired(ep *requesterEpisode, requesterCtx context.Context, deadline time.Time) bool {
+	return ep.markValue() != RequesterSuperseded && ep.owner.Err() == nil && requesterCtx.Err() == nil && !time.Now().Before(deadline)
+}
+
+func (r *Requester) attemptRemaining(deadline time.Time, downloaded int64) (time.Duration, bool) {
+	if downloaded >= r.budget.MaxDownloadedBytes {
+		return 0, false
+	}
+	remaining := time.Until(deadline)
+	if remaining > r.budget.PerAttempt {
+		remaining = r.budget.PerAttempt
+	}
+	return remaining, remaining > 0
+}
+
+func budgetDetail(deadline time.Time, downloaded, max int64) string {
+	if downloaded >= max {
+		return ErrDownloadedBytes.Error()
+	}
+	if !time.Now().Before(deadline) {
+		return "overall deadline"
+	}
+	return "attempt limit"
+}
+
+func budgetResult(out RequesterResult, detail string) RequesterResult {
+	out.Outcome, out.Detail = RequesterBudgetExhausted, detail
+	return out
+}
+
+func firstError(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return context.Canceled
+}
+
+type localRPCMeter struct {
+	rpc        registrywitness.MeteredCaller
+	left       int64
+	downloaded int64
+	calls      int
+}
+
+func (m *localRPCMeter) Call(ctx context.Context, method string, params []any) (json.RawMessage, error) {
+	if m.calls >= 2 || m.left <= 0 {
+		return nil, registrywitness.ErrResponseBytes
+	}
+	m.calls++
+	result, downloaded, err := m.rpc.CallMetered(ctx, method, params, m.left)
+	if downloaded < 0 || downloaded > m.left {
+		return nil, registrywitness.ErrResponseBytes
+	}
+	m.downloaded += downloaded
+	m.left -= downloaded
+	if err == nil && (len(result) > registrywitness.MaxResponseBytes || int64(len(result)) > downloaded) {
+		return nil, fmt.Errorf("%w: local RPC returned unmetered result", registrywitness.ErrInvalid)
+	}
+	return result, err
 }
 
 func stoppedResult(ep *requesterEpisode, out RequesterResult, err error) RequesterResult {

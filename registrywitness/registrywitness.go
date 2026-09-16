@@ -47,6 +47,8 @@ var (
 	// ErrInvalid is a response that is not acceptable evidence. The registryproof refusal, when there is
 	// one, is wrapped as well.
 	ErrInvalid = errors.New("registrywitness: evidence invalid")
+	// ErrResponseBytes reports that a caller's finite response-body budget was exhausted.
+	ErrResponseBytes = errors.New("registrywitness: response body byte budget exhausted")
 )
 
 // RPCError is a JSON-RPC error object returned by the client.
@@ -61,6 +63,14 @@ func (e *RPCError) Error() string { return fmt.Sprintf("JSON-RPC error %d: %s", 
 // ErrInvalid for a response that is not a JSON-RPC result, and any other error for transport failure.
 type Caller interface {
 	Call(ctx context.Context, method string, params []any) (json.RawMessage, error)
+}
+
+// MeteredCaller is the bounded form used when several exact-block RPC calls share a
+// larger acquisition budget. Downloaded counts raw HTTP response-body bytes, including
+// error, malformed, partial and oversized bodies, before JSON decoding. Implementations
+// must honor ctx, issue no retries or redirects, and read no more than maxDownloadedBytes.
+type MeteredCaller interface {
+	CallMetered(ctx context.Context, method string, params []any, maxDownloadedBytes int64) (result json.RawMessage, downloaded int64, err error)
 }
 
 // MaxResponseBytes bounds one response body before it is decoded. registryproof's evidence bound is
@@ -173,31 +183,66 @@ func isJSONString(raw json.RawMessage) bool {
 }
 
 func (h *HTTPCaller) Call(ctx context.Context, method string, params []any) (json.RawMessage, error) {
+	result, _, err := h.call(ctx, method, params, MaxResponseBytes+1, false)
+	return result, err
+}
+
+// CallMetered performs one application call, follows no redirects, disables request-body
+// replay, and reads at most maxDownloadedBytes raw response-body bytes. It has no retry
+// loop; the context supplied by the acquisition owner is the call deadline.
+func (h *HTTPCaller) CallMetered(ctx context.Context, method string, params []any, maxDownloadedBytes int64) (json.RawMessage, int64, error) {
+	if maxDownloadedBytes <= 0 {
+		return nil, 0, ErrResponseBytes
+	}
+	return h.call(ctx, method, params, maxDownloadedBytes, true)
+}
+
+func (h *HTTPCaller) call(ctx context.Context, method string, params []any, limit int64, metered bool) (json.RawMessage, int64, error) {
 	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: requestID, Method: method, Params: params})
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.url, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := h.client.Do(req)
+	if metered {
+		// bytes.Reader gives requests GetBody automatically. Clearing it prevents the
+		// standard transports from replaying this POST after a reused-connection failure.
+		req.GetBody = nil
+	}
+	client := h.client
+	if metered {
+		bounded := *h.client
+		bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &bounded
+	}
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
+	readLimit := limit
+	if readLimit > MaxResponseBytes+1 {
+		readLimit = MaxResponseBytes + 1
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, readLimit))
+	downloaded := int64(len(raw))
 	if err != nil {
-		return nil, err
+		return nil, downloaded, err
+	}
+	if metered && downloaded == limit && (resp.ContentLength < 0 || resp.ContentLength > limit) {
+		return nil, downloaded, ErrResponseBytes
 	}
 	if len(raw) > MaxResponseBytes {
-		return nil, fmt.Errorf("%w: %s response exceeds %d bytes", ErrInvalid, method, MaxResponseBytes)
+		return nil, downloaded, fmt.Errorf("%w: %s response exceeds %d bytes", ErrInvalid, method, MaxResponseBytes)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s returned HTTP %d", method, resp.StatusCode)
+		return nil, downloaded, fmt.Errorf("%s returned HTTP %d", method, resp.StatusCode)
 	}
-	return decodeEnvelope(method, raw)
+	result, err := decodeEnvelope(method, raw)
+	return result, downloaded, err
 }
 
 // reth's JSON-RPC errors for a block it cannot serve: an unknown block is -32001 "block not found", and a
