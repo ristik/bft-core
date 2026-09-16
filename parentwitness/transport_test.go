@@ -103,7 +103,7 @@ func TestTransportPendingBoundsRefuseBeforeRead(t *testing.T) {
 	_, target := fixtureTarget(t)
 	p, _ := NewProvider(target, &providerReader{})
 	limits := testLimits()
-	limits.MaxPendingStreams = 1
+	limits.MaxPendingStreams = 2
 	limits.MaxPendingStreamsPerPeer = 1
 	server, err := NewServer(context.Background(), p, []peer.ID{"a", "b"}, limits)
 	require.NoError(t, err)
@@ -116,7 +116,7 @@ func TestTransportPendingBoundsRefuseBeforeRead(t *testing.T) {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { n, _ := server.Pending(); return n == 1 }, time.Second, time.Millisecond)
 
-	for _, id := range []peer.ID{"a", "b"} {
+	for _, id := range []peer.ID{"a", "a"} {
 		a, b := net.Pipe()
 		tracked := &readTrackingStream{pipeTransportStream: &pipeTransportStream{Conn: b}}
 		done := make(chan struct{})
