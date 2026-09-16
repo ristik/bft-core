@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/internal/frontiercodec"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -49,4 +50,9 @@ func TestFrontierSigningIndependentEncodingVector(t *testing.T) {
 	preimageCBOR, err := types.Cbor.Marshal(frontierSigningPreimage{Domain: frontierSigningDomain, Version: 1, Context: contextValue, Nonce: nonce, Author: "node-A", PairID: pairID[:], QCDigest: qcDigest[:]})
 	require.NoError(t, err)
 	expect("preimage_cbor", preimageCBOR)
+	cutCBOR, err := types.Cbor.Marshal(frontiercodec.CutProof{Version: 1, AcquisitionBinding: bytes.Repeat([]byte{0x44}, 32), RootRound: 7, RootEpoch: 1, RootHash: bytes.Repeat([]byte{0x55}, 32), CommitQC: []byte{0xaa, 0xbb}, Pair: []byte{1, 2, 3}, ShardCertificate: []byte{4, 5}, UnicityCertificate: []byte{6, 7}})
+	require.NoError(t, err)
+	expect("cut_proof_cbor", cutCBOR)
+	cutHash := sha256.Sum256(cutCBOR)
+	expect("cut_proof_sha256", cutHash[:])
 }

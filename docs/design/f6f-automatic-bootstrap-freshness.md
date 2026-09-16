@@ -267,8 +267,19 @@ by PairIdentity with the maximum observed QC vote-round floor. Its aggregate byt
 invalid, and duplicate replies without refunds. Returned candidates retain an immutable context-and-nonce
 acquisition binding and remain diagnostic evidence only; a later receipt handoff must re-read live collector
 state so an older snapshot cannot bypass subsequent ordinary evidence, unsupported evidence, or exhaustion.
-Network reads, cut membership verification, receipt construction, node integration, and activation remain
-separate work.
+Network reads, receipt construction, node integration, and activation remain separate work.
+
+The inert committed-cut stage now copies a bounded coherent committed shard snapshot, rebuilds the shard and
+unicity membership paths outside the storage lock, and refuses any mismatch with the stored block round,
+epoch, root hash, commit QC, actual LastCR, or leaf inputs. Its canonical proof tuple is
+`[1, acquisitionBinding, rootRound, rootEpoch, rootHash, canonicalCommitQC, canonicalPair,
+canonicalShardCertificate, canonicalUnicityCertificate]`, with the four signed/proof objects carried as byte
+strings. `frontierclient.Collector.AddCut` charges this input to the same live 1-MiB acquisition budget and
+accepts it only for the current non-invalidated candidate when the QC's **committed** round reaches the
+candidate floor and the candidate's unchanged IR/TR/config leaf verifies under that root. Ordinary or
+unsupported pair material is retained before positive cut fields are considered. The returned cut remains
+diagnostic evidence; old copies cannot bypass later collector invalidation. The independent encoding-only
+vector covers this tuple, while genuine root-loop tests cover the cryptographic membership path.
 
 The small [intersection model](models/bootstrap_frontier.py) enumerates unit-vote quorum/fault sets and
 checks the floor argument plus counterexamples for local-status/minimum-floor/rollback substitutions.

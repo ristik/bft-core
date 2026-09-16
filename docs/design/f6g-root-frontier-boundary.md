@@ -168,6 +168,13 @@ evidence even when the outer response is ineligible, and its diagnostic candidat
 context-and-nonce acquisition binding plus the maximum QC vote-round floor. It performs no I/O and grants no
 receipt, cut, or bootstrap authority.
 
+The committed-cut storage reader enumerates only a bounded committed shard set, copies IR/TR/config leaf
+inputs plus the selected actual LastCR and commit QC while holding the tree read lock, then regenerates the
+membership paths from owned data after releasing it. The client verifies that canonical proof against its
+live candidate and acquisition binding, using the QC committed round rather than its later vote round. This
+completes the inactive cryptographic cut construction/verification unit; no transport, receipt, runtime
+caller, freshness activation, or bootstrap behavior is added.
+
 ## 5. Required deterministic evidence
 
 | Boundary | Required assertion |

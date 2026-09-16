@@ -38,6 +38,7 @@ pair_id = hashlib.sha256(cbor(pair_tuple)).digest()
 qc = bytes.fromhex("aabb")
 preimage = ["root-bootstrap-admission/frontier", 1, context, nonce, "node-A", pair_id, hashlib.sha256(qc).digest()]
 request = [1, context, nonce]
+cut = [1, bytes([0x44]) * 32, 7, 1, bytes([0x55]) * 32, qc, bytes.fromhex("010203"), bytes.fromhex("0405"), bytes.fromhex("0607")]
 
 out = {
     "_note": "Encoding-only vector: IR, seal, TR, and QC bytes are opaque synthetic components, not valid certificates.",
@@ -46,5 +47,7 @@ out = {
     "pair_tuple_cbor": cbor(pair_tuple).hex(),
     "pair_identity": pair_id.hex(),
     "preimage_cbor": cbor(preimage).hex(),
+    "cut_proof_cbor": cbor(cut).hex(),
+    "cut_proof_sha256": hashlib.sha256(cbor(cut)).hexdigest(),
 }
 Path(__file__).with_name("frontier_signing_vectors.json").write_text(json.dumps(out, indent=2) + "\n")

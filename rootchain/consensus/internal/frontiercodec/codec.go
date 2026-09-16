@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -72,6 +73,55 @@ type Reply struct {
 	Pair      []byte
 	QC        []byte
 	Signature []byte
+}
+
+// CutProof carries canonical byte strings for the independently decoded
+// signed objects and authentication paths. It is evidence, not a receipt.
+type CutProof struct {
+	_                  struct{} `cbor:",toarray"`
+	Version            uint64
+	AcquisitionBinding []byte
+	RootRound          uint64
+	RootEpoch          uint64
+	RootHash           []byte
+	CommitQC           []byte
+	Pair               []byte
+	ShardCertificate   []byte
+	UnicityCertificate []byte
+}
+
+// EncodeCutProof canonically encodes owned cut material for an eventual
+// provider. It performs no authentication and grants no authority.
+func EncodeCutProof(binding [32]byte, rootRound, rootEpoch uint64, rootHash []byte, qc *rctypes.QuorumCert, pair Pair, shardCert types.ShardTreeCertificate, unicityCert *types.UnicityTreeCertificate) ([]byte, error) {
+	if rootRound == 0 || rootEpoch == 0 || len(rootHash) != sha256.Size || qc == nil || pair.UC == nil || pair.TR == nil || unicityCert == nil {
+		return nil, errors.New("incomplete cut proof material")
+	}
+	qcBytes, err := types.Cbor.Marshal(qc)
+	if err != nil {
+		return nil, err
+	}
+	pairBytes, err := types.Cbor.Marshal(pair)
+	if err != nil {
+		return nil, err
+	}
+	shardBytes, err := types.Cbor.Marshal(shardCert)
+	if err != nil {
+		return nil, err
+	}
+	unicityBytes, err := types.Cbor.Marshal(unicityCert)
+	if err != nil {
+		return nil, err
+	}
+	for _, part := range [][]byte{qcBytes, pairBytes, shardBytes, unicityBytes} {
+		if len(part) == 0 || len(part) > MaxPart {
+			return nil, errors.New("cut proof component exceeds bounds")
+		}
+	}
+	raw, err := types.Cbor.Marshal(CutProof{Version: Version, AcquisitionBinding: binding[:], RootRound: rootRound, RootEpoch: rootEpoch, RootHash: append([]byte(nil), rootHash...), CommitQC: qcBytes, Pair: pairBytes, ShardCertificate: shardBytes, UnicityCertificate: unicityBytes})
+	if err != nil || len(raw) > MaxReply {
+		return nil, errors.New("cut proof encoding exceeds bounds")
+	}
+	return raw, nil
 }
 
 // AcquisitionBinding identifies the request context and nonce under which

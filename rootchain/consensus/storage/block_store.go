@@ -198,6 +198,15 @@ func (x *BlockStore) ReadFrontierStorageView(partition types.PartitionID, shard 
 	return x.blockTree.ReadFrontierStorageView(partition, shard)
 }
 
+// ReadFrontierCutSnapshot returns owned raw data and freshly generated
+// membership paths for the current committed root.
+func (x *BlockStore) ReadFrontierCutSnapshot(partition types.PartitionID, shard types.ShardID) (*FrontierCutSnapshot, error) {
+	if x == nil || x.blockTree == nil {
+		return nil, fmt.Errorf("block store is unavailable")
+	}
+	return x.blockTree.ReadFrontierCutSnapshot(partition, shard)
+}
+
 func (x *BlockStore) GetLastTC() (*rctypes.TimeoutCert, error) {
 	return x.storage.ReadLastTC()
 }
