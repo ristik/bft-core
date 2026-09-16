@@ -95,13 +95,22 @@ func TestAdmissionAuthenticatesInvalidatesPersistsThenDelivers(t *testing.T) {
 	add := func(v string) { mu.Lock(); events = append(events, v); mu.Unlock() }
 	s.checkpoint = func(string) error { add("persist"); return nil }
 	c := newTestAdmission(t, f, s, &admissionGate{}, wallAdmissionClock{}, admissionPolicy{attempts: 3, duration: time.Second, cooldown: time.Hour}, func() { add("invalidate") }, func(context.Context, rootinput.VerifiedObservationV2) error { add("deliver"); return nil })
+	c.onAuthenticated = func(o rootinput.VerifiedObservationV2) {
+		require.True(t, c.Status().BootstrapInvalidated, "ordinary refusal is latched before the external hook")
+		copy := o.Certificate()
+		copy.InputRecord.Hash = []byte{0xff}
+		st, _, loadErr := s.Load(context.Background(), f.ctx)
+		require.NoError(t, loadErr)
+		require.Zero(t, st.Revision(), "authentication notification precedes persistence")
+		add("authenticated")
+	}
 	u, tr := f.sign(f.c.InputRecord(1), 2, 5)
 	result, err := c.Submit(context.Background(), u, tr)
 	require.NoError(t, err)
 	require.Equal(t, AdmissionQueued, result)
 	waitAdmission(t, func() bool { return !c.Status().PendingLatest && !c.Status().DeliveryPending })
 	mu.Lock()
-	require.Equal(t, []string{"invalidate", "persist", "deliver"}, events)
+	require.Equal(t, []string{"authenticated", "invalidate", "persist", "deliver"}, events)
 	mu.Unlock()
 	st, _, err := s.Load(context.Background(), f.ctx)
 	require.NoError(t, err)
@@ -397,6 +406,44 @@ func TestAdmissionRestartInvalidatesBeforeRecoveredOrdinaryDelivery(t *testing.T
 	mu.Lock()
 	require.Equal(t, []string{"invalidate", "deliver"}, events)
 	mu.Unlock()
+}
+
+func TestAdmissionRepeatedOrdinarySkipsCompletedInvalidationGate(t *testing.T) {
+	f := newFixture(t, 2)
+	s, _ := f.open(2)
+	defer s.Close()
+	_, _, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	gate := &admissionGate{}
+	c := newTestAdmission(t, f, s, gate, wallAdmissionClock{}, admissionPolicy{attempts: 3, duration: time.Second, cooldown: time.Hour}, func() {}, func(context.Context, rootinput.VerifiedObservationV2) error { return nil })
+	var authenticated atomic.Int32
+	c.onAuthenticated = func(rootinput.VerifiedObservationV2) { authenticated.Add(1) }
+	a := f.first(1, 2, 5)
+	_, err = c.Submit(context.Background(), a.Certificate(), a.TechnicalRecord())
+	require.NoError(t, err)
+	waitAdmission(t, func() bool { return !c.Status().PendingLatest && !c.Status().DeliveryPending })
+
+	gate.mu.Lock()
+	b := f.ordinary(2, 3, 6)
+	submitted := make(chan error, 1)
+	go func() {
+		_, submitErr := c.Submit(context.Background(), b.Certificate(), b.TechnicalRecord())
+		submitted <- submitErr
+	}()
+	select {
+	case err = <-submitted:
+		require.NoError(t, err, "completed invalidation notification must not wait for the gate again")
+	case <-time.After(2 * time.Second):
+		gate.mu.Unlock()
+		t.Fatal("repeated ordinary submission blocked on an already-completed invalidation")
+	}
+	require.Equal(t, int32(2), authenticated.Load())
+	st, _, err := s.Load(context.Background(), f.ctx)
+	require.NoError(t, err)
+	observed, ok := st.Observed()
+	require.True(t, ok)
+	require.True(t, sameObservation(observed, a), "B cannot adopt while its persistence commit is gate-blocked")
+	gate.mu.Unlock()
 }
 
 func TestAdmissionBoundsConcurrentAuthentication(t *testing.T) {
