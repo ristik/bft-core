@@ -264,10 +264,19 @@ func TestTransportLimitsAndBusyRate(t *testing.T) {
 	defer s.Close()
 	request := func() VerifiedResponse {
 		a, b := net.Pipe()
-		go s.handle(&pipeTransportStream{Conn: b}, "p")
+		handled := make(chan struct{})
+		go func() {
+			defer close(handled)
+			s.handle(&pipeTransportStream{Conn: b}, "p")
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		r, e := exchangeVerified(ctx, &pipeTransportStream{Conn: a}, target)
+		select {
+		case <-handled:
+		case <-time.After(time.Second):
+			t.Fatal("server handler did not finish")
+		}
 		require.NoError(t, e)
 		return r
 	}
