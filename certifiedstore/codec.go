@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -48,6 +49,19 @@ func VerifyEncodedRecord(ctx context.Context, c Context, raw []byte) (Loaded, er
 	}
 	if err = embeddedRecordDec.Valid(sr.Technical); err != nil {
 		return Loaded{}, fmt.Errorf("%w: technical-record bounds: %v", ErrRecordUntrusted, err)
+	}
+	var uc types.UnicityCertificate
+	if err = types.Cbor.Unmarshal(sr.Certificate, &uc); err != nil {
+		return Loaded{}, fmt.Errorf("%w: certificate: %v", ErrRecordUntrusted, err)
+	}
+	var tr certification.TechnicalRecord
+	if err = types.Cbor.Unmarshal(sr.Technical, &tr); err != nil {
+		return Loaded{}, fmt.Errorf("%w: technical record: %v", ErrRecordUntrusted, err)
+	}
+	ucCanonical, _ := types.Cbor.Marshal(&uc)
+	trCanonical, _ := types.Cbor.Marshal(&tr)
+	if !bytes.Equal(ucCanonical, sr.Certificate) || !bytes.Equal(trCanonical, sr.Technical) {
+		return Loaded{}, fmt.Errorf("%w: nested certificate or technical record is not canonical", ErrRecordUntrusted)
 	}
 	payload, err := types.Cbor.Marshal(sr)
 	if err != nil {

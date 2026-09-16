@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/rootinput"
+	bfttypes "github.com/unicitynetwork/bft-go-base/types"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -24,6 +25,19 @@ var (
 	controlKey    = []byte("control")
 	legacyBucket  = []byte("certified-record/v1")
 )
+
+var afterPathCheck = func(string) {}
+var syncDirectory = func(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err = d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
+}
 
 // MaxRetain is the implementation ceiling for ordinary records.
 const MaxRetain = 1 << 16
@@ -42,6 +56,32 @@ type Context struct {
 	Origin      registrygenesis.GenesisOrigin
 	Observation rootinput.ObservationContextV2
 	Record      certifiedstore.Context
+}
+
+func cloneShardID(id bfttypes.ShardID) (bfttypes.ShardID, error) {
+	text, err := id.MarshalText()
+	if err != nil {
+		return bfttypes.ShardID{}, err
+	}
+	var out bfttypes.ShardID
+	if err = out.UnmarshalText(bytes.Clone(text)); err != nil {
+		return bfttypes.ShardID{}, err
+	}
+	return out, nil
+}
+func ownContext(c Context) (Context, error) {
+	var err error
+	c.Observation.ShardConfHash = bytes.Clone(c.Observation.ShardConfHash)
+	c.Record.FullShardConfHash = bytes.Clone(c.Record.FullShardConfHash)
+	c.Observation.ShardID, err = cloneShardID(c.Observation.ShardID)
+	if err != nil {
+		return Context{}, err
+	}
+	c.Record.ShardID, err = cloneShardID(c.Record.ShardID)
+	if err != nil {
+		return Context{}, err
+	}
+	return c, nil
 }
 
 func (c Context) check() error {
@@ -75,6 +115,7 @@ func OpenConfiguredV2(path string, s Settings) (*Store, error) {
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
+	afterPathCheck(path)
 	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: 3 * time.Second})
 	if err != nil {
 		return nil, err
@@ -84,21 +125,20 @@ func OpenConfiguredV2(path string, s Settings) (*Store, error) {
 		return fail(fmt.Errorf("%w: backend NoSync", ErrSettings))
 	}
 	err = db.View(func(tx *bolt.Tx) error {
-		var names [][]byte
-		err := tx.ForEach(func(n []byte, _ *bolt.Bucket) error { names = append(names, bytes.Clone(n)); return nil })
-		if err != nil {
-			return err
-		}
-		if len(names) > 1 {
-			return fmt.Errorf("%w: mixed top-level buckets", ErrVersion)
-		}
-		if len(names) == 1 && !bytes.Equal(names[0], bucketName) {
-			if bytes.Equal(names[0], legacyBucket) {
-				return fmt.Errorf("%w: legacy certified-record/v1 database", ErrVersion)
+		count := 0
+		return tx.ForEach(func(n []byte, _ *bolt.Bucket) error {
+			count++
+			if count > 1 {
+				return fmt.Errorf("%w: mixed top-level buckets", ErrVersion)
 			}
-			return fmt.Errorf("%w: unknown top-level bucket %q", ErrVersion, names[0])
-		}
-		return nil
+			if !bytes.Equal(n, bucketName) {
+				if bytes.Equal(n, legacyBucket) {
+					return fmt.Errorf("%w: legacy certified-record/v1 database", ErrVersion)
+				}
+				return fmt.Errorf("%w: unknown top-level bucket", ErrVersion)
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return fail(err)
@@ -109,15 +149,7 @@ func OpenConfiguredV2(path string, s Settings) (*Store, error) {
 		}
 		return fail(fmt.Errorf("%w: store path: %v", ErrSettings, err))
 	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return fail(err)
-	}
-	err = d.Sync()
-	closeErr := d.Close()
-	if err == nil {
-		err = closeErr
-	}
+	err = syncDirectory(filepath.Dir(path))
 	if err != nil {
 		return fail(err)
 	}
@@ -196,6 +228,11 @@ func tokenFor(s *Store, i *durableImage) ProgressToken {
 
 // Initialize atomically creates descriptor and revision-0 control. Existing state is verified, never reset.
 func (s *Store) Initialize(ctx context.Context, c Context) (State, ProgressToken, error) {
+	var err error
+	c, err = ownContext(c)
+	if err != nil {
+		return State{}, ProgressToken{}, err
+	}
 	if err := c.check(); err != nil {
 		return State{}, ProgressToken{}, err
 	}
@@ -285,6 +322,11 @@ func (s *Store) readRaw() (descriptor, control, headName, headRaw []byte, err er
 
 // Load performs bounded verification of descriptor, control, referenced pairs and referenced head only.
 func (s *Store) Load(ctx context.Context, c Context) (State, ProgressToken, error) {
+	var ownErr error
+	c, ownErr = ownContext(c)
+	if ownErr != nil {
+		return State{}, ProgressToken{}, ownErr
+	}
 	if err := c.check(); err != nil {
 		return State{}, ProgressToken{}, err
 	}

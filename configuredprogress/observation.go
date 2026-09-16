@@ -201,6 +201,11 @@ type preparedObservation struct {
 }
 
 func (s *Store) PrepareObservation(ctx context.Context, c Context, o rootinput.VerifiedObservationV2) (PreparedObservation, ObservationOutcome, error) {
+	var ownErr error
+	c, ownErr = ownContext(c)
+	if ownErr != nil {
+		return PreparedObservation{}, 0, ownErr
+	}
 	st, _, err := s.Load(ctx, c)
 	if err != nil {
 		return PreparedObservation{}, 0, err

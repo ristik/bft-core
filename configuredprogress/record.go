@@ -106,6 +106,11 @@ type preparedRecord struct {
 
 // PrepareRecord verifies an ordinary record and binds publication to the exact observed/control/head image.
 func (s *Store) PrepareRecord(ctx context.Context, c Context, r certifiedstore.Record) (PreparedRecord, error) {
+	var ownErr error
+	c, ownErr = ownContext(c)
+	if ownErr != nil {
+		return PreparedRecord{}, ownErr
+	}
 	st, _, err := s.Load(ctx, c)
 	if err != nil {
 		return PreparedRecord{}, err

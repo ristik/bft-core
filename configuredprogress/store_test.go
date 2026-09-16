@@ -6,7 +6,18 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+type callbackTrust struct {
+	tb       *types.RootTrustBaseV1
+	callback func()
+}
+
+func (t callbackTrust) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error) {
+	t.callback()
+	return t.tb, nil
+}
 
 func TestInitializeReloadAndContextBinding(t *testing.T) {
 	f := newFixture(t, 2)
@@ -104,6 +115,22 @@ func TestConcurrentFirstOrdinaryWinnerIsImmutable(t *testing.T) {
 	require.Equal(t, b.OriginIdentity(), observed.OriginIdentity())
 }
 
+func TestSameRootDifferentAssignmentConflicts(t *testing.T) {
+	f := newFixture(t, 0)
+	s, _ := f.open(2)
+	defer s.Close()
+	_, _, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	a := f.bootstrap(1, 4)
+	p, _, err := s.PrepareObservation(context.Background(), f.ctx, a)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(p)
+	require.NoError(t, err)
+	contradiction := f.bootstrap(2, 4)
+	_, _, err = s.PrepareObservation(context.Background(), f.ctx, contradiction)
+	require.ErrorIs(t, err, ErrConflict)
+}
+
 func TestFailedObservationCommitRetriesAsWrite(t *testing.T) {
 	f := newFixture(t, 1)
 	s, _ := f.open(2)
@@ -123,6 +150,37 @@ func TestFailedObservationCommitRetriesAsWrite(t *testing.T) {
 	p, out, err := s.PrepareObservation(context.Background(), f.ctx, o)
 	require.NoError(t, err)
 	require.Equal(t, ObservationAdvanced, out, "failed persistence is not remembered as duplicate")
+	_, _, err = s.CommitObservation(p)
+	require.NoError(t, err)
+}
+
+func TestPrepareOwnsContextAcrossTrustCallbacks(t *testing.T) {
+	f := newFixture(t, 1)
+	s, _ := f.open(2)
+	defer s.Close()
+	_, _, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	bootstrap := f.bootstrap(1, 4)
+	p, _, err := s.PrepareObservation(context.Background(), f.ctx, bootstrap)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(p)
+	require.NoError(t, err)
+	c := f.ctx
+	originalObs := c.Observation.ShardConfHash
+	originalRecord := c.Record.FullShardConfHash
+	c.Observation.TrustBases = callbackTrust{tb: f.c.TrustBase, callback: func() {
+		for i := range originalObs {
+			originalObs[i] ^= 0xff
+		}
+		for i := range originalRecord {
+			originalRecord[i] ^= 0xff
+		}
+	}}
+	c.Record.TrustBases = c.Observation.TrustBases
+	repeat := f.bootstrap(2, 5)
+	p, out, err := s.PrepareObservation(context.Background(), c, repeat)
+	require.NoError(t, err)
+	require.Equal(t, ObservationRepeated, out, "later authentication must use the context snapshot taken before Load callbacks")
 	_, _, err = s.CommitObservation(p)
 	require.NoError(t, err)
 }
