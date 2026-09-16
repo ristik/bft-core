@@ -174,6 +174,9 @@ func decodeCanonical(raw []byte, max int, v any) error {
 	if len(raw) == 0 || len(raw) > max {
 		return fmt.Errorf("%w: %d bytes, bound 1..%d", ErrBounds, len(raw), max)
 	}
+	if err := validateCBORBounds(raw); err != nil {
+		return err
+	}
 	if err := decoder.Unmarshal(raw, v); err != nil {
 		return fmt.Errorf("%w: %v", ErrWire, err)
 	}

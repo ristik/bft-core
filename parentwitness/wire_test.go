@@ -80,6 +80,19 @@ func TestOutcomesEvidenceAndCanonicalRefusals(t *testing.T) {
 	require.ErrorIs(t, err, ErrWire)
 }
 
+func TestPredecodeCBORBounds(t *testing.T) {
+	for name, raw := range map[string][]byte{
+		"node bytes":  append([]byte{0x59, 0x04, 0x01}, make([]byte, 1025)...),
+		"array count": {0x99, 0x08, 0x01},
+		"indefinite":  {0x9f, 0xff},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := validateCBORBounds(raw)
+			require.Error(t, err)
+		})
+	}
+}
+
 func TestFramingRejectsOversizeBeforeBodyRead(t *testing.T) {
 	var prefix [binary.MaxVarintLen64]byte
 	n := binary.PutUvarint(prefix[:], MaxRequestBytes+1)
