@@ -112,9 +112,13 @@ func (l Limits) FrameBytes() int {
 }
 
 func (l Limits) check(e Envelope) error {
+	return l.checkVersion(e, Version)
+}
+
+func (l Limits) checkVersion(e Envelope, version uint64) error {
 	switch {
-	case e.Version != Version:
-		return fmt.Errorf("%w: version %d, only %d is accepted", ErrMalformedEnvelope, e.Version, Version)
+	case e.Version != version:
+		return fmt.Errorf("%w: version %d, only %d is accepted", ErrMalformedEnvelope, e.Version, version)
 	case len(e.BlockHash) != 32:
 		return fmt.Errorf("%w: block hash must be 32 bytes, got %d", ErrMalformedEnvelope, len(e.BlockHash))
 	case len(e.Certificate) == 0 || len(e.Certificate) > l.MaxCertificateBytes:

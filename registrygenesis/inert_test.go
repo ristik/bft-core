@@ -14,8 +14,8 @@ import (
 
 const importPath = "github.com/unicitynetwork/bft-core/registrygenesis"
 
-// TestNoProductionPackageImportsTheGenerator is the inertness guard: no non-test Go file outside this
-// package imports it, so no command or node generates or checks a registry genesis through it yet.
+// TestNoProductionPackageImportsTheGenerator is the inertness guard: only the inactive v2 derivation API
+// may consume a checked GenesisOrigin; no command or node generates or checks a registry genesis yet.
 func TestNoProductionPackageImportsTheGenerator(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
@@ -62,5 +62,6 @@ func TestNoProductionPackageImportsTheGenerator(t *testing.T) {
 	for _, want := range []string{"cli/ubft/cmd/engine_api_genesis.go", "cli/ubft/cmd/shard_node_run.go", "shardnode/round.go", "engineapi/adapter.go"} {
 		require.True(t, scanned[want], "expected to scan %s", want)
 	}
-	require.Empty(t, importers, "production packages must not import %s", importPath)
+	require.Equal(t, []string{filepath.Join("rootinput", "v2.go")}, importers,
+		"only the inactive v2 derivation API may import %s", importPath)
 }
