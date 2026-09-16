@@ -71,10 +71,11 @@ func VerifyResponse(t Target, raw []byte) (VerifiedResponse, error) {
 	if t.request.BlockHash == (common.Hash{}) {
 		return VerifiedResponse{}, ErrContext
 	}
-	if len(raw) == 0 || len(raw) > MaxResponseBytes {
-		return VerifiedResponse{}, fmt.Errorf("%w: response is %d bytes", ErrBounds, len(raw))
+	owned, err := cloneBoundedResponse(raw)
+	if err != nil {
+		return VerifiedResponse{}, err
 	}
-	r, err := decodeResponse(bytes.Clone(raw))
+	r, err := decodeResponse(owned)
 	if err != nil {
 		return VerifiedResponse{}, err
 	}
@@ -90,6 +91,13 @@ func VerifyResponse(t Target, raw []byte) (VerifiedResponse, error) {
 		return VerifiedResponse{}, err
 	}
 	return VerifiedResponse{valid: true, outcome: OutcomeFound, detail: r.Detail, snapshot: snapshot, evidence: r.Evidence}, nil
+}
+
+func cloneBoundedResponse(raw []byte) ([]byte, error) {
+	if len(raw) == 0 || len(raw) > MaxResponseBytes {
+		return nil, fmt.Errorf("%w: response is %d bytes", ErrBounds, len(raw))
+	}
+	return bytes.Clone(raw), nil
 }
 
 func sameRequest(a, b Request) bool {

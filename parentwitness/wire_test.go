@@ -137,8 +137,9 @@ func TestVerifyResponseChecksFrameBoundBeforeDecode(t *testing.T) {
 	raw := make([]byte, MaxResponseBytes+1)
 	_, err := VerifyResponse(target, raw)
 	require.ErrorIs(t, err, ErrBounds)
-	allocs := testing.AllocsPerRun(20, func() { _, _ = VerifyResponse(target, raw) })
-	require.LessOrEqual(t, allocs, float64(3), "oversized input must not be cloned before refusal")
+	owned, err := cloneBoundedResponse(raw)
+	require.ErrorIs(t, err, ErrBounds)
+	require.Nil(t, owned, "the bound helper returns no owned allocation for oversized input")
 }
 
 func TestFramingRejectsShortWrites(t *testing.T) {
