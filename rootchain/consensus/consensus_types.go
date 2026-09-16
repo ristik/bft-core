@@ -24,6 +24,7 @@ type (
 	Optional struct {
 		Params          *Parameters
 		FrontierSampler *FrontierSamplerConfig
+		FrontierSigning bool
 	}
 
 	Option func(c *Optional)
@@ -46,6 +47,12 @@ func WithConsensusParams(params Parameters) Option {
 // WithFrontierSampler opts into the local, unsigned diagnostic sampler.
 func WithFrontierSampler(config FrontierSamplerConfig) Option {
 	return func(c *Optional) { c.FrontierSampler = &config }
+}
+
+// WithFrontierSigning opts into root-signed frontier responses. It requires
+// WithFrontierSampler and does not register a transport or production caller.
+func WithFrontierSigning() Option {
+	return func(c *Optional) { c.FrontierSigning = true }
 }
 
 func LoadConf(opts []Option) (*Optional, error) {

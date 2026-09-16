@@ -164,6 +164,14 @@ func NewConsensusManager(
 		}
 		store = &frontierPersistentStore{PersistentStore: rcDB, sampler: frontier, reader: reader}
 	}
+	if optional.FrontierSigning {
+		if frontier == nil {
+			return nil, errors.New("frontier signing requires frontier sampler")
+		}
+		if err := frontier.enableSigning(nodeID.String(), signer); err != nil {
+			return nil, err
+		}
+	}
 
 	// init storage
 	bStore, err := storage.New(cParams.HashAlgorithm, store, orchestration, log)

@@ -34,6 +34,7 @@ type frontierFaultStore struct {
 	failBlock     atomic.Bool
 	failVote      atomic.Bool
 	failTC        atomic.Bool
+	failRead      atomic.Bool
 	safetyGate    chan struct{}
 	safetyEntered chan struct{}
 	voteGate      chan struct{}
@@ -59,6 +60,9 @@ func (s *frontierFaultStore) ReadSafetySnapshot() (storage.SafetySnapshot, error
 		default:
 		}
 		<-s.safetyGate
+	}
+	if s.failRead.Load() {
+		return storage.SafetySnapshot{}, errors.New("checked safety read fail")
 	}
 	return s.reader.ReadSafetySnapshot()
 }
@@ -109,9 +113,15 @@ type frontierHarness struct {
 	shardNodes []*rctest.TestNode
 	cancel     context.CancelFunc
 	done       chan error
+	author     string
+	rootSigner abcrypto.Signer
 }
 
 func newFrontierHarness(t *testing.T) *frontierHarness {
+	return newFrontierHarnessWithSigner(t, nil, false)
+}
+
+func newFrontierHarnessWithSigner(t *testing.T, wrap func(abcrypto.Signer) abcrypto.Signer, signing bool) *frontierHarness {
 	t.Helper()
 	rootNode := rctest.NewTestNode(t)
 	shardNodes, shardInfos := rctest.CreateTestNodes(t, 3)
@@ -126,11 +136,20 @@ func newFrontierHarness(t *testing.T) *frontierHarness {
 	require.NoError(t, err)
 	require.NoError(t, tbs.Store(tb))
 	net := testnetwork.NewRootMockNetwork()
-	cm, err := NewConsensusManager(rootNode.PeerConf.ID, tbs, orchestration, net, rootNode.Signer, store, observe,
+	managerSigner := abcrypto.Signer(rootNode.Signer)
+	if wrap != nil {
+		managerSigner = wrap(managerSigner)
+	}
+	opts := []Option{
 		WithConsensusParams(Parameters{BlockRate: 300 * time.Millisecond, LocalTimeout: 800 * time.Millisecond, HashAlgorithm: crypto.SHA256}),
-		WithFrontierSampler(FrontierSamplerConfig{TrustBase: tb, QueueSize: 1, MaxPending: 2}))
+		WithFrontierSampler(FrontierSamplerConfig{TrustBase: tb, QueueSize: 1, MaxPending: 2}),
+	}
+	if signing {
+		opts = append(opts, WithFrontierSigning())
+	}
+	cm, err := NewConsensusManager(rootNode.PeerConf.ID, tbs, orchestration, net, managerSigner, store, observe, opts...)
 	require.NoError(t, err)
-	return &frontierHarness{cm: cm, net: net, pdr: pdr, trust: tb, store: store, shardNodes: shardNodes}
+	return &frontierHarness{cm: cm, net: net, pdr: pdr, trust: tb, store: store, shardNodes: shardNodes, author: rootNode.PeerConf.ID.String(), rootSigner: rootNode.Signer}
 }
 
 func (h *frontierHarness) request(t *testing.T) FrontierRequest {

@@ -80,6 +80,20 @@ The actual UC and TR remain owned canonical evidence and undergo complete normal
 Do not use only root/partition rounds, only the state hash or an index. Q's digest binds its full canonical
 encoding; normal QC verification binds VoteInfo to the signed LedgerCommitInfo through PreviousHash.
 
+The concrete v1 tuple is CBOR `["root-bootstrap-admission/pair", 1, inputRecordBytes,
+sealSigBytes, technicalRecordBytes, Context]`, where the three record encodings are byte strings.
+`inputRecordBytes` is the complete canonical `InputRecord.Bytes()`, `sealSigBytes` is the complete
+canonical `UnicitySeal.SigBytes()` (and therefore excludes only the seal signature map), and
+`technicalRecordBytes` is the canonical full TR. In the reply, `canonicalPair(P)` and
+`canonicalQC(Q)` are byte strings containing canonical `[UC,TR]` and the complete QC including its
+signature map. `canonicalShardBytes` is `ShardID.Bytes()` including its sentinel encoding. The
+request origin identity remains caller binding that the root echoes; it is not root endorsement.
+Independent encoding vectors and their standard-library generator are in
+[`vectors/frontier_signing_vectors.json`](vectors/frontier_signing_vectors.json) and
+[`vectors/generate_frontier_signing_vectors.py`](vectors/generate_frontier_signing_vectors.py).
+Those vectors test encoding and hashes only: their opaque IR, seal, TR and QC bytes are synthetic,
+while genuine signed loop fixtures separately test certificate and response authentication.
+
 The response signature is an attestation about a durable safety floor and actual LastCR. It is **not** an
 assertion that the root's local snapshot is globally latest. Subsequent votes need not be blocked: a root
 may vote immediately after signing the response. The proof below explicitly permits that race.
