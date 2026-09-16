@@ -61,30 +61,54 @@ type transportStream interface {
 // RequestVerified performs one dial and one exchange. It returns only a response verified
 // against the caller-owned Target; provider selection and retries remain outside this package.
 func RequestVerified(ctx context.Context, h StreamOpener, to peer.ID, target Target, deadline time.Duration) (VerifiedResponse, error) {
+	response, _, err := requestVerifiedBudgeted(ctx, h, to, target, deadline, 0)
+	return response, err
+}
+
+// RequestVerifiedBudgeted performs one exchange and accounts every byte read from the
+// response stream. A positive maxDownloadedBytes is mandatory; the legacy helper above keeps
+// the pre-budget API for callers that already have an outer bound.
+func RequestVerifiedBudgeted(ctx context.Context, h StreamOpener, to peer.ID, target Target, deadline time.Duration, maxDownloadedBytes int64) (VerifiedResponse, int64, error) {
+	if maxDownloadedBytes <= 0 {
+		return VerifiedResponse{}, 0, fmt.Errorf("%w: positive byte budget required", ErrTransport)
+	}
+	return requestVerifiedBudgeted(ctx, h, to, target, deadline, maxDownloadedBytes)
+}
+
+func requestVerifiedBudgeted(ctx context.Context, h StreamOpener, to peer.ID, target Target, deadline time.Duration, maxDownloadedBytes int64) (VerifiedResponse, int64, error) {
 	if h == nil || !target.Valid() || to == "" || deadline <= 0 {
-		return VerifiedResponse{}, fmt.Errorf("%w: invalid client configuration", ErrTransport)
+		return VerifiedResponse{}, 0, fmt.Errorf("%w: invalid client configuration", ErrTransport)
+	}
+	if maxDownloadedBytes < 0 {
+		return VerifiedResponse{}, 0, fmt.Errorf("%w: negative byte budget", ErrTransport)
 	}
 	ctx, cancel := context.WithTimeout(ctx, deadline)
 	defer cancel()
 	st, err := h.CreateStream(ctx, to, ProtocolID)
 	if err != nil {
 		if cerr := contextResult(ctx); cerr != nil {
-			return VerifiedResponse{}, fmt.Errorf("%w: %w", ErrTransport, cerr)
+			return VerifiedResponse{}, 0, fmt.Errorf("%w: %w", ErrTransport, cerr)
 		}
-		return VerifiedResponse{}, fmt.Errorf("%w: open stream: %w", ErrTransport, err)
+		return VerifiedResponse{}, 0, fmt.Errorf("%w: open stream: %w", ErrTransport, err)
 	}
-	return exchangeVerified(ctx, st, target)
+	return exchangeVerifiedBudgeted(ctx, st, target, maxDownloadedBytes)
 }
 
 func exchangeVerified(ctx context.Context, st transportStream, target Target) (VerifiedResponse, error) {
+	response, _, err := exchangeVerifiedBudgeted(ctx, st, target, 0)
+	return response, err
+}
+
+func exchangeVerifiedBudgeted(ctx context.Context, st transportStream, target Target, maxDownloadedBytes int64) (VerifiedResponse, int64, error) {
+	var downloaded int64
 	dl, ok := ctx.Deadline()
 	if ok {
 		if err := st.SetDeadline(dl); err != nil {
 			_ = st.Reset()
 			if cerr := contextResult(ctx); cerr != nil {
-				return VerifiedResponse{}, fmt.Errorf("%w: %w", ErrTransport, cerr)
+				return VerifiedResponse{}, downloaded, fmt.Errorf("%w: %w", ErrTransport, cerr)
 			}
-			return VerifiedResponse{}, fmt.Errorf("%w: set deadline: %v", ErrTransport, err)
+			return VerifiedResponse{}, downloaded, fmt.Errorf("%w: set deadline: %v", ErrTransport, err)
 		}
 	}
 	stop, joined := make(chan struct{}), make(chan struct{})
@@ -100,16 +124,20 @@ func exchangeVerified(ctx context.Context, st transportStream, target Target) (V
 	if err == nil {
 		_ = st.CloseWrite()
 		var response VerifiedResponse
-		response, err = ReadVerifiedResponseFrame(st, target)
+		if maxDownloadedBytes > 0 {
+			response, err = ReadVerifiedResponseFrameBudgeted(st, target, &downloaded, maxDownloadedBytes)
+		} else {
+			response, err = ReadVerifiedResponseFrame(st, target)
+		}
 		close(stop)
 		<-joined
 		if err == nil {
 			if cerr := contextResult(ctx); cerr != nil {
 				_ = st.Reset()
-				return VerifiedResponse{}, fmt.Errorf("%w: %w", ErrTransport, cerr)
+				return VerifiedResponse{}, downloaded, fmt.Errorf("%w: %w", ErrTransport, cerr)
 			}
 			_ = st.Close()
-			return response, nil
+			return response, downloaded, nil
 		}
 	} else {
 		close(stop)
@@ -117,9 +145,12 @@ func exchangeVerified(ctx context.Context, st transportStream, target Target) (V
 	}
 	_ = st.Reset()
 	if cerr := contextResult(ctx); cerr != nil {
-		return VerifiedResponse{}, fmt.Errorf("%w: %w", ErrTransport, cerr)
+		return VerifiedResponse{}, downloaded, fmt.Errorf("%w: %w", ErrTransport, cerr)
 	}
-	return VerifiedResponse{}, fmt.Errorf("%w: exchange: %w", ErrTransport, err)
+	if errors.Is(err, ErrDownloadedBytes) {
+		return VerifiedResponse{}, downloaded, ErrDownloadedBytes
+	}
+	return VerifiedResponse{}, downloaded, fmt.Errorf("%w: exchange: %w", ErrTransport, err)
 }
 
 func contextResult(ctx context.Context) error {
