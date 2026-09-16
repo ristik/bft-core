@@ -21,6 +21,23 @@ var (
 	ErrV2Ancestry = errors.New("rootinput: v2 execution ancestry mismatch")
 )
 
+// unsupportedObservationV2 reports that a correctly authenticated statement is outside
+// the configured v2 profile. It grants no observation, freshness, or readiness authority.
+// The classifier deliberately recognizes only the direct error returned by this package;
+// trust-provider errors which happen to wrap the same sentinels are not authenticated evidence.
+type unsupportedObservationV2 struct{ cause error }
+
+func (e *unsupportedObservationV2) Error() string { return e.cause.Error() }
+func (e *unsupportedObservationV2) Unwrap() error { return e.cause }
+
+func unsupportedV2(cause error) error { return &unsupportedObservationV2{cause: cause} }
+
+// IsUnsupportedObservationV2 classifies only a direct post-authentication profile refusal.
+func IsUnsupportedObservationV2(err error) bool {
+	_, ok := err.(*unsupportedObservationV2)
+	return ok
+}
+
 // ObservationContextV2 contains only locally configured trust and identity pins.
 type ObservationContextV2 struct {
 	NetworkID     types.NetworkID
@@ -96,25 +113,25 @@ func AuthenticateObservationV2(ctx context.Context, c ObservationContextV2, uc *
 		return VerifiedObservationV2{}, fmt.Errorf("%w: network", ErrWrongContext)
 	}
 	if u.GetRootEpoch() != c.RootEpoch {
-		return VerifiedObservationV2{}, fmt.Errorf("%w: certificate root epoch %d, configured %d", ErrV2Context, u.GetRootEpoch(), c.RootEpoch)
+		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: certificate root epoch %d, configured %d", ErrV2Context, u.GetRootEpoch(), c.RootEpoch))
 	}
 	if u.InputRecord == nil {
-		return VerifiedObservationV2{}, fmt.Errorf("%w: missing input record", ErrV2Shape)
+		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: missing input record", ErrV2Shape))
 	}
 	ir := u.InputRecord
 	o := evmroot.RootOriginV2{NetworkID: uint64(u.UnicitySeal.NetworkID), RootRound: u.UnicitySeal.RootChainRoundNumber, RootEpoch: u.UnicitySeal.Epoch, ReferenceTime: u.UnicitySeal.Timestamp, UnicityTreeRoot: bytes.Clone(u.UnicitySeal.Hash), InputVersion: uint64(ir.Version), IR: evmroot.ShardInputRecord{Round: ir.RoundNumber, Epoch: ir.Epoch, PreviousHash: bytes.Clone(ir.PreviousHash), Hash: bytes.Clone(ir.Hash), Timestamp: ir.Timestamp, BlockHash: bytes.Clone(ir.BlockHash)}, TRHash: bytes.Clone(u.TRHash), ShardConfHash: bytes.Clone(u.ShardConfHash)}
 	class, err := o.Class()
 	if err != nil {
-		return VerifiedObservationV2{}, fmt.Errorf("%w: %v", ErrV2Shape, err)
+		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: %v", ErrV2Shape, err))
 	}
 	if class == evmroot.OriginBootstrapV2 && (ir.SumOfEarnedFees != 0 || ir.SummaryValue != nil || ir.ETHash != nil) {
-		return VerifiedObservationV2{}, fmt.Errorf("%w: bootstrap requires the exact initial input record", ErrV2Shape)
+		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: bootstrap requires the exact initial input record", ErrV2Shape))
 	}
 	if ir.Epoch != 0 || t.Epoch != 0 {
-		return VerifiedObservationV2{}, fmt.Errorf("%w: only shard epoch zero is supported", ErrV2Context)
+		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: only shard epoch zero is supported", ErrV2Context))
 	}
 	if t.Round == 0 || t.Round <= ir.RoundNumber {
-		return VerifiedObservationV2{}, fmt.Errorf("%w: authorized round %d must strictly advance certified round %d", ErrV2Shape, t.Round, ir.RoundNumber)
+		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: authorized round %d must strictly advance certified round %d", ErrV2Shape, t.Round, ir.RoundNumber))
 	}
 	return VerifiedObservationV2{network: c.NetworkID, partition: c.PartitionID, shard: shard, conf: conf, rootEpoch: c.RootEpoch, origin: o, class: class, uc: u, tr: t}, nil
 }
