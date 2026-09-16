@@ -1,8 +1,11 @@
 package storage
 
 import (
+	"bytes"
 	"crypto"
+	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -354,6 +357,153 @@ func Test_BoltDB_SafetyModule_API(t *testing.T) {
 	require.Equal(t, rctypes.GenesisRootRound, db.GetHighestQcRound())
 	require.Equal(t, rctypes.GenesisRootRound, db.GetHighestVotedRound())
 	require.ErrorIs(t, db.SetHighestQcRound(20, 21), errNoSafetyBucket)
+}
+
+func Test_BoltDB_ReadSafetySnapshot(t *testing.T) {
+	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "safety-snapshot.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	fileName := filepath.Join(t.TempDir(), "read-only.db")
+	readOnlyDB, err := NewBoltStorage(fileName)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = readOnlyDB.Close() })
+	before, err := os.ReadFile(fileName)
+	require.NoError(t, err)
+	snapshot, err := readOnlyDB.ReadSafetySnapshot()
+	require.NoError(t, err)
+	require.Equal(t, SafetySnapshot{HighestQCRound: rctypes.GenesisRootRound, HighestVotedRound: rctypes.GenesisRootRound}, snapshot)
+	after, err := os.ReadFile(fileName)
+	require.NoError(t, err)
+	require.Equal(t, before, after, "successful reads must not modify the database")
+
+	snapshot, err = db.ReadSafetySnapshot()
+	require.NoError(t, err)
+	require.Equal(t, SafetySnapshot{
+		HighestQCRound:    rctypes.GenesisRootRound,
+		HighestVotedRound: rctypes.GenesisRootRound,
+	}, snapshot)
+
+	require.NoError(t, db.SetHighestQcRound(20, 21))
+	snapshot, err = db.ReadSafetySnapshot()
+	require.NoError(t, err)
+	require.Equal(t, SafetySnapshot{HighestQCRound: 20, HighestVotedRound: 21}, snapshot)
+
+	dbName := filepath.Join(t.TempDir(), "reopen.db")
+	require.NoError(t, db.Close())
+	db, err = NewBoltStorage(dbName)
+	require.NoError(t, err)
+	require.NoError(t, db.SetHighestQcRound(30, 31))
+	require.NoError(t, db.Close())
+	db, err = NewBoltStorage(dbName)
+	require.NoError(t, err)
+	snapshot, err = db.ReadSafetySnapshot()
+	require.NoError(t, err)
+	require.Equal(t, SafetySnapshot{HighestQCRound: 30, HighestVotedRound: 31}, snapshot)
+	require.NoError(t, db.Close())
+
+	t.Run("uninitialized and closed handles return errors", func(t *testing.T) {
+		var zero BoltDB
+		got, err := zero.ReadSafetySnapshot()
+		require.Error(t, err)
+		require.Zero(t, got)
+
+		closed, err := NewBoltStorage(filepath.Join(t.TempDir(), "closed.db"))
+		require.NoError(t, err)
+		require.NoError(t, closed.Close())
+		got, err = closed.ReadSafetySnapshot()
+		require.Error(t, err)
+		require.Zero(t, got)
+	})
+
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*bbolt.Bucket) error
+		want   string
+	}{
+		{name: "missing bucket", mutate: func(*bbolt.Bucket) error { return nil }, want: "safety module bucket not found"},
+		{name: "missing QC", mutate: func(b *bbolt.Bucket) error { return b.Delete(keyHighestQc) }, want: "highest QC"},
+		{name: "missing voted", mutate: func(b *bbolt.Bucket) error { return b.Delete(keyHighestVoted) }, want: "highest voted"},
+		{name: "malformed QC", mutate: func(b *bbolt.Bucket) error { return b.Put(keyHighestQc, []byte{1}) }, want: "highest QC"},
+		{name: "malformed voted", mutate: func(b *bbolt.Bucket) error { return b.Put(keyHighestVoted, []byte{1}) }, want: "highest voted"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dbName := filepath.Join(t.TempDir(), "invalid.db")
+			db, err := NewBoltStorage(dbName)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			require.NoError(t, db.SetHighestQcRound(20, 21))
+			var beforeQC, beforeVoted []byte
+			require.NoError(t, db.db.Update(func(tx *bbolt.Tx) error {
+				if testCase.name == "missing bucket" {
+					return tx.DeleteBucket(bucketSafety)
+				}
+				b := tx.Bucket(bucketSafety)
+				if err := testCase.mutate(b); err != nil {
+					return err
+				}
+				beforeQC = append([]byte(nil), b.Get(keyHighestQc)...)
+				beforeVoted = append([]byte(nil), b.Get(keyHighestVoted)...)
+				return nil
+			}))
+			before, err := os.ReadFile(dbName)
+			require.NoError(t, err)
+			got, err := db.ReadSafetySnapshot()
+			require.ErrorContains(t, err, testCase.want)
+			require.Zero(t, got, "failed reads must not return a partial snapshot")
+			if testCase.name != "missing bucket" {
+				require.NoError(t, db.db.View(func(tx *bbolt.Tx) error {
+					b := tx.Bucket(bucketSafety)
+					require.True(t, bytes.Equal(beforeQC, b.Get(keyHighestQc)))
+					require.True(t, bytes.Equal(beforeVoted, b.Get(keyHighestVoted)))
+					return nil
+				}))
+			}
+			after, err := os.ReadFile(dbName)
+			require.NoError(t, err)
+			require.Equal(t, before, after, "failed reads must not modify the database")
+		})
+	}
+}
+
+func Test_BoltDB_ReadSafetySnapshotIsCoherentDuringPairedWrites(t *testing.T) {
+	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "concurrent.db"), WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	const writes = 200
+	var wg sync.WaitGroup
+	writerErrs := make(chan error, writes)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for round := uint64(1); round <= writes; round++ {
+			if err := db.SetHighestQcRound(round, round+1); err != nil {
+				writerErrs <- err
+				return
+			}
+		}
+	}()
+
+	for i := 0; i < writes*4; i++ {
+		snapshot, err := db.ReadSafetySnapshot()
+		require.NoError(t, err)
+		if snapshot.HighestQCRound == snapshot.HighestVotedRound {
+			require.Equal(t, rctypes.GenesisRootRound, snapshot.HighestQCRound,
+				"equal non-genesis rounds indicate a mixed read: %+v", snapshot)
+		} else {
+			require.Equal(t, snapshot.HighestQCRound+1, snapshot.HighestVotedRound,
+				"read mixed values from separate writes: %+v", snapshot)
+		}
+	}
+	wg.Wait()
+	close(writerErrs)
+	for err := range writerErrs {
+		require.NoError(t, err)
+	}
+	snapshot, err := db.ReadSafetySnapshot()
+	require.NoError(t, err)
+	require.Equal(t, SafetySnapshot{HighestQCRound: writes, HighestVotedRound: writes + 1}, snapshot)
 }
 
 // TestNewBoltStorage_Sync pins the durability default: a store opened without options syncs every
