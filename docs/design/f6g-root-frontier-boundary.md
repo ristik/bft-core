@@ -32,7 +32,10 @@ query mutex: that would serialize queries with each other, not with `MakeVote` o
 Enqueue/wait respects request and manager cancellation; unavailable capacity refuses immediately.
 Bound both queued requests and callers waiting for replies. No external RPC, peer fetch, retry sleep,
 or response delivery runs inside the loop. A canceled caller cannot leave the loop blocked on reply.
-No request is admitted before startup initialization completes or after shutdown begins.
+No request is admitted before startup initialization completes or after shutdown begins. The enabled
+sampler must enforce one active `Run` owner for this manager and exclusive ownership of its safety/store
+mutation paths; two loops on the same manager would invalidate this serialization argument. The current
+`Run` method is not itself a single-run admission guard.
 
 `ShardInfo`, `GetState`, `GetCertificate`, `Root` and `HighQc` return pointers or structures containing
 pointers after their local lock is released. Their locks do not cover the safety database and replacement
