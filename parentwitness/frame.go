@@ -7,6 +7,34 @@ import (
 	"io"
 )
 
+var ErrDownloadedBytes = errors.New("parent witness: downloaded byte budget exhausted")
+
+// downloadedReader accounts bytes as they are read from a response stream. It deliberately
+// limits each underlying Read so partial bodies and malformed frames cannot bypass the budget.
+type downloadedReader struct {
+	r         io.Reader
+	left      int64
+	used      *int64
+	exhausted bool
+}
+
+func (r *downloadedReader) Read(p []byte) (int, error) {
+	if r.left <= 0 {
+		r.exhausted = true
+		return 0, ErrDownloadedBytes
+	}
+	if int64(len(p)) > r.left {
+		p = p[:int(r.left)]
+	}
+	n, err := r.r.Read(p)
+	r.left -= int64(n)
+	*r.used += int64(n)
+	if err != nil {
+		return n, err
+	}
+	return n, nil
+}
+
 func writeFrame(w io.Writer, body []byte, max int) error {
 	if len(body) == 0 || len(body) > max {
 		return fmt.Errorf("%w: frame is %d bytes", ErrBounds, len(body))
@@ -32,6 +60,21 @@ func readFrame(r io.Reader, max int) ([]byte, error) {
 	body := make([]byte, int(n))
 	if _, err := io.ReadFull(r, body); err != nil {
 		return nil, fmt.Errorf("%w: frame body: %v", ErrWire, err)
+	}
+	return body, nil
+}
+
+func readFrameBudgeted(r io.Reader, max int, used *int64, budget int64) ([]byte, error) {
+	if used == nil || budget <= 0 {
+		return nil, fmt.Errorf("%w: invalid download budget", ErrBounds)
+	}
+	br := &downloadedReader{r: r, left: budget - *used, used: used}
+	body, err := readFrame(br, max)
+	if err != nil {
+		if br.exhausted || errors.Is(err, ErrDownloadedBytes) {
+			return nil, ErrDownloadedBytes
+		}
+		return nil, err
 	}
 	return body, nil
 }
@@ -91,6 +134,14 @@ func WriteResponseFrame(w io.Writer, r Response) error {
 }
 func ReadVerifiedResponseFrame(r io.Reader, t Target) (VerifiedResponse, error) {
 	b, err := readFrame(r, MaxResponseBytes)
+	if err != nil {
+		return VerifiedResponse{}, err
+	}
+	return VerifyResponse(t, b)
+}
+
+func readVerifiedResponseFrameBudgeted(r io.Reader, t Target, used *int64, budget int64) (VerifiedResponse, error) {
+	b, err := readFrameBudgeted(r, MaxResponseBytes, used, budget)
 	if err != nil {
 		return VerifiedResponse{}, err
 	}

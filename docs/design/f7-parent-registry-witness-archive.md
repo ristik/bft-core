@@ -226,3 +226,26 @@ Required evidence for that later implementation:
 
 This documentation change is validated by reference/symbol inspection and `git diff --check`. No runtime tests,
 devnet, hosted CI or real-reth evidence is claimed. It closes none of #10, #11, #12, #14 or #15.
+
+
+## 8. Inactive requester implementation
+
+`parentwitness.Requester` adds one sequential acquisition episode over a copied, finite, unique provider
+list. `Request(ctx, target)` coalesces concurrent calls for the same complete context and exact block hash.
+The first caller owns cancellation of that episode; another caller may cancel only its own wait. Changing
+the target cancels and joins the current episode and imposes the configured positive backoff. There is no
+queued target or automatic restart allowance: a later attempt needs an explicit call after backoff.
+
+Attempts, providers, elapsed time and downloaded bytes share the episode budget. Download accounting includes
+length prefixes, partial bodies and malformed/refusal responses; consuming the exact byte limit cannot
+select the single-exchange helper's unmetered mode. Each response still passes the existing independent
+proof verifier, and a successful result is checked against cancellation and the active generation before
+publication. Results contain the existing opaque, owned `VerifiedResponse`; returning evidence gives copies.
+
+`Close` cancels the active episode and all callers of `Close` join that same completion. As with the transport,
+shutdown requires a cooperative opener honoring its context and a stream whose reset/deadline interrupts I/O.
+No custom implementation that ignores those contracts can be forcibly stopped by this API.
+
+This unit does not register a protocol, choose deployment budgets, perform peer discovery, retain a durable
+record, or activate node acquisition/readiness/signing. Composing local acquisition and archive retrieval
+under one outer budget, and rechecking current certificate continuity before use, remain wiring obligations.
