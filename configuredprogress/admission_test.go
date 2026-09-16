@@ -453,10 +453,8 @@ func TestAdmissionBoundsConcurrentAuthentication(t *testing.T) {
 	_, _, err := s.Initialize(context.Background(), f.ctx)
 	require.NoError(t, err)
 	entered, release := make(chan struct{}), make(chan struct{})
-	ctx := f.ctx
-	ctx.Observation.TrustBases = blockingAdmissionTrust{tb: f.c.TrustBase, entered: entered, release: release}
 	c := newTestAdmission(t, f, s, &admissionGate{}, wallAdmissionClock{}, admissionPolicy{attempts: 3, duration: time.Second, cooldown: time.Hour}, func() {}, func(context.Context, rootinput.VerifiedObservationV2) error { return nil })
-	c.ctx = ctx
+	c.onAuthenticated = func(rootinput.VerifiedObservationV2) { close(entered); <-release }
 	u, tr := f.sign(&types.InputRecord{Version: 1}, 1, 4)
 	done := make(chan error, 1)
 	go func() { _, e := c.Submit(context.Background(), u, tr); done <- e }()
@@ -474,10 +472,9 @@ func TestAdmissionConcurrentCloseWaitsForIngressAndWorker(t *testing.T) {
 	_, _, err := s.Initialize(context.Background(), f.ctx)
 	require.NoError(t, err)
 	entered, release := make(chan struct{}), make(chan struct{})
-	ctx := f.ctx
-	ctx.Observation.TrustBases = stubbornAdmissionTrust{tb: f.c.TrustBase, entered: entered, release: release}
-	c, err := newAdmissionCoordinator(context.Background(), AdmissionConfig{Store: s, Context: ctx, Gate: &admissionGate{}, Invalidate: func() {}, Deliver: func(context.Context, rootinput.VerifiedObservationV2) error { return nil }}, wallAdmissionClock{}, admissionPolicy{attempts: 2, duration: time.Second, cooldown: time.Hour})
+	c, err := newAdmissionCoordinator(context.Background(), AdmissionConfig{Store: s, Context: f.ctx, Gate: &admissionGate{}, Invalidate: func() {}, Deliver: func(context.Context, rootinput.VerifiedObservationV2) error { return nil }}, wallAdmissionClock{}, admissionPolicy{attempts: 2, duration: time.Second, cooldown: time.Hour})
 	require.NoError(t, err)
+	c.onAuthenticated = func(rootinput.VerifiedObservationV2) { close(entered); <-release }
 	u, tr := f.sign(&types.InputRecord{Version: 1}, 1, 4)
 	submitDone := make(chan error, 1)
 	go func() { _, e := c.Submit(context.Background(), u, tr); submitDone <- e }()
@@ -508,10 +505,8 @@ func TestAdmissionCanceledBootstrapAuthenticationCannotQueue(t *testing.T) {
 	_, _, err := s.Initialize(context.Background(), f.ctx)
 	require.NoError(t, err)
 	entered, release := make(chan struct{}), make(chan struct{})
-	ctx := f.ctx
-	ctx.Observation.TrustBases = stubbornAdmissionTrust{tb: f.c.TrustBase, entered: entered, release: release}
 	c := newTestAdmission(t, f, s, &admissionGate{}, wallAdmissionClock{}, admissionPolicy{attempts: 2, duration: time.Second, cooldown: time.Hour}, func() {}, func(context.Context, rootinput.VerifiedObservationV2) error { return nil })
-	c.ctx = ctx
+	c.onAuthenticated = func(rootinput.VerifiedObservationV2) { close(entered); <-release }
 	u, tr := f.sign(&types.InputRecord{Version: 1}, 1, 4)
 	request, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -525,32 +520,4 @@ func TestAdmissionCanceledBootstrapAuthenticationCannotQueue(t *testing.T) {
 	st, _, err := s.Load(context.Background(), f.ctx)
 	require.NoError(t, err)
 	require.Zero(t, st.Revision())
-}
-
-type blockingAdmissionTrust struct {
-	tb      *types.RootTrustBaseV1
-	entered chan struct{}
-	release chan struct{}
-}
-
-type stubbornAdmissionTrust struct {
-	tb      *types.RootTrustBaseV1
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (b stubbornAdmissionTrust) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error) {
-	close(b.entered)
-	<-b.release
-	return b.tb, nil
-}
-
-func (b blockingAdmissionTrust) GetByEpoch(ctx context.Context, _ uint64) (*types.RootTrustBaseV1, error) {
-	close(b.entered)
-	select {
-	case <-b.release:
-		return b.tb, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 }

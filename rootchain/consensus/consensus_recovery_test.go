@@ -747,6 +747,10 @@ func createConsensusManagers(t *testing.T, count int, shardNodes []*types.NodeIn
 }
 
 func createConsensusManagersWithOptions(t *testing.T, count int, shardNodes []*types.NodeInfo, options func(*types.RootTrustBaseV1) []Option, wrapStore func(PersistentStore) PersistentStore) ([]*ConsensusManager, *mockNetwork) {
+	return createConsensusManagersWithPDR(t, count, shardNodes, options, wrapStore, nil)
+}
+
+func createConsensusManagersWithPDR(t *testing.T, count int, shardNodes []*types.NodeInfo, options func(*types.RootTrustBaseV1) []Option, wrapStore func(PersistentStore) PersistentStore, mutatePDR func(*types.PartitionDescriptionRecord)) ([]*ConsensusManager, *mockNetwork) {
 	t.Helper()
 	observe := testobservability.Default(t)
 
@@ -782,6 +786,9 @@ func createConsensusManagersWithOptions(t *testing.T, count int, shardNodes []*t
 	}
 	if options != nil {
 		shardConf.T2Timeout = 5 * time.Second
+	}
+	if mutatePDR != nil {
+		mutatePDR(shardConf)
 	}
 
 	// Let the rounds advance 10x faster in tests

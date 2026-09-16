@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/unicitynetwork/bft-core/evmroot"
@@ -14,6 +16,89 @@ import (
 	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+// ObservationProfileBindingV2 identifies an owned fixed observation context
+// and root trust base. It is process-local comparison metadata and grants no
+// authority by itself.
+func ObservationProfileBindingV2(c ObservationContextV2, tb *types.RootTrustBaseV1) ([32]byte, error) {
+	if tb == nil || c.NetworkID == 0 || c.PartitionID == 0 || c.ShardID.Length() > 4096 || len(c.ShardConfHash) != 32 || c.RootEpoch == 0 || len(tb.RootNodes) == 0 || len(tb.RootNodes) > 64 {
+		return [32]byte{}, ErrV2Context
+	}
+	for _, n := range tb.RootNodes {
+		if n == nil || len(n.NodeID) == 0 || len(n.NodeID) > 256 || len(n.SigKey) == 0 || len(n.SigKey) > 256 {
+			return [32]byte{}, ErrV2Context
+		}
+	}
+	if len(tb.Signatures) > 64 {
+		return [32]byte{}, ErrV2Context
+	}
+	total := len(tb.StateHash) + len(tb.ChangeRecordHash) + len(tb.PreviousEntryHash)
+	for _, n := range tb.RootNodes {
+		total += len(n.NodeID) + len(n.SigKey)
+	}
+	for author, sig := range tb.Signatures {
+		if len(author) == 0 || len(author) > 256 || len(sig) > 256 {
+			return [32]byte{}, ErrV2Context
+		}
+		total += len(author) + len(sig)
+	}
+	if total > 1<<20 {
+		return [32]byte{}, ErrV2Context
+	}
+	raw, err := types.Cbor.Marshal(tb)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	var owned types.RootTrustBaseV1
+	if err = types.Cbor.Unmarshal(raw, &owned); err != nil {
+		return [32]byte{}, err
+	}
+	sort.Slice(owned.RootNodes, func(i, j int) bool { return owned.RootNodes[i].NodeID < owned.RootNodes[j].NodeID })
+	trust, err := types.Cbor.Marshal(&owned)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	tuple := struct {
+		_         struct{} `cbor:",toarray"`
+		Domain    string
+		Version   uint64
+		Network   types.NetworkID
+		Partition types.PartitionID
+		Shard     []byte
+		Conf      []byte
+		Epoch     uint64
+		Trust     []byte
+	}{Domain: "configured-progress/observation-profile", Version: 1, Network: c.NetworkID, Partition: c.PartitionID, Shard: c.ShardID.Bytes(), Conf: bytes.Clone(c.ShardConfHash), Epoch: c.RootEpoch, Trust: trust}
+	b, err := types.Cbor.Marshal(tuple)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(b), nil
+}
+
+// AdmissionProfileBindingV2 additionally binds the configured genesis-origin
+// identity used by an admission coordinator.
+func AdmissionProfileBindingV2(c ObservationContextV2, tb *types.RootTrustBaseV1, originIdentity []byte) ([32]byte, error) {
+	if len(originIdentity) != sha256.Size {
+		return [32]byte{}, ErrV2Context
+	}
+	observation, err := ObservationProfileBindingV2(c, tb)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	tuple := struct {
+		_           struct{} `cbor:",toarray"`
+		Domain      string
+		Version     uint64
+		Observation []byte
+		Origin      []byte
+	}{Domain: "configured-progress/admission-profile", Version: 1, Observation: observation[:], Origin: bytes.Clone(originIdentity)}
+	b, err := types.Cbor.Marshal(tuple)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(b), nil
+}
 
 var (
 	ErrV2Context  = errors.New("rootinput: v2 configured context mismatch")

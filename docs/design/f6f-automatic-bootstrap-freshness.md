@@ -279,8 +279,8 @@ per-peer admission and rate, and uses one deadline across dial/write/read. A cal
 reserves every declared body before allocation and charges actual prefix/body reads without refunds across
 at most four concurrent exchanges. Complete raw responses remain available when cancellation races the last
 read so the collector can authenticate negative evidence; partial responses never become evidence. This is
-only a single-peer exchange primitive. Gathering policy, acknowledged ordinary handoff, receipt construction,
-node registration and activation remain separate work.
+only a single-peer exchange primitive. The requester below supplies gathering, acknowledged ordinary handoff
+and receipt construction; node registration and activation remain separate work.
 
 The inert committed-cut stage now copies a bounded coherent committed shard snapshot, rebuilds the shard and
 unicity membership paths outside the storage lock, and refuses any mismatch with the stored block round,
@@ -293,6 +293,24 @@ candidate floor and the candidate's unchanged IR/TR/config leaf verifies under t
 unsupported pair material is retained before positive cut fields are considered. The returned cut remains
 diagnostic evidence; old copies cannot bypass later collector invalidation. The independent encoding-only
 vector covers this tuple, while genuine root-loop tests cover the cryptographic membership path.
+
+The inactive `frontierrequester` composes these prerequisites into one process-bound acquisition. It owns a
+fresh cryptographic nonce, fixed local context and root trust snapshot, one collector, and one shared 1-MiB
+transport receive budget across at most two frontier and cut passes. Four workers may exchange concurrently,
+but one coordinator serializes every collector update. It authenticates every complete response body even
+when cancellation or a deadline accompanies the final read, joins and drains all workers, and rechecks the
+live collector before issuing an opaque receipt. Partial bodies never become evidence.
+
+Authenticated ordinary evidence crosses a concrete configured-progress acknowledgment boundary that
+reauthenticates under an owned fixed-epoch trust snapshot. Sticky invalidation and bounded owned first/latest
+slots are updated atomically before acknowledgment; finality-gate notification, durable persistence and
+delivery remain worker obligations. Unsupported evidence receives separate bounded diagnostic retention and
+sticky refusal. An opaque receipt remains tied to its originating requester, acquisition generation, caller
+and process contexts, nonce/profile binding, live collector and admission state, and a monotonic deadline no later than five
+minutes from nonce creation. Copies cannot bypass replacement, cancellation, expiry, ordinary evidence or
+unsupported evidence. Closing the admission coordinator also invalidates the receipt. Resolving a valid receipt
+returns owned copies of the genuine UC/TR and the cut identity; those copies do not carry a portable freshness
+verdict. The requester remains unregistered and grants no readiness or bootstrap activation.
 
 The small [intersection model](models/bootstrap_frontier.py) enumerates unit-vote quorum/fault sets and
 checks the floor argument plus counterexamples for local-status/minimum-floor/rollback substitutions.
