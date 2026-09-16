@@ -307,9 +307,13 @@ func (s *delayedStream) SetDeadline(d time.Time) error { s.deadline = d; return 
 
 var _ libp2pnetwork.Stream = (*delayedStream)(nil)
 
-type delayedSuccessfulOpener struct{ stream *delayedStream }
+type delayedSuccessfulOpener struct {
+	stream            *delayedStream
+	requestedDeadline time.Time
+}
 
 func (o *delayedSuccessfulOpener) CreateStream(ctx context.Context, _ peer.ID, _ string) (libp2pnetwork.Stream, error) {
+	o.requestedDeadline, _ = ctx.Deadline()
 	if err := sleepContext(ctx, 50*time.Millisecond); err != nil {
 		return nil, err
 	}
@@ -332,11 +336,10 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 func TestTransportSuccessfulDialSharesRemainingBudget(t *testing.T) {
 	_, target := fixtureTarget(t)
 	opener := &delayedSuccessfulOpener{}
-	start := time.Now()
 	_, err := RequestVerified(context.Background(), opener, "peer", target, 200*time.Millisecond)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.NotNil(t, opener.stream)
-	require.WithinDuration(t, start.Add(200*time.Millisecond), opener.stream.deadline, 35*time.Millisecond)
+	require.Equal(t, opener.requestedDeadline, opener.stream.deadline, "dial and exchange retain the same absolute deadline")
 }
 
 type cannedResponseStream struct {
