@@ -140,7 +140,7 @@ func ReadVerifiedResponseFrame(r io.Reader, t Target) (VerifiedResponse, error) 
 	return VerifyResponse(t, b)
 }
 
-func ReadVerifiedResponseFrameBudgeted(r io.Reader, t Target, used *int64, budget int64) (VerifiedResponse, error) {
+func readVerifiedResponseFrameBudgeted(r io.Reader, t Target, used *int64, budget int64) (VerifiedResponse, error) {
 	b, err := readFrameBudgeted(r, MaxResponseBytes, used, budget)
 	if err != nil {
 		return VerifiedResponse{}, err

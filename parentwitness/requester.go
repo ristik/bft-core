@@ -225,7 +225,7 @@ func (r *Requester) run(ctx context.Context, ep *requesterEpisode) RequesterResu
 			return out
 		}
 		attemptCtx, cancel := context.WithTimeout(ctx, remaining)
-		resp, bytes, err := RequestVerifiedBudgeted(attemptCtx, r.opener, p, ep.target, remaining, r.budget.MaxDownloadedBytes-out.Downloaded)
+		resp, bytes, err := requestVerifiedBudgeted(attemptCtx, r.opener, p, ep.target, remaining, r.budget.MaxDownloadedBytes-out.Downloaded)
 		cancel()
 		out.Attempts++
 		out.Providers++

@@ -65,16 +65,6 @@ func RequestVerified(ctx context.Context, h StreamOpener, to peer.ID, target Tar
 	return response, err
 }
 
-// RequestVerifiedBudgeted performs one exchange and accounts every byte read from the
-// response stream. A positive maxDownloadedBytes is mandatory; the legacy helper above keeps
-// the pre-budget API for callers that already have an outer bound.
-func RequestVerifiedBudgeted(ctx context.Context, h StreamOpener, to peer.ID, target Target, deadline time.Duration, maxDownloadedBytes int64) (VerifiedResponse, int64, error) {
-	if maxDownloadedBytes <= 0 {
-		return VerifiedResponse{}, 0, fmt.Errorf("%w: positive byte budget required", ErrTransport)
-	}
-	return requestVerifiedBudgeted(ctx, h, to, target, deadline, maxDownloadedBytes)
-}
-
 func requestVerifiedBudgeted(ctx context.Context, h StreamOpener, to peer.ID, target Target, deadline time.Duration, maxDownloadedBytes int64) (VerifiedResponse, int64, error) {
 	if h == nil || !target.Valid() || to == "" || deadline <= 0 {
 		return VerifiedResponse{}, 0, fmt.Errorf("%w: invalid client configuration", ErrTransport)
@@ -125,7 +115,7 @@ func exchangeVerifiedBudgeted(ctx context.Context, st transportStream, target Ta
 		_ = st.CloseWrite()
 		var response VerifiedResponse
 		if maxDownloadedBytes > 0 {
-			response, err = ReadVerifiedResponseFrameBudgeted(st, target, &downloaded, maxDownloadedBytes)
+			response, err = readVerifiedResponseFrameBudgeted(st, target, &downloaded, maxDownloadedBytes)
 		} else {
 			response, err = ReadVerifiedResponseFrame(st, target)
 		}
