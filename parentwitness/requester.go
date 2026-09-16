@@ -36,10 +36,10 @@ type RequesterBudget struct {
 }
 
 func (b RequesterBudget) validate() error {
-	if b.MaxAttempts <= 0 || b.MaxProviders <= 0 || b.Overall <= 0 || b.PerAttempt <= 0 || b.MaxDownloadedBytes <= 0 || b.Backoff < 0 {
+	if b.MaxAttempts <= 0 || b.MaxProviders <= 0 || b.Overall <= 0 || b.PerAttempt <= 0 || b.MaxDownloadedBytes <= 0 || b.Backoff <= 0 {
 		return fmt.Errorf("%w: all limits must be positive and finite", ErrTransport)
 	}
-	if b.Overall <= 0 || b.PerAttempt <= 0 || b.Backoff < 0 || b.Overall > 100*365*24*time.Hour || b.PerAttempt > 100*365*24*time.Hour || b.Backoff > 100*365*24*time.Hour {
+	if b.Overall <= 0 || b.PerAttempt <= 0 || b.Backoff <= 0 || b.Overall > 100*365*24*time.Hour || b.PerAttempt > 100*365*24*time.Hour || b.Backoff > 100*365*24*time.Hour {
 		return fmt.Errorf("%w: duration out of range", ErrTransport)
 	}
 	return nil
@@ -177,9 +177,8 @@ func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult
 		res := r.run(epctx, ep)
 		close(watchStop)
 		<-watchDone
-		cancel()
 		r.mu.Lock()
-		if res.Outcome == RequesterVerified && (ep.markValue() != RequesterVerified || epctx.Err() != nil || r.closed || r.active != ep) {
+		if res.Outcome == RequesterVerified && (ep.markValue() != RequesterVerified || epctx.Err() != nil || r.ctx.Err() != nil || r.closed || r.active != ep) {
 			if ep.markValue() == RequesterSuperseded {
 				res = RequesterResult{Outcome: RequesterSuperseded, Attempts: res.Attempts, Providers: res.Providers, Downloaded: res.Downloaded, Detail: "target superseded"}
 			} else {
@@ -196,6 +195,7 @@ func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult
 		}
 		close(ep.done)
 		r.mu.Unlock()
+		cancel()
 		return res, nil
 	}
 }
@@ -211,6 +211,9 @@ func (r *Requester) run(ctx context.Context, ep *requesterEpisode) RequesterResu
 			return out
 		}
 		if err := ctx.Err(); err != nil {
+			return stoppedResult(ep, out, err)
+		}
+		if err := r.ctx.Err(); err != nil {
 			return stoppedResult(ep, out, err)
 		}
 		remaining := time.Until(deadline)
@@ -243,8 +246,15 @@ func (r *Requester) run(ctx context.Context, ep *requesterEpisode) RequesterResu
 			out.Outcome, out.Detail = RequesterBudgetExhausted, ErrDownloadedBytes.Error()
 			return out
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) {
 			return stoppedResult(ep, out, err)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			if ctx.Err() != nil || time.Now().After(deadline) {
+				return stoppedResult(ep, out, err)
+			}
+			out.Detail = err.Error()
+			continue
 		}
 		out.Outcome, out.Detail = RequesterInvalid, err.Error()
 	}
