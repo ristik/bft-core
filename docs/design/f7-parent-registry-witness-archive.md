@@ -116,6 +116,18 @@ compare verified full context and B to the request. Only the resulting verified 
 A key or secondary index may locate a candidate; it cannot establish round, identity, certification or
 availability. Missing/damaged/aliased entries refuse without raw-byte export or fallback to the head.
 
+The implemented inactive v2 locator uses key `record-hash/v1/<64 lowercase block-hash hex>` in the
+`configured-progress/v2` bucket and canonical value `[1, canonicalRecordKeyBytes]`. It is written and
+removed atomically with ordinary record publication and retention. The locator is never authority:
+`ReadByHash` consistently copies and re-verifies descriptor, control, published head, locator and candidate,
+then requires the candidate at or behind both authenticated observed progress and head. Missing locators in
+old unindexed databases are unavailable; there is no scan, backfill, head fallback or peer-supplied round.
+
+Forward use of old unindexed v2 databases is supported. Backward write compatibility is not: an old v2
+binary ignores these additive keys and may prune records without their locators, leaving dangling/orphan
+entries beyond `Retain` after downgrade and re-upgrade. Reads fail closed. Cleanup would require separately
+reviewed bounded verified maintenance; startup and peer requests never repair or scan implicitly.
+
 Any separate witness-only archive similarly re-verifies its bounded evidence under checked local context
 and exact B on read. Its local admission and indexed identity must be reviewed; it cannot be labelled a
 certified-record store or bypass verification when populated from one. No new archive schema is implemented

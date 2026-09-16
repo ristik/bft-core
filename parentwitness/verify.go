@@ -26,6 +26,8 @@ type Target struct {
 	registry registryproof.Context
 }
 
+func (t Target) Valid() bool { return t.request.BlockHash != (common.Hash{}) }
+
 func NewTarget(c TargetConfig) (Target, error) {
 	if c.FullShardConfHash != c.Registry.FullShardConfHash {
 		return Target{}, fmt.Errorf("%w: registry and full configuration hashes differ", ErrContext)

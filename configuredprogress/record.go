@@ -190,7 +190,31 @@ func (s *Store) CommitRecord(p PreparedRecord) (certifiedstore.Loaded, error) {
 		if !imageMatches(b, pr.before) {
 			return ErrStale
 		}
+		blockHash, err := blockHashFromRecordKey(pr.key)
+		if err != nil {
+			return err
+		}
+		indexKey := hashIndexKey(blockHash)
+		indexValue, err := encodeHashIndex(pr.key)
+		if err != nil {
+			return err
+		}
+		if old := b.Get(indexKey); old != nil {
+			if len(old) > MaxHashIndexValueBytes {
+				return ErrBounds
+			}
+			locator, err := decodeHashIndex(old)
+			if err != nil || !bytes.Equal(locator, pr.key) {
+				return fmt.Errorf("%w: block hash index collision", ErrUntrusted)
+			}
+			if b.Get(locator) == nil {
+				return fmt.Errorf("%w: dangling block hash index", ErrUntrusted)
+			}
+		}
 		if err := b.Put(pr.key, pr.raw); err != nil {
+			return err
+		}
+		if err := b.Put(indexKey, indexValue); err != nil {
 			return err
 		}
 		if err := s.at("after-record-put"); err != nil {
@@ -220,6 +244,23 @@ func (s *Store) CommitRecord(p PreparedRecord) (certifiedstore.Loaded, error) {
 			if bytes.Equal(k, pr.key) {
 				keys = append(keys, k)
 				continue
+			}
+			hash, err := blockHashFromRecordKey(k)
+			if err != nil {
+				return err
+			}
+			idxKey := hashIndexKey(hash)
+			if idx := b.Get(idxKey); idx != nil {
+				if len(idx) > MaxHashIndexValueBytes {
+					return ErrBounds
+				}
+				locator, err := decodeHashIndex(idx)
+				if err != nil || !bytes.Equal(locator, k) {
+					return fmt.Errorf("%w: retained-record index mismatch", ErrUntrusted)
+				}
+				if err := b.Delete(idxKey); err != nil {
+					return err
+				}
 			}
 			if err := b.Delete(k); err != nil {
 				return err
