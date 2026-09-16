@@ -49,11 +49,18 @@ func (t Target) Request() Request {
 
 // VerifiedResponse contains owned evidence and a snapshot only for OutcomeFound.
 type VerifiedResponse struct {
-	Outcome  Outcome
-	Detail   string
-	Snapshot registryproof.Snapshot
+	valid    bool
+	outcome  Outcome
+	detail   string
+	snapshot registryproof.Snapshot
 	evidence registryproof.Evidence
 }
+
+func (r VerifiedResponse) Valid() bool                      { return r.valid }
+func (r VerifiedResponse) Found() bool                      { return r.valid && r.outcome == OutcomeFound }
+func (r VerifiedResponse) Outcome() Outcome                 { return r.outcome }
+func (r VerifiedResponse) Detail() string                   { return r.detail }
+func (r VerifiedResponse) Snapshot() registryproof.Snapshot { return r.snapshot }
 
 func (r VerifiedResponse) Evidence() registryproof.Evidence {
 	e, _ := ownEvidence(r.evidence)
@@ -75,14 +82,14 @@ func VerifyResponse(t Target, raw []byte) (VerifiedResponse, error) {
 		return VerifiedResponse{}, ErrContext
 	}
 	if r.Outcome != OutcomeFound {
-		return VerifiedResponse{Outcome: r.Outcome, Detail: r.Detail}, nil
+		return VerifiedResponse{valid: true, outcome: r.Outcome, detail: r.Detail}, nil
 	}
 	// decodeResponse has already bounded and owned every byte before proof verification begins.
 	snapshot, err := registryproof.Verify(t.registry, t.request.BlockHash, r.Evidence)
 	if err != nil {
 		return VerifiedResponse{}, err
 	}
-	return VerifiedResponse{Outcome: OutcomeFound, Detail: r.Detail, Snapshot: snapshot, evidence: r.Evidence}, nil
+	return VerifiedResponse{valid: true, outcome: OutcomeFound, detail: r.Detail, snapshot: snapshot, evidence: r.Evidence}, nil
 }
 
 func sameRequest(a, b Request) bool {

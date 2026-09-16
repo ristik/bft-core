@@ -24,10 +24,10 @@ const (
 	MaxDiagnosticBytes = 200
 	MaxShardIDBytes    = 33
 
-	// MaxFoundResponseBytes is the exact largest canonical v1 found response: 256 KiB
-	// aggregate evidence spread over 23*65 nodes to maximize length prefixes, a 1,024-byte
-	// header, the maximum canonical shard encoding and a 200-byte diagnostic.
-	MaxFoundResponseBytes = 265621
+	// MaxFoundResponseBytesUpperBound proves the 272 KiB frame can carry every bounded found
+	// response. It adds the full 256 KiB evidence budget, a conservative three-byte CBOR prefix
+	// for every one of 23*65 nodes and the header, and maximum arrays/context/detail overhead.
+	MaxFoundResponseBytesUpperBound = 267138
 )
 
 var (

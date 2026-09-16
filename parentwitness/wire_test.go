@@ -3,6 +3,7 @@ package parentwitness
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 
@@ -29,8 +30,10 @@ func TestVerifiedFoundAndOwnedBoundaries(t *testing.T) {
 	r.Evidence.Header[0] ^= 1
 	verified, err := VerifyResponse(target, raw)
 	require.NoError(t, err)
-	require.Equal(t, OutcomeFound, verified.Outcome)
-	require.Equal(t, c.Blocks[1].StateRoot, verified.Snapshot.StateRoot())
+	require.True(t, verified.Valid())
+	require.True(t, verified.Found())
+	require.Equal(t, OutcomeFound, verified.Outcome())
+	require.Equal(t, c.Blocks[1].StateRoot, verified.Snapshot().StateRoot())
 	e := verified.Evidence()
 	e.Header[0] ^= 1
 	require.NotEqual(t, e.Header, verified.Evidence().Header)
@@ -92,7 +95,9 @@ func TestOutcomesEvidenceAndCanonicalRefusals(t *testing.T) {
 		require.NoError(t, err)
 		got, err := VerifyResponse(target, raw)
 		require.NoError(t, err)
-		require.Equal(t, outcome, got.Outcome)
+		require.True(t, got.Valid())
+		require.False(t, got.Found())
+		require.Equal(t, outcome, got.Outcome())
 	}
 	_, err := EncodeResponse(Response{Request: target.Request(), Outcome: OutcomeBusy, Evidence: registryproof.Evidence{Header: []byte{1}}})
 	require.ErrorIs(t, err, ErrWire)
@@ -120,16 +125,20 @@ func TestPredecodeCBORBounds(t *testing.T) {
 func TestFramingRejectsOversizeBeforeBodyRead(t *testing.T) {
 	var prefix [binary.MaxVarintLen64]byte
 	n := binary.PutUvarint(prefix[:], MaxRequestBytes+1)
-	tracked := &oneByteReader{data: append(prefix[:n], 0xaa)}
+	tracked := &prefixGuardReader{prefix: bytes.Clone(prefix[:n])}
 	_, err := ReadRequestFrame(tracked)
 	require.ErrorIs(t, err, ErrBounds)
-	require.Equal(t, n, tracked.read, "oversize admission consumes only the declared-length prefix")
+	require.Equal(t, n, tracked.read)
+	require.False(t, tracked.overread, "oversize admission never asks the underlying reader for body bytes")
 }
 
 func TestVerifyResponseChecksFrameBoundBeforeDecode(t *testing.T) {
 	_, target := fixtureTarget(t)
-	_, err := VerifyResponse(target, make([]byte, MaxResponseBytes+1))
+	raw := make([]byte, MaxResponseBytes+1)
+	_, err := VerifyResponse(target, raw)
 	require.ErrorIs(t, err, ErrBounds)
+	allocs := testing.AllocsPerRun(20, func() { _, _ = VerifyResponse(target, raw) })
+	require.LessOrEqual(t, allocs, float64(3), "oversized input must not be cloned before refusal")
 }
 
 func TestFramingRejectsShortWrites(t *testing.T) {
@@ -147,18 +156,24 @@ func TestTargetCopiesMutableInputs(t *testing.T) {
 	require.ErrorIs(t, err, registryproof.ErrUnavailable)
 }
 
-type oneByteReader struct {
-	data []byte
-	read int
+type prefixGuardReader struct {
+	prefix   []byte
+	read     int
+	overread bool
 }
 
-func (r *oneByteReader) Read(p []byte) (int, error) {
-	if r.read == len(r.data) {
+func (r *prefixGuardReader) Read(p []byte) (int, error) {
+	remaining := len(r.prefix) - r.read
+	if remaining == 0 {
 		return 0, io.EOF
 	}
-	p[0] = r.data[r.read]
-	r.read++
-	return 1, nil
+	if len(p) > remaining {
+		r.overread = true
+		return 0, errors.New("reader was asked to cross from prefix into body")
+	}
+	n := copy(p, r.prefix[r.read:])
+	r.read += n
+	return n, nil
 }
 
 type shortWriter struct{}
@@ -172,18 +187,21 @@ func (shortWriter) Write(p []byte) (int, error) {
 
 func TestWorstCaseResponseFitsFrozenCap(t *testing.T) {
 	_, target := fixtureTarget(t)
-	// 23 proof lists × 65 nodes is the maximum list overhead. Aggregate node bytes, including
-	// the header, remain capped at 256 KiB, so distribute the remaining bytes across the nodes.
+	// This uneven distribution is larger on the wire than equal-size nodes because 970 nodes
+	// cross CBOR's 256-byte threshold and gain a third length-prefix byte.
 	nodes := make([][]byte, 23*65)
-	remaining := MaxEvidenceBytes - 1024
-	for i := range nodes {
-		n := remaining / (len(nodes) - i)
-		if n > 1024 {
-			n = 1024
-		}
-		nodes[i] = bytes.Repeat([]byte{byte(i)}, n)
-		remaining -= n
+	for i := range nodes[:970] {
+		nodes[i] = bytes.Repeat([]byte{byte(i)}, 256)
 	}
+	for i := 970; i < 970+524; i++ {
+		nodes[i] = bytes.Repeat([]byte{byte(i)}, 24)
+	}
+	nodes[len(nodes)-1] = bytes.Repeat([]byte{1}, 224)
+	var nodeBytes int
+	for _, n := range nodes {
+		nodeBytes += len(n)
+	}
+	require.Equal(t, MaxEvidenceBytes-1024, nodeBytes)
 	ev := registryproof.Evidence{Header: bytes.Repeat([]byte{1}, 1024), AccountProof: nodes[:65], StorageProofs: make([][][]byte, registryproof.FieldCount)}
 	for i := range ev.StorageProofs {
 		ev.StorageProofs[i] = nodes[65+i*65 : 65+(i+1)*65]
@@ -191,7 +209,7 @@ func TestWorstCaseResponseFitsFrozenCap(t *testing.T) {
 	raw, err := EncodeResponse(Response{Request: target.Request(), Outcome: OutcomeFound, Evidence: ev})
 	require.NoError(t, err)
 	require.LessOrEqual(t, len(raw), MaxResponseBytes)
-	require.Equal(t, 265387, len(raw), "freeze maximum evidence with the fixture context")
-	require.Equal(t, MaxFoundResponseBytes, len(raw)+(35-2)+(202-1), "add maximum shard and diagnostic encodings")
-	require.Less(t, MaxFoundResponseBytes, MaxResponseBytes)
+	require.Equal(t, 266357, len(raw), "freeze adversarial prefix distribution with fixture context")
+	require.LessOrEqual(t, len(raw)+(35-2)+(202-1), MaxFoundResponseBytesUpperBound)
+	require.Less(t, MaxFoundResponseBytesUpperBound, MaxResponseBytes)
 }
