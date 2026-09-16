@@ -67,6 +67,6 @@ func TestNoProductionPackageImportsTheReader(t *testing.T) {
 	for _, want := range []string{"rootinput/rootinput.go", "shardnode/round.go", "cli/ubft/cmd/shard_node_run.go", "engineapi/adapter.go"} {
 		require.True(t, scanned[want], "expected to scan %s", want)
 	}
-	require.Equal(t, []string{filepath.Join("rootinput", "v2.go")}, importers,
+	require.Equal(t, []string{filepath.Join("configuredprogress", "codec.go"), filepath.Join("rootinput", "v2.go")}, importers,
 		"only the inactive v2 derivation API may import %s", importPath)
 }

@@ -1,0 +1,186 @@
+package configuredprogress
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
+)
+
+type callbackTrust struct {
+	tb       *types.RootTrustBaseV1
+	callback func()
+}
+
+func (t callbackTrust) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error) {
+	t.callback()
+	return t.tb, nil
+}
+
+func TestInitializeReloadAndContextBinding(t *testing.T) {
+	f := newFixture(t, 2)
+	s, path := f.open(3)
+	st, tok, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	require.Zero(t, st.Revision())
+	require.False(t, st.Ordinary())
+	require.True(t, s.Unchanged(tok))
+	require.NoError(t, s.Close())
+	require.False(t, s.Unchanged(tok), "tokens are process/store-instance owned")
+	s, err = OpenConfiguredV2(path, Settings{Retain: 3})
+	require.NoError(t, err)
+	defer s.Close()
+	st2, tok2, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	require.Zero(t, st2.Revision())
+	require.True(t, s.Unchanged(tok2))
+	bad := f.ctx
+	bad.Observation.NetworkID = 4
+	_, _, err = s.Load(context.Background(), bad)
+	require.ErrorIs(t, err, ErrContext)
+}
+
+func TestObservationMonotonicSupersessionAndNoOpCAS(t *testing.T) {
+	f := newFixture(t, 2)
+	s, _ := f.open(3)
+	defer s.Close()
+	_, _, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	b := f.bootstrap(1, 4)
+	p, out, err := s.PrepareObservation(context.Background(), f.ctx, b)
+	require.NoError(t, err)
+	require.Equal(t, ObservationAdvanced, out)
+	current, out, err := s.CommitObservation(p)
+	require.NoError(t, err)
+	require.Equal(t, b.OriginIdentity(), current.OriginIdentity())
+	require.Equal(t, ObservationAdvanced, out)
+	dupPrep, out, err := s.PrepareObservation(context.Background(), f.ctx, b)
+	require.NoError(t, err)
+	require.Equal(t, ObservationDuplicate, out)
+	first := f.first(1, 2, 5)
+	advance, _, err := s.PrepareObservation(context.Background(), f.ctx, first)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(advance)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(dupPrep)
+	require.ErrorIs(t, err, ErrStale, "a prepared no-op cannot authorize adoption after durable state changes")
+	st, _, err := s.Load(context.Background(), f.ctx)
+	require.NoError(t, err)
+	require.True(t, st.Ordinary())
+	require.Equal(t, uint64(2), st.Revision())
+	fo, ok := st.FirstOrdinary()
+	require.True(t, ok)
+	require.Equal(t, first.OriginIdentity(), fo.OriginIdentity())
+	obs, _ := st.Observed()
+	require.Equal(t, first.OriginIdentity(), obs.OriginIdentity())
+	stale := f.bootstrap(1, 4)
+	sp, out, err := s.PrepareObservation(context.Background(), f.ctx, stale)
+	require.NoError(t, err)
+	require.Equal(t, ObservationStale, out)
+	cur, out, err := s.CommitObservation(sp)
+	require.NoError(t, err)
+	require.Equal(t, ObservationStale, out)
+	require.Equal(t, first.OriginIdentity(), cur.OriginIdentity())
+	after, _, _ := s.Load(context.Background(), f.ctx)
+	require.Equal(t, uint64(2), after.Revision(), "stale delivery does not rewrite bytes")
+}
+
+func TestConcurrentFirstOrdinaryWinnerIsImmutable(t *testing.T) {
+	f := newFixture(t, 2)
+	s, _ := f.open(3)
+	defer s.Close()
+	_, _, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	a := f.first(1, 2, 5)
+	b := f.ordinary(2, 3, 6)
+	pa, _, err := s.PrepareObservation(context.Background(), f.ctx, a)
+	require.NoError(t, err)
+	pb, _, err := s.PrepareObservation(context.Background(), f.ctx, b)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(pa)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(pb)
+	require.ErrorIs(t, err, ErrStale)
+	pb, _, err = s.PrepareObservation(context.Background(), f.ctx, b)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(pb)
+	require.NoError(t, err)
+	st, _, err := s.Load(context.Background(), f.ctx)
+	require.NoError(t, err)
+	first, _ := st.FirstOrdinary()
+	observed, _ := st.Observed()
+	require.Equal(t, a.OriginIdentity(), first.OriginIdentity())
+	require.Equal(t, b.OriginIdentity(), observed.OriginIdentity())
+}
+
+func TestSameRootDifferentAssignmentConflicts(t *testing.T) {
+	f := newFixture(t, 0)
+	s, _ := f.open(2)
+	defer s.Close()
+	_, _, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	a := f.bootstrap(1, 4)
+	p, _, err := s.PrepareObservation(context.Background(), f.ctx, a)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(p)
+	require.NoError(t, err)
+	contradiction := f.bootstrap(2, 4)
+	_, _, err = s.PrepareObservation(context.Background(), f.ctx, contradiction)
+	require.ErrorIs(t, err, ErrConflict)
+}
+
+func TestFailedObservationCommitRetriesAsWrite(t *testing.T) {
+	f := newFixture(t, 1)
+	s, _ := f.open(2)
+	defer s.Close()
+	_, _, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	o := f.first(1, 2, 5)
+	p, _, err := s.PrepareObservation(context.Background(), f.ctx, o)
+	require.NoError(t, err)
+	s.checkpoint = func(string) error { return errors.New("disk fault") }
+	_, _, err = s.CommitObservation(p)
+	require.Error(t, err)
+	s.checkpoint = nil
+	st, _, err := s.Load(context.Background(), f.ctx)
+	require.NoError(t, err)
+	require.Zero(t, st.Revision())
+	p, out, err := s.PrepareObservation(context.Background(), f.ctx, o)
+	require.NoError(t, err)
+	require.Equal(t, ObservationAdvanced, out, "failed persistence is not remembered as duplicate")
+	_, _, err = s.CommitObservation(p)
+	require.NoError(t, err)
+}
+
+func TestPrepareOwnsContextAcrossTrustCallbacks(t *testing.T) {
+	f := newFixture(t, 1)
+	s, _ := f.open(2)
+	defer s.Close()
+	_, _, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	bootstrap := f.bootstrap(1, 4)
+	p, _, err := s.PrepareObservation(context.Background(), f.ctx, bootstrap)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(p)
+	require.NoError(t, err)
+	c := f.ctx
+	originalObs := c.Observation.ShardConfHash
+	originalRecord := c.Record.FullShardConfHash
+	c.Observation.TrustBases = callbackTrust{tb: f.c.TrustBase, callback: func() {
+		for i := range originalObs {
+			originalObs[i] ^= 0xff
+		}
+		for i := range originalRecord {
+			originalRecord[i] ^= 0xff
+		}
+	}}
+	c.Record.TrustBases = c.Observation.TrustBases
+	repeat := f.bootstrap(2, 5)
+	p, out, err := s.PrepareObservation(context.Background(), c, repeat)
+	require.NoError(t, err)
+	require.Equal(t, ObservationRepeated, out, "later authentication must use the context snapshot taken before Load callbacks")
+	_, _, err = s.CommitObservation(p)
+	require.NoError(t, err)
+}
