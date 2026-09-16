@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -28,6 +29,12 @@ type v2Fixture struct {
 type callbackTrust struct {
 	tb       *types.RootTrustBaseV1
 	callback func()
+}
+
+type failingTrust struct{ err error }
+
+func (s failingTrust) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error) {
+	return nil, s.err
 }
 
 func (s callbackTrust) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error) {
@@ -175,6 +182,23 @@ func TestV2AuthenticationRefusalsAreOnTheNewPath(t *testing.T) {
 	obs, _ := f.signed(t, ir, 1, 4)
 	_, err := DeriveV2(ContextV2{Genesis: f.origin, Parent: f.snapshot(t, 0), Round: 2, ParentHash: f.blocks[0].Hash.Bytes()}, obs)
 	require.ErrorIs(t, err, ErrNotPinned, "the caller-pinned assigned round must match authenticated TR")
+}
+
+func TestV2UnsupportedClassifierRequiresDirectPostAuthenticationRefusal(t *testing.T) {
+	f := newV2Fixture(t)
+	ir := &types.InputRecord{Version: 1, SumOfEarnedFees: 1}
+	tr := certifiedchain.Technical(0)
+	tr.Round = 1
+	uc := f.signedRaw(t, ir, tr, 4)
+	_, err := AuthenticateObservationV2(context.Background(), f.obsContext(), uc, tr)
+	require.True(t, IsUnsupportedObservationV2(err))
+	require.ErrorIs(t, err, ErrV2Shape)
+
+	c := f.obsContext()
+	c.TrustBases = failingTrust{err: fmt.Errorf("provider: %w", ErrV2Shape)}
+	_, err = AuthenticateObservationV2(context.Background(), c, uc, tr)
+	require.False(t, IsUnsupportedObservationV2(err), "a callback-controlled sentinel is not authenticated evidence")
+	require.ErrorIs(t, err, ErrV2Shape)
 }
 
 func TestV2ExactBootstrapAndOwnedObservation(t *testing.T) {
