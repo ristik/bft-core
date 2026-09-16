@@ -221,6 +221,9 @@ owner approval selected the automatic mechanism, not a public availability/reten
 
 ## 7. Implementation and evidence units
 
+[F6g](f6g-root-frontier-boundary.md) maps these units to the consensus loop, owned storage reads,
+covering-QC selection and failure/recovery admission boundaries at the current implementation.
+
 The inactive storage prerequisite exposes `BoltDB.ReadSafetySnapshot`, which reads the persisted highest
 QC and highest-voted rounds coherently in one bbolt view and returns an error for unavailable or malformed
 state. This value is a storage snapshot only; it is not globally fresh or a certified authority, and it does
