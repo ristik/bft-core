@@ -408,7 +408,8 @@ system calls (`alloy-evm` `block/system_calls/eip7002.rs` turns a revert or halt
 block validation error), the execution client treats any of these as **block invalid**:
 
 - `open` or `finalize` reverts, halts or runs out of gas;
-- their combined gas exceeds `g_sys` (D2 §3);
+- their combined gas spent before refunds exceeds `g_sys` (D2 §3); privileged
+  storage refunds do not reduce either call's charge or replenish that budget;
 - `open` is not the first execution in the block, or `finalize` is missing, repeated or not immediately
   after the (empty) forced prefix;
 - after the block, `phase != 2` or `outcomes.round != n` (`seal_finalize_missing`,

@@ -211,6 +211,28 @@ g_ordinary_actual = DiscretionaryGasUsed — the Σ receipt gasUsed of the
 header.gasUsed    = g_system_actual + g_forced_actual + g_ordinary_actual
 ```
 
+**System-call metering clarification, approved 2026-09-17:** `SystemCall.GasUsed`
+and `Finalize.GasUsed` mean execution gas spent **before refunds**. Storage
+refunds earned by either privileged call do not reduce its charged work and do
+not increase the budget available to the other call. Execute open with at most
+`g_sys`, then finalize with at most `g_sys - SystemCall.GasUsed` (checked
+subtraction). System calls have no transaction intrinsic gas or EOA fee/nonce
+processing; this rule does not turn them into ordinary transactions.
+
+Use these same pre-refund values in the derived system outcome, combined
+`g_sys` check, header `gasUsed`, and ordinary-gas recovery. The outcome commitment
+contains open's gas only; finalize's gas cannot enter the commitment it is
+writing, but is included in the combined system total. Build and replay apply
+identical metering. Ordinary and valid forced transactions retain standard
+Ethereum transaction refund rules and receipt gas accounting.
+
+For the pinned revm implementation, `total_gas_spent()` supplies this quantity;
+the refund-subtracting `gas_used()`/`tx_gas_used()` must not supply privileged
+work. This API note is illustrative: the before-refund rule above is normative.
+Real execution tests must include a storage reset that earns a nonzero refund,
+and a combined-budget boundary that the refund would otherwise make pass.
+The earlier model's supplied gas values do not establish that execution test.
+
 **A forced transaction's execution gas is `g_forced_actual`, drawn from the
 reserved `g_fi` budget — never `g_ordinary_actual`.** A forced entry valid at its
 turn stays an ordinary transaction in `transactionsRoot` / `receiptsRoot` with a
