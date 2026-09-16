@@ -300,6 +300,48 @@ func (db BoltDB) ReadLastVote() (msg any, err error) {
 
 var errNoSafetyBucket = errors.New("safety module bucket not found")
 
+// SafetySnapshot is the persisted safety frontier read from one database view.
+// It is a storage snapshot only; it does not certify global freshness or authority.
+// Vote and recovery serialization remain separate concerns for the callers.
+type SafetySnapshot struct {
+	HighestQCRound    uint64
+	HighestVotedRound uint64
+}
+
+// ReadSafetySnapshot returns both persisted safety rounds from one coherent read
+// transaction. It returns an error for any unavailable or malformed field rather
+// than substituting a genesis value.
+func (db BoltDB) ReadSafetySnapshot() (snapshot SafetySnapshot, err error) {
+	if db.db == nil {
+		return snapshot, errors.New("database is uninitialized")
+	}
+
+	err = db.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketSafety)
+		if b == nil {
+			return errNoSafetyBucket
+		}
+
+		highestQC, err := readUint64(b, keyHighestQc)
+		if err != nil {
+			return fmt.Errorf("reading highest QC round: %w", err)
+		}
+		highestVoted, err := readUint64(b, keyHighestVoted)
+		if err != nil {
+			return fmt.Errorf("reading highest voted round: %w", err)
+		}
+		snapshot = SafetySnapshot{
+			HighestQCRound:    highestQC,
+			HighestVotedRound: highestVoted,
+		}
+		return nil
+	})
+	if err != nil {
+		return SafetySnapshot{}, err
+	}
+	return snapshot, nil
+}
+
 func (db BoltDB) GetHighestVotedRound() (round uint64) {
 	err := db.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketSafety)

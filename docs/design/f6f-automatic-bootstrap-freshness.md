@@ -221,6 +221,12 @@ owner approval selected the automatic mechanism, not a public availability/reten
 
 ## 7. Implementation and evidence units
 
+The inactive storage prerequisite exposes `BoltDB.ReadSafetySnapshot`, which reads the persisted highest
+QC and highest-voted rounds coherently in one bbolt view and returns an error for unavailable or malformed
+state. This value is a storage snapshot only; it is not globally fresh or a certified authority, and it does
+not change existing getters, callers, schemas or write behavior. Vote and recovery serialization remain
+separate implementation work.
+
 1. **Root frontier read/sign API:** error-returning durable safety read; actual LastCR copy; covering-QC
    selection/validation; serialized vote/timeout/recovery ordering; bounded signing domain and refusal.
    Fault-test every persist/sign/recover cut and missing QC. No protocol registration in this unit.
