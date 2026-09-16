@@ -128,6 +128,9 @@ func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult
 	if ctx == nil || !target.Valid() {
 		return RequesterResult{}, ErrContext
 	}
+	if err := ctx.Err(); err != nil {
+		return RequesterResult{Outcome: RequesterStopped, Detail: err.Error()}, err
+	}
 	for {
 		r.mu.Lock()
 		if r.closed {
@@ -224,6 +227,10 @@ func (r *Requester) run(ctx context.Context, ep *requesterEpisode) RequesterResu
 			out.Outcome, out.Detail = RequesterBudgetExhausted, "overall deadline"
 			return out
 		}
+		if out.Downloaded >= r.budget.MaxDownloadedBytes {
+			out.Outcome, out.Detail = RequesterBudgetExhausted, ErrDownloadedBytes.Error()
+			return out
+		}
 		attemptCtx, cancel := context.WithTimeout(ctx, remaining)
 		resp, bytes, err := requestVerifiedBudgeted(attemptCtx, r.opener, p, ep.target, remaining, r.budget.MaxDownloadedBytes-out.Downloaded)
 		cancel()
@@ -250,7 +257,11 @@ func (r *Requester) run(ctx context.Context, ep *requesterEpisode) RequesterResu
 			return stoppedResult(ep, out, err)
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			if ctx.Err() != nil || time.Now().After(deadline) {
+			if time.Now().After(deadline) {
+				out.Outcome, out.Detail = RequesterBudgetExhausted, "overall deadline"
+				return out
+			}
+			if ctx.Err() != nil {
 				return stoppedResult(ep, out, err)
 			}
 			out.Detail = err.Error()
