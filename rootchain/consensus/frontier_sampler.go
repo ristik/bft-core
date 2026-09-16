@@ -13,6 +13,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -55,12 +56,14 @@ type FrontierSample struct {
 
 type frontierReply struct {
 	sample *FrontierSample
+	signed *SignedFrontierResponse
 	err    error
 }
 type frontierRequest struct {
-	ctx   context.Context
-	req   FrontierRequest
-	reply chan frontierReply
+	ctx    context.Context
+	req    FrontierRequest
+	signed *signedFrontierRequest
+	reply  chan frontierReply
 }
 type frontierSafetyReader interface {
 	ReadSafetySnapshot() (storage.SafetySnapshot, error)
@@ -76,6 +79,9 @@ type frontierSampler struct {
 	eligible  atomic.Bool
 	faulted   atomic.Bool
 	reader    frontierSafetyReader
+	signing   bool
+	author    string
+	signer    abcrypto.Signer
 }
 
 func newFrontierSampler(c FrontierSamplerConfig, reader frontierSafetyReader) (*frontierSampler, error) {
@@ -156,30 +162,36 @@ func (x *ConsensusManager) SampleFrontier(ctx context.Context, req FrontierReque
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	out, err := x.submitFrontierRequest(ctx, r)
+	return out.sample, err
+}
+
+func (x *ConsensusManager) submitFrontierRequest(ctx context.Context, r frontierRequest) (frontierReply, error) {
+	s := x.frontier
 	select {
 	case s.requests <- r:
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return frontierReply{}, ctx.Err()
 	case <-s.stopped:
-		return nil, ErrFrontierStopped
+		return frontierReply{}, ErrFrontierStopped
 	default:
-		return nil, ErrFrontierBusy
+		return frontierReply{}, ErrFrontierBusy
 	}
 	select {
 	case out := <-r.reply:
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return frontierReply{}, err
 		}
 		select {
 		case <-s.stopped:
-			return nil, ErrFrontierStopped
+			return frontierReply{}, ErrFrontierStopped
 		default:
 		}
-		return out.sample, out.err
+		return out, out.err
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return frontierReply{}, ctx.Err()
 	case <-s.stopped:
-		return nil, ErrFrontierStopped
+		return frontierReply{}, ErrFrontierStopped
 	}
 }
 
@@ -200,14 +212,21 @@ func (x *ConsensusManager) handleFrontierRequest(managerCtx context.Context, r f
 		return
 	}
 	sample, err := x.buildFrontierSample(r.req)
+	var signed *SignedFrontierResponse
+	if err == nil && r.signed != nil {
+		if r.ctx.Err() != nil || managerCtx.Err() != nil {
+			return
+		}
+		signed, err = x.signFrontierSample(r.ctx, managerCtx, r.req, r.signed, sample)
+	}
 	if r.ctx.Err() != nil || managerCtx.Err() != nil {
 		return
 	}
 	if x.frontier.faulted.Load() || !x.frontier.eligible.Load() || x.recovery.InRecovery() {
-		sample, err = nil, ErrFrontierUnavailable
+		sample, signed, err = nil, nil, ErrFrontierUnavailable
 	}
 	select {
-	case r.reply <- frontierReply{sample: sample, err: err}:
+	case r.reply <- frontierReply{sample: sample, signed: signed, err: err}:
 	default:
 	}
 }

@@ -153,12 +153,16 @@ and recovery refusal through completed trigger replay. Validation tables cover t
 profile limits. This remains unsigned diagnostic output; no caller, transport, signer, bootstrap path or
 activation default consumes it.
 
-Only after those units are reviewed should a domain-separated frontier signer be added. For the initial
-implementation, bounded local validation and response signing stay within the admitted loop turn, with
-cancellation rechecked before signing and before reply publication. Signature work must have fixed input
-and committee bounds; there is no external signer or unbounded operation inside that turn. A later off-loop
-signer would need separately reviewed generation/ownership/fault semantics. Transport admission/rate limits,
-cut-proof serving/client verification and bootstrap activation remain later units.
+The separately opted-in signed query uses the same queue and pending-caller budget as unsigned sampling.
+It signs only the internally sampled pair/QC in that admitted loop turn, after the checked safety read.
+The exact PairIdentity tuple and byte-string reply fields are specified in F6f §3 and pinned by independent
+encoding vectors. Construction matches the manager signer to the locally pinned author key; publication
+also verifies the returned signature against that pinned trust key. Cancellation and lifecycle state are
+rechecked before and after `SignBytes`; cancellation cannot abort cryptographic work already in progress,
+but no reply is published afterward. The signer receives an owned preimage and no caller can supply evidence
+to be signed. This API remains optional and has no registered transport or production caller. Transport
+admission/rate limits, remote reply/quorum verification, cut-proof serving/client verification and bootstrap
+activation remain later units.
 
 ## 5. Required deterministic evidence
 
