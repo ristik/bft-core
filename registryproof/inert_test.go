@@ -69,6 +69,8 @@ func TestNoProductionPackageImportsTheReader(t *testing.T) {
 	}
 	require.Equal(t, []string{
 		filepath.Join("configuredprogress", "codec.go"),
+		filepath.Join("configuredprogress", "hash_index.go"),
+		filepath.Join("parentwitness", "provider.go"),
 		filepath.Join("parentwitness", "verify.go"),
 		filepath.Join("parentwitness", "wire.go"),
 		filepath.Join("rootinput", "v2.go"),
