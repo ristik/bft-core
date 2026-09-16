@@ -160,8 +160,10 @@ encoding vectors. Construction matches the manager signer to the locally pinned 
 also verifies the returned signature against that pinned trust key. Cancellation and lifecycle state are
 rechecked before and after `SignBytes`; cancellation cannot abort cryptographic work already in progress,
 but no reply is published afterward. The signer receives an owned preimage and no caller can supply evidence
-to be signed. This API remains optional and has no registered transport or production caller. Transport
-admission/rate limits, cut-proof serving/client verification and bootstrap activation remain later units.
+to be signed. This API remains optional and has no registered production transport or caller. The separate
+inactive transport package supplies bounded libp2p handlers and a one-exchange client with a shared receive
+budget, but no node registers it. Gathering, acknowledged ordinary handoff, receipts and bootstrap activation
+remain later units.
 The separate inert `frontierclient` package now strictly verifies bounded canonical replies and groups a fixed
 unit-weight root quorum by PairIdentity. It preserves independently authenticated ordinary or unsupported
 evidence even when the outer response is ineligible, and its diagnostic candidate carries the verified
@@ -172,8 +174,9 @@ The committed-cut storage reader enumerates only a bounded committed shard set, 
 inputs plus the selected actual LastCR and commit QC while holding the tree read lock, then regenerates the
 membership paths from owned data after releasing it. The client verifies that canonical proof against its
 live candidate and acquisition binding, using the QC committed round rather than its later vote round. This
-completes the inactive cryptographic cut construction/verification unit; no transport, receipt, runtime
-caller, freshness activation, or bootstrap behavior is added.
+completes the inactive cryptographic cut construction/verification unit. The later inactive transport can
+carry this proof without granting authority; no receipt, runtime caller, freshness activation, or bootstrap
+behavior is added.
 
 ## 5. Required deterministic evidence
 
