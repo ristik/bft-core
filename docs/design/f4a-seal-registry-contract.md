@@ -423,6 +423,12 @@ A **public** call to `open` or `finalize` is an ordinary transaction that revert
 pays for its gas, leaves a `status 0` receipt, changes no registry word, and does not invalidate the
 block that contains it.
 
+The fixed-Cancun client retains the standard EIP-4788 call after finalize and
+before ordinary transactions, using D1's derived beacon root. Its standard
+Ethereum gas treatment is separate from these two registry calls (D2 §1,
+"Fixed-Cancun pre-block ordering"). It cannot precede open or interrupt the
+open/finalize pair.
+
 ### 6.5 What never writes
 
 Quiet rounds, repeat certificates and root timeouts produce no EVM block (D1 §6), so they never execute
