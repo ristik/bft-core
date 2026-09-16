@@ -292,6 +292,53 @@ func TestTransportDialAndExchangeShareOneBudget(t *testing.T) {
 	require.Less(t, time.Since(start), time.Second)
 }
 
+type delayedStream struct {
+	libp2pnetwork.Stream
+	conn     net.Conn
+	deadline time.Time
+}
+
+func (s *delayedStream) Read(p []byte) (int, error)    { return s.conn.Read(p) }
+func (s *delayedStream) Write(p []byte) (int, error)   { return s.conn.Write(p) }
+func (s *delayedStream) Close() error                  { return s.conn.Close() }
+func (s *delayedStream) CloseWrite() error             { return nil }
+func (s *delayedStream) Reset() error                  { return s.conn.Close() }
+func (s *delayedStream) SetDeadline(d time.Time) error { s.deadline = d; return s.conn.SetDeadline(d) }
+
+var _ libp2pnetwork.Stream = (*delayedStream)(nil)
+
+type delayedSuccessfulOpener struct{ stream *delayedStream }
+
+func (o *delayedSuccessfulOpener) CreateStream(ctx context.Context, _ peer.ID, _ string) (libp2pnetwork.Stream, error) {
+	if err := sleepContext(ctx, 50*time.Millisecond); err != nil {
+		return nil, err
+	}
+	a, b := net.Pipe()
+	o.stream = &delayedStream{conn: a}
+	go func() { _, _ = ReadRequestFrame(b); <-ctx.Done(); _ = b.Close() }()
+	return o.stream, nil
+}
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestTransportSuccessfulDialSharesRemainingBudget(t *testing.T) {
+	_, target := fixtureTarget(t)
+	opener := &delayedSuccessfulOpener{}
+	start := time.Now()
+	_, err := RequestVerified(context.Background(), opener, "peer", target, 200*time.Millisecond)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotNil(t, opener.stream)
+	require.WithinDuration(t, start.Add(200*time.Millisecond), opener.stream.deadline, 35*time.Millisecond)
+}
+
 type cannedResponseStream struct {
 	bytes.Reader
 	written bytes.Buffer
