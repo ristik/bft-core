@@ -1,6 +1,7 @@
 package parentwitness
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"net"
@@ -132,8 +133,43 @@ func TestTransportPendingBoundsRefuseBeforeRead(t *testing.T) {
 		require.Zero(t, reads)
 		_ = a.Close()
 	}
+	positiveClient, positiveServer := net.Pipe()
+	go server.handle(&pipeTransportStream{Conn: positiveServer}, "b")
+	require.Eventually(t, func() bool { n, _ := server.Pending(); return n == 2 }, time.Second, time.Millisecond)
+	_ = positiveClient.Close()
 	_ = firstClient.Close()
 	require.Eventually(t, func() bool { n, peers := server.Pending(); return n == 0 && peers == 0 }, time.Second, time.Millisecond)
+}
+
+func TestTransportGlobalPendingBoundRefusesBeforeRead(t *testing.T) {
+	_, target := fixtureTarget(t)
+	p, _ := NewProvider(target, &providerReader{})
+	limits := testLimits()
+	limits.MaxPendingStreams = 1
+	limits.MaxPendingStreamsPerPeer = 1
+	server, err := NewServer(context.Background(), p, []peer.ID{"a", "b"}, limits)
+	require.NoError(t, err)
+	defer server.Close()
+	firstClient, firstServer := net.Pipe()
+	defer firstClient.Close()
+	go server.handle(&pipeTransportStream{Conn: firstServer}, "a")
+	_, err = firstClient.Write([]byte{0x18})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { n, _ := server.Pending(); return n == 1 }, time.Second, time.Millisecond)
+	a, b := net.Pipe()
+	tracked := &readTrackingStream{pipeTransportStream: &pipeTransportStream{Conn: b}}
+	done := make(chan struct{})
+	go func() { server.handle(tracked, "b"); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("global saturation was not refused")
+	}
+	tracked.mu.Lock()
+	reads := tracked.reads
+	tracked.mu.Unlock()
+	require.Zero(t, reads)
+	_ = a.Close()
 }
 
 func TestTransportOversizePrefixReleasesAdmission(t *testing.T) {
@@ -256,6 +292,29 @@ func TestTransportDialAndExchangeShareOneBudget(t *testing.T) {
 	require.Less(t, time.Since(start), time.Second)
 }
 
+type cannedResponseStream struct {
+	bytes.Reader
+	written bytes.Buffer
+}
+
+func (s *cannedResponseStream) Write(p []byte) (int, error) { return s.written.Write(p) }
+
+func (s *cannedResponseStream) SetDeadline(time.Time) error { return nil }
+func (s *cannedResponseStream) CloseWrite() error           { return nil }
+func (s *cannedResponseStream) Close() error                { return nil }
+func (s *cannedResponseStream) Reset() error                { return nil }
+
+func TestTransportCompletedResponseAfterDeadlineIsRejected(t *testing.T) {
+	_, target := fixtureTarget(t)
+	var frame bytes.Buffer
+	require.NoError(t, WriteResponseFrame(&frame, Response{Request: target.Request(), Outcome: OutcomeUnavailable}))
+	st := &cannedResponseStream{Reader: *bytes.NewReader(frame.Bytes())}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	_, err := exchangeVerified(ctx, st, target)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
 type blockingResponseProvider struct {
 	started chan struct{}
 	release chan struct{}
@@ -325,9 +384,10 @@ func TestTransportServeSaturationAndOperationTimeout(t *testing.T) {
 }
 
 type joinProvider struct {
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
+	started     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	releaseOnce sync.Once
 }
 
 func (p *joinProvider) Serve(_ context.Context, req Request) (Response, error) {
@@ -336,11 +396,14 @@ func (p *joinProvider) Serve(_ context.Context, req Request) (Response, error) {
 	return Response{Request: req, Outcome: OutcomeUnavailable}, nil
 }
 
+func (p *joinProvider) unblock() { p.releaseOnce.Do(func() { close(p.release) }) }
+
 func TestTransportConcurrentCloseWaitsForSameJoin(t *testing.T) {
 	_, target := fixtureTarget(t)
 	provider := &joinProvider{started: make(chan struct{}), release: make(chan struct{})}
 	server, err := NewServer(context.Background(), provider, []peer.ID{"peer"}, testLimits())
 	require.NoError(t, err)
+	t.Cleanup(func() { provider.unblock(); server.Close() })
 	a, b := net.Pipe()
 	defer a.Close()
 	go server.handle(&pipeTransportStream{Conn: b}, "peer")
@@ -359,7 +422,7 @@ func TestTransportConcurrentCloseWaitsForSameJoin(t *testing.T) {
 		t.Fatal("second Close returned before handler joined")
 	case <-time.After(20 * time.Millisecond):
 	}
-	close(provider.release)
+	provider.unblock()
 	select {
 	case <-one:
 	case <-time.After(time.Second):
