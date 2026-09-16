@@ -133,6 +133,17 @@ The smallest next coding unit is the **unsigned owned storage view** described i
 shard lookup, root metadata and at most two QC copies, with real-store ownership/bounds tests. No manager
 query channel, signer or registration is needed for that unit, and it must not claim freshness.
 
+`BlockStore.ReadFrontierStorageView` now implements that unsigned copy boundary. It copies only the
+selected LastCR, shard/configuration identity, committed round/epoch and the two QC candidates under the
+tree lock. The QC's network ID is copied data, not independently configured trust. Collection cardinality
+is capped at 1,024, shard IDs at 4,096 bits, traversal at 10,000 values/depth 32, each pair/QC at 256 KiB
+and cumulative data at 1 MiB. A conservative encoding-size preflight runs before each clone; actual
+encodings are checked too. These local availability limits do not validate a committee or a certificate.
+Private copies protect stored objects from CBOR marshalers that normalize version fields. The real bbolt
+fixtures check ownership and unchanged files, not cryptographic authentication or crash freshness.
+Existing pointer-returning getters still expose aliases; callers must serialize with the manager loop and
+must not mutate those aliases concurrently. No safety read, fault latch or runtime sampler is added here.
+
 The subsequent manager unit adds the bounded query path and admission state in §3, integrates the checked
 safety read, and verifies the complete sample. Its tests must exercise the real event loop, not call only a
 pure helper. Existing direct handler tests are not evidence of serialized sampling. Any new vote, timeout
