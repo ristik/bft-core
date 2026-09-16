@@ -41,7 +41,8 @@ func TestNoProductionPackageImportsTheWitnessStore(t *testing.T) {
 		// recordwiring is reached only through the shard-node command's opt-in record store, which its own
 		// guard enforces.
 		if strings.HasPrefix(rel, "registrywitness"+string(filepath.Separator)) ||
-			strings.HasPrefix(rel, "recordwiring"+string(filepath.Separator)) {
+			strings.HasPrefix(rel, "recordwiring"+string(filepath.Separator)) ||
+			rel == filepath.Join("parentwitness", "requester.go") {
 			return nil
 		}
 		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)

@@ -242,10 +242,19 @@ select the single-exchange helper's unmetered mode. Each response still passes t
 proof verifier, and a successful result is checked against cancellation and the active generation before
 publication. Results contain the existing opaque, owned `VerifiedResponse`; returning evidence gives copies.
 
+An optional inactive local execution RPC source is attempted before peers. It is one source attempt and
+performs at most the two exact-hash calls already defined by `registrywitness.Acquire`; peer identity counts
+remain peer-only. Both raw HTTP response bodies (including JSON-RPC envelopes and refusal or malformed
+bodies) and peer frame prefixes/bodies consume the same episode download budget. The local call context uses
+the same per-attempt/overall deadline, redirects are refused for metered calls, and exact byte exhaustion
+cannot enter the transport's legacy unmetered mode. Unavailable or invalid local evidence may fall back only
+within the remaining attempt, time and byte budgets. Missing local configuration preserves peer-only use.
+
 `Close` cancels the active episode and all callers of `Close` join that same completion. As with the transport,
 shutdown requires a cooperative opener honoring its context and a stream whose reset/deadline interrupts I/O.
 No custom implementation that ignores those contracts can be forcibly stopped by this API.
 
 This unit does not register a protocol, choose deployment budgets, perform peer discovery, retain a durable
-record, or activate node acquisition/readiness/signing. Composing local acquisition and archive retrieval
-under one outer budget, and rechecking current certificate continuity before use, remain wiring obligations.
+record, or activate node acquisition/readiness/signing. Node wiring must use this shared coordinator rather
+than independent local and archive retry loops. Rechecking current certificate continuity and readiness
+before use remains unwired.
