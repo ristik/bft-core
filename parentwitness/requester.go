@@ -48,9 +48,7 @@ func (b RequesterBudget) validate() error {
 type RequesterConfig struct {
 	Opener    StreamOpener
 	Providers []peer.ID
-	Target    Target
 	Budget    RequesterBudget
-	Now       func() time.Time
 }
 
 type RequesterResult struct {
@@ -86,23 +84,27 @@ type Requester struct {
 	opener    StreamOpener
 	providers []peer.ID
 	budget    RequesterBudget
-	now       func() time.Time
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	mu      sync.Mutex
-	closed  bool
-	active  *requesterEpisode
-	nextTry time.Time
-	last    RequesterResult
+	mu        sync.Mutex
+	closed    bool
+	active    *requesterEpisode
+	nextTry   time.Time
+	last      RequesterResult
+	closeDone chan struct{}
+	closeOnce sync.Once
 }
 
 func NewRequester(parent context.Context, cfg RequesterConfig) (*Requester, error) {
-	if parent == nil || cfg.Opener == nil || !cfg.Target.Valid() || len(cfg.Providers) == 0 {
+	if parent == nil || cfg.Opener == nil || len(cfg.Providers) == 0 {
 		return nil, fmt.Errorf("%w: incomplete requester configuration", ErrTransport)
 	}
 	if err := cfg.Budget.validate(); err != nil {
 		return nil, err
+	}
+	if len(cfg.Providers) > cfg.Budget.MaxProviders {
+		return nil, fmt.Errorf("%w: provider list exceeds MaxProviders", ErrTransport)
 	}
 	providers := append([]peer.ID(nil), cfg.Providers...)
 	seen := make(map[peer.ID]struct{}, len(providers))
@@ -115,11 +117,8 @@ func NewRequester(parent context.Context, cfg RequesterConfig) (*Requester, erro
 		}
 		seen[p] = struct{}{}
 	}
-	if cfg.Now == nil {
-		cfg.Now = time.Now
-	}
 	ctx, cancel := context.WithCancel(parent)
-	return &Requester{opener: cfg.Opener, providers: providers, budget: cfg.Budget, now: cfg.Now, ctx: ctx, cancel: cancel}, nil
+	return &Requester{opener: cfg.Opener, providers: providers, budget: cfg.Budget, ctx: ctx, cancel: cancel, closeDone: make(chan struct{})}, nil
 }
 
 // Request runs one bounded episode. Calls for the same target coalesce. A changed target
@@ -157,13 +156,15 @@ func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult
 			}
 			continue
 		}
-		if until := r.nextTry.Sub(r.now()); until > 0 {
+		if until := r.nextTry.Sub(time.Now()); until > 0 {
 			r.mu.Unlock()
 			return RequesterResult{Outcome: RequesterBudgetExhausted, Detail: ErrRequesterBackoff.Error()}, ErrRequesterBackoff
 		}
 		epctx, cancel := context.WithCancel(ctx)
 		watchStop := make(chan struct{})
+		watchDone := make(chan struct{})
 		go func() {
+			defer close(watchDone)
 			select {
 			case <-r.ctx.Done():
 				cancel()
@@ -175,11 +176,19 @@ func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult
 		r.mu.Unlock()
 		res := r.run(epctx, ep)
 		close(watchStop)
+		<-watchDone
 		cancel()
 		r.mu.Lock()
+		if res.Outcome == RequesterVerified && (ep.markValue() != RequesterVerified || epctx.Err() != nil || r.closed || r.active != ep) {
+			if ep.markValue() == RequesterSuperseded {
+				res = RequesterResult{Outcome: RequesterSuperseded, Attempts: res.Attempts, Providers: res.Providers, Downloaded: res.Downloaded, Detail: "target superseded"}
+			} else {
+				res = RequesterResult{Outcome: RequesterStopped, Attempts: res.Attempts, Providers: res.Providers, Downloaded: res.Downloaded, Detail: "requester stopped"}
+			}
+		}
 		ep.result = cloneRequesterResult(res)
-		if res.Outcome != RequesterVerified && res.Outcome != RequesterSuperseded && res.Outcome != RequesterStopped {
-			r.nextTry = r.now().Add(r.budget.Backoff)
+		if res.Outcome != RequesterVerified {
+			r.nextTry = time.Now().Add(r.budget.Backoff)
 		}
 		r.last = ep.result
 		if r.active == ep {
@@ -192,7 +201,7 @@ func (r *Requester) Request(ctx context.Context, target Target) (RequesterResult
 }
 
 func (r *Requester) run(ctx context.Context, ep *requesterEpisode) RequesterResult {
-	started := r.now()
+	started := time.Now()
 	deadline := started.Add(r.budget.Overall)
 	var out RequesterResult
 	for i, p := range r.providers {
@@ -201,8 +210,8 @@ func (r *Requester) run(ctx context.Context, ep *requesterEpisode) RequesterResu
 			out.Detail = "attempt/provider limit"
 			return out
 		}
-		if ep.markValue() == RequesterSuperseded {
-			return RequesterResult{Outcome: RequesterSuperseded, Attempts: out.Attempts, Providers: out.Providers, Downloaded: out.Downloaded, Detail: "target superseded"}
+		if err := ctx.Err(); err != nil {
+			return stoppedResult(ep, out, err)
 		}
 		remaining := time.Until(deadline)
 		if d := r.budget.PerAttempt; remaining > d {
@@ -235,11 +244,7 @@ func (r *Requester) run(ctx context.Context, ep *requesterEpisode) RequesterResu
 			return out
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			if ep.markValue() == RequesterSuperseded {
-				return RequesterResult{Outcome: RequesterSuperseded, Attempts: out.Attempts, Providers: out.Providers, Downloaded: out.Downloaded, Detail: "target superseded"}
-			}
-			out.Detail = err.Error()
-			continue
+			return stoppedResult(ep, out, err)
 		}
 		out.Outcome, out.Detail = RequesterInvalid, err.Error()
 	}
@@ -249,10 +254,23 @@ func (r *Requester) run(ctx context.Context, ep *requesterEpisode) RequesterResu
 	return out
 }
 
+func stoppedResult(ep *requesterEpisode, out RequesterResult, err error) RequesterResult {
+	out.Detail = err.Error()
+	if ep.markValue() == RequesterSuperseded {
+		out.Outcome = RequesterSuperseded
+		out.Detail = "target superseded"
+	} else {
+		out.Outcome = RequesterStopped
+	}
+	return out
+}
+
 func (r *Requester) Close() {
 	r.mu.Lock()
 	if r.closed {
+		done := r.closeDone
 		r.mu.Unlock()
+		<-done
 		return
 	}
 	r.closed = true
@@ -266,6 +284,7 @@ func (r *Requester) Close() {
 	if ep != nil {
 		<-ep.done
 	}
+	r.closeOnce.Do(func() { close(r.closeDone) })
 }
 
 func cloneRequesterResult(in RequesterResult) RequesterResult {
