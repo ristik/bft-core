@@ -15,7 +15,7 @@ import (
 
 func fixtureTarget(t *testing.T) (*certifiedchain.Chain, Target) {
 	t.Helper()
-	c := certifiedchain.New(t, 3, 1)
+	c := certifiedchain.New(t, 3, 2)
 	pc := registryproof.Context{RegistryAddress: registryproof.RegistryAddress, RegistryCodeHash: c.Pins.RegistryCodeHash, GenesisCommitment: c.Genesis.GenesisCommitment(), FullShardConfHash: c.Genesis.FullShardConfHash(), ShardEpoch: 0, RootEpoch: 1, EVMGenesisHash: c.Blocks[0].Hash}
 	target, err := NewTarget(TargetConfig{NetworkID: 3, PartitionID: 8, ShardID: types.ShardID{}, FullShardConfHash: pc.FullShardConfHash, Registry: pc, BlockHash: c.Blocks[1].Hash})
 	require.NoError(t, err)

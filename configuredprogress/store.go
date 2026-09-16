@@ -334,82 +334,90 @@ func (s *Store) Load(ctx context.Context, c Context) (State, ProgressToken, erro
 	if err != nil {
 		return State{}, ProgressToken{}, err
 	}
-	dd, err := verifyDescriptor(desc, c.Origin)
+	i, err := verifyRawImage(ctx, c, desc, control, hn, hr)
 	if err != nil {
 		return State{}, ProgressToken{}, err
+	}
+	return State{i: i}, tokenFor(s, i), nil
+}
+
+func verifyRawImage(ctx context.Context, c Context, desc, control, hn, hr []byte) (*durableImage, error) {
+	dd, err := verifyDescriptor(desc, c.Origin)
+	if err != nil {
+		return nil, err
 	}
 	cp, err := decodeEnvelope(control, kindControl, MaxControlBytes)
 	if err != nil {
-		return State{}, ProgressToken{}, err
+		return nil, err
 	}
 	var cw controlWire
 	if err = decodePayload(cp, &cw); err != nil {
-		return State{}, ProgressToken{}, err
+		return nil, err
 	}
 	if cw.Version != FormatVersion || !bytes.Equal(cw.DescriptorDigest, dd[:]) {
-		return State{}, ProgressToken{}, ErrContext
+		return nil, ErrContext
 	}
 	if cw.Revision == 0 && (cw.First != nil || cw.Observed != nil || cw.HeadKey != nil) {
-		return State{}, ProgressToken{}, fmt.Errorf("%w: revision zero is not empty", ErrUntrusted)
+		return nil, fmt.Errorf("%w: revision zero is not empty", ErrUntrusted)
 	}
 	if cw.Revision > 0 && cw.Observed == nil {
-		return State{}, ProgressToken{}, fmt.Errorf("%w: mutated control lacks observed pair", ErrUntrusted)
+		return nil, fmt.Errorf("%w: mutated control lacks observed pair", ErrUntrusted)
 	}
 	i := &durableImage{descriptor: desc, controlRaw: control, headName: hn, headRaw: hr, descriptorDigest: dd, descriptorRawDigest: sha256.Sum256(desc), controlDigest: sha256.Sum256(control), control: cw}
 	if cw.First != nil {
 		i.first, err = verifyPair(ctx, c, *cw.First)
 		if err != nil {
-			return State{}, ProgressToken{}, err
+			return nil, err
 		}
 		if i.first.observation.Class() == evmroot.OriginBootstrapV2 {
-			return State{}, ProgressToken{}, fmt.Errorf("%w: first ordinary is bootstrap", ErrUntrusted)
+			return nil, fmt.Errorf("%w: first ordinary is bootstrap", ErrUntrusted)
 		}
 	}
 	if cw.Observed != nil {
 		i.observed, err = verifyPair(ctx, c, *cw.Observed)
 		if err != nil {
-			return State{}, ProgressToken{}, err
+			return nil, err
 		}
 	}
 	if i.first == nil && i.observed != nil && i.observed.observation.Class() != evmroot.OriginBootstrapV2 {
-		return State{}, ProgressToken{}, fmt.Errorf("%w: ordinary observed without first evidence", ErrUntrusted)
+		return nil, fmt.Errorf("%w: ordinary observed without first evidence", ErrUntrusted)
 	}
 	if i.first != nil && (i.observed == nil || i.observed.observation.Class() == evmroot.OriginBootstrapV2) {
-		return State{}, ProgressToken{}, fmt.Errorf("%w: ordinary supersession lost", ErrUntrusted)
+		return nil, fmt.Errorf("%w: ordinary supersession lost", ErrUntrusted)
 	}
 	if i.first != nil {
 		rel, e := compareObservations(i.first.observation, i.observed.observation)
 		if e != nil || rel == relationStale {
-			return State{}, ProgressToken{}, fmt.Errorf("%w: first/observed ordering: %v", ErrUntrusted, e)
+			return nil, fmt.Errorf("%w: first/observed ordering: %v", ErrUntrusted, e)
 		}
 	}
 	if cw.HeadKey == nil {
 		if hn != nil {
-			return State{}, ProgressToken{}, fmt.Errorf("%w: unbound head key", ErrUntrusted)
+			return nil, fmt.Errorf("%w: unbound head key", ErrUntrusted)
 		}
 	} else if !bytes.Equal(cw.HeadKey, hn) {
-		return State{}, ProgressToken{}, fmt.Errorf("%w: control/head key mismatch", ErrUntrusted)
+		return nil, fmt.Errorf("%w: control/head key mismatch", ErrUntrusted)
 	}
 	if hn != nil {
 		if i.first == nil || i.observed == nil || !validRecordKey(hn) {
-			return State{}, ProgressToken{}, fmt.Errorf("%w: invalid ordinary head", ErrUntrusted)
+			return nil, fmt.Errorf("%w: invalid ordinary head", ErrUntrusted)
 		}
 		i.head, err = verifyOuterRecord(ctx, c, dd, hn, hr)
 		if err != nil {
-			return State{}, ProgressToken{}, err
+			return nil, err
 		}
 		i.hasHead = true
 		i.headDigest = sha256.Sum256(hr)
 		hobs, err := observationFromLoaded(ctx, c, i.head)
 		if err != nil {
-			return State{}, ProgressToken{}, err
+			return nil, err
 		}
 		rel, e := compareObservations(hobs, i.observed.observation)
 		if e != nil || rel == relationStale {
-			return State{}, ProgressToken{}, fmt.Errorf("%w: head newer/conflicting with observed: %v", ErrUntrusted, e)
+			return nil, fmt.Errorf("%w: head newer/conflicting with observed: %v", ErrUntrusted, e)
 		}
 	}
-	return State{i: i}, tokenFor(s, i), nil
+	return i, nil
 }
 
 func (s *Store) Unchanged(t ProgressToken) bool {
