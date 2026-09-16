@@ -55,6 +55,26 @@ ordinary zero-price Ethereum transaction. The execution client implements its
 privileged origin, fee exemption, deterministic resource limit and identical
 replay semantics.
 
+### Fixed-Cancun pre-block ordering
+
+Owner decision, 2026-09-17: retain Ethereum's standard EIP-4788 beacon-root
+system call. In the fixed-Cancun profile with an empty forced prefix, the order is
+**open → finalize → EIP-4788 → ordinary transactions**. No stock pre-block
+call may execute before open or between open and finalize. The beacon-root
+argument is D1's `SHA-256(CBOR(["UNICITY_EVM_BEACON", r, n]))`, derived from the
+bound authorizing root round and assigned shard round, not a zero placeholder.
+
+EIP-4788 retains its standard Ethereum caller, execution behavior and gas
+treatment: its work is not added to the header's `gasUsed`, the registry's
+`g_sys` charge, ordinary gas, or the registry outcome commitment. The pre-refund
+rule in §3 applies to open and finalize; it does not change EIP-4788 accounting.
+Ordinary transaction receipts remain standard. EIP-2935 remains inactive under
+this Cancun-only profile; this decision does not activate later fork hooks.
+
+Build and replay must apply this same ordering and derived beacon root. Tests
+must include actual beacon-root contract state changes so an omitted or
+misordered call cannot pass because the test parent lacks that contract.
+
 `evmroot/d2import.go` `ValidateImport` encodes these as ordered predicates with
 stable rejection codes (`system_origin_forged`, `system_value_nonzero`,
 `system_eoa_like`, `system_from_pool`, `system_failed`, …) so two clients reject
