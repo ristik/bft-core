@@ -42,10 +42,11 @@ reviewed implementation without changing this ordering. No second origin-identit
 
 ## 2. Fresh admission is separate from storage
 
-**Provider choice pending owner decision:** automatic root-quorum freshness admission is recommended; an
-operator assertion is an alternative only if explicitly chosen. Neither exists in the current handshake.
-Storage APIs may be implemented inertly while this provider remains absent. No production bootstrap gate may
-be enabled with a test provider or an unsigned `fresh=true` flag.
+**Owner-selected direction (subsequent #176 amendment):** automatic fresh root-quorum confirmation.
+[F6f](f6f-automatic-bootstrap-freshness.md) specifies the proposed safety-frontier/cut-proof prerequisite;
+it adds no implementation or activation. An operator assertion is not the default or a fallback. The current
+handshake supplies neither mechanism. Storage APIs may remain inert while the provider is absent. No
+production bootstrap gate may be enabled with a test provider or an unsigned `fresh=true` flag.
 
 The gate accepts an opaque `FreshBootstrapAdmission` returned by a separately reviewed provider. It binds:
 
@@ -68,8 +69,8 @@ ordinary transition while serving an older local committed snapshot. The proof m
 commit, persistence and certificate-publication ordering. If local snapshot locking cannot provide that
 property, a consensus-confirmed read barrier is required. Plain quorum local-status polling is insufficient.
 
-The root protocol, signing domain, wire schema and interlock proof are a **separate prerequisite**, not specified
-as already provided by this document. A valid admission is a linearization point during the request, not a
+The root protocol, signing domain, wire schema and interlock proof are a **separate prerequisite**, proposed
+in F6f and not implemented by this document. A valid admission is a linearization point during the request, not a
 promise that no block can ever finalize afterward. Subsequently received ordinary progress immediately
 supersedes it; ordinary certification and signing checks still govern each request. A single untrusted
 provider's reply or a signed old UC can never mint the receipt.
@@ -98,11 +99,10 @@ verification. This bounds replay opportunity; expiration alone does not establis
 | Empty/replaced/rolled-back local store with executor B0 | no automatic inference; the fresh-admission provider must establish current initial state. If ordinary state is returned, retain it and recover; if unavailable, remain unready |
 | Non-genesis executor or authenticated ordinary evidence conflicts with a bootstrap response | reject bootstrap; preserve known ordinary mode and investigate/recover; a receipt cannot erase known progress |
 
-This is usable without a second long-lived allocation/identity manifest. With the recommended provider, normal
-fresh starts and bootstrap restarts obtain admission automatically. A manual provider would instead trust a
-named deployment operator's explicit current-initial-state assertion bound to the same nonce/context/pair and
-expiration; it is not a silent fallback and is not cryptographic evidence of freshness. Choosing it requires
-that trust premise to be accepted explicitly. Signing authority and restored-local-key restrictions are untouched.
+This is usable without a second long-lived allocation/identity manifest. With the selected automatic provider,
+normal fresh starts and bootstrap restarts will obtain admission without an operator assertion once the protocol
+and runtime prerequisites are implemented and reviewed. No manual fallback is specified. Signing authority
+and restored-local-key restrictions are untouched.
 
 ## 3. Exact v2 persistence format
 
