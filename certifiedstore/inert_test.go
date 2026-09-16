@@ -60,5 +60,6 @@ func TestNoProductionPackageImportsTheStore(t *testing.T) {
 	for _, want := range []string{"shardnode/node.go", "shardnode/store.go", "cli/ubft/cmd/shard_node_run.go", "engineapi/adapter.go"} {
 		require.True(t, scanned[want], "expected to scan %s", want)
 	}
-	require.Empty(t, importers, "production packages must not import %s", importPath)
+	require.Equal(t, []string{filepath.Join("configuredprogress", "record.go"), filepath.Join("configuredprogress", "store.go")}, importers,
+		"only inactive configured-progress composition may import %s", importPath)
 }

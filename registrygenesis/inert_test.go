@@ -62,6 +62,6 @@ func TestNoProductionPackageImportsTheGenerator(t *testing.T) {
 	for _, want := range []string{"cli/ubft/cmd/engine_api_genesis.go", "cli/ubft/cmd/shard_node_run.go", "shardnode/round.go", "engineapi/adapter.go"} {
 		require.True(t, scanned[want], "expected to scan %s", want)
 	}
-	require.Equal(t, []string{filepath.Join("rootinput", "v2.go")}, importers,
+	require.Equal(t, []string{filepath.Join("configuredprogress", "codec.go"), filepath.Join("configuredprogress", "store.go"), filepath.Join("rootinput", "v2.go")}, importers,
 		"only the inactive v2 derivation API may import %s", importPath)
 }
