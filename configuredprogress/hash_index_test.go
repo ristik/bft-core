@@ -213,8 +213,10 @@ func TestHashIndexRetentionRollbackAndReopen(t *testing.T) {
 	s, path := f.open(1)
 	publishIndexed(t, s, f, 1)
 	o2 := f.ordinary(2, 3, 6)
-	op, _, _ := s.PrepareObservation(context.Background(), f.ctx, o2)
-	_, _, _ = s.CommitObservation(op)
+	op, _, err := s.PrepareObservation(context.Background(), f.ctx, o2)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(op)
+	require.NoError(t, err)
 	rp, err := s.PrepareRecord(context.Background(), f.ctx, f.record(2, o2))
 	require.NoError(t, err)
 	s.checkpoint = func(name string) error {
