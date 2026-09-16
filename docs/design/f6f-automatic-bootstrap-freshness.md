@@ -51,6 +51,13 @@ UnicitySeal, QC, RootInput or configured-progress encoding changes. Exact transp
 independent encoding vectors belong to implementation review. Messages use deterministic CBOR definite
 arrays, shortest unsigned integers, canonical byte strings, no extra fields and bounded decoding.
 
+The inactive transport uses two versioned libp2p protocol IDs,
+`/ab/root-bootstrap/frontier/1.0.0` and `/ab/root-bootstrap/cut/1.0.0`. Each stream carries one request and
+one response framed by a four-byte unsigned big-endian length; this is deliberately distinct from legacy
+uvarint-framed protocols. The cut request is `[1, Context, N, acquisitionBinding, floorHint]`. The binding
+is echoed opaque session context and the floor is only a refusal hint: neither authorizes evidence nor lets
+the provider rewrite the committed cut. The existing frontier and cut response encodings are unchanged.
+
 `Context` is `[network, partition, canonicalShardBytes, fullShardConfHash, rootEpoch,
 GenesisOriginIdentity]`. Hashes and nonce are exactly 32 bytes. The client derives the context from its
 trusted JSON origin and local root trust, not the reply. Roots validate network/epoch and active shard/config
@@ -267,7 +274,13 @@ by PairIdentity with the maximum observed QC vote-round floor. Its aggregate byt
 invalid, and duplicate replies without refunds. Returned candidates retain an immutable context-and-nonce
 acquisition binding and remain diagnostic evidence only; a later receipt handoff must re-read live collector
 state so an older snapshot cannot bypass subsequent ordinary evidence, unsupported evidence, or exhaustion.
-Network reads, receipt construction, node integration, and activation remain separate work.
+The inactive `frontiertransport` stage now bounds request decoding, eligible peers, concurrent callbacks,
+per-peer admission and rate, and uses one deadline across dial/write/read. A caller-owned receive budget
+reserves every declared body before allocation and charges actual prefix/body reads without refunds across
+at most four concurrent exchanges. Complete raw responses remain available when cancellation races the last
+read so the collector can authenticate negative evidence; partial responses never become evidence. This is
+only a single-peer exchange primitive. Gathering policy, acknowledged ordinary handoff, receipt construction,
+node registration and activation remain separate work.
 
 The inert committed-cut stage now copies a bounded coherent committed shard snapshot, rebuilds the shard and
 unicity membership paths outside the storage lock, and refuses any mismatch with the stored block round,
