@@ -21,7 +21,8 @@ type ReadinessTicket interface{ Valid() bool }
 // recordwiring: that package imports shardnode, so the dependency runs the other way.
 //
 // Prepare does all expensive store, witness, trust and continuity verification. It is called with
-// the round lock held and the finality gate free, so it must not touch the executor.
+// the round lock held and the finality gate free, so it may read the executor (a head read takes no
+// gate) but must make no call that changes what the executor treats as canonical or final.
 //
 // Revalidate does only the decisive mutable-state checks (held bytes, observed history, durable
 // head, executor identity). It is called inside the finality gate, immediately before a
