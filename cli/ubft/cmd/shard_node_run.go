@@ -52,6 +52,10 @@ type shardNodeRunFlags struct {
 	// constructs nothing, and the node runs exactly as before. See startCertifiedRecord.
 	CertifiedRecordStore  string
 	CertifiedRecordRetain int
+	// CertifiedRecordGate withholds leadership and the signature while the durable record cannot prove
+	// readiness for the held certificate's child (#14 W3b-1). It requires CertifiedRecordStore; set alone
+	// it stops startup. Off by default so asking for a store does not silently change voting.
+	CertifiedRecordGate bool
 	// CertifiedRecordCaptureTimeout bounds one witness acquisition over --eth-url.
 	CertifiedRecordCaptureTimeout time.Duration
 	// The EVM genesis parameters the SealRegistry deployment was generated with, used only with
@@ -111,6 +115,8 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"path of the certified-block record store (#14); empty leaves it off. Requires --executor engine-api and a SealRegistry shard configuration. The record is reloaded and reported at startup, and the witness of every block the round commits is captured over --eth-url and published; none of it changes voting")
 	cmd.Flags().IntVar(&flags.CertifiedRecordRetain, "certified-record-retain", defaultCertifiedRecordRetain,
 		"non-genesis certified records to retain, counting the newest")
+	cmd.Flags().BoolVar(&flags.CertifiedRecordGate, "certified-record-gate", false,
+		"withhold leadership and the signature while the certified-block record cannot prove readiness for the held certificate's child (#14 W3b-1); requires --certified-record-store")
 	cmd.Flags().DurationVar(&flags.CertifiedRecordCaptureTimeout, "certified-record-capture-timeout", recordwiringDefaultAcquireTimeout,
 		"bound on one witness acquisition over --eth-url (with --certified-record-store)")
 	cmd.Flags().Uint64Var(&flags.RegistryEVMGasLimit, "registry-evm-gas-limit", defaultGasLimit,
@@ -135,6 +141,13 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 }
 
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
+	// The record gate needs the store it reads. Checked before anything is built so the refusal is the
+	// operator's configuration, not a downstream symptom of a node running without the record it was
+	// asked to consult.
+	if err := validateCertifiedRecordFlags(flags.CertifiedRecordStore, flags.CertifiedRecordGate); err != nil {
+		return err
+	}
+
 	keyConf, err := flags.loadKeyConf(flags.baseFlags, false)
 	if err != nil {
 		return fmt.Errorf("loading key configuration: %w", err)

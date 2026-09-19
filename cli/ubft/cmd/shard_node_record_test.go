@@ -35,6 +35,29 @@ is TestShardNodeRun_AcceptsACompatibleFixture, which also asserts that nothing a
 Fixture evidence: the shard configuration here is not a SealRegistry deployment, so these cases establish the
 refusals, not a reload against a registry chain, which recordwiring's tests cover with signed records.
 */
+// TestShardNodeRun_GateFlagRequiresTheRecordStore drives the same boundary for the record gate: the flag
+// alone is refused before any executor or store work, so the operator's mistake is the diagnostic rather
+// than a node that cannot prove readiness.
+func TestShardNodeRun_GateFlagRequiresTheRecordStore(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the CLI binary")
+	}
+	bin := buildUbft(t)
+	home, shardConf, trustBase := shardHome(t, bin)
+
+	out, code, timedOut := runShardNodeArgs(t, bin, 45*time.Second,
+		"--home", home, "--address", "/ip4/127.0.0.1/tcp/0",
+		"--shard-conf", shardConf, "--trust-base", trustBase,
+		"--log-format", "text", "--log-level", "info",
+		"--certified-record-gate",
+	)
+
+	require.False(t, timedOut, "startup must fail closed promptly:\n%s", out)
+	require.NotEqual(t, 0, code, "startup must exit non-zero:\n%s", out)
+	require.Contains(t, out, "--certified-record-gate requires --certified-record-store", out)
+	require.NotContains(t, out, "shard node starting", "startup must refuse before the node announces it is running")
+}
+
 func TestShardNodeRun_CertifiedRecordStoreFailsClosed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds and runs the CLI binary")
