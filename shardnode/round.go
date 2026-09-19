@@ -93,6 +93,18 @@ type Round struct {
 	// authority (commitobserver.go). Nil on a node without a certified-record store.
 	commitObserver CommitObserver
 
+	// certificateObserver, when set, is fed every authenticated certificate and its bound technical
+	// record at the retention site below. Nil on a node without the certified-record gate, and
+	// installed only alongside childReadiness.
+	certificateObserver CertificateObserver
+
+	// childReadiness, when set, decides whether this node may lead or sign for the held certificate's
+	// child (#14 W3b-1). It is the round-facing half of recordwiring.Readiness, attached only with
+	// the certified-record store and gate. Round.mu is held across HandleCertificate, so the gate's
+	// Prepare runs under it by construction and its Revalidate runs inside the finality gate at the
+	// two decisive points documented in HandleCertificate.
+	childReadiness ChildReadiness
+
 	// continuity is the live execution anchor and the interval this node has itself verified
 	// quiet since it (see anchor.go, and docs/design/f6b-quiet-uc-recovery.md §3.3). It is what
 	// gives reconcile a block hash to recover to when the certificate in hand is quiet and
@@ -313,6 +325,23 @@ func (r *Round) SetCommitObserver(o CommitObserver) {
 	r.commitObserver = o
 }
 
+// SetCertificateObserver attaches a receiver for every authenticated certificate and its bound
+// technical record, fed at the same site as the evidence buffer. Call before the node runs. It
+// authorizes nothing, and a refusal is logged rather than allowed to fail the round.
+func (r *Round) SetCertificateObserver(o CertificateObserver) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.certificateObserver = o
+}
+
+// SetChildReadiness installs the certified-record readiness gate (#14 W3b-1). Call before the node
+// runs. A round without one behaves exactly as it did before the gate existed.
+func (r *Round) SetChildReadiness(c ChildReadiness) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.childReadiness = c
+}
+
 // SetFinalityGate installs the gate every finality-changing executor call takes, when none is installed yet.
 // SetRecovery installs the node's gate as part of the recovery stack; a node that runs a certified-record
 // capturer without recovery needs it installed here, because the capturer's publication decision is serialized
@@ -515,6 +544,18 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 				slog.String("nodeID", r.nodeID))
 		}
 	}
+	// THE RECORD GATE'S OWN FEED, under the retention block's rules: before anything fallible, and a
+	// refusal is logged rather than allowed to fail the round. The observer retains the authenticated
+	// pair so a later Prepare can prove the continuity between the durable record and the certificate
+	// in hand. Being observed is not an authorization, so nothing here changes what the round does.
+	if r.certificateObserver != nil {
+		if err := r.certificateObserver.ObserveCertificate(uc, tr); err != nil && r.log != nil {
+			r.log.LogAttrs(ctx, slog.LevelWarn, "certificate observer refused an observation",
+				slog.String("err", err.Error()),
+				slog.Uint64("round", uc.GetRoundNumber()),
+				slog.String("nodeID", r.nodeID))
+		}
+	}
 	// The recovery lifecycle observes here too, and for the same reason: this is the one place a
 	// certificate and the technical record bound to it arrive together, already authenticated. Both
 	// halves get the same feed — what a node retains for others and what it may later reason from
@@ -640,6 +681,17 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("reading certificate seal hash: %w", err)
 	}
 
+	// THE RECORD GATE'S PREPARATION, once per round, immediately before the leadership decision and
+	// only when P-id already passed: a round that already abstains on identity needs no store,
+	// witness or trust work. The ticket and its error live for this round only. Prepare does all the
+	// expensive verification with the round lock held and the finality gate free; the cheap
+	// mutable-state revalidation happens later, inside the gate, at Build and again at the signature.
+	var readinessTicket ReadinessTicket
+	var readinessErr error
+	if identityErr == nil {
+		readinessTicket, readinessErr = r.prepareChildReadiness(ctx, uc)
+	}
+
 	// LEADERSHIP REQUIRES P-id, because building is not a neutral act. Executor.Build asks the
 	// execution client to move its forkchoice to the parent — engineapi sends head, safe AND
 	// finalized as p.Parent.Hash — so a leader that builds on a head it cannot prove is certified
@@ -659,8 +711,26 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return nil
 	}
 
-	block, params, err := r.produceBlock(ctx, head, exp, sealHash, leader)
+	// LEADERSHIP REQUIRES READINESS FOR THE RECORD'S CHILD, for the same reason: building on a parent
+	// whose certified-record continuity this node cannot prove would finalize it. This is the leader's
+	// half of the gate. A follower does not build, so a refusal here leaves the follower to verify and
+	// follow and only withholds its signature further down.
+	if identityErr == nil && readinessErr != nil && leader == r.nodeID {
+		r.metrics.recordIRDivergence(ctx, metricRecordReadinessDeclinedLeadership)
+		r.health.updateVoting(false, nonVotingRecordReadiness+": "+readinessErr.Error())
+		if r.log != nil {
+			r.log.WarnContext(ctx, "declining to lead this round: the certified-block record cannot prove readiness for the held certificate's child, and building would finalize the parent",
+				slog.Uint64("round", exp.Round), slog.String("reason", readinessErr.Error()))
+		}
+		return nil
+	}
+
+	block, params, err := r.produceBlock(ctx, head, exp, sealHash, leader, uc, readinessTicket)
 	if err != nil {
+		if errors.Is(err, errReadinessRevoked) {
+			r.recordReadinessRevoked(ctx, err)
+			return nil
+		}
 		return fmt.Errorf("producing round %d block: %w", exp.Round, err)
 	}
 
@@ -731,6 +801,23 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 				slog.Uint64("round", exp.Round), slog.String("reason", identityErr.Error()))
 		}
 		return nil
+	}
+
+	// THE RECORD GATE'S VOTE VERDICT, immediately after P-id's abstention and before P-sign. The
+	// revalidation takes the finality gate for itself alone and releases it before the signature, so
+	// it excludes every commit and build in this process at the moment it reads the record, executor
+	// and observed history. A refusal withholds the signature only: the block above was built or
+	// verified and r.pending is recorded, so this node stays a warm follower.
+	if readinessErr != nil {
+		r.recordReadinessAbstained(ctx, readinessErr)
+		return nil
+	}
+	if err := r.revalidateUnderFinality(ctx, readinessTicket, uc); err != nil {
+		if errors.Is(err, errReadinessRevoked) {
+			r.recordReadinessRevoked(ctx, err)
+			return nil
+		}
+		return fmt.Errorf("acquiring the finality gate for the vote's readiness check: %w", err)
 	}
 
 	// P-sign (§4, §6.1). THE VOTE is what a restored process withholds — not its participation.
@@ -1130,15 +1217,20 @@ func (r *Round) commitFinal(ctx context.Context, who string, hash Hash) (Status,
 	return r.executor.Commit(ctx, hash)
 }
 
-func (r *Round) buildFinal(ctx context.Context, params RoundParams) (BuildID, error) {
+func (r *Round) buildFinal(ctx context.Context, params RoundParams, held *types.UnicityCertificate, ticket ReadinessTicket) (BuildID, error) {
 	// Build sets head, safe and finalized on the parent before any payload exists, so it changes
-	// finality even though it reads as "start a block".
+	// finality even though it reads as "start a block". The record gate's mutable-state check runs
+	// inside this hold and before the Build: a ticket revoked here must not reach an Engine call that
+	// finalizes a parent the record no longer supports.
 	if r.finality != nil {
 		release, err := r.finality.acquire(ctx, "build")
 		if err != nil {
 			return "", err
 		}
 		defer release()
+	}
+	if err := r.revalidateChildReadiness(ctx, ticket, held); err != nil {
+		return "", err
 	}
 	return r.executor.Build(ctx, params)
 }
@@ -1335,8 +1427,10 @@ func (r *Round) verifyWithRetry(ctx context.Context, block Block, params RoundPa
 // produceBlock builds (leader) or awaits and verifies-for-dissemination-only
 // (follower) the candidate for this round. Note: the leader's block is
 // still passed through executor.Verify by the caller (HandleCertificate) —
-// produceBlock only obtains it.
-func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation, sealHash Hash, leader string) (Block, RoundParams, error) {
+// produceBlock only obtains it. The readiness ticket is threaded through
+// explicitly rather than kept on the Round so it lives for one round only
+// and cannot be reused by a later one.
+func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation, sealHash Hash, leader string, held *types.UnicityCertificate, ticket ReadinessTicket) (Block, RoundParams, error) {
 	params := RoundParams{
 		Round:     exp.Round,
 		Epoch:     exp.Epoch,
@@ -1348,7 +1442,7 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 
 	if leader == r.nodeID {
 		buildStart := time.Now()
-		id, err := r.buildFinal(ctx, params)
+		id, err := r.buildFinal(ctx, params, held, ticket)
 		if err != nil {
 			return Block{}, params, fmt.Errorf("build: %w", err)
 		}
