@@ -9,8 +9,9 @@ package evmroot
 // than asserted in prose:
 //
 //   - every pinned upstream source has a real revision and an SPDX licence id;
-//   - no component is marked for a source port while every pinned source is
-//     copyleft-incompatible with the Apache-2.0 contract set;
+//   - no component is marked for a source port unless its pinned source is
+//     portable into the DECLARED destination licence, which is matrix data
+//     rather than an assumed one (see portableInto);
 //   - every removed unit either names the accounting duty it carried and the
 //     replacement that assumes it, or is explicitly marked as carrying none;
 //   - every reference/port row names the upstream test obligation it drops and
