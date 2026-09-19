@@ -59,12 +59,18 @@ type lucCheckpoint struct {
 }
 
 // ErrLegacyJSONCheckpoint is returned by LoadLUC when the file on disk is the old
-// encoding/json format. It is deliberately fatal rather than self-healing: the stored
-// certificate is this node's non-equivocation authority, the legacy encoding cannot be
-// converted losslessly (the nil/empty distinction it destroyed is not recoverable from
-// the file itself), and silently continuing would mean either voting from genesis or
-// treating a certificate that no longer matches what was signed as authoritative.
+// encoding/json format. It is deliberately fatal rather than self-healing: the legacy
+// encoding cannot be converted losslessly (the nil/empty distinction it destroyed is not
+// recoverable from the file itself), and silently continuing would mean either voting from
+// genesis or resuming from a certificate that no longer matches what was signed.
 // The old file is left untouched for recovery and evidence.
+//
+// This deliberately no longer calls the stored certificate "this node's non-equivocation
+// authority", which an earlier revision did. Under the accepted F6c profile
+// (docs/design/f6c-signing-state-contract.md) that authority is the separate signing-authority
+// process and its in-memory record, and the shard's own files are untrusted: they may be
+// replayed or restored from an older backup. This checkpoint is the restoration cursor, and
+// the refusal stands on the two grounds stated above rather than on that claim.
 var ErrLegacyJSONCheckpoint = errors.New("shardnode: certificate store is in the legacy JSON format")
 
 func NewFileStore(path string) *FileStore {
