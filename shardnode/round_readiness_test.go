@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -205,6 +206,60 @@ func reasonMetrics(t *testing.T) (*shardnode.Metrics, func() []string) {
 		}
 		return out
 	}
+}
+
+// TestUngatedRoundNeverTakesTheFinalityGate: a round with no ChildReadiness must reach no gate at
+// all. With the gate held for the whole round, an ungated follower round completes and signs while
+// the holder is still inside it. The assertion is deliberate rather than incidental: the round is a
+// follower round that commits nothing, so neither buildFinal nor commitFinal is reached and the
+// only place that could take the gate is the vote's revalidation. A guard that merely held the gate
+// briefly would still block here, which is the regression the guard fixes: the recovery applier
+// takes the gate with tryAcquire and reports being turned away rather than waiting, so a no-op
+// acquisition on every round can cost a recovery attempt the round it was made in.
+func TestUngatedRoundNeverTakesTheFinalityGate(t *testing.T) {
+	ctx := context.Background()
+	const nodeID = "follower-node"
+	const leader = "other-leader"
+
+	// A follower round needs a block to verify. Build one on a second Fake that shares genesis, so the
+	// follower recomputes the same roots and Verify returns VALID without any commit.
+	leaderExec := executortest.New()
+	head, err := leaderExec.Head(ctx)
+	require.NoError(t, err)
+	leaderExec.AddEntries([]byte("a block the follower verifies"))
+	id, err := leaderExec.Build(ctx, shardnode.RoundParams{Round: 1, Parent: head})
+	require.NoError(t, err)
+	block, err := leaderExec.Seal(ctx, id)
+	require.NoError(t, err)
+
+	disseminator := newBroadcastDisseminator()
+	require.NoError(t, disseminator.Publish(ctx, 1, block))
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	sub := &recordingSubmitter{}
+	r := shardnode.NewRound(nodeID, types.PartitionID(8), types.ShardID{}, executortest.New(), disseminator, signer, sub, nil)
+
+	gate := shardnode.NewFinalityGate()
+	r.SetFinalityGate(gate)
+	// No SetChildReadiness call: this is exactly the ungated configuration the guard protects.
+
+	release, err := gate.Hold(ctx, "recovery-apply")
+	require.NoError(t, err)
+	defer release()
+
+	done := make(chan error, 1)
+	go func() { done <- r.HandleCertificate(ctx, genesisUC(1000), tr(1, 0, leader)) }()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err, "an ungated round must complete without the finality gate")
+	case <-time.After(5 * time.Second):
+		t.Fatal("HandleCertificate blocked while the finality gate was held: an ungated round took the gate")
+	}
+
+	require.Len(t, sub.got, 1, "the round still signs while the gate is held")
+	_, _, held := gate.Holder()
+	require.True(t, held, "the gate was held throughout, so the round never acquired it")
 }
 
 // TestReadyRoundIsUnchanged: when the gate is ready it must be invisible. Two rounds with the same
