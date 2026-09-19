@@ -134,17 +134,32 @@ brings a replacement host back into service with its state intact, which is what
 
 ### 2.6 "Old file-store migration is documented before any public state exists"
 
-The production behaviour exists and is deliberate: a legacy JSON checkpoint is refused, not migrated,
-because the encoding destroyed a nil/empty distinction that cannot be recovered from the file, and the
-error names two recovery routes (copy a current store from a healthy validator, or, on a discardable
-devnet, move the file aside and re-register). The old file is left in place.
+**Met.** The production behaviour is a deliberate refusal rather than a migration: a legacy JSON
+checkpoint fails startup, the file is left in place, and the error names two recovery routes (copy a
+current store from a healthy validator, or, on a discardable devnet, move the file aside and
+re-register). A file that starts with `{` but does not parse as a certificate is reported as damaged
+rather than as a migration, and an absent file remains a clean fresh start
+(`shardnode/store.go`, tested by `TestCheckpointLegacyJSONFailsClosed`,
+`TestCheckpointDamagedVersusLegacy` and `TestCheckpointRejectsUnusableStores` in
+`shardnode/store_roundtrip_test.go`).
 
-**What it does not show.** That decision is written in a Go comment (`shardnode/store.go:53-61`) and an
-error string, and **nowhere in `docs/`**. Searching `docs/` for the legacy checkpoint, legacy JSON or a
-migration procedure returns nothing. The F6a model's "a legacy certificate file creates no readiness"
-case describes the record store's view, not the operator procedure. This acceptance line asks for
-documentation, and by its own terms it is due "before any public state exists", so it is cheap now and
-expensive later.
+That decision is written down in `docs/`, and in the place this criterion asks for:
+
+- `f6a-certified-record-crash-contract.md` §"Migration from `FileStore`": the legacy file holds only
+  the latest certificate, a migration may treat it as an observed certificate after
+  re-authentication, it carries no witness so it creates no readiness, the file is left in place, and
+  "No public state exists yet, so no in-place conversion is defined." That last clause answers the
+  criterion's own condition directly.
+- `f1-baseline.md` §6.3.1: legacy JSON stores fail startup with a migration message and are left on
+  disk; a damaged file is reported as damaged rather than as a migration; neither is ever treated as
+  a fresh store.
+- `f6b-certified-record-store.md` and `f6d-node-record-wiring.md` §6 both scope migration out of
+  their units explicitly rather than silently.
+
+**What it does not show.** There is no operator-facing procedure in the operations documentation
+(`docs/troubleshooting.md`, `docs/shard-node.md`); the decision lives in design records and in the
+error message an operator actually hits. That is a documentation-placement gap, not an unmet
+criterion, and it does not block closure on this line.
 
 ## 3. A contradiction worth settling before this closes
 
@@ -174,12 +189,13 @@ changes what still has to be built.
    `store.go:35`, which leaves that path with no fault injection at any position (§2.3, §2.4); fault
    position 1, before proposal submission, which has no test at all; fault position 5, before
    execution commit, which exists only over the model; the replacement-host recovery path for the
-   store and executor side (§2.5); and the migration documentation (§2.6). The replay-cursor
-   association in §2.2 is a smaller sixth.
+   store and executor side (§2.5). The replay-cursor association in §2.2 is a smaller fifth.
+   The migration line (§2.6) is **met**; only its placement in operator-facing documentation is
+   open, and that does not block.
 2. §3 is settled first, because it decides whether the largest of those is a defect or a
    non-requirement. Everything else is scoped from that answer.
-3. §2.6 is independent of §3 and can be written now. It is documentation of behaviour that already
-   exists and is already deliberate.
+3. Moving §2.6's decision into the operations documentation is independent of §3 and can be done at
+   any time. It restates an accepted decision rather than making one.
 4. Nothing here reopens F6b, F6c or F6d. Their ledgers and merges stand; what is missing was never
    claimed by them, and two of the three gaps are recorded in the code as deferrals to #14 rather than
    discovered here.
