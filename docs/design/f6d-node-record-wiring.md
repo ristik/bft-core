@@ -571,5 +571,46 @@ the interactions the per-unit tests cannot see.
 | `TestRecoveryCommitIsReportedWithItsOwnCertificate` | a recovery across a quiet tail reports the source certificate that names the committed block, not the held certificate, and the block hash is the applied target's |
 | `TestRecoveryCommitIsNotReportedWhenNothingIsInstalled` | an attempt whose target does not explain the snapshot state installs nothing and reports nothing |
 | `TestRecoveryCapturePublishesARecord` | the capturer publishes a record for a recovery-applied block, and the gate of §9 then finds readiness for its child |
-| `TestRecoveryAndOrdinaryCommitForTheSameBlock` | both reported: the second publication is refused as not extending the head, and no record is damaged |
+| `TestRecoveryAndOrdinaryCommitForTheSameBlock` | both reported: the second is refused as `CaptureDuplicate` and no record is damaged. `ErrStaleRecord` is not reachable for the same block, because the capturer's round comes from the certificate's `InputRecord.RoundNumber` and the witness must show the same `RoundAuthorized`, so the record's round equals the head's and the store sees a republish. The stale case is a different block at the same or an earlier round, covered by `TestCaptureFailuresKeepThePriorRecord` |
 | `TestCertifiedRecordLifecycle` | §10.4, composed: ordinary rounds, restart, recovery, capture, with the vote asserted at each stage |
+
+### 10.6 Observing the authenticated recovery chain
+
+Reporting the commit is not enough on its own. `Readiness.Prepare` builds continuity from the record's
+certificate to the held certificate out of the observation history, and that history is fed from exactly
+one place: the arrival site in `HandleCertificate`, which sees only what this node received live. A node
+that fell behind and was brought back by evidence never received the source certificate or the tail
+between it and the certificate it holds. So after a recovery and a capture, the record names a
+certificate the node cannot connect to anything, and the gate of §9 abstains indefinitely. That is the
+state the record exists to repair, so W3b-2 must close it rather than leave §10.5's readiness claim
+resting on a test that observes the source by hand.
+
+`VerifiedTarget` therefore also carries the authenticated tail, copied like the source pair:
+
+```go
+	// Tail is every certificate from the round Source assigned, up to and including the one this
+	// node holds, each with its bound technical record. It is the chain a later Prepare needs.
+	Tail []EvidenceLink
+```
+
+At the same point that reports the commit, after the lock is retaken and after the snapshot revalidation
+has installed the anchor, Round feeds the certificate observer the source pair and then each tail link in
+order. The rules are the existing feed's rules: it authorizes nothing, and a refusal is logged rather
+than allowed to fail the round. Nothing is observed when the target is not installed.
+
+This costs no trust. `VerifyAnchorEvidence` authenticated every certificate in the bundle against the
+configured trust base before the target existed, which is the same standard the live arrival site
+applies, and `AnchorEvidenceLimits` bounds the bundle at verification. The observation history keeps its
+own 512-certificate and 1 MiB bounds and evicts under them as before. The held certificate is already
+observed by the time `reconcile` runs, so source plus tail completes the chain rather than starting a
+second one.
+
+| Test | Covers |
+| --- | --- |
+| `TestRecoveryFeedsTheAuthenticatedChainToObservations` | the source pair and every tail link are observed, in order, and are exactly the bundle's authenticated pairs |
+| `TestNothingIsObservedWhenTheTargetIsNotInstalled` | an attempt whose target does not explain the snapshot state observes nothing, as it reports nothing |
+| `TestRecoveryObservationRefusalDoesNotFailTheRound` | a refusal from the observer is logged and the round proceeds |
+| `TestGateBecomesReadyAfterRecoveryAndCapture` | end to end with no certificate observed by hand: a node that recovers, captures and publishes finds readiness for the recovered block's child |
+
+`TestRecoveryCapturePublishesARecord` and `TestCertifiedRecordLifecycle` drop their manual observation of
+the source, which was standing in for this feed.
