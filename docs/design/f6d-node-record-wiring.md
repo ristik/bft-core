@@ -389,3 +389,108 @@ After an unavailable episode is exhausted, `RetryPending` starts one new bounded
 immutable attempt without a new transaction or commit notification. Calls coalesce while work is pending or
 in flight. W3b owns bounded backoff/scheduling, including reconciliation triggers. W3a proves the mechanism by
 making an initially unavailable proof available later and publishing the original attempt.
+
+## 9. W3b-1: the readiness gate in Round
+
+W3a built the predicate and left it inactive. W3b-1 lets a Round consult it, behind a second opt-in flag, and
+withholds leadership and the signature when the node cannot prove readiness for the held certificate's child.
+Recovery-source capture and the composed lifecycle tests are W3b-2 and are not in this unit.
+
+### 9.1 Opt-in
+
+`--certified-record-gate` is a boolean, default false. It requires `--certified-record-store`; set alone it stops
+startup with a named refusal. With the store and without the gate, the node behaves exactly as W3a: it reloads,
+reports, captures and publishes, and no vote changes.
+
+The gate is a separate flag rather than an effect of the store because readiness demands that the durable head
+record name the executor's current head (`Prepare` refuses otherwise). Capture is asynchronous, so a node whose
+record has not yet caught up with its executor is not ready, and a node with no record at all is never ready
+until W2 capture or `PublishGenesis` produces one. Abstaining is the correct answer for a node that cannot prove
+what its executor stands on, and it is not an acceptable side effect of asking for a record store.
+
+### 9.2 What Round gains
+
+Round must not import `recordwiring` (`recordwiring` imports `shardnode`, and the reach guards hold). It gains
+two interfaces and two `Node` setters instead, both installed only with the gate:
+
+```go
+// ReadinessTicket is an opaque prepared result. Only its producer can make one.
+type ReadinessTicket interface{ Valid() bool }
+
+// ChildReadiness decides whether this node may act on the certified-block record's child (#14 W3b).
+type ChildReadiness interface {
+	// Prepare does all expensive store, witness, trust and continuity verification. It is called with
+	// the round lock held and the finality gate free.
+	Prepare(ctx context.Context, held *types.UnicityCertificate) (ReadinessTicket, error)
+	// Revalidate does only the decisive mutable-state checks. It is called inside the finality gate.
+	Revalidate(ctx context.Context, ticket ReadinessTicket, held *types.UnicityCertificate) error
+}
+
+// CertificateObserver is fed every authenticated certificate and its technical record.
+type CertificateObserver interface {
+	ObserveCertificate(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error
+}
+```
+
+`recordwiring.PreparedReadiness` already satisfies `ReadinessTicket`. `recordwiring` supplies the adapters:
+`NewChildReadiness(*Readiness) shardnode.ChildReadiness` and `NewCertificateObserver(*Observations)
+shardnode.CertificateObserver`. Neither adapter adds a check; each forwards to the W3a entry point.
+
+`Node.SetCertificateObserver` and `Node.SetChildReadiness` follow `SetCommitObserver`: after `New`, before `Run`.
+
+### 9.3 Feeding the observations
+
+Round calls the certificate observer at the one site where an authenticated certificate and its technical record
+arrive together, beside `r.evidence.Observe` (round.go, the retention block). The rules are that block's rules:
+it runs before anything fallible, a refusal is logged and never fails the round, and being observed authorizes
+nothing. Without the gate no observer is installed and the call is not made.
+
+### 9.4 Where the verdict is applied
+
+`Prepare` runs once per round, after the two re-delivery answers and immediately before the leadership decision,
+and only when `identityErr` is nil: a round that already abstains on P-id needs no store, witness or trust work.
+Its ticket and its error live for that round only.
+
+| Point | Rule |
+| --- | --- |
+| Leadership | Not ready and this node is the leader: decline to lead exactly as P-id declines. `Build` is not called, nothing is finalized, the round returns nil. |
+| Build | `Revalidate` runs inside `buildFinal`'s finality-gate hold, after the gate is taken and before `executor.Build`. A refusal returns `errReadinessRevoked`; the round abstains and returns nil rather than failing the certificate. |
+| Vote | Immediately after P-id's abstention block and before P-sign, Round takes the finality gate for `Revalidate` alone and releases it. A refusal withholds the signature only. |
+
+Withholding is the whole of it, as with P-id. The block is still built or verified, `r.pending` is still recorded,
+and `commitPrevious` still applies what the shard certifies, so a not-ready node stays a warm follower and its
+own captures can make it ready again without recovery.
+
+Between the vote's revalidation and the signature the round lock excludes every commit and build in this process,
+including the recovery applier's, which runs only under it. What can still intervene is a capturer publication,
+which replaces the durable head with a later certified block. That does not invalidate the statement being signed
+about the round in hand; the next certificate's `Prepare` re-establishes readiness against the new head. This is
+the boundary, stated rather than closed.
+
+### 9.5 Reporting
+
+Health gains `certifiedRecordReadiness` and `certifiedRecordReadinessDetail` (both `omitempty`, both empty without
+the gate), set on every round the gate evaluates to `ready` or to the refusal. The non-voting reason names record
+readiness so it is distinguishable from P-id and from a signing refusal. Two IR-divergence metric reasons are
+added: `record_readiness_declined_leadership` and `record_readiness_abstained`.
+
+### 9.6 Not in W3b-1
+
+- Capture of blocks committed by anchor recovery (#92) and the composed restart/recovery lifecycle tests: W3b-2.
+- Any change to W1 startup, W2 capture, the store, the proof path or the default ungated node.
+- Making the gate the default, and any activation decision for a deployment.
+
+### 9.7 Tests
+
+| Test | Covers |
+| --- | --- |
+| `TestGateFlagRequiresTheRecordStore` (cmd) | `--certified-record-gate` alone stops startup with the named refusal; with the store it installs both hooks |
+| `TestRecordGateIsOffWithoutTheFlag` | with the store and no gate flag no `ChildReadiness` and no `CertificateObserver` are installed and voting is unchanged |
+| `TestReadyRoundIsUnchanged` | a ready round produces byte-identical signed request bytes to the same round without the gate |
+| `TestNotReadyDeclinesLeadership` | the leader's `Prepare` refuses: `executor.Build` is never called, nothing is signed, the round returns nil, health and the metric name record readiness |
+| `TestReadinessRevokedInsideTheFinalityGate` | `Revalidate` refuses inside `buildFinal`'s hold: no `Build`, the round abstains and returns nil rather than returning an error |
+| `TestNotReadyAbstainsFromTheVote` | `Prepare` succeeded and the vote's `Revalidate` refuses: the block is still built or verified, `r.pending` is recorded, nothing is signed, and the next certificate still commits |
+| `TestVoteRevalidationHoldsTheFinalityGate` | the gate is held for the vote's `Revalidate` and released before the signer is called |
+| `TestPrepareIsSkippedWhenIdentityAlreadyRefuses` | `identityErr` non-nil: `Prepare` is not called |
+| `TestCertificateObserverRefusalDoesNotFailTheRound` | an observer refusal is logged and the round proceeds and signs |
+| reach guards | unchanged: only the shard-node command imports `recordwiring`, and `shardnode` imports neither it nor `certifiedstore` |
