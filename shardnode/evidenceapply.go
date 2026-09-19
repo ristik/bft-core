@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 )
 
 /*
@@ -246,6 +248,13 @@ func (b CertificateBinding) clone() CertificateBinding {
 type VerifiedTarget struct {
 	Anchor *ExecutionAnchor
 	For    CertificateBinding
+	// Source certified Anchor's block, with the technical record bound to it. Both come from the
+	// AnchorEvidence this target was verified from, never from the held certificate. Across a quiet
+	// tail the held certificate names no block, so it cannot be the certificate a recovered block's
+	// record is bound to; the source is the one VerifyAnchorEvidence authenticated and guaranteed
+	// non-quiet.
+	Source          *types.UnicityCertificate
+	SourceTechnical *certification.TechnicalRecord
 }
 
 // TargetSource is what holds a verified anchor — `*EvidenceRequester` in production. Behind an
@@ -261,10 +270,15 @@ type ApplyResult struct {
 	// Head is the executor's head AFTER the attempt when one was read, and the head passed in
 	// otherwise. It is never a guess: an attempt that could not read a head reports the one it was
 	// given, and Outcome says why.
-	Head    BlockRef
-	Target  *ExecutionAnchor
-	Attempt int
-	Err     error
+	Head   BlockRef
+	Target *ExecutionAnchor
+	// Source and SourceTechnical are the certificate that certified Target's block, taken from the
+	// verified target. A recovery commit is reported to the commit observer with this pair, so the
+	// record is bound to the certificate that actually names the block rather than to the held one.
+	Source          *types.UnicityCertificate
+	SourceTechnical *certification.TechnicalRecord
+	Attempt         int
+	Err             error
 }
 
 /*
@@ -359,12 +373,12 @@ taken AFTER the commit.
 */
 func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head BlockRef) ApplyResult {
 	if !held.valid() {
-		return a.record(ApplyNoTarget, head, nil,
+		return a.record(ApplyNoTarget, head, nil, nil,
 			fmt.Errorf("%w: no certificate was named to apply against", ErrApplyNoTarget))
 	}
 	vt, ok := a.source.Target()
 	if !ok || vt.Anchor == nil {
-		return a.record(ApplyNoTarget, head, nil, fmt.Errorf("%w: round %d", ErrApplyNoTarget, held.Round))
+		return a.record(ApplyNoTarget, head, nil, nil, fmt.Errorf("%w: round %d", ErrApplyNoTarget, held.Round))
 	}
 	target := vt.Anchor
 
@@ -372,14 +386,14 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 	// against the certificate this node is being asked to build on. Anything weaker is inferring
 	// what a target is about from a hash it happens to share.
 	if !vt.For.same(held) {
-		return a.record(ApplyStaleTarget, head, target,
+		return a.record(ApplyStaleTarget, head, target, &vt,
 			fmt.Errorf("%w: the target was verified against round %d (root round %d), this node holds round %d (root round %d)",
 				ErrApplyStaleTarget, vt.For.Round, vt.For.RootRound, held.Round, held.RootRound))
 	}
 	// And the two must agree about what that certificate says. A disagreement here is a bug on this
 	// node, not a peer's doing, so it is named separately rather than folded into staleness.
 	if !bytes.Equal(target.StateRoot, held.State) {
-		return a.record(ApplyStaleTarget, head, target,
+		return a.record(ApplyStaleTarget, head, target, &vt,
 			fmt.Errorf("%w: target produces state %x for round %d, the certificate for that round builds on %x",
 				ErrApplyStaleTarget, target.StateRoot, target.Round, held.State))
 	}
@@ -397,7 +411,7 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 	*/
 	enter, err := a.enter(held, target)
 	if err != nil {
-		return a.record(outcomeForAdmission(err), head, target, err)
+		return a.record(outcomeForAdmission(err), head, target, &vt, err)
 	}
 	defer enter()
 
@@ -406,7 +420,7 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 		if gerr != nil {
 			// The round is doing something of its own. Not an answer about the executor and not an
 			// attempt spent against it — the next certificate is the next opportunity.
-			return a.retryable(ApplyBusy, head, target, a.attemptNumber(),
+			return a.retryable(ApplyBusy, head, target, &vt, a.attemptNumber(),
 				fmt.Errorf("%w: %w", ErrApplyBusy, gerr))
 		}
 		defer gateRelease()
@@ -442,12 +456,12 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 	*/
 	current, herr := a.head(ctx)
 	if herr != nil {
-		return a.retryable(ApplyExecutorUnreachable, head, target, a.attemptNumber(),
+		return a.retryable(ApplyExecutorUnreachable, head, target, &vt, a.attemptNumber(),
 			fmt.Errorf("%w: reading the executor head: %w", ErrApplyExecutorUnreachable, herr))
 	}
 	satisfied, gerr := a.headSatisfies(ctx, target, held, current)
 	if gerr != nil {
-		return a.retryable(ApplyExecutorUnreachable, current, target, a.attemptNumber(),
+		return a.retryable(ApplyExecutorUnreachable, current, target, &vt, a.attemptNumber(),
 			fmt.Errorf("%w: reading the executor genesis block: %w", ErrApplyExecutorUnreachable, gerr))
 	}
 
@@ -456,7 +470,7 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 		// Only a path that COMMANDS the executor spends the attempt budget and the backoff.
 		attempt, serr := a.spend(held)
 		if serr != nil {
-			return a.record(outcomeForAdmission(serr), head, target, serr)
+			return a.record(outcomeForAdmission(serr), head, target, &vt, serr)
 		}
 
 		// Idempotent by contract (see Round.reconcile): Commit on an already-canonical hash is a
@@ -465,17 +479,17 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 		if cerr != nil {
 			// UNREACHABLE, not unavailable and not invalid. The executor said nothing, so nothing is
 			// known — including whether it applied the block. The target is kept.
-			return a.retryable(ApplyExecutorUnreachable, current, target, attempt,
+			return a.retryable(ApplyExecutorUnreachable, current, target, &vt, attempt,
 				fmt.Errorf("%w: committing certified block %x: %w", ErrApplyExecutorUnreachable, target.BlockHash, cerr))
 		}
 		switch status {
 		case StatusValid:
 			// on, to the post-conditions
 		case StatusSyncing, StatusAccepted:
-			return a.retryable(ApplyPayloadUnavailable, current, target, attempt,
+			return a.retryable(ApplyPayloadUnavailable, current, target, &vt, attempt,
 				fmt.Errorf("%w: certified block %x reported %s", ErrApplyPayloadUnavailable, target.BlockHash, status))
 		default:
-			return a.fault(ApplyPayloadInvalid, current, target, attempt,
+			return a.fault(ApplyPayloadInvalid, current, target, &vt, attempt,
 				fmt.Errorf("%w: certified block %x reported %s — this is a fault, not an availability problem",
 					ErrApplyPayloadInvalid, target.BlockHash, status))
 		}
@@ -489,7 +503,7 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 		if cherr != nil {
 			// The commit reported VALID and the head could not be read, so whether this node is
 			// recovered is unknown. Unknown is retryable, and the next attempt's commit is a no-op.
-			return a.retryable(ApplyExecutorUnreachable, current, target, attempt,
+			return a.retryable(ApplyExecutorUnreachable, current, target, &vt, attempt,
 				fmt.Errorf("%w: reading head after committing %x: %w", ErrApplyExecutorUnreachable, target.BlockHash, cherr))
 		}
 		newHead = confirmed
@@ -501,7 +515,7 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 	// read before the gate was taken, so the same window exists there, only narrower. Adopting an
 	// anchor is a decision the round acts on either way, so either way it is revalidated first.
 	if now, ok := a.source.Target(); !ok || now.Anchor == nil || !bytes.Equal(now.Anchor.BlockHash, target.BlockHash) {
-		return a.retryable(ApplyTargetMoved, newHead, target, attempt,
+		return a.retryable(ApplyTargetMoved, newHead, target, &vt, attempt,
 			fmt.Errorf("%w: %x was applied for round %d", ErrApplyTargetMoved, target.BlockHash, held.Round))
 	}
 
@@ -514,19 +528,19 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 	if target.fromGenesisRound {
 		g, gerr := a.genesis(ctx)
 		if gerr != nil {
-			return a.retryable(ApplyExecutorUnreachable, newHead, target, attempt,
+			return a.retryable(ApplyExecutorUnreachable, newHead, target, &vt, attempt,
 				fmt.Errorf("%w: reading the executor genesis block: %w", ErrApplyExecutorUnreachable, gerr))
 		}
 		genesis = &g
 	}
 	if idErr := anchorHeadIdentity(target, newHead, genesis); idErr != nil {
-		return a.fault(ApplyHeadMismatch, newHead, target, attempt,
+		return a.fault(ApplyHeadMismatch, newHead, target, &vt, attempt,
 			fmt.Errorf("%w: %w", ErrApplyHeadMismatch, idErr))
 	}
 	// And the state, which is the other half of P-id: the same block hash at another state would
 	// mean the executor and the certificate disagree about what that block produced.
 	if !bytes.Equal(newHead.StateRoot, held.State) {
-		return a.fault(ApplyHeadMismatch, newHead, target, attempt,
+		return a.fault(ApplyHeadMismatch, newHead, target, &vt, attempt,
 			fmt.Errorf("%w: head block %x is at state %x, the certified state is %x",
 				ErrApplyHeadMismatch, newHead.Hash, newHead.StateRoot, held.State))
 	}
@@ -543,7 +557,7 @@ func (a *TargetApplier) Apply(ctx context.Context, held CertificateBinding, head
 			slog.Uint64("anchorRound", target.Round),
 			slog.Uint64("heldRound", held.Round))
 	}
-	return a.record(ApplyApplied, newHead, target, nil)
+	return a.record(ApplyApplied, newHead, target, &vt, nil)
 }
 
 func outcomeForAdmission(err error) ApplyOutcome {
@@ -684,11 +698,11 @@ func (a *TargetApplier) genesis(ctx context.Context) (BlockRef, error) {
 
 // retryable records an outcome that another attempt could resolve, and schedules the next one. The
 // target is deliberately untouched: dropping it is what would remove the authority to retry.
-func (a *TargetApplier) retryable(o ApplyOutcome, head BlockRef, target *ExecutionAnchor, attempt int, err error) ApplyResult {
+func (a *TargetApplier) retryable(o ApplyOutcome, head BlockRef, target *ExecutionAnchor, src *VerifiedTarget, attempt int, err error) ApplyResult {
 	a.mu.Lock()
 	a.nextAttempt = a.now().Add(a.budget.Backoff)
 	a.mu.Unlock()
-	res := a.record(o, head, target, err)
+	res := a.record(o, head, target, src, err)
 	res.Attempt = attempt
 	return res
 }
@@ -696,7 +710,7 @@ func (a *TargetApplier) retryable(o ApplyOutcome, head BlockRef, target *Executi
 // fault records an outcome no further attempt at this target can resolve. It is recorded against the
 // BLOCK HASH rather than the state, so a later target for the same state — a different block, which
 // is exactly what §3.3.1 describes — is not refused for it.
-func (a *TargetApplier) fault(o ApplyOutcome, head BlockRef, target *ExecutionAnchor, attempt int, err error) ApplyResult {
+func (a *TargetApplier) fault(o ApplyOutcome, head BlockRef, target *ExecutionAnchor, src *VerifiedTarget, attempt int, err error) ApplyResult {
 	a.mu.Lock()
 	a.faultedFor = bytes.Clone(target.BlockHash)
 	a.faultErr = err
@@ -707,17 +721,32 @@ func (a *TargetApplier) fault(o ApplyOutcome, head BlockRef, target *ExecutionAn
 			slog.String("blockHash", fmt.Sprintf("%x", target.BlockHash)),
 			slog.String("err", err.Error()))
 	}
-	res := a.record(o, head, target, err)
+	res := a.record(o, head, target, src, err)
 	res.Attempt = attempt
 	return res
 }
 
-func (a *TargetApplier) record(o ApplyOutcome, head BlockRef, target *ExecutionAnchor, err error) ApplyResult {
+func (a *TargetApplier) record(o ApplyOutcome, head BlockRef, target *ExecutionAnchor, src *VerifiedTarget, err error) ApplyResult {
 	a.mu.Lock()
 	a.last, a.lastErr = o, err
 	attempt := a.attempts
 	a.mu.Unlock()
-	return ApplyResult{Outcome: o, Head: head, Target: copyAnchor(target), Attempt: attempt, Err: err}
+	res := ApplyResult{Outcome: o, Head: head, Target: copyAnchor(target), Attempt: attempt, Err: err}
+	// The source pair travels with every attempt that had a target, copied like the retained
+	// certificate it came from. A caller reports a commit from it, and a caller that edited it would
+	// otherwise be editing what the applier was handed.
+	if src != nil && src.Source != nil && src.SourceTechnical != nil {
+		uc, tr, _, cerr := copyPair(src.Source, src.SourceTechnical)
+		if cerr != nil {
+			if a.log != nil {
+				a.log.WarnContext(context.Background(), "a recovery attempt's source certificate could not be copied for reporting",
+					slog.String("err", cerr.Error()))
+			}
+		} else {
+			res.Source, res.SourceTechnical = uc, tr
+		}
+	}
+	return res
 }
 
 // ApplyStatus is a diagnostic snapshot.

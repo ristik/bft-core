@@ -1196,6 +1196,12 @@ func (r *Round) applyVerifiedAnchor(ctx context.Context, uc *types.UnicityCertif
 		return newHead, res, false
 	}
 	r.continuity.installVerified(res.Target, snapRound, snapNext)
+	// The commit is reported only NOW. A target that does not explain the state this round is
+	// building on was not installed, and a block that is not installed must not be recorded. The
+	// source pair is the certificate that certified the recovered block, never the held one, and the
+	// capturer cannot tell a recovery commit from an ordinary one. The lock is held here, as
+	// CommitObserver requires: it was dropped across recovery.apply and retaken above.
+	r.notifyCommit(ctx, res.Source, res.SourceTechnical, res.Target.BlockHash)
 	return newHead, res, true
 }
 

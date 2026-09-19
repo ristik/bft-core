@@ -21,12 +21,13 @@ type CertifiedCommit struct {
 }
 
 /*
-CommitObserver is told about every block the round itself commits because a certificate certified it (#14
-W2). ObserveCommit is called with the round lock held, after the executor's Commit and before the next
-round is driven, so it must return promptly, must not call back into the node, and must do any slow work
-elsewhere. Quiet certificates, repeats and re-deliveries commit nothing and are not reported, and neither are
-commits made by anchor recovery (#92). Being told is not an authorization: nothing the observer does changes
-what the round builds, validates or signs.
+CommitObserver is told about every block the round commits: one a certificate the round itself processed
+certified (#14 W2), and one authenticated anchor recovery brought the executor to (#14 W3b-2). ObserveCommit
+is called with the round lock held, after the executor's Commit and before the next round is driven, so it must
+return promptly, must not call back into the node, and must do any slow work elsewhere. A recovery commit
+reports the certificate that certified the block, which across a quiet tail is not the certificate in hand.
+Quiet certificates, repeats and re-deliveries commit nothing and are not reported. Being told is not an
+authorization: nothing the observer does changes what the round builds, validates or signs.
 */
 type CommitObserver interface {
 	ObserveCommit(CertifiedCommit)
