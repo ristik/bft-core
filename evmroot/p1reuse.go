@@ -4,7 +4,7 @@ package evmroot
 //
 // This file is the machine-checkable form of the reuse decision. The
 // normative narrative is docs/design/p1-staking-component-reuse-assessment.md
-// and the decision record is docs/adr/0009-staking-component-reuse.md; this
+// and the decision record is docs/adr/0011-staking-component-reuse.md; this
 // model exists so the acceptance invariants are enforced by a test rather
 // than asserted in prose:
 //

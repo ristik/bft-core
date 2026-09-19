@@ -1,4 +1,4 @@
-# ADR 0009: Staking component reuse — independent implementation in a separate GPL-3.0 repository (P1)
+# ADR 0011: Staking component reuse — independent implementation in a separate GPL-3.0 repository (P1)
 
 ## Status
 

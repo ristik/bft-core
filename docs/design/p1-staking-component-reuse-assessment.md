@@ -14,7 +14,7 @@ security audit are separate.
 Model: [`evmroot/p1reuse.go`](../../evmroot/p1reuse.go) (types + `Validate`),
 [`evmroot/p1matrix.go`](../../evmroot/p1matrix.go) (`BuildP1ReuseMatrix`).
 Fixture: [`evmroot/testdata/p1-reuse-matrix.json`](../../evmroot/testdata/p1-reuse-matrix.json).
-Decision record: [ADR 0009](../adr/0009-staking-component-reuse.md).
+Decision record: [ADR 0011](../adr/0011-staking-component-reuse.md).
 
 Specification basis: `docs/pos/specification/governance.tex` §§ "Stake Registry",
 "Election", "Trust Base Derivation", "Rewards", "Slashing", "Fees", "Economic
