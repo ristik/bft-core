@@ -1196,7 +1196,53 @@ func (r *Round) applyVerifiedAnchor(ctx context.Context, uc *types.UnicityCertif
 		return newHead, res, false
 	}
 	r.continuity.installVerified(res.Target, snapRound, snapNext)
+	// The commit is reported only NOW. A target that does not explain the state this round is
+	// building on was not installed, and a block that is not installed must not be recorded. The
+	// source pair is the certificate that certified the recovered block, never the held one, and the
+	// capturer cannot tell a recovery commit from an ordinary one. The lock is held here, as
+	// CommitObserver requires: it was dropped across recovery.apply and retaken above.
+	r.notifyCommit(ctx, res.Source, res.SourceTechnical, res.Target.BlockHash)
+	// The authenticated chain is fed to the certificate observer at the same point, so a later
+	// Prepare can connect the durable record to the held certificate without its certificates ever
+	// having arrived live. Nothing is observed when the target is not installed.
+	r.observeRecoveryChain(ctx, res)
 	return newHead, res, true
+}
+
+/*
+observeRecoveryChain feeds the authenticated recovery chain to the certificate observer: the source
+pair, then each tail link in order.
+
+The chain needs no re-authentication here. VerifyAnchorEvidence checked every certificate against
+this node's own configured trust base before the target existed, which is the same standard the live
+arrival site applies, and AnchorEvidenceLimits bounded the bundle. The held certificate was already
+observed at the arrival site, so source plus tail completes that chain rather than starting a second
+one.
+
+The rules are the arrival site's: observing authorizes nothing, and a refusal is logged rather than
+allowed to fail the round. A history that cannot retain the pair costs only this node's ability to
+prove its own continuity, which is an availability property, not a reason to abandon a certified
+round.
+*/
+func (r *Round) observeRecoveryChain(ctx context.Context, res ApplyResult) {
+	if r.certificateObserver == nil {
+		return
+	}
+	feed := func(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) {
+		if uc == nil || tr == nil {
+			return
+		}
+		if err := r.certificateObserver.ObserveCertificate(uc, tr); err != nil && r.log != nil {
+			r.log.LogAttrs(ctx, slog.LevelWarn, "certificate observer refused a recovery-chain observation",
+				slog.String("err", err.Error()),
+				slog.Uint64("round", uc.GetRoundNumber()),
+				slog.String("nodeID", r.nodeID))
+		}
+	}
+	feed(res.Source, res.SourceTechnical)
+	for _, link := range res.Tail {
+		feed(link.UC, link.Technical)
+	}
 }
 
 func anchorStateForLog(a *ExecutionAnchor) string {
