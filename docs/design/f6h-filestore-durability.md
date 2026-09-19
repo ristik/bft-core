@@ -39,10 +39,17 @@ standard; it changes nothing else.
 5. rename it over the target, as now;
 6. **sync the parent directory**, so the entry the rename created is durable.
 
-Any step failing returns an error and leaves the existing file untouched; the existing deferred
-`os.Remove` still clears the temporary file. Step 3 before step 5 is the order that matters: a
-durable entry pointing at data that is not yet durable is the one arrangement that can produce a
-file which exists and does not parse.
+Any step failing returns an error. Steps 1 to 4 leave the existing file untouched. Step 5 has
+already replaced it, so a failure at step 6 reports that the new certificate's durability is not
+established even though a reader now sees it: the prior file is gone and cannot be restored by this
+sequence. That is the correct outcome rather than a defect to design around. Both files are valid
+certificates, neither is treated as evidence of freshness, and the invariant that matters is
+prior-or-new, which holds throughout. Keeping the prior file recoverable across a directory-sync
+failure would need a backup-and-rollback sequence, and it would buy nothing.
+
+The deferred `os.Remove` clears the temporary file on every in-process path. Step 3 before step 5 is
+the order that matters for integrity: a durable entry pointing at data that is not yet durable is
+the one arrangement that can produce a file which exists and does not parse.
 
 ## 3. Why the directory sync is separate
 
@@ -73,8 +80,16 @@ the strongest evidence in F6 and the pattern to follow rather than invent alongs
   certificate that was there before or the one being written, never an error and never a damaged
   file, and no temporary file is left in the directory.
 - **Process kill.** A child process is SIGKILLed at each checkpoint and the real file is reopened in
-  the parent. The same assertion holds. Only `after-dir-sync` is required to show the new
-  certificate; every earlier checkpoint may show either, and the test states which.
+  the parent. `LoadLUC` returns the prior or the new certificate, never an error. Only
+  `after-dir-sync` is required to show the new one; every earlier checkpoint may show either, and
+  the test states which. The child's death is asserted to be SIGKILL rather than a normal exit, so a
+  child that failed to reach its checkpoint cannot pass as a kill.
+
+  This class does **not** assert the absence of a temporary file. A process killed before the rename
+  never runs the deferred `os.Remove`, so a `.luc-*.tmp` orphan survives, one per crash. It is
+  harmless to `LoadLUC`, which reads only the target path, and it is left rather than swept: an
+  orphan scavenger would be new behaviour on the read path and belongs in its own unit if the
+  accumulation ever matters. Recorded here so it is a known consequence rather than a surprise.
 
 The point of the second class is that it is the only one that exercises a lost write rather than a
 restarted process. An in-process injected error proves the error path; it does not prove durability.
