@@ -31,20 +31,33 @@ caller supplies it, as it does for a follower.
 
 ## 2. The units
 
-Each unit is one `ureth` pull request. None of the first four advertises a capability, so a running
+Each unit is one `ureth` pull request. None of the first five advertises a capability, so a running
 node's Engine API surface is unchanged until U3e. That ordering is the D2 requirement to "expose
 none of it as supported until the whole advertised method/capability contract is present", taken
 literally: the methods become reachable one at a time, and become *advertised* only once together.
 
 | Unit | Scope |
 | --- | --- |
-| **U3a** | the wire types: `sealBuildInput = {rootInput, transitions}` and `sealCompanion = {rootInput, witnesses, provenance}`, their CBOR decoding, and the conversion from a decoded `rootInput` plus a parent header into a `BoundExecutionInput`. No RPC, no node, no capability |
-| **U3b** | `engine_forkchoiceUpdatedWithSealV1`: the build path. Runs the system operation as step 0, writes `extraData`, starts payload building through the existing `UnicityExecutionPayloadBuilder`, returns `PayloadStatusV1` and a `payloadId`. `INVALID` on a failed `rootInput` or system operation, `SYNCING` on an unknown parent |
-| **U3c** | `engine_getPayloadWithSealV1`: returns the payload, the block value and the `sealCompanion` the leader disseminates |
-| **U3d** | `engine_newPayloadWithSealV1`: the import path, for followers, devp2p and re-execution. `VALID` only when every D2 predicate passes and reth's own execution reproduces the committed `stateRoot` and `blockHash`; `INVALID` with the rejection code on any predicate failure; `SYNCING` when the parent or a referenced trust-base body is not local. `ACCEPTED` is never returned |
-| **U3e** | capability advertisement of the three strings, the startup compatibility check, and the bft-core adapter change that negotiates and uses them |
+| **U3a** | the wire types: `sealBuildInput = {rootInput, transitions}` as a JSON envelope carrying canonical CBOR, `sealCompanion = {rootInput, witnesses, provenance}` likewise, the canonical `RootInputV2` decoder, and the conversion from a decoded `rootInput` plus a parent header into a `BoundExecutionInput`. No RPC, no node, no capability. Delivered as [`ureth` #12](https://github.com/ristik/ureth/pull/12) |
+| **U3b** | the node: a Unicity `NodeTypes`/`EngineTypes` carrying `UnicityPayloadAttributes` end to end and using the existing `UnicityExecutionPayloadBuilder`, plus the bounded job registry the builder resolves against. Advertises nothing and adds no method |
+| **U3c** | `engine_forkchoiceUpdatedWithSealV1`: the build path. Runs the system operation as step 0, writes `extraData`, starts payload building, returns `PayloadStatusV1` and a `payloadId`. `INVALID` on a failed `rootInput` or system operation, `SYNCING` on an unknown parent |
+| **U3d** | `engine_getPayloadWithSealV1`: returns the payload, the block value and the `sealCompanion` the leader disseminates |
+| **U3e** | `engine_newPayloadWithSealV1`: the import path, for followers, devp2p and re-execution. `VALID` only when every D2 predicate passes and reth's own execution reproduces the committed `stateRoot` and `blockHash`; `INVALID` with the rejection code on any predicate failure; `SYNCING` when the parent or a referenced trust-base body is not local. `ACCEPTED` is never returned |
+| **U3f** | capability advertisement of the three strings, the startup compatibility check, and the bft-core adapter change that negotiates and uses them |
 
-U3d is the largest and depends on U3a only. U3b and U3c are the flow the leader uses and are
+**U3b is a correction to the first revision of this plan**, which went straight from the wire types to
+the RPC methods. The methods have nowhere to attach without a node: `forkchoiceUpdated` has to start a
+build on *this* node's payload builder, and the builder has to resolve the job the method created.
+Discovering that during U3c would have meant either a speculative abstraction with no real consumer or
+a rewrite, so the node lands first and the methods attach to something real.
+
+Nothing about it requires editing upstream. reth's Engine API is a jsonrpsee trait in
+`crates/rpc/rpc-api/src/engine.rs`, and a sibling trait in `crates/unicity` with the same `engine`
+namespace is additive. `examples/custom-engine-types`, `examples/custom-payload-builder` and
+`examples/node-custom-rpc` are upstream's own templates for exactly this, which is the reason the
+divergence stays inside `crates/unicity`.
+
+U3e is the largest and depends on U3a and U3b only. U3c and U3d are the flow the leader uses and are
 naturally reviewed together but land separately, because `getPayload` returning a companion is a
 distinct contract from `forkchoiceUpdated` accepting one.
 
@@ -63,8 +76,8 @@ distinct contract from `forkchoiceUpdated` accepting one.
 ## 4. Evidence each unit carries
 
 Following the classes in `f2-execution-prerequisites.md` §0, each unit states which class it reaches
-and does not overclaim. U3a to U3d are **API**: implemented and tested callable code with no
-production call site, because nothing advertises them. U3e is the first that can claim **Wired**,
+and does not overclaim. U3a to U3e are **API**: implemented and tested callable code with no
+production call site, because nothing advertises them. U3f is the first that can claim **Wired**,
 and only for the paths the bft-core adapter actually drives.
 
 Real-client evidence (**Measured**) is not claimed by any unit here. It belongs to the M1 gate and
@@ -76,4 +89,4 @@ needs a running paired deployment, which is #41's subject and not this issue's.
   and #10 own those.
 - The genesis certification bootstrap, which is coordinated but distinct (#12, and
   `f4f-standard-genesis-json-bootstrap.md`).
-- Anything in the Go adapter beyond U3e's negotiation. The carrier work is #10's.
+- Anything in the Go adapter beyond U3f's negotiation. The carrier work is #10's.
