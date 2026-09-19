@@ -62,10 +62,13 @@ and `TestRound_CrashAfterSubmitBeforeUC_RecoversWithoutEquivocatingOrDoubleBuild
 (`round_recovery_test.go`) covers the submit-to-UC window. F6d adds `TestCaptureAcrossRestart`
 (#162), stopped before and after publication.
 
-*Storage durability.* The record store syncs its file and its parent directory, with `F_FULLFSYNC` on
-macOS, and a failed sync is an open failure (`certifiedstore.ErrDirectorySync`, F6b and F6d §3). The
-F6a model exercises whole-store rollback and an empty replacement disk
-(`TestWholeStoreRollbackCannotTestifyToCurrency`, `TestReplacementDiskAndMigration`, rows 12 and 13).
+*Storage durability and lost writes.* The record store syncs its file and its parent directory, with
+`F_FULLFSYNC` on macOS, and a failed sync is an open failure (`certifiedstore.ErrDirectorySync`, F6b
+and F6d §3). `certifiedstore/fault_test.go` injects a failure at each publish checkpoint and
+`certifiedstore/kill_test.go` SIGKILLs a real child process at each one, reopening the bbolt file to
+assert the prior or new state byte for byte. The F6a model exercises whole-store rollback and an empty
+replacement disk (`TestWholeStoreRollbackCannotTestifyToCurrency`, `TestReplacementDiskAndMigration`,
+rows 12 and 13). §2.4 tabulates all eight positions.
 
 **What it does not show, and this is the important line.** The restart fixtures say so themselves:
 "power loss, an interrupted write, or any fsync guarantee" are not modelled, and
@@ -80,19 +83,43 @@ covered for `FileStore`. The migration case is discussed in §3.
 
 ### 2.4 "Faults before/after proposal submission, UC receipt, execution commit and database write recover without a second conflicting vote, loss of certified block association or falsely finalized pending payload"
 
-Proposal submission and UC receipt are covered by `TestRound_CrashAfterSubmitBeforeUC_...`. Execution
-commit is covered by `TestRestart_InFlightCommitIsDecidedByTheLiveExecutorHead` and
-`TestRestart_AnAdmittedCommitCompletesAfterTheProcessIsGone`. Certified-block association across a
-restart is F6d W1's reload, whose outcomes are enumerated in `f6d-node-record-wiring.md` §4 and tested
-by `TestReloadOutcomes` and `TestReloadRefusesUntrustedRecordsWithoutFallback`. "No second conflicting
-vote" is F6c's property under §2.1's profile, and P-id plus the W3b-1 gate withhold signatures
-whenever the node cannot prove what its executor stands on.
+The list names four boundaries, so eight positions. "P" is a test over production code, "M" a test
+over an executable model under `docs/design/models/`, which is imported by nothing.
 
-**What it does not show.** The database-write boundary is the one position with no fault injection on
-the `FileStore` path, for the reason in §2.3: a crash between `os.Rename` returning and the data
-reaching stable storage is not simulated anywhere, and on that path it cannot be, because the code
-takes no step that a fault could be injected into. Every fixture above restarts a *process*; none
-loses a *write*.
+| # | Position | Evidence | Class |
+| --- | --- | --- | --- |
+| 1 | before proposal submission | **none** | |
+| 2 | after proposal submission | `TestRound_CrashAfterSubmitBeforeUC_RecoversWithoutEquivocatingOrDoubleBuilding` (`shardnode/round_recovery_test.go`) | P |
+| 3 | before UC receipt | the same test: the confirming certificate is never processed by the dead process | P |
+| 4 | after UC receipt | `TestFailedDeliveryIsRetriedByDuplicate`, `TestDeliverySeparatesApplicationFromSending` (`shardnode/delivery_retry_test.go`), `TestRestart_ResumingOlderThanTheExecutor` (`shardnode/restart_boundaries_test.go`), `TestConfiguredAdmissionPersistsBeforeLUCAndOwnsDriverEvidence` (`shardnode/bftclient_admission_test.go`) | P |
+| 5 | before execution commit | `TestCrashBetweenPipelineSteps`, "after observing, before executor commit" (`docs/design/models/f6arecord/contract_test.go`) | M only |
+| 6 | after execution commit | `TestRestart_InFlightCommitIsDecidedByTheLiveExecutorHead`, `TestRestart_AnAdmittedCommitCompletesAfterTheProcessIsGone`, `TestRestart_ResumingOlderThanTheExecutor` (`shardnode/restart_boundaries_test.go`); model `TestCrashBetweenPipelineSteps` | P, M |
+| 7 | before database write | `TestInjectedFailuresLeavePriorOrNewState` (`certifiedstore/fault_test.go`, checkpoints `before-publish` and `before-commit`), `TestProcessKilledAtEachCheckpoint` (`certifiedstore/kill_test.go`), `TestRecordCASAndAtomicFailure` and `TestRetentionDeletionFailureRollsBackWholeTransactionAcrossReopen` (`configuredprogress/`) | P, M |
+| 8 | after database write | the same two `certifiedstore` tests at checkpoint `after-commit`, `TestCaptureAcrossRestart` (`recordwiring/capture_test.go`), model `TestCrashBetweenPipelineSteps` | P, M |
+
+Positions 7 and 8 are the strongest evidence in F6 and are worth naming precisely:
+`TestProcessKilledAtEachCheckpoint` runs a child process that publishes, SIGKILLs it at each
+checkpoint, and reopens the real bbolt file to assert the prior or the new state byte for byte. That
+is a lost write, not a restarted process.
+
+**What it does not show.** Two positions are unmet.
+
+- **Position 1 has no test.** Nothing injects a fault between sealing the block and sending the
+  certification request. The nearest fixtures cut elsewhere:
+  `TestDeliverySeparatesApplicationFromSending` fails the send itself rather than crashing before it,
+  and `TestARefusedAuthorizationIsNotRebuiltAfterAPersistenceFailure`
+  (`shardnode/round_authority_test.go`) fails the certificate-file write after the signer already
+  refused, so no submission was pending.
+- **Position 5 is model-only.** No test over production code injects a crash before
+  `executor.Commit`. `TestRestart_InFlightCommitIsDecidedByTheLiveExecutorHead` is a Commit that was
+  issued and did not apply, which is position 6's other branch, and
+  `TestTargetApplier_RechecksTheCertificateBeforeCommitting` checks a precondition rather than
+  injecting a fault.
+
+Positions 7 and 8 also cover only the stores that got the F6b treatment, `certifiedstore` and
+`configuredprogress`. The `shardnode.FileStore` path has no fault injection at any position, for the
+reason in §2.3: it takes no step a fault could be injected into between `os.Rename` returning and the
+data reaching stable storage, because it never syncs.
 
 ### 2.5 "Both retained-executor-data and replacement-host recovery paths have explicit behavior"
 
@@ -143,10 +170,12 @@ changes what still has to be built.
 
 ## 4. Proposal
 
-1. #14 **cannot close** on this evidence. Three lines are unmet: the `FileStore` durability deferral
-   recorded at `store.go:35` (§2.3, §2.4), the replacement-host recovery path for the store and
-   executor side (§2.5), and the migration documentation (§2.6). The replay-cursor association in
-   §2.2 is a fourth, smaller one.
+1. #14 **cannot close** on this evidence. Unmet: the `FileStore` durability deferral recorded at
+   `store.go:35`, which leaves that path with no fault injection at any position (§2.3, §2.4); fault
+   position 1, before proposal submission, which has no test at all; fault position 5, before
+   execution commit, which exists only over the model; the replacement-host recovery path for the
+   store and executor side (§2.5); and the migration documentation (§2.6). The replay-cursor
+   association in §2.2 is a smaller sixth.
 2. §3 is settled first, because it decides whether the largest of those is a defect or a
    non-requirement. Everything else is scoped from that answer.
 3. §2.6 is independent of §3 and can be written now. It is documentation of behaviour that already
