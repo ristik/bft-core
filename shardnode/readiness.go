@@ -138,7 +138,15 @@ func (r *Round) revalidateChildReadiness(ctx context.Context, ticket ReadinessTi
 // revalidateChildReadiness directly rather than re-entering this method. A round wired with a
 // readiness gate but no finality gate is a wiring the tests use; there the revalidation still runs,
 // just without a gate to hold.
+//
+// A round without the gate acquires nothing. Taking the gate for a revalidation that does no work
+// would not be free: the recovery applier takes the gate with tryAcquire and reports being turned
+// away rather than waiting, so a no-op acquisition on every round could cost a recovery attempt the
+// round it was made in. The ungated path must reach no gate at all, not merely hold it briefly.
 func (r *Round) revalidateUnderFinality(ctx context.Context, ticket ReadinessTicket, held *types.UnicityCertificate) error {
+	if r.childReadiness == nil || ticket == nil {
+		return nil
+	}
 	if r.finality == nil {
 		return r.revalidateChildReadiness(ctx, ticket, held)
 	}
