@@ -222,12 +222,12 @@ func TestRound_TakesTheFinalityGateForBuild(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err = r.buildFinal(ctx, RoundParams{})
+	_, err = r.buildFinal(ctx, RoundParams{}, nil, nil)
 	require.ErrorIs(t, err, ErrFinalityBusy)
 	require.ErrorContains(t, err, "recovery-apply")
 	release()
 
-	_, err = r.buildFinal(context.Background(), RoundParams{})
+	_, err = r.buildFinal(context.Background(), RoundParams{}, nil, nil)
 	require.ErrorContains(t, err, "not a leader in this test", "the gate was free and Build was reached")
 }
 

@@ -190,6 +190,20 @@ func (n *Node) SetCommitObserver(o CommitObserver) {
 	n.round.SetCommitObserver(o)
 }
 
+// SetCertificateObserver adds a receiver for every authenticated certificate and its bound technical
+// record, beside the evidence buffer, when the record gate is enabled. Call after New, before Run. It
+// authorizes nothing; see Round.SetCertificateObserver.
+func (n *Node) SetCertificateObserver(o CertificateObserver) {
+	n.round.SetCertificateObserver(o)
+}
+
+// SetChildReadiness installs the certified-record readiness gate on this node's round (#14 W3b-1).
+// Call after New, before Run, and only alongside the record store: the gate withholds leadership and
+// the signature until the record proves readiness for the held certificate's child.
+func (n *Node) SetChildReadiness(c ChildReadiness) {
+	n.round.SetChildReadiness(c)
+}
+
 // FinalityGate is the gate this node's round and recovery take for every finality-changing executor call.
 func (n *Node) FinalityGate() *FinalityGate {
 	return n.recoveryDeps.Gate

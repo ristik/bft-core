@@ -33,6 +33,12 @@ type Health struct {
 	certifiedRecord       string
 	certifiedRecordDetail string
 
+	// certifiedRecordReadiness is the record gate's verdict (#14 W3b-1): "ready", or the refusal, set
+	// on every round the gate evaluates. Both fields are empty without the gate, and like
+	// certifiedRecord they are a status, not an authorization.
+	certifiedRecordReadiness       string
+	certifiedRecordReadinessDetail string
+
 	updatedAt time.Time
 }
 
@@ -56,9 +62,13 @@ type Snapshot struct {
 	NonVotingReason    string `json:"nonVotingReason,omitempty"`
 	// CertifiedRecord names the outcome of the last certified-record reload, and is empty without a
 	// record store.
-	CertifiedRecord       string    `json:"certifiedRecord,omitempty"`
-	CertifiedRecordDetail string    `json:"certifiedRecordDetail,omitempty"`
-	UpdatedAt             time.Time `json:"updatedAt"`
+	CertifiedRecord       string `json:"certifiedRecord,omitempty"`
+	CertifiedRecordDetail string `json:"certifiedRecordDetail,omitempty"`
+	// CertifiedRecordReadiness names the record gate's verdict for the last round it evaluated, and
+	// is empty without the gate.
+	CertifiedRecordReadiness       string    `json:"certifiedRecordReadiness,omitempty"`
+	CertifiedRecordReadinessDetail string    `json:"certifiedRecordReadinessDetail,omitempty"`
+	UpdatedAt                      time.Time `json:"updatedAt"`
 
 	// SecondsSinceUpdate is computed at snapshot time, not stored — see
 	// (*Health).Snapshot. It's the field worth alerting on: a healthy
@@ -120,6 +130,23 @@ func (h *Health) updateCertifiedRecord(outcome, detail string) {
 	h.updatedAt = time.Now()
 }
 
+// updateCertifiedRecordReadiness records the record gate's verdict for a round. It is idempotent so a
+// steady ready state does not churn updatedAt on every round, but a verdict that changes is always
+// visible.
+func (h *Health) updateCertifiedRecordReadiness(outcome, detail string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.certifiedRecordReadiness == outcome && h.certifiedRecordReadinessDetail == detail {
+		return
+	}
+	h.certifiedRecordReadiness = outcome
+	h.certifiedRecordReadinessDetail = detail
+	h.updatedAt = time.Now()
+}
+
 func (h *Health) updateSubmitted(round uint64) {
 	if h == nil {
 		return
@@ -139,18 +166,20 @@ func (h *Health) Snapshot() Snapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	s := Snapshot{
-		ExecutorOK:            h.executorOK,
-		ExecutorError:         h.executorErr,
-		LastUCRound:           h.lastUCRound,
-		LastUCRootRound:       h.lastUCRootRound,
-		LastSubmittedRound:    h.lastSubmittedRound,
-		CurrentLeader:         h.currentLeader,
-		IsLeader:              h.isLeader,
-		Voting:                h.voting,
-		NonVotingReason:       h.nonVotingReason,
-		CertifiedRecord:       h.certifiedRecord,
-		CertifiedRecordDetail: h.certifiedRecordDetail,
-		UpdatedAt:             h.updatedAt,
+		ExecutorOK:                     h.executorOK,
+		ExecutorError:                  h.executorErr,
+		LastUCRound:                    h.lastUCRound,
+		LastUCRootRound:                h.lastUCRootRound,
+		LastSubmittedRound:             h.lastSubmittedRound,
+		CurrentLeader:                  h.currentLeader,
+		IsLeader:                       h.isLeader,
+		Voting:                         h.voting,
+		NonVotingReason:                h.nonVotingReason,
+		CertifiedRecord:                h.certifiedRecord,
+		CertifiedRecordDetail:          h.certifiedRecordDetail,
+		CertifiedRecordReadiness:       h.certifiedRecordReadiness,
+		CertifiedRecordReadinessDetail: h.certifiedRecordReadinessDetail,
+		UpdatedAt:                      h.updatedAt,
 	}
 	if !h.updatedAt.IsZero() {
 		s.SecondsSinceUpdate = time.Since(h.updatedAt).Seconds()

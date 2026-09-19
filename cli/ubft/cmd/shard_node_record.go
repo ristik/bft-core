@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -72,6 +73,26 @@ func startCertifiedRecord(ctx context.Context, flags *shardNodeRunFlags, shardCo
 			"outcome", res.Outcome.String(), "err", detail)
 	}
 
+	// THE RECORD GATE (#14 W3b-1), behind its own flag. It needs the same durable record the store
+	// holds and the certificate/technical-record history the round observes, so it is built here from
+	// the checked deployment and attached before the node runs. Without the flag nothing is attached
+	// and the node behaves exactly as W3a did: it reloads, reports, captures and publishes, and no vote
+	// changes.
+	if flags.CertifiedRecordGate {
+		observed, err := recordwiring.NewObservations(recordwiring.DefaultObservationLimits)
+		if err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("preparing certified-record readiness observations: %w", err)
+		}
+		readiness, err := recordwiring.NewReadiness(deployment, store, executor, observed)
+		if err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("preparing the certified-record readiness gate: %w", err)
+		}
+		installCertifiedRecordGate(node, recordwiring.NewChildReadiness(readiness), recordwiring.NewCertificateObserver(observed))
+		log.Info("certified-record gate enabled: leadership and signatures are withheld until the record proves readiness for the held certificate's child (#14 W3b-1)")
+	}
+
 	capturer, err := recordwiring.NewCapturer(recordwiring.CaptureConfig{
 		Deployment: deployment, Store: store, Executor: executor, Finality: node.FinalityGate(), Log: log,
 		RPC:            recordwiring.HTTPWitnessCaller(flags.EthURL, flags.CertifiedRecordCaptureTimeout),
@@ -93,6 +114,33 @@ func startCertifiedRecord(ctx context.Context, flags *shardNodeRunFlags, shardCo
 		<-done
 		_ = store.Close()
 	}, nil
+}
+
+// validateCertifiedRecordFlags refuses the one configuration in which the record gate would run with
+// nothing to read. It is checked at the top of shard-node run so the operator sees their own mistake
+// rather than a node that silently cannot prove readiness.
+func validateCertifiedRecordFlags(store string, gate bool) error {
+	if gate && store == "" {
+		return ErrCertifiedRecordGateNeedsStore
+	}
+	return nil
+}
+
+// ErrCertifiedRecordGateNeedsStore is the named refusal for --certified-record-gate without
+// --certified-record-store.
+var ErrCertifiedRecordGateNeedsStore = errors.New("--certified-record-gate requires --certified-record-store: the readiness gate reads the durable record")
+
+// readinessHookTarget is the pair of Node setters the record gate uses. It exists so the wiring can
+// be exercised without constructing a whole node, and so the two setters are always installed
+// together: a readiness gate without the observer that feeds it could never become ready.
+type readinessHookTarget interface {
+	SetChildReadiness(shardnode.ChildReadiness)
+	SetCertificateObserver(shardnode.CertificateObserver)
+}
+
+func installCertifiedRecordGate(target readinessHookTarget, readiness shardnode.ChildReadiness, observer shardnode.CertificateObserver) {
+	target.SetChildReadiness(readiness)
+	target.SetCertificateObserver(observer)
 }
 
 // registryEVMParams are the EVM genesis parameters the SealRegistry deployment was generated with.
