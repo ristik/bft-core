@@ -494,3 +494,82 @@ added: `record_readiness_declined_leadership` and `record_readiness_abstained`.
 | `TestPrepareIsSkippedWhenIdentityAlreadyRefuses` | `identityErr` non-nil: `Prepare` is not called |
 | `TestCertificateObserverRefusalDoesNotFailTheRound` | an observer refusal is logged and the round proceeds and signs |
 | reach guards | unchanged: only the shard-node command imports `recordwiring`, and `shardnode` imports neither it nor `certifiedstore` |
+
+## 10. W3b-2: capture of recovery-applied blocks
+
+W2 reports only the blocks the round itself commits. `CommitObserver` says so: commits made by anchor
+recovery (#92) are not reported, so the block a returning node was brought to by evidence never gets a
+record, and the gate of §9 then refuses readiness for its child until an ordinary round commits again.
+That is the gap this unit closes. It is stacked on W3b-1 and assumes §9 is merged.
+
+### 10.1 Which certificate certifies a recovered block
+
+The held certificate does not. `reconcile` drives recovery for the certificate the round was asked to
+build on, and across a quiet tail that certificate carries no block hash at all: the target comes from
+`continuity.recoveryTarget`, which names the last state-changing certified block, and that block may be
+many rounds older than the one in hand. A record bound to the held certificate would therefore name one
+certificate and contain another certificate's block, which is exactly the confusion `certifiedstore`
+refuses.
+
+The certificate that certifies the recovered block is `AnchorEvidence.Source`, with `SourceTechnical`
+bound to it. `VerifyAnchorEvidence` authenticated both, and `ErrEvidenceSourceQuiet` already guarantees
+the source names a block. They are the pair the record needs, and they are currently discarded: the
+requester reduces verified evidence to an `ExecutionAnchor`, and `VerifiedTarget` carries only that
+anchor and `For`, the binding of the held certificate.
+
+So W3b-2 is first a plumbing change. `VerifiedTarget` gains the authenticated source pair, carried from
+the verification that produced it and copied like every other retained certificate:
+
+```go
+type VerifiedTarget struct {
+	Anchor *ExecutionAnchor
+	For    CertificateBinding
+	// Source certified Anchor's block, with the technical record bound to it. Both come from the
+	// AnchorEvidence this target was verified from, never from the held certificate.
+	Source          *types.UnicityCertificate
+	SourceTechnical *certification.TechnicalRecord
+}
+```
+
+`ApplyResult` gains the same pair for the attempt it reports, taken from the target it applied.
+
+### 10.2 Reporting the commit
+
+`applyVerifiedAnchor` reports the commit after the applier succeeded and after its own revalidation
+against the snapshot has installed the anchor, not before: a target that does not explain the state this
+round is building on is not installed, and it must not be recorded either. The report is
+`notifyCommit`'s existing path with the source pair and `res.Target.BlockHash`, so the capturer's
+contract is unchanged and it cannot tell a recovery commit from an ordinary one.
+
+`ObserveCommit` is documented as being called with the round lock held. `applyVerifiedAnchor` drops the
+lock across `recovery.apply` and retakes it, and the report goes after it is retaken, so that holds.
+
+`CommitObserver`'s doc comment is amended: recovery commits are now reported, and repeats, re-deliveries
+and quiet certificates still commit nothing and are still not reported.
+
+### 10.3 Ordering against the durable record
+
+A recovery commit can move the executor to a block older than the store's head record, and it can also
+move it past one. Neither is a new refusal: `Capturer` already decides staleness from the record it is
+publishing against under the finality gate, and `certifiedstore` already refuses a record that does not
+extend what it holds. W3b-2 adds no new ordering rule; it establishes by test that the existing ones
+answer the recovery case, including the case where an ordinary commit and a recovery commit for the same
+block are both reported.
+
+### 10.4 Composed lifecycle
+
+The last piece of F6d is one test that runs the units together rather than each in isolation: a node
+with the store and the gate, driven through ordinary rounds, a restart, a recovery, and capture, with
+the vote asserted at each stage. It is a composition of existing fixtures, and its purpose is to catch
+the interactions the per-unit tests cannot see.
+
+### 10.5 Tests
+
+| Test | Covers |
+| --- | --- |
+| `TestVerifiedTargetCarriesTheAuthenticatedSource` | the source pair reaching `VerifiedTarget` and `ApplyResult` is the one `VerifyAnchorEvidence` authenticated, copied, and never the held certificate |
+| `TestRecoveryCommitIsReportedWithItsOwnCertificate` | a recovery across a quiet tail reports the source certificate that names the committed block, not the held certificate, and the block hash is the applied target's |
+| `TestRecoveryCommitIsNotReportedWhenNothingIsInstalled` | an attempt whose target does not explain the snapshot state installs nothing and reports nothing |
+| `TestRecoveryCapturePublishesARecord` | the capturer publishes a record for a recovery-applied block, and the gate of §9 then finds readiness for its child |
+| `TestRecoveryAndOrdinaryCommitForTheSameBlock` | both reported: the second publication is refused as not extending the head, and no record is damaged |
+| `TestCertifiedRecordLifecycle` | §10.4, composed: ordinary rounds, restart, recovery, capture, with the vote asserted at each stage |
