@@ -7,7 +7,8 @@ each one does not show.
 What it is not: a closure of #14. The ledger is written by the party that did the work, so it is a
 proposal for review. §4 states why #14 cannot close yet and names what would have to change.
 
-Base for every citation: `integration/enshrined-evm` at `61d7f8d4` (the #197 merge).
+Base for every citation: `integration/enshrined-evm` at `bd7a5041` (the #199 merge), plus the F6i tests
+added in the same pull request as this revision.
 
 This is a parent ledger. F6b and F6c already have their own line-by-line ledgers
 (`f6b-acceptance-ledger.md`, `f6c-acceptance-ledger.md`) and are cited rather than re-derived.
@@ -20,6 +21,8 @@ This is a parent ledger. F6b and F6c already have their own line-by-line ledgers
 | F6b | `f6b-certified-record-store.md`, ledger `f6b-acceptance-ledger.md` | #160 and predecessors | the transactional record store, its durability and its retention |
 | F6c | `f6c-signing-state-contract.md`, ledger `f6c-acceptance-ledger.md` | #142 to #150 (#105) | the independent signing authority and the non-equivocation record |
 | F6d | `f6d-node-record-wiring.md` | #161 (W1), #162 (W2), #165 (W3a), #196 (W3b-1), #197 (W3b-2) | node lifecycle wiring: reload, capture, publication, the readiness gate, recovery capture |
+| F6h | `f6h-filestore-durability.md` | #199 | durable checkpoint writes and their fault injection |
+| F6i | `f6i-remaining-fault-positions.md` | this pull request | the two remaining fault positions and the record/checkpoint crash window |
 | F6e | `f6e-configured-origin-progress-store.md` | #170 | configured-origin progress |
 | F6f | `f6f-automatic-bootstrap-freshness.md` | #177 | bootstrap freshness (#176 remains open) |
 | F6g | `f6g-root-frontier-boundary.md` | #182 to #191 | the root-frontier sampling and failure boundary |
@@ -45,10 +48,19 @@ verified record, published in one transaction under the finality gate (F6b; F6d 
 (#161) reloads and re-verifies it against the executor by exact identity, and W3a/W3b (#165, #196,
 #197) add the continuity predicate and the gate that consumes it.
 
-**What it does not show.** The replay cursor is not part of that record. `certifiedstore` holds the
-certified block and its authority; the shard's own replay position is still the single certificate in
-`shardnode.FileStore`, written separately. Nothing establishes that the two are consistent after a
-crash between the two writes, and no test asserts an ordering between them.
+**Met**, with the two remaining names resolved in `f6i-remaining-fault-positions.md` §3 and §4.
+
+The canonical root input is derived, not stored, and that is the answer rather than a gap: it is a
+deterministic function of the certificate and technical record the record already holds atomically,
+plus the node's pinned configuration context whose hash is enforced on every certificate. Persisting
+it would create a second source of truth that can disagree with its own inputs.
+
+The replay cursor is the checkpoint in `shardnode.FileStore`, and it does not share a transaction
+with the record. It does not need to: each is independently authenticated on restart, the checkpoint
+by `verifyRestoredLUC` and the record by W1 `Reload` against the executor by exact identity, and
+neither is treated as evidence of freshness. What the line needs is a defined outcome per crash
+window. Both are defined, and the previously untested one, a record published before the checkpoint
+was written, is now `TestRecordAheadOfTheCheckpointIsNotAnError` (`recordwiring/crash_window_test.go`).
 
 ### 2.3 "Inject crashes around every write/certification boundary and document migration and replacement-disk behavior"
 
@@ -70,13 +82,14 @@ assert the prior or new state byte for byte. The F6a model exercises whole-store
 replacement disk (`TestWholeStoreRollbackCannotTestifyToCurrency`, `TestReplacementDiskAndMigration`,
 rows 12 and 13). §2.4 tabulates all eight positions.
 
-**What it does not show, and this is the important line.** The restart fixtures say so themselves:
-"power loss, an interrupted write, or any fsync guarantee" are not modelled, and
-`restart_boundaries_test.go` explicitly assigns storage durability to #14. The durability work landed
-for `certifiedstore` and not for `shardnode.FileStore`, whose `SaveLUC` writes a temporary file,
-closes it and renames it with no `Sync` of either the file or its directory. `shardnode/store.go:35`
-records that deferral in the code: "Durable write ordering and fault injection remain F6 (#14) — a
-rename is not an fsync." It is still open.
+**Discharged by F6h (#199).** The restart fixtures state that "power loss, an interrupted write, or
+any fsync guarantee" are not modelled by them and assign storage durability to #14, and
+`shardnode/store.go` carried the matching deferral: "Durable write ordering and fault injection
+remain F6 (#14) — a rename is not an fsync." `SaveLUC` now syncs the temporary file before the rename
+and the parent directory after it, and the path has the fault injection it never had: six
+checkpoints, exercised both by injected failure and by SIGKILL of a real child process that the
+parent then reopens (`shardnode/store_durability_test.go`). Design:
+`f6h-filestore-durability.md`.
 
 The replacement-disk case is covered for the record store at the model level (row 13) and is **not**
 covered for `FileStore`. The migration case is discussed in §3.
@@ -88,11 +101,11 @@ over an executable model under `docs/design/models/`, which is imported by nothi
 
 | # | Position | Evidence | Class |
 | --- | --- | --- | --- |
-| 1 | before proposal submission | **none** | |
+| 1 | before proposal submission | `TestCrashBeforeSubmissionRecoversTheRetainedSignature` and `TestCrashBeforeSubmissionStillRefusesADifferentCandidate` (`shardnode/crash_before_submission_test.go`) | P |
 | 2 | after proposal submission | `TestRound_CrashAfterSubmitBeforeUC_RecoversWithoutEquivocatingOrDoubleBuilding` (`shardnode/round_recovery_test.go`) | P |
 | 3 | before UC receipt | the same test: the confirming certificate is never processed by the dead process | P |
 | 4 | after UC receipt | `TestFailedDeliveryIsRetriedByDuplicate`, `TestDeliverySeparatesApplicationFromSending` (`shardnode/delivery_retry_test.go`), `TestRestart_ResumingOlderThanTheExecutor` (`shardnode/restart_boundaries_test.go`), `TestConfiguredAdmissionPersistsBeforeLUCAndOwnsDriverEvidence` (`shardnode/bftclient_admission_test.go`) | P |
-| 5 | before execution commit | `TestCrashBetweenPipelineSteps`, "after observing, before executor commit" (`docs/design/models/f6arecord/contract_test.go`) | M only |
+| 5 | before execution commit | `TestCrashBeforeExecutionCommitReconcilesWithoutVoting` (`shardnode/crash_before_commit_test.go`); model `TestCrashBetweenPipelineSteps`, "after observing, before executor commit" | P, M |
 | 6 | after execution commit | `TestRestart_InFlightCommitIsDecidedByTheLiveExecutorHead`, `TestRestart_AnAdmittedCommitCompletesAfterTheProcessIsGone`, `TestRestart_ResumingOlderThanTheExecutor` (`shardnode/restart_boundaries_test.go`); model `TestCrashBetweenPipelineSteps` | P, M |
 | 7 | before database write | `TestInjectedFailuresLeavePriorOrNewState` (`certifiedstore/fault_test.go`, checkpoints `before-publish` and `before-commit`), `TestProcessKilledAtEachCheckpoint` (`certifiedstore/kill_test.go`), `TestRecordCASAndAtomicFailure` and `TestRetentionDeletionFailureRollsBackWholeTransactionAcrossReopen` (`configuredprogress/`) | P, M |
 | 8 | after database write | the same two `certifiedstore` tests at checkpoint `after-commit`, `TestCaptureAcrossRestart` (`recordwiring/capture_test.go`), model `TestCrashBetweenPipelineSteps` | P, M |
@@ -102,24 +115,18 @@ Positions 7 and 8 are the strongest evidence in F6 and are worth naming precisel
 checkpoint, and reopens the real bbolt file to assert the prior or the new state byte for byte. That
 is a lost write, not a restarted process.
 
-**What it does not show.** Two positions are unmet.
+**All eight positions are now covered over production code.** F6i closed the two that were not.
+Position 1's case is the one #14's wording names: a process built a candidate, the authority signed
+it, and the process died before the request reached the root chain. A second process re-derives the
+identical candidate and is answered with the authority's retained response, byte for byte, with the
+reserved round unchanged, so there is no second conflicting vote. A companion test establishes that a
+differing candidate is still refused, so the first cannot pass by the authority being permissive.
+Position 5 is a Commit that was never issued over an executor that never moved, which is distinct
+from position 6, where the Commit was issued and its answer was lost.
 
-- **Position 1 has no test.** Nothing injects a fault between sealing the block and sending the
-  certification request. The nearest fixtures cut elsewhere:
-  `TestDeliverySeparatesApplicationFromSending` fails the send itself rather than crashing before it,
-  and `TestARefusedAuthorizationIsNotRebuiltAfterAPersistenceFailure`
-  (`shardnode/round_authority_test.go`) fails the certificate-file write after the signer already
-  refused, so no submission was pending.
-- **Position 5 is model-only.** No test over production code injects a crash before
-  `executor.Commit`. `TestRestart_InFlightCommitIsDecidedByTheLiveExecutorHead` is a Commit that was
-  issued and did not apply, which is position 6's other branch, and
-  `TestTargetApplier_RechecksTheCertificateBeforeCommitting` checks a precondition rather than
-  injecting a fault.
-
-Positions 7 and 8 also cover only the stores that got the F6b treatment, `certifiedstore` and
-`configuredprogress`. The `shardnode.FileStore` path has no fault injection at any position, for the
-reason in §2.3: it takes no step a fault could be injected into between `os.Rename` returning and the
-data reaching stable storage, because it never syncs.
+**What it does not show.** Positions 7 and 8 exercise the stores that carry the F6b and F6h
+durability treatment. No store in the node is now without it, but the executor's own durability is
+the execution client's and is outside this contract.
 
 ### 2.5 "Both retained-executor-data and replacement-host recovery paths have explicit behavior"
 
@@ -179,50 +186,40 @@ That decision is written down in `docs/`, and in the place this criterion asks f
 error message an operator actually hits. That is a documentation-placement gap, not an unmet
 criterion, and it does not block closure on this line.
 
-## 3. What `FileStore` is for, and why the fsync deferral survives the answer
+## 3. What `FileStore` is for
 
-`shardnode/store.go:53-61` justifies the fatal legacy refusal on the grounds that "the stored
-certificate is this node's non-equivocation authority". Under the accepted F6c profile that is no
-longer true: the authority is the separate signing-authority process and its in-memory record, and
-the shard side is explicitly untrusted, its files replayable or restorable from an older backup
-(`f6c-acceptance-ledger.md` §0). That sentence in `store.go` is stale and should be restated; the
-refusal itself remains correct on its other stated ground, that the legacy encoding destroyed a
-nil/empty distinction which cannot be recovered from the file.
+`shardnode/store.go` justified the fatal legacy refusal partly on the grounds that "the stored
+certificate is this node's non-equivocation authority". Under the accepted F6c profile that is not
+true: the authority is the separate signing-authority process and its in-memory record, and the
+shard's own files are explicitly untrusted, replayable or restorable from an older backup
+(`f6c-acceptance-ledger.md` §0). The sentence has been removed and replaced with what the checkpoint
+actually is, the restoration cursor; the refusal stands on its other two grounds, that the legacy
+encoding cannot be converted losslessly and that continuing would mean voting from genesis or
+resuming from a certificate that does not match what was signed.
 
-The deferral at `store.go:35` does **not** go away with it. The F6c contract assigns the work here
-by name:
-
-> A later profile that retains or restores the key must revisit durable-before-release, whole-store
-> freshness and atomicity together; none is discharged by this model. Full block/UC/TR persistence
-> and its storage-failure tests remain #14's work.
-
-So #14 owns durable block, UC and technical-record persistence regardless of which component holds
-the non-equivocation authority. `SaveLUC` renaming without any sync is that work, still open, and it
-is the one place in F6 where a store the node depends on has no durability guarantee and no fault
-injection at any position.
+The durability work was never contingent on that question. `f6c-signing-state-contract.md` assigns it
+here by name: "Full block/UC/TR persistence and its storage-failure tests remain #14's work." F6h did
+it, and §2.3 records the result.
 
 ## 4. Proposal
 
-1. #14 **cannot close** on this evidence, and the list is shorter than it first looked. Unmet:
-   - the `FileStore` durability deferral at `store.go:35`, which leaves that path with no durability
-     guarantee and no fault injection at any position (§2.3, §2.4, §3);
-   - fault position 1, before proposal submission, which has no test at all (§2.4);
-   - fault position 5, before execution commit, which exists only over the model (§2.4);
-   - the association of the replay cursor and the canonical inputs (§2.2). The certified head, UC,
-     technical record and witness are associated atomically; the cursor is a second file written by
-     a different path, and the derived root input is not persisted by either store.
-
-   §2.5 and §2.6 are **met**. Their residuals are placement and test class, not missing behaviour.
-2. §3 is a documentation repair rather than an open design question: the "non-equivocation
-   authority" sentence in `store.go` is stale under the accepted F6c profile, and the durability
-   deferral survives that correction because F6c assigns block/UC/TR persistence to #14 by name.
-3. The remaining work is therefore scoped and small: sync `SaveLUC` and give it fault injection,
-   add the two missing fault positions, and settle what "canonical inputs" and "replay cursor" name
-   before claiming or denying their association. Moving §2.6's decision into the operations
-   documentation can happen at any time.
-4. Nothing here reopens F6b, F6c or F6d. Their ledgers and merges stand; what is missing was never
-   claimed by them, and two of the three gaps are recorded in the code as deferrals to #14 rather than
-   discovered here.
+1. Every line of #14's acceptance list now maps to evidence over production code, with the two
+   interpretive questions in §2.2 answered rather than left open.
+2. On that basis #14 can be **proposed** for closure, by the review of this ledger and not by this
+   document. Per `docs/pos/PROCESS.md` that needs a named maintainer decision and a closing comment
+   linking the final PRs, exact commits and residual limits; neither is this document, and no PR
+   closes it automatically.
+3. Closing #14 would discharge none of these:
+   - the deployment premise F6c rests on, that the signing authority runs outside the shard's backup
+     and cloning domains, which no test here establishes;
+   - whole-store rollback detection, which `f6a` states the store cannot do and which only the
+     executor's head and continuity expose;
+   - the execution client's own durability, which is outside this contract;
+   - #176, the bootstrap freshness contract, and anything else still open under F6g.
+4. Residual limits worth carrying into the closing comment: one orphaned `.luc-*.tmp` file survives
+   each process kill before the rename (`f6h` §5); the replacement-disk and replacement-host cases of
+   §2.5 have model-level rather than production coverage; and the §2.6 decision lives in design
+   records rather than operator-facing documentation.
 
 ## 5. What this ledger does not do
 
