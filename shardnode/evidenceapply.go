@@ -255,6 +255,9 @@ type VerifiedTarget struct {
 	// non-quiet.
 	Source          *types.UnicityCertificate
 	SourceTechnical *certification.TechnicalRecord
+	// Tail is every certificate from the round Source assigned, up to and including the one this
+	// node holds, each with its bound technical record. It is the chain a later Prepare needs.
+	Tail []EvidenceLink
 }
 
 // TargetSource is what holds a verified anchor — `*EvidenceRequester` in production. Behind an
@@ -277,8 +280,12 @@ type ApplyResult struct {
 	// record is bound to the certificate that actually names the block rather than to the held one.
 	Source          *types.UnicityCertificate
 	SourceTechnical *certification.TechnicalRecord
-	Attempt         int
-	Err             error
+	// Tail is the authenticated chain from Source to the held certificate. Round feeds it to the
+	// certificate observer after the anchor is installed, so a later Prepare can connect the durable
+	// record to the certificate in hand without the source ever arriving live.
+	Tail    []EvidenceLink
+	Attempt int
+	Err     error
 }
 
 /*
@@ -732,18 +739,19 @@ func (a *TargetApplier) record(o ApplyOutcome, head BlockRef, target *ExecutionA
 	attempt := a.attempts
 	a.mu.Unlock()
 	res := ApplyResult{Outcome: o, Head: head, Target: copyAnchor(target), Attempt: attempt, Err: err}
-	// The source pair travels with every attempt that had a target, copied like the retained
-	// certificate it came from. A caller reports a commit from it, and a caller that edited it would
-	// otherwise be editing what the applier was handed.
+	// The authenticated source pair and tail travel with every attempt that had a target, copied like
+	// the retained certificate they came from. A caller reports a commit from the source pair and
+	// feeds the chain to the certificate observer, and a caller that edited them would otherwise be
+	// editing what the applier was handed.
 	if src != nil && src.Source != nil && src.SourceTechnical != nil {
-		uc, tr, _, cerr := copyPair(src.Source, src.SourceTechnical)
+		ev, cerr := copyEvidence(AnchorEvidence{Source: src.Source, SourceTechnical: src.SourceTechnical, Tail: src.Tail})
 		if cerr != nil {
 			if a.log != nil {
-				a.log.WarnContext(context.Background(), "a recovery attempt's source certificate could not be copied for reporting",
+				a.log.WarnContext(context.Background(), "a recovery attempt's authenticated chain could not be copied for reporting",
 					slog.String("err", cerr.Error()))
 			}
 		} else {
-			res.Source, res.SourceTechnical = uc, tr
+			res.Source, res.SourceTechnical, res.Tail = ev.Source, ev.SourceTechnical, ev.Tail
 		}
 	}
 	return res

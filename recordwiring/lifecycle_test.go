@@ -235,11 +235,6 @@ func TestCertifiedRecordLifecycle(t *testing.T) {
 	defer func() { stopRecovery(); <-recoveryDone }()
 	r.SetCommitObserver(capRecovery)
 
-	// The source is the durable record after recovery. A node that captured a recovery-applied block
-	// has this certificate from the evidence it verified; observing it here is the deployment's own
-	// history, which readiness demands and no certificate can manufacture.
-	require.NoError(t, obs.Observe(sourceUC, sourceTR))
-
 	// The first quiet certificate starts the fetch and refuses the round; nothing is committed.
 	require.Error(t, r.HandleCertificate(ctx, childUC, childTR))
 	require.Empty(t, sub.rounds(), "a node that cannot name the certified block signs nothing")

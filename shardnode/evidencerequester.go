@@ -277,6 +277,10 @@ type EvidenceRequester struct {
 	// cites. Retained alongside the target as its own copy, like every other retained certificate.
 	targetSource          *types.UnicityCertificate
 	targetSourceTechnical *certification.TechnicalRecord
+	// targetTail is every certificate from the source's assignment to the held certificate, copied
+	// from the same authenticated bundle. A later Prepare needs the whole chain, and a recovered node
+	// never received it live.
+	targetTail []EvidenceLink
 	// refusedFor is the held IDENTITY a terminal conflict was decided for — deliberately a narrower
 	// key than the binding above, because the two answer different questions. Readiness asks which
 	// certificate a target was verified against, and a repeat is a different certificate. A conflict
@@ -411,20 +415,20 @@ func (r *EvidenceRequester) Target() (VerifiedTarget, bool) {
 		return VerifiedTarget{}, false
 	}
 	out := VerifiedTarget{Anchor: copyAnchor(r.target), For: r.targetBinding.clone()}
-	// The source pair is copied out for the same reason the anchor is: it points into the retained
-	// evidence, and a caller that edited what it was handed would be editing what this node
-	// authenticated. It was already a decoded copy, so a refusal here would mean something this node
-	// owns is unreadable, and refusing the target is safer than sharing that memory.
+	// The authenticated chain is copied out for the same reason the anchor is: it points into the
+	// retained evidence, and a caller that edited what it was handed would be editing what this node
+	// authenticated. It was already decoded and verified, so a refusal here would mean something this
+	// node owns is unreadable, and refusing the target is safer than sharing that memory.
 	if r.targetSource != nil && r.targetSourceTechnical != nil {
-		uc, tr, _, err := copyPair(r.targetSource, r.targetSourceTechnical)
+		ev, err := copyEvidence(AnchorEvidence{Source: r.targetSource, SourceTechnical: r.targetSourceTechnical, Tail: r.targetTail})
 		if err != nil {
 			if r.cfg.Log != nil {
-				r.cfg.Log.WarnContext(context.Background(), "not handing out a recovery target: its source certificate could not be copied",
+				r.cfg.Log.WarnContext(context.Background(), "not handing out a recovery target: its authenticated chain could not be copied",
 					slog.String("err", err.Error()))
 			}
 			return VerifiedTarget{}, false
 		}
-		out.Source, out.SourceTechnical = uc, tr
+		out.Source, out.SourceTechnical, out.Tail = ev.Source, ev.SourceTechnical, ev.Tail
 	}
 	return out, true
 }
@@ -842,6 +846,7 @@ func (r *EvidenceRequester) carry(ctx context.Context, bundle AnchorEvidence, fr
 	// pointers do not alias a provider's buffers. A consumer reports a recovery commit against it.
 	r.targetSource = owned.Source
 	r.targetSourceTechnical = owned.SourceTechnical
+	r.targetTail = owned.Tail
 	// The binding travels WITH the target. What the anchor was verified against is a fact about the
 	// anchor, and a consumer that had to re-derive it from a state root would be inferring history
 	// from state equality — the one thing this whole design refuses (§3.3.1).

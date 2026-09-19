@@ -2,6 +2,7 @@ package shardnode
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,7 +10,35 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 )
+
+// observedPair is one certificate and technical record a recordingCertificateObserver kept.
+type observedPair struct {
+	uc *types.UnicityCertificate
+	tr *certification.TechnicalRecord
+}
+
+// recordingCertificateObserver keeps every authenticated pair the round feeds it, in order.
+type recordingCertificateObserver struct {
+	got []observedPair
+}
+
+func (o *recordingCertificateObserver) ObserveCertificate(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
+	o.got = append(o.got, observedPair{uc: uc, tr: tr})
+	return nil
+}
+
+// failingCertificateObserver refuses every observation, standing in for a history that cannot retain
+// the pair. The round must log the refusal and carry on.
+type failingCertificateObserver struct{}
+
+func (failingCertificateObserver) ObserveCertificate(*types.UnicityCertificate, *certification.TechnicalRecord) error {
+	return errObservationRefused
+}
+
+var errObservationRefused = errors.New("observation refused")
 
 /*
 W3b-2: a block committed by anchor recovery is reported to the commit observer, and it is reported
@@ -131,6 +160,96 @@ func TestRecoveryCommitIsReportedWithItsOwnCertificate(t *testing.T) {
 	require.Equal(t, []byte(h32(0xbb)), []byte(got.BlockHash))
 	require.NotEqual(t, held.UC.InputRecord.RoundNumber, got.Certificate.InputRecord.RoundNumber,
 		"the report names the certificate that certified the block, not the quiet certificate in hand")
+}
+
+// TestRecoveryFeedsTheAuthenticatedChainToObservations: the source pair and every tail link are
+// observed, in order, and are exactly the bundle VerifyAnchorEvidence authenticated. The arrival
+// site observes the held and next certificates live; the recovery feed then supplies the chain a
+// returning node never received, so a later Prepare can connect the durable record to the held
+// certificate.
+func TestRecoveryFeedsTheAuthenticatedChainToObservations(t *testing.T) {
+	ctx := context.Background()
+	f := newEvidenceFixture(t)
+	source, mid, held := quietTailChain(f)
+	next := f.cert(19, 130, h32(0x0b), h32(0x0b), nil, 23)
+	full := bundleOf(source, mid, held)
+
+	fx := newRecoveryRoundFixture(t, f, func() AnchorEvidence { return full })
+	obs := &recordingCertificateObserver{}
+	fx.round.SetCertificateObserver(obs)
+
+	require.Error(t, fx.round.HandleCertificate(ctx, held.UC, held.Technical))
+	st := waitRecovered(t, fx.req)
+	require.Equal(t, RecoveryReady, st.State, "err: %v", st.LastErr)
+	require.Error(t, fx.round.HandleCertificate(ctx, next.UC, next.Technical))
+
+	got := obs.got
+	require.Len(t, got, 6, "the two live arrivals, then the four authenticated chain pairs")
+	require.Equal(t, held.UC.InputRecord, got[0].uc.InputRecord)
+	require.Equal(t, next.UC.InputRecord, got[1].uc.InputRecord)
+	// The held certificate is already observed at the arrival site; the recovery feed supplies it
+	// again as the chain's terminal, which is idempotent for the history and completes the chain.
+	want := []EvidenceLink{source, mid, held, next}
+	for i, l := range want {
+		require.Equal(t, l.UC.InputRecord, got[2+i].uc.InputRecord, "pair %d", i)
+		require.Equal(t, l.Technical, got[2+i].tr, "pair %d", i)
+	}
+}
+
+// TestNothingIsObservedWhenTheTargetIsNotInstalled: an attempt whose target does not explain the
+// snapshot state observes nothing, as it reports nothing. The applier reaches the executor and
+// reports ApplyApplied, but the round's snapshot revalidation refuses to install the anchor, so no
+// certificate is fed to the observer.
+func TestNothingIsObservedWhenTheTargetIsNotInstalled(t *testing.T) {
+	ctx := context.Background()
+	f := newEvidenceFixture(t)
+	source, mid, held := quietTailChain(f)
+	full := bundleOf(source, mid, held)
+	_ = source
+	_ = mid
+
+	fx := newRecoveryRoundFixture(t, f, func() AnchorEvidence { return full })
+	obs := &recordingCertificateObserver{}
+	fx.round.SetCertificateObserver(obs)
+	require.NoError(t, fx.req.Observe(held.UC, held.Technical))
+	require.NoError(t, fx.req.Need())
+	st := waitRecovered(t, fx.req)
+	require.Equal(t, RecoveryReady, st.State, "err: %v", st.LastErr)
+
+	exp, err := ExpectationFromCertificate(held.UC, held.Technical.Round, held.Technical.Epoch)
+	require.NoError(t, err)
+	exp.PreviousHash = h32(0x0c)
+
+	fx.round.mu.Lock()
+	_, res, ok := fx.round.applyVerifiedAnchor(ctx, held.UC, exp,
+		BlockRef{Number: 4, Hash: Hash(h32(0xaa)), StateRoot: Hash(h32(0x0a))})
+	fx.round.mu.Unlock()
+
+	require.False(t, ok)
+	require.Equal(t, ApplyApplied, res.Outcome, "the applier did bring the executor to the block")
+	require.Empty(t, obs.got, "a target that was not installed is not observed")
+}
+
+// TestRecoveryObservationRefusalDoesNotFailTheRound: a refusal from the certificate observer is
+// logged and never fails the round. The certified block is still committed and still reported.
+func TestRecoveryObservationRefusalDoesNotFailTheRound(t *testing.T) {
+	ctx := context.Background()
+	f := newEvidenceFixture(t)
+	source, mid, held := quietTailChain(f)
+	next := f.cert(19, 130, h32(0x0b), h32(0x0b), nil, 23)
+	full := bundleOf(source, mid, held)
+
+	fx := newRecoveryRoundFixture(t, f, func() AnchorEvidence { return full })
+	fx.round.SetCertificateObserver(failingCertificateObserver{})
+
+	require.Error(t, fx.round.HandleCertificate(ctx, held.UC, held.Technical))
+	st := waitRecovered(t, fx.req)
+	require.Equal(t, RecoveryReady, st.State, "err: %v", st.LastErr)
+	require.Error(t, fx.round.HandleCertificate(ctx, next.UC, next.Technical),
+		"the follower arrives at its usual abstention, not at an observation failure")
+
+	require.Equal(t, Hash(h32(0xbb)), fx.exec.currentHead().Hash, "the refusal did not stop the recovery commit")
+	require.Len(t, fx.obs.got, 1, "and the commit is still reported")
 }
 
 // TestRecoveryCommitIsNotReportedWhenNothingIsInstalled: an attempt whose target does not explain
