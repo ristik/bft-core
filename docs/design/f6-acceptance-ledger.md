@@ -123,14 +123,32 @@ data reaching stable storage, because it never syncs.
 
 ### 2.5 "Both retained-executor-data and replacement-host recovery paths have explicit behavior"
 
-Retained executor data is the modelled deployment throughout #92 and F6d. Replacement host is explicit
-for the signing authority, and the answer there is deliberate and negative: the key and record are
-lost together, the validator cannot sign under that identity again, and returning it to service needs a
-separately authorized assignment (`f6c-acceptance-ledger.md` §0).
+**Met.** Retained executor data is the modelled deployment throughout #92 and F6d, and the W1 reload
+outcomes enumerate it (`f6d-node-record-wiring.md` §4; `TestReloadOutcomes`,
+`TestReloadRefusesUntrustedRecordsWithoutFallback`).
 
-**What it does not show.** For the store and executor side, "empty replacement disk yields no record,
-therefore not ready" (F6a row 13) is a refusal, not a recovery path. Nothing states how an operator
-brings a replacement host back into service with its state intact, which is what this line asks for.
+Replacement is explicit on both sides. For the signing authority the answer is deliberately negative:
+the key and record are lost together and returning to service needs a separately authorized
+assignment (`f6c-acceptance-ledger.md` §0). For the store and executor,
+`f6a-certified-record-crash-contract.md` §"Limitations, stated explicitly" defines three cases:
+
+- **Replacement disk, retained executor.** With no record the node is not ready for any non-genesis
+  child, and must obtain the certificate and `witness(B)` for the executor's certified head from the
+  network, the certificate from the live feed or #92 anchor evidence and the witness within the
+  client's proof window or through #15.
+- **Replacement host, fresh executor.** The executor must first reach a certified block by
+  execution-client sync, which the contract does not define. Until then it is behind or empty and the
+  node is not ready.
+- **Genesis.** With a wiped store and the executor at genesis the genesis record is rebuilt from
+  configuration, and readiness for the child still requires continuity and #153 E1 to E4.
+
+Whole-store rollback is called out as undetectable by the store, with the executor's head and
+continuity as the only exposure (`f6a` §"Whole-store rollback", `f6b-certified-record-store.md`).
+
+**What it does not show.** The replacement cases are design statements with model-level coverage
+(`TestReplacementDiskAndMigration`, `TestWholeStoreRollbackCannotTestifyToCurrency`, rows 12 and 13),
+not production tests, and the f6e v2 reload table is design for an inactive path. The criterion asks
+for explicit behaviour and that exists; it does not ask for a production fixture per case.
 
 ### 2.6 "Old file-store migration is documented before any public state exists"
 
@@ -161,41 +179,47 @@ That decision is written down in `docs/`, and in the place this criterion asks f
 error message an operator actually hits. That is a documentation-placement gap, not an unmet
 criterion, and it does not block closure on this line.
 
-## 3. A contradiction worth settling before this closes
+## 3. What `FileStore` is for, and why the fsync deferral survives the answer
 
-Two parts of the tree disagree about what `shardnode.FileStore` is for.
+`shardnode/store.go:53-61` justifies the fatal legacy refusal on the grounds that "the stored
+certificate is this node's non-equivocation authority". Under the accepted F6c profile that is no
+longer true: the authority is the separate signing-authority process and its in-memory record, and
+the shard side is explicitly untrusted, its files replayable or restorable from an older backup
+(`f6c-acceptance-ledger.md` §0). That sentence in `store.go` is stale and should be restated; the
+refusal itself remains correct on its other stated ground, that the legacy encoding destroyed a
+nil/empty distinction which cannot be recovered from the file.
 
-`shardnode/store.go:53-61` says "the stored certificate is this node's non-equivocation authority" and
-justifies the fatal legacy refusal on that basis. The accepted F6c profile says the opposite: the
-authority is the separate signing-authority process and its in-memory record, and "the shard side is
-untrusted. Its files may be replayed, restored from an older backup, or run twice"
-(`f6c-acceptance-ledger.md` §0).
+The deferral at `store.go:35` does **not** go away with it. The F6c contract assigns the work here
+by name:
 
-Both cannot be current. Which one is decides whether §2.3's missing fsync is a defect or a
-non-requirement:
+> A later profile that retains or restores the key must revisit durable-before-release, whole-store
+> freshness and atomicity together; none is discharged by this model. Full block/UC/TR persistence
+> and its storage-failure tests remain #14's work.
 
-- If the file is the non-equivocation authority, then a rename without an fsync is a live safety gap
-  on the path #14 exists to close, and the deferral at `store.go:35` must be discharged.
-- If the F6c authority is, then `store.go:53-61`'s justification is stale, the file is a
-  liveness-and-convenience cursor, and the durability line should be restated as such rather than left
-  reading as a safety claim.
-
-This ledger does not decide it. It is a design question for the owner, and it is the one thing that
-changes what still has to be built.
+So #14 owns durable block, UC and technical-record persistence regardless of which component holds
+the non-equivocation authority. `SaveLUC` renaming without any sync is that work, still open, and it
+is the one place in F6 where a store the node depends on has no durability guarantee and no fault
+injection at any position.
 
 ## 4. Proposal
 
-1. #14 **cannot close** on this evidence. Unmet: the `FileStore` durability deferral recorded at
-   `store.go:35`, which leaves that path with no fault injection at any position (§2.3, §2.4); fault
-   position 1, before proposal submission, which has no test at all; fault position 5, before
-   execution commit, which exists only over the model; the replacement-host recovery path for the
-   store and executor side (§2.5). The replay-cursor association in §2.2 is a smaller fifth.
-   The migration line (§2.6) is **met**; only its placement in operator-facing documentation is
-   open, and that does not block.
-2. §3 is settled first, because it decides whether the largest of those is a defect or a
-   non-requirement. Everything else is scoped from that answer.
-3. Moving §2.6's decision into the operations documentation is independent of §3 and can be done at
-   any time. It restates an accepted decision rather than making one.
+1. #14 **cannot close** on this evidence, and the list is shorter than it first looked. Unmet:
+   - the `FileStore` durability deferral at `store.go:35`, which leaves that path with no durability
+     guarantee and no fault injection at any position (§2.3, §2.4, §3);
+   - fault position 1, before proposal submission, which has no test at all (§2.4);
+   - fault position 5, before execution commit, which exists only over the model (§2.4);
+   - the association of the replay cursor and the canonical inputs (§2.2). The certified head, UC,
+     technical record and witness are associated atomically; the cursor is a second file written by
+     a different path, and the derived root input is not persisted by either store.
+
+   §2.5 and §2.6 are **met**. Their residuals are placement and test class, not missing behaviour.
+2. §3 is a documentation repair rather than an open design question: the "non-equivocation
+   authority" sentence in `store.go` is stale under the accepted F6c profile, and the durability
+   deferral survives that correction because F6c assigns block/UC/TR persistence to #14 by name.
+3. The remaining work is therefore scoped and small: sync `SaveLUC` and give it fault injection,
+   add the two missing fault positions, and settle what "canonical inputs" and "replay cursor" name
+   before claiming or denying their association. Moving §2.6's decision into the operations
+   documentation can happen at any time.
 4. Nothing here reopens F6b, F6c or F6d. Their ledgers and merges stand; what is missing was never
    claimed by them, and two of the three gaps are recorded in the code as deferrals to #14 rather than
    discovered here.
