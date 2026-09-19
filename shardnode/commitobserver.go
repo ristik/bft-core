@@ -36,7 +36,11 @@ type CommitObserver interface {
 // notifyCommit reports a certified commit to the observer, with copies it may keep. A certificate that cannot
 // be copied is logged and not reported; the round is never failed for it.
 func (r *Round) notifyCommit(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord, block Hash) {
-	if r.commitObserver == nil {
+	if r.commitObserver == nil || uc == nil || tr == nil {
+		// Nothing authenticated to report: an ordinary commit always names a certificate, and a
+		// recovery commit reports the source pair the verified target carried. A target source that
+		// supplied neither leaves this node nothing to hand an observer, and a record is never
+		// fabricated for it.
 		return
 	}
 	ucCopy, trCopy, err := copyCertified(uc, tr)
