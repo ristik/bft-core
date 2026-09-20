@@ -80,7 +80,39 @@ which is an M1 scenario rather than a unit test.
 
 Minting tokens from headers is not an alternative. `completed_parent_for` refuses it deliberately.
 
-## 4. What each unit must not do
+## 4. Where the authentication boundary sits, and why U3e does not verify witnesses
+
+This came up while implementing U3d and was briefly mistaken for a gap in D2, so it is recorded here
+to save the next reader the same detour. D2 §2 "The authentication lifecycle" already answers it.
+
+The companion's `witnesses` are the two verified inputs `VerifiedCert` and `ExpectedTransitions`.
+They are deliberately **outside the header commitment**: the header commits to
+`SHA-256(CBOR(rootInput))`, and D2 states that witnesses authenticate `rootInput` and are "not
+re-hashed into the commitment". A receiver therefore cannot validate a witness by hashing it, which
+is exactly why D2 calls them "verifier-owned inputs, never trusted fields deserialized straight from
+a peer companion" and calls `VerifyCompanionWitnesses` "the check, never the source of trust".
+
+D2's own per-path list places the verification outside the execution client every time:
+
+| Path | Who authenticates |
+| --- | --- |
+| build | the shard node is the leader, holds the verified certificate, and emits `VerifiedCert` and `ExpectedTransitions` in the companion |
+| `newPayloadWithSealV1` | the shard-node adapter derives both verified inputs and runs `VerifyCompanionWitnesses` **before** the call; reth accepts that verdict only over the JWT-authenticated channel |
+| devp2p import, offline re-execution | the importer re-derives both and re-runs the check itself |
+
+Two consequences for this plan.
+
+**U3d returning an empty witness list is required, not incomplete.** The execution client holds no
+trust base, no certificate and no committed cursor. It returns the companion fields it owns, and
+bft-core supplies the verifier-owned part before dissemination.
+
+**U3e does not verify witnesses.** Its scope is execution, reproducing the committed `stateRoot` and
+`blockHash`, the `SYNCING` conditions, and recording the parent-accounting token from §3. Adding
+certificate verification to it would move the authentication boundary into the execution client and
+duplicate a verifier that already exists in bft-core, which is precisely the divergence the fork
+budget exists to prevent.
+
+## 5. What each unit must not do
 
 - No unit changes an existing standard Engine API method's signature, semantics or error codes. D2
   §2 is explicit that the siblings are versioned and negotiated, never silent changes to V3.
@@ -92,7 +124,7 @@ Minting tokens from headers is not an alternative. `completed_parent_for` refuse
 - No unit introduces a second codec. `rootInput` decoding reuses the accepted encoding; a second
   implementation of it would be the defect D2 §4 warns about.
 
-## 5. Evidence each unit carries
+## 6. Evidence each unit carries
 
 Following the classes in `f2-execution-prerequisites.md` §0, each unit states which class it reaches
 and does not overclaim. U3a to U3e are **API**: implemented and tested callable code with no
@@ -102,7 +134,7 @@ and only for the paths the bft-core adapter actually drives.
 Real-client evidence (**Measured**) is not claimed by any unit here. It belongs to the M1 gate and
 needs a running paired deployment, which is #41's subject and not this issue's.
 
-## 6. Not in this plan
+## 7. Not in this plan
 
 - Activation, `v0` removal and the switch that makes the seal methods the only accepted path. D2 §7
   and #10 own those.
