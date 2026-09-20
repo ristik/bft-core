@@ -31,7 +31,7 @@ caller supplies it, as it does for a follower.
 
 ## 2. The units
 
-Each unit is one `ureth` pull request. None of the first five advertises a capability, so a running
+Each unit is one `ureth` pull request. None of the first six advertises a capability, so a running
 node's Engine API surface is unchanged until U3e. That ordering is the D2 requirement to "expose
 none of it as supported until the whole advertised method/capability contract is present", taken
 literally: the methods become reachable one at a time, and become *advertised* only once together.
@@ -43,7 +43,8 @@ literally: the methods become reachable one at a time, and become *advertised* o
 | **U3c** | `engine_forkchoiceUpdatedWithSealV1`: the build path. Runs the system operation as step 0, writes `extraData`, starts payload building, returns `PayloadStatusV1` and a `payloadId`. `INVALID` on a failed `rootInput` or system operation, `SYNCING` on an unknown parent |
 | **U3d** | `engine_getPayloadWithSealV1`: returns the payload, the block value and the `sealCompanion` the leader disseminates |
 | **U3e** | `engine_newPayloadWithSealV1`: the import path, for followers, devp2p and re-execution. `VALID` only when every D2 predicate passes and reth's own execution reproduces the committed `stateRoot` and `blockHash`; `INVALID` with the rejection code on any predicate failure; `SYNCING` when the parent or a referenced trust-base body is not local. `ACCEPTED` is never returned. **It must also record the parent-accounting token for every block it imports** (§3) |
-| **U3f** | capability advertisement of the three strings, the startup compatibility check, and the bft-core adapter change that negotiates and uses them |
+| **U3f** | canonical insertion: a Unicity-aware executor component and the per-block bound-input registry it resolves, so an imported seal block can enter the engine tree (§5) |
+| **U3g** | capability advertisement of the three strings, the startup compatibility check, and the bft-core adapter change that negotiates and uses them |
 
 **U3b is a correction to the first revision of this plan**, which went straight from the wire types to
 the RPC methods. The methods have nowhere to attach without a node: `forkchoiceUpdated` has to start a
@@ -112,7 +113,40 @@ certificate verification to it would move the authentication boundary into the e
 duplicate a verifier that already exists in bft-core, which is precisely the divergence the fork
 budget exists to prevent.
 
-## 5. What each unit must not do
+## 5. Canonical insertion, the gap U3e exposed
+
+U3e validates an imported block, mints the parent-accounting token and records it, and returns
+`VALID`. It does not persist the block or its post-state and does not forward to the consensus
+engine, so nothing becomes canonical. A method that returns `VALID` without importing anything is
+the kind of thing that looks finished, so it is written down here as well as in the fork.
+
+The cause is not in U3e. `UnicityNode` uses `EthereumExecutorBuilder::default()`, the stock
+executor, so the engine tree that would execute and persist an imported block uses the stock EVM.
+A seal block carries a privileged system prefix from a reserved sender, which stock validation
+rejects by design. Forwarding to the engine as it stands would therefore turn a valid seal block
+into an invalid one.
+
+This is the same gap as the discarded `_evm_config` noted during U3b. **Only the payload-builder job
+path is Unicity-aware; the node's execution path is not.** The build side works because the job
+carries its own `UnicityEvmConfig`, and nothing else in the node ever needed one until an import
+arrived.
+
+U3f closes it, and the shape follows the pattern already in use. `newPayloadWithSealV1` records the
+bound execution input in a registry keyed by block hash, a Unicity-aware executor component resolves
+that input when the engine tree executes the block, and the method then forwards to the engine as
+the stock `newPayload` does. That is the same handoff as the build-job registry, which is the reason
+to prefer it over a bespoke insertion path.
+
+Two things it must not do. It must not re-execute through the stock EVM, which cannot accept the
+system prefix. It must not bypass the engine tree with a direct provider write, which would put
+blocks into the database that the tree does not know about.
+
+Until U3f lands, the seal chain cannot run contiguously: an imported block is validated and its
+token recorded, but a later call resolving it as a parent by hash finds nothing. U3e's tests exercise
+the token mechanism with the header installed in a test provider, and say so rather than claiming the
+end-to-end case.
+
+## 6. What each unit must not do
 
 - No unit changes an existing standard Engine API method's signature, semantics or error codes. D2
   §2 is explicit that the siblings are versioned and negotiated, never silent changes to V3.
@@ -124,20 +158,20 @@ budget exists to prevent.
 - No unit introduces a second codec. `rootInput` decoding reuses the accepted encoding; a second
   implementation of it would be the defect D2 §4 warns about.
 
-## 6. Evidence each unit carries
+## 7. Evidence each unit carries
 
 Following the classes in `f2-execution-prerequisites.md` §0, each unit states which class it reaches
-and does not overclaim. U3a to U3e are **API**: implemented and tested callable code with no
-production call site, because nothing advertises them. U3f is the first that can claim **Wired**,
+and does not overclaim. U3a to U3f are **API**: implemented and tested callable code with no
+production call site, because nothing advertises them. U3g is the first that can claim **Wired**,
 and only for the paths the bft-core adapter actually drives.
 
 Real-client evidence (**Measured**) is not claimed by any unit here. It belongs to the M1 gate and
 needs a running paired deployment, which is #41's subject and not this issue's.
 
-## 7. Not in this plan
+## 8. Not in this plan
 
 - Activation, `v0` removal and the switch that makes the seal methods the only accepted path. D2 §7
   and #10 own those.
 - The genesis certification bootstrap, which is coordinated but distinct (#12, and
   `f4f-standard-genesis-json-bootstrap.md`).
-- Anything in the Go adapter beyond U3f's negotiation. The carrier work is #10's.
+- Anything in the Go adapter beyond U3g's negotiation. The carrier work is #10's.
