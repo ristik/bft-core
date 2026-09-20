@@ -18,6 +18,9 @@ type Client struct {
 	url    string
 	secret Secret
 	http   *http.Client
+	// requireSeal adds the D2 seal siblings to the capability requirement. Off unless a
+	// deployment selects the seal path; see RequireSealCapabilities.
+	requireSeal bool
 }
 
 func NewClient(url string, secret Secret) *Client {
@@ -27,6 +30,21 @@ func NewClient(url string, secret Secret) *Client {
 		http:   &http.Client{Timeout: 10 * time.Second},
 	}
 }
+
+/*
+RequireSealCapabilities makes the three D2 `engine_*WithSealV1` siblings required, so the
+startup check in adapter.go fails a client that does not offer them.
+
+It is opt-in, and deliberately not the default. D2 §2 says the adapter's startup check "fails
+the process if they are absent", which is right once a deployment drives the seal path. Making
+it unconditional now would fail startup against every stock client while buying nothing: this
+adapter does not yet call the seal methods. Routing build and import through them is activation,
+which D2 §7 and #10 own.
+
+So a deployment that has a seal-capable client and intends to use it turns this on, and the
+negotiation is real and fatal for it. Everything else is unaffected.
+*/
+func (c *Client) RequireSealCapabilities() { c.requireSeal = true }
 
 type rpcRequest struct {
 	JSONRPC string `json:"jsonrpc"`
@@ -113,18 +131,39 @@ var requiredCapabilities = []string{
 	"engine_newPayloadV3",
 }
 
+// sealCapabilities are the D2 §2 siblings. They are required only when a deployment has selected
+// the seal path through RequireSealCapabilities, and they are required together: a client that
+// offered a subset would be advertising a flow it cannot complete, so a partial answer is a
+// missing-capability failure like any other.
+var sealCapabilities = []string{
+	"engine_forkchoiceUpdatedWithSealV1",
+	"engine_getPayloadWithSealV1",
+	"engine_newPayloadWithSealV1",
+}
+
+// required returns the capability set this client insists on.
+func (c *Client) required() []string {
+	if !c.requireSeal {
+		return requiredCapabilities
+	}
+	out := make([]string, 0, len(requiredCapabilities)+len(sealCapabilities))
+	out = append(out, requiredCapabilities...)
+	return append(out, sealCapabilities...)
+}
+
 // ExchangeCapabilities calls engine_exchangeCapabilities and returns which
 // of requiredCapabilities the server is missing (empty means fully capable).
 func (c *Client) ExchangeCapabilities(ctx context.Context) (missing []string, err error) {
+	required := c.required()
 	var offered []string
-	if err := c.call(ctx, "engine_exchangeCapabilities", []any{requiredCapabilities}, &offered); err != nil {
+	if err := c.call(ctx, "engine_exchangeCapabilities", []any{required}, &offered); err != nil {
 		return nil, err
 	}
 	have := make(map[string]bool, len(offered))
 	for _, m := range offered {
 		have[m] = true
 	}
-	for _, m := range requiredCapabilities {
+	for _, m := range required {
 		if !have[m] {
 			missing = append(missing, m)
 		}
