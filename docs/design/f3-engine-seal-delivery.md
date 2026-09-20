@@ -42,7 +42,7 @@ literally: the methods become reachable one at a time, and become *advertised* o
 | **U3b** | the node: a Unicity `NodeTypes`/`EngineTypes` carrying `UnicityPayloadAttributes` end to end and using the existing `UnicityExecutionPayloadBuilder`, plus the bounded job registry the builder resolves against. Advertises nothing and adds no method |
 | **U3c** | `engine_forkchoiceUpdatedWithSealV1`: the build path. Runs the system operation as step 0, writes `extraData`, starts payload building, returns `PayloadStatusV1` and a `payloadId`. `INVALID` on a failed `rootInput` or system operation, `SYNCING` on an unknown parent |
 | **U3d** | `engine_getPayloadWithSealV1`: returns the payload, the block value and the `sealCompanion` the leader disseminates |
-| **U3e** | `engine_newPayloadWithSealV1`: the import path, for followers, devp2p and re-execution. `VALID` only when every D2 predicate passes and reth's own execution reproduces the committed `stateRoot` and `blockHash`; `INVALID` with the rejection code on any predicate failure; `SYNCING` when the parent or a referenced trust-base body is not local. `ACCEPTED` is never returned |
+| **U3e** | `engine_newPayloadWithSealV1`: the import path, for followers, devp2p and re-execution. `VALID` only when every D2 predicate passes and reth's own execution reproduces the committed `stateRoot` and `blockHash`; `INVALID` with the rejection code on any predicate failure; `SYNCING` when the parent or a referenced trust-base body is not local. `ACCEPTED` is never returned. **It must also record the parent-accounting token for every block it imports** (§3) |
 | **U3f** | capability advertisement of the three strings, the startup compatibility check, and the bft-core adapter change that negotiates and uses them |
 
 **U3b is a correction to the first revision of this plan**, which went straight from the wire types to
@@ -61,7 +61,26 @@ U3e is the largest and depends on U3a and U3b only. U3c and U3d are the flow the
 naturally reviewed together but land separately, because `getPayload` returning a companion is a
 distinct contract from `forkchoiceUpdated` accepting one.
 
-## 3. What each unit must not do
+## 3. A requirement U3c placed on U3e
+
+`BoundExecutionInput` needs the parent's ordinary and system gas split, which the header does not
+carry. U3c mints that as an opaque token from a block the executor actually finished, and refuses to
+derive one from a header alone, which is the right safety property: a token that could be
+reconstructed from public fields would not be evidence of anything.
+
+The consequence is that the token exists only for blocks the node itself **built**. A validator that
+follows round N, importing that block, and then leads round N+1 holds no token for its own parent, so
+it cannot build. Leadership rotates in this shard, so that is the ordinary case rather than an edge
+one, and as of U3c the build path works only for a node leading consecutively.
+
+U3e closes it. The import path executes the block with the same executor, so it can mint and record
+the same token, and a follower becomes able to lead. This is written down because the gap is invisible
+from the build path alone: U3c's tests pass, and the limitation only appears under leader rotation,
+which is an M1 scenario rather than a unit test.
+
+Minting tokens from headers is not an alternative. `completed_parent_for` refuses it deliberately.
+
+## 4. What each unit must not do
 
 - No unit changes an existing standard Engine API method's signature, semantics or error codes. D2
   §2 is explicit that the siblings are versioned and negotiated, never silent changes to V3.
@@ -73,7 +92,7 @@ distinct contract from `forkchoiceUpdated` accepting one.
 - No unit introduces a second codec. `rootInput` decoding reuses the accepted encoding; a second
   implementation of it would be the defect D2 §4 warns about.
 
-## 4. Evidence each unit carries
+## 5. Evidence each unit carries
 
 Following the classes in `f2-execution-prerequisites.md` §0, each unit states which class it reaches
 and does not overclaim. U3a to U3e are **API**: implemented and tested callable code with no
@@ -83,7 +102,7 @@ and only for the paths the bft-core adapter actually drives.
 Real-client evidence (**Measured**) is not claimed by any unit here. It belongs to the M1 gate and
 needs a running paired deployment, which is #41's subject and not this issue's.
 
-## 5. Not in this plan
+## 6. Not in this plan
 
 - Activation, `v0` removal and the switch that makes the seal methods the only accepted path. D2 §7
   and #10 own those.
