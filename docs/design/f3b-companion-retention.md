@@ -130,7 +130,7 @@ outcomes, not two, and conflating the last two would be a real loss of informati
 | Outcome | Meaning |
 | --- | --- |
 | **found** | the companion, byte-identical to what was stored |
-| **unavailable** | this node cannot produce the companion **and** has published a retention horizon. The horizon accompanies the answer, and it is the node's retention boundary, not a claim about the queried block's number |
+| **unavailable** | this node cannot produce the companion **and** has published a retention horizon. The horizon accompanies the answer, and it is the node's retention boundary, not a claim about the queried block's number. The boundary is **exclusive**: pruning drops blocks *below* the horizon, so a block at exactly the horizon was never dropped by pruning |
 | **unknown** | this node has no record of the block hash and has never published a horizon |
 
 Neither is a statement about the block's validity or certification, per D2 part 3.
