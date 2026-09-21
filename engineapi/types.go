@@ -72,6 +72,23 @@ type PayloadAttributesV3 struct {
 	ParentBeaconBlockRoot data32         `json:"parentBeaconBlockRoot"`
 }
 
+// UnicityPayloadAttributes is the payloadAttributes parameter of
+// engine_forkchoiceUpdatedWithSealV1: the standard V3 attributes above plus the
+// 32-byte commitment the built block's header extraData must carry.
+//
+// It is a distinct type rather than an extra field on PayloadAttributesV3
+// because reth's own UnicityPayloadAttributes is a distinct type that flattens
+// the stock attributes and adds commitment as a REQUIRED field
+// (crates/unicity/payload/src/lib.rs). Sending the plain V3 attributes to the
+// seal sibling would fail to decode on the far side with a missing-field error,
+// not merely omit a default, so this mirrors the far side exactly. The standard
+// ForkchoiceUpdatedV3 keeps the plain type and emits exactly the same JSON it
+// did before.
+type UnicityPayloadAttributes struct {
+	PayloadAttributesV3
+	Commitment data32 `json:"commitment"`
+}
+
 // PayloadStatus mirrors the enum PayloadStatusV1.status takes. See
 // docs/engine-api-adapter-plan.md §6 "Status policy" for what each value
 // means for certification, and adapter.go's toStatus for the mapping onto
@@ -123,4 +140,22 @@ type GetPayloadV3Response struct {
 	BlockValue            quantity           `json:"blockValue"`
 	BlobsBundle           BlobsBundleV1      `json:"blobsBundle"`
 	ShouldOverrideBuilder bool               `json:"shouldOverrideBuilder"`
+}
+
+// GetPayloadWithSealV1Response is engine_getPayloadWithSealV1's result. It is
+// NOT the stock ExecutionPayloadEnvelopeV3: D2 fixes the shape as
+// { executionPayload, blockValue, sealCompanion }, with no blobsBundle and no
+// shouldOverrideBuilder.
+//
+// BlockValue keeps the same quantity type as GetPayloadV3Response above.
+// reth's U256 serialises through ruint as a minimal 0x-prefixed lowercase hex
+// number — "0x0" for zero, "0x1234" for 4660, no leading zeros — which is
+// exactly the QUANTITY convention quantity implements, so the two agree on the
+// wire. quantity is uint64, so a block value above 2^64-1 would be refused on
+// decode; exec-mode values are far below that, and this keeps the one existing
+// block-value type rather than adding a second 256-bit one for a single field.
+type GetPayloadWithSealV1Response struct {
+	ExecutionPayload ExecutionPayloadV3 `json:"executionPayload"`
+	BlockValue       quantity           `json:"blockValue"`
+	SealCompanion    SealCompanion      `json:"sealCompanion"`
 }

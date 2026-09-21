@@ -77,6 +77,41 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 	})
 }
 
+// SealBuildInput is the sealBuildInput parameter of
+// engine_forkchoiceUpdatedWithSealV1, and the JSON envelope ureth's
+// reth_unicity_execution::wire::SealBuildInput deserializes under
+// deny_unknown_fields: exactly rootInput and transitions.
+//
+// RootInput is canonical CBOR for one root input, a 0x-prefixed hex DATA
+// string. Transitions is the outer committed-body array; for this unit it is
+// ALWAYS empty, and an empty array here means "none are pending", never "some
+// are pending and could not be authenticated". rootinput.Derive refuses when
+// committed trust-base bodies or handoff acknowledgements are pending
+// (rootinput/rootinput.go), and f2c-root-input-wiring-contract.md §8 lists
+// that refusal as one that must survive wiring — so dropping or misencoding
+// them would silently turn a refusal into an acceptance.
+type SealBuildInput struct {
+	RootInput   data   `json:"rootInput"`
+	Transitions []data `json:"transitions"`
+}
+
+// MarshalJSON normalizes a nil transitions slice to an empty array, for the
+// same reason SealCompanion normalizes its witnesses: a nil Go slice marshals
+// to JSON null, and ureth's Vec<Bytes> will not accept null.
+func (s SealBuildInput) MarshalJSON() ([]byte, error) {
+	transitions := s.Transitions
+	if transitions == nil {
+		transitions = []data{}
+	}
+	return json.Marshal(struct {
+		RootInput   data   `json:"rootInput"`
+		Transitions []data `json:"transitions"`
+	}{
+		RootInput:   s.RootInput,
+		Transitions: transitions,
+	})
+}
+
 // EncodeBlock wraps a sealed, non-quiet ExecutionPayloadV3 into a
 // shardnode.Block. Quiet rounds never reach this function — see adapter.go
 // Seal, which detects an empty transaction list itself and constructs the
