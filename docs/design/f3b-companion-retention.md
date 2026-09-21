@@ -1,7 +1,7 @@
 # F3 (#11): companion retention and serving
 
-Issue: #11. Base: `integration/enshrined-evm` at `4d8e5627` (the #206 merge).
-Companion repository: [`ristik/ureth`](https://github.com/ristik/ureth) at `739ecf57` (the #21 merge).
+Issue: #11. Base: `integration/enshrined-evm` at `9b5d0e1c` (the #205 merge).
+Companion repository: [`ristik/ureth`](https://github.com/ristik/ureth) at `bdf2504f` (the #22 merge).
 
 This is a delivery plan, not a design. The design is accepted and is
 `d2-reth-system-call-fee-profile.md` §2 "Companion retention on sync". Nothing here reopens it.
@@ -44,7 +44,7 @@ that holds the companion.
 | --- | --- |
 | the `sealCompanion` field on bft-core's `ProposalEnvelope` | activation of the seal path, #10. bft-core does not call the seal methods at all today, so the field would be inert on arrival |
 | devp2p import populating the execution-input registry | U3j below, which is named but not scoped; it depends on the transport above |
-| the peer-facing archival proof service keyed by `(network, partition, shard, blockHash)` | F7, #15, which is blocked on F6 and whose accepted prerequisite slice (`f7-parent-registry-witness-archive.md` §1) explicitly excludes canonical root-input companions |
+| the peer-facing archival proof service keyed by `(network, partition, shard, blockHash)` | F7, #15, which is blocked on F6 and whose prerequisite slice (`f7-parent-registry-witness-archive.md`, which is headed "Proposed design only" and is **not** acceptance of F7) explicitly excludes canonical root-input companions |
 | any Measured evidence from a running client | M1, #41 |
 
 So this plan closes §2.2's **persistence** half and the **serving** half that lives on the node
@@ -56,9 +56,17 @@ responsibility, not the execution client's (`f3-engine-seal-delivery.md` §4).
 
 ### 3.1 The store is the fork's own, not a reth table
 
-Every unit of F3 so far has held to the property that no upstream file is edited. A companion table
-added to `reth-db`'s `tables!` registry would break that, and it would put fork data inside the
-environment reth's own consistency checks and migrations manage.
+No F3 unit has edited an upstream file **to add Unicity behaviour**: every Engine API sibling, the
+bounded kernel and the node wiring live entirely under `crates/unicity`. That is the property a
+companion table in `reth-db`'s `tables!` registry would break, and it would additionally put fork
+data inside the environment reth's own consistency checks and migrations manage.
+
+The narrower wording matters, because upstream files *have* been edited. `ureth`'s `UNICITY.md`
+inventory records them: twelve upstream Rust files plus `.github/workflows/lint.yml` and
+`.github/scripts/check_wasm.sh`, from `2315f0e3a fix(ci): repair baseline checks` (ureth #9, branch
+`f3/ci-readiness`) and the toolchain pinning in ureth #11/#13/#17. Those are lint-baseline and CI
+repairs, not behaviour. An earlier draft of this section claimed no upstream file had been edited at
+all, which contradicts the repository's own inventory.
 
 The store is therefore a **separate MDBX environment** under the datadir, opened and owned by a new
 `crates/unicity/store` crate. `reth-libmdbx` is already a workspace dependency, and `tables!` is
@@ -100,8 +108,17 @@ outcomes, not two, and conflating the last two would be a real loss of informati
 | Outcome | Meaning |
 | --- | --- |
 | **found** | the companion, byte-identical to what was stored |
-| **unavailable** | the block is at or below the published retention horizon: this node once could have served it and no longer can. The horizon accompanies the answer |
-| **unknown** | this node has no record of the block hash at all. It is not a statement about the block's validity or certification, per D2 part 3 |
+| **unavailable** | this node cannot produce the companion **and** has published a retention horizon. The horizon accompanies the answer, and it is the node's retention boundary, not a claim about the queried block's number |
+| **unknown** | this node has no record of the block hash and has never published a horizon |
+
+Neither is a statement about the block's validity or certification, per D2 part 3.
+
+The boundary between the last two is **deliberately lossy**, and stating it precisely here is the
+point of this section. A store that kept a tombstone per pruned hash could distinguish them, but
+that tombstone set is exactly the unbounded set pruning exists to drop. Without tombstones, once a
+horizon is published an absent hash cannot be told apart from a pruned one, so it answers
+**unavailable**; **unknown** is reachable only on a node that has never pruned. A caller therefore
+cannot infer from **unavailable** that the block is below the horizon.
 
 A full node's horizon is unset, and it therefore never answers **unavailable**.
 
@@ -111,7 +128,7 @@ Each unit is one `ureth` pull request.
 
 | Unit | Scope |
 | --- | --- |
-| **U3h** | the store: a `crates/unicity/store` crate holding a durable, block-hash-keyed companion store with the three-outcome lookup of §3.3, a settable horizon, and pruning. No node wiring, no RPC, no reth component. Testable end to end on its own, including reopen-after-write |
+| **U3h** | the store: a `crates/unicity/store` crate holding a durable, block-hash-keyed companion store with the three-outcome lookup of §3.3, a settable horizon, and pruning. No node wiring, no RPC, no reth component. Testable end to end on its own, including reopen-after-write. Delivered as [`ureth` #22](https://github.com/ristik/ureth/pull/22) |
 | **U3i** | the wiring and the read surface: write on both seal paths, prune under the policy of §3.2, publish the horizon, and expose the lookup as a `unicity_` namespace method on the standard RPC. This is the unit that makes retention observable |
 | **U3j** | *named, not scoped here.* devp2p import re-deriving the verified inputs and populating the execution-input registry, which is §3.2's *obtain* half. It needs the transport that §2 places under #10, and it should not start before that exists |
 
@@ -144,8 +161,10 @@ Required tests, at minimum:
 - after `prune_below`, a pruned block answers **unavailable** carrying the horizon, and a retained
   block still answers **found**;
 - the horizon refuses to move backwards;
-- `remove` does not change what a later `get` reports for any other key, and the removed key reports
-  **unknown**, not **unavailable**, because it was dropped as non-canonical rather than pruned.
+- `remove` does not change what a later `get` reports for any other key. The removed key then reports
+  whatever any absent hash reports under §3.3: **unknown** on a store with no horizon, and
+  **unavailable** once one exists. Both cases are worth a test, because the second is the one a
+  reader expecting "removed means unknown" would get wrong.
 
 Explicitly not in U3h: any reth type beyond `SealCompanion`, any provider, any notion of
 canonicality. The crate is told what to store and what to drop.

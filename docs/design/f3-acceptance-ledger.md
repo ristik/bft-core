@@ -135,9 +135,10 @@ Base moves to `ristik/ureth` `unicity/main` at `739ecf57` (the #21 merge).
 covers both through the import path: `import_refuses_a_block_that_forges_the_system_sender` and
 `import_refuses_a_repeated_system_sender_after_the_legitimate_prefix`, the second running a
 legitimate paying transfer first so repetition is confirmed rather than inferred from the
-reserved-sender rule. Every case asserts the exact refusal message, because mutating a validated
-block changes its hash, state root and receipts, and a test asserting only "some error" would pass
-for an incidental reason.
+reserved-sender rule. Every case asserts the specific refusal text rather than merely that an error
+occurred (a substring match against the rule's own message, not a whole-string comparison), because
+mutating a validated block changes its hash, state root and receipts, and a test asserting only
+"some error" would pass for an incidental reason.
 
 **§3.3 malicious builder: now met, for the rules a block can express.** The two tests above are the
 malicious-builder cases: a builder emitting a forged system sender, and one emitting a repeat. A
