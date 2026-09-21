@@ -221,10 +221,28 @@ Required tests, at minimum:
 
 ## 5. Evidence this plan can produce
 
-Using `f3-acceptance-ledger.md`'s classes: U3h and U3i together take companion retention from
-**nothing** to **Wired** — exercised through the node's own paths in its own test suite, with no
-running paired deployment. **Measured** evidence remains M1's under #41, as it does for every other
-F3 unit.
+Following the classes in `f2-execution-prerequisites.md` §0: U3h and U3i together take companion
+retention from nothing to **API** — "implemented and tested callable code, with no production call
+site".
+
+**Not Wired**, and the distinction is the whole job of this section. f2 §0 defines **Wired** as "a
+running shard-node path calls the code", and nothing will call these two units on delivery. §2 puts
+the `ProposalEnvelope` field out of scope precisely because bft-core does not call the seal methods
+at all today, and §4.2's read surface sits on a `unicity_` namespace whose consumers are proof
+export and an operator, not a shard round.
+
+`f3-engine-seal-delivery.md` §7 records that U3a to U3f are API and that U3g is the first unit able
+to claim Wired, and only for the paths the bft-core adapter actually drives. U3h and U3i do not
+change that, and companion retention becomes Wired only when #10 activates the seal path.
+
+**Measured** remains M1's under #41, as it does for every other F3 unit.
+
+An earlier draft of this section claimed **Wired** and then described API in the same sentence —
+"exercised through the node's own paths in its own test suite, with no running paired deployment",
+which is the definition of API and concedes the absence Wired requires. It also credited the classes
+to `f3-acceptance-ledger.md`, which does not define them and never uses the word Wired. Recording
+the error rather than deleting it, because a section whose only job is to state what evidence exists
+is the worst place in the document to overclaim, and because U3i's brief inherits this paragraph.
 
 ## 6. What still will not close #11
 
