@@ -209,7 +209,32 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 		return fmt.Errorf("creating shard network: %w", err)
 	}
 
-	executor, err := buildExecutor(ctx, flags, shardConf)
+	// The configuration THIS node was started with, hashed the way certificates commit to it. Every
+	// certificate this node accepts — live, restored from disk, or recovered as evidence — must name
+	// it (#134), so it is computed once here, for every deployment, not only when recovery is on.
+	//
+	// Computed BEFORE the executor so the engine-api adapter can take it as part of its derivation
+	// context: a seal build derives the canonical root input from a certificate authenticated
+	// against THIS node's configuration, never the certificate's own (F2c §3). It used to be
+	// computed after buildExecutor, which would have meant either recomputing it or deriving against
+	// an unauthenticated configuration.
+	confHash, err := shardConf.Hash(crypto.SHA256)
+	if err != nil {
+		return fmt.Errorf("hashing the shard configuration: %w", err)
+	}
+
+	executor, err := buildExecutor(ctx, flags, shardConf, &engineapi.VerifierContext{
+		NetworkID:     shardConf.NetworkID,
+		PartitionID:   shardConf.PartitionID,
+		ShardID:       shardConf.ShardID,
+		ShardConfHash: confHash,
+		TrustBases:    trustBaseStore,
+		// No seal registry exists yet, so the cursor rule is explicitly not activated. See
+		// engineapi.CursorNotActivated for exactly which refusal it leaves off, and for the
+		// committed-state cursor that replaces it once a registry (or a boundary exposing the last
+		// applied root round) exists.
+		Cursor: engineapi.CursorNotActivated(),
+	})
 	if err != nil {
 		return err
 	}
@@ -221,14 +246,6 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 
 	lucStorePath := flags.PathWithDefault(flags.LUCStoreFile, lucStoreFileName)
 	store := shardnode.NewFileStore(lucStorePath)
-
-	// The configuration THIS node was started with, hashed the way certificates commit to it. Every
-	// certificate this node accepts — live, restored from disk, or recovered as evidence — must name
-	// it (#134), so it is computed once here, for every deployment, not only when recovery is on.
-	confHash, err := shardConf.Hash(crypto.SHA256)
-	if err != nil {
-		return fmt.Errorf("hashing the shard configuration: %w", err)
-	}
 
 	node, err := shardnode.New(
 		peer,
@@ -394,7 +411,7 @@ func hexToHash(s string) (shardnode.Hash, error) {
 	return b, nil
 }
 
-func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *types.PartitionDescriptionRecord) (shardnode.Executor, error) {
+func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *types.PartitionDescriptionRecord, verifier *engineapi.VerifierContext) (shardnode.Executor, error) {
 	switch flags.Executor {
 	case "fake":
 		return executortest.New(), nil
@@ -414,7 +431,13 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 			EngineURL: flags.EngineURL,
 			EthURL:    flags.EthURL,
 			Secret:    secret,
+			Verifier:  verifier,
 		}, flags.observe.Logger())
+
+		// The build path now runs through the seal siblings, so a client that lacks them fails
+		// startup rather than the first round. Opt-in at the client because the adapter itself is
+		// still usable for non-seal work; this executor is not.
+		adapter.RequireSealCapabilities()
 
 		// Fail closed at startup rather than on the first round — see
 		// docs/adr/0001-executor-boundary.md decision 3: capability

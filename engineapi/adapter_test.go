@@ -94,6 +94,12 @@ func fixedHashBytes(b byte) []byte {
 // standing in for the authenticated :8551 engine surface, one for the
 // plain :8545 eth surface — matching how a real deployment separates them).
 func newTestAdapter(t *testing.T, engine, eth *mockReth) (*Adapter, func()) {
+	return newTestAdapterWithVerifier(t, engine, eth, nil)
+}
+
+// newTestAdapterWithVerifier is newTestAdapter with an explicit derivation context, for the tests
+// that drive Adapter.Build through the seal sibling.
+func newTestAdapterWithVerifier(t *testing.T, engine, eth *mockReth, verifier *VerifierContext) (*Adapter, func()) {
 	secret, err := ParseSecret(strings.Repeat("ab", 32))
 	require.NoError(t, err)
 	engine.secret = secret
@@ -101,7 +107,7 @@ func newTestAdapter(t *testing.T, engine, eth *mockReth) (*Adapter, func()) {
 	engineSrv := engine.server(true)
 	ethSrv := eth.server(false)
 
-	a := NewAdapter(Config{EngineURL: engineSrv.URL, EthURL: ethSrv.URL, Secret: secret}, nil)
+	a := NewAdapter(Config{EngineURL: engineSrv.URL, EthURL: ethSrv.URL, Secret: secret, Verifier: verifier}, nil)
 	return a, func() { engineSrv.Close(); ethSrv.Close() }
 }
 
@@ -148,6 +154,9 @@ func TestAdapter_Head_ReadsFromEthNamespace(t *testing.T) {
 }
 
 func TestAdapter_BuildSealCommit_NonQuietRound(t *testing.T) {
+	f := newDerivationFixture(t)
+	uc, tr := f.cert(t, 4, 5, 50)
+
 	parentHash := fixedHash(0x01)
 	blockHash := fixedHash(0x02)
 	stateRoot := fixedHash(0x03)
@@ -156,8 +165,11 @@ func TestAdapter_BuildSealCommit_NonQuietRound(t *testing.T) {
 
 	zeroHash := fixedHash(0x00)
 	sealHash := fixedHash(0x99)
-	parent := shardnode.BlockRef{Number: 0, Hash: shardnode.Hash(parentHash[:]), StateRoot: shardnode.Hash(zeroHash[:])}
-	params := shardnode.RoundParams{Round: 1, Timestamp: 1000, SealHash: shardnode.Hash(sealHash[:]), Parent: parent}
+	parent := shardnode.BlockRef{Number: 4, Hash: shardnode.Hash(parentHash[:]), StateRoot: shardnode.Hash(zeroHash[:])}
+	params := shardnode.RoundParams{
+		Round: 5, Timestamp: 1000, SealHash: shardnode.Hash(sealHash[:]), Leader: tr.Leader, Parent: parent,
+		AuthorizingCertificate: uc, AuthorizingTechnicalRecord: tr,
+	}
 
 	// The sealed payload must carry the same attributes Build would have
 	// requested (Verify's self-check — called on the leader's own output
@@ -167,19 +179,19 @@ func TestAdapter_BuildSealCommit_NonQuietRound(t *testing.T) {
 	require.NoError(t, err)
 
 	engine := newMockReth(t, Secret{})
-	engine.on("engine_forkchoiceUpdatedV3", func(p json.RawMessage) (any, *rpcError) {
+	engine.on("engine_forkchoiceUpdatedWithSealV1", func(p json.RawMessage) (any, *rpcError) {
 		return ForkchoiceUpdatedResponse{
 			PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid},
 			PayloadID:     &payloadID,
 		}, nil
 	})
-	engine.on("engine_getPayloadV3", func(p json.RawMessage) (any, *rpcError) {
-		return GetPayloadV3Response{
+	engine.on("engine_getPayloadWithSealV1", func(p json.RawMessage) (any, *rpcError) {
+		return GetPayloadWithSealV1Response{
 			ExecutionPayload: ExecutionPayloadV3{
 				ParentHash:   parentHash,
 				BlockHash:    blockHash,
 				StateRoot:    stateRoot,
-				BlockNumber:  1,
+				BlockNumber:  5,
 				Timestamp:    attrs.Timestamp,
 				PrevRandao:   attrs.PrevRandao,
 				FeeRecipient: attrs.SuggestedFeeRecipient,
@@ -188,7 +200,11 @@ func TestAdapter_BuildSealCommit_NonQuietRound(t *testing.T) {
 				LogsBloom:    data{},
 				ExtraData:    data{},
 			},
+			SealCompanion: SealCompanion{RootInput: data{0x01}, Witnesses: []data{}, Provenance: "build"},
 		}, nil
+	})
+	engine.on("engine_forkchoiceUpdatedV3", func(p json.RawMessage) (any, *rpcError) {
+		return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid}}, nil
 	})
 	engine.on("engine_newPayloadV3", func(p json.RawMessage) (any, *rpcError) {
 		return PayloadStatusV1{Status: PayloadStatusValid}, nil
@@ -196,10 +212,10 @@ func TestAdapter_BuildSealCommit_NonQuietRound(t *testing.T) {
 
 	eth := newMockReth(t, Secret{})
 	eth.on("eth_getBlockByHash", func(p json.RawMessage) (any, *rpcError) {
-		return blockHeaderJSON{Number: 0, Hash: parentHash, Timestamp: parentTimestamp}, nil
+		return blockHeaderJSON{Number: 4, Hash: parentHash, Timestamp: parentTimestamp}, nil
 	})
 
-	a, closeFn := newTestAdapter(t, engine, eth)
+	a, closeFn := newTestAdapterWithVerifier(t, engine, eth, f.verifier(CursorNotActivated()))
 	defer closeFn()
 	ctx := context.Background()
 
@@ -225,19 +241,23 @@ func TestAdapter_BuildSealCommit_NonQuietRound(t *testing.T) {
 }
 
 func TestAdapter_Seal_QuietRound_EchoesParentWithNilHash(t *testing.T) {
+	f := newDerivationFixture(t)
+	uc, tr := f.cert(t, 4, 5, 50)
+
 	parentHash := fixedHash(0x11)
 	var payloadID data = []byte{9, 9, 9, 9, 9, 9, 9, 9}
 
 	engine := newMockReth(t, Secret{})
-	engine.on("engine_forkchoiceUpdatedV3", func(p json.RawMessage) (any, *rpcError) {
+	engine.on("engine_forkchoiceUpdatedWithSealV1", func(p json.RawMessage) (any, *rpcError) {
 		return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid}, PayloadID: &payloadID}, nil
 	})
-	engine.on("engine_getPayloadV3", func(p json.RawMessage) (any, *rpcError) {
-		return GetPayloadV3Response{
+	engine.on("engine_getPayloadWithSealV1", func(p json.RawMessage) (any, *rpcError) {
+		return GetPayloadWithSealV1Response{
 			ExecutionPayload: ExecutionPayloadV3{
 				ParentHash:   parentHash,
 				Transactions: []data{}, // zero transactions — quiet
 			},
+			SealCompanion: SealCompanion{RootInput: data{0x01}, Witnesses: []data{}, Provenance: "build"},
 		}, nil
 	})
 
@@ -246,12 +266,15 @@ func TestAdapter_Seal_QuietRound_EchoesParentWithNilHash(t *testing.T) {
 		return blockHeaderJSON{Timestamp: 500}, nil
 	})
 
-	a, closeFn := newTestAdapter(t, engine, eth)
+	a, closeFn := newTestAdapterWithVerifier(t, engine, eth, f.verifier(CursorNotActivated()))
 	defer closeFn()
 	ctx := context.Background()
 
 	parentRef := shardnode.BlockRef{Number: 3, Hash: shardnode.Hash(parentHash[:]), StateRoot: shardnode.Hash(fixedHashBytes(0x33))}
-	params := shardnode.RoundParams{Round: 4, Timestamp: 600, SealHash: shardnode.Hash(fixedHashBytes(0x99)), Parent: parentRef}
+	params := shardnode.RoundParams{
+		Round: 5, Timestamp: 600, SealHash: shardnode.Hash(fixedHashBytes(0x99)), Leader: tr.Leader, Parent: parentRef,
+		AuthorizingCertificate: uc, AuthorizingTechnicalRecord: tr,
+	}
 
 	id, err := a.Build(ctx, params)
 	require.NoError(t, err)
@@ -283,20 +306,24 @@ func TestAdapter_Seal_QuietRound_EchoesParentWithNilHash(t *testing.T) {
 // falls back to StateRoot instead, matching executortest.Fake's behavior
 // (whose genesis head.Hash is nil for exactly this reason).
 func TestAdapter_GenesisQuietRound_DoesNotAliasParentBlockHash(t *testing.T) {
+	f := newDerivationFixture(t)
+	uc, tr := f.cert(t, 4, 5, 50)
+
 	genesisHash := fixedHash(0x11)
 	genesisRoot := shardnode.Hash(fixedHashBytes(0x22))
 	var payloadID data = []byte{1, 2, 3, 4, 5, 6, 7, 8}
 
 	engine := newMockReth(t, Secret{})
-	engine.on("engine_forkchoiceUpdatedV3", func(p json.RawMessage) (any, *rpcError) {
+	engine.on("engine_forkchoiceUpdatedWithSealV1", func(p json.RawMessage) (any, *rpcError) {
 		return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid}, PayloadID: &payloadID}, nil
 	})
-	engine.on("engine_getPayloadV3", func(p json.RawMessage) (any, *rpcError) {
-		return GetPayloadV3Response{
+	engine.on("engine_getPayloadWithSealV1", func(p json.RawMessage) (any, *rpcError) {
+		return GetPayloadWithSealV1Response{
 			ExecutionPayload: ExecutionPayloadV3{
 				ParentHash:   genesisHash,
 				Transactions: []data{}, // zero transactions, matching a fresh chain with no mempool activity
 			},
+			SealCompanion: SealCompanion{RootInput: data{0x01}, Witnesses: []data{}, Provenance: "build"},
 		}, nil
 	})
 
@@ -305,7 +332,7 @@ func TestAdapter_GenesisQuietRound_DoesNotAliasParentBlockHash(t *testing.T) {
 		return blockHeaderJSON{Timestamp: 0}, nil
 	})
 
-	a, closeFn := newTestAdapter(t, engine, eth)
+	a, closeFn := newTestAdapterWithVerifier(t, engine, eth, f.verifier(CursorNotActivated()))
 	defer closeFn()
 	ctx := context.Background()
 
@@ -313,7 +340,10 @@ func TestAdapter_GenesisQuietRound_DoesNotAliasParentBlockHash(t *testing.T) {
 	// which is nil by construction — a real execution client's genesis
 	// always has one).
 	genesisRef := shardnode.BlockRef{Number: 0, Hash: shardnode.Hash(genesisHash[:]), StateRoot: genesisRoot}
-	params := shardnode.RoundParams{Round: 1, Timestamp: 1, SealHash: shardnode.Hash(fixedHashBytes(0x99)), Parent: genesisRef}
+	params := shardnode.RoundParams{
+		Round: 5, Timestamp: 1, SealHash: shardnode.Hash(fixedHashBytes(0x99)), Leader: tr.Leader, Parent: genesisRef,
+		AuthorizingCertificate: uc, AuthorizingTechnicalRecord: tr,
+	}
 
 	id, err := a.Build(ctx, params)
 	require.NoError(t, err)
@@ -454,7 +484,7 @@ func TestAdapter_SealCapabilities_FailClosed_WhenSelectedAndAbsent(t *testing.T)
 	eth := newMockReth(t, Secret{})
 	a, closeFn := newTestAdapter(t, engine, eth)
 	defer closeFn()
-	a.engine.RequireSealCapabilities()
+	a.RequireSealCapabilities()
 
 	err := a.CheckCapabilities(context.Background())
 	require.Error(t, err)
@@ -471,7 +501,7 @@ func TestAdapter_SealCapabilities_PassWhenSelectedAndOffered(t *testing.T) {
 	eth := newMockReth(t, Secret{})
 	a, closeFn := newTestAdapter(t, engine, eth)
 	defer closeFn()
-	a.engine.RequireSealCapabilities()
+	a.RequireSealCapabilities()
 
 	require.NoError(t, a.CheckCapabilities(context.Background()))
 }
@@ -488,7 +518,7 @@ func TestAdapter_SealCapabilities_APartialSetIsMissing(t *testing.T) {
 	eth := newMockReth(t, Secret{})
 	a, closeFn := newTestAdapter(t, engine, eth)
 	defer closeFn()
-	a.engine.RequireSealCapabilities()
+	a.RequireSealCapabilities()
 
 	err := a.CheckCapabilities(context.Background())
 	require.Error(t, err)
