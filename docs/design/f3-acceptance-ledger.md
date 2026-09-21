@@ -125,3 +125,44 @@ trees for the term finds only `f1-baseline.md`, which is F1's fault matrix and n
 It does not re-verify D2's own acceptance, which is recorded separately. It records no maintainer
 decision: per `docs/pos/PROCESS.md` closing a ticket needs a named decision and a closing comment
 linking final PRs and residual limits, and this document is neither.
+
+## 6. Addendum: what ureth #21 changed
+
+Added after the ledger merged, because §3.1 and §3.3 no longer describe the repository.
+Base moves to `ristik/ureth` `unicity/main` at `739ecf57` (the #21 merge).
+
+**§3.1 impersonation and repetition: now met.** `crates/unicity/execution/tests/block_adapter.rs`
+covers both through the import path: `import_refuses_a_block_that_forges_the_system_sender` and
+`import_refuses_a_repeated_system_sender_after_the_legitimate_prefix`, the second running a
+legitimate paying transfer first so repetition is confirmed rather than inferred from the
+reserved-sender rule. Every case asserts the exact refusal message, because mutating a validated
+block changes its hash, state root and receipts, and a test asserting only "some error" would pass
+for an incidental reason.
+
+**§3.3 malicious builder: now met, for the rules a block can express.** The two tests above are the
+malicious-builder cases: a builder emitting a forged system sender, and one emitting a repeat. A
+misplaced prefix is not expressible as a block on this path, which is the next point.
+
+**Two rules turned out to be unreachable from the import path**, and recording that is the more
+useful result than the tests themselves:
+
+- *Ordinary transaction before the system prefix.* `execute_one` always calls
+  `apply_pre_execution_changes` before any transaction, so no block can put an ordinary transaction
+  ahead of the prefix. The rule is exercised at the executor directly
+  (`executor_refuses_an_ordinary_transaction_before_the_system_prefix`) and is defence-in-depth for
+  a direct executor caller, not the import path's protection.
+- *Blob rejection.* `validate_fixed_block` requires `blob_gas_used == Some(0)` and
+  `validate_cancun_gas` rejects the mismatch before execution.
+  `import_rejects_a_blob_transaction_at_the_header_blob_gas_check` asserts the import path is
+  protected by the blob-gas-mismatch message and **explicitly not** by the executor's message, so a
+  refactor that deleted the earlier check and relied on the later one would fail the test rather
+  than pass quietly. `executor_refuses_a_blob_transaction` keeps the executor rule covered.
+
+**Unchanged by #21**: §2.2 (companion persistence and transport), §2.3's real-reth and
+synchronisation halves, and §3.2. §4's conclusion that #11 cannot close still stands.
+`f3b-companion-retention.md` plans the §2.2 persistence and serving halves; the rest needs a running
+deployment and is M1's under #41.
+
+One non-test change was disclosed with #21: `reth-evm` and `reth-evm-ethereum` gained the `std`
+feature in `crates/unicity/execution/Cargo.toml` so the crate compiles standalone. Combined builds
+already enabled it through feature unification, so no behaviour changed.
