@@ -210,6 +210,41 @@ Wiring, so the interesting failures are of reach, not of logic.
   the capability list, which matters because U3g fixed it and bft-core #205 requires the three
   together.
 
+#### Two decisions §4.2 originally left open
+
+Both surfaced while reviewing U3h ([`ureth` #22](https://github.com/ristik/ureth/pull/22)) and are
+settled here, because in each case the path of least resistance is the wrong one.
+
+**The RPC refines the lookup against the canonical chain; it does not pass `Lookup` straight
+through.** `CompanionStore::get` never compares the queried block's number to the horizon, because
+an absent hash gives it no number to compare. So once *any* horizon is published, a hash the node
+never imported comes back as `Unavailable { horizon }`. This is not hypothetical: the merged test
+`remove_after_a_horizon_exists_reports_unavailable_like_any_absent_hash` stores a companion at block
+**4**, sets the horizon to **2**, removes it, and asserts `Unavailable { horizon: 2 }` — a block four
+above the horizon, reported as unavailable-because-pruned.
+
+Inside a library with no caller that is a sound trade-off and U3h was right to ship it. On an RPC it
+becomes a wrong answer to a real question: an operator or proof-export client asking about a recent
+block this node never saw is told it was pruned, which is exactly the misreading D2 part 3 rules
+out. U3i already resolves the canonical chain, because it prunes against it, so it resolves the hash
+to a block number before answering: **unknown** when the hash is not in its chain or its number is
+above the horizon, **unavailable** only at or below. No store change and no tombstones.
+
+The last required test below already assumed this. "**unknown** for a hash the node never saw" is
+unsatisfiable by a pass-through implementation on any node that has ever pruned, so §4.2 was
+already asking for the refinement without saying so.
+
+**The per-block fsync is accepted, not batched.** `CompanionStore::put` calls `env.sync(true)`, and
+this section writes on both seal paths, so the sync lands inline on `getPayloadWithSealV1` and
+`newPayloadWithSealV1` and enters the Engine API latency budget. U3h judged one fsync per block the
+right trade with no caller to weigh it against; that judgement is upheld here with a caller, because
+D2's obligation is retention and a companion that is not durable when the method returns is not
+retained. U3i must **measure** it rather than assume. The round loop enforces T2-derived deadlines
+on every executor call (`docs/shard-node.md` §4), so a per-block fsync inside `getPayload` and
+`newPayload` spends part of that budget. If the added latency turns out to be material against it,
+batching becomes its own unit with its own durability argument, rather than an unannounced weakening
+of this one. State the measured cost in the pull request, not an estimate.
+
 Required tests, at minimum:
 
 - a built payload's companion is retrievable by block hash after `getPayloadWithSealV1`;
@@ -217,7 +252,9 @@ Required tests, at minimum:
 - a rejected import leaves no entry;
 - a store failure on the write path does not change a `VALID` verdict;
 - the RPC reports **unavailable** with the horizon for a pruned block and **unknown** for a hash the
-  node never saw.
+  node never saw, **including when a horizon exists** — the case a pass-through implementation gets
+  wrong;
+- a hash above the horizon that the node never saw reports **unknown**, not **unavailable**.
 
 ## 5. Evidence this plan can produce
 
