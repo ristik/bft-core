@@ -115,12 +115,31 @@ the blocks it can be asked to re-serve. So:
   follower's `Verify` calls `newPayload`. The leader never imports the block it built.
 - **Canonicality decides retention, at prune time, not at write time.** A write is cheap and the
   block's fate is not yet known when it happens. Pruning removes an entry whose block hash is not
-  the canonical block at its number, once that number is deeper than the node's reorg window, and
-  removes any entry below the horizon.
+  the canonical block at its number, and removes any entry below the horizon.
 
 This is one pruning rule rather than a provisional/retained state machine, and it reaches the same
 end state. It means a node briefly holds companions for blocks that lost a reorg, which is correct:
 until the reorg resolves, either could be the one it is asked to serve.
+
+#### Three refinements from delivering U3i-c
+
+**The reorg bound is the finalized block, not a configured window.** An earlier draft said to evict
+"once that number is deeper than the node's reorg window", which invites a constant to pick and
+tune. `BlockIdReader::finalized_block_number()` already names the number below which the chain
+cannot reorg, so an entry is evicted only at or below it and nothing is invented.
+
+**Eviction and horizon pruning are separate operations.** Eviction drops an entry that is not
+canonical at its number; it runs on **every** node, including one retaining indefinitely, and it
+must never raise the horizon. Horizon pruning drops entries below the horizon and raises it, and
+runs only where a retention depth is configured. Conflating them would make a full node publish a
+horizon it never pruned to, claiming it had dropped history it still holds.
+
+**An unresolved lookup is not a mismatch.** A provider answering "I have no hash for that number" is
+saying it does not know, not that the number holds a different block, and a node that prunes headers
+or is mid-sync answers exactly that for a canonical block. Only an **affirmative** mismatch may
+evict. The asymmetry is what decides it: evicting wrongly is unrecoverable, while keeping an entry
+too long costs disk. An eviction pass therefore may not advance its cursor past the lowest number it
+could not resolve.
 
 ### 3.3 `unavailable` and `unknown` are different answers
 
@@ -202,8 +221,12 @@ Wiring, so the interesting failures are of reach, not of logic.
   terms, and D2 part 3 says an unproducible companion does not un-certify a block. The failure is
   logged and surfaced through the horizon, never through `PayloadStatus`.
 - Pruning runs under the policy of §3.2 against the node's canonical chain.
-- Configuration: one flag for the retention horizon, defaulting to **retain indefinitely**, which is
-  D2's full-node behaviour. A pruned node opts in.
+- Configuration: one flag for the retention **depth** — how many recent blocks to keep — defaulting
+  to **retain indefinitely**, which is D2's full-node behaviour. A pruned node opts in. The depth is
+  configuration; the **published horizon** is an absolute block number derived from it as
+  `tip - depth`, because that is what D2 publishes and what the read surface returns. An earlier
+  draft said "horizon" here, and U3i-a duly made the flag an absolute block number, which would
+  oblige an operator to reconfigure it every block to keep a fixed amount of history.
 - `unicity_getSealCompanionV1(blockHash)` and `unicity_sealCompanionHorizonV1()` on the standard RPC
   namespace, not the `engine` namespace: the consumers are proof export and an operator, not a
   consensus client over the JWT channel. The `engine_*WithSealV1` surface is unchanged, and so is
