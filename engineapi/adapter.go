@@ -9,6 +9,9 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
@@ -20,6 +23,11 @@ type Adapter struct {
 	engine *Client
 	eth    *EthClient
 	log    *slog.Logger
+
+	// verifier is the derivation context the seal build path authenticates a certificate against.
+	// Nil for an adapter that only runs the non-deriving checks (the doctor command); Build refuses
+	// rather than deriving against an invented context. See VerifierContext and F2c §3.
+	verifier *VerifierContext
 
 	mu      sync.Mutex
 	pending map[shardnode.BuildID]buildContext
@@ -37,16 +45,52 @@ type Config struct {
 	EngineURL string // authenticated engine_* endpoint, e.g. http://localhost:8551
 	EthURL    string // plain eth_* endpoint, e.g. http://localhost:8545
 	Secret    Secret
+
+	// Verifier is the derivation context Adapter.Build authenticates the authorizing certificate
+	// against. It is required to build through the seal siblings and is deliberately nil for an
+	// adapter that only runs the non-deriving checks: where the derivation context comes from is the
+	// node's own configuration, never the certificate, so Build refuses without it rather than
+	// inferring one (F2c §3).
+	Verifier *VerifierContext
+}
+
+// VerifierContext is the verifier-owned half of rootinput.Context: what this node is configured to
+// be, where its trust comes from, and the seal-registry cursor. It carries no per-round pin — Build
+// fills Round and the certified parent from RoundParams on every call. Every field comes from the
+// node's configuration or its own trust store, never from a certificate or a peer.
+type VerifierContext struct {
+	NetworkID     types.NetworkID
+	PartitionID   types.PartitionID
+	ShardID       types.ShardID
+	ShardConfHash []byte
+	TrustBases    rootinput.TrustBases
+	Cursor        SealRegistryCursor
 }
 
 func NewAdapter(cfg Config, log *slog.Logger) *Adapter {
-	return &Adapter{
-		engine:  NewClient(cfg.EngineURL, cfg.Secret),
-		eth:     NewEthClient(cfg.EthURL),
-		log:     log,
-		pending: make(map[shardnode.BuildID]buildContext),
+	a := &Adapter{
+		engine:   NewClient(cfg.EngineURL, cfg.Secret),
+		eth:      NewEthClient(cfg.EthURL),
+		log:      log,
+		verifier: cfg.Verifier,
+		pending:  make(map[shardnode.BuildID]buildContext),
 	}
+	// Once here, never per round: the cursor decision is a startup property, and repeating it every
+	// Build would turn one configuration fact into a stream of warnings. Only logged when a verifier
+	// context is present, so the doctor's non-deriving adapter stays quiet.
+	if a.verifier != nil {
+		if warning, ok := a.verifier.Cursor.startupWarning(); ok && log != nil {
+			log.Warn(warning)
+		}
+	}
+	return a
 }
+
+// RequireSealCapabilities makes the three engine_*WithSealV1 siblings part of the startup capability
+// check, so a deployment that builds through the seal siblings fails startup against a client that
+// lacks them instead of on the first round. See Client.RequireSealCapabilities for why this is
+// opt-in rather than the default.
+func (a *Adapter) RequireSealCapabilities() { a.engine.RequireSealCapabilities() }
 
 // CheckCapabilities is the startup check from
 // docs/adr/0001-executor-boundary.md decision 3: it refuses to start
@@ -243,6 +287,39 @@ func (a *Adapter) Commit(ctx context.Context, hash shardnode.Hash) (shardnode.St
 }
 
 func (a *Adapter) Build(ctx context.Context, p shardnode.RoundParams) (shardnode.BuildID, error) {
+	if a.verifier == nil {
+		return "", errors.New("engineapi: build requires a verifier context — NetworkID, PartitionID, ShardID, ShardConfHash and TrustBases come from this node's own configuration, never from the certificate (docs/design/f2c-root-input-wiring-contract.md §3)")
+	}
+	appliedRootRound, err := a.verifier.Cursor.appliedRootRound()
+	if err != nil {
+		return "", fmt.Errorf("engineapi: build: %w", err)
+	}
+
+	// Derive the canonical root input from the certificate and record that authorized this round.
+	// Every rootinput refusal is wrapped rather than replaced, so errors.Is still finds
+	// ErrWrongContext, ErrUnauthenticated, ErrNotPinned and the rest at the call site: F2c §8
+	// requires a caller to tell a misconfiguration from an attack, and one opaque error would not.
+	derived, err := rootinput.Derive(ctx, rootinput.Context{
+		NetworkID:     a.verifier.NetworkID,
+		PartitionID:   a.verifier.PartitionID,
+		ShardID:       a.verifier.ShardID,
+		ShardConfHash: a.verifier.ShardConfHash,
+		TrustBases:    a.verifier.TrustBases,
+
+		Round:                p.Round,
+		ParentHash:           p.Parent.Hash,
+		LastAppliedRootRound: appliedRootRound,
+
+		// False, and not a guess: rootinput.Derive independently refuses the epoch-handoff boundary
+		// (rootinput/rootinput.go), so false here means "none are pending" for the accepted
+		// single-epoch profile. The handoff case is caught by Derive itself rather than by an empty
+		// list standing in for "some are pending and could not be authenticated". See F2c §8.
+		TransitionsPending: false,
+	}, p.AuthorizingCertificate, p.AuthorizingTechnicalRecord)
+	if err != nil {
+		return "", fmt.Errorf("engineapi: deriving root input for round %d: %w", p.Round, err)
+	}
+
 	parentHash32, err := toData32(p.Parent.Hash)
 	if err != nil {
 		return "", fmt.Errorf("engineapi: build: %w", err)
@@ -257,17 +334,27 @@ func (a *Adapter) Build(ctx context.Context, p shardnode.RoundParams) (shardnode
 		return "", fmt.Errorf("engineapi: deriving payload attributes: %w", err)
 	}
 
+	// The V3 attributes stay v0-derived while extraData becomes v1. That mixed state is deliberate
+	// and is what F2c §3 orders: the build must route through the seal siblings BEFORE the
+	// derivation switch, because stock PayloadAttributesV3 carry no commitment to match and
+	// enforcing one first would halt the builder. W4 swaps DeriveAttributes for the v1 derivation
+	// and closes the gap. Do not "fix" this here.
+	sealAttrs := UnicityPayloadAttributes{
+		PayloadAttributesV3: attrs,
+		Commitment:          data32(derived.Commitment),
+	}
+
 	state := ForkchoiceStateV1{HeadBlockHash: parentHash32, SafeBlockHash: parentHash32, FinalizedBlockHash: parentHash32}
-	resp, err := a.engine.ForkchoiceUpdatedV3(ctx, state, &attrs)
+	resp, err := a.engine.ForkchoiceUpdatedWithSealV1(ctx, state, &sealAttrs, SealBuildInput{RootInput: derived.Encoded})
 	if err != nil {
-		return "", fmt.Errorf("engineapi: forkchoiceUpdated (build): %w", err)
+		return "", fmt.Errorf("engineapi: forkchoiceUpdatedWithSealV1 (build): %w", err)
 	}
 	if resp.PayloadStatus.Status != PayloadStatusValid {
-		return "", fmt.Errorf("engineapi: forkchoiceUpdated (build) on our own trusted head returned %s, not VALID: %v",
+		return "", fmt.Errorf("engineapi: forkchoiceUpdatedWithSealV1 (build) on our own trusted head returned %s, not VALID: %v",
 			resp.PayloadStatus.Status, errString(resp.PayloadStatus.ValidationError))
 	}
 	if resp.PayloadID == nil {
-		return "", errors.New("engineapi: forkchoiceUpdated accepted payloadAttributes but returned no payload id")
+		return "", errors.New("engineapi: forkchoiceUpdatedWithSealV1 accepted payloadAttributes but returned no payload id")
 	}
 
 	id := shardnode.BuildID(hex.EncodeToString(*resp.PayloadID))
@@ -294,9 +381,9 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 		return shardnode.Block{}, shardnode.ErrNotFound
 	}
 
-	resp, err := a.engine.GetPayloadV3(ctx, bc.payloadID)
+	resp, err := a.engine.GetPayloadWithSealV1(ctx, bc.payloadID)
 	if err != nil {
-		return shardnode.Block{}, fmt.Errorf("engineapi: getPayload: %w", err)
+		return shardnode.Block{}, fmt.Errorf("engineapi: getPayloadWithSealV1: %w", err)
 	}
 
 	if len(resp.ExecutionPayload.Transactions) == 0 {
@@ -328,7 +415,7 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 		}, nil
 	}
 
-	return EncodeBlock(resp.ExecutionPayload)
+	return EncodeBlockWithSealCompanion(resp.ExecutionPayload, &resp.SealCompanion)
 }
 
 // Verify is where C2.3's follower-side validation actually happens: cheap,

@@ -113,14 +113,26 @@ func (s SealBuildInput) MarshalJSON() ([]byte, error) {
 }
 
 // EncodeBlock wraps a sealed, non-quiet ExecutionPayloadV3 into a
-// shardnode.Block. Quiet rounds never reach this function — see adapter.go
-// Seal, which detects an empty transaction list itself and constructs the
-// quiet Block directly, the same way executortest.Fake does for its own
-// zero-entries case.
+// shardnode.Block with no dissemination companion. It is
+// EncodeBlockWithSealCompanion with a nil companion.
 func EncodeBlock(payload ExecutionPayloadV3) (shardnode.Block, error) {
+	return EncodeBlockWithSealCompanion(payload, nil)
+}
+
+// EncodeBlockWithSealCompanion is EncodeBlock with a seal companion attached
+// for dissemination. Quiet rounds never reach this function — see adapter.go
+// Seal, which detects an empty transaction list itself and constructs the quiet
+// Block directly, the same way executortest.Fake does for its own zero-entries
+// case.
+//
+// The companion is envelope-only metadata: BlockSize stays the canonical JSON
+// of the execution payload alone, never the envelope's, so attaching one cannot
+// move a value the root chain hashes into its quorum key.
+func EncodeBlockWithSealCompanion(payload ExecutionPayloadV3, companion *SealCompanion) (shardnode.Block, error) {
 	envelope := ProposalEnvelope{
 		ExecutionPayload:            payload,
 		ExpectedBlobVersionedHashes: []data32{},
+		SealCompanion:               companion,
 	}
 	raw, err := json.Marshal(envelope)
 	if err != nil {

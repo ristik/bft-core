@@ -65,7 +65,7 @@ func TestShardNodeRun_CertifiedRecordStoreFailsClosed(t *testing.T) {
 	bin := buildUbft(t)
 	home, shardConf, trustBase := shardHome(t, bin)
 	srv := engineFixture{
-		capabilities: []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3"},
+		capabilities: []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3", "engine_forkchoiceUpdatedWithSealV1", "engine_getPayloadWithSealV1", "engine_newPayloadWithSealV1"},
 		chainID:      "0x7a69",
 		genesisHash:  expectedGenesis,
 	}.start(t)

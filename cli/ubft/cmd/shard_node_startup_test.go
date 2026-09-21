@@ -241,7 +241,7 @@ func TestShardNodeRun_RefusesIncompatibleExecutionClient(t *testing.T) {
 	bin := buildUbft(t)
 	home, shardConf, trustBase := shardHome(t, bin)
 
-	all := []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3"}
+	all := []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3", "engine_forkchoiceUpdatedWithSealV1", "engine_getPayloadWithSealV1", "engine_newPayloadWithSealV1"}
 	without := func(drop string) []string {
 		var out []string
 		for _, c := range all {
@@ -319,7 +319,7 @@ func TestShardNodeRun_AcceptsACompatibleFixture(t *testing.T) {
 	home, shardConf, trustBase := shardHome(t, bin)
 
 	srv := engineFixture{
-		capabilities: []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3"},
+		capabilities: []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3", "engine_forkchoiceUpdatedWithSealV1", "engine_getPayloadWithSealV1", "engine_newPayloadWithSealV1"},
 		chainID:      "0x7a69",
 		genesisHash:  expectedGenesis,
 	}.start(t)
@@ -363,7 +363,7 @@ func TestShardNodeRun_RefusesAShardConfWithNoChainID(t *testing.T) {
 	require.Contains(t, string(raw), "proof_type", "premise: the partition params were written at all")
 
 	srv := engineFixture{
-		capabilities: []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3"},
+		capabilities: []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3", "engine_forkchoiceUpdatedWithSealV1", "engine_getPayloadWithSealV1", "engine_newPayloadWithSealV1"},
 		chainID:      "0x7a69",
 		genesisHash:  expectedGenesis,
 	}.start(t)
@@ -423,7 +423,7 @@ func TestShardNodeRun_GenesisBinding(t *testing.T) {
 	}
 	bin := buildUbft(t)
 	home, shardConf, trustBase := shardHome(t, bin)
-	all := []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3"}
+	all := []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3", "engine_forkchoiceUpdatedWithSealV1", "engine_getPayloadWithSealV1", "engine_newPayloadWithSealV1"}
 
 	t.Run("same chain id, different genesis is refused before voting", func(t *testing.T) {
 		srv := engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: otherGenesis}.start(t)
@@ -489,7 +489,7 @@ func TestShardNodeRun_EndpointPairing(t *testing.T) {
 	}
 	bin := buildUbft(t)
 	home, shardConf, trustBase := shardHome(t, bin)
-	all := []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3"}
+	all := []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3", "engine_forkchoiceUpdatedWithSealV1", "engine_getPayloadWithSealV1", "engine_newPayloadWithSealV1"}
 
 	// The plain RPC endpoint the operator intended: right chain, right genesis.
 	correct := engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: expectedGenesis}

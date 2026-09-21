@@ -23,7 +23,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	"github.com/unicitynetwork/bft-core/shardnode"
@@ -287,40 +286,6 @@ func TestWiring_CompanionEvidenceIsReVerifiedNotTrusted(t *testing.T) {
 			}
 		}
 	})
-}
-
-// 5. extraData is checkable on a payload, and absent from the attributes that would produce one.
-func TestWiring_ExtraDataIsCheckableButNotProvisionable(t *testing.T) {
-	f := newFixture(t)
-	uc, tr := f.successful(t)
-	res, err := Derive(context.Background(), f.context(), uc, tr)
-	require.NoError(t, err)
-
-	// The import-side check, as a pure comparison: a payload carrying the commitment passes, one
-	// carrying anything else does not.
-	payload := engineapi.ExecutionPayloadV3{ExtraData: res.Commitment[:]}
-	require.True(t, bytes.Equal(payload.ExtraData, res.Commitment[:]))
-
-	other := engineapi.ExecutionPayloadV3{ExtraData: bytes.Repeat([]byte{0x00}, 32)}
-	require.False(t, bytes.Equal(other.ExtraData, res.Commitment[:]), "a mismatching commitment is detectable")
-
-	// A payload built through the stock attributes carries NOTHING to compare: PayloadAttributesV3
-	// has no extraData field, so a builder using the standard Engine API cannot ask for the
-	// commitment to be written. Enforcing the check without the execution-side provision mechanism
-	// therefore halts the builder rather than protecting it (§5 of the contract).
-	empty := engineapi.ExecutionPayloadV3{}
-	require.Empty(t, empty.ExtraData)
-	require.False(t, bytes.Equal(empty.ExtraData, res.Commitment[:]))
-
-	// If a later Engine API revision adds the field, this assertion is what should fail, so the
-	// contract's central dependency is re-examined rather than silently satisfied.
-	var names []string
-	rt := reflect.TypeOf(engineapi.PayloadAttributesV3{})
-	for i := 0; i < rt.NumField(); i++ {
-		names = append(names, rt.Field(i).Name)
-	}
-	require.NotContains(t, names, "ExtraData",
-		"PayloadAttributesV3 must still have no extraData field, or §5's dependency has changed")
 }
 
 // 6. Each refusal still arrives as itself, so a call site cannot collapse them.
