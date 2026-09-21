@@ -69,8 +69,9 @@ into three kinds:
   baseline checks` (ureth #9). The entire diff is comment rewrapping to the nightly width, one
   redundant `clone()` in `crates/trie/sparse/src/arena/mod.rs`, and one rustdoc link in
   `crates/net/network/src/config.rs`. None of it mentions Unicity.
-- **CI configuration**: `.github/workflows/lint.yml`, from the toolchain pinning and the
-  wasm/riscv removal in ureth #11/#13/#17.
+- **CI configuration**: `.github/workflows/lint.yml`, whose complete history since the fork point
+  is four commits: the wasm and RISC-V target removals and the toolchain pin from ureth #9, and the
+  `deny` reusable-workflow pin from ureth #13.
 - **Manifests and one build exclusion**, which exist to make the Unicity crates visible at all:
   three workspace member lines and two local dependency entries in `Cargo.toml`, the matching
   `Cargo.lock` entries, and one line in `.github/scripts/check_wasm.sh`.
@@ -82,9 +83,12 @@ crate: `reth-unicity-payload` is excluded from the wasm check because it wraps t
 transaction pool. A build exclusion is not behaviour, so the claim holds; but it is the one upstream
 edit an F3 feature unit made, and it should be visible rather than absorbed into a list of repairs.
 
-It is also now dead. ureth #13 removed the wasm job, and nothing under `.github/` references
-`check_wasm.sh` any more, so both the script and its Unicity exclusion are unreachable. Removing
-them is not this plan's business, but a later fork-delta cleanup should.
+It is also now dead, and by a sharper route than it first appears. The exclusion was added by
+ureth #8 and rendered unreachable by `ad1b4b76f ci: drop the wasm target` in ureth #9 — the very
+next CI pull request, and the same one that made the twelve lint-baseline repairs. It was
+load-bearing for exactly one pull request. Nothing under `.github/` references `check_wasm.sh` any
+more, so both the script and its Unicity exclusion are dead. Removing them is not this plan's
+business, but a later fork-delta cleanup should.
 
 The store is therefore a **separate MDBX environment** under the datadir, opened and owned by a new
 `crates/unicity/store` crate. `reth-libmdbx` is already a workspace dependency, and `tables!` is
