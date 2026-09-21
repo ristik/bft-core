@@ -30,6 +30,51 @@ import (
 type ProposalEnvelope struct {
 	ExecutionPayload            ExecutionPayloadV3 `json:"executionPayload"`
 	ExpectedBlobVersionedHashes []data32           `json:"expectedBlobVersionedHashes"`
+
+	// SealCompanion is D2 §2's envelope-only dissemination metadata: the root
+	// input, its authentication witnesses, and a provenance label. It is a
+	// pointer with omitempty so an envelope without one encodes to exactly the
+	// JSON this type produced before the field existed. W1 carries the field;
+	// W2 populates it and W3 consumes it. It is deliberately outside
+	// BlockSize, which EncodeBlock computes from ExecutionPayload alone,
+	// because the companion is dissemination metadata, not block content.
+	SealCompanion *SealCompanion `json:"sealCompanion,omitempty"`
+}
+
+// SealCompanion is what ureth's
+// reth_unicity_execution::wire::SealCompanion deserializes. The wire contract
+// is exact: the keys are rootInput, witnesses and provenance; rootInput and
+// each witness are 0x-prefixed hex DATA strings; and ureth declares
+// deny_unknown_fields, so a fourth key is a hard decode error rather than
+// something ignored. TestSealCompanionVector pins the exact bytes.
+//
+// Provenance carries D2's "build" | "newPayload" | "devp2p" | "reexec"
+// label. It is not a commitment field, so the set is documented but not
+// enforced here, matching the ureth side.
+type SealCompanion struct {
+	RootInput  data   `json:"rootInput"`
+	Witnesses  []data `json:"witnesses"`
+	Provenance string `json:"provenance"`
+}
+
+// MarshalJSON normalizes a nil witness slice to an empty array. A nil Go slice
+// marshals to JSON null, and ureth's Vec<Bytes> will not accept null, so an
+// empty witness list has to be [] instead. See Client.NewPayloadV3 for the
+// same normalization of expectedBlobVersionedHashes, and the same bug.
+func (c SealCompanion) MarshalJSON() ([]byte, error) {
+	witnesses := c.Witnesses
+	if witnesses == nil {
+		witnesses = []data{}
+	}
+	return json.Marshal(struct {
+		RootInput  data   `json:"rootInput"`
+		Witnesses  []data `json:"witnesses"`
+		Provenance string `json:"provenance"`
+	}{
+		RootInput:  c.RootInput,
+		Witnesses:  witnesses,
+		Provenance: c.Provenance,
+	})
 }
 
 // EncodeBlock wraps a sealed, non-quiet ExecutionPayloadV3 into a
