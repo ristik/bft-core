@@ -183,6 +183,33 @@ func (c *Client) GetPayloadV3(ctx context.Context, payloadID data) (GetPayloadV3
 	return resp, err
 }
 
+// ForkchoiceUpdatedWithSealV1 is engine_forkchoiceUpdatedWithSealV1, the
+// build-path seal sibling of ForkchoiceUpdatedV3. Parameter order matches that
+// method — forkchoice state, payload attributes, then the seal build input —
+// because these are siblings of the same call, not a new style.
+//
+// payloadAttributes is required by D2: a seal build input without attributes
+// describes nothing. The pointer is kept so callers handle this and
+// ForkchoiceUpdatedV3 the same way, but nil is refused here rather than sent as
+// JSON null and rejected with a far-side decoding error.
+func (c *Client) ForkchoiceUpdatedWithSealV1(ctx context.Context, state ForkchoiceStateV1, attrs *UnicityPayloadAttributes, sealBuildInput SealBuildInput) (ForkchoiceUpdatedResponse, error) {
+	if attrs == nil {
+		return ForkchoiceUpdatedResponse{}, fmt.Errorf("engineapi: engine_forkchoiceUpdatedWithSealV1 requires payload attributes — a seal build input without attributes describes nothing (D2 §2)")
+	}
+	var resp ForkchoiceUpdatedResponse
+	err := c.call(ctx, "engine_forkchoiceUpdatedWithSealV1", []any{state, attrs, sealBuildInput}, &resp)
+	return resp, err
+}
+
+// GetPayloadWithSealV1 is engine_getPayloadWithSealV1, the build-path seal
+// sibling of GetPayloadV3. It returns the built payload, its block value and the
+// companion the leader disseminates alongside it.
+func (c *Client) GetPayloadWithSealV1(ctx context.Context, payloadID data) (GetPayloadWithSealV1Response, error) {
+	var resp GetPayloadWithSealV1Response
+	err := c.call(ctx, "engine_getPayloadWithSealV1", []any{payloadID}, &resp)
+	return resp, err
+}
+
 // NewPayloadV3 takes all three parameters the spec requires — see
 // codec.go's ProposalEnvelope doc comment for why
 // expectedBlobVersionedHashes is always empty here and why
