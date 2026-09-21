@@ -9,6 +9,10 @@ package shardnode
 import (
 	"context"
 	"errors"
+
+	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 )
 
 // Hash is a raw digest — a state root, a block hash, a UC hash. Length is
@@ -46,6 +50,31 @@ type RoundParams struct {
 
 	Leader string // TechnicalRecord.Leader — the shard node ID building this round
 	Parent BlockRef
+
+	// AuthorizingCertificate is the certificate that authorizes this round: the
+	// one whose bound technical record names this round, whose InputRecord.Hash
+	// is the last certified state. Round, Epoch and Timestamp above are
+	// scalars extracted from this same certificate and its record; it is
+	// carried whole so an executor can authenticate a certificate rather than
+	// trust the framework's summary of one.
+	//
+	// It is a pinned input, not a value to trust. A consumer must authenticate
+	// it against its own configured trust base, partition, shard and
+	// configuration hash before deriving anything from it, exactly as
+	// rootinput.Derive does, and it must infer nothing from the executor's own
+	// state: the executor's head is not a substitute for the certified parent,
+	// and the highest root round this node has observed is not a substitute for
+	// its committed cursor. See
+	// docs/design/f2c-root-input-wiring-contract.md §3 and §3.1 for the contract
+	// under which it is consumed. Nothing consumes it yet — W2b builds on it.
+	AuthorizingCertificate *types.UnicityCertificate
+
+	// AuthorizingTechnicalRecord is the technical record the authorizing
+	// certificate commits to by hash (AuthorizingCertificate.TRHash). The two
+	// travel together because the certificate carries only that hash, and
+	// reconstructing the record is not possible from it. Like the certificate,
+	// it is a pinned input a consumer must authenticate, never a value to trust.
+	AuthorizingTechnicalRecord *certification.TechnicalRecord
 }
 
 // BuildID identifies an in-progress block construction, valid only between

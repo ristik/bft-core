@@ -725,7 +725,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return nil
 	}
 
-	block, params, err := r.produceBlock(ctx, head, exp, sealHash, leader, uc, readinessTicket)
+	block, params, err := r.produceBlock(ctx, head, exp, sealHash, leader, uc, tr, readinessTicket)
 	if err != nil {
 		if errors.Is(err, errReadinessRevoked) {
 			r.recordReadinessRevoked(ctx, err)
@@ -1476,7 +1476,7 @@ func (r *Round) verifyWithRetry(ctx context.Context, block Block, params RoundPa
 // produceBlock only obtains it. The readiness ticket is threaded through
 // explicitly rather than kept on the Round so it lives for one round only
 // and cannot be reused by a later one.
-func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation, sealHash Hash, leader string, held *types.UnicityCertificate, ticket ReadinessTicket) (Block, RoundParams, error) {
+func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation, sealHash Hash, leader string, held *types.UnicityCertificate, heldRecord *certification.TechnicalRecord, ticket ReadinessTicket) (Block, RoundParams, error) {
 	params := RoundParams{
 		Round:     exp.Round,
 		Epoch:     exp.Epoch,
@@ -1484,6 +1484,15 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		SealHash:  sealHash,
 		Leader:    leader,
 		Parent:    head,
+
+		// The certificate and record that authorized this round, carried whole
+		// rather than as the scalars above. held is the certificate being
+		// handled now — the one whose bound record names this round — not a
+		// cached or last-held value, and heldRecord is its preimage for
+		// uc.TRHash. The same route the certificate already takes, no extra
+		// lifetime: both live for this one produceBlock call.
+		AuthorizingCertificate:     held,
+		AuthorizingTechnicalRecord: heldRecord,
 	}
 
 	if leader == r.nodeID {
