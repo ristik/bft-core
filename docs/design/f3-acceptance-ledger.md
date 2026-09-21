@@ -167,3 +167,46 @@ deployment and is M1's under #41.
 One non-test change was disclosed with #21: `reth-evm` and `reth-evm-ethereum` gained the `std`
 feature in `crates/unicity/execution/Cargo.toml` so the crate compiles standalone. Combined builds
 already enabled it through feature unification, so no behaviour changed.
+
+## 7. Addendum: companion retention, delivered
+
+Added after `f3b-companion-retention.md` completed. Base moves to `ristik/ureth` `unicity/main` at
+the #29 merge.
+
+**§2.2's second half is now met.** When this ledger was written, companion persistence and transport
+had "no delivery at all" and was the only work-breakdown line of #11 in that state. The retention
+half is delivered in four units:
+
+| Unit | Delivered as | Scope |
+| --- | --- | --- |
+| U3h | [ureth #22](https://github.com/ristik/ureth/pull/22) | `crates/unicity/store`: a durable, block-hash-keyed companion store, three-outcome lookup, monotonic horizon, pruning |
+| U3i-a | [ureth #24](https://github.com/ristik/ureth/pull/24) | the node owns the store and writes it on both seal paths, `VALID`-only on import |
+| U3i-b | [ureth #28](https://github.com/ristik/ureth/pull/28) | `unicity_getSealCompanionV1` and `unicity_sealCompanionHorizonV1`, refined against the canonical chain |
+| U3i-c | [ureth #29](https://github.com/ristik/ureth/pull/29) | pruning: non-canonical eviction bounded by the finalized block, and horizon pruning to a configured depth |
+
+Plan and its corrections: bft-core #207, #208, #209, #210.
+
+**What that does and does not close.** D2 §"Companion retention on sync" has three parts. Parts 1 and
+2 — a full node retains every companion it certified, a pruned node publishes a horizon and serves
+`unavailable` past it — are implemented and tested. Part 3 is a consequence rather than an
+obligation, and is honoured by the store failing without changing any RPC verdict.
+
+**Transport is still not delivered**, and §2.2's first half therefore remains open. Nothing carries a
+companion between nodes: D2 gives `ProposalEnvelope` a `sealCompanion` field, which bft-core does not
+have, and historical fetch belongs to F7's archival service (#15), which is blocked on F6. Adding the
+field now would be inert, because bft-core does not call the seal methods at all.
+
+**§3.2 is unchanged.** Its *obtain* half needs that transport plus the devp2p import entry point
+(U3j, unscoped); its *verify* half is the shard node's, not the execution client's.
+
+**Evidence class: API, not Wired.** Using `f2-execution-prerequisites.md` §0 — the ledger does not
+define these classes and an earlier draft of the plan wrongly credited them here. Nothing calls the
+retention path in a running shard round, because bft-core does not call the seal methods. It becomes
+Wired when #10 activates them.
+
+**One disclosed reach gap**: the pruning task's wiring — that it is spawned, subscribes to the
+canonical-state stream and calls `prune_once` — has no test. `prune_once` itself is covered. The mock
+provider implements no `CanonStateSubscriptions`.
+
+**§4's conclusion still stands.** #11 cannot close: transport, the devp2p obtain half, real-reth runs,
+synchronisation and #10's activation all remain.
