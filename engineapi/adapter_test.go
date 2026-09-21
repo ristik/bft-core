@@ -427,3 +427,71 @@ func TestAdapter_Verify_MapsNewPayloadStatuses(t *testing.T) {
 		})
 	}
 }
+
+// The D2 seal siblings are required only when a deployment selects the seal path. These four cases
+// fix that boundary, because the interesting failure is the one where the requirement becomes
+// unconditional by accident: that would fail startup against every stock client, for a path this
+// adapter does not yet drive.
+
+func TestAdapter_SealCapabilities_AreNotRequiredByDefault(t *testing.T) {
+	engine := newMockReth(t, Secret{})
+	engine.on("engine_exchangeCapabilities", func(json.RawMessage) (any, *rpcError) {
+		return requiredCapabilities, nil // a stock client, no seal siblings
+	})
+	eth := newMockReth(t, Secret{})
+	a, closeFn := newTestAdapter(t, engine, eth)
+	defer closeFn()
+
+	require.NoError(t, a.CheckCapabilities(context.Background()),
+		"a stock client must still start: the seal path is not activated by this change")
+}
+
+func TestAdapter_SealCapabilities_FailClosed_WhenSelectedAndAbsent(t *testing.T) {
+	engine := newMockReth(t, Secret{})
+	engine.on("engine_exchangeCapabilities", func(json.RawMessage) (any, *rpcError) {
+		return requiredCapabilities, nil
+	})
+	eth := newMockReth(t, Secret{})
+	a, closeFn := newTestAdapter(t, engine, eth)
+	defer closeFn()
+	a.engine.RequireSealCapabilities()
+
+	err := a.CheckCapabilities(context.Background())
+	require.Error(t, err)
+	for _, m := range sealCapabilities {
+		require.Contains(t, err.Error(), m, "every absent seal sibling is named")
+	}
+}
+
+func TestAdapter_SealCapabilities_PassWhenSelectedAndOffered(t *testing.T) {
+	engine := newMockReth(t, Secret{})
+	engine.on("engine_exchangeCapabilities", func(json.RawMessage) (any, *rpcError) {
+		return append(append([]string{}, requiredCapabilities...), sealCapabilities...), nil
+	})
+	eth := newMockReth(t, Secret{})
+	a, closeFn := newTestAdapter(t, engine, eth)
+	defer closeFn()
+	a.engine.RequireSealCapabilities()
+
+	require.NoError(t, a.CheckCapabilities(context.Background()))
+}
+
+func TestAdapter_SealCapabilities_APartialSetIsMissing(t *testing.T) {
+	// A client offering some of the three advertises a flow it cannot complete. ureth makes the
+	// set atomic, so this is a client that should not exist; the check refuses it anyway rather
+	// than trusting the other side to be well formed.
+	partial := append(append([]string{}, requiredCapabilities...), sealCapabilities[0])
+	engine := newMockReth(t, Secret{})
+	engine.on("engine_exchangeCapabilities", func(json.RawMessage) (any, *rpcError) {
+		return partial, nil
+	})
+	eth := newMockReth(t, Secret{})
+	a, closeFn := newTestAdapter(t, engine, eth)
+	defer closeFn()
+	a.engine.RequireSealCapabilities()
+
+	err := a.CheckCapabilities(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), sealCapabilities[1])
+	require.NotContains(t, err.Error(), sealCapabilities[0], "the offered one is not reported missing")
+}
