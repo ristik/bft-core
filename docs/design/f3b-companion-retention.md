@@ -61,12 +61,30 @@ bounded kernel and the node wiring live entirely under `crates/unicity`. That is
 companion table in `reth-db`'s `tables!` registry would break, and it would additionally put fork
 data inside the environment reth's own consistency checks and migrations manage.
 
-The narrower wording matters, because upstream files *have* been edited. `ureth`'s `UNICITY.md`
-inventory records them: twelve upstream Rust files plus `.github/workflows/lint.yml` and
-`.github/scripts/check_wasm.sh`, from `2315f0e3a fix(ci): repair baseline checks` (ureth #9, branch
-`f3/ci-readiness`) and the toolchain pinning in ureth #11/#13/#17. Those are lint-baseline and CI
-repairs, not behaviour. An earlier draft of this section claimed no upstream file had been edited at
-all, which contradicts the repository's own inventory.
+The narrower wording matters, because upstream files *have* been edited. An earlier draft of this
+section claimed none had, which contradicts the repository's own `UNICITY.md` inventory. They fall
+into three kinds:
+
+- **Lint-baseline repairs**: twelve upstream Rust files, all from `2315f0e3a fix(ci): repair
+  baseline checks` (ureth #9). The entire diff is comment rewrapping to the nightly width, one
+  redundant `clone()` in `crates/trie/sparse/src/arena/mod.rs`, and one rustdoc link in
+  `crates/net/network/src/config.rs`. None of it mentions Unicity.
+- **CI configuration**: `.github/workflows/lint.yml`, from the toolchain pinning and the
+  wasm/riscv removal in ureth #11/#13/#17.
+- **Manifests and one build exclusion**, which exist to make the Unicity crates visible at all:
+  three workspace member lines and two local dependency entries in `Cargo.toml`, the matching
+  `Cargo.lock` entries, and one line in `.github/scripts/check_wasm.sh`.
+
+That last line deserves naming rather than filing under "CI repair", because it is the closest thing
+to a counterexample to the claim above. It came from `72444b39e` (ureth #8, branch
+`f3/payload-execution`) — a **feature** unit, not a CI one — and the line it adds names a Unicity
+crate: `reth-unicity-payload` is excluded from the wasm check because it wraps the native
+transaction pool. A build exclusion is not behaviour, so the claim holds; but it is the one upstream
+edit an F3 feature unit made, and it should be visible rather than absorbed into a list of repairs.
+
+It is also now dead. ureth #13 removed the wasm job, and nothing under `.github/` references
+`check_wasm.sh` any more, so both the script and its Unicity exclusion are unreachable. Removing
+them is not this plan's business, but a later fork-delta cleanup should.
 
 The store is therefore a **separate MDBX environment** under the datadir, opened and owned by a new
 `crates/unicity/store` crate. `reth-libmdbx` is already a workspace dependency, and `tables!` is
