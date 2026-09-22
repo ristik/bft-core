@@ -77,12 +77,15 @@ func TestDomainHash_UsesBothCounters(t *testing.T) {
 	}
 }
 
-func TestDomainHash_V1DiffersFromV0Prototype(t *testing.T) {
-	u := rep(0xA1, 32)
+// TestDomainHash_V1DiffersFromFrozenV0Vector compares the live v1 derivation against the frozen v0
+// literal, not against live v0 code: F2c §9 forbids a second live derivation path, and f2d §5.1
+// keeps v0 only as a vector. The literal is the v0 value for (u = 0xA1 x 32, n = 57), committed in
+// evmroot/testdata/vectors.json.
+func TestDomainHash_V1DiffersFromFrozenV0Vector(t *testing.T) {
+	const frozenV0PrevRandao = "2018a2745093159b35b61449c4adaf7b4079c4a2b985e26cffb71c017163aefb"
 	v1 := DerivePrevRandao(104, 57)
-	v0 := prototypeDomainHash(prototypeDomainPrevRandao, u, 57)
-	if v1 == v0 {
-		t.Fatal("v1 and v0 prevRandao derivations must not coincide — D1 is a versioned change")
+	if hx32(v1) == frozenV0PrevRandao {
+		t.Fatal("v1 and the frozen v0 prevRandao derivations must not coincide — D1 is a versioned change")
 	}
 }
 
