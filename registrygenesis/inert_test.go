@@ -15,9 +15,10 @@ import (
 const importPath = "github.com/unicitynetwork/bft-core/registrygenesis"
 
 // TestNoProductionPackageImportsTheGenerator is the inertness guard for the CHECKED origin: only the
-// inactive v2 derivation API may consume a checked GenesisOrigin, and no node generates or checks a
-// registry genesis yet. The CLI genesis command is an allowed generator (U5a): it produces the
-// finalized artifact an operator provisions, but nothing consumes a checked origin from it.
+// inactive v2 derivation API consumes a checked GenesisOrigin. The CLI genesis command is an allowed
+// generator (U5a): it produces the finalized artifact an operator provisions. The shard node is the one
+// place that configures a checked origin (U5b) — it validates the finalized artifact against its own full
+// shard configuration and holds the origin for the v2 derivation, but no derivation reads it yet.
 func TestNoProductionPackageImportsTheGenerator(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
@@ -64,6 +65,6 @@ func TestNoProductionPackageImportsTheGenerator(t *testing.T) {
 	for _, want := range []string{"cli/ubft/cmd/engine_api_genesis.go", "cli/ubft/cmd/shard_node_run.go", "shardnode/round.go", "engineapi/adapter.go"} {
 		require.True(t, scanned[want], "expected to scan %s", want)
 	}
-	require.Equal(t, []string{filepath.Join("cli", "ubft", "cmd", "engine_api_genesis.go"), filepath.Join("configuredadmission", "adapter.go"), filepath.Join("configuredprogress", "codec.go"), filepath.Join("configuredprogress", "store.go"), filepath.Join("rootinput", "v2.go")}, importers,
-		"only the genesis command and the inactive v2 derivation API may import %s", importPath)
+	require.Equal(t, []string{filepath.Join("cli", "ubft", "cmd", "engine_api_genesis.go"), filepath.Join("cli", "ubft", "cmd", "shard_node_run.go"), filepath.Join("configuredadmission", "adapter.go"), filepath.Join("configuredprogress", "codec.go"), filepath.Join("configuredprogress", "store.go"), filepath.Join("engineapi", "adapter.go"), filepath.Join("rootinput", "v2.go")}, importers,
+		"only the genesis command, the shard node's configured origin and the inactive v2 derivation API may import %s", importPath)
 }

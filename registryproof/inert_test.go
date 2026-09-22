@@ -71,11 +71,13 @@ func TestNoProductionPackageImportsTheReader(t *testing.T) {
 	}
 	require.Equal(t, []string{
 		filepath.Join("cli", "ubft", "cmd", "engine_api_genesis.go"),
+		filepath.Join("cli", "ubft", "cmd", "shard_node_run.go"),
 		filepath.Join("configuredprogress", "codec.go"),
 		filepath.Join("configuredprogress", "hash_index.go"),
+		filepath.Join("engineapi", "adapter.go"),
 		filepath.Join("parentwitness", "provider.go"),
 		filepath.Join("parentwitness", "verify.go"),
 		filepath.Join("parentwitness", "wire.go"),
 		filepath.Join("rootinput", "v2.go"),
-	}, importers, "only reviewed inactive proof consumers may import %s", importPath)
+	}, importers, "only reviewed inactive proof consumers, the genesis command and the node's configured bootstrap snapshot may import %s", importPath)
 }

@@ -1,0 +1,135 @@
+package cmd
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
+	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/util"
+
+	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
+	"github.com/unicitynetwork/bft-core/registrygenesis"
+	"github.com/unicitynetwork/bft-core/registryproof"
+)
+
+// preparedGenesisFixture builds the two artifacts `ubft engine-api genesis` emits for a test shard
+// conf: the finalized genesis JSON and the full shard configuration. The full configuration is
+// returned as a value and written to a file, because both the loader test and the origin test need it.
+func preparedGenesisFixture(t *testing.T, chainID uint64) (*types.PartitionDescriptionRecord, string, string) {
+	t.Helper()
+	base := certifiedchain.Config(3)
+	base.PartitionParams = map[string]string{registrygenesis.ChainIDParam: strconv.FormatUint(chainID, 10)}
+	art, err := registrygenesis.PinnedArtifact()
+	require.NoError(t, err)
+	pins := registrygenesis.Pins{
+		RootEpoch: 1, RegistryCodeHash: art.CodeHash,
+		SystemAddress: registrygenesis.SystemAddress, RegistryAddress: registryproof.RegistryAddress,
+	}
+	prepared, err := registrygenesis.PrepareGenesisJSON(base, pins, art, sourceGenesisJSON(t, chainID), registrygenesis.DefaultGenesisJSONLimits())
+	require.NoError(t, err)
+	full, err := prepared.FullConfig()
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	genesisPath := filepath.Join(dir, "genesis.json")
+	require.NoError(t, os.WriteFile(genesisPath, prepared.GenesisJSON(), 0600))
+	fullPath := filepath.Join(dir, "full-shard-conf.json")
+	require.NoError(t, util.WriteJsonFile(fullPath, full))
+	return full, genesisPath, fullPath
+}
+
+// sourceGenesisJSON is a minimal standard genesis template with no allocation at the reserved
+// addresses, which is what PrepareGenesisJSON accepts.
+func sourceGenesisJSON(t *testing.T, chainID uint64) []byte {
+	t.Helper()
+	doc := map[string]any{
+		"config": map[string]any{
+			"chainId":        chainID,
+			"homesteadBlock": 0, "eip150Block": 0, "eip155Block": 0, "eip158Block": 0,
+			"byzantiumBlock": 0, "constantinopleBlock": 0, "petersburgBlock": 0,
+			"istanbulBlock": 0, "berlinBlock": 0, "londonBlock": 0, "mergeNetsplitBlock": 0,
+			"shanghaiTime": 0, "cancunTime": 0,
+			"terminalTotalDifficulty": 0, "terminalTotalDifficultyPassed": true,
+		},
+		"nonce": "0x0", "timestamp": "0x0", "extraData": "0x",
+		"gasLimit": "0x1c9c380", "difficulty": "0x0",
+		"mixHash": common.Hash{}.Hex(), "coinbase": common.Address{}.Hex(),
+		"alloc": map[string]any{}, "baseFeePerGas": "0x3b9aca00",
+	}
+	raw, err := json.Marshal(doc)
+	require.NoError(t, err)
+	return raw
+}
+
+// TestLoadGenesisOrigin_ValidatesAndBuildsTheBootstrapSnapshot is the unit's core assertion: the
+// finalized artifact and the full shard configuration produce a checked origin, and the origin's own
+// evidence verifies as its block-0 snapshot with no RPC.
+func TestLoadGenesisOrigin_ValidatesAndBuildsTheBootstrapSnapshot(t *testing.T) {
+	full, genesisPath, _ := preparedGenesisFixture(t, 1337)
+
+	origin, bootstrap, err := loadGenesisOrigin(full, genesisPath, "", 1)
+	require.NoError(t, err)
+	require.True(t, origin.Valid())
+	require.True(t, bootstrap.Valid())
+	require.True(t, bootstrap.Genesis(), "the bootstrap snapshot must be block 0")
+	require.EqualValues(t, 0, bootstrap.Number())
+	require.Equal(t, origin.StateRoot(), bootstrap.StateRoot())
+	require.Equal(t, origin.BlockHash(), bootstrap.ParentHash())
+	t.Logf("origin identity=%s blockHash=%s stateRoot=%s; bootstrap valid=%t genesis=%t number=%d stateRoot=%s parentHash=%s",
+		origin.Identity(), origin.BlockHash(), origin.StateRoot(),
+		bootstrap.Valid(), bootstrap.Genesis(), bootstrap.Number(), bootstrap.StateRoot(), bootstrap.ParentHash())
+}
+
+// TestLoadGenesisOrigin_Refusals pins the three startup refusals the node can make here: a finalized
+// artifact for another deployment, an expected identity that does not match, and a root epoch that
+// does not reproduce the configuration's commitment.
+func TestLoadGenesisOrigin_Refusals(t *testing.T) {
+	full, genesisPath, _ := preparedGenesisFixture(t, 1337)
+
+	t.Run("finalized artifact for another chain id", func(t *testing.T) {
+		_, otherGenesis, _ := preparedGenesisFixture(t, 4242)
+		_, _, err := loadGenesisOrigin(full, otherGenesis, "", 1)
+		require.ErrorIs(t, err, registrygenesis.ErrChainIDMismatch)
+	})
+
+	t.Run("expected identity mismatch", func(t *testing.T) {
+		_, _, err := loadGenesisOrigin(full, genesisPath, common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111").Hex(), 1)
+		require.ErrorIs(t, err, registrygenesis.ErrOriginIdentity)
+	})
+
+	t.Run("root epoch does not reproduce the commitment", func(t *testing.T) {
+		_, _, err := loadGenesisOrigin(full, genesisPath, "", 2)
+		require.Error(t, err)
+	})
+
+	t.Run("malformed finalized artifact", func(t *testing.T) {
+		bad := filepath.Join(t.TempDir(), "bad.json")
+		require.NoError(t, os.WriteFile(bad, []byte("{}"), 0600))
+		_, _, err := loadGenesisOrigin(full, bad, "", 1)
+		require.ErrorIs(t, err, registrygenesis.ErrGenesisJSON)
+	})
+}
+
+// TestLoadRunShardConf pins the input rules: the two artifacts are required together, and the full
+// configuration is the node's one shard-configuration source.
+func TestLoadRunShardConf(t *testing.T) {
+	_, _, fullPath := preparedGenesisFixture(t, 1337)
+	base := &baseFlags{}
+	noFlag := func(string) bool { return false }
+
+	_, err := loadRunShardConf(&shardNodeRunFlags{baseFlags: base, GenesisFile: "genesis.json"}, noFlag)
+	require.ErrorContains(t, err, "--full-shard-conf")
+
+	_, err = loadRunShardConf(&shardNodeRunFlags{baseFlags: base, GenesisFile: "genesis.json", FullShardConf: fullPath},
+		func(name string) bool { return name == "shard-conf" })
+	require.ErrorContains(t, err, "--shard-conf")
+
+	conf, err := loadRunShardConf(&shardNodeRunFlags{baseFlags: base, FullShardConf: fullPath}, noFlag)
+	require.NoError(t, err)
+	require.Contains(t, conf.PartitionParams, registrygenesis.GenesisParam, "the node runs on the full configuration")
+}
