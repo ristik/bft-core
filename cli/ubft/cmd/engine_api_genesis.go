@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/unicitynetwork/bft-go-base/util"
 
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
@@ -27,6 +30,10 @@ type engineAPIGenesisFlags struct {
 	GasLimit  uint64
 	Coinbase  string
 	ExtraData string
+
+	// FullShardConf is where the full shard configuration (the base configuration plus
+	// seal_registry_genesis) is written. Empty selects the default beside --out.
+	FullShardConf string
 
 	// AllocSource is an operator-supplied standard genesis JSON used as the source instead of the
 	// built-in template. It is mutually exclusive with the template-shaping flags below, because a
@@ -63,10 +70,16 @@ requiring engine_newPayloadV4+ this adapter does not implement.
 
 The output is the FINALIZED genesis: registrygenesis.PrepareGenesisJSON inserts the pinned
 SealRegistry account at a_sr (its runtime code and the 22 initialized storage words) into the
-source allocation and derives the full shard configuration and genesis origin from it. The
-derived identities are printed so an operator can compare them; they are deliberately not
-written beside the artifact, because a second trusted file would be a second source of truth
-and the origin is re-derivable from the finalized JSON.`,
+source allocation and derives the full shard configuration and genesis origin from it.
+
+Two artifacts are written. --out is the finalized standard JSON the execution client is started
+from. --full-shard-conf (default: beside --out) is the full shard configuration — the base conf
+plus seal_registry_genesis — whose hash is the fullShardConfHash an observation's ShardConfHash
+must equal; a node handed only the base conf can never satisfy that check.
+
+The derived identities are printed so an operator can compare them; they are deliberately not
+written beside the artifacts, because a second trusted file of derived metadata would be a second
+source of truth and the origin is re-derivable from the finalized JSON.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return engineAPIGenesis(flags, cmd.Flags().Changed, cmd.OutOrStdout())
 		},
@@ -78,6 +91,8 @@ and the origin is re-derivable from the finalized JSON.`,
 	cmd.Flags().StringVar(&flags.Coinbase, "coinbase", "0x0000000000000000000000000000000000000000",
 		"genesis coinbase address")
 	cmd.Flags().StringVar(&flags.ExtraData, "extra-data", "0x", "genesis extraData, as a 0x-prefixed hex string")
+	cmd.Flags().StringVar(&flags.FullShardConf, "full-shard-conf", "",
+		"path to write the full shard configuration (the base conf plus seal_registry_genesis); default: <out without its extension>-full-shard-conf.json")
 	cmd.Flags().StringVar(&flags.AllocSource, "alloc-source", "",
 		"standard genesis JSON to use as the source instead of the built-in template; refuses to combine with --gas-limit, --coinbase or --extra-data")
 	cmd.Flags().Uint64Var(&flags.RootEpoch, "root-epoch", 1,
@@ -187,9 +202,26 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags, changed func(string) bool, o
 		return fmt.Errorf("writing %q: %w", flags.Out, err)
 	}
 
+	// The full shard configuration is the base conf plus seal_registry_genesis, and its hash is the
+	// fullShardConfHash an observation's ShardConfHash must equal (rootinput.DeriveV2); a node handed
+	// only the base conf can never satisfy that check. It is written with the CLI's ordinary shard-conf
+	// helper so it round-trips through the ordinary loader.
+	full, err := prepared.FullConfig()
+	if err != nil {
+		return fmt.Errorf("deriving the full shard configuration: %w", err)
+	}
+	fullPath := flags.FullShardConf
+	if fullPath == "" {
+		fullPath = defaultFullShardConfPath(flags.Out)
+	}
+	if err := util.WriteJsonFile(fullPath, full); err != nil {
+		return fmt.Errorf("writing the full shard configuration to %q: %w", fullPath, err)
+	}
+
 	origin := prepared.Origin()
 	fmt.Fprintf(out, "wrote %s (chainId=%d, shanghai+cancun at genesis, registry account at %s)\n",
 		flags.Out, chainID, registryproof.RegistryAddress)
+	fmt.Fprintf(out, "wrote %s (full shard configuration)\n", fullPath)
 	// The identities, printed for an operator to compare. Deliberately not written beside the
 	// artifact: the origin is re-derivable from the finalized JSON, and a sidecar would be a second
 	// trusted file and a second source of truth.
@@ -199,6 +231,14 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags, changed func(string) bool, o
 	fmt.Fprintf(out, "execution config identity:  %s\n", origin.ExecutionConfigIdentity())
 	fmt.Fprintf(out, "origin identity:            %s\n", origin.Identity())
 	return nil
+}
+
+// defaultFullShardConfPath is where the full shard configuration goes when --full-shard-conf is not
+// given: beside --out, named after it. The flag is defaulted rather than required so every existing
+// caller keeps working, while the artifact the next unit needs is always emitted.
+func defaultFullShardConfPath(out string) string {
+	ext := filepath.Ext(out)
+	return strings.TrimSuffix(out, ext) + "-full-shard-conf.json"
 }
 
 // engineAPIGenesisSource returns the standard genesis JSON to prepare from: the operator's file when

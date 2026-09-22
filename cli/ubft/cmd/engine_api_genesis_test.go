@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
@@ -154,6 +156,52 @@ func TestEngineAPIGenesis_AllocSourceIsUsedVerbatim(t *testing.T) {
 	require.Contains(t, doc.Alloc, strings.ToLower(funded), "the operator's funded account must survive preparation")
 	require.Equal(t, "0xde0b6b3a7640000", doc.Alloc[strings.ToLower(funded)].Balance)
 	require.Contains(t, doc.Alloc, registryAllocKey(), "the pinned registry account must still be inserted")
+}
+
+// TestEngineAPIGenesis_WritesTheFullShardConf is the other half of F4f section 2's output: the full
+// shard configuration (the base conf plus seal_registry_genesis), whose hash is the fullShardConfHash
+// an observation's ShardConfHash must equal. A node handed only the base conf can never satisfy that
+// check, so this artifact is required, not cosmetic.
+func TestEngineAPIGenesis_WritesTheFullShardConf(t *testing.T) {
+	shardConfPath := writeGenesisShardConf(t)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "genesis.json")
+
+	stdout, err := runEngineAPIGenesis(t, "--shard-conf", shardConfPath, "--out", out)
+	require.NoError(t, err)
+
+	// Defaulted beside --out.
+	fullPath := filepath.Join(dir, "genesis-full-shard-conf.json")
+	require.FileExists(t, fullPath)
+	require.Contains(t, stdout, "wrote "+fullPath+" (full shard configuration)")
+
+	// It loads through the CLI's ordinary shard-conf path: util.ReadJsonFile is the same call
+	// baseFlags.loadConf makes for --shard-conf.
+	var full types.PartitionDescriptionRecord
+	_, err = util.ReadJsonFile(fullPath, &full)
+	require.NoError(t, err)
+
+	// Its hash is the full shard conf hash the command printed.
+	h, err := full.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	require.Contains(t, stdout, "full shard conf hash:       "+common.BytesToHash(h).Hex())
+
+	// It differs from the input base conf only by seal_registry_genesis.
+	var base types.PartitionDescriptionRecord
+	_, err = util.ReadJsonFile(shardConfPath, &base)
+	require.NoError(t, err)
+	require.NotContains(t, base.PartitionParams, registrygenesis.GenesisParam)
+	commitment, ok := full.PartitionParams[registrygenesis.GenesisParam]
+	require.True(t, ok, "the full conf must carry %s", registrygenesis.GenesisParam)
+	require.Len(t, commitment, 64)
+	delete(full.PartitionParams, registrygenesis.GenesisParam)
+	require.Equal(t, base, full)
+
+	// An explicit path is honored.
+	explicit := filepath.Join(dir, "explicit-full.json")
+	_, err = runEngineAPIGenesis(t, "--shard-conf", shardConfPath, "--out", filepath.Join(dir, "genesis2.json"), "--full-shard-conf", explicit)
+	require.NoError(t, err)
+	require.FileExists(t, explicit)
 }
 
 func slotKeySet() map[common.Hash]struct{} {
