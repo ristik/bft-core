@@ -624,9 +624,11 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 
 	// parentBeaconBlockRoot is never trusted from the envelope (it isn't even a field in it — see
 	// codec.go's ProposalEnvelope doc comment): derive it from the authenticated input, the same way
-	// the leader was required to, and feed our own value into newPayloadWithSealV1. A leader that
-	// built against a different value gets caught by the field comparison above and, failing that, as
-	// a state-root mismatch, not by comparing the value directly.
+	// the leader was required to, and feed our own value into newPayloadWithSealV1. The comparison
+	// above does NOT cover it: PayloadFields deliberately omits ParentBeaconBlockRoot, because the
+	// payload carries no such field to compare against (VerifyPayloadFields says so in its own doc).
+	// A leader that built against a different value is caught by reth instead, as a
+	// stateRoot/blockHash mismatch reported INVALID.
 	//
 	// Only now does the execution client see it, over the JWT-authenticated Engine connection, with
 	// reth accepting the verdict produced above.

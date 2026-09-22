@@ -42,10 +42,17 @@ type RoundParams struct {
 	// certificate: CBOR re-encoding or signature-map ordering could differ
 	// byte-for-byte between two honest implementations of the *same*
 	// certificate, where the seal's own Hash field cannot, since it's the
-	// literal signed value. Executors that need round-derived randomness
-	// (an EVM adapter's prevRandao, parentBeaconBlockRoot) should derive it
-	// from this field with their own domain-separation prefix, never a
-	// re-hash of the certificate.
+	// literal signed value.
+	//
+	// It is NOT a source for round-derived randomness. This comment used to
+	// point an EVM adapter at it for prevRandao and parentBeaconBlockRoot,
+	// with its own domain-separation prefix; that is the v0 derivation W4
+	// deleted, and F2c §9 forbids reviving it. A seal hash is a value, not a
+	// certificate — it carries no quorum, no inclusion path and no trust
+	// base, so a caller can fabricate one and an executor holding it cannot
+	// tell. Derive from the authenticated root input instead
+	// (engineapi.DeriveAttributes over rootinput.Derive's result), which
+	// keys off the certified (RootRound, Round) pair.
 	SealHash Hash
 
 	Leader string // TechnicalRecord.Leader — the shard node ID building this round
