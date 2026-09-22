@@ -195,6 +195,191 @@ rethPinObtainPinned() {
   rethPinObtain "$1" "$2" "$RETH_PIN_ASSET" "$RETH_PIN_SHA256" "$RETH_PIN_RELEASE_BASE"
 }
 
+# --- the fork pin: unicity-reth, built from a pinned commit -------------------------------------
+#
+# The stock pin above stays exactly as it is, and the two coexist rather than one replacing the
+# other: scripts/reth-baseline.sh measures STOCK-client header economics and must keep getting
+# upstream reth, while the paired lanes need the fork's seal-capable binary. They are different
+# clients and a lane that needs the fork must ask for it by name.
+#
+# ureth diverged from upstream at ureth #4, so the v2.5.0 release assets the stock pin downloads are
+# no longer the fork. The fork's seal-capable node is bin/unicity-reth, added by ureth #30; the pin
+# is a COMMIT and is repinned only by an explicit edit to URETH_PIN_COMMIT here when that PR merges.
+# Nothing follows a branch: a pin that moves on its own is not a pin.
+URETH_PIN_REPO=https://github.com/ristik/ureth
+URETH_PIN_COMMIT=8cdf5c0549915b970739f2fadcc90bb15f23ada4
+URETH_PIN_BIN=unicity-reth
+
+# The fee collector every Unicity lane passes. A test devnet needs a fixed, obviously-not-real
+# address: the zero address is a real burn destination and any plausible address could be someone's,
+# so this is the conventional ...dead placeholder, defined once so every lane agrees on it.
+URETH_PIN_FEE_COLLECTOR=0x000000000000000000000000000000000000dead
+
+# The sibling ureth checkout to prefer when it is usable at the pinned commit, instead of cloning a
+# second copy. Overridable so the self-test can point at a stand-in; computed relative to this
+# library rather than hardcoded, and in a subshell so sourcing this file changes no directory.
+URETH_PIN_LOCAL=${URETH_PIN_LOCAL:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)/../ureth}
+
+# urethPinErr prints a refusal to stderr. Every refusal starts "ureth-pin: " so a reader and the
+# self-test can tell this library's verdicts from the stock pin's and from anything else on stderr,
+# matching rethPinErr's rule.
+urethPinErr() { echo "ureth-pin: $*" >&2; }
+
+# urethPinVerifyBinary <path> [expected-commit] succeeds only if <path> is an executable that runs and
+# reports exactly the expected commit (default URETH_PIN_COMMIT). It is rethPinVerifyBinary's check for
+# the fork binary and for the same reason: the binary itself is the only authority on its revision.
+# unicity-reth --version prints reth's long version, whose "Commit SHA:" line carries the full 40-hex
+# commit, so this parses exactly the line the stock check parses.
+urethPinVerifyBinary() {
+  local bin=$1 want=${2:-$URETH_PIN_COMMIT} out status got
+  if [ -z "$bin" ] || [ ! -e "$bin" ]; then
+    urethPinErr "no $URETH_PIN_BIN binary at '${bin}'"
+    return 1
+  fi
+  if [ ! -f "$bin" ] || [ ! -x "$bin" ]; then
+    urethPinErr "'$bin' is not an executable file"
+    return 1
+  fi
+  out=$(rethPinRunBounded "${RETH_PIN_VERSION_BUDGET:-30}" "$bin" --version)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    urethPinErr "'$bin --version' failed (exit $status): $(echo "$out" | head -1)"
+    return 1
+  fi
+  got=$(echo "$out" | sed -n 's/^Commit SHA: //p' | head -1)
+  if [ -z "$got" ]; then
+    urethPinErr "'$bin --version' reports no 'Commit SHA:' line, so its revision cannot be verified"
+    return 1
+  fi
+  if [ "$got" != "$want" ]; then
+    urethPinErr "'$bin' reports commit $got, pinned is $want"
+    return 1
+  fi
+  echo "ureth-pin: verified $bin reports the pinned commit $got"
+}
+
+# urethPinCacheEntry <cache-dir> [commit] [platform] prints where the built binary is cached. The
+# path carries BOTH the commit and the platform, so a binary built for another commit or another
+# platform is a different path — a miss, never a hit.
+urethPinCacheEntry() {
+  local cacheDir=$1 commit=${2:-$URETH_PIN_COMMIT} platform=${3:-$(rethPinPlatform)}
+  echo "$cacheDir/$URETH_PIN_BIN-$commit-$platform"
+}
+
+# urethPinUnicityFlags prints the --unicity.* flags a lane must pass. Only the required one is here:
+# --unicity.fee-collector has no default (a zero address would silently burn fees), while the profile
+# flags default to the kernel's pinned profile and must stay at those defaults so a lane measures the
+# configured profile rather than a lane-local one.
+urethPinUnicityFlags() {
+  echo "--unicity.fee-collector $URETH_PIN_FEE_COLLECTOR"
+}
+
+# urethPinObtain <cache-dir> <dest-dir>
+#
+# Leaves a release unicity-reth built from URETH_PIN_COMMIT at <dest-dir>/unicity-reth, or fails
+# having left nothing usable there. Sets URETH_PIN_CACHE_STATE to "hit" or "miss" and
+# URETH_PIN_BINARY to the destination path.
+#
+# Release, not debug: these lanes have real T2 timing budgets and a debug client would change what
+# they measure. The build is slow, which is exactly why the cache is keyed by commit and platform
+# and why a sibling checkout already at the pinned commit is preferred to cloning a second copy.
+#
+# Every refusal starts "ureth-pin: ". The source is never taken on trust: whichever checkout
+# produced the binary, the binary must report the pinned commit before it is accepted or cached.
+urethPinObtain() {
+  local cacheDir=$1 destDir=$2
+  local platform commit cache dest src="" built
+  commit=$URETH_PIN_COMMIT
+  platform=$(rethPinPlatform)
+  cache=$(urethPinCacheEntry "$cacheDir" "$commit" "$platform")
+  dest=$destDir/$URETH_PIN_BIN
+  URETH_PIN_CACHE_STATE=
+  URETH_PIN_BINARY=$dest
+
+  mkdir -p "$cacheDir" "$destDir" || { urethPinErr "cannot create $cacheDir or $destDir"; return 1; }
+  rm -f "$dest"
+
+  if [ -f "$cache" ]; then
+    URETH_PIN_CACHE_STATE=hit
+    # Re-verify on every hit, exactly as rethPinObtain re-verifies a cached archive's digest. A cache
+    # entry that does not report the pinned commit is refused loudly and left in place: silently
+    # rebuilding would hide whatever changed it. Delete the entry to rebuild.
+    if ! urethPinVerifyBinary "$cache" "$commit"; then
+      urethPinErr "cached $cache is not the pinned $URETH_PIN_BIN — refusing the cache hit (not rebuilding: whatever changed it should be seen). Delete $cache to rebuild."
+      return 1
+    fi
+    cp "$cache" "$dest" || { urethPinErr "cannot place the cached binary at $dest"; return 1; }
+    chmod +x "$dest"
+    echo "ureth-pin: cache hit, $URETH_PIN_BIN at $commit ($platform)"
+    return 0
+  fi
+
+  URETH_PIN_CACHE_STATE=miss
+
+  # Prefer the sibling checkout when it can produce the pinned commit. If it exists but cannot, say
+  # so and fall back to fetching: building whatever that checkout happens to be at and calling it
+  # pinned is the one failure this function exists to prevent.
+  if [ -n "$URETH_PIN_LOCAL" ] && [ -d "$URETH_PIN_LOCAL/.git" ]; then
+    if git -C "$URETH_PIN_LOCAL" cat-file -e "$commit^{commit}" 2>/dev/null; then
+      src=$URETH_PIN_LOCAL
+      if [ "$(git -C "$src" rev-parse HEAD 2>/dev/null)" != "$commit" ]; then
+        echo "ureth-pin: checking out $commit in the local checkout $src"
+        if ! git -C "$src" checkout --detach "$commit" >/dev/null 2>&1; then
+          urethPinErr "local checkout $src has $commit but could not be checked out at it; refusing to build whatever it is at"
+          return 1
+        fi
+      fi
+    else
+      urethPinErr "local checkout $URETH_PIN_LOCAL does not contain the pinned commit $commit — falling back to fetching $URETH_PIN_REPO"
+    fi
+  fi
+
+  if [ -z "$src" ]; then
+    src=$cacheDir/$URETH_PIN_BIN-src-$commit
+    if [ -d "$src/.git" ]; then
+      if ! git -C "$src" cat-file -e "$commit^{commit}" 2>/dev/null; then
+        urethPinErr "cached checkout $src does not contain the pinned commit $commit — delete it to refetch"
+        return 1
+      fi
+      if ! git -C "$src" checkout --detach "$commit" >/dev/null 2>&1; then
+        urethPinErr "cached checkout $src could not be checked out at $commit"
+        return 1
+      fi
+    else
+      rm -rf "$src"
+      echo "ureth-pin: fetching $URETH_PIN_REPO at $commit"
+      if ! git clone --quiet "$URETH_PIN_REPO" "$src" 2>/dev/null; then
+        rm -rf "$src"
+        urethPinErr "cannot clone $URETH_PIN_REPO"
+        return 1
+      fi
+      if ! git -C "$src" checkout --detach "$commit" >/dev/null 2>&1; then
+        rm -rf "$src"
+        urethPinErr "the checkout of $URETH_PIN_REPO has no commit $commit"
+        return 1
+      fi
+    fi
+  fi
+
+  echo "ureth-pin: building $URETH_PIN_BIN from $src (cargo build --release -p $URETH_PIN_BIN)"
+  if ! ( cd "$src" && cargo build --release -p "$URETH_PIN_BIN" ); then
+    urethPinErr "cargo build --release -p $URETH_PIN_BIN failed in $src"
+    return 1
+  fi
+  built=$src/target/release/$URETH_PIN_BIN
+  if [ ! -x "$built" ]; then
+    urethPinErr "the build reported success but $built is not an executable"
+    return 1
+  fi
+  if ! urethPinVerifyBinary "$built" "$commit"; then
+    return 1
+  fi
+  cp "$built" "$cache" || { urethPinErr "cannot cache the built binary at $cache"; return 1; }
+  cp "$built" "$dest" || { urethPinErr "cannot place the built binary at $dest"; return 1; }
+  chmod +x "$dest"
+  echo "ureth-pin: built and cached $URETH_PIN_BIN at $commit ($platform)"
+}
+
 # --- evidence -----------------------------------------------------------------------------------
 
 # rethEvidenceCollect <nodes-dir> <out-dir> copies what a failed run is diagnosed from: every node's

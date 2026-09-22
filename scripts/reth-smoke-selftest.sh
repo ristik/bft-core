@@ -400,6 +400,87 @@ check "…the nested cleanup did run, on the cancellation" test -e "$T/nested-ca
 check "…its own processes were stopped" ownedStopped cancel
 check "…and every sentinel survived" sentinelsAlive
 
+echo "=== the fork client: built from the pinned commit, verified by revision, cached by commit ==="
+# A stand-in fork checkout: a real git repo at a commit of its own, so "the local checkout is at the
+# pinned commit" is exercised for real. The pinned commit is retargeted to that repo's HEAD, because
+# a self-test cannot fabricate a git commit with a chosen SHA. The stand-in cargo "builds" whichever
+# stand-in binary the case chose, or fails, per FAKE_CARGO_MODE — the executable style of the rest of
+# this file: these paths are run, not read.
+urepo=$T/urepo
+other=$T/urepo-other
+for r in "$urepo" "$other"; do
+  git init -q "$r"
+  git -C "$r" -c user.email=selftest@example.invalid -c user.name=selftest commit -q --allow-empty -m "base $(basename "$r")"
+done
+U=$(git -C "$urepo" rev-parse HEAD)
+otherCommit=$(git -C "$other" rev-parse HEAD)
+[ "$U" != "$otherCommit" ] || { echo "selftest: the two stand-in checkouts must differ"; exit 1; }
+UW=1111111111111111111111111111111111111111
+
+mkdir -p "$T/fakebin" "$T/ucargo-bin"
+cat >"$T/fakebin/cargo" <<'CARGO'
+#!/bin/sh
+# stand-in cargo for the self-test: no compiler is run.
+printf '%s\n' "$*" >>"$FAKE_CARGO_LOG"
+case "${FAKE_CARGO_MODE:-ok}" in
+  fail) echo "cargo: simulated compile failure" >&2; exit 101 ;;
+  *) mkdir -p target/release
+     cp "$FAKE_CARGO_BIN" target/release/unicity-reth
+     chmod +x target/release/unicity-reth ;;
+esac
+CARGO
+chmod +x "$T/fakebin/cargo"
+
+savedPin=$URETH_PIN_COMMIT savedLocal=$URETH_PIN_LOCAL savedRepo=$URETH_PIN_REPO savedPath=$PATH
+URETH_PIN_COMMIT=$U
+URETH_PIN_LOCAL=$urepo
+URETH_PIN_REPO=file://$T/no-such-repo
+PATH="$T/fakebin:$PATH"
+uObtain() { # uObtain <cache> <dest> [ok|fail] [commit-the-stand-in-reports]
+  local mode=${3:-ok} commit=${4:-$U}
+  fakereth "$T/ucargo-bin/unicity-reth" "$commit"
+  FAKE_CARGO_MODE=$mode FAKE_CARGO_BIN=$T/ucargo-bin/unicity-reth FAKE_CARGO_LOG=$T/cargo.log \
+    urethPinObtain "$1" "$2"
+}
+
+check   "a miss builds from the local checkout and leaves a verified binary" uObtain "$T/ucache" "$T/udest"
+check   "…reported as a miss" test "$URETH_PIN_CACHE_STATE" = miss
+check   "…the destination binary reports the pinned commit" urethPinVerifyBinary "$T/udest/unicity-reth" "$U"
+check   "…and it is cached by commit and platform" test -f "$(urethPinCacheEntry "$T/ucache" "$U" "$(rethPinPlatform)")"
+check   "…and the stand-in cargo really was invoked for the miss" test "$(grep -c 'build --release -p unicity-reth' "$T/cargo.log")" -ge 1
+: >"$T/cargo.log"
+check   "a second run needs no build: the cache is a hit" uObtain "$T/ucache" "$T/udest2"
+check   "…reported as a hit" test "$URETH_PIN_CACHE_STATE" = hit
+check   "…with the binary in place again" urethPinVerifyBinary "$T/udest2/unicity-reth" "$U"
+check   "…and no cargo invoked at all" test ! -s "$T/cargo.log"
+
+# A cached binary for the pin's own path that reports another commit: a hit whose contents changed
+# must be refused loudly and left in place, exactly as a tampered cached archive is.
+cacheEntry=$(urethPinCacheEntry "$T/ucache" "$U" "$(rethPinPlatform)")
+fakereth "$cacheEntry" "$UW"
+refuses "a cache entry reporting another commit is refused, not silently rebuilt" "refusing the cache hit" uObtain "$T/ucache" "$T/udest3"
+check   "…and it is left in place to be seen" test "$($cacheEntry --version | sed -n 's/^Commit SHA: //p')" = "$UW"
+rm -f "$cacheEntry"
+
+# A local checkout without the pinned commit must be named, then fetching attempted — never silently
+# built as whatever that checkout happens to be at.
+URETH_PIN_LOCAL=$other
+refuses "a local checkout without the pinned commit says so, then falls back to fetching" "does not contain the pinned commit" uObtain "$T/ucache" "$T/udest4"
+cp "$T/.out" "$T/ufetch.out"
+check   "…and the failed fetch is named too" grep -q "cannot clone" "$T/ufetch.out"
+URETH_PIN_LOCAL=$urepo
+
+rm -f "$(urethPinCacheEntry "$T/ucache" "$U" "$(rethPinPlatform)")"
+refuses "a failed cargo build is refused" "cargo build --release -p unicity-reth failed" uObtain "$T/ucache" "$T/udest5" fail
+check   "…and nothing is cached on the failure" test ! -e "$(urethPinCacheEntry "$T/ucache" "$U" "$(rethPinPlatform)")"
+refuses "a built binary reporting another revision is refused" "reports commit $UW, pinned is $U" uObtain "$T/ucache" "$T/udest6" ok "$UW"
+check   "…and nothing is cached for it either" test ! -e "$(urethPinCacheEntry "$T/ucache" "$U" "$(rethPinPlatform)")"
+
+URETH_PIN_COMMIT=$savedPin URETH_PIN_LOCAL=$savedLocal URETH_PIN_REPO=$savedRepo PATH=$savedPath
+
+# --- the fee-collector flag the binary requires ---
+check "the lane flag helper names the required fee collector" bash -c ". scripts/lib/reth-pin.sh; [ \"\$(urethPinUnicityFlags)\" = \"--unicity.fee-collector $URETH_PIN_FEE_COLLECTOR\" ]"
+
 echo
 echo "selftest: $ok ok, $bad bad"
 [ "$bad" -eq 0 ]
