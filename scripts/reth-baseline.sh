@@ -33,6 +33,11 @@ blocks=${1:-160}
 genesis=test-nodes/evm-genesis.json
 pinnedRethCommit=189c0df32617afc488e0f091dbface1bd72cceb4   # ristik/ureth, branch unicity/main
 
+# STOCK upstream reth, deliberately and permanently. This lane measures STOCK-client header
+# economics, and being stock is the entire point of it; repointing it at the fork would destroy the
+# baseline it exists to establish. The paired lanes resolve the fork client through urethPinResolve
+# (scripts/lib/reth-pin.sh); this lane must not adopt it.
+
 [ -f "$genesis" ] || { echo "missing $genesis - run ./setup-evm-nodes.sh -r 3 -v 4 first" >&2; exit 1; }
 command -v reth >/dev/null || { echo "no reth binary on PATH - this is the real-execution lane, there is no fake fallback" >&2; exit 1; }
 

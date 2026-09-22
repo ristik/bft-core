@@ -195,6 +195,259 @@ rethPinObtainPinned() {
   rethPinObtain "$1" "$2" "$RETH_PIN_ASSET" "$RETH_PIN_SHA256" "$RETH_PIN_RELEASE_BASE"
 }
 
+# --- the fork pin: unicity-reth, built from a pinned commit -------------------------------------
+#
+# The stock pin above stays exactly as it is, and the two coexist rather than one replacing the
+# other: scripts/reth-baseline.sh measures STOCK-client header economics and must keep getting
+# upstream reth, while the paired lanes need the fork's seal-capable binary. They are different
+# clients and a lane that needs the fork must ask for it by name.
+#
+# ureth diverged from upstream at ureth #4, so the v2.5.0 release assets the stock pin downloads are
+# no longer the fork. The fork's seal-capable node is bin/unicity-reth, added by ureth #30; the pin
+# is a COMMIT and is repinned only by an explicit edit to URETH_PIN_COMMIT here when that PR merges.
+# Nothing follows a branch: a pin that moves on its own is not a pin.
+URETH_PIN_REPO=https://github.com/ristik/ureth
+URETH_PIN_COMMIT=0e0ce6dbd83f82340487e82c17393a405d547d73
+URETH_PIN_BIN=unicity-reth
+
+# The fee collector every Unicity lane passes. A test devnet needs a fixed, obviously-not-real
+# address: the zero address is a real burn destination and any plausible address could be someone's,
+# so this is the conventional ...dead placeholder, defined once so every lane agrees on it.
+URETH_PIN_FEE_COLLECTOR=0x000000000000000000000000000000000000dead
+
+# The sibling ureth checkout to prefer when it is usable at the pinned commit, instead of cloning a
+# second copy. Overridable so the self-test can point at a stand-in; computed relative to this
+# library rather than hardcoded, and in a subshell so sourcing this file changes no directory.
+URETH_PIN_LOCAL=${URETH_PIN_LOCAL:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)/ureth}
+
+# urethPinErr prints a refusal to stderr. Every refusal starts "ureth-pin: " so a reader and the
+# self-test can tell this library's verdicts from the stock pin's and from anything else on stderr,
+# matching rethPinErr's rule.
+urethPinErr() { echo "ureth-pin: $*" >&2; }
+
+# urethPinVerifyBinary <path> [expected-commit] succeeds only if <path> is an executable that runs and
+# reports exactly the expected commit (default URETH_PIN_COMMIT). It is rethPinVerifyBinary's check for
+# the fork binary and for the same reason: the binary itself is the only authority on its revision.
+# unicity-reth --version prints reth's long version, whose "Commit SHA:" line carries the full 40-hex
+# commit, so this parses exactly the line the stock check parses.
+urethPinVerifyBinary() {
+  local bin=$1 want=${2:-$URETH_PIN_COMMIT} out status got
+  if [ -z "$bin" ] || [ ! -e "$bin" ]; then
+    urethPinErr "no $URETH_PIN_BIN binary at '${bin}'"
+    return 1
+  fi
+  if [ ! -f "$bin" ] || [ ! -x "$bin" ]; then
+    urethPinErr "'$bin' is not an executable file"
+    return 1
+  fi
+  out=$(rethPinRunBounded "${RETH_PIN_VERSION_BUDGET:-30}" "$bin" --version)
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    urethPinErr "'$bin --version' failed (exit $status): $(echo "$out" | head -1)"
+    return 1
+  fi
+  got=$(echo "$out" | sed -n 's/^Commit SHA: //p' | head -1)
+  if [ -z "$got" ]; then
+    urethPinErr "'$bin --version' reports no 'Commit SHA:' line, so its revision cannot be verified"
+    return 1
+  fi
+  if [ "$got" != "$want" ]; then
+    urethPinErr "'$bin' reports commit $got, pinned is $want"
+    return 1
+  fi
+  echo "ureth-pin: verified $bin reports the pinned commit $got"
+}
+
+# urethPinCacheEntry <cache-dir> [commit] [platform] prints where the built binary is cached. The
+# path carries BOTH the commit and the platform, so a binary built for another commit or another
+# platform is a different path — a miss, never a hit.
+urethPinCacheEntry() {
+  local cacheDir=$1 commit=${2:-$URETH_PIN_COMMIT} platform=${3:-$(rethPinPlatform)}
+  echo "$cacheDir/$URETH_PIN_BIN-$commit-$platform"
+}
+
+# urethPinUnicityFlags prints the --unicity.* flags a lane must pass. Only the required one is here:
+# --unicity.fee-collector has no default (a zero address would silently burn fees), while the profile
+# flags default to the kernel's pinned profile and must stay at those defaults so a lane measures the
+# configured profile rather than a lane-local one.
+urethPinUnicityFlags() {
+  echo "--unicity.fee-collector $URETH_PIN_FEE_COLLECTOR"
+}
+
+# urethPinObtain <cache-dir> <dest-dir>
+#
+# Leaves a release unicity-reth built from URETH_PIN_COMMIT at <dest-dir>/unicity-reth, or fails
+# having left nothing usable there. Sets URETH_PIN_CACHE_STATE to "hit" or "miss" and
+# URETH_PIN_BINARY to the destination path.
+#
+# Release, not debug: these lanes have real T2 timing budgets and a debug client would change what
+# they measure. The build is slow, which is exactly why the cache is keyed by commit and platform
+# and why a sibling checkout already at the pinned commit is preferred to cloning a second copy.
+#
+# Every refusal starts "ureth-pin: ". The source is never taken on trust: whichever checkout
+# produced the binary, the binary must report the pinned commit before it is accepted or cached.
+urethPinObtain() {
+  local cacheDir=$1 destDir=$2
+  local platform commit cache dest src="" built worktree=""
+  commit=$URETH_PIN_COMMIT
+  platform=$(rethPinPlatform)
+  cache=$(urethPinCacheEntry "$cacheDir" "$commit" "$platform")
+  dest=$destDir/$URETH_PIN_BIN
+  URETH_PIN_CACHE_STATE=
+  URETH_PIN_BINARY=$dest
+
+  mkdir -p "$cacheDir" "$destDir" || { urethPinErr "cannot create $cacheDir or $destDir"; return 1; }
+  rm -f "$dest"
+
+  if [ -f "$cache" ]; then
+    URETH_PIN_CACHE_STATE=hit
+    # Re-verify on every hit, exactly as rethPinObtain re-verifies a cached archive's digest. A cache
+    # entry that does not report the pinned commit is refused loudly and left in place: silently
+    # rebuilding would hide whatever changed it. Delete the entry to rebuild.
+    if ! urethPinVerifyBinary "$cache" "$commit"; then
+      urethPinErr "cached $cache is not the pinned $URETH_PIN_BIN — refusing the cache hit (not rebuilding: whatever changed it should be seen). Delete $cache to rebuild."
+      return 1
+    fi
+    cp "$cache" "$dest" || { urethPinErr "cannot place the cached binary at $dest"; return 1; }
+    chmod +x "$dest"
+    echo "ureth-pin: cache hit, $URETH_PIN_BIN at $commit ($platform)"
+    return 0
+  fi
+
+  URETH_PIN_CACHE_STATE=miss
+
+  # Prefer the sibling checkout when it can produce the pinned commit — but never by checking it
+  # out. That is somebody's working tree: detaching its HEAD to build a pinned commit would move a
+  # developer off their branch as a side effect of running a lane, and leave them detached
+  # afterwards. Add a throwaway worktree instead, which shares the object store (so this stays much
+  # cheaper than a clone) while the real checkout keeps its branch, its index and its HEAD.
+  #
+  # If the checkout exists but cannot produce the commit, say so and fall back to fetching: building
+  # whatever that checkout happens to be at and calling it pinned is the one failure this function
+  # exists to prevent.
+  if [ -n "$URETH_PIN_LOCAL" ] && [ -d "$URETH_PIN_LOCAL/.git" ]; then
+    if git -C "$URETH_PIN_LOCAL" cat-file -e "$commit^{commit}" 2>/dev/null; then
+      src=$cacheDir/$URETH_PIN_BIN-wt-$commit
+      worktree=$src
+      if [ ! -d "$src" ]; then
+        echo "ureth-pin: adding a worktree for $commit from the local checkout $URETH_PIN_LOCAL"
+        if ! git -C "$URETH_PIN_LOCAL" worktree add --detach "$src" "$commit" >/dev/null 2>&1; then
+          urethPinErr "local checkout $URETH_PIN_LOCAL has $commit but a worktree for it could not be added; falling back to fetching $URETH_PIN_REPO"
+          src=""
+        fi
+      fi
+    else
+      urethPinErr "local checkout $URETH_PIN_LOCAL does not contain the pinned commit $commit — falling back to fetching $URETH_PIN_REPO"
+    fi
+  else
+    # Say so rather than quietly cloning. A mistyped or mis-derived path costs a network clone and a
+    # cold build every time, and the only symptom is slowness — which is how a wrong path survived
+    # this function's first review.
+    echo "ureth-pin: no usable local checkout at $URETH_PIN_LOCAL, fetching $URETH_PIN_REPO instead"
+  fi
+
+  if [ -z "$src" ]; then
+    src=$cacheDir/$URETH_PIN_BIN-src-$commit
+    if [ -d "$src/.git" ]; then
+      if ! git -C "$src" cat-file -e "$commit^{commit}" 2>/dev/null; then
+        urethPinErr "cached checkout $src does not contain the pinned commit $commit — delete it to refetch"
+        return 1
+      fi
+      if ! git -C "$src" checkout --detach "$commit" >/dev/null 2>&1; then
+        urethPinErr "cached checkout $src could not be checked out at $commit"
+        return 1
+      fi
+    else
+      rm -rf "$src"
+      echo "ureth-pin: fetching $URETH_PIN_REPO at $commit"
+      if ! git clone --quiet "$URETH_PIN_REPO" "$src" 2>/dev/null; then
+        rm -rf "$src"
+        urethPinErr "cannot clone $URETH_PIN_REPO"
+        return 1
+      fi
+      if ! git -C "$src" checkout --detach "$commit" >/dev/null 2>&1; then
+        rm -rf "$src"
+        urethPinErr "the checkout of $URETH_PIN_REPO has no commit $commit"
+        return 1
+      fi
+    fi
+  fi
+
+  # Build into a cache-local target directory, never the source tree's own. Two reasons: a worktree
+  # or clone under the cache must not have a developer's checkout write 2 GB of release artifacts
+  # into it, and keying the target directory to the cache rather than the commit lets successive
+  # pins share compilation work instead of rebuilding reth from scratch each time.
+  echo "ureth-pin: building $URETH_PIN_BIN from $src (cargo build --release -p $URETH_PIN_BIN)"
+  if ! ( cd "$src" && CARGO_TARGET_DIR=$cacheDir/target cargo build --release -p "$URETH_PIN_BIN" ); then
+    urethPinErr "cargo build --release -p $URETH_PIN_BIN failed in $src"
+    return 1
+  fi
+  built=$cacheDir/target/release/$URETH_PIN_BIN
+  if [ ! -x "$built" ]; then
+    urethPinErr "the build reported success but $built is not an executable"
+    return 1
+  fi
+  if ! urethPinVerifyBinary "$built" "$commit"; then
+    return 1
+  fi
+  cp "$built" "$cache" || { urethPinErr "cannot cache the built binary at $cache"; return 1; }
+  cp "$built" "$dest" || { urethPinErr "cannot place the built binary at $dest"; return 1; }
+  chmod +x "$dest"
+
+  # Drop the throwaway worktree now the binary is cached. It is only needed once per pin, and
+  # leaving it registered would litter the developer's checkout with entries that need
+  # `git worktree prune` the moment the lane's cache directory is deleted. Failing to remove it is
+  # not a failure of the obtain: the binary is already built, verified and cached.
+  if [ -n "$worktree" ] && [ -d "$worktree" ]; then
+    git -C "$URETH_PIN_LOCAL" worktree remove --force "$worktree" >/dev/null 2>&1 ||
+      urethPinErr "note: could not remove the temporary worktree $worktree (run 'git -C $URETH_PIN_LOCAL worktree prune')"
+  fi
+
+  echo "ureth-pin: built and cached $URETH_PIN_BIN at $commit ($platform)"
+}
+
+# urethPinResolve [dest-dir]
+#
+# Resolves the fork execution client a paired lane must run, verifies it reports the pinned commit,
+# and exports URETH_BIN for the lane's launch sites. This is the one resolver every lane uses; none
+# of them reproduces this logic.
+#
+# URETH_BIN, when set, wins and is STILL verified: an operator pointing at their own build from the
+# pinned commit is fine, and an operator accidentally pointing at stock reth is refused rather than
+# silently measured. Otherwise the pinned commit is obtained through urethPinObtain.
+#
+# The default destination is the pin library's own bin directory under the cache, not a directory in
+# a lane's tree. That is deliberate and load-bearing: setup-evm-nodes.sh runs `make clean`, which
+# deletes test-nodes/ whole, and reth-chaos.sh and the f6b lanes delete test-nodes/ between
+# scenarios, so a copy there is deleted out from under a running lane. The shared bin also means the
+# ~28-minute build is paid once on a host and every lane afterwards is a cache hit. The binary is
+# verified by the revision it reports on every resolve, so the shared path is not a shared verdict.
+#
+# A cold obtain is a ~28-minute release build, so a line saying that is printed BEFORE it starts.
+urethPinResolve() {
+  local destDir=${1:-} cacheDir
+  cacheDir=${URETH_PIN_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ureth-pin}
+  if [ -n "${URETH_BIN:-}" ]; then
+    if ! urethPinVerifyBinary "$URETH_BIN" "$URETH_PIN_COMMIT"; then
+      urethPinErr "URETH_BIN='$URETH_BIN' is not the pinned fork client — refusing to run a lane against it"
+      return 1
+    fi
+    export URETH_BIN
+    return 0
+  fi
+  [ -n "$destDir" ] || destDir=$cacheDir/bin
+  if [ ! -f "$(urethPinCacheEntry "$cacheDir" "$URETH_PIN_COMMIT" "$(rethPinPlatform)")" ]; then
+    echo "ureth-pin: no cached $URETH_PIN_BIN for $URETH_PIN_COMMIT — building it now; a cold build is a ~28-minute release build, cached for every later lane"
+  fi
+  if ! urethPinObtain "$cacheDir" "$destDir"; then
+    return 1
+  fi
+  URETH_BIN=$destDir/$URETH_PIN_BIN
+  export URETH_BIN
+  echo "ureth-pin: using $URETH_BIN (commit $URETH_PIN_COMMIT)"
+  return 0
+}
+
 # --- evidence -----------------------------------------------------------------------------------
 
 # rethEvidenceCollect <nodes-dir> <out-dir> copies what a failed run is diagnosed from: every node's

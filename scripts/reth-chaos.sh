@@ -54,14 +54,11 @@ done
 # select nothing and still exit 0 with "evidence complete".
 validateScenarios || exit 2
 
-# --- pinned client, no fake fallback ----------------------------------------------------------
-command -v reth >/dev/null || { echo "no reth binary on PATH; this lane has no fake fallback" >&2; exit 1; }
-rethCommit=$(reth --version | sed -n 's/^Commit SHA: //p')
-if [ "$rethCommit" != "$pinnedRethCommit" ]; then
-  echo "FAIL: reth is $rethCommit, pinned is $pinnedRethCommit" >&2
-  echo "      Set F1_ALLOW_UNPINNED_RETH=1 to explore; output is then not evidence." >&2
-  [ "${F1_ALLOW_UNPINNED_RETH:-0}" = "1" ] || exit 1
-fi
+# --- the fork client, no fake fallback --------------------------------------------------------
+# Every validator here runs `--executor engine-api`, and the shard node refuses a client that does
+# not advertise the three engine_*WithSealV1 methods. The client this lane needs is therefore the
+# fork, not the stock `reth` that used to be on PATH, and urethPinResolve verifies it by revision.
+urethPinResolve || exit 1
 
 # --- supervisor boundary ----------------------------------------------------------------------
 #
