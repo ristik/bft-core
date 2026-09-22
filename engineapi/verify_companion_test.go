@@ -80,15 +80,14 @@ func paramsFor(parent shardnode.BlockRef, uc *types.UnicityCertificate, tr *cert
 	}
 }
 
-// companionEnvelope builds the payload and companion a block for params would carry: the v0
-// attributes every validator derives, the v1 commitment, and the two witnesses Seal would fill.
-// Callers tamper with the returned envelope and then encode it, so a tamper is applied to the bytes
-// the follower actually reads.
+// companionEnvelope builds the payload and companion a block for params would carry: the v1
+// attributes every validator derives from the authenticated input, the commitment, and the two
+// witnesses Seal would fill. Callers tamper with the returned envelope and then encode it, so a
+// tamper is applied to the bytes the follower actually reads.
 func companionEnvelope(t *testing.T, f *derivationFixture, params shardnode.RoundParams, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (ProposalEnvelope, rootinput.Result) {
 	t.Helper()
-	attrs, err := DeriveAttributes(params, ParentHeader{Timestamp: 100})
-	require.NoError(t, err)
 	derived := f.derive(t, params.Round, params.Parent.Hash, uc, tr)
+	attrs := DeriveAttributes(derived.Input, ParentHeader{Timestamp: 100})
 	companion := f.sealCompanion(t, derived)
 	parentHash, err := toData32(params.Parent.Hash)
 	require.NoError(t, err)
@@ -400,15 +399,15 @@ func TestAdapter_Verify_RefusesWithoutAVerifierContext(t *testing.T) {
 
 	parent := shardnode.BlockRef{Number: 4, Hash: shardnode.Hash(fixedHashBytes(0x01))}
 	params := shardnode.RoundParams{Round: 5, Timestamp: 1000, SealHash: shardnode.Hash(fixedHashBytes(0x99)), Parent: parent}
-	attrs, err := DeriveAttributes(params, ParentHeader{Timestamp: 100})
-	require.NoError(t, err)
 	parentHash, err := toData32(parent.Hash)
 	require.NoError(t, err)
 
+	// The payload need not match anything: since W4 the verifier-context refusal runs before any field
+	// comparison, because without a configured context there is nothing to derive expected fields
+	// from. A non-empty raw block with a 32-byte parent is all it takes to reach the refusal.
 	envelope := ProposalEnvelope{
 		ExecutionPayload: ExecutionPayloadV3{
-			ParentHash: parentHash, Timestamp: attrs.Timestamp, PrevRandao: attrs.PrevRandao,
-			FeeRecipient: attrs.SuggestedFeeRecipient, Withdrawals: []WithdrawalV1{}, Transactions: []data{{0xaa}},
+			ParentHash: parentHash, Withdrawals: []WithdrawalV1{}, Transactions: []data{{0xaa}},
 		},
 	}
 	status, err := a.Verify(context.Background(), blockFromEnvelope(t, envelope), params)

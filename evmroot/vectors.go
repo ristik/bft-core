@@ -65,8 +65,8 @@ type DomainVectors struct {
 	V1PrevRandao     string `json:"v1_prev_randao"`      // H(CBOR(["UNICITY_EVM_RANDAO", r, n]))
 	V1BeaconRoot     string `json:"v1_beacon_root"`      // H(CBOR(["UNICITY_EVM_BEACON", r, n]))
 	V1PrevRandaoCBOR string `json:"v1_prev_randao_cbor"` // the exact preimage
-	V0PrevRandao     string `json:"v0_prev_randao"`      // SHA256(0x01 || u || be64(n))
-	V0BeaconRoot     string `json:"v0_beacon_root"`      // SHA256(0x02 || u || be64(n))
+	V0PrevRandao     string `json:"v0_prev_randao"`      // frozen v0 value: SHA256(0x01 || u || be64(n))
+	V0BeaconRoot     string `json:"v0_beacon_root"`      // frozen v0 value: SHA256(0x02 || u || be64(n))
 }
 
 // RootOriginVector is one canonical O_- body plus its identity, tagged with
@@ -182,8 +182,12 @@ func BuildVectors() VectorSet {
 		V1PrevRandao:     hx32(DerivePrevRandao(r, n)),
 		V1BeaconRoot:     hx32(DeriveBeaconRoot(r, n)),
 		V1PrevRandaoCBOR: hx(marshalCBOR(cArray{cText(DomainPrevRandao), cUint(r), cUint(n)})),
-		V0PrevRandao:     hx32(prototypeDomainHash(prototypeDomainPrevRandao, u, n)),
-		V0BeaconRoot:     hx32(prototypeDomainHash(prototypeDomainBeaconRoot, u, n)),
+		// Frozen, not computed: F2c §9 forbids a second live derivation path, and f2d §5.1 keeps v0
+		// only as a vector. These are the values the deleted v0 prototype derivation produced for
+		// (u = 0xA1 x 32, n = 57) before W4 removed it; evmroot/testdata/vectors.json is the
+		// committed witness that they are unchanged.
+		V0PrevRandao: "2018a2745093159b35b61449c4adaf7b4079c4a2b985e26cffb71c017163aefb",
+		V0BeaconRoot: "12e1a4b223dc7183d3bf76352266404205da8bb787628d2c3632adcef236f3c0",
 	}
 
 	// --- root origins by round kind ---------------------------------------

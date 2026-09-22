@@ -2,7 +2,6 @@ package evmroot
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 )
 
 // DerivePrevRandao returns prevRandao = H(DOM_rho, r, n):
@@ -45,31 +44,3 @@ func DeriveTimestamp(referenceTime, parentTimestamp uint64) uint64 {
 	}
 	return referenceTime
 }
-
-// --- v0 prototype forms, for compatibility vectors only ----------------------
-
-// prototypeDomainHash reproduces engineapi/params.go's pre-D1 derivation:
-//
-//	SHA-256( domainByte || unicityTreeRoot || bigEndian64(shardRound) )
-//
-// with domainByte 0x01 for prevRandao and 0x02 for parentBeaconBlockRoot.
-// It keys off the Unicity Tree root and a single counter, uses raw
-// concatenation instead of CBOR, and has no ASCII domain string. Kept here
-// solely so the vector set can show, byte for byte, how v1 differs. Not for
-// production use.
-func prototypeDomainHash(domainByte byte, unicityTreeRoot []byte, shardRound uint64) Hash32 {
-	h := sha256.New()
-	h.Write([]byte{domainByte})
-	h.Write(unicityTreeRoot)
-	var rb [8]byte
-	binary.BigEndian.PutUint64(rb[:], shardRound)
-	h.Write(rb[:])
-	var out Hash32
-	copy(out[:], h.Sum(nil))
-	return out
-}
-
-const (
-	prototypeDomainPrevRandao = 0x01
-	prototypeDomainBeaconRoot = 0x02
-)

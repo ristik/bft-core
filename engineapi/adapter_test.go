@@ -171,17 +171,15 @@ func TestAdapter_BuildSealCommit_NonQuietRound(t *testing.T) {
 		AuthorizingCertificate: uc, AuthorizingTechnicalRecord: tr,
 	}
 
-	// The sealed payload must carry the same attributes Build would have
-	// requested (Verify's self-check — called on the leader's own output
-	// too — recomputes and compares them), so derive them the same way
-	// Adapter itself does rather than leaving them zero.
-	attrs, err := DeriveAttributes(params, ParentHeader{Timestamp: parentTimestamp})
-	require.NoError(t, err)
-
 	// The self-verify path authenticates the companion against the adapter's own verifier context,
 	// so build the real canonical root input and commitment for this round and have the mock return
 	// them as the block-bound companion. Seal fills the witnesses.
 	derived := f.derive(t, params.Round, params.Parent.Hash, uc, tr)
+
+	// The sealed payload must carry the same attributes Build would have requested (Verify's
+	// self-check — called on the leader's own output too — recomputes and compares them), so derive
+	// them the same way Adapter itself does, from the authenticated input.
+	attrs := DeriveAttributes(derived.Input, ParentHeader{Timestamp: parentTimestamp})
 
 	engine := newMockReth(t, Secret{})
 	engine.on("engine_forkchoiceUpdatedWithSealV1", func(p json.RawMessage) (any, *rpcError) {
@@ -360,50 +358,29 @@ func TestAdapter_GenesisQuietRound_DoesNotAliasParentBlockHash(t *testing.T) {
 	require.Equal(t, genesisRoot, blockHash, "must fall back to StateRoot, exactly as executortest.Fake's own genesis round does")
 }
 
+// The payload-field comparison moved after authentication in W4, because the v1 expected values are
+// a function of the bound certificate's root round and reference time. This pins that moving it did
+// not drop it: a block with a valid, authenticated companion but a forged timestamp is still refused,
+// and reth still never sees it.
 func TestAdapter_Verify_RejectsTamperedAttributes_WithoutCallingNewPayload(t *testing.T) {
-	parentHash := fixedHash(0x21)
+	h := newCompanionHarness(t, CursorNotActivated())
+	defer h.close()
 
-	engine := newMockReth(t, Secret{})
-	// deliberately no engine_newPayloadV3 handler: if Verify calls it
-	// despite the attributes being wrong, the test fails loudly.
+	uc, tr := h.f.cert(t, 4, 5, 50)
+	parent := shardnode.BlockRef{Number: 4, Hash: shardnode.Hash(fixedHashBytes(0x21))}
+	params := paramsFor(parent, uc, tr)
+	envelope, derived := companionEnvelope(t, h.f, params, uc, tr)
 
-	eth := newMockReth(t, Secret{})
-	eth.on("eth_getBlockByHash", func(p json.RawMessage) (any, *rpcError) {
-		return blockHeaderJSON{Timestamp: 100}, nil
-	})
+	// The companion and the commitment are genuine; only the payload's timestamp is a leader claiming
+	// a bogus clock. It diverges from the v1 timestamp read out of the authenticated input.
+	envelope.ExecutionPayload.Timestamp = quantity(999999)
+	require.NotEqual(t, uint64(envelope.ExecutionPayload.Timestamp),
+		uint64(DeriveAttributes(derived.Input, ParentHeader{Timestamp: 100}).Timestamp))
 
-	a, closeFn := newTestAdapter(t, engine, eth)
-	defer closeFn()
-	ctx := context.Background()
-
-	parent := shardnode.BlockRef{Number: 1, Hash: shardnode.Hash(parentHash[:]), StateRoot: shardnode.Hash(fixedHashBytes(0x22))}
-	params := shardnode.RoundParams{Round: 2, Timestamp: 200, SealHash: shardnode.Hash(fixedHashBytes(0x99)), Parent: parent}
-
-	envelope := ProposalEnvelope{
-		ExecutionPayload: ExecutionPayloadV3{
-			ParentHash:   parentHash,
-			BlockHash:    fixedHash(0x55),
-			StateRoot:    fixedHash(0x56),
-			Timestamp:    quantity(999999), // wrong — a leader claiming a bogus clock
-			Transactions: []data{{0xaa}},
-			Withdrawals:  []WithdrawalV1{},
-		},
-		ExpectedBlobVersionedHashes: []data32{},
-	}
-	raw, err := json.Marshal(envelope)
-	require.NoError(t, err)
-
-	block := shardnode.Block{
-		Number:     2,
-		Hash:       shardnode.Hash(fixedHashBytes(0x55)),
-		StateRoot:  shardnode.Hash(fixedHashBytes(0x56)),
-		ParentHash: shardnode.Hash(parentHash[:]),
-		Raw:        raw,
-	}
-
-	status, err := a.Verify(ctx, block, params)
-	require.NoError(t, err)
+	status, err := h.adapter.Verify(context.Background(), blockFromEnvelope(t, envelope), params)
+	require.NoError(t, err, "a field divergence stays StatusInvalid with a local warning, not an error return")
 	require.Equal(t, shardnode.StatusInvalid, status)
+	require.Zero(t, h.sealCalls, "a tampered payload must be refused before reth sees it")
 }
 
 func TestAdapter_Verify_MapsNewPayloadStatuses(t *testing.T) {
@@ -428,9 +405,8 @@ func TestAdapter_Verify_MapsNewPayloadStatuses(t *testing.T) {
 				Round: 5, Timestamp: 200, SealHash: shardnode.Hash(fixedHashBytes(0x99)), Parent: parent,
 				AuthorizingCertificate: uc, AuthorizingTechnicalRecord: tr,
 			}
-			attrs, err := DeriveAttributes(params, ParentHeader{Timestamp: 100})
-			require.NoError(t, err)
 			derived := f.derive(t, params.Round, params.Parent.Hash, uc, tr)
+			attrs := DeriveAttributes(derived.Input, ParentHeader{Timestamp: 100})
 
 			engine := newMockReth(t, Secret{})
 			engine.on("engine_newPayloadWithSealV1", func(p json.RawMessage) (any, *rpcError) {

@@ -355,16 +355,8 @@ func (a *Adapter) Build(ctx context.Context, p shardnode.RoundParams) (shardnode
 	if err != nil {
 		return "", fmt.Errorf("engineapi: looking up parent header %x: %w", parentHash32, err)
 	}
-	attrs, err := DeriveAttributes(p, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)})
-	if err != nil {
-		return "", fmt.Errorf("engineapi: deriving payload attributes: %w", err)
-	}
+	attrs := DeriveAttributes(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)})
 
-	// The V3 attributes stay v0-derived while extraData becomes v1. That mixed state is deliberate
-	// and is what F2c §3 orders: the build must route through the seal siblings BEFORE the
-	// derivation switch, because stock PayloadAttributesV3 carry no commitment to match and
-	// enforcing one first would halt the builder. W4 swaps DeriveAttributes for the v1 derivation
-	// and closes the gap. Do not "fix" this here.
 	sealAttrs := UnicityPayloadAttributes{
 		PayloadAttributesV3: attrs,
 		Commitment:          data32(derived.Commitment),
@@ -465,12 +457,16 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 }
 
 // Verify is where C2.3's follower-side validation actually happens, and where the F2c §3.1
-// authentication boundary sits: cheap local recompute-and-compare first (VerifyPayloadFields — no
-// RPC call), then the block's companion is authenticated against THIS node's own configured trust,
-// and only then the expensive newPayloadWithSealV1 call that executes the block. A leader that
-// altered the timestamp or fee recipient is rejected before reth ever sees the payload, a leader
-// whose companion does not authenticate is rejected before reth sees the bound evidence, and a
-// missing companion is a refusal rather than a fallback to the stock V3 path.
+// authentication boundary sits. The order is forced by v1: the expected parameters are a function of
+// the bound certificate's root round and reference time, which arrive with the companion, so the
+// block's companion is authenticated against THIS node's own configured trust first, then the
+// parameters are derived from the authenticated input and the payload fields are checked against
+// them, and only then does the expensive newPayloadWithSealV1 call execute the block. Deriving
+// before the companion was authenticated would mean deriving from this node's own
+// p.AuthorizingCertificate, which is exactly the re-selection F2c §3.1 forbids. A leader whose
+// companion does not authenticate is rejected before reth sees the bound evidence, a leader that
+// altered the timestamp or fee recipient is still rejected before execution, and a missing companion
+// is a refusal rather than a fallback to the stock V3 path.
 //
 // The follower validates the binding the block carries; it never re-selects. Two honest nodes hold
 // different valid certificates for the same round (duplicates from several root nodes, repeats after
@@ -509,30 +505,6 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 		// on the parent — SYNCING is the honest answer, matching the same
 		// distinction the Engine API itself draws.
 		return shardnode.StatusSyncing, fmt.Errorf("engineapi: looking up parent header for verification: %w", err)
-	}
-
-	claimed := PayloadFields{
-		Timestamp:             envelope.ExecutionPayload.Timestamp,
-		PrevRandao:            envelope.ExecutionPayload.PrevRandao,
-		SuggestedFeeRecipient: envelope.ExecutionPayload.FeeRecipient,
-		Withdrawals:           envelope.ExecutionPayload.Withdrawals,
-	}
-	if err := VerifyPayloadFields(p, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, claimed); err != nil {
-		if a.log != nil {
-			a.log.WarnContext(ctx, "rejecting round before execution: attributes diverge from local derivation", slog.String("err", err.Error()))
-		}
-		return shardnode.StatusInvalid, nil
-	}
-
-	// parentBeaconBlockRoot is never trusted from the envelope (it isn't
-	// even a field in it — see codec.go's ProposalEnvelope doc comment):
-	// derive it the same way the leader was required to, and feed our own
-	// value into newPayload. A leader that built against a different value
-	// gets caught here, as a state-root mismatch, not by comparing the
-	// value directly.
-	attrs, err := DeriveAttributes(p, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)})
-	if err != nil {
-		return shardnode.StatusInvalid, fmt.Errorf("engineapi: re-deriving attributes for newPayload: %w", err)
 	}
 
 	// From here on the block is authenticated before it is executed. A missing companion is a
@@ -631,6 +603,31 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 		return shardnode.StatusInvalid, fmt.Errorf("%w: %s", ErrCompanionUnauthenticated, auth.Reason)
 	}
 
+	// Only now, with the input authenticated, are the v1 parameters computable: they are functions of
+	// the bound certificate's root round and reference time, both read from derived.Input. The payload
+	// fields are checked last of the checks, so a block that fails authentication is reported as an
+	// authentication failure rather than as a field divergence. A divergence stays StatusInvalid with
+	// the local warning, not an error return, exactly as before the reordering.
+	attrs := DeriveAttributes(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)})
+	claimed := PayloadFields{
+		Timestamp:             envelope.ExecutionPayload.Timestamp,
+		PrevRandao:            envelope.ExecutionPayload.PrevRandao,
+		SuggestedFeeRecipient: envelope.ExecutionPayload.FeeRecipient,
+		Withdrawals:           envelope.ExecutionPayload.Withdrawals,
+	}
+	if err := VerifyPayloadFields(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, claimed); err != nil {
+		if a.log != nil {
+			a.log.WarnContext(ctx, "rejecting round before execution: attributes diverge from local derivation", slog.String("err", err.Error()))
+		}
+		return shardnode.StatusInvalid, nil
+	}
+
+	// parentBeaconBlockRoot is never trusted from the envelope (it isn't even a field in it — see
+	// codec.go's ProposalEnvelope doc comment): derive it from the authenticated input, the same way
+	// the leader was required to, and feed our own value into newPayloadWithSealV1. A leader that
+	// built against a different value gets caught by the field comparison above and, failing that, as
+	// a state-root mismatch, not by comparing the value directly.
+	//
 	// Only now does the execution client see it, over the JWT-authenticated Engine connection, with
 	// reth accepting the verdict produced above.
 	status, err := a.engine.NewPayloadWithSealV1(ctx, envelope.ExecutionPayload, envelope.ExpectedBlobVersionedHashes, attrs.ParentBeaconBlockRoot, *companion)

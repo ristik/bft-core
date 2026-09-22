@@ -103,14 +103,15 @@ func TestAdapter_BuildDerivesTheRootInputAndSendsTheSealSibling(t *testing.T) {
 		"the commitment must be exactly rootinput.Derive's extraData")
 	require.Empty(t, h.capture.input.Transitions, "transitions are empty, not an unauthenticated stand-in")
 
-	// The standard V3 attributes are still v0-derived; only extraData is v1 in this unit. That
-	// mixed state is the deliberate intermediate F2c §3 orders, and this pins it so a later
-	// "cleanup" that switched the derivation early would fail here.
-	v0, err := DeriveAttributes(h.params, ParentHeader{Timestamp: 999})
-	require.NoError(t, err)
-	require.Equal(t, v0.PrevRandao, h.capture.attrs.PrevRandao)
-	require.Equal(t, v0.Timestamp, h.capture.attrs.Timestamp)
-	require.Equal(t, v0.SuggestedFeeRecipient, h.capture.attrs.SuggestedFeeRecipient)
+	// The V3 attributes are now v1-derived from the authenticated input, closing the mixed state W3
+	// left behind: prevRandao and parentBeaconBlockRoot come from the certified (rootRound,
+	// shardRound) pair and the timestamp from the certified reference time, not from
+	// RoundParams.SealHash.
+	v1 := DeriveAttributes(h.want.Input, ParentHeader{Timestamp: 999})
+	require.Equal(t, v1.PrevRandao, h.capture.attrs.PrevRandao)
+	require.Equal(t, v1.Timestamp, h.capture.attrs.Timestamp)
+	require.Equal(t, v1.SuggestedFeeRecipient, h.capture.attrs.SuggestedFeeRecipient)
+	require.Equal(t, v1.ParentBeaconBlockRoot, h.capture.attrs.ParentBeaconBlockRoot)
 }
 
 func TestAdapter_SealCarriesTheCompanionInTheEnvelope(t *testing.T) {
