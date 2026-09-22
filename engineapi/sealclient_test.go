@@ -204,6 +204,54 @@ func TestGetPayloadWithSealV1SendsMethodAndDecodesAllThreeFields(t *testing.T) {
 	require.Empty(t, resp.SealCompanion.Witnesses)
 }
 
+func TestNewPayloadWithSealV1SendsFourParamsAndNormalizesNilBlobHashes(t *testing.T) {
+	srv, capture := stubEngine(t, json.RawMessage(`{"status":"VALID"}`))
+	c := NewClient(srv.URL, Secret{})
+
+	payload := ExecutionPayloadV3{
+		ParentHash:   fixedHash(0x11),
+		StateRoot:    fixedHash(0x33),
+		BlockHash:    fixedHash(0x66),
+		LogsBloom:    data{},
+		ExtraData:    data{},
+		Transactions: []data{{0xaa}},
+		Withdrawals:  []WithdrawalV1{},
+	}
+	companion := SealCompanion{RootInput: data{0x01, 0x02, 0x03}, Witnesses: []data{{0xaa}, {0xbb}}, Provenance: "newPayload"}
+
+	resp, err := c.NewPayloadWithSealV1(context.Background(), payload, nil, fixedHash(0x44), companion)
+	require.NoError(t, err)
+	require.Equal(t, PayloadStatusValid, resp.Status)
+
+	method, params := capture.decode(t)
+	require.Equal(t, "engine_newPayloadWithSealV1", method)
+	require.Len(t, params, 4, "payload, expectedBlobVersionedHashes, parentBeaconBlockRoot, sealCompanion")
+
+	var gotPayload ExecutionPayloadV3
+	require.NoError(t, json.Unmarshal(params[0], &gotPayload))
+	require.Equal(t, payload, gotPayload)
+
+	require.Equal(t, "[]", string(params[1]),
+		"a nil expectedBlobVersionedHashes must be normalized to [] exactly as NewPayloadV3 does")
+
+	var gotRoot data32
+	require.NoError(t, json.Unmarshal(params[2], &gotRoot))
+	require.Equal(t, fixedHash(0x44), gotRoot, "parentBeaconBlockRoot is a method parameter, not a payload field")
+
+	var gotCompanion SealCompanion
+	require.NoError(t, json.Unmarshal(params[3], &gotCompanion))
+	require.Equal(t, companion, gotCompanion)
+}
+
+func TestNewPayloadWithSealV1SurfacesRPCErrorsAsErrors(t *testing.T) {
+	srv := errorStub(t, -38001, "seal method unavailable")
+	c := NewClient(srv.URL, Secret{})
+
+	payload, err := c.NewPayloadWithSealV1(context.Background(), ExecutionPayloadV3{}, nil, fixedHash(0x44), SealCompanion{})
+	require.ErrorContains(t, err, "seal method unavailable")
+	require.Equal(t, PayloadStatusV1{}, payload, "an RPC error must not look like a decoded status")
+}
+
 func TestSealClientMethodsSurfaceRPCErrorsAsErrors(t *testing.T) {
 	srv := errorStub(t, -38001, "seal method unavailable")
 	c := NewClient(srv.URL, Secret{})

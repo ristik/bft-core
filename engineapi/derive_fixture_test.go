@@ -12,6 +12,7 @@ import (
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/rootinput"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -80,9 +81,19 @@ func (f *derivationFixture) technical(round uint64) *certification.TechnicalReco
 }
 
 // cert builds a genuinely signed certificate authorizing shard round `authorized` and certifying
-// shard round `certified` at root round `rootRound`, plus the technical record it commits to.
+// shard round `certified` at root round `rootRound`, plus the technical record it commits to, with
+// the fixture's own configuration and a full quorum of three signatures.
 func (f *derivationFixture) cert(t *testing.T, certified, authorized, rootRound uint64) (*types.UnicityCertificate, *certification.TechnicalRecord) {
 	t.Helper()
+	return f.certWithPDR(t, f.pdr, certified, authorized, rootRound, 3)
+}
+
+// certWithPDR is cert against an explicit partition description (for the substituted-configuration
+// case) and an explicit signer count: fewer than quorum produces an unauthenticated certificate.
+func (f *derivationFixture) certWithPDR(t *testing.T, pdr *types.PartitionDescriptionRecord, certified, authorized, rootRound uint64, signers int) (*types.UnicityCertificate, *certification.TechnicalRecord) {
+	t.Helper()
+	require.GreaterOrEqual(t, signers, 1)
+	require.LessOrEqual(t, signers, len(f.signers))
 	tr := f.technical(authorized)
 	trHash, err := tr.Hash()
 	require.NoError(t, err)
@@ -93,14 +104,42 @@ func (f *derivationFixture) cert(t *testing.T, certified, authorized, rootRound 
 		BlockHash:    bytes.Repeat([]byte{0xb1}, 32),
 		SummaryValue: []byte{}, Timestamp: 1,
 	}
-	uc := testcertificates.CreateUnicityCertificate(t, f.signers[0], ir, f.pdr, rootRound, make([]byte, 32), trHash)
+	uc := testcertificates.CreateUnicityCertificate(t, f.signers[0], ir, pdr, rootRound, make([]byte, 32), trHash)
 	uc.UnicitySeal.NetworkID = fixtureNetworkID
 	uc.UnicitySeal.Signatures = nil
-	require.NoError(t, uc.UnicitySeal.Sign(f.nodeIDs[0], f.signers[0]))
-	for _, i := range []int{1, 2} {
+	for i := 0; i < signers; i++ {
 		require.NoError(t, uc.UnicitySeal.Sign(f.nodeIDs[i], f.signers[i]))
 	}
 	return uc, tr
+}
+
+// deriveContext is the verifier-owned rootinput.Context for a round on this fixture, with
+// LastAppliedRootRound pinned to 0 exactly as Adapter.Verify pins it (the committed cursor is applied
+// at VerifyCompanionWitnesses, not at Derive).
+func (f *derivationFixture) deriveContext(round uint64, parent []byte) rootinput.Context {
+	return rootinput.Context{
+		NetworkID: fixtureNetworkID, PartitionID: fixturePartitionID, ShardID: types.ShardID{},
+		ShardConfHash: f.confHash, TrustBases: fixtureTrustBases{tb: f.tb},
+		Round: round, ParentHash: parent, LastAppliedRootRound: 0,
+	}
+}
+
+// derive runs the same derivation Adapter.Verify runs, so tests can build a companion and payload
+// that a follower must accept.
+func (f *derivationFixture) derive(t *testing.T, round uint64, parent []byte, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) rootinput.Result {
+	t.Helper()
+	res, err := rootinput.Derive(context.Background(), f.deriveContext(round, parent), uc, tr)
+	require.NoError(t, err)
+	return res
+}
+
+// sealCompanion is the companion a leader disseminates for res: the canonical root input plus the two
+// witnesses ([bound certificate, bound technical record]) Adapter.Seal writes.
+func (f *derivationFixture) sealCompanion(t *testing.T, res rootinput.Result) SealCompanion {
+	t.Helper()
+	witnesses, err := encodeSealCompanionWitnesses(res.Certificate, res.Technical)
+	require.NoError(t, err)
+	return SealCompanion{RootInput: res.Encoded, Witnesses: witnesses, Provenance: "build"}
 }
 
 // verifier is the adapter's derivation context for this fixture, with the given cursor.

@@ -11,8 +11,27 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
+)
+
+// The companion-boundary refusals, each named so a caller can tell one from another (F2c §8). None is
+// a generic failure and none is a fallback: a block whose companion is absent, malformed, bound to
+// different bytes, or unauthenticated against this node's own configuration is refused, never routed
+// to the stock V3 path.
+var (
+	// ErrCompanionMissing means the proposal envelope carried no seal companion at all.
+	ErrCompanionMissing = errors.New("engineapi: block has no seal companion")
+	// ErrCompanionWitnesses means the witness list is not the required two canonical entries.
+	ErrCompanionWitnesses = errors.New("engineapi: seal companion witnesses are not the required [certificate, technical record] pair")
+	// ErrCompanionBinding means the leader's published rootInput is not the bytes this node derives.
+	ErrCompanionBinding = errors.New("engineapi: seal companion rootInput does not match the canonical derivation")
+	// ErrCompanionCommitment means the block header does not commit to the derived input.
+	ErrCompanionCommitment = errors.New("engineapi: block extraData does not match the derived commitment")
+	// ErrCompanionUnauthenticated means VerifyCompanionWitnesses refused the bound evidence.
+	ErrCompanionUnauthenticated = errors.New("engineapi: seal companion failed VerifyCompanionWitnesses")
 )
 
 // Adapter implements shardnode.Executor by driving reth over the Engine
@@ -34,11 +53,18 @@ type Adapter struct {
 }
 
 // buildContext is what Build remembers so Seal — called later, with only a
-// BuildID — can (a) ask reth for the right payload and (b) construct a
-// correct quiet-round echo without re-deriving the parent from scratch.
+// BuildID — can (a) ask reth for the right payload, (b) construct a correct
+// quiet-round echo without re-deriving the parent from scratch, and (c) fill
+// the seal companion's witnesses from the authorization this round was built
+// on rather than from anything ureth returns.
 type buildContext struct {
 	payloadID data
 	parent    shardnode.BlockRef
+	// certificate and technicalRecord are the authenticated, owned copies
+	// rootinput.Derive produced. Seal encodes exactly these as the two companion
+	// witnesses — the certificate the block binds and the record it commits to.
+	certificate     *types.UnicityCertificate
+	technicalRecord *certification.TechnicalRecord
 }
 
 type Config struct {
@@ -359,7 +385,12 @@ func (a *Adapter) Build(ctx context.Context, p shardnode.RoundParams) (shardnode
 
 	id := shardnode.BuildID(hex.EncodeToString(*resp.PayloadID))
 	a.mu.Lock()
-	a.pending[id] = buildContext{payloadID: *resp.PayloadID, parent: p.Parent}
+	a.pending[id] = buildContext{
+		payloadID:       *resp.PayloadID,
+		parent:          p.Parent,
+		certificate:     derived.Certificate,
+		technicalRecord: derived.Technical,
+	}
 	a.mu.Unlock()
 	return id, nil
 }
@@ -415,14 +446,38 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 		}, nil
 	}
 
-	return EncodeBlockWithSealCompanion(resp.ExecutionPayload, &resp.SealCompanion)
+	// ureth deliberately returns witnesses empty (D2 §"The authentication lifecycle": witnesses are
+	// verifier-owned and the execution client holds no trust base), so the leader supplies them before
+	// dissemination; without them a follower has nothing to authenticate. rootInput and provenance
+	// come back from ureth and are left as they are. The list is exactly [bound certificate, bound
+	// technical record] — see SealCompanionWitnessCount for why both travel and why the length is
+	// fixed. The pair was authenticated by Build, so an encoding failure here is a local fault and is
+	// surfaced rather than turned into an unfilled companion no follower could authenticate.
+	witnesses, err := encodeSealCompanionWitnesses(bc.certificate, bc.technicalRecord)
+	if err != nil {
+		return shardnode.Block{}, fmt.Errorf("engineapi: sealing round: %w", err)
+	}
+	return EncodeBlockWithSealCompanion(resp.ExecutionPayload, &SealCompanion{
+		RootInput:  resp.SealCompanion.RootInput,
+		Witnesses:  witnesses,
+		Provenance: resp.SealCompanion.Provenance,
+	})
 }
 
-// Verify is where C2.3's follower-side validation actually happens: cheap,
-// local recompute-and-compare first (params.Verify — no RPC call), then
-// only if that passes, the expensive newPayloadV3 call that actually
-// executes the block. A leader that altered the timestamp or fee recipient
-// is rejected before reth ever sees the payload.
+// Verify is where C2.3's follower-side validation actually happens, and where the F2c §3.1
+// authentication boundary sits: cheap local recompute-and-compare first (VerifyPayloadFields — no
+// RPC call), then the block's companion is authenticated against THIS node's own configured trust,
+// and only then the expensive newPayloadWithSealV1 call that executes the block. A leader that
+// altered the timestamp or fee recipient is rejected before reth ever sees the payload, a leader
+// whose companion does not authenticate is rejected before reth sees the bound evidence, and a
+// missing companion is a refusal rather than a fallback to the stock V3 path.
+//
+// The follower validates the binding the block carries; it never re-selects. Two honest nodes hold
+// different valid certificates for the same round (duplicates from several root nodes, repeats after
+// a timeout), so deriving from whichever this node happens to hold would make them compute different
+// commitments for the same block or refuse a valid proposal by delivery order. Everything below is
+// derived from the certificate the block binds, and the only view-dependent input is this node's own
+// committed seal-registry cursor, which is shared state rather than arrival order (F2c §3.1).
 func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.RoundParams) (shardnode.Status, error) {
 	if len(b.Raw) == 0 {
 		// Quiet block: must be exactly the parent's Number/StateRoot,
@@ -480,9 +535,107 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 		return shardnode.StatusInvalid, fmt.Errorf("engineapi: re-deriving attributes for newPayload: %w", err)
 	}
 
-	status, err := a.engine.NewPayloadV3(ctx, envelope.ExecutionPayload, envelope.ExpectedBlobVersionedHashes, attrs.ParentBeaconBlockRoot)
+	// From here on the block is authenticated before it is executed. A missing companion is a
+	// refusal, never a fallback to the stock V3 path: a block disseminated without one cannot be
+	// authenticated by anyone, and silently executing it as a V3 payload would skip exactly the
+	// boundary this unit exists to install.
+	if a.verifier == nil {
+		return shardnode.StatusInvalid, fmt.Errorf("engineapi: verifying round %d: no verifier context — a follower authenticates the bound certificate against its own configured trust base, partition, shard, configuration hash and cursor (docs/design/f2c-root-input-wiring-contract.md §3), and no such context is configured", p.Round)
+	}
+	if envelope.SealCompanion == nil {
+		return shardnode.StatusInvalid, fmt.Errorf("%w: round %d", ErrCompanionMissing, p.Round)
+	}
+	companion := envelope.SealCompanion
+
+	// Witnesses[0] and witnesses[1] are the bound certificate and the record it commits to, in the
+	// canonical-CBOR encoding this repository already uses for both. A wrong length, a decode
+	// failure, or a re-encode that is not byte-identical is a refusal.
+	uc, tr, err := decodeSealCompanionWitnesses(companion.Witnesses)
 	if err != nil {
-		return shardnode.StatusSyncing, fmt.Errorf("engineapi: newPayload: %w", err)
+		return shardnode.StatusInvalid, fmt.Errorf("engineapi: verifying round %d: %w", p.Round, err)
+	}
+
+	appliedRootRound, err := a.verifier.Cursor.appliedRootRound()
+	if err != nil {
+		return shardnode.StatusInvalid, fmt.Errorf("engineapi: verifying round %d: %w", p.Round, err)
+	}
+
+	// The authentication: rootinput.Derive against this node's own trust base, network, partition,
+	// shard, configuration hash and committed cursor — the same path the builder uses. Nothing is
+	// accepted on the proposer's word, and the certificate is never a value this node already held.
+	// A stale bound certificate is refused here as a named rootinput class (ErrNotPinned), which is
+	// what F2c §8 and §10 negative 6 require: fail fast, with the class that lets an operator tell a
+	// misconfiguration from an attack.
+	derived, err := rootinput.Derive(ctx, rootinput.Context{
+		NetworkID:     a.verifier.NetworkID,
+		PartitionID:   a.verifier.PartitionID,
+		ShardID:       a.verifier.ShardID,
+		ShardConfHash: a.verifier.ShardConfHash,
+		TrustBases:    a.verifier.TrustBases,
+
+		Round:                p.Round,
+		ParentHash:           p.Parent.Hash,
+		LastAppliedRootRound: appliedRootRound,
+
+		// False, as on the build path, and for the same reason: rootinput.Derive independently
+		// refuses the epoch-handoff boundary, so false here means "none are pending" for the
+		// accepted single-epoch profile, not "some are pending and could not be authenticated".
+		TransitionsPending: false,
+	}, uc, tr)
+	if err != nil {
+		return shardnode.StatusInvalid, fmt.Errorf("engineapi: authenticating the bound certificate for round %d: %w", p.Round, err)
+	}
+
+	// The leader published bytes; this node derived bytes. They must be the same bytes. This is
+	// sharper than a field-by-field comparison: a substituted transition, a swapped record, a wrong
+	// origin or a wrong parent all fail on the encoding itself. It also pins that the companion's
+	// rootInput is the canonical encoding and not merely a decodable variant.
+	if !bytes.Equal(companion.RootInput, derived.Encoded) {
+		return shardnode.StatusInvalid, fmt.Errorf("%w: round %d: companion rootInput %x is not the canonical derivation %x",
+			ErrCompanionBinding, p.Round, companion.RootInput, derived.Encoded)
+	}
+
+	// And the header itself must commit to that same input.
+	if !bytes.Equal(envelope.ExecutionPayload.ExtraData, derived.Commitment[:]) {
+		return shardnode.StatusInvalid, fmt.Errorf("%w: round %d: header extraData %x, derived commitment %x",
+			ErrCompanionCommitment, p.Round, envelope.ExecutionPayload.ExtraData, derived.Commitment[:])
+	}
+
+	// VerifyCompanionWitnesses, with this node's own committed cursor. F2c §3.1 step 4 names this
+	// check explicitly, and it runs here as defence in depth against the same value: the Derive above
+	// has already enforced that cursor, so a stale bound certificate never reaches this call and no
+	// distinct refusal reason can originate here. That is the intended outcome, not a gap — F2c §8 and
+	// §10 negative 6 require the refusal to arrive as its own rootinput class, which the earlier step
+	// gives, not as a reason from this call.
+	//
+	// Be precise about what is tautological here: the signature verdict and the canonical root input
+	// both come from that same Derive, so the O_-/TRHash binding, the teHash(ri.TE) ==
+	// ri.Origin.TRHash check and the transitions comparison are satisfied by construction. This is
+	// not a second authentication boundary and must not be described as one.
+	auth := evmroot.VerifyCompanionWitnesses(evmroot.CompanionWitness{
+		UC: evmroot.UCWitness{Cert: evmroot.VerifiedCert{
+			// True because rootinput.Derive verified the certificate above, against this node's own
+			// configured trust base — never a field a peer supplied.
+			SignaturesValid: true,
+			RootRound:       derived.Authorizing.RootRound,
+			AuthorizedRound: derived.Input.Round,
+			OriginID:        derived.Authorizing.OriginID,
+			TRHash:          derived.Authorizing.TRHash,
+		}},
+		// Verifier-owned and empty: no authenticated feed of committed trust-base bodies or handoff
+		// acknowledgements reaches a shard node (F2c §8), and an empty list here means "none are
+		// pending", never "some are pending and could not be authenticated".
+		ExpectedTransitions: nil,
+	}, derived.Input, appliedRootRound)
+	if !auth.OK {
+		return shardnode.StatusInvalid, fmt.Errorf("%w: %s", ErrCompanionUnauthenticated, auth.Reason)
+	}
+
+	// Only now does the execution client see it, over the JWT-authenticated Engine connection, with
+	// reth accepting the verdict produced above.
+	status, err := a.engine.NewPayloadWithSealV1(ctx, envelope.ExecutionPayload, envelope.ExpectedBlobVersionedHashes, attrs.ParentBeaconBlockRoot, *companion)
+	if err != nil {
+		return shardnode.StatusSyncing, fmt.Errorf("engineapi: newPayloadWithSealV1: %w", err)
 	}
 	return toStatus(status.Status), nil
 }

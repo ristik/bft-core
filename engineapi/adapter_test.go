@@ -178,6 +178,11 @@ func TestAdapter_BuildSealCommit_NonQuietRound(t *testing.T) {
 	attrs, err := DeriveAttributes(params, ParentHeader{Timestamp: parentTimestamp})
 	require.NoError(t, err)
 
+	// The self-verify path authenticates the companion against the adapter's own verifier context,
+	// so build the real canonical root input and commitment for this round and have the mock return
+	// them as the block-bound companion. Seal fills the witnesses.
+	derived := f.derive(t, params.Round, params.Parent.Hash, uc, tr)
+
 	engine := newMockReth(t, Secret{})
 	engine.on("engine_forkchoiceUpdatedWithSealV1", func(p json.RawMessage) (any, *rpcError) {
 		return ForkchoiceUpdatedResponse{
@@ -198,15 +203,15 @@ func TestAdapter_BuildSealCommit_NonQuietRound(t *testing.T) {
 				Transactions: []data{{0xde, 0xad}}, // one tx — non-quiet
 				Withdrawals:  []WithdrawalV1{},
 				LogsBloom:    data{},
-				ExtraData:    data{},
+				ExtraData:    derived.Commitment[:],
 			},
-			SealCompanion: SealCompanion{RootInput: data{0x01}, Witnesses: []data{}, Provenance: "build"},
+			SealCompanion: SealCompanion{RootInput: derived.Encoded, Witnesses: []data{}, Provenance: "build"},
 		}, nil
 	})
 	engine.on("engine_forkchoiceUpdatedV3", func(p json.RawMessage) (any, *rpcError) {
 		return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid}}, nil
 	})
-	engine.on("engine_newPayloadV3", func(p json.RawMessage) (any, *rpcError) {
+	engine.on("engine_newPayloadWithSealV1", func(p json.RawMessage) (any, *rpcError) {
 		return PayloadStatusV1{Status: PayloadStatusValid}, nil
 	})
 
@@ -415,10 +420,20 @@ func TestAdapter_Verify_MapsNewPayloadStatuses(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(string(c.payloadStatus), func(t *testing.T) {
+			f := newDerivationFixture(t)
+			uc, tr := f.cert(t, 4, 5, 50)
 			parentHash := fixedHash(0x31)
+			parent := shardnode.BlockRef{Number: 1, Hash: shardnode.Hash(parentHash[:])}
+			params := shardnode.RoundParams{
+				Round: 5, Timestamp: 200, SealHash: shardnode.Hash(fixedHashBytes(0x99)), Parent: parent,
+				AuthorizingCertificate: uc, AuthorizingTechnicalRecord: tr,
+			}
+			attrs, err := DeriveAttributes(params, ParentHeader{Timestamp: 100})
+			require.NoError(t, err)
+			derived := f.derive(t, params.Round, params.Parent.Hash, uc, tr)
 
 			engine := newMockReth(t, Secret{})
-			engine.on("engine_newPayloadV3", func(p json.RawMessage) (any, *rpcError) {
+			engine.on("engine_newPayloadWithSealV1", func(p json.RawMessage) (any, *rpcError) {
 				return PayloadStatusV1{Status: c.payloadStatus}, nil
 			})
 			eth := newMockReth(t, Secret{})
@@ -426,15 +441,8 @@ func TestAdapter_Verify_MapsNewPayloadStatuses(t *testing.T) {
 				return blockHeaderJSON{Timestamp: 100}, nil
 			})
 
-			a, closeFn := newTestAdapter(t, engine, eth)
+			a, closeFn := newTestAdapterWithVerifier(t, engine, eth, f.verifier(CursorNotActivated()))
 			defer closeFn()
-			ctx := context.Background()
-
-			parent := shardnode.BlockRef{Number: 1, Hash: shardnode.Hash(parentHash[:])}
-			params := shardnode.RoundParams{Round: 2, Timestamp: 200, SealHash: shardnode.Hash(fixedHashBytes(0x99)), Parent: parent}
-
-			attrs, err := DeriveAttributes(params, ParentHeader{Timestamp: 100})
-			require.NoError(t, err)
 
 			envelope := ProposalEnvelope{
 				ExecutionPayload: ExecutionPayloadV3{
@@ -442,21 +450,26 @@ func TestAdapter_Verify_MapsNewPayloadStatuses(t *testing.T) {
 					Timestamp:    attrs.Timestamp,
 					PrevRandao:   attrs.PrevRandao,
 					FeeRecipient: attrs.SuggestedFeeRecipient,
+					ExtraData:    derived.Commitment[:],
 					Withdrawals:  []WithdrawalV1{},
 					Transactions: []data{{0xaa}},
 				},
 				ExpectedBlobVersionedHashes: []data32{},
+				SealCompanion:               companionPtr(f.sealCompanion(t, derived)),
 			}
 			raw, err := json.Marshal(envelope)
 			require.NoError(t, err)
 
 			block := shardnode.Block{ParentHash: shardnode.Hash(parentHash[:]), Raw: raw}
-			status, err := a.Verify(ctx, block, params)
+			status, err := a.Verify(context.Background(), block, params)
 			require.NoError(t, err)
 			require.Equal(t, c.want, status)
 		})
 	}
 }
+
+// companionPtr is &companion without the address-of-a-value noise at each call site.
+func companionPtr(c SealCompanion) *SealCompanion { return &c }
 
 // The D2 seal siblings are required only when a deployment selects the seal path. These four cases
 // fix that boundary, because the interesting failure is the one where the requirement becomes

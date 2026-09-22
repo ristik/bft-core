@@ -227,6 +227,27 @@ func (c *Client) NewPayloadV3(ctx context.Context, payload ExecutionPayloadV3, e
 	return resp, err
 }
 
+// NewPayloadWithSealV1 is engine_newPayloadWithSealV1, the import-path seal sibling of
+// NewPayloadV3: the same three parameters in the same order, plus the seal companion the block
+// travelled with. It reports the same PayloadStatusV1 the standard method does, because the seal
+// sibling is a versioned sibling rather than a different contract.
+//
+// The caller must have authenticated the companion's witnesses before calling; this method does not
+// and cannot. reth accepts that verdict over the JWT-authenticated channel (f3-engine-seal-delivery.md
+// §4), which is why the authentication boundary is Adapter.Verify's and not this method's.
+func (c *Client) NewPayloadWithSealV1(ctx context.Context, payload ExecutionPayloadV3, expectedBlobVersionedHashes []data32, parentBeaconBlockRoot data32, sealCompanion SealCompanion) (PayloadStatusV1, error) {
+	// A nil slice marshals to JSON null, not []; the spec wants an explicit
+	// empty array when there are no blobs (§6 of the build plan), so a nil
+	// caller value is normalized here rather than trusted. Same rule and same
+	// reason as NewPayloadV3.
+	if expectedBlobVersionedHashes == nil {
+		expectedBlobVersionedHashes = []data32{}
+	}
+	var resp PayloadStatusV1
+	err := c.call(ctx, "engine_newPayloadWithSealV1", []any{payload, expectedBlobVersionedHashes, parentBeaconBlockRoot, sealCompanion}, &resp)
+	return resp, err
+}
+
 // ChainID and GetBlockByNumber call the standard eth_* methods on the
 // AUTHENTICATED Engine endpoint, not the plain RPC port.
 //

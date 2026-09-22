@@ -114,7 +114,9 @@ func TestAdapter_BuildDerivesTheRootInputAndSendsTheSealSibling(t *testing.T) {
 }
 
 func TestAdapter_SealCarriesTheCompanionInTheEnvelope(t *testing.T) {
-	companion := SealCompanion{RootInput: data{0x01, 0x02, 0x03}, Witnesses: []data{{0xaa}}, Provenance: "build"}
+	// ureth returns witnesses empty; Seal must fill them with the bound authorization, exactly two
+	// entries, in the canonical encoding. The rootInput and provenance ureth returned are preserved.
+	companion := SealCompanion{RootInput: data{0x01, 0x02, 0x03}, Witnesses: []data{}, Provenance: "build"}
 	h := newSealHarness(t, CursorNotActivated(), samplePayload(), companion)
 	defer h.close()
 
@@ -127,7 +129,21 @@ func TestAdapter_SealCarriesTheCompanionInTheEnvelope(t *testing.T) {
 	envelope, err := DecodeBlock(block)
 	require.NoError(t, err)
 	require.NotNil(t, envelope.SealCompanion, "the companion the far side returned must be in the envelope")
-	require.Equal(t, companion, *envelope.SealCompanion)
+	require.Equal(t, companion.RootInput, envelope.SealCompanion.RootInput)
+	require.Equal(t, companion.Provenance, envelope.SealCompanion.Provenance)
+
+	wantWitnesses, err := encodeSealCompanionWitnesses(h.want.Certificate, h.want.Technical)
+	require.NoError(t, err)
+	require.Equal(t, wantWitnesses, envelope.SealCompanion.Witnesses,
+		"Seal fills exactly [bound certificate, bound technical record]")
+	require.Len(t, envelope.SealCompanion.Witnesses, SealCompanionWitnessCount)
+
+	// The filled witnesses are the actual authorization, not labels: decode them and require the
+	// certificate and record back.
+	uc, tr, err := decodeSealCompanionWitnesses(envelope.SealCompanion.Witnesses)
+	require.NoError(t, err)
+	require.Equal(t, h.want.Certificate, uc)
+	require.Equal(t, h.want.Technical, tr)
 }
 
 func TestBlockSizeIsUnchangedByTheCompanion(t *testing.T) {

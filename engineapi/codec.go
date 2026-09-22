@@ -1,10 +1,13 @@
 package engineapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/shardnode"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 // ProposalEnvelope is what the leader disseminates to followers — not a
@@ -55,6 +58,75 @@ type SealCompanion struct {
 	RootInput  data   `json:"rootInput"`
 	Witnesses  []data `json:"witnesses"`
 	Provenance string `json:"provenance"`
+}
+
+// SealCompanionWitnessCount is the exact number of witness entries bft-core writes and accepts: two.
+//
+// Position 0 is the bound authorizing certificate (types.UnicityCertificate) and position 1 is the
+// bound technical record (certification.TechnicalRecord), both encoded with types.Cbor — the canonical
+// CBOR this repository already puts a certificate under on the wire (inputcarrier/envelope.go,
+// recordwiring/capture.go, shardnode/commitobserver.go, shardnode/store.go). Both are needed because
+// rootinput.Derive authenticates the certificate against the record it commits to by hash, and the
+// companion.rootInput carries no decoder in this tree (evmroot is an encode-only model), so the
+// record must travel rather than be read back out of the root input. This supersedes the earlier
+// single-witness design in the W3 brief; see docs/design/f2c-root-input-wiring-contract.md §3.1 step 1
+// ("read the bound UC_-/TE_- from the companion").
+//
+// The length is fixed at two. Any other length is a refusal, and a third position would be a
+// deliberate contract change, not an extension a future caller may slip in.
+const SealCompanionWitnessCount = 2
+
+// encodeSealCompanionWitnesses returns the witnesses list for a block bound to uc and tr:
+// [canonical CBOR of the certificate, canonical CBOR of the technical record], in that order.
+func encodeSealCompanionWitnesses(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) ([]data, error) {
+	if uc == nil || tr == nil {
+		return nil, fmt.Errorf("%w: both the bound certificate and technical record are required", ErrCompanionWitnesses)
+	}
+	ucBytes, err := types.Cbor.Marshal(uc)
+	if err != nil {
+		return nil, fmt.Errorf("engineapi: encoding the bound certificate: %w", err)
+	}
+	trBytes, err := types.Cbor.Marshal(tr)
+	if err != nil {
+		return nil, fmt.Errorf("engineapi: encoding the bound technical record: %w", err)
+	}
+	return []data{ucBytes, trBytes}, nil
+}
+
+// decodeSealCompanionWitnesses decodes the exactly-two witnesses written by encodeSealCompanionWitnesses.
+//
+// It refuses a wrong length, a decode failure, and any encoding that is not the canonical encoding of
+// its own contents (the same rule inputcarrier.Decode applies): the bytes judged are the bytes that
+// arrived.
+func decodeSealCompanionWitnesses(witnesses []data) (*types.UnicityCertificate, *certification.TechnicalRecord, error) {
+	if len(witnesses) != SealCompanionWitnessCount {
+		return nil, nil, fmt.Errorf("%w: companion carries %d witnesses; exactly %d ([bound certificate, bound technical record]) are required",
+			ErrCompanionWitnesses, len(witnesses), SealCompanionWitnessCount)
+	}
+	uc := &types.UnicityCertificate{}
+	if err := decodeCanonicalWitness(witnesses[0], uc); err != nil {
+		return nil, nil, fmt.Errorf("%w: bound certificate at witness 0: %w", ErrCompanionWitnesses, err)
+	}
+	tr := &certification.TechnicalRecord{}
+	if err := decodeCanonicalWitness(witnesses[1], tr); err != nil {
+		return nil, nil, fmt.Errorf("%w: bound technical record at witness 1: %w", ErrCompanionWitnesses, err)
+	}
+	return uc, tr, nil
+}
+
+// decodeCanonicalWitness decodes b into v and requires v to re-encode to exactly b.
+func decodeCanonicalWitness(b []byte, v any) error {
+	if err := types.Cbor.Unmarshal(b, v); err != nil {
+		return err
+	}
+	again, err := types.Cbor.Marshal(v)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(again, b) {
+		return fmt.Errorf("not the canonical encoding of its own contents")
+	}
+	return nil
 }
 
 // MarshalJSON normalizes a nil witness slice to an empty array. A nil Go slice
