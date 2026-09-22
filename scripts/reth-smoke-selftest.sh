@@ -424,9 +424,13 @@ cat >"$T/fakebin/cargo" <<'CARGO'
 printf '%s\n' "$*" >>"$FAKE_CARGO_LOG"
 case "${FAKE_CARGO_MODE:-ok}" in
   fail) echo "cargo: simulated compile failure" >&2; exit 101 ;;
-  *) mkdir -p target/release
-     cp "$FAKE_CARGO_BIN" target/release/unicity-reth
-     chmod +x target/release/unicity-reth ;;
+  # Honour CARGO_TARGET_DIR exactly as cargo does: urethPinObtain sets it so the build never
+  # writes into the source tree, and a stand-in that ignored it would test a layout the real
+  # build no longer produces.
+  *) out=${CARGO_TARGET_DIR:-target}/release
+     mkdir -p "$out"
+     cp "$FAKE_CARGO_BIN" "$out/unicity-reth"
+     chmod +x "$out/unicity-reth" ;;
 esac
 CARGO
 chmod +x "$T/fakebin/cargo"

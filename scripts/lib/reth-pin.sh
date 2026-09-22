@@ -207,7 +207,7 @@ rethPinObtainPinned() {
 # is a COMMIT and is repinned only by an explicit edit to URETH_PIN_COMMIT here when that PR merges.
 # Nothing follows a branch: a pin that moves on its own is not a pin.
 URETH_PIN_REPO=https://github.com/ristik/ureth
-URETH_PIN_COMMIT=8cdf5c0549915b970739f2fadcc90bb15f23ada4
+URETH_PIN_COMMIT=0e0ce6dbd83f82340487e82c17393a405d547d73
 URETH_PIN_BIN=unicity-reth
 
 # The fee collector every Unicity lane passes. A test devnet needs a fixed, obviously-not-real
@@ -218,7 +218,7 @@ URETH_PIN_FEE_COLLECTOR=0x000000000000000000000000000000000000dead
 # The sibling ureth checkout to prefer when it is usable at the pinned commit, instead of cloning a
 # second copy. Overridable so the self-test can point at a stand-in; computed relative to this
 # library rather than hardcoded, and in a subshell so sourcing this file changes no directory.
-URETH_PIN_LOCAL=${URETH_PIN_LOCAL:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)/../ureth}
+URETH_PIN_LOCAL=${URETH_PIN_LOCAL:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)/ureth}
 
 # urethPinErr prints a refusal to stderr. Every refusal starts "ureth-pin: " so a reader and the
 # self-test can tell this library's verdicts from the stock pin's and from anything else on stderr,
@@ -288,7 +288,7 @@ urethPinUnicityFlags() {
 # produced the binary, the binary must report the pinned commit before it is accepted or cached.
 urethPinObtain() {
   local cacheDir=$1 destDir=$2
-  local platform commit cache dest src="" built
+  local platform commit cache dest src="" built worktree=""
   commit=$URETH_PIN_COMMIT
   platform=$(rethPinPlatform)
   cache=$(urethPinCacheEntry "$cacheDir" "$commit" "$platform")
@@ -316,22 +316,34 @@ urethPinObtain() {
 
   URETH_PIN_CACHE_STATE=miss
 
-  # Prefer the sibling checkout when it can produce the pinned commit. If it exists but cannot, say
-  # so and fall back to fetching: building whatever that checkout happens to be at and calling it
-  # pinned is the one failure this function exists to prevent.
+  # Prefer the sibling checkout when it can produce the pinned commit — but never by checking it
+  # out. That is somebody's working tree: detaching its HEAD to build a pinned commit would move a
+  # developer off their branch as a side effect of running a lane, and leave them detached
+  # afterwards. Add a throwaway worktree instead, which shares the object store (so this stays much
+  # cheaper than a clone) while the real checkout keeps its branch, its index and its HEAD.
+  #
+  # If the checkout exists but cannot produce the commit, say so and fall back to fetching: building
+  # whatever that checkout happens to be at and calling it pinned is the one failure this function
+  # exists to prevent.
   if [ -n "$URETH_PIN_LOCAL" ] && [ -d "$URETH_PIN_LOCAL/.git" ]; then
     if git -C "$URETH_PIN_LOCAL" cat-file -e "$commit^{commit}" 2>/dev/null; then
-      src=$URETH_PIN_LOCAL
-      if [ "$(git -C "$src" rev-parse HEAD 2>/dev/null)" != "$commit" ]; then
-        echo "ureth-pin: checking out $commit in the local checkout $src"
-        if ! git -C "$src" checkout --detach "$commit" >/dev/null 2>&1; then
-          urethPinErr "local checkout $src has $commit but could not be checked out at it; refusing to build whatever it is at"
-          return 1
+      src=$cacheDir/$URETH_PIN_BIN-wt-$commit
+      worktree=$src
+      if [ ! -d "$src" ]; then
+        echo "ureth-pin: adding a worktree for $commit from the local checkout $URETH_PIN_LOCAL"
+        if ! git -C "$URETH_PIN_LOCAL" worktree add --detach "$src" "$commit" >/dev/null 2>&1; then
+          urethPinErr "local checkout $URETH_PIN_LOCAL has $commit but a worktree for it could not be added; falling back to fetching $URETH_PIN_REPO"
+          src=""
         fi
       fi
     else
       urethPinErr "local checkout $URETH_PIN_LOCAL does not contain the pinned commit $commit — falling back to fetching $URETH_PIN_REPO"
     fi
+  else
+    # Say so rather than quietly cloning. A mistyped or mis-derived path costs a network clone and a
+    # cold build every time, and the only symptom is slowness — which is how a wrong path survived
+    # this function's first review.
+    echo "ureth-pin: no usable local checkout at $URETH_PIN_LOCAL, fetching $URETH_PIN_REPO instead"
   fi
 
   if [ -z "$src" ]; then
@@ -361,12 +373,16 @@ urethPinObtain() {
     fi
   fi
 
+  # Build into a cache-local target directory, never the source tree's own. Two reasons: a worktree
+  # or clone under the cache must not have a developer's checkout write 2 GB of release artifacts
+  # into it, and keying the target directory to the cache rather than the commit lets successive
+  # pins share compilation work instead of rebuilding reth from scratch each time.
   echo "ureth-pin: building $URETH_PIN_BIN from $src (cargo build --release -p $URETH_PIN_BIN)"
-  if ! ( cd "$src" && cargo build --release -p "$URETH_PIN_BIN" ); then
+  if ! ( cd "$src" && CARGO_TARGET_DIR=$cacheDir/target cargo build --release -p "$URETH_PIN_BIN" ); then
     urethPinErr "cargo build --release -p $URETH_PIN_BIN failed in $src"
     return 1
   fi
-  built=$src/target/release/$URETH_PIN_BIN
+  built=$cacheDir/target/release/$URETH_PIN_BIN
   if [ ! -x "$built" ]; then
     urethPinErr "the build reported success but $built is not an executable"
     return 1
@@ -377,6 +393,16 @@ urethPinObtain() {
   cp "$built" "$cache" || { urethPinErr "cannot cache the built binary at $cache"; return 1; }
   cp "$built" "$dest" || { urethPinErr "cannot place the built binary at $dest"; return 1; }
   chmod +x "$dest"
+
+  # Drop the throwaway worktree now the binary is cached. It is only needed once per pin, and
+  # leaving it registered would litter the developer's checkout with entries that need
+  # `git worktree prune` the moment the lane's cache directory is deleted. Failing to remove it is
+  # not a failure of the obtain: the binary is already built, verified and cached.
+  if [ -n "$worktree" ] && [ -d "$worktree" ]; then
+    git -C "$URETH_PIN_LOCAL" worktree remove --force "$worktree" >/dev/null 2>&1 ||
+      urethPinErr "note: could not remove the temporary worktree $worktree (run 'git -C $URETH_PIN_LOCAL worktree prune')"
+  fi
+
   echo "ureth-pin: built and cached $URETH_PIN_BIN at $commit ($platform)"
 }
 
