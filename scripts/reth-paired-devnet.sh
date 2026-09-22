@@ -20,23 +20,22 @@
 set -uo pipefail
 # Definitions only; sourced here, before cleanup can run, for its ownership-scoped stop functions.
 source helper.sh
+# Definitions only: the fork-client resolver and the flag the seal-capable client requires.
+. scripts/lib/reth-pin.sh
 
 validators=${1:-4}
 rounds=${2:-5}
 partitionID=8
-pinnedRethCommit=189c0df32617afc488e0f091dbface1bd72cceb4   # ristik/ureth, branch unicity/main
 
 rethEngineBase=18551
 rethEthBase=18545
 rethP2PBase=30401
 
-command -v reth >/dev/null || { echo "no reth binary on PATH - this lane has no fake fallback" >&2; exit 1; }
-rethCommit=$(reth --version | sed -n 's/^Commit SHA: //p')
-if [ "$rethCommit" != "$pinnedRethCommit" ]; then
-  echo "FAIL: reth is $rethCommit, pinned baseline is $pinnedRethCommit" >&2
-  echo "      Set F1_ALLOW_UNPINNED_RETH=1 to run anyway; output is then NOT baseline evidence." >&2
-  [ "${F1_ALLOW_UNPINNED_RETH:-0}" = "1" ] || exit 1
-fi
+# The fork client. Every validator runs `--executor engine-api`, and the shard node refuses a
+# client without the three engine_*WithSealV1 methods, so this lane resolves the pinned fork
+# client and verifies it by revision. It used to run the stock `reth` on PATH; that client cannot
+# start a shard node, so every paired lane was pointed at a client it would refuse.
+urethPinResolve || exit 1
 
 failures=0
 pass() { echo "  PASS: $1"; }
@@ -144,13 +143,14 @@ for i in $(seq 1 "$validators"); do
   # --jwt-secret test-nodes/evm$i/jwt.hex), so the adapter's own JWT minting is what has to
   # satisfy reth - nothing here pre-authenticates on its behalf.
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
-  reth node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
+  "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) \
     --http.api eth,net,web3,admin \
     --port $((rethP2PBase + i - 1)) --disable-discovery \
     --ipcdisable \
+    $(urethPinUnicityFlags) \
     >"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"
 done
@@ -197,10 +197,11 @@ cat >test-nodes/wrong-genesis.json <<'EOF'
 "coinbase":"0x0000000000000000000000000000000000000000","alloc":{},
 "baseFeePerGas":"0x3b9aca00"}
 EOF
-reth node --chain test-nodes/wrong-genesis.json --datadir test-nodes/reth-wrong/dd \
+"$URETH_BIN" node --chain test-nodes/wrong-genesis.json --datadir test-nodes/reth-wrong/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18651 \
   --http --http.addr 127.0.0.1 --http.port 18645 --http.api eth,net,web3 \
   --port 30499 --disable-discovery --ipcdisable \
+  $(urethPinUnicityFlags) \
   >test-nodes/reth-wrong/reth.log 2>&1 &
 echo $! >test-nodes/reth-wrong/pid
 for _ in $(seq 1 60); do
@@ -245,10 +246,11 @@ g = json.load(open("test-nodes/evm-genesis-funded.json"))
 g["config"]["chainId"] = 31338
 json.dump(g, open("test-nodes/wrong-chain-genesis.json", "w"))
 PYGEN
-reth node --chain test-nodes/wrong-chain-genesis.json --datadir test-nodes/reth-wrongchain/dd \
+"$URETH_BIN" node --chain test-nodes/wrong-chain-genesis.json --datadir test-nodes/reth-wrongchain/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18751 \
   --http --http.addr 127.0.0.1 --http.port 18745 --http.api eth,net,web3 \
   --port 30599 --disable-discovery --ipcdisable \
+  $(urethPinUnicityFlags) \
   >test-nodes/reth-wrongchain/reth.log 2>&1 &
 echo $! >test-nodes/reth-wrongchain/pid
 for _ in $(seq 1 60); do
@@ -281,10 +283,11 @@ g = json.load(open("test-nodes/evm-genesis-funded.json"))
 g["alloc"]["0x00000000000000000000000000000000000000aa"] = {"balance": "0x1"}
 json.dump(g, open("test-nodes/other-genesis.json", "w"))
 PYGEN
-reth node --chain test-nodes/other-genesis.json --datadir test-nodes/reth-othergenesis/dd \
+"$URETH_BIN" node --chain test-nodes/other-genesis.json --datadir test-nodes/reth-othergenesis/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18851 \
   --http --http.addr 127.0.0.1 --http.port 18845 --http.api eth,net,web3 \
   --port 30699 --disable-discovery --ipcdisable \
+  $(urethPinUnicityFlags) \
   >test-nodes/reth-othergenesis/reth.log 2>&1 &
 echo $! >test-nodes/reth-othergenesis/pid
 for _ in $(seq 1 60); do
@@ -399,10 +402,11 @@ g = json.load(open("test-nodes/evm-genesis-funded.json"))
 g["config"]["pragueTime"] = 4102444800  # 2100-01-01; far enough that it cannot activate during a run
 json.dump(g, open("test-nodes/laterfork-genesis.json", "w"))
 PYFORK
-reth node --chain test-nodes/laterfork-genesis.json --datadir test-nodes/reth-laterfork/dd \
+"$URETH_BIN" node --chain test-nodes/laterfork-genesis.json --datadir test-nodes/reth-laterfork/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18951 \
   --http --http.addr 127.0.0.1 --http.port 18945 --http.api eth,net,web3 \
   --port 30799 --disable-discovery --ipcdisable \
+  $(urethPinUnicityFlags) \
   >test-nodes/reth-laterfork/reth.log 2>&1 &
 echo $! >test-nodes/reth-laterfork/pid
 for _ in $(seq 1 60); do

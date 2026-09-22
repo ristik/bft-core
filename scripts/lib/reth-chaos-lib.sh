@@ -55,7 +55,7 @@ knownScenarios="baseline follower-restart leader-kill reth-only-restart pair-res
 
 : "${partitionID:=8}"
 : "${chainID:=31337}"
-: "${pinnedRethCommit:=189c0df32617afc488e0f091dbface1bd72cceb4}"   # ristik/ureth, branch unicity/main
+: "${pinnedRethCommit:=$URETH_PIN_COMMIT}"   # the fork client the seal-capable shard node requires
 
 : "${rethEngineBase:=18551}"
 : "${rethEthBase:=18545}"
@@ -131,12 +131,13 @@ hexToDec() { python3 -c "print(int('${1:-0x0}',16))" 2>/dev/null || echo 0; }
 startReth() {
   local i=$1
   mkdir -p "test-nodes/reth$i"
-  reth node --chain test-nodes/evm-genesis-funded.json --datadir "test-nodes/reth$i/dd" \
+  "$URETH_BIN" node --chain test-nodes/evm-genesis-funded.json --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) \
     --http.api eth,net,web3,admin \
     --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable \
+    $(urethPinUnicityFlags) \
     >>"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"
 }
@@ -437,8 +438,8 @@ validateScenarios() {
 # its archive could not establish the revisions it ran against; and because the evidence directory
 # was reused, it could inherit a PREVIOUS run's pins and appear to.
 writeRunManifest() {
-  local rethVersion="not on PATH"
-  command -v reth >/dev/null && rethVersion=$(reth --version | tr '\n' ' ')
+  local rethVersion="not resolved"
+  [ -n "${URETH_BIN:-}" ] && rethVersion=$("$URETH_BIN" --version 2>/dev/null | tr '\n' ' ')
   mkdir -p "$runDir"
   {
     echo "runID=$runID"

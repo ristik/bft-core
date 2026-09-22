@@ -40,13 +40,13 @@
 #        scripts/f6c-reth-backup-acceptance.sh --self-test
 #   -s  run only this arm (repeatable; default: ordinary-restart backup-restore)
 #   -o  evidence directory (default: evidence-runs/f6c-reth-backup-<UTC time>)
-#   RETH_BIN selects the reth binary (default: reth on PATH, then ~/.cargo/bin/reth).
+#   URETH_BIN selects the fork client (default: the pinned commit, obtained and verified by
+#   scripts/lib/reth-pin.sh). An explicitly supplied binary is still verified against the pin.
 
 set -u -o pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 chainID=31337
-pinnedRethCommit=189c0df32617afc488e0f091dbface1bd72cceb4
 # The f6b library supplies the execution-client helpers (rpc, blockAt, sendTx, waitForReceipt,
 # receiptIdentity, countTransactions). The authority lane is sourced after it, so its fail-closed
 # pass/fail and observation helpers are the ones in effect.
@@ -69,8 +69,6 @@ rethP2PBase=40401
 recoveryFlag="--evidence-recover"
 
 arms=()
-rethBin="${RETH_BIN:-$(command -v reth 2>/dev/null || echo "$HOME/.cargo/bin/reth")}"
-
 # --- lane helpers (tested offline by reth_lane_self_test) -----------------------------------------
 
 # start_any <name> <log> <command...> starts a process from this checkout and records its pid, like
@@ -213,7 +211,11 @@ write_manifest() {
     echo "repository:       $(git rev-parse HEAD 2>/dev/null || echo unknown)"
     echo "worktree clean:   $([ -z "$(git status --porcelain 2>/dev/null)" ] && echo yes || echo 'NO: this run is not reproducible from the recorded revision')"
     echo "ubft sha256:      $([ -x build/ubft ] && shasum -a 256 build/ubft | cut -d' ' -f1 || echo missing)"
-    echo "reth:             $rethBin, commit $("$rethBin" --version 2>/dev/null | sed -n 's/^Commit SHA: //p') (pinned $pinnedRethCommit), sha256 $(shasum -a 256 "$rethBin" 2>/dev/null | cut -d' ' -f1)"
+    local rethDesc="not resolved"
+    if [ -n "${URETH_BIN:-}" ]; then
+      rethDesc="$URETH_BIN, commit $("$URETH_BIN" --version 2>/dev/null | sed -n 's/^Commit SHA: //p') (pinned ${URETH_PIN_COMMIT:-unknown}), sha256 $(shasum -a 256 "$URETH_BIN" 2>/dev/null | cut -d' ' -f1)"
+    fi
+    echo "reth:             $rethDesc"
     echo "go:               $(go version 2>/dev/null)"
     echo "host:             $(uname -srm)"
     echo "cluster:          network $networkID, partition $partitionID, T2 ${t2Millis}ms, one root node, $validators validators (quorum 2 of 2), v1 signs through the authority, v2 with its local key"
@@ -370,11 +372,12 @@ PY
   } >"$scen/identity.txt" || artifact_error "identity.txt"
 
   for i in 1 2; do
-    start_any "reth$i" "$scen/reth$i/reth.log" "$rethBin" node --chain "$scen/evm-genesis-funded.json" \
+    start_any "reth$i" "$scen/reth$i/reth.log" "$URETH_BIN" node --chain "$scen/evm-genesis-funded.json" \
       --datadir "$scen/reth$i/dd" --authrpc.jwtsecret "$scen/v$i/jwt.hex" \
       --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
       --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,txpool \
-      --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable || { fail "could not start reth $i"; return 1; }
+      --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable \
+      $(urethPinUnicityFlags) || { fail "could not start reth $i"; return 1; }
   done
   for i in 1 2; do
     waited=0
@@ -800,12 +803,11 @@ done
 for a in "${arms[@]}"; do
   case "$a" in ordinary-restart | backup-restore) ;; *) echo "unknown arm: $a" >&2; exit 2 ;; esac
 done
-[ -x "$rethBin" ] || { echo "no reth binary at '$rethBin' (set RETH_BIN)" >&2; exit 2; }
-rethCommit=$("$rethBin" --version 2>/dev/null | sed -n 's/^Commit SHA: //p')
-if [ "$rethCommit" != "$pinnedRethCommit" ]; then
-  echo "reth at $rethBin is commit '$rethCommit', the pinned commit is $pinnedRethCommit" >&2
-  exit 2
-fi
+# The fork client. This lane drives shard nodes with `--executor engine-api`, and the node refuses
+# a client without the three engine_*WithSealV1 methods, so resolve and verify the pinned fork. The
+# old RETH_BIN indirection is folded into the resolver's URETH_BIN, which is verified too: an
+# operator pointing at stock reth is refused rather than silently measured.
+urethPinResolve || exit 2
 
 startedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 invocation="$0 $*"

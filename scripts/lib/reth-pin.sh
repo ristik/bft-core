@@ -406,6 +406,48 @@ urethPinObtain() {
   echo "ureth-pin: built and cached $URETH_PIN_BIN at $commit ($platform)"
 }
 
+# urethPinResolve [dest-dir]
+#
+# Resolves the fork execution client a paired lane must run, verifies it reports the pinned commit,
+# and exports URETH_BIN for the lane's launch sites. This is the one resolver every lane uses; none
+# of them reproduces this logic.
+#
+# URETH_BIN, when set, wins and is STILL verified: an operator pointing at their own build from the
+# pinned commit is fine, and an operator accidentally pointing at stock reth is refused rather than
+# silently measured. Otherwise the pinned commit is obtained through urethPinObtain.
+#
+# The default destination is the pin library's own bin directory under the cache, not a directory in
+# a lane's tree. That is deliberate and load-bearing: setup-evm-nodes.sh runs `make clean`, which
+# deletes test-nodes/ whole, and reth-chaos.sh and the f6b lanes delete test-nodes/ between
+# scenarios, so a copy there is deleted out from under a running lane. The shared bin also means the
+# ~28-minute build is paid once on a host and every lane afterwards is a cache hit. The binary is
+# verified by the revision it reports on every resolve, so the shared path is not a shared verdict.
+#
+# A cold obtain is a ~28-minute release build, so a line saying that is printed BEFORE it starts.
+urethPinResolve() {
+  local destDir=${1:-} cacheDir
+  cacheDir=${URETH_PIN_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/ureth-pin}
+  if [ -n "${URETH_BIN:-}" ]; then
+    if ! urethPinVerifyBinary "$URETH_BIN" "$URETH_PIN_COMMIT"; then
+      urethPinErr "URETH_BIN='$URETH_BIN' is not the pinned fork client — refusing to run a lane against it"
+      return 1
+    fi
+    export URETH_BIN
+    return 0
+  fi
+  [ -n "$destDir" ] || destDir=$cacheDir/bin
+  if [ ! -f "$(urethPinCacheEntry "$cacheDir" "$URETH_PIN_COMMIT" "$(rethPinPlatform)")" ]; then
+    echo "ureth-pin: no cached $URETH_PIN_BIN for $URETH_PIN_COMMIT — building it now; a cold build is a ~28-minute release build, cached for every later lane"
+  fi
+  if ! urethPinObtain "$cacheDir" "$destDir"; then
+    return 1
+  fi
+  URETH_BIN=$destDir/$URETH_PIN_BIN
+  export URETH_BIN
+  echo "ureth-pin: using $URETH_BIN (commit $URETH_PIN_COMMIT)"
+  return 0
+}
+
 # --- evidence -----------------------------------------------------------------------------------
 
 # rethEvidenceCollect <nodes-dir> <out-dir> copies what a failed run is diagnosed from: every node's

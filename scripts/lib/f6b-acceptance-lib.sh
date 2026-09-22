@@ -25,6 +25,12 @@
 #   manifestLogs    space-separated log paths the artifact must preserve.
 #   manifestLines   extra "label: value" lines, one per array element.
 
+# The pin library's fork-client resolver. Every lane here launches the client the shard node
+# requires (it refuses a client without the seal methods), which is not the stock `reth` these lanes
+# used to find on PATH. Definitions only, like this file.
+# shellcheck source=scripts/lib/reth-pin.sh
+. "$(dirname "${BASH_SOURCE[0]}")/reth-pin.sh"
+
 : "${failures:=0}"
 : "${reached:=startup}"
 : "${validators:=3}"

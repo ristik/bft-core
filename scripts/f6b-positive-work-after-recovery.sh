@@ -50,7 +50,6 @@ if [ "${1:-}" = "--self-test" ]; then selfTest=true; shift; fi
 validators=${1:-3}
 partitionID=8
 chainID=31337
-pinnedRethCommit=189c0df32617afc488e0f091dbface1bd72cceb4
 rethEngineBase=18551
 rethEthBase=18545
 rethP2PBase=30401
@@ -70,13 +69,13 @@ manifestLines=()
 
 $selfTest && { f6bSelfTest; exit $?; }
 
-command -v reth >/dev/null || { echo "no reth binary on PATH - this lane has no fake fallback" >&2; exit 1; }
-rethCommit=$(reth --version | sed -n 's/^Commit SHA: //p')
-if [ "$rethCommit" != "$pinnedRethCommit" ]; then
-  echo "FAIL: reth is $rethCommit, pinned baseline is $pinnedRethCommit" >&2
-  echo "      Set F6B_ALLOW_UNPINNED_RETH=1 to run anyway; output is then NOT baseline evidence." >&2
-  [ "${F6B_ALLOW_UNPINNED_RETH:-0}" = "1" ] || exit 1
-fi
+# The fork client. Every validator runs `--executor engine-api`, and the shard node refuses a
+# client without the three engine_*WithSealV1 methods, so this lane resolves the pinned fork
+# client and verifies it by revision rather than relying on whatever `reth` is on PATH. It used
+# to run the stock `reth` and baseline against 189c0df3; that client cannot start a shard node.
+urethPinResolve || exit 1
+rethCommit=$("$URETH_BIN" --version 2>/dev/null | sed -n 's/^Commit SHA: //p')
+pinnedRethCommit=$URETH_PIN_COMMIT
 [ -x build/ubft ] || { echo "build/ubft missing - run 'make build' first" >&2; exit 1; }
 
 # Nothing may already be listening on the ports this run needs. A previous run's clients would
@@ -141,12 +140,13 @@ info "funded chain spec $(shasum -a 256 "$chainSpec" | cut -d' ' -f1)"
 for i in $(seq 1 "$validators"); do
   mkdir -p "test-nodes/reth$i"
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
-  reth node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
+  "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) \
     --http.api eth,net,web3,admin,txpool \
     --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable \
+    $(urethPinUnicityFlags) \
     >"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"
 done
