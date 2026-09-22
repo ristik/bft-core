@@ -16,7 +16,9 @@ const importPath = "github.com/unicitynetwork/bft-core/registryproof"
 
 // TestNoProductionPackageImportsTheReader is the inertness guard: no non-test Go file outside this package
 // imports it, so no node reads the registry through it and the go-ethereum trie packages it links are not
-// in any production binary yet.
+// in any production binary yet. The CLI genesis command is the one allowed exception to the spirit of
+// "reader": it imports the pinned a_sr constant to build Pins, not the reader, and it already links the
+// same trie packages through registrygenesis.
 func TestNoProductionPackageImportsTheReader(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
@@ -68,6 +70,7 @@ func TestNoProductionPackageImportsTheReader(t *testing.T) {
 		require.True(t, scanned[want], "expected to scan %s", want)
 	}
 	require.Equal(t, []string{
+		filepath.Join("cli", "ubft", "cmd", "engine_api_genesis.go"),
 		filepath.Join("configuredprogress", "codec.go"),
 		filepath.Join("configuredprogress", "hash_index.go"),
 		filepath.Join("parentwitness", "provider.go"),

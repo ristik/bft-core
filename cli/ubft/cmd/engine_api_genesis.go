@@ -3,10 +3,13 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
 
+	"github.com/unicitynetwork/bft-core/registrygenesis"
+	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 )
 
@@ -24,6 +27,14 @@ type engineAPIGenesisFlags struct {
 	GasLimit  uint64
 	Coinbase  string
 	ExtraData string
+
+	// AllocSource is an operator-supplied standard genesis JSON used as the source instead of the
+	// built-in template. It is mutually exclusive with the template-shaping flags below, because a
+	// flag and the file would otherwise silently fight over the same genesis field.
+	AllocSource string
+	// RootEpoch is the root epoch of the genesis record's Pins. It must be non-zero:
+	// rootinput.ObservationProfileBindingV2 refuses RootEpoch 0.
+	RootEpoch uint64
 }
 
 func newEngineAPICmd(baseFlags *baseFlags) *cobra.Command {
@@ -39,8 +50,8 @@ func engineAPIGenesisCmd(baseFlags *baseFlags) *cobra.Command {
 	flags := &engineAPIGenesisFlags{baseFlags: baseFlags}
 	cmd := &cobra.Command{
 		Use:   "genesis",
-		Short: "Generate a reth-compatible genesis.json derived from a shard conf",
-		Long: `Generate a reth-compatible genesis.json whose chainId is taken directly from the
+		Short: "Generate a finalized reth-compatible genesis.json derived from a shard conf",
+		Long: `Generate a finalized reth-compatible genesis.json whose chainId is taken directly from the
 shard conf's "chain_id" partition param, so the two files can never drift apart — see
 docs/adr/0001-executor-boundary.md decision 3.
 
@@ -48,18 +59,29 @@ Schedules Shanghai and Cancun at genesis (timestamp 0) and deliberately leaves e
 after Cancun (Prague, Osaka, ...) out of the schedule entirely, matching the exact V3
 Engine API method set this adapter speaks. Scheduling every fork at 0 would activate
 post-Cancun consensus rules the moment reth's own defaults decide they apply, silently
-requiring engine_newPayloadV4+ this adapter does not implement.`,
+requiring engine_newPayloadV4+ this adapter does not implement.
+
+The output is the FINALIZED genesis: registrygenesis.PrepareGenesisJSON inserts the pinned
+SealRegistry account at a_sr (its runtime code and the 22 initialized storage words) into the
+source allocation and derives the full shard configuration and genesis origin from it. The
+derived identities are printed so an operator can compare them; they are deliberately not
+written beside the artifact, because a second trusted file would be a second source of truth
+and the origin is re-derivable from the finalized JSON.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return engineAPIGenesis(flags)
+			return engineAPIGenesis(flags, cmd.Flags().Changed, cmd.OutOrStdout())
 		},
 	}
 	flags.addShardConfFlags(cmd, false)
-	cmd.Flags().StringVar(&flags.Out, "out", "", "output path for the generated genesis.json (required)")
+	cmd.Flags().StringVar(&flags.Out, "out", "", "output path for the finalized genesis.json (required)")
 	cmd.Flags().Uint64Var(&flags.GasLimit, "gas-limit", defaultGasLimit,
 		"per-block gas limit — a starting point, not a validated operational limit (see docs/engine-api-adapter-plan.md §8)")
 	cmd.Flags().StringVar(&flags.Coinbase, "coinbase", "0x0000000000000000000000000000000000000000",
 		"genesis coinbase address")
 	cmd.Flags().StringVar(&flags.ExtraData, "extra-data", "0x", "genesis extraData, as a 0x-prefixed hex string")
+	cmd.Flags().StringVar(&flags.AllocSource, "alloc-source", "",
+		"standard genesis JSON to use as the source instead of the built-in template; refuses to combine with --gas-limit, --coinbase or --extra-data")
+	cmd.Flags().Uint64Var(&flags.RootEpoch, "root-epoch", 1,
+		"root epoch of the genesis record's pins (must be non-zero)")
 	if err := cmd.MarkFlagRequired("out"); err != nil {
 		panic(err)
 	}
@@ -71,6 +93,9 @@ requiring engine_newPayloadV4+ this adapter does not implement.`,
 // docs/adr/0001-executor-boundary.md decision 1: the same reasoning that
 // keeps engineapi's Engine API types out of a go-ethereum dependency
 // applies here too, and this is a small, stable, well-documented format.
+//
+// It is only the SOURCE template: registrygenesis.PrepareGenesisJSON parses it, inserts the pinned
+// registry account and re-emits the finalized JSON.
 type gethGenesis struct {
 	Config     gethChainConfig   `json:"config"`
 	Nonce      string            `json:"nonce"`
@@ -116,7 +141,7 @@ type gethChainConfig struct {
 	TerminalTotalDifficultyPassed bool   `json:"terminalTotalDifficultyPassed"`
 }
 
-func engineAPIGenesis(flags *engineAPIGenesisFlags) error {
+func engineAPIGenesis(flags *engineAPIGenesisFlags, changed func(string) bool, out io.Writer) error {
 	shardConfs, err := flags.loadShardConfs(flags.baseFlags)
 	if err != nil {
 		return fmt.Errorf("loading shard conf: %w", err)
@@ -130,8 +155,73 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags) error {
 	if !ok {
 		return fmt.Errorf("shard conf has no chain_id partition param — set --partition-params chain_id=<id> when generating it")
 	}
+	if flags.RootEpoch == 0 {
+		return fmt.Errorf("--root-epoch must be non-zero: rootinput.ObservationProfileBindingV2 refuses a configured root epoch of 0")
+	}
 
-	genesis := gethGenesis{
+	art, err := registrygenesis.PinnedArtifact()
+	if err != nil {
+		return fmt.Errorf("loading the pinned seal-registry artifact: %w", err)
+	}
+
+	source, err := engineAPIGenesisSource(flags, changed, chainID)
+	if err != nil {
+		return err
+	}
+
+	pins := registrygenesis.Pins{
+		RootEpoch:        flags.RootEpoch,
+		RegistryCodeHash: art.CodeHash,
+		SystemAddress:    registrygenesis.SystemAddress,
+		RegistryAddress:  registryproof.RegistryAddress,
+	}
+	prepared, err := registrygenesis.PrepareGenesisJSON(shardConf, pins, art, source, registrygenesis.DefaultGenesisJSONLimits())
+	if err != nil {
+		return fmt.Errorf("preparing the finalized genesis: %w", err)
+	}
+
+	// Written directly with os.WriteFile rather than this CLI's usual util.WriteJsonFile helper:
+	// that helper is for bft-core's own CBOR+JSON dual-tagged types, and the finalized bytes are
+	// already canonical JSON produced by registrygenesis.
+	if err := os.WriteFile(flags.Out, prepared.GenesisJSON(), 0600); err != nil { // #nosec G306 -- matches util.WriteJsonFile's own mode
+		return fmt.Errorf("writing %q: %w", flags.Out, err)
+	}
+
+	origin := prepared.Origin()
+	fmt.Fprintf(out, "wrote %s (chainId=%d, shanghai+cancun at genesis, registry account at %s)\n",
+		flags.Out, chainID, registryproof.RegistryAddress)
+	// The identities, printed for an operator to compare. Deliberately not written beside the
+	// artifact: the origin is re-derivable from the finalized JSON, and a sidecar would be a second
+	// trusted file and a second source of truth.
+	fmt.Fprintf(out, "full shard conf hash:       %s\n", origin.FullShardConfHash())
+	fmt.Fprintf(out, "state root:                 %s\n", origin.StateRoot())
+	fmt.Fprintf(out, "block hash:                 %s\n", origin.BlockHash())
+	fmt.Fprintf(out, "execution config identity:  %s\n", origin.ExecutionConfigIdentity())
+	fmt.Fprintf(out, "origin identity:            %s\n", origin.Identity())
+	return nil
+}
+
+// engineAPIGenesisSource returns the standard genesis JSON to prepare from: the operator's file when
+// --alloc-source is given, otherwise this command's own template.
+//
+// The template-shaping flags and --alloc-source are mutually exclusive rather than merged. Both the
+// file and a flag would name the same genesis field (gasLimit is even required by the source), and
+// silently letting one win is exactly the ambiguity the operator cannot see afterwards.
+func engineAPIGenesisSource(flags *engineAPIGenesisFlags, changed func(string) bool, chainID uint64) ([]byte, error) {
+	if flags.AllocSource != "" {
+		for _, name := range []string{"gas-limit", "coinbase", "extra-data"} {
+			if changed(name) {
+				return nil, fmt.Errorf("--alloc-source %q and --%s both specify genesis fields; the source file is authoritative, so this refuses rather than silently picking a winner", flags.AllocSource, name)
+			}
+		}
+		data, err := os.ReadFile(flags.AllocSource) // #nosec G304 -- operator-supplied config path, same trust level as --shard-conf
+		if err != nil {
+			return nil, fmt.Errorf("reading --alloc-source %q: %w", flags.AllocSource, err)
+		}
+		return data, nil
+	}
+
+	template := gethGenesis{
 		Config: gethChainConfig{
 			ChainID:                       chainID,
 			HomesteadBlock:                0,
@@ -160,18 +250,9 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags) error {
 		Alloc:      map[string]string{},
 		BaseFee:    "0x3b9aca00", // 1 gwei — a starting point; EIP-1559 adjusts it from here
 	}
-
-	// Written directly with json.MarshalIndent rather than this CLI's usual
-	// util.WriteJsonFile helper: that helper is for bft-core's own CBOR+JSON
-	// dual-tagged types, and reth's genesis format is neither — a plain
-	// struct with its own field-presence rules is clearer here.
-	data, err := json.MarshalIndent(genesis, "", "  ")
+	data, err := json.MarshalIndent(template, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encoding genesis: %w", err)
+		return nil, fmt.Errorf("encoding the genesis template: %w", err)
 	}
-	if err := os.WriteFile(flags.Out, data, 0600); err != nil { // #nosec G306 -- matches util.WriteJsonFile's own mode
-		return fmt.Errorf("writing %q: %w", flags.Out, err)
-	}
-	fmt.Printf("wrote %s (chainId=%d, shanghai+cancun at genesis, gasLimit=%d)\n", flags.Out, chainID, flags.GasLimit)
-	return nil
+	return data, nil
 }

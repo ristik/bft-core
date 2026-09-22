@@ -14,8 +14,10 @@ import (
 
 const importPath = "github.com/unicitynetwork/bft-core/registrygenesis"
 
-// TestNoProductionPackageImportsTheGenerator is the inertness guard: only the inactive v2 derivation API
-// may consume a checked GenesisOrigin; no command or node generates or checks a registry genesis yet.
+// TestNoProductionPackageImportsTheGenerator is the inertness guard for the CHECKED origin: only the
+// inactive v2 derivation API may consume a checked GenesisOrigin, and no node generates or checks a
+// registry genesis yet. The CLI genesis command is an allowed generator (U5a): it produces the
+// finalized artifact an operator provisions, but nothing consumes a checked origin from it.
 func TestNoProductionPackageImportsTheGenerator(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
@@ -62,6 +64,6 @@ func TestNoProductionPackageImportsTheGenerator(t *testing.T) {
 	for _, want := range []string{"cli/ubft/cmd/engine_api_genesis.go", "cli/ubft/cmd/shard_node_run.go", "shardnode/round.go", "engineapi/adapter.go"} {
 		require.True(t, scanned[want], "expected to scan %s", want)
 	}
-	require.Equal(t, []string{filepath.Join("configuredadmission", "adapter.go"), filepath.Join("configuredprogress", "codec.go"), filepath.Join("configuredprogress", "store.go"), filepath.Join("rootinput", "v2.go")}, importers,
-		"only the inactive v2 derivation API may import %s", importPath)
+	require.Equal(t, []string{filepath.Join("cli", "ubft", "cmd", "engine_api_genesis.go"), filepath.Join("configuredadmission", "adapter.go"), filepath.Join("configuredprogress", "codec.go"), filepath.Join("configuredprogress", "store.go"), filepath.Join("rootinput", "v2.go")}, importers,
+		"only the genesis command and the inactive v2 derivation API may import %s", importPath)
 }

@@ -13,8 +13,9 @@ exactly as docs/design/f4a-seal-registry-contract.md §5.3 orders it:
 Each step reads only earlier steps. The package also provides the §5.3 startup context check
 (VerifyContext) and the genesis proof material a node would retain as witness(evmGenesisHash) (§8.2).
 
-Nothing in production imports this package (inert_test.go). It changes no deployment configuration and
-no command: `ubft engine-api genesis` still writes an empty allocation.
+The CLI genesis command generates the finalized artifact and prints the derived GenesisOrigin (its only
+production importer), but no node consumes one yet: nothing derives readiness or authority from it
+(inert_test.go).
 */
 package registrygenesis
 
