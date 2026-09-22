@@ -516,8 +516,11 @@ echo "waiting for $rounds certified rounds ..."
 # the asserted condition itself removes the race without weakening anything — the budget is
 # unchanged and a shard that genuinely never submits a quiet round still fails.
 for _ in $(seq 1 120); do
-  n=$(grep -c 'accepted certificate' test-nodes/evm1/debug.log 2>/dev/null || echo 0)
-  quiet=$(grep -c 'quiet=true' test-nodes/evm1/debug.log 2>/dev/null || echo 0)
+  # `grep -c` exits 1 on a zero count, so `$(grep -c ... || echo 0)` prints "0\n0" and every
+  # numeric test below is a syntax error rather than a false — a wait loop that cannot read its own
+  # condition. Same trap scripts/lib/f6b-acceptance-lib.sh documents at countIn.
+  n=$(grep -c 'accepted certificate' test-nodes/evm1/debug.log 2>/dev/null | head -1); n=${n:-0}
+  quiet=$(grep -c 'quiet=true' test-nodes/evm1/debug.log 2>/dev/null | head -1); quiet=${quiet:-0}
   [ "$n" -ge "$rounds" ] && [ "$quiet" -gt 0 ] && break
   sleep 2
 done
