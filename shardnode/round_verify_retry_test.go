@@ -2,6 +2,7 @@ package shardnode_test
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -11,6 +12,91 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
 )
+
+type transientVerifyFault struct{ error }
+
+func (transientVerifyFault) TransientVerify() bool { return true }
+
+type transientThenValid struct {
+	*executortest.Fake
+	calls  atomic.Int32
+	always bool
+}
+
+func (p *transientThenValid) Verify(ctx context.Context, b shardnode.Block, params shardnode.RoundParams) (shardnode.Status, error) {
+	if p.calls.Add(1) == 1 || p.always {
+		return shardnode.StatusSyncing, transientVerifyFault{errors.New("local proof unavailable")}
+	}
+	return p.Fake.Verify(ctx, b, params)
+}
+
+func TestRound_RetriesTransientWitnessOnceThenSubmits(t *testing.T) {
+	exec := &transientThenValid{Fake: executortest.New()}
+	sub := &recordingSubmitter{}
+	r, nodeID := newTestRound(t, exec, sub)
+	r.SetAwaitTimeout(2 * time.Second)
+	start := time.Now()
+	require.NoError(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID)))
+	require.Len(t, sub.got, 1)
+	require.EqualValues(t, 2, exec.calls.Load())
+	require.GreaterOrEqual(t, time.Since(start), 500*time.Millisecond)
+}
+
+func TestRound_AbstainsAfterTwoTransientWitnessEpisodes(t *testing.T) {
+	exec := &transientThenValid{Fake: executortest.New(), always: true}
+	sub := &recordingSubmitter{}
+	r, nodeID := newTestRound(t, exec, sub)
+	r.SetAwaitTimeout(2 * time.Second)
+	require.NoError(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID)))
+	require.Empty(t, sub.got)
+	require.EqualValues(t, 2, exec.calls.Load(), "no replenished proof episode on every 100 ms poll")
+}
+
+type deadlineVerify struct{ *executortest.Fake }
+
+func (p *deadlineVerify) Verify(ctx context.Context, _ shardnode.Block, _ shardnode.RoundParams) (shardnode.Status, error) {
+	<-ctx.Done()
+	return shardnode.StatusSyncing, transientVerifyFault{ctx.Err()}
+}
+
+func TestRound_PassesDeadlineIntoTransientVerification(t *testing.T) {
+	exec := &deadlineVerify{Fake: executortest.New()}
+	sub := &recordingSubmitter{}
+	r, nodeID := newTestRound(t, exec, sub)
+	r.SetAwaitTimeout(120 * time.Millisecond)
+	start := time.Now()
+	require.NoError(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID)))
+	require.Empty(t, sub.got)
+	require.Less(t, time.Since(start), 500*time.Millisecond)
+}
+
+type preparedBuildExecutor struct {
+	*executortest.Fake
+	prepared atomic.Bool
+	built    atomic.Bool
+}
+
+func (p *preparedBuildExecutor) PrepareBuild(_ context.Context, params shardnode.RoundParams) (func(context.Context) (shardnode.BuildID, error), error) {
+	p.prepared.Store(true)
+	return func(ctx context.Context) (shardnode.BuildID, error) {
+		p.built.Store(true)
+		return p.Fake.Build(ctx, params)
+	}, nil
+}
+
+func (p *preparedBuildExecutor) Build(context.Context, shardnode.RoundParams) (shardnode.BuildID, error) {
+	panic("round bypassed the prepared build")
+}
+
+func TestRound_UsesPreparedBuildBeforeFinalityMutation(t *testing.T) {
+	exec := &preparedBuildExecutor{Fake: executortest.New()}
+	sub := &recordingSubmitter{}
+	r, nodeID := newTestRound(t, exec, sub)
+	require.NoError(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID)))
+	require.True(t, exec.prepared.Load())
+	require.True(t, exec.built.Load())
+	require.Len(t, sub.got, 1)
+}
 
 // pendingThenValid wraps a real Fake but overrides Verify to report
 // StatusSyncing for the first n calls before delegating for real — proving

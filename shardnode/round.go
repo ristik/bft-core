@@ -1264,6 +1264,18 @@ func (r *Round) commitFinal(ctx context.Context, who string, hash Hash) (Status,
 }
 
 func (r *Round) buildFinal(ctx context.Context, params RoundParams, held *types.UnicityCertificate, ticket ReadinessTicket) (BuildID, error) {
+	// An executor with a preparation phase acquires slow, immutable evidence before the finality
+	// gate. Its returned closure alone may mutate forkchoice after readiness is rechecked below.
+	build := func(runCtx context.Context) (BuildID, error) { return r.executor.Build(runCtx, params) }
+	if preparer, ok := r.executor.(interface {
+		PrepareBuild(context.Context, RoundParams) (func(context.Context) (BuildID, error), error)
+	}); ok {
+		var err error
+		build, err = preparer.PrepareBuild(ctx, params)
+		if err != nil {
+			return "", err
+		}
+	}
 	// Build sets head, safe and finalized on the parent before any payload exists, so it changes
 	// finality even though it reads as "start a block". The record gate's mutable-state check runs
 	// inside this hold and before the Build: a ticket revoked here must not reach an Engine call that
@@ -1278,7 +1290,7 @@ func (r *Round) buildFinal(ctx context.Context, params RoundParams, held *types.
 	if err := r.revalidateChildReadiness(ctx, ticket, held); err != nil {
 		return "", err
 	}
-	return r.executor.Build(ctx, params)
+	return build(ctx)
 }
 
 func sameBlockRef(a, b BlockRef) bool {
@@ -1450,21 +1462,45 @@ const verifyRetryInterval = 100 * time.Millisecond
 // validator willing to wait before abstaining from the round") rather than
 // introducing a second, independently-tuned timeout.
 func (r *Round) verifyWithRetry(ctx context.Context, block Block, params RoundParams) (Status, error) {
-	deadline := time.Now().Add(r.awaitTimeout)
+	verifyCtx, cancel := context.WithTimeout(ctx, r.awaitTimeout)
+	defer cancel()
+	// A local proof failure gets at most one renewed acquisition, after a 500 ms backoff.
+	// This bounds the entire round to two 500 ms episodes and 2.4 MiB of responses.
+	const transientRetryDelay = 500 * time.Millisecond
+	transientAttempts := 0
 	for {
-		status, err := r.executor.Verify(ctx, block, params)
+		status, err := r.executor.Verify(verifyCtx, block, params)
 		if err != nil {
-			return status, err
+			var transient interface{ TransientVerify() bool }
+			if !errors.As(err, &transient) || !transient.TransientVerify() || status != StatusSyncing {
+				return status, err
+			}
+			if transientAttempts >= 1 || verifyCtx.Err() != nil {
+				if r.log != nil {
+					r.log.WarnContext(ctx, "abstaining after local parent witness acquisition remained unavailable", slog.String("err", err.Error()))
+				}
+				return status, nil
+			}
+			transientAttempts++
+			select {
+			case <-verifyCtx.Done():
+				return status, nil
+			case <-time.After(transientRetryDelay):
+			}
+			continue
 		}
 		if status != StatusSyncing && status != StatusAccepted {
 			return status, nil
 		}
-		if !time.Now().Before(deadline) {
+		if verifyCtx.Err() != nil {
 			return status, nil // caller treats a still-pending status as abstain, not reject
 		}
 		select {
-		case <-ctx.Done():
-			return status, fmt.Errorf("verify retry: %w", ctx.Err())
+		case <-verifyCtx.Done():
+			if ctx.Err() != nil {
+				return status, fmt.Errorf("verify retry: %w", ctx.Err())
+			}
+			return status, nil
 		case <-time.After(verifyRetryInterval):
 		}
 	}
