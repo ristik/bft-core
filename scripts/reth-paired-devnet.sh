@@ -575,6 +575,17 @@ else
   done
 fi
 
+divergenceLogged=false
+for i in $(seq 1 "$validators"); do
+  if grep -qiE 'diverge|equivocat|impossible certificate ordering' "test-nodes/evm$i/debug.log" 2>/dev/null; then
+    fail "validator $i logged divergence/equivocation"
+    divergenceLogged=true
+  fi
+done
+if ! $divergenceLogged; then
+  pass "no validator logged divergence or equivocation"
+fi
+
 # #232 is a known independent startup-profile failure. Keep it visible; its preflight above
 # records the exact observed diagnosis, and D1's own verdict below is separate.
 echo "3f status: see section 3f (known issue #232; FAIL until fixed)"

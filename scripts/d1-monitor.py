@@ -47,7 +47,8 @@ def execution_evidence(nodes, height, block_hash, commitment):
             raise RuntimeError(f"validator {i} lacks VALID verification for B{height}")
         partition_round = field(verified[-1], "round")
         certified = [line for line in lines if 'msg="accepted certificate"' in line
-                     and field(line, "partitionRound") == partition_round]
+                     and field(line, "partitionRound") == partition_round
+                     and field(line, "blockHash") == block_hash[2:]]
         if not certified:
             raise RuntimeError(f"validator {i} lacks root certificate for B{height} / round {partition_round}")
         root_input = field(verified[-1], "rootInput")

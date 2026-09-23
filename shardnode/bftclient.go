@@ -752,6 +752,7 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 			slog.Bool("retryOfFailedApply", retryOfFailedApply),
 			slog.Uint64("partitionRound", cr.UC.GetRoundNumber()),
 			slog.Uint64("rootRound", cr.UC.GetRootRoundNumber()),
+			slog.String("blockHash", fmt.Sprintf("%x", cr.UC.InputRecord.BlockHash)),
 			slog.Uint64("nextRound", cr.Technical.Round),
 			slog.String("nextLeader", cr.Technical.Leader))
 	}
