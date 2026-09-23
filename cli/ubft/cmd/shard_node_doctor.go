@@ -204,7 +204,9 @@ func adapterChecks(flags *shardNodeDoctorFlags) []doctorCheck {
 		if err != nil {
 			return nil, err
 		}
-		return engineapi.NewAdapter(engineapi.Config{EngineURL: flags.EngineURL, EthURL: flags.EthURL, Secret: secret}, nil), nil
+		adapter := engineapi.NewAdapter(engineapi.Config{EngineURL: flags.EngineURL, EthURL: flags.EthURL, Secret: secret}, nil)
+		adapter.RequireSealCapabilities()
+		return adapter, nil
 	}
 
 	return []doctorCheck{
@@ -218,7 +220,7 @@ func adapterChecks(flags *shardNodeDoctorFlags) []doctorCheck {
 				if err := a.CheckCapabilities(ctx); err != nil {
 					return false, err.Error(), "check --engine-url and --jwt-secret point at a running execution client's authenticated endpoint"
 				}
-				return true, fmt.Sprintf("reachable at %s with the required V3 capability set", flags.EngineURL), ""
+				return true, fmt.Sprintf("reachable at %s with the required seal capability set", flags.EngineURL), ""
 			},
 		},
 		{
