@@ -362,9 +362,13 @@ def proof_fault():
 
 
 def leader():
+    # D2A-2 was reproduced with validator 2 holding the uncertified local proposal.
+    # Keep this fault deterministic so the acceptance run proves that exact restarted
+    # leader rejoins instead of killing whichever validator happens to lead first.
+    candidates = [2] if SCENARIO == "leader-kill" else range(1, 5)
     deadline = time.monotonic() + 40
     while time.monotonic() < deadline:
-        for i in range(1, 5):
+        for i in candidates:
             lines = Path(f"test-nodes/evm{i}/debug.log").read_text(errors="replace").splitlines()
             for line in reversed(lines[-100:]):
                 round_match = re.search(r"(?:^|\s)round=(\d+)(?:\s|$)", line)
@@ -373,6 +377,8 @@ def leader():
                     print(f"D2C leader detected from logs: validator={i}; {line}", flush=True)
                     return i
         time.sleep(0.1)
+    if SCENARIO == "leader-kill":
+        raise RuntimeError("validator 2 did not become active leader within 40 seconds")
     raise RuntimeError("no active leader proposal observed in shard logs within 40 seconds")
 
 
