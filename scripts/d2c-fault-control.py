@@ -368,7 +368,7 @@ elif SCENARIO == "missing-body":
     # Close the journal owner before editing its Bolt file offline.
     stop("evm", 1, "TERM")
     result = subprocess.run(["go", "run", "scripts/d2c-journal-edit.go",
-        "delete-certified-height", "test-nodes/execution-journals/evm1.db", "5"],
+        "delete-certified-height", "test-nodes/evm1/execution-journal.db", "5"],
         text=True, capture_output=True)
     if result.returncode:
         raise RuntimeError("journal edit helper failed:\n"
