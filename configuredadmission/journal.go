@@ -31,23 +31,26 @@ type JournalFactory struct {
 }
 
 type journalAdmission struct {
-	mu        sync.Mutex
-	closed    bool
-	store     *configuredprogress.Store
-	context   configuredprogress.Context
-	limits    configuredprogress.JournalLimits
-	gate      shardnode.FinalityBoundary
-	callbacks shardnode.AdmissionCallbacks
-	epoch     uint64
-	catchUp   func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
-	onStop    func(error)
-	logger    *slog.Logger
-	ctx       context.Context
-	closeCh   chan struct{}
-	retrying  bool
-	pendingUC *types.UnicityCertificate
-	pendingTR *certification.TechnicalRecord
-	pendingID uint64
+	mu              sync.Mutex
+	closed          bool
+	store           *configuredprogress.Store
+	context         configuredprogress.Context
+	limits          configuredprogress.JournalLimits
+	gate            shardnode.FinalityBoundary
+	callbacks       shardnode.AdmissionCallbacks
+	epoch           uint64
+	catchUp         func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
+	onStop          func(error)
+	logger          *slog.Logger
+	ctx             context.Context
+	closeCh         chan struct{}
+	retrying        bool
+	pendingUC       *types.UnicityCertificate
+	pendingTR       *certification.TechnicalRecord
+	pendingID       uint64
+	pendingSince    time.Time
+	pendingAttempts uint64
+	pendingError    string
 }
 
 func journalContext(origin registrygenesis.GenesisOrigin, id shardnode.AdmissionIdentity) (configuredprogress.Context, error) {
@@ -89,12 +92,19 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 				a.onStop(outErr)
 			}
 			a.pendingUC, a.pendingTR = nil, nil
+			a.pendingSince, a.pendingAttempts, a.pendingError = time.Time{}, 0, ""
 		} else if outErr == nil {
 			if a.pendingUC == nil || uc.GetRootRoundNumber() >= a.pendingUC.GetRootRoundNumber() {
 				a.pendingUC, a.pendingTR = nil, nil
+				a.pendingSince, a.pendingAttempts, a.pendingError = time.Time{}, 0, ""
 			}
 		} else if authenticatedUC != nil && !terminalAdmissionError(outErr) && a.ctx.Err() == nil {
 			if a.pendingUC == nil || authenticatedUC.GetRootRoundNumber() >= a.pendingUC.GetRootRoundNumber() {
+				if a.pendingUC == nil || authenticatedUC.GetRootRoundNumber() != a.pendingUC.GetRootRoundNumber() || authenticatedUC.GetRoundNumber() != a.pendingUC.GetRoundNumber() || !bytes.Equal(authenticatedUC.InputRecord.BlockHash, a.pendingUC.InputRecord.BlockHash) {
+					a.pendingSince, a.pendingAttempts = time.Now(), 0
+				}
+				a.pendingAttempts++
+				a.pendingError = outErr.Error()
 				a.pendingUC, a.pendingTR = authenticatedUC, authenticatedTR
 				a.pendingID++
 				if !a.retrying {
@@ -176,6 +186,15 @@ func (a *journalAdmission) Pending() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.pendingUC != nil
+}
+
+func (a *journalAdmission) PendingAdmission() (shardnode.PendingAdmission, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.pendingUC == nil {
+		return shardnode.PendingAdmission{}, false
+	}
+	return shardnode.PendingAdmission{RootRound: a.pendingUC.GetRootRoundNumber(), Round: a.pendingUC.GetRoundNumber(), BlockHash: bytes.Clone(a.pendingUC.InputRecord.BlockHash), Since: a.pendingSince, Attempts: a.pendingAttempts, LastError: a.pendingError}, true
 }
 
 func terminalAdmissionError(err error) bool {

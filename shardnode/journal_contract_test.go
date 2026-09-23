@@ -34,6 +34,14 @@ func (followerBindingExecutor) CheckBlockBinding(context.Context, shardnode.Bloc
 
 type followerProposal struct{ block shardnode.Block }
 
+type emptyRawSealExecutor struct{ shardnode.Executor }
+
+func (e emptyRawSealExecutor) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Block, error) {
+	b, err := e.Executor.Seal(ctx, id)
+	b.Raw = nil
+	return b, err
+}
+
 func (d followerProposal) Publish(context.Context, uint64, shardnode.Block) error { return nil }
 func (d followerProposal) Await(context.Context, uint64) (shardnode.Block, error) {
 	return d.block, nil
@@ -56,6 +64,47 @@ func TestFollowerProposalConflictDeclinesSignWithoutStopping(t *testing.T) {
 	require.ErrorIs(t, err, shardnode.ErrProposalRejected)
 	require.Zero(t, spy.calls)
 	require.Equal(t, "unready", health.Snapshot().ExecutionRecovery)
+}
+
+func TestJournalRefusesEmptyRawBodyBeforePublicationOrSign(t *testing.T) {
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	fake := executortest.New()
+	fake.AddEntries([]byte("payload"))
+	genesis, err := fake.GenesisBlock(context.Background())
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name, nodeID, leader, outcome string
+		executor                      shardnode.Executor
+		proposal                      shardnode.Block
+	}{
+		{name: "leader", nodeID: "leader", leader: "leader", outcome: "stopped", executor: emptyRawSealExecutor{fake}},
+		{name: "follower", nodeID: "follower", leader: "leader", outcome: "unready", executor: followerBindingExecutor{fake}, proposal: shardnode.Block{Number: 1, Hash: []byte("block hash"), ParentHash: genesis.Hash, StateRoot: []byte("state root")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			journal := &refusingJournal{}
+			spy := &journalSignerSpy{}
+			sub := &recordingSubmitter{}
+			var d shardnode.Disseminator = &journalDisseminator{}
+			if tc.name == "follower" {
+				d = followerProposal{tc.proposal}
+			}
+			r := shardnode.NewRound(tc.nodeID, 8, types.ShardID{}, tc.executor, d, signer, sub, nil)
+			health := shardnode.NewHealth()
+			r.SetHealth(health)
+			r.SetProposalJournal(journal)
+			r.SetCertificationSigner(spy)
+			err := r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, tc.leader))
+			require.ErrorContains(t, err, "no raw body")
+			require.Zero(t, journal.calls)
+			require.Zero(t, spy.calls)
+			require.Empty(t, sub.got)
+			require.Equal(t, tc.outcome, health.Snapshot().ExecutionRecovery)
+			if leader, ok := d.(*journalDisseminator); ok {
+				require.Zero(t, leader.published)
+			}
+		})
+	}
 }
 
 func TestFollowerJournalRefusesExecutorWithoutRawBinding(t *testing.T) {

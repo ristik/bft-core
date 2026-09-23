@@ -781,7 +781,12 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		}
 		return fmt.Errorf("producing round %d block: %w", exp.Round, err)
 	}
-	if leader != r.nodeID && r.journal != nil && len(block.Raw) != 0 {
+	if leader != r.nodeID && r.journal != nil {
+		if len(block.Raw) == 0 {
+			err := fmt.Errorf("%w: round %d proposal has no raw body to retain", ErrProposalRejected, exp.Round)
+			r.health.updateExecutionRecovery("unready", err.Error())
+			return err
+		}
 		binder, ok := r.executor.(interface {
 			CheckBlockBinding(context.Context, Block, RoundParams) error
 		})
@@ -1615,7 +1620,13 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		if err != nil {
 			return Block{}, params, fmt.Errorf("seal: %w", err)
 		}
-		if r.journal != nil && len(block.Raw) != 0 {
+		if r.journal != nil {
+			if len(block.Raw) == 0 {
+				err := errors.New("leader candidate has no raw body to retain before publication")
+				r.health.updateExecutionRecovery("stopped", err.Error())
+				r.metrics.recordRecoveryStop(ctx)
+				return Block{}, params, err
+			}
 			if err := r.journal.RetainCandidate(ctx, block, params, true); err != nil {
 				r.health.updateExecutionRecovery("stopped", err.Error())
 				r.metrics.recordRecoveryStop(ctx)

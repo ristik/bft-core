@@ -299,26 +299,35 @@ func (n *Node) Run(ctx context.Context) error {
 			last := ""
 			for {
 				_, err := n.journalRecovery.Recover(gctx, nil)
-				if err == nil && n.client.admissionPending() {
-					n.health.updateExecutionRecovery("unready", "authenticated certificate awaits bounded peer catch-up")
+				pending, isPending := n.client.admissionPending()
+				age := time.Duration(0)
+				if isPending {
+					age = time.Since(pending.Since)
+				}
+				n.metrics.recordPendingCatchUp(gctx, isPending, age)
+				detail := ""
+				if err == nil && isPending {
+					detail = pending.Detail()
+					n.health.updateExecutionRecovery("unready", detail)
 				} else if err == nil {
 					n.health.updateExecutionRecovery("ready", "")
 				} else if n.journalRecovery.Terminal(err) {
+					detail = err.Error()
 					n.health.updateExecutionRecovery("stopped", err.Error())
 					if last != err.Error() {
 						n.metrics.recordRecoveryStop(gctx)
 					}
 				} else {
-					n.health.updateExecutionRecovery("unready", err.Error())
+					detail = err.Error()
+					if isPending {
+						detail = pending.Detail() + "; recoveryError=" + detail
+					}
+					n.health.updateExecutionRecovery("unready", detail)
 				}
-				if err != nil && err.Error() != last && n.log != nil {
-					n.log.WarnContext(gctx, "certified execution remains unready", slog.String("reason", err.Error()))
+				if detail != "" && detail != last && n.log != nil {
+					n.log.WarnContext(gctx, "certified execution remains unready", slog.String("reason", detail))
 				}
-				if err == nil {
-					last = ""
-				} else {
-					last = err.Error()
-				}
+				last = detail
 				select {
 				case <-gctx.Done():
 					return nil

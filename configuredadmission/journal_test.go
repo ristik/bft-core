@@ -54,6 +54,17 @@ func TestJournalAdmissionRetriesUnavailablePeerWithoutNewRootDelivery(t *testing
 	require.Equal(t, bootstrap.GetRootRoundNumber(), <-delivered)
 	require.ErrorIs(t, a.Submit(runCtx, first, firstTR), ErrRecoveryUnavailable)
 	require.True(t, a.(interface{ Pending() bool }).Pending())
+	pending, ok := a.(interface {
+		PendingAdmission() (shardnode.PendingAdmission, bool)
+	}).PendingAdmission()
+	require.True(t, ok)
+	require.Equal(t, first.GetRootRoundNumber(), pending.RootRound)
+	require.Equal(t, first.GetRoundNumber(), pending.Round)
+	require.True(t, bytes.Equal(first.InputRecord.BlockHash, pending.BlockHash))
+	require.EqualValues(t, 1, pending.Attempts)
+	require.WithinDuration(t, time.Now(), pending.Since, time.Second)
+	require.Contains(t, pending.LastError, ErrRecoveryUnavailable.Error())
+	require.Contains(t, pending.Detail(), "attempts=1")
 	require.False(t, stopped.Load())
 	available.Store(true)
 	select {
@@ -63,6 +74,10 @@ func TestJournalAdmissionRetriesUnavailablePeerWithoutNewRootDelivery(t *testing
 		t.Fatal("authenticated certificate did not resume after peer became available")
 	}
 	require.False(t, a.(interface{ Pending() bool }).Pending())
+	_, ok = a.(interface {
+		PendingAdmission() (shardnode.PendingAdmission, bool)
+	}).PendingAdmission()
+	require.False(t, ok)
 	require.False(t, stopped.Load())
 }
 
