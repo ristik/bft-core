@@ -38,6 +38,8 @@ type Health struct {
 	// certifiedRecord they are a status, not an authorization.
 	certifiedRecordReadiness       string
 	certifiedRecordReadinessDetail string
+	executionRecovery              string
+	executionRecoveryDetail        string
 
 	updatedAt time.Time
 }
@@ -68,6 +70,8 @@ type Snapshot struct {
 	// is empty without the gate.
 	CertifiedRecordReadiness       string    `json:"certifiedRecordReadiness,omitempty"`
 	CertifiedRecordReadinessDetail string    `json:"certifiedRecordReadinessDetail,omitempty"`
+	ExecutionRecovery              string    `json:"executionRecovery,omitempty"`
+	ExecutionRecoveryDetail        string    `json:"executionRecoveryDetail,omitempty"`
 	UpdatedAt                      time.Time `json:"updatedAt"`
 
 	// SecondsSinceUpdate is computed at snapshot time, not stored — see
@@ -147,6 +151,24 @@ func (h *Health) updateCertifiedRecordReadiness(outcome, detail string) {
 	h.updatedAt = time.Now()
 }
 
+func (h *Health) updateExecutionRecovery(outcome, detail string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// A terminal journal or recovery error is an operator stop. Periodic
+	// readiness checks must not erase it while the process keeps running.
+	if h.executionRecovery == "stopped" && outcome != "stopped" {
+		return
+	}
+	if h.executionRecovery == outcome && h.executionRecoveryDetail == detail {
+		return
+	}
+	h.executionRecovery, h.executionRecoveryDetail = outcome, detail
+	h.updatedAt = time.Now()
+}
+
 func (h *Health) updateSubmitted(round uint64) {
 	if h == nil {
 		return
@@ -179,6 +201,8 @@ func (h *Health) Snapshot() Snapshot {
 		CertifiedRecordDetail:          h.certifiedRecordDetail,
 		CertifiedRecordReadiness:       h.certifiedRecordReadiness,
 		CertifiedRecordReadinessDetail: h.certifiedRecordReadinessDetail,
+		ExecutionRecovery:              h.executionRecovery,
+		ExecutionRecoveryDetail:        h.executionRecoveryDetail,
 		UpdatedAt:                      h.updatedAt,
 	}
 	if !h.updatedAt.IsZero() {
