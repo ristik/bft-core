@@ -54,10 +54,10 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 cleanup() {
   ./stop-evm.sh -a >/dev/null 2>&1 || true
   for i in $(seq 1 "$validators"); do
-    stop_pidfile "test-nodes/reth$i/pid" 'reth node'
+    stop_pidfile "test-nodes/reth$i/pid" 'reth.* node'
   done
   for d in $negativeReths; do
-    stop_pidfile "test-nodes/$d/pid" 'reth node'
+    stop_pidfile "test-nodes/$d/pid" 'reth.* node'
   done
   wait 2>/dev/null || true
 }
