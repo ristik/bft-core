@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ainvaltin/httpsrv"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -25,6 +26,8 @@ import (
 
 	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/network"
+	"github.com/unicitynetwork/bft-core/registrygenesis"
+	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
 )
@@ -45,6 +48,14 @@ type shardNodeRunFlags struct {
 	EthURL              string
 	JWTSecret           string
 	ExpectedGenesisHash string
+
+	// The two files `ubft engine-api genesis` emits. They are required together: when given, the node
+	// runs on the full shard configuration and configures a checked genesis origin plus its bootstrap
+	// snapshot for the v2 derivation. Absent, the node behaves exactly as before and the live v1
+	// derivation is unchanged.
+	GenesisFile            string
+	FullShardConf          string
+	ExpectedOriginIdentity string
 
 	LUCStoreFile string
 
@@ -88,7 +99,7 @@ func shardNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 transitions against the BFT Core root chain. See docs/shard-protocol.md for the round
 protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit together.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return shardNodeRun(cmd.Context(), flags)
+			return shardNodeRun(cmd.Context(), flags, cmd.Flags().Changed)
 		},
 	}
 
@@ -107,6 +118,15 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"engine-api executor only: the execution client's expected genesis block hash (0x-prefixed). "+
 			"Operator-configured; when set it is verified before the node can vote. A chain id does not "+
 			"establish genesis identity, and a matching genesis does not establish agreement on future forks")
+	cmd.Flags().StringVar(&flags.GenesisFile, "genesis", "",
+		"path to the finalized genesis JSON emitted by `ubft engine-api genesis`; with --full-shard-conf it "+
+			"configures a checked genesis origin and bootstrap snapshot, and the client's block 0 is required to match it")
+	cmd.Flags().StringVar(&flags.FullShardConf, "full-shard-conf", "",
+		"path to the full shard configuration emitted by `ubft engine-api genesis` (the base conf plus "+
+			"seal_registry_genesis). The node runs on this configuration, because the v2 derivation requires the "+
+			"observation's shard configuration hash to equal the genesis origin's full configuration hash")
+	cmd.Flags().StringVar(&flags.ExpectedOriginIdentity, "expected-origin-identity", "",
+		"optional 0x-prefixed 32-byte expected genesis origin identity; when set, startup refuses a mismatch")
 	cmd.Flags().StringVar(&flags.JWTSecret, "jwt-secret", "",
 		"engine-api executor only: path to the 32-byte hex JWT secret shared with the execution client (default: $UBFT_HOME/jwt.hex)")
 	cmd.Flags().StringVar(&flags.LUCStoreFile, "luc-store", "",
@@ -140,7 +160,7 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 	return cmd
 }
 
-func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
+func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
 	// The record gate needs the store it reads. Checked before anything is built so the refusal is the
 	// operator's configuration, not a downstream symptom of a node running without the record it was
 	// asked to consult.
@@ -157,14 +177,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 		return fmt.Errorf("creating auth key pair: %w", err)
 	}
 
-	shardConfs, err := flags.loadShardConfs(flags.baseFlags)
+	shardConf, err := loadRunShardConf(flags, changed)
 	if err != nil {
-		return fmt.Errorf("loading shard configuration: %w", err)
+		return err
 	}
-	if len(shardConfs) != 1 {
-		return fmt.Errorf("shard-node run requires exactly one --shard-conf, got %d", len(shardConfs))
-	}
-	shardConf := shardConfs[0]
 
 	// How certification requests are signed is decided once, here, before anything is built: with the
 	// key configuration's signing key as before, or through a signing authority when one is configured
@@ -223,6 +239,20 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 		return fmt.Errorf("hashing the shard configuration: %w", err)
 	}
 
+	// The checked genesis origin and its bootstrap snapshot, when the node was configured with the two
+	// artifacts `ubft engine-api genesis` emits. The origin is re-derived from the finalized JSON
+	// against this node's own full shard configuration and pinned artifact, so it is this node's only
+	// chance to notice it was handed the wrong genesis; the operator's expected identity, when set, is
+	// checked against it. The live derivation stays v1 — nothing here reads the origin yet.
+	var origin registrygenesis.GenesisOrigin
+	var bootstrap registryproof.Snapshot
+	if flags.GenesisFile != "" {
+		origin, bootstrap, err = loadGenesisOrigin(shardConf, flags.GenesisFile, flags.ExpectedOriginIdentity, trustBases[0].GetEpoch())
+		if err != nil {
+			return err
+		}
+	}
+
 	executor, err := buildExecutor(ctx, flags, shardConf, &engineapi.VerifierContext{
 		NetworkID:     shardConf.NetworkID,
 		PartitionID:   shardConf.PartitionID,
@@ -234,9 +264,23 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags) error {
 		// committed-state cursor that replaces it once a registry (or a boundary exposing the last
 		// applied root round) exists.
 		Cursor: engineapi.CursorNotActivated(),
+
+		// The checked execution genesis and its bootstrap snapshot, when configured. They are
+		// verifier-owned and carried for the v2 derivation to consume; the live derivation stays v1.
+		GenesisOrigin:     origin,
+		BootstrapSnapshot: bootstrap,
 	})
 	if err != nil {
 		return err
+	}
+	if origin.Valid() {
+		// The agreed genesis hash: buildExecutor has just required the paired client's block 0 to equal
+		// origin.BlockHash(), so this line reports a value the configuration and the client agree on.
+		flags.observe.Logger().Info("configured genesis origin",
+			"originIdentity", origin.Identity().Hex(),
+			"genesisBlockHash", origin.BlockHash().Hex(),
+			"stateRoot", origin.StateRoot().Hex(),
+			"fullShardConfHash", origin.FullShardConfHash().Hex())
 	}
 
 	disseminator, err := buildDisseminator(peer, flags.observe, shardConf.Validators)
@@ -411,6 +455,96 @@ func hexToHash(s string) (shardnode.Hash, error) {
 	return b, nil
 }
 
+// parseHash32 parses a 0x-prefixed 32-byte hash as a go-ethereum hash.
+func parseHash32(s string) (common.Hash, error) {
+	b, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("not hex: %w", err)
+	}
+	if len(b) != common.HashLength {
+		return common.Hash{}, fmt.Errorf("expected 32 bytes, got %d", len(b))
+	}
+	return common.BytesToHash(b), nil
+}
+
+// loadGenesisOrigin validates the finalized genesis artifact against the full shard configuration and
+// the pinned artifact, checks the operator's expected identity when one is configured, and builds the
+// bootstrap snapshot from the origin's own retained evidence (no RPC). It is the node's only chance to
+// notice it was handed the wrong genesis: every value it uses is this node's own configuration or the
+// pinned artifact, never a peer's.
+func loadGenesisOrigin(shardConf *types.PartitionDescriptionRecord, genesisPath, expectedIdentity string, rootEpoch uint64) (registrygenesis.GenesisOrigin, registryproof.Snapshot, error) {
+	art, err := registrygenesis.PinnedArtifact()
+	if err != nil {
+		return registrygenesis.GenesisOrigin{}, registryproof.Snapshot{}, fmt.Errorf("loading the pinned seal-registry artifact: %w", err)
+	}
+	pins := registrygenesis.Pins{
+		// The root epoch of the configured trust base, which is the epoch the deployment pins.
+		RootEpoch:        rootEpoch,
+		RegistryCodeHash: art.CodeHash,
+		SystemAddress:    registrygenesis.SystemAddress,
+		RegistryAddress:  registryproof.RegistryAddress,
+	}
+	finalized, err := os.ReadFile(genesisPath) // #nosec G304 -- operator-supplied config path, same trust level as --shard-conf
+	if err != nil {
+		return registrygenesis.GenesisOrigin{}, registryproof.Snapshot{}, fmt.Errorf("reading the finalized genesis %q: %w", genesisPath, err)
+	}
+	var expected *common.Hash
+	if expectedIdentity != "" {
+		h, err := parseHash32(expectedIdentity)
+		if err != nil {
+			return registrygenesis.GenesisOrigin{}, registryproof.Snapshot{}, fmt.Errorf("parsing --expected-origin-identity: %w", err)
+		}
+		expected = &h
+	}
+	origin, err := registrygenesis.ValidateFinalizedGenesisJSON(shardConf, pins, art, finalized, expected, registrygenesis.DefaultGenesisJSONLimits())
+	if err != nil {
+		return registrygenesis.GenesisOrigin{}, registryproof.Snapshot{}, fmt.Errorf("validating the finalized genesis against the full shard configuration: %w", err)
+	}
+	// The bootstrap snapshot comes from the origin's own retained evidence. It is the block-0 witness
+	// the v2 derivation needs as the parent of the first payload.
+	bootstrap, err := registryproof.Verify(origin.ProofContext(), origin.BlockHash(), origin.Evidence())
+	if err != nil {
+		return registrygenesis.GenesisOrigin{}, registryproof.Snapshot{}, fmt.Errorf("verifying the configured bootstrap snapshot: %w", err)
+	}
+	if !bootstrap.Valid() || !bootstrap.Genesis() || bootstrap.Number() != 0 || bootstrap.StateRoot() != origin.StateRoot() {
+		return registrygenesis.GenesisOrigin{}, registryproof.Snapshot{}, fmt.Errorf("the configured bootstrap snapshot is not block 0 of the configured genesis origin")
+	}
+	return origin, bootstrap, nil
+}
+
+// loadRunShardConf returns the shard configuration the node runs on. With --full-shard-conf it is the
+// full configuration `ubft engine-api genesis` emitted (the base conf plus seal_registry_genesis),
+// which is what the v2 derivation requires the observation's shard configuration hash to equal;
+// otherwise it is the ordinary --shard-conf. The two are mutually exclusive rather than merged,
+// because they would be two sources for the node's identity and its configuration hash.
+func loadRunShardConf(flags *shardNodeRunFlags, changed func(string) bool) (*types.PartitionDescriptionRecord, error) {
+	if flags.GenesisFile != "" && flags.FullShardConf == "" {
+		return nil, fmt.Errorf("--genesis requires --full-shard-conf: the finalized artifact is validated against the full shard configuration the node runs on")
+	}
+	if flags.FullShardConf == "" {
+		shardConfs, err := flags.loadShardConfs(flags.baseFlags)
+		if err != nil {
+			return nil, fmt.Errorf("loading shard configuration: %w", err)
+		}
+		if len(shardConfs) != 1 {
+			return nil, fmt.Errorf("shard-node run requires exactly one --shard-conf, got %d", len(shardConfs))
+		}
+		return shardConfs[0], nil
+	}
+	if changed("shard-conf") {
+		return nil, fmt.Errorf("--full-shard-conf and --shard-conf both name the shard configuration; give only --full-shard-conf")
+	}
+	fullFlags := shardConfFlags{ShardConfFiles: []string{flags.FullShardConf}}
+	shardConfs, err := fullFlags.loadShardConfs(flags.baseFlags)
+	if err != nil {
+		return nil, fmt.Errorf("loading full shard configuration: %w", err)
+	}
+	if len(shardConfs) != 1 {
+		return nil, fmt.Errorf("loading full shard configuration: expected one configuration, got %d", len(shardConfs))
+	}
+	return shardConfs[0], nil
+}
+
 func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *types.PartitionDescriptionRecord, verifier *engineapi.VerifierContext) (shardnode.Executor, error) {
 	switch flags.Executor {
 	case "fake":
@@ -485,6 +619,15 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 			}
 			if err := adapter.CheckGenesisHash(ctx, want); err != nil {
 				return nil, fmt.Errorf("engine-api executor failed its startup genesis check: %w", err)
+			}
+		}
+
+		// And the checked genesis origin, when configured: the client's block 0 must be the block the
+		// finalized artifact and this node's full shard configuration derive. A node whose
+		// configuration and client disagree about genesis must not vote.
+		if verifier != nil && verifier.GenesisOrigin.Valid() {
+			if err := adapter.CheckGenesisHash(ctx, shardnode.Hash(verifier.GenesisOrigin.BlockHash().Bytes())); err != nil {
+				return nil, fmt.Errorf("engine-api executor failed its startup genesis check against the configured origin: %w", err)
 			}
 		}
 

@@ -13,6 +13,8 @@ import (
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/registrygenesis"
+	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 )
@@ -91,6 +93,15 @@ type VerifierContext struct {
 	ShardConfHash []byte
 	TrustBases    rootinput.TrustBases
 	Cursor        SealRegistryCursor
+
+	// GenesisOrigin is the checked execution genesis this node was configured with, and
+	// BootstrapSnapshot is the verified snapshot of its own block 0. Both are verifier-owned: they come
+	// from the finalized genesis artifact validated against this node's own full shard configuration and
+	// pinned artifact, never from a peer, a certificate or the executor. They are carried here for the
+	// v2 root-input derivation to consume; nothing in this unit reads them, and the live derivation
+	// stays rootinput.Derive (v1). The zero value means no origin was configured.
+	GenesisOrigin     registrygenesis.GenesisOrigin
+	BootstrapSnapshot registryproof.Snapshot
 }
 
 func NewAdapter(cfg Config, log *slog.Logger) *Adapter {
