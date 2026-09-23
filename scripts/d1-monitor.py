@@ -163,11 +163,15 @@ def check_restart(nodes, validator, signing, probe):
             raise RuntimeError("restarted validator logged a signing refusal")
         submitted_rounds = {field(line, "round") for line in submissions}
         quorum_proofs = []
-        for i, root_mark in enumerate(root_marks, start=1):
-            root_lines = (Path(nodes) / f"root{i}" / "debug.log").read_text().splitlines()[root_mark:]
-            quorum_proofs.extend(line for line in root_lines
-                                 if "reached consensus" in line and request_in_quorum(line, node_id)
-                                 and field(line, "requestRound") in submitted_rounds)
+        proof_deadline = time.monotonic() + 15
+        while time.monotonic() < proof_deadline and not quorum_proofs:
+            for i, root_mark in enumerate(root_marks, start=1):
+                root_lines = (Path(nodes) / f"root{i}" / "debug.log").read_text().splitlines()[root_mark:]
+                quorum_proofs.extend(line for line in root_lines
+                                     if "reached consensus" in line and request_in_quorum(line, node_id)
+                                     and field(line, "requestRound") in submitted_rounds)
+            if not quorum_proofs:
+                time.sleep(0.2)
         if not quorum_proofs:
             raise RuntimeError("no later root quorum included the restarted validator's signed request")
         print(f"D2C PASS: authority pid {authority_pid} retained its key and signed round "
@@ -197,18 +201,23 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash):
                             if 'msg="execution journal restored"' in line]
         admissions = certificate_admissions(after)
         admission_indexes = [after.index(entry["line"]) for entry in admissions]
-        association_indexes = [i for i, line in enumerate(after)
-                               if 'msg="certificate admitted" source=peer_recovery' in line
-                               and re.search(r'\bheight=([1-9][0-9]*)\b', line)]
-        restore_indexes = restored_indexes + association_indexes
-        if not restore_indexes:
+        valid_payloads = {}
+        for index, line in enumerate(after):
+            if ('msg="verified execution payload"' in line and field(line, "status") == "VALID"
+                    and field(line, "blockHash") and field(line, "round")):
+                valid_payloads[(field(line, "blockHash").lower(), field(line, "round"))] = index
+        association_indexes = [valid_payloads[(entry["block"], entry["round"])]
+                               for entry in admissions
+                               if (entry["block"], entry["round"]) in valid_payloads]
+        recovery_indexes = restored_indexes + association_indexes
+        if not recovery_indexes:
             raise RuntimeError(f"{scenario}: restarted validator {validator} has neither journal-restoration "
                                "nor peer-recovery association evidence after restart boundary")
         if not admissions:
             raise RuntimeError(f"{scenario}: restarted validator {validator} has no positive-height "
                                "certificate admission after restart boundary")
         qualifying_admissions = [index for index in admission_indexes
-                                 if any(restored_index < index for restored_index in restore_indexes)]
+                                 if any(restored_index < index for restored_index in recovery_indexes)]
         signed = [(i, line) for i, line in enumerate(after)
                   if 'msg="certification request signed"' in line
                   and (field(line, "round") or "").isdigit()]
@@ -228,7 +237,7 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash):
             raise RuntimeError(f"{scenario}: restarted validator {validator} did not agree at final B{final_height}; "
                                f"head={head}, block={block and block.get('hash')}, expected={final_hash}")
         print(f"D2C rejoin evidence: {scenario} validator={validator}; "
-              f"restorationOrAssociation={len(restore_indexes)}; positiveAdmissions={len(admissions)}; "
+              f"restorationOrAssociation={len(recovery_indexes)}; positiveAdmissions={len(admissions)}; "
               f"signedRequests={len(signed)}; "
               f"head=B{head}; agreesAt=B{final_height} hash={final_hash}", flush=True)
     if not restarted:
