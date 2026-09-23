@@ -36,9 +36,17 @@ type ParentHeader struct {
 // TestWiring_TodaysRoundParamsCannotAuthenticate records that, and a guard here
 // would contradict it.
 func DeriveAttributes(ri evmroot.RootInput, parent ParentHeader) PayloadAttributesV3 {
-	prevRandao := evmroot.DerivePrevRandao(ri.Origin.RootRound, ri.Round)
-	beaconRoot := evmroot.DeriveBeaconRoot(ri.Origin.RootRound, ri.Round)
-	ts := evmroot.DeriveTimestamp(ri.Origin.ReferenceTime, parent.Timestamp)
+	return deriveAttributes(ri.Origin.RootRound, ri.Round, ri.Origin.ReferenceTime, parent)
+}
+
+func DeriveAttributesV2(ri evmroot.RootInputV2, parent ParentHeader) PayloadAttributesV3 {
+	return deriveAttributes(ri.Origin.RootRound, ri.Round, ri.Origin.ReferenceTime, parent)
+}
+
+func deriveAttributes(rootRound, round, referenceTime uint64, parent ParentHeader) PayloadAttributesV3 {
+	prevRandao := evmroot.DerivePrevRandao(rootRound, round)
+	beaconRoot := evmroot.DeriveBeaconRoot(rootRound, round)
+	ts := evmroot.DeriveTimestamp(referenceTime, parent.Timestamp)
 
 	return PayloadAttributesV3{
 		Timestamp:             quantity(ts),
@@ -100,16 +108,23 @@ type PayloadFields struct {
 // reports as INVALID; there is no separate field to compare it against ahead of
 // that call.
 func VerifyPayloadFields(ri evmroot.RootInput, parent ParentHeader, claimed PayloadFields) error {
-	want := DeriveAttributes(ri, parent)
+	return verifyPayloadFields(ri.Round, DeriveAttributes(ri, parent), claimed)
+}
+
+func VerifyPayloadFieldsV2(ri evmroot.RootInputV2, parent ParentHeader, claimed PayloadFields) error {
+	return verifyPayloadFields(ri.Round, DeriveAttributesV2(ri, parent), claimed)
+}
+
+func verifyPayloadFields(round uint64, want PayloadAttributesV3, claimed PayloadFields) error {
 	switch {
 	case want.Timestamp != claimed.Timestamp:
-		return fmt.Errorf("engineapi: round %d timestamp diverges: got %d, want %d", ri.Round, claimed.Timestamp, want.Timestamp)
+		return fmt.Errorf("engineapi: round %d timestamp diverges: got %d, want %d", round, claimed.Timestamp, want.Timestamp)
 	case want.PrevRandao != claimed.PrevRandao:
-		return fmt.Errorf("engineapi: round %d prevRandao diverges: got %x, want %x", ri.Round, claimed.PrevRandao, want.PrevRandao)
+		return fmt.Errorf("engineapi: round %d prevRandao diverges: got %x, want %x", round, claimed.PrevRandao, want.PrevRandao)
 	case want.SuggestedFeeRecipient != claimed.SuggestedFeeRecipient:
-		return fmt.Errorf("engineapi: round %d suggestedFeeRecipient diverges: got %x, want %x", ri.Round, claimed.SuggestedFeeRecipient, want.SuggestedFeeRecipient)
+		return fmt.Errorf("engineapi: round %d suggestedFeeRecipient diverges: got %x, want %x", round, claimed.SuggestedFeeRecipient, want.SuggestedFeeRecipient)
 	case len(claimed.Withdrawals) != 0:
-		return fmt.Errorf("engineapi: round %d withdrawals must be empty, got %d", ri.Round, len(claimed.Withdrawals))
+		return fmt.Errorf("engineapi: round %d withdrawals must be empty, got %d", round, len(claimed.Withdrawals))
 	}
 	return nil
 }

@@ -51,8 +51,7 @@ type shardNodeRunFlags struct {
 
 	// The two files `ubft engine-api genesis` emits. They are required together: when given, the node
 	// runs on the full shard configuration and configures a checked genesis origin plus its bootstrap
-	// snapshot for the v2 derivation. Absent, the node behaves exactly as before and the live v1
-	// derivation is unchanged.
+	// snapshot for the v2 derivation. Without them, the v2 build path refuses to derive.
 	GenesisFile            string
 	FullShardConf          string
 	ExpectedOriginIdentity string
@@ -243,7 +242,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	// artifacts `ubft engine-api genesis` emits. The origin is re-derived from the finalized JSON
 	// against this node's own full shard configuration and pinned artifact, so it is this node's only
 	// chance to notice it was handed the wrong genesis; the operator's expected identity, when set, is
-	// checked against it. The live derivation stays v1 — nothing here reads the origin yet.
+	// checked against it. The adapter uses this snapshot for v2 block-1 derivation.
 	var origin registrygenesis.GenesisOrigin
 	var bootstrap registryproof.Snapshot
 	if flags.GenesisFile != "" {
@@ -258,15 +257,14 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		PartitionID:   shardConf.PartitionID,
 		ShardID:       shardConf.ShardID,
 		ShardConfHash: confHash,
+		RootEpoch:     trustBases[0].GetEpoch(),
 		TrustBases:    trustBaseStore,
-		// No seal registry exists yet, so the cursor rule is explicitly not activated. See
-		// engineapi.CursorNotActivated for exactly which refusal it leaves off, and for the
-		// committed-state cursor that replaces it once a registry (or a boundary exposing the last
-		// applied root round) exists.
+		// Kept for compatibility with callers of the former v1 adapter. The live v2 path reads the
+		// applied root round from the verified parent registry snapshot instead.
 		Cursor: engineapi.CursorNotActivated(),
 
 		// The checked execution genesis and its bootstrap snapshot, when configured. They are
-		// verifier-owned and carried for the v2 derivation to consume; the live derivation stays v1.
+		// verifier-owned and consumed by the v2 bootstrap derivation.
 		GenesisOrigin:     origin,
 		BootstrapSnapshot: bootstrap,
 	})
