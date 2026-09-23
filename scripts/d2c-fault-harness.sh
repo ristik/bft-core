@@ -8,11 +8,12 @@ case "$scenario" in
   *) echo "set D2C_SCENARIO to one of: pair-term pair-kill ureth-kill all-kill leader-kill proof-outage proof-corrupt missing-body wrong-genesis" >&2; exit 2 ;;
 esac
 
-mkdir -p briefs/d2c-harness
+retain_root=${D2C_RETAIN_DIR:-briefs/d2c-harness}
+mkdir -p "$retain_root"
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-log="briefs/d2c-harness/${stamp}-${scenario}.log"
+log="$retain_root/${stamp}-${scenario}.log"
 retain_run_logs() {
-  local destination="briefs/d2c-harness/${stamp}/${scenario}"
+  local destination="$retain_root/${stamp}/${scenario}"
   mkdir -p "$destination"
   for file in test-nodes/evm*/debug.log test-nodes/root*/debug.log \
               test-nodes/reth*/reth.log test-nodes/proof-proxy/proxy.log; do
@@ -23,7 +24,7 @@ retain_run_logs() {
   cp -p "$log" "$destination/$(basename "$log")"
   echo "D2C retained scenario evidence: $destination" | tee -a "$log"
 }
-trap 'destination="briefs/d2c-harness/${stamp}/${scenario}"; mkdir -p "$destination"; [ ! -f "$log" ] || cp -p "$log" "$destination/$(basename "$log")"' EXIT
+trap 'destination="$retain_root/${stamp}/${scenario}"; mkdir -p "$destination"; [ ! -f "$log" ] || cp -p "$log" "$destination/$(basename "$log")"' EXIT
 case "$scenario" in
   pair-term|pair-kill|ureth-kill|all-kill|leader-kill|missing-body|wrong-genesis)
     D2C_FAULT_SCENARIO="$scenario" SIGNING=authority ./scripts/reth-paired-devnet.sh 4 10 2>&1 | tee "$log"

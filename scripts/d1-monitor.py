@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -185,8 +186,8 @@ def check_restart(nodes, validator, signing, probe):
               f"through {len(certificates)} subsequent positive-height certificate admissions", flush=True)
 
 
-def check_fault_rejoins(nodes, scenario, final_height, final_hash):
-    """Require each process-fault target to restore and sign after its boundary."""
+def check_fault_rejoins(nodes, scenario, final_height, final_hash, recovery_started):
+    """Wait for each restarted validator to restore, associate, advance, sign, and agree."""
     restarted = []
     for validator in range(1, 5):
         path = Path(nodes) / f"evm{validator}" / "debug.log"
@@ -197,7 +198,8 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash):
             continue
         restarted.append(validator)
         expected_hash = final_hash.removeprefix("0x").lower()
-        deadline = time.monotonic() + float(os.environ.get("D2C_REJOIN_TIMEOUT", "45"))
+        timeout = float(os.environ.get("D2C_REJOIN_TIMEOUT", "180"))
+        deadline = recovery_started + timeout
         last_state = {}
         while True:
             lines = path.read_text(errors="replace").splitlines()
@@ -219,6 +221,15 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash):
             qualifying_admissions = [index for index in admission_indexes
                                      if any(recovery_index < index for recovery_index in recovery_indexes)]
             recovery_boundary = min(recovery_indexes) if recovery_indexes else None
+            peer_associations = [entry for entry in admissions
+                                 if field(entry["line"], "source") == "peer_recovery"]
+            if peer_associations:
+                first_association = min(peer_associations, key=lambda entry: entry["height"])
+            else:
+                first_association = next((entry for entry in admissions
+                                          if (entry["block"], entry["round"]) in valid_payloads), None)
+            later_heights = ({entry["height"] for entry in admissions
+                              if first_association and entry["height"] > first_association["height"]})
             signed = [(i, line) for i, line in enumerate(after)
                       if 'msg="certification request signed"' in line
                       and (field(line, "round") or "").isdigit()
@@ -234,11 +245,31 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash):
                 head_error = str(exc)
             agrees = (head is not None and head >= final_height and block
                       and block.get("hash", "").removeprefix("0x").lower() == expected_hash)
+            # Also require agreement at the live head, so a stale common prefix cannot satisfy
+            # rejoin after the recovering process has fallen behind the survivor quorum.
+            live_hashes = {}
+            for peer in range(1, 5):
+                try:
+                    peer_head = int(rpc(18544 + peer, "eth_blockNumber", []), 16)
+                    peer_block = rpc(18544 + peer, "eth_getBlockByNumber", [hex(peer_head), False])
+                    if peer_block:
+                        peer_hash = peer_block.get("hash", "").removeprefix("0x").lower()
+                        live_hashes.setdefault((peer_head, peer_hash), []).append(peer)
+                except (OSError, ValueError, RuntimeError):
+                    pass
+            live_quorum = max(live_hashes.items(), key=lambda item: len(item[1])) if live_hashes else None
+            live_agrees = bool(live_quorum and len(live_quorum[1]) >= 3
+                               and live_quorum[0] in live_hashes
+                               and (head, (block or {}).get("hash", "").removeprefix("0x").lower()) == live_quorum[0])
             last_state = {"restored": bool(restored_indexes), "admissions": len(admissions),
                           "admissionsAfterRecovery": len(qualifying_admissions),
+                          "firstAssociationHeight": first_association and first_association["height"],
+                          "furtherCertifiedHeights": sorted(later_heights),
                           "signed": len(signed), "head": head,
+                          "liveHeadAgreement": live_agrees,
                           "blockHash": block and block.get("hash"), "headError": head_error}
-            if recovery_indexes and qualifying_admissions and signed and agrees:
+            if (recovery_indexes and qualifying_admissions and first_association
+                    and len(later_heights) >= 3 and signed and agrees and live_agrees):
                 break
             if time.monotonic() >= deadline:
                 if not recovery_indexes:
@@ -247,6 +278,12 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash):
                     reason = "has no positive-height certificate admission after journal restoration/recovery association"
                 elif not signed:
                     reason = "has no signed certification request after journal restoration or recovery association"
+                elif not first_association or len(later_heights) < 3:
+                    reason = (f"has fewer than three further fresh certified heights after its first positive-height "
+                              f"association; first={first_association and first_association['height']}, "
+                              f"further={sorted(later_heights)}")
+                elif not live_agrees:
+                    reason = "does not agree with the fresh survivor head quorum"
                 else:
                     reason = (f"did not agree at final B{final_height}; head={head}, "
                               f"block={block and block.get('hash')}, expected={final_hash}, rpcError={head_error}")
@@ -254,29 +291,58 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash):
                                    f"observed={last_state}")
             time.sleep(0.5)
         print(f"D2C rejoin evidence: {scenario} validator={validator}; "
-              f"restorationOrAssociation={len(recovery_indexes)}; positiveAdmissions={len(admissions)}; "
-              f"signedRequests={len(signed)}; "
-              f"head=B{head}; agreesAt=B{final_height} hash={final_hash}", flush=True)
+          f"restorationOrAssociation={len(recovery_indexes)}; positiveAdmissions={len(admissions)}; "
+          f"firstAssociation=B{first_association['height']}; furtherCertifiedHeights={len(later_heights)}; "
+          f"signedRequests={len(signed)}; head=B{head}; liveHeadAgreement={live_agrees}; "
+          f"agreesAt=B{final_height} hash={final_hash}", flush=True)
     if not restarted:
         raise RuntimeError(f"{scenario}: no restarted-validator boundary was recorded")
 
 
-def check_proof_corrupt_recovery(nodes):
+def check_proof_corrupt_recovery(nodes, recovery_started):
     path = Path(nodes) / "evm1" / "debug.log"
-    lines = path.read_text(errors="replace").splitlines()
-    markers = [i for i, line in enumerate(lines) if line.startswith("D2C_PROOF_CORRUPT_PASS ")]
-    if not markers:
-        raise RuntimeError("proof-corrupt: proxy pass boundary was not recorded")
-    after = lines[markers[-1] + 1:]
-    admissions = certificate_admissions(after)
-    signed = [line for line in after if 'msg="certification request signed"' in line
-              and (field(line, "round") or "").isdigit()]
-    if not admissions or not signed:
-        raise RuntimeError("proof-corrupt: validator 1 did not recover after pass mode; "
-                           f"positiveAdmissions={len(admissions)} signedRequests={len(signed)}")
-    print(f"D2C[proof-corrupt] recovery measured after pass: positiveAdmissions={len(admissions)}; "
-          f"signedRequests={len(signed)}; latestAdmission=B{admissions[-1]['height']}", flush=True)
-    return admissions[-1]["height"], len(signed)
+    deadline = recovery_started + float(os.environ.get("D2C_REJOIN_TIMEOUT", "180"))
+    while True:
+        lines = path.read_text(errors="replace").splitlines()
+        markers = [i for i, line in enumerate(lines) if line.startswith("D2C_PROOF_CORRUPT_PASS ")]
+        if not markers:
+            raise RuntimeError("proof-corrupt: proxy pass boundary was not recorded")
+        after = lines[markers[-1] + 1:]
+        admissions = certificate_admissions(after)
+        associations = [entry for entry in admissions if field(entry["line"], "source") == "peer_recovery"]
+        if not associations:
+            associations = [entry for entry in admissions
+                            if any('msg="verified execution payload"' in line
+                                   and field(line, "status") == "VALID"
+                                   and field(line, "blockHash") == entry["block"]
+                                   and field(line, "round") == entry["round"] for line in after)]
+        first = min(associations, key=lambda entry: entry["height"]) if associations else None
+        further = {entry["height"] for entry in admissions if first and entry["height"] > first["height"]}
+        signed = [line for line in after if 'msg="certification request signed"' in line
+                  and (field(line, "round") or "").isdigit()]
+        agreed = False
+        try:
+            head = int(rpc(18545, "eth_blockNumber", []), 16)
+            block = rpc(18545, "eth_getBlockByNumber", [hex(head), False])
+            others = []
+            for validator in (2, 3, 4):
+                other_head = int(rpc(18544 + validator, "eth_blockNumber", []), 16)
+                other = rpc(18544 + validator, "eth_getBlockByNumber", [hex(other_head), False])
+                others.append((other_head, other.get("hash", "").removeprefix("0x").lower()))
+            agreed = (head, block.get("hash", "").removeprefix("0x").lower()) in others
+        except (OSError, RuntimeError, KeyError, TypeError, ValueError):
+            head = None
+        if first and len(further) >= 3 and signed and agreed:
+            print(f"D2C[proof-corrupt] recovery measured after pass: firstAssociation=B{first['height']}; "
+                  f"furtherCertifiedHeights={len(further)}; signedRequests={len(signed)}; "
+                  f"head=B{head}; liveHeadAgreement=true", flush=True)
+            return max(entry["height"] for entry in admissions), len(signed)
+        if time.monotonic() >= deadline:
+            raise RuntimeError("proof-corrupt: validator 1 missed bounded recovery requirements after pass; "
+                               f"firstAssociation={first and first['height']}; "
+                               f"furtherCertifiedHeights={sorted(further)}; signedRequests={len(signed)}; "
+                               f"liveHeadAgreement={agreed}; head={head}")
+        time.sleep(0.5)
 
 
 def main():
@@ -426,13 +492,13 @@ def main():
     rejoin_scenarios = {"pair-term", "pair-kill", "ureth-kill", "all-kill", "leader-kill"}
     if args.fault_scenario in rejoin_scenarios:
         try:
-            check_fault_rejoins(args.nodes, args.fault_scenario, target, prior)
+            check_fault_rejoins(args.nodes, args.fault_scenario, target, prior, probe_started)
         except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
             print(f"D2C FAIL: {exc}", flush=True)
             return 1
     if args.fault_scenario == "proof-corrupt":
         try:
-            recovered_height, signed_count = check_proof_corrupt_recovery(args.nodes)
+            recovered_height, signed_count = check_proof_corrupt_recovery(args.nodes, probe_started)
             result_path = Path(args.nodes) / "d2c-proof-corrupt-result.json"
             result = json.loads(result_path.read_text())
             print(f"D2C[proof-corrupt] EXPECTED-FAIL(mutated uncached proof parent={result['parentHash']} "
