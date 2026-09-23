@@ -34,7 +34,25 @@ case "$scenario" in
     exit "$lane_status"
     ;;
   proof-outage|proof-corrupt)
-    echo "D2C[${scenario}] EXPECTED-FAIL(needs local proof RPC proxy hook)" | tee "$log"
+    D2C_FAULT_SCENARIO="$scenario" SIGNING=authority ./scripts/reth-paired-devnet.sh 4 10 2>&1 | tee "$log"
+    lane_status=${PIPESTATUS[0]}
+    if [ "$lane_status" -eq 0 ]; then
+      echo "D2C[${scenario}] PASS" | tee -a "$log"
+      exit 0
+    fi
+    if grep -q "D2C\[$scenario\] FAIL(injection/relaunch" "$log"; then
+      echo "D2C[${scenario}] FAIL(injection/relaunch hook failed; see controller diagnostic above)" | tee -a "$log"
+      exit "$lane_status"
+    fi
+    if grep -q "D2C\[$scenario\] dropped proof RPC\|D2C\[$scenario\] corrupted proof RPC" "$log"; then
+      reason=$(grep -E 'D1 FAIL: stalled before height|D1 FAIL: B[0-9]+ lacks|D1 FAIL: canonical disagreement|D1 FAIL: discontinuity' "$log" | tail -1)
+      if [ -n "$reason" ]; then
+        echo "D2C[${scenario}] EXPECTED-FAIL(proof fault was injected/restored; ${reason#D1 FAIL: })" | tee -a "$log"
+        exit 0
+      fi
+    fi
+    echo "D2C[${scenario}] FAIL(lane exited ${lane_status}; see diagnostics above)" | tee -a "$log"
+    exit "$lane_status"
     ;;
   wrong-genesis)
     echo "D2C[${scenario}] EXPECTED-FAIL(needs retained-state wrong-genesis restart hook)" | tee "$log"

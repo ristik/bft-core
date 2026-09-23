@@ -1,0 +1,7 @@
+ureth engine.persistence-threshold=64 blocks (D2C replay visibility)
+ureth-pin: verified /Users/risto/uni/agre/ureth/target/release/unicity-reth reports the pinned commit 32e1f2fc769dfeddc18dce600e82331c8ed6279e
+bft source commit=bdb1b9dddd39a3d624d53108c6157d04830ca551
+ureth source commit=32e1f2fc769dfeddc18dce600e82331c8ed6279e binary sha256=112234b775cf674c253e603a5d095634ce6aea88143451a1d459156dca6fd936
+registry artifact sha256=56b21b59e7a67e5d5113283e5b9b44279f02e95abb0a7a3dbed0478c876e61a9
+=== 1. generate the shard topology and chain spec ===
+D2C[proof-corrupt] FAIL(lane exited 143; see diagnostics above)

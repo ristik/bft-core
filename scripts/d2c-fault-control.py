@@ -111,6 +111,59 @@ def wait_down(i):
     raise RuntimeError(f"reth{i} HTTP port did not close after signal")
 
 
+def proof_fault():
+    control = Path("test-nodes/proof-proxy/control.json")
+    proxy_log = Path("test-nodes/proof-proxy/proxy.log")
+    validator_log = Path("test-nodes/evm1/debug.log")
+
+    def set_mode(mode, seconds=0):
+        temp = control.with_suffix(".tmp")
+        temp.write_text(json.dumps({"mode": mode, "until": time.time() + seconds}))
+        temp.replace(control)
+
+    if not control.exists() or not Path("test-nodes/proof-proxy/pid").exists():
+        raise RuntimeError("proof scenario selected but the local proof proxy is not running")
+    with validator_log.open("a") as stream:
+        stream.write(f"D2C_PROOF_BOUNDARY scenario={SCENARIO} certified=B{CERTIFIED}\n")
+    if SCENARIO == "proof-outage":
+        seconds = int(os.environ.get("D2C_PROOF_OUTAGE_SECONDS", "10"))
+        set_mode("outage", seconds)
+        print(f"D2C[proof-outage] dropped proof RPC methods for {seconds}s", flush=True)
+        time.sleep(seconds)
+        set_mode("pass")
+        drops = sum("drop method=" in line for line in proxy_log.read_text(errors="replace").splitlines())
+        if drops == 0:
+            raise RuntimeError("proof outage expired without dropping either requested method")
+        print(f"D2C[proof-outage] restored forwarding after {drops} dropped proof calls", flush=True)
+        return
+
+    seconds = int(os.environ.get("D2C_PROOF_CORRUPT_SECONDS", "10"))
+    before_head = head(1)
+    set_mode("corrupt", seconds)
+    print(f"D2C[proof-corrupt] corrupted proof RPC bytes for {seconds}s", flush=True)
+    time.sleep(seconds)
+    set_mode("pass")
+    proxy_lines = proxy_log.read_text(errors="replace").splitlines()
+    corrupted = [line for line in proxy_lines if "corrupt method=" in line]
+    if not corrupted:
+        raise RuntimeError("proof-corrupt window ended without mutating proof bytes")
+    lines = validator_log.read_text(errors="replace").splitlines()
+    marker_line = max(i for i, line in enumerate(lines) if "D2C_PROOF_BOUNDARY" in line)
+    after = lines[marker_line + 1:]
+    requests = [line for line in after if 'msg="submitting block certification request"' in line]
+    named = [line for line in after if re.search(r"parent witness|proof|invalid|mismatch", line, re.I)
+             and re.search(r"level=(ERROR|WARN)", line)]
+    after_head = head(1)
+    if requests:
+        raise RuntimeError(f"validator 1 submitted {len(requests)} certification request(s) during corrupt evidence window")
+    if after_head != before_head:
+        raise RuntimeError(f"validator 1 reth head advanced during corrupt evidence window: {before_head} -> {after_head}")
+    if not named:
+        raise RuntimeError("corrupt proof bytes produced no named validator diagnostic")
+    print(f"D2C[proof-corrupt] named failure observed; no certification request or reth head advance; "
+          f"corrupted RPC calls={len(corrupted)}", flush=True)
+
+
 def leader():
     deadline = time.monotonic() + 40
     while time.monotonic() < deadline:
@@ -136,6 +189,9 @@ elif SCENARIO == "ureth-kill":
     targets, sig, kill_reth = [1], "KILL", True
 elif SCENARIO == "all-kill":
     targets, sig, kill_reth = [1, 2, 3, 4], "KILL", True
+elif SCENARIO in {"proof-outage", "proof-corrupt"}:
+    proof_fault()
+    raise SystemExit(0)
 else:
     raise RuntimeError(f"no process fault hook for {SCENARIO}")
 

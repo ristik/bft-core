@@ -7,11 +7,12 @@ D2C_SCENARIO=pair-term URETH_BIN=/Users/risto/uni/agre/ureth/target/release/unic
   D2C_PERSISTENCE_THRESHOLD=64 ./scripts/d2c-fault-harness.sh
 ```
 
-The harness injects the process faults at certified B5. It now has process controllers for
+The harness injects the process faults at certified B5. It has process controllers for
 `pair-term`, `pair-kill`, `ureth-kill`, `all-kill`, and `leader-kill`. SIGKILL scenarios record
 reth heads immediately after relaunch and their lag against the B5 certified target. The controller
-restores the static reth peer mesh before the monitor tests continuation. Proof RPC faults still
-need the local proxy; the missing-body test needs D2-A's journal.
+restores/checks the static reth peer mesh before the monitor tests continuation. A local JSON-RPC
+proxy now supports bounded outage and proof-byte corruption for `debug_getRawHeader` and
+`eth_getProof`; those cases have not yet been run. The missing-body test needs D2-A's journal.
 
 Two pair-term runs reached B5, sent SIGTERM to shard 1 and reth 1, and relaunched them. Both
 reported reth1 at B5 immediately after relaunch while the other reth clients were at B7, so the
@@ -24,8 +25,8 @@ diagnostic. The monitor now preserves that diagnostic for subsequent runs. These
 inconclusive. They do show the stricter same-block lane-check rejecting warnings without matching
 recovery.
 
-The 15:50 timestamped one-line logs are retained from the initial scaffold and predate the process
-controllers; they are not fault-injection evidence.
+The 15:50 and 15:52 timestamped scaffold logs and the 16:26 one-line proof logs predate the
+process/proxy controllers; they are not fault-injection evidence.
 
 | Scenario | Result | Classified reason |
 |---|---|---|
@@ -34,8 +35,8 @@ controllers; they are not fault-injection evidence.
 | ureth-kill | NOT RUN | Ureth-only SIGKILL controller is wired; needs an execution. |
 | all-kill | NOT RUN | Four-pair SIGKILL controller is wired; needs an execution. |
 | leader-kill | NOT RUN | Controller detects `leader=true` on a proposal round after B5, then kills that pair; needs an execution. |
-| proof-outage | EXPECTED-FAIL | Local proof RPC proxy is not implemented. |
-| proof-corrupt | EXPECTED-FAIL | Local proof mutation proxy is not implemented. |
+| proof-outage | INCONCLUSIVE | The proxy dropped two `debug_getRawHeader` calls for 10s, restored forwarding, and B6 was observed on all validators. The monitor stalled before B7 with reth1 at B6 while the other clients reached B48; validator 1 reported the next certified block unavailable (`status syncing`). The lane's final divergence scan then hit a shell syntax error because its script was edited during the live run. Repeat with the current clean `bash -n` version. See the 16:36 proof-outage log. |
+| proof-corrupt | INCONCLUSIVE | The lane exited with status 143 during topology setup, before starting the proxy or mutating proof bytes. A different paired-devnet lane was active in another worktree at the same time; rerun when its shared ports are free. See the 16:42 proof-corrupt log. |
 | missing-body | EXPECTED-FAIL | Needs D2-A durable journal entry and target. |
 | wrong-genesis | EXPECTED-FAIL | Retained-state wrong-genesis restart hook is not implemented; startup identity checks do not cover this case. |
 
