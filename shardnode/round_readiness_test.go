@@ -26,6 +26,31 @@ func (t fakeTicket) Valid() bool { return t.valid }
 
 type unreadyJournalRecovery struct{}
 
+type refusedBuildExecutor struct {
+	shardnode.Executor
+	builds int
+}
+
+func (e *refusedBuildExecutor) Build(context.Context, shardnode.RoundParams) (shardnode.BuildID, error) {
+	e.builds++
+	return "", shardnode.ErrBuildUnavailable
+}
+
+func TestRoundBuildJobRefusalAbstainsWithoutSigning(t *testing.T) {
+	exec := &refusedBuildExecutor{Executor: executortest.New()}
+	sub := &recordingSubmitter{}
+	r, nodeID := newTestRound(t, exec, sub)
+	spy := &journalSignerSpy{}
+	r.SetCertificationSigner(spy)
+	health := shardnode.NewHealth()
+	r.SetHealth(health)
+	require.NoError(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID)))
+	require.Equal(t, 1, exec.builds)
+	require.Zero(t, spy.calls)
+	require.Empty(t, sub.got)
+	require.Equal(t, "unready", health.Snapshot().ExecutionRecovery)
+}
+
 func (unreadyJournalRecovery) Recover(context.Context, *types.UnicityCertificate) (shardnode.BlockRef, error) {
 	return shardnode.BlockRef{}, errors.New("certified executor head is not ready")
 }

@@ -152,6 +152,10 @@ func (s Status) String() string {
 // executor instance, or never issued).
 var ErrNotFound = errors.New("shardnode: build id not found")
 
+// ErrBuildUnavailable means the executor refused to start a payload job on a
+// locally trusted parent. It is not a verdict about a proposed block.
+var ErrBuildUnavailable = errors.New("shardnode: execution payload build unavailable")
+
 // Executor is what a shard node runs. Implementations decide what a block
 // contains and what its state root means; the framework only sequences
 // calls and carries the results into and out of Unicity Certificates.

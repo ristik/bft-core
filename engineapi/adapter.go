@@ -474,8 +474,8 @@ func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, der
 		return "", fmt.Errorf("engineapi: forkchoiceUpdatedWithSealV1 (build): %w", err)
 	}
 	if resp.PayloadStatus.Status != PayloadStatusValid {
-		return "", fmt.Errorf("engineapi: forkchoiceUpdatedWithSealV1 (build) on our own trusted head returned %s, not VALID: %v",
-			resp.PayloadStatus.Status, errString(resp.PayloadStatus.ValidationError))
+		return "", fmt.Errorf("%w: forkchoiceUpdatedWithSealV1 refused a build on the trusted parent (status %s): %s",
+			shardnode.ErrBuildUnavailable, resp.PayloadStatus.Status, errString(resp.PayloadStatus.ValidationError))
 	}
 	if resp.PayloadID == nil {
 		return "", errors.New("engineapi: forkchoiceUpdatedWithSealV1 accepted payloadAttributes but returned no payload id")

@@ -771,6 +771,14 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 			r.recordReadinessRevoked(ctx, err)
 			return nil
 		}
+		if errors.Is(err, ErrBuildUnavailable) {
+			r.health.updateExecutionRecovery("unready", err.Error())
+			r.health.updateVoting(false, err.Error())
+			if r.log != nil {
+				r.log.WarnContext(ctx, "declining round after executor build refusal", slog.Uint64("round", exp.Round), slog.String("reason", err.Error()))
+			}
+			return nil
+		}
 		return fmt.Errorf("producing round %d block: %w", exp.Round, err)
 	}
 	if leader != r.nodeID && r.journal != nil && len(block.Raw) != 0 {
