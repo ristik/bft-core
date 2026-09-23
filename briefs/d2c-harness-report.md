@@ -35,11 +35,15 @@ supports no stronger conclusion than that this older setup did not re-drive/catc
 needed for recovery. [Earlier log](d2c-harness/20260923T163626Z-proof-outage.log)
 
 The two current reruns used fresh test-node trees and the shared lock wrapper. They ended before the
-B5 hook because the setup still waits for the old `accepted certificate` log text. The D2 acceptance
+B5 hook because the setup still waited for the old `accepted certificate` log text. The D2 acceptance
 plan says D2-A admission moved to the journal path, making a detector mismatch the likely cause.
-Switch all certified-block detection to the structured admission line after its exact format arrives.
 No scenario with a pre-injection setup failure is counted as expected SYNCING. Per the acceptance
-plan, do not run acceptance lanes until that switch is made and #247 has merged and #248 is code-approved.
+plan, do not run acceptance lanes until #247 has merged and #248 is code-approved.
+
+The exact structured admission format is now implemented in #244 at `5f362904` and inherited by
+#246: positive-height admissions match block hash, height and shard round, and D1 compares root round
+across validators. These earlier rerun logs predate that fix. Acceptance lanes remain gated on #247
+merging and #248 receiving code approval.
 
 ## #244 reviewer follow-up
 
