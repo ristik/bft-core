@@ -149,6 +149,7 @@ func (f *derivationFixture) verifier(cursor SealRegistryCursor) *VerifierContext
 		PartitionID:   fixturePartitionID,
 		ShardID:       types.ShardID{},
 		ShardConfHash: f.confHash,
+		RootEpoch:     1,
 		TrustBases:    fixtureTrustBases{tb: f.tb},
 		Cursor:        cursor,
 	}

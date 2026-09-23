@@ -11,7 +11,6 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
-	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
@@ -32,8 +31,10 @@ var (
 	ErrCompanionBinding = errors.New("engineapi: seal companion rootInput does not match the canonical derivation")
 	// ErrCompanionCommitment means the block header does not commit to the derived input.
 	ErrCompanionCommitment = errors.New("engineapi: block extraData does not match the derived commitment")
-	// ErrCompanionUnauthenticated means VerifyCompanionWitnesses refused the bound evidence.
+	// ErrCompanionUnauthenticated is retained for callers of the former v1 adapter.
 	ErrCompanionUnauthenticated = errors.New("engineapi: seal companion failed VerifyCompanionWitnesses")
+	// ErrParentWitnessUnavailable refuses blocks after B0 until U5d supplies an RPC parent witness.
+	ErrParentWitnessUnavailable = errors.New("engineapi: v2 parent registry witness unavailable")
 )
 
 // Adapter implements shardnode.Executor by driving reth over the Engine
@@ -41,9 +42,10 @@ var (
 // everything else (types.go, client.go, params.go, codec.go) is pure
 // Engine-API-facing machinery Adapter composes.
 type Adapter struct {
-	engine *Client
-	eth    *EthClient
-	log    *slog.Logger
+	engine       *Client
+	eth          *EthClient
+	log          *slog.Logger
+	feeCollector [20]byte
 
 	// verifier is the derivation context the seal build path authenticates a certificate against.
 	// Nil for an adapter that only runs the non-deriving checks (the doctor command); Build refuses
@@ -70,9 +72,10 @@ type buildContext struct {
 }
 
 type Config struct {
-	EngineURL string // authenticated engine_* endpoint, e.g. http://localhost:8551
-	EthURL    string // plain eth_* endpoint, e.g. http://localhost:8545
-	Secret    Secret
+	EngineURL    string // authenticated engine_* endpoint, e.g. http://localhost:8551
+	EthURL       string // plain eth_* endpoint, e.g. http://localhost:8545
+	Secret       Secret
+	FeeCollector [20]byte // configured execution fee recipient; must match the client's fee collector
 
 	// Verifier is the derivation context Adapter.Build authenticates the authorizing certificate
 	// against. It is required to build through the seal siblings and is deliberately nil for an
@@ -82,43 +85,34 @@ type Config struct {
 	Verifier *VerifierContext
 }
 
-// VerifierContext is the verifier-owned half of rootinput.Context: what this node is configured to
-// be, where its trust comes from, and the seal-registry cursor. It carries no per-round pin — Build
-// fills Round and the certified parent from RoundParams on every call. Every field comes from the
-// node's configuration or its own trust store, never from a certificate or a peer.
+// VerifierContext holds the verifier-owned identity and trust pins for v2 derivation.
+// Round and the certified parent come from RoundParams on every call.
 type VerifierContext struct {
 	NetworkID     types.NetworkID
 	PartitionID   types.PartitionID
 	ShardID       types.ShardID
 	ShardConfHash []byte
+	RootEpoch     uint64
 	TrustBases    rootinput.TrustBases
-	Cursor        SealRegistryCursor
+	Cursor        SealRegistryCursor // retained for callers of the former v1 API; v2 reads the verified parent snapshot
 
 	// GenesisOrigin is the checked execution genesis this node was configured with, and
 	// BootstrapSnapshot is the verified snapshot of its own block 0. Both are verifier-owned: they come
 	// from the finalized genesis artifact validated against this node's own full shard configuration and
-	// pinned artifact, never from a peer, a certificate or the executor. They are carried here for the
-	// v2 root-input derivation to consume; nothing in this unit reads them, and the live derivation
-	// stays rootinput.Derive (v1). The zero value means no origin was configured.
+	// pinned artifact, never from a peer, a certificate or the executor. The zero value means no
+	// origin was configured; v2 derivation refuses it.
 	GenesisOrigin     registrygenesis.GenesisOrigin
 	BootstrapSnapshot registryproof.Snapshot
 }
 
 func NewAdapter(cfg Config, log *slog.Logger) *Adapter {
 	a := &Adapter{
-		engine:   NewClient(cfg.EngineURL, cfg.Secret),
-		eth:      NewEthClient(cfg.EthURL),
-		log:      log,
-		verifier: cfg.Verifier,
-		pending:  make(map[shardnode.BuildID]buildContext),
-	}
-	// Once here, never per round: the cursor decision is a startup property, and repeating it every
-	// Build would turn one configuration fact into a stream of warnings. Only logged when a verifier
-	// context is present, so the doctor's non-deriving adapter stays quiet.
-	if a.verifier != nil {
-		if warning, ok := a.verifier.Cursor.startupWarning(); ok && log != nil {
-			log.Warn(warning)
-		}
+		engine:       NewClient(cfg.EngineURL, cfg.Secret),
+		eth:          NewEthClient(cfg.EthURL),
+		log:          log,
+		feeCollector: cfg.FeeCollector,
+		verifier:     cfg.Verifier,
+		pending:      make(map[shardnode.BuildID]buildContext),
 	}
 	return a
 }
@@ -323,36 +317,31 @@ func (a *Adapter) Commit(ctx context.Context, hash shardnode.Hash) (shardnode.St
 	return toStatus(resp.PayloadStatus.Status), nil
 }
 
+// deriveV2 authenticates the bound observation and uses the checked B0 snapshot.
+// Post-genesis parents require U5d's RPC witness path and are refused explicitly.
+func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (rootinput.ResultV2, error) {
+	if p.Parent.Number != 0 {
+		return rootinput.ResultV2{}, fmt.Errorf("%w: parent block %d", ErrParentWitnessUnavailable, p.Parent.Number)
+	}
+	o, err := rootinput.AuthenticateObservationV2(ctx, rootinput.ObservationContextV2{
+		NetworkID: a.verifier.NetworkID, PartitionID: a.verifier.PartitionID,
+		ShardID: a.verifier.ShardID, ShardConfHash: a.verifier.ShardConfHash,
+		RootEpoch: a.verifier.RootEpoch, TrustBases: a.verifier.TrustBases,
+	}, uc, tr)
+	if err != nil {
+		return rootinput.ResultV2{}, err
+	}
+	return rootinput.DeriveV2(rootinput.ContextV2{
+		Genesis: a.verifier.GenesisOrigin, Parent: a.verifier.BootstrapSnapshot,
+		Round: p.Round, ParentHash: p.Parent.Hash,
+	}, o)
+}
+
 func (a *Adapter) Build(ctx context.Context, p shardnode.RoundParams) (shardnode.BuildID, error) {
 	if a.verifier == nil {
 		return "", errors.New("engineapi: build requires a verifier context — NetworkID, PartitionID, ShardID, ShardConfHash and TrustBases come from this node's own configuration, never from the certificate (docs/design/f2c-root-input-wiring-contract.md §3)")
 	}
-	appliedRootRound, err := a.verifier.Cursor.appliedRootRound()
-	if err != nil {
-		return "", fmt.Errorf("engineapi: build: %w", err)
-	}
-
-	// Derive the canonical root input from the certificate and record that authorized this round.
-	// Every rootinput refusal is wrapped rather than replaced, so errors.Is still finds
-	// ErrWrongContext, ErrUnauthenticated, ErrNotPinned and the rest at the call site: F2c §8
-	// requires a caller to tell a misconfiguration from an attack, and one opaque error would not.
-	derived, err := rootinput.Derive(ctx, rootinput.Context{
-		NetworkID:     a.verifier.NetworkID,
-		PartitionID:   a.verifier.PartitionID,
-		ShardID:       a.verifier.ShardID,
-		ShardConfHash: a.verifier.ShardConfHash,
-		TrustBases:    a.verifier.TrustBases,
-
-		Round:                p.Round,
-		ParentHash:           p.Parent.Hash,
-		LastAppliedRootRound: appliedRootRound,
-
-		// False, and not a guess: rootinput.Derive independently refuses the epoch-handoff boundary
-		// (rootinput/rootinput.go), so false here means "none are pending" for the accepted
-		// single-epoch profile. The handoff case is caught by Derive itself rather than by an empty
-		// list standing in for "some are pending and could not be authenticated". See F2c §8.
-		TransitionsPending: false,
-	}, p.AuthorizingCertificate, p.AuthorizingTechnicalRecord)
+	derived, err := a.deriveV2(ctx, p, p.AuthorizingCertificate, p.AuthorizingTechnicalRecord)
 	if err != nil {
 		return "", fmt.Errorf("engineapi: deriving root input for round %d: %w", p.Round, err)
 	}
@@ -366,7 +355,7 @@ func (a *Adapter) Build(ctx context.Context, p shardnode.RoundParams) (shardnode
 	if err != nil {
 		return "", fmt.Errorf("engineapi: looking up parent header %x: %w", parentHash32, err)
 	}
-	attrs := DeriveAttributes(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)})
+	attrs := DeriveAttributesV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
 
 	sealAttrs := UnicityPayloadAttributes{
 		PayloadAttributesV3: attrs,
@@ -391,8 +380,8 @@ func (a *Adapter) Build(ctx context.Context, p shardnode.RoundParams) (shardnode
 	a.pending[id] = buildContext{
 		payloadID:       *resp.PayloadID,
 		parent:          p.Parent,
-		certificate:     derived.Certificate,
-		technicalRecord: derived.Technical,
+		certificate:     derived.Observation.Certificate(),
+		technicalRecord: derived.Observation.TechnicalRecord(),
 	}
 	a.mu.Unlock()
 	return id, nil
@@ -467,25 +456,14 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 	})
 }
 
-// Verify is where C2.3's follower-side validation actually happens, and where the F2c §3.1
-// authentication boundary sits. The order is forced by v1: the expected parameters are a function of
-// the bound certificate's root round and reference time, which arrive with the companion, so the
-// block's companion is authenticated against THIS node's own configured trust first, then the
-// parameters are derived from the authenticated input and the payload fields are checked against
-// them, and only then does the expensive newPayloadWithSealV1 call execute the block. Deriving
-// before the companion was authenticated would mean deriving from this node's own
-// p.AuthorizingCertificate, which is exactly the re-selection F2c §3.1 forbids. A leader whose
-// companion does not authenticate is rejected before reth sees the bound evidence, a leader that
-// altered the timestamp or fee recipient is still rejected before execution, and a missing companion
-// is a refusal rather than a fallback to the stock V3 path.
-//
-// The follower validates the binding the block carries; it never re-selects. Two honest nodes hold
-// different valid certificates for the same round (duplicates from several root nodes, repeats after
-// a timeout), so deriving from whichever this node happens to hold would make them compute different
-// commitments for the same block or refuse a valid proposal by delivery order. Everything below is
-// derived from the certificate the block binds, and the only view-dependent input is this node's own
-// committed seal-registry cursor, which is shared state rather than arrival order (F2c §3.1).
+// Verify authenticates the block-bound certificate and technical record against this node's v2
+// configuration and checked genesis snapshot. It compares the canonical bytes and header commitment
+// before asking the execution client to execute. The follower never re-selects from its own inbox.
+// U5d will supply a verified parent witness for post-genesis blocks; until then they are refused.
 func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.RoundParams) (shardnode.Status, error) {
+	if p.Parent.Number != 0 {
+		return shardnode.StatusInvalid, fmt.Errorf("%w: parent block %d", ErrParentWitnessUnavailable, p.Parent.Number)
+	}
 	if len(b.Raw) == 0 {
 		// Quiet block: must be exactly the parent's Number/StateRoot,
 		// unchanged. Nothing to execute — see Seal's quiet case above,
@@ -538,33 +516,7 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 		return shardnode.StatusInvalid, fmt.Errorf("engineapi: verifying round %d: %w", p.Round, err)
 	}
 
-	appliedRootRound, err := a.verifier.Cursor.appliedRootRound()
-	if err != nil {
-		return shardnode.StatusInvalid, fmt.Errorf("engineapi: verifying round %d: %w", p.Round, err)
-	}
-
-	// The authentication: rootinput.Derive against this node's own trust base, network, partition,
-	// shard, configuration hash and committed cursor — the same path the builder uses. Nothing is
-	// accepted on the proposer's word, and the certificate is never a value this node already held.
-	// A stale bound certificate is refused here as a named rootinput class (ErrNotPinned), which is
-	// what F2c §8 and §10 negative 6 require: fail fast, with the class that lets an operator tell a
-	// misconfiguration from an attack.
-	derived, err := rootinput.Derive(ctx, rootinput.Context{
-		NetworkID:     a.verifier.NetworkID,
-		PartitionID:   a.verifier.PartitionID,
-		ShardID:       a.verifier.ShardID,
-		ShardConfHash: a.verifier.ShardConfHash,
-		TrustBases:    a.verifier.TrustBases,
-
-		Round:                p.Round,
-		ParentHash:           p.Parent.Hash,
-		LastAppliedRootRound: appliedRootRound,
-
-		// False, as on the build path, and for the same reason: rootinput.Derive independently
-		// refuses the epoch-handoff boundary, so false here means "none are pending" for the
-		// accepted single-epoch profile, not "some are pending and could not be authenticated".
-		TransitionsPending: false,
-	}, uc, tr)
+	derived, err := a.deriveV2(ctx, p, uc, tr)
 	if err != nil {
 		return shardnode.StatusInvalid, fmt.Errorf("engineapi: authenticating the bound certificate for round %d: %w", p.Round, err)
 	}
@@ -584,49 +536,19 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 			ErrCompanionCommitment, p.Round, envelope.ExecutionPayload.ExtraData, derived.Commitment[:])
 	}
 
-	// VerifyCompanionWitnesses, with this node's own committed cursor. F2c §3.1 step 4 names this
-	// check explicitly, and it runs here as defence in depth against the same value: the Derive above
-	// has already enforced that cursor, so a stale bound certificate never reaches this call and no
-	// distinct refusal reason can originate here. That is the intended outcome, not a gap — F2c §8 and
-	// §10 negative 6 require the refusal to arrive as its own rootinput class, which the earlier step
-	// gives, not as a reason from this call.
-	//
-	// Be precise about what is tautological here: the signature verdict and the canonical root input
-	// both come from that same Derive, so the O_-/TRHash binding, the teHash(ri.TE) ==
-	// ri.Origin.TRHash check and the transitions comparison are satisfied by construction. This is
-	// not a second authentication boundary and must not be described as one.
-	auth := evmroot.VerifyCompanionWitnesses(evmroot.CompanionWitness{
-		UC: evmroot.UCWitness{Cert: evmroot.VerifiedCert{
-			// True because rootinput.Derive verified the certificate above, against this node's own
-			// configured trust base — never a field a peer supplied.
-			SignaturesValid: true,
-			RootRound:       derived.Authorizing.RootRound,
-			AuthorizedRound: derived.Input.Round,
-			OriginID:        derived.Authorizing.OriginID,
-			TRHash:          derived.Authorizing.TRHash,
-		}},
-		// Verifier-owned and empty: no authenticated feed of committed trust-base bodies or handoff
-		// acknowledgements reaches a shard node (F2c §8), and an empty list here means "none are
-		// pending", never "some are pending and could not be authenticated".
-		ExpectedTransitions: nil,
-	}, derived.Input, appliedRootRound)
-	if !auth.OK {
-		return shardnode.StatusInvalid, fmt.Errorf("%w: %s", ErrCompanionUnauthenticated, auth.Reason)
-	}
-
-	// Only now, with the input authenticated, are the v1 parameters computable: they are functions of
+	// Only now, with the input authenticated, are the execution parameters computable: they are functions of
 	// the bound certificate's root round and reference time, both read from derived.Input. The payload
 	// fields are checked last of the checks, so a block that fails authentication is reported as an
 	// authentication failure rather than as a field divergence. A divergence stays StatusInvalid with
 	// the local warning, not an error return, exactly as before the reordering.
-	attrs := DeriveAttributes(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)})
+	attrs := DeriveAttributesV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
 	claimed := PayloadFields{
 		Timestamp:             envelope.ExecutionPayload.Timestamp,
 		PrevRandao:            envelope.ExecutionPayload.PrevRandao,
 		SuggestedFeeRecipient: envelope.ExecutionPayload.FeeRecipient,
 		Withdrawals:           envelope.ExecutionPayload.Withdrawals,
 	}
-	if err := VerifyPayloadFields(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, claimed); err != nil {
+	if err := VerifyPayloadFieldsV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector, claimed); err != nil {
 		if a.log != nil {
 			a.log.WarnContext(ctx, "rejecting round before execution: attributes diverge from local derivation", slog.String("err", err.Error()))
 		}
