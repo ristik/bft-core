@@ -526,6 +526,9 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 		if _, err := rootinput.AuthenticateObservationV2(ctx, r.Context.Observation, e.ResultingUC, e.ResultingTR); err != nil {
 			return fmt.Errorf("%w: resulting certificate for %x: %w", ErrRecoveryConflict, b.Hash, err)
 		}
+		if e.AuthorizingUC.GetRootRoundNumber() >= e.ResultingUC.GetRootRoundNumber() || types.CheckNonEquivocatingCertificates(e.AuthorizingUC, e.ResultingUC) != nil {
+			return fmt.Errorf("%w: authorizing and resulting certificates for %x do not share a forward root history", ErrRecoveryConflict, b.Hash)
+		}
 		ir := e.ResultingUC.InputRecord
 		if e.Round != e.AuthorizingTR.Round || ir == nil || ir.RoundNumber != e.Round || !bytes.Equal(ir.BlockHash, b.Hash) || !bytes.Equal(ir.Hash, b.StateRoot) {
 			return fmt.Errorf("%w: certificate/body association for %x", ErrRecoveryConflict, b.Hash)
