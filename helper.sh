@@ -278,6 +278,13 @@ function start_one_evm_validator() {
     local engineURL="${!engineURLVar:-http://127.0.0.1:8551}"
     local ethURL="${!ethURLVar:-http://127.0.0.1:8545}"
     executorArgs=(--engine-url "$engineURL" --eth-url "$ethURL" --jwt-secret "test-nodes/evm$i/jwt.hex")
+	if [ -n "${EVM_GENESIS_FILE:-}" ]; then
+	  if [ -z "${EVM_FULL_SHARD_CONF:-}" ]; then
+	    echo "EVM_GENESIS_FILE requires EVM_FULL_SHARD_CONF" >&2
+	    return 1
+	  fi
+	  executorArgs+=(--genesis "$EVM_GENESIS_FILE" --full-shard-conf "$EVM_FULL_SHARD_CONF")
+	fi
   fi
 
   # Expanded as ${arr[@]+"${arr[@]}"} below, and $6 defaulted above, so this function works under
