@@ -97,6 +97,10 @@ type Round struct {
 	// record at the retention site below. Nil on a node without the certified-record gate, and
 	// installed only alongside childReadiness.
 	certificateObserver CertificateObserver
+	// journal is the durable v2 proposal store. A candidate is retained before a leader publishes
+	// or a follower verifies/signs it. Certification is admitted by the configured progress store
+	// before this round is delivered; this hook only handles proposal bytes.
+	journal ProposalJournal
 
 	// childReadiness, when set, decides whether this node may lead or sign for the held certificate's
 	// child (#14 W3b-1). It is the round-facing half of recordwiring.Readiness, attached only with
@@ -732,6 +736,11 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 			return nil
 		}
 		return fmt.Errorf("producing round %d block: %w", exp.Round, err)
+	}
+	if leader != r.nodeID && r.journal != nil {
+		if err := r.journal.RetainCandidate(ctx, block, params, false); err != nil {
+			return fmt.Errorf("retaining follower candidate before verification/signing: %w", err)
+		}
 	}
 
 	verifyStart := time.Now()
@@ -1541,6 +1550,11 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		r.metrics.recordBuildDuration(ctx, time.Since(buildStart))
 		if err != nil {
 			return Block{}, params, fmt.Errorf("seal: %w", err)
+		}
+		if r.journal != nil {
+			if err := r.journal.RetainCandidate(ctx, block, params, true); err != nil {
+				return Block{}, params, fmt.Errorf("retaining leader candidate before publication: %w", err)
+			}
 		}
 		if r.disseminator != nil {
 			if err := r.disseminator.Publish(ctx, exp.Round, block); err != nil {

@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNoProductionPackageImportsConfiguredAdmission(t *testing.T) {
+func TestOnlyShardNodeCLIActivatesConfiguredAdmission(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
 	const importPath = "github.com/unicitynetwork/bft-core/configuredadmission"
@@ -46,5 +46,6 @@ func TestNoProductionPackageImportsConfiguredAdmission(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	require.Empty(t, importers, "inactive configured admission must have no production importer")
+	require.Equal(t, []string{filepath.Join("cli", "ubft", "cmd", "shard_node_run.go")}, importers,
+		"configured admission is activated only by the explicit execution-journal CLI path")
 }

@@ -5,7 +5,9 @@ import (
 	"crypto"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,10 +26,14 @@ import (
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 
+	"github.com/unicitynetwork/bft-core/certifiedstore"
+	"github.com/unicitynetwork/bft-core/configuredadmission"
+	"github.com/unicitynetwork/bft-core/configuredprogress"
 	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
+	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
 )
@@ -57,7 +63,11 @@ type shardNodeRunFlags struct {
 	FullShardConf          string
 	ExpectedOriginIdentity string
 
-	LUCStoreFile string
+	LUCStoreFile        string
+	ExecutionJournal    string
+	JournalCandidates   int
+	JournalObservations int
+	JournalBytes        int64
 
 	// CertifiedRecordStore enables the certified-block record store (#14) at this path. Empty, the default,
 	// constructs nothing, and the node runs exactly as before. See startCertifiedRecord.
@@ -133,6 +143,14 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"engine-api executor only: path to the 32-byte hex JWT secret shared with the execution client (default: $UBFT_HOME/jwt.hex)")
 	cmd.Flags().StringVar(&flags.LUCStoreFile, "luc-store", "",
 		fmt.Sprintf("path to the last-certificate store, for restart recovery (default: %s)", filepath.Join("$UBFT_HOME", lucStoreFileName)))
+	cmd.Flags().StringVar(&flags.ExecutionJournal, "execution-journal", "",
+		"path to the configured-origin v2 full-history proposal and certification journal (fresh D2 lane state required)")
+	cmd.Flags().IntVar(&flags.JournalCandidates, "journal-candidates", 256,
+		"maximum retained candidate bodies with --execution-journal; admission stops at capacity")
+	cmd.Flags().IntVar(&flags.JournalObservations, "journal-observations", 512,
+		"maximum retained certificate observations with --execution-journal; admission stops at capacity")
+	cmd.Flags().Int64Var(&flags.JournalBytes, "journal-bytes", 64<<20,
+		"maximum retained journal bytes with --execution-journal; no pruning in M1")
 	cmd.Flags().StringVar(&flags.CertifiedRecordStore, "certified-record-store", "",
 		"path of the certified-block record store (#14); empty leaves it off. Requires --executor engine-api and a SealRegistry shard configuration. The record is reloaded and reported at startup, and the witness of every block the round commits is captured over --eth-url and published; none of it changes voting")
 	cmd.Flags().IntVar(&flags.CertifiedRecordRetain, "certified-record-retain", defaultCertifiedRecordRetain,
@@ -294,6 +312,20 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 
 	lucStorePath := flags.PathWithDefault(flags.LUCStoreFile, lucStoreFileName)
 	store := shardnode.NewFileStore(lucStorePath)
+	if flags.ExecutionJournal != "" {
+		if flags.Executor != "engine-api" || !origin.Valid() {
+			return errors.New("--execution-journal requires --executor engine-api and a checked --genesis/--full-shard-conf origin")
+		}
+		if flags.CertifiedRecordStore != "" {
+			return errors.New("--execution-journal cannot share authority with the legacy --certified-record-store; v2 record/readiness wiring belongs to D2-B")
+		}
+		if _, statErr := os.Stat(lucStorePath); statErr == nil {
+			return fmt.Errorf("execution journal requires fresh D2 lane state: legacy LUC checkpoint exists at %s; no automatic migration", lucStorePath)
+		} else if !errors.Is(statErr, fs.ErrNotExist) {
+			return fmt.Errorf("checking legacy LUC checkpoint: %w", statErr)
+		}
+		store = nil
+	}
 
 	node, err := shardnode.New(
 		peer,
@@ -322,6 +354,39 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		// node resumed from its checkpoint signs only through this signer's authority record; with the
 		// local key it stays non-voting (#105 step 4).
 		node.SetCertificationSigner(signing.authority)
+	}
+	if flags.ExecutionJournal != "" {
+		limits := configuredprogress.JournalLimits{Candidates: flags.JournalCandidates, Observations: flags.JournalObservations, Bytes: flags.JournalBytes}
+		journalPath := flags.ExecutionJournal
+		journalStore, openErr := configuredprogress.OpenConfiguredV2(journalPath, configuredprogress.Settings{Retain: 128})
+		if openErr != nil {
+			return fmt.Errorf("opening execution journal: %w", openErr)
+		}
+		defer journalStore.Close()
+		recordCtx := certifiedstore.Context{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, FullShardConfHash: confHash, Registry: origin.ProofContext(), TrustBases: trustBaseStore}
+		journalCtx := configuredprogress.Context{Origin: origin, Observation: rootinput.ObservationContextV2{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, ShardConfHash: confHash, RootEpoch: trustBases[0].GetEpoch(), TrustBases: trustBaseStore}, Record: recordCtx}
+		if _, _, openErr = journalStore.Initialize(ctx, journalCtx); openErr != nil {
+			return fmt.Errorf("initializing execution journal: %w", openErr)
+		}
+		if openErr = journalStore.EnableJournal(ctx, journalCtx, limits); openErr != nil {
+			return fmt.Errorf("activating execution journal: %w", openErr)
+		}
+		journalImage, loadErr := journalStore.LoadJournal(ctx, journalCtx, limits)
+		if loadErr != nil {
+			return fmt.Errorf("verifying execution journal: %w", loadErr)
+		}
+		progress, _, loadErr := journalStore.Load(ctx, journalCtx)
+		if loadErr != nil {
+			return fmt.Errorf("loading execution progress: %w", loadErr)
+		}
+		if observed, ok := progress.Observed(); ok {
+			node.MarkJournalRestored(observed.Certificate().GetRoundNumber())
+		}
+		node.SetProposalJournal(configuredadmission.ProposalJournal{Store: journalStore, Context: journalCtx, Limits: limits})
+		if openErr = node.SetJournalAdmission(configuredadmission.JournalFactory{Store: journalStore, Origin: origin, Limits: limits}); openErr != nil {
+			return fmt.Errorf("enabling journal certification admission: %w", openErr)
+		}
+		flags.observe.Logger().Info("execution journal verified", "candidates", len(journalImage.Candidates), "observations", len(journalImage.Observations), "bytes", journalImage.Bytes)
 	}
 
 	// The follower's wait for the leader's block comes from the shard's own T2, never from a
