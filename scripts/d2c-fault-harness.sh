@@ -16,21 +16,27 @@ case "$scenario" in
     echo "D2C[${scenario}] EXPECTED-FAIL(needs D2-A journal entry)" | tee "$log"
     exit 0
     ;;
-  pair-term|pair-kill|ureth-kill|all-kill|leader-kill|proof-outage|proof-corrupt|wrong-genesis)
-    # The current D2-C branch has only the shard-only SIGTERM probe. Preserve a real
-    # B1..B10 baseline log, then report this requested fault as blocked unless its exact
-    # process/RPC hook is present. Never label the baseline probe as the requested fault.
-    if [ "$scenario" = pair-term ]; then
-      D2C_RESTART_PROBE=1 SIGNING=authority ./scripts/reth-paired-devnet.sh 4 10 2>&1 | tee "$log"
-      lane_status=${PIPESTATUS[0]}
-      if [ "$lane_status" -ne 0 ]; then
-        echo "D2C[${scenario}] FAIL(lane baseline exited ${lane_status}; see preceding diagnostics)" | tee -a "$log"
-        exit "$lane_status"
-      fi
-    else
-      echo "D2C[${scenario}] EXPECTED-FAIL(process fault hook absent on D2-C branch)" | tee "$log"
+  pair-term|pair-kill|ureth-kill|all-kill|leader-kill)
+    D2C_FAULT_SCENARIO="$scenario" SIGNING=authority ./scripts/reth-paired-devnet.sh 4 10 2>&1 | tee "$log"
+    lane_status=${PIPESTATUS[0]}
+    if [ "$lane_status" -eq 0 ]; then
+      echo "D2C[${scenario}] PASS" | tee -a "$log"
       exit 0
     fi
-    echo "D2C[${scenario}] EXPECTED-FAIL(existing probe restarts shard only; pair SIGTERM/relaunch not exercised)" | tee -a "$log"
+    if grep -q "D2C\[$scenario\] injection at certified B5" "$log"; then
+      reason=$(grep -E 'D1 FAIL: stalled before height|D1 FAIL: B[0-9]+ lacks|D1 FAIL: canonical disagreement|D1 FAIL: discontinuity' "$log" | tail -1)
+      if [ -n "$reason" ]; then
+        echo "D2C[${scenario}] EXPECTED-FAIL(no automatic re-drive: ${reason#D1 FAIL: })" | tee -a "$log"
+        exit 0
+      fi
+    fi
+    echo "D2C[${scenario}] FAIL(lane exited ${lane_status}; see diagnostics above)" | tee -a "$log"
+    exit "$lane_status"
+    ;;
+  proof-outage|proof-corrupt)
+    echo "D2C[${scenario}] EXPECTED-FAIL(needs local proof RPC proxy hook)" | tee "$log"
+    ;;
+  wrong-genesis)
+    echo "D2C[${scenario}] EXPECTED-FAIL(needs retained-state wrong-genesis restart hook)" | tee "$log"
     ;;
 esac

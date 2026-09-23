@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Inject one D2-C process fault after B5 and relaunch from retained homes."""
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+
+ROOT = Path.cwd()
+ETH_BASE = 18545
+ENGINE_BASE = 18551
+P2P_BASE = 30401
+SCENARIO, CERTIFIED, LAST_ROUND = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+
+
+def rpc(port, method, params):
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+    req = urllib.request.Request(f"http://127.0.0.1:{port}", body, {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=2) as response:
+        answer = json.load(response)
+    if "error" in answer:
+        raise RuntimeError(f"{method} on {port}: {answer['error']}")
+    return answer["result"]
+
+
+def head(i):
+    return int(rpc(ETH_BASE + i - 1, "eth_blockNumber", []), 16)
+
+
+def stop(kind, i, sig):
+    pidfile = f"test-nodes/{kind}{i}/pid"
+    pattern = "ubft shard-node run" if kind == "evm" else "reth.* node"
+    pid = int(Path(pidfile).read_text().strip())
+    subprocess.run(["bash", "-c", "source helper.sh; stop_pidfile \"$1\" \"$2\" \"$3\"",
+                    "d2c-stop", pidfile, pattern, sig], check=True)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        if not stat or stat.startswith("Z"):
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"{kind}{i} process {pid} did not exit after SIG{sig}")
+
+
+def start_reth(i):
+    home = Path(f"test-nodes/reth{i}")
+    jwt = f"test-nodes/evm{i}/jwt.hex"
+    threshold = os.environ.get("D2C_PERSISTENCE_THRESHOLD", "64")
+    fee_collector = os.environ["URETH_PIN_FEE_COLLECTOR"]
+    args = [os.environ["URETH_BIN"], "node", "--chain", "test-nodes/evm-genesis-finalized-funded.json",
+            "--datadir", str(home / "dd"), "--authrpc.jwtsecret", jwt,
+            "--authrpc.addr", "127.0.0.1", "--authrpc.port", str(ENGINE_BASE + i - 1),
+            "--http", "--http.addr", "127.0.0.1", "--http.port", str(ETH_BASE + i - 1),
+            "--http.api", "eth,net,web3,admin,debug", "--rpc.eth-proof-window", "64",
+            "--port", str(P2P_BASE + i - 1), "--disable-discovery", "--ipcdisable",
+            "--engine.persistence-threshold", threshold, "--builder.gaslimit", "30000000",
+            "--unicity.fee-collector", fee_collector]
+    with open(home / "reth.log", "a") as log:
+        process = subprocess.Popen(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+    (home / "pid").write_text(f"{process.pid}\n")
+    for _ in range(120):
+        if process.poll() is not None:
+            raise RuntimeError(f"reth{i} exited {process.returncode}; see {home / 'reth.log'}")
+        try:
+            rpc(ETH_BASE + i - 1, "eth_chainId", [])
+            return
+        except Exception:
+            time.sleep(0.5)
+    raise RuntimeError(f"reth{i} did not reopen its HTTP RPC")
+
+
+def start_shard(i):
+    command = ("source helper.sh; rootBoot=$(boot_node test-nodes/root1 26662); "
+               f"start_one_evm_validator {i} 4 8 \"$rootBoot\" engine-api")
+    subprocess.run(["bash", "-c", command], cwd=ROOT, check=True, env=os.environ.copy())
+
+
+def restore_reth_mesh():
+    for i in range(1, 5):
+        for j in range(1, 5):
+            if i == j:
+                continue
+            enode = rpc(ETH_BASE + j - 1, "admin_nodeInfo", [])["enode"]
+            added = rpc(ETH_BASE + i - 1, "admin_addPeer", [enode])
+            print(f"reth{i} admin_addPeer reth{j}: {added}", flush=True)
+    for i in range(1, 5):
+        for _ in range(40):
+            peers = rpc(ETH_BASE + i - 1, "admin_peers", [])
+            if peers:
+                break
+            time.sleep(0.25)
+        if not peers:
+            raise RuntimeError(f"reth{i} has no connected static peers after restart")
+        print(f"reth{i} connected peers after relaunch: {len(peers)}", flush=True)
+
+
+def wait_down(i):
+    for _ in range(100):
+        try:
+            with socket.create_connection(("127.0.0.1", ETH_BASE + i - 1), timeout=0.1):
+                pass
+        except OSError:
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"reth{i} HTTP port did not close after signal")
+
+
+def leader():
+    deadline = time.monotonic() + 40
+    while time.monotonic() < deadline:
+        for i in range(1, 5):
+            lines = Path(f"test-nodes/evm{i}/debug.log").read_text(errors="replace").splitlines()
+            for line in reversed(lines[-100:]):
+                round_match = re.search(r"(?:^|\s)round=(\d+)(?:\s|$)", line)
+                if ('msg="submitting block certification request"' in line and "leader=true" in line
+                        and round_match and int(round_match.group(1)) > LAST_ROUND):
+                    print(f"D2C leader detected from logs: validator={i}; {line}", flush=True)
+                    return i
+        time.sleep(0.1)
+    raise RuntimeError("no active leader proposal observed in shard logs within 40 seconds")
+
+
+if SCENARIO == "leader-kill":
+    targets, sig, kill_reth = [leader()], "KILL", True
+elif SCENARIO == "pair-term":
+    targets, sig, kill_reth = [1], "TERM", True
+elif SCENARIO == "pair-kill":
+    targets, sig, kill_reth = [1], "KILL", True
+elif SCENARIO == "ureth-kill":
+    targets, sig, kill_reth = [1], "KILL", True
+elif SCENARIO == "all-kill":
+    targets, sig, kill_reth = [1, 2, 3, 4], "KILL", True
+else:
+    raise RuntimeError(f"no process fault hook for {SCENARIO}")
+
+before = {i: head(i) for i in range(1, 5)}
+print(f"D2C[{SCENARIO}] injection at certified B{CERTIFIED}; reth heads before={before}", flush=True)
+for i in targets:
+    if SCENARIO != "ureth-kill":
+        stop("evm", i, sig)
+    if kill_reth:
+        stop("reth", i, sig)
+        wait_down(i)
+
+for i in targets:
+    with open(f"test-nodes/evm{i}/debug.log", "a") as log:
+        log.write(f"D2C_RESTART_BOUNDARY scenario={SCENARIO} certified=B{CERTIFIED}\n")
+for i in range(1, 4):
+    with open(f"test-nodes/root{i}/debug.log", "a") as log:
+        log.write(f"D2C_RESTART_BOUNDARY scenario={SCENARIO} validator={','.join(map(str, targets))}\n")
+
+immediate_after = {}
+if kill_reth:
+    for i in targets:
+        start_reth(i)
+    for i in range(1, 5):
+        try:
+            immediate_after[i] = head(i)
+        except Exception:
+            immediate_after[i] = "unavailable"
+    restore_reth_mesh()
+if SCENARIO != "ureth-kill":
+    for i in targets:
+        start_shard(i)
+
+after = {}
+for i in range(1, 5):
+    try:
+        after[i] = head(i)
+    except Exception:
+        after[i] = "unavailable"
+lag = {i: max(0, CERTIFIED - h) if isinstance(h, int) else "unavailable" for i, h in after.items()}
+if immediate_after:
+    immediate_lag = {i: max(0, CERTIFIED - h) if isinstance(h, int) else "unavailable"
+                     for i, h in immediate_after.items()}
+    print(f"D2C[{SCENARIO}] reth heads immediately after relaunch={immediate_after}; "
+          f"certified=B{CERTIFIED}; lag={immediate_lag}", flush=True)
+print(f"D2C[{SCENARIO}] reth heads after peer restoration={after}; certified=B{CERTIFIED}; lag={lag}", flush=True)

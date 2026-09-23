@@ -1,51 +1,53 @@
 # D2-C fault harness report
 
-The harness is env-selected and runs one scenario per invocation:
+Run one case per invocation:
 
 ```sh
 D2C_SCENARIO=pair-term URETH_BIN=/Users/risto/uni/agre/ureth/target/release/unicity-reth \
   D2C_PERSISTENCE_THRESHOLD=64 ./scripts/d2c-fault-harness.sh
 ```
 
-Each invocation writes a timestamped log under `briefs/d2c-harness/` and finishes with a
-`D2C[scenario]` verdict. `pair-term` runs the existing authority-mode D2-C restart probe, which
-restarts only validator 1's shard process. It is deliberately classified as expected-fail for
-the requested pair fault; the probe does not stop or restart reth. The other process faults have
-no injection/relaunch hook on this branch and are recorded as expected-fail without claiming they
-were exercised. The missing-body case is gated on D2-A's journal.
+The harness injects the process faults at certified B5. It now has process controllers for
+`pair-term`, `pair-kill`, `ureth-kill`, `all-kill`, and `leader-kill`. SIGKILL scenarios record
+reth heads immediately after relaunch and their lag against the B5 certified target. The controller
+restores the static reth peer mesh before the monitor tests continuation. Proof RPC faults still
+need the local proxy; the missing-body test needs D2-A's journal.
 
-The real baseline run used the pinned ureth binary (commit
-`32e1f2fc769dfeddc18dce600e82331c8ed6279e`, SHA-256
-`112234b775cf674c253e603a5d095634ce6aea88143451a1d459156dca6fd936`) and four external
-signing authorities. It certified B1–B10 on all four reth clients. Validator 1 restarted its
-shard process after B5, retained its authority PID/key/session, submitted five later requests,
-appeared in six root quorum proofs, and accepted five later certificates. No unresolved divergence
-was logged. The engine persistence threshold was set to 64 blocks and logged at startup. Since the
-probe left reth running, it did not measure reth replay lag.
+Two pair-term runs reached B5, sent SIGTERM to shard 1 and reth 1, and relaunched them. Both
+reported reth1 at B5 immediately after relaunch while the other reth clients were at B7, so the
+observed B5 lag was zero. The restarted shard repeatedly logged `status syncing` for certified
+blocks, then the monitor stalled before B6 while the other clients advanced to B38/B43. Those runs
+also showed reth1 with `connected_peers=0` after restart; they cannot distinguish D2-A/B recovery
+behavior from missing reth peer connectivity. A peer restoration check is now in the controller,
+but these runs predate that check and need repeating before the pair-term result is classified.
+They do show the requested same-block lane-check refusing warnings that have no matching recovery.
+
+The 15:50 timestamped one-line logs are retained from the initial scaffold and predate the process
+controllers; they are not fault-injection evidence.
 
 | Scenario | Result | Classified reason |
 |---|---|---|
-| pair-term | EXPECTED-FAIL | Existing probe restarts shard only; pair SIGTERM/relaunch is not exercised. Baseline itself reached B10; see timestamped pair-term log. |
-| pair-kill | EXPECTED-FAIL | Process fault hook absent on D2-C branch; SIGKILL pair and retained-data relaunch were not run. |
-| ureth-kill | EXPECTED-FAIL | Process fault hook absent on D2-C branch; ureth-only SIGKILL while shard stays live was not run. |
-| all-kill | EXPECTED-FAIL | Process fault hook absent on D2-C branch; four-pair kill/relaunch was not run. |
-| leader-kill | EXPECTED-FAIL | No proposal-time leader detection or pair-kill hook on D2-C branch. |
-| proof-outage | EXPECTED-FAIL | No local proof RPC proxy or outage injection hook on D2-C branch. |
-| proof-corrupt | EXPECTED-FAIL | No proof mutation hook on D2-C branch; no no-sign/no-commit evidence collected. |
-| missing-body | EXPECTED-FAIL | Needs D2-A durable journal entry to delete and target for recovery. |
-| wrong-genesis | EXPECTED-FAIL | No retained-state restart hook for this case; existing startup identity checks are not a wrong-genesis recovery test. |
+| pair-term | INCONCLUSIVE | Actual SIGTERM pair restart ran, but reth1 had zero connected peers and stayed at B5; shard logged certified blocks as unavailable (`status syncing`) and the monitor stalled before B6. Repeat with the current peer restoration check. |
+| pair-kill | NOT RUN | SIGKILL pair controller is wired; needs an execution with peer restoration verified. |
+| ureth-kill | NOT RUN | Ureth-only SIGKILL controller is wired; needs an execution. |
+| all-kill | NOT RUN | Four-pair SIGKILL controller is wired; needs an execution. |
+| leader-kill | NOT RUN | Controller detects `leader=true` on a proposal round after B5, then kills that pair; needs an execution. |
+| proof-outage | EXPECTED-FAIL | Local proof RPC proxy is not implemented. |
+| proof-corrupt | EXPECTED-FAIL | Local proof mutation proxy is not implemented. |
+| missing-body | EXPECTED-FAIL | Needs D2-A durable journal entry and target. |
+| wrong-genesis | EXPECTED-FAIL | Retained-state wrong-genesis restart hook is not implemented; startup identity checks do not cover this case. |
 
-The timestamped logs for the eight unrun fault injections contain their explicit expected-fail
-verdicts. The pair-term log contains the full B1–B10 baseline and the shard-only probe evidence.
-No Go source was changed. No Go recovery behavior was inferred from an unrun fault.
+The pinned ureth binary is commit `32e1f2fc769dfeddc18dce600e82331c8ed6279e`, SHA-256
+`112234b775cf674c253e603a5d095634ce6aea88143451a1d459156dca6fd936`. Each run logs
+`--engine.persistence-threshold 64`. No SIGKILL replay has yet shown nonzero lag. No Go source was
+changed.
 
-## Follow-up hooks needed for full acceptance
+## Remaining acceptance work
 
-- Add scenario hooks to stop/relaunch owned shard and reth PIDs while preserving datadirs and
-  authorities; detect and kill the current leader while a proposal is in flight.
-- Add a local JSON-RPC proxy for `debug_getRawHeader` and `eth_getProof` that can time out or
-  mutate response bytes for one validator, then restore forwarding.
-- After D2-A lands, remove a journal body at a certified target and restart against it.
-- For every SIGKILL recovery, record the certified target and each reth head immediately after
-  relaunch, then verify continuation through at least B10 and show nonzero lag at least once.
-- Rebase this branch when #239/#244 merge, then run the complete scenario matrix against D2-A/B.
+- Repeat pair-term after verifying the reth mesh reconnects; then run pair-kill, ureth-kill,
+  all-kill, and leader-kill through B10.
+- Add a local proxy that can drop `debug_getRawHeader`/`eth_getProof` for a bounded period and flip
+  bytes for the corrupt case; verify automatic continuation or named fail-closed behavior.
+- After D2-A lands, remove a certified journal body and test retained-state recovery; add the
+  wrong-genesis restart case.
+- Show nonzero lag and automatic replay for at least one SIGKILL run after D2-A/B.
