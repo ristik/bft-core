@@ -117,7 +117,7 @@ func TestAdapterV2ContinuesThroughCertifiedParents(t *testing.T) {
 			status, err = a.Verify(context.Background(), block, differentInbox)
 			require.NoError(t, err, "follower authenticates the block-bound witnesses, not its own inbox")
 			require.Equal(t, shardnode.StatusValid, status)
-			require.EqualValues(t, 6, calls.Load())
+			require.EqualValues(t, 2, calls.Load(), "Build and Verify reuse one verified parent snapshot")
 			require.Equal(t, 2, sealCalls)
 			bad := params
 			bad.Parent.StateRoot = bytes.Repeat([]byte{0xee}, 32)
@@ -254,5 +254,5 @@ func TestAdapterV2IdlePostGenesisParentAdvancesBlock(t *testing.T) {
 	status, err := a.Verify(context.Background(), block, params)
 	require.NoError(t, err)
 	require.Equal(t, shardnode.StatusValid, status)
-	require.EqualValues(t, 4, calls.Load())
+	require.EqualValues(t, 2, calls.Load(), "quiet Verify reuses the Build parent snapshot")
 }

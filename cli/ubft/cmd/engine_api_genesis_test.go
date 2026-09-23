@@ -180,6 +180,17 @@ func TestEngineAPIGenesis_WritesTheFullShardConf(t *testing.T) {
 	var full types.PartitionDescriptionRecord
 	_, err = util.ReadJsonFile(fullPath, &full)
 	require.NoError(t, err)
+	finalized, err := os.ReadFile(out)
+	require.NoError(t, err)
+	art, err := registrygenesis.PinnedArtifact()
+	require.NoError(t, err)
+	pins := registrygenesis.Pins{
+		RootEpoch: 1, RegistryCodeHash: art.CodeHash,
+		SystemAddress: registrygenesis.SystemAddress, RegistryAddress: registryproof.RegistryAddress,
+	}
+	origin, err := registrygenesis.ValidateFinalizedGenesisJSON(&full, pins, art, finalized, nil, registrygenesis.DefaultGenesisJSONLimits())
+	require.NoError(t, err, "the emitted genesis must validate against the emitted full configuration")
+	require.True(t, origin.Valid())
 
 	// Its hash is the full shard conf hash the command printed.
 	h, err := full.Hash(crypto.SHA256)
@@ -202,6 +213,22 @@ func TestEngineAPIGenesis_WritesTheFullShardConf(t *testing.T) {
 	_, err = runEngineAPIGenesis(t, "--shard-conf", shardConfPath, "--out", filepath.Join(dir, "genesis2.json"), "--full-shard-conf", explicit)
 	require.NoError(t, err)
 	require.FileExists(t, explicit)
+}
+
+func TestEngineAPIGenesis_RejectsOverlappingOrIncompleteOutputs(t *testing.T) {
+	shardConf := writeGenesisShardConf(t)
+	dir := t.TempDir()
+	out := filepath.Join(dir, "genesis.json")
+
+	_, err := runEngineAPIGenesis(t, "--shard-conf", shardConf, "--out", out,
+		"--full-shard-conf", filepath.Join(dir, ".", "genesis.json"))
+	require.ErrorContains(t, err, "must name different files")
+	require.NoFileExists(t, out)
+
+	_, err = runEngineAPIGenesis(t, "--shard-conf", shardConf, "--out", out,
+		"--full-shard-conf", filepath.Join(dir, "missing", "full.json"))
+	require.ErrorContains(t, err, "staging the full shard configuration")
+	require.NoFileExists(t, out, "a failed second stage must not publish the genesis")
 }
 
 func slotKeySet() map[common.Hash]struct{} {
