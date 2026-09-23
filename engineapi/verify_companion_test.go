@@ -322,7 +322,6 @@ func TestAdapter_Verify_RefusesCompanionEvidenceItCannotAuthenticate(t *testing.
 // engine_newPayloadV3 path: a payload disseminated without one cannot be authenticated by anyone, so
 // silently executing it would skip the boundary this unit installs.
 func TestAdapter_Verify_MissingCompanionIsRefusedWithoutFallingBackToNewPayloadV3(t *testing.T) {
-	t.Skip("U5d: v1 adapter fixture awaits migration to the RPC parent witness; v2 bootstrap is covered by adapter_v2_test.go")
 	h := newCompanionHarness(t, CursorNotActivated())
 	defer h.close()
 
@@ -343,7 +342,6 @@ func TestAdapter_Verify_MissingCompanionIsRefusedWithoutFallingBackToNewPayloadV
 // length other than the fixed two is refused the same way (a third entry must be a deliberate
 // decision, not an accident).
 func TestAdapter_Verify_RefusesAWrongWitnessCountAndSaysSo(t *testing.T) {
-	t.Skip("U5d: v1 adapter fixture awaits migration to the RPC parent witness; v2 bootstrap is covered by adapter_v2_test.go")
 	cases := []struct {
 		name      string
 		witnesses func(t *testing.T, f *derivationFixture, env *ProposalEnvelope) []data

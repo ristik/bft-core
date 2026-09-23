@@ -155,3 +155,16 @@ func (a *Adapter) Close() {
 	a.mu.Unlock()
 	source.Close()
 }
+
+func isParentWitnessAcquisitionError(err error) bool {
+	return errors.Is(err, ErrParentWitnessUnavailable) || errors.Is(err, ErrParentWitnessInvalid) ||
+		errors.Is(err, ErrParentWitnessBudget) || errors.Is(err, ErrParentWitnessStopped) ||
+		errors.Is(err, ErrParentWitnessSuperseded) || errors.Is(err, ErrParentWitnessMismatch)
+}
+
+// TransientVerify lets the round retry only a transport/absence failure. The wrapper preserves
+// errors.Is for diagnostics while avoiding an engineapi import from shardnode.
+type transientParentWitnessError struct{ error }
+
+func (e transientParentWitnessError) Unwrap() error         { return e.error }
+func (e transientParentWitnessError) TransientVerify() bool { return true }

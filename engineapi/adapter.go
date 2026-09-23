@@ -33,7 +33,7 @@ var (
 	ErrCompanionCommitment = errors.New("engineapi: block extraData does not match the derived commitment")
 	// ErrCompanionUnauthenticated is retained for callers of the former v1 adapter.
 	ErrCompanionUnauthenticated = errors.New("engineapi: seal companion failed VerifyCompanionWitnesses")
-	// ErrParentWitnessUnavailable refuses blocks after B0 until U5d supplies an RPC parent witness.
+	// ErrParentWitnessUnavailable means the exact certified parent's local RPC proof is not available.
 	ErrParentWitnessUnavailable = errors.New("engineapi: v2 parent registry witness unavailable")
 )
 
@@ -319,12 +319,9 @@ func (a *Adapter) Commit(ctx context.Context, hash shardnode.Hash) (shardnode.St
 	return toStatus(resp.PayloadStatus.Status), nil
 }
 
-// deriveV2 authenticates the bound observation and uses the checked B0 snapshot.
-// Post-genesis parents require U5d's RPC witness path and are refused explicitly.
+// deriveV2 authenticates the bound observation before reading a parent witness.
+// The parent subject is always the certified BlockRef supplied by the round.
 func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (rootinput.ResultV2, error) {
-	if p.Parent.Number != 0 {
-		return rootinput.ResultV2{}, fmt.Errorf("%w: parent block %d", ErrParentWitnessUnavailable, p.Parent.Number)
-	}
 	o, err := rootinput.AuthenticateObservationV2(ctx, rootinput.ObservationContextV2{
 		NetworkID: a.verifier.NetworkID, PartitionID: a.verifier.PartitionID,
 		ShardID: a.verifier.ShardID, ShardConfHash: a.verifier.ShardConfHash,
@@ -333,21 +330,55 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 	if err != nil {
 		return rootinput.ResultV2{}, err
 	}
+	var snapshot registryproof.Snapshot
+	if p.Parent.Number == 0 {
+		if !a.verifier.BootstrapSnapshot.Valid() || !bytes.Equal(p.Parent.Hash, a.verifier.GenesisOrigin.BlockHash().Bytes()) || !bytes.Equal(p.Parent.StateRoot, a.verifier.GenesisOrigin.StateRoot().Bytes()) {
+			return rootinput.ResultV2{}, fmt.Errorf("%w: bootstrap parent differs from configured genesis", ErrParentWitnessMismatch)
+		}
+		snapshot = a.verifier.BootstrapSnapshot
+	} else {
+		a.mu.Lock()
+		source := a.parentWitness
+		a.mu.Unlock()
+		if source == nil {
+			return rootinput.ResultV2{}, fmt.Errorf("%w: no source for parent block %d", ErrParentWitnessUnavailable, p.Parent.Number)
+		}
+		snapshot, err = source.Acquire(ctx, p.Parent)
+		if err != nil {
+			return rootinput.ResultV2{}, err
+		}
+	}
 	return rootinput.DeriveV2(rootinput.ContextV2{
-		Genesis: a.verifier.GenesisOrigin, Parent: a.verifier.BootstrapSnapshot,
+		Genesis: a.verifier.GenesisOrigin, Parent: snapshot,
 		Round: p.Round, ParentHash: p.Parent.Hash,
 	}, o)
 }
 
 func (a *Adapter) Build(ctx context.Context, p shardnode.RoundParams) (shardnode.BuildID, error) {
+	prepared, err := a.PrepareBuild(ctx, p)
+	if err != nil {
+		return "", err
+	}
+	return prepared(ctx)
+}
+
+// PrepareBuild performs certificate authentication and bounded proof RPC before Round acquires
+// its finality gate. The returned closure performs the final Engine forkchoice mutation only
+// after Round revalidates readiness under that gate.
+func (a *Adapter) PrepareBuild(ctx context.Context, p shardnode.RoundParams) (func(context.Context) (shardnode.BuildID, error), error) {
 	if a.verifier == nil {
-		return "", errors.New("engineapi: build requires a verifier context — NetworkID, PartitionID, ShardID, ShardConfHash and TrustBases come from this node's own configuration, never from the certificate (docs/design/f2c-root-input-wiring-contract.md §3)")
+		return nil, errors.New("engineapi: build requires a verifier context — NetworkID, PartitionID, ShardID, ShardConfHash and TrustBases come from this node's own configuration, never from the certificate (docs/design/f2c-root-input-wiring-contract.md §3)")
 	}
 	derived, err := a.deriveV2(ctx, p, p.AuthorizingCertificate, p.AuthorizingTechnicalRecord)
 	if err != nil {
-		return "", fmt.Errorf("engineapi: deriving root input for round %d: %w", p.Round, err)
+		return nil, fmt.Errorf("engineapi: deriving root input for round %d: %w", p.Round, err)
 	}
+	return func(runCtx context.Context) (shardnode.BuildID, error) {
+		return a.buildDerived(runCtx, p, derived)
+	}, nil
+}
 
+func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, derived rootinput.ResultV2) (shardnode.BuildID, error) {
 	parentHash32, err := toData32(p.Parent.Hash)
 	if err != nil {
 		return "", fmt.Errorf("engineapi: build: %w", err)
@@ -461,11 +492,7 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 // Verify authenticates the block-bound certificate and technical record against this node's v2
 // configuration and checked genesis snapshot. It compares the canonical bytes and header commitment
 // before asking the execution client to execute. The follower never re-selects from its own inbox.
-// U5d will supply a verified parent witness for post-genesis blocks; until then they are refused.
 func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.RoundParams) (shardnode.Status, error) {
-	if p.Parent.Number != 0 {
-		return shardnode.StatusInvalid, fmt.Errorf("%w: parent block %d", ErrParentWitnessUnavailable, p.Parent.Number)
-	}
 	if len(b.Raw) == 0 {
 		// Quiet block: must be exactly the parent's Number/StateRoot,
 		// unchanged. Nothing to execute — see Seal's quiet case above,
@@ -476,6 +503,20 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 		// quiet block. executortest.Fake.Verify's quiet check has the same
 		// shape, for the same reason.
 		if b.Number == p.Parent.Number && bytes.Equal(b.StateRoot, p.Parent.StateRoot) {
+			if p.Parent.Number > 0 {
+				if a.verifier == nil {
+					return shardnode.StatusInvalid, errors.New("engineapi: quiet verification requires a verifier context")
+				}
+				if _, err := a.deriveV2(ctx, p, p.AuthorizingCertificate, p.AuthorizingTechnicalRecord); err != nil {
+					if isParentWitnessAcquisitionError(err) {
+						if errors.Is(err, ErrParentWitnessUnavailable) {
+							return shardnode.StatusSyncing, transientParentWitnessError{err}
+						}
+						return shardnode.StatusSyncing, err
+					}
+					return shardnode.StatusInvalid, err
+				}
+			}
 			return shardnode.StatusValid, nil
 		}
 		return shardnode.StatusInvalid, nil
@@ -484,18 +525,6 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	envelope, err := DecodeBlock(b)
 	if err != nil {
 		return shardnode.StatusInvalid, nil //nolint:nilerr // a malformed envelope is an invalid block, not a local error
-	}
-
-	parentHash32, err := toData32(p.Parent.Hash)
-	if err != nil {
-		return shardnode.StatusInvalid, fmt.Errorf("engineapi: verify: %w", err)
-	}
-	parentHeader, err := a.eth.GetBlockByHash(ctx, parentHash32)
-	if err != nil {
-		// We can't tell yet whether the block is bad or we're just behind
-		// on the parent — SYNCING is the honest answer, matching the same
-		// distinction the Engine API itself draws.
-		return shardnode.StatusSyncing, fmt.Errorf("engineapi: looking up parent header for verification: %w", err)
 	}
 
 	// From here on the block is authenticated before it is executed. A missing companion is a
@@ -520,6 +549,12 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 
 	derived, err := a.deriveV2(ctx, p, uc, tr)
 	if err != nil {
+		if isParentWitnessAcquisitionError(err) {
+			if errors.Is(err, ErrParentWitnessUnavailable) {
+				return shardnode.StatusSyncing, transientParentWitnessError{err}
+			}
+			return shardnode.StatusSyncing, fmt.Errorf("engineapi: acquiring parent witness for round %d: %w", p.Round, err)
+		}
 		return shardnode.StatusInvalid, fmt.Errorf("engineapi: authenticating the bound certificate for round %d: %w", p.Round, err)
 	}
 
@@ -536,6 +571,14 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	if !bytes.Equal(envelope.ExecutionPayload.ExtraData, derived.Commitment[:]) {
 		return shardnode.StatusInvalid, fmt.Errorf("%w: round %d: header extraData %x, derived commitment %x",
 			ErrCompanionCommitment, p.Round, envelope.ExecutionPayload.ExtraData, derived.Commitment[:])
+	}
+	parentHash32, err := toData32(p.Parent.Hash)
+	if err != nil {
+		return shardnode.StatusInvalid, fmt.Errorf("engineapi: verify: %w", err)
+	}
+	parentHeader, err := a.eth.GetBlockByHash(ctx, parentHash32)
+	if err != nil {
+		return shardnode.StatusSyncing, fmt.Errorf("engineapi: looking up parent header for verification: %w", err)
 	}
 
 	// Only now, with the input authenticated, are the execution parameters computable: they are functions of

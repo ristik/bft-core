@@ -191,6 +191,6 @@ func TestAdapterV2BootstrapVerifyBoundCompanion(t *testing.T) {
 	params.Parent.Number = 1
 	status, err = a.Verify(context.Background(), block, params)
 	require.ErrorIs(t, err, ErrParentWitnessUnavailable)
-	require.Equal(t, shardnode.StatusInvalid, status)
+	require.Equal(t, shardnode.StatusSyncing, status)
 	require.Equal(t, 1, sealCalls)
 }
