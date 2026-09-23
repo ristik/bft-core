@@ -26,6 +26,10 @@ source helper.sh
 validators=${1:-4}
 rounds=${2:-10}
 partitionID=8
+case "${SIGNING:-local}" in
+  local | authority) ;;
+  *) echo "SIGNING must be local or authority" >&2; exit 2 ;;
+esac
 
 rethEngineBase=18551
 rethEthBase=18545
@@ -56,6 +60,9 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 # anything a machine-wide sweep here had already killed.
 cleanup() {
   ./stop-evm.sh -a >/dev/null 2>&1 || true
+  for i in $(seq 1 "$validators"); do
+    stop_pidfile "test-nodes/auth$i/pid" 'ubft signing-authority run'
+  done
   for i in $(seq 1 "$validators"); do
     stop_pidfile "test-nodes/reth$i/pid" 'reth.* node'
   done
@@ -105,9 +112,9 @@ boundedRun() {
 # one of the validator ports silently reduces the cluster this lane claims to have started. Found
 # for real: a `shard-node run` from the previous day was still writing to evm1/debug.log during a
 # passing run. Fail loudly instead of producing evidence of unclear provenance.
-stale=$(pgrep -f 'ubft shard-node run' 2>/dev/null || true)
+stale=$(owned_pids 'ubft shard-node run')
 if [ -n "$stale" ]; then
-  echo "refusing to start: shard-node processes are already running (pids: $(echo $stale | tr '\n' ' '))" >&2
+  echo "refusing to start: this checkout's shard-node processes are already running (pids: $(echo $stale | tr '\n' ' '))" >&2
   echo "their logs would mix with this run's evidence. stop them first:" >&2
   echo "  pkill -f 'ubft shard-node run'" >&2
   exit 1
@@ -144,6 +151,14 @@ build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}
   --alloc-source test-nodes/evm-genesis-funded.json --out "$chainSpec" \
   --full-shard-conf "$fullShardConf" || { echo "finalized funded genesis failed" >&2; exit 1; }
 echo "finalized funded genesis sha256=$(shasum -a 256 "$chainSpec" | cut -d' ' -f1)"
+if [ "${SIGNING:-local}" = authority ]; then
+  # The full configuration is the one the root chain will certify, so enroll against it rather
+  # than the base configuration emitted by setup-evm-nodes.sh.
+  source helper.sh
+  cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
+  enroll_evm_authorities "$validators" "$partitionID" || exit 1
+  echo "enrolled $validators independent signing authorities against the full shard configuration"
+fi
 
 echo
 echo "=== 2. start one reth per validator on that chain spec ==="
@@ -194,6 +209,9 @@ pass "reth instances statically peered"
 
 echo
 echo "=== 3. doctor preflight detects chainId mismatch and unreachable Engine API ==="
+if [ "${SIGNING:-local}" = authority ] || [ "${D2C_RESTART_PROBE:-0}" = 1 ]; then
+  echo "D2C mode: skipping unrelated startup negatives; the execution lane starts in section 4"
+else
 
 # 3a. chainId mismatch. shard-node doctor compares the client's eth_chainId against the shard
 # conf; point it at a reth running a different chain and it must refuse.
@@ -499,6 +517,7 @@ else
   fi
 fi
 kill "$(cat test-nodes/reth-laterfork/pid)" 2>/dev/null; rm -f test-nodes/reth-laterfork/pid
+fi
 
 echo
 echo "=== 4. configure the checked v2 origin and seed the block-1 transaction ==="
@@ -571,7 +590,13 @@ fi
 echo
 echo "=== 6. D1 continuous certified execution through block $rounds ==="
 echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, proof window=64 blocks"
-if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout 900; then
+probeArgs=()
+if [ "${D2C_RESTART_PROBE:-0}" = 1 ]; then
+  [ "$validators" -eq 4 ] && [ "$rounds" -ge 10 ] || { echo "D2C probe requires four validators and >=10 blocks" >&2; exit 2; }
+  probeArgs=(--restart-validator 1 --signing "${SIGNING:-local}")
+fi
+if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout 900 \
+  ${probeArgs[@]+"${probeArgs[@]}"}; then
   pass "D1 observed $rounds consecutive blocks with four agreeing canonical heads"
 else
   fail "D1 continuous block observation failed"
@@ -583,7 +608,22 @@ fi
 
 divergenceLogged=false
 for i in $(seq 1 "$validators"); do
-  if grep -qiE 'diverge|equivocat|impossible certificate ordering' "test-nodes/evm$i/debug.log" 2>/dev/null; then
+  log="test-nodes/evm$i/debug.log"
+  if [ "${D2C_RESTART_PROBE:-0}" = 1 ]; then
+    # A shard-only restart can find reth one certified block ahead. The existing recovery path
+    # logs a warning, then commits that exact block. Count it only if every warning has a matching
+    # successful recovery; any other divergence/equivocation diagnostic still fails the lane.
+    recovering=$(grep -c 'executor head diverges from certified state — attempting recovery via Commit before giving up' "$log" || true)
+    recovered=$(grep -c 'recovered: executor held the certified block, now committed' "$log" || true)
+    unexpected=$(grep -iE 'diverge|equivocat|impossible certificate ordering' "$log" | \
+      grep -v 'executor head diverges from certified state — attempting recovery via Commit before giving up' || true)
+    if [ "$recovering" -ne "$recovered" ] || [ -n "$unexpected" ]; then
+      fail "validator $i logged unresolved divergence/equivocation (recovery attempts=$recovering successes=$recovered)"
+      divergenceLogged=true
+    elif [ "$recovering" -gt 0 ]; then
+      info "validator $i reconciled $recovering certified block(s) after its shard restart"
+    fi
+  elif grep -qiE 'diverge|equivocat|impossible certificate ordering' "$log" 2>/dev/null; then
     fail "validator $i logged divergence/equivocation"
     divergenceLogged=true
   fi

@@ -176,6 +176,50 @@ function init_evm_validators() {
   done
 }
 
+# Keep each authority outside its shard node's process and home. Its key exists only for this
+# process lifetime, so the paired lane must leave it running while shard nodes are restarted.
+function init_evm_authorities() {
+  local n=$1 partitionID=$2 i home nodeID attempt
+  for i in $(seq 1 "$n"); do
+    home="test-nodes/auth$i"
+    mkdir -p "$home"
+    chmod 700 "$home"
+    nodeID=$(evm_validator_id "$i") || return 1
+    build/ubft signing-authority credential --out "$home/operator.cred" || return 1
+    build/ubft signing-authority run --home "$home" \
+      --client-socket "$home/client.sock" --operator-socket "$home/operator.sock" \
+      --operator-credential "$home/operator.cred" --authority-id "paired-evm-$i" \
+      --node-id "$nodeID" --network-id 3 --partition-id "$partitionID" --shard-id 0x80 \
+      --shard-epoch 0 --root-epoch 1 --trust-base test-nodes/trust-base.json \
+      --log-format text --log-level info >"$home/authority.log" 2>&1 &
+    echo $! >"$home/pid"
+    for attempt in $(seq 1 100); do
+      [ -S "$home/operator.sock" ] && break
+      if ! kill -0 "$(cat "$home/pid")" 2>/dev/null; then
+        echo "authority $i exited during startup" >&2
+        tail -20 "$home/authority.log" >&2
+        return 1
+      fi
+      sleep 0.1
+    done
+    [ -S "$home/operator.sock" ] || { echo "authority $i did not open its socket" >&2; return 1; }
+    build/ubft signing-authority node-info --operator-socket "$home/operator.sock" \
+      --operator-credential "$home/operator.cred" --out "$home/node-info.json" || return 1
+  done
+}
+
+function enroll_evm_authorities() {
+  local n=$1 partitionID=$2 i home
+  for i in $(seq 1 "$n"); do
+    home="test-nodes/auth$i"
+    build/ubft signing-authority complete-enrollment --operator-socket "$home/operator.sock" \
+      --operator-credential "$home/operator.cred" \
+      --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" || return 1
+    build/ubft signing-authority replace-session --operator-socket "$home/operator.sock" \
+      --operator-credential "$home/operator.cred" --out "$home/client.cred" || return 1
+  done
+}
+
 # generate_evm_shard_conf - generate the shard conf for the EVM partition,
 # naming every validator init_evm_validators created.
 # $1 number of validators
@@ -188,7 +232,11 @@ function generate_evm_shard_conf() {
   nodeInfoFiles=
   for i in $(seq 1 "$n")
   do
-    nodeInfoFiles+=" --node-info test-nodes/evm$i/node-info.json"
+    if [ "${SIGNING:-local}" = authority ]; then
+      nodeInfoFiles+=" --node-info test-nodes/auth$i/node-info.json"
+    else
+      nodeInfoFiles+=" --node-info test-nodes/evm$i/node-info.json"
+    fi
   done
 
   build/ubft shard-conf generate --home test-nodes \
@@ -302,12 +350,19 @@ function start_one_evm_validator() {
     rpcArgs=(--rpc-server-address "$(evm_validator_rpc_addr "$i")")
   fi
 
+  local signingArgs=()
+  if [ "${SIGNING:-local}" = authority ]; then
+    signingArgs=(--signing-authority-socket "test-nodes/auth$i/client.sock" \
+      --signing-authority-credential "test-nodes/auth$i/client.cred")
+  fi
+
   build/ubft shard-node run --home "test-nodes/evm$i" --executor "$executor" \
     --address "/ip4/127.0.0.1/tcp/$port" --bootnodes "$bootnodes" \
     --trust-base test-nodes/trust-base.json \
     ${shardConfArgs[@]+"${shardConfArgs[@]}"} \
     --log-format text --log-level "${EVM_VALIDATOR_LOG_LEVEL:-info}" \
     ${executorArgs[@]+"${executorArgs[@]}"} ${rpcArgs[@]+"${rpcArgs[@]}"} \
+    ${signingArgs[@]+"${signingArgs[@]}"} \
     >> "test-nodes/evm$i/debug.log" 2>&1 &
   echo $! > "test-nodes/evm$i/pid"
 }

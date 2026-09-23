@@ -4,6 +4,7 @@
 import argparse
 import json
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -63,21 +64,82 @@ def execution_evidence(nodes, height, block_hash, commitment):
     return derived[0], partition_rounds[0], root_rounds[0]
 
 
+def authority_status(nodes, validator):
+    home = Path(nodes) / f"auth{validator}"
+    output = subprocess.check_output([
+        "build/ubft", "signing-authority", "status",
+        "--operator-socket", str(home / "operator.sock"),
+        "--operator-credential", str(home / "operator.cred"),
+    ], text=True)
+    return json.loads(output)
+
+
+def restart_validator(nodes, validator, signing):
+    log = Path(nodes) / f"evm{validator}" / "debug.log"
+    before = authority_status(nodes, validator) if signing == "authority" else None
+    authority_pid = (Path(nodes) / f"auth{validator}" / "pid").read_text().strip() if before else None
+    reth_pid = (Path(nodes) / f"reth{validator}" / "pid").read_text().strip()
+    output = subprocess.check_output(["bash", "scripts/d2c-restart-validator.sh", str(validator)], text=True)
+    markers = [i for i, line in enumerate(log.read_text().splitlines()) if "D2C_RESTART_BOUNDARY" in line]
+    if not markers:
+        raise RuntimeError("restart helper did not mark the boundary after the old shard exited")
+    mark = markers[-1] + 1
+    print(f"D2C probe: {output.strip()}; retained reth pid={reth_pid}, authority pid={authority_pid}", flush=True)
+    return mark, before, reth_pid, authority_pid
+
+
+def check_restart(nodes, validator, signing, probe):
+    mark, before, reth_pid, authority_pid = probe
+    lines = (Path(nodes) / f"evm{validator}" / "debug.log").read_text().splitlines()[mark:]
+    if not any("resumed from persisted certificate" in line for line in lines):
+        raise RuntimeError("restarted shard did not restore its persisted certificate")
+    submissions = [line for line in lines if "submitting block certification request" in line]
+    certificates = [line for line in lines if 'msg="accepted certificate"' in line]
+    if not certificates:
+        raise RuntimeError("restarted shard accepted no subsequent certificate")
+    if (Path(nodes) / f"reth{validator}" / "pid").read_text().strip() != reth_pid:
+        raise RuntimeError("reth PID changed during the shard-only probe")
+    if signing == "authority":
+        if (Path(nodes) / f"auth{validator}" / "pid").read_text().strip() != authority_pid:
+            raise RuntimeError("signing authority PID changed during the shard-only probe")
+        after = authority_status(nodes, validator)
+        if after["signingKeyFingerprint"] != before["signingKeyFingerprint"] or after["generation"] != before["generation"]:
+            raise RuntimeError("authority key or client session changed during the shard-only probe")
+        if not submissions or after["reservedRound"] <= before["reservedRound"] or not after["responseRetained"]:
+            raise RuntimeError(f"authority did not sign and submit after restart: before={before}, after={after}, submissions={len(submissions)}")
+        if any("the certification request was not signed" in line for line in lines):
+            raise RuntimeError("restarted validator logged a signing refusal")
+        print(f"D2C PASS: authority pid {authority_pid} retained its key and signed round "
+              f"{after['reservedRound']} after restart; {len(submissions)} requests and "
+              f"{len(certificates)} subsequent certificates observed", flush=True)
+    else:
+        if submissions:
+            raise RuntimeError(f"local-key restart submitted {len(submissions)} requests")
+        print(f"D2C PASS: local-key restart logged MarkRestored and remained NON-VOTING "
+              f"through {len(certificates)} subsequent certificates", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--nodes", default="test-nodes")
     parser.add_argument("--validators", type=int, default=4)
     parser.add_argument("--blocks", type=int, default=10)
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--restart-validator", type=int, default=0)
+    parser.add_argument("--signing", choices=("local", "authority"), default="local")
     args = parser.parse_args()
     if args.validators != 4 or args.blocks < 10:
         parser.error("D1 requires four validators and at least ten blocks")
 
     start = time.monotonic()
     prior = None
+    probe = None
+    probe_started = None
+    target = args.blocks
     print("height hash parent stateRoot commitment txs heads partitionRound rootRound elapsed_s", flush=True)
-    for height in range(1, args.blocks + 1):
-        deadline = start + args.timeout
+    height = 1
+    while height <= target:
+        deadline = min(start + args.timeout, probe_started + 180) if probe_started else start + args.timeout
         while time.monotonic() < deadline:
             try:
                 heads = [int(rpc(18545 + i, "eth_blockNumber", []), 16) for i in range(4)]
@@ -119,6 +181,23 @@ def main():
             partition_round, root_round, round(time.monotonic() - start, 3), flush=True,
         )
         print(f"v2 B{height} bytes={root_input} (same on all four validators)", flush=True)
+        if args.restart_validator and height == 5:
+            try:
+                probe = restart_validator(args.nodes, args.restart_validator, args.signing)
+                probe_started = time.monotonic()
+            except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+                print(f"D2C FAIL: could not restart validator {args.restart_validator}: {exc}", flush=True)
+                return 1
+            # At B5 the cluster may already be ahead. Require fresh certified heights after the
+            # restart rather than counting only blocks produced before the probe.
+            target = max(target, max(heads) + 3)
+        height += 1
+    if probe:
+        try:
+            check_restart(args.nodes, args.restart_validator, args.signing, probe)
+        except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+            print(f"D2C FAIL: {exc}", flush=True)
+            return 1
     print("D1 observed consecutive canonical blocks on all four reth clients", flush=True)
     return 0
 
