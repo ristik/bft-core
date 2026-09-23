@@ -194,3 +194,46 @@ func TestAdapterV2BootstrapVerifyBoundCompanion(t *testing.T) {
 	require.Equal(t, shardnode.StatusSyncing, status)
 	require.Equal(t, 1, sealCalls)
 }
+
+func TestAdapterV2MapsEnginePayloadStatuses(t *testing.T) {
+	for _, tc := range []struct {
+		engine PayloadStatus
+		want   shardnode.Status
+	}{
+		{PayloadStatusValid, shardnode.StatusValid},
+		{PayloadStatusSyncing, shardnode.StatusSyncing},
+		{PayloadStatusAccepted, shardnode.StatusAccepted},
+		{PayloadStatusInvalid, shardnode.StatusInvalid},
+		{PayloadStatusInvalidBlockHash, shardnode.StatusInvalid},
+	} {
+		t.Run(string(tc.engine), func(t *testing.T) {
+			verifier, params, want := bootstrapAdapterFixture(t)
+			engine := newMockReth(t, Secret{})
+			eth := newMockReth(t, Secret{})
+			engine.on("engine_newPayloadWithSealV1", func(json.RawMessage) (any, *rpcError) {
+				return PayloadStatusV1{Status: tc.engine}, nil
+			})
+			eth.on("eth_getBlockByHash", func(json.RawMessage) (any, *rpcError) {
+				return blockHeaderJSON{Number: 0, Hash: data32(verifier.GenesisOrigin.BlockHash()), Timestamp: 0}, nil
+			})
+			a, closeFn := newTestAdapterWithVerifier(t, engine, eth, verifier)
+			defer closeFn()
+			attrs := DeriveAttributesV2(want.Input, ParentHeader{}, a.feeCollector)
+			payload := samplePayload()
+			payload.ParentHash = data32(verifier.GenesisOrigin.BlockHash())
+			payload.BlockNumber = 1
+			payload.Timestamp = attrs.Timestamp
+			payload.PrevRandao = attrs.PrevRandao
+			payload.FeeRecipient = attrs.SuggestedFeeRecipient
+			payload.ExtraData = want.Commitment[:]
+			payload.Withdrawals = attrs.Withdrawals
+			witnesses, err := encodeSealCompanionWitnesses(params.AuthorizingCertificate, params.AuthorizingTechnicalRecord)
+			require.NoError(t, err)
+			block, err := EncodeBlockWithSealCompanion(payload, &SealCompanion{RootInput: want.Encoded, Witnesses: witnesses})
+			require.NoError(t, err)
+			status, err := a.Verify(context.Background(), block, params)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, status)
+		})
+	}
+}

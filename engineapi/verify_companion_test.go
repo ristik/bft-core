@@ -140,13 +140,10 @@ func TestAdapter_Verify_RejectsExtraDataThatDoesNotMatchTheRecomputedCommitment(
 
 // 6. Refusals stay distinct across the companion boundary: each rootinput class still arrives at the
 // call site as itself (F2c §10 negative 6 / §8). Each case reaches Adapter.Verify with otherwise-valid
-// bytes and differs only in one field, so the class it reports is the field's — ErrUnauthenticated,
-// ErrWrongContext and ErrNotPinned all arrive distinguishably, and none is collapsed into a generic
-// failure. There is deliberately no case expecting a VerifyCompanionWitnesses reason: that call is
-// reached only with evidence this node has already derived and authenticated, so it cannot produce
-// one, and the cursor refusal belongs to Derive as a rootinput class.
+// bytes and differs only in one field, so the class it reports is the field's — ErrUnauthenticated
+// and ErrWrongContext arrive distinguishably, and neither is collapsed into a generic
+// failure. Cases requiring a verified v2 parent are exercised by adapter_v2_continuation_test.go.
 func TestAdapter_Verify_RefusalClassesStayDistinctAcrossTheCompanionBoundary(t *testing.T) {
-	t.Skip("U5d: v1 adapter fixture awaits migration to the RPC parent witness; v2 bootstrap is covered by adapter_v2_test.go")
 	cases := []struct {
 		name     string
 		verifier func(*derivationFixture) *VerifierContext
@@ -188,22 +185,6 @@ func TestAdapter_Verify_RefusalClassesStayDistinctAcrossTheCompanionBoundary(t *
 			},
 			want:    rootinput.ErrWrongContext,
 			notWant: rootinput.ErrUnauthenticated,
-		},
-		{
-			name: "bound certificate behind the committed cursor",
-			verifier: func(f *derivationFixture) *VerifierContext {
-				return f.verifier(CommittedCursor(60)) // the bound certificate is at root round 50
-			},
-			want:    rootinput.ErrNotPinned,
-			notWant: ErrCompanionUnauthenticated,
-		},
-		{
-			name: "companion rootInput is not the canonical derivation",
-			tamper: func(t *testing.T, f *derivationFixture, env *ProposalEnvelope) {
-				env.SealCompanion.RootInput = bytes.Repeat([]byte{0x7e}, len(env.SealCompanion.RootInput))
-			},
-			want:    ErrCompanionBinding,
-			notWant: ErrCompanionCommitment,
 		},
 	}
 
@@ -278,7 +259,6 @@ func TestAdapter_Verify_AsymmetricDeliveryAgreesOnTheBlockBoundCertificate(t *te
 // rather than accepted on the proposer's word, and no type on the path carries a field by which a
 // caller could instead assert that something was already verified.
 func TestAdapter_Verify_RefusesCompanionEvidenceItCannotAuthenticate(t *testing.T) {
-	t.Skip("U5d: v1 adapter fixture awaits migration to the RPC parent witness; v2 bootstrap is covered by adapter_v2_test.go")
 	t.Run("an authentic certificate for another configuration is not this node's authority", func(t *testing.T) {
 		h := newCompanionHarness(t, CursorNotActivated())
 		defer h.close()
