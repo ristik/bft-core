@@ -274,6 +274,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err != nil {
 		return err
 	}
+	if closer, ok := executor.(interface{ Close() }); ok {
+		defer closer.Close()
+	}
 	if origin.Valid() {
 		// The agreed genesis hash: buildExecutor has just required the paired client's block 0 to equal
 		// origin.BlockHash(), so this line reports a value the configuration and the client agree on.
@@ -644,6 +647,16 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 		if _, err := adapter.CheckExecutionProfile(ctx, wantChainID); err != nil {
 			return nil, fmt.Errorf("engine-api executor failed its startup execution-profile check "+
 				"(the execution client's chain spec is not the pinned %s profile): %w", engineapi.PinnedProfileName, err)
+		}
+		if verifier != nil && verifier.GenesisOrigin.Valid() {
+			budget := engineapi.DefaultParentWitnessBudget()
+			if err := adapter.EnableParentWitness(ctx, budget); err != nil {
+				return nil, fmt.Errorf("engine-api executor failed to enable local parent witness acquisition: %w", err)
+			}
+			flags.observe.Logger().Info("local parent witness acquisition enabled",
+				"maxAttempts", budget.MaxAttempts, "overall", budget.Overall,
+				"perAttempt", budget.PerAttempt, "maxDownloadedBytes", budget.MaxDownloadedBytes,
+				"backoff", budget.Backoff)
 		}
 		return adapter, nil
 

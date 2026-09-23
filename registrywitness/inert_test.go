@@ -14,9 +14,9 @@ import (
 
 const importPath = "github.com/unicitynetwork/bft-core/registrywitness"
 
-// TestNoProductionPackageImportsTheWitnessStore is the inertness guard: no non-test Go file outside this
-// package imports it, so no node acquires or retains witnesses through it yet.
-func TestNoProductionPackageImportsTheWitnessStore(t *testing.T) {
+// TestOnlyLocalAdapterSourceImportsTheWitnessStore keeps the production boundary narrow:
+// only the adapter's local proof source may activate this RPC witness acquisition path.
+func TestOnlyLocalAdapterSourceImportsTheWitnessStore(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
 
@@ -62,5 +62,6 @@ func TestNoProductionPackageImportsTheWitnessStore(t *testing.T) {
 	for _, want := range []string{"rootinput/rootinput.go", "shardnode/round.go", "cli/ubft/cmd/shard_node_run.go", "engineapi/adapter.go"} {
 		require.True(t, scanned[want], "expected to scan %s", want)
 	}
-	require.Empty(t, importers, "production packages must not import %s", importPath)
+	require.Equal(t, []string{filepath.Join("engineapi", "parent_witness_source.go")}, importers,
+		"only the local adapter source may import %s", importPath)
 }

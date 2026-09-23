@@ -52,8 +52,10 @@ type Adapter struct {
 	// rather than deriving against an invented context. See VerifierContext and F2c §3.
 	verifier *VerifierContext
 
-	mu      sync.Mutex
-	pending map[shardnode.BuildID]buildContext
+	mu            sync.Mutex
+	pending       map[shardnode.BuildID]buildContext
+	parentWitness *ParentWitnessSource
+	witnessClosed bool
 }
 
 // buildContext is what Build remembers so Seal — called later, with only a
