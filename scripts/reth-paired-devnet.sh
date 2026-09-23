@@ -634,6 +634,10 @@ if warnings and probe:
         print(f"recovery warning is only allowed for restarted validator 1 after D2C_RESTART_BOUNDARY ({path})")
         raise SystemExit(1)
 
+if warnings and not probe:
+    print(f"recovery warning is forbidden outside restart-probe mode ({path})")
+    raise SystemExit(1)
+
 for index, warning_line in enumerate(warnings):
     boundary_after = next((n for n in boundaries if n > warning_line), len(lines))
     if probe and (validator != 1 or warning_line < boundaries[0]):
