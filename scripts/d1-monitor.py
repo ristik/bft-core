@@ -35,6 +35,11 @@ def field(line, name):
     return match.group(1) if match else None
 
 
+def request_in_quorum(line, node_id):
+    match = re.search(r'requestNodeIDs="([^"]*)"', line)
+    return bool(match and node_id in match.group(1).split())
+
+
 def execution_evidence(nodes, height, block_hash, commitment):
     derived = []
     partition_rounds = []
@@ -122,7 +127,7 @@ def check_restart(nodes, validator, signing, probe):
         for i, root_mark in enumerate(root_marks, start=1):
             root_lines = (Path(nodes) / f"root{i}" / "debug.log").read_text().splitlines()[root_mark:]
             quorum_proofs.extend(line for line in root_lines
-                                 if "reached consensus" in line and "requestNodeIDs=" in line and node_id in line
+                                 if "reached consensus" in line and request_in_quorum(line, node_id)
                                  and field(line, "requestRound") in submitted_rounds)
         if not quorum_proofs:
             raise RuntimeError("no later root quorum included the restarted validator's signed request")

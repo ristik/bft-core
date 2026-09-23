@@ -609,22 +609,53 @@ fi
 divergenceLogged=false
 for i in $(seq 1 "$validators"); do
   log="test-nodes/evm$i/debug.log"
-  if [ "${D2C_RESTART_PROBE:-0}" = 1 ]; then
-    # A shard-only restart can find reth one certified block ahead. The existing recovery path
-    # logs a warning, then commits that exact block. Count it only if every warning has a matching
-    # successful recovery; any other divergence/equivocation diagnostic still fails the lane.
-    recovering=$(grep -c 'executor head diverges from certified state — attempting recovery via Commit before giving up' "$log" || true)
-    recovered=$(grep -c 'recovered: executor held the certified block, now committed' "$log" || true)
-    unexpected=$(grep -iE 'diverge|equivocat|impossible certificate ordering' "$log" | \
-      grep -v 'executor head diverges from certified state — attempting recovery via Commit before giving up' || true)
-    if [ "$recovering" -ne "$recovered" ] || [ -n "$unexpected" ]; then
-      fail "validator $i logged unresolved divergence/equivocation (recovery attempts=$recovering successes=$recovered)"
-      divergenceLogged=true
-    elif [ "$recovering" -gt 0 ]; then
-      info "validator $i reconciled $recovering certified block(s) after its shard restart"
-    fi
-  elif grep -qiE 'diverge|equivocat|impossible certificate ordering' "$log" 2>/dev/null; then
-    fail "validator $i logged divergence/equivocation"
+  if ! python3 - "$log" "$i" "${D2C_RESTART_PROBE:-0}" <<'PYDIVERGENCE'
+import re, sys
+from pathlib import Path
+
+path, validator, probe = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
+try:
+    lines = Path(path).read_text(errors="replace").splitlines()
+except OSError as exc:
+    print(f"missing validator log {path}: {exc}")
+    raise SystemExit(1)
+
+warning = "executor head diverges from certified state — attempting recovery via Commit before giving up"
+recovered = "recovered: executor held the certified block, now committed"
+boundaries = [n for n, line in enumerate(lines) if "D2C_RESTART_BOUNDARY" in line]
+warnings = [n for n, line in enumerate(lines) if warning in line]
+for line_no, line in enumerate(lines):
+    if re.search(r"diverge|equivocat|impossible certificate ordering", line, re.I) and warning not in line:
+        print(f"unexpected divergence/equivocation at {path}:{line_no + 1}: {line}")
+        raise SystemExit(1)
+
+if warnings and probe:
+    if validator != 1 or not boundaries:
+        print(f"recovery warning is only allowed for restarted validator 1 after D2C_RESTART_BOUNDARY ({path})")
+        raise SystemExit(1)
+
+for index, warning_line in enumerate(warnings):
+    boundary_after = next((n for n in boundaries if n > warning_line), len(lines))
+    if probe and (validator != 1 or warning_line < boundaries[0]):
+        print(f"recovery warning before restart boundary or on non-restarted validator at {path}:{warning_line + 1}")
+        raise SystemExit(1)
+    warning_hash = re.search(r"(?:^|\s)recoveryBlockHash=([^\s]+)", lines[warning_line])
+    if not warning_hash:
+        print(f"recovery warning lacks recoveryBlockHash at {path}:{warning_line + 1}")
+        raise SystemExit(1)
+    end = min(boundary_after, warnings[index + 1] if index + 1 < len(warnings) else len(lines))
+    match = next((n for n in range(warning_line + 1, end)
+                  if recovered in lines[n]
+                  and re.search(r"(?:^|\s)blockHash=" + re.escape(warning_hash.group(1)) + r"(?:\s|$)", lines[n])), None)
+    if match is None:
+        print(f"no recovery for block {warning_hash.group(1)} before next warning/process boundary in {path}")
+        raise SystemExit(1)
+
+if warnings:
+    print(f"validator {validator} recovered {len(warnings)} matching certified block(s)")
+PYDIVERGENCE
+  then
+    fail "validator $i logged unresolved divergence/equivocation or has no log"
     divergenceLogged=true
   fi
 done
