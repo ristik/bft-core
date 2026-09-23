@@ -18,16 +18,18 @@ reported reth1 at B5 immediately after relaunch while the other reth clients wer
 observed B5 lag was zero. The restarted shard repeatedly logged `status syncing` for certified
 blocks, then the monitor stalled before B6 while the other clients advanced to B38/B43. Those runs
 also showed reth1 with `connected_peers=0` after restart; they cannot distinguish D2-A/B recovery
-behavior from missing reth peer connectivity. A peer restoration check is now in the controller,
-but these runs predate that check and need repeating before the pair-term result is classified.
-They do show the requested same-block lane-check refusing warnings that have no matching recovery.
+behavior from missing reth peer connectivity. A third run with a peer restoration check failed
+inside that controller before shard restart; its captured log does not include the subprocess
+diagnostic. The monitor now preserves that diagnostic for subsequent runs. These attempts remain
+inconclusive. They do show the stricter same-block lane-check rejecting warnings without matching
+recovery.
 
 The 15:50 timestamped one-line logs are retained from the initial scaffold and predate the process
 controllers; they are not fault-injection evidence.
 
 | Scenario | Result | Classified reason |
 |---|---|---|
-| pair-term | INCONCLUSIVE | Actual SIGTERM pair restart ran, but reth1 had zero connected peers and stayed at B5; shard logged certified blocks as unavailable (`status syncing`) and the monitor stalled before B6. Repeat with the current peer restoration check. |
+| pair-term | INCONCLUSIVE | Two SIGTERM pair restarts ran but reth1 had zero connected peers and stayed at B5; shard logged certified blocks as unavailable (`status syncing`) and the monitor stalled before B6. A third run failed the peer restoration check before shard restart. Repeat with child diagnostics now preserved. |
 | pair-kill | NOT RUN | SIGKILL pair controller is wired; needs an execution with peer restoration verified. |
 | ureth-kill | NOT RUN | Ureth-only SIGKILL controller is wired; needs an execution. |
 | all-kill | NOT RUN | Four-pair SIGKILL controller is wired; needs an execution. |
