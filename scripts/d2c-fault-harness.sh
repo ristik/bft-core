@@ -51,7 +51,11 @@ case "$scenario" in
     D2C_FAULT_SCENARIO="$scenario" SIGNING=authority ./scripts/reth-paired-devnet.sh 4 10 2>&1 | tee "$log"
     lane_status=${PIPESTATUS[0]}
     if [ "$lane_status" -eq 0 ]; then
-      echo "D2C[${scenario}] PASS" | tee -a "$log"
+      if [ "$scenario" = proof-corrupt ]; then
+        echo "D2C[${scenario}] EXPECTED-FAIL(uncached corrupted proof rejected before signing; validator 1 stayed impaired while fresh survivor quorum advanced; D2-B catch-up pending)" | tee -a "$log"
+      else
+        echo "D2C[${scenario}] PASS" | tee -a "$log"
+      fi
       exit 0
     fi
     if grep -q "D2C\[$scenario\] FAIL(injection/relaunch" "$log"; then
@@ -61,14 +65,8 @@ case "$scenario" in
     if grep -q "D2C\[$scenario\] dropped proof RPC\|D2C\[$scenario\] corrupted proof RPC" "$log"; then
       reason=$(grep -E 'D1 FAIL: stalled before height|D1 FAIL: B[0-9]+ lacks|D1 FAIL: canonical disagreement|D1 FAIL: discontinuity' "$log" | tail -1)
       if [ -n "$reason" ]; then
-        syncing=$(grep -h 'status syncing' test-nodes/evm{1,2,3,4}/debug.log 2>/dev/null | tail -1)
-        if [ -n "$syncing" ]; then
-          echo "D2C[${scenario}] EXPECTED-FAIL(proof fault injected/restored; validator remained SYNCING without D2-B re-drive/catch-up; ${reason#D1 FAIL: })" | tee -a "$log"
-        else
-          echo "D2C[${scenario}] FAIL(proof fault run stalled without SYNCING evidence; ${reason#D1 FAIL: })" | tee -a "$log"
-          exit "$lane_status"
-        fi
-        exit 0
+        echo "D2C[${scenario}] FAIL(after proof hook; the post-fault lane assertion failed: ${reason#D1 FAIL: })" | tee -a "$log"
+        exit "$lane_status"
       fi
     fi
     echo "D2C[${scenario}] FAIL(lane exited ${lane_status}; see diagnostics above)" | tee -a "$log"

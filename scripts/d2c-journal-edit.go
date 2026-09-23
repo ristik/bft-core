@@ -13,6 +13,29 @@ import (
 var bucket = []byte("configured-progress/v2")
 var prefix = []byte("journal/c/")
 
+// Journal records are versioned envelopes containing a CBOR array payload. Keep
+// the small wire structs here so the harness can inspect the record without
+// reaching into configuredprogress's unexported codec.
+type envelopeWire struct {
+	_             struct{} `cbor:",toarray"`
+	Version, Kind uint64
+	Payload       []byte
+	Digest        []byte
+}
+
+type candidateWire struct {
+	_                                             struct{} `cbor:",toarray"`
+	Version                                       uint64
+	Descriptor                                    []byte
+	Status                                        uint64
+	Round, Number, ParentNumber                   uint64
+	Hash, StateRoot, ParentHash, ParentState, Raw []byte
+	BlockSize, StateSize                          uint64
+	LocallyBuilt                                  bool
+	AuthorizingUC, AuthorizingTR                  []byte
+	ResultingUC, ResultingTR                      []byte
+}
+
 func main() {
 	if len(os.Args) != 4 || os.Args[1] != "delete-certified-height" {
 		panic("usage: d2c-journal-edit.go delete-certified-height DB HEIGHT")
@@ -37,20 +60,22 @@ func main() {
 			if len(k) <= len(prefix) || string(k[:len(prefix)]) != string(prefix) {
 				continue
 			}
-			var fields []any
-			if err := cbor.Unmarshal(v, &fields); err != nil {
+			var envelope envelopeWire
+			if err := cbor.Unmarshal(v, &envelope); err != nil {
 				return err
 			}
-			if len(fields) < 7 {
-				return fmt.Errorf("candidate record has %d fields", len(fields))
+			if envelope.Version != 2 || envelope.Kind != 3 {
+				return fmt.Errorf("candidate envelope has version=%d kind=%d", envelope.Version, envelope.Kind)
 			}
-			status, ok1 := fields[2].(uint64)
-			number, ok2 := fields[4].(uint64)
-			if ok1 && ok2 && status == 1 && number == height {
+			var candidate candidateWire
+			if err := cbor.Unmarshal(envelope.Payload, &candidate); err != nil {
+				return fmt.Errorf("decode candidate payload: %w", err)
+			}
+			if candidate.Status == 1 && candidate.Number == height {
 				if len(removed) != 0 {
 					return fmt.Errorf("multiple certified candidates at height %d", height)
 				}
-				removed = fmt.Sprintf("0x%x", k[len(prefix):])
+				removed = fmt.Sprintf("0x%x", candidate.Hash)
 				if err := c.Delete(); err != nil {
 					return err
 				}

@@ -82,22 +82,14 @@ def start_shard(i):
 
 
 def restore_reth_mesh():
-    for i in range(1, 5):
-        for j in range(1, 5):
-            if i == j:
-                continue
-            enode = rpc(ETH_BASE + j - 1, "admin_nodeInfo", [])["enode"]
-            added = rpc(ETH_BASE + i - 1, "admin_addPeer", [enode])
-            print(f"reth{i} admin_addPeer reth{j}: {added}", flush=True)
-    for i in range(1, 5):
-        for _ in range(40):
-            peers = rpc(ETH_BASE + i - 1, "admin_peers", [])
-            if peers:
-                break
-            time.sleep(0.25)
-        if not peers:
-            raise RuntimeError(f"reth{i} has no connected static peers after restart")
-        print(f"reth{i} connected peers after relaunch: {len(peers)}", flush=True)
+    # M1 ureth P2P is intentionally a no-op (ureth#33/#34). Transactions are
+    # seeded into each local mempool directly, so peer connectivity is not a
+    # relaunch premise and must not gate the fault scenario.
+    print("D2C reth relaunch: skipping peer-connectivity check (M1 P2P is a no-op)", flush=True)
+
+
+def record_expected_refusal(scenario, detail):
+    Path("test-nodes/d2c-expected-refusal").write_text(f"{scenario}: {detail}\n")
 
 
 def wait_down(i):
@@ -116,9 +108,9 @@ def proof_fault():
     proxy_log = Path("test-nodes/proof-proxy/proxy.log")
     validator_log = Path("test-nodes/evm1/debug.log")
 
-    def set_mode(mode, seconds=0):
+    def set_mode(mode, seconds=0, **extra):
         temp = control.with_suffix(".tmp")
-        temp.write_text(json.dumps({"mode": mode, "until": time.time() + seconds}))
+        temp.write_text(json.dumps({"mode": mode, "until": time.time() + seconds, **extra}))
         temp.replace(control)
 
     if not control.exists() or not Path("test-nodes/proof-proxy/pid").exists():
@@ -131,37 +123,216 @@ def proof_fault():
         print(f"D2C[proof-outage] dropped proof RPC methods for {seconds}s", flush=True)
         time.sleep(seconds)
         set_mode("pass")
-        drops = sum("drop method=" in line for line in proxy_log.read_text(errors="replace").splitlines())
+        drops = sum(" drop " in line for line in proxy_log.read_text(errors="replace").splitlines())
         if drops == 0:
             raise RuntimeError("proof outage expired without dropping either requested method")
         print(f"D2C[proof-outage] restored forwarding after {drops} dropped proof calls", flush=True)
+        deadline = time.monotonic() + int(os.environ.get("D2C_PROOF_RECOVERY_TIMEOUT", "120"))
+        association = None
+        agreement = None
+        admission_re = re.compile(
+            r'msg="certificate admitted" source=peer_recovery block=([0-9a-f]{64}) '
+            r'height=([1-9][0-9]*) round=([0-9]+) rootRound=([0-9]+)(?:\s|$)'
+        )
+        while time.monotonic() < deadline:
+            validator_lines = validator_log.read_text(errors="replace").splitlines()
+            for line in reversed(validator_lines):
+                match = admission_re.search(line)
+                if match:
+                    block, height, shard_round, root_round = match.groups()
+                    association = {"block": block, "height": int(height),
+                                   "round": shard_round, "rootRound": root_round}
+                    break
+            if association:
+                try:
+                    tags = {tag: rpc(ETH_BASE, "eth_getBlockByNumber", [tag, False])
+                            for tag in ("latest", "safe", "finalized")}
+                    canonical = [tags[tag]["hash"].removeprefix("0x").lower() for tag in tags]
+                    numbers = [int(tags[tag]["number"], 16) for tag in tags]
+                    at_height = rpc(ETH_BASE, "eth_getBlockByNumber", [hex(association["height"]), False])
+                    association_block = rpc(ETH_BASE, "eth_getBlockByHash",
+                                             ["0x" + association["block"], False])
+                    if (len(set(canonical)) == 1 and min(numbers) >= association["height"]
+                            and at_height is not None and association_block is not None
+                            and at_height["hash"].removeprefix("0x").lower() == association["block"]
+                            and association_block["hash"].removeprefix("0x").lower() == association["block"]):
+                        agreement = {"hash": canonical[0], "height": numbers[0]}
+                        break
+                except (OSError, RuntimeError, KeyError, TypeError, ValueError):
+                    pass
+            time.sleep(0.5)
+        if not association:
+            raise RuntimeError("timed out waiting for positive-height peer_recovery certificate association")
+        if not agreement:
+            raise RuntimeError(f"timed out waiting for latest/safe/finalized agreement on associated block "
+                                f"B{association['height']} {association['block']}")
+        print(f"D2C[proof-outage] peer-recovery association confirmed: block={association['block']} "
+              f"height={association['height']} round={association['round']} "
+              f"rootRound={association['rootRound']}; latest/safe/finalized agree at "
+              f"B{agreement['height']} {agreement['hash']}", flush=True)
         return
 
-    seconds = int(os.environ.get("D2C_PROOF_CORRUPT_SECONDS", "10"))
-    before_head = head(1)
-    set_mode("corrupt", seconds)
-    print(f"D2C[proof-corrupt] corrupted proof RPC bytes for {seconds}s", flush=True)
-    time.sleep(seconds)
-    set_mode("pass")
-    proxy_lines = proxy_log.read_text(errors="replace").splitlines()
-    corrupted = [line for line in proxy_lines if "corrupt method=" in line]
-    if not corrupted:
-        raise RuntimeError("proof-corrupt window ended without mutating proof bytes")
+    timeout = int(os.environ.get("D2C_PROOF_CORRUPT_TIMEOUT", "60"))
     lines = validator_log.read_text(errors="replace").splitlines()
-    marker_line = max(i for i, line in enumerate(lines) if "D2C_PROOF_BOUNDARY" in line)
-    after = lines[marker_line + 1:]
-    requests = [line for line in after if 'msg="submitting block certification request"' in line]
-    named = [line for line in after if re.search(r"parent witness|proof|invalid|mismatch", line, re.I)
-             and re.search(r"level=(ERROR|WARN)", line)]
-    after_head = head(1)
-    if requests:
-        raise RuntimeError(f"validator 1 submitted {len(requests)} certification request(s) during corrupt evidence window")
-    if after_head != before_head:
-        raise RuntimeError(f"validator 1 reth head advanced during corrupt evidence window: {before_head} -> {after_head}")
-    if not named:
-        raise RuntimeError("corrupt proof bytes produced no named validator diagnostic")
-    print(f"D2C[proof-corrupt] named failure observed; no certification request or reth head advance; "
-          f"corrupted RPC calls={len(corrupted)}", flush=True)
+    known_parents = set()
+    known_numbers = set()
+    for line in lines:
+        match = re.search(r'msg="parent witness snapshot" cache=(?:miss|hit).*?parentNumber=(\d+) parentHash=([0-9a-f]{64})', line)
+        if match:
+            known_numbers.add(int(match.group(1)))
+            known_parents.add(match.group(2))
+        match = re.search(r'msg="acquired certified parent registry witness".*?parentNumber=(\d+) parentHash=([0-9a-f]{64})', line)
+        if match:
+            known_numbers.add(int(match.group(1)))
+            known_parents.add(match.group(2))
+
+    def selector(line):
+        match = re.search(r'parent=([^ ]+)', line)
+        if not match:
+            return None
+        value = match.group(1).lower()
+        if re.fullmatch(r"[0-9a-f]{64}", value):
+            return {"hash": value, "number": None}
+        if value.startswith("0x"):
+            try:
+                return {"hash": None, "number": int(value, 16)}
+            except ValueError:
+                pass
+        return None
+
+    proxy_activation = time.time()
+    prior_refs = set()
+    for line in proxy_log.read_text(errors="replace").splitlines():
+        try:
+            log_epoch = float(line.split(" ", 1)[0])
+        except (ValueError, IndexError):
+            continue
+        ref_match = re.search(r"\bparent=([^ ]+)", line)
+        if log_epoch <= proxy_activation and " fetch " in line and ref_match:
+            prior = ref_match.group(1).lower().removeprefix("0x")
+            if re.fullmatch(r"[0-9a-f]{64}", prior):
+                prior_refs.add(prior)
+            else:
+                try:
+                    prior_refs.add(f"height:{int(prior, 16)}")
+                except ValueError:
+                    prior_refs.add(prior)
+    set_mode("hold", 120, hold=True, release=[], pass_release=[])
+    print(f"D2C[proof-corrupt] holding proof fetches until an uncached parent request is selected; "
+          f"cached parents={len(known_parents)}", flush=True)
+    deadline = time.monotonic() + timeout
+    target = None
+    released_cached = []
+    while time.monotonic() < deadline:
+        for line in proxy_log.read_text(errors="replace").splitlines():
+            if " fetch " not in line or " mode=hold" not in line:
+                continue
+            trace_match = re.search(r"\btrace=([0-9]+)", line)
+            ref = selector(line)
+            if not trace_match or not ref:
+                continue
+            ref_key = ref["hash"] or f"height:{ref['number']}"
+            is_known = (ref["hash"] in known_parents if ref["hash"] is not None
+                        else ref["number"] in known_numbers)
+            if ref_key in prior_refs:
+                is_known = True
+            if not is_known:
+                target = {"trace": trace_match.group(1), "ref": ref, "line": line}
+                break
+            # Let already-verified cached parents continue normally while keeping future
+            # requests behind the barrier.
+            if trace_match.group(1) not in released_cached:
+                released_cached.append(trace_match.group(1))
+                set_mode("hold", 120, hold=True, release=released_cached,
+                         pass_release=released_cached)
+        if target:
+            break
+        time.sleep(0.05)
+    if not target:
+        set_mode("pass")
+        raise RuntimeError(f"no held proof request for an uncached parent appeared within {timeout}s")
+
+    ref_text = target["ref"]["hash"] or f"height:{target['ref']['number']}"
+    set_mode("corrupt", 120, hold=True, release=released_cached,
+             pass_release=released_cached)
+    with validator_log.open("a") as stream:
+        stream.write(f"D2C_PROOF_CORRUPT_RELEASE parent={ref_text} trace={target['trace']}\n")
+    set_mode("corrupt", 120, hold=True, release=released_cached + [target["trace"]],
+             pass_release=released_cached)
+    print(f"D2C[proof-corrupt] corrupted proof RPC before releasing uncached parent={ref_text}; "
+          f"trace={target['trace']}; fetch={target['line']}", flush=True)
+
+    mutation_deadline = time.monotonic() + 20
+    mutation = None
+    while time.monotonic() < mutation_deadline:
+        for line in proxy_log.read_text(errors="replace").splitlines():
+            if f" mutate trace={target['trace']} " in line and "response_sha256=" in line:
+                mutation = line
+                break
+        if mutation:
+            break
+        time.sleep(0.05)
+    if not mutation:
+        set_mode("pass")
+        raise RuntimeError(f"uncached proof response trace={target['trace']} was not mutated")
+    mutated_hash = re.search(r"response_sha256=([0-9a-f]{64})", mutation)
+    if not mutated_hash:
+        set_mode("pass")
+        raise RuntimeError("proxy mutation log lacks the corrupted response digest")
+    print(f"D2C[proof-corrupt] mutated response confirmed: {mutation}", flush=True)
+
+    # The selected RPC is synchronous in the proof verifier. Wait for its validation
+    # failure, and ensure that no verified snapshot, derivation, signature, or admitted
+    # child is attributed to this parent. Other cache-hit parents remain allowed.
+    reject_deadline = time.monotonic() + 30
+    rejected = None
+    while time.monotonic() < reject_deadline:
+        lines = validator_log.read_text(errors="replace").splitlines()
+        marker = f"D2C_PROOF_CORRUPT_RELEASE parent={ref_text} trace={target['trace']}"
+        release_index = max((i for i, line in enumerate(lines) if marker in line), default=-1)
+        for line in reversed(lines[release_index + 1:]):
+            if ("level=ERROR" in line or "level=WARN" in line) and re.search(
+                    r"proof|witness|fetched block binding|invalid peer candidate|mismatch", line, re.I):
+                rejected = line
+                break
+        if rejected:
+            break
+        time.sleep(0.1)
+    lines = validator_log.read_text(errors="replace").splitlines()
+    marker = f"D2C_PROOF_CORRUPT_RELEASE parent={ref_text} trace={target['trace']}"
+    release_index = max((i for i, line in enumerate(lines) if marker in line), default=-1)
+    post_release = lines[release_index + 1:]
+    set_mode("pass")
+    if not rejected:
+        raise RuntimeError(f"mutated uncached proof parent={ref_text} had no rejection diagnostic")
+    parent_hash = target["ref"]["hash"]
+    if parent_hash is None:
+        # If the request used a block number selector, resolve its canonical hash for
+        # exact downstream correlation.
+        block = rpc(ETH_BASE, "eth_getBlockByNumber", [hex(target["ref"]["number"]), False])
+        parent_hash = block["hash"].removeprefix("0x").lower() if block else None
+    if not parent_hash:
+        raise RuntimeError(f"cannot resolve held proof parent {ref_text} to a canonical block hash")
+    pattern = re.compile(rf"\b{re.escape(parent_hash)}\b", re.I)
+    success_for_parent = [line for line in post_release if pattern.search(line) and (
+        'msg="derived root input from parent witness"' in line or
+        'msg="certification request signed"' in line)]
+    if success_for_parent:
+        raise RuntimeError(f"mutated uncached parent {parent_hash} reached a verified derivation or signature: "
+                            f"{success_for_parent[-1]}")
+    if not pattern.search(rejected):
+        raise RuntimeError(
+            "D2-B rejection diagnostic lacks the selected parent hash, so the failure cannot be "
+            f"correlated to mutated parent {parent_hash}: {rejected}. Needed fields: parentHash, "
+            "proofRequestID (also logged by the proxy), rejection class/reason, and event time."
+        )
+    cached_progress = [line for line in post_release if 'msg="parent witness snapshot" cache=hit' in line]
+    print(f"D2C[proof-corrupt] mutated uncached parent={parent_hash} response_sha256={mutated_hash.group(1)} "
+          f"was rejected before snapshot verification/derivation/signing; rejection={rejected}", flush=True)
+    if cached_progress:
+        print(f"D2C[proof-corrupt] legitimate cached-parent progress remained allowed; "
+              f"cache-hit snapshots={len(cached_progress)}", flush=True)
+    record_expected_refusal(SCENARIO, f"mutated uncached parent {parent_hash} rejected before derivation or signature")
 
 
 def leader():
@@ -194,13 +365,17 @@ elif SCENARIO in {"proof-outage", "proof-corrupt"}:
     raise SystemExit(0)
 elif SCENARIO == "missing-body":
     import subprocess
-    # A tiny Go helper removes the certified B5 candidate record from validator 1's journal.
-    output = subprocess.check_output(["go", "run", "scripts/d2c-journal-edit.go",
+    # Close the journal owner before editing its Bolt file offline.
+    stop("evm", 1, "TERM")
+    result = subprocess.run(["go", "run", "scripts/d2c-journal-edit.go",
         "delete-certified-height", "test-nodes/execution-journals/evm1.db", "5"],
-        text=True, stderr=subprocess.STDOUT)
+        text=True, capture_output=True)
+    if result.returncode:
+        raise RuntimeError("journal edit helper failed:\n"
+                           f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
+    output = result.stdout
     print(output, end="", flush=True)
     print(f"D2C[missing-body] deleted certified candidate at B5; restarting validator 1", flush=True)
-    stop("evm", 1, "TERM")
     with open("test-nodes/evm1/debug.log", "a") as log:
         log.write(f"D2C_RESTART_BOUNDARY scenario={SCENARIO} certified=B{CERTIFIED}\n")
     try:
@@ -213,14 +388,17 @@ elif SCENARIO == "missing-body":
                     ("error" in line.lower() or "failed" in line.lower() or "missing" in line.lower())]
         if failures:
             print(f"D2C[missing-body] journal rejected restart after certified B{CERTIFIED}: {failures[-1]}", flush=True)
+            record_expected_refusal(SCENARIO, failures[-1])
             raise SystemExit(0)
         syncing = [line for line in restart if "status syncing" in line.lower()]
         if syncing:
             print(f"D2C[missing-body] restarted validator remains SYNCING: {syncing[-1]}", flush=True)
+            record_expected_refusal(SCENARIO, syncing[-1])
         else:
             raise RuntimeError("restarted validator neither rejected the journal nor reported SYNCING")
     except subprocess.CalledProcessError as exc:
         print(f"D2C[missing-body] restart refused after certified candidate body deletion: {exc}", flush=True)
+        record_expected_refusal(SCENARIO, f"restart exited {exc.returncode} after deleting B{CERTIFIED} candidate")
         raise SystemExit(0)
     raise SystemExit(0)
 elif SCENARIO == "wrong-genesis":
@@ -245,6 +423,7 @@ elif SCENARIO == "wrong-genesis":
         for _ in range(20):
             if proc.poll() is not None:
                 print(f"D2C[wrong-genesis] retained-state reth restart refused alternate genesis (exit {proc.returncode})", flush=True)
+                record_expected_refusal(SCENARIO, f"reth exited {proc.returncode} on alternate genesis")
                 raise SystemExit(0)
             time.sleep(0.5)
         raise RuntimeError("reth accepted alternate genesis on retained datadir")
@@ -295,4 +474,4 @@ if immediate_after:
                      for i, h in immediate_after.items()}
     print(f"D2C[{SCENARIO}] reth heads immediately after relaunch={immediate_after}; "
           f"certified=B{CERTIFIED}; lag={immediate_lag}", flush=True)
-print(f"D2C[{SCENARIO}] reth heads after peer restoration={after}; certified=B{CERTIFIED}; lag={lag}", flush=True)
+print(f"D2C[{SCENARIO}] reth heads after relaunch={after}; certified=B{CERTIFIED}; lag={lag}", flush=True)
