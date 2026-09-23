@@ -96,12 +96,14 @@ func TestAdapterV2BootstrapBuildSendsCanonicalInput(t *testing.T) {
 	})
 	a, closeFn := newTestAdapterWithVerifier(t, engine, eth, verifier)
 	defer closeFn()
+	a.feeCollector = [20]byte{19: 0xad}
 	id, err := a.Build(context.Background(), params)
 	require.NoError(t, err)
 	require.Equal(t, want.Input.Encode(), []byte(captured.RootInput))
 	require.Equal(t, want.Encoded, []byte(captured.RootInput))
 	require.Equal(t, data32(want.Commitment), attrs.Commitment)
-	require.Equal(t, DeriveAttributesV2(want.Input, ParentHeader{}), attrs.PayloadAttributesV3)
+	require.Equal(t, DeriveAttributesV2(want.Input, ParentHeader{}, a.feeCollector), attrs.PayloadAttributesV3)
+	require.Equal(t, data20(a.feeCollector), attrs.SuggestedFeeRecipient)
 	firstAttrs, firstInput := attrs, captured
 	changed := params
 	changed.Timestamp = params.Timestamp + 42
@@ -143,7 +145,7 @@ func TestAdapterV2BootstrapVerifyBoundCompanion(t *testing.T) {
 	})
 	a, closeFn := newTestAdapterWithVerifier(t, engine, eth, verifier)
 	defer closeFn()
-	attrs := DeriveAttributesV2(want.Input, ParentHeader{})
+	attrs := DeriveAttributesV2(want.Input, ParentHeader{}, a.feeCollector)
 	payload := samplePayload()
 	payload.ParentHash = data32(verifier.GenesisOrigin.BlockHash())
 	payload.BlockNumber = 1

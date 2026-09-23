@@ -47,6 +47,7 @@ type shardNodeRunFlags struct {
 	EngineURL           string
 	EthURL              string
 	JWTSecret           string
+	EngineFeeCollector  string
 	ExpectedGenesisHash string
 
 	// The two files `ubft engine-api genesis` emits. They are required together: when given, the node
@@ -113,6 +114,8 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"engine-api executor only: URL of the execution client's authenticated Engine API endpoint")
 	cmd.Flags().StringVar(&flags.EthURL, "eth-url", "http://127.0.0.1:8545",
 		"engine-api executor only: URL of the execution client's plain eth_* JSON-RPC endpoint")
+	cmd.Flags().StringVar(&flags.EngineFeeCollector, "engine-fee-collector", "0x0000000000000000000000000000000000000000",
+		"engine-api executor only: configured fee collector address, which must match the execution client's --unicity.fee-collector")
 	cmd.Flags().StringVar(&flags.ExpectedGenesisHash, "expected-genesis-hash", "",
 		"engine-api executor only: the execution client's expected genesis block hash (0x-prefixed). "+
 			"Operator-configured; when set it is verified before the node can vote. A chain id does not "+
@@ -549,6 +552,9 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 		return executortest.New(), nil
 
 	case "engine-api":
+		if !common.IsHexAddress(flags.EngineFeeCollector) {
+			return nil, fmt.Errorf("--engine-fee-collector %q is not an address", flags.EngineFeeCollector)
+		}
 		jwtPath := flags.PathWithDefault(flags.JWTSecret, "jwt.hex")
 		hexStr, err := os.ReadFile(jwtPath) // #nosec G304 -- operator-supplied config path, same trust level as keys.json
 		if err != nil {
@@ -560,10 +566,11 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 		}
 
 		adapter := engineapi.NewAdapter(engineapi.Config{
-			EngineURL: flags.EngineURL,
-			EthURL:    flags.EthURL,
-			Secret:    secret,
-			Verifier:  verifier,
+			EngineURL:    flags.EngineURL,
+			EthURL:       flags.EthURL,
+			Secret:       secret,
+			FeeCollector: [20]byte(common.HexToAddress(flags.EngineFeeCollector)),
+			Verifier:     verifier,
 		}, flags.observe.Logger())
 
 		// The build path now runs through the seal siblings, so a client that lacks them fails

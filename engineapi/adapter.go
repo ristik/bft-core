@@ -42,9 +42,10 @@ var (
 // everything else (types.go, client.go, params.go, codec.go) is pure
 // Engine-API-facing machinery Adapter composes.
 type Adapter struct {
-	engine *Client
-	eth    *EthClient
-	log    *slog.Logger
+	engine       *Client
+	eth          *EthClient
+	log          *slog.Logger
+	feeCollector [20]byte
 
 	// verifier is the derivation context the seal build path authenticates a certificate against.
 	// Nil for an adapter that only runs the non-deriving checks (the doctor command); Build refuses
@@ -71,9 +72,10 @@ type buildContext struct {
 }
 
 type Config struct {
-	EngineURL string // authenticated engine_* endpoint, e.g. http://localhost:8551
-	EthURL    string // plain eth_* endpoint, e.g. http://localhost:8545
-	Secret    Secret
+	EngineURL    string // authenticated engine_* endpoint, e.g. http://localhost:8551
+	EthURL       string // plain eth_* endpoint, e.g. http://localhost:8545
+	Secret       Secret
+	FeeCollector [20]byte // configured execution fee recipient; must match the client's fee collector
 
 	// Verifier is the derivation context Adapter.Build authenticates the authorizing certificate
 	// against. It is required to build through the seal siblings and is deliberately nil for an
@@ -105,11 +107,12 @@ type VerifierContext struct {
 
 func NewAdapter(cfg Config, log *slog.Logger) *Adapter {
 	a := &Adapter{
-		engine:   NewClient(cfg.EngineURL, cfg.Secret),
-		eth:      NewEthClient(cfg.EthURL),
-		log:      log,
-		verifier: cfg.Verifier,
-		pending:  make(map[shardnode.BuildID]buildContext),
+		engine:       NewClient(cfg.EngineURL, cfg.Secret),
+		eth:          NewEthClient(cfg.EthURL),
+		log:          log,
+		feeCollector: cfg.FeeCollector,
+		verifier:     cfg.Verifier,
+		pending:      make(map[shardnode.BuildID]buildContext),
 	}
 	return a
 }
@@ -352,7 +355,7 @@ func (a *Adapter) Build(ctx context.Context, p shardnode.RoundParams) (shardnode
 	if err != nil {
 		return "", fmt.Errorf("engineapi: looking up parent header %x: %w", parentHash32, err)
 	}
-	attrs := DeriveAttributesV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)})
+	attrs := DeriveAttributesV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
 
 	sealAttrs := UnicityPayloadAttributes{
 		PayloadAttributesV3: attrs,
@@ -538,14 +541,14 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	// fields are checked last of the checks, so a block that fails authentication is reported as an
 	// authentication failure rather than as a field divergence. A divergence stays StatusInvalid with
 	// the local warning, not an error return, exactly as before the reordering.
-	attrs := DeriveAttributesV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)})
+	attrs := DeriveAttributesV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
 	claimed := PayloadFields{
 		Timestamp:             envelope.ExecutionPayload.Timestamp,
 		PrevRandao:            envelope.ExecutionPayload.PrevRandao,
 		SuggestedFeeRecipient: envelope.ExecutionPayload.FeeRecipient,
 		Withdrawals:           envelope.ExecutionPayload.Withdrawals,
 	}
-	if err := VerifyPayloadFieldsV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, claimed); err != nil {
+	if err := VerifyPayloadFieldsV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector, claimed); err != nil {
 		if a.log != nil {
 			a.log.WarnContext(ctx, "rejecting round before execution: attributes diverge from local derivation", slog.String("err", err.Error()))
 		}

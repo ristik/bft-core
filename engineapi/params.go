@@ -36,14 +36,14 @@ type ParentHeader struct {
 // TestWiring_TodaysRoundParamsCannotAuthenticate records that, and a guard here
 // would contradict it.
 func DeriveAttributes(ri evmroot.RootInput, parent ParentHeader) PayloadAttributesV3 {
-	return deriveAttributes(ri.Origin.RootRound, ri.Round, ri.Origin.ReferenceTime, parent)
+	return deriveAttributes(ri.Origin.RootRound, ri.Round, ri.Origin.ReferenceTime, parent, [20]byte{})
 }
 
-func DeriveAttributesV2(ri evmroot.RootInputV2, parent ParentHeader) PayloadAttributesV3 {
-	return deriveAttributes(ri.Origin.RootRound, ri.Round, ri.Origin.ReferenceTime, parent)
+func DeriveAttributesV2(ri evmroot.RootInputV2, parent ParentHeader, feeCollector [20]byte) PayloadAttributesV3 {
+	return deriveAttributes(ri.Origin.RootRound, ri.Round, ri.Origin.ReferenceTime, parent, feeCollector)
 }
 
-func deriveAttributes(rootRound, round, referenceTime uint64, parent ParentHeader) PayloadAttributesV3 {
+func deriveAttributes(rootRound, round, referenceTime uint64, parent ParentHeader, feeCollector [20]byte) PayloadAttributesV3 {
 	prevRandao := evmroot.DerivePrevRandao(rootRound, round)
 	beaconRoot := evmroot.DeriveBeaconRoot(rootRound, round)
 	ts := evmroot.DeriveTimestamp(referenceTime, parent.Timestamp)
@@ -51,7 +51,7 @@ func deriveAttributes(rootRound, round, referenceTime uint64, parent ParentHeade
 	return PayloadAttributesV3{
 		Timestamp:             quantity(ts),
 		PrevRandao:            data32(prevRandao),
-		SuggestedFeeRecipient: data20{}, // zero address — see the build plan's derivation table
+		SuggestedFeeRecipient: data20(feeCollector),
 		Withdrawals:           []WithdrawalV1{},
 		ParentBeaconBlockRoot: data32(beaconRoot),
 	}
@@ -111,8 +111,8 @@ func VerifyPayloadFields(ri evmroot.RootInput, parent ParentHeader, claimed Payl
 	return verifyPayloadFields(ri.Round, DeriveAttributes(ri, parent), claimed)
 }
 
-func VerifyPayloadFieldsV2(ri evmroot.RootInputV2, parent ParentHeader, claimed PayloadFields) error {
-	return verifyPayloadFields(ri.Round, DeriveAttributesV2(ri, parent), claimed)
+func VerifyPayloadFieldsV2(ri evmroot.RootInputV2, parent ParentHeader, feeCollector [20]byte, claimed PayloadFields) error {
+	return verifyPayloadFields(ri.Round, DeriveAttributesV2(ri, parent, feeCollector), claimed)
 }
 
 func verifyPayloadFields(round uint64, want PayloadAttributesV3, claimed PayloadFields) error {
