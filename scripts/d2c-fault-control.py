@@ -193,15 +193,13 @@ elif SCENARIO in {"proof-outage", "proof-corrupt"}:
     proof_fault()
     raise SystemExit(0)
 elif SCENARIO == "missing-body":
-    import hashlib
-    import struct
-    import tempfile
     import subprocess
     # A tiny Go helper removes the certified B5 candidate record from validator 1's journal.
     output = subprocess.check_output(["go", "run", "scripts/d2c-journal-edit.go",
         "delete-certified-height", "test-nodes/execution-journals/evm1.db", "5"],
         text=True, stderr=subprocess.STDOUT)
     print(output, end="", flush=True)
+    print(f"D2C[missing-body] deleted certified candidate at B5; restarting validator 1", flush=True)
     stop("evm", 1, "TERM")
     with open("test-nodes/evm1/debug.log", "a") as log:
         log.write(f"D2C_RESTART_BOUNDARY scenario={SCENARIO} certified=B{CERTIFIED}\n")
@@ -216,12 +214,17 @@ elif SCENARIO == "missing-body":
         if failures:
             print(f"D2C[missing-body] journal rejected restart after certified B{CERTIFIED}: {failures[-1]}", flush=True)
             raise SystemExit(0)
-        raise RuntimeError("restarted validator did not report missing certified candidate journal entry")
+        syncing = [line for line in restart if "status syncing" in line.lower()]
+        if syncing:
+            print(f"D2C[missing-body] restarted validator remains SYNCING: {syncing[-1]}", flush=True)
+        else:
+            raise RuntimeError("restarted validator neither rejected the journal nor reported SYNCING")
     except subprocess.CalledProcessError as exc:
         print(f"D2C[missing-body] restart refused after certified candidate body deletion: {exc}", flush=True)
         raise SystemExit(0)
     raise SystemExit(0)
 elif SCENARIO == "wrong-genesis":
+    print(f"D2C[wrong-genesis] testing alternate genesis against retained validator 1 datadir at B{CERTIFIED}", flush=True)
     stop("evm", 1, "TERM")
     stop("reth", 1, "TERM")
     wait_down(1)

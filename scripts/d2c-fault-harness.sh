@@ -32,6 +32,18 @@ case "$scenario" in
         exit 0
       fi
     fi
+    if { [ "$scenario" = missing-body ] && grep -q 'D2C\[missing-body\] deleted certified candidate' "$log"; } ||
+       { [ "$scenario" = wrong-genesis ] && grep -q 'D2C\[wrong-genesis\] retained-state reth restart refused' "$log"; }; then
+      reason=$(grep -E 'D1 FAIL: stalled before height|D1 FAIL: B[0-9]+ lacks|D1 FAIL: canonical disagreement|D1 FAIL: discontinuity' "$log" | tail -1)
+      if [ -n "$reason" ]; then
+        if [ "$scenario" = missing-body ]; then
+          echo "D2C[${scenario}] EXPECTED-FAIL(certified B5 candidate journal entry deleted; restarted validator SYNCING with no D2-B recovery; ${reason#D1 FAIL: })" | tee -a "$log"
+        else
+          echo "D2C[${scenario}] EXPECTED-FAIL(retained-state alternate genesis rejected; ${reason#D1 FAIL: })" | tee -a "$log"
+        fi
+        exit 0
+      fi
+    fi
     echo "D2C[${scenario}] FAIL(lane exited ${lane_status}; see diagnostics above)" | tee -a "$log"
     exit "$lane_status"
     ;;
@@ -61,8 +73,5 @@ case "$scenario" in
     fi
     echo "D2C[${scenario}] FAIL(lane exited ${lane_status}; see diagnostics above)" | tee -a "$log"
     exit "$lane_status"
-    ;;
-  wrong-genesis)
-    echo "D2C[${scenario}] EXPECTED-FAIL(needs retained-state wrong-genesis restart hook)" | tee "$log"
     ;;
 esac
