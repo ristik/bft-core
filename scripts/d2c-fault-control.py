@@ -191,8 +191,9 @@ def proof_fault():
         if not match:
             return None
         value = match.group(1).lower()
-        if re.fullmatch(r"[0-9a-f]{64}", value):
-            return {"hash": value, "number": None}
+        hash_value = value.removeprefix("0x")
+        if re.fullmatch(r"[0-9a-f]{64}", hash_value):
+            return {"hash": hash_value, "number": None}
         if value.startswith("0x"):
             try:
                 return {"hash": None, "number": int(value, 16)}
@@ -253,37 +254,39 @@ def proof_fault():
         raise RuntimeError(f"no held proof request for an uncached parent appeared within {timeout}s")
 
     ref_text = target["ref"]["hash"] or f"height:{target['ref']['number']}"
-    set_mode("corrupt", 120, hold=True, release=released_cached,
-             pass_release=released_cached)
+    corrupt_refs = [ref_text]
     with validator_log.open("a") as stream:
         stream.write(f"D2C_PROOF_CORRUPT_RELEASE parent={ref_text} trace={target['trace']}\n")
     set_mode("corrupt", 120, hold=True, release=released_cached + [target["trace"]],
-             pass_release=released_cached)
-    print(f"D2C[proof-corrupt] corrupted proof RPC before releasing uncached parent={ref_text}; "
+             pass_release=released_cached, corrupt_refs=corrupt_refs)
+    print(f"D2C[proof-corrupt] corrupting and promptly releasing all proof RPCs for uncached parent={ref_text}; "
           f"trace={target['trace']}; fetch={target['line']}", flush=True)
 
     mutation_deadline = time.monotonic() + 20
-    mutation = None
+    mutations = []
     while time.monotonic() < mutation_deadline:
-        for line in proxy_log.read_text(errors="replace").splitlines():
-            if f" mutate trace={target['trace']} " in line and "response_sha256=" in line:
-                mutation = line
-                break
-        if mutation:
+        mutations = [line for line in proxy_log.read_text(errors="replace").splitlines()
+                     if " mutate " in line and "response_sha256=" in line
+                     and (candidate := selector(line)) == target["ref"]]
+        if (any(f"trace={target['trace']} " in line for line in mutations)
+                and any("method=eth_getProof " in line for line in mutations)):
             break
         time.sleep(0.05)
-    if not mutation:
+    target_mutation = next((line for line in mutations if f"trace={target['trace']} " in line), None)
+    proof_mutation = next((line for line in mutations if "method=eth_getProof " in line), None)
+    if not target_mutation or not proof_mutation:
         set_mode("pass")
-        raise RuntimeError(f"uncached proof response trace={target['trace']} was not mutated")
-    mutated_hash = re.search(r"response_sha256=([0-9a-f]{64})", mutation)
+        raise RuntimeError(f"uncached parent {ref_text} did not promptly return both a mutated selected response "
+                           f"and a mutated matching eth_getProof response: {mutations[-4:]}")
+    mutated_hash = re.search(r"response_sha256=([0-9a-f]{64})", target_mutation)
     if not mutated_hash:
         set_mode("pass")
         raise RuntimeError("proxy mutation log lacks the corrupted response digest")
-    print(f"D2C[proof-corrupt] mutated response confirmed: {mutation}", flush=True)
+    print(f"D2C[proof-corrupt] mutated responses confirmed promptly: {target_mutation}; {proof_mutation}", flush=True)
 
-    # The selected RPC is synchronous in the proof verifier. Wait for its validation
-    # failure, and ensure that no verified snapshot, derivation, signature, or admitted
-    # child is attributed to this parent. Other cache-hit parents remain allowed.
+    # Require a validation-class failure tied to this exact parent. An unavailable or
+    # deadline diagnostic means another proof call was held too long and does not prove
+    # that the mutated response reached verification.
     reject_deadline = time.monotonic() + 30
     rejected = None
     while time.monotonic() < reject_deadline:
@@ -291,8 +294,10 @@ def proof_fault():
         marker = f"D2C_PROOF_CORRUPT_RELEASE parent={ref_text} trace={target['trace']}"
         release_index = max((i for i, line in enumerate(lines) if marker in line), default=-1)
         for line in reversed(lines[release_index + 1:]):
-            if ("level=ERROR" in line or "level=WARN" in line) and re.search(
-                    r"proof|witness|fetched block binding|invalid peer candidate|mismatch", line, re.I):
+            is_invalid = re.search(r"invalid|mismatch|binding", line, re.I)
+            is_unavailable = re.search(r"unavailable|deadline exceeded|timed? out|timeout", line, re.I)
+            if (("level=ERROR" in line or "level=WARN" in line) and is_invalid and not is_unavailable
+                    and re.search(r"proof|witness|fetched block binding|parent", line, re.I)):
                 rejected = line
                 break
         if rejected:
@@ -302,8 +307,8 @@ def proof_fault():
     marker = f"D2C_PROOF_CORRUPT_RELEASE parent={ref_text} trace={target['trace']}"
     release_index = max((i for i, line in enumerate(lines) if marker in line), default=-1)
     post_release = lines[release_index + 1:]
-    set_mode("pass")
     if not rejected:
+        set_mode("pass")
         raise RuntimeError(f"mutated uncached proof parent={ref_text} had no rejection diagnostic")
     parent_hash = target["ref"]["hash"]
     if parent_hash is None:
@@ -312,27 +317,48 @@ def proof_fault():
         block = rpc(ETH_BASE, "eth_getBlockByNumber", [hex(target["ref"]["number"]), False])
         parent_hash = block["hash"].removeprefix("0x").lower() if block else None
     if not parent_hash:
+        set_mode("pass")
         raise RuntimeError(f"cannot resolve held proof parent {ref_text} to a canonical block hash")
     pattern = re.compile(rf"\b{re.escape(parent_hash)}\b", re.I)
-    success_for_parent = [line for line in post_release if pattern.search(line) and (
-        'msg="derived root input from parent witness"' in line or
-        'msg="certification request signed"' in line)]
-    if success_for_parent:
-        raise RuntimeError(f"mutated uncached parent {parent_hash} reached a verified derivation or signature: "
-                            f"{success_for_parent[-1]}")
     if not pattern.search(rejected):
+        set_mode("pass")
         raise RuntimeError(
-            "D2-B rejection diagnostic lacks the selected parent hash, so the failure cannot be "
-            f"correlated to mutated parent {parent_hash}: {rejected}. Needed fields: parentHash, "
-            "proofRequestID (also logged by the proxy), rejection class/reason, and event time."
+            "invalid-proof diagnostic lacks the selected parent hash and cannot be correlated: "
+            f"{rejected}; needed parentHash, proof request trace, rejection class, and event time"
         )
+    parent_snapshots = {}
+    for line in post_release:
+        if 'msg="parent witness snapshot"' in line and pattern.search(line):
+            snapshot_id = re.search(r"\bsnapshotID=([0-9a-f]{64})\b", line)
+            if snapshot_id:
+                parent_snapshots[snapshot_id.group(1)] = line
+    dependent_signatures = [line for line in post_release
+                            if 'msg="certification request signed"' in line
+                            and (pattern.search(line) or any(
+                                re.search(rf"\bsnapshotID={re.escape(snapshot_id)}\b", line)
+                                for snapshot_id in parent_snapshots))]
+    derivations = [line for line in post_release
+                   if 'msg="derived root input from parent witness"' in line and pattern.search(line)]
+    if parent_snapshots or dependent_signatures or derivations:
+        set_mode("pass")
+        raise RuntimeError(f"mutated uncached parent {parent_hash} reached a verified derivation or signature: "
+                            f"snapshotIDs={sorted(parent_snapshots)} dependent={dependent_signatures[-1:]}; "
+                            f"derivation={derivations[-1:]}")
     cached_progress = [line for line in post_release if 'msg="parent witness snapshot" cache=hit' in line]
-    print(f"D2C[proof-corrupt] mutated uncached parent={parent_hash} response_sha256={mutated_hash.group(1)} "
-          f"was rejected before snapshot verification/derivation/signing; rejection={rejected}", flush=True)
+    pass_marker = f"D2C_PROOF_CORRUPT_PASS parent={parent_hash} trace={target['trace']}\n"
+    with validator_log.open("a") as stream:
+        stream.write(pass_marker)
+    set_mode("pass")
+    result = {"parentHash": parent_hash, "trace": target["trace"],
+              "responseSHA256": mutated_hash.group(1), "invalidDiagnostic": rejected,
+              "snapshotIDs": sorted(parent_snapshots), "cachedProgress": len(cached_progress)}
+    Path("test-nodes/d2c-proof-corrupt-result.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(f"D2C[proof-corrupt] invalid-proof rejection confirmed for parent={parent_hash}; "
+          f"trace={target['trace']}; response_sha256={mutated_hash.group(1)}; diagnostic={rejected}; "
+          f"snapshotIDs={sorted(parent_snapshots)}; dependentSignedRequests=0", flush=True)
     if cached_progress:
         print(f"D2C[proof-corrupt] legitimate cached-parent progress remained allowed; "
               f"cache-hit snapshots={len(cached_progress)}", flush=True)
-    record_expected_refusal(SCENARIO, f"mutated uncached parent {parent_hash} rejected before derivation or signature")
 
 
 def leader():

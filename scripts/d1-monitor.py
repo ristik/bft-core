@@ -181,6 +181,78 @@ def check_restart(nodes, validator, signing, probe):
               f"through {len(certificates)} subsequent positive-height certificate admissions", flush=True)
 
 
+def check_fault_rejoins(nodes, scenario, final_height, final_hash):
+    """Require each process-fault target to restore and sign after its boundary."""
+    restarted = []
+    for validator in range(1, 5):
+        path = Path(nodes) / f"evm{validator}" / "debug.log"
+        lines = path.read_text(errors="replace").splitlines()
+        marker = f"D2C_RESTART_BOUNDARY scenario={scenario} "
+        boundaries = [i for i, line in enumerate(lines) if line.startswith(marker)]
+        if not boundaries:
+            continue
+        restarted.append(validator)
+        after = lines[boundaries[-1] + 1:]
+        restored_indexes = [i for i, line in enumerate(after)
+                            if 'msg="execution journal restored"' in line]
+        admissions = certificate_admissions(after)
+        admission_indexes = [after.index(entry["line"]) for entry in admissions]
+        association_indexes = [i for i, line in enumerate(after)
+                               if 'msg="certificate admitted" source=peer_recovery' in line
+                               and re.search(r'\bheight=([1-9][0-9]*)\b', line)]
+        restore_indexes = restored_indexes + association_indexes
+        if not restore_indexes:
+            raise RuntimeError(f"{scenario}: restarted validator {validator} has neither journal-restoration "
+                               "nor peer-recovery association evidence after restart boundary")
+        if not admissions:
+            raise RuntimeError(f"{scenario}: restarted validator {validator} has no positive-height "
+                               "certificate admission after restart boundary")
+        qualifying_admissions = [index for index in admission_indexes
+                                 if any(restored_index < index for restored_index in restore_indexes)]
+        signed = [(i, line) for i, line in enumerate(after)
+                  if 'msg="certification request signed"' in line
+                  and (field(line, "round") or "").isdigit()]
+        signed = [(i, line) for i, line in signed
+                  if any(admission_index < i for admission_index in qualifying_admissions)]
+        if not signed:
+            raise RuntimeError(f"{scenario}: restarted validator {validator} has no signed certification "
+                               "request after its restored positive-height admission")
+        port = 18545 + validator
+        try:
+            head = int(rpc(port, "eth_blockNumber", []), 16)
+            block = rpc(port, "eth_getBlockByNumber", [hex(final_height), False])
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise RuntimeError(f"{scenario}: restarted validator {validator} final-head sample failed: {exc}") from exc
+        expected_hash = final_hash.removeprefix("0x").lower()
+        if head < final_height or not block or block.get("hash", "").removeprefix("0x").lower() != expected_hash:
+            raise RuntimeError(f"{scenario}: restarted validator {validator} did not agree at final B{final_height}; "
+                               f"head={head}, block={block and block.get('hash')}, expected={final_hash}")
+        print(f"D2C rejoin evidence: {scenario} validator={validator}; "
+              f"restorationOrAssociation={len(restore_indexes)}; positiveAdmissions={len(admissions)}; "
+              f"signedRequests={len(signed)}; "
+              f"head=B{head}; agreesAt=B{final_height} hash={final_hash}", flush=True)
+    if not restarted:
+        raise RuntimeError(f"{scenario}: no restarted-validator boundary was recorded")
+
+
+def check_proof_corrupt_recovery(nodes):
+    path = Path(nodes) / "evm1" / "debug.log"
+    lines = path.read_text(errors="replace").splitlines()
+    markers = [i for i, line in enumerate(lines) if line.startswith("D2C_PROOF_CORRUPT_PASS ")]
+    if not markers:
+        raise RuntimeError("proof-corrupt: proxy pass boundary was not recorded")
+    after = lines[markers[-1] + 1:]
+    admissions = certificate_admissions(after)
+    signed = [line for line in after if 'msg="certification request signed"' in line
+              and (field(line, "round") or "").isdigit()]
+    if not admissions or not signed:
+        raise RuntimeError("proof-corrupt: validator 1 did not recover after pass mode; "
+                           f"positiveAdmissions={len(admissions)} signedRequests={len(signed)}")
+    print(f"D2C[proof-corrupt] recovery measured after pass: positiveAdmissions={len(admissions)}; "
+          f"signedRequests={len(signed)}; latestAdmission=B{admissions[-1]['height']}", flush=True)
+    return admissions[-1]["height"], len(signed)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--nodes", default="test-nodes")
@@ -325,13 +397,32 @@ def main():
                 return 1
             target = max(target, max(last_sample[i]["height"] for i in block_ids) + 3)
         height += 1
+    rejoin_scenarios = {"pair-term", "pair-kill", "ureth-kill", "all-kill", "leader-kill"}
+    if args.fault_scenario in rejoin_scenarios:
+        try:
+            check_fault_rejoins(args.nodes, args.fault_scenario, target, prior)
+        except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+            print(f"D2C FAIL: {exc}", flush=True)
+            return 1
+    if args.fault_scenario == "proof-corrupt":
+        try:
+            recovered_height, signed_count = check_proof_corrupt_recovery(args.nodes)
+            result_path = Path(args.nodes) / "d2c-proof-corrupt-result.json"
+            result = json.loads(result_path.read_text())
+            print(f"D2C[proof-corrupt] EXPECTED-FAIL(mutated uncached proof parent={result['parentHash']} "
+                  f"rejected as invalid; no derived snapshot or signed request used its snapshotID; "
+                  f"validator 1 recovered after pass with {recovered_height} positive-height admissions "
+                  f"and {signed_count} signed requests)", flush=True)
+        except (OSError, RuntimeError, KeyError, ValueError) as exc:
+            print(f"D2C FAIL: {exc}", flush=True)
+            return 1
     if probe:
         try:
             check_restart(args.nodes, args.restart_validator, args.signing, probe)
         except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
             print(f"D2C FAIL: {exc}", flush=True)
             return 1
-    if impaired:
+    if impaired and args.fault_scenario != "proof-corrupt":
         try:
             assert_expected_impaired_refusal(args.nodes, args.fault_scenario, impaired)
         except OSError as exc:

@@ -11,10 +11,24 @@ esac
 mkdir -p briefs/d2c-harness
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 log="briefs/d2c-harness/${stamp}-${scenario}.log"
+retain_run_logs() {
+  local destination="briefs/d2c-harness/${stamp}/${scenario}"
+  mkdir -p "$destination"
+  for file in test-nodes/evm*/debug.log test-nodes/root*/debug.log \
+              test-nodes/reth*/reth.log test-nodes/proof-proxy/proxy.log; do
+    [ -f "$file" ] || continue
+    mkdir -p "$destination/$(dirname "$file")"
+    cp -p "$file" "$destination/$file"
+  done
+  cp -p "$log" "$destination/$(basename "$log")"
+  echo "D2C retained scenario evidence: $destination" | tee -a "$log"
+}
+trap 'destination="briefs/d2c-harness/${stamp}/${scenario}"; mkdir -p "$destination"; [ ! -f "$log" ] || cp -p "$log" "$destination/$(basename "$log")"' EXIT
 case "$scenario" in
   pair-term|pair-kill|ureth-kill|all-kill|leader-kill|missing-body|wrong-genesis)
     D2C_FAULT_SCENARIO="$scenario" SIGNING=authority ./scripts/reth-paired-devnet.sh 4 10 2>&1 | tee "$log"
     lane_status=${PIPESTATUS[0]}
+    retain_run_logs
     if [ "$lane_status" -eq 0 ]; then
       echo "D2C[${scenario}] PASS" | tee -a "$log"
       exit 0
@@ -50,9 +64,13 @@ case "$scenario" in
   proof-outage|proof-corrupt)
     D2C_FAULT_SCENARIO="$scenario" SIGNING=authority ./scripts/reth-paired-devnet.sh 4 10 2>&1 | tee "$log"
     lane_status=${PIPESTATUS[0]}
+    retain_run_logs
     if [ "$lane_status" -eq 0 ]; then
       if [ "$scenario" = proof-corrupt ]; then
-        echo "D2C[${scenario}] EXPECTED-FAIL(uncached corrupted proof rejected before signing; validator 1 stayed impaired while fresh survivor quorum advanced; D2-B catch-up pending)" | tee -a "$log"
+        if ! grep -q '^D2C\[proof-corrupt\] EXPECTED-FAIL(' "$log"; then
+          echo "D2C[proof-corrupt] FAIL(missing measured invalid-proof and recovery verdict)" | tee -a "$log"
+          exit 1
+        fi
       else
         echo "D2C[${scenario}] PASS" | tee -a "$log"
       fi

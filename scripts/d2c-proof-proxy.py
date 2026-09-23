@@ -46,7 +46,7 @@ def request_ref(method, params):
     if isinstance(selector, dict):
         selector = selector.get("blockHash", selector.get("blockNumber", "unknown"))
     if isinstance(selector, str):
-        return selector.removeprefix("0x").lower()
+        return selector.lower()
     return "unknown"
 
 
@@ -74,7 +74,19 @@ class Handler(BaseHTTPRequestHandler):
         active = method in METHODS and now < float(state.get("until", 0))
         mode = state.get("mode", "pass") if active else "pass"
         released = {str(item) for item in state.get("release", [])}
-        if active and state.get("hold") and trace not in released:
+        reference_key = reference.removeprefix("0x").lower()
+        if len(reference_key) != 64:
+            try:
+                reference_key = f"height:{int(reference, 16)}"
+            except ValueError:
+                pass
+        corrupt_refs = {str(item).lower() for item in state.get("corrupt_refs", [])}
+        matching_corrupt_parent = reference_key in corrupt_refs
+        if matching_corrupt_parent:
+            # Once selected, return both header and eth_getProof for this exact parent
+            # immediately, even while all other uncached requests remain behind the hold.
+            mode = "corrupt"
+        elif active and state.get("hold") and trace not in released:
             mode = "hold"
 
         if method in METHODS:
