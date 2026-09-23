@@ -339,6 +339,38 @@ func TestShardNodeRun_AcceptsACompatibleFixture(t *testing.T) {
 	require.NotContains(t, out, "certified-record", out)
 }
 
+func TestShardNodeRun_RefusesClientBlockZeroDifferentFromConfiguredOrigin(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the CLI binary")
+	}
+	bin := buildUbft(t)
+	home, shardConf, trustBase := shardHome(t, bin)
+	dir := t.TempDir()
+	genesisPath := filepath.Join(dir, "genesis.json")
+	fullPath := filepath.Join(dir, "full-shard-conf.json")
+	run(t, repoRoot(t), bin, "engine-api", "genesis", "--shard-conf", shardConf,
+		"--out", genesisPath, "--full-shard-conf", fullPath)
+
+	server := engineFixture{
+		capabilities: []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3",
+			"engine_forkchoiceUpdatedWithSealV1", "engine_getPayloadWithSealV1", "engine_newPayloadWithSealV1"},
+		chainID: "0x7a69", genesisHash: otherGenesis,
+	}.start(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "shard-node", "run",
+		"--home", home, "--executor", "engine-api", "--address", "/ip4/127.0.0.1/tcp/0",
+		"--full-shard-conf", fullPath, "--genesis", genesisPath, "--trust-base", trustBase,
+		"--engine-url", server.URL, "--eth-url", server.URL,
+		"--jwt-secret", filepath.Join(home, "jwt.hex"), "--log-format", "text")
+	cmd.Dir = repoRoot(t)
+	output, err := cmd.CombinedOutput()
+	require.Error(t, err)
+	require.NoError(t, ctx.Err(), "startup did not refuse in time: %s", output)
+	require.Contains(t, string(output), "genesis check against the configured origin")
+	require.NotContains(t, string(output), "shard node starting")
+}
+
 /*
 TestShardNodeRun_RefusesAShardConfWithNoChainID covers the one identity input that comes from local
 configuration rather than from the client: the shard conf's chain_id partition param.

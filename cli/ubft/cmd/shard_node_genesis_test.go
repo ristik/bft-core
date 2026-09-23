@@ -102,6 +102,11 @@ func TestLoadGenesisOrigin_Refusals(t *testing.T) {
 		require.ErrorIs(t, err, registrygenesis.ErrOriginIdentity)
 	})
 
+	t.Run("malformed expected identity", func(t *testing.T) {
+		_, _, err := loadGenesisOrigin(full, genesisPath, "0xnot-a-hash", 1)
+		require.ErrorContains(t, err, "parsing --expected-origin-identity")
+	})
+
 	t.Run("root epoch does not reproduce the commitment", func(t *testing.T) {
 		_, _, err := loadGenesisOrigin(full, genesisPath, "", 2)
 		require.Error(t, err)
@@ -118,18 +123,22 @@ func TestLoadGenesisOrigin_Refusals(t *testing.T) {
 // TestLoadRunShardConf pins the input rules: the two artifacts are required together, and the full
 // configuration is the node's one shard-configuration source.
 func TestLoadRunShardConf(t *testing.T) {
-	_, _, fullPath := preparedGenesisFixture(t, 1337)
+	_, genesisPath, fullPath := preparedGenesisFixture(t, 1337)
 	base := &baseFlags{}
 	noFlag := func(string) bool { return false }
 
 	_, err := loadRunShardConf(&shardNodeRunFlags{baseFlags: base, GenesisFile: "genesis.json"}, noFlag)
 	require.ErrorContains(t, err, "--full-shard-conf")
+	_, err = loadRunShardConf(&shardNodeRunFlags{baseFlags: base, FullShardConf: fullPath}, noFlag)
+	require.ErrorContains(t, err, "--genesis")
+	_, err = loadRunShardConf(&shardNodeRunFlags{baseFlags: base, ExpectedOriginIdentity: "0x01"}, noFlag)
+	require.ErrorContains(t, err, "--expected-origin-identity requires")
 
 	_, err = loadRunShardConf(&shardNodeRunFlags{baseFlags: base, GenesisFile: "genesis.json", FullShardConf: fullPath},
 		func(name string) bool { return name == "shard-conf" })
 	require.ErrorContains(t, err, "--shard-conf")
 
-	conf, err := loadRunShardConf(&shardNodeRunFlags{baseFlags: base, FullShardConf: fullPath}, noFlag)
+	conf, err := loadRunShardConf(&shardNodeRunFlags{baseFlags: base, GenesisFile: genesisPath, FullShardConf: fullPath}, noFlag)
 	require.NoError(t, err)
 	require.Contains(t, conf.PartitionParams, registrygenesis.GenesisParam, "the node runs on the full configuration")
 }

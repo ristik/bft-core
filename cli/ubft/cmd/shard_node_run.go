@@ -249,6 +249,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	var origin registrygenesis.GenesisOrigin
 	var bootstrap registryproof.Snapshot
 	if flags.GenesisFile != "" {
+		// M1 pins one root epoch from trustBases[0]. H1/H2 multi-epoch trust bases must
+		// select the epoch bound to the genesis record instead of assuming the first.
 		origin, bootstrap, err = loadGenesisOrigin(shardConf, flags.GenesisFile, flags.ExpectedOriginIdentity, trustBases[0].GetEpoch())
 		if err != nil {
 			return err
@@ -277,7 +279,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if closer, ok := executor.(interface{ Close() }); ok {
 		defer closer.Close()
 	}
-	if origin.Valid() {
+	if origin.Valid() && flags.Executor == "engine-api" {
 		// The agreed genesis hash: buildExecutor has just required the paired client's block 0 to equal
 		// origin.BlockHash(), so this line reports a value the configuration and the client agree on.
 		flags.observe.Logger().Info("configured genesis origin",
@@ -522,6 +524,12 @@ func loadGenesisOrigin(shardConf *types.PartitionDescriptionRecord, genesisPath,
 // otherwise it is the ordinary --shard-conf. The two are mutually exclusive rather than merged,
 // because they would be two sources for the node's identity and its configuration hash.
 func loadRunShardConf(flags *shardNodeRunFlags, changed func(string) bool) (*types.PartitionDescriptionRecord, error) {
+	if flags.GenesisFile == "" && flags.FullShardConf != "" {
+		return nil, fmt.Errorf("--full-shard-conf requires --genesis")
+	}
+	if flags.GenesisFile == "" && flags.ExpectedOriginIdentity != "" {
+		return nil, fmt.Errorf("--expected-origin-identity requires --genesis and --full-shard-conf")
+	}
 	if flags.GenesisFile != "" && flags.FullShardConf == "" {
 		return nil, fmt.Errorf("--genesis requires --full-shard-conf: the finalized artifact is validated against the full shard configuration the node runs on")
 	}
