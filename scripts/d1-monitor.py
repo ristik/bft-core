@@ -196,49 +196,63 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash):
         if not boundaries:
             continue
         restarted.append(validator)
-        after = lines[boundaries[-1] + 1:]
-        restored_indexes = [i for i, line in enumerate(after)
-                            if 'msg="execution journal restored"' in line]
-        admissions = certificate_admissions(after)
-        admission_indexes = [after.index(entry["line"]) for entry in admissions]
-        valid_payloads = {}
-        for index, line in enumerate(after):
-            if ('msg="verified execution payload"' in line and field(line, "status") == "VALID"
-                    and field(line, "blockHash") and field(line, "round")):
-                valid_payloads[(field(line, "blockHash").lower(), field(line, "round"))] = index
-        association_indexes = [valid_payloads[(entry["block"], entry["round"])]
-                               for entry in admissions
-                               if (entry["block"], entry["round"]) in valid_payloads]
-        recovery_indexes = restored_indexes + association_indexes
-        if not recovery_indexes:
-            raise RuntimeError(f"{scenario}: restarted validator {validator} has neither journal-restoration "
-                               "nor peer-recovery association evidence after restart boundary")
-        if not admissions:
-            raise RuntimeError(f"{scenario}: restarted validator {validator} has no positive-height "
-                               "certificate admission after restart boundary")
-        qualifying_admissions = [index for index in admission_indexes
-                                 if any(recovery_index < index for recovery_index in recovery_indexes)]
-        if not qualifying_admissions:
-            raise RuntimeError(f"{scenario}: restarted validator {validator} has no positive-height "
-                               "certificate admission after journal restoration/recovery association")
-        recovery_boundary = min(restored_indexes or association_indexes)
-        signed = [(i, line) for i, line in enumerate(after)
-                  if 'msg="certification request signed"' in line
-                  and (field(line, "round") or "").isdigit()
-                  and i > recovery_boundary]
-        if not signed:
-            raise RuntimeError(f"{scenario}: restarted validator {validator} has no signed certification "
-                               "request after journal restoration or recovery association")
-        port = 18544 + validator
-        try:
-            head = int(rpc(port, "eth_blockNumber", []), 16)
-            block = rpc(port, "eth_getBlockByNumber", [hex(final_height), False])
-        except (OSError, ValueError, RuntimeError) as exc:
-            raise RuntimeError(f"{scenario}: restarted validator {validator} final-head sample failed: {exc}") from exc
         expected_hash = final_hash.removeprefix("0x").lower()
-        if head < final_height or not block or block.get("hash", "").removeprefix("0x").lower() != expected_hash:
-            raise RuntimeError(f"{scenario}: restarted validator {validator} did not agree at final B{final_height}; "
-                               f"head={head}, block={block and block.get('hash')}, expected={final_hash}")
+        deadline = time.monotonic() + float(os.environ.get("D2C_REJOIN_TIMEOUT", "45"))
+        last_state = {}
+        while True:
+            lines = path.read_text(errors="replace").splitlines()
+            boundaries = [i for i, line in enumerate(lines) if line.startswith(marker)]
+            after = lines[boundaries[-1] + 1:]
+            restored_indexes = [i for i, line in enumerate(after)
+                                if 'msg="execution journal restored"' in line]
+            admissions = certificate_admissions(after)
+            admission_indexes = [after.index(entry["line"]) for entry in admissions]
+            valid_payloads = {}
+            for index, line in enumerate(after):
+                if ('msg="verified execution payload"' in line and field(line, "status") == "VALID"
+                        and field(line, "blockHash") and field(line, "round")):
+                    valid_payloads[(field(line, "blockHash").lower(), field(line, "round"))] = index
+            association_indexes = [valid_payloads[(entry["block"], entry["round"])]
+                                   for entry in admissions
+                                   if (entry["block"], entry["round"]) in valid_payloads]
+            recovery_indexes = restored_indexes + association_indexes
+            qualifying_admissions = [index for index in admission_indexes
+                                     if any(recovery_index < index for recovery_index in recovery_indexes)]
+            recovery_boundary = min(recovery_indexes) if recovery_indexes else None
+            signed = [(i, line) for i, line in enumerate(after)
+                      if 'msg="certification request signed"' in line
+                      and (field(line, "round") or "").isdigit()
+                      and recovery_boundary is not None and i > recovery_boundary]
+            head = None
+            block = None
+            head_error = None
+            try:
+                port = 18544 + validator
+                head = int(rpc(port, "eth_blockNumber", []), 16)
+                block = rpc(port, "eth_getBlockByNumber", [hex(final_height), False])
+            except (OSError, ValueError, RuntimeError) as exc:
+                head_error = str(exc)
+            agrees = (head is not None and head >= final_height and block
+                      and block.get("hash", "").removeprefix("0x").lower() == expected_hash)
+            last_state = {"restored": bool(restored_indexes), "admissions": len(admissions),
+                          "admissionsAfterRecovery": len(qualifying_admissions),
+                          "signed": len(signed), "head": head,
+                          "blockHash": block and block.get("hash"), "headError": head_error}
+            if recovery_indexes and qualifying_admissions and signed and agrees:
+                break
+            if time.monotonic() >= deadline:
+                if not recovery_indexes:
+                    reason = "has neither journal-restoration nor peer-recovery association evidence"
+                elif not qualifying_admissions:
+                    reason = "has no positive-height certificate admission after journal restoration/recovery association"
+                elif not signed:
+                    reason = "has no signed certification request after journal restoration or recovery association"
+                else:
+                    reason = (f"did not agree at final B{final_height}; head={head}, "
+                              f"block={block and block.get('hash')}, expected={final_hash}, rpcError={head_error}")
+                raise RuntimeError(f"{scenario}: restarted validator {validator} {reason}; "
+                                   f"observed={last_state}")
+            time.sleep(0.5)
         print(f"D2C rejoin evidence: {scenario} validator={validator}; "
               f"restorationOrAssociation={len(recovery_indexes)}; positiveAdmissions={len(admissions)}; "
               f"signedRequests={len(signed)}; "
