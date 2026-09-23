@@ -34,12 +34,15 @@ esac
 rethEngineBase=18551
 rethEthBase=18545
 rethP2PBase=30401
+d2cPersistenceThreshold=${D2C_PERSISTENCE_THRESHOLD:-64}
+echo "ureth engine.persistence-threshold=$d2cPersistenceThreshold blocks (D2C replay visibility)"
 
 # The fork client. Every validator runs `--executor engine-api`, and the shard node refuses a
 # client without the three engine_*WithSealV1 methods, so this lane resolves the pinned fork
 # client and verifies it by revision. It used to run the stock `reth` on PATH; that client cannot
 # start a shard node, so every paired lane was pointed at a client it would refuse.
 urethPinResolve || exit 1
+export URETH_PIN_FEE_COLLECTOR
 echo "bft source commit=$(git rev-parse HEAD)"
 echo "ureth source commit=$URETH_PIN_COMMIT binary sha256=$(shasum -a 256 "$URETH_BIN" | cut -d' ' -f1)"
 echo "registry artifact sha256=$(shasum -a 256 registrygenesis/seal-registry-v1.json | cut -d' ' -f1)"
@@ -60,6 +63,7 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 # anything a machine-wide sweep here had already killed.
 cleanup() {
   ./stop-evm.sh -a >/dev/null 2>&1 || true
+  stop_pidfile "test-nodes/proof-proxy/pid" 'd2c-proof-proxy.py'
   for i in $(seq 1 "$validators"); do
     stop_pidfile "test-nodes/auth$i/pid" 'ubft signing-authority run'
   done
@@ -174,7 +178,7 @@ for i in $(seq 1 "$validators"); do
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) \
     --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
     --port $((rethP2PBase + i - 1)) --disable-discovery \
-    --ipcdisable \
+    --ipcdisable --engine.persistence-threshold "$d2cPersistenceThreshold" \
     --builder.gaslimit 30000000 \
     $(urethPinUnicityFlags) \
     >"test-nodes/reth$i/reth.log" 2>&1 &
@@ -206,6 +210,26 @@ for i in $(seq 1 "$validators"); do
   done
 done
 pass "reth instances statically peered"
+
+if [ "${D2C_FAULT_SCENARIO:-}" = proof-outage ] || [ "${D2C_FAULT_SCENARIO:-}" = proof-corrupt ]; then
+  mkdir -p test-nodes/proof-proxy
+  printf '{"mode":"pass","until":0}\n' >test-nodes/proof-proxy/control.json
+  python3 scripts/d2c-proof-proxy.py --listen 127.0.0.1:18645 \
+    --target "http://127.0.0.1:$rethEthBase" \
+    --control test-nodes/proof-proxy/control.json --log test-nodes/proof-proxy/proxy.log \
+    >test-nodes/proof-proxy/stdout.log 2>&1 &
+  echo $! >test-nodes/proof-proxy/pid
+  ready=false
+  for _ in $(seq 1 20); do
+    if curl -sS --max-time 2 -X POST http://127.0.0.1:18645 \
+      -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' 2>/dev/null | grep -q result; then
+      ready=true; break
+    fi
+    sleep 0.25
+  done
+  $ready || { echo "D2C proof proxy did not start" >&2; exit 1; }
+  echo "D2C proof proxy routes validator 1 HTTP RPC through 127.0.0.1:18645"
+fi
 
 echo
 echo "=== 3. doctor preflight detects chainId mismatch and unreachable Engine API ==="
@@ -528,11 +552,18 @@ cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
 export EVM_GENESIS_FILE="$chainSpec"
 export EVM_FULL_SHARD_CONF="test-nodes/shard-conf-${partitionID}_0.json"
 export EVM_ENGINE_FEE_COLLECTOR="$URETH_PIN_FEE_COLLECTOR"
+if [ -n "${D2C_FAULT_SCENARIO:-}" ]; then
+  export EVM_EXECUTION_JOURNAL_ROOT="test-nodes/execution-journals"
+  mkdir -p "$EVM_EXECUTION_JOURNAL_ROOT"
+fi
 source helper.sh
 for i in $(seq 1 "$validators"); do
   export "EVM_ENGINE_URL_$i=http://127.0.0.1:$((rethEngineBase + i - 1))"
   export "EVM_ETH_URL_$i=http://127.0.0.1:$((rethEthBase + i - 1))"
 done
+if [ "${D2C_FAULT_SCENARIO:-}" = proof-outage ] || [ "${D2C_FAULT_SCENARIO:-}" = proof-corrupt ]; then
+  export EVM_ETH_URL_1=http://127.0.0.1:18645
+fi
 
 # Every validator may lead. P2P transaction propagation is disabled in M1, so seed the same
 # three paid nonce-ordered transactions into each local mempool before shard voting starts.
@@ -569,7 +600,12 @@ for _ in $(seq 1 90); do
   rcpt=$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionReceipt "[\"$txHash\"]")
   blkNum=$(echo "$rcpt" | pyget "['result']['blockNumber']")
   if [ -n "$blkNum" ] && [ "$blkNum" != "None" ]; then mined=true; fi
-  if grep -q 'msg="certificate admitted".* height=1 ' test-nodes/evm1/debug.log 2>/dev/null; then certified=true; fi
+  blkHash=$(echo "$rcpt" | pyget "['result']['blockHash']")
+  if [ -n "$blkHash" ] && [ "$blkHash" != "None" ]; then
+    blkHash=${blkHash#0x}
+    if grep -Eq 'msg="certificate admitted".* block='"$blkHash"' height=1 round=[0-9]+ rootRound=[0-9]+' \
+      test-nodes/evm1/debug.log 2>/dev/null; then certified=true; fi
+  fi
   $mined && $certified && break
   sleep 2
 done
@@ -591,13 +627,20 @@ echo
 echo "=== 6. D1 continuous certified execution through block $rounds ==="
 echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, proof window=64 blocks"
 probeArgs=()
+faultArgs=()
 if [ "${D2C_RESTART_PROBE:-0}" = 1 ]; then
   [ "$validators" -eq 4 ] && [ "$rounds" -ge 10 ] || { echo "D2C probe requires four validators and >=10 blocks" >&2; exit 2; }
   probeArgs=(--restart-validator 1 --signing "${SIGNING:-local}")
 fi
+if [ -n "${D2C_FAULT_SCENARIO:-}" ]; then
+  [ "$validators" -eq 4 ] && [ "$rounds" -ge 10 ] || { echo "D2C fault scenarios require four validators and >=10 blocks" >&2; exit 2; }
+  faultArgs=(--fault-scenario "$D2C_FAULT_SCENARIO")
+fi
+d2cRecoveryProbe=${D2C_RESTART_PROBE:-0}
+[ -n "${D2C_FAULT_SCENARIO:-}" ] && d2cRecoveryProbe=1
 if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout 900 \
-  ${probeArgs[@]+"${probeArgs[@]}"}; then
-  pass "D1 observed $rounds consecutive blocks with four agreeing canonical heads"
+  ${probeArgs[@]+"${probeArgs[@]}"} ${faultArgs[@]+"${faultArgs[@]}"}; then
+  pass "D1 observed $rounds consecutive blocks with a fresh canonical survivor quorum"
 else
   fail "D1 continuous block observation failed"
   for i in $(seq 1 "$validators"); do
@@ -609,7 +652,7 @@ fi
 divergenceLogged=false
 for i in $(seq 1 "$validators"); do
   log="test-nodes/evm$i/debug.log"
-  if ! python3 - "$log" "$i" "${D2C_RESTART_PROBE:-0}" <<'PYDIVERGENCE'
+  if ! python3 - "$log" "$i" "$d2cRecoveryProbe" <<'PYDIVERGENCE'
 import re, sys
 from pathlib import Path
 
@@ -629,10 +672,9 @@ for line_no, line in enumerate(lines):
         print(f"unexpected divergence/equivocation at {path}:{line_no + 1}: {line}")
         raise SystemExit(1)
 
-if warnings and probe:
-    if validator != 1 or not boundaries:
-        print(f"recovery warning is only allowed for restarted validator 1 after D2C_RESTART_BOUNDARY ({path})")
-        raise SystemExit(1)
+if warnings and probe and not boundaries:
+    print(f"recovery warning is only allowed after this validator's D2C_RESTART_BOUNDARY ({path})")
+    raise SystemExit(1)
 
 if warnings and not probe:
     print(f"recovery warning is forbidden outside restart-probe mode ({path})")
@@ -640,8 +682,8 @@ if warnings and not probe:
 
 for index, warning_line in enumerate(warnings):
     boundary_after = next((n for n in boundaries if n > warning_line), len(lines))
-    if probe and (validator != 1 or warning_line < boundaries[0]):
-        print(f"recovery warning before restart boundary or on non-restarted validator at {path}:{warning_line + 1}")
+    if probe and (not boundaries or warning_line < boundaries[0]):
+        print(f"recovery warning before this validator's restart boundary at {path}:{warning_line + 1}")
         raise SystemExit(1)
     warning_hash = re.search(r"(?:^|\s)recoveryBlockHash=([^\s]+)", lines[warning_line])
     if not warning_hash:
