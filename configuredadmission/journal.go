@@ -3,6 +3,7 @@ package configuredadmission
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -19,9 +20,11 @@ import (
 // committed to configured progress and its journal association before BFTClient receives it.
 // It deliberately does not coalesce intermediate certificates: recovery needs full history.
 type JournalFactory struct {
-	Store  *configuredprogress.Store
-	Origin registrygenesis.GenesisOrigin
-	Limits configuredprogress.JournalLimits
+	Store   *configuredprogress.Store
+	Origin  registrygenesis.GenesisOrigin
+	Limits  configuredprogress.JournalLimits
+	CatchUp func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
+	OnStop  func(error)
 }
 
 type journalAdmission struct {
@@ -33,6 +36,8 @@ type journalAdmission struct {
 	gate      shardnode.FinalityBoundary
 	callbacks shardnode.AdmissionCallbacks
 	epoch     uint64
+	catchUp   func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
+	onStop    func(error)
 }
 
 func journalContext(origin registrygenesis.GenesisOrigin, id shardnode.AdmissionIdentity) (configuredprogress.Context, error) {
@@ -59,13 +64,18 @@ func (f JournalFactory) Start(ctx context.Context, id shardnode.AdmissionIdentit
 	if _, err = f.Store.LoadJournal(ctx, c, f.Limits); err != nil {
 		return nil, fmt.Errorf("loading execution journal: %w", err)
 	}
-	a := &journalAdmission{store: f.Store, context: c, limits: f.Limits, gate: gate, callbacks: callbacks, epoch: c.Observation.RootEpoch}
+	a := &journalAdmission{store: f.Store, context: c, limits: f.Limits, gate: gate, callbacks: callbacks, epoch: c.Observation.RootEpoch, catchUp: f.CatchUp, onStop: f.OnStop}
 	return a, nil
 }
 
-func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
+func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (outErr error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	defer func() {
+		if outErr != nil && a.onStop != nil && (errors.Is(outErr, configuredprogress.ErrBounds) || errors.Is(outErr, configuredprogress.ErrConflict) || errors.Is(outErr, configuredprogress.ErrUntrusted) || errors.Is(outErr, configuredprogress.ErrUnavailable) || errors.Is(outErr, ErrRecoveryBudget) || errors.Is(outErr, ErrRecoveryConflict) || errors.Is(outErr, ErrRecoveryUnavailable)) {
+			a.onStop(outErr)
+		}
+	}()
 	if a.closed {
 		return configuredprogress.ErrAdmissionClosed
 	}
@@ -75,7 +85,16 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 	}
 	p, _, err := a.store.PrepareObservation(ctx, a.context, o)
 	if err != nil {
-		return err
+		if a.catchUp == nil || !errors.Is(err, configuredprogress.ErrConflict) && !errors.Is(err, configuredprogress.ErrUnavailable) {
+			return err
+		}
+		if catchErr := a.catchUp(ctx, uc, tr); catchErr != nil {
+			return fmt.Errorf("journal peer catch-up after non-contiguous certificate: %w (initial admission: %v)", catchErr, err)
+		}
+		p, _, err = a.store.PrepareObservation(ctx, a.context, o)
+		if err != nil {
+			return err
+		}
 	}
 	release, err := a.gate.Hold(ctx, "execution-journal-admission")
 	if err != nil {
@@ -90,6 +109,20 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 	image, err := a.store.LoadJournal(ctx, a.context, a.limits)
 	if err != nil {
 		return fmt.Errorf("verifying admitted execution journal: %w", err)
+	}
+	if a.catchUp != nil {
+		for _, observed := range image.Observations {
+			if observed.Unresolved {
+				if catchErr := a.catchUp(ctx, current.Certificate(), current.TechnicalRecord()); catchErr != nil {
+					return fmt.Errorf("journal peer catch-up for certified target %x: %w", observed.TargetHash, catchErr)
+				}
+				image, err = a.store.LoadJournal(ctx, a.context, a.limits)
+				if err != nil {
+					return fmt.Errorf("verifying fetched execution journal: %w", err)
+				}
+				break
+			}
+		}
 	}
 	for _, observed := range image.Observations {
 		if observed.Unresolved {

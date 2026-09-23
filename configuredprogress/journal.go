@@ -485,6 +485,60 @@ func (s *Store) appendJournalObservation(tx *bolt.Tx, pair *verifiedPair, dd [32
 	return s.at("before-journal-observation-commit")
 }
 
+// BackfillJournalObservation admits an independently authenticated historical
+// certificate for a fetched body without moving the monotonic live progress
+// cursor backwards. The caller must have checked and executed that body first.
+// The candidate association and observation are one Bolt transaction.
+func (s *Store) BackfillJournalObservation(ctx context.Context, c Context, limits JournalLimits, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
+	if !s.journal {
+		return ErrSettings
+	}
+	if err := limits.check(); err != nil {
+		return err
+	}
+	state, _, err := s.Load(ctx, c)
+	if err != nil {
+		return err
+	}
+	o, err := rootinput.AuthenticateObservationV2(ctx, c.Observation, uc, tr)
+	if err != nil {
+		return err
+	}
+	pair, err := authenticateHandle(ctx, c, o)
+	if err != nil {
+		return err
+	}
+	if state.i.observed == nil {
+		return fmt.Errorf("%w: no current observation for historical backfill", ErrUnavailable)
+	}
+	rel, err := compareObservations(o, state.i.observed.observation)
+	if err != nil || rel != relationAdvance && rel != relationDuplicate && rel != relationRepeat {
+		return fmt.Errorf("%w: historical certificate conflicts with current progress: %v", ErrConflict, err)
+	}
+	target := uc.InputRecord.BlockHash
+	if len(target) != sha256.Size {
+		return fmt.Errorf("%w: backfill needs a non-quiet target hash", ErrUntrusted)
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketName)
+		if !imageMatches(b, state.i) {
+			return ErrStale
+		}
+		candidate := b.Get(journalCandidateKey(target))
+		if candidate == nil {
+			return fmt.Errorf("%w: backfill body %x is missing", ErrUnavailable, target)
+		}
+		cw, e := decodeCandidate(candidate)
+		if e != nil {
+			return e
+		}
+		if cw.Round != uc.InputRecord.RoundNumber || !bytes.Equal(cw.StateRoot, uc.InputRecord.Hash) {
+			return fmt.Errorf("%w: backfill body differs from certificate", ErrConflict)
+		}
+		return s.appendJournalObservation(tx, pair, state.i.descriptorDigest)
+	})
+}
+
 // LoadJournal verifies every retained byte against the caller's configured origin and root trust.
 // It is intentionally a capped full-history scan for the private D2 lane, never a readiness grant.
 func (s *Store) LoadJournal(ctx context.Context, c Context, limits JournalLimits) (JournalSnapshot, error) {
@@ -605,7 +659,11 @@ func (s *Store) LoadJournal(ctx context.Context, c Context, limits JournalLimits
 					foundResult = true
 				}
 			}
-			if !foundAuthorization || !foundResult {
+			// A returning follower may retain a later proposal before it has
+			// fetched the authorizing certificate's own body/observation. The
+			// pair above was independently authenticated; only locally built
+			// proposals require it to have been observed here already.
+			if candidate.Candidate.LocallyBuilt && !foundAuthorization || !foundResult {
 				return fmt.Errorf("%w: candidate lacks its retained authorizing or resulting certificate", ErrUntrusted)
 			}
 		}

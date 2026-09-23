@@ -100,7 +100,8 @@ type Round struct {
 	// journal is the durable v2 proposal store. A candidate is retained before a leader publishes
 	// or a follower verifies/signs it. Certification is admitted by the configured progress store
 	// before this round is delivered; this hook only handles proposal bytes.
-	journal ProposalJournal
+	journal         ProposalJournal
+	journalRecovery JournalRecovery
 
 	// childReadiness, when set, decides whether this node may lead or sign for the held certificate's
 	// child (#14 W3b-1). It is the round-facing half of recordwiring.Readiness, attached only with
@@ -346,6 +347,14 @@ func (r *Round) SetChildReadiness(c ChildReadiness) {
 	r.childReadiness = c
 }
 
+// SetJournalRecovery replaces the legacy in-memory Commit/reconcile path for
+// journal deployments. The owner reads durable certification on every call.
+func (r *Round) SetJournalRecovery(c JournalRecovery) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.journalRecovery = c
+}
+
 // SetFinalityGate installs the gate every finality-changing executor call takes, when none is installed yet.
 // SetRecovery installs the node's gate as part of the recovery stack; a node that runs a certified-record
 // capturer without recovery needs it installed here, because the capturer's publication decision is serialized
@@ -566,8 +575,29 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// about itself are the same certificates, and letting them diverge would mean a node able to
 	// prove something to a peer that it could not prove to itself.
 	r.recovery.observe(ctx, uc, tr, r.nodeID)
+	if r.journalRecovery != nil && r.health.Snapshot().ExecutionRecovery == "stopped" {
+		return fmt.Errorf("shardnode: execution journal stopped: %s", r.health.Snapshot().ExecutionRecoveryDetail)
+	}
 
-	if err := r.commitPrevious(ctx, uc, tr); err != nil {
+	var recoveredHead BlockRef
+	if r.journalRecovery != nil {
+		var err error
+		recoveredHead, err = r.journalRecovery.Recover(ctx, uc)
+		if err != nil {
+			r.health.updateVoting(false, err.Error())
+			if r.journalRecovery.Terminal(err) {
+				r.health.updateExecutionRecovery("stopped", err.Error())
+				r.metrics.recordRecoveryStop(ctx)
+			} else {
+				r.health.updateExecutionRecovery("unready", err.Error())
+			}
+			return fmt.Errorf("recovering certified execution: %w", err)
+		}
+		r.health.updateExecutionRecovery("ready", "")
+		if r.pending != nil && uc.InputRecord != nil && r.pending.round == uc.InputRecord.RoundNumber {
+			r.pending = nil
+		}
+	} else if err := r.commitPrevious(ctx, uc, tr); err != nil {
 		return fmt.Errorf("committing previously certified round: %w", err)
 	}
 
@@ -582,6 +612,9 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("reading executor head: %w", err)
 	}
 	r.health.updateExecutorStatus(true, "")
+	if r.journalRecovery != nil && !sameBlockRef(head, recoveredHead) {
+		return fmt.Errorf("shardnode: executor identity changed immediately after journal recovery: got %d/%x, certified %d/%x", head.Number, head.Hash, recoveredHead.Number, recoveredHead.Hash)
+	}
 	if r.executorGenesis == nil {
 		g, gerr := r.executor.GenesisBlock(ctx)
 		if gerr != nil {
@@ -608,7 +641,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// two are never byte-equal, and that is expected, not divergence: there
 	// is nothing yet to compare against. Only compare once the root chain
 	// has a real PreviousHash to hold the executor to.
-	if len(exp.PreviousHash) > 0 && !bytes.Equal(head.StateRoot, exp.PreviousHash) {
+	if r.journalRecovery == nil && len(exp.PreviousHash) > 0 && !bytes.Equal(head.StateRoot, exp.PreviousHash) {
 		head, err = r.reconcile(ctx, uc, exp, head)
 		if err != nil {
 			return err
@@ -634,7 +667,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// finalized to the parent. Being unable to vote is not an exemption from the identity
 	// requirement for finality-changing Engine calls.
 	var identityErr error
-	if len(exp.PreviousHash) > 0 {
+	if r.journalRecovery == nil && len(exp.PreviousHash) > 0 {
 		// head may move: a successful evidence recovery commits the certified block, and the parent
 		// every later step builds on is the executor's head AFTER that, not before.
 		head, identityErr = r.identityCheck(ctx, uc, head, exp)
@@ -729,6 +762,9 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return nil
 	}
 
+	if r.journalRecovery != nil && r.health.Snapshot().ExecutionRecovery == "stopped" {
+		return fmt.Errorf("shardnode: execution journal stopped before block production: %s", r.health.Snapshot().ExecutionRecoveryDetail)
+	}
 	block, params, err := r.produceBlock(ctx, head, exp, sealHash, leader, uc, tr, readinessTicket)
 	if err != nil {
 		if errors.Is(err, errReadinessRevoked) {
@@ -882,6 +918,9 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		partitionRound: uc.GetRoundNumber(),
 		rootRound:      uc.GetRootRoundNumber(),
 		req:            req,
+	}
+	if r.journalRecovery != nil && r.health.Snapshot().ExecutionRecovery == "stopped" {
+		return fmt.Errorf("shardnode: execution journal stopped before signature: %s", r.health.Snapshot().ExecutionRecoveryDetail)
 	}
 	signed, err := r.certSigner.Sign(ctx, uc, tr, req)
 	if err != nil {

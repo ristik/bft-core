@@ -361,6 +361,7 @@ func TestShardNodeRun_RefusesClientBlockZeroDifferentFromConfiguredOrigin(t *tes
 	cmd := exec.CommandContext(ctx, bin, "shard-node", "run",
 		"--home", home, "--executor", "engine-api", "--address", "/ip4/127.0.0.1/tcp/0",
 		"--full-shard-conf", fullPath, "--genesis", genesisPath, "--trust-base", trustBase,
+		"--execution-journal", filepath.Join(home, "execution-journal.db"),
 		"--engine-url", server.URL, "--eth-url", server.URL,
 		"--jwt-secret", filepath.Join(home, "jwt.hex"), "--log-format", "text")
 	cmd.Dir = repoRoot(t)

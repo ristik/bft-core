@@ -550,7 +550,10 @@ for _ in $(seq 1 90); do
   rcpt=$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionReceipt "[\"$txHash\"]")
   blkNum=$(echo "$rcpt" | pyget "['result']['blockNumber']")
   if [ -n "$blkNum" ] && [ "$blkNum" != "None" ]; then mined=true; fi
-  if grep -q 'accepted certificate' test-nodes/evm1/debug.log 2>/dev/null; then certified=true; fi
+  # Journal admission delivers directly to the round, so the former BFTClient
+  # "accepted certificate" log is absent. A parent-1 witness is acquired only
+  # after the block-1 certificate was admitted and execution advanced.
+  if grep -q 'acquired certified parent registry witness.*parentNumber=1 ' test-nodes/evm1/debug.log 2>/dev/null; then certified=true; fi
   $mined && $certified && break
   sleep 2
 done

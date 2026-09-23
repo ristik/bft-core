@@ -57,8 +57,12 @@ type adapterGate struct{}
 func (adapterGate) Hold(context.Context, string) (func(), error) { return func() {}, nil }
 
 func adapterFixture(t *testing.T) (*certifiedchain.Chain, registrygenesis.GenesisOrigin, configuredprogress.Context, shardnode.AdmissionIdentity) {
+	return adapterFixtureBlocks(t,1)
+}
+
+func adapterFixtureBlocks(t *testing.T,blocks int) (*certifiedchain.Chain, registrygenesis.GenesisOrigin, configuredprogress.Context, shardnode.AdmissionIdentity) {
 	t.Helper()
-	c := certifiedchain.New(t, 3, 1)
+	c := certifiedchain.New(t, 3, blocks)
 	var doc map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(c.Genesis.GenesisJSON(), &doc))
 	var alloc map[string]json.RawMessage

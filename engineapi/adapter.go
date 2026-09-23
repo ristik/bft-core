@@ -285,6 +285,70 @@ func (a *Adapter) Head(ctx context.Context) (shardnode.BlockRef, error) {
 	}, nil
 }
 
+// Finalized reports the executor's finalized identity. Recovery must check it
+// before moving forkchoice; Commit alone would set finalized to the new head.
+func (a *Adapter) Finalized(ctx context.Context) (shardnode.BlockRef, error) {
+	h, err := a.eth.GetBlockByNumber(ctx, "finalized")
+	if err != nil {
+		// A fresh ureth datadir has no finalized forkchoice marker until its
+		// first Engine call. Genesis is the sole safe implicit finality value.
+		// Never infer finality from a non-genesis latest head.
+		genesis, genesisErr := a.eth.GetBlockByNumber(ctx, "0x0")
+		latest, latestErr := a.eth.GetBlockByNumber(ctx, "latest")
+		if genesisErr == nil && latestErr == nil && latest.Hash == genesis.Hash && latest.Number == 0 {
+			return shardnode.BlockRef{Number: 0, Hash: shardnode.Hash(genesis.Hash[:]), StateRoot: shardnode.Hash(genesis.StateRoot[:])}, nil
+		}
+		return shardnode.BlockRef{}, fmt.Errorf("engineapi: reading finalized head: %w", err)
+	}
+	return shardnode.BlockRef{Number: uint64(h.Number), Hash: shardnode.Hash(h.Hash[:]), StateRoot: shardnode.Hash(h.StateRoot[:])}, nil
+}
+
+// Header returns identity and parent linkage for bounded ancestry checks.
+func (a *Adapter) Header(ctx context.Context, hash shardnode.Hash) (shardnode.BlockRef, shardnode.Hash, error) {
+	h32, err := toData32(hash)
+	if err != nil {
+		return shardnode.BlockRef{}, nil, err
+	}
+	h, err := a.eth.GetBlockByHash(ctx, h32)
+	if err != nil {
+		return shardnode.BlockRef{}, nil, fmt.Errorf("engineapi: reading header %x: %w", hash, err)
+	}
+	return shardnode.BlockRef{Number: uint64(h.Number), Hash: shardnode.Hash(h.Hash[:]), StateRoot: shardnode.Hash(h.StateRoot[:])}, shardnode.Hash(h.ParentHash[:]), nil
+}
+
+// RecoveryForkchoice advances only the head. The proven, compatible finalized
+// identity stays in place until the complete certified target can be committed.
+func (a *Adapter) RecoveryForkchoice(ctx context.Context, head, finalized shardnode.Hash) (shardnode.Status, error) {
+	h, err := toData32(head)
+	if err != nil {
+		return shardnode.StatusInvalid, err
+	}
+	f, err := toData32(finalized)
+	if err != nil {
+		return shardnode.StatusInvalid, err
+	}
+	resp, err := a.engine.ForkchoiceUpdatedV3(ctx, ForkchoiceStateV1{HeadBlockHash: h, SafeBlockHash: f, FinalizedBlockHash: f}, nil)
+	if err != nil {
+		return shardnode.StatusSyncing, fmt.Errorf("engineapi: recovery forkchoice: %w", err)
+	}
+	return toStatus(resp.PayloadStatus.Status), nil
+}
+
+// CheckParentWitness checks the exact certified head before Build is enabled.
+func (a *Adapter) CheckParentWitness(ctx context.Context, parent shardnode.BlockRef) error {
+	if parent.Number == 0 {
+		return nil
+	}
+	a.mu.Lock()
+	source := a.parentWitness
+	a.mu.Unlock()
+	if source == nil {
+		return ErrParentWitnessUnavailable
+	}
+	_, err := source.Acquire(ctx, parent)
+	return err
+}
+
 // GenesisBlock answers from the client's chain configuration: block number zero, which is fixed by
 // the chain spec this client was started with and does not move with what it has committed. That is
 // what makes it usable as an execution identity — see shardnode.Executor.GenesisBlock, and note that

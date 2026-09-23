@@ -126,7 +126,7 @@ function start_root_nodes() {
       # uplaod all shard confs
       for shardConf in test-nodes/shard-conf-*
       do
-        curl -X PUT -H "Content-Type: application/json" -d @${shardConf} \
+        curl --retry 5 --retry-all-errors --retry-delay 1 -f -X PUT -H "Content-Type: application/json" -d @${shardConf} \
              http://localhost:${rpcPort}/api/v1/configurations
       done
     fi
@@ -288,6 +288,7 @@ function start_one_evm_validator() {
 	    return 1
 	  fi
 	  executorArgs+=(--genesis "$EVM_GENESIS_FILE")
+	  executorArgs+=(--execution-journal "test-nodes/evm$i/execution-journal.db")
 	  shardConfArgs=(--full-shard-conf "$EVM_FULL_SHARD_CONF")
 	fi
   fi
