@@ -259,7 +259,7 @@ func TestShardNodeRun_RefusesIncompatibleExecutionClient(t *testing.T) {
 	}{
 		{"missing forkchoiceUpdatedV3", engineFixture{capabilities: without("engine_forkchoiceUpdatedV3"), chainID: "0x7a69"}, "missing required capabilities"},
 		{"missing getPayloadV3", engineFixture{capabilities: without("engine_getPayloadV3"), chainID: "0x7a69"}, "missing required capabilities"},
-		{"missing newPayloadV3", engineFixture{capabilities: without("engine_newPayloadV3"), chainID: "0x7a69"}, "missing required capabilities"},
+		{"missing newPayloadWithSealV1", engineFixture{capabilities: without("engine_newPayloadWithSealV1"), chainID: "0x7a69"}, "missing required capabilities"},
 		{"offers nothing at all", engineFixture{capabilities: []string{}, chainID: "0x7a69"}, "missing required capabilities"},
 		{"capability exchange fails", engineFixture{capErr: true, chainID: "0x7a69"}, "checking capabilities"},
 		{"capability response is malformed", engineFixture{malformed: true, chainID: "0x7a69"}, "checking capabilities"},
@@ -319,7 +319,7 @@ func TestShardNodeRun_AcceptsACompatibleFixture(t *testing.T) {
 	home, shardConf, trustBase := shardHome(t, bin)
 
 	srv := engineFixture{
-		capabilities: []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_newPayloadV3", "engine_forkchoiceUpdatedWithSealV1", "engine_getPayloadWithSealV1", "engine_newPayloadWithSealV1"},
+		capabilities: []string{"engine_forkchoiceUpdatedV3", "engine_getPayloadV3", "engine_forkchoiceUpdatedWithSealV1", "engine_getPayloadWithSealV1", "engine_newPayloadWithSealV1"},
 		chainID:      "0x7a69",
 		genesisHash:  expectedGenesis,
 	}.start(t)
