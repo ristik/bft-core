@@ -36,24 +36,29 @@ def field(line, name):
 
 def execution_evidence(nodes, height, block_hash, commitment):
     derived = []
+    partition_rounds = []
     root_rounds = []
     for i in range(1, 5):
         lines = (Path(nodes) / f"evm{i}" / "debug.log").read_text().splitlines()
         verified = [line for line in lines if 'msg="verified execution payload"' in line
                     and field(line, "blockHash") == block_hash[2:]
                     and field(line, "status") == "VALID"]
+        if not verified:
+            raise RuntimeError(f"validator {i} lacks VALID verification for B{height}")
+        partition_round = field(verified[-1], "round")
         certified = [line for line in lines if 'msg="accepted certificate"' in line
-                     and field(line, "partitionRound") == str(height)]
-        if not verified or not certified:
-            raise RuntimeError(f"validator {i} lacks VALID verification or root certificate for B{height}")
+                     and field(line, "partitionRound") == partition_round]
+        if not certified:
+            raise RuntimeError(f"validator {i} lacks root certificate for B{height} / round {partition_round}")
         root_input = field(verified[-1], "rootInput")
         if not root_input or field(verified[-1], "commitment") != commitment[2:]:
             raise RuntimeError(f"validator {i} v2 bytes/commitment missing or inconsistent at B{height}")
         derived.append(root_input)
+        partition_rounds.append(partition_round)
         root_rounds.append(field(certified[-1], "rootRound"))
-    if len(set(derived)) != 1 or len(set(root_rounds)) != 1:
-        raise RuntimeError(f"validator v2 derivation or root round disagrees at B{height}")
-    return derived[0], root_rounds[0]
+    if len(set(derived)) != 1 or len(set(partition_rounds)) != 1 or len(set(root_rounds)) != 1:
+        raise RuntimeError(f"validator v2 derivation or certificate round disagrees at B{height}")
+    return derived[0], partition_rounds[0], root_rounds[0]
 
 
 def main():
@@ -68,7 +73,7 @@ def main():
 
     start = time.monotonic()
     prior = None
-    print("height hash parent stateRoot commitment txs heads rootRound elapsed_s", flush=True)
+    print("height hash parent stateRoot commitment txs heads partitionRound rootRound elapsed_s", flush=True)
     for height in range(1, args.blocks + 1):
         deadline = start + args.timeout
         while time.monotonic() < deadline:
@@ -100,7 +105,7 @@ def main():
             return 1
         prior = block["hash"]
         try:
-            root_input, root_round = execution_evidence(
+            root_input, partition_round, root_round = execution_evidence(
                 args.nodes, height, block["hash"], block["extraData"]
             )
         except (OSError, RuntimeError) as exc:
@@ -109,7 +114,7 @@ def main():
         print(
             height, block["hash"], block["parentHash"], block["stateRoot"],
             block["extraData"], len(block["transactions"]), ",".join(map(str, heads)),
-            root_round, round(time.monotonic() - start, 3), flush=True,
+            partition_round, root_round, round(time.monotonic() - start, 3), flush=True,
         )
         print(f"v2 B{height} bytes={root_input} (same on all four validators)", flush=True)
     print("D1 observed consecutive canonical blocks on all four reth clients", flush=True)
