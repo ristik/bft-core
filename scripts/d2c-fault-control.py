@@ -294,10 +294,19 @@ def proof_fault():
         marker = f"D2C_PROOF_CORRUPT_RELEASE parent={ref_text} trace={target['trace']}"
         release_index = max((i for i, line in enumerate(lines) if marker in line), default=-1)
         for line in reversed(lines[release_index + 1:]):
-            is_invalid = re.search(r"invalid|mismatch|binding", line, re.I)
-            is_unavailable = re.search(r"unavailable|deadline exceeded|timed? out|timeout", line, re.I)
-            if (("level=ERROR" in line or "level=WARN" in line) and is_invalid and not is_unavailable
-                    and re.search(r"proof|witness|fetched block binding|parent", line, re.I)):
+            # Peer catch-up can wrap a concrete invalid-proof error in an outer
+            # `certified input unavailable` message. Accept only the specific
+            # validation diagnostic, and only when it names this requested
+            # parent; generic unavailable/deadline errors still do not qualify.
+            specific_invalid = re.search(
+                r"header hash mismatch|registryproof:.*invalid|parent registry witness invalid|"
+                r"invalid peer candidate: fetched block binding",
+                line, re.I,
+            )
+            expected_parent = target["ref"].get("hash")
+            tied_to_parent = expected_parent and expected_parent.lower() in line.lower()
+            if (("level=ERROR" in line or "level=WARN" in line) and specific_invalid
+                    and tied_to_parent):
                 rejected = line
                 break
         if rejected:
@@ -319,7 +328,11 @@ def proof_fault():
     if not parent_hash:
         set_mode("pass")
         raise RuntimeError(f"cannot resolve held proof parent {ref_text} to a canonical block hash")
-    pattern = re.compile(rf"\b{re.escape(parent_hash)}\b", re.I)
+    # Error strings can identify the parent as `parent is 0x<hash>` rather than
+    # a structured `parentHash=<hash>` field. A word boundary before the first
+    # hex digit does not match there because the preceding `0` is also a word
+    # character, so correlate by the normalized hash substring itself.
+    pattern = re.compile(re.escape(parent_hash), re.I)
     if not pattern.search(rejected):
         set_mode("pass")
         raise RuntimeError(
