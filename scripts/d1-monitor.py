@@ -312,7 +312,7 @@ def main():
                 output = subprocess.check_output([
                     "python3", "scripts/d2c-fault-control.py", args.fault_scenario,
                     str(height), str(partition_round),
-                ], text=True, stderr=subprocess.STDOUT, timeout=90)
+                ], text=True, stderr=subprocess.STDOUT, timeout=150)
                 print(output, end="", flush=True)
                 probe_started = time.monotonic()
             except subprocess.CalledProcessError as exc:
