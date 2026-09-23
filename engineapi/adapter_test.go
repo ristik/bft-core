@@ -519,3 +519,46 @@ func TestAdapter_SealCapabilities_APartialSetIsMissing(t *testing.T) {
 	require.Contains(t, err.Error(), sealCapabilities[1])
 	require.NotContains(t, err.Error(), sealCapabilities[0], "the offered one is not reported missing")
 }
+
+// ureth #33 advertises its stock non-admission capabilities and all three seal siblings, while
+// withholding every stock newPayload version. The shard-node startup check must accept that set.
+func TestAdapter_SealCapabilities_AcceptsUreth33Advertisement(t *testing.T) {
+	advertisedByUreth33 := []string{
+		"engine_forkchoiceUpdatedV1", "engine_forkchoiceUpdatedV2", "engine_forkchoiceUpdatedV3", "engine_forkchoiceUpdatedV4",
+		"engine_getClientVersionV1",
+		"engine_getPayloadV1", "engine_getPayloadV2", "engine_getPayloadV3", "engine_getPayloadV4", "engine_getPayloadV5", "engine_getPayloadV6",
+		"engine_getPayloadBodiesByHashV1", "engine_getPayloadBodiesByHashV2", "engine_getPayloadBodiesByRangeV1", "engine_getPayloadBodiesByRangeV2",
+		"engine_getBlobsV1", "engine_getBlobsV2", "engine_getBlobsV3", "engine_getBlobsV4", "engine_hasBlobs",
+		"engine_forkchoiceUpdatedWithSealV1", "engine_getPayloadWithSealV1", "engine_newPayloadWithSealV1",
+	}
+	wantRequest := []string{
+		"engine_forkchoiceUpdatedV3", "engine_getPayloadV3",
+		"engine_forkchoiceUpdatedWithSealV1", "engine_getPayloadWithSealV1", "engine_newPayloadWithSealV1",
+	}
+	engine := newMockReth(t, Secret{})
+	engine.on("engine_exchangeCapabilities", func(raw json.RawMessage) (any, *rpcError) {
+		var params [][]string
+		require.NoError(t, json.Unmarshal(raw, &params))
+		require.Equal(t, [][]string{wantRequest}, params)
+		return advertisedByUreth33, nil
+	})
+	a, closeFn := newTestAdapter(t, engine, newMockReth(t, Secret{}))
+	defer closeFn()
+	require.Contains(t, a.engine.required(), "engine_newPayloadV3", "the default client retains the stock V3 requirement")
+	a.RequireSealCapabilities()
+	require.NoError(t, a.CheckCapabilities(context.Background()))
+
+	for _, missing := range wantRequest {
+		t.Run(missing, func(t *testing.T) {
+			offered := make([]string, 0, len(advertisedByUreth33)-1)
+			for _, capability := range advertisedByUreth33 {
+				if capability != missing {
+					offered = append(offered, capability)
+				}
+			}
+			engine.on("engine_exchangeCapabilities", func(json.RawMessage) (any, *rpcError) { return offered, nil })
+			err := a.CheckCapabilities(context.Background())
+			require.ErrorContains(t, err, missing)
+		})
+	}
+}

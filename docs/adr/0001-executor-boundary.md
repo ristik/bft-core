@@ -190,6 +190,16 @@ V4, silently requiring calls this adapter never makes.
   disagreeing on an edge case is indistinguishable from a real state-transition bug until you already
   suspect a version mismatch.
 
+### Amendment — 2026-09-23: seal-path capability requirement
+
+When the shard-node executor requires the seal siblings, its startup capability check requires
+`engine_forkchoiceUpdatedV3`, `engine_getPayloadV3`, and all three `engine_*WithSealV1` methods.
+It does not require `engine_newPayloadV3`: M1 admits blocks only through
+`engine_newPayloadWithSealV1`, and [ureth #33](https://github.com/ristik/ureth/pull/33)
+stops advertising stock `engine_newPayloadV3` for that reason. The default non-seal client path
+still requires the original V3 trio. The check requires every method used by the selected path;
+it does not require a client to advertise a stock admission method the seal path does not call.
+
 ### Upgrading past Cancun
 
 When a later fork needs supporting, the upgrade is: hand-roll the new method set and payload version

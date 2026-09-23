@@ -118,15 +118,13 @@ func NewAdapter(cfg Config, log *slog.Logger) *Adapter {
 }
 
 // RequireSealCapabilities makes the three engine_*WithSealV1 siblings part of the startup capability
-// check, so a deployment that builds through the seal siblings fails startup against a client that
-// lacks them instead of on the first round. See Client.RequireSealCapabilities for why this is
-// opt-in rather than the default.
+// check, while dropping the stock newPayloadV3 requirement for a seal-path deployment. The
+// shard-node executor selects this at startup; generic non-seal clients retain the stock V3 set.
 func (a *Adapter) RequireSealCapabilities() { a.engine.RequireSealCapabilities() }
 
 // CheckCapabilities is the startup check from
 // docs/adr/0001-executor-boundary.md decision 3: it refuses to start
-// against a client that does not offer the exact V3 method set this
-// adapter speaks.
+// against a client that does not offer every method this adapter calls on its selected path.
 //
 // What it establishes is narrow, and was previously overstated here.
 // engine_exchangeCapabilities reports what a client BUILD supports, not
