@@ -12,11 +12,7 @@ mkdir -p briefs/d2c-harness
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 log="briefs/d2c-harness/${stamp}-${scenario}.log"
 case "$scenario" in
-  missing-body)
-    echo "D2C[${scenario}] EXPECTED-FAIL(needs D2-A journal entry)" | tee "$log"
-    exit 0
-    ;;
-  pair-term|pair-kill|ureth-kill|all-kill|leader-kill)
+  pair-term|pair-kill|ureth-kill|all-kill|leader-kill|missing-body|wrong-genesis)
     D2C_FAULT_SCENARIO="$scenario" SIGNING=authority ./scripts/reth-paired-devnet.sh 4 10 2>&1 | tee "$log"
     lane_status=${PIPESTATUS[0]}
     if [ "$lane_status" -eq 0 ]; then
@@ -26,7 +22,13 @@ case "$scenario" in
     if grep -q "D2C\[$scenario\] injection at certified B5" "$log"; then
       reason=$(grep -E 'D1 FAIL: stalled before height|D1 FAIL: B[0-9]+ lacks|D1 FAIL: canonical disagreement|D1 FAIL: discontinuity' "$log" | tail -1)
       if [ -n "$reason" ]; then
-        echo "D2C[${scenario}] EXPECTED-FAIL(no automatic re-drive: ${reason#D1 FAIL: })" | tee -a "$log"
+        if [ "$scenario" = missing-body ]; then
+          echo "D2C[${scenario}] EXPECTED-FAIL(D2-A journal body absent; ${reason#D1 FAIL: }; D2-B recovery pending)" | tee -a "$log"
+        elif [ "$scenario" = wrong-genesis ]; then
+          echo "D2C[${scenario}] EXPECTED-FAIL(retained-state alternate genesis rejected; ${reason#D1 FAIL: })" | tee -a "$log"
+        else
+          echo "D2C[${scenario}] EXPECTED-FAIL(no automatic re-drive: ${reason#D1 FAIL: })" | tee -a "$log"
+        fi
         exit 0
       fi
     fi
@@ -47,7 +49,13 @@ case "$scenario" in
     if grep -q "D2C\[$scenario\] dropped proof RPC\|D2C\[$scenario\] corrupted proof RPC" "$log"; then
       reason=$(grep -E 'D1 FAIL: stalled before height|D1 FAIL: B[0-9]+ lacks|D1 FAIL: canonical disagreement|D1 FAIL: discontinuity' "$log" | tail -1)
       if [ -n "$reason" ]; then
-        echo "D2C[${scenario}] EXPECTED-FAIL(proof fault was injected/restored; ${reason#D1 FAIL: })" | tee -a "$log"
+        syncing=$(grep -h 'status syncing' test-nodes/evm{1,2,3,4}/debug.log 2>/dev/null | tail -1)
+        if [ -n "$syncing" ]; then
+          echo "D2C[${scenario}] EXPECTED-FAIL(proof fault injected/restored; validator remained SYNCING without D2-B re-drive/catch-up; ${reason#D1 FAIL: })" | tee -a "$log"
+        else
+          echo "D2C[${scenario}] FAIL(proof fault run stalled without SYNCING evidence; ${reason#D1 FAIL: })" | tee -a "$log"
+          exit "$lane_status"
+        fi
         exit 0
       fi
     fi

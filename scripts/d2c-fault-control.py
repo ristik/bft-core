@@ -192,6 +192,61 @@ elif SCENARIO == "all-kill":
 elif SCENARIO in {"proof-outage", "proof-corrupt"}:
     proof_fault()
     raise SystemExit(0)
+elif SCENARIO == "missing-body":
+    import hashlib
+    import struct
+    import tempfile
+    import subprocess
+    # A tiny Go helper removes the certified B5 candidate record from validator 1's journal.
+    output = subprocess.check_output(["go", "run", "scripts/d2c-journal-edit.go",
+        "delete-certified-height", "test-nodes/execution-journals/evm1.db", "5"],
+        text=True, stderr=subprocess.STDOUT)
+    print(output, end="", flush=True)
+    stop("evm", 1, "TERM")
+    with open("test-nodes/evm1/debug.log", "a") as log:
+        log.write(f"D2C_RESTART_BOUNDARY scenario={SCENARIO} certified=B{CERTIFIED}\n")
+    try:
+        start_shard(1)
+        time.sleep(5)
+        lines = Path("test-nodes/evm1/debug.log").read_text(errors="replace").splitlines()
+        marker = max(i for i, line in enumerate(lines) if "D2C_RESTART_BOUNDARY" in line)
+        restart = lines[marker + 1:]
+        failures = [line for line in restart if "execution journal" in line.lower() and
+                    ("error" in line.lower() or "failed" in line.lower() or "missing" in line.lower())]
+        if failures:
+            print(f"D2C[missing-body] journal rejected restart after certified B{CERTIFIED}: {failures[-1]}", flush=True)
+            raise SystemExit(0)
+        raise RuntimeError("restarted validator did not report missing certified candidate journal entry")
+    except subprocess.CalledProcessError as exc:
+        print(f"D2C[missing-body] restart refused after certified candidate body deletion: {exc}", flush=True)
+        raise SystemExit(0)
+    raise SystemExit(0)
+elif SCENARIO == "wrong-genesis":
+    stop("evm", 1, "TERM")
+    stop("reth", 1, "TERM")
+    wait_down(1)
+    spec = json.loads(Path("test-nodes/evm-genesis-finalized-funded.json").read_text())
+    spec["config"]["chainId"] = 31338
+    wrong = Path("test-nodes/wrong-restart-genesis.json")
+    wrong.write_text(json.dumps(spec))
+    args = [os.environ["URETH_BIN"], "node", "--chain", str(wrong), "--datadir", "test-nodes/reth1/dd",
+            "--authrpc.jwtsecret", "test-nodes/evm1/jwt.hex", "--authrpc.addr", "127.0.0.1",
+            "--authrpc.port", str(ENGINE_BASE), "--http", "--http.addr", "127.0.0.1", "--http.port", str(ETH_BASE),
+            "--http.api", "eth,net,web3,admin,debug", "--port", str(P2P_BASE), "--disable-discovery", "--ipcdisable",
+            "--engine.persistence-threshold", os.environ.get("D2C_PERSISTENCE_THRESHOLD", "64"),
+            "--builder.gaslimit", "30000000", "--unicity.fee-collector", os.environ["URETH_PIN_FEE_COLLECTOR"]]
+    with open("test-nodes/reth1/reth.log", "a") as log:
+        proc = subprocess.Popen(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+    (Path("test-nodes/reth1/pid")).write_text(f"{proc.pid}\n")
+    try:
+        for _ in range(20):
+            if proc.poll() is not None:
+                print(f"D2C[wrong-genesis] retained-state reth restart refused alternate genesis (exit {proc.returncode})", flush=True)
+                raise SystemExit(0)
+            time.sleep(0.5)
+        raise RuntimeError("reth accepted alternate genesis on retained datadir")
+    except SystemExit:
+        raise
 else:
     raise RuntimeError(f"no process fault hook for {SCENARIO}")
 
