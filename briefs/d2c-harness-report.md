@@ -21,8 +21,8 @@ retained reth datadir.
 
 | Scenario | Verdict | Evidence |
 |---|---|---|
-| pair-term (current rerun) | INCONCLUSIVE: setup did not reach B5 | The transaction was mined and the four reth clients advanced, but validator 1 did not log `accepted certificate` within the 180s bootstrap window. The SIGTERM controller was never called. [Log](d2c-harness/20260923T170615Z-pair-term.log) |
-| proof-outage (current rerun) | INCONCLUSIVE: setup did not reach B5 | Proxy started and routed validator 1 RPC; the transaction was mined, but validator 1 did not log `accepted certificate` within 180s. No outage was injected, so this run provides no SYNCING/re-drive classification. [Log](d2c-harness/20260923T171036Z-proof-outage.log) |
+| pair-term (current rerun) | INCONCLUSIVE: harness detector stalled before B5 | The transaction was mined and the four reth clients advanced, but validator 1 did not emit the old `accepted certificate` line within the 180s bootstrap window. D2-A admission now uses a journal path, so the likely cause is the stale detection signal identified in `d2-acceptance-plan.md`, not a proven absence of admission. The SIGTERM controller was never called. [Log](d2c-harness/20260923T170615Z-pair-term.log) |
+| proof-outage (current rerun) | INCONCLUSIVE: harness detector stalled before B5 | Proxy started and routed validator 1 RPC; the transaction was mined, but validator 1 did not emit the old `accepted certificate` line within 180s. No outage was injected, so this run provides no SYNCING/re-drive classification. The likely cause is the stale detector described above. [Log](d2c-harness/20260923T171036Z-proof-outage.log) |
 | proof-corrupt | NOT rerun after lock coordination | The earlier run exited during topology setup before proof mutation. Current proxy startup is confirmed by the proof-outage setup, but corruption behavior remains unverified. [Earlier log](d2c-harness/20260923T164220Z-proof-corrupt.log) |
 | missing-body | Hook wired; not run | Requires reaching certified B5 before editing the journal. The current bootstrap stall prevents exercising it. |
 | wrong-genesis | Hook wired; not run | Requires reaching certified B5 before reusing the retained datadir with the altered genesis. The current bootstrap stall prevents exercising it. |
@@ -34,10 +34,12 @@ injection evidence, not a result from the current rerun or current D2-A journal-
 supports no stronger conclusion than that this older setup did not re-drive/catch up; D2-B is still
 needed for recovery. [Earlier log](d2c-harness/20260923T163626Z-proof-outage.log)
 
-The two current reruns used fresh test-node trees and the shared lock wrapper. Their failure happened
-before the B5 hook, with repeated block certification requests but no accepted certificate logged by
-validator 1. This bootstrap behavior must be resolved before the requested post-D2-A classifications
-can be established. No scenario with a pre-injection setup failure is counted as expected SYNCING.
+The two current reruns used fresh test-node trees and the shared lock wrapper. They ended before the
+B5 hook because the setup still waits for the old `accepted certificate` log text. The D2 acceptance
+plan says D2-A admission moved to the journal path, making a detector mismatch the likely cause.
+Switch all certified-block detection to the structured admission line after its exact format arrives.
+No scenario with a pre-injection setup failure is counted as expected SYNCING. Per the acceptance
+plan, do not run acceptance lanes until that switch is made and #247 has merged and #248 is code-approved.
 
 ## #244 reviewer follow-up
 
