@@ -54,10 +54,10 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 cleanup() {
   ./stop-evm.sh -a >/dev/null 2>&1 || true
   for i in $(seq 1 "$validators"); do
-    stop_pidfile "test-nodes/reth$i/pid" 'reth node'
+    stop_pidfile "test-nodes/reth$i/pid" 'reth.* node'
   done
   for d in $negativeReths; do
-    stop_pidfile "test-nodes/$d/pid" 'reth node'
+    stop_pidfile "test-nodes/$d/pid" 'reth.* node'
   done
   wait 2>/dev/null || true
 }
@@ -132,8 +132,15 @@ g["alloc"] = json.loads(subprocess.check_output(["go", "run", "./scripts/evmtx",
 json.dump(g, open("test-nodes/evm-genesis-funded.json", "w"), indent=2)
 PY
 fundedSHA=$(shasum -a 256 test-nodes/evm-genesis-funded.json | cut -d' ' -f1)
-echo "funded test genesis sha256=$fundedSHA"
-chainSpec=test-nodes/evm-genesis-funded.json
+echo "funded genesis source sha256=$fundedSHA"
+# The funding edit replaces alloc, so finalize it again through U5a. That inserts the pinned
+# SealRegistry account and emits the full shard configuration whose hash the v2 certificate binds.
+chainSpec=test-nodes/evm-genesis-finalized-funded.json
+fullShardConf=test-nodes/evm-full-shard-conf-v2.json
+build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
+  --alloc-source test-nodes/evm-genesis-funded.json --out "$chainSpec" \
+  --full-shard-conf "$fullShardConf" || { echo "finalized funded genesis failed" >&2; exit 1; }
+echo "finalized funded genesis sha256=$(shasum -a 256 "$chainSpec" | cut -d' ' -f1)"
 
 echo
 echo "=== 2. start one reth per validator on that chain spec ==="
@@ -150,6 +157,7 @@ for i in $(seq 1 "$validators"); do
     --http.api eth,net,web3,admin \
     --port $((rethP2PBase + i - 1)) --disable-discovery \
     --ipcdisable \
+    --builder.gaslimit 30000000 \
     $(urethPinUnicityFlags) \
     >"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"
@@ -242,7 +250,7 @@ fi
 mkdir -p test-nodes/reth-wrongchain
 python3 - <<'PYGEN'
 import json
-g = json.load(open("test-nodes/evm-genesis-funded.json"))
+g = json.load(open("test-nodes/evm-genesis-finalized-funded.json"))
 g["config"]["chainId"] = 31338
 json.dump(g, open("test-nodes/wrong-chain-genesis.json", "w"))
 PYGEN
@@ -278,7 +286,7 @@ kill "$(cat test-nodes/reth-wrongchain/pid)" 2>/dev/null; rm -f test-nodes/reth-
 mkdir -p test-nodes/reth-othergenesis
 python3 - <<'PYGEN'
 import json
-g = json.load(open("test-nodes/evm-genesis-funded.json"))
+g = json.load(open("test-nodes/evm-genesis-finalized-funded.json"))
 # Same chainId, different allocation -> different genesis hash.
 g["alloc"]["0x00000000000000000000000000000000000000aa"] = {"balance": "0x1"}
 json.dump(g, open("test-nodes/other-genesis.json", "w"))
@@ -398,7 +406,7 @@ kill "$(cat test-nodes/reth-othergenesis/pid)" 2>/dev/null; rm -f test-nodes/ret
 mkdir -p test-nodes/reth-laterfork
 python3 - <<'PYFORK'
 import json
-g = json.load(open("test-nodes/evm-genesis-funded.json"))
+g = json.load(open("test-nodes/evm-genesis-finalized-funded.json"))
 g["config"]["pragueTime"] = 4102444800  # 2100-01-01; far enough that it cannot activate during a run
 json.dump(g, open("test-nodes/laterfork-genesis.json", "w"))
 PYFORK
@@ -484,90 +492,83 @@ fi
 kill "$(cat test-nodes/reth-laterfork/pid)" 2>/dev/null; rm -f test-nodes/reth-laterfork/pid
 
 echo
-echo "=== 4. start the root chain and the shard validators on --executor engine-api ==="
+echo "=== 4. configure the checked v2 origin and seed the block-1 transaction ==="
+# The root chain must certify the FULL shard configuration emitted beside the finalized genesis.
+# Registration happens when start-evm.sh starts the root nodes, so replace the generated base conf
+# only now, after the startup negatives above have used it.
+cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
+export EVM_GENESIS_FILE="$chainSpec"
+export EVM_FULL_SHARD_CONF="test-nodes/shard-conf-${partitionID}_0.json"
+export EVM_ENGINE_FEE_COLLECTOR="$URETH_PIN_FEE_COLLECTOR"
 source helper.sh
 for i in $(seq 1 "$validators"); do
   export "EVM_ENGINE_URL_$i=http://127.0.0.1:$((rethEngineBase + i - 1))"
   export "EVM_ETH_URL_$i=http://127.0.0.1:$((rethEthBase + i - 1))"
 done
+
+# Every validator may lead block 1. Put the same signed transaction in each local mempool before
+# shard voting starts, so the first execution build can produce a real block.
+txHash=""
+for i in $(seq 1 "$validators"); do
+  sent=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase + i - 1))" \
+    -chain-id 31337 -nonce 0 2>&1)
+  if [[ "$sent" != 0x* ]]; then
+    fail "could not seed validator $i's mempool: $sent"
+    exit 1
+  fi
+  if [ -n "$txHash" ] && [ "$sent" != "$txHash" ]; then
+    fail "validators received different signed transaction hashes: $txHash / $sent"
+    exit 1
+  fi
+  txHash=$sent
+done
+pass "seeded $txHash in every reth mempool before block 1"
+
+echo
+echo "=== 5. the v2 bootstrap certifies a real EVM block 1 ==="
 ./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1
 
-echo "waiting for certification (real execution, up to 180s) ..."
+echo "waiting for block 1 and a certificate (up to 180s) ..."
+mined=false
 certified=false
 for _ in $(seq 1 90); do
-  if grep -q 'accepted certificate' test-nodes/evm1/debug.log 2>/dev/null; then certified=true; break; fi
+  rcpt=$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionReceipt "[\"$txHash\"]")
+  blkNum=$(echo "$rcpt" | pyget "['result']['blockNumber']")
+  if [ -n "$blkNum" ] && [ "$blkNum" != "None" ]; then mined=true; fi
+  if grep -q 'accepted certificate' test-nodes/evm1/debug.log 2>/dev/null; then certified=true; fi
+  $mined && $certified && break
   sleep 2
 done
-if $certified; then
-  pass "shard certified with --executor engine-api against real reth"
+if $mined && $certified; then
+  status=$(echo "$rcpt" | pyget "['result']['status']")
+  blkDec=$(python3 -c "print(int('$blkNum', 16))")
+  if [ "$blkDec" = "1" ] && [ "$status" = "0x1" ]; then
+    pass "real reth executed $txHash in certified v2 block 1"
+  else
+    fail "transaction receipt did not confirm successful block 1: block=$blkDec status=$status"
+  fi
 else
-  fail "no certificate within 180s"
+  fail "v2 bootstrap did not produce a certified transaction block within 180s (mined=$mined certified=$certified)"
   echo "--- evm1 tail ---"; tail -25 test-nodes/evm1/debug.log 2>/dev/null
   echo "--- reth1 tail ---"; tail -15 test-nodes/reth1/reth.log 2>/dev/null
 fi
 
 echo
-echo "=== 5. an idle shard certifies quiet rounds and builds no EVM block ==="
-echo "waiting for $rounds certified rounds ..."
-# The wait and the verdict must measure the SAME thing. This used to wait for `rounds` accepted
-# certificates and then assert on the number of quiet SUBMISSIONS, which is a different count made
-# a moment later: a run where the certificates had arrived but the submission for the current round
-# had not yet been logged failed with "quiet=0" while the shard was behaving perfectly. Waiting for
-# the asserted condition itself removes the race without weakening anything — the budget is
-# unchanged and a shard that genuinely never submits a quiet round still fails.
-for _ in $(seq 1 120); do
-  # `grep -c` exits 1 on a zero count, so `$(grep -c ... || echo 0)` prints "0\n0" and every
-  # numeric test below is a syntax error rather than a false — a wait loop that cannot read its own
-  # condition. Same trap scripts/lib/f6b-acceptance-lib.sh documents at countIn.
-  n=$(grep -c 'accepted certificate' test-nodes/evm1/debug.log 2>/dev/null | head -1); n=${n:-0}
-  quiet=$(grep -c 'quiet=true' test-nodes/evm1/debug.log 2>/dev/null | head -1); quiet=${quiet:-0}
-  [ "$n" -ge "$rounds" ] && [ "$quiet" -gt 0 ] && break
-  sleep 2
-done
-idleHead=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBlockByNumber '["latest", false]' | pyget "['result']['number']")
-idleDec=$(python3 -c "print(int('${idleHead:-0x0}', 16))" 2>/dev/null || echo 0)
-if [ "$idleDec" = "0" ] && [ "$quiet" -gt 0 ]; then
-  pass "idle rounds are quiet ($quiet of them) and reth stays at block 0 - the baseline builds no block without a transaction"
-else
-  fail "expected an idle shard to stay at block 0 with quiet rounds; head=$idleDec quiet=$quiet"
-fi
-echo "  NOTE: producing blocks on idle rounds at the EVM cadence is F4 (#12), not the F1 baseline."
-
-echo
-echo "=== 6. a real transaction makes the adapter build, certify and commit a real EVM block ==="
-txHash=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$rethEthBase" \
-  -chain-id 31337 -nonce 0 2>&1)
-if [[ "$txHash" == 0x* ]]; then
-  pass "submitted $txHash to reth1's mempool"
-else
-  fail "could not submit a transaction: $txHash"
-fi
-
-echo "waiting for it to be executed and certified ..."
-mined=false
-for _ in $(seq 1 90); do
-  rcpt=$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionReceipt "[\"$txHash\"]")
-  blkNum=$(echo "$rcpt" | pyget "['result']['blockNumber']")
-  if [ -n "$blkNum" ] && [ "$blkNum" != "None" ]; then mined=true; break; fi
-  sleep 2
-done
-
-if $mined; then
-  status=$(echo "$rcpt" | pyget "['result']['status']")
-  gasUsed=$(echo "$rcpt" | pyget "['result']['gasUsed']")
-  blkDec=$(python3 -c "print(int('$blkNum', 16))")
-  pass "executed in reth block $blkDec, status=$status gasUsed=$gasUsed"
-  if [ "$blkDec" -gt 0 ] && [ "$status" = "0x1" ]; then
-    pass "the Go adapter drove real EVM execution to a canonical block, not a quiet round"
-  else
-    fail "transaction did not succeed in a real block (block=$blkDec status=$status)"
+echo "=== 6. block 2 fails closed until U5d supplies a parent witness ==="
+refused=false
+for _ in $(seq 1 60); do
+  if grep -q 'v2 parent registry witness unavailable: parent block 1' test-nodes/evm*/debug.log 2>/dev/null; then
+    refused=true
+    break
   fi
+  sleep 2
+done
+if $refused; then
+  pass "block 2 was refused with ErrParentWitnessUnavailable (U5d pending)"
 else
-  fail "transaction was never executed within 180s"
-  echo "--- evm1 tail ---"; tail -20 test-nodes/evm1/debug.log 2>/dev/null
+  fail "no typed post-genesis parent-witness refusal was observed within 120s"
 fi
 
-echo
 echo "=== 7. every validator's reth converged on that same canonical block ==="
 heads=""
 for i in $(seq 1 "$validators"); do
