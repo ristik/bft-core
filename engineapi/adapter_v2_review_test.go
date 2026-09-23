@@ -140,10 +140,10 @@ func TestAdapterV2BuildAndVerifyAuthenticateBeforeDeriving(t *testing.T) {
 	require.Equal(t, 0, calls)
 }
 
-// Before D1 idle execution is enabled, a zero-transaction genesis build is a
-// quiet certificate. Its round hash must use the state root, never alias the
-// execution client's pre-existing genesis block hash.
-func TestAdapterV2GenesisQuietRoundDoesNotAliasGenesisHash(t *testing.T) {
+// A zero-transaction genesis build must never certify the pre-existing genesis
+// block hash as if it were a new round. This also covers the quiet fallback on
+// the current base; D1's system-only block path carries a distinct payload hash.
+func TestAdapterV2GenesisEmptyPayloadDoesNotAliasGenesisHash(t *testing.T) {
 	verifier, params, _ := bootstrapAdapterFixture(t)
 	engine, eth := newMockReth(t, Secret{}), newMockReth(t, Secret{})
 	payloadID := data{1, 2, 3, 4, 5, 6, 7, 8}
@@ -152,7 +152,8 @@ func TestAdapterV2GenesisQuietRoundDoesNotAliasGenesisHash(t *testing.T) {
 	})
 	engine.on("engine_getPayloadWithSealV1", func(json.RawMessage) (any, *rpcError) {
 		return GetPayloadWithSealV1Response{ExecutionPayload: ExecutionPayloadV3{
-			ParentHash: data32(verifier.GenesisOrigin.BlockHash()), Transactions: []data{},
+			ParentHash: data32(verifier.GenesisOrigin.BlockHash()), BlockHash: fixedHash(0x42),
+			StateRoot: fixedHash(0x24), BlockNumber: 1, Transactions: []data{},
 		}}, nil
 	})
 	eth.on("eth_getBlockByHash", func(json.RawMessage) (any, *rpcError) {
@@ -164,9 +165,12 @@ func TestAdapterV2GenesisQuietRoundDoesNotAliasGenesisHash(t *testing.T) {
 	require.NoError(t, err)
 	block, err := a.Seal(context.Background(), id)
 	require.NoError(t, err)
-	require.Empty(t, block.Hash)
-	require.Empty(t, block.Raw)
 	roundHash := shardnode.Hash(shardnode.BlockHashOrFallback(block, false))
-	require.Equal(t, params.Parent.StateRoot, roundHash)
 	require.NotEqual(t, params.Parent.Hash, roundHash)
+	if len(block.Raw) == 0 {
+		require.Empty(t, block.Hash)
+		require.Equal(t, params.Parent.StateRoot, roundHash)
+	} else {
+		require.NotEmpty(t, block.Hash)
+	}
 }
