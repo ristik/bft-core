@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -50,6 +51,9 @@ type ParentWitnessPins struct {
 type ParentWitnessSource struct {
 	pins      ParentWitnessPins
 	requester *parentwitness.Requester
+	mu        sync.Mutex
+	last      registryproof.Snapshot // one immutable, verified parent; never a failed acquisition
+	closed    bool
 }
 
 // NewParentWitnessSource activates only the local execution RPC. All proof acquisition and
@@ -73,6 +77,22 @@ func (s *ParentWitnessSource) Acquire(ctx context.Context, parent shardnode.Bloc
 		return registryproof.Snapshot{}, fmt.Errorf("%w: expected non-genesis parent with 32-byte hash and state root", ErrParentWitnessMismatch)
 	}
 	hash := common.BytesToHash(parent.Hash)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return registryproof.Snapshot{}, ErrParentWitnessStopped
+	}
+	cached := s.last
+	s.mu.Unlock()
+	if cached.Valid() && cached.ParentHash() == hash {
+		if cached.Number() != parent.Number || !bytes.Equal(cached.StateRoot().Bytes(), parent.StateRoot) {
+			return registryproof.Snapshot{}, fmt.Errorf("%w: cached parent %d/%s has state %s", ErrParentWitnessMismatch, cached.Number(), hash, cached.StateRoot())
+		}
+		if err := ctx.Err(); err != nil {
+			return registryproof.Snapshot{}, err
+		}
+		return cached, nil
+	}
 	target, err := parentwitness.NewTarget(parentwitness.TargetConfig{
 		NetworkID: s.pins.NetworkID, PartitionID: s.pins.PartitionID, ShardID: s.pins.ShardID,
 		FullShardConfHash: s.pins.FullShardConfHash, Registry: s.pins.Registry, BlockHash: hash,
@@ -96,6 +116,11 @@ func (s *ParentWitnessSource) Acquire(ctx context.Context, parent shardnode.Bloc
 		if !result.Response.Found() || !snapshot.Valid() || snapshot.ParentHash() != hash || snapshot.Number() != parent.Number || !bytes.Equal(snapshot.StateRoot().Bytes(), parent.StateRoot) {
 			return registryproof.Snapshot{}, fmt.Errorf("%w: parent %d/%s has verified proof %d/%s with state %s", ErrParentWitnessMismatch, parent.Number, hash, snapshot.Number(), snapshot.ParentHash(), snapshot.StateRoot())
 		}
+		s.mu.Lock()
+		if !s.closed {
+			s.last = snapshot
+		}
+		s.mu.Unlock()
 		return snapshot, nil
 	case parentwitness.RequesterUnavailable:
 		return registryproof.Snapshot{}, fmt.Errorf("%w: %s", ErrParentWitnessUnavailable, result.Detail)
@@ -112,6 +137,10 @@ func (s *ParentWitnessSource) Acquire(ctx context.Context, parent shardnode.Bloc
 
 func (s *ParentWitnessSource) Close() {
 	if s != nil && s.requester != nil {
+		s.mu.Lock()
+		s.closed = true
+		s.last = registryproof.Snapshot{}
+		s.mu.Unlock()
 		s.requester.Close()
 	}
 }
