@@ -77,6 +77,7 @@ def authority_status(nodes, validator):
 def restart_validator(nodes, validator, signing):
     log = Path(nodes) / f"evm{validator}" / "debug.log"
     before = authority_status(nodes, validator) if signing == "authority" else None
+    node_id = subprocess.check_output(["build/ubft", "node-id", "--home", str(Path(nodes) / f"evm{validator}")], text=True).splitlines()[-1]
     authority_pid = (Path(nodes) / f"auth{validator}" / "pid").read_text().strip() if before else None
     reth_pid = (Path(nodes) / f"reth{validator}" / "pid").read_text().strip()
     output = subprocess.check_output(["bash", "scripts/d2c-restart-validator.sh", str(validator)], text=True)
@@ -84,12 +85,19 @@ def restart_validator(nodes, validator, signing):
     if not markers:
         raise RuntimeError("restart helper did not mark the boundary after the old shard exited")
     mark = markers[-1] + 1
+    root_marks = []
+    for i in range(1, 4):
+        root_lines = (Path(nodes) / f"root{i}" / "debug.log").read_text().splitlines()
+        root_markers = [j for j, line in enumerate(root_lines) if "D2C_RESTART_BOUNDARY" in line]
+        if not root_markers:
+            raise RuntimeError(f"restart helper did not mark root {i} after the old shard exited")
+        root_marks.append(root_markers[-1] + 1)
     print(f"D2C probe: {output.strip()}; retained reth pid={reth_pid}, authority pid={authority_pid}", flush=True)
-    return mark, before, reth_pid, authority_pid
+    return mark, before, reth_pid, authority_pid, root_marks, node_id
 
 
 def check_restart(nodes, validator, signing, probe):
-    mark, before, reth_pid, authority_pid = probe
+    mark, before, reth_pid, authority_pid, root_marks, node_id = probe
     lines = (Path(nodes) / f"evm{validator}" / "debug.log").read_text().splitlines()[mark:]
     if not any("resumed from persisted certificate" in line for line in lines):
         raise RuntimeError("restarted shard did not restore its persisted certificate")
@@ -109,8 +117,18 @@ def check_restart(nodes, validator, signing, probe):
             raise RuntimeError(f"authority did not sign and submit after restart: before={before}, after={after}, submissions={len(submissions)}")
         if any("the certification request was not signed" in line for line in lines):
             raise RuntimeError("restarted validator logged a signing refusal")
+        submitted_rounds = {field(line, "round") for line in submissions}
+        quorum_proofs = []
+        for i, root_mark in enumerate(root_marks, start=1):
+            root_lines = (Path(nodes) / f"root{i}" / "debug.log").read_text().splitlines()[root_mark:]
+            quorum_proofs.extend(line for line in root_lines
+                                 if "reached consensus" in line and "requestNodeIDs=" in line and node_id in line
+                                 and field(line, "requestRound") in submitted_rounds)
+        if not quorum_proofs:
+            raise RuntimeError("no later root quorum included the restarted validator's signed request")
         print(f"D2C PASS: authority pid {authority_pid} retained its key and signed round "
-              f"{after['reservedRound']} after restart; {len(submissions)} requests and "
+              f"{after['reservedRound']} after restart; {len(submissions)} requests, "
+              f"{len(quorum_proofs)} root quorum proofs containing its signature, and "
               f"{len(certificates)} subsequent certificates observed", flush=True)
     else:
         if submissions:

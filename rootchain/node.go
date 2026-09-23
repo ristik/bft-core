@@ -307,7 +307,15 @@ func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certificati
 	var reason consensus.CertReqReason
 	switch res {
 	case QuorumAchieved:
-		v.log.DebugContext(ctx, fmt.Sprintf("partition %s reached consensus, new InputHash: %X", req.PartitionID, requests[0].InputRecord.Hash), logger.Shard(req.PartitionID, req.ShardID))
+		if v.log.Enabled(ctx, slog.LevelDebug) {
+			requestNodeIDs := make([]string, len(requests))
+			for i, request := range requests {
+				requestNodeIDs[i] = request.NodeID
+			}
+			v.log.DebugContext(ctx, fmt.Sprintf("partition %s reached consensus, new InputHash: %X", req.PartitionID, requests[0].InputRecord.Hash),
+				logger.Shard(req.PartitionID, req.ShardID), slog.Uint64("requestRound", requests[0].InputRecord.RoundNumber),
+				slog.Any("requestNodeIDs", requestNodeIDs))
+		}
 		reason = consensus.Quorum
 	case QuorumNotPossible:
 		v.log.DebugContext(ctx, fmt.Sprintf("partition %s consensus not possible, repeat UC", req.PartitionID), logger.Shard(req.PartitionID, req.ShardID))

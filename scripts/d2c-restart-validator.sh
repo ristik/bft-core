@@ -12,6 +12,9 @@ for _ in $(seq 1 100); do
 done
 owned_pid "$old" 'ubft shard-node run' && { echo "validator $i did not exit after SIGTERM" >&2; exit 1; }
 echo "D2C_RESTART_BOUNDARY old=$old" >>"test-nodes/evm$i/debug.log"
+for root in test-nodes/root*/debug.log; do
+  echo "D2C_RESTART_BOUNDARY validator=$i" >>"$root"
+done
 rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
 start_one_evm_validator "$i" 4 8 "$rootBoot" engine-api
 new=$(cat "test-nodes/evm$i/pid")
