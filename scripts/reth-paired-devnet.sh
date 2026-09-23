@@ -401,8 +401,10 @@ kill "$(cat test-nodes/reth-othergenesis/pid)" 2>/dev/null; rm -f test-nodes/ret
 # from exactly the funded spec the validators use, plus one field: Prague scheduled for a future
 # timestamp. A fork that has not activated changes no genesis header field, so this client reports the
 # configured chain id AND the configured genesis hash, and passes every identity check before this one.
-# It would then require engine_newPayloadV4 once Prague activated. The standard eth_config (EIP-7910)
-# read reports the loaded schedule, and startup refuses on it.
+# It would then require engine_newPayloadV4 once Prague activated. This Unicity client only supports
+# the fixed Cancun EVM profile: EthConfigHandler asks its EVM for the future fork's precompiles,
+# which refuses Prague. Thus eth_config returns a typed RPC error, and startup must fail closed on
+# the unreadable execution profile. The loaded schedule is independently visible in the node log.
 mkdir -p test-nodes/reth-laterfork
 python3 - <<'PYFORK'
 import json
@@ -424,13 +426,15 @@ done
 configuredGenesis=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBlockByNumber '["0x0", false]' | pyget "['result']['hash']")
 laterChainID=$(rpc http://127.0.0.1:18945 eth_chainId '[]' | pyget "['result']")
 laterGenesis=$(rpc http://127.0.0.1:18945 eth_getBlockByNumber '["0x0", false]' | pyget "['result']['hash']")
-laterNext=$(rpc http://127.0.0.1:18945 eth_config '[]' | pyget "['result']['next']['activationTime']")
+laterConfig=$(rpc http://127.0.0.1:18945 eth_config '[]')
+laterCode=$(echo "$laterConfig" | pyget "['error']['code']")
+laterError=$(echo "$laterConfig" | pyget "['error']['message']")
 okNext=$(rpc "http://127.0.0.1:$rethEthBase" eth_config '[]' | pyget "['result']['next']")
-info "the later-fork client reports: chainId $laterChainID, genesis $laterGenesis, next fork at ${laterNext:-?}"
+info "the later-fork client reports: chainId $laterChainID, genesis $laterGenesis, eth_config error $laterCode: ${laterError:-?}"
 info "the configured client reports: genesis $configuredGenesis, next fork ${okNext:-?}"
 
 # The premise, established before the refusal is asserted: same chain id, the SAME genesis as the
-# configured client, and a fork actually scheduled. Without it this case could pass because the client
+# configured client, and a fork actually loaded. Without it this case could pass because the client
 # failed to start, or because the spec edit changed the genesis and the genesis check refused instead.
 if [ -z "$laterGenesis" ] || [ -z "$configuredGenesis" ]; then
   fail "3f premise: could not read both genesis hashes (configured='$configuredGenesis' later-fork='$laterGenesis')"
@@ -438,12 +442,14 @@ elif [ "$laterGenesis" != "$configuredGenesis" ]; then
   fail "3f premise: the later-fork client's genesis $laterGenesis differs from $configuredGenesis, so the genesis check — not the profile — would refuse it"
 elif [ "$laterChainID" != "0x7a69" ]; then
   fail "3f premise: the later-fork client reports chainId $laterChainID, not 0x7a69"
-elif [ "$laterNext" != "4102444800" ]; then
-  fail "3f premise: the later-fork client's eth_config does not report the scheduled fork (next='${laterNext}')"
+elif ! grep -qE 'Prague[[:space:]]+@4102444800' test-nodes/reth-laterfork/reth.log; then
+  fail "3f premise: the later-fork client did not log Prague at timestamp 4102444800 as loaded"
+elif [ "$laterCode" != "-32603" ] || [ "$laterError" != "only the fixed Cancun profile is supported" ]; then
+  fail "3f premise: later-fork eth_config did not refuse unsupported Prague as fixed-Cancun (code='$laterCode' message='$laterError')"
 elif [ "$okNext" != "None" ]; then
   fail "3f premise: the configured client's eth_config reports a scheduled fork ('$okNext'), so the positive path would be refused too"
 else
-  info "premise holds: identical chain id and genesis, different loaded fork schedule"
+  info "premise holds: identical chain id and genesis, Prague loaded at 4102444800, eth_config refuses unsupported Prague"
   boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api \
     --address /ip4/127.0.0.1/tcp/28004 --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
@@ -451,15 +457,15 @@ else
     --expected-genesis-hash "$configuredGenesis" \
     --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
   forkOut=$boundedOut; forkStatus=$boundedStatus
-  forkMsg="schedules a fork at timestamp 4102444800 after its current one"
+  forkMsg="only the fixed Cancun profile is supported"
   if [ "$forkStatus" -ne 0 ] && [ "$forkStatus" -ne 124 ] &&
-     echo "$forkOut" | grep -q -- 'startup execution-profile check' && echo "$forkOut" | grep -qF -- "$forkMsg" &&
+     echo "$forkOut" | grep -q -- 'startup execution-profile check' && echo "$forkOut" | grep -q -- 'reading eth_config (EIP-7910)' && echo "$forkOut" | grep -qF -- "$forkMsg" &&
      ! echo "$forkOut" | grep -q -- 'startup genesis check'; then
-    pass "shard-node run refused a same-chainId/same-genesis client with a later fork scheduled (exit $forkStatus), before voting"
+    pass "shard-node run refused a same-chainId/same-genesis client with unsupported Prague loaded (exit $forkStatus), before voting"
   elif [ "$forkStatus" -eq 124 ]; then
-    fail "a later scheduled fork was NOT refused: startup ran past its budget"
+    fail "unsupported Prague was NOT refused: startup ran past its budget"
   else
-    fail "a later scheduled fork was NOT refused with the expected diagnostic (exit $forkStatus); wanted '$forkMsg'"
+    fail "unsupported Prague was NOT refused with the expected diagnostic (exit $forkStatus); wanted '$forkMsg'"
     echo "--- captured output ---"; echo "$forkOut" | tail -15; echo "--- end ---"
   fi
 
@@ -470,8 +476,8 @@ else
     --jwt-secret test-nodes/evm1/jwt.hex 2>&1)
   forkDoctorStatus=$?
   if [ "$forkDoctorStatus" -ne 0 ] && echo "$forkDoctor" | grep -qE '^\[FAIL\] execution profile' &&
-     echo "$forkDoctor" | grep -qF -- "$forkMsg" && echo "$forkDoctor" | grep -qE '^\[PASS\] genesis hash'; then
-    pass "doctor rejected the later fork at its execution-profile check, having passed its genesis check"
+     echo "$forkDoctor" | grep -q -- 'reading eth_config (EIP-7910)' && echo "$forkDoctor" | grep -qF -- "$forkMsg" && echo "$forkDoctor" | grep -qE '^\[PASS\] genesis hash'; then
+    pass "doctor rejected unsupported Prague at its execution-profile check, having passed its genesis check"
   else
     fail "doctor did not reject the later fork as expected (exit $forkDoctorStatus)"
     echo "--- captured output ---"; echo "$forkDoctor" | tail -15; echo "--- end ---"
