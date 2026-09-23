@@ -121,8 +121,8 @@ func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnaps
 	// branch remains inert even when its payload is present locally.
 	cur := c.anchor
 	for cur.Number > 0 {
-		if len(c.blocks) >= r.limits().Blocks {
-			return recoveryChain{}, fmt.Errorf("%w: target %x exceeds %d retained ancestors", ErrRecoveryBudget, c.anchor.Hash, r.limits().Blocks)
+		if len(c.blocks) >= r.walkLimit() {
+			return recoveryChain{}, fmt.Errorf("%w: target %x exceeds %d retained ancestors", ErrRecoveryBudget, c.anchor.Hash, r.walkLimit())
 		}
 		e, ok := entries[string(cur.Hash)]
 		if !ok {
@@ -145,6 +145,13 @@ func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnaps
 		c.byHash[string(e.Candidate.Hash)] = i + 1
 	}
 	return c, nil
+}
+
+func (r *ExecutionRecovery) walkLimit() int {
+	if r.JournalLimits.Candidates > 0 && r.JournalLimits.Candidates <= configuredprogress.MaxJournalCandidates {
+		return r.JournalLimits.Candidates
+	}
+	return configuredprogress.MaxJournalCandidates
 }
 
 func (r *ExecutionRecovery) limits() RecoveryLimits {
@@ -172,7 +179,7 @@ func (c recoveryChain) index(ref shardnode.BlockRef, genesis shardnode.BlockRef)
 }
 
 func (r *ExecutionRecovery) ancestry(ctx context.Context, c recoveryChain, head shardnode.BlockRef) (int, error) {
-	for n := 0; n <= r.limits().Blocks; n++ {
+	for n := 0; n <= r.walkLimit(); n++ {
 		if i, ok := c.index(head, r.Genesis); ok {
 			return i, nil
 		}
@@ -293,6 +300,9 @@ func (r *ExecutionRecovery) recoverChain(ctx context.Context, c recoveryChain, c
 			return head, err
 		}
 		e := c.blocks[i].Candidate
+		if i-common >= r.limits().Blocks {
+			return head, fmt.Errorf("%w: replay suffix to %x exceeds %d blocks", ErrRecoveryBudget, c.anchor.Hash, r.limits().Blocks)
+		}
 		used += int64(len(e.Raw))
 		if used > r.limits().Bytes {
 			return head, fmt.Errorf("%w: suffix to %x exceeds %d bytes", ErrRecoveryBudget, c.anchor.Hash, r.limits().Bytes)
@@ -458,7 +468,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 			spent += int64(len(entry.Block.Raw))
 		}
 		if spent > 2*r.limits().Bytes {
-			return fmt.Errorf("%w: total peer fetch bytes exceed %d", ErrRecoveryBudget, 2*r.limits().Bytes)
+			return fmt.Errorf("%w: total peer fetch bytes exceed %d", ErrRecoveryUnavailable, 2*r.limits().Bytes)
 		}
 		if expected != nil {
 			if len(entries) == 0 || entries[len(entries)-1].ResultingUC == nil {
@@ -483,11 +493,17 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 		if err := r.admitFetched(ctx, after, actualTarget, entries, advance); err == nil {
 			return nil
 		} else {
-			last = fmt.Errorf("provider %s: %w", provider, err)
+			// A peer controls its response bytes. Never propagate its conflict or
+			// budget classification into the local terminal-stop classifier.
+			// Durable store faults are local and retain their original class.
+			if errors.Is(err, configuredprogress.ErrBounds) || errors.Is(err, configuredprogress.ErrConflict) || errors.Is(err, configuredprogress.ErrUntrusted) {
+				return err
+			}
+			last = fmt.Errorf("provider %s: %v", provider, err)
 		}
 	}
 	if last != nil {
-		return fmt.Errorf("%w: target %x unavailable from %d peers: %w", ErrRecoveryUnavailable, target, len(r.Providers), last)
+		return fmt.Errorf("%w: target %x unavailable from %d peers: %v", ErrRecoveryUnavailable, target, len(r.Providers), last)
 	}
 	return fmt.Errorf("%w: target %x unavailable from %d peers", ErrRecoveryUnavailable, target, len(r.Providers))
 }
@@ -510,6 +526,9 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 			return err
 		}
 		b := e.Block
+		if len(b.Raw) == 0 || len(b.Raw) > configuredprogress.MaxCandidateBytes || len(b.Hash) != 32 || len(b.StateRoot) != 32 || len(b.ParentHash) != 32 || len(e.ParentState) != 32 {
+			return fmt.Errorf("%w: peer candidate has invalid body or identity bounds", ErrRecoveryUnavailable)
+		}
 		total += int64(len(b.Raw))
 		if total > r.limits().Bytes {
 			return fmt.Errorf("%w: peer suffix exceeds byte limit", ErrRecoveryBudget)
@@ -549,6 +568,9 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 		}
 		candidate := configuredprogress.JournalCandidate{Round: e.Round, Number: b.Number, ParentNumber: parent.Number, Hash: b.Hash, StateRoot: b.StateRoot, ParentHash: b.ParentHash, ParentState: e.ParentState, Raw: b.Raw, BlockSize: b.BlockSize, StateSize: b.StateSize, AuthorizingUC: e.AuthorizingUC, AuthorizingTR: e.AuthorizingTR}
 		if err := r.Store.PutJournalCandidate(ctx, r.Context, r.JournalLimits, candidate); err != nil {
+			if errors.Is(err, configuredprogress.ErrConflict) {
+				return fmt.Errorf("%w: peer candidate metadata conflicts with retained body %x: %v", ErrRecoveryUnavailable, b.Hash, err)
+			}
 			return fmt.Errorf("%w: retaining fetched body %x: %w", ErrRecoveryUnavailable, b.Hash, err)
 		}
 		if advance {

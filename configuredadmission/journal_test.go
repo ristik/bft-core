@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
@@ -17,6 +19,52 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+func TestJournalAdmissionRetriesUnavailablePeerWithoutNewRootDelivery(t *testing.T) {
+	chain, origin, ctx, id := adapterFixture(t)
+	limits := configuredprogress.JournalLimits{Candidates: 2, Observations: 3, Bytes: 16 << 20}
+	s, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 2})
+	require.NoError(t, err)
+	defer s.Close()
+	_, _, err = s.Initialize(context.Background(), ctx)
+	require.NoError(t, err)
+	require.NoError(t, s.EnableJournal(context.Background(), ctx, limits))
+	bootstrap, bootTR := journalBootstrap(t, chain)
+	first, firstTR := signAdapterObservation(t, chain)
+	var available, stopped atomic.Bool
+	delivered := make(chan uint64, 2)
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a, err := (JournalFactory{Store: s, Origin: origin, Limits: limits,
+		CatchUp: func(callCtx context.Context, _ *types.UnicityCertificate, _ *certification.TechnicalRecord) error {
+			if !available.Load() {
+				return ErrRecoveryUnavailable
+			}
+			b, parent := chain.Blocks[1], chain.Blocks[0]
+			return s.PutJournalCandidate(callCtx, ctx, limits, configuredprogress.JournalCandidate{Round: b.Round, Number: b.Number, ParentNumber: parent.Number, Hash: b.Hash.Bytes(), StateRoot: b.StateRoot.Bytes(), ParentHash: parent.Hash.Bytes(), ParentState: parent.StateRoot.Bytes(), Raw: []byte{1, 2, 3}, BlockSize: 3, AuthorizingUC: bootstrap, AuthorizingTR: bootTR})
+		},
+		OnStop: func(error) { stopped.Store(true) },
+	}).Start(runCtx, id, adapterGate{}, shardnode.AdmissionCallbacks{AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {}, DeliverDurable: func(_ context.Context, uc *types.UnicityCertificate, _ *certification.TechnicalRecord) error {
+		delivered <- uc.GetRootRoundNumber()
+		return nil
+	}})
+	require.NoError(t, err)
+	defer a.Close()
+	require.NoError(t, a.Submit(runCtx, bootstrap, bootTR))
+	require.Equal(t, bootstrap.GetRootRoundNumber(), <-delivered)
+	require.ErrorIs(t, a.Submit(runCtx, first, firstTR), ErrRecoveryUnavailable)
+	require.True(t, a.(interface{ Pending() bool }).Pending())
+	require.False(t, stopped.Load())
+	available.Store(true)
+	select {
+	case round := <-delivered:
+		require.Equal(t, first.GetRootRoundNumber(), round)
+	case <-time.After(5 * time.Second):
+		t.Fatal("authenticated certificate did not resume after peer became available")
+	}
+	require.False(t, a.(interface{ Pending() bool }).Pending())
+	require.False(t, stopped.Load())
+}
 
 func TestJournalAdmissionLogsDurableCertificateOnce(t *testing.T) {
 	chain, origin, ctx, id := adapterFixture(t)

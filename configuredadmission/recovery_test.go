@@ -3,6 +3,7 @@ package configuredadmission
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"testing"
@@ -15,6 +16,36 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	abhex "github.com/unicitynetwork/bft-go-base/types/hex"
 )
+
+func TestRecoveryChainWalkCoversJournalCapacityBeyondReplayBudget(t *testing.T) {
+	const height = 300
+	genesisHash := sha256.Sum256([]byte("genesis"))
+	genesisState := sha256.Sum256([]byte("genesis state"))
+	genesis := shardnode.BlockRef{Number: 0, Hash: genesisHash[:], StateRoot: genesisState[:]}
+	r := &ExecutionRecovery{Genesis: genesis, JournalLimits: configuredprogress.JournalLimits{Candidates: 400}, Limits: RecoveryLimits{Blocks: 2, Bytes: 1024, Deadline: time.Second, Retries: 0}}
+	image := configuredprogress.JournalSnapshot{}
+	parent := genesis
+	refs := []shardnode.BlockRef{genesis}
+	for n := 1; n <= height; n++ {
+		hash := sha256.Sum256([]byte(fmt.Sprintf("block %d", n)))
+		state := sha256.Sum256([]byte(fmt.Sprintf("state %d", n)))
+		entry := configuredprogress.JournalEntry{Candidate: configuredprogress.JournalCandidate{Number: uint64(n), ParentNumber: parent.Number, Hash: hash[:], StateRoot: state[:], ParentHash: parent.Hash, ParentState: parent.StateRoot}, Certified: true}
+		image.Candidates = append(image.Candidates, entry)
+		parent = shardnode.BlockRef{Number: uint64(n), Hash: hash[:], StateRoot: state[:]}
+		refs = append(refs, parent)
+	}
+	image.Observations = []configuredprogress.JournalObservation{{TargetHash: parent.Hash, UC: &types.UnicityCertificate{InputRecord: &types.InputRecord{Hash: abhex.Bytes(parent.StateRoot)}}}}
+	chain, err := r.chainFromImage(image)
+	require.NoError(t, err)
+	require.Equal(t, height, len(chain.blocks))
+	require.Equal(t, parent, chain.anchor)
+	r.snapshot = func(context.Context) (configuredprogress.JournalSnapshot, error) { return image, nil }
+	r.Executor = &replayExecutor{head: parent, finalized: parent, refs: refs}
+	r.Gate = shardnode.NewFinalityGate()
+	got, err := r.Recover(context.Background(), nil)
+	require.NoError(t, err, "a synced B300 node must not spend its two-block replay budget walking retained ancestry")
+	require.Equal(t, parent, got)
+}
 
 type replayExecutor struct {
 	head, finalized shardnode.BlockRef

@@ -39,6 +39,14 @@ func internalTR(round uint64, leader string) *certification.TechnicalRecord {
 	return &certification.TechnicalRecord{Round: round, Epoch: 0, Leader: leader, StatHash: []byte{0x01}, FeeHash: []byte{0x01}}
 }
 
+func TestJournalActivationRefusesExecutorWithoutRawBinding(t *testing.T) {
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	round := NewRound("node", 8, types.ShardID{}, newSeqExecutor(), NewLoopbackDisseminator(), signer, &staleTestSubmitter{}, nil)
+	node := &Node{round: round, recoveryDeps: RecoveryDeps{Gate: NewFinalityGate()}}
+	require.ErrorContains(t, node.SetJournalAdmission(nil), "requires an executor with raw block binding support")
+}
+
 // TestRecordGateIsOffWithoutTheFlag: the record gate is an explicit opt-in, so a node wired without
 // it carries no ChildReadiness and no CertificateObserver and its voting is unchanged. The store the
 // CLI consults is a command-layer concern; what this pins is that the Node and Round defaults stay

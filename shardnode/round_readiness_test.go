@@ -24,6 +24,29 @@ type fakeTicket struct{ valid bool }
 
 func (t fakeTicket) Valid() bool { return t.valid }
 
+type unreadyJournalRecovery struct{}
+
+func (unreadyJournalRecovery) Recover(context.Context, *types.UnicityCertificate) (shardnode.BlockRef, error) {
+	return shardnode.BlockRef{}, errors.New("certified executor head is not ready")
+}
+func (unreadyJournalRecovery) Terminal(error) bool { return false }
+
+func TestJournalRecoveryBlocksRoundBuildAndSignUntilReady(t *testing.T) {
+	builds := &buildRecordingExecutor{Executor: executortest.New()}
+	sub := &recordingSubmitter{}
+	r, nodeID := newTestRound(t, builds, sub)
+	spy := &journalSignerSpy{}
+	r.SetCertificationSigner(spy)
+	r.SetHealth(shardnode.NewHealth())
+	r.SetFinalityGate(shardnode.NewFinalityGate())
+	r.SetJournalRecovery(unreadyJournalRecovery{})
+	err := r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID))
+	require.ErrorContains(t, err, "certified executor head is not ready")
+	require.Empty(t, builds.parents, "the real Round must refuse Build before recovery readiness")
+	require.Zero(t, spy.calls, "the real Round must refuse Sign before recovery readiness")
+	require.Empty(t, sub.got)
+}
+
 // staticReadiness is a scripted ChildReadiness for the cases that need one verdict only.
 type staticReadiness struct {
 	ticket        shardnode.ReadinessTicket

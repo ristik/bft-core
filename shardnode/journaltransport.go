@@ -79,6 +79,16 @@ type JournalServer struct {
 	provider  JournalFetchProvider
 	limits    JournalTransportLimits
 	admission *streamAdmission
+	allowed   map[peer.ID]struct{}
+}
+
+// RestrictToPeers must be called before Register. The configured shard
+// validator set, not an incoming request, supplies these identities.
+func (s *JournalServer) RestrictToPeers(peers []peer.ID) {
+	s.allowed = make(map[peer.ID]struct{}, len(peers))
+	for _, id := range peers {
+		s.allowed[id] = struct{}{}
+	}
 }
 
 func NewJournalServer(provider JournalFetchProvider, limits JournalTransportLimits) (*JournalServer, error) {
@@ -97,7 +107,14 @@ func (s *JournalServer) Register(host EvidenceHost) {
 
 func (s *JournalServer) handle(st libp2pnetwork.Stream) {
 	defer st.Close()
-	from := st.Conn().RemotePeer().String()
+	remote := st.Conn().RemotePeer()
+	if s.allowed != nil {
+		if _, ok := s.allowed[remote]; !ok {
+			_ = st.Reset()
+			return
+		}
+	}
+	from := remote.String()
 	if err := s.admission.acquire(from); err != nil {
 		_ = st.Reset()
 		return

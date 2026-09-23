@@ -773,17 +773,25 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		}
 		return fmt.Errorf("producing round %d block: %w", exp.Round, err)
 	}
-	if leader != r.nodeID && r.journal != nil {
-		if binder, ok := r.executor.(interface {
+	if leader != r.nodeID && r.journal != nil && len(block.Raw) != 0 {
+		binder, ok := r.executor.(interface {
 			CheckBlockBinding(context.Context, Block, RoundParams) error
-		}); ok {
-			if err := binder.CheckBlockBinding(ctx, block, params); err != nil {
-				return fmt.Errorf("retaining follower candidate: %w", err)
-			}
+		})
+		if !ok {
+			return errors.New("retaining follower candidate: executor lacks raw block binding support")
+		}
+		if err := binder.CheckBlockBinding(ctx, block, params); err != nil {
+			return fmt.Errorf("retaining follower candidate: %w", err)
 		}
 		if err := r.journal.RetainCandidate(ctx, block, params, false); err != nil {
-			r.health.updateExecutionRecovery("stopped", err.Error())
-			r.metrics.recordRecoveryStop(ctx)
+			// A follower's candidate and its provenance came from the leader.
+			// A conflict here refuses this proposal, never the process.
+			if !errors.Is(err, ErrProposalRejected) {
+				r.health.updateExecutionRecovery("stopped", err.Error())
+				r.metrics.recordRecoveryStop(ctx)
+			} else {
+				r.health.updateExecutionRecovery("unready", err.Error())
+			}
 			return fmt.Errorf("retaining follower candidate before verification/signing: %w", err)
 		}
 	}
@@ -1599,7 +1607,7 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		if err != nil {
 			return Block{}, params, fmt.Errorf("seal: %w", err)
 		}
-		if r.journal != nil {
+		if r.journal != nil && len(block.Raw) != 0 {
 			if err := r.journal.RetainCandidate(ctx, block, params, true); err != nil {
 				r.health.updateExecutionRecovery("stopped", err.Error())
 				r.metrics.recordRecoveryStop(ctx)

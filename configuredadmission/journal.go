@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/unicitynetwork/bft-core/certifiedstore"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
@@ -41,6 +42,12 @@ type journalAdmission struct {
 	catchUp   func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
 	onStop    func(error)
 	logger    *slog.Logger
+	ctx       context.Context
+	closeCh   chan struct{}
+	retrying  bool
+	pendingUC *types.UnicityCertificate
+	pendingTR *certification.TechnicalRecord
+	pendingID uint64
 }
 
 func journalContext(origin registrygenesis.GenesisOrigin, id shardnode.AdmissionIdentity) (configuredprogress.Context, error) {
@@ -67,16 +74,34 @@ func (f JournalFactory) Start(ctx context.Context, id shardnode.AdmissionIdentit
 	if _, err = f.Store.LoadJournal(ctx, c, f.Limits); err != nil {
 		return nil, fmt.Errorf("loading execution journal: %w", err)
 	}
-	a := &journalAdmission{store: f.Store, context: c, limits: f.Limits, gate: gate, callbacks: callbacks, epoch: c.Observation.RootEpoch, catchUp: f.CatchUp, onStop: f.OnStop, logger: f.Logger}
+	a := &journalAdmission{store: f.Store, context: c, limits: f.Limits, gate: gate, callbacks: callbacks, epoch: c.Observation.RootEpoch, catchUp: f.CatchUp, onStop: f.OnStop, logger: f.Logger, ctx: ctx, closeCh: make(chan struct{})}
 	return a, nil
 }
 
 func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (outErr error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	var authenticatedUC *types.UnicityCertificate
+	var authenticatedTR *certification.TechnicalRecord
 	defer func() {
-		if outErr != nil && a.onStop != nil && (errors.Is(outErr, configuredprogress.ErrBounds) || errors.Is(outErr, configuredprogress.ErrConflict) || errors.Is(outErr, configuredprogress.ErrUntrusted) || errors.Is(outErr, configuredprogress.ErrUnavailable) || errors.Is(outErr, ErrRecoveryBudget) || errors.Is(outErr, ErrRecoveryConflict) || errors.Is(outErr, ErrRecoveryUnavailable)) {
-			a.onStop(outErr)
+		if outErr != nil && terminalAdmissionError(outErr) {
+			if a.onStop != nil {
+				a.onStop(outErr)
+			}
+			a.pendingUC, a.pendingTR = nil, nil
+		} else if outErr == nil {
+			if a.pendingUC == nil || uc.GetRootRoundNumber() >= a.pendingUC.GetRootRoundNumber() {
+				a.pendingUC, a.pendingTR = nil, nil
+			}
+		} else if authenticatedUC != nil && !terminalAdmissionError(outErr) && a.ctx.Err() == nil {
+			if a.pendingUC == nil || authenticatedUC.GetRootRoundNumber() >= a.pendingUC.GetRootRoundNumber() {
+				a.pendingUC, a.pendingTR = authenticatedUC, authenticatedTR
+				a.pendingID++
+				if !a.retrying {
+					a.retrying = true
+					go a.retryPending()
+				}
+			}
 		}
 	}()
 	if a.closed {
@@ -86,6 +111,7 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 	if err != nil {
 		return err
 	}
+	authenticatedUC, authenticatedTR = o.Certificate(), o.TechnicalRecord()
 	p, _, err := a.store.PrepareObservation(ctx, a.context, o)
 	if err != nil {
 		if a.catchUp == nil || !errors.Is(err, configuredprogress.ErrConflict) && !errors.Is(err, configuredprogress.ErrUnavailable) {
@@ -146,10 +172,62 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 	return a.callbacks.DeliverDurable(ctx, current.Certificate(), current.TechnicalRecord())
 }
 func (a *journalAdmission) RootEpoch() uint64 { return a.epoch }
+func (a *journalAdmission) Pending() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.pendingUC != nil
+}
+
+func terminalAdmissionError(err error) bool {
+	return errors.Is(err, configuredprogress.ErrBounds) || errors.Is(err, configuredprogress.ErrConflict) || errors.Is(err, configuredprogress.ErrUntrusted) || errors.Is(err, ErrRecoveryBudget) || errors.Is(err, ErrRecoveryConflict)
+}
+
+// A bounded attempt is followed by increasing delay. It keeps the authenticated
+// target alive when every configured peer is temporarily unavailable.
+func (a *journalAdmission) retryPending() {
+	delay := time.Second
+	for {
+		timer := time.NewTimer(delay)
+		select {
+		case <-a.ctx.Done():
+			timer.Stop()
+			return
+		case <-a.closeCh:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		a.mu.Lock()
+		uc, tr, id := a.pendingUC, a.pendingTR, a.pendingID
+		if uc == nil || a.closed {
+			a.retrying = false
+			a.mu.Unlock()
+			return
+		}
+		a.mu.Unlock()
+		err := a.Submit(a.ctx, uc, tr)
+		a.mu.Lock()
+		if (err == nil || terminalAdmissionError(err)) && a.pendingID == id {
+			a.pendingUC, a.pendingTR = nil, nil
+		}
+		if a.pendingUC == nil || a.closed {
+			a.retrying = false
+			a.mu.Unlock()
+			return
+		}
+		a.mu.Unlock()
+		if delay < 8*time.Second {
+			delay *= 2
+		}
+	}
+}
 func (a *journalAdmission) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.closed = true
+	if !a.closed {
+		a.closed = true
+		close(a.closeCh)
+	}
 	return nil
 }
 
@@ -167,7 +245,11 @@ func (j ProposalJournal) RetainCandidate(ctx context.Context, b shardnode.Block,
 	if !bytes.Equal(b.ParentHash, p.Parent.Hash) {
 		return fmt.Errorf("configuredadmission: candidate parent differs from held executor head")
 	}
-	return j.Store.PutJournalCandidate(ctx, j.Context, j.Limits, configuredprogress.JournalCandidate{
+	err := j.Store.PutJournalCandidate(ctx, j.Context, j.Limits, configuredprogress.JournalCandidate{
 		Round: p.Round, Number: b.Number, ParentNumber: p.Parent.Number, Hash: b.Hash, StateRoot: b.StateRoot, ParentHash: b.ParentHash, ParentState: p.Parent.StateRoot, Raw: b.Raw, BlockSize: b.BlockSize, StateSize: b.StateSize, LocallyBuilt: locallyBuilt, AuthorizingUC: p.AuthorizingCertificate, AuthorizingTR: p.AuthorizingTechnicalRecord,
 	})
+	if !locallyBuilt && errors.Is(err, configuredprogress.ErrConflict) {
+		return fmt.Errorf("%w: %v", shardnode.ErrProposalRejected, err)
+	}
+	return err
 }

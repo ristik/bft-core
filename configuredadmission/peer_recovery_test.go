@@ -126,6 +126,20 @@ func TestPeerCatchUpBackfillsMissingCertifiedMiddle(t *testing.T) {
 	for _, entry := range image.Candidates {
 		require.True(t, entry.Certified)
 	}
+	// Raw-hash binding does not cover envelope metadata. A malicious peer can
+	// offer the same certified hash with conflicting metadata; that peer must
+	// be rejected without converting its store conflict into a process stop.
+	metadataOwner := &ExecutionRecovery{Store: returning, Context: journalCtx, JournalLimits: limits, Executor: exec, Gate: shardnode.NewFinalityGate(), Genesis: refs[0], Limits: RecoveryLimits{Blocks: 8, Bytes: 1024, Deadline: 3 * time.Second, Retries: 0}, Providers: []peer.ID{"bad-metadata"}}
+	metadataOwner.fetch = func(ctx context.Context, _ peer.ID, req shardnode.JournalFetchRequest) ([]shardnode.JournalFetchEntry, error) {
+		entries, err := served.FetchJournal(ctx, req)
+		if err == nil {
+			entries[0].Block.BlockSize++
+		}
+		return entries, err
+	}
+	metadataErr := metadataOwner.fetchFromPeers(context.Background(), refs[0], refs[1].Hash, false, nil)
+	require.ErrorIs(t, metadataErr, ErrRecoveryUnavailable)
+	require.False(t, metadataOwner.Terminal(metadataErr))
 	// A shard restart can lose journal B2/B3 while ureth still has them
 	// finalized. Fetch their authenticated bytes without rewinding finality.
 	aheadStore := open()
@@ -208,5 +222,6 @@ func TestPeerCatchUpBackfillsMissingCertifiedMiddle(t *testing.T) {
 	require.NoError(t, verifyErr)
 	defer blockedAdmission.Close()
 	require.ErrorIs(t, blockedAdmission.Submit(context.Background(), uc[3], tr[3]), ErrRecoveryUnavailable)
-	require.ErrorIs(t, stopped, ErrRecoveryUnavailable)
+	require.NoError(t, stopped, "peer unavailability must remain retryable")
+	require.True(t, blockedAdmission.(interface{ Pending() bool }).Pending(), "the authenticated target must be retried without another root delivery")
 }

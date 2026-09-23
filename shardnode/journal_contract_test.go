@@ -20,6 +20,63 @@ func (j *refusingJournal) RetainCandidate(context.Context, shardnode.Block, shar
 	return errors.New("journal fsync failed")
 }
 
+type conflictingFollowerJournal struct{}
+
+func (conflictingFollowerJournal) RetainCandidate(context.Context, shardnode.Block, shardnode.RoundParams, bool) error {
+	return shardnode.ErrProposalRejected
+}
+
+type followerBindingExecutor struct{ shardnode.Executor }
+
+func (followerBindingExecutor) CheckBlockBinding(context.Context, shardnode.Block, shardnode.RoundParams) error {
+	return nil
+}
+
+type followerProposal struct{ block shardnode.Block }
+
+func (d followerProposal) Publish(context.Context, uint64, shardnode.Block) error { return nil }
+func (d followerProposal) Await(context.Context, uint64) (shardnode.Block, error) {
+	return d.block, nil
+}
+
+func TestFollowerProposalConflictDeclinesSignWithoutStopping(t *testing.T) {
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	fake := executortest.New()
+	genesis, err := fake.GenesisBlock(context.Background())
+	require.NoError(t, err)
+	block := shardnode.Block{Number: 1, Hash: []byte("block hash"), ParentHash: genesis.Hash, StateRoot: []byte("state root"), Raw: []byte("payload")}
+	spy := &journalSignerSpy{}
+	r := shardnode.NewRound("follower", 8, types.ShardID{}, followerBindingExecutor{fake}, followerProposal{block}, signer, &recordingSubmitter{}, nil)
+	health := shardnode.NewHealth()
+	r.SetHealth(health)
+	r.SetProposalJournal(conflictingFollowerJournal{})
+	r.SetCertificationSigner(spy)
+	err = r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, "leader"))
+	require.ErrorIs(t, err, shardnode.ErrProposalRejected)
+	require.Zero(t, spy.calls)
+	require.Equal(t, "unready", health.Snapshot().ExecutionRecovery)
+}
+
+func TestFollowerJournalRefusesExecutorWithoutRawBinding(t *testing.T) {
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	fake := executortest.New()
+	genesis, err := fake.GenesisBlock(context.Background())
+	require.NoError(t, err)
+	block := shardnode.Block{Number: 1, Hash: []byte("block hash"), ParentHash: genesis.Hash, StateRoot: []byte("state root"), Raw: []byte("payload")}
+	journal := &refusingJournal{}
+	spy := &journalSignerSpy{}
+	r := shardnode.NewRound("follower", 8, types.ShardID{}, fake, followerProposal{block}, signer, &recordingSubmitter{}, nil)
+	r.SetHealth(shardnode.NewHealth())
+	r.SetProposalJournal(journal)
+	r.SetCertificationSigner(spy)
+	err = r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, "leader"))
+	require.ErrorContains(t, err, "lacks raw block binding support")
+	require.Zero(t, journal.calls)
+	require.Zero(t, spy.calls)
+}
+
 type journalDisseminator struct{ published int }
 
 func (d *journalDisseminator) Publish(context.Context, uint64, shardnode.Block) error {
@@ -44,7 +101,9 @@ func TestJournalFailurePreventsLeaderPublicationAndSignature(t *testing.T) {
 	j := &refusingJournal{}
 	spy := &journalSignerSpy{}
 	sub := &recordingSubmitter{}
-	r := shardnode.NewRound("journal-leader", 8, types.ShardID{}, executortest.New(), d, signer, sub, nil)
+	exec := executortest.New()
+	exec.AddEntries([]byte("block payload"))
+	r := shardnode.NewRound("journal-leader", 8, types.ShardID{}, exec, d, signer, sub, nil)
 	health := shardnode.NewHealth()
 	r.SetHealth(health)
 	r.SetProposalJournal(j)

@@ -408,6 +408,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		if serverErr != nil {
 			return fmt.Errorf("starting journal suffix server: %w", serverErr)
 		}
+		server.RestrictToPeers(providers)
 		server.Register(peer)
 		coordinator.Host, coordinator.Providers, coordinator.TransportLimits = peer, providers, shardnode.DefaultJournalTransportLimits()
 		node.SetJournalRecovery(coordinator, coordinator)

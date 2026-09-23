@@ -182,6 +182,11 @@ func (n *Node) SetCertificationSigner(s CertificationSigner) {
 // SetJournalAdmission selects the v2 persistence-before-LUC path. Call only on a node built
 // without a legacy LUC store. The same finality gate serializes progress commits and execution.
 func (n *Node) SetJournalAdmission(factory CertificateAdmissionFactory) error {
+	if _, ok := n.round.executor.(interface {
+		CheckBlockBinding(context.Context, Block, RoundParams) error
+	}); !ok {
+		return errors.New("shardnode: execution journal requires an executor with raw block binding support")
+	}
 	n.round.SetFinalityGate(n.recoveryDeps.Gate)
 	return n.client.SetCertificateAdmission(factory, n.recoveryDeps.Gate, n.round)
 }
@@ -294,7 +299,9 @@ func (n *Node) Run(ctx context.Context) error {
 			last := ""
 			for {
 				_, err := n.journalRecovery.Recover(gctx, nil)
-				if err == nil {
+				if err == nil && n.client.admissionPending() {
+					n.health.updateExecutionRecovery("unready", "authenticated certificate awaits bounded peer catch-up")
+				} else if err == nil {
 					n.health.updateExecutionRecovery("ready", "")
 				} else if n.journalRecovery.Terminal(err) {
 					n.health.updateExecutionRecovery("stopped", err.Error())

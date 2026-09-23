@@ -11,8 +11,9 @@ import (
 )
 
 var (
-	ErrAdmissionMode = errors.New("shardnode: configured certificate admission mode conflict")
-	ErrClientRunning = errors.New("shardnode: BFT client configuration is frozen while running")
+	ErrAdmissionMode    = errors.New("shardnode: configured certificate admission mode conflict")
+	ErrClientRunning    = errors.New("shardnode: BFT client configuration is frozen while running")
+	ErrProposalRejected = errors.New("shardnode: untrusted follower proposal rejected")
 )
 
 // AdmissionIdentity is the client-owned deployment context supplied to an optional admission
