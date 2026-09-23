@@ -12,7 +12,7 @@
 # enforces every corresponding check before voting (§5.5 of docs/design/f1-baseline.md).
 #
 # Usage:
-#   ./scripts/reth-paired-devnet.sh [validators] [rounds]      # defaults: 4 validators, 5 rounds
+#   ./scripts/reth-paired-devnet.sh [validators] [rounds]      # defaults: 4 validators, 10 blocks
 #
 # Needs: a `reth` binary at the pinned revision, curl, openssl, python3, and a built ./build/ubft.
 # Run from the repository root. Leaves test-nodes/ and its reth datadirs in place for inspection.
@@ -24,7 +24,7 @@ source helper.sh
 . scripts/lib/reth-pin.sh
 
 validators=${1:-4}
-rounds=${2:-5}
+rounds=${2:-10}
 partitionID=8
 
 rethEngineBase=18551
@@ -36,6 +36,9 @@ rethP2PBase=30401
 # client and verifies it by revision. It used to run the stock `reth` on PATH; that client cannot
 # start a shard node, so every paired lane was pointed at a client it would refuse.
 urethPinResolve || exit 1
+echo "bft source commit=$(git rev-parse HEAD)"
+echo "ureth source commit=$URETH_PIN_COMMIT binary sha256=$(shasum -a 256 "$URETH_BIN" | cut -d' ' -f1)"
+echo "registry artifact sha256=$(shasum -a 256 registrygenesis/seal-registry-v1.json | cut -d' ' -f1)"
 
 failures=0
 pass() { echo "  PASS: $1"; }
@@ -154,7 +157,7 @@ for i in $(seq 1 "$validators"); do
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) \
-    --http.api eth,net,web3,admin \
+    --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
     --port $((rethP2PBase + i - 1)) --disable-discovery \
     --ipcdisable \
     --builder.gaslimit 30000000 \
@@ -512,26 +515,32 @@ for i in $(seq 1 "$validators"); do
   export "EVM_ETH_URL_$i=http://127.0.0.1:$((rethEthBase + i - 1))"
 done
 
-# Every validator may lead block 1. Put the same signed transaction in each local mempool before
-# shard voting starts, so the first execution build can produce a real block.
+# Every validator may lead. P2P transaction propagation is disabled in M1, so seed the same
+# three paid nonce-ordered transactions into each local mempool before shard voting starts.
 txHash=""
-for i in $(seq 1 "$validators"); do
-  sent=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase + i - 1))" \
-    -chain-id 31337 -nonce 0 2>&1)
-  if [[ "$sent" != 0x* ]]; then
-    fail "could not seed validator $i's mempool: $sent"
-    exit 1
-  fi
-  if [ -n "$txHash" ] && [ "$sent" != "$txHash" ]; then
-    fail "validators received different signed transaction hashes: $txHash / $sent"
-    exit 1
-  fi
-  txHash=$sent
+for nonce in 0 1 2; do
+  expected=""
+  for i in $(seq 1 "$validators"); do
+    sent=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase + i - 1))" \
+      -chain-id 31337 -nonce "$nonce" 2>&1)
+    if [[ "$sent" != 0x* ]]; then
+      fail "could not seed validator $i's mempool at nonce $nonce: $sent"
+      exit 1
+    fi
+    if [ -n "$expected" ] && [ "$sent" != "$expected" ]; then
+      fail "validators received different signed transaction hashes at nonce $nonce: $expected / $sent"
+      exit 1
+    fi
+    expected=$sent
+  done
+  [ "$nonce" = 0 ] && txHash=$expected
+  echo "  paid nonce $nonce hash=$expected seeded on all $validators reth clients"
 done
-pass "seeded $txHash in every reth mempool before block 1"
+pass "seeded three paid user transactions in every reth mempool before block 1"
 
 echo
 echo "=== 5. the v2 bootstrap certifies a real EVM block 1 ==="
+preflightFailures=$failures
 ./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1
 
 echo "waiting for block 1 and a certificate (up to 180s) ..."
@@ -560,54 +569,35 @@ else
 fi
 
 echo
-echo "=== 6. block 2 fails closed until U5d supplies a parent witness ==="
-refused=false
-for _ in $(seq 1 60); do
-  if grep -q 'v2 parent registry witness unavailable: parent block 1' test-nodes/evm*/debug.log 2>/dev/null; then
-    refused=true
-    break
-  fi
-  sleep 2
-done
-if $refused; then
-  pass "block 2 was refused with ErrParentWitnessUnavailable (U5d pending)"
+echo "=== 6. D1 continuous certified execution through block $rounds ==="
+echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, proof window=64 blocks"
+if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout 900; then
+  pass "D1 observed $rounds consecutive blocks with four agreeing canonical heads"
 else
-  fail "no typed post-genesis parent-witness refusal was observed within 120s"
+  fail "D1 continuous block observation failed"
+  for i in $(seq 1 "$validators"); do
+    echo "--- evm$i at stall ---"; tail -40 "test-nodes/evm$i/debug.log" 2>/dev/null
+    echo "--- reth$i at stall ---"; tail -40 "test-nodes/reth$i/reth.log" 2>/dev/null
+  done
 fi
 
-echo "=== 7. every validator's reth converged on that same canonical block ==="
-heads=""
-for i in $(seq 1 "$validators"); do
-  blk=$(rpc "http://127.0.0.1:$((rethEthBase + i - 1))" eth_getBlockByNumber '["latest", false]')
-  num=$(echo "$blk" | pyget "['result']['number']")
-  hash=$(echo "$blk" | pyget "['result']['hash']")
-  echo "  reth$i head: number=$num hash=$hash"
-  heads="$heads$num:$hash"$'\n'
-done
-agree=$(printf '%s' "$heads" | sort -u | grep -c . )
-if [ "$agree" = "1" ]; then
-  pass "all $validators reth instances agree on the same canonical head"
-else
-  fail "reth instances disagree on the canonical head:"; printf '%s' "$heads"
-fi
-
-# The certified state root must be reth's own, not something the framework invented.
-certRoot=$(grep 'accepted certificate' test-nodes/evm1/debug.log | tail -1)
-if [ -n "$certRoot" ]; then
-  pass "latest certificate: $(echo "$certRoot" | grep -oE 'partitionRound=[0-9]+ rootRound=[0-9]+' | head -1)"
-fi
-
+divergenceLogged=false
 for i in $(seq 1 "$validators"); do
   if grep -qiE 'diverge|equivocat|impossible certificate ordering' "test-nodes/evm$i/debug.log" 2>/dev/null; then
     fail "validator $i logged divergence/equivocation"
+    divergenceLogged=true
   fi
 done
-grep -qiE 'diverge|equivocat|impossible certificate ordering' test-nodes/evm*/debug.log 2>/dev/null || pass "no validator logged divergence or equivocation"
-
-echo
-if [ "$failures" -gt 0 ]; then
-  echo "=== paired devnet: $failures check(s) failed ==="
-  exit 1
+if ! $divergenceLogged; then
+  pass "no validator logged divergence or equivocation"
 fi
-echo "=== paired devnet: the Go adapter drove real reth to a certified chain. ==="
-echo "=== This is the real-execution evidence F1 (#9) owes; the curl scripts are not. ==="
+
+# #232 is a known independent startup-profile failure. Keep it visible; its preflight above
+# records the exact observed diagnosis, and D1's own verdict below is separate.
+echo "3f status: see section 3f (known issue #232; FAIL until fixed)"
+if [ "$failures" -gt "$preflightFailures" ]; then
+  echo "D1 FAIL ($((failures - preflightFailures)) lane check(s) failed)"
+else
+  echo "D1 PASS"
+fi
+[ "$failures" -eq 0 ]

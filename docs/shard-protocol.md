@@ -132,6 +132,14 @@ or fall back to using its state root as the block hash (see
 
 ## 6. The quiet-round rule
 
+**D1 amendment (2026-09-23).** On the Engine API path, an empty user
+transaction list still produces an execution block. The beacon-root system
+transition can change its state root, and the block carries a seal companion
+and a distinct block hash. In the four-pair real-reth lane, this advanced B2–B10
+without user transactions. The quiet rule below still applies when an executor
+actually returns an unchanged state root and no block; transaction count alone
+is not the quiet predicate.
+
 `bft-go-base/types/input_record.go`'s `IsValid()`:
 
 - `Hash == PreviousHash` ⇒ `BlockHash` **must** be nil
