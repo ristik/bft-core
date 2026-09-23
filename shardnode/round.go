@@ -738,7 +738,16 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("producing round %d block: %w", exp.Round, err)
 	}
 	if leader != r.nodeID && r.journal != nil {
+		if binder, ok := r.executor.(interface {
+			CheckBlockBinding(context.Context, Block, RoundParams) error
+		}); ok {
+			if err := binder.CheckBlockBinding(ctx, block, params); err != nil {
+				return fmt.Errorf("retaining follower candidate: %w", err)
+			}
+		}
 		if err := r.journal.RetainCandidate(ctx, block, params, false); err != nil {
+			r.health.updateExecutionRecovery("stopped", err.Error())
+			r.metrics.recordRecoveryStop(ctx)
 			return fmt.Errorf("retaining follower candidate before verification/signing: %w", err)
 		}
 	}
@@ -1553,6 +1562,8 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		}
 		if r.journal != nil {
 			if err := r.journal.RetainCandidate(ctx, block, params, true); err != nil {
+				r.health.updateExecutionRecovery("stopped", err.Error())
+				r.metrics.recordRecoveryStop(ctx)
 				return Block{}, params, fmt.Errorf("retaining leader candidate before publication: %w", err)
 			}
 		}

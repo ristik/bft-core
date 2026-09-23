@@ -45,6 +45,8 @@ func TestJournalFailurePreventsLeaderPublicationAndSignature(t *testing.T) {
 	spy := &journalSignerSpy{}
 	sub := &recordingSubmitter{}
 	r := shardnode.NewRound("journal-leader", 8, types.ShardID{}, executortest.New(), d, signer, sub, nil)
+	health := shardnode.NewHealth()
+	r.SetHealth(health)
 	r.SetProposalJournal(j)
 	r.SetCertificationSigner(spy)
 	err = r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, "journal-leader"))
@@ -53,4 +55,5 @@ func TestJournalFailurePreventsLeaderPublicationAndSignature(t *testing.T) {
 	require.Zero(t, d.published, "a proposal cannot escape before its body is durable")
 	require.Zero(t, spy.calls, "the signer cannot authorize an unretained proposal")
 	require.Empty(t, sub.got)
+	require.Equal(t, "stopped", health.Snapshot().ExecutionRecovery)
 }

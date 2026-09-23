@@ -21,6 +21,7 @@ type Metrics struct {
 	verifyDuration  metric.Float64Histogram
 	quorumLatency   metric.Float64Histogram
 	irDivergences   metric.Int64Counter
+	recoveryStops   metric.Int64Counter
 }
 
 // NewMetrics registers this package's instruments on meter. See
@@ -59,6 +60,10 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	if m.irDivergences, err = meter.Int64Counter("shardnode.ir.divergences",
 		metric.WithDescription("Locally-detected InputRecord problems: a local ValidRequest mirror failure, or a reconcile that needed to run")); err != nil {
 		return nil, fmt.Errorf("creating ir.divergences counter: %w", err)
+	}
+	if m.recoveryStops, err = meter.Int64Counter("shardnode.execution_recovery.stops",
+		metric.WithDescription("Journal execution recovery entered an operator-visible stop state")); err != nil {
+		return nil, fmt.Errorf("creating execution_recovery.stops counter: %w", err)
 	}
 	return m, nil
 }
@@ -110,4 +115,11 @@ func (m *Metrics) recordIRDivergence(ctx context.Context, reason string) {
 		return
 	}
 	m.irDivergences.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", reason)))
+}
+
+func (m *Metrics) recordRecoveryStop(ctx context.Context) {
+	if m == nil {
+		return
+	}
+	m.recoveryStops.Add(ctx, 1)
 }

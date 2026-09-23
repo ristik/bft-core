@@ -181,6 +181,9 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 }
 
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
+	if flags.ExecutionJournal != "" && flags.EvidenceRecover {
+		return errors.New("--evidence-recover cannot be combined with --execution-journal: evidence recovery bypasses durable journal admission")
+	}
 	// The record gate needs the store it reads. Checked before anything is built so the refusal is the
 	// operator's configuration, not a downstream symptom of a node running without the record it was
 	// asked to consult.

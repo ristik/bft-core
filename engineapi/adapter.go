@@ -4,10 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"sync"
+
+	"github.com/ethereum/go-ethereum/common"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/trie"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -470,6 +476,101 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 		Witnesses:  witnesses,
 		Provenance: resp.SealCompanion.Provenance,
 	})
+}
+
+// CheckBlockBinding computes the Cancun header hash from the raw envelope and
+// the independently derived beacon root. It runs before a follower retains
+// a candidate, so a leader cannot consume journal capacity with arbitrary
+// claimed hashes. This does not import the payload or move forkchoice.
+func (a *Adapter) CheckBlockBinding(ctx context.Context, b shardnode.Block, p shardnode.RoundParams) error {
+	envelope, err := DecodeBlock(b)
+	if err != nil {
+		return err
+	}
+	canonical, err := json.Marshal(envelope)
+	if err != nil || !bytes.Equal(canonical, b.Raw) {
+		return errors.New("engineapi: proposal envelope is not canonical JSON; refusing journal retention")
+	}
+	if a.verifier == nil {
+		return errors.New("engineapi: block binding requires a verifier context")
+	}
+	if len(envelope.ExpectedBlobVersionedHashes) != 0 {
+		return errors.New("engineapi: blob transactions are not admitted")
+	}
+	if envelope.SealCompanion == nil || len(envelope.SealCompanion.Provenance) > 16 {
+		return errors.New("engineapi: missing or oversized seal companion")
+	}
+	companionUC, companionTR, err := decodeSealCompanionWitnesses(envelope.SealCompanion.Witnesses)
+	if err != nil {
+		return err
+	}
+	cu, err := types.Cbor.Marshal(companionUC)
+	if err != nil {
+		return err
+	}
+	pu, err := types.Cbor.Marshal(p.AuthorizingCertificate)
+	if err != nil {
+		return err
+	}
+	ct, err := types.Cbor.Marshal(companionTR)
+	if err != nil {
+		return err
+	}
+	pt, err := types.Cbor.Marshal(p.AuthorizingTechnicalRecord)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(cu, pu) || !bytes.Equal(ct, pt) {
+		return errors.New("engineapi: companion authorization differs from held certificate and technical record")
+	}
+	input, err := a.deriveV2(ctx, p, p.AuthorizingCertificate, p.AuthorizingTechnicalRecord)
+	if err != nil {
+		return fmt.Errorf("engineapi: block binding authorizing pair: %w", err)
+	}
+	parentHash, err := toData32(p.Parent.Hash)
+	if err != nil {
+		return err
+	}
+	parentHeader, err := a.eth.GetBlockByHash(ctx, parentHash)
+	if err != nil {
+		return fmt.Errorf("engineapi: block binding parent header: %w", err)
+	}
+	attrs := DeriveAttributesV2(input.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
+	payload := envelope.ExecutionPayload
+	if !bytes.Equal(envelope.SealCompanion.RootInput, input.Encoded) || !bytes.Equal(payload.ExtraData, input.Commitment[:]) {
+		return ErrCompanionBinding
+	}
+	if b.Number != uint64(payload.BlockNumber) || !bytes.Equal(b.Hash, payload.BlockHash[:]) || !bytes.Equal(b.ParentHash, payload.ParentHash[:]) || !bytes.Equal(b.StateRoot, payload.StateRoot[:]) || !bytes.Equal(p.Parent.Hash, payload.ParentHash[:]) || b.Number != p.Parent.Number+1 {
+		return errors.New("engineapi: outer block identity differs from raw execution payload")
+	}
+	withdrawals := make([]*gethtypes.Withdrawal, 0, len(payload.Withdrawals))
+	for _, w := range payload.Withdrawals {
+		withdrawals = append(withdrawals, &gethtypes.Withdrawal{Index: uint64(w.Index), Validator: uint64(w.ValidatorIndex), Address: common.Address(w.Address), Amount: uint64(w.Amount)})
+	}
+	if len(payload.LogsBloom) != 256 || len(payload.ExtraData) > 32 {
+		return errors.New("engineapi: invalid raw header bloom or extraData length")
+	}
+	txs := make(gethtypes.Transactions, len(payload.Transactions))
+	for i, tx := range payload.Transactions {
+		var decoded gethtypes.Transaction
+		if err := decoded.UnmarshalBinary(tx); err != nil {
+			return fmt.Errorf("engineapi: decoding raw transaction %d: %w", i, err)
+		}
+		if len(decoded.BlobHashes()) != 0 {
+			return errors.New("engineapi: blob transaction is not admitted")
+		}
+		txs[i] = &decoded
+	}
+	blobGas, excessBlobGas := uint64(payload.BlobGasUsed), uint64(payload.ExcessBlobGas)
+	beaconRoot := common.Hash(attrs.ParentBeaconBlockRoot)
+	withdrawalsRoot := gethtypes.DeriveSha(gethtypes.Withdrawals(withdrawals), trie.NewStackTrie(nil))
+	header := &gethtypes.Header{
+		ParentHash: common.Hash(payload.ParentHash), UncleHash: gethtypes.EmptyUncleHash, Coinbase: common.Address(payload.FeeRecipient), Root: common.Hash(payload.StateRoot), TxHash: gethtypes.DeriveSha(txs, trie.NewStackTrie(nil)), ReceiptHash: common.Hash(payload.ReceiptsRoot), Bloom: gethtypes.BytesToBloom(payload.LogsBloom), Difficulty: new(big.Int), Number: new(big.Int).SetUint64(uint64(payload.BlockNumber)), GasLimit: uint64(payload.GasLimit), GasUsed: uint64(payload.GasUsed), Time: uint64(payload.Timestamp), Extra: payload.ExtraData, MixDigest: common.Hash(payload.PrevRandao), BaseFee: new(big.Int).SetUint64(uint64(payload.BaseFeePerGas)), WithdrawalsHash: &withdrawalsRoot, BlobGasUsed: &blobGas, ExcessBlobGas: &excessBlobGas, ParentBeaconRoot: &beaconRoot,
+	}
+	if computed := header.Hash(); computed != common.Hash(payload.BlockHash) {
+		return fmt.Errorf("engineapi: raw payload block hash %x is not its computed header hash %x", payload.BlockHash, computed)
+	}
+	return nil
 }
 
 // Verify authenticates the block-bound certificate and technical record against this node's v2
