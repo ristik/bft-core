@@ -545,9 +545,25 @@ func (s *Store) LoadJournal(ctx context.Context, c Context, limits JournalLimits
 	if err := limits.check(); err != nil {
 		return JournalSnapshot{}, err
 	}
-	state, _, err := s.Load(ctx, c)
+	// Progress and journal are read in separate Bolt transactions because progress
+	// verification runs outside a transaction. A certificate can commit between
+	// those reads. Retry that moving snapshot instead of treating it as damage.
+	for attempt := 0; attempt < 3; attempt++ {
+		image, token, err := s.loadJournalOnce(ctx, c, limits)
+		if token.t == nil || s.Unchanged(token) {
+			return image, err
+		}
+	}
+	return JournalSnapshot{}, ErrStale
+}
+
+func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLimits) (JournalSnapshot, ProgressToken, error) {
+	state, token, err := s.Load(ctx, c)
 	if err != nil {
-		return JournalSnapshot{}, err
+		return JournalSnapshot{}, ProgressToken{}, err
+	}
+	if err := s.at("after-journal-progress-load"); err != nil {
+		return JournalSnapshot{}, token, err
 	}
 	var out JournalSnapshot
 	err = s.db.View(func(tx *bolt.Tx) error {
@@ -669,5 +685,5 @@ func (s *Store) LoadJournal(ctx context.Context, c Context, limits JournalLimits
 		}
 		return nil
 	})
-	return out, err
+	return out, token, err
 }
