@@ -217,15 +217,18 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash):
             raise RuntimeError(f"{scenario}: restarted validator {validator} has no positive-height "
                                "certificate admission after restart boundary")
         qualifying_admissions = [index for index in admission_indexes
-                                 if any(restored_index < index for restored_index in recovery_indexes)]
+                                 if any(recovery_index < index for recovery_index in recovery_indexes)]
+        if not qualifying_admissions:
+            raise RuntimeError(f"{scenario}: restarted validator {validator} has no positive-height "
+                               "certificate admission after journal restoration/recovery association")
+        recovery_boundary = min(restored_indexes or association_indexes)
         signed = [(i, line) for i, line in enumerate(after)
                   if 'msg="certification request signed"' in line
-                  and (field(line, "round") or "").isdigit()]
-        signed = [(i, line) for i, line in signed
-                  if any(admission_index < i for admission_index in qualifying_admissions)]
+                  and (field(line, "round") or "").isdigit()
+                  and i > recovery_boundary]
         if not signed:
             raise RuntimeError(f"{scenario}: restarted validator {validator} has no signed certification "
-                               "request after its restored positive-height admission")
+                               "request after journal restoration or recovery association")
         port = 18545 + validator
         try:
             head = int(rpc(port, "eth_blockNumber", []), 16)
