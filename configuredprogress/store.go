@@ -103,6 +103,7 @@ type Store struct {
 	db         *bolt.DB
 	settings   Settings
 	checkpoint func(string) error
+	journal    bool
 }
 
 // OpenConfiguredV2 opens an isolated v2 database without creating its bucket or initializing data.

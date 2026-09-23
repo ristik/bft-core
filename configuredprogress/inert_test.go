@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNoProductionPackageImportsConfiguredProgress(t *testing.T) {
+func TestOnlyJournalWiringImportsConfiguredProgress(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
 	const importPath = "github.com/unicitynetwork/bft-core/configuredprogress"
@@ -46,5 +46,6 @@ func TestNoProductionPackageImportsConfiguredProgress(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	require.Empty(t, importers, "inactive configured-progress store must have no production importer")
+	require.Equal(t, []string{filepath.Join("cli", "ubft", "cmd", "shard_node_run.go"), filepath.Join("configuredadmission", "journal.go")}, importers,
+		"configured progress is activated only through explicit journal wiring")
 }

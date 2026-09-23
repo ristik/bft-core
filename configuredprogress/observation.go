@@ -219,6 +219,9 @@ func (s *Store) PrepareObservation(ctx context.Context, c Context, o rootinput.V
 		if i.control.Revision != 0 {
 			return PreparedObservation{}, 0, fmt.Errorf("%w: missing observed", ErrUntrusted)
 		}
+		if s.journal && candidate.observation.Class() != evmroot.OriginBootstrapV2 {
+			return PreparedObservation{}, 0, fmt.Errorf("%w: a fresh execution journal must begin with the configured bootstrap certificate", ErrUnavailable)
+		}
 		return s.prepareObservationMutation(i, candidate, ObservationAdvanced)
 	}
 	rel, err := compareObservations(i.observed.observation, candidate.observation)
@@ -298,6 +301,16 @@ func (s *Store) CommitObservation(p PreparedObservation) (rootinput.VerifiedObse
 		}
 		if err := b.Put(controlKey, pr.next); err != nil {
 			return err
+		}
+		// Once a journal marker exists, no caller can bypass the atomic association merely by
+		// reopening Store without calling EnableJournal. The marker, not process memory, governs
+		// the durable observation contract.
+		if b.Get(journalMetaKey) != nil {
+			if err := s.appendJournalObservation(tx, pr.current, pr.before.descriptorDigest); err != nil {
+				return err
+			}
+		} else if s.journal {
+			return fmt.Errorf("%w: enabled journal marker missing", ErrUnavailable)
 		}
 		return s.at("before-observation-commit")
 	})

@@ -175,6 +175,19 @@ func (n *Node) SetCertificationSigner(s CertificationSigner) {
 	n.round.SetCertificationSigner(s)
 }
 
+// SetJournalAdmission selects the v2 persistence-before-LUC path. Call only on a node built
+// without a legacy LUC store. The same finality gate serializes progress commits and execution.
+func (n *Node) SetJournalAdmission(factory CertificateAdmissionFactory) error {
+	n.round.SetFinalityGate(n.recoveryDeps.Gate)
+	return n.client.SetCertificateAdmission(factory, n.recoveryDeps.Gate, n.round)
+}
+
+// MarkJournalRestored preserves the local-key non-voting rule when progress comes from the v2
+// journal rather than the legacy LUC checkpoint. An external authority remains independently fenced.
+func (n *Node) MarkJournalRestored(round uint64) {
+	n.round.MarkRestored(round)
+}
+
 // SetCertifiedRecordStatus reports the outcome of reloading the certified-block record (#14) in health. It
 // is a status only: nothing about rounds, voting or signing reads it.
 func (n *Node) SetCertifiedRecordStatus(outcome, detail string) {
