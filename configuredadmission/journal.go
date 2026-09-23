@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/unicitynetwork/bft-core/certifiedstore"
@@ -25,6 +26,7 @@ type JournalFactory struct {
 	Limits  configuredprogress.JournalLimits
 	CatchUp func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
 	OnStop  func(error)
+	Logger  *slog.Logger
 }
 
 type journalAdmission struct {
@@ -38,6 +40,7 @@ type journalAdmission struct {
 	epoch     uint64
 	catchUp   func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
 	onStop    func(error)
+	logger    *slog.Logger
 }
 
 func journalContext(origin registrygenesis.GenesisOrigin, id shardnode.AdmissionIdentity) (configuredprogress.Context, error) {
@@ -64,7 +67,7 @@ func (f JournalFactory) Start(ctx context.Context, id shardnode.AdmissionIdentit
 	if _, err = f.Store.LoadJournal(ctx, c, f.Limits); err != nil {
 		return nil, fmt.Errorf("loading execution journal: %w", err)
 	}
-	a := &journalAdmission{store: f.Store, context: c, limits: f.Limits, gate: gate, callbacks: callbacks, epoch: c.Observation.RootEpoch, catchUp: f.CatchUp, onStop: f.OnStop}
+	a := &journalAdmission{store: f.Store, context: c, limits: f.Limits, gate: gate, callbacks: callbacks, epoch: c.Observation.RootEpoch, catchUp: f.CatchUp, onStop: f.OnStop, logger: f.Logger}
 	return a, nil
 }
 
@@ -100,7 +103,7 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 	if err != nil {
 		return err
 	}
-	current, _, err := a.store.CommitObservation(p)
+	current, outcome, err := a.store.CommitObservation(p)
 	release()
 	if err != nil {
 		return fmt.Errorf("durable journal admission: %w", err)
@@ -109,6 +112,17 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 	image, err := a.store.LoadJournal(ctx, a.context, a.limits)
 	if err != nil {
 		return fmt.Errorf("verifying admitted execution journal: %w", err)
+	}
+	if a.logger != nil && outcome != configuredprogress.ObservationDuplicate && outcome != configuredprogress.ObservationStale {
+		uc := current.Certificate()
+		var height uint64 // Zero means the durable certificate has no retained body yet.
+		for _, entry := range image.Candidates {
+			if entry.Certified && entry.ResultingUC != nil && entry.ResultingUC.GetRootRoundNumber() == uc.GetRootRoundNumber() && entry.ResultingUC.GetRoundNumber() == uc.GetRoundNumber() && bytes.Equal(entry.Candidate.Hash, uc.InputRecord.BlockHash) {
+				height = entry.Candidate.Number
+				break
+			}
+		}
+		a.logger.InfoContext(ctx, "certificate admitted", slog.String("block", fmt.Sprintf("%x", uc.InputRecord.BlockHash)), slog.Uint64("height", height), slog.Uint64("round", uc.GetRoundNumber()), slog.Uint64("rootRound", uc.GetRootRoundNumber()))
 	}
 	if a.catchUp != nil {
 		for _, observed := range image.Observations {

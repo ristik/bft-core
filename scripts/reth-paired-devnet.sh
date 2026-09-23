@@ -101,7 +101,7 @@ boundedRun() {
 
 # Refuse to run alongside a shard node left over from an earlier run. Sections 4-7 take their
 # evidence from test-nodes/evmN/debug.log by grep, so a stale process still appending to that file
-# can supply the "accepted certificate" line this lane treats as proof — and a stale process holding
+# can supply the "certificate admitted" line this lane treats as proof — and a stale process holding
 # one of the validator ports silently reduces the cluster this lane claims to have started. Found
 # for real: a `shard-node run` from the previous day was still writing to evm1/debug.log during a
 # passing run. Fail loudly instead of producing evidence of unclear provenance.
@@ -550,10 +550,7 @@ for _ in $(seq 1 90); do
   rcpt=$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionReceipt "[\"$txHash\"]")
   blkNum=$(echo "$rcpt" | pyget "['result']['blockNumber']")
   if [ -n "$blkNum" ] && [ "$blkNum" != "None" ]; then mined=true; fi
-  # Journal admission delivers directly to the round, so the former BFTClient
-  # "accepted certificate" log is absent. A parent-1 witness is acquired only
-  # after the block-1 certificate was admitted and execution advanced.
-  if grep -q 'acquired certified parent registry witness.*parentNumber=1 ' test-nodes/evm1/debug.log 2>/dev/null; then certified=true; fi
+  if grep -q 'msg="certificate admitted".* height=1 ' test-nodes/evm1/debug.log 2>/dev/null; then certified=true; fi
   $mined && $certified && break
   sleep 2
 done

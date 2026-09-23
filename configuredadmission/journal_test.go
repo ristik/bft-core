@@ -1,8 +1,12 @@
 package configuredadmission
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -13,6 +17,33 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+func TestJournalAdmissionLogsDurableCertificateOnce(t *testing.T) {
+	chain, origin, ctx, id := adapterFixture(t)
+	limits := configuredprogress.JournalLimits{Candidates: 2, Observations: 3, Bytes: 16 << 20}
+	s, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 2})
+	require.NoError(t, err)
+	defer s.Close()
+	_, _, err = s.Initialize(context.Background(), ctx)
+	require.NoError(t, err)
+	require.NoError(t, s.EnableJournal(context.Background(), ctx, limits))
+	var output bytes.Buffer
+	a, err := (JournalFactory{Store: s, Origin: origin, Limits: limits, Logger: slog.New(slog.NewTextHandler(&output, nil))}).Start(context.Background(), id, adapterGate{}, shardnode.AdmissionCallbacks{
+		AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {},
+		DeliverDurable:    func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error { return nil },
+	})
+	require.NoError(t, err)
+	defer a.Close()
+	bootstrap, bootTR := journalBootstrap(t, chain)
+	require.NoError(t, a.Submit(context.Background(), bootstrap, bootTR))
+	putAdapterB1(t, s, ctx, limits, chain, bootstrap, bootTR)
+	first, firstTR := signAdapterObservation(t, chain)
+	require.NoError(t, a.Submit(context.Background(), first, firstTR))
+	require.NoError(t, a.Submit(context.Background(), first, firstTR))
+	line := fmt.Sprintf("msg=\"certificate admitted\" block=%x height=1 round=%d rootRound=%d", chain.Blocks[1].Hash.Bytes(), first.GetRoundNumber(), first.GetRootRoundNumber())
+	require.Contains(t, output.String(), line)
+	require.Equal(t, 2, strings.Count(output.String(), "msg=\"certificate admitted\""), "bootstrap and B1 each admit once; duplicate delivery does not log again")
+}
 
 func journalBootstrap(t *testing.T, c *certifiedchain.Chain) (*types.UnicityCertificate, *certification.TechnicalRecord) {
 	t.Helper()
