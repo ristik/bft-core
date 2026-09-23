@@ -247,26 +247,40 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash, recovery_star
                       and block.get("hash", "").removeprefix("0x").lower() == expected_hash)
             # Also require agreement at the live head, so a stale common prefix cannot satisfy
             # rejoin after the recovering process has fallen behind the survivor quorum.
-            live_hashes = {}
+            survivor_heads = {}
             for peer in range(1, 5):
+                if peer == validator:
+                    continue
                 try:
                     peer_head = int(rpc(18544 + peer, "eth_blockNumber", []), 16)
-                    peer_block = rpc(18544 + peer, "eth_getBlockByNumber", [hex(peer_head), False])
-                    if peer_block:
-                        peer_hash = peer_block.get("hash", "").removeprefix("0x").lower()
-                        live_hashes.setdefault((peer_head, peer_hash), []).append(peer)
+                    survivor_heads[peer] = peer_head
                 except (OSError, ValueError, RuntimeError):
                     pass
-            live_quorum = max(live_hashes.items(), key=lambda item: len(item[1])) if live_hashes else None
-            live_agrees = bool(live_quorum and len(live_quorum[1]) >= 3
-                               and live_quorum[0] in live_hashes
-                               and (head, (block or {}).get("hash", "").removeprefix("0x").lower()) == live_quorum[0])
+            common_height = min(survivor_heads.values()) if len(survivor_heads) == 3 else None
+            survivor_hashes = []
+            if common_height is not None:
+                for peer in survivor_heads:
+                    try:
+                        peer_block = rpc(18544 + peer, "eth_getBlockByNumber", [hex(common_height), False])
+                        survivor_hashes.append(peer_block and peer_block.get("hash", "").removeprefix("0x").lower())
+                    except (OSError, ValueError, RuntimeError):
+                        survivor_hashes.append(None)
+            recovery_hash = None
+            if common_height is not None and head is not None and head >= common_height:
+                try:
+                    recovery_block = rpc(18544 + validator, "eth_getBlockByNumber", [hex(common_height), False])
+                    recovery_hash = recovery_block and recovery_block.get("hash", "").removeprefix("0x").lower()
+                except (OSError, ValueError, RuntimeError):
+                    pass
+            live_agrees = bool(common_height is not None and len(survivor_hashes) == 3
+                               and None not in survivor_hashes and len(set(survivor_hashes)) == 1
+                               and recovery_hash == survivor_hashes[0])
             last_state = {"restored": bool(restored_indexes), "admissions": len(admissions),
                           "admissionsAfterRecovery": len(qualifying_admissions),
                           "firstAssociationHeight": first_association and first_association["height"],
                           "furtherCertifiedHeights": sorted(later_heights),
                           "signed": len(signed), "head": head,
-                          "liveHeadAgreement": live_agrees,
+                          "liveHeadAgreement": live_agrees, "survivorCommonHeight": common_height,
                           "blockHash": block and block.get("hash"), "headError": head_error}
             if (recovery_indexes and qualifying_admissions and first_association
                     and len(later_heights) >= 3 and signed and agrees and live_agrees):
@@ -323,13 +337,19 @@ def check_proof_corrupt_recovery(nodes, recovery_started):
         agreed = False
         try:
             head = int(rpc(18545, "eth_blockNumber", []), 16)
-            block = rpc(18545, "eth_getBlockByNumber", [hex(head), False])
-            others = []
+            survivor_heads = []
             for validator in (2, 3, 4):
                 other_head = int(rpc(18544 + validator, "eth_blockNumber", []), 16)
-                other = rpc(18544 + validator, "eth_getBlockByNumber", [hex(other_head), False])
-                others.append((other_head, other.get("hash", "").removeprefix("0x").lower()))
-            agreed = (head, block.get("hash", "").removeprefix("0x").lower()) in others
+                survivor_heads.append(other_head)
+            common_height = min(survivor_heads)
+            survivor_hashes = []
+            for validator in (2, 3, 4):
+                other = rpc(18544 + validator, "eth_getBlockByNumber", [hex(common_height), False])
+                survivor_hashes.append(other and other.get("hash", "").removeprefix("0x").lower())
+            recovered = rpc(18545, "eth_getBlockByNumber", [hex(common_height), False])
+            recovered_hash = recovered and recovered.get("hash", "").removeprefix("0x").lower()
+            agreed = (head >= common_height and None not in survivor_hashes
+                      and len(set(survivor_hashes)) == 1 and recovered_hash == survivor_hashes[0])
         except (OSError, RuntimeError, KeyError, TypeError, ValueError):
             head = None
         if first and len(further) >= 3 and signed and agreed:
