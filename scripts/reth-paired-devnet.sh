@@ -36,6 +36,9 @@ rethP2PBase=30401
 # client and verifies it by revision. It used to run the stock `reth` on PATH; that client cannot
 # start a shard node, so every paired lane was pointed at a client it would refuse.
 urethPinResolve || exit 1
+echo "bft source commit=$(git rev-parse HEAD)"
+echo "ureth source commit=$URETH_PIN_COMMIT binary sha256=$(shasum -a 256 "$URETH_BIN" | cut -d' ' -f1)"
+echo "registry artifact sha256=$(shasum -a 256 registrygenesis/seal-registry-v1.json | cut -d' ' -f1)"
 
 failures=0
 pass() { echo "  PASS: $1"; }
