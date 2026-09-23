@@ -273,6 +273,7 @@ function start_one_evm_validator() {
   done
 
   local executorArgs=()
+  local shardConfArgs=(--shard-conf "test-nodes/shard-conf-${partitionID}_0.json")
   if [ "$executor" == "engine-api" ]; then
     local engineURLVar="EVM_ENGINE_URL_$i" ethURLVar="EVM_ETH_URL_$i"
     local engineURL="${!engineURLVar:-http://127.0.0.1:8551}"
@@ -283,7 +284,8 @@ function start_one_evm_validator() {
 	    echo "EVM_GENESIS_FILE requires EVM_FULL_SHARD_CONF" >&2
 	    return 1
 	  fi
-	  executorArgs+=(--genesis "$EVM_GENESIS_FILE" --full-shard-conf "$EVM_FULL_SHARD_CONF")
+	  executorArgs+=(--genesis "$EVM_GENESIS_FILE")
+	  shardConfArgs=(--full-shard-conf "$EVM_FULL_SHARD_CONF")
 	fi
   fi
 
@@ -299,7 +301,7 @@ function start_one_evm_validator() {
   build/ubft shard-node run --home "test-nodes/evm$i" --executor "$executor" \
     --address "/ip4/127.0.0.1/tcp/$port" --bootnodes "$bootnodes" \
     --trust-base test-nodes/trust-base.json \
-    --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
+    ${shardConfArgs[@]+"${shardConfArgs[@]}"} \
     --log-format text --log-level "${EVM_VALIDATOR_LOG_LEVEL:-info}" \
     ${executorArgs[@]+"${executorArgs[@]}"} ${rpcArgs[@]+"${rpcArgs[@]}"} \
     >> "test-nodes/evm$i/debug.log" 2>&1 &
