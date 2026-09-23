@@ -211,7 +211,7 @@ rethPinObtainPinned() {
 # answered -32601 for that method and CheckExecutionProfile refused it at startup, so no paired lane
 # could get a shard validator running at all. Do not move this pin back below that commit.
 URETH_PIN_REPO=https://github.com/ristik/ureth
-URETH_PIN_COMMIT=d7e89aac1c9f5cafc95e75b8bba4c08e13e0b5c4
+URETH_PIN_COMMIT=f9bdc1ad6a9a55a24e1030848e7ced6f770844e1
 URETH_PIN_BIN=unicity-reth
 
 # The fee collector every Unicity lane passes. A test devnet needs a fixed, obviously-not-real

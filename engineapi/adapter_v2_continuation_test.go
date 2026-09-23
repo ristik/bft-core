@@ -187,7 +187,7 @@ func TestAdapterV2ContinuesThroughCertifiedParents(t *testing.T) {
 	}
 }
 
-func TestAdapterV2QuietPostGenesisParent(t *testing.T) {
+func TestAdapterV2IdlePostGenesisParentAdvancesBlock(t *testing.T) {
 	verifier, _, _ := bootstrapAdapterFixture(t)
 	c := certifiedchain.New(t, 3, 1)
 	parent := c.Blocks[1]
@@ -210,11 +210,29 @@ func TestAdapterV2QuietPostGenesisParent(t *testing.T) {
 	engine := newMockReth(t, Secret{})
 	eth := newMockReth(t, Secret{})
 	payloadID := data{8, 7, 6, 5, 4, 3, 2, 1}
-	engine.on("engine_forkchoiceUpdatedWithSealV1", func(json.RawMessage) (any, *rpcError) {
+	var attrs UnicityPayloadAttributes
+	var input SealBuildInput
+	engine.on("engine_forkchoiceUpdatedWithSealV1", func(raw json.RawMessage) (any, *rpcError) {
+		var args []json.RawMessage
+		require.NoError(t, json.Unmarshal(raw, &args))
+		require.NoError(t, json.Unmarshal(args[1], &attrs))
+		require.NoError(t, json.Unmarshal(args[2], &input))
 		return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid}, PayloadID: &payloadID}, nil
 	})
 	engine.on("engine_getPayloadWithSealV1", func(json.RawMessage) (any, *rpcError) {
-		return GetPayloadWithSealV1Response{ExecutionPayload: ExecutionPayloadV3{ParentHash: data32(parent.Hash), Transactions: []data{}}}, nil
+		payload := samplePayload()
+		payload.ParentHash = data32(parent.Hash)
+		payload.BlockNumber = quantity(parent.Number + 1)
+		payload.Timestamp = attrs.Timestamp
+		payload.PrevRandao = attrs.PrevRandao
+		payload.FeeRecipient = attrs.SuggestedFeeRecipient
+		payload.ExtraData = attrs.Commitment[:]
+		payload.Withdrawals = attrs.Withdrawals
+		payload.Transactions = []data{}
+		return GetPayloadWithSealV1Response{ExecutionPayload: payload, SealCompanion: SealCompanion{RootInput: input.RootInput, Provenance: "build"}}, nil
+	})
+	engine.on("engine_newPayloadWithSealV1", func(json.RawMessage) (any, *rpcError) {
+		return PayloadStatusV1{Status: PayloadStatusValid}, nil
 	})
 	eth.on("eth_getBlockByHash", func(json.RawMessage) (any, *rpcError) {
 		return blockHeaderJSON{Number: quantity(parent.Number), Hash: data32(parent.Hash), Timestamp: 0}, nil
@@ -226,10 +244,13 @@ func TestAdapterV2QuietPostGenesisParent(t *testing.T) {
 	require.NoError(t, err)
 	block, err := a.Seal(context.Background(), buildID)
 	require.NoError(t, err)
-	require.Empty(t, block.Hash)
-	require.Empty(t, block.Raw)
-	require.Equal(t, parent.Number, block.Number)
-	require.Equal(t, shardnode.Hash(parent.StateRoot.Bytes()), block.StateRoot)
+	require.NotEmpty(t, block.Hash)
+	require.NotEmpty(t, block.Raw)
+	require.Equal(t, parent.Number+1, block.Number)
+	envelope, err := DecodeBlock(block)
+	require.NoError(t, err)
+	require.Empty(t, envelope.ExecutionPayload.Transactions)
+	require.Equal(t, []byte(attrs.Commitment[:]), []byte(envelope.ExecutionPayload.ExtraData))
 	status, err := a.Verify(context.Background(), block, params)
 	require.NoError(t, err)
 	require.Equal(t, shardnode.StatusValid, status)

@@ -345,6 +345,11 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 		if err != nil {
 			return rootinput.ResultV2{}, err
 		}
+		if a.log != nil {
+			a.log.InfoContext(ctx, "acquired certified parent registry witness",
+				slog.Uint64("round", p.Round), slog.Uint64("parentNumber", p.Parent.Number),
+				slog.String("parentHash", fmt.Sprintf("%x", p.Parent.Hash)))
+		}
 	}
 	return rootinput.DeriveV2(rootinput.ContextV2{
 		Genesis: a.verifier.GenesisOrigin, Parent: snapshot,
@@ -418,12 +423,9 @@ func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, der
 	return id, nil
 }
 
-// Seal retrieves the built payload and decides, only now, whether the round
-// was quiet — see the build plan §6's note on why this can't be known
-// before sealing: there is no txpool-inspection API, and
-// parentBeaconBlockRoot moves the state root on every produced block
-// regardless of transaction count (EIP-4788), so "empty payload" is the
-// only reliable signal.
+// Seal retrieves the built payload. An empty user transaction list still
+// produces an execution block: system transitions can change its state, and
+// an idle M1 shard must keep advancing the EVM height.
 func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Block, error) {
 	a.mu.Lock()
 	bc, ok := a.pending[id]
@@ -440,34 +442,9 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 		return shardnode.Block{}, fmt.Errorf("engineapi: getPayloadWithSealV1: %w", err)
 	}
 
-	if len(resp.ExecutionPayload.Transactions) == 0 {
-		// Quiet: echo the parent's Number/StateRoot, matching
-		// executortest.Fake's own convention for the same case — round.go's
-		// quiet-detection compares against Expectation.PreviousHash, not
-		// against anything Executor-specific, so every Executor must agree
-		// on this shape.
-		//
-		// Hash is deliberately nil here, NOT bc.parent.Hash — this is not
-		// optional cosmetic parity with Fake, it's load-bearing. Fake's own
-		// genesis head has a nil Hash by construction (executortest.New),
-		// which is what makes blockHashOrFallback's genesis fallback (use
-		// StateRoot instead of Hash) trigger correctly. A real execution
-		// client's genesis always has a real, non-nil block hash — echoing
-		// it here would hand the framework that SAME real hash to use as
-		// the genesis round's BlockHash, aliasing a certified round to a
-		// block that already existed before this round ran, rather than a
-		// value distinct to this round. See docs/troubleshooting.md and
-		// TestAdapter_Seal_QuietRound_EchoesParentWithNilHash.
-		return shardnode.Block{
-			Number:     bc.parent.Number,
-			Hash:       nil,
-			StateRoot:  bc.parent.StateRoot,
-			ParentHash: bc.parent.Hash,
-			Raw:        nil,
-			BlockSize:  0,
-			StateSize:  0,
-		}, nil
-	}
+	// Even an empty user transaction list is a real execution payload: system contracts
+	// (including the beacon-root update) may change state, and M1 must advance EVM
+	// height through idle periods. The payload still needs its normal seal companion.
 
 	// ureth deliberately returns witnesses empty (D2 §"The authentication lifecycle": witnesses are
 	// verifier-owned and the execution client holds no trust base), so the leader supplies them before
@@ -479,6 +456,14 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 	witnesses, err := encodeSealCompanionWitnesses(bc.certificate, bc.technicalRecord)
 	if err != nil {
 		return shardnode.Block{}, fmt.Errorf("engineapi: sealing round: %w", err)
+	}
+	if a.log != nil {
+		a.log.InfoContext(ctx, "sealed execution payload",
+			slog.String("blockHash", fmt.Sprintf("%x", resp.ExecutionPayload.BlockHash)),
+			slog.String("parentHash", fmt.Sprintf("%x", resp.ExecutionPayload.ParentHash)),
+			slog.Int("userTransactions", len(resp.ExecutionPayload.Transactions)),
+			slog.String("rootInput", fmt.Sprintf("%x", resp.SealCompanion.RootInput)),
+			slog.String("commitment", fmt.Sprintf("%x", resp.ExecutionPayload.ExtraData)))
 	}
 	return EncodeBlockWithSealCompanion(resp.ExecutionPayload, &SealCompanion{
 		RootInput:  resp.SealCompanion.RootInput,
@@ -611,6 +596,14 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	status, err := a.engine.NewPayloadWithSealV1(ctx, envelope.ExecutionPayload, envelope.ExpectedBlobVersionedHashes, attrs.ParentBeaconBlockRoot, *companion)
 	if err != nil {
 		return shardnode.StatusSyncing, fmt.Errorf("engineapi: newPayloadWithSealV1: %w", err)
+	}
+	if a.log != nil {
+		a.log.InfoContext(ctx, "verified execution payload",
+			slog.Uint64("round", p.Round),
+			slog.String("blockHash", fmt.Sprintf("%x", envelope.ExecutionPayload.BlockHash)),
+			slog.String("status", string(status.Status)),
+			slog.String("rootInput", fmt.Sprintf("%x", derived.Encoded)),
+			slog.String("commitment", fmt.Sprintf("%x", derived.Commitment)))
 	}
 	return toStatus(status.Status), nil
 }
