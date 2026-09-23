@@ -229,7 +229,7 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash):
         if not signed:
             raise RuntimeError(f"{scenario}: restarted validator {validator} has no signed certification "
                                "request after journal restoration or recovery association")
-        port = 18545 + validator
+        port = 18544 + validator
         try:
             head = int(rpc(port, "eth_blockNumber", []), 16)
             block = rpc(port, "eth_getBlockByNumber", [hex(final_height), False])
