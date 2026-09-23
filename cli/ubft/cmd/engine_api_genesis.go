@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/unicitynetwork/bft-go-base/util"
 
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
@@ -173,6 +172,30 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags, changed func(string) bool, o
 	if flags.RootEpoch == 0 {
 		return fmt.Errorf("--root-epoch must be non-zero: rootinput.ObservationProfileBindingV2 refuses a configured root epoch of 0")
 	}
+	fullPath := flags.FullShardConf
+	if fullPath == "" {
+		fullPath = defaultFullShardConfPath(flags.Out)
+	}
+	outAbs, err := filepath.Abs(flags.Out)
+	if err != nil {
+		return fmt.Errorf("resolving --out: %w", err)
+	}
+	fullAbs, err := filepath.Abs(fullPath)
+	if err != nil {
+		return fmt.Errorf("resolving --full-shard-conf: %w", err)
+	}
+	if outAbs == fullAbs {
+		return fmt.Errorf("--out and --full-shard-conf must name different files")
+	}
+	for _, path := range []string{flags.Out, fullPath} {
+		info, err := os.Lstat(path)
+		if err == nil && info.IsDir() {
+			return fmt.Errorf("output path %q is a directory", path)
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("checking output path %q: %w", path, err)
+		}
+	}
 
 	art, err := registrygenesis.PinnedArtifact()
 	if err != nil {
@@ -195,27 +218,35 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags, changed func(string) bool, o
 		return fmt.Errorf("preparing the finalized genesis: %w", err)
 	}
 
-	// Written directly with os.WriteFile rather than this CLI's usual util.WriteJsonFile helper:
-	// that helper is for bft-core's own CBOR+JSON dual-tagged types, and the finalized bytes are
-	// already canonical JSON produced by registrygenesis.
-	if err := os.WriteFile(flags.Out, prepared.GenesisJSON(), 0600); err != nil { // #nosec G306 -- matches util.WriteJsonFile's own mode
-		return fmt.Errorf("writing %q: %w", flags.Out, err)
-	}
-
 	// The full shard configuration is the base conf plus seal_registry_genesis, and its hash is the
 	// fullShardConfHash an observation's ShardConfHash must equal (rootinput.DeriveV2); a node handed
-	// only the base conf can never satisfy that check. It is written with the CLI's ordinary shard-conf
-	// helper so it round-trips through the ordinary loader.
+	// only the base conf can never satisfy that check.
 	full, err := prepared.FullConfig()
 	if err != nil {
 		return fmt.Errorf("deriving the full shard configuration: %w", err)
 	}
-	fullPath := flags.FullShardConf
-	if fullPath == "" {
-		fullPath = defaultFullShardConfPath(flags.Out)
+	fullJSON, err := json.MarshalIndent(full, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding the full shard configuration: %w", err)
 	}
-	if err := util.WriteJsonFile(fullPath, full); err != nil {
-		return fmt.Errorf("writing the full shard configuration to %q: %w", fullPath, err)
+
+	// Stage both artifacts beside their destinations before publishing either name. A failed
+	// second write then cannot leave a new genesis without its matching full configuration.
+	genesisTemp, err := stageGenesisFile(flags.Out, prepared.GenesisJSON())
+	if err != nil {
+		return fmt.Errorf("staging %q: %w", flags.Out, err)
+	}
+	defer os.Remove(genesisTemp)
+	fullTemp, err := stageGenesisFile(fullPath, fullJSON)
+	if err != nil {
+		return fmt.Errorf("staging the full shard configuration at %q: %w", fullPath, err)
+	}
+	defer os.Remove(fullTemp)
+	if err := os.Rename(genesisTemp, flags.Out); err != nil {
+		return fmt.Errorf("publishing %q: %w", flags.Out, err)
+	}
+	if err := os.Rename(fullTemp, fullPath); err != nil {
+		return fmt.Errorf("publishing the full shard configuration at %q: %w", fullPath, err)
 	}
 
 	origin := prepared.Origin()
@@ -231,6 +262,29 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags, changed func(string) bool, o
 	fmt.Fprintf(out, "execution config identity:  %s\n", origin.ExecutionConfigIdentity())
 	fmt.Fprintf(out, "origin identity:            %s\n", origin.Identity())
 	return nil
+}
+
+func stageGenesisFile(path string, data []byte) (string, error) {
+	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return "", err
+	}
+	name := file.Name()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(name)
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	return name, nil
 }
 
 // defaultFullShardConfPath is where the full shard configuration goes when --full-shard-conf is not
