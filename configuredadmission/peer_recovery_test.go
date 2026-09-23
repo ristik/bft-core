@@ -248,3 +248,68 @@ func TestPeerCatchUpBackfillsMissingCertifiedMiddle(t *testing.T) {
 	require.NoError(t, stopped, "peer unavailability must remain retryable")
 	require.True(t, blockedAdmission.(interface{ Pending() bool }).Pending(), "the authenticated target must be retried without another root delivery")
 }
+
+func TestPeerCatchUpReusesLocallyBuiltCandidateAfterLeaderRestart(t *testing.T) {
+	chain, origin, journalCtx, id := adapterFixtureBlocks(t, 3)
+	limits := configuredprogress.JournalLimits{Candidates: 8, Observations: 8, Bytes: 16 << 20}
+	open := func() *configuredprogress.Store {
+		s, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 8})
+		require.NoError(t, err)
+		_, _, err = s.Initialize(context.Background(), journalCtx)
+		require.NoError(t, err)
+		require.NoError(t, s.EnableJournal(context.Background(), journalCtx, limits))
+		t.Cleanup(func() { require.NoError(t, s.Close()) })
+		return s
+	}
+	provider, returning := open(), open()
+	boot, bootTR := journalBootstrap(t, chain)
+	uc := []*types.UnicityCertificate{boot}
+	tr := []*certification.TechnicalRecord{bootTR}
+	admitPeerObservation(t, provider, journalCtx, boot, bootTR)
+	admitPeerObservation(t, returning, journalCtx, boot, bootTR)
+	for i := 1; i <= 3; i++ {
+		u, r := signPeerBlock(t, chain, i)
+		uc, tr = append(uc, u), append(tr, r)
+		b, prev := chain.Blocks[i], chain.Blocks[i-1]
+		candidate := configuredprogress.JournalCandidate{Round: b.Round, Number: b.Number, ParentNumber: prev.Number, Hash: b.Hash.Bytes(), StateRoot: b.StateRoot.Bytes(), ParentHash: prev.Hash.Bytes(), ParentState: prev.StateRoot.Bytes(), Raw: []byte{byte(i)}, AuthorizingUC: uc[i-1], AuthorizingTR: tr[i-1]}
+		require.NoError(t, provider.PutJournalCandidate(context.Background(), journalCtx, limits, candidate))
+		admitPeerObservation(t, provider, journalCtx, u, r)
+		if i == 1 {
+			require.NoError(t, returning.PutJournalCandidate(context.Background(), journalCtx, limits, candidate))
+			admitPeerObservation(t, returning, journalCtx, u, r)
+		}
+		if i == 2 {
+			// The killed leader durably retained this exact body before B2 was
+			// certified, then restarted with only B1 in durable progress.
+			candidate.LocallyBuilt = true
+			require.NoError(t, returning.PutJournalCandidate(context.Background(), journalCtx, limits, candidate))
+		}
+	}
+	refs := make([]shardnode.BlockRef, 4)
+	for i, b := range chain.Blocks {
+		refs[i] = shardnode.BlockRef{Number: b.Number, Hash: b.Hash.Bytes(), StateRoot: b.StateRoot.Bytes()}
+	}
+	exec := &replayExecutor{head: refs[1], finalized: refs[1], refs: refs, known: map[string]bool{string(refs[0].Hash): true, string(refs[1].Hash): true}}
+	owner := &ExecutionRecovery{Store: returning, Context: journalCtx, JournalLimits: limits, Executor: exec, Gate: shardnode.NewFinalityGate(), Genesis: refs[0], Limits: RecoveryLimits{Blocks: 8, Bytes: 1024, Deadline: 3 * time.Second}, Providers: []peer.ID{"provider"}}
+	served := JournalProvider{Store: provider, Context: journalCtx, Limits: limits}
+	owner.fetch = func(ctx context.Context, _ peer.ID, req shardnode.JournalFetchRequest) ([]shardnode.JournalFetchEntry, error) {
+		return served.FetchJournal(ctx, req)
+	}
+	admission, err := (JournalFactory{Store: returning, Origin: origin, Limits: limits, CatchUp: owner.AcquireForCertificate}).Start(context.Background(), id, adapterGate{}, shardnode.AdmissionCallbacks{AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {}, DeliverDurable: func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error { return nil }})
+	require.NoError(t, err)
+	defer admission.Close()
+	require.NoError(t, admission.Submit(context.Background(), uc[3], tr[3]))
+	head, err := owner.Recover(context.Background(), uc[3])
+	require.NoError(t, err)
+	require.Equal(t, refs[3], head)
+	image, err := returning.LoadJournal(context.Background(), journalCtx, limits)
+	require.NoError(t, err)
+	for _, e := range image.Candidates {
+		if e.Candidate.Number == 2 {
+			require.True(t, e.Candidate.LocallyBuilt)
+			require.True(t, e.Certified)
+			return
+		}
+	}
+	t.Fatal("missing recovered locally built candidate")
+}

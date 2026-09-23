@@ -320,6 +320,10 @@ func (s *Store) PutJournalCandidate(ctx context.Context, c Context, limits Journ
 				return e
 			}
 			w.Status, w.ResultingUC, w.ResultingTR = prior.Status, prior.ResultingUC, prior.ResultingTR
+			// LocallyBuilt records that this node authored the proposal. A peer
+			// may later return the same certified body during catch-up; that
+			// source does not change its original provenance.
+			w.LocallyBuilt = w.LocallyBuilt || prior.LocallyBuilt
 			raw, e := encodeCandidate(w)
 			if e != nil {
 				return e
