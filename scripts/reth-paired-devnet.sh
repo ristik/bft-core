@@ -157,6 +157,7 @@ for i in $(seq 1 "$validators"); do
     --http.api eth,net,web3,admin \
     --port $((rethP2PBase + i - 1)) --disable-discovery \
     --ipcdisable \
+    --builder.gaslimit 30000000 \
     $(urethPinUnicityFlags) \
     >"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"
@@ -498,6 +499,7 @@ echo "=== 4. configure the checked v2 origin and seed the block-1 transaction ==
 cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
 export EVM_GENESIS_FILE="$chainSpec"
 export EVM_FULL_SHARD_CONF="test-nodes/shard-conf-${partitionID}_0.json"
+export EVM_ENGINE_FEE_COLLECTOR="$URETH_PIN_FEE_COLLECTOR"
 source helper.sh
 for i in $(seq 1 "$validators"); do
   export "EVM_ENGINE_URL_$i=http://127.0.0.1:$((rethEngineBase + i - 1))"

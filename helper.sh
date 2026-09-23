@@ -279,6 +279,9 @@ function start_one_evm_validator() {
     local engineURL="${!engineURLVar:-http://127.0.0.1:8551}"
     local ethURL="${!ethURLVar:-http://127.0.0.1:8545}"
     executorArgs=(--engine-url "$engineURL" --eth-url "$ethURL" --jwt-secret "test-nodes/evm$i/jwt.hex")
+	if [ -n "${EVM_ENGINE_FEE_COLLECTOR:-}" ]; then
+	  executorArgs+=(--engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR")
+	fi
 	if [ -n "${EVM_GENESIS_FILE:-}" ]; then
 	  if [ -z "${EVM_FULL_SHARD_CONF:-}" ]; then
 	    echo "EVM_GENESIS_FILE requires EVM_FULL_SHARD_CONF" >&2
