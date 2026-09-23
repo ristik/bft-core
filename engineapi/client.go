@@ -18,8 +18,8 @@ type Client struct {
 	url    string
 	secret Secret
 	http   *http.Client
-	// requireSeal adds the D2 seal siblings to the capability requirement. Off unless a
-	// deployment selects the seal path; see RequireSealCapabilities.
+	// requireSeal selects seal-path admission: stock V3 forkchoice/build capabilities plus
+	// all three seal siblings, without stock newPayloadV3.
 	requireSeal bool
 }
 
@@ -32,17 +32,11 @@ func NewClient(url string, secret Secret) *Client {
 }
 
 /*
-RequireSealCapabilities makes the three D2 `engine_*WithSealV1` siblings required, so the
-startup check in adapter.go fails a client that does not offer them.
-
-It is opt-in, and deliberately not the default. D2 §2 says the adapter's startup check "fails
-the process if they are absent", which is right once a deployment drives the seal path. Making
-it unconditional now would fail startup against every stock client while buying nothing: this
-adapter does not yet call the seal methods. Routing build and import through them is activation,
-which D2 §7 and #10 own.
-
-So a deployment that has a seal-capable client and intends to use it turns this on, and the
-negotiation is real and fatal for it. Everything else is unaffected.
+RequireSealCapabilities makes the three D2 `engine_*WithSealV1` siblings required and stops
+requiring stock `engine_newPayloadV3`. The shard-node executor selects this at startup: it imports
+only through `engine_newPayloadWithSealV1`, while `Commit` still calls stock forkchoice V3 and the
+adapter retains the V3 payload method for its non-seal client path. A caller that does not select
+the seal path keeps the stock V3 requirement.
 */
 func (c *Client) RequireSealCapabilities() { c.requireSeal = true }
 
@@ -121,10 +115,8 @@ func (c *Client) call(ctx context.Context, method string, params []any, out any)
 	return nil
 }
 
-// requiredCapabilities is the exact V3 method set this client speaks — see
-// docs/adr/0001-executor-boundary.md decision 3. ExchangeCapabilities
-// checks the server offers all of these; adapter.go's startup check is what
-// makes that check fatal rather than advisory.
+// requiredCapabilities is the stock V3 method set for a client that has not selected seal admission.
+// Decision 3 of docs/adr/0001-executor-boundary.md records the seal-path amendment.
 var requiredCapabilities = []string{
 	"engine_forkchoiceUpdatedV3",
 	"engine_getPayloadV3",
@@ -146,13 +138,17 @@ func (c *Client) required() []string {
 	if !c.requireSeal {
 		return requiredCapabilities
 	}
-	out := make([]string, 0, len(requiredCapabilities)+len(sealCapabilities))
-	out = append(out, requiredCapabilities...)
+	out := make([]string, 0, len(requiredCapabilities)-1+len(sealCapabilities))
+	for _, method := range requiredCapabilities {
+		if method != "engine_newPayloadV3" {
+			out = append(out, method)
+		}
+	}
 	return append(out, sealCapabilities...)
 }
 
 // ExchangeCapabilities calls engine_exchangeCapabilities and returns which
-// of requiredCapabilities the server is missing (empty means fully capable).
+// of the selected path's required methods the server is missing (empty means fully capable).
 func (c *Client) ExchangeCapabilities(ctx context.Context) (missing []string, err error) {
 	required := c.required()
 	var offered []string
