@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNoProductionPackageImportsParentWitness(t *testing.T) {
+func TestOnlyLocalAdapterSourceImportsParentWitness(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
 	const importPath = "github.com/unicitynetwork/bft-core/parentwitness"
@@ -46,5 +46,6 @@ func TestNoProductionPackageImportsParentWitness(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	require.Empty(t, importers, "inactive parent-witness wire boundary must have no production importer")
+	require.Equal(t, []string{filepath.Join("engineapi", "parent_witness_source.go")}, importers,
+		"only the local adapter source may import the parent-witness requester")
 }
