@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"encoding/hex"
@@ -389,6 +390,15 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		if observed, ok := progress.Observed(); ok {
 			node.MarkJournalRestored(observed.Certificate().GetRoundNumber())
+			cert := observed.Certificate()
+			var height uint64
+			for _, entry := range journalImage.Candidates {
+				if entry.Certified && entry.ResultingUC != nil && entry.ResultingUC.GetRootRoundNumber() == cert.GetRootRoundNumber() && bytes.Equal(entry.Candidate.Hash, cert.InputRecord.BlockHash) {
+					height = entry.Candidate.Number
+					break
+				}
+			}
+			flags.observe.Logger().Info("execution journal restored", "block", fmt.Sprintf("%x", cert.InputRecord.BlockHash), "height", height, "round", cert.GetRoundNumber(), "rootRound", cert.GetRootRoundNumber())
 		}
 		node.SetProposalJournal(configuredadmission.ProposalJournal{Store: journalStore, Context: journalCtx, Limits: limits})
 		recoveryExecutor, ok := executor.(configuredadmission.RecoveryExecutor)
@@ -399,7 +409,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		if genesisErr != nil {
 			return fmt.Errorf("reading recovery genesis identity: %w", genesisErr)
 		}
-		coordinator := &configuredadmission.ExecutionRecovery{Store: journalStore, Context: journalCtx, JournalLimits: limits, Executor: recoveryExecutor, Gate: node.FinalityGate(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
+		coordinator := &configuredadmission.ExecutionRecovery{Store: journalStore, Context: journalCtx, JournalLimits: limits, Executor: recoveryExecutor, Gate: node.FinalityGate(), Log: flags.observe.Logger(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
 		providers, peerErr := shardPeers(peer, shardConf.Validators)
 		if peerErr != nil {
 			return fmt.Errorf("resolving journal suffix providers: %w", peerErr)

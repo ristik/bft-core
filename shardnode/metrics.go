@@ -72,7 +72,7 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		return nil, fmt.Errorf("creating execution_recovery.pending_catch_up gauge: %w", err)
 	}
 	if m.pendingCatchUpAge, err = meter.Float64Gauge("shardnode.execution_recovery.pending_catch_up_age",
-		metric.WithDescription("Age in seconds of the pending authenticated certificate"), metric.WithUnit("s")); err != nil {
+		metric.WithDescription("Age in seconds of the continuous pending catch-up episode, across authenticated target changes"), metric.WithUnit("s")); err != nil {
 		return nil, fmt.Errorf("creating execution_recovery.pending_catch_up_age gauge: %w", err)
 	}
 	return m, nil

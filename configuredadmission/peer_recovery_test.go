@@ -3,6 +3,10 @@ package configuredadmission
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,7 +98,8 @@ func TestPeerCatchUpBackfillsMissingCertifiedMiddle(t *testing.T) {
 		}
 	}
 	exec := &replayExecutor{head: refs[1], finalized: refs[1], refs: refs, known: known}
-	owner := &ExecutionRecovery{Store: returning, Context: journalCtx, JournalLimits: limits, Executor: exec, Gate: shardnode.NewFinalityGate(), Genesis: refs[0], Limits: RecoveryLimits{Blocks: 8, Bytes: 1024, Deadline: 3 * time.Second, Retries: 0}, Providers: []peer.ID{"bad", "provider"}}
+	var recoveryLogs bytes.Buffer
+	owner := &ExecutionRecovery{Store: returning, Context: journalCtx, JournalLimits: limits, Executor: exec, Gate: shardnode.NewFinalityGate(), Log: slog.New(slog.NewTextHandler(&recoveryLogs, nil)), Genesis: refs[0], Limits: RecoveryLimits{Blocks: 8, Bytes: 1024, Deadline: 3 * time.Second, Retries: 0}, Providers: []peer.ID{"bad", "provider"}}
 	served := JournalProvider{Store: provider, Context: journalCtx, Limits: limits}
 	badRequests := 0
 	owner.fetch = func(ctx context.Context, peerID peer.ID, req shardnode.JournalFetchRequest) ([]shardnode.JournalFetchEntry, error) {
@@ -119,6 +124,24 @@ func TestPeerCatchUpBackfillsMissingCertifiedMiddle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, refs[3], head)
 	require.Equal(t, []uint64{2, 3}, exec.verify)
+	for i := 2; i <= 3; i++ {
+		line := fmt.Sprintf("source=peer_recovery block=%x height=%d round=%d rootRound=%d", refs[i].Hash, i, uc[i].GetRoundNumber(), uc[i].GetRootRoundNumber())
+		require.True(t, strings.Contains(recoveryLogs.String(), line), "missing durable association log %s in %s", line, recoveryLogs.String())
+	}
+	owner.Providers = []peer.ID{"provider"}
+	for _, tc := range []struct {
+		bindingErr error
+		class      string
+	}{
+		{fmt.Errorf("%w: witness RPC down", shardnode.ErrBlockBindingUnavailable), ErrRecoveryUnavailable.Error()},
+		{errors.New("raw header mismatch"), ErrRecoveryInvalid.Error()},
+	} {
+		exec.bindingErr = tc.bindingErr
+		bindingErr := owner.fetchFromPeers(context.Background(), refs[1], refs[2].Hash, false, nil)
+		require.ErrorContains(t, bindingErr, tc.class)
+		require.False(t, owner.Terminal(bindingErr), "peer failure must not stop local recovery")
+	}
+	exec.bindingErr = nil
 	image, err := returning.LoadJournal(context.Background(), journalCtx, limits)
 	require.NoError(t, err)
 	require.Len(t, image.Observations, 4)

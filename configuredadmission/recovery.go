@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -48,6 +49,7 @@ type ExecutionRecovery struct {
 	JournalLimits   configuredprogress.JournalLimits
 	Executor        RecoveryExecutor
 	Gate            *shardnode.FinalityGate
+	Log             *slog.Logger
 	Genesis         shardnode.BlockRef
 	Limits          RecoveryLimits
 	Host            shardnode.EvidenceHost
@@ -60,6 +62,7 @@ type ExecutionRecovery struct {
 var (
 	ErrRecoveryUnavailable = errors.New("execution recovery: certified input unavailable")
 	ErrRecoveryConflict    = errors.New("execution recovery: finalized-branch conflict")
+	ErrRecoveryInvalid     = errors.New("execution recovery: invalid peer candidate")
 	ErrRecoveryBudget      = errors.New("execution recovery: bounded replay budget exhausted")
 	ErrRecoveryIdentity    = errors.New("execution recovery: executor identity differs from certified anchor")
 )
@@ -561,7 +564,10 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 		}
 		p := shardnode.RoundParams{Round: e.Round, Epoch: e.AuthorizingTR.Epoch, Timestamp: e.AuthorizingUC.UnicitySeal.Timestamp, SealHash: seal, Leader: e.AuthorizingTR.Leader, Parent: parent, AuthorizingCertificate: e.AuthorizingUC, AuthorizingTechnicalRecord: e.AuthorizingTR}
 		if err := r.Executor.CheckBlockBinding(ctx, b, p); err != nil {
-			return fmt.Errorf("%w: fetched raw hash for %x: %w", ErrRecoveryConflict, b.Hash, err)
+			if errors.Is(err, shardnode.ErrBlockBindingUnavailable) {
+				return fmt.Errorf("%w: fetched block binding for %x: %w", ErrRecoveryUnavailable, b.Hash, err)
+			}
+			return fmt.Errorf("%w: fetched block binding for %x: %w", ErrRecoveryInvalid, b.Hash, err)
 		}
 		if err := r.status(ctx, fmt.Sprintf("fetched Verify %d/%x", b.Number, b.Hash), func() (shardnode.Status, error) { return r.Executor.Verify(ctx, b, p) }); err != nil {
 			return err
@@ -593,6 +599,11 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 			}
 		} else if err := r.Store.BackfillJournalObservation(ctx, r.Context, r.JournalLimits, e.ResultingUC, e.ResultingTR); err != nil {
 			return fmt.Errorf("%w: backfilling fetched certificate %x: %w", ErrRecoveryUnavailable, b.Hash, err)
+		}
+		if r.Log != nil {
+			r.Log.InfoContext(ctx, "certificate admitted", slog.String("source", "peer_recovery"),
+				slog.String("block", fmt.Sprintf("%x", b.Hash)), slog.Uint64("height", b.Number),
+				slog.Uint64("round", e.ResultingUC.GetRoundNumber()), slog.Uint64("rootRound", e.ResultingUC.GetRootRoundNumber()))
 		}
 		ref := shardnode.BlockRef{Number: b.Number, Hash: b.Hash, StateRoot: b.StateRoot}
 		if b.Number <= f.Number {

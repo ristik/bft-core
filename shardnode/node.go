@@ -297,6 +297,8 @@ func (n *Node) Run(ctx context.Context) error {
 			ticker := time.NewTicker(time.Second)
 			defer ticker.Stop()
 			last := ""
+			lastState := ""
+			var lastWarn time.Time
 			for {
 				_, err := n.journalRecovery.Recover(gctx, nil)
 				pending, isPending := n.client.admissionPending()
@@ -324,10 +326,13 @@ func (n *Node) Run(ctx context.Context) error {
 					}
 					n.health.updateExecutionRecovery("unready", detail)
 				}
-				if detail != "" && detail != last && n.log != nil {
+				state := n.health.Snapshot().ExecutionRecovery
+				if detail != "" && n.log != nil && (lastState != state || time.Since(lastWarn) >= 30*time.Second) {
 					n.log.WarnContext(gctx, "certified execution remains unready", slog.String("reason", detail))
+					lastWarn = time.Now()
 				}
 				last = detail
+				lastState = state
 				select {
 				case <-gctx.Done():
 					return nil

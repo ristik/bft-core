@@ -399,11 +399,13 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 		return rootinput.ResultV2{}, err
 	}
 	var snapshot registryproof.Snapshot
+	var proof shardnode.ProofEvidence
 	if p.Parent.Number == 0 {
 		if !a.verifier.BootstrapSnapshot.Valid() || !bytes.Equal(p.Parent.Hash, a.verifier.GenesisOrigin.BlockHash().Bytes()) || !bytes.Equal(p.Parent.StateRoot, a.verifier.GenesisOrigin.StateRoot().Bytes()) {
 			return rootinput.ResultV2{}, fmt.Errorf("%w: bootstrap parent differs from configured genesis", ErrParentWitnessMismatch)
 		}
 		snapshot = a.verifier.BootstrapSnapshot
+		proof.SnapshotID = fmt.Sprintf("genesis:%x", p.Parent.Hash)
 	} else {
 		a.mu.Lock()
 		source := a.parentWitness
@@ -411,20 +413,29 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 		if source == nil {
 			return rootinput.ResultV2{}, fmt.Errorf("%w: no source for parent block %d", ErrParentWitnessUnavailable, p.Parent.Number)
 		}
-		snapshot, err = source.Acquire(ctx, p.Parent)
+		snapshot, proof, err = source.AcquireWithProvenance(ctx, p.Parent)
 		if err != nil {
 			return rootinput.ResultV2{}, err
 		}
 		if a.log != nil {
 			a.log.InfoContext(ctx, "acquired certified parent registry witness",
 				slog.Uint64("round", p.Round), slog.Uint64("parentNumber", p.Parent.Number),
-				slog.String("parentHash", fmt.Sprintf("%x", p.Parent.Hash)))
+				slog.String("parentHash", fmt.Sprintf("%x", p.Parent.Hash)), slog.String("snapshotID", proof.SnapshotID), slog.Time("verifiedAt", proof.VerifiedAt))
 		}
 	}
-	return rootinput.DeriveV2(rootinput.ContextV2{
+	derived, err := rootinput.DeriveV2(rootinput.ContextV2{
 		Genesis: a.verifier.GenesisOrigin, Parent: snapshot,
 		Round: p.Round, ParentHash: p.Parent.Hash,
 	}, o)
+	if err == nil {
+		shardnode.RecordProofEvidence(ctx, proof)
+		if a.log != nil {
+			a.log.InfoContext(ctx, "derived root input from parent witness", slog.Uint64("round", p.Round),
+				slog.String("parentHash", fmt.Sprintf("%x", p.Parent.Hash)), slog.String("snapshotID", proof.SnapshotID),
+				slog.Time("verifiedAt", proof.VerifiedAt), slog.String("commitment", fmt.Sprintf("%x", derived.Commitment)))
+		}
+	}
+	return derived, err
 }
 
 func (a *Adapter) Build(ctx context.Context, p shardnode.RoundParams) (shardnode.BuildID, error) {
@@ -589,6 +600,9 @@ func (a *Adapter) CheckBlockBinding(ctx context.Context, b shardnode.Block, p sh
 	}
 	input, err := a.deriveV2(ctx, p, p.AuthorizingCertificate, p.AuthorizingTechnicalRecord)
 	if err != nil {
+		if errors.Is(err, ErrParentWitnessUnavailable) || errors.Is(err, ErrParentWitnessBudget) || errors.Is(err, ErrParentWitnessStopped) || errors.Is(err, ErrParentWitnessSuperseded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("%w: %w", shardnode.ErrBlockBindingUnavailable, err)
+		}
 		return fmt.Errorf("engineapi: block binding authorizing pair: %w", err)
 	}
 	parentHash, err := toData32(p.Parent.Hash)
@@ -597,7 +611,7 @@ func (a *Adapter) CheckBlockBinding(ctx context.Context, b shardnode.Block, p sh
 	}
 	parentHeader, err := a.eth.GetBlockByHash(ctx, parentHash)
 	if err != nil {
-		return fmt.Errorf("engineapi: block binding parent header: %w", err)
+		return fmt.Errorf("%w: parent header: %w", shardnode.ErrBlockBindingUnavailable, err)
 	}
 	attrs := DeriveAttributesV2(input.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
 	payload := envelope.ExecutionPayload
@@ -664,6 +678,11 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 					}
 					return shardnode.StatusInvalid, err
 				}
+			}
+			if a.log != nil {
+				a.log.InfoContext(ctx, "verified quiet block", slog.Uint64("round", p.Round),
+					slog.String("parentHash", fmt.Sprintf("%x", p.Parent.Hash)),
+					slog.String("snapshotID", shardnode.CurrentProofEvidence(ctx).SnapshotID), slog.String("status", "VALID"))
 			}
 			return shardnode.StatusValid, nil
 		}
@@ -765,6 +784,7 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	if a.log != nil {
 		a.log.InfoContext(ctx, "verified execution payload",
 			slog.Uint64("round", p.Round),
+			slog.String("snapshotID", shardnode.CurrentProofEvidence(ctx).SnapshotID),
 			slog.String("blockHash", fmt.Sprintf("%x", envelope.ExecutionPayload.BlockHash)),
 			slog.String("status", string(status.Status)),
 			slog.String("rootInput", fmt.Sprintf("%x", derived.Encoded)),

@@ -68,11 +68,14 @@ func TestRoundBuildJobRefusalAbstainsWithoutSigning(t *testing.T) {
 	r.SetCertificationSigner(spy)
 	health := shardnode.NewHealth()
 	r.SetHealth(health)
+	metrics, reasons := reasonMetrics(t)
+	r.SetMetrics(metrics)
 	require.NoError(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID)))
 	require.Equal(t, 1, exec.builds)
 	require.Zero(t, spy.calls)
 	require.Empty(t, sub.got)
 	require.Equal(t, "unready", health.Snapshot().ExecutionRecovery)
+	require.Contains(t, reasons(), "build_unavailable_declined_leadership")
 }
 
 func TestJournalRecoveryBlocksRoundBuildAndSignUntilReady(t *testing.T) {

@@ -60,6 +60,7 @@ type replayExecutor struct {
 	invalid    uint64
 	lostReply  uint64
 	witnessErr error
+	bindingErr error
 	headErr    error
 }
 
@@ -122,7 +123,7 @@ func (e *replayExecutor) CheckParentWitness(context.Context, shardnode.BlockRef)
 	return e.witnessErr
 }
 func (e *replayExecutor) CheckBlockBinding(context.Context, shardnode.Block, shardnode.RoundParams) error {
-	return nil
+	return e.bindingErr
 }
 func (e *replayExecutor) Build(context.Context, shardnode.RoundParams) (shardnode.BuildID, error) {
 	panic("Build before readiness")

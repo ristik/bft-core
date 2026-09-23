@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 
@@ -29,6 +30,9 @@ const (
 )
 
 var (
+	// ErrLocalProposalConflict identifies the safe-to-decline case where a
+	// leader already retained different bytes for this exact authorization.
+	ErrLocalProposalConflict = errors.New("configured progress: local proposal already retained")
 	journalMetaKey           = []byte("journal/meta")
 	journalCandidatePrefix   = []byte("journal/c/")
 	journalObservationPrefix = []byte("journal/o/")
@@ -340,7 +344,7 @@ func (s *Store) PutJournalCandidate(ctx context.Context, c Context, limits Journ
 					return e
 				}
 				if pu.GetRootRoundNumber() == v.AuthorizingUC.GetRootRoundNumber() && pu.GetRoundNumber() == v.AuthorizingUC.GetRoundNumber() {
-					return fmt.Errorf("%w: a different local proposal was already retained for this authorization; refusing publication after restart", ErrConflict)
+					return fmt.Errorf("%w: %w: a different local proposal was already retained for this authorization; refusing publication after restart", ErrConflict, ErrLocalProposalConflict)
 				}
 			}
 		}

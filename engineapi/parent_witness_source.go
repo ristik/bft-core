@@ -3,8 +3,11 @@ package engineapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -53,6 +56,8 @@ type ParentWitnessSource struct {
 	requester *parentwitness.Requester
 	mu        sync.Mutex
 	last      registryproof.Snapshot // one immutable, verified parent; never a failed acquisition
+	lastProof shardnode.ProofEvidence
+	log       *slog.Logger
 	closed    bool
 }
 
@@ -73,65 +78,90 @@ func NewParentWitnessSource(ctx context.Context, pins ParentWitnessPins, rpc reg
 // header number and state root with that same BlockRef. A different valid proof encoding is fine;
 // a different subject or state is not. Genesis uses the configured B0 snapshot, not this source.
 func (s *ParentWitnessSource) Acquire(ctx context.Context, parent shardnode.BlockRef) (registryproof.Snapshot, error) {
+	snapshot, _, err := s.AcquireWithProvenance(ctx, parent)
+	return snapshot, err
+}
+
+// AcquireWithProvenance returns the evidence digest and its original verification
+// time, including on cache hits. The digest is over the verified proof bytes.
+func (s *ParentWitnessSource) AcquireWithProvenance(ctx context.Context, parent shardnode.BlockRef) (registryproof.Snapshot, shardnode.ProofEvidence, error) {
 	if s == nil || s.requester == nil || parent.Number == 0 || len(parent.Hash) != common.HashLength || len(parent.StateRoot) != common.HashLength {
-		return registryproof.Snapshot{}, fmt.Errorf("%w: expected non-genesis parent with 32-byte hash and state root", ErrParentWitnessMismatch)
+		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: expected non-genesis parent with 32-byte hash and state root", ErrParentWitnessMismatch)
 	}
 	hash := common.BytesToHash(parent.Hash)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return registryproof.Snapshot{}, ErrParentWitnessStopped
+		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, ErrParentWitnessStopped
 	}
 	cached := s.last
+	cachedProof := s.lastProof
+	log := s.log
 	s.mu.Unlock()
 	if cached.Valid() && cached.ParentHash() == hash {
 		if cached.Number() != parent.Number || !bytes.Equal(cached.StateRoot().Bytes(), parent.StateRoot) {
-			return registryproof.Snapshot{}, fmt.Errorf("%w: cached parent %d/%s has state %s", ErrParentWitnessMismatch, cached.Number(), hash, cached.StateRoot())
+			return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: cached parent %d/%s has state %s", ErrParentWitnessMismatch, cached.Number(), hash, cached.StateRoot())
 		}
 		if err := ctx.Err(); err != nil {
-			return registryproof.Snapshot{}, err
+			return registryproof.Snapshot{}, shardnode.ProofEvidence{}, err
 		}
-		return cached, nil
+		logParentWitness(ctx, log, parent, "hit", cachedProof)
+		return cached, cachedProof, nil
 	}
 	target, err := parentwitness.NewTarget(parentwitness.TargetConfig{
 		NetworkID: s.pins.NetworkID, PartitionID: s.pins.PartitionID, ShardID: s.pins.ShardID,
 		FullShardConfHash: s.pins.FullShardConfHash, Registry: s.pins.Registry, BlockHash: hash,
 	})
 	if err != nil {
-		return registryproof.Snapshot{}, fmt.Errorf("%w: constructing exact parent target: %w", ErrParentWitnessInvalid, err)
+		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: constructing exact parent target: %w", ErrParentWitnessInvalid, err)
 	}
 	result, requestErr := s.requester.Request(ctx, target)
 	if errors.Is(requestErr, parentwitness.ErrRequesterBackoff) {
-		return registryproof.Snapshot{}, fmt.Errorf("%w: requester backoff", ErrParentWitnessUnavailable)
+		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: requester backoff", ErrParentWitnessUnavailable)
 	}
 	if requestErr != nil && result.Outcome == parentwitness.RequesterStopped {
-		return registryproof.Snapshot{}, fmt.Errorf("%w: %w", ErrParentWitnessStopped, requestErr)
+		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %w", ErrParentWitnessStopped, requestErr)
 	}
 	if requestErr != nil {
-		return registryproof.Snapshot{}, fmt.Errorf("%w: %w", ErrParentWitnessInvalid, requestErr)
+		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %w", ErrParentWitnessInvalid, requestErr)
 	}
 	switch result.Outcome {
 	case parentwitness.RequesterVerified:
 		snapshot := result.Response.Snapshot()
 		if !result.Response.Found() || !snapshot.Valid() || snapshot.ParentHash() != hash || snapshot.Number() != parent.Number || !bytes.Equal(snapshot.StateRoot().Bytes(), parent.StateRoot) {
-			return registryproof.Snapshot{}, fmt.Errorf("%w: parent %d/%s has verified proof %d/%s with state %s", ErrParentWitnessMismatch, parent.Number, hash, snapshot.Number(), snapshot.ParentHash(), snapshot.StateRoot())
+			return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: parent %d/%s has verified proof %d/%s with state %s", ErrParentWitnessMismatch, parent.Number, hash, snapshot.Number(), snapshot.ParentHash(), snapshot.StateRoot())
 		}
+		evidence, marshalErr := json.Marshal(result.Response.Evidence())
+		if marshalErr != nil {
+			return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: encoding verified evidence digest: %w", ErrParentWitnessInvalid, marshalErr)
+		}
+		digest := sha256.Sum256(evidence)
+		proof := shardnode.ProofEvidence{SnapshotID: fmt.Sprintf("%x", digest), VerifiedAt: time.Now().UTC()}
 		s.mu.Lock()
 		if !s.closed {
 			s.last = snapshot
+			s.lastProof = proof
 		}
 		s.mu.Unlock()
-		return snapshot, nil
+		logParentWitness(ctx, log, parent, "miss", proof)
+		return snapshot, proof, nil
 	case parentwitness.RequesterUnavailable:
-		return registryproof.Snapshot{}, fmt.Errorf("%w: %s", ErrParentWitnessUnavailable, result.Detail)
+		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %s", ErrParentWitnessUnavailable, result.Detail)
 	case parentwitness.RequesterInvalid:
-		return registryproof.Snapshot{}, fmt.Errorf("%w: %s", ErrParentWitnessInvalid, result.Detail)
+		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %s", ErrParentWitnessInvalid, result.Detail)
 	case parentwitness.RequesterBudgetExhausted:
-		return registryproof.Snapshot{}, fmt.Errorf("%w: %s", ErrParentWitnessBudget, result.Detail)
+		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %s", ErrParentWitnessBudget, result.Detail)
 	case parentwitness.RequesterSuperseded:
-		return registryproof.Snapshot{}, fmt.Errorf("%w: %s", ErrParentWitnessSuperseded, result.Detail)
+		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %s", ErrParentWitnessSuperseded, result.Detail)
 	default:
-		return registryproof.Snapshot{}, fmt.Errorf("%w: %s", ErrParentWitnessStopped, result.Detail)
+		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %s", ErrParentWitnessStopped, result.Detail)
+	}
+}
+
+func logParentWitness(ctx context.Context, log *slog.Logger, parent shardnode.BlockRef, cache string, proof shardnode.ProofEvidence) {
+	if log != nil {
+		log.InfoContext(ctx, "parent witness snapshot", slog.String("cache", cache), slog.String("snapshotID", proof.SnapshotID),
+			slog.Time("verifiedAt", proof.VerifiedAt), slog.Uint64("parentNumber", parent.Number), slog.String("parentHash", fmt.Sprintf("%x", parent.Hash)))
 	}
 }
 
@@ -140,6 +170,7 @@ func (s *ParentWitnessSource) Close() {
 		s.mu.Lock()
 		s.closed = true
 		s.last = registryproof.Snapshot{}
+		s.lastProof = shardnode.ProofEvidence{}
 		s.mu.Unlock()
 		s.requester.Close()
 	}
@@ -169,6 +200,7 @@ func (a *Adapter) EnableParentWitness(ctx context.Context, budget parentwitness.
 		return err
 	}
 	a.parentWitness = source
+	source.log = a.log
 	return nil
 }
 

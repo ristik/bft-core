@@ -22,6 +22,13 @@ func (j *refusingJournal) RetainCandidate(context.Context, shardnode.Block, shar
 
 type conflictingFollowerJournal struct{}
 
+type conflictingLeaderJournal struct{ calls int }
+
+func (j *conflictingLeaderJournal) RetainCandidate(context.Context, shardnode.Block, shardnode.RoundParams, bool) error {
+	j.calls++
+	return shardnode.ErrLeaderProposalConflict
+}
+
 func (conflictingFollowerJournal) RetainCandidate(context.Context, shardnode.Block, shardnode.RoundParams, bool) error {
 	return shardnode.ErrProposalRejected
 }
@@ -164,4 +171,31 @@ func TestJournalFailurePreventsLeaderPublicationAndSignature(t *testing.T) {
 	require.Zero(t, spy.calls, "the signer cannot authorize an unretained proposal")
 	require.Empty(t, sub.got)
 	require.Equal(t, "stopped", health.Snapshot().ExecutionRecovery)
+}
+
+func TestJournaledDifferentLeaderProposalDeclinesWithoutStopping(t *testing.T) {
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	d := &journalDisseminator{}
+	j := &conflictingLeaderJournal{}
+	spy := &journalSignerSpy{}
+	sub := &recordingSubmitter{}
+	exec := executortest.New()
+	r := shardnode.NewRound("journal-leader", 8, types.ShardID{}, exec, d, signer, sub, nil)
+	health := shardnode.NewHealth()
+	r.SetHealth(health)
+	r.SetProposalJournal(j)
+	r.SetCertificationSigner(spy)
+	metrics, reasons := reasonMetrics(t)
+	r.SetMetrics(metrics)
+	for attempt := 1; attempt <= 2; attempt++ {
+		exec.AddEntries([]byte("different payload after restart"))
+		require.NoError(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, "journal-leader")))
+		require.Equal(t, attempt, j.calls, "the node remains able to handle a later delivery")
+		require.Zero(t, d.published, "the second proposal must never escape")
+		require.Zero(t, spy.calls)
+		require.Empty(t, sub.got)
+		require.NotEqual(t, "stopped", health.Snapshot().ExecutionRecovery)
+	}
+	require.Contains(t, reasons(), "leader_candidate_conflict_declined")
 }

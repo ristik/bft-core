@@ -20,6 +20,14 @@ import (
 // forwards it.
 type Hash []byte
 
+// ErrBlockBindingUnavailable marks a local prerequisite that can be retried
+// without treating the peer's certified body as invalid.
+var ErrBlockBindingUnavailable = errors.New("shardnode: block binding prerequisite unavailable")
+
+// ErrLeaderProposalConflict means a different local proposal was already
+// journaled for this authorization. The round must abstain without stopping.
+var ErrLeaderProposalConflict = errors.New("shardnode: leader proposal already retained")
+
 // BlockRef identifies one committed block without carrying its contents.
 type BlockRef struct {
 	Number    uint64

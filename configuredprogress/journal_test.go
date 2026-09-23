@@ -130,7 +130,9 @@ func TestJournalKeepsSameHeightBranchesAndQuietTail(t *testing.T) {
 	conflictingLocal := branch
 	conflictingLocal.Hash = bytes.Repeat([]byte{0xc3}, 32)
 	conflictingLocal.LocallyBuilt = true
-	require.ErrorIs(t, s.PutJournalCandidate(context.Background(), f.ctx, testJournalLimits, conflictingLocal), ErrConflict)
+	conflictErr := s.PutJournalCandidate(context.Background(), f.ctx, testJournalLimits, conflictingLocal)
+	require.ErrorIs(t, conflictErr, ErrConflict)
+	require.ErrorIs(t, conflictErr, ErrLocalProposalConflict)
 	first := f.first(1, 2, 5)
 	admitJournal(t, s, f, first)
 	quietIR := &types.InputRecord{Version: 1, RoundNumber: 2, PreviousHash: f.c.Blocks[1].StateRoot.Bytes(), Hash: f.c.Blocks[1].StateRoot.Bytes(), SummaryValue: []byte{}, Timestamp: 1_700_000_003}

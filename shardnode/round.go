@@ -3,6 +3,7 @@ package shardnode
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -506,6 +507,7 @@ func (r *Round) MarkRestored(round uint64) {
 func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	ctx = WithProofEvidence(ctx)
 
 	if r.inRecovery {
 		// See Round.inRecovery. Reaching this means a second certificate is being handled while the
@@ -772,10 +774,20 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 			return nil
 		}
 		if errors.Is(err, ErrBuildUnavailable) {
+			r.metrics.recordIRDivergence(ctx, "build_unavailable_declined_leadership")
 			r.health.updateExecutionRecovery("unready", err.Error())
 			r.health.updateVoting(false, err.Error())
 			if r.log != nil {
 				r.log.WarnContext(ctx, "declining round after executor build refusal", slog.Uint64("round", exp.Round), slog.String("reason", err.Error()))
+			}
+			return nil
+		}
+		if errors.Is(err, ErrLeaderProposalConflict) {
+			r.metrics.recordIRDivergence(ctx, "leader_candidate_conflict_declined")
+			r.health.updateExecutionRecovery("unready", err.Error())
+			r.health.updateVoting(false, err.Error())
+			if r.log != nil {
+				r.log.WarnContext(ctx, "declining leader round after a different proposal was already journaled", slog.Uint64("round", exp.Round), slog.String("reason", err.Error()))
 			}
 			return nil
 		}
@@ -956,6 +968,19 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return nil
 	}
 	req = signed
+	if r.log != nil {
+		proof := CurrentProofEvidence(ctx)
+		var requestDigest string
+		if requestBytes, digestErr := req.Bytes(); digestErr == nil {
+			digest := sha256.Sum256(requestBytes)
+			requestDigest = fmt.Sprintf("%x", digest)
+		}
+		r.log.InfoContext(ctx, "certification request signed", slog.Uint64("round", exp.Round),
+			slog.Uint64("shardRound", uc.GetRoundNumber()), slog.Uint64("rootRound", uc.GetRootRoundNumber()),
+			slog.String("parentHash", fmt.Sprintf("%x", params.Parent.Hash)), slog.String("childHash", fmt.Sprintf("%x", block.Hash)),
+			slog.String("snapshotID", proof.SnapshotID), slog.Time("verifiedAt", proof.VerifiedAt),
+			slog.String("requestDigest", requestDigest))
+	}
 
 	// Retained before the send, not after it: what must not change on a replay is the SIGNED
 	// bytes, and they exist from here on whether or not the send succeeds.
@@ -1628,6 +1653,9 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 				return Block{}, params, err
 			}
 			if err := r.journal.RetainCandidate(ctx, block, params, true); err != nil {
+				if errors.Is(err, ErrLeaderProposalConflict) {
+					return Block{}, params, err
+				}
 				r.health.updateExecutionRecovery("stopped", err.Error())
 				r.metrics.recordRecoveryStop(ctx)
 				return Block{}, params, fmt.Errorf("retaining leader candidate before publication: %w", err)

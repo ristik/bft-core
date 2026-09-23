@@ -100,8 +100,8 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 			}
 		} else if authenticatedUC != nil && !terminalAdmissionError(outErr) && a.ctx.Err() == nil {
 			if a.pendingUC == nil || authenticatedUC.GetRootRoundNumber() >= a.pendingUC.GetRootRoundNumber() {
-				if a.pendingUC == nil || authenticatedUC.GetRootRoundNumber() != a.pendingUC.GetRootRoundNumber() || authenticatedUC.GetRoundNumber() != a.pendingUC.GetRoundNumber() || !bytes.Equal(authenticatedUC.InputRecord.BlockHash, a.pendingUC.InputRecord.BlockHash) {
-					a.pendingSince, a.pendingAttempts = time.Now(), 0
+				if a.pendingSince.IsZero() {
+					a.pendingSince = time.Now()
 				}
 				a.pendingAttempts++
 				a.pendingError = outErr.Error()
@@ -267,6 +267,9 @@ func (j ProposalJournal) RetainCandidate(ctx context.Context, b shardnode.Block,
 	err := j.Store.PutJournalCandidate(ctx, j.Context, j.Limits, configuredprogress.JournalCandidate{
 		Round: p.Round, Number: b.Number, ParentNumber: p.Parent.Number, Hash: b.Hash, StateRoot: b.StateRoot, ParentHash: b.ParentHash, ParentState: p.Parent.StateRoot, Raw: b.Raw, BlockSize: b.BlockSize, StateSize: b.StateSize, LocallyBuilt: locallyBuilt, AuthorizingUC: p.AuthorizingCertificate, AuthorizingTR: p.AuthorizingTechnicalRecord,
 	})
+	if locallyBuilt && errors.Is(err, configuredprogress.ErrLocalProposalConflict) {
+		return fmt.Errorf("%w: %v", shardnode.ErrLeaderProposalConflict, err)
+	}
 	if !locallyBuilt && errors.Is(err, configuredprogress.ErrConflict) {
 		return fmt.Errorf("%w: %v", shardnode.ErrProposalRejected, err)
 	}

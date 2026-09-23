@@ -81,6 +81,46 @@ func TestJournalAdmissionRetriesUnavailablePeerWithoutNewRootDelivery(t *testing
 	require.False(t, stopped.Load())
 }
 
+func TestPendingCatchUpEpisodeSurvivesNewAuthenticatedTarget(t *testing.T) {
+	chain, origin, ctx, id := adapterFixtureBlocks(t, 2)
+	limits := configuredprogress.JournalLimits{Candidates: 3, Observations: 4, Bytes: 16 << 20}
+	s, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 3})
+	require.NoError(t, err)
+	defer s.Close()
+	_, _, err = s.Initialize(context.Background(), ctx)
+	require.NoError(t, err)
+	require.NoError(t, s.EnableJournal(context.Background(), ctx, limits))
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a, err := (JournalFactory{Store: s, Origin: origin, Limits: limits,
+		CatchUp: func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error {
+			return ErrRecoveryUnavailable
+		},
+	}).Start(runCtx, id, adapterGate{}, shardnode.AdmissionCallbacks{
+		AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {},
+		DeliverDurable:    func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error { return nil },
+	})
+	require.NoError(t, err)
+	defer a.Close()
+	boot, bootTR := journalBootstrap(t, chain)
+	require.NoError(t, a.Submit(runCtx, boot, bootTR))
+	first, firstTR := signPeerBlock(t, chain, 1)
+	require.ErrorIs(t, a.Submit(runCtx, first, firstTR), ErrRecoveryUnavailable)
+	firstPending, ok := a.(interface {
+		PendingAdmission() (shardnode.PendingAdmission, bool)
+	}).PendingAdmission()
+	require.True(t, ok)
+	second, secondTR := signPeerBlock(t, chain, 2)
+	require.ErrorIs(t, a.Submit(runCtx, second, secondTR), ErrRecoveryUnavailable)
+	secondPending, ok := a.(interface {
+		PendingAdmission() (shardnode.PendingAdmission, bool)
+	}).PendingAdmission()
+	require.True(t, ok)
+	require.Equal(t, second.GetRootRoundNumber(), secondPending.RootRound)
+	require.Equal(t, firstPending.Since, secondPending.Since, "episode age must not reset with a newer target")
+	require.Greater(t, secondPending.Attempts, firstPending.Attempts)
+}
+
 func TestJournalAdmissionLogsDurableCertificateOnce(t *testing.T) {
 	chain, origin, ctx, id := adapterFixture(t)
 	limits := configuredprogress.JournalLimits{Candidates: 2, Observations: 3, Bytes: 16 << 20}

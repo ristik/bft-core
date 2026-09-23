@@ -93,8 +93,12 @@ func TestAdapterV2ContinuesThroughCertifiedParents(t *testing.T) {
 			a, closeFn := newTestAdapterWithVerifier(t, engine, eth, verifier)
 			defer closeFn()
 			a.parentWitness = source
-			_, err = a.Build(context.Background(), params)
+			proofCtx := shardnode.WithProofEvidence(context.Background())
+			_, err = a.Build(proofCtx, params)
 			require.NoError(t, err)
+			builtProof := shardnode.CurrentProofEvidence(proofCtx)
+			require.Len(t, builtProof.SnapshotID, 64)
+			require.False(t, builtProof.VerifiedAt.IsZero())
 			require.Equal(t, want.Encoded, []byte(gotInput.RootInput))
 			payload := samplePayload()
 			payload.ParentHash = data32(parent.Hash)
@@ -108,9 +112,10 @@ func TestAdapterV2ContinuesThroughCertifiedParents(t *testing.T) {
 			require.NoError(t, err)
 			block, err := EncodeBlockWithSealCompanion(payload, &SealCompanion{RootInput: want.Encoded, Witnesses: witnesses})
 			require.NoError(t, err)
-			status, err := a.Verify(context.Background(), block, params)
+			status, err := a.Verify(proofCtx, block, params)
 			require.NoError(t, err)
 			require.Equal(t, shardnode.StatusValid, status)
+			require.Equal(t, builtProof, shardnode.CurrentProofEvidence(proofCtx), "Build and Verify used the same verified proof")
 			differentInbox := params
 			differentInbox.AuthorizingCertificate = nil
 			differentInbox.AuthorizingTechnicalRecord = nil
