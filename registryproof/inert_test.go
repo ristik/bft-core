@@ -14,9 +14,9 @@ import (
 
 const importPath = "github.com/unicitynetwork/bft-core/registryproof"
 
-// TestNoProductionPackageImportsTheReader is the narrow importer guard. The adapter's local parent
+// TestOnlyReviewedPackagesImportTheReader is the narrow importer guard. The adapter's local parent
 // witness source is an active, reviewed reader; the other listed consumers retain their own bounds.
-func TestNoProductionPackageImportsTheReader(t *testing.T) {
+func TestOnlyReviewedPackagesImportTheReader(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
 

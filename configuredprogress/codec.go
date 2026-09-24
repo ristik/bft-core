@@ -1,5 +1,6 @@
-// Package configuredprogress is the inactive configured-origin v2 persistence boundary from F6e.
-// It stores authenticated progress data only; it grants no freshness, readiness, execution or signing authority.
+// Package configuredprogress is the configured-origin v2 persistence boundary from F6e, used by
+// the shard-node admission path. It stores authenticated progress data only; it grants no freshness,
+// readiness, execution or signing authority.
 package configuredprogress
 
 import (

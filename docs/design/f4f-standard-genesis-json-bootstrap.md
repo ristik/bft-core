@@ -170,7 +170,7 @@ changing the authorized round, nor can it authorize an executor already past B0 
 
 ## 4. Canonical input v2 and first certification
 
-This is an **inactive versioned semantic amendment**. Existing Go/reth/companion v1 implementations do not
+This is an **active versioned semantic path** for the fixed configured-origin profile. Existing Go/reth/companion v1 implementations do not
 implement it. Root-input version 2 retains the D1 tuple field order and changes its first version element to
 2. O_- keeps the actual authenticated statement. The state-hash positions encode either a 32-byte byte string
 or canonical CBOR null according to exactly these classes; empty byte strings are not an alternate null:

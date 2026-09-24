@@ -190,17 +190,13 @@ the process if they are absent.
 Capability strings: `engine_forkchoiceUpdatedWithSealV1`,
 `engine_newPayloadWithSealV1`, `engine_getPayloadWithSealV1`.
 
-### Companion retention on sync
+### Companion retention and synchronization — future scope
 
-- A node importing via devp2p receives `sealCompanion` in the block-gossip
-  envelope (`ProposalEnvelope` gains a `sealCompanion` field). A node syncing
-  historical blocks fetches companions from the archival proof service (F7)
-  keyed by `(network, partition, shard, blockHash)`.
-- A full node **retains every companion** it has certified, indefinitely, next to
-  the block/UC association (D6 §"proof export"); a pruned node publishes its
-  retention horizon and serves `unavailable` past it. A block whose companion
-  cannot be produced on request is not re-servable and cannot be used as a
-  historical proof subject, but this does not un-certify it.
+Generic devp2p companion gossip, full-node historical synchronization, and an
+archival proof service are future scope; they are not implemented by M1. M1
+uses seal-only import and bounded authenticated shard-journal suffix fetches,
+with retained local archive state and an explicitly capped journal. It does not
+claim public/full-node synchronization or indefinite companion retention.
 
 ## 3. Gas, header, receipts, tracing, EIP-1559
 
