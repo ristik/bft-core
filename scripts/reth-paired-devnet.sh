@@ -241,11 +241,13 @@ if [ "${D2C_FAULT_SCENARIO:-}" = proof-outage ] || [ "${D2C_FAULT_SCENARIO:-}" =
   echo "D2C proof proxy routes validator 1 HTTP RPC through 127.0.0.1:18645"
 fi
 
-if [ "${D2C_FAULT_SCENARIO:-}" = hostile-builder ]; then
+if [ "${D2C_FAULT_SCENARIO:-}" = hostile-builder ] || [ "${D2C_FAULT_SCENARIO:-}" = hostile-fee-recipient ]; then
   mkdir -p test-nodes/engine-proxy
+  engineMutation=gas-used
+  [ "${D2C_FAULT_SCENARIO:-}" != hostile-fee-recipient ] || engineMutation=fee-recipient
   printf '{"armed":false}\n' >test-nodes/engine-proxy/control.json
   python3 scripts/d2c-engine-proxy.py --listen "127.0.0.1:$engineProxyPort" \
-    --target "http://127.0.0.1:$rethEngineBase" \
+    --target "http://127.0.0.1:$rethEngineBase" --mutation "$engineMutation" \
     --control test-nodes/engine-proxy/control.json --log test-nodes/engine-proxy/engine.log \
     >test-nodes/engine-proxy/stdout.log 2>&1 &
   echo $! >test-nodes/engine-proxy/pid
@@ -265,7 +267,7 @@ PYPORT
     sleep 0.25
   done
   $ready || { echo "D2C Engine proxy did not start" >&2; exit 1; }
-  echo "D2C Engine proxy routes only validator 1 Engine API through 127.0.0.1:$engineProxyPort"
+  echo "D2C Engine proxy ($engineMutation mutation) routes only validator 1 Engine API through 127.0.0.1:$engineProxyPort"
 fi
 
 echo
@@ -601,7 +603,7 @@ done
 if [ "${D2C_FAULT_SCENARIO:-}" = proof-outage ] || [ "${D2C_FAULT_SCENARIO:-}" = proof-corrupt ]; then
   export EVM_ETH_URL_1=http://127.0.0.1:18645
 fi
-if [ "${D2C_FAULT_SCENARIO:-}" = hostile-builder ]; then
+if [ "${D2C_FAULT_SCENARIO:-}" = hostile-builder ] || [ "${D2C_FAULT_SCENARIO:-}" = hostile-fee-recipient ]; then
   export EVM_ENGINE_URL_1="http://127.0.0.1:$engineProxyPort"
 fi
 
@@ -697,11 +699,19 @@ fi
 divergenceLogged=false
 for i in $(seq 1 "$validators"); do
   log="test-nodes/evm$i/debug.log"
-  if ! python3 - "$log" "$i" "$d2cRecoveryProbe" <<'PYDIVERGENCE'
-import re, sys
+  if ! python3 - "$log" "$i" "$d2cRecoveryProbe" "${D2C_FAULT_SCENARIO:-}" <<'PYDIVERGENCE'
+import json, re, sys
 from pathlib import Path
 
-path, validator, probe = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
+path, validator, probe, scenario = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1", sys.argv[4]
+expected_fee_recipient = None
+if scenario == "hostile-fee-recipient":
+    try:
+        expected_fee_recipient = json.loads(Path("test-nodes/d2c-hostile-fee-recipient-expected-invalid.json").read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"expected fee-recipient INVALID marker missing or malformed: {exc}")
+        raise SystemExit(1)
+expected_fee_recipient_lines = 0
 try:
     lines = Path(path).read_text(errors="replace").splitlines()
 except OSError as exc:
@@ -714,8 +724,22 @@ boundaries = [n for n, line in enumerate(lines) if "D2C_RESTART_BOUNDARY" in lin
 warnings = [n for n, line in enumerate(lines) if warning in line]
 for line_no, line in enumerate(lines):
     if re.search(r"diverge|equivocat|impossible certificate ordering", line, re.I) and warning not in line:
+        expected = expected_fee_recipient
+        round_match = re.search(r"engineapi: round (\d+) suggestedFeeRecipient diverges: got ([0-9a-f]+), want ([0-9a-f]+)", line)
+        if (expected and 'msg="rejecting round before execution: attributes diverge from local derivation"' in line
+                and 'status="INVALID"' in line and round_match
+                and int(round_match.group(1)) == expected["round"]
+                and round_match.group(2) == expected["got"] and round_match.group(3) == expected["want"]):
+            expected_fee_recipient_lines += 1
+            continue
         print(f"unexpected divergence/equivocation at {path}:{line_no + 1}: {line}")
         raise SystemExit(1)
+
+if expected_fee_recipient and expected_fee_recipient_lines == 0:
+    print(f"validator {validator} lacks the armed fee-recipient INVALID diagnostic")
+    raise SystemExit(1)
+if expected_fee_recipient_lines:
+    print(f"validator {validator} logged {expected_fee_recipient_lines} expected fee-recipient INVALID diagnostic(s)")
 
 if warnings and probe and not boundaries:
     print(f"recovery warning is only allowed after this validator's D2C_RESTART_BOUNDARY ({path})")
@@ -751,7 +775,11 @@ PYDIVERGENCE
   fi
 done
 if ! $divergenceLogged; then
-  pass "no validator logged divergence or equivocation"
+  if [ "${D2C_FAULT_SCENARIO:-}" = hostile-fee-recipient ]; then
+    pass "no unexpected divergence or equivocation; each validator logged the armed fee-recipient INVALID refusal"
+  else
+    pass "no validator logged divergence or equivocation"
+  fi
 fi
 
 # #232 is a known independent startup-profile failure. Keep it visible; its preflight above

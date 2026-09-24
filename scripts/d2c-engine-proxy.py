@@ -18,6 +18,7 @@ parser.add_argument("--listen", required=True)
 parser.add_argument("--target", required=True)
 parser.add_argument("--control", required=True)
 parser.add_argument("--log", required=True)
+parser.add_argument("--mutation", choices=("gas-used", "fee-recipient"), default="gas-used")
 args = parser.parse_args()
 control = Path(args.control)
 log_path = Path(args.log)
@@ -65,9 +66,9 @@ def rlp_list(items):
     return bytes([0xf7 + len(length)]) + length + body
 
 
-def payload_header_hash(payload, attributes, gas_used):
+def payload_header_hash(payload, attributes, gas_used=None):
     if payload.get("transactions") != [] or payload.get("withdrawals") != []:
-        raise ValueError("hostile gasUsed mutation expects the empty-transaction, empty-withdrawal lane")
+        raise ValueError("hostile header mutation expects the empty-transaction, empty-withdrawal lane")
 
     def data(name):
         return bytes.fromhex(payload[name].removeprefix("0x"))
@@ -90,7 +91,7 @@ def payload_header_hash(payload, attributes, gas_used):
         rlp_int(0),
         rlp_int(quantity("blockNumber")),
         rlp_int(quantity("gasLimit")),
-        rlp_int(gas_used),
+        rlp_int(quantity("gasUsed") if gas_used is None else gas_used),
         rlp_int(quantity("timestamp")),
         rlp_bytes(data("extraData")),
         rlp_bytes(data("prevRandao")),
@@ -182,22 +183,50 @@ class Handler(BaseHTTPRequestHandler):
                 answer = json.loads(payload)
                 result = answer["result"]
                 execution_payload = result["executionPayload"]
-                old_gas_used = int(execution_payload["gasUsed"], 16)
-                new_gas_used = old_gas_used + 1
                 old_block_hash = execution_payload["blockHash"]
                 attrs = payload_attributes.pop(payload_id, {})
-                computed_original = payload_header_hash(execution_payload, attrs, old_gas_used)
+                computed_original = payload_header_hash(execution_payload, attrs)
                 if computed_original.lower() != old_block_hash.lower():
                     raise ValueError(f"header hash reconstruction mismatch: expected {old_block_hash}, "
                                      f"computed {computed_original}")
-                execution_payload["gasUsed"] = hex(new_gas_used)
-                execution_payload["blockHash"] = payload_header_hash(execution_payload, attrs, new_gas_used)
+                mutation_fields = ""
+                if args.mutation == "gas-used":
+                    old_value = int(execution_payload["gasUsed"], 16)
+                    new_value = old_value + 1
+                    execution_payload["gasUsed"] = hex(new_value)
+                    execution_payload["blockHash"] = payload_header_hash(
+                        execution_payload, attrs, new_value)
+                    mutation_fields = f"gasUsed={old_value}->{new_value}"
+                else:
+                    old_value = execution_payload["feeRecipient"]
+                    recipient = bytearray.fromhex(old_value.removeprefix("0x"))
+                    recipient[0] ^= 1
+                    new_value = "0x" + recipient.hex()
+                    execution_payload["feeRecipient"] = new_value
+                    execution_payload["blockHash"] = payload_header_hash(execution_payload, attrs)
+                    mutation_fields = f"feeRecipient={old_value}->{new_value}"
+                if args.mutation == "fee-recipient":
+                    probe = {"jsonrpc": "2.0", "id": "fee-recipient-probe",
+                             "method": "engine_newPayloadWithSealV1",
+                             "params": [execution_payload, [], attrs["parentBeaconBlockRoot"],
+                                        result["sealCompanion"]]}
+                    probe_request = urllib.request.Request(
+                        args.target, json.dumps(probe, separators=(",", ":")).encode(),
+                        headers, method="POST")
+                    try:
+                        with urllib.request.urlopen(probe_request, timeout=15) as probe_response:
+                            probe_answer = json.load(probe_response)
+                        probe_status = probe_answer.get("result", {})
+                        log(f"RETH-FEE-RECIPIENT-PROBE status={probe_status.get('status')} "
+                            f"validationError={json.dumps(probe_status.get('validationError'))}")
+                    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+                        log(f"RETH-FEE-RECIPIENT-PROBE-ERROR error={type(exc).__name__}:{exc}")
                 payload = json.dumps(answer, separators=(",", ":")).encode()
                 digest = hashlib.sha256(payload).hexdigest()
-                log(f"MUTATED pending-release trace={trace} method={method} id={request.get('id')} payloadId={payload_id} "
+                log(f"MUTATED pending-release trace={trace} mutation={args.mutation} method={method} "
+                    f"id={request.get('id')} payloadId={payload_id} "
                     f"blockNumber={execution_payload['blockNumber']} parentHash={execution_payload['parentHash']} "
-                    f"blockHash={old_block_hash}->{execution_payload['blockHash']} "
-                    f"gasUsed={old_gas_used}->{new_gas_used} "
+                    f"blockHash={old_block_hash}->{execution_payload['blockHash']} {mutation_fields} "
                     f"response_sha256={digest}")
                 release_deadline = time.monotonic() + 30
                 while time.monotonic() < release_deadline:
