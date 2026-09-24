@@ -4,8 +4,8 @@
 set -uo pipefail
 scenario=${D2C_SCENARIO:-}
 case "$scenario" in
-  pair-term|pair-kill|ureth-kill|all-kill|leader-kill|proof-outage|proof-corrupt|missing-body|wrong-genesis|hostile-builder) ;;
-  *) echo "set D2C_SCENARIO to one of: pair-term pair-kill ureth-kill all-kill leader-kill proof-outage proof-corrupt missing-body wrong-genesis hostile-builder" >&2; exit 2 ;;
+  pair-term|pair-kill|ureth-kill|all-kill|leader-kill|proof-outage|proof-corrupt|missing-body|wrong-genesis|hostile-builder|hostile-fee-recipient) ;;
+  *) echo "set D2C_SCENARIO to one of: pair-term pair-kill ureth-kill all-kill leader-kill proof-outage proof-corrupt missing-body wrong-genesis hostile-builder hostile-fee-recipient" >&2; exit 2 ;;
 esac
 
 retain_root=${D2C_RETAIN_DIR:-briefs/d2c-harness}
@@ -58,7 +58,7 @@ case "$scenario" in
     echo "D2C[${scenario}] FAIL(lane exited ${lane_status}; see diagnostics above)" | tee -a "$log"
     exit "$lane_status"
     ;;
-  proof-outage|proof-corrupt|hostile-builder)
+  proof-outage|proof-corrupt|hostile-builder|hostile-fee-recipient)
     D2C_FAULT_SCENARIO="$scenario" SIGNING=authority ./scripts/reth-paired-devnet.sh 4 10 2>&1 | tee "$log"
     lane_status=${PIPESTATUS[0]}
     retain_run_logs
@@ -72,15 +72,17 @@ case "$scenario" in
         fi
         verdict=$(grep '^D2C\[proof-corrupt\] EXPECTED-FAIL(' "$log" | tail -1)
         echo "$verdict" | tee -a "$log"
-      elif [ "$scenario" = hostile-builder ]; then
-        if ! grep -q '^D2C\[hostile-builder\] EXPECTED-FAIL(mutated builder payload ' "$log" ||
-           ! grep -q '^D2C\[hostile-builder\] rotated leader validator=.*certificate admitted at B' "$log" ||
+      elif [ "$scenario" = hostile-builder ] || [ "$scenario" = hostile-fee-recipient ]; then
+        label=hostile-builder
+        [ "$scenario" != hostile-fee-recipient ] || label=hostile-fee-recipient
+        if ! grep -q "^D2C\[$label\] EXPECTED-FAIL(mutated builder payload " "$log" ||
+           ! grep -q "^D2C\[$label\] rotated leader validator=.*certificate admitted at B" "$log" ||
            ! grep -q '^D1 PASS$' "$log"; then
-          echo "D2C[hostile-builder] FAIL(missing mutation rejection, leader rotation, or continuing D1 evidence)" | tee -a "$log"
+          echo "D2C[$label] FAIL(missing mutation rejection, leader rotation, or continuing D1 evidence)" | tee -a "$log"
           exit 1
         fi
-        grep '^D2C\[hostile-builder\]' "$log" | tee -a "$log"
-        echo "D2C[hostile-builder] PASS" | tee -a "$log"
+        grep "^D2C\[$label\]" "$log" | tee -a "$log"
+        echo "D2C[$label] PASS" | tee -a "$log"
       else
         echo "D2C[${scenario}] PASS" | tee -a "$log"
       fi

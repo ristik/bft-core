@@ -375,7 +375,7 @@ def main():
     parser.add_argument("--signing", choices=("local", "authority"), default="local")
     parser.add_argument("--fault-scenario", choices=("pair-term", "pair-kill", "ureth-kill",
                         "all-kill", "leader-kill", "proof-outage", "proof-corrupt",
-                        "missing-body", "wrong-genesis", "hostile-builder"), default="")
+                        "missing-body", "wrong-genesis", "hostile-builder", "hostile-fee-recipient"), default="")
     args = parser.parse_args()
     if args.validators != 4 or args.blocks < 10:
         parser.error("D1 requires four validators and at least ten blocks")

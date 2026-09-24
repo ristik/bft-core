@@ -762,7 +762,8 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	}
 	if err := VerifyPayloadFieldsV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector, claimed); err != nil {
 		if a.log != nil {
-			a.log.WarnContext(ctx, "rejecting round before execution: attributes diverge from local derivation", slog.String("err", err.Error()))
+			a.log.WarnContext(ctx, "rejecting round before execution: attributes diverge from local derivation",
+				slog.String("status", "INVALID"), slog.String("err", err.Error()))
 		}
 		return shardnode.StatusInvalid, nil
 	}

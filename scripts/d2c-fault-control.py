@@ -387,6 +387,8 @@ def finalized(i):
 
 
 def hostile_builder():
+    mutation_kind = "fee-recipient" if SCENARIO == "hostile-fee-recipient" else "gas-used"
+    label = "hostile-fee-recipient" if mutation_kind == "fee-recipient" else "hostile-builder"
     control = Path("test-nodes/engine-proxy/control.json")
     proxy_log = Path("test-nodes/engine-proxy/engine.log")
     if not control.exists() or not proxy_log.exists():
@@ -398,32 +400,42 @@ def hostile_builder():
         temp.replace(control)
 
     set_armed(True)
-    print(f"D2C[hostile-builder] armed validator 1 Engine proxy after certified B{CERTIFIED}", flush=True)
+    print(f"D2C[{label}] armed validator 1 Engine proxy for {mutation_kind} after certified B{CERTIFIED}", flush=True)
     deadline = time.monotonic() + float(os.environ.get("D2C_HOSTILE_TIMEOUT", "60"))
     mutation = None
     while time.monotonic() < deadline:
         for line in proxy_log.read_text(errors="replace").splitlines():
-            if " MUTATED " in line:
+            if " MUTATED " in line and f"mutation={mutation_kind} " in line:
                 match = re.search(r"blockNumber=(0x[0-9a-fA-F]+) parentHash=(0x[0-9a-fA-F]{64}) "
                                   r"blockHash=(0x[0-9a-fA-F]{64})->(0x[0-9a-fA-F]{64}) "
-                                  r"gasUsed=([0-9]+)->([0-9]+)", line)
+                                  r"(.*)", line)
                 if match:
                     mutation = {"height": int(match.group(1), 16),
                                 "parent": match.group(2).removeprefix("0x").lower(),
                                 "originalBlock": match.group(3).removeprefix("0x").lower(),
                                 "block": match.group(4).removeprefix("0x").lower(),
-                                "oldGasUsed": int(match.group(5)),
-                                "newGasUsed": int(match.group(6)),
                                 "line": line}
-                    break
+                    if mutation_kind == "gas-used":
+                        values = re.search(r"gasUsed=([0-9]+)->([0-9]+)", match.group(5))
+                        if values:
+                            mutation.update(oldGasUsed=int(values.group(1)), newGasUsed=int(values.group(2)))
+                    else:
+                        values = re.search(r"feeRecipient=(0x[0-9a-fA-F]{40})->(0x[0-9a-fA-F]{40})", match.group(5))
+                        if values:
+                            mutation.update(oldFeeRecipient=values.group(1).lower(),
+                                            newFeeRecipient=values.group(2).lower())
+                    if ("oldGasUsed" in mutation or "oldFeeRecipient" in mutation):
+                        break
         if mutation:
             break
         time.sleep(0.05)
     if not mutation:
         set_armed(False)
         raise RuntimeError("validator 1 never built a payload through the armed Engine proxy")
-    if mutation["oldGasUsed"] + 1 != mutation["newGasUsed"]:
+    if mutation_kind == "gas-used" and mutation["oldGasUsed"] + 1 != mutation["newGasUsed"]:
         raise RuntimeError("Engine proxy logged an unexpected gasUsed mutation")
+    if mutation_kind == "fee-recipient" and mutation["oldFeeRecipient"] == mutation["newFeeRecipient"]:
+        raise RuntimeError("Engine proxy logged an unchanged feeRecipient")
 
     # The proxy holds the changed response before returning it to the leader. Let all validators
     # finish applying the authorizing certificate, then record their shared finalized parent.
@@ -453,56 +465,93 @@ def hostile_builder():
     temp = control.with_suffix(".tmp")
     temp.write_text(json.dumps({"armed": False, "release_mutation": True}) + "\n")
     temp.replace(control)
-    print(f"D2C[hostile-builder] common finality held at B{before[1]['height']} "
+    print(f"D2C[{label}] common finality held at B{before[1]['height']} "
           f"{before[1]['hash']} before releasing the mutated proposal", flush=True)
-    print(f"D2C[hostile-builder] mutated one getPayloadWithSealV1 response: block={mutation['block']} "
-          f"gasUsed={mutation['oldGasUsed']}->{mutation['newGasUsed']}; blockHash="
+    if mutation_kind == "gas-used":
+        mutation_description = f"gasUsed={mutation['oldGasUsed']}->{mutation['newGasUsed']}"
+    else:
+        mutation_description = f"feeRecipient={mutation['oldFeeRecipient']}->{mutation['newFeeRecipient']}"
+    print(f"D2C[{label}] mutated one getPayloadWithSealV1 response: block=B{mutation['height']} "
+          f"{mutation['block']} {mutation_description}; blockHash="
           f"{mutation['originalBlock']}->{mutation['block']}; finality baseline="
-          f"B{before[1]['height']}:{before[1]['hash']}",
-          flush=True)
+          f"B{before[1]['height']}:{before[1]['hash']}", flush=True)
 
     invalid = {}
     deadline = time.monotonic() + float(os.environ.get("D2C_HOSTILE_REJECT_TIMEOUT", "45"))
     while time.monotonic() < deadline:
         for i in range(1, 5):
             lines = Path(f"test-nodes/evm{i}/debug.log").read_text(errors="replace").splitlines()
-            matches = [line for line in lines
-                       if 'msg="verified execution payload"' in line
-                       and log_field(line, "blockHash") == mutation["block"]
-                       and log_field(line, "status") == "INVALID"]
+            if mutation_kind == "gas-used":
+                matches = [line for line in lines
+                           if 'msg="verified execution payload"' in line
+                           and log_field(line, "blockHash") == mutation["block"]
+                           and log_field(line, "status") == "INVALID"]
+            else:
+                matches = [line for line in lines
+                           if 'msg="rejecting round before execution: attributes diverge from local derivation"' in line
+                           and "suggestedFeeRecipient diverges" in line
+                           and "status=INVALID" in line
+                           and mutation["newFeeRecipient"].removeprefix("0x") in line
+                           and mutation["oldFeeRecipient"].removeprefix("0x") in line]
             if matches:
                 invalid[i] = matches[-1]
         if len(invalid) == 4:
             break
         time.sleep(0.05)
     if set(invalid) != {1, 2, 3, 4}:
-        raise RuntimeError(f"did not observe INVALID verification on the leader and all followers: "
+        raise RuntimeError(f"did not observe INVALID rejection and reason on all validators: "
                            f"validators={sorted(invalid)} block={mutation['block']}")
 
-    rounds = {log_field(line, "round") for line in invalid.values()}
-    if len(rounds) != 1 or not next(iter(rounds), "").isdigit():
-        raise RuntimeError(f"INVALID verification did not agree on one shard round: {rounds}")
-    hostile_round = int(next(iter(rounds)))
-    snapshots = {i: log_field(line, "snapshotID") for i, line in invalid.items()}
-    if any(not value for value in snapshots.values()):
-        raise RuntimeError(f"INVALID verification lacks its parent snapshot evidence: {snapshots}")
+    if mutation_kind == "gas-used":
+        rounds = {log_field(line, "round") for line in invalid.values()}
+        if len(rounds) != 1 or not next(iter(rounds), "").isdigit():
+            raise RuntimeError(f"INVALID verification did not agree on one shard round: {rounds}")
+        hostile_round = int(next(iter(rounds)))
+        snapshots = {i: log_field(line, "snapshotID") for i, line in invalid.items()}
+        if any(not value for value in snapshots.values()):
+            raise RuntimeError(f"INVALID verification lacks its parent snapshot evidence: {snapshots}")
+    else:
+        rounds = set()
+        for line in invalid.values():
+            round_match = re.search(r"engineapi: round (\d+) suggestedFeeRecipient diverges", line)
+            if not round_match or "status=INVALID" not in line:
+                raise RuntimeError(f"fee-recipient rejection lacks INVALID status or a round diagnostic: {line}")
+            rounds.add(round_match.group(1))
+        if len(rounds) != 1:
+            raise RuntimeError(f"fee-recipient rejections did not agree on one shard round: {rounds}")
+        hostile_round = int(next(iter(rounds)))
+        snapshots = {}
+        Path("test-nodes/d2c-hostile-fee-recipient-expected-invalid.json").write_text(
+            json.dumps({"round": hostile_round, "block": mutation["block"],
+                        "height": mutation["height"], "parent": mutation["parent"],
+                        "got": mutation["newFeeRecipient"].removeprefix("0x"),
+                        "want": mutation["oldFeeRecipient"].removeprefix("0x")}, indent=2) + "\n")
 
     for i in range(1, 5):
         lines = Path(f"test-nodes/evm{i}/debug.log").read_text(errors="replace").splitlines()
         signed = [line for line in lines
                   if 'msg="certification request signed"' in line
                   and log_field(line, "round") == str(hostile_round)
-                  and (log_field(line, "childHash") == mutation["block"]
+                  and (mutation_kind == "fee-recipient"
+                       or log_field(line, "childHash") == mutation["block"]
                        or log_field(line, "snapshotID") == snapshots[i])]
         if signed:
             raise RuntimeError(f"validator {i} signed a request based on the INVALID snapshot: {signed[-1]}")
         admissions = [line for line in lines
                       if 'msg="certificate admitted"' in line
                       and log_field(line, "round") == str(hostile_round)
-                      and log_field(line, "block") == mutation["block"]]
+                      and (mutation_kind == "fee-recipient" or log_field(line, "block") == mutation["block"])]
         if admissions:
             raise RuntimeError(f"validator {i} admitted a certificate for the hostile block: {admissions[-1]}")
-    print(f"D2C[hostile-builder] followers rejected block={mutation['block']} at round={hostile_round}; "
+    if mutation_kind == "fee-recipient":
+        probe_lines = [line for line in proxy_log.read_text(errors="replace").splitlines()
+                       if "RETH-FEE-RECIPIENT-PROBE status=" in line]
+        if not probe_lines:
+            raise RuntimeError("proxy did not retain the direct real-reth fee-recipient verdict")
+        print(f"D2C[{label}] real reth verdict: {probe_lines[-1]}", flush=True)
+        for i, line in sorted(invalid.items()):
+            print(f"D2C[{label}] validator={i} status=INVALID reason={line}", flush=True)
+    print(f"D2C[{label}] all validators rejected block={mutation['block']} at round={hostile_round}; "
           f"snapshotIDs={snapshots}; signedRequests=0; certificate=false", flush=True)
 
     # Check finality again after all four adapters reported INVALID and before considering
@@ -510,13 +559,14 @@ def hostile_builder():
     after_rejection = {i: finalized(i) for i in range(1, 5)}
     if any(item != before[i] for i, item in after_rejection.items()):
         raise RuntimeError(f"finalized heads changed during hostile-round rejection: {after_rejection}")
-    print(f"D2C[hostile-builder] finality unchanged through rejection at B{before[1]['height']} "
+    print(f"D2C[{label}] finality unchanged through rejection at B{before[1]['height']} "
           f"{before[1]['hash']}", flush=True)
 
     # Require a post-rotation certificate above the exact hostile proposal parent, then
     # require every reth finalized head to reflect that certificate before lane teardown.
     # Root consensus alone is insufficient: the shard certificate must be admitted.
     deadline = time.monotonic() + float(os.environ.get("D2C_HOSTILE_RECOVERY_TIMEOUT", "180"))
+    recovery_height = mutation["height"] if mutation_kind == "fee-recipient" else before[1]["height"]
     rotated = None
     recovery = None
     heads = {}
@@ -539,7 +589,7 @@ def hostile_builder():
             continue
         same_head = len({(item["height"], item["hash"]) for item in heads.values()}) == 1
         head = heads.get(1)
-        if rotated and same_head and head and head["height"] > before[1]["height"]:
+        if rotated and same_head and head and head["height"] > recovery_height:
             admitted = {}
             for i in range(1, 5):
                 lines = Path(f"test-nodes/evm{i}/debug.log").read_text(errors="replace").splitlines()
@@ -557,22 +607,23 @@ def hostile_builder():
                 break
         time.sleep(0.2)
     if not rotated or not recovery:
-        raise RuntimeError(f"no post-rotation certificate above hostile parent B{before[1]['height']} "
+        raise RuntimeError(f"no post-rotation certificate above hostile height B{recovery_height} "
                            f"was admitted and finalized on all validators within the bounded wait; "
                            f"leader={rotated}; finalized={heads}")
     proxy_lines = proxy_log.read_text(errors="replace").splitlines()
     upstream_verdicts = [line for line in proxy_lines
                          if "UPSTREAM-VALIDATION" in line and "status=INVALID" in line]
-    if upstream_verdicts:
-        print(f"D2C[hostile-builder] leader reth INVALID reason: {upstream_verdicts[-1]}", flush=True)
-    else:
-        print("D2C[hostile-builder] leader proxy did not receive a validationError field from reth", flush=True)
+    if mutation_kind == "gas-used":
+        if upstream_verdicts:
+            print(f"D2C[{label}] leader reth INVALID reason: {upstream_verdicts[-1]}", flush=True)
+        else:
+            print(f"D2C[{label}] leader proxy did not receive a validationError field from reth", flush=True)
     for i in range(2, 5):
         lines = Path(f"test-nodes/evm{i}/debug.log").read_text(errors="replace").splitlines()
         validation_lines = [line for line in lines if "validationError" in line or "validation error" in line.lower()]
         if validation_lines:
-            print(f"D2C[hostile-builder] validator {i} validation diagnostic: {validation_lines[-1]}", flush=True)
-    print(f"D2C[hostile-builder] rotated leader validator={rotated[0]} after round={hostile_round}; "
+            print(f"D2C[{label}] validator {i} validation diagnostic: {validation_lines[-1]}", flush=True)
+    print(f"D2C[{label}] rotated leader validator={rotated[0]} after round={hostile_round}; "
           f"certificate admitted at B{recovery['head']['height']} "
           f"{recovery['head']['hash']} by all validators; finalized heads={heads}", flush=True)
     proxy_lines = proxy_log.read_text(errors="replace").splitlines()
@@ -581,10 +632,10 @@ def hostile_builder():
     if len(mutations) != 1 or len(releases) != 1:
         raise RuntimeError(f"proxy did not perform and release exactly one mutation: "
                            f"mutations={len(mutations)} releases={len(releases)}")
-    print(f"D2C[hostile-builder] EXPECTED-FAIL(mutated builder payload {mutation['block']} was INVALID at all "
+    print(f"D2C[{label}] EXPECTED-FAIL(mutated builder payload {mutation['block']} was INVALID at all "
           f"four validators; no same-round signature or certificate; finality held at "
           f"B{before[1]['height']} {before[1]['hash']}; post-rotation certificate admitted/finalized at "
-          f"B{recovery['head']['height']}; follow-up stateRoot/system-call mutation variant remains future work)",
+          f"B{recovery['head']['height']})",
           flush=True)
 
 
@@ -609,7 +660,7 @@ def leader():
     raise RuntimeError("no active leader proposal observed in shard logs within 40 seconds")
 
 
-if SCENARIO == "hostile-builder":
+if SCENARIO in ("hostile-builder", "hostile-fee-recipient"):
     hostile_builder()
     raise SystemExit(0)
 elif SCENARIO == "leader-kill":
