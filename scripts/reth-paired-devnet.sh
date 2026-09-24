@@ -26,6 +26,10 @@ source helper.sh
 validators=${1:-4}
 rounds=${2:-10}
 partitionID=8
+if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ] && { [ "$validators" -ne 4 ] || [ "$rounds" -lt 10 ]; }; then
+  echo "M1 fee accounting requires four validators and at least 10 rounds" >&2
+  exit 2
+fi
 case "${SIGNING:-local}" in
   local | authority) ;;
   *) echo "SIGNING must be local or authority" >&2; exit 2 ;;
@@ -143,6 +147,10 @@ python3 - <<'PY'
 import json, subprocess
 g = json.load(open("test-nodes/evm-genesis.json"))
 g["alloc"] = json.loads(subprocess.check_output(["go", "run", "./scripts/evmtx", "-alloc"]))
+if __import__("os").environ.get("M1_FEE_ACCOUNTING") == "1":
+    # Start one wei above ureth's fixed M1 floor. B1 has ordinary gas well below target,
+    # so its fee must clamp to the floor and every following idle block must hold there.
+    g["baseFeePerGas"] = "0xf4241"  # 1,000,001 wei; production floor is 1,000,000 wei
 json.dump(g, open("test-nodes/evm-genesis-funded.json", "w"), indent=2)
 PY
 fundedSHA=$(shasum -a 256 test-nodes/evm-genesis-funded.json | cut -d' ' -f1)
@@ -568,6 +576,7 @@ fi
 # Every validator may lead. P2P transaction propagation is disabled in M1, so seed the same
 # three paid nonce-ordered transactions into each local mempool before shard voting starts.
 txHash=""
+txHashes=""
 for nonce in 0 1 2; do
   expected=""
   for i in $(seq 1 "$validators"); do
@@ -584,8 +593,12 @@ for nonce in 0 1 2; do
     expected=$sent
   done
   [ "$nonce" = 0 ] && txHash=$expected
+  txHashes+="$expected\n"
   echo "  paid nonce $nonce hash=$expected seeded on all $validators reth clients"
 done
+if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ]; then
+  printf '%b' "$txHashes" >test-nodes/m1-fee-tx-hashes.txt
+fi
 pass "seeded three paid user transactions in every reth mempool before block 1"
 
 echo
@@ -716,5 +729,33 @@ if [ "$failures" -gt "$preflightFailures" ]; then
   echo "D1 FAIL ($((failures - preflightFailures)) lane check(s) failed)"
 else
   echo "D1 PASS"
+fi
+if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ]; then
+  echo
+  echo "=== 7. audit paid receipt accounting, then reach and hold the fee floor across a reth restart ==="
+  if [ "$failures" -eq 0 ]; then
+    python3 scripts/m1-fee-accounting.py before-restart --nodes test-nodes \
+      --tx-hashes test-nodes/m1-fee-tx-hashes.txt --floor 1000000 --restart-height "$rounds" || \
+      fail "paid transaction fee accounting or pre-restart floor check failed"
+  fi
+  if [ "$failures" -eq 0 ]; then
+    feeRestartHeight=$(cat test-nodes/m1-fee-pre-restart-head.txt)
+    echo "restarting only reth1 at the certified idle head B$feeRestartHeight"
+    stop_pidfile "test-nodes/reth1/pid" 'reth.* node' TERM || fail "could not stop reth1 for fee-floor restart"
+    if [ "$failures" -eq 0 ]; then
+      "$URETH_BIN" node --chain "$chainSpec" --datadir test-nodes/reth1/dd \
+        --authrpc.jwtsecret test-nodes/evm1/jwt.hex \
+        --authrpc.addr 127.0.0.1 --authrpc.port "$rethEngineBase" \
+        --http --http.addr 127.0.0.1 --http.port "$rethEthBase" \
+        --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
+        --port "$rethP2PBase" --disable-discovery --ipcdisable \
+        --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit 30000000 \
+        $(urethPinUnicityFlags) >test-nodes/reth1/reth-restart.log 2>&1 &
+      echo $! >test-nodes/reth1/pid
+      python3 scripts/m1-fee-accounting.py after-restart --nodes test-nodes \
+        --floor 1000000 --restart-height "$feeRestartHeight" --further-heights 3 --timeout 120 || \
+        fail "base-fee floor was not held across the reth restart"
+    fi
+  fi
 fi
 [ "$failures" -eq 0 ]
