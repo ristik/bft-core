@@ -232,14 +232,11 @@ func TestV2QuorumSubsetAuthenticationAndContextRefusals(t *testing.T) {
 		}
 	}
 	_, err := AuthenticateObservationV2(context.Background(), c, makeUC(0, 1), tr)
-	require.Error(t, err, "sub-quorum must be rejected")
+	require.ErrorIs(t, err, ErrUnauthenticated)
+	require.ErrorContains(t, err, "quorum not reached", "sub-quorum must be rejected")
 	foreign, err := abcrypto.NewInMemorySecp256K1Signer()
 	require.NoError(t, err)
-	foreignUC := makeUC(0, 1, 2)
-	foreignUC.UnicitySeal.Signatures = nil
-	for _, i := range []int{0, 1} {
-		require.NoError(t, foreignUC.UnicitySeal.Sign(ids[i], signers[i]))
-	}
+	foreignUC := makeUC(0, 1)
 	v, err := foreign.Verifier()
 	require.NoError(t, err)
 	pk, err := v.MarshalPublicKey()
@@ -248,17 +245,20 @@ func TestV2QuorumSubsetAuthenticationAndContextRefusals(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, foreignUC.UnicitySeal.Sign(foreignID.String(), foreign))
 	_, err = AuthenticateObservationV2(context.Background(), c, foreignUC, tr)
-	require.Error(t, err, "a non-member signer must be rejected")
+	require.ErrorIs(t, err, ErrUnauthenticated)
+	require.ErrorContains(t, err, "quorum not reached", "a non-member signer must be rejected")
 
 	valid := makeUC(0, 1, 2)
 	wrongPartition := c
 	wrongPartition.PartitionID++
 	_, err = AuthenticateObservationV2(context.Background(), wrongPartition, valid, tr)
-	require.Error(t, err, "wrong partition must be rejected")
+	require.ErrorIs(t, err, ErrUnauthenticated)
+	require.ErrorContains(t, err, "invalid partition identifier", "wrong partition must be rejected")
 	wrongShard := c
 	_, wrongShard.ShardID = c.ShardID.Split()
 	_, err = AuthenticateObservationV2(context.Background(), wrongShard, valid, tr)
-	require.Error(t, err, "wrong shard must be rejected")
+	require.ErrorIs(t, err, ErrUnauthenticated)
+	require.ErrorContains(t, err, "invalid shard ID", "wrong shard must be rejected")
 }
 
 func TestV2UnsupportedClassifierRequiresDirectPostAuthenticationRefusal(t *testing.T) {
