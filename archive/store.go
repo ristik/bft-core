@@ -241,7 +241,7 @@ func (s *Store) get(q Request) (*Record, error) {
 		return nil, ErrCorrupt
 	}
 	r := bytes.NewReader(m[8 : len(m)-32])
-	qb, err := readBytes(r, MaxContextBytes+256)
+	qb, err := readBytes(r, MaxRequestBytes)
 	if err != nil {
 		return nil, ErrCorrupt
 	}
@@ -318,7 +318,9 @@ func binaryRead32(r io.Reader, v *uint32) error {
 	return nil
 }
 
-// Serve maps local storage outcomes into the typed response envelope.
+// Serve maps local storage outcomes into the typed response envelope. A future
+// transport must validate DecodeRequest before calling Serve: malformed
+// requests have no canonical echo and cannot be encoded as a response.
 func (s *Store) Serve(q Request) Response {
 	rec, err := s.Get(q)
 	if err == nil {
@@ -328,7 +330,7 @@ func (s *Store) Serve(q Request) Response {
 		return Response{q, Invalid, nil}
 	}
 	if errors.Is(err, ErrCorrupt) {
-		return Response{q, Invalid, nil}
+		return Response{q, Unavailable, nil}
 	}
 	return Response{q, Unavailable, nil}
 }

@@ -5,14 +5,21 @@ package archive
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io"
+
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 const Version byte = 1
+const requestDomain = "archive/request"
+const responseDomain = "archive/response"
 
 const (
 	MaxContextBytes = 4096
+	MaxShardBytes   = 513 // 4096 bits plus the bitstring end marker
+	MaxRequestBytes = MaxContextBytes + MaxShardBytes + 256
 	MaxChunkBytes   = 8 << 20
 	MaxRecordBytes  = 32 << 20
 	MaxWireBytes    = MaxRecordBytes + MaxContextBytes + 4096
@@ -31,7 +38,9 @@ func (i RawIdentity) ArchiveIdentity() ([]byte, error) { return bytes.Clone(i), 
 // Context includes the entire deployment subject; identity binds execution
 // configuration, including the fee profile and collector once WP1 lands.
 type Context struct {
-	NetworkID, PartitionID, ShardID     uint32
+	NetworkID                           types.NetworkID
+	PartitionID                         types.PartitionID
+	ShardID                             types.ShardID
 	ShardEpoch, RootEpoch               uint64
 	FullShardConfHash, RegistryCodeHash [32]byte
 	RegistryAddress                     [20]byte
@@ -91,7 +100,7 @@ func fields(r *Record) map[string][]byte {
 }
 
 func validRequest(q Request) bool {
-	if len(q.Context.ExecutionIdentity) == 0 || len(q.Context.ExecutionIdentity) > MaxContextBytes || q.BlockHash == ([32]byte{}) {
+	if q.Context.ShardID.Length() > 4096 || len(q.Context.ExecutionIdentity) == 0 || len(q.Context.ExecutionIdentity) > MaxContextBytes || q.BlockHash == ([32]byte{}) {
 		return false
 	}
 	return q.Context.FullShardConfHash != ([32]byte{}) && q.Context.RegistryAddress != ([20]byte{}) && q.Context.RegistryCodeHash != ([32]byte{}) && q.Context.GenesisCommitment != ([32]byte{}) && q.Context.EVMGenesisHash != ([32]byte{})
@@ -108,6 +117,11 @@ func put32(b *bytes.Buffer, v uint32) {
 	binary.BigEndian.PutUint32(x[:], v)
 	b.Write(x[:])
 }
+func put16(b *bytes.Buffer, v uint16) {
+	var x [2]byte
+	binary.BigEndian.PutUint16(x[:], v)
+	b.Write(x[:])
+}
 func put64(b *bytes.Buffer, v uint64) {
 	var x [8]byte
 	binary.BigEndian.PutUint64(x[:], v)
@@ -120,10 +134,11 @@ func EncodeRequest(q Request) ([]byte, error) {
 		return nil, ErrInvalid
 	}
 	var b bytes.Buffer
+	b.WriteString(requestDomain)
 	b.WriteByte(Version)
-	put32(&b, q.Context.NetworkID)
-	put32(&b, q.Context.PartitionID)
-	put32(&b, q.Context.ShardID)
+	put16(&b, uint16(q.Context.NetworkID))
+	put32(&b, uint32(q.Context.PartitionID))
+	putBytes(&b, q.Context.ShardID.Bytes())
 	put64(&b, q.Context.ShardEpoch)
 	put64(&b, q.Context.RootEpoch)
 	b.Write(q.Context.FullShardConfHash[:])
@@ -133,12 +148,15 @@ func EncodeRequest(q Request) ([]byte, error) {
 	b.Write(q.Context.EVMGenesisHash[:])
 	putBytes(&b, q.Context.ExecutionIdentity)
 	b.Write(q.BlockHash[:])
+	if b.Len() > MaxRequestBytes {
+		return nil, ErrInvalid
+	}
 	return b.Bytes(), nil
 }
 
 func readBytes(r *bytes.Reader, cap int) ([]byte, error) {
 	var n uint32
-	if binary.Read(r, binary.BigEndian, &n) != nil || int(n) > cap || int(n) > r.Len() {
+	if binary.Read(r, binary.BigEndian, &n) != nil || uint64(n) > uint64(cap) || uint64(n) > uint64(r.Len()) {
 		return nil, ErrInvalid
 	}
 	v := make([]byte, n)
@@ -148,15 +166,20 @@ func readBytes(r *bytes.Reader, cap int) ([]byte, error) {
 
 func DecodeRequest(b []byte) (Request, error) {
 	var q Request
-	if len(b) > MaxContextBytes+256 || len(b) < 1 || b[0] != Version {
+	if len(b) > MaxRequestBytes || len(b) < len(requestDomain)+1 || !bytes.Equal(b[:len(requestDomain)], []byte(requestDomain)) || b[len(requestDomain)] != Version {
 		return q, ErrInvalid
 	}
-	r := bytes.NewReader(b[1:])
+	r := bytes.NewReader(b[len(requestDomain)+1:])
 	c := &q.Context
-	for _, p := range []*uint32{&c.NetworkID, &c.PartitionID, &c.ShardID} {
-		if binary.Read(r, binary.BigEndian, p) != nil {
-			return Request{}, ErrInvalid
-		}
+	if binary.Read(r, binary.BigEndian, &c.NetworkID) != nil || binary.Read(r, binary.BigEndian, &c.PartitionID) != nil {
+		return Request{}, ErrInvalid
+	}
+	shard, err := readBytes(r, MaxShardBytes)
+	if err != nil || len(shard) == 0 {
+		return Request{}, ErrInvalid
+	}
+	if err := c.ShardID.UnmarshalText([]byte("0x" + hex.EncodeToString(shard))); err != nil || c.ShardID.Length() > 4096 || !bytes.Equal(c.ShardID.Bytes(), shard) {
+		return Request{}, ErrInvalid
 	}
 	for _, p := range []*uint64{&c.ShardEpoch, &c.RootEpoch} {
 		if binary.Read(r, binary.BigEndian, p) != nil {
@@ -174,7 +197,6 @@ func DecodeRequest(b []byte) (Request, error) {
 			return Request{}, ErrInvalid
 		}
 	}
-	var err error
 	c.ExecutionIdentity, err = readBytes(r, MaxContextBytes)
 	if err != nil {
 		return Request{}, ErrInvalid
@@ -197,7 +219,7 @@ func validRecord(rec *Record) bool {
 		total += len(v)
 	}
 	for k, v := range rec.Extensions {
-		if len(k) == 0 || len(k) > 64 || len(v) == 0 || len(v) > MaxChunkBytes {
+		if len(k) == 0 || len(k) > 64 || reserved(k) || len(v) == 0 || len(v) > MaxChunkBytes {
 			return false
 		}
 		total += len(v)
@@ -214,6 +236,8 @@ func EncodeResponse(s Response) ([]byte, error) {
 		return nil, ErrInvalid
 	}
 	var b bytes.Buffer
+	b.WriteString(responseDomain)
+	b.WriteByte(Version)
 	putBytes(&b, q)
 	b.WriteByte(byte(s.Outcome))
 	if s.Outcome == OK {
@@ -236,11 +260,11 @@ func EncodeResponse(s Response) ([]byte, error) {
 
 func DecodeResponse(b []byte) (Response, error) {
 	var s Response
-	if len(b) > MaxWireBytes || len(b) < 5 {
+	if len(b) > MaxWireBytes || len(b) < len(responseDomain)+1+5 || !bytes.Equal(b[:len(responseDomain)], []byte(responseDomain)) || b[len(responseDomain)] != Version {
 		return s, ErrInvalid
 	}
-	r := bytes.NewReader(b)
-	q, err := readBytes(r, MaxContextBytes+256)
+	r := bytes.NewReader(b[len(responseDomain)+1:])
+	q, err := readBytes(r, MaxRequestBytes)
 	if err != nil {
 		return s, ErrInvalid
 	}
