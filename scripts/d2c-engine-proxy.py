@@ -44,7 +44,6 @@ def control_armed():
         return False
 
 
-
 def rlp_bytes(value):
     if len(value) == 1 and value[0] < 0x80:
         return value
@@ -143,6 +142,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(502, str(exc))
             return
 
+        if method == "engine_newPayloadWithSealV1":
+            try:
+                answer = json.loads(payload)
+                result = answer.get("result", {})
+                payload_status = result.get("payloadStatus", result)
+                validation_error = payload_status.get("validationError")
+                if validation_error:
+                    log(f"UPSTREAM-VALIDATION status={payload_status.get('status')} "
+                        f"validationError={json.dumps(validation_error, ensure_ascii=False)}")
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
         mutate = False
         if method == "engine_forkchoiceUpdatedWithSealV1" and control_armed():
             try:
@@ -184,6 +195,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.dumps(answer, separators=(",", ":")).encode()
                 digest = hashlib.sha256(payload).hexdigest()
                 log(f"MUTATED pending-release trace={trace} method={method} id={request.get('id')} payloadId={payload_id} "
+                    f"blockNumber={execution_payload['blockNumber']} parentHash={execution_payload['parentHash']} "
                     f"blockHash={old_block_hash}->{execution_payload['blockHash']} "
                     f"gasUsed={old_gas_used}->{new_gas_used} "
                     f"response_sha256={digest}")

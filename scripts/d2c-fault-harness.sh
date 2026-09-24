@@ -5,7 +5,7 @@ set -uo pipefail
 scenario=${D2C_SCENARIO:-}
 case "$scenario" in
   pair-term|pair-kill|ureth-kill|all-kill|leader-kill|proof-outage|proof-corrupt|missing-body|wrong-genesis|hostile-builder) ;;
-  *) echo "set D2C_SCENARIO to one of: pair-term pair-kill ureth-kill all-kill leader-kill proof-outage proof-corrupt missing-body wrong-genesis" >&2; exit 2 ;;
+  *) echo "set D2C_SCENARIO to one of: pair-term pair-kill ureth-kill all-kill leader-kill proof-outage proof-corrupt missing-body wrong-genesis hostile-builder" >&2; exit 2 ;;
 esac
 
 retain_root=${D2C_RETAIN_DIR:-briefs/d2c-harness}
@@ -74,7 +74,7 @@ case "$scenario" in
         echo "$verdict" | tee -a "$log"
       elif [ "$scenario" = hostile-builder ]; then
         if ! grep -q '^D2C\[hostile-builder\] EXPECTED-FAIL(mutated builder payload ' "$log" ||
-           ! grep -q '^D2C\[hostile-builder\] rotated leader validator=' "$log" ||
+           ! grep -q '^D2C\[hostile-builder\] rotated leader validator=.*certificate admitted at B' "$log" ||
            ! grep -q '^D1 PASS$' "$log"; then
           echo "D2C[hostile-builder] FAIL(missing mutation rejection, leader rotation, or continuing D1 evidence)" | tee -a "$log"
           exit 1

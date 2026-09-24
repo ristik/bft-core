@@ -404,13 +404,16 @@ def hostile_builder():
     while time.monotonic() < deadline:
         for line in proxy_log.read_text(errors="replace").splitlines():
             if " MUTATED " in line:
-                match = re.search(r"blockHash=(0x[0-9a-fA-F]{64})->(0x[0-9a-fA-F]{64}) "
+                match = re.search(r"blockNumber=(0x[0-9a-fA-F]+) parentHash=(0x[0-9a-fA-F]{64}) "
+                                  r"blockHash=(0x[0-9a-fA-F]{64})->(0x[0-9a-fA-F]{64}) "
                                   r"gasUsed=([0-9]+)->([0-9]+)", line)
                 if match:
-                    mutation = {"originalBlock": match.group(1).removeprefix("0x").lower(),
-                                "block": match.group(2).removeprefix("0x").lower(),
-                                "oldGasUsed": int(match.group(3)),
-                                "newGasUsed": int(match.group(4)),
+                    mutation = {"height": int(match.group(1), 16),
+                                "parent": match.group(2).removeprefix("0x").lower(),
+                                "originalBlock": match.group(3).removeprefix("0x").lower(),
+                                "block": match.group(4).removeprefix("0x").lower(),
+                                "oldGasUsed": int(match.group(5)),
+                                "newGasUsed": int(match.group(6)),
                                 "line": line}
                     break
         if mutation:
@@ -440,6 +443,13 @@ def hostile_builder():
         temp.write_text(json.dumps({"armed": False, "release_mutation": True}) + "\n")
         temp.replace(control)
         raise RuntimeError("validators did not converge on one finalized parent while the hostile payload was held")
+    if mutation["parent"] != before[1]["hash"] or mutation["height"] != before[1]["height"] + 1:
+        temp = control.with_suffix(".tmp")
+        temp.write_text(json.dumps({"armed": False, "release_mutation": True}) + "\n")
+        temp.replace(control)
+        raise RuntimeError(f"hostile payload parent does not match the finalized baseline: "
+                           f"payload B{mutation['height']} parent={mutation['parent']}; "
+                           f"finalized B{before[1]['height']} {before[1]['hash']}")
     temp = control.with_suffix(".tmp")
     temp.write_text(json.dumps({"armed": False, "release_mutation": True}) + "\n")
     temp.replace(control)
@@ -503,41 +513,79 @@ def hostile_builder():
     print(f"D2C[hostile-builder] finality unchanged through rejection at B{before[1]['height']} "
           f"{before[1]['hash']}", flush=True)
 
-    # The remaining lane must certify later blocks and include a different active leader.
-    # This is a process-level leader rotation check; the D1 monitor subsequently checks the
-    # common canonical chain and v2 evidence across the validator quorum.
-    deadline = time.monotonic() + float(os.environ.get("D2C_HOSTILE_RECOVERY_TIMEOUT", "120"))
+    # Require a post-rotation certificate above the exact hostile proposal parent, then
+    # require every reth finalized head to reflect that certificate before lane teardown.
+    # Root consensus alone is insufficient: the shard certificate must be admitted.
+    deadline = time.monotonic() + float(os.environ.get("D2C_HOSTILE_RECOVERY_TIMEOUT", "180"))
     rotated = None
+    recovery = None
+    heads = {}
     while time.monotonic() < deadline:
-        for i in range(2, 5):
-            lines = Path(f"test-nodes/evm{i}/debug.log").read_text(errors="replace").splitlines()
-            candidates = [line for line in lines
-                          if 'msg="submitting block certification request"' in line
-                          and log_field(line, "leader") == "true"
-                          and (log_field(line, "round") or "").isdigit()
-                          and int(log_field(line, "round")) > hostile_round]
-            if candidates:
-                rotated = (i, candidates[0])
+        if rotated is None:
+            for i in range(2, 5):
+                lines = Path(f"test-nodes/evm{i}/debug.log").read_text(errors="replace").splitlines()
+                candidates = [line for line in lines
+                              if 'msg="submitting block certification request"' in line
+                              and log_field(line, "leader") == "true"
+                              and (log_field(line, "round") or "").isdigit()
+                              and int(log_field(line, "round")) > hostile_round]
+                if candidates:
+                    rotated = (i, candidates[0])
+                    break
+        try:
+            heads = {i: finalized(i) for i in range(1, 5)}
+        except (OSError, RuntimeError, KeyError, TypeError, ValueError):
+            time.sleep(0.2)
+            continue
+        same_head = len({(item["height"], item["hash"]) for item in heads.values()}) == 1
+        head = heads.get(1)
+        if rotated and same_head and head and head["height"] > before[1]["height"]:
+            admitted = {}
+            for i in range(1, 5):
+                lines = Path(f"test-nodes/evm{i}/debug.log").read_text(errors="replace").splitlines()
+                matches = [line for line in lines
+                           if 'msg="certificate admitted"' in line
+                           and log_field(line, "block") == head["hash"]
+                           and (log_field(line, "height") or "").isdigit()
+                           and int(log_field(line, "height")) == head["height"]
+                           and (log_field(line, "round") or "").isdigit()
+                           and int(log_field(line, "round")) > hostile_round]
+                if matches:
+                    admitted[i] = matches[-1]
+            if set(admitted) == {1, 2, 3, 4}:
+                recovery = {"head": head, "admitted": admitted}
                 break
-        heads = {i: head(i) for i in range(1, 5)}
-        if rotated and min(heads.values()) > CERTIFIED:
-            break
-        time.sleep(0.1)
-    if not rotated or min(heads.values()) <= CERTIFIED:
-        raise RuntimeError(f"chain did not continue at a rotated leader after the hostile round; "
-                           f"leader={rotated}; heads={heads}")
+        time.sleep(0.2)
+    if not rotated or not recovery:
+        raise RuntimeError(f"no post-rotation certificate above hostile parent B{before[1]['height']} "
+                           f"was admitted and finalized on all validators within the bounded wait; "
+                           f"leader={rotated}; finalized={heads}")
+    proxy_lines = proxy_log.read_text(errors="replace").splitlines()
+    upstream_verdicts = [line for line in proxy_lines
+                         if "UPSTREAM-VALIDATION" in line and "status=INVALID" in line]
+    if upstream_verdicts:
+        print(f"D2C[hostile-builder] leader reth INVALID reason: {upstream_verdicts[-1]}", flush=True)
+    else:
+        print("D2C[hostile-builder] leader proxy did not receive a validationError field from reth", flush=True)
+    for i in range(2, 5):
+        lines = Path(f"test-nodes/evm{i}/debug.log").read_text(errors="replace").splitlines()
+        validation_lines = [line for line in lines if "validationError" in line or "validation error" in line.lower()]
+        if validation_lines:
+            print(f"D2C[hostile-builder] validator {i} validation diagnostic: {validation_lines[-1]}", flush=True)
+    print(f"D2C[hostile-builder] rotated leader validator={rotated[0]} after round={hostile_round}; "
+          f"certificate admitted at B{recovery['head']['height']} "
+          f"{recovery['head']['hash']} by all validators; finalized heads={heads}", flush=True)
     proxy_lines = proxy_log.read_text(errors="replace").splitlines()
     mutations = [line for line in proxy_lines if " MUTATED " in line]
     releases = [line for line in proxy_lines if "MUTATION-RELEASED" in line]
     if len(mutations) != 1 or len(releases) != 1:
         raise RuntimeError(f"proxy did not perform and release exactly one mutation: "
                            f"mutations={len(mutations)} releases={len(releases)}")
-    print(f"D2C[hostile-builder] rotated leader validator={rotated[0]} after round={hostile_round}; "
-          f"later heights={heads}", flush=True)
     print(f"D2C[hostile-builder] EXPECTED-FAIL(mutated builder payload {mutation['block']} was INVALID at all "
           f"four validators; no same-round signature or certificate; finality held at "
-          f"B{before[1]['height']} {before[1]['hash']}; "
-          f"leader rotation resumed progress)", flush=True)
+          f"B{before[1]['height']} {before[1]['hash']}; post-rotation certificate admitted/finalized at "
+          f"B{recovery['head']['height']}; follow-up stateRoot/system-call mutation variant remains future work)",
+          flush=True)
 
 
 def leader():
