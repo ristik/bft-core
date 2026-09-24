@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 
@@ -29,6 +30,9 @@ const (
 )
 
 var (
+	// ErrLocalProposalConflict identifies the safe-to-decline case where a
+	// leader already retained different bytes for this exact authorization.
+	ErrLocalProposalConflict = errors.New("configured progress: local proposal already retained")
 	journalMetaKey           = []byte("journal/meta")
 	journalCandidatePrefix   = []byte("journal/c/")
 	journalObservationPrefix = []byte("journal/o/")
@@ -316,6 +320,10 @@ func (s *Store) PutJournalCandidate(ctx context.Context, c Context, limits Journ
 				return e
 			}
 			w.Status, w.ResultingUC, w.ResultingTR = prior.Status, prior.ResultingUC, prior.ResultingTR
+			// LocallyBuilt records that this node authored the proposal. A peer
+			// may later return the same certified body during catch-up; that
+			// source does not change its original provenance.
+			w.LocallyBuilt = w.LocallyBuilt || prior.LocallyBuilt
 			raw, e := encodeCandidate(w)
 			if e != nil {
 				return e
@@ -340,7 +348,7 @@ func (s *Store) PutJournalCandidate(ctx context.Context, c Context, limits Journ
 					return e
 				}
 				if pu.GetRootRoundNumber() == v.AuthorizingUC.GetRootRoundNumber() && pu.GetRoundNumber() == v.AuthorizingUC.GetRoundNumber() {
-					return fmt.Errorf("%w: a different local proposal was already retained for this authorization; refusing publication after restart", ErrConflict)
+					return fmt.Errorf("%w: %w: a different local proposal was already retained for this authorization; refusing publication after restart", ErrConflict, ErrLocalProposalConflict)
 				}
 			}
 		}
@@ -485,15 +493,85 @@ func (s *Store) appendJournalObservation(tx *bolt.Tx, pair *verifiedPair, dd [32
 	return s.at("before-journal-observation-commit")
 }
 
+// BackfillJournalObservation admits an independently authenticated historical
+// certificate for a fetched body without moving the monotonic live progress
+// cursor backwards. The caller must have checked and executed that body first.
+// The candidate association and observation are one Bolt transaction.
+func (s *Store) BackfillJournalObservation(ctx context.Context, c Context, limits JournalLimits, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
+	if !s.journal {
+		return ErrSettings
+	}
+	if err := limits.check(); err != nil {
+		return err
+	}
+	state, _, err := s.Load(ctx, c)
+	if err != nil {
+		return err
+	}
+	o, err := rootinput.AuthenticateObservationV2(ctx, c.Observation, uc, tr)
+	if err != nil {
+		return err
+	}
+	pair, err := authenticateHandle(ctx, c, o)
+	if err != nil {
+		return err
+	}
+	if state.i.observed == nil {
+		return fmt.Errorf("%w: no current observation for historical backfill", ErrUnavailable)
+	}
+	rel, err := compareObservations(o, state.i.observed.observation)
+	if err != nil || rel != relationAdvance && rel != relationDuplicate && rel != relationRepeat {
+		return fmt.Errorf("%w: historical certificate conflicts with current progress: %v", ErrConflict, err)
+	}
+	target := uc.InputRecord.BlockHash
+	if len(target) != sha256.Size {
+		return fmt.Errorf("%w: backfill needs a non-quiet target hash", ErrUntrusted)
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketName)
+		if !imageMatches(b, state.i) {
+			return ErrStale
+		}
+		candidate := b.Get(journalCandidateKey(target))
+		if candidate == nil {
+			return fmt.Errorf("%w: backfill body %x is missing", ErrUnavailable, target)
+		}
+		cw, e := decodeCandidate(candidate)
+		if e != nil {
+			return e
+		}
+		if cw.Round != uc.InputRecord.RoundNumber || !bytes.Equal(cw.StateRoot, uc.InputRecord.Hash) {
+			return fmt.Errorf("%w: backfill body differs from certificate", ErrConflict)
+		}
+		return s.appendJournalObservation(tx, pair, state.i.descriptorDigest)
+	})
+}
+
 // LoadJournal verifies every retained byte against the caller's configured origin and root trust.
 // It is intentionally a capped full-history scan for the private D2 lane, never a readiness grant.
 func (s *Store) LoadJournal(ctx context.Context, c Context, limits JournalLimits) (JournalSnapshot, error) {
 	if err := limits.check(); err != nil {
 		return JournalSnapshot{}, err
 	}
-	state, _, err := s.Load(ctx, c)
+	// Progress and journal are read in separate Bolt transactions because progress
+	// verification runs outside a transaction. A certificate can commit between
+	// those reads. Retry that moving snapshot instead of treating it as damage.
+	for attempt := 0; attempt < 3; attempt++ {
+		image, token, err := s.loadJournalOnce(ctx, c, limits)
+		if token.t == nil || s.Unchanged(token) {
+			return image, err
+		}
+	}
+	return JournalSnapshot{}, ErrStale
+}
+
+func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLimits) (JournalSnapshot, ProgressToken, error) {
+	state, token, err := s.Load(ctx, c)
 	if err != nil {
-		return JournalSnapshot{}, err
+		return JournalSnapshot{}, ProgressToken{}, err
+	}
+	if err := s.at("after-journal-progress-load"); err != nil {
+		return JournalSnapshot{}, token, err
 	}
 	var out JournalSnapshot
 	err = s.db.View(func(tx *bolt.Tx) error {
@@ -605,11 +683,15 @@ func (s *Store) LoadJournal(ctx context.Context, c Context, limits JournalLimits
 					foundResult = true
 				}
 			}
-			if !foundAuthorization || !foundResult {
+			// A returning follower may retain a later proposal before it has
+			// fetched the authorizing certificate's own body/observation. The
+			// pair above was independently authenticated; only locally built
+			// proposals require it to have been observed here already.
+			if candidate.Candidate.LocallyBuilt && !foundAuthorization || !foundResult {
 				return fmt.Errorf("%w: candidate lacks its retained authorizing or resulting certificate", ErrUntrusted)
 			}
 		}
 		return nil
 	})
-	return out, err
+	return out, token, err
 }

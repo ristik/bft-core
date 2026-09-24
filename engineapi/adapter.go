@@ -285,6 +285,70 @@ func (a *Adapter) Head(ctx context.Context) (shardnode.BlockRef, error) {
 	}, nil
 }
 
+// Finalized reports the executor's finalized identity. Recovery must check it
+// before moving forkchoice; Commit alone would set finalized to the new head.
+func (a *Adapter) Finalized(ctx context.Context) (shardnode.BlockRef, error) {
+	h, err := a.eth.GetBlockByNumber(ctx, "finalized")
+	if err != nil {
+		// A fresh ureth datadir has no finalized forkchoice marker until its
+		// first Engine call. Genesis is the sole safe implicit finality value.
+		// Never infer finality from a non-genesis latest head.
+		genesis, genesisErr := a.eth.GetBlockByNumber(ctx, "0x0")
+		latest, latestErr := a.eth.GetBlockByNumber(ctx, "latest")
+		if genesisErr == nil && latestErr == nil && latest.Hash == genesis.Hash && latest.Number == 0 {
+			return shardnode.BlockRef{Number: 0, Hash: shardnode.Hash(genesis.Hash[:]), StateRoot: shardnode.Hash(genesis.StateRoot[:])}, nil
+		}
+		return shardnode.BlockRef{}, fmt.Errorf("engineapi: reading finalized head: %w", err)
+	}
+	return shardnode.BlockRef{Number: uint64(h.Number), Hash: shardnode.Hash(h.Hash[:]), StateRoot: shardnode.Hash(h.StateRoot[:])}, nil
+}
+
+// Header returns identity and parent linkage for bounded ancestry checks.
+func (a *Adapter) Header(ctx context.Context, hash shardnode.Hash) (shardnode.BlockRef, shardnode.Hash, error) {
+	h32, err := toData32(hash)
+	if err != nil {
+		return shardnode.BlockRef{}, nil, err
+	}
+	h, err := a.eth.GetBlockByHash(ctx, h32)
+	if err != nil {
+		return shardnode.BlockRef{}, nil, fmt.Errorf("engineapi: reading header %x: %w", hash, err)
+	}
+	return shardnode.BlockRef{Number: uint64(h.Number), Hash: shardnode.Hash(h.Hash[:]), StateRoot: shardnode.Hash(h.StateRoot[:])}, shardnode.Hash(h.ParentHash[:]), nil
+}
+
+// RecoveryForkchoice advances only the head. The proven, compatible finalized
+// identity stays in place until the complete certified target can be committed.
+func (a *Adapter) RecoveryForkchoice(ctx context.Context, head, finalized shardnode.Hash) (shardnode.Status, error) {
+	h, err := toData32(head)
+	if err != nil {
+		return shardnode.StatusInvalid, err
+	}
+	f, err := toData32(finalized)
+	if err != nil {
+		return shardnode.StatusInvalid, err
+	}
+	resp, err := a.engine.ForkchoiceUpdatedV3(ctx, ForkchoiceStateV1{HeadBlockHash: h, SafeBlockHash: f, FinalizedBlockHash: f}, nil)
+	if err != nil {
+		return shardnode.StatusSyncing, fmt.Errorf("engineapi: recovery forkchoice: %w", err)
+	}
+	return toStatus(resp.PayloadStatus.Status), nil
+}
+
+// CheckParentWitness checks the exact certified head before Build is enabled.
+func (a *Adapter) CheckParentWitness(ctx context.Context, parent shardnode.BlockRef) error {
+	if parent.Number == 0 {
+		return nil
+	}
+	a.mu.Lock()
+	source := a.parentWitness
+	a.mu.Unlock()
+	if source == nil {
+		return ErrParentWitnessUnavailable
+	}
+	_, err := source.Acquire(ctx, parent)
+	return err
+}
+
 // GenesisBlock answers from the client's chain configuration: block number zero, which is fixed by
 // the chain spec this client was started with and does not move with what it has committed. That is
 // what makes it usable as an execution identity — see shardnode.Executor.GenesisBlock, and note that
@@ -335,11 +399,13 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 		return rootinput.ResultV2{}, err
 	}
 	var snapshot registryproof.Snapshot
+	var proof shardnode.ProofEvidence
 	if p.Parent.Number == 0 {
 		if !a.verifier.BootstrapSnapshot.Valid() || !bytes.Equal(p.Parent.Hash, a.verifier.GenesisOrigin.BlockHash().Bytes()) || !bytes.Equal(p.Parent.StateRoot, a.verifier.GenesisOrigin.StateRoot().Bytes()) {
 			return rootinput.ResultV2{}, fmt.Errorf("%w: bootstrap parent differs from configured genesis", ErrParentWitnessMismatch)
 		}
 		snapshot = a.verifier.BootstrapSnapshot
+		proof.SnapshotID = fmt.Sprintf("genesis:%x", p.Parent.Hash)
 	} else {
 		a.mu.Lock()
 		source := a.parentWitness
@@ -347,20 +413,29 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 		if source == nil {
 			return rootinput.ResultV2{}, fmt.Errorf("%w: no source for parent block %d", ErrParentWitnessUnavailable, p.Parent.Number)
 		}
-		snapshot, err = source.Acquire(ctx, p.Parent)
+		snapshot, proof, err = source.AcquireWithProvenance(ctx, p.Parent)
 		if err != nil {
 			return rootinput.ResultV2{}, err
 		}
 		if a.log != nil {
 			a.log.InfoContext(ctx, "acquired certified parent registry witness",
 				slog.Uint64("round", p.Round), slog.Uint64("parentNumber", p.Parent.Number),
-				slog.String("parentHash", fmt.Sprintf("%x", p.Parent.Hash)))
+				slog.String("parentHash", fmt.Sprintf("%x", p.Parent.Hash)), slog.String("snapshotID", proof.SnapshotID), slog.Time("verifiedAt", proof.VerifiedAt))
 		}
 	}
-	return rootinput.DeriveV2(rootinput.ContextV2{
+	derived, err := rootinput.DeriveV2(rootinput.ContextV2{
 		Genesis: a.verifier.GenesisOrigin, Parent: snapshot,
 		Round: p.Round, ParentHash: p.Parent.Hash,
 	}, o)
+	if err == nil {
+		shardnode.RecordProofEvidence(ctx, proof)
+		if a.log != nil {
+			a.log.InfoContext(ctx, "derived root input from parent witness", slog.Uint64("round", p.Round),
+				slog.String("parentHash", fmt.Sprintf("%x", p.Parent.Hash)), slog.String("snapshotID", proof.SnapshotID),
+				slog.Time("verifiedAt", proof.VerifiedAt), slog.String("commitment", fmt.Sprintf("%x", derived.Commitment)))
+		}
+	}
+	return derived, err
 }
 
 func (a *Adapter) Build(ctx context.Context, p shardnode.RoundParams) (shardnode.BuildID, error) {
@@ -410,8 +485,8 @@ func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, der
 		return "", fmt.Errorf("engineapi: forkchoiceUpdatedWithSealV1 (build): %w", err)
 	}
 	if resp.PayloadStatus.Status != PayloadStatusValid {
-		return "", fmt.Errorf("engineapi: forkchoiceUpdatedWithSealV1 (build) on our own trusted head returned %s, not VALID: %v",
-			resp.PayloadStatus.Status, errString(resp.PayloadStatus.ValidationError))
+		return "", fmt.Errorf("%w: forkchoiceUpdatedWithSealV1 refused a build on the trusted parent (status %s): %s",
+			shardnode.ErrBuildUnavailable, resp.PayloadStatus.Status, errString(resp.PayloadStatus.ValidationError))
 	}
 	if resp.PayloadID == nil {
 		return "", errors.New("engineapi: forkchoiceUpdatedWithSealV1 accepted payloadAttributes but returned no payload id")
@@ -525,6 +600,9 @@ func (a *Adapter) CheckBlockBinding(ctx context.Context, b shardnode.Block, p sh
 	}
 	input, err := a.deriveV2(ctx, p, p.AuthorizingCertificate, p.AuthorizingTechnicalRecord)
 	if err != nil {
+		if errors.Is(err, ErrParentWitnessUnavailable) || errors.Is(err, ErrParentWitnessBudget) || errors.Is(err, ErrParentWitnessStopped) || errors.Is(err, ErrParentWitnessSuperseded) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("%w: %w", shardnode.ErrBlockBindingUnavailable, err)
+		}
 		return fmt.Errorf("engineapi: block binding authorizing pair: %w", err)
 	}
 	parentHash, err := toData32(p.Parent.Hash)
@@ -533,7 +611,7 @@ func (a *Adapter) CheckBlockBinding(ctx context.Context, b shardnode.Block, p sh
 	}
 	parentHeader, err := a.eth.GetBlockByHash(ctx, parentHash)
 	if err != nil {
-		return fmt.Errorf("engineapi: block binding parent header: %w", err)
+		return fmt.Errorf("%w: parent header: %w", shardnode.ErrBlockBindingUnavailable, err)
 	}
 	attrs := DeriveAttributesV2(input.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
 	payload := envelope.ExecutionPayload
@@ -600,6 +678,11 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 					}
 					return shardnode.StatusInvalid, err
 				}
+			}
+			if a.log != nil {
+				a.log.InfoContext(ctx, "verified quiet block", slog.Uint64("round", p.Round),
+					slog.String("parentHash", fmt.Sprintf("%x", p.Parent.Hash)),
+					slog.String("snapshotID", shardnode.CurrentProofEvidence(ctx).SnapshotID), slog.String("status", "VALID"))
 			}
 			return shardnode.StatusValid, nil
 		}
@@ -701,6 +784,7 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	if a.log != nil {
 		a.log.InfoContext(ctx, "verified execution payload",
 			slog.Uint64("round", p.Round),
+			slog.String("snapshotID", shardnode.CurrentProofEvidence(ctx).SnapshotID),
 			slog.String("blockHash", fmt.Sprintf("%x", envelope.ExecutionPayload.BlockHash)),
 			slog.String("status", string(status.Status)),
 			slog.String("rootInput", fmt.Sprintf("%x", derived.Encoded)),

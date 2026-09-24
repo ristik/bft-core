@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -106,14 +107,22 @@ func TestParentWitnessSourceExactCertifiedParent(t *testing.T) {
 	source, err := NewParentWitnessSource(context.Background(), pins, registrywitness.NewHTTPCaller(s.URL, time.Second), DefaultParentWitnessBudget())
 	require.NoError(t, err)
 	defer source.Close()
-	snapshot, err := source.Acquire(context.Background(), parent)
+	var logs bytes.Buffer
+	source.log = slog.New(slog.NewTextHandler(&logs, nil))
+	snapshot, proof, err := source.AcquireWithProvenance(context.Background(), parent)
 	require.NoError(t, err)
+	require.Len(t, proof.SnapshotID, 64)
+	require.False(t, proof.VerifiedAt.IsZero())
 	require.Equal(t, parent.Number, snapshot.Number())
 	require.Equal(t, common.BytesToHash(parent.StateRoot), snapshot.StateRoot())
 	require.EqualValues(t, 2, calls.Load())
-	second, err := source.Acquire(context.Background(), parent)
+	second, cachedProof, err := source.AcquireWithProvenance(context.Background(), parent)
 	require.NoError(t, err)
 	require.Equal(t, snapshot.Fields(), second.Fields())
+	require.Equal(t, proof, cachedProof, "cache reuse must retain original proof digest and verification time")
+	require.Contains(t, logs.String(), "cache=miss")
+	require.Contains(t, logs.String(), "cache=hit")
+	require.Contains(t, logs.String(), "snapshotID="+proof.SnapshotID)
 	require.EqualValues(t, 2, calls.Load(), "a repeated SYNCING poll must reuse the verified parent without a new byte budget")
 	wrongState := parent
 	wrongState.StateRoot = bytes.Repeat([]byte{0x42}, 32)

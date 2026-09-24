@@ -59,6 +59,44 @@ func bootstrapAdapterFixture(t *testing.T) (*VerifierContext, shardnode.RoundPar
 	return verifier, params, want
 }
 
+func TestAdapterBuildDuplicateJobIsUnavailableNotBlockInvalid(t *testing.T) {
+	verifier, params, _ := bootstrapAdapterFixture(t)
+	engine := newMockReth(t, Secret{})
+	eth := newMockReth(t, Secret{})
+	message := "duplicate payload id"
+	var requests [][]json.RawMessage
+	payloadID := data{1, 2, 3, 4, 5, 6, 7, 8}
+	engine.on("engine_forkchoiceUpdatedWithSealV1", func(raw json.RawMessage) (any, *rpcError) {
+		var args []json.RawMessage
+		require.NoError(t, json.Unmarshal(raw, &args))
+		require.Len(t, args, 3)
+		requests = append(requests, args)
+		if len(requests) == 1 {
+			return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid}, PayloadID: &payloadID}, nil
+		}
+		return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusInvalid, ValidationError: &message}}, nil
+	})
+	eth.on("eth_getBlockByHash", func(json.RawMessage) (any, *rpcError) {
+		return blockHeaderJSON{Number: 0, Hash: data32(verifier.GenesisOrigin.BlockHash()), Timestamp: 0}, nil
+	})
+	a, closeFn := newTestAdapterWithVerifier(t, engine, eth, verifier)
+	defer closeFn()
+	_, err := a.Build(context.Background(), params)
+	require.NoError(t, err)
+	// The second adapter has fresh process state and the same certified parent.
+	restarted := NewAdapter(Config{EngineURL: a.engine.url, EthURL: a.eth.url, Secret: a.engine.secret, Verifier: verifier}, nil)
+	_, err = restarted.Build(context.Background(), params)
+	require.ErrorIs(t, err, shardnode.ErrBuildUnavailable)
+	require.ErrorContains(t, err, message)
+	require.Len(t, requests, 2)
+	for i, label := range []string{"pre-restart", "post-restart"} {
+		t.Logf("%s parent=%s attributes=%s sealInput=%s", label, requests[i][0], requests[i][1], requests[i][2])
+	}
+	require.Equal(t, string(requests[0][0]), string(requests[1][0]))
+	require.Equal(t, string(requests[0][1]), string(requests[1][1]))
+	require.Equal(t, string(requests[0][2]), string(requests[1][2]))
+}
+
 func TestAdapterV2BootstrapBuildSendsCanonicalInput(t *testing.T) {
 	verifier, params, want := bootstrapAdapterFixture(t)
 	engine := newMockReth(t, Secret{})

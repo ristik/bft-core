@@ -207,11 +207,10 @@ rethPinObtainPinned() {
 # is a COMMIT and is repinned only by an explicit edit to URETH_PIN_COMMIT here when that PR merges.
 # Nothing follows a branch: a pin that moves on its own is not a pin.
 #
-# Now at ureth #31, which registers eth_config (EIP-7910) on the Unicity node. Before it, the node
-# answered -32601 for that method and CheckExecutionProfile refused it at startup, so no paired lane
-# could get a shard validator running at all. Do not move this pin back below that commit.
+# Includes ureth #31's eth_config (EIP-7910) registration and #36's idempotent seal build.
+# Do not move this pin back below #31: CheckExecutionProfile needs eth_config at startup.
 URETH_PIN_REPO=https://github.com/ristik/ureth
-URETH_PIN_COMMIT=32e1f2fc769dfeddc18dce600e82331c8ed6279e
+URETH_PIN_COMMIT=39d7e59db3054811d0b4020bf182a2e23f8a3b38
 URETH_PIN_BIN=unicity-reth
 
 # The fee collector every Unicity lane passes. A test devnet needs a fixed, obviously-not-real

@@ -24,6 +24,113 @@ type fakeTicket struct{ valid bool }
 
 func (t fakeTicket) Valid() bool { return t.valid }
 
+type countingRoundSigner struct {
+	signer abcrypto.Signer
+	calls  int
+}
+
+func (s *countingRoundSigner) Sign(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord, req *certification.BlockCertificationRequest) (*certification.BlockCertificationRequest, error) {
+	s.calls++
+	return shardnode.LocalKeySigner(s.signer).Sign(ctx, uc, tr, req)
+}
+
+type toggleJournalRecovery struct {
+	ready, terminal bool
+	head            shardnode.BlockRef
+	calls           int
+}
+
+func (r *toggleJournalRecovery) Recover(context.Context, *types.UnicityCertificate) (shardnode.BlockRef, error) {
+	r.calls++
+	if !r.ready {
+		return shardnode.BlockRef{}, errors.New("certified executor head is not ready")
+	}
+	return r.head, nil
+}
+
+func (r *toggleJournalRecovery) Terminal(error) bool { return r.terminal }
+
+type refusedBuildExecutor struct {
+	shardnode.Executor
+	builds int
+}
+
+func (e *refusedBuildExecutor) Build(context.Context, shardnode.RoundParams) (shardnode.BuildID, error) {
+	e.builds++
+	return "", shardnode.ErrBuildUnavailable
+}
+
+func TestRoundBuildJobRefusalAbstainsWithoutSigning(t *testing.T) {
+	exec := &refusedBuildExecutor{Executor: executortest.New()}
+	sub := &recordingSubmitter{}
+	r, nodeID := newTestRound(t, exec, sub)
+	spy := &journalSignerSpy{}
+	r.SetCertificationSigner(spy)
+	health := shardnode.NewHealth()
+	r.SetHealth(health)
+	metrics, reasons := reasonMetrics(t)
+	r.SetMetrics(metrics)
+	require.NoError(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID)))
+	require.Equal(t, 1, exec.builds)
+	require.Zero(t, spy.calls)
+	require.Empty(t, sub.got)
+	require.Equal(t, "unready", health.Snapshot().ExecutionRecovery)
+	require.Contains(t, reasons(), "build_unavailable_declined_leadership")
+}
+
+func TestJournalRecoveryBlocksRoundBuildAndSignUntilReady(t *testing.T) {
+	fake := executortest.New()
+	fake.AddEntries([]byte("payload"))
+	genesis, err := fake.GenesisBlock(context.Background())
+	require.NoError(t, err)
+	builds := &buildRecordingExecutor{Executor: fake}
+	sub := &recordingSubmitter{}
+	r, nodeID := newTestRound(t, builds, sub)
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	spy := &countingRoundSigner{signer: signer}
+	r.SetCertificationSigner(spy)
+	r.SetHealth(shardnode.NewHealth())
+	r.SetFinalityGate(shardnode.NewFinalityGate())
+	recovery := &toggleJournalRecovery{head: genesis}
+	r.SetJournalRecovery(recovery)
+	err = r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID))
+	require.ErrorContains(t, err, "certified executor head is not ready")
+	require.Empty(t, builds.parents, "the real Round must refuse Build before recovery readiness")
+	require.Zero(t, spy.calls, "the real Round must refuse Sign before recovery readiness")
+	require.Empty(t, sub.got)
+	recovery.ready = true
+	require.NoError(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID)))
+	require.Len(t, builds.parents, 1, "the same Round must Build once when recovery becomes ready")
+	require.Equal(t, 1, spy.calls, "the same Round must Sign once when recovery becomes ready")
+	require.Len(t, sub.got, 1)
+}
+
+func TestJournalRecoveryStoppedLatchBlocksBuildAndSign(t *testing.T) {
+	fake := executortest.New()
+	genesis, err := fake.GenesisBlock(context.Background())
+	require.NoError(t, err)
+	builds := &buildRecordingExecutor{Executor: fake}
+	sub := &recordingSubmitter{}
+	r, nodeID := newTestRound(t, builds, sub)
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	spy := &countingRoundSigner{signer: signer}
+	r.SetCertificationSigner(spy)
+	health := shardnode.NewHealth()
+	r.SetHealth(health)
+	recovery := &toggleJournalRecovery{head: genesis, terminal: true}
+	r.SetJournalRecovery(recovery)
+	require.ErrorContains(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID)), "certified executor head is not ready")
+	require.Equal(t, "stopped", health.Snapshot().ExecutionRecovery)
+	recovery.ready = true
+	require.ErrorContains(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID)), "execution journal stopped")
+	require.Equal(t, 1, recovery.calls, "a stopped journal cannot be retried into readiness")
+	require.Empty(t, builds.parents)
+	require.Zero(t, spy.calls)
+	require.Empty(t, sub.got)
+}
+
 // staticReadiness is a scripted ChildReadiness for the cases that need one verdict only.
 type staticReadiness struct {
 	ticket        shardnode.ReadinessTicket

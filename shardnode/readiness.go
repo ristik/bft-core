@@ -33,6 +33,14 @@ type ChildReadiness interface {
 	Revalidate(ctx context.Context, ticket ReadinessTicket, held *types.UnicityCertificate) error
 }
 
+// JournalRecovery is the sole owner of execution catch-up for a journal-backed node.
+// Recover is called after durable certificate admission and before the round may
+// build or sign. The same owner supplies the readiness ticket below.
+type JournalRecovery interface {
+	Recover(context.Context, *types.UnicityCertificate) (BlockRef, error)
+	Terminal(error) bool
+}
+
 // CertificateObserver is fed every authenticated certificate and its technical record at the one
 // site where the two arrive together. Observing authorizes nothing; it is what lets a readiness
 // predicate later name the continuity between the durable record and the certificate in hand.

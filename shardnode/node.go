@@ -33,8 +33,11 @@ type Node struct {
 	// recoveryDeps is what EnableRecovery needs and New already has. Kept rather than added to
 	// New's signature because whether a node serves or recovers is a deployment decision made after
 	// the node is wired, alongside SetAwaitTimeout and SetMetrics.
-	recoveryDeps RecoveryDeps
-	recovery     *RecoveryStack
+	recoveryDeps    RecoveryDeps
+	recovery        *RecoveryStack
+	journalRecovery JournalRecovery
+	log             *slog.Logger
+	metrics         *Metrics
 }
 
 // runnable is implemented by Disseminators with their own background
@@ -120,7 +123,7 @@ func New(
 	round.SetHealth(health)
 
 	return &Node{
-		client: client, round: round, store: store, disseminator: disseminator, health: health,
+		client: client, round: round, store: store, disseminator: disseminator, health: health, log: log,
 		recoveryDeps: RecoveryDeps{
 			Host:          peer,
 			Executor:      executor,
@@ -165,6 +168,7 @@ func (n *Node) SetAwaitTimeout(d time.Duration) {
 func (n *Node) SetMetrics(m *Metrics) {
 	n.client.SetMetrics(m)
 	n.round.SetMetrics(m)
+	n.metrics = m
 }
 
 // SetCertificationSigner routes this node's certification requests through the given signer. Call
@@ -178,6 +182,11 @@ func (n *Node) SetCertificationSigner(s CertificationSigner) {
 // SetJournalAdmission selects the v2 persistence-before-LUC path. Call only on a node built
 // without a legacy LUC store. The same finality gate serializes progress commits and execution.
 func (n *Node) SetJournalAdmission(factory CertificateAdmissionFactory) error {
+	if _, ok := n.round.executor.(interface {
+		CheckBlockBinding(context.Context, Block, RoundParams) error
+	}); !ok {
+		return errors.New("shardnode: execution journal requires an executor with raw block binding support")
+	}
 	n.round.SetFinalityGate(n.recoveryDeps.Gate)
 	return n.client.SetCertificateAdmission(factory, n.recoveryDeps.Gate, n.round)
 }
@@ -215,6 +224,23 @@ func (n *Node) SetCertificateObserver(o CertificateObserver) {
 // the signature until the record proves readiness for the held certificate's child.
 func (n *Node) SetChildReadiness(c ChildReadiness) {
 	n.round.SetChildReadiness(c)
+}
+
+// SetJournalRecovery installs the journal's single execution and readiness owner.
+func (n *Node) SetJournalRecovery(c JournalRecovery, readiness ChildReadiness) {
+	n.round.SetFinalityGate(n.recoveryDeps.Gate)
+	n.round.SetJournalRecovery(c)
+	n.round.SetChildReadiness(readiness)
+	n.journalRecovery = c
+}
+
+// ReportJournalStop is the durable admission path's operator-visible stop.
+func (n *Node) ReportJournalStop(err error) {
+	if err == nil {
+		return
+	}
+	n.health.updateExecutionRecovery("stopped", err.Error())
+	n.metrics.recordRecoveryStop(context.Background())
 }
 
 // FinalityGate is the gate this node's round and recovery take for every finality-changing executor call.
@@ -264,6 +290,57 @@ func (n *Node) EnableRecovery(opts RecoveryOptions) error {
 func (n *Node) Run(ctx context.Context) error {
 	defer n.recovery.Close()
 	g, gctx := errgroup.WithContext(ctx)
+	if n.journalRecovery != nil {
+		// The client must remain available to receive a missing root certificate
+		// while recovery is unready. Revisit retained targets after RPC outages.
+		g.Go(func() error {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			last := ""
+			lastState := ""
+			var lastWarn time.Time
+			for {
+				_, err := n.journalRecovery.Recover(gctx, nil)
+				pending, isPending := n.client.admissionPending()
+				age := time.Duration(0)
+				if isPending {
+					age = time.Since(pending.Since)
+				}
+				n.metrics.recordPendingCatchUp(gctx, isPending, age)
+				detail := ""
+				if err == nil && isPending {
+					detail = pending.Detail()
+					n.health.updateExecutionRecovery("unready", detail)
+				} else if err == nil {
+					n.health.updateExecutionRecovery("ready", "")
+				} else if n.journalRecovery.Terminal(err) {
+					detail = err.Error()
+					n.health.updateExecutionRecovery("stopped", err.Error())
+					if last != err.Error() {
+						n.metrics.recordRecoveryStop(gctx)
+					}
+				} else {
+					detail = err.Error()
+					if isPending {
+						detail = pending.Detail() + "; recoveryError=" + detail
+					}
+					n.health.updateExecutionRecovery("unready", detail)
+				}
+				state := n.health.Snapshot().ExecutionRecovery
+				if detail != "" && n.log != nil && (lastState != state || time.Since(lastWarn) >= 30*time.Second) {
+					n.log.WarnContext(gctx, "certified execution remains unready", slog.String("reason", detail))
+					lastWarn = time.Now()
+				}
+				last = detail
+				lastState = state
+				select {
+				case <-gctx.Done():
+					return nil
+				case <-ticker.C:
+				}
+			}
+		})
+	}
 	g.Go(func() error { return n.client.Run(gctx) })
 	if r, ok := n.disseminator.(runnable); ok {
 		g.Go(func() error { return r.Run(gctx) })

@@ -1,9 +1,15 @@
 package configuredadmission
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
@@ -13,6 +19,134 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+func TestJournalAdmissionRetriesUnavailablePeerWithoutNewRootDelivery(t *testing.T) {
+	chain, origin, ctx, id := adapterFixture(t)
+	limits := configuredprogress.JournalLimits{Candidates: 2, Observations: 3, Bytes: 16 << 20}
+	s, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 2})
+	require.NoError(t, err)
+	defer s.Close()
+	_, _, err = s.Initialize(context.Background(), ctx)
+	require.NoError(t, err)
+	require.NoError(t, s.EnableJournal(context.Background(), ctx, limits))
+	bootstrap, bootTR := journalBootstrap(t, chain)
+	first, firstTR := signAdapterObservation(t, chain)
+	var available, stopped atomic.Bool
+	delivered := make(chan uint64, 2)
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a, err := (JournalFactory{Store: s, Origin: origin, Limits: limits,
+		CatchUp: func(callCtx context.Context, _ *types.UnicityCertificate, _ *certification.TechnicalRecord) error {
+			if !available.Load() {
+				return ErrRecoveryUnavailable
+			}
+			b, parent := chain.Blocks[1], chain.Blocks[0]
+			return s.PutJournalCandidate(callCtx, ctx, limits, configuredprogress.JournalCandidate{Round: b.Round, Number: b.Number, ParentNumber: parent.Number, Hash: b.Hash.Bytes(), StateRoot: b.StateRoot.Bytes(), ParentHash: parent.Hash.Bytes(), ParentState: parent.StateRoot.Bytes(), Raw: []byte{1, 2, 3}, BlockSize: 3, AuthorizingUC: bootstrap, AuthorizingTR: bootTR})
+		},
+		OnStop: func(error) { stopped.Store(true) },
+	}).Start(runCtx, id, adapterGate{}, shardnode.AdmissionCallbacks{AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {}, DeliverDurable: func(_ context.Context, uc *types.UnicityCertificate, _ *certification.TechnicalRecord) error {
+		delivered <- uc.GetRootRoundNumber()
+		return nil
+	}})
+	require.NoError(t, err)
+	defer a.Close()
+	require.NoError(t, a.Submit(runCtx, bootstrap, bootTR))
+	require.Equal(t, bootstrap.GetRootRoundNumber(), <-delivered)
+	require.ErrorIs(t, a.Submit(runCtx, first, firstTR), ErrRecoveryUnavailable)
+	require.True(t, a.(interface{ Pending() bool }).Pending())
+	pending, ok := a.(interface {
+		PendingAdmission() (shardnode.PendingAdmission, bool)
+	}).PendingAdmission()
+	require.True(t, ok)
+	require.Equal(t, first.GetRootRoundNumber(), pending.RootRound)
+	require.Equal(t, first.GetRoundNumber(), pending.Round)
+	require.True(t, bytes.Equal(first.InputRecord.BlockHash, pending.BlockHash))
+	require.EqualValues(t, 1, pending.Attempts)
+	require.WithinDuration(t, time.Now(), pending.Since, time.Second)
+	require.Contains(t, pending.LastError, ErrRecoveryUnavailable.Error())
+	require.Contains(t, pending.Detail(), "attempts=1")
+	require.False(t, stopped.Load())
+	available.Store(true)
+	select {
+	case round := <-delivered:
+		require.Equal(t, first.GetRootRoundNumber(), round)
+	case <-time.After(5 * time.Second):
+		t.Fatal("authenticated certificate did not resume after peer became available")
+	}
+	require.False(t, a.(interface{ Pending() bool }).Pending())
+	_, ok = a.(interface {
+		PendingAdmission() (shardnode.PendingAdmission, bool)
+	}).PendingAdmission()
+	require.False(t, ok)
+	require.False(t, stopped.Load())
+}
+
+func TestPendingCatchUpEpisodeSurvivesNewAuthenticatedTarget(t *testing.T) {
+	chain, origin, ctx, id := adapterFixtureBlocks(t, 2)
+	limits := configuredprogress.JournalLimits{Candidates: 3, Observations: 4, Bytes: 16 << 20}
+	s, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 3})
+	require.NoError(t, err)
+	defer s.Close()
+	_, _, err = s.Initialize(context.Background(), ctx)
+	require.NoError(t, err)
+	require.NoError(t, s.EnableJournal(context.Background(), ctx, limits))
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a, err := (JournalFactory{Store: s, Origin: origin, Limits: limits,
+		CatchUp: func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error {
+			return ErrRecoveryUnavailable
+		},
+	}).Start(runCtx, id, adapterGate{}, shardnode.AdmissionCallbacks{
+		AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {},
+		DeliverDurable:    func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error { return nil },
+	})
+	require.NoError(t, err)
+	defer a.Close()
+	boot, bootTR := journalBootstrap(t, chain)
+	require.NoError(t, a.Submit(runCtx, boot, bootTR))
+	first, firstTR := signPeerBlock(t, chain, 1)
+	require.ErrorIs(t, a.Submit(runCtx, first, firstTR), ErrRecoveryUnavailable)
+	firstPending, ok := a.(interface {
+		PendingAdmission() (shardnode.PendingAdmission, bool)
+	}).PendingAdmission()
+	require.True(t, ok)
+	second, secondTR := signPeerBlock(t, chain, 2)
+	require.ErrorIs(t, a.Submit(runCtx, second, secondTR), ErrRecoveryUnavailable)
+	secondPending, ok := a.(interface {
+		PendingAdmission() (shardnode.PendingAdmission, bool)
+	}).PendingAdmission()
+	require.True(t, ok)
+	require.Equal(t, second.GetRootRoundNumber(), secondPending.RootRound)
+	require.Equal(t, firstPending.Since, secondPending.Since, "episode age must not reset with a newer target")
+	require.Greater(t, secondPending.Attempts, firstPending.Attempts)
+}
+
+func TestJournalAdmissionLogsDurableCertificateOnce(t *testing.T) {
+	chain, origin, ctx, id := adapterFixture(t)
+	limits := configuredprogress.JournalLimits{Candidates: 2, Observations: 3, Bytes: 16 << 20}
+	s, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 2})
+	require.NoError(t, err)
+	defer s.Close()
+	_, _, err = s.Initialize(context.Background(), ctx)
+	require.NoError(t, err)
+	require.NoError(t, s.EnableJournal(context.Background(), ctx, limits))
+	var output bytes.Buffer
+	a, err := (JournalFactory{Store: s, Origin: origin, Limits: limits, Logger: slog.New(slog.NewTextHandler(&output, nil))}).Start(context.Background(), id, adapterGate{}, shardnode.AdmissionCallbacks{
+		AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {},
+		DeliverDurable:    func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error { return nil },
+	})
+	require.NoError(t, err)
+	defer a.Close()
+	bootstrap, bootTR := journalBootstrap(t, chain)
+	require.NoError(t, a.Submit(context.Background(), bootstrap, bootTR))
+	putAdapterB1(t, s, ctx, limits, chain, bootstrap, bootTR)
+	first, firstTR := signAdapterObservation(t, chain)
+	require.NoError(t, a.Submit(context.Background(), first, firstTR))
+	require.NoError(t, a.Submit(context.Background(), first, firstTR))
+	line := fmt.Sprintf("msg=\"certificate admitted\" block=%x height=1 round=%d rootRound=%d", chain.Blocks[1].Hash.Bytes(), first.GetRoundNumber(), first.GetRootRoundNumber())
+	require.Contains(t, output.String(), line)
+	require.Equal(t, 2, strings.Count(output.String(), "msg=\"certificate admitted\""), "bootstrap and B1 each admit once; duplicate delivery does not log again")
+}
 
 func journalBootstrap(t *testing.T, c *certifiedchain.Chain) (*types.UnicityCertificate, *certification.TechnicalRecord) {
 	t.Helper()

@@ -5,14 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 var (
-	ErrAdmissionMode = errors.New("shardnode: configured certificate admission mode conflict")
-	ErrClientRunning = errors.New("shardnode: BFT client configuration is frozen while running")
+	ErrAdmissionMode    = errors.New("shardnode: configured certificate admission mode conflict")
+	ErrClientRunning    = errors.New("shardnode: BFT client configuration is frozen while running")
+	ErrProposalRejected = errors.New("shardnode: untrusted follower proposal rejected")
 )
 
 // AdmissionIdentity is the client-owned deployment context supplied to an optional admission
@@ -42,6 +44,21 @@ type CertificateAdmission interface {
 	Submit(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
 	RootEpoch() uint64
 	Close() error
+}
+
+// PendingAdmission is an authenticated certificate waiting for peer catch-up
+// before durable admission. It is diagnostic state, never signing authority.
+type PendingAdmission struct {
+	RootRound, Round uint64
+	BlockHash        []byte
+	Since            time.Time
+	Attempts         uint64
+	LastError        string
+}
+
+func (p PendingAdmission) Detail() string {
+	return fmt.Sprintf("authenticated certificate awaits peer catch-up: rootRound=%d round=%d block=%x attempts=%d since=%s lastError=%s",
+		p.RootRound, p.Round, p.BlockHash, p.Attempts, p.Since.UTC().Format(time.RFC3339Nano), p.LastError)
 }
 
 // CertificateAdmissionFactory constructs an inactive admission boundary before the initial

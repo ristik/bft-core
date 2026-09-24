@@ -648,6 +648,18 @@ func (c *BFTClient) deliverConfigured(ctx context.Context, uc *types.UnicityCert
 	return err
 }
 
+func (c *BFTClient) admissionPending() (PendingAdmission, bool) {
+	c.mu.Lock()
+	a := c.admission
+	c.mu.Unlock()
+	if p, ok := a.(interface {
+		PendingAdmission() (PendingAdmission, bool)
+	}); ok {
+		return p.PendingAdmission()
+	}
+	return PendingAdmission{}, false
+}
+
 func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certification.CertificationResponse) error {
 	if cr == nil {
 		return errors.New("nil certification response")

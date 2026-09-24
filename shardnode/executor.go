@@ -20,6 +20,14 @@ import (
 // forwards it.
 type Hash []byte
 
+// ErrBlockBindingUnavailable marks a local prerequisite that can be retried
+// without treating the peer's certified body as invalid.
+var ErrBlockBindingUnavailable = errors.New("shardnode: block binding prerequisite unavailable")
+
+// ErrLeaderProposalConflict means a different local proposal was already
+// journaled for this authorization. The round must abstain without stopping.
+var ErrLeaderProposalConflict = errors.New("shardnode: leader proposal already retained")
+
 // BlockRef identifies one committed block without carrying its contents.
 type BlockRef struct {
 	Number    uint64
@@ -151,6 +159,10 @@ func (s Status) String() string {
 // ErrNotFound is returned by Seal when BuildID is unknown (expired, wrong
 // executor instance, or never issued).
 var ErrNotFound = errors.New("shardnode: build id not found")
+
+// ErrBuildUnavailable means the executor refused to start a payload job on a
+// locally trusted parent. It is not a verdict about a proposed block.
+var ErrBuildUnavailable = errors.New("shardnode: execution payload build unavailable")
 
 // Executor is what a shard node runs. Implementations decide what a block
 // contains and what its state root means; the framework only sequences

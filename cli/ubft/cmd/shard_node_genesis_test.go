@@ -142,3 +142,30 @@ func TestLoadRunShardConf(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, conf.PartitionParams, registrygenesis.GenesisParam, "the node runs on the full configuration")
 }
+
+func TestShardNodeRun_JournalFlagsForSealOrigin(t *testing.T) {
+	full, genesisPath, _ := preparedGenesisFixture(t, 1337)
+	origin, _, err := loadGenesisOrigin(full, genesisPath, "", 1)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"missing journal", []string{"--executor", "engine-api"}, "require --execution-journal"},
+		{"journal enabled", []string{"--executor", "engine-api", "--execution-journal", "journal.db"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := shardNodeRunCmd(&baseFlags{})
+			require.NoError(t, cmd.ParseFlags(tc.args))
+			flags := &shardNodeRunFlags{Executor: cmd.Flags().Lookup("executor").Value.String(), ExecutionJournal: cmd.Flags().Lookup("execution-journal").Value.String(), EvidenceRecover: cmd.Flags().Lookup("evidence-recover").Value.String() == "true"}
+			err := validateExecutionJournalFlags(flags, origin)
+			if tc.want == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tc.want)
+			}
+		})
+	}
+}

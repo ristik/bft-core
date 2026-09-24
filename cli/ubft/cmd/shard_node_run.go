@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"encoding/hex"
@@ -277,6 +278,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return err
 		}
 	}
+	if err := validateExecutionJournalFlags(flags, origin); err != nil {
+		return err
+	}
 
 	executor, err := buildExecutor(ctx, flags, shardConf, &engineapi.VerifierContext{
 		NetworkID:     shardConf.NetworkID,
@@ -386,9 +390,39 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		if observed, ok := progress.Observed(); ok {
 			node.MarkJournalRestored(observed.Certificate().GetRoundNumber())
+			cert := observed.Certificate()
+			var height uint64
+			for _, entry := range journalImage.Candidates {
+				if entry.Certified && entry.ResultingUC != nil && entry.ResultingUC.GetRootRoundNumber() == cert.GetRootRoundNumber() && bytes.Equal(entry.Candidate.Hash, cert.InputRecord.BlockHash) {
+					height = entry.Candidate.Number
+					break
+				}
+			}
+			flags.observe.Logger().Info("execution journal restored", "block", fmt.Sprintf("%x", cert.InputRecord.BlockHash), "height", height, "round", cert.GetRoundNumber(), "rootRound", cert.GetRootRoundNumber())
 		}
 		node.SetProposalJournal(configuredadmission.ProposalJournal{Store: journalStore, Context: journalCtx, Limits: limits})
-		if openErr = node.SetJournalAdmission(configuredadmission.JournalFactory{Store: journalStore, Origin: origin, Limits: limits}); openErr != nil {
+		recoveryExecutor, ok := executor.(configuredadmission.RecoveryExecutor)
+		if !ok {
+			return errors.New("execution journal needs an executor with finalized identity and recovery forkchoice")
+		}
+		genesis, genesisErr := executor.GenesisBlock(ctx)
+		if genesisErr != nil {
+			return fmt.Errorf("reading recovery genesis identity: %w", genesisErr)
+		}
+		coordinator := &configuredadmission.ExecutionRecovery{Store: journalStore, Context: journalCtx, JournalLimits: limits, Executor: recoveryExecutor, Gate: node.FinalityGate(), Log: flags.observe.Logger(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
+		providers, peerErr := shardPeers(peer, shardConf.Validators)
+		if peerErr != nil {
+			return fmt.Errorf("resolving journal suffix providers: %w", peerErr)
+		}
+		server, serverErr := shardnode.NewJournalServer(configuredadmission.JournalProvider{Store: journalStore, Context: journalCtx, Limits: limits}, shardnode.DefaultJournalTransportLimits())
+		if serverErr != nil {
+			return fmt.Errorf("starting journal suffix server: %w", serverErr)
+		}
+		server.RestrictToPeers(providers)
+		server.Register(peer)
+		coordinator.Host, coordinator.Providers, coordinator.TransportLimits = peer, providers, shardnode.DefaultJournalTransportLimits()
+		node.SetJournalRecovery(coordinator, coordinator)
+		if openErr = node.SetJournalAdmission(configuredadmission.JournalFactory{Store: journalStore, Origin: origin, Limits: limits, CatchUp: coordinator.AcquireForCertificate, OnStop: node.ReportJournalStop, Logger: flags.observe.Logger()}); openErr != nil {
 			return fmt.Errorf("enabling journal certification admission: %w", openErr)
 		}
 		flags.observe.Logger().Info("execution journal verified", "candidates", len(journalImage.Candidates), "observations", len(journalImage.Observations), "bytes", journalImage.Bytes)
@@ -448,6 +482,13 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	g.Go(func() error { return node.Run(gctx) })
 	g.Go(func() error { return serveShardNodeRPC(gctx, flags, node) })
 	return g.Wait()
+}
+
+func validateExecutionJournalFlags(flags *shardNodeRunFlags, origin registrygenesis.GenesisOrigin) error {
+	if flags.Executor == "engine-api" && origin.Valid() && flags.ExecutionJournal == "" {
+		return errors.New("engine-api seal deployments require --execution-journal in M1; supply a path in fresh D2 state")
+	}
+	return nil
 }
 
 // serveShardNodeRPC exposes /api/v1/metrics (Prometheus, when --metrics

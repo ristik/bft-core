@@ -39,6 +39,27 @@ func openJournal(t *testing.T, f *fixture, limits JournalLimits) (*Store, string
 	return s, path
 }
 
+func TestLoadJournalConcurrentCertificateAdmission(t *testing.T) {
+	f := newFixture(t, 2)
+	s, _ := openJournal(t, f, testJournalLimits)
+	defer s.Close()
+	bootstrap := f.bootstrap(1, 4)
+	admitJournal(t, s, f, bootstrap)
+	require.NoError(t, s.PutJournalCandidate(context.Background(), f.ctx, testJournalLimits, candidateB1(f, bootstrap)))
+	first := f.first(1, 2, 5)
+	s.checkpoint = func(name string) error {
+		if name == "after-journal-progress-load" {
+			s.checkpoint = nil
+			admitJournal(t, s, f, first)
+		}
+		return nil
+	}
+	image, err := s.LoadJournal(context.Background(), f.ctx, testJournalLimits)
+	require.NoError(t, err)
+	require.Len(t, image.Observations, 2)
+	require.True(t, image.Candidates[0].Certified)
+}
+
 func TestJournalReopenSeparatesOriginalAuthorizationAndResultingCertificate(t *testing.T) {
 	f := newFixture(t, 2)
 	s, path := openJournal(t, f, testJournalLimits)
@@ -109,7 +130,9 @@ func TestJournalKeepsSameHeightBranchesAndQuietTail(t *testing.T) {
 	conflictingLocal := branch
 	conflictingLocal.Hash = bytes.Repeat([]byte{0xc3}, 32)
 	conflictingLocal.LocallyBuilt = true
-	require.ErrorIs(t, s.PutJournalCandidate(context.Background(), f.ctx, testJournalLimits, conflictingLocal), ErrConflict)
+	conflictErr := s.PutJournalCandidate(context.Background(), f.ctx, testJournalLimits, conflictingLocal)
+	require.ErrorIs(t, conflictErr, ErrConflict)
+	require.ErrorIs(t, conflictErr, ErrLocalProposalConflict)
 	first := f.first(1, 2, 5)
 	admitJournal(t, s, f, first)
 	quietIR := &types.InputRecord{Version: 1, RoundNumber: 2, PreviousHash: f.c.Blocks[1].StateRoot.Bytes(), Hash: f.c.Blocks[1].StateRoot.Bytes(), SummaryValue: []byte{}, Timestamp: 1_700_000_003}

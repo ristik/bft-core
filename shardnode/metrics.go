@@ -14,14 +14,16 @@ import (
 // `if m != nil`. A shard node run without --metrics still works identically;
 // it just doesn't record anything.
 type Metrics struct {
-	roundsCertified metric.Int64Counter
-	repeatUCs       metric.Int64Counter
-	staleUCs        metric.Int64Counter
-	buildDuration   metric.Float64Histogram
-	verifyDuration  metric.Float64Histogram
-	quorumLatency   metric.Float64Histogram
-	irDivergences   metric.Int64Counter
-	recoveryStops   metric.Int64Counter
+	roundsCertified   metric.Int64Counter
+	repeatUCs         metric.Int64Counter
+	staleUCs          metric.Int64Counter
+	buildDuration     metric.Float64Histogram
+	verifyDuration    metric.Float64Histogram
+	quorumLatency     metric.Float64Histogram
+	irDivergences     metric.Int64Counter
+	recoveryStops     metric.Int64Counter
+	pendingCatchUp    metric.Int64Gauge
+	pendingCatchUpAge metric.Float64Gauge
 }
 
 // NewMetrics registers this package's instruments on meter. See
@@ -64,6 +66,14 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 	if m.recoveryStops, err = meter.Int64Counter("shardnode.execution_recovery.stops",
 		metric.WithDescription("Journal execution recovery entered an operator-visible stop state")); err != nil {
 		return nil, fmt.Errorf("creating execution_recovery.stops counter: %w", err)
+	}
+	if m.pendingCatchUp, err = meter.Int64Gauge("shardnode.execution_recovery.pending_catch_up",
+		metric.WithDescription("One while an authenticated certificate awaits peer catch-up before admission, zero otherwise")); err != nil {
+		return nil, fmt.Errorf("creating execution_recovery.pending_catch_up gauge: %w", err)
+	}
+	if m.pendingCatchUpAge, err = meter.Float64Gauge("shardnode.execution_recovery.pending_catch_up_age",
+		metric.WithDescription("Age in seconds of the continuous pending catch-up episode, across authenticated target changes"), metric.WithUnit("s")); err != nil {
+		return nil, fmt.Errorf("creating execution_recovery.pending_catch_up_age gauge: %w", err)
 	}
 	return m, nil
 }
@@ -122,4 +132,17 @@ func (m *Metrics) recordRecoveryStop(ctx context.Context) {
 		return
 	}
 	m.recoveryStops.Add(ctx, 1)
+}
+
+func (m *Metrics) recordPendingCatchUp(ctx context.Context, pending bool, age time.Duration) {
+	if m == nil {
+		return
+	}
+	if pending {
+		m.pendingCatchUp.Record(ctx, 1)
+		m.pendingCatchUpAge.Record(ctx, age.Seconds())
+	} else {
+		m.pendingCatchUp.Record(ctx, 0)
+		m.pendingCatchUpAge.Record(ctx, 0)
+	}
 }
