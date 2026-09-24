@@ -30,7 +30,9 @@ func TestShardNodeDoctorUsesRunSealCapabilities(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := engineFixture{capabilities: tc.capabilities}.start(t)
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// Under coverage/race or machine contention, starting the subprocess
+			// can take longer than the check's own 250 ms dial timeout.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, bin, "shard-node", "doctor",
 				"--home", home, "--executor", "engine-api",
