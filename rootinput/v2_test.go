@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
+	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
@@ -182,6 +183,82 @@ func TestV2AuthenticationRefusalsAreOnTheNewPath(t *testing.T) {
 	obs, _ := f.signed(t, ir, 1, 4)
 	_, err := DeriveV2(ContextV2{Genesis: f.origin, Parent: f.snapshot(t, 0), Round: 2, ParentHash: f.blocks[0].Hash.Bytes()}, obs)
 	require.ErrorIs(t, err, ErrNotPinned, "the caller-pinned assigned round must match authenticated TR")
+}
+
+func TestV2QuorumSubsetAuthenticationAndContextRefusals(t *testing.T) {
+	f := newV2Fixture(t)
+	// Build a root trust base independently of the one-member certified EVM fixture so
+	// signature-subset behavior is exercised by the v2 authentication path.
+	var signers []abcrypto.Signer
+	var ids []string
+	for i := 0; i < 4; i++ {
+		s, err := abcrypto.NewInMemorySecp256K1Signer()
+		require.NoError(t, err)
+		v, err := s.Verifier()
+		require.NoError(t, err)
+		pk, err := v.MarshalPublicKey()
+		require.NoError(t, err)
+		id, err := network.NodeIDFromPublicKeyBytes(pk)
+		require.NoError(t, err)
+		signers, ids = append(signers, s), append(ids, id.String())
+	}
+	tb, ok := testtrustbase.NewTrustBase(t, signers...).(*types.RootTrustBaseV1)
+	require.True(t, ok)
+	c := f.obsContext()
+	c.TrustBases = stubTrustBases{tb: tb}
+	ir := &types.InputRecord{Version: 1}
+	tr := certifiedchain.Technical(6)
+	tr.Round = 7
+	makeUC := func(indices ...int) *types.UnicityCertificate {
+		uc := f.c.Certify(f.c.Signer, ir, tr, 4)
+		uc.UnicitySeal.NetworkID = 3
+		uc.UnicitySeal.Signatures = nil
+		for _, i := range indices {
+			require.NoError(t, uc.UnicitySeal.Sign(ids[i], signers[i]))
+		}
+		return uc
+	}
+	var want []byte
+	for _, subset := range [][]int{{0, 1, 2}, {0, 1, 3}, {0, 2, 3}} {
+		uc := makeUC(subset...)
+		o, err := AuthenticateObservationV2(context.Background(), c, uc, tr)
+		require.NoError(t, err, "valid quorum subset %v", subset)
+		derived, err := DeriveV2(ContextV2{Genesis: f.origin, Parent: f.snapshot(t, 0), Round: 7, ParentHash: f.blocks[0].Hash.Bytes()}, o)
+		require.NoError(t, err, "derive with valid quorum subset %v", subset)
+		if want == nil {
+			want = derived.Encoded
+		} else {
+			require.Equal(t, want, derived.Encoded, "canonical v2 bytes must not depend on the signer subset")
+		}
+	}
+	_, err := AuthenticateObservationV2(context.Background(), c, makeUC(0, 1), tr)
+	require.ErrorIs(t, err, ErrUnauthenticated)
+	require.ErrorContains(t, err, "quorum not reached", "sub-quorum must be rejected")
+	foreign, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	foreignUC := makeUC(0, 1)
+	v, err := foreign.Verifier()
+	require.NoError(t, err)
+	pk, err := v.MarshalPublicKey()
+	require.NoError(t, err)
+	foreignID, err := network.NodeIDFromPublicKeyBytes(pk)
+	require.NoError(t, err)
+	require.NoError(t, foreignUC.UnicitySeal.Sign(foreignID.String(), foreign))
+	_, err = AuthenticateObservationV2(context.Background(), c, foreignUC, tr)
+	require.ErrorIs(t, err, ErrUnauthenticated)
+	require.ErrorContains(t, err, "quorum not reached", "a non-member signer must be rejected")
+
+	valid := makeUC(0, 1, 2)
+	wrongPartition := c
+	wrongPartition.PartitionID++
+	_, err = AuthenticateObservationV2(context.Background(), wrongPartition, valid, tr)
+	require.ErrorIs(t, err, ErrUnauthenticated)
+	require.ErrorContains(t, err, "invalid partition identifier", "wrong partition must be rejected")
+	wrongShard := c
+	_, wrongShard.ShardID = c.ShardID.Split()
+	_, err = AuthenticateObservationV2(context.Background(), wrongShard, valid, tr)
+	require.ErrorIs(t, err, ErrUnauthenticated)
+	require.ErrorContains(t, err, "invalid shard ID", "wrong shard must be rejected")
 }
 
 func TestV2UnsupportedClassifierRequiresDirectPostAuthenticationRefusal(t *testing.T) {
