@@ -289,7 +289,7 @@ else
   # The paired devnet's setup wipes test-nodes/; its cluster's secrets are recorded first.
   if recordCluster "the stock control's cluster"; then
     step "paired real-reth devnet (4 validators, funded transaction)"
-    if ./scripts/reth-paired-devnet.sh 4 5; then
+    if ./scripts/reth-paired-devnet.sh 4 10; then
       echo "reth-smoke: paired devnet passed"
     else
       echo "reth-smoke: paired devnet FAILED"; failures=$((failures + 1))
