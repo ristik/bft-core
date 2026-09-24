@@ -4,9 +4,11 @@
 import argparse
 import json
 import re
+import subprocess
 import sys
 import time
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -34,11 +36,36 @@ def field(line, name):
     return match.group(1) if match else None
 
 
-def execution_evidence(nodes, height, block_hash, commitment):
+def request_in_quorum(line, node_id):
+    match = re.search(r'requestNodeIDs="([^"]*)"', line)
+    return bool(match and node_id in match.group(1).split())
+
+
+def certificate_admissions(lines):
+    admission = re.compile(
+        r'msg="certificate admitted".*?\bblock=([0-9a-f]{64})\s+'
+        r'height=(\d+)\s+round=(\d+)\s+rootRound=(\d+)(?:\s|$)'
+    )
+    found = []
+    for line in lines:
+        match = admission.search(line)
+        if match:
+            block, height, round_number, root_round = match.groups()
+            height = int(height)
+            if height > 0:
+                found.append({"block": block, "height": height,
+                              "round": round_number, "rootRound": root_round,
+                              "line": line})
+    return found
+
+
+def execution_evidence(nodes, height, block_hash, commitment, validators):
     derived = []
     partition_rounds = []
     root_rounds = []
-    for i in range(1, 5):
+    if len(validators) < 3:
+        raise RuntimeError(f"only {len(validators)} survivor(s); a quorum of three is required")
+    for i in validators:
         lines = (Path(nodes) / f"evm{i}" / "debug.log").read_text().splitlines()
         verified = [line for line in lines if 'msg="verified execution payload"' in line
                     and field(line, "blockHash") == block_hash[2:]
@@ -46,21 +73,112 @@ def execution_evidence(nodes, height, block_hash, commitment):
         if not verified:
             raise RuntimeError(f"validator {i} lacks VALID verification for B{height}")
         partition_round = field(verified[-1], "round")
-        certified = [line for line in lines if 'msg="certificate admitted"' in line
-                     and field(line, "height") == str(height)
-                     and field(line, "round") == partition_round
-                     and field(line, "block") == block_hash[2:]]
+        certified = [entry for entry in certificate_admissions(lines)
+                     if entry["height"] == height
+                     and entry["round"] == partition_round
+                     and entry["block"] == block_hash[2:].lower()]
         if not certified:
-            raise RuntimeError(f"validator {i} lacks root certificate for B{height} / round {partition_round}")
+            raise RuntimeError(f"validator {i} lacks positive-height certificate admission for "
+                               f"B{height} / block {block_hash[2:]} / round {partition_round}")
         root_input = field(verified[-1], "rootInput")
         if not root_input or field(verified[-1], "commitment") != commitment[2:]:
             raise RuntimeError(f"validator {i} v2 bytes/commitment missing or inconsistent at B{height}")
         derived.append(root_input)
         partition_rounds.append(partition_round)
-        root_rounds.append(field(certified[-1], "rootRound"))
+        root_rounds.append(certified[-1]["rootRound"])
     if len(set(derived)) != 1 or len(set(partition_rounds)) != 1 or len(set(root_rounds)) != 1:
         raise RuntimeError(f"validator v2 derivation or certificate round disagrees at B{height}")
     return derived[0], partition_rounds[0], root_rounds[0]
+
+
+def authority_status(nodes, validator):
+    home = Path(nodes) / f"auth{validator}"
+    output = subprocess.check_output([
+        "build/ubft", "signing-authority", "status",
+        "--operator-socket", str(home / "operator.sock"),
+        "--operator-credential", str(home / "operator.cred"),
+    ], text=True)
+    return json.loads(output)
+
+
+def assert_expected_impaired_refusal(nodes, scenario, impaired):
+    marker = Path(nodes) / "d2c-expected-refusal"
+    if not marker.exists():
+        raise RuntimeError(f"validator {impaired} has no recorded expected refusal for {scenario}")
+    detail = marker.read_text(errors="replace").strip()
+    if not detail.startswith(f"{scenario}:") or len(detail.split(":", 1)[-1].strip()) == 0:
+        raise RuntimeError(f"impaired validator refusal record does not match {scenario}: {detail!r}")
+    print(f"D1 impaired validator {impaired} expected refusal confirmed separately: {detail}", flush=True)
+
+
+def restart_validator(nodes, validator, signing):
+    log = Path(nodes) / f"evm{validator}" / "debug.log"
+    before = authority_status(nodes, validator) if signing == "authority" else None
+    node_id = subprocess.check_output(["build/ubft", "node-id", "--home", str(Path(nodes) / f"evm{validator}")], text=True).splitlines()[-1]
+    authority_pid = (Path(nodes) / f"auth{validator}" / "pid").read_text().strip() if before else None
+    reth_pid = (Path(nodes) / f"reth{validator}" / "pid").read_text().strip()
+    output = subprocess.check_output(["bash", "scripts/d2c-restart-validator.sh", str(validator)], text=True)
+    markers = [i for i, line in enumerate(log.read_text().splitlines()) if "D2C_RESTART_BOUNDARY" in line]
+    if not markers:
+        raise RuntimeError("restart helper did not mark the boundary after the old shard exited")
+    mark = markers[-1] + 1
+    root_marks = []
+    for i in range(1, 4):
+        root_lines = (Path(nodes) / f"root{i}" / "debug.log").read_text().splitlines()
+        root_markers = [j for j, line in enumerate(root_lines) if "D2C_RESTART_BOUNDARY" in line]
+        if not root_markers:
+            raise RuntimeError(f"restart helper did not mark root {i} after the old shard exited")
+        root_marks.append(root_markers[-1] + 1)
+    print(f"D2C probe: {output.strip()}; retained reth pid={reth_pid}, authority pid={authority_pid}", flush=True)
+    return mark, before, reth_pid, authority_pid, root_marks, node_id
+
+
+def check_restart(nodes, validator, signing, probe):
+    mark, before, reth_pid, authority_pid, root_marks, node_id = probe
+    lines = (Path(nodes) / f"evm{validator}" / "debug.log").read_text().splitlines()[mark:]
+    restored = [line for line in lines if 'msg="execution journal restored"' in line]
+    restored = [line for line in restored
+                if re.fullmatch(r"[0-9a-f]{64}", field(line, "block") or "")
+                and (field(line, "height") or "").isdigit()
+                and int(field(line, "height")) > 0
+                and field(line, "round") is not None
+                and field(line, "rootRound") is not None]
+    if not restored:
+        raise RuntimeError("restarted shard did not restore an authenticated execution-journal observation")
+    submissions = [line for line in lines if "submitting block certification request" in line]
+    certificates = certificate_admissions(lines)
+    if not certificates:
+        raise RuntimeError("restarted shard accepted no subsequent certificate")
+    if (Path(nodes) / f"reth{validator}" / "pid").read_text().strip() != reth_pid:
+        raise RuntimeError("reth PID changed during the shard-only probe")
+    if signing == "authority":
+        if (Path(nodes) / f"auth{validator}" / "pid").read_text().strip() != authority_pid:
+            raise RuntimeError("signing authority PID changed during the shard-only probe")
+        after = authority_status(nodes, validator)
+        if after["signingKeyFingerprint"] != before["signingKeyFingerprint"] or after["generation"] != before["generation"]:
+            raise RuntimeError("authority key or client session changed during the shard-only probe")
+        if not submissions or after["reservedRound"] <= before["reservedRound"] or not after["responseRetained"]:
+            raise RuntimeError(f"authority did not sign and submit after restart: before={before}, after={after}, submissions={len(submissions)}")
+        if any("the certification request was not signed" in line for line in lines):
+            raise RuntimeError("restarted validator logged a signing refusal")
+        submitted_rounds = {field(line, "round") for line in submissions}
+        quorum_proofs = []
+        for i, root_mark in enumerate(root_marks, start=1):
+            root_lines = (Path(nodes) / f"root{i}" / "debug.log").read_text().splitlines()[root_mark:]
+            quorum_proofs.extend(line for line in root_lines
+                                 if "reached consensus" in line and request_in_quorum(line, node_id)
+                                 and field(line, "requestRound") in submitted_rounds)
+        if not quorum_proofs:
+            raise RuntimeError("no later root quorum included the restarted validator's signed request")
+        print(f"D2C PASS: authority pid {authority_pid} retained its key and signed round "
+              f"{after['reservedRound']} after restart; {len(submissions)} requests, "
+              f"{len(quorum_proofs)} root quorum proofs containing its signature, and "
+              f"{len(certificates)} subsequent positive-height certificate admissions observed", flush=True)
+    else:
+        if submissions:
+            raise RuntimeError(f"local-key restart submitted {len(submissions)} requests")
+        print(f"D2C PASS: local-key restart logged MarkRestored and remained NON-VOTING "
+              f"through {len(certificates)} subsequent positive-height certificate admissions", flush=True)
 
 
 def main():
@@ -69,57 +187,161 @@ def main():
     parser.add_argument("--validators", type=int, default=4)
     parser.add_argument("--blocks", type=int, default=10)
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--restart-validator", type=int, default=0)
+    parser.add_argument("--signing", choices=("local", "authority"), default="local")
+    parser.add_argument("--fault-scenario", choices=("pair-term", "pair-kill", "ureth-kill",
+                        "all-kill", "leader-kill", "proof-outage", "proof-corrupt",
+                        "missing-body", "wrong-genesis"), default="")
     args = parser.parse_args()
     if args.validators != 4 or args.blocks < 10:
         parser.error("D1 requires four validators and at least ten blocks")
 
+    impaired = 1 if args.fault_scenario in {"missing-body", "wrong-genesis", "proof-corrupt"} else 0
+    survivors = [i for i in range(1, 5) if i != impaired] if impaired else [1, 2, 3, 4]
+    required_quorum = 3
+    if impaired:
+        print(f"D1 expected refusal: validator {impaired}; fresh survivor quorum={survivors}", flush=True)
+    else:
+        print(f"D1 fresh survivor quorum: any three of validators {survivors}", flush=True)
+
     start = time.monotonic()
     prior = None
+    probe = None
+    probe_started = None
+    target = args.blocks
     print("height hash parent stateRoot commitment txs heads partitionRound rootRound elapsed_s", flush=True)
-    for height in range(1, args.blocks + 1):
-        deadline = start + args.timeout
+    height = 1
+    while height <= target:
+        deadline = min(start + args.timeout, probe_started + 180) if probe_started else start + args.timeout
+        sample_ids = []
+        last_sample = {}
+        last_report = 0.0
         while time.monotonic() < deadline:
-            try:
-                heads = [int(rpc(18545 + i, "eth_blockNumber", []), 16) for i in range(4)]
-                if min(heads) >= height:
-                    break
-            except (OSError, ValueError, RuntimeError) as exc:
-                print(f"height {height}: RPC pending: {exc}", flush=True)
+            current = {}
+            sample_ids = []
+            for i in range(1, 5):
+                try:
+                    sampled_height = int(rpc(18544 + i, "eth_blockNumber", []), 16)
+                    sampled_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+                    current[i] = {"height": sampled_height, "time": sampled_at, "error": None}
+                    if i in survivors and sampled_height >= height:
+                        sample_ids.append(i)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    sampled_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+                    current[i] = {"height": None, "time": sampled_at, "error": str(exc)}
+            last_sample = current
+            now = time.monotonic()
+            if len(sample_ids) >= required_quorum:
+                break
+            if now - last_report >= 5:
+                vector = ", ".join(
+                    f"v{i}={sample['height']}@{sample['time']}" if sample["error"] is None
+                    else f"v{i}=UNAVAILABLE@{sample['time']}({sample['error']})"
+                    for i, sample in current.items()
+                )
+                print(f"height {height}: fresh samples [{vector}]; survivor quorum "
+                      f"{len(sample_ids)}/{required_quorum}", flush=True)
+                last_report = now
             time.sleep(0.5)
         else:
-            print(f"D1 FAIL: stalled before height {height}; heads={locals().get('heads')}")
+            vector = ", ".join(
+                f"v{i}={sample['height']}@{sample['time']}" if sample["error"] is None
+                else f"v{i}=UNAVAILABLE@{sample['time']}({sample['error']})"
+                for i, sample in last_sample.items()
+            )
+            print(f"D1 FAIL: fresh survivor quorum stalled before height {height}; "
+                  f"samples=[{vector}]; survivors={survivors}; required={required_quorum}", flush=True)
             for i in range(1, 5):
                 print(f"--- evm{i} ---\n{tail(f'{args.nodes}/evm{i}/debug.log')}")
                 print(f"--- reth{i} ---\n{tail(f'{args.nodes}/reth{i}/reth.log')}")
             return 1
 
-        blocks = [rpc(18545 + i, "eth_getBlockByNumber", [hex(height), False]) for i in range(4)]
-        if any(block is None for block in blocks):
-            print(f"D1 FAIL: height {height} absent on a paired reth", flush=True)
+        blocks_by_id = {}
+        for i in sample_ids:
+            try:
+                blocks_by_id[i] = rpc(18544 + i, "eth_getBlockByNumber", [hex(height), False])
+            except (OSError, ValueError, RuntimeError) as exc:
+                print(f"height {height}: v{i} block sample unavailable after its fresh head sample: {exc}", flush=True)
+        blocks_by_id = {i: block for i, block in blocks_by_id.items() if block is not None}
+        if len(blocks_by_id) < required_quorum:
+            print(f"D1 FAIL: fewer than three fresh survivor blocks at height {height}; "
+                  f"validators={sorted(blocks_by_id)}", flush=True)
             return 1
         fields = ("number", "hash", "parentHash", "stateRoot", "extraData")
-        if any(tuple(block[field] for field in fields) != tuple(blocks[0][field] for field in fields) for block in blocks[1:]):
-            print(f"D1 FAIL: canonical disagreement at height {height}: {blocks}", flush=True)
+        groups = {}
+        for i, block in blocks_by_id.items():
+            key = tuple(block[field] for field in fields)
+            groups.setdefault(key, []).append((i, block))
+        quorum = max(groups.values(), key=len)
+        if len(quorum) < required_quorum:
+            print(f"D1 FAIL: no matching fresh survivor quorum at height {height}; "
+                  f"samples={[(i, b.get('hash'), b.get('parentHash')) for i, b in blocks_by_id.items()]}", flush=True)
             return 1
-        block = blocks[0]
+        block_ids = [i for i, _ in quorum]
+        block = quorum[0][1]
         if int(block["number"], 16) != height or (prior and block["parentHash"] != prior):
             print(f"D1 FAIL: discontinuity at height {height}: {block}", flush=True)
             return 1
         prior = block["hash"]
         try:
             root_input, partition_round, root_round = execution_evidence(
-                args.nodes, height, block["hash"], block["extraData"]
+                args.nodes, height, block["hash"], block["extraData"], block_ids
             )
         except (OSError, RuntimeError) as exc:
             print(f"D1 FAIL: B{height} lacks cross-validator certificate/v2 evidence: {exc}", flush=True)
             return 1
         print(
             height, block["hash"], block["parentHash"], block["stateRoot"],
-            block["extraData"], len(block["transactions"]), ",".join(map(str, heads)),
+            block["extraData"], len(block["transactions"]),
+            ",".join(f"{i}:{last_sample[i]['height']}@{last_sample[i]['time']}" for i in block_ids),
             partition_round, root_round, round(time.monotonic() - start, 3), flush=True,
         )
-        print(f"v2 B{height} bytes={root_input} (same on all four validators)", flush=True)
-    print("D1 observed consecutive canonical blocks on all four reth clients", flush=True)
+        print(f"v2 B{height} bytes={root_input} (same across quorum validators)", flush=True)
+        if args.restart_validator and height == 5:
+            try:
+                probe = restart_validator(args.nodes, args.restart_validator, args.signing)
+                probe_started = time.monotonic()
+            except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+                print(f"D2C FAIL: could not restart validator {args.restart_validator}: {exc}", flush=True)
+                return 1
+            # At B5 the cluster may already be ahead. Require fresh certified heights after the
+            # restart rather than counting only blocks produced before the probe.
+            target = max(target, max(last_sample[i]["height"] for i in block_ids) + 3)
+        if args.fault_scenario and height == 5:
+            try:
+                output = subprocess.check_output([
+                    "python3", "scripts/d2c-fault-control.py", args.fault_scenario,
+                    str(height), str(partition_round),
+                ], text=True, stderr=subprocess.STDOUT, timeout=90)
+                print(output, end="", flush=True)
+                probe_started = time.monotonic()
+            except subprocess.CalledProcessError as exc:
+                if exc.output:
+                    print(exc.output, end="", flush=True)
+                print(f"D2C[{args.fault_scenario}] FAIL(injection/relaunch error: {exc})", flush=True)
+                return 1
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                print(f"D2C[{args.fault_scenario}] FAIL(injection/relaunch error: {exc})", flush=True)
+                return 1
+            target = max(target, max(last_sample[i]["height"] for i in block_ids) + 3)
+        height += 1
+    if probe:
+        try:
+            check_restart(args.nodes, args.restart_validator, args.signing, probe)
+        except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+            print(f"D2C FAIL: {exc}", flush=True)
+            return 1
+    if impaired:
+        try:
+            assert_expected_impaired_refusal(args.nodes, args.fault_scenario, impaired)
+        except OSError as exc:
+            print(f"D1 FAIL: could not verify impaired validator refusal: {exc}", flush=True)
+            return 1
+        except RuntimeError as exc:
+            print(f"D1 FAIL: {exc}", flush=True)
+            return 1
+    print(f"D1 observed consecutive canonical blocks with a fresh survivor quorum of "
+          f"{required_quorum} through B{target}; survivors={survivors}", flush=True)
     return 0
 
 

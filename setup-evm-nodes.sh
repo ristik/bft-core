@@ -39,7 +39,13 @@ source helper.sh
 
 init_root_nodes "$root_nodes"
 init_evm_validators "$validators"
+case "${SIGNING:-local}" in
+  local) ;;
+  authority) init_evm_authorities "$validators" "$partition_id" ;;
+  *) echo "unknown SIGNING mode: $SIGNING" >&2; exit 2 ;;
+esac
 generate_evm_shard_conf "$validators" "$partition_id" "$chain_id" "$t2_timeout" "$proof_type"
+# Authority enrollment waits for the paired lane's finalized full shard configuration.
 generate_evm_genesis "$partition_id"
 
 generate_log_configuration "test-nodes/*/"
