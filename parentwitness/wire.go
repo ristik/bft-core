@@ -1,5 +1,6 @@
-// Package parentwitness defines the inactive parent SealRegistry witness wire boundary.
-// It registers no protocol. Its optional requester uses caller-pinned providers and bounded retries.
+// Package parentwitness defines the parent SealRegistry witness wire boundary. The local adapter
+// uses its acquisition types; this peer transport is not registered or used. Its optional requester
+// uses caller-pinned providers and bounded retries.
 package parentwitness
 
 import (

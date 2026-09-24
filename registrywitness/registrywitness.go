@@ -15,7 +15,8 @@ fail are kept apart:
 
 Store holds captured witnesses in memory, bounded, and re-verifies a witness each time it is used (§7.5).
 Durable retention and restart are #14; serving witnesses to other nodes and reacquisition after expiry
-are #15. Nothing in production imports this package (inert_test.go).
+are #15. The production execution adapter uses this package for local acquisition, and opt-in
+recordwiring uses it to capture records; inert_test.go keeps the acquisition importers narrow.
 */
 package registrywitness
 

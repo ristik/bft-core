@@ -1,5 +1,6 @@
-// Package configuredadmission bridges the inactive configured-progress v2 coordinator to the
-// generic BFTClient admission boundary. Importing this package does not register or activate it.
+// Package configuredadmission bridges the configured-progress v2 coordinator to the generic
+// BFTClient admission boundary. The shard-node CLI explicitly activates this path; importing the
+// package elsewhere does not register it.
 package configuredadmission
 
 import (

@@ -16,7 +16,9 @@ hash), the size bounds (checked while copying the input, before any decoding or 
 decoding of the account and every storage word, and the §7.3 initialization and parent rules.
 docs/design/f4c-registry-proof-reader.md records the bounds and the dependency review.
 
-Nothing in production imports this package yet (inert_test.go).
+The reviewed production callers are the allowlist in inert_test.go: the Engine API adapter, rootinput,
+configuredprogress, parentwitness, and the genesis and shard-node CLI. The adapter's local witness
+source is part of this path; other packages with controlled imports use their own guards.
 */
 package registryproof
 
