@@ -322,13 +322,16 @@ function start_one_evm_validator() {
 
   local executorArgs=()
   local shardConfArgs=(--shard-conf "test-nodes/shard-conf-${partitionID}_0.json")
-  if [ "$executor" == "engine-api" ]; then
+    if [ "$executor" == "engine-api" ]; then
     local engineURLVar="EVM_ENGINE_URL_$i" ethURLVar="EVM_ETH_URL_$i"
     local engineURL="${!engineURLVar:-http://127.0.0.1:8551}"
     local ethURL="${!ethURLVar:-http://127.0.0.1:8545}"
     executorArgs=(--engine-url "$engineURL" --eth-url "$ethURL" --jwt-secret "test-nodes/evm$i/jwt.hex")
 	if [ -n "${EVM_ENGINE_FEE_COLLECTOR:-}" ]; then
-	  executorArgs+=(--engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR")
+      executorArgs+=(--engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR")
+	fi
+	if [ -n "${EVM_EXECUTION_JOURNAL_ROOT:-}" ]; then
+	  executorArgs+=(--execution-journal "$EVM_EXECUTION_JOURNAL_ROOT/evm$i.db")
 	fi
 	if [ -n "${EVM_GENESIS_FILE:-}" ]; then
 	  if [ -z "${EVM_FULL_SHARD_CONF:-}" ]; then
