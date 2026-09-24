@@ -727,7 +727,7 @@ for line_no, line in enumerate(lines):
         expected = expected_fee_recipient
         round_match = re.search(r"engineapi: round (\d+) suggestedFeeRecipient diverges: got ([0-9a-f]+), want ([0-9a-f]+)", line)
         if (expected and 'msg="rejecting round before execution: attributes diverge from local derivation"' in line
-                and 'status="INVALID"' in line and round_match
+                and ('status=INVALID' in line or 'status="INVALID"' in line) and round_match
                 and int(round_match.group(1)) == expected["round"]
                 and round_match.group(2) == expected["got"] and round_match.group(3) == expected["want"]):
             expected_fee_recipient_lines += 1
