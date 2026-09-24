@@ -1,3 +1,5 @@
+//go:build ignore
+
 // d2c-journal-edit changes one isolated D2-C execution journal record for negative testing.
 package main
 

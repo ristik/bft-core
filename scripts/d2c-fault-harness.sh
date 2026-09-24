@@ -31,33 +31,28 @@ case "$scenario" in
     lane_status=${PIPESTATUS[0]}
     retain_run_logs
     if [ "$lane_status" -eq 0 ]; then
+      case "$scenario" in
+        missing-body)
+          if ! grep -q '^D2C\[missing-body\] deleted certified candidate at B5; restarting validator 1$' "$log" ||
+             ! grep -q '^D2C\[missing-body\] journal rejected restart after certified B5: .*durable state is damaged or untrusted' "$log" ||
+             ! grep -q '^D1 impaired validator 1 expected refusal confirmed separately: missing-body:' "$log" ||
+             ! grep -q '^D1 PASS$' "$log"; then
+            echo "D2C[missing-body] FAIL(missing journal-deletion, restart-rejection, impaired-refusal, or survivor-quorum evidence)" | tee -a "$log"
+            exit 1
+          fi
+          ;;
+        wrong-genesis)
+          if ! grep -q '^D2C\[wrong-genesis\] testing alternate genesis against retained validator 1 datadir at B5$' "$log" ||
+             ! grep -q '^D2C\[wrong-genesis\] retained-state reth restart refused alternate genesis (exit 1)$' "$log" ||
+             ! grep -q '^D1 impaired validator 1 expected refusal confirmed separately: wrong-genesis:' "$log" ||
+             ! grep -q '^D1 PASS$' "$log"; then
+            echo "D2C[wrong-genesis] FAIL(missing alternate-genesis refusal, impaired-refusal, or survivor-quorum evidence)" | tee -a "$log"
+            exit 1
+          fi
+          ;;
+      esac
       echo "D2C[${scenario}] PASS" | tee -a "$log"
       exit 0
-    fi
-    if grep -q "D2C\[$scenario\] injection at certified B5" "$log"; then
-      reason=$(grep -E 'D1 FAIL: stalled before height|D1 FAIL: B[0-9]+ lacks|D1 FAIL: canonical disagreement|D1 FAIL: discontinuity' "$log" | tail -1)
-      if [ -n "$reason" ]; then
-        if [ "$scenario" = missing-body ]; then
-          echo "D2C[${scenario}] EXPECTED-FAIL(D2-A journal body absent; ${reason#D1 FAIL: }; D2-B recovery pending)" | tee -a "$log"
-        elif [ "$scenario" = wrong-genesis ]; then
-          echo "D2C[${scenario}] EXPECTED-FAIL(retained-state alternate genesis rejected; ${reason#D1 FAIL: })" | tee -a "$log"
-        else
-          echo "D2C[${scenario}] EXPECTED-FAIL(no automatic re-drive: ${reason#D1 FAIL: })" | tee -a "$log"
-        fi
-        exit 0
-      fi
-    fi
-    if { [ "$scenario" = missing-body ] && grep -q 'D2C\[missing-body\] deleted certified candidate' "$log"; } ||
-       { [ "$scenario" = wrong-genesis ] && grep -q 'D2C\[wrong-genesis\] retained-state reth restart refused' "$log"; }; then
-      reason=$(grep -E 'D1 FAIL: stalled before height|D1 FAIL: B[0-9]+ lacks|D1 FAIL: canonical disagreement|D1 FAIL: discontinuity' "$log" | tail -1)
-      if [ -n "$reason" ]; then
-        if [ "$scenario" = missing-body ]; then
-          echo "D2C[${scenario}] EXPECTED-FAIL(certified B5 candidate journal entry deleted; restarted validator SYNCING with no D2-B recovery; ${reason#D1 FAIL: })" | tee -a "$log"
-        else
-          echo "D2C[${scenario}] EXPECTED-FAIL(retained-state alternate genesis rejected; ${reason#D1 FAIL: })" | tee -a "$log"
-        fi
-        exit 0
-      fi
     fi
     echo "D2C[${scenario}] FAIL(lane exited ${lane_status}; see diagnostics above)" | tee -a "$log"
     exit "$lane_status"
@@ -68,25 +63,18 @@ case "$scenario" in
     retain_run_logs
     if [ "$lane_status" -eq 0 ]; then
       if [ "$scenario" = proof-corrupt ]; then
-        if ! grep -q '^D2C\[proof-corrupt\] EXPECTED-FAIL(' "$log"; then
-          echo "D2C[proof-corrupt] FAIL(missing measured invalid-proof and recovery verdict)" | tee -a "$log"
+        if ! grep -Eq '^D2C\[proof-corrupt\] invalid-proof rejection confirmed for parent=.*invalid peer candidate:.*registrywitness:.*header hash mismatch.*snapshotIDs=\[\]; dependentSignedRequests=0$' "$log" ||
+           ! grep -Eq '^D2C\[proof-corrupt\] recovery measured after pass: firstAssociation=B[0-9]+; furtherCertifiedHeights=([3-9]|[1-9][0-9]+); signedRequests=[1-9][0-9]*; head=B[0-9]+; liveHeadAgreement=true$' "$log" ||
+           ! grep -q '^D2C\[proof-corrupt\] EXPECTED-FAIL(mutated uncached proof parent=.*rejected as invalid; no derived snapshot or signed request used its snapshotID; validator 1 recovered after pass with .* positive-height admissions and .* signed requests)$' "$log"; then
+          echo "D2C[proof-corrupt] FAIL(missing parent-specific invalid-proof rejection, safe dependency check, or bounded recovery evidence)" | tee -a "$log"
           exit 1
         fi
+        verdict=$(grep '^D2C\[proof-corrupt\] EXPECTED-FAIL(' "$log" | tail -1)
+        echo "$verdict" | tee -a "$log"
       else
         echo "D2C[${scenario}] PASS" | tee -a "$log"
       fi
       exit 0
-    fi
-    if grep -q "D2C\[$scenario\] FAIL(injection/relaunch" "$log"; then
-      echo "D2C[${scenario}] FAIL(injection/relaunch hook failed; see controller diagnostic above)" | tee -a "$log"
-      exit "$lane_status"
-    fi
-    if grep -q "D2C\[$scenario\] dropped proof RPC\|D2C\[$scenario\] corrupted proof RPC" "$log"; then
-      reason=$(grep -E 'D1 FAIL: stalled before height|D1 FAIL: B[0-9]+ lacks|D1 FAIL: canonical disagreement|D1 FAIL: discontinuity' "$log" | tail -1)
-      if [ -n "$reason" ]; then
-        echo "D2C[${scenario}] FAIL(after proof hook; the post-fault lane assertion failed: ${reason#D1 FAIL: })" | tee -a "$log"
-        exit "$lane_status"
-      fi
     fi
     echo "D2C[${scenario}] FAIL(lane exited ${lane_status}; see diagnostics above)" | tee -a "$log"
     exit "$lane_status"
