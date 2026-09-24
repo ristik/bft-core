@@ -741,7 +741,17 @@ if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ]; then
   if [ "$failures" -eq 0 ]; then
     feeRestartHeight=$(cat test-nodes/m1-fee-pre-restart-head.txt)
     echo "restarting only reth1 at the certified idle head B$feeRestartHeight"
+    feeOldRethPid=$(cat test-nodes/reth1/pid)
     stop_pidfile "test-nodes/reth1/pid" 'reth.* node' TERM || fail "could not stop reth1 for fee-floor restart"
+    for _ in $(seq 1 200); do
+      feeOldRethState=$(ps -o stat= -p "$feeOldRethPid" 2>/dev/null | tr -d ' ')
+      [ -z "$feeOldRethState" ] || [[ "$feeOldRethState" == Z* ]] && break
+      sleep 0.1
+    done
+    feeOldRethState=$(ps -o stat= -p "$feeOldRethPid" 2>/dev/null | tr -d ' ')
+    if [ -n "$feeOldRethState" ] && [[ "$feeOldRethState" != Z* ]]; then
+      fail "reth1 process $feeOldRethPid did not exit before fee-floor restart"
+    fi
     if [ "$failures" -eq 0 ]; then
       "$URETH_BIN" node --chain "$chainSpec" --datadir test-nodes/reth1/dd \
         --authrpc.jwtsecret test-nodes/evm1/jwt.hex \
