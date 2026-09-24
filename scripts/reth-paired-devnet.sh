@@ -38,6 +38,7 @@ esac
 rethEngineBase=18551
 rethEthBase=18545
 rethP2PBase=30401
+engineProxyPort=18651
 d2cPersistenceThreshold=${D2C_PERSISTENCE_THRESHOLD:-64}
 echo "ureth engine.persistence-threshold=$d2cPersistenceThreshold blocks (D2C replay visibility)"
 
@@ -68,6 +69,7 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 cleanup() {
   ./stop-evm.sh -a >/dev/null 2>&1 || true
   stop_pidfile "test-nodes/proof-proxy/pid" 'd2c-proof-proxy.py'
+  stop_pidfile "test-nodes/engine-proxy/pid" 'd2c-engine-proxy.py'
   for i in $(seq 1 "$validators"); do
     stop_pidfile "test-nodes/auth$i/pid" 'ubft signing-authority run'
   done
@@ -237,6 +239,33 @@ if [ "${D2C_FAULT_SCENARIO:-}" = proof-outage ] || [ "${D2C_FAULT_SCENARIO:-}" =
   done
   $ready || { echo "D2C proof proxy did not start" >&2; exit 1; }
   echo "D2C proof proxy routes validator 1 HTTP RPC through 127.0.0.1:18645"
+fi
+
+if [ "${D2C_FAULT_SCENARIO:-}" = hostile-builder ]; then
+  mkdir -p test-nodes/engine-proxy
+  printf '{"armed":false}\n' >test-nodes/engine-proxy/control.json
+  python3 scripts/d2c-engine-proxy.py --listen "127.0.0.1:$engineProxyPort" \
+    --target "http://127.0.0.1:$rethEngineBase" \
+    --control test-nodes/engine-proxy/control.json --log test-nodes/engine-proxy/engine.log \
+    >test-nodes/engine-proxy/stdout.log 2>&1 &
+  echo $! >test-nodes/engine-proxy/pid
+  ready=false
+  for _ in $(seq 1 20); do
+    if python3 - "$engineProxyPort" <<'PYPORT'
+import socket, sys
+try:
+    with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=0.5):
+        pass
+except OSError:
+    raise SystemExit(1)
+PYPORT
+    then
+      ready=true; break
+    fi
+    sleep 0.25
+  done
+  $ready || { echo "D2C Engine proxy did not start" >&2; exit 1; }
+  echo "D2C Engine proxy routes only validator 1 Engine API through 127.0.0.1:$engineProxyPort"
 fi
 
 echo
@@ -571,6 +600,9 @@ for i in $(seq 1 "$validators"); do
 done
 if [ "${D2C_FAULT_SCENARIO:-}" = proof-outage ] || [ "${D2C_FAULT_SCENARIO:-}" = proof-corrupt ]; then
   export EVM_ETH_URL_1=http://127.0.0.1:18645
+fi
+if [ "${D2C_FAULT_SCENARIO:-}" = hostile-builder ]; then
+  export EVM_ENGINE_URL_1="http://127.0.0.1:$engineProxyPort"
 fi
 
 # Every validator may lead. P2P transaction propagation is disabled in M1, so seed the same
