@@ -30,7 +30,9 @@ field order is:
  rootThreshold, stateSummary, changeRecordHash, predecessorHash]
 ```
 
-Members are sorted bytewise by `nodeID` for the body. `consensusKey` is a
+Members are sorted bytewise by `nodeID` for the body. Empty or absent
+`stateSummary` and `changeRecordHash` are CBOR null under D3 `optBytes`;
+validating their provenance is a separate handoff admission check. `consensusKey` is a
 33-byte compressed secp256k1 key; node IDs, staking IDs, and consensus keys
 are individually unique. `rootThreshold = floor(2 * sum(weight) / 3) + 1`.
 `BodyID = SHA-256(CBOR(body))`. Signatures on the current body and the
@@ -60,7 +62,11 @@ A historical store records contiguous half-open intervals `[start,end)` for
 the v1 anchor and every activated v2 body. `start` for each v2 interval must
 be the authenticated `A*`, at least the body's `A_min`; the prior end must
 equal this start, and start must be below end. Lookup by root round uses these
-intervals, never `A_min`. It refuses a partial, overlapping, gapped, or
+intervals, never `A_min`. The durable activated-interval record is
+`["UNICITY_ACTIVATED_TRUST_INTERVAL", 1, bodyIdentity, A*,
+activationCommitID, end]` in deterministic CBOR; `end` is an unsigned
+round for closed intervals and CBOR null for the open-ended current interval.
+The open interval may only be last. The body is stored separately by ID. It refuses a partial, overlapping, gapped, or
 out-of-context chain rather than selecting a convenient entry. Epoch lookup
 must validate the same lineage and activated record. Retention and restart
 are PR 2 concerns; no local REST insertion or clock passage activates a body.
@@ -84,8 +90,9 @@ schedule without altering the old encoding. The five fee fields are the
 companion `BlockProfile` values; `feeCollector20` is the exact 20-byte EVM
 address. The supported profile requires positive fields, `systemGas < maxGas`,
 `baseFeeFloor <= 2^62`, elasticity 2, and ordinary capacity divisible by 2.
-The collector may be zero only if that is the explicitly configured address;
-zero is still hashed. Changing any fee field or collector changes the v2 ID.
+The inert encoder hashes the supplied collector bytes, including zero. The
+PR 2 runtime binder must refuse an unset zero collector and obtain the address
+from checked configuration. Changing any fee field or collector changes the v2 ID.
 The future runtime binder must obtain all values from the checked node and
 companion configuration, then compare the pinned identity on restore.
 

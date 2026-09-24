@@ -15,6 +15,7 @@ def head(major, n):
     return bytes([major << 5 | 27]) + n.to_bytes(8, 'big')
 
 def cbor(v):
+    if v is None: return b"\xf6"
     if isinstance(v, int): return head(0, v)
     if isinstance(v, bytes): return head(2, len(v)) + v
     if isinstance(v, str):
@@ -27,9 +28,10 @@ def hx(v): return v.hex()
 
 anchor = bytes.fromhex('a1'*32)
 first = digest(['UNICITY_TRUSTBASE_V1_TO_V2', 3, 4, anchor])
-legacy = bytes.fromhex('b2'*32)
+legacy = bytes.fromhex('f63207575830a59dece6e1b59ecbc46faa865492715252d5a846a6996bde98ba')
 keys = [bytes([2+i])*33 for i in range(4)]
-members = [[f'stake-{i}', f'node-{i}', keys[i], 1] for i in range(4)]
+unsorted_members = [[f'stake-{i}', f'node-{i}', keys[i], 1] for i in [2, 0, 3, 1]]
+members = sorted(unsorted_members, key=lambda member: member[1].encode('utf-8'))
 body = [2, 3, 5, 70, members, 3, bytes.fromhex('c3'*32), bytes.fromhex('d4'*32), first]
 body_id = digest(body)
 body2 = [2, 3, 6, 160, members, 3, bytes.fromhex('e5'*32), bytes.fromhex('f6'*32), body_id]
@@ -49,7 +51,10 @@ doc = {
  'encoding': 'RFC 8949 deterministic CBOR, SHA-256; no signatures or witnesses in body',
  'anchor': {'network': 3, 'epoch': 4, 'start': 0, 'end': 120, 'hashIncludingSigs': hx(anchor)},
  'firstPredecessor': hx(first),
+ 'inputMemberOrder': [m[1] for m in unsorted_members],
  'body': encoded(body), 'body2': encoded(body2),
+ 'interval': encoded(['UNICITY_ACTIVATED_TRUST_INTERVAL', 1, body_id, 120, bytes.fromhex('77'*32), 200]),
+ 'openInterval': encoded(['UNICITY_ACTIVATED_TRUST_INTERVAL', 1, digest(body2), 200, bytes.fromhex('88'*32), None]),
  'activation': {'bodyIdentity': hx(body_id), 'earliest': 70, 'actual': 120, 'end': 200, 'commitID': '77'*32},
  'activation2': {'bodyIdentity': hx(digest(body2)), 'earliest': 160, 'actual': 200, 'end': 260, 'commitID': '88'*32},
  'quorumSubsets': [['node-0','node-1','node-2'], ['node-0','node-1','node-3'], ['node-1','node-2','node-3']],
