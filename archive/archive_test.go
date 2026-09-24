@@ -215,6 +215,7 @@ func TestCanonicalDecoding(t *testing.T) {
 	badShard[shardLen+4+len(q.Context.ShardID.Bytes())-1] = 0
 	badShardLength := clone(request)
 	binary.BigEndian.PutUint32(badShardLength[shardLen:], MaxShardBytes+1)
+	badShardLength = append(badShardLength[:shardLen+4], append(bytes.Repeat([]byte{1}, MaxShardBytes+1), badShardLength[shardLen+4+len(q.Context.ShardID.Bytes()):]...)...)
 	for name, wire := range map[string][]byte{"request domain": badRequestDomain, "request version": badRequestVersion, "noncanonical shard": badShard, "shard cap": badShardLength} {
 		if _, err := DecodeRequest(wire); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: %v", name, err)
@@ -226,6 +227,7 @@ func TestCanonicalDecoding(t *testing.T) {
 	badResponseVersion[len(responseDomain)]++
 	badResponseLength := clone(response)
 	binary.BigEndian.PutUint32(badResponseLength[len(responseDomain)+1:], MaxRequestBytes+1)
+	badResponseLength = append(badResponseLength[:len(responseDomain)+1+4], bytes.Repeat([]byte{1}, MaxRequestBytes+1)...)
 	for name, wire := range map[string][]byte{"response domain": badResponseDomain, "response version": badResponseVersion, "request cap": badResponseLength} {
 		if _, err := DecodeResponse(wire); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: %v", name, err)
@@ -256,7 +258,9 @@ func TestCanonicalDecoding(t *testing.T) {
 		"duplicate extensions": makeRaw(OK, 2, []string{"a", "a"}, nil),
 		"empty extension":      makeRaw(OK, 1, []string{""}, nil),
 		"reserved extension":   makeRaw(OK, 1, []string{"body"}, nil),
-		"extension count":      makeRaw(OK, 17, nil, nil),
+		"extension count": makeRaw(OK, 17, []string{
+			"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q",
+		}, nil),
 		"refusal payload":      makeRaw(Unavailable, 0, nil, []byte{1}),
 		"out of range outcome": makeRaw(Outcome(5), 0, nil, nil),
 	} {
@@ -267,6 +271,16 @@ func TestCanonicalDecoding(t *testing.T) {
 	rec.Extensions["body"] = []byte("shadow")
 	if _, err := EncodeResponse(Response{q, OK, rec}); !errors.Is(err, ErrInvalid) {
 		t.Errorf("reserved extension encoded: %v", err)
+	}
+}
+
+func TestReadBytesRejectsDeclaredCapWithAvailablePayload(t *testing.T) {
+	for _, limit := range []int{MaxShardBytes, MaxRequestBytes} {
+		var wire bytes.Buffer
+		putBytes(&wire, bytes.Repeat([]byte{1}, limit+1))
+		if _, err := readBytes(bytes.NewReader(wire.Bytes()), limit); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("limit %d: %v", limit, err)
+		}
 	}
 }
 
