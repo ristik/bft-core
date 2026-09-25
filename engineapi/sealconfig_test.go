@@ -2,6 +2,7 @@ package engineapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -96,5 +97,27 @@ func TestCheckedIdentityRecheckedBeforeEngineCall(t *testing.T) {
 	}
 	if id, err := a.CheckedExecutionConfigIdentity(context.Background(), legacy); err != nil || id != pinned {
 		t.Fatalf("stable recheck: %x, %v", id, err)
+	}
+}
+
+func TestCheckedExecutionConfigBytesMatchPinnedIdentity(t *testing.T) {
+	legacy := [32]byte{1}
+	current := sealConfigWire{Version: 1, MaxGas: 30_000_000, SystemGas: 2_000_000, BaseFeeFloor: 1_000_000, Elasticity: 2, ChangeDenominator: 8, FeeCollector: "0x" + strings.Repeat("12", 20)}
+	engine := newMockReth(t, Secret{})
+	engine.on("engine_sealConfigV1", func(json.RawMessage) (any, *rpcError) { return current, nil })
+	a, closeFn := newTestAdapter(t, engine, newMockReth(t, Secret{}))
+	defer closeFn()
+	a.feeCollector = filledCollector()
+	id, err := a.CheckedExecutionConfigIdentity(context.Background(), legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := a.CheckedExecutionConfigBytes(context.Background(), legacy)
+	if err != nil || sha256.Sum256(b) != id {
+		t.Fatalf("archive identity bytes: %x, %v", b, err)
+	}
+	current.BaseFeeFloor++
+	if _, err := a.CheckedExecutionConfigBytes(context.Background(), legacy); !errors.Is(err, ErrSealConfigIdentity) {
+		t.Fatalf("changed companion accepted: %v", err)
 	}
 }

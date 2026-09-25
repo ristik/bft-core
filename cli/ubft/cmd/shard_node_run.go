@@ -17,7 +17,7 @@ import (
 
 	"github.com/ainvaltin/httpsrv"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/libp2p/go-libp2p/core/peer"
+	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
@@ -27,6 +27,8 @@ import (
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 
+	"github.com/unicitynetwork/bft-core/archive"
+	"github.com/unicitynetwork/bft-core/archivewiring"
 	"github.com/unicitynetwork/bft-core/certifiedstore"
 	"github.com/unicitynetwork/bft-core/configuredadmission"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
@@ -70,6 +72,8 @@ type shardNodeRunFlags struct {
 	JournalCandidates   int
 	JournalObservations int
 	JournalBytes        int64
+	ArchiveStore        string
+	ArchiveReplicas     []string
 
 	// CertifiedRecordStore enables the certified-block record store (#14) at this path. Empty, the default,
 	// constructs nothing, and the node runs exactly as before. See startCertifiedRecord.
@@ -153,6 +157,10 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"maximum retained certificate observations with --execution-journal; admission stops at capacity")
 	cmd.Flags().Int64Var(&flags.JournalBytes, "journal-bytes", 64<<20,
 		"maximum retained journal bytes with --execution-journal; no pruning in M1")
+	cmd.Flags().StringVar(&flags.ArchiveStore, "archive-store", "",
+		"local certified archive directory; requires --execution-journal and exactly two --archive-replica peer IDs")
+	cmd.Flags().StringSliceVar(&flags.ArchiveReplicas, "archive-replica", nil,
+		"configured replica peer ID; set exactly twice with --archive-store")
 	cmd.Flags().StringVar(&flags.CertifiedRecordStore, "certified-record-store", "",
 		"path of the certified-block record store (#14); empty leaves it off. Requires --executor engine-api and a SealRegistry shard configuration. The record is reloaded and reported at startup, and the witness of every block the round commits is captured over --eth-url and published; none of it changes voting")
 	cmd.Flags().IntVar(&flags.CertifiedRecordRetain, "certified-record-retain", defaultCertifiedRecordRetain,
@@ -183,6 +191,9 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 }
 
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
+	if flags.ArchiveStore != "" && (flags.ExecutionJournal == "" || len(flags.ArchiveReplicas) != 2) || flags.ArchiveStore == "" && len(flags.ArchiveReplicas) != 0 {
+		return archivewiring.ErrConfig
+	}
 	if flags.ExecutionJournal != "" && flags.EvidenceRecover {
 		return errors.New("--evidence-recover cannot be combined with --execution-journal: evidence recovery bypasses durable journal admission")
 	}
@@ -449,6 +460,54 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return fmt.Errorf("enabling journal certification admission: %w", openErr)
 		}
 		flags.observe.Logger().Info("execution journal verified", "candidates", len(journalImage.Candidates), "observations", len(journalImage.Observations), "bytes", journalImage.Bytes)
+		if flags.ArchiveStore != "" {
+			adapter, ok := executor.(*engineapi.Adapter)
+			if !ok || !origin.Valid() {
+				return archivewiring.ErrConfig
+			}
+			identity, e := adapter.CheckedExecutionConfigBytes(ctx, [32]byte(origin.ExecutionConfigIdentity()))
+			if e != nil {
+				return fmt.Errorf("checking archive execution identity: %w", e)
+			}
+			subject, e := archivewiring.ContextFrom(journalCtx, identity)
+			if e != nil {
+				return fmt.Errorf("checking archive subject: %w", e)
+			}
+			local, e := archive.Open(flags.ArchiveStore)
+			if e != nil {
+				return fmt.Errorf("opening archive: %w", e)
+			}
+			allowed, e := shardPeers(peer, shardConf.Validators)
+			if e != nil {
+				return e
+			}
+			var replicas [2]libp2ppeer.ID
+			for i, raw := range flags.ArchiveReplicas {
+				replicas[i], e = libp2ppeer.Decode(raw)
+				if e != nil {
+					return fmt.Errorf("archive replica %d: %w", i, e)
+				}
+			}
+			transportLimits := archivewiring.DefaultLimits()
+			server, e := archivewiring.NewServer(local, subject, archivewiring.JournalVerifier(journalStore, journalCtx, limits, subject), allowed, transportLimits)
+			if e != nil {
+				return fmt.Errorf("starting archive replica: %w", e)
+			}
+			server.Register(peer)
+			metrics, e := archivewiring.NewMetrics(flags.observe.Meter("archive"))
+			if e != nil {
+				return e
+			}
+			publisher := &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: local, Subject: subject, Adapter: adapter, Host: peer, Replicas: replicas, Limits: transportLimits, Log: flags.observe.Logger(), Metrics: metrics}
+			if e := publisher.Validate(); e != nil {
+				_ = metrics.Close()
+				return e
+			}
+			archiveCtx, cancelArchive := context.WithCancel(ctx)
+			archiveDone := make(chan struct{})
+			go func() { defer close(archiveDone); _ = publisher.Run(archiveCtx) }()
+			defer func() { cancelArchive(); <-archiveDone; _ = metrics.Close() }()
+		}
 	}
 
 	// The follower's wait for the leader's block comes from the shard's own T2, never from a
@@ -565,14 +624,14 @@ func buildDisseminator(p *network.Peer, obs Observability, validators []*types.N
 // deliberately the same set, because both are "the validators of this shard" and a node that is
 // trusted to send blocks is no more trusted to serve evidence: the evidence predicate authenticates
 // everything against this node's own trust base regardless of who supplied it (§3).
-func shardPeers(p *network.Peer, validators []*types.NodeInfo) ([]peer.ID, error) {
+func shardPeers(p *network.Peer, validators []*types.NodeInfo) ([]libp2ppeer.ID, error) {
 	selfID := p.ID().String()
-	var peers []peer.ID
+	var peers []libp2ppeer.ID
 	for _, v := range validators {
 		if v.NodeID == selfID {
 			continue
 		}
-		id, err := peer.Decode(v.NodeID)
+		id, err := libp2ppeer.Decode(v.NodeID)
 		if err != nil {
 			return nil, fmt.Errorf("invalid validator node id %q in shard conf: %w", v.NodeID, err)
 		}

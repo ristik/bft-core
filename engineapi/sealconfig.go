@@ -63,33 +63,65 @@ func (a *Adapter) CheckedExecutionConfigIdentity(ctx context.Context, legacy [32
 }
 
 func (a *Adapter) readExecutionConfigIdentity(ctx context.Context, legacy [32]byte) ([32]byte, error) {
+	c, err := a.readExecutionConfig(ctx, legacy)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return c.Identity()
+}
+
+// CheckedExecutionConfigBytes returns the complete versioned archive subject.
+// The identity is pinned before the bytes are read and checked again afterward.
+func (a *Adapter) CheckedExecutionConfigBytes(ctx context.Context, legacy [32]byte) ([]byte, error) {
+	pinned, err := a.CheckedExecutionConfigIdentity(ctx, legacy)
+	if err != nil {
+		return nil, err
+	}
+	c, err := a.readExecutionConfig(ctx, legacy)
+	if err != nil {
+		return nil, err
+	}
+	b, err := c.Encode()
+	if err != nil {
+		return nil, err
+	}
+	id, err := c.Identity()
+	if err != nil {
+		return nil, err
+	}
+	if id != pinned {
+		return nil, ErrSealConfigIdentity
+	}
+	return b, nil
+}
+
+func (a *Adapter) readExecutionConfig(ctx context.Context, legacy [32]byte) (m2contract.ExecutionConfigV2, error) {
 	if a.feeCollector == ([20]byte{}) {
-		return [32]byte{}, ErrUnsetCollector
+		return m2contract.ExecutionConfigV2{}, ErrUnsetCollector
 	}
 	var got sealConfigWire
 	if err := a.engine.call(ctx, "engine_sealConfigV1", []any{}, &got); err != nil {
-		return [32]byte{}, fmt.Errorf("%w: %v", ErrSealConfigUnavailable, err)
+		return m2contract.ExecutionConfigV2{}, fmt.Errorf("%w: %v", ErrSealConfigUnavailable, err)
 	}
 	if got.Version != 1 {
-		return [32]byte{}, ErrSealConfigVersion
+		return m2contract.ExecutionConfigV2{}, ErrSealConfigVersion
 	}
 	if !common.IsHexAddress(got.FeeCollector) {
-		return [32]byte{}, ErrSealConfigCollector
+		return m2contract.ExecutionConfigV2{}, ErrSealConfigCollector
 	}
 	actual := [20]byte(common.HexToAddress(got.FeeCollector))
 	if actual == ([20]byte{}) {
-		return [32]byte{}, ErrUnsetCollector
+		return m2contract.ExecutionConfigV2{}, ErrUnsetCollector
 	}
 	if actual != a.feeCollector {
-		return [32]byte{}, ErrSealConfigCollector
+		return m2contract.ExecutionConfigV2{}, ErrSealConfigCollector
 	}
 	c := m2contract.ExecutionConfigV2{LegacyConfigIdentity: legacy, Fee: m2contract.FeeProfile{MaxGas: got.MaxGas, SystemGas: got.SystemGas, BaseFeeFloor: got.BaseFeeFloor, Elasticity: got.Elasticity, ChangeDenominator: got.ChangeDenominator}, Collector: actual}
-	id, err := c.Identity()
-	if err != nil {
+	if err := c.Validate(); err != nil {
 		if errors.Is(err, m2contract.ErrFeeProfile) {
-			return [32]byte{}, fmt.Errorf("%w: %w", ErrSealConfigProfile, err)
+			return m2contract.ExecutionConfigV2{}, fmt.Errorf("%w: %w", ErrSealConfigProfile, err)
 		}
-		return [32]byte{}, err
+		return m2contract.ExecutionConfigV2{}, err
 	}
-	return id, nil
+	return c, nil
 }

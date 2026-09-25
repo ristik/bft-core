@@ -17,8 +17,8 @@ import (
 var ErrUnavailable = errors.New("archive record unavailable")
 var ErrCorrupt = errors.New("archive record invalid")
 
-// Store is inert: no runtime caller, peer listener, or pruning acknowledgement
-// is installed by this package. One process may write a store at a time.
+// Store holds immutable local availability copies. One process may write a
+// store at a time; archivewiring owns peer publication and verification.
 type Store struct {
 	dir   string
 	mu    sync.Mutex
