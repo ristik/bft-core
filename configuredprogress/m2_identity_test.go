@@ -71,3 +71,16 @@ func TestM2DescriptorVersionRefused(t *testing.T) {
 		t.Fatalf("wrong m2 descriptor version: %v", err)
 	}
 }
+
+func TestM2DamagedDescriptorPayloadIsUntrusted(t *testing.T) {
+	f := newFixture(t, 0)
+	id := sha256.Sum256([]byte("checked profile and collector"))
+	raw, err := encodeEnvelope(kindDescriptor, []byte{0xff}, MaxDescriptorBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = verifyDescriptor(raw, f.origin, id)
+	if !errors.Is(err, ErrUntrusted) || errors.Is(err, ErrVersion) {
+		t.Fatalf("damaged payload: %v", err)
+	}
+}

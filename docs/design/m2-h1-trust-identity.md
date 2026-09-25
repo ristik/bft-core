@@ -104,6 +104,12 @@ The runtime binder reads the checked profile and collector from ureth over
 the JWT-authenticated Engine connection, then compares the pinned identity
 on restore. The journal descriptor uses payload version 3 when this ID is
 present; a legacy descriptor is incompatible and refused.
+On first initialization the JWT-protected companion is the source of the five
+fee fields; only the collector is compared with the local setting. The first
+accepted profile is pinned in the descriptor, so an incorrect companion at
+initialization can establish an incorrect identity. Recovery compares the
+entire pinned identity. A new Engine connection must repeat that comparison
+before executing or signing with the replacement companion.
 
 Old descriptors and stores carry v1 identities and lack these fields. They
 must not be silently reinterpreted as v2 or opened for M2 execution. An

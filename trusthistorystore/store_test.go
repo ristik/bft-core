@@ -17,10 +17,23 @@ import (
 
 type proofVerifier struct{}
 
-func (proofVerifier) VerifyActivation(_ context.Context, b evmroot.TrustBaseBodyV2, a evmroot.ActivatedTrustBase, p []byte) error {
-	id := b.Identity()
-	if !bytes.Equal(a.BodyIdentity, id[:]) || !bytes.Equal(p, []byte("finalized-proof")) {
+type countingVerifier struct{ calls int }
+
+func (v *countingVerifier) VerifyActivation(ctx context.Context, prior Record, in m2contract.TrustInterval, proof []byte) error {
+	v.calls++
+	return (proofVerifier{}).VerifyActivation(ctx, prior, in, proof)
+}
+
+func (proofVerifier) VerifyActivation(_ context.Context, prior Record, in m2contract.TrustInterval, p []byte) error {
+	id := in.Body.Identity()
+	if !bytes.Equal(in.Activation.BodyIdentity, id[:]) || !bytes.Equal(p, []byte("finalized-proof")) || prior.End != in.Activation.EpochStart || prior.Epoch+1 != in.Body.Epoch || (prior.V1 == nil && prior.V2 == nil) {
 		return errors.New("bad proof")
+	}
+	if prior.V1 != nil && prior.V1.Epoch != prior.Epoch {
+		return errors.New("wrong v1 trust base")
+	}
+	if prior.V2 != nil && prior.V2.Identity() != prior.BodyID {
+		return errors.New("wrong v2 trust base")
 	}
 	return nil
 }
@@ -152,8 +165,8 @@ func TestStoreRestartEvictionAndRefusal(t *testing.T) {
 	priorID := second.Body.Identity()
 	bad.Body.Epoch++
 	bad.Body.PredecessorHash = priorID[:]
-	bad.Body.EarliestActivation = 19
-	bad.Activation.EpochStart = 20
+	bad.Body.EarliestActivation = 30
+	bad.Activation.EpochStart = 32
 	badID := bad.Body.Identity()
 	bad.Activation.BodyIdentity = badID[:]
 	if err := s.AppendVerified(ctx, bad, []byte("bad")); !errors.Is(err, ErrProof) {
@@ -329,5 +342,207 @@ func TestAppendRefusesGappedEpoch(t *testing.T) {
 	err = s.AppendVerified(ctx, in, []byte("finalized-proof"))
 	if !errors.Is(err, ErrHistory) || !errors.Is(err, m2contract.ErrEpochGap) {
 		t.Fatalf("gapped append: %v", err)
+	}
+}
+
+func TestAppendClearsCachedAnchorInterval(t *testing.T) {
+	db := openDB(t, filepath.Join(t.TempDir(), "trust.db"))
+	defer db.Close()
+	tb := anchor(t)
+	s, err := Open(context.Background(), db, tb, sha256.Sum256([]byte("execution-v2")), proofVerifier{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.ByEpoch(tb.GetEpoch())
+	if err != nil || before.End != 0 {
+		t.Fatalf("cached anchor before append: %+v %v", before, err)
+	}
+	in := body(t, s)
+	if err := s.AppendVerified(context.Background(), in, []byte("finalized-proof")); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.ByEpoch(tb.GetEpoch())
+	if err != nil || after.End != in.Activation.EpochStart {
+		t.Fatalf("cached anchor after append: %+v %v", after, err)
+	}
+}
+
+func TestByEpochOwnsV1Anchor(t *testing.T) {
+	db := openDB(t, filepath.Join(t.TempDir(), "trust.db"))
+	defer db.Close()
+	tb := anchor(t)
+	s, err := Open(context.Background(), db, tb, sha256.Sum256([]byte("execution-v2")), proofVerifier{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.ByEpoch(tb.Epoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.V1.RootNodes[0].SigKey[0] ^= 0xff
+	for id, sig := range first.V1.Signatures {
+		sig[0] ^= 0xff
+		first.V1.Signatures[id] = sig
+	}
+	second, err := s.ByEpoch(tb.Epoch)
+	if err != nil || !bytes.Equal(second.V1.RootNodes[0].SigKey, tb.RootNodes[0].SigKey) {
+		t.Fatalf("mutable v1 key: %v", err)
+	}
+	for id, sig := range second.V1.Signatures {
+		if !bytes.Equal(sig, tb.Signatures[id]) {
+			t.Fatal("mutable v1 signature")
+		}
+	}
+}
+
+func TestOpenRefusesZeroExecutionIdentity(t *testing.T) {
+	db := openDB(t, filepath.Join(t.TempDir(), "trust.db"))
+	defer db.Close()
+	_, err := Open(context.Background(), db, anchor(t), [32]byte{}, proofVerifier{})
+	if !errors.Is(err, ErrIdentity) {
+		t.Fatalf("zero execution identity: %v", err)
+	}
+}
+
+func TestLoadPinsAnchorStart(t *testing.T) {
+	path, tb, id := persistedFixture(t)
+	db := openDB(t, path)
+	var raw []byte
+	if ok, err := db.Read(anchorKey, &raw); err != nil || !ok {
+		t.Fatalf("anchor: %v %v", ok, err)
+	}
+	var a anchorDisk
+	if err := types.Cbor.Unmarshal(raw, &a); err != nil {
+		t.Fatal(err)
+	}
+	a.Start++
+	var err error
+	a.Canonical, err = (m2contract.V1AnchorRecord{Anchor: a.Anchor, Start: a.Start, End: a.End}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err = types.Cbor.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Write(anchorKey, raw); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Open(context.Background(), db, tb, id, proofVerifier{})
+	if !errors.Is(err, ErrAnchor) {
+		t.Fatalf("changed anchor start: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadRejectsKeyBodyEpochMismatchBeforeHistory(t *testing.T) {
+	path, tb, id := persistedFixture(t)
+	mutateStoredEntry(t, path, func(e *entryDisk) {
+		e.Body.Epoch++
+		bodyID := e.Body.Identity()
+		e.Activation.BodyIdentity = bytes.Clone(bodyID[:])
+		var err error
+		e.Canonical, err = (m2contract.TrustInterval{Body: e.Body, Activation: e.Activation, End: e.End}).Encode()
+		if err != nil {
+			panic(err)
+		}
+	})
+	db := openDB(t, path)
+	defer db.Close()
+	_, err := Open(context.Background(), db, tb, id, proofVerifier{})
+	if !errors.Is(err, ErrHistory) || errors.Is(err, m2contract.ErrEpochGap) {
+		t.Fatalf("key/body epoch mismatch: %v", err)
+	}
+}
+
+func TestAppendRequiresOpenNewInterval(t *testing.T) {
+	db := openDB(t, filepath.Join(t.TempDir(), "trust.db"))
+	defer db.Close()
+	s, err := Open(context.Background(), db, anchor(t), sha256.Sum256([]byte("execution-v2")), proofVerifier{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := body(t, s)
+	in.End = in.Activation.EpochStart + 1
+	if err := s.AppendVerified(context.Background(), in, []byte("finalized-proof")); !errors.Is(err, ErrHistory) {
+		t.Fatalf("closed new interval: %v", err)
+	}
+}
+
+func TestLoadRequiresOpenFinalRecord(t *testing.T) {
+	t.Run("v2 tail", func(t *testing.T) {
+		path, tb, id := persistedFixture(t)
+		mutateStoredEntry(t, path, func(e *entryDisk) {
+			e.End = e.Activation.EpochStart + 1
+			var err error
+			e.Canonical, err = (m2contract.TrustInterval{Body: e.Body, Activation: e.Activation, End: e.End}).Encode()
+			if err != nil {
+				panic(err)
+			}
+		})
+		db := openDB(t, path)
+		defer db.Close()
+		_, err := Open(context.Background(), db, tb, id, proofVerifier{})
+		if !errors.Is(err, ErrHistory) {
+			t.Fatalf("closed v2 tail: %v", err)
+		}
+	})
+	t.Run("anchor tail", func(t *testing.T) {
+		db := openDB(t, filepath.Join(t.TempDir(), "trust.db"))
+		defer db.Close()
+		tb := anchor(t)
+		id := sha256.Sum256([]byte("execution-v2"))
+		if _, err := Open(context.Background(), db, tb, id, proofVerifier{}); err != nil {
+			t.Fatal(err)
+		}
+		var raw []byte
+		if ok, err := db.Read(anchorKey, &raw); err != nil || !ok {
+			t.Fatalf("anchor: %v %v", ok, err)
+		}
+		var a anchorDisk
+		if err := types.Cbor.Unmarshal(raw, &a); err != nil {
+			t.Fatal(err)
+		}
+		a.End = a.Start + 1
+		var err error
+		a.Canonical, err = (m2contract.V1AnchorRecord{Anchor: a.Anchor, Start: a.Start, End: a.End}).Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err = types.Cbor.Marshal(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Write(anchorKey, raw); err != nil {
+			t.Fatal(err)
+		}
+		_, err = Open(context.Background(), db, tb, id, proofVerifier{})
+		if !errors.Is(err, ErrHistory) {
+			t.Fatalf("closed anchor tail: %v", err)
+		}
+	})
+}
+
+func TestLoadValidatesHistoryBeforeVerifier(t *testing.T) {
+	path, tb, id := persistedFixture(t)
+	mutateStoredEntry(t, path, func(e *entryDisk) {
+		e.Body.Members[0].Weight = 2
+		e.Body.RootThreshold = 2
+		bodyID := e.Body.Identity()
+		e.Activation.BodyIdentity = bytes.Clone(bodyID[:])
+		var err error
+		e.Canonical, err = (m2contract.TrustInterval{Body: e.Body, Activation: e.Activation, End: e.End}).Encode()
+		if err != nil {
+			panic(err)
+		}
+	})
+	db := openDB(t, path)
+	defer db.Close()
+	v := &countingVerifier{}
+	_, err := Open(context.Background(), db, tb, id, v)
+	if !errors.Is(err, ErrHistory) || v.calls != 0 {
+		t.Fatalf("invalid history reached verifier: %v, calls %d", err, v.calls)
 	}
 }

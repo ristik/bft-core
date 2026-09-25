@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/bft-core/keyvaluedb"
 	"github.com/unicitynetwork/bft-core/m2contract"
 	bfttypes "github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
 
 var (
@@ -37,10 +38,11 @@ var anchorKey = []byte("m2trust/anchor")
 const entryPrefix = "m2trust/epoch/"
 const maxRecordBytes = 1 << 20
 
-// ActivationVerifier must authenticate the D4 finalized root commit binding
-// this exact body, A*, and commit ID. Nil never admits a v2 entry.
+// ActivationVerifier authenticates the D4 finalized root commit using the
+// verified predecessor trust base over its exact voting-round interval.
+// Nil never admits a v2 entry.
 type ActivationVerifier interface {
-	VerifyActivation(context.Context, evmroot.TrustBaseBodyV2, evmroot.ActivatedTrustBase, []byte) error
+	VerifyActivation(context.Context, Record, m2contract.TrustInterval, []byte) error
 }
 
 type anchorDisk struct {
@@ -88,7 +90,7 @@ func Open(ctx context.Context, db keyvaluedb.KeyValueDB, anchor *bfttypes.RootTr
 		return nil, fmt.Errorf("%w: %v", ErrAnchor, err)
 	}
 	a := evmroot.V1Anchor{Version: 1, NetworkID: uint64(anchor.GetNetworkID()), Epoch: anchor.GetEpoch(), HashIncludingSigs: hash}
-	s := &Store{db: db, anchor: anchor, identity: identity, verifier: verifier, cache: make(map[uint64]Record), proofs: make(map[uint64][]byte), history: m2contract.TrustHistory{Anchor: a, AnchorStart: anchor.GetEpochStart()}}
+	s := &Store{db: db, anchor: cloneRecord(Record{V1: anchor}).V1, identity: identity, verifier: verifier, cache: make(map[uint64]Record), proofs: make(map[uint64][]byte), history: m2contract.TrustHistory{Anchor: a, AnchorStart: anchor.GetEpochStart()}}
 	if err := s.load(ctx); err != nil {
 		return nil, err
 	}
@@ -184,6 +186,7 @@ func (s *Store) load(ctx context.Context) error {
 	if !haveSchema || !haveIdentity || !haveAnchor {
 		return ErrIncompatible
 	}
+	var loaded []entryDisk
 	for epoch := s.history.Anchor.Epoch + 1; len(entries) > 0; epoch++ {
 		e, ok := entries[epoch]
 		if !ok {
@@ -195,17 +198,29 @@ func (s *Store) load(ctx context.Context) error {
 		if err != nil || !bytes.Equal(canonical, e.Canonical) {
 			return ErrEncoding
 		}
-		if s.verifier == nil {
-			return ErrProof
-		}
-		if err := s.verifier.VerifyActivation(ctx, e.Body, e.Activation, e.Proof); err != nil {
-			return fmt.Errorf("%w: %v", ErrProof, err)
-		}
 		s.history.Intervals = append(s.history.Intervals, in)
-		s.proofs[epoch] = bytes.Clone(e.Proof)
+		loaded = append(loaded, e)
 	}
 	if err := s.history.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrHistory, err)
+	}
+	if len(loaded) == 0 {
+		if s.history.AnchorEnd != 0 {
+			return ErrHistory
+		}
+	} else if loaded[len(loaded)-1].End != 0 {
+		return ErrHistory
+	}
+	for i, e := range loaded {
+		if s.verifier == nil {
+			return ErrProof
+		}
+		in := s.history.Intervals[i]
+		prior := predecessorRecord(s.anchor, s.history, i)
+		if err := s.verifier.VerifyActivation(ctx, cloneRecord(prior), in, e.Proof); err != nil {
+			return fmt.Errorf("%w: %w", ErrProof, err)
+		}
+		s.proofs[e.Body.Epoch] = bytes.Clone(e.Proof)
 	}
 	return nil
 }
@@ -256,6 +271,23 @@ func readUint64(b []byte) uint64 {
 // owned history loaded from the durable database.
 func (s *Store) Evict() { s.mu.Lock(); defer s.mu.Unlock(); s.cache = make(map[uint64]Record) }
 func cloneRecord(r Record) Record {
+	if r.V1 != nil {
+		v := *r.V1
+		v.StateHash = bytes.Clone(v.StateHash)
+		v.ChangeRecordHash = bytes.Clone(v.ChangeRecordHash)
+		v.PreviousEntryHash = bytes.Clone(v.PreviousEntryHash)
+		v.RootNodes = make([]*bfttypes.NodeInfo, len(r.V1.RootNodes))
+		for i, node := range r.V1.RootNodes {
+			if node != nil {
+				v.RootNodes[i] = &bfttypes.NodeInfo{NodeID: node.NodeID, SigKey: bytes.Clone(node.SigKey), Stake: node.Stake}
+			}
+		}
+		v.Signatures = make(map[string]hex.Bytes, len(r.V1.Signatures))
+		for id, sig := range r.V1.Signatures {
+			v.Signatures[id] = bytes.Clone(sig)
+		}
+		r.V1 = &v
+	}
 	if r.V2 != nil {
 		b := *r.V2
 		b.Members = append(evmroot.WeightSet(nil), b.Members...)
@@ -268,6 +300,14 @@ func cloneRecord(r Record) Record {
 		r.V2 = &b
 	}
 	return r
+}
+func predecessorRecord(anchor *bfttypes.RootTrustBaseV1, history m2contract.TrustHistory, nextIndex int) Record {
+	if nextIndex == 0 {
+		return Record{Epoch: history.Anchor.Epoch, Start: history.AnchorStart, End: history.AnchorEnd, V1: anchor}
+	}
+	prior := history.Intervals[nextIndex-1]
+	body := prior.Body
+	return Record{Epoch: body.Epoch, Start: prior.Activation.EpochStart, End: prior.End, V2: &body, BodyID: body.Identity()}
 }
 func (s *Store) ByEpoch(epoch uint64) (Record, error) {
 	s.mu.Lock()
@@ -317,8 +357,8 @@ func (s *Store) AppendVerified(ctx context.Context, in m2contract.TrustInterval,
 	if in.Body.Epoch <= s.history.Anchor.Epoch+uint64(len(s.history.Intervals)) {
 		return ErrAlreadyExists
 	}
-	if err := s.verifier.VerifyActivation(ctx, in.Body, in.Activation, proof); err != nil {
-		return fmt.Errorf("%w: %v", ErrProof, err)
+	if in.End != 0 {
+		return ErrHistory
 	}
 	if len(s.history.Intervals) > 0 && s.history.Intervals[len(s.history.Intervals)-1].End != 0 {
 		return ErrAlreadyExists
@@ -332,6 +372,10 @@ func (s *Store) AppendVerified(ctx context.Context, in m2contract.TrustInterval,
 	}
 	if err := next.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrHistory, err)
+	}
+	prior := predecessorRecord(s.anchor, next, len(next.Intervals)-1)
+	if err := s.verifier.VerifyActivation(ctx, cloneRecord(prior), in, proof); err != nil {
+		return fmt.Errorf("%w: %w", ErrProof, err)
 	}
 	canonical, err := in.Encode()
 	if err != nil {

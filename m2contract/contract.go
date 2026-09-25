@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	bfttypes "github.com/unicitynetwork/bft-go-base/types"
@@ -158,7 +157,7 @@ func (h TrustHistory) Validate() error {
 	for i, in := range h.Intervals {
 		b := in.Body
 		if err := b.Validate(); err != nil {
-			if strings.Contains(err.Error(), "shared with another member") {
+			if errors.Is(err, evmroot.ErrDuplicateConsensusKey) {
 				return fmt.Errorf("%w: interval %d: duplicate consensus key: %w", ErrBody, i, err)
 			}
 			return fmt.Errorf("%w: interval %d: %w", ErrBody, i, err)

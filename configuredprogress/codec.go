@@ -19,6 +19,7 @@ import (
 
 const (
 	FormatVersion       uint64 = 2
+	descriptorM2Version uint64 = 3
 	MaxDescriptorBytes         = 4 << 10
 	MaxPairBytes               = 1 << 20
 	MaxControlBytes            = (2 << 20) + (4 << 10)
@@ -181,7 +182,7 @@ func encodeDescriptor(o registrygenesis.GenesisOrigin, identity ...[32]byte) ([]
 	}
 	var value any = d
 	if len(identity) > 0 && identity[0] != ([32]byte{}) {
-		value = descriptorM2Wire{Version: 3, OriginIdentity: d.OriginIdentity, LegacyExecutionConfigIdentity: d.ExecutionConfigIdentity, Context: d.Context, B0: d.B0, S0: d.S0, RootInputVersion: d.RootInputVersion, RegistryLayoutVersion: d.RegistryLayoutVersion, ExecutionConfigV2: identity[0][:]}
+		value = descriptorM2Wire{Version: descriptorM2Version, OriginIdentity: d.OriginIdentity, LegacyExecutionConfigIdentity: d.ExecutionConfigIdentity, Context: d.Context, B0: d.B0, S0: d.S0, RootInputVersion: d.RootInputVersion, RegistryLayoutVersion: d.RegistryLayoutVersion, ExecutionConfigV2: identity[0][:]}
 	}
 	p, err := marshal(value)
 	if err != nil {
@@ -201,15 +202,23 @@ func verifyDescriptor(raw []byte, o registrygenesis.GenesisOrigin, identity ...[
 	if m2 {
 		var got descriptorM2Wire
 		if err := decodePayload(p, &got); err != nil {
-			return [32]byte{}, ErrVersion
+			var legacy descriptorWire
+			if decodePayload(p, &legacy) == nil && legacy.Version == FormatVersion {
+				return [32]byte{}, ErrVersion
+			}
+			return [32]byte{}, err
 		}
-		if got.Version != 3 {
+		if got.Version != descriptorM2Version {
 			return [32]byte{}, ErrVersion
 		}
 	} else {
 		var got descriptorWire
 		if err := decodePayload(p, &got); err != nil {
-			return [32]byte{}, ErrVersion
+			var newer descriptorM2Wire
+			if decodePayload(p, &newer) == nil && newer.Version == descriptorM2Version {
+				return [32]byte{}, ErrVersion
+			}
+			return [32]byte{}, err
 		}
 		if got.Version != FormatVersion {
 			return [32]byte{}, ErrVersion
