@@ -129,6 +129,33 @@ type BFTClient struct {
 	unapplied *deliveryAttempt
 
 	lastCertResponseTime atomic.Int64
+	profile2             *Profile2Consumer
+}
+
+// SetProfile2Consumer enables the proof-gated epoch boundary before Run.
+// The configured journal admission path needs its own proof-aware durability
+// boundary; until i-b/H4 supplies it, combining the two modes fails closed.
+func (c *BFTClient) SetProfile2Consumer(consumer *Profile2Consumer) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.running {
+		return ErrClientRunning
+	}
+	if consumer == nil {
+		return ErrProfile2Unready
+	}
+	if c.admissionFactory != nil {
+		return fmt.Errorf("%w: profile 2 requires proof-aware journal admission", ErrAdmissionMode)
+	}
+	c.profile2 = consumer
+	return nil
+}
+
+func (c *BFTClient) classifyUC(prev, next *types.UnicityCertificate) (UCClass, error) {
+	if c.profile2 != nil {
+		return c.profile2.Classify(prev, next)
+	}
+	return ClassifyUC(prev, next)
 }
 
 // deliveryAttempt identifies one certificate for retry purposes. Rounds are enough: a UCDuplicate
@@ -241,6 +268,9 @@ func (c *BFTClient) SetCertificateAdmission(factory CertificateAdmissionFactory,
 	}
 	if c.admissionFactory != nil {
 		return fmt.Errorf("%w: admission already attached", ErrAdmissionMode)
+	}
+	if c.profile2 != nil {
+		return fmt.Errorf("%w: configured admission cannot bypass profile 2 proof gate", ErrAdmissionMode)
 	}
 	c.admissionFactory, c.admissionGate, c.admissionSink = factory, gate, sink
 	c.admissionWake = make(chan struct{}, 1)
@@ -469,6 +499,11 @@ func (c *BFTClient) sendHandshake(ctx context.Context) error {
 	if luc != nil && !configuredEpochSet {
 		epoch = luc.GetRootEpoch()
 	}
+	if c.profile2 != nil {
+		if floor, installed := c.profile2.EpochFloor(); installed {
+			epoch = floor
+		}
+	}
 	tb, err := c.trustBaseStore.GetByEpoch(ctx, epoch)
 	if err != nil {
 		return fmt.Errorf("loading trust base for epoch %d: %w", epoch, err)
@@ -559,7 +594,7 @@ func (c *BFTClient) observeConfiguredFeed(uc *types.UnicityCertificate, tr *cert
 	c.mu.Lock()
 	progress := c.feedHeld == nil
 	if c.feedHeld != nil {
-		class, classErr := ClassifyUC(c.feedHeld, u)
+		class, classErr := c.classifyUC(c.feedHeld, u)
 		progress = classErr == nil && (class == UCValid || class == UCRepeat)
 		if class == UCDuplicate && id != c.feedHeldIdentity {
 			progress = false
@@ -604,7 +639,7 @@ func (c *BFTClient) deliverConfigured(ctx context.Context, uc *types.UnicityCert
 		return nil
 	}
 	retry := c.hasConfiguredFailed && c.configuredFailed == id
-	class, err := ClassifyUC(c.luc, cursor)
+	class, err := c.classifyUC(c.luc, cursor)
 	if err != nil {
 		c.mu.Unlock()
 		return fmt.Errorf("classifying durably admitted certificate: %w", err)
@@ -701,9 +736,12 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 
 	c.mu.Lock()
 	prevLUC := c.luc
-	class, err := ClassifyUC(prevLUC, &cr.UC)
+	class, err := c.classifyUC(prevLUC, &cr.UC)
 	if err != nil {
 		c.mu.Unlock()
+		if errors.Is(err, ErrProfile2TerminalRepeat) || errors.Is(err, ErrProfile2Unready) || errors.Is(err, ErrProfile2Epoch) {
+			return nil
+		}
 		// Log the two certificates that were compared before returning. The error string alone
 		// says a conflict happened but not which field differs or which root rounds the seals
 		// came from, and this node will now reject every subsequent certificate the same way

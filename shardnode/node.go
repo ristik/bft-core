@@ -179,6 +179,11 @@ func (n *Node) SetCertificationSigner(s CertificationSigner) {
 	n.round.SetCertificationSigner(s)
 }
 
+// SetProfile2Consumer selects the proof-gated certificate boundary before Run.
+func (n *Node) SetProfile2Consumer(consumer *Profile2Consumer) error {
+	return n.client.SetProfile2Consumer(consumer)
+}
+
 // SetJournalAdmission selects the v2 persistence-before-LUC path. Call only on a node built
 // without a legacy LUC store. The same finality gate serializes progress commits and execution.
 func (n *Node) SetJournalAdmission(factory CertificateAdmissionFactory) error {
