@@ -28,8 +28,10 @@ var (
 	ErrCodec     = errors.New("handoff: invalid encoding")
 )
 
-const Version uint64 = 1
+const Version uint64 = 2
 const PipelineDepth uint64 = evmroot.PipelineDepth
+const MaxEncodedLength = 16 * 1024
+const MaxShardLength = 256
 
 type Phase uint8
 
@@ -76,6 +78,9 @@ type AckRecord struct {
 
 func enc(v ...any) ([]byte, error) { return types.Cbor.Marshal(v) }
 func exact(data []byte, n int, domain string) ([]any, error) {
+	if len(data) == 0 || len(data) > MaxEncodedLength {
+		return nil, ErrCodec
+	}
 	var v []any
 	if err := types.Cbor.Unmarshal(data, &v); err != nil || len(v) != n || v[0] != domain {
 		return nil, ErrCodec
@@ -111,6 +116,9 @@ func raw(v any) ([]byte, error) {
 }
 func hash(v ...any) [32]byte { b, _ := enc(v...); return sha256.Sum256(b) }
 func (c Context) Encode() ([]byte, error) {
+	if len(c.Shard) > MaxShardLength || c.Partition == uint32(evmroot.D4ControlPartition) {
+		return nil, ErrCodec
+	}
 	return enc("UNICITY_HANDOFF_CONTEXT", Version, c.Network, c.Epoch, c.Attempt, c.MinActivation, uint64(c.Partition), c.Shard, c.Predecessor[:], c.Candidate[:])
 }
 func DecodeContext(data []byte) (Context, error) {
@@ -134,8 +142,8 @@ func DecodeContext(data []byte) (Context, error) {
 	}
 	c.Partition = uint32(p)
 	c.Shard, e = raw(v[7])
-	if e != nil {
-		return c, e
+	if e != nil || len(c.Shard) > MaxShardLength || c.Partition == uint32(evmroot.D4ControlPartition) {
+		return c, ErrCodec
 	}
 	c.Predecessor, e = b32(v[8])
 	if e != nil {
@@ -145,7 +153,10 @@ func DecodeContext(data []byte) (Context, error) {
 	return c, e
 }
 func (r FreezeRecord) Encode() ([]byte, error) {
-	c, _ := r.Context.Encode()
+	c, e := r.Context.Encode()
+	if e != nil {
+		return nil, e
+	}
 	return enc("UNICITY_HANDOFF_FREEZE", Version, c, r.Body[:], r.Summary[:], r.Parent[:], r.FrozenID[:])
 }
 func DecodeFreeze(data []byte) (FreezeRecord, error) {
@@ -211,6 +222,21 @@ func DecodeCommit(data []byte) (CommitRecord, error) {
 func (r AckRecord) Encode() ([]byte, error) {
 	return enc("UNICITY_HANDOFF_ACK", Version, r.FrozenID[:], r.CommitID[:], r.FrozenParent[:], r.SuccessorParent[:], r.SuccessorTR[:], r.EVMRound)
 }
+
+func (r CommitRecord) D4Record(c Context) evmroot.OrderedHandoffRecord {
+	return evmroot.OrderedHandoffRecord{
+		Network: c.Network, Epoch: c.Epoch, Attempt: c.Attempt,
+		OrderedRound: r.Round, ActivationRound: r.Activation,
+		PredecessorBodyID: c.Predecessor[:], FrozenID: r.FrozenID[:],
+		NextBodyID: r.Body[:], SuccessorTRHash: r.SuccessorTR[:], Kind: "commit",
+	}
+}
+
+func (r CommitRecord) RecordID(c Context) [32]byte {
+	var id [32]byte
+	copy(id[:], r.D4Record(c).ID())
+	return id
+}
 func DecodeAck(data []byte) (AckRecord, error) {
 	var r AckRecord
 	v, e := exact(data, 8, "UNICITY_HANDOFF_ACK")
@@ -230,13 +256,26 @@ func DecodeAck(data []byte) (AckRecord, error) {
 	return r, e
 }
 
-// RootProofVerifier is the future consensus adapter. It must verify QC signatures
-// against the historical old trust base, block ancestry, committed content,
-// and the consecutive commit-capable QC relation before returning nil.
-type RootProofVerifier interface {
-	VerifyOrdered(kind string, recordID [32]byte, proof []byte) error
-	VerifyFinal(commitID [32]byte, commitRound uint64, proof []byte) error
+// VerifiedRecord is returned only after proof and old trust-lineage validation.
+// The real adapter must bind the control leaf at P_CTL to the state root signed
+// by a commit-capable QC(c+1), including its original order round o.
+type VerifiedRecord struct {
+	Context                     Context
+	Kind                        string
+	RecordID                    [32]byte
+	OrderRound, CommitSealRound uint64
+	StateRoot, ControlDigest    [32]byte
+	SignerEpoch                 uint64
+}
+
+type OldSetVerifier interface {
+	VerifyOrdered(context Context, kind string, recordID [32]byte, proof []byte) (VerifiedRecord, error)
+	VerifyFinal(context Context, commitID [32]byte, proof []byte) (VerifiedRecord, error)
 	VerifyEndorse(frozenID [32]byte, proof []byte) error
+}
+
+type NewEpochAckVerifier interface {
+	VerifyAck(context Context, recordID [32]byte, proof []byte) (VerifiedRecord, error)
 }
 type Machine struct {
 	Phase    Phase
@@ -245,22 +284,34 @@ type Machine struct {
 	Commit   CommitRecord
 	Ack      AckRecord
 	Final    bool
-	verifier RootProofVerifier
+	Verified *VerifiedRecord
+	Genesis  *evmroot.EpochGenesis
+	old      OldSetVerifier
+	ack      NewEpochAckVerifier
 }
 
-func New(c Context, v RootProofVerifier) *Machine { return &Machine{Context: c, verifier: v} }
-func (m *Machine) ordered(kind string, id [32]byte, p []byte) error {
-	if m.verifier == nil || len(p) == 0 || m.verifier.VerifyOrdered(kind, id, p) != nil {
-		return ErrProof
+func New(c Context, old OldSetVerifier, ack NewEpochAckVerifier) *Machine {
+	return &Machine{Context: c, old: old, ack: ack}
+}
+func (m *Machine) matches(v VerifiedRecord, kind string, id [32]byte) bool {
+	return sameContext(v.Context, m.Context) && v.Context.Partition == m.Context.Partition && bytes.Equal(v.Context.Shard, m.Context.Shard) && v.Kind == kind && v.RecordID == id && v.SignerEpoch == m.Context.Epoch && v.OrderRound > 0 && v.CommitSealRound >= v.OrderRound && v.StateRoot != ([32]byte{}) && v.ControlDigest != ([32]byte{})
+}
+func (m *Machine) ordered(kind string, id [32]byte, p []byte) (VerifiedRecord, error) {
+	if m.old == nil || len(p) == 0 {
+		return VerifiedRecord{}, ErrProof
 	}
-	return nil
+	v, e := m.old.VerifyOrdered(m.Context, kind, id, p)
+	if e != nil || !m.matches(v, kind, id) {
+		return VerifiedRecord{}, ErrProof
+	}
+	return v, nil
 }
 func (m *Machine) Prepare(proof []byte) error {
 	if m.Phase != Idle {
 		return ErrPhase
 	}
 	id := hash("UNICITY_HANDOFF_PREPARE", m.Context.Candidate[:], m.Context.Attempt)
-	if e := m.ordered("prepare", id, proof); e != nil {
+	if _, e := m.ordered("prepare", id, proof); e != nil {
 		return e
 	}
 	m.Phase = Prepared
@@ -280,14 +331,14 @@ func (m *Machine) FreezeWith(r FreezeRecord, body evmroot.TrustBaseBodyV2, expec
 		return ErrBody
 	}
 	id := body.Identity()
-	if body.Validate() != nil || r.Body != id || body.EarliestActivation != m.Context.MinActivation || !bytes.Equal(body.PredecessorHash, m.Context.Predecessor[:]) || r.Summary == ([32]byte{}) || r.Parent == ([32]byte{}) {
+	if body.Validate() != nil || m.Context.Epoch == math.MaxUint64 || body.NetworkID != m.Context.Network || body.Epoch != m.Context.Epoch+1 || r.Body != id || body.EarliestActivation != m.Context.MinActivation || !bytes.Equal(body.PredecessorHash, m.Context.Predecessor[:]) || r.Summary == ([32]byte{}) || r.Parent == ([32]byte{}) {
 		return ErrBody
 	}
 	want := hash("UNICITY_HANDOFF_FROZEN", r.Body[:], r.Summary[:], r.Parent[:], m.Context.Candidate[:], m.Context.Attempt, m.Context.Predecessor[:])
 	if r.FrozenID != want {
 		return ErrBody
 	}
-	if e := m.ordered("freeze", r.FrozenID, proof); e != nil {
+	if _, e := m.ordered("freeze", r.FrozenID, proof); e != nil {
 		return e
 	}
 	m.Freeze = r
@@ -298,7 +349,7 @@ func (m *Machine) Endorse(proof []byte) error {
 	if m.Phase != Frozen {
 		return ErrPhase
 	}
-	if m.verifier == nil || len(proof) == 0 || m.verifier.VerifyEndorse(m.Freeze.FrozenID, proof) != nil {
+	if m.old == nil || len(proof) == 0 || m.old.VerifyEndorse(m.Freeze.FrozenID, proof) != nil {
 		return ErrNoQuorum
 	}
 	m.Phase = Endorsed
@@ -320,18 +371,22 @@ func (m *Machine) CommitWith(r CommitRecord, proof []byte) error {
 	if r.FrozenID != m.Freeze.FrozenID || r.Body != m.Freeze.Body {
 		return ErrBody
 	}
-	if r.Activation < m.Context.MinActivation || r.Round > math.MaxUint64-PipelineDepth || r.Activation < r.Round+PipelineDepth {
+	if r.Activation < m.Context.MinActivation || r.Round == 0 || r.Round > math.MaxUint64-PipelineDepth || r.Activation < r.Round+PipelineDepth {
 		return ErrBoundary
 	}
 	if r.SuccessorTR == ([32]byte{}) {
 		return ErrSuccessor
 	}
-	want := hash("UNICITY_HANDOFF_COMMIT", r.FrozenID[:], r.Activation, r.SuccessorTR[:], m.Context.Attempt, m.Context.Predecessor[:])
+	want := r.RecordID(m.Context)
 	if r.ID != want {
 		return ErrBody
 	}
-	if e := m.ordered("commit", r.ID, proof); e != nil {
+	v, e := m.ordered("commit", r.ID, proof)
+	if e != nil {
 		return e
+	}
+	if v.OrderRound != r.Round {
+		return ErrProof
 	}
 	m.Commit = r
 	m.Phase = Committed
@@ -341,10 +396,28 @@ func (m *Machine) Finalize(proof []byte) error {
 	if m.Phase != Committed {
 		return ErrPhase
 	}
-	if m.verifier == nil || len(proof) == 0 || m.verifier.VerifyFinal(m.Commit.ID, m.Commit.Round, proof) != nil {
+	if m.old == nil || len(proof) == 0 {
 		return ErrProof
 	}
+	v, e := m.old.VerifyFinal(m.Context, m.Commit.ID, proof)
+	if e != nil || !m.matches(v, "commit", m.Commit.ID) || v.OrderRound != m.Commit.Round || v.CommitSealRound < m.Commit.Round {
+		return ErrProof
+	}
+	m.Verified = &v
 	m.Final = true
+	return nil
+}
+
+// Bootstrap checks the typed epoch genesis and full imported checkpoint before
+// the boundary can activate. The old proof's seal round never changes A*.
+func (m *Machine) Bootstrap(v evmroot.VerifiedHandoff, g evmroot.EpochGenesis, s evmroot.FullSnapshot) error {
+	if !m.Final || m.Verified == nil || v.RecordID == nil || !bytes.Equal(v.RecordID, m.Commit.ID[:]) || v.Epoch != m.Context.Epoch || v.OrderRound != m.Commit.Round || v.CommitSealRound != m.Verified.CommitSealRound || !bytes.Equal(v.Root, m.Verified.StateRoot[:]) || !bytes.Equal(v.ControlDigest, m.Verified.ControlDigest[:]) || g.Epoch != m.Context.Epoch+1 || !bytes.Equal(g.FrozenID, m.Freeze.FrozenID[:]) || !bytes.Equal(g.NextBodyID, m.Commit.Body[:]) || g.Start != m.Commit.Activation {
+		return ErrProof
+	}
+	if e := evmroot.CanBootstrapNew(v, g, s); e != nil {
+		return ErrProof
+	}
+	m.Genesis = &g
 	return nil
 }
 func (m *Machine) Activate(observed uint64) error {
@@ -356,6 +429,9 @@ func (m *Machine) Activate(observed uint64) error {
 	}
 	if !m.Final {
 		return ErrNotFinal
+	}
+	if m.Genesis == nil {
+		return ErrProof
 	}
 	if observed < m.Commit.Activation {
 		return ErrBoundary
@@ -371,8 +447,12 @@ func (m *Machine) Acknowledge(r AckRecord, proof []byte) error {
 		return ErrParent
 	}
 	id := hash("UNICITY_HANDOFF_ACK_ID", r.CommitID[:], r.SuccessorParent[:], r.EVMRound)
-	if e := m.ordered("ack", id, proof); e != nil {
-		return e
+	if m.ack == nil || len(proof) == 0 {
+		return ErrProof
+	}
+	v, e := m.ack.VerifyAck(m.Context, id, proof)
+	if e != nil || !sameContext(v.Context, m.Context) || v.Context.Partition != m.Context.Partition || !bytes.Equal(v.Context.Shard, m.Context.Shard) || v.Kind != "ack" || v.RecordID != id || v.SignerEpoch != m.Context.Epoch+1 || v.OrderRound < m.Commit.Activation || v.CommitSealRound < v.OrderRound || v.StateRoot == ([32]byte{}) || v.ControlDigest == ([32]byte{}) {
+		return ErrProof
 	}
 	m.Ack = r
 	m.Phase = Acknowledged
@@ -389,7 +469,7 @@ func (m *Machine) Abort(proof []byte) error {
 		return ErrPhase
 	}
 	id := hash("UNICITY_HANDOFF_ABORT", m.Context.Candidate[:], m.Context.Attempt)
-	if e := m.ordered("abort", id, proof); e != nil {
+	if _, e := m.ordered("abort", id, proof); e != nil {
 		return e
 	}
 	m.Phase = Aborted
@@ -397,7 +477,7 @@ func (m *Machine) Abort(proof []byte) error {
 }
 func (m *Machine) LocalProposal() error { return ErrProposal }
 func (m *Machine) Authorized(round uint64) bool {
-	return m.Phase >= Committed && m.Phase <= Acknowledged && round >= m.Commit.Activation
+	return m.Final && m.Genesis != nil && m.Phase >= Activated && m.Phase <= Acknowledged && round >= m.Commit.Activation
 }
 
 func sameContext(a, b Context) bool {
