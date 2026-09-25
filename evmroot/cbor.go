@@ -41,6 +41,15 @@ type cText string
 // cArray is a CBOR definite-length array (major type 4).
 type cArray []cborItem
 
+// cTag is used by the D4 proof model for the existing root RoundInfo and
+// UnicitySeal wire encodings. It does not alter the D1 profile's values.
+type cTag struct {
+	number uint64
+	value  cborItem
+}
+
+func (v cTag) encode(dst []byte) []byte { return v.value.encode(appendHead(dst, 6, v.number)) }
+
 // cNull is the CBOR simple value `null` (0xf6). The profile uses it for a
 // genuinely absent optional field — an absent block hash on a quiet round
 // (h_b = ⊥), an absent parent hash at genesis — never for a present but

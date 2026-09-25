@@ -1,31 +1,41 @@
 package evmroot
 
 import (
+	"bytes"
+	"crypto"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
+	"sort"
+
+	abhash "github.com/unicitynetwork/bft-go-base/hash"
+	"github.com/unicitynetwork/bft-go-base/tree/imt"
+	base "github.com/unicitynetwork/bft-go-base/types"
 )
 
-// D4 epoch-handoff state machine. Executable model of the ordered root
-// transition prepare -> freeze -> endorse -> commit -> activate ->
-// acknowledge, plus committed-abort, from governance.tex §"root handoff".
-//
-// The model's job is to make two safety properties checkable by
-// exploration:
-//
-//   - no two effective successors for one epoch, and
-//   - no root round at which both the old and the new assignment may
-//     authorise a governance block (no overlap, no gap),
-//
-// while never requiring a signed message to commit to state that is not
-// yet known at the moment it is signed.
-//
-// Normative source: docs/design/d4-epoch-handoff-state-machine.md,
-// docs/adr/0006-epoch-handoff-state-machine.md. Issue:
-// https://github.com/ristik/bft-core/issues/6
+// D4 is an executable protocol model. The wire profile is reserved here; no
+// runtime consensus path imports this model.
+const D4Profile uint64 = 2
+const D4ControlPartition base.PartitionID = 0xffffffff
+const PipelineDepth uint64 = 3 // scheduling margin, never a vote fence
 
-// Phase is the handoff state. Progress is strictly Prepared -> Frozen ->
-// Endorsed -> Committed -> Activated -> Acknowledged; Aborted is reachable
-// only from a pre-Committed phase.
+var (
+	ErrD4Phase          = errors.New("d4: invalid phase")
+	ErrD4Record         = errors.New("d4: invalid ordered record")
+	ErrD4Control        = errors.New("d4: invalid control leaf")
+	ErrD4Proof          = errors.New("d4: invalid old commit proof")
+	ErrD4Quorum         = errors.New("d4: insufficient distinct signed weight")
+	ErrD4Snapshot       = errors.New("d4: invalid full snapshot")
+	ErrD4Anchor         = errors.New("d4: invalid epoch anchor")
+	ErrD4Suffix         = errors.New("d4: nonempty or state-changing old suffix")
+	ErrD4CommitAnchor   = errors.New("d4: anchor cannot be committed")
+	ErrD4Epoch          = errors.New("d4: epoch authority violation")
+	ErrD4TerminalRepeat = errors.New("d4: terminal old certificate is historical")
+	ErrD4Unready        = errors.New("d4: transition evidence unavailable")
+)
+
 type Phase uint8
 
 const (
@@ -43,618 +53,698 @@ func (p Phase) String() string {
 	return [...]string{"idle", "prepared", "frozen", "endorsed", "committed", "activated", "acknowledged", "aborted"}[p]
 }
 
-// AssignmentID names which validator set may authorise a governance block.
-type AssignmentID string
+type Candidate struct {
+	Network, OldEpoch, NextEpoch, Attempt, MinActivation uint64
+	PredecessorHash, CandidateHash                       []byte
+}
+type Handoff struct {
+	Phase                           Phase
+	Candidate                       Candidate
+	Body                            TrustBaseBodyV2
+	BodyID, FrozenID, LastEVMParent []byte
+	Endorsement                     SigDomain
+	Record                          OrderedHandoffRecord
+	Proof                           *HandoffProof
+	Verified                        *VerifiedHandoff
+	Anchor                          *EpochGenesis
+	AckEVMRound                     uint64
+}
+type SigDomain struct {
+	Network, Epoch, Attempt, MinActivation uint64
+	Predecessor, FrozenID                  []byte
+	ActivationRound                        uint64
+	SuccessorTRHash                        []byte
+}
+
+func FieldsAreKnown(d SigDomain) bool {
+	return len(d.FrozenID) == 32 && d.ActivationRound == 0 && len(d.SuccessorTRHash) == 0
+}
+
+// The record payload omits its ID, signatures and proof. OrderedRound is in
+// the ID, even when a later empty suffix supplies the commit seal.
+type OrderedHandoffRecord struct {
+	Network, Epoch, Attempt, OrderedRound, ActivationRound   uint64
+	PredecessorBodyID, FrozenID, NextBodyID, SuccessorTRHash []byte
+	Kind                                                     string
+}
+
+func (r OrderedHandoffRecord) payload() cArray {
+	return cArray{cBytes(r.FrozenID), cBytes(r.NextBodyID), cUint(r.ActivationRound), cBytes(r.SuccessorTRHash)}
+}
+func (r OrderedHandoffRecord) Bytes() []byte {
+	return marshalCBOR(cArray{cText("UNICITY_ORDERED_HANDOFF_RECORD"), cUint(1), cUint(r.Network), cUint(r.Epoch), cBytes(r.PredecessorBodyID), cUint(r.Attempt), cText(r.Kind), cUint(r.OrderedRound), r.payload()})
+}
+func (r OrderedHandoffRecord) ID() []byte { h := sha256.Sum256(r.Bytes()); return h[:] }
+func (r OrderedHandoffRecord) Valid() bool {
+	return r.Kind == "commit" && r.OrderedRound > 0 && r.ActivationRound >= r.OrderedRound && r.ActivationRound-r.OrderedRound >= PipelineDepth && len(r.PredecessorBodyID) == 32 && len(r.FrozenID) == 32 && len(r.NextBodyID) == 32 && len(r.SuccessorTRHash) == 32
+}
+
+type ControlState struct {
+	Network, Epoch, Attempt, OrderedRound uint64
+	PredecessorBodyID                     []byte
+	Phase                                 string
+	RecordBytes, PreviousDigest           []byte
+}
+
+func (s ControlState) Bytes() []byte {
+	return marshalCBOR(cArray{cText("UNICITY_ROOT_HANDOFF_STATE"), cUint(1), cUint(s.Network), cUint(s.Epoch), cBytes(s.PredecessorBodyID), cUint(s.Attempt), cText(s.Phase), cUint(s.OrderedRound), cBytes(s.RecordBytes), cBytes(s.PreviousDigest)})
+}
+func (s ControlState) Digest() []byte { h := sha256.Sum256(s.Bytes()); return h[:] }
+func (s ControlState) Matches(r OrderedHandoffRecord) bool {
+	return s.Phase == "committed" && s.Network == r.Network && s.Epoch == r.Epoch && s.Attempt == r.Attempt && s.OrderedRound == r.OrderedRound && bytes.Equal(s.PredecessorBodyID, r.PredecessorBodyID) && bytes.Equal(s.RecordBytes, r.Bytes())
+}
+
+type ShardSnapshot struct {
+	Partition                                                           base.PartitionID
+	Root, InputRecord, TechnicalRecord, LastCR, PendingConfig, FeeStats []byte
+}
+
+func (s ShardSnapshot) CalculatedRoot() []byte {
+	h := sha256.Sum256(marshalCBOR(cArray{cText("UNICITY_D4_SHARD_CHECKPOINT"), cUint(1), cUint(uint64(s.Partition)), cBytes(s.InputRecord), cBytes(s.TechnicalRecord), cBytes(s.LastCR), cBytes(s.PendingConfig), cBytes(s.FeeStats)}))
+	return h[:]
+}
+
+type FullSnapshot struct {
+	Control ControlState
+	Shards  []ShardSnapshot
+}
+
+func (s FullSnapshot) Leaves() ([]*base.UnicityTreeData, error) {
+	if s.Control.Phase != "committed" {
+		return nil, ErrD4Control
+	}
+	out := []*base.UnicityTreeData{{Partition: D4ControlPartition, ShardTreeRoot: s.Control.Digest()}}
+	seen := map[base.PartitionID]bool{D4ControlPartition: true}
+	for _, v := range s.Shards {
+		if seen[v.Partition] || len(v.Root) != 32 || !bytes.Equal(v.Root, v.CalculatedRoot()) {
+			return nil, ErrD4Snapshot
+		}
+		seen[v.Partition] = true
+		out = append(out, &base.UnicityTreeData{Partition: v.Partition, ShardTreeRoot: bytes.Clone(v.Root)})
+	}
+	return out, nil
+}
+func (s FullSnapshot) Tree() (*base.UnicityTree, error) {
+	leaves, err := s.Leaves()
+	if err != nil {
+		return nil, err
+	}
+	return base.NewUnicityTree(crypto.SHA256, leaves)
+}
+func (s FullSnapshot) Root() ([]byte, error) {
+	t, e := s.Tree()
+	if e != nil {
+		return nil, e
+	}
+	return t.RootHash(), nil
+}
+func (s FullSnapshot) ControlPath() (*base.UnicityTreeCertificate, error) {
+	t, e := s.Tree()
+	if e != nil {
+		return nil, e
+	}
+	return t.Certificate(D4ControlPartition)
+}
+
+// The model signs the same relationship as the root QC: PreviousHash is
+// Hash(VoteInfo); LedgerCommitInfo names the parent's round, epoch and root.
+type D4VoteInfo struct {
+	Round, Epoch, ParentRound, Timestamp uint64
+	CurrentRoot                          []byte
+}
+
+func (v D4VoteInfo) Bytes() []byte {
+	return marshalCBOR(cTag{39007, cArray{cUint(1), cUint(v.Round), cUint(v.Epoch), cUint(v.Timestamp), cUint(v.ParentRound), cBytes(v.CurrentRoot)}})
+}
+func (v D4VoteInfo) Hash() []byte { h := sha256.Sum256(v.Bytes()); return h[:] }
+
+type D4LedgerCommitInfo struct {
+	Network, Round, Epoch, Timestamp uint64
+	Root                             []byte
+}
+
+func (l D4LedgerCommitInfo) Bytes(previousHash []byte) []byte {
+	return marshalCBOR(cTag{39005, cArray{cUint(1), cUint(l.Network), cUint(l.Round), cUint(l.Epoch), cUint(l.Timestamp), cBytes(previousHash), optBytes(l.Root), cNull{}}})
+}
+
+type D4Seal struct {
+	PreviousHash []byte
+	Commit       D4LedgerCommitInfo
+}
+
+func (s D4Seal) Bytes() []byte {
+	return s.Commit.Bytes(s.PreviousHash)
+}
+
+type D4Member struct {
+	ID     string
+	Weight uint64
+	Public ed25519.PublicKey
+}
+type D4TrustBase struct {
+	Network, Epoch, Threshold uint64
+	Members                   []D4Member
+}
+
+func (tb D4TrustBase) Validate() error {
+	seen := map[string]bool{}
+	var total uint64
+	for _, m := range tb.Members {
+		if m.ID == "" || seen[m.ID] || m.Weight == 0 || len(m.Public) != ed25519.PublicKeySize || math.MaxUint64-total < m.Weight {
+			return ErrD4Proof
+		}
+		seen[m.ID] = true
+		total += m.Weight
+	}
+	if total == 0 || total > math.MaxUint64/2 || tb.Threshold != total*2/3+1 {
+		return ErrD4Proof
+	}
+	return nil
+}
+
+func (tb D4TrustBase) member(id string) (D4Member, bool) {
+	for _, m := range tb.Members {
+		if m.ID == id {
+			return m, true
+		}
+	}
+	return D4Member{}, false
+}
+
+type D4QC struct {
+	Vote       D4VoteInfo
+	Seal       D4Seal
+	Signatures map[string][]byte
+}
+
+func (qc D4QC) ID() []byte {
+	ids := make([]string, 0, len(qc.Signatures))
+	for id := range qc.Signatures {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	sigs := make(cArray, len(ids))
+	for i, id := range ids {
+		sigs[i] = cArray{cText(id), cBytes(qc.Signatures[id])}
+	}
+	h := sha256.Sum256(marshalCBOR(cArray{cText("UNICITY_D4_QC_ID"), cUint(2), cBytes(qc.Vote.Bytes()), cBytes(qc.Seal.Bytes()), sigs}))
+	return h[:]
+}
+
+func (qc D4QC) Verify(tb D4TrustBase) error {
+	if err := tb.Validate(); err != nil {
+		return err
+	}
+	if qc.Vote.Epoch != tb.Epoch || qc.Vote.Round == 0 || qc.Vote.Timestamp == 0 || (qc.Vote.Round > 1 && qc.Vote.ParentRound == 0) || qc.Vote.ParentRound >= qc.Vote.Round || len(qc.Vote.CurrentRoot) != 32 || !bytes.Equal(qc.Seal.PreviousHash, qc.Vote.Hash()) {
+		return ErrD4Proof
+	}
+	if qc.Seal.Commit.Round > 0 && (qc.Seal.Commit.Network != tb.Network || qc.Seal.Commit.Epoch != tb.Epoch || qc.Seal.Commit.Round != qc.Vote.ParentRound || qc.Seal.Commit.Timestamp < base.GenesisTime || qc.Seal.Commit.Timestamp > qc.Vote.Timestamp || len(qc.Seal.Commit.Root) != 32) {
+		return ErrD4Proof
+	}
+	var weight uint64
+	for id, sig := range qc.Signatures {
+		m, ok := tb.member(id)
+		if !ok || len(m.Public) != ed25519.PublicKeySize || !ed25519.Verify(m.Public, qc.Seal.Bytes(), sig) || math.MaxUint64-weight < m.Weight {
+			return ErrD4Proof
+		}
+		weight += m.Weight
+	}
+	if weight < tb.Threshold || tb.Threshold == 0 {
+		return ErrD4Quorum
+	}
+	return nil
+}
+
+// A deterministic key fixture is for the executable model only.
+func D4FixtureTrustBase(epoch uint64, weights map[string]uint64) (D4TrustBase, map[string]ed25519.PrivateKey) {
+	ids := make([]string, 0, len(weights))
+	for id := range weights {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	tb := D4TrustBase{Network: 3, Epoch: epoch}
+	keys := make(map[string]ed25519.PrivateKey)
+	var total uint64
+	for _, id := range ids {
+		seed := sha256.Sum256([]byte(fmt.Sprintf("d4-model/%d/%s", epoch, id)))
+		key := ed25519.NewKeyFromSeed(seed[:])
+		keys[id] = key
+		tb.Members = append(tb.Members, D4Member{id, weights[id], key.Public().(ed25519.PublicKey)})
+		total += weights[id]
+	}
+	tb.Threshold = total*2/3 + 1
+	return tb, keys
+}
+func D4SignQC(qc *D4QC, keys map[string]ed25519.PrivateKey, ids ...string) {
+	qc.Seal.PreviousHash = qc.Vote.Hash()
+	qc.Signatures = map[string][]byte{}
+	for _, id := range ids {
+		qc.Signatures[id] = ed25519.Sign(keys[id], qc.Seal.Bytes())
+	}
+}
+
+type HandoffProof struct {
+	Profile     uint64
+	Record      OrderedHandoffRecord
+	Control     ControlState
+	ControlPath *base.UnicityTreeCertificate
+	CommitQC    D4QC // QC(c+1), seal commits c
+	OptionalQC  *D4QC
+	Snapshot    FullSnapshot
+}
+type VerifiedHandoff struct {
+	RecordID, Root, ControlDigest      []byte
+	OrderRound, CommitSealRound, Epoch uint64
+	Record                             OrderedHandoffRecord
+	Snapshot                           FullSnapshot
+}
+
+func VerifyHandoff(p HandoffProof, old D4TrustBase) (VerifiedHandoff, error) {
+	r := p.Record
+	if p.Profile != D4Profile || !r.Valid() || r.Network != old.Network || r.Epoch != old.Epoch || !p.Control.Matches(r) {
+		return VerifiedHandoff{}, ErrD4Record
+	}
+	if p.ControlPath == nil || p.ControlPath.Partition != D4ControlPartition || p.ControlPath.Version != 1 {
+		return VerifiedHandoff{}, ErrD4Control
+	}
+	// Fix both the leaf key and IndexTreeOutput selector; a supplied shard key
+	// must never choose the control leaf's position.
+	digest := p.Control.Digest()
+	hasher := abhash.New(crypto.SHA256.New())
+	hasher.Write(digest)
+	dataHash, e := hasher.Sum()
+	if e != nil {
+		return VerifiedHandoff{}, ErrD4Control
+	}
+	path := []*imt.PathItem{imt.NewPathItem(D4ControlPartition.Bytes(), dataHash)}
+	for _, step := range p.ControlPath.HashSteps {
+		if step == nil || step.Key == D4ControlPartition {
+			return VerifiedHandoff{}, ErrD4Control
+		}
+		path = append(path, step.ToIMTPathItem())
+	}
+	root, e := imt.IndexTreeOutput(path, D4ControlPartition.Bytes(), crypto.SHA256)
+	if e != nil {
+		return VerifiedHandoff{}, ErrD4Control
+	}
+	c := p.CommitQC.Seal.Commit.Round
+	if c == 0 || c < r.OrderedRound || c == math.MaxUint64 || p.CommitQC.Vote.Round != c+1 || p.CommitQC.Vote.Epoch != r.Epoch || p.CommitQC.Vote.ParentRound != c || p.CommitQC.Seal.Commit.Network != r.Network || p.CommitQC.Seal.Commit.Epoch != r.Epoch || !bytes.Equal(p.CommitQC.Seal.Commit.Root, root) || !bytes.Equal(p.CommitQC.Vote.CurrentRoot, root) {
+		return VerifiedHandoff{}, ErrD4Proof
+	}
+	if e = p.CommitQC.Verify(old); e != nil {
+		return VerifiedHandoff{}, e
+	}
+	if p.OptionalQC != nil {
+		if p.OptionalQC.Vote.Round != c || p.OptionalQC.Vote.Epoch != r.Epoch || !bytes.Equal(p.OptionalQC.Vote.CurrentRoot, root) {
+			return VerifiedHandoff{}, ErrD4Proof
+		}
+		if e = p.OptionalQC.Verify(old); e != nil {
+			return VerifiedHandoff{}, e
+		}
+	}
+	if !p.Snapshot.Control.Matches(r) || !bytes.Equal(p.Snapshot.Control.Digest(), digest) {
+		return VerifiedHandoff{}, ErrD4Snapshot
+	}
+	full, e := p.Snapshot.Root()
+	if e != nil || !bytes.Equal(full, root) {
+		return VerifiedHandoff{}, ErrD4Snapshot
+	}
+	return VerifiedHandoff{r.ID(), root, digest, r.OrderedRound, c, r.Epoch, r, p.Snapshot}, nil
+}
+
+// G is a typed checkpoint, not an old block, QC or UC subject.
+type EpochGenesis struct {
+	Network, Epoch, Start, OrderedRound                                  uint64
+	NextBodyID, RecordID, Root, ControlDigest, FrozenID, SuccessorTRHash []byte
+}
+
+func (g EpochGenesis) Bytes() []byte {
+	return marshalCBOR(cArray{cText("UNICITY_EPOCH_GENESIS"), cUint(1), cUint(g.Network), cUint(g.Epoch), cBytes(g.NextBodyID), cUint(g.Start), cBytes(g.RecordID), cUint(g.OrderedRound), cBytes(g.Root), cBytes(g.ControlDigest), cBytes(g.FrozenID), cBytes(g.SuccessorTRHash)})
+}
+func (g EpochGenesis) ID() []byte { h := sha256.Sum256(g.Bytes()); return h[:] }
+func DeriveEpochGenesis(v VerifiedHandoff, next TrustBaseBodyV2) (EpochGenesis, error) {
+	r := v.Record
+	id := next.Identity()
+	if r.Epoch == math.MaxUint64 || next.Epoch != r.Epoch+1 || next.NetworkID != r.Network || !bytes.Equal(id[:], r.NextBodyID) || !bytes.Equal(next.PredecessorHash, r.PredecessorBodyID) || next.EarliestActivation > r.ActivationRound {
+		return EpochGenesis{}, ErrD4Anchor
+	}
+	if e := next.Validate(); e != nil {
+		return EpochGenesis{}, ErrD4Anchor
+	}
+	return EpochGenesis{r.Network, next.Epoch, r.ActivationRound, r.OrderedRound, bytes.Clone(r.NextBodyID), bytes.Clone(v.RecordID), bytes.Clone(v.Root), bytes.Clone(v.ControlDigest), bytes.Clone(r.FrozenID), bytes.Clone(r.SuccessorTRHash)}, nil
+}
+
+type D4ParentKind uint8
 
 const (
-	OldAssignment AssignmentID = "old"
-	NewAssignment AssignmentID = "new"
+	D4AnchorParent D4ParentKind = iota + 1
+	D4OrdinaryParent
 )
 
-// Candidate is the committed election candidate (appendix-evm.tex
-// §"Candidate Record"), reduced to what the handoff state machine needs.
-type Candidate struct {
-	Network         uint64
-	NextEpoch       uint64
-	Attempt         uint64 // j — attempt number; a new attempt after an abort is j+1
-	PredecessorHash []byte // h_e — the current trust-base body identity
-	MinActivation   uint64 // A_min — earliest activation bound, NOT the actual round
-	CandidateHash   []byte // H(c) — the committed candidate body hash (fixed slot at the epoch manager)
+type D4Parent struct {
+	Kind         D4ParentKind
+	GenesisID    []byte
+	Epoch, Round uint64
+	QC           *D4QC
+}
+type D4Bootstrap struct {
+	Anchor               EpochGenesis
+	NewTrust             D4TrustBase
+	Installed            bool
+	Snapshot             FullSnapshot
+	HighestQC            D4Parent
+	LastVoted, LockRound uint64
+	Committed            []uint64
 }
 
-// PipelineDepth is the minimum root-round gap the committed activation
-// round must leave after the commit round. It is NOT what establishes
-// finality — finality of the commit comes from the root QC/ancestry rule,
-// modelled by FinalizeCommit / CommitFinalized. The gap only keeps A* from
-// being scheduled inside the window where the commit could still be
-// reorged.
-const PipelineDepth uint64 = 3
-
-// Handoff is the durable state of one in-progress handoff.
-type Handoff struct {
-	Phase       Phase
-	Candidate   Candidate
-	ProtocolVer uint64
-
-	// Set at Freeze:
-	FrozenSummary []byte // frozen root state summary — determined by the handoff, not a local clock
-	LastEVMParent []byte // last certified EVM block hash the new assignment resumes from
-	BodyIdentity  []byte // identity of the constructed next trust-base body (D3 v2, witness-free)
-	FrozenID      []byte // H(bodyIdentity, frozenSummary, lastEVMParent, candidateHash, attempt, predecessor) — what the endorsement signs
-
-	// Set at Endorse:
-	EndorsementWeight uint64 // old-epoch unique signer weight on the endorsement
-	EndorsementDomain SigDomain
-
-	// Set at Commit:
-	CommitRound             uint64             // root round at which the endorsed handoff was committed
-	ActivationRound         uint64             // A* — the actual boundary, fixed here, >= MinActivation and >= CommitRound+PipelineDepth
-	SuccessorTRHash         []byte             // successor technical record — names the leader of the first successor proposal
-	CommitRecordID          []byte             // identity of the old-quorum commit statement (see CommitRecordID)
-	SelfCommitQC            CommitQC           // the old-quorum QC that certified THIS commit
-	ActivationRecord        ActivatedTrustBase // D3 record fixing A*; what a joining node reads for the active epoch
-	CommitFinalized         bool               // a descendant commit QC extends this one (root 2-chain, not a round count)
-	FinalityEvidence        CommitQC           // the descendant commit QC that finalised this one
-	FinalityDescendantRound uint64             // its round (== CommitRound + 1)
-
-	// Set at Acknowledge:
-	AckEVMRound uint64 // EVM block round whose system op acknowledged the handoff
-
-	AbortReason string
-}
-
-// SigDomain is the set of fields a phase's signed message binds. The model
-// asserts that no field names state unknown at signing time (see
-// FieldsAreKnown).
-type SigDomain struct {
-	Phase           string
-	Network         uint64
-	ProtocolVer     uint64
-	PredecessorHash []byte
-	Attempt         uint64
-	FrozenID        []byte // known from Freeze onward — binds body + frozen summary + parent + candidate
-	MinActivation   uint64 // known from the candidate
-	ActivationRound uint64 // 0 until Commit — MUST be 0 in the endorsement domain
-	SuccessorTRHash []byte // nil until Commit
-}
-
-var (
-	errPhase          = errors.New("d4: transition not allowed from this phase")
-	errActivationRoot = errors.New("d4: activation round below MinActivation or inside the reorg window")
-	errNoCommit       = errors.New("d4: cannot activate without a committed handoff record")
-	errCommitNotFinal = errors.New("d4: commit is not yet final under the root 2-chain rule")
-	errEndorseWeight  = errors.New("d4: endorsement weight below the old root threshold")
-	errFutureState    = errors.New("d4: signed domain binds state not known at signing time")
-	errFinalityLink   = errors.New("d4: finality QC does not extend this commit (ParentCommitID mismatch)")
-	errFinalityGap    = errors.New("d4: finality QC is not the consecutive next commit (timeout gap)")
-	errFinalityQuorum = errors.New("d4: finality QC weight below the old root threshold")
-	errFinalityRoot   = errors.New("d4: finality QC binds no committed root hash")
-	errFinalityShape  = errors.New("d4: finality QC is malformed")
-)
-
-// CommitQC is an old-quorum quorum certificate over a root commit — the
-// executable stand-in for the root's SafetyModule.isCommitCandidate
-// relation plus the signed LedgerCommitInfo. Finality of a handoff commit
-// is a DESCENDANT CommitQC that (a) names this commit as its parent, (b)
-// sits at the consecutive next round, (c) carries its own old-quorum weight
-// and (d) binds a committed root hash. A larger round number alone is not
-// finality.
-type CommitQC struct {
-	CommitRecordID    []byte // the commit statement this QC certifies
-	Round             uint64 // root round of this commit
-	ParentCommitID    []byte // the commit this one extends (the 2-chain link)
-	CommittedRootHash []byte // root block hash bound by the signed LedgerCommitInfo
-	QuorumWeight      uint64 // distinct old-assignment signer weight on this QC
-}
-
-// preHandoffHeadCommitID is a deterministic stand-in for the last committed
-// root state the handoff extends — the parent of the handoff commit.
-func preHandoffHeadCommitID(predecessor []byte, attempt uint64) []byte {
-	return sha256Bytes(marshalCBOR(cArray{cText("UNICITY_HANDOFF_HEAD"), cBytes(predecessor), cUint(attempt)}))
-}
-
-// committedRootHashFor is the deterministic committed root hash a CommitQC
-// binds in the model (the signed LedgerCommitInfo's committed-state field).
-func committedRootHashFor(commitRecordID []byte, round uint64) []byte {
-	return sha256Bytes(marshalCBOR(cArray{cText("UNICITY_ROOT_COMMIT"), cBytes(commitRecordID), cUint(round)}))
-}
-
-// RootCommit is ONE commit in the root chain's own commit sequence, as the
-// verifier's AUTHENTICATED view of it (from the real root consensus /
-// LedgerCommitInfo stream). D4 consumes it as a VERIFIED EXTERNAL
-// PRECONDITION — it is never fabricated by this model.
-type RootCommit struct {
-	CommitID          []byte // 32 bytes — the committed statement's id (a handoff commit's is its CommitRecordID)
-	Round             uint64
-	ParentID          []byte // the CommitID this one extends
-	CommittedRootHash []byte // 32 bytes — the signed LedgerCommitInfo committed-state field
-	QuorumWeight      uint64 // distinct old-assignment signer weight on this commit's QC
-}
-
-// RootCommitChain is an ascending-round slice of RootCommits, hash-linked
-// by ParentID == predecessor.CommitID.
-type RootCommitChain []RootCommit
-
-func (c RootCommitChain) linkedAndQuorate(oldThreshold uint64) bool {
-	if len(c) == 0 || oldThreshold == 0 {
-		return false
+func CanBootstrapNew(v VerifiedHandoff, g EpochGenesis, s FullSnapshot) error {
+	root, e := s.Root()
+	if e != nil || !bytes.Equal(root, v.Root) || !bytes.Equal(g.Root, v.Root) || !bytes.Equal(g.RecordID, v.RecordID) || g.Epoch != v.Epoch+1 || g.Start != v.Record.ActivationRound || !bytes.Equal(s.Control.Digest(), v.ControlDigest) {
+		return ErrD4Anchor
 	}
-	for i := range c {
-		if len(c[i].CommitID) != 32 || len(c[i].CommittedRootHash) != 32 || c[i].QuorumWeight < oldThreshold {
-			return false
+	return nil
+}
+func (b *D4Bootstrap) Install(v VerifiedHandoff, g EpochGenesis, s FullSnapshot, newTrust D4TrustBase) error {
+	if e := CanBootstrapNew(v, g, s); e != nil {
+		return e
+	}
+	if e := newTrust.Validate(); e != nil || newTrust.Epoch != g.Epoch || newTrust.Network != g.Network {
+		return ErrD4Anchor
+	}
+	if b.Installed {
+		if !bytes.Equal(b.Anchor.ID(), g.ID()) {
+			return ErrD4Anchor
 		}
-		if i > 0 && (!bytesEqual(c[i].ParentID, c[i-1].CommitID) || c[i].Round != c[i-1].Round+1) {
-			return false
+		return nil
+	}
+	b.Anchor = g
+	b.NewTrust = newTrust
+	b.Snapshot = s
+	b.Installed = true
+	b.HighestQC = D4Parent{Kind: D4AnchorParent, GenesisID: g.ID(), Epoch: g.Epoch, Round: g.Start - 1}
+	return nil
+}
+func (b *D4Bootstrap) CanVote(round uint64, parent D4Parent) error {
+	if !b.Installed || round < b.Anchor.Start || round <= b.LastVoted || parent.Epoch != b.Anchor.Epoch {
+		return ErrD4Epoch
+	}
+	if parent.Kind == D4AnchorParent {
+		if !bytes.Equal(parent.GenesisID, b.Anchor.ID()) || parent.Round != b.Anchor.Start-1 || b.HighestQC.Kind == D4OrdinaryParent {
+			return ErrD4Anchor
 		}
+	} else if parent.Kind != D4OrdinaryParent || parent.QC == nil || parent.Round < b.Anchor.Start || parent.Round >= round || parent.Round < b.LockRound {
+		return ErrD4Proof
+	} else if parent.QC.Vote.Round != parent.Round || parent.QC.Vote.Epoch != b.Anchor.Epoch || parent.QC.Verify(b.NewTrust) != nil {
+		return ErrD4Proof
 	}
-	return true
+	return nil
 }
-
-// DeriveFinalityEvidence is the CHECKED MAPPING from the authenticated root
-// commit chain to the descendant CommitQC that finalises the handoff commit
-// `commitRecordID` under the root 2-chain. It succeeds only if the chain
-// contains that commit AND a descendant commit that extends it at the
-// consecutive next round, both quorate. It never manufactures a root hash —
-// CommittedRootHash comes from the chain. Negatives: the commit is absent,
-// has no descendant (1-chain), a non-consecutive descendant (gap), an
-// under-quorum descendant, or a broken link.
-func DeriveFinalityEvidence(chain RootCommitChain, commitRecordID []byte, oldThreshold uint64) (CommitQC, bool) {
-	if !chain.linkedAndQuorate(oldThreshold) {
-		return CommitQC{}, false
+func (b *D4Bootstrap) Vote(round uint64, parent D4Parent) error {
+	if e := b.CanVote(round, parent); e != nil {
+		return e
 	}
-	idx := -1
-	for i := range chain {
-		if bytesEqual(chain[i].CommitID, commitRecordID) {
-			idx = i
-			break
-		}
+	b.LastVoted = round
+	if parent.Kind == D4OrdinaryParent && parent.Round > b.LockRound {
+		b.LockRound = parent.Round
+		b.HighestQC = parent
 	}
-	if idx < 0 || idx+1 >= len(chain) {
-		return CommitQC{}, false
+	return nil
+}
+
+// The typed anchor occupies a slot for pacemaker ordering, but has no
+// commit subject. This models isCommitCandidate before any QC aggregation.
+func (b *D4Bootstrap) voteCommitSubject(round uint64, parent D4Parent, timestamp uint64) D4LedgerCommitInfo {
+	if parent.Kind == D4AnchorParent {
+		return D4LedgerCommitInfo{}
 	}
-	d := chain[idx+1] // linkedAndQuorate guarantees d links to chain[idx] at +1 round, quorate
-	return CommitQC{
-		CommitRecordID:    append([]byte(nil), d.CommitID...),
-		Round:             d.Round,
-		ParentCommitID:    append([]byte(nil), commitRecordID...),
-		CommittedRootHash: append([]byte(nil), d.CommittedRootHash...),
-		QuorumWeight:      d.QuorumWeight,
-	}, true
+	if round != parent.Round+1 {
+		return D4LedgerCommitInfo{}
+	}
+	root := b.Anchor.Root
+	if parent.QC != nil {
+		root, timestamp = parent.QC.Vote.CurrentRoot, parent.QC.Vote.Timestamp
+	}
+	return D4LedgerCommitInfo{Network: b.NewTrust.Network, Round: parent.Round, Epoch: b.Anchor.Epoch, Timestamp: timestamp, Root: bytes.Clone(root)}
 }
 
-// FrozenOrdered is the proof that this EXACT frozen record was committed by
-// the existing root BFT consensus BEFORE any endorsement. The freeze record
-// — like every handoff record — rides the root chain, which commits at most
-// one freeze per (attempt, predecessor). A Byzantine handoff leader
-// therefore cannot obtain a FrozenOrdered proof for two different
-// FrozenIDs. FrozenID is the full frozenID(bodyIdentity, frozenSummary,
-// lastEVMParent, candidateHash, attempt, predecessor) hash — the candidate
-// alone does not determine it. Honest signers endorse ONLY a FrozenID that
-// carries a valid FrozenOrdered proof. It is a VERIFIED EXTERNAL
-// PRECONDITION (the verifier's authenticated view of that root commit).
-type FrozenOrdered struct {
-	FrozenID   []byte
-	RootCommit RootCommit
+func (b *D4Bootstrap) BuildVoteQC(round uint64, parent D4Parent, root []byte, timestamp uint64) (D4QC, error) {
+	if len(root) != 32 || timestamp == 0 {
+		return D4QC{}, ErrD4Proof
+	}
+	if e := b.CanVote(round, parent); e != nil {
+		return D4QC{}, e
+	}
+	commit := b.voteCommitSubject(round, parent, timestamp)
+	if e := b.Vote(round, parent); e != nil {
+		return D4QC{}, e
+	}
+	qc := D4QC{Vote: D4VoteInfo{Round: round, Epoch: b.Anchor.Epoch, ParentRound: parent.Round, Timestamp: timestamp, CurrentRoot: bytes.Clone(root)}, Seal: D4Seal{Commit: commit}}
+	qc.Seal.PreviousHash = qc.Vote.Hash()
+	return qc, nil
 }
-
-func (fo FrozenOrdered) authenticates(frozenID []byte, oldThreshold uint64) bool {
-	return oldThreshold > 0 && len(frozenID) == 32 && bytesEqual(fo.FrozenID, frozenID) &&
-		len(fo.RootCommit.CommitID) == 32 && fo.RootCommit.QuorumWeight >= oldThreshold
+func (b *D4Bootstrap) Commit(parent D4Parent, child D4QC) error {
+	if parent.Kind == D4AnchorParent {
+		return ErrD4CommitAnchor
+	}
+	if !b.Installed || parent.Kind != D4OrdinaryParent || parent.QC == nil || parent.Epoch != b.Anchor.Epoch || parent.Round < b.Anchor.Start || parent.Round == math.MaxUint64 || child.Vote.Round != parent.Round+1 || child.Vote.ParentRound != parent.Round || child.Seal.Commit.Round != parent.Round || child.Seal.Commit.Epoch != b.Anchor.Epoch || !bytes.Equal(child.Seal.Commit.Root, parent.QC.Vote.CurrentRoot) || parent.QC.Vote.Round != parent.Round || parent.QC.Verify(b.NewTrust) != nil || child.Verify(b.NewTrust) != nil {
+		return ErrD4Proof
+	}
+	b.Committed = append(b.Committed, parent.Round)
+	return nil
 }
+func (b *D4Bootstrap) Restart() D4Bootstrap { return *b }
 
-// NewHandoff starts an Idle handoff for a candidate.
-func NewHandoff(c Candidate, protocolVer uint64) *Handoff {
-	return &Handoff{Phase: PhaseIdle, Candidate: c, ProtocolVer: protocolVer}
-}
-
-// Prepare commits the prepare record under the old root quorum: admission
-// of new old-assignment governance proposals is closed and in-flight work
-// is drained or cancelled. Only from Idle.
+func NewHandoff(c Candidate, _ uint64) *Handoff { return &Handoff{Candidate: c} }
 func (h *Handoff) Prepare() error {
 	if h.Phase != PhaseIdle {
-		return errPhase
+		return ErrD4Phase
 	}
 	h.Phase = PhasePrepared
 	return nil
 }
-
-// Freeze records the last certified EVM block/state and the frozen root
-// state summary, constructs the next trust-base body, and computes the
-// FrozenID that the endorsement will sign. The body it accepts must:
-//
-//   - be a valid D3 v2 body (Validate passes);
-//   - carry EpochStart == the candidate's A_min (NOT A*, which is not known
-//     until Commit — this is what removes the circularity: the body
-//     identity is stable from Freeze, and A* lives only in the commit
-//     record);
-//   - carry PredecessorHash == the candidate's predecessor.
-//
-// Two handoffs that freeze the same body with different frozen summaries or
-// EVM parents get DIFFERENT FrozenIDs, so one endorsement cannot authorise
-// divergent handoff states.
-func (h *Handoff) Freeze(frozenSummary, lastEVMParent []byte, body TrustBaseBodyV2) error {
+func (h *Handoff) Freeze(summary, parent []byte, body TrustBaseBodyV2) error {
 	if h.Phase != PhasePrepared {
-		return errPhase
+		return ErrD4Phase
 	}
-	if err := body.Validate(); err != nil {
-		return fmt.Errorf("d4: frozen trust-base body invalid: %w", err)
+	if e := body.Validate(); e != nil {
+		return e
 	}
-	// The body binds EarliestActivation (A_min) — a lower bound, known now.
-	// The actual boundary A* is fixed at Commit and lives ONLY in the
-	// ActivatedTrustBase record (D3), never in the body.
-	if body.EarliestActivation != h.Candidate.MinActivation {
-		return fmt.Errorf("d4: body EarliestActivation %d != candidate A_min %d", body.EarliestActivation, h.Candidate.MinActivation)
+	if body.EarliestActivation != h.Candidate.MinActivation || !bytes.Equal(body.PredecessorHash, h.Candidate.PredecessorHash) || len(summary) == 0 || len(parent) == 0 {
+		return ErrD4Record
 	}
-	if !bytesEqual(body.PredecessorHash, h.Candidate.PredecessorHash) {
-		return errors.New("d4: body predecessor hash does not match the candidate")
-	}
-	if len(frozenSummary) == 0 || len(lastEVMParent) == 0 {
-		return errors.New("d4: frozen summary and last EVM parent are required")
-	}
-	h.FrozenSummary = bytesClone(frozenSummary)
-	h.LastEVMParent = bytesClone(lastEVMParent)
 	id := body.Identity()
-	h.BodyIdentity = id[:]
-	h.FrozenID = frozenID(id[:], frozenSummary, lastEVMParent, h.Candidate.CandidateHash, h.Candidate.Attempt, h.Candidate.PredecessorHash)
+	h.Body = body
+	h.BodyID = id[:]
+	h.LastEVMParent = bytes.Clone(parent)
+	h.FrozenID = frozenID(id[:], summary, parent, h.Candidate.CandidateHash, h.Candidate.Attempt, h.Candidate.PredecessorHash)
 	h.Phase = PhaseFrozen
 	return nil
 }
-
-// frozenID binds every component of the handoff state the endorsement
-// commits to, so a signer that endorsed one cannot silently be counted for
-// another.
-func frozenID(bodyIdentity, frozenSummary, lastEVMParent, candidateHash []byte, attempt uint64, predecessor []byte) []byte {
-	enc := marshalCBOR(cArray{
-		cText("UNICITY_HANDOFF_FROZEN"),
-		cBytes(bodyIdentity), cBytes(frozenSummary), cBytes(lastEVMParent),
-		cBytes(candidateHash), cUint(attempt), cBytes(predecessor),
-	})
-	return sha256Slice(enc)
+func frozenID(body, summary, parent, candidate []byte, attempt uint64, predecessor []byte) []byte {
+	x := sha256.Sum256(marshalCBOR(cArray{cText("UNICITY_HANDOFF_FROZEN"), cBytes(body), cBytes(summary), cBytes(parent), cBytes(candidate), cUint(attempt), cBytes(predecessor)}))
+	return x[:]
 }
 
-// EndorsementDomainFor returns the exact field set the endorsement
-// signature binds. It binds the FrozenID (body + frozen summary + parent +
-// candidate + attempt), never ActivationRound or SuccessorTRHash — those
-// are unknown until Commit.
-func (h *Handoff) EndorsementDomainFor() SigDomain {
-	return SigDomain{
-		Phase:           "endorse",
-		Network:         h.Candidate.Network,
-		ProtocolVer:     h.ProtocolVer,
-		PredecessorHash: h.Candidate.PredecessorHash,
-		Attempt:         h.Candidate.Attempt,
-		FrozenID:        h.FrozenID,
-		MinActivation:   h.Candidate.MinActivation,
-		ActivationRound: 0,
-		SuccessorTRHash: nil,
-	}
+func D4PreFreezeSummary(network uint64, predecessor []byte, attempt, round uint64, root, lastParent []byte) []byte {
+	h := sha256.Sum256(marshalCBOR(cArray{cText("UNICITY_HANDOFF_PREFREEZE_STATE"), cUint(1), cUint(network), cBytes(predecessor), cUint(attempt), cUint(round), cBytes(root), cBytes(lastParent)}))
+	return h[:]
 }
 
-func bytesEqual(a, b []byte) bool { return string(a) == string(b) }
-
-func bytesClone(b []byte) []byte {
-	if len(b) == 0 {
-		return nil
-	}
-	out := make([]byte, len(b))
-	copy(out, b)
-	return out
+func D4CandidateContextHash(network uint64, predecessor []byte, attempt uint64, candidate []byte, aMin uint64) []byte {
+	h := sha256.Sum256(marshalCBOR(cArray{cText("UNICITY_HANDOFF_CANDIDATE_CONTEXT"), cUint(1), cUint(network), cBytes(predecessor), cUint(attempt), cBytes(candidate), cUint(aMin)}))
+	return h[:]
 }
-
-// Endorse records old-validator endorsement of the agreed body. weight is
-// the old-epoch unique signer weight; oldThreshold is D3's ⌊2W/3⌋+1 for the
-// outgoing assignment. Only from Frozen.
-func (h *Handoff) Endorse(weight, oldThreshold uint64) error {
+func (h *Handoff) Endorse(weight, threshold uint64) error {
 	if h.Phase != PhaseFrozen {
-		return errPhase
+		return ErrD4Phase
 	}
-	dom := h.EndorsementDomainFor()
-	if !FieldsAreKnown(dom) {
-		return errFutureState
+	if threshold == 0 || weight < threshold {
+		return ErrD4Quorum
 	}
-	if weight < oldThreshold {
-		return errEndorseWeight
-	}
-	h.EndorsementWeight = weight
-	h.EndorsementDomain = dom
+	h.Endorsement = SigDomain{Network: h.Candidate.Network, Epoch: h.Candidate.OldEpoch, Attempt: h.Candidate.Attempt, MinActivation: h.Candidate.MinActivation, Predecessor: h.Candidate.PredecessorHash, FrozenID: h.FrozenID}
 	h.Phase = PhaseEndorsed
 	return nil
 }
-
-// CommitRecordID is the identity of the old-quorum commit statement:
-// H( "UNICITY_HANDOFF_COMMIT", frozenID, A*, successorTRHash, attempt,
-// predecessor ). An honest old-quorum member signs at most one of these per
-// (frozenID, attempt); a second commit with a different A* or successor TR
-// is a distinct CommitRecordID and needs a second, conflicting old-quorum
-// QC — impossible by quorum intersection (see d4multireplica.go G2/G6).
-func CommitRecordID(frozenID []byte, aStar uint64, successorTRHash []byte, attempt uint64, predecessor []byte) []byte {
-	return sha256Bytes(marshalCBOR(cArray{
-		cText("UNICITY_HANDOFF_COMMIT"),
-		cBytes(frozenID), cUint(aStar), cBytes(successorTRHash), cUint(attempt), cBytes(predecessor),
-	}))
-}
-
-// Commit commits the endorsed handoff under the old consensus rules,
-// binding the new body, the actual activation boundary and the successor
-// technical record. It produces the ActivatedTrustBase record (D3) that
-// fixes A*. Only from Endorsed.
-func (h *Handoff) Commit(commitRound, activationRound uint64, successorTRHash []byte) error {
+func (h *Handoff) Commit(order, start uint64, tr []byte) error {
 	if h.Phase != PhaseEndorsed {
-		return errPhase
+		return ErrD4Phase
 	}
-	if activationRound < h.Candidate.MinActivation || activationRound < commitRound+PipelineDepth {
-		return errActivationRoot
+	if order == 0 || order > math.MaxUint64-PipelineDepth || start < h.Candidate.MinActivation || start < order+PipelineDepth || len(tr) != 32 {
+		return ErrD4Record
 	}
-	if len(successorTRHash) == 0 {
-		return errors.New("d4: commit requires a successor technical record")
-	}
-	h.CommitRound = commitRound
-	h.ActivationRound = activationRound
-	h.SuccessorTRHash = successorTRHash
-	h.CommitRecordID = CommitRecordID(h.FrozenID, activationRound, successorTRHash, h.Candidate.Attempt, h.Candidate.PredecessorHash)
-	h.SelfCommitQC = CommitQC{
-		CommitRecordID:    append([]byte(nil), h.CommitRecordID...),
-		Round:             commitRound,
-		ParentCommitID:    preHandoffHeadCommitID(h.Candidate.PredecessorHash, h.Candidate.Attempt),
-		CommittedRootHash: committedRootHashFor(h.CommitRecordID, commitRound),
-		QuorumWeight:      h.EndorsementWeight, // the commit is under the same old quorum that endorsed
-	}
-	h.ActivationRecord = ActivatedTrustBase{
-		BodyIdentity:       append([]byte(nil), h.BodyIdentity...),
-		EpochStart:         activationRound,
-		ActivationCommitID: append([]byte(nil), h.CommitRecordID...),
-	}
+	h.Record = OrderedHandoffRecord{Network: h.Candidate.Network, Epoch: h.Candidate.OldEpoch, Attempt: h.Candidate.Attempt, OrderedRound: order, ActivationRound: start, PredecessorBodyID: bytes.Clone(h.Candidate.PredecessorHash), FrozenID: bytes.Clone(h.FrozenID), NextBodyID: bytes.Clone(h.BodyID), SuccessorTRHash: bytes.Clone(tr), Kind: "commit"}
 	h.Phase = PhaseCommitted
 	return nil
 }
-
-// RootCommitChainWith returns the 2-entry authenticated root commit chain a
-// well-formed finality proof for this handoff commit would carry: this
-// handoff commit, then a quorate descendant at the consecutive next round.
-// Test/scenario helper standing in for the real root LedgerCommitInfo
-// stream. DeriveFinalityEvidence is what turns it into a CommitQC.
-func (h *Handoff) RootCommitChainWith(descQuorumWeight uint64) RootCommitChain {
-	childID := sha256Bytes(marshalCBOR(cArray{cText("UNICITY_ROOT_COMMIT_CHILD"), cBytes(h.CommitRecordID)}))
-	return RootCommitChain{
-		{CommitID: append([]byte(nil), h.CommitRecordID...), Round: h.CommitRound, ParentID: preHandoffHeadCommitID(h.Candidate.PredecessorHash, h.Candidate.Attempt), CommittedRootHash: committedRootHashFor(h.CommitRecordID, h.CommitRound), QuorumWeight: h.SelfCommitQC.QuorumWeight},
-		{CommitID: childID, Round: h.CommitRound + 1, ParentID: append([]byte(nil), h.CommitRecordID...), CommittedRootHash: committedRootHashFor(childID, h.CommitRound+1), QuorumWeight: descQuorumWeight},
+func (h *Handoff) Finalize(p HandoffProof, old D4TrustBase) error {
+	if h.Phase != PhaseCommitted {
+		return ErrD4Phase
 	}
-}
-
-// DescendantCommitQC builds the CommitQC that would finalise this handoff
-// commit under the root 2-chain. Test/scenario helper for NEGATIVE cases;
-// the positive path derives the QC from an authenticated RootCommitChain
-// via DeriveFinalityEvidence, which never fabricates a root hash.
-func (h *Handoff) DescendantCommitQC(quorumWeight uint64) CommitQC {
-	childID := sha256Bytes(marshalCBOR(cArray{cText("UNICITY_ROOT_COMMIT_CHILD"), cBytes(h.CommitRecordID)}))
-	round := h.CommitRound + 1
-	return CommitQC{
-		CommitRecordID:    childID,
-		Round:             round,
-		ParentCommitID:    append([]byte(nil), h.CommitRecordID...),
-		CommittedRootHash: committedRootHashFor(childID, round),
-		QuorumWeight:      quorumWeight,
+	if p.Profile == 0 {
+		return ErrD4Proof
 	}
-}
-
-// FinalizeCommit records finality under the ROOT 2-CHAIN RULE. It takes a
-// DESCENDANT CommitQC — in real code and in the positive fixtures produced
-// by DeriveFinalityEvidence from the authenticated root commit chain, never
-// fabricated — and oldThreshold, and checks the real relation:
-//
-//   - the descendant's ParentCommitID is THIS commit's CommitRecordID
-//     (it extends this commit, not some unrelated higher-round commit);
-//   - the descendant sits at the consecutive next round (CommitRound + 1) —
-//     a timeout gap is not a 2-chain;
-//   - the descendant carries its own old-quorum weight ≥ oldThreshold;
-//   - the descendant binds a 32-byte committed root hash (the signed
-//     LedgerCommitInfo's committed-state field).
-//
-// A larger round number on its own no longer finalises anything.
-// PipelineDepth still only keeps A* outside the reorg window. Idempotent;
-// only from Committed onward.
-func (h *Handoff) FinalizeCommit(descendant CommitQC, oldThreshold uint64) error {
-	if h.Phase < PhaseCommitted || h.Phase == PhaseAborted {
-		return errPhase
+	v, e := VerifyHandoff(p, old)
+	if e != nil {
+		return e
 	}
-	if len(descendant.CommitRecordID) != 32 || len(descendant.ParentCommitID) != 32 {
-		return errFinalityShape
+	if !bytes.Equal(v.RecordID, h.Record.ID()) {
+		return ErrD4Record
 	}
-	if !bytesEqual(descendant.ParentCommitID, h.CommitRecordID) {
-		return errFinalityLink
-	}
-	if descendant.Round != h.CommitRound+1 {
-		return errFinalityGap
-	}
-	if len(descendant.CommittedRootHash) != 32 {
-		return errFinalityRoot
-	}
-	if descendant.QuorumWeight < oldThreshold {
-		return errFinalityQuorum
-	}
-	h.CommitFinalized = true
-	h.FinalityEvidence = descendant
-	h.FinalityDescendantRound = descendant.Round
+	h.Proof = &p
+	h.Verified = &v
 	return nil
 }
-
-// FinalizeFromRootChain is the positive path: derive the descendant
-// CommitQC from the AUTHENTICATED root commit chain (DeriveFinalityEvidence
-// — never a fabricated root hash), then FinalizeCommit with it. Real code
-// receives `chain` from the root LedgerCommitInfo stream.
-func (h *Handoff) FinalizeFromRootChain(chain RootCommitChain, oldThreshold uint64) error {
-	ev, ok := DeriveFinalityEvidence(chain, h.CommitRecordID, oldThreshold)
-	if !ok {
-		return errFinalityShape
-	}
-	return h.FinalizeCommit(ev, oldThreshold)
-}
-
-// FirstSuccessorProposal is the bootstrap step the re-review asked to make
-// explicit: BEFORE any new-assignment certified root round ≥ A* exists,
-// who produces the first proposal and what authorises it.
-//
-//   - Leader: the identity named by the committed successor technical
-//     record (SuccessorTRHash). It is fixed at Commit, under the old quorum.
-//   - BuildsOn: the last old-set finalised committed root — this handoff's
-//     own finalised commit (SelfCommitQC + FinalityEvidence), NOT a
-//     new-set round (none exists yet).
-//   - Authorisation: the finalised commit chain (CommitRecordID +
-//     SelfCommitQC + the descendant FinalityEvidence). The new set carries
-//     this proof; it does not need the old set online.
-//   - ProposedRound: A*. Once THIS proposal is certified it becomes the
-//     first certified round ≥ A* — the activation round.
-//
-// Available only from a FINALISED commit; a bare commit cannot bootstrap.
-type SuccessorProposal struct {
-	Leader        []byte
-	BuildsOnRoot  []byte // committed root hash the new set extends
-	CommitRecord  []byte
-	CommitQC      CommitQC
-	FinalityQC    CommitQC
-	ProposedRound uint64 // A*
-}
-
-func (h *Handoff) FirstSuccessorProposal() (SuccessorProposal, bool) {
-	if h.Phase != PhaseCommitted && h.Phase != PhaseActivated && h.Phase != PhaseAcknowledged {
-		return SuccessorProposal{}, false
-	}
-	if !h.CommitFinalized {
-		return SuccessorProposal{}, false
-	}
-	return SuccessorProposal{
-		Leader:        append([]byte(nil), h.SuccessorTRHash...),
-		BuildsOnRoot:  append([]byte(nil), h.FinalityEvidence.CommittedRootHash...),
-		CommitRecord:  append([]byte(nil), h.CommitRecordID...),
-		CommitQC:      h.SelfCommitQC,
-		FinalityQC:    h.FinalityEvidence,
-		ProposedRound: h.ActivationRound,
-	}, true
-}
-
-// FirstSuccessorProposalLeader is the leader identity alone (kept for
-// callers that only need the name).
-func (h *Handoff) FirstSuccessorProposalLeader() ([]byte, bool) {
-	if h.Phase < PhaseCommitted || h.Phase == PhaseAborted {
-		return nil, false
-	}
-	return h.SuccessorTRHash, true
-}
-
-// Activate lets the new root set resume from the certified handoff state.
-// observedRootRound is the certified root round the new set has imported.
-// Allowed only from Committed, only once the commit is FINAL under the root
-// rule (not merely once a round counter elapsed), and only once
-// observedRootRound has reached the committed A*. A timeout or repeat
-// certificate between the commit and A* installs nobody; the first
-// certified round >= A* under the new assignment is the activation.
-func (h *Handoff) Activate(observedRootRound uint64) error {
+func (h *Handoff) Activate(g EpochGenesis, s FullSnapshot) error {
 	if h.Phase != PhaseCommitted {
-		if h.Phase == PhasePrepared || h.Phase == PhaseFrozen || h.Phase == PhaseEndorsed {
-			return errNoCommit // an incomplete prepare cannot activate
-		}
-		return errPhase
+		return ErrD4Phase
 	}
-	if !h.CommitFinalized {
-		return errCommitNotFinal
+	if h.Verified == nil {
+		return ErrD4Proof
 	}
-	if observedRootRound < h.ActivationRound {
-		return fmt.Errorf("d4: observed root round %d has not reached committed activation round %d", observedRootRound, h.ActivationRound)
+	if e := CanBootstrapNew(*h.Verified, g, s); e != nil {
+		return e
 	}
+	h.Anchor = &g
 	h.Phase = PhaseActivated
 	return nil
 }
-
-// Acknowledge records that the first new-assignment governance block's
-// system operation acknowledged the handoff, closing the old assignment's
-// liabilities. Only from Activated.
-func (h *Handoff) Acknowledge(evmRound uint64) error {
+func (h *Handoff) Acknowledge(round uint64) error {
 	if h.Phase != PhaseActivated {
-		return errPhase
+		return ErrD4Phase
 	}
-	h.AckEVMRound = evmRound
+	h.AckEVMRound = round
 	h.Phase = PhaseAcknowledged
 	return nil
 }
-
-// Abort is the old-quorum committed abort of an incomplete prepare. Allowed
-// only before Commit. After it, this attempt (j) is dead; a replacement
-// needs attempt j+1 and the same predecessor.
-func (h *Handoff) Abort(reason string) error {
-	switch h.Phase {
-	case PhasePrepared, PhaseFrozen, PhaseEndorsed:
-		h.Phase = PhaseAborted
-		h.AbortReason = reason
-		return nil
-	default:
-		return errPhase
+func (h *Handoff) Abort() error {
+	if h.Phase < PhasePrepared || h.Phase >= PhaseCommitted {
+		return ErrD4Phase
 	}
+	h.Phase = PhaseAborted
+	return nil
 }
 
-// Authorized reports which assignment may authorise a governance block
-// whose imported root round is observedRootRound. This is the function the
-// safety exploration checks for overlap and gaps.
-//
-//   - Before a committed handoff (or after an abort): always the old set.
-//   - From Committed onward: old for rounds strictly below A*, new for
-//     rounds at or above A*. There is no round assigned to both and none
-//     assigned to neither.
-func (h *Handoff) Authorized(observedRootRound uint64) AssignmentID {
-	switch h.Phase {
-	case PhaseCommitted, PhaseActivated, PhaseAcknowledged:
-		if observedRootRound >= h.ActivationRound {
-			return NewAssignment
+// Timeout votes bind the tagged highQC, including the anchor's identity and
+// slot. The new trust base signs these bytes; an old TC cannot advance it.
+type D4TimeoutCertificate struct {
+	Epoch, Round uint64
+	HighQC       D4Parent
+	Signatures   map[string][]byte
+}
+
+func (tc D4TimeoutCertificate) Bytes() []byte {
+	tag := uint64(tc.HighQC.Kind)
+	var qcID []byte
+	if tc.HighQC.QC != nil {
+		qcID = tc.HighQC.QC.ID()
+	}
+	return marshalCBOR(cArray{cText("UNICITY_D4_TIMEOUT"), cUint(2), cUint(tc.Epoch), cUint(tc.Round), cUint(tag), cBytes(tc.HighQC.GenesisID), cUint(tc.HighQC.Epoch), cUint(tc.HighQC.Round), cBytes(qcID)})
+}
+func D4SignTC(tc *D4TimeoutCertificate, keys map[string]ed25519.PrivateKey, ids ...string) {
+	tc.Signatures = map[string][]byte{}
+	for _, id := range ids {
+		tc.Signatures[id] = ed25519.Sign(keys[id], tc.Bytes())
+	}
+}
+func (tc D4TimeoutCertificate) Verify(tb D4TrustBase, g EpochGenesis) error {
+	if err := tb.Validate(); err != nil {
+		return err
+	}
+	if tc.Epoch != tb.Epoch || tc.Epoch != g.Epoch || tc.Round < g.Start || tc.HighQC.Epoch != g.Epoch {
+		return ErrD4Epoch
+	}
+	if tc.HighQC.Kind == D4AnchorParent {
+		if !bytes.Equal(tc.HighQC.GenesisID, g.ID()) || tc.HighQC.Round != g.Start-1 {
+			return ErrD4Anchor
 		}
-		return OldAssignment
-	default:
-		return OldAssignment
+	} else if tc.HighQC.Kind == D4OrdinaryParent {
+		if tc.HighQC.QC == nil || tc.HighQC.Round < g.Start || tc.HighQC.Round >= tc.Round || tc.HighQC.QC.Vote.Round != tc.HighQC.Round {
+			return ErrD4Proof
+		}
+		if e := tc.HighQC.QC.Verify(tb); e != nil {
+			return e
+		}
+	} else {
+		return ErrD4Proof
 	}
+	var weight uint64
+	for id, sig := range tc.Signatures {
+		m, ok := tb.member(id)
+		if !ok || !ed25519.Verify(m.Public, tc.Bytes(), sig) || math.MaxUint64-weight < m.Weight {
+			return ErrD4Proof
+		}
+		weight += m.Weight
+	}
+	if weight < tb.Threshold || tb.Threshold == 0 {
+		return ErrD4Quorum
+	}
+	return nil
+}
+func (b *D4Bootstrap) ApplyTC(tc D4TimeoutCertificate) error {
+	if !b.Installed {
+		return ErrD4Anchor
+	}
+	if e := tc.Verify(b.NewTrust, b.Anchor); e != nil {
+		return e
+	}
+	if tc.HighQC.Kind == D4OrdinaryParent && (b.HighestQC.Kind == D4AnchorParent || tc.HighQC.Round > b.HighestQC.Round) {
+		b.HighestQC = tc.HighQC
+	}
+	return nil
 }
 
-// FieldsAreKnown reports whether every field in a signed domain is known at
-// the time that phase signs. For the endorsement phase, ActivationRound and
-// SuccessorTRHash must be zero/nil — binding them there would be a
-// signature over state fixed only at Commit.
-func FieldsAreKnown(d SigDomain) bool {
-	if d.Phase == "endorse" {
-		return d.ActivationRound == 0 && d.SuccessorTRHash == nil && len(d.FrozenID) == 32
-	}
-	if d.Phase == "commit" {
-		// At commit, A* is known and bounded by pipelining; the successor
-		// TR is constructed now. Nothing here is future EVM state.
-		return d.ActivationRound != 0 && len(d.SuccessorTRHash) > 0 && len(d.FrozenID) == 32
-	}
-	return true
+type D4RecoveryHead struct {
+	Parent       D4Parent
+	Proof        *HandoffProof
+	Snapshot     *FullSnapshot
+	QC, CommitQC *D4QC
 }
 
-// CommitDomainFor returns the field set the commit signature binds — an
-// old-quorum QC over this domain is the authorisation the first successor
-// proposal carries.
-func (h *Handoff) CommitDomainFor() SigDomain {
-	return SigDomain{
-		Phase:           "commit",
-		Network:         h.Candidate.Network,
-		ProtocolVer:     h.ProtocolVer,
-		PredecessorHash: h.Candidate.PredecessorHash,
-		Attempt:         h.Candidate.Attempt,
-		FrozenID:        h.FrozenID,
-		MinActivation:   h.Candidate.MinActivation,
-		ActivationRound: h.ActivationRound,
-		SuccessorTRHash: h.SuccessorTRHash,
+func (h D4RecoveryHead) Verify(old, newTB D4TrustBase, g EpochGenesis) error {
+	if e := newTB.Validate(); e != nil || newTB.Epoch != g.Epoch || newTB.Network != g.Network {
+		return ErrD4Epoch
 	}
+	if h.Parent.Kind == D4AnchorParent {
+		if h.Proof == nil || h.Snapshot == nil || h.QC != nil || h.CommitQC != nil {
+			return ErrD4Anchor
+		}
+		v, e := VerifyHandoff(*h.Proof, old)
+		if e != nil {
+			return e
+		}
+		if e = CanBootstrapNew(v, g, *h.Snapshot); e != nil {
+			return e
+		}
+		if !bytes.Equal(h.Parent.GenesisID, g.ID()) || h.Parent.Epoch != g.Epoch || h.Parent.Round != g.Start-1 {
+			return ErrD4Anchor
+		}
+		return nil
+	}
+	if h.Parent.Kind != D4OrdinaryParent || h.QC == nil || h.CommitQC == nil || h.Proof != nil || h.Snapshot != nil || h.Parent.Epoch != g.Epoch || h.Parent.Round < g.Start || h.QC.Vote.Round != h.Parent.Round || h.CommitQC.Vote.Round != h.Parent.Round+1 || h.CommitQC.Vote.ParentRound != h.Parent.Round || h.CommitQC.Seal.Commit.Round != h.Parent.Round || !bytes.Equal(h.CommitQC.Seal.Commit.Root, h.QC.Vote.CurrentRoot) {
+		return ErrD4Proof
+	}
+	if e := h.QC.Verify(newTB); e != nil {
+		return e
+	}
+	if e := h.CommitQC.Verify(newTB); e != nil {
+		return e
+	}
+	return nil
+}
+func D4FallbackLeader(g EpochGenesis, members []string, round uint64) (string, error) {
+	if round < g.Start || len(members) == 0 {
+		return "", ErrD4Epoch
+	}
+	ordered := append([]string(nil), members...)
+	sort.Strings(ordered)
+	return ordered[(round-g.Start)%uint64(len(ordered))], nil
 }
 
-// sampleHandoffBody builds a representative next trust-base body for the
-// model. EarliestActivation is the candidate's A_min (known at Freeze); the
-// actual boundary A* is never in the body — it lives only in the
-// ActivatedTrustBase record.
-func sampleHandoffBody(predecessor []byte, minActivation uint64) TrustBaseBodyV2 {
-	ws := d3Assignment()
-	w, _ := ws.TotalWeight()
-	return TrustBaseBodyV2{
-		Version: TrustBaseVersion, NetworkID: 3, Epoch: 8, EarliestActivation: minActivation,
-		Members: ws, RootThreshold: RootQuorumThreshold(w),
-		StateSummary: rep(0x5A, 32), ChangeRecordHash: sha256Slice([]byte("candidate-8-attempt-0")),
-		PredecessorHash: predecessor,
+// Ordinary interval selection is separate from the typed old-suffix proof
+// path. An old QC at c>=A* can prove H but cannot authorize ordinary work.
+func D4VerifyOrdinaryQC(qc D4QC, tb D4TrustBase, start, end uint64) error {
+	if qc.Vote.Epoch != tb.Epoch || qc.Vote.Round < start || (end != 0 && qc.Vote.Round >= end) {
+		return ErrD4Epoch
 	}
+	return qc.Verify(tb)
 }

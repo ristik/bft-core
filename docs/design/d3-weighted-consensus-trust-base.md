@@ -120,10 +120,19 @@ normative:
 [ version, networkId, epoch, earliestActivation,
   [ [stakingID, nodeID, consensusKey, weight], … ]   ; members, sorted bytewise by nodeID
   rootThreshold,             ; must equal ⌊2·ΣWeight/3⌋+1
-  stateSummary,              ; agreed frozen transition state
-  changeRecordHash,          ; candidate body hash + committed handoff binding
+  stateSummary,              ; SHA256(CBOR(["UNICITY_HANDOFF_PREFREEZE_STATE",1,networkId,predecessorHash,attempt,preFreezeRootRound,preFreezeRootHash,lastCertifiedEVMParent]))
+  changeRecordHash,          ; SHA256(CBOR(["UNICITY_HANDOFF_CANDIDATE_CONTEXT",1,networkId,predecessorHash,attempt,candidateHash,A_min]))
   predecessorHash ]          ; v2 body identity of the current trust base (32 bytes)
 ```
+
+The pre-freeze snapshot is the root-ordered, fully drained snapshot selected
+before constructing this successor body; its root excludes every record
+containing this body or FrozenID. `candidateHash` hashes the fixed
+candidate/preparation payload, excluding the resulting trust-base body,
+FrozenID, commit record, A*, signatures and proofs. These inputs are known
+before Freeze and remain immutable. Neither field commits to a root containing
+its own BodyID. The later control record binds BodyID, FrozenID and actual
+activation separately.
 
 ### `earliestActivation` vs the actual boundary `A*` (joint with D4)
 
@@ -141,6 +150,11 @@ A consumer that used `A_min` as the boundary would switch epochs early — the t
 `TestD3_ActiveEpochFromActivationRecordNotBodyEpochStart` demonstrates the 50-round
 gap. This replaces the earlier `epochStart` field that D4's `Freeze` and D3's hash
 disagreed on.
+
+This D3 helper assumes the activation record has already been authenticated
+and installed. D4 additionally requires a verified checkpoint/anchor and
+epoch-qualified certificate ordering; an old suffix proof can have a seal
+round beyond A* without authorizing ordinary old-epoch work.
 
 ### First v1 → v2 transition
 
