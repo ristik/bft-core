@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"testing"
@@ -407,12 +408,14 @@ func TestD4_ProofNegatives(t *testing.T) {
 
 func TestD4_ProofRootBindingSignedWrongRoots(t *testing.T) {
 	f := fixture(t)
-	for _, name := range []string{"both_roots", "seal_root_only"} {
+	for _, name := range []string{"both_roots", "seal_root_only", "vote_root_only"} {
 		t.Run(name, func(t *testing.T) {
 			p := f.proof(t, 10)
 			wrong := bytes.Repeat([]byte{0xee}, 32)
-			p.CommitQC.Seal.Commit.Root = wrong
-			if name == "both_roots" {
+			if name != "vote_root_only" {
+				p.CommitQC.Seal.Commit.Root = wrong
+			}
+			if name != "seal_root_only" {
 				p.CommitQC.Vote.CurrentRoot = bytes.Clone(wrong)
 			}
 			D4SignQC(&p.CommitQC, f.keys, "a", "b", "c")
@@ -421,6 +424,21 @@ func TestD4_ProofRootBindingSignedWrongRoots(t *testing.T) {
 			}
 			_, e := VerifyHandoff(p, f.old)
 			assertIs(t, e, ErrD4Proof)
+		})
+	}
+}
+
+func TestD4_PreInstallOldUCOrder(t *testing.T) {
+	current := D4ShardUC{Shard: 1, Position: D4Position{7, 10}, InputRecord: []byte("IR"), SignerEpoch: 7, Valid: true}
+	for _, round := range []uint64{9, 10} {
+		t.Run(fmt.Sprint(round), func(t *testing.T) {
+			c := D4Consumer{Current: &current}
+			stale := current
+			stale.Position.Round = round
+			assertIs(t, c.Accept(stale), ErrD4Epoch)
+			if c.Current.Position != current.Position || len(c.History) != 0 || c.TimeoutCount != 0 || c.RevertCount != 0 {
+				t.Fatal("stale UC changed pre-install consumer")
+			}
 		})
 	}
 }
