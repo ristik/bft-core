@@ -1,321 +1,214 @@
 # D4 — Epoch handoff state machine
 
-Issue: [#6 D4](https://github.com/ristik/bft-core/issues/6) · Milestone: M0 ·
-Prereqs: [#3 D1](https://github.com/ristik/bft-core/issues/3),
-[#5 D3](https://github.com/ristik/bft-core/issues/5) · Status: **proposed for freeze**
+**Amendment 2026-09-25.** The accepted fixed-parent bootstrap would discard old
+commits after H. A tentative round fence can deadlock after the c+2 leader
+crashes. Empty old suffixes also let any holder of a later commit QC mint valid
+higher-round, same-IR old UCs. This revision uses a branch-local reconfiguration
+suffix, a typed epoch genesis, and epoch-qualified consumer ordering. It is a
+model and design revision; automatic PoS handoff remains disabled.
 
-D4 is the executable state machine for the root epoch handoff:
-`prepare → freeze → endorse → commit → activate → acknowledge`, plus
-`committed-abort`. It fixes the exact consensus rounds and message domains that
-determine actual activation and the frozen state summary — including root
-pipelining — such that **no signature depends on state unknown when it is
-signed**, and it makes the two headline safety properties checkable by
-exploration:
+Issue [#6](https://github.com/ristik/bft-core/issues/6). Decision:
+[ADR 0006](../adr/0006-epoch-handoff-state-machine.md). Executable model:
+[`evmroot/d4handoff.go`](../../evmroot/d4handoff.go),
+[`d4explore.go`](../../evmroot/d4explore.go),
+[`d4multireplica.go`](../../evmroot/d4multireplica.go), and
+[`d4progress.go`](../../evmroot/d4progress.go). The independent standard-library
+proof generator is
+[`generate_d4_vectors.go`](../../evmroot/testdata/generate_d4_vectors.go).
 
-- there are never **two effective successors** for one epoch;
-- there is **no root round at which both the old and the new assignment** may
-  authorise a governance block — no overlap, no gap.
+## 1. Safety boundary and ordered state
 
-Model: [`evmroot/d4handoff.go`](../../evmroot/d4handoff.go),
-[`evmroot/d4explore.go`](../../evmroot/d4explore.go). Vectors:
-[`evmroot/testdata/d4-vectors.json`](../../evmroot/testdata/d4-vectors.json).
-Decision record: [ADR 0006](../adr/0006-epoch-handoff-state-machine.md).
+There is one effective successor for an old epoch. The old committee may keep
+certifying empty consensus suffixes while the new committee starts; this is not
+overlapping authority to change shard state. All shard certification pauses
+from the terminal old state through verified checkpoint import and first new
+certification. No fixed wall-clock bound follows from the model.
 
-Specification basis: `docs/pos/specification/governance.tex` §"root handoff"
-(the ordered transition), §"Election", §"Extension"; `evm-partition.tex`
-§"Validator Set"; `appendix-evm.tex` §§ Candidate Record, Trust Base Record
-Derivation.
+The root orders `prepare → freeze → endorse → commit H → activate → acknowledge`.
+A committed abort applies only before H. The predecessor and attempt are held
+in root control state so attempts cannot each install an independent successor.
+Freeze signs `FrozenID`, which binds the D3 body, pre-freeze summary, last
+certified EVM parent, candidate, attempt and predecessor. Endorsement never
+binds the later `A*` or successor TR. The D3 body contains `A_min` and uses the
+non-circular pre-freeze and candidate-context hashes specified in D3; `A*`
+lives in H. H fixes network, old epoch, predecessor BodyID, attempt, FrozenID,
+next BodyID, `A*`, successor TR hash and its original ordered round `o`.
+`A* >= max(A_min,o+3)` is only a scheduling margin.
 
----
+Before an old voter signs, it executes or validates the proposal's certified
+parent chain and reads that branch's authenticated control state. If the parent
+contains H, the proposal is a suffix. Missing parent state causes recovery,
+never an assumption of no H. A suffix has no payload of any kind: no shard
+success, repeat, no-quorum or timeout request; no EVM/governance transaction;
+no prepare, freeze, commit or abort; no unknown kind. Production, execution,
+`BlockStore.Add`, recovered pending blocks and every honest pre-vote check
+apply this rule. H's own ordered block may contain prior deterministic changes;
+those changes are included in `R_H` before installing H.
 
-## 1. Phases
+Execution of a suffix is the identity on *all* shard and control state:
+IR, TR, epochs and rounds, state/input/block hashes, fees/stats, membership,
+configuration, shard creation/removal and pending configuration. Automatic
+`nextEpoch`, round-selected activation and timeout IR/TR updates are deferred
+to the first ordinary new block. Root rounds, timestamps, QCs and TCs can
+advance. The suffix predicate is branch-local; ordinary BFT locking decides
+which conflicting branch an honest signer may vote for. Durable honest locks
+survive restart. For weighted total `W` and quorum `Q`, certified H contains
+honest refusing weight greater than `W-Q`; Byzantine equivocation cannot form
+a payload-descendant QC. Root ordering and BFT safety exclude a competing
+committed H or abort. The complete ancestor shard state and old certificate
+history survive checkpoint import; abandoned speculative work need not.
 
-| Phase | What is committed | Under whose quorum | New durable fields |
-|---|---|---|---|
-| **Prepare** | prepare record; admission of new old-assignment governance proposals closed; in-flight work drained or cancelled | old root quorum | — |
-| **Freeze** | last certified EVM block/state; frozen root state summary; next trust-base body constructed (D3 v2 identity) | old root quorum (same record as Prepare) | `FrozenSummary`, `LastEVMParent`, `BodyIdentity` |
-| **Endorse** | old validators endorse **only the agreed body**, domain-separated signature, durable non-equivocation | old-epoch **unique signer weight ≥ ⌊2Wₒₗd/3⌋+1** | `EndorsementWeight`, `EndorsementDomain` |
-| **Commit** | the endorsed handoff: new body + **actual activation boundary A\*** + successor technical record | old consensus rules | `CommitRound`, `ActivationRound (A*)`, `SuccessorTRHash` |
-| **Activate** | the new root set resumes from the certified handoff state | new set, gated on the **committed** A* | phase only |
-| **Acknowledge** | first new-assignment governance block's system op acknowledges the handoff, closing the old assignment's liabilities | new assignment | `AckEVMRound` |
-| **Committed-abort** | old-quorum committed abort of an **incomplete** prepare (pre-Commit only) | old root quorum | `AbortReason` |
+The old quorum is needed until a commit proof and full state are available. A
+lost c+2 leader or QC is bypassed by old timeouts and arbitrarily later
+consecutive empty blocks, even beyond `A*`. There is no old round fence.
+Permanent old-quorum loss before proof stalls safely; after proof/state
+availability new progress needs only the new quorum and data availability.
 
-Progress is strictly `Prepared → Frozen → Endorsed → Committed → Activated →
-Acknowledged`. `Aborted` is reachable only from `Prepared`/`Frozen`/`Endorsed`.
-No phase can be skipped — the exhaustive interleaving check (§4) confirms that of
-all 24 orderings of the four core phases, only the canonical order reaches
-`committed`.
+## 2. Signed control leaf and exact finality proof
 
-## 2. Rounds, pipelining, and "no signature over unknown future state"
+Reserve `P_CTL` in a versioned network profile before wire implementation.
+The model's profile 2 uses `0xfffffffe` only as a fixture. Orchestration,
+registration, normal shard requests and shard timeout scheduling reject the
+reserved key. It is root-maintained control data, never a UC destination.
 
-The candidate carries `A_min` (earliest activation bound) — **not** a prediction
-of the actual round (`appendix-evm.tex` §"Candidate Record").
+The deterministic CBOR preimages are:
 
-### The endorsement binds the whole frozen state (`FrozenID`)
-
-`Freeze` does not store `frozenSummary` / `lastEVMParent` loosely next to the
-body. It computes
-
+```text
+ControlState = ["UNICITY_ROOT_HANDOFF_STATE",1,network,e,predecessorBodyID,
+                attempt,phase,orderedRound,recordBytes,previousControlDigest]
+RecordID = SHA256(CBOR(["UNICITY_ORDERED_HANDOFF_RECORD",1,network,e,
+            predecessorBodyID,attempt,kind,orderedRound,recordPayload]))
 ```
-FrozenID = SHA-256( CBOR([ "UNICITY_HANDOFF_FROZEN",
-                            bodyIdentity, frozenSummary, lastEVMParent,
-                            candidateHash, attempt, predecessorHash ]) )
+
+The record payload excludes ID, signatures and proof. The control leaf's value
+is `SHA256(CBOR(ControlState))`, included under the existing
+`UnicityTreeData(P_CTL,value)` and indexed Merkle tree hashing. Genesis,
+execution, checkpoint/recovery and certificate-tree reconstruction must all
+include exactly one such leaf. Recovery ShardInfo carries it as typed control
+data with no shard UC/config. Reconstruct all shard leaves without scheduled
+config activation and compare the whole computed root to the authenticated
+committed root. Missing, duplicate or substituted control data is refused.
+
+A handoff proof contains profile version, canonical record, ControlState,
+`path_CTL`, and the old `QC(c+1)`; `QC_c` is optional. Verify the control path
+with **both** its leaf key and `IndexTreeOutput` lookup key fixed to `P_CTL`.
+Recompute RecordID and digest; check network, predecessor, attempt, phase,
+original `o`, body, FrozenID, `A*`, TR and full snapshot. Verify unique old
+signatures by authenticated weight, version and signed
+`PreviousHash=Hash(VoteInfo)`. The commit QC must have
+`VoteInfo.(round,epoch,parentRound)=(c+1,e,c)` and
+`LedgerCommitInfo.(round,epoch,hash)=(c,e,R_H)` with nonzero c and a valid
+timestamp. There is no genesis or endorsement quorum exemption. If provided,
+`QC_c` is checked independently against the same epoch, state and timestamp.
+A gapped QC with no commit seal proves nothing.
+
+Normally `c=o`. If an earlier QC is lost, consecutive later empty blocks can
+commit H's unchanged state at `c>o`; the control leaf retains `o` and
+`R_c=R_H`. Verification accepts that proof even when `c>=A*`. No condition
+`c+1<A*` is permitted.
+
+## 3. Typed epoch genesis and new voting
+
+Derive the *virtual* anchor, never an ordinary QC or old block, from the
+verified proof, next body and complete shard checkpoint:
+
+```text
+G = CBOR(["UNICITY_EPOCH_GENESIS",1,network,e+1,nextBodyID,A*,
+          RecordID,o,R_H,H(ControlState),FrozenID,successorTRHash])
+GenesisID = SHA256(G)
 ```
 
-and the endorsement signs **`FrozenID`**, not the bare body identity. Two
-handoffs that freeze the *same* body with different frozen summaries or EVM
-parents get **different** `FrozenID`s, so a single endorsement can never be
-counted toward divergent handoff states
-(`TestD4_FreezeBindsFrozenStateIntoEndorsedIdentity`). `Freeze` also rejects a
-body whose `EarliestActivation != A_min` or whose predecessor ≠ the candidate's,
-and a missing frozen summary / parent.
+The logical parent `(e,o,R_H,RecordID)` is checkpoint identity, not an old
+block hash. Signature subsets, optional `QC_c`, proof seal round `c`, and
+arrival order do not enter `GenesisID`. Its typed slot is `A*−1`; it has no
+author, timestamp, UC or commit subject. A verified anchor and full snapshot
+are installed once per `(e+1,GenesisID)` together with durable new-epoch
+safety/pacemaker state. Every new validator starts at **exactly `A*`**,
+regardless of `c`; new-epoch timeouts may advance the first successful QC.
+Later old proofs never raise the floor, reset votes/locks or replace a new QC.
 
-### The trust-base body records `A_min`, not `A*`
+Proposal, timeout and TC highQC carry a tagged `EpochAnchor | OrdinaryQC`.
+The anchor tag binds GenesisID, epoch and slot into signed timeout bytes;
+new-body signatures and quorum are verified. It ranks below an ordinary new
+QC. Old QCs and TCs cannot advance the new pacemaker. A typed recovery
+CommittedHead includes proof and full checkpoint; ordinary heads keep both
+required QCs. Pending recovery accepts only same-new-epoch blocks extending
+the anchor or verified new QCs. The first proposal references the anchor, and
+`isCommitCandidate` yields no commit subject for it. `BlockTree.Commit` also
+rejects the anchor before pruning or UC generation. Only a consecutive pair
+of ordinary new blocks commits its ordinary parent. A timeout gap delays that
+commit under the usual rule.
 
-D3's v2 body hashes `EarliestActivation` (renamed from `EpochStart` in the joint
-D3/D4 revision). To keep the body identity stable from Freeze,
-`EarliestActivation == A_min` (known at Freeze). The **actual** boundary `A*` is
-fixed only at Commit and lives **only in the `ActivatedTrustBase` commit
-record** — it is never in the body, so fixing it later cannot change any
-endorsed identity. This removes the circularity the review flagged.
+When certified ancestry lacks the full new-epoch reputation history, root
+leadership is deterministic round-robin over ordered new root members:
+`members[(r-A*) mod len(members)]`. The successor TR governs EVM leadership,
+not root leadership. The existing old-highQC extension/broadcast path must be
+replaced before runtime admission. Joining validators fetch old proof, lineage,
+next body, full snapshot and durable auxiliary state from any peer/archive and
+verify them before signing; a control-leaf path alone proves no availability.
+Inherited LastCRs are independently verified with lineage-verified
+`GetByEpoch(uc.GetRootEpoch())` and the expected shard identity. Missing bodies
+cause fetch or refusal, never fallback to the current body. This historical
+verification grants no current authority. The control leaf is not a UC.
 
-| Signed message | Fields it binds | All known at signing? |
-|---|---|---|
-| endorsement | `network, protocolVersion, predecessorHash, attempt, FrozenID, A_min` (= body `EarliestActivation`) | yes. **No `A*`, no successor TR.** |
-| commit | `… + A*, successorTRHash` | yes — `A*` is fixed now, `A* ≥ A_min` and `A* ≥ commitRound + PipelineDepth`; the successor TR is constructed now |
+## 4. Shard consumers and terminal repeats
 
-### Finality is the root 2-chain, not a round count
+All ordinary accepted UCs retain `seal epoch = signer epoch`. Shard nodes,
+ureth admission/import/replay and `SealRegistry` compare authenticated
+`(rootEpoch,rootRound)` lexicographically and persist the installed transition
+and epoch floor atomically. A verified e→e+1 transition is required; arbitrary
+higher epochs are refused. Within an epoch keep round and non-equivocation
+checks. Across that authorized boundary preserve shard-state continuity and
+canonical IR equality without a scalar-root-round rejection. Thus a new
+`(e+1,A*)` UC follows an old `(e,100)` UC even if `A*=13`.
 
-`PipelineDepth` is only the minimum gap `A*` must leave after the commit round so
-`A*` is not scheduled inside the reorg window. It does **not** establish
-finality.
+A later empty-suffix commit QC can be used by *any* holder to mint valid old
+same-IR UCs at unbounded `c'`. Nodes may flush ancestor changes when they
+locally first commit H, with their own seal c; persisting/clearing Changed
+prevents local duplicate emission, not external minting. Before proof/snapshot
+installation, a higher-round same-IR old UC is deferred for classification and
+must not trigger timeout or revert. With proof, an old UC at seal `>=o` whose
+root is `R_H` and IR equals that shard's canonical `IR_H` is terminal
+historical evidence/repeat. Missing terminal state is imported only through
+verified checkpoint import. Once proof is installed, no old UC becomes current,
+even before new certification is ready. Old signatures and high numeric rounds
+cannot replace a new UC. Historical old LastCRs remain available.
 
-The descendant `CommitQC` is **not fabricated** in the model. It is derived by a
-**checked mapping** from an authenticated `RootCommitChain` — the verifier's view
-of the root chain's own `LedgerCommitInfo` commit stream, consumed as a **verified
-external precondition**:
+The first ordinary new block applies deferred `nextEpoch` under authenticated
+shard configuration. It preserves IR/TR/LastCR semantics, exact fee/stat/config
+state and does not set Changed or emit a UC merely for `nextEpoch`. Replay and
+restart cannot apply it twice. Subsequent payload certification follows normal
+Changed rules. The frozen EVM parent remains the last certified EVM parent;
+new EVM work waits for the authenticated transition/ack in `SealRegistry.open`,
+executed first and bound to FrozenID/TR. Both ureth and contract changes are
+mandatory before runtime admission.
 
-`DeriveFinalityEvidence(chain, commitRecordID, oldThreshold)` walks the chain and
-returns the descendant `CommitQC` **only** if:
+Normal proposal/vote/QC/TC epoch selectors, including embedded highQCs, obey
+authenticated intervals. Old suffix proof/recovery is a separately typed old
+epoch path allowed past `A*`, with no ability to authorize new work. Neither
+an unconditional old-round cutoff nor epoch-only key selection is sufficient.
+Legacy mixed-tip transitions remain disabled. There is no cross-epoch UC
+witness, changed `GetRootEpoch` contract, or new-quorum commit of an old block.
 
-| Requirement | Rejects |
+## 5. Executable review gate
+
+The model exercises `CanVoteOldSuffix`, `VerifyHandoff`, `CanBootstrapNew`,
+`CanAcceptShardUC`, actual signer sets/locks, checkpoint reconstruction and
+cross-replica committed histories. Tests use `errors.Is` sentinels and isolated
+mutations. The V2 vectors independently generate the control path, signed
+VoteInfo/seal, genesis bytes and the D3 pre-freeze/candidate-context hashes;
+old vector encodings are never reinterpreted.
+
+| Trace | Key observation |
 |---|---|
-| the chain is hash-linked (`ParentID == predecessor.CommitID`) and consecutive-round throughout | a broken / gapped chain |
-| every entry is quorate (`QuorumWeight ≥ ⌊2Wₒₗd/3⌋+1`) and has a 32-byte `CommittedRootHash` | an under-quorum or rootless commit |
-| the chain contains `commitRecordID` **and a descendant that extends it** | a 1-chain (no descendant) / a commit not in the chain |
+| `suffix_payload_refused`, `payload_bearing_recovered_suffix`, `next_epoch_carry_over` | All payload/config/timeout/state mutation routes refuse on an old suffix; deferred work applies once in new consensus. |
+| `suffix_payload_no_qc`, `leader_c_plus_2_crash` | Weighted honest blocking survives Byzantine equivocation/restart; old TCs pass A* and later consecutive suffixes prove H. |
+| `deterministic_genesis`, `different_c_fixed_start`, `new_bootstrap_timeout`, `anchor_commit_refused` | Alternate c/signatures yield one G and fixed A* start; anchor never commits; new locks persist. |
+| `consumer_epoch_and_round`, `minted_late_suffix_uc` | Shard, ureth and registry consumer models quarantine/reclassify old repeats; `(e+1,13)` follows `(e,100)`. |
+| `proof_negatives`, `missing_forged_control`, `mixed_historical_lastcr` | Record, leaf/path, QC, signer, checkpoint and historical-body substitutions refuse. |
+| `pause_measurement` | Ordered timestamps report last old UC, proof, snapshot, first new QC/UC and EVM ack in normal and crashed-leader traces. |
 
-The returned QC's `CommittedRootHash` is **taken from the chain**, never
-synthesised. `FinalizeCommit(descendant, oldThreshold)` then re-checks
-`ParentCommitID == this.CommitRecordID` (`errFinalityLink`),
-`Round == CommitRound + 1` (`errFinalityGap`), `QuorumWeight ≥ threshold`
-(`errFinalityQuorum`), `len(CommittedRootHash) == 32` (`errFinalityRoot`) — so a
-hand-built unrelated / gapped / under-quorum QC is still rejected on the direct
-path. `FinalizeFromRootChain` is the positive one-call helper.
-
-`Commit` records this handoff's own `SelfCommitQC` (parent = the pre-handoff
-committed head, weight = the endorsement weight). **`Activate` requires
-`CommitFinalized` and `observedRootRound ≥ A*`** — a larger round number on its
-own is `errCommitNotFinal` (`TestD4_ActivationRequiresFinalizedCommit`, which
-exercises the unrelated-parent, timeout-gap and under-quorum negatives). From any
-pre-Commit phase, `Activate` returns `errNoCommit`.
-
-### First successor proposal — the bootstrap step
-
-`FirstSuccessorProposal()` (available only from a **finalised** commit) makes the
-bootstrap explicit — who produces the first proposal before any new-assignment
-certified round `≥ A*` exists:
-
-- **Leader**: the identity in the committed successor technical record
-  (`SuccessorTRHash`), fixed at Commit under the old quorum.
-- **BuildsOnRoot**: the last **old-set finalised committed root** — this
-  handoff's `FinalityEvidence.CommittedRootHash`. Not a new-set round; none
-  exists yet.
-- **Authorisation**: the finalised commit chain — `CommitRecordID`,
-  `SelfCommitQC` and the descendant `FinalityEvidence`. The new set carries this
-  proof; it does not need the old set online.
-- **ProposedRound**: `A*`. Once this proposal is certified it **is** the first
-  certified round `≥ A*` — the activation round.
-
-- **Timeout gaps**: if no block is certified at exactly `A*`, the certified root
-  round clock (D1) crosses `A*` and the **first certified round `≥ A*` under the
-  new assignment** (this proposal, or a later one) is the activation. A
-  repeat/timeout certificate between the commit and `A*` installs nobody
-  (`Authorized` still returns `old` for rounds `< A*`, `new` for `≥ A*`, on a
-  committed+finalised replica only).
-
-## 3. Authorisation function (the safety core)
-
-`Authorized(observedRootRound)` returns which assignment may authorise a
-governance block whose imported root round is `observedRootRound`:
-
-```
-phase ∈ {Committed, Activated, Acknowledged}:
-    observedRootRound  <  A*  ->  old
-    observedRootRound  >= A*  ->  new
-otherwise (pre-Commit, or Aborted):    old
-```
-
-- **No overlap**: the boundary is a single `≥` comparison against one `A*`.
-- **No gap**: every round maps to exactly one side.
-- **Abort ⇒ old for all rounds**: an aborted attempt names no successor, so it can
-  never authorise a new block.
-- **Extension does not install a successor**: until a handoff is committed the
-  incumbent set remains authoritative; a timeout never installs a successor
-  (`governance.tex` §"Extension").
-
-## 4. Exploration and the fault scenarios
-
-`checkInvariants` evaluates, after every step of every scenario, over a window of
-probe rounds:
-
-| Invariant | Statement |
-|---|---|
-| `single_successor` | an aborted handoff carries no successor technical record |
-| `no_overlap_no_gap` | `Authorized(r)` matches the §3 table for every probe round `r` |
-| `no_future_signature` | once set, the endorsement domain binds no post-commit field |
-| `activation_gap` | `A* ≥ commitRound + PipelineDepth` (reorg-window gap, not finality) |
-| `activation_requires_final_commit` | `Activated`/`Acknowledged` implies `CommitFinalized` |
-
-### Adversarial multi-replica exploration (`multi_replica_exploration`)
-
-The single-`Handoff` scenarios exercise **one** replica's phase API. The
-adversarial model (`d4multireplica.go`) states the fault the handoff must
-survive and checks that safety holds under it. The first-review version used a
-**global signer lock** — no signer, honest or Byzantine, could ever be counted
-for two conflicting statements. The re-review (#80) rejected that: it assumes
-away Byzantine equivocation. The model now:
-
-- gives **honest** signers durable local state — each signs **at most one** of
-  two conflicting statements (a per-honest-signer lock, not a global one);
-- names an explicit **Byzantine** set whose authenticated weight is `≤ f_W =
-  W − ⌊2W/3⌋ − 1` and lets it **equivocate freely** — sign *both* statements;
-- derives every quorum from the **actual distinct authenticated signer set**
-  via `WeightSet.SignerWeight`, never a supplied cumulative number;
-- enumerates **every** assignment of the honest signers to `{X, Y, abstain}`
-  (`3^|honest|`) and records the largest number of the two statements that
-  simultaneously reach `⌊2W/3⌋+1`.
-
-| Property | Statement | Result |
-|---|---|---|
-| G2 | over every honest assignment, with the Byzantine set on both sides, **at most one** of two conflicting statements reaches a quorum — applied to two `FrozenID`s, two `CommitRecordID`s (conflicting `A*`), and commit-vs-abort of one attempt | `max_simultaneous_quorums = 1` in every run; at the `f_W` bound the closest split is one side at 17, the other at 14 |
-| G3 | per-replica commit tuples `(replica, FrozenID, A*, commitRound, CommitRecordID)` are kept **un-deduplicated** and must all agree | holds for `replica_commit_tuples_agree`; the counterexample is **flagged**, not silently merged |
-| G4 | activation requires a `CommitFinalized` set only by a descendant `CommitQC` **derived from an authenticated `RootCommitChain`** — the root 2-chain, not a round count | holds (`activation_requires_finalized_commit`) |
-| G5 | (conditional) every record delivered, no abort ⇒ every replica reaches `acknowledged` | `reached` (`conditional_liveness_all_delivered`) |
-
-`G1` ("no signer ever equivocates") is **deliberately not a property**:
-Byzantine signers do equivocate, and safety must not depend on their not doing
-so — the reason the global lock was wrong.
-
-Runs: `endorsement_quorum_honest_only`, `endorsement_quorum_byzantine_below_bound`
-(weight 6), `endorsement_quorum_byzantine_at_bound` (weight 7 = `f_W`),
-`commit_quorum_conflicting_activation_rounds` (two `CommitRecordID`s for one
-`FrozenID` with `A*` = 12 and 15 — the mechanism that makes finding 1's
-scenario unreachable), `commit_versus_abort_exclusion`,
-`replica_commit_tuples_agree`, `conflicting_activation_round_counterexample`
-(`is_counterexample: true` — replica A committed `A*`=12, replica B `A*`=15;
-the tuple check must flag the disagreement), `activation_requires_finalized_commit`
-(now exercises the unrelated-parent and timeout-gap finality negatives and the
-`FirstSuccessorProposal` bootstrap), `conditional_liveness_all_delivered`.
-
-### Handoff progress / abort model (`handoff_progress_and_abort`)
-
-The enumeration above is a *static* safety fact. The third-review version of this
-section invented a bespoke "handoff view-change" protocol; the fourth review
-showed it did not hold for its own state machine — a **Byzantine handoff leader**
-can send `X` to signer `a` and `Y` to `c,d`, and a signer that "follows the
-leader" accepts whatever it received. *Following a leader is not agreement.*
-
-The fix is to **stop inventing a second consensus**. The **freeze record — like
-every handoff record — is committed by the existing root BFT consensus** before
-any endorsement, and root consensus commits **at most one freeze per (attempt,
-predecessor)** (quorum intersection at the root level). So:
-
-- An honest signer endorses a `FrozenID` **only if it carries a `FrozenOrdered`
-  proof** — the verifier's authenticated view of the root commit that ordered
-  that exact freeze record (`FrozenID` is the full
-  `frozenID(bodyIdentity, frozenSummary, lastEVMParent, candidateHash, attempt,
-  predecessor)` hash — the candidate alone does not determine it). A Byzantine
-  handoff leader **cannot obtain** such a proof for two different `FrozenID`s.
-- Honest signers hold **durable local state**, checked **unconditionally**: once
-  they endorsed `F` for attempt `j` they will not endorse a different value for
-  `j` (a restart reloads this), and they will not sign an abort of a committed
-  `F`.
-- Byzantine signers (weight ≤ `f_W`) may equivocate.
-
-| Run | Shows |
-|---|---|
-| `byzantine_leader_cannot_split_honest_weight` | the leader sends `X` to `a`, `Y` to `c,d`; only `X`'s freeze was root-ordered. `a` endorses `X`; `c,d` **reject `Y`** (no `FrozenOrdered` proof) and adopt `X`. `X` reaches `10+5+2 = 17`; `Y` gets only Byzantine weight 7. **No honest weight on `Y`.** |
-| `two_root_ordered_frozen_ids_is_a_root_violation` | two quorate `FrozenOrdered` proofs for one `(attempt, predecessor)` slot is a **root-consensus violation** (two root quorums for one commit slot) — the model flags it; the handoff machine does not have to resolve it. |
-| `durable_state_survives_restart` | `a` endorses `X`, restarts, is handed a valid-looking `FrozenOrdered` proof for `Y` → **still refused**; re-endorsing the same `X` is allowed. |
-| `commit_then_abort_cannot_reach_quorum` | `X` endorsed and committed; honest signers refuse an abort of a committed attempt; only Byzantine weight 7 < 17 is available. |
-| `combined_delay_restart_equivocation_abort` | one execution: out-of-order endorsements, `root-a` restart blocking a switch to `Y`, Byzantine `b,e` equivocating, then a late abort — `X` reaches 17 with nothing on `Y`, the abort gets only weight 7. |
-
-All hold (`all_progress_properties_hold`); `TestD4_HandoffProgressAndAbortModel`
-(which also directly exercises `honestSigner.endorse` — a `FrozenID` with no
-proof is refused, and a post-restart switch is refused).
-
-### Scenarios (all in `d4-vectors.json`, `phase_ok` and `invariants_ok` true for each):
-
-| Scenario | What it exercises | Terminal phase |
-|---|---|---|
-| `delayed_signatures` | endorsement crosses the threshold in a later batch, before commit | acknowledged |
-| `asymmetric_delivery` | a replica never receives the commit record → cannot self-activate, keeps old set authoritative | endorsed |
-| `missed_earliest_activation` | observed round passes `A_min` before commit; activation waits for committed `A*` | acknowledged |
-| `crash_at_prepared` / `crash_at_frozen` / `crash_at_endorsed` / `crash_at_committed` | resume from the durable phase; the next phase cannot be skipped (last one resumes and activates) | prepared / frozen / endorsed / activated |
-| `old_quorum_loss_after_prepare` | endorsement can never reach the threshold → stall; safety over progress; no path to Activated | frozen |
-| `committed_abort_vs_late_activate` | a committed handoff cannot be aborted | committed |
-| `aborted_then_activate_rejected` | a pre-commit abort kills attempt `j`; `Activate` impossible after | aborted |
-| `incomplete_prepare_then_clock` | round counter reaches the proposed start with only a prepare → no activation | prepared |
-| `incomplete_prepare_then_rest_insertion` | a locally submitted trust base (Activate with no committed record) is rejected | prepared |
-
-Plus the exhaustive check: all 24 phase-order permutations; `only_canonical_commits`
-and `no_early_new_authorization` both true.
-
-Under the declared synchrony/availability assumptions (all messages eventually
-delivered, no permanent crash, old quorum available through Commit) the machine
-reaches `acknowledged` — `delayed_signatures` and `missed_earliest_activation`
-are the witnesses. Outside them (`asymmetric_delivery`, `old_quorum_loss_after_prepare`)
-it stalls with the old set authoritative rather than proceeding — safety
-preserved, recovery not claimed.
-
-## 5. Candidate binding, cancellation, disposition
-
-- **Attempt binding**: `Candidate.Attempt = j`, `PredecessorHash = h_e` (the
-  current trust-base body identity). A replacement after an abort is a new
-  candidate with `Attempt = j+1` and the same predecessor. "An agent cannot
-  choose whichever historical candidate it prefers" — the predecessor + attempt
-  pin it.
-- **Cancellation** requires a root-certified abort of any prepared handoff plus
-  an EVM acknowledgement that releases its reservations. Only one candidate is
-  pending per epoch.
-- **Outstanding-proposal disposition**: at Prepare, in-flight old-assignment
-  governance work is drained or cancelled; a cancelled proposal is never revived
-  under the new assignment.
-- **Last certified EVM parent**: recorded at Freeze; the first new-assignment
-  governance proposal builds on it.
-- **Successor technical record**: bound at Commit; the new set resumes under the
-  leader it names.
-- **Joining-node readiness**: a joining node must synchronise the certified root
-  and EVM states before its votes count (`governance.tex` §"root handoff").
-
-## 6. Acceptance mapping
-
-| D4 acceptance clause | Evidence |
-|---|---|
-| model exploration (not a phase-API test) shows two effective successors / old+new authorisation of the same extension cannot occur, across competing replicas with quorum intersection under Byzantine equivocation / attempts / delayed commit vs abort | §4 adversarial model — G2 (at most one of two conflicting `FrozenID`s / `CommitRecordID`s / commit-vs-abort reaches a quorum, honest signers split every way, Byzantine set ≤ `f_W` on both sides), G3 (per-replica commit tuples kept un-deduplicated and required to agree; conflicting-`A*` counterexample flagged); `TestD4_MultiReplicaGlobalInvariants` |
-| delayed signatures, asymmetric delivery, missed earliest activation, crash at every phase, old quorum loss, committed abort vs late activate | scenario table §4 (`asymmetric_delivery`, `old_quorum_loss_after_prepare`, `crash_at_*`, `committed_abort_vs_late_activate`) |
-| freeze authenticates the state it endorses — one endorsement cannot authorise divergent handoff states | §2 `FrozenID` (binds body + frozen summary + parent + candidate + attempt); `TestD4_FreezeBindsFrozenStateIntoEndorsedIdentity` |
-| finality evidence is a checked mapping from real root QCs, not a fabricated hash | §2 "Finality is the root 2-chain" — `DeriveFinalityEvidence(RootCommitChain, commitRecordID, threshold)` requires a hash-linked, consecutive-round, quorate chain containing the commit **and a descendant**; `CommittedRootHash` comes from the chain; negatives (1-chain, gap, under-quorum, commit-not-in-chain) in `TestD4_ActivationRequiresFinalizedCommit` |
-| pipeline/activation is not circular; who produces the first successor proposal and which old-quorum proof authorises it; behaviour under timeout gaps | §2 "First successor proposal — the bootstrap step" (`FirstSuccessorProposal` — leader = successor TR, builds on the finalised committed root, at `A*`); `TestD4_ActivationRequiresFinalizedCommit` |
-| the model exercises the handoff progress/abort rule against equivocating leaders and restarts, not static quorum arithmetic | §4 "Handoff progress / abort model" — the freeze is committed by the **existing root consensus** (`FrozenOrdered`), so a Byzantine handoff leader cannot split honest weight; unconditional durable per-signer state (restart-safe); commit-vs-abort exclusion; `handoff_progress_and_abort`; `TestD4_HandoffProgressAndAbortModel` |
-| an incomplete prepare cannot activate through local REST insertion or clock passage | `incomplete_prepare_then_clock`, `incomplete_prepare_then_rest_insertion`; `TestD4_NoActivationWithoutCommit` |
-| under declared assumptions the model completes a handoff; outside them it preserves safety without claiming recovery | §4 G5 (`reached` vs `held-safe`); scenario `old_quorum_loss_after_prepare` |
-| no signature depends on unknown future state | §2; `FieldsAreKnown` (endorsement binds `FrozenID`, not `A*`); `TestD4_EndorsementBindsNoFutureState` |
-
-## 7. Reproduce
-
-```
-go test ./evmroot/... -run TestD4
-go run ./evmroot/cmd/d4vectors            # print the scenario set
-go run ./evmroot/cmd/d4vectors -update    # regenerate testdata/d4-vectors.json
-```
+The inert model does not establish runtime completeness. Runtime review must
+cover suffix identity through every executor path, typed timeout/recovery
+plumbing, historic LastCR verification, and consumer suppression of late old
+UCs. The old quorum is a liveness dependency only until proof/state delivery.

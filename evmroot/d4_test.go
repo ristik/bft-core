@@ -2,331 +2,610 @@ package evmroot
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/ed25519"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"os"
+	"reflect"
 	"testing"
+	"time"
+
+	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	base "github.com/unicitynetwork/bft-go-base/types"
 )
 
-func TestD4_AllScenariosMeetExpectations(t *testing.T) {
-	for _, s := range D4Scenarios() {
-		if !s.PhaseOK {
-			t.Errorf("%s: final phase %s, want %s", s.Name, s.FinalPhase, s.WantPhase)
+type d4Fixture struct {
+	body     TrustBaseBodyV2
+	record   OrderedHandoffRecord
+	snapshot FullSnapshot
+	old      D4TrustBase
+	keys     map[string]ed25519.PrivateKey
+}
+
+func fixture(t *testing.T) d4Fixture {
+	t.Helper()
+	ws := d3Assignment()
+	w, _ := ws.TotalWeight()
+	pred := bytes.Repeat([]byte{0x11}, 32)
+	prefreeze := D4PreFreezeSummary(3, pred, 1, 9, bytes.Repeat([]byte{0x88}, 32), bytes.Repeat([]byte{0x99}, 32))
+	candidateContext := D4CandidateContextHash(3, pred, 1, bytes.Repeat([]byte{0xaa}, 32), 12)
+	body := TrustBaseBodyV2{Version: 2, NetworkID: 3, Epoch: 8, EarliestActivation: 12, Members: ws, RootThreshold: RootQuorumThreshold(w), StateSummary: prefreeze, ChangeRecordHash: candidateContext, PredecessorHash: pred}
+	id := body.Identity()
+	r := OrderedHandoffRecord{Network: 3, Epoch: 7, Attempt: 1, OrderedRound: 10, ActivationRound: 13, PredecessorBodyID: pred, FrozenID: bytes.Repeat([]byte{0x44}, 32), NextBodyID: id[:], SuccessorTRHash: bytes.Repeat([]byte{0x55}, 32), Kind: "commit"}
+	ctl := ControlState{Network: 3, Epoch: 7, Attempt: 1, OrderedRound: 10, PredecessorBodyID: pred, Phase: "committed", RecordBytes: r.Bytes(), PreviousDigest: bytes.Repeat([]byte{0x66}, 32)}
+	shard := ShardSnapshot{Partition: 1, InputRecord: []byte("IR-H"), TechnicalRecord: []byte("TR-H"), LastCR: []byte("old-last-cr"), PendingConfig: []byte("cfg-next"), FeeStats: []byte("fees")}
+	shard.Root = shard.CalculatedRoot()
+	s := FullSnapshot{Control: ctl, Shards: []ShardSnapshot{shard}}
+	old, keys := D4FixtureTrustBase(7, map[string]uint64{"a": 1, "b": 1, "c": 1, "d": 1})
+	return d4Fixture{body, r, s, old, keys}
+}
+func (f d4Fixture) proof(t *testing.T, c uint64) HandoffProof {
+	t.Helper()
+	root, e := f.snapshot.Root()
+	if e != nil {
+		t.Fatal(e)
+	}
+	path, e := f.snapshot.ControlPath()
+	if e != nil {
+		t.Fatal(e)
+	}
+	qc := D4QC{Vote: D4VoteInfo{Round: c + 1, Epoch: 7, ParentRound: c, Timestamp: 1700000000, CurrentRoot: bytes.Clone(root)}, Seal: D4Seal{Commit: D4LedgerCommitInfo{Network: 3, Round: c, Epoch: 7, Timestamp: 1699999999, Root: bytes.Clone(root)}}}
+	D4SignQC(&qc, f.keys, "a", "b", "c")
+	record := f.record
+	record.NextBodyID = bytes.Clone(record.NextBodyID)
+	record.FrozenID = bytes.Clone(record.FrozenID)
+	record.PredecessorBodyID = bytes.Clone(record.PredecessorBodyID)
+	record.SuccessorTRHash = bytes.Clone(record.SuccessorTRHash)
+	return HandoffProof{Profile: D4Profile, Record: record, Control: f.snapshot.Control, ControlPath: path, CommitQC: qc, Snapshot: f.snapshot}
+}
+func mustVerified(t *testing.T, p HandoffProof, old D4TrustBase) VerifiedHandoff {
+	t.Helper()
+	v, e := VerifyHandoff(p, old)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return v
+}
+func assertIs(t *testing.T, e, target error) {
+	t.Helper()
+	if !errors.Is(e, target) {
+		t.Fatalf("got %v, want %v", e, target)
+	}
+}
+
+func TestD4_SuffixPayloadRefused(t *testing.T) {
+	f := fixture(t)
+	parent := &D4BranchState{Control: &f.snapshot.Control, Shards: f.snapshot.Shards, PendingWork: [][]byte{[]byte("deferred")}}
+	kinds := []string{"shard_success", "shard_repeat", "shard_no_quorum", "shard_timeout", "evm_tx", "governance_tx", "prepare", "freeze", "commit", "abort", "unknown"}
+	for _, kind := range kinds {
+		t.Run(kind, func(t *testing.T) {
+			p := D4Proposal{Epoch: 7, Round: 11, PayloadKind: kind}
+			assertIs(t, CanVoteOldSuffix(parent, p), ErrD4Suffix)
+			assertIs(t, func() error { _, e := RecoverOldSuffix(parent, p); return e }(), ErrD4Suffix)
+		})
+	}
+	mutations := []D4Proposal{{ScheduledConfig: true}, {NextEpoch: true}, {TimeoutUpdate: true}, {HiddenMutation: true}, {Payload: []byte{1}}}
+	for i, p := range mutations {
+		t.Run(string(rune('a'+i)), func(t *testing.T) { p.Epoch = 7; p.Round = 11; assertIs(t, CanVoteOldSuffix(parent, p), ErrD4Suffix) })
+	}
+	empty, e := ExecuteOldSuffix(parent, D4Proposal{Epoch: 7, Round: 100})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !parent.Equal(empty) {
+		t.Fatal("old suffix changed state")
+	}
+	assertIs(t, CanVoteOldSuffix(nil, D4Proposal{Epoch: 7, Round: 11}), ErrD4Unready)
+}
+func TestD4_SuffixPayloadNoQC(t *testing.T) {
+	for _, signers := range [][]D4Signer{{{"a", 1, false, ""}, {"b", 1, false, ""}, {"c", 1, false, ""}, {"d", 1, true, ""}}, {{"a", 10, false, ""}, {"b", 6, false, ""}, {"c", 5, false, ""}, {"d", 2, true, ""}, {"e", 1, true, ""}}} {
+		var total uint64
+		for _, s := range signers {
+			total += s.Weight
 		}
-		if !s.InvariantsOK {
-			t.Errorf("%s: invariant violations: %+v", s.Name, s.Violations)
-		}
-	}
-}
-
-func TestD4_NoActivationWithoutCommit(t *testing.T) {
-	// Prepare / freeze / endorse: Activate must fail with the no-commit error.
-	oldT := RootQuorumThreshold(func() uint64 { w, _ := d3Assignment().TotalWeight(); return w }())
-	h := freshHandoff()
-	if err := h.Activate(1 << 20); err == nil {
-		t.Fatal("idle handoff activated")
-	}
-	_ = h.Prepare()
-	if err := h.Activate(1 << 20); err != errNoCommit {
-		t.Fatalf("prepared: want errNoCommit, got %v", err)
-	}
-	_ = h.Freeze(rep(1, 32), rep(2, 32), body(h))
-	if err := h.Activate(1 << 20); err != errNoCommit {
-		t.Fatalf("frozen: want errNoCommit, got %v", err)
-	}
-	_ = h.Endorse(oldT, oldT)
-	if err := h.Activate(1 << 20); err != errNoCommit {
-		t.Fatalf("endorsed: want errNoCommit, got %v", err)
-	}
-}
-
-func TestD4_FreezeBindsFrozenStateIntoEndorsedIdentity(t *testing.T) {
-	// Two handoffs freeze the SAME body but with different frozen summaries
-	// / EVM parents. Their endorsement domains must differ, so one
-	// endorsement cannot authorise divergent handoff states.
-	a := freshHandoff()
-	_ = a.Prepare()
-	if err := a.Freeze(rep(0x11, 32), rep(0x22, 32), body(a)); err != nil {
-		t.Fatal(err)
-	}
-	b := freshHandoff()
-	_ = b.Prepare()
-	if err := b.Freeze(rep(0x99, 32), rep(0x22, 32), body(b)); err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Equal(a.FrozenID, b.FrozenID) {
-		t.Fatal("different frozen summaries produced the same FrozenID")
-	}
-	if bytes.Equal(a.EndorsementDomainFor().FrozenID, b.EndorsementDomainFor().FrozenID) {
-		t.Fatal("different frozen state produced the same endorsement identity")
-	}
-	// Freeze rejects a body whose EpochStart is not the candidate A_min
-	// (A* is not known until commit) and a body with the wrong predecessor.
-	c := freshHandoff()
-	_ = c.Prepare()
-	badBody := body(c)
-	badBody.EarliestActivation = 999 // not A_min
-	if err := c.Freeze(rep(1, 32), rep(2, 32), badBody); err == nil {
-		t.Fatal("Freeze accepted a body with EpochStart != A_min")
-	}
-}
-
-func TestD4_ActivationRequiresFinalizedCommit(t *testing.T) {
-	oldT := RootQuorumThreshold(func() uint64 { w, _ := d3Assignment().TotalWeight(); return w }())
-	h := freshHandoff()
-	_ = h.Prepare()
-	_ = h.Freeze(rep(1, 32), rep(2, 32), body(h))
-	_ = h.Endorse(oldT, oldT)
-	_ = h.Commit(6, 10, rep(3, 32))
-	// A* reached but commit not final under the root rule.
-	if err := h.Activate(10); err != errCommitNotFinal {
-		t.Fatalf("activated on round count alone: %v", err)
-	}
-	// A merely-larger round is NOT finality: an unrelated higher-round QC
-	// (wrong parent) and a timeout-gap QC (non-consecutive) are both
-	// rejected.
-	unrelated := h.DescendantCommitQC(oldT)
-	unrelated.ParentCommitID = rep(0x7A, 32)
-	if err := h.FinalizeCommit(unrelated, oldT); err != errFinalityLink {
-		t.Fatalf("an unrelated higher-round QC finalised the commit: %v", err)
-	}
-	gap := h.DescendantCommitQC(oldT)
-	gap.Round = h.CommitRound + 2
-	if err := h.FinalizeCommit(gap, oldT); err != errFinalityGap {
-		t.Fatalf("a timeout-gap QC finalised the commit: %v", err)
-	}
-	weak := h.DescendantCommitQC(oldT)
-	weak.QuorumWeight = oldT - 1
-	if err := h.FinalizeCommit(weak, oldT); err != errFinalityQuorum {
-		t.Fatalf("a below-quorum descendant finalised the commit: %v", err)
-	}
-
-	// The CHECKED MAPPING: DeriveFinalityEvidence refuses to produce a QC
-	// from a root commit chain that is not a real 2-chain.
-	chain := h.RootCommitChainWith(oldT)
-	if _, ok := DeriveFinalityEvidence(chain[:1], h.CommitRecordID, oldT); ok {
-		t.Fatal("derived finality from a 1-chain (no descendant commit)")
-	}
-	brokenGap := h.RootCommitChainWith(oldT)
-	brokenGap[1].Round = h.CommitRound + 2 // non-consecutive
-	if _, ok := DeriveFinalityEvidence(brokenGap, h.CommitRecordID, oldT); ok {
-		t.Fatal("derived finality from a non-consecutive descendant")
-	}
-	weakChain := h.RootCommitChainWith(oldT)
-	weakChain[1].QuorumWeight = oldT - 1
-	if _, ok := DeriveFinalityEvidence(weakChain, h.CommitRecordID, oldT); ok {
-		t.Fatal("derived finality from an under-quorum descendant")
-	}
-	if _, ok := DeriveFinalityEvidence(chain, rep(0xAB, 32), oldT); ok {
-		t.Fatal("derived finality for a commit not in the chain")
-	}
-	// Positive path: a real 2-chain -> derived QC -> finalize, with the
-	// committed root taken FROM the chain, not fabricated.
-	ev, ok := DeriveFinalityEvidence(chain, h.CommitRecordID, oldT)
-	if !ok || !bytes.Equal(ev.CommittedRootHash, chain[1].CommittedRootHash) {
-		t.Fatalf("derived finality QC does not carry the chain's committed root: %+v", ev)
-	}
-	if err := h.FinalizeFromRootChain(chain, oldT); err != nil {
-		t.Fatal(err)
-	}
-	if err := h.Activate(10); err != nil {
-		t.Fatalf("activation rejected after finalize: %v", err)
-	}
-	// The bootstrap step is now explicit: a finalised commit yields the
-	// first successor proposal, built on the finalised committed root, not
-	// on a new-set round.
-	sp, ok := h.FirstSuccessorProposal()
-	if !ok || len(sp.Leader) == 0 || len(sp.BuildsOnRoot) != 32 || sp.ProposedRound != h.ActivationRound {
-		t.Fatalf("first successor proposal not well-formed: %+v ok=%v", sp, ok)
-	}
-	if !bytes.Equal(sp.FinalityQC.CommittedRootHash, sp.BuildsOnRoot) {
-		t.Fatal("successor proposal does not build on the finalised committed root")
-	}
-}
-
-func TestD4_MultiReplicaGlobalInvariants(t *testing.T) {
-	runs := D4MultiReplicaRuns()
-	sawByzantineEquivocation := false
-	sawCounterexample := false
-	sawLiveness := false
-	for _, m := range runs {
-		if !m.PropertyHeld {
-			t.Errorf("%s: modelled safety property does not hold: %+v", m.Name, m.Violations)
-		}
-		if m.Exploration != nil && m.Exploration.ByzantineWeight > 0 {
-			sawByzantineEquivocation = true
-			if m.Exploration.ByzantineWeight > m.Exploration.FaultyWeightBound {
-				t.Errorf("%s: Byzantine weight %d exceeds f_W %d — outside the model's assumption",
-					m.Name, m.Exploration.ByzantineWeight, m.Exploration.FaultyWeightBound)
-			}
-			if m.Exploration.MaxSimultaneousQuorums > 1 {
-				t.Errorf("%s: Byzantine equivocation split a quorum (max %d simultaneous)",
-					m.Name, m.Exploration.MaxSimultaneousQuorums)
-			}
-			if !m.Exploration.ByzantineOnBoth {
-				t.Errorf("%s: Byzantine signers were not placed on both statements", m.Name)
+		q := total*2/3 + 1
+		ids := []string{}
+		var sum uint64
+		for _, s := range signers {
+			ids = append(ids, s.ID)
+			sum += s.Weight
+			if sum >= q {
+				break
 			}
 		}
-		if m.IsCounterexample {
-			sawCounterexample = true
-			if !m.ConflictDetected {
-				t.Errorf("%s: conflicting per-replica commit tuples were not flagged", m.Name)
+		if e := PayloadSuffixQCImpossible(signers, ids, q); e != nil {
+			t.Fatal(e)
+		}
+		r, e := ExploreD4Quorums(signers, q)
+		if e != nil || r.BothQuorate {
+			t.Fatalf("equivocation formed conflicting QCs: %+v %v", r, e)
+		}
+		lock := signers[0]
+		if !lock.Vote("H") {
+			t.Fatal("honest vote refused")
+		}
+		restarted := lock.Restart()
+		if restarted.Vote("abort") {
+			t.Fatal("restart lost honest lock")
+		}
+	}
+}
+func TestD4_LeaderCPlus2Crash(t *testing.T) {
+	f := fixture(t)
+	timeouts, c := D4DelayedFinalityRounds(10, 13, 12)
+	if c <= 13 || len(timeouts) == 0 || timeouts[0] != 12 {
+		t.Fatal("old timeouts fenced at A*")
+	}
+	progress := D4OldProgress{Order: 10, Start: 13, Live: true}
+	for _, round := range timeouts {
+		if e := progress.Timeout(round); e != nil {
+			t.Fatal(e)
+		}
+	}
+	progress.Live = false
+	assertIs(t, progress.DeliverProof(), ErrD4Proof)
+	if progress.NewMayBootstrap() {
+		t.Fatal("new quorum started without old proof")
+	}
+	progress.Live = true
+	if e := progress.CertifyEmpty(c); e != nil {
+		t.Fatal(e)
+	}
+	if e := progress.CertifyEmpty(c + 1); e != nil {
+		t.Fatal(e)
+	}
+	if progress.Seal != c {
+		t.Fatal("later pair did not commit suffix")
+	}
+	if e := progress.DeliverProof(); e != nil {
+		t.Fatal(e)
+	}
+	progress.Live = false
+	if !progress.NewMayBootstrap() {
+		t.Fatal("new quorum still needs old signatures after proof")
+	}
+	p := f.proof(t, c)
+	v := mustVerified(t, p, f.old)
+	g, e := DeriveEpochGenesis(v, f.body)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if g.Start != 13 || v.CommitSealRound <= 13 {
+		t.Fatal("late proof moved fixed start")
+	}
+	b := D4Bootstrap{}
+	newTB, _ := D4FixtureTrustBase(8, map[string]uint64{"n1": 1, "n2": 1, "n3": 1, "n4": 1})
+	if e = b.Install(v, g, f.snapshot, newTB); e != nil {
+		t.Fatal(e)
+	}
+	if e = b.Vote(13, b.HighestQC); e != nil {
+		t.Fatal(e)
+	}
+	if e := b.Commit(b.HighestQC, D4QC{}); !errors.Is(e, ErrD4CommitAnchor) {
+		t.Fatal(e)
+	}
+}
+func TestD4_DeterministicGenesis(t *testing.T) {
+	f := fixture(t)
+	p10 := f.proof(t, 10)
+	p100 := f.proof(t, 100)
+	v10 := mustVerified(t, p10, f.old)
+	v100 := mustVerified(t, p100, f.old)
+	g10, e := DeriveEpochGenesis(v10, f.body)
+	if e != nil {
+		t.Fatal(e)
+	}
+	g100, e := DeriveEpochGenesis(v100, f.body)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !bytes.Equal(g10.Bytes(), g100.Bytes()) || !bytes.Equal(g10.ID(), g100.ID()) {
+		t.Fatal("proof c changed genesis")
+	}
+	p100.CommitQC.Signatures = map[string][]byte{}
+	D4SignQC(&p100.CommitQC, f.keys, "b", "c", "d")
+	v100 = mustVerified(t, p100, f.old)
+	g100, e = DeriveEpochGenesis(v100, f.body)
+	if e != nil || !bytes.Equal(g10.ID(), g100.ID()) {
+		t.Fatal("signer subset changed genesis")
+	}
+	bad := p10
+	bad.Snapshot.Shards = append([]ShardSnapshot(nil), p10.Snapshot.Shards...)
+	bad.Snapshot.Shards[0].Root = bytes.Repeat([]byte{0x99}, 32)
+	assertIs(t, func() error { _, e := VerifyHandoff(bad, f.old); return e }(), ErrD4Snapshot)
+}
+
+func TestD4_DeterministicGenesisInputOrdering(t *testing.T) {
+	f := fixture(t)
+	extra := ShardSnapshot{Partition: 2, InputRecord: []byte("IR-2"), TechnicalRecord: []byte("TR-2"), LastCR: []byte("last-2")}
+	extra.Root = extra.CalculatedRoot()
+	f.snapshot.Shards = append(f.snapshot.Shards, extra)
+	p1 := f.proof(t, 10)
+	v1 := mustVerified(t, p1, f.old)
+	g1, e := DeriveEpochGenesis(v1, f.body)
+	if e != nil {
+		t.Fatal(e)
+	}
+	f.snapshot.Shards[0], f.snapshot.Shards[1] = f.snapshot.Shards[1], f.snapshot.Shards[0]
+	p2 := f.proof(t, 100)
+	v2 := mustVerified(t, p2, f.old)
+	g2, e := DeriveEpochGenesis(v2, f.body)
+	if e != nil || !bytes.Equal(g1.Bytes(), g2.Bytes()) || !bytes.Equal(g1.ID(), g2.ID()) {
+		t.Fatal("input order or seal round changed genesis", e)
+	}
+}
+func TestD4_NewBootstrapTimeout(t *testing.T) {
+	f := fixture(t)
+	p := f.proof(t, 100)
+	v := mustVerified(t, p, f.old)
+	g, _ := DeriveEpochGenesis(v, f.body)
+	b := D4Bootstrap{}
+	newTB, newKeys := D4FixtureTrustBase(8, map[string]uint64{"n1": 1, "n2": 1, "n3": 1, "n4": 1})
+	if e := b.Install(v, g, f.snapshot, newTB); e != nil {
+		t.Fatal(e)
+	}
+	anchor := b.HighestQC
+	if anchor.Round != 12 {
+		t.Fatal(anchor)
+	}
+	tc := D4TimeoutCertificate{Epoch: 8, Round: 13, HighQC: anchor}
+	D4SignTC(&tc, newKeys, "n1", "n2", "n3")
+	if e := b.ApplyTC(tc); e != nil {
+		t.Fatal(e)
+	}
+	head := D4RecoveryHead{Parent: anchor, Proof: &p, Snapshot: &f.snapshot}
+	if e := head.Verify(f.old, newTB, g); e != nil {
+		t.Fatal(e)
+	}
+	tc.HighQC.GenesisID = bytes.Repeat([]byte{0}, 32)
+	assertIs(t, tc.Verify(newTB, g), ErrD4Anchor)
+	leader, e := D4FallbackLeader(g, []string{"n4", "n2", "n1", "n3"}, 13)
+	if e != nil || leader != "n1" {
+		t.Fatal("fallback leader not canonical", leader, e)
+	}
+	if e := b.Vote(13, anchor); e != nil {
+		t.Fatal(e)
+	}
+	restart := b.Restart()
+	assertIs(t, restart.Vote(13, anchor), ErrD4Epoch)
+	assertIs(t, restart.Commit(anchor, D4QC{}), ErrD4CommitAnchor)
+	newQC := D4QC{Vote: D4VoteInfo{Round: 14, Epoch: 8, ParentRound: 13, Timestamp: 1700000001, CurrentRoot: g.Root}}
+	D4SignQC(&newQC, newKeys, "n1", "n2", "n3")
+	ordinary := D4Parent{Kind: D4OrdinaryParent, Epoch: 8, Round: 14, QC: &newQC}
+	if e := restart.Vote(15, ordinary); e != nil {
+		t.Fatal(e)
+	}
+	childQC := D4QC{Vote: D4VoteInfo{Round: 15, Epoch: 8, ParentRound: 14, Timestamp: 1700000002, CurrentRoot: g.Root}, Seal: D4Seal{Commit: D4LedgerCommitInfo{Network: 3, Round: 14, Epoch: 8, Timestamp: 1700000001, Root: g.Root}}}
+	D4SignQC(&childQC, newKeys, "n1", "n2", "n3")
+	if e := restart.Commit(ordinary, childQC); e != nil {
+		t.Fatal(e)
+	}
+	if !reflect.DeepEqual(restart.Committed, []uint64{14}) {
+		t.Fatal(restart.Committed)
+	}
+	assertIs(t, restart.Vote(16, anchor), ErrD4Anchor)
+}
+func TestD4_ConsumerEpochAndRound(t *testing.T) {
+	f := fixture(t)
+	v := mustVerified(t, f.proof(t, 100), f.old)
+	for _, name := range []string{"shard", "ureth", "SealRegistry"} {
+		t.Run(name, func(t *testing.T) {
+			c := D4Consumer{OrderedRound: 10, Current: &D4ShardUC{Shard: 1, Position: D4Position{7, 9}, InputRecord: []byte("IR-H")}}
+			old := D4ShardUC{Shard: 1, Position: D4Position{7, 100}, Root: v.Root, InputRecord: []byte("IR-H"), SignerEpoch: 7, Valid: true}
+			assertIs(t, c.Accept(old), ErrD4Unready)
+			if c.TimeoutCount != 0 || c.RevertCount != 0 {
+				t.Fatal("unclassified repeat triggered side effect")
 			}
-		}
-		if m.Name == "conditional_liveness_all_delivered" {
-			sawLiveness = true
-			if m.G5Liveness != "reached" {
-				t.Fatalf("conditional-liveness run did not reach: %s", m.G5Liveness)
+			c.Install(v)
+			assertIs(t, c.Accept(old), ErrD4TerminalRepeat)
+			c.Ready = true
+			newUC := D4ShardUC{Shard: 1, Position: D4Position{8, 13}, Root: bytes.Repeat([]byte{0x91}, 32), InputRecord: []byte("IR-H"), ParentIR: []byte("IR-H"), SignerEpoch: 8, Valid: true}
+			wrongParent := newUC
+			wrongParent.ParentIR = []byte("other")
+			assertIs(t, c.Accept(wrongParent), ErrD4Proof)
+			if e := c.Accept(newUC); e != nil {
+				t.Fatal(e)
 			}
-		}
-	}
-	if !sawByzantineEquivocation {
-		t.Fatal("no run models Byzantine signer equivocation — the fault is assumed away")
-	}
-	if !sawCounterexample {
-		t.Fatal("no conflicting-activation-round counterexample in the suite")
-	}
-	if !sawLiveness {
-		t.Fatal("no conditional-liveness run in the suite")
-	}
-}
-
-func TestD4_HandoffProgressAndAbortModel(t *testing.T) {
-	runs := D4ProgressRuns()
-	names := map[string]bool{}
-	for _, p := range runs {
-		names[p.Name] = true
-		if !p.Holds {
-			t.Errorf("%s: progress/abort property does not hold: %+v", p.Name, p)
-		}
-	}
-	for _, n := range []string{
-		"byzantine_leader_cannot_split_honest_weight",
-		"two_root_ordered_frozen_ids_is_a_root_violation",
-		"durable_state_survives_restart",
-		"commit_then_abort_cannot_reach_quorum",
-		"combined_delay_restart_equivocation_abort",
-	} {
-		if !names[n] {
-			t.Fatalf("missing progress/abort run %q", n)
-		}
-	}
-	for _, p := range runs {
-		if p.Name == "byzantine_leader_cannot_split_honest_weight" {
-			if !p.QuorumFormed || !p.SplitAvoided || len(p.EndorsedFrozenIDs) != 1 || p.EndorsedFrozenIDs[0] != "X" {
-				t.Fatalf("a Byzantine leader split honest weight or no single quorum formed: %+v", p)
+			c = c.Restart()
+			assertIs(t, c.Accept(old), ErrD4TerminalRepeat)
+			if c.Current.Position != newUC.Position {
+				t.Fatal("old UC replaced new")
 			}
-		}
-		if p.Name == "combined_delay_restart_equivocation_abort" {
-			if p.AbortReachedQuorum || !p.SplitAvoided {
-				t.Fatalf("combined schedule broke safety: %+v", p)
+		})
+	}
+}
+func TestD4_ProofNegatives(t *testing.T) {
+	f := fixture(t)
+	cases := map[string]struct {
+		mut  func(*HandoffProof)
+		want error
+	}{"record": {func(p *HandoffProof) { p.Record.Attempt++ }, ErrD4Record}, "ordered_round": {func(p *HandoffProof) { p.Record.OrderedRound++ }, ErrD4Record}, "body": {func(p *HandoffProof) { p.Record.NextBodyID[0] ^= 1 }, ErrD4Record}, "network": {func(p *HandoffProof) { p.Record.Network++ }, ErrD4Record}, "path_key": {func(p *HandoffProof) { p.ControlPath.Partition = 1 }, ErrD4Control}, "path_item_key": {func(p *HandoffProof) { p.ControlPath.HashSteps[0].Key = D4ControlPartition }, ErrD4Control}, "missing_leaf": {func(p *HandoffProof) { p.ControlPath = nil }, ErrD4Control}, "under_quorum": {func(p *HandoffProof) { delete(p.CommitQC.Signatures, "c") }, ErrD4Quorum}, "wrong_epoch": {func(p *HandoffProof) { p.CommitQC.Vote.Epoch++ }, ErrD4Proof}, "wrong_parent": {func(p *HandoffProof) { p.CommitQC.Vote.ParentRound-- }, ErrD4Proof}, "bad_timestamp": {func(p *HandoffProof) { p.CommitQC.Vote.Timestamp = 0 }, ErrD4Proof}, "noncommitting": {func(p *HandoffProof) { p.CommitQC.Seal.Commit.Round = 0 }, ErrD4Proof}, "genesis_exemption": {func(p *HandoffProof) { p.CommitQC.Signatures = nil }, ErrD4Quorum}, "forged_seal": {func(p *HandoffProof) { p.CommitQC.Seal.Commit.Root[0] ^= 1 }, ErrD4Proof}}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := f.proof(t, 10)
+			tc.mut(&p)
+			_, e := VerifyHandoff(p, f.old)
+			assertIs(t, e, tc.want)
+		})
+	}
+	p := f.proof(t, 10)
+	root, _ := f.snapshot.Root()
+	qcC := D4QC{Vote: D4VoteInfo{Round: 10, Epoch: 7, ParentRound: 9, Timestamp: 1699999999, CurrentRoot: root}}
+	D4SignQC(&qcC, f.keys, "a", "b", "c")
+	p.OptionalQC = &qcC
+	_ = mustVerified(t, p, f.old)
+	qcC.Signatures["a"][0] ^= 1
+	_, e := VerifyHandoff(p, f.old)
+	assertIs(t, e, ErrD4Proof)
+	badTB := f.old
+	badTB.Members = append(append([]D4Member(nil), f.old.Members...), f.old.Members[0])
+	_, e = VerifyHandoff(f.proof(t, 10), badTB)
+	assertIs(t, e, ErrD4Proof)
+}
+
+func TestD4_FinalizeRefusesMissingAndForgedProof(t *testing.T) {
+	f := fixture(t)
+	h := &Handoff{Phase: PhaseCommitted, Record: f.record}
+	assertIs(t, h.Finalize(HandoffProof{}, f.old), ErrD4Proof)
+	forged := f.proof(t, 10)
+	forged.CommitQC.Signatures["a"][0] ^= 1
+	assertIs(t, h.Finalize(forged, f.old), ErrD4Proof)
+	if h.Verified != nil {
+		t.Fatal("forged finality installed")
+	}
+	if e := h.Finalize(f.proof(t, 10), f.old); e != nil {
+		t.Fatal(e)
+	}
+	g, e := DeriveEpochGenesis(*h.Verified, f.body)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := h.Activate(g, f.snapshot); e != nil || h.Phase != PhaseActivated {
+		t.Fatal("verified checkpoint did not activate", e)
+	}
+}
+func TestD4_MintedLateSuffixUC(t *testing.T) {
+	f := fixture(t)
+	v := mustVerified(t, f.proof(t, 10), f.old)
+	for _, consumer := range []string{"shard", "ureth", "SealRegistry"} {
+		t.Run(consumer, func(t *testing.T) {
+			c := D4Consumer{OrderedRound: 10, Current: &D4ShardUC{Shard: 1, Position: D4Position{7, 9}, InputRecord: []byte("IR-H")}}
+			for _, round := range []uint64{10, 100, 1000} {
+				uc := D4ShardUC{Shard: 1, Position: D4Position{7, round}, Root: v.Root, InputRecord: []byte("IR-H"), SignerEpoch: 7, Valid: true}
+				assertIs(t, c.Accept(uc), ErrD4Unready)
 			}
+			c.Install(v)
+			for _, round := range []uint64{10, 100, 1000} {
+				uc := D4ShardUC{Shard: 1, Position: D4Position{7, round}, Root: v.Root, InputRecord: []byte("IR-H"), SignerEpoch: 7, Valid: true}
+				assertIs(t, c.Accept(uc), ErrD4TerminalRepeat)
+			}
+			c.Ready = true
+			c = c.Restart()
+			if e := c.Accept(D4ShardUC{Shard: 1, Position: D4Position{8, 13}, Root: bytes.Repeat([]byte{0x91}, 32), InputRecord: []byte("IR-H"), ParentIR: []byte("IR-H"), SignerEpoch: 8, Valid: true}); e != nil {
+				t.Fatal(e)
+			}
+			if c.TimeoutCount != 0 || c.RevertCount != 0 {
+				t.Fatal("late suffix caused timeout or revert")
+			}
+		})
+	}
+}
+func TestD4_DifferentCFixedStart(t *testing.T) {
+	f := fixture(t)
+	var id []byte
+	for _, c := range []uint64{10, 100, 1000} {
+		v := mustVerified(t, f.proof(t, c), f.old)
+		g, e := DeriveEpochGenesis(v, f.body)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if g.Start != 13 {
+			t.Fatal("proof-dependent floor")
+		}
+		if id == nil {
+			id = g.ID()
+		} else if !bytes.Equal(id, g.ID()) {
+			t.Fatal("genesis split")
 		}
 	}
-
-	// The endorsement model itself: an honest signer refuses a FrozenID
-	// with no root-ordering proof, and refuses to switch after endorsing.
-	tb := RootQuorumThreshold(func() uint64 { w, _ := d3Assignment().TotalWeight(); return w }())
-	fid := rep(0xF1, 32)
-	other := rep(0xF2, 32)
-	s := &honestSigner{id: "x", weight: 5}
-	if s.endorse(fid, FrozenOrdered{}, tb) {
-		t.Fatal("endorsed a FrozenID with no FrozenOrdered proof")
-	}
-	if !s.endorse(fid, d4FrozenOrdered(fid, tb+1), tb) {
-		t.Fatal("refused a genuinely root-ordered FrozenID")
-	}
-	s.restart()
-	if s.endorse(other, d4FrozenOrdered(other, tb+1), tb) {
-		t.Fatal("switched endorsement to a different FrozenID after a restart")
+	newTB, _ := D4FixtureTrustBase(8, map[string]uint64{"n1": 1, "n2": 1, "n3": 1, "n4": 1})
+	for _, c := range []uint64{10, 100} {
+		v := mustVerified(t, f.proof(t, c), f.old)
+		g, _ := DeriveEpochGenesis(v, f.body)
+		b := D4Bootstrap{}
+		if e := b.Install(v, g, f.snapshot, newTB); e != nil {
+			t.Fatal(e)
+		}
+		if e := b.Vote(13, b.HighestQC); e != nil || b.LastVoted != 13 {
+			t.Fatal("split new validators chased old c", e)
+		}
 	}
 }
 
-func TestD4_EndorsementBindsNoFutureState(t *testing.T) {
-	h := freshHandoff()
-	_ = h.Prepare()
-	_ = h.Freeze(rep(1, 32), rep(2, 32), body(h))
-	dom := h.EndorsementDomainFor()
-	if dom.ActivationRound != 0 || dom.SuccessorTRHash != nil {
-		t.Fatal("endorsement domain carries post-commit fields")
+func TestD4_OldSuffixProofCannotAuthorizeOrdinaryInterval(t *testing.T) {
+	f := fixture(t)
+	p := f.proof(t, 100)
+	_ = mustVerified(t, p, f.old)
+	assertIs(t, D4VerifyOrdinaryQC(p.CommitQC, f.old, 1, 13), ErrD4Epoch)
+}
+func TestD4_NextEpochCarryOver(t *testing.T) {
+	s := D4DeferredShard{IR: []byte("ir"), TR: []byte("tr"), LastCR: []byte("last"), PendingConfig: []byte("next"), ActiveConfig: []byte("old"), FeeStats: []byte("fee"), IREpoch: 7, TREpoch: 8}
+	before := s
+	if e := s.NewEpochBlock(); e != nil {
+		t.Fatal(e)
 	}
-	if !FieldsAreKnown(dom) {
-		t.Fatal("endorsement domain rejected as unknown despite being complete")
+	if s.IREpoch != 8 || string(s.ActiveConfig) != "next" || s.Changed || string(s.IR) != "ir" || string(s.TR) != "tr" || string(s.LastCR) != "last" || !bytes.Equal(s.FeeStats, append(before.FeeStats, 1)) {
+		t.Fatal("nextEpoch carry-over mismatch")
+	}
+	again := s
+	s.NewEpochBlock()
+	if !reflect.DeepEqual(s, again) {
+		t.Fatal("replay double-applied")
+	}
+	s.PayloadCertification([]byte("ir2"))
+	if !s.Changed {
+		t.Fatal("subsequent certification not changed")
+	}
+}
+func TestD4_PayloadBearingRecoveredSuffix(t *testing.T) {
+	f := fixture(t)
+	parent := &D4BranchState{Control: &f.snapshot.Control, Shards: f.snapshot.Shards}
+	_, e := RecoverOldSuffix(parent, D4Proposal{Epoch: 7, Round: 11, PayloadKind: "evm_tx"})
+	assertIs(t, e, ErrD4Suffix)
+}
+func TestD4_MissingForgedControl(t *testing.T) {
+	f := fixture(t)
+	p := f.proof(t, 10)
+	p.Control.RecordBytes = []byte("forged")
+	_, e := VerifyHandoff(p, f.old)
+	assertIs(t, e, ErrD4Record)
+	p = f.proof(t, 10)
+	p.Snapshot.Control = ControlState{}
+	_, e = VerifyHandoff(p, f.old)
+	assertIs(t, e, ErrD4Snapshot)
+}
+func TestD4_AnchorCommitRefused(t *testing.T) {
+	f := fixture(t)
+	v := mustVerified(t, f.proof(t, 10), f.old)
+	g, _ := DeriveEpochGenesis(v, f.body)
+	b := D4Bootstrap{}
+	newTB, _ := D4FixtureTrustBase(8, map[string]uint64{"n1": 1, "n2": 1, "n3": 1, "n4": 1})
+	b.Install(v, g, f.snapshot, newTB)
+	assertIs(t, b.Commit(b.HighestQC, D4QC{}), ErrD4CommitAnchor)
+}
+func TestD4_MixedHistoricalLastCR(t *testing.T) {
+	ucs := []D4HistoricalUC{{Epoch: 6, Shard: 1, ValidForEpoch: 6}, {Epoch: 7, Shard: 2, ValidForEpoch: 7}}
+	if e := VerifyHistoricalLastCR(ucs, map[uint64]bool{6: true, 7: true, 8: true}, 8); e != nil {
+		t.Fatal(e)
+	}
+	assertIs(t, VerifyHistoricalLastCR(ucs, map[uint64]bool{8: true}, 8), ErrD4Proof)
+}
+func TestD4_PauseMeasurement(t *testing.T) {
+	normal := D4PauseMeasurement{time.Second, 2 * time.Second, 3 * time.Second, 4 * time.Second, 5 * time.Second, 6 * time.Second}
+	crash := D4PauseMeasurement{time.Second, 4 * time.Second, 5 * time.Second, 7 * time.Second, 8 * time.Second, 9 * time.Second}
+	for _, m := range []D4PauseMeasurement{normal, crash} {
+		if !m.Valid() || m.Pause() <= 0 {
+			t.Fatal(m)
+		}
+	}
+}
+func TestD4_CommittedHistoryInvariant(t *testing.T) {
+	f := fixture(t)
+	state := D4BranchState{Control: &f.snapshot.Control, Shards: f.snapshot.Shards}
+	root, _ := f.snapshot.Root()
+	a := D4Committed{Position: D4Position{7, 10}, Root: root, State: state, RecordID: f.record.ID()}
+	replicas := []D4Replica{{ID: "a", Committed: []D4Committed{a}}, {ID: "b", Committed: []D4Committed{a}}}
+	if e := ExploreCommittedHistories(replicas); e != nil {
+		t.Fatal(e)
+	}
+	bad := a
+	bad.Root = bytes.Repeat([]byte{0xee}, 32)
+	replicas[1].Committed[0] = bad
+	if e := ExploreCommittedHistories(replicas); e == nil {
+		t.Fatal("different committed histories accepted")
 	}
 }
 
-func TestD4_ActivationRoundMustBeFinalUnderPipelining(t *testing.T) {
-	oldT := RootQuorumThreshold(func() uint64 { w, _ := d3Assignment().TotalWeight(); return w }())
-	h := freshHandoff()
-	_ = h.Prepare()
-	_ = h.Freeze(rep(1, 32), rep(2, 32), body(h))
-	_ = h.Endorse(oldT, oldT)
-	// commitRound 20, pipeline 3 -> A* must be >= 23; also >= MinActivation (10).
-	if err := h.Commit(20, 22, rep(3, 32)); err != errActivationRoot {
-		t.Fatalf("accepted A* below commit+pipeline: %v", err)
+func TestD4_ExplorerGuardInvariants(t *testing.T) {
+	f := fixture(t)
+	v := mustVerified(t, f.proof(t, 100), f.old)
+	g, e := DeriveEpochGenesis(v, f.body)
+	if e != nil {
+		t.Fatal(e)
 	}
-	if err := h.Commit(20, 23, rep(3, 32)); err != nil {
-		t.Fatalf("rejected a valid A*: %v", err)
-	}
-}
-
-func TestD4_NoOverlapNoGapAtBoundary(t *testing.T) {
-	oldT := RootQuorumThreshold(func() uint64 { w, _ := d3Assignment().TotalWeight(); return w }())
-	h := freshHandoff()
-	_ = h.Prepare()
-	_ = h.Freeze(rep(1, 32), rep(2, 32), body(h))
-	_ = h.Endorse(oldT, oldT)
-	_ = h.Commit(6, 12, rep(3, 32)) // A* = 12
-	if h.Authorized(11) != OldAssignment {
-		t.Fatal("round below A* not authorised by the old set")
-	}
-	if h.Authorized(12) != NewAssignment {
-		t.Fatal("round at A* not authorised by the new set")
-	}
-	if h.Authorized(13) != NewAssignment {
-		t.Fatal("round above A* not authorised by the new set")
+	newTB, _ := D4FixtureTrustBase(8, map[string]uint64{"n1": 1, "n2": 1, "n3": 1, "n4": 1})
+	parent := D4BranchState{Control: &f.snapshot.Control, Shards: f.snapshot.Shards}
+	if e := ExploreD4GuardInvariants(parent, v, g, newTB); e != nil {
+		t.Fatal(e)
 	}
 }
-
-func TestD4_CommittedCannotAbortAbortedCannotActivate(t *testing.T) {
-	oldT := RootQuorumThreshold(func() uint64 { w, _ := d3Assignment().TotalWeight(); return w }())
-	// committed -> abort rejected
-	h := freshHandoff()
-	_ = h.Prepare()
-	_ = h.Freeze(rep(1, 32), rep(2, 32), body(h))
-	_ = h.Endorse(oldT, oldT)
-	_ = h.Commit(6, 10, rep(3, 32))
-	if err := h.Abort("late"); err == nil {
-		t.Fatal("aborted a committed handoff")
-	}
-	// aborted -> activate rejected
-	g := freshHandoff()
-	_ = g.Prepare()
-	_ = g.Abort("replaced")
-	if err := g.Activate(1 << 20); err == nil {
-		t.Fatal("activated an aborted handoff")
-	}
-}
-
-func TestD4_OnlyCanonicalPhaseOrderCommits(t *testing.T) {
-	c := BuildD4Vectors().Interleavings
-	if !c.OnlyCanonicalCommits {
-		t.Fatalf("orders reaching committed: %v (want only the canonical order)", c.ReachedCommitted)
-	}
-	if !c.NoEarlyNewAuthorization {
-		t.Fatalf("orders authorising the new set before commit: %v", c.NewAuthorizedEarly)
-	}
-}
-
 func TestD4_VectorsMatchGolden(t *testing.T) {
-	const path = "testdata/d4-vectors.json"
-	got, err := MarshalD4Vectors(BuildD4Vectors())
+	data, e := os.ReadFile("testdata/d4-vectors.json")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var v D4VectorSet
+	if e = json.Unmarshal(data, &v); e != nil {
+		t.Fatal(e)
+	}
+	if v.Version != 2 || !reflect.DeepEqual(v.TraceCoverage, D4TraceNames()) || v.Crypto.Profile != 2 {
+		t.Fatal("v2 vector coverage mismatch")
+	}
+	for _, s := range []string{v.Crypto.RecordID, v.Crypto.ControlDigest, v.Crypto.Root, v.Crypto.VoteInfoHash, v.Crypto.GenesisID} {
+		b, e := hex.DecodeString(s)
+		if e != nil || len(b) != 32 {
+			t.Fatalf("bad vector digest %q", s)
+		}
+	}
+	if len(v.Crypto.Signatures) != 3 || len(v.Crypto.Path) == 0 {
+		t.Fatal("missing real proof bytes")
+	}
+	f := fixture(t)
+	p := f.proof(t, 10)
+	verified := mustVerified(t, p, f.old)
+	g, err := DeriveEpochGenesis(verified, f.body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("reading %s (run: go run ./evmroot/cmd/d4vectors -update): %v", path, err)
+	checks := map[string][]byte{
+		"record_cbor": p.Record.Bytes(), "record_id": p.Record.ID(),
+		"control_cbor": p.Control.Bytes(), "control_digest": p.Control.Digest(),
+		"shard_root": p.Snapshot.Shards[0].Root, "root": verified.Root,
+		"vote_info_cbor": p.CommitQC.Vote.Bytes(), "vote_info_hash": p.CommitQC.Vote.Hash(),
+		"ledger_commit_info_cbor": p.CommitQC.Seal.Commit.Bytes(p.CommitQC.Seal.PreviousHash), "seal_cbor": p.CommitQC.Seal.Bytes(),
+		"genesis_cbor": g.Bytes(), "genesis_id": g.ID(),
+		"pre_freeze_summary":     D4PreFreezeSummary(3, f.record.PredecessorBodyID, 1, 9, bytes.Repeat([]byte{0x88}, 32), bytes.Repeat([]byte{0x99}, 32)),
+		"candidate_context_hash": D4CandidateContextHash(3, f.record.PredecessorBodyID, 1, bytes.Repeat([]byte{0xaa}, 32), 12),
 	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("%s is stale — regenerate with: go run ./evmroot/cmd/d4vectors -update", path)
+	encoded, _ := json.Marshal(v.Crypto)
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
 	}
+	for name, want := range checks {
+		var got string
+		if err := json.Unmarshal(fields[name], &got); err != nil {
+			t.Fatal(err)
+		}
+		if got != hex.EncodeToString(want) {
+			t.Fatalf("independent %s differs", name)
+		}
+	}
+	for id, sig := range v.Crypto.Signatures {
+		if sig != hex.EncodeToString(p.CommitQC.Signatures[id]) {
+			t.Fatalf("signature %s differs", id)
+		}
+	}
+	if v.Crypto.Path[0].Key != "00000001" || v.Crypto.Path[0].Hash != hex.EncodeToString(p.ControlPath.HashSteps[0].Hash) {
+		t.Fatal("independent control path differs")
+	}
+}
+
+func TestD4_QCBytesMatchRootTypes(t *testing.T) {
+	f := fixture(t)
+	p := f.proof(t, 10)
+	round := &drctypes.RoundInfo{Version: 1, RoundNumber: p.CommitQC.Vote.Round, Epoch: p.CommitQC.Vote.Epoch, Timestamp: p.CommitQC.Vote.Timestamp, ParentRoundNumber: p.CommitQC.Vote.ParentRound, CurrentRootHash: p.CommitQC.Vote.CurrentRoot}
+	roundBytes, e := round.MarshalCBOR()
+	if e != nil || !bytes.Equal(roundBytes, p.CommitQC.Vote.Bytes()) {
+		t.Fatal("model VoteInfo differs from root RoundInfo CBOR", e)
+	}
+	roundHash, e := round.Hash(crypto.SHA256)
+	if e != nil || !bytes.Equal(roundHash, p.CommitQC.Vote.Hash()) {
+		t.Fatal("model VoteInfo hash differs", e)
+	}
+	l := p.CommitQC.Seal.Commit
+	seal := &base.UnicitySeal{Version: 1, NetworkID: base.NetworkID(l.Network), RootChainRoundNumber: l.Round, Epoch: l.Epoch, Timestamp: l.Timestamp, PreviousHash: p.CommitQC.Seal.PreviousHash, Hash: l.Root}
+	sealBytes, e := seal.SigBytes()
+	if e != nil || !bytes.Equal(sealBytes, p.CommitQC.Seal.Bytes()) {
+		t.Fatal("model seal signed bytes differ from UnicitySeal", e)
+	}
+}
+func TestD4_ReservedControlNotShard(t *testing.T) {
+	f := fixture(t)
+	f.snapshot.Shards = append(f.snapshot.Shards, ShardSnapshot{Partition: D4ControlPartition, Root: bytes.Repeat([]byte{1}, 32)})
+	_, e := f.snapshot.Root()
+	assertIs(t, e, ErrD4Snapshot)
+	_ = base.PartitionID(1)
 }
