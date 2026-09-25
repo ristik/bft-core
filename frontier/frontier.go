@@ -177,9 +177,10 @@ func Decode(raw []byte, p Policy) (Record, error) {
 		}
 		name := make([]byte, length)
 		_, _ = io.ReadFull(r, name)
-		// Transport padding is normalized here; the canonical re-encode check
-		// below rejects it because Encode never writes padded names.
-		out.Acks[i].Replica = string(bytes.TrimRight(name, "\x00"))
+		if bytes.IndexByte(name, 0) >= 0 {
+			return Record{}, ErrInvalid
+		}
+		out.Acks[i].Replica = string(name)
 		_, _ = io.ReadFull(r, out.Acks[i].RequestDigest[:])
 		_, _ = io.ReadFull(r, out.Acks[i].ManifestDigest[:])
 	}
@@ -224,12 +225,12 @@ func PlanAdvance(current *Record, next Record, p Policy, covered []Coverage, obl
 		return Plan{}, ErrAcknowledgment
 	}
 	previous := *current
-	for i, item := range covered {
+	for _, item := range covered {
 		r := item.Anchor
 		if err := valid(r, p); err != nil {
 			return Plan{}, err
 		}
-		if r.Height != previous.Height+1 || (i > 0 && (r.Round <= previous.Round || r.Sequence <= previous.Sequence)) || (i < len(covered)-1 && (r.Round <= previous.Round || r.Round >= next.Round || r.Sequence <= previous.Sequence || r.Sequence >= next.Sequence)) {
+		if r.Height != previous.Height+1 || r.Round <= previous.Round || r.Sequence <= previous.Sequence {
 			return Plan{}, ErrAcknowledgment
 		}
 		digest, err := archive.ManifestDigest(r.Subject, item.Material)
@@ -246,7 +247,7 @@ func PlanAdvance(current *Record, next Record, p Policy, covered []Coverage, obl
 		}
 		previous = r
 	}
-	if len(covered) > 0 && (previous.Round != next.Round || previous.Height != next.Height || previous.Sequence != next.Sequence || previous.Subject.BlockHash != next.Subject.BlockHash || previous.StateRoot != next.StateRoot) {
+	if len(covered) > 0 && !reflect.DeepEqual(previous, next) {
 		return Plan{}, ErrAcknowledgment
 	}
 	for _, o := range obligations {

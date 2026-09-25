@@ -319,6 +319,66 @@ func TestAdvanceIsolatedMonotonicAndCoverage(t *testing.T) {
 	})
 }
 
+func TestAdvanceRequiresLastCoveredAnchor(t *testing.T) {
+	base, p := fixture()
+	first, c1 := nextOf(base, p)
+	last, c2 := nextOf(first, p)
+	for _, tc := range []struct {
+		name    string
+		covered []Coverage
+		change  func(*Record)
+	}{
+		{"short coverage", []Coverage{c1}, func(*Record) {}},
+		{"block hash", []Coverage{c1, c2}, func(r *Record) {
+			r.Subject.BlockHash[0] ^= 1
+			q, err := archive.EncodeRequest(r.Subject)
+			if err != nil {
+				panic(err)
+			}
+			d := sha256.Sum256(q)
+			for i := range r.Acks {
+				r.Acks[i].RequestDigest = d
+			}
+		}},
+		{"state root", []Coverage{c1, c2}, func(r *Record) { r.StateRoot[0] ^= 1 }},
+		{"manifest acknowledgment", []Coverage{c1, c2}, func(r *Record) {
+			for i := range r.Acks {
+				r.Acks[i].ManifestDigest[0] ^= 1
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			next := last
+			tc.change(&next)
+			_, err := PlanAdvance(&base, next, p, tc.covered, nil)
+			if !errors.Is(err, ErrAcknowledgment) {
+				t.Fatalf("uncovered next: %v", err)
+			}
+		})
+	}
+}
+
+func TestAdvanceRequiresAdapters(t *testing.T) {
+	base, p := fixture()
+	next, covered := nextOf(base, p)
+	for _, tc := range []struct {
+		name   string
+		change func(*Policy)
+	}{
+		{"nil binding", func(p *Policy) { p.Binding = nil }},
+		{"nil availability", func(p *Policy) { p.Availability = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := p
+			tc.change(&q)
+			_, err := PlanAdvance(&base, next, q, []Coverage{covered}, nil)
+			if !errors.Is(err, ErrAcknowledgment) {
+				t.Fatalf("missing adapter: %v", err)
+			}
+		})
+	}
+}
+
 func TestConfiguredReplicasAndNames(t *testing.T) {
 	r, p := fixture()
 	for _, n := range []int{0, 65} {
@@ -426,6 +486,26 @@ func TestCodecTrailingAndNoncanonical(t *testing.T) {
 		_, e := Decode(bad, p)
 		require(t, e, ErrInvalid)
 	})
+}
+
+func TestDecodeRejectsNULReplicaName(t *testing.T) {
+	r, p := fixture()
+	wire, err := Encode(r, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := archive.EncodeRequest(r.Subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nameAt := len(domain) + 1 + 24 + 32 + 4 + len(q) + 1
+	wire[nameAt] = 0
+	sum := sha256.Sum256(wire[:len(wire)-32])
+	copy(wire[len(wire)-32:], sum[:])
+	_, err = Decode(wire, p)
+	if !errors.Is(err, ErrInvalid) || errors.Is(err, ErrContext) {
+		t.Fatalf("NUL replica name: %v", err)
+	}
 }
 
 func TestRecoveryOrderingAndReplicaLoss(t *testing.T) {
