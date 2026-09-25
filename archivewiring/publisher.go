@@ -13,7 +13,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
-	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -26,17 +25,17 @@ type Publisher struct {
 	JournalLimits configuredprogress.JournalLimits
 	Archive       *archive.Store
 	Subject       archive.Context
-	Adapter       *engineapi.Adapter
 	Host          shardnode.EvidenceHost
 	Replicas      [2]peer.ID
 	Limits        Limits
 	Log           *slog.Logger
 	Metrics       *Metrics
 
-	mu     sync.Mutex
-	ack    map[[32]byte]uint8
-	cursor int
-	status Status
+	mu            sync.Mutex
+	ack           map[[32]byte]uint8
+	cursor        int
+	replicaCursor [2]int
+	status        Status
 }
 
 type Status struct{ Pending, Acknowledged, Lagging int64 }
@@ -47,7 +46,7 @@ func (p *Publisher) Snapshot() Status { p.mu.Lock(); defer p.mu.Unlock(); return
 
 // Validate checks the complete static policy before the node starts.
 func (p *Publisher) Validate() error {
-	if p.Journal == nil || p.Archive == nil || p.Adapter == nil || p.Host == nil || p.Replicas[0] == "" || p.Replicas[1] == "" || p.Replicas[0] == p.Replicas[1] || !p.Limits.valid() {
+	if p.Journal == nil || p.Archive == nil || p.Host == nil || p.Replicas[0] == "" || p.Replicas[1] == "" || p.Replicas[0] == p.Replicas[1] || !p.Limits.valid() {
 		return ErrConfig
 	}
 	var q archive.Request
@@ -74,6 +73,15 @@ func (p *Publisher) Run(ctx context.Context) error {
 		p.ack = make(map[[32]byte]uint8)
 	}
 	p.mu.Unlock()
+	var workers sync.WaitGroup
+	for i := range p.Replicas {
+		workers.Add(1)
+		go func(index int) {
+			defer workers.Done()
+			p.replicaLoop(ctx, index)
+		}(i)
+	}
+	defer workers.Wait()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -129,7 +137,7 @@ func (p *Publisher) pass(ctx context.Context) error {
 		q := archive.Request{Context: p.Subject, BlockHash: hash}
 		rec, eerr := p.Archive.Get(q)
 		if errors.Is(eerr, archive.ErrUnavailable) {
-			q, rec, eerr = FromJournal(ctx, p.Context, p.Subject, p.Adapter, e)
+			q, rec, eerr = FromJournal(ctx, p.Context, p.Subject, nil, e)
 			if eerr == nil {
 				eerr = p.Archive.Put(q, rec)
 			}
@@ -151,22 +159,6 @@ func (p *Publisher) pass(ctx context.Context) error {
 			}
 			continue
 		}
-		for i, id := range p.Replicas {
-			mask := uint8(1 << i)
-			if bits&mask != 0 {
-				continue
-			}
-			if eerr = PutAndReadBack(ctx, p.Host, id, q, rec, p.Limits); eerr != nil {
-				if first == nil {
-					first = fmt.Errorf("replica %s: %w", id, eerr)
-				}
-				continue
-			}
-			bits |= mask
-		}
-		p.mu.Lock()
-		p.ack[hash] = bits
-		p.mu.Unlock()
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -193,6 +185,100 @@ func (p *Publisher) pass(ctx context.Context) error {
 	p.status = status
 	if p.Metrics != nil {
 		p.Metrics.set(status)
+	}
+	return first
+}
+
+func certifiedEntries(image configuredprogress.JournalSnapshot) []configuredprogress.JournalEntry {
+	entries := make([]configuredprogress.JournalEntry, 0, len(image.Candidates))
+	for _, e := range image.Candidates {
+		if e.Certified {
+			entries = append(entries, e)
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Candidate.Number < entries[j].Candidate.Number })
+	return entries
+}
+
+// Each replica owns an independent bounded retry loop. A lost peer cannot
+// consume the healthy peer's deadline or cursor.
+func (p *Publisher) replicaLoop(ctx context.Context, index int) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		if err := p.replicaPass(ctx, index); err != nil && ctx.Err() == nil {
+			p.Log.WarnContext(ctx, "archive replica waiting", "replica", p.Replicas[index], "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (p *Publisher) replicaPass(ctx context.Context, index int) error {
+	image, err := p.Journal.LoadJournal(ctx, p.Context, p.JournalLimits)
+	if err != nil {
+		return err
+	}
+	entries := certifiedEntries(image)
+	if len(entries) == 0 {
+		return nil
+	}
+	mask := uint8(1 << index)
+	p.mu.Lock()
+	start := p.replicaCursor[index]
+	p.mu.Unlock()
+	var first error
+	processed := 0
+	for j := 0; j < len(entries); j++ {
+		position := (start + j) % len(entries)
+		e := entries[position]
+		var hash [32]byte
+		copy(hash[:], e.Candidate.Hash)
+		p.mu.Lock()
+		bits := p.ack[hash]
+		p.mu.Unlock()
+		if bits&mask != 0 {
+			continue
+		}
+		if processed == 4 {
+			break
+		}
+		processed++
+		p.mu.Lock()
+		p.replicaCursor[index] = (position + 1) % len(entries)
+		p.mu.Unlock()
+		q := archive.Request{Context: p.Subject, BlockHash: hash}
+		rec, err := p.Archive.Get(q)
+		if errors.Is(err, archive.ErrUnavailable) {
+			continue // The local publisher will reconstruct this record.
+		}
+		if err == nil {
+			_, expected, checkErr := FromJournal(ctx, p.Context, p.Subject, nil, e)
+			if checkErr != nil {
+				err = checkErr
+			} else {
+				got, gotErr := archive.ManifestDigest(q, rec)
+				want, wantErr := archive.ManifestDigest(q, expected)
+				if gotErr != nil || wantErr != nil || got != want {
+					err = ErrBinding
+				}
+			}
+		}
+		if err == nil {
+			err = PutAndReadBack(ctx, p.Host, p.Replicas[index], q, rec, p.Limits)
+		}
+		if err != nil {
+			if first == nil {
+				first = fmt.Errorf("replica %s: %w", p.Replicas[index], err)
+			}
+			continue
+		}
+		p.mu.Lock()
+		p.ack[hash] |= mask
+		p.mu.Unlock()
 	}
 	return first
 }

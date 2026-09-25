@@ -80,7 +80,7 @@ func TestArchiveCrashChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server.Register(receiver)
+	server.Register(context.Background(), receiver)
 	if err := PutAndReadBack(context.Background(), sender, receiver.ID(), q, rec, DefaultLimits()); err != nil {
 		t.Fatal(err)
 	}

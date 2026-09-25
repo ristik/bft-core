@@ -6,10 +6,12 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	libp2pnetwork "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/unicitynetwork/bft-core/archive"
@@ -140,7 +142,7 @@ func TestTwoInProcessReplicaReadbacksAndOneReplicaLoss(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		server.Register(remote)
+		server.Register(context.Background(), remote)
 	}
 	for _, id := range []peer.ID{first.ID(), second.ID()} {
 		if err := PutAndReadBack(context.Background(), sender, id, q, rec, DefaultLimits()); err != nil {
@@ -158,4 +160,79 @@ func TestTwoInProcessReplicaReadbacksAndOneReplicaLoss(t *testing.T) {
 	if err := PutAndReadBack(context.Background(), sender, first.ID(), q, rec, DefaultLimits()); err != nil {
 		t.Fatalf("surviving replica: %v", err)
 	}
+}
+
+func TestReplicaRejectsWrongPutAckAndChangedReadBack(t *testing.T) {
+	for _, change := range []string{"ack", "read-back"} {
+		t.Run(change, func(t *testing.T) {
+			q, rec := transportFixture()
+			sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+			receiver := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+			sender.Network().Peerstore().AddAddrs(receiver.ID(), receiver.MultiAddresses(), peerstore.PermanentAddrTTL)
+			var reads atomic.Int32
+			receiver.RegisterProtocolHandler(ProtocolArchive, func(stream libp2pnetwork.Stream) {
+				defer stream.Close()
+				frame, err := readFrame(stream, archive.MaxWireBytes+1)
+				if err != nil || len(frame) == 0 {
+					return
+				}
+				if frame[0] == 1 {
+					if change == "ack" {
+						_ = writeFrame(stream, []byte{2})
+					} else {
+						_ = writeFrame(stream, []byte{1})
+					}
+					return
+				}
+				reads.Add(1)
+				changed := *rec
+				changed.Body = []byte{0xc1, 0x80}
+				response, err := archive.EncodeResponse(archive.Response{Request: q, Outcome: archive.OK, Record: &changed})
+				if err == nil {
+					_ = writeFrame(stream, response)
+				}
+			})
+			err := PutAndReadBack(context.Background(), sender, receiver.ID(), q, rec, DefaultLimits())
+			if !errors.Is(err, ErrReplica) {
+				t.Fatalf("%s: %v", change, err)
+			}
+			if change == "ack" && reads.Load() != 0 || change == "read-back" && reads.Load() != 1 {
+				t.Fatalf("%s: read-backs %d", change, reads.Load())
+			}
+		})
+	}
+}
+
+func TestReplicaAdmissionLimitsAndAllowlist(t *testing.T) {
+	q, _ := transportFixture()
+	store, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{Deadline: time.Second, Pending: 2, PerPeer: 1}
+	s, err := NewServer(store, q.Context, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{"first", "second", "third"}, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.enter("outsider") {
+		t.Fatal("unconfigured peer admitted")
+	}
+	if !s.enter("first") {
+		t.Fatal("first slot refused")
+	}
+	if s.enter("first") {
+		t.Fatal("per-peer slot limit ignored")
+	}
+	if !s.enter("second") {
+		t.Fatal("second slot refused")
+	}
+	if s.enter("third") {
+		t.Fatal("global slot limit ignored")
+	}
+	s.leave("first")
+	if !s.enter("third") {
+		t.Fatal("released global slot unavailable")
+	}
+	s.leave("second")
+	s.leave("third")
 }

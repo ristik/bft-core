@@ -481,24 +481,21 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if e != nil {
 				return e
 			}
-			var replicas [2]libp2ppeer.ID
-			for i, raw := range flags.ArchiveReplicas {
-				replicas[i], e = libp2ppeer.Decode(raw)
-				if e != nil {
-					return fmt.Errorf("archive replica %d: %w", i, e)
-				}
+			replicas, e := configuredArchiveReplicas(flags.ArchiveReplicas, allowed, peer.ID())
+			if e != nil {
+				return e
 			}
 			transportLimits := archivewiring.DefaultLimits()
 			server, e := archivewiring.NewServer(local, subject, archivewiring.JournalVerifier(journalStore, journalCtx, limits, subject), allowed, transportLimits)
 			if e != nil {
 				return fmt.Errorf("starting archive replica: %w", e)
 			}
-			server.Register(peer)
+			server.Register(ctx, peer)
 			metrics, e := archivewiring.NewMetrics(flags.observe.Meter("archive"))
 			if e != nil {
 				return e
 			}
-			publisher := &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: local, Subject: subject, Adapter: adapter, Host: peer, Replicas: replicas, Limits: transportLimits, Log: flags.observe.Logger(), Metrics: metrics}
+			publisher := &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: local, Subject: subject, Host: peer, Replicas: replicas, Limits: transportLimits, Log: flags.observe.Logger(), Metrics: metrics}
 			if e := publisher.Validate(); e != nil {
 				_ = metrics.Close()
 				return e
@@ -624,6 +621,34 @@ func buildDisseminator(p *network.Peer, obs Observability, validators []*types.N
 // deliberately the same set, because both are "the validators of this shard" and a node that is
 // trusted to send blocks is no more trusted to serve evidence: the evidence predicate authenticates
 // everything against this node's own trust base regardless of who supplied it (§3).
+func configuredArchiveReplicas(raws []string, validators []libp2ppeer.ID, self libp2ppeer.ID) ([2]libp2ppeer.ID, error) {
+	var out [2]libp2ppeer.ID
+	if len(raws) != 2 {
+		return out, archivewiring.ErrConfig
+	}
+	for i, raw := range raws {
+		id, err := libp2ppeer.Decode(raw)
+		if err != nil {
+			return out, fmt.Errorf("%w: archive replica %d: %v", archivewiring.ErrConfig, i, err)
+		}
+		if id == self {
+			return out, fmt.Errorf("%w: archive replica cannot be self", archivewiring.ErrConfig)
+		}
+		configured := false
+		for _, candidate := range validators {
+			configured = configured || candidate == id
+		}
+		if !configured {
+			return out, fmt.Errorf("%w: archive replica %s is not a configured shard validator", archivewiring.ErrConfig, id)
+		}
+		out[i] = id
+	}
+	if out[0] == out[1] {
+		return [2]libp2ppeer.ID{}, archivewiring.ErrConfig
+	}
+	return out, nil
+}
+
 func shardPeers(p *network.Peer, validators []*types.NodeInfo) ([]libp2ppeer.ID, error) {
 	selfID := p.ID().String()
 	var peers []libp2ppeer.ID

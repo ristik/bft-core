@@ -40,6 +40,7 @@ type Verifier func(context.Context, archive.Request, *archive.Record) error
 
 type Server struct {
 	store   *archive.Store
+	ctx     context.Context
 	want    []byte
 	verify  Verifier
 	limits  Limits
@@ -70,7 +71,8 @@ func NewServer(store *archive.Store, contextValue archive.Context, verify Verifi
 	return &Server{store: store, want: want[:len(want)-32], verify: verify, limits: limits, allowed: peers, byPeer: make(map[peer.ID]int)}, nil
 }
 
-func (s *Server) Register(host shardnode.EvidenceHost) {
+func (s *Server) Register(ctx context.Context, host shardnode.EvidenceHost) {
+	s.ctx = ctx
 	host.RegisterProtocolHandler(ProtocolArchive, s.handle)
 }
 
@@ -104,7 +106,7 @@ func (s *Server) handle(stream libp2pnetwork.Stream) {
 	}
 	defer s.leave(id)
 	_ = stream.SetDeadline(time.Now().Add(s.limits.Deadline))
-	ctx, cancel := context.WithTimeout(context.Background(), s.limits.Deadline)
+	ctx, cancel := context.WithTimeout(s.ctx, s.limits.Deadline)
 	defer cancel()
 	if err := s.Serve(ctx, stream); err != nil {
 		_ = stream.Reset()
@@ -233,16 +235,18 @@ func readFrame(r io.Reader, max int) ([]byte, error) {
 	if n == 0 || uint64(n) > uint64(max) {
 		return nil, archive.ErrInvalid
 	}
-	out := make([]byte, n)
-	for off := 0; off < len(out); {
-		end := off + transferChunk
-		if end > len(out) {
-			end = len(out)
+	out := make([]byte, 0)
+	var chunk [transferChunk]byte
+	for remaining := int(n); remaining > 0; {
+		step := remaining
+		if step > len(chunk) {
+			step = len(chunk)
 		}
-		if _, err := io.ReadFull(r, out[off:end]); err != nil {
+		if _, err := io.ReadFull(r, chunk[:step]); err != nil {
 			return nil, err
 		}
-		off = end
+		out = append(out, chunk[:step]...)
+		remaining -= step
 	}
 	return out, nil
 }
