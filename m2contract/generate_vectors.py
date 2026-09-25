@@ -51,6 +51,8 @@ doc = {
  'encoding': 'RFC 8949 deterministic CBOR, SHA-256; no signatures or witnesses in body',
  'anchor': {'network': 3, 'epoch': 4, 'start': 0, 'end': 120, 'hashIncludingSigs': hx(anchor)},
  'firstPredecessor': hx(first),
+ 'openAnchor': encoded(['UNICITY_V1_TRUST_ANCHOR_INTERVAL', 1, 3, 4, anchor, 0, None]),
+ 'closedAnchor': encoded(['UNICITY_V1_TRUST_ANCHOR_INTERVAL', 1, 3, 4, anchor, 0, 120]),
  'inputMemberOrder': [m[1] for m in unsorted_members],
  'body': encoded(body), 'body2': encoded(body2),
  'interval': encoded(['UNICITY_ACTIVATED_TRUST_INTERVAL', 1, body_id, 120, bytes.fromhex('77'*32), 200]),

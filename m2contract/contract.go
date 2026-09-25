@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	bfttypes "github.com/unicitynetwork/bft-go-base/types"
@@ -16,6 +17,8 @@ const ExecutionConfigVersion = 2
 const executionDomain = "UNICITY_EXECUTION_CONFIG_V2"
 const intervalDomain = "UNICITY_ACTIVATED_TRUST_INTERVAL"
 const IntervalVersion = 1
+const anchorDomain = "UNICITY_V1_TRUST_ANCHOR_INTERVAL"
+const AnchorVersion = 1
 
 var (
 	ErrLegacyConfig             = errors.New("m2contract: missing legacy execution config identity")
@@ -112,6 +115,24 @@ func (in TrustInterval) validateActivation() error {
 	return nil
 }
 
+// V1AnchorRecord is the durable first interval. End == 0 is CBOR null and
+// means the v1 anchor remains current before any authenticated handoff.
+type V1AnchorRecord struct {
+	Anchor     evmroot.V1Anchor
+	Start, End uint64
+}
+
+func (r V1AnchorRecord) Encode() ([]byte, error) {
+	if r.Anchor.Version != 1 || len(r.Anchor.HashIncludingSigs) != 32 || (r.End != 0 && r.Start >= r.End) {
+		return nil, ErrAnchor
+	}
+	var end any
+	if r.End != 0 {
+		end = r.End
+	}
+	return bfttypes.Cbor.Marshal([]any{anchorDomain, uint64(AnchorVersion), r.Anchor.NetworkID, r.Anchor.Epoch, r.Anchor.HashIncludingSigs, r.Start, end})
+}
+
 // TrustHistory is a contiguous, single-network lineage from a v1 anchor.
 // AnchorStart/AnchorEnd describe the authenticated v1 active interval.
 type TrustHistory struct {
@@ -121,7 +142,7 @@ type TrustHistory struct {
 }
 
 func (h TrustHistory) Validate() error {
-	if h.Anchor.Version != 1 || len(h.Anchor.HashIncludingSigs) != 32 || h.AnchorStart >= h.AnchorEnd {
+	if h.Anchor.Version != 1 || len(h.Anchor.HashIncludingSigs) != 32 || (h.AnchorEnd != 0 && h.AnchorStart >= h.AnchorEnd) || (h.AnchorEnd == 0 && len(h.Intervals) != 0) {
 		return ErrAnchor
 	}
 	predecessor, err := evmroot.FirstV2PredecessorHash(h.Anchor)
@@ -137,6 +158,9 @@ func (h TrustHistory) Validate() error {
 	for i, in := range h.Intervals {
 		b := in.Body
 		if err := b.Validate(); err != nil {
+			if strings.Contains(err.Error(), "shared with another member") {
+				return fmt.Errorf("%w: interval %d: duplicate consensus key: %w", ErrBody, i, err)
+			}
 			return fmt.Errorf("%w: interval %d: %w", ErrBody, i, err)
 		}
 		if b.NetworkID != h.Anchor.NetworkID {
@@ -171,7 +195,7 @@ func (h TrustHistory) At(round uint64) (uint64, error) {
 	if err := h.Validate(); err != nil {
 		return 0, err
 	}
-	if round >= h.AnchorStart && round < h.AnchorEnd {
+	if round >= h.AnchorStart && (h.AnchorEnd == 0 || round < h.AnchorEnd) {
 		return h.Anchor.Epoch, nil
 	}
 	for _, in := range h.Intervals {

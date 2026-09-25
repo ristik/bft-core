@@ -59,17 +59,24 @@ See [D3 §4, activation](d3-weighted-consensus-trust-base.md#earliestactivation-
 and [D4 §§1–3](d4-epoch-handoff-state-machine.md#3-authorisation-function-the-safety-core).
 
 A historical store records contiguous half-open intervals `[start,end)` for
-the v1 anchor and every activated v2 body. `start` for each v2 interval must
+the v1 anchor and every activated v2 body. Before the first handoff, the
+durable v1 anchor is `["UNICITY_V1_TRUST_ANCHOR_INTERVAL", 1, networkId,
+epoch, v1HashIncludingSigs, start, null]` in deterministic CBOR. Closing it
+replaces `null` with the authenticated first A*. The anchor is pinned to the
+exact v1 hash including signatures. `start` for each v2 interval must
 be the authenticated `A*`, at least the body's `A_min`; the prior end must
 equal this start, and start must be below end. Lookup by root round uses these
 intervals, never `A_min`. The durable activated-interval record is
 `["UNICITY_ACTIVATED_TRUST_INTERVAL", 1, bodyIdentity, A*,
 activationCommitID, end]` in deterministic CBOR; `end` is an unsigned
 round for closed intervals and CBOR null for the open-ended current interval.
-The open interval may only be last. The body is stored separately by ID. It refuses a partial, overlapping, gapped, or
+The open interval may only be last. The non-final-open check is redundant
+with contiguous boundaries and retained as defense in depth. The body is
+stored alongside the interval and checked against its ID. It refuses a partial,
+overlapping, gapped, or
 out-of-context chain rather than selecting a convenient entry. Epoch lookup
-must validate the same lineage and activated record. Retention and restart
-are PR 2 concerns; no local REST insertion or clock passage activates a body.
+must validate the same lineage and activated record. No local REST insertion
+or clock passage activates a body.
 `rootinput/v2.go` transition refusal remains until WP3.
 
 ## Execution configuration identity
@@ -93,8 +100,10 @@ address. The supported profile requires positive fields, `systemGas < maxGas`,
 The inert encoder hashes the supplied collector bytes, including zero. The
 PR 2 runtime binder must refuse an unset zero collector and obtain the address
 from checked configuration. Changing any fee field or collector changes the v2 ID.
-The future runtime binder must obtain all values from the checked node and
-companion configuration, then compare the pinned identity on restore.
+The runtime binder reads the checked profile and collector from ureth over
+the JWT-authenticated Engine connection, then compares the pinned identity
+on restore. The journal descriptor uses payload version 3 when this ID is
+present; a legacy descriptor is incompatible and refused.
 
 Old descriptors and stores carry v1 identities and lack these fields. They
 must not be silently reinterpreted as v2 or opened for M2 execution. An

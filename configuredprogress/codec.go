@@ -82,6 +82,18 @@ type descriptorWire struct {
 	B0, S0                                  []byte
 	RootInputVersion, RegistryLayoutVersion uint64
 }
+
+// descriptorM2Wire extends the immutable descriptor under a distinct payload
+// version. The old tuple is never reinterpreted as a fee-complete identity.
+type descriptorM2Wire struct {
+	_                                             struct{} `cbor:",toarray"`
+	Version                                       uint64
+	OriginIdentity, LegacyExecutionConfigIdentity []byte
+	Context                                       descriptorContextWire
+	B0, S0                                        []byte
+	RootInputVersion, RegistryLayoutVersion       uint64
+	ExecutionConfigV2                             []byte
+}
 type pairWire struct {
 	_      struct{} `cbor:",toarray"`
 	UC, TR []byte
@@ -162,12 +174,16 @@ func descriptorFor(o registrygenesis.GenesisOrigin) (descriptorWire, error) {
 	return descriptorWire{Version: FormatVersion, OriginIdentity: o.Identity().Bytes(), ExecutionConfigIdentity: o.ExecutionConfigIdentity().Bytes(), Context: descriptorContextWire{NetworkID: r.NetworkID, PartitionID: r.PartitionID, ShardID: bytes.Clone(r.ShardID), FullConf: o.FullShardConfHash().Bytes(), RegistryAddress: pc.RegistryAddress.Bytes(), RegistryCodeHash: pc.RegistryCodeHash.Bytes(), GenesisCommitment: pc.GenesisCommitment.Bytes(), ShardEpoch: pc.ShardEpoch, RootEpoch: pc.RootEpoch}, B0: o.BlockHash().Bytes(), S0: o.StateRoot().Bytes(), RootInputVersion: evmroot.ProfileVersionV2, RegistryLayoutVersion: registryproof.LayoutVersion}, nil
 }
 
-func encodeDescriptor(o registrygenesis.GenesisOrigin) ([]byte, [32]byte, error) {
+func encodeDescriptor(o registrygenesis.GenesisOrigin, identity ...[32]byte) ([]byte, [32]byte, error) {
 	d, err := descriptorFor(o)
 	if err != nil {
 		return nil, [32]byte{}, err
 	}
-	p, err := marshal(d)
+	var value any = d
+	if len(identity) > 0 && identity[0] != ([32]byte{}) {
+		value = descriptorM2Wire{Version: 3, OriginIdentity: d.OriginIdentity, LegacyExecutionConfigIdentity: d.ExecutionConfigIdentity, Context: d.Context, B0: d.B0, S0: d.S0, RootInputVersion: d.RootInputVersion, RegistryLayoutVersion: d.RegistryLayoutVersion, ExecutionConfigV2: identity[0][:]}
+	}
+	p, err := marshal(value)
 	if err != nil {
 		return nil, [32]byte{}, err
 	}
@@ -176,21 +192,42 @@ func encodeDescriptor(o registrygenesis.GenesisOrigin) ([]byte, [32]byte, error)
 	return raw, sum, err
 }
 
-func verifyDescriptor(raw []byte, o registrygenesis.GenesisOrigin) ([32]byte, error) {
+func verifyDescriptor(raw []byte, o registrygenesis.GenesisOrigin, identity ...[32]byte) ([32]byte, error) {
 	p, err := decodeEnvelope(raw, kindDescriptor, MaxDescriptorBytes)
 	if err != nil {
 		return [32]byte{}, err
 	}
-	var got descriptorWire
-	if err = decodePayload(p, &got); err != nil {
-		return [32]byte{}, err
+	m2 := len(identity) > 0 && identity[0] != ([32]byte{})
+	if m2 {
+		var got descriptorM2Wire
+		if err := decodePayload(p, &got); err != nil {
+			return [32]byte{}, ErrVersion
+		}
+		if got.Version != 3 {
+			return [32]byte{}, ErrVersion
+		}
+	} else {
+		var got descriptorWire
+		if err := decodePayload(p, &got); err != nil {
+			return [32]byte{}, ErrVersion
+		}
+		if got.Version != FormatVersion {
+			return [32]byte{}, ErrVersion
+		}
 	}
-	want, err := descriptorFor(o)
+	var id [32]byte
+	if m2 {
+		id = identity[0]
+	}
+	want, _, err := encodeDescriptor(o, id)
 	if err != nil {
 		return [32]byte{}, err
 	}
-	wb, _ := marshal(want)
-	if !bytes.Equal(p, wb) {
+	wp, err := decodeEnvelope(want, kindDescriptor, MaxDescriptorBytes)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	if !bytes.Equal(p, wp) {
 		return [32]byte{}, ErrContext
 	}
 	return sha256.Sum256(p), nil

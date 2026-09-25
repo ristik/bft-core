@@ -53,9 +53,10 @@ func (s Settings) check() error {
 
 // Context is independently checked local configuration used to distrust every stored byte.
 type Context struct {
-	Origin      registrygenesis.GenesisOrigin
-	Observation rootinput.ObservationContextV2
-	Record      certifiedstore.Context
+	Origin            registrygenesis.GenesisOrigin
+	ExecutionConfigV2 [32]byte
+	Observation       rootinput.ObservationContextV2
+	Record            certifiedstore.Context
 }
 
 func cloneShardID(id bfttypes.ShardID) (bfttypes.ShardID, error) {
@@ -242,7 +243,7 @@ func (s *Store) Initialize(ctx context.Context, c Context) (State, ProgressToken
 	} else if !errors.Is(err, ErrUnavailable) {
 		return State{}, ProgressToken{}, err
 	}
-	desc, dd, err := encodeDescriptor(c.Origin)
+	desc, dd, err := encodeDescriptor(c.Origin, c.ExecutionConfigV2)
 	if err != nil {
 		return State{}, ProgressToken{}, err
 	}
@@ -343,7 +344,7 @@ func (s *Store) Load(ctx context.Context, c Context) (State, ProgressToken, erro
 }
 
 func verifyRawImage(ctx context.Context, c Context, desc, control, hn, hr []byte) (*durableImage, error) {
-	dd, err := verifyDescriptor(desc, c.Origin)
+	dd, err := verifyDescriptor(desc, c.Origin, c.ExecutionConfigV2)
 	if err != nil {
 		return nil, err
 	}
