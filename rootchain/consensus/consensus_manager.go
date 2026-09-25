@@ -1098,6 +1098,9 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	}
 	var verifyErr error
 	if x.recoveryProfile2 {
+		if x.recoveryHistory == nil {
+			return fmt.Errorf("recovery response verification failed: %w", abdrc.ErrHistoricalTrustBase)
+		}
 		verifyErr = rsp.VerifyWithHistory(x.params.HashAlgorithm, x.trustBase.Load(), x.recoveryHistory)
 	} else {
 		verifyErr = rsp.Verify(x.params.HashAlgorithm, x.trustBase.Load())

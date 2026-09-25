@@ -221,11 +221,7 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 				return fmt.Errorf("%w for epoch %d: invalid body variant", ErrHistoricalTrustBase, historical.Epoch)
 			}
 		}
-		partition, shard, conf := c.UC.GetPartitionID(), c.UC.GetShardID(), []byte(nil)
-		if history != nil {
-			partition, shard, conf = c.Partition, c.Shard, c.ShardConfHash
-		}
-		if err := c.UC.Verify(ucTrust, hashAlgorithm, partition, shard, conf); err != nil {
+		if err := verifyRecoveryUC(c, ucTrust, hashAlgorithm, history != nil); err != nil {
 			if history != nil {
 				return fmt.Errorf("%w for %s-%s: %w", ErrHistoricalUC, c.Partition, c.Shard, err)
 			}
@@ -233,6 +229,14 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 		}
 	}
 	return nil
+}
+
+func verifyRecoveryUC(c ShardInfo, trust types.RootTrustBase, hashAlgorithm crypto.Hash, historical bool) error {
+	partition, shard, conf := c.UC.GetPartitionID(), c.UC.GetShardID(), []byte(nil)
+	if historical {
+		partition, shard, conf = c.Partition, c.Shard, c.ShardConfHash
+	}
+	return c.UC.Verify(trust, hashAlgorithm, partition, shard, conf)
 }
 
 // v2UCTrustBase adapts an authenticated WP1 body to the legacy UC signature

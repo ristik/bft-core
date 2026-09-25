@@ -340,6 +340,20 @@ func TestStateMsg_Verify(t *testing.T) {
 			require.ErrorIs(t, sm.VerifyWithHistory(crypto.SHA256, current, history), ErrHistoricalUC)
 		})
 
+		t.Run("right signer epoch but wrong shard identity", func(t *testing.T) {
+			sm := makeState()
+			// The UC and its epoch signature remain valid, but the recovery
+			// record claims that the certificate belongs to another shard.
+			wrongShard, _ := (types.ShardID{}).Split()
+			sm.CommittedHead.ShardInfo[1].Shard = wrongShard
+			shard := sm.CommittedHead.ShardInfo[1]
+			// Isolate the final expected-identity binding: the same UC is
+			// authentic under its own identity and epoch trust base.
+			require.NoError(t, verifyRecoveryUC(shard, secondGenesis, crypto.SHA256, false))
+			require.ErrorContains(t, verifyRecoveryUC(shard, secondGenesis, crypto.SHA256, true), "invalid shard ID")
+			require.ErrorContains(t, sm.VerifyWithHistory(crypto.SHA256, current, history), "invalid shard ID")
+		})
+
 		t.Run("missing body never falls back", func(t *testing.T) {
 			onlyFirst, err := trusthistorystore.Open(context.Background(), memorydb.New(), first, identity, recoveryHistoryProof{})
 			require.NoError(t, err)
