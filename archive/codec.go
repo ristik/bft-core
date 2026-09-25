@@ -1,4 +1,4 @@
-// Package archive provides an inactive, bounded certified-record archive.
+// Package archive provides a bounded certified-record archive.
 // Its bytes are availability data; callers must authenticate them independently.
 package archive
 
@@ -29,7 +29,7 @@ var ErrInvalid = errors.New("invalid archive message")
 
 // Identity is the small boundary to WP1's versioned execution identity.
 // The caller must supply the canonical, complete identity bytes. RawIdentity is
-// a temporary implementation for fixtures until WP1's identity type is merged.
+// an adapter for a checked execution configuration encoder.
 type Identity interface{ ArchiveIdentity() ([]byte, error) }
 type RawIdentity []byte
 
@@ -86,7 +86,7 @@ type Response struct {
 type Record struct {
 	Header, Body, CanonicalRootInput                 []byte
 	OriginalUC, OriginalTR, ResultingUC, ResultingTR []byte
-	Companion, ParentAccounting                      []byte
+	Companion, ParentAccounting                      []byte // ParentAccounting is empty in version 1.
 	// Reserved for future versioned proof/export material. Not interpreted here.
 	Extensions map[string][]byte
 }
@@ -212,7 +212,13 @@ func validRecord(rec *Record) bool {
 		return false
 	}
 	total := 0
-	for _, v := range fields(rec) {
+	for name, v := range fields(rec) {
+		if name == "parent-accounting" {
+			if len(v) != 0 {
+				return false
+			}
+			continue
+		}
 		if len(v) == 0 || len(v) > MaxChunkBytes {
 			return false
 		}

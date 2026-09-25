@@ -17,8 +17,8 @@ import (
 var ErrUnavailable = errors.New("archive record unavailable")
 var ErrCorrupt = errors.New("archive record invalid")
 
-// Store is inert: no runtime caller, peer listener, or pruning acknowledgement
-// is installed by this package. One process may write a store at a time.
+// Store holds immutable local availability copies. One process may write a
+// store at a time; archivewiring owns peer publication and verification.
 type Store struct {
 	dir   string
 	mu    sync.Mutex
@@ -300,7 +300,7 @@ func (s *Store) get(q Request) (*Record, error) {
 		k := string(kb)
 		last = k
 		var size uint32
-		if e = binaryRead32(r, &size); e != nil || size == 0 || size > MaxChunkBytes {
+		if e = binaryRead32(r, &size); e != nil || size > MaxChunkBytes || (size == 0 && k != "parent-accounting") || (size != 0 && k == "parent-accounting") {
 			return nil, ErrCorrupt
 		}
 		var hash [32]byte

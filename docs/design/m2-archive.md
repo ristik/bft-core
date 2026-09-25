@@ -1,9 +1,9 @@
 # M2a certified-record archive, version 1
 
-This is the inactive contract and local store for M2 WP2a. It does not enable
-publication, retrieval over a network, pruning, replacement recovery, or proof
-export. The schema reserves extensions for the M2b proof bundle; no verifier is
-provided here. The principles of exact context and typed responses follow
+This is the archive contract and local store for M2 WP2a. PR A adds journal
+publication and configured peer serving. Pruning, replacement recovery and
+proof export remain separate work. The schema reserves extensions for the M2b
+proof bundle. The principles of exact context and typed responses follow
 [F7's retrieval design](f7-parent-registry-witness-archive.md).
 
 ## Subject and record
@@ -22,11 +22,22 @@ TODO (WP1): answer whether the canonical identity bytes commit to the trust
 set and its version; align this context with the trust binding in `rootinput/v2.go`.
 
 A record retains the raw header and body, canonical root input, original UC/TR,
-resulting UC/TR, companion, and parent accounting. The original pair derives the
+resulting UC/TR, and companion. The version 1 parent-accounting slot is present
+with zero length; a later schema may carry it. The original pair derives the
 block's root input; the resulting pair certifies the block hash and state root
-(see [D2-A](d2a-execution-journal.md)). All nine fields are required, nonempty
-chunks. Versioned extensions can later carry proofs and transition material.
+(see [D2-A](d2a-execution-journal.md)). All nine slots are present; eight are
+nonempty and parent accounting is empty in version 1. Versioned extensions can
+later carry proofs and transition material.
 This version does not interpret extensions or certify the retained bytes.
+
+The execution client's parent accounting is reproduced by contiguous checked
+seal-import replay: the payload and authenticated seal companion execute on the
+exact certified parent state, using that parent's checked accounting token. The
+configured genesis supplies the initial zero-system-gas token. A snapshot restore
+starts with the parent accounting token from the independently authenticated
+execution-client snapshot (H4 scope), then replays forward. Neither a header nor
+an archive response alone establishes the gas split. A missing token is
+unavailable and blocks import until its predecessor is restored or replayed.
 
 ## Publication and durability
 
@@ -47,9 +58,14 @@ the record published while the caller receives an error; callers must re-read
 before retrying. A single process owns the store; cross-process writer locking
 and recovery of orphan temporary directories belong to the later wiring.
 
-There is **no durable availability acknowledgement** in this PR. The later
-frontier may advance only after two independently stored, configured replicas
-durably acknowledge the exact record and its complete manifest. A receipt of
+The publisher pushes to two configured peer IDs and independently reads back
+each exact record. It compares the full manifest digest to its own canonical
+record digest before counting a durable acknowledgement. Publisher retries use
+the local immutable copy so a later execution-client witness-window expiry
+cannot prevent replica repair. On restart the node obtains fresh read-backs;
+the in-memory counts are never a prune basis. The later frontier may advance
+only after two independently stored, configured replicas durably acknowledge
+the exact record and its complete manifest. A receipt of
 durable availability is a retention claim, not evidence of certification,
 freshness, authenticity, or future peer health. The frontier must bind those
 acknowledgements to its own authenticated subject and policy before pruning.
@@ -72,20 +88,25 @@ success with missing data is malformed. Consumers reject a wrong echo.
 The hard codec ceilings are 4 KiB for execution identity, 8 MiB per chunk,
 32 MiB for all record data, 16 extensions, and about 32 MiB for a response.
 Decoders check lengths before allocation and reject noncanonical shard IDs.
-A future peer transport must validate the request before `Serve`: a malformed
+The peer transport validates the request before `Serve`: a malformed
 request has no canonical echo for an encodable refusal. It must enforce
 frame, in-flight byte/work, concurrency and deadline limits **before** decode;
-it must choose peers from a fixed configured list. Requests must be bounded
-to one subject and chunks transferred with bounded byte ranges. These transport
-limits and peer selection are requirements for later wiring, not implemented
-by the inert store.
+it chooses peers from a fixed configured list. Requests are bounded to one
+subject and frames are transferred in 64 KiB write/read slices, under a 32 MiB
+record cap, four global server slots, one slot per peer, and a 20-second
+deadline. A replica compares the incoming record with its own authenticated
+certified journal association before storing it; a lagging replica refuses and
+the sender retries later. The publisher scans at most four pending records per
+pass. Archive transport runs outside certification and cannot hold its round
+lock; a prolonged outage still consumes the journal's finite capacity until
+frontier pruning is enabled in PR B.
 
 ## Consumer authentication
 
 The consumer starts with independently authenticated context, target hash,
 certificate/trust history, and continuity anchor. It checks the exact response
 echo, then re-verifies header, root input, original and resulting UC/TR roles,
-companion, parent accounting and any required state witness against those local
+companion and any required state witness against those local
 pins. It must derive the header hash and state root from evidence, check the
 resulting certificate's association, and reject missing or substituted evidence.
 It cannot adopt a provider's stated trust set, checkpoint, freshness, or

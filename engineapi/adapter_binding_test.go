@@ -1,6 +1,7 @@
 package engineapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"math/big"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/shardnode"
@@ -47,12 +49,22 @@ func TestCheckBlockBindingRecomputesRawHeaderBeforeRetention(t *testing.T) {
 	block, err := EncodeBlockWithSealCompanion(payload, &SealCompanion{RootInput: want.Encoded, Witnesses: witnesses, Provenance: "build"})
 	require.NoError(t, err)
 	require.NoError(t, a.CheckBlockBinding(context.Background(), block, params))
+	archivedHeader, archivedBody, archivedInput, archivedCompanion, err := ArchiveParts(block, params.AuthorizingCertificate.GetRootRoundNumber(), params.Round)
+	require.NoError(t, err)
+	var decodedHeader gethtypes.Header
+	require.NoError(t, rlp.DecodeBytes(archivedHeader, &decodedHeader))
+	require.Equal(t, header.Hash(), decodedHeader.Hash())
+	require.NotEmpty(t, archivedBody)
+	require.True(t, bytes.Equal(want.Encoded, archivedInput))
+	require.Contains(t, string(archivedCompanion), "rootInput")
 	payload.GasUsed++ // The claimed block hash and parent linkage remain unchanged.
 	forged, err := EncodeBlockWithSealCompanion(payload, &SealCompanion{RootInput: want.Encoded, Witnesses: witnesses, Provenance: "build"})
 	require.NoError(t, err)
 	require.Equal(t, block.Hash, forged.Hash)
 	require.Equal(t, block.ParentHash, forged.ParentHash)
 	require.ErrorContains(t, a.CheckBlockBinding(context.Background(), forged, params), "computed header hash")
+	_, _, _, _, err = ArchiveParts(forged, params.AuthorizingCertificate.GetRootRoundNumber(), params.Round)
+	require.Error(t, err)
 	var binder interface {
 		CheckBlockBinding(context.Context, shardnode.Block, shardnode.RoundParams) error
 	} = a
