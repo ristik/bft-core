@@ -63,3 +63,38 @@ func filledCollector() [20]byte {
 	}
 	return x
 }
+
+func TestCheckedIdentityRecheckedBeforeEngineCall(t *testing.T) {
+	legacy := [32]byte{1}
+	baseline := sealConfigWire{Version: 1, MaxGas: 30_000_000, SystemGas: 2_000_000, BaseFeeFloor: 1_000_000, Elasticity: 2, ChangeDenominator: 8, FeeCollector: "0x" + strings.Repeat("12", 20)}
+	current := baseline
+	engine := newMockReth(t, Secret{})
+	engine.on("engine_sealConfigV1", func(json.RawMessage) (any, *rpcError) { return current, nil })
+	called := 0
+	engine.on("engine_exchangeCapabilities", func(json.RawMessage) (any, *rpcError) { called++; return requiredCapabilities, nil })
+	a, closeFn := newTestAdapter(t, engine, newMockReth(t, Secret{}))
+	defer closeFn()
+	a.feeCollector = filledCollector()
+	pinned, err := a.CheckedExecutionConfigIdentity(context.Background(), legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.BaseFeeFloor++
+	a.engine.http.CloseIdleConnections() // the next Engine RPC uses a new connection
+	var capabilities []string
+	err = a.engine.call(context.Background(), "engine_exchangeCapabilities", []any{requiredCapabilities}, &capabilities)
+	if !errors.Is(err, ErrSealConfigIdentity) || called != 0 {
+		t.Fatalf("changed companion reached Engine call: %v, calls %d", err, called)
+	}
+	if _, err := a.CheckedExecutionConfigIdentity(context.Background(), legacy); !errors.Is(err, ErrSealConfigIdentity) {
+		t.Fatalf("repinned changed companion: %v", err)
+	}
+	current = baseline
+	err = a.engine.call(context.Background(), "engine_exchangeCapabilities", []any{requiredCapabilities}, &capabilities)
+	if err != nil || called != 1 {
+		t.Fatalf("unchanged companion refused: %v, calls %d", err, called)
+	}
+	if id, err := a.CheckedExecutionConfigIdentity(context.Background(), legacy); err != nil || id != pinned {
+		t.Fatalf("stable recheck: %x, %v", id, err)
+	}
+}

@@ -65,8 +65,11 @@ epoch, v1HashIncludingSigs, start, null]` in deterministic CBOR. Closing it
 replaces `null` with the authenticated first A*. The anchor is pinned to the
 exact v1 hash including signatures. `start` for each v2 interval must
 be the authenticated `A*`, at least the body's `A_min`; the prior end must
-equal this start, and start must be below end. Lookup by root round uses these
-intervals, never `A_min`. The durable activated-interval record is
+equal this start, and start must be below end. The active-epoch mapping by root round uses these
+intervals, never `A_min`. This round-to-active-epoch mapping is not a signer
+resolver for historical UCs: a suffix UC may carry the old root epoch at a
+round at or above `A*`; verification selects its trust base by the UC's
+`rootEpoch`. The durable activated-interval record is
 `["UNICITY_ACTIVATED_TRUST_INTERVAL", 1, bodyIdentity, A*,
 activationCommitID, end]` in deterministic CBOR; `end` is an unsigned
 round for closed intervals and CBOR null for the open-ended current interval.
@@ -109,7 +112,9 @@ fee fields; only the collector is compared with the local setting. The first
 accepted profile is pinned in the descriptor, so an incorrect companion at
 initialization can establish an incorrect identity. Recovery compares the
 entire pinned identity. A new Engine connection must repeat that comparison
-before executing or signing with the replacement companion.
+before executing or signing with the replacement companion. The adapter
+rechecks the pin before each later authenticated Engine RPC, including after
+an HTTP reconnect.
 
 Old descriptors and stores carry v1 identities and lack these fields. They
 must not be silently reinterpreted as v2 or opened for M2 execution. An

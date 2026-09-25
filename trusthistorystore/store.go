@@ -24,7 +24,7 @@ var (
 	ErrEncoding      = errors.New("trusthistorystore: noncanonical or damaged record")
 	ErrHistory       = errors.New("trusthistorystore: invalid trust history")
 	ErrProof         = errors.New("trusthistorystore: activation proof unavailable or invalid")
-	ErrNotFound      = errors.New("trusthistorystore: trust epoch or round not found")
+	ErrNotFound      = errors.New("trusthistorystore: trust epoch not found")
 	ErrAlreadyExists = errors.New("trusthistorystore: epoch already exists")
 	ErrUnsupportedV2 = errors.New("trusthistorystore: v2 runtime activation is disabled")
 )
@@ -39,7 +39,8 @@ const entryPrefix = "m2trust/epoch/"
 const maxRecordBytes = 1 << 20
 
 // ActivationVerifier authenticates the D4 finalized root commit using the
-// verified predecessor trust base over its exact voting-round interval.
+// verified predecessor trust base. Record.Start and Record.End describe when
+// new consensus used that base; a suffix proof may finalize at c >= End.
 // Nil never admits a v2 entry.
 type ActivationVerifier interface {
 	VerifyActivation(context.Context, Record, m2contract.TrustInterval, []byte) error
@@ -57,7 +58,7 @@ type entryDisk struct {
 	Canonical, Proof []byte
 }
 
-// Record is a checked result of epoch or round lookup. Exactly one variant is set.
+// Record is a checked result of epoch lookup. Exactly one variant is set.
 type Record struct {
 	Epoch, Start, End uint64
 	V1                *bfttypes.RootTrustBaseV1
@@ -335,15 +336,6 @@ func (s *Store) ByEpoch(epoch uint64) (Record, error) {
 	}
 	s.cache[epoch] = cloneRecord(r)
 	return cloneRecord(r), nil
-}
-func (s *Store) ByRound(round uint64) (Record, error) {
-	s.mu.RLock()
-	epoch, err := s.history.At(round)
-	s.mu.RUnlock()
-	if err != nil {
-		return Record{}, fmt.Errorf("%w: %w", ErrNotFound, err)
-	}
-	return s.ByEpoch(epoch)
 }
 
 // AppendVerified persists a successor only after a caller-provided D4 verifier

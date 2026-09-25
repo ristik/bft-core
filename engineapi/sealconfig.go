@@ -15,6 +15,7 @@ var (
 	ErrSealConfigCollector   = errors.New("engineapi: companion fee collector mismatch")
 	ErrUnsetCollector        = errors.New("engineapi: fee collector is unset")
 	ErrSealConfigProfile     = errors.New("engineapi: companion fee profile invalid")
+	ErrSealConfigIdentity    = errors.New("engineapi: companion execution identity changed")
 )
 
 // sealConfigWire is returned by ureth from the same node-owned configuration
@@ -30,9 +31,38 @@ type sealConfigWire struct {
 }
 
 // CheckedExecutionConfigIdentity binds the checked companion settings to the
-// legacy chain/fork identity. The configured collector must be explicit and
-// match the companion; a second local fee-profile copy is never consulted.
+// legacy chain/fork identity and pins them for this adapter. Every later Engine
+// call rechecks the pin before proceeding, including after an HTTP reconnect.
+// The configured collector must match; no local fee-profile copy is consulted.
 func (a *Adapter) CheckedExecutionConfigIdentity(ctx context.Context, legacy [32]byte) ([32]byte, error) {
+	id, err := a.readExecutionConfigIdentity(ctx, legacy)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	a.sealPinMu.Lock()
+	defer a.sealPinMu.Unlock()
+	if a.sealPinned {
+		if id != a.sealID {
+			return [32]byte{}, ErrSealConfigIdentity
+		}
+		return id, nil
+	}
+	a.sealID = id
+	a.sealPinned = true
+	a.engine.setBeforeCall(func(ctx context.Context) error {
+		current, err := a.readExecutionConfigIdentity(ctx, legacy)
+		if err != nil {
+			return err
+		}
+		if current != id {
+			return ErrSealConfigIdentity
+		}
+		return nil
+	})
+	return id, nil
+}
+
+func (a *Adapter) readExecutionConfigIdentity(ctx context.Context, legacy [32]byte) ([32]byte, error) {
 	if a.feeCollector == ([20]byte{}) {
 		return [32]byte{}, ErrUnsetCollector
 	}

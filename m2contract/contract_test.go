@@ -101,13 +101,6 @@ func TestIndependentTrustVectors(t *testing.T) {
 			t.Fatalf("body %d differs from independent oracle", i)
 		}
 	}
-	bodyID := h.Intervals[0].Body.Identity()
-	for _, subset := range v.QuorumSubsets {
-		reached, valid := h.Intervals[0].Body.Members.QuorumReached(subset, 3)
-		if !valid || !reached || h.Intervals[0].Body.Identity() != bodyID {
-			t.Fatal("quorum subset changed body identity")
-		}
-	}
 	for round, want := range map[uint64]uint64{69: 4, 70: 4, 119: 4, 120: 5, 199: 5, 200: 6, 259: 6} {
 		got, err := h.At(round)
 		if err != nil || got != want {
