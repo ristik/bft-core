@@ -134,7 +134,7 @@ func (s setup) finalized(t *testing.T) { t.Helper(); s.commitStep(t); must(t, s.
 func (s setup) bootstrapped(t *testing.T) {
 	t.Helper()
 	s.finalized(t)
-	must(t, s.m.Bootstrap(s.verified, s.genesis, s.snapshot))
+	must(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot))
 }
 
 func TestCommitRecordIDBindsOrderRound(t *testing.T) {
@@ -186,6 +186,140 @@ func (m *mutatingOld) VerifyFinal(c Context, id [32]byte, p []byte) (VerifiedRec
 	}
 	return v, e
 }
+func (m *mutatingOld) VerifyOrdered(c Context, kind string, id [32]byte, p []byte) (VerifiedRecord, error) {
+	v, e := m.verifier.VerifyOrdered(c, kind, id, p)
+	if e == nil {
+		m.change(&v)
+	}
+	return v, e
+}
+
+type mutatingAck struct {
+	*ackVerifier
+	change func(*VerifiedRecord)
+}
+
+func (m *mutatingAck) VerifyAck(c Context, id [32]byte, p []byte) (VerifiedRecord, error) {
+	v, e := m.ackVerifier.VerifyAck(c, id, p)
+	if e == nil {
+		m.change(&v)
+	}
+	return v, e
+}
+
+func TestCommitWithRejectsVerifierOrderRound(t *testing.T) {
+	s := fixture(t)
+	s.endorse(t)
+	s.m.old = &mutatingOld{verifier: s.old, change: func(v *VerifiedRecord) { v.OrderRound-- }}
+	want(t, s.m.CommitWith(s.commit, proof), ErrProof)
+}
+
+func TestAckTypedResultGuards(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*VerifiedRecord)
+	}{
+		{"signer_epoch", func(v *VerifiedRecord) { v.SignerEpoch++ }},
+		{"kind", func(v *VerifiedRecord) { v.Kind = "commit" }},
+		{"order_floor", func(v *VerifiedRecord) { v.OrderRound-- }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := fixture(t)
+			s.bootstrapped(t)
+			must(t, s.m.Activate(s.commit.Activation))
+			s.m.ack = &mutatingAck{ackVerifier: s.ackV, change: tc.change}
+			want(t, s.m.Acknowledge(s.ack, proof), ErrProof)
+		})
+	}
+}
+
+func TestBootstrapCanonicalFields(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*setup)
+	}{
+		{"genesis_network", func(s *setup) { s.genesis.Network++ }},
+		{"genesis_order", func(s *setup) { s.genesis.OrderedRound++ }},
+		{"genesis_control_digest", func(s *setup) { s.genesis.ControlDigest[0] ^= 1 }},
+		{"genesis_successor_tr", func(s *setup) { s.genesis.SuccessorTRHash[0] ^= 1 }},
+		{"genesis_frozen_id", func(s *setup) { s.genesis.FrozenID[0] ^= 1 }},
+		{"genesis_next_body", func(s *setup) { s.genesis.NextBodyID[0] ^= 1 }},
+		{"verified_record_tr", func(s *setup) { s.verified.Record.SuccessorTRHash[0] ^= 1 }},
+		{"verified_record_rebound", func(s *setup) {
+			s.verified.Record.SuccessorTRHash[0] ^= 1
+			var e error
+			s.genesis, e = evmroot.DeriveEpochGenesis(s.verified, s.body)
+			if e != nil {
+				panic(e)
+			}
+		}},
+		{"verified_record_round", func(s *setup) { s.verified.Record.OrderedRound++ }},
+		{"verified_record_attempt", func(s *setup) { s.verified.Record.Attempt++ }},
+		{"verified_record_frozen", func(s *setup) { s.verified.Record.FrozenID[0] ^= 1 }},
+		{"verified_seal_round", func(s *setup) { s.verified.CommitSealRound++ }},
+		{"body", func(s *setup) { s.body.EarliestActivation++ }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := fixture(t)
+			s.finalized(t)
+			tc.change(&s)
+			want(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot), ErrProof)
+			if s.m.Genesis != nil {
+				t.Fatal("invalid genesis installed")
+			}
+		})
+	}
+}
+
+func TestBootstrapMachineBindings(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*Machine)
+	}{
+		{"frozen_id", func(m *Machine) { m.Freeze.FrozenID[0] ^= 1 }},
+		{"next_body", func(m *Machine) { m.Commit.Body[0] ^= 1 }},
+		{"commit_seal_round", func(m *Machine) { m.Verified.CommitSealRound++ }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := fixture(t)
+			s.finalized(t)
+			tc.change(s.m)
+			if s.m.bootstrapMachineFields(s.verified, s.genesis) {
+				t.Fatal("changed machine field accepted")
+			}
+			want(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot), ErrProof)
+		})
+	}
+}
+
+func TestBootstrapInstallOnce(t *testing.T) {
+	s := fixture(t)
+	s.finalized(t)
+	must(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot))
+	must(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot))
+	must(t, s.m.Activate(s.commit.Activation))
+	want(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot), ErrProof)
+}
+
+func TestControlPartitionRefusedByContextCodecs(t *testing.T) {
+	s := fixture(t)
+	c := s.m.Context
+	c.Partition = uint32(evmroot.D4ControlPartition)
+	_, e := c.Encode()
+	want(t, e, ErrCodec)
+	_, e = DecodeContext(mustEncode(t, c))
+	want(t, e, ErrCodec)
+}
+
+func TestExactRejectsOversizeCanonicalInput(t *testing.T) {
+	b, e := enc("OVERSIZE", bytes.Repeat([]byte{1}, MaxEncodedLength))
+	must(t, e)
+	if len(b) <= MaxEncodedLength {
+		t.Fatal("test input is not over limit")
+	}
+	_, e = exact(b, 2, "OVERSIZE")
+	want(t, e, ErrCodec)
+}
 func TestFinalizeRefusesMissingAndForgedProof(t *testing.T) {
 	s := fixture(t)
 	s.commitStep(t)
@@ -208,11 +342,11 @@ func TestBootstrapRequiresVerifiedGenesisAndSnapshot(t *testing.T) {
 	want(t, s.m.Activate(10), ErrProof)
 	g := s.genesis
 	g.Start++
-	want(t, s.m.Bootstrap(s.verified, g, s.snapshot), ErrProof)
+	want(t, s.m.Bootstrap(s.verified, s.body, g, s.snapshot), ErrProof)
 	bad := s.snapshot
 	bad.Control.OrderedRound++
-	want(t, s.m.Bootstrap(s.verified, s.genesis, bad), ErrProof)
-	must(t, s.m.Bootstrap(s.verified, s.genesis, s.snapshot))
+	want(t, s.m.Bootstrap(s.verified, s.body, s.genesis, bad), ErrProof)
+	must(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot))
 	must(t, s.m.Activate(10))
 	if !s.m.Authorized(10) || s.m.Authorized(9) {
 		t.Fatal("wrong activation authority")
