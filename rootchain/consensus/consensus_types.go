@@ -3,6 +3,8 @@ package consensus
 import (
 	"crypto"
 	"time"
+
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
 
 const (
@@ -23,9 +25,11 @@ type (
 	}
 	// Optional are common optional parameters for consensus managers
 	Optional struct {
-		Params          *Parameters
-		FrontierSampler *FrontierSamplerConfig
-		FrontierSigning bool
+		Params           *Parameters
+		FrontierSampler  *FrontierSamplerConfig
+		FrontierSigning  bool
+		RecoveryProfile2 bool
+		RecoveryHistory  *trusthistorystore.Store
 	}
 
 	Option func(c *Optional)
@@ -54,6 +58,11 @@ func WithFrontierSampler(config FrontierSamplerConfig) Option {
 // WithFrontierSampler and does not register a transport or production caller.
 func WithFrontierSigning() Option {
 	return func(c *Optional) { c.FrontierSigning = true }
+}
+
+// WithRecoveryProfile2 enables per-certificate historical LastCR verification.
+func WithRecoveryProfile2(history *trusthistorystore.Store) Option {
+	return func(c *Optional) { c.RecoveryProfile2, c.RecoveryHistory = true, history }
 }
 
 func LoadConf(opts []Option) (*Optional, error) {
