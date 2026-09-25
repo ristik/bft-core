@@ -21,6 +21,7 @@ type (
 		storage       PersistentStore
 		orchestration Orchestration
 		profile       uint64
+		handoffAuth   handoffAuthority
 		lock          sync.RWMutex
 		log           *slog.Logger
 	}
@@ -200,11 +201,14 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 	if err := checkProfile(x.profile, parentBlock.ShardState); err != nil {
 		return nil, err
 	}
-	if parentBlock.ShardState.Control != nil && parentBlock.ShardState.Control.Phase == "committed" && block.Epoch == parentBlock.ShardState.Control.Epoch && !block.Payload.IsEmpty() {
+	if x.profile == ProfileHandoff && block.Epoch != parentBlock.BlockData.Epoch {
+		return nil, ErrNetworkProfile
+	}
+	if parentBlock.ShardState.Control != nil && parentBlock.ShardState.Control.Phase == "committed" && !block.Payload.IsEmpty() {
 		return nil, ErrHandoffSuffix
 	}
 	// Extend state from parent block
-	exeBlock, err := parentBlock.Extend(block, verifier, x.orchestration, x.hash, x.log)
+	exeBlock, err := parentBlock.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth)
 	if err != nil {
 		return nil, fmt.Errorf("error processing block round %v, %w", block.Round, err)
 	}
@@ -229,8 +233,11 @@ func (x *BlockStore) SuffixParent(parentRound, epoch uint64) (bool, error) {
 	if err := checkProfile(x.profile, parent.ShardState); err != nil {
 		return false, err
 	}
+	if x.profile == ProfileHandoff && epoch != parent.BlockData.Epoch {
+		return false, ErrNetworkProfile
+	}
 	control := parent.ShardState.Control
-	return control != nil && control.Phase == "committed" && control.Epoch == epoch, nil
+	return control != nil && control.Phase == "committed", nil
 }
 
 // ReadFrontierStorageView returns an owned raw storage view for one shard.

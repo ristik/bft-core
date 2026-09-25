@@ -144,7 +144,14 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 }
 
 func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger) (*ExecutedBlock, error) {
-	if x.ShardState.Control != nil && x.ShardState.Control.Phase == "committed" && newBlock.Epoch == x.ShardState.Control.Epoch {
+	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil)
+}
+
+func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority) (*ExecutedBlock, error) {
+	if x.ShardState.Control != nil && newBlock.Epoch != x.BlockData.Epoch {
+		return nil, ErrNetworkProfile
+	}
+	if x.ShardState.Control != nil && x.ShardState.Control.Phase == "committed" {
 		if newBlock.Payload == nil || !newBlock.Payload.IsEmpty() || newBlock.Payload.Version != 2 {
 			return nil, ErrHandoffSuffix
 		}
@@ -199,11 +206,15 @@ func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReq
 		nextShardState.Changed[shardKey] = struct{}{}
 	}
 	if nextShardState.Control != nil {
-		if len(newBlock.Payload.HandoffRecords) > 1 {
+		if len(newBlock.Payload.HandoffRecords) > 2 {
 			return nil, ErrHandoffRecord
 		}
-		if len(newBlock.Payload.HandoffRecords) == 1 {
-			control, err := applyHandoffRecord(nextShardState.Control, newBlock.Payload.HandoffRecords[0], uint64(orchestration.NetworkID()), newBlock.Epoch, newBlock.Round)
+		if len(newBlock.Payload.HandoffRecords) > 0 {
+			var companion []byte
+			if len(newBlock.Payload.HandoffRecords) == 2 {
+				companion = newBlock.Payload.HandoffRecords[1]
+			}
+			control, err := applyHandoffRecord(nextShardState.Control, newBlock.Payload.HandoffRecords[0], uint64(orchestration.NetworkID()), newBlock.Epoch, newBlock.Round, authority, companion)
 			if err != nil {
 				return nil, err
 			}

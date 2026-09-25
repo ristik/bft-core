@@ -22,9 +22,24 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+type handoffBoundaryConsensus struct{ mockConsensusManager }
+
+func (handoffBoundaryConsensus) HandoffProfileEnabled() bool { return true }
+
+func TestProfile2NodeRefusesControlPartition(t *testing.T) {
+	cm := handoffBoundaryConsensus{mockConsensusManager{shardInfo: func(types.PartitionID, types.ShardID) (*storage.ShardInfo, error) {
+		return nil, errors.New("reserved partition reached shard lookup")
+	}}}
+	node, err := New(&network.Peer{}, mockPartitionNet{}, cm, testobservability.NOPObservability())
+	require.NoError(t, err)
+	require.ErrorIs(t, node.onHandshake(t.Context(), &handshake.Handshake{PartitionID: rctypes.ControlPartition}), rctypes.ErrControlPartition)
+	require.ErrorIs(t, node.onBlockCertificationRequest(t.Context(), &certification.BlockCertificationRequest{PartitionID: rctypes.ControlPartition}), rctypes.ErrControlPartition)
+}
 
 func Test_rootNode(t *testing.T) {
 	nopObs := testobservability.NOPObservability()

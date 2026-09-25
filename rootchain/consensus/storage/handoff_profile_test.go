@@ -26,6 +26,11 @@ func emptyOrchestration() mockOrchestration {
 	}}
 }
 
+type testRecordAuthority struct{}
+
+func (testRecordAuthority) Predecessor() []byte                                     { return make([]byte, 32) }
+func (testRecordAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) error { return nil }
+
 func profileStore(t *testing.T) *BlockStore {
 	t.Helper()
 	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "root.db"), WithNoSync())
@@ -33,6 +38,7 @@ func profileStore(t *testing.T) *BlockStore {
 	t.Cleanup(func() { _ = db.Close() })
 	s, err := New(crypto.SHA256, db, emptyOrchestration(), logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
+	s.handoffAuth = testRecordAuthority{}
 	return s
 }
 
@@ -139,6 +145,83 @@ func TestProfileSwitchRejectsUnsupported(t *testing.T) {
 	require.Equal(t, "886683a3b83db9020f43bee8e9b49d3926cef0bff52048fe7a77dc9c5b61ed60", hex.EncodeToString(digest[:]))
 }
 
+func TestLegacyAddRejectsProfileTwoVersion(t *testing.T) {
+	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "legacy.db"), WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	s, err := New(crypto.SHA256, db, emptyOrchestration(), logger.New(t))
+	require.NoError(t, err)
+	parent, err := s.Block(1)
+	require.NoError(t, err)
+	for _, blockVersion := range []types.Version{1, 2} {
+		block := &rctypes.BlockData{Version: blockVersion, Round: 2, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 2},
+			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}
+		_, err := s.Add(block, nil)
+		require.ErrorIs(t, err, ErrNetworkProfile)
+	}
+}
+
+func TestCommittedHandoffSuffixClearsPendingChanges(t *testing.T) {
+	s := profileStore(t)
+	zero := make([]byte, 32)
+	body, frozen, tr := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32)
+	addProfileBlock(t, s, 2, [][]byte{record("prepare", 2, 7, zero, body, zero)})
+	addProfileBlock(t, s, 3, [][]byte{record("freeze", 3, 7, frozen, body, zero)})
+	h := addProfileBlock(t, s, 4, [][]byte{record("commit", 4, 7, frozen, body, tr)})
+	checkpoint := &abdrc.CommittedBlock{Block: h.BlockData, Control: h.ShardState.Control,
+		CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: h.RootHash}}}
+	recovered, err := NewFromState(crypto.SHA256, checkpoint, s.GetDB(), emptyOrchestration(), logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	suffix := addProfileBlock(t, recovered, 5, nil)
+	marker := types.PartitionShardID{PartitionID: 99}
+	recovered.blockTree.Root().ShardState.Changed[marker] = struct{}{}
+	suffix.ShardState.Changed[marker] = struct{}{}
+	qc := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 6, ParentRoundNumber: 5, Epoch: 1},
+		LedgerCommitInfo: &types.UnicitySeal{Hash: suffix.RootHash}}
+	ucs, err := recovered.blockTree.Commit(qc)
+	require.NoError(t, err)
+	require.Empty(t, ucs)
+	require.Empty(t, recovered.blockTree.Root().ShardState.Changed)
+}
+
+func TestProfileOffNonemptyByteIdentity(t *testing.T) {
+	key := []byte{0x3, 0x24, 0x8b, 0x61, 0x68, 0x51, 0xac, 0x6e, 0x43, 0x7e, 0xc2, 0x4e, 0xcc, 0x21, 0x9e, 0x5b, 0x42, 0x43, 0xdf, 0xa5, 0xdb, 0xdb, 0x8, 0xce, 0xa6, 0x48, 0x3a, 0xc9, 0xe0, 0xdc, 0x6b, 0x55, 0xcd}
+	conf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 7,
+		Validators: []*types.NodeInfo{{NodeID: "n", SigKey: key, Stake: 1}}}
+	si, err := NewShardInfo(conf, crypto.SHA256)
+	require.NoError(t, err)
+	shard := types.PartitionShardID{PartitionID: 7, ShardID: conf.ShardID.Key()}
+	state := ShardStates{States: map[types.PartitionShardID]*ShardInfo{shard: si}, Changed: ShardSet{}}
+	tree, _, err := state.UnicityTree(crypto.SHA256)
+	require.NoError(t, err)
+	proposal := &rctypes.BlockData{Version: 1, Author: "legacy", Round: 2, Epoch: 1, Timestamp: 2,
+		Payload: &rctypes.Payload{Requests: []*rctypes.IRChangeReq{{Partition: 7, Shard: conf.ShardID}}},
+		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 1, Epoch: 1}}}
+	executed := &ExecutedBlock{BlockData: proposal, HashAlgo: crypto.SHA256, RootHash: tree.RootHash(), ShardState: state}
+	committed := *executed
+	committed.CommitQc = &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, ParentRoundNumber: 2, Epoch: 1},
+		LedgerCommitInfo: &types.UnicitySeal{Hash: tree.RootHash()}}
+	goldens := []struct {
+		name string
+		v    any
+		want string
+	}{
+		{"proposal", proposal, "48bac51b1dcafd07697880c90e6b579c2b760f1d0e021aadc1e046e7edb39f71"},
+		{"shard-state", state, "2b8230b5f566ee8e1b5dbcb3e14d5d8bd1caf69e19ed7d4746c5bc64240eebeb"},
+		{"tree-root", tree.RootHash(), "5377a9166bc43e6808b4eac7f4485c72796c37fe74c4963654c1fa33ed3955eb"},
+		{"executed", executed, "9bd438fa25ea7e142c707e07296bef16e13897a7a4d6385c4758adf125dedb56"},
+		{"committed", &committed, "0f8f05a198885b766c592c974bbd2f070bdb2fdf24445cc80ca0f5eb6518bd03"},
+	}
+	for _, g := range goldens {
+		raw, err := types.Cbor.Marshal(g.v)
+		require.NoError(t, err, g.name)
+		digest := sha256.Sum256(raw)
+		got := hex.EncodeToString(digest[:])
+		require.Equal(t, g.want, got, g.name)
+	}
+}
+
 func TestFourRootNodesRefusePayloadQCOnCommittedBranch(t *testing.T) {
 	zero := make([]byte, 32)
 	body, frozen, tr := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32)
@@ -175,27 +258,27 @@ func TestHandoffIsolatedGuards(t *testing.T) {
 		require.ErrorIs(t, checkProfile(ProfileHandoff, ShardStates{}), ErrNetworkProfile)
 	})
 	t.Run("record_order_round", func(t *testing.T) {
-		_, err := applyHandoffRecord(initialControl(5), record("prepare", 3, 7, zero, body, zero), 5, 1, 2)
+		_, err := applyHandoffRecord(initialControl(5), record("prepare", 3, 7, zero, body, zero), 5, 1, 2, testRecordAuthority{}, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
 	})
 	t.Run("record_phase", func(t *testing.T) {
-		_, err := applyHandoffRecord(initialControl(5), record("freeze", 2, 7, frozen, body, zero), 5, 1, 2)
+		_, err := applyHandoffRecord(initialControl(5), record("freeze", 2, 7, frozen, body, zero), 5, 1, 2, testRecordAuthority{}, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
 	})
 	t.Run("one_live_attempt", func(t *testing.T) {
-		prepared, err := applyHandoffRecord(initialControl(5), record("prepare", 2, 7, zero, body, zero), 5, 1, 2)
+		prepared, err := applyHandoffRecord(initialControl(5), record("prepare", 2, 7, zero, body, zero), 5, 1, 2, testRecordAuthority{}, nil)
 		require.NoError(t, err)
-		_, err = applyHandoffRecord(prepared, record("prepare", 3, 7, zero, body, zero), 5, 1, 3)
+		_, err = applyHandoffRecord(prepared, record("prepare", 3, 7, zero, body, zero), 5, 1, 3, testRecordAuthority{}, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
 	})
 	t.Run("terminal_outcome", func(t *testing.T) {
-		prepared, err := applyHandoffRecord(initialControl(5), record("prepare", 2, 7, zero, body, zero), 5, 1, 2)
+		prepared, err := applyHandoffRecord(initialControl(5), record("prepare", 2, 7, zero, body, zero), 5, 1, 2, testRecordAuthority{}, nil)
 		require.NoError(t, err)
-		frozenState, err := applyHandoffRecord(prepared, record("freeze", 3, 7, frozen, body, zero), 5, 1, 3)
+		frozenState, err := applyHandoffRecord(prepared, record("freeze", 3, 7, frozen, body, zero), 5, 1, 3, testRecordAuthority{}, nil)
 		require.NoError(t, err)
-		committed, err := applyHandoffRecord(frozenState, record("commit", 4, 7, frozen, body, tr), 5, 1, 4)
+		committed, err := applyHandoffRecord(frozenState, record("commit", 4, 7, frozen, body, tr), 5, 1, 4, testRecordAuthority{}, nil)
 		require.NoError(t, err)
-		_, err = applyHandoffRecord(committed, record("abort", 5, 8, frozen, body, zero), 5, 1, 5)
+		_, err = applyHandoffRecord(committed, record("abort", 5, 8, frozen, body, zero), 5, 1, 5, testRecordAuthority{}, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
 	})
 	t.Run("control_leaf_in_tree", func(t *testing.T) {
@@ -289,4 +372,47 @@ func TestProfileHandoffReloadRejectsForgedSuffixPayload(t *testing.T) {
 	require.NoError(t, s.storage.WriteBlock(&forged, false))
 	_, err = New(crypto.SHA256, s.storage, emptyOrchestration(), logger.New(t), ProfileHandoff)
 	require.ErrorIs(t, err, ErrHandoffSuffix)
+}
+
+func TestProfileHandoffRejectsEpochJumpOnEveryBlockPath(t *testing.T) {
+	s := profileStore(t)
+	zero := make([]byte, 32)
+	body, frozen, tr := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32)
+	addProfileBlock(t, s, 2, [][]byte{record("prepare", 2, 7, zero, body, zero)})
+	addProfileBlock(t, s, 3, [][]byte{record("freeze", 3, 7, frozen, body, zero)})
+	h := addProfileBlock(t, s, 4, [][]byte{record("commit", 4, 7, frozen, body, tr)})
+	jump := &rctypes.BlockData{Version: 2, Round: 5, Epoch: 2, Payload: &rctypes.Payload{Version: 2},
+		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 4, Epoch: 1, CurrentRootHash: h.RootHash}}}
+	_, err := s.Add(jump, nil)
+	require.EqualError(t, err, ErrNetworkProfile.Error())
+	_, err = h.Extend(jump, nil, emptyOrchestration(), crypto.SHA256, logger.New(t))
+	require.ErrorIs(t, err, ErrNetworkProfile)
+	_, err = s.SuffixParent(4, 2)
+	require.ErrorIs(t, err, ErrNetworkProfile)
+	checkpoint := &abdrc.CommittedBlock{Block: h.BlockData, Control: h.ShardState.Control,
+		CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: h.RootHash}}}
+	recoveryDB, err := NewBoltStorage(filepath.Join(t.TempDir(), "recovery.db"), WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = recoveryDB.Close() })
+	recovery, err := NewFromState(crypto.SHA256, checkpoint, recoveryDB, emptyOrchestration(), logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	_, err = recovery.Add(jump, nil)
+	require.EqualError(t, err, ErrNetworkProfile.Error())
+	reloadStore := profileStore(t)
+	child := addProfileBlock(t, reloadStore, 2, nil)
+	forged := *child
+	changed := *child.BlockData
+	changed.Epoch = 2
+	forged.BlockData = &changed
+	forged.ShardState.Control = &evmroot.ControlState{Network: 5, Epoch: 2,
+		PredecessorBodyID: make([]byte, 32), Phase: "idle"}
+	tree, _, err := forged.ShardState.UnicityTree(crypto.SHA256)
+	require.NoError(t, err)
+	forged.RootHash = tree.RootHash()
+	rootMismatch := forged
+	rootMismatch.BlockData = child.BlockData
+	require.ErrorIs(t, checkStoredRoot(&rootMismatch, ProfileHandoff), ErrNetworkProfile)
+	require.NoError(t, reloadStore.storage.WriteBlock(&forged, false))
+	_, err = New(crypto.SHA256, reloadStore.storage, emptyOrchestration(), logger.New(t), ProfileHandoff)
+	require.ErrorIs(t, err, ErrNetworkProfile)
 }

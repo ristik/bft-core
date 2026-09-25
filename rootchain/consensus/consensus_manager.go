@@ -195,6 +195,11 @@ func NewConsensusManager(
 	if err != nil {
 		return nil, err
 	}
+	if cParams.NetworkProfileVersion == storage.ProfileHandoff {
+		if err := bStore.ConfigureHandoffAuthority(trustBase); err != nil {
+			return nil, fmt.Errorf("handoff authority: %w", err)
+		}
+	}
 	safetyModule, err := NewSafetyModule(trustBase.GetNetworkID(), nodeID.String(), signer, store)
 	if err != nil {
 		return nil, err
@@ -1102,6 +1107,11 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	blockStore, err := storage.NewFromState(x.params.HashAlgorithm, rsp.CommittedHead, x.blockStore.GetDB(), x.orchestration, x.log, x.params.NetworkProfileVersion)
 	if err != nil {
 		return fmt.Errorf("recovery, new block store init failed: %w", err)
+	}
+	if x.params.NetworkProfileVersion == storage.ProfileHandoff {
+		if err := blockStore.ConfigureHandoffAuthority(x.trustBase.Load()); err != nil {
+			return fmt.Errorf("recovery handoff authority: %w", err)
+		}
 	}
 	// create new verifier
 	reqVerifier, err := NewIRChangeReqVerifier(x.params, blockStore)

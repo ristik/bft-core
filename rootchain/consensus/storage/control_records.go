@@ -14,6 +14,11 @@ var (
 	ErrHandoffSuffix = errors.New("nonempty old-epoch handoff suffix")
 )
 
+type handoffAuthority interface {
+	Predecessor() []byte
+	VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) error
+}
+
 func recordNumber(v any) (uint64, bool) { n, ok := v.(uint64); return n, ok }
 func recordBytes(v any) ([]byte, bool)  { b, ok := v.([]byte); return b, ok }
 
@@ -80,7 +85,7 @@ func decodeOrderedRecord(data []byte) (evmroot.OrderedHandoffRecord, error) {
 	return r, nil
 }
 
-func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, epoch, round uint64) (*evmroot.ControlState, error) {
+func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, epoch, round uint64, authority handoffAuthority, companion []byte) (*evmroot.ControlState, error) {
 	if previous == nil {
 		return nil, ErrNetworkProfile
 	}
@@ -91,11 +96,13 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 	if r.Network != network || r.Epoch != epoch || r.OrderedRound != round || previous.Network != network || previous.Epoch != epoch {
 		return nil, ErrHandoffRecord
 	}
-	if previous.Phase == "committed" || previous.Phase == "aborted" {
+	if authority == nil || !bytes.Equal(r.PredecessorBodyID, authority.Predecessor()) || previous.Phase == "committed" {
 		return nil, ErrHandoffRecord
 	}
-	if previous.Phase == "idle" {
-		if r.Kind != "prepare" || !bytes.Equal(previous.PredecessorBodyID, make([]byte, 32)) && !bytes.Equal(previous.PredecessorBodyID, r.PredecessorBodyID) {
+	if previous.Phase == "idle" || previous.Phase == "aborted" {
+		if r.Kind != "prepare" || len(companion) != 0 ||
+			(previous.Phase == "idle" && r.Attempt != 0) ||
+			(previous.Phase == "aborted" && (previous.Attempt == ^uint64(0) || r.Attempt != previous.Attempt+1)) {
 			return nil, ErrHandoffRecord
 		}
 		if bytes.Equal(r.NextBodyID, make([]byte, 32)) || r.ActivationRound < r.OrderedRound {
@@ -113,17 +120,18 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 	phase := ""
 	switch r.Kind {
 	case "freeze":
-		if previous.Phase != "prepared" || !bytes.Equal(r.NextBodyID, old.NextBodyID) || bytes.Equal(r.FrozenID, make([]byte, 32)) || r.ActivationRound != old.ActivationRound {
+		if previous.Phase != "prepared" || !bytes.Equal(r.NextBodyID, old.NextBodyID) || bytes.Equal(r.FrozenID, make([]byte, 32)) || r.ActivationRound != old.ActivationRound || authority.VerifyFreeze(r, companion) != nil {
 			return nil, ErrHandoffRecord
 		}
-		phase = "frozen"
+		phase = "endorsed"
 	case "commit":
-		if previous.Phase != "frozen" || !r.Valid() || !bytes.Equal(r.FrozenID, old.FrozenID) || !bytes.Equal(r.NextBodyID, old.NextBodyID) || r.ActivationRound < old.ActivationRound || bytes.Equal(r.SuccessorTRHash, make([]byte, 32)) {
+		if len(companion) != 0 || previous.Phase != "endorsed" || !r.Valid() || !bytes.Equal(r.FrozenID, old.FrozenID) || !bytes.Equal(r.NextBodyID, old.NextBodyID) || r.ActivationRound < old.ActivationRound || bytes.Equal(r.SuccessorTRHash, make([]byte, 32)) {
 			return nil, ErrHandoffRecord
 		}
 		phase = "committed"
 	case "abort":
-		if previous.Phase != "prepared" && previous.Phase != "frozen" {
+		if len(companion) != 0 || previous.Phase != "prepared" && previous.Phase != "endorsed" ||
+			!bytes.Equal(r.NextBodyID, old.NextBodyID) || r.ActivationRound != old.ActivationRound {
 			return nil, ErrHandoffRecord
 		}
 		phase = "aborted"

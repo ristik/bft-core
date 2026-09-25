@@ -66,6 +66,17 @@ func TestHandoffProfileSkipsControlPartitionTimeout(t *testing.T) {
 	require.Empty(t, timedOut)
 }
 
+func TestProfile2VerifierRefusesControlPartition(t *testing.T) {
+	verifier := &IRChangeReqVerifier{params: &Parameters{NetworkProfileVersion: 2}, state: &MockState{
+		shardInfo: func(types.PartitionID, types.ShardID) *storage.ShardInfo {
+			t.Fatal("reserved partition reached shard state")
+			return nil
+		},
+	}}
+	_, err := verifier.VerifyIRChangeReq(3, &abtypes.IRChangeReq{Partition: abtypes.ControlPartition})
+	require.ErrorIs(t, err, abtypes.ErrControlPartition)
+}
+
 func (s *MockState) ShardInfo(partition types.PartitionID, shard types.ShardID) *storage.ShardInfo {
 	return s.shardInfo(partition, shard)
 }

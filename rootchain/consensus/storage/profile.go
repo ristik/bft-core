@@ -72,7 +72,7 @@ func validateControl(c *evmroot.ControlState) error {
 		if r.Kind != "prepare" {
 			return ErrControlCheckpoint
 		}
-	case "frozen":
+	case "frozen", "endorsed":
 		if r.Kind != "freeze" {
 			return ErrControlCheckpoint
 		}
@@ -96,6 +96,9 @@ func checkStoredRoot(block *ExecutedBlock, profile uint64) error {
 	}
 	if err := checkProfile(profile, block.ShardState); err != nil {
 		return err
+	}
+	if profile == ProfileHandoff && block.BlockData.Epoch != block.ShardState.Control.Epoch {
+		return ErrNetworkProfile
 	}
 	if profile != ProfileHandoff {
 		return nil
@@ -122,7 +125,7 @@ func checkStoredRoot(block *ExecutedBlock, profile uint64) error {
 
 func checkStoredSuffix(parent, child *ExecutedBlock) error {
 	control := parent.ShardState.Control
-	if control == nil || control.Phase != "committed" || child.BlockData.Epoch != control.Epoch {
+	if control == nil || control.Phase != "committed" {
 		return nil
 	}
 	if child.BlockData.Payload == nil || !child.BlockData.Payload.IsEmpty() || len(child.ShardState.Changed) != 0 || child.ShardState.Control == nil || !bytes.Equal(child.ShardState.Control.Bytes(), control.Bytes()) || !bytes.Equal(child.RootHash, parent.RootHash) || len(child.ShardState.States) != len(parent.ShardState.States) {

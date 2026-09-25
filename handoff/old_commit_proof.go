@@ -104,7 +104,7 @@ func VerifyOldCommitProof(p OldCommitProof, tb *types.RootTrustBaseV1, expected 
 		return VerifiedRecord{}, err
 	}
 	if p.OptionalQC != nil {
-		if p.OptionalQC.VoteInfo == nil || p.OptionalQC.GetRound() != c || p.OptionalQC.VoteInfo.Epoch != p.Record.Epoch || !bytes.Equal(p.OptionalQC.VoteInfo.CurrentRootHash, root) {
+		if p.OptionalQC.VoteInfo == nil || p.OptionalQC.GetRound() != c || p.OptionalQC.VoteInfo.Epoch != p.Record.Epoch || p.OptionalQC.VoteInfo.Timestamp != qc.LedgerCommitInfo.Timestamp || !bytes.Equal(p.OptionalQC.VoteInfo.CurrentRootHash, root) {
 			return VerifiedRecord{}, ErrProof
 		}
 		if err := verifyOldQC(p.OptionalQC, tb); err != nil {

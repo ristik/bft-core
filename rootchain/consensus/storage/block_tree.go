@@ -147,6 +147,9 @@ func NewBlockTree(bDB PersistentStore, orchestration Orchestration, networkProfi
 			return nil, fmt.Errorf("init child block: %w", err)
 		}
 		if profile == ProfileHandoff {
+			if block.BlockData.Epoch != parent.data.BlockData.Epoch {
+				return nil, ErrNetworkProfile
+			}
 			if err := checkStoredSuffix(parent.data, block); err != nil {
 				return nil, err
 			}
