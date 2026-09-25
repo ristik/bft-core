@@ -18,7 +18,9 @@ import (
 	"github.com/unicitynetwork/bft-core/frontier"
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
 	"github.com/unicitynetwork/bft-core/network"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootinput"
+	"github.com/unicitynetwork/bft-core/signingauthority"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -63,6 +65,17 @@ func TestCertifiedBindingAuthenticatesArchiveRolesAndHeader(t *testing.T) {
 	r := frontier.Record{Sequence: 1, Round: f.entries[0].ResultingUC.GetRootRoundNumber(), Height: 1, StateRoot: state, Subject: q, Acks: [2]frontier.Acknowledgment{{Replica: "first", RequestDigest: sha256.Sum256(request), ManifestDigest: digest}, {Replica: "second", RequestDigest: sha256.Sum256(request), ManifestDigest: digest}}}
 	v := CertifiedBinding{Context: f.context, Subject: f.subject}
 	require.NoError(t, v.VerifyCertified(r, record))
+	// An independently valid resulting UC for the same round and state still
+	// must name the exact archived block.
+	wrongIR := *f.entries[0].ResultingUC.InputRecord
+	wrongIR.BlockHash = bytes.Repeat([]byte{0xa5}, 32)
+	wrongUC, wrongTR := signWiring(t, f.chain, &wrongIR, 2, r.Round)
+	badResult := *record
+	badResult.ResultingUC, err = types.Cbor.Marshal(wrongUC)
+	require.NoError(t, err)
+	badResult.ResultingTR, err = types.Cbor.Marshal(wrongTR)
+	require.NoError(t, err)
+	require.ErrorIs(t, v.VerifyCertified(r, &badResult), frontier.ErrInvalid)
 	bad := *record
 	bad.OriginalUC = append([]byte(nil), record.ResultingUC...)
 	require.ErrorIs(t, v.VerifyCertified(r, &bad), frontier.ErrInvalid)
@@ -165,6 +178,98 @@ func TestFrontierPacedAuditRepairsPrunedReplica(t *testing.T) {
 	require.NoError(t, worker.Pass(context.Background()))
 	_, err = second.Get(q)
 	require.NoError(t, err)
+}
+
+func TestFrontierWorkerWaitsToPruneAfterOfflineRestart(t *testing.T) {
+	f := newWiringFixture(t, 1)
+	local, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	q, rec := f.record(t, 0)
+	require.NoError(t, local.Put(q, rec))
+	peers := [2]peer.ID{"first", "second"}
+	available := digestAvailability{copies: map[string]map[[32]byte][32]byte{"first": {}, "second": {}}}
+	policy := frontier.Policy{Context: f.subject, Replicas: [2]string{"first", "second"}, Binding: CertifiedBinding{Context: f.context, Subject: f.subject}, Availability: available}
+	request, err := archive.EncodeRequest(q)
+	require.NoError(t, err)
+	digest, err := archive.ManifestDigest(q, rec)
+	require.NoError(t, err)
+	available.copies["first"][q.BlockHash] = digest
+	available.copies["second"][q.BlockHash] = digest
+	require.NoError(t, f.store.EnableFrontier(context.Background(), f.context, f.limits, policy))
+	var state [32]byte
+	copy(state[:], f.entries[0].Candidate.StateRoot)
+	item := frontier.Coverage{Anchor: frontier.Record{Sequence: 1, Height: 1, Round: f.entries[0].ResultingUC.GetRootRoundNumber(), StateRoot: state, Subject: q,
+		Acks: [2]frontier.Acknowledgment{{Replica: "first", RequestDigest: sha256.Sum256(request), ManifestDigest: digest}, {Replica: "second", RequestDigest: sha256.Sum256(request), ManifestDigest: digest}}}, Material: rec}
+	require.NoError(t, f.store.AdvanceFrontier(context.Background(), f.context, f.limits, []frontier.Coverage{item}))
+	require.NoError(t, f.store.Close())
+	delete(available.copies["first"], q.BlockHash)
+	delete(available.copies["second"], q.BlockHash)
+	reopened, err := configuredprogress.OpenConfiguredV2(f.path, configuredprogress.Settings{Retain: 16})
+	require.NoError(t, err)
+	defer reopened.Close()
+	require.NoError(t, reopened.EnableJournal(context.Background(), f.context, f.limits))
+	require.NoError(t, reopened.EnableFrontier(context.Background(), f.context, f.limits, policy))
+	worker := &FrontierWorker{Journal: reopened, Context: f.context, Limits: f.limits, Archive: local, Subject: f.subject, Replicas: peers}
+	require.ErrorIs(t, worker.Pass(context.Background()), frontier.ErrUnavailable)
+	snap, err := reopened.LoadFrontier(context.Background(), f.context, f.limits)
+	require.NoError(t, err)
+	require.Zero(t, snap.Floor)
+}
+
+func TestFrontierPruneKeepsIndependentSigningRecord(t *testing.T) {
+	f := newWiringFixture(t, 1)
+	certified := f.entries[0]
+	loser := certified.Candidate
+	loserHash := sha256.Sum256([]byte("timed out local proposal"))
+	loser.Hash, loser.Raw, loser.LocallyBuilt = loserHash[:], []byte("timed out local proposal"), true
+	require.NoError(t, f.store.PutJournalCandidate(context.Background(), f.context, f.limits, loser))
+
+	enrollment := signingauthority.Enrollment{AuthorityID: "frontier-test", NodeID: loser.AuthorizingTR.Leader,
+		NetworkID: f.subject.NetworkID, PartitionID: f.subject.PartitionID, ShardID: f.subject.ShardID,
+		ShardEpoch: f.subject.ShardEpoch, ShardConfHash: f.context.Origin.FullShardConfHash().Bytes(),
+		RootEpoch: signingauthority.PinRootEpoch(f.subject.RootEpoch), Profile: signingauthority.ProfileLegacyBCRv1}
+	rootTrust := *f.chain.TrustBase
+	rootTrust.NetworkID = f.subject.NetworkID
+	authority, err := signingauthority.New(enrollment, fixtureTrust{&rootTrust})
+	require.NoError(t, err)
+	defer authority.Close()
+	session, err := authority.ReplaceSession()
+	require.NoError(t, err)
+	proposed := &certification.BlockCertificationRequest{PartitionID: f.subject.PartitionID, ShardID: f.subject.ShardID,
+		NodeID: enrollment.NodeID, BlockSize: loser.BlockSize, StateSize: loser.StateSize,
+		InputRecord: &types.InputRecord{Version: 1, RoundNumber: loser.Round, Epoch: loser.AuthorizingTR.Epoch,
+			PreviousHash: loser.AuthorizingUC.InputRecord.Hash, Hash: loser.StateRoot, BlockHash: loser.Hash,
+			SummaryValue: []byte{}, Timestamp: loser.AuthorizingUC.UnicitySeal.Timestamp}}
+	request := signingauthority.Request{UC: loser.AuthorizingUC, Technical: loser.AuthorizingTR, Proposed: proposed}
+	_, err = authority.Reserve(context.Background(), session, request)
+	require.NoError(t, err)
+	require.NoError(t, authority.Sign(session))
+	require.NoError(t, authority.RetainResponse(session))
+	require.True(t, authority.Status().ResponseRetained)
+
+	q, rec := f.record(t, 0)
+	requestWire, err := archive.EncodeRequest(q)
+	require.NoError(t, err)
+	digest, err := archive.ManifestDigest(q, rec)
+	require.NoError(t, err)
+	availability := digestAvailability{copies: map[string]map[[32]byte][32]byte{"first": {q.BlockHash: digest}, "second": {q.BlockHash: digest}}}
+	policy := frontier.Policy{Context: f.subject, Replicas: [2]string{"first", "second"}, Binding: CertifiedBinding{Context: f.context, Subject: f.subject}, Availability: availability}
+	require.NoError(t, f.store.EnableFrontier(context.Background(), f.context, f.limits, policy))
+	var state [32]byte
+	copy(state[:], certified.Candidate.StateRoot)
+	item := frontier.Coverage{Anchor: frontier.Record{Sequence: 1, Height: 1, Round: certified.ResultingUC.GetRootRoundNumber(), StateRoot: state, Subject: q,
+		Acks: [2]frontier.Acknowledgment{{Replica: "first", RequestDigest: sha256.Sum256(requestWire), ManifestDigest: digest}, {Replica: "second", RequestDigest: sha256.Sum256(requestWire), ManifestDigest: digest}}}, Material: rec}
+	require.NoError(t, f.store.AdvanceFrontier(context.Background(), f.context, f.limits, []frontier.Coverage{item}))
+	require.NoError(t, f.store.PruneFrontier(context.Background(), f.context, f.limits))
+	image, err := f.store.LoadJournal(context.Background(), f.context, f.limits)
+	require.NoError(t, err)
+	require.Empty(t, image.Candidates)
+	require.True(t, authority.Status().ResponseRetained)
+	require.Equal(t, loser.Round, authority.Status().ReservedRound)
+	changed := *proposed
+	changed.BlockSize++
+	_, err = authority.Reserve(context.Background(), session, signingauthority.Request{UC: loser.AuthorizingUC, Technical: loser.AuthorizingTR, Proposed: &changed})
+	require.ErrorIs(t, err, signingauthority.ErrConflict)
 }
 
 func TestFrontierLongRunPastJournalCapsAndReplicaLoss(t *testing.T) {

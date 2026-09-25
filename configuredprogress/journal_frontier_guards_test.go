@@ -153,3 +153,133 @@ func TestPrunedJournalRequiresAuthenticatedFrontierOnRestart(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1, image.Frontier.Floor)
 }
+
+func TestFrontierDiscardsSupersededCandidatesAndKeepsLaterBodies(t *testing.T) {
+	for _, name := range []string{"timed-out proposal", "losing same-height proposal", "stale round at later height", "stale height at later round"} {
+		t.Run(name, func(t *testing.T) {
+			s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
+			defer s.Close()
+			image, err := s.LoadJournal(context.Background(), c, limits)
+			require.NoError(t, err)
+			loser := image.Candidates[0].Candidate
+			loserHash := sha256.Sum256([]byte(name))
+			loser.Hash = loserHash[:]
+			loser.Raw = []byte(name)
+			loser.LocallyBuilt = name == "timed-out proposal"
+			if name == "stale round at later height" {
+				loser.Number, loser.ParentNumber = 2, 1
+			}
+			if name == "stale height at later round" {
+				loser.Round = 2
+				loser.AuthorizingUC, loser.AuthorizingTR = image.Candidates[0].ResultingUC, image.Candidates[0].ResultingTR
+			}
+			require.NoError(t, s.PutJournalCandidate(context.Background(), c, limits, loser))
+			require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}))
+			require.NoError(t, s.PruneFrontier(context.Background(), c, limits))
+			image, err = s.LoadJournal(context.Background(), c, limits)
+			require.NoError(t, err)
+			require.Empty(t, image.Candidates)
+			require.ErrorIs(t, s.PutJournalCandidate(context.Background(), c, limits, loser), ErrConflict)
+		})
+	}
+	s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/later.db")
+	defer s.Close()
+	image, err := s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	later := image.Candidates[0].Candidate
+	later.Number, later.ParentNumber, later.Round = 2, 1, 2
+	later.AuthorizingUC, later.AuthorizingTR = image.Candidates[0].ResultingUC, image.Candidates[0].ResultingTR
+	hash := sha256.Sum256([]byte("unresolved later height"))
+	later.Hash = hash[:]
+	later.Raw = []byte("unresolved later height")
+	require.NoError(t, s.PutJournalCandidate(context.Background(), c, limits, later))
+	require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}))
+	require.NoError(t, s.PruneFrontier(context.Background(), c, limits))
+	image, err = s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Len(t, image.Candidates, 1)
+	require.Equal(t, hash[:], image.Candidates[0].Candidate.Hash)
+}
+
+func TestFrontierPruneChecksCoveredCandidateHash(t *testing.T) {
+	s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
+	defer s.Close()
+	require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}))
+	require.NoError(t, s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketName)
+		key := journalCandidateKey(item.Anchor.Subject.BlockHash[:])
+		w, err := decodeCandidate(b.Get(key))
+		if err != nil {
+			return err
+		}
+		w.Hash[0] ^= 1
+		raw, err := encodeCandidate(w)
+		if err != nil {
+			return err
+		}
+		return b.Put(key, raw)
+	}))
+	require.ErrorIs(t, s.PruneFrontier(context.Background(), c, limits), frontier.ErrObligation)
+	image, err := s.LoadFrontier(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Zero(t, image.Floor)
+}
+
+func TestFrontierReauthenticatesStoredAnchor(t *testing.T) {
+	s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
+	defer s.Close()
+	require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}))
+	s.frontier.Binding = rejectingBinding{}
+	_, err := s.LoadFrontier(context.Background(), c, limits)
+	require.ErrorIs(t, err, frontier.ErrInvalid)
+}
+
+func TestFrontierAdvanceTransactionRechecksNewObligations(t *testing.T) {
+	s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
+	defer s.Close()
+	s.checkpoint = func(step string) error {
+		if step != "before-frontier-transaction" {
+			return nil
+		}
+		s.checkpoint = nil
+		return insertUnresolvedFrontierTestObservation(s)
+	}
+	require.ErrorIs(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}), frontier.ErrObligation)
+	image, err := s.LoadFrontier(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Nil(t, image.Anchor)
+}
+
+func TestFrontierPruneTransactionRetainsNewObligations(t *testing.T) {
+	s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
+	defer s.Close()
+	require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}))
+	require.NoError(t, insertUnresolvedFrontierTestObservation(s))
+	require.ErrorIs(t, s.PruneFrontier(context.Background(), c, limits), frontier.ErrObligation)
+	front, err := s.LoadFrontier(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Zero(t, front.Floor)
+}
+
+func insertUnresolvedFrontierTestObservation(s *Store) error {
+	w := journalObservationWire{Version: journalVersion, Round: 1, RootRound: 4, Unresolved: true}
+	raw, err := encodeObservation(w)
+	if err != nil {
+		return err
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketName).Put(journalObservationKey(w.RootRound, w.Round), raw)
+	})
+}
+
+func TestJournalObligationsRetainUnresolvedObservation(t *testing.T) {
+	s, c, _, _, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
+	defer s.Close()
+	image, err := s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Empty(t, journalObligations(image))
+	image.Observations[0].Unresolved = true
+	obligations := journalObligations(image)
+	require.Len(t, obligations, 1)
+	require.True(t, obligations[0].UnresolvedBody)
+}

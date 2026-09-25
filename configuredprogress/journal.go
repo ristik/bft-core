@@ -320,6 +320,21 @@ func (s *Store) PutJournalCandidate(ctx context.Context, c Context, limits Journ
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
 			return err
 		}
+		if s.frontier != nil {
+			frontierImage, e := readFrontier(b, state.i.descriptorDigest, *s.frontier)
+			if e != nil {
+				return e
+			}
+			if frontierImage.Anchor != nil {
+				anchorUC, _, e := verifiedPairBytes(ctx, c, frontierImage.Record.ResultingUC, frontierImage.Record.ResultingTR)
+				if e != nil {
+					return e
+				}
+				if supersededCandidate(v.Number, v.Round, frontierImage.Anchor.Height, anchorUC.InputRecord.RoundNumber) {
+					return fmt.Errorf("%w: candidate was superseded by the certified frontier", ErrConflict)
+				}
+			}
+		}
 		if old := b.Get(key); old != nil {
 			prior, e := decodeCandidate(old)
 			if e != nil {

@@ -44,6 +44,11 @@ func frontierTestContext(f *fixture) (Context, archive.Context) {
 }
 
 func frontierTestSetup(t *testing.T, path string) (*Store, Context, frontier.Policy, frontier.Coverage, JournalLimits) {
+	s, _, c, policy, item, limits := frontierTestSetupWithFixture(t, path)
+	return s, c, policy, item, limits
+}
+
+func frontierTestSetupWithFixture(t *testing.T, path string) (*Store, *fixture, Context, frontier.Policy, frontier.Coverage, JournalLimits) {
 	t.Helper()
 	f := newFixture(t, 0)
 	c, subject := frontierTestContext(f)
@@ -85,7 +90,7 @@ func frontierTestSetup(t *testing.T, path string) (*Store, Context, frontier.Pol
 	r := frontier.Record{Sequence: 1, Round: first.Certificate().GetRootRoundNumber(), Height: 1, StateRoot: [32]byte(state), Subject: q, Acks: [2]frontier.Acknowledgment{{Replica: "first", RequestDigest: ack, ManifestDigest: digest}, {Replica: "second", RequestDigest: ack, ManifestDigest: digest}}}
 	policy := frontier.Policy{Context: subject, Replicas: [2]string{"first", "second"}, Binding: frontierTestBinding{}, Availability: frontierTestAvailability{}}
 	require.NoError(t, s.EnableFrontier(context.Background(), c, limits, policy))
-	return s, c, policy, frontier.Coverage{Anchor: r, Material: rec}, limits
+	return s, f, c, policy, frontier.Coverage{Anchor: r, Material: rec}, limits
 }
 
 func TestFrontierCrashProcess(t *testing.T) {
@@ -168,4 +173,33 @@ func TestFrontierCommitAndPruneGuards(t *testing.T) {
 	require.Len(t, image.Candidates, 1)
 	require.EqualValues(t, 0, image.Frontier.Floor)
 	require.NoError(t, s.PruneFrontier(context.Background(), c, limits))
+}
+
+func TestFrontierRestartAdmitsCertificatesWhileReplicasAreDown(t *testing.T) {
+	path := t.TempDir() + "/journal.db"
+	s, f, c, policy, item, limits := frontierTestSetupWithFixture(t, path)
+	require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}))
+	require.NoError(t, s.Close()) // crash window before the prune transaction
+
+	s, err := OpenConfiguredV2(path, Settings{Retain: 3})
+	require.NoError(t, err)
+	defer s.Close()
+	require.NoError(t, s.EnableJournal(context.Background(), c, limits))
+	policy.Availability = rejectingAvailability{}
+	require.NoError(t, s.EnableFrontier(context.Background(), c, limits, policy))
+	image, err := s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, image.Frontier.Anchor.Height)
+	require.ErrorIs(t, s.VerifyFrontierCopies(context.Background(), c, limits), frontier.ErrUnavailable)
+
+	state := bytes.Repeat([]byte{9}, 32)
+	hash := bytes.Repeat([]byte{10}, 32)
+	o := f.observation(&types.InputRecord{Version: 1, RoundNumber: 2, PreviousHash: item.Anchor.StateRoot[:], Hash: state, BlockHash: hash, SummaryValue: []byte{}, Timestamp: 1_700_000_002}, 3, 6)
+	p, _, err := s.PrepareObservation(context.Background(), c, o)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(p)
+	require.NoError(t, err)
+	image, err = s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.EqualValues(t, 6, image.Observations[len(image.Observations)-1].UC.GetRootRoundNumber())
 }

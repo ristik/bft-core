@@ -458,20 +458,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			archiveServer.Register(ctx, peer)
 			if flags.ArchivePrune {
 				policy := frontier.Policy{Context: archiveSubject, Replicas: [2]string{archiveReplicas[0].String(), archiveReplicas[1].String()}, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
-				for {
-					e = journalStore.EnableFrontier(ctx, journalCtx, limits, policy)
-					if e == nil {
-						break
-					}
-					if !errors.Is(e, frontier.ErrUnavailable) {
-						return fmt.Errorf("authenticating certified frontier: %w", e)
-					}
-					flags.observe.Logger().WarnContext(ctx, "waiting for both certified frontier replicas", "err", e)
-					select {
-					case <-ctx.Done():
-						return ctx.Err()
-					case <-time.After(2 * time.Second):
-					}
+				if e = journalStore.EnableFrontier(ctx, journalCtx, limits, policy); e != nil {
+					return fmt.Errorf("authenticating certified frontier: %w", e)
 				}
 			}
 		}

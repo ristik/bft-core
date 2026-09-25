@@ -84,8 +84,8 @@ func sameFrontierContext(c Context, p frontier.Policy) bool {
 }
 
 // EnableFrontier checks the exact configured subject and both replica names
-// before activating pruning. A database with a frontier cannot be opened for
-// ordinary voting until this authenticated read succeeds.
+// before activating pruning. The local anchor is authenticated against the
+// certified journal; replica availability is checked only before advancement.
 func (s *Store) EnableFrontier(ctx context.Context, c Context, limits JournalLimits, p frontier.Policy) error {
 	if !s.journal || p.Binding == nil || p.Availability == nil || !sameFrontierContext(c, p) || p.Replicas[0] == "" || p.Replicas[1] == "" || p.Replicas[0] == p.Replicas[1] {
 		return ErrContext
@@ -99,23 +99,14 @@ func (s *Store) EnableFrontier(ctx context.Context, c Context, limits JournalLim
 	}
 	p.Context.ExecutionIdentity = bytes.Clone(p.Context.ExecutionIdentity)
 	s.frontier = &p
-	var snap FrontierSnapshot
 	err = s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
 			return err
 		}
-		var e error
-		snap, e = readFrontier(b, state.i.descriptorDigest, p)
-		return e
+		_, err := readFrontier(b, state.i.descriptorDigest, p)
+		return err
 	})
-	if err == nil && snap.Anchor != nil {
-		for _, ack := range snap.Anchor.Acks {
-			if err = p.Availability.VerifyAvailable(ack.Replica, snap.Anchor.Subject, ack.ManifestDigest); err != nil {
-				break
-			}
-		}
-	}
 	if err != nil {
 		s.frontier = nil
 		return err
@@ -326,7 +317,6 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 	if err != nil {
 		return err
 	}
-	obligations := journalObligations(image)
 	next := covered[len(covered)-1].Anchor
 	if covered[len(covered)-1].Material == nil {
 		return frontier.ErrInvalid
@@ -335,6 +325,10 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 	if err != nil {
 		return fmt.Errorf("%w: resulting certificate: %v", frontier.ErrInvalid, err)
 	}
+	if nextUC.GetRootRoundNumber() != next.Round {
+		return frontier.ErrInvalid
+	}
+	obligations := journalObligations(image)
 	if _, err = frontier.PlanAdvance(current.Anchor, next, *s.frontier, covered, obligations); err != nil {
 		return err
 	}
@@ -368,6 +362,9 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 	if err != nil {
 		return err
 	}
+	if err := s.at("before-frontier-transaction"); err != nil {
+		return err
+	}
 	err = s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
 		if !imageMatches(b, state.i) {
@@ -388,7 +385,7 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 				return err
 			}
 		}
-		if err := checkPruneObligations(b, next.Round, nextUC.InputRecord.RoundNumber); err != nil {
+		if err := checkPruneObligations(b, next.Round); err != nil {
 			return err
 		}
 		for i, item := range covered {
@@ -433,11 +430,6 @@ func checkCoveredCandidate(b *bolt.Bucket, ctx context.Context, c Context, item 
 
 func journalObligations(image JournalSnapshot) []frontier.Obligation {
 	var out []frontier.Obligation
-	for _, entry := range image.Candidates {
-		if !entry.Certified {
-			out = append(out, frontier.Obligation{Round: entry.Candidate.AuthorizingUC.GetRootRoundNumber(), PendingAuthorization: true})
-		}
-	}
 	for _, o := range image.Observations {
 		if o.Unresolved {
 			out = append(out, frontier.Obligation{Round: o.UC.GetRootRoundNumber(), UnresolvedBody: true})
@@ -446,17 +438,15 @@ func journalObligations(image JournalSnapshot) []frontier.Obligation {
 	return out
 }
 
-func checkPruneObligations(b *bolt.Bucket, throughRoot, throughPartition uint64) error {
+// A different certified block at or above either coordinate makes this body
+// impossible to certify. The independent signing authority retains this
+// node's vote record; the journal body is not that safety record.
+func supersededCandidate(number, round, certifiedHeight, certifiedRound uint64) bool {
+	return number <= certifiedHeight || round <= certifiedRound
+}
+
+func checkPruneObligations(b *bolt.Bucket, throughRoot uint64) error {
 	curs := b.Cursor()
-	for k, raw := curs.Seek(journalCandidatePrefix); k != nil && bytes.HasPrefix(k, journalCandidatePrefix); k, raw = curs.Next() {
-		w, err := decodeCandidate(raw)
-		if err != nil {
-			return err
-		}
-		if w.Round <= throughPartition && w.Status != 1 {
-			return frontier.ErrObligation
-		}
-	}
 	for k, raw := curs.Seek(journalObservationPrefix); k != nil && bytes.HasPrefix(k, journalObservationPrefix); k, raw = curs.Next() {
 		w, err := decodeObservation(raw)
 		if err != nil {
@@ -501,7 +491,7 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 		if err != nil {
 			return err
 		}
-		if err := checkPruneObligations(b, f.Anchor.Round, anchorUC.InputRecord.RoundNumber); err != nil {
+		if err := checkPruneObligations(b, f.Anchor.Round); err != nil {
 			return err
 		}
 		curs := b.Cursor()
@@ -510,14 +500,16 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 			if e != nil {
 				return e
 			}
-			if w.Number <= f.Anchor.Height {
-				covered := b.Get(coverageKey(w.Number))
-				if covered == nil {
-					return frontier.ErrObligation
-				}
-				claimed, e := frontier.Decode(covered, *s.frontier)
-				if e != nil || !bytes.Equal(claimed.Subject.BlockHash[:], w.Hash) {
-					return frontier.ErrObligation
+			if w.Status == 1 && w.Number <= f.Anchor.Height || w.Status != 1 && supersededCandidate(w.Number, w.Round, f.Anchor.Height, anchorUC.InputRecord.RoundNumber) {
+				if w.Status == 1 {
+					covered := b.Get(coverageKey(w.Number))
+					if covered == nil {
+						return frontier.ErrObligation
+					}
+					claimed, e := frontier.Decode(covered, *s.frontier)
+					if e != nil || !bytes.Equal(claimed.Subject.BlockHash[:], w.Hash) {
+						return frontier.ErrObligation
+					}
 				}
 				if err := curs.Delete(); err != nil {
 					return err

@@ -559,7 +559,7 @@ func TestRecoveryOrderingAndReplicaLoss(t *testing.T) {
 	}
 	require(t, CheckRecovery(base, next.Round, p, Coverage{Anchor: base, Material: materialFor(base.Height)}), ErrStale)
 	p.Availability = availabilityTest{lost: "replica-b"}
-	require(t, CheckRecovery(got, next.Round, p, covered), ErrUnavailable)
+	require(t, CheckRecovery(got, next.Round, p, covered), nil)
 }
 
 func TestLoadRejectsOversizedFile(t *testing.T) {
