@@ -35,10 +35,16 @@ func TestSignedQuorumSubsetsHaveOneBodyID(t *testing.T) {
 	if err := b.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	id := b.Identity()
 	subsets := [][]string{{"member-0", "member-1", "member-2"}, {"member-1", "member-2", "member-3"}}
-	var prior map[string][]byte
-	for _, subset := range subsets {
+	var ids [2][32]byte
+	var witnesses [2]map[string][]byte
+	for index, subset := range subsets {
+		candidate := b
+		candidate.Members = append(evmroot.WeightSet(nil), b.Members...)
+		for i := range candidate.Members {
+			candidate.Members[i].ConsensusKey = bytes.Clone(b.Members[i].ConsensusKey)
+		}
+		id := candidate.Identity()
 		witness := make(map[string][]byte)
 		for _, name := range subset {
 			sig, err := signers[name].SignBytes(id[:])
@@ -46,7 +52,7 @@ func TestSignedQuorumSubsetsHaveOneBodyID(t *testing.T) {
 				t.Fatal(err)
 			}
 			witness[name] = sig
-			for _, m := range members {
+			for _, m := range candidate.Members {
 				if m.NodeID == name {
 					v, err := abcrypto.NewVerifierSecp256k1(m.ConsensusKey)
 					if err != nil {
@@ -58,25 +64,23 @@ func TestSignedQuorumSubsetsHaveOneBodyID(t *testing.T) {
 				}
 			}
 		}
-		reached, valid := members.QuorumReached(subset, b.RootThreshold)
+		reached, valid := candidate.Members.QuorumReached(subset, candidate.RootThreshold)
 		if !valid || !reached {
 			t.Fatal("signed subset lacked quorum")
 		}
-		if b.Identity() != id {
-			t.Fatal("witness changed body identity")
-		}
-		if prior != nil {
-			same := true
-			for name, sig := range prior {
-				if !bytes.Equal(witness[name], sig) {
-					same = false
-					break
-				}
-			}
-			if same {
-				t.Fatal("witness maps did not differ")
-			}
-		}
-		prior = witness
+		ids[index] = candidate.Identity()
+		witnesses[index] = witness
+	}
+	if ids[0] != ids[1] {
+		t.Fatal("verified quorum subsets produced different body IDs")
+	}
+	if len(witnesses[0]) != 3 || len(witnesses[1]) != 3 || witnesses[0]["member-0"] == nil || witnesses[1]["member-3"] == nil {
+		t.Fatal("witness maps were not distinct quorum subsets")
+	}
+	changed := b
+	changed.Members = append(evmroot.WeightSet(nil), b.Members...)
+	changed.Members[0].ConsensusKey = bytes.Repeat([]byte{9}, 33)
+	if changed.Identity() == ids[0] {
+		t.Fatal("member key did not change the production body ID")
 	}
 }

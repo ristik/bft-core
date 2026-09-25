@@ -9,7 +9,7 @@ import (
 )
 
 // HistoricalTrustBaseStore gives shard verification its v1 anchor while
-// retaining checked epoch/round history for catch-up. The v2 branch remains
+// retaining checked epoch history for catch-up. The v2 branch remains
 // unavailable to UC verification until WP3 activates it.
 type HistoricalTrustBaseStore struct{ history *trusthistorystore.Store }
 
@@ -29,8 +29,5 @@ func (s *HistoricalTrustBaseStore) GetByEpoch(_ context.Context, epoch uint64) (
 		return nil, trusthistorystore.ErrUnsupportedV2
 	}
 	return r.V1, nil
-}
-func (s *HistoricalTrustBaseStore) GetByRound(round uint64) (trusthistorystore.Record, error) {
-	return s.history.ByRound(round)
 }
 func (s *HistoricalTrustBaseStore) Evict() { s.history.Evict() }

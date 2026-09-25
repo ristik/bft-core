@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -15,9 +16,11 @@ import (
 // there is exactly one executor per validator, so there is no connection
 // pooling or multi-target routing to do here.
 type Client struct {
-	url    string
-	secret Secret
-	http   *http.Client
+	url        string
+	secret     Secret
+	http       *http.Client
+	checkMu    sync.RWMutex
+	beforeCall func(context.Context) error
 	// requireSeal selects seal-path admission: stock V3 forkchoice/build capabilities plus
 	// all three seal siblings, without stock newPayloadV3.
 	requireSeal bool
@@ -39,6 +42,12 @@ adapter retains the V3 payload method for its non-seal client path. A caller tha
 the seal path keeps the stock V3 requirement.
 */
 func (c *Client) RequireSealCapabilities() { c.requireSeal = true }
+
+func (c *Client) setBeforeCall(check func(context.Context) error) {
+	c.checkMu.Lock()
+	defer c.checkMu.Unlock()
+	c.beforeCall = check
+}
 
 type rpcRequest struct {
 	JSONRPC string `json:"jsonrpc"`
@@ -68,6 +77,16 @@ type rpcResponse struct {
 // POST, and surface either a transport error, an RPC-level error, or the
 // raw result for the caller to unmarshal into its specific response type.
 func (c *Client) call(ctx context.Context, method string, params []any, out any) error {
+	if method != "engine_sealConfigV1" {
+		c.checkMu.RLock()
+		check := c.beforeCall
+		c.checkMu.RUnlock()
+		if check != nil {
+			if err := check(ctx); err != nil {
+				return err
+			}
+		}
+	}
 	reqBody, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: params})
 	if err != nil {
 		return fmt.Errorf("engineapi: encoding request for %s: %w", method, err)

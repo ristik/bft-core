@@ -89,7 +89,7 @@ func TestStoreRestartEvictionAndRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := s.ByRound(tb.GetEpochStart())
+	first, err := s.ByEpoch(tb.GetEpoch())
 	if err != nil || first.V1 == nil {
 		t.Fatalf("open anchor: %+v %v", first, err)
 	}
@@ -122,7 +122,7 @@ func TestStoreRestartEvictionAndRefusal(t *testing.T) {
 		t.Fatalf("caller corrupted cache: %+v %v", stable, err)
 	}
 	s.Evict()
-	after, err := s.ByRound(12)
+	after, err := s.ByEpoch(in.Body.Epoch)
 	if err != nil || after.V2 == nil || after.Epoch != in.Body.Epoch {
 		t.Fatalf("evicted lookup: %+v %v", after, err)
 	}
@@ -139,14 +139,14 @@ func TestStoreRestartEvictionAndRefusal(t *testing.T) {
 	if err != nil || after.V2 == nil {
 		t.Fatalf("restart lookup: %+v %v", after, err)
 	}
-	if got, err := s.ByRound(11); err != nil || got.V1 == nil {
-		t.Fatalf("before A*: %+v %v", got, err)
+	if got, err := s.ByEpoch(tb.GetEpoch()); err != nil || got.V1 == nil || got.End != in.Activation.EpochStart {
+		t.Fatalf("old epoch after A*: %+v %v", got, err)
 	}
-	if got, err := s.ByRound(12); err != nil || got.V2 == nil || got.Epoch != in.Body.Epoch {
-		t.Fatalf("at first A*: %+v %v", got, err)
+	if got, err := s.ByEpoch(in.Body.Epoch); err != nil || got.V2 == nil || got.Start != in.Activation.EpochStart || got.End != second.Activation.EpochStart {
+		t.Fatalf("first v2 epoch: %+v %v", got, err)
 	}
-	if got, err := s.ByRound(22); err != nil || got.V2 == nil || got.Epoch != second.Body.Epoch {
-		t.Fatalf("at second A*: %+v %v", got, err)
+	if got, err := s.ByEpoch(second.Body.Epoch); err != nil || got.V2 == nil || got.Start != second.Activation.EpochStart {
+		t.Fatalf("second v2 epoch: %+v %v", got, err)
 	}
 	if _, err := Open(ctx, db, tb, sha256.Sum256([]byte("different")), proofVerifier{}); !errors.Is(err, ErrIdentity) {
 		t.Fatalf("identity mismatch: %v", err)
@@ -171,6 +171,29 @@ func TestStoreRestartEvictionAndRefusal(t *testing.T) {
 	bad.Activation.BodyIdentity = badID[:]
 	if err := s.AppendVerified(ctx, bad, []byte("bad")); !errors.Is(err, ErrProof) {
 		t.Fatalf("bad proof: %v", err)
+	}
+}
+
+func TestSuffixUCSelectsSignerByEpoch(t *testing.T) {
+	db := openDB(t, filepath.Join(t.TempDir(), "trust.db"))
+	defer db.Close()
+	tb := anchor(t)
+	s, err := Open(context.Background(), db, tb, sha256.Sum256([]byte("execution-v2")), proofVerifier{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := body(t, s)
+	if err := s.AppendVerified(context.Background(), in, []byte("finalized-proof")); err != nil {
+		t.Fatal(err)
+	}
+	ucRootEpoch, ucRound := tb.GetEpoch(), in.Activation.EpochStart+1
+	activeEpoch, err := s.history.At(ucRound)
+	if err != nil || activeEpoch != in.Body.Epoch {
+		t.Fatalf("active epoch at suffix round: %d, %v", activeEpoch, err)
+	}
+	signer, err := s.ByEpoch(ucRootEpoch)
+	if err != nil || signer.V1 == nil || signer.Epoch != ucRootEpoch || signer.End != in.Activation.EpochStart {
+		t.Fatalf("suffix UC signer: %+v %v", signer, err)
 	}
 }
 func TestIncompatibleStoreRefused(t *testing.T) {
