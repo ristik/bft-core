@@ -410,11 +410,19 @@ func (m *Machine) Finalize(proof []byte) error {
 
 // Bootstrap checks the typed epoch genesis and full imported checkpoint before
 // the boundary can activate. The old proof's seal round never changes A*.
+// SnapshotVerifier is implemented by the root recovery path. Its input is the
+// typed recovery ShardInfo set and control checkpoint, and it must reconstruct
+// the production unicity tree before comparing it with the committed root.
+// The D4 model snapshot remains separate and is only used in model tests.
+type SnapshotVerifier interface {
+	VerifyHandoffSnapshot(evmroot.VerifiedHandoff) error
+}
+
 func (m *Machine) bootstrapMachineFields(v evmroot.VerifiedHandoff, g evmroot.EpochGenesis) bool {
 	return m.Verified != nil && v.CommitSealRound == m.Verified.CommitSealRound && bytes.Equal(g.FrozenID, m.Freeze.FrozenID[:]) && bytes.Equal(g.NextBodyID, m.Commit.Body[:])
 }
 
-func (m *Machine) Bootstrap(v evmroot.VerifiedHandoff, body evmroot.TrustBaseBodyV2, g evmroot.EpochGenesis, s evmroot.FullSnapshot) error {
+func (m *Machine) Bootstrap(v evmroot.VerifiedHandoff, body evmroot.TrustBaseBodyV2, g evmroot.EpochGenesis, s SnapshotVerifier) error {
 	if m.Phase != Committed || !m.Final || !m.bootstrapMachineFields(v, g) || v.RecordID == nil || !bytes.Equal(v.RecordID, m.Commit.ID[:]) || !bytes.Equal(v.Record.Bytes(), m.Commit.D4Record(m.Context).Bytes()) || v.Epoch != m.Context.Epoch || v.OrderRound != m.Commit.Round || !bytes.Equal(v.Root, m.Verified.StateRoot[:]) || !bytes.Equal(v.ControlDigest, m.Verified.ControlDigest[:]) || g.Epoch != m.Context.Epoch+1 || g.Start != m.Commit.Activation {
 		return ErrProof
 	}
@@ -422,7 +430,7 @@ func (m *Machine) Bootstrap(v evmroot.VerifiedHandoff, body evmroot.TrustBaseBod
 	if err != nil || !bytes.Equal(g.Bytes(), derived.Bytes()) {
 		return ErrProof
 	}
-	if e := evmroot.CanBootstrapNew(v, g, s); e != nil {
+	if s == nil || s.VerifyHandoffSnapshot(v) != nil {
 		return ErrProof
 	}
 	if m.Genesis != nil {
