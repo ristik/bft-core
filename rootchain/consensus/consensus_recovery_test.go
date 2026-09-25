@@ -379,7 +379,7 @@ func Test_recoverState(t *testing.T) {
 		require.Eventually(t,
 			func() bool {
 				return cmLeader.pacemaker.GetCurrentRound() >= destRound
-			}, 9*time.Second, 300*time.Millisecond, "waiting for round %d to be processed", destRound)
+			}, 15*cmLeader.pacemaker.maxRoundLen, 300*time.Millisecond, "waiting for round %d to be processed", destRound)
 	})
 
 	t.Run("less than quorum nodes are live for a period", func(t *testing.T) {

@@ -1068,6 +1068,50 @@ func Test_ConsensusManager_sendCertificates(t *testing.T) {
 		outputMustBeEmpty(t, cms[0])
 	})
 
+	t.Run("late duplicate does not leak into next collection window", func(t *testing.T) {
+		cms, _ := createConsensusManagers(t, 1, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { require.ErrorIs(t, cms[0].sendCertificates(ctx), context.Canceled) }()
+
+		first := makeUCs(1)
+		select {
+		case cms[0].ucSink <- slices.Collect(maps.Values(first)):
+		case <-time.After(10 * time.Second):
+			t.Fatal("first input hasn't been consumed fast enough")
+		}
+		require.Equal(t, first, consumeUCs(t, cms[0], first))
+
+		// The first collection window is complete. An old duplicate now arrives
+		// while the next window is collecting the same partition, with a new UC.
+		// It must not satisfy that window or remain in its result.
+		second := makeUCs(1)
+		consumed := make(chan map[types.PartitionShardID]*certification.CertificationResponse, 1)
+		go func() { consumed <- consumeUCs(t, cms[0], second) }()
+
+		lateDuplicateSent := make(chan struct{})
+		go func() {
+			cms[0].certResultCh <- first[types.PartitionShardID{PartitionID: 1, ShardID: shardID.Key()}]
+			close(lateDuplicateSent)
+		}()
+		// The send completes only after the next collection window accepts the
+		// duplicate, so this deterministically exercises cross-window delivery.
+		<-lateDuplicateSent
+
+		select {
+		case cms[0].ucSink <- slices.Collect(maps.Values(second)):
+		case <-time.After(10 * time.Second):
+			t.Fatal("next input hasn't been consumed fast enough")
+		}
+		select {
+		case got := <-consumed:
+			require.Equal(t, second, got)
+		case <-time.After(10 * time.Second):
+			t.Fatal("next collection window accepted a late duplicate as its result")
+		}
+		outputMustBeEmpty(t, cms[0])
+	})
+
 	t.Run("overwriting unconsumed QC", func(t *testing.T) {
 		cms, _ := createConsensusManagers(t, 1, nil)
 		ctx, cancel := context.WithCancel(context.Background())
