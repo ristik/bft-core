@@ -1,9 +1,20 @@
 # M2a certified frontier, version 1
 
-Status: inert contract. No production reader, journal mutation, pruning or
-replica transport imports `frontier`. `configuredprogress` remains the single
-recovery owner. This PR fixes the contract PR #264 review findings; the wired
-journal and replica adapters require a separate review.
+Status: the codec and planner remain in `frontier`; the opt-in M2a runtime
+is wired through `configuredprogress` and `archivewiring` by PR B. The journal
+is the only recovery owner. `--archive-prune` defaults to off and requires the
+archive store and two configured replica peers.
+
+The journal's first Bolt transaction stores every covered request, the
+certified anchor record and its frontier together. A second transaction
+deletes eligible hot candidates and observations and raises the prune floor.
+On restart, the node authenticates the anchor with the configured trust base,
+re-reads both replicas and loads only the suffix after that anchor. The
+execution client's authenticated snapshot is the H4 restore input; archive
+material never serves as a replacement trust pin. The worker audits covered
+archive promises in bounded pages and repairs a missing replica from a
+surviving verified copy. A missing copy halts further frontier work while
+ordinary certification retains its independent journal path.
 
 ## Certified record and acknowledgement
 

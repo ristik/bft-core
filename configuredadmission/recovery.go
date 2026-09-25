@@ -72,8 +72,9 @@ func (*ExecutionRecovery) Terminal(err error) bool {
 }
 
 type recoveryChain struct {
+	base   shardnode.BlockRef
 	anchor shardnode.BlockRef
-	blocks []configuredprogress.JournalEntry // ordered from B1 to anchor
+	blocks []configuredprogress.JournalEntry // ordered from the retained base to anchor
 	byHash map[string]int
 	latest *types.UnicityCertificate
 }
@@ -96,7 +97,13 @@ func (r *ExecutionRecovery) load(ctx context.Context) (recoveryChain, error) {
 }
 
 func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnapshot) (recoveryChain, error) {
-	c := recoveryChain{anchor: r.Genesis, byHash: make(map[string]int)}
+	c := recoveryChain{base: r.Genesis, anchor: r.Genesis, byHash: make(map[string]int)}
+	if image.Frontier != nil && image.Frontier.Anchor != nil {
+		anchor := image.Frontier.Anchor
+		c.base = shardnode.BlockRef{Number: anchor.Height, Hash: anchor.Subject.BlockHash[:], StateRoot: anchor.StateRoot[:]}
+		c.anchor = c.base
+		c.latest = image.Frontier.ResultingUC
+	}
 	entries := make(map[string]configuredprogress.JournalEntry)
 	for _, e := range image.Candidates {
 		if e.Certified {
@@ -123,7 +130,7 @@ func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnaps
 	// Walk the target's ancestors, not all candidates. A same-height side
 	// branch remains inert even when its payload is present locally.
 	cur := c.anchor
-	for cur.Number > 0 {
+	for cur.Number > c.base.Number {
 		if len(c.blocks) >= r.walkLimit() {
 			return recoveryChain{}, fmt.Errorf("%w: target %x exceeds %d retained ancestors", ErrRecoveryBudget, c.anchor.Hash, r.walkLimit())
 		}
@@ -138,8 +145,8 @@ func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnaps
 		c.blocks = append(c.blocks, e)
 		cur = shardnode.BlockRef{Number: b.ParentNumber, Hash: b.ParentHash, StateRoot: b.ParentState}
 	}
-	if !equalRef(cur, r.Genesis) {
-		return recoveryChain{}, fmt.Errorf("%w: certified chain does not reach configured genesis from %x", ErrRecoveryConflict, c.anchor.Hash)
+	if !equalRef(cur, c.base) {
+		return recoveryChain{}, fmt.Errorf("%w: certified chain does not reach retained frontier from %x", ErrRecoveryConflict, c.anchor.Hash)
 	}
 	for i, j := 0, len(c.blocks)-1; i < j; i, j = i+1, j-1 {
 		c.blocks[i], c.blocks[j] = c.blocks[j], c.blocks[i]
@@ -169,8 +176,8 @@ func equalRef(a, b shardnode.BlockRef) bool {
 	return a.Number == b.Number && bytes.Equal(a.Hash, b.Hash) && bytes.Equal(a.StateRoot, b.StateRoot)
 }
 
-func (c recoveryChain) index(ref shardnode.BlockRef, genesis shardnode.BlockRef) (int, bool) {
-	if equalRef(ref, genesis) {
+func (c recoveryChain) index(ref shardnode.BlockRef) (int, bool) {
+	if equalRef(ref, c.base) {
 		return 0, true
 	}
 	i := c.byHash[string(ref.Hash)]
@@ -183,7 +190,7 @@ func (c recoveryChain) index(ref shardnode.BlockRef, genesis shardnode.BlockRef)
 
 func (r *ExecutionRecovery) ancestry(ctx context.Context, c recoveryChain, head shardnode.BlockRef) (int, error) {
 	for n := 0; n <= r.walkLimit(); n++ {
-		if i, ok := c.index(head, r.Genesis); ok {
+		if i, ok := c.index(head); ok {
 			return i, nil
 		}
 		if head.Number == 0 {
@@ -230,7 +237,7 @@ func (r *ExecutionRecovery) finality(ctx context.Context, c recoveryChain) (shar
 	if err != nil {
 		return f, fmt.Errorf("%w: finalized identity unavailable: %w", ErrRecoveryUnavailable, err)
 	}
-	if _, ok := c.index(f, r.Genesis); !ok {
+	if _, ok := c.index(f); !ok {
 		return f, fmt.Errorf("%w: finalized %d/%x is outside certified chain to %d/%x", ErrRecoveryConflict, f.Number, f.Hash, c.anchor.Number, c.anchor.Hash)
 	}
 	return f, nil
@@ -313,7 +320,7 @@ func (r *ExecutionRecovery) recoverChain(ctx context.Context, c recoveryChain, c
 		if f.Number > e.Number {
 			return head, fmt.Errorf("%w: replay would move below finalized %d/%x", ErrRecoveryConflict, f.Number, f.Hash)
 		}
-		parent := r.Genesis
+		parent := c.base
 		if i > 0 {
 			b := c.blocks[i-1].Candidate
 			parent = shardnode.BlockRef{Number: b.Number, Hash: b.Hash, StateRoot: b.StateRoot}

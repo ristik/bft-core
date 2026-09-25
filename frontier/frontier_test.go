@@ -81,6 +81,28 @@ func require(t *testing.T, got, want error) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
+func TestPlanAdvanceInitialCertifiedHeight(t *testing.T) {
+	_, p := fixture()
+	p.Binding = acceptBinding{}
+	r := Record{Sequence: 1, Round: 5, Height: 1, Subject: archive.Request{Context: p.Context}}
+	r.StateRoot[0] = 1
+	material := materialFor(1)
+	copy(r.Subject.BlockHash[:], crypto.Keccak256(material.Header))
+	request, err := archive.EncodeRequest(r.Subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := archive.ManifestDigest(r.Subject, material)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range r.Acks {
+		r.Acks[i] = Acknowledgment{Replica: p.Replicas[i], RequestDigest: sha256.Sum256(request), ManifestDigest: digest}
+	}
+	if _, err := PlanAdvance(nil, r, p, []Coverage{{Anchor: r, Material: material}}, nil); err != nil {
+		t.Fatal(err)
+	}
+}
 func TestAdvanceGates(t *testing.T) {
 	base, p := fixture()
 	next, covered := nextOf(base, p)

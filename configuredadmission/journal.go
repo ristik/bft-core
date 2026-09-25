@@ -22,12 +22,13 @@ import (
 // committed to configured progress and its journal association before BFTClient receives it.
 // It deliberately does not coalesce intermediate certificates: recovery needs full history.
 type JournalFactory struct {
-	Store   *configuredprogress.Store
-	Origin  registrygenesis.GenesisOrigin
-	Limits  configuredprogress.JournalLimits
-	CatchUp func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
-	OnStop  func(error)
-	Logger  *slog.Logger
+	Store             *configuredprogress.Store
+	Origin            registrygenesis.GenesisOrigin
+	ExecutionConfigV2 [32]byte
+	Limits            configuredprogress.JournalLimits
+	CatchUp           func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
+	OnStop            func(error)
+	Logger            *slog.Logger
 }
 
 type journalAdmission struct {
@@ -74,6 +75,7 @@ func (f JournalFactory) Start(ctx context.Context, id shardnode.AdmissionIdentit
 	if err != nil {
 		return nil, err
 	}
+	c.ExecutionConfigV2 = f.ExecutionConfigV2
 	if _, err = f.Store.LoadJournal(ctx, c, f.Limits); err != nil {
 		return nil, fmt.Errorf("loading execution journal: %w", err)
 	}

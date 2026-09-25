@@ -37,7 +37,7 @@ type Acknowledgment struct {
 }
 type Record struct {
 	Sequence  uint64
-	Round     uint64
+	Round     uint64 // resulting UC root round; partition round remains in its input record
 	Height    uint64
 	StateRoot [32]byte
 	Subject   archive.Request
@@ -221,10 +221,13 @@ func PlanAdvance(current *Record, next Record, p Policy, covered []Coverage, obl
 			return Plan{}, ErrStale
 		}
 	}
-	if current == nil || p.Binding == nil || p.Availability == nil || (len(covered) == 0 && next.Height > current.Height) {
+	if p.Binding == nil || p.Availability == nil || len(covered) == 0 {
 		return Plan{}, ErrAcknowledgment
 	}
-	previous := *current
+	previous := Record{}
+	if current != nil {
+		previous = *current
+	}
 	for _, item := range covered {
 		r := item.Anchor
 		if err := valid(r, p); err != nil {
