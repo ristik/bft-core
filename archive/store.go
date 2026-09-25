@@ -71,6 +71,35 @@ func allFields(r *Record) (map[string][]byte, error) {
 	}
 	return f, nil
 }
+
+// ManifestDigest is the digest of the exact ARCHIVE1 manifest payload that
+// Put publishes for this request and record, before its trailing checksum.
+func ManifestDigest(q Request, rec *Record) ([32]byte, error) {
+	var zero [32]byte
+	f, err := allFields(rec)
+	if err != nil {
+		return zero, err
+	}
+	qb, err := EncodeRequest(q)
+	if err != nil || !bytes.Equal(crypto.Keccak256(rec.Header), q.BlockHash[:]) {
+		return zero, ErrInvalid
+	}
+	keys := sortedExtensions(f)
+	var manifest bytes.Buffer
+	manifest.WriteString("ARCHIVE1")
+	putBytes(&manifest, qb)
+	manifest.WriteByte(byte(len(keys)))
+	for _, k := range keys {
+		if len(k) == 0 || len(k) > 64 {
+			return zero, ErrInvalid
+		}
+		putBytes(&manifest, []byte(k))
+		put32(&manifest, uint32(len(f[k])))
+		d := sha256.Sum256(f[k])
+		manifest.Write(d[:])
+	}
+	return sha256.Sum256(manifest.Bytes()), nil
+}
 func fileName(k string) string { return hex.EncodeToString([]byte(k)) + ".chunk" }
 func location(q Request) (string, error) {
 	b, err := EncodeRequest(q)
@@ -187,6 +216,10 @@ func (s *Store) Put(q Request, rec *Record) error {
 		}
 	}
 	d := sha256.Sum256(manifest.Bytes())
+	expected, err := ManifestDigest(q, rec)
+	if err != nil || d != expected {
+		return ErrInvalid
+	}
 	manifest.Write(d[:])
 	h, err := os.OpenFile(filepath.Join(tmp, "manifest"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
