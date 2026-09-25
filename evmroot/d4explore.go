@@ -132,6 +132,8 @@ func CanAcceptShardUC(c *D4Consumer, u D4ShardUC) error {
 		return ErrD4Proof
 	}
 	if !c.TransitionInstalled {
+		// This model starts with an existing old certificate. A fresh consumer
+		// with Current == nil needs a separate verified checkpoint import.
 		if c.Current == nil || u.Position.Epoch != c.Current.Position.Epoch || !c.Current.Position.Less(u.Position) {
 			return ErrD4Epoch
 		}
