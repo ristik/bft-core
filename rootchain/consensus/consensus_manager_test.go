@@ -1003,8 +1003,7 @@ func Test_ConsensusManager_sendCertificates(t *testing.T) {
 	// arrived. Sending certificates is asynchronous, so a short quiet-period
 	// timeout can expire before the feeder gets scheduled; overwrites can also
 	// arrive after an earlier value for that partition.
-	consumeUCs := func(t *testing.T, cm *ConsensusManager, want map[types.PartitionShardID]*certification.CertificationResponse) map[types.PartitionShardID]*certification.CertificationResponse {
-		t.Helper()
+	consumeUCs := func(cm *ConsensusManager, want map[types.PartitionShardID]*certification.CertificationResponse) (map[types.PartitionShardID]*certification.CertificationResponse, error) {
 		to := time.NewTimer(10 * time.Second)
 		defer to.Stop()
 		rUC := make(map[types.PartitionShardID]*certification.CertificationResponse)
@@ -1017,13 +1016,13 @@ func Test_ConsensusManager_sendCertificates(t *testing.T) {
 				}
 			}
 			if complete {
-				return rUC
+				return rUC, nil
 			}
 			select {
 			case uc := <-cm.CertificationResult():
 				rUC[types.PartitionShardID{PartitionID: uc.Partition, ShardID: uc.Shard.Key()}] = uc
 			case <-to.C:
-				t.Fatalf("did not receive latest expected certificates before deadline: got %v, want %v", rUC, want)
+				return nil, fmt.Errorf("did not receive latest expected certificates before deadline: got %v, want %v", rUC, want)
 			}
 		}
 	}
@@ -1051,7 +1050,8 @@ func Test_ConsensusManager_sendCertificates(t *testing.T) {
 			t.Fatal("expected that input would be accepted immediately, sink should be empty")
 		}
 		//...and consume them
-		rUC := consumeUCs(t, cms[0], ucs)
+		rUC, err := consumeUCs(cms[0], ucs)
+		require.NoError(t, err)
 		require.Equal(t, ucs, rUC)
 		outputMustBeEmpty(t, cms[0])
 
@@ -1063,8 +1063,63 @@ func Test_ConsensusManager_sendCertificates(t *testing.T) {
 			t.Fatal("expected that input would be accepted immediately, sink should be empty")
 		}
 
-		rUC = consumeUCs(t, cms[0], ucs)
+		rUC, err = consumeUCs(cms[0], ucs)
+		require.NoError(t, err)
 		require.Equal(t, ucs, rUC)
+		outputMustBeEmpty(t, cms[0])
+	})
+
+	t.Run("late duplicate does not leak into next collection window", func(t *testing.T) {
+		cms, _ := createConsensusManagers(t, 1, nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { require.ErrorIs(t, cms[0].sendCertificates(ctx), context.Canceled) }()
+
+		first := makeUCs(1)
+		select {
+		case cms[0].ucSink <- slices.Collect(maps.Values(first)):
+		case <-time.After(10 * time.Second):
+			t.Fatal("first input hasn't been consumed fast enough")
+		}
+		gotFirst, err := consumeUCs(cms[0], first)
+		require.NoError(t, err)
+		require.Equal(t, first, gotFirst)
+
+		// The first collection window is complete. An old duplicate now arrives
+		// while the next window is collecting the same partition, with a new UC.
+		// It must not satisfy that window or remain in its result.
+		second := makeUCs(1)
+		type consumeResult struct {
+			certs map[types.PartitionShardID]*certification.CertificationResponse
+			err   error
+		}
+		consumed := make(chan consumeResult, 1)
+		go func() {
+			certs, err := consumeUCs(cms[0], second)
+			consumed <- consumeResult{certs: certs, err: err}
+		}()
+
+		lateDuplicateSent := make(chan struct{})
+		go func() {
+			cms[0].certResultCh <- first[types.PartitionShardID{PartitionID: 1, ShardID: shardID.Key()}]
+			close(lateDuplicateSent)
+		}()
+		// The send completes only after the next collection window accepts the
+		// duplicate, so this deterministically exercises cross-window delivery.
+		<-lateDuplicateSent
+
+		select {
+		case cms[0].ucSink <- slices.Collect(maps.Values(second)):
+		case <-time.After(10 * time.Second):
+			t.Fatal("next input hasn't been consumed fast enough")
+		}
+		select {
+		case result := <-consumed:
+			require.NoError(t, result.err)
+			require.Equal(t, second, result.certs)
+		case <-time.After(10 * time.Second):
+			t.Fatal("next collection window accepted a late duplicate as its result")
+		}
 		outputMustBeEmpty(t, cms[0])
 	})
 
@@ -1101,7 +1156,8 @@ func Test_ConsensusManager_sendCertificates(t *testing.T) {
 			t.Error("next input hasn't been consumed fast enough")
 		}
 
-		rUC := consumeUCs(t, cms[0], exp)
+		rUC, err := consumeUCs(cms[0], exp)
+		require.NoError(t, err)
 		require.Len(t, rUC, 3, "number of different partition identifiers")
 		require.Equal(t, exp, rUC)
 		outputMustBeEmpty(t, cms[0])
@@ -1139,7 +1195,8 @@ func Test_ConsensusManager_sendCertificates(t *testing.T) {
 			t.Error("next input hasn't been consumed fast enough")
 		}
 
-		rUC := consumeUCs(t, cms[0], exp)
+		rUC, err := consumeUCs(cms[0], exp)
+		require.NoError(t, err)
 		require.Len(t, rUC, 4, "number of different partition identifiers")
 		require.Equal(t, exp, rUC)
 		outputMustBeEmpty(t, cms[0])

@@ -379,7 +379,7 @@ func Test_recoverState(t *testing.T) {
 		require.Eventually(t,
 			func() bool {
 				return cmLeader.pacemaker.GetCurrentRound() >= destRound
-			}, 9*time.Second, 300*time.Millisecond, "waiting for round %d to be processed", destRound)
+			}, 15*cmLeader.pacemaker.maxRoundLen, 300*time.Millisecond, "waiting for round %d to be processed", destRound)
 	})
 
 	t.Run("less than quorum nodes are live for a period", func(t *testing.T) {
@@ -644,7 +644,7 @@ func Test_recoverState(t *testing.T) {
 			return false
 		})
 		// make sure leader still issues a proposal after recovery
-		require.Eventually(t, func() bool { return cmLeader.pacemaker.GetCurrentRound() >= 5 }, 3*time.Second, 20*time.Millisecond, "make progress")
+		require.Eventually(t, func() bool { return cmLeader.pacemaker.GetCurrentRound() >= 5 }, 15*cmLeader.pacemaker.maxRoundLen, 20*time.Millisecond, "make progress")
 	})
 
 	t.Run("recovery triggered by missing proposal - delay proposal", func(t *testing.T) {
@@ -677,7 +677,7 @@ func Test_recoverState(t *testing.T) {
 			return false
 		})
 		// make sure leader still issues a proposal after recovery
-		require.Eventually(t, func() bool { return cmLeader.pacemaker.GetCurrentRound() >= 5 }, 3*time.Second, 20*time.Millisecond, "make progress")
+		require.Eventually(t, func() bool { return cmLeader.pacemaker.GetCurrentRound() >= 5 }, 15*cmLeader.pacemaker.maxRoundLen, 20*time.Millisecond, "make progress")
 	})
 	roundOfMsg := func(msg any) uint64 {
 		switch mt := msg.(type) {
