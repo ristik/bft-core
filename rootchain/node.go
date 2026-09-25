@@ -22,6 +22,7 @@ import (
 	"github.com/unicitynetwork/bft-core/observability"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -220,6 +221,9 @@ func (v *Node) sendRejection(ctx context.Context, nodeID string, last *certifica
 func (v *Node) onHandshake(ctx context.Context, req *handshake.Handshake) error {
 	ctx, span := v.tracer.Start(ctx, "node.onHandshake")
 	defer span.End()
+	if profile, ok := v.consensusManager.(interface{ HandoffProfileEnabled() bool }); ok && profile.HandoffProfileEnabled() && req != nil && req.PartitionID == rctypes.ControlPartition {
+		return rctypes.ErrControlPartition
+	}
 
 	if err := req.IsValid(); err != nil {
 		return fmt.Errorf("invalid handshake request: %w", err)
@@ -260,6 +264,9 @@ Shard nodes can only extend the stored/certified state.
 func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certification.BlockCertificationRequest) (rErr error) {
 	ctx, span := v.tracer.Start(ctx, "node.onBlockCertificationRequest")
 	defer span.End()
+	if profile, ok := v.consensusManager.(interface{ HandoffProfileEnabled() bool }); ok && profile.HandoffProfileEnabled() && req != nil && req.PartitionID == rctypes.ControlPartition {
+		return rctypes.ErrControlPartition
+	}
 
 	si, err := v.consensusManager.ShardInfo(req.PartitionID, req.ShardID)
 	if err != nil {

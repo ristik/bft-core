@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/unicitynetwork/bft-core/logger"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 	"github.com/unicitynetwork/bft-go-base/types"
 	bolt "go.etcd.io/bbolt"
@@ -18,11 +19,14 @@ var rootBucketName = []byte("root")
 
 type (
 	Orchestration struct {
-		networkID types.NetworkID
-		db        *bolt.DB
-		log       *slog.Logger
+		networkID      types.NetworkID
+		db             *bolt.DB
+		log            *slog.Logger
+		reserveControl bool
 	}
 )
+
+func (o *Orchestration) EnableHandoffProfile() { o.reserveControl = true }
 
 /*
 NewOrchestration creates new boltDB implementation of shard validator orchestration.
@@ -154,6 +158,12 @@ func (o *Orchestration) ShardConfigs(rootRound uint64) (map[types.PartitionShard
 //   - The activation round number must be strictly greater than the current round of the only shard in the specified partition
 //   - The node identifiers must match their authentication keys
 func (o *Orchestration) AddShardConfig(shardConf *types.PartitionDescriptionRecord) error {
+	if shardConf == nil {
+		return fmt.Errorf("missing shard configuration")
+	}
+	if o.reserveControl && shardConf.PartitionID == rctypes.ControlPartition {
+		return rctypes.ErrControlPartition
+	}
 	if shardConf.NetworkID != o.networkID {
 		return fmt.Errorf("invalid networkID %d, expected %d", shardConf.NetworkID, o.networkID)
 	}

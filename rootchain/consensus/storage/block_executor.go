@@ -3,8 +3,12 @@ package storage
 import (
 	"bytes"
 	"crypto"
+	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+
+	"github.com/unicitynetwork/bft-core/evmroot"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -29,8 +33,36 @@ type (
 	}
 )
 
-func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration Orchestration) (*ExecutedBlock, error) {
-	shardConfs, err := orchestration.ShardConfigs(block.GetRound())
+func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration Orchestration, networkProfile ...uint64) (*ExecutedBlock, error) {
+	profile, err := profileVersion(networkProfile)
+	if err != nil {
+		return nil, err
+	}
+	if block == nil || block.Block == nil || block.CommitQc == nil || block.CommitQc.LedgerCommitInfo == nil {
+		return nil, errors.New("missing committed root certificate")
+	}
+	if (profile == ProfileHandoff) != (block.Control != nil) {
+		return nil, ErrNetworkProfile
+	}
+	if (profile == ProfileHandoff && block.Block.GetVersion() != 2) || (profile == ProfileLegacy && block.Block.GetVersion() != 1) {
+		return nil, ErrNetworkProfile
+	}
+	if block.Control != nil && (block.Control.Network != uint64(orchestration.NetworkID()) || block.Control.Epoch != block.Block.Epoch || len(block.Control.PredecessorBodyID) != 32) {
+		return nil, ErrNetworkProfile
+	}
+	if block.Control != nil {
+		if err := validateControl(block.Control); err != nil {
+			return nil, err
+		}
+	}
+	configRound := block.GetRound()
+	if block.Control != nil && block.Control.Phase == "committed" {
+		if block.Control.OrderedRound == 0 || block.Control.OrderedRound > configRound {
+			return nil, errors.New("invalid control order round")
+		}
+		configRound = block.Control.OrderedRound
+	}
+	shardConfs, err := orchestration.ShardConfigs(configRound)
 	if err != nil {
 		return nil, fmt.Errorf("loading shard configurations for round %d: %w", block.GetRound(), err)
 	}
@@ -38,8 +70,12 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 	shardState := ShardStates{
 		States:  make(map[types.PartitionShardID]*ShardInfo, len(shardConfs)),
 		Changed: ShardSet{},
+		Control: block.Control,
 	}
 	for _, d := range block.ShardInfo {
+		if profile == ProfileHandoff && d.Partition == evmroot.D4ControlPartition {
+			return nil, ErrControlCheckpoint
+		}
 		shardKey := types.PartitionShardID{PartitionID: d.Partition, ShardID: d.Shard.Key()}
 		shardConf, ok := shardConfs[shardKey]
 		if !ok {
@@ -74,6 +110,16 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 				UC:        *d.UC,
 			}
 		}
+		if profile == ProfileHandoff {
+			feeHash, err := si.feeHash(crypto.SHA256)
+			if err != nil || !bytes.Equal(feeHash, si.TR.FeeHash) {
+				return nil, fmt.Errorf("%w: fee accumulator differs from technical record", ErrControlCheckpoint)
+			}
+			statHash, err := si.statHash(crypto.SHA256)
+			if err != nil || !bytes.Equal(statHash, si.TR.StatHash) {
+				return nil, fmt.Errorf("%w: statistics differ from technical record", ErrControlCheckpoint)
+			}
+		}
 		if err := si.resetTrustBase(shardConf); err != nil {
 			return nil, fmt.Errorf("initializing shard trustbase: %w", err)
 		}
@@ -83,6 +129,9 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 	ut, _, err := shardState.UnicityTree(hash)
 	if err != nil {
 		return nil, err
+	}
+	if profile == ProfileHandoff && !bytes.Equal(ut.RootHash(), block.CommitQc.LedgerCommitInfo.Hash) {
+		return nil, ErrControlCheckpoint
 	}
 	return &ExecutedBlock{
 		BlockData:  block.Block,
@@ -95,6 +144,23 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 }
 
 func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger) (*ExecutedBlock, error) {
+	if x.ShardState.Control != nil && x.ShardState.Control.Phase == "committed" && newBlock.Epoch == x.ShardState.Control.Epoch {
+		if newBlock.Payload == nil || !newBlock.Payload.IsEmpty() || newBlock.Payload.Version != 2 {
+			return nil, ErrHandoffSuffix
+		}
+		unchanged := ShardStates{States: make(map[types.PartitionShardID]*ShardInfo, len(x.ShardState.States)), Changed: ShardSet{}}
+		control := *x.ShardState.Control
+		control.PredecessorBodyID = bytes.Clone(control.PredecessorBodyID)
+		control.RecordBytes = bytes.Clone(control.RecordBytes)
+		control.PreviousDigest = bytes.Clone(control.PreviousDigest)
+		unchanged.Control = &control
+		for key, previous := range x.ShardState.States {
+			copy := *previous
+			copy.Fees = maps.Clone(previous.Fees)
+			unchanged.States[key] = &copy
+		}
+		return &ExecutedBlock{BlockData: newBlock, HashAlgo: hash, RootHash: bytes.Clone(x.RootHash), ShardState: unchanged}, nil
+	}
 	// clone parent state
 	shardConfs, err := orchestration.ShardConfigs(newBlock.Round)
 	if err != nil {
@@ -107,6 +173,9 @@ func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReq
 	}
 
 	for _, irChReq := range newBlock.Payload.Requests {
+		if x.ShardState.Control != nil && irChReq.Partition == evmroot.D4ControlPartition {
+			return nil, ErrHandoffRecord
+		}
 		shardKey := types.PartitionShardID{PartitionID: irChReq.Partition, ShardID: irChReq.Shard.Key()}
 		si, ok := nextShardState.States[shardKey]
 		if !ok {
@@ -128,6 +197,20 @@ func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReq
 		}
 
 		nextShardState.Changed[shardKey] = struct{}{}
+	}
+	if nextShardState.Control != nil {
+		if len(newBlock.Payload.HandoffRecords) > 1 {
+			return nil, ErrHandoffRecord
+		}
+		if len(newBlock.Payload.HandoffRecords) == 1 {
+			control, err := applyHandoffRecord(nextShardState.Control, newBlock.Payload.HandoffRecords[0], uint64(orchestration.NetworkID()), newBlock.Epoch, newBlock.Round)
+			if err != nil {
+				return nil, err
+			}
+			nextShardState.Control = control
+		}
+	} else if len(newBlock.Payload.HandoffRecords) > 0 {
+		return nil, ErrNetworkProfile
 	}
 
 	ut, _, err := nextShardState.UnicityTree(hash)

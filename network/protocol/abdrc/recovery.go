@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -24,8 +25,47 @@ type CommittedBlock struct {
 	_         struct{} `cbor:",toarray"`
 	Block     *rctypes.BlockData
 	ShardInfo []ShardInfo
-	Qc        *rctypes.QuorumCert // block's quorum certificate (from next view)
-	CommitQc  *rctypes.QuorumCert // commit certificate
+	Qc        *rctypes.QuorumCert   // block's quorum certificate (from next view)
+	CommitQc  *rctypes.QuorumCert   // commit certificate
+	Control   *evmroot.ControlState // version 2 checkpoint control leaf
+}
+
+func (r CommittedBlock) MarshalCBOR() ([]byte, error) {
+	if r.Control == nil {
+		return types.Cbor.Marshal([]any{r.Block, r.ShardInfo, r.Qc, r.CommitQc})
+	}
+	return types.Cbor.Marshal([]any{uint64(2), r.Block, r.ShardInfo, r.Qc, r.CommitQc, r.Control})
+}
+
+func (r *CommittedBlock) UnmarshalCBOR(data []byte) error {
+	var v2 struct {
+		_         struct{} `cbor:",toarray"`
+		Version   uint64
+		Block     *rctypes.BlockData
+		ShardInfo []ShardInfo
+		Qc        *rctypes.QuorumCert
+		CommitQc  *rctypes.QuorumCert
+		Control   *evmroot.ControlState
+	}
+	if err := types.Cbor.Unmarshal(data, &v2); err == nil {
+		if v2.Version != 2 || v2.Control == nil {
+			return errors.New("invalid control checkpoint")
+		}
+		*r = CommittedBlock{Block: v2.Block, ShardInfo: v2.ShardInfo, Qc: v2.Qc, CommitQc: v2.CommitQc, Control: v2.Control}
+		return nil
+	}
+	var v1 struct {
+		_         struct{} `cbor:",toarray"`
+		Block     *rctypes.BlockData
+		ShardInfo []ShardInfo
+		Qc        *rctypes.QuorumCert
+		CommitQc  *rctypes.QuorumCert
+	}
+	if err := types.Cbor.Unmarshal(data, &v1); err != nil {
+		return err
+	}
+	*r = CommittedBlock{Block: v1.Block, ShardInfo: v1.ShardInfo, Qc: v1.Qc, CommitQc: v1.CommitQc}
+	return nil
 }
 
 type ShardInfo struct {
@@ -132,7 +172,21 @@ func (r *CommittedBlock) GetRound() uint64 {
 }
 
 func (r *CommittedBlock) IsValid() error {
+	if r == nil || r.Block == nil {
+		return errors.New("block data is nil")
+	}
+	if (r.Block.GetVersion() == 2) != (r.Control != nil) {
+		return errors.New("missing or unexpected control checkpoint")
+	}
+	if r.Control != nil {
+		if r.Control.Epoch != r.Block.Epoch || r.Control.Network == 0 || len(r.Control.PredecessorBodyID) != 32 {
+			return errors.New("invalid control checkpoint")
+		}
+	}
 	for _, si := range r.ShardInfo {
+		if r.Control != nil && si.Partition == evmroot.D4ControlPartition {
+			return errors.New("control partition cannot be shard info")
+		}
 		if err := si.IsValid(); err != nil {
 			return fmt.Errorf("invalid ShardInfo[%s - %s]: %w", si.Partition, si.Shard, err)
 		}

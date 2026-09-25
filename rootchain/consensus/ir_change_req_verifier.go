@@ -27,6 +27,7 @@ type (
 	PartitionTimeoutGenerator struct {
 		blockRate time.Duration
 		state     State
+		profile   uint64
 	}
 )
 
@@ -46,6 +47,9 @@ func NewIRChangeReqVerifier(c *Parameters, sMonitor State) (*IRChangeReqVerifier
 func (x *IRChangeReqVerifier) VerifyIRChangeReq(rootRound uint64, irChReq *drctypes.IRChangeReq) (*types.InputRecord, error) {
 	if irChReq == nil {
 		return nil, fmt.Errorf("IR change request is nil")
+	}
+	if x.params.NetworkProfileVersion == 2 && irChReq.Partition == drctypes.ControlPartition {
+		return nil, drctypes.ErrControlPartition
 	}
 	// Certify input, everything needs to be verified again as if received from partition node, since we cannot trust the leader is honest.
 	// This gets the shardInfo from committed round (for which there is UC), and irChReq should build on that.
@@ -88,6 +92,7 @@ func NewLucBasedT2TimeoutGenerator(c *Parameters, sMonitor State) (*PartitionTim
 	return &PartitionTimeoutGenerator{
 		blockRate: c.BlockRate,
 		state:     sMonitor,
+		profile:   c.NetworkProfileVersion,
 	}, nil
 }
 
@@ -99,6 +104,9 @@ func (x *PartitionTimeoutGenerator) GetT2Timeouts(currentRound uint64) ([]*types
 
 	timedOutShards := make([]*types.UnicityCertificate, 0, len(ucs))
 	for _, uc := range ucs {
+		if x.profile == 2 && (uc == nil || uc.GetPartitionID() == drctypes.ControlPartition) {
+			continue
+		}
 		// do not create T2 timeout requests if shard has a change already in pipeline
 		if x.state.IsChangeInProgress(uc.GetPartitionID(), uc.GetShardID()) != nil {
 			continue

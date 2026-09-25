@@ -173,8 +173,13 @@ func NewConsensusManager(
 		}
 	}
 
+	if cParams.NetworkProfileVersion == storage.ProfileHandoff {
+		if profileOrchestration, ok := orchestration.(interface{ EnableHandoffProfile() }); ok {
+			profileOrchestration.EnableHandoffProfile()
+		}
+	}
 	// init storage
-	bStore, err := storage.New(cParams.HashAlgorithm, store, orchestration, log)
+	bStore, err := storage.New(cParams.HashAlgorithm, store, orchestration, log, cParams.NetworkProfileVersion)
 	if err != nil {
 		return nil, fmt.Errorf("consensus block storage init failed: %w", err)
 	}
@@ -212,7 +217,7 @@ func NewConsensusManager(
 		pacemaker:      pm,
 		leaderSelector: ls,
 		trustBaseStore: trustBaseStore,
-		irReqBuffer:    NewIrReqBuffer(log),
+		irReqBuffer:    NewIrReqBuffer(log, cParams.NetworkProfileVersion),
 		safety:         safetyModule,
 		blockStore:     bStore,
 		orchestration:  orchestration,
@@ -981,20 +986,45 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	// x.log.InfoContext(ctx, "new round start, node is leader")
 
 	// find shards with T2 timeouts
-	timedOutShards, err := x.t2Timeouts.GetT2Timeouts(round)
+	profile := x.params.NetworkProfileVersion
+	if profile == 0 {
+		profile = storage.ProfileLegacy
+	}
+	oldSuffix := false
+	if profile == storage.ProfileHandoff {
+		oldSuffix, err = x.blockStore.SuffixParent(x.blockStore.GetHighQc().GetRound(), x.trustBase.Load().Epoch)
+		if err != nil {
+			x.log.WarnContext(ctx, "cannot establish parent control state", logger.Error(err))
+			return
+		}
+	}
+	var timedOutShards []*types.UnicityCertificate
+	if !oldSuffix {
+		timedOutShards, err = x.t2Timeouts.GetT2Timeouts(round)
+	}
 	if err != nil {
 		// error here is not fatal, still make a proposal, hopefully the next node will generate timeout
 		// requests for partitions this node failed to query
 		x.log.WarnContext(ctx, "failed to check timeouts for some partitions", logger.Error(err))
 	}
+	payload := &drctypes.Payload{}
+	if profile == storage.ProfileHandoff {
+		payload.Version = profile
+	}
+	if !oldSuffix {
+		payload = x.irReqBuffer.GeneratePayload(round, timedOutShards, x.blockStore.IsChangeInProgress)
+		if profile == storage.ProfileHandoff {
+			payload.Version = profile
+		}
+	}
 	proposalMsg := &abdrc.ProposalMsg{
 		Block: &drctypes.BlockData{
-			Version:   1,
+			Version:   types.Version(profile),
 			Author:    x.id.String(),
 			Round:     round,
 			Epoch:     x.trustBase.Load().Epoch,
 			Timestamp: types.NewTimestamp(),
-			Payload:   x.irReqBuffer.GeneratePayload(round, timedOutShards, x.blockStore.IsChangeInProgress),
+			Payload:   payload,
 			Qc:        x.blockStore.GetHighQc(),
 		},
 		LastRoundTc: x.pacemaker.LastRoundTC(),
@@ -1069,7 +1099,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			x.frontier.latchFault()
 		}
 	}()
-	blockStore, err := storage.NewFromState(x.params.HashAlgorithm, rsp.CommittedHead, x.blockStore.GetDB(), x.orchestration, x.log)
+	blockStore, err := storage.NewFromState(x.params.HashAlgorithm, rsp.CommittedHead, x.blockStore.GetDB(), x.orchestration, x.log, x.params.NetworkProfileVersion)
 	if err != nil {
 		return fmt.Errorf("recovery, new block store init failed: %w", err)
 	}
@@ -1262,7 +1292,16 @@ func (x *ConsensusManager) Validators() peer.IDSlice {
 	return toIDSlice(x.trustBase.Load().RootNodes, x.log)
 }
 
+func (x *ConsensusManager) HandoffProfileEnabled() bool {
+	return x.params.NetworkProfileVersion == storage.ProfileHandoff
+}
+
 func (x *ConsensusManager) updateTrustBase() {
+	// Profile 2 keeps the old committee voting on an empty suffix until the
+	// typed epoch anchor path installs the successor committee.
+	if x.params.NetworkProfileVersion == storage.ProfileHandoff {
+		return
+	}
 	trustBase, err := x.trustBaseStore.GetByRound(x.pacemaker.GetCurrentRound())
 	if err != nil {
 		if x.frontier != nil {

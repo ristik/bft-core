@@ -15,10 +15,11 @@ type (
 	// Parameters are basic consensus parameters that need to be the same in all root validators.
 	// Extracted from root genesis where all validators in the root cluster must have signed them to signal agreement
 	Parameters struct {
-		BlockRate          time.Duration // also known as T3
-		LocalTimeout       time.Duration
-		ConsensusThreshold uint32
-		HashAlgorithm      crypto.Hash
+		BlockRate             time.Duration // also known as T3
+		LocalTimeout          time.Duration
+		ConsensusThreshold    uint32
+		HashAlgorithm         crypto.Hash
+		NetworkProfileVersion uint64 // 1 is the legacy root profile; 2 enables handoff
 	}
 	// Optional are common optional parameters for consensus managers
 	Optional struct {
