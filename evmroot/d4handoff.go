@@ -18,7 +18,7 @@ import (
 // D4 is an executable protocol model. The wire profile is reserved here; no
 // runtime consensus path imports this model.
 const D4Profile uint64 = 2
-const D4ControlPartition base.PartitionID = 0xfffffffe
+const D4ControlPartition base.PartitionID = 0xffffffff
 const PipelineDepth uint64 = 3 // scheduling margin, never a vote fence
 
 var (
@@ -469,6 +469,38 @@ func (b *D4Bootstrap) Vote(round uint64, parent D4Parent) error {
 		b.HighestQC = parent
 	}
 	return nil
+}
+
+// The typed anchor occupies a slot for pacemaker ordering, but has no
+// commit subject. This models isCommitCandidate before any QC aggregation.
+func (b *D4Bootstrap) voteCommitSubject(round uint64, parent D4Parent, timestamp uint64) D4LedgerCommitInfo {
+	if parent.Kind == D4AnchorParent {
+		return D4LedgerCommitInfo{}
+	}
+	if round != parent.Round+1 {
+		return D4LedgerCommitInfo{}
+	}
+	root := b.Anchor.Root
+	if parent.QC != nil {
+		root, timestamp = parent.QC.Vote.CurrentRoot, parent.QC.Vote.Timestamp
+	}
+	return D4LedgerCommitInfo{Network: b.NewTrust.Network, Round: parent.Round, Epoch: b.Anchor.Epoch, Timestamp: timestamp, Root: bytes.Clone(root)}
+}
+
+func (b *D4Bootstrap) BuildVoteQC(round uint64, parent D4Parent, root []byte, timestamp uint64) (D4QC, error) {
+	if len(root) != 32 || timestamp == 0 {
+		return D4QC{}, ErrD4Proof
+	}
+	if e := b.CanVote(round, parent); e != nil {
+		return D4QC{}, e
+	}
+	commit := b.voteCommitSubject(round, parent, timestamp)
+	if e := b.Vote(round, parent); e != nil {
+		return D4QC{}, e
+	}
+	qc := D4QC{Vote: D4VoteInfo{Round: round, Epoch: b.Anchor.Epoch, ParentRound: parent.Round, Timestamp: timestamp, CurrentRoot: bytes.Clone(root)}, Seal: D4Seal{Commit: commit}}
+	qc.Seal.PreviousHash = qc.Vote.Hash()
+	return qc, nil
 }
 func (b *D4Bootstrap) Commit(parent D4Parent, child D4QC) error {
 	if parent.Kind == D4AnchorParent {

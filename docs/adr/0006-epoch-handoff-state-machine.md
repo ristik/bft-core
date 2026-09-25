@@ -32,7 +32,8 @@ apply a terminal repeat as a timeout or reject a subsequent new UC.
    recovery enforce the same rule. Durable honest locks survive restart;
    Byzantine members may equivocate. A certified H's honest refusing weight
    exceeds `W-Q`, preventing a payload-suffix QC.
-3. A versioned, reserved `P_CTL` control leaf commits canonical record and
+3. A versioned, reserved `P_CTL = 0xffffffff` control leaf, always the
+   rightmost IMT leaf, commits canonical record and
    state under the existing unicity tree. Verification fixes both control
    path keys and requires old QC(c+1)'s signed VoteInfo and commit seal for
    `(c,e,R_H)` at consecutive rounds. `QC_c` is optional; endorsement and
@@ -73,7 +74,8 @@ The executable D4 model uses signed VoteInfo/seal QCs, full snapshot/control
 path checks, honest durable locks with Byzantine equivocation, typed anchor
 bootstrap, epoch-qualified consumers and cross-replica committed-history
 checks. Independent standard-library vectors pin V2 record, proof and genesis
-bytes and the D3 hash-cycle repair. The design's review table names every
+bytes and the D3 hash-cycle repair. Their Ed25519 signatures are model-crypto-only;
+the runtime verifier needs separate secp256k1 vectors. The design's review table names every
 required trace and negative. The model is inert and supplies no runtime
 consensus wiring. Runtime integration still needs proposal/timeout/recovery
 changes, checkpoint import, suffix execution, UC consumers, ureth and

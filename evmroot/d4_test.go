@@ -37,7 +37,11 @@ func fixture(t *testing.T) d4Fixture {
 	ctl := ControlState{Network: 3, Epoch: 7, Attempt: 1, OrderedRound: 10, PredecessorBodyID: pred, Phase: "committed", RecordBytes: r.Bytes(), PreviousDigest: bytes.Repeat([]byte{0x66}, 32)}
 	shard := ShardSnapshot{Partition: 1, InputRecord: []byte("IR-H"), TechnicalRecord: []byte("TR-H"), LastCR: []byte("old-last-cr"), PendingConfig: []byte("cfg-next"), FeeStats: []byte("fees")}
 	shard.Root = shard.CalculatedRoot()
-	s := FullSnapshot{Control: ctl, Shards: []ShardSnapshot{shard}}
+	shard2 := ShardSnapshot{Partition: 2, InputRecord: []byte("IR-2"), TechnicalRecord: []byte("TR-2"), LastCR: []byte("last-2")}
+	shard2.Root = shard2.CalculatedRoot()
+	shard3 := ShardSnapshot{Partition: 3, InputRecord: []byte("IR-3"), TechnicalRecord: []byte("TR-3"), LastCR: []byte("last-3")}
+	shard3.Root = shard3.CalculatedRoot()
+	s := FullSnapshot{Control: ctl, Shards: []ShardSnapshot{shard, shard2, shard3}}
 	old, keys := D4FixtureTrustBase(7, map[string]uint64{"a": 1, "b": 1, "c": 1, "d": 1})
 	return d4Fixture{body, r, s, old, keys}
 }
@@ -99,7 +103,9 @@ func TestD4_SuffixPayloadRefused(t *testing.T) {
 	}
 	assertIs(t, CanVoteOldSuffix(nil, D4Proposal{Epoch: 7, Round: 11}), ErrD4Unready)
 }
-func TestD4_SuffixPayloadNoQC(t *testing.T) {
+
+// Formula/illustrative: enumerates signer weight, not the runtime vote path.
+func TestD4_SuffixPayloadNoQC_Formula(t *testing.T) {
 	for _, signers := range [][]D4Signer{{{"a", 1, false, ""}, {"b", 1, false, ""}, {"c", 1, false, ""}, {"d", 1, true, ""}}, {{"a", 10, false, ""}, {"b", 6, false, ""}, {"c", 5, false, ""}, {"d", 2, true, ""}, {"e", 1, true, ""}}} {
 		var total uint64
 		for _, s := range signers {
@@ -134,12 +140,9 @@ func TestD4_SuffixPayloadNoQC(t *testing.T) {
 }
 func TestD4_LeaderCPlus2Crash(t *testing.T) {
 	f := fixture(t)
-	timeouts, c := D4DelayedFinalityRounds(10, 13, 12)
-	if c <= 13 || len(timeouts) == 0 || timeouts[0] != 12 {
-		t.Fatal("old timeouts fenced at A*")
-	}
 	progress := D4OldProgress{Order: 10, Start: 13, Live: true}
-	for _, round := range timeouts {
+	// Leader 12 crashes before aggregating QC(11); old timeouts cross A*.
+	for _, round := range []uint64{12, 13, 14, 15} {
 		if e := progress.Timeout(round); e != nil {
 			t.Fatal(e)
 		}
@@ -150,13 +153,14 @@ func TestD4_LeaderCPlus2Crash(t *testing.T) {
 		t.Fatal("new quorum started without old proof")
 	}
 	progress.Live = true
-	if e := progress.CertifyEmpty(c); e != nil {
+	if e := progress.CertifyEmpty(15); e != nil {
 		t.Fatal(e)
 	}
-	if e := progress.CertifyEmpty(c + 1); e != nil {
+	if e := progress.CertifyEmpty(16); e != nil {
 		t.Fatal(e)
 	}
-	if progress.Seal != c {
+	c := progress.Seal
+	if c != 15 || progress.Timeouts[len(progress.Timeouts)-1] < progress.Start {
 		t.Fatal("later pair did not commit suffix")
 	}
 	if e := progress.DeliverProof(); e != nil {
@@ -219,7 +223,7 @@ func TestD4_DeterministicGenesis(t *testing.T) {
 
 func TestD4_DeterministicGenesisInputOrdering(t *testing.T) {
 	f := fixture(t)
-	extra := ShardSnapshot{Partition: 2, InputRecord: []byte("IR-2"), TechnicalRecord: []byte("TR-2"), LastCR: []byte("last-2")}
+	extra := ShardSnapshot{Partition: 4, InputRecord: []byte("IR-4"), TechnicalRecord: []byte("TR-4"), LastCR: []byte("last-4")}
 	extra.Root = extra.CalculatedRoot()
 	f.snapshot.Shards = append(f.snapshot.Shards, extra)
 	p1 := f.proof(t, 10)
@@ -287,13 +291,60 @@ func TestD4_NewBootstrapTimeout(t *testing.T) {
 	}
 	assertIs(t, restart.Vote(16, anchor), ErrD4Anchor)
 }
+
+func TestD4_NewEpochLockRejectsOlderCertifiedParent(t *testing.T) {
+	f := fixture(t)
+	v := mustVerified(t, f.proof(t, 100), f.old)
+	g, _ := DeriveEpochGenesis(v, f.body)
+	newTB, keys := D4FixtureTrustBase(8, map[string]uint64{"n1": 1, "n2": 1, "n3": 1, "n4": 1})
+	b := D4Bootstrap{}
+	if e := b.Install(v, g, f.snapshot, newTB); e != nil {
+		t.Fatal(e)
+	}
+	if e := b.Vote(13, b.HighestQC); e != nil {
+		t.Fatal(e)
+	}
+	qc14 := D4QC{Vote: D4VoteInfo{Round: 14, Epoch: 8, ParentRound: 13, Timestamp: 1700000001, CurrentRoot: g.Root}}
+	D4SignQC(&qc14, keys, "n1", "n2", "n3")
+	if e := b.Vote(15, D4Parent{Kind: D4OrdinaryParent, Epoch: 8, Round: 14, QC: &qc14}); e != nil {
+		t.Fatal(e)
+	}
+	qc13 := D4QC{Vote: D4VoteInfo{Round: 13, Epoch: 8, ParentRound: 12, Timestamp: 1700000000, CurrentRoot: g.Root}}
+	D4SignQC(&qc13, keys, "n1", "n2", "n3")
+	stale := D4Parent{Kind: D4OrdinaryParent, Epoch: 8, Round: 13, QC: &qc13}
+	assertIs(t, b.CanVote(16, stale), ErrD4Proof)
+	restarted := b.Restart()
+	assertIs(t, restarted.CanVote(16, stale), ErrD4Proof)
+}
+
+func TestD4_TCIntervalRejectsWrongRoundAndEpoch(t *testing.T) {
+	f := fixture(t)
+	v := mustVerified(t, f.proof(t, 10), f.old)
+	g, _ := DeriveEpochGenesis(v, f.body)
+	newTB, keys := D4FixtureTrustBase(8, map[string]uint64{"n1": 1, "n2": 1, "n3": 1, "n4": 1})
+	anchor := D4Parent{Kind: D4AnchorParent, GenesisID: g.ID(), Epoch: 8, Round: 12}
+	for _, name := range []string{"before_start", "wrong_highqc_epoch"} {
+		t.Run(name, func(t *testing.T) {
+			tc := D4TimeoutCertificate{Epoch: 8, Round: 13, HighQC: anchor}
+			if name == "before_start" {
+				tc.Round = 12
+			} else {
+				tc.HighQC.Epoch = 7
+			}
+			D4SignTC(&tc, keys, "n1", "n2", "n3")
+			assertIs(t, tc.Verify(newTB, g), ErrD4Epoch)
+		})
+	}
+}
 func TestD4_ConsumerEpochAndRound(t *testing.T) {
 	f := fixture(t)
 	v := mustVerified(t, f.proof(t, 100), f.old)
 	for _, name := range []string{"shard", "ureth", "SealRegistry"} {
 		t.Run(name, func(t *testing.T) {
-			c := D4Consumer{OrderedRound: 10, Current: &D4ShardUC{Shard: 1, Position: D4Position{7, 9}, InputRecord: []byte("IR-H")}}
-			old := D4ShardUC{Shard: 1, Position: D4Position{7, 100}, Root: v.Root, InputRecord: []byte("IR-H"), SignerEpoch: 7, Valid: true}
+			terminal := D4ShardUC{Shard: 1, Position: D4Position{7, 100}, Root: v.Root, InputRecord: []byte("IR-H"), SignerEpoch: 7, Valid: true}
+			c := D4Consumer{OrderedRound: 10, Current: &terminal, History: []D4ShardUC{terminal}}
+			old := terminal
+			old.Position.Round = 101
 			assertIs(t, c.Accept(old), ErrD4Unready)
 			if c.TimeoutCount != 0 || c.RevertCount != 0 {
 				t.Fatal("unclassified repeat triggered side effect")
@@ -308,12 +359,21 @@ func TestD4_ConsumerEpochAndRound(t *testing.T) {
 			if e := c.Accept(newUC); e != nil {
 				t.Fatal(e)
 			}
+			outOfOrder := newUC
+			outOfOrder.Position.Round = 12
+			assertIs(t, c.Accept(outOfOrder), ErrD4Epoch)
 			c = c.Restart()
 			assertIs(t, c.Accept(old), ErrD4TerminalRepeat)
 			if c.Current.Position != newUC.Position {
 				t.Fatal("old UC replaced new")
 			}
 		})
+	}
+}
+
+func TestD4_PositionLexicographic(t *testing.T) {
+	if !(D4Position{7, 100}).Less(D4Position{8, 13}) || (D4Position{8, 13}).Less(D4Position{7, 100}) || !(D4Position{8, 13}).Less(D4Position{8, 14}) {
+		t.Fatal("epoch-qualified root order was lost")
 	}
 }
 func TestD4_ProofNegatives(t *testing.T) {
@@ -345,6 +405,26 @@ func TestD4_ProofNegatives(t *testing.T) {
 	assertIs(t, e, ErrD4Proof)
 }
 
+func TestD4_ProofRootBindingSignedWrongRoots(t *testing.T) {
+	f := fixture(t)
+	for _, name := range []string{"both_roots", "seal_root_only"} {
+		t.Run(name, func(t *testing.T) {
+			p := f.proof(t, 10)
+			wrong := bytes.Repeat([]byte{0xee}, 32)
+			p.CommitQC.Seal.Commit.Root = wrong
+			if name == "both_roots" {
+				p.CommitQC.Vote.CurrentRoot = bytes.Clone(wrong)
+			}
+			D4SignQC(&p.CommitQC, f.keys, "a", "b", "c")
+			if e := p.CommitQC.Verify(f.old); e != nil {
+				t.Fatal("wrong-root QC must still be validly signed", e)
+			}
+			_, e := VerifyHandoff(p, f.old)
+			assertIs(t, e, ErrD4Proof)
+		})
+	}
+}
+
 func TestD4_FinalizeRefusesMissingAndForgedProof(t *testing.T) {
 	f := fixture(t)
 	h := &Handoff{Phase: PhaseCommitted, Record: f.record}
@@ -371,10 +451,17 @@ func TestD4_MintedLateSuffixUC(t *testing.T) {
 	v := mustVerified(t, f.proof(t, 10), f.old)
 	for _, consumer := range []string{"shard", "ureth", "SealRegistry"} {
 		t.Run(consumer, func(t *testing.T) {
+			ordinary := D4Consumer{OrderedRound: 10, Current: &D4ShardUC{Shard: 1, Position: D4Position{7, 7}, InputRecord: []byte("IR-H")}}
+			if e := ordinary.Accept(D4ShardUC{Shard: 1, Position: D4Position{7, 8}, Root: v.Root, InputRecord: []byte("IR-H"), SignerEpoch: 7, Valid: true}); e != nil || ordinary.TimeoutCount != 1 || ordinary.RevertCount != 1 {
+				t.Fatal("ordinary old repeat did not exercise timeout/revert path", e)
+			}
 			c := D4Consumer{OrderedRound: 10, Current: &D4ShardUC{Shard: 1, Position: D4Position{7, 9}, InputRecord: []byte("IR-H")}}
 			for _, round := range []uint64{10, 100, 1000} {
 				uc := D4ShardUC{Shard: 1, Position: D4Position{7, round}, Root: v.Root, InputRecord: []byte("IR-H"), SignerEpoch: 7, Valid: true}
 				assertIs(t, c.Accept(uc), ErrD4Unready)
+				if c.TimeoutCount != 0 || c.RevertCount != 0 {
+					t.Fatal("pre-install terminal repeat caused timeout or revert")
+				}
 			}
 			c.Install(v)
 			for _, round := range []uint64{10, 100, 1000} {
@@ -475,14 +562,42 @@ func TestD4_AnchorCommitRefused(t *testing.T) {
 	b.Install(v, g, f.snapshot, newTB)
 	assertIs(t, b.Commit(b.HighestQC, D4QC{}), ErrD4CommitAnchor)
 }
-func TestD4_MixedHistoricalLastCR(t *testing.T) {
+
+func TestD4_AnchorVoteSealNoncommitting(t *testing.T) {
+	f := fixture(t)
+	v := mustVerified(t, f.proof(t, 10), f.old)
+	g, _ := DeriveEpochGenesis(v, f.body)
+	newTB, keys := D4FixtureTrustBase(8, map[string]uint64{"n1": 1, "n2": 1, "n3": 1, "n4": 1})
+	b := D4Bootstrap{}
+	if e := b.Install(v, g, f.snapshot, newTB); e != nil {
+		t.Fatal(e)
+	}
+	anchor := b.HighestQC
+	qc, e := b.BuildVoteQC(13, anchor, g.Root, 1700000001)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if qc.Seal.Commit.Round != 0 || len(qc.Seal.Commit.Root) != 0 {
+		t.Fatal("vote at A* claims an anchor commit")
+	}
+	D4SignQC(&qc, keys, "n1", "n2", "n3")
+	if e := qc.Verify(newTB); e != nil {
+		t.Fatal(e)
+	}
+	assertIs(t, b.Commit(anchor, qc), ErrD4CommitAnchor)
+}
+
+// Formula/illustrative: epoch flags stand in for historical UC signatures.
+func TestD4_MixedHistoricalLastCR_Illustrative(t *testing.T) {
 	ucs := []D4HistoricalUC{{Epoch: 6, Shard: 1, ValidForEpoch: 6}, {Epoch: 7, Shard: 2, ValidForEpoch: 7}}
 	if e := VerifyHistoricalLastCR(ucs, map[uint64]bool{6: true, 7: true, 8: true}, 8); e != nil {
 		t.Fatal(e)
 	}
 	assertIs(t, VerifyHistoricalLastCR(ucs, map[uint64]bool{8: true}, 8), ErrD4Proof)
 }
-func TestD4_PauseMeasurement(t *testing.T) {
+
+// Formula/illustrative: durations are model event times, not runtime latency.
+func TestD4_PauseMeasurement_Illustrative(t *testing.T) {
 	normal := D4PauseMeasurement{time.Second, 2 * time.Second, 3 * time.Second, 4 * time.Second, 5 * time.Second, 6 * time.Second}
 	crash := D4PauseMeasurement{time.Second, 4 * time.Second, 5 * time.Second, 7 * time.Second, 8 * time.Second, 9 * time.Second}
 	for _, m := range []D4PauseMeasurement{normal, crash} {
@@ -491,7 +606,9 @@ func TestD4_PauseMeasurement(t *testing.T) {
 		}
 	}
 }
-func TestD4_CommittedHistoryInvariant(t *testing.T) {
+
+// Formula/illustrative: replicas are constructed to probe the history checker.
+func TestD4_CommittedHistoryInvariant_Illustrative(t *testing.T) {
 	f := fixture(t)
 	state := D4BranchState{Control: &f.snapshot.Control, Shards: f.snapshot.Shards}
 	root, _ := f.snapshot.Root()
@@ -530,7 +647,7 @@ func TestD4_VectorsMatchGolden(t *testing.T) {
 	if e = json.Unmarshal(data, &v); e != nil {
 		t.Fatal(e)
 	}
-	if v.Version != 2 || !reflect.DeepEqual(v.TraceCoverage, D4TraceNames()) || v.Crypto.Profile != 2 {
+	if v.Version != 2 || !reflect.DeepEqual(v.TraceCoverage, D4TraceNames()) || v.Crypto.Profile != 2 || v.Crypto.Scope != "model-crypto-only (Ed25519); runtime secp256k1 vectors are separate" || v.Crypto.ControlPartition != "ffffffff" {
 		t.Fatal("v2 vector coverage mismatch")
 	}
 	for _, s := range []string{v.Crypto.RecordID, v.Crypto.ControlDigest, v.Crypto.Root, v.Crypto.VoteInfoHash, v.Crypto.GenesisID} {
@@ -578,8 +695,13 @@ func TestD4_VectorsMatchGolden(t *testing.T) {
 			t.Fatalf("signature %s differs", id)
 		}
 	}
-	if v.Crypto.Path[0].Key != "00000001" || v.Crypto.Path[0].Hash != hex.EncodeToString(p.ControlPath.HashSteps[0].Hash) {
-		t.Fatal("independent control path differs")
+	if len(v.Crypto.Path) != 2 || len(p.ControlPath.HashSteps) != 2 {
+		t.Fatal("control path must have two independent steps")
+	}
+	for i, key := range []string{"00000003", "00000002"} {
+		if v.Crypto.Path[i].Key != key || v.Crypto.Path[i].Hash != hex.EncodeToString(p.ControlPath.HashSteps[i].Hash) {
+			t.Fatal("independent control path differs at step", i)
+		}
 	}
 }
 

@@ -98,11 +98,17 @@ func main() {
 	control := cbor(arr{"UNICITY_ROOT_HANDOFF_STATE", 1, 3, 7, pred, 1, "committed", 10, record, repeated(0x66)})
 	digest := sum(control)
 	shard := sum(cbor(arr{"UNICITY_D4_SHARD_CHECKPOINT", 1, 1, []byte("IR-H"), []byte("TR-H"), []byte("old-last-cr"), []byte("cfg-next"), []byte("fees")}))
+	shard2 := sum(cbor(arr{"UNICITY_D4_SHARD_CHECKPOINT", 1, 2, []byte("IR-2"), []byte("TR-2"), []byte("last-2"), []byte{}, []byte{}}))
+	shard3 := sum(cbor(arr{"UNICITY_D4_SHARD_CHECKPOINT", 1, 3, []byte("IR-3"), []byte("TR-3"), []byte("last-3"), []byte{}, []byte{}}))
 	// UnicityTreeData.AddToHasher writes the root bytes as CBOR. IMT then
 	// writes CBOR(byte{tag}), CBOR(key), CBOR(dataHash) for each leaf.
 	shardLeaf := h([]byte{1}, key(1), h(shard))
-	controlLeaf := h([]byte{1}, key(0xfffffffe), h(digest))
-	root := h([]byte{0}, key(1), shardLeaf, controlLeaf)
+	shard2Leaf := h([]byte{1}, key(2), h(shard2))
+	shard3Leaf := h([]byte{1}, key(3), h(shard3))
+	controlLeaf := h([]byte{1}, key(0xffffffff), h(digest))
+	leftNode := h([]byte{0}, key(1), shardLeaf, shard2Leaf)
+	rightNode := h([]byte{0}, key(3), shard3Leaf, controlLeaf)
+	root := h([]byte{0}, key(2), leftNode, rightNode)
 	vote := cbor(tag{39007, arr{1, 11, 7, 1700000000, 10, root}})
 	voteHash := sum(vote)
 	ledger := cbor(tag{39005, arr{1, 3, 10, 7, 1699999999, voteHash, root, nil}})
@@ -118,7 +124,7 @@ func main() {
 	genesis := cbor(arr{"UNICITY_EPOCH_GENESIS", 1, 3, 8, bodyID, 13, recordID, 10, root, digest, frozen, tr})
 	names := []string{"suffix_payload_refused", "suffix_payload_no_qc", "leader_c_plus_2_crash", "deterministic_genesis", "new_bootstrap_timeout", "consumer_epoch_and_round", "proof_negatives", "pause_measurement", "minted_late_suffix_uc", "different_c_fixed_start", "next_epoch_carry_over", "payload_bearing_recovered_suffix", "missing_forged_control", "anchor_commit_refused", "mixed_historical_lastcr"}
 	sort.Strings(names)
-	v := map[string]any{"version": 2, "trace_coverage": names, "crypto": map[string]any{"profile": 2, "control_partition": "fffffffe", "record_cbor": hx(record), "record_id": hx(recordID), "control_cbor": hx(control), "control_digest": hx(digest), "shard_root": hx(shard), "root": hx(root), "path": []map[string]string{{"key": "00000001", "hash": hx(shardLeaf)}}, "vote_info_cbor": hx(vote), "vote_info_hash": hx(voteHash), "ledger_commit_info_cbor": hx(ledger), "seal_cbor": hx(seal), "signatures": sigs, "public_keys": pubs, "genesis_cbor": hx(genesis), "genesis_id": hx(sum(genesis)), "pre_freeze_summary": hx(prefreeze), "candidate_context_hash": hx(candidate)}}
+	v := map[string]any{"version": 2, "trace_coverage": names, "crypto": map[string]any{"profile": 2, "scope": "model-crypto-only (Ed25519); runtime secp256k1 vectors are separate", "control_partition": "ffffffff", "record_cbor": hx(record), "record_id": hx(recordID), "control_cbor": hx(control), "control_digest": hx(digest), "shard_root": hx(shard), "root": hx(root), "path": []map[string]string{{"key": "00000003", "hash": hx(shard3Leaf)}, {"key": "00000002", "hash": hx(leftNode)}}, "vote_info_cbor": hx(vote), "vote_info_hash": hx(voteHash), "ledger_commit_info_cbor": hx(ledger), "seal_cbor": hx(seal), "signatures": sigs, "public_keys": pubs, "genesis_cbor": hx(genesis), "genesis_id": hx(sum(genesis)), "pre_freeze_summary": hx(prefreeze), "candidate_context_hash": hx(candidate)}}
 	out, e := json.MarshalIndent(v, "", "  ")
 	if e != nil {
 		panic(e)

@@ -13,18 +13,6 @@ func (m D4PauseMeasurement) Valid() bool {
 }
 func (m D4PauseMeasurement) Pause() time.Duration { return m.FirstNewUC - m.LastOldUC }
 
-// A lost QC or crashed leader leaves old timeout voting enabled at and beyond
-// A*. Consecutive later empty rounds can supply a commit seal for H.
-func D4DelayedFinalityRounds(order, start uint64, crashAt uint64) (timeouts []uint64, seal uint64) {
-	for r := order + 2; r <= start+2; r++ {
-		timeouts = append(timeouts, r)
-	}
-	if crashAt == order+2 {
-		return timeouts, start + 2
-	}
-	return timeouts, order
-}
-
 // Old suffix liveness is driven by timeout and consecutive-QC events, not
 // the numeric A* boundary. Losing the old quorum before proof stalls safely.
 type D4OldProgress struct {

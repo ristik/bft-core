@@ -75,7 +75,19 @@ func ExecuteOldSuffix(parent *D4BranchState, p D4Proposal) (D4BranchState, error
 	if e := CanVoteOldSuffix(parent, p); e != nil {
 		return D4BranchState{}, e
 	}
-	return parent.Clone(), nil
+	out := parent.Clone()
+	// Model the ordinary executor's state change behind the suffix gate. If
+	// that gate is removed, a payload reaches a different committed root.
+	if p.PayloadKind != "" || len(p.Payload) != 0 || p.ScheduledConfig || p.NextEpoch || p.TimeoutUpdate || p.HiddenMutation {
+		if len(out.Shards) > 0 {
+			out.Shards[0].InputRecord = append(bytes.Clone(out.Shards[0].InputRecord), p.Payload...)
+			out.Shards[0].InputRecord = append(out.Shards[0].InputRecord, byte(1))
+			out.Shards[0].Root = out.Shards[0].CalculatedRoot()
+		} else {
+			out.PendingWork = append(out.PendingWork, []byte("executed-payload"))
+		}
+	}
+	return out, nil
 }
 func RecoverOldSuffix(parent *D4BranchState, p D4Proposal) (D4BranchState, error) {
 	return ExecuteOldSuffix(parent, p)
@@ -120,10 +132,15 @@ func CanAcceptShardUC(c *D4Consumer, u D4ShardUC) error {
 		return ErrD4Proof
 	}
 	if !c.TransitionInstalled {
-		if c.Current != nil && u.Position.Epoch == c.Current.Position.Epoch && u.Position.Round >= c.OrderedRound && bytes.Equal(u.InputRecord, c.Current.InputRecord) {
+		if c.Current == nil || u.Position.Epoch != c.Current.Position.Epoch || !c.Current.Position.Less(u.Position) {
+			return ErrD4Epoch
+		}
+		// A higher-round same-IR old UC may be a minted terminal repeat. Until
+		// the checkpoint supplies IR_H, defer its effects and fetch evidence.
+		if c.OrderedRound != 0 && u.Position.Round >= c.OrderedRound && bytes.Equal(u.InputRecord, c.Current.InputRecord) {
 			return ErrD4Unready
 		}
-		return ErrD4Unready
+		return nil
 	}
 	if u.Position.Epoch == c.OldEpoch {
 		if u.Position.Round >= c.OrderedRound && bytes.Equal(u.Root, c.TerminalRoot) && bytes.Equal(u.InputRecord, c.TerminalIR[u.Shard]) {
@@ -152,6 +169,12 @@ func CanAcceptShardUC(c *D4Consumer, u D4ShardUC) error {
 func (c *D4Consumer) Accept(u D4ShardUC) error {
 	e := CanAcceptShardUC(c, u)
 	if e == nil {
+		if !c.TransitionInstalled && c.Current != nil && bytes.Equal(u.InputRecord, c.Current.InputRecord) {
+			// Ordinary old-epoch repeats use the legacy timeout/revert path.
+			// The pre-install terminal guard above must keep late repeats out.
+			c.TimeoutCount++
+			c.RevertCount++
+		}
 		cp := u
 		c.Current = &cp
 		c.History = append(c.History, cp)

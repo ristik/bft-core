@@ -67,7 +67,8 @@ availability new progress needs only the new quorum and data availability.
 ## 2. Signed control leaf and exact finality proof
 
 Reserve `P_CTL` in a versioned network profile before wire implementation.
-The model's profile 2 uses `0xfffffffe` only as a fixture. Orchestration,
+The model's profile 2 freezes `P_CTL = 0xffffffff`, the rightmost IMT leaf.
+Orchestration,
 registration, normal shard requests and shard timeout scheduling reject the
 reserved key. It is root-maintained control data, never a UC destination.
 
@@ -196,17 +197,18 @@ The model exercises `CanVoteOldSuffix`, `VerifyHandoff`, `CanBootstrapNew`,
 `CanAcceptShardUC`, actual signer sets/locks, checkpoint reconstruction and
 cross-replica committed histories. Tests use `errors.Is` sentinels and isolated
 mutations. The V2 vectors independently generate the control path, signed
-VoteInfo/seal, genesis bytes and the D3 pre-freeze/candidate-context hashes;
-old vector encodings are never reinterpreted.
+VoteInfo/seal, genesis bytes and the D3 pre-freeze/candidate-context hashes.
+Their Ed25519 signatures are model-crypto-only; the runtime verifier needs
+separate secp256k1 vectors. Old vector encodings are never reinterpreted.
 
 | Trace | Key observation |
 |---|---|
 | `suffix_payload_refused`, `payload_bearing_recovered_suffix`, `next_epoch_carry_over` | All payload/config/timeout/state mutation routes refuse on an old suffix; deferred work applies once in new consensus. |
-| `suffix_payload_no_qc`, `leader_c_plus_2_crash` | Weighted honest blocking survives Byzantine equivocation/restart; old TCs pass A* and later consecutive suffixes prove H. |
+| `suffix_payload_no_qc`, `leader_c_plus_2_crash` | Signer-weight QC impossibility is formula/illustrative; the old progress model executes timeouts past A* and a later consecutive suffix seal. |
 | `deterministic_genesis`, `different_c_fixed_start`, `new_bootstrap_timeout`, `anchor_commit_refused` | Alternate c/signatures yield one G and fixed A* start; anchor never commits; new locks persist. |
 | `consumer_epoch_and_round`, `minted_late_suffix_uc` | Shard, ureth and registry consumer models quarantine/reclassify old repeats; `(e+1,13)` follows `(e,100)`. |
-| `proof_negatives`, `missing_forged_control`, `mixed_historical_lastcr` | Record, leaf/path, QC, signer, checkpoint and historical-body substitutions refuse. |
-| `pause_measurement` | Ordered timestamps report last old UC, proof, snapshot, first new QC/UC and EVM ack in normal and crashed-leader traces. |
+| `proof_negatives`, `missing_forged_control`, `mixed_historical_lastcr` | Record, leaf/path, QC, signer and checkpoint substitutions refuse; LastCR epoch flags are illustrative pending runtime signatures. |
+| `pause_measurement` | Illustrative event times show the last old UC, proof, snapshot, first new QC/UC and EVM ack in normal and crashed-leader schedules. |
 
 The inert model does not establish runtime completeness. Runtime review must
 cover suffix identity through every executor path, typed timeout/recovery

@@ -3,8 +3,8 @@ package evmroot
 import "encoding/json"
 
 // Version 2 changes the record, proof and anchor encodings. V1 fixture bytes
-// are never parsed as V2. The real-crypto fixture is generated separately by
-// testdata/generate_d4_vectors.go using only the Go standard library.
+// are never parsed as V2. The model-crypto-only Ed25519 fixture is generated
+// separately by testdata/generate_d4_vectors.go using only the Go standard library.
 type D4VectorSet struct {
 	Version       int            `json:"version"`
 	TraceCoverage []string       `json:"trace_coverage"`
@@ -12,6 +12,7 @@ type D4VectorSet struct {
 }
 type D4CryptoVector struct {
 	Profile              int               `json:"profile"`
+	Scope                string            `json:"scope"`
 	ControlPartition     string            `json:"control_partition"`
 	RecordCBOR           string            `json:"record_cbor"`
 	RecordID             string            `json:"record_id"`
