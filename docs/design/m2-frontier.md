@@ -1,65 +1,93 @@
 # M2a certified frontier, version 1
 
-This PR defines a frontier record and an inert advance planner. No production
-reader, journal mutation, pruning, or replica transport uses them yet. The
-configuredprogress journal remains the single recovery owner. Its existing
-`LoadJournal` scan and progress transaction at `configuredprogress/journal.go`
-must be extended in the later wired PR; a second recovery path must not be
-introduced.
+Status: inert contract. No production reader, journal mutation, pruning or
+replica transport imports `frontier`. `configuredprogress` remains the single
+recovery owner. This PR fixes the contract PR #264 review findings; the wired
+journal and replica adapters require a separate review.
 
-## Record and identity
+## Certified record and acknowledgement
 
-The frontier identifies one certified anchor by round, EVM height, block hash,
-state root, and a monotonic local sequence. Its archive request embeds the full
-[archive context](m2-archive.md): network, partition, shard, epochs, genesis and
-registry commitments, and canonical execution identity. The archive request's
-block hash is the anchor hash. The identity field is supplied through the
-archive `Identity` interface; the concrete WP1 identity is still pending.
+A frontier names one certified anchor by root round, EVM height, block hash,
+state root and a monotonic local sequence. Its archive request embeds the full
+network, partition, shard, epoch, genesis, registry and execution identity
+context. The `CertifiedBinding` adapter must verify those claimed fields
+against the canonical header and resulting UC/TR, under an independently
+trusted root/shard trust base, before an advance. The record is archive data,
+not its own certificate. A local supplied height, round or state root cannot
+establish the binding. The inert tests use a fake verifier; production
+certification remains a child PR obligation.
 
-The frontier stores two acknowledgements. Each names one configured replica,
-its digest of the exact encoded archive request, and its digest of the complete
-published manifest. Both manifest digests must match. Acknowledgements mean
-durable availability of all recovery and export bytes at those configured,
-independently stored replicas. They do not authenticate certification or grant
-freshness. The later runtime must obtain them after each replica's durable
-publication and verify the anchor's UC/TR association itself. A caller cannot
-promote a local archive `Put` result or cached provider claim into an ack.
+Each `ARCHIVE1` manifest is single-subject. For an advance from height H to
+height K, `PlanAdvance` therefore requires one `Coverage` item for **every**
+height in `(H,K]`, in order and without gaps. Both configured replicas must
+acknowledge every item's exact request and the digest returned by
+`archive.ManifestDigest` for that canonical record. The helper is checked
+against the manifest bytes actually published by `archive.Put`. Anchor-only
+acknowledgements never license deletion of intermediate records. The selected
+anchor must equal the last covered item, including sequence, round, height,
+block hash and state root. The prune boundary includes the anchor's hot entry;
+recovery uses the retained certified anchor and a fixed suffix after it.
 
-The version 1 codec has a domain tag, version, fixed-order big-endian fields,
-bounded canonical archive request, configured replica names, two digests and a
-SHA-256 checksum. Decode checks its version, canonical bytes, context, both
-replica slots, ack binding and an independently supplied minimum sequence.
-The checksum detects corruption; it is not a MAC. An authenticated journal or
-checkpoint must supply the expected context and sequence floor. A copied or
-stale file cannot set its own validation policy.
+The authentication choice is **local read-back**. Before planning an advance,
+the future `ReplicaAvailability` adapter must contact each configured,
+independently stored replica through its authenticated endpoint, re-read the
+exact manifest and all chunks, validate `ARCHIVE1` checksums and compare the
+manifest digest to the node's own canonical-record digest. A caller-created
+`sha256(request)` receipt is insufficient. The names in an inert ack are only
+slots; the trusted adapter binds each slot to its configured endpoint and
+returns success only after durable publication and verified read-back.
+`PlanAdvance` refuses a missing adapter or failed read. Re-read the current
+frontier at restart and before each advance, and audit every still-promised
+archived record on a paced cycle no longer than 24 hours; a missing copy
+raises an alert, starts re-replication from the surviving verified copy, and
+halts advance/prune until two replicas re-attest. If either copy is lost after
+pruning, recovery is degraded and admission backpressures rather than claiming
+two-copy availability. A single surviving copy is never a fresh prune basis.
 
-## Atomic advance and pruning
+The codec has a domain, version, fixed-order big-endian fields, bounded
+canonical archive request, two configured replica names of 1 to 64 bytes,
+two digests and a SHA-256 corruption checksum. The checksum is not a MAC.
+Decode checks the configured context and a journal-supplied sequence floor;
+it refuses trailing bytes and noncanonical NUL-padded names. `Save` decodes
+its newly encoded bytes before replacing an existing good file. `Load` caps
+file reading at `MaxBytes` and refuses a larger or nonregular file.
 
-`PlanAdvance` requires both acknowledgements and strictly increasing sequence,
-round and height. It rejects an unresolved certificate body, pending
-execution authorization or non-equivocation obligation at or below the proposed
-frontier. The planner returns a prune-through round and deletes nothing. The
-later journal transaction must recheck these gates under its own lock and
-atomically associate the frontier with certified progress before deleting any
-hot entries. A planner result alone cannot authorize deletion.
+## Journal order, crashes and epoch change
 
-The file store writes a temporary record, syncs it, renames it over the old
-record and syncs the parent directory. A fault after rename may leave the new
-record visible despite an error; a caller reloads before retry. The store is
-inert and single-process. The wired design must coordinate its commit with the
-journal's Bolt transaction so a crash cannot leave a prune decision ahead of
-its certified association. Kill tests belong to that integration PR.
+The required runtime order is **both durable replica acknowledgements, then
+frontier commit, then prune**. The first journal Bolt transaction stores the
+frontier, certified association and covered-range evidence together. A later
+Bolt transaction deletes eligible hot entries and raises the minimum sequence
+and prune floors atomically with that deletion. Both transactions use the
+existing journal recovery owner and lock. The separate `frontier.Store` file
+is an inert codec/crash fixture only; it must not become an independent
+recovery authority. The runtime rechecks certification, manifest, replica and
+obligation gates under the journal lock before frontier commit, then rechecks
+the durable frontier and obligations before prune. Prune is idempotent. Never
+prune before the frontier commit or raise a floor without the corresponding
+deletion.
 
-The hot journal retains a fixed suffix after the frontier, plus unresolved
-bodies, pending authorizations and non-equivocation obligations regardless of
-age. A normal restart authenticates the frontier and checks only that bounded
-suffix; it does not replay from genesis. The existing journal remains the
-recovery verifier and must validate continuity from the certified anchor.
+A crash after acknowledgements but before the frontier write leaves the old
+frontier and journal intact; the acknowledgements are discarded or re-obtained
+and nothing is pruned. A crash after the frontier transaction but before
+pruning restarts from the new durable frontier and repeats the planned prune.
+A copied or rolled-back frontier below the journal's already-pruned round or
+sequence floor is refused as `ErrStale`; the floor is committed in the same
+Bolt transaction as the prune. `TestRecoveryOrderingAndReplicaLoss` exercises
+both windows and the rollback check in the inert store model. The wired PR
+must add SIGKILL tests at those Bolt boundaries.
 
-If a local frontier is corrupt, stale, copied, or version-incompatible, the
-node refuses ordinary recovery and never votes from it. Reconstruction uses an
-independently authenticated checkpoint/trust pin and the two replica archives
-to rebuild certified association, then writes a new frontier and suffix. The
-archive cannot supply its own trust anchor. An archive outage or missing second
-ack stops frontier advancement and pruning; bounded hot storage eventually
-backpressures admission. It must never bypass certification or stop safety.
+The hot journal retains a bounded suffix plus unresolved bodies, pending
+authorizations and non-equivocation obligations regardless of age. Any such
+obligation at or before the proposed frontier blocks pruning. Normal restart
+authenticates the frontier and bounded suffix, never replaying from genesis.
+Corrupt, copied, stale or incompatible frontier state refuses ordinary voting;
+reconstruction requires an independent checkpoint/trust pin and both replica
+archives. The archive cannot supply its own trust anchor.
+
+The archive context includes shard and root epochs. On an authenticated epoch
+transition, close the old frontier at its last certified interval and start a
+new frontier/sequence namespace under the new complete context and activated
+trust interval. No cross-context `PlanAdvance` is valid; the journal commits
+that context switch with the activated record and retains the old anchor for
+historical export until its separate retention policy permits removal.

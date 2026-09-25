@@ -9,10 +9,48 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
+type bindingTest struct{}
+
+func (bindingTest) VerifyCertified(r Record, material *archive.Record) error {
+	if material == nil || !bytes.Equal(crypto.Keccak256(material.Header), r.Subject.BlockHash[:]) || r.StateRoot[0] != byte(r.Height-1) || r.Round != r.Height+3 {
+		return ErrInvalid
+	}
+	return nil
+}
+
+type acceptBinding struct{}
+
+func (acceptBinding) VerifyCertified(Record, *archive.Record) error { return nil }
+
+type availabilityTest struct{ lost string }
+
+func (a availabilityTest) VerifyAvailable(replica string, _ archive.Request, _ [32]byte) error {
+	if replica == a.lost {
+		return ErrUnavailable
+	}
+	return nil
+}
+func materialFor(height uint64) *archive.Record {
+	return &archive.Record{Header: []byte{0xc1, byte(height)}, Body: []byte("body"), CanonicalRootInput: []byte("input"), OriginalUC: []byte("ouc"), OriginalTR: []byte("otr"), ResultingUC: []byte("ruc"), ResultingTR: []byte("rtr"), Companion: []byte("companion"), ParentAccounting: []byte("accounting")}
+}
+func setSubject(r *Record, p Policy) *archive.Record {
+	m := materialFor(r.Height)
+	copy(r.Subject.BlockHash[:], crypto.Keccak256(m.Header))
+	r.StateRoot = [32]byte{}
+	r.StateRoot[0] = byte(r.Height - 1)
+	q, _ := archive.EncodeRequest(r.Subject)
+	d := sha256.Sum256(q)
+	md, _ := archive.ManifestDigest(r.Subject, m)
+	for i := range r.Acks {
+		r.Acks[i] = Acknowledgment{Replica: p.Replicas[i], RequestDigest: d, ManifestDigest: md}
+	}
+	return m
+}
 func fixture() (Record, Policy) {
 	var shard types.ShardID
 	if err := shard.UnmarshalText([]byte("0x0180")); err != nil {
@@ -25,15 +63,17 @@ func fixture() (Record, Policy) {
 	c.GenesisCommitment[0] = 4
 	c.EVMGenesisHash[0] = 5
 	r := Record{Sequence: 1, Round: 10, Height: 7, Subject: archive.Request{Context: c}}
-	r.StateRoot[0] = 6
-	r.Subject.BlockHash[0] = 7
-	p := Policy{Context: c, Replicas: [2]string{"replica-a", "replica-b"}}
-	q, _ := archive.EncodeRequest(r.Subject)
-	d := sha256.Sum256(q)
-	for i := range r.Acks {
-		r.Acks[i] = Acknowledgment{Replica: p.Replicas[i], RequestDigest: d, ManifestDigest: sha256.Sum256([]byte("manifest"))}
-	}
+	p := Policy{Context: c, Replicas: [2]string{"replica-a", "replica-b"}, Binding: bindingTest{}, Availability: availabilityTest{}}
+	setSubject(&r, p)
 	return r, p
+}
+func nextOf(base Record, p Policy) (Record, Coverage) {
+	r := base
+	r.Sequence++
+	r.Round++
+	r.Height++
+	m := setSubject(&r, p)
+	return r, Coverage{Anchor: r, Material: m}
 }
 func require(t *testing.T, got, want error) {
 	t.Helper()
@@ -43,10 +83,7 @@ func require(t *testing.T, got, want error) {
 }
 func TestAdvanceGates(t *testing.T) {
 	base, p := fixture()
-	next := base
-	next.Sequence = 2
-	next.Round = 11
-	next.Height = 8
+	next, covered := nextOf(base, p)
 	cases := []struct {
 		name   string
 		mutate func(*Record, *Policy)
@@ -62,7 +99,9 @@ func TestAdvanceGates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r, p2 := next, p
 			tc.mutate(&r, &p2)
-			_, err := PlanAdvance(&base, r, p2, nil)
+			c := covered
+			c.Anchor = r
+			_, err := PlanAdvance(&base, r, p2, []Coverage{c}, nil)
 			require(t, err, tc.want)
 		})
 	}
@@ -75,11 +114,11 @@ func TestAdvanceGates(t *testing.T) {
 		{"non-equivocation", Obligation{Round: 11, NonEquivocation: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := PlanAdvance(&base, next, p, []Obligation{tc.o})
+			_, err := PlanAdvance(&base, next, p, []Coverage{covered}, []Obligation{tc.o})
 			require(t, err, ErrObligation)
 		})
 	}
-	plan, err := PlanAdvance(&base, next, p, []Obligation{{Round: 12, UnresolvedBody: true}})
+	plan, err := PlanAdvance(&base, next, p, []Coverage{covered}, []Obligation{{Round: 12, UnresolvedBody: true}})
 	if err != nil || plan.PruneThrough != 11 {
 		t.Fatalf("plan: %+v %v", plan, err)
 	}
@@ -90,7 +129,7 @@ func TestCodecVectorAndRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const vector = "b0e6a8f028abc4abebf66995579481ec616248cc1811f118c56806ddda370459"
+	const vector = "f25807679c9911401db8cf9aae7971c9f039b95d85c8dc1f62f25aecac9e6b98"
 	sum := sha256.Sum256(wire)
 	if hex.EncodeToString(sum[:]) != vector {
 		t.Fatalf("vector: %x", sum)
@@ -198,5 +237,235 @@ func TestStoreRejectsCorruptStaleCopiedAndRegression(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = s.Load(p)
+	require(t, err, ErrInvalid)
+}
+
+func TestAdvanceIsolatedMonotonicAndCoverage(t *testing.T) {
+	base, p := fixture()
+	first, c1 := nextOf(base, p)
+	last, c2 := nextOf(first, p)
+	p.Binding = acceptBinding{}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Record)
+	}{
+		{"sequence", func(r *Record) { r.Sequence = base.Sequence }},
+		{"round", func(r *Record) { r.Round = base.Round }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := first
+			tc.mutate(&r)
+			c := c1
+			c.Anchor = r
+			_, err := PlanAdvance(&base, r, p, []Coverage{c}, nil)
+			require(t, err, ErrStale)
+		})
+	}
+	t.Run("height", func(t *testing.T) {
+		r := base
+		r.Sequence++
+		r.Round++
+		_, err := PlanAdvance(&base, r, p, nil, nil)
+		require(t, err, ErrStale)
+	})
+	t.Run("missing-intermediate", func(t *testing.T) {
+		_, err := PlanAdvance(&base, last, p, []Coverage{c2}, nil)
+		require(t, err, ErrAcknowledgment)
+	})
+	t.Run("missing-all", func(t *testing.T) {
+		_, err := PlanAdvance(&base, first, p, nil, nil)
+		require(t, err, ErrAcknowledgment)
+	})
+	t.Run("covered-sequence", func(t *testing.T) {
+		r := last
+		r.Sequence = first.Sequence
+		c := c2
+		c.Anchor = r
+		_, err := PlanAdvance(&base, r, p, []Coverage{c1, c}, nil)
+		require(t, err, ErrAcknowledgment)
+	})
+	t.Run("covered-round", func(t *testing.T) {
+		r := last
+		r.Round = first.Round
+		c := c2
+		c.Anchor = r
+		_, err := PlanAdvance(&base, r, p, []Coverage{c1, c}, nil)
+		require(t, err, ErrAcknowledgment)
+	})
+	_, err := PlanAdvance(&base, last, p, []Coverage{c1, c2}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("manifest-binding", func(t *testing.T) {
+		wrong := c1
+		wrong.Anchor.Acks[0].ManifestDigest[0] ^= 1
+		wrong.Anchor.Acks[1].ManifestDigest = wrong.Anchor.Acks[0].ManifestDigest
+		_, err := PlanAdvance(&base, last, p, []Coverage{wrong, c2}, nil)
+		require(t, err, ErrAcknowledgment)
+	})
+	t.Run("certified-binding", func(t *testing.T) {
+		q := p
+		q.Binding = bindingTest{}
+		wrong := c1
+		wrong.Anchor.StateRoot[0] ^= 1
+		_, err := PlanAdvance(&base, last, q, []Coverage{wrong, c2}, nil)
+		require(t, err, ErrInvalid)
+	})
+	t.Run("replica-readback", func(t *testing.T) {
+		q := p
+		q.Availability = availabilityTest{lost: "replica-b"}
+		_, err := PlanAdvance(&base, last, q, []Coverage{c1, c2}, nil)
+		require(t, err, ErrAcknowledgment)
+	})
+}
+
+func TestConfiguredReplicasAndNames(t *testing.T) {
+	r, p := fixture()
+	for _, n := range []int{0, 65} {
+		name := "zero"
+		if n == 65 {
+			name = "65"
+		}
+		t.Run(name, func(t *testing.T) {
+			q := p
+			q.Replicas[0] = string(bytes.Repeat([]byte{'a'}, n))
+			r2 := r
+			r2.Acks[0].Replica = q.Replicas[0]
+			_, err := Encode(r2, q)
+			require(t, err, ErrContext)
+		})
+	}
+	t.Run("duplicate", func(t *testing.T) {
+		q := p
+		q.Replicas[1] = q.Replicas[0]
+		r.Acks[1].Replica = q.Replicas[1]
+		_, err := Encode(r, q)
+		require(t, err, ErrContext)
+	})
+}
+
+func TestStoreIsolatedRegressionsAndUnloadable(t *testing.T) {
+	base, p := fixture()
+	next, _ := nextOf(base, p)
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Record)
+	}{
+		{"sequence", func(r *Record) { r.Sequence = base.Sequence }},
+		{"round", func(r *Record) { r.Round = base.Round }},
+		{"height", func(r *Record) { r.Height = base.Height }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := Open(t.TempDir())
+			if e := s.Save(base, p); e != nil {
+				t.Fatal(e)
+			}
+			r := next
+			tc.mutate(&r)
+			require(t, s.Save(r, p), ErrStale)
+			got, e := s.Load(p)
+			if e != nil || got.Sequence != base.Sequence {
+				t.Fatalf("good frontier replaced: %v", e)
+			}
+		})
+	}
+	t.Run("unloadable", func(t *testing.T) {
+		s, _ := Open(t.TempDir())
+		if e := s.Save(base, p); e != nil {
+			t.Fatal(e)
+		}
+		wire, e := Encode(next, p)
+		if e != nil {
+			t.Fatal(e)
+		}
+		wire[len(wire)-1] ^= 1
+		require(t, s.saveEncoded(next, p, wire), ErrInvalid)
+		good, e := s.Load(p)
+		if e != nil || good.Sequence != base.Sequence {
+			t.Fatalf("unloadable replacement: %v", e)
+		}
+	})
+	s, _ := Open(t.TempDir())
+	if e := s.Save(base, p); e != nil {
+		t.Fatal(e)
+	}
+	var e error
+	q := p
+	q.Replicas[0] = string(bytes.Repeat([]byte{'x'}, 65))
+	r := next
+	r.Acks[0].Replica = q.Replicas[0]
+	require(t, s.Save(r, q), ErrContext)
+	got, e := s.Load(p)
+	if e != nil || got.Sequence != base.Sequence {
+		t.Fatalf("good frontier replaced: %v", e)
+	}
+}
+
+func TestCodecTrailingAndNoncanonical(t *testing.T) {
+	r, p := fixture()
+	wire, e := Encode(r, p)
+	if e != nil {
+		t.Fatal(e)
+	}
+	fixSum := func(b []byte) { sum := sha256.Sum256(b[:len(b)-32]); copy(b[len(b)-32:], sum[:]) }
+	t.Run("trailing", func(t *testing.T) {
+		trailing := append(bytes.Clone(wire[:len(wire)-32]), 0x99)
+		trailing = append(trailing, make([]byte, 32)...)
+		fixSum(trailing)
+		_, e := Decode(trailing, p)
+		require(t, e, ErrInvalid)
+	})
+	t.Run("noncanonical", func(t *testing.T) {
+		q, _ := archive.EncodeRequest(r.Subject)
+		nameAt := len(domain) + 1 + 24 + 32 + 4 + len(q)
+		bad := bytes.Clone(wire)
+		nameEnd := nameAt + 1 + int(bad[nameAt])
+		bad[nameAt]++
+		bad = append(bad[:nameEnd], append([]byte{0}, bad[nameEnd:]...)...)
+		fixSum(bad)
+		_, e := Decode(bad, p)
+		require(t, e, ErrInvalid)
+	})
+}
+
+func TestRecoveryOrderingAndReplicaLoss(t *testing.T) {
+	base, p := fixture()
+	next, covered := nextOf(base, p)
+	_, e := PlanAdvance(&base, next, p, []Coverage{covered}, nil)
+	if e != nil {
+		t.Fatal(e)
+	} // both acks first
+	s, _ := Open(t.TempDir())
+	if e = s.Save(base, p); e != nil {
+		t.Fatal(e)
+	}
+	// Crash after acknowledgements but before frontier write: old boundary remains.
+	got, e := s.Load(p)
+	if e != nil || got.Round != base.Round {
+		t.Fatalf("frontier moved before write: %v", e)
+	}
+	if e = s.Save(next, p); e != nil {
+		t.Fatal(e)
+	}
+	// Crash after frontier write but before prune: restart may prune idempotently.
+	got, e = s.Load(p)
+	if e != nil || got.Round != next.Round {
+		t.Fatalf("frontier write absent: %v", e)
+	}
+	if e = CheckRecovery(got, base.Round, p, covered); e != nil {
+		t.Fatal(e)
+	}
+	require(t, CheckRecovery(base, next.Round, p, Coverage{Anchor: base, Material: materialFor(base.Height)}), ErrStale)
+	p.Availability = availabilityTest{lost: "replica-b"}
+	require(t, CheckRecovery(got, next.Round, p, covered), ErrUnavailable)
+}
+
+func TestLoadRejectsOversizedFile(t *testing.T) {
+	_, p := fixture()
+	s, _ := Open(t.TempDir())
+	if err := os.WriteFile(filepath.Join(s.dir, "frontier"), bytes.Repeat([]byte{1}, MaxBytes+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.Load(p)
 	require(t, err, ErrInvalid)
 }

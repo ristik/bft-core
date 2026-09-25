@@ -28,7 +28,7 @@ var (
 
 const version byte = 1
 const domain = "M2FRONTIER"
-const MaxBytes = archive.MaxRequestBytes + 256
+const MaxBytes = archive.MaxRequestBytes + 512
 
 type Acknowledgment struct {
 	Replica        string
@@ -47,6 +47,27 @@ type Policy struct {
 	Context         archive.Context
 	Replicas        [2]string
 	MinimumSequence uint64 // authenticated lower bound supplied by the recovery owner
+	Binding         CertifiedBinding
+	Availability    ReplicaAvailability
+}
+
+// CertifiedBinding checks the claimed round, height, state root and block hash
+// against the header and resulting UC/TR in the canonical archive record.
+// The wired adapter must obtain its trust base independently of this record.
+type CertifiedBinding interface {
+	VerifyCertified(Record, *archive.Record) error
+}
+
+// ReplicaAvailability re-reads and verifies the named replica's complete
+// manifest and chunks for the exact request. It must compare the real manifest
+// digest to expected before returning; the caller cannot mint an ack locally.
+type ReplicaAvailability interface {
+	VerifyAvailable(replica string, request archive.Request, expected [32]byte) error
+}
+
+type Coverage struct {
+	Anchor   Record
+	Material *archive.Record
 }
 
 func subjectBytes(r Record) ([]byte, error) { return archive.EncodeRequest(r.Subject) }
@@ -67,7 +88,7 @@ func valid(r Record, p Policy) error {
 	if !equalContext(r.Subject.Context, p.Context) || !bytes.Equal(r.Subject.Context.ExecutionIdentity, p.Context.ExecutionIdentity) {
 		return ErrContext
 	}
-	if p.Replicas[0] == "" || p.Replicas[1] == "" || p.Replicas[0] == p.Replicas[1] || r.Acks[0].Replica != p.Replicas[0] || r.Acks[1].Replica != p.Replicas[1] {
+	if len(p.Replicas[0]) == 0 || len(p.Replicas[0]) > 64 || len(p.Replicas[1]) == 0 || len(p.Replicas[1]) > 64 || p.Replicas[0] == p.Replicas[1] || r.Acks[0].Replica != p.Replicas[0] || r.Acks[1].Replica != p.Replicas[1] {
 		return ErrContext
 	}
 	digest := sha256.Sum256(q)
@@ -156,18 +177,21 @@ func Decode(raw []byte, p Policy) (Record, error) {
 		}
 		name := make([]byte, length)
 		_, _ = io.ReadFull(r, name)
-		out.Acks[i].Replica = string(name)
+		// Transport padding is normalized here; the canonical re-encode check
+		// below rejects it because Encode never writes padded names.
+		out.Acks[i].Replica = string(bytes.TrimRight(name, "\x00"))
 		_, _ = io.ReadFull(r, out.Acks[i].RequestDigest[:])
 		_, _ = io.ReadFull(r, out.Acks[i].ManifestDigest[:])
 	}
-	if r.Len() != 0 {
+	remaining := r.Len()
+	if remaining != 0 {
 		return Record{}, ErrInvalid
 	}
 	if err = valid(out, p); err != nil {
 		return Record{}, err
 	}
 	again, _ := Encode(out, p)
-	if !bytes.Equal(payload[len(domain)+1:], again[len(domain)+1:len(again)-32]) {
+	if !bytes.Equal(payload[len(domain)+1:len(payload)-remaining], again[len(domain)+1:len(again)-32]) {
 		return Record{}, ErrInvalid
 	}
 	return out, nil
@@ -184,7 +208,7 @@ type Plan struct {
 
 // PlanAdvance only returns a deletion boundary. The journal owner must perform
 // any later transition atomically with its own certified progress state.
-func PlanAdvance(current *Record, next Record, p Policy, obligations []Obligation) (Plan, error) {
+func PlanAdvance(current *Record, next Record, p Policy, covered []Coverage, obligations []Obligation) (Plan, error) {
 	if err := valid(next, p); err != nil {
 		return Plan{}, err
 	}
@@ -196,12 +220,66 @@ func PlanAdvance(current *Record, next Record, p Policy, obligations []Obligatio
 			return Plan{}, ErrStale
 		}
 	}
+	if current == nil || p.Binding == nil || p.Availability == nil || (len(covered) == 0 && next.Height > current.Height) {
+		return Plan{}, ErrAcknowledgment
+	}
+	previous := *current
+	for i, item := range covered {
+		r := item.Anchor
+		if err := valid(r, p); err != nil {
+			return Plan{}, err
+		}
+		if r.Height != previous.Height+1 || (i > 0 && (r.Round <= previous.Round || r.Sequence <= previous.Sequence)) || (i < len(covered)-1 && (r.Round <= previous.Round || r.Round >= next.Round || r.Sequence <= previous.Sequence || r.Sequence >= next.Sequence)) {
+			return Plan{}, ErrAcknowledgment
+		}
+		digest, err := archive.ManifestDigest(r.Subject, item.Material)
+		if err != nil || digest != r.Acks[0].ManifestDigest || digest != r.Acks[1].ManifestDigest {
+			return Plan{}, ErrAcknowledgment
+		}
+		if p.Binding.VerifyCertified(r, item.Material) != nil {
+			return Plan{}, ErrInvalid
+		}
+		for _, ack := range r.Acks {
+			if p.Availability.VerifyAvailable(ack.Replica, r.Subject, digest) != nil {
+				return Plan{}, ErrAcknowledgment
+			}
+		}
+		previous = r
+	}
+	if len(covered) > 0 && (previous.Round != next.Round || previous.Height != next.Height || previous.Sequence != next.Sequence || previous.Subject.BlockHash != next.Subject.BlockHash || previous.StateRoot != next.StateRoot) {
+		return Plan{}, ErrAcknowledgment
+	}
 	for _, o := range obligations {
 		if o.Round <= next.Round && (o.UnresolvedBody || o.PendingAuthorization || o.NonEquivocation) {
 			return Plan{}, ErrObligation
 		}
 	}
 	return Plan{Next: next, PruneThrough: next.Round}, nil
+}
+
+// CheckRecovery refuses a rolled-back frontier and re-reads both replica
+// copies. A wired journal supplies its prune floor from the same transaction
+// that made pruning durable. Loss of either copy halts further advancement.
+func CheckRecovery(durable Record, journalPrunedThrough uint64, p Policy, anchor Coverage) error {
+	if durable.Round < journalPrunedThrough {
+		return ErrStale
+	}
+	if err := valid(durable, p); err != nil {
+		return err
+	}
+	if anchor.Anchor.Round != durable.Round || anchor.Anchor.Subject.BlockHash != durable.Subject.BlockHash || p.Binding == nil || p.Availability == nil {
+		return ErrInvalid
+	}
+	digest, err := archive.ManifestDigest(durable.Subject, anchor.Material)
+	if err != nil || digest != durable.Acks[0].ManifestDigest || digest != durable.Acks[1].ManifestDigest || p.Binding.VerifyCertified(durable, anchor.Material) != nil {
+		return ErrInvalid
+	}
+	for _, ack := range durable.Acks {
+		if p.Availability.VerifyAvailable(ack.Replica, durable.Subject, digest) != nil {
+			return ErrUnavailable
+		}
+	}
+	return nil
 }
 
 type Store struct {
@@ -223,12 +301,22 @@ func (s *Store) at(step string) error {
 	return nil
 }
 func (s *Store) Load(p Policy) (Record, error) {
-	raw, err := os.ReadFile(filepath.Join(s.dir, "frontier"))
+	path := filepath.Join(s.dir, "frontier")
+	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return Record{}, ErrUnavailable
 	}
 	if err != nil {
 		return Record{}, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() || st.Size() > MaxBytes {
+		return Record{}, ErrInvalid
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, MaxBytes+1))
+	if err != nil || len(raw) > MaxBytes {
+		return Record{}, ErrInvalid
 	}
 	return Decode(raw, p)
 }
@@ -240,6 +328,15 @@ func (s *Store) Save(next Record, p Policy) error {
 	defer s.mu.Unlock()
 	raw, err := Encode(next, p)
 	if err != nil {
+		return err
+	}
+	return s.saveEncoded(next, p, raw)
+}
+
+// saveEncoded is split out so an unloadable encoder result can be fault-tested
+// before it reaches the atomic replacement path. Caller holds s.mu.
+func (s *Store) saveEncoded(next Record, p Policy, raw []byte) error {
+	if _, err := Decode(raw, p); err != nil {
 		return err
 	}
 	old, e := s.Load(p)

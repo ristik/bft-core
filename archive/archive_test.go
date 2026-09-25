@@ -30,6 +30,33 @@ func fixture() (Request, *Record) {
 	return q, r
 }
 
+func TestManifestDigestMatchesPublishedManifest(t *testing.T) {
+	q, r := fixture()
+	want, err := ManifestDigest(q, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Put(q, r); err != nil {
+		t.Fatal(err)
+	}
+	loc, err := location(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := os.ReadFile(filepath.Join(s.dir, loc, "manifest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sha256.Sum256(manifest[:len(manifest)-32])
+	if got != want || !bytes.Equal(got[:], manifest[len(manifest)-32:]) {
+		t.Fatal("published manifest differs")
+	}
+}
+
 func TestAtomicPublicationAndFault(t *testing.T) {
 	q, r := fixture()
 	s, err := Open(t.TempDir())
