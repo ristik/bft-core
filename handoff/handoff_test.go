@@ -77,6 +77,14 @@ func want(t *testing.T, e, target error) {
 	}
 }
 
+// Model snapshots exercise the contract in unit tests. Runtime admission uses
+// storage.RecoveryHandoffSnapshot and the production UnicityTree calculation.
+type modelSnapshot evmroot.FullSnapshot
+
+func (s modelSnapshot) VerifyHandoffSnapshot(v evmroot.VerifiedHandoff) error {
+	return evmroot.CanBootstrapNew(v, evmroot.EpochGenesis{Root: v.Root, RecordID: v.RecordID, Epoch: v.Epoch + 1, Start: v.Record.ActivationRound}, evmroot.FullSnapshot(s))
+}
+
 type setup struct {
 	m        *Machine
 	old      *verifier
@@ -134,7 +142,7 @@ func (s setup) finalized(t *testing.T) { t.Helper(); s.commitStep(t); must(t, s.
 func (s setup) bootstrapped(t *testing.T) {
 	t.Helper()
 	s.finalized(t)
-	must(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot))
+	must(t, s.m.Bootstrap(s.verified, s.body, s.genesis, modelSnapshot(s.snapshot)))
 }
 
 func TestCommitRecordIDBindsOrderRound(t *testing.T) {
@@ -263,7 +271,7 @@ func TestBootstrapCanonicalFields(t *testing.T) {
 			s := fixture(t)
 			s.finalized(t)
 			tc.change(&s)
-			want(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot), ErrProof)
+			want(t, s.m.Bootstrap(s.verified, s.body, s.genesis, modelSnapshot(s.snapshot)), ErrProof)
 			if s.m.Genesis != nil {
 				t.Fatal("invalid genesis installed")
 			}
@@ -287,7 +295,7 @@ func TestBootstrapMachineBindings(t *testing.T) {
 			if s.m.bootstrapMachineFields(s.verified, s.genesis) {
 				t.Fatal("changed machine field accepted")
 			}
-			want(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot), ErrProof)
+			want(t, s.m.Bootstrap(s.verified, s.body, s.genesis, modelSnapshot(s.snapshot)), ErrProof)
 		})
 	}
 }
@@ -295,10 +303,10 @@ func TestBootstrapMachineBindings(t *testing.T) {
 func TestBootstrapInstallOnce(t *testing.T) {
 	s := fixture(t)
 	s.finalized(t)
-	must(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot))
-	must(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot))
+	must(t, s.m.Bootstrap(s.verified, s.body, s.genesis, modelSnapshot(s.snapshot)))
+	must(t, s.m.Bootstrap(s.verified, s.body, s.genesis, modelSnapshot(s.snapshot)))
 	must(t, s.m.Activate(s.commit.Activation))
-	want(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot), ErrProof)
+	want(t, s.m.Bootstrap(s.verified, s.body, s.genesis, modelSnapshot(s.snapshot)), ErrProof)
 }
 
 func TestControlPartitionRefusedByContextCodecs(t *testing.T) {
@@ -342,11 +350,11 @@ func TestBootstrapRequiresVerifiedGenesisAndSnapshot(t *testing.T) {
 	want(t, s.m.Activate(10), ErrProof)
 	g := s.genesis
 	g.Start++
-	want(t, s.m.Bootstrap(s.verified, s.body, g, s.snapshot), ErrProof)
+	want(t, s.m.Bootstrap(s.verified, s.body, g, modelSnapshot(s.snapshot)), ErrProof)
 	bad := s.snapshot
 	bad.Control.OrderedRound++
-	want(t, s.m.Bootstrap(s.verified, s.body, s.genesis, bad), ErrProof)
-	must(t, s.m.Bootstrap(s.verified, s.body, s.genesis, s.snapshot))
+	want(t, s.m.Bootstrap(s.verified, s.body, s.genesis, modelSnapshot(bad)), ErrProof)
+	must(t, s.m.Bootstrap(s.verified, s.body, s.genesis, modelSnapshot(s.snapshot)))
 	must(t, s.m.Activate(10))
 	if !s.m.Authorized(10) || s.m.Authorized(9) {
 		t.Fatal("wrong activation authority")
