@@ -376,3 +376,20 @@ func TestPinnedRethAgreesWithFundedGenesis(t *testing.T) {
 	require.Equal(t, "0x6001600055", v.Accounts[contract1].Code)
 	require.Equal(t, common.HexToHash("0x2").Hex(), v.Accounts[contract1].Storage[common.HexToHash("0x1").Hex()])
 }
+
+// The M2 vector binds the real legacy config identity without changing its bytes.
+func TestM2LegacyConfigVectorPin(t *testing.T) {
+	raw, err := os.ReadFile("../m2contract/testdata/vectors.json")
+	require.NoError(t, err)
+	var vector struct {
+		LegacyFixture struct {
+			ExecutionConfigIdentity string `json:"executionConfigIdentity"`
+			GenesisOriginIdentity   string `json:"genesisOriginIdentity"`
+		} `json:"legacyFixture"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &vector))
+	id, err := executionConfigIdentity(1337)
+	require.NoError(t, err)
+	require.Equal(t, strings.TrimPrefix(id.Hex(), "0x"), vector.LegacyFixture.ExecutionConfigIdentity)
+	require.Equal(t, strings.TrimPrefix(prepareFunded(t).Origin().Identity().Hex(), "0x"), vector.LegacyFixture.GenesisOriginIdentity)
+}
