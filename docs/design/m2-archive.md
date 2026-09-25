@@ -22,11 +22,22 @@ TODO (WP1): answer whether the canonical identity bytes commit to the trust
 set and its version; align this context with the trust binding in `rootinput/v2.go`.
 
 A record retains the raw header and body, canonical root input, original UC/TR,
-resulting UC/TR, companion, and parent accounting. The original pair derives the
+resulting UC/TR, and companion. The version 1 parent-accounting slot is present
+with zero length; a later schema may carry it. The original pair derives the
 block's root input; the resulting pair certifies the block hash and state root
-(see [D2-A](d2a-execution-journal.md)). All nine fields are required, nonempty
-chunks. Versioned extensions can later carry proofs and transition material.
+(see [D2-A](d2a-execution-journal.md)). All nine slots are present; eight are
+nonempty and parent accounting is empty in version 1. Versioned extensions can
+later carry proofs and transition material.
 This version does not interpret extensions or certify the retained bytes.
+
+The execution client's parent accounting is reproduced by contiguous checked
+seal-import replay: the payload and authenticated seal companion execute on the
+exact certified parent state, using that parent's checked accounting token. The
+configured genesis supplies the initial zero-system-gas token. A snapshot restore
+starts with the parent accounting token from the independently authenticated
+execution-client snapshot (H4 scope), then replays forward. Neither a header nor
+an archive response alone establishes the gas split. A missing token is
+unavailable and blocks import until its predecessor is restored or replayed.
 
 ## Publication and durability
 
@@ -85,7 +96,7 @@ by the inert store.
 The consumer starts with independently authenticated context, target hash,
 certificate/trust history, and continuity anchor. It checks the exact response
 echo, then re-verifies header, root input, original and resulting UC/TR roles,
-companion, parent accounting and any required state witness against those local
+companion and any required state witness against those local
 pins. It must derive the header hash and state root from evidence, check the
 resulting certificate's association, and reject missing or substituted evidence.
 It cannot adopt a provider's stated trust set, checkpoint, freshness, or

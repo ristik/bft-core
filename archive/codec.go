@@ -86,7 +86,7 @@ type Response struct {
 type Record struct {
 	Header, Body, CanonicalRootInput                 []byte
 	OriginalUC, OriginalTR, ResultingUC, ResultingTR []byte
-	Companion, ParentAccounting                      []byte
+	Companion, ParentAccounting                      []byte // ParentAccounting is empty in version 1.
 	// Reserved for future versioned proof/export material. Not interpreted here.
 	Extensions map[string][]byte
 }
@@ -212,7 +212,13 @@ func validRecord(rec *Record) bool {
 		return false
 	}
 	total := 0
-	for _, v := range fields(rec) {
+	for name, v := range fields(rec) {
+		if name == "parent-accounting" {
+			if len(v) != 0 {
+				return false
+			}
+			continue
+		}
 		if len(v) == 0 || len(v) > MaxChunkBytes {
 			return false
 		}

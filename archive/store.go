@@ -300,7 +300,7 @@ func (s *Store) get(q Request) (*Record, error) {
 		k := string(kb)
 		last = k
 		var size uint32
-		if e = binaryRead32(r, &size); e != nil || size == 0 || size > MaxChunkBytes {
+		if e = binaryRead32(r, &size); e != nil || size > MaxChunkBytes || (size == 0 && k != "parent-accounting") || (size != 0 && k == "parent-accounting") {
 			return nil, ErrCorrupt
 		}
 		var hash [32]byte

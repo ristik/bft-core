@@ -36,7 +36,7 @@ func (a availabilityTest) VerifyAvailable(replica string, _ archive.Request, _ [
 	return nil
 }
 func materialFor(height uint64) *archive.Record {
-	return &archive.Record{Header: []byte{0xc1, byte(height)}, Body: []byte("body"), CanonicalRootInput: []byte("input"), OriginalUC: []byte("ouc"), OriginalTR: []byte("otr"), ResultingUC: []byte("ruc"), ResultingTR: []byte("rtr"), Companion: []byte("companion"), ParentAccounting: []byte("accounting")}
+	return &archive.Record{Header: []byte{0xc1, byte(height)}, Body: []byte("body"), CanonicalRootInput: []byte("input"), OriginalUC: []byte("ouc"), OriginalTR: []byte("otr"), ResultingUC: []byte("ruc"), ResultingTR: []byte("rtr"), Companion: []byte("companion")}
 }
 func setSubject(r *Record, p Policy) *archive.Record {
 	m := materialFor(r.Height)
@@ -129,7 +129,7 @@ func TestCodecVectorAndRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const vector = "f25807679c9911401db8cf9aae7971c9f039b95d85c8dc1f62f25aecac9e6b98"
+	const vector = "65a1a16edcf3bdc3cec340594b92a899a55c113ae09766b800c2c8308d58f6f9"
 	sum := sha256.Sum256(wire)
 	if hex.EncodeToString(sum[:]) != vector {
 		t.Fatalf("vector: %x", sum)

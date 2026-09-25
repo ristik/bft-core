@@ -15,7 +15,7 @@ import (
 )
 
 func fixture() (Request, *Record) {
-	r := &Record{Header: []byte{0xc1, 0x80}, Body: []byte("body"), CanonicalRootInput: []byte("input"), OriginalUC: []byte("ouc"), OriginalTR: []byte("otr"), ResultingUC: []byte("ruc"), ResultingTR: []byte("rtr"), Companion: []byte("companion"), ParentAccounting: []byte("accounting"), Extensions: map[string][]byte{"future-proof": []byte("proof")}}
+	r := &Record{Header: []byte{0xc1, 0x80}, Body: []byte("body"), CanonicalRootInput: []byte("input"), OriginalUC: []byte("ouc"), OriginalTR: []byte("otr"), ResultingUC: []byte("ruc"), ResultingTR: []byte("rtr"), Companion: []byte("companion"), Extensions: map[string][]byte{"future-proof": []byte("proof")}}
 	var shard types.ShardID
 	if err := shard.UnmarshalText([]byte("0x010203040580")); err != nil {
 		panic(err)
@@ -148,7 +148,7 @@ func TestCodecVectorAndBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest = sha256.Sum256(w)
-	const responseSHA = "1ff29ae4ed96986375fd84e2ec7ad82acd107ec193a0d6746e41b07e2e6628a3"
+	const responseSHA = "e9a51ddba76de1ddb53d1e443aa10ff0d89379e57acbccf9935c96074a65666f"
 	if hex.EncodeToString(digest[:]) != responseSHA {
 		t.Fatalf("response vector: %x", digest)
 	}
@@ -186,6 +186,39 @@ func TestCodecVectorAndBounds(t *testing.T) {
 	}
 	if _, err = DecodeResponse(make([]byte, MaxWireBytes+1)); !errors.Is(err, ErrInvalid) {
 		t.Fatal("oversize response")
+	}
+}
+
+func TestVersionOneAccountingSlotIsEmptyAndRequired(t *testing.T) {
+	q, rec := fixture()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.ParentAccounting = []byte("invented")
+	if _, err := EncodeResponse(Response{q, OK, rec}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nonempty accounting slot encoded: %v", err)
+	}
+	if err := store.Put(q, rec); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("nonempty accounting slot published: %v", err)
+	}
+	rec.ParentAccounting = nil
+	if err := store.Put(q, rec); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(q)
+	if err != nil || len(got.ParentAccounting) != 0 {
+		t.Fatalf("empty accounting slot did not round trip: %v", err)
+	}
+	loc, err := location(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(store.dir, loc, fileName("parent-accounting"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(q); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("missing accounting slot accepted: %v", err)
 	}
 }
 
