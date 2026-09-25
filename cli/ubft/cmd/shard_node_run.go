@@ -31,6 +31,7 @@ import (
 	"github.com/unicitynetwork/bft-core/configuredadmission"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
 	"github.com/unicitynetwork/bft-core/engineapi"
+	"github.com/unicitynetwork/bft-core/keyvaluedb/boltdb"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
@@ -222,10 +223,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if len(trustBases) != 1 {
 		return fmt.Errorf("shard-node run requires exactly one --trust-base, got %d", len(trustBases))
 	}
-	trustBaseStore, err := shardnode.NewFileTrustBaseStore(trustBases[0], flags.observe.Logger())
+	initialTrustStore, err := shardnode.NewFileTrustBaseStore(trustBases[0], flags.observe.Logger())
 	if err != nil {
 		return fmt.Errorf("creating trust base store: %w", err)
 	}
+	var trustBaseStore shardnode.TrustBaseStore = initialTrustStore
 
 	bootNodes, err := getBootStrapNodes(flags.BootstrapAddresses)
 	if err != nil {
@@ -304,6 +306,27 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if closer, ok := executor.(interface{ Close() }); ok {
 		defer closer.Close()
 	}
+	var executionID [32]byte
+	if flags.ExecutionJournal != "" {
+		adapter, ok := executor.(*engineapi.Adapter)
+		if !ok || !origin.Valid() {
+			return errors.New("execution journal requires a checked engine-api executor and genesis origin")
+		}
+		executionID, err = adapter.CheckedExecutionConfigIdentity(ctx, [32]byte(origin.ExecutionConfigIdentity()))
+		if err != nil {
+			return fmt.Errorf("binding checked companion execution identity: %w", err)
+		}
+		historyDB, openErr := boltdb.New(flags.ExecutionJournal + ".trust")
+		if openErr != nil {
+			return fmt.Errorf("opening historical trust store: %w", openErr)
+		}
+		defer historyDB.Close()
+		historical, openErr := shardnode.NewHistoricalTrustBaseStore(ctx, historyDB, trustBases[0], executionID, nil)
+		if openErr != nil {
+			return fmt.Errorf("verifying historical trust store: %w", openErr)
+		}
+		trustBaseStore = historical
+	}
 	if origin.Valid() && flags.Executor == "engine-api" {
 		// The agreed genesis hash: buildExecutor has just required the paired client's block 0 to equal
 		// origin.BlockHash(), so this line reports a value the configuration and the client agree on.
@@ -373,7 +396,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		defer journalStore.Close()
 		recordCtx := certifiedstore.Context{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, FullShardConfHash: confHash, Registry: origin.ProofContext(), TrustBases: trustBaseStore}
-		journalCtx := configuredprogress.Context{Origin: origin, Observation: rootinput.ObservationContextV2{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, ShardConfHash: confHash, RootEpoch: trustBases[0].GetEpoch(), TrustBases: trustBaseStore}, Record: recordCtx}
+		journalCtx := configuredprogress.Context{Origin: origin, ExecutionConfigV2: executionID, Observation: rootinput.ObservationContextV2{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, ShardConfHash: confHash, RootEpoch: trustBases[0].GetEpoch(), TrustBases: trustBaseStore}, Record: recordCtx}
 		if _, _, openErr = journalStore.Initialize(ctx, journalCtx); openErr != nil {
 			return fmt.Errorf("initializing execution journal: %w", openErr)
 		}

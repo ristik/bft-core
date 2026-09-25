@@ -52,7 +52,8 @@ type WeightSet []Member
 
 // errEmptyAssignment etc. surface validation failures with a stable reason.
 var (
-	errEmptyAssignment = errors.New("evmroot: empty validator assignment")
+	errEmptyAssignment       = errors.New("evmroot: empty validator assignment")
+	ErrDuplicateConsensusKey = errors.New("evmroot: consensus key shared with another member")
 )
 
 // Validate checks structural well-formedness: non-empty; unique NodeID,
@@ -80,7 +81,7 @@ func (ws WeightSet) Validate() error {
 			return fmt.Errorf("evmroot: duplicate StakingID %q", m.StakingID)
 		}
 		if _, dup := keys[string(m.ConsensusKey)]; dup {
-			return fmt.Errorf("evmroot: consensus key of %q is shared with another member", m.NodeID)
+			return fmt.Errorf("%w: %q", ErrDuplicateConsensusKey, m.NodeID)
 		}
 		nodeIDs[m.NodeID] = struct{}{}
 		stakingIDs[m.StakingID] = struct{}{}

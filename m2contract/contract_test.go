@@ -19,12 +19,12 @@ type oracleEncoded struct {
 	Identity string `json:"identity"`
 }
 type oracle struct {
-	FirstPredecessor                                     string `json:"firstPredecessor"`
-	Body, Body2, Interval, OpenInterval                  oracleEncoded
-	ExecutionConfig, ChangedFeeProfile, ChangedCollector oracleEncoded
-	QuorumSubsets                                        [][]string `json:"quorumSubsets"`
-	InputMemberOrder                                     []string   `json:"inputMemberOrder"`
-	LegacyFixture                                        struct {
+	FirstPredecessor                                              string `json:"firstPredecessor"`
+	Body, Body2, Interval, OpenInterval, OpenAnchor, ClosedAnchor oracleEncoded
+	ExecutionConfig, ChangedFeeProfile, ChangedCollector          oracleEncoded
+	QuorumSubsets                                                 [][]string `json:"quorumSubsets"`
+	InputMemberOrder                                              []string   `json:"inputMemberOrder"`
+	LegacyFixture                                                 struct {
 		ExecutionConfigIdentity string `json:"executionConfigIdentity"`
 		GenesisOriginIdentity   string `json:"genesisOriginIdentity"`
 	} `json:"legacyFixture"`
@@ -127,6 +127,38 @@ func TestMemberPermutationStable(t *testing.T) {
 		t.Fatal("permuted members changed canonical body")
 	}
 }
+func TestV1AnchorEncodingVectors(t *testing.T) {
+	v, h := fixture(t), history(t)
+	for _, tc := range []struct {
+		name string
+		end  uint64
+		want oracleEncoded
+	}{{"open", 0, v.OpenAnchor}, {"closed", 120, v.ClosedAnchor}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := V1AnchorRecord{Anchor: h.Anchor, Start: 0, End: tc.end}
+			raw, err := r.Encode()
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := sha256.Sum256(raw)
+			if !bytes.Equal(raw, unhex(t, tc.want.CBOR)) || !bytes.Equal(id[:], unhex(t, tc.want.Identity)) {
+				t.Fatal("anchor differs from independent oracle")
+			}
+		})
+	}
+	h.Intervals = nil
+	h.AnchorEnd = 0
+	if err := h.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := h.At(1000000); err != nil || got != 4 {
+		t.Fatalf("open anchor: %d, %v", got, err)
+	}
+	h.Intervals = history(t).Intervals
+	if err := h.Validate(); !errors.Is(err, ErrAnchor) {
+		t.Fatalf("open anchor with successor: %v", err)
+	}
+}
 func TestIntervalEncodingVectors(t *testing.T) {
 	v, h := fixture(t), history(t)
 	for _, tc := range []struct {
@@ -179,7 +211,7 @@ func TestTrustHistoryRefusals(t *testing.T) {
 		{"empty finite interval", ErrIntervalBounds, "", func(h *TrustHistory) { h.Intervals = h.Intervals[:1]; h.Intervals[0].End = 120 }},
 		{"overlap", ErrIntervalBounds, "", func(h *TrustHistory) { h.Intervals[0].End = 201 }},
 		{"gap", ErrIntervalBounds, "", func(h *TrustHistory) { h.Intervals[0].End = 199 }},
-		{"duplicate key", ErrBody, "consensus key", func(h *TrustHistory) {
+		{"duplicate key", ErrBody, "duplicate", func(h *TrustHistory) {
 			h.Intervals[0].Body.Members[1].ConsensusKey = bytes.Clone(h.Intervals[0].Body.Members[0].ConsensusKey)
 			relink(h, 0)
 		}},
