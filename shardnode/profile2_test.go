@@ -3,8 +3,10 @@ package shardnode
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -82,6 +84,68 @@ func TestProfile2MintedLateSuffixUC(t *testing.T) {
 	require.ErrorIs(t, err, ErrProfile2Epoch)
 }
 
+func TestProfile2OrdinaryRepeatBeforeKnownHandoff(t *testing.T) {
+	for _, orderedRound := range []uint64{0, 10} {
+		t.Run(fmt.Sprintf("ordered_%d", orderedRound), func(t *testing.T) {
+			_, old := profile2Proof(t, uc(1, 10, []byte{0}, []byte{1}, []byte{2}))
+			c, err := NewProfile2Consumer(filepath.Join(t.TempDir(), "consumer.json"), 1, old, orderedRound)
+			require.NoError(t, err)
+			prev := uc(1, 7, []byte{0}, []byte{1}, []byte{2})
+			prev.UnicitySeal.Epoch = 7
+			repeat := uc(1, 8, []byte{0}, []byte{1}, []byte{2})
+			repeat.UnicitySeal.Epoch = 7
+			class, err := c.Classify(prev, repeat)
+			require.NoError(t, err)
+			require.Equal(t, UCRepeat, class)
+		})
+	}
+}
+
+func TestProfile2NewEpochOrderingAndBoundary(t *testing.T) {
+	terminal := uc(1, 10, []byte{0}, []byte{1}, []byte{2})
+	terminal.UnicitySeal.Epoch = 7
+	proof, old := profile2Proof(t, terminal)
+	root, err := proof.Snapshot.Root()
+	require.NoError(t, err)
+	c, err := NewProfile2Consumer(filepath.Join(t.TempDir(), "consumer.json"), 1, old, 10)
+	require.NoError(t, err)
+	require.NoError(t, c.Install(proof))
+	require.NoError(t, c.SetReady())
+
+	otherIR := uc(1, 100, []byte{0}, []byte{9}, []byte{2})
+	otherIR.UnicitySeal.Epoch, otherIR.UnicitySeal.Hash = 7, root
+	_, err = c.Classify(terminal, otherIR)
+	require.ErrorIs(t, err, ErrProfile2Epoch)
+	belowOrder := uc(1, 9, []byte{0}, []byte{1}, []byte{2})
+	belowOrder.UnicitySeal.Epoch, belowOrder.UnicitySeal.Hash = 7, root
+	_, err = c.Classify(terminal, belowOrder)
+	require.ErrorIs(t, err, ErrProfile2Epoch)
+
+	below := uc(0, 13, []byte{0}, []byte{1}, []byte{2})
+	below.UnicitySeal.Epoch = 8
+	_, err = c.Classify(terminal, below)
+	require.ErrorIs(t, err, ErrImpossibleUCOrder)
+	atBoundary := uc(1, 13, []byte{0}, []byte{9}, []byte{2})
+	atBoundary.UnicitySeal.Epoch = 8
+	_, err = c.Classify(terminal, atBoundary)
+	require.ErrorIs(t, err, ErrEquivocatingUC)
+
+	held := uc(3, 15, []byte{3}, []byte{4}, []byte{5})
+	held.UnicitySeal.Epoch = 8
+	older := uc(2, 14, []byte{1}, []byte{3}, []byte{4})
+	older.UnicitySeal.Epoch = 8
+	class, err := c.Classify(held, older)
+	require.NoError(t, err)
+	require.Equal(t, UCStale, class)
+	class, err = c.Classify(held, held)
+	require.NoError(t, err)
+	require.Equal(t, UCDuplicate, class)
+	conflict := uc(3, 16, []byte{3}, []byte{8}, []byte{5})
+	conflict.UnicitySeal.Epoch = 8
+	_, err = c.Classify(held, conflict)
+	require.ErrorIs(t, err, ErrEquivocatingUC)
+}
+
 func TestProfile2ProofAndContinuityGuards(t *testing.T) {
 	terminal := uc(1, 10, []byte{0}, []byte{1}, []byte{2})
 	terminal.UnicitySeal.Epoch = 7
@@ -141,6 +205,66 @@ func TestProfile2ProofAndContinuityGuards(t *testing.T) {
 			_, err := NewProfile2Consumer(badPath, 1, old, 10)
 			require.ErrorIs(t, err, ErrProfile2Epoch)
 		})
+	}
+}
+
+func TestProfile2ReloadAndInstallBindings(t *testing.T) {
+	terminal := uc(1, 10, []byte{0}, []byte{1}, []byte{2})
+	terminal.UnicitySeal.Epoch = 7
+	proof, old := profile2Proof(t, terminal)
+	path := filepath.Join(t.TempDir(), "consumer.json")
+	c, err := NewProfile2Consumer(path, 1, old, 10)
+	require.NoError(t, err)
+	require.NoError(t, c.Install(proof))
+	_, err = NewProfile2Consumer(path, 1, old, 11)
+	require.ErrorIs(t, err, ErrProfile2Epoch)
+	_, err = NewProfile2Consumer(path, 2, old, 10)
+	require.ErrorIs(t, err, ErrProfile2Epoch)
+
+	wrongOrder, err := NewProfile2Consumer(filepath.Join(t.TempDir(), "order.json"), 1, old, 11)
+	require.NoError(t, err)
+	require.ErrorIs(t, wrongOrder.Install(proof), ErrProfile2Epoch)
+	wrongPartition, err := NewProfile2Consumer(filepath.Join(t.TempDir(), "partition.json"), 2, old, 10)
+	require.NoError(t, err)
+	require.ErrorIs(t, wrongPartition.Install(proof), ErrProfile2Epoch)
+
+	var second evmroot.HandoffProof
+	require.NoError(t, json.Unmarshal(mustJSON(t, proof), &second))
+	second.Record.SuccessorTRHash[0] ^= 1
+	second.Control.RecordBytes = second.Record.Bytes()
+	second.Snapshot.Control = second.Control
+	root, err := second.Snapshot.Root()
+	require.NoError(t, err)
+	second.ControlPath, err = second.Snapshot.ControlPath()
+	require.NoError(t, err)
+	second.CommitQC.Vote.CurrentRoot = root
+	second.CommitQC.Seal.Commit.Root = root
+	_, keys := evmroot.D4FixtureTrustBase(7, map[string]uint64{"a": 1, "b": 1, "c": 1, "d": 1})
+	evmroot.D4SignQC(&second.CommitQC, keys, "a", "b", "c")
+	require.ErrorIs(t, c.Install(second), ErrProfile2Epoch)
+	_, err = NewProfile2Consumer(path, 1, old, 10)
+	require.NoError(t, err, "a conflicting second proof must not overwrite the checkpoint")
+}
+
+func TestProfile2ConcurrentInstall(t *testing.T) {
+	terminal := uc(1, 10, []byte{0}, []byte{1}, []byte{2})
+	terminal.UnicitySeal.Epoch = 7
+	proof, old := profile2Proof(t, terminal)
+	c, err := NewProfile2Consumer(filepath.Join(t.TempDir(), "consumer.json"), 1, old, 10)
+	require.NoError(t, err)
+	var wg sync.WaitGroup
+	errors := make(chan error, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errors <- c.Install(proof)
+		}()
+	}
+	wg.Wait()
+	close(errors)
+	for err := range errors {
+		require.NoError(t, err)
 	}
 }
 

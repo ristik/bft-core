@@ -84,11 +84,11 @@ func (c *Profile2Consumer) Install(proof evmroot.HandoffProof) error {
 	if err != nil {
 		return err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if v.Epoch == ^uint64(0) || (c.orderedRound != 0 && c.orderedRound != v.OrderRound) || !hasProfile2Partition(v, c.partition) {
 		return ErrProfile2Epoch
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.verified != nil {
 		if bytes.Equal(c.verified.RecordID, v.RecordID) {
 			return nil
@@ -164,7 +164,7 @@ func (c *Profile2Consumer) Classify(prev, next *types.UnicityCertificate) (UCCla
 		if prev != nil && next.GetRootEpoch() != prev.GetRootEpoch() {
 			return UCValid, ErrProfile2Unready
 		}
-		if prev != nil && (c.orderedRound == 0 || next.GetRootRoundNumber() >= c.orderedRound) && next.GetRootRoundNumber() > prev.GetRootRoundNumber() {
+		if prev != nil && c.orderedRound != 0 && next.GetRootRoundNumber() >= c.orderedRound && next.GetRootRoundNumber() > prev.GetRootRoundNumber() {
 			same, err := sameInputRecord(prev, next)
 			if err != nil {
 				return UCValid, err
