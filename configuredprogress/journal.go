@@ -724,12 +724,15 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 				if candidate.Candidate.AuthorizingUC.GetRootRoundNumber() == observed.UC.GetRootRoundNumber() && candidate.Candidate.AuthorizingUC.GetRoundNumber() == observed.UC.GetRoundNumber() && candidate.Candidate.AuthorizingTR.Round == observed.TR.Round {
 					foundAuthorization = true
 				}
-				if candidate.Certified && candidate.ResultingUC.GetRootRoundNumber() == observed.UC.GetRootRoundNumber() && candidate.ResultingUC.GetRoundNumber() == observed.UC.GetRoundNumber() && bytes.Equal(candidate.Candidate.Hash, observed.TargetHash) {
+				if candidate.Certified && candidate.Candidate.Round == observed.UC.InputRecord.RoundNumber && bytes.Equal(candidate.Candidate.Hash, observed.TargetHash) && bytes.Equal(candidate.Candidate.StateRoot, observed.UC.InputRecord.Hash) {
 					foundResult = true
 				}
 			}
 			if anchorUC != nil && candidate.Candidate.AuthorizingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.Candidate.AuthorizingUC.GetRoundNumber() == anchorUC.GetRoundNumber() {
 				foundAuthorization = true
+			}
+			if anchorUC != nil && candidate.Certified && candidate.ResultingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.ResultingUC.GetRoundNumber() == anchorUC.GetRoundNumber() && bytes.Equal(candidate.Candidate.Hash, anchorUC.InputRecord.BlockHash) {
+				foundResult = true
 			}
 			// A returning follower may retain a later proposal before it has
 			// fetched the authorizing certificate's own body/observation. The

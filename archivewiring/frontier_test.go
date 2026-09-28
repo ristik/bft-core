@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
+	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/frontier"
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
 	"github.com/unicitynetwork/bft-core/network"
@@ -76,7 +78,28 @@ func TestCertifiedBindingAuthenticatesArchiveRolesAndHeader(t *testing.T) {
 	badResult.ResultingTR, err = types.Cbor.Marshal(wrongTR)
 	require.NoError(t, err)
 	require.ErrorIs(t, v.VerifyCertified(r, &badResult), frontier.ErrInvalid)
+	// Both certificates authenticate individually, but two different input
+	// records at the same partition round are equivocation and cannot bind an
+	// archive record.
+	wrongOriginalIR := *f.entries[0].ResultingUC.InputRecord
+	wrongOriginalIR.Hash = bytes.Repeat([]byte{0x9a}, 32)
+	wrongOriginalIR.BlockHash = bytes.Repeat([]byte{0x9b}, 32)
+	wrongOriginal, wrongOriginalTR := signWiring(t, f.chain, &wrongOriginalIR, 1, r.Round-1)
 	bad := *record
+	bad.OriginalUC, err = types.Cbor.Marshal(wrongOriginal)
+	require.NoError(t, err)
+	bad.OriginalTR, err = types.Cbor.Marshal(wrongOriginalTR)
+	require.NoError(t, err)
+	var companion engineapi.SealCompanion
+	require.NoError(t, json.Unmarshal(bad.Companion, &companion))
+	companion.Witnesses[0], err = types.Cbor.Marshal(wrongOriginal)
+	require.NoError(t, err)
+	companion.Witnesses[1], err = types.Cbor.Marshal(wrongOriginalTR)
+	require.NoError(t, err)
+	bad.Companion, err = json.Marshal(companion)
+	require.NoError(t, err)
+	require.ErrorIs(t, v.VerifyCertified(r, &bad), frontier.ErrInvalid)
+	bad = *record
 	bad.OriginalUC = append([]byte(nil), record.ResultingUC...)
 	require.ErrorIs(t, v.VerifyCertified(r, &bad), frontier.ErrInvalid)
 	bad = *record
@@ -123,14 +146,78 @@ func TestFrontierJournalAdvancePruneAndRestart(t *testing.T) {
 	require.NotNil(t, image.Frontier)
 	require.EqualValues(t, 6, image.Frontier.Anchor.Height)
 	require.EqualValues(t, 6, image.Frontier.Floor)
-	require.Empty(t, image.Candidates)
+	require.Len(t, image.Candidates, 1)
+	require.Equal(t, image.Frontier.Anchor.Subject.BlockHash[:], image.Candidates[0].Candidate.Hash)
+	require.NotEmpty(t, image.Candidates[0].Candidate.Raw)
 	require.Empty(t, image.Observations)
-	oldQ, oldRec := f.record(t, 0)
+	var oldQ archive.Request
+	var oldRec *archive.Record
+	for i, entry := range f.entries {
+		if entry.Candidate.Number == 1 {
+			oldQ, oldRec = f.record(t, i)
+			break
+		}
+	}
+	require.NotNil(t, oldRec)
 	verify := JournalVerifier(f.store, f.context, f.limits, f.subject)
 	require.NoError(t, verify(context.Background(), oldQ, oldRec))
 	changed := *oldRec
 	changed.Body = append([]byte(nil), oldRec.Header...)
 	require.ErrorIs(t, verify(context.Background(), oldQ, &changed), ErrUncertified)
+}
+
+func TestFrontierPruneSweepKeepsTimeoutRepeatBodies(t *testing.T) {
+	f := newWiringFixtureWithTimeouts(t, 8)
+	local, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	first, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	second, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	for i := range f.entries {
+		q, rec := f.record(t, i)
+		for _, s := range []*archive.Store{local, first, second} {
+			require.NoError(t, s.Put(q, rec))
+		}
+	}
+	peers := [2]peer.ID{"first", "second"}
+	policy := frontier.Policy{Context: f.subject, Replicas: [2]string{peers[0].String(), peers[1].String()}, Binding: CertifiedBinding{Context: f.context, Subject: f.subject}, Availability: fixtureAvailability{stores: map[string]*archive.Store{peers[0].String(): first, peers[1].String(): second}}}
+	require.NoError(t, f.store.EnableFrontier(context.Background(), f.context, f.limits, policy))
+	worker := &FrontierWorker{Journal: f.store, Context: f.context, Limits: f.limits, Archive: local, Subject: f.subject, Replicas: peers}
+
+	for _, height := range []uint64{4, 8} {
+		require.NoError(t, worker.Pass(context.Background()))
+		image, err := f.store.LoadJournal(context.Background(), f.context, f.limits)
+		require.NoError(t, err)
+		require.Equal(t, height, image.Frontier.Anchor.Height)
+		require.NotEmpty(t, image.Candidates)
+		anchorFound := false
+		for _, candidate := range image.Candidates {
+			if bytes.Equal(candidate.Candidate.Hash, image.Frontier.Anchor.Subject.BlockHash[:]) {
+				anchorFound = true
+				require.NotEmpty(t, candidate.Candidate.Raw)
+			}
+		}
+		require.True(t, anchorFound, "frontier anchor body remains materialized")
+	}
+
+	var latest configuredprogress.JournalEntry
+	for _, entry := range f.entries {
+		if entry.Candidate.Number > latest.Candidate.Number {
+			latest = entry
+		}
+	}
+	last := latest.ResultingUC.InputRecord
+	continuedUC, continuedTR := signWiring(t, f.chain, last, latest.Candidate.Round+1, latest.ResultingUC.GetRootRoundNumber()+2)
+	continued, err := rootinput.AuthenticateObservationV2(context.Background(), f.context.Observation, continuedUC, continuedTR)
+	require.NoError(t, err)
+	p, outcome, err := f.store.PrepareObservation(context.Background(), f.context, continued)
+	require.NoError(t, err)
+	require.Equal(t, configuredprogress.ObservationRepeated, outcome)
+	_, _, err = f.store.CommitObservation(p)
+	require.NoError(t, err)
+	_, err = f.store.LoadJournal(context.Background(), f.context, f.limits)
+	require.NoError(t, err)
 }
 
 func TestFrontierPacedAuditRepairsPrunedReplica(t *testing.T) {
@@ -263,7 +350,9 @@ func TestFrontierPruneKeepsIndependentSigningRecord(t *testing.T) {
 	require.NoError(t, f.store.PruneFrontier(context.Background(), f.context, f.limits))
 	image, err := f.store.LoadJournal(context.Background(), f.context, f.limits)
 	require.NoError(t, err)
-	require.Empty(t, image.Candidates)
+	require.Len(t, image.Candidates, 1)
+	require.Equal(t, image.Frontier.Anchor.Subject.BlockHash[:], image.Candidates[0].Candidate.Hash)
+	require.NotEmpty(t, image.Candidates[0].Candidate.Raw)
 	require.True(t, authority.Status().ResponseRetained)
 	require.Equal(t, loser.Round, authority.Status().ReservedRound)
 	changed := *proposed
@@ -345,7 +434,7 @@ func TestFrontierLongRunPastJournalCapsAndReplicaLoss(t *testing.T) {
 	image, err = f.store.LoadJournal(context.Background(), f.context, limits)
 	require.NoError(t, err)
 	require.EqualValues(t, 516, image.Frontier.Anchor.Height)
-	require.Len(t, image.Candidates, 2)
+	require.Len(t, image.Candidates, 3)
 	for _, item := range pending {
 		availability.copies[peers[1].String()][item.Anchor.Subject.BlockHash] = item.Anchor.Acks[1].ManifestDigest
 	}
@@ -362,7 +451,9 @@ func TestFrontierLongRunPastJournalCapsAndReplicaLoss(t *testing.T) {
 	require.NoError(t, err)
 	restartTime := time.Since(start)
 	require.EqualValues(t, blocks, image.Frontier.Anchor.Height)
-	require.Empty(t, image.Candidates)
+	require.Len(t, image.Candidates, 1)
+	require.Equal(t, image.Frontier.Anchor.Subject.BlockHash[:], image.Candidates[0].Candidate.Hash)
+	require.NotEmpty(t, image.Candidates[0].Candidate.Raw)
 	require.Empty(t, image.Observations)
 	stat, err := os.Stat(f.path)
 	require.NoError(t, err)

@@ -154,7 +154,7 @@ func TestTwoInProcessReplicaReadbacksAndOneReplicaLoss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	availability := ReplicaAvailability{Context: context.Background(), Host: sender, Replicas: [2]peer.ID{first.ID(), second.ID()}, Limits: DefaultLimits()}
+	availability := ReplicaAvailability{Host: sender, Replicas: [2]peer.ID{first.ID(), second.ID()}, Limits: DefaultLimits()}
 	for _, id := range []peer.ID{first.ID(), second.ID()} {
 		if err := availability.VerifyAvailable(id.String(), q, digest); err != nil {
 			t.Fatalf("frontier read-back %s: %v", id, err)

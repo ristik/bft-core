@@ -377,7 +377,7 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 		if err != nil {
 			return err
 		}
-		if prior.Anchor == nil && current.Anchor != nil || prior.Anchor != nil && current.Anchor == nil || prior.Anchor != nil && prior.Anchor.Sequence != current.Anchor.Sequence {
+		if frontierSnapshotChanged(prior, current) {
 			return frontier.ErrStale
 		}
 		for _, item := range covered {
@@ -459,6 +459,42 @@ func checkPruneObligations(b *bolt.Bucket, throughRoot uint64) error {
 	return nil
 }
 
+func frontierSnapshotChanged(prior, current FrontierSnapshot) bool {
+	return prior.Anchor == nil && current.Anchor != nil ||
+		prior.Anchor != nil && current.Anchor == nil ||
+		prior.Anchor != nil && prior.Anchor.Sequence != current.Anchor.Sequence
+}
+
+func retainedObservationBodies(b *bolt.Bucket, anchorHash []byte, anchorRound, anchorPartitionRound uint64) (map[string]struct{}, error) {
+	retained := map[string]struct{}{string(anchorHash): {}}
+	curs := b.Cursor()
+	for k, raw := curs.Seek(journalObservationPrefix); k != nil && bytes.HasPrefix(k, journalObservationPrefix); k, raw = curs.Next() {
+		w, err := decodeObservation(raw)
+		if err != nil {
+			return nil, err
+		}
+		if w.Round <= anchorPartitionRound && w.RootRound <= anchorRound {
+			continue
+		}
+		if len(w.TargetHash) == sha256.Size {
+			retained[string(w.TargetHash)] = struct{}{}
+		}
+	}
+	return retained, nil
+}
+
+func checkPruneCoverage(b *bolt.Bucket, policy frontier.Policy, w journalCandidateWire) error {
+	covered := b.Get(coverageKey(w.Number))
+	if covered == nil {
+		return frontier.ErrObligation
+	}
+	claimed, err := frontier.Decode(covered, policy)
+	if err != nil || !bytes.Equal(claimed.Subject.BlockHash[:], w.Hash) {
+		return frontier.ErrObligation
+	}
+	return nil
+}
+
 // PruneFrontier is a second Bolt transaction. The deletion and floor advance
 // are atomic. Repeating it after a crash is safe.
 func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimits) error {
@@ -494,6 +530,13 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 		if err := checkPruneObligations(b, f.Anchor.Round); err != nil {
 			return err
 		}
+		// The anchor becomes the journal's new base, so keep its full candidate
+		// body. A repeat observation can refer to that same block at a later root
+		// round and is intentionally retained below.
+		retainedBodies, err := retainedObservationBodies(b, f.Anchor.Subject.BlockHash[:], f.Anchor.Round, anchorUC.InputRecord.RoundNumber)
+		if err != nil {
+			return err
+		}
 		curs := b.Cursor()
 		for k, raw := curs.Seek(journalCandidatePrefix); k != nil && bytes.HasPrefix(k, journalCandidatePrefix); k, raw = curs.Next() {
 			w, e := decodeCandidate(raw)
@@ -501,14 +544,12 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 				return e
 			}
 			if w.Status == 1 && w.Number <= f.Anchor.Height || w.Status != 1 && supersededCandidate(w.Number, w.Round, f.Anchor.Height, anchorUC.InputRecord.RoundNumber) {
+				if _, keep := retainedBodies[string(w.Hash)]; keep {
+					continue
+				}
 				if w.Status == 1 {
-					covered := b.Get(coverageKey(w.Number))
-					if covered == nil {
-						return frontier.ErrObligation
-					}
-					claimed, e := frontier.Decode(covered, *s.frontier)
-					if e != nil || !bytes.Equal(claimed.Subject.BlockHash[:], w.Hash) {
-						return frontier.ErrObligation
+					if err := checkPruneCoverage(b, *s.frontier, w); err != nil {
+						return err
 					}
 				}
 				if err := curs.Delete(); err != nil {

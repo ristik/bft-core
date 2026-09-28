@@ -101,6 +101,14 @@ func newWiringFixture(t *testing.T, blocks int) *wiringFixture {
 }
 
 func newWiringFixtureWithLimits(t *testing.T, blocks int, limits configuredprogress.JournalLimits) *wiringFixture {
+	return newWiringFixtureMode(t, blocks, limits, false)
+}
+
+func newWiringFixtureWithTimeouts(t *testing.T, blocks int) *wiringFixture {
+	return newWiringFixtureMode(t, blocks, configuredprogress.JournalLimits{Candidates: 16, Observations: 32, Bytes: 32 << 20}, true)
+}
+
+func newWiringFixtureMode(t *testing.T, blocks int, limits configuredprogress.JournalLimits, timeouts bool) *wiringFixture {
 	t.Helper()
 	chain := certifiedchain.New(t, 3, 0)
 	var doc map[string]json.RawMessage
@@ -157,9 +165,19 @@ func newWiringFixtureWithLimits(t *testing.T, blocks int, limits configuredprogr
 		if number > 1 {
 			ir.PreviousHash = bytes.Clone(parentState[:])
 		}
-		resultUC, resultTR := signWiring(t, chain, ir, uint64(number+1), uint64(4+number))
+		rootRound := uint64(4 + number)
+		if timeouts {
+			rootRound += uint64(number - 1)
+		}
+		resultUC, resultTR := signWiring(t, chain, ir, uint64(number+1), rootRound)
 		admit(resultUC, resultTR)
 		parentUC, parentTR = resultUC, resultTR
+		if timeouts {
+			// A timeout can repeat the same certified input record at the next
+			// root round before the next block is certified.
+			parentUC, parentTR = signWiring(t, chain, ir, uint64(number+1), rootRound+1)
+			admit(parentUC, parentTR)
+		}
 		parentHash, parentState = hash, state
 	}
 	subject, err := ContextFrom(c, identity)

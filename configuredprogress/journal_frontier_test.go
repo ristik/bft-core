@@ -139,10 +139,54 @@ func TestFrontierSIGKILLTransactionsRecoverExactAssociation(t *testing.T) {
 			require.NoError(t, s.PruneFrontier(context.Background(), c, limits))
 			image, err = s.LoadJournal(context.Background(), c, limits)
 			require.NoError(t, err)
-			require.Empty(t, image.Candidates)
+			require.Len(t, image.Candidates, 1)
+			require.Equal(t, image.Frontier.Anchor.Subject.BlockHash[:], image.Candidates[0].Candidate.Hash)
+			require.NotEmpty(t, image.Candidates[0].Candidate.Raw)
 			require.EqualValues(t, 1, image.Frontier.Floor)
 		})
 	}
+}
+
+func TestPruneRetainsAnchorForRepeatObservationAcrossRestart(t *testing.T) {
+	path := t.TempDir() + "/journal.db"
+	s, f, c, policy, item, limits := frontierTestSetupWithFixture(t, path)
+	var anchorUC types.UnicityCertificate
+	require.NoError(t, types.Cbor.Unmarshal(item.Material.ResultingUC, &anchorUC))
+	repeat := f.observation(anchorUC.InputRecord, 3, 6)
+	p, outcome, err := s.PrepareObservation(context.Background(), c, repeat)
+	require.NoError(t, err)
+	require.Equal(t, ObservationRepeated, outcome)
+	_, _, err = s.CommitObservation(p)
+	require.NoError(t, err)
+	require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}))
+	require.NoError(t, s.PruneFrontier(context.Background(), c, limits))
+	image, err := s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Len(t, image.Observations, 1)
+	require.Len(t, image.Candidates, 1)
+	require.NotEmpty(t, image.Candidates[0].Candidate.Raw)
+	require.NoError(t, s.Close())
+
+	s, err = OpenConfiguredV2(path, Settings{Retain: 3})
+	require.NoError(t, err)
+	defer s.Close()
+	require.NoError(t, s.EnableJournal(context.Background(), c, limits))
+	require.NoError(t, s.EnableFrontier(context.Background(), c, limits, policy))
+	image, err = s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Len(t, image.Observations, 1)
+	require.Len(t, image.Candidates, 1)
+
+	continued := f.observation(anchorUC.InputRecord, 4, 7)
+	p, outcome, err = s.PrepareObservation(context.Background(), c, continued)
+	require.NoError(t, err)
+	require.Equal(t, ObservationRepeated, outcome)
+	_, _, err = s.CommitObservation(p)
+	require.NoError(t, err)
+	image, err = s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Len(t, image.Observations, 2)
+	require.Len(t, image.Candidates, 1)
 }
 
 func TestFrontierCommitAndPruneGuards(t *testing.T) {
