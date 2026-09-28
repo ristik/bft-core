@@ -148,10 +148,15 @@ func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReq
 }
 
 func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority) (*ExecutedBlock, error) {
+	bootstrapChild := isEpochAnchorRoot(x)
+	if bootstrapChild && (newBlock.Anchor == nil || !bytes.Equal(newBlock.Anchor.GenesisID, x.BlockData.Anchor.GenesisID) ||
+		newBlock.Anchor.Slot != x.GetRound() || newBlock.Epoch != x.BlockData.Epoch) {
+		return nil, ErrNetworkProfile
+	}
 	if x.ShardState.Control != nil && newBlock.Epoch != x.BlockData.Epoch {
 		return nil, ErrNetworkProfile
 	}
-	if x.ShardState.Control != nil && x.ShardState.Control.Phase == "committed" {
+	if !bootstrapChild && x.ShardState.Control != nil && x.ShardState.Control.Phase == "committed" {
 		if newBlock.Payload == nil || !newBlock.Payload.IsEmpty() || newBlock.Payload.Version != 2 {
 			return nil, ErrHandoffSuffix
 		}
@@ -174,9 +179,25 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		return nil, fmt.Errorf("loading shard configurations for round %d: %w", newBlock.Round, err)
 	}
 
-	nextShardState, err := x.ShardState.nextBlock(shardConfs, hash)
+	parentState := x.ShardState
+	if bootstrapChild {
+		record, err := decodeOrderedRecord(parentState.Control.RecordBytes)
+		if err != nil || record.Kind != "commit" || len(record.NextBodyID) != 32 || parentState.Control.Epoch+1 != newBlock.Epoch {
+			return nil, ErrControlCheckpoint
+		}
+		parentState.Control = &evmroot.ControlState{Network: parentState.Control.Network,
+			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle"}
+	}
+	nextShardState, err := parentState.nextBlock(shardConfs, hash)
 	if err != nil {
 		return nil, fmt.Errorf("creating shard info for the block: %w", err)
+	}
+	if bootstrapChild {
+		// The first ordinary successor block recertifies every imported shard
+		// under the new committee once that block is committed.
+		for shard := range nextShardState.States {
+			nextShardState.Changed[shard] = struct{}{}
+		}
 	}
 
 	for _, irChReq := range newBlock.Payload.Requests {

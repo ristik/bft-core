@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
 
@@ -443,6 +444,14 @@ func TestSafetyModule_isCommitCandidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEpochAnchorVoteSealIsNoncommitting(t *testing.T) {
+	s := &SafetyModule{}
+	a := &drctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 12, StateRoot: bytes.Repeat([]byte{2}, 32)}
+	b := &drctypes.BlockData{Version: 2, Round: 13, Epoch: 2, Anchor: a, Payload: &drctypes.Payload{Version: 2}}
+	require.Nil(t, s.isCommitCandidate(b))
+	require.Zero(t, s.constructCommitInfo(b, bytes.Repeat([]byte{3}, 32)).RootChainRoundNumber)
 }
 
 func TestSafetyModule_isSafeToTimeout(t *testing.T) {

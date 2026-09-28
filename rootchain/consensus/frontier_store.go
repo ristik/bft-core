@@ -1,6 +1,8 @@
 package consensus
 
 import (
+	"errors"
+
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
@@ -36,4 +38,24 @@ func (s *frontierPersistentStore) WriteTC(tc *drctypes.TimeoutCert) error {
 }
 func (s *frontierPersistentStore) ReadSafetySnapshot() (storage.SafetySnapshot, error) {
 	return s.reader.ReadSafetySnapshot()
+}
+
+func (s *frontierPersistentStore) InstallEpochAnchorSafety(a *drctypes.EpochAnchor) error {
+	store, ok := s.PersistentStore.(interface {
+		InstallEpochAnchorSafety(*drctypes.EpochAnchor) error
+	})
+	if !ok {
+		return s.fault(errors.New("durable epoch anchor safety store unavailable"))
+	}
+	return s.fault(store.InstallEpochAnchorSafety(a))
+}
+
+func (s *frontierPersistentStore) ReadEpochAnchorSafety() (*drctypes.EpochAnchor, error) {
+	store, ok := s.PersistentStore.(interface {
+		ReadEpochAnchorSafety() (*drctypes.EpochAnchor, error)
+	})
+	if !ok {
+		return nil, errors.New("durable epoch anchor safety store unavailable")
+	}
+	return store.ReadEpochAnchorSafety()
 }

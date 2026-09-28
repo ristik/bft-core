@@ -19,6 +19,42 @@ import (
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
+func TestEpochAnchorSafetyInstallPreservesNewLocks(t *testing.T) {
+	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "anchor.db"), WithNoSync())
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, db.SetHighestQcRound(100, 101))
+	a := &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 12, StateRoot: bytes.Repeat([]byte{2}, 32)}
+	require.NoError(t, db.InstallEpochAnchorSafety(a))
+	require.EqualValues(t, 12, db.GetHighestQcRound())
+	require.EqualValues(t, 12, db.GetHighestVotedRound())
+	require.NoError(t, db.SetHighestQcRound(20, 21))
+	require.NoError(t, db.InstallEpochAnchorSafety(a))
+	require.EqualValues(t, 20, db.GetHighestQcRound())
+	require.EqualValues(t, 21, db.GetHighestVotedRound())
+	installed, err := db.ReadEpochAnchorSafety()
+	require.NoError(t, err)
+	require.Equal(t, a, installed)
+	other := *a
+	other.GenesisID = bytes.Repeat([]byte{3}, 32)
+	require.ErrorIs(t, db.InstallEpochAnchorSafety(&other), rctypes.ErrEpochAnchor)
+}
+
+func TestAnchorRootDiscardsOldSuffixAboveFixedStart(t *testing.T) {
+	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "late-proof.db"), WithNoSync())
+	require.NoError(t, err)
+	defer db.Close()
+	for _, round := range []uint64{4, 5, 7, 8} {
+		require.NoError(t, db.WriteBlock(&ExecutedBlock{BlockData: &rctypes.BlockData{Round: round, Epoch: 1}}, false))
+	}
+	a := &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 6, StateRoot: bytes.Repeat([]byte{2}, 32)}
+	require.NoError(t, db.WriteBlock(&ExecutedBlock{BlockData: &rctypes.BlockData{Round: 6, Epoch: 2, Anchor: a}}, true))
+	blocks, err := db.LoadBlocks()
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	require.Equal(t, a, blocks[0].BlockData.Anchor)
+}
+
 func Test_BoltDB_Block(t *testing.T) {
 	tempDir := t.TempDir()
 

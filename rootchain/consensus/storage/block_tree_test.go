@@ -40,6 +40,17 @@ func mockExecutedBlock(round, qcRound uint64) ExecutedBlock {
 	}
 }
 
+func TestBlockTreeRejectsAnchorCommitBeforeMutation(t *testing.T) {
+	a := &drctypes.EpochAnchor{GenesisID: test.RandomBytes(32), StateRoot: test.RandomBytes(32), Epoch: 2, Slot: 12}
+	root := newNode(&ExecutedBlock{BlockData: &drctypes.BlockData{Version: 2, Epoch: 2, Round: 12, Anchor: a}})
+	bt := &BlockTree{root: root, roundToNode: map[uint64]*node{12: root}}
+	qc := &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 13, ParentRoundNumber: 12}}
+	_, err := bt.Commit(qc)
+	require.ErrorIs(t, err, ErrCommitFailed)
+	require.Same(t, root, bt.root)
+	require.Len(t, bt.roundToNode, 1)
+}
+
 func hexToBytes(hexStr string) []byte {
 	b, err := hex.DecodeString(hexStr)
 	if err != nil {

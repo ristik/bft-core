@@ -195,7 +195,7 @@ func (x *Pacemaker) RegisterTimeoutVote(ctx context.Context, vote *abdrc.Timeout
 	if err != nil {
 		return nil, fmt.Errorf("inserting to pending votes: %w", err)
 	}
-	if tc == nil && voteCnt > quorum.GetMaxFaultyNodes() && x.status.Load() != uint32(pmsRoundTimeout) {
+	if tc == nil && voteCnt > maxFaultyWeight(quorum) && x.status.Load() != uint32(pmsRoundTimeout) {
 		// there is f+1 votes for TO - jump to TO state as quorum shouldn't be possible now
 		x.setState(ctx, pmsRoundTimeout)
 	}

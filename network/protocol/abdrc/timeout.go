@@ -29,7 +29,13 @@ func (x *TimeoutMsg) Bytes() []byte {
 	var b bytes.Buffer
 	b.Write(util.Uint64ToBytes(x.Timeout.Round))
 	b.Write(util.Uint64ToBytes(x.Timeout.Epoch))
-	b.Write(util.Uint64ToBytes(x.Timeout.HighQc.VoteInfo.RoundNumber))
+	b.Write(util.Uint64ToBytes(x.Timeout.GetHqcRound()))
+	if x.Timeout.Anchor != nil {
+		b.WriteByte(1)
+		b.Write(x.Timeout.Anchor.GenesisID)
+		b.Write(util.Uint64ToBytes(x.Timeout.Anchor.Epoch))
+		b.Write(util.Uint64ToBytes(x.Timeout.Anchor.Slot))
+	}
 	b.Write([]byte(x.Author))
 	return b.Bytes()
 }
@@ -46,7 +52,7 @@ func (x *TimeoutMsg) IsValid() error {
 	}
 
 	// if highQC is not for previous round we must have TC for previous round
-	if prevRound := x.GetRound() - 1; prevRound != x.Timeout.HighQc.GetRound() {
+	if prevRound := x.GetRound() - 1; prevRound != x.Timeout.GetHqcRound() {
 		if x.LastTC == nil {
 			return fmt.Errorf("last TC is missing for round %d", prevRound)
 		}
