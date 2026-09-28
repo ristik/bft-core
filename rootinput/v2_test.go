@@ -176,6 +176,55 @@ func TestV2DerivationBindsSingleInstalledTransition(t *testing.T) {
 	require.ErrorIs(t, err, ErrV2Context)
 }
 
+func TestV2AcknowledgementRebindsAfterT2Timeout(t *testing.T) {
+	f := newV2Fixture(t)
+	assigned := uint64(8) // initial successor assignment was 7; T2 advanced it
+	technical := certifiedchain.Technical(assigned - 1)
+	technical.Round = assigned
+	uc := f.signedRaw(t, &types.InputRecord{Version: 1}, technical, 5)
+	uc.UnicitySeal.Epoch = 2
+	uc.UnicitySeal.Signatures = nil
+	verifier, err := f.c.Signer.Verifier()
+	require.NoError(t, err)
+	key, err := verifier.MarshalPublicKey()
+	require.NoError(t, err)
+	id, err := network.NodeIDFromPublicKeyBytes(key)
+	require.NoError(t, err)
+	require.NoError(t, uc.UnicitySeal.Sign(id.String(), f.c.Signer))
+	newBase := *f.c.TrustBase
+	newBase.Epoch = 2
+	newBase.Signatures = nil
+	observationContext := f.obsContext()
+	observationContext.RootEpoch = 2
+	observationContext.TrustBases = stubTrustBases{tb: &newBase}
+	o, err := AuthenticateObservationV2(context.Background(), observationContext, uc, technical)
+	require.NoError(t, err)
+
+	template := handoff.EVMTransition{OldEpoch: 1, NewEpoch: 2, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
+		Ack: handoff.AckRecord{FrozenID: [32]byte{3}, CommitID: [32]byte{4},
+			SuccessorTR: [32]byte{5}, EVMRound: assigned - 1}}
+	copy(template.Ack.FrozenParent[:], f.blocks[0].Hash.Bytes())
+	template.Ack.SuccessorParent = template.Ack.FrozenParent
+	templateBytes, err := template.Encode()
+	require.NoError(t, err)
+	c := ContextV2{Genesis: f.origin, Parent: f.snapshot(t, 0), Round: assigned,
+		ParentHash: f.blocks[0].Hash.Bytes(), TransitionsPending: true, Transition: templateBytes}
+	r, err := DeriveV2(c, o)
+	require.NoError(t, err)
+	require.Len(t, r.Input.Transitions, 1)
+	bound, err := handoff.DecodeEVMTransition(r.Input.Transitions[0])
+	require.NoError(t, err)
+	require.Equal(t, assigned, bound.Ack.EVMRound)
+	template.Ack.EVMRound = assigned
+	require.Equal(t, template, bound, "only the actual authenticated shard round changes")
+	require.NotEqual(t, templateBytes, r.Input.Transitions[0])
+
+	// Once the acknowledgement was applied, the parent is no longer pending.
+	c.TransitionsPending = false
+	_, err = DeriveV2(c, o)
+	require.ErrorIs(t, err, ErrUnsupported, "a second acknowledgement is refused")
+}
+
 func TestV2AuthenticationRefusalsAreOnTheNewPath(t *testing.T) {
 	f := newV2Fixture(t)
 	ir := &types.InputRecord{Version: 1}

@@ -360,6 +360,7 @@ func TestBootstrapRequiresVerifiedGenesisAndSnapshot(t *testing.T) {
 		t.Fatal("wrong activation authority")
 	}
 	must(t, s.m.Acknowledge(s.ack, proof))
+	want(t, s.m.Acknowledge(s.ack, proof), ErrPhase)
 }
 func TestRefusals(t *testing.T) {
 	t.Run("body", func(t *testing.T) {

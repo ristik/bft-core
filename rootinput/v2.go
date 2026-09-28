@@ -267,8 +267,8 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 	f := c.Parent.Fields()
 	if c.TransitionsPending {
 		if transition.OldEpoch != f.RootEpoch || transition.NewEpoch != o.rootEpoch ||
-			transition.Ack.EVMRound != c.Round || !bytes.Equal(transition.Ack.FrozenParent[:], parent) {
-			return ResultV2{}, fmt.Errorf("%w: transition epoch, round, or frozen parent mismatch", ErrV2Context)
+			!bytes.Equal(transition.Ack.FrozenParent[:], parent) {
+			return ResultV2{}, fmt.Errorf("%w: transition epoch or frozen parent mismatch", ErrV2Context)
 		}
 	} else if o.rootEpoch != f.RootEpoch {
 		return ResultV2{}, fmt.Errorf("%w: root epoch change requires installed transition", ErrV2Context)
@@ -279,6 +279,18 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 	}
 	if c.Round != o.tr.Round {
 		return ResultV2{}, fmt.Errorf("%w: pinned round %d, authenticated assignment %d", ErrNotPinned, c.Round, o.tr.Round)
+	}
+	var boundTransition []byte
+	if c.TransitionsPending {
+		// The committed successor TR names the first assignment, but T2 may
+		// advance it before the acknowledgement block is built. Bind the Ack
+		// to the authenticated assignment used by this exact block.
+		transition.Ack.EVMRound = c.Round
+		var err error
+		boundTransition, err = transition.Encode()
+		if err != nil {
+			return ResultV2{}, fmt.Errorf("%w: bound acknowledgement: %v", ErrV2Context, err)
+		}
 	}
 	if !c.TransitionsPending && o.origin.RootRound < c.Parent.LastAppliedRootRound() {
 		return ResultV2{}, fmt.Errorf("%w: root round %d behind committed cursor %d", ErrNotPinned, o.origin.RootRound, c.Parent.LastAppliedRootRound())
@@ -309,7 +321,7 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 	}
 	ri := evmroot.RootInputV2{Version: evmroot.ProfileVersionV2, NetworkID: uint64(o.network), PartitionID: uint64(o.partition), ShardID: bytes.Clone(o.shard), Round: c.Round, CertifiedEpoch: o.origin.IR.Epoch, AuthorizedEpoch: o.tr.Epoch, ParentHash: parent, Origin: cloneOriginV2(o.origin), TE: evmroot.TechnicalRecord{Round: o.tr.Round, Epoch: o.tr.Epoch, Leader: o.tr.Leader, StatHash: bytes.Clone(o.tr.StatHash), FeeHash: bytes.Clone(o.tr.FeeHash)}}
 	if c.TransitionsPending {
-		ri.Transitions = [][]byte{bytes.Clone(c.Transition)}
+		ri.Transitions = [][]byte{boundTransition}
 	}
 	if err := ri.Validate(); err != nil {
 		return ResultV2{}, fmt.Errorf("%w: %v", ErrV2Shape, err)

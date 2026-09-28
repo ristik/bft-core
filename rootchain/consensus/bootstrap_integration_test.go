@@ -121,7 +121,7 @@ func TestInstalledTransitionAdapterUsesAssignedShardRound(t *testing.T) {
 	vc.Transition, err = wrong.Encode()
 	require.NoError(t, err)
 	_, err = adapter.PrepareBuild(context.Background(), params)
-	require.ErrorContains(t, err, "transition epoch, round, or frozen parent mismatch")
+	require.NoError(t, err, "a stale template round is rebound to the authenticated shard assignment")
 }
 
 func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]byte) (map[peer.ID]*anchorReplica, *rctypes.EpochAnchor, time.Time) {
