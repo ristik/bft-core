@@ -22,10 +22,10 @@ import (
 
 var ErrRestore = errors.New("archive restore: certified replay refused")
 
-// SingleEpochRestore replays authenticated archive records from the checked
+// ArchiveRestore replays authenticated archive records from the checked
 // execution genesis. Its archive and journal directories must be fresh. The
 // paired Engine remains at genesis finality until the whole target is checked.
-type SingleEpochRestore struct {
+type ArchiveRestore struct {
 	Journal       *configuredprogress.Store
 	Context       configuredprogress.Context
 	JournalLimits configuredprogress.JournalLimits
@@ -39,6 +39,9 @@ type SingleEpochRestore struct {
 	TipUC         *types.UnicityCertificate
 	TipTR         *certification.TechnicalRecord
 }
+
+// SingleEpochRestore is kept for callers of the original single-epoch route.
+type SingleEpochRestore = ArchiveRestore
 
 // RestoreExecutor is the paired seal-import and finality surface used by the
 // existing execution recovery coordinator. Production supplies *Adapter.
@@ -57,14 +60,11 @@ type restoredBlock struct {
 	state  [32]byte
 }
 
-func (r *SingleEpochRestore) Restore(ctx context.Context) error {
+func (r *ArchiveRestore) Restore(ctx context.Context) error {
 	if r == nil || r.Journal == nil || r.Archive == nil || r.Adapter == nil || r.Host == nil ||
 		r.Replicas[0] == "" || r.Replicas[1] == "" || r.Replicas[0] == r.Replicas[1] ||
 		r.TipUC == nil || r.TipTR == nil || r.TipUC.InputRecord == nil || len(r.Genesis.Hash) != 32 || !r.Limits.valid() {
 		return fmt.Errorf("%w: incomplete restore configuration", ErrRestore)
-	}
-	if r.TipUC.GetRootEpoch() != r.Context.Observation.RootEpoch {
-		return fmt.Errorf("%w: pin crosses the configured root epoch", ErrRestore)
 	}
 	if _, err := rootinput.AuthenticateObservationV2(ctx, r.Context.Observation, r.TipUC, r.TipTR); err != nil {
 		return fmt.Errorf("%w: tip pin: %v", ErrRestore, err)
@@ -80,6 +80,12 @@ func (r *SingleEpochRestore) Restore(ctx context.Context) error {
 	finalized, err := r.Adapter.Finalized(ctx)
 	if err != nil || !sameBlockRef(finalized, r.Genesis) {
 		return fmt.Errorf("%w: EL finalized head must be the checked genesis: %v", ErrRestore, err)
+	}
+	replayCtx := ctx
+	if adapter, ok := r.Adapter.(interface {
+		HistoricalContext(context.Context) context.Context
+	}); ok {
+		replayCtx = adapter.HistoricalContext(ctx)
 	}
 	target, err := r.findTarget(ctx)
 	if err != nil {
@@ -146,7 +152,7 @@ func (r *SingleEpochRestore) Restore(ctx context.Context) error {
 		params := shardnode.RoundParams{Round: resulting.InputRecord.RoundNumber, Epoch: originalTR.Epoch,
 			Timestamp: original.UnicitySeal.Timestamp, SealHash: seal, Leader: originalTR.Leader, Parent: parent,
 			AuthorizingCertificate: original, AuthorizingTechnicalRecord: originalTR}
-		status, err := r.Adapter.Verify(ctx, block, params)
+		status, err := r.Adapter.Verify(replayCtx, block, params)
 		if err != nil || status != shardnode.StatusValid {
 			return fmt.Errorf("%w: paired seal import %d returned %s: %v", ErrRestore, block.Number, status, err)
 		}
@@ -167,6 +173,10 @@ func (r *SingleEpochRestore) Restore(ctx context.Context) error {
 	head, err = r.Adapter.Head(ctx)
 	if err != nil || !sameBlockRef(head, parent) {
 		return fmt.Errorf("%w: EL head differs from replay target: %v", ErrRestore, err)
+	}
+	finalized, err = r.Adapter.Finalized(ctx)
+	if err != nil || !sameBlockRef(finalized, parent) {
+		return fmt.Errorf("%w: EL finalized head differs from replay target: %v", ErrRestore, err)
 	}
 	if err := r.recordTip(ctx, firstUC, firstTR, targetUC, targetTR, targetBlock, reverse[0]); err != nil {
 		return err
@@ -191,7 +201,7 @@ func decodeRestorePairs(rec *archive.Record) (*types.UnicityCertificate, *certif
 	return &a, &at, &b, &bt, nil
 }
 
-func (r *SingleEpochRestore) matchesTip(result *types.UnicityCertificate) bool {
+func (r *ArchiveRestore) matchesTip(result *types.UnicityCertificate) bool {
 	if result == nil || result.InputRecord == nil || r.TipUC.InputRecord == nil ||
 		result.InputRecord.RoundNumber > r.TipUC.InputRecord.RoundNumber ||
 		!bytes.Equal(result.InputRecord.Hash, r.TipUC.InputRecord.Hash) {
@@ -203,7 +213,7 @@ func (r *SingleEpochRestore) matchesTip(result *types.UnicityCertificate) bool {
 	return true
 }
 
-func (r *SingleEpochRestore) findTarget(ctx context.Context) ([32]byte, error) {
+func (r *ArchiveRestore) findTarget(ctx context.Context) ([32]byte, error) {
 	if len(r.TipUC.InputRecord.BlockHash) == 32 {
 		var hash [32]byte
 		copy(hash[:], r.TipUC.InputRecord.BlockHash)
@@ -223,7 +233,7 @@ func (r *SingleEpochRestore) findTarget(ctx context.Context) ([32]byte, error) {
 	return [32]byte{}, fmt.Errorf("%w: neither replica supplied a certified record matching the quiet tip state", ErrRestore)
 }
 
-func (r *SingleEpochRestore) fetchChecked(ctx context.Context, hash [32]byte) (archive.Request, *archive.Record, *types.UnicityCertificate, *certification.TechnicalRecord, *gethtypes.Header, error) {
+func (r *ArchiveRestore) fetchChecked(ctx context.Context, hash [32]byte) (archive.Request, *archive.Record, *types.UnicityCertificate, *certification.TechnicalRecord, *gethtypes.Header, error) {
 	q := archive.Request{Context: r.Subject, BlockHash: hash}
 	for _, id := range r.Replicas {
 		rec, err := Fetch(ctx, r.Host, id, q, r.Limits)
@@ -241,25 +251,33 @@ func (r *SingleEpochRestore) fetchChecked(ctx context.Context, hash [32]byte) (a
 	return archive.Request{}, nil, nil, nil, nil, archive.ErrUnavailable
 }
 
-func (r *SingleEpochRestore) checkRecord(q archive.Request, rec *archive.Record) (*types.UnicityCertificate, *certification.TechnicalRecord, error) {
+func (r *ArchiveRestore) checkRecord(q archive.Request, rec *archive.Record) (*types.UnicityCertificate, *certification.TechnicalRecord, error) {
 	_, _, result, tr, err := decodeRestorePairs(rec)
-	if err != nil || result.GetRootEpoch() != r.TipUC.GetRootEpoch() {
+	if err != nil || result.GetRootEpoch() > r.TipUC.GetRootEpoch() {
 		return nil, nil, ErrRestore
 	}
 	var header gethtypes.Header
 	if rlp.DecodeBytes(rec.Header, &header) != nil || header.Number == nil {
 		return nil, nil, archive.ErrInvalid
 	}
-	fr := frontier.Record{Height: header.Number.Uint64(), Round: result.GetRootRoundNumber(), StateRoot: [32]byte(header.Root), Subject: q}
+	fr := frontier.Record{Height: header.Number.Uint64(), Epoch: result.GetRootEpoch(), Round: result.GetRootRoundNumber(), StateRoot: [32]byte(header.Root), Subject: q}
 	if err := (CertifiedBinding{Context: r.Context, Subject: r.Subject}).VerifyCertified(fr, rec); err != nil {
 		return nil, nil, err
 	}
 	return result, tr, nil
 }
 
-func (r *SingleEpochRestore) recordTip(ctx context.Context, firstUC *types.UnicityCertificate, firstTR *certification.TechnicalRecord, resultUC *types.UnicityCertificate, resultTR *certification.TechnicalRecord, block shardnode.Block, item restoredBlock) error {
+func (r *ArchiveRestore) recordTip(ctx context.Context, firstUC *types.UnicityCertificate, firstTR *certification.TechnicalRecord, resultUC *types.UnicityCertificate, resultTR *certification.TechnicalRecord, block shardnode.Block, item restoredBlock) error {
 	if firstUC == nil || firstTR == nil || resultUC == nil || resultTR == nil {
 		return ErrRestore
+	}
+	if firstUC.GetRootEpoch() != r.TipUC.GetRootEpoch() {
+		candidate, err := r.restoreCandidate(ctx, resultUC, block, item)
+		if err != nil {
+			return err
+		}
+		return r.Journal.InstallReplayedTip(ctx, r.Context, r.JournalLimits, candidate, resultUC, resultTR, r.TipUC, r.TipTR,
+			configuredprogress.RestoreAnchor{Height: block.Number, Hash: item.q.BlockHash, StateRoot: item.state, RootRound: resultUC.GetRootRoundNumber()})
 	}
 	for _, pair := range []struct {
 		uc *types.UnicityCertificate
@@ -272,30 +290,10 @@ func (r *SingleEpochRestore) recordTip(ctx context.Context, firstUC *types.Unici
 		// The last record's candidate is inserted before its resulting UC so
 		// the journal never records an unresolved certified body.
 		if pair.uc == resultUC {
-			rec, err := r.Archive.Get(item.q)
+			candidate, err := r.restoreCandidate(ctx, resultUC, block, item)
 			if err != nil {
 				return err
 			}
-			original, originalTR, _, _, err := decodeRestorePairs(rec)
-			if err != nil {
-				return err
-			}
-			var parentState []byte
-			if block.Number == 1 {
-				parentState = r.Genesis.StateRoot
-			} else {
-				// The preceding certified archive record was retained while
-				// walking the chain; the replayed parent is independently known.
-				parent, _, err := r.Adapter.Header(ctx, block.ParentHash)
-				if err != nil {
-					return err
-				}
-				parentState = parent.StateRoot
-			}
-			candidate := configuredprogress.JournalCandidate{Round: resultUC.InputRecord.RoundNumber, Number: block.Number,
-				ParentNumber: block.Number - 1, Hash: block.Hash, StateRoot: block.StateRoot,
-				ParentHash: block.ParentHash, ParentState: parentState, Raw: block.Raw,
-				BlockSize: block.BlockSize, StateSize: block.StateSize, AuthorizingUC: original, AuthorizingTR: originalTR}
 			if err := r.Journal.PutJournalCandidate(ctx, r.Context, r.JournalLimits, candidate); err != nil {
 				return err
 			}
@@ -311,4 +309,29 @@ func (r *SingleEpochRestore) recordTip(ctx context.Context, firstUC *types.Unici
 	return r.Journal.InstallRestoreAnchor(ctx, r.Context, r.JournalLimits, configuredprogress.RestoreAnchor{
 		Height: block.Number, Hash: item.q.BlockHash, StateRoot: item.state, RootRound: resultUC.GetRootRoundNumber(),
 	})
+}
+
+func (r *ArchiveRestore) restoreCandidate(ctx context.Context, resultUC *types.UnicityCertificate, block shardnode.Block, item restoredBlock) (configuredprogress.JournalCandidate, error) {
+	rec, err := r.Archive.Get(item.q)
+	if err != nil {
+		return configuredprogress.JournalCandidate{}, err
+	}
+	original, originalTR, _, _, err := decodeRestorePairs(rec)
+	if err != nil {
+		return configuredprogress.JournalCandidate{}, err
+	}
+	var parentState []byte
+	if block.Number == 1 {
+		parentState = r.Genesis.StateRoot
+	} else {
+		parent, _, err := r.Adapter.Header(ctx, block.ParentHash)
+		if err != nil {
+			return configuredprogress.JournalCandidate{}, err
+		}
+		parentState = parent.StateRoot
+	}
+	return configuredprogress.JournalCandidate{Round: resultUC.InputRecord.RoundNumber, Number: block.Number,
+		ParentNumber: block.Number - 1, Hash: block.Hash, StateRoot: block.StateRoot, ParentHash: block.ParentHash,
+		ParentState: parentState, Raw: block.Raw, BlockSize: block.BlockSize, StateSize: block.StateSize,
+		AuthorizingUC: original, AuthorizingTR: originalTR}, nil
 }

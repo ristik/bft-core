@@ -108,3 +108,20 @@ func TestClassifyUC(t *testing.T) {
 		require.ErrorIs(t, err, ErrEquivocatingUC)
 	})
 }
+
+func TestClassifyUCEpochUsesEpochBeforeRootRound(t *testing.T) {
+	old := uc(1, 100, []byte{0}, []byte{1}, []byte{0xb1})
+	old.UnicitySeal.Epoch = 1
+	next := uc(2, 1, []byte{1}, []byte{2}, []byte{0xb2})
+	next.UnicitySeal.Epoch = 2
+	class, err := ClassifyUCEpoch(old, next)
+	require.NoError(t, err)
+	require.Equal(t, UCValid, class)
+	class, err = ClassifyUCEpoch(next, old)
+	require.NoError(t, err)
+	require.Equal(t, UCStale, class)
+	other := uc(1, 1, []byte{0}, []byte{9}, []byte{0xb1})
+	other.UnicitySeal.Epoch = 2
+	_, err = ClassifyUCEpoch(old, other)
+	require.ErrorIs(t, err, ErrEquivocatingUC)
+}

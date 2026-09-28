@@ -1,15 +1,20 @@
 package engineapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	"github.com/unicitynetwork/bft-core/network"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/rootinput"
@@ -36,6 +41,48 @@ func TestAdapterRequiresCanonicalTransitionFromConfiguredEpoch(t *testing.T) {
 	require.NoError(t, err)
 	_, err = a.deriveV2(context.Background(), params, params.AuthorizingCertificate, params.AuthorizingTechnicalRecord)
 	require.True(t, rootinput.IsUnsupportedObservationV2(err), "valid installed transition reaches certificate authentication: %v", err)
+}
+
+func TestAdapterSelectsEachInstalledHandoffTransition(t *testing.T) {
+	v := &VerifierContext{transitions: make(map[uint64]handoff.EVMTransition)}
+	for old := uint64(1); old <= 2; old++ {
+		tx := handoff.EVMTransition{OldEpoch: old, NewEpoch: old + 1, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
+			Ack: handoff.AckRecord{FrozenID: [32]byte{3}, CommitID: [32]byte{4}, FrozenParent: [32]byte{5},
+				SuccessorParent: [32]byte{5}, SuccessorTR: [32]byte{6}, EVMRound: 1}}
+		v.transitions[old] = tx
+	}
+	for old := uint64(1); old <= 2; old++ {
+		raw, err := v.transitionFor(old, old+1)
+		require.NoError(t, err)
+		decoded, err := handoff.DecodeEVMTransition(raw)
+		require.NoError(t, err)
+		require.Equal(t, old, decoded.OldEpoch)
+		require.Equal(t, old+1, decoded.NewEpoch)
+	}
+	_, err := v.transitionFor(1, 3)
+	require.ErrorIs(t, err, rootinput.ErrV2Context)
+}
+
+func TestInstalledTransitionUsesCommittedSuccessorRound(t *testing.T) {
+	tr := &certification.TechnicalRecord{Round: 41}
+	hash, err := tr.Hash()
+	require.NoError(t, err)
+	bundle := handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{Epoch: 2}}
+	bundle.Proof.Record.Epoch = 1
+	bundle.Proof.Record.NextBodyID = bytes.Repeat([]byte{1}, 32)
+	bundle.Proof.Record.FrozenID = bytes.Repeat([]byte{2}, 32)
+	bundle.Proof.Record.SuccessorTRHash = hash
+	bundle.Proof.Control.FrozenParent = bytes.Repeat([]byte{3}, 32)
+	checked := handoffdelivery.Verified{Genesis: evmroot.EpochGenesis{Epoch: 2}, Shard: abdrc.ShardInfo{TR: tr}}
+	v := new(VerifierContext)
+	require.NoError(t, v.InstallHandoffTransition(bundle, checked))
+	raw, err := v.transitionFor(1, 2)
+	require.NoError(t, err)
+	transition, err := handoff.DecodeEVMTransition(raw)
+	require.NoError(t, err)
+	require.Equal(t, uint64(41), transition.Ack.EVMRound)
+	checked.Shard.TR = &certification.TechnicalRecord{Round: 42}
+	require.ErrorIs(t, v.InstallHandoffTransition(bundle, checked), handoff.ErrBoundary)
 }
 
 func bootstrapAdapterFixture(t *testing.T) (*VerifierContext, shardnode.RoundParams, rootinput.ResultV2) {

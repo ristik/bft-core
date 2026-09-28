@@ -63,13 +63,17 @@ func (v CertifiedBinding) VerifyCertified(r frontier.Record, rec *archive.Record
 		}
 	}
 	ctx := context.Background()
-	if _, err := rootinput.AuthenticateObservationV2(ctx, v.Context.Observation, &original, &ot); err != nil {
+	if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, v.Context.Observation, &original, &ot); err != nil {
 		return fmt.Errorf("%w: original: %v", frontier.ErrInvalid, err)
 	}
-	if _, err := rootinput.AuthenticateObservationV2(ctx, v.Context.Observation, &result, &rt); err != nil {
+	if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, v.Context.Observation, &result, &rt); err != nil {
 		return fmt.Errorf("%w: resulting: %v", frontier.ErrInvalid, err)
 	}
-	if result.InputRecord == nil || result.GetRootRoundNumber() != r.Round || !bytes.Equal(result.InputRecord.BlockHash, r.Subject.BlockHash[:]) || !bytes.Equal(result.InputRecord.Hash, r.StateRoot[:]) || original.GetRootRoundNumber() >= result.GetRootRoundNumber() || ot.Round != result.InputRecord.RoundNumber || types.CheckNonEquivocatingCertificates(&original, &result) != nil {
+	rootEpoch := r.Epoch
+	if rootEpoch == 0 {
+		rootEpoch = v.Subject.RootEpoch
+	}
+	if result.InputRecord == nil || result.GetRootEpoch() != rootEpoch || result.GetRootRoundNumber() != r.Round || !bytes.Equal(result.InputRecord.BlockHash, r.Subject.BlockHash[:]) || !bytes.Equal(result.InputRecord.Hash, r.StateRoot[:]) || ot.Round != result.InputRecord.RoundNumber || rootinput.CheckEpochCertificates(&original, &result) != nil || original.GetRootEpoch() == result.GetRootEpoch() && original.GetRootRoundNumber() >= result.GetRootRoundNumber() {
 		return frontier.ErrInvalid
 	}
 	var companion engineapi.SealCompanion

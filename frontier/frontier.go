@@ -27,6 +27,7 @@ var (
 )
 
 const version byte = 1
+const epochVersion byte = 2
 const domain = "M2FRONTIER"
 const MaxBytes = archive.MaxRequestBytes + 512
 
@@ -37,6 +38,7 @@ type Acknowledgment struct {
 }
 type Record struct {
 	Sequence  uint64
+	Epoch     uint64 // zero decodes a pre-epoch frontier in the configured anchor epoch
 	Round     uint64 // resulting UC root round; partition round remains in its input record
 	Height    uint64
 	StateRoot [32]byte
@@ -81,6 +83,9 @@ func valid(r Record, p Policy) error {
 	if r.Sequence == 0 || r.Round == 0 || r.Height == 0 || r.StateRoot == ([32]byte{}) {
 		return ErrInvalid
 	}
+	if r.Epoch != 0 && r.Epoch < p.Context.RootEpoch {
+		return ErrInvalid
+	}
 	q, err := subjectBytes(r)
 	if err != nil {
 		return ErrInvalid
@@ -113,9 +118,16 @@ func Encode(r Record, p Policy) ([]byte, error) {
 	q, _ := subjectBytes(r)
 	var b bytes.Buffer
 	b.WriteString(domain)
-	b.WriteByte(version)
+	if r.Epoch == 0 {
+		b.WriteByte(version)
+	} else {
+		b.WriteByte(epochVersion)
+	}
 	for _, v := range []uint64{r.Sequence, r.Round, r.Height} {
 		_ = binary.Write(&b, binary.BigEndian, v)
+	}
+	if r.Epoch != 0 {
+		_ = binary.Write(&b, binary.BigEndian, r.Epoch)
 	}
 	b.Write(r.StateRoot[:])
 	_ = binary.Write(&b, binary.BigEndian, uint32(len(q)))
@@ -140,7 +152,7 @@ func Decode(raw []byte, p Policy) (Record, error) {
 	if !bytes.Equal(raw[:len(domain)], []byte(domain)) {
 		return out, ErrInvalid
 	}
-	if raw[len(domain)] != version {
+	if raw[len(domain)] != version && raw[len(domain)] != epochVersion {
 		return out, ErrVersion
 	}
 	payload := raw[:len(raw)-32]
@@ -151,6 +163,11 @@ func Decode(raw []byte, p Policy) (Record, error) {
 	r := bytes.NewReader(payload[len(domain)+1:])
 	for _, v := range []*uint64{&out.Sequence, &out.Round, &out.Height} {
 		if binary.Read(r, binary.BigEndian, v) != nil {
+			return Record{}, ErrInvalid
+		}
+	}
+	if raw[len(domain)] == epochVersion {
+		if binary.Read(r, binary.BigEndian, &out.Epoch) != nil || out.Epoch == 0 {
 			return Record{}, ErrInvalid
 		}
 	}
@@ -199,9 +216,21 @@ func Decode(raw []byte, p Policy) (Record, error) {
 }
 
 type Obligation struct {
+	Epoch                                                 uint64
 	Round                                                 uint64
 	UnresolvedBody, PendingAuthorization, NonEquivocation bool
 }
+
+func epochOf(r Record, p Policy) uint64 {
+	if r.Epoch != 0 {
+		return r.Epoch
+	}
+	return p.Context.RootEpoch
+}
+func laterEpochRound(epoch, round, oldEpoch, oldRound uint64) bool {
+	return epoch > oldEpoch || epoch == oldEpoch && round > oldRound
+}
+
 type Plan struct {
 	Next         Record
 	PruneThrough uint64
@@ -217,7 +246,7 @@ func PlanAdvance(current *Record, next Record, p Policy, covered []Coverage, obl
 		if err := valid(*current, p); err != nil {
 			return Plan{}, err
 		}
-		if next.Sequence <= current.Sequence || next.Round <= current.Round || next.Height <= current.Height {
+		if next.Sequence <= current.Sequence || !laterEpochRound(epochOf(next, p), next.Round, epochOf(*current, p), current.Round) || next.Height <= current.Height {
 			return Plan{}, ErrStale
 		}
 	}
@@ -233,7 +262,7 @@ func PlanAdvance(current *Record, next Record, p Policy, covered []Coverage, obl
 		if err := valid(r, p); err != nil {
 			return Plan{}, err
 		}
-		if r.Height != previous.Height+1 || r.Round <= previous.Round || r.Sequence <= previous.Sequence {
+		if r.Height != previous.Height+1 || !laterEpochRound(epochOf(r, p), r.Round, epochOf(previous, p), previous.Round) || r.Sequence <= previous.Sequence {
 			return Plan{}, ErrAcknowledgment
 		}
 		digest, err := archive.ManifestDigest(r.Subject, item.Material)
@@ -254,7 +283,7 @@ func PlanAdvance(current *Record, next Record, p Policy, covered []Coverage, obl
 		return Plan{}, ErrAcknowledgment
 	}
 	for _, o := range obligations {
-		if o.Round <= next.Round && (o.UnresolvedBody || o.PendingAuthorization || o.NonEquivocation) {
+		if !laterEpochRound(epochOf(Record{Epoch: o.Epoch}, p), o.Round, epochOf(next, p), next.Round) && (o.UnresolvedBody || o.PendingAuthorization || o.NonEquivocation) {
 			return Plan{}, ErrObligation
 		}
 	}
@@ -265,16 +294,20 @@ func PlanAdvance(current *Record, next Record, p Policy, covered []Coverage, obl
 // independently replayed archive checkpoint. The restored base makes no
 // replica-availability claim; every newly covered block does.
 func PlanAdvanceFromRestore(baseHeight, baseRound uint64, next Record, p Policy, covered []Coverage, obligations []Obligation) (Plan, error) {
+	return PlanAdvanceFromRestoreEpoch(baseHeight, p.Context.RootEpoch, baseRound, next, p, covered, obligations)
+}
+
+func PlanAdvanceFromRestoreEpoch(baseHeight, baseEpoch, baseRound uint64, next Record, p Policy, covered []Coverage, obligations []Obligation) (Plan, error) {
 	if baseHeight == 0 || baseRound == 0 || len(covered) == 0 || p.Binding == nil || p.Availability == nil {
 		return Plan{}, ErrAcknowledgment
 	}
-	previousHeight, previousRound, previousSequence := baseHeight, baseRound, uint64(0)
+	previousHeight, previousEpoch, previousRound, previousSequence := baseHeight, baseEpoch, baseRound, uint64(0)
 	for _, item := range covered {
 		r := item.Anchor
 		if err := valid(r, p); err != nil {
 			return Plan{}, err
 		}
-		if r.Height != previousHeight+1 || r.Round <= previousRound || r.Sequence <= previousSequence {
+		if r.Height != previousHeight+1 || !laterEpochRound(epochOf(r, p), r.Round, previousEpoch, previousRound) || r.Sequence <= previousSequence {
 			return Plan{}, ErrAcknowledgment
 		}
 		digest, err := archive.ManifestDigest(r.Subject, item.Material)
@@ -286,13 +319,13 @@ func PlanAdvanceFromRestore(baseHeight, baseRound uint64, next Record, p Policy,
 				return Plan{}, ErrAcknowledgment
 			}
 		}
-		previousHeight, previousRound, previousSequence = r.Height, r.Round, r.Sequence
+		previousHeight, previousEpoch, previousRound, previousSequence = r.Height, epochOf(r, p), r.Round, r.Sequence
 	}
 	if !reflect.DeepEqual(covered[len(covered)-1].Anchor, next) {
 		return Plan{}, ErrAcknowledgment
 	}
 	for _, o := range obligations {
-		if o.Round <= next.Round && (o.UnresolvedBody || o.PendingAuthorization || o.NonEquivocation) {
+		if !laterEpochRound(epochOf(Record{Epoch: o.Epoch}, p), o.Round, epochOf(next, p), next.Round) && (o.UnresolvedBody || o.PendingAuthorization || o.NonEquivocation) {
 			return Plan{}, ErrObligation
 		}
 	}
@@ -302,13 +335,17 @@ func PlanAdvanceFromRestore(baseHeight, baseRound uint64, next Record, p Policy,
 // CheckRecovery authenticates the locally durable anchor and prune floor.
 // Replica read-back is required when planning an advance, not to restart.
 func CheckRecovery(durable Record, journalPrunedThrough uint64, p Policy, anchor Coverage) error {
-	if durable.Round < journalPrunedThrough {
+	return CheckRecoveryEpoch(durable, p.Context.RootEpoch, journalPrunedThrough, p, anchor)
+}
+
+func CheckRecoveryEpoch(durable Record, floorEpoch, floorRound uint64, p Policy, anchor Coverage) error {
+	if epochOf(durable, p) < floorEpoch || epochOf(durable, p) == floorEpoch && durable.Round < floorRound {
 		return ErrStale
 	}
 	if err := valid(durable, p); err != nil {
 		return err
 	}
-	if anchor.Anchor.Round != durable.Round || anchor.Anchor.Subject.BlockHash != durable.Subject.BlockHash || p.Binding == nil || p.Availability == nil {
+	if epochOf(anchor.Anchor, p) != epochOf(durable, p) || anchor.Anchor.Round != durable.Round || anchor.Anchor.Subject.BlockHash != durable.Subject.BlockHash || p.Binding == nil || p.Availability == nil {
 		return ErrInvalid
 	}
 	digest, err := archive.ManifestDigest(durable.Subject, anchor.Material)
@@ -377,7 +414,7 @@ func (s *Store) saveEncoded(next Record, p Policy, raw []byte) error {
 	}
 	old, e := s.Load(p)
 	if e == nil {
-		if next.Sequence <= old.Sequence || next.Round <= old.Round || next.Height <= old.Height {
+		if next.Sequence <= old.Sequence || !laterEpochRound(epochOf(next, p), next.Round, epochOf(old, p), old.Round) || next.Height <= old.Height {
 			return ErrStale
 		}
 	} else if !errors.Is(e, ErrUnavailable) {
