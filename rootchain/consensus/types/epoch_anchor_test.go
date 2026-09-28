@@ -36,8 +36,41 @@ func TestEpochAnchorProposalWireAndEpoch(t *testing.T) {
 	require.ErrorIs(t, b.IsValid(), ErrEpochAnchor)
 }
 
+func TestEpochAnchorProposalValidationBoundaries(t *testing.T) {
+	a := testEpochAnchor()
+	b := &BlockData{Version: 2, Round: a.Slot, Epoch: a.Epoch, Payload: &Payload{Version: 2}, Anchor: a}
+	require.ErrorIs(t, b.IsValid(), ErrEpochAnchor)
+	b.Round++
+	require.NoError(t, b.IsValid())
+
+	// Once an ordinary QC replaces the bootstrap anchor, its epoch must be
+	// the successor epoch even when the QC is otherwise valid.
+	b.Anchor = nil
+	b.Qc = &QuorumCert{VoteInfo: &RoundInfo{ParentRoundNumber: a.Slot - 1, RoundNumber: a.Slot, Epoch: a.Epoch, Timestamp: 1},
+		LedgerCommitInfo: &base.UnicitySeal{Version: 1, PreviousHash: []byte{1}}}
+	require.NoError(t, b.IsValid())
+	b.Qc.VoteInfo.Epoch--
+	require.ErrorContains(t, b.IsValid(), "ordinary parent QC epochs differ")
+}
+
+func TestEpochAnchorBlockVersionWireGuards(t *testing.T) {
+	b := &BlockData{Round: 1, Payload: &Payload{}}
+	_, err := b.MarshalCBOR()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, b.Version)
+
+	invalid, err := base.Cbor.MarshalTaggedValue(base.RootPartitionBlockDataTag, blockDataLegacyWire{
+		Version: 3, Round: 1, Payload: &Payload{},
+	})
+	require.NoError(t, err)
+	var restored BlockData
+	require.Error(t, restored.UnmarshalCBOR(invalid))
+}
+
 func TestEpochAnchorTimeoutVotesRankBelowOrdinaryQC(t *testing.T) {
 	a := testEpochAnchor()
+	boundaryTimeout := NewAnchorTimeout(a.Slot, a)
+	require.ErrorIs(t, boundaryTimeout.IsValid(), ErrEpochAnchor)
 	anchorTimeout := NewAnchorTimeout(13, a)
 	require.NoError(t, anchorTimeout.IsValid())
 	tc := &TimeoutCert{Timeout: anchorTimeout, Signatures: map[string]*TimeoutVote{}}

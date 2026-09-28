@@ -236,6 +236,7 @@ func TestVoteMsgAnchorWireAndGuard(t *testing.T) {
 	require.NoError(t, types.Cbor.Unmarshal(encoded, &restored))
 	require.Equal(t, vote, &restored)
 	require.Error(t, types.Cbor.Unmarshal([]byte{0xff}, &restored))
+	require.Error(t, restored.UnmarshalCBOR([]byte{0xff}))
 	vote.VoteInfo.Epoch = 1
 	hash, err = vote.VoteInfo.Hash(gocrypto.SHA256)
 	require.NoError(t, err)
