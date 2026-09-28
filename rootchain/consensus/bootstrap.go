@@ -95,12 +95,8 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 	if _, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
 		return nil, err
 	}
-	if archive, ok := x.blockStore.GetDB().(interface{ StoreHandoffBundle(uint64, []byte) error }); ok {
-		encoded, err := basetypes.Cbor.Marshal(bundle)
-		if err != nil {
-			return nil, err
-		}
-		if err := archive.StoreHandoffBundle(g.Epoch, encoded); err != nil {
+	if archive, ok := x.blockStore.GetDB().(handoffBundleArchive); ok {
+		if err := retainEquivalentHandoffBundle(archive, g.Epoch, bundle, old, g.ID()); err != nil {
 			return nil, err
 		}
 	}
@@ -161,6 +157,42 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 	return a, nil
 }
 
+type handoffBundleArchive interface {
+	HandoffBundle(uint64) ([]byte, error)
+	StoreHandoffBundle(uint64, []byte) error
+}
+
+// A later empty old-epoch suffix can produce another valid commit QC for H.
+// Both bundles derive the same genesis; retain the first served bundle so a
+// shard that fetched it and a root that installs a later suffix agree.
+func retainEquivalentHandoffBundle(archive handoffBundleArchive, epoch uint64, incoming handoffdelivery.Bundle,
+	old *basetypes.RootTrustBaseV1, genesisID []byte) error {
+	existing, err := archive.HandoffBundle(epoch)
+	if err != nil {
+		return err
+	}
+	if len(existing) != 0 {
+		var stored handoffdelivery.Bundle
+		if err := basetypes.Cbor.Unmarshal(existing, &stored); err != nil {
+			return handoffdelivery.ErrBundle
+		}
+		if stored.Snapshot == nil || len(stored.Snapshot.ShardInfo) == 0 {
+			return handoffdelivery.ErrBundle
+		}
+		first := stored.Snapshot.ShardInfo[0]
+		verified, err := handoffdelivery.Verify(stored, old, first.Partition, first.Shard, first.ShardConfHash)
+		if err != nil || stored.Body.Epoch != epoch || !bytes.Equal(verified.Genesis.ID(), genesisID) {
+			return handoffdelivery.ErrBundle
+		}
+		return nil
+	}
+	encoded, err := basetypes.Cbor.Marshal(incoming)
+	if err != nil {
+		return err
+	}
+	return archive.StoreHandoffBundle(epoch, encoded)
+}
+
 // InstalledEVMTransition derives the one acknowledgement payload from the
 // signed old control state and this manager's durable installed anchor.
 func (x *ConsensusManager) InstalledEVMTransition(proof handoff.OldCommitProof,
@@ -189,10 +221,7 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff || epoch < 2 {
 		return nil, rctypes.ErrEpochAnchor
 	}
-	archive, ok := x.blockStore.GetDB().(interface {
-		HandoffBundle(uint64) ([]byte, error)
-		StoreHandoffBundle(uint64, []byte) error
-	})
+	archive, ok := x.blockStore.GetDB().(handoffBundleArchive)
 	if ok {
 		raw, err := archive.HandoffBundle(epoch)
 		if err != nil {
@@ -205,6 +234,17 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 			}
 			if bundle.Body.Epoch != epoch || bundle.Proof.Record.Epoch+1 != epoch {
 				return nil, handoffdelivery.ErrBundle
+			}
+			if bundle.Snapshot == nil || len(bundle.Snapshot.ShardInfo) == 0 {
+				return nil, handoffdelivery.ErrBundle
+			}
+			old, err := x.trustBaseStore.GetByEpoch(bundle.Proof.Record.Epoch)
+			if err != nil {
+				return nil, handoffdelivery.ErrBundle
+			}
+			first := bundle.Snapshot.ShardInfo[0]
+			if _, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+				return nil, err
 			}
 			return &bundle, nil
 		}
@@ -232,11 +272,11 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 		return nil, err
 	}
 	if ok {
-		raw, err := basetypes.Cbor.Marshal(bundle)
+		verified, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash)
 		if err != nil {
 			return nil, err
 		}
-		if err := archive.StoreHandoffBundle(epoch, raw); err != nil {
+		if err := retainEquivalentHandoffBundle(archive, epoch, bundle, old, verified.Genesis.ID()); err != nil {
 			return nil, err
 		}
 	}
