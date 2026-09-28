@@ -17,6 +17,7 @@ var (
 type handoffAuthority interface {
 	Predecessor() []byte
 	VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) error
+	VerifyAbort(evmroot.OrderedHandoffRecord, []byte) error
 }
 
 func recordNumber(v any) (uint64, bool) { n, ok := v.(uint64); return n, ok }
@@ -130,8 +131,11 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 		}
 		phase = "committed"
 	case "abort":
-		if len(companion) != 0 || previous.Phase != "prepared" && previous.Phase != "endorsed" ||
+		if previous.Phase != "prepared" && previous.Phase != "endorsed" ||
 			!bytes.Equal(r.NextBodyID, old.NextBodyID) || r.ActivationRound != old.ActivationRound {
+			return nil, ErrHandoffRecord
+		}
+		if authority.VerifyAbort(r, companion) != nil {
 			return nil, ErrHandoffRecord
 		}
 		phase = "aborted"

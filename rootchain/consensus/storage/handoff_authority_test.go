@@ -75,6 +75,21 @@ func (f authorizedFixture) companion(t *testing.T, r evmroot.OrderedHandoffRecor
 	return encoded
 }
 
+func (f authorizedFixture) abortCompanion(t *testing.T, r evmroot.OrderedHandoffRecord, names ...string) []byte {
+	t.Helper()
+	message, err := AbortEndorsementBytes(r)
+	require.NoError(t, err)
+	sigs := make(map[string]hex.Bytes)
+	for _, name := range names {
+		sig, err := f.signers[name].SignBytes(message)
+		require.NoError(t, err)
+		sigs[name] = sig
+	}
+	encoded, err := (AbortAuthorization{Version: 1, Signatures: sigs}).Bytes()
+	require.NoError(t, err)
+	return encoded
+}
+
 func TestConfigureHandoffAuthorityRequiresAuthenticCurrentBase(t *testing.T) {
 	f := newAuthorizedFixture(t)
 	tb := *f.store.handoffAuth.(*v1HandoffAuthority).trust
@@ -225,7 +240,8 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: beforeAbort.RootHash}}}
 		_, err = f.store.Add(invalidAbort, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
-		addProfileBlock(t, f.store, 3, [][]byte{f.record("abort", 3, 0).Bytes()})
+		abort := f.record("abort", 3, 0)
+		addProfileBlock(t, f.store, 3, [][]byte{abort.Bytes(), f.abortCompanion(t, abort, "old-a", "old-b", "old-c")})
 		parent, err := f.store.Block(3)
 		require.NoError(t, err)
 		skipped := &rctypes.BlockData{Version: 2, Round: 4, Epoch: 1,
@@ -236,5 +252,46 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		prepared := addProfileBlock(t, f.store, 4, [][]byte{f.record("prepare", 4, 1).Bytes()})
 		require.Equal(t, "prepared", prepared.ShardState.Control.Phase)
 		require.Equal(t, uint64(1), prepared.ShardState.Control.Attempt)
+	})
+	t.Run("abort proof requires quorum", func(t *testing.T) {
+		f := newAuthorizedFixture(t)
+		addProfileBlock(t, f.store, 2, [][]byte{f.record("prepare", 2, 0).Bytes()})
+		abort := f.record("abort", 3, 0)
+		parent, err := f.store.Block(2)
+		require.NoError(t, err)
+		block := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), f.abortCompanion(t, abort, "old-a")}},
+			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
+		_, err = f.store.Add(block, nil)
+		require.ErrorIs(t, err, ErrHandoffRecord)
+	})
+	t.Run("abort signature binds attempt", func(t *testing.T) {
+		f := newAuthorizedFixture(t)
+		addProfileBlock(t, f.store, 2, [][]byte{f.record("prepare", 2, 0).Bytes()})
+		abort := f.record("abort", 3, 0)
+		wrongAttempt := abort
+		wrongAttempt.Attempt++
+		parent, err := f.store.Block(2)
+		require.NoError(t, err)
+		block := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), f.abortCompanion(t, wrongAttempt, "old-a", "old-b", "old-c")}},
+			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
+		_, err = f.store.Add(block, nil)
+		require.ErrorIs(t, err, ErrHandoffRecord)
+	})
+	t.Run("abort signature binds predecessor", func(t *testing.T) {
+		f := newAuthorizedFixture(t)
+		addProfileBlock(t, f.store, 2, [][]byte{f.record("prepare", 2, 0).Bytes()})
+		abort := f.record("abort", 3, 0)
+		wrongPredecessor := abort
+		wrongPredecessor.PredecessorBodyID = bytes.Clone(abort.PredecessorBodyID)
+		wrongPredecessor.PredecessorBodyID[0] ^= 1
+		parent, err := f.store.Block(2)
+		require.NoError(t, err)
+		block := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), f.abortCompanion(t, wrongPredecessor, "old-a", "old-b", "old-c")}},
+			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
+		_, err = f.store.Add(block, nil)
+		require.ErrorIs(t, err, ErrHandoffRecord)
 	})
 }

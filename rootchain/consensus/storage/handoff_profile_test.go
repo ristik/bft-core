@@ -30,6 +30,7 @@ type testRecordAuthority struct{}
 
 func (testRecordAuthority) Predecessor() []byte                                     { return make([]byte, 32) }
 func (testRecordAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) error { return nil }
+func (testRecordAuthority) VerifyAbort(evmroot.OrderedHandoffRecord, []byte) error  { return nil }
 
 func profileStore(t *testing.T) *BlockStore {
 	t.Helper()
@@ -143,6 +144,17 @@ func TestProfileSwitchRejectsUnsupported(t *testing.T) {
 	require.NoError(t, err)
 	digest := sha256.Sum256(encoded)
 	require.Equal(t, "886683a3b83db9020f43bee8e9b49d3926cef0bff52048fe7a77dc9c5b61ed60", hex.EncodeToString(digest[:]))
+}
+
+func TestAbortRequiresPreparedOrEndorsedPhase(t *testing.T) {
+	zero := make([]byte, 32)
+	body := bytes.Repeat([]byte{1}, 32)
+	preparedRecord := record("prepare", 2, 7, zero, body, zero)
+	control := &evmroot.ControlState{Network: 5, Epoch: 1, PredecessorBodyID: zero,
+		Attempt: 0, Phase: "frozen", OrderedRound: 2, RecordBytes: preparedRecord}
+	_, err := applyHandoffRecord(control, record("abort", 3, 7, zero, body, zero),
+		5, 1, 3, testRecordAuthority{}, nil)
+	require.ErrorIs(t, err, ErrHandoffRecord)
 }
 
 func TestLegacyAddRejectsProfileTwoVersion(t *testing.T) {

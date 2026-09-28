@@ -22,11 +22,26 @@ type FreezeAuthorization struct {
 
 func (a FreezeAuthorization) Bytes() ([]byte, error) { return types.Cbor.Marshal(a) }
 
+// AbortAuthorization is the block-local old-set quorum proof for an abort.
+type AbortAuthorization struct {
+	_          struct{} `cbor:",toarray"`
+	Version    uint64
+	Signatures map[string]hex.Bytes
+}
+
+func (a AbortAuthorization) Bytes() ([]byte, error) { return types.Cbor.Marshal(a) }
+
 // EndorsementBytes uses D4's old-set endorsement domain and fixes all fields
 // known at freeze. The signatures do not enter the ordered record ID.
 func EndorsementBytes(r evmroot.OrderedHandoffRecord) ([]byte, error) {
 	return types.Cbor.Marshal([]any{"UNICITY_D4_ENDORSEMENT", uint64(1), r.Network, r.Epoch,
 		r.PredecessorBodyID, r.Attempt, r.NextBodyID, r.FrozenID})
+}
+
+// AbortEndorsementBytes binds an abort quorum to its authority and attempt.
+func AbortEndorsementBytes(r evmroot.OrderedHandoffRecord) ([]byte, error) {
+	return types.Cbor.Marshal([]any{"UNICITY_D4_ENDORSEMENT", uint64(1), r.Network, r.Epoch,
+		r.PredecessorBodyID, r.Attempt, "abort"})
 }
 
 type v1HandoffAuthority struct {
@@ -100,15 +115,42 @@ func (a *v1HandoffAuthority) VerifyFreeze(r evmroot.OrderedHandoffRecord, compan
 	if err != nil {
 		return ErrHandoffRecord
 	}
+	if err := a.verifyQuorum(message, proof.Signatures); err != nil {
+		return ErrHandoffRecord
+	}
+	return nil
+}
+
+func (a *v1HandoffAuthority) VerifyAbort(r evmroot.OrderedHandoffRecord, companion []byte) error {
+	if len(companion) == 0 || len(companion) > 1<<20 || r.Epoch != a.trust.Epoch ||
+		r.Network != uint64(a.trust.NetworkID) || !bytes.Equal(r.PredecessorBodyID, a.predecessor) {
+		return ErrHandoffRecord
+	}
+	var proof AbortAuthorization
+	if err := types.Cbor.Unmarshal(companion, &proof); err != nil || proof.Version != 1 || len(proof.Signatures) == 0 {
+		return ErrHandoffRecord
+	}
+	canonical, err := proof.Bytes()
+	if err != nil || !bytes.Equal(canonical, companion) {
+		return ErrHandoffRecord
+	}
+	message, err := AbortEndorsementBytes(r)
+	if err != nil || a.verifyQuorum(message, proof.Signatures) != nil {
+		return ErrHandoffRecord
+	}
+	return nil
+}
+
+func (a *v1HandoffAuthority) verifyQuorum(message []byte, signatures map[string]hex.Bytes) error {
 	var weight uint64
-	for signer, signature := range proof.Signatures {
+	for signer, signature := range signatures {
 		stake, err := a.trust.VerifySignature(message, signature, signer)
 		if err != nil || math.MaxUint64-weight < stake {
 			return ErrHandoffRecord
 		}
 		weight += stake
 	}
-	if err := a.trust.VerifyQuorumSignatures(message, proof.Signatures); err != nil {
+	if err := a.trust.VerifyQuorumSignatures(message, signatures); err != nil {
 		return ErrHandoffRecord
 	}
 	return nil
