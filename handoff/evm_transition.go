@@ -5,6 +5,7 @@ import (
 	"math"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -76,7 +77,7 @@ func DecodeEVMTransition(data []byte) (EVMTransition, error) {
 // the successor identity before using the installed typed anchor. The control
 // state must carry the freeze parent committed under the same old QC.
 func TransitionFromInstalledAnchor(p OldCommitProof, old *types.RootTrustBaseV1,
-	body evmroot.TrustBaseBodyV2, anchor *rctypes.EpochAnchor) (EVMTransition, error) {
+	body evmroot.TrustBaseBodyV2, anchor *rctypes.EpochAnchor, successorTR certification.TechnicalRecord) (EVMTransition, error) {
 	verified, err := VerifyOldCommitProof(p, old)
 	if err != nil || anchor == nil || len(p.Control.FrozenParent) != 32 {
 		return EVMTransition{}, ErrProof
@@ -89,6 +90,10 @@ func TransitionFromInstalledAnchor(p OldCommitProof, old *types.RootTrustBaseV1,
 		!bytes.Equal(anchor.GenesisID, g.ID()) || !bytes.Equal(anchor.StateRoot, v.Root) {
 		return EVMTransition{}, ErrProof
 	}
+	trHash, err := successorTR.Hash()
+	if err != nil || successorTR.Round == 0 || !bytes.Equal(trHash, p.Record.SuccessorTRHash) {
+		return EVMTransition{}, ErrProof
+	}
 	var t EVMTransition
 	t.OldEpoch, t.NewEpoch = p.Record.Epoch, g.Epoch
 	copy(t.NextBodyID[:], p.Record.NextBodyID)
@@ -98,10 +103,8 @@ func TransitionFromInstalledAnchor(p OldCommitProof, old *types.RootTrustBaseV1,
 	copy(t.Ack.FrozenParent[:], p.Control.FrozenParent)
 	t.Ack.SuccessorParent = t.Ack.FrozenParent
 	copy(t.Ack.SuccessorTR[:], p.Record.SuccessorTRHash)
-	// The acknowledgement is executed at the first successor root round. Derive
-	// it from the verified genesis schedule and installed anchor, not a caller
-	// supplied value that builders and followers could disagree on.
-	t.Ack.EVMRound = g.Start
+	// The root activation round and shard assignment are separate counters.
+	t.Ack.EVMRound = successorTR.Round
 	if !t.Valid() {
 		return EVMTransition{}, ErrProof
 	}

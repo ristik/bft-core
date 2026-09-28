@@ -113,7 +113,11 @@ func (x *ConsensusManager) InstalledEVMTransition(proof handoff.OldCommitProof,
 	if err != nil {
 		return nil, fmt.Errorf("old root trust lineage: %w", err)
 	}
-	transition, err := handoff.TransitionFromInstalledAnchor(proof, old, body, x.epochAnchor)
+	successorTR, err := x.blockStore.AnchoredTechnicalRecord(proof.Record.SuccessorTRHash)
+	if err != nil {
+		return nil, fmt.Errorf("verified successor shard assignment: %w", err)
+	}
+	transition, err := handoff.TransitionFromInstalledAnchor(proof, old, body, x.epochAnchor, successorTR)
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
 )
@@ -74,6 +75,38 @@ func (x *BlockStore) RootAnchor() *rctypes.EpochAnchor {
 }
 
 func (x *BlockStore) RootEpoch() uint64 { return x.blockTree.Root().BlockData.Epoch }
+
+// AnchoredTechnicalRecord selects the committed shard assignment named by H.
+// It is available only while the installed snapshot is still the root.
+func (x *BlockStore) AnchoredTechnicalRecord(hash []byte) (certification.TechnicalRecord, error) {
+	x.lock.RLock()
+	defer x.lock.RUnlock()
+	root := x.blockTree.Root()
+	if !isEpochAnchorRoot(root) || len(hash) != 32 {
+		return certification.TechnicalRecord{}, rctypes.ErrEpochAnchor
+	}
+	var matched *certification.TechnicalRecord
+	for _, shard := range root.ShardState.States {
+		if shard == nil {
+			return certification.TechnicalRecord{}, rctypes.ErrEpochAnchor
+		}
+		digest, err := shard.TR.Hash()
+		if err != nil {
+			return certification.TechnicalRecord{}, err
+		}
+		if bytes.Equal(digest, hash) {
+			if matched != nil {
+				return certification.TechnicalRecord{}, rctypes.ErrEpochAnchor
+			}
+			tr := shard.TR
+			matched = &tr
+		}
+	}
+	if matched == nil || matched.Round == 0 {
+		return certification.TechnicalRecord{}, rctypes.ErrEpochAnchor
+	}
+	return *matched, nil
+}
 
 // VerifyRecoveryAnchor reconstructs the received recovery ShardInfo and P_CTL
 // with the production tree, then compares it to the locally proof-verified G.

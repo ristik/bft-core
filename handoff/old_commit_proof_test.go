@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -207,6 +208,9 @@ func TestInstalledEVMTransitionBindsCommittedFrozenParent(t *testing.T) {
 	require.NoError(t, body.Validate())
 	id := body.Identity()
 	p.Record.NextBodyID = id[:]
+	successorTR := certification.TechnicalRecord{Round: 41}
+	p.Record.SuccessorTRHash, err = successorTR.Hash()
+	require.NoError(t, err)
 	p.Control.FrozenParent = bytes.Repeat([]byte{0x33}, 32)
 	rebuildOldProofRoot(t, &p, signers)
 	v, err := VerifyOldCommitProof(p, tb)
@@ -216,9 +220,9 @@ func TestInstalledEVMTransitionBindsCommittedFrozenParent(t *testing.T) {
 		CommitSealRound: v.CommitSealRound, Epoch: v.SignerEpoch, Record: p.Record}, body)
 	require.NoError(t, err)
 	a := &rctypes.EpochAnchor{GenesisID: g.ID(), Epoch: g.Epoch, Slot: g.Start - 1, StateRoot: v.StateRoot[:]}
-	transition, err := TransitionFromInstalledAnchor(p, tb, body, a)
+	transition, err := TransitionFromInstalledAnchor(p, tb, body, a, successorTR)
 	require.NoError(t, err)
-	require.Equal(t, g.Start, transition.Ack.EVMRound)
+	require.Equal(t, successorTR.Round, transition.Ack.EVMRound)
 	require.Equal(t, p.Control.FrozenParent, transition.Ack.FrozenParent[:])
 	encoded, err := transition.Encode()
 	require.NoError(t, err)
@@ -227,10 +231,14 @@ func TestInstalledEVMTransitionBindsCommittedFrozenParent(t *testing.T) {
 	require.Equal(t, transition, decoded)
 	bad := *a
 	bad.GenesisID = bytes.Repeat([]byte{0x55}, 32)
-	_, err = TransitionFromInstalledAnchor(p, tb, body, &bad)
+	_, err = TransitionFromInstalledAnchor(p, tb, body, &bad, successorTR)
+	require.ErrorIs(t, err, ErrProof)
+	badTR := successorTR
+	badTR.Round++
+	_, err = TransitionFromInstalledAnchor(p, tb, body, a, badTR)
 	require.ErrorIs(t, err, ErrProof)
 	p.Control.FrozenParent[0] ^= 1
-	_, err = TransitionFromInstalledAnchor(p, tb, body, a)
+	_, err = TransitionFromInstalledAnchor(p, tb, body, a, successorTR)
 	require.ErrorIs(t, err, ErrProof)
 }
 

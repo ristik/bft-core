@@ -5,26 +5,33 @@ import (
 	"context"
 	"crypto"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
 	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/registrygenesis"
+	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	tbstore "github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
+	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -38,10 +45,91 @@ type anchorReplica struct {
 	history *trusthistorystore.Store
 	db      storage.BoltDB
 	oldHead *abdrc.CommittedBlock
+	proof   handoff.OldCommitProof
+	body    evmroot.TrustBaseBodyV2
 }
 
-func newAnchorReplicas(t *testing.T, commitSealRound uint64) (map[peer.ID]*anchorReplica, *rctypes.EpochAnchor, time.Time) {
+type oneEpochTrust struct{ tb *types.RootTrustBaseV1 }
+
+func (s oneEpochTrust) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	if epoch != s.tb.Epoch {
+		return nil, fmt.Errorf("epoch %d unavailable", epoch)
+	}
+	return s.tb, nil
+}
+
+// This drives the real adapter derivation with a transition exported from an
+// installed root anchor. The root starts at round 7; the shard is assigned 1.
+func TestInstalledTransitionAdapterUsesAssignedShardRound(t *testing.T) {
+	chain := certifiedchain.New(t, 3, 0)
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(chain.Genesis.GenesisJSON(), &doc))
+	var alloc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(doc["alloc"], &alloc))
+	for key := range alloc {
+		if strings.EqualFold(strings.TrimPrefix(key, "0x"), strings.TrimPrefix(registryproof.RegistryAddress.Hex(), "0x")) {
+			delete(alloc, key)
+		}
+	}
+	doc["alloc"], _ = json.Marshal(alloc)
+	source, err := json.Marshal(doc)
+	require.NoError(t, err)
+	artifact, err := registrygenesis.PinnedArtifact()
+	require.NoError(t, err)
+	prepared, err := registrygenesis.PrepareGenesisJSON(certifiedchain.Config(3), chain.Pins, artifact, source, registrygenesis.GenesisJSONLimits{})
+	require.NoError(t, err)
+	origin := prepared.Origin()
+	snapshot, err := registryproof.Verify(origin.ProofContext(), origin.BlockHash(), origin.Evidence())
+	require.NoError(t, err)
+	replicas, anchor, _ := newAnchorReplicas(t, 4, origin.BlockHash().Bytes())
+	replica := firstReplica(replicas)
+	// Reuse the verified proof and body already installed by the helper through
+	// the public manager export path, rather than constructing an Ack by hand.
+	transitionBytes, err := replica.manager.InstalledEVMTransition(replica.proof, replica.body)
+	require.NoError(t, err)
+	transition, err := handoff.DecodeEVMTransition(transitionBytes)
+	require.NoError(t, err)
+	require.NotEqual(t, anchor.Slot+1, transition.Ack.EVMRound)
+
+	tr := certifiedchain.Technical(0)
+	tr.Round = transition.Ack.EVMRound
+	uc := chain.Certify(chain.Signer, &types.InputRecord{Version: 1}, tr, 4)
+	uc.UnicitySeal.NetworkID = 3
+	uc.UnicitySeal.Epoch = 2
+	uc.UnicitySeal.Signatures = nil
+	verifier, err := chain.Signer.Verifier()
+	require.NoError(t, err)
+	key, err := verifier.MarshalPublicKey()
+	require.NoError(t, err)
+	id, err := network.NodeIDFromPublicKeyBytes(key)
+	require.NoError(t, err)
+	require.NoError(t, uc.UnicitySeal.Sign(id.String(), chain.Signer))
+	tb := *chain.TrustBase
+	tb.Epoch = 2
+	tb.Signatures = nil
+	vc := &engineapi.VerifierContext{NetworkID: 3, PartitionID: 8, ShardID: types.ShardID{},
+		ShardConfHash: origin.FullShardConfHash().Bytes(), RootEpoch: 1, TrustBases: oneEpochTrust{&tb},
+		GenesisOrigin: origin, BootstrapSnapshot: snapshot, Transition: transitionBytes}
+	adapter := engineapi.NewAdapter(engineapi.Config{Verifier: vc}, nil)
+	params := shardnode.RoundParams{Round: tr.Round, Parent: shardnode.BlockRef{Number: 0,
+		Hash: origin.BlockHash().Bytes(), StateRoot: origin.StateRoot().Bytes()},
+		AuthorizingCertificate: uc, AuthorizingTechnicalRecord: tr}
+	_, err = adapter.PrepareBuild(context.Background(), params)
+	require.NoError(t, err)
+	wrong := transition
+	wrong.Ack.EVMRound = anchor.Slot + 1
+	vc.Transition, err = wrong.Encode()
+	require.NoError(t, err)
+	_, err = adapter.PrepareBuild(context.Background(), params)
+	require.ErrorContains(t, err, "transition epoch, round, or frozen parent mismatch")
+}
+
+func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]byte) (map[peer.ID]*anchorReplica, *rctypes.EpochAnchor, time.Time) {
 	t.Helper()
+	parent := bytes.Repeat([]byte{5}, 32)
+	if len(frozenParent) == 1 {
+		parent = frozenParent[0]
+	}
 	oldSigners := make(map[string]abcrypto.Signer)
 	oldNodes := make([]*testutils.TestNode, 4)
 	for i := range oldNodes {
@@ -72,17 +160,19 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64) (map[peer.ID]*ancho
 		Members: members, RootThreshold: 3, PredecessorHash: link}
 	require.NoError(t, body.Validate())
 	bodyID := body.Identity()
-	record := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: 4, ActivationRound: 7,
-		PredecessorBodyID: oldID, NextBodyID: bodyID[:], FrozenID: bytes.Repeat([]byte{2}, 32),
-		SuccessorTRHash: bytes.Repeat([]byte{3}, 32), Kind: "commit"}
-	control := evmroot.ControlState{Network: 5, Epoch: 1, OrderedRound: 4, PredecessorBodyID: oldID,
-		Phase: "committed", RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: bytes.Repeat([]byte{5}, 32)}
 	_, shardValidators := testutils.CreateTestNodes(t, 3)
 	shardConf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: partitionID,
 		ShardID: shardID, PartitionTypeID: 999, TypeIDLen: 8, UnitIDLen: 256,
 		T2Timeout: 2500 * time.Millisecond, Validators: shardValidators, Epoch: 0, EpochStart: 1}
 	shardState, err := storage.NewShardInfo(shardConf, crypto.SHA256)
 	require.NoError(t, err)
+	successorTRHash, err := shardState.TR.Hash()
+	require.NoError(t, err)
+	record := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: 4, ActivationRound: 7,
+		PredecessorBodyID: oldID, NextBodyID: bodyID[:], FrozenID: bytes.Repeat([]byte{2}, 32),
+		SuccessorTRHash: successorTRHash, Kind: "commit"}
+	control := evmroot.ControlState{Network: 5, Epoch: 1, OrderedRound: 4, PredecessorBodyID: oldID,
+		Phase: "committed", RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: parent}
 	shardKey := types.PartitionShardID{PartitionID: partitionID, ShardID: shardID.Key()}
 	state := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{shardKey: shardState},
 		Changed: storage.ShardSet{shardKey: {}}, Control: &control}
@@ -156,8 +246,9 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64) (map[peer.ID]*ancho
 		transition, err := handoff.DecodeEVMTransition(transitionBytes)
 		require.NoError(t, err)
 		require.Equal(t, uint64(2), transition.NewEpoch)
-		require.Equal(t, installed.Slot+1, transition.Ack.EVMRound)
-		require.Equal(t, bytes.Repeat([]byte{5}, 32), transition.Ack.FrozenParent[:])
+		require.NotEqual(t, installed.Slot+1, shardState.TR.Round, "root and shard counters differ in this fixture")
+		require.Equal(t, shardState.TR.Round, transition.Ack.EVMRound)
+		require.Equal(t, parent, transition.Ack.FrozenParent[:])
 		require.Equal(t, installed.GenesisID, transition.GenesisID[:])
 		if anchor == nil {
 			anchor = installed
@@ -166,7 +257,7 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64) (map[peer.ID]*ancho
 		}
 		manager.pacemaker.Reset(context.Background(), anchor.Slot, nil, nil)
 		t.Cleanup(manager.pacemaker.Stop)
-		replicas[node.PeerConf.ID] = &anchorReplica{manager: manager, net: net, store: trust, history: history, db: db, oldHead: head}
+		replicas[node.PeerConf.ID] = &anchorReplica{manager: manager, net: net, store: trust, history: history, db: db, oldHead: head, proof: proof, body: body}
 	}
 	return replicas, anchor, oldUCAt
 }
