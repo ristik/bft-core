@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"crypto"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/logger"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -30,13 +33,16 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
+	"github.com/unicitynetwork/bft-core/trustactivation"
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
 
 const (
-	rootDBFileName          = "rootchain.db"
-	trustBaseDBFileName     = "trustbase.db"
-	orchestrationDBFileName = "orchestration.db"
-	defaultNetworkTimeout   = 300 * time.Millisecond
+	rootDBFileName             = "rootchain.db"
+	trustBaseDBFileName        = "trustbase.db"
+	orchestrationDBFileName    = "orchestration.db"
+	rootTrustHistoryDBFileName = "root-trust-history.db"
+	defaultNetworkTimeout      = 300 * time.Millisecond
 )
 
 type (
@@ -50,6 +56,8 @@ type (
 		RootDBFile          string // path to Bolt storage file
 		TrustBaseDBFile     string
 		OrchestrationDBFile string
+		TrustHistoryDBFile  string
+		Profile2            bool
 
 		BlockRate        uint32
 		MaxRequests      uint   // certification request channel capacity
@@ -109,6 +117,9 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		fmt.Sprintf("path to the trust base database (default: %s)", filepath.Join("$UBFT_HOME", trustBaseDBFileName)))
 	cmd.Flags().StringVar(&flags.OrchestrationDBFile, "orchestration-db", "",
 		fmt.Sprintf("path to the orchestration database (default: %s)", filepath.Join("$UBFT_HOME", orchestrationDBFileName)))
+	cmd.Flags().BoolVar(&flags.Profile2, "profile-2", false, "run the version-2 root handoff network profile")
+	cmd.Flags().StringVar(&flags.TrustHistoryDBFile, "trust-history-db", "",
+		fmt.Sprintf("profile-2 trust history database (default: %s)", filepath.Join("$UBFT_HOME", rootTrustHistoryDBFileName)))
 
 	cmd.Flags().Uint32Var(&flags.BlockRate, "block-rate", consensus.BlockRate, "block rate (consensus parameter)")
 
@@ -211,6 +222,27 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 
 	consensusParams := consensus.NewConsensusParams()
 	consensusParams.BlockRate = time.Duration(flags.BlockRate) * time.Millisecond
+	var options []consensus.Option
+	if flags.Profile2 {
+		consensusParams.NetworkProfileVersion = storage.ProfileHandoff
+		rootHistoryDB, openErr := flags.initDB(flags.TrustHistoryDBFile, rootTrustHistoryDBFileName)
+		if openErr != nil {
+			return openErr
+		}
+		if closer, ok := rootHistoryDB.(io.Closer); ok {
+			defer closer.Close()
+		}
+		anchorHash, hashErr := trustBase.Hash(crypto.SHA256)
+		if hashErr != nil {
+			return hashErr
+		}
+		identity := sha256.Sum256(append([]byte("unicity/root-profile-2/history/1"), anchorHash...))
+		history, openErr := trusthistorystore.Open(ctx, rootHistoryDB, trustBase, identity, trustactivation.Verifier{})
+		if openErr != nil {
+			return fmt.Errorf("opening root profile-2 history: %w", openErr)
+		}
+		options = append(options, consensus.WithRecoveryProfile2(history))
+	}
 
 	cm, err := consensus.NewConsensusManager(
 		host.ID(),
@@ -220,10 +252,17 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		signer,
 		rootStore,
 		obs,
-		consensus.WithConsensusParams(*consensusParams),
+		append(options, consensus.WithConsensusParams(*consensusParams))...,
 	)
 	if err != nil {
 		return fmt.Errorf("failed initiate distributed consensus manager: %w", err)
+	}
+	if flags.Profile2 {
+		server, err := handoffdelivery.NewServer(cm)
+		if err != nil {
+			return err
+		}
+		server.Register(host)
 	}
 	if err = host.BootstrapConnect(ctx, log); err != nil {
 		return err

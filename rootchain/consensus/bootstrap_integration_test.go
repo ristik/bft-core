@@ -17,6 +17,7 @@ import (
 	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
 	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
@@ -32,6 +33,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 	"github.com/unicitynetwork/bft-core/shardnode"
+	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -214,6 +216,17 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		UC: &shardState.LastCR.UC, TR: &shardState.LastCR.Technical}
 	head := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 2, Epoch: 1, Round: commitSealRound,
 		Payload: &rctypes.Payload{Version: 2}}, ShardInfo: []abdrc.ShardInfo{shardInfo}, Control: &control, CommitQc: qc}
+	bundle := handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: head}
+	delivered, err := handoffdelivery.Verify(bundle, oldTrust, shardState.PartitionID, shardState.ShardID, shardState.ShardConfHash)
+	require.NoError(t, err)
+	deliveredBodyID := body.Identity()
+	require.Equal(t, deliveredBodyID[:], delivered.Genesis.NextBodyID)
+	tampered := *head
+	tampered.ShardInfo = append([]abdrc.ShardInfo(nil), head.ShardInfo...)
+	tampered.ShardInfo[0].IRTR.Round++
+	_, err = handoffdelivery.Verify(handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: &tampered}, oldTrust,
+		shardState.PartitionID, shardState.ShardID, shardState.ShardConfHash)
+	require.ErrorIs(t, err, handoffdelivery.ErrBundle)
 	replicas := make(map[peer.ID]*anchorReplica, len(newNodes))
 	var anchor *rctypes.EpochAnchor
 	for _, node := range newNodes {
@@ -230,7 +243,7 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		require.NoError(t, err)
 		require.NoError(t, trust.Store(oldTrust))
 		historyID := sha256.Sum256([]byte("epoch-anchor-integration"))
-		history, err := trusthistorystore.Open(context.Background(), memorydb.New(), oldTrust, historyID, nil)
+		history, err := trusthistorystore.Open(context.Background(), memorydb.New(), oldTrust, historyID, trustactivation.Verifier{})
 		require.NoError(t, err)
 		net := testnetwork.NewRootMockNetwork()
 		params := *NewConsensusParams()
@@ -240,6 +253,18 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		manager.blockStore, err = storage.NewFromState(crypto.SHA256, head, db, orchestration, obs.Logger(), storage.ProfileHandoff)
 		require.NoError(t, err)
 		installed, err := manager.InstallEpochGenesis(proof, head, body)
+		require.NoError(t, err)
+		served, err := manager.HandoffBundle(context.Background(), body.Epoch)
+		require.NoError(t, err)
+		_, err = handoffdelivery.Verify(*served, oldTrust, shardState.PartitionID, shardState.ShardID, shardState.ShardConfHash)
+		require.NoError(t, err)
+		shardHistory, err := shardnode.NewHistoricalTrustBaseStore(context.Background(), memorydb.New(), oldTrust, historyID, true)
+		require.NoError(t, err)
+		_, err = shardHistory.InstallHandoff(context.Background(), *served, shardState.PartitionID, shardState.ShardID, shardState.ShardConfHash)
+		require.NoError(t, err)
+		_, err = shardHistory.InstallHandoff(context.Background(), *served, shardState.PartitionID, shardState.ShardID, shardState.ShardConfHash)
+		require.NoError(t, err)
+		_, err = shardHistory.GetByEpoch(context.Background(), body.Epoch)
 		require.NoError(t, err)
 		transitionBytes, err := manager.InstalledEVMTransition(proof, body)
 		require.NoError(t, err)

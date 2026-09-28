@@ -41,6 +41,61 @@ func TestEpochAnchorSafetyInstallPreservesNewLocks(t *testing.T) {
 	require.ErrorIs(t, db.InstallEpochAnchorSafety(&other), rctypes.ErrEpochAnchor)
 }
 
+func TestEpochAnchorRootAdvancesOneEpochAndPersistsNewLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "two-anchors.db")
+	db, err := NewBoltStorage(path, WithNoSync())
+	require.NoError(t, err)
+	anchor := func(epoch, slot uint64) *rctypes.EpochAnchor {
+		return &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{byte(epoch)}, 32), Epoch: epoch, Slot: slot, StateRoot: bytes.Repeat([]byte{byte(epoch + 10)}, 32)}
+	}
+	root := func(a *rctypes.EpochAnchor) *ExecutedBlock {
+		return &ExecutedBlock{BlockData: &rctypes.BlockData{Version: 2, Epoch: a.Epoch, Round: a.Slot, Payload: &rctypes.Payload{Version: 2}, Anchor: a}}
+	}
+	a2, a3 := anchor(2, 12), anchor(3, 22)
+	require.NoError(t, db.InstallEpochAnchorRoot(root(a2), a2))
+	require.NoError(t, db.SetHighestQcRound(19, 20))
+	bad := anchor(4, 32)
+	require.ErrorIs(t, db.InstallEpochAnchorRoot(root(bad), bad), rctypes.ErrEpochAnchor)
+	require.ErrorIs(t, db.InstallEpochAnchorRoot(root(anchor(3, 12)), anchor(3, 12)), rctypes.ErrEpochAnchor)
+	require.NoError(t, db.InstallEpochAnchorRoot(root(a3), a3))
+	require.NoError(t, db.InstallEpochAnchorRoot(root(a3), a3))
+	require.ErrorIs(t, db.InstallEpochAnchorRoot(root(a2), a2), rctypes.ErrEpochAnchor)
+	require.EqualValues(t, 22, db.GetHighestQcRound())
+	require.EqualValues(t, 22, db.GetHighestVotedRound())
+	require.NoError(t, db.Close())
+	db, err = NewBoltStorage(path, WithNoSync())
+	require.NoError(t, err)
+	defer db.Close()
+	installed, err := db.ReadEpochAnchorSafety()
+	require.NoError(t, err)
+	require.Equal(t, a3, installed)
+	blocks, err := db.LoadBlocks()
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	require.EqualValues(t, 3, blocks[0].BlockData.Epoch)
+}
+
+func TestHandoffBundleArchiveSurvivesRestartAndRefusesReplacement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "handoff-archive.db")
+	db, err := NewBoltStorage(path, WithNoSync())
+	require.NoError(t, err)
+	id := bytes.Repeat([]byte{7}, 32)
+	require.NoError(t, db.StoreHandoffBody(id, []byte("body")))
+	require.NoError(t, db.StoreHandoffBundle(2, []byte("bundle")))
+	require.ErrorIs(t, db.StoreHandoffBody(id, []byte("other")), ErrHandoffRecord)
+	require.ErrorIs(t, db.StoreHandoffBundle(2, []byte("other")), ErrHandoffRecord)
+	require.NoError(t, db.Close())
+	db, err = NewBoltStorage(path, WithNoSync())
+	require.NoError(t, err)
+	defer db.Close()
+	body, err := db.HandoffBody(id)
+	require.NoError(t, err)
+	require.Equal(t, []byte("body"), body)
+	bundle, err := db.HandoffBundle(2)
+	require.NoError(t, err)
+	require.Equal(t, []byte("bundle"), bundle)
+}
+
 func TestEpochAnchorRootInstallRollsBackAtEveryWriteAndRestarts(t *testing.T) {
 	steps := []string{"root-put", "old-block-delete-0", "old-block-delete-1", "safety-anchor", "highest-voted", "highest-qc", "vote-delete", "timeout-delete"}
 	for _, failAt := range steps {
