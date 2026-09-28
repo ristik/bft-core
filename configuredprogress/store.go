@@ -13,6 +13,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/certifiedstore"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	bfttypes "github.com/unicitynetwork/bft-go-base/types"
@@ -105,6 +106,7 @@ type Store struct {
 	settings   Settings
 	checkpoint func(string) error
 	journal    bool
+	frontier   *frontier.Policy
 }
 
 // OpenConfiguredV2 opens an isolated v2 database without creating its bucket or initializing data.

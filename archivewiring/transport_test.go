@@ -15,6 +15,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/unicitynetwork/bft-core/archive"
+	"github.com/unicitynetwork/bft-core/frontier"
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
 	"github.com/unicitynetwork/bft-core/network"
 )
@@ -149,11 +150,28 @@ func TestTwoInProcessReplicaReadbacksAndOneReplicaLoss(t *testing.T) {
 			t.Fatalf("replica %s: %v", id, err)
 		}
 	}
+	digest, err := archive.ManifestDigest(q, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	availability := ReplicaAvailability{Host: sender, Replicas: [2]peer.ID{first.ID(), second.ID()}, Limits: DefaultLimits()}
+	for _, id := range []peer.ID{first.ID(), second.ID()} {
+		if err := availability.VerifyAvailable(id.String(), q, digest); err != nil {
+			t.Fatalf("frontier read-back %s: %v", id, err)
+		}
+	}
+	if err := availability.VerifyAvailable("not configured", q, digest); !errors.Is(err, frontier.ErrContext) {
+		t.Fatalf("unconfigured frontier replica: %v", err)
+	}
 	if err := second.Close(); err != nil {
 		t.Fatal(err)
 	}
 	short := DefaultLimits()
 	short.Deadline = 250 * time.Millisecond
+	availability.Limits = short
+	if err := availability.VerifyAvailable(second.ID().String(), q, digest); !errors.Is(err, frontier.ErrUnavailable) {
+		t.Fatalf("lost frontier copy: %v", err)
+	}
 	if err := PutAndReadBack(context.Background(), sender, second.ID(), q, rec, short); !errors.Is(err, ErrTransport) {
 		t.Fatalf("lost replica: %v", err)
 	}

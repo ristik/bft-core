@@ -33,6 +33,7 @@ import (
 	"github.com/unicitynetwork/bft-core/configuredadmission"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
 	"github.com/unicitynetwork/bft-core/engineapi"
+	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/boltdb"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
@@ -74,6 +75,7 @@ type shardNodeRunFlags struct {
 	JournalBytes        int64
 	ArchiveStore        string
 	ArchiveReplicas     []string
+	ArchivePrune        bool
 
 	// CertifiedRecordStore enables the certified-block record store (#14) at this path. Empty, the default,
 	// constructs nothing, and the node runs exactly as before. See startCertifiedRecord.
@@ -156,11 +158,13 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 	cmd.Flags().IntVar(&flags.JournalObservations, "journal-observations", 512,
 		"maximum retained certificate observations with --execution-journal; admission stops at capacity")
 	cmd.Flags().Int64Var(&flags.JournalBytes, "journal-bytes", 64<<20,
-		"maximum retained journal bytes with --execution-journal; no pruning in M1")
+		"maximum retained hot journal bytes with --execution-journal; pruning requires --archive-prune")
 	cmd.Flags().StringVar(&flags.ArchiveStore, "archive-store", "",
 		"local certified archive directory; requires --execution-journal and exactly two --archive-replica peer IDs")
 	cmd.Flags().StringSliceVar(&flags.ArchiveReplicas, "archive-replica", nil,
 		"configured replica peer ID; set exactly twice with --archive-store")
+	cmd.Flags().BoolVar(&flags.ArchivePrune, "archive-prune", false,
+		"advance the certified frontier and prune acknowledged journal history; requires --archive-store")
 	cmd.Flags().StringVar(&flags.CertifiedRecordStore, "certified-record-store", "",
 		"path of the certified-block record store (#14); empty leaves it off. Requires --executor engine-api and a SealRegistry shard configuration. The record is reloaded and reported at startup, and the witness of every block the round commits is captured over --eth-url and published; none of it changes voting")
 	cmd.Flags().IntVar(&flags.CertifiedRecordRetain, "certified-record-retain", defaultCertifiedRecordRetain,
@@ -192,6 +196,9 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
 	if flags.ArchiveStore != "" && (flags.ExecutionJournal == "" || len(flags.ArchiveReplicas) != 2) || flags.ArchiveStore == "" && len(flags.ArchiveReplicas) != 0 {
+		return archivewiring.ErrConfig
+	}
+	if flags.ArchivePrune && flags.ArchiveStore == "" {
 		return archivewiring.ErrConfig
 	}
 	if flags.ExecutionJournal != "" && flags.EvidenceRecover {
@@ -414,6 +421,48 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		if openErr = journalStore.EnableJournal(ctx, journalCtx, limits); openErr != nil {
 			return fmt.Errorf("activating execution journal: %w", openErr)
 		}
+		var archiveLocal *archive.Store
+		var archiveSubject archive.Context
+		var archiveReplicas [2]libp2ppeer.ID
+		var archiveAllowed []libp2ppeer.ID
+		archiveTransportLimits := archivewiring.DefaultLimits()
+		if flags.ArchiveStore != "" {
+			adapter, ok := executor.(*engineapi.Adapter)
+			if !ok || !origin.Valid() {
+				return archivewiring.ErrConfig
+			}
+			identity, e := adapter.CheckedExecutionConfigBytes(ctx, [32]byte(origin.ExecutionConfigIdentity()))
+			if e != nil {
+				return fmt.Errorf("checking archive execution identity: %w", e)
+			}
+			archiveSubject, e = archivewiring.ContextFrom(journalCtx, identity)
+			if e != nil {
+				return fmt.Errorf("checking archive subject: %w", e)
+			}
+			archiveLocal, e = archive.Open(flags.ArchiveStore)
+			if e != nil {
+				return fmt.Errorf("opening archive: %w", e)
+			}
+			archiveAllowed, e = shardPeers(peer, shardConf.Validators)
+			if e != nil {
+				return e
+			}
+			archiveReplicas, e = configuredArchiveReplicas(flags.ArchiveReplicas, archiveAllowed, peer.ID())
+			if e != nil {
+				return e
+			}
+			archiveServer, e := archivewiring.NewServer(archiveLocal, archiveSubject, archivewiring.JournalVerifier(journalStore, journalCtx, limits, archiveSubject), archiveAllowed, archiveTransportLimits)
+			if e != nil {
+				return fmt.Errorf("starting archive replica: %w", e)
+			}
+			archiveServer.Register(ctx, peer)
+			if flags.ArchivePrune {
+				policy := frontier.Policy{Context: archiveSubject, Replicas: [2]string{archiveReplicas[0].String(), archiveReplicas[1].String()}, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
+				if e = journalStore.EnableFrontier(ctx, journalCtx, limits, policy); e != nil {
+					return fmt.Errorf("authenticating certified frontier: %w", e)
+				}
+			}
+		}
 		journalImage, loadErr := journalStore.LoadJournal(ctx, journalCtx, limits)
 		if loadErr != nil {
 			return fmt.Errorf("verifying execution journal: %w", loadErr)
@@ -456,46 +505,16 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		server.Register(peer)
 		coordinator.Host, coordinator.Providers, coordinator.TransportLimits = peer, providers, shardnode.DefaultJournalTransportLimits()
 		node.SetJournalRecovery(coordinator, coordinator)
-		if openErr = node.SetJournalAdmission(configuredadmission.JournalFactory{Store: journalStore, Origin: origin, Limits: limits, CatchUp: coordinator.AcquireForCertificate, OnStop: node.ReportJournalStop, Logger: flags.observe.Logger()}); openErr != nil {
+		if openErr = node.SetJournalAdmission(configuredadmission.JournalFactory{Store: journalStore, Origin: origin, ExecutionConfigV2: executionID, Limits: limits, CatchUp: coordinator.AcquireForCertificate, OnStop: node.ReportJournalStop, Logger: flags.observe.Logger()}); openErr != nil {
 			return fmt.Errorf("enabling journal certification admission: %w", openErr)
 		}
 		flags.observe.Logger().Info("execution journal verified", "candidates", len(journalImage.Candidates), "observations", len(journalImage.Observations), "bytes", journalImage.Bytes)
 		if flags.ArchiveStore != "" {
-			adapter, ok := executor.(*engineapi.Adapter)
-			if !ok || !origin.Valid() {
-				return archivewiring.ErrConfig
-			}
-			identity, e := adapter.CheckedExecutionConfigBytes(ctx, [32]byte(origin.ExecutionConfigIdentity()))
-			if e != nil {
-				return fmt.Errorf("checking archive execution identity: %w", e)
-			}
-			subject, e := archivewiring.ContextFrom(journalCtx, identity)
-			if e != nil {
-				return fmt.Errorf("checking archive subject: %w", e)
-			}
-			local, e := archive.Open(flags.ArchiveStore)
-			if e != nil {
-				return fmt.Errorf("opening archive: %w", e)
-			}
-			allowed, e := shardPeers(peer, shardConf.Validators)
-			if e != nil {
-				return e
-			}
-			replicas, e := configuredArchiveReplicas(flags.ArchiveReplicas, allowed, peer.ID())
-			if e != nil {
-				return e
-			}
-			transportLimits := archivewiring.DefaultLimits()
-			server, e := archivewiring.NewServer(local, subject, archivewiring.JournalVerifier(journalStore, journalCtx, limits, subject), allowed, transportLimits)
-			if e != nil {
-				return fmt.Errorf("starting archive replica: %w", e)
-			}
-			server.Register(ctx, peer)
 			metrics, e := archivewiring.NewMetrics(flags.observe.Meter("archive"))
 			if e != nil {
 				return e
 			}
-			publisher := &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: local, Subject: subject, Host: peer, Replicas: replicas, Limits: transportLimits, Log: flags.observe.Logger(), Metrics: metrics}
+			publisher := &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics}
 			if e := publisher.Validate(); e != nil {
 				_ = metrics.Close()
 				return e
@@ -504,6 +523,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			archiveDone := make(chan struct{})
 			go func() { defer close(archiveDone); _ = publisher.Run(archiveCtx) }()
 			defer func() { cancelArchive(); <-archiveDone; _ = metrics.Close() }()
+			if flags.ArchivePrune {
+				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: peer, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger()}
+				pruneDone := make(chan struct{})
+				go func() { defer close(pruneDone); _ = worker.Run(archiveCtx) }()
+				defer func() { cancelArchive(); <-pruneDone }()
+			}
 		}
 	}
 

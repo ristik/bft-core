@@ -37,7 +37,7 @@ type Acknowledgment struct {
 }
 type Record struct {
 	Sequence  uint64
-	Round     uint64
+	Round     uint64 // resulting UC root round; partition round remains in its input record
 	Height    uint64
 	StateRoot [32]byte
 	Subject   archive.Request
@@ -221,10 +221,13 @@ func PlanAdvance(current *Record, next Record, p Policy, covered []Coverage, obl
 			return Plan{}, ErrStale
 		}
 	}
-	if current == nil || p.Binding == nil || p.Availability == nil || (len(covered) == 0 && next.Height > current.Height) {
+	if p.Binding == nil || p.Availability == nil || len(covered) == 0 {
 		return Plan{}, ErrAcknowledgment
 	}
-	previous := *current
+	previous := Record{}
+	if current != nil {
+		previous = *current
+	}
 	for _, item := range covered {
 		r := item.Anchor
 		if err := valid(r, p); err != nil {
@@ -258,9 +261,8 @@ func PlanAdvance(current *Record, next Record, p Policy, covered []Coverage, obl
 	return Plan{Next: next, PruneThrough: next.Round}, nil
 }
 
-// CheckRecovery refuses a rolled-back frontier and re-reads both replica
-// copies. A wired journal supplies its prune floor from the same transaction
-// that made pruning durable. Loss of either copy halts further advancement.
+// CheckRecovery authenticates the locally durable anchor and prune floor.
+// Replica read-back is required when planning an advance, not to restart.
 func CheckRecovery(durable Record, journalPrunedThrough uint64, p Policy, anchor Coverage) error {
 	if durable.Round < journalPrunedThrough {
 		return ErrStale
@@ -274,11 +276,6 @@ func CheckRecovery(durable Record, journalPrunedThrough uint64, p Policy, anchor
 	digest, err := archive.ManifestDigest(durable.Subject, anchor.Material)
 	if err != nil || digest != durable.Acks[0].ManifestDigest || digest != durable.Acks[1].ManifestDigest || p.Binding.VerifyCertified(durable, anchor.Material) != nil {
 		return ErrInvalid
-	}
-	for _, ack := range durable.Acks {
-		if p.Availability.VerifyAvailable(ack.Replica, durable.Subject, digest) != nil {
-			return ErrUnavailable
-		}
 	}
 	return nil
 }

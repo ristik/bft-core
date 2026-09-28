@@ -316,6 +316,9 @@ func JournalVerifier(store *configuredprogress.Store, c configuredprogress.Conte
 			}
 			return nil
 		}
+		if err := store.VerifyCoveredArchive(ctx, c, limits, q, rec); err == nil {
+			return nil
+		}
 		return ErrUncertified
 	}
 }

@@ -107,6 +107,7 @@ type JournalSnapshot struct {
 	Candidates   []JournalEntry
 	Observations []JournalObservation
 	Bytes        int64
+	Frontier     *FrontierSnapshot
 }
 
 func journalCandidateKey(hash []byte) []byte {
@@ -162,6 +163,11 @@ func (s *Store) EnableJournal(ctx context.Context, c Context, limits JournalLimi
 		return err
 	}
 	s.journal = true
+	if present, err := s.frontierPresent(); err != nil {
+		return err
+	} else if present {
+		return nil // EnableFrontier must authenticate the anchor before a reader starts.
+	}
 	_, err = s.LoadJournal(ctx, c, limits)
 	return err
 }
@@ -313,6 +319,21 @@ func (s *Store) PutJournalCandidate(ctx context.Context, c Context, limits Journ
 		}
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
 			return err
+		}
+		if s.frontier != nil {
+			frontierImage, e := readFrontier(b, state.i.descriptorDigest, *s.frontier)
+			if e != nil {
+				return e
+			}
+			if frontierImage.Anchor != nil {
+				anchorUC, _, e := verifiedPairBytes(ctx, c, frontierImage.Record.ResultingUC, frontierImage.Record.ResultingTR)
+				if e != nil {
+					return e
+				}
+				if supersededCandidate(v.Number, v.Round, frontierImage.Anchor.Height, anchorUC.InputRecord.RoundNumber) {
+					return fmt.Errorf("%w: candidate was superseded by the certified frontier", ErrConflict)
+				}
+			}
 		}
 		if old := b.Get(key); old != nil {
 			prior, e := decodeCandidate(old)
@@ -579,6 +600,24 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
 			return err
 		}
+		if err := s.requireFrontierPolicy(b); err != nil {
+			return err
+		}
+		var anchorUC *types.UnicityCertificate
+		if s.frontier != nil {
+			frontierImage, e := readFrontier(b, state.i.descriptorDigest, *s.frontier)
+			if e != nil {
+				return e
+			}
+			if frontierImage.Anchor != nil {
+				out.Frontier = &frontierImage
+				anchorUC, _, e = verifiedPairBytes(ctx, c, frontierImage.Record.ResultingUC, frontierImage.Record.ResultingTR)
+				if e != nil {
+					return e
+				}
+				out.Frontier.ResultingUC = anchorUC
+			}
+		}
 		count, observed, n, err := journalCount(b)
 		if err != nil {
 			return err
@@ -655,12 +694,18 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			}
 			out.Observations = append(out.Observations, JournalObservation{UC: uc, TR: tr, TargetHash: bytes.Clone(w.TargetHash), Unresolved: w.Unresolved})
 		}
-		if state.i.observed == nil && len(out.Observations) != 0 || state.i.observed != nil && len(out.Observations) == 0 {
+		if state.i.observed == nil && len(out.Observations) != 0 || state.i.observed != nil && len(out.Observations) == 0 && anchorUC == nil {
 			return fmt.Errorf("%w: journal and progress observation count disagree", ErrUntrusted)
 		}
 		if state.i.observed != nil {
-			latest := out.Observations[len(out.Observations)-1]
-			lu, lt, e := pairBytes(latest.UC, latest.TR)
+			var lu, lt []byte
+			var e error
+			if len(out.Observations) != 0 {
+				latest := out.Observations[len(out.Observations)-1]
+				lu, lt, e = pairBytes(latest.UC, latest.TR)
+			} else {
+				lu, lt = out.Frontier.Record.ResultingUC, out.Frontier.Record.ResultingTR
+			}
 			if e != nil || !bytes.Equal(lu, state.i.observed.wire.UC) || !bytes.Equal(lt, state.i.observed.wire.TR) {
 				return fmt.Errorf("%w: latest journal certificate differs from durable progress", ErrUntrusted)
 			}
@@ -679,9 +724,15 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 				if candidate.Candidate.AuthorizingUC.GetRootRoundNumber() == observed.UC.GetRootRoundNumber() && candidate.Candidate.AuthorizingUC.GetRoundNumber() == observed.UC.GetRoundNumber() && candidate.Candidate.AuthorizingTR.Round == observed.TR.Round {
 					foundAuthorization = true
 				}
-				if candidate.Certified && candidate.ResultingUC.GetRootRoundNumber() == observed.UC.GetRootRoundNumber() && candidate.ResultingUC.GetRoundNumber() == observed.UC.GetRoundNumber() && bytes.Equal(candidate.Candidate.Hash, observed.TargetHash) {
+				if candidate.Certified && candidate.Candidate.Round == observed.UC.InputRecord.RoundNumber && bytes.Equal(candidate.Candidate.Hash, observed.TargetHash) && bytes.Equal(candidate.Candidate.StateRoot, observed.UC.InputRecord.Hash) {
 					foundResult = true
 				}
+			}
+			if anchorUC != nil && candidate.Candidate.AuthorizingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.Candidate.AuthorizingUC.GetRoundNumber() == anchorUC.GetRoundNumber() {
+				foundAuthorization = true
+			}
+			if anchorUC != nil && candidate.Certified && candidate.ResultingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.ResultingUC.GetRoundNumber() == anchorUC.GetRoundNumber() && bytes.Equal(candidate.Candidate.Hash, anchorUC.InputRecord.BlockHash) {
+				foundResult = true
 			}
 			// A returning follower may retain a later proposal before it has
 			// fetched the authorizing certificate's own body/observation. The

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -35,5 +36,11 @@ func TestConfiguredArchiveReplicasRequireOtherShardValidators(t *testing.T) {
 	got, err := configuredArchiveReplicas([]string{first.String(), second.String()}, validators, self)
 	if err != nil || got[0] != first || got[1] != second {
 		t.Fatalf("configured replicas: %v %v", got, err)
+	}
+}
+
+func TestArchivePruneRequiresArchiveStore(t *testing.T) {
+	if err := shardNodeRun(context.Background(), &shardNodeRunFlags{ArchivePrune: true}, nil); !errors.Is(err, archivewiring.ErrConfig) {
+		t.Fatalf("pruning without archive configuration: %v", err)
 	}
 }

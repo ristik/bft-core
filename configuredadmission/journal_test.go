@@ -3,6 +3,7 @@ package configuredadmission
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,6 +20,24 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+func TestJournalFactoryCarriesCheckedExecutionIdentity(t *testing.T) {
+	_, origin, c, id := adapterFixture(t)
+	c.ExecutionConfigV2 = sha256.Sum256([]byte("checked execution identity"))
+	limits := configuredprogress.JournalLimits{Candidates: 2, Observations: 3, Bytes: 16 << 20}
+	s, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 2})
+	require.NoError(t, err)
+	defer s.Close()
+	_, _, err = s.Initialize(context.Background(), c)
+	require.NoError(t, err)
+	require.NoError(t, s.EnableJournal(context.Background(), c, limits))
+	callbacks := shardnode.AdmissionCallbacks{AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {}, DeliverDurable: func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error { return nil }}
+	_, err = (JournalFactory{Store: s, Origin: origin, Limits: limits}).Start(context.Background(), id, adapterGate{}, callbacks)
+	require.ErrorIs(t, err, configuredprogress.ErrVersion)
+	a, err := (JournalFactory{Store: s, Origin: origin, ExecutionConfigV2: c.ExecutionConfigV2, Limits: limits}).Start(context.Background(), id, adapterGate{}, callbacks)
+	require.NoError(t, err)
+	require.NoError(t, a.Close())
+}
 
 func TestJournalAdmissionRetriesUnavailablePeerWithoutNewRootDelivery(t *testing.T) {
 	chain, origin, ctx, id := adapterFixture(t)
