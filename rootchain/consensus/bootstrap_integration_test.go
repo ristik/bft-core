@@ -35,23 +35,18 @@ type anchorReplica struct {
 	manager *ConsensusManager
 	net     *testnetwork.MockNet
 	store   *tbstore.TrustBaseStore
+	history *trusthistorystore.Store
 	db      storage.BoltDB
-}
-
-type anchorHistoryFixture struct{ old *types.RootTrustBaseV1 }
-
-func (h anchorHistoryFixture) ByEpoch(epoch uint64) (trusthistorystore.Record, error) {
-	if epoch != h.old.Epoch {
-		return trusthistorystore.Record{}, abdrc.ErrHistoricalTrustBase
-	}
-	return trusthistorystore.Record{Epoch: h.old.Epoch, V1: h.old}, nil
+	oldHead *abdrc.CommittedBlock
 }
 
 func newAnchorReplicas(t *testing.T, commitSealRound uint64) (map[peer.ID]*anchorReplica, *rctypes.EpochAnchor, time.Time) {
 	t.Helper()
 	oldSigners := make(map[string]abcrypto.Signer)
-	for range 4 {
+	oldNodes := make([]*testutils.TestNode, 4)
+	for i := range oldNodes {
 		node := testutils.NewTestNode(t)
+		oldNodes[i] = node
 		oldSigners[node.PeerConf.ID.String()] = node.Signer
 	}
 	oldTrust := testtrustbase.NewTrustBaseFromSigners(t, oldSigners).(*types.RootTrustBaseV1)
@@ -62,7 +57,11 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64) (map[peer.ID]*ancho
 	newNodes := make([]*testutils.TestNode, 4)
 	members := make(evmroot.WeightSet, 4)
 	for i := range newNodes {
-		newNodes[i] = testutils.NewTestNode(t)
+		if i < 3 {
+			newNodes[i] = oldNodes[i]
+		} else {
+			newNodes[i] = testutils.NewTestNode(t)
+		}
 		verifier, err := newNodes[i].Signer.Verifier()
 		require.NoError(t, err)
 		key, err := verifier.MarshalPublicKey()
@@ -101,15 +100,12 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64) (map[peer.ID]*ancho
 	message, err := seal.SigBytes()
 	require.NoError(t, err)
 	qc := &rctypes.QuorumCert{VoteInfo: voteInfo, LedgerCommitInfo: seal, Signatures: map[string]hex.Bytes{}}
-	count := 0
-	for id, signer := range oldSigners {
-		if count == 3 {
-			break
-		}
+	for i := 0; i < 3; i++ {
+		id := oldNodes[i].PeerConf.ID.String()
+		signer := oldNodes[i].Signer
 		sig, err := signer.SignBytes(message)
 		require.NoError(t, err)
 		qc.Signatures[id] = sig
-		count++
 	}
 	proof := handoff.OldCommitProof{Profile: evmroot.D4Profile, Record: record, Control: control,
 		ControlPath: path, CommitQC: qc}
@@ -169,7 +165,7 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64) (map[peer.ID]*ancho
 		}
 		manager.pacemaker.Reset(context.Background(), anchor.Slot, nil, nil)
 		t.Cleanup(manager.pacemaker.Stop)
-		replicas[node.PeerConf.ID] = &anchorReplica{manager: manager, net: net, store: trust, db: db}
+		replicas[node.PeerConf.ID] = &anchorReplica{manager: manager, net: net, store: trust, history: history, db: db, oldHead: head}
 	}
 	return replicas, anchor, oldUCAt
 }
@@ -294,6 +290,10 @@ func TestEpochAnchorRestartKeepsSuccessorVoteLock(t *testing.T) {
 	restarted, err := NewConsensusManager(leader, replica.store, replica.manager.orchestration,
 		testnetwork.NewRootMockNetwork(), replica.manager.safety.signer, replica.db, obs,
 		WithConsensusParams(*replica.manager.params))
+	require.ErrorIs(t, err, abdrc.ErrRecoveryEpoch)
+	restarted, err = NewConsensusManager(leader, replica.store, replica.manager.orchestration,
+		testnetwork.NewRootMockNetwork(), replica.manager.safety.signer, replica.db, obs,
+		WithConsensusParams(*replica.manager.params), WithRecoveryProfile2(replica.history))
 	require.NoError(t, err)
 	require.Equal(t, anchor, restarted.epochAnchor)
 	require.EqualValues(t, anchor.Slot+1, replica.db.GetHighestVotedRound())
@@ -309,9 +309,7 @@ func TestEpochAnchorRecoveryVerifiesNativeSnapshotAndOldUC(t *testing.T) {
 	state, err := replica.manager.blockStore.GetState()
 	require.NoError(t, err)
 	require.Equal(t, anchor, state.CommittedHead.Anchor)
-	old, err := replica.store.GetByEpoch(1)
-	require.NoError(t, err)
-	history := anchorHistoryFixture{old: old}
+	history := replica.history
 	require.NoError(t, state.VerifyWithAnchor(crypto.SHA256, replica.manager.trustBase.Load(), history, replica.manager.blockStore))
 	corrupt := *state.CommittedHead
 	corrupt.ShardInfo = append([]abdrc.ShardInfo(nil), corrupt.ShardInfo...)
@@ -324,6 +322,34 @@ func TestEpochAnchorRecoveryVerifiesNativeSnapshotAndOldUC(t *testing.T) {
 	corrupt.Anchor = &wrong
 	require.Error(t, (&abdrc.StateMsg{CommittedHead: &corrupt}).VerifyWithAnchor(
 		crypto.SHA256, replica.manager.trustBase.Load(), history, replica.manager.blockStore))
+}
+
+func TestEpochAnchorRecoveryRefusesOldEpochHeadWithoutChangingAnchor(t *testing.T) {
+	replicas, anchor, _ := newAnchorReplicas(t, 8)
+	replica := firstReplica(replicas)
+	manager := replica.manager
+	oldHead := *replica.oldHead
+	oldBlock := *oldHead.Block
+	oldBlock.Round = oldHead.Block.Round + 2
+	oldBlock.Qc = oldHead.CommitQc
+	oldHead.Block = &oldBlock
+	oldHead.Qc = oldHead.CommitQc
+	oldHeadPtr := &oldHead
+	require.Greater(t, oldHeadPtr.Block.Round, anchor.Slot)
+	require.NoError(t, (&abdrc.StateMsg{CommittedHead: oldHeadPtr}).Verify(crypto.SHA256, manager.trustBase.Load()),
+		"overlapping old-set keys should satisfy the successor threshold in the legacy verifier")
+	before, err := replica.db.LoadBlocks()
+	require.NoError(t, err)
+	recoveryQC := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: oldHeadPtr.Block.Round + 1,
+		ParentRoundNumber: oldHeadPtr.Block.Round}, Signatures: oldHeadPtr.CommitQc.Signatures}
+	_, err = manager.recovery.Set(recoveryQC)
+	require.NoError(t, err)
+	err = manager.onStateResponse(context.Background(), &abdrc.StateMsg{CommittedHead: oldHeadPtr})
+	require.ErrorIs(t, err, abdrc.ErrRecoveryEpoch)
+	require.Equal(t, anchor, manager.blockStore.RootAnchor())
+	after, err := replica.db.LoadBlocks()
+	require.NoError(t, err)
+	require.Equal(t, before, after)
 }
 
 func firstReplica(replicas map[peer.ID]*anchorReplica) *anchorReplica {

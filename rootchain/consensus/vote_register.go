@@ -37,6 +37,17 @@ type (
 	voteID = [sha256.Size]byte
 )
 
+type profile2QuorumInfo struct{ QuorumInfo }
+
+func (q profile2QuorumInfo) GetRootNodes() []*types.NodeInfo {
+	if members, ok := q.QuorumInfo.(interface{ GetRootNodes() []*types.NodeInfo }); ok {
+		return members.GetRootNodes()
+	}
+	return nil
+}
+
+func (profile2QuorumInfo) usesStakeWeighting() {}
+
 var ErrVoteIsNil = errors.New("vote is nil")
 
 func NewVoteRegister() *VoteRegister {
@@ -118,6 +129,9 @@ func (v *VoteRegister) InsertTimeoutVote(timeout *abdrc.TimeoutMsg, quorumInfo Q
 }
 
 func authorWeight(quorum QuorumInfo, author string) uint64 {
+	if _, enabled := quorum.(interface{ usesStakeWeighting() }); !enabled {
+		return 1
+	}
 	if members, ok := quorum.(interface{ GetRootNodes() []*types.NodeInfo }); ok {
 		for _, member := range members.GetRootNodes() {
 			if member.NodeID == author {
@@ -146,6 +160,9 @@ func signedTimeoutWeight(votes map[string]*drctypes.TimeoutVote, quorum QuorumIn
 }
 
 func maxFaultyWeight(quorum QuorumInfo) uint64 {
+	if _, enabled := quorum.(interface{ usesStakeWeighting() }); !enabled {
+		return quorum.GetMaxFaultyNodes()
+	}
 	if members, ok := quorum.(interface{ GetRootNodes() []*types.NodeInfo }); ok {
 		var total uint64
 		for _, member := range members.GetRootNodes() {

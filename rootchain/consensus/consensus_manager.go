@@ -215,6 +215,9 @@ func NewConsensusManager(
 			return nil, errors.New("root anchor has no matching durable safety state")
 		}
 		if installedAnchor != nil {
+			if !optional.RecoveryProfile2 || optional.RecoveryHistory == nil {
+				return nil, fmt.Errorf("installed epoch anchor requires profile 2 recovery: %w", abdrc.ErrRecoveryEpoch)
+			}
 			if bStore.RootEpoch() != installedAnchor.Epoch {
 				return nil, errors.New("root epoch differs from installed anchor")
 			}
@@ -748,7 +751,7 @@ func (x *ConsensusManager) onVoteMsg(ctx context.Context, vote *abdrc.VoteMsg) e
 		return fmt.Errorf("validator is not the leader for round %d", nextRound)
 	}
 
-	qc, mature, err := x.pacemaker.RegisterVote(vote, x.trustBase.Load())
+	qc, mature, err := x.pacemaker.RegisterVote(vote, x.voteQuorumInfo())
 	if err != nil {
 		return fmt.Errorf("failed to register vote: %w", err)
 	}
@@ -759,6 +762,14 @@ func (x *ConsensusManager) onVoteMsg(ctx context.Context, vote *abdrc.VoteMsg) e
 		x.updateQCMetrics(ctx, qc)
 	}
 	return nil
+}
+
+func (x *ConsensusManager) voteQuorumInfo() QuorumInfo {
+	trust := x.trustBase.Load()
+	if x.params.NetworkProfileVersion == storage.ProfileHandoff {
+		return profile2QuorumInfo{QuorumInfo: trust}
+	}
+	return trust
 }
 
 // onTimeoutMsg handles timeout vote messages from other root validators
@@ -797,7 +808,7 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	// the highQC is the same for both rounds. So checking the lastTC helps the instance into latest TO round.
 	x.processTC(ctx, vote.LastTC)
 
-	tc, err := x.pacemaker.RegisterTimeoutVote(ctx, vote, x.trustBase.Load())
+	tc, err := x.pacemaker.RegisterTimeoutVote(ctx, vote, x.voteQuorumInfo())
 	if err != nil {
 		return fmt.Errorf("failed to register timeout vote: %w", err)
 	}
@@ -938,7 +949,7 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 		}
 		return
 	}
-	if len(certs) > 0 {
+	if shouldSendCertificateBatch(x.params.NetworkProfileVersion, certs) {
 		select {
 		case <-ctx.Done():
 			return // node is exiting certificates have been stored and we are done
@@ -959,6 +970,10 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 	if err := x.leaderSelector.Update(qc, x.pacemaker.GetCurrentRound(), x.blockStore.Block); err != nil {
 		x.log.ErrorContext(ctx, "failed to update leader selector", logger.Error(err))
 	}
+}
+
+func shouldSendCertificateBatch(profile uint64, certs []*certification.CertificationResponse) bool {
+	return len(certs) > 0 || profile != storage.ProfileHandoff
 }
 
 // processTC - handles timeout certificate
@@ -1188,6 +1203,9 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	if !x.recovery.InRecovery() {
 		// we do send out multiple state recovery request so do not return error when we ignore the ones after successful recovery...
 		return nil
+	}
+	if x.epochAnchor != nil && !x.recoveryProfile2 {
+		return fmt.Errorf("recovery response verification failed: %w", abdrc.ErrRecoveryEpoch)
 	}
 	var verifyErr error
 	if x.recoveryProfile2 {

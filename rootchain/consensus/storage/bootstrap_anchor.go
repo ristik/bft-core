@@ -50,10 +50,17 @@ func (x *BlockStore) InstallEpochAnchor(head *abdrc.CommittedBlock, v evmroot.Ve
 	oldRoot.BlockData = &rctypes.BlockData{Version: 2, Epoch: a.Epoch, Round: a.Slot,
 		Payload: &rctypes.Payload{Version: 2}, Anchor: a}
 	oldRoot.Qc, oldRoot.CommitQc = nil, nil
-	tree, err := NewBlockTreeWithRootBlock(oldRoot, x.storage)
-	if err != nil {
+	installer, ok := x.storage.(interface {
+		InstallEpochAnchorRoot(*ExecutedBlock, *rctypes.EpochAnchor) error
+	})
+	if !ok {
+		return nil, errors.New("atomic epoch anchor storage unavailable")
+	}
+	if err := installer.InstallEpochAnchorRoot(oldRoot, a); err != nil {
 		return nil, err
 	}
+	root := newNode(oldRoot)
+	tree := &BlockTree{root: root, roundToNode: map[uint64]*node{a.Slot: root}, blocksDB: x.storage}
 	x.blockTree = tree
 	return a, nil
 }
