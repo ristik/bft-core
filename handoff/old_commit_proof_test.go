@@ -168,6 +168,46 @@ func TestVerifyOldCommitProofSecp256k1(t *testing.T) {
 	}
 }
 
+func TestInstalledEVMTransitionBindsCommittedFrozenParent(t *testing.T) {
+	p, tb, signers := signedOldProofWithSigners(t)
+	link, err := evmroot.FirstV2PredecessorHash(evmroot.V1Anchor{Version: 1,
+		NetworkID: p.Record.Network, Epoch: p.Record.Epoch, HashIncludingSigs: p.Record.PredecessorBodyID})
+	require.NoError(t, err)
+	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: p.Record.Network, Epoch: p.Record.Epoch + 1,
+		EarliestActivation: p.Record.ActivationRound,
+		Members: evmroot.WeightSet{{StakingID: "next", NodeID: tb.RootNodes[0].NodeID,
+			ConsensusKey: tb.RootNodes[0].SigKey, Weight: 1}}, RootThreshold: 1,
+		StateSummary: bytes.Repeat([]byte{0x21}, 32), ChangeRecordHash: bytes.Repeat([]byte{0x22}, 32),
+		PredecessorHash: link}
+	require.NoError(t, body.Validate())
+	id := body.Identity()
+	p.Record.NextBodyID = id[:]
+	p.Control.FrozenParent = bytes.Repeat([]byte{0x33}, 32)
+	rebuildOldProofRoot(t, &p, signers)
+	v, err := VerifyOldCommitProof(p, tb)
+	require.NoError(t, err)
+	g, err := evmroot.DeriveEpochGenesis(evmroot.VerifiedHandoff{RecordID: v.RecordID[:],
+		Root: v.StateRoot[:], ControlDigest: v.ControlDigest[:], OrderRound: v.OrderRound,
+		CommitSealRound: v.CommitSealRound, Epoch: v.SignerEpoch, Record: p.Record}, body)
+	require.NoError(t, err)
+	a := &rctypes.EpochAnchor{GenesisID: g.ID(), Epoch: g.Epoch, Slot: g.Start - 1, StateRoot: v.StateRoot[:]}
+	transition, err := TransitionFromInstalledAnchor(p, tb, body, a, 41)
+	require.NoError(t, err)
+	require.Equal(t, p.Control.FrozenParent, transition.Ack.FrozenParent[:])
+	encoded, err := transition.Encode()
+	require.NoError(t, err)
+	decoded, err := DecodeEVMTransition(encoded)
+	require.NoError(t, err)
+	require.Equal(t, transition, decoded)
+	bad := *a
+	bad.GenesisID = bytes.Repeat([]byte{0x55}, 32)
+	_, err = TransitionFromInstalledAnchor(p, tb, body, &bad, 41)
+	require.ErrorIs(t, err, ErrProof)
+	p.Control.FrozenParent[0] ^= 1
+	_, err = TransitionFromInstalledAnchor(p, tb, body, a, 41)
+	require.ErrorIs(t, err, ErrProof)
+}
+
 func TestOldCommitProofReviewGuards(t *testing.T) {
 	makeOptional := func(t *testing.T, p *OldCommitProof, signers map[string]abcrypto.Signer) {
 		t.Helper()

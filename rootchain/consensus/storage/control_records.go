@@ -16,7 +16,7 @@ var (
 
 type handoffAuthority interface {
 	Predecessor() []byte
-	VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) error
+	VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) ([]byte, error)
 }
 
 func recordNumber(v any) (uint64, bool) { n, ok := v.(uint64); return n, ok }
@@ -118,14 +118,19 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 		return nil, fmt.Errorf("%w: previous record: %v", ErrHandoffRecord, err)
 	}
 	phase := ""
+	frozenParent := bytes.Clone(previous.FrozenParent)
 	switch r.Kind {
 	case "freeze":
-		if previous.Phase != "prepared" || !bytes.Equal(r.NextBodyID, old.NextBodyID) || bytes.Equal(r.FrozenID, make([]byte, 32)) || r.ActivationRound != old.ActivationRound || authority.VerifyFreeze(r, companion) != nil {
+		if previous.Phase != "prepared" || !bytes.Equal(r.NextBodyID, old.NextBodyID) || bytes.Equal(r.FrozenID, make([]byte, 32)) || r.ActivationRound != old.ActivationRound {
+			return nil, ErrHandoffRecord
+		}
+		frozenParent, err = authority.VerifyFreeze(r, companion)
+		if err != nil || len(frozenParent) != 32 {
 			return nil, ErrHandoffRecord
 		}
 		phase = "endorsed"
 	case "commit":
-		if len(companion) != 0 || previous.Phase != "endorsed" || !r.Valid() || !bytes.Equal(r.FrozenID, old.FrozenID) || !bytes.Equal(r.NextBodyID, old.NextBodyID) || r.ActivationRound < old.ActivationRound || bytes.Equal(r.SuccessorTRHash, make([]byte, 32)) {
+		if len(companion) != 0 || previous.Phase != "endorsed" || len(frozenParent) != 32 || !r.Valid() || !bytes.Equal(r.FrozenID, old.FrozenID) || !bytes.Equal(r.NextBodyID, old.NextBodyID) || r.ActivationRound < old.ActivationRound || bytes.Equal(r.SuccessorTRHash, make([]byte, 32)) {
 			return nil, ErrHandoffRecord
 		}
 		phase = "committed"
@@ -138,5 +143,5 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 	default:
 		return nil, ErrHandoffRecord
 	}
-	return &evmroot.ControlState{Network: network, Epoch: epoch, PredecessorBodyID: bytes.Clone(r.PredecessorBodyID), Attempt: r.Attempt, Phase: phase, OrderedRound: round, RecordBytes: bytes.Clone(data), PreviousDigest: previous.Digest()}, nil
+	return &evmroot.ControlState{Network: network, Epoch: epoch, PredecessorBodyID: bytes.Clone(r.PredecessorBodyID), Attempt: r.Attempt, Phase: phase, OrderedRound: round, RecordBytes: bytes.Clone(data), PreviousDigest: previous.Digest(), FrozenParent: frozenParent}, nil
 }

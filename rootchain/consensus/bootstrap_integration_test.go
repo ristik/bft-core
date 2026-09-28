@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -76,7 +77,7 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64) (map[peer.ID]*ancho
 		PredecessorBodyID: oldID, NextBodyID: bodyID[:], FrozenID: bytes.Repeat([]byte{2}, 32),
 		SuccessorTRHash: bytes.Repeat([]byte{3}, 32), Kind: "commit"}
 	control := evmroot.ControlState{Network: 5, Epoch: 1, OrderedRound: 4, PredecessorBodyID: oldID,
-		Phase: "committed", RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32)}
+		Phase: "committed", RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: bytes.Repeat([]byte{5}, 32)}
 	_, shardValidators := testutils.CreateTestNodes(t, 3)
 	shardConf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: partitionID,
 		ShardID: shardID, PartitionTypeID: 999, TypeIDLen: 8, UnitIDLen: 256,
@@ -142,15 +143,25 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64) (map[peer.ID]*ancho
 		trust, err := tbstore.NewTrustBaseStore(memorydb.New(), obs.Logger())
 		require.NoError(t, err)
 		require.NoError(t, trust.Store(oldTrust))
+		historyID := sha256.Sum256([]byte("epoch-anchor-integration"))
+		history, err := trusthistorystore.Open(context.Background(), memorydb.New(), oldTrust, historyID, nil)
+		require.NoError(t, err)
 		net := testnetwork.NewRootMockNetwork()
 		params := *NewConsensusParams()
 		params.NetworkProfileVersion = storage.ProfileHandoff
-		manager, err := NewConsensusManager(node.PeerConf.ID, trust, orchestration, net, node.Signer, db, obs, WithConsensusParams(params))
+		manager, err := NewConsensusManager(node.PeerConf.ID, trust, orchestration, net, node.Signer, db, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
 		require.NoError(t, err)
 		manager.blockStore, err = storage.NewFromState(crypto.SHA256, head, db, orchestration, obs.Logger(), storage.ProfileHandoff)
 		require.NoError(t, err)
 		installed, err := manager.InstallEpochGenesis(proof, head, body)
 		require.NoError(t, err)
+		transitionBytes, err := manager.InstalledEVMTransition(proof, body, 1)
+		require.NoError(t, err)
+		transition, err := handoff.DecodeEVMTransition(transitionBytes)
+		require.NoError(t, err)
+		require.Equal(t, uint64(2), transition.NewEpoch)
+		require.Equal(t, bytes.Repeat([]byte{5}, 32), transition.Ack.FrozenParent[:])
+		require.Equal(t, installed.GenesisID, transition.GenesisID[:])
 		if anchor == nil {
 			anchor = installed
 		} else {

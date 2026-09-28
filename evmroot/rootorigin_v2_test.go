@@ -108,6 +108,34 @@ func TestV2IndependentVectors(t *testing.T) {
 	}
 }
 
+func TestV2TransitionCountAndLengthBounds(t *testing.T) {
+	b, err := os.ReadFile("testdata/v2-vectors.json")
+	require.NoError(t, err)
+	var f v2VectorFile
+	require.NoError(t, json.Unmarshal(b, &f))
+	s := f.Vectors[0].Source
+	ri := RootInputV2{Version: s.Version, NetworkID: s.NetworkID, PartitionID: s.PartitionID,
+		ShardID: vh(t, s.ShardID), Round: s.AuthorizedRound, CertifiedEpoch: s.CertifiedEpoch,
+		AuthorizedEpoch: s.AuthorizedEpoch, ParentHash: vh(t, s.ParentHash),
+		Origin: RootOriginV2{NetworkID: s.NetworkID, RootRound: s.RootRound, RootEpoch: s.RootEpoch,
+			ReferenceTime: s.ReferenceTime, UnicityTreeRoot: vh(t, s.UnicityTreeRoot), InputVersion: 1,
+			IR: ShardInputRecord{Round: s.InputRecord.Round, Epoch: s.InputRecord.Epoch,
+				PreviousHash: vo(t, s.InputRecord.PreviousHash), Hash: vo(t, s.InputRecord.Hash),
+				Timestamp: s.InputRecord.Timestamp, BlockHash: vo(t, s.InputRecord.BlockHash)},
+			TRHash: vh(t, s.TRHash), ShardConfHash: vh(t, s.ShardConfHash)},
+		TE: TechnicalRecord{Round: s.Technical.Round, Epoch: s.Technical.Epoch, Leader: s.Technical.Leader,
+			StatHash: vh(t, s.Technical.StatHash), FeeHash: vh(t, s.Technical.FeeHash)}}
+	require.NoError(t, ri.Validate())
+	for _, n := range []int{1, 16 * 1024} {
+		ri.Transitions = [][]byte{bytes.Repeat([]byte{1}, n)}
+		require.NoError(t, ri.Validate())
+	}
+	for _, entries := range [][][]byte{{{}}, {bytes.Repeat([]byte{1}, 16*1024+1)}, {{1}, {2}}} {
+		ri.Transitions = entries
+		require.Error(t, ri.Validate())
+	}
+}
+
 func TestV2NullIsNotEmptyOrSyntheticBootstrap(t *testing.T) {
 	base := RootOriginV2{NetworkID: 1, RootRound: 1, RootEpoch: 1, UnicityTreeRoot: make([]byte, 32), InputVersion: 1, TRHash: make([]byte, 32), ShardConfHash: make([]byte, 32)}
 	require.Equal(t, OriginBootstrapV2, mustClass(t, base))

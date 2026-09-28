@@ -28,7 +28,7 @@ vector's, and the code hash is the merged registry artifact's; both are fixtures
 */
 
 // registryCodeHash is artifacts/seal-registry-v1.json in ristik/unicity-pos-contracts at 7dc63acd.
-var registryCodeHash = common.HexToHash("0x643b1b983696b0de1f67053daf65c33b55d304de79074b55ee6f8829715a267b")
+var registryCodeHash = common.HexToHash("0x18b4c874e37d8563c1f672b6da073f009cd6a03bc9bfde886cc4743db6c14d3c")
 
 var (
 	genesisCommitment = common.HexToHash("0x071a4f34498689e1f26353434c92f763ddaaba8de9cc634aa68af6e1bf65eab8")

@@ -28,8 +28,10 @@ func emptyOrchestration() mockOrchestration {
 
 type testRecordAuthority struct{}
 
-func (testRecordAuthority) Predecessor() []byte                                     { return make([]byte, 32) }
-func (testRecordAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) error { return nil }
+func (testRecordAuthority) Predecessor() []byte { return make([]byte, 32) }
+func (testRecordAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) ([]byte, error) {
+	return bytes.Repeat([]byte{0x42}, 32), nil
+}
 
 func profileStore(t *testing.T) *BlockStore {
 	t.Helper()
@@ -150,7 +152,7 @@ func TestRecoveryHandoffSnapshotUsesProductionShardTree(t *testing.T) {
 		FrozenID: bytes.Repeat([]byte{1}, 32), NextBodyID: bytes.Repeat([]byte{2}, 32),
 		ActivationRound: 7, SuccessorTRHash: bytes.Repeat([]byte{3}, 32), Kind: "commit"}
 	control := &evmroot.ControlState{Network: 5, Epoch: 1, OrderedRound: 4, PredecessorBodyID: zero,
-		Phase: "committed", RecordBytes: rec.Bytes(), PreviousDigest: zero}
+		Phase: "committed", RecordBytes: rec.Bytes(), PreviousDigest: zero, FrozenParent: bytes.Repeat([]byte{4}, 32)}
 	state := ShardStates{States: map[types.PartitionShardID]*ShardInfo{shard: si}, Control: control}
 	tree, _, err := state.UnicityTree(crypto.SHA256)
 	require.NoError(t, err)

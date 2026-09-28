@@ -17,6 +17,8 @@ type FreezeAuthorization struct {
 	_          struct{} `cbor:",toarray"`
 	Version    uint64
 	Body       []byte // canonical D3 TrustBaseBodyV2 encoding
+	Parent     []byte // frozen certified EVM block hash
+	Candidate  []byte // candidate hash used by the D3 context and FrozenID
 	Signatures map[string]hex.Bytes
 }
 
@@ -68,50 +70,57 @@ func (x *BlockStore) ConfigureHandoffAuthority(tb *types.RootTrustBaseV1) error 
 
 func (a *v1HandoffAuthority) Predecessor() []byte { return a.predecessor }
 
-func (a *v1HandoffAuthority) VerifyFreeze(r evmroot.OrderedHandoffRecord, companion []byte) error {
-	if len(companion) == 0 || len(companion) > 1<<20 || r.Epoch != a.trust.Epoch ||
+func validFreezeCompanionSize(n int) bool { return n > 0 && n <= 1<<20 }
+
+func (a *v1HandoffAuthority) VerifyFreeze(r evmroot.OrderedHandoffRecord, companion []byte) ([]byte, error) {
+	if !validFreezeCompanionSize(len(companion)) || r.Epoch != a.trust.Epoch ||
 		r.Network != uint64(a.trust.NetworkID) || len(r.FrozenID) != 32 || bytes.Equal(r.FrozenID, make([]byte, 32)) ||
 		!bytes.Equal(r.PredecessorBodyID, a.predecessor) {
-		return ErrHandoffRecord
+		return nil, ErrHandoffRecord
 	}
 	var proof FreezeAuthorization
 	if err := types.Cbor.Unmarshal(companion, &proof); err != nil || proof.Version != 1 || len(proof.Signatures) == 0 {
-		return ErrHandoffRecord
+		return nil, ErrHandoffRecord
 	}
 	canonical, err := proof.Bytes()
 	if err != nil || !bytes.Equal(canonical, companion) {
-		return ErrHandoffRecord
+		return nil, ErrHandoffRecord
 	}
 	body, err := decodeD3Body(proof.Body)
 	if err != nil || r.Epoch == math.MaxUint64 || body.NetworkID != r.Network || body.Epoch != r.Epoch+1 ||
 		body.EarliestActivation == 0 || body.EarliestActivation > r.ActivationRound || !bytes.Equal(body.PredecessorHash, a.link) {
-		return ErrHandoffRecord
+		return nil, ErrHandoffRecord
+	}
+	if len(proof.Parent) != 32 || bytes.Equal(proof.Parent, make([]byte, 32)) || len(proof.Candidate) != 32 ||
+		!bytes.Equal(body.ChangeRecordHash, evmroot.D4CandidateContextHash(r.Network, r.PredecessorBodyID, r.Attempt, proof.Candidate, body.EarliestActivation)) ||
+		!bytes.Equal(r.FrozenID, evmroot.D4FrozenID(r.NextBodyID, body.StateSummary, proof.Parent, proof.Candidate, r.Attempt, r.PredecessorBodyID)) {
+		return nil, ErrHandoffRecord
 	}
 	for _, member := range body.Members {
 		if member.Weight != 1 {
-			return ErrHandoffRecord
+			return nil, ErrHandoffRecord
 		}
 	}
 	id := body.Identity()
 	if !bytes.Equal(id[:], r.NextBodyID) {
-		return ErrHandoffRecord
+		return nil, ErrHandoffRecord
 	}
 	message, err := EndorsementBytes(r)
 	if err != nil {
-		return ErrHandoffRecord
+		return nil, ErrHandoffRecord
 	}
 	var weight uint64
 	for signer, signature := range proof.Signatures {
 		stake, err := a.trust.VerifySignature(message, signature, signer)
 		if err != nil || math.MaxUint64-weight < stake {
-			return ErrHandoffRecord
+			return nil, ErrHandoffRecord
 		}
 		weight += stake
 	}
 	if err := a.trust.VerifyQuorumSignatures(message, proof.Signatures); err != nil {
-		return ErrHandoffRecord
+		return nil, ErrHandoffRecord
 	}
-	return nil
+	return bytes.Clone(proof.Parent), nil
 }
 
 func decodeD3Body(raw []byte) (evmroot.TrustBaseBodyV2, error) {

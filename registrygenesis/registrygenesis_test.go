@@ -48,8 +48,8 @@ func generate(t testing.TB) *Genesis {
 
 func TestPinnedArtifact(t *testing.T) {
 	a := pinnedArtifact(t)
-	require.Equal(t, common.HexToHash("0x643b1b983696b0de1f67053daf65c33b55d304de79074b55ee6f8829715a267b"), a.CodeHash)
-	require.Len(t, a.RuntimeCode, 1572)
+	require.Equal(t, common.HexToHash("0x18b4c874e37d8563c1f672b6da073f009cd6a03bc9bfde886cc4743db6c14d3c"), a.CodeHash)
+	require.Len(t, a.RuntimeCode, 2408)
 	require.Equal(t, a.CodeHash, crypto.Keccak256Hash(a.RuntimeCode))
 }
 
@@ -104,12 +104,12 @@ func deepCopyJSON(t *testing.T, m map[string]any) map[string]any {
 // the genesis a deployment of this configuration would run, not a test update.
 const (
 	wantBaseConfigHash    = "0x3582bd0f44572e45c1e46f9b5c9797991dff8a59cdf85cd12e2879d7d67c5653"
-	wantRecordCBOR        = "8c781d554e49434954595f5345414c5f52454749535452595f47454e45534953010308418019053954ff0000000000000000000000000000000000000154ff000000000000000000000000000000000000025820643b1b983696b0de1f67053daf65c33b55d304de79074b55ee6f8829715a267b58203582bd0f44572e45c1e46f9b5c9797991dff8a59cdf85cd12e2879d7d67c56530001"
-	wantGenesisCommitment = "0xe4c40d66b7014e2bb0a26bbacf4df194343ec7d331ccb356cf0a167019647ec6"
-	wantFullShardConfHash = "0x4ba6ed4d7f56b668f781eb698b9ad1101d823050c677c8bc03b88b3b3b92a6ba"
-	wantStorageRoot       = "0xacd33a6d7f29e1775dc7f84ce6e0c87ef38e8f4a0063c0e9382b983b676fb3b9"
-	wantStateRoot         = "0xddb3133acc51b92b1aef31305df41c897f378741f0e4bb1312e3c21f221fb73d"
-	wantEVMGenesisHash    = "0xc6606d09de8980f7abc0861c61cf19069719181d6e2417be975039bc38b31de0"
+	wantRecordCBOR        = "8c781d554e49434954595f5345414c5f52454749535452595f47454e45534953010308418019053954ff0000000000000000000000000000000000000154ff00000000000000000000000000000000000002582018b4c874e37d8563c1f672b6da073f009cd6a03bc9bfde886cc4743db6c14d3c58203582bd0f44572e45c1e46f9b5c9797991dff8a59cdf85cd12e2879d7d67c56530001"
+	wantGenesisCommitment = "0x78c8ae71b930dd4a379a5d2bc82ce30deb54de0ef4387c33c30a27f06fb8ef26"
+	wantFullShardConfHash = "0x002a719ed27ff7b185660ac29fe1f32269b0e3ab3f126716a52c47ec2b8a92dd"
+	wantStorageRoot       = "0xe6d1f3ea67ba8f07734105ea8959374173a1c68660166cbd3699441890f9b229"
+	wantStateRoot         = "0x7920b60c4fef92ed6b001d3ae492eacfa626ba8333e963f951784b636dd4d514"
+	wantEVMGenesisHash    = "0x0ba86302dddb0f67e17e5a12b91fbc519ff3d513edca6a332b0cbf07ce239ea0"
 )
 
 func TestGenesisVector(t *testing.T) {

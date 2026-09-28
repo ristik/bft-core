@@ -62,9 +62,9 @@ func prepareFunded(t testing.TB) *PreparedGenesis {
 func TestPrepareAndValidateFundedGenesis(t *testing.T) {
 	p := prepareFunded(t)
 	require.Equal(t, common.HexToHash("0xf63207575830a59dece6e1b59ecbc46faa865492715252d5a846a6996bde98ba"), p.Origin().ExecutionConfigIdentity())
-	require.Equal(t, common.HexToHash("0x030c8f48abdcfba2a393b0422726d1e492272edaa5e7044af846281055b5b33e"), p.Origin().Identity())
-	require.Equal(t, common.HexToHash("0x9d672f7822f0747687bcf1c4273cecac83f987871d215d5554d71fb1d1f6f1b9"), p.Origin().BlockHash())
-	require.Equal(t, common.HexToHash("0x8936f379e65d90577242c6333f644cd0716325117e5bb064a2a32c08ba8afdf0"), p.Origin().StateRoot())
+	require.Equal(t, common.HexToHash("0x2bfab11db07e24ca2023af18bef177fd619d403f47dd33ae180c1197034f9cf3"), p.Origin().Identity())
+	require.Equal(t, common.HexToHash("0xdf28d41ed53c949eacd7f1db41c9a412e3d8e98da6b100931df337cf9f48992d"), p.Origin().BlockHash())
+	require.Equal(t, common.HexToHash("0xd63fd616fa91fea173cfef70a8f15336488c6cb31d7b26b6ff72c924515359a4"), p.Origin().StateRoot())
 	// Independently spell the two documented canonical tuples rather than obtaining either digest from
 	// the implementation helper under test.
 	cfgTuple := []any{executionProfile, uint64(1337),

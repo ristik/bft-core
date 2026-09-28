@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network"
@@ -137,6 +138,42 @@ func TestV2BootstrapFirstCertifiedOrdinaryAndQuiet(t *testing.T) {
 		_, e = DeriveV2(ContextV2{Genesis: f.origin, Parent: f.snapshot(t, 2), Round: 4, ParentHash: b.Hash.Bytes()}, qo)
 		require.NoError(t, e)
 	})
+}
+
+func TestV2DerivationBindsSingleInstalledTransition(t *testing.T) {
+	f := newV2Fixture(t)
+	o, _ := f.signed(t, &types.InputRecord{Version: 1}, 7, 4)
+	// DeriveV2 receives an already authenticated successor observation.
+	o.rootEpoch, o.origin.RootEpoch = 2, 2
+	var tr handoff.EVMTransition
+	tr.OldEpoch, tr.NewEpoch = 1, 2
+	tr.NextBodyID, tr.GenesisID = [32]byte{1}, [32]byte{2}
+	tr.Ack.FrozenID, tr.Ack.CommitID = [32]byte{3}, [32]byte{4}
+	copy(tr.Ack.FrozenParent[:], f.blocks[0].Hash.Bytes())
+	tr.Ack.SuccessorParent = tr.Ack.FrozenParent
+	tr.Ack.SuccessorTR, tr.Ack.EVMRound = [32]byte{5}, 7
+	encoded, err := tr.Encode()
+	require.NoError(t, err)
+	c := ContextV2{Genesis: f.origin, Parent: f.snapshot(t, 0), Round: 7,
+		ParentHash: f.blocks[0].Hash.Bytes(), TransitionsPending: true, Transition: encoded}
+	result, err := DeriveV2(c, o)
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{encoded}, result.Input.Transitions)
+	require.Equal(t, result.Input.ExtraData(), result.Commitment)
+	c.Transition = nil
+	_, err = DeriveV2(c, o)
+	require.ErrorIs(t, err, ErrUnsupported)
+	c.Transition = encoded
+	c.TransitionsPending = false
+	_, err = DeriveV2(c, o)
+	require.ErrorIs(t, err, ErrUnsupported)
+	c.TransitionsPending = true
+	tr.Ack.FrozenParent[0] ^= 1
+	tr.Ack.SuccessorParent = tr.Ack.FrozenParent
+	c.Transition, err = tr.Encode()
+	require.NoError(t, err)
+	_, err = DeriveV2(c, o)
+	require.ErrorIs(t, err, ErrV2Context)
 }
 
 func TestV2AuthenticationRefusalsAreOnTheNewPath(t *testing.T) {

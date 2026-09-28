@@ -41,6 +41,12 @@ func TestSlotKeysMatchTheIndependentVector(t *testing.T) {
 		"435c00c3e0bb551759ef849ef59de7b0a62c300b5c1aa3011d4363b09ddef85a",
 		"9071048d24ef915056944fc390854c5afc82c7b780af60912f32c98b8a009850",
 		"902fa8def05f8c67caa8c59344f53ee4ebbc428d5073e5fbf37e23543232cae5",
+		"f64ae08ca348865e7c42acf81d3a418af899eeafa1c21504ea348c15d212c4b8",
+		"dedd17782b4935024a9ff293bbd39d406d127447bf3b1d6ed496032fa0cd58e5",
+		"a17f343c4f400f901a88319ee38011c1770dfd251fb8f2afb0e66b3ac0e3d1a5",
+		"ecd1c378aba52fc330dbbc613de4db55413282426cdedf09fd6ed57a76bc90b5",
+		"f4f5ae5954831b1d1559d70dc2cabdc751ef64cc34ab0750efbd97479665f06a",
+		"af0d5400378db3d13018c5af67f324d41d95126cd3f97f3e3b4ac05ba9afdaeb",
 	}
 	for i := range SlotNames {
 		require.Equal(t, common.HexToHash(want[i]), SlotKey(i), SlotNames[i])
@@ -62,6 +68,52 @@ func TestGenesisProofDecodes(t *testing.T) {
 	require.Equal(t, uint64(2), s.Fields().Phase)
 	require.Equal(t, uint64(0), s.LastAppliedRootRound(), "§9.1: the zero cursor, authoritative because steps 2 and 5 passed")
 	require.Equal(t, uint64(0), s.Fields().RoundAuthorized)
+}
+
+func TestVerifiedTransitionStorageRequiresEveryBoundField(t *testing.T) {
+	c := newChain(t)
+	base := executed(1, 5, 0, "S0", "")
+	fields := []string{"transition.bodyID", "transition.genesisID", "transition.frozenID", "transition.commitID", "transition.frozenParent", "transition.successorTR"}
+	installed := base.with("assignment.rootEpoch", num(2), "transition.cursor", num(1))
+	for _, name := range fields {
+		installed = installed.with(name, named(name))
+	}
+	valid := build(t, spec{number: 1, parent: c.genesis.hash, words: installed, fillers: fillers})
+	s, err := Verify(c.context(), valid.hash, valid.ev)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), s.Fields().RootEpoch)
+	require.Equal(t, uint64(1), s.Fields().TransitionCursor)
+
+	for _, name := range fields {
+		t.Run("missing "+name, func(t *testing.T) {
+			b := build(t, spec{number: 1, parent: c.genesis.hash, words: installed.with(name, common.Hash{}), fillers: fillers})
+			_, err := Verify(c.context(), b.hash, b.ev)
+			require.ErrorIs(t, err, ErrConfiguration)
+		})
+		t.Run("unexpected "+name, func(t *testing.T) {
+			b := build(t, spec{number: 1, parent: c.genesis.hash, words: base.with(name, named(name)), fillers: fillers})
+			_, err := Verify(c.context(), b.hash, b.ev)
+			require.ErrorIs(t, err, ErrConfiguration)
+		})
+	}
+	for name, changed := range map[string]words{
+		"wrong successor epoch": installed.with("assignment.rootEpoch", num(3)),
+		"wrong old epoch":       base.with("assignment.rootEpoch", num(2)),
+		"unexpected inbox":      base.with("inbox.consumed", num(1)),
+		"multiple transitions":  installed.with("transition.cursor", num(2)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := build(t, spec{number: 1, parent: c.genesis.hash, words: changed, fillers: fillers})
+			_, err := Verify(c.context(), b.hash, b.ev)
+			require.ErrorIs(t, err, ErrConfiguration)
+		})
+	}
+	overflow := build(t, spec{number: 1, parent: c.genesis.hash,
+		words: installed.with("assignment.rootEpoch", num(0)), fillers: fillers})
+	ctx := c.context()
+	ctx.RootEpoch = ^uint64(0)
+	_, err = Verify(ctx, overflow.hash, overflow.ev)
+	require.ErrorIs(t, err, ErrConfiguration)
 }
 
 func TestExecutedBlocksDecode(t *testing.T) {

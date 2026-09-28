@@ -38,6 +38,7 @@ func (ss ShardStates) nextBlock(shardConfs map[types.PartitionShardID]*types.Par
 		control.PredecessorBodyID = bytes.Clone(control.PredecessorBodyID)
 		control.RecordBytes = bytes.Clone(control.RecordBytes)
 		control.PreviousDigest = bytes.Clone(control.PreviousDigest)
+		control.FrozenParent = bytes.Clone(control.FrozenParent)
 		nextBlock.Control = &control
 	}
 	for k, pdr := range shardConfs {

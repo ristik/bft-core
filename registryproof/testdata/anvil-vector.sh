@@ -54,6 +54,8 @@ names=(
 	clock.rootRound origin.rootEpoch origin.timestamp origin.treeRoot origin.identity origin.trHash
 	round.authorized input.commitment certified.round certified.stateHash certified.hasBlockHash
 	certified.blockHash phase outcomes.round outcomes.commitment transition.cursor inbox.consumed
+	transition.bodyID transition.genesisID transition.frozenID transition.commitID
+	transition.frozenParent transition.successorTR
 )
 
 code=$(jq -r .runtimeBytecode "$artifact")

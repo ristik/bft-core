@@ -48,7 +48,7 @@ func TestProfile2LeaderEmitsEmptySuffixDespiteBufferedRequest(t *testing.T) {
 		ActivationRound: 7, PredecessorBodyID: make([]byte, 32), FrozenID: bytes.Repeat([]byte{2}, 32),
 		NextBodyID: bytes.Repeat([]byte{3}, 32), SuccessorTRHash: bytes.Repeat([]byte{4}, 32), Kind: "commit"}
 	control := &evmroot.ControlState{Network: 5, Epoch: 1, Attempt: 0, OrderedRound: 4,
-		PredecessorBodyID: record.PredecessorBodyID, Phase: "committed", RecordBytes: record.Bytes(), PreviousDigest: make([]byte, 32)}
+		PredecessorBodyID: record.PredecessorBodyID, Phase: "committed", RecordBytes: record.Bytes(), PreviousDigest: make([]byte, 32), FrozenParent: bytes.Repeat([]byte{5}, 32)}
 	state := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{}, Control: control}
 	tree, _, err := state.UnicityTree(crypto.SHA256)
 	require.NoError(t, err)
