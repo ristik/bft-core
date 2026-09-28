@@ -84,7 +84,7 @@ func verifyPair(ctx context.Context, c Context, p pairWire) (*verifiedPair, erro
 	if !bytes.Equal(ucAgain, p.UC) || !bytes.Equal(trAgain, p.TR) {
 		return nil, fmt.Errorf("%w: non-canonical pair member", ErrUntrusted)
 	}
-	o, err := rootinput.AuthenticateObservationV2(ctx, c.Observation, &u, technical)
+	o, err := rootinput.AuthenticateHistoricalObservationV2(ctx, c.Observation, &u, technical)
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +146,16 @@ func compareObservations(current, next rootinput.VerifiedObservationV2) (relatio
 	}
 	apr, bpr := a.GetRoundNumber(), b.GetRoundNumber()
 	arr, brr := a.GetRootRoundNumber(), b.GetRootRoundNumber()
+	ae, be := a.GetRootEpoch(), b.GetRootEpoch()
+	if be > ae && be != ae+1 {
+		return relationAdvance, fmt.Errorf("%w: root epoch skipped from %d to %d", ErrConflict, ae, be)
+	}
+	order := 0
+	if be < ae || be == ae && brr < arr {
+		order = -1
+	} else if be > ae || be == ae && brr > arr {
+		order = 1
+	}
 	if apr == bpr {
 		ai, e := canonicalIR(a)
 		if e != nil {
@@ -159,7 +169,7 @@ func compareObservations(current, next rootinput.VerifiedObservationV2) (relatio
 			return relationAdvance, fmt.Errorf("%w: different input records at partition round %d", ErrConflict, apr)
 		}
 		switch {
-		case brr == arr:
+		case order == 0:
 			same, e := sameRootStatement(a, b, current.TechnicalRecord(), next.TechnicalRecord())
 			if e != nil {
 				return relationAdvance, e
@@ -168,20 +178,30 @@ func compareObservations(current, next rootinput.VerifiedObservationV2) (relatio
 				return relationAdvance, fmt.Errorf("%w: same root/partition round has another signed seal statement or TR", ErrConflict)
 			}
 			return relationDuplicate, nil
-		case brr < arr:
+		case order < 0:
 			return relationStale, nil
 		default:
 			return relationRepeat, nil
 		}
 	}
 	if bpr < apr {
-		if brr >= arr {
+		if order >= 0 {
 			return relationAdvance, fmt.Errorf("%w: earlier partition round at later root round", ErrConflict)
 		}
 		return relationStale, nil
 	}
-	if brr <= arr {
+	if order <= 0 {
 		return relationAdvance, fmt.Errorf("%w: later partition round at earlier root round", ErrConflict)
+	}
+	// The shared helper still compares scalar root rounds. For a proven
+	// cross-epoch successor, neutralize only that precondition on local copies;
+	// its shard-state and block-hash continuity checks remain in force.
+	if be > ae {
+		oldCopy, newCopy := *a, *b
+		oldSeal, newSeal := *a.UnicitySeal, *b.UnicitySeal
+		oldSeal.RootChainRoundNumber, newSeal.RootChainRoundNumber = 0, 0
+		oldCopy.UnicitySeal, newCopy.UnicitySeal = &oldSeal, &newSeal
+		a, b = &oldCopy, &newCopy
 	}
 	if err := types.CheckNonEquivocatingCertificates(a, b); err != nil {
 		return relationAdvance, fmt.Errorf("%w: %v", ErrConflict, err)
@@ -205,6 +225,15 @@ func (s *Store) PrepareObservation(ctx context.Context, c Context, o rootinput.V
 	c, ownErr = ownContext(c)
 	if ownErr != nil {
 		return PreparedObservation{}, 0, ownErr
+	}
+	// A historical handle can prove old bytes during replay but cannot grant
+	// current admission after the installed epoch advances.
+	current, err := rootinput.AuthenticateObservationV2(ctx, c.Observation, o.Certificate(), o.TechnicalRecord())
+	if err != nil || current.OriginIdentity() != o.OriginIdentity() {
+		if err != nil {
+			return PreparedObservation{}, 0, err
+		}
+		return PreparedObservation{}, 0, ErrContext
 	}
 	st, _, err := s.Load(ctx, c)
 	if err != nil {

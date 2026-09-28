@@ -274,7 +274,7 @@ func verifiedPairBytes(ctx context.Context, c Context, u, t []byte) (*types.Unic
 	if err := types.Cbor.Unmarshal(t, &tr); err != nil {
 		return nil, nil, err
 	}
-	if _, err := rootinput.AuthenticateObservationV2(ctx, c.Observation, &uc, &tr); err != nil {
+	if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, c.Observation, &uc, &tr); err != nil {
 		return nil, nil, err
 	}
 	return &uc, &tr, nil
@@ -529,7 +529,7 @@ func (s *Store) BackfillJournalObservation(ctx context.Context, c Context, limit
 	if err != nil {
 		return err
 	}
-	o, err := rootinput.AuthenticateObservationV2(ctx, c.Observation, uc, tr)
+	o, err := rootinput.AuthenticateHistoricalObservationV2(ctx, c.Observation, uc, tr)
 	if err != nil {
 		return err
 	}
