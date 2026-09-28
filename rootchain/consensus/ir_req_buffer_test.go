@@ -49,6 +49,14 @@ func TestIrReqBuffer_AddNil(t *testing.T) {
 	require.ErrorContains(t, reqBuffer.Add(3, nil, ver), "ir change request is nil")
 }
 
+func TestProfile2BufferRefusesControlPartition(t *testing.T) {
+	buffer := NewIrReqBuffer(logger.New(t), 2)
+	req := &drctypes.IRChangeReq{Partition: drctypes.ControlPartition, CertReason: drctypes.Quorum,
+		Requests: []*certification.BlockCertificationRequest{{InputRecord: inputRecord1}}}
+	require.ErrorIs(t, buffer.Add(3, req, NewAlwaysTrueIRReqVerifier()), drctypes.ErrControlPartition)
+	require.False(t, buffer.IsChangeInBuffer(drctypes.ControlPartition, types.ShardID{}))
+}
+
 func TestIrReqBuffer_Add(t *testing.T) {
 	reqBuffer := NewIrReqBuffer(logger.New(t))
 	ver := NewAlwaysTrueIRReqVerifier()

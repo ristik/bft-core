@@ -1,6 +1,7 @@
 package partitions
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"path/filepath"
@@ -9,9 +10,20 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+func TestHandoffProfileReservesControlPartition(t *testing.T) {
+	o, err := NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), logger.New(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.db.Close() })
+	conf := &types.PartitionDescriptionRecord{PartitionID: rctypes.ControlPartition}
+	require.False(t, errors.Is(o.AddShardConfig(conf), rctypes.ErrControlPartition))
+	o.EnableHandoffProfile()
+	require.ErrorIs(t, o.AddShardConfig(conf), rctypes.ErrControlPartition)
+}
 
 func TestNewOrchestration(t *testing.T) {
 	t.Run("directory not exist", func(t *testing.T) {

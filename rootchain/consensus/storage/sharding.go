@@ -10,6 +10,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
@@ -18,7 +19,8 @@ import (
 
 type ShardStates struct {
 	States  map[types.PartitionShardID]*ShardInfo
-	Changed ShardSet // shards whose state has changed
+	Changed ShardSet              // shards whose state has changed
+	Control *evmroot.ControlState // present only in the handoff network profile
 
 	// cache schemes of the block
 	schemes map[types.PartitionID]types.ShardingScheme
@@ -31,6 +33,13 @@ shard was part of the current block it's state is cloned, otherwise new empty st
 func (ss ShardStates) nextBlock(shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord, hashAlg crypto.Hash) (nextBlock ShardStates, err error) {
 	nextBlock.States = make(map[types.PartitionShardID]*ShardInfo, len(shardConfs))
 	nextBlock.Changed = ShardSet{}
+	if ss.Control != nil {
+		control := *ss.Control
+		control.PredecessorBodyID = bytes.Clone(control.PredecessorBodyID)
+		control.RecordBytes = bytes.Clone(control.RecordBytes)
+		control.PreviousDigest = bytes.Clone(control.PreviousDigest)
+		nextBlock.Control = &control
+	}
 	for k, pdr := range shardConfs {
 		if len(pdr.Validators) == 0 {
 			continue //  shard is deleted
@@ -43,6 +52,15 @@ func (ss ShardStates) nextBlock(shardConfs map[types.PartitionShardID]*types.Par
 				if nextBlock.States[k], err = prevSI.nextEpoch(pdr, hashAlg); err != nil {
 					return nextBlock, fmt.Errorf("creating ShardInfo %s - %s of the next epoch: %w",
 						prevSI.LastCR.Partition, prevSI.LastCR.Shard, err)
+				}
+				if ss.Control != nil {
+					next := nextBlock.States[k]
+					if next.TR.FeeHash, err = next.feeHash(crypto.SHA256); err != nil {
+						return nextBlock, err
+					}
+					if next.TR.StatHash, err = next.statHash(crypto.SHA256); err != nil {
+						return nextBlock, err
+					}
 				}
 			} else {
 				si := *prevSI
@@ -70,6 +88,12 @@ func (ss ShardStates) UnicityTree(algo crypto.Hash) (*types.UnicityTree, map[typ
 		return nil, nil, fmt.Errorf("acquiring sharding schemes: %w", err)
 	}
 	utData := make([]*types.UnicityTreeData, 0, len(schemes))
+	if ss.Control != nil {
+		if _, exists := schemes[evmroot.D4ControlPartition]; exists {
+			return nil, nil, errors.New("control partition is also configured as a shard")
+		}
+		utData = append(utData, &types.UnicityTreeData{Partition: evmroot.D4ControlPartition, ShardTreeRoot: ss.Control.Digest()})
+	}
 	shardTrees := make(map[types.PartitionID]types.ShardTree)
 	var si *ShardInfo
 	var ok bool
@@ -208,6 +232,14 @@ type ssItems struct {
 	Changes ShardSet
 }
 
+type ssItemsV2 struct {
+	_       struct{} `cbor:",toarray"`
+	Version uint32
+	Data    []*ShardInfo
+	Changes ShardSet
+	Control *evmroot.ControlState
+}
+
 func (ss ShardStates) MarshalCBOR() ([]byte, error) {
 	d := ssItems{
 		Version: 1,
@@ -219,6 +251,9 @@ func (ss ShardStates) MarshalCBOR() ([]byte, error) {
 		d.Data[idx] = si
 		idx++
 	}
+	if ss.Control != nil {
+		return types.Cbor.Marshal(ssItemsV2{Version: 2, Data: d.Data, Changes: d.Changes, Control: ss.Control})
+	}
 	buf, err := types.Cbor.Marshal(d)
 	if err != nil {
 		return nil, fmt.Errorf("serializing shard states: %w", err)
@@ -227,6 +262,25 @@ func (ss ShardStates) MarshalCBOR() ([]byte, error) {
 }
 
 func (ss *ShardStates) UnmarshalCBOR(data []byte) error {
+	var v2 ssItemsV2
+	if err := types.Cbor.Unmarshal(data, &v2); err == nil {
+		if v2.Version != 2 || v2.Control == nil {
+			return errors.New("invalid handoff shard state")
+		}
+		ssn := ShardStates{States: make(map[types.PartitionShardID]*ShardInfo, len(v2.Data)), Changed: v2.Changes, Control: v2.Control}
+		for _, itm := range v2.Data {
+			if itm == nil || itm.PartitionID == evmroot.D4ControlPartition {
+				return errors.New("invalid handoff shard entry")
+			}
+			key := types.PartitionShardID{PartitionID: itm.PartitionID, ShardID: itm.ShardID.Key()}
+			if _, duplicate := ssn.States[key]; duplicate {
+				return errors.New("duplicate handoff shard entry")
+			}
+			ssn.States[key] = itm
+		}
+		*ss = ssn
+		return nil
+	}
 	var d ssItems
 	if err := types.Cbor.Unmarshal(data, &d); err != nil {
 		return fmt.Errorf("decoding shard states: %w", err)

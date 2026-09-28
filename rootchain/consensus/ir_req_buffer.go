@@ -25,15 +25,21 @@ type (
 	IrReqBuffer struct {
 		irChgReqBuffer map[types.PartitionShardID]*irChange
 		log            *slog.Logger
+		profile        uint64
 	}
 
 	InProgressFn func(partition types.PartitionID, shard types.ShardID) *types.InputRecord
 )
 
-func NewIrReqBuffer(log *slog.Logger) *IrReqBuffer {
+func NewIrReqBuffer(log *slog.Logger, profile ...uint64) *IrReqBuffer {
+	var version uint64
+	if len(profile) != 0 {
+		version = profile[0]
+	}
 	return &IrReqBuffer{
 		irChgReqBuffer: make(map[types.PartitionShardID]*irChange),
 		log:            log,
+		profile:        version,
 	}
 }
 
@@ -42,6 +48,9 @@ func NewIrReqBuffer(log *slog.Logger) *IrReqBuffer {
 func (x *IrReqBuffer) Add(round uint64, irChReq *drctypes.IRChangeReq, ver IRChangeVerifier) error {
 	if irChReq == nil {
 		return errors.New("ir change request is nil")
+	}
+	if x.profile == 2 && irChReq.Partition == drctypes.ControlPartition {
+		return drctypes.ErrControlPartition
 	}
 	// special case, timeout cannot be requested, it can only be added to a block by the leader
 	if irChReq.CertReason == drctypes.T2Timeout {
@@ -92,6 +101,9 @@ func (x *IrReqBuffer) GeneratePayload(round uint64, timeouts []*types.UnicityCer
 	}
 	// first add timeout requests
 	for _, uc := range timeouts {
+		if x.profile == 2 && (uc == nil || uc.GetPartitionID() == drctypes.ControlPartition) {
+			continue
+		}
 		pID := uc.GetPartitionID()
 		sID := uc.GetShardID()
 		// if there is a request for the same partition (same id) in buffer (prefer progress to timeout) or

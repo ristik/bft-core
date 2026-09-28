@@ -20,6 +20,8 @@ type (
 		blockTree     *BlockTree
 		storage       PersistentStore
 		orchestration Orchestration
+		profile       uint64
+		handoffAuth   handoffAuthority
 		lock          sync.RWMutex
 		log           *slog.Logger
 	}
@@ -42,12 +44,16 @@ type (
 	}
 )
 
-func New(hashAlgo crypto.Hash, db PersistentStore, orchestration Orchestration, log *slog.Logger) (block *BlockStore, err error) {
+func New(hashAlgo crypto.Hash, db PersistentStore, orchestration Orchestration, log *slog.Logger, networkProfile ...uint64) (block *BlockStore, err error) {
 	if db == nil {
 		return nil, errors.New("storage is nil")
 	}
 
-	blTree, err := NewBlockTree(db, orchestration)
+	profile, err := profileVersion(networkProfile)
+	if err != nil {
+		return nil, err
+	}
+	blTree, err := NewBlockTree(db, orchestration, profile)
 	if err != nil {
 		return nil, fmt.Errorf("initializing block tree: %w", err)
 	}
@@ -56,16 +62,21 @@ func New(hashAlgo crypto.Hash, db PersistentStore, orchestration Orchestration, 
 		blockTree:     blTree,
 		storage:       db,
 		orchestration: orchestration,
+		profile:       profile,
 		log:           log,
 	}, nil
 }
 
-func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger) (*BlockStore, error) {
+func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger, networkProfile ...uint64) (*BlockStore, error) {
 	if db == nil {
 		return nil, errors.New("storage is nil")
 	}
 
-	rootNode, err := NewRootBlock(block, hash, orchestration)
+	profile, err := profileVersion(networkProfile)
+	if err != nil {
+		return nil, err
+	}
+	rootNode, err := NewRootBlock(block, hash, orchestration, profile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new root node: %w", err)
 	}
@@ -79,6 +90,7 @@ func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSt
 		blockTree:     blTree,
 		storage:       db,
 		orchestration: orchestration,
+		profile:       profile,
 		log:           log,
 	}, nil
 }
@@ -150,6 +162,20 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 
 // Add adds new round state to pipeline and returns the new state root hash a.k.a. execStateID
 func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier) ([]byte, error) {
+	if block == nil || block.Payload == nil {
+		return nil, errors.New("missing block or payload")
+	}
+	if (x.profile == ProfileHandoff && (block.GetVersion() != 2 || block.Payload.Version != 2)) ||
+		(x.profile == ProfileLegacy && (block.GetVersion() != 1 || block.Payload.Version > 1 || len(block.Payload.HandoffRecords) != 0)) {
+		return nil, ErrNetworkProfile
+	}
+	if x.profile == ProfileHandoff {
+		for _, req := range block.Payload.Requests {
+			if req == nil || req.Partition == rctypes.ControlPartition {
+				return nil, rctypes.ErrControlPartition
+			}
+		}
+	}
 	// verify that block for the round does not exist yet
 	// if block already exists, then check that it is the same block by comparing block hash
 	if b, err := x.blockTree.FindBlock(block.GetRound()); err == nil && b != nil {
@@ -172,8 +198,17 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 	if err != nil {
 		return nil, fmt.Errorf("add block failed: parent round %v not found, recover", block.Qc.VoteInfo.RoundNumber)
 	}
+	if err := checkProfile(x.profile, parentBlock.ShardState); err != nil {
+		return nil, err
+	}
+	if x.profile == ProfileHandoff && block.Epoch != parentBlock.BlockData.Epoch {
+		return nil, ErrNetworkProfile
+	}
+	if parentBlock.ShardState.Control != nil && parentBlock.ShardState.Control.Phase == "committed" && !block.Payload.IsEmpty() {
+		return nil, ErrHandoffSuffix
+	}
 	// Extend state from parent block
-	exeBlock, err := parentBlock.Extend(block, verifier, x.orchestration, x.hash, x.log)
+	exeBlock, err := parentBlock.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth)
 	if err != nil {
 		return nil, fmt.Errorf("error processing block round %v, %w", block.Round, err)
 	}
@@ -186,6 +221,23 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 
 func (x *BlockStore) GetHighQc() *rctypes.QuorumCert {
 	return x.blockTree.HighQc()
+}
+
+// SuffixParent reports whether an old-epoch proposal extends a branch that
+// already contains a committed handoff record.
+func (x *BlockStore) SuffixParent(parentRound, epoch uint64) (bool, error) {
+	parent, err := x.blockTree.FindBlock(parentRound)
+	if err != nil {
+		return false, err
+	}
+	if err := checkProfile(x.profile, parent.ShardState); err != nil {
+		return false, err
+	}
+	if x.profile == ProfileHandoff && epoch != parent.BlockData.Epoch {
+		return false, ErrNetworkProfile
+	}
+	control := parent.ShardState.Control
+	return control != nil && control.Phase == "committed", nil
 }
 
 // ReadFrontierStorageView returns an owned raw storage view for one shard.
@@ -271,7 +323,11 @@ func (x *BlockStore) ReadLastVote() (any, error) {
 	return x.storage.ReadLastVote()
 }
 
-func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash) (*ExecutedBlock, error) {
+func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash, networkProfile ...uint64) (*ExecutedBlock, error) {
+	profile, err := profileVersion(networkProfile)
+	if err != nil {
+		return nil, err
+	}
 	genesisBlock := &rctypes.BlockData{
 		Version:   1,
 		Author:    "genesis",
@@ -280,6 +336,10 @@ func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash) (*Executed
 		Timestamp: types.GenesisTime,
 		Payload:   &rctypes.Payload{},
 		Qc:        nil, // no parent block -> no parent QC
+	}
+	if profile == ProfileHandoff {
+		genesisBlock.Version = 2
+		genesisBlock.Payload.Version = 2
 	}
 
 	// Info about the round that commits the genesis block.
@@ -291,6 +351,16 @@ func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash) (*Executed
 		Timestamp:         genesisBlock.Timestamp,
 		ParentRoundNumber: 0,   // no parent block
 		CurrentRootHash:   nil, // no shards -> Unicity Tree root hash is nil
+	}
+	var state ShardStates
+	if profile == ProfileHandoff {
+		state = ShardStates{States: map[types.PartitionShardID]*ShardInfo{}, Changed: ShardSet{}}
+		state.Control = initialControl(networkID)
+		ut, _, err := state.UnicityTree(hashAlgo)
+		if err != nil {
+			return nil, err
+		}
+		commitRoundInfo.CurrentRootHash = ut.RootHash()
 	}
 	commitRoundInfoHash, err := commitRoundInfo.Hash(hashAlgo)
 	if err != nil {
@@ -320,8 +390,9 @@ func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash) (*Executed
 		HashAlgo:  hashAlgo,
 
 		// the same QC accepts the genesis block and commits it, usually commit comes later
-		Qc:       commitQc,
-		CommitQc: commitQc,
-		RootHash: commitQc.LedgerCommitInfo.Hash,
+		Qc:         commitQc,
+		CommitQc:   commitQc,
+		RootHash:   commitQc.LedgerCommitInfo.Hash,
+		ShardState: state,
 	}, nil
 }

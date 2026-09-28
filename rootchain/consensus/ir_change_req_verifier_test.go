@@ -20,6 +20,7 @@ type (
 		inProgress   []types.PartitionID
 		irInProgress *types.InputRecord
 		shardInfo    func(partition types.PartitionID, shard types.ShardID) *storage.ShardInfo
+		certificates []*types.UnicityCertificate
 	}
 )
 
@@ -34,6 +35,9 @@ var irSysID1 = &types.InputRecord{
 }
 
 func (s *MockState) GetCertificates() []*types.UnicityCertificate {
+	if s.certificates != nil {
+		return s.certificates
+	}
 	return []*types.UnicityCertificate{{
 		Version:                1,
 		InputRecord:            irSysID1,
@@ -44,6 +48,33 @@ func (s *MockState) GetCertificates() []*types.UnicityCertificate {
 		},
 	},
 	}
+}
+
+func TestHandoffProfileSkipsControlPartitionTimeout(t *testing.T) {
+	state := &MockState{certificates: []*types.UnicityCertificate{{
+		InputRecord:            &types.InputRecord{},
+		UnicityTreeCertificate: &types.UnicityTreeCertificate{Partition: abtypes.ControlPartition},
+		UnicitySeal:            &types.UnicitySeal{RootChainRoundNumber: 1},
+	}}, shardInfo: func(types.PartitionID, types.ShardID) *storage.ShardInfo {
+		t.Fatal("control shard was scheduled")
+		return nil
+	}}
+	generator, err := NewLucBasedT2TimeoutGenerator(&Parameters{NetworkProfileVersion: 2, BlockRate: time.Second}, state)
+	require.NoError(t, err)
+	timedOut, err := generator.GetT2Timeouts(100)
+	require.NoError(t, err)
+	require.Empty(t, timedOut)
+}
+
+func TestProfile2VerifierRefusesControlPartition(t *testing.T) {
+	verifier := &IRChangeReqVerifier{params: &Parameters{NetworkProfileVersion: 2}, state: &MockState{
+		shardInfo: func(types.PartitionID, types.ShardID) *storage.ShardInfo {
+			t.Fatal("reserved partition reached shard state")
+			return nil
+		},
+	}}
+	_, err := verifier.VerifyIRChangeReq(3, &abtypes.IRChangeReq{Partition: abtypes.ControlPartition})
+	require.ErrorIs(t, err, abtypes.ErrControlPartition)
 }
 
 func (s *MockState) ShardInfo(partition types.PartitionID, shard types.ShardID) *storage.ShardInfo {

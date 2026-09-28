@@ -79,7 +79,11 @@ func NewBlockTreeWithRootBlock(block *ExecutedBlock, bDB PersistentStore) (*Bloc
 
 func initBlock(block *ExecutedBlock, orchestration Orchestration) error {
 	// init SI data which is not persisted
-	shardConfs, err := orchestration.ShardConfigs(block.GetRound())
+	configRound := block.GetRound()
+	if block.ShardState.Control != nil && block.ShardState.Control.Phase == "committed" {
+		configRound = block.ShardState.Control.OrderedRound
+	}
+	shardConfs, err := orchestration.ShardConfigs(configRound)
 	if err != nil {
 		return fmt.Errorf("loading shard configurations for round %d: %w", block.GetRound(), err)
 	}
@@ -95,7 +99,11 @@ func initBlock(block *ExecutedBlock, orchestration Orchestration) error {
 	return nil
 }
 
-func NewBlockTree(bDB PersistentStore, orchestration Orchestration) (*BlockTree, error) {
+func NewBlockTree(bDB PersistentStore, orchestration Orchestration, networkProfile ...uint64) (*BlockTree, error) {
+	profile, err := profileVersion(networkProfile)
+	if err != nil {
+		return nil, err
+	}
 	if bDB == nil {
 		return nil, fmt.Errorf("block tree init failed, database is nil")
 	}
@@ -105,7 +113,7 @@ func NewBlockTree(bDB PersistentStore, orchestration Orchestration) (*BlockTree,
 	}
 	if len(blocks) == 0 {
 		// must be system bootstrap - init tree with genesis block
-		genesisBlock, err := NewGenesisBlock(orchestration.NetworkID(), crypto.SHA256)
+		genesisBlock, err := NewGenesisBlock(orchestration.NetworkID(), crypto.SHA256, profile)
 		if err != nil {
 			return nil, fmt.Errorf("creating genesis block for empty DB: %w", err)
 		}
@@ -117,6 +125,11 @@ func NewBlockTree(bDB PersistentStore, orchestration Orchestration) (*BlockTree,
 		return nil, errors.New("root block not found")
 	}
 	rootNode := newNode(blocks[rootIdx])
+	for _, block := range blocks {
+		if err := checkStoredRoot(block, profile); err != nil {
+			return nil, err
+		}
+	}
 	if err = initBlock(rootNode.data, orchestration); err != nil {
 		return nil, fmt.Errorf("init root block: %w", err)
 	}
@@ -132,6 +145,14 @@ func NewBlockTree(bDB PersistentStore, orchestration Orchestration) (*BlockTree,
 		// init ShardInfo data which is not persisted
 		if err = initBlock(block, orchestration); err != nil {
 			return nil, fmt.Errorf("init child block: %w", err)
+		}
+		if profile == ProfileHandoff {
+			if block.BlockData.Epoch != parent.data.BlockData.Epoch {
+				return nil, ErrNetworkProfile
+			}
+			if err := checkStoredSuffix(parent.data, block); err != nil {
+				return nil, err
+			}
 		}
 		// append block and add a child to parent
 		n := newNode(block)
@@ -366,6 +387,9 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert) ([]*certification.Certif
 	for _, cb := range path {
 		maps.Copy(commitNode.data.ShardState.Changed, cb.ShardState.Changed)
 	}
+	if oldControl, newControl := bt.root.data.ShardState.Control, commitNode.data.ShardState.Control; oldControl != nil && newControl != nil && oldControl.Phase == "committed" && newControl.Phase == "committed" && oldControl.Epoch == newControl.Epoch {
+		clear(commitNode.data.ShardState.Changed)
+	}
 	// prune the chain, the committed block becomes new root of the chain
 	blocksToPrune, err := bt.findBlocksToPrune(commitRound)
 	if err != nil {
@@ -411,6 +435,7 @@ func (bt *BlockTree) CurrentState() (*rcnet.StateMsg, error) {
 			Block:     committedBlock.BlockData,
 			Qc:        committedBlock.Qc,
 			CommitQc:  committedBlock.CommitQc,
+			Control:   committedBlock.ShardState.Control,
 		},
 		Pending: pending,
 	}, nil
