@@ -120,7 +120,9 @@ func NewBlockTree(bDB PersistentStore, orchestration Orchestration, networkProfi
 		return NewBlockTreeWithRootBlock(genesisBlock, bDB)
 	}
 	// blocks are sorted in descending order, first one with commit QC is the root
-	rootIdx := slices.IndexFunc(blocks, func(b *ExecutedBlock) bool { return b.CommitQc != nil })
+	rootIdx := slices.IndexFunc(blocks, func(b *ExecutedBlock) bool {
+		return b.CommitQc != nil || isEpochAnchorRoot(b)
+	})
 	if rootIdx == -1 {
 		return nil, errors.New("root block not found")
 	}
@@ -169,6 +171,10 @@ func NewBlockTree(bDB PersistentStore, orchestration Orchestration, networkProfi
 		highQc:      hQC,
 		blocksDB:    bDB,
 	}, nil
+}
+
+func isEpochAnchorRoot(b *ExecutedBlock) bool {
+	return b != nil && b.BlockData != nil && b.BlockData.Anchor != nil && b.BlockData.Round == b.BlockData.Anchor.Slot
 }
 
 func (bt *BlockTree) InsertQc(qc *abdrc.QuorumCert) error {
@@ -372,6 +378,9 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert) ([]*certification.Certif
 	if !found {
 		return nil, errors.Join(ErrCommitFailed, fmt.Errorf("block for round %v not found", commitRound))
 	}
+	if a := commitNode.data.BlockData.Anchor; a != nil && commitNode.data.BlockData.Round == a.Slot {
+		return nil, errors.Join(ErrCommitFailed, fmt.Errorf("epoch anchor is not a commit subject"))
+	}
 
 	for k, parentSI := range bt.root.data.ShardState.States {
 		// between blocks there might have been epoch change and thus new state
@@ -425,6 +434,10 @@ func (bt *BlockTree) CurrentState() (*rcnet.StateMsg, error) {
 	}
 
 	committedBlock := bt.root.data
+	var anchor *abdrc.EpochAnchor
+	if isEpochAnchorRoot(committedBlock) {
+		anchor = committedBlock.BlockData.Anchor
+	}
 	si, err := toRecoveryShardInfo(committedBlock)
 	if err != nil {
 		return nil, fmt.Errorf("building recovery info of the root block: %w", err)
@@ -436,6 +449,7 @@ func (bt *BlockTree) CurrentState() (*rcnet.StateMsg, error) {
 			Qc:        committedBlock.Qc,
 			CommitQc:  committedBlock.CommitQc,
 			Control:   committedBlock.ShardState.Control,
+			Anchor:    anchor,
 		},
 		Pending: pending,
 	}, nil

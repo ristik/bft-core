@@ -83,7 +83,7 @@ func (v *VoteRegister) InsertVote(vote *abdrc.VoteMsg, quorumInfo QuorumInfo) (*
 	quorum := v.hashToSignatures[commitInfoHash]
 	quorum.signatures[vote.Author] = vote.Signature
 	// Check QC
-	if uint64(len(quorum.signatures)) >= quorumInfo.GetQuorumThreshold() {
+	if signedWeight(quorum.signatures, quorumInfo) >= quorumInfo.GetQuorumThreshold() {
 		qc := drctypes.NewQuorumCertificateFromVote(quorum.voteInfo, quorum.commitInfo, quorum.signatures)
 		return qc, nil
 	}
@@ -109,12 +109,54 @@ func (v *VoteRegister) InsertTimeoutVote(timeout *abdrc.TimeoutMsg, quorumInfo Q
 	}
 
 	// Check if TC can be formed
-	sigCount := uint64(len(v.timeoutCert.Signatures))
+	sigCount := signedTimeoutWeight(v.timeoutCert.Signatures, quorumInfo)
 	if sigCount >= quorumInfo.GetQuorumThreshold() {
 		return v.timeoutCert, sigCount, nil
 	}
 	// No quorum yet, but also no error all is fine
 	return nil, sigCount, nil
+}
+
+func authorWeight(quorum QuorumInfo, author string) uint64 {
+	if members, ok := quorum.(interface{ GetRootNodes() []*types.NodeInfo }); ok {
+		for _, member := range members.GetRootNodes() {
+			if member.NodeID == author {
+				return member.Stake
+			}
+		}
+		return 0
+	}
+	return 1
+}
+
+func signedWeight(votes map[string]hex.Bytes, quorum QuorumInfo) uint64 {
+	var weight uint64
+	for author := range votes {
+		weight += authorWeight(quorum, author)
+	}
+	return weight
+}
+
+func signedTimeoutWeight(votes map[string]*drctypes.TimeoutVote, quorum QuorumInfo) uint64 {
+	var weight uint64
+	for author := range votes {
+		weight += authorWeight(quorum, author)
+	}
+	return weight
+}
+
+func maxFaultyWeight(quorum QuorumInfo) uint64 {
+	if members, ok := quorum.(interface{ GetRootNodes() []*types.NodeInfo }); ok {
+		var total uint64
+		for _, member := range members.GetRootNodes() {
+			total += member.Stake
+		}
+		if total >= quorum.GetQuorumThreshold() {
+			return total - quorum.GetQuorumThreshold()
+		}
+		return 0
+	}
+	return quorum.GetMaxFaultyNodes()
 }
 
 func (v *VoteRegister) Reset() {

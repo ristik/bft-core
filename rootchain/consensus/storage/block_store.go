@@ -204,7 +204,10 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 	if x.profile == ProfileHandoff && block.Epoch != parentBlock.BlockData.Epoch {
 		return nil, ErrNetworkProfile
 	}
-	if parentBlock.ShardState.Control != nil && parentBlock.ShardState.Control.Phase == "committed" && !block.Payload.IsEmpty() {
+	if x.profile == ProfileHandoff && (block.Anchor != nil) != isEpochAnchorRoot(parentBlock) {
+		return nil, ErrNetworkProfile
+	}
+	if !isEpochAnchorRoot(parentBlock) && parentBlock.ShardState.Control != nil && parentBlock.ShardState.Control.Phase == "committed" && !block.Payload.IsEmpty() {
 		return nil, ErrHandoffSuffix
 	}
 	// Extend state from parent block

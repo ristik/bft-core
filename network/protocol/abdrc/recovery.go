@@ -40,9 +40,13 @@ type CommittedBlock struct {
 	Qc        *rctypes.QuorumCert   // block's quorum certificate (from next view)
 	CommitQc  *rctypes.QuorumCert   // commit certificate
 	Control   *evmroot.ControlState // version 2 checkpoint control leaf
+	Anchor    *rctypes.EpochAnchor  // verified, noncommittable successor root
 }
 
 func (r CommittedBlock) MarshalCBOR() ([]byte, error) {
+	if r.Anchor != nil {
+		return types.Cbor.Marshal([]any{uint64(3), r.Block, r.ShardInfo, r.Qc, r.CommitQc, r.Control, r.Anchor})
+	}
 	if r.Control == nil {
 		return types.Cbor.Marshal([]any{r.Block, r.ShardInfo, r.Qc, r.CommitQc})
 	}
@@ -50,6 +54,23 @@ func (r CommittedBlock) MarshalCBOR() ([]byte, error) {
 }
 
 func (r *CommittedBlock) UnmarshalCBOR(data []byte) error {
+	var v3 struct {
+		_         struct{} `cbor:",toarray"`
+		Version   uint64
+		Block     *rctypes.BlockData
+		ShardInfo []ShardInfo
+		Qc        *rctypes.QuorumCert
+		CommitQc  *rctypes.QuorumCert
+		Control   *evmroot.ControlState
+		Anchor    *rctypes.EpochAnchor
+	}
+	if err := types.Cbor.Unmarshal(data, &v3); err == nil {
+		if v3.Version != 3 || v3.Control == nil || v3.Anchor == nil {
+			return errors.New("invalid anchor checkpoint")
+		}
+		*r = CommittedBlock{Block: v3.Block, ShardInfo: v3.ShardInfo, Qc: v3.Qc, CommitQc: v3.CommitQc, Control: v3.Control, Anchor: v3.Anchor}
+		return nil
+	}
 	var v2 struct {
 		_         struct{} `cbor:",toarray"`
 		Version   uint64
@@ -117,6 +138,12 @@ type StateMsg struct {
 	Pending       []*rctypes.BlockData
 }
 
+// RecoveryAnchorVerifier checks an anchor against a locally installed,
+// proof-verified genesis and reconstructs its native checkpoint tree.
+type RecoveryAnchorVerifier interface {
+	VerifyRecoveryAnchor(*CommittedBlock) error
+}
+
 /*
 CanRecoverToRound returns non-nil error when the state message is not suitable for recovery into round "round".
 */
@@ -139,51 +166,74 @@ func (sm *StateMsg) CanRecoverToRound(round uint64) error {
 }
 
 func (sm *StateMsg) Verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase) error {
-	return sm.verify(hashAlgorithm, tb, nil)
+	return sm.verify(hashAlgorithm, tb, nil, nil)
 }
 
 // VerifyWithHistory verifies inherited LastCRs under their own signer epochs.
 // Consensus certificates remain on the current, same-epoch recovery path.
-// TODO(i-b): admit a typed, independently verified checkpoint anchor here.
 func (sm *StateMsg) VerifyWithHistory(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases) error {
 	if history == nil {
 		return ErrHistoricalTrustBase
 	}
-	return sm.verify(hashAlgorithm, tb, history)
+	return sm.verify(hashAlgorithm, tb, history, nil)
 }
 
-func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases) error {
+// VerifyWithAnchor is the profile-2 recovery path after local proof and
+// snapshot installation. Ordinary recovery remains on VerifyWithHistory.
+func (sm *StateMsg) VerifyWithAnchor(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases, anchor RecoveryAnchorVerifier) error {
+	if history == nil || anchor == nil {
+		return ErrHistoricalTrustBase
+	}
+	return sm.verify(hashAlgorithm, tb, history, anchor)
+}
+
+func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases, anchor RecoveryAnchorVerifier) error {
 	if sm.CommittedHead == nil {
 		return fmt.Errorf("commit head is nil")
 	}
 	if err := sm.CommittedHead.IsValid(); err != nil {
 		return fmt.Errorf("invalid commit head: %w", err)
 	}
+	anchorHead := sm.CommittedHead.Anchor != nil
+	if anchorHead {
+		if history == nil || anchor == nil {
+			return ErrRecoveryEpoch
+		}
+		if err := anchor.VerifyRecoveryAnchor(sm.CommittedHead); err != nil {
+			return fmt.Errorf("invalid recovery anchor: %w", err)
+		}
+	}
 	if history != nil {
 		epoch := tb.GetEpoch()
 		if sm.CommittedHead.Block.Epoch != epoch ||
-			!recoveryQCEpoch(sm.CommittedHead.Block.Qc, epoch) ||
-			!recoveryQCEpoch(sm.CommittedHead.Qc, epoch) ||
-			!recoveryQCEpoch(sm.CommittedHead.CommitQc, epoch) {
+			(!anchorHead && (!recoveryQCEpoch(sm.CommittedHead.Block.Qc, epoch) ||
+				!recoveryQCEpoch(sm.CommittedHead.Qc, epoch) ||
+				!recoveryQCEpoch(sm.CommittedHead.CommitQc, epoch))) {
 			return ErrRecoveryEpoch
 		}
 		for _, block := range sm.Pending {
-			if block == nil || block.Epoch != epoch || !recoveryQCEpoch(block.Qc, epoch) {
+			if block == nil || block.Epoch != epoch || (block.Anchor == nil && !recoveryQCEpoch(block.Qc, epoch)) ||
+				(block.Anchor != nil && (!anchorHead || block.Anchor.Epoch != sm.CommittedHead.Anchor.Epoch ||
+					block.Anchor.Slot != sm.CommittedHead.Anchor.Slot ||
+					!slices.Equal(block.Anchor.GenesisID, sm.CommittedHead.Anchor.GenesisID) ||
+					!slices.Equal(block.Anchor.StateRoot, sm.CommittedHead.Anchor.StateRoot))) {
 				return ErrRecoveryEpoch
 			}
 		}
 	}
 	// Block from genesis round does not have a Qc
-	if sm.CommittedHead.GetRound() > rctypes.GenesisRootRound {
+	if !anchorHead && sm.CommittedHead.GetRound() > rctypes.GenesisRootRound {
 		if err := sm.CommittedHead.Block.Qc.Verify(tb); err != nil {
 			return fmt.Errorf("block qc verification error: %w", err)
 		}
 	}
-	if err := sm.CommittedHead.Qc.Verify(tb); err != nil {
-		return fmt.Errorf("qc verification error: %w", err)
-	}
-	if err := sm.CommittedHead.CommitQc.Verify(tb); err != nil {
-		return fmt.Errorf("commit qc verification error: %w", err)
+	if !anchorHead {
+		if err := sm.CommittedHead.Qc.Verify(tb); err != nil {
+			return fmt.Errorf("qc verification error: %w", err)
+		}
+		if err := sm.CommittedHead.CommitQc.Verify(tb); err != nil {
+			return fmt.Errorf("commit qc verification error: %w", err)
+		}
 	}
 	// verify node blocks
 	for _, n := range sm.Pending {
@@ -280,8 +330,21 @@ func (r *CommittedBlock) IsValid() error {
 	if (r.Block.GetVersion() == 2) != (r.Control != nil) {
 		return errors.New("missing or unexpected control checkpoint")
 	}
+	if r.Anchor != nil {
+		if err := r.Anchor.IsValid(); err != nil {
+			return err
+		}
+		if r.Block.Version != 2 || r.Block.Payload == nil || !r.Block.Payload.IsEmpty() ||
+			r.Block.Payload.Version != 2 || r.Block.Anchor == nil || r.Block.Qc != nil ||
+			r.Block.Round != r.Anchor.Slot || r.Block.Epoch != r.Anchor.Epoch ||
+			!slices.Equal(r.Block.Anchor.GenesisID, r.Anchor.GenesisID) || !slices.Equal(r.Block.Anchor.StateRoot, r.Anchor.StateRoot) ||
+			r.Block.Anchor.Slot != r.Anchor.Slot || r.Block.Anchor.Epoch != r.Anchor.Epoch ||
+			r.Qc != nil || r.CommitQc != nil || r.Control == nil || r.Control.Epoch+1 != r.Anchor.Epoch {
+			return ErrRecoveryEpoch
+		}
+	}
 	if r.Control != nil {
-		if r.Control.Epoch != r.Block.Epoch || r.Control.Network == 0 || len(r.Control.PredecessorBodyID) != 32 {
+		if (r.Anchor == nil && r.Control.Epoch != r.Block.Epoch) || r.Control.Network == 0 || len(r.Control.PredecessorBodyID) != 32 {
 			return errors.New("invalid control checkpoint")
 		}
 	}
@@ -296,8 +359,13 @@ func (r *CommittedBlock) IsValid() error {
 	if r.Block == nil {
 		return fmt.Errorf("block data is nil")
 	}
-	if err := r.Block.IsValid(); err != nil {
-		return fmt.Errorf("invalid block data: %w", err)
+	if r.Anchor == nil {
+		if err := r.Block.IsValid(); err != nil {
+			return fmt.Errorf("invalid block data: %w", err)
+		}
+	}
+	if r.Anchor != nil {
+		return nil
 	}
 
 	if r.Qc == nil {

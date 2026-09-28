@@ -25,6 +25,43 @@ import (
 
 type recoveryHistoryProof struct{}
 
+type anchorRecoveryHistory struct{}
+
+func (anchorRecoveryHistory) ByEpoch(uint64) (trusthistorystore.Record, error) {
+	return trusthistorystore.Record{}, nil
+}
+
+type anchorRecoveryVerifier struct{ expected []byte }
+
+func (v anchorRecoveryVerifier) VerifyRecoveryAnchor(head *CommittedBlock) error {
+	if !bytes.Equal(head.Anchor.GenesisID, v.expected) {
+		return ErrRecoveryEpoch
+	}
+	return nil
+}
+
+func TestRecoveryCommittedHeadRequiresVerifiedTypedAnchor(t *testing.T) {
+	a := &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 6,
+		StateRoot: bytes.Repeat([]byte{2}, 32)}
+	head := &CommittedBlock{Block: &rctypes.BlockData{Version: 2, Epoch: 2, Round: 6,
+		Payload: &rctypes.Payload{Version: 2}, Anchor: a}, Anchor: a,
+		Control: &evmroot.ControlState{Network: 5, Epoch: 1, PredecessorBodyID: make([]byte, 32)}}
+	encoded, err := types.Cbor.Marshal(head)
+	require.NoError(t, err)
+	var decoded CommittedBlock
+	require.NoError(t, types.Cbor.Unmarshal(encoded, &decoded))
+	require.Equal(t, head, &decoded)
+	require.NoError(t, head.IsValid())
+	state := &StateMsg{CommittedHead: head}
+	tb := &types.RootTrustBaseV1{Epoch: 2}
+	require.ErrorIs(t, state.VerifyWithHistory(crypto.SHA256, tb, anchorRecoveryHistory{}), ErrRecoveryEpoch)
+	require.NoError(t, state.VerifyWithAnchor(crypto.SHA256, tb, anchorRecoveryHistory{}, anchorRecoveryVerifier{a.GenesisID}))
+	wrong := bytes.Repeat([]byte{3}, 32)
+	require.Error(t, state.VerifyWithAnchor(crypto.SHA256, tb, anchorRecoveryHistory{}, anchorRecoveryVerifier{wrong}))
+	head.Qc = &rctypes.QuorumCert{}
+	require.ErrorIs(t, head.IsValid(), ErrRecoveryEpoch)
+}
+
 func (recoveryHistoryProof) VerifyActivation(context.Context, trusthistorystore.Record, m2contract.TrustInterval, []byte) error {
 	return nil // This recovery fixture supplies an already accepted transition.
 }

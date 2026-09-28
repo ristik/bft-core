@@ -97,7 +97,9 @@ func checkStoredRoot(block *ExecutedBlock, profile uint64) error {
 	if err := checkProfile(profile, block.ShardState); err != nil {
 		return err
 	}
-	if profile == ProfileHandoff && block.BlockData.Epoch != block.ShardState.Control.Epoch {
+	if profile == ProfileHandoff && block.BlockData.Epoch != block.ShardState.Control.Epoch &&
+		!(isEpochAnchorRoot(block) && block.BlockData.Epoch == block.ShardState.Control.Epoch+1 &&
+			bytes.Equal(block.BlockData.Anchor.StateRoot, block.RootHash)) {
 		return ErrNetworkProfile
 	}
 	if profile != ProfileHandoff {
@@ -124,6 +126,9 @@ func checkStoredRoot(block *ExecutedBlock, profile uint64) error {
 }
 
 func checkStoredSuffix(parent, child *ExecutedBlock) error {
+	if isEpochAnchorRoot(parent) {
+		return nil
+	}
 	control := parent.ShardState.Control
 	if control == nil || control.Phase != "committed" {
 		return nil

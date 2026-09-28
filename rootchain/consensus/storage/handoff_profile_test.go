@@ -170,6 +170,56 @@ func TestRecoveryHandoffSnapshotUsesProductionShardTree(t *testing.T) {
 	require.Error(t, snapshot.VerifyHandoffSnapshot(verified))
 }
 
+func TestInstallEpochAnchorFromRecoveryCheckpoint(t *testing.T) {
+	s := profileStore(t)
+	zero := make([]byte, 32)
+	body, frozen, tr := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32)
+	addProfileBlock(t, s, 2, [][]byte{record("prepare", 2, 7, zero, body, zero)})
+	addProfileBlock(t, s, 3, [][]byte{record("freeze", 3, 7, frozen, body, zero)})
+	h := addProfileBlock(t, s, 4, [][]byte{record("commit", 4, 7, frozen, body, tr)})
+	suffix := addProfileBlock(t, s, 5, nil)
+	_, err := s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, ParentRoundNumber: 4, Epoch: 1},
+		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 4, Epoch: 1, Hash: h.RootHash}})
+	require.NoError(t, err)
+	rec := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: 4, PredecessorBodyID: zero,
+		FrozenID: frozen, NextBodyID: body, ActivationRound: 7, SuccessorTRHash: tr, Kind: "commit"}
+	head := &abdrc.CommittedBlock{Block: suffix.BlockData, Control: suffix.ShardState.Control,
+		CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: suffix.RootHash}}}
+	v := evmroot.VerifiedHandoff{RecordID: rec.ID(), Record: rec, Root: suffix.RootHash,
+		ControlDigest: suffix.ShardState.Control.Digest(), OrderRound: 4, CommitSealRound: 5, Epoch: 1}
+	g := evmroot.EpochGenesis{Network: 5, Epoch: 2, Start: 7, OrderedRound: 4, NextBodyID: body,
+		RecordID: rec.ID(), Root: suffix.RootHash, ControlDigest: v.ControlDigest, FrozenID: frozen, SuccessorTRHash: tr}
+	a, err := s.InstallEpochAnchor(head, v, g)
+	require.NoError(t, err)
+	require.EqualValues(t, 6, a.Slot)
+	require.True(t, isEpochAnchorRoot(s.blockTree.Root()))
+	reloaded, err := New(crypto.SHA256, s.storage, emptyOrchestration(), logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	require.True(t, isEpochAnchorRoot(reloaded.blockTree.Root()))
+	anchorState, err := reloaded.GetState()
+	require.NoError(t, err)
+	require.Equal(t, a, anchorState.CommittedHead.Anchor)
+	require.NoError(t, reloaded.VerifyRecoveryAnchor(anchorState.CommittedHead))
+	corrupt := *anchorState.CommittedHead
+	controlCopy := *corrupt.Control
+	controlCopy.PreviousDigest = bytes.Repeat([]byte{9}, 32)
+	corrupt.Control = &controlCopy
+	require.Error(t, reloaded.VerifyRecoveryAnchor(&corrupt))
+	first := &rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Payload: &rctypes.Payload{Version: 2}, Anchor: a}
+	_, err = reloaded.Add(first, nil)
+	require.NoError(t, err)
+	child, err := reloaded.Block(7)
+	require.NoError(t, err)
+	require.Equal(t, "idle", child.ShardState.Control.Phase)
+	require.EqualValues(t, 2, child.ShardState.Control.Epoch)
+	require.False(t, bytes.Equal(child.RootHash, a.StateRoot))
+	recoveredAnchor, err := reloaded.NewFromAnchorState(anchorState.CommittedHead)
+	require.NoError(t, err)
+	require.Equal(t, a, recoveredAnchor.RootAnchor())
+	_, err = recoveredAnchor.Block(7)
+	require.Error(t, err)
+}
+
 func TestProfileSwitchRejectsUnsupported(t *testing.T) {
 	_, err := NewGenesisBlock(5, crypto.SHA256, 99)
 	require.True(t, errors.Is(err, ErrNetworkProfile))
