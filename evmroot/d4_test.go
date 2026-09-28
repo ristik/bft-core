@@ -46,6 +46,31 @@ func fixture(t *testing.T) d4Fixture {
 	old, keys := D4FixtureTrustBase(7, map[string]uint64{"a": 1, "b": 1, "c": 1, "d": 1})
 	return d4Fixture{body, r, s, old, keys}
 }
+
+func TestD4_FirstV2GenesisUsesWP1Predecessor(t *testing.T) {
+	oldHash := bytes.Repeat([]byte{0x71}, 32)
+	link, err := FirstV2PredecessorHash(V1Anchor{Version: 1, NetworkID: 3, Epoch: 1, HashIncludingSigs: oldHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	members := d3Assignment()
+	weight, _ := members.TotalWeight()
+	body := TrustBaseBodyV2{Version: 2, NetworkID: 3, Epoch: 2, EarliestActivation: 7,
+		Members: members, RootThreshold: RootQuorumThreshold(weight), PredecessorHash: link}
+	id := body.Identity()
+	record := OrderedHandoffRecord{Network: 3, Epoch: 1, OrderedRound: 4, ActivationRound: 7,
+		PredecessorBodyID: oldHash, NextBodyID: id[:], FrozenID: bytes.Repeat([]byte{2}, 32),
+		SuccessorTRHash: bytes.Repeat([]byte{3}, 32), Kind: "commit"}
+	v := VerifiedHandoff{Record: record}
+	g, err := DeriveEpochGenesis(v, body)
+	if err != nil || g.Start != 7 || g.Epoch != 2 {
+		t.Fatalf("first v2 body must derive G at A*: G=%+v err=%v", g, err)
+	}
+	v.Record.PredecessorBodyID = nil
+	if _, err := DeriveEpochGenesis(v, body); !errors.Is(err, ErrD4Anchor) {
+		t.Fatalf("missing v1 predecessor must fail: %v", err)
+	}
+}
 func (f d4Fixture) proof(t *testing.T, c uint64) HandoffProof {
 	t.Helper()
 	root, e := f.snapshot.Root()

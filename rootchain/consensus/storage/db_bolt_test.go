@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"crypto"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,6 +19,118 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
+
+func TestEpochAnchorSafetyInstallPreservesNewLocks(t *testing.T) {
+	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "anchor.db"), WithNoSync())
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, db.SetHighestQcRound(100, 101))
+	a := &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 12, StateRoot: bytes.Repeat([]byte{2}, 32)}
+	require.NoError(t, db.InstallEpochAnchorSafety(a))
+	require.EqualValues(t, 12, db.GetHighestQcRound())
+	require.EqualValues(t, 12, db.GetHighestVotedRound())
+	require.NoError(t, db.SetHighestQcRound(20, 21))
+	require.NoError(t, db.InstallEpochAnchorSafety(a))
+	require.EqualValues(t, 20, db.GetHighestQcRound())
+	require.EqualValues(t, 21, db.GetHighestVotedRound())
+	installed, err := db.ReadEpochAnchorSafety()
+	require.NoError(t, err)
+	require.Equal(t, a, installed)
+	other := *a
+	other.GenesisID = bytes.Repeat([]byte{3}, 32)
+	require.ErrorIs(t, db.InstallEpochAnchorSafety(&other), rctypes.ErrEpochAnchor)
+}
+
+func TestEpochAnchorRootInstallRollsBackAtEveryWriteAndRestarts(t *testing.T) {
+	steps := []string{"root-put", "old-block-delete-0", "old-block-delete-1", "safety-anchor", "highest-voted", "highest-qc", "vote-delete", "timeout-delete"}
+	for _, failAt := range steps {
+		t.Run(failAt, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "anchor-crash.db")
+			db, err := NewBoltStorage(path)
+			require.NoError(t, err)
+			oldRoot := &ExecutedBlock{BlockData: &rctypes.BlockData{Version: 2, Epoch: 1, Round: 4, Payload: &rctypes.Payload{Version: 2}}, CommitQc: &rctypes.QuorumCert{}}
+			require.NoError(t, db.WriteBlock(oldRoot, true))
+			require.NoError(t, db.WriteBlock(&ExecutedBlock{BlockData: &rctypes.BlockData{Version: 2, Epoch: 1, Round: 5, Payload: &rctypes.Payload{Version: 2}}}, false))
+			require.NoError(t, db.SetHighestQcRound(20, 21))
+			require.NoError(t, db.WriteVote(&abdrc.VoteMsg{Author: "old-validator"}))
+			timeout := &rctypes.TimeoutCert{Timeout: &rctypes.Timeout{Epoch: 1, Round: 99, HighQc: &rctypes.QuorumCert{}}}
+			require.NoError(t, db.WriteTC(timeout))
+			anchor := &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 6, StateRoot: bytes.Repeat([]byte{2}, 32)}
+			root := &ExecutedBlock{BlockData: &rctypes.BlockData{Version: 2, Epoch: 2, Round: 6, Payload: &rctypes.Payload{Version: 2}, Anchor: anchor}}
+			crash := errors.New("injected crash")
+			err = db.installEpochAnchorRootWithFault(root, anchor, func(step string) error {
+				if step == failAt {
+					return crash
+				}
+				return nil
+			})
+			require.ErrorIs(t, err, crash)
+			blocks, err := db.LoadBlocks()
+			require.NoError(t, err)
+			require.Len(t, blocks, 2)
+			require.EqualValues(t, 5, blocks[0].GetRound())
+			require.EqualValues(t, 4, blocks[1].GetRound())
+			installed, err := db.ReadEpochAnchorSafety()
+			require.NoError(t, err)
+			require.Nil(t, installed)
+			require.EqualValues(t, 20, db.GetHighestQcRound())
+			require.EqualValues(t, 21, db.GetHighestVotedRound())
+			vote, err := db.ReadLastVote()
+			require.NoError(t, err)
+			require.NotNil(t, vote)
+			lastTC, err := db.ReadLastTC()
+			require.NoError(t, err)
+			require.NotNil(t, lastTC)
+			require.NoError(t, db.Close())
+
+			db, err = NewBoltStorage(path)
+			require.NoError(t, err)
+			defer db.Close()
+			blocks, err = db.LoadBlocks()
+			require.NoError(t, err)
+			require.Len(t, blocks, 2)
+			installed, err = db.ReadEpochAnchorSafety()
+			require.NoError(t, err)
+			require.Nil(t, installed)
+			require.NoError(t, db.InstallEpochAnchorRoot(root, anchor))
+			require.NoError(t, db.Close())
+
+			db, err = NewBoltStorage(path)
+			require.NoError(t, err)
+			defer db.Close()
+			blocks, err = db.LoadBlocks()
+			require.NoError(t, err)
+			require.Len(t, blocks, 1)
+			require.True(t, isEpochAnchorRoot(blocks[0]))
+			installed, err = db.ReadEpochAnchorSafety()
+			require.NoError(t, err)
+			require.Equal(t, anchor, installed)
+			require.EqualValues(t, anchor.Slot, db.GetHighestQcRound())
+			require.EqualValues(t, anchor.Slot, db.GetHighestVotedRound())
+			vote, err = db.ReadLastVote()
+			require.NoError(t, err)
+			require.Nil(t, vote)
+			lastTC, err = db.ReadLastTC()
+			require.NoError(t, err)
+			require.Nil(t, lastTC)
+		})
+	}
+}
+
+func TestAnchorRootDiscardsOldSuffixAboveFixedStart(t *testing.T) {
+	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "late-proof.db"), WithNoSync())
+	require.NoError(t, err)
+	defer db.Close()
+	for _, round := range []uint64{4, 5, 7, 8} {
+		require.NoError(t, db.WriteBlock(&ExecutedBlock{BlockData: &rctypes.BlockData{Round: round, Epoch: 1}}, false))
+	}
+	a := &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 6, StateRoot: bytes.Repeat([]byte{2}, 32)}
+	require.NoError(t, db.WriteBlock(&ExecutedBlock{BlockData: &rctypes.BlockData{Round: 6, Epoch: 2, Anchor: a}}, true))
+	blocks, err := db.LoadBlocks()
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	require.Equal(t, a, blocks[0].BlockData.Anchor)
+}
 
 func Test_BoltDB_Block(t *testing.T) {
 	tempDir := t.TempDir()

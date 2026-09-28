@@ -9,12 +9,72 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
 type DummyQuorum struct {
 	quorum uint64
 	faulty uint64
+}
+
+type weightedQuorum struct{ members []*types.NodeInfo }
+
+func (q weightedQuorum) GetQuorumThreshold() uint64      { return 3 }
+func (q weightedQuorum) GetMaxFaultyNodes() uint64       { return 0 }
+func (q weightedQuorum) GetRootNodes() []*types.NodeInfo { return q.members }
+
+func TestVoteRegisterUsesSuccessorWeights(t *testing.T) {
+	committee := weightedQuorum{members: []*types.NodeInfo{{NodeID: "heavy", Stake: 3}, {NodeID: "light", Stake: 1}}}
+	weighted := profile2QuorumInfo{QuorumInfo: committee}
+	require.EqualValues(t, 1, maxFaultyWeight(weighted))
+	register := NewVoteRegister()
+	qc, err := register.InsertVote(NewDummyVote(t, "light", 7, []byte{1}), weighted)
+	require.NoError(t, err)
+	require.Nil(t, qc)
+	qc, err = register.InsertVote(NewDummyVote(t, "heavy", 7, []byte{1}), weighted)
+	require.NoError(t, err)
+	require.NotNil(t, qc)
+	anchor := &drctypes.EpochAnchor{GenesisID: make([]byte, 32), Epoch: 2, Slot: 6, StateRoot: make([]byte, 32)}
+	anchor.GenesisID[0], anchor.StateRoot[0] = 1, 1
+	timeout := abdrc.NewTimeoutMsg(drctypes.NewAnchorTimeout(7, anchor), "heavy", nil)
+	timeout.Signature = []byte{1}
+	tc, weight, err := NewVoteRegister().InsertTimeoutVote(timeout, weighted)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, weight)
+	require.NotNil(t, tc)
+}
+
+func TestVoteRegisterUsesUnitCountsWithoutProfile2(t *testing.T) {
+	committee := weightedQuorum{members: []*types.NodeInfo{{NodeID: "heavy", Stake: 3}, {NodeID: "light", Stake: 1}}}
+	require.EqualValues(t, 0, maxFaultyWeight(committee))
+	qc, err := NewVoteRegister().InsertVote(NewDummyVote(t, "heavy", 7, []byte{1}), committee)
+	require.NoError(t, err)
+	require.Nil(t, qc, "one validator counts as one vote with profile off")
+	anchor := &drctypes.EpochAnchor{GenesisID: make([]byte, 32), Epoch: 2, Slot: 6, StateRoot: make([]byte, 32)}
+	anchor.GenesisID[0], anchor.StateRoot[0] = 1, 1
+	timeout := abdrc.NewTimeoutMsg(drctypes.NewAnchorTimeout(7, anchor), "heavy", nil)
+	timeout.Signature = []byte{1}
+	tc, count, err := NewVoteRegister().InsertTimeoutVote(timeout, committee)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, count)
+	require.Nil(t, tc, "one validator counts as one timeout vote with profile off")
+}
+
+func TestConsensusManagerVoteQuorumInfoIsProfileGated(t *testing.T) {
+	trust := &types.RootTrustBaseV1{}
+	manager := &ConsensusManager{params: &Parameters{NetworkProfileVersion: storage.ProfileLegacy}}
+	manager.trustBase.Store(trust)
+	legacy := manager.voteQuorumInfo()
+	require.True(t, legacy == trust)
+	_, weighted := legacy.(interface{ usesStakeWeighting() })
+	require.False(t, weighted)
+
+	manager.params.NetworkProfileVersion = storage.ProfileHandoff
+	handoff := manager.voteQuorumInfo()
+	require.False(t, handoff == trust)
+	_, weighted = handoff.(interface{ usesStakeWeighting() })
+	require.True(t, weighted)
 }
 
 func NewDummyQuorum(q, f uint64) *DummyQuorum {

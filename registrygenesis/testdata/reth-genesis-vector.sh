@@ -141,7 +141,7 @@ jq -e --arg a "$a_sr" --argjson keys "$keys" '
 	and (.storageProof | type == "array" and length == ($keys | length))
 	and ([.storageProof[].key] == $keys)
 	and all(.storageProof[]; .proof | type == "array" and all(.[]; type == "string" and test("^0x([0-9a-f][0-9a-f])+$")))
-' <<<"$proof" >/dev/null 2>&1 || fail "eth_getProof result is malformed or not for $a_sr and the 22 keys"
+' <<<"$proof" >/dev/null 2>&1 || fail "eth_getProof result is malformed or not for $a_sr and the 28 keys"
 
 owned
 alive

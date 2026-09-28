@@ -11,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
@@ -229,6 +230,9 @@ type ContextV2 struct {
 	Round              uint64
 	ParentHash         []byte
 	TransitionsPending bool
+	// Transition is supplied by the verified, installed root handoff anchor.
+	// It is included exactly once, while the parent registry is still in the old epoch.
+	Transition []byte
 }
 
 type ResultV2 struct {
@@ -242,18 +246,33 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 	if !o.Valid() || !c.Genesis.Valid() || !c.Parent.Valid() {
 		return ResultV2{}, fmt.Errorf("%w: observation, genesis origin, and snapshot are required", ErrV2Context)
 	}
+	var transition handoff.EVMTransition
 	if c.TransitionsPending {
-		return ResultV2{}, fmt.Errorf("%w: transitions pending", ErrUnsupported)
+		var err error
+		transition, err = handoff.DecodeEVMTransition(c.Transition)
+		if err != nil {
+			return ResultV2{}, fmt.Errorf("%w: missing or invalid installed transition", ErrUnsupported)
+		}
+	} else if len(c.Transition) != 0 {
+		return ResultV2{}, fmt.Errorf("%w: transition without pending handoff", ErrUnsupported)
 	}
 	parent := bytes.Clone(c.ParentHash)
 	if len(parent) != 32 || !bytes.Equal(parent, c.Parent.ParentHash().Bytes()) {
 		return ResultV2{}, fmt.Errorf("%w: chosen snapshot subject is not the pinned parent", ErrV2Ancestry)
 	}
 	r := c.Genesis.Record()
-	if uint64(o.network) != r.NetworkID || uint64(o.partition) != r.PartitionID || !bytes.Equal(o.shard, r.ShardID) || !bytes.Equal(o.conf, c.Genesis.FullShardConfHash().Bytes()) || o.rootEpoch != r.RootEpoch {
+	if uint64(o.network) != r.NetworkID || uint64(o.partition) != r.PartitionID || !bytes.Equal(o.shard, r.ShardID) || !bytes.Equal(o.conf, c.Genesis.FullShardConfHash().Bytes()) {
 		return ResultV2{}, fmt.Errorf("%w: observation and genesis origin name different deployment contexts", ErrV2Context)
 	}
 	f := c.Parent.Fields()
+	if c.TransitionsPending {
+		if transition.OldEpoch != f.RootEpoch || transition.NewEpoch != o.rootEpoch ||
+			!bytes.Equal(transition.Ack.FrozenParent[:], parent) {
+			return ResultV2{}, fmt.Errorf("%w: transition epoch or frozen parent mismatch", ErrV2Context)
+		}
+	} else if o.rootEpoch != f.RootEpoch {
+		return ResultV2{}, fmt.Errorf("%w: root epoch change requires installed transition", ErrV2Context)
+	}
 	pc := c.Genesis.ProofContext()
 	if c.Parent.VerifiedContext() != pc {
 		return ResultV2{}, fmt.Errorf("%w: snapshot and genesis origin use different proof contexts", ErrV2Context)
@@ -261,7 +280,19 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 	if c.Round != o.tr.Round {
 		return ResultV2{}, fmt.Errorf("%w: pinned round %d, authenticated assignment %d", ErrNotPinned, c.Round, o.tr.Round)
 	}
-	if o.origin.RootRound < c.Parent.LastAppliedRootRound() {
+	var boundTransition []byte
+	if c.TransitionsPending {
+		// The committed successor TR names the first assignment, but T2 may
+		// advance it before the acknowledgement block is built. Bind the Ack
+		// to the authenticated assignment used by this exact block.
+		transition.Ack.EVMRound = c.Round
+		var err error
+		boundTransition, err = transition.Encode()
+		if err != nil {
+			return ResultV2{}, fmt.Errorf("%w: bound acknowledgement: %v", ErrV2Context, err)
+		}
+	}
+	if !c.TransitionsPending && o.origin.RootRound < c.Parent.LastAppliedRootRound() {
 		return ResultV2{}, fmt.Errorf("%w: root round %d behind committed cursor %d", ErrNotPinned, o.origin.RootRound, c.Parent.LastAppliedRootRound())
 	}
 	b0, s0 := c.Genesis.BlockHash(), c.Genesis.StateRoot()
@@ -289,6 +320,9 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 		return ResultV2{}, fmt.Errorf("%w: invalid class", ErrV2Shape)
 	}
 	ri := evmroot.RootInputV2{Version: evmroot.ProfileVersionV2, NetworkID: uint64(o.network), PartitionID: uint64(o.partition), ShardID: bytes.Clone(o.shard), Round: c.Round, CertifiedEpoch: o.origin.IR.Epoch, AuthorizedEpoch: o.tr.Epoch, ParentHash: parent, Origin: cloneOriginV2(o.origin), TE: evmroot.TechnicalRecord{Round: o.tr.Round, Epoch: o.tr.Epoch, Leader: o.tr.Leader, StatHash: bytes.Clone(o.tr.StatHash), FeeHash: bytes.Clone(o.tr.FeeHash)}}
+	if c.TransitionsPending {
+		ri.Transitions = [][]byte{boundTransition}
+	}
 	if err := ri.Validate(); err != nil {
 		return ResultV2{}, fmt.Errorf("%w: %v", ErrV2Shape, err)
 	}

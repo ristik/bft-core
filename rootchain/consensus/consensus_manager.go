@@ -105,6 +105,7 @@ type (
 		frontier         *frontierSampler
 		recoveryProfile2 bool
 		recoveryHistory  *trusthistorystore.Store
+		epochAnchor      *drctypes.EpochAnchor
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -201,7 +202,32 @@ func NewConsensusManager(
 	if err != nil {
 		return nil, err
 	}
+	var installedAnchor *drctypes.EpochAnchor
 	if cParams.NetworkProfileVersion == storage.ProfileHandoff {
+		if durable, ok := store.(epochAnchorSafetyStore); ok {
+			installedAnchor, err = durable.ReadEpochAnchorSafety()
+			if err != nil {
+				return nil, fmt.Errorf("read durable epoch anchor: %w", err)
+			}
+		}
+		if rootAnchor := bStore.RootAnchor(); rootAnchor != nil &&
+			(installedAnchor == nil || !bytes.Equal(rootAnchor.GenesisID, installedAnchor.GenesisID)) {
+			return nil, errors.New("root anchor has no matching durable safety state")
+		}
+		if installedAnchor != nil {
+			if !optional.RecoveryProfile2 || optional.RecoveryHistory == nil {
+				return nil, fmt.Errorf("installed epoch anchor requires profile 2 recovery: %w", abdrc.ErrRecoveryEpoch)
+			}
+			if bStore.RootEpoch() != installedAnchor.Epoch {
+				return nil, errors.New("root epoch differs from installed anchor")
+			}
+			trustBase, err = trustBaseStore.GetByEpoch(installedAnchor.Epoch)
+			if err != nil {
+				return nil, fmt.Errorf("successor trust base unavailable: %w", err)
+			}
+		}
+	}
+	if cParams.NetworkProfileVersion == storage.ProfileHandoff && installedAnchor == nil {
 		if err := bStore.ConfigureHandoffAuthority(trustBase); err != nil {
 			return nil, fmt.Errorf("handoff authority: %w", err)
 		}
@@ -217,6 +243,13 @@ func NewConsensusManager(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create consensus leader selector: %w", err)
 	}
+	var chosenLeader Leader = ls
+	if installedAnchor != nil {
+		chosenLeader, err = newBootstrapLeader(ls, installedAnchor.Slot+1, trustBase.RootNodes)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	consensusManager := &ConsensusManager{
 		certReqCh:        make(chan certRequest),
@@ -226,7 +259,7 @@ func NewConsensusManager(
 		id:               nodeID,
 		net:              net,
 		pacemaker:        pm,
-		leaderSelector:   ls,
+		leaderSelector:   chosenLeader,
 		trustBaseStore:   trustBaseStore,
 		irReqBuffer:      NewIrReqBuffer(log, cParams.NetworkProfileVersion),
 		safety:           safetyModule,
@@ -239,6 +272,7 @@ func NewConsensusManager(
 		frontier:         frontier,
 		recoveryProfile2: optional.RecoveryProfile2,
 		recoveryHistory:  optional.RecoveryHistory,
+		epochAnchor:      installedAnchor,
 		log:              log,
 		tracer:           observe.Tracer("cm.distributed"),
 	}
@@ -367,7 +401,17 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("failed to read last TC from block store: %w", err)
 		}
-		x.pacemaker.Reset(ctx, hQc.GetRound(), lastTC, vote)
+		highRound := hQc.GetRound()
+		if x.epochAnchor != nil {
+			if hQc != nil && hQc.VoteInfo.Epoch != x.epochAnchor.Epoch {
+				return errors.New("old QC cannot start successor pacemaker")
+			}
+			if lastTC != nil && (lastTC.Timeout == nil || lastTC.Timeout.Epoch != x.epochAnchor.Epoch) {
+				return errors.New("old TC cannot start successor pacemaker")
+			}
+			highRound = max(highRound, x.epochAnchor.Slot)
+		}
+		x.pacemaker.Reset(ctx, highRound, lastTC, vote)
 
 		// Now that we have a better idea of current round, let's see if we need to update our trust base.
 		x.updateTrustBase()
@@ -514,8 +558,15 @@ func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 	timeoutVoteMsg := x.pacemaker.GetTimeoutVote()
 	if timeoutVoteMsg == nil {
 		// create timeout vote
+		qc := x.blockStore.GetHighQc()
+		var timeout *drctypes.Timeout
+		if x.epochAnchor != nil && qc == nil {
+			timeout = drctypes.NewAnchorTimeout(x.pacemaker.GetCurrentRound(), x.epochAnchor)
+		} else {
+			timeout = drctypes.NewTimeout(x.pacemaker.GetCurrentRound(), x.trustBase.Load().Epoch, qc)
+		}
 		timeoutVoteMsg = abdrc.NewTimeoutMsg(
-			drctypes.NewTimeout(x.pacemaker.GetCurrentRound(), x.trustBase.Load().Epoch, x.blockStore.GetHighQc()),
+			timeout,
 			x.id.String(),
 			x.pacemaker.LastRoundTC())
 		if err := x.safety.SignTimeout(timeoutVoteMsg, x.pacemaker.LastRoundTC()); err != nil {
@@ -636,6 +687,15 @@ func (x *ConsensusManager) onVoteMsg(ctx context.Context, vote *abdrc.VoteMsg) e
 	if err := vote.Verify(x.trustBaseStore); err != nil {
 		return fmt.Errorf("invalid vote: %w", err)
 	}
+	if x.epochAnchor != nil {
+		if vote.VoteInfo.Epoch != x.epochAnchor.Epoch ||
+			(vote.Anchor != nil && !x.matchesInstalledAnchor(vote.Anchor)) ||
+			(vote.HighQc != nil && (vote.HighQc.VoteInfo == nil || vote.HighQc.VoteInfo.Epoch != x.epochAnchor.Epoch)) {
+			return drctypes.ErrEpochAnchor
+		}
+	} else if vote.Anchor != nil {
+		return drctypes.ErrEpochAnchor
+	}
 	// if a vote is received for future round it is intended for the node which is going to be the
 	// leader. Cache the vote and wait for more one vote is not enough to trigger recovery.
 	// If the node has received at least f+1 votes, then at least 1 honest node also agrees that this node
@@ -653,8 +713,12 @@ func (x *ConsensusManager) onVoteMsg(ctx context.Context, vote *abdrc.VoteMsg) e
 		// NB! it seems that it's quite common that votes arrive before proposal and going into recovery
 		// too early is counterproductive... maybe do not trigger recovery here at all - if we're lucky
 		// proposal will arrive on time, otherwise round will likely TO anyway?
-		if uint64(len(x.voteBuffer)) >= x.trustBase.Load().GetQuorumThreshold() {
-			err := fmt.Errorf("have received %d votes but no proposal, entering recovery", len(x.voteBuffer))
+		var bufferedWeight uint64
+		for author := range x.voteBuffer {
+			bufferedWeight += authorWeight(x.trustBase.Load(), author)
+		}
+		if bufferedWeight >= x.trustBase.Load().GetQuorumThreshold() {
+			err := fmt.Errorf("have received vote weight %d but no proposal, entering recovery", bufferedWeight)
 			if e := x.sendRecoveryRequests(ctx, vote); e != nil {
 				err = errors.Join(err, fmt.Errorf("sending recovery requests failed: %w", e))
 			}
@@ -662,16 +726,18 @@ func (x *ConsensusManager) onVoteMsg(ctx context.Context, vote *abdrc.VoteMsg) e
 		}
 		return nil
 	}
-	if err := x.checkRecoveryNeeded(vote.HighQc); err != nil {
-		// we need to buffer the vote(s) so that when recovery succeeds we can "replay"
-		// them - otherwise there might not be enough votes to achieve quorum and round
-		// will time out
-		x.voteBuffer[vote.Author] = vote
-		err = fmt.Errorf("vote triggers recovery: %w", err)
-		if e := x.sendRecoveryRequests(ctx, vote); e != nil {
-			err = errors.Join(err, fmt.Errorf("sending recovery requests failed: %w", e))
+	if vote.HighQc != nil {
+		if err := x.checkRecoveryNeeded(vote.HighQc); err != nil {
+			// we need to buffer the vote(s) so that when recovery succeeds we can "replay"
+			// them - otherwise there might not be enough votes to achieve quorum and round
+			// will time out
+			x.voteBuffer[vote.Author] = vote
+			err = fmt.Errorf("vote triggers recovery: %w", err)
+			if e := x.sendRecoveryRequests(ctx, vote); e != nil {
+				err = errors.Join(err, fmt.Errorf("sending recovery requests failed: %w", e))
+			}
+			return err
 		}
-		return err
 	}
 
 	// Normal votes are only sent to the next leader (timeout votes are broadcast) is it us?
@@ -685,7 +751,7 @@ func (x *ConsensusManager) onVoteMsg(ctx context.Context, vote *abdrc.VoteMsg) e
 		return fmt.Errorf("validator is not the leader for round %d", nextRound)
 	}
 
-	qc, mature, err := x.pacemaker.RegisterVote(vote, x.trustBase.Load())
+	qc, mature, err := x.pacemaker.RegisterVote(vote, x.voteQuorumInfo())
 	if err != nil {
 		return fmt.Errorf("failed to register vote: %w", err)
 	}
@@ -696,6 +762,14 @@ func (x *ConsensusManager) onVoteMsg(ctx context.Context, vote *abdrc.VoteMsg) e
 		x.updateQCMetrics(ctx, qc)
 	}
 	return nil
+}
+
+func (x *ConsensusManager) voteQuorumInfo() QuorumInfo {
+	trust := x.trustBase.Load()
+	if x.params.NetworkProfileVersion == storage.ProfileHandoff {
+		return profile2QuorumInfo{QuorumInfo: trust}
+	}
+	return trust
 }
 
 // onTimeoutMsg handles timeout vote messages from other root validators
@@ -711,13 +785,21 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	if err := vote.Verify(x.trustBaseStore); err != nil {
 		return fmt.Errorf("invalid timeout vote: %w", err)
 	}
-	// SyncState, compare last handled QC
-	if err := x.checkRecoveryNeeded(vote.Timeout.HighQc); err != nil {
-		err = fmt.Errorf("timeout vote triggers recovery: %w", err)
-		if e := x.sendRecoveryRequests(ctx, vote); e != nil {
-			err = errors.Join(err, fmt.Errorf("sending recovery requests failed: %w", e))
-		}
+	if err := x.validateTimeoutParent(vote.Timeout); err != nil {
 		return err
+	}
+	if err := x.validateTimeoutCert(vote.LastTC); err != nil {
+		return err
+	}
+	// SyncState, compare last handled QC
+	if vote.Timeout.HighQc != nil {
+		if err := x.checkRecoveryNeeded(vote.Timeout.HighQc); err != nil {
+			err = fmt.Errorf("timeout vote triggers recovery: %w", err)
+			if e := x.sendRecoveryRequests(ctx, vote); e != nil {
+				err = errors.Join(err, fmt.Errorf("sending recovery requests failed: %w", e))
+			}
+			return err
+		}
 	}
 	// node is up-to-date, first handle high QC, maybe this has not been seen yet
 	x.processQC(ctx, vote.Timeout.HighQc)
@@ -726,7 +808,7 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	// the highQC is the same for both rounds. So checking the lastTC helps the instance into latest TO round.
 	x.processTC(ctx, vote.LastTC)
 
-	tc, err := x.pacemaker.RegisterTimeoutVote(ctx, vote, x.trustBase.Load())
+	tc, err := x.pacemaker.RegisterTimeoutVote(ctx, vote, x.voteQuorumInfo())
 	if err != nil {
 		return fmt.Errorf("failed to register timeout vote: %w", err)
 	}
@@ -781,13 +863,21 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 	if err := proposal.Verify(x.trustBaseStore); err != nil {
 		return fmt.Errorf("invalid proposal: %w", err)
 	}
-	// Check current state against new QC
-	if err := x.checkRecoveryNeeded(proposal.Block.Qc); err != nil {
-		err = fmt.Errorf("proposal triggers recovery: %w", err)
-		if e := x.sendRecoveryRequests(ctx, proposal); e != nil {
-			err = errors.Join(err, fmt.Errorf("sending recovery requests failed: %w", e))
-		}
+	if err := x.validateProposalParent(proposal.Block); err != nil {
 		return err
+	}
+	if err := x.validateTimeoutCert(proposal.LastRoundTc); err != nil {
+		return err
+	}
+	// Check current state against new QC
+	if proposal.Block.Qc != nil {
+		if err := x.checkRecoveryNeeded(proposal.Block.Qc); err != nil {
+			err = fmt.Errorf("proposal triggers recovery: %w", err)
+			if e := x.sendRecoveryRequests(ctx, proposal); e != nil {
+				err = errors.Join(err, fmt.Errorf("sending recovery requests failed: %w", e))
+			}
+			return err
+		}
 	}
 	// Is from valid leader
 	l, err := x.leaderSelector.GetLeaderForRound(proposal.Block.Round)
@@ -845,6 +935,9 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 	if qc == nil {
 		return
 	}
+	if x.epochAnchor != nil && (qc.VoteInfo == nil || qc.VoteInfo.Epoch != x.epochAnchor.Epoch) {
+		return
+	}
 	certs, err := x.blockStore.ProcessQc(qc)
 	if err != nil {
 		if x.frontier != nil && errors.Is(err, storage.ErrPersistenceUncertain) {
@@ -856,10 +949,12 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 		}
 		return
 	}
-	select {
-	case <-ctx.Done():
-		return // node is exiting certificates have been stored and we are done
-	case x.ucSink <- certs: // trigger update to partition nodes
+	if shouldSendCertificateBatch(x.params.NetworkProfileVersion, certs) {
+		select {
+		case <-ctx.Done():
+			return // node is exiting certificates have been stored and we are done
+		case x.ucSink <- certs: // trigger update to partition nodes
+		}
 	}
 
 	if !x.pacemaker.AdvanceRoundQC(ctx, qc) {
@@ -877,11 +972,18 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 	}
 }
 
+func shouldSendCertificateBatch(profile uint64, certs []*certification.CertificationResponse) bool {
+	return len(certs) > 0 || profile != storage.ProfileHandoff
+}
+
 // processTC - handles timeout certificate
 func (x *ConsensusManager) processTC(ctx context.Context, tc *drctypes.TimeoutCert) {
 	_, span := x.tracer.Start(ctx, "ConsensusManager.processTC")
 	defer span.End()
 	if tc == nil {
+		return
+	}
+	if x.validateTimeoutCert(tc) != nil {
 		return
 	}
 	if err := x.blockStore.ProcessTc(tc); err != nil {
@@ -1004,7 +1106,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		profile = storage.ProfileLegacy
 	}
 	oldSuffix := false
-	if profile == storage.ProfileHandoff {
+	if profile == storage.ProfileHandoff && x.epochAnchor == nil {
 		oldSuffix, err = x.blockStore.SuffixParent(x.blockStore.GetHighQc().GetRound(), x.trustBase.Load().Epoch)
 		if err != nil {
 			x.log.WarnContext(ctx, "cannot establish parent control state", logger.Error(err))
@@ -1030,6 +1132,11 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 			payload.Version = profile
 		}
 	}
+	parentQC := x.blockStore.GetHighQc()
+	var parentAnchor *drctypes.EpochAnchor
+	if x.epochAnchor != nil && parentQC == nil {
+		parentAnchor = x.epochAnchor
+	}
 	proposalMsg := &abdrc.ProposalMsg{
 		Block: &drctypes.BlockData{
 			Version:   types.Version(profile),
@@ -1038,7 +1145,8 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 			Epoch:     x.trustBase.Load().Epoch,
 			Timestamp: types.NewTimestamp(),
 			Payload:   payload,
-			Qc:        x.blockStore.GetHighQc(),
+			Qc:        parentQC,
+			Anchor:    parentAnchor,
 		},
 		LastRoundTc: x.pacemaker.LastRoundTC(),
 	}
@@ -1053,7 +1161,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 
 	sendTo := make(map[peer.ID]struct{})
 	addAll(sendTo, x.Validators())
-	if round == x.trustBase.Load().EpochStart {
+	if profile != storage.ProfileHandoff && round == x.trustBase.Load().EpochStart {
 		// New epoch was activated in this round. Also send the proposal to previous epoch
 		// validators so that they can generae UCs for the round they voted to commit.
 		prevTrustBase, err := x.trustBaseStore.GetByEpoch(x.trustBase.Load().Epoch - 1)
@@ -1096,12 +1204,15 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		// we do send out multiple state recovery request so do not return error when we ignore the ones after successful recovery...
 		return nil
 	}
+	if x.epochAnchor != nil && !x.recoveryProfile2 {
+		return fmt.Errorf("recovery response verification failed: %w", abdrc.ErrRecoveryEpoch)
+	}
 	var verifyErr error
 	if x.recoveryProfile2 {
 		if x.recoveryHistory == nil {
 			return fmt.Errorf("recovery response verification failed: %w", abdrc.ErrHistoricalTrustBase)
 		}
-		verifyErr = rsp.VerifyWithHistory(x.params.HashAlgorithm, x.trustBase.Load(), x.recoveryHistory)
+		verifyErr = rsp.VerifyWithAnchor(x.params.HashAlgorithm, x.trustBase.Load(), x.recoveryHistory, x.blockStore)
 	} else {
 		verifyErr = rsp.Verify(x.params.HashAlgorithm, x.trustBase.Load())
 	}
@@ -1121,11 +1232,17 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			x.frontier.latchFault()
 		}
 	}()
-	blockStore, err := storage.NewFromState(x.params.HashAlgorithm, rsp.CommittedHead, x.blockStore.GetDB(), x.orchestration, x.log, x.params.NetworkProfileVersion)
+	var blockStore *storage.BlockStore
+	var err error
+	if x.recoveryProfile2 && rsp.CommittedHead.Anchor != nil {
+		blockStore, err = x.blockStore.NewFromAnchorState(rsp.CommittedHead)
+	} else {
+		blockStore, err = storage.NewFromState(x.params.HashAlgorithm, rsp.CommittedHead, x.blockStore.GetDB(), x.orchestration, x.log, x.params.NetworkProfileVersion)
+	}
 	if err != nil {
 		return fmt.Errorf("recovery, new block store init failed: %w", err)
 	}
-	if x.params.NetworkProfileVersion == storage.ProfileHandoff {
+	if x.params.NetworkProfileVersion == storage.ProfileHandoff && x.epochAnchor == nil {
 		if err := blockStore.ConfigureHandoffAuthority(x.trustBase.Load()); err != nil {
 			return fmt.Errorf("recovery handoff authority: %w", err)
 		}
@@ -1135,7 +1252,11 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	if err != nil {
 		return fmt.Errorf("verifier construction failed: %w", err)
 	}
-	x.pacemaker.Reset(ctx, blockStore.GetHighQc().GetRound(), nil, nil)
+	recoveryRound := blockStore.GetHighQc().GetRound()
+	if a := blockStore.RootAnchor(); a != nil && recoveryRound < a.Slot {
+		recoveryRound = a.Slot
+	}
+	x.pacemaker.Reset(ctx, recoveryRound, nil, nil)
 
 	for i, block := range rsp.Pending {
 		// if received block has QC then process it first as with a block received normally

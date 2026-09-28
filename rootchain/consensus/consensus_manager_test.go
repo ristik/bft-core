@@ -47,6 +47,14 @@ const partitionID types.PartitionID = 0x00FF0001
 
 var shardID = types.ShardID{}
 
+func TestEmptyCertificateBatchEmissionIsProfileGated(t *testing.T) {
+	require.True(t, shouldSendCertificateBatch(storage.ProfileLegacy, nil))
+	require.False(t, shouldSendCertificateBatch(storage.ProfileHandoff, nil))
+	certs := []*certification.CertificationResponse{{}}
+	require.True(t, shouldSendCertificateBatch(storage.ProfileLegacy, certs))
+	require.True(t, shouldSendCertificateBatch(storage.ProfileHandoff, certs))
+}
+
 func readResult(ch <-chan *certification.CertificationResponse, timeout time.Duration) (*types.UnicityCertificate, error) {
 	select {
 	case result, ok := <-ch:
@@ -734,7 +742,7 @@ func Test_ConsensusManager_onVoteMsg(t *testing.T) {
 		// seen proposal yet
 		vote := makeVoteMsg(t, cms, votedRound+1)
 		err := cms[0].onVoteMsg(context.Background(), vote)
-		require.EqualError(t, err, `have received 1 votes but no proposal, entering recovery`)
+		require.EqualError(t, err, `have received vote weight 1 but no proposal, entering recovery`)
 		require.Equal(t, vote, cms[0].voteBuffer[vote.Author], "expected vote to be buffered")
 	})
 	/* todo - need a way to mock storage

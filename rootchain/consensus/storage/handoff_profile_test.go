@@ -28,9 +28,11 @@ func emptyOrchestration() mockOrchestration {
 
 type testRecordAuthority struct{}
 
-func (testRecordAuthority) Predecessor() []byte                                     { return make([]byte, 32) }
-func (testRecordAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) error { return nil }
-func (testRecordAuthority) VerifyAbort(evmroot.OrderedHandoffRecord, []byte) error  { return nil }
+func (testRecordAuthority) Predecessor() []byte { return make([]byte, 32) }
+func (testRecordAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) ([]byte, error) {
+	return bytes.Repeat([]byte{0x42}, 32), nil
+}
+func (testRecordAuthority) VerifyAbort(evmroot.OrderedHandoffRecord, []byte) error { return nil }
 
 func profileStore(t *testing.T) *BlockStore {
 	t.Helper()
@@ -106,6 +108,16 @@ func TestHandoffControlLeafAndSuffix(t *testing.T) {
 	require.Equal(t, h.ShardState.Control.Bytes(), suffix.ShardState.Control.Bytes())
 	checkpoint := &abdrc.CommittedBlock{Block: suffix.BlockData, Control: suffix.ShardState.Control,
 		CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: suffix.RootHash}}}
+	committedRecord := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: 4,
+		PredecessorBodyID: zero, FrozenID: frozen, NextBodyID: body,
+		ActivationRound: 7, SuccessorTRHash: tr, Kind: "commit"}
+	verified := evmroot.VerifiedHandoff{Record: committedRecord, Root: suffix.RootHash,
+		ControlDigest: suffix.ShardState.Control.Digest(), CommitSealRound: 5, Epoch: 1}
+	verifySnapshot := RecoveryHandoffSnapshot{Head: checkpoint, Orchestration: emptyOrchestration()}
+	require.NoError(t, verifySnapshot.VerifyHandoffSnapshot(verified))
+	wrongRoot := verified
+	wrongRoot.Root = bytes.Repeat([]byte{0x7f}, 32)
+	require.Error(t, verifySnapshot.VerifyHandoffSnapshot(wrongRoot))
 	recovered, err := NewRootBlock(checkpoint, crypto.SHA256, emptyOrchestration(), ProfileHandoff)
 	require.NoError(t, err)
 	require.True(t, bytes.Equal(suffix.RootHash, recovered.RootHash))
@@ -128,6 +140,86 @@ func TestHandoffControlLeafAndSuffix(t *testing.T) {
 	checkpoint.Control = &evmroot.ControlState{Network: 5, Epoch: 1, PredecessorBodyID: zero, Phase: "committed", OrderedRound: 4, RecordBytes: []byte{1}}
 	_, err = NewRootBlock(checkpoint, crypto.SHA256, emptyOrchestration(), ProfileHandoff)
 	require.ErrorIs(t, err, ErrControlCheckpoint)
+}
+
+func TestRecoveryHandoffSnapshotUsesProductionShardTree(t *testing.T) {
+	key := []byte{0x3, 0x24, 0x8b, 0x61, 0x68, 0x51, 0xac, 0x6e, 0x43, 0x7e, 0xc2, 0x4e, 0xcc, 0x21, 0x9e, 0x5b, 0x42, 0x43, 0xdf, 0xa5, 0xdb, 0xdb, 0x8, 0xce, 0xa6, 0x48, 0x3a, 0xc9, 0xe0, 0xdc, 0x6b, 0x55, 0xcd}
+	conf := &types.PartitionDescriptionRecord{PartitionID: 7, Epoch: 1, Validators: []*types.NodeInfo{{NodeID: "n", SigKey: key, Stake: 1}}}
+	si, err := NewShardInfo(conf, crypto.SHA256)
+	require.NoError(t, err)
+	shard := types.PartitionShardID{PartitionID: conf.PartitionID, ShardID: conf.ShardID.Key()}
+	zero := make([]byte, 32)
+	rec := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: 4, PredecessorBodyID: zero,
+		FrozenID: bytes.Repeat([]byte{1}, 32), NextBodyID: bytes.Repeat([]byte{2}, 32),
+		ActivationRound: 7, SuccessorTRHash: bytes.Repeat([]byte{3}, 32), Kind: "commit"}
+	control := &evmroot.ControlState{Network: 5, Epoch: 1, OrderedRound: 4, PredecessorBodyID: zero,
+		Phase: "committed", RecordBytes: rec.Bytes(), PreviousDigest: zero, FrozenParent: bytes.Repeat([]byte{4}, 32)}
+	state := ShardStates{States: map[types.PartitionShardID]*ShardInfo{shard: si}, Control: control}
+	tree, _, err := state.UnicityTree(crypto.SHA256)
+	require.NoError(t, err)
+	block := &ExecutedBlock{ShardState: state}
+	info, err := toRecoveryShardInfo(block)
+	require.NoError(t, err)
+	head := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 2, Epoch: 1, Round: 4, Payload: &rctypes.Payload{Version: 2}},
+		ShardInfo: info, Control: control, CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: tree.RootHash()}}}
+	orchestration := mockOrchestration{shardConfigs: func(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
+		return map[types.PartitionShardID]*types.PartitionDescriptionRecord{shard: conf}, nil
+	}}
+	snapshot := RecoveryHandoffSnapshot{Head: head, Orchestration: orchestration}
+	verified := evmroot.VerifiedHandoff{Record: rec, Root: tree.RootHash(), ControlDigest: control.Digest(), CommitSealRound: 4, Epoch: 1}
+	require.NoError(t, snapshot.VerifyHandoffSnapshot(verified))
+	head.ShardInfo[0].IRTR.Round++
+	require.Error(t, snapshot.VerifyHandoffSnapshot(verified))
+}
+
+func TestInstallEpochAnchorFromRecoveryCheckpoint(t *testing.T) {
+	s := profileStore(t)
+	zero := make([]byte, 32)
+	body, frozen, tr := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32)
+	addProfileBlock(t, s, 2, [][]byte{record("prepare", 2, 7, zero, body, zero)})
+	addProfileBlock(t, s, 3, [][]byte{record("freeze", 3, 7, frozen, body, zero)})
+	h := addProfileBlock(t, s, 4, [][]byte{record("commit", 4, 7, frozen, body, tr)})
+	suffix := addProfileBlock(t, s, 5, nil)
+	_, err := s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, ParentRoundNumber: 4, Epoch: 1},
+		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 4, Epoch: 1, Hash: h.RootHash}})
+	require.NoError(t, err)
+	rec := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: 4, PredecessorBodyID: zero,
+		FrozenID: frozen, NextBodyID: body, ActivationRound: 7, SuccessorTRHash: tr, Kind: "commit"}
+	head := &abdrc.CommittedBlock{Block: suffix.BlockData, Control: suffix.ShardState.Control,
+		CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: suffix.RootHash}}}
+	v := evmroot.VerifiedHandoff{RecordID: rec.ID(), Record: rec, Root: suffix.RootHash,
+		ControlDigest: suffix.ShardState.Control.Digest(), OrderRound: 4, CommitSealRound: 5, Epoch: 1}
+	g := evmroot.EpochGenesis{Network: 5, Epoch: 2, Start: 7, OrderedRound: 4, NextBodyID: body,
+		RecordID: rec.ID(), Root: suffix.RootHash, ControlDigest: v.ControlDigest, FrozenID: frozen, SuccessorTRHash: tr}
+	a, err := s.InstallEpochAnchor(head, v, g)
+	require.NoError(t, err)
+	require.EqualValues(t, 6, a.Slot)
+	require.True(t, isEpochAnchorRoot(s.blockTree.Root()))
+	reloaded, err := New(crypto.SHA256, s.storage, emptyOrchestration(), logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	require.True(t, isEpochAnchorRoot(reloaded.blockTree.Root()))
+	anchorState, err := reloaded.GetState()
+	require.NoError(t, err)
+	require.Equal(t, a, anchorState.CommittedHead.Anchor)
+	require.NoError(t, reloaded.VerifyRecoveryAnchor(anchorState.CommittedHead))
+	corrupt := *anchorState.CommittedHead
+	controlCopy := *corrupt.Control
+	controlCopy.PreviousDigest = bytes.Repeat([]byte{9}, 32)
+	corrupt.Control = &controlCopy
+	require.Error(t, reloaded.VerifyRecoveryAnchor(&corrupt))
+	first := &rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Payload: &rctypes.Payload{Version: 2}, Anchor: a}
+	_, err = reloaded.Add(first, nil)
+	require.NoError(t, err)
+	child, err := reloaded.Block(7)
+	require.NoError(t, err)
+	require.Equal(t, "idle", child.ShardState.Control.Phase)
+	require.EqualValues(t, 2, child.ShardState.Control.Epoch)
+	require.False(t, bytes.Equal(child.RootHash, a.StateRoot))
+	recoveredAnchor, err := reloaded.NewFromAnchorState(anchorState.CommittedHead)
+	require.NoError(t, err)
+	require.Equal(t, a, recoveredAnchor.RootAnchor())
+	_, err = recoveredAnchor.Block(7)
+	require.Error(t, err)
 }
 
 func TestProfileSwitchRejectsUnsupported(t *testing.T) {

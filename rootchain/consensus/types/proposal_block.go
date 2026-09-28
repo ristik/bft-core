@@ -30,6 +30,9 @@ type BlockData struct {
 	// before payload can be applied check that local state matches state in qc
 	// qc.vote_info.proposed.state_hash == h(UC[])
 	Qc *QuorumCert `json:"qc"`
+	// Anchor is present only for a profile-2 bootstrap parent. Exactly one of
+	// Qc and Anchor is present on an ordinary proposal.
+	Anchor *EpochAnchor `json:"anchor,omitempty"`
 }
 
 type Payload struct {
@@ -128,6 +131,12 @@ func (x *BlockData) IsValid() error {
 	if (x.GetVersion() == 2) != (x.Payload.Version == 2) {
 		return errors.New("block and payload profile versions differ")
 	}
+	if x.Anchor != nil {
+		if x.GetVersion() != 2 || x.Qc != nil || x.Anchor.IsValid() != nil || x.Epoch != x.Anchor.Epoch || x.Round <= x.Anchor.Slot {
+			return ErrEpochAnchor
+		}
+		return nil
+	}
 	if x.Qc == nil {
 		if x.Round == GenesisRootRound {
 			// Genesis block does not have previous Qc,
@@ -142,12 +151,20 @@ func (x *BlockData) IsValid() error {
 	if x.Round <= x.Qc.VoteInfo.RoundNumber {
 		return fmt.Errorf("invalid block round %d, round is less or equal to QC round %d", x.Round, x.Qc.VoteInfo.RoundNumber)
 	}
+	if x.GetVersion() == 2 && x.Qc.VoteInfo.Epoch != x.Epoch {
+		return fmt.Errorf("block and ordinary parent QC epochs differ")
+	}
 	return nil
 }
 
 func (x *BlockData) Verify(tb types.RootTrustBase) error {
 	if err := x.IsValid(); err != nil {
 		return fmt.Errorf("invalid block data: %w", err)
+	}
+	if x.Anchor != nil {
+		// The anchor is authenticated against the locally installed handoff
+		// checkpoint by the consensus bootstrap admission path.
+		return nil
 	}
 	if err := x.Qc.Verify(tb); err != nil {
 		return fmt.Errorf("invalid block data QC: %w", err)
@@ -175,6 +192,9 @@ func (x *BlockData) GetRound() uint64 {
 
 func (x *BlockData) GetParentRound() uint64 {
 	if x != nil {
+		if x.Anchor != nil {
+			return x.Anchor.Slot
+		}
 		return x.Qc.GetRound()
 	}
 	return 0
@@ -200,20 +220,57 @@ func (x *BlockData) GetVersion() types.Version {
 }
 
 func (x *BlockData) MarshalCBOR() ([]byte, error) {
-	type alias BlockData
 	if x.Version == 0 {
 		x.Version = x.GetVersion()
 	}
-	return types.Cbor.MarshalTaggedValue(types.RootPartitionBlockDataTag, (*alias)(x))
+	if x.Anchor != nil {
+		return types.Cbor.MarshalTaggedValue(types.RootPartitionBlockDataTag, blockDataAnchorWire{
+			Version: x.Version, Author: x.Author, Round: x.Round, Epoch: x.Epoch,
+			Timestamp: x.Timestamp, Payload: x.Payload, Qc: x.Qc, Anchor: x.Anchor})
+	}
+	return types.Cbor.MarshalTaggedValue(types.RootPartitionBlockDataTag, blockDataLegacyWire{
+		Version: x.Version, Author: x.Author, Round: x.Round, Epoch: x.Epoch,
+		Timestamp: x.Timestamp, Payload: x.Payload, Qc: x.Qc})
 }
 
 func (x *BlockData) UnmarshalCBOR(data []byte) error {
-	type alias BlockData
-	if err := types.Cbor.UnmarshalTaggedValue(types.RootPartitionBlockDataTag, data, (*alias)(x)); err != nil {
-		return err
+	var anchor blockDataAnchorWire
+	if err := types.Cbor.UnmarshalTaggedValue(types.RootPartitionBlockDataTag, data, &anchor); err == nil {
+		*x = BlockData{Version: anchor.Version, Author: anchor.Author, Round: anchor.Round, Epoch: anchor.Epoch,
+			Timestamp: anchor.Timestamp, Payload: anchor.Payload, Qc: anchor.Qc, Anchor: anchor.Anchor}
+	} else {
+		var legacy blockDataLegacyWire
+		if err := types.Cbor.UnmarshalTaggedValue(types.RootPartitionBlockDataTag, data, &legacy); err != nil {
+			return err
+		}
+		*x = BlockData{Version: legacy.Version, Author: legacy.Author, Round: legacy.Round, Epoch: legacy.Epoch,
+			Timestamp: legacy.Timestamp, Payload: legacy.Payload, Qc: legacy.Qc}
 	}
 	if x.Version != 1 && x.Version != 2 {
 		return types.ErrInvalidVersion(x)
 	}
 	return nil
+}
+
+type blockDataLegacyWire struct {
+	_         struct{} `cbor:",toarray"`
+	Version   types.Version
+	Author    string
+	Round     uint64
+	Epoch     uint64
+	Timestamp uint64
+	Payload   *Payload
+	Qc        *QuorumCert
+}
+
+type blockDataAnchorWire struct {
+	_         struct{} `cbor:",toarray"`
+	Version   types.Version
+	Author    string
+	Round     uint64
+	Epoch     uint64
+	Timestamp uint64
+	Payload   *Payload
+	Qc        *QuorumCert
+	Anchor    *EpochAnchor
 }

@@ -63,7 +63,7 @@ doc = {
  'executionConfig': encoded(config),
  'changedFeeProfile': encoded(['UNICITY_EXECUTION_CONFIG_V2', 2, legacy, 30_000_000, 2_000_000, 2_000_000, 2, 8, collector]),
  'changedCollector': encoded(['UNICITY_EXECUTION_CONFIG_V2', 2, legacy, *profile, bytes.fromhex('34'*20)]),
- 'legacyFixture': {'executionConfigIdentity': 'f63207575830a59dece6e1b59ecbc46faa865492715252d5a846a6996bde98ba', 'genesisOriginIdentity': '030c8f48abdcfba2a393b0422726d1e492272edaa5e7044af846281055b5b33e'},
+ 'legacyFixture': {'executionConfigIdentity': 'f63207575830a59dece6e1b59ecbc46faa865492715252d5a846a6996bde98ba', 'genesisOriginIdentity': '2bfab11db07e24ca2023af18bef177fd619d403f47dd33ae180c1197034f9cf3'},
 }
 raw = (json.dumps(doc, indent=2) + '\n').encode()
 if len(sys.argv)>1 and sys.argv[1]=='--check':

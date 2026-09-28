@@ -28,6 +28,7 @@ var (
 	keyVote         = []byte("vote")
 	keyHighestVoted = []byte("votedRound")
 	keyHighestQc    = []byte("qcRound")
+	keyEpochAnchor  = []byte("epochAnchor")
 )
 
 /*
@@ -166,8 +167,26 @@ func (db BoltDB) WriteBlock(block *ExecutedBlock, root bool) error {
 		if !root {
 			return nil
 		}
-		if block.CommitQc == nil {
+		if block.CommitQc == nil && !isEpochAnchorRoot(block) {
 			return errors.New("root block must have commit QC")
+		}
+		if isEpochAnchorRoot(block) {
+			// A handoff proof may arrive after the old chain has advanced beyond
+			// the fixed successor start. None of that old suffix belongs under
+			// the new anchor, regardless of its numerical round.
+			var oldKeys [][]byte
+			c := b.Cursor()
+			for k, _ := c.First(); k != nil; k, _ = c.Next() {
+				if !bytes.Equal(k, key) {
+					oldKeys = append(oldKeys, bytes.Clone(k))
+				}
+			}
+			for _, oldKey := range oldKeys {
+				if err := b.Delete(oldKey); err != nil {
+					return fmt.Errorf("delete old epoch block %x: %w", oldKey, err)
+				}
+			}
+			return nil
 		}
 
 		// we do not keep history so anything older than the root can be deleted
@@ -412,6 +431,169 @@ func (db BoltDB) SetHighestQcRound(qcRound, votedRound uint64) error {
 		}
 		return writeUint64(b, keyHighestVoted, max(votedRound, hVR))
 	})
+}
+
+// InstallEpochAnchorSafety crosses from the old epoch to the new epoch once.
+// A later old proof cannot lower the new lock or clear votes and timeouts.
+func (db BoltDB) InstallEpochAnchorSafety(a *rctypes.EpochAnchor) error {
+	if err := a.IsValid(); err != nil {
+		return err
+	}
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketSafety)
+		if b == nil {
+			return errNoSafetyBucket
+		}
+		if prior := b.Get(keyEpochAnchor); prior != nil {
+			var installed rctypes.EpochAnchor
+			if err := types.Cbor.Unmarshal(prior, &installed); err != nil {
+				return err
+			}
+			if installed.Epoch != a.Epoch || installed.Slot != a.Slot || !bytes.Equal(installed.GenesisID, a.GenesisID) || !bytes.Equal(installed.StateRoot, a.StateRoot) {
+				return rctypes.ErrEpochAnchor
+			}
+			return nil
+		}
+		encoded, err := types.Cbor.Marshal(a)
+		if err != nil {
+			return err
+		}
+		if err := b.Put(keyEpochAnchor, encoded); err != nil {
+			return err
+		}
+		if err := writeUint64(b, keyHighestVoted, a.Slot); err != nil {
+			return err
+		}
+		if err := writeUint64(b, keyHighestQc, a.Slot); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bucketVotes).Delete(keyVote); err != nil {
+			return err
+		}
+		return tx.Bucket(bucketCertificates).Delete(keyTimeoutCert)
+	})
+}
+
+// InstallEpochAnchorRoot atomically persists the successor root and its safety
+// record so restart sees either the prior epoch or the complete anchor.
+func (db BoltDB) InstallEpochAnchorRoot(block *ExecutedBlock, a *rctypes.EpochAnchor) error {
+	return db.installEpochAnchorRootWithFault(block, a, nil)
+}
+
+func (db BoltDB) installEpochAnchorRootWithFault(block *ExecutedBlock, a *rctypes.EpochAnchor, afterWrite func(string) error) error {
+	if block == nil || block.BlockData == nil || a == nil || a.IsValid() != nil ||
+		!isEpochAnchorRoot(block) || block.BlockData.Round != a.Slot || block.BlockData.Epoch != a.Epoch ||
+		!bytes.Equal(block.BlockData.Anchor.GenesisID, a.GenesisID) || !bytes.Equal(block.BlockData.Anchor.StateRoot, a.StateRoot) {
+		return rctypes.ErrEpochAnchor
+	}
+	data, err := types.Cbor.Marshal(block)
+	if err != nil {
+		return fmt.Errorf("serializing epoch anchor root: %w", err)
+	}
+	key := binary.BigEndian.AppendUint64(make([]byte, 0, 8), block.GetRound())
+	anchorData, err := types.Cbor.Marshal(a)
+	if err != nil {
+		return err
+	}
+	step := func(name string) error {
+		if afterWrite == nil {
+			return nil
+		}
+		return afterWrite(name)
+	}
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		blocks := tx.Bucket(bucketBlocks)
+		safety := tx.Bucket(bucketSafety)
+		votes := tx.Bucket(bucketVotes)
+		certificates := tx.Bucket(bucketCertificates)
+		if blocks == nil || safety == nil || votes == nil || certificates == nil {
+			return errNoSafetyBucket
+		}
+		installed := safety.Get(keyEpochAnchor)
+		if installed != nil {
+			var prior rctypes.EpochAnchor
+			if err := types.Cbor.Unmarshal(installed, &prior); err != nil {
+				return err
+			}
+			if !sameEpochAnchor(&prior, a) {
+				return rctypes.ErrEpochAnchor
+			}
+		}
+		if err := blocks.Put(key, data); err != nil {
+			return err
+		}
+		if err := step("root-put"); err != nil {
+			return err
+		}
+		var oldKeys [][]byte
+		cursor := blocks.Cursor()
+		for k, _ := cursor.First(); k != nil; k, _ = cursor.Next() {
+			if !bytes.Equal(k, key) {
+				oldKeys = append(oldKeys, bytes.Clone(k))
+			}
+		}
+		for i, oldKey := range oldKeys {
+			if err := blocks.Delete(oldKey); err != nil {
+				return err
+			}
+			if err := step(fmt.Sprintf("old-block-delete-%d", i)); err != nil {
+				return err
+			}
+		}
+		if installed == nil {
+			if err := safety.Put(keyEpochAnchor, anchorData); err != nil {
+				return err
+			}
+			if err := step("safety-anchor"); err != nil {
+				return err
+			}
+			if err := writeUint64(safety, keyHighestVoted, a.Slot); err != nil {
+				return err
+			}
+			if err := step("highest-voted"); err != nil {
+				return err
+			}
+			if err := writeUint64(safety, keyHighestQc, a.Slot); err != nil {
+				return err
+			}
+			if err := step("highest-qc"); err != nil {
+				return err
+			}
+			if err := votes.Delete(keyVote); err != nil {
+				return err
+			}
+			if err := step("vote-delete"); err != nil {
+				return err
+			}
+			if err := certificates.Delete(keyTimeoutCert); err != nil {
+				return err
+			}
+			if err := step("timeout-delete"); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func sameEpochAnchor(a, b *rctypes.EpochAnchor) bool {
+	return a != nil && b != nil && a.Epoch == b.Epoch && a.Slot == b.Slot &&
+		bytes.Equal(a.GenesisID, b.GenesisID) && bytes.Equal(a.StateRoot, b.StateRoot)
+}
+
+func (db BoltDB) ReadEpochAnchorSafety() (*rctypes.EpochAnchor, error) {
+	var a *rctypes.EpochAnchor
+	err := db.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketSafety)
+		if b == nil {
+			return errNoSafetyBucket
+		}
+		if data := b.Get(keyEpochAnchor); data != nil {
+			return types.Cbor.Unmarshal(data, &a)
+		}
+		return nil
+	})
+	return a, err
 }
 
 func (db BoltDB) getVersion() (ver uint64, _ error) {

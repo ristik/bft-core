@@ -40,9 +40,18 @@ func newAuthorizedFixture(t *testing.T) authorizedFixture {
 	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: 5, Epoch: 2, EarliestActivation: 7,
 		Members: evmroot.WeightSet{{StakingID: "next-stake", NodeID: tb.RootNodes[0].NodeID,
 			ConsensusKey: tb.RootNodes[0].SigKey, Weight: 1}}, RootThreshold: 1,
-		StateSummary: bytes.Repeat([]byte{3}, 32), ChangeRecordHash: bytes.Repeat([]byte{4}, 32), PredecessorHash: link}
+		StateSummary: bytes.Repeat([]byte{3}, 32), ChangeRecordHash: evmroot.D4CandidateContextHash(5, predecessor, 0, bytes.Repeat([]byte{4}, 32), 7), PredecessorHash: link}
 	require.NoError(t, body.Validate())
-	return authorizedFixture{store: s, signers: signers, body: body, predecessor: predecessor, frozen: bytes.Repeat([]byte{2}, 32)}
+	id := body.Identity()
+	frozen := evmroot.D4FrozenID(id[:], body.StateSummary, bytes.Repeat([]byte{5}, 32), bytes.Repeat([]byte{4}, 32), 0, predecessor)
+	return authorizedFixture{store: s, signers: signers, body: body, predecessor: predecessor, frozen: frozen}
+}
+
+func TestFreezeCompanionSizeBounds(t *testing.T) {
+	require.False(t, validFreezeCompanionSize(0))
+	require.True(t, validFreezeCompanionSize(1))
+	require.True(t, validFreezeCompanionSize(1<<20))
+	require.False(t, validFreezeCompanionSize((1<<20)+1))
 }
 
 func (f authorizedFixture) record(kind string, round, attempt uint64) evmroot.OrderedHandoffRecord {
@@ -70,7 +79,7 @@ func (f authorizedFixture) companion(t *testing.T, r evmroot.OrderedHandoffRecor
 		require.NoError(t, err)
 		sigs[name] = sig
 	}
-	encoded, err := (FreezeAuthorization{Version: 1, Body: f.body.Encode(), Signatures: sigs}).Bytes()
+	encoded, err := (FreezeAuthorization{Version: 1, Body: f.body.Encode(), Parent: bytes.Repeat([]byte{5}, 32), Candidate: bytes.Repeat([]byte{4}, 32), Signatures: sigs}).Bytes()
 	require.NoError(t, err)
 	return encoded
 }
@@ -88,6 +97,28 @@ func (f authorizedFixture) abortCompanion(t *testing.T, r evmroot.OrderedHandoff
 	encoded, err := (AbortAuthorization{Version: 1, Signatures: sigs}).Bytes()
 	require.NoError(t, err)
 	return encoded
+}
+
+func TestAuthorizedFirstV2HandoffDerivesEpochGenesis(t *testing.T) {
+	f := newAuthorizedFixture(t)
+	addProfileBlock(t, f.store, 2, [][]byte{f.record("prepare", 2, 0).Bytes()})
+	freeze := f.record("freeze", 3, 0)
+	addProfileBlock(t, f.store, 3, [][]byte{freeze.Bytes(), f.companion(t, freeze, "old-a", "old-b", "old-c")})
+	commit := f.record("commit", 4, 0)
+	h := addProfileBlock(t, f.store, 4, [][]byte{commit.Bytes()})
+	v := evmroot.VerifiedHandoff{RecordID: commit.ID(), Record: commit, Root: h.RootHash,
+		ControlDigest: h.ShardState.Control.Digest(), Epoch: 1, OrderRound: 4, CommitSealRound: 4}
+	g, err := evmroot.DeriveEpochGenesis(v, f.body)
+	require.NoError(t, err)
+	require.EqualValues(t, 7, g.Start)
+	require.EqualValues(t, 2, g.Epoch)
+	bad := f.body
+	bad.PredecessorHash = bytes.Clone(f.predecessor)
+	badV := v
+	badID := bad.Identity()
+	badV.Record.NextBodyID = badID[:]
+	_, err = evmroot.DeriveEpochGenesis(badV, bad)
+	require.ErrorIs(t, err, evmroot.ErrD4Anchor)
 }
 
 func TestConfigureHandoffAuthorityRequiresAuthenticCurrentBase(t *testing.T) {
@@ -224,7 +255,7 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		freeze := f.record("freeze", 3, 0)
 		control := &evmroot.ControlState{Network: 5, Epoch: 1, Attempt: 0,
 			PredecessorBodyID: f.predecessor, Phase: "frozen", OrderedRound: 3,
-			RecordBytes: freeze.Bytes(), PreviousDigest: bytes.Repeat([]byte{1}, 32)}
+			RecordBytes: freeze.Bytes(), PreviousDigest: bytes.Repeat([]byte{1}, 32), FrozenParent: bytes.Repeat([]byte{2}, 32)}
 		_, err := applyHandoffRecord(control, f.record("commit", 4, 0).Bytes(), 5, 1, 4, f.store.handoffAuth, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
 	})

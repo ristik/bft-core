@@ -55,7 +55,7 @@ func validateControl(c *evmroot.ControlState) error {
 		return ErrControlCheckpoint
 	}
 	if c.Phase == "idle" {
-		if c.Attempt != 0 || c.OrderedRound != 0 || len(c.RecordBytes) != 0 || len(c.PreviousDigest) != 0 {
+		if c.Attempt != 0 || c.OrderedRound != 0 || len(c.RecordBytes) != 0 || len(c.PreviousDigest) != 0 || len(c.FrozenParent) != 0 {
 			return ErrControlCheckpoint
 		}
 		return nil
@@ -69,19 +69,19 @@ func validateControl(c *evmroot.ControlState) error {
 	}
 	switch c.Phase {
 	case "prepared":
-		if r.Kind != "prepare" {
+		if r.Kind != "prepare" || len(c.FrozenParent) != 0 {
 			return ErrControlCheckpoint
 		}
 	case "frozen", "endorsed":
-		if r.Kind != "freeze" {
+		if r.Kind != "freeze" || len(c.FrozenParent) != 32 {
 			return ErrControlCheckpoint
 		}
 	case "committed":
-		if r.Kind != "commit" || !r.Valid() {
+		if r.Kind != "commit" || !r.Valid() || len(c.FrozenParent) != 32 {
 			return ErrControlCheckpoint
 		}
 	case "aborted":
-		if r.Kind != "abort" {
+		if r.Kind != "abort" || (len(c.FrozenParent) != 0 && len(c.FrozenParent) != 32) {
 			return ErrControlCheckpoint
 		}
 	default:
@@ -97,7 +97,9 @@ func checkStoredRoot(block *ExecutedBlock, profile uint64) error {
 	if err := checkProfile(profile, block.ShardState); err != nil {
 		return err
 	}
-	if profile == ProfileHandoff && block.BlockData.Epoch != block.ShardState.Control.Epoch {
+	if profile == ProfileHandoff && block.BlockData.Epoch != block.ShardState.Control.Epoch &&
+		!(isEpochAnchorRoot(block) && block.BlockData.Epoch == block.ShardState.Control.Epoch+1 &&
+			bytes.Equal(block.BlockData.Anchor.StateRoot, block.RootHash)) {
 		return ErrNetworkProfile
 	}
 	if profile != ProfileHandoff {
@@ -124,6 +126,9 @@ func checkStoredRoot(block *ExecutedBlock, profile uint64) error {
 }
 
 func checkStoredSuffix(parent, child *ExecutedBlock) error {
+	if isEpochAnchorRoot(parent) {
+		return nil
+	}
 	control := parent.ShardState.Control
 	if control == nil || control.Phase != "committed" {
 		return nil

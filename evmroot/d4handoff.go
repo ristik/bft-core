@@ -104,10 +104,15 @@ type ControlState struct {
 	PredecessorBodyID                     []byte
 	Phase                                 string
 	RecordBytes, PreviousDigest           []byte
+	FrozenParent                          []byte
 }
 
 func (s ControlState) Bytes() []byte {
-	return marshalCBOR(cArray{cText("UNICITY_ROOT_HANDOFF_STATE"), cUint(1), cUint(s.Network), cUint(s.Epoch), cBytes(s.PredecessorBodyID), cUint(s.Attempt), cText(s.Phase), cUint(s.OrderedRound), cBytes(s.RecordBytes), cBytes(s.PreviousDigest)})
+	fields := cArray{cText("UNICITY_ROOT_HANDOFF_STATE"), cUint(1), cUint(s.Network), cUint(s.Epoch), cBytes(s.PredecessorBodyID), cUint(s.Attempt), cText(s.Phase), cUint(s.OrderedRound), cBytes(s.RecordBytes), cBytes(s.PreviousDigest)}
+	if len(s.FrozenParent) != 0 {
+		fields = append(fields, cBytes(s.FrozenParent))
+	}
+	return marshalCBOR(fields)
 }
 func (s ControlState) Digest() []byte { h := sha256.Sum256(s.Bytes()); return h[:] }
 func (s ControlState) Matches(r OrderedHandoffRecord) bool {
@@ -385,7 +390,18 @@ func (g EpochGenesis) ID() []byte { h := sha256.Sum256(g.Bytes()); return h[:] }
 func DeriveEpochGenesis(v VerifiedHandoff, next TrustBaseBodyV2) (EpochGenesis, error) {
 	r := v.Record
 	id := next.Identity()
-	if r.Epoch == math.MaxUint64 || next.Epoch != r.Epoch+1 || next.NetworkID != r.Network || !bytes.Equal(id[:], r.NextBodyID) || !bytes.Equal(next.PredecessorHash, r.PredecessorBodyID) || next.EarliestActivation > r.ActivationRound {
+	if r.Epoch == math.MaxUint64 || next.Epoch != r.Epoch+1 || next.NetworkID != r.Network || !bytes.Equal(id[:], r.NextBodyID) || next.EarliestActivation > r.ActivationRound {
+		return EpochGenesis{}, ErrD4Anchor
+	}
+	predecessorID := r.PredecessorBodyID
+	if r.Epoch == 1 {
+		var err error
+		predecessorID, err = FirstV2PredecessorHash(V1Anchor{Version: 1, NetworkID: r.Network, Epoch: r.Epoch, HashIncludingSigs: r.PredecessorBodyID})
+		if err != nil {
+			return EpochGenesis{}, ErrD4Anchor
+		}
+	}
+	if !bytes.Equal(next.PredecessorHash, predecessorID) {
 		return EpochGenesis{}, ErrD4Anchor
 	}
 	if e := next.Validate(); e != nil {
@@ -543,6 +559,11 @@ func (h *Handoff) Freeze(summary, parent []byte, body TrustBaseBodyV2) error {
 func frozenID(body, summary, parent, candidate []byte, attempt uint64, predecessor []byte) []byte {
 	x := sha256.Sum256(marshalCBOR(cArray{cText("UNICITY_HANDOFF_FROZEN"), cBytes(body), cBytes(summary), cBytes(parent), cBytes(candidate), cUint(attempt), cBytes(predecessor)}))
 	return x[:]
+}
+
+// D4FrozenID binds the frozen EVM parent to the endorsed freeze commitment.
+func D4FrozenID(body, summary, parent, candidate []byte, attempt uint64, predecessor []byte) []byte {
+	return frozenID(body, summary, parent, candidate, attempt, predecessor)
 }
 
 func D4PreFreezeSummary(network uint64, predecessor []byte, attempt, round uint64, root, lastParent []byte) []byte {

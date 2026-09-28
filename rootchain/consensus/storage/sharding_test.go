@@ -1,10 +1,12 @@
 package storage
 
 import (
+	"bytes"
 	"crypto"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
 
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	testsig "github.com/unicitynetwork/bft-core/internal/testutils/sig"
@@ -487,6 +489,16 @@ func Test_NewShardInfoFromGenesis(t *testing.T) {
 }
 
 func Test_shardStates_nextBlock(t *testing.T) {
+	t.Run("frozen parent is retained without sharing memory", func(t *testing.T) {
+		original := bytes.Repeat([]byte{0x42}, 32)
+		ss := ShardStates{States: map[types.PartitionShardID]*ShardInfo{},
+			Control: &evmroot.ControlState{FrozenParent: original}}
+		next, err := ss.nextBlock(map[types.PartitionShardID]*types.PartitionDescriptionRecord{}, hashAlg)
+		require.NoError(t, err)
+		require.Equal(t, original, next.Control.FrozenParent)
+		next.Control.FrozenParent[0] ^= 1
+		require.Equal(t, byte(0x42), ss.Control.FrozenParent[0])
+	})
 	t.Run("new shard", func(t *testing.T) {
 		// configuration contains new shard (no info on the current state)
 		si := ShardInfo{

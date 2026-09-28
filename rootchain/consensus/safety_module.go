@@ -54,7 +54,7 @@ func (s *SafetyModule) isSafeToVote(block *drctypes.BlockData, lastRoundTC *drct
 	if hvr := s.storage.GetHighestVotedRound(); blockRound <= hvr {
 		return fmt.Errorf("already voted for round %d, last voted round %d", blockRound, hvr)
 	}
-	qcRound := block.Qc.GetRound()
+	qcRound := block.GetParentRound()
 	// normal case, block is extended from last QC
 	if lastRoundTC == nil {
 		if !isConsecutive(blockRound, qcRound) {
@@ -96,10 +96,10 @@ func (s *SafetyModule) constructCommitInfo(block *drctypes.BlockData, voteInfoHa
 func (s *SafetyModule) MakeVote(block *drctypes.BlockData, execStateID []byte, highQC *drctypes.QuorumCert, lastRoundTC *drctypes.TimeoutCert) (*abdrc.VoteMsg, error) {
 	// The overall validity of the block must be checked prior to calling this method
 	// However since we are de-referencing QC make sure it is not nil
-	if block.Qc == nil {
+	if block.Qc == nil && block.Anchor == nil {
 		return nil, fmt.Errorf("make vote error, block is missing quorum certificate")
 	}
-	qcRound := block.Qc.VoteInfo.RoundNumber
+	qcRound := block.GetParentRound()
 	votingRound := block.Round
 	if err := s.isSafeToVote(block, lastRoundTC); err != nil {
 		return nil, fmt.Errorf("not safe to vote, %w", err)
@@ -113,7 +113,7 @@ func (s *SafetyModule) MakeVote(block *drctypes.BlockData, execStateID []byte, h
 		RoundNumber:       block.Round,
 		Epoch:             block.Epoch,
 		Timestamp:         block.Timestamp,
-		ParentRoundNumber: block.Qc.VoteInfo.RoundNumber,
+		ParentRoundNumber: qcRound,
 		CurrentRootHash:   execStateID,
 	}
 	h, err := voteInfo.Hash(gocrypto.SHA256)
@@ -126,6 +126,7 @@ func (s *SafetyModule) MakeVote(block *drctypes.BlockData, execStateID []byte, h
 		VoteInfo:         voteInfo,
 		LedgerCommitInfo: ledgerCommitInfo,
 		HighQc:           highQC,
+		Anchor:           block.Anchor,
 		Author:           s.peerID,
 	}
 	// signs commit info hash
@@ -139,7 +140,7 @@ func (s *SafetyModule) SignTimeout(tmoVote *abdrc.TimeoutMsg, lastRoundTC *drcty
 	if err := tmoVote.IsValid(); err != nil {
 		return fmt.Errorf("timeout message not valid, %w", err)
 	}
-	qcRound := tmoVote.Timeout.HighQc.GetRound()
+	qcRound := tmoVote.Timeout.GetHqcRound()
 	round := tmoVote.GetRound()
 	if err := s.isSafeToTimeout(round, qcRound, lastRoundTC); err != nil {
 		return fmt.Errorf("not safe to time-out, %w", err)
@@ -183,7 +184,7 @@ func (s *SafetyModule) isSafeToTimeout(round, tmoHighQCRound uint64, lastRoundTC
 
 // isCommitCandidate - returns committed round info if commit criteria is valid
 func (s *SafetyModule) isCommitCandidate(block *drctypes.BlockData) *drctypes.RoundInfo {
-	if block.Qc == nil {
+	if block.Qc == nil || block.Anchor != nil {
 		return nil
 	}
 	// consecutive successful round commits previous round

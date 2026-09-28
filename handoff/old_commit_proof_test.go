@@ -6,11 +6,13 @@ import (
 	stdhex "encoding/hex"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -19,6 +21,30 @@ import (
 )
 
 type emptyRootOrchestration struct{}
+
+func TestEVMTransitionSharedVector(t *testing.T) {
+	var vector struct {
+		Encoded  string `json:"encoded"`
+		OldEpoch uint64 `json:"oldEpoch"`
+		NewEpoch uint64 `json:"newEpoch"`
+		Ack      struct {
+			EVMRound uint64 `json:"evmRound"`
+		} `json:"ack"`
+	}
+	raw, err := os.ReadFile("testdata/evm-transition-v1.json")
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &vector))
+	encoded, err := stdhex.DecodeString(strings.TrimPrefix(vector.Encoded, "0x"))
+	require.NoError(t, err)
+	got, err := DecodeEVMTransition(encoded)
+	require.NoError(t, err)
+	require.Equal(t, vector.OldEpoch, got.OldEpoch)
+	require.Equal(t, vector.NewEpoch, got.NewEpoch)
+	require.Equal(t, vector.Ack.EVMRound, got.Ack.EVMRound)
+	reencoded, err := got.Encode()
+	require.NoError(t, err)
+	require.Equal(t, encoded, reencoded)
+}
 
 func (emptyRootOrchestration) NetworkID() types.NetworkID { return 5 }
 func (emptyRootOrchestration) ShardConfig(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error) {
@@ -166,6 +192,54 @@ func TestVerifyOldCommitProofSecp256k1(t *testing.T) {
 			require.ErrorIs(t, err, ErrProof)
 		})
 	}
+}
+
+func TestInstalledEVMTransitionBindsCommittedFrozenParent(t *testing.T) {
+	p, tb, signers := signedOldProofWithSigners(t)
+	link, err := evmroot.FirstV2PredecessorHash(evmroot.V1Anchor{Version: 1,
+		NetworkID: p.Record.Network, Epoch: p.Record.Epoch, HashIncludingSigs: p.Record.PredecessorBodyID})
+	require.NoError(t, err)
+	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: p.Record.Network, Epoch: p.Record.Epoch + 1,
+		EarliestActivation: p.Record.ActivationRound,
+		Members: evmroot.WeightSet{{StakingID: "next", NodeID: tb.RootNodes[0].NodeID,
+			ConsensusKey: tb.RootNodes[0].SigKey, Weight: 1}}, RootThreshold: 1,
+		StateSummary: bytes.Repeat([]byte{0x21}, 32), ChangeRecordHash: bytes.Repeat([]byte{0x22}, 32),
+		PredecessorHash: link}
+	require.NoError(t, body.Validate())
+	id := body.Identity()
+	p.Record.NextBodyID = id[:]
+	successorTR := certification.TechnicalRecord{Round: 41}
+	p.Record.SuccessorTRHash, err = successorTR.Hash()
+	require.NoError(t, err)
+	p.Control.FrozenParent = bytes.Repeat([]byte{0x33}, 32)
+	rebuildOldProofRoot(t, &p, signers)
+	v, err := VerifyOldCommitProof(p, tb)
+	require.NoError(t, err)
+	g, err := evmroot.DeriveEpochGenesis(evmroot.VerifiedHandoff{RecordID: v.RecordID[:],
+		Root: v.StateRoot[:], ControlDigest: v.ControlDigest[:], OrderRound: v.OrderRound,
+		CommitSealRound: v.CommitSealRound, Epoch: v.SignerEpoch, Record: p.Record}, body)
+	require.NoError(t, err)
+	a := &rctypes.EpochAnchor{GenesisID: g.ID(), Epoch: g.Epoch, Slot: g.Start - 1, StateRoot: v.StateRoot[:]}
+	transition, err := TransitionFromInstalledAnchor(p, tb, body, a, successorTR)
+	require.NoError(t, err)
+	require.Equal(t, successorTR.Round, transition.Ack.EVMRound)
+	require.Equal(t, p.Control.FrozenParent, transition.Ack.FrozenParent[:])
+	encoded, err := transition.Encode()
+	require.NoError(t, err)
+	decoded, err := DecodeEVMTransition(encoded)
+	require.NoError(t, err)
+	require.Equal(t, transition, decoded)
+	bad := *a
+	bad.GenesisID = bytes.Repeat([]byte{0x55}, 32)
+	_, err = TransitionFromInstalledAnchor(p, tb, body, &bad, successorTR)
+	require.ErrorIs(t, err, ErrProof)
+	badTR := successorTR
+	badTR.Round++
+	_, err = TransitionFromInstalledAnchor(p, tb, body, a, badTR)
+	require.ErrorIs(t, err, ErrProof)
+	p.Control.FrozenParent[0] ^= 1
+	_, err = TransitionFromInstalledAnchor(p, tb, body, a, successorTR)
+	require.ErrorIs(t, err, ErrProof)
 }
 
 func TestOldCommitProofReviewGuards(t *testing.T) {
