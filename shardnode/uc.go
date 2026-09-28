@@ -207,7 +207,7 @@ func ClassifyUCEpoch(previous, next *types.UnicityCertificate) (UCClass, error) 
 		if newEpoch < oldEpoch {
 			return UCStale, nil
 		}
-		if oldEpoch == ^uint64(0) || newEpoch != oldEpoch+1 {
+		if newEpoch != oldEpoch+1 {
 			return UCValid, ErrImpossibleUCOrder
 		}
 		return UCRepeat, nil
@@ -218,7 +218,7 @@ func ClassifyUCEpoch(previous, next *types.UnicityCertificate) (UCClass, error) 
 		}
 		return UCValid, ErrImpossibleUCOrder
 	}
-	if oldEpoch == ^uint64(0) || newEpoch != oldEpoch+1 || newRound < oldRound {
+	if newEpoch != oldEpoch+1 || newRound < oldRound {
 		return UCValid, ErrImpossibleUCOrder
 	}
 	oldCopy, newCopy := *previous, *next

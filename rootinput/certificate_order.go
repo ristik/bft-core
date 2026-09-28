@@ -14,7 +14,7 @@ func CheckEpochCertificates(previous, next *types.UnicityCertificate) error {
 		return fmt.Errorf("missing root certificate")
 	}
 	a, b := previous.GetRootEpoch(), next.GetRootEpoch()
-	if b < a || b > a && (a == ^uint64(0) || b != a+1) || b == a && next.GetRootRoundNumber() < previous.GetRootRoundNumber() {
+	if b < a || b > a && b != a+1 || b == a && next.GetRootRoundNumber() < previous.GetRootRoundNumber() {
 		return fmt.Errorf("non-contiguous root certificate epochs or rounds")
 	}
 	if b == a {

@@ -24,6 +24,11 @@ func TestHandoffFollowerConfigurationAndSavedBundleGuards(t *testing.T) {
 	peer := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	base := HandoffFollower{Host: peer, History: &followerHistory{}, AnchorEpoch: 1,
 		Directory: t.TempDir(), ConfHash: bytes.Repeat([]byte{5}, 32)}
+	upToAnchor, err := base.CatchUp(ctx, 1)
+	require.NoError(t, err)
+	require.Empty(t, upToAnchor, "an already pinned anchor needs no successor bundle")
+	_, err = base.CatchUp(ctx, 0)
+	require.Error(t, err, "restore cannot target an epoch older than its anchor")
 	for _, tc := range []struct {
 		name   string
 		change func(*HandoffFollower)

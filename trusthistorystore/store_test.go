@@ -89,6 +89,9 @@ func TestStoreRestartEvictionAndRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got := s.LatestEpoch(); got != tb.Epoch {
+		t.Fatalf("anchor latest epoch: got %d, want %d", got, tb.Epoch)
+	}
 	first, err := s.ByEpoch(tb.GetEpoch())
 	if err != nil || first.V1 == nil {
 		t.Fatalf("open anchor: %+v %v", first, err)
@@ -99,6 +102,9 @@ func TestStoreRestartEvictionAndRefusal(t *testing.T) {
 	in := body(t, s)
 	if err := s.AppendVerified(ctx, in, []byte("finalized-proof")); err != nil {
 		t.Fatal(err)
+	}
+	if got := s.LatestEpoch(); got != in.Body.Epoch {
+		t.Fatalf("first successor latest epoch: got %d, want %d", got, in.Body.Epoch)
 	}
 	second := in
 	firstID := in.Body.Identity()
@@ -111,6 +117,9 @@ func TestStoreRestartEvictionAndRefusal(t *testing.T) {
 	second.Activation.ActivationCommitID = bytes.Repeat([]byte{6}, 32)
 	if err := s.AppendVerified(ctx, second, []byte("finalized-proof")); err != nil {
 		t.Fatal(err)
+	}
+	if got := s.LatestEpoch(); got != second.Body.Epoch {
+		t.Fatalf("second successor latest epoch: got %d, want %d", got, second.Body.Epoch)
 	}
 	cached, err := s.ByEpoch(in.Body.Epoch)
 	if err != nil {
