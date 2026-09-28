@@ -90,6 +90,29 @@ func (f authorizedFixture) abortCompanion(t *testing.T, r evmroot.OrderedHandoff
 	return encoded
 }
 
+func TestAuthorizedFirstV2HandoffDerivesEpochGenesis(t *testing.T) {
+	f := newAuthorizedFixture(t)
+	addProfileBlock(t, f.store, 2, [][]byte{f.record("prepare", 2, 0).Bytes()})
+	freeze := f.record("freeze", 3, 0)
+	addProfileBlock(t, f.store, 3, [][]byte{freeze.Bytes(), f.companion(t, freeze, "old-a", "old-b", "old-c")})
+	commit := f.record("commit", 4, 0)
+	h := addProfileBlock(t, f.store, 4, [][]byte{commit.Bytes()})
+	v := evmroot.VerifiedHandoff{RecordID: commit.ID(), Record: commit, Root: h.RootHash,
+		ControlDigest: h.ShardState.Control.Digest(), Epoch: 1, OrderRound: 4, CommitSealRound: 4}
+	g, err := evmroot.DeriveEpochGenesis(v, f.body)
+	require.NoError(t, err)
+	require.EqualValues(t, 7, g.Start)
+	require.EqualValues(t, 2, g.Epoch)
+	bad := f.body
+	bad.PredecessorHash = bytes.Clone(f.predecessor)
+	badV := v
+	badID := bad.Identity()
+	badV.Record.NextBodyID = badID[:]
+	_, err = evmroot.DeriveEpochGenesis(badV, bad)
+	require.ErrorIs(t, err, evmroot.ErrD4Anchor)
+}
+}
+
 func TestConfigureHandoffAuthorityRequiresAuthenticCurrentBase(t *testing.T) {
 	f := newAuthorizedFixture(t)
 	tb := *f.store.handoffAuth.(*v1HandoffAuthority).trust

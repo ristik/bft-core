@@ -385,7 +385,18 @@ func (g EpochGenesis) ID() []byte { h := sha256.Sum256(g.Bytes()); return h[:] }
 func DeriveEpochGenesis(v VerifiedHandoff, next TrustBaseBodyV2) (EpochGenesis, error) {
 	r := v.Record
 	id := next.Identity()
-	if r.Epoch == math.MaxUint64 || next.Epoch != r.Epoch+1 || next.NetworkID != r.Network || !bytes.Equal(id[:], r.NextBodyID) || !bytes.Equal(next.PredecessorHash, r.PredecessorBodyID) || next.EarliestActivation > r.ActivationRound {
+	if r.Epoch == math.MaxUint64 || next.Epoch != r.Epoch+1 || next.NetworkID != r.Network || !bytes.Equal(id[:], r.NextBodyID) || next.EarliestActivation > r.ActivationRound {
+		return EpochGenesis{}, ErrD4Anchor
+	}
+	predecessorID := r.PredecessorBodyID
+	if r.Epoch == 1 {
+		var err error
+		predecessorID, err = FirstV2PredecessorHash(V1Anchor{Version: 1, NetworkID: r.Network, Epoch: r.Epoch, HashIncludingSigs: r.PredecessorBodyID})
+		if err != nil {
+			return EpochGenesis{}, ErrD4Anchor
+		}
+	}
+	if !bytes.Equal(next.PredecessorHash, predecessorID) {
 		return EpochGenesis{}, ErrD4Anchor
 	}
 	if e := next.Validate(); e != nil {
