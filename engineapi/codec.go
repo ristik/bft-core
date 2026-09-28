@@ -154,14 +154,11 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 // reth_unicity_execution::wire::SealBuildInput deserializes under
 // deny_unknown_fields: exactly rootInput and transitions.
 //
-// RootInput is canonical CBOR for one root input, a 0x-prefixed hex DATA
-// string. Transitions is the outer committed-body array; for this unit it is
-// ALWAYS empty, and an empty array here means "none are pending", never "some
-// are pending and could not be authenticated". rootinput.Derive refuses when
-// committed trust-base bodies or handoff acknowledgements are pending
-// (rootinput/rootinput.go), and f2c-root-input-wiring-contract.md §8 lists
-// that refusal as one that must survive wiring — so dropping or misencoding
-// them would silently turn a refusal into an acceptance.
+// RootInput is canonical CBOR for one root input. Transitions is the outer
+// committed-body array passed to ureth's execution path. It mirrors the
+// authenticated transition sequence encoded in RootInput; the adapter derives
+// both from the same verified parent snapshot. An empty array means no
+// transition is pending, never that unauthenticated data was dropped.
 type SealBuildInput struct {
 	RootInput   data   `json:"rootInput"`
 	Transitions []data `json:"transitions"`

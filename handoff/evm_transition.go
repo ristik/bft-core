@@ -76,7 +76,7 @@ func DecodeEVMTransition(data []byte) (EVMTransition, error) {
 // the successor identity before using the installed typed anchor. The control
 // state must carry the freeze parent committed under the same old QC.
 func TransitionFromInstalledAnchor(p OldCommitProof, old *types.RootTrustBaseV1,
-	body evmroot.TrustBaseBodyV2, anchor *rctypes.EpochAnchor, evmRound uint64) (EVMTransition, error) {
+	body evmroot.TrustBaseBodyV2, anchor *rctypes.EpochAnchor) (EVMTransition, error) {
 	verified, err := VerifyOldCommitProof(p, old)
 	if err != nil || anchor == nil || len(p.Control.FrozenParent) != 32 {
 		return EVMTransition{}, ErrProof
@@ -98,7 +98,10 @@ func TransitionFromInstalledAnchor(p OldCommitProof, old *types.RootTrustBaseV1,
 	copy(t.Ack.FrozenParent[:], p.Control.FrozenParent)
 	t.Ack.SuccessorParent = t.Ack.FrozenParent
 	copy(t.Ack.SuccessorTR[:], p.Record.SuccessorTRHash)
-	t.Ack.EVMRound = evmRound
+	// The acknowledgement is executed at the first successor root round. Derive
+	// it from the verified genesis schedule and installed anchor, not a caller
+	// supplied value that builders and followers could disagree on.
+	t.Ack.EVMRound = g.Start
 	if !t.Valid() {
 		return EVMTransition{}, ErrProof
 	}

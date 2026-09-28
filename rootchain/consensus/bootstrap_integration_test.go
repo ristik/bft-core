@@ -151,11 +151,12 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64) (map[peer.ID]*ancho
 		require.NoError(t, err)
 		installed, err := manager.InstallEpochGenesis(proof, head, body)
 		require.NoError(t, err)
-		transitionBytes, err := manager.InstalledEVMTransition(proof, body, 1)
+		transitionBytes, err := manager.InstalledEVMTransition(proof, body)
 		require.NoError(t, err)
 		transition, err := handoff.DecodeEVMTransition(transitionBytes)
 		require.NoError(t, err)
 		require.Equal(t, uint64(2), transition.NewEpoch)
+		require.Equal(t, installed.Slot+1, transition.Ack.EVMRound)
 		require.Equal(t, bytes.Repeat([]byte{5}, 32), transition.Ack.FrozenParent[:])
 		require.Equal(t, installed.GenesisID, transition.GenesisID[:])
 		if anchor == nil {

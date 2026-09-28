@@ -501,7 +501,7 @@ func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, der
 	}
 
 	state := ForkchoiceStateV1{HeadBlockHash: parentHash32, SafeBlockHash: parentHash32, FinalizedBlockHash: parentHash32}
-	resp, err := a.engine.ForkchoiceUpdatedWithSealV1(ctx, state, &sealAttrs, SealBuildInput{RootInput: derived.Encoded})
+	resp, err := a.engine.ForkchoiceUpdatedWithSealV1(ctx, state, &sealAttrs, sealBuildInput(derived))
 	if err != nil {
 		return "", fmt.Errorf("engineapi: forkchoiceUpdatedWithSealV1 (build): %w", err)
 	}
@@ -523,6 +523,14 @@ func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, der
 	}
 	a.mu.Unlock()
 	return id, nil
+}
+
+func sealBuildInput(derived rootinput.ResultV2) SealBuildInput {
+	transitions := make([]data, len(derived.Input.Transitions))
+	for i, transition := range derived.Input.Transitions {
+		transitions[i] = data(bytes.Clone(transition))
+	}
+	return SealBuildInput{RootInput: data(bytes.Clone(derived.Encoded)), Transitions: transitions}
 }
 
 // Seal retrieves the built payload. An empty user transaction list still

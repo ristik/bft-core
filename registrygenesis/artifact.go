@@ -11,8 +11,8 @@ import (
 	"github.com/unicitynetwork/bft-core/registryproof"
 )
 
-// ArtifactSource names the embedded file exactly: the merged SealRegistry artifact (#12, contracts PR #1).
-const ArtifactSource = "ristik/unicity-pos-contracts artifacts/seal-registry-v1.json at 7dc63acd64606f0ef0bec68cc1e8f2caa1a32684"
+// ArtifactSource names the embedded file exactly: the merged SealRegistry artifact (contracts PR #2).
+const ArtifactSource = "ristik/unicity-pos-contracts artifacts/seal-registry-v1.json at 6b4e221737c13a645400b9e19dd5259d02e5cc5c"
 
 //go:embed seal-registry-v1.json
 var pinnedArtifactJSON []byte

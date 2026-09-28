@@ -105,7 +105,7 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 // InstalledEVMTransition derives the one acknowledgement payload from the
 // signed old control state and this manager's durable installed anchor.
 func (x *ConsensusManager) InstalledEVMTransition(proof handoff.OldCommitProof,
-	body evmroot.TrustBaseBodyV2, evmRound uint64) ([]byte, error) {
+	body evmroot.TrustBaseBodyV2) ([]byte, error) {
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.epochAnchor == nil {
 		return nil, rctypes.ErrEpochAnchor
 	}
@@ -113,7 +113,7 @@ func (x *ConsensusManager) InstalledEVMTransition(proof handoff.OldCommitProof,
 	if err != nil {
 		return nil, fmt.Errorf("old root trust lineage: %w", err)
 	}
-	transition, err := handoff.TransitionFromInstalledAnchor(proof, old, body, x.epochAnchor, evmRound)
+	transition, err := handoff.TransitionFromInstalledAnchor(proof, old, body, x.epochAnchor)
 	if err != nil {
 		return nil, err
 	}

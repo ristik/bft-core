@@ -34,6 +34,7 @@ import (
 	"github.com/unicitynetwork/bft-core/configuredprogress"
 	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/frontier"
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/boltdb"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
@@ -67,6 +68,7 @@ type shardNodeRunFlags struct {
 	GenesisFile            string
 	FullShardConf          string
 	ExpectedOriginIdentity string
+	EVMTransitionFile      string
 
 	LUCStoreFile         string
 	ExecutionJournal     string
@@ -139,6 +141,8 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"engine-api executor only: the execution client's expected genesis block hash (0x-prefixed). "+
 			"Operator-configured; when set it is verified before the node can vote. A chain id does not "+
 			"establish genesis identity, and a matching genesis does not establish agreement on future forks")
+	cmd.Flags().StringVar(&flags.EVMTransitionFile, "engine-epoch-transition", "",
+		"engine-api executor only: path to the canonical transition emitted by the installed root handoff; sent while the authenticated parent is in the old epoch")
 	cmd.Flags().StringVar(&flags.GenesisFile, "genesis", "",
 		"path to the finalized genesis JSON emitted by `ubft engine-api genesis`; with --full-shard-conf it "+
 			"configures a checked genesis origin and bootstrap snapshot, and the client's block 0 is required to match it")
@@ -200,6 +204,9 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
 	if flags.TrustHistoryProfile2 && flags.ExecutionJournal == "" {
 		return errors.New("--trust-history-profile-2 requires --execution-journal")
+	}
+	if flags.EVMTransitionFile != "" && flags.Executor != "engine-api" {
+		return errors.New("--engine-epoch-transition requires --executor=engine-api")
 	}
 	if flags.ArchiveStore != "" && (flags.ExecutionJournal == "" || len(flags.ArchiveReplicas) != 2) || flags.ArchiveStore == "" && len(flags.ArchiveReplicas) != 0 {
 		return archivewiring.ErrConfig
@@ -307,6 +314,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err := validateExecutionJournalFlags(flags, origin); err != nil {
 		return err
 	}
+	evmTransition, err := loadEngineEpochTransition(flags.EVMTransitionFile, trustBases[0].GetEpoch())
+	if err != nil {
+		return err
+	}
 
 	executor, err := buildExecutor(ctx, flags, shardConf, &engineapi.VerifierContext{
 		NetworkID:     shardConf.NetworkID,
@@ -315,6 +326,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		ShardConfHash: confHash,
 		RootEpoch:     trustBases[0].GetEpoch(),
 		TrustBases:    trustBaseStore,
+		Transition:    evmTransition,
 		// Kept for compatibility with callers of the former v1 adapter. The live v2 path reads the
 		// applied root round from the verified parent registry snapshot instead.
 		Cursor: engineapi.CursorNotActivated(),
@@ -918,4 +930,22 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 	default:
 		return nil, fmt.Errorf("unknown --executor %q, expected \"fake\" or \"engine-api\"", flags.Executor)
 	}
+}
+
+func loadEngineEpochTransition(path string, oldEpoch uint64) ([]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path) // #nosec G304 -- operator supplied trusted local handoff file
+	if err != nil {
+		return nil, fmt.Errorf("reading --engine-epoch-transition %q: %w", path, err)
+	}
+	transition, err := handoff.DecodeEVMTransition(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decoding --engine-epoch-transition %q: %w", path, err)
+	}
+	if transition.OldEpoch != oldEpoch {
+		return nil, fmt.Errorf("--engine-epoch-transition starts at epoch %d, configured root trust base is epoch %d", transition.OldEpoch, oldEpoch)
+	}
+	return raw, nil
 }

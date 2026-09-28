@@ -6,6 +6,7 @@ import (
 	stdhex "encoding/hex"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -19,6 +20,30 @@ import (
 )
 
 type emptyRootOrchestration struct{}
+
+func TestEVMTransitionSharedVector(t *testing.T) {
+	var vector struct {
+		Encoded  string `json:"encoded"`
+		OldEpoch uint64 `json:"oldEpoch"`
+		NewEpoch uint64 `json:"newEpoch"`
+		Ack      struct {
+			EVMRound uint64 `json:"evmRound"`
+		} `json:"ack"`
+	}
+	raw, err := os.ReadFile("testdata/evm-transition-v1.json")
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &vector))
+	encoded, err := stdhex.DecodeString(strings.TrimPrefix(vector.Encoded, "0x"))
+	require.NoError(t, err)
+	got, err := DecodeEVMTransition(encoded)
+	require.NoError(t, err)
+	require.Equal(t, vector.OldEpoch, got.OldEpoch)
+	require.Equal(t, vector.NewEpoch, got.NewEpoch)
+	require.Equal(t, vector.Ack.EVMRound, got.Ack.EVMRound)
+	reencoded, err := got.Encode()
+	require.NoError(t, err)
+	require.Equal(t, encoded, reencoded)
+}
 
 func (emptyRootOrchestration) NetworkID() types.NetworkID { return 5 }
 func (emptyRootOrchestration) ShardConfig(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error) {
@@ -191,8 +216,9 @@ func TestInstalledEVMTransitionBindsCommittedFrozenParent(t *testing.T) {
 		CommitSealRound: v.CommitSealRound, Epoch: v.SignerEpoch, Record: p.Record}, body)
 	require.NoError(t, err)
 	a := &rctypes.EpochAnchor{GenesisID: g.ID(), Epoch: g.Epoch, Slot: g.Start - 1, StateRoot: v.StateRoot[:]}
-	transition, err := TransitionFromInstalledAnchor(p, tb, body, a, 41)
+	transition, err := TransitionFromInstalledAnchor(p, tb, body, a)
 	require.NoError(t, err)
+	require.Equal(t, g.Start, transition.Ack.EVMRound)
 	require.Equal(t, p.Control.FrozenParent, transition.Ack.FrozenParent[:])
 	encoded, err := transition.Encode()
 	require.NoError(t, err)
@@ -201,10 +227,10 @@ func TestInstalledEVMTransitionBindsCommittedFrozenParent(t *testing.T) {
 	require.Equal(t, transition, decoded)
 	bad := *a
 	bad.GenesisID = bytes.Repeat([]byte{0x55}, 32)
-	_, err = TransitionFromInstalledAnchor(p, tb, body, &bad, 41)
+	_, err = TransitionFromInstalledAnchor(p, tb, body, &bad)
 	require.ErrorIs(t, err, ErrProof)
 	p.Control.FrozenParent[0] ^= 1
-	_, err = TransitionFromInstalledAnchor(p, tb, body, a, 41)
+	_, err = TransitionFromInstalledAnchor(p, tb, body, a)
 	require.ErrorIs(t, err, ErrProof)
 }
 

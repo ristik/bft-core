@@ -159,6 +159,7 @@ func TestAdapterV2BootstrapBuildSendsCanonicalInput(t *testing.T) {
 	a.feeCollector = [20]byte{19: 0xad}
 	id, err := a.Build(context.Background(), params)
 	require.NoError(t, err)
+	require.Empty(t, captured.Transitions, "the profile-off bootstrap sends an empty transition list")
 	require.Equal(t, want.Input.Encode(), []byte(captured.RootInput))
 	require.Equal(t, want.Encoded, []byte(captured.RootInput))
 	require.Equal(t, data32(want.Commitment), attrs.Commitment)
@@ -181,6 +182,36 @@ func TestAdapterV2BootstrapBuildSendsCanonicalInput(t *testing.T) {
 	status, err = a.Commit(context.Background(), block.Hash)
 	require.NoError(t, err)
 	require.Equal(t, shardnode.StatusValid, status)
+}
+
+func TestAdapterV2BuildSendsTransitionInEngineSealInput(t *testing.T) {
+	verifier, params, derived := bootstrapAdapterFixture(t)
+	transition := handoff.EVMTransition{OldEpoch: 1, NewEpoch: 2, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
+		Ack: handoff.AckRecord{FrozenID: [32]byte{3}, CommitID: [32]byte{4}, FrozenParent: [32]byte{5},
+			SuccessorParent: [32]byte{5}, SuccessorTR: [32]byte{6}, EVMRound: params.Round}}
+	encoded, err := transition.Encode()
+	require.NoError(t, err)
+	derived.Input.Transitions = [][]byte{encoded}
+	derived.Encoded = derived.Input.Encode()
+	derived.Commitment = derived.Input.ExtraData()
+
+	engine, eth := newMockReth(t, Secret{}), newMockReth(t, Secret{})
+	var captured SealBuildInput
+	pid := data{1, 2, 3, 4, 5, 6, 7, 8}
+	engine.on("engine_forkchoiceUpdatedWithSealV1", func(raw json.RawMessage) (any, *rpcError) {
+		var args []json.RawMessage
+		require.NoError(t, json.Unmarshal(raw, &args))
+		require.NoError(t, json.Unmarshal(args[2], &captured))
+		return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid}, PayloadID: &pid}, nil
+	})
+	eth.on("eth_getBlockByHash", func(json.RawMessage) (any, *rpcError) {
+		return blockHeaderJSON{Number: 0, Hash: data32(verifier.GenesisOrigin.BlockHash()), Timestamp: 0}, nil
+	})
+	a, closeFn := newTestAdapterWithVerifier(t, engine, eth, verifier)
+	defer closeFn()
+	_, err = a.buildDerived(context.Background(), params, derived)
+	require.NoError(t, err)
+	require.Equal(t, []data{data(encoded)}, captured.Transitions)
 }
 
 func TestAdapterV2PostGenesisFailsClosed(t *testing.T) {
