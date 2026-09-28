@@ -68,14 +68,15 @@ type shardNodeRunFlags struct {
 	FullShardConf          string
 	ExpectedOriginIdentity string
 
-	LUCStoreFile        string
-	ExecutionJournal    string
-	JournalCandidates   int
-	JournalObservations int
-	JournalBytes        int64
-	ArchiveStore        string
-	ArchiveReplicas     []string
-	ArchivePrune        bool
+	LUCStoreFile         string
+	ExecutionJournal     string
+	JournalCandidates    int
+	JournalObservations  int
+	JournalBytes         int64
+	ArchiveStore         string
+	ArchiveReplicas      []string
+	ArchivePrune         bool
+	TrustHistoryProfile2 bool
 
 	// CertifiedRecordStore enables the certified-block record store (#14) at this path. Empty, the default,
 	// constructs nothing, and the node runs exactly as before. See startCertifiedRecord.
@@ -165,6 +166,8 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"configured replica peer ID; set exactly twice with --archive-store")
 	cmd.Flags().BoolVar(&flags.ArchivePrune, "archive-prune", false,
 		"advance the certified frontier and prune acknowledged journal history; requires --archive-store")
+	cmd.Flags().BoolVar(&flags.TrustHistoryProfile2, "trust-history-profile-2", false,
+		"verify old-set handoff commit proofs before admitting successor trust epochs; requires --execution-journal")
 	cmd.Flags().StringVar(&flags.CertifiedRecordStore, "certified-record-store", "",
 		"path of the certified-block record store (#14); empty leaves it off. Requires --executor engine-api and a SealRegistry shard configuration. The record is reloaded and reported at startup, and the witness of every block the round commits is captured over --eth-url and published; none of it changes voting")
 	cmd.Flags().IntVar(&flags.CertifiedRecordRetain, "certified-record-retain", defaultCertifiedRecordRetain,
@@ -195,6 +198,9 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 }
 
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
+	if flags.TrustHistoryProfile2 && flags.ExecutionJournal == "" {
+		return errors.New("--trust-history-profile-2 requires --execution-journal")
+	}
 	if flags.ArchiveStore != "" && (flags.ExecutionJournal == "" || len(flags.ArchiveReplicas) != 2) || flags.ArchiveStore == "" && len(flags.ArchiveReplicas) != 0 {
 		return archivewiring.ErrConfig
 	}
@@ -339,7 +345,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return fmt.Errorf("opening historical trust store: %w", openErr)
 		}
 		defer historyDB.Close()
-		historical, openErr := shardnode.NewHistoricalTrustBaseStore(ctx, historyDB, trustBases[0], executionID, nil)
+		historical, openErr := shardnode.NewHistoricalTrustBaseStore(ctx, historyDB, trustBases[0], executionID, flags.TrustHistoryProfile2)
 		if openErr != nil {
 			return fmt.Errorf("verifying historical trust store: %w", openErr)
 		}

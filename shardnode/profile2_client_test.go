@@ -15,6 +15,10 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
+type profile2MarkedTrust struct{ stubTrustBaseStore }
+
+func (profile2MarkedTrust) IsV2Epoch(epoch uint64) bool { return epoch == 8 }
+
 func TestProfile2ClientDoesNotDispatchOldRepeat(t *testing.T) {
 	ctx := context.Background()
 	signer, err := abcrypto.NewInMemorySecp256K1Signer()
@@ -102,6 +106,13 @@ func TestProfile2ClientDoesNotDispatchOldRepeat(t *testing.T) {
 	require.Empty(t, restartedDriver.rounds())
 	require.NoError(t, restored.SetReady())
 	newUC := signed(2, 13, 8, []byte{1}, []byte{3}, []byte{4})
+	unguardedDriver := &recordingDriver{}
+	unguarded := &BFTClient{partitionID: 1, shardConfHash: confHash, nodeID: "test-node",
+		trustBaseStore: profile2MarkedTrust{stubTrustBaseStore{tb: tb}}, driver: unguardedDriver}
+	require.NoError(t, unguarded.SeedLUC(held))
+	require.ErrorIs(t, unguarded.handleCertificationResponse(ctx, response(newUC)), ErrProfile2Unready)
+	require.Same(t, held, unguarded.luc)
+	require.Empty(t, unguardedDriver.rounds())
 	restarted.mu.Lock()
 	restarted.submittedSinceHandshake = true // delivery spends this credit; no test transport is needed
 	restarted.mu.Unlock()

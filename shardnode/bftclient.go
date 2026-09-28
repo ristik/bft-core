@@ -702,7 +702,11 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	c.lastCertResponseTime.Store(time.Now().UnixMilli())
 	c.mu.Lock()
 	admission := c.admission
+	profile2 := c.profile2
 	c.mu.Unlock()
+	if history, ok := c.trustBaseStore.(interface{ IsV2Epoch(uint64) bool }); ok && history.IsV2Epoch(cr.UC.GetRootEpoch()) && profile2 == nil {
+		return ErrProfile2Unready
+	}
 	if admission != nil {
 		if cr.Partition != c.partitionID || !cr.Shard.Equal(c.shardID) {
 			return fmt.Errorf("certification response for wrong shard %s-%s", cr.Partition, cr.Shard)
