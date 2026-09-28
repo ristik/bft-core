@@ -120,7 +120,6 @@ func TestAuthorizedFirstV2HandoffDerivesEpochGenesis(t *testing.T) {
 	_, err = evmroot.DeriveEpochGenesis(badV, bad)
 	require.ErrorIs(t, err, evmroot.ErrD4Anchor)
 }
-}
 
 func TestConfigureHandoffAuthorityRequiresAuthenticCurrentBase(t *testing.T) {
 	f := newAuthorizedFixture(t)
