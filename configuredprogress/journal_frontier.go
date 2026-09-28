@@ -101,9 +101,6 @@ func (s *Store) EnableFrontier(ctx context.Context, c Context, limits JournalLim
 	s.frontier = &p
 	err = s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
-		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
-			return err
-		}
 		_, err := readFrontier(b, state.i.descriptorDigest, p)
 		return err
 	})

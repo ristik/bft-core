@@ -289,13 +289,22 @@ func TestPruneCoverageGuardChecksPresentExactAnchor(t *testing.T) {
 
 func TestFrontierEnvelopeSizeLimits(t *testing.T) {
 	w := journalFrontierWire{Version: journalVersion, Descriptor: make([]byte, 32), Frontier: make([]byte, frontier.MaxBytes), Anchor: make([]byte, archive.MaxWireBytes)}
-	_, err := encodeFrontierState(w)
+	raw, err := encodeFrontierState(w)
 	require.NoError(t, err)
+	s, _, _, _, _ := frontierTestSetup(t, t.TempDir()+"/near-limit.db")
+	defer s.Close()
+	require.NoError(t, s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bucketName).Put(journalFrontierKey, raw) }))
+	err = s.db.View(func(tx *bolt.Tx) error {
+		_, err := readFrontier(tx.Bucket(bucketName), [32]byte{}, frontier.Policy{Binding: frontierTestBinding{}})
+		return err
+	})
+	require.NotErrorIs(t, err, ErrBounds)
+
 	w.Anchor = make([]byte, archive.MaxWireBytes+8192)
 	_, err = encodeFrontierState(w)
 	require.ErrorIs(t, err, ErrBounds)
 
-	s, _, _, _, _ := frontierTestSetup(t, t.TempDir()+"/oversized.db")
+	s, _, _, _, _ = frontierTestSetup(t, t.TempDir()+"/oversized.db")
 	defer s.Close()
 	tooLarge := bytes.Repeat([]byte{1}, archive.MaxWireBytes+frontier.MaxBytes+4097)
 	require.NoError(t, s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bucketName).Put(journalFrontierKey, tooLarge) }))
