@@ -165,6 +165,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		control.PredecessorBodyID = bytes.Clone(control.PredecessorBodyID)
 		control.RecordBytes = bytes.Clone(control.RecordBytes)
 		control.PreviousDigest = bytes.Clone(control.PreviousDigest)
+		control.FrozenParent = bytes.Clone(control.FrozenParent)
 		unchanged.Control = &control
 		for key, previous := range x.ShardState.States {
 			copy := *previous

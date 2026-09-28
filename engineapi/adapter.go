@@ -17,6 +17,7 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
@@ -105,7 +106,10 @@ type VerifierContext struct {
 	ShardConfHash []byte
 	RootEpoch     uint64
 	TrustBases    rootinput.TrustBases
-	Cursor        SealRegistryCursor // retained for callers of the former v1 API; v2 reads the verified parent snapshot
+	// Transition is the canonical acknowledgement derived from an installed
+	// profile-2 anchor and delivered through the authenticated local link.
+	Transition []byte
+	Cursor     SealRegistryCursor // retained for callers of the former v1 API; v2 reads the verified parent snapshot
 
 	// GenesisOrigin is the checked execution genesis this node was configured with, and
 	// BootstrapSnapshot is the verified snapshot of its own block 0. Both are verifier-owned: they come
@@ -393,10 +397,18 @@ func (a *Adapter) Commit(ctx context.Context, hash shardnode.Hash) (shardnode.St
 // deriveV2 authenticates the bound observation before reading a parent witness.
 // The parent subject is always the certified BlockRef supplied by the round.
 func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (rootinput.ResultV2, error) {
+	rootEpoch := a.verifier.RootEpoch
+	if len(a.verifier.Transition) != 0 {
+		installed, err := handoff.DecodeEVMTransition(a.verifier.Transition)
+		if err != nil || installed.OldEpoch != rootEpoch {
+			return rootinput.ResultV2{}, fmt.Errorf("%w: invalid installed transition", rootinput.ErrV2Context)
+		}
+		rootEpoch = installed.NewEpoch
+	}
 	o, err := rootinput.AuthenticateObservationV2(ctx, rootinput.ObservationContextV2{
 		NetworkID: a.verifier.NetworkID, PartitionID: a.verifier.PartitionID,
 		ShardID: a.verifier.ShardID, ShardConfHash: a.verifier.ShardConfHash,
-		RootEpoch: a.verifier.RootEpoch, TrustBases: a.verifier.TrustBases,
+		RootEpoch: rootEpoch, TrustBases: a.verifier.TrustBases,
 	}, uc, tr)
 	if err != nil {
 		return rootinput.ResultV2{}, err
@@ -426,9 +438,15 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 				slog.String("parentHash", fmt.Sprintf("%x", p.Parent.Hash)), slog.String("snapshotID", proof.SnapshotID), slog.Time("verifiedAt", proof.VerifiedAt))
 		}
 	}
+	pendingTransition := snapshot.Fields().RootEpoch != o.Origin().RootEpoch
+	var transition []byte
+	if pendingTransition {
+		transition = bytes.Clone(a.verifier.Transition)
+	}
 	derived, err := rootinput.DeriveV2(rootinput.ContextV2{
 		Genesis: a.verifier.GenesisOrigin, Parent: snapshot,
 		Round: p.Round, ParentHash: p.Parent.Hash,
+		TransitionsPending: pendingTransition, Transition: transition,
 	}, o)
 	if err == nil {
 		shardnode.RecordProofEvidence(ctx, proof)

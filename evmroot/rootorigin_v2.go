@@ -144,9 +144,12 @@ func (ri RootInputV2) Validate() error {
 	if err := ri.Origin.Validate(); err != nil {
 		return err
 	}
+	if len(ri.Transitions) > 1 {
+		return fmt.Errorf("evmroot: v2 supports at most one epoch transition")
+	}
 	for i, b := range ri.Transitions {
-		if len(b) == 0 {
-			return fmt.Errorf("evmroot: v2 transition D[%d] is empty", i)
+		if len(b) == 0 || len(b) > 16*1024 {
+			return fmt.Errorf("evmroot: v2 transition D[%d] has invalid length", i)
 		}
 	}
 	return nil

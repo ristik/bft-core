@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
@@ -15,6 +16,27 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+func TestAdapterRequiresCanonicalTransitionFromConfiguredEpoch(t *testing.T) {
+	verifier, params, _ := bootstrapAdapterFixture(t)
+	a, closeFn := newTestAdapterWithVerifier(t, newMockReth(t, Secret{}), newMockReth(t, Secret{}), verifier)
+	defer closeFn()
+	verifier.Transition = []byte{0x80}
+	_, err := a.deriveV2(context.Background(), params, params.AuthorizingCertificate, params.AuthorizingTechnicalRecord)
+	require.ErrorIs(t, err, rootinput.ErrV2Context)
+	tx := handoff.EVMTransition{OldEpoch: 2, NewEpoch: 3, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
+		Ack: handoff.AckRecord{FrozenID: [32]byte{3}, CommitID: [32]byte{4}, FrozenParent: [32]byte{5},
+			SuccessorParent: [32]byte{5}, SuccessorTR: [32]byte{6}, EVMRound: 1}}
+	verifier.Transition, err = tx.Encode()
+	require.NoError(t, err)
+	_, err = a.deriveV2(context.Background(), params, params.AuthorizingCertificate, params.AuthorizingTechnicalRecord)
+	require.ErrorIs(t, err, rootinput.ErrV2Context)
+	tx.OldEpoch, tx.NewEpoch = 1, 2
+	verifier.Transition, err = tx.Encode()
+	require.NoError(t, err)
+	_, err = a.deriveV2(context.Background(), params, params.AuthorizingCertificate, params.AuthorizingTechnicalRecord)
+	require.True(t, rootinput.IsUnsupportedObservationV2(err), "valid installed transition reaches certificate authentication: %v", err)
+}
 
 func bootstrapAdapterFixture(t *testing.T) (*VerifierContext, shardnode.RoundParams, rootinput.ResultV2) {
 	t.Helper()

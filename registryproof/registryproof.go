@@ -78,10 +78,12 @@ var SlotNames = [FieldCount]string{
 	"origin.trHash", "round.authorized", "input.commitment", "certified.round", "certified.stateHash",
 	"certified.hasBlockHash", "certified.blockHash", "phase", "outcomes.round", "outcomes.commitment",
 	"transition.cursor", "inbox.consumed",
+	"transition.bodyID", "transition.genesisID", "transition.frozenID", "transition.commitID",
+	"transition.frozenParent", "transition.successorTR",
 }
 
 // FieldCount is the number of §4.2 fields, and the exact number of storage proofs Evidence carries.
-const FieldCount = 22
+const FieldCount = 28
 
 const (
 	fLayoutVersion = iota
@@ -106,6 +108,12 @@ const (
 	fOutcomesCommitment
 	fTransitionCursor
 	fInboxConsumed
+	fTransitionBodyID
+	fTransitionGenesisID
+	fTransitionFrozenID
+	fTransitionCommitID
+	fTransitionFrozenParent
+	fTransitionSuccessorTR
 )
 
 // genesisFields are the words §5.4 writes at genesis; every other field is zero there.
@@ -387,28 +395,30 @@ type Fields struct {
 	// against §5.4 instead of the parent-consistency rule.
 	Genesis bool
 
-	LayoutVersion      uint64
-	GenesisCommitment  common.Hash
-	ShardConfHash      common.Hash
-	ShardEpoch         uint64
-	RootEpoch          uint64
-	ClockRootRound     uint64
-	OriginRootEpoch    uint64
-	OriginTimestamp    uint64
-	OriginTreeRoot     common.Hash
-	OriginIdentity     common.Hash
-	OriginTRHash       common.Hash
-	RoundAuthorized    uint64
-	InputCommitment    common.Hash
-	CertifiedRound     uint64
-	CertifiedStateHash common.Hash
-	HasBlockHash       bool
-	CertifiedBlockHash common.Hash
-	Phase              uint64
-	OutcomesRound      uint64
-	OutcomesCommitment common.Hash
-	TransitionCursor   uint64
-	InboxConsumed      uint64
+	LayoutVersion                                                     uint64
+	GenesisCommitment                                                 common.Hash
+	ShardConfHash                                                     common.Hash
+	ShardEpoch                                                        uint64
+	RootEpoch                                                         uint64
+	ClockRootRound                                                    uint64
+	OriginRootEpoch                                                   uint64
+	OriginTimestamp                                                   uint64
+	OriginTreeRoot                                                    common.Hash
+	OriginIdentity                                                    common.Hash
+	OriginTRHash                                                      common.Hash
+	RoundAuthorized                                                   uint64
+	InputCommitment                                                   common.Hash
+	CertifiedRound                                                    uint64
+	CertifiedStateHash                                                common.Hash
+	HasBlockHash                                                      bool
+	CertifiedBlockHash                                                common.Hash
+	Phase                                                             uint64
+	OutcomesRound                                                     uint64
+	OutcomesCommitment                                                common.Hash
+	TransitionCursor                                                  uint64
+	InboxConsumed                                                     uint64
+	TransitionBodyID, TransitionGenesisID, TransitionFrozenID         common.Hash
+	TransitionCommitID, TransitionFrozenParent, TransitionSuccessorTR common.Hash
 }
 
 func decodeFields(w *[FieldCount]common.Hash) (Fields, error) {
@@ -433,6 +443,9 @@ func decodeFields(w *[FieldCount]common.Hash) (Fields, error) {
 	s.OriginTreeRoot, s.OriginIdentity, s.OriginTRHash = w[fOriginTreeRoot], w[fOriginIdentity], w[fOriginTRHash]
 	s.InputCommitment, s.CertifiedStateHash = w[fInputCommitment], w[fCertifiedStateHash]
 	s.CertifiedBlockHash, s.OutcomesCommitment = w[fCertifiedBlockHash], w[fOutcomesCommitment]
+	s.TransitionBodyID, s.TransitionGenesisID = w[fTransitionBodyID], w[fTransitionGenesisID]
+	s.TransitionFrozenID, s.TransitionCommitID = w[fTransitionFrozenID], w[fTransitionCommitID]
+	s.TransitionFrozenParent, s.TransitionSuccessorTR = w[fTransitionFrozenParent], w[fTransitionSuccessorTR]
 
 	switch flag := w[fCertifiedHasBlockHash]; flag {
 	case common.Hash{}:
@@ -528,11 +541,20 @@ func (l limits) verify(c Context, parentHash common.Hash, ev Evidence) (Snapshot
 		return Snapshot{}, fmt.Errorf("%w: genesis commitment %s, configured %s", ErrConfiguration, s.GenesisCommitment, c.GenesisCommitment)
 	case s.ShardConfHash != c.FullShardConfHash:
 		return Snapshot{}, fmt.Errorf("%w: shard configuration hash %s, configured %s", ErrConfiguration, s.ShardConfHash, c.FullShardConfHash)
-	case s.ShardEpoch != c.ShardEpoch || s.RootEpoch != c.RootEpoch:
+	case s.ShardEpoch != c.ShardEpoch:
 		return Snapshot{}, fmt.Errorf("%w: epochs %d/%d, configured %d/%d", ErrConfiguration, s.ShardEpoch, s.RootEpoch, c.ShardEpoch, c.RootEpoch)
-	case s.TransitionCursor != 0 || s.InboxConsumed != 0:
-		// §10: v1 never advances either cursor.
-		return Snapshot{}, fmt.Errorf("%w: v1 cursors are not zero", ErrConfiguration)
+	case s.InboxConsumed != 0:
+		return Snapshot{}, fmt.Errorf("%w: unsupported inbox cursor", ErrConfiguration)
+	case s.TransitionCursor == 0:
+		if s.RootEpoch != c.RootEpoch || s.TransitionBodyID != (common.Hash{}) || s.TransitionGenesisID != (common.Hash{}) || s.TransitionFrozenID != (common.Hash{}) || s.TransitionCommitID != (common.Hash{}) || s.TransitionFrozenParent != (common.Hash{}) || s.TransitionSuccessorTR != (common.Hash{}) {
+			return Snapshot{}, fmt.Errorf("%w: missing epoch transition", ErrConfiguration)
+		}
+	case s.TransitionCursor == 1:
+		if c.RootEpoch == ^uint64(0) || s.RootEpoch != c.RootEpoch+1 || s.TransitionBodyID == (common.Hash{}) || s.TransitionGenesisID == (common.Hash{}) || s.TransitionFrozenID == (common.Hash{}) || s.TransitionCommitID == (common.Hash{}) || s.TransitionFrozenParent == (common.Hash{}) || s.TransitionSuccessorTR == (common.Hash{}) {
+			return Snapshot{}, fmt.Errorf("%w: invalid installed transition", ErrConfiguration)
+		}
+	default:
+		return Snapshot{}, fmt.Errorf("%w: unsupported transition cursor", ErrConfiguration)
 	}
 	switch s.Phase {
 	case phaseFinalized:

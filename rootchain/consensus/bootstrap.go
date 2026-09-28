@@ -17,7 +17,6 @@ import (
 )
 
 type epochAnchorSafetyStore interface {
-	InstallEpochAnchorSafety(*rctypes.EpochAnchor) error
 	ReadEpochAnchorSafety() (*rctypes.EpochAnchor, error)
 }
 
@@ -27,6 +26,9 @@ type epochAnchorSafetyStore interface {
 func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, head *abdrc.CommittedBlock, body evmroot.TrustBaseBodyV2) (*rctypes.EpochAnchor, error) {
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.pacemaker.GetCurrentRound() != 0 {
 		return nil, errors.New("epoch genesis requires stopped profile-2 consensus")
+	}
+	if !x.recoveryProfile2 || x.recoveryHistory == nil {
+		return nil, fmt.Errorf("epoch genesis requires profile 2 recovery: %w", abdrc.ErrRecoveryEpoch)
 	}
 	old, err := x.trustBaseStore.GetByEpoch(proof.Record.Epoch)
 	if err != nil {
@@ -72,15 +74,12 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 	} else if existing != nil && (existing.Epoch != g.Epoch || !bytes.Equal(existing.GenesisID, g.ID())) {
 		return nil, rctypes.ErrEpochAnchor
 	}
-	a, err := x.blockStore.InstallEpochAnchor(head, v, g)
-	if err != nil {
-		return nil, err
-	}
 	newTrust, err := x.trustBaseStore.InstallV2Projection(projected)
 	if err != nil {
 		return nil, err
 	}
-	if err := safetyStore.InstallEpochAnchorSafety(a); err != nil {
+	a, err := x.blockStore.InstallEpochAnchor(head, v, g)
+	if err != nil {
 		return nil, err
 	}
 	reqVerifier, err := NewIRChangeReqVerifier(x.params, x.blockStore)
@@ -101,6 +100,24 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 	x.t2Timeouts = t2Timeouts
 	x.epochAnchor = a
 	return a, nil
+}
+
+// InstalledEVMTransition derives the one acknowledgement payload from the
+// signed old control state and this manager's durable installed anchor.
+func (x *ConsensusManager) InstalledEVMTransition(proof handoff.OldCommitProof,
+	body evmroot.TrustBaseBodyV2, evmRound uint64) ([]byte, error) {
+	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.epochAnchor == nil {
+		return nil, rctypes.ErrEpochAnchor
+	}
+	old, err := x.trustBaseStore.GetByEpoch(proof.Record.Epoch)
+	if err != nil {
+		return nil, fmt.Errorf("old root trust lineage: %w", err)
+	}
+	transition, err := handoff.TransitionFromInstalledAnchor(proof, old, body, x.epochAnchor, evmRound)
+	if err != nil {
+		return nil, err
+	}
+	return transition.Encode()
 }
 
 func (x *ConsensusManager) matchesInstalledAnchor(a *rctypes.EpochAnchor) bool {
