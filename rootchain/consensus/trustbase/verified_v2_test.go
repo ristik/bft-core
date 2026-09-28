@@ -59,9 +59,7 @@ func TestInstallV2ProjectionPreservesVerifiedCommittee(t *testing.T) {
 		func(p *types.RootTrustBaseV1) { p.ChangeRecordHash = bytes.Repeat([]byte{3}, 32) },
 		func(p *types.RootTrustBaseV1) {
 			p.RootNodes = append([]*types.NodeInfo(nil), p.RootNodes...)
-			node := *p.RootNodes[0]
-			node.NodeID = "other"
-			p.RootNodes[0] = &node
+			p.RootNodes[0] = &types.NodeInfo{NodeID: "other"}
 		},
 	} {
 		wrong = *projection
