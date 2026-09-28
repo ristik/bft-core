@@ -83,6 +83,12 @@ func TestVerifiedTransitionStorageRequiresEveryBoundField(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), s.Fields().RootEpoch)
 	require.Equal(t, uint64(1), s.Fields().TransitionCursor)
+	repeated := build(t, spec{number: 1, parent: c.genesis.hash,
+		words: installed.with("assignment.rootEpoch", num(3), "transition.cursor", num(2)), fillers: fillers})
+	s, err = Verify(c.context(), repeated.hash, repeated.ev)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), s.Fields().RootEpoch)
+	require.Equal(t, uint64(2), s.Fields().TransitionCursor)
 
 	for _, name := range fields {
 		t.Run("missing "+name, func(t *testing.T) {

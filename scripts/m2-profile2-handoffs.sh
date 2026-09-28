@@ -98,8 +98,8 @@ m2_send_paid() {
         assignment=$(rpc "http://127.0.0.1:$rethEthBase" eth_getStorageAt "[\"$registry\",\"$m2_epoch_slot\",\"latest\"]" | pyget "['result']")
         cursor=$(rpc "http://127.0.0.1:$rethEthBase" eth_getStorageAt "[\"$registry\",\"$m2_cursor_slot\",\"latest\"]" | pyget "['result']")
         if [ "$(python3 -c "print(int('$assignment',16))" 2>/dev/null)" = "$epoch" ] &&
-           [ "$(python3 -c "print(int('$cursor',16))" 2>/dev/null)" = 1 ]; then
-          echo "paid epoch $epoch nonce $nonce hash=$expected registryRootEpoch=$epoch transitionCursor=1"
+           [ "$(python3 -c "print(int('$cursor',16))" 2>/dev/null)" = "$((epoch-1))" ]; then
+          echo "paid epoch $epoch nonce $nonce hash=$expected registryRootEpoch=$epoch transitionCursor=$((epoch-1))"
           return 0
         fi
       fi
