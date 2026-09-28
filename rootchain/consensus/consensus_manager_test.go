@@ -47,6 +47,14 @@ const partitionID types.PartitionID = 0x00FF0001
 
 var shardID = types.ShardID{}
 
+func TestEmptyCertificateBatchEmissionIsProfileGated(t *testing.T) {
+	require.True(t, shouldSendCertificateBatch(storage.ProfileLegacy, nil))
+	require.False(t, shouldSendCertificateBatch(storage.ProfileHandoff, nil))
+	certs := []*certification.CertificationResponse{{}}
+	require.True(t, shouldSendCertificateBatch(storage.ProfileLegacy, certs))
+	require.True(t, shouldSendCertificateBatch(storage.ProfileHandoff, certs))
+}
+
 func readResult(ch <-chan *certification.CertificationResponse, timeout time.Duration) (*types.UnicityCertificate, error) {
 	select {
 	case result, ok := <-ch:
