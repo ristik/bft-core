@@ -2,9 +2,15 @@ package types
 
 import (
 	"bytes"
+	"crypto"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
+	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
+	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	base "github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -22,6 +28,7 @@ func TestEpochAnchorProposalWireAndEpoch(t *testing.T) {
 	require.NoError(t, base.Cbor.Unmarshal(raw, &restored))
 	require.Equal(t, a, restored.Anchor)
 	require.EqualValues(t, 12, restored.GetParentRound())
+	require.Error(t, base.Cbor.Unmarshal([]byte{0xff}, &restored))
 	b.Epoch = 1
 	require.ErrorIs(t, b.IsValid(), ErrEpochAnchor)
 	b.Epoch = 2
@@ -42,4 +49,61 @@ func TestEpochAnchorTimeoutVotesRankBelowOrdinaryQC(t *testing.T) {
 	require.NoError(t, tc.Add("b", ordinary, []byte{2}))
 	require.Same(t, ordinary, tc.Timeout)
 	require.NotNil(t, tc.Signatures["a"].Anchor)
+	other := *a
+	other.GenesisID = bytes.Repeat([]byte{9}, 32)
+	require.ErrorIs(t, tc.Add("c", NewAnchorTimeout(13, &other), []byte{3}), ErrEpochAnchor)
+}
+
+func TestEpochAnchorTimeoutWireAndCertificateGuards(t *testing.T) {
+	a := testEpochAnchor()
+	for _, timeout := range []*Timeout{NewAnchorTimeout(13, a), NewTimeout(14, 2, &QuorumCert{})} {
+		encoded, err := base.Cbor.Marshal(timeout)
+		require.NoError(t, err)
+		var restored Timeout
+		require.NoError(t, base.Cbor.Unmarshal(encoded, &restored))
+		require.Equal(t, timeout, &restored)
+		require.Error(t, base.Cbor.Unmarshal([]byte{0xff}, &restored))
+	}
+	for _, vote := range []*TimeoutVote{{HqcRound: a.Slot, Signature: []byte{1}, Anchor: a}, {HqcRound: 12, Signature: []byte{2}}} {
+		encoded, err := base.Cbor.Marshal(vote)
+		require.NoError(t, err)
+		var restored TimeoutVote
+		require.NoError(t, base.Cbor.Unmarshal(encoded, &restored))
+		require.Equal(t, vote, &restored)
+		require.Error(t, base.Cbor.Unmarshal([]byte{0xff}, &restored))
+	}
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	old := testtrustbase.NewTrustBaseFromSigners(t, map[string]abcrypto.Signer{"node": signer}).(*base.RootTrustBaseV1)
+	store, err := trustbase.NewTrustBaseStore(memorydb.New(), logger.New(t))
+	require.NoError(t, err)
+	require.NoError(t, store.Store(old))
+	oldID, err := old.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	projected, err := base.NewTrustBase(old.NetworkID, old.RootNodes, base.WithEpoch(2),
+		base.WithEpochStart(13), base.WithPreviousTrustBaseHash(oldID))
+	require.NoError(t, err)
+	_, err = store.InstallV2Projection(projected)
+	require.NoError(t, err)
+	timeout := NewAnchorTimeout(13, a)
+	makeVote := func(anchor *EpochAnchor, hqcRound uint64) *TimeoutVote {
+		vote := &TimeoutVote{HqcRound: hqcRound, Anchor: anchor}
+		vote.Signature, err = signer.SignBytes(BytesFromTimeoutVote(timeout, "node", vote))
+		require.NoError(t, err)
+		return vote
+	}
+	tc := &TimeoutCert{Timeout: timeout, Signatures: map[string]*TimeoutVote{"node": makeVote(a, a.Slot)}}
+	require.NoError(t, tc.Verify(store))
+	tc.Signatures["node"] = makeVote(nil, a.Slot)
+	require.ErrorIs(t, tc.Verify(store), ErrEpochAnchor)
+	tc.Signatures["node"] = makeVote(nil, 0)
+	require.ErrorIs(t, tc.Verify(store), ErrEpochAnchor)
+	wrong := *a
+	wrong.GenesisID = bytes.Repeat([]byte{9}, 32)
+	tc.Signatures["node"] = makeVote(&wrong, wrong.Slot)
+	require.ErrorIs(t, tc.Verify(store), ErrEpochAnchor)
+	wrong = *a
+	wrong.Slot++
+	tc.Signatures["node"] = makeVote(&wrong, wrong.Slot)
+	require.ErrorIs(t, tc.Verify(store), ErrEpochAnchor)
 }

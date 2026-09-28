@@ -1,6 +1,7 @@
 package abdrc
 
 import (
+	"bytes"
 	gocrypto "crypto"
 	"testing"
 
@@ -174,6 +175,13 @@ func Test_VoteMsg_Verify(t *testing.T) {
 		require.EqualError(t, vi.Verify(tbs), `vote from '1' high QC is missing vote info`)
 	})
 
+	t.Run("invalid high QC signature", func(t *testing.T) {
+		vi := validVoteMsg(t)
+		vi.HighQc.Signatures["1"] = bytes.Clone(vi.HighQc.Signatures["1"])
+		vi.HighQc.Signatures["1"][0] ^= 1
+		require.ErrorContains(t, vi.Verify(tbs), "high QC error")
+	})
+
 	t.Run("unassigned author", func(t *testing.T) {
 		vi := validVoteMsg(t)
 		vi.Author = ""
@@ -197,4 +205,40 @@ func Test_VoteMsg_Verify(t *testing.T) {
 		vi.Signature = nil
 		require.EqualError(t, vi.Verify(tbs), `vote from '1' signature verification error: verify bytes failed: invalid nil argument`)
 	})
+}
+
+func TestVoteMsgAnchorWireAndGuard(t *testing.T) {
+	signer, _ := testsig.CreateSignerAndVerifier(t)
+	old := testtb.NewTrustBaseFromSigners(t, map[string]crypto.Signer{"anchor-author": signer}).(*types.RootTrustBaseV1)
+	tbs, err := trustbase.NewTrustBaseStore(memorydb.New(), logger.New(t))
+	require.NoError(t, err)
+	require.NoError(t, tbs.Store(old))
+	oldHash, err := old.Hash(gocrypto.SHA256)
+	require.NoError(t, err)
+	newBase, err := types.NewTrustBase(old.NetworkID, old.RootNodes, types.WithEpoch(2),
+		types.WithEpochStart(7), types.WithPreviousTrustBaseHash(oldHash))
+	require.NoError(t, err)
+	_, err = tbs.InstallV2Projection(newBase)
+	require.NoError(t, err)
+	a := &drctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 6,
+		StateRoot: bytes.Repeat([]byte{2}, 32)}
+	info := &drctypes.RoundInfo{Version: 1, RoundNumber: 7, ParentRoundNumber: 6, Epoch: 2,
+		Timestamp: types.NewTimestamp(), CurrentRootHash: bytes.Repeat([]byte{3}, 32)}
+	hash, err := info.Hash(gocrypto.SHA256)
+	require.NoError(t, err)
+	vote := &VoteMsg{VoteInfo: info, LedgerCommitInfo: &types.UnicitySeal{Version: 1, PreviousHash: hash},
+		Anchor: a, Author: "anchor-author"}
+	require.NoError(t, vote.Sign(signer))
+	require.NoError(t, vote.Verify(tbs))
+	encoded, err := types.Cbor.Marshal(vote)
+	require.NoError(t, err)
+	var restored VoteMsg
+	require.NoError(t, types.Cbor.Unmarshal(encoded, &restored))
+	require.Equal(t, vote, &restored)
+	require.Error(t, types.Cbor.Unmarshal([]byte{0xff}, &restored))
+	vote.VoteInfo.Epoch = 1
+	hash, err = vote.VoteInfo.Hash(gocrypto.SHA256)
+	require.NoError(t, err)
+	vote.LedgerCommitInfo.PreviousHash = hash
+	require.ErrorIs(t, vote.Verify(tbs), drctypes.ErrEpochAnchor)
 }
