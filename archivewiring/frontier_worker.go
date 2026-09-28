@@ -1,6 +1,7 @@
 package archivewiring
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -27,7 +28,10 @@ type FrontierWorker struct {
 	Host            shardnode.EvidenceHost
 	TransportLimits Limits
 	Log             *slog.Logger
-	auditCursor     uint64
+	// Finalized bounds pruning to the execution head this node has actually
+	// committed. An archive copy can arrive before local EL finality does.
+	Finalized   func(context.Context) (shardnode.BlockRef, error)
+	auditCursor uint64
 }
 
 func (w *FrontierWorker) Run(ctx context.Context) error {
@@ -71,6 +75,13 @@ func (w *FrontierWorker) Pass(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var finalized shardnode.BlockRef
+	if w.Finalized != nil {
+		finalized, err = w.Finalized(ctx)
+		if err != nil {
+			return fmt.Errorf("reading local execution finality before pruning: %w", err)
+		}
+	}
 	height, sequence, round := uint64(0), uint64(0), uint64(0)
 	if image.Frontier != nil && image.Frontier.Anchor != nil {
 		height, sequence, round = image.Frontier.Anchor.Height, image.Frontier.Anchor.Sequence, image.Frontier.Anchor.Round
@@ -81,6 +92,12 @@ func (w *FrontierWorker) Pass(ctx context.Context) error {
 	for _, entry := range certifiedEntries(image) {
 		if entry.Candidate.Number <= height {
 			continue
+		}
+		if w.Finalized != nil && entry.Candidate.Number > finalized.Number {
+			break
+		}
+		if w.Finalized != nil && entry.Candidate.Number == finalized.Number && !bytes.Equal(entry.Candidate.Hash, finalized.Hash) {
+			return ErrBinding
 		}
 		if entry.Candidate.Number != height+1 || entry.ResultingUC.GetRootRoundNumber() <= round {
 			break

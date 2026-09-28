@@ -342,6 +342,17 @@ function start_one_evm_validator() {
 	  executorArgs+=(--execution-journal "test-nodes/evm$i/execution-journal.db")
 	  shardConfArgs=(--full-shard-conf "$EVM_FULL_SHARD_CONF")
 	fi
+	if [ -n "${EVM_ARCHIVE_ROOT:-}" ]; then
+	  local replicaCount=0 peerID
+	  executorArgs+=(--archive-store "$EVM_ARCHIVE_ROOT/evm$i" --archive-prune --journal-candidates 8)
+	  for j in $(seq 2 "$n"); do
+	    [ "$j" = "$i" ] && continue
+	    peerID=$(evm_validator_id "$j") || return 1
+	    executorArgs+=(--archive-replica "$peerID")
+	    replicaCount=$((replicaCount + 1))
+	    [ "$replicaCount" -lt 2 ] || break
+	  done
+	fi
   fi
 
   # Expanded as ${arr[@]+"${arr[@]}"} below, and $6 defaulted above, so this function works under

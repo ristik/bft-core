@@ -118,6 +118,12 @@ func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnaps
 		}
 	}
 	for _, o := range image.Observations {
+		if image.Frontier != nil && image.Frontier.Anchor != nil && o.UC.GetRootRoundNumber() <= image.Frontier.Anchor.Round {
+			// Pruning may retain an older certificate solely because it
+			// authorizes a hot local proposal. The frontier already covers
+			// its body; it is not the recovery target.
+			continue
+		}
 		if o.Unresolved {
 			return recoveryChain{}, fmt.Errorf("%w: missing certified body %x at round %d", ErrRecoveryUnavailable, o.TargetHash, o.UC.GetRoundNumber())
 		}

@@ -72,6 +72,14 @@ func TestCheckBlockBindingRecomputesRawHeaderBeforeRetention(t *testing.T) {
 	archiveQuery.BlockHash[0] ^= 1
 	_, err = BlockFromArchive(archiveQuery, archiveRecord, params.AuthorizingCertificate.GetRootRoundNumber(), params.Round)
 	require.Error(t, err)
+	zeroBase := decodedHeader
+	zeroBase.BaseFee = big.NewInt(0)
+	badArchive.CanonicalRootInput = archivedInput
+	badArchive.Header, err = rlp.EncodeToBytes(&zeroBase)
+	require.NoError(t, err)
+	archiveQuery.BlockHash = [32]byte(zeroBase.Hash())
+	_, err = BlockFromArchive(archiveQuery, &badArchive, params.AuthorizingCertificate.GetRootRoundNumber(), params.Round)
+	require.Error(t, err, "the paired profile's positive base-fee floor forbids zero")
 	payload.GasUsed++ // The claimed block hash and parent linkage remain unchanged.
 	forged, err := EncodeBlockWithSealCompanion(payload, &SealCompanion{RootInput: want.Encoded, Witnesses: witnesses, Provenance: "build"})
 	require.NoError(t, err)

@@ -280,6 +280,12 @@ func (c *countingClient) Release(ctx context.Context, round uint64, digest [32]b
 	c.count()
 	return c.inner.Release(ctx, round, digest)
 }
+func (c *countingClient) RestoreStatus(ctx context.Context) (signingauthority.Status, error) {
+	c.count()
+	return c.inner.(interface {
+		RestoreStatus(context.Context) (signingauthority.Status, error)
+	}).RestoreStatus(ctx)
+}
 
 func (p *authorityProcess) client(credential []byte) *countingClient {
 	p.t.Helper()
@@ -431,6 +437,10 @@ func TestRestoredVotingThroughAnIndependentAuthority(t *testing.T) {
 		}
 		round7 := signedBytes(t, first.sub.requests()[1])
 		require.EqualValues(t, 7, c.auth.mustStatus().ReservedRound)
+		clientStatus, err := first.client.RestoreStatus(ctx)
+		require.NoError(t, err)
+		require.True(t, clientStatus.HasReservation)
+		require.EqualValues(t, 7, clientStatus.ReservedRound, "the shard client sees the surviving independent high-water record")
 
 		// A second process resumes from the OLDER checkpoint (round 4), with the same credential: the
 		// authority survived the shard restart.

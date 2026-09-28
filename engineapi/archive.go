@@ -26,7 +26,7 @@ func BlockFromArchive(q archive.Request, rec *archive.Record, originalRootRound,
 	var body gethtypes.Body
 	var companion SealCompanion
 	if rlp.DecodeBytes(rec.Header, &header) != nil || rlp.DecodeBytes(rec.Body, &body) != nil || json.Unmarshal(rec.Companion, &companion) != nil ||
-		header.Number == nil || header.BaseFee == nil || header.BaseFee.Sign() < 0 || !header.BaseFee.IsUint64() || len(body.Uncles) != 0 || len(body.Withdrawals) != 0 {
+		header.Number == nil || header.BaseFee == nil || header.BaseFee.Sign() <= 0 || !header.BaseFee.IsUint64() || len(body.Uncles) != 0 || len(body.Withdrawals) != 0 {
 		return shardnode.Block{}, archive.ErrInvalid
 	}
 	if header.Hash() != common.Hash(q.BlockHash) {

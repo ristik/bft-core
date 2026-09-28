@@ -22,6 +22,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootinput"
+	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/signingauthority"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -138,8 +139,23 @@ func TestFrontierJournalAdvancePruneAndRestart(t *testing.T) {
 	peers := [2]peer.ID{"first", "second"}
 	policy := frontier.Policy{Context: f.subject, Replicas: [2]string{peers[0].String(), peers[1].String()}, Binding: CertifiedBinding{Context: f.context, Subject: f.subject}, Availability: fixtureAvailability{stores: map[string]*archive.Store{peers[0].String(): first, peers[1].String(): second}}}
 	require.NoError(t, f.store.EnableFrontier(context.Background(), f.context, f.limits, policy))
-	worker := &FrontierWorker{Journal: f.store, Context: f.context, Limits: f.limits, Archive: local, Subject: f.subject, Replicas: peers}
+	finalizedAt := func(height uint64) shardnode.BlockRef {
+		for _, entry := range f.entries {
+			if entry.Candidate.Number == height {
+				return shardnode.BlockRef{Number: height, Hash: entry.Candidate.Hash}
+			}
+		}
+		t.Fatalf("missing certified fixture height %d", height)
+		return shardnode.BlockRef{}
+	}
+	finalized := finalizedAt(3)
+	worker := &FrontierWorker{Journal: f.store, Context: f.context, Limits: f.limits, Archive: local, Subject: f.subject, Replicas: peers,
+		Finalized: func(context.Context) (shardnode.BlockRef, error) { return finalized, nil }}
 	require.NoError(t, worker.Pass(context.Background()))
+	partial, err := f.store.LoadJournal(context.Background(), f.context, f.limits)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, partial.Frontier.Anchor.Height, "archive acknowledgments cannot prune beyond local EL finality")
+	finalized = finalizedAt(6)
 	require.NoError(t, worker.Pass(context.Background()))
 	image, err := f.store.LoadJournal(context.Background(), f.context, f.limits)
 	require.NoError(t, err)

@@ -541,6 +541,12 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 		if err != nil {
 			return err
 		}
+		// A retained local body still needs its authorizing observation when
+		// the frontier later moves past that body. A repeat certificate can
+		// keep an older body hot after its own frontier record ceases to be
+		// the anchor. Retaining at most one authorization per hot local body
+		// preserves LoadJournal's non-equivocation check across pruning.
+		retainedAuthorizations := make(map[[2]uint64]struct{})
 		var restoredHash []byte
 		if raw := b.Get(restoreAnchorKey); raw != nil {
 			payload, e := decodeEnvelope(raw, restoreAnchorKind, 4096)
@@ -559,8 +565,17 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 			if e != nil {
 				return e
 			}
-			if w.Status == 1 && w.Number <= f.Anchor.Height || w.Status != 1 && supersededCandidate(w.Number, w.Round, f.Anchor.Height, anchorUC.InputRecord.RoundNumber) {
-				if _, keep := retainedBodies[string(w.Hash)]; keep {
+			prunable := w.Status == 1 && w.Number <= f.Anchor.Height || w.Status != 1 && supersededCandidate(w.Number, w.Round, f.Anchor.Height, anchorUC.InputRecord.RoundNumber)
+			_, keep := retainedBodies[string(w.Hash)]
+			if (!prunable || keep) && w.LocallyBuilt {
+				auth, _, e := verifiedPairBytes(ctx, c, w.AuthorizingUC, w.AuthorizingTR)
+				if e != nil {
+					return e
+				}
+				retainedAuthorizations[[2]uint64{auth.GetRootRoundNumber(), auth.GetRoundNumber()}] = struct{}{}
+			}
+			if prunable {
+				if keep {
 					continue
 				}
 				if w.Status == 1 {
@@ -584,6 +599,9 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 				return e
 			}
 			if w.Round <= anchorUC.InputRecord.RoundNumber && w.RootRound <= f.Anchor.Round {
+				if _, needed := retainedAuthorizations[[2]uint64{w.RootRound, w.Round}]; needed {
+					continue
+				}
 				if err := curs.Delete(); err != nil {
 					return err
 				}

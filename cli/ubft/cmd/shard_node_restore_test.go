@@ -31,6 +31,10 @@ func TestRestoreCommandKeepsRunProfileOffAndRequiresFreshState(t *testing.T) {
 	err = shardNodeRun(context.Background(), flags, nil)
 	require.ErrorContains(t, err, "--archive-prune")
 	flags.ArchivePrune = true
+	flags.SigningAuthoritySocket = ""
+	err = shardNodeRun(context.Background(), flags, nil)
+	require.ErrorContains(t, err, "local-key restore is refused")
+	flags.SigningAuthoritySocket = "authority.sock"
 	flags.TrustHistoryProfile2 = true
 	err = shardNodeRun(context.Background(), flags, nil)
 	require.ErrorContains(t, err, "profile off")

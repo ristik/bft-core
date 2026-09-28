@@ -1114,7 +1114,18 @@ func (r *Round) abstainRestored(ctx context.Context, exp Expectation) bool {
 	// a lower assigned round and different bytes for the round it holds, whatever this process
 	// re-enters after restoring an older file. P-id has already been required above; this does not
 	// replace it. Every other signer keeps the blanket refusal.
-	if _, ok := r.certSigner.(recordKeepingSigner); ok {
+	if signer, ok := r.certSigner.(interface {
+		recordKeepingSigner
+		RestoreReadiness(context.Context, uint64) error
+	}); ok {
+		if err := signer.RestoreReadiness(ctx, exp.Round); err != nil {
+			r.metrics.recordIRDivergence(ctx, "restored_authority_not_ready")
+			r.health.updateVoting(false, err.Error())
+			if r.log != nil {
+				r.log.WarnContext(ctx, "restored authority refused readiness", slog.Uint64("round", exp.Round), slog.String("err", err.Error()))
+			}
+			return true
+		}
 		if r.log != nil && !r.warnedRestored {
 			r.warnedRestored = true
 			r.log.InfoContext(ctx, "resumed from a persisted certificate: signing only what the signing authority's record admits (#105)",

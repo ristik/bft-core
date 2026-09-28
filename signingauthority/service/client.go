@@ -38,7 +38,8 @@ type ClientConfig struct {
 /*
 Client is a shard node's end of the boundary.
 
-It implements the four client operations of shardnode.SigningAuthorityClient and nothing else.
+It implements the four signing operations of shardnode.SigningAuthorityClient and
+a read-only restore-status probe. It has no operator control operation.
 Anything that is not an answer from the authority is signingauthority.ErrUnavailable: no process
 listening, a connection that died, a deadline, a caller that cancelled. That distinction matters at
 the round, which abstains either way but records what happened, and it is the reason this type never
@@ -114,6 +115,22 @@ func (c *Client) Release(ctx context.Context, round uint64, digest [32]byte) ([]
 		return nil, fmt.Errorf("encoding the release: %w", err)
 	}
 	return c.ex.call(ctx, opRelease, payload)
+}
+
+// RestoreStatus is a read-only view of the independent signing record. The
+// client endpoint cannot replace a session or operate the authority.
+func (c *Client) RestoreStatus(ctx context.Context) (signingauthority.Status, error) {
+	answer, err := c.ex.call(ctx, opRestoreStatus, nil)
+	if err != nil {
+		return signingauthority.Status{}, err
+	}
+	var wire statusPayload
+	if err := types.Cbor.Unmarshal(answer, &wire); err != nil {
+		return signingauthority.Status{}, fmt.Errorf("decoding restore status: %w", err)
+	}
+	return signingauthority.Status{Generation: wire.Generation, ReservedRound: wire.ReservedRound,
+		HasReservation: wire.HasReservation, ResponseRetained: wire.ResponseRetained,
+		Faulted: wire.Faulted, KeyLost: wire.KeyLost}, nil
 }
 
 func encodeRequest(req signingauthority.Request) ([]byte, error) {

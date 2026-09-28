@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
+	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -45,6 +47,28 @@ func TestRecoveryChainWalkCoversJournalCapacityBeyondReplayBudget(t *testing.T) 
 	got, err := r.Recover(context.Background(), nil)
 	require.NoError(t, err, "a synced B300 node must not spend its two-block replay budget walking retained ancestry")
 	require.Equal(t, parent, got)
+}
+
+func TestRecoveryIgnoresCoveredAuthorizingObservation(t *testing.T) {
+	genesisHash := sha256.Sum256([]byte("genesis"))
+	genesisState := sha256.Sum256([]byte("genesis state"))
+	coveredHash := sha256.Sum256([]byte("covered"))
+	coveredState := sha256.Sum256([]byte("covered state"))
+	olderHash := sha256.Sum256([]byte("older"))
+	r := &ExecutionRecovery{Genesis: shardnode.BlockRef{Hash: genesisHash[:], StateRoot: genesisState[:]}}
+	image := configuredprogress.JournalSnapshot{
+		Frontier: &configuredprogress.FrontierSnapshot{
+			Anchor: &frontier.Record{Height: 2, Round: 6, StateRoot: coveredState,
+				Subject: archive.Request{BlockHash: coveredHash}},
+			ResultingUC: &types.UnicityCertificate{InputRecord: &types.InputRecord{Hash: abhex.Bytes(coveredState[:])}},
+		},
+		Observations: []configuredprogress.JournalObservation{{TargetHash: olderHash[:],
+			UC: &types.UnicityCertificate{InputRecord: &types.InputRecord{Hash: abhex.Bytes(coveredState[:])}, UnicitySeal: &types.UnicitySeal{RootChainRoundNumber: 5}}}},
+	}
+	chain, err := r.chainFromImage(image)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, chain.anchor.Number)
+	require.Equal(t, shardnode.Hash(coveredHash[:]), chain.anchor.Hash)
 }
 
 type replayExecutor struct {

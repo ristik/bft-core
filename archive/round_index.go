@@ -27,7 +27,7 @@ func (s *Store) GetLatest(q RoundRequest) (Request, *Record, error) {
 	var chosen []Request
 	var highest uint64
 	for round, requests := range s.rounds[key] {
-		if round <= q.Round && round >= highest {
+		if round <= q.Round && round > highest {
 			highest, chosen = round, requests
 		}
 	}
@@ -84,14 +84,14 @@ func (s *Store) buildRoundIndex() error {
 			continue
 		}
 		manifest, err := readBounded(filepath.Join(s.dir, entry.Name(), "manifest"), 16<<10)
-		if err != nil || len(manifest) < 8+4+1+32 || !bytes.Equal(manifest[:8], []byte("ARCHIVE1")) {
+		if err != nil || len(manifest) < 45 || !bytes.Equal(manifest[:8], []byte("ARCHIVE1")) {
 			continue
 		}
 		digest := sha256.Sum256(manifest[:len(manifest)-32])
 		if !bytes.Equal(digest[:], manifest[len(manifest)-32:]) {
 			continue
 		}
-		reader := bytes.NewReader(manifest[8 : len(manifest)-32])
+		reader := bytes.NewReader(bytes.TrimPrefix(manifest[:len(manifest)-sha256.Size], []byte("ARCHIVE1")))
 		raw, err := readBytes(reader, MaxRequestBytes)
 		if err != nil {
 			continue

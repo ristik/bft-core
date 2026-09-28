@@ -379,13 +379,14 @@ func TestADroppedConnectionIsRetriedOnce(t *testing.T) {
 		"a connection that went away between two operations is reconnected, not reported as unavailability")
 }
 
-func TestTheClientOffersTheFourOperationsAndNothingElse(t *testing.T) {
-	// The shard node's end of the boundary: no session replacement, no key, no status.
+func TestTheClientOffersSigningAndReadOnlyRestoreStatus(t *testing.T) {
+	// The shard node's end of the boundary: no session replacement or key; the
+	// restore gate can read only the high-water status for its own credential.
 	var methods []string
 	for i := 0; i < reflect.TypeOf(&Client{}).NumMethod(); i++ {
 		methods = append(methods, reflect.TypeOf(&Client{}).Method(i).Name)
 	}
-	require.ElementsMatch(t, []string{"Close", "Release", "Reserve", "RetainResponse", "Sign"}, methods)
+	require.ElementsMatch(t, []string{"Close", "Release", "Reserve", "RestoreStatus", "RetainResponse", "Sign"}, methods)
 
 	var operatorMethods []string
 	for i := 0; i < reflect.TypeOf(&OperatorClient{}).NumMethod(); i++ {

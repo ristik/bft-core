@@ -221,7 +221,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if flags.Restore {
 		if flags.TrustHistoryProfile2 || flags.Executor != "engine-api" || flags.ExecutionJournal == "" || flags.ArchiveStore == "" || !flags.ArchivePrune ||
 			flags.SigningAuthoritySocket == "" || flags.RestoreTipUC == "" || flags.RestoreTipTR == "" || flags.RestoreTrustBodyID == "" {
-			return errors.New("single-epoch restore requires profile off, --executor engine-api, --execution-journal, --archive-store, --archive-prune, a fresh --signing-authority-socket, --tip-uc, --tip-tr and --trust-body-id")
+			return errors.New("single-epoch restore requires profile off, --executor engine-api, --execution-journal, --archive-store, --archive-prune, a surviving --signing-authority-socket, --tip-uc, --tip-tr and --trust-body-id; local-key restore is refused")
 		}
 		for _, path := range []string{flags.ExecutionJournal, flags.ExecutionJournal + ".trust", flags.PathWithDefault(flags.LUCStoreFile, lucStoreFileName)} {
 			if _, err := os.Lstat(path); err == nil {
@@ -272,6 +272,17 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		return fmt.Errorf("configuring certification signing: %w", err)
 	}
 	defer signing.close()
+	if flags.Restore {
+		guard, ok := signing.authority.(interface {
+			RestoreReadiness(context.Context, uint64) error
+		})
+		if !ok {
+			return errors.New("restore requires a signing authority with a surviving high-water record")
+		}
+		if err := guard.RestoreReadiness(ctx, 0); err != nil {
+			return fmt.Errorf("restore signing authority is not ready: %w", err)
+		}
+	}
 
 	trustBases, err := flags.loadTrustBases(flags.baseFlags)
 	if err != nil {
@@ -595,7 +606,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			go func() { defer close(archiveDone); _ = publisher.Run(archiveCtx) }()
 			defer func() { cancelArchive(); <-archiveDone; _ = metrics.Close() }()
 			if flags.ArchivePrune {
-				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: peer, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger()}
+				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: peer, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
 				pruneDone := make(chan struct{})
 				go func() { defer close(pruneDone); _ = worker.Run(archiveCtx) }()
 				defer func() { cancelArchive(); <-pruneDone }()
