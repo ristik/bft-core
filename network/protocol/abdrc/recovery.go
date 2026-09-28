@@ -12,7 +12,19 @@ import (
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
+
+var (
+	ErrHistoricalTrustBase = errors.New("historical trust base unavailable or unverified")
+	ErrHistoricalUC        = errors.New("historical certificate invalid")
+	ErrRecoveryEpoch       = errors.New("pending consensus recovery crosses epoch")
+)
+
+// HistoricalTrustBases returns only lineage-verified epoch bodies.
+type HistoricalTrustBases interface {
+	ByEpoch(epoch uint64) (trusthistorystore.Record, error)
+}
 
 type StateRequestMsg struct {
 	_ struct{} `cbor:",toarray"`
@@ -127,11 +139,39 @@ func (sm *StateMsg) CanRecoverToRound(round uint64) error {
 }
 
 func (sm *StateMsg) Verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase) error {
+	return sm.verify(hashAlgorithm, tb, nil)
+}
+
+// VerifyWithHistory verifies inherited LastCRs under their own signer epochs.
+// Consensus certificates remain on the current, same-epoch recovery path.
+// TODO(i-b): admit a typed, independently verified checkpoint anchor here.
+func (sm *StateMsg) VerifyWithHistory(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases) error {
+	if history == nil {
+		return ErrHistoricalTrustBase
+	}
+	return sm.verify(hashAlgorithm, tb, history)
+}
+
+func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases) error {
 	if sm.CommittedHead == nil {
 		return fmt.Errorf("commit head is nil")
 	}
 	if err := sm.CommittedHead.IsValid(); err != nil {
 		return fmt.Errorf("invalid commit head: %w", err)
+	}
+	if history != nil {
+		epoch := tb.GetEpoch()
+		if sm.CommittedHead.Block.Epoch != epoch ||
+			!recoveryQCEpoch(sm.CommittedHead.Block.Qc, epoch) ||
+			!recoveryQCEpoch(sm.CommittedHead.Qc, epoch) ||
+			!recoveryQCEpoch(sm.CommittedHead.CommitQc, epoch) {
+			return ErrRecoveryEpoch
+		}
+		for _, block := range sm.Pending {
+			if block == nil || block.Epoch != epoch || !recoveryQCEpoch(block.Qc, epoch) {
+				return ErrRecoveryEpoch
+			}
+		}
 	}
 	// Block from genesis round does not have a Qc
 	if sm.CommittedHead.GetRound() > rctypes.GenesisRootRound {
@@ -157,11 +197,73 @@ func (sm *StateMsg) Verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase) er
 		}
 	}
 	for _, c := range sm.CommittedHead.ShardInfo {
-		if err := c.UC.Verify(tb, hashAlgorithm, c.UC.GetPartitionID(), c.UC.GetShardID(), nil); err != nil {
+		ucTrust := tb
+		if history != nil {
+			// IsValid above permits absent LastCRs; there is no UC to verify in that case.
+			if c.UC == nil {
+				continue
+			}
+			historical, err := history.ByEpoch(c.UC.GetRootEpoch())
+			if err != nil {
+				return fmt.Errorf("%w for epoch %d: %w", ErrHistoricalTrustBase, c.UC.GetRootEpoch(), err)
+			}
+			if historical.Epoch != c.UC.GetRootEpoch() {
+				return fmt.Errorf("%w for epoch %d: returned epoch %d", ErrHistoricalTrustBase, c.UC.GetRootEpoch(), historical.Epoch)
+			}
+			if historical.V1 != nil && historical.V2 == nil {
+				ucTrust = historical.V1
+			} else if historical.V2 != nil && historical.V1 == nil {
+				ucTrust, err = v2UCTrustBase(historical)
+				if err != nil {
+					return fmt.Errorf("%w for epoch %d: %w", ErrHistoricalTrustBase, historical.Epoch, err)
+				}
+			} else {
+				return fmt.Errorf("%w for epoch %d: invalid body variant", ErrHistoricalTrustBase, historical.Epoch)
+			}
+		}
+		if err := verifyRecoveryUC(c, ucTrust, hashAlgorithm, history != nil); err != nil {
+			if history != nil {
+				return fmt.Errorf("%w for %s-%s: %w", ErrHistoricalUC, c.Partition, c.Shard, err)
+			}
 			return fmt.Errorf("certificate for %s is invalid: %w", c.UC.UnicityTreeCertificate.Partition, err)
 		}
 	}
 	return nil
+}
+
+func verifyRecoveryUC(c ShardInfo, trust types.RootTrustBase, hashAlgorithm crypto.Hash, historical bool) error {
+	partition, shard, conf := c.UC.GetPartitionID(), c.UC.GetShardID(), []byte(nil)
+	if historical {
+		partition, shard, conf = c.Partition, c.Shard, c.ShardConfHash
+	}
+	return c.UC.Verify(trust, hashAlgorithm, partition, shard, conf)
+}
+
+// v2UCTrustBase adapts an authenticated WP1 body to the legacy UC signature
+// verifier. The synthetic value is used only to verify historical seal bytes;
+// it is never installed as a current consensus or consumer trust base.
+func v2UCTrustBase(record trusthistorystore.Record) (*types.RootTrustBaseV1, error) {
+	body := record.V2
+	if body == nil || body.Epoch != record.Epoch {
+		return nil, errors.New("invalid v2 body")
+	}
+	if err := body.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid v2 body: %w", err)
+	}
+	if body.Identity() != record.BodyID {
+		return nil, errors.New("v2 body identity mismatch")
+	}
+	nodes := make([]*types.NodeInfo, 0, len(body.Members))
+	for _, member := range body.Members {
+		nodes = append(nodes, &types.NodeInfo{NodeID: member.NodeID, SigKey: member.ConsensusKey, Stake: member.Weight})
+	}
+	return types.NewTrustBase(types.NetworkID(body.NetworkID), nodes,
+		types.WithEpoch(body.Epoch), types.WithEpochStart(record.Start), types.WithQuorumThreshold(body.RootThreshold))
+}
+
+func recoveryQCEpoch(qc *rctypes.QuorumCert, epoch uint64) bool {
+	return qc == nil || (qc.VoteInfo != nil && qc.LedgerCommitInfo != nil &&
+		qc.VoteInfo.Epoch == epoch && qc.LedgerCommitInfo.Epoch == epoch)
 }
 
 func (r *CommittedBlock) GetRound() uint64 {

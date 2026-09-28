@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"maps"
 	"os"
@@ -39,6 +40,7 @@ import (
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
 
 const partitionID types.PartitionID = 0x00FF0001
@@ -101,6 +103,36 @@ func initConsensusManager(t *testing.T, rootNet RootNet, opts ...Option) (*Conse
 	require.NoError(t, err)
 
 	return cm, rootNode, shardNodes
+}
+
+func TestRecoveryProfile2ManagerRequiresHistoryAndRoutesVerification(t *testing.T) {
+	net := testnetwork.NewRootMockNetwork()
+	root := testutils.NewTestNode(t)
+	observe := testobservability.Default(t)
+	store, err := tbstore.NewTrustBaseStore(memorydb.New(), observe.Logger())
+	require.NoError(t, err)
+
+	// The guard must refuse a nil history before construction touches storage.
+	cm, err := NewConsensusManager(root.PeerConf.ID, store, nil, net, root.Signer, nil, observe, WithRecoveryProfile2(nil))
+	require.Nil(t, cm)
+	require.ErrorContains(t, err, "profile 2 recovery requires verified trust history")
+
+	anchor := trustbase.NewTrustBaseFromSigners(t, map[string]abcrypto.Signer{
+		root.PeerConf.ID.String(): root.Signer,
+	}).(*types.RootTrustBaseV1)
+	identity := sha256.Sum256([]byte("profile-2-manager-wiring"))
+	history, err := trusthistorystore.Open(context.Background(), memorydb.New(), anchor, identity, nil)
+	require.NoError(t, err)
+	cm, _, _ = initConsensusManager(t, net, WithRecoveryProfile2(history))
+	require.True(t, cm.recoveryProfile2)
+	require.Same(t, history, cm.recoveryHistory)
+
+	// Drive the recovery response branch. A missing resolver must surface the
+	// profile-2 error before the malformed message is examined.
+	cm.recovery.triggerMsg = &drctypes.QuorumCert{}
+	cm.recoveryHistory = nil
+	err = cm.onStateResponse(context.Background(), &abdrc.StateMsg{})
+	require.ErrorIs(t, err, abdrc.ErrHistoricalTrustBase)
 }
 
 func buildBlockCertificationRequest(t *testing.T, shardNodes []*testutils.TestNode, lastCR *certification.CertificationResponse) []*certification.BlockCertificationRequest {

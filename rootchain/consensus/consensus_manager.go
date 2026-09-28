@@ -31,6 +31,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
 
 type (
@@ -100,8 +101,10 @@ type (
 		// multiple times (votes are buffered for single round only)
 		voteBuffer map[string]*abdrc.VoteMsg
 		// whether the CM is in recovery mode, trying to get into the same state as other CMs
-		recovery *recoveryState
-		frontier *frontierSampler
+		recovery         *recoveryState
+		frontier         *frontierSampler
+		recoveryProfile2 bool
+		recoveryHistory  *trusthistorystore.Store
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -142,6 +145,9 @@ func NewConsensusManager(
 	optional, err := LoadConf(opts)
 	if err != nil {
 		return nil, fmt.Errorf("loading optional configuration: %w", err)
+	}
+	if optional.RecoveryProfile2 && optional.RecoveryHistory == nil {
+		return nil, errors.New("profile 2 recovery requires verified trust history")
 	}
 
 	cParams := optional.Params
@@ -213,26 +219,28 @@ func NewConsensusManager(
 	}
 
 	consensusManager := &ConsensusManager{
-		certReqCh:      make(chan certRequest),
-		certResultCh:   make(chan *certification.CertificationResponse),
-		ucSink:         make(chan []*certification.CertificationResponse, 1),
-		params:         cParams,
-		id:             nodeID,
-		net:            net,
-		pacemaker:      pm,
-		leaderSelector: ls,
-		trustBaseStore: trustBaseStore,
-		irReqBuffer:    NewIrReqBuffer(log, cParams.NetworkProfileVersion),
-		safety:         safetyModule,
-		blockStore:     bStore,
-		orchestration:  orchestration,
-		irReqVerifier:  reqVerifier,
-		t2Timeouts:     t2TimeoutGen,
-		voteBuffer:     make(map[string]*abdrc.VoteMsg),
-		recovery:       &recoveryState{},
-		frontier:       frontier,
-		log:            log,
-		tracer:         observe.Tracer("cm.distributed"),
+		certReqCh:        make(chan certRequest),
+		certResultCh:     make(chan *certification.CertificationResponse),
+		ucSink:           make(chan []*certification.CertificationResponse, 1),
+		params:           cParams,
+		id:               nodeID,
+		net:              net,
+		pacemaker:        pm,
+		leaderSelector:   ls,
+		trustBaseStore:   trustBaseStore,
+		irReqBuffer:      NewIrReqBuffer(log, cParams.NetworkProfileVersion),
+		safety:           safetyModule,
+		blockStore:       bStore,
+		orchestration:    orchestration,
+		irReqVerifier:    reqVerifier,
+		t2Timeouts:       t2TimeoutGen,
+		voteBuffer:       make(map[string]*abdrc.VoteMsg),
+		recovery:         &recoveryState{},
+		frontier:         frontier,
+		recoveryProfile2: optional.RecoveryProfile2,
+		recoveryHistory:  optional.RecoveryHistory,
+		log:              log,
+		tracer:           observe.Tracer("cm.distributed"),
 	}
 
 	// Probably not the correct trust base, but we start with it and update as we discover current round
@@ -1088,7 +1096,16 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		// we do send out multiple state recovery request so do not return error when we ignore the ones after successful recovery...
 		return nil
 	}
-	if err := rsp.Verify(x.params.HashAlgorithm, x.trustBase.Load()); err != nil {
+	var verifyErr error
+	if x.recoveryProfile2 {
+		if x.recoveryHistory == nil {
+			return fmt.Errorf("recovery response verification failed: %w", abdrc.ErrHistoricalTrustBase)
+		}
+		verifyErr = rsp.VerifyWithHistory(x.params.HashAlgorithm, x.trustBase.Load(), x.recoveryHistory)
+	} else {
+		verifyErr = rsp.Verify(x.params.HashAlgorithm, x.trustBase.Load())
+	}
+	if err := verifyErr; err != nil {
 		return fmt.Errorf("recovery response verification failed: %w", err)
 	}
 	if err := rsp.CanRecoverToRound(x.recovery.ToRound()); err != nil {
