@@ -102,6 +102,40 @@ def authority_status(nodes, validator):
     return json.loads(output)
 
 
+def check_h4_restore(nodes):
+    home = Path(nodes) / "h4-replaced"
+    pin = dict(part.split("=", 1) for part in (home / "pin.txt").read_text().split())
+    height = int(pin["height"])
+    before = json.loads((home / "authority-before.json").read_text())
+    authority_pid = (home / "authority-pid").read_text().strip()
+    if (Path(nodes) / "auth1" / "pid").read_text().strip() != authority_pid:
+        raise RuntimeError("the surviving signing authority PID changed")
+    deadline = time.monotonic() + 600
+    while time.monotonic() < deadline:
+        log = (home / "restore.log").read_text(errors="replace")
+        if not subprocess.run(["kill", "-0", (home / "pid").read_text().strip()],
+                              capture_output=True).returncode == 0:
+            raise RuntimeError(f"restore process exited: {tail(home / 'restore.log')}")
+        try:
+            restored = rpc(18545, "eth_getBlockByNumber", [hex(height), False])
+            survivor = rpc(18546, "eth_getBlockByNumber", [hex(height), False])
+        except (OSError, RuntimeError, ValueError):
+            time.sleep(2)
+            continue
+        if restored and survivor and all(restored[field] == survivor[field] for field in
+              ("hash", "stateRoot", "receiptsRoot")) and restored["hash"].lower() == pin["blockHash"].lower():
+            if 'msg="certification request signed"' in log and 'msg="execution journal restored"' in log:
+                after = authority_status(nodes, 1)
+                if after["reservedRound"] <= before["reservedRound"]:
+                    raise RuntimeError("surviving authority did not advance its high-water round")
+                print(f"H4 PASS: wiped BFT+EL at B5, replayed to certified B{height}, "
+                      f"block/state/receipts roots match validator 2, authority PID {authority_pid} survived "
+                      f"and signed above high-water {before['reservedRound']} -> {after['reservedRound']}", flush=True)
+                return
+        time.sleep(2)
+    raise RuntimeError(f"restore did not match and sign by deadline: {tail(home / 'restore.log')}")
+
+
 def assert_expected_impaired_refusal(nodes, scenario, impaired):
     marker = Path(nodes) / "d2c-expected-refusal"
     if not marker.exists():
@@ -372,6 +406,7 @@ def main():
     parser.add_argument("--blocks", type=int, default=10)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--restart-validator", type=int, default=0)
+    parser.add_argument("--h4-restore-validator", type=int, default=0)
     parser.add_argument("--signing", choices=("local", "authority"), default="local")
     parser.add_argument("--fault-scenario", choices=("pair-term", "pair-kill", "ureth-kill",
                         "all-kill", "leader-kill", "proof-outage", "proof-corrupt",
@@ -396,7 +431,8 @@ def main():
     print("height hash parent stateRoot commitment txs heads partitionRound rootRound elapsed_s", flush=True)
     height = 1
     while height <= target:
-        deadline = min(start + args.timeout, probe_started + 180) if probe_started else start + args.timeout
+        probe_budget = 600 if args.h4_restore_validator else 180
+        deadline = min(start + args.timeout, probe_started + probe_budget) if probe_started else start + args.timeout
         sample_ids = []
         last_sample = {}
         last_report = 0.0
@@ -491,6 +527,26 @@ def main():
             # At B5 the cluster may already be ahead. Require fresh certified heights after the
             # restart rather than counting only blocks produced before the probe.
             target = max(target, max(last_sample[i]["height"] for i in block_ids) + 3)
+        if args.h4_restore_validator and height == 5:
+            try:
+                output = subprocess.check_output(["bash", "scripts/h4-restore-probe.sh", "stop"],
+                                                 text=True, stderr=subprocess.STDOUT, timeout=60)
+                print(output, end="", flush=True)
+                survivors = [2, 3, 4]
+                probe_started = time.monotonic()
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                print(f"H4 FAIL: stopping validator: {exc}", flush=True)
+                return 1
+        if args.h4_restore_validator and height == 15:
+            try:
+                output = subprocess.check_output(["bash", "scripts/h4-restore-probe.sh", "restore"],
+                                                 text=True, stderr=subprocess.STDOUT, timeout=180)
+                print(output, end="", flush=True)
+                target = max(target, height + 3)
+                probe_started = time.monotonic()
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                print(f"H4 FAIL: restoring validator: {exc}", flush=True)
+                return 1
         if args.fault_scenario and height == 5:
             try:
                 output = subprocess.check_output([
@@ -533,6 +589,12 @@ def main():
             check_restart(args.nodes, args.restart_validator, args.signing, probe)
         except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
             print(f"D2C FAIL: {exc}", flush=True)
+            return 1
+    if args.h4_restore_validator:
+        try:
+            check_h4_restore(args.nodes)
+        except (OSError, RuntimeError, KeyError, ValueError) as exc:
+            print(f"H4 FAIL: {exc}", flush=True)
             return 1
     if impaired and args.fault_scenario != "proof-corrupt":
         try:

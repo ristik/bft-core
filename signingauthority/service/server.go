@@ -377,6 +377,11 @@ func (s *Server) clientOp(ctx context.Context, session signingauthority.Session,
 		var digest [32]byte
 		copy(digest[:], wire.Digest)
 		return s.authority.Release(session, wire.Round, digest)
+	case opRestoreStatus:
+		status := s.authority.Status()
+		return types.Cbor.Marshal(statusPayload{Generation: status.Generation, ReservedRound: status.ReservedRound,
+			HasReservation: status.HasReservation, ResponseRetained: status.ResponseRetained,
+			Faulted: status.Faulted, KeyLost: status.KeyLost})
 	}
 	return nil, fmt.Errorf("%w: %s", errWrongEndpoint, operation)
 }
@@ -399,7 +404,7 @@ func (s *Server) operatorOp(operation op, payload []byte) ([]byte, error) {
 		return nil, nil
 	case opReplaceSession:
 		return s.replaceSession()
-	case opStatus:
+	case opStatus, opRestoreStatus:
 		status := s.authority.Status()
 		return types.Cbor.Marshal(statusPayload{
 			Generation: status.Generation, ReservedRound: status.ReservedRound,

@@ -261,6 +261,44 @@ func PlanAdvance(current *Record, next Record, p Policy, covered []Coverage, obl
 	return Plan{Next: next, PruneThrough: next.Round}, nil
 }
 
+// PlanAdvanceFromRestore begins ordinary two-replica pruning after an
+// independently replayed archive checkpoint. The restored base makes no
+// replica-availability claim; every newly covered block does.
+func PlanAdvanceFromRestore(baseHeight, baseRound uint64, next Record, p Policy, covered []Coverage, obligations []Obligation) (Plan, error) {
+	if baseHeight == 0 || baseRound == 0 || len(covered) == 0 || p.Binding == nil || p.Availability == nil {
+		return Plan{}, ErrAcknowledgment
+	}
+	previousHeight, previousRound, previousSequence := baseHeight, baseRound, uint64(0)
+	for _, item := range covered {
+		r := item.Anchor
+		if err := valid(r, p); err != nil {
+			return Plan{}, err
+		}
+		if r.Height != previousHeight+1 || r.Round <= previousRound || r.Sequence <= previousSequence {
+			return Plan{}, ErrAcknowledgment
+		}
+		digest, err := archive.ManifestDigest(r.Subject, item.Material)
+		if err != nil || digest != r.Acks[0].ManifestDigest || digest != r.Acks[1].ManifestDigest || p.Binding.VerifyCertified(r, item.Material) != nil {
+			return Plan{}, ErrAcknowledgment
+		}
+		for _, ack := range r.Acks {
+			if p.Availability.VerifyAvailable(ack.Replica, r.Subject, digest) != nil {
+				return Plan{}, ErrAcknowledgment
+			}
+		}
+		previousHeight, previousRound, previousSequence = r.Height, r.Round, r.Sequence
+	}
+	if !reflect.DeepEqual(covered[len(covered)-1].Anchor, next) {
+		return Plan{}, ErrAcknowledgment
+	}
+	for _, o := range obligations {
+		if o.Round <= next.Round && (o.UnresolvedBody || o.PendingAuthorization || o.NonEquivocation) {
+			return Plan{}, ErrObligation
+		}
+	}
+	return Plan{Next: next, PruneThrough: next.Round}, nil
+}
+
 // CheckRecovery authenticates the locally durable anchor and prune floor.
 // Replica read-back is required when planning an advance, not to restart.
 func CheckRecovery(durable Record, journalPrunedThrough uint64, p Policy, anchor Coverage) error {

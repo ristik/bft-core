@@ -326,12 +326,19 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 		return frontier.ErrInvalid
 	}
 	obligations := journalObligations(image)
-	if _, err = frontier.PlanAdvance(current.Anchor, next, *s.frontier, covered, obligations); err != nil {
+	if current.Anchor == nil && image.Restored != nil {
+		_, err = frontier.PlanAdvanceFromRestore(image.Restored.Height, image.Restored.RootRound, next, *s.frontier, covered, obligations)
+	} else {
+		_, err = frontier.PlanAdvance(current.Anchor, next, *s.frontier, covered, obligations)
+	}
+	if err != nil {
 		return err
 	}
 	parent := common.Hash(c.Origin.BlockHash())
 	if current.Anchor != nil {
 		parent = common.Hash(current.Anchor.Subject.BlockHash)
+	} else if image.Restored != nil {
+		parent = common.Hash(image.Restored.Hash)
 	}
 	for _, item := range covered {
 		var header gethtypes.Header
@@ -534,19 +541,48 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 		if err != nil {
 			return err
 		}
+		// A retained local body still needs its authorizing observation when
+		// the frontier later moves past that body. A repeat certificate can
+		// keep an older body hot after its own frontier record ceases to be
+		// the anchor. Retaining at most one authorization per hot local body
+		// preserves LoadJournal's non-equivocation check across pruning.
+		retainedAuthorizations := make(map[[2]uint64]struct{})
+		var restoredHash []byte
+		if raw := b.Get(restoreAnchorKey); raw != nil {
+			payload, e := decodeEnvelope(raw, restoreAnchorKind, 4096)
+			if e != nil {
+				return e
+			}
+			var restored restoreAnchorWire
+			if e = decodePayload(payload, &restored); e != nil || len(restored.Hash) != sha256.Size {
+				return ErrUntrusted
+			}
+			restoredHash = restored.Hash
+		}
 		curs := b.Cursor()
 		for k, raw := curs.Seek(journalCandidatePrefix); k != nil && bytes.HasPrefix(k, journalCandidatePrefix); k, raw = curs.Next() {
 			w, e := decodeCandidate(raw)
 			if e != nil {
 				return e
 			}
-			if w.Status == 1 && w.Number <= f.Anchor.Height || w.Status != 1 && supersededCandidate(w.Number, w.Round, f.Anchor.Height, anchorUC.InputRecord.RoundNumber) {
-				if _, keep := retainedBodies[string(w.Hash)]; keep {
+			prunable := w.Status == 1 && w.Number <= f.Anchor.Height || w.Status != 1 && supersededCandidate(w.Number, w.Round, f.Anchor.Height, anchorUC.InputRecord.RoundNumber)
+			_, keep := retainedBodies[string(w.Hash)]
+			if (!prunable || keep) && w.LocallyBuilt {
+				auth, _, e := verifiedPairBytes(ctx, c, w.AuthorizingUC, w.AuthorizingTR)
+				if e != nil {
+					return e
+				}
+				retainedAuthorizations[[2]uint64{auth.GetRootRoundNumber(), auth.GetRoundNumber()}] = struct{}{}
+			}
+			if prunable {
+				if keep {
 					continue
 				}
 				if w.Status == 1 {
-					if err := checkPruneCoverage(b, *s.frontier, w); err != nil {
-						return err
+					if !bytes.Equal(w.Hash, restoredHash) {
+						if err := checkPruneCoverage(b, *s.frontier, w); err != nil {
+							return err
+						}
 					}
 				}
 				if err := curs.Delete(); err != nil {
@@ -563,6 +599,9 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 				return e
 			}
 			if w.Round <= anchorUC.InputRecord.RoundNumber && w.RootRound <= f.Anchor.Round {
+				if _, needed := retainedAuthorizations[[2]uint64{w.RootRound, w.Round}]; needed {
+					continue
+				}
 				if err := curs.Delete(); err != nil {
 					return err
 				}

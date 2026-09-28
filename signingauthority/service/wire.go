@@ -52,6 +52,7 @@ const (
 	opSign           op = 2
 	opRetainResponse op = 3
 	opRelease        op = 4
+	opRestoreStatus  op = 5
 
 	opReplaceSession op = 101
 	opStatus         op = 102
@@ -63,7 +64,7 @@ const (
 
 func (o op) servedToClient() bool {
 	switch o {
-	case opReserve, opSign, opRetainResponse, opRelease:
+	case opReserve, opSign, opRetainResponse, opRelease, opRestoreStatus:
 		return true
 	}
 	return false
@@ -87,6 +88,8 @@ func (o op) String() string {
 		return "retain-response"
 	case opRelease:
 		return "release"
+	case opRestoreStatus:
+		return "restore-status"
 	case opReplaceSession:
 		return "replace-session"
 	case opStatus:

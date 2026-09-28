@@ -41,6 +41,7 @@ type Verifier func(context.Context, archive.Request, *archive.Record) error
 type Server struct {
 	store   *archive.Store
 	ctx     context.Context
+	subject archive.Context
 	want    []byte
 	verify  Verifier
 	limits  Limits
@@ -68,7 +69,7 @@ func NewServer(store *archive.Store, contextValue archive.Context, verify Verifi
 		}
 		peers[id] = struct{}{}
 	}
-	return &Server{store: store, want: want[:len(want)-32], verify: verify, limits: limits, allowed: peers, byPeer: make(map[peer.ID]int)}, nil
+	return &Server{store: store, subject: contextValue, want: want[:len(want)-32], verify: verify, limits: limits, allowed: peers, byPeer: make(map[peer.ID]int)}, nil
 }
 
 func (s *Server) Register(ctx context.Context, host shardnode.EvidenceHost) {
@@ -121,6 +122,21 @@ func (s *Server) Serve(ctx context.Context, rw io.ReadWriter) error {
 		return ErrTransport
 	}
 	op := frame[0]
+	if op == 3 {
+		query, err := archive.DecodeRoundRequest(frame[1:])
+		if err != nil || !sameArchiveContext(query.Context, s.subject) {
+			return archive.ErrInvalid
+		}
+		found, record, err := s.store.GetLatest(query)
+		if err != nil {
+			return writeFrame(rw, []byte{byte(archive.Unavailable)})
+		}
+		encoded, err := archive.EncodeResponse(archive.Response{Request: found, Outcome: archive.OK, Record: record})
+		if err != nil {
+			return err
+		}
+		return writeFrame(rw, append([]byte{byte(archive.OK)}, encoded...))
+	}
 	var q archive.Request
 	var rec *archive.Record
 	switch op {
@@ -201,6 +217,55 @@ func PutAndReadBack(ctx context.Context, host shardnode.EvidenceHost, id peer.ID
 		return ErrReplica
 	}
 	return nil
+}
+
+// Fetch reads an exact record from one configured replica. Authentication is
+// the caller's responsibility; DecodeFor only checks framing and echo.
+func Fetch(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, q archive.Request, limits Limits) (*archive.Record, error) {
+	if host == nil || id == "" || !limits.valid() {
+		return nil, archive.ErrInvalid
+	}
+	raw, err := archive.EncodeRequest(q)
+	if err != nil {
+		return nil, err
+	}
+	answer, err := exchange(ctx, host, id, append([]byte{2}, raw...), limits)
+	if err != nil {
+		return nil, err
+	}
+	response, err := archive.DecodeFor(q, answer)
+	if err != nil || response.Outcome != archive.OK || response.Record == nil {
+		return nil, ErrReplica
+	}
+	return response.Record, nil
+}
+
+// FetchLatest locates one record by certified shard round. The returned
+// record and the server's choice are untrusted until the restorer verifies
+// the certificate and compares its state root with the pinned tip.
+func FetchLatest(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, query archive.RoundRequest, limits Limits) (archive.Request, *archive.Record, error) {
+	if host == nil || id == "" || !limits.valid() {
+		return archive.Request{}, nil, archive.ErrInvalid
+	}
+	raw, err := archive.EncodeRoundRequest(query)
+	if err != nil {
+		return archive.Request{}, nil, err
+	}
+	answer, err := exchange(ctx, host, id, append([]byte{3}, raw...), limits)
+	if err != nil {
+		return archive.Request{}, nil, err
+	}
+	if len(answer) == 1 && answer[0] == byte(archive.Unavailable) {
+		return archive.Request{}, nil, archive.ErrUnavailable
+	}
+	if len(answer) < 2 || answer[0] != byte(archive.OK) {
+		return archive.Request{}, nil, ErrReplica
+	}
+	response, err := archive.DecodeResponse(answer[1:])
+	if err != nil || response.Outcome != archive.OK || response.Record == nil || !sameArchiveContext(response.Request.Context, query.Context) {
+		return archive.Request{}, nil, ErrReplica
+	}
+	return response.Request, response.Record, nil
 }
 
 func exchange(parent context.Context, host shardnode.EvidenceHost, id peer.ID, payload []byte, limits Limits) ([]byte, error) {

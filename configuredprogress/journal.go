@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -108,6 +109,7 @@ type JournalSnapshot struct {
 	Observations []JournalObservation
 	Bytes        int64
 	Frontier     *FrontierSnapshot
+	Restored     *RestoreAnchor
 }
 
 func journalCandidateKey(hash []byte) []byte {
@@ -677,7 +679,14 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			}
 			if len(w.TargetHash) > 0 {
 				cr := b.Get(journalCandidateKey(w.TargetHash))
-				if w.Unresolved != (cr == nil) {
+				coveredByFrontier := cr == nil && !w.Unresolved && anchorUC != nil &&
+					uc.GetRootRoundNumber() <= anchorUC.GetRootRoundNumber() &&
+					uc.InputRecord.RoundNumber <= anchorUC.InputRecord.RoundNumber
+				// Pruning may retain an older authenticated observation because
+				// it authorizes a hot local candidate, while deleting that
+				// observation's own covered body. The contiguous frontier is
+				// then the proof that the body was previously resolved.
+				if w.Unresolved != (cr == nil) && !coveredByFrontier {
 					return ErrUntrusted
 				}
 				if cr != nil {
@@ -694,13 +703,17 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			}
 			out.Observations = append(out.Observations, JournalObservation{UC: uc, TR: tr, TargetHash: bytes.Clone(w.TargetHash), Unresolved: w.Unresolved})
 		}
+		out.Restored, err = readRestoreAnchor(b, state.i.descriptorDigest, out)
+		if err != nil {
+			return err
+		}
 		if state.i.observed == nil && len(out.Observations) != 0 || state.i.observed != nil && len(out.Observations) == 0 && anchorUC == nil {
 			return fmt.Errorf("%w: journal and progress observation count disagree", ErrUntrusted)
 		}
 		if state.i.observed != nil {
 			var lu, lt []byte
 			var e error
-			if len(out.Observations) != 0 {
+			if len(out.Observations) != 0 && (anchorUC == nil || out.Observations[len(out.Observations)-1].UC.GetRootRoundNumber() > anchorUC.GetRootRoundNumber()) {
 				latest := out.Observations[len(out.Observations)-1]
 				lu, lt, e = pairBytes(latest.UC, latest.TR)
 			} else {
@@ -732,14 +745,44 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 				foundAuthorization = true
 			}
 			if anchorUC != nil && candidate.Certified && candidate.ResultingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.ResultingUC.GetRoundNumber() == anchorUC.GetRoundNumber() && bytes.Equal(candidate.Candidate.Hash, anchorUC.InputRecord.BlockHash) {
-				foundResult = true
+				// Pruning removes the anchor body's authorizing observation while
+				// retaining the body itself. The frontier transaction checked the
+				// exact original and resulting pairs against this candidate.
+				originalUC, originalTR, originalErr := pairBytes(candidate.Candidate.AuthorizingUC, candidate.Candidate.AuthorizingTR)
+				resultUC, resultTR, resultErr := pairBytes(candidate.ResultingUC, candidate.ResultingTR)
+				if originalErr == nil && resultErr == nil &&
+					bytes.Equal(originalUC, out.Frontier.Record.OriginalUC) && bytes.Equal(originalTR, out.Frontier.Record.OriginalTR) &&
+					bytes.Equal(resultUC, out.Frontier.Record.ResultingUC) && bytes.Equal(resultTR, out.Frontier.Record.ResultingTR) {
+					foundAuthorization = true
+					foundResult = true
+				}
+			}
+			if !foundResult && candidate.Certified && out.Frontier != nil && candidate.Candidate.Number < out.Frontier.Anchor.Height {
+				// A repeat certificate can keep an older covered body hot after
+				// its resulting observation is pruned. Coverage was committed
+				// with the frontier after checking this exact candidate and both
+				// replica acknowledgments. Recheck every certified coordinate.
+				if raw := b.Get(coverageKey(candidate.Candidate.Number)); raw != nil {
+					covered, e := frontier.Decode(raw, *s.frontier)
+					if e == nil && covered.Height == candidate.Candidate.Number && covered.Round == candidate.ResultingUC.GetRootRoundNumber() &&
+						covered.Sequence < out.Frontier.Anchor.Sequence && bytes.Equal(covered.Subject.BlockHash[:], candidate.Candidate.Hash) &&
+						bytes.Equal(covered.StateRoot[:], candidate.Candidate.StateRoot) {
+						foundResult = true
+					}
+				}
 			}
 			// A returning follower may retain a later proposal before it has
 			// fetched the authorizing certificate's own body/observation. The
 			// pair above was independently authenticated; only locally built
 			// proposals require it to have been observed here already.
 			if candidate.Candidate.LocallyBuilt && !foundAuthorization || !foundResult {
-				return fmt.Errorf("%w: candidate lacks its retained authorizing or resulting certificate", ErrUntrusted)
+				anchorHeight, anchorRound := uint64(0), uint64(0)
+				if out.Frontier != nil {
+					anchorHeight, anchorRound = out.Frontier.Anchor.Height, out.Frontier.Anchor.Round
+				}
+				return fmt.Errorf("%w: candidate lacks its retained authorizing or resulting certificate: height=%d round=%d local=%t certified=%t auth=(%d,%d) authorization=%t result=%t frontier=(%d,%d)",
+					ErrUntrusted, candidate.Candidate.Number, candidate.Candidate.Round, candidate.Candidate.LocallyBuilt, candidate.Certified,
+					candidate.Candidate.AuthorizingUC.GetRootRoundNumber(), candidate.Candidate.AuthorizingUC.GetRoundNumber(), foundAuthorization, foundResult, anchorHeight, anchorRound)
 			}
 		}
 		return nil

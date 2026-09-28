@@ -98,10 +98,17 @@ func (r *ExecutionRecovery) load(ctx context.Context) (recoveryChain, error) {
 
 func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnapshot) (recoveryChain, error) {
 	c := recoveryChain{base: r.Genesis, anchor: r.Genesis, byHash: make(map[string]int)}
+	if image.Restored != nil {
+		a := image.Restored
+		c.base = shardnode.BlockRef{Number: a.Height, Hash: a.Hash[:], StateRoot: a.StateRoot[:]}
+		c.anchor = c.base
+	}
 	if image.Frontier != nil && image.Frontier.Anchor != nil {
 		anchor := image.Frontier.Anchor
-		c.base = shardnode.BlockRef{Number: anchor.Height, Hash: anchor.Subject.BlockHash[:], StateRoot: anchor.StateRoot[:]}
-		c.anchor = c.base
+		if anchor.Height >= c.base.Number {
+			c.base = shardnode.BlockRef{Number: anchor.Height, Hash: anchor.Subject.BlockHash[:], StateRoot: anchor.StateRoot[:]}
+			c.anchor = c.base
+		}
 		c.latest = image.Frontier.ResultingUC
 	}
 	entries := make(map[string]configuredprogress.JournalEntry)
@@ -111,6 +118,12 @@ func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnaps
 		}
 	}
 	for _, o := range image.Observations {
+		if image.Frontier != nil && image.Frontier.Anchor != nil && o.UC.GetRootRoundNumber() <= image.Frontier.Anchor.Round {
+			// Pruning may retain an older certificate solely because it
+			// authorizes a hot local proposal. The frontier already covers
+			// its body; it is not the recovery target.
+			continue
+		}
 		if o.Unresolved {
 			return recoveryChain{}, fmt.Errorf("%w: missing certified body %x at round %d", ErrRecoveryUnavailable, o.TargetHash, o.UC.GetRoundNumber())
 		}

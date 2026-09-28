@@ -22,6 +22,14 @@ set -uo pipefail
 source helper.sh
 # Definitions only: the fork-client resolver and the flag the seal-capable client requires.
 . scripts/lib/reth-pin.sh
+if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
+  [ -n "${H4_URETH_BIN:-}" ] && [ -n "${H4_URETH_COMMIT:-}" ] || {
+    echo "H4 restore probe requires an explicit ureth binary and source commit with engine_sealConfigV1" >&2
+    exit 2
+  }
+  URETH_BIN=$H4_URETH_BIN
+  URETH_PIN_COMMIT=$H4_URETH_COMMIT
+fi
 
 validators=${1:-4}
 rounds=${2:-10}
@@ -34,6 +42,10 @@ case "${SIGNING:-local}" in
   local | authority) ;;
   *) echo "SIGNING must be local or authority" >&2; exit 2 ;;
 esac
+if [ "${H4_RESTORE_PROBE:-0}" = 1 ] && { [ "${SIGNING:-local}" != authority ] || [ "$validators" -ne 4 ] || [ "$rounds" -lt 15 ]; }; then
+  echo "H4 restore probe requires SIGNING=authority, four validators and at least 15 blocks" >&2
+  exit 2
+fi
 
 rethEngineBase=18551
 rethEthBase=18545
@@ -68,6 +80,7 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 # anything a machine-wide sweep here had already killed.
 cleanup() {
   ./stop-evm.sh -a >/dev/null 2>&1 || true
+  stop_pidfile "test-nodes/h4-replaced/pid" 'ubft shard-node restore'
   stop_pidfile "test-nodes/proof-proxy/pid" 'd2c-proof-proxy.py'
   stop_pidfile "test-nodes/engine-proxy/pid" 'd2c-engine-proxy.py'
   for i in $(seq 1 "$validators"); do
@@ -122,7 +135,7 @@ boundedRun() {
 # one of the validator ports silently reduces the cluster this lane claims to have started. Found
 # for real: a `shard-node run` from the previous day was still writing to evm1/debug.log during a
 # passing run. Fail loudly instead of producing evidence of unclear provenance.
-stale=$(owned_pids 'ubft shard-node run')
+stale=$(owned_pids 'ubft shard-node (run|restore)')
 if [ -n "$stale" ]; then
   echo "refusing to start: this checkout's shard-node processes are already running (pids: $(echo $stale | tr '\n' ' '))" >&2
   echo "their logs would mix with this run's evidence. stop them first:" >&2
@@ -588,6 +601,10 @@ echo "=== 4. configure the checked v2 origin and seed the block-1 transaction ==
 # Registration happens when start-evm.sh starts the root nodes, so replace the generated base conf
 # only now, after the startup negatives above have used it.
 cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
+if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
+  export EVM_ARCHIVE_ROOT=test-nodes/h4-archives
+  mkdir -p "$EVM_ARCHIVE_ROOT"
+fi
 export EVM_GENESIS_FILE="$chainSpec"
 export EVM_FULL_SHARD_CONF="test-nodes/shard-conf-${partitionID}_0.json"
 export EVM_ENGINE_FEE_COLLECTOR="$URETH_PIN_FEE_COLLECTOR"
@@ -669,6 +686,24 @@ else
   echo "--- evm1 tail ---"; tail -25 test-nodes/evm1/debug.log 2>/dev/null
   echo "--- reth1 tail ---"; tail -15 test-nodes/reth1/reth.log 2>/dev/null
 fi
+if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
+  for i in $(seq 1 "$validators"); do
+    ready=false
+    for _ in $(seq 1 30); do
+      head=$(rpc "http://127.0.0.1:$((rethEthBase + i - 1))" eth_blockNumber '[]' | pyget "['result']")
+      if [ -n "$head" ] && [ "$head" != None ] && [ "$((head))" -ge 1 ]; then
+        ready=true
+        break
+      fi
+      sleep 1
+    done
+    if ! $ready; then
+      fail "H4 requires every validator to have certified B1 before selecting a replacement; validator $i stayed at genesis"
+      exit 1
+    fi
+  done
+  pass "all four validators imported the certified bootstrap block before H4"
+fi
 
 echo
 echo "=== 6. D1 continuous certified execution through block $rounds ==="
@@ -678,6 +713,9 @@ faultArgs=()
 if [ "${D2C_RESTART_PROBE:-0}" = 1 ]; then
   [ "$validators" -eq 4 ] && [ "$rounds" -ge 10 ] || { echo "D2C probe requires four validators and >=10 blocks" >&2; exit 2; }
   probeArgs=(--restart-validator 1 --signing "${SIGNING:-local}")
+fi
+if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
+  probeArgs=(--h4-restore-validator 1 --signing authority)
 fi
 if [ -n "${D2C_FAULT_SCENARIO:-}" ]; then
   [ "$validators" -eq 4 ] && [ "$rounds" -ge 10 ] || { echo "D2C fault scenarios require four validators and >=10 blocks" >&2; exit 2; }

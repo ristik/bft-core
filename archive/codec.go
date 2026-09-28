@@ -15,6 +15,7 @@ import (
 const Version byte = 1
 const requestDomain = "archive/request"
 const responseDomain = "archive/response"
+const roundRequestDomain = "archive/round-request"
 
 const (
 	MaxContextBytes = 4096
@@ -51,6 +52,55 @@ type Context struct {
 type Request struct {
 	Context   Context
 	BlockHash [32]byte
+}
+
+// RoundRequest locates the newest stored certified block at or below a shard
+// round. The returned record is availability data; callers authenticate its
+// certificate and state against their independently pinned tip.
+type RoundRequest struct {
+	Context Context
+	Round   uint64
+}
+
+func EncodeRoundRequest(q RoundRequest) ([]byte, error) {
+	if q.Round == 0 {
+		return nil, ErrInvalid
+	}
+	probe := Request{Context: q.Context}
+	probe.BlockHash[0] = 1
+	raw, err := EncodeRequest(probe)
+	if err != nil {
+		return nil, err
+	}
+	var out []byte
+	out = append(out, roundRequestDomain...)
+	out = append(out, raw[len(requestDomain):len(raw)-32]...)
+	var round [8]byte
+	binary.BigEndian.PutUint64(round[:], q.Round)
+	out = append(out, round[:]...)
+	return out, nil
+}
+
+func DecodeRoundRequest(raw []byte) (RoundRequest, error) {
+	if len(raw) < len(roundRequestDomain)+8 || len(raw) > MaxRequestBytes || !bytes.HasPrefix(raw, []byte(roundRequestDomain)) {
+		return RoundRequest{}, ErrInvalid
+	}
+	round := binary.BigEndian.Uint64(raw[len(raw)-8:])
+	var probe []byte
+	probe = append(probe, requestDomain...)
+	probe = append(probe, raw[len(roundRequestDomain):len(raw)-8]...)
+	probe = append(probe, make([]byte, 32)...)
+	probe[len(probe)-32] = 1
+	q, err := DecodeRequest(probe)
+	if err != nil || round == 0 {
+		return RoundRequest{}, ErrInvalid
+	}
+	out := RoundRequest{Context: q.Context, Round: round}
+	canonical, err := EncodeRoundRequest(out)
+	if err != nil || !bytes.Equal(raw, canonical) {
+		return RoundRequest{}, ErrInvalid
+	}
+	return out, nil
 }
 
 // WithIdentity fills the identity slot without coupling this package to WP1's

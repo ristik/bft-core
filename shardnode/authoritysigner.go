@@ -64,6 +64,30 @@ type authoritySigner struct {
 	authorityKey abcrypto.Verifier
 }
 
+// RestoreReadiness checks the surviving authority's independent high-water
+// record. Round zero is an availability preflight; a nonzero round may be
+// signed only above the recorded reservation. Reserve repeats this check
+// atomically, so a concurrent authority operation cannot bypass it.
+func (a *authoritySigner) RestoreReadiness(ctx context.Context, round uint64) error {
+	probe, ok := a.client.(interface {
+		RestoreStatus(context.Context) (signingauthority.Status, error)
+	})
+	if !ok {
+		return fmt.Errorf("shardnode: signing authority has no restore-status probe")
+	}
+	status, err := probe.RestoreStatus(ctx)
+	if err != nil {
+		return fmt.Errorf("shardnode: reading surviving signing authority: %w", err)
+	}
+	if status.Faulted || status.KeyLost || status.Generation == 0 || status.HasReservation != (status.ReservedRound != 0) {
+		return fmt.Errorf("shardnode: surviving signing authority has inconsistent high-water state")
+	}
+	if round != 0 && round < status.ReservedRound {
+		return fmt.Errorf("shardnode: signing-stale: proposed round %d is below signing authority high-water %d", round, status.ReservedRound)
+	}
+	return nil
+}
+
 /*
 recordKeepingSigner is a CertificationSigner whose every signature is admitted by an independent
 signing record: the authority's, which refuses a lower assigned round, refuses different bytes for the
