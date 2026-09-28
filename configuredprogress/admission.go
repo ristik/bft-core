@@ -214,9 +214,11 @@ func newAdmissionCoordinator(ctx context.Context, cfg AdmissionConfig, clock adm
 	if err = types.Cbor.Unmarshal(trustBytes, &trustCopy); err != nil {
 		return nil, fmt.Errorf("%w: fixed root trust: %v", ErrSettings, err)
 	}
-	fixed := fixedTrustBase{epoch: owned.Observation.RootEpoch, trust: &trustCopy}
-	owned.Observation.TrustBases = fixed
-	owned.Record.TrustBases = fixed
+	if owned.Observation.EpochAuthority == nil {
+		fixed := fixedTrustBase{epoch: owned.Observation.RootEpoch, trust: &trustCopy}
+		owned.Observation.TrustBases = fixed
+		owned.Record.TrustBases = fixed
+	}
 	st, _, err := cfg.Store.Load(ctx, owned)
 	if err != nil {
 		return nil, err

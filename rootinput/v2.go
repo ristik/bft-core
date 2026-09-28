@@ -132,6 +132,15 @@ type ObservationContextV2 struct {
 	ShardConfHash []byte
 	RootEpoch     uint64
 	TrustBases    TrustBases
+	// EpochAuthority is set only for profile 2. It reports the epoch whose
+	// handoff has been installed; nil preserves the fixed genesis profile.
+	EpochAuthority RootEpochAuthority
+}
+
+// RootEpochAuthority is backed by locally verified handoff state. A trust
+// history lookup alone does not grant current-epoch authority.
+type RootEpochAuthority interface {
+	CurrentRootEpoch() (uint64, bool)
 }
 
 // VerifiedObservationV2 is authenticated signed evidence, but makes no execution ancestry/readiness claim.
@@ -168,8 +177,20 @@ func (o VerifiedObservationV2) TechnicalRecord() *certification.TechnicalRecord 
 	return t
 }
 
-// AuthenticateObservationV2 authenticates and classifies signed evidence without requiring an EVM witness.
+// AuthenticateObservationV2 authenticates current signed evidence without an
+// EVM witness. Historical callers use AuthenticateHistoricalObservationV2 and
+// must never turn that result into current consumer authority.
 func AuthenticateObservationV2(ctx context.Context, c ObservationContextV2, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (VerifiedObservationV2, error) {
+	return authenticateObservationV2(ctx, c, uc, tr, false)
+}
+
+// AuthenticateHistoricalObservationV2 verifies a previously admitted record
+// under its signer epoch, including after the local current epoch advances.
+func AuthenticateHistoricalObservationV2(ctx context.Context, c ObservationContextV2, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (VerifiedObservationV2, error) {
+	return authenticateObservationV2(ctx, c, uc, tr, true)
+}
+
+func authenticateObservationV2(ctx context.Context, c ObservationContextV2, uc *types.UnicityCertificate, tr *certification.TechnicalRecord, historical bool) (VerifiedObservationV2, error) {
 	if c.TrustBases == nil || len(c.ShardConfHash) != 32 || uc == nil || tr == nil {
 		return VerifiedObservationV2{}, fmt.Errorf("%w: incomplete observation context/evidence", ErrContextIncomplete)
 	}
@@ -198,8 +219,19 @@ func AuthenticateObservationV2(ctx context.Context, c ObservationContextV2, uc *
 	if u.UnicitySeal == nil || uint64(u.UnicitySeal.NetworkID) != uint64(c.NetworkID) {
 		return VerifiedObservationV2{}, fmt.Errorf("%w: network", ErrWrongContext)
 	}
-	if u.GetRootEpoch() != c.RootEpoch {
-		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: certificate root epoch %d, configured %d", ErrV2Context, u.GetRootEpoch(), c.RootEpoch))
+	current := c.RootEpoch
+	if c.EpochAuthority != nil {
+		var ready bool
+		current, ready = c.EpochAuthority.CurrentRootEpoch()
+		if !ready || current < c.RootEpoch {
+			return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: current root epoch is unavailable", ErrV2Context))
+		}
+	}
+	if !historical && u.GetRootEpoch() != current {
+		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: certificate root epoch %d, current %d", ErrV2Context, u.GetRootEpoch(), current))
+	}
+	if historical && (u.GetRootEpoch() > current || (c.EpochAuthority == nil && u.GetRootEpoch() != current)) {
+		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: historical root epoch %d exceeds installed %d", ErrV2Context, u.GetRootEpoch(), current))
 	}
 	if u.InputRecord == nil {
 		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: missing input record", ErrV2Shape))
@@ -219,7 +251,7 @@ func AuthenticateObservationV2(ctx context.Context, c ObservationContextV2, uc *
 	if t.Round == 0 || t.Round <= ir.RoundNumber {
 		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: authorized round %d must strictly advance certified round %d", ErrV2Shape, t.Round, ir.RoundNumber))
 	}
-	return VerifiedObservationV2{network: c.NetworkID, partition: c.PartitionID, shard: shard, conf: conf, rootEpoch: c.RootEpoch, origin: o, class: class, uc: u, tr: t}, nil
+	return VerifiedObservationV2{network: c.NetworkID, partition: c.PartitionID, shard: shard, conf: conf, rootEpoch: u.GetRootEpoch(), origin: o, class: class, uc: u, tr: t}, nil
 }
 
 // ContextV2 binds an authenticated observation to trusted genesis and one exact verified parent witness.

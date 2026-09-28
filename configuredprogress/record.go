@@ -22,7 +22,7 @@ func observationFromLoaded(ctx context.Context, c Context, l certifiedstore.Load
 	if err != nil {
 		return rootinput.VerifiedObservationV2{}, err
 	}
-	return rootinput.AuthenticateObservationV2(ctx, c.Observation, u, tr)
+	return rootinput.AuthenticateHistoricalObservationV2(ctx, c.Observation, u, tr)
 }
 
 func encodeOuterRecord(ctx context.Context, c Context, dd [32]byte, r certifiedstore.Record) ([]byte, []byte, certifiedstore.Loaded, rootinput.VerifiedObservationV2, error) {

@@ -35,6 +35,23 @@ type callbackTrust struct {
 
 type failingTrust struct{ err error }
 
+type testEpochAuthority struct {
+	epoch uint64
+	ready bool
+}
+
+func (a *testEpochAuthority) CurrentRootEpoch() (uint64, bool) { return a.epoch, a.ready }
+
+type epochTrustBases struct {
+	bases map[uint64]*types.RootTrustBaseV1
+	seen  []uint64
+}
+
+func (s *epochTrustBases) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	s.seen = append(s.seen, epoch)
+	return s.bases[epoch], nil
+}
+
 func (s failingTrust) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error) {
 	return nil, s.err
 }
@@ -362,6 +379,55 @@ func TestV2UnsupportedClassifierRequiresDirectPostAuthenticationRefusal(t *testi
 	_, err = AuthenticateObservationV2(context.Background(), c, uc, tr)
 	require.False(t, IsUnsupportedObservationV2(err), "a callback-controlled sentinel is not authenticated evidence")
 	require.ErrorIs(t, err, ErrV2Shape)
+}
+
+func TestV2Profile2SelectsSignerEpochAndSeparatesCurrentFromHistory(t *testing.T) {
+	f := newV2Fixture(t)
+	tr := certifiedchain.Technical(1)
+	tr.Round = 2
+	ir := &types.InputRecord{Version: 1, RoundNumber: 1, Hash: f.blocks[1].StateRoot.Bytes(), SummaryValue: []byte{}, Timestamp: 9, BlockHash: f.blocks[1].Hash.Bytes()}
+	old := f.signedRaw(t, ir, tr, 10)
+	newUC := *old
+	newSeal := *old.UnicitySeal
+	newUC.UnicitySeal = &newSeal
+	newSeal.Epoch = 2
+	newSeal.RootChainRoundNumber = 13
+	newSeal.Signatures = nil
+	for signer := range old.UnicitySeal.Signatures {
+		require.NoError(t, newSeal.Sign(signer, f.c.Signer))
+	}
+	newBase := *f.c.TrustBase
+	newBase.Epoch = 2
+	newBase.Signatures = nil
+	bases := &epochTrustBases{bases: map[uint64]*types.RootTrustBaseV1{1: f.c.TrustBase, 2: &newBase}}
+	authority := &testEpochAuthority{epoch: 1, ready: true}
+	c := f.obsContext()
+	c.TrustBases, c.EpochAuthority = bases, authority
+	_, err := AuthenticateObservationV2(context.Background(), c, old, tr)
+	require.NoError(t, err, "the genesis epoch remains current before handoff")
+	_, err = AuthenticateObservationV2(context.Background(), c, &newUC, tr)
+	require.ErrorIs(t, err, ErrV2Context, "an available future body does not activate an epoch")
+	require.Equal(t, uint64(2), bases.seen[len(bases.seen)-1], "the UC selects its own signer base")
+	authority.epoch = 2
+	o, err := AuthenticateObservationV2(context.Background(), c, &newUC, tr)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), o.Origin().RootEpoch)
+	_, err = AuthenticateObservationV2(context.Background(), c, old, tr)
+	require.ErrorIs(t, err, ErrV2Context, "old proof stays verifiable but cannot become current")
+	_, err = AuthenticateHistoricalObservationV2(context.Background(), c, old, tr)
+	require.NoError(t, err)
+	_, err = AuthenticateHistoricalObservationV2(context.Background(), c, &newUC, tr)
+	require.NoError(t, err, "the installed epoch is also valid history")
+	legacy := c
+	legacy.EpochAuthority = nil
+	legacy.RootEpoch = 1
+	_, err = AuthenticateHistoricalObservationV2(context.Background(), legacy, old, tr)
+	require.NoError(t, err, "profile-off replay accepts its configured epoch")
+	_, err = AuthenticateHistoricalObservationV2(context.Background(), legacy, &newUC, tr)
+	require.ErrorIs(t, err, ErrV2Context, "profile-off replay stays fixed to its configured epoch")
+	authority.ready = false
+	_, err = AuthenticateObservationV2(context.Background(), c, &newUC, tr)
+	require.ErrorIs(t, err, ErrV2Context)
 }
 
 func TestV2ExactBootstrapAndOwnedObservation(t *testing.T) {

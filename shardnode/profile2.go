@@ -151,6 +151,21 @@ func (c *Profile2Consumer) EpochFloor() (uint64, bool) {
 	return c.verified.Epoch + 1, true
 }
 
+// CurrentRootEpoch is the live admission floor. The old epoch remains current
+// until a handoff proof is installed; installing the proof retires it even if
+// shard checkpoint import has not yet made new certification ready.
+func (c *Profile2Consumer) CurrentRootEpoch() (uint64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.old.Epoch == 0 {
+		return 0, false
+	}
+	if c.verified != nil {
+		return c.verified.Epoch + 1, true
+	}
+	return c.old.Epoch, true
+}
+
 func (c *Profile2Consumer) Classify(prev, next *types.UnicityCertificate) (UCClass, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
