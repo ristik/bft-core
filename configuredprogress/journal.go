@@ -108,6 +108,7 @@ type JournalSnapshot struct {
 	Observations []JournalObservation
 	Bytes        int64
 	Frontier     *FrontierSnapshot
+	Restored     *RestoreAnchor
 }
 
 func journalCandidateKey(hash []byte) []byte {
@@ -693,6 +694,10 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 				return ErrUntrusted
 			}
 			out.Observations = append(out.Observations, JournalObservation{UC: uc, TR: tr, TargetHash: bytes.Clone(w.TargetHash), Unresolved: w.Unresolved})
+		}
+		out.Restored, err = readRestoreAnchor(b, state.i.descriptorDigest, out)
+		if err != nil {
+			return err
 		}
 		if state.i.observed == nil && len(out.Observations) != 0 || state.i.observed != nil && len(out.Observations) == 0 && anchorUC == nil {
 			return fmt.Errorf("%w: journal and progress observation count disagree", ErrUntrusted)

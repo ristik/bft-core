@@ -74,6 +74,8 @@ func (w *FrontierWorker) Pass(ctx context.Context) error {
 	height, sequence, round := uint64(0), uint64(0), uint64(0)
 	if image.Frontier != nil && image.Frontier.Anchor != nil {
 		height, sequence, round = image.Frontier.Anchor.Height, image.Frontier.Anchor.Sequence, image.Frontier.Anchor.Round
+	} else if image.Restored != nil {
+		height, round = image.Restored.Height, image.Restored.RootRound
 	}
 	var covered []frontier.Coverage
 	for _, entry := range certifiedEntries(image) {

@@ -326,12 +326,19 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 		return frontier.ErrInvalid
 	}
 	obligations := journalObligations(image)
-	if _, err = frontier.PlanAdvance(current.Anchor, next, *s.frontier, covered, obligations); err != nil {
+	if current.Anchor == nil && image.Restored != nil {
+		_, err = frontier.PlanAdvanceFromRestore(image.Restored.Height, image.Restored.RootRound, next, *s.frontier, covered, obligations)
+	} else {
+		_, err = frontier.PlanAdvance(current.Anchor, next, *s.frontier, covered, obligations)
+	}
+	if err != nil {
 		return err
 	}
 	parent := common.Hash(c.Origin.BlockHash())
 	if current.Anchor != nil {
 		parent = common.Hash(current.Anchor.Subject.BlockHash)
+	} else if image.Restored != nil {
+		parent = common.Hash(image.Restored.Hash)
 	}
 	for _, item := range covered {
 		var header gethtypes.Header
@@ -534,6 +541,18 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 		if err != nil {
 			return err
 		}
+		var restoredHash []byte
+		if raw := b.Get(restoreAnchorKey); raw != nil {
+			payload, e := decodeEnvelope(raw, restoreAnchorKind, 4096)
+			if e != nil {
+				return e
+			}
+			var restored restoreAnchorWire
+			if e = decodePayload(payload, &restored); e != nil || len(restored.Hash) != sha256.Size {
+				return ErrUntrusted
+			}
+			restoredHash = restored.Hash
+		}
 		curs := b.Cursor()
 		for k, raw := curs.Seek(journalCandidatePrefix); k != nil && bytes.HasPrefix(k, journalCandidatePrefix); k, raw = curs.Next() {
 			w, e := decodeCandidate(raw)
@@ -545,8 +564,10 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 					continue
 				}
 				if w.Status == 1 {
-					if err := checkPruneCoverage(b, *s.frontier, w); err != nil {
-						return err
+					if !bytes.Equal(w.Hash, restoredHash) {
+						if err := checkPruneCoverage(b, *s.frontier, w); err != nil {
+							return err
+						}
 					}
 				}
 				if err := curs.Delete(); err != nil {

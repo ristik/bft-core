@@ -93,6 +93,30 @@ func frontierTestSetupWithFixture(t *testing.T, path string) (*Store, *fixture, 
 	return s, f, c, policy, frontier.Coverage{Anchor: r, Material: rec}, limits
 }
 
+func TestRestoreAnchorPersistsOnlyCertifiedReplayBase(t *testing.T) {
+	path := t.TempDir() + "/journal.db"
+	s, c, policy, item, limits := frontierTestSetup(t, path)
+	anchor := RestoreAnchor{Height: item.Anchor.Height, Hash: item.Anchor.Subject.BlockHash,
+		StateRoot: item.Anchor.StateRoot, RootRound: item.Anchor.Round}
+	wrong := anchor
+	wrong.Hash[0] ^= 1
+	require.ErrorIs(t, s.InstallRestoreAnchor(context.Background(), c, limits, wrong), ErrUntrusted)
+	require.NoError(t, s.InstallRestoreAnchor(context.Background(), c, limits, anchor))
+	image, err := s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Equal(t, &anchor, image.Restored)
+	require.ErrorIs(t, s.InstallRestoreAnchor(context.Background(), c, limits, anchor), ErrConflict)
+	require.NoError(t, s.Close())
+	restarted, err := OpenConfiguredV2(path, Settings{Retain: 3})
+	require.NoError(t, err)
+	defer restarted.Close()
+	require.NoError(t, restarted.EnableJournal(context.Background(), c, limits))
+	require.NoError(t, restarted.EnableFrontier(context.Background(), c, limits, policy))
+	image, err = restarted.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Equal(t, &anchor, image.Restored)
+}
+
 func TestFrontierCrashProcess(t *testing.T) {
 	if os.Getenv("FRONTIER_CRASH_CHILD") == "" {
 		return

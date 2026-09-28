@@ -98,10 +98,17 @@ func (r *ExecutionRecovery) load(ctx context.Context) (recoveryChain, error) {
 
 func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnapshot) (recoveryChain, error) {
 	c := recoveryChain{base: r.Genesis, anchor: r.Genesis, byHash: make(map[string]int)}
+	if image.Restored != nil {
+		a := image.Restored
+		c.base = shardnode.BlockRef{Number: a.Height, Hash: a.Hash[:], StateRoot: a.StateRoot[:]}
+		c.anchor = c.base
+	}
 	if image.Frontier != nil && image.Frontier.Anchor != nil {
 		anchor := image.Frontier.Anchor
-		c.base = shardnode.BlockRef{Number: anchor.Height, Hash: anchor.Subject.BlockHash[:], StateRoot: anchor.StateRoot[:]}
-		c.anchor = c.base
+		if anchor.Height >= c.base.Number {
+			c.base = shardnode.BlockRef{Number: anchor.Height, Hash: anchor.Subject.BlockHash[:], StateRoot: anchor.StateRoot[:]}
+			c.anchor = c.base
+		}
 		c.latest = image.Frontier.ResultingUC
 	}
 	entries := make(map[string]configuredprogress.JournalEntry)

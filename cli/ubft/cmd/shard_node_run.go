@@ -77,6 +77,10 @@ type shardNodeRunFlags struct {
 	ArchiveReplicas      []string
 	ArchivePrune         bool
 	TrustHistoryProfile2 bool
+	Restore              bool
+	RestoreTipUC         string
+	RestoreTipTR         string
+	RestoreTrustBodyID   string
 
 	// CertifiedRecordStore enables the certified-block record store (#14) at this path. Empty, the default,
 	// constructs nothing, and the node runs exactly as before. See startCertifiedRecord.
@@ -110,7 +114,16 @@ type shardNodeRunFlags struct {
 }
 
 func shardNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
+	return shardNodeExecutionCmd(baseFlags, false)
+}
+
+func shardNodeRestoreCmd(baseFlags *baseFlags) *cobra.Command {
+	return shardNodeExecutionCmd(baseFlags, true)
+}
+
+func shardNodeExecutionCmd(baseFlags *baseFlags, restore bool) *cobra.Command {
 	flags := &shardNodeRunFlags{baseFlags: baseFlags}
+	flags.Restore = restore
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run a shard node",
@@ -120,6 +133,13 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return shardNodeRun(cmd.Context(), flags, cmd.Flags().Changed)
 		},
+	}
+	if restore {
+		cmd.Use = "restore"
+		cmd.Short = "Restore an empty single-epoch shard node from certified archive records, then run"
+		cmd.Flags().StringVar(&flags.RestoreTipUC, "tip-uc", "", "canonical CBOR file containing the operator-pinned latest certified UC")
+		cmd.Flags().StringVar(&flags.RestoreTipTR, "tip-tr", "", "canonical CBOR file containing that UC's technical record")
+		cmd.Flags().StringVar(&flags.RestoreTrustBodyID, "trust-body-id", "", "0x-prefixed SHA-256 BodyID of the pinned current v1 trust base")
 	}
 
 	flags.addKeyConfFlags(cmd, false)
@@ -198,6 +218,19 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 }
 
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
+	if flags.Restore {
+		if flags.TrustHistoryProfile2 || flags.Executor != "engine-api" || flags.ExecutionJournal == "" || flags.ArchiveStore == "" || !flags.ArchivePrune ||
+			flags.SigningAuthoritySocket == "" || flags.RestoreTipUC == "" || flags.RestoreTipTR == "" || flags.RestoreTrustBodyID == "" {
+			return errors.New("single-epoch restore requires profile off, --executor engine-api, --execution-journal, --archive-store, --archive-prune, a fresh --signing-authority-socket, --tip-uc, --tip-tr and --trust-body-id")
+		}
+		for _, path := range []string{flags.ExecutionJournal, flags.ExecutionJournal + ".trust", flags.PathWithDefault(flags.LUCStoreFile, lucStoreFileName)} {
+			if _, err := os.Lstat(path); err == nil {
+				return fmt.Errorf("restore requires a fresh BFT data directory: %s already exists", path)
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("checking fresh BFT path %s: %w", path, err)
+			}
+		}
+	}
 	if flags.TrustHistoryProfile2 && flags.ExecutionJournal == "" {
 		return errors.New("--trust-history-profile-2 requires --execution-journal")
 	}
@@ -246,6 +279,13 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	}
 	if len(trustBases) != 1 {
 		return fmt.Errorf("shard-node run requires exactly one --trust-base, got %d", len(trustBases))
+	}
+	if flags.Restore {
+		expected, parseErr := hexToHash(flags.RestoreTrustBodyID)
+		actual, hashErr := trustBases[0].Hash(crypto.SHA256)
+		if parseErr != nil || hashErr != nil || !bytes.Equal(expected, actual) {
+			return fmt.Errorf("restore trust BodyID differs from configured trust base: parse=%v hash=%v", parseErr, hashErr)
+		}
 	}
 	initialTrustStore, err := shardnode.NewFileTrustBaseStore(trustBases[0], flags.observe.Logger())
 	if err != nil {
@@ -433,6 +473,15 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		var archiveAllowed []libp2ppeer.ID
 		archiveTransportLimits := archivewiring.DefaultLimits()
 		if flags.ArchiveStore != "" {
+			if flags.Restore {
+				entries, readErr := os.ReadDir(flags.ArchiveStore)
+				if readErr == nil && len(entries) != 0 {
+					return fmt.Errorf("restore archive directory %s is not empty; supply a fresh directory", flags.ArchiveStore)
+				}
+				if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+					return fmt.Errorf("checking restore archive directory: %w", readErr)
+				}
+			}
 			adapter, ok := executor.(*engineapi.Adapter)
 			if !ok || !origin.Valid() {
 				return archivewiring.ErrConfig
@@ -467,6 +516,22 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if e = journalStore.EnableFrontier(ctx, journalCtx, limits, policy); e != nil {
 					return fmt.Errorf("authenticating certified frontier: %w", e)
 				}
+			}
+		}
+		if flags.Restore {
+			uc, tr, pinErr := loadRestorePin(flags.RestoreTipUC, flags.RestoreTipTR)
+			if pinErr != nil {
+				return pinErr
+			}
+			genesis, genesisErr := executor.GenesisBlock(ctx)
+			if genesisErr != nil {
+				return fmt.Errorf("reading restore genesis identity: %w", genesisErr)
+			}
+			restorer := &archivewiring.SingleEpochRestore{Journal: journalStore, Context: journalCtx, JournalLimits: limits,
+				Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: peer,
+				Limits: archiveTransportLimits, Adapter: executor.(*engineapi.Adapter), Genesis: genesis, TipUC: uc, TipTR: tr}
+			if restoreErr := restorer.Restore(ctx); restoreErr != nil {
+				return fmt.Errorf("restoring from certified archive: %w", restoreErr)
 			}
 		}
 		journalImage, loadErr := journalStore.LoadJournal(ctx, journalCtx, limits)

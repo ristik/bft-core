@@ -20,9 +20,10 @@ var ErrCorrupt = errors.New("archive record invalid")
 // Store holds immutable local availability copies. One process may write a
 // store at a time; archivewiring owns peer publication and verification.
 type Store struct {
-	dir   string
-	mu    sync.Mutex
-	Fault func(string) error
+	dir    string
+	mu     sync.Mutex
+	Fault  func(string) error
+	rounds map[string]map[uint64][]Request
 }
 
 func Open(dir string) (*Store, error) {
@@ -247,7 +248,13 @@ func (s *Store) Put(q Request, rec *Record) error {
 	if err = os.Rename(tmp, final); err != nil {
 		return err
 	}
-	return syncDir(s.dir)
+	if err := syncDir(s.dir); err != nil {
+		return err
+	}
+	if s.rounds != nil {
+		s.indexRecord(q, rec)
+	}
+	return nil
 }
 
 // Get refuses missing or damaged chunks as a whole. It never returns partial

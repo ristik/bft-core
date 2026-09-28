@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
@@ -57,6 +58,20 @@ func TestCheckBlockBindingRecomputesRawHeaderBeforeRetention(t *testing.T) {
 	require.NotEmpty(t, archivedBody)
 	require.True(t, bytes.Equal(want.Encoded, archivedInput))
 	require.Contains(t, string(archivedCompanion), "rootInput")
+	var archivedHash [32]byte
+	copy(archivedHash[:], block.Hash)
+	archiveQuery := archive.Request{BlockHash: archivedHash}
+	archiveRecord := &archive.Record{Header: archivedHeader, Body: archivedBody, CanonicalRootInput: archivedInput, Companion: archivedCompanion}
+	rebuilt, err := BlockFromArchive(archiveQuery, archiveRecord, params.AuthorizingCertificate.GetRootRoundNumber(), params.Round)
+	require.NoError(t, err)
+	require.Equal(t, block.Raw, rebuilt.Raw)
+	badArchive := *archiveRecord
+	badArchive.CanonicalRootInput = []byte{0xff}
+	_, err = BlockFromArchive(archiveQuery, &badArchive, params.AuthorizingCertificate.GetRootRoundNumber(), params.Round)
+	require.Error(t, err)
+	archiveQuery.BlockHash[0] ^= 1
+	_, err = BlockFromArchive(archiveQuery, archiveRecord, params.AuthorizingCertificate.GetRootRoundNumber(), params.Round)
+	require.Error(t, err)
 	payload.GasUsed++ // The claimed block hash and parent linkage remain unchanged.
 	forged, err := EncodeBlockWithSealCompanion(payload, &SealCompanion{RootInput: want.Encoded, Witnesses: witnesses, Provenance: "build"})
 	require.NoError(t, err)

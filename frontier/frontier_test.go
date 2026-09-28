@@ -103,6 +103,42 @@ func TestPlanAdvanceInitialCertifiedHeight(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestPlanAdvanceFromRestoreRequiresNewCoverage(t *testing.T) {
+	base, p := fixture()
+	next, coverage := nextOf(base, p)
+	if plan, err := PlanAdvanceFromRestore(base.Height, base.Round, next, p, []Coverage{coverage}, nil); err != nil || plan.PruneThrough != next.Round {
+		t.Fatalf("newly covered successor: %+v %v", plan, err)
+	}
+	if _, err := PlanAdvanceFromRestore(base.Height, base.Round, next, p, nil, nil); !errors.Is(err, ErrAcknowledgment) {
+		t.Fatalf("empty coverage: %v", err)
+	}
+	if _, err := PlanAdvanceFromRestore(base.Height+1, base.Round, next, p, []Coverage{coverage}, nil); !errors.Is(err, ErrAcknowledgment) {
+		t.Fatalf("height gap: %v", err)
+	}
+	if _, err := PlanAdvanceFromRestore(base.Height, next.Round, next, p, []Coverage{coverage}, nil); !errors.Is(err, ErrAcknowledgment) {
+		t.Fatalf("round regression: %v", err)
+	}
+	third, thirdCoverage := nextOf(next, p)
+	third.Sequence = next.Sequence
+	thirdCoverage.Anchor = third
+	if _, err := PlanAdvanceFromRestore(base.Height, base.Round, third, p, []Coverage{coverage, thirdCoverage}, nil); !errors.Is(err, ErrAcknowledgment) {
+		t.Fatalf("sequence tie: %v", err)
+	}
+	bad := coverage
+	bad.Anchor.Acks[1].ManifestDigest[0] ^= 1
+	if _, err := PlanAdvanceFromRestore(base.Height, base.Round, bad.Anchor, p, []Coverage{bad}, nil); err == nil {
+		t.Fatal("conflicting replica manifest accepted")
+	}
+	p.Availability = availabilityTest{lost: p.Replicas[1]}
+	if _, err := PlanAdvanceFromRestore(base.Height, base.Round, next, p, []Coverage{coverage}, nil); !errors.Is(err, ErrAcknowledgment) {
+		t.Fatalf("lost replica: %v", err)
+	}
+	p.Availability = availabilityTest{}
+	if _, err := PlanAdvanceFromRestore(base.Height, base.Round, next, p, []Coverage{coverage}, []Obligation{{Round: next.Round, UnresolvedBody: true}}); !errors.Is(err, ErrObligation) {
+		t.Fatalf("unresolved certified body: %v", err)
+	}
+}
 func TestAdvanceGates(t *testing.T) {
 	base, p := fixture()
 	next, covered := nextOf(base, p)
