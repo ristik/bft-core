@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -106,6 +107,8 @@ type (
 		recoveryProfile2 bool
 		recoveryHistory  *trusthistorystore.Store
 		epochAnchor      *drctypes.EpochAnchor
+		handoffMu        sync.Mutex
+		handoffPlans     map[[32]byte]*pendingHandoff
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -512,6 +515,8 @@ func (x *ConsensusManager) handleRootNetMsg(ctx context.Context, msg any) (rErr 
 		return x.onStateReq(ctx, mt)
 	case *abdrc.StateMsg:
 		return x.onStateResponse(ctx, mt)
+	case *abdrc.HandoffApprovalMsg:
+		return x.onHandoffApprovalMsg(ctx, mt)
 	}
 	return fmt.Errorf("unknown message type %T", msg)
 }
@@ -1114,8 +1119,8 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		profile = storage.ProfileLegacy
 	}
 	oldSuffix := false
-	if profile == storage.ProfileHandoff && x.epochAnchor == nil {
-		oldSuffix, err = x.blockStore.SuffixParent(x.blockStore.GetHighQc().GetRound(), x.trustBase.Load().Epoch)
+	if highQC := x.blockStore.GetHighQc(); profile == storage.ProfileHandoff && highQC != nil {
+		oldSuffix, err = x.blockStore.SuffixParent(highQC.GetRound(), x.trustBase.Load().Epoch)
 		if err != nil {
 			x.log.WarnContext(ctx, "cannot establish parent control state", logger.Error(err))
 			return
@@ -1134,13 +1139,23 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	if profile == storage.ProfileHandoff {
 		payload.Version = profile
 	}
-	if !oldSuffix {
+	parentQC := x.blockStore.GetHighQc()
+	var handoffRecords [][]byte
+	if profile == storage.ProfileHandoff && !oldSuffix {
+		handoffRecords, err = x.handoffRecordsForRound(round, parentQC)
+		if err != nil {
+			x.log.WarnContext(ctx, "cannot propose root handoff record", logger.Error(err))
+			return
+		}
+	}
+	if len(handoffRecords) != 0 {
+		payload.HandoffRecords = handoffRecords
+	} else if !oldSuffix {
 		payload = x.irReqBuffer.GeneratePayload(round, timedOutShards, x.blockStore.IsChangeInProgress)
 		if profile == storage.ProfileHandoff {
 			payload.Version = profile
 		}
 	}
-	parentQC := x.blockStore.GetHighQc()
 	var parentAnchor *drctypes.EpochAnchor
 	if x.epochAnchor != nil && parentQC == nil {
 		parentAnchor = x.epochAnchor

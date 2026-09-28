@@ -20,6 +20,7 @@ import (
 func TestHandoffFollowerConfigurationAndSavedBundleGuards(t *testing.T) {
 	ctx := context.Background()
 	require.Error(t, (*HandoffFollower)(nil).Run(ctx))
+	require.Error(t, (*HandoffFollower)(nil).Restore(ctx))
 	peer := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	base := HandoffFollower{Host: peer, History: &followerHistory{}, AnchorEpoch: 1,
 		Directory: t.TempDir(), ConfHash: bytes.Repeat([]byte{5}, 32)}
@@ -34,7 +35,11 @@ func TestHandoffFollowerConfigurationAndSavedBundleGuards(t *testing.T) {
 		{"config hash", func(f *HandoffFollower) { f.ConfHash = nil }},
 	} {
 		t.Run(tc.name, func(t *testing.T) { f := base; tc.change(&f); require.Error(t, f.Run(ctx)) })
+		if tc.name != "host" {
+			t.Run(tc.name+" restore", func(t *testing.T) { f := base; tc.change(&f); require.Error(t, f.Restore(ctx)) })
+		}
 	}
+	require.NoError(t, base.Restore(ctx)) // a fresh installation has no saved successor
 	f := base
 	largePath := f.path(2)
 	file, err := os.Create(largePath)
@@ -48,6 +53,7 @@ func TestHandoffFollowerConfigurationAndSavedBundleGuards(t *testing.T) {
 	require.NoError(t, f.Run(cancelled))
 	f.AnchorEpoch = ^uint64(0)
 	require.ErrorContains(t, f.Run(ctx), "epoch overflow")
+	require.ErrorContains(t, f.Restore(ctx), "epoch overflow")
 	f.AnchorEpoch = 1
 	f.Directory = filepath.Join(t.TempDir(), "not-a-directory")
 	require.NoError(t, os.WriteFile(f.Directory, []byte{1}, 0600))
@@ -77,6 +83,7 @@ func TestHandoffFollowerConfigurationAndSavedBundleGuards(t *testing.T) {
 	require.NoError(t, f.save(2, wrongEpoch))
 	_, err = f.load(2)
 	require.ErrorIs(t, err, handoffdelivery.ErrBundle)
+	require.ErrorIs(t, f.Restore(ctx), handoffdelivery.ErrBundle)
 	oversize := handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{StateSummary: make([]byte, 64<<20)}}
 	require.ErrorIs(t, f.save(2, oversize), handoffdelivery.ErrBundle)
 	f.Directory = filepath.Join(t.TempDir(), "missing")
@@ -142,6 +149,13 @@ func TestHandoffFollowerTriesAnotherRootAndRestoresSavedBundle(t *testing.T) {
 	saved, err := follower.load(2)
 	require.NoError(t, err)
 	require.Equal(t, good.Body.StateSummary, saved.Body.StateSummary)
+	restoreCalls := 0
+	follower.OnInstalled = func(context.Context, handoffdelivery.Bundle, handoffdelivery.Verified) error {
+		restoreCalls++
+		return nil
+	}
+	require.NoError(t, follower.Restore(context.Background()))
+	require.Equal(t, 1, restoreCalls)
 
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	follower.OnInstalled = func(context.Context, handoffdelivery.Bundle, handoffdelivery.Verified) error {
@@ -154,5 +168,8 @@ func TestHandoffFollowerTriesAnotherRootAndRestoresSavedBundle(t *testing.T) {
 	follower.OnInstalled = func(context.Context, handoffdelivery.Bundle, handoffdelivery.Verified) error {
 		return callbackFailure
 	}
+	require.ErrorIs(t, follower.Restore(context.Background()), callbackFailure)
 	require.ErrorIs(t, follower.Run(context.Background()), callbackFailure)
+	require.NoError(t, follower.save(2, bad))
+	require.ErrorIs(t, follower.Restore(context.Background()), handoffdelivery.ErrBundle)
 }

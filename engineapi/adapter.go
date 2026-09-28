@@ -60,7 +60,9 @@ type Adapter struct {
 	// verifier is the derivation context the seal build path authenticates a certificate against.
 	// Nil for an adapter that only runs the non-deriving checks (the doctor command); Build refuses
 	// rather than deriving against an invented context. See VerifierContext and F2c §3.
-	verifier *VerifierContext
+	verifier            *VerifierContext
+	transitionMu        sync.RWMutex
+	installedTransition []byte
 
 	mu            sync.Mutex
 	pending       map[shardnode.BuildID]buildContext
@@ -130,6 +132,38 @@ func NewAdapter(cfg Config, log *slog.Logger) *Adapter {
 		pending:      make(map[shardnode.BuildID]buildContext),
 	}
 	return a
+}
+
+// InstallEpochTransition advances the verifier-owned acknowledgement after the
+// shard has checked the native handoff bundle. Replaying the same transition
+// after restart is idempotent; a skipped or conflicting transition is refused.
+func (a *Adapter) InstallEpochTransition(raw []byte) error {
+	transition, err := handoff.DecodeEVMTransition(raw)
+	if err != nil || a.verifier == nil {
+		return rootinput.ErrV2Context
+	}
+	a.transitionMu.Lock()
+	defer a.transitionMu.Unlock()
+	current := a.verifier.RootEpoch
+	previous := a.installedTransition
+	if len(previous) == 0 {
+		previous = a.verifier.Transition
+	}
+	if len(previous) != 0 {
+		old, err := handoff.DecodeEVMTransition(previous)
+		if err != nil {
+			return rootinput.ErrV2Context
+		}
+		if old.NewEpoch == transition.NewEpoch && bytes.Equal(previous, raw) {
+			return nil
+		}
+		current = old.NewEpoch
+	}
+	if transition.OldEpoch != current {
+		return rootinput.ErrV2Context
+	}
+	a.installedTransition = bytes.Clone(raw)
+	return nil
 }
 
 // RequireSealCapabilities makes the three engine_*WithSealV1 siblings part of the startup capability
@@ -398,9 +432,16 @@ func (a *Adapter) Commit(ctx context.Context, hash shardnode.Hash) (shardnode.St
 // The parent subject is always the certified BlockRef supplied by the round.
 func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (rootinput.ResultV2, error) {
 	rootEpoch := a.verifier.RootEpoch
-	if len(a.verifier.Transition) != 0 {
-		installed, err := handoff.DecodeEVMTransition(a.verifier.Transition)
-		if err != nil || installed.OldEpoch != rootEpoch {
+	a.transitionMu.RLock()
+	transitionBytes := bytes.Clone(a.installedTransition)
+	dynamic := len(a.installedTransition) != 0
+	a.transitionMu.RUnlock()
+	if len(transitionBytes) == 0 {
+		transitionBytes = bytes.Clone(a.verifier.Transition)
+	}
+	if len(transitionBytes) != 0 {
+		installed, err := handoff.DecodeEVMTransition(transitionBytes)
+		if err != nil || (!dynamic && installed.OldEpoch != rootEpoch) {
 			return rootinput.ResultV2{}, fmt.Errorf("%w: invalid installed transition", rootinput.ErrV2Context)
 		}
 		rootEpoch = installed.NewEpoch
@@ -441,7 +482,7 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 	pendingTransition := snapshot.Fields().RootEpoch != o.Origin().RootEpoch
 	var transition []byte
 	if pendingTransition {
-		transition = bytes.Clone(a.verifier.Transition)
+		transition = transitionBytes
 	}
 	derived, err := rootinput.DeriveV2(rootinput.ContextV2{
 		Genesis: a.verifier.GenesisOrigin, Parent: snapshot,

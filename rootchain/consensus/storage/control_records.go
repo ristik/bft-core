@@ -86,6 +86,11 @@ func decodeOrderedRecord(data []byte) (evmroot.OrderedHandoffRecord, error) {
 	return r, nil
 }
 
+// DecodeOrderedHandoffRecord parses and checks the canonical ordered record.
+func DecodeOrderedHandoffRecord(data []byte) (evmroot.OrderedHandoffRecord, error) {
+	return decodeOrderedRecord(data)
+}
+
 func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, epoch, round uint64, authority handoffAuthority, companion []byte) (*evmroot.ControlState, error) {
 	if previous == nil {
 		return nil, ErrNetworkProfile

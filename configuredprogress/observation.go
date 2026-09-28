@@ -140,6 +140,17 @@ func sameRootStatement(a, b *types.UnicityCertificate, at, bt *certification.Tec
 }
 
 func compareObservations(current, next rootinput.VerifiedObservationV2) (relation, error) {
+	return compareObservationsWithEpochSpan(current, next, false)
+}
+
+// compareCumulativeObservations checks two retained endpoints. Their verified
+// trust history may contain intervening root epochs; only live admission above
+// requires the next observation to be in the immediately succeeding epoch.
+func compareCumulativeObservations(current, next rootinput.VerifiedObservationV2) (relation, error) {
+	return compareObservationsWithEpochSpan(current, next, true)
+}
+
+func compareObservationsWithEpochSpan(current, next rootinput.VerifiedObservationV2, cumulative bool) (relation, error) {
 	a, b := current.Certificate(), next.Certificate()
 	if a == nil || b == nil {
 		return relationAdvance, ErrConflict
@@ -147,7 +158,7 @@ func compareObservations(current, next rootinput.VerifiedObservationV2) (relatio
 	apr, bpr := a.GetRoundNumber(), b.GetRoundNumber()
 	arr, brr := a.GetRootRoundNumber(), b.GetRootRoundNumber()
 	ae, be := a.GetRootEpoch(), b.GetRootEpoch()
-	if be > ae && be != ae+1 {
+	if !cumulative && be > ae && be != ae+1 {
 		return relationAdvance, fmt.Errorf("%w: root epoch skipped from %d to %d", ErrConflict, ae, be)
 	}
 	order := 0

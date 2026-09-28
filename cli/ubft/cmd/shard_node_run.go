@@ -35,10 +35,12 @@ import (
 	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/boltdb"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
@@ -418,6 +420,58 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		historicalTrust = historical
 		verifierContext.TrustBases = historical
 	}
+	var follower *shardnode.HandoffFollower
+	var handoffJournal *configuredprogress.Store
+	var handoffJournalContext configuredprogress.Context
+	if flags.TrustHistoryProfile2 {
+		adapter, ok := executor.(*engineapi.Adapter)
+		if !ok {
+			return errors.New("profile 2 requires the checked engine-api adapter")
+		}
+		follower = &shardnode.HandoffFollower{Host: peer, History: historicalTrust,
+			Partition: shardConf.PartitionID, Shard: shardConf.ShardID, ConfHash: confHash,
+			AnchorEpoch: trustBases[0].Epoch, Directory: flags.ExecutionJournal + ".handoffs",
+			OnInstalled: func(ctx context.Context, bundle handoffdelivery.Bundle, verified handoffdelivery.Verified) error {
+				if handoffJournal == nil || verified.Shard.UC == nil || verified.Shard.UC.InputRecord == nil || verified.Shard.TR == nil || verified.Shard.IR == nil ||
+					!bytes.Equal(verified.Shard.UC.InputRecord.BlockHash, verified.Shard.IR.BlockHash) ||
+					verified.Shard.UC.GetRoundNumber() != verified.Shard.IR.RoundNumber {
+					return errors.New("verified handoff lacks the terminal shard certificate")
+				}
+				terminal, err := rootinput.AuthenticateObservationV2(ctx, handoffJournalContext.Observation, verified.Shard.UC, verified.Shard.TR)
+				if err != nil {
+					return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
+				}
+				prepared, _, err := handoffJournal.PrepareObservation(ctx, handoffJournalContext, terminal)
+				if err != nil {
+					return fmt.Errorf("preparing handoff terminal certificate: %w", err)
+				}
+				if _, _, err := handoffJournal.CommitObservation(prepared); err != nil {
+					return fmt.Errorf("persisting handoff terminal certificate: %w", err)
+				}
+				old, err := historicalTrust.GetByEpoch(ctx, bundle.Proof.Record.Epoch)
+				if err != nil {
+					return err
+				}
+				anchor := &rctypes.EpochAnchor{GenesisID: verified.Genesis.ID(), Epoch: verified.Genesis.Epoch,
+					Slot: verified.Genesis.Start - 1, StateRoot: verified.Record.StateRoot[:]}
+				transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR)
+				if err != nil {
+					return err
+				}
+				raw, err := transition.Encode()
+				if err != nil {
+					return err
+				}
+				if err := adapter.InstallEpochTransition(raw); err != nil {
+					return err
+				}
+				if err := historicalTrust.ActivateHandoff(bundle.Body.Epoch); err != nil {
+					return err
+				}
+				flags.observe.Logger().Info("handoff activated", "rootEpoch", bundle.Body.Epoch)
+				return nil
+			}}
+	}
 	if origin.Valid() && flags.Executor == "engine-api" {
 		// The agreed genesis hash: buildExecutor has just required the paired client's block 0 to equal
 		// origin.BlockHash(), so this line reports a value the configuration and the client agree on.
@@ -488,6 +542,15 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		defer journalStore.Close()
 		recordCtx := certifiedstore.Context{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, FullShardConfHash: confHash, Registry: origin.ProofContext(), TrustBases: trustBaseStore}
 		journalCtx := configuredprogress.Context{Origin: origin, ExecutionConfigV2: executionID, Observation: rootinput.ObservationContextV2{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, ShardConfHash: confHash, RootEpoch: trustBases[0].GetEpoch(), TrustBases: trustBaseStore}, Record: recordCtx}
+		if flags.TrustHistoryProfile2 {
+			journalCtx.Observation.EpochAuthority = historicalTrust
+		}
+		handoffJournal, handoffJournalContext = journalStore, journalCtx
+		if follower != nil {
+			if err := follower.Restore(ctx); err != nil {
+				return fmt.Errorf("restoring verified handoffs: %w", err)
+			}
+		}
 		if _, _, openErr = journalStore.Initialize(ctx, journalCtx); openErr != nil {
 			return fmt.Errorf("initializing execution journal: %w", openErr)
 		}
@@ -603,7 +666,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		server.Register(peer)
 		coordinator.Host, coordinator.Providers, coordinator.TransportLimits = peer, providers, shardnode.DefaultJournalTransportLimits()
 		node.SetJournalRecovery(coordinator, coordinator)
-		if openErr = node.SetJournalAdmission(configuredadmission.JournalFactory{Store: journalStore, Origin: origin, ExecutionConfigV2: executionID, Limits: limits, CatchUp: coordinator.AcquireForCertificate, OnStop: node.ReportJournalStop, Logger: flags.observe.Logger()}); openErr != nil {
+		if openErr = node.SetJournalAdmission(configuredadmission.JournalFactory{Store: journalStore, Origin: origin, ExecutionConfigV2: executionID, Limits: limits, CatchUp: coordinator.AcquireForCertificate, OnStop: node.ReportJournalStop, Logger: flags.observe.Logger(), EpochAuthority: journalCtx.Observation.EpochAuthority}); openErr != nil {
 			return fmt.Errorf("enabling journal certification admission: %w", openErr)
 		}
 		flags.observe.Logger().Info("execution journal verified", "candidates", len(journalImage.Candidates), "observations", len(journalImage.Observations), "bytes", journalImage.Bytes)
@@ -683,10 +746,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return node.Run(gctx) })
 	g.Go(func() error { return serveShardNodeRPC(gctx, flags, node) })
-	if flags.TrustHistoryProfile2 {
-		follower := &shardnode.HandoffFollower{Host: peer, History: historicalTrust,
-			Partition: shardConf.PartitionID, Shard: shardConf.ShardID, ConfHash: confHash,
-			AnchorEpoch: trustBases[0].Epoch, Directory: flags.ExecutionJournal + ".handoffs"}
+	if follower != nil {
 		g.Go(func() error { return follower.Run(gctx) })
 	}
 	return g.Wait()

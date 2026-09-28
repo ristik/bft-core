@@ -58,6 +58,7 @@ type (
 		OrchestrationDBFile string
 		TrustHistoryDBFile  string
 		Profile2            bool
+		InstallHandoffEpoch uint64
 
 		BlockRate        uint32
 		MaxRequests      uint   // certification request channel capacity
@@ -118,6 +119,7 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd.Flags().StringVar(&flags.OrchestrationDBFile, "orchestration-db", "",
 		fmt.Sprintf("path to the orchestration database (default: %s)", filepath.Join("$UBFT_HOME", orchestrationDBFileName)))
 	cmd.Flags().BoolVar(&flags.Profile2, "profile-2", false, "run the version-2 root handoff network profile")
+	cmd.Flags().Uint64Var(&flags.InstallHandoffEpoch, "install-handoff-epoch", 0, "fetch and verify this successor epoch before starting profile-2 consensus")
 	cmd.Flags().StringVar(&flags.TrustHistoryDBFile, "trust-history-db", "",
 		fmt.Sprintf("profile-2 trust history database (default: %s)", filepath.Join("$UBFT_HOME", rootTrustHistoryDBFileName)))
 
@@ -267,6 +269,35 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err = host.BootstrapConnect(ctx, log); err != nil {
 		return err
 	}
+	if flags.InstallHandoffEpoch != 0 {
+		if !flags.Profile2 || flags.InstallHandoffEpoch < 2 {
+			return fmt.Errorf("install-handoff-epoch requires profile 2 and epoch >= 2")
+		}
+		if flags.InstallHandoffEpoch < cm.InstalledRootEpoch() {
+			return fmt.Errorf("requested handoff epoch %d is older than installed epoch %d", flags.InstallHandoffEpoch, cm.InstalledRootEpoch())
+		}
+		peers, err := getBootStrapNodes(flags.BootstrapAddresses)
+		if err != nil {
+			return err
+		}
+		for epoch := cm.InstalledRootEpoch() + 1; epoch <= flags.InstallHandoffEpoch; epoch++ {
+			var installed bool
+			for _, root := range peers {
+				bundle, fetchErr := handoffdelivery.Request(ctx, host, root.ID, epoch)
+				if fetchErr != nil {
+					continue
+				}
+				if _, installErr := cm.InstallEpochGenesis(bundle.Proof, bundle.Snapshot, bundle.Body); installErr != nil {
+					return fmt.Errorf("install handoff epoch %d: %w", epoch, installErr)
+				}
+				installed = true
+				break
+			}
+			if !installed {
+				return fmt.Errorf("no root peer served verified handoff epoch %d", epoch)
+			}
+		}
+	}
 
 	node, err := rootchain.New(
 		host,
@@ -295,6 +326,10 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		mux.HandleFunc("PUT /api/v1/trustbases", putTrustBaseHandler(trustBaseStore.Store))
 		mux.HandleFunc("GET /api/v1/trustbases", getTrustBaseHandler(trustBaseStore, obs))
 		mux.HandleFunc("GET /api/v1/roundInfo", getRoundInfoHandler(cm.GetState, obs))
+		if flags.Profile2 {
+			mux.HandleFunc("POST /api/v1/handoff/plan", rootHandoffPlanHandler(cm))
+			mux.HandleFunc("POST /api/v1/handoff/endorse", rootHandoffEndorseHandler(cm))
+		}
 		return httpsrv.Run(ctx,
 			&http.Server{
 				Addr:              flags.RPCServerAddress,

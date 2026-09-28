@@ -193,7 +193,7 @@ func (s *Store) ReadByHash(ctx context.Context, c Context, hash common.Hash) (ce
 	if err != nil {
 		return certifiedstore.Loaded{}, err
 	}
-	rel, compareErr := compareObservations(candidateObs, image.observed.observation)
+	rel, compareErr := compareCumulativeObservations(candidateObs, image.observed.observation)
 	if compareErr != nil || rel == relationStale {
 		return certifiedstore.Loaded{}, fmt.Errorf("%w: indexed record newer/conflicting with observed", ErrUntrusted)
 	}
@@ -202,7 +202,7 @@ func (s *Store) ReadByHash(ctx context.Context, c Context, hash common.Hash) (ce
 		if err != nil {
 			return certifiedstore.Loaded{}, err
 		}
-		rel, compareErr = compareObservations(candidateObs, headObs)
+		rel, compareErr = compareCumulativeObservations(candidateObs, headObs)
 		if compareErr != nil || rel == relationStale {
 			return certifiedstore.Loaded{}, fmt.Errorf("%w: indexed record newer/conflicting with head", ErrUntrusted)
 		}

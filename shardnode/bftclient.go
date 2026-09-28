@@ -492,7 +492,11 @@ func (c *BFTClient) sendHandshake(ctx context.Context) error {
 	c.mu.Lock()
 	configuredEpoch := c.admissionEpoch
 	configuredEpochSet := c.admissionEpochSet
+	admission := c.admission
 	c.mu.Unlock()
+	if admission != nil {
+		configuredEpoch = admission.RootEpoch()
+	}
 	if configuredEpochSet {
 		epoch = configuredEpoch
 	}
@@ -501,7 +505,9 @@ func (c *BFTClient) sendHandshake(ctx context.Context) error {
 	}
 	if c.profile2 != nil {
 		if floor, installed := c.profile2.EpochFloor(); installed {
-			epoch = floor
+			if floor > epoch {
+				epoch = floor
+			}
 		}
 	}
 	tb, err := c.trustBaseStore.GetByEpoch(ctx, epoch)
@@ -704,7 +710,10 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	admission := c.admission
 	profile2 := c.profile2
 	c.mu.Unlock()
-	if history, ok := c.trustBaseStore.(interface{ IsV2Epoch(uint64) bool }); ok && history.IsV2Epoch(cr.UC.GetRootEpoch()) && profile2 == nil {
+	// Configured admission verifies the installed lineage and persists the
+	// certificate before delivery. The legacy consumer owns that gate only
+	// when configured admission is absent.
+	if history, ok := c.trustBaseStore.(interface{ IsV2Epoch(uint64) bool }); ok && history.IsV2Epoch(cr.UC.GetRootEpoch()) && profile2 == nil && admission == nil {
 		return ErrProfile2Unready
 	}
 	if admission != nil {

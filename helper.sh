@@ -88,6 +88,8 @@ function start_root_nodes() {
   local bootNode=""
   local p2pPort=$rootPortStart
   local rpcPort=25866
+  local rpcHost=localhost
+  if [ "${M2_PROFILE2:-0}" = 1 ]; then rpcHost=127.0.0.1; fi
 
   bootNode=$(boot_node test-nodes/root1 "$rootPortStart")
 
@@ -98,15 +100,18 @@ function start_root_nodes() {
       bootNodeParam="--bootnodes=$bootNode"
     fi
 
+    local profileArgs=()
+    if [ "${M2_PROFILE2:-0}" = 1 ]; then profileArgs=(--profile-2); fi
     build/ubft root-node run \
                     --home test-nodes/root$i \
                     --address "/ip4/127.0.0.1/tcp/$p2pPort" \
                     $bootNodeParam \
                     --trust-base test-nodes/trust-base.json \
-                    --rpc-server-address "localhost:$rpcPort" \
+                    --rpc-server-address "$rpcHost:$rpcPort" \
                     --log-format text \
                     --log-level debug \
                     --metrics prometheus \
+                    ${profileArgs[@]+"${profileArgs[@]}"} \
                     >> test-nodes/root$i/debug.log 2>&1 &
     nodePID=$!
     echo "$nodePID" > "test-nodes/root$i/pid"
@@ -127,7 +132,7 @@ function start_root_nodes() {
       for shardConf in test-nodes/shard-conf-*
       do
         curl --retry 5 --retry-all-errors --retry-delay 1 -f -X PUT -H "Content-Type: application/json" -d @${shardConf} \
-             http://localhost:${rpcPort}/api/v1/configurations
+             http://${rpcHost}:${rpcPort}/api/v1/configurations
       done
     fi
 
@@ -370,6 +375,15 @@ function start_one_evm_validator() {
       --signing-authority-credential "test-nodes/auth$i/client.cred")
   fi
 
+  local profileArgs=()
+  if [ "${M2_PROFILE2:-0}" = 1 ]; then
+    if [ -z "${EVM_GENESIS_FILE:-}" ]; then
+      echo "M2_PROFILE2 requires the checked execution journal origin" >&2
+      return 1
+    fi
+    profileArgs=(--trust-history-profile-2)
+  fi
+
   build/ubft shard-node run --home "test-nodes/evm$i" --executor "$executor" \
     --address "/ip4/127.0.0.1/tcp/$port" --bootnodes "$bootnodes" \
     --trust-base test-nodes/trust-base.json \
@@ -377,6 +391,7 @@ function start_one_evm_validator() {
     --log-format text --log-level "${EVM_VALIDATOR_LOG_LEVEL:-info}" \
     ${executorArgs[@]+"${executorArgs[@]}"} ${rpcArgs[@]+"${rpcArgs[@]}"} \
     ${signingArgs[@]+"${signingArgs[@]}"} \
+    ${profileArgs[@]+"${profileArgs[@]}"} \
     >> "test-nodes/evm$i/debug.log" 2>&1 &
   echo $! > "test-nodes/evm$i/pid"
 }

@@ -20,6 +20,64 @@ func (b epochBases) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrus
 	return b[epoch], nil
 }
 
+func TestHistoricalPeerCandidateAfterRootEpochActivation(t *testing.T) {
+	f := newFixture(t, 1)
+	bootstrap := f.bootstrap(1, 4)
+	base2 := *f.c.TrustBase
+	base2.Epoch = 2
+	authority := &currentEpoch{epoch: 1}
+	f.ctx.Observation.TrustBases = epochBases{1: f.c.TrustBase, 2: &base2}
+	f.ctx.Observation.EpochAuthority = authority
+	s, _ := openJournal(t, f, testJournalLimits)
+	defer s.Close()
+	admitJournal(t, s, f, bootstrap)
+	authority.epoch = 2
+	candidate := candidateB1(f, bootstrap)
+	require.ErrorIs(t, s.PutJournalCandidate(context.Background(), f.ctx, testJournalLimits, candidate), rootinput.ErrV2Context,
+		"live candidate admission must reject the stale authorization")
+	require.NoError(t, s.PutHistoricalJournalCandidate(context.Background(), f.ctx, testJournalLimits, candidate))
+	image, err := s.LoadJournal(context.Background(), f.ctx, testJournalLimits)
+	require.NoError(t, err)
+	require.Len(t, image.Candidates, 1)
+	require.Equal(t, candidate.Raw, image.Candidates[0].Candidate.Raw)
+}
+
+func TestProfile2RetainedEndpointsSpanTwoInstalledHandoffs(t *testing.T) {
+	f := newFixture(t, 1)
+	base2, base3 := *f.c.TrustBase, *f.c.TrustBase
+	base2.Epoch, base3.Epoch = 2, 3
+	authority := &currentEpoch{epoch: 1}
+	f.ctx.Observation.TrustBases = epochBases{1: f.c.TrustBase, 2: &base2, 3: &base3}
+	f.ctx.Observation.EpochAuthority = authority
+	s, _ := openJournal(t, f, testJournalLimits)
+	defer s.Close()
+	admitJournal(t, s, f, f.bootstrap(1, 4))
+	first := f.first(1, 2, 5)
+	admitJournal(t, s, f, first)
+	previous := first
+	for epoch := uint64(2); epoch <= 3; epoch++ {
+		uc := previous.Certificate()
+		uc.UnicitySeal.Epoch = epoch
+		uc.UnicitySeal.RootChainRoundNumber = 5 + epoch
+		uc.UnicitySeal.Signatures = nil
+		for signer := range first.Certificate().UnicitySeal.Signatures {
+			require.NoError(t, uc.UnicitySeal.Sign(signer, f.c.Signer))
+		}
+		authority.epoch = epoch
+		next, err := rootinput.AuthenticateObservationV2(context.Background(), f.ctx.Observation, uc, first.TechnicalRecord())
+		require.NoError(t, err)
+		admitJournal(t, s, f, next)
+		previous = next
+	}
+	_, err := compareObservations(first, previous)
+	require.ErrorIs(t, err, ErrConflict, "live admission still refuses a skipped epoch")
+	state, _, err := s.Load(context.Background(), f.ctx)
+	require.NoError(t, err, "retained first and latest observations have a verified intervening epoch")
+	latest, ok := state.Observed()
+	require.True(t, ok)
+	require.Equal(t, uint64(3), latest.Certificate().GetRootEpoch())
+}
+
 func TestProfile2JournalObservationUsesEpochOrderAndCurrentGate(t *testing.T) {
 	f := newFixture(t, 1)
 	oldUC, tr := f.sign(f.c.InputRecord(1), 2, 100)

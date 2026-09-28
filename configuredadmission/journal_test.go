@@ -17,9 +17,35 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+type fixedJournalEpoch struct{ current uint64 }
+
+func (e fixedJournalEpoch) CurrentRootEpoch() (uint64, bool) { return e.current, true }
+
+func TestProposalJournalDeclinesStaleSealedRoundAfterHandoff(t *testing.T) {
+	chain, _, c, _ := adapterFixture(t)
+	uc, _ := journalBootstrap(t, chain)
+	c.Observation.EpochAuthority = fixedJournalEpoch{current: 2}
+	j := ProposalJournal{Store: new(configuredprogress.Store), Context: c}
+	p := shardnode.RoundParams{AuthorizingCertificate: uc}
+	require.ErrorIs(t, j.RetainCandidate(context.Background(), shardnode.Block{}, p, true), shardnode.ErrLeaderProposalConflict)
+	require.ErrorIs(t, j.RetainCandidate(context.Background(), shardnode.Block{}, p, false), shardnode.ErrProposalRejected)
+	c.Observation.EpochAuthority = fixedJournalEpoch{current: 1}
+	j.Context = c
+	require.ErrorContains(t, j.RetainCandidate(context.Background(), shardnode.Block{ParentHash: []byte{1}}, p, true), "candidate parent differs",
+		"a current-epoch candidate still reaches the ordinary binding check")
+}
+
+func TestJournalAdmissionReportsActivatedEpoch(t *testing.T) {
+	a := &journalAdmission{epoch: 1, context: configuredprogress.Context{Observation: rootinput.ObservationContextV2{EpochAuthority: fixedJournalEpoch{current: 2}}}}
+	require.EqualValues(t, 2, a.RootEpoch())
+	a.context.Observation.EpochAuthority = fixedJournalEpoch{current: 0}
+	require.EqualValues(t, 1, a.RootEpoch())
+}
 
 func TestJournalFactoryCarriesCheckedExecutionIdentity(t *testing.T) {
 	_, origin, c, id := adapterFixture(t)

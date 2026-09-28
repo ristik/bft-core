@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
@@ -13,14 +12,10 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// bootstrapLeader uses the canonical new committee order until certified
-// ancestry contains the ordinary block history needed by reputation voting.
+// bootstrapLeader uses the canonical new committee order for the entire epoch.
 type bootstrapLeader struct {
-	base     Leader
-	start    uint64
-	members  []peer.ID
-	mu       sync.RWMutex
-	fallback bool
+	start   uint64
+	members []peer.ID
 }
 
 func newBootstrapLeader(base Leader, start uint64, nodes []*types.NodeInfo) (*bootstrapLeader, error) {
@@ -37,51 +32,23 @@ func newBootstrapLeader(base Leader, start uint64, nodes []*types.NodeInfo) (*bo
 		}
 		members[i] = id
 	}
-	return &bootstrapLeader{base: base, start: start, members: members, fallback: true}, nil
+	return &bootstrapLeader{start: start, members: members}, nil
 }
 
 func (b *bootstrapLeader) GetLeaderForRound(round uint64) (peer.ID, error) {
-	b.mu.RLock()
-	fallback := b.fallback
-	b.mu.RUnlock()
-	if fallback {
-		if round < b.start {
-			return "", errors.New("round precedes epoch genesis")
-		}
-		return b.members[(round-b.start)%uint64(len(b.members))], nil
+	if round < b.start {
+		return "", errors.New("round precedes epoch genesis")
 	}
-	return b.base.GetLeaderForRound(round)
+	return b.members[(round-b.start)%uint64(len(b.members))], nil
 }
 
 func (b *bootstrapLeader) UpdateWithTrustBase(tb types.RootTrustBase, round uint64) error {
-	b.mu.RLock()
-	fallback := b.fallback
-	b.mu.RUnlock()
-	if fallback {
-		return nil
-	}
-	return b.base.UpdateWithTrustBase(tb, round)
+	return nil
 }
 
 func (b *bootstrapLeader) Update(qc *rctypes.QuorumCert, currentRound uint64, blocks leader.BlockLoader) error {
-	b.mu.RLock()
-	fallback := b.fallback
-	b.mu.RUnlock()
-	if !fallback {
-		return b.base.Update(qc, currentRound, blocks)
-	}
-	if qc == nil || qc.GetParentRound() < b.start {
-		return nil
-	}
-	parent, err := blocks(qc.GetParentRound())
-	if err != nil || parent == nil || parent.BlockData == nil || parent.BlockData.Author == "" {
-		return nil
-	}
-	if err := b.base.Update(qc, currentRound, blocks); err != nil {
-		return nil
-	}
-	b.mu.Lock()
-	b.fallback = false
-	b.mu.Unlock()
+	// Nodes can install the same genesis after seeing different old-epoch
+	// suffixes. Switching to a locally updated reputation selector would
+	// let them disagree about the leader despite a common committee.
 	return nil
 }

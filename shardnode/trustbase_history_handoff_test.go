@@ -6,9 +6,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/internal/testutils/handoffbundle"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
 
@@ -20,8 +22,19 @@ func TestHistoricalTrustStoreHandoffRefusalsAndReplay(t *testing.T) {
 	store, err := NewHistoricalTrustBaseStore(ctx, memorydb.New(), f.Old, executionID, true)
 	require.NoError(t, err)
 	bundle := handoffdelivery.Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot}
-	_, err = store.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
+	epoch, ready := store.CurrentRootEpoch()
+	require.True(t, ready)
+	require.EqualValues(t, 1, epoch)
+	verified, err := store.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
 	require.NoError(t, err)
+	epoch, _ = store.CurrentRootEpoch()
+	require.EqualValues(t, 1, epoch, "proof persistence alone does not activate certification")
+	_, err = handoff.TransitionFromInstalledAnchor(bundle.Proof, f.Old, bundle.Body,
+		&rctypes.EpochAnchor{GenesisID: verified.Genesis.ID(), Epoch: verified.Genesis.Epoch,
+			Slot: verified.Genesis.Start - 1, StateRoot: verified.Record.StateRoot[:]}, verified.Shard.IRTR)
+	require.NoError(t, err)
+	require.ErrorIs(t, store.ActivateHandoff(3), trusthistorystore.ErrHistory)
+	require.NoError(t, store.ActivateHandoff(2))
 	require.True(t, store.IsV2Epoch(2))
 	_, err = store.GetByEpoch(ctx, 2)
 	require.NoError(t, err)
@@ -31,6 +44,11 @@ func TestHistoricalTrustStoreHandoffRefusalsAndReplay(t *testing.T) {
 	secondBundle := handoffdelivery.Bundle{Proof: second.Proof, Body: second.Body, Snapshot: second.Snapshot}
 	_, err = store.InstallHandoff(ctx, secondBundle, f.Partition, f.Shard, f.ConfHash)
 	require.NoError(t, err)
+	epoch, _ = store.CurrentRootEpoch()
+	require.EqualValues(t, 2, epoch)
+	require.NoError(t, store.ActivateHandoff(3))
+	epoch, _ = store.CurrentRootEpoch()
+	require.EqualValues(t, 3, epoch)
 	require.True(t, store.IsV2Epoch(3))
 	_, err = store.InstallHandoff(ctx, secondBundle, f.Partition, f.Shard, f.ConfHash)
 	require.NoError(t, err)

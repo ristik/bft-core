@@ -29,6 +29,7 @@ type JournalFactory struct {
 	CatchUp           func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
 	OnStop            func(error)
 	Logger            *slog.Logger
+	EpochAuthority    rootinput.RootEpochAuthority
 }
 
 type journalAdmission struct {
@@ -76,6 +77,7 @@ func (f JournalFactory) Start(ctx context.Context, id shardnode.AdmissionIdentit
 		return nil, err
 	}
 	c.ExecutionConfigV2 = f.ExecutionConfigV2
+	c.Observation.EpochAuthority = f.EpochAuthority
 	if _, err = f.Store.LoadJournal(ctx, c, f.Limits); err != nil {
 		return nil, fmt.Errorf("loading execution journal: %w", err)
 	}
@@ -160,7 +162,7 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 				break
 			}
 		}
-		a.logger.InfoContext(ctx, "certificate admitted", slog.String("block", fmt.Sprintf("%x", uc.InputRecord.BlockHash)), slog.Uint64("height", height), slog.Uint64("round", uc.GetRoundNumber()), slog.Uint64("rootRound", uc.GetRootRoundNumber()))
+		a.logger.InfoContext(ctx, "certificate admitted", slog.String("block", fmt.Sprintf("%x", uc.InputRecord.BlockHash)), slog.Uint64("height", height), slog.Uint64("round", uc.GetRoundNumber()), slog.Uint64("rootRound", uc.GetRootRoundNumber()), slog.Uint64("rootEpoch", uc.GetRootEpoch()))
 	}
 	if a.catchUp != nil {
 		for _, observed := range image.Observations {
@@ -183,7 +185,14 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 	}
 	return a.callbacks.DeliverDurable(ctx, current.Certificate(), current.TechnicalRecord())
 }
-func (a *journalAdmission) RootEpoch() uint64 { return a.epoch }
+func (a *journalAdmission) RootEpoch() uint64 {
+	if authority := a.context.Observation.EpochAuthority; authority != nil {
+		if current, ready := authority.CurrentRootEpoch(); ready && current >= a.epoch {
+			return current
+		}
+	}
+	return a.epoch
+}
 func (a *journalAdmission) Pending() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -262,6 +271,16 @@ type ProposalJournal struct {
 func (j ProposalJournal) RetainCandidate(ctx context.Context, b shardnode.Block, p shardnode.RoundParams, locallyBuilt bool) error {
 	if j.Store == nil {
 		return configuredprogress.ErrSettings
+	}
+	if authority := j.Context.Observation.EpochAuthority; authority != nil && p.AuthorizingCertificate != nil {
+		if current, ready := authority.CurrentRootEpoch(); ready && p.AuthorizingCertificate.GetRootEpoch() < current {
+			// Activation may land between sealing and the journal fsync. This
+			// proposal has lost its authority, but no durable state is damaged.
+			if locallyBuilt {
+				return fmt.Errorf("%w: root epoch advanced before publication", shardnode.ErrLeaderProposalConflict)
+			}
+			return fmt.Errorf("%w: root epoch advanced before verification", shardnode.ErrProposalRejected)
+		}
 	}
 	if !bytes.Equal(b.ParentHash, p.Parent.Hash) {
 		return fmt.Errorf("configuredadmission: candidate parent differs from held executor head")
