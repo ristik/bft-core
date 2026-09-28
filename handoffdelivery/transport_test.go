@@ -3,13 +3,40 @@ package handoffdelivery
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 )
+
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestFrameBoundaryAndDecodeGuards(t *testing.T) {
+	req := request{Epoch: 2}
+	var frame bytes.Buffer
+	require.NoError(t, writeFrame(&frame, req, maxRequestBytes))
+	raw := bytes.Clone(frame.Bytes())
+	size := int(binary.BigEndian.Uint32(raw[:4]))
+	require.Equal(t, len(raw)-4, size)
+	var exact bytes.Buffer
+	require.NoError(t, writeFrame(&exact, req, size))
+	require.ErrorIs(t, writeFrame(io.Discard, req, size-1), ErrBundle)
+	var decoded request
+	require.NoError(t, readFrame(bytes.NewReader(raw), &decoded, size))
+	require.Equal(t, req.Epoch, decoded.Epoch)
+	require.ErrorIs(t, readFrame(bytes.NewReader(raw), &decoded, size-1), ErrBundle)
+	boom := errors.New("write failed")
+	require.ErrorIs(t, writeAll(failingWriter{boom}, []byte{1}), boom)
+	require.ErrorIs(t, writeFrame(failingWriter{boom}, req, size), boom)
+	bad := []byte{0, 0, 0, 1, 0xff}
+	require.Error(t, readFrame(bytes.NewReader(bad), &decoded, size))
+}
 
 type testProvider struct{ bundle *Bundle }
 

@@ -39,10 +39,13 @@ func handoffMetadataKey(prefix, id []byte) []byte {
 	return append(key, id...)
 }
 
+func validHandoffBodySize(n int) bool   { return n > 0 && n <= 1<<20 }
+func validHandoffBundleSize(n int) bool { return n > 0 && n <= 64<<20 }
+
 // StoreHandoffBody retains a verified freeze companion so any root peer can
 // later serve the successor body named by the committed control record.
 func (db BoltDB) StoreHandoffBody(id, body []byte) error {
-	if len(id) != 32 || len(body) == 0 || len(body) > 1<<20 {
+	if len(id) != 32 || !validHandoffBodySize(len(body)) {
 		return ErrHandoffRecord
 	}
 	return db.db.Update(func(tx *bbolt.Tx) error {
@@ -75,7 +78,7 @@ func (db BoltDB) HandoffBody(id []byte) ([]byte, error) {
 }
 
 func (db BoltDB) StoreHandoffBundle(epoch uint64, data []byte) error {
-	if epoch < 2 || len(data) == 0 || len(data) > 64<<20 {
+	if epoch < 2 || !validHandoffBundleSize(len(data)) {
 		return ErrHandoffRecord
 	}
 	var number [8]byte

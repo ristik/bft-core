@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/libp2p/go-libp2p/core/peerstore"
@@ -14,6 +16,72 @@ import (
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+func TestHandoffFollowerConfigurationAndSavedBundleGuards(t *testing.T) {
+	ctx := context.Background()
+	require.Error(t, (*HandoffFollower)(nil).Run(ctx))
+	peer := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	base := HandoffFollower{Host: peer, History: &followerHistory{}, AnchorEpoch: 1,
+		Directory: t.TempDir(), ConfHash: bytes.Repeat([]byte{5}, 32)}
+	for _, tc := range []struct {
+		name   string
+		change func(*HandoffFollower)
+	}{
+		{"host", func(f *HandoffFollower) { f.Host = nil }},
+		{"history", func(f *HandoffFollower) { f.History = nil }},
+		{"anchor epoch", func(f *HandoffFollower) { f.AnchorEpoch = 0 }},
+		{"directory", func(f *HandoffFollower) { f.Directory = "" }},
+		{"config hash", func(f *HandoffFollower) { f.ConfHash = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) { f := base; tc.change(&f); require.Error(t, f.Run(ctx)) })
+	}
+	f := base
+	largePath := f.path(2)
+	file, err := os.Create(largePath)
+	require.NoError(t, err)
+	require.NoError(t, file.Truncate((64<<20)+1))
+	require.NoError(t, file.Close())
+	_, err = f.load(2)
+	require.ErrorIs(t, err, handoffdelivery.ErrBundle)
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	require.NoError(t, f.Run(cancelled))
+	f.AnchorEpoch = ^uint64(0)
+	require.ErrorContains(t, f.Run(ctx), "epoch overflow")
+	f.AnchorEpoch = 1
+	f.Directory = filepath.Join(t.TempDir(), "not-a-directory")
+	require.NoError(t, os.WriteFile(f.Directory, []byte{1}, 0600))
+	require.Error(t, f.Run(ctx))
+	f.Directory = t.TempDir()
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"empty", nil}, {"malformed CBOR", []byte{0xff}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, os.WriteFile(f.path(2), tc.raw, 0600))
+			_, err := f.load(2)
+			require.ErrorIs(t, err, handoffdelivery.ErrBundle)
+		})
+	}
+	_, err = f.fetch(ctx, 3)
+	require.Error(t, err) // old epoch is absent
+	f.History = &followerHistory{old: &types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{
+		nil, {NodeID: "not a peer id"},
+	}}}
+	_, err = f.fetch(ctx, 2)
+	require.Error(t, err) // no usable root peer
+	f.History = base.History
+	wrongEpoch := handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{Epoch: 3}}
+	require.NoError(t, f.save(2, wrongEpoch))
+	_, err = f.load(2)
+	require.ErrorIs(t, err, handoffdelivery.ErrBundle)
+	oversize := handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{StateSummary: make([]byte, 64<<20)}}
+	require.ErrorIs(t, f.save(2, oversize), handoffdelivery.ErrBundle)
+	f.Directory = filepath.Join(t.TempDir(), "missing")
+	require.Error(t, f.save(2, handoffdelivery.Bundle{}))
+}
 
 type followerProvider struct{ bundle handoffdelivery.Bundle }
 
@@ -82,4 +150,9 @@ func TestHandoffFollowerTriesAnotherRootAndRestoresSavedBundle(t *testing.T) {
 	}
 	require.NoError(t, follower.Run(ctx2))
 	require.GreaterOrEqual(t, history.accepted, 2)
+	callbackFailure := errors.New("snapshot install failed")
+	follower.OnInstalled = func(context.Context, handoffdelivery.Bundle, handoffdelivery.Verified) error {
+		return callbackFailure
+	}
+	require.ErrorIs(t, follower.Run(context.Background()), callbackFailure)
 }
