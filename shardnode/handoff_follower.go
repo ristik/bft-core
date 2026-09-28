@@ -18,13 +18,18 @@ import (
 // every response is checked before entering local lineage or snapshot storage.
 type HandoffFollower struct {
 	Host        handoffdelivery.Host
-	History     *HistoricalTrustBaseStore
+	History     HandoffHistory
 	Partition   types.PartitionID
 	Shard       types.ShardID
 	ConfHash    []byte
 	AnchorEpoch uint64
 	Directory   string
 	OnInstalled func(context.Context, handoffdelivery.Bundle, handoffdelivery.Verified) error
+}
+
+type HandoffHistory interface {
+	GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error)
+	InstallHandoff(context.Context, handoffdelivery.Bundle, types.PartitionID, types.ShardID, []byte) (handoffdelivery.Verified, error)
 }
 
 func (f *HandoffFollower) Run(ctx context.Context) error {
