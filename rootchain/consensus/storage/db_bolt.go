@@ -29,7 +29,87 @@ var (
 	keyHighestVoted = []byte("votedRound")
 	keyHighestQc    = []byte("qcRound")
 	keyEpochAnchor  = []byte("epochAnchor")
+	keyHandoffBody  = []byte("handoff/body/")
+	keyHandoffProof = []byte("handoff/bundle/")
 )
+
+func handoffMetadataKey(prefix, id []byte) []byte {
+	key := make([]byte, 0, len(prefix)+len(id))
+	key = append(key, prefix...)
+	return append(key, id...)
+}
+
+func validHandoffBodySize(n int) bool   { return n > 0 && n <= 1<<20 }
+func validHandoffBundleSize(n int) bool { return n > 0 && n <= 64<<20 }
+
+// StoreHandoffBody retains a verified freeze companion so any root peer can
+// later serve the successor body named by the committed control record.
+func (db BoltDB) StoreHandoffBody(id, body []byte) error {
+	if len(id) != 32 || !validHandoffBodySize(len(body)) {
+		return ErrHandoffRecord
+	}
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return ErrHandoffRecord
+		}
+		key := handoffMetadataKey(keyHandoffBody, id)
+		if existing := b.Get(key); existing != nil && !bytes.Equal(existing, body) {
+			return ErrHandoffRecord
+		}
+		return b.Put(key, body)
+	})
+}
+
+func (db BoltDB) HandoffBody(id []byte) ([]byte, error) {
+	if len(id) != 32 {
+		return nil, ErrHandoffRecord
+	}
+	var data []byte
+	err := db.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return ErrHandoffRecord
+		}
+		data = bytes.Clone(b.Get(handoffMetadataKey(keyHandoffBody, id)))
+		return nil
+	})
+	return data, err
+}
+
+func (db BoltDB) StoreHandoffBundle(epoch uint64, data []byte) error {
+	if epoch < 2 || !validHandoffBundleSize(len(data)) {
+		return ErrHandoffRecord
+	}
+	var number [8]byte
+	binary.BigEndian.PutUint64(number[:], epoch)
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return ErrHandoffRecord
+		}
+		key := handoffMetadataKey(keyHandoffProof, number[:])
+		if existing := b.Get(key); existing != nil && !bytes.Equal(existing, data) {
+			return ErrHandoffRecord
+		}
+		return b.Put(key, data)
+	})
+}
+
+func (db BoltDB) HandoffBundle(epoch uint64) ([]byte, error) {
+	var number [8]byte
+	binary.BigEndian.PutUint64(number[:], epoch)
+	var data []byte
+	err := db.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return ErrHandoffRecord
+		}
+		data = bytes.Clone(b.Get(handoffMetadataKey(keyHandoffProof, number[:])))
+		return nil
+	})
+	return data, err
+}
 
 /*
 Implementation of persistent storage for the BlockTree and SafetyModule using bbolt database.
@@ -433,8 +513,8 @@ func (db BoltDB) SetHighestQcRound(qcRound, votedRound uint64) error {
 	})
 }
 
-// InstallEpochAnchorSafety crosses from the old epoch to the new epoch once.
-// A later old proof cannot lower the new lock or clear votes and timeouts.
+// InstallEpochAnchorSafety crosses one epoch at a time. An old or skipped
+// anchor cannot lower the lock or clear votes and timeouts.
 func (db BoltDB) InstallEpochAnchorSafety(a *rctypes.EpochAnchor) error {
 	if err := a.IsValid(); err != nil {
 		return err
@@ -449,10 +529,12 @@ func (db BoltDB) InstallEpochAnchorSafety(a *rctypes.EpochAnchor) error {
 			if err := types.Cbor.Unmarshal(prior, &installed); err != nil {
 				return err
 			}
-			if installed.Epoch != a.Epoch || installed.Slot != a.Slot || !bytes.Equal(installed.GenesisID, a.GenesisID) || !bytes.Equal(installed.StateRoot, a.StateRoot) {
+			if sameEpochAnchor(&installed, a) {
+				return nil
+			}
+			if installed.Epoch == ^uint64(0) || a.Epoch != installed.Epoch+1 || a.Slot <= installed.Slot {
 				return rctypes.ErrEpochAnchor
 			}
-			return nil
 		}
 		encoded, err := types.Cbor.Marshal(a)
 		if err != nil {
@@ -510,13 +592,17 @@ func (db BoltDB) installEpochAnchorRootWithFault(block *ExecutedBlock, a *rctype
 			return errNoSafetyBucket
 		}
 		installed := safety.Get(keyEpochAnchor)
+		advance := installed == nil
 		if installed != nil {
 			var prior rctypes.EpochAnchor
 			if err := types.Cbor.Unmarshal(installed, &prior); err != nil {
 				return err
 			}
 			if !sameEpochAnchor(&prior, a) {
-				return rctypes.ErrEpochAnchor
+				if prior.Epoch == ^uint64(0) || a.Epoch != prior.Epoch+1 || a.Slot <= prior.Slot {
+					return rctypes.ErrEpochAnchor
+				}
+				advance = true
 			}
 		}
 		if err := blocks.Put(key, data); err != nil {
@@ -540,7 +626,7 @@ func (db BoltDB) installEpochAnchorRootWithFault(block *ExecutedBlock, a *rctype
 				return err
 			}
 		}
-		if installed == nil {
+		if advance {
 			if err := safety.Put(keyEpochAnchor, anchorData); err != nil {
 				return err
 			}

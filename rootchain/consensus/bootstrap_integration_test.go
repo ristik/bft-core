@@ -17,6 +17,7 @@ import (
 	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
 	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
@@ -32,6 +33,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 	"github.com/unicitynetwork/bft-core/shardnode"
+	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -39,17 +41,110 @@ import (
 )
 
 type anchorReplica struct {
-	manager *ConsensusManager
-	net     *testnetwork.MockNet
-	store   *tbstore.TrustBaseStore
-	history *trusthistorystore.Store
-	db      storage.BoltDB
-	oldHead *abdrc.CommittedBlock
-	proof   handoff.OldCommitProof
-	body    evmroot.TrustBaseBodyV2
+	manager    *ConsensusManager
+	net        *testnetwork.MockNet
+	store      *tbstore.TrustBaseStore
+	history    *trusthistorystore.Store
+	db         storage.BoltDB
+	oldHead    *abdrc.CommittedBlock
+	proof      handoff.OldCommitProof
+	body       evmroot.TrustBaseBodyV2
+	oldSigners map[string]abcrypto.Signer
 }
 
 type oneEpochTrust struct{ tb *types.RootTrustBaseV1 }
+
+func stoppedHandoffReplica(t *testing.T, source *anchorReplica) *ConsensusManager {
+	t.Helper()
+	old, err := source.store.GetByEpoch(1)
+	require.NoError(t, err)
+	trust, err := tbstore.NewTrustBaseStore(memorydb.New(), testobservability.Default(t).Logger())
+	require.NoError(t, err)
+	require.NoError(t, trust.Store(old))
+	obs := testobservability.Default(t)
+	db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), "before-install.db"), storage.WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	bodyID := source.body.Identity()
+	require.NoError(t, db.StoreHandoffBody(bodyID[:], source.body.Encode()))
+	identity := sha256.Sum256([]byte("bundle-order-test"))
+	history, err := trusthistorystore.Open(context.Background(), memorydb.New(), old, identity, trustactivation.Verifier{})
+	require.NoError(t, err)
+	params := *NewConsensusParams()
+	params.NetworkProfileVersion = storage.ProfileHandoff
+	id := source.manager.id
+	cm, err := NewConsensusManager(id, trust, source.manager.orchestration, testnetwork.NewRootMockNetwork(),
+		source.oldSigners[id.String()], db, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
+	require.NoError(t, err)
+	cm.blockStore, err = storage.NewFromState(crypto.SHA256, source.oldHead, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
+	require.NoError(t, err)
+	return cm
+}
+
+func laterSuffixBundle(t *testing.T, source *anchorReplica) handoffdelivery.Bundle {
+	t.Helper()
+	original := handoffdelivery.Bundle{Proof: source.proof, Body: source.body, Snapshot: source.oldHead}
+	raw, err := types.Cbor.Marshal(original)
+	require.NoError(t, err)
+	var later handoffdelivery.Bundle
+	require.NoError(t, types.Cbor.Unmarshal(raw, &later))
+	qc := later.Proof.CommitQC
+	qc.VoteInfo.RoundNumber++
+	qc.VoteInfo.ParentRoundNumber++
+	qc.LedgerCommitInfo.RootChainRoundNumber++
+	voteHash, err := qc.VoteInfo.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	qc.LedgerCommitInfo.PreviousHash = voteHash
+	message, err := qc.LedgerCommitInfo.SigBytes()
+	require.NoError(t, err)
+	qc.Signatures = make(map[string]hex.Bytes)
+	for id, signer := range source.oldSigners {
+		sig, err := signer.SignBytes(message)
+		require.NoError(t, err)
+		qc.Signatures[id] = sig
+	}
+	later.Snapshot.CommitQc = qc
+	later.Snapshot.Block.Round++
+	return later
+}
+
+func TestHandoffBundleServeSuffixThenInstallAndInstallThenServe(t *testing.T) {
+	replicas, _, _ := newAnchorReplicas(t, 4)
+	var source *anchorReplica
+	for id, replica := range replicas {
+		if replica.oldSigners[id.String()] != nil {
+			source = replica
+			break
+		}
+	}
+	require.NotNil(t, source)
+	old, err := source.store.GetByEpoch(1)
+	require.NoError(t, err)
+	later := laterSuffixBundle(t, source)
+	first := later.Snapshot.ShardInfo[0]
+	_, err = handoffdelivery.Verify(later, old, first.Partition, first.Shard, first.ShardConfHash)
+	require.NoError(t, err)
+	t.Run("serve suffix install", func(t *testing.T) {
+		cm := stoppedHandoffReplica(t, source)
+		served, err := cm.HandoffBundle(context.Background(), 2)
+		require.NoError(t, err)
+		require.EqualValues(t, 4, served.Proof.CommitQC.LedgerCommitInfo.RootChainRoundNumber)
+		_, err = cm.InstallEpochGenesis(later.Proof, later.Snapshot, later.Body)
+		require.NoError(t, err)
+		retained, err := cm.HandoffBundle(context.Background(), 2)
+		require.NoError(t, err)
+		require.EqualValues(t, 4, retained.Proof.CommitQC.LedgerCommitInfo.RootChainRoundNumber)
+		require.Equal(t, cm.epochAnchor.GenesisID, source.manager.epochAnchor.GenesisID)
+	})
+	t.Run("install serve", func(t *testing.T) {
+		cm := stoppedHandoffReplica(t, source)
+		_, err := cm.InstallEpochGenesis(later.Proof, later.Snapshot, later.Body)
+		require.NoError(t, err)
+		served, err := cm.HandoffBundle(context.Background(), 2)
+		require.NoError(t, err)
+		require.EqualValues(t, 5, served.Proof.CommitQC.LedgerCommitInfo.RootChainRoundNumber)
+	})
+}
 
 func (s oneEpochTrust) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
 	if epoch != s.tb.Epoch {
@@ -214,6 +309,17 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		UC: &shardState.LastCR.UC, TR: &shardState.LastCR.Technical}
 	head := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 2, Epoch: 1, Round: commitSealRound,
 		Payload: &rctypes.Payload{Version: 2}}, ShardInfo: []abdrc.ShardInfo{shardInfo}, Control: &control, CommitQc: qc}
+	bundle := handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: head}
+	delivered, err := handoffdelivery.Verify(bundle, oldTrust, shardState.PartitionID, shardState.ShardID, shardState.ShardConfHash)
+	require.NoError(t, err)
+	deliveredBodyID := body.Identity()
+	require.Equal(t, deliveredBodyID[:], delivered.Genesis.NextBodyID)
+	tampered := *head
+	tampered.ShardInfo = append([]abdrc.ShardInfo(nil), head.ShardInfo...)
+	tampered.ShardInfo[0].IRTR.Round++
+	_, err = handoffdelivery.Verify(handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: &tampered}, oldTrust,
+		shardState.PartitionID, shardState.ShardID, shardState.ShardConfHash)
+	require.ErrorIs(t, err, handoffdelivery.ErrBundle)
 	replicas := make(map[peer.ID]*anchorReplica, len(newNodes))
 	var anchor *rctypes.EpochAnchor
 	for _, node := range newNodes {
@@ -230,7 +336,7 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		require.NoError(t, err)
 		require.NoError(t, trust.Store(oldTrust))
 		historyID := sha256.Sum256([]byte("epoch-anchor-integration"))
-		history, err := trusthistorystore.Open(context.Background(), memorydb.New(), oldTrust, historyID, nil)
+		history, err := trusthistorystore.Open(context.Background(), memorydb.New(), oldTrust, historyID, trustactivation.Verifier{})
 		require.NoError(t, err)
 		net := testnetwork.NewRootMockNetwork()
 		params := *NewConsensusParams()
@@ -240,6 +346,18 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		manager.blockStore, err = storage.NewFromState(crypto.SHA256, head, db, orchestration, obs.Logger(), storage.ProfileHandoff)
 		require.NoError(t, err)
 		installed, err := manager.InstallEpochGenesis(proof, head, body)
+		require.NoError(t, err)
+		served, err := manager.HandoffBundle(context.Background(), body.Epoch)
+		require.NoError(t, err)
+		_, err = handoffdelivery.Verify(*served, oldTrust, shardState.PartitionID, shardState.ShardID, shardState.ShardConfHash)
+		require.NoError(t, err)
+		shardHistory, err := shardnode.NewHistoricalTrustBaseStore(context.Background(), memorydb.New(), oldTrust, historyID, true)
+		require.NoError(t, err)
+		_, err = shardHistory.InstallHandoff(context.Background(), *served, shardState.PartitionID, shardState.ShardID, shardState.ShardConfHash)
+		require.NoError(t, err)
+		_, err = shardHistory.InstallHandoff(context.Background(), *served, shardState.PartitionID, shardState.ShardID, shardState.ShardConfHash)
+		require.NoError(t, err)
+		_, err = shardHistory.GetByEpoch(context.Background(), body.Epoch)
 		require.NoError(t, err)
 		transitionBytes, err := manager.InstalledEVMTransition(proof, body)
 		require.NoError(t, err)
@@ -257,7 +375,7 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		}
 		manager.pacemaker.Reset(context.Background(), anchor.Slot, nil, nil)
 		t.Cleanup(manager.pacemaker.Stop)
-		replicas[node.PeerConf.ID] = &anchorReplica{manager: manager, net: net, store: trust, history: history, db: db, oldHead: head, proof: proof, body: body}
+		replicas[node.PeerConf.ID] = &anchorReplica{manager: manager, net: net, store: trust, history: history, db: db, oldHead: head, proof: proof, body: body, oldSigners: oldSigners}
 	}
 	return replicas, anchor, oldUCAt
 }

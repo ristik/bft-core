@@ -1,8 +1,14 @@
 package shardnode
 
 import (
+	"bytes"
 	"context"
+	"crypto"
+	"errors"
+	"fmt"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/keyvaluedb"
 	"github.com/unicitynetwork/bft-core/m2contract"
 	"github.com/unicitynetwork/bft-core/trustactivation"
@@ -34,6 +40,55 @@ func (s *HistoricalTrustBaseStore) AppendVerified(ctx context.Context, in m2cont
 		return trusthistorystore.ErrUnsupportedV2
 	}
 	return s.history.AppendVerified(ctx, in, proof)
+}
+
+// InstallHandoff checks a fetched native proof, full shard snapshot and exact
+// local shard configuration before extending durable trust lineage.
+func (s *HistoricalTrustBaseStore) InstallHandoff(ctx context.Context, bundle handoffdelivery.Bundle,
+	partition types.PartitionID, shard types.ShardID, confHash []byte) (handoffdelivery.Verified, error) {
+	if !s.profile2 || bundle.Proof.Record.Epoch == ^uint64(0) {
+		return handoffdelivery.Verified{}, trusthistorystore.ErrUnsupportedV2
+	}
+	prior, err := s.history.ByEpoch(bundle.Proof.Record.Epoch)
+	if err != nil {
+		return handoffdelivery.Verified{}, err
+	}
+	var predecessor []byte
+	if prior.V1 != nil {
+		predecessor, err = prior.V1.Hash(crypto.SHA256)
+	} else if prior.V2 != nil {
+		predecessor = prior.BodyID[:]
+	} else {
+		return handoffdelivery.Verified{}, trusthistorystore.ErrHistory
+	}
+	if err != nil || !bytes.Equal(predecessor, bundle.Proof.Record.PredecessorBodyID) {
+		return handoffdelivery.Verified{}, handoffdelivery.ErrBundle
+	}
+	old, err := s.GetByEpoch(ctx, prior.Epoch)
+	if err != nil {
+		return handoffdelivery.Verified{}, err
+	}
+	verified, err := handoffdelivery.Verify(bundle, old, partition, shard, confHash)
+	if err != nil {
+		return handoffdelivery.Verified{}, err
+	}
+	id := bundle.Body.Identity()
+	interval := m2contract.TrustInterval{Body: bundle.Body, Activation: evmroot.ActivatedTrustBase{
+		BodyIdentity: id[:], EpochStart: verified.Genesis.Start, ActivationCommitID: verified.Record.RecordID[:]}}
+	proof, err := types.Cbor.Marshal(bundle.Proof)
+	if err != nil {
+		return handoffdelivery.Verified{}, err
+	}
+	if err := s.history.AppendVerified(ctx, interval, proof); err != nil {
+		if !errors.Is(err, trusthistorystore.ErrAlreadyExists) {
+			return handoffdelivery.Verified{}, err
+		}
+		stored, lookupErr := s.history.ByEpoch(bundle.Body.Epoch)
+		if lookupErr != nil || stored.V2 == nil || stored.BodyID != id || stored.Start != verified.Genesis.Start {
+			return handoffdelivery.Verified{}, fmt.Errorf("%w: fetched handoff conflicts with durable history", handoffdelivery.ErrBundle)
+		}
+	}
+	return verified, nil
 }
 
 func (s *HistoricalTrustBaseStore) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {

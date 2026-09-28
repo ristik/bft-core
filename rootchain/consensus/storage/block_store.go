@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -215,6 +216,22 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 	if err != nil {
 		return nil, fmt.Errorf("error processing block round %v, %w", block.Round, err)
 	}
+	if x.profile == ProfileHandoff && len(block.Payload.HandoffRecords) == 2 &&
+		exeBlock.ShardState.Control != nil && exeBlock.ShardState.Control.Phase == "endorsed" {
+		record, decodeErr := decodeOrderedRecord(block.Payload.HandoffRecords[0])
+		if decodeErr != nil || record.Kind != "freeze" {
+			return nil, ErrHandoffRecord
+		}
+		var companion FreezeAuthorization
+		if err := types.Cbor.Unmarshal(block.Payload.HandoffRecords[1], &companion); err != nil {
+			return nil, ErrHandoffRecord
+		}
+		if archive, ok := x.storage.(interface{ StoreHandoffBody([]byte, []byte) error }); ok {
+			if err := archive.StoreHandoffBody(record.NextBodyID, companion.Body); err != nil {
+				return nil, fmt.Errorf("retaining verified successor body: %w", err)
+			}
+		}
+	}
 	// append new block
 	if err = x.blockTree.Add(exeBlock); err != nil {
 		return nil, fmt.Errorf("adding block to the tree: %w", err)
@@ -306,6 +323,21 @@ func (x *BlockStore) ShardInfo(partition types.PartitionID, shard types.ShardID)
 
 func (x *BlockStore) GetState() (*abdrc.StateMsg, error) {
 	return x.blockTree.CurrentState()
+}
+
+func (x *BlockStore) HandoffBody(id []byte) ([]byte, error) {
+	archive, ok := x.storage.(interface{ HandoffBody([]byte) ([]byte, error) })
+	if !ok {
+		return nil, ErrHandoffRecord
+	}
+	return archive.HandoffBody(id)
+}
+
+func (x *BlockStore) HandoffCheckpoint() (*abdrc.CommittedBlock, *types.UnicityTreeCertificate, evmroot.OrderedHandoffRecord, error) {
+	if x.profile != ProfileHandoff {
+		return nil, nil, evmroot.OrderedHandoffRecord{}, ErrNetworkProfile
+	}
+	return x.blockTree.HandoffCheckpoint()
 }
 
 /*

@@ -7,6 +7,8 @@ import (
 	"math"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/trustactivation"
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
@@ -53,8 +55,7 @@ type v1HandoffAuthority struct {
 }
 
 // ConfigureHandoffAuthority installs the independently authenticated old v1
-// body before profile-2 records can execute. Epoch transitions remain closed
-// until the typed anchor implementation can install a verified v2 authority.
+// body before profile-2 records can execute.
 func (x *BlockStore) ConfigureHandoffAuthority(tb *types.RootTrustBaseV1) error {
 	if x.profile != ProfileHandoff || tb == nil || tb.Epoch != 1 {
 		return ErrHandoffRecord
@@ -80,6 +81,40 @@ func (x *BlockStore) ConfigureHandoffAuthority(tb *types.RootTrustBaseV1) error 
 		return err
 	}
 	x.handoffAuth = &v1HandoffAuthority{trust: &owned, predecessor: predecessor, link: link}
+	return nil
+}
+
+// ConfigureHandoffV2Authority takes the predecessor from verified trust
+// history. A runtime projection is only a signature-verification view; its
+// hash is never the D4 predecessor identity for a later handoff.
+func (x *BlockStore) ConfigureHandoffV2Authority(tb *types.RootTrustBaseV1, prior trusthistorystore.Record) error {
+	if x.profile != ProfileHandoff || tb == nil || prior.V2 == nil || prior.V1 != nil ||
+		prior.Epoch < 2 || prior.Epoch != tb.Epoch || prior.V2.Epoch != prior.Epoch ||
+		prior.V2.NetworkID != uint64(tb.NetworkID) || prior.BodyID != prior.V2.Identity() {
+		return ErrHandoffRecord
+	}
+	projection, err := trustactivation.Project(prior)
+	if err != nil || projection.EpochStart != tb.EpochStart || projection.QuorumThreshold != tb.QuorumThreshold ||
+		len(projection.RootNodes) != len(tb.RootNodes) {
+		return ErrHandoffRecord
+	}
+	for _, node := range projection.RootNodes {
+		if node == nil {
+			return ErrHandoffRecord
+		}
+		found := false
+		for _, actual := range tb.RootNodes {
+			if actual != nil && actual.NodeID == node.NodeID && actual.Stake == node.Stake && bytes.Equal(actual.SigKey, node.SigKey) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ErrHandoffRecord
+		}
+	}
+	predecessor := bytes.Clone(prior.BodyID[:])
+	x.handoffAuth = &v1HandoffAuthority{trust: projection, predecessor: predecessor, link: predecessor}
 	return nil
 }
 
@@ -222,6 +257,9 @@ func decodeD3Body(raw []byte) (evmroot.TrustBaseBodyV2, error) {
 	}
 	return body, nil
 }
+
+// DecodeHandoffBody checks the exact canonical body retained from Freeze.
+func DecodeHandoffBody(raw []byte) (evmroot.TrustBaseBodyV2, error) { return decodeD3Body(raw) }
 
 func optionalD3Bytes(value any) ([]byte, bool) {
 	if value == nil {

@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"errors"
 	"fmt"
@@ -10,9 +11,12 @@ import (
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/handoffdelivery"
+	"github.com/unicitynetwork/bft-core/m2contract"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -34,9 +38,24 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 	if err != nil {
 		return nil, fmt.Errorf("old root trust lineage: %w", err)
 	}
-	oldID, err := old.Hash(crypto.SHA256)
-	if err != nil || !bytes.Equal(oldID, proof.Record.PredecessorBodyID) {
+	prior, err := x.recoveryHistory.ByEpoch(proof.Record.Epoch)
+	if err != nil {
+		return nil, fmt.Errorf("old root trust lineage: %w", err)
+	}
+	var predecessor []byte
+	if prior.V1 != nil {
+		predecessor, err = old.Hash(crypto.SHA256)
+	} else if prior.V2 != nil {
+		predecessor = prior.BodyID[:]
+	} else {
+		return nil, errors.New("handoff predecessor has no verified trust body")
+	}
+	if err != nil || !bytes.Equal(predecessor, proof.Record.PredecessorBodyID) {
 		return nil, errors.New("handoff predecessor differs from verified old trust base")
+	}
+	oldID, err := old.Hash(crypto.SHA256)
+	if err != nil {
+		return nil, err
 	}
 	verified, err := handoff.VerifyOldCommitProof(proof, old)
 	if err != nil {
@@ -65,14 +84,43 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 	}
 	projected.StateHash = bytes.Clone(body.StateSummary)
 	projected.ChangeRecordHash = bytes.Clone(body.ChangeRecordHash)
+	bodyID := body.Identity()
+	interval := m2contract.TrustInterval{Body: body, Activation: evmroot.ActivatedTrustBase{
+		BodyIdentity: bodyID[:], EpochStart: g.Start, ActivationCommitID: bytes.Clone(verified.RecordID[:])}}
+	bundle := handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: head}
+	if head == nil || len(head.ShardInfo) == 0 {
+		return nil, errors.New("handoff snapshot has no shards")
+	}
+	first := head.ShardInfo[0]
+	if _, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+		return nil, err
+	}
+	if archive, ok := x.blockStore.GetDB().(handoffBundleArchive); ok {
+		if err := retainEquivalentHandoffBundle(archive, g.Epoch, bundle, old, g.ID()); err != nil {
+			return nil, err
+		}
+	}
 	safetyStore, ok := x.blockStore.GetDB().(epochAnchorSafetyStore)
 	if !ok {
 		return nil, errors.New("durable epoch anchor safety store unavailable")
 	}
 	if existing, err := safetyStore.ReadEpochAnchorSafety(); err != nil {
 		return nil, err
-	} else if existing != nil && (existing.Epoch != g.Epoch || !bytes.Equal(existing.GenesisID, g.ID())) {
+	} else if existing != nil && existing.Epoch >= g.Epoch && (existing.Epoch != g.Epoch || !bytes.Equal(existing.GenesisID, g.ID())) {
 		return nil, rctypes.ErrEpochAnchor
+	}
+	proofBytes, err := basetypes.Cbor.Marshal(proof)
+	if err != nil {
+		return nil, err
+	}
+	if err = x.recoveryHistory.AppendVerified(context.Background(), interval, proofBytes); err != nil {
+		if !errors.Is(err, trusthistorystore.ErrAlreadyExists) {
+			return nil, fmt.Errorf("persist verified successor lineage: %w", err)
+		}
+		stored, lookupErr := x.recoveryHistory.ByEpoch(g.Epoch)
+		if lookupErr != nil || stored.V2 == nil || stored.BodyID != bodyID || stored.Start != g.Start {
+			return nil, fmt.Errorf("successor lineage differs from installed body: %w", err)
+		}
 	}
 	newTrust, err := x.trustBaseStore.InstallV2Projection(projected)
 	if err != nil {
@@ -80,6 +128,13 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 	}
 	a, err := x.blockStore.InstallEpochAnchor(head, v, g)
 	if err != nil {
+		return nil, err
+	}
+	installed, err := x.recoveryHistory.ByEpoch(g.Epoch)
+	if err != nil {
+		return nil, err
+	}
+	if err := x.blockStore.ConfigureHandoffV2Authority(newTrust, installed); err != nil {
 		return nil, err
 	}
 	reqVerifier, err := NewIRChangeReqVerifier(x.params, x.blockStore)
@@ -102,6 +157,42 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 	return a, nil
 }
 
+type handoffBundleArchive interface {
+	HandoffBundle(uint64) ([]byte, error)
+	StoreHandoffBundle(uint64, []byte) error
+}
+
+// A later empty old-epoch suffix can produce another valid commit QC for H.
+// Both bundles derive the same genesis; retain the first served bundle so a
+// shard that fetched it and a root that installs a later suffix agree.
+func retainEquivalentHandoffBundle(archive handoffBundleArchive, epoch uint64, incoming handoffdelivery.Bundle,
+	old *basetypes.RootTrustBaseV1, genesisID []byte) error {
+	existing, err := archive.HandoffBundle(epoch)
+	if err != nil {
+		return err
+	}
+	if len(existing) != 0 {
+		var stored handoffdelivery.Bundle
+		if err := basetypes.Cbor.Unmarshal(existing, &stored); err != nil {
+			return handoffdelivery.ErrBundle
+		}
+		if stored.Snapshot == nil || len(stored.Snapshot.ShardInfo) == 0 {
+			return handoffdelivery.ErrBundle
+		}
+		first := stored.Snapshot.ShardInfo[0]
+		verified, err := handoffdelivery.Verify(stored, old, first.Partition, first.Shard, first.ShardConfHash)
+		if err != nil || stored.Body.Epoch != epoch || !bytes.Equal(verified.Genesis.ID(), genesisID) {
+			return handoffdelivery.ErrBundle
+		}
+		return nil
+	}
+	encoded, err := basetypes.Cbor.Marshal(incoming)
+	if err != nil {
+		return err
+	}
+	return archive.StoreHandoffBundle(epoch, encoded)
+}
+
 // InstalledEVMTransition derives the one acknowledgement payload from the
 // signed old control state and this manager's durable installed anchor.
 func (x *ConsensusManager) InstalledEVMTransition(proof handoff.OldCommitProof,
@@ -122,6 +213,74 @@ func (x *ConsensusManager) InstalledEVMTransition(proof handoff.OldCommitProof,
 		return nil, err
 	}
 	return transition.Encode()
+}
+
+// HandoffBundle serves a finalized bundle from durable archive, or assembles
+// it from the current committed old tip while activation is still pending.
+func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*handoffdelivery.Bundle, error) {
+	if x.params.NetworkProfileVersion != storage.ProfileHandoff || epoch < 2 {
+		return nil, rctypes.ErrEpochAnchor
+	}
+	archive, ok := x.blockStore.GetDB().(handoffBundleArchive)
+	if ok {
+		raw, err := archive.HandoffBundle(epoch)
+		if err != nil {
+			return nil, err
+		}
+		if len(raw) != 0 {
+			var bundle handoffdelivery.Bundle
+			if err := basetypes.Cbor.Unmarshal(raw, &bundle); err != nil {
+				return nil, err
+			}
+			if bundle.Body.Epoch != epoch || bundle.Proof.Record.Epoch+1 != epoch {
+				return nil, handoffdelivery.ErrBundle
+			}
+			if bundle.Snapshot == nil || len(bundle.Snapshot.ShardInfo) == 0 {
+				return nil, handoffdelivery.ErrBundle
+			}
+			old, err := x.trustBaseStore.GetByEpoch(bundle.Proof.Record.Epoch)
+			if err != nil {
+				return nil, handoffdelivery.ErrBundle
+			}
+			first := bundle.Snapshot.ShardInfo[0]
+			if _, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+				return nil, err
+			}
+			return &bundle, nil
+		}
+	}
+	head, path, record, err := x.blockStore.HandoffCheckpoint()
+	if err != nil || record.Epoch+1 != epoch {
+		return nil, handoffdelivery.ErrBundle
+	}
+	rawBody, err := x.blockStore.HandoffBody(record.NextBodyID)
+	if err != nil {
+		return nil, err
+	}
+	body, err := storage.DecodeHandoffBody(rawBody)
+	if err != nil {
+		return nil, err
+	}
+	bundle := handoffdelivery.Bundle{Proof: handoff.OldCommitProof{Profile: evmroot.D4Profile,
+		Record: record, Control: *head.Control, ControlPath: path, CommitQC: head.CommitQc}, Body: body, Snapshot: head}
+	old, err := x.trustBaseStore.GetByEpoch(record.Epoch)
+	if err != nil || len(head.ShardInfo) == 0 {
+		return nil, handoffdelivery.ErrBundle
+	}
+	first := head.ShardInfo[0]
+	if _, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+		return nil, err
+	}
+	if ok {
+		verified, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash)
+		if err != nil {
+			return nil, err
+		}
+		if err := retainEquivalentHandoffBundle(archive, epoch, bundle, old, verified.Genesis.ID()); err != nil {
+			return nil, err
+		}
+	}
+	return &bundle, nil
 }
 
 func (x *ConsensusManager) matchesInstalledAnchor(a *rctypes.EpochAnchor) bool {

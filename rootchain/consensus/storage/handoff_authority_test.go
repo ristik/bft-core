@@ -9,6 +9,8 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/trustactivation"
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -104,6 +106,9 @@ func TestAuthorizedFirstV2HandoffDerivesEpochGenesis(t *testing.T) {
 	addProfileBlock(t, f.store, 2, [][]byte{f.record("prepare", 2, 0).Bytes()})
 	freeze := f.record("freeze", 3, 0)
 	addProfileBlock(t, f.store, 3, [][]byte{freeze.Bytes(), f.companion(t, freeze, "old-a", "old-b", "old-c")})
+	retained, err := f.store.HandoffBody(freeze.NextBodyID)
+	require.NoError(t, err)
+	require.Equal(t, f.body.Encode(), retained)
 	commit := f.record("commit", 4, 0)
 	h := addProfileBlock(t, f.store, 4, [][]byte{commit.Bytes()})
 	v := evmroot.VerifiedHandoff{RecordID: commit.ID(), Record: commit, Root: h.RootHash,
@@ -129,6 +134,45 @@ func TestConfigureHandoffAuthorityRequiresAuthenticCurrentBase(t *testing.T) {
 	tb.Epoch = 1
 	tb.Signatures = nil
 	require.ErrorIs(t, f.store.ConfigureHandoffAuthority(&tb), ErrHandoffRecord)
+}
+
+func TestVerifiedV2AuthorityUsesBodyIDForNextFreeze(t *testing.T) {
+	f := newAuthorizedFixture(t)
+	priorID := f.body.Identity()
+	prior := trusthistorystore.Record{Epoch: 2, Start: 7, V2: &f.body, BodyID: priorID}
+	projected, err := trustactivation.Project(prior)
+	require.NoError(t, err)
+	require.NoError(t, f.store.ConfigureHandoffV2Authority(projected, prior))
+	require.Equal(t, priorID[:], f.store.handoffAuth.Predecessor())
+
+	candidate := bytes.Repeat([]byte{7}, 32)
+	parent := bytes.Repeat([]byte{8}, 32)
+	next := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: 5, Epoch: 3, EarliestActivation: 12,
+		Members: f.body.Members, RootThreshold: f.body.RootThreshold,
+		StateSummary: bytes.Repeat([]byte{6}, 32), PredecessorHash: priorID[:],
+		ChangeRecordHash: evmroot.D4CandidateContextHash(5, priorID[:], 0, candidate, 12)}
+	require.NoError(t, next.Validate())
+	nextID := next.Identity()
+	r := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 2, Attempt: 0, Kind: "freeze", OrderedRound: 9,
+		ActivationRound: 12, PredecessorBodyID: priorID[:], NextBodyID: nextID[:],
+		FrozenID:        evmroot.D4FrozenID(nextID[:], next.StateSummary, parent, candidate, 0, priorID[:]),
+		SuccessorTRHash: make([]byte, 32)}
+	message, err := EndorsementBytes(r)
+	require.NoError(t, err)
+	signer := f.signers[next.Members[0].NodeID]
+	signature, err := signer.SignBytes(message)
+	require.NoError(t, err)
+	companion, err := (FreezeAuthorization{Version: 1, Body: next.Encode(), Parent: parent,
+		Candidate: candidate, Signatures: map[string]hex.Bytes{next.Members[0].NodeID: signature}}).Bytes()
+	require.NoError(t, err)
+	_, err = f.store.handoffAuth.VerifyFreeze(r, companion)
+	require.NoError(t, err)
+	wrong := r
+	wrong.PredecessorBodyID = bytes.Repeat([]byte{1}, 32)
+	_, err = f.store.handoffAuth.VerifyFreeze(wrong, companion)
+	require.ErrorIs(t, err, ErrHandoffRecord)
+	prior.BodyID[0] ^= 1
+	require.ErrorIs(t, f.store.ConfigureHandoffV2Authority(projected, prior), ErrHandoffRecord)
 }
 
 func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {

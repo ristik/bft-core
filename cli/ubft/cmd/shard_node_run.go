@@ -259,6 +259,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		return fmt.Errorf("creating trust base store: %w", err)
 	}
 	var trustBaseStore shardnode.TrustBaseStore = initialTrustStore
+	var historicalTrust *shardnode.HistoricalTrustBaseStore
 
 	bootNodes, err := getBootStrapNodes(flags.BootstrapAddresses)
 	if err != nil {
@@ -319,7 +320,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		return err
 	}
 
-	executor, err := buildExecutor(ctx, flags, shardConf, &engineapi.VerifierContext{
+	verifierContext := &engineapi.VerifierContext{
 		NetworkID:     shardConf.NetworkID,
 		PartitionID:   shardConf.PartitionID,
 		ShardID:       shardConf.ShardID,
@@ -335,7 +336,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		// verifier-owned and consumed by the v2 bootstrap derivation.
 		GenesisOrigin:     origin,
 		BootstrapSnapshot: bootstrap,
-	})
+	}
+	executor, err := buildExecutor(ctx, flags, shardConf, verifierContext)
 	if err != nil {
 		return err
 	}
@@ -362,6 +364,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return fmt.Errorf("verifying historical trust store: %w", openErr)
 		}
 		trustBaseStore = historical
+		historicalTrust = historical
+		verifierContext.TrustBases = historical
 	}
 	if origin.Valid() && flags.Executor == "engine-api" {
 		// The agreed genesis hash: buildExecutor has just required the paired client's block 0 to equal
@@ -603,6 +607,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return node.Run(gctx) })
 	g.Go(func() error { return serveShardNodeRPC(gctx, flags, node) })
+	if flags.TrustHistoryProfile2 {
+		follower := &shardnode.HandoffFollower{Host: peer, History: historicalTrust,
+			Partition: shardConf.PartitionID, Shard: shardConf.ShardID, ConfHash: confHash,
+			AnchorEpoch: trustBases[0].Epoch, Directory: flags.ExecutionJournal + ".handoffs"}
+		g.Go(func() error { return follower.Run(gctx) })
+	}
 	return g.Wait()
 }
 

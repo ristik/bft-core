@@ -9,9 +9,11 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
 	rcnet "github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	abdrc "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	basetypes "github.com/unicitynetwork/bft-go-base/types"
 )
 
 type (
@@ -453,6 +455,37 @@ func (bt *BlockTree) CurrentState() (*rcnet.StateMsg, error) {
 		},
 		Pending: pending,
 	}, nil
+}
+
+// HandoffCheckpoint returns the current committed H (or an unchanged suffix)
+// with a path for its control leaf. The tree lock keeps the snapshot and path
+// from different committed roots from being paired by a concurrent request.
+func (bt *BlockTree) HandoffCheckpoint() (*rcnet.CommittedBlock, *basetypes.UnicityTreeCertificate, evmroot.OrderedHandoffRecord, error) {
+	bt.m.Lock()
+	defer bt.m.Unlock()
+	root := bt.root.data
+	if root == nil || root.ShardState.Control == nil || root.ShardState.Control.Phase != "committed" || root.CommitQc == nil {
+		return nil, nil, evmroot.OrderedHandoffRecord{}, ErrHandoffRecord
+	}
+	record, err := decodeOrderedRecord(root.ShardState.Control.RecordBytes)
+	if err != nil || record.Kind != "commit" {
+		return nil, nil, evmroot.OrderedHandoffRecord{}, ErrHandoffRecord
+	}
+	tree, _, err := root.ShardState.UnicityTree(crypto.SHA256)
+	if err != nil {
+		return nil, nil, evmroot.OrderedHandoffRecord{}, err
+	}
+	path, err := tree.Certificate(evmroot.D4ControlPartition)
+	if err != nil {
+		return nil, nil, evmroot.OrderedHandoffRecord{}, err
+	}
+	shards, err := toRecoveryShardInfo(root)
+	if err != nil {
+		return nil, nil, evmroot.OrderedHandoffRecord{}, err
+	}
+	head := &rcnet.CommittedBlock{Block: root.BlockData, ShardInfo: shards, Qc: root.Qc,
+		CommitQc: root.CommitQc, Control: root.ShardState.Control}
+	return head, path, record, nil
 }
 
 func toRecoveryShardInfo(block *ExecutedBlock) ([]rcnet.ShardInfo, error) {

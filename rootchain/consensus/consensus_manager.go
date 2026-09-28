@@ -231,6 +231,14 @@ func NewConsensusManager(
 		if err := bStore.ConfigureHandoffAuthority(trustBase); err != nil {
 			return nil, fmt.Errorf("handoff authority: %w", err)
 		}
+	} else if cParams.NetworkProfileVersion == storage.ProfileHandoff && installedAnchor != nil {
+		prior, historyErr := optional.RecoveryHistory.ByEpoch(installedAnchor.Epoch)
+		if historyErr != nil {
+			return nil, fmt.Errorf("handoff authority lineage: %w", historyErr)
+		}
+		if err := bStore.ConfigureHandoffV2Authority(trustBase, prior); err != nil {
+			return nil, fmt.Errorf("handoff authority: %w", err)
+		}
 	}
 	safetyModule, err := NewSafetyModule(trustBase.GetNetworkID(), nodeID.String(), signer, store)
 	if err != nil {
@@ -1242,9 +1250,19 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	if err != nil {
 		return fmt.Errorf("recovery, new block store init failed: %w", err)
 	}
-	if x.params.NetworkProfileVersion == storage.ProfileHandoff && x.epochAnchor == nil {
-		if err := blockStore.ConfigureHandoffAuthority(x.trustBase.Load()); err != nil {
-			return fmt.Errorf("recovery handoff authority: %w", err)
+	if x.params.NetworkProfileVersion == storage.ProfileHandoff {
+		if x.epochAnchor == nil {
+			if err := blockStore.ConfigureHandoffAuthority(x.trustBase.Load()); err != nil {
+				return fmt.Errorf("recovery handoff authority: %w", err)
+			}
+		} else {
+			prior, historyErr := x.recoveryHistory.ByEpoch(x.epochAnchor.Epoch)
+			if historyErr != nil {
+				return fmt.Errorf("recovery handoff authority lineage: %w", historyErr)
+			}
+			if err := blockStore.ConfigureHandoffV2Authority(x.trustBase.Load(), prior); err != nil {
+				return fmt.Errorf("recovery handoff authority: %w", err)
+			}
 		}
 	}
 	// create new verifier
