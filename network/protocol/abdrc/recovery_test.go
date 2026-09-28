@@ -41,6 +41,16 @@ func (h recoveryHistoryRecordOverride) ByEpoch(epoch uint64) (trusthistorystore.
 	return h.base.ByEpoch(epoch)
 }
 
+type recoveryHistoryMutating struct {
+	base   HistoricalTrustBases
+	mutate func()
+}
+
+func (h recoveryHistoryMutating) ByEpoch(epoch uint64) (trusthistorystore.Record, error) {
+	h.mutate()
+	return h.base.ByEpoch(epoch)
+}
+
 func TestRecoveryBlock_GetRound(t *testing.T) {
 	t.Run("recovery block is nil", func(t *testing.T) {
 		var block *CommittedBlock = nil
@@ -352,6 +362,20 @@ func TestStateMsg_Verify(t *testing.T) {
 			require.NoError(t, verifyRecoveryUC(shard, secondGenesis, crypto.SHA256, false))
 			require.ErrorContains(t, verifyRecoveryUC(shard, secondGenesis, crypto.SHA256, true), "invalid shard ID")
 			require.ErrorContains(t, sm.VerifyWithHistory(crypto.SHA256, current, history), "invalid shard ID")
+		})
+
+		t.Run("right epoch and shard but wrong shard configuration hash", func(t *testing.T) {
+			sm := makeState()
+			// The initial structural validation accepts the matching hash. Change
+			// only the expected recovery hash before historical UC verification.
+			shardConfHash := sm.CommittedHead.ShardInfo[1].ShardConfHash
+			err := sm.VerifyWithHistory(crypto.SHA256, current, recoveryHistoryMutating{
+				base: history,
+				mutate: func() {
+					shardConfHash[0]++
+				},
+			})
+			require.ErrorIs(t, err, ErrHistoricalUC)
 		})
 
 		t.Run("missing body never falls back", func(t *testing.T) {
