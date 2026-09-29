@@ -74,6 +74,28 @@ func (o *OperatorClient) CompleteEnrollment(ctx context.Context, conf *types.Par
 	return err
 }
 
+// AdvanceEpoch provisions the one successor scope through the operator channel.
+// Success fences the old client credential; issue a new session before resuming.
+func (o *OperatorClient) AdvanceEpoch(ctx context.Context, conf *types.PartitionDescriptionRecord, trust *types.RootTrustBaseV1) error {
+	if conf == nil || trust == nil {
+		return fmt.Errorf("%w: missing successor context", signingauthority.ErrContextMismatch)
+	}
+	confBytes, err := types.Cbor.Marshal(conf)
+	if err != nil {
+		return err
+	}
+	trustBytes, err := types.Cbor.Marshal(trust)
+	if err != nil {
+		return err
+	}
+	payload, err := types.Cbor.Marshal(advanceEpochPayload{Configuration: confBytes, TrustBase: trustBytes})
+	if err != nil {
+		return err
+	}
+	_, err = o.ex.call(ctx, opAdvanceEpoch, payload)
+	return err
+}
+
 // Status reports what the authority is holding.
 func (o *OperatorClient) Status(ctx context.Context) (signingauthority.Status, error) {
 	answer, err := o.ex.call(ctx, opStatus, nil)

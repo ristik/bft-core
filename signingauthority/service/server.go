@@ -306,7 +306,7 @@ func (s *Server) dispatch(ctx context.Context, endpoint Endpoint, req wireReques
 		if subtle.ConstantTimeCompare(req.Credential, s.cfg.OperatorCredential) != 1 {
 			return nil, errOperatorUnauthenticated
 		}
-		return s.operatorOp(operation, req.Payload)
+		return s.operatorOp(ctx, operation, req.Payload)
 	case ClientEndpoint:
 		if !operation.servedToClient() {
 			return nil, fmt.Errorf("%w: %s is not a client operation", errWrongEndpoint, operation)
@@ -386,8 +386,30 @@ func (s *Server) clientOp(ctx context.Context, session signingauthority.Session,
 	return nil, fmt.Errorf("%w: %s", errWrongEndpoint, operation)
 }
 
-func (s *Server) operatorOp(operation op, payload []byte) ([]byte, error) {
+func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) ([]byte, error) {
 	switch operation {
+	case opAdvanceEpoch:
+		var wire advanceEpochPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: successor context: %v", errMalformed, err)
+		}
+		var conf types.PartitionDescriptionRecord
+		var trust types.RootTrustBaseV1
+		if err := types.Cbor.Unmarshal(wire.Configuration, &conf); err != nil {
+			return nil, fmt.Errorf("%w: successor configuration: %v", errMalformed, err)
+		}
+		if err := types.Cbor.Unmarshal(wire.TrustBase, &trust); err != nil {
+			return nil, fmt.Errorf("%w: successor trust: %v", errMalformed, err)
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.authority.AdvanceEpoch(ctx, &conf, &trust); err != nil {
+			s.log.Warn("refusing epoch advance", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.hasSession = false
+		s.credential = nil
+		return nil, nil
 	case opCompleteEnrollment:
 		var conf types.PartitionDescriptionRecord
 		if err := types.Cbor.Unmarshal(payload, &conf); err != nil {

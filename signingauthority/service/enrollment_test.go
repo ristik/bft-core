@@ -128,4 +128,20 @@ func TestAPendingAuthorityIsCompletedThroughTheOperatorEndpoint(t *testing.T) {
 	verifier, err := conf.Validators[0].SigVerifier()
 	require.NoError(t, err)
 	require.NoError(t, signed.IsValid(verifier), "the response verifies under the key the completed configuration names")
+	nextTrust := *tb
+	nextTrust.Epoch = 2
+	require.NoError(t, operator.AdvanceEpoch(ctx, conf, &nextTrust))
+	_, err = client.RestoreStatus(ctx)
+	require.ErrorIs(t, err, signingauthority.ErrFenced, "advance fences the previous credential")
+	advanced, _, err := operator.Enrollment(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), *advanced.RootEpoch)
+	newCredential, err := operator.ReplaceSession(ctx)
+	require.NoError(t, err)
+	newClient, err := NewClient(ClientConfig{Dial: UnixDialer(clientPath), Credential: newCredential, Timeout: 10 * time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = newClient.Close() })
+	status, err := newClient.RestoreStatus(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(6), status.ReservedRound)
 }
