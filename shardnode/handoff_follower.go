@@ -99,8 +99,10 @@ func (f *HandoffFollower) fetch(ctx context.Context, epoch uint64) (handoffdeliv
 	}
 	try := func(id peer.ID, request func(context.Context, peer.ID, uint64) (handoffdelivery.Bundle, error)) (handoffdelivery.Bundle, bool) {
 		bundle, err := request(ctx, id, epoch)
-		if err == nil {
+		if err == nil && bundle.Body.Epoch == epoch && bundle.Proof.Record.Epoch+1 == epoch {
 			_, err = f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
+		} else {
+			return handoffdelivery.Bundle{}, false
 		}
 		return bundle, err == nil
 	}

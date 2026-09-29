@@ -71,6 +71,31 @@ func TestRecoveryIgnoresCoveredAuthorizingObservation(t *testing.T) {
 	require.Equal(t, shardnode.Hash(coveredHash[:]), chain.anchor.Hash)
 }
 
+func TestRecoveryKeepsSuccessorObservationsBelowPredecessorFrontierRound(t *testing.T) {
+	genesisHash := sha256.Sum256([]byte("genesis"))
+	genesisState := sha256.Sum256([]byte("genesis state"))
+	coveredHash := sha256.Sum256([]byte("covered"))
+	coveredState := sha256.Sum256([]byte("covered state"))
+	anchor := shardnode.BlockRef{Number: 2, Hash: coveredHash[:], StateRoot: coveredState[:]}
+	frontierUC := &types.UnicityCertificate{InputRecord: &types.InputRecord{Hash: abhex.Bytes(coveredState[:])}, UnicitySeal: &types.UnicitySeal{Epoch: 1, RootChainRoundNumber: 100}}
+	successor := func(round uint64) *types.UnicityCertificate {
+		return &types.UnicityCertificate{InputRecord: &types.InputRecord{Hash: abhex.Bytes(coveredState[:])}, UnicitySeal: &types.UnicitySeal{Epoch: 2, RootChainRoundNumber: round}}
+	}
+	latest := successor(50)
+	image := configuredprogress.JournalSnapshot{
+		Frontier:     &configuredprogress.FrontierSnapshot{Anchor: &frontier.Record{Height: 2, Round: 100, StateRoot: coveredState, Subject: archive.Request{BlockHash: coveredHash}}, ResultingUC: frontierUC},
+		Observations: []configuredprogress.JournalObservation{{UC: successor(40)}, {UC: latest}},
+	}
+	r := &ExecutionRecovery{Genesis: shardnode.BlockRef{Hash: genesisHash[:], StateRoot: genesisState[:]}, Executor: &replayExecutor{head: anchor, finalized: anchor}, Gate: shardnode.NewFinalityGate()}
+	r.snapshot = func(context.Context) (configuredprogress.JournalSnapshot, error) { return image, nil }
+	chain, err := r.chainFromImage(image)
+	require.NoError(t, err)
+	require.Equal(t, latest, chain.latest, "a successor round 50 follows predecessor round 100")
+	got, err := r.Recover(context.Background(), latest)
+	require.NoError(t, err)
+	require.Equal(t, anchor, got)
+}
+
 type replayExecutor struct {
 	head, finalized shardnode.BlockRef
 	refs            []shardnode.BlockRef

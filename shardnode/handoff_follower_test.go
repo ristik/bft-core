@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -229,7 +230,7 @@ func TestHandoffFollowerCatchUpWalksMissedEpochs(t *testing.T) {
 		AnchorEpoch: 1, Directory: t.TempDir(), ArchiveReplicas: []peer.ID{"archive"},
 		FetchArchive: func(_ context.Context, _ peer.ID, epoch uint64) (handoffdelivery.Bundle, error) {
 			requested = append(requested, epoch)
-			return handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{Epoch: epoch}}, nil
+			return handoffdelivery.Bundle{Proof: handoff.OldCommitProof{Record: evmroot.OrderedHandoffRecord{Epoch: epoch - 1}}, Body: evmroot.TrustBaseBodyV2{Epoch: epoch}}, nil
 		},
 		OnInstalled: func(_ context.Context, b handoffdelivery.Bundle, _ handoffdelivery.Verified) error {
 			installed = append(installed, b.Body.Epoch)
@@ -244,4 +245,29 @@ func TestHandoffFollowerCatchUpWalksMissedEpochs(t *testing.T) {
 		_, err := f.load(epoch)
 		require.NoError(t, err)
 	}
+}
+
+func TestHandoffFollowerCatchUpRejectsOlderArchiveBundleAndFallsThrough(t *testing.T) {
+	history := &sequentialHistory{last: 1}
+	shardPeer := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	old := handoffdelivery.Bundle{Proof: handoff.OldCommitProof{Record: evmroot.OrderedHandoffRecord{Epoch: 1}}, Body: evmroot.TrustBaseBodyV2{Epoch: 2}}
+	next := handoffdelivery.Bundle{Proof: handoff.OldCommitProof{Record: evmroot.OrderedHandoffRecord{Epoch: 2}}, Body: evmroot.TrustBaseBodyV2{Epoch: 3}}
+	var requested []string
+	f := &HandoffFollower{Host: shardPeer, History: history, Partition: 8, ConfHash: bytes.Repeat([]byte{5}, 32),
+		AnchorEpoch: 1, Directory: t.TempDir(), ArchiveReplicas: []peer.ID{"stale", "fresh"},
+		FetchArchive: func(_ context.Context, id peer.ID, epoch uint64) (handoffdelivery.Bundle, error) {
+			requested = append(requested, string(id)+"/"+fmt.Sprint(epoch))
+			if epoch == 2 || id == "stale" {
+				return old, nil
+			}
+			return next, nil
+		}}
+	bundles, err := f.CatchUp(context.Background(), 3)
+	require.NoError(t, err)
+	require.Equal(t, []string{"stale/2", "stale/3", "fresh/3"}, requested)
+	require.EqualValues(t, 3, history.last)
+	require.EqualValues(t, 3, bundles[3].Body.Epoch)
+	saved, err := f.load(3)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, saved.Body.Epoch, "an older bundle must not be stored as epoch 3")
 }

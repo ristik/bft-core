@@ -158,7 +158,7 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 		uc := current.Certificate()
 		var height uint64 // Zero means the durable certificate has no retained body yet.
 		for _, entry := range image.Candidates {
-			if entry.Certified && entry.ResultingUC != nil && entry.ResultingUC.GetRootEpoch() == uc.GetRootEpoch() && entry.ResultingUC.GetRootRoundNumber() == uc.GetRootRoundNumber() && entry.ResultingUC.GetRoundNumber() == uc.GetRoundNumber() && bytes.Equal(entry.Candidate.Hash, uc.InputRecord.BlockHash) {
+			if matchesCertifiedCandidate(entry, uc) {
 				height = entry.Candidate.Number
 				break
 			}
@@ -190,6 +190,11 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 func laterRootUC(a, b *types.UnicityCertificate) bool {
 	return a.GetRootEpoch() > b.GetRootEpoch() || a.GetRootEpoch() == b.GetRootEpoch() && a.GetRootRoundNumber() >= b.GetRootRoundNumber()
 }
+
+func matchesCertifiedCandidate(entry configuredprogress.JournalEntry, uc *types.UnicityCertificate) bool {
+	return entry.Certified && entry.ResultingUC != nil && entry.ResultingUC.GetRootEpoch() == uc.GetRootEpoch() && entry.ResultingUC.GetRootRoundNumber() == uc.GetRootRoundNumber() && entry.ResultingUC.GetRoundNumber() == uc.GetRoundNumber() && bytes.Equal(entry.Candidate.Hash, uc.InputRecord.BlockHash)
+}
+
 func (a *journalAdmission) RootEpoch() uint64 {
 	if a.context.Observation.EpochAuthority != nil {
 		if epoch, ready := a.context.Observation.EpochAuthority.CurrentRootEpoch(); ready {

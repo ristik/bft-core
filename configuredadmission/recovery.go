@@ -111,6 +111,10 @@ func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnaps
 		}
 		c.latest = image.Frontier.ResultingUC
 	}
+	frontierEpoch := uint64(0)
+	if c.latest != nil {
+		frontierEpoch = c.latest.GetRootEpoch()
+	}
 	entries := make(map[string]configuredprogress.JournalEntry)
 	for _, e := range image.Candidates {
 		if e.Certified {
@@ -118,7 +122,7 @@ func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnaps
 		}
 	}
 	for _, o := range image.Observations {
-		if image.Frontier != nil && image.Frontier.Anchor != nil && (o.UC.GetRootEpoch() < c.latest.GetRootEpoch() || o.UC.GetRootEpoch() == c.latest.GetRootEpoch() && o.UC.GetRootRoundNumber() <= image.Frontier.Anchor.Round) {
+		if image.Frontier != nil && image.Frontier.Anchor != nil && c.latest != nil && rootPositionAtOrBefore(o.UC.GetRootEpoch(), o.UC.GetRootRoundNumber(), frontierEpoch, image.Frontier.Anchor.Round) {
 			// Pruning may retain an older certificate solely because it
 			// authorizes a hot local proposal. The frontier already covers
 			// its body; it is not the recovery target.
@@ -168,6 +172,14 @@ func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnaps
 		c.byHash[string(e.Candidate.Hash)] = i + 1
 	}
 	return c, nil
+}
+
+func rootPositionAfter(epoch, round, otherEpoch, otherRound uint64) bool {
+	return epoch > otherEpoch || epoch == otherEpoch && round > otherRound
+}
+
+func rootPositionAtOrBefore(epoch, round, otherEpoch, otherRound uint64) bool {
+	return epoch < otherEpoch || epoch == otherEpoch && round <= otherRound
 }
 
 func (r *ExecutionRecovery) walkLimit() int {
@@ -277,7 +289,7 @@ func (r *ExecutionRecovery) Recover(ctx context.Context, held *types.UnicityCert
 			return shardnode.BlockRef{}, err
 		}
 	}
-	if held != nil && c.latest != nil && (held.GetRootEpoch() > c.latest.GetRootEpoch() || held.GetRootEpoch() == c.latest.GetRootEpoch() && held.GetRootRoundNumber() > c.latest.GetRootRoundNumber()) {
+	if held != nil && c.latest != nil && rootPositionAfter(held.GetRootEpoch(), held.GetRootRoundNumber(), c.latest.GetRootEpoch(), c.latest.GetRootRoundNumber()) {
 		return shardnode.BlockRef{}, fmt.Errorf("%w: held certificate is newer than durable journal", ErrRecoveryUnavailable)
 	}
 	return r.recoverChain(ctx, c, true)
@@ -574,7 +586,7 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 		if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, r.Context.Observation, e.ResultingUC, e.ResultingTR); err != nil {
 			return fmt.Errorf("%w: resulting certificate for %x: %w", ErrRecoveryConflict, b.Hash, err)
 		}
-		if rootinput.CheckEpochCertificates(e.AuthorizingUC, e.ResultingUC) != nil || e.AuthorizingUC.GetRootEpoch() == e.ResultingUC.GetRootEpoch() && e.AuthorizingUC.GetRootRoundNumber() >= e.ResultingUC.GetRootRoundNumber() {
+		if rootinput.CheckEpochCertificates(e.AuthorizingUC, e.ResultingUC) != nil || !rootPositionAfter(e.ResultingUC.GetRootEpoch(), e.ResultingUC.GetRootRoundNumber(), e.AuthorizingUC.GetRootEpoch(), e.AuthorizingUC.GetRootRoundNumber()) {
 			return fmt.Errorf("%w: authorizing and resulting certificates for %x do not share a forward root history", ErrRecoveryConflict, b.Hash)
 		}
 		ir := e.ResultingUC.InputRecord
