@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -30,11 +31,13 @@ var (
 	ErrManifestDuplicateRecipient = errors.New("registrygenesis: duplicate allocation recipient")
 	ErrManifestAddressCollision   = errors.New("registrygenesis: reserved or system address collision")
 	ErrManifestFeeBeneficiary     = errors.New("registrygenesis: fee beneficiary mismatch")
+	ErrManifestUnverifiedContract = errors.New("registrygenesis: contract state is not verified constructor export")
+	ErrManifestFeeCollectorCode   = errors.New("registrygenesis: fee beneficiary has no exported collector code")
+	ErrManifestVaultBeneficiary   = errors.New("registrygenesis: vault beneficiary cannot receive or claim native value")
 )
 
-// AllocationManifest is the versioned build input for funded genesis. It is metadata plus
-// ordinary allocation balances: contract code and initialized storage remain the responsibility
-// of the existing registrygenesis artifact pipeline.
+// AllocationManifest is the versioned build input for funded genesis. Contract code and
+// initialized storage are added only by ExportAllocationManifest and verified again at compile.
 type AllocationManifest struct {
 	Version             string               `json:"version"`
 	NativeSupply        string               `json:"nativeSupply"`
@@ -183,6 +186,9 @@ func CompileAllocationManifest(data []byte, expectedChainID uint64) ([]byte, err
 	if expectedChainID == 0 || m.Chain.ChainID != expectedChainID {
 		return nil, fmt.Errorf("%w: manifest chain id %d does not match shard chain id %d", ErrAllocationManifest, m.Chain.ChainID, expectedChainID)
 	}
+	if err := verifyConstructorExport(data, m); err != nil {
+		return nil, err
+	}
 	baseFee, ok := new(big.Int).SetString(m.Genesis.BaseFeePerGas, 10)
 	if !ok || baseFee.Sign() < 0 || baseFee.BitLen() > 64 {
 		return nil, fmt.Errorf("%w: baseFeePerGas must be an unsigned uint64 decimal string", ErrAllocationManifest)
@@ -267,6 +273,80 @@ func CompileAllocationManifest(data []byte, expectedChainID uint64) ([]byte, err
 		return nil, fmt.Errorf("%w: encoding standard genesis JSON: %v", ErrAllocationManifest, err)
 	}
 	return append(out, '\n'), nil
+}
+
+// verifyConstructorExport reruns the pinned constructors from the manifest's deterministic
+// deployment recipe and requires every declared contract allocation to match that result.
+// This prevents callers from supplying arbitrary runtime code/storage with a self-consistent
+// code hash. The exporter itself is intentionally one-way and does not call the compiler.
+func verifyConstructorExport(data []byte, m AllocationManifest) error {
+	allocations := make(map[common.Address]ManifestAllocation, len(m.Allocations))
+	for _, allocation := range m.Allocations {
+		allocations[common.HexToAddress(allocation.Recipient)] = allocation
+	}
+	if err := requireFeeCollectorCode(m); err != nil {
+		return err
+	}
+	for _, contract := range m.Contracts {
+		address := common.HexToAddress(contract.Address)
+		allocation, ok := allocations[address]
+		if !ok || allocation.Kind != "contract_pot" || allocation.State == nil {
+			if contract.Name == "feeCollector" {
+				return manifestError(ErrManifestFeeCollectorCode, "fee beneficiary %s must have an exported FeeCollector allocation", address)
+			}
+			return manifestError(ErrManifestUnverifiedContract, "contract %s must have an exported contract-pot allocation", contract.Name)
+		}
+		code, err := hexutil.Decode(allocation.State.Code)
+		if err != nil || len(code) == 0 {
+			if contract.Name == "feeCollector" {
+				return manifestError(ErrManifestFeeCollectorCode, "fee beneficiary %s must contain FeeCollector runtime code", address)
+			}
+			return manifestError(ErrManifestUnverifiedContract, "contract %s has invalid or empty runtime code", contract.Name)
+		}
+	}
+
+	exportedJSON, err := ExportAllocationManifest(data)
+	if err != nil {
+		return fmt.Errorf("%w: verify constructor export: %w", ErrManifestUnverifiedContract, err)
+	}
+	exported, err := DecodeAllocationManifest(exportedJSON)
+	if err != nil {
+		return fmt.Errorf("%w: decode verified constructor export: %w", ErrManifestUnverifiedContract, err)
+	}
+	verified := make(map[common.Address]ManifestAllocation, len(exported.Allocations))
+	for _, allocation := range exported.Allocations {
+		verified[common.HexToAddress(allocation.Recipient)] = allocation
+	}
+	for _, contract := range m.Contracts {
+		address := common.HexToAddress(contract.Address)
+		actual := allocations[address]
+		want, ok := verified[address]
+		if !ok || want.State == nil || !reflect.DeepEqual(actual.State, want.State) {
+			if contract.Name == "feeCollector" {
+				return manifestError(ErrManifestFeeCollectorCode, "fee beneficiary %s does not contain the verified FeeCollector constructor state", address)
+			}
+			return manifestError(ErrManifestUnverifiedContract, "contract %s state differs from verified constructor export", contract.Name)
+		}
+	}
+	return nil
+}
+
+func requireFeeCollectorCode(m AllocationManifest) error {
+	feeAddress := common.HexToAddress(m.FeeBeneficiary)
+	for _, allocation := range m.Allocations {
+		if common.HexToAddress(allocation.Recipient) != feeAddress {
+			continue
+		}
+		if allocation.Kind != "contract_pot" || allocation.State == nil {
+			break
+		}
+		code, err := hexutil.Decode(allocation.State.Code)
+		if err == nil && len(code) > 0 {
+			return nil
+		}
+		break
+	}
+	return manifestError(ErrManifestFeeCollectorCode, "fee beneficiary %s must have exported FeeCollector runtime code", feeAddress)
 }
 
 func validateAllocationManifest(m AllocationManifest) error {
@@ -391,8 +471,9 @@ func validateAllocationManifest(m AllocationManifest) error {
 				return fail("vesting beneficiaryKind must be eoa or contract_receiver")
 			}
 			if a.BeneficiaryKind == "contract_receiver" {
-				if _, declared := contractsByAddress(addresses, beneficiary); !declared {
-					return fail("contract vesting beneficiary %s must be a declared constructor-exported contract", beneficiary)
+				name, declared := contractsByAddress(addresses, beneficiary)
+				if !declared || name != "feeCollector" {
+					return manifestError(ErrManifestVaultBeneficiary, "contract vesting beneficiary %s must be the payable FeeCollector", beneficiary)
 				}
 			}
 		}

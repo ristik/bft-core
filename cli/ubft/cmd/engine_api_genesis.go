@@ -104,10 +104,11 @@ The output is the FINALIZED genesis: registrygenesis.PrepareGenesisJSON inserts 
 SealRegistry account at a_sr (its runtime code and the 22 initialized storage words) into the
 source allocation and derives the full shard configuration and genesis origin from it.
 
-Use --manifest to compile a strict versioned allocation/build manifest into the same standard JSON
-source pipeline. The manifest's chain ID must match the shard configuration, its fee beneficiary
-must be its declared FeeCollector, and allocation balances must sum exactly to nativeSupply. Contract
-artifact references are recorded metadata only; this command does not deploy or export contracts.
+Use --manifest with a strict versioned allocation/build manifest exported by
+engine-api export-manifest. The exporter executes and verifies the pinned constructors; this
+command reruns them and refuses contract state that differs from the verified output. The manifest's
+chain ID must match the shard configuration, its fee beneficiary must retain the exported
+FeeCollector code, and allocation balances must sum exactly to nativeSupply.
 
 Two artifacts are written. --out is the finalized standard JSON the execution client is started
 from. --full-shard-conf (default: beside --out) is the full shard configuration — the base conf

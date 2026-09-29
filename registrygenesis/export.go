@@ -25,7 +25,10 @@ var pinnedGenesisArtifacts embed.FS
 
 const GenesisContractsCommit = "e7eb3216549b772a9e1df2b1214976d7dd9e6e62"
 
-var ErrGenesisExport = errors.New("registrygenesis: constructor export failed")
+var (
+	ErrGenesisExport           = errors.New("registrygenesis: constructor export failed")
+	ErrGenesisPrincipalBalance = errors.New("registrygenesis: vault balance must equal principal")
+)
 
 type compilerArtifact struct {
 	ABI                 json.RawMessage `json:"abi"`
@@ -57,15 +60,17 @@ func ExportAllocationManifest(data []byte) ([]byte, error) {
 			return nil, fmt.Errorf("%w: contract %s sourceCommit must be pinned to %s", ErrGenesisExport, c.Name, GenesisContractsCommit)
 		}
 		name := artifactName(c.Name)
-		if _, ok := artifacts[name]; ok {
-			continue
-		}
 		raw, err := pinnedGenesisArtifacts.ReadFile("testdata/t1-artifacts/" + name + ".json")
 		if err != nil {
 			return nil, fmt.Errorf("%w: unsupported embedded artifact %q", ErrGenesisExport, c.Artifact)
 		}
 		if sum := sha256.Sum256(raw); hex.EncodeToString(sum[:]) != c.SHA256 {
 			return nil, fmt.Errorf("%w: artifact %s sha256 mismatch", ErrGenesisExport, c.Name)
+		}
+		if _, ok := artifacts[name]; ok {
+			// Each declaration pins the artifact independently. In particular, both vault
+			// entries must be checked even though they share the same compiler artifact.
+			continue
 		}
 		var a compilerArtifact
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -167,8 +172,8 @@ func ExportAllocationManifest(data []byte) ([]byte, error) {
 			}
 			amount, _ := new(big.Int).SetString(a.Amount, 10)
 			st.SetBalance(addr, uint256.MustFromBig(amount), 0)
-			if st.GetBalance(addr).ToBig().Cmp(amount) != 0 {
-				return nil, fmt.Errorf("%w: contract %s balance does not equal principal", ErrGenesisExport, a.Purpose)
+			if err := requirePrincipalBalance(addr, st.GetBalance(addr).ToBig(), amount); err != nil {
+				return nil, fmt.Errorf("%w: %s: %w", ErrGenesisExport, a.Purpose, err)
 			}
 			artifact := artifacts[artifactName(contractNameForAddress(m, addr))]
 			if len(artifact.StorageLayout.Storage) == 0 {
@@ -196,6 +201,13 @@ func ExportAllocationManifest(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: encode: %v", ErrGenesisExport, err)
 	}
 	return append(out, '\n'), nil
+}
+
+func requirePrincipalBalance(address common.Address, balance, principal *big.Int) error {
+	if balance.Cmp(principal) != 0 {
+		return fmt.Errorf("%w: address %s balance %s principal %s", ErrGenesisPrincipalBalance, address, balance, principal)
+	}
+	return nil
 }
 
 func validateVestingReceivers(m AllocationManifest, artifacts map[string]compilerArtifact, cfg *runtime.Config) error {
