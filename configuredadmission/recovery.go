@@ -57,6 +57,9 @@ type ExecutionRecovery struct {
 	TransportLimits shardnode.JournalTransportLimits
 	snapshot        func(context.Context) (configuredprogress.JournalSnapshot, error) // deterministic fault fixtures
 	fetch           func(context.Context, peer.ID, shardnode.JournalFetchRequest) ([]shardnode.JournalFetchEntry, error)
+	// FetchArchive retrieves an authenticated suffix after peer hot-journal
+	// sources are unavailable. Returned entries pass through admitFetched too.
+	FetchArchive func(context.Context, shardnode.BlockRef, []byte) ([]shardnode.JournalFetchEntry, error)
 }
 
 var (
@@ -531,7 +534,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 		if len(actualTarget) == 0 && len(entries) > 0 {
 			actualTarget = entries[len(entries)-1].Block.Hash
 		}
-		if err := r.admitFetched(ctx, after, actualTarget, entries, advance); err == nil {
+		if err := r.admitFetched(ctx, after, actualTarget, entries, advance, "peer_recovery"); err == nil {
 			return nil
 		} else {
 			// A peer controls its response bytes. Never propagate its conflict or
@@ -544,12 +547,61 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 		}
 	}
 	if last != nil {
-		return fmt.Errorf("%w: target %x unavailable from %d peers: %v", ErrRecoveryUnavailable, target, len(r.Providers), last)
+		peerErr := fmt.Errorf("%w: target %x unavailable from %d peers: %v", ErrRecoveryUnavailable, target, len(r.Providers), last)
+		if r.FetchArchive != nil {
+			archiveErr := r.fetchFromArchive(ctx, after, target, advance)
+			if archiveErr == nil {
+				return nil
+			}
+			if errors.Is(archiveErr, ErrRecoveryBudget) {
+				return r.archiveBudgetUnavailable(ctx, target, archiveErr)
+			}
+			if errors.Is(archiveErr, ErrRecoveryInvalid) || errors.Is(archiveErr, ErrRecoveryConflict) {
+				return archiveErr
+			}
+			return fmt.Errorf("%w: target %x unavailable from peers and archive: %v", ErrRecoveryUnavailable, target, archiveErr)
+		}
+		return peerErr
+	}
+	if r.FetchArchive != nil {
+		archiveErr := r.fetchFromArchive(ctx, after, target, advance)
+		if archiveErr == nil {
+			return nil
+		}
+		if errors.Is(archiveErr, ErrRecoveryBudget) {
+			return r.archiveBudgetUnavailable(ctx, target, archiveErr)
+		}
+		if errors.Is(archiveErr, ErrRecoveryInvalid) || errors.Is(archiveErr, ErrRecoveryConflict) {
+			return archiveErr
+		}
+		return fmt.Errorf("%w: target %x unavailable from peers and archive: %v", ErrRecoveryUnavailable, target, archiveErr)
 	}
 	return fmt.Errorf("%w: target %x unavailable from %d peers", ErrRecoveryUnavailable, target, len(r.Providers))
 }
 
-func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.BlockRef, target []byte, entries []shardnode.JournalFetchEntry, advance bool) error {
+func (r *ExecutionRecovery) archiveBudgetUnavailable(ctx context.Context, target []byte, err error) error {
+	retryErr := fmt.Errorf("%w: archive recovery budget exceeded for target %x: %v", ErrRecoveryUnavailable, target, err)
+	if r.Log != nil {
+		r.Log.WarnContext(ctx, "archive recovery deferred", "target", fmt.Sprintf("%x", target), "error", retryErr)
+	}
+	return retryErr
+}
+
+func (r *ExecutionRecovery) fetchFromArchive(ctx context.Context, after shardnode.BlockRef, target []byte, advance bool) error {
+	entries, err := r.FetchArchive(ctx, after, target)
+	if err != nil {
+		return err
+	}
+	if err := r.admitFetched(ctx, after, target, entries, advance, "archive_recovery"); err != nil {
+		return err
+	}
+	if r.Log != nil {
+		r.Log.InfoContext(ctx, "certificate suffix recovered", slog.String("source", "archive_recovery"), slog.String("target", fmt.Sprintf("%x", target)))
+	}
+	return nil
+}
+
+func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.BlockRef, target []byte, entries []shardnode.JournalFetchEntry, advance bool, source string) error {
 	if len(entries) == 0 || len(entries) > r.limits().Blocks {
 		return fmt.Errorf("%w: peer suffix block count", ErrRecoveryBudget)
 	}
@@ -645,7 +697,7 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 			return fmt.Errorf("%w: backfilling fetched certificate %x: %w", ErrRecoveryUnavailable, b.Hash, err)
 		}
 		if r.Log != nil {
-			r.Log.InfoContext(ctx, "certificate admitted", slog.String("source", "peer_recovery"),
+			r.Log.InfoContext(ctx, "certificate admitted", slog.String("source", source),
 				slog.String("block", fmt.Sprintf("%x", b.Hash)), slog.Uint64("height", b.Number),
 				slog.Uint64("round", e.ResultingUC.GetRoundNumber()), slog.Uint64("rootRound", e.ResultingUC.GetRootRoundNumber()))
 		}
