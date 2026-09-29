@@ -337,8 +337,14 @@ exports these exact instrument names (Prometheus form):
 
 ```sh
 curl -fsS REPLACE_SHARD_RPC_BASE_URL/api/v1/metrics \
-  | grep -E '^archive_(pending|acknowledged|lagging)_records([ {]|$)'
+  | grep -E '^ab_archive_(pending|acknowledged|lagging)_records([ {]|$)'
 ```
+
+The Prometheus exporter is configured with namespace `ab`, so these series are
+`ab_archive_pending_records`, `ab_archive_acknowledged_records`, and
+`ab_archive_lagging_records`. An empty grep result means the metric name did not
+match or the exporter is unavailable; it does **not** mean the backlog is zero.
+Confirm `/api/v1/metrics` is enabled and inspect the full response before proceeding.
 
 Before and after any maintenance, preserve the output and inspect the replica
 process log for these exact wait diagnostics:
