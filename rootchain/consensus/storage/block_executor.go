@@ -216,7 +216,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 				return nil, err
 			}
 			if control.Phase == "endorsed" || control.Phase == "committed" {
-				if _, err := frozenShard(nextShardState, control.FrozenParent); err != nil {
+				if _, err := frozenShard(nextShardState, shardConfs, control.FrozenParent); err != nil {
 					return nil, err
 				}
 			}
@@ -232,7 +232,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		}
 		shardKey := types.PartitionShardID{PartitionID: irChReq.Partition, ShardID: irChReq.Shard.Key()}
 		if nextShardState.Control != nil && (nextShardState.Control.Phase == "endorsed" || nextShardState.Control.Phase == "committed") {
-			frozen, err := frozenShard(nextShardState, nextShardState.Control.FrozenParent)
+			frozen, err := frozenShard(nextShardState, shardConfs, nextShardState.Control.FrozenParent)
 			if err != nil {
 				return nil, err
 			}
@@ -276,7 +276,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 // The handoff binds one certified EVM parent. Its unique shard entry remains
 // identifiable by that hash while the root refuses changes to it. Other
 // partitions retain their normal certification path.
-func frozenShard(state ShardStates, parent []byte) (types.PartitionShardID, error) {
+func frozenShard(state ShardStates, configs map[types.PartitionShardID]*types.PartitionDescriptionRecord, parent []byte) (types.PartitionShardID, error) {
 	var selected types.PartitionShardID
 	found := false
 	if len(parent) != 32 {
@@ -285,6 +285,12 @@ func frozenShard(state ShardStates, parent []byte) (types.PartitionShardID, erro
 	for key, shard := range state.States {
 		if shard == nil || shard.IR == nil || !bytes.Equal(shard.IR.BlockHash, parent) {
 			continue
+		}
+		// The parent hash identifies one certified EVM shard, not an
+		// aggregator that happens to present the same hash.
+		conf := configs[key]
+		if conf == nil || conf.PartitionTypeID != 8 {
+			return selected, ErrHandoffRecord
 		}
 		if found {
 			return selected, ErrHandoffRecord

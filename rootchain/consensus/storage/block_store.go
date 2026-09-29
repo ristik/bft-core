@@ -229,7 +229,11 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 			if control == nil || control.Phase != "endorsed" {
 				return nil, ErrHandoffRecord
 			}
-			key, err := frozenShard(parentBlock.ShardState, control.FrozenParent)
+			configs, err := x.orchestration.ShardConfigs(parentBlock.GetRound())
+			if err != nil {
+				return nil, err
+			}
+			key, err := frozenShard(parentBlock.ShardState, configs, control.FrozenParent)
 			if err != nil {
 				return nil, err
 			}
@@ -373,7 +377,12 @@ func (x *BlockStore) CommittedFrozenParent(parent []byte) bool {
 	if x.profile != ProfileHandoff {
 		return false
 	}
-	_, err := frozenShard(x.blockTree.Root().ShardState, parent)
+	root := x.blockTree.Root()
+	configs, err := x.orchestration.ShardConfigs(root.GetRound())
+	if err != nil {
+		return false
+	}
+	_, err = frozenShard(root.ShardState, configs, parent)
 	return err == nil
 }
 
@@ -391,7 +400,11 @@ func (x *BlockStore) HighQCFrozenParent(parent []byte) bool {
 	if err != nil {
 		return false
 	}
-	_, err = frozenShard(block.ShardState, parent)
+	configs, err := x.orchestration.ShardConfigs(block.GetRound())
+	if err != nil {
+		return false
+	}
+	_, err = frozenShard(block.ShardState, configs, parent)
 	return err == nil
 }
 
@@ -408,8 +421,26 @@ func (x *BlockStore) FrozenShardAt(round uint64) (types.PartitionShardID, bool, 
 	if control == nil || control.Phase != "endorsed" {
 		return zero, false, nil
 	}
-	key, err := frozenShard(parent.ShardState, control.FrozenParent)
+	configs, err := x.orchestration.ShardConfigs(parent.GetRound())
+	if err != nil {
+		return zero, false, err
+	}
+	key, err := frozenShard(parent.ShardState, configs, control.FrozenParent)
 	return key, err == nil, err
+}
+
+// CertifiedEVMShardAt selects the sole EVM shard with the verified parent at
+// the given root round. Ambiguous or non-EVM matches fail closed.
+func (x *BlockStore) CertifiedEVMShardAt(round uint64, frozenParent []byte) (types.PartitionShardID, error) {
+	parent, err := x.blockTree.FindBlock(round)
+	if err != nil {
+		return types.PartitionShardID{}, err
+	}
+	configs, err := x.orchestration.ShardConfigs(round)
+	if err != nil {
+		return types.PartitionShardID{}, err
+	}
+	return frozenShard(parent.ShardState, configs, frozenParent)
 }
 
 /*

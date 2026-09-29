@@ -450,17 +450,14 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		if record.ActivationRound < round+8 {
 			record.ActivationRound = round + 8
 		}
-		if len(parent.ShardState.States) != 1 {
-			return nil, ErrHandoffApproval
+		key, err := x.blockStore.CertifiedEVMShardAt(parent.GetRound(), control.FrozenParent)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrHandoffApproval, err)
 		}
-		for _, shard := range parent.ShardState.States {
-			if shard == nil {
-				return nil, ErrHandoffApproval
-			}
-			record.SuccessorTRHash, err = shard.TR.Hash()
-			if err != nil {
-				return nil, err
-			}
+		shard := parent.ShardState.States[key]
+		record.SuccessorTRHash, err = shard.TR.Hash()
+		if err != nil {
+			return nil, err
 		}
 		record.Kind = "commit"
 		return [][]byte{record.Bytes()}, nil

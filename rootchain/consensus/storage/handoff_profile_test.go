@@ -73,6 +73,80 @@ func installTestFrozenShard(t *testing.T, s *BlockStore, parent []byte) {
 	require.NoError(t, s.storage.WriteBlock(root, true))
 }
 
+func installTestAggregatorShards(t *testing.T, s *BlockStore) [2]types.PartitionShardID {
+	t.Helper()
+	left, right := (types.ShardID{}).Split()
+	ids := [2]types.ShardID{left, right}
+	var keys [2]types.PartitionShardID
+	configs, err := s.orchestration.ShardConfigs(1)
+	require.NoError(t, err)
+	evmKey := configs[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}].Validators[0].SigKey
+	root := s.blockTree.Root()
+	for i, id := range ids {
+		conf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 9, PartitionTypeID: 9, ShardID: id,
+			Validators: []*types.NodeInfo{{NodeID: "n", SigKey: evmKey, Stake: 1}}}
+		key := types.PartitionShardID{PartitionID: 9, ShardID: id.Key()}
+		si, err := NewShardInfo(conf, crypto.SHA256)
+		require.NoError(t, err)
+		si.IR.BlockHash = bytes.Repeat([]byte{byte(i + 10)}, 32)
+		root.ShardState.States[key] = si
+		configs[key] = conf
+		keys[i] = key
+	}
+	s.orchestration = mockOrchestration{shardConfigs: func(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
+		return configs, nil
+	}}
+	tree, _, err := root.ShardState.UnicityTree(crypto.SHA256)
+	require.NoError(t, err)
+	root.RootHash = tree.RootHash()
+	if root.CommitQc != nil && root.CommitQc.LedgerCommitInfo != nil {
+		root.CommitQc.LedgerCommitInfo.Hash = root.RootHash
+	}
+	require.NoError(t, s.storage.WriteBlock(root, true))
+	return keys
+}
+
+func TestFrozenEVMShardSelectionRejectsIsolatedMutations(t *testing.T) {
+	parent := bytes.Repeat([]byte{0x42}, 32)
+	evm := types.PartitionShardID{PartitionID: 8}
+	agg := types.PartitionShardID{PartitionID: 9}
+	other := types.PartitionShardID{PartitionID: 10}
+	base := func() (ShardStates, map[types.PartitionShardID]*types.PartitionDescriptionRecord) {
+		return ShardStates{States: map[types.PartitionShardID]*ShardInfo{
+			evm:   {IR: &types.InputRecord{BlockHash: bytes.Clone(parent)}},
+			agg:   {IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{1}, 32)}},
+			other: {IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{2}, 32)}},
+		}}, map[types.PartitionShardID]*types.PartitionDescriptionRecord{
+			evm: {PartitionTypeID: 8}, agg: {PartitionTypeID: 9}, other: {PartitionTypeID: 9},
+		}
+	}
+	state, configs := base()
+	key, err := frozenShard(state, configs, parent)
+	require.NoError(t, err)
+	require.Equal(t, evm, key)
+
+	t.Run("wrong shard", func(t *testing.T) {
+		state, configs := base()
+		state.States[evm].IR.BlockHash = bytes.Repeat([]byte{3}, 32)
+		state.States[agg].IR.BlockHash = bytes.Clone(parent)
+		_, err := frozenShard(state, configs, parent)
+		require.ErrorIs(t, err, ErrHandoffRecord)
+	})
+	t.Run("ambiguous EVM", func(t *testing.T) {
+		state, configs := base()
+		state.States[other].IR.BlockHash = bytes.Clone(parent)
+		configs[other].PartitionTypeID = 8
+		_, err := frozenShard(state, configs, parent)
+		require.ErrorIs(t, err, ErrHandoffRecord)
+	})
+	t.Run("EVM and aggregator collide", func(t *testing.T) {
+		state, configs := base()
+		state.States[agg].IR.BlockHash = bytes.Clone(parent)
+		_, err := frozenShard(state, configs, parent)
+		require.ErrorIs(t, err, ErrHandoffRecord)
+	})
+}
+
 func record(kind string, round, activation uint64, frozen, body, tr []byte) []byte {
 	return (evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, Attempt: 0, OrderedRound: round,
 		PredecessorBodyID: make([]byte, 32), FrozenID: frozen, NextBodyID: body,
@@ -403,6 +477,30 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 	s := profileStore(t)
 	parent := bytes.Repeat([]byte{0x42}, 32)
 	installTestFrozenShard(t, s, parent)
+	aggregators := installTestAggregatorShards(t, s)
+	shardIDs := [2]types.ShardID{}
+	shardIDs[0], shardIDs[1] = (types.ShardID{}).Split()
+	assertAggregators := func(block *ExecutedBlock, round uint64) {
+		t.Helper()
+		for _, key := range aggregators {
+			require.Equal(t, bytes.Repeat([]byte{byte(round)}, 32), []byte(block.ShardState.States[key].IR.BlockHash))
+		}
+		certs, err := block.GenerateCertificates(&rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{
+			Version: 1, NetworkID: 5, RootChainRoundNumber: round, Epoch: block.BlockData.Epoch, Hash: block.RootHash}})
+		require.NoError(t, err)
+		certified := map[string]bool{}
+		for _, cert := range certs {
+			if cert.Partition != 9 {
+				continue
+			}
+			certified[cert.Shard.Key()] = true
+			require.Equal(t, round, cert.UC.InputRecord.RoundNumber)
+			require.Equal(t, block.BlockData.Epoch, cert.UC.UnicitySeal.Epoch)
+		}
+		for _, key := range aggregators {
+			require.True(t, certified[key.ShardID], "aggregator shard must receive a certificate")
+		}
+	}
 	predecessor := make([]byte, 32)
 	bodies := [][]byte{bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)}
 	restart := func() {
@@ -415,13 +513,17 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		prior, err := s.Block(round - 1)
 		require.NoError(t, err)
 		block := &rctypes.BlockData{Version: 2, Epoch: epoch, Round: round,
-			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{record.Bytes()}},
+			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{record.Bytes()},
+				Requests: []*rctypes.IRChangeReq{{Partition: 9, Shard: shardIDs[0]}, {Partition: 9, Shard: shardIDs[1]}}},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1,
 				Epoch: epoch, CurrentRootHash: prior.RootHash}}}
-		_, err = s.Add(block, nil)
+		_, err = s.Add(block, mockIRVerifier{verify: func(_ uint64, _ *rctypes.IRChangeReq) (*types.InputRecord, error) {
+			return &types.InputRecord{Version: 1, RoundNumber: round, BlockHash: bytes.Repeat([]byte{byte(round)}, 32)}, nil
+		}})
 		require.NoError(t, err)
 		added, err := s.Block(round)
 		require.NoError(t, err)
+		assertAggregators(added, round)
 		return added
 	}
 	refuseEVM := func(epoch, round uint64, want error) {
@@ -457,23 +559,28 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		add(epoch, base, prepare)
 		restart()
 		require.Equal(t, "prepared", mustBlock(t, s, base).ShardState.Control.Phase)
+		assertAggregators(mustBlock(t, s, base), base)
 		freeze := makeRecord("freeze", base+1)
 		freeze.SuccessorTRHash = make([]byte, 32)
 		add(epoch, base+1, freeze)
 		restart()
 		require.Equal(t, "endorsed", mustBlock(t, s, base+1).ShardState.Control.Phase)
+		assertAggregators(mustBlock(t, s, base+1), base+1)
 		refuseEVM(epoch, base+2, ErrHandoffFrozen)
 		commit := makeRecord("commit", base+2)
 		h := add(epoch, base+2, commit)
 		restart()
 		require.Equal(t, "committed", mustBlock(t, s, base+2).ShardState.Control.Phase)
+		assertAggregators(mustBlock(t, s, base+2), base+2)
 		refuseEVM(epoch, base+3, ErrHandoffSuffix)
-		if epoch == 2 {
-			break
-		}
 		// Certify H, install the successor anchor, then restart before its
 		// first ordinary block and the next changed committee's handoff.
-		suffix := addProfileBlock(t, s, base+3, nil)
+		prior := mustBlock(t, s, base+2)
+		_, err = s.Add(&rctypes.BlockData{Version: 2, Epoch: epoch, Round: base + 3,
+			Payload: &rctypes.Payload{Version: 2}, Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{
+				RoundNumber: base + 2, Epoch: epoch, CurrentRootHash: prior.RootHash}}}, nil)
+		require.NoError(t, err)
+		suffix := mustBlock(t, s, base+3)
 		_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{
 			RoundNumber: base + 3, ParentRoundNumber: base + 2, Epoch: epoch},
 			LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: base + 2,
@@ -494,11 +601,17 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		predecessor = body
 		restart()
 		first, err := s.Add(&rctypes.BlockData{Version: 2, Epoch: epoch + 1, Round: genesis.Start,
-			Anchor: anchor, Payload: &rctypes.Payload{Version: 2}}, nil)
+			Anchor: anchor, Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{
+				{Partition: 9, Shard: shardIDs[0]}, {Partition: 9, Shard: shardIDs[1]},
+			}}}, mockIRVerifier{verify: func(_ uint64, _ *rctypes.IRChangeReq) (*types.InputRecord, error) {
+			return &types.InputRecord{Version: 1, RoundNumber: genesis.Start,
+				BlockHash: bytes.Repeat([]byte{byte(genesis.Start)}, 32)}, nil
+		}})
 		require.NoError(t, err)
 		require.NotEmpty(t, first)
 		restart()
 		require.Equal(t, "idle", mustBlock(t, s, genesis.Start).ShardState.Control.Phase)
+		assertAggregators(mustBlock(t, s, genesis.Start), genesis.Start)
 	}
 }
 

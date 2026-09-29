@@ -257,7 +257,7 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 	bodyID := body.Identity()
 	_, shardValidators := testutils.CreateTestNodes(t, 3)
 	shardConf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: partitionID,
-		ShardID: shardID, PartitionTypeID: 999, TypeIDLen: 8, UnitIDLen: 256,
+		ShardID: shardID, PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256,
 		T2Timeout: 2500 * time.Millisecond, Validators: shardValidators, Epoch: 0, EpochStart: 1}
 	shardState, err := storage.NewShardInfo(shardConf, crypto.SHA256)
 	require.NoError(t, err)

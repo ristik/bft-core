@@ -120,20 +120,20 @@ func (x *BlockStore) AnchoredFrozenParent(trHash, parent []byte) error {
 	if !isEpochAnchorRoot(root) {
 		return rctypes.ErrEpochAnchor
 	}
-	matched := 0
-	for _, shard := range root.ShardState.States {
-		if shard == nil || shard.IR == nil {
-			return rctypes.ErrEpochAnchor
-		}
-		digest, err := shard.TR.Hash()
-		if err != nil {
-			return err
-		}
-		if bytes.Equal(digest, trHash) && bytes.Equal(shard.IR.BlockHash, parent) {
-			matched++
-		}
+	configs, err := x.orchestration.ShardConfigs(root.ShardState.Control.OrderedRound)
+	if err != nil {
+		return err
 	}
-	if matched != 1 {
+	selected, err := frozenShard(root.ShardState, configs, parent)
+	if err != nil {
+		return rctypes.ErrEpochAnchor
+	}
+	shard := root.ShardState.States[selected]
+	digest, err := shard.TR.Hash()
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(digest, trHash) {
 		return rctypes.ErrEpochAnchor
 	}
 	return nil
