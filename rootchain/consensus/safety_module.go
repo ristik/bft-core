@@ -2,6 +2,7 @@ package consensus
 
 import (
 	gocrypto "crypto"
+	"errors"
 	"fmt"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -9,6 +10,8 @@ import (
 	"github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+var ErrAlreadyVotedForRound = errors.New("already voted for round")
 
 type (
 	SafetyModule struct {
@@ -52,7 +55,7 @@ func (s *SafetyModule) isSafeToVote(block *drctypes.BlockData, lastRoundTC *drct
 	blockRound := block.Round
 	// never vote for the same round twice
 	if hvr := s.storage.GetHighestVotedRound(); blockRound <= hvr {
-		return fmt.Errorf("already voted for round %d, last voted round %d", blockRound, hvr)
+		return fmt.Errorf("%w %d, last voted round %d", ErrAlreadyVotedForRound, blockRound, hvr)
 	}
 	qcRound := block.GetParentRound()
 	// normal case, block is extended from last QC

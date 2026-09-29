@@ -2,6 +2,8 @@ package consensus
 
 import (
 	"bytes"
+	"fmt"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -11,7 +13,9 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
@@ -24,6 +28,61 @@ func initSafetyModule(t *testing.T, id string, db SafetyStorage) *SafetyModule {
 	require.NotNil(t, safety)
 	require.NotNil(t, safety.verifier)
 	return safety
+}
+
+func TestCompetingHandoffAbortAndCommitFollowDurableVoteLocks(t *testing.T) {
+	predecessor, body, frozen := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32)
+	previous := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, Attempt: 0,
+		OrderedRound: 2, ActivationRound: 7, PredecessorBodyID: predecessor,
+		NextBodyID: body, FrozenID: frozen, Kind: "freeze"}
+	abort := previous
+	abort.Kind = "abort"
+	abort.OrderedRound = 3
+	abortProof, err := (storage.AbortAuthorization{Version: 1, Signatures: map[string]hex.Bytes{"old-a": {1}, "old-b": {2}, "old-c": {3}}}).Bytes()
+	require.NoError(t, err)
+	commit := previous
+	commit.Kind = "commit"
+	commit.OrderedRound = 3
+	commit.SuccessorTRHash = bytes.Repeat([]byte{4}, 32)
+	parentQC := &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 1, Epoch: 1, CurrentRootHash: bytes.Repeat([]byte{9}, 32)}}
+	abortBlock := &drctypes.BlockData{Version: 2, Round: 2, Epoch: 1, Qc: parentQC,
+		Payload: &drctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), abortProof}}}
+	commitBlock := &drctypes.BlockData{Version: 2, Round: 2, Epoch: 1, Qc: parentQC,
+		Payload: &drctypes.Payload{Version: 2, HandoffRecords: [][]byte{commit.Bytes()}}}
+	validators := 4
+	var abortVotes, commitVotes int
+	for i := 0; i < validators; i++ {
+		signer, err := abcrypto.NewInMemorySecp256K1Signer()
+		require.NoError(t, err)
+		db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), "vote-lock.db"), storage.WithNoSync())
+		require.NoError(t, err)
+		id := fmt.Sprintf("validator-%d", i)
+		first, second := abortBlock, commitBlock
+		if i == 3 { // one validator sees the competing H proposal first
+			first, second = commitBlock, abortBlock
+		}
+		module, err := NewSafetyModule(types.NetworkLocal, id, signer, db)
+		require.NoError(t, err)
+		vote, err := module.MakeVote(first, bytes.Repeat([]byte{byte(i + 10)}, 32), nil, nil)
+		require.NoError(t, err, "first proposal observed by this replica is eligible")
+		if first == abortBlock {
+			abortVotes++
+		} else {
+			commitVotes++
+		}
+		// Model a crash after the vote reached durable safety storage and a
+		// leader replacement proposing the competing transition on that round.
+		restarted, err := NewSafetyModule(types.NetworkLocal, id, signer, db)
+		require.NoError(t, err)
+		_, err = restarted.MakeVote(second, bytes.Repeat([]byte{byte(i + 20)}, 32), nil, nil)
+		require.ErrorIs(t, err, ErrAlreadyVotedForRound, "restart must retain the same-round vote lock")
+		require.NotNil(t, vote)
+		require.NoError(t, db.Close())
+	}
+	require.Equal(t, 3, abortVotes)
+	require.Equal(t, 1, commitVotes)
+	require.GreaterOrEqual(t, abortVotes, 3, "only Abort can form the old committee's 3-of-4 quorum")
+	require.Less(t, commitVotes, 3, "conflicting H cannot also form a certificate after leader change")
 }
 
 func TestIsConsecutive(t *testing.T) {

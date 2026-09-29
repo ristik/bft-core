@@ -44,6 +44,7 @@ func NewRootMockNetwork() *MockNet {
 		{protocolID: network.ProtocolRootStateReq, msgStruct: abdrc.StateRequestMsg{}},
 		{protocolID: network.ProtocolRootStateResp, msgStruct: abdrc.StateMsg{}},
 		{protocolID: network.ProtocolRootHandoffApproval, msgStruct: abdrc.HandoffApprovalMsg{}},
+		{protocolID: network.ProtocolRootHandoffAbort, msgStruct: abdrc.HandoffAbortApprovalMsg{}},
 	})
 	if err != nil {
 		panic(fmt.Errorf("failed to register protocols: %w", err))

@@ -127,6 +127,25 @@ func TestAuthorizedFirstV2HandoffDerivesEpochGenesis(t *testing.T) {
 	require.ErrorIs(t, err, evmroot.ErrD4Anchor)
 }
 
+func TestAbortBlockRejectedAfterCertifiedH(t *testing.T) {
+	f := newAuthorizedFixture(t)
+	addProfileBlock(t, f.store, 2, [][]byte{f.record("prepare", 2, 0).Bytes()})
+	freeze := f.record("freeze", 3, 0)
+	addProfileBlock(t, f.store, 3, [][]byte{freeze.Bytes(), f.companion(t, freeze, "old-a", "old-b", "old-c")})
+	commit := f.record("commit", 4, 0)
+	committed := addProfileBlock(t, f.store, 4, [][]byte{commit.Bytes()})
+	require.Equal(t, "committed", committed.ShardState.Control.Phase)
+
+	abort := f.record("abort", 5, 0)
+	companion := f.abortCompanion(t, abort, "old-a", "old-b", "old-c")
+	block := &rctypes.BlockData{Version: 2, Round: 5, Epoch: 1, Payload: &rctypes.Payload{Version: 2,
+		HandoffRecords: [][]byte{abort.Bytes(), companion}}}
+	_, err := applyHandoffRecord(committed.ShardState.Control, block.Payload.HandoffRecords[0], 5, 1, block.Round,
+		f.store.handoffAuth, block.Payload.HandoffRecords[1])
+	require.ErrorIs(t, err, ErrAbortAfterH)
+	require.ErrorIs(t, err, ErrHandoffRecord)
+}
+
 func TestConfigureHandoffAuthorityRequiresAuthenticCurrentBase(t *testing.T) {
 	f := newAuthorizedFixture(t)
 	tb := *f.store.handoffAuth.(*v1HandoffAuthority).trust

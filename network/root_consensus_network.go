@@ -14,6 +14,7 @@ const (
 	ProtocolRootStateReq        = "/ab/root-state-req/0.0.1"
 	ProtocolRootStateResp       = "/ab/root-state-resp/0.0.1"
 	ProtocolRootHandoffApproval = "/ab/root-handoff-approval/1.0.0"
+	ProtocolRootHandoffAbort    = "/ab/root-handoff-abort/1.0.0"
 )
 
 func NewLibP2RootConsensusNetwork(self *Peer, capacity uint, sendTimeout time.Duration, obs Observability) (*LibP2PNetwork, error) {
@@ -33,6 +34,7 @@ func NewLibP2RootConsensusNetwork(self *Peer, capacity uint, sendTimeout time.Du
 		{ProtocolID: ProtocolRootStateReq, Timeout: sendTimeout, MsgType: abdrc.StateRequestMsg{}},
 		{ProtocolID: ProtocolRootStateResp, Timeout: sendTimeout, MsgType: abdrc.StateMsg{}},
 		{ProtocolID: ProtocolRootHandoffApproval, Timeout: approvalTimeout, MsgType: abdrc.HandoffApprovalMsg{}},
+		{ProtocolID: ProtocolRootHandoffAbort, Timeout: approvalTimeout, MsgType: abdrc.HandoffAbortApprovalMsg{}},
 	}
 	if err = n.RegisterSendProtocols(sendProtocolDescriptions); err != nil {
 		return nil, err
@@ -65,6 +67,10 @@ func NewLibP2RootConsensusNetwork(self *Peer, capacity uint, sendTimeout time.Du
 		{
 			ProtocolID: ProtocolRootHandoffApproval,
 			TypeFn:     func() any { return &abdrc.HandoffApprovalMsg{} },
+		},
+		{
+			ProtocolID: ProtocolRootHandoffAbort,
+			TypeFn:     func() any { return &abdrc.HandoffAbortApprovalMsg{} },
 		},
 	}
 	if err = n.RegisterReceiveProtocols(receiveProtocolDescriptions); err != nil {
