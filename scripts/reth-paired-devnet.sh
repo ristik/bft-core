@@ -684,15 +684,6 @@ echo
 echo "=== 5. the v2 bootstrap certifies a real EVM block 1 ==="
 preflightFailures=$failures
 ./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1
-if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
-  f8_start || { fail "mixed aggregator startup failed"; exit 1; }
-  for _ in $(seq 1 90); do
-    if f8_trace >/dev/null 2>&1; then break; fi
-    sleep 1
-  done
-  f8_trace >/dev/null || { fail "not all mixed shards entered certified root state"; exit 1; }
-  pass "three aggregator shards certified alongside the EVM partition; UC/TR/EVM trace recorded"
-fi
 
 echo "waiting for block 1 and a certificate (up to 180s) ..."
 mined=false
@@ -740,6 +731,23 @@ if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
     fi
   done
   pass "all four validators imported the certified bootstrap block before H4"
+fi
+
+# Wait until the bootstrap partition certificate is committed before joining the three
+# independent aggregator shards. Their handshakes ask roots for partition state, so starting
+# them before block 1 is certified creates a needless unknown-partition retry loop.
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+  if ! $mined || ! $certified; then
+    fail "cannot start mixed aggregators without the certified EVM bootstrap"
+    exit 1
+  fi
+  f8_start || { fail "mixed aggregator startup failed"; exit 1; }
+  for _ in $(seq 1 90); do
+    if f8_trace >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  f8_trace >/dev/null || { fail "not all mixed shards entered certified root state"; exit 1; }
+  pass "three aggregator shards certified alongside the EVM partition; UC/TR/EVM trace recorded"
 fi
 
 if [ "${M2_PROFILE2:-0}" = 1 ]; then
