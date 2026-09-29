@@ -218,5 +218,9 @@ for initialHash in $(printf '%b' "$txHashes"); do
 done
 m2_handoff 2 4 5 '1 2 3 4' "$(m2_root_addr 4)" \
   'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+  echo "F8 mixed lane completed one root handoff while all aggregator shards remained active"
+  return 0
+fi
 m2_handoff 3 3 6 '1 2 3 5' "$(m2_root_addr 3)" \
   'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25870' || return 1

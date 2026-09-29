@@ -785,7 +785,13 @@ if [ "${M2_PROFILE2:-0}" = 1 ]; then
     fail "profile-2 two-handoff lane failed"
     exit 1
   fi
-  pass "two profile-2 handoffs replaced validator keys and certified paid transactions"
+  if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+    f8_trace || { fail "aggregator shards lost root coverage after handoff"; exit 1; }
+    pass "one root handoff replaced validator keys and certified paid transactions"
+    pass "all three aggregator shards remained live through the root handoff"
+  else
+    pass "two profile-2 handoffs replaced validator keys and certified paid transactions"
+  fi
 fi
 
 echo
