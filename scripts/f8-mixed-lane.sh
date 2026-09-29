@@ -261,6 +261,6 @@ f8_stop() {
     [ -n "${F8_PIDS[$i]:-}" ] && kill "${F8_PIDS[$i]}" 2>/dev/null || true
   done
   for i in 0 1 2; do
-    [ -n "${F8_PIDS[$i]}" ] && wait "${F8_PIDS[$i]}" 2>/dev/null || true
+    [ -n "${F8_PIDS[$i]:-}" ] && wait "${F8_PIDS[$i]}" 2>/dev/null || true
   done
 }
