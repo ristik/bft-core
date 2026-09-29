@@ -35,6 +35,17 @@ jq '{authorityId,nodeId,rootEpoch,shardEpoch,enrollmentComplete,shardConfHash,ge
   REPLACE_EVIDENCE_DIR/authority-before.json
 ```
 
+For journal-enabled shards, the read-only status endpoint is available when the
+node is started with `--rpc-server-address HOST:PORT`. Capture its JSON snapshot
+alongside the authority status:
+
+```sh
+build/ubft shard-node status --url REPLACE_SHARD_RPC_BASE_URL \
+  > REPLACE_EVIDENCE_DIR/node-status-before.json
+jq '{currentRootEpoch,activatedHandoffs,journal,pruneFrontier,restoreBase,latestLocalV2Archive,replicas,authority}' \
+  REPLACE_EVIDENCE_DIR/node-status-before.json
+```
+
 The exact successful shard log records used by the lane are:
 
 ```text
@@ -317,6 +328,11 @@ than the saved high-water. Keep the existing authority and client credential; do
 not restart the authority. Signing resumes only after the restore replay and the
 authority high-water gate both pass.
 
+Capture the shared status command before and after restore. Require the reported
+root epoch and activated handoffs to match the committed history; compare journal
+occupancy, restore base, prune frontier, and latest local v2 record with the
+restore evidence.
+
 **STOP:** restore exits; the pinned block/state/receipt roots differ; the status
 shows another authority lifetime, changed key fingerprint, `keyLost` or `faulted`;
 the reserved round did not increase; or no certificate under the current epoch is
@@ -327,10 +343,26 @@ empty BFT and archive paths.
 
 **Evidence:** the publisher requires acknowledgements from both configured
 replicas before the frontier worker can prune. The merged scripts do not contain
-a one-replica-at-a-time maintenance/restart procedure. Per-replica acknowledgement
-and frontier inspection are pending; see Gaps.
+a one-replica-at-a-time maintenance/restart procedure. The new read-only
+`shard-node status` command exposes the durable frontier and per-replica
+acknowledgement heights; independent operator evidence remains pending.
 
-Before taking a replica out, scrape the affected shard node's Prometheus endpoint.
+Before taking a replica out, inspect the affected shard node's status. It must
+have been started with `--rpc-server-address HOST:PORT`:
+
+```sh
+build/ubft shard-node status --url REPLACE_SHARD_RPC_BASE_URL \
+  > REPLACE_EVIDENCE_DIR/operator-status-before.json
+jq '{currentRootEpoch,pruneFrontier,replicas}' \
+  REPLACE_EVIDENCE_DIR/operator-status-before.json
+```
+
+Require a non-null prune frontier and both configured replicas' acknowledged
+heights at or above that frontier, with no reported replica error. A command
+failure or missing frontier is a STOP condition. This is a read-only snapshot;
+it does not authorize taking a replica offline.
+
+The Prometheus endpoint is an additional backlog cross-check:
 The node must have been started with `--metrics prometheus` and
 `--rpc-server-address HOST:PORT` for `/api/v1/metrics` to exist. The publisher
 exports these exact instrument names (Prometheus form):
@@ -357,10 +389,12 @@ grep -E 'msg="(archive publication waiting|archive replica waiting|certified fro
 Do not take a second replica out while one is unavailable. Do not continue when
 `archive_pending_records` or `archive_lagging_records` is nonzero, when the two
 replicas do not both acknowledge a recent certified record, or when
-`certified frontier waiting` reports an error. The aggregate metrics do not name
-which replica acknowledged a record, and there is no CLI to read the committed
-frontier height/sequence. Without independent per-replica and frontier evidence,
-stop before restarting any replica.
+`certified frontier waiting` reports an error. After maintenance, repeat the
+status and metrics checks before touching the other replica. The status endpoint
+reports the last acknowledged heights and publisher's latest per-peer transfer
+error; it does not prove a replica process is healthy between read attempts.
+There is still no operator-safe replica restart command, so see Gaps and stop
+before any restart that lacks a deployment-owned procedure.
 
 ## 5. Shard-node restart after handoffs
 
@@ -409,6 +443,8 @@ latest admitted block and each authority status. After every procedure, capture 
 same outputs and compare root epoch, certified height/hash, state/receipt roots,
 authority key fingerprint, generation and reserved round. Keep root/shard logs,
 the archive pin output, and the exact commands in a dated evidence directory.
+Also capture the shared `shard-node status` JSON before and after each journaled
+operation; treat an unavailable or invalid status response as a STOP condition.
 
 Stop and do not resume signing on any of these conditions:
 
@@ -440,10 +476,11 @@ not a complete recovery authority:
    real command, but the merged profile-2 lane does not call it for each EVM
    authority or rehearse its session replacement and shard reconnect sequence.
    The operator sequence in procedure 1 remains pending live/private acceptance.
-4. **Replica/frontier visibility and lifecycle:** metrics provide aggregate
-   acknowledged/lagging counts but not peer identity; no CLI reads the durable
-   frontier or safely restarts one archive replica. The lane's process helpers
-   are topology-specific and not an operator service manager.
+4. **Replica lifecycle:** `shard-node status` reports the durable frontier,
+   configured peer acknowledgement heights, and latest publisher errors. There
+   is still no operator-safe command to take one archive replica offline and
+   restart it; the lane's process helpers are topology-specific, not a service
+   manager.
 5. **Execution-version activation/support policy:** the lane prints source/client
    pins and exercises current binaries, but there is no rolling version activation
    command, supported-version matrix, rollback procedure, or defined recovery
