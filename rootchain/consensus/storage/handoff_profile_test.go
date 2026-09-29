@@ -26,9 +26,14 @@ func emptyOrchestration() mockOrchestration {
 	}}
 }
 
-type testRecordAuthority struct{}
+type testRecordAuthority struct{ predecessor []byte }
 
-func (testRecordAuthority) Predecessor() []byte { return make([]byte, 32) }
+func (a testRecordAuthority) Predecessor() []byte {
+	if len(a.predecessor) != 0 {
+		return a.predecessor
+	}
+	return make([]byte, 32)
+}
 func (testRecordAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) ([]byte, error) {
 	return bytes.Repeat([]byte{0x42}, 32), nil
 }
@@ -392,6 +397,101 @@ func TestInstallEpochAnchorFromRecoveryCheckpoint(t *testing.T) {
 	require.Equal(t, a, recoveredAnchor.RootAnchor())
 	_, err = recoveredAnchor.Block(7)
 	require.Error(t, err)
+}
+
+func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
+	s := profileStore(t)
+	parent := bytes.Repeat([]byte{0x42}, 32)
+	installTestFrozenShard(t, s, parent)
+	predecessor := make([]byte, 32)
+	bodies := [][]byte{bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)}
+	restart := func() {
+		var err error
+		s, err = New(crypto.SHA256, s.storage, s.orchestration, logger.New(t), ProfileHandoff)
+		require.NoError(t, err)
+		s.handoffAuth = testRecordAuthority{predecessor: predecessor}
+	}
+	add := func(epoch, round uint64, record evmroot.OrderedHandoffRecord) *ExecutedBlock {
+		prior, err := s.Block(round - 1)
+		require.NoError(t, err)
+		block := &rctypes.BlockData{Version: 2, Epoch: epoch, Round: round,
+			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{record.Bytes()}},
+			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1,
+				Epoch: epoch, CurrentRootHash: prior.RootHash}}}
+		_, err = s.Add(block, nil)
+		require.NoError(t, err)
+		added, err := s.Block(round)
+		require.NoError(t, err)
+		return added
+	}
+	for epoch := uint64(1); epoch <= 2; epoch++ {
+		base := uint64(2)
+		if epoch == 2 {
+			base = 8
+		}
+		body := bodies[epoch-1]
+		frozen := bytes.Repeat([]byte{byte(epoch + 2)}, 32)
+		tr, err := s.blockTree.Root().ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}].TR.Hash()
+		require.NoError(t, err)
+		makeRecord := func(kind string, round uint64) evmroot.OrderedHandoffRecord {
+			return evmroot.OrderedHandoffRecord{Network: 5, Epoch: epoch, OrderedRound: round,
+				PredecessorBodyID: predecessor, NextBodyID: body, FrozenID: frozen,
+				ActivationRound: base + 5, SuccessorTRHash: tr, Kind: kind}
+		}
+		prepare := makeRecord("prepare", base)
+		prepare.FrozenID = make([]byte, 32)
+		prepare.SuccessorTRHash = make([]byte, 32)
+		add(epoch, base, prepare)
+		restart()
+		require.Equal(t, "prepared", mustBlock(t, s, base).ShardState.Control.Phase)
+		freeze := makeRecord("freeze", base+1)
+		freeze.SuccessorTRHash = make([]byte, 32)
+		add(epoch, base+1, freeze)
+		restart()
+		require.Equal(t, "endorsed", mustBlock(t, s, base+1).ShardState.Control.Phase)
+		commit := makeRecord("commit", base+2)
+		h := add(epoch, base+2, commit)
+		restart()
+		require.Equal(t, "committed", mustBlock(t, s, base+2).ShardState.Control.Phase)
+		if epoch == 2 {
+			break
+		}
+		// Certify H, install the successor anchor, then restart before its
+		// first ordinary block and the next changed committee's handoff.
+		suffix := addProfileBlock(t, s, base+3, nil)
+		_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{
+			RoundNumber: base + 3, ParentRoundNumber: base + 2, Epoch: epoch},
+			LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: base + 2,
+				Epoch: epoch, Hash: h.RootHash}})
+		require.NoError(t, err)
+		checkpoint := &abdrc.CommittedBlock{Block: suffix.BlockData, Control: suffix.ShardState.Control,
+			CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: suffix.RootHash}}}
+		checkpoint.ShardInfo, err = toRecoveryShardInfo(suffix)
+		require.NoError(t, err)
+		verified := evmroot.VerifiedHandoff{RecordID: commit.ID(), Record: commit, Root: suffix.RootHash,
+			ControlDigest: suffix.ShardState.Control.Digest(), OrderRound: base + 2,
+			CommitSealRound: base + 3, Epoch: epoch}
+		genesis := evmroot.EpochGenesis{Network: 5, Epoch: epoch + 1, Start: base + 5,
+			OrderedRound: base + 2, NextBodyID: body, RecordID: commit.ID(), Root: suffix.RootHash,
+			ControlDigest: verified.ControlDigest, FrozenID: frozen, SuccessorTRHash: tr}
+		anchor, err := s.InstallEpochAnchor(checkpoint, verified, genesis)
+		require.NoError(t, err)
+		predecessor = body
+		restart()
+		first, err := s.Add(&rctypes.BlockData{Version: 2, Epoch: epoch + 1, Round: genesis.Start,
+			Anchor: anchor, Payload: &rctypes.Payload{Version: 2}}, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, first)
+		restart()
+		require.Equal(t, "idle", mustBlock(t, s, genesis.Start).ShardState.Control.Phase)
+	}
+}
+
+func mustBlock(t *testing.T, s *BlockStore, round uint64) *ExecutedBlock {
+	t.Helper()
+	block, err := s.Block(round)
+	require.NoError(t, err)
+	return block
 }
 
 func TestProfileSwitchRejectsUnsupported(t *testing.T) {
