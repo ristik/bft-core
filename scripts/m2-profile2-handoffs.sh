@@ -143,8 +143,9 @@ m2_handoff() {
   generate_log_configuration "test-nodes/root$new/"
   m2_next_trust_base "$epoch" "$replace" "$new" "$previous" "$nextFile" || return 1
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
-    local parent logStart outcome waitStep activated
-    parent=$(python3 - test-nodes/root1/debug.log <<'PY'
+    local parent logStart outcome waitStep activated committed=false oldEpoch=$((epoch-1))
+    for attempt in $(seq 1 30); do
+      parent=$(python3 - test-nodes/root1/debug.log <<'PY'
 import re,sys
 last=''
 for line in open(sys.argv[1], errors='replace'):
@@ -153,19 +154,25 @@ for line in open(sys.argv[1], errors='replace'):
     if block: last='0x'+block.group(1).lower()
 print(last)
 PY
-    )
-    [[ "$parent" = 0x* ]] || { echo "F8 handoff requires a certified EVM parent" >&2; return 1; }
-    logStart=$(wc -l < test-nodes/root1/debug.log)
-    build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" \
-      --frozen-parent "$parent" --root-rpc "$oldRpcs" || return 1
-    for waitStep in $(seq 1 90); do
-      outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
-        grep -E "msg=\\\"root handoff outcome\\\" .*rootEpoch=$((epoch-1))([[:space:]]|$)" | tail -1 || true)
-      [[ "$outcome" = *phase=committed* ]] && break
-      [[ "$outcome" = *phase=aborted* ]] && { echo "F8 root handoff aborted" >&2; return 1; }
-      sleep 1
+      )
+      [[ "$parent" = 0x* ]] || { sleep 1; continue; }
+      logStart=$(wc -l < test-nodes/root1/debug.log)
+      if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" \
+        --frozen-parent "$parent" --root-rpc "$oldRpcs"; then
+        sleep 1
+        continue
+      fi
+      for waitStep in $(seq 1 90); do
+        outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
+          grep -E "msg=\\\"root handoff outcome\\\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
+        [[ "$outcome" = *phase=committed* ]] && { committed=true; break; }
+        [[ "$outcome" = *phase=aborted* ]] && break
+        sleep 1
+      done
+      $committed && break
+      [[ "$outcome" = *phase=aborted* ]] && echo "F8 handoff attempt $attempt aborted; retrying with the current certified parent"
     done
-    [[ "$outcome" = *phase=committed* ]] || { echo "F8 root handoff did not commit" >&2; return 1; }
+    $committed || { echo "F8 root handoff did not commit after retries" >&2; return 1; }
     for i in $(seq 1 "$validators"); do
       activated=false
       for waitStep in $(seq 1 90); do
