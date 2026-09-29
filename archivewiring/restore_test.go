@@ -112,6 +112,9 @@ func TestArchiveRestoreBackfillsAnUnresolvedHistoricalObservation(t *testing.T) 
 		Subject: f.subject, Replicas: [2]peer.ID{first.ID(), second.ID()}, Host: sender, Limits: DefaultLimits(),
 		Adapter: executor, Genesis: genesis, TipUC: last.ResultingUC, TipTR: last.ResultingTR}
 	require.NoError(t, restore.Restore(context.Background()))
+	// A retry after the replay marker and EL finality are durable resumes the
+	// observation repair path without requiring another empty-disk restore.
+	require.NoError(t, restore.Restore(context.Background()))
 
 	// This valid historical certificate has no hot journal body after replay;
 	// the direct repair path confirms the journal reports the missing proof.

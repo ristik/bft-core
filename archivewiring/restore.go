@@ -70,7 +70,26 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		return fmt.Errorf("%w: tip pin: %v", ErrRestore, err)
 	}
 	image, err := r.Journal.LoadJournal(ctx, r.Context, r.JournalLimits)
-	if err != nil || len(image.Observations) != 0 || len(image.Candidates) != 0 || image.Restored != nil || image.Frontier != nil {
+	if err != nil {
+		return fmt.Errorf("%w: loading BFT journal: %v", ErrRestore, err)
+	}
+	if image.RestoreBase != nil {
+		// A prior replay may have committed its verified pin and EL finality,
+		// then failed while repairing a missing observation body. Resume that
+		// repair from the durable pin instead of requiring another disk wipe.
+		expected := shardnode.BlockRef{Number: image.RestoreBase.Height, Hash: image.RestoreBase.Hash[:], StateRoot: image.RestoreBase.StateRoot[:]}
+		if image.Frontier != nil && image.Frontier.Anchor != nil && image.Frontier.Anchor.Height > expected.Number {
+			expected = shardnode.BlockRef{Number: image.Frontier.Anchor.Height,
+				Hash: image.Frontier.Anchor.Subject.BlockHash[:], StateRoot: image.Frontier.Anchor.StateRoot[:]}
+		}
+		head, headErr := r.Adapter.Head(ctx)
+		finalized, finalErr := r.Adapter.Finalized(ctx)
+		if headErr != nil || finalErr != nil || !sameBlockRef(head, expected) || !sameBlockRef(finalized, expected) {
+			return fmt.Errorf("%w: retry requires the EL head and finality at the verified restore base: head=%v finalized=%v", ErrRestore, headErr, finalErr)
+		}
+		return r.backfillRestoredObservations(ctx)
+	}
+	if len(image.Observations) != 0 || len(image.Candidates) != 0 || image.Restored != nil || image.Frontier != nil {
 		return fmt.Errorf("%w: BFT journal is not empty: %v", ErrRestore, err)
 	}
 	head, err := r.Adapter.Head(ctx)
