@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unicity.network/schemas/allocation-build-v1.schema.json",
+  "title": "Unicity allocation/build manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "nativeSupply", "chain", "genesis", "addresses", "feeBeneficiary", "feeSplit", "allocations", "bootstrapGasBudgets", "contracts"],
+  "properties": {
+    "version": {"const": "unicity/allocation-build/v1"},
+    "nativeSupply": {"$ref": "#/$defs/uint"},
+    "chain": {
+      "type": "object", "additionalProperties": false, "required": ["chainId", "forks"],
+      "properties": {
+        "chainId": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "forks": {
+          "type": "object", "additionalProperties": false,
+          "required": ["homesteadBlock", "eip150Block", "eip155Block", "eip158Block", "byzantiumBlock", "constantinopleBlock", "petersburgBlock", "istanbulBlock", "berlinBlock", "londonBlock", "mergeNetsplitBlock", "shanghaiTime", "cancunTime", "terminalTotalDifficulty", "terminalTotalDifficultyPassed"],
+          "properties": {
+            "homesteadBlock": {"const": 0}, "eip150Block": {"const": 0}, "eip155Block": {"const": 0}, "eip158Block": {"const": 0},
+            "byzantiumBlock": {"const": 0}, "constantinopleBlock": {"const": 0}, "petersburgBlock": {"const": 0}, "istanbulBlock": {"const": 0},
+            "berlinBlock": {"const": 0}, "londonBlock": {"const": 0}, "mergeNetsplitBlock": {"const": 0}, "shanghaiTime": {"const": 0}, "cancunTime": {"const": 0},
+            "terminalTotalDifficulty": {"const": "0"}, "terminalTotalDifficultyPassed": {"const": true}
+          }
+        }
+      }
+    },
+    "genesis": {"type": "object", "additionalProperties": false, "required": ["gasLimit", "baseFeePerGas"], "properties": {"gasLimit": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}, "baseFeePerGas": {"$ref": "#/$defs/uint"}}},
+    "addresses": {"type": "object", "additionalProperties": false, "required": ["system", "registry", "feeCollector", "wuct", "treasury", "teamVesting", "ecosystemVesting"], "properties": {"system": {"$ref": "#/$defs/address"}, "registry": {"$ref": "#/$defs/address"}, "feeCollector": {"$ref": "#/$defs/address"}, "wuct": {"$ref": "#/$defs/address"}, "treasury": {"$ref": "#/$defs/address"}, "teamVesting": {"$ref": "#/$defs/address"}, "ecosystemVesting": {"$ref": "#/$defs/address"}}},
+    "feeBeneficiary": {"$ref": "#/$defs/address"},
+    "feeSplit": {"type": "object", "additionalProperties": false, "required": ["treasuryBps", "rewardBps"], "properties": {"treasuryBps": {"type": "integer", "minimum": 0, "maximum": 10000}, "rewardBps": {"type": "integer", "minimum": 0, "maximum": 10000}}},
+    "allocations": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["purpose", "recipient", "kind", "amount"], "properties": {"purpose": {"type": "string", "minLength": 1}, "recipient": {"$ref": "#/$defs/address"}, "kind": {"enum": ["eoa", "contract_pot"]}, "amount": {"$ref": "#/$defs/uint"}, "schedule": {"type": "object", "additionalProperties": false, "required": ["start", "cliff", "duration"], "properties": {"start": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}, "cliff": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}, "duration": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}}}}}},
+    "bootstrapGasBudgets": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["recipient", "gas"], "properties": {"recipient": {"$ref": "#/$defs/address"}, "gas": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}}}},
+    "contracts": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "object", "additionalProperties": false, "required": ["name", "address", "artifact", "sha256"], "properties": {"name": {"enum": ["feeCollector", "wuct", "teamVesting", "ecosystemVesting"]}, "address": {"$ref": "#/$defs/address"}, "artifact": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}}}}
+  },
+  "$defs": {
+    "uint": {"type": "string", "pattern": "^(0|[1-9][0-9]*)$"},
+    "address": {"type": "string", "pattern": "^0x[0-9a-fA-F]{40}$"}
+  }
+}

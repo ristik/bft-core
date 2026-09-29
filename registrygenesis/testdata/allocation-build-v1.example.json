@@ -1,0 +1,130 @@
+{
+  "version": "unicity/allocation-build/v1",
+  "nativeSupply": "1000000000000000000000000000",
+  "chain": {
+    "chainId": 1337,
+    "forks": {
+      "homesteadBlock": 0,
+      "eip150Block": 0,
+      "eip155Block": 0,
+      "eip158Block": 0,
+      "byzantiumBlock": 0,
+      "constantinopleBlock": 0,
+      "petersburgBlock": 0,
+      "istanbulBlock": 0,
+      "berlinBlock": 0,
+      "londonBlock": 0,
+      "mergeNetsplitBlock": 0,
+      "shanghaiTime": 0,
+      "cancunTime": 0,
+      "terminalTotalDifficulty": "0",
+      "terminalTotalDifficultyPassed": true
+    }
+  },
+  "genesis": {
+    "gasLimit": 30000000,
+    "baseFeePerGas": "1000000000"
+  },
+  "addresses": {
+    "system": "0xff00000000000000000000000000000000000001",
+    "registry": "0xff00000000000000000000000000000000000002",
+    "feeCollector": "0x3000000000000000000000000000000000000001",
+    "wuct": "0x3000000000000000000000000000000000000002",
+    "treasury": "0x1000000000000000000000000000000000000001",
+    "teamVesting": "0x3000000000000000000000000000000000000003",
+    "ecosystemVesting": "0x3000000000000000000000000000000000000004"
+  },
+  "feeBeneficiary": "0x3000000000000000000000000000000000000001",
+  "feeSplit": {
+    "treasuryBps": 10000,
+    "rewardBps": 0
+  },
+  "allocations": [
+    {
+      "purpose": "foundation_treasury",
+      "recipient": "0x1000000000000000000000000000000000000001",
+      "kind": "eoa",
+      "amount": "400000000000000000000000000"
+    },
+    {
+      "purpose": "team_vesting",
+      "recipient": "0x3000000000000000000000000000000000000003",
+      "kind": "contract_pot",
+      "amount": "200000000000000000000000000",
+      "schedule": {
+        "start": 0,
+        "cliff": 31536000,
+        "duration": 126144000
+      }
+    },
+    {
+      "purpose": "ecosystem_vesting",
+      "recipient": "0x3000000000000000000000000000000000000004",
+      "kind": "contract_pot",
+      "amount": "300000000000000000000000000",
+      "schedule": {
+        "start": 0,
+        "cliff": 0,
+        "duration": 126144000
+      }
+    },
+    {
+      "purpose": "bootstrap_validator_gas",
+      "recipient": "0x1000000000000000000000000000000000000002",
+      "kind": "eoa",
+      "amount": "33333333333333333333333333"
+    },
+    {
+      "purpose": "bootstrap_validator_gas",
+      "recipient": "0x1000000000000000000000000000000000000003",
+      "kind": "eoa",
+      "amount": "33333333333333333333333333"
+    },
+    {
+      "purpose": "bootstrap_validator_gas",
+      "recipient": "0x1000000000000000000000000000000000000004",
+      "kind": "eoa",
+      "amount": "33333333333333333333333334"
+    }
+  ],
+  "bootstrapGasBudgets": [
+    {
+      "recipient": "0x1000000000000000000000000000000000000002",
+      "gas": 10000000
+    },
+    {
+      "recipient": "0x1000000000000000000000000000000000000003",
+      "gas": 10000000
+    },
+    {
+      "recipient": "0x1000000000000000000000000000000000000004",
+      "gas": 10000000
+    }
+  ],
+  "contracts": [
+    {
+      "name": "feeCollector",
+      "address": "0x3000000000000000000000000000000000000001",
+      "artifact": "synthetic/fee-collector-artifact.json#/runtime",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "wuct",
+      "address": "0x3000000000000000000000000000000000000002",
+      "artifact": "synthetic/wuct-artifact.json#/runtime",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "name": "teamVesting",
+      "address": "0x3000000000000000000000000000000000000003",
+      "artifact": "synthetic/vesting-artifact.json#/runtime",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    {
+      "name": "ecosystemVesting",
+      "address": "0x3000000000000000000000000000000000000004",
+      "artifact": "synthetic/vesting-artifact.json#/runtime",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  ]
+}

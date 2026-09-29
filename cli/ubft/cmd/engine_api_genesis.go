@@ -38,6 +38,9 @@ type engineAPIGenesisFlags struct {
 	// built-in template. It is mutually exclusive with the template-shaping flags below, because a
 	// flag and the file would otherwise silently fight over the same genesis field.
 	AllocSource string
+	// Manifest is a versioned allocation/build manifest compiled into the standard JSON source
+	// consumed by registrygenesis.PrepareGenesisJSON.
+	Manifest string
 	// RootEpoch is the root epoch of the genesis record's Pins. It must be non-zero:
 	// rootinput.ObservationProfileBindingV2 refuses RootEpoch 0.
 	RootEpoch uint64
@@ -71,6 +74,11 @@ The output is the FINALIZED genesis: registrygenesis.PrepareGenesisJSON inserts 
 SealRegistry account at a_sr (its runtime code and the 22 initialized storage words) into the
 source allocation and derives the full shard configuration and genesis origin from it.
 
+Use --manifest to compile a strict versioned allocation/build manifest into the same standard JSON
+source pipeline. The manifest's chain ID must match the shard configuration, its fee beneficiary
+must be its declared FeeCollector, and allocation balances must sum exactly to nativeSupply. Contract
+artifact references are recorded metadata only; this command does not deploy or export contracts.
+
 Two artifacts are written. --out is the finalized standard JSON the execution client is started
 from. --full-shard-conf (default: beside --out) is the full shard configuration — the base conf
 plus seal_registry_genesis — whose hash is the fullShardConfHash an observation's ShardConfHash
@@ -94,6 +102,8 @@ source of truth and the origin is re-derivable from the finalized JSON.`,
 		"path to write the full shard configuration (the base conf plus seal_registry_genesis); default: <out without its extension>-full-shard-conf.json")
 	cmd.Flags().StringVar(&flags.AllocSource, "alloc-source", "",
 		"standard genesis JSON to use as the source instead of the built-in template; refuses to combine with --gas-limit, --coinbase or --extra-data")
+	cmd.Flags().StringVar(&flags.Manifest, "manifest", "",
+		"versioned allocation/build manifest to compile into the standard genesis JSON pipeline; mutually exclusive with --alloc-source and template-shaping flags")
 	cmd.Flags().Uint64Var(&flags.RootEpoch, "root-epoch", 1,
 		"root epoch of the genesis record's pins (must be non-zero)")
 	if err := cmd.MarkFlagRequired("out"); err != nil {
@@ -302,6 +312,25 @@ func defaultFullShardConfPath(out string) string {
 // file and a flag would name the same genesis field (gasLimit is even required by the source), and
 // silently letting one win is exactly the ambiguity the operator cannot see afterwards.
 func engineAPIGenesisSource(flags *engineAPIGenesisFlags, changed func(string) bool, chainID uint64) ([]byte, error) {
+	if flags.Manifest != "" {
+		if flags.AllocSource != "" {
+			return nil, fmt.Errorf("--manifest and --alloc-source are mutually exclusive")
+		}
+		for _, name := range []string{"gas-limit", "coinbase", "extra-data"} {
+			if changed(name) {
+				return nil, fmt.Errorf("--manifest %q and --%s both specify genesis fields; the manifest is authoritative, so this refuses rather than silently picking a winner", flags.Manifest, name)
+			}
+		}
+		data, err := os.ReadFile(flags.Manifest) // #nosec G304 -- operator-supplied config path, same trust level as --shard-conf
+		if err != nil {
+			return nil, fmt.Errorf("reading --manifest %q: %w", flags.Manifest, err)
+		}
+		compiled, err := registrygenesis.CompileAllocationManifest(data, chainID)
+		if err != nil {
+			return nil, fmt.Errorf("compiling --manifest %q: %w", flags.Manifest, err)
+		}
+		return compiled, nil
+	}
 	if flags.AllocSource != "" {
 		for _, name := range []string{"gas-limit", "coinbase", "extra-data"} {
 			if changed(name) {

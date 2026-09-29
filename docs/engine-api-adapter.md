@@ -40,6 +40,14 @@ failing check instead of leaving you to guess from a stalled round.
 `genesis.json` this adapter needs — see §4. It also takes `--gas-limit` (default 30,000,000 — a
 starting point, not a validated limit, see §6), `--coinbase`, and `--extra-data`.
 
+For a funded bootstrap, `--manifest <path>` compiles the strict, versioned
+`registrygenesis/allocation-build-v1.schema.json` format into the same standard-JSON preparation
+pipeline. `registrygenesis/testdata/allocation-build-v1.example.json` is a synthetic parameter
+example based on the current T-track defaults; its balances are not approved issuance values. The
+manifest's chain ID must match the shard configuration, and its per-recipient balances must sum
+exactly to `nativeSupply`. This step records contract artifact references and addresses but does not
+deploy or export contract code/storage.
+
 ## 2. Round-params derivation
 
 `engineapi/params.go`'s `DeriveAttributes` is the one place a `shardnode.RoundParams` becomes an
