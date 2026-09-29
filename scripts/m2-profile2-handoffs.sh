@@ -142,6 +142,43 @@ m2_handoff() {
   build/ubft root-node init --home "test-nodes/root$new" -g >/dev/null || return 1
   generate_log_configuration "test-nodes/root$new/"
   m2_next_trust_base "$epoch" "$replace" "$new" "$previous" "$nextFile" || return 1
+  if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+    local parent logStart outcome waitStep activated
+    parent=$(python3 - test-nodes/root1/debug.log <<'PY'
+import re,sys
+last=''
+for line in open(sys.argv[1], errors='replace'):
+    if 'sending CertificationResponse' not in line: continue
+    block=re.search(r'Block Hash: ([0-9A-F]{64})\b', line)
+    if block: last='0x'+block.group(1).lower()
+print(last)
+PY
+    )
+    [[ "$parent" = 0x* ]] || { echo "F8 handoff requires a certified EVM parent" >&2; return 1; }
+    logStart=$(wc -l < test-nodes/root1/debug.log)
+    build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" \
+      --frozen-parent "$parent" --root-rpc "$oldRpcs" || return 1
+    for waitStep in $(seq 1 90); do
+      outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
+        grep -E "msg=\\\"root handoff outcome\\\" .*rootEpoch=$((epoch-1))([[:space:]]|$)" | tail -1 || true)
+      [[ "$outcome" = *phase=committed* ]] && break
+      [[ "$outcome" = *phase=aborted* ]] && { echo "F8 root handoff aborted" >&2; return 1; }
+      sleep 1
+    done
+    [[ "$outcome" = *phase=committed* ]] || { echo "F8 root handoff did not commit" >&2; return 1; }
+    for i in $(seq 1 "$validators"); do
+      activated=false
+      for waitStep in $(seq 1 90); do
+        if grep -Eq "msg=\\\"handoff activated\\\" rootEpoch=$epoch([[:space:]]|$)" "test-nodes/evm$i/debug.log"; then
+          activated=true; break
+        fi
+        sleep 1
+      done
+      $activated || { echo "EVM validator $i did not activate root epoch $epoch" >&2; return 1; }
+    done
+    echo "F8 root handoff epoch $epoch committed and activated while aggregators remained live"
+    return 0
+  fi
   # Root validators enforce the ordered freeze. The operator only selects a
   # currently certified EVM tip and retries if an endorser has advanced.
   local parent waitStep oldEpoch=$((epoch-1)) outcome logStart
