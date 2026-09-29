@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
 	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
@@ -64,7 +65,7 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	next.RootNodes[3] = &types.NodeInfo{NodeID: replacement.PeerConf.ID.String(), SigKey: key, Stake: 1}
 	parentHash := bytes.Repeat([]byte{7}, 32)
 	_, err = cm.BuildHandoffPlan(&next, parentHash)
-	require.Error(t, err, "the operator cannot freeze an uncertified EVM parent")
+	require.ErrorIs(t, err, ErrHandoffApproval, "the operator cannot freeze an uncertified EVM parent")
 	state, err := cm.blockStore.GetState()
 	require.NoError(t, err)
 	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{IR: &types.InputRecord{BlockHash: parentHash}}}
@@ -72,7 +73,7 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	require.NoError(t, err)
 	bad := plan
 	bad.FrozenParent = bytes.Repeat([]byte{8}, 32)
-	require.Error(t, cm.EndorseHandoff(ctx, bad))
+	require.ErrorIs(t, cm.EndorseHandoff(ctx, bad), ErrHandoffApproval)
 	stale := *state
 	staleHead := *state.CommittedHead
 	staleHead.ShardInfo = []abdrc.ShardInfo{{IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{9}, 32)}}}
@@ -94,7 +95,7 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	require.NoError(t, cm.endorseHandoffAtState(ctx, plan, state))
 	require.Len(t, cm.handoffPlans, 4)
 	_, err = cm.readyHandoff()
-	require.Error(t, err, "one signature cannot authorize a four-validator handoff")
+	require.ErrorIs(t, err, ErrHandoffApproval, "one signature cannot authorize a four-validator handoff")
 	body, err := storage.DecodeHandoffBody(plan.Body)
 	require.NoError(t, err)
 	id := body.Identity()
@@ -113,7 +114,7 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 		require.NoError(t, cm.onHandoffApprovalMsg(ctx, &signed), "duplicate endorsement is idempotent")
 		if i == 0 {
 			_, err = cm.readyHandoff()
-			require.Error(t, err)
+			require.ErrorIs(t, err, ErrHandoffApproval)
 		}
 	}
 	approved, err := cm.readyHandoff()
@@ -147,4 +148,67 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1, retry.Attempt)
 	require.NotEqual(t, plan.Body, retry.Body, "attempt+1 binds a new body and FrozenID")
+}
+
+func TestLeaderAbortsWhenEVMAdvancesPastFrozenParent(t *testing.T) {
+	ctx := context.Background()
+	node := testutils.NewTestNode(t)
+	obs := testobservability.Default(t)
+	db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), "root.db"), storage.WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	orchestration, err := partitions.NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), obs.Logger(), partitions.WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, orchestration.Close()) })
+	old := testtrustbase.NewTrustBaseFromSigners(t, map[string]abcrypto.Signer{node.PeerConf.ID.String(): node.Signer}).(*types.RootTrustBaseV1)
+	store, err := tbstore.NewTrustBaseStore(memorydb.New(), obs.Logger())
+	require.NoError(t, err)
+	require.NoError(t, store.Store(old))
+	identity := sha256.Sum256([]byte("leader-abort-test"))
+	history, err := trusthistorystore.Open(ctx, memorydb.New(), old, identity, trustactivation.Verifier{})
+	require.NoError(t, err)
+	params := *NewConsensusParams()
+	params.NetworkProfileVersion = storage.ProfileHandoff
+	cm, err := NewConsensusManager(node.PeerConf.ID, store, orchestration, testnetwork.NewRootMockNetwork(), node.Signer, db, obs,
+		WithConsensusParams(params), WithRecoveryProfile2(history))
+	require.NoError(t, err)
+
+	frozenParent := bytes.Repeat([]byte{0x42}, 32)
+	parentQC := cm.blockStore.GetHighQc()
+	parent, err := cm.blockStore.Block(parentQC.GetRound())
+	require.NoError(t, err)
+	shardKey := types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}
+	parent.ShardState.States[shardKey] = &storage.ShardInfo{IR: &types.InputRecord{BlockHash: bytes.Clone(frozenParent)}}
+	previous := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: parentQC.GetRound(),
+		PredecessorBodyID: make([]byte, 32), NextBodyID: bytes.Repeat([]byte{1}, 32),
+		FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32), ActivationRound: 9, Kind: "prepare"}
+	parent.ShardState.Control.Phase = "prepared"
+	parent.ShardState.Control.RecordBytes = previous.Bytes()
+	cm.handoffPlans = map[[32]byte]*pendingHandoff{{}: {
+		plan:   abdrc.HandoffApprovalMsg{Body: bytes.Repeat([]byte{2}, 32), FrozenParent: frozenParent},
+		record: previous, signatures: map[string]hex.Bytes{node.PeerConf.ID.String(): {1}},
+		abortSignatures: map[string]hex.Bytes{node.PeerConf.ID.String(): {2}}, weight: old.QuorumThreshold,
+	}}
+
+	// A matching committed tip permits Freeze. Moving only that tip makes
+	// the leader choose the already endorsed Abort in the same phase.
+	records, err := cm.handoffRecordsForRound(parentQC.GetRound()+1, parentQC)
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	freeze, err := storage.DecodeOrderedHandoffRecord(records[0])
+	require.NoError(t, err)
+	require.Equal(t, "freeze", freeze.Kind)
+	parent.ShardState.States[shardKey].IR.BlockHash = bytes.Repeat([]byte{0x43}, 32)
+	records, err = cm.handoffRecordsForRound(parentQC.GetRound()+1, parentQC)
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	abort, err := storage.DecodeOrderedHandoffRecord(records[0])
+	require.NoError(t, err)
+	require.Equal(t, "abort", abort.Kind)
+	require.Equal(t, previous.Attempt, abort.Attempt)
+	require.Equal(t, parentQC.GetRound()+1, abort.OrderedRound)
+	var authorization storage.AbortAuthorization
+	require.NoError(t, types.Cbor.Unmarshal(records[1], &authorization))
+	require.EqualValues(t, 1, authorization.Version)
+	require.Equal(t, hex.Bytes{2}, authorization.Signatures[node.PeerConf.ID.String()])
 }

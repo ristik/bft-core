@@ -144,7 +144,7 @@ func TestHistoricalTrustStoreHandoffRefusalsAndReplay(t *testing.T) {
 		bad := bundle
 		bad.Proof.Record.Epoch = 88
 		_, err := store.InstallHandoff(ctx, bad, f.Partition, f.Shard, f.ConfHash)
-		require.Error(t, err)
+		require.ErrorIs(t, err, trusthistorystore.ErrNotFound)
 	})
 	t.Run("wrong predecessor", func(t *testing.T) {
 		bad := bundle
@@ -167,5 +167,5 @@ func TestHistoricalTrustStoreHandoffRefusalsAndReplay(t *testing.T) {
 		require.ErrorIs(t, err, handoffdelivery.ErrBundle)
 	})
 	_, err = store.GetByEpoch(ctx, 100)
-	require.Error(t, err)
+	require.ErrorIs(t, err, trusthistorystore.ErrNotFound)
 }

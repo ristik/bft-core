@@ -383,7 +383,7 @@ func TestInstallEpochAnchorFromRecoveryCheckpoint(t *testing.T) {
 	controlCopy := *corrupt.Control
 	controlCopy.PreviousDigest = bytes.Repeat([]byte{9}, 32)
 	corrupt.Control = &controlCopy
-	require.Error(t, reloaded.VerifyRecoveryAnchor(&corrupt))
+	require.ErrorIs(t, reloaded.VerifyRecoveryAnchor(&corrupt), ErrControlCheckpoint)
 	first := &rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Payload: &rctypes.Payload{Version: 2}, Anchor: a}
 	_, err = reloaded.Add(first, nil)
 	require.NoError(t, err)
@@ -424,6 +424,19 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		require.NoError(t, err)
 		return added
 	}
+	refuseEVM := func(epoch, round uint64, want error) {
+		t.Helper()
+		prior, err := s.Block(round - 1)
+		require.NoError(t, err)
+		block := &rctypes.BlockData{Version: 2, Epoch: epoch, Round: round,
+			Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1,
+				Epoch: epoch, CurrentRootHash: prior.RootHash}}}
+		_, err = s.Add(block, mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) {
+			return &types.InputRecord{Version: 1, BlockHash: bytes.Repeat([]byte{0x44}, 32)}, nil
+		}})
+		require.ErrorIs(t, err, want)
+	}
 	for epoch := uint64(1); epoch <= 2; epoch++ {
 		base := uint64(2)
 		if epoch == 2 {
@@ -449,10 +462,12 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		add(epoch, base+1, freeze)
 		restart()
 		require.Equal(t, "endorsed", mustBlock(t, s, base+1).ShardState.Control.Phase)
+		refuseEVM(epoch, base+2, ErrHandoffFrozen)
 		commit := makeRecord("commit", base+2)
 		h := add(epoch, base+2, commit)
 		restart()
 		require.Equal(t, "committed", mustBlock(t, s, base+2).ShardState.Control.Phase)
+		refuseEVM(epoch, base+3, ErrHandoffSuffix)
 		if epoch == 2 {
 			break
 		}
