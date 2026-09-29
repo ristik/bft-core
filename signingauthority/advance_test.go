@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
+	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -153,4 +156,119 @@ func TestAuthorityAdvanceRejectsChangedRootOnlyConfigAndForgedCertificate(t *tes
 	hash, err := conf.Hash(crypto.SHA256)
 	require.NoError(t, err)
 	require.Equal(t, hash, a.Enrollment().ShardConfHash)
+}
+
+func TestSameRootEpochRequiresIdenticalTrustHash(t *testing.T) {
+	f := newFixture(t, 1)
+	a := f.pending(t)
+	conf := ownConf(t, a)
+	require.NoError(t, a.CompleteEnrollment(conf))
+	next := *conf
+	next.Epoch++ // a shard advance must not permit root-key substitution at epoch 1
+	other, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	otherTB, ok := testtrustbase.NewTrustBase(t, other).(*types.RootTrustBaseV1)
+	require.True(t, ok)
+	successor := *otherTB
+	successor.Epoch = rootEpoch
+	successor.NetworkID = f.tb.NetworkID
+	require.ErrorIs(t, a.AdvanceEpoch(t.Context(), &next, &successor), ErrContextMismatch)
+}
+
+type blockingTrust struct {
+	tb      *types.RootTrustBaseV1
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingTrust) GetByEpoch(ctx context.Context, _ uint64) (*types.RootTrustBaseV1, error) {
+	b.once.Do(func() { close(b.entered) })
+	select {
+	case <-b.release:
+		return b.tb, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestReserveRechecksScopeAfterTrustLookup(t *testing.T) {
+	f := newFixture(t, 1)
+	a := f.pending(t)
+	conf := ownConf(t, a)
+	require.NoError(t, a.CompleteEnrollment(conf))
+	trust := &blockingTrust{tb: f.tb, entered: make(chan struct{}), release: make(chan struct{})}
+	a.trust = trust
+	session, err := a.ReplaceSession()
+	require.NoError(t, err)
+	request := f.requestUnder(t, conf)
+	type result struct{ err error }
+	done := make(chan result, 1)
+	go func() { _, err := a.Reserve(context.Background(), session, request); done <- result{err} }()
+	<-trust.entered // Authenticate is paused after Reserve's first admission check.
+	require.NoError(t, a.AdvanceEpoch(t.Context(), conf, successorTrust(f, 2)))
+	close(trust.release)
+	got := <-done
+	require.ErrorIs(t, got.err, ErrContextMismatch)
+	require.Zero(t, a.Status().ReservedRound, "an authorization from the prior scope must not reserve a round")
+}
+
+func TestOldScopeCannotRetainOrReleaseAfterAdvance(t *testing.T) {
+	for _, operation := range []string{"retain", "release"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newFixture(t, 1)
+			a := f.pending(t)
+			conf := ownConf(t, a)
+			require.NoError(t, a.CompleteEnrollment(conf))
+			session, err := a.ReplaceSession()
+			require.NoError(t, err)
+			auth, err := a.Reserve(t.Context(), session, f.requestUnder(t, conf))
+			require.NoError(t, err)
+			require.NoError(t, a.Sign(session))
+			require.NoError(t, a.RetainResponse(session))
+			require.NoError(t, a.AdvanceEpoch(t.Context(), conf, successorTrust(f, 2)))
+			current, err := a.ReplaceSession()
+			require.NoError(t, err)
+			if operation == "retain" {
+				require.ErrorIs(t, a.RetainResponse(current), ErrContextMismatch)
+			} else {
+				_, err = a.Release(current, auth.AssignedRound, auth.UnsignedDigest)
+				require.ErrorIs(t, err, ErrContextMismatch)
+			}
+		})
+	}
+}
+
+func TestReserveRejectsIdenticalBytesReservedUnderPriorScope(t *testing.T) {
+	f := newFixture(t, 1)
+	a := f.pending(t)
+	conf := ownConf(t, a)
+	require.NoError(t, a.CompleteEnrollment(conf))
+	session, err := a.ReplaceSession()
+	require.NoError(t, err)
+	oldRequest := f.requestUnder(t, conf)
+	_, err = a.Reserve(t.Context(), session, oldRequest)
+	require.NoError(t, err)
+	require.NoError(t, a.AdvanceEpoch(t.Context(), conf, successorTrust(f, 2))) // root only; shard config and epoch unchanged
+	current, err := a.ReplaceSession()
+	require.NoError(t, err)
+	// Keep the unsigned proposal byte-for-byte identical while presenting a
+	// valid authorization from the successor root epoch. This reaches the
+	// reservation's scopeVersion guard before the different-bytes guard.
+	uc := *oldRequest.UC
+	seal := *oldRequest.UC.UnicitySeal
+	seal.Epoch = 2
+	seal.Signatures = nil
+	require.NoError(t, seal.Sign(nodeIDOf(t, f.signers[0]), f.signers[0]))
+	uc.UnicitySeal = &seal
+	successorRequest := oldRequest
+	successorRequest.UC = &uc
+	oldUnsigned, err := oldRequest.Proposed.Bytes()
+	require.NoError(t, err)
+	newUnsigned, err := successorRequest.Proposed.Bytes()
+	require.NoError(t, err)
+	require.Equal(t, oldUnsigned, newUnsigned)
+	_, err = a.Reserve(t.Context(), current, successorRequest)
+	require.ErrorIs(t, err, ErrConflict)
+	require.Equal(t, oldRequest.Proposed.InputRecord.RoundNumber, a.Status().ReservedRound)
 }

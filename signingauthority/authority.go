@@ -354,11 +354,11 @@ func (a *Authority) Reserve(ctx context.Context, s Session, req Request) (*Autho
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if err := a.admitLocked(s); err != nil {
-		return nil, err
-	}
 	if auth.scopeVersion != a.scopeVersion {
 		return nil, fmt.Errorf("%w: enrollment advanced during authentication", ErrContextMismatch)
+	}
+	if err := a.admitLocked(s); err != nil {
+		return nil, err
 	}
 	switch {
 	case a.rec.empty() || auth.AssignedRound > a.rec.reserved:
