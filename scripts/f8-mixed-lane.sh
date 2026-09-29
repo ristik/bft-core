@@ -189,15 +189,15 @@ f8_reconnect_probe() {
   # A-right uses the non-default 0xc0 shard ID, so this exercises the configurable
   # shard identity on both initial connect and reconnect.
   local i=1 startLine
-  startLine=$(wc -l <"$F8_LOG_DIR/b-left.log")
+  startLine=$(wc -l <"$F8_LOG_DIR/${F8_NAMES[$i]}.log")
   kill "${F8_PIDS[$i]}"
   wait "${F8_PIDS[$i]}" 2>/dev/null || true
   f8_start_one "$i"
   for _ in $(seq 1 60); do
-    if tail -n +"$((startLine+1))" "$F8_LOG_DIR/b-left.log" | grep -q 'Received handshake response'; then break; fi
+    if tail -n +"$((startLine+1))" "$F8_LOG_DIR/${F8_NAMES[$i]}.log" | grep -q 'Dialer: Received confirmation for protocol: /ab/handshake/0.0.1'; then break; fi
     sleep 1
   done
-  tail -n +"$((startLine+1))" "$F8_LOG_DIR/b-left.log" | grep -q 'Received handshake response' || { echo "non-default shard reconnect did not complete its BFT handshake" >&2; return 1; }
+  tail -n +"$((startLine+1))" "$F8_LOG_DIR/${F8_NAMES[$i]}.log" | grep -q 'Dialer: Received confirmation for protocol: /ab/handshake/0.0.1' || { echo "non-default shard reconnect did not negotiate its BFT handshake protocol" >&2; return 1; }
   f8_trace
 }
 
@@ -206,5 +206,7 @@ f8_stop() {
   for i in 0 1 2; do
     [ -n "${F8_PIDS[$i]:-}" ] && kill "${F8_PIDS[$i]}" 2>/dev/null || true
   done
-  wait 2>/dev/null || true
+  for i in 0 1 2; do
+    [ -n "${F8_PIDS[$i]}" ] && wait "${F8_PIDS[$i]}" 2>/dev/null || true
+  done
 }
