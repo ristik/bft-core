@@ -32,6 +32,7 @@ type authorizationIdentity struct {
 // round, and a different root round producing a different ID must not reopen a round that has
 // already been answered.
 type Authorization struct {
+	scopeVersion uint64
 	// AssignedRound and AssignedEpoch come from the authenticated TechnicalRecord.
 	AssignedRound uint64
 	AssignedEpoch uint64

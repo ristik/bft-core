@@ -44,6 +44,7 @@ const (
 // record that cannot outlive the key needs no durability, because nothing can sign with that
 // identity once the process is gone (§6).
 type record struct {
+	scopeVersion uint64
 	// reserved is the assigned partition round this record locks. It is the conflict key together
 	// with the enrolled key and profile; a different root round does not open a second record.
 	reserved uint64

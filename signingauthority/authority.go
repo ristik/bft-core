@@ -50,7 +50,17 @@ type Authority struct {
 	// state latches faulted on a detected inconsistency and never recovers within this lifetime.
 	state health
 	// rec is the one reservation this authority holds.
-	rec record
+	rec          record
+	scopeVersion uint64
+}
+
+type currentTrust struct{ base *types.RootTrustBaseV1 }
+
+func (t currentTrust) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	if t.base == nil || t.base.Epoch != epoch {
+		return nil, fmt.Errorf("root trust epoch %d is not current", epoch)
+	}
+	return t.base, nil
 }
 
 // Session is a client's admission token for one generation of one authority.
@@ -344,6 +354,9 @@ func (a *Authority) Reserve(ctx context.Context, s Session, req Request) (*Autho
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if auth.scopeVersion != a.scopeVersion {
+		return nil, fmt.Errorf("%w: enrollment advanced during authentication", ErrContextMismatch)
+	}
 	if err := a.admitLocked(s); err != nil {
 		return nil, err
 	}
@@ -366,6 +379,7 @@ func (a *Authority) Reserve(ctx context.Context, s Session, req Request) (*Autho
 			return nil, fmt.Errorf("%w: the completed record would be %d bytes, limit is %d", ErrRequestTooLarge, size, MaxRecordBytes)
 		}
 		a.rec = record{
+			scopeVersion:    a.scopeVersion,
 			reserved:        auth.AssignedRound,
 			unsigned:        bytes.Clone(auth.Unsigned),
 			digest:          auth.UnsignedDigest,
@@ -374,6 +388,8 @@ func (a *Authority) Reserve(ctx context.Context, s Session, req Request) (*Autho
 		return auth, nil
 	case auth.AssignedRound < a.rec.reserved:
 		return nil, fmt.Errorf("%w: round %d is below the reserved round %d", ErrStale, auth.AssignedRound, a.rec.reserved)
+	case a.rec.scopeVersion != a.scopeVersion:
+		return nil, fmt.Errorf("%w: round %d was reserved before the enrollment advanced", ErrConflict, a.rec.reserved)
 	case !a.rec.sameRequest(auth.Unsigned):
 		return nil, fmt.Errorf("%w: round %d is reserved for different bytes", ErrConflict, a.rec.reserved)
 	default:
@@ -395,6 +411,9 @@ func (a *Authority) Sign(s Session) error {
 	}
 	if a.rec.empty() {
 		return fmt.Errorf("%w: nothing is reserved", ErrNoReservation)
+	}
+	if a.rec.scopeVersion != a.scopeVersion {
+		return fmt.Errorf("%w: reservation belongs to the previous enrollment", ErrContextMismatch)
 	}
 	if a.rec.releasable {
 		return nil
@@ -436,6 +455,9 @@ func (a *Authority) RetainResponse(s Session) error {
 	if a.rec.empty() {
 		return fmt.Errorf("%w: nothing is reserved", ErrNoReservation)
 	}
+	if a.rec.scopeVersion != a.scopeVersion {
+		return fmt.Errorf("%w: reservation belongs to the previous enrollment", ErrContextMismatch)
+	}
 	if len(a.rec.signed) == 0 {
 		return fmt.Errorf("%w: nothing has been signed for round %d", ErrResponseNotRetained, a.rec.reserved)
 	}
@@ -462,6 +484,9 @@ func (a *Authority) Release(s Session, round uint64, digest [32]byte) ([]byte, e
 	if a.rec.empty() {
 		return nil, fmt.Errorf("%w: nothing is reserved", ErrNoReservation)
 	}
+	if a.rec.scopeVersion != a.scopeVersion {
+		return nil, fmt.Errorf("%w: reservation belongs to the previous enrollment", ErrContextMismatch)
+	}
 	if round != a.rec.reserved {
 		return nil, fmt.Errorf("%w: asked for round %d, the reservation is round %d", ErrStale, round, a.rec.reserved)
 	}
@@ -485,7 +510,7 @@ refuses it. Keeping the two apart is the point of the split, because authenticit
 */
 func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorization, error) {
 	a.mu.Lock()
-	enroll, trust, hasKey := a.enroll, a.trust, a.signer != nil
+	enroll, trust, hasKey, scopeVersion := a.enroll.clone(), a.trust, a.signer != nil, a.scopeVersion
 	a.mu.Unlock()
 
 	if !hasKey {
@@ -541,10 +566,8 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 		return nil, fmt.Errorf("%w: certificate names shard configuration %x, this authority is enrolled for %x", ErrContextMismatch, own.UC.ShardConfHash, enroll.ShardConfHash)
 	}
 
-	// The root epoch is frozen by enrollment, and this refusal is deliberately not an
-	// authentication failure: a certificate from the next genuine root epoch verifies perfectly
-	// against that epoch's trust base, which is precisely why accepting it here would carry this
-	// key across a transition the profile does not support (§4).
+	// The root epoch is pinned to the current operator-provisioned context. A certificate
+	// from another epoch cannot select a trust base for the authority.
 	//
 	// The check comes BEFORE the trust lookup on purpose, so that an epoch chosen by whoever sent
 	// the request cannot drive which trust base this authority fetches. The cost is that a forged
@@ -553,7 +576,7 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 	// certificate is genuine. A certificate naming the enrolled epoch reaches verification below,
 	// where a forgery is reported as one.
 	if own.UC.GetRootEpoch() != *enroll.RootEpoch {
-		return nil, fmt.Errorf("%w: certificate claims root epoch %d, this authority is enrolled for %d and does not follow a transition; refused before authentication, so the claim is not established", ErrContextMismatch, own.UC.GetRootEpoch(), *enroll.RootEpoch)
+		return nil, fmt.Errorf("%w: certificate claims root epoch %d, this authority is enrolled for %d; refused before authentication, so the claim is not established", ErrContextMismatch, own.UC.GetRootEpoch(), *enroll.RootEpoch)
 	}
 
 	// Authentication against the authority's own trust, for the root epoch the certificate names.
@@ -599,6 +622,7 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 		return nil, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 	}
 	return &Authorization{
+		scopeVersion:   scopeVersion,
 		AssignedRound:  own.Technical.Round,
 		AssignedEpoch:  own.Technical.Epoch,
 		ID:             id,
