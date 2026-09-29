@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
@@ -179,6 +180,13 @@ func TestLeaderAbortsWhenEVMAdvancesPastFrozenParent(t *testing.T) {
 	require.NoError(t, err)
 	shardKey := types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}
 	parent.ShardState.States[shardKey] = &storage.ShardInfo{IR: &types.InputRecord{BlockHash: bytes.Clone(frozenParent)}}
+	verifier, err := node.Signer.Verifier()
+	require.NoError(t, err)
+	key, err := verifier.MarshalPublicKey()
+	require.NoError(t, err)
+	require.NoError(t, orchestration.AddShardConfig(&types.PartitionDescriptionRecord{Version: 1,
+		NetworkID: 5, PartitionID: 8, PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, EpochStart: 1, T2Timeout: 5 * time.Second,
+		Validators: []*types.NodeInfo{{NodeID: node.PeerConf.ID.String(), SigKey: key, Stake: 1}}}))
 	previous := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: parentQC.GetRound(),
 		PredecessorBodyID: make([]byte, 32), NextBodyID: bytes.Repeat([]byte{1}, 32),
 		FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32), ActivationRound: 9, Kind: "prepare"}
@@ -211,4 +219,37 @@ func TestLeaderAbortsWhenEVMAdvancesPastFrozenParent(t *testing.T) {
 	require.NoError(t, types.Cbor.Unmarshal(records[1], &authorization))
 	require.EqualValues(t, 1, authorization.Version)
 	require.Equal(t, hex.Bytes{2}, authorization.Signatures[node.PeerConf.ID.String()])
+
+	// The endorsed branch carries an unrelated aggregator shard. Commit must
+	// bind H to the frozen EVM assignment rather than the map's only entry.
+	aggKey := types.PartitionShardID{PartitionID: 9, ShardID: (types.ShardID{}).Key()}
+	require.NoError(t, orchestration.AddShardConfig(&types.PartitionDescriptionRecord{Version: 1,
+		NetworkID: 5, PartitionID: 9, PartitionTypeID: 9, TypeIDLen: 8, UnitIDLen: 256, EpochStart: 1, T2Timeout: 5 * time.Second,
+		Validators: []*types.NodeInfo{{NodeID: node.PeerConf.ID.String(), SigKey: key, Stake: 1}}}))
+	parent.ShardState.States[shardKey].IR.BlockHash = bytes.Clone(frozenParent)
+	parent.ShardState.States[shardKey].TR.Round = 3
+	parent.ShardState.States[shardKey].TR.Leader = "evm"
+	parent.ShardState.States[aggKey] = &storage.ShardInfo{IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{0x51}, 32)}}
+	parent.ShardState.States[aggKey].TR.Round = 4
+	parent.ShardState.States[aggKey].TR.Leader = "aggregator"
+	previous.Kind = "freeze"
+	previous.FrozenID = bytes.Repeat([]byte{0x52}, 32)
+	parent.ShardState.Control.Phase = "endorsed"
+	parent.ShardState.Control.FrozenParent = bytes.Clone(frozenParent)
+	parent.ShardState.Control.RecordBytes = previous.Bytes()
+	for _, plan := range cm.handoffPlans {
+		plan.record.FrozenID = bytes.Clone(previous.FrozenID)
+	}
+	records, err = cm.handoffRecordsForRound(parentQC.GetRound()+1, parentQC)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	commit, err := storage.DecodeOrderedHandoffRecord(records[0])
+	require.NoError(t, err)
+	require.Equal(t, "commit", commit.Kind)
+	evmTR, err := parent.ShardState.States[shardKey].TR.Hash()
+	require.NoError(t, err)
+	require.Equal(t, evmTR, []byte(commit.SuccessorTRHash))
+	aggTR, err := parent.ShardState.States[aggKey].TR.Hash()
+	require.NoError(t, err)
+	require.NotEqual(t, aggTR, []byte(commit.SuccessorTRHash))
 }
