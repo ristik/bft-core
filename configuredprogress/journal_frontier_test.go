@@ -118,11 +118,17 @@ func TestRestoreAnchorPersistsOnlyCertifiedReplayBase(t *testing.T) {
 	wrong := anchor
 	wrong.Hash[0] ^= 1
 	require.ErrorIs(t, s.InstallRestoreAnchor(context.Background(), c, limits, wrong), ErrUntrusted)
-	require.NoError(t, s.InstallRestoreAnchor(context.Background(), c, limits, anchor))
 	image, err := s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.NotNil(t, image.CoverageBase)
+	require.Zero(t, image.CoverageBase.Height, "an unverified restore pin cannot move the coverage base")
+	require.Equal(t, [32]byte(c.Origin.BlockHash()), image.CoverageBase.Hash)
+	require.NoError(t, s.InstallRestoreAnchor(context.Background(), c, limits, anchor))
+	image, err = s.LoadJournal(context.Background(), c, limits)
 	require.NoError(t, err)
 	require.Equal(t, &anchor, image.Restored)
 	require.Equal(t, &anchor, image.RestoreBase)
+	require.Equal(t, &CoverageBase{Height: anchor.Height, Hash: anchor.Hash}, image.CoverageBase)
 	require.ErrorIs(t, s.InstallRestoreAnchor(context.Background(), c, limits, anchor), ErrConflict)
 	require.NoError(t, s.Close())
 	restarted, err := OpenConfiguredV2(path, Settings{Retain: 3})
@@ -134,6 +140,14 @@ func TestRestoreAnchorPersistsOnlyCertifiedReplayBase(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, &anchor, image.Restored)
 	require.Equal(t, &anchor, image.RestoreBase)
+	require.NoError(t, restarted.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bucketName).Delete(journalCoverageBaseKey) }))
+	image, err = restarted.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err, "an existing verified restore marker upgrades to the durable coverage base")
+	require.Equal(t, &CoverageBase{Height: anchor.Height, Hash: anchor.Hash}, image.CoverageBase)
+	require.NoError(t, restarted.db.View(func(tx *bolt.Tx) error {
+		require.NotEmpty(t, tx.Bucket(bucketName).Get(journalCoverageBaseKey))
+		return nil
+	}))
 	require.NoError(t, restarted.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
 		raw := bytes.Clone(b.Get(restoreAnchorKey))
@@ -142,6 +156,105 @@ func TestRestoreAnchorPersistsOnlyCertifiedReplayBase(t *testing.T) {
 	}))
 	_, err = restarted.LoadJournal(context.Background(), c, limits)
 	require.Error(t, err, "a damaged restore marker cannot make the journal appear healthy")
+}
+
+func TestCoverageBaseMustMatchVerifiedRestorePin(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		base func(RestoreAnchor) CoverageBase
+	}{
+		{"stale height", func(pin RestoreAnchor) CoverageBase { return CoverageBase{Height: pin.Height + 1, Hash: pin.Hash} }},
+		{"wrong hash", func(pin RestoreAnchor) CoverageBase {
+			base := CoverageBase{Height: pin.Height, Hash: pin.Hash}
+			base.Hash[0] ^= 1
+			return base
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, f, c, policy, item, limits := frontierTestSetupWithFixture(t, t.TempDir()+"/journal.db")
+			defer s.Close()
+			pin := RestoreAnchor{Height: item.Anchor.Height, Hash: item.Anchor.Subject.BlockHash,
+				StateRoot: item.Anchor.StateRoot, RootRound: item.Anchor.Round}
+			require.NoError(t, s.InstallRestoreAnchor(context.Background(), c, limits, pin))
+			next := installFrontierTestBlockAfterRestore(t, s, f, c, policy, item, limits)
+			require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{next}))
+
+			state, _, err := s.Load(context.Background(), c)
+			require.NoError(t, err)
+			raw, err := encodeCoverageBase(state.i.descriptorDigest, tc.base(pin))
+			require.NoError(t, err)
+			require.NoError(t, s.db.Update(func(tx *bolt.Tx) error {
+				return tx.Bucket(bucketName).Put(journalCoverageBaseKey, raw)
+			}))
+
+			// FrontierWorker.audit starts with LoadFrontier, which must reject the
+			// corrupted base before its cursor can skip any restored heights.
+			_, err = s.LoadFrontier(context.Background(), c, limits)
+			require.ErrorIs(t, err, ErrUntrusted)
+			// PruneFrontier must reject the same mismatch before advancing its floor.
+			require.ErrorIs(t, s.PruneFrontier(context.Background(), c, limits), ErrUntrusted)
+		})
+	}
+}
+
+func installFrontierTestBlockAfterRestore(t *testing.T, s *Store, f *fixture, c Context, _ frontier.Policy,
+	prior frontier.Coverage, limits JournalLimits) frontier.Coverage {
+	t.Helper()
+	state := common.Hash{31: 8}
+	header := &gethtypes.Header{ParentHash: common.Hash(prior.Anchor.Subject.BlockHash), Root: state,
+		Number: big.NewInt(2), Difficulty: new(big.Int), BaseFee: big.NewInt(1)}
+	headerRaw, err := rlp.EncodeToBytes(header)
+	require.NoError(t, err)
+	hash := header.Hash()
+	var previous types.UnicityCertificate
+	var previousTR certification.TechnicalRecord
+	require.NoError(t, types.Cbor.Unmarshal(prior.Material.ResultingUC, &previous))
+	require.NoError(t, types.Cbor.Unmarshal(prior.Material.ResultingTR, &previousTR))
+	candidate := JournalCandidate{Round: 2, Number: 2, ParentNumber: 1, Hash: hash.Bytes(), StateRoot: state.Bytes(),
+		ParentHash: prior.Anchor.Subject.BlockHash[:], ParentState: prior.Anchor.StateRoot[:], Raw: []byte{4}, BlockSize: 1,
+		AuthorizingUC: &previous, AuthorizingTR: &previousTR}
+	require.NoError(t, s.PutJournalCandidate(context.Background(), c, limits, candidate))
+	observation := f.observation(&types.InputRecord{Version: 1, RoundNumber: 2, PreviousHash: prior.Anchor.StateRoot[:],
+		Hash: state.Bytes(), BlockHash: hash.Bytes(), SummaryValue: []byte{}, Timestamp: 1_700_000_002}, 3, prior.Anchor.Round+1)
+	prepared, _, err := s.PrepareObservation(context.Background(), c, observation)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(prepared)
+	require.NoError(t, err)
+	originalUC, err := types.Cbor.Marshal(&previous)
+	require.NoError(t, err)
+	originalTR, err := types.Cbor.Marshal(&previousTR)
+	require.NoError(t, err)
+	resultUC, err := types.Cbor.Marshal(observation.Certificate())
+	require.NoError(t, err)
+	resultTR, err := types.Cbor.Marshal(observation.TechnicalRecord())
+	require.NoError(t, err)
+	bodyRaw, err := rlp.EncodeToBytes(&gethtypes.Body{})
+	require.NoError(t, err)
+	record := &archive.Record{Header: headerRaw, Body: bodyRaw, CanonicalRootInput: []byte{2}, OriginalUC: originalUC,
+		OriginalTR: originalTR, ResultingUC: resultUC, ResultingTR: resultTR, Companion: []byte{2}}
+	request := archive.Request{Context: prior.Anchor.Subject.Context, BlockHash: [32]byte(hash)}
+	requestRaw, err := archive.EncodeRequest(request)
+	require.NoError(t, err)
+	digest, err := archive.ManifestDigest(request, record)
+	require.NoError(t, err)
+	ack := sha256.Sum256(requestRaw)
+	return frontier.Coverage{Anchor: frontier.Record{Sequence: 1, Epoch: observation.Certificate().GetRootEpoch(),
+		Round: observation.Certificate().GetRootRoundNumber(), Height: 2, StateRoot: [32]byte(state), Subject: request,
+		Acks: [2]frontier.Acknowledgment{{Replica: "first", RequestDigest: ack, ManifestDigest: digest},
+			{Replica: "second", RequestDigest: ack, ManifestDigest: digest}}}, Material: record}
+}
+
+func TestUnrestoredFrontierStillRequiresCoverageFromHeightOne(t *testing.T) {
+	s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
+	defer s.Close()
+	image, err := s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Equal(t, &CoverageBase{Hash: [32]byte(c.Origin.BlockHash())}, image.CoverageBase)
+	require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}))
+	page, err := s.LoadCoverage(context.Background(), c, limits, 0, 4)
+	require.NoError(t, err)
+	require.Len(t, page, 1)
+	require.EqualValues(t, 1, page[0].Height, "a non-restored node audits coverage beginning at height one")
 }
 
 func TestPrunedFrontierRetainsLocalAnchorAuthorization(t *testing.T) {

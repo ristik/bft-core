@@ -70,7 +70,26 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		return fmt.Errorf("%w: tip pin: %v", ErrRestore, err)
 	}
 	image, err := r.Journal.LoadJournal(ctx, r.Context, r.JournalLimits)
-	if err != nil || len(image.Observations) != 0 || len(image.Candidates) != 0 || image.Restored != nil || image.Frontier != nil {
+	if err != nil {
+		return fmt.Errorf("%w: loading BFT journal: %v", ErrRestore, err)
+	}
+	if image.RestoreBase != nil {
+		// A prior replay may have committed its verified pin and EL finality,
+		// then failed while repairing a missing observation body. Resume that
+		// repair from the durable pin instead of requiring another disk wipe.
+		expected := shardnode.BlockRef{Number: image.RestoreBase.Height, Hash: image.RestoreBase.Hash[:], StateRoot: image.RestoreBase.StateRoot[:]}
+		if image.Frontier != nil && image.Frontier.Anchor != nil && image.Frontier.Anchor.Height > expected.Number {
+			expected = shardnode.BlockRef{Number: image.Frontier.Anchor.Height,
+				Hash: image.Frontier.Anchor.Subject.BlockHash[:], StateRoot: image.Frontier.Anchor.StateRoot[:]}
+		}
+		head, headErr := r.Adapter.Head(ctx)
+		finalized, finalErr := r.Adapter.Finalized(ctx)
+		if headErr != nil || finalErr != nil || !sameBlockRef(head, expected) || !sameBlockRef(finalized, expected) {
+			return fmt.Errorf("%w: retry requires the EL head and finality at the verified restore base: head=%v finalized=%v", ErrRestore, headErr, finalErr)
+		}
+		return r.backfillRestoredObservations(ctx)
+	}
+	if len(image.Observations) != 0 || len(image.Candidates) != 0 || image.Restored != nil || image.Frontier != nil {
 		return fmt.Errorf("%w: BFT journal is not empty: %v", ErrRestore, err)
 	}
 	head, err := r.Adapter.Head(ctx)
@@ -181,7 +200,119 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 	if err := r.recordTip(ctx, firstUC, firstTR, targetUC, targetTR, targetBlock, reverse[0]); err != nil {
 		return err
 	}
+	return r.backfillRestoredObservations(ctx)
+}
+
+// backfillRestoredObservations resolves any certificate body obligation in
+// the replayed range from a locally or remotely retained, independently
+// verified archive record. It never clears an observation without importing
+// the matching body through the journal's normal historical-candidate path.
+func (r *ArchiveRestore) backfillRestoredObservations(ctx context.Context) error {
+	image, err := r.Journal.LoadJournal(ctx, r.Context, r.JournalLimits)
+	if err != nil {
+		return err
+	}
+	if image.CoverageBase == nil || image.CoverageBase.Height == 0 {
+		return fmt.Errorf("%w: restored observation repair has no verified archive base", ErrRestore)
+	}
+	for _, observation := range image.Observations {
+		if !observation.Unresolved {
+			continue
+		}
+		if err := r.backfillRestoredObservation(ctx, image.CoverageBase.Height, observation); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (r *ArchiveRestore) backfillRestoredObservation(ctx context.Context, baseHeight uint64, observation configuredprogress.JournalObservation) error {
+	if observation.UC == nil || observation.UC.InputRecord == nil || len(observation.TargetHash) != 32 ||
+		!bytes.Equal(observation.TargetHash, observation.UC.InputRecord.BlockHash) {
+		return fmt.Errorf("%w: unresolved restored observation has no certified block hash", configuredprogress.ErrUntrusted)
+	}
+	var q archive.Request
+	q.Context = r.Subject
+	copy(q.BlockHash[:], observation.TargetHash)
+	record, original, originalTR, result, _, header, err := r.verifiedRestoreRecord(ctx, q, observation.UC)
+	if err != nil {
+		return fmt.Errorf("%w: restored observation body %x is unavailable or unverified", configuredprogress.ErrUnavailable, q.BlockHash)
+	}
+	if header.Number.Uint64() > baseHeight {
+		return nil // outside the verified restore range
+	}
+	if result.InputRecord == nil || !bytes.Equal(result.InputRecord.BlockHash, observation.TargetHash) ||
+		!bytes.Equal(result.InputRecord.Hash, observation.UC.InputRecord.Hash) ||
+		result.InputRecord.RoundNumber != observation.UC.InputRecord.RoundNumber {
+		return fmt.Errorf("%w: archived certificate does not bind restored observation %x", configuredprogress.ErrUntrusted, q.BlockHash)
+	}
+	block, err := engineapi.BlockFromArchive(q, record, original.GetRootRoundNumber(), result.InputRecord.RoundNumber)
+	if err != nil || block.Number == 0 || block.Number != header.Number.Uint64() ||
+		!bytes.Equal(block.Hash, observation.TargetHash) || !bytes.Equal(block.StateRoot, observation.UC.InputRecord.Hash) {
+		return fmt.Errorf("%w: archived restored body differs from certificate %x", configuredprogress.ErrUntrusted, q.BlockHash)
+	}
+	candidate := configuredprogress.JournalCandidate{
+		Round: observation.UC.InputRecord.RoundNumber, Number: block.Number, ParentNumber: block.Number - 1,
+		Hash: bytes.Clone(block.Hash), StateRoot: bytes.Clone(block.StateRoot), ParentHash: bytes.Clone(block.ParentHash),
+		ParentState: bytes.Clone(observation.UC.InputRecord.PreviousHash), Raw: bytes.Clone(block.Raw),
+		BlockSize: block.BlockSize, StateSize: block.StateSize, AuthorizingUC: original, AuthorizingTR: originalTR,
+	}
+	if err := r.Journal.PutHistoricalJournalCandidate(ctx, r.Context, r.JournalLimits, candidate); err != nil {
+		return fmt.Errorf("backfilling archived restored body %x: %w", q.BlockHash, err)
+	}
+	if err := r.Journal.BackfillJournalObservation(ctx, r.Context, r.JournalLimits, observation.UC, observation.TR); err != nil {
+		return fmt.Errorf("backfilling restored certificate at epoch %d round %d: %w",
+			observation.UC.GetRootEpoch(), observation.UC.GetRoundNumber(), err)
+	}
+	return nil
+}
+
+func (r *ArchiveRestore) verifiedRestoreRecord(ctx context.Context, q archive.Request, expected *types.UnicityCertificate) (*archive.Record, *types.UnicityCertificate,
+	*certification.TechnicalRecord, *types.UnicityCertificate, *certification.TechnicalRecord, *gethtypes.Header, error) {
+	check := func(rec *archive.Record) (*types.UnicityCertificate, *certification.TechnicalRecord, *types.UnicityCertificate,
+		*certification.TechnicalRecord, *gethtypes.Header, error) {
+		original, originalTR, result, resultTR, err := decodeRestorePairs(rec)
+		if err != nil {
+			return nil, nil, nil, nil, nil, err
+		}
+		if _, _, err := r.checkRecord(q, rec); err != nil {
+			return nil, nil, nil, nil, nil, err
+		}
+		var header gethtypes.Header
+		if err := rlp.DecodeBytes(rec.Header, &header); err != nil || header.Number == nil || header.Hash() != common.Hash(q.BlockHash) {
+			return nil, nil, nil, nil, nil, archive.ErrInvalid
+		}
+		if result.InputRecord == nil || expected == nil || expected.InputRecord == nil ||
+			!bytes.Equal(result.InputRecord.BlockHash, expected.InputRecord.BlockHash) ||
+			!bytes.Equal(result.InputRecord.Hash, expected.InputRecord.Hash) ||
+			result.InputRecord.RoundNumber != expected.InputRecord.RoundNumber ||
+			!bytes.Equal(result.InputRecord.BlockHash, q.BlockHash[:]) || !bytes.Equal(result.InputRecord.Hash, header.Root[:]) {
+			return nil, nil, nil, nil, nil, archive.ErrInvalid
+		}
+		block, err := engineapi.BlockFromArchive(q, rec, original.GetRootRoundNumber(), result.InputRecord.RoundNumber)
+		if err != nil || block.Number != header.Number.Uint64() || !bytes.Equal(block.Hash, q.BlockHash[:]) || !bytes.Equal(block.StateRoot, header.Root[:]) {
+			return nil, nil, nil, nil, nil, archive.ErrInvalid
+		}
+		return original, originalTR, result, resultTR, &header, nil
+	}
+	if rec, err := r.Archive.Get(q); err == nil {
+		if original, originalTR, result, resultTR, header, checkErr := check(rec); checkErr == nil {
+			return rec, original, originalTR, result, resultTR, header, nil
+		}
+	}
+	for _, id := range r.Replicas {
+		rec, err := Fetch(ctx, r.Host, id, q, r.Limits)
+		if err != nil {
+			continue
+		}
+		original, originalTR, result, resultTR, header, checkErr := check(rec)
+		if checkErr != nil {
+			continue
+		}
+		_ = r.Archive.Put(q, rec) // a stale/corrupt local copy must not hide a verified replica.
+		return rec, original, originalTR, result, resultTR, header, nil
+	}
+	return nil, nil, nil, nil, nil, nil, archive.ErrUnavailable
 }
 
 func sameBlockRef(a, b shardnode.BlockRef) bool {

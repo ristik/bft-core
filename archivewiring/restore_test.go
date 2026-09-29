@@ -72,6 +72,83 @@ func TestSingleEpochArchiveRestoreResolvesCertifiedQuietTip(t *testing.T) {
 	require.Empty(t, image.Observations[2].TargetHash)
 }
 
+func TestArchiveRestoreBackfillsAnUnresolvedHistoricalObservation(t *testing.T) {
+	f := newWiringFixture(t, 3)
+	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	first := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	second := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	for _, remote := range []*network.Peer{first, second} {
+		sender.Network().Peerstore().AddAddrs(remote.ID(), remote.MultiAddresses(), peerstore.PermanentAddrTTL)
+		store, err := archive.Open(t.TempDir())
+		require.NoError(t, err)
+		for _, entry := range f.entries {
+			q, rec, err := FromJournal(context.Background(), f.context, f.subject, nil, entry)
+			require.NoError(t, err)
+			if remote.ID() == first.ID() {
+				corrupt := *rec
+				corrupt.Body = bytes.Clone(rec.Body)
+				corrupt.Body[0] ^= 0xff
+				rec = &corrupt
+			}
+			require.NoError(t, store.Put(q, rec))
+		}
+		server, err := NewServer(store, f.subject, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{sender.ID()}, DefaultLimits())
+		require.NoError(t, err)
+		server.Register(context.Background(), remote)
+	}
+	journal, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/restore.db", configuredprogress.Settings{Retain: 16})
+	require.NoError(t, err)
+	defer journal.Close()
+	_, _, err = journal.Initialize(context.Background(), f.context)
+	require.NoError(t, err)
+	limits := configuredprogress.JournalLimits{Candidates: 4, Observations: 8, Bytes: 16 << 20}
+	require.NoError(t, journal.EnableJournal(context.Background(), f.context, limits))
+	local, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	genesis := shardnode.BlockRef{Hash: f.context.Origin.BlockHash().Bytes(), StateRoot: f.context.Origin.StateRoot().Bytes()}
+	executor := newRestoreExecutorFixture(genesis)
+	last := f.entries[len(f.entries)-1]
+	restore := &ArchiveRestore{Journal: journal, Context: f.context, JournalLimits: limits, Archive: local,
+		Subject: f.subject, Replicas: [2]peer.ID{first.ID(), second.ID()}, Host: sender, Limits: DefaultLimits(),
+		Adapter: executor, Genesis: genesis, TipUC: last.ResultingUC, TipTR: last.ResultingTR}
+	require.NoError(t, restore.Restore(context.Background()))
+	// A retry after the replay marker and EL finality are durable resumes the
+	// observation repair path without requiring another empty-disk restore.
+	require.NoError(t, restore.Restore(context.Background()))
+
+	// This valid historical certificate has no hot journal body after replay;
+	// the direct repair path confirms the journal reports the missing proof.
+	entry := f.entries[1]
+	require.ErrorIs(t, journal.BackfillJournalObservation(context.Background(), f.context, limits, entry.ResultingUC, entry.ResultingTR), configuredprogress.ErrUnavailable)
+	observation := configuredprogress.JournalObservation{UC: entry.ResultingUC, TR: entry.ResultingTR,
+		TargetHash: bytes.Clone(entry.Candidate.Hash), Unresolved: true}
+	image, err := journal.LoadJournal(context.Background(), f.context, limits)
+	require.NoError(t, err)
+	probeArchive, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	fallbackRestore := *restore
+	fallbackRestore.Archive = probeArchive
+	require.NoError(t, fallbackRestore.backfillRestoredObservation(context.Background(), image.CoverageBase.Height, observation),
+		"a corrupt first replica is skipped for the good second replica")
+	image, err = journal.LoadJournal(context.Background(), f.context, limits)
+	require.NoError(t, err)
+	found := false
+	for _, o := range image.Observations {
+		if o.UC.GetRoundNumber() == entry.ResultingUC.GetRoundNumber() && o.UC.GetRootRoundNumber() == entry.ResultingUC.GetRootRoundNumber() {
+			require.False(t, o.Unresolved)
+			found = true
+		}
+	}
+	require.True(t, found, "verified archive body backfills the unresolved observation")
+	for _, candidate := range image.Candidates {
+		if bytes.Equal(candidate.Candidate.Hash, entry.Candidate.Hash) {
+			require.True(t, candidate.Certified)
+			return
+		}
+	}
+	t.Fatal("backfilled archive body was not retained in the journal")
+}
+
 func newRestoreExecutorFixture(genesis shardnode.BlockRef) *restoreExecutorFixture {
 	return &restoreExecutorFixture{genesis: genesis, head: genesis, finalized: genesis,
 		blocks: map[string]shardnode.BlockRef{string(genesis.Hash): genesis}, parents: make(map[string]shardnode.Hash)}
@@ -156,7 +233,7 @@ func TestSingleEpochArchiveRestoreReplaysBeyondJournalCapWithReplicaFailover(t *
 	require.NoError(t, err)
 	_, _, err = journal.Initialize(context.Background(), f.context)
 	require.NoError(t, err)
-	limits := configuredprogress.JournalLimits{Candidates: 2, Observations: 4, Bytes: 16 << 20}
+	limits := configuredprogress.JournalLimits{Candidates: 3, Observations: 4, Bytes: 16 << 20}
 	require.NoError(t, journal.EnableJournal(context.Background(), f.context, limits))
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
@@ -179,6 +256,7 @@ func TestSingleEpochArchiveRestoreReplaysBeyondJournalCapWithReplicaFailover(t *
 	require.NoError(t, err)
 	require.Len(t, image.Candidates, 1, "restore retains a certified base rather than overflowing the bounded journal")
 	require.NotNil(t, image.Restored)
+	require.Equal(t, &configuredprogress.CoverageBase{Height: image.Restored.Height, Hash: image.Restored.Hash}, image.CoverageBase)
 	coordinator := &configuredadmission.ExecutionRecovery{Store: journal, Context: f.context, JournalLimits: limits,
 		Executor: executor, Gate: shardnode.NewFinalityGate(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
 	ticket, err := coordinator.Prepare(context.Background(), last.ResultingUC)
@@ -213,10 +291,27 @@ func TestSingleEpochArchiveRestoreReplaysBeyondJournalCapWithReplicaFailover(t *
 	require.NoError(t, err)
 	_, _, err = journal.CommitObservation(prepared)
 	require.NoError(t, err)
+	var state7 [32]byte
+	state7[0], state7[31] = 7, 24
+	parentHash7 := nextHash
+	nextHash7, nextRaw7, nextSize7 := wiringBlock(t, parentHash7, state7, 7, uc6.GetRootRoundNumber(), uc6, tr6)
+	candidate7 := configuredprogress.JournalCandidate{Round: 7, Number: 7, ParentNumber: 6,
+		Hash: nextHash7[:], StateRoot: state7[:], ParentHash: parentHash7[:], ParentState: nextState[:],
+		Raw: nextRaw7, BlockSize: nextSize7, AuthorizingUC: uc6, AuthorizingTR: tr6}
+	require.NoError(t, journal.PutJournalCandidate(context.Background(), f.context, limits, candidate7))
+	ir7 := &types.InputRecord{Version: 1, RoundNumber: 7, PreviousHash: bytes.Clone(nextState[:]),
+		Hash: state7[:], BlockHash: nextHash7[:], SummaryValue: []byte{}, Timestamp: 1_700_000_007}
+	uc7, tr7 := signWiring(t, f.chain, ir7, 8, uc6.GetRootRoundNumber()+1)
+	observation7, err := rootinput.AuthenticateObservationV2(context.Background(), f.context.Observation, uc7, tr7)
+	require.NoError(t, err)
+	prepared, _, err = journal.PrepareObservation(context.Background(), f.context, observation7)
+	require.NoError(t, err)
+	_, _, err = journal.CommitObservation(prepared)
+	require.NoError(t, err)
 	image, err = journal.LoadJournal(context.Background(), f.context, limits)
 	require.NoError(t, err)
 	for _, entry := range image.Candidates {
-		if entry.Candidate.Number != 6 {
+		if entry.Candidate.Number < 6 {
 			continue
 		}
 		q, rec, err := FromJournal(context.Background(), f.context, f.subject, nil, entry)
@@ -237,7 +332,15 @@ func TestSingleEpochArchiveRestoreReplaysBeyondJournalCapWithReplicaFailover(t *
 	image, err = journal.LoadJournal(context.Background(), f.context, limits)
 	require.NoError(t, err)
 	require.NotNil(t, image.Frontier)
-	require.EqualValues(t, 6, image.Frontier.Anchor.Height)
+	require.EqualValues(t, 7, image.Frontier.Anchor.Height)
+	require.EqualValues(t, 7, image.Frontier.Floor, "frontier pruning crosses the restored coverage base")
+	require.Len(t, image.Candidates, 1)
+	for _, candidate := range image.Candidates {
+		require.NotEqualValues(t, 6, candidate.Candidate.Number, "the covered height between the base and tip is pruned")
+	}
+	// The restored checkpoint is the start of local two-replica coverage;
+	// subsequent audits must not demand pre-restore coverage entries.
+	require.NoError(t, worker.Pass(context.Background()))
 	// The trust decision also survives a journal process restart.
 	require.NoError(t, journal.Close())
 	reopened, err := configuredprogress.OpenConfiguredV2(path, configuredprogress.Settings{Retain: 16})
@@ -248,5 +351,5 @@ func TestSingleEpochArchiveRestoreReplaysBeyondJournalCapWithReplicaFailover(t *
 	image, err = reopened.LoadJournal(context.Background(), f.context, limits)
 	require.NoError(t, err)
 	require.NotNil(t, image.Frontier)
-	require.EqualValues(t, 6, image.Frontier.Anchor.Height)
+	require.EqualValues(t, 7, image.Frontier.Anchor.Height)
 }

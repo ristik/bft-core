@@ -116,9 +116,13 @@ func (s *Store) InstallReplayedTip(ctx context.Context, c Context, limits Journa
 	if err != nil {
 		return err
 	}
+	coverageRaw, err := encodeCoverageBase(state.i.descriptorDigest, CoverageBase{Height: anchor.Height, Hash: anchor.Hash})
+	if err != nil {
+		return err
+	}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
-		if !imageMatches(b, state.i) || b.Get(restoreAnchorKey) != nil {
+		if !imageMatches(b, state.i) || b.Get(restoreAnchorKey) != nil || b.Get(journalCoverageBaseKey) != nil {
 			return ErrStale
 		}
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
@@ -149,6 +153,9 @@ func (s *Store) InstallReplayedTip(ctx context.Context, c Context, limits Journa
 				return err
 			}
 		}
-		return b.Put(restoreAnchorKey, anchorRaw)
+		if err := b.Put(restoreAnchorKey, anchorRaw); err != nil {
+			return err
+		}
+		return b.Put(journalCoverageBaseKey, coverageRaw)
 	})
 }
