@@ -64,7 +64,10 @@ func (p *Publisher) fromJournal(ctx context.Context, e configuredprogress.Journa
 		}
 	}
 	if err != nil {
-		return q, nil, err
+		if ctx.Err() != nil {
+			return q, nil, ctx.Err()
+		}
+		return q, nil, fmt.Errorf("%w: capturing certified block receipts: %v", archive.ErrUnavailable, err)
 	}
 	rec, err = WithReceiptList(rec, envelopes)
 	return q, rec, err
@@ -223,7 +226,7 @@ func (p *Publisher) pass(ctx context.Context) error {
 		p.cursor = (index + 1) % len(entries)
 		p.mu.Unlock()
 		q := archive.Request{Context: p.Subject, BlockHash: hash}
-		rec, eerr := p.Archive.Get(q)
+		rec, eerr := p.Archive.GetReceiptComplete(q)
 		if errors.Is(eerr, archive.ErrUnavailable) {
 			q, rec, eerr = p.fromJournal(ctx, e)
 			if eerr == nil {
@@ -339,7 +342,7 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 		p.replicaCursor[index] = (position + 1) % len(entries)
 		p.mu.Unlock()
 		q := archive.Request{Context: p.Subject, BlockHash: hash}
-		rec, err := p.Archive.Get(q)
+		rec, err := p.Archive.GetReceiptComplete(q)
 		if errors.Is(err, archive.ErrUnavailable) {
 			continue // The local publisher will reconstruct this record.
 		}
