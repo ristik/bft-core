@@ -132,6 +132,15 @@ func isJSONNull(raw json.RawMessage) bool {
 	return len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null"
 }
 
+// blockReceiptsNotReadyError marks the brief interval where a certified
+// payload is not yet visible through the execution client's receipt RPC.
+// Callers may retry it for a bounded period; other RPC and validation errors
+// remain terminal.
+type blockReceiptsNotReadyError struct{}
+
+func (blockReceiptsNotReadyError) Error() string   { return "eth_getBlockReceipts returned null" }
+func (blockReceiptsNotReadyError) Temporary() bool { return true }
+
 // GetBlockByHash returns the subset of the block header this package needs.
 // includeTxs is always false — headers, not bodies.
 func (c *EthClient) GetBlockByHash(ctx context.Context, hash data32) (blockHeaderJSON, error) {
@@ -150,7 +159,7 @@ func (c *EthClient) GetBlockReceipts(ctx context.Context, hash data32) ([][]byte
 		return nil, err
 	}
 	if isJSONNull(raw) {
-		return nil, errors.New("eth_getBlockReceipts returned null")
+		return nil, blockReceiptsNotReadyError{}
 	}
 	var entries []json.RawMessage
 	if err := json.Unmarshal(raw, &entries); err != nil {

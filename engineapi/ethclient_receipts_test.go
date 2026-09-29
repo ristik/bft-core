@@ -52,3 +52,16 @@ func TestGetBlockReceiptsRefusesMismatchedBlockOrIndex(t *testing.T) {
 		})
 	}
 }
+
+func TestGetBlockReceiptsNullIsTemporarilyUnavailable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":null}`))
+	}))
+	defer server.Close()
+
+	_, err := NewEthClient(server.URL).GetBlockReceipts(t.Context(), data32(common.HexToHash("0x1234")))
+	require.EqualError(t, err, "eth_getBlockReceipts returned null")
+	var retryable interface{ Temporary() bool }
+	require.ErrorAs(t, err, &retryable)
+	require.True(t, retryable.Temporary())
+}
