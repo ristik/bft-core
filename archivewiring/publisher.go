@@ -56,7 +56,7 @@ func (p *Publisher) fromJournal(ctx context.Context, e configuredprogress.Journa
 	}
 	var envelopes [][]byte
 	if p.ReceiptSource != nil {
-		envelopes, err = p.ReceiptSource.GetBlockReceipts(ctx, q.BlockHash)
+		envelopes, err = captureBlockReceipts(ctx, p.ReceiptSource, q.BlockHash)
 	} else {
 		var body gethtypes.Body
 		if rlp.DecodeBytes(rec.Body, &body) != nil || len(body.Transactions) != 0 {
@@ -67,10 +67,51 @@ func (p *Publisher) fromJournal(ctx context.Context, e configuredprogress.Journa
 		if ctx.Err() != nil {
 			return q, nil, ctx.Err()
 		}
-		return q, nil, fmt.Errorf("%w: capturing certified block receipts: %v", archive.ErrUnavailable, err)
+		return q, nil, fmt.Errorf("%w: capturing certified block receipts: %w", archive.ErrUnavailable, err)
 	}
 	rec, err = WithReceiptList(rec, envelopes)
 	return q, rec, err
+}
+
+// Receipt RPC visibility can lag certification briefly while the execution
+// client commits the canonical block. Retry only explicitly temporary null
+// responses, with a bound so malformed receipts or a stuck node stay loud.
+func captureBlockReceipts(ctx context.Context, source ReceiptSource, hash [32]byte) ([][]byte, error) {
+	const retryBound = 5 * time.Second
+	const retryInterval = 100 * time.Millisecond
+	retryCtx, cancel := context.WithTimeout(ctx, retryBound)
+	defer cancel()
+	var lastRetryable error
+	for {
+		envelopes, err := source.GetBlockReceipts(retryCtx, hash)
+		if err == nil {
+			return envelopes, nil
+		}
+		if retryCtx.Err() != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			if lastRetryable != nil {
+				return nil, lastRetryable
+			}
+			return nil, err
+		}
+		var retryable interface{ Temporary() bool }
+		if !errors.As(err, &retryable) || !retryable.Temporary() {
+			return nil, err
+		}
+		lastRetryable = err
+		ticker := time.NewTimer(retryInterval)
+		select {
+		case <-ctx.Done():
+			ticker.Stop()
+			return nil, ctx.Err()
+		case <-retryCtx.Done():
+			ticker.Stop()
+			return nil, lastRetryable
+		case <-ticker.C:
+		}
+	}
 }
 
 type Status struct{ Pending, Acknowledged, Lagging int64 }

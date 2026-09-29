@@ -381,3 +381,37 @@ func TestPartitionTimeoutGenerator_GetT2Timeouts(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, tmos)
 }
+
+func TestPartitionTimeoutGenerator_IndependentShardT2(t *testing.T) {
+	shortID, longID := types.PartitionID(31), types.PartitionID(32)
+	shortConf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: shortID,
+		T2Timeout: time.Second, Validators: []*types.NodeInfo{testutils.NewTestNode(t).NodeInfo(t)}}
+	longConf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: longID,
+		T2Timeout: 5 * time.Second, Validators: []*types.NodeInfo{testutils.NewTestNode(t).NodeInfo(t)}}
+	configs := map[types.PartitionID]*types.PartitionDescriptionRecord{shortID: shortConf, longID: longConf}
+	state := &MockState{
+		certificates: []*types.UnicityCertificate{
+			{InputRecord: &types.InputRecord{}, UnicityTreeCertificate: &types.UnicityTreeCertificate{Partition: shortID},
+				UnicitySeal: &types.UnicitySeal{RootChainRoundNumber: 1}},
+			{InputRecord: &types.InputRecord{}, UnicityTreeCertificate: &types.UnicityTreeCertificate{Partition: longID},
+				UnicitySeal: &types.UnicitySeal{RootChainRoundNumber: 1}},
+		},
+		shardInfo: func(partition types.PartitionID, _ types.ShardID) *storage.ShardInfo {
+			si, err := storage.NewShardInfo(configs[partition], crypto.SHA256)
+			require.NoError(t, err)
+			return si
+		},
+	}
+	generator := &PartitionTimeoutGenerator{blockRate: time.Second, state: state}
+	// Root rounds are spaced at blockRate/2. At round 5 only the one second
+	// shard has reached its own T2; the five second shard remains live.
+	timedOut, err := generator.GetT2Timeouts(5)
+	require.NoError(t, err)
+	require.Len(t, timedOut, 1)
+	require.Equal(t, shortID, timedOut[0].GetPartitionID())
+	timedOut, err = generator.GetT2Timeouts(13)
+	require.NoError(t, err)
+	require.Len(t, timedOut, 2)
+	require.Equal(t, shortID, timedOut[0].GetPartitionID())
+	require.Equal(t, longID, timedOut[1].GetPartitionID())
+}
