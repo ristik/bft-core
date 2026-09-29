@@ -18,14 +18,20 @@ m2_wait_root_epoch() {
 }
 
 m2_start_root() {
-  local node=$1 epoch=$2 boot=$3 port pid i
+  local node=$1 epoch=$2 boot=$3 port pid i conf
+  local -a shardConfArgs=(--shard-conf "$fullShardConf")
   port=$(m2_rpc_port "$node")
+  if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+    for conf in test-nodes/shard-conf-f8-a-left.json test-nodes/shard-conf-f8-a-right.json test-nodes/shard-conf-f8-b-left.json; do
+      shardConfArgs+=(--shard-conf "$conf")
+    done
+  fi
   mkdir -p "test-nodes/root$node"
   for i in $(seq 1 90); do
     build/ubft root-node run --home "test-nodes/root$node" \
       --address "/ip4/127.0.0.1/tcp/$(m2_p2p_port "$node")" \
       --bootnodes "$boot" --trust-base test-nodes/trust-base.json \
-      --shard-conf "$fullShardConf" --profile-2 --install-handoff-epoch "$epoch" \
+      "${shardConfArgs[@]}" --profile-2 --install-handoff-epoch "$epoch" \
       --rpc-server-address "127.0.0.1:$port" --log-format text --log-level debug \
       >>"test-nodes/root$node/debug.log" 2>&1 &
     pid=$!
@@ -136,6 +142,50 @@ m2_handoff() {
   build/ubft root-node init --home "test-nodes/root$new" -g >/dev/null || return 1
   generate_log_configuration "test-nodes/root$new/"
   m2_next_trust_base "$epoch" "$replace" "$new" "$previous" "$nextFile" || return 1
+  if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+    local parent logStart outcome waitStep activated committed=false oldEpoch=$((epoch-1))
+    for attempt in $(seq 1 30); do
+      parent=$(python3 - test-nodes/root1/debug.log <<'PY'
+import re,sys
+last=''
+for line in open(sys.argv[1], errors='replace'):
+    if 'sending CertificationResponse' not in line: continue
+    block=re.search(r'Block Hash: ([0-9A-F]{64})\b', line)
+    if block: last='0x'+block.group(1).lower()
+print(last)
+PY
+      )
+      [[ "$parent" = 0x* ]] || { sleep 1; continue; }
+      logStart=$(wc -l < test-nodes/root1/debug.log)
+      if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" \
+        --frozen-parent "$parent" --root-rpc "$oldRpcs"; then
+        sleep 1
+        continue
+      fi
+      for waitStep in $(seq 1 90); do
+        outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
+          grep -E "msg=\\\"root handoff outcome\\\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
+        [[ "$outcome" = *phase=committed* ]] && { committed=true; break; }
+        [[ "$outcome" = *phase=aborted* ]] && break
+        sleep 1
+      done
+      $committed && break
+      [[ "$outcome" = *phase=aborted* ]] && echo "F8 handoff attempt $attempt aborted; retrying with the current certified parent"
+    done
+    $committed || { echo "F8 root handoff did not commit after retries" >&2; return 1; }
+    for i in $(seq 1 "$validators"); do
+      activated=false
+      for waitStep in $(seq 1 90); do
+        if grep -Eq "msg=\\\"handoff activated\\\" rootEpoch=$epoch([[:space:]]|$)" "test-nodes/evm$i/debug.log"; then
+          activated=true; break
+        fi
+        sleep 1
+      done
+      $activated || { echo "EVM validator $i did not activate root epoch $epoch" >&2; return 1; }
+    done
+    echo "F8 root handoff epoch $epoch committed and activated while aggregators remained live"
+    return 0
+  fi
   # Root validators enforce the ordered freeze. The operator only selects a
   # currently certified EVM tip and retries if an endorser has advanced.
   local parent waitStep oldEpoch=$((epoch-1)) outcome logStart
@@ -218,5 +268,9 @@ for initialHash in $(printf '%b' "$txHashes"); do
 done
 m2_handoff 2 4 5 '1 2 3 4' "$(m2_root_addr 4)" \
   'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+  echo "F8 mixed lane completed one root handoff while all aggregator shards remained active"
+  return 0
+fi
 m2_handoff 3 3 6 '1 2 3 5' "$(m2_root_addr 3)" \
   'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25870' || return 1

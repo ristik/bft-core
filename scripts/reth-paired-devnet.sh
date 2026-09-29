@@ -50,6 +50,11 @@ case "${SIGNING:-local}" in
   local | authority) ;;
   *) echo "SIGNING must be local or authority" >&2; exit 2 ;;
 esac
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+  [ "${M2_PROFILE2:-0}" = 1 ] || { echo "F8 mixed lane requires M2_PROFILE2=1 for the live root handoff" >&2; exit 2; }
+  # Defines the three pinned Rust aggregator fixture and its trace/reconnect probes.
+  source scripts/f8-mixed-lane.sh
+fi
 if [ "${H4_RESTORE_PROBE:-0}" = 1 ] && { [ "${SIGNING:-local}" != authority ] || [ "$validators" -ne 4 ] || [ "$rounds" -lt 15 ]; }; then
   echo "H4 restore probe requires SIGNING=authority, four validators and at least 15 blocks" >&2
   exit 2
@@ -87,7 +92,14 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 # from this checkout. This runs nested inside scripts/reth-smoke.sh, whose own teardown cannot undo
 # anything a machine-wide sweep here had already killed.
 cleanup() {
+  if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
   ./stop-evm.sh -a >/dev/null 2>&1 || true
+  stop_root_nodes
+  # These daemons can outlive TERM while their P2P/RPC servers drain. Interrupt only
+  # processes whose command and working directory identify this checkout.
+  for p in $(owned_pids 'ubft root-node run|ubft shard-node run'); do
+    kill -INT "$p" 2>/dev/null || true
+  done
   stop_pidfile "test-nodes/h4-replaced/pid" 'ubft shard-node restore'
   stop_pidfile "test-nodes/proof-proxy/pid" 'd2c-proof-proxy.py'
   stop_pidfile "test-nodes/engine-proxy/pid" 'd2c-engine-proxy.py'
@@ -95,10 +107,13 @@ cleanup() {
     stop_pidfile "test-nodes/auth$i/pid" 'ubft signing-authority run'
   done
   for i in $(seq 1 "$validators"); do
-    stop_pidfile "test-nodes/reth$i/pid" 'reth.* node'
+    stop_pidfile "test-nodes/reth$i/pid" 'reth.* node' INT
   done
   for d in $negativeReths; do
-    stop_pidfile "test-nodes/$d/pid" 'reth.* node'
+    stop_pidfile "test-nodes/$d/pid" 'reth.* node' INT
+  done
+  for p in $(owned_pids 'reth.* node'); do
+    kill -INT "$p" 2>/dev/null || true
   done
   wait 2>/dev/null || true
   if [ "${M2_PROFILE2:-0}" = 1 ]; then
@@ -164,6 +179,19 @@ fi
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# A failed mixed lane can leave a partial partition frontier in root storage. Reuse the
+# generated root identities and trust base, but start its databases clean so a retry cannot
+# inherit half-certified shard schemes from the prior attempt. Stop only processes owned by
+# this checkout while holding the devnet lock.
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+  stop_root_nodes
+  sleep 2
+  rm -f test-nodes/root{1,2,3,4}/root-trust-history.db \
+    test-nodes/root{1,2,3,4}/rootchain.db \
+    test-nodes/root{1,2,3,4}/orchestration.db \
+    test-nodes/root{1,2,3,4}/trustbase.db
+fi
 
 echo "=== 1. generate the shard topology and chain spec ==="
 rootValidators=3
@@ -622,6 +650,7 @@ echo "=== 4. configure the checked v2 origin and seed the block-1 transaction ==
 # Registration happens when start-evm.sh starts the root nodes, so replace the generated base conf
 # only now, after the startup negatives above have used it.
 cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_prepare; fi
 if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   export EVM_ARCHIVE_ROOT=test-nodes/h4-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
@@ -681,16 +710,17 @@ preflightFailures=$failures
 echo "waiting for block 1 and a certificate (up to 180s) ..."
 mined=false
 certified=false
-for _ in $(seq 1 90); do
+for attempt in $(seq 1 90); do
   rcpt=$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionReceipt "[\"$txHash\"]")
-  blkNum=$(echo "$rcpt" | pyget "['result']['blockNumber']")
+  blkNum=$(echo "$rcpt" | pyget "['result']['blockNumber']" || true)
   if [ -n "$blkNum" ] && [ "$blkNum" != "None" ]; then mined=true; fi
-  blkHash=$(echo "$rcpt" | pyget "['result']['blockHash']")
+  blkHash=$(echo "$rcpt" | pyget "['result']['blockHash']" || true)
   if [ -n "$blkHash" ] && [ "$blkHash" != "None" ]; then
     blkHash=${blkHash#0x}
     if grep -Eq 'msg="certificate admitted".* block='"$blkHash"' height=1 round=[0-9]+ rootRound=[0-9]+' \
       test-nodes/evm1/debug.log 2>/dev/null; then certified=true; fi
   fi
+  echo "  bootstrap probe $attempt: mined=$mined certified=$certified block=${blkNum:-none}"
   $mined && $certified && break
   sleep 2
 done
@@ -726,13 +756,42 @@ if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   pass "all four validators imported the certified bootstrap block before H4"
 fi
 
+# Wait until the bootstrap partition certificate is committed before joining the three
+# independent aggregator shards. Their handshakes ask roots for partition state, so starting
+# them before block 1 is certified creates a needless unknown-partition retry loop.
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+  if ! $mined || ! $certified; then
+    fail "cannot start mixed aggregators without the certified EVM bootstrap"
+    exit 1
+  fi
+  f8_start || { fail "mixed aggregator startup failed"; exit 1; }
+  for _ in $(seq 1 90); do
+    if f8_trace >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  f8_trace >/dev/null || { fail "not all mixed shards entered certified root state"; exit 1; }
+  pass "three aggregator shards certified alongside the EVM partition; UC/TR/EVM trace recorded"
+fi
+
 if [ "${M2_PROFILE2:-0}" = 1 ]; then
   echo "=== M2 profile-2: two certified root handoffs with paid execution ==="
+  if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+    f8_slow_stop_resume_evm || { fail "EVM delay/stop/resume probe failed"; exit 1; }
+    f8_reconnect_probe || { fail "non-default aggregator shard reconnect failed"; exit 1; }
+    f8_inflight_evm_probe || { fail "EVM proposal did not certify during root leader rotation"; exit 1; }
+    pass "aggregators continued through delayed/stopped EVM; reconnect and in-flight EVM proposal passed"
+  fi
   if ! source scripts/m2-profile2-handoffs.sh; then
     fail "profile-2 two-handoff lane failed"
     exit 1
   fi
-  pass "two profile-2 handoffs replaced validator keys and certified paid transactions"
+  if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+    f8_trace || { fail "aggregator shards lost root coverage after handoff"; exit 1; }
+    pass "one root handoff replaced validator keys and certified paid transactions"
+    pass "all three aggregator shards remained live through the root handoff"
+  else
+    pass "two profile-2 handoffs replaced validator keys and certified paid transactions"
+  fi
 fi
 
 echo

@@ -497,6 +497,9 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 			certified[cert.Shard.Key()] = true
 			require.Equal(t, round, cert.UC.InputRecord.RoundNumber)
 			require.Equal(t, block.BlockData.Epoch, cert.UC.UnicitySeal.Epoch)
+			key := types.PartitionShardID{PartitionID: cert.Partition, ShardID: cert.Shard.Key()}
+			require.Equal(t, block.ShardState.States[key].TR.Leader, cert.Technical.Leader,
+				"root round/leader changes must not replace the shard TR authorizer")
 		}
 		for _, key := range aggregators {
 			require.True(t, certified[key.ShardID], "aggregator shard must receive a certificate")

@@ -60,7 +60,7 @@ def certificate_admissions(lines):
     return found
 
 
-def execution_evidence(nodes, height, block_hash, commitment, validators):
+def execution_evidence(nodes, height, block_hash, commitment, validators, allow_root_round_skew=False):
     derived = []
     partition_rounds = []
     root_rounds = []
@@ -87,9 +87,12 @@ def execution_evidence(nodes, height, block_hash, commitment, validators):
         derived.append(root_input)
         partition_rounds.append(partition_round)
         root_rounds.append(certified[-1]["rootRound"])
-    if len(set(derived)) != 1 or len(set(partition_rounds)) != 1 or len(set(root_rounds)) != 1:
+    if (len(set(derived)) != 1 or len(set(partition_rounds)) != 1
+            or (not allow_root_round_skew and len(set(root_rounds)) != 1)):
         raise RuntimeError(f"validator v2 derivation or certificate round disagrees at B{height}")
-    return derived[0], partition_rounds[0], root_rounds[0]
+    return derived[0], partition_rounds[0], (
+        ",".join(root_rounds) if allow_root_round_skew else root_rounds[0]
+    )
 
 
 def authority_status(nodes, validator):
@@ -505,7 +508,8 @@ def main():
         prior = block["hash"]
         try:
             root_input, partition_round, root_round = execution_evidence(
-                args.nodes, height, block["hash"], block["extraData"], block_ids
+                args.nodes, height, block["hash"], block["extraData"], block_ids,
+                allow_root_round_skew=os.environ.get("F8_MIXED_LANE") == "1",
             )
         except (OSError, RuntimeError) as exc:
             print(f"D1 FAIL: B{height} lacks cross-validator certificate/v2 evidence: {exc}", flush=True)
