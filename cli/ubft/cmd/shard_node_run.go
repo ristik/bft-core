@@ -38,6 +38,7 @@ import (
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/boltdb"
 	"github.com/unicitynetwork/bft-core/network"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -47,6 +48,52 @@ import (
 )
 
 const lucStoreFileName = "shard-node-luc.json"
+
+type handoffTerminalCertificate struct {
+	uc *types.UnicityCertificate
+	tr *certification.TechnicalRecord
+}
+
+type handoffObservationBackfiller interface {
+	BackfillJournalObservation(context.Context, configuredprogress.Context, configuredprogress.JournalLimits, *types.UnicityCertificate, *certification.TechnicalRecord) error
+}
+
+// runProfile2JournalStartup is the startup boundary for proof-aware journal
+// replay. Keep the verified lineage restore ahead of Initialize: Initialize
+// replays observations using the active epoch from that lineage.
+func runProfile2JournalStartup(ctx context.Context, restore, initialize, enable, repair func(context.Context) error) error {
+	if restore != nil {
+		if err := restore(ctx); err != nil {
+			return fmt.Errorf("restoring handoff lineage: %w", err)
+		}
+	}
+	if err := initialize(ctx); err != nil {
+		return fmt.Errorf("initializing execution journal: %w", err)
+	}
+	if err := enable(ctx); err != nil {
+		return fmt.Errorf("activating execution journal: %w", err)
+	}
+	if repair != nil {
+		if err := repair(ctx); err != nil {
+			return fmt.Errorf("repairing saved handoff observations: %w", err)
+		}
+	}
+	return nil
+}
+
+func reapplyHandoffTerminalCertificates(ctx context.Context, store handoffObservationBackfiller, journalCtx configuredprogress.Context,
+	limits configuredprogress.JournalLimits, terminals []handoffTerminalCertificate) error {
+	for _, terminal := range terminals {
+		if terminal.uc == nil || terminal.tr == nil {
+			return configuredprogress.ErrUntrusted
+		}
+		if err := store.BackfillJournalObservation(ctx, journalCtx, limits, terminal.uc, terminal.tr); err != nil {
+			return fmt.Errorf("backfilling handoff terminal certificate at root epoch %d round %d: %w",
+				terminal.uc.GetRootEpoch(), terminal.uc.GetRoundNumber(), err)
+		}
+	}
+	return nil
+}
 
 type shardNodeRunFlags struct {
 	*baseFlags
@@ -547,6 +594,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			archiveServer.Register(ctx, peer)
 		}
 		restoringHandoffHistory := flags.TrustHistoryProfile2
+		var restoredHandoffTerminals []handoffTerminalCertificate
 		if flags.TrustHistoryProfile2 {
 			currentRoots := make([]libp2ppeer.ID, 0, len(bootNodes))
 			for _, root := range bootNodes {
@@ -566,7 +614,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if err != nil {
 						return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
 					}
-					if !restoringHandoffHistory {
+					if restoringHandoffHistory {
+						uc := *verified.Shard.UC
+						tr := *verified.Shard.TR
+						restoredHandoffTerminals = append(restoredHandoffTerminals, handoffTerminalCertificate{uc: &uc, tr: &tr})
+					} else {
 						prepared, _, err := journalStore.PrepareObservation(ctx, journalCtx, terminal)
 						if err != nil {
 							return fmt.Errorf("preparing handoff terminal certificate: %w", err)
@@ -620,20 +672,27 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					return bundle, err
 				}
 			}
-			if err := handoffFollower.Restore(ctx); err != nil {
-				return fmt.Errorf("restoring verified handoffs: %w", err)
+		}
+		var restoreLineage func(context.Context) error
+		if handoffFollower != nil {
+			restoreLineage = func(ctx context.Context) error {
+				if err := handoffFollower.Restore(ctx); err != nil {
+					return err
+				}
+				restoringHandoffHistory = false
+				return nil
 			}
-			restoringHandoffHistory = false
 		}
-		// The journal may contain observations from later root epochs than its
-		// genesis trust-base anchor. Restore and activate every locally verified
-		// handoff first so journal replay's historical-epoch gate uses the
-		// installed epoch, not the anchor epoch.
-		if _, _, openErr = journalStore.Initialize(ctx, journalCtx); openErr != nil {
-			return fmt.Errorf("initializing execution journal: %w", openErr)
-		}
-		if openErr = journalStore.EnableJournal(ctx, journalCtx, limits); openErr != nil {
-			return fmt.Errorf("activating execution journal: %w", openErr)
+		if startupErr := runProfile2JournalStartup(ctx, restoreLineage,
+			func(ctx context.Context) error {
+				_, _, err := journalStore.Initialize(ctx, journalCtx)
+				return err
+			},
+			func(ctx context.Context) error { return journalStore.EnableJournal(ctx, journalCtx, limits) },
+			func(ctx context.Context) error {
+				return reapplyHandoffTerminalCertificates(ctx, journalStore, journalCtx, limits, restoredHandoffTerminals)
+			}); startupErr != nil {
+			return startupErr
 		}
 		if archiveLocal != nil && flags.ArchivePrune {
 			policy := frontier.Policy{Context: archiveSubject, Replicas: [2]string{archiveReplicas[0].String(), archiveReplicas[1].String()}, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
