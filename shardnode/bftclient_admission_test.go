@@ -9,6 +9,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
@@ -194,6 +195,23 @@ func TestConfiguredAdmissionReceivesVerifiedV2Epoch(t *testing.T) {
 	require.NoError(t, c.handleCertificationResponse(context.Background(), response),
 		"configured admission owns v2 verification and durability")
 	require.Nil(t, c.luc, "feed observation alone is not durable admission")
+}
+
+func TestConfiguredAdmissionDropsRetiredEpochAfterInstalledHandoff(t *testing.T) {
+	c, fixture := newAdmissionTestClient(t, &admissionSink{}, &admissionTestNet{})
+	stale := fixture.respond(fixture.ucMine)
+	require.Equal(t, uint64(1), stale.UC.GetRootEpoch())
+	c.profile2 = &Profile2Consumer{verified: &evmroot.VerifiedHandoff{Epoch: 1}}
+	forwarded := errors.New("current epoch forwarded")
+	c.admission = &admissionTestSession{submitErr: forwarded, callbacks: AdmissionCallbacks{
+		AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {},
+	}}
+	require.NoError(t, c.handleCertificationResponse(context.Background(), stale),
+		"a delayed old-committee response cannot reach admission or the driver")
+	current := fixture.respond(fixture.ucMine)
+	current.UC.UnicitySeal.Epoch = 2
+	require.ErrorIs(t, c.handleCertificationResponse(context.Background(), current), forwarded,
+		"the installed epoch still reaches configured admission")
 }
 
 func TestConfiguredAdmissionFeedRenewalSurvivesPersistenceFailure(t *testing.T) {

@@ -121,6 +121,17 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 	if a.closed {
 		return configuredprogress.ErrAdmissionClosed
 	}
+	if uc != nil && a.context.Observation.EpochAuthority != nil {
+		if current, ready := a.context.Observation.EpochAuthority.CurrentRootEpoch(); ready && uc.GetRootEpoch() < current {
+			// The handoff has retired this live response. Historical journal
+			// replay authenticates old epochs through its separate path.
+			if a.pendingUC != nil && a.pendingUC.GetRootEpoch() < current {
+				a.pendingUC, a.pendingTR = nil, nil
+				a.pendingSince, a.pendingAttempts, a.pendingError = time.Time{}, 0, ""
+			}
+			return nil
+		}
+	}
 	o, err := rootinput.AuthenticateObservationV2(ctx, a.context.Observation, uc, tr)
 	if err != nil {
 		return err
@@ -288,6 +299,19 @@ func (j ProposalJournal) RetainCandidate(ctx context.Context, b shardnode.Block,
 	err := j.Store.PutJournalCandidate(ctx, j.Context, j.Limits, configuredprogress.JournalCandidate{
 		Round: p.Round, Number: b.Number, ParentNumber: p.Parent.Number, Hash: b.Hash, StateRoot: b.StateRoot, ParentHash: b.ParentHash, ParentState: p.Parent.StateRoot, Raw: b.Raw, BlockSize: b.BlockSize, StateSize: b.StateSize, LocallyBuilt: locallyBuilt, AuthorizingUC: p.AuthorizingCertificate, AuthorizingTR: p.AuthorizingTechnicalRecord,
 	})
+	if err != nil && p.AuthorizingCertificate != nil {
+		if authority := j.Context.Observation.EpochAuthority; authority != nil {
+			if current, ready := authority.CurrentRootEpoch(); ready && p.AuthorizingCertificate.GetRootEpoch() < current {
+				// Activation can race the journal's authentication after the
+				// first epoch check. The superseded round is a refusal, not a
+				// reason to stop certified execution.
+				if locallyBuilt {
+					return fmt.Errorf("%w: root epoch advanced during retention", shardnode.ErrLeaderProposalConflict)
+				}
+				return fmt.Errorf("%w: root epoch advanced during retention", shardnode.ErrProposalRejected)
+			}
+		}
+	}
 	if locallyBuilt && errors.Is(err, configuredprogress.ErrLocalProposalConflict) {
 		return fmt.Errorf("%w: %v", shardnode.ErrLeaderProposalConflict, err)
 	}

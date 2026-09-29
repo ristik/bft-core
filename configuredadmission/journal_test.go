@@ -26,6 +26,15 @@ type fixedJournalEpoch struct{ current uint64 }
 
 func (e fixedJournalEpoch) CurrentRootEpoch() (uint64, bool) { return e.current, true }
 
+type advancingJournalEpoch struct{ calls atomic.Uint32 }
+
+func (e *advancingJournalEpoch) CurrentRootEpoch() (uint64, bool) {
+	if e.calls.Add(1) == 1 {
+		return 1, true
+	}
+	return 2, true
+}
+
 func TestProposalJournalDeclinesStaleSealedRoundAfterHandoff(t *testing.T) {
 	chain, _, c, _ := adapterFixture(t)
 	uc, _ := journalBootstrap(t, chain)
@@ -40,11 +49,40 @@ func TestProposalJournalDeclinesStaleSealedRoundAfterHandoff(t *testing.T) {
 		"a current-epoch candidate still reaches the ordinary binding check")
 }
 
+func TestProposalJournalDeclinesActivationDuringRetention(t *testing.T) {
+	chain, _, c, _ := adapterFixture(t)
+	uc, _ := journalBootstrap(t, chain)
+	for _, locallyBuilt := range []bool{true, false} {
+		epoch := &advancingJournalEpoch{}
+		c.Observation.EpochAuthority = epoch
+		j := ProposalJournal{Store: new(configuredprogress.Store), Context: c}
+		p := shardnode.RoundParams{AuthorizingCertificate: uc}
+		err := j.RetainCandidate(context.Background(), shardnode.Block{}, p, locallyBuilt)
+		if locallyBuilt {
+			require.ErrorIs(t, err, shardnode.ErrLeaderProposalConflict)
+		} else {
+			require.ErrorIs(t, err, shardnode.ErrProposalRejected)
+		}
+		require.EqualValues(t, 2, epoch.calls.Load(), "activation raced the store call")
+	}
+}
+
 func TestJournalAdmissionReportsActivatedEpoch(t *testing.T) {
 	a := &journalAdmission{epoch: 1, context: configuredprogress.Context{Observation: rootinput.ObservationContextV2{EpochAuthority: fixedJournalEpoch{current: 2}}}}
 	require.EqualValues(t, 2, a.RootEpoch())
 	a.context.Observation.EpochAuthority = fixedJournalEpoch{current: 0}
 	require.EqualValues(t, 1, a.RootEpoch())
+}
+
+func TestJournalAdmissionDropsRetiredPendingResponse(t *testing.T) {
+	chain, _, _, _ := adapterFixture(t)
+	uc, tr := journalBootstrap(t, chain)
+	a := &journalAdmission{context: configuredprogress.Context{Observation: rootinput.ObservationContextV2{
+		EpochAuthority: fixedJournalEpoch{current: 2},
+	}}, pendingUC: uc, pendingTR: tr, pendingSince: time.Now(), pendingAttempts: 1}
+	require.NoError(t, a.Submit(context.Background(), uc, tr))
+	_, pending := a.PendingAdmission()
+	require.False(t, pending, "a retired response cannot keep catch-up unready")
 }
 
 func TestJournalFactoryCarriesCheckedExecutionIdentity(t *testing.T) {
