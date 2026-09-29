@@ -184,7 +184,7 @@ func (e *restoreExecutorFixture) Verify(_ context.Context, b shardnode.Block, p 
 	return shardnode.StatusValid, nil
 }
 func (e *restoreExecutorFixture) RecoveryForkchoice(_ context.Context, hash, finalized shardnode.Hash) (shardnode.Status, error) {
-	if !bytes.Equal(finalized, e.genesis.Hash) {
+	if !bytes.Equal(finalized, e.finalized.Hash) {
 		return shardnode.StatusInvalid, nil
 	}
 	b, ok := e.blocks[string(hash)]
