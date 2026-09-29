@@ -338,6 +338,16 @@ func (s *Store) ByEpoch(epoch uint64) (Record, error) {
 	return cloneRecord(r), nil
 }
 
+// LatestEpoch returns the last durably verified interval, or the anchor.
+func (s *Store) LatestEpoch() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if n := len(s.history.Intervals); n != 0 {
+		return s.history.Intervals[n-1].Body.Epoch
+	}
+	return s.history.Anchor.Epoch
+}
+
 // AppendVerified persists a successor only after a caller-provided D4 verifier
 // authenticates the finalized commit. This API does not activate runtime use.
 func (s *Store) AppendVerified(ctx context.Context, in m2contract.TrustInterval, proof []byte) error {

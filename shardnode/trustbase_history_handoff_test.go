@@ -3,6 +3,7 @@ package shardnode
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -19,9 +20,19 @@ func TestHistoricalTrustStoreHandoffRefusalsAndReplay(t *testing.T) {
 	executionID[0] = 1
 	store, err := NewHistoricalTrustBaseStore(ctx, memorydb.New(), f.Old, executionID, true)
 	require.NoError(t, err)
+	anchorID, err := f.Old.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	gotAnchorID, err := store.BodyID(f.Old.Epoch)
+	require.NoError(t, err)
+	require.Equal(t, anchorID, gotAnchorID[:])
+	_, err = store.BodyID(99)
+	require.ErrorIs(t, err, trusthistorystore.ErrNotFound)
 	bundle := handoffdelivery.Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot}
 	_, err = store.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
 	require.NoError(t, err)
+	gotBodyID, err := store.BodyID(f.Body.Epoch)
+	require.NoError(t, err)
+	require.Equal(t, [32]byte(f.Body.Identity()), gotBodyID)
 	require.True(t, store.IsV2Epoch(2))
 	_, err = store.GetByEpoch(ctx, 2)
 	require.NoError(t, err)

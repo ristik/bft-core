@@ -65,6 +65,7 @@ type Context struct {
 	FullShardConfHash []byte
 	Registry          registryproof.Context
 	TrustBases        TrustBases
+	EpochAuthority    interface{ CurrentRootEpoch() (uint64, bool) }
 }
 
 func (c Context) check() error {
@@ -285,8 +286,16 @@ func verify(ctx context.Context, c Context, sr storedRecord) (Loaded, error) {
 	// UC.Verify authenticates the statement; it does not show the statement is for this deployment's single
 	// shard epoch and root epoch (#153 O8). These come after authentication, so an authenticated certificate
 	// for an unsupported epoch and a forgery are distinct refusals.
-	if got := uc.GetRootEpoch(); got != c.Registry.RootEpoch {
-		return Loaded{}, fmt.Errorf("%w: root epoch %d, configured %d", ErrEpoch, got, c.Registry.RootEpoch)
+	current := c.Registry.RootEpoch
+	if c.EpochAuthority != nil {
+		var ready bool
+		current, ready = c.EpochAuthority.CurrentRootEpoch()
+		if !ready || current < c.Registry.RootEpoch {
+			return Loaded{}, ErrEpoch
+		}
+	}
+	if got := uc.GetRootEpoch(); got < c.Registry.RootEpoch || got > current {
+		return Loaded{}, fmt.Errorf("%w: root epoch %d outside verified history %d..%d", ErrEpoch, got, c.Registry.RootEpoch, current)
 	}
 	if got := uc.InputRecord.Epoch; got != c.Registry.ShardEpoch {
 		return Loaded{}, fmt.Errorf("%w: input record epoch %d, configured shard epoch %d", ErrEpoch, got, c.Registry.ShardEpoch)

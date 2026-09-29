@@ -111,6 +111,10 @@ func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnaps
 		}
 		c.latest = image.Frontier.ResultingUC
 	}
+	frontierEpoch := uint64(0)
+	if c.latest != nil {
+		frontierEpoch = c.latest.GetRootEpoch()
+	}
 	entries := make(map[string]configuredprogress.JournalEntry)
 	for _, e := range image.Candidates {
 		if e.Certified {
@@ -118,7 +122,7 @@ func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnaps
 		}
 	}
 	for _, o := range image.Observations {
-		if image.Frontier != nil && image.Frontier.Anchor != nil && o.UC.GetRootRoundNumber() <= image.Frontier.Anchor.Round {
+		if image.Frontier != nil && image.Frontier.Anchor != nil && c.latest != nil && rootPositionAtOrBefore(o.UC.GetRootEpoch(), o.UC.GetRootRoundNumber(), frontierEpoch, image.Frontier.Anchor.Round) {
 			// Pruning may retain an older certificate solely because it
 			// authorizes a hot local proposal. The frontier already covers
 			// its body; it is not the recovery target.
@@ -168,6 +172,14 @@ func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnaps
 		c.byHash[string(e.Candidate.Hash)] = i + 1
 	}
 	return c, nil
+}
+
+func rootPositionAfter(epoch, round, otherEpoch, otherRound uint64) bool {
+	return epoch > otherEpoch || epoch == otherEpoch && round > otherRound
+}
+
+func rootPositionAtOrBefore(epoch, round, otherEpoch, otherRound uint64) bool {
+	return epoch < otherEpoch || epoch == otherEpoch && round <= otherRound
 }
 
 func (r *ExecutionRecovery) walkLimit() int {
@@ -277,7 +289,7 @@ func (r *ExecutionRecovery) Recover(ctx context.Context, held *types.UnicityCert
 			return shardnode.BlockRef{}, err
 		}
 	}
-	if held != nil && c.latest != nil && held.GetRootRoundNumber() > c.latest.GetRootRoundNumber() {
+	if held != nil && c.latest != nil && rootPositionAfter(held.GetRootEpoch(), held.GetRootRoundNumber(), c.latest.GetRootEpoch(), c.latest.GetRootRoundNumber()) {
 		return shardnode.BlockRef{}, fmt.Errorf("%w: held certificate is newer than durable journal", ErrRecoveryUnavailable)
 	}
 	return r.recoverChain(ctx, c, true)
@@ -344,7 +356,13 @@ func (r *ExecutionRecovery) recoverChain(ctx context.Context, c recoveryChain, c
 		}
 		p := shardnode.RoundParams{Round: e.Round, Epoch: e.AuthorizingTR.Epoch, Timestamp: e.AuthorizingUC.UnicitySeal.Timestamp, SealHash: seal, Leader: e.AuthorizingTR.Leader, Parent: parent, AuthorizingCertificate: e.AuthorizingUC, AuthorizingTechnicalRecord: e.AuthorizingTR}
 		b := shardnode.Block{Number: e.Number, Hash: e.Hash, ParentHash: e.ParentHash, StateRoot: e.StateRoot, Raw: e.Raw, BlockSize: e.BlockSize, StateSize: e.StateSize}
-		if err := r.status(ctx, fmt.Sprintf("Verify %d/%x", e.Number, e.Hash), func() (shardnode.Status, error) { return r.Executor.Verify(ctx, b, p) }); err != nil {
+		verifyCtx := ctx
+		if historical, ok := r.Executor.(interface {
+			HistoricalContext(context.Context) context.Context
+		}); ok {
+			verifyCtx = historical.HistoricalContext(ctx)
+		}
+		if err := r.status(ctx, fmt.Sprintf("Verify %d/%x", e.Number, e.Hash), func() (shardnode.Status, error) { return r.Executor.Verify(verifyCtx, b, p) }); err != nil {
 			return head, err
 		}
 		head, err = r.move(ctx, shardnode.BlockRef{Number: e.Number, Hash: e.Hash, StateRoot: e.StateRoot}, f, false)
@@ -504,7 +522,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 				last = fmt.Errorf("provider %s returned another terminal certificate", provider)
 				continue
 			}
-			if len(target) == 0 && (!bytes.Equal(entries[len(entries)-1].Block.StateRoot, expected.InputRecord.Hash) || types.CheckNonEquivocatingCertificates(entries[len(entries)-1].ResultingUC, expected) != nil) {
+			if len(target) == 0 && (!bytes.Equal(entries[len(entries)-1].Block.StateRoot, expected.InputRecord.Hash) || rootinput.CheckEpochCertificates(entries[len(entries)-1].ResultingUC, expected) != nil) {
 				last = fmt.Errorf("provider %s returned a source incompatible with held quiet certificate", provider)
 				continue
 			}
@@ -562,13 +580,13 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 		if e.AuthorizingUC == nil || e.AuthorizingTR == nil || e.ResultingUC == nil || e.ResultingTR == nil {
 			return fmt.Errorf("%w: missing original or resulting UC/TR for %x", ErrRecoveryUnavailable, b.Hash)
 		}
-		if _, err := rootinput.AuthenticateObservationV2(ctx, r.Context.Observation, e.AuthorizingUC, e.AuthorizingTR); err != nil {
+		if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, r.Context.Observation, e.AuthorizingUC, e.AuthorizingTR); err != nil {
 			return fmt.Errorf("%w: original authorization for %x: %w", ErrRecoveryConflict, b.Hash, err)
 		}
-		if _, err := rootinput.AuthenticateObservationV2(ctx, r.Context.Observation, e.ResultingUC, e.ResultingTR); err != nil {
+		if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, r.Context.Observation, e.ResultingUC, e.ResultingTR); err != nil {
 			return fmt.Errorf("%w: resulting certificate for %x: %w", ErrRecoveryConflict, b.Hash, err)
 		}
-		if e.AuthorizingUC.GetRootRoundNumber() >= e.ResultingUC.GetRootRoundNumber() || types.CheckNonEquivocatingCertificates(e.AuthorizingUC, e.ResultingUC) != nil {
+		if rootinput.CheckEpochCertificates(e.AuthorizingUC, e.ResultingUC) != nil || !rootPositionAfter(e.ResultingUC.GetRootEpoch(), e.ResultingUC.GetRootRoundNumber(), e.AuthorizingUC.GetRootEpoch(), e.AuthorizingUC.GetRootRoundNumber()) {
 			return fmt.Errorf("%w: authorizing and resulting certificates for %x do not share a forward root history", ErrRecoveryConflict, b.Hash)
 		}
 		ir := e.ResultingUC.InputRecord
@@ -583,13 +601,19 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 			return err
 		}
 		p := shardnode.RoundParams{Round: e.Round, Epoch: e.AuthorizingTR.Epoch, Timestamp: e.AuthorizingUC.UnicitySeal.Timestamp, SealHash: seal, Leader: e.AuthorizingTR.Leader, Parent: parent, AuthorizingCertificate: e.AuthorizingUC, AuthorizingTechnicalRecord: e.AuthorizingTR}
-		if err := r.Executor.CheckBlockBinding(ctx, b, p); err != nil {
+		bindingCtx := ctx
+		if historical, ok := r.Executor.(interface {
+			HistoricalContext(context.Context) context.Context
+		}); ok {
+			bindingCtx = historical.HistoricalContext(ctx)
+		}
+		if err := r.Executor.CheckBlockBinding(bindingCtx, b, p); err != nil {
 			if errors.Is(err, shardnode.ErrBlockBindingUnavailable) {
 				return fmt.Errorf("%w: fetched block binding for %x: %w", ErrRecoveryUnavailable, b.Hash, err)
 			}
 			return fmt.Errorf("%w: fetched block binding for %x: %w", ErrRecoveryInvalid, b.Hash, err)
 		}
-		if err := r.status(ctx, fmt.Sprintf("fetched Verify %d/%x", b.Number, b.Hash), func() (shardnode.Status, error) { return r.Executor.Verify(ctx, b, p) }); err != nil {
+		if err := r.status(ctx, fmt.Sprintf("fetched Verify %d/%x", b.Number, b.Hash), func() (shardnode.Status, error) { return r.Executor.Verify(bindingCtx, b, p) }); err != nil {
 			return err
 		}
 		candidate := configuredprogress.JournalCandidate{Round: e.Round, Number: b.Number, ParentNumber: parent.Number, Hash: b.Hash, StateRoot: b.StateRoot, ParentHash: b.ParentHash, ParentState: e.ParentState, Raw: b.Raw, BlockSize: b.BlockSize, StateSize: b.StateSize, AuthorizingUC: e.AuthorizingUC, AuthorizingTR: e.AuthorizingTR}
@@ -694,6 +718,7 @@ func (r *ExecutionRecovery) move(ctx context.Context, target, finalized shardnod
 
 type recoveryTicket struct {
 	anchor    shardnode.BlockRef
+	rootEpoch uint64
 	rootRound uint64
 	sealHash  []byte
 }
@@ -705,7 +730,7 @@ func (r *ExecutionRecovery) Prepare(ctx context.Context, held *types.UnicityCert
 	if err != nil {
 		return nil, err
 	}
-	if c.latest != nil && (held == nil || held.GetRootRoundNumber() != c.latest.GetRootRoundNumber() || held.UnicitySeal == nil || !bytes.Equal(held.UnicitySeal.Hash, c.latest.UnicitySeal.Hash)) {
+	if c.latest != nil && (held == nil || held.GetRootEpoch() != c.latest.GetRootEpoch() || held.GetRootRoundNumber() != c.latest.GetRootRoundNumber() || held.UnicitySeal == nil || !bytes.Equal(held.UnicitySeal.Hash, c.latest.UnicitySeal.Hash)) {
 		return nil, fmt.Errorf("%w: held certificate differs from latest durable journal observation", ErrRecoveryUnavailable)
 	}
 	head, err := r.Executor.Head(ctx)
@@ -722,14 +747,16 @@ func (r *ExecutionRecovery) Prepare(ctx context.Context, held *types.UnicityCert
 		return nil, fmt.Errorf("%w: parent witness for %d/%x: %w", ErrRecoveryUnavailable, c.anchor.Number, c.anchor.Hash, err)
 	}
 	var round uint64
+	var epoch uint64
 	if c.latest != nil {
 		round = c.latest.GetRootRoundNumber()
+		epoch = c.latest.GetRootEpoch()
 	}
 	var seal []byte
 	if c.latest != nil {
 		seal = bytes.Clone(c.latest.UnicitySeal.Hash)
 	}
-	return recoveryTicket{anchor: c.anchor, rootRound: round, sealHash: seal}, nil
+	return recoveryTicket{anchor: c.anchor, rootEpoch: epoch, rootRound: round, sealHash: seal}, nil
 }
 
 func (r *ExecutionRecovery) Revalidate(ctx context.Context, ticket shardnode.ReadinessTicket, held *types.UnicityCertificate) error {
@@ -741,7 +768,7 @@ func (r *ExecutionRecovery) Revalidate(ctx context.Context, ticket shardnode.Rea
 	if err != nil {
 		return err
 	}
-	if !equalRef(t.anchor, c.anchor) || c.latest != nil && (t.rootRound != c.latest.GetRootRoundNumber() || held == nil || held.GetRootRoundNumber() != t.rootRound || held.UnicitySeal == nil || !bytes.Equal(held.UnicitySeal.Hash, t.sealHash) || !bytes.Equal(c.latest.UnicitySeal.Hash, t.sealHash)) {
+	if !equalRef(t.anchor, c.anchor) || c.latest != nil && (t.rootEpoch != c.latest.GetRootEpoch() || t.rootRound != c.latest.GetRootRoundNumber() || held == nil || held.GetRootEpoch() != t.rootEpoch || held.GetRootRoundNumber() != t.rootRound || held.UnicitySeal == nil || !bytes.Equal(held.UnicitySeal.Hash, t.sealHash) || !bytes.Equal(c.latest.UnicitySeal.Hash, t.sealHash)) {
 		return fmt.Errorf("%w: certified target changed", ErrRecoveryIdentity)
 	}
 	head, err := r.Executor.Head(ctx)

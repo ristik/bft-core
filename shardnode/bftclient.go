@@ -155,6 +155,11 @@ func (c *BFTClient) classifyUC(prev, next *types.UnicityCertificate) (UCClass, e
 	if c.profile2 != nil {
 		return c.profile2.Classify(prev, next)
 	}
+	if next != nil && c.admission != nil {
+		if gate, ok := c.admission.(interface{ Profile2Ready(uint64) bool }); ok && gate.Profile2Ready(next.GetRootEpoch()) {
+			return ClassifyUCEpoch(prev, next)
+		}
+	}
 	return ClassifyUC(prev, next)
 }
 
@@ -492,9 +497,13 @@ func (c *BFTClient) sendHandshake(ctx context.Context) error {
 	c.mu.Lock()
 	configuredEpoch := c.admissionEpoch
 	configuredEpochSet := c.admissionEpochSet
+	admission := c.admission
 	c.mu.Unlock()
 	if configuredEpochSet {
 		epoch = configuredEpoch
+		if admission != nil {
+			epoch = admission.RootEpoch()
+		}
 	}
 	if luc != nil && !configuredEpochSet {
 		epoch = luc.GetRootEpoch()
@@ -705,7 +714,13 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	profile2 := c.profile2
 	c.mu.Unlock()
 	if history, ok := c.trustBaseStore.(interface{ IsV2Epoch(uint64) bool }); ok && history.IsV2Epoch(cr.UC.GetRootEpoch()) && profile2 == nil {
-		return ErrProfile2Unready
+		ready := false
+		if gate, ok := admission.(interface{ Profile2Ready(uint64) bool }); ok {
+			ready = gate.Profile2Ready(cr.UC.GetRootEpoch())
+		}
+		if !ready {
+			return ErrProfile2Unready
+		}
 	}
 	if admission != nil {
 		if cr.Partition != c.partitionID || !cr.Shard.Equal(c.shardID) {

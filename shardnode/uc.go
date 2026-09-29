@@ -185,6 +185,52 @@ func ClassifyUC(prevUC, newUC *types.UnicityCertificate) (UCClass, error) {
 	return UCValid, nil
 }
 
+// ClassifyUCEpoch is used after proof-aware journal admission has installed a
+// successor epoch. Root rounds are ordered within the signer epoch.
+func ClassifyUCEpoch(previous, next *types.UnicityCertificate) (UCClass, error) {
+	if previous == nil || next == nil || previous.InputRecord == nil || next.InputRecord == nil || previous.UnicitySeal == nil || next.UnicitySeal == nil {
+		return ClassifyUC(previous, next)
+	}
+	oldEpoch, newEpoch := previous.GetRootEpoch(), next.GetRootEpoch()
+	if oldEpoch == newEpoch {
+		return ClassifyUC(previous, next)
+	}
+	oldRound, newRound := previous.GetRoundNumber(), next.GetRoundNumber()
+	if oldRound == newRound {
+		same, err := sameInputRecord(previous, next)
+		if err != nil {
+			return UCValid, err
+		}
+		if !same {
+			return UCValid, fmt.Errorf("%w: different input records for partition round %d", ErrEquivocatingUC, newRound)
+		}
+		if newEpoch < oldEpoch {
+			return UCStale, nil
+		}
+		if newEpoch != oldEpoch+1 {
+			return UCValid, ErrImpossibleUCOrder
+		}
+		return UCRepeat, nil
+	}
+	if newEpoch < oldEpoch {
+		if newRound < oldRound {
+			return UCStale, nil
+		}
+		return UCValid, ErrImpossibleUCOrder
+	}
+	if newEpoch != oldEpoch+1 || newRound < oldRound {
+		return UCValid, ErrImpossibleUCOrder
+	}
+	oldCopy, newCopy := *previous, *next
+	oldSeal, newSeal := *previous.UnicitySeal, *next.UnicitySeal
+	oldSeal.RootChainRoundNumber, newSeal.RootChainRoundNumber = 0, 0
+	oldCopy.UnicitySeal, newCopy.UnicitySeal = &oldSeal, &newSeal
+	if err := types.CheckNonEquivocatingCertificates(&oldCopy, &newCopy); err != nil {
+		return UCValid, fmt.Errorf("%w: %w", ErrEquivocatingUC, err)
+	}
+	return UCValid, nil
+}
+
 /*
 DescribeUCConflict renders the two certificates a failed ClassifyUC compared, so a
 rejection carries its own evidence.

@@ -139,6 +139,37 @@ func TestPlanAdvanceFromRestoreRequiresNewCoverage(t *testing.T) {
 		t.Fatalf("unresolved certified body: %v", err)
 	}
 }
+
+func TestFrontierOrdersEpochBeforeRootRound(t *testing.T) {
+	base, p := fixture()
+	p.Binding = acceptBinding{}
+	base.Epoch, base.Round = 4, 100
+	next, covered := nextOf(base, p)
+	next.Epoch, next.Round = 5, 1
+	covered.Anchor = next
+	raw, err := Encode(next, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(raw, p)
+	if err != nil || decoded.Epoch != 5 || decoded.Round != 1 {
+		t.Fatalf("epoch frontier round trip: %+v %v", decoded, err)
+	}
+	if _, err := PlanAdvance(&base, next, p, []Coverage{covered}, nil); err != nil {
+		t.Fatalf("handoff frontier: %v", err)
+	}
+	if _, err := PlanAdvance(&base, next, p, []Coverage{covered}, []Obligation{{Epoch: 4, Round: 101, UnresolvedBody: true}}); !errors.Is(err, ErrObligation) {
+		t.Fatalf("old unresolved body: %v", err)
+	}
+	if _, err := PlanAdvanceFromRestoreEpoch(base.Height, base.Epoch, base.Round, next, p, []Coverage{covered}, nil); err != nil {
+		t.Fatalf("restore frontier: %v", err)
+	}
+	stale := next
+	stale.Epoch, stale.Round = 4, 101
+	if _, err := PlanAdvance(&base, stale, p, []Coverage{covered}, nil); !errors.Is(err, ErrAcknowledgment) {
+		t.Fatalf("wrong terminal anchor: %v", err)
+	}
+}
 func TestAdvanceGates(t *testing.T) {
 	base, p := fixture()
 	next, covered := nextOf(base, p)
@@ -201,7 +232,7 @@ func TestCodecVectorAndRefusals(t *testing.T) {
 	_, err = Decode(bad, p)
 	require(t, err, ErrInvalid)
 	bad = bytes.Clone(wire)
-	bad[len(domain)]++
+	bad[len(domain)] = 3
 	checksum := sha256.Sum256(bad[:len(bad)-32])
 	copy(bad[len(bad)-32:], checksum[:])
 	_, err = Decode(bad, p)

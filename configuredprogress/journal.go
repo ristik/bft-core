@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 
 	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -120,6 +121,15 @@ func journalObservationKey(root, round uint64) []byte {
 	copy(k, journalObservationPrefix)
 	binary.BigEndian.PutUint64(k[len(journalObservationPrefix):], root)
 	binary.BigEndian.PutUint64(k[len(journalObservationPrefix)+8:], round)
+	return k
+}
+
+func journalEpochObservationKey(epoch, root, round uint64) []byte {
+	k := make([]byte, len(journalObservationPrefix)+24)
+	copy(k, journalObservationPrefix)
+	binary.BigEndian.PutUint64(k[len(journalObservationPrefix):], epoch)
+	binary.BigEndian.PutUint64(k[len(journalObservationPrefix)+8:], root)
+	binary.BigEndian.PutUint64(k[len(journalObservationPrefix)+16:], round)
 	return k
 }
 
@@ -302,7 +312,7 @@ func (s *Store) PutJournalCandidate(ctx context.Context, c Context, limits Journ
 	if v.AuthorizingUC == nil || v.AuthorizingTR == nil {
 		return ErrUntrusted
 	}
-	if _, err := rootinput.AuthenticateObservationV2(ctx, c.Observation, v.AuthorizingUC, v.AuthorizingTR); err != nil {
+	if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, c.Observation, v.AuthorizingUC, v.AuthorizingTR); err != nil {
 		return err
 	}
 	if v.AuthorizingTR.Round != v.Round {
@@ -370,7 +380,7 @@ func (s *Store) PutJournalCandidate(ctx context.Context, c Context, limits Journ
 				if e != nil {
 					return e
 				}
-				if pu.GetRootRoundNumber() == v.AuthorizingUC.GetRootRoundNumber() && pu.GetRoundNumber() == v.AuthorizingUC.GetRoundNumber() {
+				if pu.GetRootEpoch() == v.AuthorizingUC.GetRootEpoch() && pu.GetRootRoundNumber() == v.AuthorizingUC.GetRootRoundNumber() && pu.GetRoundNumber() == v.AuthorizingUC.GetRoundNumber() {
 					return fmt.Errorf("%w: %w: a different local proposal was already retained for this authorization; refusing publication after restart", ErrConflict, ErrLocalProposalConflict)
 				}
 			}
@@ -461,7 +471,18 @@ func (s *Store) appendJournalObservation(tx *bolt.Tx, pair *verifiedPair, dd [32
 		return ErrUntrusted
 	}
 	w := journalObservationWire{Version: journalVersion, Descriptor: dd[:], Round: ir.RoundNumber, RootRound: uc.GetRootRoundNumber(), TargetHash: target, UC: u, TR: t}
-	key := journalObservationKey(w.RootRound, w.Round)
+	key := journalEpochObservationKey(uc.GetRootEpoch(), w.RootRound, w.Round)
+	// A journal written before epoch-qualified keys may already hold this
+	// exact observation under the legacy coordinate.
+	if old := b.Get(journalObservationKey(w.RootRound, w.Round)); old != nil {
+		ow, e := decodeObservation(old)
+		if e != nil {
+			return e
+		}
+		if bytes.Equal(ow.UC, u) && bytes.Equal(ow.TR, t) {
+			return nil
+		}
+	}
 	if old := b.Get(key); old != nil {
 		ow, e := decodeObservation(old)
 		if e != nil {
@@ -542,7 +563,23 @@ func (s *Store) BackfillJournalObservation(ctx context.Context, c Context, limit
 	if state.i.observed == nil {
 		return fmt.Errorf("%w: no current observation for historical backfill", ErrUnavailable)
 	}
-	rel, err := compareObservations(o, state.i.observed.observation)
+	current := state.i.observed.observation
+	var rel relation
+	if o.Certificate().GetRootEpoch() != ^uint64(0) && current.Certificate().GetRootEpoch() > o.Certificate().GetRootEpoch()+1 {
+		if o.Certificate().GetRoundNumber() > current.Certificate().GetRoundNumber() {
+			return ErrConflict
+		}
+		if o.Certificate().GetRoundNumber() == current.Certificate().GetRoundNumber() {
+			oldIR, oldErr := canonicalIR(o.Certificate())
+			newIR, newErr := canonicalIR(current.Certificate())
+			if oldErr != nil || newErr != nil || !bytes.Equal(oldIR, newIR) {
+				return ErrConflict
+			}
+		}
+		rel = relationAdvance
+	} else {
+		rel, err = compareObservations(o, current)
+	}
 	if err != nil || rel != relationAdvance && rel != relationDuplicate && rel != relationRepeat {
 		return fmt.Errorf("%w: historical certificate conflicts with current progress: %v", ErrConflict, err)
 	}
@@ -667,12 +704,15 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			if e != nil {
 				return e
 			}
-			if w.Version != journalVersion || !bytes.Equal(w.Descriptor, state.i.descriptorDigest[:]) || !bytes.Equal(k, journalObservationKey(w.RootRound, w.Round)) {
+			if w.Version != journalVersion || !bytes.Equal(w.Descriptor, state.i.descriptorDigest[:]) {
 				return ErrContext
 			}
 			uc, tr, e := verifiedPairBytes(ctx, c, w.UC, w.TR)
 			if e != nil {
 				return e
+			}
+			if !bytes.Equal(k, journalObservationKey(w.RootRound, w.Round)) && !bytes.Equal(k, journalEpochObservationKey(uc.GetRootEpoch(), w.RootRound, w.Round)) {
+				return ErrContext
 			}
 			if w.Round != uc.GetRoundNumber() || w.RootRound != uc.GetRootRoundNumber() || !bytes.Equal(w.TargetHash, uc.InputRecord.BlockHash) {
 				return ErrUntrusted
@@ -680,7 +720,7 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			if len(w.TargetHash) > 0 {
 				cr := b.Get(journalCandidateKey(w.TargetHash))
 				coveredByFrontier := cr == nil && !w.Unresolved && anchorUC != nil &&
-					uc.GetRootRoundNumber() <= anchorUC.GetRootRoundNumber() &&
+					(uc.GetRootEpoch() < anchorUC.GetRootEpoch() || uc.GetRootEpoch() == anchorUC.GetRootEpoch() && uc.GetRootRoundNumber() <= anchorUC.GetRootRoundNumber()) &&
 					uc.InputRecord.RoundNumber <= anchorUC.InputRecord.RoundNumber
 				// Pruning may retain an older authenticated observation because
 				// it authorizes a hot local candidate, while deleting that
@@ -703,6 +743,16 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			}
 			out.Observations = append(out.Observations, JournalObservation{UC: uc, TR: tr, TargetHash: bytes.Clone(w.TargetHash), Unresolved: w.Unresolved})
 		}
+		sort.Slice(out.Observations, func(i, j int) bool {
+			a, b := out.Observations[i].UC, out.Observations[j].UC
+			if a.GetRootEpoch() != b.GetRootEpoch() {
+				return a.GetRootEpoch() < b.GetRootEpoch()
+			}
+			if a.GetRootRoundNumber() != b.GetRootRoundNumber() {
+				return a.GetRootRoundNumber() < b.GetRootRoundNumber()
+			}
+			return a.GetRoundNumber() < b.GetRoundNumber()
+		})
 		out.Restored, err = readRestoreAnchor(b, state.i.descriptorDigest, out)
 		if err != nil {
 			return err
@@ -713,7 +763,7 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 		if state.i.observed != nil {
 			var lu, lt []byte
 			var e error
-			if len(out.Observations) != 0 && (anchorUC == nil || out.Observations[len(out.Observations)-1].UC.GetRootRoundNumber() > anchorUC.GetRootRoundNumber()) {
+			if len(out.Observations) != 0 && (anchorUC == nil || out.Observations[len(out.Observations)-1].UC.GetRootEpoch() > anchorUC.GetRootEpoch() || out.Observations[len(out.Observations)-1].UC.GetRootEpoch() == anchorUC.GetRootEpoch() && out.Observations[len(out.Observations)-1].UC.GetRootRoundNumber() > anchorUC.GetRootRoundNumber()) {
 				latest := out.Observations[len(out.Observations)-1]
 				lu, lt, e = pairBytes(latest.UC, latest.TR)
 			} else {
@@ -723,10 +773,10 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 				return fmt.Errorf("%w: latest journal certificate differs from durable progress", ErrUntrusted)
 			}
 		}
-		localAuthorizations := make(map[[3]uint64]struct{})
+		localAuthorizations := make(map[[4]uint64]struct{})
 		for _, candidate := range out.Candidates {
 			if candidate.Candidate.LocallyBuilt {
-				key := [3]uint64{candidate.Candidate.AuthorizingUC.GetRootRoundNumber(), candidate.Candidate.AuthorizingUC.GetRoundNumber(), candidate.Candidate.Round}
+				key := [4]uint64{candidate.Candidate.AuthorizingUC.GetRootEpoch(), candidate.Candidate.AuthorizingUC.GetRootRoundNumber(), candidate.Candidate.AuthorizingUC.GetRoundNumber(), candidate.Candidate.Round}
 				if _, repeated := localAuthorizations[key]; repeated {
 					return fmt.Errorf("%w: two local proposals for one authorization", ErrConflict)
 				}
@@ -734,17 +784,17 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			}
 			foundAuthorization, foundResult := false, !candidate.Certified
 			for _, observed := range out.Observations {
-				if candidate.Candidate.AuthorizingUC.GetRootRoundNumber() == observed.UC.GetRootRoundNumber() && candidate.Candidate.AuthorizingUC.GetRoundNumber() == observed.UC.GetRoundNumber() && candidate.Candidate.AuthorizingTR.Round == observed.TR.Round {
+				if candidate.Candidate.AuthorizingUC.GetRootEpoch() == observed.UC.GetRootEpoch() && candidate.Candidate.AuthorizingUC.GetRootRoundNumber() == observed.UC.GetRootRoundNumber() && candidate.Candidate.AuthorizingUC.GetRoundNumber() == observed.UC.GetRoundNumber() && candidate.Candidate.AuthorizingTR.Round == observed.TR.Round {
 					foundAuthorization = true
 				}
 				if candidate.Certified && candidate.Candidate.Round == observed.UC.InputRecord.RoundNumber && bytes.Equal(candidate.Candidate.Hash, observed.TargetHash) && bytes.Equal(candidate.Candidate.StateRoot, observed.UC.InputRecord.Hash) {
 					foundResult = true
 				}
 			}
-			if anchorUC != nil && candidate.Candidate.AuthorizingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.Candidate.AuthorizingUC.GetRoundNumber() == anchorUC.GetRoundNumber() {
+			if anchorUC != nil && candidate.Candidate.AuthorizingUC.GetRootEpoch() == anchorUC.GetRootEpoch() && candidate.Candidate.AuthorizingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.Candidate.AuthorizingUC.GetRoundNumber() == anchorUC.GetRoundNumber() {
 				foundAuthorization = true
 			}
-			if anchorUC != nil && candidate.Certified && candidate.ResultingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.ResultingUC.GetRoundNumber() == anchorUC.GetRoundNumber() && bytes.Equal(candidate.Candidate.Hash, anchorUC.InputRecord.BlockHash) {
+			if anchorUC != nil && candidate.Certified && candidate.ResultingUC.GetRootEpoch() == anchorUC.GetRootEpoch() && candidate.ResultingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.ResultingUC.GetRoundNumber() == anchorUC.GetRoundNumber() && bytes.Equal(candidate.Candidate.Hash, anchorUC.InputRecord.BlockHash) {
 				// Pruning removes the anchor body's authorizing observation while
 				// retaining the body itself. The frontier transaction checked the
 				// exact original and resulting pairs against this candidate.
@@ -764,7 +814,7 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 				// replica acknowledgments. Recheck every certified coordinate.
 				if raw := b.Get(coverageKey(candidate.Candidate.Number)); raw != nil {
 					covered, e := frontier.Decode(raw, *s.frontier)
-					if e == nil && covered.Height == candidate.Candidate.Number && covered.Round == candidate.ResultingUC.GetRootRoundNumber() &&
+					if e == nil && covered.Height == candidate.Candidate.Number && (covered.Epoch == candidate.ResultingUC.GetRootEpoch() || covered.Epoch == 0 && candidate.ResultingUC.GetRootEpoch() == c.Observation.RootEpoch) && covered.Round == candidate.ResultingUC.GetRootRoundNumber() &&
 						covered.Sequence < out.Frontier.Anchor.Sequence && bytes.Equal(covered.Subject.BlockHash[:], candidate.Candidate.Hash) &&
 						bytes.Equal(covered.StateRoot[:], candidate.Candidate.StateRoot) {
 						foundResult = true

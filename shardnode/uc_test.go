@@ -1,12 +1,23 @@
 package shardnode
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+type epochAdmissionStub struct{ ready bool }
+
+func (a epochAdmissionStub) Submit(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error {
+	return nil
+}
+func (a epochAdmissionStub) RootEpoch() uint64         { return 2 }
+func (a epochAdmissionStub) Close() error              { return nil }
+func (a epochAdmissionStub) Profile2Ready(uint64) bool { return a.ready }
 
 // uc builds a minimal UnicityCertificate sufficient for ClassifyUC, which
 // only inspects InputRecord and UnicitySeal.RootChainRoundNumber — no
@@ -107,4 +118,68 @@ func TestClassifyUC(t *testing.T) {
 		_, err := ClassifyUC(prev, disconnected)
 		require.ErrorIs(t, err, ErrEquivocatingUC)
 	})
+}
+
+func TestClassifyUCEpochUsesEpochBeforeRootRound(t *testing.T) {
+	old := uc(1, 100, []byte{0}, []byte{1}, []byte{0xb1})
+	old.UnicitySeal.Epoch = 1
+	next := uc(2, 1, []byte{1}, []byte{2}, []byte{0xb2})
+	next.UnicitySeal.Epoch = 2
+	class, err := ClassifyUCEpoch(old, next)
+	require.NoError(t, err)
+	require.Equal(t, UCValid, class)
+	class, err = ClassifyUCEpoch(next, old)
+	require.NoError(t, err)
+	require.Equal(t, UCStale, class)
+	other := uc(1, 1, []byte{0}, []byte{9}, []byte{0xb1})
+	other.UnicitySeal.Epoch = 2
+	_, err = ClassifyUCEpoch(old, other)
+	require.ErrorIs(t, err, ErrEquivocatingUC)
+}
+
+func TestConfiguredClientSelectsInstalledEpochClassifier(t *testing.T) {
+	old := uc(1, 100, []byte{0}, []byte{1}, []byte{0xb1})
+	old.UnicitySeal.Epoch = 1
+	next := uc(2, 1, []byte{1}, []byte{2}, []byte{0xb2})
+	next.UnicitySeal.Epoch = 2
+	client := &BFTClient{admission: epochAdmissionStub{ready: true}}
+	class, err := client.classifyUC(old, next)
+	require.NoError(t, err)
+	require.Equal(t, UCValid, class)
+	client.admission = epochAdmissionStub{ready: false}
+	_, err = client.classifyUC(old, next)
+	require.ErrorIs(t, err, ErrImpossibleUCOrder, "an uninstalled successor stays on the current-only path")
+}
+
+func TestClassifyUCEpochBoundaryMatrix(t *testing.T) {
+	makeUC := func(epoch, round, root uint64, previous, hash byte) *types.UnicityCertificate {
+		value := uc(round, root, []byte{previous}, []byte{hash}, []byte{hash})
+		value.UnicitySeal.Epoch = epoch
+		return value
+	}
+	old := makeUC(1, 5, 100, 4, 5)
+	for _, tc := range []struct {
+		name    string
+		next    *types.UnicityCertificate
+		want    UCClass
+		wantErr error
+	}{
+		{"repeat at handoff", makeUC(2, 5, 1, 4, 5), UCRepeat, nil},
+		{"stale repeat", makeUC(0, 5, 1, 4, 5), UCStale, nil},
+		{"skipped epoch repeat", makeUC(3, 5, 1, 4, 5), UCValid, ErrImpossibleUCOrder},
+		{"older epoch and older partition round", makeUC(0, 4, 1, 3, 4), UCStale, nil},
+		{"older epoch with newer partition round", makeUC(0, 6, 1, 5, 6), UCValid, ErrImpossibleUCOrder},
+		{"new epoch with older partition round", makeUC(2, 4, 1, 3, 4), UCValid, ErrImpossibleUCOrder},
+		{"skipped epoch with newer partition round", makeUC(3, 6, 1, 5, 6), UCValid, ErrImpossibleUCOrder},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			class, err := ClassifyUCEpoch(old, tc.next)
+			require.Equal(t, tc.want, class)
+			if tc.wantErr == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, tc.wantErr)
+			}
+		})
+	}
 }

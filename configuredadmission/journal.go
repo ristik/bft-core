@@ -29,6 +29,7 @@ type JournalFactory struct {
 	CatchUp           func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
 	OnStop            func(error)
 	Logger            *slog.Logger
+	EpochAuthority    rootinput.RootEpochAuthority
 }
 
 type journalAdmission struct {
@@ -76,6 +77,8 @@ func (f JournalFactory) Start(ctx context.Context, id shardnode.AdmissionIdentit
 		return nil, err
 	}
 	c.ExecutionConfigV2 = f.ExecutionConfigV2
+	c.Observation.EpochAuthority = f.EpochAuthority
+	c.Record.EpochAuthority = f.EpochAuthority
 	if _, err = f.Store.LoadJournal(ctx, c, f.Limits); err != nil {
 		return nil, fmt.Errorf("loading execution journal: %w", err)
 	}
@@ -96,12 +99,12 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 			a.pendingUC, a.pendingTR = nil, nil
 			a.pendingSince, a.pendingAttempts, a.pendingError = time.Time{}, 0, ""
 		} else if outErr == nil {
-			if a.pendingUC == nil || uc.GetRootRoundNumber() >= a.pendingUC.GetRootRoundNumber() {
+			if a.pendingUC == nil || laterRootUC(uc, a.pendingUC) {
 				a.pendingUC, a.pendingTR = nil, nil
 				a.pendingSince, a.pendingAttempts, a.pendingError = time.Time{}, 0, ""
 			}
 		} else if authenticatedUC != nil && !terminalAdmissionError(outErr) && a.ctx.Err() == nil {
-			if a.pendingUC == nil || authenticatedUC.GetRootRoundNumber() >= a.pendingUC.GetRootRoundNumber() {
+			if a.pendingUC == nil || laterRootUC(authenticatedUC, a.pendingUC) {
 				if a.pendingSince.IsZero() {
 					a.pendingSince = time.Now()
 				}
@@ -155,7 +158,7 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 		uc := current.Certificate()
 		var height uint64 // Zero means the durable certificate has no retained body yet.
 		for _, entry := range image.Candidates {
-			if entry.Certified && entry.ResultingUC != nil && entry.ResultingUC.GetRootRoundNumber() == uc.GetRootRoundNumber() && entry.ResultingUC.GetRoundNumber() == uc.GetRoundNumber() && bytes.Equal(entry.Candidate.Hash, uc.InputRecord.BlockHash) {
+			if matchesCertifiedCandidate(entry, uc) {
 				height = entry.Candidate.Number
 				break
 			}
@@ -183,7 +186,31 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 	}
 	return a.callbacks.DeliverDurable(ctx, current.Certificate(), current.TechnicalRecord())
 }
-func (a *journalAdmission) RootEpoch() uint64 { return a.epoch }
+
+func laterRootUC(a, b *types.UnicityCertificate) bool {
+	return a.GetRootEpoch() > b.GetRootEpoch() || a.GetRootEpoch() == b.GetRootEpoch() && a.GetRootRoundNumber() >= b.GetRootRoundNumber()
+}
+
+func matchesCertifiedCandidate(entry configuredprogress.JournalEntry, uc *types.UnicityCertificate) bool {
+	return entry.Certified && entry.ResultingUC != nil && entry.ResultingUC.GetRootEpoch() == uc.GetRootEpoch() && entry.ResultingUC.GetRootRoundNumber() == uc.GetRootRoundNumber() && entry.ResultingUC.GetRoundNumber() == uc.GetRoundNumber() && bytes.Equal(entry.Candidate.Hash, uc.InputRecord.BlockHash)
+}
+
+func (a *journalAdmission) RootEpoch() uint64 {
+	if a.context.Observation.EpochAuthority != nil {
+		if epoch, ready := a.context.Observation.EpochAuthority.CurrentRootEpoch(); ready {
+			return epoch
+		}
+	}
+	return a.epoch
+}
+
+func (a *journalAdmission) Profile2Ready(epoch uint64) bool {
+	if a.context.Observation.EpochAuthority == nil {
+		return false
+	}
+	current, ready := a.context.Observation.EpochAuthority.CurrentRootEpoch()
+	return ready && current == epoch
+}
 func (a *journalAdmission) Pending() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()

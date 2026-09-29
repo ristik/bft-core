@@ -114,6 +114,50 @@ func TestAuthenticatedRootEpochIsBoundToConfiguration(t *testing.T) {
 	}
 }
 
+type fixedEpochAuthority struct {
+	epoch uint64
+	ready bool
+}
+
+func (a fixedEpochAuthority) CurrentRootEpoch() (uint64, bool) { return a.epoch, a.ready }
+
+func TestCertifiedRecordRequiresInstalledRootEpoch(t *testing.T) {
+	f := newFixture(t, 2)
+	base := f.ctx
+	base.TrustBases = multiTrust{f.trust.tb, mustTrustBaseAtEpoch(t, f, 2)}
+	newEpoch := f.recordWith(2, func(ir *types.InputRecord, tr *certification.TechnicalRecord, r *Record) {
+		r.Certificate = f.reseal(f.certify(f.signer, ir, tr, 6), 2, f.signer)
+	})
+	for _, tc := range []struct {
+		name      string
+		context   Context
+		record    Record
+		wantError error
+	}{
+		{"installed successor", func() Context { c := base; c.EpochAuthority = fixedEpochAuthority{2, true}; return c }(), newEpoch, nil},
+		{"successor not installed", func() Context { c := base; c.EpochAuthority = fixedEpochAuthority{1, true}; return c }(), newEpoch, ErrEpoch},
+		{"authority not ready", func() Context { c := base; c.EpochAuthority = fixedEpochAuthority{2, false}; return c }(), f.record(2), ErrEpoch},
+		{"authority below configured origin", func() Context { c := base; c.EpochAuthority = fixedEpochAuthority{0, true}; return c }(), f.record(2), ErrEpoch},
+		{"certificate before configured origin", func() Context {
+			c := base
+			c.Registry.RootEpoch = 2
+			c.EpochAuthority = fixedEpochAuthority{3, true}
+			return c
+		}(), f.record(2), ErrEpoch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, encoded, err := encodeRecord(tc.context, tc.record)
+			require.NoError(t, err)
+			_, err = verify(context.Background(), tc.context, encoded)
+			if tc.wantError == nil {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, tc.wantError)
+			}
+		})
+	}
+}
+
 func TestPublishRefusesARecordThatDoesNotVerify(t *testing.T) {
 	f := newFixture(t, 2)
 	other := newFixtureFor(t, 4, 2)

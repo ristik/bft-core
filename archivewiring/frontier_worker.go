@@ -82,11 +82,20 @@ func (w *FrontierWorker) Pass(ctx context.Context) error {
 			return fmt.Errorf("reading local execution finality before pruning: %w", err)
 		}
 	}
-	height, sequence, round := uint64(0), uint64(0), uint64(0)
+	height, sequence, epoch, round := uint64(0), uint64(0), w.Subject.RootEpoch, uint64(0)
 	if image.Frontier != nil && image.Frontier.Anchor != nil {
 		height, sequence, round = image.Frontier.Anchor.Height, image.Frontier.Anchor.Sequence, image.Frontier.Anchor.Round
+		if image.Frontier.Anchor.Epoch != 0 {
+			epoch = image.Frontier.Anchor.Epoch
+		}
 	} else if image.Restored != nil {
 		height, round = image.Restored.Height, image.Restored.RootRound
+		for _, entry := range image.Candidates {
+			if entry.Certified && entry.Candidate.Number == height {
+				epoch = entry.ResultingUC.GetRootEpoch()
+				break
+			}
+		}
 	}
 	var covered []frontier.Coverage
 	for _, entry := range certifiedEntries(image) {
@@ -99,7 +108,7 @@ func (w *FrontierWorker) Pass(ctx context.Context) error {
 		if w.Finalized != nil && entry.Candidate.Number == finalized.Number && !bytes.Equal(entry.Candidate.Hash, finalized.Hash) {
 			return ErrBinding
 		}
-		if entry.Candidate.Number != height+1 || entry.ResultingUC.GetRootRoundNumber() <= round {
+		if entry.Candidate.Number != height+1 || entry.ResultingUC.GetRootEpoch() < epoch || entry.ResultingUC.GetRootEpoch() == epoch && entry.ResultingUC.GetRootRoundNumber() <= round {
 			break
 		}
 		var hash, state [32]byte
@@ -131,8 +140,8 @@ func (w *FrontierWorker) Pass(ctx context.Context) error {
 		}
 		ack := sha256.Sum256(request)
 		sequence++
-		covered = append(covered, frontier.Coverage{Anchor: frontier.Record{Sequence: sequence, Height: entry.Candidate.Number, Round: entry.ResultingUC.GetRootRoundNumber(), StateRoot: state, Subject: q, Acks: [2]frontier.Acknowledgment{{Replica: w.Replicas[0].String(), RequestDigest: ack, ManifestDigest: digest}, {Replica: w.Replicas[1].String(), RequestDigest: ack, ManifestDigest: digest}}}, Material: rec})
-		height, round = entry.Candidate.Number, entry.ResultingUC.GetRootRoundNumber()
+		covered = append(covered, frontier.Coverage{Anchor: frontier.Record{Sequence: sequence, Height: entry.Candidate.Number, Epoch: entry.ResultingUC.GetRootEpoch(), Round: entry.ResultingUC.GetRootRoundNumber(), StateRoot: state, Subject: q, Acks: [2]frontier.Acknowledgment{{Replica: w.Replicas[0].String(), RequestDigest: ack, ManifestDigest: digest}, {Replica: w.Replicas[1].String(), RequestDigest: ack, ManifestDigest: digest}}}, Material: rec})
+		height, epoch, round = entry.Candidate.Number, entry.ResultingUC.GetRootEpoch(), entry.ResultingUC.GetRootRoundNumber()
 		if len(covered) == 4 {
 			break
 		}
