@@ -109,6 +109,7 @@ type (
 		epochAnchor      *drctypes.EpochAnchor
 		handoffMu        sync.Mutex
 		handoffPlans     map[[32]byte]*pendingHandoff
+		handoffAborts    map[handoffAbortKey]*pendingHandoffAbort
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -517,6 +518,8 @@ func (x *ConsensusManager) handleRootNetMsg(ctx context.Context, msg any) (rErr 
 		return x.onStateResponse(ctx, mt)
 	case *abdrc.HandoffApprovalMsg:
 		return x.onHandoffApprovalMsg(ctx, mt)
+	case *abdrc.HandoffAbortApprovalMsg:
+		return x.onHandoffAbortApprovalMsg(mt)
 	}
 	return fmt.Errorf("unknown message type %T", msg)
 }

@@ -157,6 +157,7 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 	x.trustBase.Store(newTrust)
 	x.handoffMu.Lock()
 	x.handoffPlans = nil
+	x.handoffAborts = nil
 	x.handoffMu.Unlock()
 	x.leaderSelector = selector
 	x.irReqVerifier = reqVerifier

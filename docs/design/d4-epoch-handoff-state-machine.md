@@ -25,8 +25,24 @@ from the terminal old state through verified checkpoint import and first new
 certification. No fixed wall-clock bound follows from the model.
 
 The root orders `prepare → freeze → endorse → commit H → activate → acknowledge`.
-A committed abort applies only before H. The predecessor and attempt are held
-in root control state so attempts cannot each install an independent successor.
+A committed abort applies only before H. In `prepared` or `endorsed`, an
+operator can instruct old validators to sign the existing abort-only domain;
+the target must match network, old epoch, predecessor, attempt and successor
+BodyID in authenticated control state. Signatures are aggregated against the
+old trust base's quorum and attached to the existing Abort record. No new
+consensus transition, candidate-body authorization, or successor key is
+introduced. Leaders schedule a ready Abort before the volatile plan lookup,
+including after restart has lost that plan cache. Acceptance of an approval is
+not finality: only a committed Abort releases the ordered freeze, and a race
+with H is resolved by ordinary BFT locks. After Abort, a new handoff uses
+`attempt+1` and a freshly observed parent. A request after H cannot rewind it.
+The predecessor and attempt are held in root control state so attempts cannot
+each install an independent successor.
+
+All members of the old validator set must run a version that understands the
+bounded abort-approval peer message before operators use this path. An older
+peer will not contribute an approval; the old trust base's ordinary quorum
+availability requirement still applies.
 Freeze signs `FrozenID`, which binds the D3 body, pre-freeze summary, last
 certified EVM parent, candidate, attempt and predecessor. Endorsement never
 binds the later `A*` or successor TR. The D3 body contains `A_min` and uses the

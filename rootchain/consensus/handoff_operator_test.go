@@ -149,6 +149,9 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1, retry.Attempt)
 	require.NotEqual(t, plan.Body, retry.Body, "attempt+1 binds a new body and FrozenID")
+	abortedHead.Control.Attempt = ^uint64(0)
+	_, err = cm.buildHandoffPlanFromState(&next, parentHash, &aborted)
+	require.ErrorIs(t, err, ErrHandoffApproval, "retry refuses attempt overflow")
 }
 
 func TestLeaderAbortsWhenEVMAdvancesPastFrozenParent(t *testing.T) {
@@ -252,4 +255,209 @@ func TestLeaderAbortsWhenEVMAdvancesPastFrozenParent(t *testing.T) {
 	aggTR, err := parent.ShardState.States[aggKey].TR.Hash()
 	require.NoError(t, err)
 	require.NotEqual(t, aggTR, []byte(commit.SuccessorTRHash))
+}
+
+func newExplicitAbortFixture(t *testing.T, phase ...string) (*ConsensusManager, *testnetwork.MockNet, []*testutils.TestNode, abdrc.HandoffAbortTarget, evmroot.OrderedHandoffRecord) {
+	t.Helper()
+	ctx := context.Background()
+	nodes := []*testutils.TestNode{testutils.NewTestNode(t), testutils.NewTestNode(t), testutils.NewTestNode(t), testutils.NewTestNode(t)}
+	obs := testobservability.Default(t)
+	db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), "root.db"), storage.WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	orchestration, err := partitions.NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), obs.Logger(), partitions.WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, orchestration.Close()) })
+	signers := make(map[string]abcrypto.Signer, len(nodes))
+	for _, node := range nodes {
+		signers[node.PeerConf.ID.String()] = node.Signer
+	}
+	old := testtrustbase.NewTrustBaseFromSigners(t, signers).(*types.RootTrustBaseV1)
+	store, err := tbstore.NewTrustBaseStore(memorydb.New(), obs.Logger())
+	require.NoError(t, err)
+	require.NoError(t, store.Store(old))
+	identity := sha256.Sum256([]byte("operator-abort-test"))
+	history, err := trusthistorystore.Open(ctx, memorydb.New(), old, identity, trustactivation.Verifier{})
+	require.NoError(t, err)
+	params := *NewConsensusParams()
+	params.NetworkProfileVersion = storage.ProfileHandoff
+	net := testnetwork.NewRootMockNetwork()
+	cm, err := NewConsensusManager(nodes[0].PeerConf.ID, store, orchestration, net, nodes[0].Signer, db, obs,
+		WithConsensusParams(params), WithRecoveryProfile2(history))
+	require.NoError(t, err)
+	predecessor, err := cm.handoffPredecessor()
+	require.NoError(t, err)
+	parentQC := cm.blockStore.GetHighQc()
+	parent, err := cm.blockStore.Block(parentQC.GetRound())
+	require.NoError(t, err)
+	record := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, Attempt: 0,
+		OrderedRound: parentQC.GetRound(), ActivationRound: parentQC.GetRound() + 8,
+		PredecessorBodyID: predecessor, NextBodyID: bytes.Repeat([]byte{0x6a}, 32),
+		FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32), Kind: "prepare"}
+	controlPhase := "prepared"
+	if len(phase) > 0 {
+		controlPhase = phase[0]
+	}
+	frozenParent := make([]byte, 0)
+	if controlPhase == "endorsed" {
+		record.Kind = "freeze"
+		record.FrozenID = bytes.Repeat([]byte{0x73}, 32)
+		frozenParent = bytes.Repeat([]byte{0x74}, 32)
+	}
+	parent.ShardState.Control = &evmroot.ControlState{Network: record.Network, Epoch: record.Epoch,
+		Attempt: record.Attempt, OrderedRound: record.OrderedRound, PredecessorBodyID: bytes.Clone(predecessor),
+		Phase: controlPhase, RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{0x71}, 32), FrozenParent: frozenParent}
+	target := abdrc.HandoffAbortTarget{Network: record.Network, OldEpoch: record.Epoch,
+		PredecessorBodyID: bytes.Clone(record.PredecessorBodyID), Attempt: record.Attempt,
+		NextBodyID: bytes.Clone(record.NextBodyID)}
+	return cm, net, nodes, target, record
+}
+
+func TestExplicitAbortPrioritizesEndorsedPhaseWithoutPlanCache(t *testing.T) {
+	cm, _, nodes, target, record := newExplicitAbortFixture(t, "endorsed")
+	_, err := cm.SubmitHandoffAbort(context.Background(), target)
+	require.NoError(t, err)
+	domain, err := storage.AbortEndorsementBytes(record)
+	require.NoError(t, err)
+	for _, node := range nodes[1:3] {
+		signature, signErr := node.Signer.SignBytes(domain)
+		require.NoError(t, signErr)
+		require.NoError(t, cm.onHandoffAbortApprovalMsg(&abdrc.HandoffAbortApprovalMsg{
+			Network: target.Network, OldEpoch: target.OldEpoch, PredecessorBodyID: target.PredecessorBodyID,
+			Attempt: target.Attempt, NextBodyID: target.NextBodyID, Signer: node.PeerConf.ID.String(), Signature: signature,
+		}))
+	}
+	cm.handoffPlans = nil
+	parentQC := cm.blockStore.GetHighQc()
+	records, err := cm.handoffRecordsForRound(parentQC.GetRound()+1, parentQC)
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	ordered, err := storage.DecodeOrderedHandoffRecord(records[0])
+	require.NoError(t, err)
+	require.Equal(t, "abort", ordered.Kind)
+}
+
+func TestExplicitAbortQuorumPrioritizesRecordWithoutHandoffPlanCache(t *testing.T) {
+	ctx := context.Background()
+	cm, net, nodes, target, record := newExplicitAbortFixture(t)
+	status, err := cm.SubmitHandoffAbort(ctx, target)
+	require.NoError(t, err)
+	require.Equal(t, "pending", status.State, "HTTP submission is not consensus finality")
+	var local *abdrc.HandoffAbortApprovalMsg
+	for _, sent := range net.SentMessages(network.ProtocolRootHandoffAbort) {
+		if sent.ID == nodes[1].PeerConf.ID {
+			local = sent.Message.(*abdrc.HandoffAbortApprovalMsg)
+			break
+		}
+	}
+	require.NotNil(t, local, "operator approval is broadcast to old validators")
+	require.NoError(t, cm.onHandoffAbortApprovalMsg(local), "duplicate approval is idempotent")
+	if signatures, ready := cm.readyHandoffAbort(target); ready {
+		t.Fatalf("one old-validator signature unexpectedly reached quorum: %v", signatures)
+	}
+	domain, err := storage.AbortEndorsementBytes(record)
+	require.NoError(t, err)
+	for _, node := range nodes[1:3] {
+		signature, signErr := node.Signer.SignBytes(domain)
+		require.NoError(t, signErr)
+		msg := &abdrc.HandoffAbortApprovalMsg{Network: target.Network, OldEpoch: target.OldEpoch,
+			PredecessorBodyID: bytes.Clone(target.PredecessorBodyID), Attempt: target.Attempt,
+			NextBodyID: bytes.Clone(target.NextBodyID), Signer: node.PeerConf.ID.String(), Signature: signature}
+		require.NoError(t, cm.onHandoffAbortApprovalMsg(msg))
+	}
+	signatures, ready := cm.readyHandoffAbort(target)
+	require.True(t, ready, "threshold comes from the configured old trust base")
+	require.Len(t, signatures, 3)
+	cm.handoffAborts = nil // a process restart loses approvals but retains ordered control state
+	status, err = cm.SubmitHandoffAbort(ctx, target)
+	require.NoError(t, err, "operator resubmission revalidates the still-pre-H control state")
+	for _, node := range nodes[1:3] {
+		signature, signErr := node.Signer.SignBytes(domain)
+		require.NoError(t, signErr)
+		msg := &abdrc.HandoffAbortApprovalMsg{Network: target.Network, OldEpoch: target.OldEpoch,
+			PredecessorBodyID: bytes.Clone(target.PredecessorBodyID), Attempt: target.Attempt,
+			NextBodyID: bytes.Clone(target.NextBodyID), Signer: node.PeerConf.ID.String(), Signature: signature}
+		require.NoError(t, cm.onHandoffAbortApprovalMsg(msg))
+	}
+	_, ready = cm.readyHandoffAbort(target)
+	require.True(t, ready, "retained operator input can recollect quorum after cache loss")
+	cm.handoffPlans = nil // simulate restart/cache loss for the volatile plan
+	parentQC := cm.blockStore.GetHighQc()
+	records, err := cm.handoffRecordsForRound(parentQC.GetRound()+1, parentQC)
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	abort, err := storage.DecodeOrderedHandoffRecord(records[0])
+	require.NoError(t, err)
+	require.Equal(t, "abort", abort.Kind)
+	require.EqualValues(t, target.Attempt, abort.Attempt)
+	require.Equal(t, target.NextBodyID, abort.NextBodyID)
+	var proof storage.AbortAuthorization
+	require.NoError(t, types.Cbor.Unmarshal(records[1], &proof))
+	require.Len(t, proof.Signatures, 3)
+}
+
+func TestExplicitAbortRejectsWrongTarget(t *testing.T) {
+	cm, _, _, target, _ := newExplicitAbortFixture(t)
+	signature, err := cm.safety.signer.SignBytes([]byte("test signature"))
+	require.NoError(t, err)
+	tests := []struct {
+		name   string
+		mutate func(*abdrc.HandoffAbortTarget)
+	}{
+		{"network", func(target *abdrc.HandoffAbortTarget) { target.Network++ }},
+		{"old epoch", func(target *abdrc.HandoffAbortTarget) { target.OldEpoch++ }},
+		{"predecessor", func(target *abdrc.HandoffAbortTarget) { target.PredecessorBodyID = bytes.Repeat([]byte{0x6b}, 32) }},
+		{"attempt", func(target *abdrc.HandoffAbortTarget) { target.Attempt++ }},
+		{"successor body", func(target *abdrc.HandoffAbortTarget) { target.NextBodyID = bytes.Repeat([]byte{0x6b}, 32) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wrong := target
+			wrong.PredecessorBodyID = bytes.Clone(target.PredecessorBodyID)
+			wrong.NextBodyID = bytes.Clone(target.NextBodyID)
+			tt.mutate(&wrong)
+			err := cm.onHandoffAbortApprovalMsg(&abdrc.HandoffAbortApprovalMsg{Network: wrong.Network, OldEpoch: wrong.OldEpoch,
+				PredecessorBodyID: wrong.PredecessorBodyID, Attempt: wrong.Attempt, NextBodyID: wrong.NextBodyID,
+				Signer: cm.id.String(), Signature: signature})
+			require.ErrorIs(t, err, ErrHandoffAbortTarget)
+		})
+	}
+}
+
+func TestExplicitAbortRejectsOutsiderSignature(t *testing.T) {
+	cm, _, _, target, record := newExplicitAbortFixture(t)
+	outsider := testutils.NewTestNode(t)
+	domain, err := storage.AbortEndorsementBytes(record)
+	require.NoError(t, err)
+	signature, err := outsider.Signer.SignBytes(domain)
+	require.NoError(t, err)
+	err = cm.onHandoffAbortApprovalMsg(&abdrc.HandoffAbortApprovalMsg{Network: target.Network, OldEpoch: target.OldEpoch,
+		PredecessorBodyID: target.PredecessorBodyID, Attempt: target.Attempt, NextBodyID: target.NextBodyID,
+		Signer: outsider.PeerConf.ID.String(), Signature: signature})
+	require.ErrorIs(t, err, ErrHandoffAbortSignature)
+}
+
+func TestExplicitAbortIsIdempotentAndTooLateAfterCommit(t *testing.T) {
+	ctx := context.Background()
+	cm, _, _, target, record := newExplicitAbortFixture(t)
+	root := cm.blockStore.GetHighQc()
+	parent, err := cm.blockStore.Block(root.GetRound())
+	require.NoError(t, err)
+	record.Kind = "abort"
+	record.OrderedRound = root.GetRound()
+	parent.ShardState.Control = &evmroot.ControlState{Network: target.Network, Epoch: target.OldEpoch,
+		Attempt: target.Attempt, OrderedRound: record.OrderedRound, PredecessorBodyID: target.PredecessorBodyID,
+		Phase: "aborted", RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{0x72}, 32)}
+	status, err := cm.SubmitHandoffAbort(ctx, target)
+	require.NoError(t, err)
+	require.Equal(t, "committed", status.State)
+	require.Empty(t, cm.handoffAborts, "a repeated request for the committed Abort does not create a new approval")
+	record.Kind = "commit"
+	parent.ShardState.Control.Phase = "committed"
+	parent.ShardState.Control.RecordBytes = record.Bytes()
+	status, err = cm.HandoffAbortStatus(target)
+	require.NoError(t, err)
+	require.Equal(t, "too_late", status.State)
+	_, err = cm.SubmitHandoffAbort(ctx, target)
+	require.ErrorIs(t, err, ErrHandoffAbortTarget, "a committed H cannot be rewound by a late operator request")
 }

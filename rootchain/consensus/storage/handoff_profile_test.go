@@ -653,6 +653,47 @@ func TestAbortRequiresPreparedOrEndorsedPhase(t *testing.T) {
 	require.ErrorIs(t, err, ErrHandoffRecord)
 }
 
+func TestCommittedAbortReplayRetainsPhaseAndResumesEVMRequests(t *testing.T) {
+	s := profileStore(t)
+	frozenParent := bytes.Repeat([]byte{0x42}, 32)
+	installTestFrozenShard(t, s, frozenParent)
+	zero, body := make([]byte, 32), bytes.Repeat([]byte{0x31}, 32)
+	addProfileBlock(t, s, 2, [][]byte{record("prepare", 2, 7, zero, body, zero)})
+	abort := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, Attempt: 0,
+		OrderedRound: 3, ActivationRound: 7, PredecessorBodyID: zero,
+		NextBodyID: body, FrozenID: zero, SuccessorTRHash: zero, Kind: "abort"}
+	proof, err := (AbortAuthorization{Version: 1, Signatures: map[string]abhex.Bytes{"old-a": {1}}}).Bytes()
+	require.NoError(t, err)
+	parent, err := s.Block(2)
+	require.NoError(t, err)
+	abortBlock := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), proof},
+			Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
+	_, err = s.Add(abortBlock, mockIRVerifier{verify: func(round uint64, _ *rctypes.IRChangeReq) (*types.InputRecord, error) {
+		return &types.InputRecord{Version: 1, RoundNumber: round, BlockHash: bytes.Repeat([]byte{3}, 32)}, nil
+	}})
+	require.NoError(t, err, "an Abort block may itself admit EVM work after its ordered transition")
+	aborted, err := s.Block(3)
+	require.NoError(t, err)
+	require.Equal(t, "aborted", aborted.ShardState.Control.Phase)
+	checkpoint := &abdrc.CommittedBlock{Block: aborted.BlockData, Control: aborted.ShardState.Control,
+		CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: bytes.Clone(aborted.RootHash)}}}
+	checkpoint.ShardInfo, err = toRecoveryShardInfo(aborted)
+	require.NoError(t, err)
+	restarted, err := NewFromState(crypto.SHA256, checkpoint, s.GetDB(), s.orchestration, logger.New(t), ProfileHandoff)
+	require.NoError(t, err, "recovery after durable Abort retains the authenticated phase")
+	root := restarted.blockTree.Root()
+	require.Equal(t, "aborted", root.ShardState.Control.Phase)
+	block := &rctypes.BlockData{Version: 2, Round: 4, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, Epoch: 1, CurrentRootHash: root.RootHash}}}
+	_, err = restarted.Add(block, mockIRVerifier{verify: func(round uint64, _ *rctypes.IRChangeReq) (*types.InputRecord, error) {
+		return &types.InputRecord{Version: 1, RoundNumber: round, BlockHash: bytes.Repeat([]byte{4}, 32)}, nil
+	}})
+	require.NoError(t, err, "the replayed Abort releases ordinary EVM certification")
+}
+
 func TestLegacyAddRejectsProfileTwoVersion(t *testing.T) {
 	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "legacy.db"), WithNoSync())
 	require.NoError(t, err)

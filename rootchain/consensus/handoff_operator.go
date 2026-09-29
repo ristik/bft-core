@@ -17,7 +17,197 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
 
-var ErrHandoffApproval = errors.New("root handoff: invalid operator approval")
+var (
+	ErrHandoffApproval       = errors.New("root handoff: invalid operator approval")
+	ErrHandoffAbortTarget    = errors.New("root handoff abort: target does not match authenticated control state")
+	ErrHandoffAbortSignature = errors.New("root handoff abort: invalid old-validator signature")
+	ErrHandoffAbortCache     = errors.New("root handoff abort: approval cache full or conflicting")
+)
+
+const maxPendingHandoffAborts = 4
+
+type handoffAbortKey struct {
+	network, epoch, attempt uint64
+	predecessor             [32]byte
+}
+
+type pendingHandoffAbort struct {
+	target     abdrc.HandoffAbortTarget
+	signatures map[string]hex.Bytes
+	weight     uint64
+}
+
+// SubmitHandoffAbort is the operator-only local signing path. Network peers
+// can relay an approval but cannot cause this validator to create one.
+func (x *ConsensusManager) SubmitHandoffAbort(ctx context.Context, target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, error) {
+	status, record, err := x.handoffAbortStatus(target)
+	if err != nil {
+		return abdrc.HandoffAbortStatus{}, err
+	}
+	if status.State == "committed" {
+		return status, nil
+	}
+	if status.State != "pending" {
+		return abdrc.HandoffAbortStatus{}, ErrHandoffAbortTarget
+	}
+	domain, err := storage.AbortEndorsementBytes(record)
+	if err != nil {
+		return abdrc.HandoffAbortStatus{}, ErrHandoffAbortTarget
+	}
+	signature, err := x.safety.signer.SignBytes(domain)
+	if err != nil {
+		return abdrc.HandoffAbortStatus{}, fmt.Errorf("%w: %v", ErrHandoffAbortSignature, err)
+	}
+	msg := &abdrc.HandoffAbortApprovalMsg{Network: target.Network, OldEpoch: target.OldEpoch,
+		PredecessorBodyID: bytes.Clone(target.PredecessorBodyID), Attempt: target.Attempt,
+		NextBodyID: bytes.Clone(target.NextBodyID), Signer: x.id.String(), Signature: signature}
+	if err := x.onHandoffAbortApprovalMsg(msg); err != nil {
+		return abdrc.HandoffAbortStatus{}, err
+	}
+	// The local signature is cached before broadcast, so this request remains
+	// submitted if peers are temporarily unavailable. Retries are idempotent.
+	sendCtx := context.WithoutCancel(ctx)
+	for _, validator := range x.Validators() {
+		if validator == x.id {
+			continue
+		}
+		if err := x.net.Send(sendCtx, msg, validator); err != nil {
+			x.log.WarnContext(ctx, "could not disseminate root handoff abort approval", "validator", validator.String(), "error", err)
+		}
+	}
+	status.State = "pending"
+	return status, nil
+}
+
+// HandoffAbortStatus reads committed control state only; pending approvals are
+// not exposed as a cancellation result.
+func (x *ConsensusManager) HandoffAbortStatus(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, error) {
+	status, _, err := x.handoffAbortStatus(target)
+	return status, err
+}
+
+func (x *ConsensusManager) handoffAbortStatus(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, evmroot.OrderedHandoffRecord, error) {
+	status := abdrc.HandoffAbortStatus{Target: target, State: "unknown"}
+	if _, err := handoffAbortKeyFor(target); err != nil {
+		return status, evmroot.OrderedHandoffRecord{}, err
+	}
+	state, err := x.blockStore.GetState()
+	if err != nil || state == nil || state.CommittedHead == nil || state.CommittedHead.Control == nil || state.CommittedHead.Block == nil {
+		return status, evmroot.OrderedHandoffRecord{}, ErrHandoffAbortTarget
+	}
+	control := state.CommittedHead.Control
+	if !controlMatchesAbortTarget(control, target) {
+		return status, evmroot.OrderedHandoffRecord{}, ErrHandoffAbortTarget
+	}
+	record, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
+	if err != nil || !recordMatchesAbortTarget(record, target) {
+		return status, evmroot.OrderedHandoffRecord{}, ErrHandoffAbortTarget
+	}
+	blockID, err := state.CommittedHead.Block.Hash(crypto.SHA256)
+	if err != nil {
+		return status, evmroot.OrderedHandoffRecord{}, ErrHandoffAbortTarget
+	}
+	status.CommittedRootID = fmt.Sprintf("0x%x", blockID)
+	status.CommittedRootRound = state.CommittedHead.Block.GetRound()
+	status.RecordID = fmt.Sprintf("0x%x", record.ID())
+	status.OrderedRound = control.OrderedRound
+	switch control.Phase {
+	case "prepared", "endorsed":
+		trust := x.trustBase.Load()
+		if trust == nil || uint64(trust.NetworkID) != target.Network || trust.Epoch != target.OldEpoch {
+			return status, evmroot.OrderedHandoffRecord{}, ErrHandoffAbortTarget
+		}
+		status.State = "pending"
+	case "aborted":
+		status.State = "committed"
+	case "committed":
+		status.State = "too_late"
+	default:
+		return status, evmroot.OrderedHandoffRecord{}, ErrHandoffAbortTarget
+	}
+	return status, record, nil
+}
+
+func handoffAbortKeyFor(target abdrc.HandoffAbortTarget) (handoffAbortKey, error) {
+	if target.OldEpoch == 0 ||
+		len(target.PredecessorBodyID) != 32 || bytes.Equal(target.PredecessorBodyID, make([]byte, 32)) ||
+		len(target.NextBodyID) != 32 || bytes.Equal(target.NextBodyID, make([]byte, 32)) {
+		return handoffAbortKey{}, ErrHandoffAbortTarget
+	}
+	var predecessor [32]byte
+	copy(predecessor[:], target.PredecessorBodyID)
+	return handoffAbortKey{network: target.Network, epoch: target.OldEpoch, attempt: target.Attempt,
+		predecessor: predecessor}, nil
+}
+
+func controlMatchesAbortTarget(control *evmroot.ControlState, target abdrc.HandoffAbortTarget) bool {
+	return control != nil && control.Network == target.Network && control.Epoch == target.OldEpoch &&
+		control.Attempt == target.Attempt && bytes.Equal(control.PredecessorBodyID, target.PredecessorBodyID)
+}
+
+func recordMatchesAbortTarget(record evmroot.OrderedHandoffRecord, target abdrc.HandoffAbortTarget) bool {
+	return record.Network == target.Network && record.Epoch == target.OldEpoch && record.Attempt == target.Attempt &&
+		bytes.Equal(record.PredecessorBodyID, target.PredecessorBodyID) && bytes.Equal(record.NextBodyID, target.NextBodyID)
+}
+
+func (x *ConsensusManager) onHandoffAbortApprovalMsg(msg *abdrc.HandoffAbortApprovalMsg) error {
+	if msg == nil || msg.Signer == "" || len(msg.Signer) > 512 || len(msg.Signature) == 0 || len(msg.Signature) > 1024 {
+		return ErrHandoffAbortSignature
+	}
+	target := abdrc.HandoffAbortTarget{Network: msg.Network, OldEpoch: msg.OldEpoch,
+		PredecessorBodyID: msg.PredecessorBodyID, Attempt: msg.Attempt, NextBodyID: msg.NextBodyID}
+	key, err := handoffAbortKeyFor(target)
+	if err != nil {
+		return err
+	}
+	status, record, err := x.handoffAbortStatus(target)
+	if err != nil || status.State != "pending" {
+		return ErrHandoffAbortTarget
+	}
+	domain, err := storage.AbortEndorsementBytes(record)
+	if err != nil {
+		return ErrHandoffAbortSignature
+	}
+	trust := x.trustBase.Load()
+	weight, err := trust.VerifySignature(domain, msg.Signature, msg.Signer)
+	if err != nil || weight == 0 {
+		return ErrHandoffAbortSignature
+	}
+	x.handoffMu.Lock()
+	defer x.handoffMu.Unlock()
+	if x.handoffAborts == nil {
+		x.handoffAborts = make(map[handoffAbortKey]*pendingHandoffAbort)
+	}
+	pending := x.handoffAborts[key]
+	if pending == nil {
+		// Only the attempt named by authenticated current control can receive
+		// approvals; discard any approvals for earlier, no-longer-live attempts.
+		for stale := range x.handoffAborts {
+			if stale != key {
+				delete(x.handoffAborts, stale)
+			}
+		}
+		if len(x.handoffAborts) >= maxPendingHandoffAborts {
+			return ErrHandoffAbortCache
+		}
+		pending = &pendingHandoffAbort{target: target, signatures: make(map[string]hex.Bytes)}
+		x.handoffAborts[key] = pending
+	} else if !bytes.Equal(pending.target.NextBodyID, target.NextBodyID) {
+		return ErrHandoffAbortCache
+	}
+	if prior, exists := pending.signatures[msg.Signer]; exists {
+		if !bytes.Equal(prior, msg.Signature) {
+			return ErrHandoffAbortCache
+		}
+		return nil
+	}
+	if ^uint64(0)-pending.weight < weight {
+		return ErrHandoffAbortSignature
+	}
+	pending.signatures[msg.Signer] = bytes.Clone(msg.Signature)
+	pending.weight += weight
+	return nil
+}
 
 type pendingHandoff struct {
 	plan            abdrc.HandoffApprovalMsg
@@ -389,6 +579,19 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	if control.Phase == "committed" {
 		return nil, nil
 	}
+	// An explicit old-set quorum abort has priority over every volatile plan
+	// lookup. The ordered parent record is the authority for the exact attempt,
+	// so this still works after restart has cleared handoffPlans.
+	if control.Phase == "prepared" || control.Phase == "endorsed" {
+		previous, decodeErr := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
+		if decodeErr == nil {
+			target := abdrc.HandoffAbortTarget{Network: previous.Network, OldEpoch: previous.Epoch,
+				PredecessorBodyID: previous.PredecessorBodyID, Attempt: previous.Attempt, NextBodyID: previous.NextBodyID}
+			if signatures, ready := x.readyHandoffAbort(target); ready {
+				return abortHandoffRecords(round, previous, signatures)
+			}
+		}
+	}
 	expectedAttempt := uint64(0)
 	if control.Phase == "aborted" {
 		if control.Attempt == ^uint64(0) {
@@ -464,6 +667,28 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	default:
 		return nil, nil
 	}
+}
+
+func (x *ConsensusManager) readyHandoffAbort(target abdrc.HandoffAbortTarget) (map[string]hex.Bytes, bool) {
+	key, err := handoffAbortKeyFor(target)
+	if err != nil {
+		return nil, false
+	}
+	trust := x.trustBase.Load()
+	if trust == nil {
+		return nil, false
+	}
+	x.handoffMu.Lock()
+	defer x.handoffMu.Unlock()
+	pending := x.handoffAborts[key]
+	if pending == nil || !bytes.Equal(pending.target.NextBodyID, target.NextBodyID) || pending.weight < trust.QuorumThreshold {
+		return nil, false
+	}
+	signatures := make(map[string]hex.Bytes, len(pending.signatures))
+	for signer, signature := range pending.signatures {
+		signatures[signer] = bytes.Clone(signature)
+	}
+	return signatures, true
 }
 
 func parentHasFrozenShard(parent *storage.ExecutedBlock, frozenParent []byte) bool {

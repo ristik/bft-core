@@ -2,9 +2,10 @@
 
 ## Status
 
-Proposed for independent model/proof review, amended 2026-09-25. Automatic
-PoS handoff remains disabled until runtime integration and review. Depends on
-ADR 0003 (D1) and ADR 0005 (D3).
+Proposed for independent model/proof review, amended 2026-09-29. The profile-2
+root runtime includes an explicit operator-triggered abort path; automatic PoS
+handoff and the H6 live acceptance remain gated on review and end-to-end
+evidence. Depends on ADR 0003 (D1) and ADR 0005 (D3).
 
 ## Context
 
@@ -24,7 +25,16 @@ apply a terminal repeat as a timeout or reject a subsequent new UC.
    predecessor and attempt, FrozenID, next BodyID, original order round `o`,
    `A*` and successor TR. The D3 body retains `A_min`, with pre-freeze and
    candidate-context hashes that do not include their own BodyID. Endorsement
-   binds known frozen state only. Abort is old-quorum committed and pre-H.
+   binds known frozen state only. Abort is old-quorum committed and pre-H. An
+   operator may explicitly collect signatures in `prepared` or `endorsed`;
+   each old validator checks the exact authenticated target and signs only on
+   local operator instruction. The existing abort-only domain and
+   authorization companion are reused. No candidate body or successor key is
+   needed. Root leaders prioritize a quorum-ready Abort from branch control
+   state before consulting the volatile handoff-plan cache. Handoff approval
+   receipt is not cancellation: only a committed Abort is final. A racing H
+   wins or loses under ordinary BFT locks; H cannot be rewound. Retry uses
+   `attempt+1` and newly observed parent state.
 2. A voter reads authenticated parent-branch control state before every old
    proposal. Any descendant of H must have empty payload and execute as the
    identity on every shard/control field, including scheduled configuration,
