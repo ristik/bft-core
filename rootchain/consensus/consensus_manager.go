@@ -617,6 +617,9 @@ func (x *ConsensusManager) onPartitionIRChangeReq(ctx context.Context, req *IRCh
 		Shard:     req.Shard,
 		Requests:  req.Requests,
 	}
+	if err := x.refuseFrozenIR(irReq); err != nil {
+		return err
+	}
 	switch req.Reason {
 	case Quorum:
 		irReq.CertReason = drctypes.Quorum
@@ -660,6 +663,9 @@ func (x *ConsensusManager) onIRChangeMsg(ctx context.Context, irChangeMsg *abdrc
 	if err := irChangeMsg.Verify(x.trustBase.Load()); err != nil {
 		return fmt.Errorf("invalid IR change request from node %s: %w", irChangeMsg.Author, err)
 	}
+	if err := x.refuseFrozenIR(irChangeMsg.IrChangeReq); err != nil {
+		return err
+	}
 	nextLeader, err := x.leaderSelector.GetLeaderForRound(x.pacemaker.GetCurrentRound() + 1)
 	if err != nil {
 		return fmt.Errorf("failed to get next leader to forward IR change request: %w", err)
@@ -683,6 +689,24 @@ func (x *ConsensusManager) onIRChangeMsg(ctx context.Context, irChangeMsg *abdrc
 	x.fwdIRCRCnt.Add(ctx, 1, observability.Shard(irChangeMsg.IrChangeReq.Partition, irChangeMsg.IrChangeReq.Shard, attribute.String("reason", irChangeMsg.IrChangeReq.CertReason.String())))
 	if err := x.net.Send(ctx, irChangeMsg, nextLeader); err != nil {
 		return fmt.Errorf("failed to forward IR change request from %s to the next leader: %w", irChangeMsg.Author, err)
+	}
+	return nil
+}
+
+func (x *ConsensusManager) refuseFrozenIR(req *drctypes.IRChangeReq) error {
+	if req == nil || x.params.NetworkProfileVersion != storage.ProfileHandoff {
+		return nil
+	}
+	qc := x.blockStore.GetHighQc()
+	if qc == nil {
+		return nil
+	}
+	frozen, active, err := x.blockStore.FrozenShardAt(qc.GetRound())
+	if err != nil {
+		return err
+	}
+	if active && frozen == (types.PartitionShardID{PartitionID: req.Partition, ShardID: req.Shard.Key()}) {
+		return storage.ErrHandoffFrozen
 	}
 	return nil
 }
@@ -1154,6 +1178,23 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		payload = x.irReqBuffer.GeneratePayload(round, timedOutShards, x.blockStore.IsChangeInProgress)
 		if profile == storage.ProfileHandoff {
 			payload.Version = profile
+			if parentQC != nil {
+				frozen, active, err := x.blockStore.FrozenShardAt(parentQC.GetRound())
+				if err != nil {
+					x.log.WarnContext(ctx, "cannot establish frozen EVM shard", logger.Error(err))
+					return
+				}
+				if active {
+					kept := payload.Requests[:0]
+					for _, req := range payload.Requests {
+						if req != nil && frozen == (types.PartitionShardID{PartitionID: req.Partition, ShardID: req.Shard.Key()}) {
+							continue
+						}
+						kept = append(kept, req)
+					}
+					payload.Requests = kept
+				}
+			}
 		}
 	}
 	var parentAnchor *drctypes.EpochAnchor

@@ -208,6 +208,9 @@ func (x *ConsensusManager) InstalledEVMTransition(proof handoff.OldCommitProof,
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.epochAnchor == nil {
 		return nil, rctypes.ErrEpochAnchor
 	}
+	if err := x.blockStore.AnchoredFrozenParent(proof.Record.SuccessorTRHash, proof.Control.FrozenParent); err != nil {
+		return nil, err
+	}
 	old, err := x.trustBaseStore.GetByEpoch(proof.Record.Epoch)
 	if err != nil {
 		return nil, fmt.Errorf("old root trust lineage: %w", err)

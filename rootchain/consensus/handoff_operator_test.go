@@ -73,11 +73,25 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	bad := plan
 	bad.FrozenParent = bytes.Repeat([]byte{8}, 32)
 	require.Error(t, cm.EndorseHandoff(ctx, bad))
+	stale := *state
+	staleHead := *state.CommittedHead
+	staleHead.ShardInfo = []abdrc.ShardInfo{{IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{9}, 32)}}}
+	stale.CommittedHead = &staleHead
+	require.ErrorIs(t, cm.endorseHandoffAtState(ctx, plan, &stale), ErrHandoffApproval,
+		"an endorser cannot sign a plan for an older certified EVM tip")
+	staleHead.ShardInfo = state.CommittedHead.ShardInfo
+	staleQC := *state.CommittedHead.CommitQc
+	staleSeal := *staleQC.LedgerCommitInfo
+	staleSeal.Hash = bytes.Repeat([]byte{0xaa}, 32)
+	staleQC.LedgerCommitInfo = &staleSeal
+	staleHead.CommitQc = &staleQC
+	require.ErrorIs(t, cm.endorseHandoffAtState(ctx, plan, &stale), ErrHandoffApproval,
+		"an endorser cannot sign a different pre-freeze root")
 	cm.handoffPlans = make(map[[32]byte]*pendingHandoff)
 	for i := byte(1); i <= 4; i++ {
 		cm.handoffPlans[[32]byte{i}] = &pendingHandoff{signatures: make(map[string]hex.Bytes)}
 	}
-	require.NoError(t, cm.EndorseHandoff(ctx, plan))
+	require.NoError(t, cm.endorseHandoffAtState(ctx, plan, state))
 	require.Len(t, cm.handoffPlans, 4)
 	_, err = cm.readyHandoff()
 	require.Error(t, err, "one signature cannot authorize a four-validator handoff")
@@ -86,10 +100,14 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	id := body.Identity()
 	domain, err := storage.EndorsementBytes(cm.handoffPlans[id].record)
 	require.NoError(t, err)
+	abortDomain, err := storage.AbortEndorsementBytes(cm.handoffPlans[id].record)
+	require.NoError(t, err)
 	for i, other := range others[:2] {
 		signed := plan
 		signed.Signer = other.PeerConf.ID.String()
 		signed.Signature, err = other.Signer.SignBytes(domain)
+		require.NoError(t, err)
+		signed.AbortSignature, err = other.Signer.SignBytes(abortDomain)
 		require.NoError(t, err)
 		require.NoError(t, cm.onHandoffApprovalMsg(ctx, &signed))
 		require.NoError(t, cm.onHandoffApprovalMsg(ctx, &signed), "duplicate endorsement is idempotent")
@@ -118,4 +136,15 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	require.Len(t, proposal.Block.Payload.HandoffRecords, 1)
 	require.Empty(t, proposal.Block.Payload.Requests)
 	require.NotEmpty(t, cm.irReqBuffer.irChgReqBuffer, "handoff proposal retains buffered shard work")
+	aborted := *state
+	abortedHead := *state.CommittedHead
+	abortedControl := *abortedHead.Control
+	abortedControl.Phase = "aborted"
+	abortedControl.Attempt = 0
+	abortedHead.Control = &abortedControl
+	aborted.CommittedHead = &abortedHead
+	retry, err := cm.buildHandoffPlanFromState(&next, parentHash, &aborted)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, retry.Attempt)
+	require.NotEqual(t, plan.Body, retry.Body, "attempt+1 binds a new body and FrozenID")
 }

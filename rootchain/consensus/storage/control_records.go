@@ -12,6 +12,7 @@ import (
 var (
 	ErrHandoffRecord = errors.New("invalid root handoff record")
 	ErrHandoffSuffix = errors.New("nonempty old-epoch handoff suffix")
+	ErrHandoffFrozen = errors.New("EVM certification frozen by root handoff")
 )
 
 type handoffAuthority interface {

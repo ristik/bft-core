@@ -433,6 +433,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			AnchorEpoch: trustBases[0].Epoch, Directory: flags.ExecutionJournal + ".handoffs",
 			OnInstalled: func(ctx context.Context, bundle handoffdelivery.Bundle, verified handoffdelivery.Verified) error {
 				if handoffJournal == nil || verified.Shard.UC == nil || verified.Shard.UC.InputRecord == nil || verified.Shard.TR == nil || verified.Shard.IR == nil ||
+					!bytes.Equal(verified.Shard.IR.BlockHash, bundle.Proof.Control.FrozenParent) ||
 					!bytes.Equal(verified.Shard.UC.InputRecord.BlockHash, verified.Shard.IR.BlockHash) ||
 					verified.Shard.UC.GetRoundNumber() != verified.Shard.IR.RoundNumber {
 					return errors.New("verified handoff lacks the terminal shard certificate")

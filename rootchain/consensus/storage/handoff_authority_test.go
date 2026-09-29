@@ -27,6 +27,7 @@ type authorizedFixture struct {
 func newAuthorizedFixture(t *testing.T) authorizedFixture {
 	t.Helper()
 	s := profileStore(t)
+	installTestFrozenShard(t, s, bytes.Repeat([]byte{5}, 32))
 	signers := make(map[string]abcrypto.Signer)
 	for _, id := range []string{"old-a", "old-b", "old-c", "old-d"} {
 		signer, err := abcrypto.NewInMemorySecp256K1Signer()

@@ -20,11 +20,12 @@ import (
 var ErrHandoffApproval = errors.New("root handoff: invalid operator approval")
 
 type pendingHandoff struct {
-	plan       abdrc.HandoffApprovalMsg
-	body       evmroot.TrustBaseBodyV2
-	record     evmroot.OrderedHandoffRecord
-	signatures map[string]hex.Bytes
-	weight     uint64
+	plan            abdrc.HandoffApprovalMsg
+	body            evmroot.TrustBaseBodyV2
+	record          evmroot.OrderedHandoffRecord
+	signatures      map[string]hex.Bytes
+	abortSignatures map[string]hex.Bytes
+	weight          uint64
 }
 
 func (x *ConsensusManager) handoffPredecessor() ([]byte, error) {
@@ -52,11 +53,35 @@ func (x *ConsensusManager) handoffPredecessor() ([]byte, error) {
 // signature is collected. A caller submits this identical plan locally to
 // each old validator; each signer decides independently whether to endorse.
 func (x *ConsensusManager) BuildHandoffPlan(next *types.RootTrustBaseV1, frozenParent []byte) (abdrc.HandoffApprovalMsg, error) {
+	if !x.blockStore.HighQCFrozenParent(frozenParent) {
+		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
+	}
 	state, err := x.blockStore.GetState()
 	if err != nil {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
 	return x.buildHandoffPlanFromState(next, frozenParent, state)
+}
+
+// BuildAndEndorseHandoff uses one committed checkpoint for the proposed plan
+// and this validator's endorsement. Root rounds may advance between separate
+// operator HTTP calls while the shard remains live.
+func (x *ConsensusManager) BuildAndEndorseHandoff(ctx context.Context, next *types.RootTrustBaseV1, frozenParent []byte) (abdrc.HandoffApprovalMsg, error) {
+	if !x.blockStore.HighQCFrozenParent(frozenParent) {
+		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
+	}
+	state, err := x.blockStore.GetState()
+	if err != nil {
+		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
+	}
+	plan, err := x.buildHandoffPlanFromState(next, frozenParent, state)
+	if err != nil {
+		return abdrc.HandoffApprovalMsg{}, err
+	}
+	if err := x.endorseHandoffAtState(ctx, plan, state); err != nil {
+		return abdrc.HandoffApprovalMsg{}, err
+	}
+	return plan, nil
 }
 
 func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1, frozenParent []byte, state *abdrc.StateMsg) (abdrc.HandoffApprovalMsg, error) {
@@ -73,17 +98,24 @@ func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1
 		state.CommittedHead.CommitQc == nil || state.CommittedHead.CommitQc.LedgerCommitInfo == nil {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
-	if state.CommittedHead.Control == nil || state.CommittedHead.Control.Phase != "idle" {
+	if state.CommittedHead.Control == nil ||
+		(state.CommittedHead.Control.Phase != "idle" && state.CommittedHead.Control.Phase != "aborted") {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
-	certifiedParent := false
+	attempt := uint64(0)
+	if state.CommittedHead.Control.Phase == "aborted" {
+		if state.CommittedHead.Control.Attempt == ^uint64(0) {
+			return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
+		}
+		attempt = state.CommittedHead.Control.Attempt + 1
+	}
+	certifiedParents := 0
 	for _, shard := range state.CommittedHead.ShardInfo {
 		if shard.IR != nil && bytes.Equal(shard.IR.BlockHash, frozenParent) {
-			certifiedParent = true
-			break
+			certifiedParents++
 		}
 	}
-	if !certifiedParent {
+	if certifiedParents != 1 {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
 	round := state.CommittedHead.Block.Round
@@ -108,8 +140,8 @@ func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1
 	aMin := round + 16
 	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: uint64(old.NetworkID), Epoch: next.Epoch,
 		EarliestActivation: aMin, Members: members, RootThreshold: evmroot.RootQuorumThreshold(uint64(len(members))),
-		StateSummary:     evmroot.D4PreFreezeSummary(uint64(old.NetworkID), predecessor, 0, round, root, frozenParent),
-		ChangeRecordHash: evmroot.D4CandidateContextHash(uint64(old.NetworkID), predecessor, 0, candidate[:], aMin)}
+		StateSummary:     evmroot.D4PreFreezeSummary(uint64(old.NetworkID), predecessor, attempt, round, root, frozenParent),
+		ChangeRecordHash: evmroot.D4CandidateContextHash(uint64(old.NetworkID), predecessor, attempt, candidate[:], aMin)}
 	if old.Epoch == 1 {
 		body.PredecessorHash, err = evmroot.FirstV2PredecessorHash(evmroot.V1Anchor{Version: 1,
 			NetworkID: uint64(old.NetworkID), Epoch: old.Epoch, HashIncludingSigs: predecessor})
@@ -124,13 +156,13 @@ func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1
 	}
 	return abdrc.HandoffApprovalMsg{Body: body.Encode(), FrozenParent: bytes.Clone(frozenParent),
 		Candidate: candidate[:], PreFreezeRound: round, PreFreezeRoot: bytes.Clone(root),
-		ActivationRound: aMin}, nil
+		ActivationRound: aMin, Attempt: attempt}, nil
 }
 
 func (x *ConsensusManager) validateHandoffApproval(msg *abdrc.HandoffApprovalMsg) (*pendingHandoff, uint64, error) {
 	if msg == nil || len(msg.Body) == 0 || len(msg.Body) > 1<<20 || len(msg.FrozenParent) != 32 ||
 		len(msg.Candidate) != 32 || len(msg.PreFreezeRoot) != 32 || msg.PreFreezeRound == 0 ||
-		msg.Attempt != 0 || msg.ActivationRound == 0 || msg.Signer == "" || len(msg.Signature) == 0 {
+		msg.ActivationRound == 0 || msg.Signer == "" || len(msg.Signature) == 0 || len(msg.AbortSignature) == 0 {
 		return nil, 0, ErrHandoffApproval
 	}
 	body, err := storage.DecodeHandoffBody(msg.Body)
@@ -172,6 +204,14 @@ func (x *ConsensusManager) validateHandoffApproval(msg *abdrc.HandoffApprovalMsg
 	if err != nil || weight == 0 {
 		return nil, 0, ErrHandoffApproval
 	}
+	abortDomain, err := storage.AbortEndorsementBytes(record)
+	if err != nil {
+		return nil, 0, err
+	}
+	abortWeight, err := old.VerifySignature(abortDomain, msg.AbortSignature, msg.Signer)
+	if err != nil || abortWeight != weight {
+		return nil, 0, ErrHandoffApproval
+	}
 	return &pendingHandoff{plan: *msg, body: body, record: record}, weight, nil
 }
 
@@ -179,7 +219,45 @@ func (x *ConsensusManager) validateHandoffApproval(msg *abdrc.HandoffApprovalMsg
 // It signs one immutable candidate and disseminates that approval through the
 // root network; no validator signs merely because another peer asked it to.
 func (x *ConsensusManager) EndorseHandoff(ctx context.Context, plan abdrc.HandoffApprovalMsg) error {
-	if plan.Signer != "" || len(plan.Signature) != 0 {
+	if !x.blockStore.HighQCFrozenParent(plan.FrozenParent) {
+		return ErrHandoffApproval
+	}
+	state, err := x.blockStore.GetState()
+	if err != nil {
+		return ErrHandoffApproval
+	}
+	return x.endorseHandoffAtState(ctx, plan, state)
+}
+
+func (x *ConsensusManager) endorseHandoffAtState(ctx context.Context, plan abdrc.HandoffApprovalMsg, state *abdrc.StateMsg) error {
+	if plan.Signer != "" || len(plan.Signature) != 0 || len(plan.AbortSignature) != 0 {
+		return ErrHandoffApproval
+	}
+	if state == nil || state.CommittedHead == nil || state.CommittedHead.Block == nil ||
+		state.CommittedHead.CommitQc == nil || state.CommittedHead.CommitQc.LedgerCommitInfo == nil ||
+		state.CommittedHead.Control == nil ||
+		(state.CommittedHead.Control.Phase != "idle" && state.CommittedHead.Control.Phase != "aborted") ||
+		plan.PreFreezeRound != state.CommittedHead.Block.Round ||
+		!bytes.Equal(plan.PreFreezeRoot, state.CommittedHead.CommitQc.LedgerCommitInfo.Hash) {
+		return ErrHandoffApproval
+	}
+	expectedAttempt := uint64(0)
+	if state.CommittedHead.Control.Phase == "aborted" {
+		if state.CommittedHead.Control.Attempt == ^uint64(0) {
+			return ErrHandoffApproval
+		}
+		expectedAttempt = state.CommittedHead.Control.Attempt + 1
+	}
+	if plan.Attempt != expectedAttempt {
+		return ErrHandoffApproval
+	}
+	certifiedParents := 0
+	for _, shard := range state.CommittedHead.ShardInfo {
+		if shard.IR != nil && bytes.Equal(shard.IR.BlockHash, plan.FrozenParent) {
+			certifiedParents++
+		}
+	}
+	if certifiedParents != 1 {
 		return ErrHandoffApproval
 	}
 	plan.Signer = x.id.String()
@@ -202,6 +280,14 @@ func (x *ConsensusManager) EndorseHandoff(ctx context.Context, plan abdrc.Handof
 		return err
 	}
 	plan.Signature, err = x.safety.signer.SignBytes(domain)
+	if err != nil {
+		return err
+	}
+	abortDomain, err := storage.AbortEndorsementBytes(record)
+	if err != nil {
+		return err
+	}
+	plan.AbortSignature, err = x.safety.signer.SignBytes(abortDomain)
 	if err != nil {
 		return err
 	}
@@ -253,6 +339,7 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 		}
 		stored = plan
 		stored.signatures = make(map[string]hex.Bytes)
+		stored.abortSignatures = make(map[string]hex.Bytes)
 		x.handoffPlans[id] = stored
 	} else if !bytes.Equal(stored.plan.Body, msg.Body) || !bytes.Equal(stored.plan.FrozenParent, msg.FrozenParent) ||
 		!bytes.Equal(stored.plan.Candidate, msg.Candidate) || stored.plan.ActivationRound != msg.ActivationRound ||
@@ -263,20 +350,23 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 		return nil
 	}
 	stored.signatures[msg.Signer] = bytes.Clone(msg.Signature)
+	stored.abortSignatures[msg.Signer] = bytes.Clone(msg.AbortSignature)
 	stored.weight += weight
 	return nil
 }
 
-func (x *ConsensusManager) readyHandoff() (*pendingHandoff, error) {
+func (x *ConsensusManager) readyHandoff(attempt ...uint64) (*pendingHandoff, error) {
 	x.handoffMu.Lock()
 	defer x.handoffMu.Unlock()
 	threshold := x.trustBase.Load().QuorumThreshold
 	for _, plan := range x.handoffPlans {
-		if plan.weight >= threshold {
+		if plan.weight >= threshold && (len(attempt) == 0 || plan.plan.Attempt == attempt[0]) {
 			copyPlan := *plan
 			copyPlan.signatures = make(map[string]hex.Bytes, len(plan.signatures))
+			copyPlan.abortSignatures = make(map[string]hex.Bytes, len(plan.abortSignatures))
 			for signer, sig := range plan.signatures {
 				copyPlan.signatures[signer] = bytes.Clone(sig)
+				copyPlan.abortSignatures[signer] = bytes.Clone(plan.abortSignatures[signer])
 			}
 			return &copyPlan, nil
 		}
@@ -299,7 +389,16 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	if control.Phase == "committed" {
 		return nil, nil
 	}
-	plan, err := x.readyHandoff()
+	expectedAttempt := uint64(0)
+	if control.Phase == "aborted" {
+		if control.Attempt == ^uint64(0) {
+			return nil, ErrHandoffApproval
+		}
+		expectedAttempt = control.Attempt + 1
+	} else if control.Phase != "idle" {
+		expectedAttempt = control.Attempt
+	}
+	plan, err := x.readyHandoff(expectedAttempt)
 	if err != nil {
 		return nil, nil
 	}
@@ -307,9 +406,6 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	record.OrderedRound = round
 	switch control.Phase {
 	case "idle", "aborted":
-		if control.Phase == "aborted" {
-			return nil, nil
-		} // a new attempt needs fresh approvals
 		record.Kind = "prepare"
 		if round > ^uint64(0)-8 {
 			return nil, ErrHandoffApproval
@@ -325,6 +421,9 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		if err != nil || !bytes.Equal(previous.NextBodyID, record.NextBodyID) || previous.Attempt != record.Attempt {
 			return nil, nil
 		}
+		if !parentHasFrozenShard(parent, plan.plan.FrozenParent) || !x.blockStore.CommittedFrozenParent(plan.plan.FrozenParent) {
+			return abortHandoffRecords(round, previous, plan.abortSignatures)
+		}
 		record.ActivationRound = previous.ActivationRound
 		record.Kind = "freeze"
 		record.SuccessorTRHash = make([]byte, 32)
@@ -339,6 +438,10 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		previous, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
 		if err != nil || !bytes.Equal(previous.NextBodyID, record.NextBodyID) || previous.Attempt != record.Attempt {
 			return nil, nil
+		}
+		if !bytes.Equal(control.FrozenParent, plan.plan.FrozenParent) || !parentHasFrozenShard(parent, control.FrozenParent) ||
+			!x.blockStore.CommittedFrozenParent(control.FrozenParent) {
+			return abortHandoffRecords(round, previous, plan.abortSignatures)
 		}
 		record.ActivationRound = previous.ActivationRound
 		if round > ^uint64(0)-8 {
@@ -364,4 +467,30 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	default:
 		return nil, nil
 	}
+}
+
+func parentHasFrozenShard(parent *storage.ExecutedBlock, frozenParent []byte) bool {
+	if parent == nil || len(frozenParent) != 32 {
+		return false
+	}
+	found := 0
+	for _, shard := range parent.ShardState.States {
+		if shard != nil && shard.IR != nil && bytes.Equal(shard.IR.BlockHash, frozenParent) {
+			found++
+		}
+	}
+	return found == 1
+}
+
+func abortHandoffRecords(round uint64, previous evmroot.OrderedHandoffRecord, signatures map[string]hex.Bytes) ([][]byte, error) {
+	if len(signatures) == 0 {
+		return nil, ErrHandoffApproval
+	}
+	previous.Kind = "abort"
+	previous.OrderedRound = round
+	proof, err := (storage.AbortAuthorization{Version: 1, Signatures: signatures}).Bytes()
+	if err != nil {
+		return nil, err
+	}
+	return [][]byte{previous.Bytes(), proof}, nil
 }

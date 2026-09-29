@@ -16,4 +16,5 @@ type HandoffApprovalMsg struct {
 	Attempt         uint64
 	Signer          string
 	Signature       hex.Bytes
+	AbortSignature  hex.Bytes
 }

@@ -158,6 +158,14 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 	if err != nil {
 		return nil, fmt.Errorf("committing new root block: %w", err)
 	}
+	if x.profile == ProfileHandoff && x.log != nil {
+		root := x.blockTree.Root()
+		if control := root.ShardState.Control; control != nil && root.GetRound() == control.OrderedRound &&
+			(control.Phase == "committed" || control.Phase == "aborted") {
+			x.log.Info("root handoff outcome", "phase", control.Phase, "attempt", control.Attempt,
+				"rootEpoch", control.Epoch, "rootRound", root.GetRound())
+		}
+	}
 	return ucs, nil
 }
 
@@ -210,6 +218,27 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 	}
 	if !isEpochAnchorRoot(parentBlock) && parentBlock.ShardState.Control != nil && parentBlock.ShardState.Control.Phase == "committed" && !block.Payload.IsEmpty() {
 		return nil, ErrHandoffSuffix
+	}
+	if x.profile == ProfileHandoff && len(block.Payload.HandoffRecords) > 0 {
+		record, err := decodeOrderedRecord(block.Payload.HandoffRecords[0])
+		if err != nil {
+			return nil, err
+		}
+		if record.Kind == "commit" {
+			control := parentBlock.ShardState.Control
+			if control == nil || control.Phase != "endorsed" {
+				return nil, ErrHandoffRecord
+			}
+			key, err := frozenShard(parentBlock.ShardState, control.FrozenParent)
+			if err != nil {
+				return nil, err
+			}
+			committed := x.blockTree.Root()
+			if committed == nil || committed.ShardState.States[key] == nil || committed.ShardState.States[key].IR == nil ||
+				!bytes.Equal(committed.ShardState.States[key].IR.BlockHash, control.FrozenParent) {
+				return nil, ErrHandoffRecord
+			}
+		}
 	}
 	// Extend state from parent block
 	exeBlock, err := parentBlock.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth)
@@ -338,6 +367,49 @@ func (x *BlockStore) HandoffCheckpoint() (*abdrc.CommittedBlock, *types.UnicityT
 		return nil, nil, evmroot.OrderedHandoffRecord{}, ErrNetworkProfile
 	}
 	return x.blockTree.HandoffCheckpoint()
+}
+
+func (x *BlockStore) CommittedFrozenParent(parent []byte) bool {
+	if x.profile != ProfileHandoff {
+		return false
+	}
+	_, err := frozenShard(x.blockTree.Root().ShardState, parent)
+	return err == nil
+}
+
+// HighQCFrozenParent detects an EVM change already ordered on the live branch
+// but not yet reflected in the committed checkpoint used for operator plans.
+func (x *BlockStore) HighQCFrozenParent(parent []byte) bool {
+	if x.profile != ProfileHandoff {
+		return false
+	}
+	qc := x.blockTree.HighQc()
+	if qc == nil {
+		return false
+	}
+	block, err := x.blockTree.FindBlock(qc.GetRound())
+	if err != nil {
+		return false
+	}
+	_, err = frozenShard(block.ShardState, parent)
+	return err == nil
+}
+
+func (x *BlockStore) FrozenShardAt(round uint64) (types.PartitionShardID, bool, error) {
+	var zero types.PartitionShardID
+	if x.profile != ProfileHandoff {
+		return zero, false, nil
+	}
+	parent, err := x.blockTree.FindBlock(round)
+	if err != nil {
+		return zero, false, err
+	}
+	control := parent.ShardState.Control
+	if control == nil || control.Phase != "endorsed" {
+		return zero, false, nil
+	}
+	key, err := frozenShard(parent.ShardState, control.FrozenParent)
+	return key, err == nil, err
 }
 
 /*

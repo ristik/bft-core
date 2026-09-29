@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -21,6 +23,7 @@ import (
 
 type rootHandoffOperator interface {
 	BuildHandoffPlan(*types.RootTrustBaseV1, []byte) (abdrc.HandoffApprovalMsg, error)
+	BuildAndEndorseHandoff(context.Context, *types.RootTrustBaseV1, []byte) (abdrc.HandoffApprovalMsg, error)
 	EndorseHandoff(context.Context, abdrc.HandoffApprovalMsg) error
 }
 
@@ -33,6 +36,11 @@ func localOperatorRequest(w http.ResponseWriter, r *http.Request) bool {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil || !net.ParseIP(host).IsLoopback() {
 		http.Error(w, "local operator access required", http.StatusForbidden)
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" || r.Header.Get("Origin") != "" {
+		http.Error(w, "application/json without Origin required", http.StatusUnsupportedMediaType)
 		return false
 	}
 	return true
@@ -53,7 +61,7 @@ func rootHandoffPlanHandler(operator rootHandoffOperator) http.HandlerFunc {
 			http.Error(w, "invalid frozen parent", http.StatusBadRequest)
 			return
 		}
-		plan, err := operator.BuildHandoffPlan(request.NextTrustBase, parent)
+		plan, err := operator.BuildAndEndorseHandoff(r.Context(), request.NextTrustBase, parent)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
@@ -111,12 +119,30 @@ func newRootCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		for _, endpoint := range endpoints {
-			if err = handoffPost(cmd.Context(), client, strings.TrimRight(strings.TrimSpace(endpoint), "/")+"/api/v1/handoff/endorse", data, nil); err != nil {
-				return err
+		var wg sync.WaitGroup
+		results := make(chan error, len(endpoints))
+		for _, endpoint := range endpoints[1:] {
+			wg.Add(1)
+			go func(endpoint string) {
+				defer wg.Done()
+				results <- handoffPost(cmd.Context(), client, strings.TrimRight(strings.TrimSpace(endpoint), "/")+"/api/v1/handoff/endorse", data, nil)
+			}(endpoint)
+		}
+		wg.Wait()
+		close(results)
+		accepted := 1 // the plan endpoint already endorsed the same checkpoint
+		var refusals []error
+		for result := range results {
+			if result == nil {
+				accepted++
+			} else {
+				refusals = append(refusals, result)
 			}
 		}
-		_, err = fmt.Fprintf(cmd.OutOrStdout(), "submitted %d root endorsements for epoch %d\n", len(endpoints), next.Epoch)
+		if accepted < len(endpoints)*2/3+1 {
+			return fmt.Errorf("only %d/%d validators endorsed: %w", accepted, len(endpoints), errors.Join(refusals...))
+		}
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "submitted %d root endorsements for epoch %d\n", accepted, next.Epoch)
 		return err
 	}}
 	propose.Flags().StringVar(&nextFile, "next-trust-base", "", "next epoch trust base JSON")

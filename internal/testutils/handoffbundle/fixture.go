@@ -47,7 +47,9 @@ func New(t *testing.T) Fixture {
 		Epoch: old.Epoch, HashIncludingSigs: oldID})
 	require.NoError(t, err)
 	members := make(evmroot.WeightSet, len(oldNodes))
-	for i, node := range oldNodes {
+	nextNodes := append([]*testutils.TestNode(nil), oldNodes...)
+	nextNodes[0] = testutils.NewTestNode(t)
+	for i, node := range nextNodes {
 		verifier, err := node.Signer.Verifier()
 		require.NoError(t, err)
 		key, err := verifier.MarshalPublicKey()
@@ -67,6 +69,8 @@ func New(t *testing.T) Fixture {
 		T2Timeout: 2500 * time.Millisecond, Validators: shardValidators, Epoch: 0, EpochStart: 1}
 	state, err := storage.NewShardInfo(conf, crypto.SHA256)
 	require.NoError(t, err)
+	state.IR.BlockHash = bytes.Repeat([]byte{5}, 32)
+	state.IR.Hash = bytes.Repeat([]byte{0x35}, 32)
 	trHash, err := state.TR.Hash()
 	require.NoError(t, err)
 	record := evmroot.OrderedHandoffRecord{Network: uint64(old.NetworkID), Epoch: 1, OrderedRound: 4,
@@ -106,7 +110,7 @@ func New(t *testing.T) Fixture {
 			RootHash: state.RootHash, PrevEpochStat: state.PrevEpochStat, Stat: state.Stat,
 			PrevEpochFees: state.PrevEpochFees, Fees: state.Fees, IR: state.IR, IRTR: state.TR,
 			ShardConfHash: state.ShardConfHash}}}
-	return Fixture{Proof: proof, Body: body, Snapshot: snapshot, Old: old, ConfHash: bytes.Clone(state.ShardConfHash), Partition: partition, Shard: shard, State: state, Nodes: oldNodes}
+	return Fixture{Proof: proof, Body: body, Snapshot: snapshot, Old: old, ConfHash: bytes.Clone(state.ShardConfHash), Partition: partition, Shard: shard, State: state, Nodes: nextNodes}
 }
 
 // Next creates another committed handoff signed by the projected v2 trust.
@@ -117,9 +121,22 @@ func Next(t *testing.T, first Fixture, old *types.RootTrustBaseV1) Fixture {
 	body.Epoch = 3
 	body.EarliestActivation = 11
 	body.PredecessorHash = bytes.Clone(priorID[:])
+	nextNodes := append([]*testutils.TestNode(nil), first.Nodes...)
+	nextNodes[1] = testutils.NewTestNode(t)
+	verifier, err := nextNodes[1].Signer.Verifier()
+	require.NoError(t, err)
+	body.Members = append(evmroot.WeightSet(nil), body.Members...)
+	body.Members[1].NodeID = nextNodes[1].PeerConf.ID.String()
+	body.Members[1].ConsensusKey, err = verifier.MarshalPublicKey()
+	require.NoError(t, err)
 	require.NoError(t, body.Validate())
 	bodyID := body.Identity()
-	trHash, err := first.State.TR.Hash()
+	state := *first.State
+	inputRecord := *first.State.IR
+	state.IR = &inputRecord
+	state.IR.BlockHash = bytes.Repeat([]byte{8}, 32)
+	state.IR.Hash = bytes.Repeat([]byte{0x38}, 32)
+	trHash, err := state.TR.Hash()
 	require.NoError(t, err)
 	record := evmroot.OrderedHandoffRecord{Network: uint64(old.NetworkID), Epoch: 2, OrderedRound: 8,
 		ActivationRound: 11, PredecessorBodyID: priorID[:], NextBodyID: bodyID[:],
@@ -128,7 +145,7 @@ func Next(t *testing.T, first Fixture, old *types.RootTrustBaseV1) Fixture {
 		PredecessorBodyID: priorID[:], Phase: "committed", RecordBytes: record.Bytes(),
 		PreviousDigest: bytes.Repeat([]byte{7}, 32), FrozenParent: bytes.Repeat([]byte{8}, 32)}
 	key := types.PartitionShardID{PartitionID: first.Partition, ShardID: first.Shard.Key()}
-	states := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{key: first.State}, Control: &control}
+	states := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{key: &state}, Control: &control}
 	tree, _, err := states.UnicityTree(crypto.SHA256)
 	require.NoError(t, err)
 	path, err := tree.Certificate(evmroot.D4ControlPartition)
@@ -154,7 +171,10 @@ func Next(t *testing.T, first Fixture, old *types.RootTrustBaseV1) Fixture {
 	require.NoError(t, err)
 	snapshot := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 2, Epoch: 2, Round: 8,
 		Payload: &rctypes.Payload{Version: 2}}, Control: &control, CommitQc: qc,
-		ShardInfo: first.Snapshot.ShardInfo}
+		ShardInfo: []abdrc.ShardInfo{{Partition: first.Partition, Shard: first.Shard, T2Timeout: state.T2Timeout,
+			RootHash: state.RootHash, PrevEpochStat: state.PrevEpochStat, Stat: state.Stat,
+			PrevEpochFees: state.PrevEpochFees, Fees: state.Fees, IR: state.IR, IRTR: state.TR,
+			ShardConfHash: state.ShardConfHash}}}
 	return Fixture{Proof: proof, Body: body, Snapshot: snapshot, Old: old, ConfHash: first.ConfHash,
-		Partition: first.Partition, Shard: first.Shard, State: first.State, Nodes: first.Nodes}
+		Partition: first.Partition, Shard: first.Shard, State: &state, Nodes: nextNodes}
 }

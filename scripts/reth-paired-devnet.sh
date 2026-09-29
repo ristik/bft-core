@@ -87,11 +87,6 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 # from this checkout. This runs nested inside scripts/reth-smoke.sh, whose own teardown cannot undo
 # anything a machine-wide sweep here had already killed.
 cleanup() {
-  if [ "${M2_PROFILE2:-0}" = 1 ]; then
-    for i in $(seq 1 "$validators"); do
-      [ -f "test-nodes/evm$i/pid" ] && kill -CONT "$(cat "test-nodes/evm$i/pid")" 2>/dev/null || true
-    done
-  fi
   ./stop-evm.sh -a >/dev/null 2>&1 || true
   stop_pidfile "test-nodes/h4-replaced/pid" 'ubft shard-node restore'
   stop_pidfile "test-nodes/proof-proxy/pid" 'd2c-proof-proxy.py'

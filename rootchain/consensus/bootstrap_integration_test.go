@@ -261,6 +261,8 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		T2Timeout: 2500 * time.Millisecond, Validators: shardValidators, Epoch: 0, EpochStart: 1}
 	shardState, err := storage.NewShardInfo(shardConf, crypto.SHA256)
 	require.NoError(t, err)
+	shardState.IR.BlockHash = bytes.Clone(parent)
+	shardState.IR.Hash = bytes.Repeat([]byte{0x37}, 32)
 	successorTRHash, err := shardState.TR.Hash()
 	require.NoError(t, err)
 	record := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: 4, ActivationRound: 7,

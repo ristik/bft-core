@@ -130,38 +130,18 @@ print(f'handoff {old}->{new} certification pause={(first-last).total_seconds():.
 PY
 }
 
-m2_parent_applied() {
-  local node=$1 parent=$2 head
-  m2_parent_admitted "$node" "$parent" || return 1
-  head=$(rpc "http://127.0.0.1:$((rethEthBase+node-1))" eth_getBlockByNumber '["latest",false]' |
-    pyget "['result']['hash']")
-  [ "$head" = "$parent" ]
-}
-
-m2_parent_admitted() {
-  grep -Eq "msg=\"certificate admitted\" block=${2#0x} height=[1-9][0-9]*([[:space:]]|$)" \
-    "test-nodes/evm$1/debug.log"
-}
-
 m2_handoff() {
   local epoch=$1 replace=$2 new=$3 previous=$4 oldBoot=$5 oldRpcs=$6
   local nextFile="trust-base-epoch${epoch}.json"
   build/ubft root-node init --home "test-nodes/root$new" -g >/dev/null || return 1
   generate_log_configuration "test-nodes/root$new/"
   m2_next_trust_base "$epoch" "$replace" "$new" "$previous" "$nextFile" || return 1
-  # Freeze the certified EVM parent before H is proposed. A later shard
-  # block would change the parent and make the bound acknowledgement invalid.
-  local parent candidate stable waitStep
-  local proposed=false
+  # Root validators enforce the ordered freeze. The operator only selects a
+  # currently certified EVM tip and retries if an endorser has advanced.
+  local parent waitStep oldEpoch=$((epoch-1)) outcome logStart
+  local committed=false
   for i in $(seq 1 30); do
-    for node in $(seq 1 "$validators"); do
-      kill -STOP "$(cat "test-nodes/evm$node/pid")" || return 1
-    done
-    # Let every in-flight old-epoch request finish. A root response can arrive
-    # after the shard processes stop; H must bind the last certified block.
-    parent= stable=0
-    for waitStep in $(seq 1 90); do
-      candidate=$(python3 - test-nodes/root1/debug.log <<'PY'
+    parent=$(python3 - test-nodes/root1/debug.log <<'PY'
 import re,sys
 last=''
 for line in open(sys.argv[1], errors='replace'):
@@ -170,76 +150,28 @@ for line in open(sys.argv[1], errors='replace'):
     if block: last='0x'+block.group(1).lower()
 print(last)
 PY
-      )
-      if [ "$candidate" = "$parent" ] && [[ "$candidate" = 0x* ]]; then
-        stable=$((stable+1))
-      else
-        parent=$candidate
-        stable=0
+    )
+    [[ "$parent" = 0x* ]] || { sleep 1; continue; }
+    logStart=$(wc -l < test-nodes/root1/debug.log)
+    if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" \
+      --frozen-parent "$parent" --root-rpc "$oldRpcs"; then
+      sleep 1
+      continue
+    fi
+    for waitStep in $(seq 1 60); do
+      outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
+        grep -E "msg=\"root handoff outcome\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
+      if [[ "$outcome" = *phase=committed* ]]; then committed=true; break; fi
+      if [[ "$outcome" = *phase=aborted* ]]; then
+        echo "root handoff aborted; selecting a fresh certified parent and attempt"
+        break
       fi
-      [ "$stable" -ge 15 ] && break
       sleep 1
     done
-    if [[ "$parent" != 0x* ]] || [ "$stable" -lt 15 ]; then
-      for node in $(seq 1 "$validators"); do
-        kill -CONT "$(cat "test-nodes/evm$node/pid")" || return 1
-      done
-      sleep 2
-      continue
-    fi
-    # Keep fewer than three shard validators active while each imports the
-    # exact certified parent. That drains the in-flight old-epoch response
-    # without allowing another block to reach the shard quorum.
-    local source= ready=false node
-    for node in $(seq 1 "$validators"); do
-      if m2_parent_admitted "$node" "$parent"; then source=$node; break; fi
-    done
-    if [ -z "$source" ]; then
-      # One of the validators built the just-certified block. Let each
-      # process its queued certificate alone; a solo validator cannot form
-      # another shard quorum while we locate the retained body.
-      for node in $(seq 1 "$validators"); do
-        kill -CONT "$(cat "test-nodes/evm$node/pid")" || return 1
-        for waitStep in $(seq 1 12); do
-          if m2_parent_applied "$node" "$parent"; then source=$node; break; fi
-          sleep 1
-        done
-        kill -STOP "$(cat "test-nodes/evm$node/pid")" || return 1
-        [ -z "$source" ] || break
-      done
-    fi
-    if [ -n "$source" ]; then
-      ready=true
-      kill -CONT "$(cat "test-nodes/evm$source/pid")" || return 1
-      for node in $(seq 1 "$validators"); do
-        [ "$node" = "$source" ] || kill -CONT "$(cat "test-nodes/evm$node/pid")" || return 1
-        local applied=false
-        for waitStep in $(seq 1 60); do
-          if m2_parent_applied "$node" "$parent"; then applied=true; break; fi
-          sleep 1
-        done
-        if [ "$node" != "$source" ]; then
-          kill -STOP "$(cat "test-nodes/evm$node/pid")" || return 1
-        fi
-        if ! $applied; then ready=false; break; fi
-      done
-      kill -STOP "$(cat "test-nodes/evm$source/pid")" || return 1
-    fi
-    if ! $ready; then
-      echo "waiting for all shard validators to import frozen parent $parent (attempt $i)"
-      for node in $(seq 1 "$validators"); do
-        kill -CONT "$(cat "test-nodes/evm$node/pid")" || return 1
-      done
-      sleep 2
-      continue
-    fi
-    if build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" \
-      --frozen-parent "$parent" --root-rpc "$oldRpcs"; then
-      proposed=true; break
-    fi
-    sleep 1
+    $committed && break
+    [ -n "$outcome" ] || return 1
   done
-  $proposed || return 1
+  $committed || return 1
   # The replacement first proves that the old committee really committed H.
   m2_start_root "$new" "$epoch" "$oldBoot" || return 1
   for i in $previous; do
@@ -254,10 +186,7 @@ PY
   done
   stop_pidfile "test-nodes/root$replace/pid" 'ubft root-node' || return 1
   m2_wait_root_epoch 1 "$epoch" || return 1
-  # Admit each installed transition before another old-epoch signer resumes.
-  # This keeps queued pre-handoff responses below the old committee's quorum.
   for i in $(seq 1 "$validators"); do
-    kill -CONT "$(cat "test-nodes/evm$i/pid")" || return 1
     local activated=false waitStep
     for waitStep in $(seq 1 90); do
       if grep -Eq "msg=\"handoff activated\" rootEpoch=$epoch([[:space:]]|$)" "test-nodes/evm$i/debug.log"; then
