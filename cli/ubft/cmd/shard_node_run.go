@@ -58,6 +58,14 @@ type handoffObservationBackfiller interface {
 	BackfillJournalObservation(context.Context, configuredprogress.Context, configuredprogress.JournalLimits, *types.UnicityCertificate, *certification.TechnicalRecord) error
 }
 
+type handoffArchiveReader interface {
+	Get(archive.Request) (*archive.Record, error)
+}
+
+type handoffHistoricalCandidateWriter interface {
+	PutHistoricalJournalCandidate(context.Context, configuredprogress.Context, configuredprogress.JournalLimits, configuredprogress.JournalCandidate) error
+}
+
 // runProfile2JournalStartup is the startup boundary for proof-aware journal
 // replay. Keep the verified lineage restore ahead of Initialize: Initialize
 // replays observations using the active epoch from that lineage.
@@ -81,6 +89,27 @@ func runProfile2JournalStartup(ctx context.Context, restore, initialize, enable,
 	return nil
 }
 
+// runProfile2ArchiveRestore keeps verified handoff installation ahead of
+// archive replay, then repairs any terminal observations saved during catch-up.
+func runProfile2ArchiveRestore(ctx context.Context, catchUp, restore, repair func(context.Context) error) error {
+	if catchUp != nil {
+		if err := catchUp(ctx); err != nil {
+			return fmt.Errorf("restoring handoff history: %w", err)
+		}
+	}
+	if restore != nil {
+		if err := restore(ctx); err != nil {
+			return fmt.Errorf("restoring from certified archive: %w", err)
+		}
+	}
+	if repair != nil {
+		if err := repair(ctx); err != nil {
+			return fmt.Errorf("repairing restored handoff observations: %w", err)
+		}
+	}
+	return nil
+}
+
 func reapplyHandoffTerminalCertificates(ctx context.Context, store handoffObservationBackfiller, journalCtx configuredprogress.Context,
 	limits configuredprogress.JournalLimits, terminals []handoffTerminalCertificate) error {
 	for _, terminal := range terminals {
@@ -89,6 +118,64 @@ func reapplyHandoffTerminalCertificates(ctx context.Context, store handoffObserv
 		}
 		if err := store.BackfillJournalObservation(ctx, journalCtx, limits, terminal.uc, terminal.tr); err != nil {
 			return fmt.Errorf("backfilling handoff terminal certificate at root epoch %d round %d: %w",
+				terminal.uc.GetRootEpoch(), terminal.uc.GetRoundNumber(), err)
+		}
+	}
+	return nil
+}
+
+func reapplyHandoffTerminalCertificatesWithArchive(ctx context.Context, store handoffObservationBackfiller,
+	candidateWriter handoffHistoricalCandidateWriter, localArchive handoffArchiveReader, archiveContext archive.Context,
+	journalCtx configuredprogress.Context, limits configuredprogress.JournalLimits, terminals []handoffTerminalCertificate) error {
+	for _, terminal := range terminals {
+		if terminal.uc == nil || terminal.tr == nil || terminal.uc.InputRecord == nil || len(terminal.uc.InputRecord.BlockHash) != 32 ||
+			len(terminal.uc.InputRecord.PreviousHash) != 32 {
+			return configuredprogress.ErrUntrusted
+		}
+		err := store.BackfillJournalObservation(ctx, journalCtx, limits, terminal.uc, terminal.tr)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, configuredprogress.ErrUnavailable) || localArchive == nil || candidateWriter == nil {
+			return fmt.Errorf("backfilling handoff terminal certificate at root epoch %d round %d: %w",
+				terminal.uc.GetRootEpoch(), terminal.uc.GetRoundNumber(), err)
+		}
+		var q archive.Request
+		q.Context = archiveContext
+		copy(q.BlockHash[:], terminal.uc.InputRecord.BlockHash)
+		record, archiveErr := localArchive.Get(q)
+		if errors.Is(archiveErr, archive.ErrUnavailable) {
+			return fmt.Errorf("%w: handoff terminal body %x is unavailable in both journal and archive",
+				configuredprogress.ErrUnavailable, q.BlockHash)
+		}
+		if archiveErr != nil {
+			return fmt.Errorf("loading handoff terminal body %x from archive: %w", q.BlockHash, archiveErr)
+		}
+		var originalUC types.UnicityCertificate
+		var originalTR certification.TechnicalRecord
+		if record == nil || types.Cbor.Unmarshal(record.OriginalUC, &originalUC) != nil || types.Cbor.Unmarshal(record.OriginalTR, &originalTR) != nil {
+			return fmt.Errorf("%w: archived handoff terminal body has invalid authorizing certificate", configuredprogress.ErrUntrusted)
+		}
+		block, blockErr := engineapi.BlockFromArchive(q, record, originalUC.GetRootRoundNumber(), terminal.uc.InputRecord.RoundNumber)
+		if blockErr != nil {
+			return fmt.Errorf("verifying archived handoff terminal body %x: %w", q.BlockHash, blockErr)
+		}
+		if block.Number == 0 || !bytes.Equal(block.Hash, terminal.uc.InputRecord.BlockHash) || !bytes.Equal(block.StateRoot, terminal.uc.InputRecord.Hash) {
+			return fmt.Errorf("%w: archived handoff terminal body differs from its verified certificate",
+				configuredprogress.ErrUntrusted)
+		}
+		candidate := configuredprogress.JournalCandidate{
+			Round: terminal.uc.InputRecord.RoundNumber, Number: block.Number, ParentNumber: block.Number - 1,
+			Hash: bytes.Clone(block.Hash), StateRoot: bytes.Clone(block.StateRoot), ParentHash: bytes.Clone(block.ParentHash),
+			ParentState: bytes.Clone(terminal.uc.InputRecord.PreviousHash),
+			Raw:         bytes.Clone(block.Raw), BlockSize: block.BlockSize, StateSize: block.StateSize,
+			AuthorizingUC: &originalUC, AuthorizingTR: &originalTR,
+		}
+		if err := candidateWriter.PutHistoricalJournalCandidate(ctx, journalCtx, limits, candidate); err != nil {
+			return fmt.Errorf("retaining verified archived handoff terminal body %x: %w", q.BlockHash, err)
+		}
+		if err := store.BackfillJournalObservation(ctx, journalCtx, limits, terminal.uc, terminal.tr); err != nil {
+			return fmt.Errorf("backfilling handoff terminal certificate at root epoch %d round %d after archive recovery: %w",
 				terminal.uc.GetRootEpoch(), terminal.uc.GetRoundNumber(), err)
 		}
 	}
@@ -683,7 +770,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if err := handoffFollower.Restore(ctx); err != nil {
 					return err
 				}
-				restoringHandoffHistory = false
+				if !flags.Restore {
+					restoringHandoffHistory = false
+				}
 				return nil
 			}
 		}
@@ -694,8 +783,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			},
 			func(ctx context.Context) error { return journalStore.EnableJournal(ctx, journalCtx, limits) },
 			func(ctx context.Context) error {
-				return reapplyHandoffTerminalCertificates(ctx, journalStore, journalCtx, limits, restoredHandoffTerminals)
+				return reapplyHandoffTerminalCertificatesWithArchive(ctx, journalStore, journalStore, archiveLocal,
+					archiveSubject, journalCtx, limits, restoredHandoffTerminals)
 			}); startupErr != nil {
+			flags.observe.Logger().Error("profile2 handoff terminal repair failed", "error", startupErr)
 			return startupErr
 		}
 		if archiveLocal != nil && flags.ArchivePrune {
@@ -709,31 +800,47 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if pinErr != nil {
 				return pinErr
 			}
+			var catchUpHistory func(context.Context) error
 			if flags.TrustHistoryProfile2 {
-				if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
-					return fmt.Errorf("restore bootstrap connect: %w", err)
-				}
-				if _, err := handoffFollower.CatchUp(ctx, uc.GetRootEpoch()); err != nil {
-					return fmt.Errorf("restoring handoff history: %w", err)
-				}
-				pin, err := hexToHash(flags.RestoreTrustBodyID)
-				if err != nil {
-					return err
-				}
-				bodyID, err := historicalTrust.BodyID(uc.GetRootEpoch())
-				if err != nil || !bytes.Equal(pin, bodyID[:]) {
-					return fmt.Errorf("restore trust BodyID differs from verified current history: %v", err)
+				catchUpHistory = func(ctx context.Context) error {
+					if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
+						return fmt.Errorf("restore bootstrap connect: %w", err)
+					}
+					if _, err := handoffFollower.CatchUp(ctx, uc.GetRootEpoch()); err != nil {
+						return err
+					}
+					pin, err := hexToHash(flags.RestoreTrustBodyID)
+					if err != nil {
+						return err
+					}
+					bodyID, err := historicalTrust.BodyID(uc.GetRootEpoch())
+					if err != nil || !bytes.Equal(pin, bodyID[:]) {
+						return fmt.Errorf("restore trust BodyID differs from verified current history: %v", err)
+					}
+					return nil
 				}
 			}
-			genesis, genesisErr := executor.GenesisBlock(ctx)
-			if genesisErr != nil {
-				return fmt.Errorf("reading restore genesis identity: %w", genesisErr)
+			restoreArchive := func(ctx context.Context) error {
+				genesis, genesisErr := executor.GenesisBlock(ctx)
+				if genesisErr != nil {
+					return fmt.Errorf("reading restore genesis identity: %w", genesisErr)
+				}
+				restorer := &archivewiring.ArchiveRestore{Journal: journalStore, Context: journalCtx, JournalLimits: limits,
+					Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: peer,
+					Limits: archiveTransportLimits, Adapter: executor.(*engineapi.Adapter), Genesis: genesis, TipUC: uc, TipTR: tr}
+				return restorer.Restore(ctx)
 			}
-			restorer := &archivewiring.ArchiveRestore{Journal: journalStore, Context: journalCtx, JournalLimits: limits,
-				Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: peer,
-				Limits: archiveTransportLimits, Adapter: executor.(*engineapi.Adapter), Genesis: genesis, TipUC: uc, TipTR: tr}
-			if restoreErr := restorer.Restore(ctx); restoreErr != nil {
-				return fmt.Errorf("restoring from certified archive: %w", restoreErr)
+			var repairRestoredHandoffs func(context.Context) error
+			if flags.TrustHistoryProfile2 {
+				repairRestoredHandoffs = func(ctx context.Context) error {
+					restoringHandoffHistory = false
+					return reapplyHandoffTerminalCertificatesWithArchive(ctx, journalStore, journalStore, archiveLocal,
+						archiveSubject, journalCtx, limits, restoredHandoffTerminals)
+				}
+			}
+			if restoreErr := runProfile2ArchiveRestore(ctx, catchUpHistory, restoreArchive, repairRestoredHandoffs); restoreErr != nil {
+				flags.observe.Logger().Error("profile2 archive restore failed", "error", restoreErr)
+				return restoreErr
 			}
 		}
 		journalImage, loadErr := journalStore.LoadJournal(ctx, journalCtx, limits)
