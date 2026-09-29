@@ -73,7 +73,7 @@ func allFields(r *Record) (map[string][]byte, error) {
 	return f, nil
 }
 
-// ManifestDigest is the digest of the exact ARCHIVE1 manifest payload that
+// ManifestDigest is the digest of the exact versioned manifest payload that
 // Put publishes for this request and record, before its trailing checksum.
 func ManifestDigest(q Request, rec *Record) ([32]byte, error) {
 	var zero [32]byte
@@ -87,7 +87,7 @@ func ManifestDigest(q Request, rec *Record) ([32]byte, error) {
 	}
 	keys := sortedExtensions(f)
 	var manifest bytes.Buffer
-	manifest.WriteString("ARCHIVE1")
+	manifest.WriteString(archiveMagic(recordV2(rec)))
 	putBytes(&manifest, qb)
 	manifest.WriteByte(byte(len(keys)))
 	for _, k := range keys {
@@ -102,13 +102,25 @@ func ManifestDigest(q Request, rec *Record) ([32]byte, error) {
 	return sha256.Sum256(manifest.Bytes()), nil
 }
 func fileName(k string) string { return hex.EncodeToString([]byte(k)) + ".chunk" }
-func location(q Request) (string, error) {
+func location(q Request, versions ...bool) (string, error) {
+	v2 := len(versions) != 0 && versions[0]
 	b, err := EncodeRequest(q)
 	if err != nil {
 		return "", err
 	}
 	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:]), nil
+	version := "v1-"
+	if v2 {
+		version = "v2-"
+	}
+	return version + hex.EncodeToString(h[:]), nil
+}
+func recordV2(r *Record) bool { return HasReceiptList(r) }
+func archiveMagic(v2 bool) string {
+	if v2 {
+		return "ARCHIVE2"
+	}
+	return "ARCHIVE1"
 }
 func syncDir(dir string) error {
 	f, err := os.Open(dir)
@@ -152,13 +164,13 @@ func (s *Store) Put(q Request, rec *Record) error {
 	if !bytes.Equal(crypto.Keccak256(rec.Header), q.BlockHash[:]) {
 		return ErrInvalid
 	}
-	loc, err := location(q)
+	loc, err := location(q, recordV2(rec))
 	if err != nil {
 		return err
 	}
 	final := filepath.Join(s.dir, loc)
 	if _, err = os.Stat(final); err == nil {
-		old, e := s.get(q)
+		old, e := s.getVersion(q, recordV2(rec))
 		if e != nil {
 			return e
 		}
@@ -182,7 +194,7 @@ func (s *Store) Put(q Request, rec *Record) error {
 	}
 	sort.Strings(keys)
 	var manifest bytes.Buffer
-	manifest.Write([]byte("ARCHIVE1"))
+	manifest.Write([]byte(archiveMagic(recordV2(rec))))
 	qb, _ := EncodeRequest(q)
 	putBytes(&manifest, qb)
 	manifest.WriteByte(byte(len(keys)))
@@ -259,9 +271,33 @@ func (s *Store) Put(q Request, rec *Record) error {
 
 // Get refuses missing or damaged chunks as a whole. It never returns partial
 // evidence. A consumer must verify every returned field under its own trust.
-func (s *Store) Get(q Request) (*Record, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.get(q) }
+func (s *Store) Get(q Request) (*Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r, err := s.getVersion(q, true); err == nil || !errors.Is(err, ErrUnavailable) {
+		return r, err
+	}
+	return s.getVersion(q, false)
+}
+
+// GetReceiptComplete reads only the receipt-complete immutable namespace.
+func (s *Store) GetReceiptComplete(q Request) (*Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.getVersion(q, true)
+	if err != nil {
+		return nil, err
+	}
+	if !validReceiptList(r) {
+		return nil, ErrUnavailable
+	}
+	return r, nil
+}
 func (s *Store) get(q Request) (*Record, error) {
-	loc, err := location(q)
+	return s.getVersion(q, false)
+}
+func (s *Store) getVersion(q Request, v2 bool) (*Record, error) {
+	loc, err := location(q, v2)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +309,8 @@ func (s *Store) get(q Request) (*Record, error) {
 	if err != nil {
 		return nil, ErrCorrupt
 	}
-	if len(m) < 8+4+1+32 || !bytes.Equal(m[:8], []byte("ARCHIVE1")) {
+	magic := archiveMagic(v2)
+	if len(m) < 8+4+1+32 || !bytes.Equal(m[:8], []byte(magic)) {
 		return nil, ErrCorrupt
 	}
 	d := sha256.Sum256(m[:len(m)-32])
@@ -343,7 +380,7 @@ func (s *Store) get(q Request) (*Record, error) {
 			rec.Extensions[k] = v
 		}
 	}
-	if !validRecord(rec) || !bytes.Equal(crypto.Keccak256(rec.Header), q.BlockHash[:]) {
+	if !validRecord(rec) || recordV2(rec) != v2 || !bytes.Equal(crypto.Keccak256(rec.Header), q.BlockHash[:]) {
 		return nil, ErrCorrupt
 	}
 	return rec, nil

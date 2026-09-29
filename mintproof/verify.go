@@ -1,0 +1,97 @@
+package mintproof
+
+import (
+	"bytes"
+	stdcrypto "crypto"
+	"fmt"
+	"math"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	gethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/trie"
+	"github.com/unicitynetwork/bft-go-base/types"
+)
+
+type ExpectedClaim struct {
+	Network types.NetworkID
+	Partition types.PartitionID
+	Shard []byte
+	ShardConf [32]byte
+	BlockHash [32]byte
+	BlockNumber uint64
+	MatchLog func(*gethtypes.Log) bool
+}
+
+// Verify authenticates the subject UC with the caller's epoch trust base,
+// then verifies the EVM header and the inclusion or complete-block absence
+// evidence without network, filesystem, or historical-database access.
+func Verify(bundle []byte, trustBase types.RootTrustBase, expected ExpectedClaim, limits Limits) error {
+	b, err := DecodeBundle(bundle, limits)
+	if err != nil { return err }
+	if trustBase == nil || trustBase.GetNetworkID() != b.Context.Network || trustBase.GetEpoch() == 0 || expected.Network != b.Context.Network || expected.Partition != b.Context.Partition || !bytes.Equal(expected.Shard, b.Context.Shard) || expected.ShardConf != b.Context.ShardConf || len(b.Context.Shard) == 0 { return ErrInvalid }
+	if expected.BlockHash == ([32]byte{}) { return ErrInvalid }
+	var shard types.ShardID
+	if err := shard.UnmarshalText([]byte("0x" + common.Bytes2Hex(b.Context.Shard))); err != nil || !bytes.Equal(shard.Bytes(), b.Context.Shard) { return ErrInvalid }
+	var uc types.UnicityCertificate
+	if err := types.Cbor.Unmarshal(b.SubjectUC, &uc); err != nil { return fmt.Errorf("%w: subject UC: %v", ErrInvalid, err) }
+	canonicalUC, err := types.Cbor.Marshal(&uc)
+	if err != nil || !bytes.Equal(canonicalUC, b.SubjectUC) || uc.InputRecord == nil || uc.UnicitySeal == nil || uc.GetRootEpoch() != trustBase.GetEpoch() { return ErrInvalid }
+	if err := uc.Verify(trustBase, stdcrypto.SHA256, b.Context.Partition, shard, b.Context.ShardConf[:]); err != nil { return fmt.Errorf("%w: subject UC: %v", ErrInvalid, err) }
+	if len(uc.InputRecord.BlockHash) != 32 || len(uc.InputRecord.Hash) != 32 { return ErrInvalid }
+	var header gethtypes.Header
+	if err := rlp.DecodeBytes(b.HeaderRLP, &header); err != nil || header.Number == nil || !header.Number.IsUint64() { return ErrInvalid }
+	if !bytes.Equal(gethcrypto.Keccak256(b.HeaderRLP), uc.InputRecord.BlockHash) || !bytes.Equal(header.Root[:], uc.InputRecord.Hash) || !bytes.Equal(header.Hash().Bytes(), expected.BlockHash[:]) || header.Number.Uint64() != expected.BlockNumber { return ErrInvalid }
+	if expected.BlockNumber > math.MaxInt64 || header.UncleHash != gethtypes.EmptyUncleHash || header.Difficulty == nil || header.Difficulty.Sign() != 0 || header.WithdrawalsHash == nil { return ErrInvalid }
+	work := len(bundle) + countNodes(b)
+	if work > limits.MaxWork { return ErrTooLarge }
+	if b.Evidence.Absence { return verifyAbsence(b, header, expected, limits) }
+	return verifyInclusion(b, header, expected, limits)
+}
+
+func verifyInclusion(b MintReasonBundleV1, header gethtypes.Header, expected ExpectedClaim, limits Limits) error {
+	if expected.MatchLog == nil { return ErrInvalid }
+	if b.Evidence.TxIndex > math.MaxUint64-1 { return ErrInvalid }
+	key, _ := rlp.EncodeToBytes(b.Evidence.TxIndex)
+	value, err := verifyProof(header.TxHash, key, b.Evidence.TxProof, limits)
+	if err != nil || !bytes.Equal(value, b.Evidence.TxEnvelope) { return ErrInvalid }
+	var tx gethtypes.Transaction
+	if tx.UnmarshalBinary(b.Evidence.TxEnvelope) != nil || len(tx.BlobHashes()) != 0 { return ErrInvalid }
+	value, err = verifyProof(header.ReceiptHash, key, b.Evidence.ReceiptProof, limits)
+	if err != nil || !bytes.Equal(value, b.Evidence.Receipt) { return ErrInvalid }
+	var receipt gethtypes.Receipt
+	if receipt.UnmarshalBinary(b.Evidence.Receipt) != nil || receipt.Type != tx.Type() || receipt.Status != gethtypes.ReceiptStatusSuccessful { return ErrInvalid }
+	if b.Evidence.LogIndex >= uint64(len(receipt.Logs)) { return ErrInvalid }
+	log := receipt.Logs[b.Evidence.LogIndex]
+	if log == nil || !expected.MatchLog(log) { return ErrInvalid }
+	return nil
+}
+
+func verifyAbsence(b MintReasonBundleV1, header gethtypes.Header, expected ExpectedClaim, limits Limits) error {
+	if expected.MatchLog == nil { return ErrInvalid }
+	if len(b.Evidence.AllReceipts) > limits.MaxNodes { return ErrTooLarge }
+	receipts := make(gethtypes.Receipts, len(b.Evidence.AllReceipts))
+	for i, envelope := range b.Evidence.AllReceipts {
+		var receipt gethtypes.Receipt
+		if receipt.UnmarshalBinary(envelope) != nil { return ErrInvalid }
+		canonical, err := receipt.MarshalBinary()
+		if err != nil || !bytes.Equal(canonical, envelope) { return ErrInvalid }
+		receipts[i] = &receipt
+		for _, log := range receipt.Logs { if log != nil && expected.MatchLog(log) { return ErrInvalid } }
+	}
+	if gethtypes.DeriveSha(receipts, trie.NewStackTrie(nil)) != header.ReceiptHash { return ErrInvalid }
+	return nil
+}
+
+func verifyProof(root common.Hash, key []byte, nodes [][]byte, limits Limits) ([]byte, error) {
+	if len(nodes) == 0 || len(nodes) > limits.MaxNodes { return nil, ErrTooLarge }
+	db := rawdb.NewMemoryDatabase()
+	for _, node := range nodes {
+		if len(node) == 0 || len(node) > limits.MaxBytes { return nil, ErrTooLarge }
+		hash := gethcrypto.Keccak256(node)
+		if err := db.Put(hash, node); err != nil { return nil, err }
+	}
+	return trie.VerifyProof(root, key, db)
+}

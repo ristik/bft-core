@@ -43,6 +43,21 @@ func (v CertifiedBinding) VerifyCertified(r frontier.Record, rec *archive.Record
 	if header.TxHash != gethtypes.DeriveSha(gethtypes.Transactions(body.Transactions), trie.NewStackTrie(nil)) || len(body.Uncles) != 0 || len(body.Withdrawals) != 0 || header.WithdrawalsHash == nil || *header.WithdrawalsHash != gethtypes.DeriveSha(gethtypes.Withdrawals{}, trie.NewStackTrie(nil)) {
 		return frontier.ErrInvalid
 	}
+	envelopes, err := DecodeReceiptList(rec)
+	if err != nil || len(envelopes) != len(body.Transactions) {
+		return frontier.ErrInvalid
+	}
+	receipts := make(gethtypes.Receipts, len(envelopes))
+	for i, envelope := range envelopes {
+		var receipt gethtypes.Receipt
+		if receipt.UnmarshalBinary(envelope) != nil || receipt.Type != body.Transactions[i].Type() {
+			return frontier.ErrInvalid
+		}
+		receipts[i] = &receipt
+	}
+	if gethtypes.DeriveSha(receipts, trie.NewStackTrie(nil)) != header.ReceiptHash {
+		return frontier.ErrInvalid
+	}
 	var original, result types.UnicityCertificate
 	if types.Cbor.Unmarshal(rec.OriginalUC, &original) != nil || types.Cbor.Unmarshal(rec.ResultingUC, &result) != nil {
 		return frontier.ErrInvalid

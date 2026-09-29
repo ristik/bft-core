@@ -543,7 +543,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if e != nil {
 				return e
 			}
-			archiveServer, e := archivewiring.NewServer(archiveLocal, archiveSubject, archivewiring.JournalVerifier(journalStore, journalCtx, limits, archiveSubject), archiveAllowed, archiveTransportLimits)
+			receiptSource, ok := executor.(*engineapi.Adapter)
+			if !ok {
+				return errors.New("receipt-complete archive requires an EVM adapter")
+			}
+			archiveServer, e := archivewiring.NewServer(archiveLocal, archiveSubject, archivewiring.JournalVerifier(journalStore, journalCtx, limits, archiveSubject, receiptSource), archiveAllowed, archiveTransportLimits)
 			if e != nil {
 				return fmt.Errorf("starting archive replica: %w", e)
 			}
@@ -716,7 +720,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if e != nil {
 				return e
 			}
-			publisher := &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics}
+			publisher := &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics, ReceiptSource: executor.(*engineapi.Adapter)}
 			if flags.TrustHistoryProfile2 {
 				publisher.BundleVerifier = archivewiring.BundleAdmission(historicalTrust)
 			}

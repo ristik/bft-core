@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
@@ -31,6 +33,7 @@ type Publisher struct {
 	Log            *slog.Logger
 	Metrics        *Metrics
 	BundleVerifier BundleVerifier
+	ReceiptSource  ReceiptSource
 
 	mu            sync.Mutex
 	ack           map[[32]byte]uint8
@@ -38,6 +41,33 @@ type Publisher struct {
 	cursor        int
 	replicaCursor [2]int
 	status        Status
+}
+
+// ReceiptSource is the execution RPC boundary used only while capturing an
+// archive record. Extraction and verification never depend on it.
+type ReceiptSource interface {
+	GetBlockReceipts(context.Context, [32]byte) ([][]byte, error)
+}
+
+func (p *Publisher) fromJournal(ctx context.Context, e configuredprogress.JournalEntry) (archive.Request, *archive.Record, error) {
+	q, rec, err := FromJournal(ctx, p.Context, p.Subject, nil, e)
+	if err != nil {
+		return q, nil, err
+	}
+	var envelopes [][]byte
+	if p.ReceiptSource != nil {
+		envelopes, err = p.ReceiptSource.GetBlockReceipts(ctx, q.BlockHash)
+	} else {
+		var body gethtypes.Body
+		if rlp.DecodeBytes(rec.Body, &body) != nil || len(body.Transactions) != 0 {
+			return q, nil, archive.ErrUnavailable
+		}
+	}
+	if err != nil {
+		return q, nil, err
+	}
+	rec, err = WithReceiptList(rec, envelopes)
+	return q, rec, err
 }
 
 type Status struct{ Pending, Acknowledged, Lagging int64 }
@@ -195,12 +225,12 @@ func (p *Publisher) pass(ctx context.Context) error {
 		q := archive.Request{Context: p.Subject, BlockHash: hash}
 		rec, eerr := p.Archive.Get(q)
 		if errors.Is(eerr, archive.ErrUnavailable) {
-			q, rec, eerr = FromJournal(ctx, p.Context, p.Subject, nil, e)
+			q, rec, eerr = p.fromJournal(ctx, e)
 			if eerr == nil {
 				eerr = p.Archive.Put(q, rec)
 			}
 		} else if eerr == nil {
-			_, expected, verifyErr := FromJournal(ctx, p.Context, p.Subject, nil, e)
+			_, expected, verifyErr := p.fromJournal(ctx, e)
 			if verifyErr != nil {
 				eerr = verifyErr
 			} else {
@@ -314,7 +344,7 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 			continue // The local publisher will reconstruct this record.
 		}
 		if err == nil {
-			_, expected, checkErr := FromJournal(ctx, p.Context, p.Subject, nil, e)
+			_, expected, checkErr := p.fromJournal(ctx, e)
 			if checkErr != nil {
 				err = checkErr
 			} else {
@@ -344,7 +374,7 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 // JournalVerifier accepts a remote publication only when this replica's own
 // independently checked journal names the same certified association and bytes.
 // A lagging replica refuses and can accept the retry after catch-up.
-func JournalVerifier(store *configuredprogress.Store, c configuredprogress.Context, limits configuredprogress.JournalLimits, subject archive.Context) Verifier {
+func JournalVerifier(store *configuredprogress.Store, c configuredprogress.Context, limits configuredprogress.JournalLimits, subject archive.Context, receiptSources ...ReceiptSource) Verifier {
 	return func(ctx context.Context, q archive.Request, rec *archive.Record) error {
 		if store == nil || rec == nil {
 			return ErrBinding
@@ -358,6 +388,22 @@ func JournalVerifier(store *configuredprogress.Store, c configuredprogress.Conte
 				continue
 			}
 			wantQ, wantRec, err := FromJournal(ctx, c, subject, nil, entry)
+			if err != nil {
+				return err
+			}
+			var envelopes [][]byte
+			if len(receiptSources) != 0 && receiptSources[0] != nil {
+				envelopes, err = receiptSources[0].GetBlockReceipts(ctx, wantQ.BlockHash)
+			} else {
+				var body gethtypes.Body
+				if rlp.DecodeBytes(wantRec.Body, &body) != nil || len(body.Transactions) != 0 {
+					return archive.ErrUnavailable
+				}
+			}
+			if err != nil {
+				return err
+			}
+			wantRec, err = WithReceiptList(wantRec, envelopes)
 			if err != nil {
 				return err
 			}

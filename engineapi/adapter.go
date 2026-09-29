@@ -432,6 +432,12 @@ func (a *Adapter) Header(ctx context.Context, hash shardnode.Hash) (shardnode.Bl
 	return shardnode.BlockRef{Number: uint64(h.Number), Hash: shardnode.Hash(h.Hash[:]), StateRoot: shardnode.Hash(h.StateRoot[:])}, shardnode.Hash(h.ParentHash[:]), nil
 }
 
+// GetBlockReceipts captures the complete consensus receipt list from the
+// execution RPC for an exact certified hash.
+func (a *Adapter) GetBlockReceipts(ctx context.Context, hash [32]byte) ([][]byte, error) {
+	return a.eth.GetBlockReceipts(ctx, data32(hash))
+}
+
 // RecoveryForkchoice advances only the head. The proven, compatible finalized
 // identity stays in place until the complete certified target can be committed.
 func (a *Adapter) RecoveryForkchoice(ctx context.Context, head, finalized shardnode.Hash) (shardnode.Status, error) {
