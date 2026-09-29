@@ -553,10 +553,11 @@ func (s *Store) appendJournalObservation(tx *bolt.Tx, pair *verifiedPair, dd [32
 	return s.at("before-journal-observation-commit")
 }
 
-// BackfillJournalObservation admits an independently authenticated historical
-// certificate for a fetched body without moving the monotonic live progress
-// cursor backwards. The caller must have checked and executed that body first.
-// The candidate association and observation are one Bolt transaction.
+// BackfillJournalObservation admits an independently authenticated certificate
+// for a fetched body. A cumulative successor repairs progress as well as the
+// journal; an older certificate is retained without moving progress backwards.
+// The candidate association, observation, and any progress advance are one
+// Bolt transaction.
 func (s *Store) BackfillJournalObservation(ctx context.Context, c Context, limits JournalLimits, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
 	if !s.journal {
 		return ErrSettings
@@ -579,18 +580,49 @@ func (s *Store) BackfillJournalObservation(ctx context.Context, c Context, limit
 	if state.i.observed == nil {
 		return fmt.Errorf("%w: no current observation for historical backfill", ErrUnavailable)
 	}
-	rel, err := compareCumulativeObservations(o, state.i.observed.observation)
-	if err != nil || rel != relationAdvance && rel != relationDuplicate && rel != relationRepeat {
+	rel, err := compareCumulativeObservations(state.i.observed.observation, o)
+	if err != nil || rel != relationAdvance && rel != relationDuplicate && rel != relationRepeat && rel != relationStale {
 		return fmt.Errorf("%w: historical certificate conflicts with current progress: %v", ErrConflict, err)
+	}
+	var nextControl []byte
+	if rel == relationAdvance || rel == relationRepeat {
+		outcome := ObservationAdvanced
+		if rel == relationRepeat {
+			outcome = ObservationRepeated
+		}
+		prepared, _, prepareErr := s.prepareObservationMutation(state.i, pair, outcome)
+		if prepareErr != nil {
+			return prepareErr
+		}
+		nextControl = prepared.p.next
 	}
 	target := uc.InputRecord.BlockHash
 	if len(target) != sha256.Size {
 		return fmt.Errorf("%w: backfill needs a non-quiet target hash", ErrUntrusted)
 	}
+	u, t, err := pairBytes(uc, tr)
+	if err != nil {
+		return err
+	}
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
 		if !imageMatches(b, state.i) {
 			return ErrStale
+		}
+		key := journalEpochObservationKey(uc.GetRootEpoch(), uc.GetRootRoundNumber(), uc.GetRoundNumber())
+		for _, existingKey := range [][]byte{key, journalObservationKey(uc.GetRootRoundNumber(), uc.GetRoundNumber())} {
+			old := b.Get(existingKey)
+			if old == nil {
+				continue
+			}
+			ow, decodeErr := decodeObservation(old)
+			if decodeErr != nil {
+				return decodeErr
+			}
+			if bytes.Equal(ow.UC, u) && bytes.Equal(ow.TR, t) {
+				return nil
+			}
+			return fmt.Errorf("%w: handoff terminal certificate differs at the same root/partition round", ErrConflict)
 		}
 		candidate := b.Get(journalCandidateKey(target))
 		if candidate == nil {
@@ -603,7 +635,18 @@ func (s *Store) BackfillJournalObservation(ctx context.Context, c Context, limit
 		if cw.Round != uc.InputRecord.RoundNumber || !bytes.Equal(cw.StateRoot, uc.InputRecord.Hash) {
 			return fmt.Errorf("%w: backfill body differs from certificate", ErrConflict)
 		}
-		return s.appendJournalObservation(tx, pair, state.i.descriptorDigest)
+		if len(nextControl) != 0 {
+			if err := b.Put(controlKey, nextControl); err != nil {
+				return err
+			}
+		}
+		if err := s.appendJournalObservation(tx, pair, state.i.descriptorDigest); err != nil {
+			return err
+		}
+		if len(nextControl) != 0 {
+			return s.at("before-observation-commit")
+		}
+		return nil
 	})
 }
 

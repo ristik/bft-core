@@ -228,6 +228,46 @@ func TestHandoffFollowerTriesAnotherRootAndRestoresSavedBundle(t *testing.T) {
 	require.ErrorIs(t, follower.Restore(context.Background()), handoffdelivery.ErrBundle)
 }
 
+func TestHandoffFollowerCrashAfterSaveReplaysInstallationCallbackOnRestart(t *testing.T) {
+	root := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	shardPeer := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	shardPeer.Network().Peerstore().AddAddrs(root.ID(), root.MultiAddresses(), peerstore.PermanentAddrTTL)
+	bundle := handoffdelivery.Bundle{Proof: handoff.OldCommitProof{Record: evmroot.OrderedHandoffRecord{Epoch: 1}},
+		Body: evmroot.TrustBaseBodyV2{Epoch: 2, StateSummary: []byte{0xaa}}}
+	server, err := handoffdelivery.NewServer(followerProvider{bundle: bundle})
+	require.NoError(t, err)
+	server.Register(root)
+	history := &followerHistory{old: &types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{{NodeID: root.ID().String()}}}}
+	directory := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	crash := errors.New("crash between durable handoff save and journal commit")
+	liveCalls := 0
+	follower := &HandoffFollower{Host: shardPeer, History: history, Partition: 8,
+		ConfHash: bytes.Repeat([]byte{5}, 32), AnchorEpoch: 1, Directory: directory,
+		OnInstalled: func(context.Context, handoffdelivery.Bundle, handoffdelivery.Verified) error {
+			liveCalls++
+			cancel() // End Run after returning the injected crash.
+			return crash
+		}}
+	require.NoError(t, follower.Run(ctx))
+	require.Equal(t, 1, liveCalls)
+	_, err = follower.load(2)
+	require.NoError(t, err, "the follower saves the verified bundle before the journal callback")
+
+	// A restarted node restores that saved proof and invokes OnInstalled again;
+	// the production callback uses this delivery to backfill the terminal UC.
+	repaired := make(map[uint64]bool)
+	follower.OnInstalled = func(_ context.Context, restored handoffdelivery.Bundle, _ handoffdelivery.Verified) error {
+		repaired[restored.Body.Epoch] = true // idempotent journal backfill
+		return nil
+	}
+	require.NoError(t, follower.Restore(context.Background()))
+	require.True(t, repaired[2])
+	require.NoError(t, follower.Restore(context.Background()))
+	require.True(t, repaired[2], "reapplying a saved terminal certificate is safe after another restart")
+}
+
 func TestHandoffFollowerSourceOrderAndArchiveFallback(t *testing.T) {
 	badRoot := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	goodRoot := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
