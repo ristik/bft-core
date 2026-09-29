@@ -171,6 +171,13 @@ func (w *FrontierWorker) audit(ctx context.Context) error {
 	if current.Anchor == nil {
 		return nil
 	}
+	if current.CoverageBase == nil {
+		return configuredprogress.ErrUntrusted
+	}
+	baseHeight := current.CoverageBase.Height
+	if w.auditCursor < baseHeight {
+		w.auditCursor = baseHeight
+	}
 	// At a two-second cadence there are 43,200 passes per day. Scale the
 	// bounded page count with promised history so a full sweep stays within
 	// that interval as the chain grows.
@@ -190,7 +197,7 @@ func (w *FrontierWorker) audit(ctx context.Context) error {
 			return err
 		}
 		if len(page) == 0 {
-			w.auditCursor = 0
+			w.auditCursor = baseHeight
 			return nil
 		}
 		for _, r := range page {

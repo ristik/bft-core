@@ -56,6 +56,7 @@ func TestCrossEpochReplayedTipOpensAsCurrentJournal(t *testing.T) {
 	require.Len(t, image.Observations, 1)
 	require.Equal(t, uint64(2), image.Observations[0].UC.GetRootEpoch())
 	require.Equal(t, anchor, *image.Restored)
+	require.Equal(t, &CoverageBase{Height: anchor.Height, Hash: anchor.Hash}, image.CoverageBase)
 	require.NoError(t, s.Close())
 	s, err = OpenConfiguredV2(path, Settings{Retain: 3})
 	require.NoError(t, err)

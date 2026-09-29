@@ -19,11 +19,13 @@ import (
 
 const journalFrontierKind uint64 = 6
 const journalFloorKind uint64 = 8
+const journalCoverageBaseKind uint64 = 10
 
 var journalFrontierKey = []byte("journal/frontier")
 var journalFloorKey = []byte("journal/floor")
 var journalFloorEpochKey = []byte("journal/floor-epoch")
 var journalCoveragePrefix = []byte("journal/coverage/")
+var journalCoverageBaseKey = []byte("journal/coverage-base")
 
 // The frontier, its certified anchor and every covered request live in the
 // journal's Bolt bucket. The separate file Store in frontier is never opened.
@@ -44,11 +46,28 @@ type journalFloorWire struct {
 	Height     uint64
 }
 
+type journalCoverageBaseWire struct {
+	_          struct{} `cbor:",toarray"`
+	Version    uint64
+	Descriptor []byte
+	Height     uint64
+	Hash       []byte
+}
+
+// CoverageBase is the first height for which this journal promises local
+// archive coverage. A restored journal starts at its verified archive pin;
+// ordinary journals start at the configured genesis block.
+type CoverageBase struct {
+	Height uint64
+	Hash   [32]byte
+}
+
 type FrontierSnapshot struct {
-	Anchor      *frontier.Record
-	Record      *archive.Record
-	ResultingUC *bfttypes.UnicityCertificate
-	Floor       uint64
+	Anchor       *frontier.Record
+	Record       *archive.Record
+	ResultingUC  *bfttypes.UnicityCertificate
+	Floor        uint64
+	CoverageBase *CoverageBase
 }
 
 func coverageKey(height uint64) []byte {
@@ -202,6 +221,10 @@ func (s *Store) LoadFrontier(ctx context.Context, c Context, limits JournalLimit
 			return err
 		}
 		out, err = readFrontier(b, state.i.descriptorDigest, *s.frontier)
+		if err != nil {
+			return err
+		}
+		out.CoverageBase, _, err = readCoverageBase(b, state.i.descriptorDigest, [32]byte(c.Origin.BlockHash()))
 		return err
 	})
 	return out, err
@@ -237,6 +260,13 @@ func (s *Store) LoadCoverage(ctx context.Context, c Context, limits JournalLimit
 		b := tx.Bucket(bucketName)
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
 			return err
+		}
+		base, _, err := readCoverageBase(b, state.i.descriptorDigest, [32]byte(c.Origin.BlockHash()))
+		if err != nil {
+			return err
+		}
+		if after < base.Height {
+			after = base.Height
 		}
 		f, err := readFrontier(b, state.i.descriptorDigest, *s.frontier)
 		if err != nil || f.Anchor == nil {
@@ -514,7 +544,13 @@ func retainedObservationBodies(b *bolt.Bucket, ctx context.Context, c Context, a
 	return retained, nil
 }
 
-func checkPruneCoverage(b *bolt.Bucket, policy frontier.Policy, w journalCandidateWire) error {
+func checkPruneCoverage(b *bolt.Bucket, policy frontier.Policy, baseHeight uint64, w journalCandidateWire) error {
+	// Archive restore authenticated every ancestor through its pin. Those
+	// heights are covered by the durable base and do not need local per-height
+	// two-replica coverage entries.
+	if w.Number <= baseHeight {
+		return nil
+	}
 	covered := b.Get(coverageKey(w.Number))
 	if covered == nil {
 		return frontier.ErrObligation
@@ -542,6 +578,10 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 			return ErrStale
 		}
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
+			return err
+		}
+		coverageBase, _, err := readCoverageBase(b, state.i.descriptorDigest, [32]byte(c.Origin.BlockHash()))
+		if err != nil {
 			return err
 		}
 		f, err := readFrontier(b, state.i.descriptorDigest, *s.frontier)
@@ -607,7 +647,7 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 				}
 				if w.Status == 1 {
 					if !bytes.Equal(w.Hash, restoredHash) {
-						if err := checkPruneCoverage(b, *s.frontier, w); err != nil {
+						if err := checkPruneCoverage(b, *s.frontier, coverageBase.Height, w); err != nil {
 							return err
 						}
 					}

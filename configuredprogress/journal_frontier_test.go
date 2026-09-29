@@ -118,11 +118,17 @@ func TestRestoreAnchorPersistsOnlyCertifiedReplayBase(t *testing.T) {
 	wrong := anchor
 	wrong.Hash[0] ^= 1
 	require.ErrorIs(t, s.InstallRestoreAnchor(context.Background(), c, limits, wrong), ErrUntrusted)
-	require.NoError(t, s.InstallRestoreAnchor(context.Background(), c, limits, anchor))
 	image, err := s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.NotNil(t, image.CoverageBase)
+	require.Zero(t, image.CoverageBase.Height, "an unverified restore pin cannot move the coverage base")
+	require.Equal(t, [32]byte(c.Origin.BlockHash()), image.CoverageBase.Hash)
+	require.NoError(t, s.InstallRestoreAnchor(context.Background(), c, limits, anchor))
+	image, err = s.LoadJournal(context.Background(), c, limits)
 	require.NoError(t, err)
 	require.Equal(t, &anchor, image.Restored)
 	require.Equal(t, &anchor, image.RestoreBase)
+	require.Equal(t, &CoverageBase{Height: anchor.Height, Hash: anchor.Hash}, image.CoverageBase)
 	require.ErrorIs(t, s.InstallRestoreAnchor(context.Background(), c, limits, anchor), ErrConflict)
 	require.NoError(t, s.Close())
 	restarted, err := OpenConfiguredV2(path, Settings{Retain: 3})
@@ -134,6 +140,14 @@ func TestRestoreAnchorPersistsOnlyCertifiedReplayBase(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, &anchor, image.Restored)
 	require.Equal(t, &anchor, image.RestoreBase)
+	require.NoError(t, restarted.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bucketName).Delete(journalCoverageBaseKey) }))
+	image, err = restarted.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err, "an existing verified restore marker upgrades to the durable coverage base")
+	require.Equal(t, &CoverageBase{Height: anchor.Height, Hash: anchor.Hash}, image.CoverageBase)
+	require.NoError(t, restarted.db.View(func(tx *bolt.Tx) error {
+		require.NotEmpty(t, tx.Bucket(bucketName).Get(journalCoverageBaseKey))
+		return nil
+	}))
 	require.NoError(t, restarted.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
 		raw := bytes.Clone(b.Get(restoreAnchorKey))
@@ -142,6 +156,19 @@ func TestRestoreAnchorPersistsOnlyCertifiedReplayBase(t *testing.T) {
 	}))
 	_, err = restarted.LoadJournal(context.Background(), c, limits)
 	require.Error(t, err, "a damaged restore marker cannot make the journal appear healthy")
+}
+
+func TestUnrestoredFrontierStillRequiresCoverageFromHeightOne(t *testing.T) {
+	s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
+	defer s.Close()
+	image, err := s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Equal(t, &CoverageBase{Hash: [32]byte(c.Origin.BlockHash())}, image.CoverageBase)
+	require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}))
+	page, err := s.LoadCoverage(context.Background(), c, limits, 0, 4)
+	require.NoError(t, err)
+	require.Len(t, page, 1)
+	require.EqualValues(t, 1, page[0].Height, "a non-restored node audits coverage beginning at height one")
 }
 
 func TestPrunedFrontierRetainsLocalAnchorAuthorization(t *testing.T) {

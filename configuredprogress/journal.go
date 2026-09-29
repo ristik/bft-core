@@ -106,12 +106,14 @@ type JournalObservation struct {
 	Unresolved bool
 }
 type JournalSnapshot struct {
-	Candidates   []JournalEntry
-	Observations []JournalObservation
-	Bytes        int64
-	Frontier     *FrontierSnapshot
-	Restored     *RestoreAnchor
-	RestoreBase  *RestoreAnchor
+	Candidates               []JournalEntry
+	Observations             []JournalObservation
+	Bytes                    int64
+	Frontier                 *FrontierSnapshot
+	Restored                 *RestoreAnchor
+	RestoreBase              *RestoreAnchor
+	CoverageBase             *CoverageBase
+	coverageBaseNeedsPersist bool
 }
 
 func journalCandidateKey(hash []byte) []byte {
@@ -662,6 +664,15 @@ func (s *Store) LoadJournal(ctx context.Context, c Context, limits JournalLimits
 	// those reads. Retry that moving snapshot instead of treating it as damage.
 	for attempt := 0; attempt < 3; attempt++ {
 		image, token, err := s.loadJournalOnce(ctx, c, limits)
+		if err == nil && image.coverageBaseNeedsPersist {
+			if persistErr := s.persistCoverageBase(ctx, c, image.CoverageBase); persistErr != nil {
+				if errors.Is(persistErr, ErrStale) {
+					continue
+				}
+				return JournalSnapshot{}, persistErr
+			}
+			image.coverageBaseNeedsPersist = false
+		}
 		if token.t == nil || s.Unchanged(token) {
 			return image, err
 		}
@@ -804,6 +815,10 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 		out.Restored = out.RestoreBase
 		if out.RestoreBase != nil && out.Frontier != nil && out.Frontier.Anchor != nil && out.Frontier.Anchor.Height > out.RestoreBase.Height {
 			out.Restored = nil // the later replica-acknowledged frontier is the active recovery base
+		}
+		out.CoverageBase, out.coverageBaseNeedsPersist, err = readCoverageBase(b, state.i.descriptorDigest, [32]byte(c.Origin.BlockHash()))
+		if err != nil {
+			return err
 		}
 		if state.i.observed == nil && len(out.Observations) != 0 || state.i.observed != nil && len(out.Observations) == 0 && anchorUC == nil {
 			return fmt.Errorf("%w: journal and progress observation count disagree", ErrUntrusted)

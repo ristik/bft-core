@@ -243,16 +243,16 @@ func TestPruneCoverageGuardChecksPresentExactAnchor(t *testing.T) {
 	}))
 	w := journalCandidateWire{Number: item.Anchor.Height, Hash: item.Anchor.Subject.BlockHash[:]}
 	require.NoError(t, s.db.View(func(tx *bolt.Tx) error {
-		return checkPruneCoverage(tx.Bucket(bucketName), policy, w)
+		return checkPruneCoverage(tx.Bucket(bucketName), policy, 0, w)
 	}))
 	w.Hash = bytes.Clone(w.Hash)
 	w.Hash[0] ^= 1
 	require.ErrorIs(t, s.db.View(func(tx *bolt.Tx) error {
-		return checkPruneCoverage(tx.Bucket(bucketName), policy, w)
+		return checkPruneCoverage(tx.Bucket(bucketName), policy, 0, w)
 	}), frontier.ErrObligation)
 	require.NoError(t, s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bucketName).Delete(coverageKey(item.Anchor.Height)) }))
 	require.ErrorIs(t, s.db.View(func(tx *bolt.Tx) error {
-		return checkPruneCoverage(tx.Bucket(bucketName), frontier.Policy{}, journalCandidateWire{Number: item.Anchor.Height})
+		return checkPruneCoverage(tx.Bucket(bucketName), frontier.Policy{}, 0, journalCandidateWire{Number: item.Anchor.Height})
 	}), frontier.ErrObligation)
 }
 
