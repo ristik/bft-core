@@ -128,6 +128,48 @@ func TestPeerCatchUpBackfillsMissingCertifiedMiddle(t *testing.T) {
 		line := fmt.Sprintf("source=peer_recovery block=%x height=%d round=%d rootRound=%d", refs[i].Hash, i, uc[i].GetRoundNumber(), uc[i].GetRootRoundNumber())
 		require.True(t, strings.Contains(recoveryLogs.String(), line), "missing durable association log %s in %s", line, recoveryLogs.String())
 	}
+	// With all hot-journal peers unavailable, the same authenticated suffix
+	// can be supplied by the archive source and goes through the same admission.
+	archiveOnly := open()
+	admitPeerObservation(t, archiveOnly, journalCtx, boot, bootTR)
+	imageForArchive, err := returning.LoadJournal(context.Background(), journalCtx, limits)
+	require.NoError(t, err)
+	var firstCandidate configuredprogress.JournalCandidate
+	for _, item := range imageForArchive.Candidates {
+		if item.Candidate.Number == 1 {
+			firstCandidate = item.Candidate
+			break
+		}
+	}
+	require.NotEmpty(t, firstCandidate.Hash)
+	require.NoError(t, archiveOnly.PutJournalCandidate(context.Background(), journalCtx, limits, firstCandidate))
+	admitPeerObservation(t, archiveOnly, journalCtx, uc[1], tr[1])
+	archiveExec := &replayExecutor{head: refs[1], finalized: refs[1], refs: refs, known: map[string]bool{string(refs[0].Hash): true, string(refs[1].Hash): true}}
+	archiveCalls := 0
+	archiveOwner := &ExecutionRecovery{Store: archiveOnly, Context: journalCtx, JournalLimits: limits, Executor: archiveExec, Gate: shardnode.NewFinalityGate(), Genesis: refs[0], Limits: RecoveryLimits{Blocks: 8, Bytes: 1024, Deadline: 3 * time.Second, Retries: 0}}
+	archiveOwner.FetchArchive = func(ctx context.Context, after shardnode.BlockRef, target []byte) ([]shardnode.JournalFetchEntry, error) {
+		archiveCalls++
+		return served.FetchJournal(ctx, shardnode.JournalFetchRequest{TargetHash: target, AfterHash: after.Hash})
+	}
+	archiveAdmission, archiveErr := (JournalFactory{Store: archiveOnly, Origin: origin, Limits: limits, CatchUp: archiveOwner.AcquireForCertificate}).Start(context.Background(), id, adapterGate{}, shardnode.AdmissionCallbacks{AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {}, DeliverDurable: func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error { return nil }})
+	require.NoError(t, archiveErr)
+	defer archiveAdmission.Close()
+	require.NoError(t, archiveAdmission.Submit(context.Background(), uc[3], tr[3]))
+	archiveHead, archiveErr := archiveOwner.Recover(context.Background(), uc[3])
+	require.NoError(t, archiveErr)
+	require.Equal(t, refs[3], archiveHead)
+	require.Positive(t, archiveCalls)
+	require.Equal(t, []uint64{2, 3}, archiveExec.verify)
+	archiveOwner.FetchArchive = func(context.Context, shardnode.BlockRef, []byte) ([]shardnode.JournalFetchEntry, error) {
+		return nil, fmt.Errorf("%w: tampered archived record", ErrRecoveryInvalid)
+	}
+	beforeRefusal, err := archiveOnly.LoadJournal(context.Background(), journalCtx, limits)
+	require.NoError(t, err)
+	refusal := archiveOwner.fetchFromPeers(context.Background(), refs[1], refs[2].Hash, false, nil)
+	require.ErrorIs(t, refusal, ErrRecoveryInvalid)
+	afterRefusal, err := archiveOnly.LoadJournal(context.Background(), journalCtx, limits)
+	require.NoError(t, err)
+	require.Len(t, afterRefusal.Observations, len(beforeRefusal.Observations), "invalid archive bytes must not partially admit a suffix")
 	owner.Providers = []peer.ID{"provider"}
 	for _, tc := range []struct {
 		bindingErr error
@@ -247,6 +289,11 @@ func TestPeerCatchUpBackfillsMissingCertifiedMiddle(t *testing.T) {
 	require.ErrorIs(t, blockedAdmission.Submit(context.Background(), uc[3], tr[3]), ErrRecoveryUnavailable)
 	require.NoError(t, stopped, "peer unavailability must remain retryable")
 	require.True(t, blockedAdmission.(interface{ Pending() bool }).Pending(), "the authenticated target must be retried without another root delivery")
+	blockedImage, err := blocked.LoadJournal(context.Background(), journalCtx, limits)
+	require.NoError(t, err)
+	require.Len(t, blockedImage.Observations, 3, "only the authenticated held certificate should remain pending")
+	require.True(t, blockedImage.Observations[2].Unresolved)
+	require.Len(t, blockedImage.Candidates, 1, "an unavailable source must not partially admit any suffix bodies")
 }
 
 func TestPeerCatchUpReusesLocallyBuiltCandidateAfterLeaderRestart(t *testing.T) {

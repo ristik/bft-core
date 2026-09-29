@@ -884,6 +884,20 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		server.RestrictToPeers(providers)
 		server.Register(peer)
 		coordinator.Host, coordinator.Providers, coordinator.TransportLimits = peer, providers, shardnode.DefaultJournalTransportLimits()
+		if archiveLocal != nil {
+			source := &archivewiring.RecoverySource{Context: journalCtx, Subject: archiveSubject, Local: archiveLocal, Host: peer,
+				Replicas: archiveReplicas, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks}
+			coordinator.FetchArchive = func(ctx context.Context, after shardnode.BlockRef, target []byte) ([]shardnode.JournalFetchEntry, error) {
+				entries, fetchErr := source.FetchSuffix(ctx, after, target)
+				if errors.Is(fetchErr, archivewiring.ErrArchiveRecoveryInvalid) {
+					return nil, fmt.Errorf("%w: %w", configuredadmission.ErrRecoveryInvalid, fetchErr)
+				}
+				if errors.Is(fetchErr, archivewiring.ErrArchiveRecoveryUnavailable) {
+					return nil, fmt.Errorf("%w: %w", configuredadmission.ErrRecoveryUnavailable, fetchErr)
+				}
+				return entries, fetchErr
+			}
+		}
 		node.SetJournalRecovery(coordinator, coordinator)
 		if openErr = node.SetJournalAdmission(configuredadmission.JournalFactory{Store: journalStore, Origin: origin, ExecutionConfigV2: executionID, Limits: limits, CatchUp: coordinator.AcquireForCertificate, OnStop: node.ReportJournalStop, Logger: flags.observe.Logger(), EpochAuthority: journalCtx.Observation.EpochAuthority}); openErr != nil {
 			return fmt.Errorf("enabling journal certification admission: %w", openErr)
