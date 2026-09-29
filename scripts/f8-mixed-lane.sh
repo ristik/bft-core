@@ -2,7 +2,7 @@
 # Mixed F8 fixture hooks; sourced only by the paired devnet with F8_MIXED_LANE=1.
 set -euo pipefail
 
-F8_PIN=662e37a56e6da67fcb67aa4ebc32be5076bc301c
+F8_PIN=a032aa6fd397224fa72336be4b240de076372389
 F8_BIN=${RUGREGATOR_BIN:-}
 F8_SRC=${RUGREGATOR_SOURCE:-}
 F8_ROOT_RPC_BASE=${F8_ROOT_RPC_BASE:-25866}
