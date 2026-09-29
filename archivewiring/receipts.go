@@ -22,6 +22,9 @@ func WithReceiptList(rec *archive.Record, envelopes [][]byte) (*archive.Record, 
 	if rlp.DecodeBytes(rec.Header, &header) != nil || rlp.DecodeBytes(rec.Body, &body) != nil || header.Number == nil || len(envelopes) != len(body.Transactions) {
 		return nil, archive.ErrInvalid
 	}
+	if header.TxHash != gethtypes.DeriveSha(gethtypes.Transactions(body.Transactions), trie.NewStackTrie(nil)) {
+		return nil, archive.ErrInvalid
+	}
 	receipts := make(gethtypes.Receipts, len(envelopes))
 	for i, envelope := range envelopes {
 		var receipt gethtypes.Receipt
@@ -34,7 +37,7 @@ func WithReceiptList(rec *archive.Record, envelopes [][]byte) (*archive.Record, 
 		}
 		receipts[i] = &receipt
 	}
-	if gethtypes.DeriveSha(receipts, trie.NewStackTrie(nil)) != common.Hash(header.ReceiptHash) {
+	if gethtypes.DeriveSha(receipts, trie.NewStackTrie(nil)) != common.Hash(header.ReceiptHash) || gethtypes.CreateBloom(receipts) != header.Bloom {
 		return nil, fmt.Errorf("archive receipt root does not match certified header")
 	}
 	list, err := rlp.EncodeToBytes(envelopes)
@@ -48,6 +51,40 @@ func WithReceiptList(rec *archive.Record, envelopes [][]byte) (*archive.Record, 
 	}
 	cp.Extensions[archive.ReceiptListKey] = list
 	return &cp, nil
+}
+
+// ValidateReceiptCommitments checks the complete consensus receipt list,
+// transaction count/types and both execution roots against the archived
+// canonical header and body.
+func ValidateReceiptCommitments(rec *archive.Record) error {
+	if rec == nil {
+		return archive.ErrInvalid
+	}
+	var header gethtypes.Header
+	var body gethtypes.Body
+	if rlp.DecodeBytes(rec.Header, &header) != nil || rlp.DecodeBytes(rec.Body, &body) != nil || header.Number == nil {
+		return archive.ErrInvalid
+	}
+	envelopes, err := DecodeReceiptList(rec)
+	if err != nil || len(envelopes) != len(body.Transactions) {
+		return archive.ErrInvalid
+	}
+	receipts := make(gethtypes.Receipts, len(envelopes))
+	for i, envelope := range envelopes {
+		var receipt gethtypes.Receipt
+		if receipt.UnmarshalBinary(envelope) != nil || receipt.Type != body.Transactions[i].Type() {
+			return archive.ErrInvalid
+		}
+		canonical, err := receipt.MarshalBinary()
+		if err != nil || !bytes.Equal(canonical, envelope) {
+			return archive.ErrInvalid
+		}
+		receipts[i] = &receipt
+	}
+	if header.TxHash != gethtypes.DeriveSha(gethtypes.Transactions(body.Transactions), trie.NewStackTrie(nil)) || header.ReceiptHash != gethtypes.DeriveSha(receipts, trie.NewStackTrie(nil)) || header.Bloom != gethtypes.CreateBloom(receipts) {
+		return archive.ErrInvalid
+	}
+	return nil
 }
 
 // DecodeReceiptList decodes the v2 archive's bounded RLP envelope list.
@@ -70,10 +107,16 @@ func DecodeReceiptList(rec *archive.Record) ([][]byte, error) {
 // independently root-checked receipt list to occupy the v2 namespace.
 func SameArchiveCore(q archive.Request, a, b *archive.Record) bool {
 	strip := func(in *archive.Record) *archive.Record {
-		if in == nil { return nil }
+		if in == nil {
+			return nil
+		}
 		cp := *in
 		cp.Extensions = make(map[string][]byte, len(in.Extensions))
-		for k, v := range in.Extensions { if k != archive.ReceiptListKey { cp.Extensions[k] = v } }
+		for k, v := range in.Extensions {
+			if k != archive.ReceiptListKey {
+				cp.Extensions[k] = v
+			}
+		}
 		return &cp
 	}
 	x, errX := archive.ManifestDigest(q, strip(a))

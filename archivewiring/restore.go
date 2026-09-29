@@ -240,6 +240,32 @@ func (r *ArchiveRestore) fetchChecked(ctx context.Context, hash [32]byte) (archi
 		if err != nil {
 			continue
 		}
+		if !archive.HasReceiptList(rec) {
+			source, ok := r.Adapter.(ReceiptSource)
+			if !ok {
+				continue
+			}
+			envelopes, captureErr := source.GetBlockReceipts(ctx, q.BlockHash)
+			if captureErr != nil {
+				continue
+			}
+			rec, captureErr = WithReceiptList(rec, envelopes)
+			if captureErr != nil {
+				continue
+			}
+			// Backfill publishes to both independent copies and requires complete
+			// read-backs before the record can serve as pruning coverage.
+			complete := true
+			for _, replica := range r.Replicas {
+				if PutAndReadBack(ctx, r.Host, replica, q, rec, r.Limits) != nil {
+					complete = false
+					break
+				}
+			}
+			if !complete {
+				continue
+			}
+		}
 		uc, tr, err := r.checkRecord(q, rec)
 		if err == nil {
 			var header gethtypes.Header

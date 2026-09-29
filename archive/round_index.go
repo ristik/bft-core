@@ -38,7 +38,10 @@ func (s *Store) GetLatest(q RoundRequest) (Request, *Record, error) {
 	if len(chosen) != 1 {
 		return Request{}, nil, ErrCorrupt
 	}
-	rec, err := s.get(chosen[0])
+	rec, err := s.getVersion(chosen[0], true)
+	if os.IsNotExist(err) || err == ErrUnavailable {
+		rec, err = s.getVersion(chosen[0], false)
+	}
 	return chosen[0], rec, err
 }
 
@@ -83,8 +86,7 @@ func (s *Store) buildRoundIndex() error {
 	for _, entry := range entries {
 		name := entry.Name()
 		v2 := strings.HasPrefix(name, "v2-")
-		legacy := len(name) == 64
-		if !entry.IsDir() || (!legacy && len(name) != 67) || len(name) == 67 && !strings.HasPrefix(name, "v1-") && !v2 {
+		if !entry.IsDir() || (!v2 && len(name) != 64) || (v2 && len(name) != 67) {
 			continue
 		}
 		manifest, err := readBounded(filepath.Join(s.dir, entry.Name(), "manifest"), 16<<10)
@@ -106,9 +108,6 @@ func (s *Store) buildRoundIndex() error {
 			continue
 		}
 		location, err := location(q, v2)
-		if legacy && err == nil {
-			location = strings.TrimPrefix(location, "v1-")
-		}
 		if err != nil || location != entry.Name() {
 			continue
 		}

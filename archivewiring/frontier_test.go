@@ -275,7 +275,7 @@ func TestFrontierPacedAuditRepairsPrunedReplica(t *testing.T) {
 	request, err := archive.EncodeRequest(q)
 	require.NoError(t, err)
 	key := sha256.Sum256(request)
-	require.NoError(t, os.RemoveAll(filepath.Join(secondDir, hex.EncodeToString(key[:]))))
+	require.NoError(t, os.RemoveAll(filepath.Join(secondDir, "v2-"+hex.EncodeToString(key[:]))))
 	_, err = second.Get(q)
 	require.ErrorIs(t, err, archive.ErrUnavailable)
 	require.NoError(t, worker.Pass(context.Background()))

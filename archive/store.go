@@ -109,11 +109,11 @@ func location(q Request, versions ...bool) (string, error) {
 		return "", err
 	}
 	h := sha256.Sum256(b)
-	version := "v1-"
+	name := hex.EncodeToString(h[:])
 	if v2 {
-		version = "v2-"
+		name = "v2-" + name
 	}
-	return version + hex.EncodeToString(h[:]), nil
+	return name, nil
 }
 func recordV2(r *Record) bool { return HasReceiptList(r) }
 func archiveMagic(v2 bool) string {

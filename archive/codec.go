@@ -148,6 +148,9 @@ var required = []string{"header", "body", "root-input", "original-uc", "original
 const ReceiptListKey = "consensus-receipts-v2"
 
 func HasReceiptList(r *Record) bool {
+	if r == nil {
+		return false
+	}
 	v, ok := r.Extensions[ReceiptListKey]
 	return ok && len(v) != 0
 }
