@@ -276,6 +276,8 @@ func (a *Authority) MarkUntrusted(reason string) {
 // Status is a diagnostic view of the authority. It deliberately carries no request bytes and no
 // response: it says what is reserved, not what was signed.
 type Status struct {
+	RootEpoch        uint64
+	ShardEpoch       uint64
 	Generation       uint64
 	ReservedRound    uint64
 	HasReservation   bool
@@ -289,6 +291,8 @@ func (a *Authority) Status() Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return Status{
+		RootEpoch:        pinnedRootEpoch(a.enroll.RootEpoch),
+		ShardEpoch:       a.enroll.ShardEpoch,
 		Generation:       a.generation,
 		ReservedRound:    a.rec.reserved,
 		HasReservation:   !a.rec.empty(),
@@ -296,6 +300,13 @@ func (a *Authority) Status() Status {
 		Faulted:          a.state != healthActive,
 		KeyLost:          a.signer == nil,
 	}
+}
+
+func pinnedRootEpoch(epoch *uint64) uint64 {
+	if epoch == nil {
+		return 0
+	}
+	return *epoch
 }
 
 // admitLocked is the guard every client operation shares: a key, a healthy record, and the current

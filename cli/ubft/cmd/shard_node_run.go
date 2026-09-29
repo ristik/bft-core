@@ -45,6 +45,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
+	"github.com/unicitynetwork/bft-core/signingauthority"
 )
 
 const lucStoreFileName = "shard-node-luc.json"
@@ -358,6 +359,7 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 }
 
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
+	var readOperatorStatus func(context.Context) (archivewiring.OperatorStatus, error)
 	if flags.Restore {
 		if flags.Executor != "engine-api" || flags.ExecutionJournal == "" || flags.ArchiveStore == "" || !flags.ArchivePrune ||
 			flags.SigningAuthoritySocket == "" || flags.RestoreTipUC == "" || flags.RestoreTipTR == "" || flags.RestoreTrustBodyID == "" {
@@ -636,6 +638,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		var archiveSubject archive.Context
 		var archiveReplicas [2]libp2ppeer.ID
 		var archiveAllowed []libp2ppeer.ID
+		var publisher *archivewiring.Publisher
 		archiveTransportLimits := archivewiring.DefaultLimits()
 		if flags.ArchiveStore != "" {
 			if flags.Restore {
@@ -908,7 +911,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if e != nil {
 				return e
 			}
-			publisher := &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics, ReceiptSource: executor.(*engineapi.Adapter)}
+			publisher = &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics, ReceiptSource: executor.(*engineapi.Adapter)}
 			if flags.TrustHistoryProfile2 {
 				publisher.BundleVerifier = archivewiring.BundleAdmission(historicalTrust)
 			}
@@ -926,6 +929,39 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				go func() { defer close(pruneDone); _ = worker.Run(archiveCtx) }()
 				defer func() { cancelArchive(); <-pruneDone }()
 			}
+		}
+		readOperatorStatus = func(statusCtx context.Context) (archivewiring.OperatorStatus, error) {
+			rootEpoch := trustBases[0].GetEpoch()
+			var activated []uint64
+			if historicalTrust != nil {
+				if active, ok := historicalTrust.CurrentRootEpoch(); ok && active >= rootEpoch {
+					rootEpoch = active
+					for epoch := trustBases[0].GetEpoch() + 1; epoch <= active; epoch++ {
+						activated = append(activated, epoch)
+						if epoch == ^uint64(0) {
+							break
+						}
+					}
+				}
+			}
+			var progress [2]archivewiring.ReplicaProgress
+			if publisher != nil {
+				progress = publisher.ReplicaProgress()
+			}
+			var authority *archivewiring.AuthorityReport
+			if probe, ok := signing.authority.(interface {
+				RestoreStatus(context.Context) (signingauthority.Status, error)
+			}); ok {
+				probeCtx, cancel := context.WithTimeout(statusCtx, 1500*time.Millisecond)
+				defer cancel()
+				status, statusErr := probe.RestoreStatus(probeCtx)
+				authority = &archivewiring.AuthorityReport{Reachable: statusErr == nil, Error: errorString(statusErr)}
+				if statusErr == nil {
+					authority.RootEpoch, authority.ShardEpoch, authority.ReservedRound = status.RootEpoch, status.ShardEpoch, status.ReservedRound
+				}
+			}
+			return archivewiring.ReadOperatorStatus(statusCtx, journalStore, journalCtx, limits,
+				archiveLocal, archiveSubject, archiveReplicas, rootEpoch, activated, progress, authority)
 		}
 	}
 
@@ -981,7 +1017,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return node.Run(gctx) })
-	g.Go(func() error { return serveShardNodeRPC(gctx, flags, node) })
+	g.Go(func() error { return serveShardNodeRPC(gctx, flags, node, readOperatorStatus) })
 	if handoffFollower != nil {
 		g.Go(func() error { return handoffFollower.Run(gctx) })
 	}
@@ -999,7 +1035,8 @@ func validateExecutionJournalFlags(flags *shardNodeRunFlags, origin registrygene
 // prometheus is set) and /api/v1/health (JSON, always) — see
 // docs/engine-api-adapter-plan.md C3.2/C3.4. Mirrors root_node.go's own
 // RPC server construction.
-func serveShardNodeRPC(ctx context.Context, flags *shardNodeRunFlags, node *shardnode.Node) error {
+func serveShardNodeRPC(ctx context.Context, flags *shardNodeRunFlags, node *shardnode.Node,
+	readOperatorStatus func(context.Context) (archivewiring.OperatorStatus, error)) error {
 	if flags.RPCServerAddress == "" {
 		return nil // do not kill the errgroup
 	}
@@ -1012,6 +1049,11 @@ func serveShardNodeRPC(ctx context.Context, flags *shardNodeRunFlags, node *shar
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(node.Health().Snapshot())
 	})
+	if readOperatorStatus != nil {
+		mux.HandleFunc("GET /api/v1/operator/status", func(w http.ResponseWriter, r *http.Request) {
+			writeOperatorStatus(w, r, readOperatorStatus)
+		})
+	}
 
 	return httpsrv.Run(ctx,
 		&http.Server{

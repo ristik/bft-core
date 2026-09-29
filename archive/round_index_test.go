@@ -85,3 +85,50 @@ func TestRoundLookupContextAndRestart(t *testing.T) {
 		}
 	}
 }
+
+func TestLatestReceiptCompleteSkipsNewerV1AndSurvivesRestart(t *testing.T) {
+	q, rec := fixture()
+	var uc types.UnicityCertificate
+	uc.InputRecord = &types.InputRecord{RoundNumber: 7, BlockHash: q.BlockHash[:]}
+	var err error
+	rec.ResultingUC, err = types.Cbor.Marshal(&uc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := t.TempDir()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1 := *rec
+	if err := s.Put(q, &v1); err != nil {
+		t.Fatal(err)
+	}
+	rec.Extensions = map[string][]byte{ReceiptListKey: {0xc0}}
+	if err := s.Put(q, rec); err != nil {
+		t.Fatal(err)
+	}
+	q2, rec2 := q, *rec
+	rec2.Extensions = nil
+	rec2.Header = append(bytes.Clone(rec.Header), 0x08)
+	copy(q2.BlockHash[:], crypto.Keccak256(rec2.Header))
+	uc.InputRecord = &types.InputRecord{RoundNumber: 8, BlockHash: q2.BlockHash[:]}
+	rec2.ResultingUC, err = types.Cbor.Marshal(&uc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put(q2, &rec2); err != nil {
+		t.Fatal(err)
+	}
+	query := RoundRequest{Context: q.Context, Round: 8}
+	if got, _, err := s.GetLatestReceiptComplete(query); err != nil || got.BlockHash != q.BlockHash {
+		t.Fatalf("latest receipt-complete record: %x %v", got.BlockHash, err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, rec, err := reopened.GetLatestReceiptComplete(query); err != nil || got.BlockHash != q.BlockHash || !HasReceiptList(rec) {
+		t.Fatalf("rebuilt receipt-complete index: %x %v", got.BlockHash, err)
+	}
+}

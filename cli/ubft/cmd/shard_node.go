@@ -14,5 +14,6 @@ func newShardNodeCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd.AddCommand(shardNodeRunCmd(baseFlags))
 	cmd.AddCommand(shardNodeRestoreCmd(baseFlags))
 	cmd.AddCommand(shardNodeDoctorCmd(baseFlags))
+	cmd.AddCommand(shardNodeStatusCmd())
 	return cmd
 }

@@ -122,6 +122,7 @@ func TestRestoreAnchorPersistsOnlyCertifiedReplayBase(t *testing.T) {
 	image, err := s.LoadJournal(context.Background(), c, limits)
 	require.NoError(t, err)
 	require.Equal(t, &anchor, image.Restored)
+	require.Equal(t, &anchor, image.RestoreBase)
 	require.ErrorIs(t, s.InstallRestoreAnchor(context.Background(), c, limits, anchor), ErrConflict)
 	require.NoError(t, s.Close())
 	restarted, err := OpenConfiguredV2(path, Settings{Retain: 3})
@@ -132,6 +133,7 @@ func TestRestoreAnchorPersistsOnlyCertifiedReplayBase(t *testing.T) {
 	image, err = restarted.LoadJournal(context.Background(), c, limits)
 	require.NoError(t, err)
 	require.Equal(t, &anchor, image.Restored)
+	require.Equal(t, &anchor, image.RestoreBase)
 	require.NoError(t, restarted.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
 		raw := bytes.Clone(b.Get(restoreAnchorKey))

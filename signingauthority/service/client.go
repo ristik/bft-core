@@ -128,7 +128,8 @@ func (c *Client) RestoreStatus(ctx context.Context) (signingauthority.Status, er
 	if err := types.Cbor.Unmarshal(answer, &wire); err != nil {
 		return signingauthority.Status{}, fmt.Errorf("decoding restore status: %w", err)
 	}
-	return signingauthority.Status{Generation: wire.Generation, ReservedRound: wire.ReservedRound,
+	return signingauthority.Status{RootEpoch: wire.RootEpoch, ShardEpoch: wire.ShardEpoch,
+		Generation: wire.Generation, ReservedRound: wire.ReservedRound,
 		HasReservation: wire.HasReservation, ResponseRetained: wire.ResponseRetained,
 		Faulted: wire.Faulted, KeyLost: wire.KeyLost}, nil
 }

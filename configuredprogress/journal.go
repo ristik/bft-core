@@ -111,6 +111,7 @@ type JournalSnapshot struct {
 	Bytes        int64
 	Frontier     *FrontierSnapshot
 	Restored     *RestoreAnchor
+	RestoreBase  *RestoreAnchor
 }
 
 func journalCandidateKey(hash []byte) []byte {
@@ -796,9 +797,13 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			}
 			return a.GetRoundNumber() < b.GetRoundNumber()
 		})
-		out.Restored, err = readRestoreAnchor(b, state.i.descriptorDigest, out)
+		out.RestoreBase, err = readRestoreAnchor(b, state.i.descriptorDigest, out)
 		if err != nil {
 			return err
+		}
+		out.Restored = out.RestoreBase
+		if out.RestoreBase != nil && out.Frontier != nil && out.Frontier.Anchor != nil && out.Frontier.Anchor.Height > out.RestoreBase.Height {
+			out.Restored = nil // the later replica-acknowledged frontier is the active recovery base
 		}
 		if state.i.observed == nil && len(out.Observations) != 0 || state.i.observed != nil && len(out.Observations) == 0 && anchorUC == nil {
 			return fmt.Errorf("%w: journal and progress observation count disagree", ErrUntrusted)

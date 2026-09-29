@@ -153,6 +153,8 @@ type statusPayload struct {
 	ResponseRetained bool
 	Faulted          bool
 	KeyLost          bool
+	RootEpoch        uint64
+	ShardEpoch       uint64
 }
 
 type enrollmentPayload struct {

@@ -54,7 +54,7 @@ func readRestoreAnchor(b *bolt.Bucket, descriptor [32]byte, image JournalSnapsho
 	copy(out.Hash[:], w.Hash)
 	copy(out.StateRoot[:], w.StateRoot)
 	if image.Frontier != nil && image.Frontier.Anchor != nil && image.Frontier.Anchor.Height > out.Height {
-		return nil, nil // later two-replica frontier supersedes the replay base
+		return &out, nil // the checked marker remains reportable after the frontier supersedes its body
 	}
 	if len(image.Observations) == 0 || image.Observations[len(image.Observations)-1].UC.InputRecord == nil {
 		return nil, ErrUntrusted

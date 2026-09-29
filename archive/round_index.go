@@ -16,7 +16,7 @@ import (
 func (s *Store) GetLatest(q RoundRequest) (Request, *Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key, err := roundKey(q)
+	_, err := roundKey(q)
 	if err != nil {
 		return Request{}, nil, err
 	}
@@ -25,9 +25,35 @@ func (s *Store) GetLatest(q RoundRequest) (Request, *Record, error) {
 			return Request{}, nil, err
 		}
 	}
+	return s.getLatestIndexed(q, s.rounds, false)
+}
+
+// GetLatestReceiptComplete returns the newest local v2 record at or below q.Round.
+// The round index is only a locator; the immutable manifest and chunks are reread
+// and checked before the record is returned.
+func (s *Store) GetLatestReceiptComplete(q RoundRequest) (Request, *Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := roundKey(q)
+	if err != nil {
+		return Request{}, nil, err
+	}
+	if s.rounds == nil {
+		if err := s.buildRoundIndex(); err != nil {
+			return Request{}, nil, err
+		}
+	}
+	return s.getLatestIndexed(q, s.receiptRounds, true)
+}
+
+func (s *Store) getLatestIndexed(q RoundRequest, index map[string]map[uint64][]Request, receiptComplete bool) (Request, *Record, error) {
+	key, err := roundKey(q)
+	if err != nil {
+		return Request{}, nil, err
+	}
 	var chosen []Request
 	var highest uint64
-	for round, requests := range s.rounds[key] {
+	for round, requests := range index[key] {
 		if round <= q.Round && round > highest {
 			highest, chosen = round, requests
 		}
@@ -39,7 +65,7 @@ func (s *Store) GetLatest(q RoundRequest) (Request, *Record, error) {
 		return Request{}, nil, ErrCorrupt
 	}
 	rec, err := s.getVersion(chosen[0], true)
-	if os.IsNotExist(err) || err == ErrUnavailable {
+	if !receiptComplete && (os.IsNotExist(err) || err == ErrUnavailable) {
 		rec, err = s.getVersion(chosen[0], false)
 	}
 	return chosen[0], rec, err
@@ -69,12 +95,34 @@ func (s *Store) indexRecord(q Request, rec *Record) {
 	if s.rounds[key] == nil {
 		s.rounds[key] = make(map[uint64][]Request)
 	}
+	found := false
 	for _, old := range s.rounds[key][uc.InputRecord.RoundNumber] {
 		if old.BlockHash == q.BlockHash {
-			return
+			found = true
+			break
 		}
 	}
-	s.rounds[key][uc.InputRecord.RoundNumber] = append(s.rounds[key][uc.InputRecord.RoundNumber], q)
+	if !found {
+		s.rounds[key][uc.InputRecord.RoundNumber] = append(s.rounds[key][uc.InputRecord.RoundNumber], q)
+	}
+	if HasReceiptList(rec) {
+		if s.receiptRounds == nil {
+			s.receiptRounds = make(map[string]map[uint64][]Request)
+		}
+		if s.receiptRounds[key] == nil {
+			s.receiptRounds[key] = make(map[uint64][]Request)
+		}
+		found = false
+		for _, old := range s.receiptRounds[key][uc.InputRecord.RoundNumber] {
+			if old.BlockHash == q.BlockHash {
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.receiptRounds[key][uc.InputRecord.RoundNumber] = append(s.receiptRounds[key][uc.InputRecord.RoundNumber], q)
+		}
+	}
 }
 
 func (s *Store) buildRoundIndex() error {
@@ -83,6 +131,7 @@ func (s *Store) buildRoundIndex() error {
 		return err
 	}
 	s.rounds = make(map[string]map[uint64][]Request)
+	s.receiptRounds = make(map[string]map[uint64][]Request)
 	for _, entry := range entries {
 		name := entry.Name()
 		v2 := strings.HasPrefix(name, "v2-")

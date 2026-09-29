@@ -69,15 +69,9 @@ type authoritySigner struct {
 // signed only at or above the recorded reservation. Reserve repeats this check
 // atomically, so a concurrent authority operation cannot bypass it.
 func (a *authoritySigner) RestoreReadiness(ctx context.Context, round uint64) error {
-	probe, ok := a.client.(interface {
-		RestoreStatus(context.Context) (signingauthority.Status, error)
-	})
-	if !ok {
-		return fmt.Errorf("shardnode: signing authority has no restore-status probe")
-	}
-	status, err := probe.RestoreStatus(ctx)
+	status, err := a.RestoreStatus(ctx)
 	if err != nil {
-		return fmt.Errorf("shardnode: reading surviving signing authority: %w", err)
+		return err
 	}
 	if status.Faulted || status.KeyLost || status.Generation == 0 || status.HasReservation != (status.ReservedRound != 0) {
 		return fmt.Errorf("shardnode: surviving signing authority has inconsistent high-water state")
@@ -86,6 +80,22 @@ func (a *authoritySigner) RestoreReadiness(ctx context.Context, round uint64) er
 		return fmt.Errorf("shardnode: signing-stale: proposed round %d is below signing authority high-water %d", round, status.ReservedRound)
 	}
 	return nil
+}
+
+// RestoreStatus exposes only the authority's read-only high-water and scope
+// diagnostics to operator status and restore readiness checks.
+func (a *authoritySigner) RestoreStatus(ctx context.Context) (signingauthority.Status, error) {
+	probe, ok := a.client.(interface {
+		RestoreStatus(context.Context) (signingauthority.Status, error)
+	})
+	if !ok {
+		return signingauthority.Status{}, fmt.Errorf("shardnode: signing authority has no restore-status probe")
+	}
+	status, err := probe.RestoreStatus(ctx)
+	if err != nil {
+		return signingauthority.Status{}, fmt.Errorf("shardnode: reading signing authority: %w", err)
+	}
+	return status, nil
 }
 
 /*
