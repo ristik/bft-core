@@ -160,6 +160,18 @@ func TestPeerCatchUpBackfillsMissingCertifiedMiddle(t *testing.T) {
 	require.Equal(t, refs[3], archiveHead)
 	require.Positive(t, archiveCalls)
 	require.Equal(t, []uint64{2, 3}, archiveExec.verify)
+	var budgetLogs bytes.Buffer
+	archiveOwner.Log = slog.New(slog.NewTextHandler(&budgetLogs, nil))
+	archiveOwner.Limits.Bytes = 1
+	archiveOwner.Providers = []peer.ID{"offline"}
+	archiveOwner.fetch = func(context.Context, peer.ID, shardnode.JournalFetchRequest) ([]shardnode.JournalFetchEntry, error) {
+		return nil, ErrRecoveryUnavailable
+	}
+	budgetErr := archiveOwner.fetchFromPeers(context.Background(), refs[1], refs[3].Hash, false, nil)
+	require.ErrorIs(t, budgetErr, ErrRecoveryUnavailable)
+	require.False(t, archiveOwner.Terminal(budgetErr), "an archive byte-budget overrun must be retried")
+	require.Contains(t, budgetLogs.String(), "archive recovery deferred")
+
 	archiveOwner.FetchArchive = func(context.Context, shardnode.BlockRef, []byte) ([]shardnode.JournalFetchEntry, error) {
 		return nil, fmt.Errorf("%w: tampered archived record", ErrRecoveryInvalid)
 	}

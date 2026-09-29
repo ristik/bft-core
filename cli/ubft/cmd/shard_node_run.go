@@ -886,7 +886,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		coordinator.Host, coordinator.Providers, coordinator.TransportLimits = peer, providers, shardnode.DefaultJournalTransportLimits()
 		if archiveLocal != nil {
 			source := &archivewiring.RecoverySource{Context: journalCtx, Subject: archiveSubject, Local: archiveLocal, Host: peer,
-				Replicas: archiveReplicas, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks}
+				Replicas: archiveReplicas, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks, Log: flags.observe.Logger()}
 			coordinator.FetchArchive = func(ctx context.Context, after shardnode.BlockRef, target []byte) ([]shardnode.JournalFetchEntry, error) {
 				entries, fetchErr := source.FetchSuffix(ctx, after, target)
 				if errors.Is(fetchErr, archivewiring.ErrArchiveRecoveryInvalid) {

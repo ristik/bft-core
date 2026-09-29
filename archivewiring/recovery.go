@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
@@ -35,6 +36,7 @@ type RecoverySource struct {
 	Replicas  [2]peer.ID
 	Limits    Limits
 	MaxBlocks int
+	Log       *slog.Logger
 }
 
 func (s *RecoverySource) FetchSuffix(ctx context.Context, after shardnode.BlockRef, target []byte) ([]shardnode.JournalFetchEntry, error) {
@@ -49,16 +51,9 @@ func (s *RecoverySource) FetchSuffix(ctx context.Context, after shardnode.BlockR
 	current := common.BytesToHash(target)
 	for len(reverse) < max {
 		q := archive.Request{Context: s.Subject, BlockHash: current}
-		rec, err := s.Local.Get(q)
-		if err != nil {
-			rec, err = s.fetchReplica(ctx, q)
-		}
+		entry, err := s.fetchVerifiedEntry(ctx, q)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %x: %v", ErrArchiveRecoveryUnavailable, current, err)
-		}
-		entry, err := s.decodeEntry(ctx, q, rec)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %x: %v", ErrArchiveRecoveryInvalid, current, err)
 		}
 		reverse = append(reverse, entry)
 		if bytes.Equal(entry.Block.ParentHash, after.Hash) {
@@ -87,22 +82,43 @@ func frontierRecordForRecovery(q archive.Request, header *gethtypes.Header, resu
 	return frontier.Record{Height: header.Number.Uint64(), Epoch: result.GetRootEpoch(), Round: result.GetRootRoundNumber(), StateRoot: [32]byte(header.Root), Subject: q}
 }
 
-func (s *RecoverySource) fetchReplica(ctx context.Context, q archive.Request) (*archive.Record, error) {
-	var last error
+func (s *RecoverySource) fetchVerifiedEntry(ctx context.Context, q archive.Request) (shardnode.JournalFetchEntry, error) {
+	var failures []error
+	if s.Local != nil {
+		rec, err := s.Local.Get(q)
+		if err == nil {
+			entry, verifyErr := s.decodeEntry(ctx, q, rec)
+			if verifyErr == nil {
+				return entry, nil
+			}
+			err = verifyErr
+		}
+		failures = append(failures, fmt.Errorf("local archive: %w", err))
+		if s.Log != nil {
+			s.Log.WarnContext(ctx, "archive recovery source rejected", "source", "local", "block", fmt.Sprintf("%x", q.BlockHash), "error", err)
+		}
+	}
 	for _, id := range s.Replicas {
 		if id == "" || s.Host == nil {
 			continue
 		}
 		rec, err := Fetch(ctx, s.Host, id, q, s.Limits)
 		if err == nil {
-			return rec, nil
+			var entry shardnode.JournalFetchEntry
+			entry, err = s.decodeEntry(ctx, q, rec)
+			if err == nil {
+				return entry, nil
+			}
 		}
-		last = err
+		failures = append(failures, fmt.Errorf("replica %s: %w", id, err))
+		if s.Log != nil {
+			s.Log.WarnContext(ctx, "archive recovery source rejected", "source", id.String(), "block", fmt.Sprintf("%x", q.BlockHash), "error", err)
+		}
 	}
-	if last == nil {
-		last = archive.ErrUnavailable
+	if len(failures) == 0 {
+		return shardnode.JournalFetchEntry{}, archive.ErrUnavailable
 	}
-	return nil, last
+	return shardnode.JournalFetchEntry{}, fmt.Errorf("all archive copies failed verification or retrieval: %w", errors.Join(failures...))
 }
 
 func (s *RecoverySource) decodeEntry(ctx context.Context, q archive.Request, rec *archive.Record) (shardnode.JournalFetchEntry, error) {

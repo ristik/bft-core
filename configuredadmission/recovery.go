@@ -553,7 +553,10 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 			if archiveErr == nil {
 				return nil
 			}
-			if errors.Is(archiveErr, ErrRecoveryInvalid) || errors.Is(archiveErr, ErrRecoveryConflict) || errors.Is(archiveErr, ErrRecoveryBudget) {
+			if errors.Is(archiveErr, ErrRecoveryBudget) {
+				return r.archiveBudgetUnavailable(ctx, target, archiveErr)
+			}
+			if errors.Is(archiveErr, ErrRecoveryInvalid) || errors.Is(archiveErr, ErrRecoveryConflict) {
 				return archiveErr
 			}
 			return fmt.Errorf("%w: target %x unavailable from peers and archive: %v", ErrRecoveryUnavailable, target, archiveErr)
@@ -565,12 +568,23 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 		if archiveErr == nil {
 			return nil
 		}
-		if errors.Is(archiveErr, ErrRecoveryInvalid) || errors.Is(archiveErr, ErrRecoveryConflict) || errors.Is(archiveErr, ErrRecoveryBudget) {
+		if errors.Is(archiveErr, ErrRecoveryBudget) {
+			return r.archiveBudgetUnavailable(ctx, target, archiveErr)
+		}
+		if errors.Is(archiveErr, ErrRecoveryInvalid) || errors.Is(archiveErr, ErrRecoveryConflict) {
 			return archiveErr
 		}
 		return fmt.Errorf("%w: target %x unavailable from peers and archive: %v", ErrRecoveryUnavailable, target, archiveErr)
 	}
 	return fmt.Errorf("%w: target %x unavailable from %d peers", ErrRecoveryUnavailable, target, len(r.Providers))
+}
+
+func (r *ExecutionRecovery) archiveBudgetUnavailable(ctx context.Context, target []byte, err error) error {
+	retryErr := fmt.Errorf("%w: archive recovery budget exceeded for target %x: %v", ErrRecoveryUnavailable, target, err)
+	if r.Log != nil {
+		r.Log.WarnContext(ctx, "archive recovery deferred", "target", fmt.Sprintf("%x", target), "error", retryErr)
+	}
+	return retryErr
 }
 
 func (r *ExecutionRecovery) fetchFromArchive(ctx context.Context, after shardnode.BlockRef, target []byte, advance bool) error {
