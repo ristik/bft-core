@@ -95,6 +95,11 @@ cleanup() {
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
   ./stop-evm.sh -a >/dev/null 2>&1 || true
   stop_root_nodes
+  # These daemons can outlive TERM while their P2P/RPC servers drain. Interrupt only
+  # processes whose command and working directory identify this checkout.
+  for p in $(owned_pids 'ubft root-node run|ubft shard-node run'); do
+    kill -INT "$p" 2>/dev/null || true
+  done
   stop_pidfile "test-nodes/h4-replaced/pid" 'ubft shard-node restore'
   stop_pidfile "test-nodes/proof-proxy/pid" 'd2c-proof-proxy.py'
   stop_pidfile "test-nodes/engine-proxy/pid" 'd2c-engine-proxy.py'
