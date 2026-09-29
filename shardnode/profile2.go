@@ -14,9 +14,11 @@ import (
 )
 
 var (
-	ErrProfile2Unready        = errors.New("shardnode: handoff evidence required")
-	ErrProfile2Epoch          = errors.New("shardnode: certificate outside installed epoch")
-	ErrProfile2TerminalRepeat = errors.New("shardnode: historical terminal repeat")
+	ErrProfile2Unready              = errors.New("shardnode: handoff evidence required")
+	ErrProfile2Epoch                = errors.New("shardnode: certificate outside installed epoch")
+	ErrProfile2TerminalRepeat       = errors.New("shardnode: historical terminal repeat")
+	ErrStaleEpochCertificateInvalid = errors.New("shardnode: invalid stale epoch certificate")
+	ErrStaleEpochResponseWrongShard = errors.New("shardnode: stale epoch response for wrong shard")
 )
 
 // Profile2Consumer keeps the authenticated handoff and its epoch floor in one

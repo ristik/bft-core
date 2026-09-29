@@ -718,6 +718,38 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	admission := c.admission
 	profile2 := c.profile2
 	c.mu.Unlock()
+	// A configured profile-2 admission session is keyed to the installed epoch.
+	// Authenticate late certificates from retired v2 epochs before discarding
+	// them, so they cannot be mistaken for an unready certificate in the active
+	// epoch by the readiness gate below.
+	if profile2 == nil && cr.UC.UnicitySeal != nil {
+		if history, ok := c.trustBaseStore.(interface {
+			IsV2Epoch(uint64) bool
+			CurrentRootEpoch() (uint64, bool)
+		}); ok {
+			certificateEpoch := cr.UC.GetRootEpoch()
+			if currentEpoch, active := history.CurrentRootEpoch(); active && history.IsV2Epoch(certificateEpoch) && certificateEpoch < currentEpoch {
+				if err := cr.IsValid(); err != nil {
+					return fmt.Errorf("%w: %w", ErrStaleEpochCertificateInvalid, err)
+				}
+				if cr.Partition != c.partitionID || !cr.Shard.Equal(c.shardID) {
+					return fmt.Errorf("%w: certification response for %s-%s", ErrStaleEpochResponseWrongShard, cr.Partition, cr.Shard)
+				}
+				tb, err := c.trustBaseStore.GetByEpoch(ctx, certificateEpoch)
+				if err != nil {
+					return fmt.Errorf("loading trust base for epoch %d: %w", certificateEpoch, err)
+				}
+				if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, c.shardConfHash); err != nil {
+					return fmt.Errorf("%w: %w", ErrStaleEpochCertificateInvalid, err)
+				}
+				if c.log != nil {
+					c.log.DebugContext(ctx, "dropping verified certificate from retired root epoch",
+						slog.Uint64("certificateEpoch", certificateEpoch), slog.Uint64("currentRootEpoch", currentEpoch))
+				}
+				return nil
+			}
+		}
+	}
 	// A committed handoff retires the old epoch before shard execution resumes.
 	// Delayed old-committee responses are neither current admission nor driver
 	// input; historical recovery authenticates them through its separate path.
@@ -735,6 +767,10 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 			ready = gate.Profile2Ready(cr.UC.GetRootEpoch())
 		}
 		if !ready {
+			if c.log != nil {
+				c.log.DebugContext(ctx, "certificate blocked by profile-2 readiness gate",
+					slog.Uint64("certificateEpoch", cr.UC.GetRootEpoch()))
+			}
 			return ErrProfile2Unready
 		}
 	}
