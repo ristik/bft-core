@@ -14,6 +14,9 @@ F8_PARTITIONS=(9 9 10)
 F8_NAMES=(a-left a-right b-left)
 F8_HTTP_PORTS=(28601 28602 28603)
 F8_PIDS=()
+# Rugregator's canonical absent-deadline SDK request fixture. Its witness is
+# valid, and every fresh shard DB can independently certify the same StateID.
+F8_LOAD_REQUEST=d9987684015820ffb36b55de9bfaf48b766d1f4e041a6c5d35ba23b402ea2a56a6c7692cb8f81ad998778602d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e6152415820c034e096d7bdf71ba759558663b5cafb7279ecb7e284443e5e6cbce0461aceeef6584154ca6b19a7dbcae7a6adc38af5c8672f81943ecaf51345436684299b4b7ac81a57db2653f32048981e37913db4749ca08d998d1fac4a52ab5579988bc2c50de90000
 
 f8_require_pin() {
   [ -x "$F8_BIN" ] || { echo "F8 requires executable RUGREGATOR_BIN" >&2; return 1; }
@@ -104,6 +107,7 @@ health=json.loads(__import__('urllib.request').request.urlopen('http://127.0.0.1
 if row is None: raise SystemExit(f"missing certified shard {part}/{shard}")
 print(json.dumps({'shard':os.environ['F8_NAME'],'partition':part,'shardId':shard,
  'rootRound':state['roundNumber'],'certifiedIRRound':row['roundNumber'],
+ 'stateRoot':row['stateRoot'],
  'authorizedTRRound':row['trRound'],'authorizedTRLeader':row['trLeader'],
  'evmBlockHeight':int(os.environ['F8_EVM'],16),'aggregatorBlockHeight':int(health['blockNumber'])},sort_keys=True))
 PY
@@ -160,14 +164,55 @@ PY
 }
 
 f8_slow_stop_resume_evm() {
-  local i pid
-  # Exercise both a delayed EVM participant and a fully stopped EVM partition while
-  # the three aggregator processes continue to receive root certificates.
+  local i pid port response progress=false
+  f8_trace >/dev/null
+  python3 - "$F8_LOG_DIR/trace.jsonl" "$F8_LOG_DIR/evm-stop-before.json" <<'PY'
+import json,sys
+rows=[json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+latest={r['shard']:r for r in rows if r['shard'] in ('a-left','a-right','b-left')}
+if len(latest)!=3: raise SystemExit('missing baseline trace for all aggregator shards')
+json.dump(latest,open(sys.argv[2],'w'),sort_keys=True)
+PY
+  # Pause every EVM validator, then place a real SDK certification request on
+  # each aggregator so each partition must commit a new RSMT state root.
   for i in $(seq 1 "$validators"); do pid=$(cat "test-nodes/evm$i/pid"); kill -STOP "$pid"; done
+  for i in $(seq 1 "$validators"); do
+    pid=$(cat "test-nodes/evm$i/pid")
+    [[ "$(ps -o stat= -p "$pid" | tr -d ' ')" == *T* ]] || { echo "EVM validator $i did not stop" >&2; return 1; }
+  done
   sleep 4
-  f8_trace
-  sleep 8
-  f8_trace
+  f8_trace >/dev/null
+  for i in 0 1 2; do
+    port=${F8_HTTP_PORTS[$i]}
+    response=$(curl -fsS -H 'content-type: application/json' \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"certification_request\",\"params\":\"$F8_LOAD_REQUEST\"}" \
+      "http://127.0.0.1:$port/") || return 1
+    echo "$response" | jq -e '.result.status == "SUCCESS"' >/dev/null || {
+      echo "${F8_NAMES[$i]} rejected the mixed-lane certification request: $response" >&2; return 1;
+    }
+    echo "submitted real certification request to ${F8_NAMES[$i]} while EVM was stopped"
+  done
+  for _ in $(seq 1 90); do
+    f8_trace >/dev/null
+    if python3 - "$F8_LOG_DIR/trace.jsonl" "$F8_LOG_DIR/evm-stop-before.json" "$F8_LOG_DIR/evm-stop-after.json" <<'PY'
+import json,sys
+rows=[json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+before=json.load(open(sys.argv[2]))
+latest={r['shard']:r for r in rows if r['shard'] in before}
+if len(latest)==3 and all(
+    int(latest[name]['certifiedIRRound']) > int(before[name]['certifiedIRRound'])
+    and int(latest[name]['aggregatorBlockHeight']) > int(before[name]['aggregatorBlockHeight'])
+    and latest[name]['stateRoot'] != before[name]['stateRoot']
+    for name in before):
+    json.dump(latest,open(sys.argv[3],'w'),sort_keys=True)
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+    then progress=true; break; fi
+    sleep 1
+  done
+  $progress || { echo "aggregator certified roots did not advance during the EVM stop" >&2; return 1; }
+  cat "$F8_LOG_DIR/evm-stop-after.json"
   for i in $(seq 1 "$validators"); do pid=$(cat "test-nodes/evm$i/pid"); kill -CONT "$pid"; done
   sleep 8
   f8_trace
@@ -181,7 +226,16 @@ for shard in ('a-left','a-right','b-left'):
         raise SystemExit(f'{shard}: authorized TR did not advance while EVM was paused')
     if int(samples[-1]['rootRound']) <= int(samples[0]['rootRound']):
         raise SystemExit(f'{shard}: root round did not advance')
-print('all three shard TRs and root rounds advanced across EVM pause/resume')
+before=json.load(open(sys.argv[1].replace('trace.jsonl','evm-stop-before.json')))
+after=json.load(open(sys.argv[1].replace('trace.jsonl','evm-stop-after.json')))
+for shard in before:
+    if int(after[shard]['certifiedIRRound']) <= int(before[shard]['certifiedIRRound']):
+        raise SystemExit(f'{shard}: certified IR round did not advance during EVM stop')
+    if int(after[shard]['aggregatorBlockHeight']) <= int(before[shard]['aggregatorBlockHeight']):
+        raise SystemExit(f'{shard}: aggregator block height did not advance during EVM stop')
+    if after[shard]['stateRoot'] == before[shard]['stateRoot']:
+        raise SystemExit(f'{shard}: certified state root did not advance during EVM stop')
+print('all three aggregator shards certified new state roots and rounds while EVM was stopped; TR and root rounds advanced across pause/resume')
 PY
 }
 

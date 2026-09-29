@@ -153,7 +153,7 @@ func Test_roundInfoHandler(t *testing.T) {
 						{
 							Partition: 1,
 							Shard:     types.ShardID{},
-							IR:        &types.InputRecord{RoundNumber: 11, Epoch: 1},
+							IR:        &types.InputRecord{RoundNumber: 11, Epoch: 1, Hash: []byte{0xab, 0xcd}},
 							IRTR:      certification.TechnicalRecord{Round: 13, Leader: "shard-leader"},
 						},
 					},
@@ -179,6 +179,7 @@ func Test_roundInfoHandler(t *testing.T) {
 					EpochNumber: 1,
 					TRRound:     13,
 					TRLeader:    "shard-leader",
+					StateRoot:   "0xabcd",
 				},
 			},
 		}

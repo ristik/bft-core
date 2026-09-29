@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -528,6 +529,7 @@ type (
 		EpochNumber uint64            `json:"epochNumber,string"`
 		TRRound     uint64            `json:"trRound,string"`
 		TRLeader    string            `json:"trLeader"`
+		StateRoot   string            `json:"stateRoot"`
 	}
 	roundInfoResponse struct {
 		RoundNumber     uint64      `json:"roundNumber,string"`
@@ -554,6 +556,7 @@ func getRoundInfoHandler(getState func() (*abdrc.StateMsg, error), obs Observabi
 				EpochNumber: si.IR.Epoch,
 				TRRound:     si.IRTR.Round,
 				TRLeader:    si.IRTR.Leader,
+				StateRoot:   "0x" + hex.EncodeToString(si.IR.Hash),
 			})
 		}
 		response := roundInfoResponse{

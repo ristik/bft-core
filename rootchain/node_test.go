@@ -23,6 +23,8 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier/rsmt"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -561,6 +563,162 @@ func Test_partitionMsgLoop(t *testing.T) {
 			t.Error("msg loop didn't quit within timeout")
 		}
 	})
+}
+
+func TestInvalidRSMTRootClaimsDoNotBlockAnotherShard(t *testing.T) {
+	var oldKey, newKey [32]byte
+	oldKey[0], newKey[0] = 0x00, 0x80
+	oldValue, newValue := []byte("old"), []byte("new")
+	oldLeaf := rsmt.HashLeaf(oldKey, oldValue)
+	newLeaf := rsmt.HashLeaf(newKey, newValue)
+	newRoot := rsmt.HashNode(oldLeaf, newLeaf, 0, rsmt.PrefixRegion(oldKey, 0))
+	proofStream := append([]byte{0x04}, oldKey[:]...) // O_L(old key, old value)
+	proofStream = append(proofStream, 0, byte(len(oldValue)))
+	proofStream = append(proofStream, oldValue...)
+	proofStream = append(proofStream, 0x01, 0x02, 0) // L(new leaf), N(0)
+	proof, err := rsmt.EncodeEnvelope([]rsmt.Leaf{{Key: newKey, Value: newValue}}, proofStream)
+	require.NoError(t, err)
+	oldRoot := append([]byte(nil), oldLeaf[:]...)
+	claimedNewRoot := append([]byte(nil), newRoot[:]...)
+
+	shardID := func(t *testing.T, text string) types.ShardID {
+		t.Helper()
+		var id types.ShardID
+		require.NoError(t, id.UnmarshalText([]byte(text)))
+		return id
+	}
+
+	for _, tc := range []struct {
+		name       string
+		mutatePrev bool
+	}{
+		{name: "claimed prior root", mutatePrev: true},
+		{name: "claimed new root"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			badShard, healthyShard := shardID(t, "0x40"), shardID(t, "0xc0")
+			nodeID, nodeID2 := generateNodeID(t).String(), generateNodeID(t).String()
+			signer, verifier := testsig.CreateSignerAndVerifier(t)
+			sigKey, err := verifier.MarshalPublicKey()
+			require.NoError(t, err)
+			validators := []*types.NodeInfo{{NodeID: nodeID, SigKey: sigKey}, {NodeID: nodeID2, SigKey: sigKey}}
+
+			makeShardInfo := func(id types.ShardID, root []byte) *storage.ShardInfo {
+				t.Helper()
+				const partition = types.PartitionID(9)
+				stamp := types.NewTimestamp()
+				lastInput := &types.InputRecord{
+					Version: 1, PreviousHash: test.RandomBytes(32), Hash: append([]byte(nil), root...),
+					BlockHash: test.RandomBytes(32), SummaryValue: []byte{1}, RoundNumber: 3864,
+					Epoch: 2, Timestamp: stamp,
+				}
+				last := certification.CertificationResponse{
+					Partition: partition, Shard: id,
+					UC: types.UnicityCertificate{
+						InputRecord:            lastInput,
+						UnicityTreeCertificate: &types.UnicityTreeCertificate{Version: 1, Partition: partition},
+						UnicitySeal:            &types.UnicitySeal{Timestamp: stamp},
+					},
+				}
+				require.NoError(t, last.SetTechnicalRecord(certification.TechnicalRecord{
+					Round: 3864, Epoch: 2, Leader: nodeID, StatHash: []byte("state hash"), FeeHash: []byte("fee hash"),
+				}))
+				require.NoError(t, last.IsValid())
+				conf := &types.PartitionDescriptionRecord{
+					Version: 1, NetworkID: 5, PartitionID: partition, ShardID: id, Epoch: 2,
+					T2Timeout:       2 * time.Second,
+					PartitionParams: map[string]string{"proof_type": "aggregator_rsmt_v1"},
+					Validators:      validators,
+				}
+				si, err := storage.NewShardInfo(conf, crypto.SHA256)
+				require.NoError(t, err)
+				si.LastCR = &last
+				require.NoError(t, si.IsValid())
+				si.RootHash = append([]byte(nil), root...)
+				require.Equal(t, root, si.RootHash)
+				return si
+			}
+
+			badPrior := append([]byte(nil), oldRoot...)
+			badNew := append([]byte(nil), claimedNewRoot...)
+			if tc.mutatePrev {
+				badPrior[0] ^= 0x01
+			} else {
+				badNew[0] ^= 0x01
+			}
+			badCurrentRoot := oldRoot
+			badClaimedNew := claimedNewRoot
+			if tc.mutatePrev {
+				badCurrentRoot = badPrior
+			} else {
+				badClaimedNew = badNew
+			}
+			badInfo := makeShardInfo(badShard, badCurrentRoot)
+			healthyInfo := makeShardInfo(healthyShard, oldRoot)
+			makeRequest := func(id types.ShardID, node string, si *storage.ShardInfo, nextRoot []byte) certification.BlockCertificationRequest {
+				t.Helper()
+				ir := si.LastCR.UC.InputRecord.NewRepeatIR()
+				ir.PreviousHash = append([]byte(nil), si.RootHash...)
+				ir.Hash = append([]byte(nil), nextRoot...)
+				ir.BlockHash = test.RandomBytes(32)
+				req := certification.BlockCertificationRequest{
+					PartitionID: si.PartitionID, ShardID: id, NodeID: node,
+					InputRecord: ir, BlockSize: 1, StateSize: 2, ZkProof: append([]byte(nil), proof...),
+				}
+				require.NoError(t, req.Sign(signer))
+				require.NoError(t, si.ValidRequest(&req))
+				return req
+			}
+			invalid := makeRequest(badShard, nodeID, badInfo, badClaimedNew)
+			var statuses []uint32
+			partNet := mockPartitionNet{send: func(_ context.Context, msg any, _ ...p2peer.ID) error {
+				resp, ok := msg.(*certification.CertificationResponse)
+				require.True(t, ok, "expected a certification response, got %T", msg)
+				statuses = append(statuses, resp.Status)
+				return nil
+			}}
+			var certified []consensus.IRChangeRequest
+			cm := mockConsensusManager{
+				shardInfo: func(partition types.PartitionID, id types.ShardID) (*storage.ShardInfo, error) {
+					require.Equal(t, types.PartitionID(9), partition)
+					switch id.Key() {
+					case badShard.Key():
+						return badInfo, nil
+					case healthyShard.Key():
+						return healthyInfo, nil
+					default:
+						return nil, fmt.Errorf("unexpected shard %s", id)
+					}
+				},
+				requestCert: func(_ context.Context, req consensus.IRChangeRequest) error {
+					certified = append(certified, req)
+					return nil
+				},
+			}
+			node, err := New(&network.Peer{}, partNet, cm, testobservability.NOPObservability())
+			require.NoError(t, err)
+
+			err = node.onBlockCertificationRequest(t.Context(), &invalid)
+			require.ErrorIs(t, err, zkverifier.ErrProofVerificationFailed)
+			require.Equal(t, []uint32{certification.CertStatusProofInvalid}, statuses)
+			require.Empty(t, certified, "a false root claim must not enter root consensus")
+
+			first := makeRequest(healthyShard, nodeID, healthyInfo, claimedNewRoot)
+			second := first
+			second.NodeID = nodeID2
+			second.InputRecord = first.InputRecord.NewRepeatIR()
+			second.ZkProof = append([]byte(nil), first.ZkProof...)
+			require.NoError(t, second.Sign(signer))
+			require.NoError(t, node.onBlockCertificationRequest(t.Context(), &first))
+			require.NoError(t, node.onBlockCertificationRequest(t.Context(), &second))
+			require.Len(t, certified, 1, "the other shard reaches certification in the same node window")
+			require.Equal(t, healthyShard, certified[0].Shard)
+			require.Equal(t, types.PartitionID(9), certified[0].Partition)
+			require.Len(t, certified[0].Requests, 2)
+			require.Equal(t, []uint32{certification.CertStatusProofInvalid}, statuses,
+				"the healthy shard is not rejected with the bad shard's proof response")
+		})
+	}
 }
 
 func Test_onBlockCertificationRequest(t *testing.T) {
