@@ -274,7 +274,13 @@ f8_reconnect_probe() {
 }
 
 f8_stop() {
-  local i
+  local i evmPid
+  # The EVM probe may have failed while validators were SIGSTOP'd. Resume them
+  # before the parent lane's ownership-scoped teardown signals its node PIDs.
+  for i in $(seq 1 "$validators"); do
+    evmPid=$(cat "test-nodes/evm$i/pid" 2>/dev/null || true)
+    [ -n "$evmPid" ] && kill -CONT "$evmPid" 2>/dev/null || true
+  done
   for i in 0 1 2; do
     [ -n "${F8_PIDS[$i]:-}" ] && kill "${F8_PIDS[$i]}" 2>/dev/null || true
   done
