@@ -158,6 +158,51 @@ func TestEngineAPIGenesis_AllocSourceIsUsedVerbatim(t *testing.T) {
 	require.Contains(t, doc.Alloc, registryAllocKey(), "the pinned registry account must still be inserted")
 }
 
+func TestEngineAPIGenesis_ManifestCompilesIntoStandardPipeline(t *testing.T) {
+	shardConf := writeGenesisShardConf(t)
+	manifestPath := filepath.Join(t.TempDir(), "allocation-build.json")
+	collector := "0x3000000000000000000000000000000000000001"
+	manifest := registrygenesis.AllocationManifest{
+		Version: registrygenesis.AllocationManifestVersion, NativeSupply: "100",
+		Chain: registrygenesis.ManifestChain{ChainID: 1337, Forks: registrygenesis.ManifestForks{
+			TerminalTotalDifficulty: "0", TerminalTotalDifficultyPassed: true,
+		}},
+		Genesis: registrygenesis.ManifestGenesis{GasLimit: 30_000_000, BaseFeePerGas: "1000000000"},
+		Addresses: registrygenesis.ManifestAddresses{
+			System: registrygenesis.SystemAddress.Hex(), Registry: registryproof.RegistryAddress.Hex(),
+			FeeCollector: collector, WUCT: "0x3000000000000000000000000000000000000002",
+			Treasury:    "0x3000000000000000000000000000000000000003",
+			TeamVesting: "0x3000000000000000000000000000000000000004", EcosystemVesting: "0x3000000000000000000000000000000000000005",
+		},
+		FeeBeneficiary: collector,
+		FeeSplit:       registrygenesis.ManifestFeeSplit{TreasuryBps: 10_000},
+		Allocations: []registrygenesis.ManifestAllocation{
+			{Purpose: "test_eoa", Recipient: "0x1000000000000000000000000000000000000001", Kind: "eoa", Amount: "90"},
+			{Purpose: "test_collector", Recipient: collector, Kind: "contract_pot", Amount: "10"},
+		},
+		BootstrapGasBudgets: []registrygenesis.ManifestGasBudget{{Recipient: "0x1000000000000000000000000000000000000001", Gas: 100_000}},
+		Contracts: []registrygenesis.ManifestContract{
+			{Name: "feeCollector", Address: collector, Artifact: "synthetic/fee-collector.json", SHA256: strings.Repeat("a", 64)},
+			{Name: "wuct", Address: "0x3000000000000000000000000000000000000002", Artifact: "synthetic/wuct.json", SHA256: strings.Repeat("b", 64)},
+			{Name: "teamVesting", Address: "0x3000000000000000000000000000000000000004", Artifact: "synthetic/team-vault.json", SHA256: strings.Repeat("c", 64)},
+			{Name: "ecosystemVesting", Address: "0x3000000000000000000000000000000000000005", Artifact: "synthetic/ecosystem-vault.json", SHA256: strings.Repeat("d", 64)},
+		},
+	}
+	manifestBytes, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifestPath, manifestBytes, 0o600))
+	out := filepath.Join(t.TempDir(), "genesis.json")
+	_, err = runEngineAPIGenesis(t, "--shard-conf", shardConf, "--out", out, "--manifest", manifestPath)
+	require.NoError(t, err)
+	doc := readFinalizedGenesis(t, out)
+	require.Equal(t, "0x5a", doc.Alloc["0x1000000000000000000000000000000000000001"].Balance)
+	require.Equal(t, "0xa", doc.Alloc[strings.ToLower(collector)].Balance)
+	require.Contains(t, doc.Alloc, registryAllocKey())
+
+	_, err = runEngineAPIGenesis(t, "--shard-conf", shardConf, "--out", filepath.Join(t.TempDir(), "conflict.json"), "--manifest", manifestPath, "--alloc-source", manifestPath)
+	require.ErrorContains(t, err, "mutually exclusive")
+}
+
 // TestEngineAPIGenesis_WritesTheFullShardConf is the other half of F4f section 2's output: the full
 // shard configuration (the base conf plus seal_registry_genesis), whose hash is the fullShardConfHash
 // an observation's ShardConfHash must equal. A node handed only the base conf can never satisfy that
