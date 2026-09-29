@@ -730,17 +730,17 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 			certificateEpoch := cr.UC.GetRootEpoch()
 			if currentEpoch, active := history.CurrentRootEpoch(); active && history.IsV2Epoch(certificateEpoch) && certificateEpoch < currentEpoch {
 				if err := cr.IsValid(); err != nil {
-					return fmt.Errorf("invalid certification response: %w", err)
+					return fmt.Errorf("%w: %w", ErrStaleEpochCertificateInvalid, err)
 				}
 				if cr.Partition != c.partitionID || !cr.Shard.Equal(c.shardID) {
-					return fmt.Errorf("certification response for wrong shard %s-%s", cr.Partition, cr.Shard)
+					return fmt.Errorf("%w: certification response for %s-%s", ErrStaleEpochResponseWrongShard, cr.Partition, cr.Shard)
 				}
 				tb, err := c.trustBaseStore.GetByEpoch(ctx, certificateEpoch)
 				if err != nil {
 					return fmt.Errorf("loading trust base for epoch %d: %w", certificateEpoch, err)
 				}
 				if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, c.shardConfHash); err != nil {
-					return fmt.Errorf("verifying unicity certificate: %w", err)
+					return fmt.Errorf("%w: %w", ErrStaleEpochCertificateInvalid, err)
 				}
 				if c.log != nil {
 					c.log.DebugContext(ctx, "dropping verified certificate from retired root epoch",

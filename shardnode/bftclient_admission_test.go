@@ -1,6 +1,7 @@
 package shardnode
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"errors"
@@ -268,6 +269,85 @@ func TestConfiguredAdmissionDropsVerifiedStaleV2CertificateBeforeReadinessGate(t
 	futureEpoch4 := certificateAt(4)
 	require.ErrorIs(t, client.handleCertificationResponse(context.Background(), futureEpoch4), ErrProfile2Unready,
 		"a future epoch remains gated until its handoff is active")
+}
+
+func TestConfiguredAdmissionRejectsUnverifiedStaleV2Certificate(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*certification.CertificationResponse)
+	}{
+		{
+			name: "forged seal signature",
+			mutate: func(response *certification.CertificationResponse) {
+				for signer, signature := range response.UC.UnicitySeal.Signatures {
+					forged := bytes.Clone(signature)
+					forged[0] ^= 0xff
+					response.UC.UnicitySeal.Signatures[signer] = forged
+					break
+				}
+			},
+		},
+		{
+			name: "wrong committed hash",
+			mutate: func(response *certification.CertificationResponse) {
+				ir := *response.UC.InputRecord
+				ir.Hash = bytes.Clone(ir.Hash)
+				ir.Hash[0] ^= 0xff
+				response.UC.InputRecord = &ir
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newConfBindingFixture(t)
+			client, _ := newAdmissionTestClient(t, &admissionSink{}, &admissionTestNet{})
+			client.trustBaseStore = activeV2AdmissionTrustStore{stubTrustBaseStore{tb: f.tb}}
+			client.admission = &admissionTestSession{epoch: 3, profile2Ready: true, callbacks: AdmissionCallbacks{
+				AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {},
+			}}
+
+			uc := *f.ucMine
+			seal := *uc.UnicitySeal
+			uc.UnicitySeal = &seal
+			seal.Epoch = 2
+			seal.Signatures = nil
+			for signer := range f.ucMine.UnicitySeal.Signatures {
+				require.NoError(t, seal.Sign(signer, f.signer))
+			}
+			response := f.respond(&uc)
+			require.NoError(t, response.IsValid())
+			tc.mutate(response)
+
+			err := client.handleCertificationResponse(context.Background(), response)
+			require.ErrorIs(t, err, ErrStaleEpochCertificateInvalid,
+				"an unverified epoch-2 response must not take the verified-stale drop path")
+			require.NotErrorIs(t, err, ErrProfile2Unready)
+		})
+	}
+}
+
+func TestConfiguredAdmissionRejectsStaleV2CertificateForWrongShard(t *testing.T) {
+	f := newConfBindingFixture(t)
+	client, _ := newAdmissionTestClient(t, &admissionSink{}, &admissionTestNet{})
+	client.trustBaseStore = activeV2AdmissionTrustStore{stubTrustBaseStore{tb: f.tb}}
+	client.admission = &admissionTestSession{epoch: 3, profile2Ready: true, callbacks: AdmissionCallbacks{
+		AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {},
+	}}
+
+	uc := *f.ucMine
+	seal := *uc.UnicitySeal
+	uc.UnicitySeal = &seal
+	seal.Epoch = 2
+	seal.Signatures = nil
+	for signer := range f.ucMine.UnicitySeal.Signatures {
+		require.NoError(t, seal.Sign(signer, f.signer))
+	}
+	response := f.respond(&uc)
+	_, wrongShard := (types.ShardID{}).Split()
+	response.Shard = wrongShard
+
+	err := client.handleCertificationResponse(context.Background(), response)
+	require.ErrorIs(t, err, ErrStaleEpochResponseWrongShard,
+		"a stale response addressed to another shard cannot be silently discarded")
 }
 
 func TestConfiguredAdmissionFeedRenewalSurvivesPersistenceFailure(t *testing.T) {
