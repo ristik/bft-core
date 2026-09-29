@@ -52,6 +52,36 @@ func newEngineAPICmd(baseFlags *baseFlags) *cobra.Command {
 		Short: "Tools for the Engine API executor",
 	}
 	cmd.AddCommand(engineAPIGenesisCmd(baseFlags))
+	cmd.AddCommand(engineAPIExportManifestCmd())
+	return cmd
+}
+
+func engineAPIExportManifestCmd() *cobra.Command {
+	var manifest, out string
+	cmd := &cobra.Command{
+		Use:   "export-manifest",
+		Short: "Execute pinned genesis constructors and export initialized account state",
+		Long:  "Run the pinned FeeCollector, WUCT, and vesting-vault constructors in an in-process Cancun EVM, then write the constructor-executed contract accounts into a new manifest. The operation is offline and deterministic; pass the exported file to engine-api genesis --manifest.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if manifest == "" || out == "" {
+				return fmt.Errorf("--manifest and --out are required")
+			}
+			data, err := os.ReadFile(manifest)
+			if err != nil {
+				return fmt.Errorf("reading manifest %q: %w", manifest, err)
+			}
+			exported, err := registrygenesis.ExportAllocationManifest(data)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(out, exported, 0o644); err != nil {
+				return fmt.Errorf("writing exported manifest %q: %w", out, err)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&manifest, "manifest", "", "versioned allocation/build manifest to export")
+	cmd.Flags().StringVar(&out, "out", "", "path to write constructor-exported manifest")
 	return cmd
 }
 
@@ -74,10 +104,11 @@ The output is the FINALIZED genesis: registrygenesis.PrepareGenesisJSON inserts 
 SealRegistry account at a_sr (its runtime code and the 22 initialized storage words) into the
 source allocation and derives the full shard configuration and genesis origin from it.
 
-Use --manifest to compile a strict versioned allocation/build manifest into the same standard JSON
-source pipeline. The manifest's chain ID must match the shard configuration, its fee beneficiary
-must be its declared FeeCollector, and allocation balances must sum exactly to nativeSupply. Contract
-artifact references are recorded metadata only; this command does not deploy or export contracts.
+Use --manifest with a strict versioned allocation/build manifest exported by
+engine-api export-manifest. The exporter executes and verifies the pinned constructors; this
+command reruns them and refuses contract state that differs from the verified output. The manifest's
+chain ID must match the shard configuration, its fee beneficiary must retain the exported
+FeeCollector code, and allocation balances must sum exactly to nativeSupply.
 
 Two artifacts are written. --out is the finalized standard JSON the execution client is started
 from. --full-shard-conf (default: beside --out) is the full shard configuration — the base conf

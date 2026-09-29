@@ -28,13 +28,13 @@
   "addresses": {
     "system": "0xff00000000000000000000000000000000000001",
     "registry": "0xff00000000000000000000000000000000000002",
-    "feeCollector": "0x3000000000000000000000000000000000000001",
-    "wuct": "0x3000000000000000000000000000000000000002",
+    "feeCollector": "0x9B137463d4E7986D7f535f9B79e28b4EF1938E9b",
+    "wuct": "0x2387b3383E89c164781d173B7Aa14d9c46eD2642",
     "treasury": "0x1000000000000000000000000000000000000001",
-    "teamVesting": "0x3000000000000000000000000000000000000003",
-    "ecosystemVesting": "0x3000000000000000000000000000000000000004"
+    "teamVesting": "0x22bc2df58D96CBc5f2599f2C25D1E565974749EE",
+    "ecosystemVesting": "0x7bBCFa8c109B0a6888d3329a6B762Ad4782e0B26"
   },
-  "feeBeneficiary": "0x3000000000000000000000000000000000000001",
+  "feeBeneficiary": "0x9B137463d4E7986D7f535f9B79e28b4EF1938E9b",
   "feeSplit": {
     "treasuryBps": 10000,
     "rewardBps": 0
@@ -45,28 +45,6 @@
       "recipient": "0x1000000000000000000000000000000000000001",
       "kind": "eoa",
       "amount": "400000000000000000000000000"
-    },
-    {
-      "purpose": "team_vesting",
-      "recipient": "0x3000000000000000000000000000000000000003",
-      "kind": "contract_pot",
-      "amount": "200000000000000000000000000",
-      "schedule": {
-        "start": 0,
-        "cliff": 31536000,
-        "duration": 126144000
-      }
-    },
-    {
-      "purpose": "ecosystem_vesting",
-      "recipient": "0x3000000000000000000000000000000000000004",
-      "kind": "contract_pot",
-      "amount": "300000000000000000000000000",
-      "schedule": {
-        "start": 0,
-        "cliff": 0,
-        "duration": 126144000
-      }
     },
     {
       "purpose": "bootstrap_validator_gas",
@@ -85,6 +63,44 @@
       "recipient": "0x1000000000000000000000000000000000000004",
       "kind": "eoa",
       "amount": "33333333333333333333333334"
+    },
+    {
+      "purpose": "team_vesting",
+      "recipient": "0x22bc2df58D96CBc5f2599f2C25D1E565974749EE",
+      "kind": "contract_pot",
+      "amount": "200000000000000000000000000",
+      "schedule": {
+        "start": 0,
+        "cliff": 31536000,
+        "duration": 126144000
+      },
+      "beneficiary": "0x1000000000000000000000000000000000000005",
+      "beneficiaryKind": "eoa"
+    },
+    {
+      "purpose": "wuct_contract",
+      "recipient": "0x2387b3383E89c164781d173B7Aa14d9c46eD2642",
+      "kind": "contract_pot",
+      "amount": "0"
+    },
+    {
+      "purpose": "ecosystem_vesting",
+      "recipient": "0x7bBCFa8c109B0a6888d3329a6B762Ad4782e0B26",
+      "kind": "contract_pot",
+      "amount": "300000000000000000000000000",
+      "schedule": {
+        "start": 0,
+        "cliff": 0,
+        "duration": 126144000
+      },
+      "beneficiary": "0x1000000000000000000000000000000000000006",
+      "beneficiaryKind": "eoa"
+    },
+    {
+      "purpose": "fee_collector_contract",
+      "recipient": "0x9B137463d4E7986D7f535f9B79e28b4EF1938E9b",
+      "kind": "contract_pot",
+      "amount": "0"
     }
   ],
   "bootstrapGasBudgets": [
@@ -104,27 +120,37 @@
   "contracts": [
     {
       "name": "feeCollector",
-      "address": "0x3000000000000000000000000000000000000001",
-      "artifact": "synthetic/fee-collector-artifact.json#/runtime",
-      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "address": "0x9B137463d4E7986D7f535f9B79e28b4EF1938E9b",
+      "artifact": "testdata/t1-artifacts/fee-collector.json",
+      "sha256": "f07711f6a837683628043408949c6e5443e4d1655df3ce66249a5279570fe58a",
+      "sourceCommit": "e7eb3216549b772a9e1df2b1214976d7dd9e6e62"
     },
     {
       "name": "wuct",
-      "address": "0x3000000000000000000000000000000000000002",
-      "artifact": "synthetic/wuct-artifact.json#/runtime",
-      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      "address": "0x2387b3383E89c164781d173B7Aa14d9c46eD2642",
+      "artifact": "testdata/t1-artifacts/wuct.json",
+      "sha256": "d7d80b17a53c4889e76b8986e9169f2cba272309965e1f032218ebbaa9aca0db",
+      "sourceCommit": "e7eb3216549b772a9e1df2b1214976d7dd9e6e62"
     },
     {
       "name": "teamVesting",
-      "address": "0x3000000000000000000000000000000000000003",
-      "artifact": "synthetic/vesting-artifact.json#/runtime",
-      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      "address": "0x22bc2df58D96CBc5f2599f2C25D1E565974749EE",
+      "artifact": "testdata/t1-artifacts/vesting.json",
+      "sha256": "18d059fae21cc9adc34fe825cb3997a0bde32f128e02551dd48e35ffecb9b242",
+      "sourceCommit": "e7eb3216549b772a9e1df2b1214976d7dd9e6e62"
     },
     {
       "name": "ecosystemVesting",
-      "address": "0x3000000000000000000000000000000000000004",
-      "artifact": "synthetic/vesting-artifact.json#/runtime",
-      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      "address": "0x7bBCFa8c109B0a6888d3329a6B762Ad4782e0B26",
+      "artifact": "testdata/t1-artifacts/vesting.json",
+      "sha256": "18d059fae21cc9adc34fe825cb3997a0bde32f128e02551dd48e35ffecb9b242",
+      "sourceCommit": "e7eb3216549b772a9e1df2b1214976d7dd9e6e62"
     }
-  ]
+  ],
+  "deployment": {
+    "deployer": "0x000000000000000000000000000000000000dEaD",
+    "firstNonce": 0,
+    "blockNumber": 0,
+    "timestamp": 1700000000
+  }
 }
