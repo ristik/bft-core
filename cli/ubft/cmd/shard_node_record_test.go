@@ -45,7 +45,7 @@ func TestShardNodeRun_GateFlagRequiresTheRecordStore(t *testing.T) {
 	bin := buildUbft(t)
 	home, shardConf, trustBase := shardHome(t, bin)
 
-	out, code, timedOut := runShardNodeArgs(t, bin, 45*time.Second,
+	out, code, timedOut := runShardNodeArgs(t, bin, 5*time.Second,
 		"--home", home, "--address", "/ip4/127.0.0.1/tcp/0",
 		"--shard-conf", shardConf, "--trust-base", trustBase,
 		"--log-format", "text", "--log-level", "info",
@@ -92,7 +92,7 @@ func TestShardNodeRun_CertifiedRecordStoreFailsClosed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := filepath.Join(t.TempDir(), "certified.db")
 			args := append(append(append([]string{}, common...), tc.args...), "--certified-record-store", store)
-			out, code, timedOut := runShardNodeArgs(t, bin, 45*time.Second, args...)
+			out, code, timedOut := runShardNodeArgs(t, bin, 5*time.Second, args...)
 
 			require.False(t, timedOut, "startup must fail closed promptly:\n%s", out)
 			require.NotEqual(t, 0, code, "startup must exit non-zero:\n%s", out)
