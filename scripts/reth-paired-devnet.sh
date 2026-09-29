@@ -112,6 +112,9 @@ cleanup() {
   for d in $negativeReths; do
     stop_pidfile "test-nodes/$d/pid" 'reth.* node' INT
   done
+  for p in $(owned_pids 'reth.* node'); do
+    kill -INT "$p" 2>/dev/null || true
+  done
   wait 2>/dev/null || true
   if [ "${M2_PROFILE2:-0}" = 1 ]; then
     mkdir -p "$M2_RUN_LOG_DIR"
@@ -707,16 +710,17 @@ preflightFailures=$failures
 echo "waiting for block 1 and a certificate (up to 180s) ..."
 mined=false
 certified=false
-for _ in $(seq 1 90); do
+for attempt in $(seq 1 90); do
   rcpt=$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionReceipt "[\"$txHash\"]")
-  blkNum=$(echo "$rcpt" | pyget "['result']['blockNumber']")
+  blkNum=$(echo "$rcpt" | pyget "['result']['blockNumber']" || true)
   if [ -n "$blkNum" ] && [ "$blkNum" != "None" ]; then mined=true; fi
-  blkHash=$(echo "$rcpt" | pyget "['result']['blockHash']")
+  blkHash=$(echo "$rcpt" | pyget "['result']['blockHash']" || true)
   if [ -n "$blkHash" ] && [ "$blkHash" != "None" ]; then
     blkHash=${blkHash#0x}
     if grep -Eq 'msg="certificate admitted".* block='"$blkHash"' height=1 round=[0-9]+ rootRound=[0-9]+' \
       test-nodes/evm1/debug.log 2>/dev/null; then certified=true; fi
   fi
+  echo "  bootstrap probe $attempt: mined=$mined certified=$certified block=${blkNum:-none}"
   $mined && $certified && break
   sleep 2
 done
