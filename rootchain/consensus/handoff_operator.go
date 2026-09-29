@@ -582,7 +582,9 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	// An explicit old-set quorum abort has priority over every volatile plan
 	// lookup. The ordered parent record is the authority for the exact attempt,
 	// so this still works after restart has cleared handoffPlans.
-	if control.Phase == "prepared" || control.Phase == "endorsed" {
+	// The committed phase is unreachable past the guard above. Keep it in this
+	// branch so removing that guard would let stale quorum approvals build Abort.
+	if control.Phase == "prepared" || control.Phase == "endorsed" || control.Phase == "committed" {
 		previous, decodeErr := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
 		if decodeErr == nil {
 			target := abdrc.HandoffAbortTarget{Network: previous.Network, OldEpoch: previous.Epoch,

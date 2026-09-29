@@ -337,6 +337,26 @@ func TestExplicitAbortPrioritizesEndorsedPhaseWithoutPlanCache(t *testing.T) {
 	require.Equal(t, "abort", ordered.Kind)
 }
 
+func TestLeaderDoesNotBuildAbortAfterCommittedH(t *testing.T) {
+	cm, _, _, target, record := newExplicitAbortFixture(t)
+	parentQC := cm.blockStore.GetHighQc()
+	parent, err := cm.blockStore.Block(parentQC.GetRound())
+	require.NoError(t, err)
+	record.Kind = "commit"
+	record.FrozenID = bytes.Repeat([]byte{0x73}, 32)
+	record.SuccessorTRHash = bytes.Repeat([]byte{0x74}, 32)
+	parent.ShardState.Control.Phase = "committed"
+	parent.ShardState.Control.RecordBytes = record.Bytes()
+	key, err := handoffAbortKeyFor(target)
+	require.NoError(t, err)
+	cm.handoffAborts = map[handoffAbortKey]*pendingHandoffAbort{key: {
+		target: target, signatures: map[string]hex.Bytes{"old-quorum": {1}}, weight: cm.trustBase.Load().QuorumThreshold,
+	}}
+	records, err := cm.handoffRecordsForRound(parentQC.GetRound()+1, parentQC)
+	require.NoError(t, err)
+	require.Empty(t, records, "a quorum cached before H cannot make the leader build an Abort after H")
+}
+
 func TestExplicitAbortQuorumPrioritizesRecordWithoutHandoffPlanCache(t *testing.T) {
 	ctx := context.Background()
 	cm, net, nodes, target, record := newExplicitAbortFixture(t)

@@ -75,7 +75,7 @@ func TestCompetingHandoffAbortAndCommitFollowDurableVoteLocks(t *testing.T) {
 		restarted, err := NewSafetyModule(types.NetworkLocal, id, signer, db)
 		require.NoError(t, err)
 		_, err = restarted.MakeVote(second, bytes.Repeat([]byte{byte(i + 20)}, 32), nil, nil)
-		require.Error(t, err, "restart must retain the same-round vote lock")
+		require.ErrorIs(t, err, ErrAlreadyVotedForRound, "restart must retain the same-round vote lock")
 		require.NotNil(t, vote)
 		require.NoError(t, db.Close())
 	}

@@ -11,6 +11,7 @@ import (
 
 var (
 	ErrHandoffRecord = errors.New("invalid root handoff record")
+	ErrAbortAfterH   = errors.New("root handoff Abort follows committed H")
 	ErrHandoffSuffix = errors.New("nonempty old-epoch handoff suffix")
 	ErrHandoffFrozen = errors.New("EVM certification frozen by root handoff")
 )
@@ -102,6 +103,9 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 	}
 	if r.Network != network || r.Epoch != epoch || r.OrderedRound != round || previous.Network != network || previous.Epoch != epoch {
 		return nil, ErrHandoffRecord
+	}
+	if previous.Phase == "committed" && r.Kind == "abort" {
+		return nil, errors.Join(ErrHandoffRecord, ErrAbortAfterH)
 	}
 	if authority == nil || !bytes.Equal(r.PredecessorBodyID, authority.Predecessor()) || previous.Phase == "committed" {
 		return nil, ErrHandoffRecord
