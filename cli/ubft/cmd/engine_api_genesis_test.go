@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	gethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
@@ -167,7 +168,8 @@ func TestEngineAPIGenesis_ManifestCompilesIntoStandardPipeline(t *testing.T) {
 		Chain: registrygenesis.ManifestChain{ChainID: 1337, Forks: registrygenesis.ManifestForks{
 			TerminalTotalDifficulty: "0", TerminalTotalDifficultyPassed: true,
 		}},
-		Genesis: registrygenesis.ManifestGenesis{GasLimit: 30_000_000, BaseFeePerGas: "1000000000"},
+		Genesis:    registrygenesis.ManifestGenesis{GasLimit: 30_000_000, BaseFeePerGas: "1000000000"},
+		Deployment: registrygenesis.ManifestDeployment{Deployer: "0x000000000000000000000000000000000000dEaD"},
 		Addresses: registrygenesis.ManifestAddresses{
 			System: registrygenesis.SystemAddress.Hex(), Registry: registryproof.RegistryAddress.Hex(),
 			FeeCollector: collector, WUCT: "0x3000000000000000000000000000000000000002",
@@ -178,14 +180,14 @@ func TestEngineAPIGenesis_ManifestCompilesIntoStandardPipeline(t *testing.T) {
 		FeeSplit:       registrygenesis.ManifestFeeSplit{TreasuryBps: 10_000},
 		Allocations: []registrygenesis.ManifestAllocation{
 			{Purpose: "test_eoa", Recipient: "0x1000000000000000000000000000000000000001", Kind: "eoa", Amount: "90"},
-			{Purpose: "test_collector", Recipient: collector, Kind: "contract_pot", Amount: "10"},
+			{Purpose: "test_collector", Recipient: collector, Kind: "contract_pot", Amount: "10", State: &registrygenesis.ManifestAccountState{Code: "0x", CodeHash: gethcrypto.Keccak256Hash(nil).Hex(), Storage: map[string]string{}}},
 		},
 		BootstrapGasBudgets: []registrygenesis.ManifestGasBudget{{Recipient: "0x1000000000000000000000000000000000000001", Gas: 100_000}},
 		Contracts: []registrygenesis.ManifestContract{
-			{Name: "feeCollector", Address: collector, Artifact: "synthetic/fee-collector.json", SHA256: strings.Repeat("a", 64)},
-			{Name: "wuct", Address: "0x3000000000000000000000000000000000000002", Artifact: "synthetic/wuct.json", SHA256: strings.Repeat("b", 64)},
-			{Name: "teamVesting", Address: "0x3000000000000000000000000000000000000004", Artifact: "synthetic/team-vault.json", SHA256: strings.Repeat("c", 64)},
-			{Name: "ecosystemVesting", Address: "0x3000000000000000000000000000000000000005", Artifact: "synthetic/ecosystem-vault.json", SHA256: strings.Repeat("d", 64)},
+			{Name: "feeCollector", Address: collector, Artifact: "synthetic/fee-collector.json", SHA256: strings.Repeat("a", 64), SourceCommit: strings.Repeat("a", 40)},
+			{Name: "wuct", Address: "0x3000000000000000000000000000000000000002", Artifact: "synthetic/wuct.json", SHA256: strings.Repeat("b", 64), SourceCommit: strings.Repeat("b", 40)},
+			{Name: "teamVesting", Address: "0x3000000000000000000000000000000000000004", Artifact: "synthetic/team-vault.json", SHA256: strings.Repeat("c", 64), SourceCommit: strings.Repeat("c", 40)},
+			{Name: "ecosystemVesting", Address: "0x3000000000000000000000000000000000000005", Artifact: "synthetic/ecosystem-vault.json", SHA256: strings.Repeat("d", 64), SourceCommit: strings.Repeat("d", 40)},
 		},
 	}
 	manifestBytes, err := json.Marshal(manifest)

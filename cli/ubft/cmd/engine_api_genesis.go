@@ -52,6 +52,36 @@ func newEngineAPICmd(baseFlags *baseFlags) *cobra.Command {
 		Short: "Tools for the Engine API executor",
 	}
 	cmd.AddCommand(engineAPIGenesisCmd(baseFlags))
+	cmd.AddCommand(engineAPIExportManifestCmd())
+	return cmd
+}
+
+func engineAPIExportManifestCmd() *cobra.Command {
+	var manifest, out string
+	cmd := &cobra.Command{
+		Use:   "export-manifest",
+		Short: "Execute pinned genesis constructors and export initialized account state",
+		Long:  "Run the pinned FeeCollector, WUCT, and vesting-vault constructors in an in-process Cancun EVM, then write the constructor-executed contract accounts into a new manifest. The operation is offline and deterministic; pass the exported file to engine-api genesis --manifest.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if manifest == "" || out == "" {
+				return fmt.Errorf("--manifest and --out are required")
+			}
+			data, err := os.ReadFile(manifest)
+			if err != nil {
+				return fmt.Errorf("reading manifest %q: %w", manifest, err)
+			}
+			exported, err := registrygenesis.ExportAllocationManifest(data)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(out, exported, 0o644); err != nil {
+				return fmt.Errorf("writing exported manifest %q: %w", out, err)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&manifest, "manifest", "", "versioned allocation/build manifest to export")
+	cmd.Flags().StringVar(&out, "out", "", "path to write constructor-exported manifest")
 	return cmd
 }
 

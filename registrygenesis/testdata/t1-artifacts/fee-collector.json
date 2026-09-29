@@ -1,0 +1,292 @@
+{
+  "abi": [
+    {
+      "type": "constructor",
+      "inputs": [
+        {
+          "name": "treasury_",
+          "type": "address",
+          "internalType": "address payable"
+        },
+        {
+          "name": "treasuryShareBps_",
+          "type": "uint16",
+          "internalType": "uint16"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "receive",
+      "stateMutability": "payable"
+    },
+    {
+      "type": "function",
+      "name": "BPS",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "rewardPot",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "split",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "totalTreasuryCredits",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "totalTreasuryPaid",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "treasury",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address",
+          "internalType": "address payable"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "treasuryCredit",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "treasuryShareBps",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint16",
+          "internalType": "uint16"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "unallocatedBalance",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "withdraw",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "amount",
+          "type": "uint256",
+          "internalType": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "event",
+      "name": "Split",
+      "inputs": [
+        {
+          "name": "unallocated",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "treasuryCredit",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        },
+        {
+          "name": "rewardPot",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "event",
+      "name": "TreasuryWithdrawn",
+      "inputs": [
+        {
+          "name": "treasury",
+          "type": "address",
+          "indexed": true,
+          "internalType": "address"
+        },
+        {
+          "name": "amount",
+          "type": "uint256",
+          "indexed": false,
+          "internalType": "uint256"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "InvalidTreasury",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "InvalidTreasuryShare",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NativeTransferFailed",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ReentrancyGuardReentrantCall",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "TreasuryOnly",
+      "inputs": []
+    }
+  ],
+  "bytecode": "0x60c0346100c657601f61056338819003918201601f19168301916001600160401b038311848410176100ca5780849260409485528339810103126100c65780516001600160a01b038116918282036100c657602001519161ffff8316908184036100c65760015f55156100b757612710106100a85760805260a05260405161048490816100df82396080518181816101d80152610243015260a05181818160ea01526103780152f35b633c51b41f60e11b5f5260045ffd5b6302979eb960e31b5f5260045ffd5b5f80fd5b634e487b7160e01b5f52604160045260245ffdfe608080604052600436101561001c575b50361561001a575f80fd5b005b5f3560e01c90816322f7f0f9146103b857508063249d39e91461039c57806330654a471461035e5780633ccfd60b146102245780636133d1dd1461020757806361d027b3146101c357806393ad7440146101a65780639583612e1461017c578063d08e89081461015f5763f765417614610096575f61000f565b3461015b575f36600319011261015b577fcf0974dfd867840133a0d4b02f1672f24017796fb8892d1e0d587692e4da90ab60606100e26100d947600154906103f3565b600254906103f3565b61011061ffff7f00000000000000000000000000000000000000000000000000000000000000001682610400565b61011a81836103f3565b90610127816001546103d2565b600155610136816003546103d2565b600355610145826002546103d2565b60025560405192835260208301526040820152a1005b5f80fd5b3461015b575f36600319011261015b576020600154604051908152f35b3461015b575f36600319011261015b57602061019e6100d947600154906103f3565b604051908152f35b3461015b575f36600319011261015b576020600254604051908152f35b3461015b575f36600319011261015b576040517f00000000000000000000000000000000000000000000000000000000000000006001600160a01b03168152602090f35b3461015b575f36600319011261015b576020600354604051908152f35b3461015b575f36600319011261015b5760025f541461034f5760025f557f00000000000000000000000000000000000000000000000000000000000000006001600160a01b031633819003610340576001545f600155610286816004546103d2565b6004555f80808084865af13d1561033b573d67ffffffffffffffff81116103275760405190601f8101601f19908116603f0116820167ffffffffffffffff8111838210176103275760405281525f60203d92013e5b15610318576020917f41fdd680478135993bc53fb2ffaf9560951b57ef62ff6badd02b61e018b4f17f83604051848152a260015f55604051908152f35b633d2cec6f60e21b5f5260045ffd5b634e487b7160e01b5f52604160045260245ffd5b6102db565b635353c48f60e01b5f5260045ffd5b633ee5aeb560e01b5f5260045ffd5b3461015b575f36600319011261015b57602060405161ffff7f0000000000000000000000000000000000000000000000000000000000000000168152f35b3461015b575f36600319011261015b5760206040516127108152f35b3461015b575f36600319011261015b576020906004548152f35b919082018092116103df57565b634e487b7160e01b5f52601160045260245ffd5b919082039182116103df57565b9091905f905f1984820990848102928380841093039280840393146104775782612710111561046557507fbc01a36e2eb1c432ca57a786c226809d495182a9930be0ded288ce703afb7e919394612710910990828211900360fc1b910360041c170290565b634e487b71905260116020526024601cfd5b505050612710919250049056",
+  "runtime": "0x608080604052600436101561001c575b50361561001a575f80fd5b005b5f3560e01c90816322f7f0f9146103b857508063249d39e91461039c57806330654a471461035e5780633ccfd60b146102245780636133d1dd1461020757806361d027b3146101c357806393ad7440146101a65780639583612e1461017c578063d08e89081461015f5763f765417614610096575f61000f565b3461015b575f36600319011261015b577fcf0974dfd867840133a0d4b02f1672f24017796fb8892d1e0d587692e4da90ab60606100e26100d947600154906103f3565b600254906103f3565b61011061ffff7f00000000000000000000000000000000000000000000000000000000000000001682610400565b61011a81836103f3565b90610127816001546103d2565b600155610136816003546103d2565b600355610145826002546103d2565b60025560405192835260208301526040820152a1005b5f80fd5b3461015b575f36600319011261015b576020600154604051908152f35b3461015b575f36600319011261015b57602061019e6100d947600154906103f3565b604051908152f35b3461015b575f36600319011261015b576020600254604051908152f35b3461015b575f36600319011261015b576040517f00000000000000000000000000000000000000000000000000000000000000006001600160a01b03168152602090f35b3461015b575f36600319011261015b576020600354604051908152f35b3461015b575f36600319011261015b5760025f541461034f5760025f557f00000000000000000000000000000000000000000000000000000000000000006001600160a01b031633819003610340576001545f600155610286816004546103d2565b6004555f80808084865af13d1561033b573d67ffffffffffffffff81116103275760405190601f8101601f19908116603f0116820167ffffffffffffffff8111838210176103275760405281525f60203d92013e5b15610318576020917f41fdd680478135993bc53fb2ffaf9560951b57ef62ff6badd02b61e018b4f17f83604051848152a260015f55604051908152f35b633d2cec6f60e21b5f5260045ffd5b634e487b7160e01b5f52604160045260245ffd5b6102db565b635353c48f60e01b5f5260045ffd5b633ee5aeb560e01b5f5260045ffd5b3461015b575f36600319011261015b57602060405161ffff7f0000000000000000000000000000000000000000000000000000000000000000168152f35b3461015b575f36600319011261015b5760206040516127108152f35b3461015b575f36600319011261015b576020906004548152f35b919082018092116103df57565b634e487b7160e01b5f52601160045260245ffd5b919082039182116103df57565b9091905f905f1984820990848102928380841093039280840393146104775782612710111561046557507fbc01a36e2eb1c432ca57a786c226809d495182a9930be0ded288ce703afb7e919394612710910990828211900360fc1b910360041c170290565b634e487b71905260116020526024601cfd5b505050612710919250049056",
+  "immutableReferences": {
+    "45652": [
+      {
+        "start": 472,
+        "length": 32
+      },
+      {
+        "start": 579,
+        "length": 32
+      }
+    ],
+    "45654": [
+      {
+        "start": 234,
+        "length": 32
+      },
+      {
+        "start": 888,
+        "length": 32
+      }
+    ]
+  },
+  "storageLayout": {
+    "storage": [
+      {
+        "astId": 41891,
+        "contract": "src/FeeCollector.sol:FeeCollector",
+        "label": "_status",
+        "offset": 0,
+        "slot": "0",
+        "type": "t_uint256"
+      },
+      {
+        "astId": 45656,
+        "contract": "src/FeeCollector.sol:FeeCollector",
+        "label": "treasuryCredit",
+        "offset": 0,
+        "slot": "1",
+        "type": "t_uint256"
+      },
+      {
+        "astId": 45658,
+        "contract": "src/FeeCollector.sol:FeeCollector",
+        "label": "rewardPot",
+        "offset": 0,
+        "slot": "2",
+        "type": "t_uint256"
+      },
+      {
+        "astId": 45660,
+        "contract": "src/FeeCollector.sol:FeeCollector",
+        "label": "totalTreasuryCredits",
+        "offset": 0,
+        "slot": "3",
+        "type": "t_uint256"
+      },
+      {
+        "astId": 45662,
+        "contract": "src/FeeCollector.sol:FeeCollector",
+        "label": "totalTreasuryPaid",
+        "offset": 0,
+        "slot": "4",
+        "type": "t_uint256"
+      }
+    ],
+    "types": {
+      "t_uint256": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    }
+  }
+}

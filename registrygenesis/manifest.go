@@ -13,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-core/registryproof"
 )
 
@@ -39,6 +40,7 @@ type AllocationManifest struct {
 	NativeSupply        string               `json:"nativeSupply"`
 	Chain               ManifestChain        `json:"chain"`
 	Genesis             ManifestGenesis      `json:"genesis"`
+	Deployment          ManifestDeployment   `json:"deployment"`
 	Addresses           ManifestAddresses    `json:"addresses"`
 	FeeBeneficiary      string               `json:"feeBeneficiary"`
 	FeeSplit            ManifestFeeSplit     `json:"feeSplit"`
@@ -77,6 +79,13 @@ type ManifestGenesis struct {
 	BaseFeePerGas string `json:"baseFeePerGas"`
 }
 
+type ManifestDeployment struct {
+	Deployer    string `json:"deployer"`
+	FirstNonce  uint64 `json:"firstNonce"`
+	BlockNumber uint64 `json:"blockNumber"`
+	Timestamp   uint64 `json:"timestamp"`
+}
+
 type ManifestAddresses struct {
 	System           string `json:"system"`
 	Registry         string `json:"registry"`
@@ -93,11 +102,21 @@ type ManifestFeeSplit struct {
 }
 
 type ManifestAllocation struct {
-	Purpose   string                   `json:"purpose"`
-	Recipient string                   `json:"recipient"`
-	Kind      string                   `json:"kind"` // "eoa" or "contract_pot"
-	Amount    string                   `json:"amount"`
-	Schedule  *ManifestVestingSchedule `json:"schedule,omitempty"`
+	Purpose         string                   `json:"purpose"`
+	Recipient       string                   `json:"recipient"`
+	Kind            string                   `json:"kind"` // "eoa" or "contract_pot"
+	Amount          string                   `json:"amount"`
+	Beneficiary     string                   `json:"beneficiary,omitempty"`
+	BeneficiaryKind string                   `json:"beneficiaryKind,omitempty"` // "eoa" or "contract_receiver"
+	Schedule        *ManifestVestingSchedule `json:"schedule,omitempty"`
+	State           *ManifestAccountState    `json:"state,omitempty"`
+}
+
+type ManifestAccountState struct {
+	Nonce    uint64            `json:"nonce"`
+	Code     string            `json:"code"`
+	CodeHash string            `json:"codeHash"`
+	Storage  map[string]string `json:"storage"`
 }
 
 type ManifestVestingSchedule struct {
@@ -112,10 +131,11 @@ type ManifestGasBudget struct {
 }
 
 type ManifestContract struct {
-	Name     string `json:"name"`
-	Address  string `json:"address"`
-	Artifact string `json:"artifact"`
-	SHA256   string `json:"sha256"`
+	Name         string `json:"name"`
+	Address      string `json:"address"`
+	Artifact     string `json:"artifact"`
+	SHA256       string `json:"sha256"`
+	SourceCommit string `json:"sourceCommit"`
 }
 
 // DecodeAllocationManifest strictly decodes one versioned manifest. Unknown and duplicate fields,
@@ -168,7 +188,10 @@ func CompileAllocationManifest(data []byte, expectedChainID uint64) ([]byte, err
 		return nil, fmt.Errorf("%w: baseFeePerGas must be an unsigned uint64 decimal string", ErrAllocationManifest)
 	}
 	type standardAccount struct {
-		Balance string `json:"balance"`
+		Balance string            `json:"balance"`
+		Code    string            `json:"code,omitempty"`
+		Nonce   string            `json:"nonce,omitempty"`
+		Storage map[string]string `json:"storage,omitempty"`
 	}
 	alloc := make(map[string]standardAccount, len(m.Allocations))
 	ordered := append([]ManifestAllocation(nil), m.Allocations...)
@@ -178,7 +201,24 @@ func CompileAllocationManifest(data []byte, expectedChainID uint64) ([]byte, err
 	for _, a := range ordered {
 		addr := common.HexToAddress(a.Recipient)
 		amount, _ := new(big.Int).SetString(a.Amount, 10) // validated below
-		alloc[addr.Hex()] = standardAccount{Balance: hexutil.EncodeBig(amount)}
+		entry := standardAccount{Balance: hexutil.EncodeBig(amount)}
+		if a.Kind == "contract_pot" {
+			if a.State == nil {
+				return nil, fmt.Errorf("%w: contract pot %s has no constructor-exported state", ErrAllocationManifest, addr)
+			}
+			code, e := hexutil.Decode(a.State.Code)
+			if e != nil {
+				return nil, fmt.Errorf("%w: contract pot %s has invalid code", ErrAllocationManifest, addr)
+			}
+			codeHash := crypto.Keccak256Hash(code)
+			if !strings.EqualFold(a.State.CodeHash, codeHash.Hex()) {
+				return nil, fmt.Errorf("%w: contract pot %s code hash mismatch", ErrAllocationManifest, addr)
+			}
+			entry.Code = a.State.Code
+			entry.Nonce = hexutil.EncodeUint64(a.State.Nonce)
+			entry.Storage = a.State.Storage
+		}
+		alloc[addr.Hex()] = entry
 	}
 
 	// Field names/order intentionally mirror the existing engine-api standard-JSON template.
@@ -246,6 +286,9 @@ func validateAllocationManifest(m AllocationManifest) error {
 	if m.Genesis.GasLimit == 0 {
 		return fail("genesis.gasLimit must be non-zero")
 	}
+	if _, err := manifestAddress(m.Deployment.Deployer, "deployment.deployer"); err != nil {
+		return err
+	}
 	if n, ok := new(big.Int).SetString(m.Genesis.BaseFeePerGas, 10); !ok || n.Sign() < 0 || n.BitLen() > 64 {
 		return fail("genesis.baseFeePerGas must be an unsigned uint64 decimal string")
 	}
@@ -284,6 +327,9 @@ func validateAllocationManifest(m AllocationManifest) error {
 		}
 		if strings.TrimSpace(c.Artifact) == "" || strings.ContainsAny(c.Artifact, "\x00\n\r") {
 			return fail("contract %q artifact reference is empty or invalid", c.Name)
+		}
+		if sourceCommit, e := hex.DecodeString(c.SourceCommit); e != nil || len(sourceCommit) != 20 {
+			return fail("contract %q sourceCommit must be a 40-character hexadecimal commit", c.Name)
 		}
 		hash, e := hex.DecodeString(c.SHA256)
 		if e != nil || len(hash) != 32 {
@@ -332,6 +378,23 @@ func validateAllocationManifest(m AllocationManifest) error {
 		}
 		if (addr == addresses["teamVesting"] || addr == addresses["ecosystemVesting"]) && a.Kind == "contract_pot" && a.Schedule == nil {
 			return fail("vesting pot allocation for %s must declare its constructor schedule", addr)
+		}
+		if (addr == addresses["teamVesting"] || addr == addresses["ecosystemVesting"]) && a.Kind == "contract_pot" {
+			beneficiary, e := manifestAddress(a.Beneficiary, "allocations.beneficiary")
+			if e != nil {
+				return e
+			}
+			if beneficiary == (common.Address{}) || beneficiary == addresses["system"] || beneficiary == addresses["registry"] || isPrecompileAddress(beneficiary) {
+				return fail("vesting beneficiary %s collides with zero, a reserved/system address, or a precompile", beneficiary)
+			}
+			if a.BeneficiaryKind != "eoa" && a.BeneficiaryKind != "contract_receiver" {
+				return fail("vesting beneficiaryKind must be eoa or contract_receiver")
+			}
+			if a.BeneficiaryKind == "contract_receiver" {
+				if _, declared := contractsByAddress(addresses, beneficiary); !declared {
+					return fail("contract vesting beneficiary %s must be a declared constructor-exported contract", beneficiary)
+				}
+			}
 		}
 		total.Add(total, amount)
 	}
@@ -457,7 +520,7 @@ func requireManifestFields(data []byte) error {
 		}
 		return object, nil
 	}
-	root, err := require(data, "manifest", "nativeSupply", "chain", "genesis", "addresses", "feeBeneficiary", "allocations", "bootstrapGasBudgets", "contracts")
+	root, err := require(data, "manifest", "nativeSupply", "chain", "genesis", "deployment", "addresses", "feeBeneficiary", "allocations", "bootstrapGasBudgets", "contracts")
 	if err != nil {
 		return err
 	}
@@ -474,6 +537,9 @@ func requireManifestFields(data []byte) error {
 	if _, err = require(root["genesis"], "genesis", "gasLimit", "baseFeePerGas"); err != nil {
 		return err
 	}
+	if _, err = require(root["deployment"], "deployment", "deployer", "firstNonce", "blockNumber", "timestamp"); err != nil {
+		return err
+	}
 	if _, err = require(root["addresses"], "addresses", "system", "registry", "feeCollector", "wuct", "treasury", "teamVesting", "ecosystemVesting"); err != nil {
 		return err
 	}
@@ -483,7 +549,7 @@ func requireManifestFields(data []byte) error {
 	for _, item := range []struct {
 		field    string
 		required []string
-	}{{"allocations", []string{"purpose", "recipient", "kind", "amount"}}, {"bootstrapGasBudgets", []string{"recipient", "gas"}}, {"contracts", []string{"name", "address", "artifact", "sha256"}}} {
+	}{{"allocations", []string{"purpose", "recipient", "kind", "amount"}}, {"bootstrapGasBudgets", []string{"recipient", "gas"}}, {"contracts", []string{"name", "address", "artifact", "sha256", "sourceCommit"}}} {
 		var list []json.RawMessage
 		if err := json.Unmarshal(root[item.field], &list); err != nil || list == nil {
 			return manifestError(ErrManifestStrictDecode, "%s must be an array", item.field)
