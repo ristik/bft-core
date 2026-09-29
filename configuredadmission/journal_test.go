@@ -104,7 +104,7 @@ func TestJournalAdmissionDropsRetiredPendingResponse(t *testing.T) {
 	currentSeal := *uc.UnicitySeal
 	currentSeal.Epoch = 2
 	current.UnicitySeal = &currentSeal
-	require.Error(t, a.Submit(context.Background(), &current, tr),
+	require.ErrorIs(t, a.Submit(context.Background(), &current, tr), rootinput.ErrContextIncomplete,
 		"the current epoch must reach authentication rather than being discarded as stale")
 }
 
