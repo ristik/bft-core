@@ -28,7 +28,7 @@ request = [1, context, block]
 outcomes = ["found", "unavailable", "busy", "unsupported-version", "wrong-context", "invalid-request"]
 responses = []
 for code, name in enumerate(outcomes):
-    evidence = [b"\x01", [], [[] for _ in range(22)]] if code == 0 else None
+    evidence = [b"\x01", [], [[] for _ in range(28)]] if code == 0 else None
     value = [1, context, block, code, "" if code == 0 else name, evidence]
     responses.append({"name": name, "outcome": code, "cbor": "0x" + cbor(value).hex()})
 

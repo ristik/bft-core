@@ -27,8 +27,8 @@ const (
 
 	// MaxFoundResponseBytesUpperBound proves the 272 KiB frame can carry every bounded found
 	// response. It adds the full 256 KiB evidence budget, a conservative three-byte CBOR prefix
-	// for every one of 23*65 nodes and the header, and maximum arrays/context/detail overhead.
-	MaxFoundResponseBytesUpperBound = 267138
+	// for every one of 29*65 nodes and the header, and maximum arrays/context/detail overhead.
+	MaxFoundResponseBytesUpperBound = 268308
 )
 
 var (
