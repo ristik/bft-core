@@ -142,6 +142,23 @@ func (s *HistoricalTrustBaseStore) GetByEpoch(_ context.Context, epoch uint64) (
 
 func (s *HistoricalTrustBaseStore) Evict() { s.history.Evict() }
 
+func (s *HistoricalTrustBaseStore) BodyID(epoch uint64) ([32]byte, error) {
+	record, err := s.history.ByEpoch(epoch)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	if record.V2 != nil {
+		return record.BodyID, nil
+	}
+	if record.V1 == nil {
+		return [32]byte{}, trusthistorystore.ErrHistory
+	}
+	raw, err := record.V1.Hash(crypto.SHA256)
+	var out [32]byte
+	copy(out[:], raw)
+	return out, err
+}
+
 // IsV2Epoch lets certificate admission keep the proof-aware handoff gate
 // closed even after a successor body has been authenticated and persisted.
 func (s *HistoricalTrustBaseStore) IsV2Epoch(epoch uint64) bool {

@@ -8,6 +8,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/archive"
+	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -92,10 +93,11 @@ func TestRestoreRecordAuthenticationRefusesForgedEpochAndIdentity(t *testing.T) 
 	for _, change := range []struct {
 		name string
 		edit func(*types.UnicityCertificate)
+		want error
 	}{
-		{"forged state", func(uc *types.UnicityCertificate) { uc.InputRecord.Hash[0] ^= 1 }},
-		{"wrong epoch", func(uc *types.UnicityCertificate) { uc.UnicitySeal.Epoch++ }},
-		{"wrong round", func(uc *types.UnicityCertificate) { uc.InputRecord.RoundNumber++ }},
+		{"forged state", func(uc *types.UnicityCertificate) { uc.InputRecord.Hash[0] ^= 1 }, frontier.ErrInvalid},
+		{"wrong epoch", func(uc *types.UnicityCertificate) { uc.UnicitySeal.Epoch++ }, ErrRestore},
+		{"wrong round", func(uc *types.UnicityCertificate) { uc.InputRecord.RoundNumber++ }, frontier.ErrInvalid},
 	} {
 		t.Run(change.name, func(t *testing.T) {
 			altered := *rec
@@ -105,11 +107,11 @@ func TestRestoreRecordAuthenticationRefusesForgedEpochAndIdentity(t *testing.T) 
 			altered.ResultingUC, err = types.Cbor.Marshal(&uc)
 			require.NoError(t, err)
 			_, _, err = r.checkRecord(q, &altered)
-			require.Error(t, err)
+			require.ErrorIs(t, err, change.want)
 		})
 	}
 	foreign := q
 	foreign.Context.ExecutionIdentity = []byte("another execution identity")
 	_, _, err = r.checkRecord(foreign, rec)
-	require.Error(t, err)
+	require.ErrorIs(t, err, frontier.ErrContext)
 }

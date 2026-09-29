@@ -20,19 +20,21 @@ import (
 var ErrConfig = errors.New("archive wiring: invalid replica configuration")
 
 type Publisher struct {
-	Journal       *configuredprogress.Store
-	Context       configuredprogress.Context
-	JournalLimits configuredprogress.JournalLimits
-	Archive       *archive.Store
-	Subject       archive.Context
-	Host          shardnode.EvidenceHost
-	Replicas      [2]peer.ID
-	Limits        Limits
-	Log           *slog.Logger
-	Metrics       *Metrics
+	Journal        *configuredprogress.Store
+	Context        configuredprogress.Context
+	JournalLimits  configuredprogress.JournalLimits
+	Archive        *archive.Store
+	Subject        archive.Context
+	Host           shardnode.EvidenceHost
+	Replicas       [2]peer.ID
+	Limits         Limits
+	Log            *slog.Logger
+	Metrics        *Metrics
+	BundleVerifier BundleVerifier
 
 	mu            sync.Mutex
 	ack           map[[32]byte]uint8
+	bundleAck     map[uint64]uint8
 	cursor        int
 	replicaCursor [2]int
 	status        Status
@@ -72,6 +74,9 @@ func (p *Publisher) Run(ctx context.Context) error {
 	if p.ack == nil {
 		p.ack = make(map[[32]byte]uint8)
 	}
+	if p.bundleAck == nil {
+		p.bundleAck = make(map[uint64]uint8)
+	}
 	p.mu.Unlock()
 	var workers sync.WaitGroup
 	for i := range p.Replicas {
@@ -81,6 +86,22 @@ func (p *Publisher) Run(ctx context.Context) error {
 			p.replicaLoop(ctx, index)
 		}(i)
 	}
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			if err := p.publishBundles(ctx); err != nil && ctx.Err() == nil {
+				p.Log.WarnContext(ctx, "handoff bundle replication waiting", "err", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 	defer workers.Wait()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -94,6 +115,43 @@ func (p *Publisher) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+func (p *Publisher) publishBundles(ctx context.Context) error {
+	epochs, err := p.Archive.BundleEpochs(p.Subject)
+	if err != nil {
+		return err
+	}
+	var waiting error
+	for _, epoch := range epochs {
+		q := archive.BundleRequest{Context: p.Subject, Epoch: epoch}
+		raw, err := p.Archive.GetBundle(q)
+		if err != nil {
+			return err
+		}
+		if p.BundleVerifier == nil {
+			return ErrConfig
+		}
+		if err := p.BundleVerifier(ctx, q, raw); err != nil {
+			return err
+		}
+		p.mu.Lock()
+		bits := p.bundleAck[epoch]
+		p.mu.Unlock()
+		for i, id := range p.Replicas {
+			if bits&(1<<i) != 0 {
+				continue
+			}
+			if err := PutBundleAndReadBack(ctx, p.Host, id, q, raw, p.Limits); err != nil {
+				waiting = errors.Join(waiting, fmt.Errorf("epoch %d replica %s: %w", epoch, id, err))
+				continue
+			}
+			p.mu.Lock()
+			p.bundleAck[epoch] |= 1 << i
+			p.mu.Unlock()
+		}
+	}
+	return waiting
 }
 
 func (p *Publisher) pass(ctx context.Context) error {

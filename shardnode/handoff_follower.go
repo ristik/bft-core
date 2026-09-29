@@ -14,17 +14,21 @@ import (
 )
 
 // HandoffFollower fetches the next committed proof and full checkpoint from
-// configured old root peers. Peers are chosen from verified trust history;
+// current root peers, old root peers, then configured archive replicas.
+// Old peers are chosen from verified trust history;
 // every response is checked before entering local lineage or snapshot storage.
 type HandoffFollower struct {
-	Host        handoffdelivery.Host
-	History     HandoffHistory
-	Partition   types.PartitionID
-	Shard       types.ShardID
-	ConfHash    []byte
-	AnchorEpoch uint64
-	Directory   string
-	OnInstalled func(context.Context, handoffdelivery.Bundle, handoffdelivery.Verified) error
+	Host            handoffdelivery.Host
+	History         HandoffHistory
+	Partition       types.PartitionID
+	Shard           types.ShardID
+	ConfHash        []byte
+	AnchorEpoch     uint64
+	Directory       string
+	OnInstalled     func(context.Context, handoffdelivery.Bundle, handoffdelivery.Verified) error
+	CurrentRoots    []peer.ID
+	ArchiveReplicas []peer.ID
+	FetchArchive    func(context.Context, peer.ID, uint64) (handoffdelivery.Bundle, error)
 }
 
 type HandoffHistory interface {
@@ -125,6 +129,23 @@ func (f *HandoffFollower) fetch(ctx context.Context, epoch uint64) (handoffdeliv
 	if err != nil {
 		return handoffdelivery.Bundle{}, err
 	}
+	try := func(id peer.ID, request func(context.Context, peer.ID, uint64) (handoffdelivery.Bundle, error)) (handoffdelivery.Bundle, bool) {
+		bundle, err := request(ctx, id, epoch)
+		if err == nil && bundle.Body.Epoch == epoch && bundle.Proof.Record.Epoch+1 == epoch {
+			_, err = f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
+		} else {
+			return handoffdelivery.Bundle{}, false
+		}
+		return bundle, err == nil
+	}
+	requestRoot := func(ctx context.Context, id peer.ID, epoch uint64) (handoffdelivery.Bundle, error) {
+		return handoffdelivery.Request(ctx, f.Host, id, epoch)
+	}
+	for _, id := range f.CurrentRoots {
+		if bundle, ok := try(id, requestRoot); ok {
+			return bundle, nil
+		}
+	}
 	for _, node := range old.RootNodes {
 		if node == nil {
 			continue
@@ -133,15 +154,58 @@ func (f *HandoffFollower) fetch(ctx context.Context, epoch uint64) (handoffdeliv
 		if err != nil {
 			continue
 		}
-		bundle, err := handoffdelivery.Request(ctx, f.Host, id, epoch)
-		if err == nil {
-			_, err = f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
-		}
-		if err == nil {
+		if bundle, ok := try(id, requestRoot); ok {
 			return bundle, nil
 		}
 	}
-	return handoffdelivery.Bundle{}, fmt.Errorf("handoff follower: epoch %d unavailable from old root peers", epoch)
+	if f.FetchArchive != nil {
+		for _, id := range f.ArchiveReplicas {
+			if bundle, ok := try(id, f.FetchArchive); ok {
+				return bundle, nil
+			}
+		}
+	}
+	return handoffdelivery.Bundle{}, fmt.Errorf("handoff follower: epoch %d unavailable from current roots, old roots and archive replicas", epoch)
+}
+
+// CatchUp walks every pinned boundary before an empty-disk restore begins.
+func (f *HandoffFollower) CatchUp(ctx context.Context, target uint64) (map[uint64]handoffdelivery.Bundle, error) {
+	if f == nil || f.Host == nil || f.History == nil || f.AnchorEpoch == 0 || target < f.AnchorEpoch || f.Directory == "" || len(f.ConfHash) != 32 {
+		return nil, errors.New("handoff follower: incomplete restore configuration")
+	}
+	if err := os.MkdirAll(f.Directory, 0700); err != nil {
+		return nil, err
+	}
+	bundles := make(map[uint64]handoffdelivery.Bundle)
+	for epoch := f.AnchorEpoch + 1; epoch <= target; epoch++ {
+		bundle, err := f.load(epoch)
+		fetched := errors.Is(err, os.ErrNotExist)
+		if fetched {
+			bundle, err = f.fetch(ctx, epoch)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("epoch %d: %w", epoch, err)
+		}
+		verified, err := f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
+		if err != nil {
+			return nil, fmt.Errorf("epoch %d: %w", epoch, err)
+		}
+		if fetched {
+			if err := f.save(epoch, bundle); err != nil {
+				return nil, err
+			}
+		}
+		if f.OnInstalled != nil {
+			if err := f.OnInstalled(ctx, bundle, verified); err != nil {
+				return nil, err
+			}
+		}
+		bundles[epoch] = bundle
+		if epoch == ^uint64(0) {
+			break
+		}
+	}
+	return bundles, nil
 }
 
 func (f *HandoffFollower) path(epoch uint64) string {

@@ -8,9 +8,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/archivewiring"
 )
 
-func TestRestoreCommandKeepsRunProfileOffAndRequiresFreshState(t *testing.T) {
+func TestRestoreCommandAcceptsProfile2AndRequiresFreshState(t *testing.T) {
 	base := &baseFlags{HomeDir: t.TempDir()}
 	run := shardNodeRunCmd(base)
 	restore := shardNodeRestoreCmd(base)
@@ -37,7 +38,11 @@ func TestRestoreCommandKeepsRunProfileOffAndRequiresFreshState(t *testing.T) {
 	flags.SigningAuthoritySocket = "authority.sock"
 	flags.TrustHistoryProfile2 = true
 	err = shardNodeRun(context.Background(), flags, nil)
-	require.ErrorContains(t, err, "profile off")
+	require.ErrorIs(t, err, archivewiring.ErrConfig, "profile-2 restore reaches ordinary replica configuration validation")
+	require.NoError(t, os.Mkdir(journal+".handoffs", 0700))
+	err = shardNodeRun(context.Background(), flags, nil)
+	require.ErrorContains(t, err, "fresh BFT data directory")
+	require.NoError(t, os.Remove(journal+".handoffs"))
 	flags.TrustHistoryProfile2 = false
 	flags.Executor = "fake"
 	err = shardNodeRun(context.Background(), flags, nil)

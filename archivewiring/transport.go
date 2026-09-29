@@ -37,19 +37,23 @@ func (l Limits) valid() bool {
 // Verifier authenticates the record against local configured trust and the
 // certified association before a replica stores any remote bytes.
 type Verifier func(context.Context, archive.Request, *archive.Record) error
+type BundleVerifier func(context.Context, archive.BundleRequest, []byte) error
 
 type Server struct {
-	store   *archive.Store
-	ctx     context.Context
-	subject archive.Context
-	want    []byte
-	verify  Verifier
-	limits  Limits
-	allowed map[peer.ID]struct{}
-	mu      sync.Mutex
-	pending int
-	byPeer  map[peer.ID]int
+	store        *archive.Store
+	ctx          context.Context
+	subject      archive.Context
+	want         []byte
+	verify       Verifier
+	bundleVerify BundleVerifier
+	limits       Limits
+	allowed      map[peer.ID]struct{}
+	mu           sync.Mutex
+	pending      int
+	byPeer       map[peer.ID]int
 }
+
+func (s *Server) SetBundleVerifier(v BundleVerifier) { s.bundleVerify = v }
 
 func NewServer(store *archive.Store, contextValue archive.Context, verify Verifier, allowed []peer.ID, limits Limits) (*Server, error) {
 	if store == nil || verify == nil || !limits.valid() || len(allowed) == 0 {
@@ -117,11 +121,14 @@ func (s *Server) handle(stream libp2pnetwork.Stream) {
 // Serve handles one exchange. The frame cap is checked before allocation or
 // archive decoding, and reads and writes are split into bounded byte slices.
 func (s *Server) Serve(ctx context.Context, rw io.ReadWriter) error {
-	frame, err := readFrame(rw, archive.MaxWireBytes+1)
+	frame, err := readFrame(rw, archive.MaxBundleBytes+archive.MaxRequestBytes+8)
 	if err != nil || len(frame) < 2 {
 		return ErrTransport
 	}
 	op := frame[0]
+	if op == 4 || op == 5 {
+		return s.serveBundle(ctx, rw, op, frame[1:])
+	}
 	if op == 3 {
 		query, err := archive.DecodeRoundRequest(frame[1:])
 		if err != nil || !sameArchiveContext(query.Context, s.subject) {
@@ -180,6 +187,89 @@ func (s *Server) Serve(ctx context.Context, rw io.ReadWriter) error {
 		return err
 	}
 	return writeFrame(rw, encoded)
+}
+
+func (s *Server) serveBundle(ctx context.Context, rw io.ReadWriter, op byte, payload []byte) error {
+	if op == 4 {
+		q, err := archive.DecodeBundleRequest(payload)
+		if err != nil || !sameArchiveContext(q.Context, s.subject) {
+			return archive.ErrInvalid
+		}
+		raw, err := s.store.GetBundle(q)
+		if errors.Is(err, archive.ErrUnavailable) {
+			return writeFrame(rw, []byte{0})
+		}
+		if err != nil {
+			return err
+		}
+		return writeFrame(rw, append([]byte{1}, raw...))
+	}
+	if len(payload) < 2 {
+		return archive.ErrInvalid
+	}
+	n := int(binary.BigEndian.Uint16(payload[:2]))
+	if n == 0 || n > archive.MaxRequestBytes || len(payload) <= 2+n || len(payload)-2-n > archive.MaxBundleBytes {
+		return archive.ErrInvalid
+	}
+	q, err := archive.DecodeBundleRequest(payload[2 : 2+n])
+	if err != nil || !sameArchiveContext(q.Context, s.subject) || s.bundleVerify == nil {
+		return archive.ErrInvalid
+	}
+	raw := payload[2+n:]
+	if err := s.bundleVerify(ctx, q, raw); err != nil {
+		return fmt.Errorf("%w: %v", ErrReplica, err)
+	}
+	if err := s.store.PutBundle(q, raw); err != nil {
+		return err
+	}
+	return writeFrame(rw, []byte{1})
+}
+
+func FetchBundle(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, q archive.BundleRequest, limits Limits) ([]byte, error) {
+	if host == nil || id == "" || !limits.valid() {
+		return nil, archive.ErrInvalid
+	}
+	request, err := archive.EncodeBundleRequest(q)
+	if err != nil {
+		return nil, err
+	}
+	answer, err := exchange(ctx, host, id, append([]byte{4}, request...), limits)
+	if err != nil {
+		return nil, err
+	}
+	if len(answer) == 1 && answer[0] == 0 {
+		return nil, archive.ErrUnavailable
+	}
+	if len(answer) < 2 || answer[0] != 1 || len(answer)-1 > archive.MaxBundleBytes {
+		return nil, ErrReplica
+	}
+	return answer[1:], nil
+}
+
+func PutBundleAndReadBack(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, q archive.BundleRequest, raw []byte, limits Limits) error {
+	if len(raw) == 0 || len(raw) > archive.MaxBundleBytes {
+		return archive.ErrInvalid
+	}
+	request, err := archive.EncodeBundleRequest(q)
+	if err != nil || len(request) > 65535 {
+		return archive.ErrInvalid
+	}
+	var n [2]byte
+	binary.BigEndian.PutUint16(n[:], uint16(len(request)))
+	payload := append([]byte{5, n[0], n[1]}, request...)
+	payload = append(payload, raw...)
+	answer, err := exchange(ctx, host, id, payload, limits)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(answer, []byte{1}) {
+		return ErrReplica
+	}
+	got, err := FetchBundle(ctx, host, id, q, limits)
+	if err != nil || !bytes.Equal(got, raw) {
+		return ErrReplica
+	}
+	return nil
 }
 
 // PutAndReadBack verifies the exact manifest digest from a separately fetched
@@ -283,7 +373,7 @@ func exchange(parent context.Context, host shardnode.EvidenceHost, id peer.ID, p
 		_ = stream.Reset()
 		return nil, fmt.Errorf("%w: %v", ErrTransport, err)
 	}
-	answer, err := readFrame(stream, archive.MaxWireBytes)
+	answer, err := readFrame(stream, archive.MaxBundleBytes+archive.MaxRequestBytes+8)
 	if err != nil {
 		_ = stream.Reset()
 		return nil, fmt.Errorf("%w: %v", ErrTransport, err)
@@ -317,13 +407,15 @@ func readFrame(r io.Reader, max int) ([]byte, error) {
 }
 
 func writeFrame(w io.Writer, payload []byte) error {
-	if len(payload) == 0 || len(payload) > archive.MaxWireBytes+1 {
+	if len(payload) == 0 || len(payload) > archive.MaxBundleBytes+archive.MaxRequestBytes+8 {
 		return archive.ErrInvalid
 	}
 	var size [4]byte
 	binary.BigEndian.PutUint32(size[:], uint32(len(payload)))
-	if _, err := w.Write(size[:]); err != nil {
+	if n, err := w.Write(size[:]); err != nil {
 		return err
+	} else if n != len(size) {
+		return io.ErrShortWrite
 	}
 	for off := 0; off < len(payload); {
 		end := off + transferChunk

@@ -22,6 +22,7 @@ const journalFloorKind uint64 = 8
 
 var journalFrontierKey = []byte("journal/frontier")
 var journalFloorKey = []byte("journal/floor")
+var journalFloorEpochKey = []byte("journal/floor-epoch")
 var journalCoveragePrefix = []byte("journal/coverage/")
 
 // The frontier, its certified anchor and every covered request live in the
@@ -157,7 +158,18 @@ func readFrontier(b *bolt.Bucket, dd [32]byte, policy frontier.Policy) (Frontier
 	if err != nil {
 		return out, err
 	}
-	if floor.Sequence > r.Sequence || floor.Round > r.Round || floor.Height > r.Height {
+	floorEpoch := policy.Context.RootEpoch
+	if raw := b.Get(journalFloorEpochKey); raw != nil {
+		if len(raw) != 8 {
+			return out, frontier.ErrStale
+		}
+		floorEpoch = binary.BigEndian.Uint64(raw)
+	}
+	rEpoch := r.Epoch
+	if rEpoch == 0 {
+		rEpoch = policy.Context.RootEpoch
+	}
+	if floor.Sequence > r.Sequence || floorEpoch > rEpoch || floorEpoch == rEpoch && floor.Round > r.Round || floor.Height > r.Height {
 		return out, frontier.ErrStale
 	}
 	if !bytes.Equal(b.Get(coverageKey(r.Height)), w.Frontier) {
@@ -322,12 +334,19 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 	if err != nil {
 		return fmt.Errorf("%w: resulting certificate: %v", frontier.ErrInvalid, err)
 	}
-	if nextUC.GetRootRoundNumber() != next.Round {
+	if nextUC.GetRootRoundNumber() != next.Round || next.Epoch != 0 && nextUC.GetRootEpoch() != next.Epoch {
 		return frontier.ErrInvalid
 	}
 	obligations := journalObligations(image)
 	if current.Anchor == nil && image.Restored != nil {
-		_, err = frontier.PlanAdvanceFromRestore(image.Restored.Height, image.Restored.RootRound, next, *s.frontier, covered, obligations)
+		baseEpoch := c.Observation.RootEpoch
+		for _, entry := range image.Candidates {
+			if entry.Certified && entry.Candidate.Number == image.Restored.Height {
+				baseEpoch = entry.ResultingUC.GetRootEpoch()
+				break
+			}
+		}
+		_, err = frontier.PlanAdvanceFromRestoreEpoch(image.Restored.Height, baseEpoch, image.Restored.RootRound, next, *s.frontier, covered, obligations)
 	} else {
 		_, err = frontier.PlanAdvance(current.Anchor, next, *s.frontier, covered, obligations)
 	}
@@ -389,7 +408,7 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 				return err
 			}
 		}
-		if err := checkPruneObligations(b, next.Round); err != nil {
+		if err := checkPruneObligations(b); err != nil {
 			return err
 		}
 		for i, item := range covered {
@@ -426,7 +445,7 @@ func checkCoveredCandidate(b *bolt.Bucket, ctx context.Context, c Context, item 
 	if err != nil {
 		return fmt.Errorf("%w: %v", frontier.ErrInvalid, err)
 	}
-	if resultUC.GetRootRoundNumber() != r.Round || resultUC.InputRecord.RoundNumber != w.Round {
+	if resultUC.GetRootRoundNumber() != r.Round || r.Epoch != 0 && resultUC.GetRootEpoch() != r.Epoch || resultUC.InputRecord.RoundNumber != w.Round {
 		return frontier.ErrInvalid
 	}
 	return nil
@@ -436,7 +455,7 @@ func journalObligations(image JournalSnapshot) []frontier.Obligation {
 	var out []frontier.Obligation
 	for _, o := range image.Observations {
 		if o.Unresolved {
-			out = append(out, frontier.Obligation{Round: o.UC.GetRootRoundNumber(), UnresolvedBody: true})
+			out = append(out, frontier.Obligation{Epoch: o.UC.GetRootEpoch(), Round: o.UC.GetRootRoundNumber(), UnresolvedBody: true})
 		}
 	}
 	return out
@@ -449,14 +468,14 @@ func supersededCandidate(number, round, certifiedHeight, certifiedRound uint64) 
 	return number <= certifiedHeight || round <= certifiedRound
 }
 
-func checkPruneObligations(b *bolt.Bucket, throughRoot uint64) error {
+func checkPruneObligations(b *bolt.Bucket) error {
 	curs := b.Cursor()
 	for k, raw := curs.Seek(journalObservationPrefix); k != nil && bytes.HasPrefix(k, journalObservationPrefix); k, raw = curs.Next() {
 		w, err := decodeObservation(raw)
 		if err != nil {
 			return err
 		}
-		if w.RootRound <= throughRoot && w.Unresolved {
+		if w.Unresolved {
 			return frontier.ErrObligation
 		}
 	}
@@ -469,7 +488,11 @@ func frontierSnapshotChanged(prior, current FrontierSnapshot) bool {
 		prior.Anchor != nil && prior.Anchor.Sequence != current.Anchor.Sequence
 }
 
-func retainedObservationBodies(b *bolt.Bucket, anchorHash []byte, anchorRound, anchorPartitionRound uint64) (map[string]struct{}, error) {
+func observationCovered(epoch, root, round, anchorEpoch, anchorRoot, anchorRound uint64) bool {
+	return round <= anchorRound && (epoch < anchorEpoch || epoch == anchorEpoch && root <= anchorRoot)
+}
+
+func retainedObservationBodies(b *bolt.Bucket, ctx context.Context, c Context, anchorHash []byte, anchorEpoch, anchorRound, anchorPartitionRound uint64) (map[string]struct{}, error) {
 	retained := map[string]struct{}{string(anchorHash): {}}
 	curs := b.Cursor()
 	for k, raw := curs.Seek(journalObservationPrefix); k != nil && bytes.HasPrefix(k, journalObservationPrefix); k, raw = curs.Next() {
@@ -477,7 +500,11 @@ func retainedObservationBodies(b *bolt.Bucket, anchorHash []byte, anchorRound, a
 		if err != nil {
 			return nil, err
 		}
-		if w.Round <= anchorPartitionRound && w.RootRound <= anchorRound {
+		uc, _, err := verifiedPairBytes(ctx, c, w.UC, w.TR)
+		if err != nil {
+			return nil, err
+		}
+		if observationCovered(uc.GetRootEpoch(), w.RootRound, w.Round, anchorEpoch, anchorRound, anchorPartitionRound) {
 			continue
 		}
 		if len(w.TargetHash) == sha256.Size {
@@ -531,13 +558,13 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 		if err != nil {
 			return err
 		}
-		if err := checkPruneObligations(b, f.Anchor.Round); err != nil {
+		if err := checkPruneObligations(b); err != nil {
 			return err
 		}
 		// The anchor becomes the journal's new base, so keep its full candidate
 		// body. A repeat observation can refer to that same block at a later root
 		// round and is intentionally retained below.
-		retainedBodies, err := retainedObservationBodies(b, f.Anchor.Subject.BlockHash[:], f.Anchor.Round, anchorUC.InputRecord.RoundNumber)
+		retainedBodies, err := retainedObservationBodies(b, ctx, c, f.Anchor.Subject.BlockHash[:], anchorUC.GetRootEpoch(), f.Anchor.Round, anchorUC.InputRecord.RoundNumber)
 		if err != nil {
 			return err
 		}
@@ -546,7 +573,7 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 		// keep an older body hot after its own frontier record ceases to be
 		// the anchor. Retaining at most one authorization per hot local body
 		// preserves LoadJournal's non-equivocation check across pruning.
-		retainedAuthorizations := make(map[[2]uint64]struct{})
+		retainedAuthorizations := make(map[[3]uint64]struct{})
 		var restoredHash []byte
 		if raw := b.Get(restoreAnchorKey); raw != nil {
 			payload, e := decodeEnvelope(raw, restoreAnchorKind, 4096)
@@ -572,7 +599,7 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 				if e != nil {
 					return e
 				}
-				retainedAuthorizations[[2]uint64{auth.GetRootRoundNumber(), auth.GetRoundNumber()}] = struct{}{}
+				retainedAuthorizations[[3]uint64{auth.GetRootEpoch(), auth.GetRootRoundNumber(), auth.GetRoundNumber()}] = struct{}{}
 			}
 			if prunable {
 				if keep {
@@ -598,8 +625,12 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 			if e != nil {
 				return e
 			}
-			if w.Round <= anchorUC.InputRecord.RoundNumber && w.RootRound <= f.Anchor.Round {
-				if _, needed := retainedAuthorizations[[2]uint64{w.RootRound, w.Round}]; needed {
+			observedUC, _, e := verifiedPairBytes(ctx, c, w.UC, w.TR)
+			if e != nil {
+				return e
+			}
+			if observationCovered(observedUC.GetRootEpoch(), w.RootRound, w.Round, anchorUC.GetRootEpoch(), f.Anchor.Round, anchorUC.InputRecord.RoundNumber) {
+				if _, needed := retainedAuthorizations[[3]uint64{observedUC.GetRootEpoch(), w.RootRound, w.Round}]; needed {
 					continue
 				}
 				if err := curs.Delete(); err != nil {
@@ -617,7 +648,12 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 		if err := s.at("before-prune-commit"); err != nil {
 			return err
 		}
-		return b.Put(journalFloorKey, floor)
+		if err := b.Put(journalFloorKey, floor); err != nil {
+			return err
+		}
+		var epochRaw [8]byte
+		binary.BigEndian.PutUint64(epochRaw[:], anchorUC.GetRootEpoch())
+		return b.Put(journalFloorEpochKey, epochRaw[:])
 	})
 }
 

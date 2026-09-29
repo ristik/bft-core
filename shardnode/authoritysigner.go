@@ -66,7 +66,7 @@ type authoritySigner struct {
 
 // RestoreReadiness checks the surviving authority's independent high-water
 // record. Round zero is an availability preflight; a nonzero round may be
-// signed only above the recorded reservation. Reserve repeats this check
+// signed only at or above the recorded reservation. Reserve repeats this check
 // atomically, so a concurrent authority operation cannot bypass it.
 func (a *authoritySigner) RestoreReadiness(ctx context.Context, round uint64) error {
 	probe, ok := a.client.(interface {

@@ -70,11 +70,12 @@ func (s admissionEpochTrustStore) GetByEpoch(_ context.Context, epoch uint64) (*
 }
 
 type admissionTestSession struct {
-	callbacks AdmissionCallbacks
-	epoch     uint64
-	submitErr error
-	closed    chan struct{}
-	once      sync.Once
+	callbacks     AdmissionCallbacks
+	epoch         uint64
+	profile2Ready bool
+	submitErr     error
+	closed        chan struct{}
+	once          sync.Once
 }
 
 func (s *admissionTestSession) Submit(_ context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
@@ -82,6 +83,9 @@ func (s *admissionTestSession) Submit(_ context.Context, uc *types.UnicityCertif
 	return s.submitErr
 }
 func (s *admissionTestSession) RootEpoch() uint64 { return s.epoch }
+func (s *admissionTestSession) Profile2Ready(epoch uint64) bool {
+	return s.profile2Ready && epoch == s.epoch
+}
 func (s *admissionTestSession) Close() error {
 	s.once.Do(func() { close(s.closed) })
 	return nil
@@ -189,7 +193,7 @@ func TestConfiguredAdmissionReceivesVerifiedV2Epoch(t *testing.T) {
 	response := fixture.respond(fixture.ucMine)
 	require.ErrorIs(t, c.handleCertificationResponse(context.Background(), response), ErrProfile2Unready,
 		"without proof-aware admission, the v2 certificate remains closed")
-	factory := &admissionTestFactory{}
+	factory := &admissionTestFactory{session: &admissionTestSession{epoch: 1, profile2Ready: true, closed: make(chan struct{})}}
 	cancel, done := startAdmissionClient(t, c, factory, sink)
 	defer func() { cancel(); require.ErrorIs(t, <-done, context.Canceled) }()
 	require.NoError(t, c.handleCertificationResponse(context.Background(), response),

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
@@ -24,6 +26,11 @@ func TestHandoffFollowerConfigurationAndSavedBundleGuards(t *testing.T) {
 	peer := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	base := HandoffFollower{Host: peer, History: &followerHistory{}, AnchorEpoch: 1,
 		Directory: t.TempDir(), ConfHash: bytes.Repeat([]byte{5}, 32)}
+	upToAnchor, err := base.CatchUp(ctx, 1)
+	require.NoError(t, err)
+	require.Empty(t, upToAnchor, "an already pinned anchor needs no successor bundle")
+	_, err = base.CatchUp(ctx, 0)
+	require.Error(t, err, "restore cannot target an epoch older than its anchor")
 	for _, tc := range []struct {
 		name   string
 		change func(*HandoffFollower)
@@ -219,4 +226,112 @@ func TestHandoffFollowerTriesAnotherRootAndRestoresSavedBundle(t *testing.T) {
 	require.ErrorIs(t, follower.Run(context.Background()), callbackFailure)
 	require.NoError(t, follower.save(2, bad))
 	require.ErrorIs(t, follower.Restore(context.Background()), handoffdelivery.ErrBundle)
+}
+
+func TestHandoffFollowerSourceOrderAndArchiveFallback(t *testing.T) {
+	badRoot := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	goodRoot := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	shardPeer := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	shardPeer.Network().Peerstore().AddAddrs(badRoot.ID(), badRoot.MultiAddresses(), peerstore.PermanentAddrTTL)
+	shardPeer.Network().Peerstore().AddAddrs(goodRoot.ID(), goodRoot.MultiAddresses(), peerstore.PermanentAddrTTL)
+	good := handoffdelivery.Bundle{Proof: handoff.OldCommitProof{Record: evmroot.OrderedHandoffRecord{Epoch: 1}},
+		Body: evmroot.TrustBaseBodyV2{Epoch: 2, StateSummary: []byte{0xaa}}}
+	bad := good
+	bad.Body.StateSummary = []byte{0xbb}
+	server, err := handoffdelivery.NewServer(followerProvider{bundle: bad})
+	require.NoError(t, err)
+	server.Register(badRoot)
+	server, err = handoffdelivery.NewServer(followerProvider{bundle: good})
+	require.NoError(t, err)
+	server.Register(goodRoot)
+	history := &followerHistory{old: &types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{{NodeID: goodRoot.ID().String()}}}}
+	archiveCalls := 0
+	f := &HandoffFollower{Host: shardPeer, History: history, Partition: 8, ConfHash: bytes.Repeat([]byte{5}, 32),
+		AnchorEpoch: 1, Directory: t.TempDir(), CurrentRoots: []peer.ID{badRoot.ID()}, ArchiveReplicas: []peer.ID{"archive"},
+		FetchArchive: func(context.Context, peer.ID, uint64) (handoffdelivery.Bundle, error) {
+			archiveCalls++
+			return good, nil
+		}}
+	bundle, err := f.fetch(context.Background(), 2)
+	require.NoError(t, err)
+	require.Equal(t, good.Body.StateSummary, bundle.Body.StateSummary)
+	require.Zero(t, archiveCalls, "previous root should precede archive")
+	history.old.RootNodes = nil
+	bundle, err = f.fetch(context.Background(), 2)
+	require.NoError(t, err)
+	require.Equal(t, good.Body.StateSummary, bundle.Body.StateSummary)
+	require.Equal(t, 1, archiveCalls)
+	f.CurrentRoots = []peer.ID{goodRoot.ID()}
+	bundle, err = f.fetch(context.Background(), 2)
+	require.NoError(t, err)
+	require.Equal(t, good.Body.StateSummary, bundle.Body.StateSummary)
+	require.Equal(t, 1, archiveCalls, "current root should precede archive")
+}
+
+type sequentialHistory struct{ last uint64 }
+
+func (h *sequentialHistory) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	if epoch != h.last {
+		return nil, errors.New("history gap")
+	}
+	return &types.RootTrustBaseV1{}, nil
+}
+func (h *sequentialHistory) InstallHandoff(_ context.Context, b handoffdelivery.Bundle, _ types.PartitionID, _ types.ShardID, _ []byte) (handoffdelivery.Verified, error) {
+	if b.Body.Epoch != h.last+1 && b.Body.Epoch != h.last {
+		return handoffdelivery.Verified{}, errors.New("out-of-order handoff")
+	}
+	if b.Body.Epoch > h.last {
+		h.last = b.Body.Epoch
+	}
+	return handoffdelivery.Verified{}, nil
+}
+
+func TestHandoffFollowerCatchUpWalksMissedEpochs(t *testing.T) {
+	history := &sequentialHistory{last: 1}
+	shardPeer := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	var requested, installed []uint64
+	f := &HandoffFollower{Host: shardPeer, History: history, Partition: 8, ConfHash: bytes.Repeat([]byte{5}, 32),
+		AnchorEpoch: 1, Directory: t.TempDir(), ArchiveReplicas: []peer.ID{"archive"},
+		FetchArchive: func(_ context.Context, _ peer.ID, epoch uint64) (handoffdelivery.Bundle, error) {
+			requested = append(requested, epoch)
+			return handoffdelivery.Bundle{Proof: handoff.OldCommitProof{Record: evmroot.OrderedHandoffRecord{Epoch: epoch - 1}}, Body: evmroot.TrustBaseBodyV2{Epoch: epoch}}, nil
+		},
+		OnInstalled: func(_ context.Context, b handoffdelivery.Bundle, _ handoffdelivery.Verified) error {
+			installed = append(installed, b.Body.Epoch)
+			return nil
+		}}
+	bundles, err := f.CatchUp(context.Background(), 3)
+	require.NoError(t, err)
+	require.Equal(t, []uint64{2, 3}, requested)
+	require.Equal(t, []uint64{2, 3}, installed)
+	require.Len(t, bundles, 2)
+	for _, epoch := range []uint64{2, 3} {
+		_, err := f.load(epoch)
+		require.NoError(t, err)
+	}
+}
+
+func TestHandoffFollowerCatchUpRejectsOlderArchiveBundleAndFallsThrough(t *testing.T) {
+	history := &sequentialHistory{last: 1}
+	shardPeer := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	old := handoffdelivery.Bundle{Proof: handoff.OldCommitProof{Record: evmroot.OrderedHandoffRecord{Epoch: 1}}, Body: evmroot.TrustBaseBodyV2{Epoch: 2}}
+	next := handoffdelivery.Bundle{Proof: handoff.OldCommitProof{Record: evmroot.OrderedHandoffRecord{Epoch: 2}}, Body: evmroot.TrustBaseBodyV2{Epoch: 3}}
+	var requested []string
+	f := &HandoffFollower{Host: shardPeer, History: history, Partition: 8, ConfHash: bytes.Repeat([]byte{5}, 32),
+		AnchorEpoch: 1, Directory: t.TempDir(), ArchiveReplicas: []peer.ID{"stale", "fresh"},
+		FetchArchive: func(_ context.Context, id peer.ID, epoch uint64) (handoffdelivery.Bundle, error) {
+			requested = append(requested, string(id)+"/"+fmt.Sprint(epoch))
+			if epoch == 2 || id == "stale" {
+				return old, nil
+			}
+			return next, nil
+		}}
+	bundles, err := f.CatchUp(context.Background(), 3)
+	require.NoError(t, err)
+	require.Equal(t, []string{"stale/2", "stale/3", "fresh/3"}, requested)
+	require.EqualValues(t, 3, history.last)
+	require.EqualValues(t, 3, bundles[3].Body.Epoch)
+	saved, err := f.load(3)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, saved.Body.Epoch, "an older bundle must not be stored as epoch 3")
 }

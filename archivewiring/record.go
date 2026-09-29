@@ -51,13 +51,13 @@ func FromJournal(ctx context.Context, c configuredprogress.Context, subject arch
 	if len(b.Hash) != 32 || len(b.StateRoot) != 32 || len(b.ParentHash) != 32 || len(b.ParentState) != 32 {
 		return archive.Request{}, nil, ErrBinding
 	}
-	if _, err := rootinput.AuthenticateObservationV2(ctx, c.Observation, b.AuthorizingUC, b.AuthorizingTR); err != nil {
+	if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, c.Observation, b.AuthorizingUC, b.AuthorizingTR); err != nil {
 		return archive.Request{}, nil, fmt.Errorf("%w: original pair: %v", ErrBinding, err)
 	}
-	if _, err := rootinput.AuthenticateObservationV2(ctx, c.Observation, e.ResultingUC, e.ResultingTR); err != nil {
+	if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, c.Observation, e.ResultingUC, e.ResultingTR); err != nil {
 		return archive.Request{}, nil, fmt.Errorf("%w: resulting pair: %v", ErrBinding, err)
 	}
-	if e.ResultingUC.InputRecord.RoundNumber != b.Round || !bytes.Equal(e.ResultingUC.InputRecord.BlockHash, b.Hash) || !bytes.Equal(e.ResultingUC.InputRecord.Hash, b.StateRoot) || b.AuthorizingUC.GetRootRoundNumber() >= e.ResultingUC.GetRootRoundNumber() || types.CheckNonEquivocatingCertificates(b.AuthorizingUC, e.ResultingUC) != nil {
+	if e.ResultingUC.InputRecord.RoundNumber != b.Round || !bytes.Equal(e.ResultingUC.InputRecord.BlockHash, b.Hash) || !bytes.Equal(e.ResultingUC.InputRecord.Hash, b.StateRoot) || rootinput.CheckEpochCertificates(b.AuthorizingUC, e.ResultingUC) != nil || b.AuthorizingUC.GetRootEpoch() == e.ResultingUC.GetRootEpoch() && b.AuthorizingUC.GetRootRoundNumber() >= e.ResultingUC.GetRootRoundNumber() {
 		return archive.Request{}, nil, ErrBinding
 	}
 	seal, err := shardnode.SealHash(b.AuthorizingUC)
@@ -67,7 +67,7 @@ func FromJournal(ctx context.Context, c configuredprogress.Context, subject arch
 	block := shardnode.Block{Number: b.Number, Hash: b.Hash, StateRoot: b.StateRoot, ParentHash: b.ParentHash, Raw: b.Raw, BlockSize: b.BlockSize, StateSize: b.StateSize}
 	p := shardnode.RoundParams{Round: b.Round, Epoch: b.AuthorizingTR.Epoch, Timestamp: b.AuthorizingUC.UnicitySeal.Timestamp, SealHash: seal, Leader: b.AuthorizingTR.Leader, Parent: shardnode.BlockRef{Number: b.ParentNumber, Hash: b.ParentHash, StateRoot: b.ParentState}, AuthorizingCertificate: b.AuthorizingUC, AuthorizingTechnicalRecord: b.AuthorizingTR}
 	if adapter != nil {
-		if err := adapter.CheckBlockBinding(ctx, block, p); err != nil {
+		if err := adapter.CheckBlockBinding(adapter.HistoricalContext(ctx), block, p); err != nil {
 			return archive.Request{}, nil, fmt.Errorf("%w: %v", ErrBinding, err)
 		}
 	}

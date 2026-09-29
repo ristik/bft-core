@@ -121,9 +121,52 @@ func TestJournalFactoryCarriesCheckedExecutionIdentity(t *testing.T) {
 	callbacks := shardnode.AdmissionCallbacks{AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {}, DeliverDurable: func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error { return nil }}
 	_, err = (JournalFactory{Store: s, Origin: origin, Limits: limits}).Start(context.Background(), id, adapterGate{}, callbacks)
 	require.ErrorIs(t, err, configuredprogress.ErrVersion)
-	a, err := (JournalFactory{Store: s, Origin: origin, ExecutionConfigV2: c.ExecutionConfigV2, Limits: limits}).Start(context.Background(), id, adapterGate{}, callbacks)
+	authority := journalEpochAuthority{epoch: 2, ready: true}
+	a, err := (JournalFactory{Store: s, Origin: origin, ExecutionConfigV2: c.ExecutionConfigV2, Limits: limits, EpochAuthority: authority}).Start(context.Background(), id, adapterGate{}, callbacks)
 	require.NoError(t, err)
+	journal := a.(*journalAdmission)
+	require.Equal(t, authority, journal.context.Observation.EpochAuthority)
+	require.Equal(t, authority, journal.context.Record.EpochAuthority)
+	require.EqualValues(t, 2, journal.RootEpoch())
+	require.True(t, journal.Profile2Ready(2))
 	require.NoError(t, a.Close())
+}
+
+type journalEpochAuthority struct {
+	epoch uint64
+	ready bool
+}
+
+func (a journalEpochAuthority) CurrentRootEpoch() (uint64, bool) { return a.epoch, a.ready }
+
+func TestJournalEpochGuards(t *testing.T) {
+	uc := func(epoch, round, shardRound uint64, block []byte) *types.UnicityCertificate {
+		return &types.UnicityCertificate{InputRecord: &types.InputRecord{RoundNumber: shardRound, BlockHash: block}, UnicitySeal: &types.UnicitySeal{Epoch: epoch, RootChainRoundNumber: round}}
+	}
+	older := uc(1, 100, 7, []byte{1})
+	newer := uc(2, 50, 7, []byte{1})
+	require.True(t, laterRootUC(newer, older), "a successor epoch advances even when its round is lower")
+	require.False(t, laterRootUC(older, newer))
+	require.True(t, laterRootUC(uc(1, 100, 7, []byte{1}), older), "the same root position clears a completed pending attempt")
+	require.False(t, laterRootUC(uc(1, 99, 7, []byte{1}), older))
+	entry := configuredprogress.JournalEntry{Certified: true, ResultingUC: older, Candidate: configuredprogress.JournalCandidate{Hash: []byte{1}}}
+	require.True(t, matchesCertifiedCandidate(entry, older))
+	require.False(t, matchesCertifiedCandidate(entry, uc(2, 100, 7, []byte{1})), "equal rounds in different epochs name different certificates")
+	entry.Certified = false
+	require.False(t, matchesCertifiedCandidate(entry, older))
+	entry.Certified, entry.ResultingUC = true, nil
+	require.False(t, matchesCertifiedCandidate(entry, older))
+
+	a := &journalAdmission{epoch: 1}
+	require.EqualValues(t, 1, a.RootEpoch())
+	require.False(t, a.Profile2Ready(1))
+	a.context.Observation.EpochAuthority = journalEpochAuthority{epoch: 2, ready: false}
+	require.EqualValues(t, 1, a.RootEpoch(), "an unready authority cannot advance the visible epoch")
+	require.False(t, a.Profile2Ready(2))
+	a.context.Observation.EpochAuthority = journalEpochAuthority{epoch: 2, ready: true}
+	require.EqualValues(t, 2, a.RootEpoch())
+	require.False(t, a.Profile2Ready(1))
+	require.True(t, a.Profile2Ready(2))
 }
 
 func TestJournalAdmissionRetriesUnavailablePeerWithoutNewRootDelivery(t *testing.T) {

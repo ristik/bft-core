@@ -140,10 +140,10 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 	}
 	if restore {
 		cmd.Use = "restore"
-		cmd.Short = "Restore an empty single-epoch shard node from certified archive records, then run"
+		cmd.Short = "Restore an empty shard node from certified archive records and verified handoffs, then run"
 		cmd.Flags().StringVar(&flags.RestoreTipUC, "tip-uc", "", "canonical CBOR file containing the operator-pinned latest certified UC")
 		cmd.Flags().StringVar(&flags.RestoreTipTR, "tip-tr", "", "canonical CBOR file containing that UC's technical record")
-		cmd.Flags().StringVar(&flags.RestoreTrustBodyID, "trust-body-id", "", "0x-prefixed SHA-256 BodyID of the pinned current v1 trust base")
+		cmd.Flags().StringVar(&flags.RestoreTrustBodyID, "trust-body-id", "", "0x-prefixed BodyID of the pinned current trust base")
 	}
 
 	flags.addKeyConfFlags(cmd, false)
@@ -225,11 +225,11 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
 	if flags.Restore {
-		if flags.TrustHistoryProfile2 || flags.Executor != "engine-api" || flags.ExecutionJournal == "" || flags.ArchiveStore == "" || !flags.ArchivePrune ||
+		if flags.Executor != "engine-api" || flags.ExecutionJournal == "" || flags.ArchiveStore == "" || !flags.ArchivePrune ||
 			flags.SigningAuthoritySocket == "" || flags.RestoreTipUC == "" || flags.RestoreTipTR == "" || flags.RestoreTrustBodyID == "" {
-			return errors.New("single-epoch restore requires profile off, --executor engine-api, --execution-journal, --archive-store, --archive-prune, a surviving --signing-authority-socket, --tip-uc, --tip-tr and --trust-body-id; local-key restore is refused")
+			return errors.New("restore requires --executor engine-api, --execution-journal, --archive-store, --archive-prune, a surviving --signing-authority-socket, --tip-uc, --tip-tr and --trust-body-id; local-key restore is refused")
 		}
-		for _, path := range []string{flags.ExecutionJournal, flags.ExecutionJournal + ".trust", flags.PathWithDefault(flags.LUCStoreFile, lucStoreFileName)} {
+		for _, path := range []string{flags.ExecutionJournal, flags.ExecutionJournal + ".trust", flags.ExecutionJournal + ".handoffs", flags.PathWithDefault(flags.LUCStoreFile, lucStoreFileName)} {
 			if _, err := os.Lstat(path); err == nil {
 				return fmt.Errorf("restore requires a fresh BFT data directory: %s already exists", path)
 			} else if !errors.Is(err, fs.ErrNotExist) {
@@ -300,7 +300,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if len(trustBases) != 1 {
 		return fmt.Errorf("shard-node run requires exactly one --trust-base, got %d", len(trustBases))
 	}
-	if flags.Restore {
+	if flags.Restore && !flags.TrustHistoryProfile2 {
 		expected, parseErr := hexToHash(flags.RestoreTrustBodyID)
 		actual, hashErr := trustBases[0].Hash(crypto.SHA256)
 		if parseErr != nil || hashErr != nil || !bytes.Equal(expected, actual) {
@@ -398,6 +398,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		defer closer.Close()
 	}
 	var executionID [32]byte
+	var handoffFollower *shardnode.HandoffFollower
 	if flags.ExecutionJournal != "" {
 		adapter, ok := executor.(*engineapi.Adapter)
 		if !ok || !origin.Valid() {
@@ -419,59 +420,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		trustBaseStore = historical
 		historicalTrust = historical
 		verifierContext.TrustBases = historical
-	}
-	var follower *shardnode.HandoffFollower
-	var handoffJournal *configuredprogress.Store
-	var handoffJournalContext configuredprogress.Context
-	if flags.TrustHistoryProfile2 {
-		adapter, ok := executor.(*engineapi.Adapter)
-		if !ok {
-			return errors.New("profile 2 requires the checked engine-api adapter")
+		if flags.TrustHistoryProfile2 {
+			verifierContext.EpochAuthority = historical
 		}
-		follower = &shardnode.HandoffFollower{Host: peer, History: historicalTrust,
-			Partition: shardConf.PartitionID, Shard: shardConf.ShardID, ConfHash: confHash,
-			AnchorEpoch: trustBases[0].Epoch, Directory: flags.ExecutionJournal + ".handoffs",
-			OnInstalled: func(ctx context.Context, bundle handoffdelivery.Bundle, verified handoffdelivery.Verified) error {
-				if handoffJournal == nil || verified.Shard.UC == nil || verified.Shard.UC.InputRecord == nil || verified.Shard.TR == nil || verified.Shard.IR == nil ||
-					!bytes.Equal(verified.Shard.IR.BlockHash, bundle.Proof.Control.FrozenParent) ||
-					!bytes.Equal(verified.Shard.UC.InputRecord.BlockHash, verified.Shard.IR.BlockHash) ||
-					verified.Shard.UC.GetRoundNumber() != verified.Shard.IR.RoundNumber {
-					return errors.New("verified handoff lacks the terminal shard certificate")
-				}
-				terminal, err := rootinput.AuthenticateObservationV2(ctx, handoffJournalContext.Observation, verified.Shard.UC, verified.Shard.TR)
-				if err != nil {
-					return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
-				}
-				prepared, _, err := handoffJournal.PrepareObservation(ctx, handoffJournalContext, terminal)
-				if err != nil {
-					return fmt.Errorf("preparing handoff terminal certificate: %w", err)
-				}
-				if _, _, err := handoffJournal.CommitObservation(prepared); err != nil {
-					return fmt.Errorf("persisting handoff terminal certificate: %w", err)
-				}
-				old, err := historicalTrust.GetByEpoch(ctx, bundle.Proof.Record.Epoch)
-				if err != nil {
-					return err
-				}
-				anchor := &rctypes.EpochAnchor{GenesisID: verified.Genesis.ID(), Epoch: verified.Genesis.Epoch,
-					Slot: verified.Genesis.Start - 1, StateRoot: verified.Record.StateRoot[:]}
-				transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR)
-				if err != nil {
-					return err
-				}
-				raw, err := transition.Encode()
-				if err != nil {
-					return err
-				}
-				if err := adapter.InstallEpochTransition(raw); err != nil {
-					return err
-				}
-				if err := historicalTrust.ActivateHandoff(bundle.Body.Epoch); err != nil {
-					return err
-				}
-				flags.observe.Logger().Info("handoff activated", "rootEpoch", bundle.Body.Epoch)
-				return nil
-			}}
 	}
 	if origin.Valid() && flags.Executor == "engine-api" {
 		// The agreed genesis hash: buildExecutor has just required the paired client's block 0 to equal
@@ -545,12 +496,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		journalCtx := configuredprogress.Context{Origin: origin, ExecutionConfigV2: executionID, Observation: rootinput.ObservationContextV2{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, ShardConfHash: confHash, RootEpoch: trustBases[0].GetEpoch(), TrustBases: trustBaseStore}, Record: recordCtx}
 		if flags.TrustHistoryProfile2 {
 			journalCtx.Observation.EpochAuthority = historicalTrust
-		}
-		handoffJournal, handoffJournalContext = journalStore, journalCtx
-		if follower != nil {
-			if err := follower.Restore(ctx); err != nil {
-				return fmt.Errorf("restoring verified handoffs: %w", err)
-			}
+			journalCtx.Record.EpochAuthority = historicalTrust
 		}
 		if _, _, openErr = journalStore.Initialize(ctx, journalCtx); openErr != nil {
 			return fmt.Errorf("initializing execution journal: %w", openErr)
@@ -601,6 +547,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if e != nil {
 				return fmt.Errorf("starting archive replica: %w", e)
 			}
+			if flags.TrustHistoryProfile2 {
+				archiveServer.SetBundleVerifier(archivewiring.BundleAdmission(historicalTrust))
+			}
 			archiveServer.Register(ctx, peer)
 			if flags.ArchivePrune {
 				policy := frontier.Policy{Context: archiveSubject, Replicas: [2]string{archiveReplicas[0].String(), archiveReplicas[1].String()}, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
@@ -609,16 +558,107 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				}
 			}
 		}
+		if flags.TrustHistoryProfile2 {
+			currentRoots := make([]libp2ppeer.ID, 0, len(bootNodes))
+			for _, root := range bootNodes {
+				currentRoots = append(currentRoots, root.ID)
+			}
+			handoffFollower = &shardnode.HandoffFollower{Host: peer, History: historicalTrust, Partition: shardConf.PartitionID, Shard: shardConf.ShardID,
+				ConfHash: confHash, AnchorEpoch: trustBases[0].GetEpoch(), Directory: flags.ExecutionJournal + ".handoffs", CurrentRoots: currentRoots,
+				ArchiveReplicas: archiveReplicas[:],
+				OnInstalled: func(ctx context.Context, bundle handoffdelivery.Bundle, verified handoffdelivery.Verified) error {
+					if verified.Shard.UC == nil || verified.Shard.UC.InputRecord == nil || verified.Shard.TR == nil || verified.Shard.IR == nil ||
+						!bytes.Equal(verified.Shard.IR.BlockHash, bundle.Proof.Control.FrozenParent) ||
+						!bytes.Equal(verified.Shard.UC.InputRecord.BlockHash, verified.Shard.IR.BlockHash) ||
+						verified.Shard.UC.GetRoundNumber() != verified.Shard.IR.RoundNumber {
+						return errors.New("verified handoff lacks the terminal shard certificate")
+					}
+					terminal, err := rootinput.AuthenticateObservationV2(ctx, journalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
+					if err != nil {
+						return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
+					}
+					prepared, _, err := journalStore.PrepareObservation(ctx, journalCtx, terminal)
+					if err != nil {
+						return fmt.Errorf("preparing handoff terminal certificate: %w", err)
+					}
+					if _, _, err := journalStore.CommitObservation(prepared); err != nil {
+						return fmt.Errorf("persisting handoff terminal certificate: %w", err)
+					}
+					if err := verifierContext.InstallHandoffTransition(bundle, verified); err != nil {
+						return err
+					}
+					old, err := historicalTrust.GetByEpoch(ctx, bundle.Proof.Record.Epoch)
+					if err != nil {
+						return err
+					}
+					anchor := &rctypes.EpochAnchor{GenesisID: verified.Genesis.ID(), Epoch: verified.Genesis.Epoch,
+						Slot: verified.Genesis.Start - 1, StateRoot: verified.Record.StateRoot[:]}
+					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR)
+					if err != nil {
+						return err
+					}
+					rawTransition, err := transition.Encode()
+					if err != nil {
+						return err
+					}
+					if err := executor.(*engineapi.Adapter).InstallEpochTransition(rawTransition); err != nil {
+						return err
+					}
+					if archiveLocal != nil {
+						raw, err := types.Cbor.Marshal(bundle)
+						if err != nil {
+							return err
+						}
+						if err := archiveLocal.PutBundle(archive.BundleRequest{Context: archiveSubject, Epoch: bundle.Body.Epoch}, raw); err != nil {
+							return err
+						}
+					}
+					if err := historicalTrust.ActivateHandoff(bundle.Body.Epoch); err != nil {
+						return err
+					}
+					flags.observe.Logger().Info("handoff activated", "rootEpoch", bundle.Body.Epoch)
+					return nil
+				}}
+			if archiveLocal != nil {
+				handoffFollower.FetchArchive = func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (handoffdelivery.Bundle, error) {
+					raw, err := archivewiring.FetchBundle(ctx, peer, id, archive.BundleRequest{Context: archiveSubject, Epoch: epoch}, archiveTransportLimits)
+					var bundle handoffdelivery.Bundle
+					if err == nil {
+						err = types.Cbor.Unmarshal(raw, &bundle)
+					}
+					return bundle, err
+				}
+			}
+			if err := handoffFollower.Restore(ctx); err != nil {
+				return fmt.Errorf("restoring verified handoffs: %w", err)
+			}
+		}
 		if flags.Restore {
 			uc, tr, pinErr := loadRestorePin(flags.RestoreTipUC, flags.RestoreTipTR)
 			if pinErr != nil {
 				return pinErr
 			}
+			if flags.TrustHistoryProfile2 {
+				if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
+					return fmt.Errorf("restore bootstrap connect: %w", err)
+				}
+				if _, err := handoffFollower.CatchUp(ctx, uc.GetRootEpoch()); err != nil {
+					return fmt.Errorf("restoring handoff history: %w", err)
+				}
+				pin, err := hexToHash(flags.RestoreTrustBodyID)
+				if err != nil {
+					return err
+				}
+				bodyID, err := historicalTrust.BodyID(uc.GetRootEpoch())
+				if err != nil || !bytes.Equal(pin, bodyID[:]) {
+					return fmt.Errorf("restore trust BodyID differs from verified current history: %v", err)
+				}
+			}
 			genesis, genesisErr := executor.GenesisBlock(ctx)
 			if genesisErr != nil {
 				return fmt.Errorf("reading restore genesis identity: %w", genesisErr)
 			}
-			restorer := &archivewiring.SingleEpochRestore{Journal: journalStore, Context: journalCtx, JournalLimits: limits,
+			restorer := &archivewiring.ArchiveRestore{Journal: journalStore, Context: journalCtx, JournalLimits: limits,
 				Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: peer,
 				Limits: archiveTransportLimits, Adapter: executor.(*engineapi.Adapter), Genesis: genesis, TipUC: uc, TipTR: tr}
 			if restoreErr := restorer.Restore(ctx); restoreErr != nil {
@@ -677,6 +717,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				return e
 			}
 			publisher := &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics}
+			if flags.TrustHistoryProfile2 {
+				publisher.BundleVerifier = archivewiring.BundleAdmission(historicalTrust)
+			}
 			if e := publisher.Validate(); e != nil {
 				_ = metrics.Close()
 				return e
@@ -747,8 +790,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return node.Run(gctx) })
 	g.Go(func() error { return serveShardNodeRPC(gctx, flags, node) })
-	if follower != nil {
-		g.Go(func() error { return follower.Run(gctx) })
+	if handoffFollower != nil {
+		g.Go(func() error { return handoffFollower.Run(gctx) })
 	}
 	return g.Wait()
 }

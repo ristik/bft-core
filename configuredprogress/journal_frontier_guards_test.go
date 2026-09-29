@@ -225,42 +225,11 @@ func TestPruneSuccessfulCoveredCandidateDeletesAndAdvancesFloor(t *testing.T) {
 }
 
 func TestRetainedObservationBodiesFollowPruneCut(t *testing.T) {
-	s, _, _, _, _ := frontierTestSetup(t, t.TempDir()+"/journal.db")
-	defer s.Close()
-	anchorHash := bytes.Repeat([]byte{9}, 32)
-	repeatHash := bytes.Repeat([]byte{8}, 32)
-	laterRoundHash := bytes.Repeat([]byte{7}, 32)
-	badWidthHash := []byte{6}
-	records := []journalObservationWire{
-		{Version: journalVersion, Round: 1, RootRound: 5, TargetHash: bytes.Repeat([]byte{5}, 32)},
-		{Version: journalVersion, Round: 1, RootRound: 6, TargetHash: repeatHash},
-		{Version: journalVersion, Round: 2, RootRound: 5, TargetHash: laterRoundHash},
-		{Version: journalVersion, Round: 3, RootRound: 6, TargetHash: badWidthHash},
-	}
-	require.NoError(t, s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucketName)
-		for _, w := range records {
-			raw, err := encodeObservation(w)
-			if err != nil {
-				return err
-			}
-			if err := b.Put(journalObservationKey(w.RootRound, w.Round), raw); err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
-	var retained map[string]struct{}
-	require.NoError(t, s.db.View(func(tx *bolt.Tx) error {
-		var err error
-		retained, err = retainedObservationBodies(tx.Bucket(bucketName), anchorHash, 5, 1)
-		return err
-	}))
-	require.Contains(t, retained, string(anchorHash))
-	require.Contains(t, retained, string(repeatHash))
-	require.Contains(t, retained, string(laterRoundHash))
-	require.NotContains(t, retained, string(records[0].TargetHash))
-	require.NotContains(t, retained, string(badWidthHash))
+	require.True(t, observationCovered(1, 5, 1, 1, 5, 1))
+	require.False(t, observationCovered(1, 6, 1, 1, 5, 1))
+	require.False(t, observationCovered(1, 5, 2, 1, 5, 1))
+	require.True(t, observationCovered(1, 100, 1, 2, 1, 1), "older epoch is covered despite its larger round")
+	require.False(t, observationCovered(3, 1, 1, 2, 100, 1), "newer epoch remains hot")
 }
 
 func TestPruneCoverageGuardChecksPresentExactAnchor(t *testing.T) {

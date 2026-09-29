@@ -1,15 +1,20 @@
 package engineapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	"github.com/unicitynetwork/bft-core/network"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/rootinput"
@@ -62,6 +67,108 @@ func TestAdapterInstallsConsecutiveTransitions(t *testing.T) {
 	require.ErrorIs(t, err, rootinput.ErrContextIncomplete,
 		"a dynamically installed second transition reaches observation authentication")
 	require.ErrorIs(t, a.InstallEpochTransition(first), rootinput.ErrV2Context)
+}
+
+func TestAdapterSelectsEachInstalledHandoffTransition(t *testing.T) {
+	v := &VerifierContext{transitions: make(map[uint64]handoff.EVMTransition)}
+	for old := uint64(1); old <= 2; old++ {
+		tx := handoff.EVMTransition{OldEpoch: old, NewEpoch: old + 1, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
+			Ack: handoff.AckRecord{FrozenID: [32]byte{3}, CommitID: [32]byte{4}, FrozenParent: [32]byte{5},
+				SuccessorParent: [32]byte{5}, SuccessorTR: [32]byte{6}, EVMRound: 1}}
+		v.transitions[old] = tx
+	}
+	for old := uint64(1); old <= 2; old++ {
+		raw, err := v.transitionFor(old, old+1)
+		require.NoError(t, err)
+		decoded, err := handoff.DecodeEVMTransition(raw)
+		require.NoError(t, err)
+		require.Equal(t, old, decoded.OldEpoch)
+		require.Equal(t, old+1, decoded.NewEpoch)
+	}
+	_, err := v.transitionFor(1, 3)
+	require.ErrorIs(t, err, rootinput.ErrV2Context)
+}
+
+type fixedEpochAuthority struct{}
+
+func (fixedEpochAuthority) CurrentRootEpoch() (uint64, bool) { return 2, true }
+
+func TestTransitionLookupFailsClosed(t *testing.T) {
+	v := new(VerifierContext)
+	_, err := v.transitionFor(1, 2)
+	require.ErrorIs(t, err, rootinput.ErrV2Context, "missing installed transition")
+	v.Transition = []byte{0x80}
+	_, err = v.transitionFor(1, 2)
+	require.ErrorIs(t, err, rootinput.ErrV2Context, "malformed legacy transition")
+	tx := handoff.EVMTransition{OldEpoch: 2, NewEpoch: 3, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
+		Ack: handoff.AckRecord{FrozenID: [32]byte{3}, CommitID: [32]byte{4}, FrozenParent: [32]byte{5},
+			SuccessorParent: [32]byte{5}, SuccessorTR: [32]byte{6}, EVMRound: 7}}
+	v.Transition, err = tx.Encode()
+	require.NoError(t, err)
+	_, err = v.transitionFor(1, 3)
+	require.ErrorIs(t, err, rootinput.ErrV2Context, "wrong predecessor epoch")
+	_, err = v.transitionFor(2, 4)
+	require.ErrorIs(t, err, rootinput.ErrV2Context, "wrong successor epoch")
+	_, err = v.transitionFor(2, 3)
+	require.NoError(t, err)
+	v.EpochAuthority = fixedEpochAuthority{}
+	_, err = v.transitionFor(2, 3)
+	require.ErrorIs(t, err, rootinput.ErrV2Context, "verified history cannot use a legacy transition")
+}
+
+func TestInstalledTransitionUsesCommittedSuccessorRound(t *testing.T) {
+	tr := &certification.TechnicalRecord{Round: 41}
+	hash, err := tr.Hash()
+	require.NoError(t, err)
+	bundle := handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{Epoch: 2}}
+	bundle.Proof.Record.Epoch = 1
+	bundle.Proof.Record.NextBodyID = bytes.Repeat([]byte{1}, 32)
+	bundle.Proof.Record.FrozenID = bytes.Repeat([]byte{2}, 32)
+	bundle.Proof.Record.SuccessorTRHash = hash
+	bundle.Proof.Control.FrozenParent = bytes.Repeat([]byte{3}, 32)
+	checked := handoffdelivery.Verified{Genesis: evmroot.EpochGenesis{Epoch: 2}, Shard: abdrc.ShardInfo{TR: tr}}
+	v := new(VerifierContext)
+	require.NoError(t, v.InstallHandoffTransition(bundle, checked))
+	require.NoError(t, v.InstallHandoffTransition(bundle, checked), "reinstalling the same verified handoff is idempotent")
+	raw, err := v.transitionFor(1, 2)
+	require.NoError(t, err)
+	transition, err := handoff.DecodeEVMTransition(raw)
+	require.NoError(t, err)
+	require.Equal(t, uint64(41), transition.Ack.EVMRound)
+	checked.Shard.TR = &certification.TechnicalRecord{Round: 42}
+	require.ErrorIs(t, v.InstallHandoffTransition(bundle, checked), handoff.ErrBoundary)
+	checked.Shard.TR = tr
+	bundle.Proof.Control.FrozenParent[0] ^= 1
+	require.ErrorIs(t, v.InstallHandoffTransition(bundle, checked), handoff.ErrSuccessor)
+}
+
+func TestDeriveV2PropagatesMissingBoundaryTransition(t *testing.T) {
+	verifier, params, _ := bootstrapAdapterFixture(t)
+	c := certifiedchain.New(t, 3, 0)
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(c.Genesis.GenesisJSON(), &doc))
+	var alloc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(doc["alloc"], &alloc))
+	for key := range alloc {
+		if strings.EqualFold(strings.TrimPrefix(key, "0x"), strings.TrimPrefix(registryproof.RegistryAddress.Hex(), "0x")) {
+			delete(alloc, key)
+		}
+	}
+	doc["alloc"], _ = json.Marshal(alloc)
+	source, err := json.Marshal(doc)
+	require.NoError(t, err)
+	art, err := registrygenesis.PinnedArtifact()
+	require.NoError(t, err)
+	pins := c.Pins
+	pins.RootEpoch = 2
+	prepared, err := registrygenesis.PrepareGenesisJSON(certifiedchain.Config(3), pins, art, source, registrygenesis.GenesisJSONLimits{})
+	require.NoError(t, err)
+	otherOrigin := prepared.Origin()
+	verifier.BootstrapSnapshot, err = registryproof.Verify(otherOrigin.ProofContext(), otherOrigin.BlockHash(), otherOrigin.Evidence())
+	require.NoError(t, err)
+	a := NewAdapter(Config{Verifier: verifier}, nil)
+	_, err = a.deriveV2(context.Background(), params, params.AuthorizingCertificate, params.AuthorizingTechnicalRecord)
+	require.ErrorIs(t, err, rootinput.ErrV2Context, "a mismatched verified parent requires its own installed transition")
 }
 
 func bootstrapAdapterFixture(t *testing.T) (*VerifierContext, shardnode.RoundParams, rootinput.ResultV2) {
