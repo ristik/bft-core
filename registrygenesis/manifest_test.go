@@ -113,11 +113,13 @@ func TestAllocationManifestExactSupplyAndOffByOne(t *testing.T) {
 	m.Allocations[0].Amount = "699999"
 	err := validateAllocationManifest(m)
 	require.ErrorIs(t, err, ErrAllocationManifest)
+	require.ErrorIs(t, err, ErrManifestSupplySum)
 	require.ErrorContains(t, err, "does not equal nativeSupply")
 	m = syntheticManifest()
 	m.Allocations[0].Amount = "700001"
 	err = validateAllocationManifest(m)
 	require.ErrorIs(t, err, ErrAllocationManifest)
+	require.ErrorIs(t, err, ErrManifestSupplySum)
 	require.ErrorContains(t, err, "does not equal nativeSupply")
 }
 
@@ -125,40 +127,54 @@ func TestAllocationManifestRejectsDuplicateRecipientAndReservedCollisions(t *tes
 	t.Run("duplicate recipient", func(t *testing.T) {
 		m := syntheticManifest()
 		m.Allocations = append(m.Allocations, ManifestAllocation{Purpose: "duplicate", Recipient: m.Allocations[0].Recipient, Kind: "eoa", Amount: "0"})
-		require.ErrorIs(t, validateAllocationManifest(m), ErrAllocationManifest)
+		err := validateAllocationManifest(m)
+		require.ErrorIs(t, err, ErrAllocationManifest)
+		require.ErrorIs(t, err, ErrManifestDuplicateRecipient)
 	})
 	t.Run("system address", func(t *testing.T) {
 		m := syntheticManifest()
 		m.Allocations[0].Recipient = m.Addresses.System
-		require.ErrorIs(t, validateAllocationManifest(m), ErrAllocationManifest)
+		err := validateAllocationManifest(m)
+		require.ErrorIs(t, err, ErrAllocationManifest)
+		require.ErrorIs(t, err, ErrManifestAddressCollision)
 	})
 	t.Run("registry address", func(t *testing.T) {
 		m := syntheticManifest()
 		m.Allocations[0].Recipient = m.Addresses.Registry
-		require.ErrorIs(t, validateAllocationManifest(m), ErrAllocationManifest)
+		err := validateAllocationManifest(m)
+		require.ErrorIs(t, err, ErrAllocationManifest)
+		require.ErrorIs(t, err, ErrManifestAddressCollision)
 	})
 	t.Run("precompile address", func(t *testing.T) {
 		m := syntheticManifest()
 		m.Allocations[0].Recipient = "0x0000000000000000000000000000000000000001"
-		require.ErrorIs(t, validateAllocationManifest(m), ErrAllocationManifest)
+		err := validateAllocationManifest(m)
+		require.ErrorIs(t, err, ErrAllocationManifest)
+		require.ErrorIs(t, err, ErrManifestAddressCollision)
 	})
 	t.Run("gas budget precompile", func(t *testing.T) {
 		m := syntheticManifest()
 		m.BootstrapGasBudgets[0].Recipient = "0x0000000000000000000000000000000000000001"
-		require.ErrorIs(t, validateAllocationManifest(m), ErrAllocationManifest)
+		err := validateAllocationManifest(m)
+		require.ErrorIs(t, err, ErrAllocationManifest)
+		require.ErrorIs(t, err, ErrManifestAddressCollision)
 	})
 	t.Run("fixed contract precompile", func(t *testing.T) {
 		m := syntheticManifest()
 		m.Addresses.WUCT = "0x000000000000000000000000000000000000000a"
 		m.Contracts[1].Address = m.Addresses.WUCT
-		require.ErrorIs(t, validateAllocationManifest(m), ErrAllocationManifest)
+		err := validateAllocationManifest(m)
+		require.ErrorIs(t, err, ErrAllocationManifest)
+		require.ErrorIs(t, err, ErrManifestAddressCollision)
 	})
 }
 
 func TestAllocationManifestRejectsBeneficiaryAndChainMismatch(t *testing.T) {
 	m := syntheticManifest()
 	m.FeeBeneficiary = "0x4000000000000000000000000000000000000001"
-	require.ErrorIs(t, validateAllocationManifest(m), ErrAllocationManifest)
+	err := validateAllocationManifest(m)
+	require.ErrorIs(t, err, ErrAllocationManifest)
+	require.ErrorIs(t, err, ErrManifestFeeBeneficiary)
 	require.ErrorIs(t, func() error {
 		_, err := CompileAllocationManifest(manifestBytes(t, syntheticManifest()), 1338)
 		return err
@@ -174,12 +190,15 @@ func TestDecodeAllocationManifestIsStrict(t *testing.T) {
 	require.NoError(t, err)
 	_, err = DecodeAllocationManifest(unknown)
 	require.ErrorIs(t, err, ErrAllocationManifest)
+	require.ErrorIs(t, err, ErrManifestStrictDecode)
 
 	duplicate := bytes.Replace(valid, []byte(`"version":`), []byte(`"version":"unicity/allocation-build/v1","version":`), 1)
 	_, err = DecodeAllocationManifest(duplicate)
 	require.ErrorIs(t, err, ErrAllocationManifest)
+	require.ErrorIs(t, err, ErrManifestStrictDecode)
 	_, err = DecodeAllocationManifest(append(valid, []byte(` {}`)...))
 	require.ErrorIs(t, err, ErrAllocationManifest)
+	require.ErrorIs(t, err, ErrManifestStrictDecode)
 	var missing map[string]any
 	require.NoError(t, json.Unmarshal(valid, &missing))
 	delete(missing["chain"].(map[string]any)["forks"].(map[string]any), "londonBlock")
@@ -187,6 +206,28 @@ func TestDecodeAllocationManifestIsStrict(t *testing.T) {
 	require.NoError(t, err)
 	_, err = DecodeAllocationManifest(withoutFork)
 	require.ErrorIs(t, err, ErrAllocationManifest)
+	require.ErrorIs(t, err, ErrManifestStrictDecode)
+}
+
+func TestDecodeAllocationManifestRequiresSupportedVersion(t *testing.T) {
+	valid := manifestBytes(t, syntheticManifest())
+	var missing map[string]any
+	require.NoError(t, json.Unmarshal(valid, &missing))
+	delete(missing, "version")
+	withoutVersion, err := json.Marshal(missing)
+	require.NoError(t, err)
+	_, err = DecodeAllocationManifest(withoutVersion)
+	require.ErrorIs(t, err, ErrAllocationManifest)
+	require.ErrorIs(t, err, ErrManifestVersion)
+
+	var wrong map[string]any
+	require.NoError(t, json.Unmarshal(valid, &wrong))
+	wrong["version"] = "unicity/allocation-build/v999"
+	wrongVersion, err := json.Marshal(wrong)
+	require.NoError(t, err)
+	_, err = DecodeAllocationManifest(wrongVersion)
+	require.ErrorIs(t, err, ErrAllocationManifest)
+	require.ErrorIs(t, err, ErrManifestVersion)
 }
 
 func TestAllocationManifestAmountsUseExactIntegers(t *testing.T) {

@@ -21,7 +21,15 @@ const (
 	maxAllocationManifestSize = 1 << 20
 )
 
-var ErrAllocationManifest = errors.New("registrygenesis: allocation manifest invalid")
+var (
+	ErrAllocationManifest         = errors.New("registrygenesis: allocation manifest invalid")
+	ErrManifestVersion            = errors.New("registrygenesis: allocation manifest version invalid")
+	ErrManifestStrictDecode       = errors.New("registrygenesis: allocation manifest strict decoding failed")
+	ErrManifestSupplySum          = errors.New("registrygenesis: allocation sum does not equal native supply")
+	ErrManifestDuplicateRecipient = errors.New("registrygenesis: duplicate allocation recipient")
+	ErrManifestAddressCollision   = errors.New("registrygenesis: reserved or system address collision")
+	ErrManifestFeeBeneficiary     = errors.New("registrygenesis: fee beneficiary mismatch")
+)
 
 // AllocationManifest is the versioned build input for funded genesis. It is metadata plus
 // ordinary allocation balances: contract code and initialized storage remain the responsibility
@@ -115,10 +123,10 @@ type ManifestContract struct {
 func DecodeAllocationManifest(data []byte) (AllocationManifest, error) {
 	var m AllocationManifest
 	if len(data) == 0 || len(data) > maxAllocationManifestSize {
-		return m, fmt.Errorf("%w: document size must be 1..%d bytes", ErrAllocationManifest, maxAllocationManifestSize)
+		return m, manifestError(ErrManifestStrictDecode, "document size must be 1..%d bytes", maxAllocationManifestSize)
 	}
 	if err := scanJSON(data, 32); err != nil {
-		return m, fmt.Errorf("%w: %v", ErrAllocationManifest, err)
+		return m, manifestError(ErrManifestStrictDecode, "%v", err)
 	}
 	if err := requireManifestFields(data); err != nil {
 		return m, err
@@ -126,18 +134,22 @@ func DecodeAllocationManifest(data []byte) (AllocationManifest, error) {
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&m); err != nil {
-		return m, fmt.Errorf("%w: %v", ErrAllocationManifest, err)
+		return m, manifestError(ErrManifestStrictDecode, "%v", err)
 	}
 	if err := d.Decode(new(any)); err != io.EOF {
-		return m, fmt.Errorf("%w: trailing JSON value", ErrAllocationManifest)
+		return m, manifestError(ErrManifestStrictDecode, "trailing JSON value")
 	}
 	if m.Version != AllocationManifestVersion {
-		return m, fmt.Errorf("%w: version must be %q", ErrAllocationManifest, AllocationManifestVersion)
+		return m, manifestError(ErrManifestVersion, "version must be %q", AllocationManifestVersion)
 	}
 	if err := validateAllocationManifest(m); err != nil {
 		return m, err
 	}
 	return m, nil
+}
+
+func manifestError(check error, format string, args ...any) error {
+	return fmt.Errorf("%w: %w: %s", ErrAllocationManifest, check, fmt.Sprintf(format, args...))
 }
 
 // CompileAllocationManifest compiles validated allocation data into the standard geth/reth
@@ -250,7 +262,7 @@ func validateAllocationManifest(m AllocationManifest) error {
 		return err
 	}
 	if beneficiary != addresses["feeCollector"] {
-		return fail("feeBeneficiary must equal addresses.feeCollector")
+		return manifestError(ErrManifestFeeBeneficiary, "feeBeneficiary must equal addresses.feeCollector")
 	}
 	if uint32(m.FeeSplit.TreasuryBps)+uint32(m.FeeSplit.RewardBps) != 10_000 {
 		return fail("feeSplit treasuryBps plus rewardBps must equal 10000")
@@ -290,10 +302,10 @@ func validateAllocationManifest(m AllocationManifest) error {
 			return e
 		}
 		if addr == addresses["system"] || addr == addresses["registry"] || isPrecompileAddress(addr) {
-			return fail("allocation recipient %s collides with a reserved, system, or precompile address", addr)
+			return manifestError(ErrManifestAddressCollision, "allocation recipient %s collides with a reserved, system, or precompile address", addr)
 		}
 		if _, exists := seen[addr]; exists {
-			return fail("duplicate allocation recipient %s", addr)
+			return manifestError(ErrManifestDuplicateRecipient, "duplicate allocation recipient %s", addr)
 		}
 		seen[addr] = struct{}{}
 		amount, ok := parseCanonicalUint(a.Amount)
@@ -324,7 +336,7 @@ func validateAllocationManifest(m AllocationManifest) error {
 		total.Add(total, amount)
 	}
 	if len(m.Allocations) == 0 || total.Cmp(supply) != 0 {
-		return fail("allocation sum %s does not equal nativeSupply %s", total, supply)
+		return manifestError(ErrManifestSupplySum, "allocation sum %s does not equal nativeSupply %s", total, supply)
 	}
 	gasRecipients := make(map[common.Address]struct{}, len(m.BootstrapGasBudgets))
 	allocationKinds := make(map[common.Address]string, len(m.Allocations))
@@ -337,7 +349,7 @@ func validateAllocationManifest(m AllocationManifest) error {
 			return e
 		}
 		if addr == addresses["system"] || addr == addresses["registry"] || isPrecompileAddress(addr) {
-			return fail("bootstrap gas recipient %s collides with a reserved, system, or precompile address", addr)
+			return manifestError(ErrManifestAddressCollision, "bootstrap gas recipient %s collides with a reserved, system, or precompile address", addr)
 		}
 		if b.Gas == 0 {
 			return fail("bootstrap gas budget for %s must be non-zero", addr)
@@ -366,7 +378,7 @@ func validateManifestAddresses(a ManifestAddresses) (map[string]common.Address, 
 		return nil, err
 	}
 	if system != SystemAddress || registry != registryproof.RegistryAddress {
-		return fail("system and registry addresses must match the pinned reserved addresses")
+		return nil, manifestError(ErrManifestAddressCollision, "system and registry addresses must match the pinned reserved addresses")
 	}
 	addresses := map[string]common.Address{"system": system, "registry": registry}
 	for key, text := range map[string]string{
@@ -378,7 +390,7 @@ func validateManifestAddresses(a ManifestAddresses) (map[string]common.Address, 
 			return nil, e
 		}
 		if addr == (common.Address{}) || addr == system || addr == registry || isPrecompileAddress(addr) {
-			return fail("%s address %s collides with zero, a reserved/system address, or an EVM precompile", key, addr)
+			return nil, manifestError(ErrManifestAddressCollision, "%s address %s collides with zero, a reserved/system address, or an EVM precompile", key, addr)
 		}
 		addresses[key] = addr
 	}
@@ -436,18 +448,21 @@ func requireManifestFields(data []byte) error {
 	require := func(raw json.RawMessage, context string, fields ...string) (map[string]json.RawMessage, error) {
 		var object map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &object); err != nil || object == nil {
-			return nil, fmt.Errorf("%w: %s must be an object", ErrAllocationManifest, context)
+			return nil, manifestError(ErrManifestStrictDecode, "%s must be an object", context)
 		}
 		for _, field := range fields {
 			if _, ok := object[field]; !ok {
-				return nil, fmt.Errorf("%w: %s missing %s", ErrAllocationManifest, context, field)
+				return nil, manifestError(ErrManifestStrictDecode, "%s missing %s", context, field)
 			}
 		}
 		return object, nil
 	}
-	root, err := require(data, "manifest", "version", "nativeSupply", "chain", "genesis", "addresses", "feeBeneficiary", "allocations", "bootstrapGasBudgets", "contracts")
+	root, err := require(data, "manifest", "nativeSupply", "chain", "genesis", "addresses", "feeBeneficiary", "allocations", "bootstrapGasBudgets", "contracts")
 	if err != nil {
 		return err
+	}
+	if _, exists := root["version"]; !exists {
+		return manifestError(ErrManifestVersion, "missing version")
 	}
 	chain, err := require(root["chain"], "chain", "chainId", "forks")
 	if err != nil {
@@ -471,7 +486,7 @@ func requireManifestFields(data []byte) error {
 	}{{"allocations", []string{"purpose", "recipient", "kind", "amount"}}, {"bootstrapGasBudgets", []string{"recipient", "gas"}}, {"contracts", []string{"name", "address", "artifact", "sha256"}}} {
 		var list []json.RawMessage
 		if err := json.Unmarshal(root[item.field], &list); err != nil || list == nil {
-			return fmt.Errorf("%w: %s must be an array", ErrAllocationManifest, item.field)
+			return manifestError(ErrManifestStrictDecode, "%s must be an array", item.field)
 		}
 		for i, entry := range list {
 			if _, err := require(entry, fmt.Sprintf("%s[%d]", item.field, i), item.required...); err != nil {
