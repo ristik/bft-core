@@ -4,7 +4,7 @@
 #
 # It initializes reth from the file, starts it with discovery and peers disabled, and records the genesis
 # block hash from `reth init`, the block-0 hash and state root, the raw header, and eth_getProof for a_sr and
-# the 22 slot keys requested by block hash (EIP-1898). Nothing is sent to a network. This shows what the
+# the 28 slot keys requested by block hash (EIP-1898). Nothing is sent to a network. This shows what the
 # pinned client computes and serves at genesis; it says nothing about proof availability for later blocks.
 #
 # Evidence is accepted only from the process this run started (review of #157):

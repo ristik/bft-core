@@ -1,4 +1,4 @@
-package handoff
+package handoff_test
 
 import (
 	"bytes"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/handoff"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
@@ -36,7 +37,7 @@ func TestEVMTransitionSharedVector(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &vector))
 	encoded, err := stdhex.DecodeString(strings.TrimPrefix(vector.Encoded, "0x"))
 	require.NoError(t, err)
-	got, err := DecodeEVMTransition(encoded)
+	got, err := handoff.DecodeEVMTransition(encoded)
 	require.NoError(t, err)
 	require.Equal(t, vector.OldEpoch, got.OldEpoch)
 	require.Equal(t, vector.NewEpoch, got.NewEpoch)
@@ -54,12 +55,12 @@ func (emptyRootOrchestration) ShardConfigs(uint64) (map[types.PartitionShardID]*
 	return map[types.PartitionShardID]*types.PartitionDescriptionRecord{}, nil
 }
 
-func signedOldProof(t *testing.T) (OldCommitProof, *types.RootTrustBaseV1) {
+func signedOldProof(t *testing.T) (handoff.OldCommitProof, *types.RootTrustBaseV1) {
 	p, tb, _ := signedOldProofWithSigners(t)
 	return p, tb
 }
 
-func signedOldProofWithSigners(t *testing.T) (OldCommitProof, *types.RootTrustBaseV1, map[string]abcrypto.Signer) {
+func signedOldProofWithSigners(t *testing.T) (handoff.OldCommitProof, *types.RootTrustBaseV1, map[string]abcrypto.Signer) {
 	t.Helper()
 	signers := map[string]abcrypto.Signer{}
 	for _, id := range []string{"a", "b", "c", "d"} {
@@ -108,7 +109,7 @@ func signedOldProofWithSigners(t *testing.T) (OldCommitProof, *types.RootTrustBa
 		require.NoError(t, err)
 		qc.Signatures[id] = sig
 	}
-	return OldCommitProof{Profile: evmroot.D4Profile, Record: rec, Control: control, ControlPath: path, CommitQC: qc}, tb, signers
+	return handoff.OldCommitProof{Profile: evmroot.D4Profile, Record: rec, Control: control, ControlPath: path, CommitQC: qc}, tb, signers
 }
 
 func resignOldQC(t *testing.T, qc *rctypes.QuorumCert, signers map[string]abcrypto.Signer) {
@@ -131,7 +132,7 @@ func resignOldSealOnly(t *testing.T, qc *rctypes.QuorumCert, signers map[string]
 	}
 }
 
-func setOldProofRootFromPath(t *testing.T, p *OldCommitProof, signers map[string]abcrypto.Signer) {
+func setOldProofRootFromPath(t *testing.T, p *handoff.OldCommitProof, signers map[string]abcrypto.Signer) {
 	t.Helper()
 	root, err := p.ControlPath.EvalAuthPath(p.Control.Digest(), crypto.SHA256)
 	require.NoError(t, err)
@@ -140,7 +141,7 @@ func setOldProofRootFromPath(t *testing.T, p *OldCommitProof, signers map[string
 	resignOldQC(t, p.CommitQC, signers)
 }
 
-func rebuildOldProofRoot(t *testing.T, p *OldCommitProof, signers map[string]abcrypto.Signer) {
+func rebuildOldProofRoot(t *testing.T, p *handoff.OldCommitProof, signers map[string]abcrypto.Signer) {
 	t.Helper()
 	p.Control.RecordBytes = p.Record.Bytes()
 	p.Control.OrderedRound = p.Record.OrderedRound
@@ -158,38 +159,38 @@ func rebuildOldProofRoot(t *testing.T, p *OldCommitProof, signers map[string]abc
 
 func TestVerifyOldCommitProofSecp256k1(t *testing.T) {
 	p, tb := signedOldProof(t)
-	v, err := VerifyOldCommitProof(p, tb)
+	v, err := handoff.VerifyOldCommitProof(p, tb)
 	require.NoError(t, err)
 	require.Equal(t, uint64(4), v.OrderRound)
 	require.Equal(t, uint64(4), v.CommitSealRound)
 	require.Equal(t, p.Record.ID(), v.RecordID[:])
-	var context Context
+	var context handoff.Context
 	context.Network, context.Epoch, context.MinActivation = 5, tb.Epoch, 7
 	copy(context.Predecessor[:], p.Record.PredecessorBodyID)
-	bound, err := VerifyOldCommitProof(p, tb, context)
+	bound, err := handoff.VerifyOldCommitProof(p, tb, context)
 	require.NoError(t, err)
 	require.Equal(t, context, bound.Context)
 	context.MinActivation = 8
-	_, err = VerifyOldCommitProof(p, tb, context)
-	require.ErrorIs(t, err, ErrProof)
+	_, err = handoff.VerifyOldCommitProof(p, tb, context)
+	require.ErrorIs(t, err, handoff.ErrProof)
 	for _, tc := range []struct {
 		name   string
-		change func(*OldCommitProof)
+		change func(*handoff.OldCommitProof)
 	}{
-		{"missing_path", func(p *OldCommitProof) { p.ControlPath = nil }},
-		{"wrong_key", func(p *OldCommitProof) { p.ControlPath.Partition = 1 }},
-		{"forged_control", func(p *OldCommitProof) { p.Control.OrderedRound++ }},
-		{"under_quorum", func(p *OldCommitProof) { delete(p.CommitQC.Signatures, "c") }},
-		{"forged_seal", func(p *OldCommitProof) { p.CommitQC.LedgerCommitInfo.Hash[0] ^= 1 }},
-		{"noncommitting", func(p *OldCommitProof) { p.CommitQC.LedgerCommitInfo.RootChainRoundNumber = 0 }},
-		{"invalid_timestamp", func(p *OldCommitProof) { p.CommitQC.LedgerCommitInfo.Timestamp = 1 }},
-		{"invalid_vote_version", func(p *OldCommitProof) { p.CommitQC.VoteInfo.Version = 2 }},
+		{"missing_path", func(p *handoff.OldCommitProof) { p.ControlPath = nil }},
+		{"wrong_key", func(p *handoff.OldCommitProof) { p.ControlPath.Partition = 1 }},
+		{"forged_control", func(p *handoff.OldCommitProof) { p.Control.OrderedRound++ }},
+		{"under_quorum", func(p *handoff.OldCommitProof) { delete(p.CommitQC.Signatures, "c") }},
+		{"forged_seal", func(p *handoff.OldCommitProof) { p.CommitQC.LedgerCommitInfo.Hash[0] ^= 1 }},
+		{"noncommitting", func(p *handoff.OldCommitProof) { p.CommitQC.LedgerCommitInfo.RootChainRoundNumber = 0 }},
+		{"invalid_timestamp", func(p *handoff.OldCommitProof) { p.CommitQC.LedgerCommitInfo.Timestamp = 1 }},
+		{"invalid_vote_version", func(p *handoff.OldCommitProof) { p.CommitQC.VoteInfo.Version = 2 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, tb := signedOldProof(t)
 			tc.change(&p)
-			_, err := VerifyOldCommitProof(p, tb)
-			require.ErrorIs(t, err, ErrProof)
+			_, err := handoff.VerifyOldCommitProof(p, tb)
+			require.ErrorIs(t, err, handoff.ErrProof)
 		})
 	}
 }
@@ -213,37 +214,37 @@ func TestInstalledEVMTransitionBindsCommittedFrozenParent(t *testing.T) {
 	require.NoError(t, err)
 	p.Control.FrozenParent = bytes.Repeat([]byte{0x33}, 32)
 	rebuildOldProofRoot(t, &p, signers)
-	v, err := VerifyOldCommitProof(p, tb)
+	v, err := handoff.VerifyOldCommitProof(p, tb)
 	require.NoError(t, err)
 	g, err := evmroot.DeriveEpochGenesis(evmroot.VerifiedHandoff{RecordID: v.RecordID[:],
 		Root: v.StateRoot[:], ControlDigest: v.ControlDigest[:], OrderRound: v.OrderRound,
 		CommitSealRound: v.CommitSealRound, Epoch: v.SignerEpoch, Record: p.Record}, body)
 	require.NoError(t, err)
 	a := &rctypes.EpochAnchor{GenesisID: g.ID(), Epoch: g.Epoch, Slot: g.Start - 1, StateRoot: v.StateRoot[:]}
-	transition, err := TransitionFromInstalledAnchor(p, tb, body, a, successorTR)
+	transition, err := handoff.TransitionFromInstalledAnchor(p, tb, body, a, successorTR)
 	require.NoError(t, err)
 	require.Equal(t, successorTR.Round, transition.Ack.EVMRound)
 	require.Equal(t, p.Control.FrozenParent, transition.Ack.FrozenParent[:])
 	encoded, err := transition.Encode()
 	require.NoError(t, err)
-	decoded, err := DecodeEVMTransition(encoded)
+	decoded, err := handoff.DecodeEVMTransition(encoded)
 	require.NoError(t, err)
 	require.Equal(t, transition, decoded)
 	bad := *a
 	bad.GenesisID = bytes.Repeat([]byte{0x55}, 32)
-	_, err = TransitionFromInstalledAnchor(p, tb, body, &bad, successorTR)
-	require.ErrorIs(t, err, ErrProof)
+	_, err = handoff.TransitionFromInstalledAnchor(p, tb, body, &bad, successorTR)
+	require.ErrorIs(t, err, handoff.ErrProof)
 	badTR := successorTR
 	badTR.Round++
-	_, err = TransitionFromInstalledAnchor(p, tb, body, a, badTR)
-	require.ErrorIs(t, err, ErrProof)
+	_, err = handoff.TransitionFromInstalledAnchor(p, tb, body, a, badTR)
+	require.ErrorIs(t, err, handoff.ErrProof)
 	p.Control.FrozenParent[0] ^= 1
-	_, err = TransitionFromInstalledAnchor(p, tb, body, a, successorTR)
-	require.ErrorIs(t, err, ErrProof)
+	_, err = handoff.TransitionFromInstalledAnchor(p, tb, body, a, successorTR)
+	require.ErrorIs(t, err, handoff.ErrProof)
 }
 
 func TestOldCommitProofReviewGuards(t *testing.T) {
-	makeOptional := func(t *testing.T, p *OldCommitProof, signers map[string]abcrypto.Signer) {
+	makeOptional := func(t *testing.T, p *handoff.OldCommitProof, signers map[string]abcrypto.Signer) {
 		t.Helper()
 		vote := *p.CommitQC.VoteInfo
 		vote.RoundNumber, vote.ParentRoundNumber = 4, 3
@@ -251,54 +252,54 @@ func TestOldCommitProofReviewGuards(t *testing.T) {
 		seal.RootChainRoundNumber = 0
 		p.OptionalQC = &rctypes.QuorumCert{VoteInfo: &vote, LedgerCommitInfo: &seal}
 		resignOldQC(t, p.OptionalQC, signers)
-		_, err := VerifyOldCommitProof(*p, signedTrust(t, signers))
+		_, err := handoff.VerifyOldCommitProof(*p, signedTrust(t, signers))
 		require.NoError(t, err)
 	}
 	cases := []struct {
 		name   string
-		change func(*testing.T, *OldCommitProof, *types.RootTrustBaseV1, map[string]abcrypto.Signer)
+		change func(*testing.T, *handoff.OldCommitProof, *types.RootTrustBaseV1, map[string]abcrypto.Signer)
 	}{
-		{"record_control_match", func(t *testing.T, p *OldCommitProof, _ *types.RootTrustBaseV1, _ map[string]abcrypto.Signer) {
+		{"record_control_match", func(t *testing.T, p *handoff.OldCommitProof, _ *types.RootTrustBaseV1, _ map[string]abcrypto.Signer) {
 			p.Record.FrozenID = bytes.Repeat([]byte{0x99}, 32)
 		}},
-		{"previous_hash", func(t *testing.T, p *OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
+		{"previous_hash", func(t *testing.T, p *handoff.OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
 			p.CommitQC.LedgerCommitInfo.PreviousHash = bytes.Repeat([]byte{0x77}, 32)
 			resignOldSealOnly(t, p.CommitQC, signers)
 		}},
-		{"parent_round", func(t *testing.T, p *OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
+		{"parent_round", func(t *testing.T, p *handoff.OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
 			p.CommitQC.VoteInfo.ParentRoundNumber = 3
 			resignOldQC(t, p.CommitQC, signers)
 		}},
-		{"commit_before_order", func(t *testing.T, p *OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
+		{"commit_before_order", func(t *testing.T, p *handoff.OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
 			p.Record.OrderedRound, p.Record.ActivationRound = 5, 8
 			rebuildOldProofRoot(t, p, signers)
 		}},
-		{"vote_epoch", func(t *testing.T, p *OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
+		{"vote_epoch", func(t *testing.T, p *handoff.OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
 			p.CommitQC.VoteInfo.Epoch = 2
 			resignOldQC(t, p.CommitQC, signers)
 		}},
-		{"seal_network", func(t *testing.T, p *OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
+		{"seal_network", func(t *testing.T, p *handoff.OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
 			p.CommitQC.LedgerCommitInfo.NetworkID = 6
 			resignOldSealOnly(t, p.CommitQC, signers)
 		}},
-		{"record_epoch_vs_trust", func(t *testing.T, p *OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
+		{"record_epoch_vs_trust", func(t *testing.T, p *handoff.OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
 			p.Record.Epoch = 2
 			p.CommitQC.VoteInfo.Epoch = 2
 			p.CommitQC.LedgerCommitInfo.Epoch = 2
 			rebuildOldProofRoot(t, p, signers)
 		}},
-		{"optional_qc_round", func(t *testing.T, p *OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
+		{"optional_qc_round", func(t *testing.T, p *handoff.OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
 			makeOptional(t, p, signers)
 			p.OptionalQC.VoteInfo.RoundNumber = 3
 			p.OptionalQC.VoteInfo.ParentRoundNumber = 2
 			resignOldQC(t, p.OptionalQC, signers)
 		}},
-		{"optional_qc_timestamp", func(t *testing.T, p *OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
+		{"optional_qc_timestamp", func(t *testing.T, p *handoff.OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
 			makeOptional(t, p, signers)
 			p.OptionalQC.VoteInfo.Timestamp++
 			resignOldQC(t, p.OptionalQC, signers)
 		}},
-		{"control_path_step", func(t *testing.T, p *OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
+		{"control_path_step", func(t *testing.T, p *handoff.OldCommitProof, _ *types.RootTrustBaseV1, signers map[string]abcrypto.Signer) {
 			p.ControlPath.HashSteps = []*types.PathItem{{Key: evmroot.D4ControlPartition, Hash: bytes.Repeat([]byte{0x55}, 32)}}
 			setOldProofRootFromPath(t, p, signers)
 		}},
@@ -307,8 +308,8 @@ func TestOldCommitProofReviewGuards(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, tb, signers := signedOldProofWithSigners(t)
 			tc.change(t, &p, tb, signers)
-			_, err := VerifyOldCommitProof(p, tb)
-			require.ErrorIs(t, err, ErrProof)
+			_, err := handoff.VerifyOldCommitProof(p, tb)
+			require.ErrorIs(t, err, handoff.ErrProof)
 		})
 	}
 	t.Run("genesis_qc", func(t *testing.T) {
@@ -316,13 +317,15 @@ func TestOldCommitProofReviewGuards(t *testing.T) {
 		p.CommitQC.VoteInfo.RoundNumber = rctypes.GenesisRootRound
 		p.CommitQC.VoteInfo.ParentRoundNumber = 0
 		resignOldQC(t, p.CommitQC, signers)
-		require.ErrorIs(t, verifyOldQC(p.CommitQC, tb), ErrProof)
+		_, err := handoff.VerifyOldCommitProof(p, tb)
+		require.ErrorIs(t, err, handoff.ErrProof)
 	})
 	t.Run("empty_signatures", func(t *testing.T) {
 		p, tb := signedOldProof(t)
 		p.CommitQC.Signatures = nil
 		tb.QuorumThreshold = 0 // isolate the explicit empty-signature guard
-		require.ErrorIs(t, verifyOldQC(p.CommitQC, tb), ErrProof)
+		_, err := handoff.VerifyOldCommitProof(p, tb)
+		require.ErrorIs(t, err, handoff.ErrProof)
 	})
 }
 
@@ -360,7 +363,7 @@ func TestIndependentOldCommitProofVector(t *testing.T) {
 		qc.Signatures[id] = decode(sig)
 	}
 	p.CommitQC = qc
-	verified, err := VerifyOldCommitProof(p, tb)
+	verified, err := handoff.VerifyOldCommitProof(p, tb)
 	require.NoError(t, err)
 	require.Equal(t, uint64(4), verified.OrderRound)
 }

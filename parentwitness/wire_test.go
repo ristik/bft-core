@@ -188,16 +188,21 @@ func (shortWriter) Write(p []byte) (int, error) {
 
 func TestWorstCaseResponseFitsFrozenCap(t *testing.T) {
 	_, target := fixtureTarget(t)
-	// This uneven distribution is larger on the wire than equal-size nodes because 970 nodes
-	// cross CBOR's 256-byte threshold and gain a third length-prefix byte.
-	nodes := make([][]byte, 23*65)
-	for i := range nodes[:970] {
-		nodes[i] = bytes.Repeat([]byte{byte(i)}, 256)
+	// Fill all permitted proof nodes to CBOR's 24-byte threshold, then move as
+	// many as possible across its 256-byte threshold within the byte budget.
+	nodes := make([][]byte, (registryproof.FieldCount+1)*65)
+	remaining := MaxEvidenceBytes - 1024 - len(nodes)*24
+	for i := range nodes {
+		size := 24
+		if remaining >= 232 {
+			size = 256
+			remaining -= 232
+		} else if remaining > 0 {
+			size += remaining
+			remaining = 0
+		}
+		nodes[i] = bytes.Repeat([]byte{byte(i)}, size)
 	}
-	for i := 970; i < 970+524; i++ {
-		nodes[i] = bytes.Repeat([]byte{byte(i)}, 24)
-	}
-	nodes[len(nodes)-1] = bytes.Repeat([]byte{1}, 224)
 	var nodeBytes int
 	for _, n := range nodes {
 		nodeBytes += len(n)
@@ -209,8 +214,9 @@ func TestWorstCaseResponseFitsFrozenCap(t *testing.T) {
 	}
 	raw, err := EncodeResponse(Response{Request: target.Request(), Outcome: OutcomeFound, Evidence: ev})
 	require.NoError(t, err)
+	t.Logf("measured worst-case found response: %d bytes; frozen frame cap: %d bytes; conservative upper bound: %d bytes", len(raw), MaxResponseBytes, MaxFoundResponseBytesUpperBound)
 	require.LessOrEqual(t, len(raw), MaxResponseBytes)
-	require.Equal(t, 266357, len(raw), "freeze adversarial prefix distribution with fixture context")
+	require.Equal(t, 267110, len(raw), "freeze adversarial prefix distribution with fixture context")
 	require.LessOrEqual(t, len(raw)+(35-2)+(202-1), MaxFoundResponseBytesUpperBound)
 	require.Less(t, MaxFoundResponseBytesUpperBound, MaxResponseBytes)
 }
