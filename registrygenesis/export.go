@@ -50,6 +50,13 @@ type compilerArtifact struct {
 // contract's constructor-executed account state to its allocation. Embedded compiler artifacts
 // are content-hash checked against the manifest, so export is offline and deterministic.
 func ExportAllocationManifest(data []byte) ([]byte, error) {
+	return exportAllocationManifest(data, nil)
+}
+
+// exportAllocationManifest keeps the constructor export path testable against execution-state
+// mismatches. afterFunding is nil in production and only allows same-package fixtures to model a
+// genesis allocation/funding mismatch before the invariant is checked.
+func exportAllocationManifest(data []byte, afterFunding func(*state.StateDB, common.Address)) ([]byte, error) {
 	m, err := DecodeAllocationManifest(data)
 	if err != nil {
 		return nil, err
@@ -172,6 +179,9 @@ func ExportAllocationManifest(data []byte) ([]byte, error) {
 			}
 			amount, _ := new(big.Int).SetString(a.Amount, 10)
 			st.SetBalance(addr, uint256.MustFromBig(amount), 0)
+			if afterFunding != nil {
+				afterFunding(st, addr)
+			}
 			if err := requirePrincipalBalance(addr, st.GetBalance(addr).ToBig(), amount); err != nil {
 				return nil, fmt.Errorf("%w: %s: %w", ErrGenesisExport, a.Purpose, err)
 			}

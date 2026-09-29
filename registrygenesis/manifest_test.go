@@ -11,7 +11,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/registryproof"
 )
@@ -284,6 +286,30 @@ func TestVaultPrincipalMustEqualInitialBalance(t *testing.T) {
 	principal := big.NewInt(10)
 	require.ErrorIs(t, requirePrincipalBalance(common.HexToAddress("0x3000000000000000000000000000000000000001"), big.NewInt(9), principal), ErrGenesisPrincipalBalance)
 	require.NoError(t, requirePrincipalBalance(common.HexToAddress("0x3000000000000000000000000000000000000001"), big.NewInt(10), principal))
+}
+
+func TestConstructorExportRejectsVaultBalancePrincipalMismatch(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "allocation-build-v1.example.json"))
+	require.NoError(t, err)
+	var m AllocationManifest
+	require.NoError(t, json.Unmarshal(raw, &m))
+	var vault common.Address
+	for _, allocation := range m.Allocations {
+		if allocation.Schedule != nil {
+			vault = common.HexToAddress(allocation.Recipient)
+			break
+		}
+	}
+	require.NotEqual(t, common.Address{}, vault, "fixture must include a vesting vault")
+
+	// Model a faulty genesis funding step after the real constructor has run. This drives the same
+	// export path as production and proves the exporter refuses a vault funded below its principal.
+	_, err = exportAllocationManifest(raw, func(st *state.StateDB, address common.Address) {
+		if address == vault {
+			st.SetBalance(address, uint256.NewInt(1), 0)
+		}
+	})
+	require.ErrorIs(t, err, ErrGenesisPrincipalBalance)
 }
 
 func TestAllocationManifestExactSupplyAndOffByOne(t *testing.T) {
