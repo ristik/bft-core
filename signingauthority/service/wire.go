@@ -60,6 +60,7 @@ const (
 	// opCompleteEnrollment states a pending authority's shard configuration. It carries the whole
 	// configuration, never a hash, because the authority checks the configuration names its own key.
 	opCompleteEnrollment op = 104
+	opAdvanceEpoch       op = 105
 )
 
 func (o op) servedToClient() bool {
@@ -72,7 +73,7 @@ func (o op) servedToClient() bool {
 
 func (o op) servedToOperator() bool {
 	switch o {
-	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment:
+	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch:
 		return true
 	}
 	return false
@@ -98,6 +99,8 @@ func (o op) String() string {
 		return "enrollment"
 	case opCompleteEnrollment:
 		return "complete-enrollment"
+	case opAdvanceEpoch:
+		return "advance-epoch"
 	}
 	return fmt.Sprintf("unknown(%d)", uint64(o))
 }
@@ -156,6 +159,12 @@ type enrollmentPayload struct {
 	_          struct{} `cbor:",toarray"`
 	Enrollment []byte
 	PublicKey  []byte
+}
+
+type advanceEpochPayload struct {
+	_             struct{} `cbor:",toarray"`
+	Configuration []byte
+	TrustBase     []byte
 }
 
 // writeFrame writes one length-prefixed CBOR message.

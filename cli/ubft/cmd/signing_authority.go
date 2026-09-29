@@ -60,6 +60,7 @@ Deployment order:
 	cmd.AddCommand(signingAuthorityCredentialCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityNodeInfoCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityCompleteEnrollmentCmd(baseFlags))
+	cmd.AddCommand(signingAuthorityAdvanceEpochCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityReplaceSessionCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityStatusCmd(baseFlags))
 	return cmd
@@ -307,6 +308,37 @@ shard epoch, and then fixes its hash for the rest of its lifetime. A second comp
 	if err := cmd.MarkFlagRequired("shard-conf"); err != nil {
 		panic(err)
 	}
+	return cmd
+}
+
+func signingAuthorityAdvanceEpochCmd(baseFlags *baseFlags) *cobra.Command {
+	flags := &signingAuthorityOperatorFlags{baseFlags: baseFlags}
+	var confFile, trustFile string
+	cmd := &cobra.Command{
+		Use:   "advance-epoch",
+		Short: "Advance a surviving authority to operator-provisioned successor trust and shard configuration",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			conf, err := util.ReadJsonFile(confFile, &types.PartitionDescriptionRecord{})
+			if err != nil {
+				return fmt.Errorf("loading successor shard configuration: %w", err)
+			}
+			trust, err := util.ReadJsonFile(trustFile, &types.RootTrustBaseV1{})
+			if err != nil {
+				return fmt.Errorf("loading successor root trust: %w", err)
+			}
+			operator, err := flags.operator()
+			if err != nil {
+				return err
+			}
+			defer func() { _ = operator.Close() }()
+			return operator.AdvanceEpoch(cmd.Context(), conf, trust)
+		},
+	}
+	flags.addOperatorFlags(cmd)
+	cmd.Flags().StringVar(&confFile, "shard-conf", "", "successor shard configuration naming this authority's key")
+	cmd.Flags().StringVar(&trustFile, "trust-base", "", "operator-provisioned successor root trust base")
+	_ = cmd.MarkFlagRequired("shard-conf")
+	_ = cmd.MarkFlagRequired("trust-base")
 	return cmd
 }
 
