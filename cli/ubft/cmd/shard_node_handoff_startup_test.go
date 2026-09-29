@@ -42,6 +42,33 @@ func TestShardStartupRestoresHandoffLineageBeforeJournalInitialize(t *testing.T)
 		"shard_node_run uses this seam to order handoff restore, journal replay and terminal-certificate repair")
 }
 
+func TestProfile2RestoreCatchesUpTrustBeforeArchiveReplayAndRepairsAfterward(t *testing.T) {
+	installedEpoch := uint64(1)
+	restoringHandoffHistory := true
+	var steps []string
+	err := runProfile2ArchiveRestore(context.Background(),
+		func(context.Context) error {
+			require.True(t, restoringHandoffHistory)
+			installedEpoch = 3
+			steps = append(steps, "handoff-catch-up")
+			return nil
+		},
+		func(context.Context) error {
+			require.Equal(t, uint64(3), installedEpoch, "archive replay must use the verified trust lineage")
+			require.True(t, restoringHandoffHistory, "terminal observations are deferred during archive restore")
+			steps = append(steps, "archive-replay")
+			return nil
+		},
+		func(context.Context) error {
+			restoringHandoffHistory = false
+			steps = append(steps, "terminal-observation-repair")
+			return nil
+		})
+	require.NoError(t, err)
+	require.Equal(t, []string{"handoff-catch-up", "archive-replay", "terminal-observation-repair"}, steps)
+	require.False(t, restoringHandoffHistory)
+}
+
 type handoffStartupJournal struct {
 	observations map[string]struct{}
 }
