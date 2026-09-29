@@ -108,6 +108,37 @@ func (x *BlockStore) AnchoredTechnicalRecord(hash []byte) (certification.Technic
 	return *matched, nil
 }
 
+// AnchoredFrozenParent binds the EVM shard assignment named by H to the last
+// certified old EVM block imported in the same verified checkpoint.
+func (x *BlockStore) AnchoredFrozenParent(trHash, parent []byte) error {
+	if len(parent) != 32 {
+		return rctypes.ErrEpochAnchor
+	}
+	x.lock.RLock()
+	defer x.lock.RUnlock()
+	root := x.blockTree.Root()
+	if !isEpochAnchorRoot(root) {
+		return rctypes.ErrEpochAnchor
+	}
+	matched := 0
+	for _, shard := range root.ShardState.States {
+		if shard == nil || shard.IR == nil {
+			return rctypes.ErrEpochAnchor
+		}
+		digest, err := shard.TR.Hash()
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(digest, trHash) && bytes.Equal(shard.IR.BlockHash, parent) {
+			matched++
+		}
+	}
+	if matched != 1 {
+		return rctypes.ErrEpochAnchor
+	}
+	return nil
+}
+
 // VerifyRecoveryAnchor reconstructs the received recovery ShardInfo and P_CTL
 // with the production tree, then compares it to the locally proof-verified G.
 func (x *BlockStore) VerifyRecoveryAnchor(head *abdrc.CommittedBlock) error {

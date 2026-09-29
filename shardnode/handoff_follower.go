@@ -36,6 +36,34 @@ type HandoffHistory interface {
 	InstallHandoff(context.Context, handoffdelivery.Bundle, types.PartitionID, types.ShardID, []byte) (handoffdelivery.Verified, error)
 }
 
+// Restore replays durable handoffs before journal admission opens. A successor
+// observation already on disk must never be checked while the active epoch is
+// still at the original anchor after process restart.
+func (f *HandoffFollower) Restore(ctx context.Context) error {
+	if f == nil || f.History == nil || f.AnchorEpoch == 0 || f.Directory == "" || len(f.ConfHash) != 32 {
+		return errors.New("handoff follower: incomplete configuration")
+	}
+	for epoch := f.AnchorEpoch + 1; epoch > f.AnchorEpoch; epoch++ {
+		bundle, err := f.load(epoch)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		verified, err := f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
+		if err != nil {
+			return err
+		}
+		if f.OnInstalled != nil {
+			if err := f.OnInstalled(ctx, bundle, verified); err != nil {
+				return err
+			}
+		}
+	}
+	return errors.New("handoff follower: epoch overflow")
+}
+
 func (f *HandoffFollower) Run(ctx context.Context) error {
 	if f == nil || f.Host == nil || f.History == nil || f.AnchorEpoch == 0 || f.Directory == "" || len(f.ConfHash) != 32 {
 		return errors.New("handoff follower: incomplete configuration")
@@ -43,7 +71,11 @@ func (f *HandoffFollower) Run(ctx context.Context) error {
 	if err := os.MkdirAll(f.Directory, 0700); err != nil {
 		return err
 	}
-	for epoch := f.AnchorEpoch + 1; epoch > f.AnchorEpoch; epoch++ {
+	start := f.AnchorEpoch
+	if active, ok := f.History.(interface{ CurrentRootEpoch() (uint64, bool) }); ok {
+		if epoch, ready := active.CurrentRootEpoch(); ready && epoch >= start { start = epoch }
+	}
+	for epoch := start + 1; epoch > start; epoch++ {
 		for {
 			if err := ctx.Err(); err != nil {
 				return nil

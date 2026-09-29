@@ -17,9 +17,96 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+type fixedJournalEpoch struct{ current uint64 }
+
+func (e fixedJournalEpoch) CurrentRootEpoch() (uint64, bool) { return e.current, true }
+
+type advancingJournalEpoch struct{ calls atomic.Uint32 }
+
+func (e *advancingJournalEpoch) CurrentRootEpoch() (uint64, bool) {
+	if e.calls.Add(1) == 1 {
+		return 1, true
+	}
+	return 2, true
+}
+
+func TestProposalJournalDeclinesStaleSealedRoundAfterHandoff(t *testing.T) {
+	chain, _, c, _ := adapterFixture(t)
+	uc, _ := journalBootstrap(t, chain)
+	c.Observation.EpochAuthority = fixedJournalEpoch{current: 2}
+	j := ProposalJournal{Store: new(configuredprogress.Store), Context: c}
+	p := shardnode.RoundParams{AuthorizingCertificate: uc}
+	require.ErrorIs(t, j.RetainCandidate(context.Background(), shardnode.Block{}, p, true), shardnode.ErrLeaderProposalConflict)
+	require.ErrorIs(t, j.RetainCandidate(context.Background(), shardnode.Block{}, p, false), shardnode.ErrProposalRejected)
+	c.Observation.EpochAuthority = fixedJournalEpoch{current: 1}
+	j.Context = c
+	require.ErrorContains(t, j.RetainCandidate(context.Background(), shardnode.Block{ParentHash: []byte{1}}, p, true), "candidate parent differs",
+		"a current-epoch candidate still reaches the ordinary binding check")
+}
+
+func TestProposalJournalDeclinesActivationDuringRetention(t *testing.T) {
+	chain, _, c, _ := adapterFixture(t)
+	uc, _ := journalBootstrap(t, chain)
+	for _, locallyBuilt := range []bool{true, false} {
+		epoch := &advancingJournalEpoch{}
+		c.Observation.EpochAuthority = epoch
+		j := ProposalJournal{Store: new(configuredprogress.Store), Context: c}
+		p := shardnode.RoundParams{AuthorizingCertificate: uc}
+		err := j.RetainCandidate(context.Background(), shardnode.Block{}, p, locallyBuilt)
+		if locallyBuilt {
+			require.ErrorIs(t, err, shardnode.ErrLeaderProposalConflict)
+		} else {
+			require.ErrorIs(t, err, shardnode.ErrProposalRejected)
+		}
+		require.EqualValues(t, 2, epoch.calls.Load(), "activation raced the store call")
+	}
+}
+
+func TestProposalJournalPreservesCurrentEpochStoreFailure(t *testing.T) {
+	chain, _, c, _ := adapterFixture(t)
+	uc, _ := journalBootstrap(t, chain)
+	c.Observation.EpochAuthority = fixedJournalEpoch{current: uc.GetRootEpoch()}
+	j := ProposalJournal{Store: new(configuredprogress.Store), Context: c}
+	for _, locallyBuilt := range []bool{true, false} {
+		err := j.RetainCandidate(context.Background(), shardnode.Block{},
+			shardnode.RoundParams{AuthorizingCertificate: uc}, locallyBuilt)
+		require.ErrorIs(t, err, configuredprogress.ErrSettings,
+			"a current-epoch store failure must not be treated as retired work")
+	}
+}
+
+func TestJournalAdmissionReportsActivatedEpoch(t *testing.T) {
+	a := &journalAdmission{epoch: 1, context: configuredprogress.Context{Observation: rootinput.ObservationContextV2{EpochAuthority: fixedJournalEpoch{current: 2}}}}
+	require.EqualValues(t, 2, a.RootEpoch())
+	a.context.Observation.EpochAuthority = fixedJournalEpoch{current: 0}
+	require.EqualValues(t, 1, a.RootEpoch())
+}
+
+func TestJournalAdmissionDropsRetiredPendingResponse(t *testing.T) {
+	chain, _, _, _ := adapterFixture(t)
+	uc, tr := journalBootstrap(t, chain)
+	newer := *uc
+	newerSeal := *uc.UnicitySeal
+	newerSeal.RootChainRoundNumber++
+	newer.UnicitySeal = &newerSeal
+	a := &journalAdmission{context: configuredprogress.Context{Observation: rootinput.ObservationContextV2{
+		EpochAuthority: fixedJournalEpoch{current: 2},
+	}}, pendingUC: &newer, pendingTR: tr, pendingSince: time.Now(), pendingAttempts: 1}
+	require.NoError(t, a.Submit(context.Background(), uc, tr))
+	_, pending := a.PendingAdmission()
+	require.False(t, pending, "a retired response cannot keep catch-up unready")
+	current := *uc
+	currentSeal := *uc.UnicitySeal
+	currentSeal.Epoch = 2
+	current.UnicitySeal = &currentSeal
+	require.Error(t, a.Submit(context.Background(), &current, tr),
+		"the current epoch must reach authentication rather than being discarded as stale")
+}
 
 func TestJournalFactoryCarriesCheckedExecutionIdentity(t *testing.T) {
 	_, origin, c, id := adapterFixture(t)

@@ -296,6 +296,18 @@ func verifiedPairBytes(ctx context.Context, c Context, u, t []byte) (*types.Unic
 // previously durable UC whose body arrived later. Repeated identical candidates are idempotent;
 // a hash reused for different bytes is a conflict. The configured origin is checked on every call.
 func (s *Store) PutJournalCandidate(ctx context.Context, c Context, limits JournalLimits, v JournalCandidate) error {
+	return s.putJournalCandidate(ctx, c, limits, v, false)
+}
+
+// PutHistoricalJournalCandidate retains a peer-recovered body whose original
+// authorization was signed before the installed root epoch. This grants no
+// current admission authority; the caller must verify the resulting certificate
+// and the block binding before retaining the body.
+func (s *Store) PutHistoricalJournalCandidate(ctx context.Context, c Context, limits JournalLimits, v JournalCandidate) error {
+	return s.putJournalCandidate(ctx, c, limits, v, true)
+}
+
+func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits JournalLimits, v JournalCandidate, historical bool) error {
 	if !s.journal {
 		return fmt.Errorf("%w: journal not enabled", ErrSettings)
 	}
@@ -312,7 +324,11 @@ func (s *Store) PutJournalCandidate(ctx context.Context, c Context, limits Journ
 	if v.AuthorizingUC == nil || v.AuthorizingTR == nil {
 		return ErrUntrusted
 	}
-	if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, c.Observation, v.AuthorizingUC, v.AuthorizingTR); err != nil {
+	authenticate := rootinput.AuthenticateObservationV2
+	if historical {
+		authenticate = rootinput.AuthenticateHistoricalObservationV2
+	}
+	if _, err := authenticate(ctx, c.Observation, v.AuthorizingUC, v.AuthorizingTR); err != nil {
 		return err
 	}
 	if v.AuthorizingTR.Round != v.Round {
@@ -563,23 +579,7 @@ func (s *Store) BackfillJournalObservation(ctx context.Context, c Context, limit
 	if state.i.observed == nil {
 		return fmt.Errorf("%w: no current observation for historical backfill", ErrUnavailable)
 	}
-	current := state.i.observed.observation
-	var rel relation
-	if o.Certificate().GetRootEpoch() != ^uint64(0) && current.Certificate().GetRootEpoch() > o.Certificate().GetRootEpoch()+1 {
-		if o.Certificate().GetRoundNumber() > current.Certificate().GetRoundNumber() {
-			return ErrConflict
-		}
-		if o.Certificate().GetRoundNumber() == current.Certificate().GetRoundNumber() {
-			oldIR, oldErr := canonicalIR(o.Certificate())
-			newIR, newErr := canonicalIR(current.Certificate())
-			if oldErr != nil || newErr != nil || !bytes.Equal(oldIR, newIR) {
-				return ErrConflict
-			}
-		}
-		rel = relationAdvance
-	} else {
-		rel, err = compareObservations(o, current)
-	}
+	rel, err := compareCumulativeObservations(o, state.i.observed.observation)
 	if err != nil || rel != relationAdvance && rel != relationDuplicate && rel != relationRepeat {
 		return fmt.Errorf("%w: historical certificate conflicts with current progress: %v", ErrConflict, err)
 	}

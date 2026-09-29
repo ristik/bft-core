@@ -1,6 +1,7 @@
 package network
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/libp2p/go-libp2p/config"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/internal/testutils/observability"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 )
 
 func TestNewLibP2RootConsensusNetwork(t *testing.T) {
@@ -29,4 +31,5 @@ func TestNewLibP2RootConsensusNetwork(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, h.ID(), result.self.ID())
+	require.GreaterOrEqual(t, result.sendProtocols[reflect.TypeOf(abdrc.HandoffApprovalMsg{})].timeout, 5*time.Second)
 }

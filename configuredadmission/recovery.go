@@ -617,14 +617,14 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 			return err
 		}
 		candidate := configuredprogress.JournalCandidate{Round: e.Round, Number: b.Number, ParentNumber: parent.Number, Hash: b.Hash, StateRoot: b.StateRoot, ParentHash: b.ParentHash, ParentState: e.ParentState, Raw: b.Raw, BlockSize: b.BlockSize, StateSize: b.StateSize, AuthorizingUC: e.AuthorizingUC, AuthorizingTR: e.AuthorizingTR}
-		if err := r.Store.PutJournalCandidate(ctx, r.Context, r.JournalLimits, candidate); err != nil {
+		if err := r.Store.PutHistoricalJournalCandidate(ctx, r.Context, r.JournalLimits, candidate); err != nil {
 			if errors.Is(err, configuredprogress.ErrConflict) {
 				return fmt.Errorf("%w: peer candidate metadata conflicts with retained body %x: %v", ErrRecoveryUnavailable, b.Hash, err)
 			}
 			return fmt.Errorf("%w: retaining fetched body %x: %w", ErrRecoveryUnavailable, b.Hash, err)
 		}
 		if advance {
-			o, authErr := rootinput.AuthenticateObservationV2(ctx, r.Context.Observation, e.ResultingUC, e.ResultingTR)
+			o, authErr := rootinput.AuthenticateHistoricalObservationV2(ctx, r.Context.Observation, e.ResultingUC, e.ResultingTR)
 			if authErr != nil {
 				return authErr
 			}

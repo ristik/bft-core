@@ -40,6 +40,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
@@ -566,17 +567,57 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				ConfHash: confHash, AnchorEpoch: trustBases[0].GetEpoch(), Directory: flags.ExecutionJournal + ".handoffs", CurrentRoots: currentRoots,
 				ArchiveReplicas: archiveReplicas[:],
 				OnInstalled: func(ctx context.Context, bundle handoffdelivery.Bundle, verified handoffdelivery.Verified) error {
+					if verified.Shard.UC == nil || verified.Shard.UC.InputRecord == nil || verified.Shard.TR == nil || verified.Shard.IR == nil ||
+						!bytes.Equal(verified.Shard.IR.BlockHash, bundle.Proof.Control.FrozenParent) ||
+						!bytes.Equal(verified.Shard.UC.InputRecord.BlockHash, verified.Shard.IR.BlockHash) ||
+						verified.Shard.UC.GetRoundNumber() != verified.Shard.IR.RoundNumber {
+						return errors.New("verified handoff lacks the terminal shard certificate")
+					}
+					terminal, err := rootinput.AuthenticateObservationV2(ctx, journalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
+					if err != nil {
+						return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
+					}
+					prepared, _, err := journalStore.PrepareObservation(ctx, journalCtx, terminal)
+					if err != nil {
+						return fmt.Errorf("preparing handoff terminal certificate: %w", err)
+					}
+					if _, _, err := journalStore.CommitObservation(prepared); err != nil {
+						return fmt.Errorf("persisting handoff terminal certificate: %w", err)
+					}
 					if err := verifierContext.InstallHandoffTransition(bundle, verified); err != nil {
 						return err
 					}
-					if archiveLocal == nil {
-						return nil
-					}
-					raw, err := types.Cbor.Marshal(bundle)
+					old, err := historicalTrust.GetByEpoch(ctx, bundle.Proof.Record.Epoch)
 					if err != nil {
 						return err
 					}
-					return archiveLocal.PutBundle(archive.BundleRequest{Context: archiveSubject, Epoch: bundle.Body.Epoch}, raw)
+					anchor := &rctypes.EpochAnchor{GenesisID: verified.Genesis.ID(), Epoch: verified.Genesis.Epoch,
+						Slot: verified.Genesis.Start - 1, StateRoot: verified.Record.StateRoot[:]}
+					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR)
+					if err != nil {
+						return err
+					}
+					rawTransition, err := transition.Encode()
+					if err != nil {
+						return err
+					}
+					if err := executor.(*engineapi.Adapter).InstallEpochTransition(rawTransition); err != nil {
+						return err
+					}
+					if archiveLocal != nil {
+						raw, err := types.Cbor.Marshal(bundle)
+						if err != nil {
+							return err
+						}
+						if err := archiveLocal.PutBundle(archive.BundleRequest{Context: archiveSubject, Epoch: bundle.Body.Epoch}, raw); err != nil {
+							return err
+						}
+					}
+					if err := historicalTrust.ActivateHandoff(bundle.Body.Epoch); err != nil {
+						return err
+					}
+					flags.observe.Logger().Info("handoff activated", "rootEpoch", bundle.Body.Epoch)
+					return nil
 				}}
 			if archiveLocal != nil {
 				handoffFollower.FetchArchive = func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (handoffdelivery.Bundle, error) {
@@ -587,6 +628,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					}
 					return bundle, err
 				}
+			}
+			if err := handoffFollower.Restore(ctx); err != nil {
+				return fmt.Errorf("restoring verified handoffs: %w", err)
 			}
 		}
 		if flags.Restore {

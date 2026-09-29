@@ -7,18 +7,23 @@ import (
 )
 
 const (
-	ProtocolRootIrChangeReq = "/ab/root-change-req/0.0.1"
-	ProtocolRootProposal    = "/ab/root-proposal/0.0.1"
-	ProtocolRootVote        = "/ab/root-vote/0.0.1"
-	ProtocolRootTimeout     = "/ab/root-timeout/0.0.1"
-	ProtocolRootStateReq    = "/ab/root-state-req/0.0.1"
-	ProtocolRootStateResp   = "/ab/root-state-resp/0.0.1"
+	ProtocolRootIrChangeReq     = "/ab/root-change-req/0.0.1"
+	ProtocolRootProposal        = "/ab/root-proposal/0.0.1"
+	ProtocolRootVote            = "/ab/root-vote/0.0.1"
+	ProtocolRootTimeout         = "/ab/root-timeout/0.0.1"
+	ProtocolRootStateReq        = "/ab/root-state-req/0.0.1"
+	ProtocolRootStateResp       = "/ab/root-state-resp/0.0.1"
+	ProtocolRootHandoffApproval = "/ab/root-handoff-approval/1.0.0"
 )
 
 func NewLibP2RootConsensusNetwork(self *Peer, capacity uint, sendTimeout time.Duration, obs Observability) (*LibP2PNetwork, error) {
 	n, err := NewLibP2PNetwork(self, capacity, obs)
 	if err != nil {
 		return nil, err
+	}
+	approvalTimeout := sendTimeout
+	if approvalTimeout < 5*time.Second {
+		approvalTimeout = 5 * time.Second
 	}
 	sendProtocolDescriptions := []SendProtocolDescription{
 		{ProtocolID: ProtocolRootIrChangeReq, Timeout: sendTimeout, MsgType: abdrc.IrChangeReqMsg{}},
@@ -27,6 +32,7 @@ func NewLibP2RootConsensusNetwork(self *Peer, capacity uint, sendTimeout time.Du
 		{ProtocolID: ProtocolRootTimeout, Timeout: sendTimeout, MsgType: abdrc.TimeoutMsg{}},
 		{ProtocolID: ProtocolRootStateReq, Timeout: sendTimeout, MsgType: abdrc.StateRequestMsg{}},
 		{ProtocolID: ProtocolRootStateResp, Timeout: sendTimeout, MsgType: abdrc.StateMsg{}},
+		{ProtocolID: ProtocolRootHandoffApproval, Timeout: approvalTimeout, MsgType: abdrc.HandoffApprovalMsg{}},
 	}
 	if err = n.RegisterSendProtocols(sendProtocolDescriptions); err != nil {
 		return nil, err
@@ -55,6 +61,10 @@ func NewLibP2RootConsensusNetwork(self *Peer, capacity uint, sendTimeout time.Du
 		{
 			ProtocolID: ProtocolRootStateResp,
 			TypeFn:     func() any { return &abdrc.StateMsg{} },
+		},
+		{
+			ProtocolID: ProtocolRootHandoffApproval,
+			TypeFn:     func() any { return &abdrc.HandoffApprovalMsg{} },
 		},
 	}
 	if err = n.RegisterReceiveProtocols(receiveProtocolDescriptions); err != nil {

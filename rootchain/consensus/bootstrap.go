@@ -24,6 +24,11 @@ type epochAnchorSafetyStore interface {
 	ReadEpochAnchorSafety() (*rctypes.EpochAnchor, error)
 }
 
+// InstalledRootEpoch is the epoch selected by the verified local root lineage.
+func (x *ConsensusManager) InstalledRootEpoch() uint64 {
+	return x.trustBase.Load().Epoch
+}
+
 // InstallEpochGenesis is the local/test injection path until H4 provides
 // transport. Call it before Run with a proof under the lineage-verified old
 // trust base, the full native recovery checkpoint, and the successor body.
@@ -150,6 +155,9 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 		return nil, err
 	}
 	x.trustBase.Store(newTrust)
+	x.handoffMu.Lock()
+	x.handoffPlans = nil
+	x.handoffMu.Unlock()
 	x.leaderSelector = selector
 	x.irReqVerifier = reqVerifier
 	x.t2Timeouts = t2Timeouts
@@ -199,6 +207,9 @@ func (x *ConsensusManager) InstalledEVMTransition(proof handoff.OldCommitProof,
 	body evmroot.TrustBaseBodyV2) ([]byte, error) {
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.epochAnchor == nil {
 		return nil, rctypes.ErrEpochAnchor
+	}
+	if err := x.blockStore.AnchoredFrozenParent(proof.Record.SuccessorTRHash, proof.Control.FrozenParent); err != nil {
+		return nil, err
 	}
 	old, err := x.trustBaseStore.GetByEpoch(proof.Record.Epoch)
 	if err != nil {

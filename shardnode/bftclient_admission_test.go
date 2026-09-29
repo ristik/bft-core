@@ -9,6 +9,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
@@ -59,17 +60,22 @@ type admissionEpochTrustStore struct {
 	epochs chan uint64
 }
 
+type v2AdmissionTrustStore struct{ stubTrustBaseStore }
+
+func (v2AdmissionTrustStore) IsV2Epoch(epoch uint64) bool { return epoch == 1 }
+
 func (s admissionEpochTrustStore) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
 	s.epochs <- epoch
 	return s.tb, nil
 }
 
 type admissionTestSession struct {
-	callbacks AdmissionCallbacks
-	epoch     uint64
-	submitErr error
-	closed    chan struct{}
-	once      sync.Once
+	callbacks     AdmissionCallbacks
+	epoch         uint64
+	profile2Ready bool
+	submitErr     error
+	closed        chan struct{}
+	once          sync.Once
 }
 
 func (s *admissionTestSession) Submit(_ context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
@@ -77,6 +83,9 @@ func (s *admissionTestSession) Submit(_ context.Context, uc *types.UnicityCertif
 	return s.submitErr
 }
 func (s *admissionTestSession) RootEpoch() uint64 { return s.epoch }
+func (s *admissionTestSession) Profile2Ready(epoch uint64) bool {
+	return s.profile2Ready && epoch == s.epoch
+}
 func (s *admissionTestSession) Close() error {
 	s.once.Do(func() { close(s.closed) })
 	return nil
@@ -174,6 +183,39 @@ func TestConfiguredAdmissionPersistsBeforeLUCAndOwnsDriverEvidence(t *testing.T)
 	require.Equal(t, 1, sink.count())
 	require.NotNil(t, c.luc)
 	require.NotEqual(t, []byte{0xff}, c.luc.InputRecord.Hash, "driver mutation cannot change retained LUC")
+}
+
+func TestConfiguredAdmissionReceivesVerifiedV2Epoch(t *testing.T) {
+	net := &admissionTestNet{}
+	sink := &admissionSink{}
+	c, fixture := newAdmissionTestClient(t, sink, net)
+	c.trustBaseStore = v2AdmissionTrustStore{stubTrustBaseStore{tb: fixture.tb}}
+	response := fixture.respond(fixture.ucMine)
+	require.ErrorIs(t, c.handleCertificationResponse(context.Background(), response), ErrProfile2Unready,
+		"without proof-aware admission, the v2 certificate remains closed")
+	factory := &admissionTestFactory{session: &admissionTestSession{epoch: 1, profile2Ready: true, closed: make(chan struct{})}}
+	cancel, done := startAdmissionClient(t, c, factory, sink)
+	defer func() { cancel(); require.ErrorIs(t, <-done, context.Canceled) }()
+	require.NoError(t, c.handleCertificationResponse(context.Background(), response),
+		"configured admission owns v2 verification and durability")
+	require.Nil(t, c.luc, "feed observation alone is not durable admission")
+}
+
+func TestConfiguredAdmissionDropsRetiredEpochAfterInstalledHandoff(t *testing.T) {
+	c, fixture := newAdmissionTestClient(t, &admissionSink{}, &admissionTestNet{})
+	stale := fixture.respond(fixture.ucMine)
+	require.Equal(t, uint64(1), stale.UC.GetRootEpoch())
+	c.profile2 = &Profile2Consumer{verified: &evmroot.VerifiedHandoff{Epoch: 1}}
+	forwarded := errors.New("current epoch forwarded")
+	c.admission = &admissionTestSession{submitErr: forwarded, callbacks: AdmissionCallbacks{
+		AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {},
+	}}
+	require.NoError(t, c.handleCertificationResponse(context.Background(), stale),
+		"a delayed old-committee response cannot reach admission or the driver")
+	current := fixture.respond(fixture.ucMine)
+	current.UC.UnicitySeal.Epoch = 2
+	require.ErrorIs(t, c.handleCertificationResponse(context.Background(), current), forwarded,
+		"the installed epoch still reaches configured admission")
 }
 
 func TestConfiguredAdmissionFeedRenewalSurvivesPersistenceFailure(t *testing.T) {
@@ -334,4 +376,31 @@ func TestConfiguredAdmissionUsesTrustedEpochAndCanDeliverDuringStart(t *testing.
 	require.Equal(t, uint64(7), <-epochs)
 	require.Equal(t, 1, sink.count())
 	require.NotNil(t, c.luc, "the durable callback is initialized before Start returns")
+}
+
+func TestConfiguredAdmissionHandshakeReadsCurrentEpoch(t *testing.T) {
+	net := &admissionTestNet{}
+	c, f := newAdmissionTestClient(t, &admissionSink{}, net)
+	epochs := make(chan uint64, 1)
+	c.trustBaseStore = admissionEpochTrustStore{tb: f.tb, epochs: epochs}
+	c.admission = &admissionTestSession{epoch: 3}
+	c.admissionEpoch = 1
+	c.admissionEpochSet = true
+	require.NoError(t, c.sendHandshake(context.Background()))
+	require.EqualValues(t, 3, <-epochs)
+}
+
+func TestProfile2HandshakeUsesInstalledEpochFloor(t *testing.T) {
+	net := &admissionTestNet{}
+	c, f := newAdmissionTestClient(t, &admissionSink{}, net)
+	epochs := make(chan uint64, 2)
+	c.trustBaseStore = admissionEpochTrustStore{tb: f.tb, epochs: epochs}
+	c.profile2 = &Profile2Consumer{verified: &evmroot.VerifiedHandoff{Epoch: 1}}
+	c.admissionEpochSet = true
+	c.admissionEpoch = 1
+	require.NoError(t, c.sendHandshake(context.Background()))
+	require.EqualValues(t, 2, <-epochs, "a stale admission cursor cannot address the retired committee")
+	c.admissionEpoch = 2
+	require.NoError(t, c.sendHandshake(context.Background()))
+	require.EqualValues(t, 2, <-epochs, "the current epoch remains the handshake target")
 }

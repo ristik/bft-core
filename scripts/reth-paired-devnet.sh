@@ -29,10 +29,18 @@ if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   }
   URETH_BIN=$H4_URETH_BIN
   URETH_PIN_COMMIT=$H4_URETH_COMMIT
+elif [ "${M2_PROFILE2:-0}" = 1 ]; then
+  URETH_PIN_COMMIT=ae6e6be94d6dc45d0df6574cb5fbedef398f5c2e
+  M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2-$(date -u +%Y%m%dT%H%M%SZ)}
+  echo "profile-2 logs: $M2_RUN_LOG_DIR"
 fi
 
 validators=${1:-4}
 rounds=${2:-10}
+if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ]; then
+  echo "profile-2 handoff lane requires four validators" >&2
+  exit 2
+fi
 partitionID=8
 if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ] && { [ "$validators" -ne 4 ] || [ "$rounds" -lt 10 ]; }; then
   echo "M1 fee accounting requires four validators and at least 10 rounds" >&2
@@ -93,6 +101,15 @@ cleanup() {
     stop_pidfile "test-nodes/$d/pid" 'reth.* node'
   done
   wait 2>/dev/null || true
+  if [ "${M2_PROFILE2:-0}" = 1 ]; then
+    mkdir -p "$M2_RUN_LOG_DIR"
+    cp test-nodes/start-evm.log test-nodes/m2-pauses.log "$M2_RUN_LOG_DIR/" 2>/dev/null || true
+    for d in test-nodes/root* test-nodes/evm* test-nodes/reth*; do
+      [ -d "$d" ] || continue
+      mkdir -p "$M2_RUN_LOG_DIR/$(basename "$d")"
+      cp "$d"/*.log "$M2_RUN_LOG_DIR/$(basename "$d")/" 2>/dev/null || true
+    done
+  fi
 }
 
 
@@ -149,7 +166,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo "=== 1. generate the shard topology and chain spec ==="
-./setup-evm-nodes.sh -r 3 -v "$validators" >/dev/null || { echo "setup failed" >&2; exit 1; }
+rootValidators=3
+if [ "${M2_PROFILE2:-0}" = 1 ]; then rootValidators=4; fi
+./setup-evm-nodes.sh -r "$rootValidators" -v "$validators" >/dev/null || { echo "setup failed" >&2; exit 1; }
 genesisSHA=$(shasum -a 256 test-nodes/evm-genesis.json | cut -d' ' -f1)
 echo "generated genesis sha256=$genesisSHA"
 
@@ -284,6 +303,7 @@ PYPORT
 fi
 
 echo
+if [ "${M2_PROFILE2:-0}" != 1 ]; then
 echo "=== 3. doctor preflight detects chainId mismatch and unreachable Engine API ==="
 if [ "${SIGNING:-local}" = authority ] || [ "${D2C_RESTART_PROBE:-0}" = 1 ]; then
   echo "D2C mode: skipping unrelated startup negatives; the execution lane starts in section 4"
@@ -596,6 +616,7 @@ kill "$(cat test-nodes/reth-laterfork/pid)" 2>/dev/null; rm -f test-nodes/reth-l
 fi
 
 echo
+fi
 echo "=== 4. configure the checked v2 origin and seed the block-1 transaction ==="
 # The root chain must certify the FULL shard configuration emitted beside the finalized genesis.
 # Registration happens when start-evm.sh starts the root nodes, so replace the generated base conf
@@ -703,6 +724,15 @@ if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
     fi
   done
   pass "all four validators imported the certified bootstrap block before H4"
+fi
+
+if [ "${M2_PROFILE2:-0}" = 1 ]; then
+  echo "=== M2 profile-2: two certified root handoffs with paid execution ==="
+  if ! source scripts/m2-profile2-handoffs.sh; then
+    fail "profile-2 two-handoff lane failed"
+    exit 1
+  fi
+  pass "two profile-2 handoffs replaced validator keys and certified paid transactions"
 fi
 
 echo
@@ -822,7 +852,9 @@ fi
 
 # #232 is a known independent startup-profile failure. Keep it visible; its preflight above
 # records the exact observed diagnosis, and D1's own verdict below is separate.
-echo "3f status: see section 3f (known issue #232; FAIL until fixed)"
+if [ "${M2_PROFILE2:-0}" != 1 ]; then
+  echo "3f status: see section 3f (known issue #232; FAIL until fixed)"
+fi
 if [ "$failures" -gt "$preflightFailures" ]; then
   echo "D1 FAIL ($((failures - preflightFailures)) lane check(s) failed)"
 else

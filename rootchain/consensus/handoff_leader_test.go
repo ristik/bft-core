@@ -59,6 +59,9 @@ func TestProfile2LeaderEmitsEmptySuffixDespiteBufferedRequest(t *testing.T) {
 	cm.blockStore, err = storage.NewFromState(crypto.SHA256, checkpoint, cm.blockStore.GetDB(), cm.orchestration, logger.New(t), storage.ProfileHandoff)
 	require.NoError(t, err)
 	cm.leaderSelector = constLeader{leader: cm.id}
+	// The anchor stays installed after the first successor block. A later
+	// handoff must still suppress buffered shard requests in its old suffix.
+	cm.epochAnchor = &rctypes.EpochAnchor{}
 	cm.pacemaker.Reset(context.Background(), 4, nil, nil)
 	request := &rctypes.IRChangeReq{Partition: partitionID, CertReason: rctypes.Quorum}
 	key := types.PartitionShardID{PartitionID: partitionID, ShardID: shardID.Key()}

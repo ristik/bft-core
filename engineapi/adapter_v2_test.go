@@ -43,6 +43,32 @@ func TestAdapterRequiresCanonicalTransitionFromConfiguredEpoch(t *testing.T) {
 	require.True(t, rootinput.IsUnsupportedObservationV2(err), "valid installed transition reaches certificate authentication: %v", err)
 }
 
+func TestAdapterInstallsConsecutiveTransitions(t *testing.T) {
+	a := NewAdapter(Config{Verifier: &VerifierContext{RootEpoch: 1}}, nil)
+	makeTransition := func(old uint64, marker byte) []byte {
+		t.Helper()
+		tx := handoff.EVMTransition{OldEpoch: old, NewEpoch: old + 1,
+			NextBodyID: [32]byte{marker}, GenesisID: [32]byte{marker + 1},
+			Ack: handoff.AckRecord{FrozenID: [32]byte{marker + 2}, CommitID: [32]byte{marker + 3},
+				FrozenParent: [32]byte{marker + 4}, SuccessorParent: [32]byte{marker + 4},
+				SuccessorTR: [32]byte{marker + 5}, EVMRound: 1}}
+		raw, err := tx.Encode()
+		require.NoError(t, err)
+		return raw
+	}
+	first, second := makeTransition(1, 1), makeTransition(2, 9)
+	require.ErrorIs(t, a.InstallEpochTransition(second), rootinput.ErrV2Context)
+	require.NoError(t, a.InstallEpochTransition(first))
+	require.NoError(t, a.InstallEpochTransition(first))
+	require.ErrorIs(t, a.InstallEpochTransition(makeTransition(1, 20)), rootinput.ErrV2Context)
+	require.NoError(t, a.InstallEpochTransition(second))
+	require.NoError(t, a.InstallEpochTransition(second))
+	_, err := a.deriveV2(context.Background(), shardnode.RoundParams{}, nil, nil)
+	require.ErrorIs(t, err, rootinput.ErrContextIncomplete,
+		"a dynamically installed second transition reaches observation authentication")
+	require.ErrorIs(t, a.InstallEpochTransition(first), rootinput.ErrV2Context)
+}
+
 func TestAdapterSelectsEachInstalledHandoffTransition(t *testing.T) {
 	v := &VerifierContext{transitions: make(map[uint64]handoff.EVMTransition)}
 	for old := uint64(1); old <= 2; old++ {

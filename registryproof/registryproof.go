@@ -549,12 +549,10 @@ func (l limits) verify(c Context, parentHash common.Hash, ev Evidence) (Snapshot
 		if s.RootEpoch != c.RootEpoch || s.TransitionBodyID != (common.Hash{}) || s.TransitionGenesisID != (common.Hash{}) || s.TransitionFrozenID != (common.Hash{}) || s.TransitionCommitID != (common.Hash{}) || s.TransitionFrozenParent != (common.Hash{}) || s.TransitionSuccessorTR != (common.Hash{}) {
 			return Snapshot{}, fmt.Errorf("%w: missing epoch transition", ErrConfiguration)
 		}
-	case s.TransitionCursor == 1:
-		if c.RootEpoch == ^uint64(0) || s.RootEpoch != c.RootEpoch+1 || s.TransitionBodyID == (common.Hash{}) || s.TransitionGenesisID == (common.Hash{}) || s.TransitionFrozenID == (common.Hash{}) || s.TransitionCommitID == (common.Hash{}) || s.TransitionFrozenParent == (common.Hash{}) || s.TransitionSuccessorTR == (common.Hash{}) {
+	case s.TransitionCursor > 0:
+		if s.TransitionCursor > ^uint64(0)-c.RootEpoch || s.RootEpoch != c.RootEpoch+s.TransitionCursor || s.TransitionBodyID == (common.Hash{}) || s.TransitionGenesisID == (common.Hash{}) || s.TransitionFrozenID == (common.Hash{}) || s.TransitionCommitID == (common.Hash{}) || s.TransitionFrozenParent == (common.Hash{}) || s.TransitionSuccessorTR == (common.Hash{}) {
 			return Snapshot{}, fmt.Errorf("%w: invalid installed transition", ErrConfiguration)
 		}
-	default:
-		return Snapshot{}, fmt.Errorf("%w: unsupported transition cursor", ErrConfiguration)
 	}
 	switch s.Phase {
 	case phaseFinalized:

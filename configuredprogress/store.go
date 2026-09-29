@@ -390,7 +390,7 @@ func verifyRawImage(ctx context.Context, c Context, desc, control, hn, hr []byte
 		return nil, fmt.Errorf("%w: ordinary supersession lost", ErrUntrusted)
 	}
 	if i.first != nil {
-		rel, e := compareObservations(i.first.observation, i.observed.observation)
+		rel, e := compareCumulativeObservations(i.first.observation, i.observed.observation)
 		if e != nil || rel == relationStale {
 			return nil, fmt.Errorf("%w: first/observed ordering: %v", ErrUntrusted, e)
 		}
@@ -416,7 +416,7 @@ func verifyRawImage(ctx context.Context, c Context, desc, control, hn, hr []byte
 		if err != nil {
 			return nil, err
 		}
-		rel, e := compareObservations(hobs, i.observed.observation)
+		rel, e := compareCumulativeObservations(hobs, i.observed.observation)
 		if e != nil || rel == relationStale {
 			return nil, fmt.Errorf("%w: head newer/conflicting with observed: %v", ErrUntrusted, e)
 		}

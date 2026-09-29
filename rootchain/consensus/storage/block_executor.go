@@ -200,12 +200,46 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			nextShardState.Changed[shard] = struct{}{}
 		}
 	}
+	// Apply the ordered control record before shard requests. A freeze takes
+	// effect in its own block, for leaders and for every voter replaying it.
+	if nextShardState.Control != nil {
+		if len(newBlock.Payload.HandoffRecords) > 2 {
+			return nil, ErrHandoffRecord
+		}
+		if len(newBlock.Payload.HandoffRecords) > 0 {
+			var companion []byte
+			if len(newBlock.Payload.HandoffRecords) == 2 {
+				companion = newBlock.Payload.HandoffRecords[1]
+			}
+			control, err := applyHandoffRecord(nextShardState.Control, newBlock.Payload.HandoffRecords[0], uint64(orchestration.NetworkID()), newBlock.Epoch, newBlock.Round, authority, companion)
+			if err != nil {
+				return nil, err
+			}
+			if control.Phase == "endorsed" || control.Phase == "committed" {
+				if _, err := frozenShard(nextShardState, control.FrozenParent); err != nil {
+					return nil, err
+				}
+			}
+			nextShardState.Control = control
+		}
+	} else if len(newBlock.Payload.HandoffRecords) > 0 {
+		return nil, ErrNetworkProfile
+	}
 
 	for _, irChReq := range newBlock.Payload.Requests {
 		if x.ShardState.Control != nil && irChReq.Partition == evmroot.D4ControlPartition {
 			return nil, ErrHandoffRecord
 		}
 		shardKey := types.PartitionShardID{PartitionID: irChReq.Partition, ShardID: irChReq.Shard.Key()}
+		if nextShardState.Control != nil && (nextShardState.Control.Phase == "endorsed" || nextShardState.Control.Phase == "committed") {
+			frozen, err := frozenShard(nextShardState, nextShardState.Control.FrozenParent)
+			if err != nil {
+				return nil, err
+			}
+			if shardKey == frozen {
+				return nil, ErrHandoffFrozen
+			}
+		}
 		si, ok := nextShardState.States[shardKey]
 		if !ok {
 			log.Info(fmt.Sprintf("no validators in shard config (shard has been removed?) %s", shardKey))
@@ -227,25 +261,6 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 
 		nextShardState.Changed[shardKey] = struct{}{}
 	}
-	if nextShardState.Control != nil {
-		if len(newBlock.Payload.HandoffRecords) > 2 {
-			return nil, ErrHandoffRecord
-		}
-		if len(newBlock.Payload.HandoffRecords) > 0 {
-			var companion []byte
-			if len(newBlock.Payload.HandoffRecords) == 2 {
-				companion = newBlock.Payload.HandoffRecords[1]
-			}
-			control, err := applyHandoffRecord(nextShardState.Control, newBlock.Payload.HandoffRecords[0], uint64(orchestration.NetworkID()), newBlock.Epoch, newBlock.Round, authority, companion)
-			if err != nil {
-				return nil, err
-			}
-			nextShardState.Control = control
-		}
-	} else if len(newBlock.Payload.HandoffRecords) > 0 {
-		return nil, ErrNetworkProfile
-	}
-
 	ut, _, err := nextShardState.UnicityTree(hash)
 	if err != nil {
 		return nil, fmt.Errorf("creating UnicityTree: %w", err)
@@ -256,6 +271,30 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		RootHash:   ut.RootHash(),
 		ShardState: nextShardState,
 	}, nil
+}
+
+// The handoff binds one certified EVM parent. Its unique shard entry remains
+// identifiable by that hash while the root refuses changes to it. Other
+// partitions retain their normal certification path.
+func frozenShard(state ShardStates, parent []byte) (types.PartitionShardID, error) {
+	var selected types.PartitionShardID
+	found := false
+	if len(parent) != 32 {
+		return selected, ErrHandoffRecord
+	}
+	for key, shard := range state.States {
+		if shard == nil || shard.IR == nil || !bytes.Equal(shard.IR.BlockHash, parent) {
+			continue
+		}
+		if found {
+			return selected, ErrHandoffRecord
+		}
+		selected, found = key, true
+	}
+	if !found {
+		return selected, ErrHandoffRecord
+	}
+	return selected, nil
 }
 
 func (x *ExecutedBlock) GenerateCertificates(commitQc *rctypes.QuorumCert) ([]*certification.CertificationResponse, error) {

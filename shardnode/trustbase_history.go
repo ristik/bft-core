@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
@@ -21,6 +22,7 @@ import (
 type HistoricalTrustBaseStore struct {
 	history  *trusthistorystore.Store
 	profile2 bool
+	active   atomic.Uint64
 }
 
 func NewHistoricalTrustBaseStore(ctx context.Context, db keyvaluedb.KeyValueDB, anchor *types.RootTrustBaseV1, executionID [32]byte, profile2 bool) (*HistoricalTrustBaseStore, error) {
@@ -32,7 +34,40 @@ func NewHistoricalTrustBaseStore(ctx context.Context, db keyvaluedb.KeyValueDB, 
 	if err != nil {
 		return nil, err
 	}
-	return &HistoricalTrustBaseStore{history: s, profile2: profile2}, nil
+	out := &HistoricalTrustBaseStore{history: s, profile2: profile2}
+	out.active.Store(anchor.Epoch)
+	return out, nil
+}
+
+// CurrentRootEpoch advances only after the native bundle, local snapshot and
+// execution transition have all been installed by the follower.
+func (s *HistoricalTrustBaseStore) CurrentRootEpoch() (uint64, bool) {
+	if !s.profile2 {
+		return 0, false
+	}
+	return s.active.Load(), true
+}
+
+func (s *HistoricalTrustBaseStore) ActivateHandoff(epoch uint64) error {
+	if !s.profile2 || epoch == 0 {
+		return trusthistorystore.ErrUnsupportedV2
+	}
+	for {
+		current := s.active.Load()
+		if epoch == current {
+			return nil
+		}
+		if current == ^uint64(0) || epoch != current+1 {
+			return trusthistorystore.ErrHistory
+		}
+		r, err := s.history.ByEpoch(epoch)
+		if err != nil || r.V2 == nil {
+			return trusthistorystore.ErrHistory
+		}
+		if s.active.CompareAndSwap(current, epoch) {
+			return nil
+		}
+	}
 }
 
 func (s *HistoricalTrustBaseStore) AppendVerified(ctx context.Context, in m2contract.TrustInterval, proof []byte) error {
@@ -106,10 +141,6 @@ func (s *HistoricalTrustBaseStore) GetByEpoch(_ context.Context, epoch uint64) (
 }
 
 func (s *HistoricalTrustBaseStore) Evict() { s.history.Evict() }
-
-func (s *HistoricalTrustBaseStore) CurrentRootEpoch() (uint64, bool) {
-	return s.history.LatestEpoch(), true
-}
 
 func (s *HistoricalTrustBaseStore) BodyID(epoch uint64) ([32]byte, error) {
 	record, err := s.history.ByEpoch(epoch)

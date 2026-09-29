@@ -123,7 +123,7 @@ func (s *Store) PrepareRecord(ctx context.Context, c Context, r certifiedstore.R
 	if err != nil {
 		return PreparedRecord{}, err
 	}
-	rel, err := compareObservations(obs, i.observed.observation)
+	rel, err := compareCumulativeObservations(obs, i.observed.observation)
 	if err != nil || rel == relationStale {
 		return PreparedRecord{}, fmt.Errorf("%w: record certificate is newer/conflicting with observed: %v", ErrConflict, err)
 	}
@@ -132,7 +132,7 @@ func (s *Store) PrepareRecord(ctx context.Context, c Context, r certifiedstore.R
 		if err != nil {
 			return PreparedRecord{}, err
 		}
-		hr, err := compareObservations(headObs, obs)
+		hr, err := compareCumulativeObservations(headObs, obs)
 		if err != nil {
 			return PreparedRecord{}, err
 		}

@@ -122,6 +122,17 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 	if a.closed {
 		return configuredprogress.ErrAdmissionClosed
 	}
+	if uc != nil && a.context.Observation.EpochAuthority != nil {
+		if current, ready := a.context.Observation.EpochAuthority.CurrentRootEpoch(); ready && uc.GetRootEpoch() < current {
+			// The handoff has retired this live response. Historical journal
+			// replay authenticates old epochs through its separate path.
+			if a.pendingUC != nil && a.pendingUC.GetRootEpoch() < current {
+				a.pendingUC, a.pendingTR = nil, nil
+				a.pendingSince, a.pendingAttempts, a.pendingError = time.Time{}, 0, ""
+			}
+			return nil
+		}
+	}
 	o, err := rootinput.AuthenticateObservationV2(ctx, a.context.Observation, uc, tr)
 	if err != nil {
 		return err
@@ -163,7 +174,7 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 				break
 			}
 		}
-		a.logger.InfoContext(ctx, "certificate admitted", slog.String("block", fmt.Sprintf("%x", uc.InputRecord.BlockHash)), slog.Uint64("height", height), slog.Uint64("round", uc.GetRoundNumber()), slog.Uint64("rootRound", uc.GetRootRoundNumber()))
+		a.logger.InfoContext(ctx, "certificate admitted", slog.String("block", fmt.Sprintf("%x", uc.InputRecord.BlockHash)), slog.Uint64("height", height), slog.Uint64("round", uc.GetRoundNumber()), slog.Uint64("rootRound", uc.GetRootRoundNumber()), slog.Uint64("rootEpoch", uc.GetRootEpoch()))
 	}
 	if a.catchUp != nil {
 		for _, observed := range image.Observations {
@@ -196,9 +207,9 @@ func matchesCertifiedCandidate(entry configuredprogress.JournalEntry, uc *types.
 }
 
 func (a *journalAdmission) RootEpoch() uint64 {
-	if a.context.Observation.EpochAuthority != nil {
-		if epoch, ready := a.context.Observation.EpochAuthority.CurrentRootEpoch(); ready {
-			return epoch
+	if authority := a.context.Observation.EpochAuthority; authority != nil {
+		if current, ready := authority.CurrentRootEpoch(); ready && current >= a.epoch {
+			return current
 		}
 	}
 	return a.epoch
@@ -290,12 +301,35 @@ func (j ProposalJournal) RetainCandidate(ctx context.Context, b shardnode.Block,
 	if j.Store == nil {
 		return configuredprogress.ErrSettings
 	}
+	if authority := j.Context.Observation.EpochAuthority; authority != nil && p.AuthorizingCertificate != nil {
+		if current, ready := authority.CurrentRootEpoch(); ready && p.AuthorizingCertificate.GetRootEpoch() < current {
+			// Activation may land between sealing and the journal fsync. This
+			// proposal has lost its authority, but no durable state is damaged.
+			if locallyBuilt {
+				return fmt.Errorf("%w: root epoch advanced before publication", shardnode.ErrLeaderProposalConflict)
+			}
+			return fmt.Errorf("%w: root epoch advanced before verification", shardnode.ErrProposalRejected)
+		}
+	}
 	if !bytes.Equal(b.ParentHash, p.Parent.Hash) {
 		return fmt.Errorf("configuredadmission: candidate parent differs from held executor head")
 	}
 	err := j.Store.PutJournalCandidate(ctx, j.Context, j.Limits, configuredprogress.JournalCandidate{
 		Round: p.Round, Number: b.Number, ParentNumber: p.Parent.Number, Hash: b.Hash, StateRoot: b.StateRoot, ParentHash: b.ParentHash, ParentState: p.Parent.StateRoot, Raw: b.Raw, BlockSize: b.BlockSize, StateSize: b.StateSize, LocallyBuilt: locallyBuilt, AuthorizingUC: p.AuthorizingCertificate, AuthorizingTR: p.AuthorizingTechnicalRecord,
 	})
+	if err != nil && p.AuthorizingCertificate != nil {
+		if authority := j.Context.Observation.EpochAuthority; authority != nil {
+			if current, ready := authority.CurrentRootEpoch(); ready && p.AuthorizingCertificate.GetRootEpoch() < current {
+				// Activation can race the journal's authentication after the
+				// first epoch check. The superseded round is a refusal, not a
+				// reason to stop certified execution.
+				if locallyBuilt {
+					return fmt.Errorf("%w: root epoch advanced during retention", shardnode.ErrLeaderProposalConflict)
+				}
+				return fmt.Errorf("%w: root epoch advanced during retention", shardnode.ErrProposalRejected)
+			}
+		}
+	}
 	if locallyBuilt && errors.Is(err, configuredprogress.ErrLocalProposalConflict) {
 		return fmt.Errorf("%w: %v", shardnode.ErrLeaderProposalConflict, err)
 	}
