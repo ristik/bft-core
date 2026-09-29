@@ -164,7 +164,8 @@ PY
 }
 
 f8_slow_stop_resume_evm() {
-  local i pid port response progress=false
+  local i pid port response progress=false allSubmitted
+  local -a submitted=(false false false)
   f8_trace >/dev/null
   python3 - "$F8_LOG_DIR/trace.jsonl" "$F8_LOG_DIR/evm-stop-before.json" <<'PY'
 import json,sys
@@ -182,15 +183,32 @@ PY
   done
   sleep 4
   f8_trace >/dev/null
+  # These aggregators can start before the first root UC pins their reference
+  # time. Retry SERVICE_NOT_READY on every shard until all three accept real
+  # requests; any other response is a lane failure.
+  for _ in $(seq 1 90); do
+    allSubmitted=true
+    for i in 0 1 2; do
+      [ "${submitted[$i]}" = true ] && continue
+      port=${F8_HTTP_PORTS[$i]}
+      response=$(curl -fsS -H 'content-type: application/json' \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"certification_request\",\"params\":\"$F8_LOAD_REQUEST\"}" \
+        "http://127.0.0.1:$port/") || return 1
+      if echo "$response" | jq -e '.result.status == "SUCCESS"' >/dev/null; then
+        submitted[$i]=true
+        echo "submitted real certification request to ${F8_NAMES[$i]} while EVM was stopped"
+      elif echo "$response" | jq -e '.error.message == "SERVICE_NOT_READY"' >/dev/null; then
+        allSubmitted=false
+      else
+        echo "${F8_NAMES[$i]} rejected the mixed-lane certification request: $response" >&2
+        return 1
+      fi
+    done
+    [ "$allSubmitted" = true ] && break
+    sleep 1
+  done
   for i in 0 1 2; do
-    port=${F8_HTTP_PORTS[$i]}
-    response=$(curl -fsS -H 'content-type: application/json' \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"certification_request\",\"params\":\"$F8_LOAD_REQUEST\"}" \
-      "http://127.0.0.1:$port/") || return 1
-    echo "$response" | jq -e '.result.status == "SUCCESS"' >/dev/null || {
-      echo "${F8_NAMES[$i]} rejected the mixed-lane certification request: $response" >&2; return 1;
-    }
-    echo "submitted real certification request to ${F8_NAMES[$i]} while EVM was stopped"
+    [ "${submitted[$i]}" = true ] || { echo "${F8_NAMES[$i]} did not become ready to accept a certification request" >&2; return 1; }
   done
   for _ in $(seq 1 90); do
     f8_trace >/dev/null
