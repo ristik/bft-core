@@ -113,7 +113,8 @@ type handoffRepairJournal struct {
 
 func (j *handoffRepairJournal) PutHistoricalJournalCandidate(_ context.Context, _ configuredprogress.Context, _ configuredprogress.JournalLimits, candidate configuredprogress.JournalCandidate) error {
 	j.candidatePut = true
-	if !bytes.Equal(candidate.Hash, j.terminal.InputRecord.BlockHash) || !bytes.Equal(candidate.StateRoot, j.terminal.InputRecord.Hash) {
+	if !bytes.Equal(candidate.Hash, j.terminal.InputRecord.BlockHash) || !bytes.Equal(candidate.StateRoot, j.terminal.InputRecord.Hash) ||
+		!bytes.Equal(candidate.ParentState, j.terminal.InputRecord.PreviousHash) {
 		return configuredprogress.ErrConflict
 	}
 	return nil
@@ -210,7 +211,7 @@ func archivedHandoffTerminalFixture(t *testing.T) (handoffTerminalCertificate, *
 	require.NoError(t, err)
 	blockHash := header.Hash().Bytes()
 	terminalUC := &types.UnicityCertificate{UnicitySeal: &types.UnicitySeal{Epoch: 3, RootChainRoundNumber: 12},
-		InputRecord: &types.InputRecord{RoundNumber: shardRound, BlockHash: blockHash, Hash: state.Bytes()}}
+		InputRecord: &types.InputRecord{RoundNumber: shardRound, BlockHash: blockHash, PreviousHash: common.Hash{0x33}.Bytes(), Hash: state.Bytes()}}
 	terminalTR := &certification.TechnicalRecord{Round: shardRound}
 	return handoffTerminalCertificate{uc: terminalUC, tr: terminalTR}, &archive.Record{
 		Header: headerRaw, Body: bodyRaw, CanonicalRootInput: []byte{1}, Companion: companion, OriginalUC: originalUCraw, OriginalTR: originalTRraw,

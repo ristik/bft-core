@@ -107,7 +107,8 @@ func reapplyHandoffTerminalCertificatesWithArchive(ctx context.Context, store ha
 	candidateWriter handoffHistoricalCandidateWriter, localArchive handoffArchiveReader, archiveContext archive.Context,
 	journalCtx configuredprogress.Context, limits configuredprogress.JournalLimits, terminals []handoffTerminalCertificate) error {
 	for _, terminal := range terminals {
-		if terminal.uc == nil || terminal.tr == nil || terminal.uc.InputRecord == nil || len(terminal.uc.InputRecord.BlockHash) != 32 {
+		if terminal.uc == nil || terminal.tr == nil || terminal.uc.InputRecord == nil || len(terminal.uc.InputRecord.BlockHash) != 32 ||
+			len(terminal.uc.InputRecord.PreviousHash) != 32 {
 			return configuredprogress.ErrUntrusted
 		}
 		err := store.BackfillJournalObservation(ctx, journalCtx, limits, terminal.uc, terminal.tr)
@@ -145,7 +146,8 @@ func reapplyHandoffTerminalCertificatesWithArchive(ctx context.Context, store ha
 		candidate := configuredprogress.JournalCandidate{
 			Round: terminal.uc.InputRecord.RoundNumber, Number: block.Number, ParentNumber: block.Number - 1,
 			Hash: bytes.Clone(block.Hash), StateRoot: bytes.Clone(block.StateRoot), ParentHash: bytes.Clone(block.ParentHash),
-			Raw: bytes.Clone(block.Raw), BlockSize: block.BlockSize, StateSize: block.StateSize,
+			ParentState: bytes.Clone(terminal.uc.InputRecord.PreviousHash),
+			Raw:         bytes.Clone(block.Raw), BlockSize: block.BlockSize, StateSize: block.StateSize,
 			AuthorizingUC: &originalUC, AuthorizingTR: &originalTR,
 		}
 		if err := candidateWriter.PutHistoricalJournalCandidate(ctx, journalCtx, limits, candidate); err != nil {
