@@ -95,6 +95,21 @@ func frontierTestSetupWithFixture(t *testing.T, path string) (*Store, *fixture, 
 	return s, f, c, policy, frontier.Coverage{Anchor: r, Material: rec}, limits
 }
 
+func TestFrontierActivationFollowsJournalInitialization(t *testing.T) {
+	f := newFixture(t, 0)
+	c, subject := frontierTestContext(f)
+	limits := JournalLimits{Candidates: 3, Observations: 5, Bytes: 16 << 20}
+	store, err := OpenConfiguredV2(t.TempDir()+"/journal.db", Settings{Retain: 3})
+	require.NoError(t, err)
+	defer store.Close()
+	policy := frontier.Policy{Context: subject, Replicas: [2]string{"first", "second"}, Binding: frontierTestBinding{}, Availability: frontierTestAvailability{}}
+	require.Error(t, store.EnableFrontier(context.Background(), c, limits, policy), "frontier admission requires the configured journal descriptor")
+	_, _, err = store.Initialize(context.Background(), c)
+	require.NoError(t, err)
+	require.NoError(t, store.EnableJournal(context.Background(), c, limits))
+	require.NoError(t, store.EnableFrontier(context.Background(), c, limits, policy))
+}
+
 func TestRestoreAnchorPersistsOnlyCertifiedReplayBase(t *testing.T) {
 	path := t.TempDir() + "/journal.db"
 	s, c, policy, item, limits := frontierTestSetup(t, path)

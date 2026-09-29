@@ -545,12 +545,6 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				archiveServer.SetBundleVerifier(archivewiring.BundleAdmission(historicalTrust))
 			}
 			archiveServer.Register(ctx, peer)
-			if flags.ArchivePrune {
-				policy := frontier.Policy{Context: archiveSubject, Replicas: [2]string{archiveReplicas[0].String(), archiveReplicas[1].String()}, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
-				if e = journalStore.EnableFrontier(ctx, journalCtx, limits, policy); e != nil {
-					return fmt.Errorf("authenticating certified frontier: %w", e)
-				}
-			}
 		}
 		restoringHandoffHistory := flags.TrustHistoryProfile2
 		if flags.TrustHistoryProfile2 {
@@ -640,6 +634,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		if openErr = journalStore.EnableJournal(ctx, journalCtx, limits); openErr != nil {
 			return fmt.Errorf("activating execution journal: %w", openErr)
+		}
+		if archiveLocal != nil && flags.ArchivePrune {
+			policy := frontier.Policy{Context: archiveSubject, Replicas: [2]string{archiveReplicas[0].String(), archiveReplicas[1].String()}, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
+			if e := journalStore.EnableFrontier(ctx, journalCtx, limits, policy); e != nil {
+				return fmt.Errorf("authenticating certified frontier: %w", e)
+			}
 		}
 		if flags.Restore {
 			uc, tr, pinErr := loadRestorePin(flags.RestoreTipUC, flags.RestoreTipTR)
