@@ -43,6 +43,9 @@ func (v CertifiedBinding) VerifyCertified(r frontier.Record, rec *archive.Record
 	if header.TxHash != gethtypes.DeriveSha(gethtypes.Transactions(body.Transactions), trie.NewStackTrie(nil)) || len(body.Uncles) != 0 || len(body.Withdrawals) != 0 || header.WithdrawalsHash == nil || *header.WithdrawalsHash != gethtypes.DeriveSha(gethtypes.Withdrawals{}, trie.NewStackTrie(nil)) {
 		return frontier.ErrInvalid
 	}
+	if ValidateReceiptCommitments(rec) != nil {
+		return frontier.ErrInvalid
+	}
 	var original, result types.UnicityCertificate
 	if types.Cbor.Unmarshal(rec.OriginalUC, &original) != nil || types.Cbor.Unmarshal(rec.ResultingUC, &result) != nil {
 		return frontier.ErrInvalid

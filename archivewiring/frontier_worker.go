@@ -115,9 +115,12 @@ func (w *FrontierWorker) Pass(ctx context.Context) error {
 		copy(hash[:], entry.Candidate.Hash)
 		copy(state[:], entry.Candidate.StateRoot)
 		q := archive.Request{Context: w.Subject, BlockHash: hash}
-		rec, err := w.Archive.Get(q)
+		rec, err := w.Archive.GetReceiptComplete(q)
 		if err != nil {
 			if errors.Is(err, archive.ErrUnavailable) {
+				if len(covered) == 0 {
+					return fmt.Errorf("%w: receipt-complete archive record missing for block %x", archive.ErrUnavailable, q.BlockHash)
+				}
 				break
 			}
 			return err
@@ -126,13 +129,12 @@ func (w *FrontierWorker) Pass(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if !SameArchiveCore(q, rec, expected) {
+			return ErrBinding
+		}
 		digest, err := archive.ManifestDigest(q, rec)
 		if err != nil {
 			return err
-		}
-		want, err := archive.ManifestDigest(q, expected)
-		if err != nil || digest != want {
-			return ErrBinding
 		}
 		request, err := archive.EncodeRequest(q)
 		if err != nil {

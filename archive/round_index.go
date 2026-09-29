@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -37,7 +38,10 @@ func (s *Store) GetLatest(q RoundRequest) (Request, *Record, error) {
 	if len(chosen) != 1 {
 		return Request{}, nil, ErrCorrupt
 	}
-	rec, err := s.get(chosen[0])
+	rec, err := s.getVersion(chosen[0], true)
+	if os.IsNotExist(err) || err == ErrUnavailable {
+		rec, err = s.getVersion(chosen[0], false)
+	}
 	return chosen[0], rec, err
 }
 
@@ -80,18 +84,21 @@ func (s *Store) buildRoundIndex() error {
 	}
 	s.rounds = make(map[string]map[uint64][]Request)
 	for _, entry := range entries {
-		if !entry.IsDir() || len(entry.Name()) != 64 {
+		name := entry.Name()
+		v2 := strings.HasPrefix(name, "v2-")
+		if !entry.IsDir() || (!v2 && len(name) != 64) || (v2 && len(name) != 67) {
 			continue
 		}
 		manifest, err := readBounded(filepath.Join(s.dir, entry.Name(), "manifest"), 16<<10)
-		if err != nil || len(manifest) < 45 || !bytes.Equal(manifest[:8], []byte("ARCHIVE1")) {
+		magic := archiveMagic(v2)
+		if err != nil || len(manifest) < 45 || !bytes.Equal(manifest[:8], []byte(magic)) {
 			continue
 		}
 		digest := sha256.Sum256(manifest[:len(manifest)-32])
 		if !bytes.Equal(digest[:], manifest[len(manifest)-32:]) {
 			continue
 		}
-		reader := bytes.NewReader(bytes.TrimPrefix(manifest[:len(manifest)-sha256.Size], []byte("ARCHIVE1")))
+		reader := bytes.NewReader(bytes.TrimPrefix(manifest[:len(manifest)-sha256.Size], []byte(magic)))
 		raw, err := readBytes(reader, MaxRequestBytes)
 		if err != nil {
 			continue
@@ -100,11 +107,11 @@ func (s *Store) buildRoundIndex() error {
 		if err != nil {
 			continue
 		}
-		location, err := location(q)
+		location, err := location(q, v2)
 		if err != nil || location != entry.Name() {
 			continue
 		}
-		rec, err := s.get(q)
+		rec, err := s.getVersion(q, v2)
 		if err == nil {
 			s.indexRecord(q, rec)
 		}

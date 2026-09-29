@@ -143,6 +143,26 @@ type Record struct {
 
 var required = []string{"header", "body", "root-input", "original-uc", "original-tr", "resulting-uc", "resulting-tr", "companion", "parent-accounting"}
 
+// ReceiptListKey is the immutable v2 archive field containing the ordered
+// consensus receipt envelopes, encoded as an RLP list of byte strings.
+const ReceiptListKey = "consensus-receipts-v2"
+
+func HasReceiptList(r *Record) bool {
+	if r == nil {
+		return false
+	}
+	v, ok := r.Extensions[ReceiptListKey]
+	return ok && len(v) != 0
+}
+
+func validReceiptList(r *Record) bool {
+	if r == nil {
+		return false
+	}
+	v, ok := r.Extensions[ReceiptListKey]
+	return ok && len(v) != 0
+}
+
 func fields(r *Record) map[string][]byte {
 	return map[string][]byte{"header": r.Header, "body": r.Body, "root-input": r.CanonicalRootInput,
 		"original-uc": r.OriginalUC, "original-tr": r.OriginalTR, "resulting-uc": r.ResultingUC,

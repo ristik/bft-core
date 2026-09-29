@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
 	"github.com/unicitynetwork/bft-core/engineapi"
@@ -94,6 +96,19 @@ func FromJournal(ctx context.Context, c configuredprogress.Context, subject arch
 	q := archive.Request{Context: subject}
 	copy(q.BlockHash[:], b.Hash)
 	rec := &archive.Record{Header: header, Body: body, CanonicalRootInput: root, OriginalUC: originalUC, OriginalTR: originalTR, ResultingUC: resultingUC, ResultingTR: resultingTR, Companion: companion}
+	var archivedBody gethtypes.Body
+	if rlp.DecodeBytes(body, &archivedBody) != nil {
+		return archive.Request{}, nil, ErrBinding
+	}
+	// Empty receipt tries are fully determined by the certified empty body, so
+	// they can be retained without an RPC round trip. Nonempty lists are always
+	// captured through ReceiptSource at publication time.
+	if len(archivedBody.Transactions) == 0 {
+		rec, err = WithReceiptList(rec, nil)
+		if err != nil {
+			return archive.Request{}, nil, err
+		}
+	}
 	if _, err := archive.ManifestDigest(q, rec); err != nil {
 		return archive.Request{}, nil, fmt.Errorf("%w: manifest: %v", ErrBinding, err)
 	}

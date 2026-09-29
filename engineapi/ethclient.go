@@ -9,6 +9,9 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 // EthClient speaks the standard eth_* JSON-RPC namespace — reth's regular
@@ -137,6 +140,52 @@ func (c *EthClient) GetBlockByHash(ctx context.Context, hash data32) (blockHeade
 		return blockHeaderJSON{}, err
 	}
 	return decodeBlockHeader(raw)
+}
+
+// GetBlockReceipts retrieves the complete receipt list by the certified block
+// hash. It returns consensus receipt envelopes in transaction-index order.
+func (c *EthClient) GetBlockReceipts(ctx context.Context, hash data32) ([][]byte, error) {
+	var raw json.RawMessage
+	if err := c.call(ctx, "eth_getBlockReceipts", []any{hash}, &raw); err != nil {
+		return nil, err
+	}
+	if isJSONNull(raw) {
+		return nil, errors.New("eth_getBlockReceipts returned null")
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, fmt.Errorf("decoding block receipts: %w", err)
+	}
+	out := make([][]byte, len(entries))
+	for i, entry := range entries {
+		var meta struct {
+			BlockHash        data32   `json:"blockHash"`
+			TransactionIndex quantity `json:"transactionIndex"`
+		}
+		if err := json.Unmarshal(entry, &meta); err != nil || meta.BlockHash != hash || uint64(meta.TransactionIndex) != uint64(i) {
+			return nil, fmt.Errorf("receipt %d has a wrong block hash or transaction index", i)
+		}
+		var receipt gethtypes.Receipt
+		if err := json.Unmarshal(entry, &receipt); err != nil {
+			return nil, fmt.Errorf("decoding receipt %d: %w", i, err)
+		}
+		encoded, err := receipt.MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("encoding receipt %d: %w", i, err)
+		}
+		// Ensure the returned envelopes are canonical consensus encodings.
+		var decoded gethtypes.Receipt
+		if err := decoded.UnmarshalBinary(encoded); err != nil {
+			return nil, err
+		}
+		out[i] = encoded
+	}
+	// The archive representation is an RLP list of byte strings. Decoding this
+	// here makes the storage boundary independent of JSON-RPC response spelling.
+	if _, err := rlp.EncodeToBytes(out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // GetBlockByNumber accepts either a QUANTITY-encoded number or a tag

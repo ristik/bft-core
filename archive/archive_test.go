@@ -57,6 +57,35 @@ func TestManifestDigestMatchesPublishedManifest(t *testing.T) {
 	}
 }
 
+func TestReceiptCompleteV2CoexistsWithImmutableV1(t *testing.T) {
+	q, v1 := fixture()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(q, v1); err != nil {
+		t.Fatal(err)
+	}
+	v2 := *v1
+	v2.Extensions = map[string][]byte{}
+	for k, v := range v1.Extensions {
+		v2.Extensions[k] = bytes.Clone(v)
+	}
+	v2.Extensions[ReceiptListKey] = []byte{0xc0} // canonical empty RLP receipt list
+	if err := store.Put(q, &v2); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.GetReceiptComplete(q); err != nil || !HasReceiptList(got) {
+		t.Fatalf("receipt complete namespace: %v", err)
+	}
+	if got, err := store.getVersion(q, false); err != nil || HasReceiptList(got) {
+		t.Fatalf("legacy v1 namespace changed: %v", err)
+	}
+	if got, err := store.Get(q); err != nil || !HasReceiptList(got) {
+		t.Fatalf("new reads must prefer v2: %v", err)
+	}
+}
+
 func TestAtomicPublicationAndFault(t *testing.T) {
 	q, r := fixture()
 	s, err := Open(t.TempDir())
