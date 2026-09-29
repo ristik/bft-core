@@ -7,7 +7,9 @@ F8_BIN=${RUGREGATOR_BIN:-}
 F8_SRC=${RUGREGATOR_SOURCE:-}
 F8_ROOT_RPC_BASE=${F8_ROOT_RPC_BASE:-25866}
 F8_LOG_DIR=${F8_LOG_DIR:-test-nodes/f8-mixed}
-F8_IDS=(0x40 0xc0 0x40)
+# A is deliberately split into two non-default ranges; B is a single full-range
+# (unsharded) partition, whose canonical end-marker encoding is 0x80.
+F8_IDS=(0x40 0xc0 0x80)
 F8_PARTITIONS=(9 9 10)
 F8_NAMES=(a-left a-right b-left)
 F8_HTTP_PORTS=(28601 28602 28603)
@@ -41,7 +43,7 @@ f8_prepare() {
       "$F8_LOG_DIR/shard-conf-${name}.json" >/dev/null
     echo "prepared partition=$part shard=$shard name=$name t2_ms=$((2500 + i*2500)) config_sha256=$(shasum -a 256 "$F8_LOG_DIR/shard-conf-${name}.json" | awk '{print $1}')"
   done
-  echo "topology: EVM 8/0x80; aggregator A=9/{0x40,0xc0}; B=10/0x40"
+  echo "topology: EVM 8/0x80; aggregator A=9/{0x40,0xc0}; B=10/0x80 (single full-range shard)"
 }
 
 f8_start_one() {
@@ -181,7 +183,9 @@ PY
 }
 
 f8_reconnect_probe() {
-  local i=2 startLine
+  # A-right uses the non-default 0xc0 shard ID, so this exercises the configurable
+  # shard identity on both initial connect and reconnect.
+  local i=1 startLine
   startLine=$(wc -l <"$F8_LOG_DIR/b-left.log")
   kill "${F8_PIDS[$i]}"
   wait "${F8_PIDS[$i]}" 2>/dev/null || true

@@ -94,6 +94,7 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 cleanup() {
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
   ./stop-evm.sh -a >/dev/null 2>&1 || true
+  stop_root_nodes
   stop_pidfile "test-nodes/h4-replaced/pid" 'ubft shard-node restore'
   stop_pidfile "test-nodes/proof-proxy/pid" 'd2c-proof-proxy.py'
   stop_pidfile "test-nodes/engine-proxy/pid" 'd2c-engine-proxy.py'
@@ -101,10 +102,10 @@ cleanup() {
     stop_pidfile "test-nodes/auth$i/pid" 'ubft signing-authority run'
   done
   for i in $(seq 1 "$validators"); do
-    stop_pidfile "test-nodes/reth$i/pid" 'reth.* node'
+    stop_pidfile "test-nodes/reth$i/pid" 'reth.* node' INT
   done
   for d in $negativeReths; do
-    stop_pidfile "test-nodes/$d/pid" 'reth.* node'
+    stop_pidfile "test-nodes/$d/pid" 'reth.* node' INT
   done
   wait 2>/dev/null || true
   if [ "${M2_PROFILE2:-0}" = 1 ]; then
@@ -170,6 +171,19 @@ fi
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# A failed mixed lane can leave a partial partition frontier in root storage. Reuse the
+# generated root identities and trust base, but start its databases clean so a retry cannot
+# inherit half-certified shard schemes from the prior attempt. Stop only processes owned by
+# this checkout while holding the devnet lock.
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+  stop_root_nodes
+  sleep 2
+  rm -f test-nodes/root{1,2,3,4}/root-trust-history.db \
+    test-nodes/root{1,2,3,4}/rootchain.db \
+    test-nodes/root{1,2,3,4}/orchestration.db \
+    test-nodes/root{1,2,3,4}/trustbase.db
+fi
 
 echo "=== 1. generate the shard topology and chain spec ==="
 rootValidators=3
