@@ -379,7 +379,8 @@ func (s *Server) clientOp(ctx context.Context, session signingauthority.Session,
 		return s.authority.Release(session, wire.Round, digest)
 	case opRestoreStatus:
 		status := s.authority.Status()
-		return types.Cbor.Marshal(statusPayload{Generation: status.Generation, ReservedRound: status.ReservedRound,
+		return types.Cbor.Marshal(statusPayload{RootEpoch: status.RootEpoch, ShardEpoch: status.ShardEpoch,
+			Generation: status.Generation, ReservedRound: status.ReservedRound,
 			HasReservation: status.HasReservation, ResponseRetained: status.ResponseRetained,
 			Faulted: status.Faulted, KeyLost: status.KeyLost})
 	}
@@ -429,6 +430,7 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 	case opStatus, opRestoreStatus:
 		status := s.authority.Status()
 		return types.Cbor.Marshal(statusPayload{
+			RootEpoch: status.RootEpoch, ShardEpoch: status.ShardEpoch,
 			Generation: status.Generation, ReservedRound: status.ReservedRound,
 			HasReservation: status.HasReservation, ResponseRetained: status.ResponseRetained,
 			Faulted: status.Faulted, KeyLost: status.KeyLost,

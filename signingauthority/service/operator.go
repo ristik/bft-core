@@ -107,6 +107,7 @@ func (o *OperatorClient) Status(ctx context.Context) (signingauthority.Status, e
 		return signingauthority.Status{}, fmt.Errorf("decoding the status: %w", err)
 	}
 	return signingauthority.Status{
+		RootEpoch: wire.RootEpoch, ShardEpoch: wire.ShardEpoch,
 		Generation: wire.Generation, ReservedRound: wire.ReservedRound,
 		HasReservation: wire.HasReservation, ResponseRetained: wire.ResponseRetained,
 		Faulted: wire.Faulted, KeyLost: wire.KeyLost,

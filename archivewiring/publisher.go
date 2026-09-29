@@ -35,12 +35,13 @@ type Publisher struct {
 	BundleVerifier BundleVerifier
 	ReceiptSource  ReceiptSource
 
-	mu            sync.Mutex
-	ack           map[[32]byte]uint8
-	bundleAck     map[uint64]uint8
-	cursor        int
-	replicaCursor [2]int
-	status        Status
+	mu              sync.Mutex
+	ack             map[[32]byte]uint8
+	bundleAck       map[uint64]uint8
+	cursor          int
+	replicaCursor   [2]int
+	status          Status
+	replicaProgress [2]ReplicaProgress
 }
 
 // ReceiptSource is the execution RPC boundary used only while capturing an
@@ -116,9 +117,24 @@ func captureBlockReceipts(ctx context.Context, source ReceiptSource, hash [32]by
 
 type Status struct{ Pending, Acknowledged, Lagging int64 }
 
+// ReplicaProgress is process-local transfer diagnostics. Durable acknowledgements
+// are read from the journal frontier and remain the authority for pruning.
+type ReplicaProgress struct {
+	Replica                string `json:"replica"`
+	LastAcknowledgedHeight uint64 `json:"lastAcknowledgedHeight"`
+	Error                  string `json:"error,omitempty"`
+}
+
 // Snapshot is diagnostic only. Durable availability is re-established through
 // verified read-back after restart; this in-memory count never licenses prune.
 func (p *Publisher) Snapshot() Status { p.mu.Lock(); defer p.mu.Unlock(); return p.status }
+
+// ReplicaProgress returns a copy of the latest per-peer transfer diagnostics.
+func (p *Publisher) ReplicaProgress() [2]ReplicaProgress {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.replicaProgress
+}
 
 // Validate checks the complete static policy before the node starts.
 func (p *Publisher) Validate() error {
@@ -385,6 +401,7 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 		q := archive.Request{Context: p.Subject, BlockHash: hash}
 		rec, err := p.Archive.GetReceiptComplete(q)
 		if errors.Is(err, archive.ErrUnavailable) {
+			p.setReplicaError(index, "local receipt-complete archive record unavailable")
 			continue // The local publisher will reconstruct this record.
 		}
 		if err == nil {
@@ -403,6 +420,7 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 			err = PutAndReadBack(ctx, p.Host, p.Replicas[index], q, rec, p.Limits)
 		}
 		if err != nil {
+			p.setReplicaError(index, err.Error())
 			if first == nil {
 				first = fmt.Errorf("replica %s: %w", p.Replicas[index], err)
 			}
@@ -410,12 +428,24 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 		}
 		p.mu.Lock()
 		p.ack[hash] |= mask
+		if e.Candidate.Number > p.replicaProgress[index].LastAcknowledgedHeight {
+			p.replicaProgress[index].LastAcknowledgedHeight = e.Candidate.Number
+		}
+		p.replicaProgress[index].Replica = p.Replicas[index].String()
+		p.replicaProgress[index].Error = ""
 		p.mu.Unlock()
 		if p.Log != nil {
 			p.Log.InfoContext(ctx, "archive replica ack catch-up", "replica", p.Replicas[index].String(), "block", fmt.Sprintf("%x", hash[:]))
 		}
 	}
 	return first
+}
+
+func (p *Publisher) setReplicaError(index int, message string) {
+	p.mu.Lock()
+	p.replicaProgress[index].Replica = p.Replicas[index].String()
+	p.replicaProgress[index].Error = message
+	p.mu.Unlock()
 }
 
 // JournalVerifier accepts a remote publication only when this replica's own

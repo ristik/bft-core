@@ -143,5 +143,7 @@ func TestAPendingAuthorityIsCompletedThroughTheOperatorEndpoint(t *testing.T) {
 	t.Cleanup(func() { _ = newClient.Close() })
 	status, err := newClient.RestoreStatus(ctx)
 	require.NoError(t, err)
+	require.Equal(t, uint64(2), status.RootEpoch)
+	require.Equal(t, conf.Epoch, status.ShardEpoch)
 	require.Equal(t, uint64(6), status.ReservedRound)
 }
