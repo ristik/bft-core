@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -135,15 +136,30 @@ func writeError(w http.ResponseWriter, id any, msg string) {
 	})
 }
 
-// buildUbft builds the CLI once per test binary run.
+var (
+	ubftBuildOnce sync.Once
+	ubftBuildPath string
+	ubftBuildErr  error
+	ubftBuildOut  []byte
+)
+
+// buildUbft builds the CLI once per test binary run. Rebuilding it in every
+// integration test dominated this package's runtime without adding coverage.
 func buildUbft(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "ubft")
-	cmd := exec.Command("go", "build", "-o", bin, "./cli/ubft")
-	cmd.Dir = repoRoot(t)
-	out, err := cmd.CombinedOutput()
-	require.NoErrorf(t, err, "building ubft: %s", out)
-	return bin
+	ubftBuildOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "bft-ubft-test-")
+		if err != nil {
+			ubftBuildErr = err
+			return
+		}
+		ubftBuildPath = filepath.Join(dir, "ubft")
+		cmd := exec.Command("go", "build", "-o", ubftBuildPath, "./cli/ubft")
+		cmd.Dir = repoRoot(t)
+		ubftBuildOut, ubftBuildErr = cmd.CombinedOutput()
+	})
+	require.NoErrorf(t, ubftBuildErr, "building ubft: %s", ubftBuildOut)
+	return ubftBuildPath
 }
 
 func repoRoot(t *testing.T) string {
@@ -285,7 +301,7 @@ func TestShardNodeRun_RefusesIncompatibleExecutionClient(t *testing.T) {
 				tc.fixture.genesisHash = expectedGenesis
 			}
 			srv := tc.fixture.start(t)
-			out, code, timedOut := runShardNode(t, bin, home, shardConf, trustBase, srv.URL, srv.URL, 45*time.Second)
+			out, code, timedOut := runShardNode(t, bin, home, shardConf, trustBase, srv.URL, srv.URL, 5*time.Second)
 
 			require.False(t, timedOut,
 				"startup must fail closed promptly, not hang or proceed:\n%s", out)
@@ -324,7 +340,7 @@ func TestShardNodeRun_AcceptsACompatibleFixture(t *testing.T) {
 		genesisHash:  expectedGenesis,
 	}.start(t)
 
-	out, _, timedOut := runShardNode(t, bin, home, shardConf, trustBase, srv.URL, srv.URL, 20*time.Second)
+	out, _, timedOut := runShardNode(t, bin, home, shardConf, trustBase, srv.URL, srv.URL, 5*time.Second)
 
 	require.True(t, timedOut,
 		"a compatible client must let startup proceed; it exited instead:\n%s", out)
@@ -400,7 +416,7 @@ func TestShardNodeRun_RefusesAShardConfWithNoChainID(t *testing.T) {
 		chainID:      "0x7a69",
 		genesisHash:  expectedGenesis,
 	}.start(t)
-	out, code, timedOut := runShardNode(t, bin, home, shardConf, trustBase, srv.URL, srv.URL, 45*time.Second)
+	out, code, timedOut := runShardNode(t, bin, home, shardConf, trustBase, srv.URL, srv.URL, 5*time.Second)
 
 	require.False(t, timedOut, "must fail closed promptly, not hang or proceed:\n%s", out)
 	require.NotEqual(t, 0, code, "must exit non-zero:\n%s", out)
@@ -461,7 +477,7 @@ func TestShardNodeRun_GenesisBinding(t *testing.T) {
 	t.Run("same chain id, different genesis is refused before voting", func(t *testing.T) {
 		srv := engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: otherGenesis}.start(t)
 		out, code, timedOut := runShardNodeWithGenesis(t, bin, home, shardConf, trustBase,
-			srv.URL, srv.URL, expectedGenesis, 45*time.Second)
+			srv.URL, srv.URL, expectedGenesis, 5*time.Second)
 
 		require.False(t, timedOut, "must fail closed promptly:\n%s", out)
 		require.NotEqual(t, 0, code, "must exit non-zero:\n%s", out)
@@ -490,7 +506,7 @@ func TestShardNodeRun_GenesisBinding(t *testing.T) {
 	t.Run("matching genesis lets startup proceed", func(t *testing.T) {
 		srv := engineFixture{capabilities: all, chainID: "0x7a69", genesisHash: expectedGenesis}.start(t)
 		out, _, timedOut := runShardNodeWithGenesis(t, bin, home, shardConf, trustBase,
-			srv.URL, srv.URL, expectedGenesis, 20*time.Second)
+			srv.URL, srv.URL, expectedGenesis, 5*time.Second)
 		require.True(t, timedOut, "a matching genesis must let startup proceed; it exited:\n%s", out)
 		require.Contains(t, out, "shard node starting", out)
 	})
@@ -625,9 +641,9 @@ func TestShardNodeRun_EndpointPairing(t *testing.T) {
 				ethURL = tc.eth.start(t).URL
 			}
 
-			budget := 45 * time.Second
+			budget := 5 * time.Second
 			if !tc.refuse {
-				budget = 20 * time.Second
+				budget = 5 * time.Second
 			}
 			out, code, timedOut := runShardNodeWithGenesis(t, bin, home, shardConf, trustBase,
 				engineSrv.URL, ethURL, tc.wantGenesis, budget)
