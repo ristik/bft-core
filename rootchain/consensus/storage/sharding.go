@@ -313,7 +313,7 @@ func NewShardInfo(shardConf *types.PartitionDescriptionRecord, hashAlg crypto.Ha
 		RootHash:        nil,
 		PrevEpochFees:   types.RawCBOR{0xA0}, // CBOR map(0)
 		LastCR:          nil,
-		IR:              &types.InputRecord{Version: 1, Hash: []byte{}, SummaryValue: []byte{}},
+		IR:              &types.InputRecord{Version: 1},
 		PartitionParams: maps.Clone(shardConf.PartitionParams),
 	}
 

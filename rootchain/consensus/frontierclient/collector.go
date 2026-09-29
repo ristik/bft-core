@@ -491,7 +491,7 @@ func (c *Collector) authenticatePair(pair frontiercodec.Pair) ([32]byte, pairCla
 		return [32]byte{}, 0, nil, ErrUnauthentic
 	}
 	strict := strictSignatures(c.trust, seal.Signatures, mustSealBytes(seal))
-	initialBytes, _ := (&types.InputRecord{Version: 1, Hash: []byte{}, SummaryValue: []byte{}}).Bytes()
+	initialBytes, _ := (&types.InputRecord{Version: 1}).Bytes()
 	irBytes, _ := pair.UC.InputRecord.Bytes()
 	if bytes.Equal(irBytes, initialBytes) {
 		return id, pairInitial, strict, nil
