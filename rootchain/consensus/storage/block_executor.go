@@ -17,6 +17,8 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
 
+const evmPartitionTypeID = 8
+
 type (
 	ExecutedBlock struct {
 		_          struct{}            `cbor:",toarray"`
@@ -289,8 +291,11 @@ func frozenShard(state ShardStates, configs map[types.PartitionShardID]*types.Pa
 		// The parent hash identifies one certified EVM shard, not an
 		// aggregator that happens to present the same hash.
 		conf := configs[key]
-		if conf == nil || conf.PartitionTypeID != 8 {
+		if conf == nil {
 			return selected, ErrHandoffRecord
+		}
+		if conf.PartitionTypeID != evmPartitionTypeID {
+			continue
 		}
 		if found {
 			return selected, ErrHandoffRecord

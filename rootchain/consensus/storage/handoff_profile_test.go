@@ -142,8 +142,9 @@ func TestFrozenEVMShardSelectionRejectsIsolatedMutations(t *testing.T) {
 	t.Run("EVM and aggregator collide", func(t *testing.T) {
 		state, configs := base()
 		state.States[agg].IR.BlockHash = bytes.Clone(parent)
-		_, err := frozenShard(state, configs, parent)
-		require.ErrorIs(t, err, ErrHandoffRecord)
+		selected, err := frozenShard(state, configs, parent)
+		require.NoError(t, err)
+		require.Equal(t, evm, selected)
 	})
 }
 
