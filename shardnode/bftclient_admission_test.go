@@ -385,3 +385,18 @@ func TestConfiguredAdmissionHandshakeReadsCurrentEpoch(t *testing.T) {
 	require.NoError(t, c.sendHandshake(context.Background()))
 	require.EqualValues(t, 3, <-epochs)
 }
+
+func TestProfile2HandshakeUsesInstalledEpochFloor(t *testing.T) {
+	net := &admissionTestNet{}
+	c, f := newAdmissionTestClient(t, &admissionSink{}, net)
+	epochs := make(chan uint64, 2)
+	c.trustBaseStore = admissionEpochTrustStore{tb: f.tb, epochs: epochs}
+	c.profile2 = &Profile2Consumer{verified: &evmroot.VerifiedHandoff{Epoch: 1}}
+	c.admissionEpochSet = true
+	c.admissionEpoch = 1
+	require.NoError(t, c.sendHandshake(context.Background()))
+	require.EqualValues(t, 2, <-epochs, "a stale admission cursor cannot address the retired committee")
+	c.admissionEpoch = 2
+	require.NoError(t, c.sendHandshake(context.Background()))
+	require.EqualValues(t, 2, <-epochs, "the current epoch remains the handshake target")
+}

@@ -58,6 +58,9 @@ func TestAdapterInstallsConsecutiveTransitions(t *testing.T) {
 	require.ErrorIs(t, a.InstallEpochTransition(makeTransition(1, 20)), rootinput.ErrV2Context)
 	require.NoError(t, a.InstallEpochTransition(second))
 	require.NoError(t, a.InstallEpochTransition(second))
+	_, err := a.deriveV2(context.Background(), shardnode.RoundParams{}, nil, nil)
+	require.ErrorIs(t, err, rootinput.ErrContextIncomplete,
+		"a dynamically installed second transition reaches observation authentication")
 	require.ErrorIs(t, a.InstallEpochTransition(first), rootinput.ErrV2Context)
 }
 

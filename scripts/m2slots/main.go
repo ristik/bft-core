@@ -2,9 +2,14 @@ package main
 
 import (
 	"fmt"
-	"github.com/unicitynetwork/bft-core/registryproof"
+
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 func main() {
-	fmt.Printf("%s %s\n", registryproof.SlotKey(4).Hex(), registryproof.SlotKey(20).Hex())
+	fmt.Printf("%s %s\n", slot("assignment.rootEpoch"), slot("transition.cursor"))
+}
+
+func slot(name string) string {
+	return crypto.Keccak256Hash([]byte("unicity.seal-registry.v1/" + name)).Hex()
 }

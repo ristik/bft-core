@@ -101,6 +101,53 @@ type followerHistory struct {
 	accepted int
 }
 
+type activeFollowerHistory struct {
+	epoch     uint64
+	ready     bool
+	installed []uint64
+}
+
+func (h *activeFollowerHistory) CurrentRootEpoch() (uint64, bool) { return h.epoch, h.ready }
+func (*activeFollowerHistory) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1, error) {
+	return nil, errors.New("unexpected fetch")
+}
+func (h *activeFollowerHistory) InstallHandoff(_ context.Context, bundle handoffdelivery.Bundle,
+	_ types.PartitionID, _ types.ShardID, _ []byte) (handoffdelivery.Verified, error) {
+	h.installed = append(h.installed, bundle.Body.Epoch)
+	return handoffdelivery.Verified{}, nil
+}
+
+func TestHandoffFollowerStartsAfterActiveEpoch(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		active uint64
+		ready  bool
+		want   uint64
+	}{
+		{"installed successor", 2, true, 3},
+		{"unready successor", 2, false, 2},
+		{"older active report", 0, true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			history := &activeFollowerHistory{epoch: tc.active, ready: tc.ready}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f := &HandoffFollower{Host: testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t)),
+				History: history, AnchorEpoch: 1, Directory: t.TempDir(),
+				ConfHash: bytes.Repeat([]byte{5}, 32),
+				OnInstalled: func(context.Context, handoffdelivery.Bundle, handoffdelivery.Verified) error {
+					cancel()
+					return nil
+				}}
+			for _, epoch := range []uint64{2, 3} {
+				require.NoError(t, f.save(epoch, handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{Epoch: epoch}}))
+			}
+			require.NoError(t, f.Run(ctx))
+			require.Equal(t, []uint64{tc.want}, history.installed)
+		})
+	}
+}
+
 func (h *followerHistory) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
 	if epoch != 1 {
 		return nil, errors.New("unexpected old epoch")

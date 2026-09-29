@@ -67,6 +67,19 @@ func TestProposalJournalDeclinesActivationDuringRetention(t *testing.T) {
 	}
 }
 
+func TestProposalJournalPreservesCurrentEpochStoreFailure(t *testing.T) {
+	chain, _, c, _ := adapterFixture(t)
+	uc, _ := journalBootstrap(t, chain)
+	c.Observation.EpochAuthority = fixedJournalEpoch{current: uc.GetRootEpoch()}
+	j := ProposalJournal{Store: new(configuredprogress.Store), Context: c}
+	for _, locallyBuilt := range []bool{true, false} {
+		err := j.RetainCandidate(context.Background(), shardnode.Block{},
+			shardnode.RoundParams{AuthorizingCertificate: uc}, locallyBuilt)
+		require.ErrorIs(t, err, configuredprogress.ErrSettings,
+			"a current-epoch store failure must not be treated as retired work")
+	}
+}
+
 func TestJournalAdmissionReportsActivatedEpoch(t *testing.T) {
 	a := &journalAdmission{epoch: 1, context: configuredprogress.Context{Observation: rootinput.ObservationContextV2{EpochAuthority: fixedJournalEpoch{current: 2}}}}
 	require.EqualValues(t, 2, a.RootEpoch())
@@ -77,12 +90,22 @@ func TestJournalAdmissionReportsActivatedEpoch(t *testing.T) {
 func TestJournalAdmissionDropsRetiredPendingResponse(t *testing.T) {
 	chain, _, _, _ := adapterFixture(t)
 	uc, tr := journalBootstrap(t, chain)
+	newer := *uc
+	newerSeal := *uc.UnicitySeal
+	newerSeal.RootChainRoundNumber++
+	newer.UnicitySeal = &newerSeal
 	a := &journalAdmission{context: configuredprogress.Context{Observation: rootinput.ObservationContextV2{
 		EpochAuthority: fixedJournalEpoch{current: 2},
-	}}, pendingUC: uc, pendingTR: tr, pendingSince: time.Now(), pendingAttempts: 1}
+	}}, pendingUC: &newer, pendingTR: tr, pendingSince: time.Now(), pendingAttempts: 1}
 	require.NoError(t, a.Submit(context.Background(), uc, tr))
 	_, pending := a.PendingAdmission()
 	require.False(t, pending, "a retired response cannot keep catch-up unready")
+	current := *uc
+	currentSeal := *uc.UnicitySeal
+	currentSeal.Epoch = 2
+	current.UnicitySeal = &currentSeal
+	require.Error(t, a.Submit(context.Background(), &current, tr),
+		"the current epoch must reach authentication rather than being discarded as stale")
 }
 
 func TestJournalFactoryCarriesCheckedExecutionIdentity(t *testing.T) {
