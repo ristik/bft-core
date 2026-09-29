@@ -411,6 +411,9 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 		p.mu.Lock()
 		p.ack[hash] |= mask
 		p.mu.Unlock()
+		if p.Log != nil {
+			p.Log.InfoContext(ctx, "archive replica ack catch-up", "replica", p.Replicas[index].String(), "block", fmt.Sprintf("%x", hash[:]))
+		}
 	}
 	return first
 }
