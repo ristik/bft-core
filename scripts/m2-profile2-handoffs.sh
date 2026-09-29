@@ -18,14 +18,20 @@ m2_wait_root_epoch() {
 }
 
 m2_start_root() {
-  local node=$1 epoch=$2 boot=$3 port pid i
+  local node=$1 epoch=$2 boot=$3 port pid i conf
+  local -a shardConfArgs=(--shard-conf "$fullShardConf")
   port=$(m2_rpc_port "$node")
+  if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+    for conf in test-nodes/shard-conf-f8-a-left.json test-nodes/shard-conf-f8-a-right.json test-nodes/shard-conf-f8-b-left.json; do
+      shardConfArgs+=(--shard-conf "$conf")
+    done
+  fi
   mkdir -p "test-nodes/root$node"
   for i in $(seq 1 90); do
     build/ubft root-node run --home "test-nodes/root$node" \
       --address "/ip4/127.0.0.1/tcp/$(m2_p2p_port "$node")" \
       --bootnodes "$boot" --trust-base test-nodes/trust-base.json \
-      --shard-conf "$fullShardConf" --profile-2 --install-handoff-epoch "$epoch" \
+      "${shardConfArgs[@]}" --profile-2 --install-handoff-epoch "$epoch" \
       --rpc-server-address "127.0.0.1:$port" --log-format text --log-level debug \
       >>"test-nodes/root$node/debug.log" 2>&1 &
     pid=$!
