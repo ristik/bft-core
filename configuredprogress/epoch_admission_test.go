@@ -78,6 +78,95 @@ func TestProfile2RetainedEndpointsSpanTwoInstalledHandoffs(t *testing.T) {
 	require.Equal(t, uint64(3), latest.Certificate().GetRootEpoch())
 }
 
+func TestProfile2RestartReplaysHandoffsBeforeJournalInitialize(t *testing.T) {
+	f := newFixture(t, 1)
+	base2, base3 := *f.c.TrustBase, *f.c.TrustBase
+	base2.Epoch, base3.Epoch = 2, 3
+	authority := &currentEpoch{epoch: 1}
+	f.ctx.Observation.TrustBases = epochBases{1: f.c.TrustBase, 2: &base2, 3: &base3}
+	f.ctx.Observation.EpochAuthority = authority
+
+	s, path := f.open(3)
+	_, _, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	require.NoError(t, s.EnableJournal(context.Background(), f.ctx, testJournalLimits))
+	first := f.first(1, 2, 5)
+	admitJournal(t, s, f, f.bootstrap(1, 4))
+	admitJournal(t, s, f, first)
+	previous := first
+	for epoch := uint64(2); epoch <= 3; epoch++ {
+		uc := previous.Certificate()
+		uc.UnicitySeal.Epoch = epoch
+		uc.UnicitySeal.RootChainRoundNumber = 5 + epoch
+		uc.UnicitySeal.Signatures = nil
+		for signer := range first.Certificate().UnicitySeal.Signatures {
+			require.NoError(t, uc.UnicitySeal.Sign(signer, f.c.Signer))
+		}
+		authority.epoch = epoch
+		next, authErr := rootinput.AuthenticateObservationV2(context.Background(), f.ctx.Observation, uc, first.TechnicalRecord())
+		require.NoError(t, authErr)
+		admitJournal(t, s, f, next)
+		previous = next
+	}
+	require.NoError(t, s.Close())
+
+	// A process starts from its configured anchor (epoch 1). Restoring the
+	// saved, verified handoff bundles advances this authority before Initialize
+	// replays epochs 1 through 3 from the journal.
+	authority.epoch = 1
+	s, err = OpenConfiguredV2(path, Settings{Retain: 3})
+	require.NoError(t, err)
+	defer s.Close()
+	_, _, err = s.Initialize(context.Background(), f.ctx)
+	require.ErrorIs(t, err, rootinput.ErrV2Context, "replay before handoff restore must refuse uninstalled history")
+	authority.epoch = 3
+	_, _, err = s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err, "verified handoff restore admits historical journal records through installed epoch 3")
+}
+
+func TestProfile2JournalReplayRefusesEpochAboveInstalledHandoffs(t *testing.T) {
+	f := newFixture(t, 1)
+	bases := make(epochBases)
+	for epoch := uint64(1); epoch <= 4; epoch++ {
+		base := *f.c.TrustBase
+		base.Epoch = epoch
+		bases[epoch] = &base
+	}
+	authority := &currentEpoch{epoch: 1}
+	f.ctx.Observation.TrustBases = bases
+	f.ctx.Observation.EpochAuthority = authority
+	s, path := f.open(3)
+	_, _, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	require.NoError(t, s.EnableJournal(context.Background(), f.ctx, testJournalLimits))
+	first := f.first(1, 2, 5)
+	admitJournal(t, s, f, f.bootstrap(1, 4))
+	admitJournal(t, s, f, first)
+	previous := first
+	for epoch := uint64(2); epoch <= 4; epoch++ {
+		uc := previous.Certificate()
+		uc.UnicitySeal.Epoch = epoch
+		uc.UnicitySeal.RootChainRoundNumber = 5 + epoch
+		uc.UnicitySeal.Signatures = nil
+		for signer := range first.Certificate().UnicitySeal.Signatures {
+			require.NoError(t, uc.UnicitySeal.Sign(signer, f.c.Signer))
+		}
+		authority.epoch = epoch
+		next, authErr := rootinput.AuthenticateObservationV2(context.Background(), f.ctx.Observation, uc, first.TechnicalRecord())
+		require.NoError(t, authErr)
+		admitJournal(t, s, f, next)
+		previous = next
+	}
+	require.NoError(t, s.Close())
+	authority.epoch = 3
+	s, err = OpenConfiguredV2(path, Settings{Retain: 3})
+	require.NoError(t, err)
+	defer s.Close()
+	_, _, err = s.Initialize(context.Background(), f.ctx)
+	require.ErrorIs(t, err, rootinput.ErrV2Context)
+	require.ErrorContains(t, err, "historical root epoch 4 exceeds installed 3")
+}
+
 func TestProfile2JournalObservationUsesEpochOrderAndCurrentGate(t *testing.T) {
 	f := newFixture(t, 1)
 	oldUC, tr := f.sign(f.c.InputRecord(1), 2, 100)

@@ -498,12 +498,6 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			journalCtx.Observation.EpochAuthority = historicalTrust
 			journalCtx.Record.EpochAuthority = historicalTrust
 		}
-		if _, _, openErr = journalStore.Initialize(ctx, journalCtx); openErr != nil {
-			return fmt.Errorf("initializing execution journal: %w", openErr)
-		}
-		if openErr = journalStore.EnableJournal(ctx, journalCtx, limits); openErr != nil {
-			return fmt.Errorf("activating execution journal: %w", openErr)
-		}
 		var archiveLocal *archive.Store
 		var archiveSubject archive.Context
 		var archiveReplicas [2]libp2ppeer.ID
@@ -558,6 +552,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				}
 			}
 		}
+		restoringHandoffHistory := flags.TrustHistoryProfile2
 		if flags.TrustHistoryProfile2 {
 			currentRoots := make([]libp2ppeer.ID, 0, len(bootNodes))
 			for _, root := range bootNodes {
@@ -577,12 +572,14 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if err != nil {
 						return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
 					}
-					prepared, _, err := journalStore.PrepareObservation(ctx, journalCtx, terminal)
-					if err != nil {
-						return fmt.Errorf("preparing handoff terminal certificate: %w", err)
-					}
-					if _, _, err := journalStore.CommitObservation(prepared); err != nil {
-						return fmt.Errorf("persisting handoff terminal certificate: %w", err)
+					if !restoringHandoffHistory {
+						prepared, _, err := journalStore.PrepareObservation(ctx, journalCtx, terminal)
+						if err != nil {
+							return fmt.Errorf("preparing handoff terminal certificate: %w", err)
+						}
+						if _, _, err := journalStore.CommitObservation(prepared); err != nil {
+							return fmt.Errorf("persisting handoff terminal certificate: %w", err)
+						}
 					}
 					if err := verifierContext.InstallHandoffTransition(bundle, verified); err != nil {
 						return err
@@ -632,6 +629,17 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if err := handoffFollower.Restore(ctx); err != nil {
 				return fmt.Errorf("restoring verified handoffs: %w", err)
 			}
+			restoringHandoffHistory = false
+		}
+		// The journal may contain observations from later root epochs than its
+		// genesis trust-base anchor. Restore and activate every locally verified
+		// handoff first so journal replay's historical-epoch gate uses the
+		// installed epoch, not the anchor epoch.
+		if _, _, openErr = journalStore.Initialize(ctx, journalCtx); openErr != nil {
+			return fmt.Errorf("initializing execution journal: %w", openErr)
+		}
+		if openErr = journalStore.EnableJournal(ctx, journalCtx, limits); openErr != nil {
+			return fmt.Errorf("activating execution journal: %w", openErr)
 		}
 		if flags.Restore {
 			uc, tr, pinErr := loadRestorePin(flags.RestoreTipUC, flags.RestoreTipTR)
