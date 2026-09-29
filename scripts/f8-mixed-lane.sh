@@ -27,11 +27,14 @@ f8_require_pin() {
 f8_prepare() {
   f8_require_pin
   mkdir -p "$F8_LOG_DIR"
+  rm -f "$F8_LOG_DIR/trace.jsonl"
   local i name part shard home confHome
   for i in 0 1 2; do
     name=${F8_NAMES[$i]}; part=${F8_PARTITIONS[$i]}; shard=${F8_IDS[$i]}
     home="test-nodes/f8-$name"; confHome="test-nodes/f8-conf-$name"
     mkdir -p "$home" "$confHome"
+    rm -rf "$home/db"
+    rm -f "$F8_LOG_DIR/$name.log"
     build/ubft shard-node init --home "$home" -g >/dev/null
     build/ubft shard-conf generate --home "$confHome" --network-id 3 \
       --partition-id "$part" --partition-type-id "$part" --shard-id "$shard" \
