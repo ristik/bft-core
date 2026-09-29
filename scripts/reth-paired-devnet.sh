@@ -50,6 +50,11 @@ case "${SIGNING:-local}" in
   local | authority) ;;
   *) echo "SIGNING must be local or authority" >&2; exit 2 ;;
 esac
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+  [ "${M2_PROFILE2:-0}" = 1 ] || { echo "F8 mixed lane requires M2_PROFILE2=1 for the live root handoff" >&2; exit 2; }
+  # Defines the three pinned Rust aggregator fixture and its trace/reconnect probes.
+  source scripts/f8-mixed-lane.sh
+fi
 if [ "${H4_RESTORE_PROBE:-0}" = 1 ] && { [ "${SIGNING:-local}" != authority ] || [ "$validators" -ne 4 ] || [ "$rounds" -lt 15 ]; }; then
   echo "H4 restore probe requires SIGNING=authority, four validators and at least 15 blocks" >&2
   exit 2
@@ -87,6 +92,7 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 # from this checkout. This runs nested inside scripts/reth-smoke.sh, whose own teardown cannot undo
 # anything a machine-wide sweep here had already killed.
 cleanup() {
+  if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
   ./stop-evm.sh -a >/dev/null 2>&1 || true
   stop_pidfile "test-nodes/h4-replaced/pid" 'ubft shard-node restore'
   stop_pidfile "test-nodes/proof-proxy/pid" 'd2c-proof-proxy.py'
@@ -622,6 +628,7 @@ echo "=== 4. configure the checked v2 origin and seed the block-1 transaction ==
 # Registration happens when start-evm.sh starts the root nodes, so replace the generated base conf
 # only now, after the startup negatives above have used it.
 cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_prepare; fi
 if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   export EVM_ARCHIVE_ROOT=test-nodes/h4-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
@@ -677,6 +684,15 @@ echo
 echo "=== 5. the v2 bootstrap certifies a real EVM block 1 ==="
 preflightFailures=$failures
 ./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+  f8_start || { fail "mixed aggregator startup failed"; exit 1; }
+  for _ in $(seq 1 90); do
+    if f8_trace >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+  f8_trace >/dev/null || { fail "not all mixed shards entered certified root state"; exit 1; }
+  pass "three aggregator shards certified alongside the EVM partition; UC/TR/EVM trace recorded"
+fi
 
 echo "waiting for block 1 and a certificate (up to 180s) ..."
 mined=false
@@ -728,6 +744,12 @@ fi
 
 if [ "${M2_PROFILE2:-0}" = 1 ]; then
   echo "=== M2 profile-2: two certified root handoffs with paid execution ==="
+  if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+    f8_slow_stop_resume_evm || { fail "EVM delay/stop/resume probe failed"; exit 1; }
+    f8_reconnect_probe || { fail "non-default aggregator shard reconnect failed"; exit 1; }
+    f8_inflight_evm_probe || { fail "EVM proposal did not certify during root leader rotation"; exit 1; }
+    pass "aggregators continued through delayed/stopped EVM; reconnect and in-flight EVM proposal passed"
+  fi
   if ! source scripts/m2-profile2-handoffs.sh; then
     fail "profile-2 two-handoff lane failed"
     exit 1

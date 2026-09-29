@@ -20,6 +20,7 @@ import (
 	testtb "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
@@ -153,6 +154,7 @@ func Test_roundInfoHandler(t *testing.T) {
 							Partition: 1,
 							Shard:     types.ShardID{},
 							IR:        &types.InputRecord{RoundNumber: 11, Epoch: 1},
+							IRTR:      certification.TechnicalRecord{Round: 13, Leader: "shard-leader"},
 						},
 					},
 					Block: &rctypes.BlockData{Round: 12, Epoch: 2},
@@ -175,6 +177,8 @@ func Test_roundInfoHandler(t *testing.T) {
 					ShardID:     types.ShardID{},
 					RoundNumber: 11,
 					EpochNumber: 1,
+					TRRound:     13,
+					TRLeader:    "shard-leader",
 				},
 			},
 		}

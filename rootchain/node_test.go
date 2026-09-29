@@ -725,6 +725,44 @@ func Test_onBlockCertificationRequest(t *testing.T) {
 		require.EqualValues(t, 2, sendCallCnt, "expected that the latest Cert is sent to the node")
 	})
 
+	t.Run("invalid RSMT proof is rejected before certification", func(t *testing.T) {
+		// Keep the request signature and shard continuity valid so rejection
+		// reaches the configured proof verifier itself.
+		oldParams := si.PartitionParams
+		oldRoot := si.RootHash
+		t.Cleanup(func() { si.PartitionParams, si.RootHash = oldParams, oldRoot })
+		si.PartitionParams = map[string]string{"proof_type": "aggregator_rsmt_v1"}
+		si.RootHash = test.RandomBytes(32)
+		cr := validCertRequest
+		cr.InputRecord = validCertRequest.InputRecord.NewRepeatIR()
+		cr.InputRecord.PreviousHash = si.RootHash
+		cr.ZkProof = []byte{0xff, 0x00} // malformed RSMT envelope
+		require.NoError(t, cr.Sign(signer))
+		var certReqCalls, responseCalls int
+		partNet := mockPartitionNet{send: func(_ context.Context, msg any, _ ...p2peer.ID) error {
+			resp, ok := msg.(*certification.CertificationResponse)
+			require.True(t, ok, "expected certification response, got %T", msg)
+			require.Equal(t, certification.CertStatusProofInvalid, resp.Status)
+			require.Equal(t, certResp.UC.TRHash, resp.UC.TRHash, "reject with the last certified UC")
+			responseCalls++
+			return nil
+		}}
+		cm := mockConsensusManager{
+			shardInfo: func(types.PartitionID, types.ShardID) (*storage.ShardInfo, error) { return si, nil },
+			requestCert: func(context.Context, consensus.IRChangeRequest) error {
+				certReqCalls++
+				return nil
+			},
+		}
+		node, err := New(&nwPeer, partNet, cm, testobservability.Default(t))
+		require.NoError(t, err)
+		err = node.onBlockCertificationRequest(t.Context(), &cr)
+		require.ErrorContains(t, err, "ZK proof verification failed")
+		require.Equal(t, 1, responseCalls)
+		require.Zero(t, certReqCalls, "invalid proof must never enter root consensus")
+		require.Empty(t, node.incomingRequests.store, "invalid proof must not advance buffered shard state")
+	})
+
 	t.Run("Equivocating Request", func(t *testing.T) {
 		cm := &mockConsensusManager{
 			shardInfo: func(partition types.PartitionID, shard types.ShardID) (*storage.ShardInfo, error) {
