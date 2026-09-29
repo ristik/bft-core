@@ -438,7 +438,7 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 				return err
 			}
 		}
-		if err := checkPruneObligations(b); err != nil {
+		if err := checkPruneObligations(ctx, c, b, nextUC.GetRootEpoch(), nextUC.GetRootRoundNumber()); err != nil {
 			return err
 		}
 		for i, item := range covered {
@@ -498,7 +498,11 @@ func supersededCandidate(number, round, certifiedHeight, certifiedRound uint64) 
 	return number <= certifiedHeight || round <= certifiedRound
 }
 
-func checkPruneObligations(b *bolt.Bucket) error {
+func rootPositionLater(epoch, round, otherEpoch, otherRound uint64) bool {
+	return epoch > otherEpoch || epoch == otherEpoch && round > otherRound
+}
+
+func checkPruneObligations(ctx context.Context, c Context, b *bolt.Bucket, throughEpoch, throughRound uint64) error {
 	curs := b.Cursor()
 	for k, raw := curs.Seek(journalObservationPrefix); k != nil && bytes.HasPrefix(k, journalObservationPrefix); k, raw = curs.Next() {
 		w, err := decodeObservation(raw)
@@ -506,7 +510,13 @@ func checkPruneObligations(b *bolt.Bucket) error {
 			return err
 		}
 		if w.Unresolved {
-			return frontier.ErrObligation
+			uc, _, err := verifiedPairBytes(ctx, c, w.UC, w.TR)
+			if err != nil {
+				return fmt.Errorf("%w: unresolved observation certificate: %v", frontier.ErrInvalid, err)
+			}
+			if !rootPositionLater(uc.GetRootEpoch(), uc.GetRootRoundNumber(), throughEpoch, throughRound) {
+				return frontier.ErrObligation
+			}
 		}
 	}
 	return nil
@@ -598,7 +608,7 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 		if err != nil {
 			return err
 		}
-		if err := checkPruneObligations(b); err != nil {
+		if err := checkPruneObligations(ctx, c, b, anchorUC.GetRootEpoch(), anchorUC.GetRootRoundNumber()); err != nil {
 			return err
 		}
 		// The anchor becomes the journal's new base, so keep its full candidate
@@ -664,6 +674,9 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 			w, e := decodeObservation(raw)
 			if e != nil {
 				return e
+			}
+			if w.Unresolved {
+				continue
 			}
 			observedUC, _, e := verifiedPairBytes(ctx, c, w.UC, w.TR)
 			if e != nil {

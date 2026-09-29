@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/frontier"
+	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-go-base/types"
 	bolt "go.etcd.io/bbolt"
 )
@@ -393,56 +394,100 @@ func TestFrontierReauthenticatesStoredAnchor(t *testing.T) {
 }
 
 func TestFrontierAdvanceTransactionRechecksNewObligations(t *testing.T) {
-	s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
+	s, f, c, _, item, limits := frontierTestSetupWithFixture(t, t.TempDir()+"/journal.db")
 	defer s.Close()
 	s.checkpoint = func(step string) error {
 		if step != "before-frontier-transaction" {
 			return nil
 		}
 		s.checkpoint = nil
-		return insertUnresolvedFrontierTestObservation(s)
+		return insertUnresolvedFrontierTestObservationAt(s, c, f, item.Anchor.Round+1)
 	}
-	require.ErrorIs(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}), frontier.ErrObligation)
+	require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}), "an unresolved observation after the proposed frontier must not block earlier coverage")
 	image, err := s.LoadFrontier(context.Background(), c, limits)
 	require.NoError(t, err)
-	require.Nil(t, image.Anchor)
+	require.NotNil(t, image.Anchor)
 }
 
 func TestFrontierPruneTransactionRetainsNewObligations(t *testing.T) {
-	s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
+	s, f, c, _, item, limits := frontierTestSetupWithFixture(t, t.TempDir()+"/journal.db")
 	defer s.Close()
 	require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}))
-	require.NoError(t, insertUnresolvedFrontierTestObservation(s))
-	require.ErrorIs(t, s.PruneFrontier(context.Background(), c, limits), frontier.ErrObligation)
+	observation, err := frontierTestUnresolvedObservation(s, c, f, item.Anchor.Round+1)
+	require.NoError(t, err)
+	prepared, _, err := s.PrepareObservation(context.Background(), c, observation)
+	require.NoError(t, err)
+	_, _, err = s.CommitObservation(prepared)
+	require.NoError(t, err)
+	require.NoError(t, s.PruneFrontier(context.Background(), c, limits), "pruning below the unresolved round should proceed")
 	front, err := s.LoadFrontier(context.Background(), c, limits)
 	require.NoError(t, err)
-	require.Zero(t, front.Floor)
+	require.Equal(t, item.Anchor.Height, front.Floor)
+	image, err := s.LoadJournal(context.Background(), c, limits)
+	require.NoError(t, err)
+	require.Len(t, image.Observations, 1)
+	require.True(t, image.Observations[0].Unresolved, "the unresolved observation must remain retained")
 }
 
 func TestFrontierPruneRejectsUnresolvedObservationAtAnchorRound(t *testing.T) {
-	s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
+	s, f, c, _, item, limits := frontierTestSetupWithFixture(t, t.TempDir()+"/journal.db")
 	defer s.Close()
 	require.NoError(t, s.AdvanceFrontier(context.Background(), c, limits, []frontier.Coverage{item}))
-	require.NoError(t, insertUnresolvedFrontierTestObservationAt(s, item.Anchor.Round))
+	require.NoError(t, insertUnresolvedFrontierTestObservationAt(s, c, f, item.Anchor.Round))
 	require.ErrorIs(t, s.PruneFrontier(context.Background(), c, limits), frontier.ErrObligation)
 	front, err := s.LoadFrontier(context.Background(), c, limits)
 	require.NoError(t, err)
 	require.Zero(t, front.Floor)
+	require.NoError(t, s.db.View(func(tx *bolt.Tx) error {
+		raw := tx.Bucket(bucketName).Get(journalEpochObservationKey(1, item.Anchor.Round, 2))
+		require.NotEmpty(t, raw, "the unresolved observation at the prune cut must not be deleted")
+		wire, decodeErr := decodeObservation(raw)
+		require.NoError(t, decodeErr)
+		require.True(t, wire.Unresolved)
+		return nil
+	}))
 }
 
-func insertUnresolvedFrontierTestObservation(s *Store) error {
-	return insertUnresolvedFrontierTestObservationAt(s, 4)
-}
-
-func insertUnresolvedFrontierTestObservationAt(s *Store, rootRound uint64) error {
-	w := journalObservationWire{Version: journalVersion, Round: 1, RootRound: rootRound, Unresolved: true}
+func insertUnresolvedFrontierTestObservationAt(s *Store, c Context, f *fixture, rootRound uint64) error {
+	observation, err := frontierTestUnresolvedObservation(s, c, f, rootRound)
+	if err != nil {
+		return err
+	}
+	uc, tr := observation.Certificate(), observation.TechnicalRecord()
+	u, tech, err := pairBytes(uc, tr)
+	if err != nil {
+		return err
+	}
+	stateImage, _, err := s.Load(context.Background(), c)
+	if err != nil {
+		return err
+	}
+	w := journalObservationWire{Version: journalVersion, Descriptor: stateImage.i.descriptorDigest[:], Round: uc.GetRoundNumber(),
+		RootRound: uc.GetRootRoundNumber(), TargetHash: bytes.Clone(uc.InputRecord.BlockHash), Unresolved: true, UC: u, TR: tech}
 	raw, err := encodeObservation(w)
 	if err != nil {
 		return err
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketName).Put(journalObservationKey(w.RootRound, w.Round), raw)
+		return tx.Bucket(bucketName).Put(journalEpochObservationKey(uc.GetRootEpoch(), w.RootRound, w.Round), raw)
 	})
+}
+
+func frontierTestUnresolvedObservation(s *Store, c Context, f *fixture, rootRound uint64) (rootinput.VerifiedObservationV2, error) {
+	image, err := s.LoadJournal(context.Background(), c, JournalLimits{Candidates: 3, Observations: 5, Bytes: 16 << 20})
+	if err != nil {
+		return rootinput.VerifiedObservationV2{}, err
+	}
+	if len(image.Observations) == 0 {
+		return rootinput.VerifiedObservationV2{}, ErrUnavailable
+	}
+	parent := image.Observations[len(image.Observations)-1].UC.InputRecord
+	state := sha256.Sum256([]byte("frontier unresolved observation state"))
+	target := sha256.Sum256([]byte("frontier unresolved observation target"))
+	ir := &types.InputRecord{Version: 1, RoundNumber: parent.RoundNumber + 1, Hash: state[:], PreviousHash: bytes.Clone(parent.Hash),
+		BlockHash: target[:], SummaryValue: []byte{}, Timestamp: 1_700_000_010}
+	observation := f.observation(ir, 3, rootRound)
+	return observation, nil
 }
 
 func TestJournalObligationsRetainUnresolvedObservation(t *testing.T) {
