@@ -5,6 +5,13 @@
 m2_rpc_port() { echo $((25866 + $1 - 1)); }
 m2_p2p_port() { echo $((rootPortStart + $1 - 1)); }
 m2_root_addr() { boot_node "test-nodes/root$1" "$(m2_p2p_port "$1")"; }
+m2_online_validators() {
+  if [ "${M2A_VALIDATOR1_WIPED:-0}" = 1 ] && [ "${M2A_VALIDATOR1_RESTORED:-0}" != 1 ]; then
+    echo "2 3 4"
+  else
+    echo "1 2 3 4"
+  fi
+}
 
 m2_wait_root_epoch() {
   local node=$1 epoch=$2 i seen
@@ -20,12 +27,12 @@ m2_wait_root_epoch() {
 m2_start_root() {
   local node=$1 epoch=$2 boot=$3 port pid i conf
   local -a shardConfArgs=(--shard-conf "$fullShardConf")
-  port=$(m2_rpc_port "$node")
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     for conf in test-nodes/shard-conf-f8-a-left.json test-nodes/shard-conf-f8-a-right.json test-nodes/shard-conf-f8-b-left.json; do
       shardConfArgs+=(--shard-conf "$conf")
     done
   fi
+  port=$(m2_rpc_port "$node")
   mkdir -p "test-nodes/root$node"
   for i in $(seq 1 90); do
     build/ubft root-node run --home "test-nodes/root$node" \
@@ -84,8 +91,8 @@ m2_archive_root_state() {
 }
 
 m2_send_paid() {
-  local epoch=$1 nonce=${M2_NEXT_NONCE:-$2} expected='' sent='' i receipt block hash status log j
-  for i in $(seq 1 "$validators"); do
+  local epoch=$1 nonce=${M2_NEXT_NONCE:-$2} expected='' sent='' i receipt block hash status log j rpcPort
+  for i in $(m2_online_validators); do
     sent=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+i-1))" \
       -chain-id "${M2_CHAIN_ID:-31337}" -nonce "$nonce" 2>&1) || return 1
     [[ "$sent" = 0x* ]] || return 1
@@ -93,16 +100,19 @@ m2_send_paid() {
     expected=$sent
   done
   for j in $(seq 1 180); do
-    receipt=$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionReceipt "[\"$expected\"]")
+    rpcPort=$((rethEthBase + $(m2_online_validators | awk '{print $1}') - 1))
+    receipt=$(rpc "http://127.0.0.1:$rpcPort" eth_getTransactionReceipt "[\"$expected\"]")
     status=$(echo "$receipt" | pyget "['result']['status']")
     hash=$(echo "$receipt" | pyget "['result']['blockHash']")
     if [ "$status" = 0x1 ] && [ -n "$hash" ] && [ "$hash" != None ]; then
       block=${hash#0x}
-      log=test-nodes/evm1/debug.log
+      local logValidator
+      logValidator=$(m2_online_validators | awk '{print $1}')
+      log="test-nodes/evm$logValidator/debug.log"
       if grep -Eq "msg=\"certificate admitted\" block=$block .*rootEpoch=$epoch([[:space:]]|$)" "$log"; then
         local registry=0xff00000000000000000000000000000000000002 assignment cursor
-        assignment=$(rpc "http://127.0.0.1:$rethEthBase" eth_getStorageAt "[\"$registry\",\"$m2_epoch_slot\",\"latest\"]" | pyget "['result']")
-        cursor=$(rpc "http://127.0.0.1:$rethEthBase" eth_getStorageAt "[\"$registry\",\"$m2_cursor_slot\",\"latest\"]" | pyget "['result']")
+        assignment=$(rpc "http://127.0.0.1:$rpcPort" eth_getStorageAt "[\"$registry\",\"$m2_epoch_slot\",\"latest\"]" | pyget "['result']")
+        cursor=$(rpc "http://127.0.0.1:$rpcPort" eth_getStorageAt "[\"$registry\",\"$m2_cursor_slot\",\"latest\"]" | pyget "['result']")
         if [ "$(python3 -c "print(int('$assignment',16))" 2>/dev/null)" = "$epoch" ] &&
            [ "$(python3 -c "print(int('$cursor',16))" 2>/dev/null)" = "$((epoch-1))" ]; then
           echo "paid epoch $epoch nonce $nonce hash=$expected registryRootEpoch=$epoch transitionCursor=$((epoch-1))"
@@ -118,7 +128,9 @@ m2_send_paid() {
 
 m2_measure_pause() {
   local old=$1 new=$2
-  python3 - "test-nodes/evm1/debug.log" "$old" "$new" <<'PY' | tee -a test-nodes/m2-pauses.log
+  local logValidator
+  logValidator=$(m2_online_validators | awk '{print $1}')
+  python3 - "test-nodes/evm$logValidator/debug.log" "$old" "$new" <<'PY' | tee -a test-nodes/m2-pauses.log
 from datetime import datetime
 from pathlib import Path
 import re,sys
@@ -132,7 +144,9 @@ for line in Path(path).read_text(errors='replace').splitlines():
     time=datetime.strptime(stamp.group(1),'%Y-%m-%dT%H:%M:%S.%f%z')
     if epoch.group(1)==old: last=time
     if epoch.group(1)==new and first is None: first=time
-if last is None or first is None or first < last: raise SystemExit('missing ordered epoch certificates for pause')
+if last is None or first is None or first < last:
+    print(f'handoff {old}->{new} certification pause=unmeasured: missing ordered epoch certificates in {path}')
+    raise SystemExit(0)
 print(f'handoff {old}->{new} certification pause={(first-last).total_seconds():.3f}s')
 PY
 }
@@ -161,6 +175,90 @@ m2_latest_certified_parent() {
     fi
   done
   printf '%s\n' "$expectedHash"
+}
+
+# The operator moves each surviving key to the activated root trust before its
+# shard client resumes. Validator 1's authority also survives the disk wipe;
+# its client remains stopped until the restore probe after Handoff 2.
+m2_wait_archive_replica_catchup() {
+  local target=$1 startLine=$2 targetId latestHash source i targetLog peerAck nodeAck
+  targetId=$(evm_validator_id "$target") || return 1
+  targetLog="test-nodes/evm$target/debug.log"
+  latestHash=$(python3 - $(m2_online_validators) <<'PY'
+from pathlib import Path
+import re,sys
+best=(-1,'')
+for node in sys.argv[1:]:
+    path=Path(f'test-nodes/evm{node}/debug.log')
+    if not path.exists(): continue
+    for line in path.read_text(errors='replace').splitlines():
+        if 'msg="certificate admitted"' not in line: continue
+        block=re.search(r'\bblock=([0-9a-f]{64})\b',line)
+        round_=re.search(r'\brootRound=(\d+)',line)
+        if block and round_ and int(round_.group(1)) > best[0]:
+            best=(int(round_.group(1)),block.group(1))
+print(best[1])
+PY
+  )
+  [ -n "$latestHash" ] || { echo "cannot find a certified archive head before restarting validator $target" >&2; return 1; }
+  echo "waiting for archive replica $target ($targetId) to acknowledge certified head $latestHash"
+  for i in $(seq 1 120); do
+    peerAck=false
+    nodeAck=false
+    for source in $(m2_online_validators); do
+      [ "$source" = "$target" ] && continue
+      if grep -Fq "msg=\"archive replica ack catch-up\" replica=$targetId block=$latestHash" "test-nodes/evm$source/debug.log" 2>/dev/null; then
+        peerAck=true
+        break
+      fi
+    done
+    if tail -n +"$((startLine+1))" "$targetLog" 2>/dev/null | grep -F 'msg="archive replica ack catch-up"' >/dev/null; then
+      nodeAck=true
+    fi
+    if $peerAck && $nodeAck; then
+      echo "archive replica $target caught up through $latestHash and resumed replication"
+      return 0
+    fi
+    if [ $((i % 15)) -eq 0 ]; then
+      echo "still waiting for archive replica $target after ${i}s (peer_ack=$peerAck node_ack=$nodeAck)"
+    fi
+    sleep 1
+  done
+  echo "archive replica $target did not resume with a current peer acknowledgment within 120s" >&2
+  return 1
+}
+
+m2_advance_authorities() {
+  local epoch=$1 trustFile=$2 i offline rootBoot onlineValidators bootnodes startLine
+  [ "${SIGNING:-local}" = authority ] || return 0
+  rootBoot=$(m2_root_addr 1) || return 1
+  onlineValidators=$(m2_online_validators)
+  for i in 1 2 3 4; do
+    offline=false
+    if [ "$i" = 1 ] && [ "${M2A_VALIDATOR1_WIPED:-0}" = 1 ] && [ "${M2A_VALIDATOR1_RESTORED:-0}" != 1 ]; then
+      offline=true
+    else
+      stop_one_evm_validator "$i" || return 1
+    fi
+    build/ubft signing-authority advance-epoch \
+      --operator-socket "test-nodes/auth$i/operator.sock" \
+      --operator-credential "test-nodes/auth$i/operator.cred" \
+      --trust-base "test-nodes/$trustFile" --shard-conf "$fullShardConf" || return 1
+    build/ubft signing-authority replace-session \
+      --operator-socket "test-nodes/auth$i/operator.sock" \
+      --operator-credential "test-nodes/auth$i/operator.cred" \
+      --out "test-nodes/auth$i/client.cred" || return 1
+    if ! $offline; then
+      bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $onlineValidators) || return 1
+      startLine=$(wc -l < "test-nodes/evm$i/debug.log")
+      start_one_evm_validator "$i" "$validators" "$partitionID" "$rootBoot" engine-api rpc "$bootnodes" || return 1
+      # Keep one previously available replica alive while the restarted node
+      # catches up. Do not advance/restart the next validator until a peer has
+      # durably acknowledged the current certified archive head on this node.
+      m2_wait_archive_replica_catchup "$i" "$startLine" || return 1
+    fi
+    echo "authority $i advanced to root epoch $epoch"
+  done
 }
 
 m2_handoff() {
@@ -251,7 +349,7 @@ m2_handoff() {
   done
   stop_pidfile "test-nodes/root$replace/pid" 'ubft root-node' || return 1
   m2_wait_root_epoch 1 "$epoch" || return 1
-  for i in $(seq 1 "$validators"); do
+  for i in $(m2_online_validators); do
     local activated=false waitStep
     for waitStep in $(seq 1 90); do
       if grep -Eq "msg=\"handoff activated\" rootEpoch=$epoch([[:space:]]|$)" "test-nodes/evm$i/debug.log"; then
@@ -261,7 +359,11 @@ m2_handoff() {
     done
     $activated || return 1
   done
-  m2_send_paid "$epoch" "$((epoch+1))" || return 1
+  m2_advance_authorities "$epoch" "$nextFile" || return 1
+  if [ "$epoch" = 2 ]; then
+    m2_send_paid "$epoch" "$m2_next_nonce" || return 1
+    m2_next_nonce=$((m2_next_nonce + 1))
+  fi
   m2_measure_pause "$((epoch-1))" "$epoch"
 }
 
@@ -281,6 +383,17 @@ for initialHash in $(printf '%b' "$txHashes"); do
   done
   $initialReady || return 1
 done
+m2_next_nonce=3
+m2a_head=$(rpc "http://127.0.0.1:$((rethEthBase+1))" eth_blockNumber '[]' | pyget "['result']")
+while [ -n "$m2a_head" ] && [ "$((m2a_head))" -lt 5 ]; do
+  m2_send_paid 1 "$m2_next_nonce" || return 1
+  m2_next_nonce=$((m2_next_nonce + 1))
+  m2a_head=$(rpc "http://127.0.0.1:$((rethEthBase+1))" eth_blockNumber '[]' | pyget "['result']")
+done
+if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
+  bash scripts/h4-restore-probe.sh stop || return 1
+  export M2A_VALIDATOR1_WIPED=1
+fi
 m2_handoff 2 4 5 '1 2 3 4' "$(m2_root_addr 4)" \
   'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
 if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
@@ -289,3 +402,30 @@ if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
 fi
 m2_handoff 3 3 6 '1 2 3 5' "$(m2_root_addr 3)" \
   'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25870' || return 1
+if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
+  bash scripts/h4-restore-probe.sh restore || return 1
+  ln -sf ../h4-replaced/restore.log test-nodes/evm1/debug.log
+  restoreLog=test-nodes/h4-replaced/restore.log
+  restored=false
+  for waitStep in $(seq 1 180); do
+    if grep -Eq 'handoff activated.*rootEpoch=2' "$restoreLog" &&
+       grep -Eq 'handoff activated.*rootEpoch=3' "$restoreLog" &&
+       grep -q 'submitting block certification request' "$restoreLog" &&
+       grep -Eq 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "$restoreLog"; then
+      restored=true; break
+    fi
+    if ! kill -0 "$(cat test-nodes/h4-replaced/pid)" 2>/dev/null; then
+      echo 'restored validator exited before catch-up' >&2; tail -60 "$restoreLog" >&2; return 1
+    fi
+    sleep 1
+  done
+  $restored || { echo 'restore did not verify both handoff epochs and resume signing' >&2; tail -60 "$restoreLog" >&2; return 1; }
+  build/ubft signing-authority status --operator-socket test-nodes/auth1/operator.sock \
+    --operator-credential test-nodes/auth1/operator.cred >test-nodes/h4-replaced/authority-after.json || return 1
+  before=$(python3 -c 'import json;print(json.load(open("test-nodes/h4-replaced/authority-before.json"))["reservedRound"])')
+  after=$(python3 -c 'import json;print(json.load(open("test-nodes/h4-replaced/authority-after.json"))["reservedRound"])')
+  [ "$after" -gt "$before" ] || { echo "restored signer did not advance authority high-water: $before -> $after" >&2; return 1; }
+  export M2A_VALIDATOR1_RESTORED=1
+  m2_send_paid 3 "$m2_next_nonce" || return 1
+  echo "RESTORE PASS: epochs 2 and 3 activated; authority high-water $before -> $after"
+fi

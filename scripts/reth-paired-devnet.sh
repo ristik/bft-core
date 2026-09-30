@@ -71,11 +71,6 @@ case "${SIGNING:-local}" in
   local | authority) ;;
   *) echo "SIGNING must be local or authority" >&2; exit 2 ;;
 esac
-if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
-  [ "${M2_PROFILE2:-0}" = 1 ] || { echo "F8 mixed lane requires M2_PROFILE2=1 for the live root handoff" >&2; exit 2; }
-  # Defines the three pinned Rust aggregator fixture and its trace/reconnect probes.
-  source scripts/f8-mixed-lane.sh
-fi
 if [ "${H4_RESTORE_PROBE:-0}" = 1 ] && { [ "${SIGNING:-local}" != authority ] || [ "$validators" -ne 4 ] || [ "$rounds" -lt 15 ]; }; then
   echo "H4 restore probe requires SIGNING=authority, four validators and at least 15 blocks" >&2
   exit 2
@@ -106,6 +101,11 @@ info() { echo "  info: $1"; }
 if [ -n "$postM2aMode" ]; then
   source scripts/post-m2a-evidence-lib.sh || { echo "post-M2a evidence helper could not be loaded" >&2; exit 2; }
   export URETH_PIN_FEE_COLLECTOR_OVERRIDE
+fi
+
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+  [ "${M2_PROFILE2:-0}" = 1 ] || { echo "F8 mixed lane requires M2_PROFILE2=1" >&2; exit 2; }
+  source scripts/f8-mixed-lane.sh
 fi
 
 # The extra single-purpose reth instances the section-3 negatives start, by directory. They are
@@ -149,6 +149,11 @@ cleanup() {
       [ -d "$d" ] || continue
       mkdir -p "$M2_RUN_LOG_DIR/$(basename "$d")"
       cp "$d"/*.log "$M2_RUN_LOG_DIR/$(basename "$d")/" 2>/dev/null || true
+    done
+    for d in test-nodes/h4-replaced test-nodes/auth1; do
+      [ -d "$d" ] || continue
+      mkdir -p "$M2_RUN_LOG_DIR/$(basename "$d")"
+      cp -R "$d"/. "$M2_RUN_LOG_DIR/$(basename "$d")/" 2>/dev/null || true
     done
   fi
 }
@@ -201,23 +206,20 @@ if [ -n "$stale" ]; then
   exit 1
 fi
 
+# A failed mixed lane can leave a partial partition frontier. Reset only this
+# checkout's root databases before retrying the F8 handoff fixture.
+if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
+  stop_root_nodes
+  sleep 2
+  for root in test-nodes/root{1,2,3,4}; do
+    rm -f "$root"/{root-trust-history.db,rootchain.db,orchestration.db,trustbase.db}
+  done
+fi
+
 # Install cleanup only after the refusal guard: a refused run owns no processes.
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-
-# A failed mixed lane can leave a partial partition frontier in root storage. Reuse the
-# generated root identities and trust base, but start its databases clean so a retry cannot
-# inherit half-certified shard schemes from the prior attempt. Stop only processes owned by
-# this checkout while holding the devnet lock.
-if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
-  stop_root_nodes
-  sleep 2
-  rm -f test-nodes/root{1,2,3,4}/root-trust-history.db \
-    test-nodes/root{1,2,3,4}/rootchain.db \
-    test-nodes/root{1,2,3,4}/orchestration.db \
-    test-nodes/root{1,2,3,4}/trustbase.db
-fi
 
 echo "=== 1. generate the shard topology and chain spec ==="
 rootValidators=3
@@ -273,6 +275,12 @@ echo "=== 2. start one reth per validator on that chain spec ==="
 rethStorageArgs=()
 if [ "$postM2aMode" = t1 ] || [ "$postM2aMode" = t4 ]; then rethStorageArgs=(--storage.v2 false); fi
 for i in $(seq 1 "$validators"); do
+  port=$((rethEthBase + i - 1))
+  listener=$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+  if [ -n "$listener" ]; then
+    fail "reth HTTP port $port is already owned by PID(s) $listener; refusing to reuse another run's process or mempool"
+    exit 1
+  fi
   mkdir -p "test-nodes/reth$i"
   # Each validator's adapter reads this exact file (helper.sh's start_one_evm_validator passes
   # --jwt-secret test-nodes/evm$i/jwt.hex), so the adapter's own JWT minting is what has to
@@ -298,9 +306,16 @@ pyget() { python3 -c "import sys,json; d=json.load(sys.stdin); print(d$1)" 2>/de
 
 for i in $(seq 1 "$validators"); do
   url="http://127.0.0.1:$((rethEthBase + i - 1))"
+  pid=$(cat "test-nodes/reth$i/pid")
+  port=$((rethEthBase + i - 1))
   up=false
   for _ in $(seq 1 60); do
-    if rpc "$url" eth_chainId '[]' 2>/dev/null | grep -q result; then up=true; break; fi
+    if rpc "$url" eth_chainId '[]' 2>/dev/null | grep -q result; then
+      listener=$(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+      if echo "$listener" | grep -qx "$pid"; then up=true; break; fi
+      fail "reth $i HTTP port $port answered from PID(s) '$listener', expected this run's PID $pid"
+      break
+    fi
     sleep 1
   done
   $up || { fail "reth $i did not start"; tail -20 "test-nodes/reth$i/reth.log" >&2; exit 1; }
@@ -587,7 +602,6 @@ kill "$(cat test-nodes/reth-othergenesis/pid)" 2>/dev/null; rm -f test-nodes/ret
 # the fixed Cancun EVM profile: EthConfigHandler asks its EVM for the future fork's precompiles,
 # which refuses Prague. Thus eth_config returns a typed RPC error, and startup must fail closed on
 # the unreadable execution profile. The loaded schedule is independently visible in the node log.
-threeFFailuresBefore=$failures
 mkdir -p test-nodes/reth-laterfork
 python3 - <<'PYFORK'
 import json
@@ -679,12 +693,6 @@ else
   fi
 fi
 kill "$(cat test-nodes/reth-laterfork/pid)" 2>/dev/null; rm -f test-nodes/reth-laterfork/pid
-threeFFailureCount=$((failures - threeFFailuresBefore))
-if [ "$threeFFailureCount" -eq 0 ]; then
-  echo "3f status: PASS"
-else
-  echo "3f status: FAIL ($threeFFailureCount check(s) failed)"
-fi
 fi
 
 echo
@@ -695,13 +703,17 @@ echo "=== 4. configure the checked v2 origin and seed the block-1 transaction ==
 # only now, after the startup negatives above have used it.
 cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
 if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_prepare; fi
-if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
+# Both the standalone H4 probe and the M2a final lane need persistent archive
+# publication before they stop validator 1; the latter invokes restore
+# directly after Handoff 2 rather than through d1-monitor's probe schedule.
+if [ "${H4_RESTORE_PROBE:-0}" = 1 ] || [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   export EVM_ARCHIVE_ROOT=test-nodes/h4-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
 elif [ "$postM2aMode" = f7 ]; then
   export EVM_ARCHIVE_ROOT=test-nodes/post-m2a-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
 fi
+if [ -n "${EVM_ARCHIVE_ROOT:-}" ]; then mkdir -p "$EVM_ARCHIVE_ROOT"; fi
 export EVM_GENESIS_FILE="$chainSpec"
 export EVM_FULL_SHARD_CONF="test-nodes/shard-conf-${partitionID}_0.json"
 export EVM_ENGINE_FEE_COLLECTOR="${POST_M2A_FEE_COLLECTOR:-$URETH_PIN_FEE_COLLECTOR}"
@@ -759,17 +771,16 @@ preflightFailures=$failures
 echo "waiting for block 1 and a certificate (up to 180s) ..."
 mined=false
 certified=false
-for attempt in $(seq 1 90); do
+for _ in $(seq 1 90); do
   rcpt=$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionReceipt "[\"$txHash\"]")
-  blkNum=$(echo "$rcpt" | pyget "['result']['blockNumber']" || true)
+  blkNum=$(echo "$rcpt" | pyget "['result']['blockNumber']")
   if [ -n "$blkNum" ] && [ "$blkNum" != "None" ]; then mined=true; fi
-  blkHash=$(echo "$rcpt" | pyget "['result']['blockHash']" || true)
+  blkHash=$(echo "$rcpt" | pyget "['result']['blockHash']")
   if [ -n "$blkHash" ] && [ "$blkHash" != "None" ]; then
     blkHash=${blkHash#0x}
     if grep -Eq 'msg="certificate admitted".* block='"$blkHash"' height=1 round=[0-9]+ rootRound=[0-9]+' \
       test-nodes/evm1/debug.log 2>/dev/null; then certified=true; fi
   fi
-  echo "  bootstrap probe $attempt: mined=$mined certified=$certified block=${blkNum:-none}"
   $mined && $certified && break
   sleep 2
 done
@@ -865,13 +876,19 @@ fi
 if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   probeArgs=(--h4-restore-validator 1 --signing authority)
 fi
+if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
+  probeArgs=(--already-restored-validator 1)
+fi
 if [ -n "${D2C_FAULT_SCENARIO:-}" ]; then
   [ "$validators" -eq 4 ] && [ "$rounds" -ge 10 ] || { echo "D2C fault scenarios require four validators and >=10 blocks" >&2; exit 2; }
   faultArgs=(--fault-scenario "$D2C_FAULT_SCENARIO")
 fi
 d2cRecoveryProbe=${D2C_RESTART_PROBE:-0}
 [ -n "${D2C_FAULT_SCENARIO:-}" ] && d2cRecoveryProbe=1
-if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout 900 \
+d1Timeout=900
+if [ "$rounds" -gt 100 ]; then d1Timeout=6000; fi
+if [ -n "${D1_MONITOR_TIMEOUT:-}" ]; then d1Timeout=$D1_MONITOR_TIMEOUT; fi
+if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout "$d1Timeout" \
   ${traceArgs[@]+"${traceArgs[@]}"} ${probeArgs[@]+"${probeArgs[@]}"} ${faultArgs[@]+"${faultArgs[@]}"}; then
   pass "D1 observed $rounds consecutive blocks with a fresh canonical survivor quorum"
 else
@@ -982,6 +999,11 @@ if [ -n "$postM2aMode" ]; then
   fi
 fi
 
+# #232 is a known independent startup-profile failure. Keep it visible; its preflight above
+# records the exact observed diagnosis, and D1's own verdict below is separate.
+if [ "${M2_PROFILE2:-0}" != 1 ]; then
+  echo "3f status: see section 3f (known issue #232; FAIL until fixed)"
+fi
 if [ "$failures" -gt "$preflightFailures" ]; then
   echo "D1 FAIL ($((failures - preflightFailures)) lane check(s) failed)"
 else

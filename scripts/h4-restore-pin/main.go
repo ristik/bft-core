@@ -4,13 +4,16 @@ package main
 
 import (
 	"crypto"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
 )
@@ -26,8 +29,12 @@ func main() {
 	}
 	var bestUC, bestTR, bestHeader []byte
 	var bestRound uint64
+	var bestEpoch uint64
+	var bestRootRound uint64
+	var bestV2 bool
 	for _, entry := range entries {
-		if !entry.IsDir() || len(entry.Name()) != 64 {
+		name := entry.Name()
+		if !entry.IsDir() || !archiveRecordDirectory(name) {
 			continue
 		}
 		read := func(name string) []byte {
@@ -43,8 +50,12 @@ func main() {
 		if types.Cbor.Unmarshal(ucRaw, &uc) != nil || uc.InputRecord == nil || len(uc.InputRecord.BlockHash) != 32 || len(trRaw) == 0 || rlp.DecodeBytes(headerRaw, &header) != nil || header.Number == nil {
 			continue
 		}
-		if uc.InputRecord.RoundNumber > bestRound {
-			bestRound, bestUC, bestTR, bestHeader = uc.InputRecord.RoundNumber, ucRaw, trRaw, headerRaw
+		isV2 := strings.HasPrefix(name, "v2-")
+		// Prefer v2 records because they retain the complete proof material.
+		// Within a version, compare the full root position: rounds restart at
+		// handoff, so round alone cannot identify the newest certified record.
+		if preferPin(isV2, uc.GetRootEpoch(), uc.GetRootRoundNumber(), bestV2, bestEpoch, bestRootRound) {
+			bestRound, bestEpoch, bestRootRound, bestUC, bestTR, bestHeader, bestV2 = uc.GetRoundNumber(), uc.GetRootEpoch(), uc.GetRootRoundNumber(), ucRaw, trRaw, headerRaw, isV2
 		}
 	}
 	if bestRound == 0 {
@@ -54,7 +65,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	bodyID, err := tb.Hash(crypto.SHA256)
+	bodyID, err := archiveTrustBodyID(archiveDir, bestEpoch, tb)
 	if err != nil {
 		panic(err)
 	}
@@ -70,4 +81,55 @@ func main() {
 	}
 	fmt.Printf("round=%d height=%d blockHash=%s stateRoot=%s receiptsRoot=%s bodyID=0x%x\n",
 		bestRound, header.Number.Uint64(), header.Hash(), header.Root, header.ReceiptHash, bodyID)
+}
+
+func preferPin(candidateV2 bool, candidateEpoch, candidateRound uint64, bestV2 bool, bestEpoch, bestRound uint64) bool {
+	if candidateV2 != bestV2 {
+		return candidateV2
+	}
+	return candidateEpoch > bestEpoch || candidateEpoch == bestEpoch && candidateRound > bestRound
+}
+
+func archiveTrustBodyID(archiveDir string, epoch uint64, anchor *types.RootTrustBaseV1) ([32]byte, error) {
+	if epoch == anchor.Epoch {
+		var out [32]byte
+		raw, err := anchor.Hash(crypto.SHA256)
+		copy(out[:], raw)
+		return out, err
+	}
+	entries, err := os.ReadDir(archiveDir)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "bundle-") {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(archiveDir, entry.Name()))
+		if readErr != nil || len(raw) < sha256.Size+1 {
+			continue
+		}
+		want := sha256.Sum256(raw[sha256.Size:])
+		if !strings.HasPrefix(entry.Name(), fmt.Sprintf("bundle-%016x-", epoch)) || string(want[:]) != string(raw[:sha256.Size]) {
+			continue
+		}
+		var bundle handoffdelivery.Bundle
+		if types.Cbor.Unmarshal(raw[sha256.Size:], &bundle) != nil || bundle.Body.Epoch != epoch {
+			continue
+		}
+		return [32]byte(bundle.Body.Identity()), nil
+	}
+	return [32]byte{}, fmt.Errorf("no archived verified-trust body identity for epoch %d", epoch)
+}
+
+func archiveRecordDirectory(name string) bool {
+	if len(name) == 64 {
+		_, err := hex.DecodeString(name)
+		return err == nil
+	}
+	if len(name) == 67 && name[:3] == "v2-" {
+		_, err := hex.DecodeString(name[3:])
+		return err == nil
+	}
+	return false
 }

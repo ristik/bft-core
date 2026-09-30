@@ -260,6 +260,11 @@ func sendRaw(ethURL string, raw []byte) (string, error) {
 		return "", fmt.Errorf("decoding response %q: %w", body, err)
 	}
 	if out.Error != nil {
+		if strings.Contains(strings.ToLower(out.Error.Message), "already known") {
+			// This request carries the exact signed bytes, so its deterministic hash
+			// makes transaction seeding safe to retry after an interrupted run.
+			return "0x" + hex.EncodeToString(keccak(raw)), nil
+		}
 		return "", fmt.Errorf("eth_sendRawTransaction: %s", out.Error.Message)
 	}
 	if out.Result == "" {
