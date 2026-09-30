@@ -358,6 +358,9 @@ func (c *BFTClient) Run(ctx context.Context) error {
 
 	received := c.net.ReceivedChannel()
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -375,7 +378,13 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			if !ok {
 				return errors.New("shardnode: network received channel closed")
 			}
-			c.handleMessage(ctx, msg)
+			batch, closed := c.coalesceBufferedCertificationResponses(ctx, msg, received)
+			for _, queued := range batch {
+				c.handleMessage(ctx, queued)
+			}
+			if closed {
+				return errors.New("shardnode: network received channel closed")
+			}
 		case <-heartbeat.C:
 			last := time.UnixMilli(c.lastCertResponseTime.Load())
 			if time.Since(last) > c.opts.InactivityTimeout {
@@ -544,6 +553,209 @@ func (c *BFTClient) handleMessage(ctx context.Context, msg any) {
 	if err := c.handleCertificationResponse(ctx, cr); err != nil && c.log != nil {
 		c.log.ErrorContext(ctx, "processing certification response", slog.String("err", err.Error()))
 	}
+}
+
+// certificationAuthorization is populated only after the wrapped UC has been verified against
+// this client's configured shard and a locally trusted root epoch. Its round fields are therefore
+// safe to use when deciding which queued response carries the newest authorization.
+type certificationAuthorization struct {
+	rootEpoch    uint64
+	rootRound    uint64
+	inputRecord  string
+	pairIdentity [32]byte
+}
+
+type queuedCertificationMessage struct {
+	message       any
+	authorization *certificationAuthorization
+}
+
+// verifyCertificationAuthorization authenticates the response before any round number from it is
+// trusted by the queue coalescer. handleCertificationResponse repeats these checks on delivery: the
+// queue check is an ordering guard, not an alternate certificate acceptance path.
+func (c *BFTClient) verifyCertificationAuthorization(ctx context.Context, cr *certification.CertificationResponse) (*certificationAuthorization, error) {
+	if err := cr.IsValid(); err != nil {
+		return nil, fmt.Errorf("invalid certification response: %w", err)
+	}
+	if cr.Partition != c.partitionID || !cr.Shard.Equal(c.shardID) {
+		return nil, fmt.Errorf("certification response for wrong shard %s-%s", cr.Partition, cr.Shard)
+	}
+	if len(c.shardConfHash) == 0 {
+		return nil, errors.New("this client has no configured shard configuration hash, so a certificate's configuration cannot be checked")
+	}
+	if cr.UC.InputRecord == nil || cr.UC.UnicitySeal == nil {
+		return nil, errors.New("invalid certification response: unicity certificate is incomplete")
+	}
+	epoch := cr.UC.GetRootEpoch()
+	tb, err := c.trustBaseStore.GetByEpoch(ctx, epoch)
+	if err != nil {
+		return nil, fmt.Errorf("loading trust base for epoch %d: %w", epoch, err)
+	}
+	if tb == nil {
+		return nil, fmt.Errorf("loading trust base for epoch %d: trust base is nil", epoch)
+	}
+	if err = cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, c.shardConfHash); err != nil {
+		return nil, fmt.Errorf("verifying unicity certificate: %w", err)
+	}
+	c.mu.Lock()
+	profile2, admission, previous := c.profile2, c.admission, c.luc
+	c.mu.Unlock()
+	if profile2 != nil {
+		if floor, installed := profile2.EpochFloor(); installed && epoch < floor {
+			return nil, ErrProfile2Epoch
+		}
+		if _, err = profile2.Classify(previous, &cr.UC); err != nil {
+			return nil, err
+		}
+	} else if history, ok := c.trustBaseStore.(interface{ IsV2Epoch(uint64) bool }); ok && history.IsV2Epoch(epoch) {
+		ready := false
+		if gate, ok := admission.(interface{ Profile2Ready(uint64) bool }); ok {
+			ready = gate.Profile2Ready(epoch)
+		}
+		if !ready {
+			return nil, ErrProfile2Unready
+		}
+	}
+	input, err := cr.UC.InputRecord.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("encoding certified input record: %w", err)
+	}
+	pairIdentity, err := configuredPairIdentity(&cr.UC, &cr.Technical)
+	if err != nil {
+		return nil, fmt.Errorf("identifying certified response: %w", err)
+	}
+	return &certificationAuthorization{
+		rootEpoch: epoch, rootRound: cr.UC.GetRootRoundNumber(), inputRecord: string(input), pairIdentity: pairIdentity,
+	}, nil
+}
+
+func compareCertificationAuthorization(a, b *certificationAuthorization) int {
+	if a.rootEpoch < b.rootEpoch {
+		return -1
+	}
+	if a.rootEpoch > b.rootEpoch {
+		return 1
+	}
+	if a.rootRound < b.rootRound {
+		return -1
+	}
+	if a.rootRound > b.rootRound {
+		return 1
+	}
+	return 0
+}
+
+// coalesceBufferedCertificationResponses drains only the messages queued at entry before handing
+// anything to the synchronous round driver. Repeats for one exact InputRecord are one authorization
+// stream: once a newer, authenticated root round is present, earlier responses in that stream
+// cannot authorize useful work and are collapsed. Distinct InputRecords stay in arrival order
+// because each certified block may need to be applied. Equal-round conflicting statements are
+// preserved so the normal non-equivocation check still sees them. Identical copies are retained at
+// most twice, preserving one retry opportunity without allowing duplicate traffic to grow the batch.
+func (c *BFTClient) coalesceBufferedCertificationResponses(ctx context.Context, first any, received <-chan any) ([]any, bool) {
+	drainLimit := len(received)
+	queued := make([]queuedCertificationMessage, 0, 1)
+	activeInput := ""
+	activeAuth := (*certificationAuthorization)(nil)
+	activeIndices := make([]int, 0, 1)
+	activeAmbiguous := false
+	activePairCopies := make(map[[32]byte]int)
+	appendActive := func(entry queuedCertificationMessage) {
+		identity := entry.authorization.pairIdentity
+		if activePairCopies[identity] >= 2 {
+			return
+		}
+		activePairCopies[identity]++
+		activeIndices = append(activeIndices, len(queued))
+		queued = append(queued, entry)
+	}
+	appendMessage := func(message any) {
+		entry := queuedCertificationMessage{message: message}
+		cr, ok := message.(*certification.CertificationResponse)
+		if ok && cr != nil {
+			if authorization, err := c.verifyCertificationAuthorization(ctx, cr); err == nil {
+				entry.authorization = authorization
+			}
+		}
+
+		// Invalid or unrelated messages are retained for ordinary handling and do not break the
+		// active group; a distinct authenticated input record does.
+		if entry.authorization == nil {
+			queued = append(queued, entry)
+			return
+		}
+		if activeAuth == nil || activeInput != entry.authorization.inputRecord {
+			activeInput = entry.authorization.inputRecord
+			activeAuth = entry.authorization
+			activeIndices = []int{len(queued)}
+			activeAmbiguous = false
+			activePairCopies = map[[32]byte]int{entry.authorization.pairIdentity: 1}
+			queued = append(queued, entry)
+			return
+		}
+		if activeAmbiguous {
+			appendActive(entry)
+			return
+		}
+
+		order := compareCertificationAuthorization(activeAuth, entry.authorization)
+		if order > 0 {
+			if c.log != nil {
+				c.log.DebugContext(ctx, "dropping verified older certification response",
+					slog.Uint64("rootEpoch", entry.authorization.rootEpoch),
+					slog.Uint64("rootRound", entry.authorization.rootRound),
+					slog.Uint64("newerRootEpoch", activeAuth.rootEpoch),
+					slog.Uint64("newerRootRound", activeAuth.rootRound))
+			}
+			return
+		}
+		if order == 0 {
+			// A repeated byte-identical authorization may be the retry that recovers a failed
+			// driver delivery, so preserve it. If the UC or TechnicalRecord differs, keep both
+			// for classification rather than hiding a same-round conflict.
+			if activeAuth.pairIdentity != entry.authorization.pairIdentity {
+				activeAmbiguous = true
+			}
+			appendActive(entry)
+			return
+		}
+
+		// A higher root authorization for the same exact input record supersedes every queued
+		// occurrence of its earlier authorizations. Keep the newest response in the first slot so
+		// it remains before any later distinct InputRecord that must be applied after it.
+		firstIndex := activeIndices[0]
+		queued[firstIndex] = entry
+		for _, index := range activeIndices[1:] {
+			queued[index] = queuedCertificationMessage{}
+		}
+		activeAuth = entry.authorization
+		activeIndices = []int{firstIndex}
+		activePairCopies = map[[32]byte]int{entry.authorization.pairIdentity: 1}
+	}
+
+	appendMessage(first)
+	closed := false
+	for drained := 0; drained < drainLimit; drained++ {
+		select {
+		case message, ok := <-received:
+			if !ok {
+				closed = true
+				goto drained
+			}
+			appendMessage(message)
+		default:
+			goto drained
+		}
+	}
+
+drained:
+	batch := make([]any, 0, len(queued))
+	for _, entry := range queued {
+		if entry.message != nil {
+			batch = append(batch, entry.message)
+		}
+	}
+	return batch, closed
 }
 
 func configuredPairIdentity(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) ([32]byte, error) {
