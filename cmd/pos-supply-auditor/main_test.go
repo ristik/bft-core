@@ -14,6 +14,84 @@ import (
 )
 
 func TestRunEmitsMachineResultAndNonzeroOnViolation(t *testing.T) {
+	genesisPath, snapshotPath, snapshot := writeT4AuditFixture(t)
+	var stdout, stderr bytes.Buffer
+	codeExit := run([]string{"--genesis", genesisPath, "--state-dump", snapshotPath}, &stdout, &stderr)
+	if codeExit != 0 {
+		t.Fatalf("valid audit exit=%d stderr=%s stdout=%s", codeExit, stderr.String(), stdout.String())
+	}
+	var result supplyaudit.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("output is not JSON: %v", err)
+	}
+	if result.Status != "pass" {
+		t.Fatalf("status=%s", result.Status)
+	}
+	a := snapshot.Accounts["0x1000000000000000000000000000000000000001"]
+	a.Balance = "0x4ca"
+	snapshot.Accounts["0x1000000000000000000000000000000000000001"] = a
+	snapshotJSON, _ := json.Marshal(snapshot)
+	if err := os.WriteFile(snapshotPath, snapshotJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	codeExit = run([]string{"--genesis", genesisPath, "--state-dump", snapshotPath}, &stdout, &stderr)
+	if codeExit == 0 {
+		t.Fatal("supply violation exited successfully")
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("violation output is not JSON: %v", err)
+	}
+	if result.Status != "fail" {
+		t.Fatalf("status=%s", result.Status)
+	}
+}
+
+func TestRunMissingHeaderReceiptOrTraceIsInconclusiveExitTwo(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*supplyaudit.Snapshot)
+	}{
+		{"missing header", func(s *supplyaudit.Snapshot) { s.Blocks[0].Hash = "" }},
+		{"missing receipt", func(s *supplyaudit.Snapshot) { s.Blocks[0].FeeReceipts = nil }},
+		{"missing trace", func(s *supplyaudit.Snapshot) {
+			s.Blocks[0].SelfDestructTracesComplete = nil
+			s.Blocks[0].SelfDestructs = nil
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			genesisPath, snapshotPath, snapshot := writeT4AuditFixture(t)
+			test.mutate(&snapshot)
+			snapshotJSON, err := json.Marshal(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(snapshotPath, snapshotJSON, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			codeExit := run([]string{"--genesis", genesisPath, "--state-dump", snapshotPath}, &stdout, &stderr)
+			if codeExit != 2 {
+				t.Fatalf("incomplete audit exit=%d, want 2; stderr=%s stdout=%s", codeExit, stderr.String(), stdout.String())
+			}
+			var result supplyaudit.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("inconclusive output is not JSON: %v", err)
+			}
+			if result.Status != "inconclusive" {
+				t.Fatalf("status=%q, want inconclusive", result.Status)
+			}
+			if len(result.Coverage.IncompleteReasons) == 0 {
+				t.Fatal("inconclusive result omitted its coverage reason")
+			}
+		})
+	}
+}
+
+func writeT4AuditFixture(t *testing.T) (string, string, supplyaudit.Snapshot) {
+	t.Helper()
 	code := make([]byte, 1180)
 	principal := make([]byte, 32)
 	big.NewInt(150).FillBytes(principal)
@@ -43,35 +121,5 @@ func TestRunEmitsMachineResultAndNonzeroOnViolation(t *testing.T) {
 	if err := os.WriteFile(snapshotPath, snapshotJSON, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var stdout, stderr bytes.Buffer
-	codeExit := run([]string{"--genesis", genesisPath, "--state-dump", snapshotPath}, &stdout, &stderr)
-	if codeExit != 0 {
-		t.Fatalf("valid audit exit=%d stderr=%s stdout=%s", codeExit, stderr.String(), stdout.String())
-	}
-	var result supplyaudit.Result
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("output is not JSON: %v", err)
-	}
-	if result.Status != "pass" {
-		t.Fatalf("status=%s", result.Status)
-	}
-	a := snapshot.Accounts["0x1000000000000000000000000000000000000001"]
-	a.Balance = "0x4ca"
-	snapshot.Accounts["0x1000000000000000000000000000000000000001"] = a
-	snapshotJSON, _ = json.Marshal(snapshot)
-	if err := os.WriteFile(snapshotPath, snapshotJSON, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	stdout.Reset()
-	stderr.Reset()
-	codeExit = run([]string{"--genesis", genesisPath, "--state-dump", snapshotPath}, &stdout, &stderr)
-	if codeExit == 0 {
-		t.Fatal("supply violation exited successfully")
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("violation output is not JSON: %v", err)
-	}
-	if result.Status != "fail" {
-		t.Fatalf("status=%s", result.Status)
-	}
+	return genesisPath, snapshotPath, snapshot
 }

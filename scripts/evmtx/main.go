@@ -47,23 +47,24 @@ const eip1559TxType = 0x02
 
 func main() {
 	var (
-		alloc         = flag.Bool("alloc", false, "print a genesis alloc object funding the test account")
-		address       = flag.Bool("address", false, "print the funded test account address")
-		send          = flag.Bool("send", false, "sign a transfer and submit it with eth_sendRawTransaction")
-		create        = flag.Bool("create", false, "create a contract instead of sending to an address")
-		createAddress = flag.Bool("create-address", false, "print the CREATE address for the funded key and nonce")
-		lockInitcode  = flag.Bool("lock-initcode", false, "print initcode for the demo payable Locked(uint256) receipt contract")
-		eventTopic    = flag.String("event-topic", "", "print the Keccak-256 topic for an event signature")
-		ethURL        = flag.String("eth-url", "http://127.0.0.1:8545", "eth_* endpoint")
-		chainID       = flag.Int64("chain-id", 31337, "chain id to sign for")
-		nonce         = flag.Uint64("nonce", 0, "sender nonce")
-		tip           = flag.Int64("tip", 1_000_000_000, "maxPriorityFeePerGas in wei")
-		feeCap        = flag.Int64("fee-cap", 10_000_000_000, "maxFeePerGas in wei")
-		to            = flag.String("to", "0x00000000000000000000000000000000000000ff", "transaction recipient")
-		value         = flag.String("value", "1", "transaction value in decimal or 0x-prefixed hex")
-		data          = flag.String("data", "0x", "transaction calldata or contract creation bytecode")
-		call          = flag.String("call", "", "zero-argument call signature; encoded as its 4-byte selector")
-		gasLimit      = flag.Uint64("gas-limit", 21000, "transaction gas limit")
+		alloc           = flag.Bool("alloc", false, "print a genesis alloc object funding the test account")
+		address         = flag.Bool("address", false, "print the funded test account address")
+		send            = flag.Bool("send", false, "sign a transfer and submit it with eth_sendRawTransaction")
+		create          = flag.Bool("create", false, "create a contract instead of sending to an address")
+		createAddress   = flag.Bool("create-address", false, "print the CREATE address for the funded key and nonce")
+		lockInitcode    = flag.Bool("lock-initcode", false, "print initcode for the demo payable Locked(uint256) receipt contract")
+		eventTopic      = flag.String("event-topic", "", "print the Keccak-256 topic for an event signature")
+		methodSignature = flag.String("method-selector", "", "print the 4-byte Keccak selector for a method signature")
+		ethURL          = flag.String("eth-url", "http://127.0.0.1:8545", "eth_* endpoint")
+		chainID         = flag.Int64("chain-id", 31337, "chain id to sign for")
+		nonce           = flag.Uint64("nonce", 0, "sender nonce")
+		tip             = flag.Int64("tip", 1_000_000_000, "maxPriorityFeePerGas in wei")
+		feeCap          = flag.Int64("fee-cap", 10_000_000_000, "maxFeePerGas in wei")
+		to              = flag.String("to", "0x00000000000000000000000000000000000000ff", "transaction recipient")
+		value           = flag.String("value", "1", "transaction value in decimal or 0x-prefixed hex")
+		data            = flag.String("data", "0x", "transaction calldata or contract creation bytecode")
+		call            = flag.String("call", "", "zero-argument call signature; encoded as its 4-byte selector")
+		gasLimit        = flag.Uint64("gas-limit", 21000, "transaction gas limit")
 	)
 	flag.Parse()
 
@@ -83,6 +84,9 @@ func main() {
 		fmt.Println("0x" + hex.EncodeToString(lockInitcodeBytes()))
 	case *eventTopic != "":
 		fmt.Println("0x" + hex.EncodeToString(keccak([]byte(*eventTopic))))
+	case *methodSignature != "":
+		selector := keccak([]byte(*methodSignature))
+		fmt.Println("0x" + hex.EncodeToString(selector[:4]))
 	case *alloc:
 		// 10000 ETH, enough that fee experiments never run the account dry.
 		out, err := json.MarshalIndent(map[string]any{

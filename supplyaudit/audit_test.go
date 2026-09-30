@@ -203,20 +203,28 @@ func TestUrethT4LaneReceiptBurnExcludesSystemPrefix(t *testing.T) {
 
 func TestAuditRejectsMissingOrMismatchedFeeReceiptCoverage(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		mutate func(*BlockAccounting)
+		name       string
+		mutate     func(*BlockAccounting)
+		wantStatus string
+		wantErr    bool
 	}{
-		{"missing receipts", func(b *BlockAccounting) { b.FeeReceipts = nil }},
-		{"receipt count mismatch", func(b *BlockAccounting) { count := uint64(2); b.TransactionCount = &count }},
-		{"priority fee mismatch", func(b *BlockAccounting) { b.FeeReceipts[0].PriorityFeePerGas = "0x1" }},
+		{"missing receipts", func(b *BlockAccounting) { b.FeeReceipts = nil }, "inconclusive", false},
+		{"receipt count mismatch", func(b *BlockAccounting) { count := uint64(2); b.TransactionCount = &count }, "inconclusive", false},
+		{"priority fee mismatch", func(b *BlockAccounting) { b.FeeReceipts[0].PriorityFeePerGas = "0x1" }, "", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			g, _, snapshot := fixture(t)
 			test.mutate(&snapshot.Blocks[0])
 			raw, err := json.Marshal(snapshot)
 			require.NoError(t, err)
-			_, err = Audit(g, raw)
-			require.ErrorIs(t, err, ErrInput)
+			result, err := Audit(g, raw)
+			if test.wantErr {
+				require.ErrorIs(t, err, ErrInput)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, test.wantStatus, result.Status)
+			require.NotEmpty(t, result.Coverage.IncompleteReasons)
 		})
 	}
 }
@@ -295,6 +303,61 @@ func TestAuditReportsIncompleteTraceCoverage(t *testing.T) {
 	}
 	if result.Status != "inconclusive" || result.Coverage.TraceComplete || len(result.Coverage.UncoveredBlocks) != 1 || result.Native.Matches != nil {
 		t.Fatalf("incomplete traces were not surfaced: %+v", result)
+	}
+}
+
+func TestAuditMissingHeaderReceiptOrTraceIsInconclusive(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Snapshot)
+		want   string
+	}{
+		{"header", func(s *Snapshot) { s.Blocks[0].Hash = "" }, "header:"},
+		{"receipt", func(s *Snapshot) { s.Blocks[0].FeeReceipts = nil }, "receipt:"},
+		{"trace", func(s *Snapshot) {
+			s.Blocks[0].SelfDestructTracesComplete = nil
+			s.Blocks[0].SelfDestructs = nil
+		}, "trace:"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g, _, snapshot := fixture(t)
+			test.mutate(&snapshot)
+			raw, err := json.Marshal(snapshot)
+			require.NoError(t, err)
+			result, err := Audit(g, raw)
+			require.NoError(t, err)
+			require.Equal(t, "inconclusive", result.Status)
+			require.NotContains(t, []string{"pass", "fail"}, result.Status)
+			require.NotEmpty(t, result.Coverage.IncompleteReasons)
+			require.Contains(t, result.Coverage.IncompleteReasons[0], test.want)
+		})
+	}
+}
+
+func TestAuditDetectsPlusOrMinusOneWeiNativeAccountingError(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		actual string
+		want   string
+	}{
+		{"one wei mint", "0x4ca", "1476"},
+		{"one wei extra burn", "0x4c8", "1474"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			g, _, snapshot := fixture(t)
+			account := snapshot.Accounts[addrEOA]
+			account.Balance = test.actual
+			snapshot.Accounts[addrEOA] = account
+			raw, err := json.Marshal(snapshot)
+			require.NoError(t, err)
+			result, err := Audit(g, raw)
+			require.NoError(t, err)
+			require.Equal(t, "fail", result.Status)
+			require.Contains(t, result.Violations, Violation{Check: "native_supply_mismatch",
+				Message:  "full-state native supply differs from genesis less base-fee and permitted SELFDESTRUCT burns",
+				Expected: "1475", Actual: test.want})
+		})
 	}
 }
 

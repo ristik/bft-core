@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture certified-block headers and explicit trace coverage for the T4 snapshot."""
+"""Capture certified headers, receipts, full state, and Cancun SELFDESTRUCT evidence for T4."""
 import argparse
 import json
 import re
@@ -7,6 +7,12 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+
+ZERO_ADDRESS = "0x" + "00" * 20
+WUCT_SUPPLY_SLOT = "0x" + "00" * 31 + "02"
+COLLECTOR_CREDIT_SLOT = "0x" + "00" * 31 + "01"
+COLLECTOR_REWARD_SLOT = "0x" + "00" * 31 + "02"
 
 
 def rpc(url, method, params):
@@ -61,41 +67,21 @@ def capture_fee_receipt(url, block, transaction, number, index):
         tip = effective - base_fee
     if effective - tip != base_fee:
         raise RuntimeError(f"block {number} transaction {tx_hash} effective gas price minus tip does not equal base fee")
-    return {
+    fee = {
         "transactionHash": tx_hash.lower(),
         "gasUsed": hex(gas_used),
         "effectiveGasPrice": hex(effective),
         "priorityFeePerGas": hex(tip),
     }
+    return fee, receipt
 
 
-def contains_selfdestruct(value):
-    if isinstance(value, dict):
-        for key in ("op", "opcode"):
-            if str(value.get(key, "")).upper() == "SELFDESTRUCT":
-                return True
-        return any(contains_selfdestruct(item) for item in value.values())
-    if isinstance(value, list):
-        return any(contains_selfdestruct(item) for item in value)
-    return False
-
-
-def contains_creation(value):
-    if isinstance(value, dict):
-        if str(value.get("op", value.get("opcode", ""))).upper() in {"CREATE", "CREATE2"}:
-            return True
-        return any(contains_creation(item) for item in value.values())
-    if isinstance(value, list):
-        return any(contains_creation(item) for item in value)
-    return False
-
-
-def call_targets(value):
+def call_targets(struct_logs):
     targets = set()
-    if isinstance(value, dict):
-        op = str(value.get("op", value.get("opcode", ""))).upper()
+    for step in struct_logs:
+        op = str(step.get("op", "")).upper()
         if op in {"CALL", "CALLCODE", "DELEGATECALL", "STATICCALL"}:
-            stack = value.get("stack")
+            stack = step.get("stack")
             if not isinstance(stack, list) or len(stack) < 2:
                 raise RuntimeError(f"{op} trace omits the EVM stack needed for account coverage")
             try:
@@ -103,12 +89,61 @@ def call_targets(value):
             except ValueError as exc:
                 raise RuntimeError(f"{op} trace has a malformed target stack word") from exc
             targets.add(f"0x{word & ((1 << 160) - 1):040x}")
-        for item in value.values():
-            targets.update(call_targets(item))
-    elif isinstance(value, list):
-        for item in value:
-            targets.update(call_targets(item))
     return targets
+
+
+def bound_struct_logs(trace_item, tx_hash, number):
+    if not isinstance(trace_item, dict):
+        raise RuntimeError(f"block {number} has a malformed transaction trace")
+    if str(trace_item.get("txHash", "")).lower() != tx_hash.lower():
+        raise RuntimeError(f"block {number} trace is not bound to transaction {tx_hash}")
+    result = trace_item.get("result")
+    logs = result.get("structLogs") if isinstance(result, dict) else None
+    if not isinstance(logs, list):
+        raise RuntimeError(f"block {number} transaction {tx_hash} lacks a complete structLogs trace")
+    return logs
+
+
+def selfdestruct_observations(transactions, receipts, traces, number):
+    observations = []
+    for tx in transactions:
+        tx_hash = tx["hash"].lower()
+        logs = bound_struct_logs(traces[tx_hash], tx_hash, number)
+        for step in logs:
+            if str(step.get("op", "")).upper() not in {"CREATE", "CREATE2"}:
+                continue
+            raise RuntimeError(f"block {number} has an internal CREATE/CREATE2; account inventory is incomplete")
+        for step in logs:
+            if str(step.get("op", "")).upper() != "SELFDESTRUCT":
+                continue
+            if step.get("depth") != 1:
+                raise RuntimeError(f"block {number} transaction {tx_hash} has nested SELFDESTRUCT; actor identity is unbound")
+            stack = step.get("stack")
+            if not isinstance(stack, list) or not stack:
+                raise RuntimeError(f"block {number} transaction {tx_hash} SELFDESTRUCT omits its beneficiary stack word")
+            try:
+                beneficiary = f"0x{int(str(stack[-1]), 16) & ((1 << 160) - 1):040x}"
+            except ValueError as exc:
+                raise RuntimeError(f"block {number} transaction {tx_hash} has a malformed SELFDESTRUCT beneficiary") from exc
+            receipt = receipts[tx_hash]
+            created = tx.get("to") is None
+            contract = receipt.get("contractAddress") if created else tx.get("to")
+            if not isinstance(contract, str) or not re.fullmatch(r"0x[0-9a-fA-F]{40}", contract):
+                raise RuntimeError(f"block {number} transaction {tx_hash} SELFDESTRUCT actor is unknown")
+            contract = contract.lower()
+            burned = 0
+            value = rpc_quantity(tx.get("value", "0x0"), f"transaction {tx_hash} value")
+            if created and beneficiary.lower() == contract:
+                burned = value
+            observations.append({
+                "transactionHash": tx_hash,
+                "contract": contract,
+                "beneficiary": beneficiary.lower(),
+                "createdInSameTransaction": created,
+                "opcode": "SELFDESTRUCT",
+                "burnedAmount": hex(burned),
+            })
+    return observations
 
 
 def fail(message):
@@ -155,32 +190,47 @@ def main():
         chain_genesis = json.loads(Path("test-nodes/evm-genesis-finalized-funded.json").read_text())
         manifest = json.loads(Path("test-nodes/post-m2a-allocation-build-v1.json").read_text())
         claim_record = json.loads(Path("test-nodes/post-m2a-evidence/t1-claim.json").read_text())
+        actions = json.loads(Path("test-nodes/post-m2a-evidence/t4-contract-actions.json").read_text())
         claim_hash = claim_record["transactionHash"].lower()
         known_accounts = {address.lower() for address in chain_genesis["alloc"]}
         storage_slots = {address.lower(): set(account.get("storage", {}))
                          for address, account in chain_genesis["alloc"].items()}
-        beneficiaries = [entry["beneficiary"] for entry in manifest["allocations"]
-                         if entry.get("beneficiary")]
+        beneficiaries = [entry["beneficiary"] for entry in manifest["allocations"] if entry.get("beneficiary")]
         known_accounts.update(address.lower() for address in beneficiaries)
-        storage_slots.setdefault(manifest["addresses"]["wuct"].lower(), set()).add("0x" + "00" * 31 + "02")
-        storage_slots.setdefault(manifest["addresses"]["feeCollector"].lower(), set()).update(
-            {"0x" + "00" * 31 + "01", "0x" + "00" * 31 + "02"})
+        wuct = manifest["addresses"]["wuct"].lower()
+        collector = manifest["addresses"]["feeCollector"].lower()
+        storage_slots.setdefault(wuct, set()).add(WUCT_SUPPLY_SLOT)
+        storage_slots.setdefault(collector, set()).update({COLLECTOR_CREDIT_SLOT, COLLECTOR_REWARD_SLOT})
         for entry in manifest["allocations"]:
             if entry.get("purpose", "").endswith("vesting"):
                 storage_slots.setdefault(entry["recipient"].lower(), set()).update(
-                    {"0x" + "00" * 31 + "00", "0x" + "00" * 31 + "01"})
+                    {"0x" + "00" * 32, "0x" + "00" * 31 + "01"})
 
+        action_transactions = {
+            actions["selfdestructToSelf"]["transactionHash"].lower(),
+            actions["ordinarySelfdestruct"]["deployTransactionHash"].lower(),
+            actions["ordinarySelfdestruct"]["destroyTransactionHash"].lower(),
+            actions["wuct"]["depositTransactionHash"].lower(),
+            actions["wuct"]["withdrawTransactionHash"].lower(),
+            actions["feeCollector"]["splitTransactionHash"].lower(),
+        }
         blocks = []
+        block_by_tx = {}
         transaction_count = 0
         transfer_count = 0
         claim_seen = False
         fee_burn = 0
+        all_selfdestructs = []
         for number in range(1, tip + 1):
             block = rpc(args.url, "eth_getBlockByNumber", [hex(number), True])
             if not block or not block.get("hash") or block.get("parentHash", "").lower() != previous_hash:
                 raise RuntimeError(f"block {number} is missing or breaks the parent-hash chain")
             if block.get("blobGasUsed") is None:
                 raise RuntimeError(f"block {number} omits Cancun blobGasUsed")
+            miner = block.get("miner") or block.get("author") or ZERO_ADDRESS
+            if not isinstance(miner, str) or not re.fullmatch(r"0x[0-9a-fA-F]{40}", miner):
+                raise RuntimeError(f"block {number} has an invalid fee-beneficiary address")
+            known_accounts.add(miner.lower())
             withdrawals = block.get("withdrawals")
             if withdrawals is None:
                 raise RuntimeError(f"block {number} omits the withdrawals list")
@@ -198,36 +248,57 @@ def main():
             if (trace_record.get("number") != number
                     or str(trace_record.get("blockHash", "")).lower() != block["hash"].lower()
                     or not isinstance(trace_record.get("validator"), int)
-                    or trace_record["validator"] < 1
-                    or trace_record["validator"] > args.validators
+                    or not 1 <= trace_record["validator"] <= args.validators
                     or not isinstance(trace, list)
                     or len(trace) != len(transactions)):
                 raise RuntimeError(f"block {number} trace coverage is missing, incomplete or bound to another block")
-            if contains_selfdestruct(trace):
-                raise RuntimeError(f"block {number} contains SELFDESTRUCT; this lane only accepts complete empty trace sets")
-            if contains_creation(trace):
-                raise RuntimeError(f"block {number} contains CREATE/CREATE2; this controlled account inventory is no longer complete")
-            known_accounts.update(call_targets(trace))
-            miner = block.get("miner") or block.get("author") or "0x" + "00" * 20
-            if not isinstance(miner, str) or not re.fullmatch(r"0x[0-9a-fA-F]{40}", miner):
-                raise RuntimeError(f"block {number} has an invalid fee-beneficiary address")
-            known_accounts.add(miner.lower())
-            fee_receipts = []
-            for transaction_index, transaction in enumerate(transactions):
+            traces = {}
+            for transaction, trace_item in zip(transactions, trace):
                 if not isinstance(transaction, dict):
                     raise RuntimeError(f"block {number} has a malformed transaction entry")
+                tx_hash = transaction.get("hash", "").lower()
+                if not tx_hash or tx_hash in traces:
+                    raise RuntimeError(f"block {number} has a missing or duplicate transaction hash")
+                traces[tx_hash] = trace_item
+            trace_hashes = [str(item.get("txHash", "")).lower() if isinstance(item, dict) else ""
+                            for item in trace]
+            if set(trace_hashes) != set(traces) or len(set(trace_hashes)) != len(trace_hashes):
+                raise RuntimeError(f"block {number} trace transaction hashes do not cover the block")
+            for trace_item in trace:
+                item_hash = str(trace_item.get("txHash", "")).lower() if isinstance(trace_item, dict) else ""
+                if item_hash not in traces:
+                    raise RuntimeError(f"block {number} has a trace for an unknown transaction {item_hash}")
+                known_accounts.update(call_targets(bound_struct_logs(trace_item, item_hash, number)))
+            receipts = {}
+            fee_receipts = []
+            for transaction_index, transaction in enumerate(transactions):
                 transaction_count += 1
-                fee_receipts.append(capture_fee_receipt(args.url, block, transaction, number, transaction_index))
-                if transaction.get("hash", "").lower() == claim_hash:
+                fee, receipt = capture_fee_receipt(args.url, block, transaction, number, transaction_index)
+                fee_receipts.append(fee)
+                tx_hash = transaction["hash"].lower()
+                receipts[tx_hash] = receipt
+                block_by_tx[tx_hash] = (number, block, transaction)
+                if tx_hash == claim_hash:
                     claim_seen = True
                 sender = transaction.get("from")
                 recipient = transaction.get("to")
-                if not sender or not recipient:
-                    raise RuntimeError(f"block {number} contains a transaction without a sender or with contract creation")
+                if not isinstance(sender, str) or not re.fullmatch(r"0x[0-9a-fA-F]{40}", sender):
+                    raise RuntimeError(f"block {number} transaction {tx_hash} has no valid sender")
                 known_accounts.add(sender.lower())
-                known_accounts.add(recipient.lower())
-                if recipient.lower() == "0x00000000000000000000000000000000000000ff":
+                if recipient is not None:
+                    if not isinstance(recipient, str) or not re.fullmatch(r"0x[0-9a-fA-F]{40}", recipient):
+                        raise RuntimeError(f"block {number} transaction {tx_hash} has an invalid recipient")
+                    known_accounts.add(recipient.lower())
+                elif receipt.get("contractAddress"):
+                    known_accounts.add(receipt["contractAddress"].lower())
+                if recipient and recipient.lower() == "0x00000000000000000000000000000000000000ff":
                     transfer_count += 1
+            for tx_hash in action_transactions.intersection(receipts):
+                receipt = receipts[tx_hash]
+                if receipt.get("status") != "0x1":
+                    raise RuntimeError(f"T4 action transaction {tx_hash} did not succeed")
+            observations = selfdestruct_observations(transactions, receipts, traces, number)
+            all_selfdestructs.extend(observations)
             ordinary_gas = sum(int(receipt["gasUsed"], 16) for receipt in fee_receipts)
             header_gas = rpc_quantity(block["gasUsed"], f"block {number} gasUsed")
             if ordinary_gas > header_gas:
@@ -246,7 +317,7 @@ def main():
                 "blobGasUsed": block["blobGasUsed"],
                 "withdrawalsCount": len(withdrawals),
                 "selfdestructTracesComplete": True,
-                "selfdestructs": [],
+                "selfdestructs": observations,
             })
             if number <= 3:
                 print(f"T4 fee coverage B{number}: {len(fee_receipts)} ordinary receipt(s), "
@@ -260,8 +331,78 @@ def main():
             raise RuntimeError(f"expected bootstrap and handoff transfers; saw {transaction_count} txs and {transfer_count} transfer-to-0xff txs")
         if fee_burn <= 0:
             raise RuntimeError("no base-fee burn was observed in the certified block history")
+        if len(all_selfdestructs) != 2:
+            raise RuntimeError(f"expected exactly two controlled SELFDESTRUCT records, observed {len(all_selfdestructs)}")
+
+        burn_action = actions["selfdestructToSelf"]
+        ordinary_action = actions["ordinarySelfdestruct"]
+        by_tx = {record["transactionHash"]: record for record in all_selfdestructs}
+        burn = by_tx.get(burn_action["transactionHash"].lower())
+        if (not burn or burn["contract"].lower() != burn_action["contract"].lower()
+                or burn["beneficiary"].lower() != burn_action["contract"].lower()
+                or not burn["createdInSameTransaction"]
+                or int(burn["burnedAmount"], 16) != int(burn_action["valueWei"])):
+            raise RuntimeError("same-transaction CREATE/SELFDESTRUCT-to-self did not produce its expected native burn")
+        ordinary_destroy = by_tx.get(ordinary_action["destroyTransactionHash"].lower())
+        if (not ordinary_destroy or ordinary_destroy["contract"].lower() != ordinary_action["contract"].lower()
+                or ordinary_destroy["beneficiary"].lower() != ordinary_action["beneficiary"].lower()
+                or ordinary_destroy["createdInSameTransaction"] or int(ordinary_destroy["burnedAmount"], 16) != 0):
+            raise RuntimeError("ordinary SELFDESTRUCT was not recorded as a transfer without a permitted burn")
+        if ordinary_action["deployTransactionHash"].lower() not in block_by_tx:
+            raise RuntimeError("ordinary SELFDESTRUCT fixture deployment is absent from certified history")
+        burn_block = block_by_tx[burn_action["transactionHash"].lower()][0]
+        ordinary_deploy_block = block_by_tx[ordinary_action["deployTransactionHash"].lower()][0]
+        ordinary_destroy_block = block_by_tx[ordinary_action["destroyTransactionHash"].lower()][0]
+        if not ordinary_deploy_block < ordinary_destroy_block:
+            raise RuntimeError("ordinary SELFDESTRUCT deployment and destruction are not in separate ordered transactions")
+        burn_address = burn_action["contract"].lower()
+        ordinary_address = ordinary_action["contract"].lower()
+        burn_code = rpc(args.url, "eth_getCode", [burn_address, hex(tip)]).lower()
+        burn_balance = rpc_quantity(rpc(args.url, "eth_getBalance", [burn_address, hex(tip)]), "burned fixture balance")
+        burn_code_at_creation_block = rpc(args.url, "eth_getCode", [burn_address, hex(burn_block)]).lower()
+        burn_balance_at_creation_block = rpc_quantity(rpc(args.url, "eth_getBalance", [burn_address, hex(burn_block)]),
+                                                      "same-transaction burn fixture balance")
+        ordinary_code_deployed = rpc(args.url, "eth_getCode", [ordinary_address, hex(ordinary_deploy_block)]).lower()
+        ordinary_code_tip = rpc(args.url, "eth_getCode", [ordinary_address, hex(tip)]).lower()
+        ordinary_balance_deployed = rpc_quantity(rpc(args.url, "eth_getBalance", [ordinary_address, hex(ordinary_deploy_block)]), "ordinary fixture deployment balance")
+        ordinary_balance_tip = rpc_quantity(rpc(args.url, "eth_getBalance", [ordinary_address, hex(tip)]), "ordinary fixture final balance")
+        if (burn_code != "0x" or burn_balance != 0 or burn_code_at_creation_block != "0x"
+                or burn_balance_at_creation_block != 0):
+            raise RuntimeError("Cancun same-transaction selfdestruct did not remove its new account and balance")
+        if not ordinary_code_deployed or ordinary_code_deployed == "0x" or ordinary_code_tip != ordinary_code_deployed:
+            raise RuntimeError("Cancun ordinary SELFDESTRUCT did not preserve the already-deployed contract code")
+        if ordinary_balance_deployed != int(ordinary_action["valueWei"]) or ordinary_balance_tip != 0:
+            raise RuntimeError("ordinary SELFDESTRUCT did not transfer the fixture's full balance")
+        beneficiary_before = rpc_quantity(rpc(args.url, "eth_getBalance", [ordinary_action["beneficiary"],
+                                                                             hex(ordinary_destroy_block - 1)]),
+                                          "ordinary SELFDESTRUCT beneficiary balance before transfer")
+        beneficiary_after = rpc_quantity(rpc(args.url, "eth_getBalance", [ordinary_action["beneficiary"],
+                                                                            hex(ordinary_destroy_block)]),
+                                         "ordinary SELFDESTRUCT beneficiary balance after transfer")
+        if beneficiary_after - beneficiary_before != int(ordinary_action["valueWei"]):
+            raise RuntimeError("ordinary SELFDESTRUCT beneficiary did not receive the contract's full balance")
+
+        deposit_hash = actions["wuct"]["depositTransactionHash"].lower()
+        withdraw_hash = actions["wuct"]["withdrawTransactionHash"].lower()
+        split_hash = actions["feeCollector"]["splitTransactionHash"].lower()
+        for tx_hash in (deposit_hash, withdraw_hash, split_hash):
+            if tx_hash not in block_by_tx:
+                raise RuntimeError(f"T4 WUCT/FeeCollector action {tx_hash} is absent from certified history")
+        expected_wuct_supply = int(actions["wuct"]["expectedTotalSupplyWei"])
+        actual_wuct_supply = rpc_quantity(rpc(args.url, "eth_getStorageAt", [wuct, WUCT_SUPPLY_SLOT, hex(tip)]), "WUCT totalSupply")
+        wuct_native_balance = rpc_quantity(rpc(args.url, "eth_getBalance", [wuct, hex(tip)]), "WUCT native custody")
+        if actual_wuct_supply != expected_wuct_supply or expected_wuct_supply <= 0:
+            raise RuntimeError(f"WUCT final totalSupply is {actual_wuct_supply}, expected nonzero {expected_wuct_supply}")
+        if wuct_native_balance < actual_wuct_supply:
+            raise RuntimeError("WUCT native balance does not cover its minted totalSupply")
+        collector_credit = rpc_quantity(rpc(args.url, "eth_getStorageAt", [collector, COLLECTOR_CREDIT_SLOT, hex(tip)]), "FeeCollector treasuryCredit")
+        collector_reward = rpc_quantity(rpc(args.url, "eth_getStorageAt", [collector, COLLECTOR_REWARD_SLOT, hex(tip)]), "FeeCollector rewardPot")
+        collector_balance = rpc_quantity(rpc(args.url, "eth_getBalance", [collector, hex(tip)]), "FeeCollector native balance")
+        if collector_credit + collector_reward <= 0 or collector_credit + collector_reward > collector_balance:
+            raise RuntimeError("FeeCollector split did not leave nonzero, backed liabilities")
         print(f"PASS: captured {tip} hash-linked headers, {transaction_count} transactions, claim and {fee_burn} wei base-fee burn")
-        print("PASS: complete traces show no CREATE/CREATE2/SELFDESTRUCT; account inventory includes genesis allocations, tx endpoints, internal-call targets and vesting beneficiaries")
+        print(f"PASS: Cancun same-transaction selfdestruct burned {burn['burnedAmount']} wei; ordinary SELFDESTRUCT transferred {ordinary_action['valueWei']} wei and retained code")
+        print(f"PASS: WUCT supply/custody {actual_wuct_supply}/{wuct_native_balance}; FeeCollector liabilities {collector_credit + collector_reward}/{collector_balance}")
 
         state_accounts = {}
         for address in sorted(known_accounts):
@@ -270,8 +411,6 @@ def main():
             slots = {}
             for slot in sorted(storage_slots.get(address, set())):
                 value = rpc(args.url, "eth_getStorageAt", [address, slot, hex(tip)])
-                # Preserve zero values for slots the auditor must read (e.g. WUCT supply and
-                # FeeCollector liabilities); absence would mean incomplete evidence, not zero.
                 slots[slot.lower()] = value.lower()
             state_accounts[address] = {"balance": balance.lower(), "code": code.lower(), "storage": slots}
         if not state_accounts:
@@ -287,18 +426,37 @@ def main():
             "addresses": {
                 "wuct": manifest["addresses"]["wuct"],
                 "feeCollector": manifest["addresses"]["feeCollector"],
-                "vestingVaults": [
-                    entry["recipient"] for entry in manifest["allocations"]
-                    if entry["purpose"].endswith("vesting")
-                ],
+                "vestingVaults": [entry["recipient"] for entry in manifest["allocations"]
+                                  if entry["purpose"].endswith("vesting")],
             },
             "accounts": state_accounts,
             "blocks": blocks,
+            "t4ContractActions": actions,
+            "t4Observations": {
+                "burnedNewContract": {"transactionHash": burn["transactionHash"], "contract": burn["contract"],
+                                      "amountWei": burn["burnedAmount"],
+                                      "codeAtCreationBlock": burn_code_at_creation_block,
+                                      "balanceAtCreationBlockWei": str(burn_balance_at_creation_block),
+                                      "codeAtTip": burn_code, "balanceAtTipWei": str(burn_balance)},
+                "ordinarySelfdestruct": {"transactionHash": ordinary_destroy["transactionHash"],
+                                          "contract": ordinary_address, "beneficiary": ordinary_destroy["beneficiary"],
+                                          "transferredWei": ordinary_action["valueWei"],
+                                          "codeAtDeployment": ordinary_code_deployed, "codeAtTip": ordinary_code_tip,
+                                          "balanceAtDeploymentWei": str(ordinary_balance_deployed),
+                                          "balanceAtTipWei": str(ordinary_balance_tip),
+                                          "beneficiaryBalanceDeltaWei": str(beneficiary_after - beneficiary_before)},
+                "wuct": {"expectedTotalSupplyWei": str(expected_wuct_supply), "actualTotalSupplyWei": str(actual_wuct_supply),
+                         "nativeBalanceWei": str(wuct_native_balance), "depositWei": actions["wuct"]["depositWei"],
+                         "withdrawWei": actions["wuct"]["withdrawWei"]},
+                "feeCollector": {"treasuryCreditWei": str(collector_credit), "rewardPotWei": str(collector_reward),
+                                 "totalLiabilitiesWei": str(collector_credit + collector_reward),
+                                 "nativeBalanceWei": str(collector_balance)},
+            },
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(evidence, indent=2) + "\n")
         print(f"PASS: saved T4 accounting source {args.output}")
-    except (OSError, ValueError, RuntimeError, urllib.error.URLError, KeyError) as exc:
+    except (OSError, ValueError, RuntimeError, urllib.error.URLError, KeyError, TypeError) as exc:
         return fail(str(exc))
     return 0
 

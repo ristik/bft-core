@@ -113,6 +113,171 @@ post_m2a_wait_certified_receipt() {
   return 1
 }
 
+post_m2a_t4_exercise_contracts() {
+  local artifacts=${POST_M2A_T4_ARTIFACT_DIR:-}
+  [ -s "$artifacts/SameTransactionSelfDestructToSelf.bin" ] &&
+    [ -s "$artifacts/ExistingSelfDestruct.bin" ] || {
+      fail "pinned-solc T4 fixture bytecode is missing"; return 1;
+    }
+  local wuct collector beneficiary burnValue ordinaryValue depositAmount withdrawAmount
+  local burnCode ordinaryCode beneficiaryWord burnNonce burnContract ordinaryNonce ordinaryContract
+  local wuctWithdrawTopic withdrawSelector withdrawWord withdrawData splitTopic depositTopic
+  local burnHash ordinaryDeployHash depositHash withdrawHash destroyHash splitHash
+  wuct=$(python3 - "$post_m2a_default_manifest" <<'PY'
+import json,sys
+print(json.load(open(sys.argv[1],encoding="utf-8"))["addresses"]["wuct"])
+PY
+  ) || return 1
+  collector=$POST_M2A_FEE_COLLECTOR
+  beneficiary=$(python3 - "$post_m2a_default_manifest" <<'PY'
+import json,sys
+m=json.load(open(sys.argv[1],encoding="utf-8"))
+print(next(a["beneficiary"] for a in m["allocations"] if a["purpose"] == "ecosystem_vesting"))
+PY
+  ) || return 1
+  burnValue=1200000
+  ordinaryValue=2400000
+  depositAmount=10000000
+  withdrawAmount=4000000
+  mkdir -p test-nodes/post-m2a-evidence/t4-contract-actions
+
+  burnNonce=$M2_NEXT_NONCE
+  burnContract=$(go run ./scripts/evmtx -create-address -nonce "$burnNonce") || return 1
+  burnCode=$(tr -d '[:space:]' <"$artifacts/SameTransactionSelfDestructToSelf.bin") || return 1
+  post_m2a_send_transaction "$burnNonce" -create -data "$burnCode" -gas-limit 300000 -value "$burnValue" || return 1
+  burnHash=$POST_M2A_TX_HASH
+  post_m2a_wait_certified_receipt "$burnHash" 1 || return 1
+  if ! python3 - "$POST_M2A_RECEIPT" "$burnContract" <<'PY'
+import json,sys
+receipt=json.loads(sys.argv[1])["result"]
+if receipt.get("status") != "0x1" or receipt.get("contractAddress","").lower() != sys.argv[2].lower():
+    raise SystemExit("same-transaction CREATE/SELFDESTRUCT receipt is not successful or address-bound")
+PY
+  then
+    fail "same-transaction selfdestruct-to-self deployment was not certified"; return 1
+  fi
+  printf '%s\n' "$POST_M2A_RECEIPT" >test-nodes/post-m2a-evidence/t4-contract-actions/burn-create.receipt.json
+  M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
+
+  ordinaryNonce=$M2_NEXT_NONCE
+  ordinaryContract=$(go run ./scripts/evmtx -create-address -nonce "$ordinaryNonce") || return 1
+  beneficiaryWord=$(python3 - "$beneficiary" <<'PY'
+import sys
+address=sys.argv[1].removeprefix("0x").lower()
+if len(address)!=40: raise SystemExit("ordinary SELFDESTRUCT beneficiary is not an address")
+print(address.rjust(64,"0"))
+PY
+  ) || return 1
+  ordinaryCode=$(tr -d '[:space:]' <"$artifacts/ExistingSelfDestruct.bin") || return 1
+  ordinaryCode="${ordinaryCode}${beneficiaryWord}"
+  post_m2a_send_transaction "$ordinaryNonce" -create -data "$ordinaryCode" -gas-limit 350000 -value "$ordinaryValue" || return 1
+  ordinaryDeployHash=$POST_M2A_TX_HASH
+  post_m2a_wait_certified_receipt "$ordinaryDeployHash" 1 || return 1
+  if ! python3 - "$POST_M2A_RECEIPT" "$ordinaryContract" <<'PY'
+import json,sys
+receipt=json.loads(sys.argv[1])["result"]
+if receipt.get("status") != "0x1" or receipt.get("contractAddress","").lower() != sys.argv[2].lower():
+    raise SystemExit("ordinary SELFDESTRUCT fixture deployment receipt is not successful or address-bound")
+PY
+  then
+    fail "ordinary SELFDESTRUCT fixture deployment failed"; return 1
+  fi
+  printf '%s\n' "$POST_M2A_RECEIPT" >test-nodes/post-m2a-evidence/t4-contract-actions/ordinary-create.receipt.json
+  M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
+
+  depositTopic=$(go run ./scripts/evmtx -event-topic 'Deposit(address,uint256)') || return 1
+  post_m2a_send_transaction "$M2_NEXT_NONCE" -to "$wuct" -call 'deposit()' -gas-limit 150000 -value "$depositAmount" || return 1
+  depositHash=$POST_M2A_TX_HASH
+  post_m2a_wait_certified_receipt "$depositHash" 1 || return 1
+  if ! python3 - "$POST_M2A_RECEIPT" "$wuct" "$depositTopic" "$depositAmount" <<'PY'
+import json,sys
+receipt=json.loads(sys.argv[1])["result"]
+logs=[log for log in receipt.get("logs",[]) if log.get("address","").lower()==sys.argv[2].lower()
+      and log.get("topics",[""])[0].lower()==sys.argv[3].lower()]
+if receipt.get("status")!="0x1" or len(logs)!=1 or int(logs[0].get("data","0x0"),16)!=int(sys.argv[4]):
+    raise SystemExit("nonzero WUCT Deposit event was not emitted with the requested amount")
+PY
+  then
+    fail "nonzero WUCT deposit receipt did not match the expected amount"; return 1
+  fi
+  printf '%s\n' "$POST_M2A_RECEIPT" >test-nodes/post-m2a-evidence/t4-contract-actions/wuct-deposit.receipt.json
+  M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
+
+  wuctWithdrawTopic=$(go run ./scripts/evmtx -event-topic 'Withdrawal(address,uint256)') || return 1
+  withdrawSelector=$(go run ./scripts/evmtx -method-selector 'withdraw(uint256)') || return 1
+  printf -v withdrawWord '%064x' "$withdrawAmount"
+  withdrawData="${withdrawSelector}${withdrawWord}"
+  post_m2a_send_transaction "$M2_NEXT_NONCE" -to "$wuct" -data "$withdrawData" -gas-limit 150000 -value 0 || return 1
+  withdrawHash=$POST_M2A_TX_HASH
+  post_m2a_wait_certified_receipt "$withdrawHash" 1 || return 1
+  if ! python3 - "$POST_M2A_RECEIPT" "$wuct" "$wuctWithdrawTopic" "$withdrawAmount" <<'PY'
+import json,sys
+receipt=json.loads(sys.argv[1])["result"]
+logs=[log for log in receipt.get("logs",[]) if log.get("address","").lower()==sys.argv[2].lower()
+      and log.get("topics",[""])[0].lower()==sys.argv[3].lower()]
+if receipt.get("status")!="0x1" or len(logs)!=1 or int(logs[0].get("data","0x0"),16)!=int(sys.argv[4]):
+    raise SystemExit("nonzero WUCT Withdrawal event was not emitted with the requested amount")
+PY
+  then
+    fail "nonzero WUCT withdrawal receipt did not match the expected amount"; return 1
+  fi
+  printf '%s\n' "$POST_M2A_RECEIPT" >test-nodes/post-m2a-evidence/t4-contract-actions/wuct-withdraw.receipt.json
+  M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
+
+  post_m2a_send_transaction "$M2_NEXT_NONCE" -to "$ordinaryContract" -call 'destroy()' -gas-limit 150000 -value 0 || return 1
+  destroyHash=$POST_M2A_TX_HASH
+  post_m2a_wait_certified_receipt "$destroyHash" 1 || return 1
+  [ "$(printf '%s' "$POST_M2A_RECEIPT" | pyget "['result']['status']")" = 0x1 ] || {
+    fail "ordinary SELFDESTRUCT transaction did not succeed"; return 1;
+  }
+  printf '%s\n' "$POST_M2A_RECEIPT" >test-nodes/post-m2a-evidence/t4-contract-actions/ordinary-destroy.receipt.json
+  M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
+
+  splitTopic=$(go run ./scripts/evmtx -event-topic 'Split(uint256,uint256,uint256)') || return 1
+  post_m2a_send_transaction "$M2_NEXT_NONCE" -to "$collector" -call 'split()' -gas-limit 200000 -value 0 || return 1
+  splitHash=$POST_M2A_TX_HASH
+  post_m2a_wait_certified_receipt "$splitHash" 1 || return 1
+  if ! python3 - "$POST_M2A_RECEIPT" "$collector" "$splitTopic" <<'PY'
+import json,sys
+receipt=json.loads(sys.argv[1])["result"]
+logs=[log for log in receipt.get("logs",[]) if log.get("address","").lower()==sys.argv[2].lower()
+      and log.get("topics",[""])[0].lower()==sys.argv[3].lower()]
+if receipt.get("status")!="0x1" or len(logs)!=1:
+    raise SystemExit("FeeCollector split() receipt lacks its event")
+data=logs[0].get("data","").removeprefix("0x")
+if len(data)!=192: raise SystemExit("FeeCollector Split event has malformed data")
+unallocated,credit,reward=(int(data[i:i+64],16) for i in (0,64,128))
+if unallocated<=0 or credit+reward!=unallocated or credit+reward<=0:
+    raise SystemExit(f"split produced no nonzero liabilities or wrong totals: {unallocated}, {credit}, {reward}")
+PY
+  then
+    fail "FeeCollector split did not create nonzero, fully-backed liabilities"; return 1
+  fi
+  printf '%s\n' "$POST_M2A_RECEIPT" >test-nodes/post-m2a-evidence/t4-contract-actions/collector-split.receipt.json
+  M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
+
+  POST_M2A_T4_COMPILER_VERSION=$(cat "$artifacts/solc-version.txt") \
+    POST_M2A_T4_BURN_CONTRACT=$burnContract POST_M2A_T4_BURN_TX=$burnHash POST_M2A_T4_BURN_VALUE=$burnValue \
+    POST_M2A_T4_ORDINARY_CONTRACT=$ordinaryContract POST_M2A_T4_ORDINARY_DEPLOY_TX=$ordinaryDeployHash \
+    POST_M2A_T4_ORDINARY_DESTROY_TX=$destroyHash POST_M2A_T4_ORDINARY_VALUE=$ordinaryValue \
+    POST_M2A_T4_BENEFICIARY=$beneficiary POST_M2A_T4_WUCT=$wuct \
+    POST_M2A_T4_WUCT_DEPOSIT_TX=$depositHash POST_M2A_T4_WUCT_DEPOSIT=$depositAmount \
+    POST_M2A_T4_WUCT_WITHDRAW_TX=$withdrawHash POST_M2A_T4_WUCT_WITHDRAW=$withdrawAmount \
+    POST_M2A_T4_COLLECTOR=$collector POST_M2A_T4_SPLIT_TX=$splitHash \
+    python3 - <<'PY' >test-nodes/post-m2a-evidence/t4-contract-actions.json
+import json,os
+out={
+ "compiler":os.environ["POST_M2A_T4_COMPILER_VERSION"],
+ "selfdestructToSelf":{"contract":os.environ["POST_M2A_T4_BURN_CONTRACT"],"transactionHash":os.environ["POST_M2A_T4_BURN_TX"],"valueWei":os.environ["POST_M2A_T4_BURN_VALUE"]},
+ "ordinarySelfdestruct":{"contract":os.environ["POST_M2A_T4_ORDINARY_CONTRACT"],"deployTransactionHash":os.environ["POST_M2A_T4_ORDINARY_DEPLOY_TX"],"destroyTransactionHash":os.environ["POST_M2A_T4_ORDINARY_DESTROY_TX"],"valueWei":os.environ["POST_M2A_T4_ORDINARY_VALUE"],"beneficiary":os.environ["POST_M2A_T4_BENEFICIARY"]},
+ "wuct":{"address":os.environ["POST_M2A_T4_WUCT"],"depositTransactionHash":os.environ["POST_M2A_T4_WUCT_DEPOSIT_TX"],"depositWei":os.environ["POST_M2A_T4_WUCT_DEPOSIT"],"withdrawTransactionHash":os.environ["POST_M2A_T4_WUCT_WITHDRAW_TX"],"withdrawWei":os.environ["POST_M2A_T4_WUCT_WITHDRAW"],"expectedTotalSupplyWei":str(int(os.environ["POST_M2A_T4_WUCT_DEPOSIT"])-int(os.environ["POST_M2A_T4_WUCT_WITHDRAW"]))},
+ "feeCollector":{"address":os.environ["POST_M2A_T4_COLLECTOR"],"splitTransactionHash":os.environ["POST_M2A_T4_SPLIT_TX"]}}
+json.dump(out,sys.stdout,indent=2); print()
+PY
+  pass "deployed the Cancun same-transaction burn and ordinary SELFDESTRUCT fixtures"
+  pass "nonzero WUCT deposit/withdrawal and FeeCollector split() liabilities were certified"
+}
+
 post_m2a_after_bootstrap() {
   post_m2a_wait_initial_transactions || return 1
   mkdir -p test-nodes/post-m2a-evidence
@@ -225,6 +390,9 @@ PY
     M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
     pass "default-manifest ecosystem vesting release succeeded as a typed transaction in root epoch 1"
     pass "beneficiary received the exact due principal and FeeCollector received the priority fee"
+  fi
+  if [ "$postM2aMode" = t4 ]; then
+    post_m2a_t4_exercise_contracts || return 1
   fi
 }
 
