@@ -93,10 +93,15 @@ func startCertifiedRecord(ctx context.Context, flags *shardNodeRunFlags, shardCo
 		log.Info("certified-record gate enabled: leadership and signatures are withheld until the record proves readiness for the held certificate's child (#14 W3b-1)")
 	}
 
+	witnessMetrics, err := recordwiring.NewMetrics(flags.observe.Meter("recordwiring"))
+	if err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("creating certified-record witness metrics: %w", err)
+	}
 	capturer, err := recordwiring.NewCapturer(recordwiring.CaptureConfig{
 		Deployment: deployment, Store: store, Executor: executor, Finality: node.FinalityGate(), Log: log,
 		RPC:            recordwiring.HTTPWitnessCaller(flags.EthURL, flags.CertifiedRecordCaptureTimeout),
-		AcquireTimeout: flags.CertifiedRecordCaptureTimeout,
+		AcquireTimeout: flags.CertifiedRecordCaptureTimeout, Metrics: witnessMetrics,
 	})
 	if err != nil {
 		_ = store.Close()

@@ -47,3 +47,37 @@ func TestPendingCatchUpMetricShowsAgeAndClears(t *testing.T) {
 	require.Zero(t, pending)
 	require.Zero(t, age)
 }
+
+func TestCertificationMetricsExposeEpochTransitionPauseTimestamps(t *testing.T) {
+	ctx := context.Background()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(ctx)) })
+	m, err := NewMetrics(provider.Meter("certification-pause-test"))
+	require.NoError(t, err)
+	m.recordRoundCertified(ctx, 4)
+	time.Sleep(time.Millisecond)
+	m.recordRoundCertified(ctx, 5)
+
+	var data metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(ctx, &data))
+	got := make(map[string]float64)
+	for _, scope := range data.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			switch metric.Name {
+			case "shardnode.certification.last_timestamp", "shardnode.certification.pause_start_timestamp", "shardnode.certification.pause_end_timestamp":
+				gauge, ok := metric.Data.(metricdata.Gauge[float64])
+				require.True(t, ok)
+				got[metric.Name] = gauge.DataPoints[0].Value
+			case "shardnode.certification.pause_duration":
+				histogram, ok := metric.Data.(metricdata.Histogram[float64])
+				require.True(t, ok)
+				require.EqualValues(t, 1, histogram.DataPoints[0].Count)
+				require.Greater(t, histogram.DataPoints[0].Sum, float64(0))
+			}
+		}
+	}
+	require.Greater(t, got["shardnode.certification.last_timestamp"], float64(0))
+	require.Greater(t, got["shardnode.certification.pause_start_timestamp"], float64(0))
+	require.Greater(t, got["shardnode.certification.pause_end_timestamp"], got["shardnode.certification.pause_start_timestamp"])
+}

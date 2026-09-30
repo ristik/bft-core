@@ -146,6 +146,7 @@ type CaptureConfig struct {
 	// expiry and authenticated invalid evidence are terminal for one episode and are not burst-retried.
 	MaxAttempts int
 	RetryDelay  time.Duration
+	Metrics     *Metrics
 	Log         *slog.Logger
 	// OnResult, when set, receives every attempt's result. It is called from the round for duplicate,
 	// superseded and malformed attempts and from Run otherwise, so it must not block.
@@ -380,7 +381,7 @@ func (c *Capturer) capture(ctx context.Context, a Attempt) CaptureResult {
 	w, err := registrywitness.Acquire(actx, c.cfg.RPC, c.cfg.Deployment.ProofContext(), a.BlockHash)
 	cancel()
 	if err != nil {
-		if errors.Is(err, registrywitness.ErrUnavailable) {
+		if errors.Is(err, registrywitness.ErrUnavailable) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return fail(CaptureWitnessUnavailable, err)
 		}
 		return fail(CaptureWitnessInvalid, err)

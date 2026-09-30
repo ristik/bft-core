@@ -49,6 +49,7 @@ type OperatorStatus struct {
 	CurrentRootEpoch  uint64           `json:"currentRootEpoch"`
 	ActivatedHandoffs []uint64         `json:"activatedHandoffs"`
 	Journal           JournalUsage     `json:"journal"`
+	CertifiedTip      *BlockPin        `json:"certifiedTip,omitempty"`
 	PruneFrontier     *BlockPin        `json:"pruneFrontier,omitempty"`
 	RestoreBase       *BlockPin        `json:"restoreBase,omitempty"`
 	LatestLocalV2     *BlockPin        `json:"latestLocalV2Archive,omitempty"`
@@ -80,10 +81,21 @@ func ReadOperatorStatus(ctx context.Context, journal *configuredprogress.Store, 
 		a := image.Frontier.Anchor
 		out.PruneFrontier = &BlockPin{Height: a.Height, Hash: fmt.Sprintf("0x%x", a.Subject.BlockHash),
 			StateRoot: fmt.Sprintf("0x%x", a.StateRoot), RootEpoch: a.Epoch, RootRound: a.Round}
+		out.CertifiedTip = cloneHigherPin(out.CertifiedTip, out.PruneFrontier)
 	}
 	if image.RestoreBase != nil {
 		a := image.RestoreBase
 		out.RestoreBase = &BlockPin{Height: a.Height, Hash: fmt.Sprintf("0x%x", a.Hash), StateRoot: fmt.Sprintf("0x%x", a.StateRoot), RootRound: a.RootRound}
+		out.CertifiedTip = cloneHigherPin(out.CertifiedTip, out.RestoreBase)
+	}
+	for _, entry := range image.Candidates {
+		if !entry.Certified || entry.ResultingUC == nil || len(entry.Candidate.Hash) != 32 || len(entry.Candidate.StateRoot) != 32 {
+			continue
+		}
+		pin := &BlockPin{Height: entry.Candidate.Number, Hash: fmt.Sprintf("0x%x", entry.Candidate.Hash),
+			StateRoot: fmt.Sprintf("0x%x", entry.Candidate.StateRoot), RootEpoch: entry.ResultingUC.GetRootEpoch(),
+			RootRound: entry.ResultingUC.GetRootRoundNumber()}
+		out.CertifiedTip = cloneHigherPin(out.CertifiedTip, pin)
 	}
 	if local != nil {
 		q, rec, latestErr := local.GetLatestReceiptComplete(archive.RoundRequest{Context: subject, Round: math.MaxUint64})
@@ -96,6 +108,7 @@ func ReadOperatorStatus(ctx context.Context, journal *configuredprogress.Store, 
 			}
 			out.LatestLocalV2 = &BlockPin{Height: header.Number.Uint64(), Hash: fmt.Sprintf("0x%x", q.BlockHash),
 				StateRoot: fmt.Sprintf("0x%x", header.Root), RootEpoch: uc.GetRootEpoch(), RootRound: uc.GetRoundNumber()}
+			out.CertifiedTip = cloneHigherPin(out.CertifiedTip, out.LatestLocalV2)
 		} else if !errors.Is(latestErr, archive.ErrUnavailable) {
 			return out, fmt.Errorf("reading latest local receipt-complete archive record: %w", latestErr)
 		}
@@ -131,4 +144,12 @@ func ReadOperatorStatus(ctx context.Context, journal *configuredprogress.Store, 
 		out.Authority = &copy
 	}
 	return out, nil
+}
+
+func cloneHigherPin(current, candidate *BlockPin) *BlockPin {
+	if candidate == nil || (current != nil && current.Height >= candidate.Height) {
+		return current
+	}
+	copy := *candidate
+	return &copy
 }
