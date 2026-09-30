@@ -202,7 +202,15 @@ build_pinned_ureth() {
   printf 'ureth commit=%s\nureth binary=%s\nureth binary sha256=%s\n' \
     "$T6_URETH_COMMIT" "$URETH_BIN" "$(sha256 "$URETH_BIN")" >>"$EVIDENCE_DIR/source-pin.txt"
   "$URETH_BIN" --version >"$EVIDENCE_DIR/ureth-version.txt" 2>&1
+  {
+    go version
+    rustc --version
+    cargo --version
+  } >"$EVIDENCE_DIR/compiler-toolchains.txt"
   rm -rf "$URETH_PIN_CACHE_DIR/target" "$URETH_PIN_CACHE_DIR/unicity-reth-src-$T6_URETH_COMMIT"
+  # Cargo registry and rustup toolchains are fresh per this rehearsal. The verified client is
+  # self-contained, so release those isolated build caches before the Solidity and devnet builds.
+  rm -rf "$CARGO_HOME" "$RUSTUP_HOME"
   local available_kb
   available_kb=$(df -Pk "$ISOLATION_ROOT" | awk 'NR==2 {print $4}')
   printf 'disk available after Ureth build and target cleanup: %s KiB\n' "$available_kb" >>"$EVIDENCE_DIR/disk-before.txt"
@@ -329,8 +337,7 @@ write_prerehearsal_pins() {
   printf 'contracts commit=%s\ncontracts manifest sha256=%s\n' \
     "$(git -C "$FRESH_CONTRACTS" rev-parse HEAD)" "$hash" >>"$EVIDENCE_DIR/source-pin.txt"
   printf 'Foundry forge sha256=%s\n' "$(sha256 "$ISOLATION_ROOT/bin/forge")" >>"$EVIDENCE_DIR/source-pin.txt"
-  printf 'Go toolchain: %s\nRust toolchain: %s\nCargo: %s\n' \
-    "$(go version)" "$(rustc --version)" "$(cargo --version)" >>"$EVIDENCE_DIR/source-pin.txt"
+  cat "$EVIDENCE_DIR/compiler-toolchains.txt" >>"$EVIDENCE_DIR/source-pin.txt"
   printf 'Foundry release=v1.8.3\nFoundry macOS asset sha256=1b469229681b31e3c66a07132811b99460b2874a0a48de3b29500234454f47b8\n' \
     >>"$EVIDENCE_DIR/source-pin.txt"
   cat "$EVIDENCE_DIR/foundry-version.txt" >>"$EVIDENCE_DIR/source-pin.txt"
@@ -339,10 +346,10 @@ write_prerehearsal_pins() {
 printf 'T6 rehearsal evidence directory: %s\n' "$EVIDENCE_DIR"
 printf 'BFT pin: %s\nUreth pin: %s\nContracts pin: %s\n' "$T6_BFT_COMMIT" "$T6_URETH_COMMIT" "$T6_CONTRACTS_COMMIT"
 run_step "fresh clone and isolated HOME/cache setup" new_isolated_checkout
+run_step "fresh pinned Ureth source build" build_pinned_ureth
 run_step "fresh BFT and F7 tool build" build_bft_tools
 run_step "isolated pinned Foundry release install" install_pinned_foundry
 run_step "contracts e7eb3216 source rebuild and manifest artifact match" build_pinned_contracts
-run_step "fresh pinned Ureth source build" build_pinned_ureth
 run_step "source, binary, and manifest pins" write_prerehearsal_pins
 run_step "paired T6 rehearsal with handoffs and documented restore" run_paired_t6
 run_step "retain and recheck pre-handoff offline F7 bundle" extract_verify_f7
