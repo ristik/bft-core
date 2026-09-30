@@ -3,6 +3,7 @@ package shardnode
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -24,6 +25,13 @@ type Metrics struct {
 	recoveryStops     metric.Int64Counter
 	pendingCatchUp    metric.Int64Gauge
 	pendingCatchUpAge metric.Float64Gauge
+	lastCertifiedAt   metric.Float64Gauge
+	pauseStartAt      metric.Float64Gauge
+	pauseEndAt        metric.Float64Gauge
+	pauseDuration     metric.Float64Histogram
+	certMu            sync.Mutex
+	previousCertAt    time.Time
+	previousEpoch     uint64
 }
 
 // NewMetrics registers this package's instruments on meter. See
@@ -75,14 +83,43 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Age in seconds of the continuous pending catch-up episode, across authenticated target changes"), metric.WithUnit("s")); err != nil {
 		return nil, fmt.Errorf("creating execution_recovery.pending_catch_up_age gauge: %w", err)
 	}
+	if m.lastCertifiedAt, err = meter.Float64Gauge("shardnode.certification.last_timestamp",
+		metric.WithDescription("Unix timestamp of the last successfully certified round"), metric.WithUnit("s")); err != nil {
+		return nil, fmt.Errorf("creating certification.last_timestamp gauge: %w", err)
+	}
+	if m.pauseStartAt, err = meter.Float64Gauge("shardnode.certification.pause_start_timestamp",
+		metric.WithDescription("Unix timestamp of the last certification in the old root epoch before an epoch transition"), metric.WithUnit("s")); err != nil {
+		return nil, fmt.Errorf("creating certification.pause_start_timestamp gauge: %w", err)
+	}
+	if m.pauseEndAt, err = meter.Float64Gauge("shardnode.certification.pause_end_timestamp",
+		metric.WithDescription("Unix timestamp of the first certification in the new root epoch"), metric.WithUnit("s")); err != nil {
+		return nil, fmt.Errorf("creating certification.pause_end_timestamp gauge: %w", err)
+	}
+	if m.pauseDuration, err = meter.Float64Histogram("shardnode.certification.pause_duration",
+		metric.WithDescription("Time between the last certified round in one root epoch and the first certified round in the next"), metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300)); err != nil {
+		return nil, fmt.Errorf("creating certification.pause_duration histogram: %w", err)
+	}
 	return m, nil
 }
 
-func (m *Metrics) recordRoundCertified(ctx context.Context) {
+func (m *Metrics) recordRoundCertified(ctx context.Context, rootEpoch uint64) {
 	if m == nil {
 		return
 	}
 	m.roundsCertified.Add(ctx, 1)
+	now := time.Now()
+	m.lastCertifiedAt.Record(ctx, float64(now.UnixNano())/1e9)
+	m.certMu.Lock()
+	previousAt, previousEpoch := m.previousCertAt, m.previousEpoch
+	m.previousCertAt, m.previousEpoch = now, rootEpoch
+	m.certMu.Unlock()
+	if !previousAt.IsZero() && rootEpoch > previousEpoch {
+		start, end := float64(previousAt.UnixNano())/1e9, float64(now.UnixNano())/1e9
+		m.pauseStartAt.Record(ctx, start)
+		m.pauseEndAt.Record(ctx, end)
+		m.pauseDuration.Record(ctx, now.Sub(previousAt).Seconds())
+	}
 }
 
 func (m *Metrics) recordRepeatUC(ctx context.Context) {

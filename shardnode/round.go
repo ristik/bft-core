@@ -1175,7 +1175,7 @@ func (r *Round) commitPrevious(ctx context.Context, uc *types.UnicityCertificate
 
 	// Recorded for every confirmed round, quiet or not — both are "this
 	// round reached quorum," which is what the metric is for.
-	r.metrics.recordRoundCertified(ctx)
+	r.metrics.recordRoundCertified(ctx, uc.GetRootEpoch())
 	if !p.submittedAt.IsZero() {
 		r.metrics.recordQuorumLatency(ctx, time.Since(p.submittedAt))
 	}

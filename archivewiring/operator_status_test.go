@@ -34,6 +34,8 @@ func TestReadOperatorStatusUsesFixtureJournalAndReceiptArchive(t *testing.T) {
 	require.Equal(t, f.limits.Candidates, status.Journal.CandidatesCap)
 	require.NotNil(t, status.LatestLocalV2)
 	require.Equal(t, uint64(2), status.LatestLocalV2.Height)
+	require.NotNil(t, status.CertifiedTip)
+	require.Equal(t, uint64(2), status.CertifiedTip.Height)
 	require.Equal(t, replicas[0].String(), status.Replicas[0].Replica)
 	require.Equal(t, uint64(2), status.Replicas[0].LastAcknowledgedHeight)
 	require.Equal(t, "timeout", status.Replicas[1].Error)
