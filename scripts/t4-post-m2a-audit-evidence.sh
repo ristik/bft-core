@@ -33,17 +33,19 @@ genesis=test-nodes/evm-genesis-finalized-funded.json
 snapshot=test-nodes/post-m2a-evidence/t4-rpc-accounting.json
 claim_receipt=test-nodes/post-m2a-evidence/t1-claim.json
 actions=test-nodes/post-m2a-evidence/t4-contract-actions.json
+observations=test-nodes/post-m2a-evidence/t4-observations.json
 [ -s "$genesis" ] || fail "compiled default-manifest genesis is missing"
 [ -s "$snapshot" ] || fail "full certified-state snapshot is missing"
 [ -s "$claim_receipt" ] || fail "successful vesting claim receipt is missing"
 [ -s "$actions" ] || fail "certified T4 contract action manifest is missing"
+[ -s "$observations" ] || fail "T4 supplemental observations are missing"
 
 mkdir -p "$EVIDENCE_DIR/build"
 go build -o "$EVIDENCE_DIR/build/pos-supply-auditor" ./cmd/pos-supply-auditor || fail "could not build T4 supply auditor"
 if "$EVIDENCE_DIR/build/pos-supply-auditor" --genesis "$genesis" --state-dump "$snapshot" >"$EVIDENCE_DIR/audit-result.json"; then
-  python3 - "$EVIDENCE_DIR/audit-result.json" "$claim_receipt" "$actions" "$snapshot" <<'PY' || fail "full T4 audit assertions did not reconcile"
+  python3 - "$EVIDENCE_DIR/audit-result.json" "$claim_receipt" "$actions" "$snapshot" "$observations" <<'PY' || fail "full T4 audit assertions did not reconcile"
 import json,sys
-r,c,a,s=(json.load(open(p,encoding="utf-8")) for p in sys.argv[1:])
+r,c,a,s,o=(json.load(open(p,encoding="utf-8")) for p in sys.argv[1:])
 n=r.get("nativeSupply",{}); cov=r.get("coverage",{})
 if r.get("status")!="pass" or not n.get("matches"): raise SystemExit("auditor/native supply did not pass")
 if int(n.get("ordinaryGasUsed","0"))<=0 or int(n.get("baseFeeBurn","0"))<=0: raise SystemExit("ordinary gas/base-fee burn not observed")
@@ -55,7 +57,7 @@ w=r["wuct"]; supply=int(a["wuct"]["expectedTotalSupplyWei"])
 if supply<=0 or int(w["totalSupply"])!=supply or int(w["nativeBalance"])<supply: raise SystemExit("WUCT supply/custody mismatch")
 f=r["feeCollector"]; due=int(f["totalLiabilities"])
 if due<=0 or due>int(f["nativeBalance"]): raise SystemExit("FeeCollector liabilities absent or unbacked")
-o=s["t4Observations"]
+o=o["t4Observations"]
 if o["ordinarySelfdestruct"]["codeAtTip"]=="0x" or o["ordinarySelfdestruct"]["balanceAtTipWei"]!="0": raise SystemExit("ordinary SELFDESTRUCT did not transfer and retain code")
 if o["burnedNewContract"]["codeAtTip"]!="0x" or o["burnedNewContract"]["balanceAtTipWei"]!="0": raise SystemExit("same-tx SELFDESTRUCT did not remove new contract")
 PY
@@ -123,6 +125,7 @@ cp "$genesis" "$EVIDENCE_DIR/genesis.json"
 cp "$snapshot" "$EVIDENCE_DIR/certified-state.json"
 cp "$claim_receipt" "$EVIDENCE_DIR/vesting-claim-receipt.json"
 cp "$actions" "$EVIDENCE_DIR/t4-contract-actions.json"
+cp "$observations" "$EVIDENCE_DIR/t4-observations.json"
 cp -R test-nodes/post-m2a-evidence/t4-contract-actions "$EVIDENCE_DIR/"
 cp -R test-nodes/post-m2a-evidence/t4-traces "$EVIDENCE_DIR/"
 cp -R "$EVIDENCE_DIR/lane-nodes" "$EVIDENCE_DIR/node-logs"

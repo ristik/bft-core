@@ -431,7 +431,8 @@ def main():
             },
             "accounts": state_accounts,
             "blocks": blocks,
-            "t4ContractActions": actions,
+        }
+        t4_observations = {
             "t4Observations": {
                 "burnedNewContract": {"transactionHash": burn["transactionHash"], "contract": burn["contract"],
                                       "amountWei": burn["burnedAmount"],
@@ -451,11 +452,14 @@ def main():
                 "feeCollector": {"treasuryCreditWei": str(collector_credit), "rewardPotWei": str(collector_reward),
                                  "totalLiabilitiesWei": str(collector_credit + collector_reward),
                                  "nativeBalanceWei": str(collector_balance)},
-            },
+            }
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(evidence, indent=2) + "\n")
         print(f"PASS: saved T4 accounting source {args.output}")
+        observations_path = args.output.with_name("t4-observations.json")
+        observations_path.write_text(json.dumps(t4_observations, indent=2) + "\n")
+        print(f"PASS: saved T4 supplemental observations {observations_path}")
     except (OSError, ValueError, RuntimeError, urllib.error.URLError, KeyError, TypeError) as exc:
         return fail(str(exc))
     return 0
