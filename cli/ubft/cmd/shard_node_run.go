@@ -636,6 +636,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		var archiveLocal *archive.Store
 		var archiveSubject archive.Context
+		var archiveHost shardnode.EvidenceHost
 		var archiveReplicas [2]libp2ppeer.ID
 		var archiveAllowed []libp2ppeer.ID
 		var publisher *archivewiring.Publisher
@@ -674,6 +675,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if e != nil {
 				return e
 			}
+			archiveHost, e = archivewiring.NewPeerGatedHost(peer, archiveTransportLimits.PerPeer)
+			if e != nil {
+				return e
+			}
 			receiptSource, ok := executor.(*engineapi.Adapter)
 			if !ok {
 				return errors.New("receipt-complete archive requires an EVM adapter")
@@ -685,6 +690,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if flags.TrustHistoryProfile2 {
 				archiveServer.SetBundleVerifier(archivewiring.BundleAdmission(historicalTrust))
 			}
+			archiveServer.SetLogger(flags.observe.Logger())
 			archiveServer.Register(ctx, peer)
 		}
 		restoringHandoffHistory := flags.TrustHistoryProfile2
@@ -758,7 +764,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				}}
 			if archiveLocal != nil {
 				handoffFollower.FetchArchive = func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (handoffdelivery.Bundle, error) {
-					raw, err := archivewiring.FetchBundle(ctx, peer, id, archive.BundleRequest{Context: archiveSubject, Epoch: epoch}, archiveTransportLimits)
+					raw, err := archivewiring.FetchBundle(ctx, archiveHost, id, archive.BundleRequest{Context: archiveSubject, Epoch: epoch}, archiveTransportLimits)
 					var bundle handoffdelivery.Bundle
 					if err == nil {
 						err = types.Cbor.Unmarshal(raw, &bundle)
@@ -793,7 +799,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return startupErr
 		}
 		if archiveLocal != nil && flags.ArchivePrune {
-			policy := frontier.Policy{Context: archiveSubject, Replicas: [2]string{archiveReplicas[0].String(), archiveReplicas[1].String()}, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
+			policy := frontier.Policy{Context: archiveSubject, Replicas: [2]string{archiveReplicas[0].String(), archiveReplicas[1].String()}, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
 			if e := journalStore.EnableFrontier(ctx, journalCtx, limits, policy); e != nil {
 				return fmt.Errorf("authenticating certified frontier: %w", e)
 			}
@@ -829,7 +835,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					return fmt.Errorf("reading restore genesis identity: %w", genesisErr)
 				}
 				restorer := &archivewiring.ArchiveRestore{Journal: journalStore, Context: journalCtx, JournalLimits: limits,
-					Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: peer,
+					Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: archiveHost,
 					Limits: archiveTransportLimits, Adapter: executor.(*engineapi.Adapter), Genesis: genesis, TipUC: uc, TipTR: tr}
 				return restorer.Restore(ctx)
 			}
@@ -888,7 +894,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		server.Register(peer)
 		coordinator.Host, coordinator.Providers, coordinator.TransportLimits = peer, providers, shardnode.DefaultJournalTransportLimits()
 		if archiveLocal != nil {
-			source := &archivewiring.RecoverySource{Context: journalCtx, Subject: archiveSubject, Local: archiveLocal, Host: peer,
+			source := &archivewiring.RecoverySource{Context: journalCtx, Subject: archiveSubject, Local: archiveLocal, Host: archiveHost,
 				Replicas: archiveReplicas, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks, Log: flags.observe.Logger()}
 			coordinator.FetchArchive = func(ctx context.Context, after shardnode.BlockRef, target []byte) ([]shardnode.JournalFetchEntry, error) {
 				entries, fetchErr := source.FetchSuffix(ctx, after, target)
@@ -911,7 +917,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if e != nil {
 				return e
 			}
-			publisher = &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: peer, Replicas: archiveReplicas, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics, ReceiptSource: executor.(*engineapi.Adapter)}
+			publisher = &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics, ReceiptSource: executor.(*engineapi.Adapter)}
 			if flags.TrustHistoryProfile2 {
 				publisher.BundleVerifier = archivewiring.BundleAdmission(historicalTrust)
 			}
@@ -924,7 +930,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			go func() { defer close(archiveDone); _ = publisher.Run(archiveCtx) }()
 			defer func() { cancelArchive(); <-archiveDone; _ = metrics.Close() }()
 			if flags.ArchivePrune {
-				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: peer, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
+				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: archiveHost, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
 				pruneDone := make(chan struct{})
 				go func() { defer close(pruneDone); _ = worker.Run(archiveCtx) }()
 				defer func() { cancelArchive(); <-pruneDone }()

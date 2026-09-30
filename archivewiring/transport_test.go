@@ -40,15 +40,30 @@ func serveOne(t *testing.T, s *Server, request []byte) ([]byte, error) {
 	if err := writeFrame(client, request); err != nil {
 		t.Fatal(err)
 	}
-	answer, err := readFrame(client, archive.MaxWireBytes)
-	if err != nil {
-		_ = client.Close()
+	type readResult struct {
+		answer []byte
+		err    error
 	}
-	serverErr := <-done
-	if err != nil {
-		return nil, serverErr
+	read := make(chan readResult, 1)
+	go func() {
+		answer, err := readFrame(client, archive.MaxWireBytes)
+		read <- readResult{answer: answer, err: err}
+	}()
+	select {
+	case result := <-read:
+		return result.answer, <-done
+	case serverErr := <-done:
+		if serverErr == nil {
+			result := <-read // a successful Serve has written a full response.
+			return result.answer, nil
+		}
+		select {
+		case result := <-read:
+			return result.answer, serverErr
+		default:
+			return nil, serverErr
+		}
 	}
-	return answer, serverErr
 }
 
 func TestReplicaStoresOnlyVerifiedRecordsAndServesExactSubject(t *testing.T) {
@@ -232,25 +247,124 @@ func TestReplicaAdmissionLimitsAndAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.enter("outsider") {
-		t.Fatal("unconfigured peer admitted")
+	if err := s.reservePending("outsider"); !errors.Is(err, ErrPeerNotAllowed) {
+		t.Fatalf("unconfigured peer: %v", err)
 	}
-	if !s.enter("first") {
-		t.Fatal("first slot refused")
+	if err := s.reservePending("first"); err != nil {
+		t.Fatalf("first global slot refused: %v", err)
 	}
-	if s.enter("first") {
-		t.Fatal("per-peer slot limit ignored")
+	if err := s.reservePeer("first"); err != nil {
+		t.Fatalf("first peer slot refused: %v", err)
 	}
-	if !s.enter("second") {
-		t.Fatal("second slot refused")
+	if err := s.reservePending("second"); err != nil {
+		t.Fatalf("second global slot refused: %v", err)
 	}
-	if s.enter("third") {
-		t.Fatal("global slot limit ignored")
+	if err := s.reservePeer("second"); err != nil {
+		t.Fatalf("second peer slot refused: %v", err)
+	}
+	if err := s.reservePending("third"); !errors.Is(err, ErrPendingLimit) {
+		t.Fatalf("global slot limit ignored: %v", err)
 	}
 	s.leave("first")
-	if !s.enter("third") {
-		t.Fatal("released global slot unavailable")
+	if err := s.reservePending("third"); err != nil {
+		t.Fatalf("released global slot unavailable: %v", err)
+	}
+	if err := s.reservePeer("third"); err != nil {
+		t.Fatalf("released peer slot unavailable: %v", err)
 	}
 	s.leave("second")
 	s.leave("third")
+}
+
+func TestArchiveAdmissionRejectsUnlistedPeerWithSentinel(t *testing.T) {
+	s := admissionTestServer(t, Limits{Deadline: time.Second, Pending: 4, PerPeer: 4})
+	if err := s.reservePending("outsider"); !errors.Is(err, ErrPeerNotAllowed) {
+		t.Fatalf("unlisted peer refusal: %v", err)
+	}
+}
+
+func TestArchiveAdmissionRejectsPerPeerOverflowWithSentinel(t *testing.T) {
+	s := admissionTestServer(t, Limits{Deadline: time.Second, Pending: 8, PerPeer: 4})
+	for i := 0; i < 4; i++ {
+		if err := s.reservePending("sender"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.reservePeer("sender"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.reservePending("sender"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reservePeer("sender"); !errors.Is(err, ErrPeerLimit) {
+		t.Fatalf("per-peer overflow: %v", err)
+	}
+	for i := 0; i < 4; i++ {
+		s.leave("sender")
+	}
+}
+
+func TestArchiveAdmissionRejectsGlobalPendingOverflowWithSentinel(t *testing.T) {
+	s := admissionTestServer(t, Limits{Deadline: time.Second, Pending: 2, PerPeer: 2})
+	if err := s.reservePending("sender"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reservePending("sender"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reservePending("sender"); !errors.Is(err, ErrPendingLimit) {
+		t.Fatalf("global pending overflow: %v", err)
+	}
+	s.releasePending()
+	s.releasePending()
+}
+
+func TestArchiveVerifierRefusalHasSpecificSentinel(t *testing.T) {
+	q, rec := transportFixture()
+	store, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(store, q.Context, func(context.Context, archive.Request, *archive.Record) error { return ErrBinding }, []peer.ID{"configured"}, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := archive.EncodeResponse(archive.Response{Request: q, Outcome: archive.OK, Record: rec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = serveOne(t, s, append([]byte{1}, encoded...))
+	if !errors.Is(err, ErrVerifier) {
+		t.Fatalf("verifier refusal: %v", err)
+	}
+}
+
+func TestArchiveHandlerFailureHasSpecificSentinel(t *testing.T) {
+	q, _ := transportFixture()
+	store, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(store, q.Context, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{"configured"}, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = serveOne(t, s, []byte{99, 0})
+	if !errors.Is(err, ErrHandler) {
+		t.Fatalf("handler failure: %v", err)
+	}
+}
+
+func admissionTestServer(t *testing.T, limits Limits) *Server {
+	t.Helper()
+	q, _ := transportFixture()
+	store, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(store, q.Context, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{"sender"}, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
 }

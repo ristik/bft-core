@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -18,9 +19,28 @@ import (
 
 const ProtocolArchive = "/unicity/certified-archive/1.0.0"
 const transferChunk = 64 << 10
+const resetFrameMarker = byte(0xff)
+const maxArchiveFrameBytes = archive.MaxBundleBytes + archive.MaxRequestBytes + 8
 
 var ErrTransport = errors.New("archive wiring: replica transport failed")
 var ErrReplica = errors.New("archive wiring: replica refused or changed record")
+var ErrPeerNotAllowed = errors.New("archive wiring: archive peer is not allowed")
+var ErrPeerLimit = errors.New("archive wiring: archive peer stream limit reached")
+var ErrPendingLimit = errors.New("archive wiring: global archive stream limit reached")
+var ErrVerifier = errors.New("archive wiring: archive request verifier failed")
+var ErrHandler = errors.New("archive wiring: archive request handler failed")
+
+type StreamResetError struct {
+	Peer      peer.ID
+	Operation string
+	Reason    error
+}
+
+func (e *StreamResetError) Error() string {
+	return fmt.Sprintf("archive stream reset by %s during %s: %v", e.Peer, e.Operation, e.Reason)
+}
+
+func (e *StreamResetError) Unwrap() error { return e.Reason }
 
 type Limits struct {
 	Deadline time.Duration
@@ -28,7 +48,7 @@ type Limits struct {
 	PerPeer  int
 }
 
-func DefaultLimits() Limits { return Limits{Deadline: 20 * time.Second, Pending: 4, PerPeer: 1} }
+func DefaultLimits() Limits { return Limits{Deadline: 20 * time.Second, Pending: 4, PerPeer: 4} }
 
 func (l Limits) valid() bool {
 	return l.Deadline > 0 && l.Pending > 0 && l.Pending <= 64 && l.PerPeer > 0 && l.PerPeer <= l.Pending
@@ -46,6 +66,7 @@ type Server struct {
 	want         []byte
 	verify       Verifier
 	bundleVerify BundleVerifier
+	log          *slog.Logger
 	limits       Limits
 	allowed      map[peer.ID]struct{}
 	mu           sync.Mutex
@@ -54,6 +75,8 @@ type Server struct {
 }
 
 func (s *Server) SetBundleVerifier(v BundleVerifier) { s.bundleVerify = v }
+
+func (s *Server) SetLogger(log *slog.Logger) { s.log = log }
 
 func NewServer(store *archive.Store, contextValue archive.Context, verify Verifier, allowed []peer.ID, limits Limits) (*Server, error) {
 	if store == nil || verify == nil || !limits.valid() || len(allowed) == 0 {
@@ -73,7 +96,7 @@ func NewServer(store *archive.Store, contextValue archive.Context, verify Verifi
 		}
 		peers[id] = struct{}{}
 	}
-	return &Server{store: store, subject: contextValue, want: want[:len(want)-32], verify: verify, limits: limits, allowed: peers, byPeer: make(map[peer.ID]int)}, nil
+	return &Server{store: store, subject: contextValue, want: want[:len(want)-32], verify: verify, limits: limits, allowed: peers, byPeer: make(map[peer.ID]int), log: slog.Default()}, nil
 }
 
 func (s *Server) Register(ctx context.Context, host shardnode.EvidenceHost) {
@@ -81,15 +104,37 @@ func (s *Server) Register(ctx context.Context, host shardnode.EvidenceHost) {
 	host.RegisterProtocolHandler(ProtocolArchive, s.handle)
 }
 
-func (s *Server) enter(id peer.ID) bool {
+func (s *Server) reservePending(id peer.ID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.allowed[id]; !ok || s.pending >= s.limits.Pending || s.byPeer[id] >= s.limits.PerPeer {
-		return false
+	if _, ok := s.allowed[id]; !ok {
+		return ErrPeerNotAllowed
+	}
+	if s.pending >= s.limits.Pending {
+		return ErrPendingLimit
 	}
 	s.pending++
+	return nil
+}
+
+// reservePeer follows reservePending. Holding the global slot while checking
+// the peer limit keeps the number of untrusted request frames bounded even
+// before the operation byte has been inspected.
+func (s *Server) reservePeer(id peer.ID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.byPeer[id] >= s.limits.PerPeer {
+		s.pending--
+		return ErrPeerLimit
+	}
 	s.byPeer[id]++
-	return true
+	return nil
+}
+
+func (s *Server) releasePending() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pending--
 }
 
 func (s *Server) leave(id peer.ID) {
@@ -105,34 +150,78 @@ func (s *Server) leave(id peer.ID) {
 func (s *Server) handle(stream libp2pnetwork.Stream) {
 	defer stream.Close()
 	id := stream.Conn().RemotePeer()
-	if !s.enter(id) {
-		_ = stream.Reset()
+	_ = stream.SetDeadline(time.Now().Add(s.limits.Deadline))
+	if err := s.reservePending(id); err != nil {
+		s.reject(stream, id, "unknown", err, false)
 		return
 	}
-	defer s.leave(id)
-	_ = stream.SetDeadline(time.Now().Add(s.limits.Deadline))
+	reserved := true
+	defer func() {
+		if reserved {
+			s.releasePending()
+		}
+	}()
 	ctx, cancel := context.WithTimeout(s.ctx, s.limits.Deadline)
 	defer cancel()
-	if err := s.Serve(ctx, stream); err != nil {
-		_ = stream.Reset()
+	frame, err := readFrame(stream, maxArchiveFrameBytes)
+	if err != nil || len(frame) == 0 {
+		if err == nil {
+			err = archive.ErrInvalid
+		}
+		s.reject(stream, id, "unknown", fmt.Errorf("%w: %w", ErrHandler, err), false)
+		return
 	}
+	operation := archiveOperation(frame[0])
+	if err := s.reservePeer(id); err != nil {
+		reserved = false // reservePeer releases the global reservation on refusal.
+		s.reject(stream, id, operation, err, true)
+		return
+	}
+	reserved = false
+	defer s.leave(id)
+	if err := s.serveFrame(ctx, stream, frame); err != nil {
+		err = typedHandlerError(err)
+		s.reject(stream, id, operation, err, true)
+	}
+}
+
+func (s *Server) reject(stream libp2pnetwork.Stream, id peer.ID, operation string, err error, requestConsumed bool) {
+	reason := resetReasonName(err)
+	log := s.log
+	if log == nil {
+		log = slog.Default()
+	}
+	log.WarnContext(context.Background(), "archive stream reset", "peer", id.String(), "operation", operation, "reason", reason, "error", err)
+	if requestConsumed {
+		if writeFrame(stream, resetFrame(err)) == nil {
+			return
+		}
+	}
+	_ = stream.Reset()
 }
 
 // Serve handles one exchange. The frame cap is checked before allocation or
 // archive decoding, and reads and writes are split into bounded byte slices.
 func (s *Server) Serve(ctx context.Context, rw io.ReadWriter) error {
-	frame, err := readFrame(rw, archive.MaxBundleBytes+archive.MaxRequestBytes+8)
+	frame, err := readFrame(rw, maxArchiveFrameBytes)
 	if err != nil || len(frame) < 2 {
-		return ErrTransport
+		return fmt.Errorf("%w: %w", ErrHandler, ErrTransport)
+	}
+	return s.serveFrame(ctx, rw, frame)
+}
+
+func (s *Server) serveFrame(ctx context.Context, rw io.ReadWriter, frame []byte) error {
+	if len(frame) < 2 {
+		return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 	}
 	op := frame[0]
 	if op == 4 || op == 5 {
-		return s.serveBundle(ctx, rw, op, frame[1:])
+		return typedHandlerError(s.serveBundle(ctx, rw, op, frame[1:]))
 	}
 	if op == 3 {
 		query, err := archive.DecodeRoundRequest(frame[1:])
 		if err != nil || !sameArchiveContext(query.Context, s.subject) {
-			return archive.ErrInvalid
+			return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 		}
 		found, record, err := s.store.GetLatest(query)
 		if err != nil {
@@ -142,24 +231,25 @@ func (s *Server) Serve(ctx context.Context, rw io.ReadWriter) error {
 		if err != nil {
 			return err
 		}
-		return writeFrame(rw, append([]byte{byte(archive.OK)}, encoded...))
+		return typedHandlerError(writeFrame(rw, append([]byte{byte(archive.OK)}, encoded...)))
 	}
 	var q archive.Request
 	var rec *archive.Record
+	var err error
 	switch op {
 	case 1:
 		decoded, e := archive.DecodeResponse(frame[1:])
 		if e != nil || decoded.Outcome != archive.OK {
-			return archive.ErrInvalid
+			return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 		}
 		q, rec = decoded.Request, decoded.Record
 	case 2:
 		q, err = archive.DecodeRequest(frame[1:])
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrHandler, err)
 		}
 	default:
-		return archive.ErrInvalid
+		return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 	}
 	qb, _ := archive.EncodeRequest(q)
 	if !bytes.Equal(qb[:len(qb)-32], s.want) {
@@ -168,61 +258,146 @@ func (s *Server) Serve(ctx context.Context, rw io.ReadWriter) error {
 			if err != nil {
 				return err
 			}
-			return writeFrame(rw, encoded)
+			return typedHandlerError(writeFrame(rw, encoded))
 		}
-		return archive.ErrInvalid
+		return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 	}
 	if op == 1 {
 		if err := s.verify(ctx, q, rec); err != nil {
-			return fmt.Errorf("%w: %v", ErrReplica, err)
+			return fmt.Errorf("%w: %w: %w", ErrVerifier, ErrReplica, err)
 		}
 		if err := s.store.Put(q, rec); err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrHandler, err)
 		}
-		return writeFrame(rw, []byte{1})
+		return typedHandlerError(writeFrame(rw, []byte{1}))
 	}
 	answer := s.store.Serve(q)
 	encoded, err := archive.EncodeResponse(answer)
 	if err != nil {
 		return err
 	}
-	return writeFrame(rw, encoded)
+	return typedHandlerError(writeFrame(rw, encoded))
 }
 
 func (s *Server) serveBundle(ctx context.Context, rw io.ReadWriter, op byte, payload []byte) error {
 	if op == 4 {
 		q, err := archive.DecodeBundleRequest(payload)
 		if err != nil || !sameArchiveContext(q.Context, s.subject) {
-			return archive.ErrInvalid
+			return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 		}
 		raw, err := s.store.GetBundle(q)
 		if errors.Is(err, archive.ErrUnavailable) {
 			return writeFrame(rw, []byte{0})
 		}
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrHandler, err)
 		}
-		return writeFrame(rw, append([]byte{1}, raw...))
+		return typedHandlerError(writeFrame(rw, append([]byte{1}, raw...)))
 	}
 	if len(payload) < 2 {
-		return archive.ErrInvalid
+		return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 	}
 	n := int(binary.BigEndian.Uint16(payload[:2]))
 	if n == 0 || n > archive.MaxRequestBytes || len(payload) <= 2+n || len(payload)-2-n > archive.MaxBundleBytes {
-		return archive.ErrInvalid
+		return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 	}
 	q, err := archive.DecodeBundleRequest(payload[2 : 2+n])
 	if err != nil || !sameArchiveContext(q.Context, s.subject) || s.bundleVerify == nil {
-		return archive.ErrInvalid
+		return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 	}
 	raw := payload[2+n:]
 	if err := s.bundleVerify(ctx, q, raw); err != nil {
-		return fmt.Errorf("%w: %v", ErrReplica, err)
+		return fmt.Errorf("%w: %w: %w", ErrVerifier, ErrReplica, err)
 	}
 	if err := s.store.PutBundle(q, raw); err != nil {
+		return fmt.Errorf("%w: %w", ErrHandler, err)
+	}
+	return typedHandlerError(writeFrame(rw, []byte{1}))
+}
+
+func typedHandlerError(err error) error {
+	if err == nil || errors.Is(err, ErrHandler) || errors.Is(err, ErrVerifier) {
 		return err
 	}
-	return writeFrame(rw, []byte{1})
+	return fmt.Errorf("%w: %w", ErrHandler, err)
+}
+
+func archiveOperation(op byte) string {
+	switch op {
+	case 1:
+		return "put"
+	case 2:
+		return "get"
+	case 3:
+		return "get-latest"
+	case 4:
+		return "bundle-get"
+	case 5:
+		return "bundle-put"
+	default:
+		return "unknown"
+	}
+}
+
+func resetReasonName(err error) string {
+	switch {
+	case errors.Is(err, ErrPeerNotAllowed):
+		return "not_allowed"
+	case errors.Is(err, ErrPeerLimit):
+		return "per_peer_limit"
+	case errors.Is(err, ErrPendingLimit):
+		return "pending_limit"
+	case errors.Is(err, ErrVerifier):
+		return "verifier_error"
+	default:
+		return "handler_error"
+	}
+}
+
+func resetFrame(err error) []byte {
+	code := byte(5) // handler error
+	switch {
+	case errors.Is(err, ErrPeerNotAllowed):
+		code = 1
+	case errors.Is(err, ErrPeerLimit):
+		code = 2
+	case errors.Is(err, ErrPendingLimit):
+		code = 3
+	case errors.Is(err, ErrVerifier):
+		code = 4
+	case errors.Is(err, ErrHandler):
+		code = 5
+	}
+	return []byte{resetFrameMarker, code}
+}
+
+func decodeResetFrame(frame []byte, id peer.ID, payload []byte) error {
+	if len(frame) == 0 || frame[0] != resetFrameMarker {
+		return nil
+	}
+	if len(frame) != 2 {
+		return ErrReplica
+	}
+	var reason error
+	switch frame[1] {
+	case 1:
+		reason = ErrPeerNotAllowed
+	case 2:
+		reason = ErrPeerLimit
+	case 3:
+		reason = ErrPendingLimit
+	case 4:
+		reason = ErrVerifier
+	case 5:
+		reason = ErrHandler
+	default:
+		return ErrReplica
+	}
+	operation := "unknown"
+	if len(payload) > 0 {
+		operation = archiveOperation(payload[0])
+	}
+	return &StreamResetError{Peer: id, Operation: operation, Reason: reason}
 }
 
 func FetchBundle(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, q archive.BundleRequest, limits Limits) ([]byte, error) {
@@ -361,6 +536,30 @@ func FetchLatest(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, q
 func exchange(parent context.Context, host shardnode.EvidenceHost, id peer.ID, payload []byte, limits Limits) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(parent, limits.Deadline)
 	defer cancel()
+	var last error
+	for attempt := 0; attempt <= 8; attempt++ {
+		answer, err := exchangeOnce(ctx, host, id, payload)
+		if !errors.Is(err, ErrPeerLimit) || attempt == 8 {
+			return answer, err
+		}
+		last = err
+		backoff := attempt
+		if backoff > 3 {
+			backoff = 3
+		}
+		delay := time.Duration(1<<backoff) * 100 * time.Millisecond
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, errors.Join(last, ctx.Err())
+		case <-timer.C:
+		}
+	}
+	return nil, last
+}
+
+func exchangeOnce(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, payload []byte) ([]byte, error) {
 	stream, err := host.CreateStream(ctx, id, ProtocolArchive)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTransport, err)
@@ -373,10 +572,13 @@ func exchange(parent context.Context, host shardnode.EvidenceHost, id peer.ID, p
 		_ = stream.Reset()
 		return nil, fmt.Errorf("%w: %v", ErrTransport, err)
 	}
-	answer, err := readFrame(stream, archive.MaxBundleBytes+archive.MaxRequestBytes+8)
+	answer, err := readFrame(stream, maxArchiveFrameBytes)
 	if err != nil {
 		_ = stream.Reset()
 		return nil, fmt.Errorf("%w: %v", ErrTransport, err)
+	}
+	if resetErr := decodeResetFrame(answer, id, payload); resetErr != nil {
+		return nil, resetErr
 	}
 	return answer, nil
 }
