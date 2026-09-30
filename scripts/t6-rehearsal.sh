@@ -188,6 +188,7 @@ build_pinned_contracts() {
 
 build_pinned_ureth() {
   cd "$FRESH_REPO"
+  local pathBeforeCargo=$PATH rustupBin
   require_free_kb 4500000 "cold Ureth build" || return 1
   . scripts/lib/reth-pin.sh
   URETH_PIN_COMMIT=$T6_URETH_COMMIT
@@ -196,8 +197,14 @@ build_pinned_ureth() {
   URETH_PIN_CACHE_DIR=$ISOLATION_ROOT/cache/ureth-pin
   URETH_BIN=
   command -v rustup >/dev/null 2>&1 || { fail "rustup is unavailable for the isolated toolchain install"; return 1; }
+  rustupBin=$(command -v rustup)
+  mkdir -p "$CARGO_HOME/bin"
+  cp "$rustupBin" "$CARGO_HOME/bin/rustup"
+  ln -sf rustup "$CARGO_HOME/bin/cargo"
+  ln -sf rustup "$CARGO_HOME/bin/rustc"
+  export PATH="$CARGO_HOME/bin:$PATH"
   export RUSTUP_TOOLCHAIN=$T6_RUST_TOOLCHAIN
-  rustup toolchain install "$T6_RUST_TOOLCHAIN" --profile minimal
+  "$CARGO_HOME/bin/rustup" toolchain install "$T6_RUST_TOOLCHAIN" --profile minimal
   URETH_PIN_COMMIT=$URETH_PIN_COMMIT URETH_PIN_REPO=$URETH_PIN_REPO \
     URETH_PIN_LOCAL=$URETH_PIN_LOCAL URETH_PIN_CACHE_DIR=$URETH_PIN_CACHE_DIR \
     urethPinResolve "$ISOLATION_ROOT/bin" | tee "$EVIDENCE_DIR/ureth-build.log"
@@ -217,6 +224,8 @@ build_pinned_ureth() {
   # Cargo registry and rustup toolchains are fresh per this rehearsal. The verified client is
   # self-contained, so release those isolated build caches before the Solidity and devnet builds.
   rm -rf "$CARGO_HOME" "$RUSTUP_HOME"
+  PATH=$pathBeforeCargo
+  export PATH
   unset RUSTUP_TOOLCHAIN CARGO_HOME RUSTUP_HOME
   local available_kb
   available_kb=$(df -Pk "$ISOLATION_ROOT" | awk 'NR==2 {print $4}')
