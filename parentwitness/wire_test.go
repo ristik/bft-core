@@ -5,8 +5,19 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math/big"
+	"sort"
 	"testing"
+	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	ethTypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/trie"
+	"github.com/ethereum/go-ethereum/triedb"
+	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	"github.com/unicitynetwork/bft-core/registryproof"
@@ -20,6 +31,139 @@ func fixtureTarget(t *testing.T) (*certifiedchain.Chain, Target) {
 	target, err := NewTarget(TargetConfig{NetworkID: 3, PartitionID: 8, ShardID: types.ShardID{}, FullShardConfHash: pc.FullShardConfHash, Registry: pc, BlockHash: c.Blocks[1].Hash})
 	require.NoError(t, err)
 	return c, target
+}
+
+type proofNodeList [][]byte
+
+func (l *proofNodeList) Put(_, value []byte) error {
+	*l = append(*l, common.CopyBytes(value))
+	return nil
+}
+
+func (*proofNodeList) Delete([]byte) error { return nil }
+
+func proveTrie(t *testing.T, tr *trie.Trie, path []byte) [][]byte {
+	t.Helper()
+	var nodes proofNodeList
+	require.NoError(t, tr.Prove(path, &nodes))
+	return nodes
+}
+
+func testTrie() *trie.Trie {
+	return trie.NewEmpty(triedb.NewDatabase(rawdb.NewMemoryDatabase(), nil))
+}
+
+func trieStorageValue(t *testing.T, value common.Hash) []byte {
+	t.Helper()
+	encoded, err := rlp.EncodeToBytes(common.TrimLeftZeroes(value[:]))
+	require.NoError(t, err)
+	return encoded
+}
+
+func buildLargeStorageWitness(t *testing.T, c *certifiedchain.Chain, fillerSlots int) (Target, registryproof.Evidence) {
+	t.Helper()
+	storage := testTrie()
+	words := c.Genesis.Storage()
+	rootRound := uint64(5)
+	words["clock.rootRound"] = common.BigToHash(new(big.Int).SetUint64(rootRound))
+	words["origin.rootEpoch"] = common.BigToHash(big.NewInt(1))
+	words["origin.timestamp"] = common.BigToHash(new(big.Int).SetUint64(1_700_000_000 + rootRound))
+	words["origin.treeRoot"] = crypto.Keccak256Hash([]byte("U5"))
+	words["origin.identity"] = crypto.Keccak256Hash([]byte("O5"))
+	words["origin.trHash"] = crypto.Keccak256Hash([]byte("T5"))
+	words["round.authorized"] = common.BigToHash(big.NewInt(1))
+	words["input.commitment"] = crypto.Keccak256Hash([]byte("X1"))
+	words["certified.round"] = common.Hash{}
+	words["certified.stateHash"] = c.Blocks[0].StateRoot
+	words["outcomes.round"] = common.BigToHash(big.NewInt(1))
+	words["outcomes.commitment"] = crypto.Keccak256Hash([]byte("R1"))
+	for i, name := range registryproof.SlotNames {
+		value := words[name]
+		if value == (common.Hash{}) {
+			continue
+		}
+		slot := registryproof.SlotKey(i)
+		require.NoError(t, storage.Update(crypto.Keccak256(slot[:]), trieStorageValue(t, value)))
+	}
+	// Model a real EVM storage trie: use distinct 256-bit slot keys, Keccak-hash
+	// each slot into the trie path, and store a full 32-byte nonzero value in every leaf.
+	for i := 1; i <= fillerSlots; i++ {
+		slot := common.BigToHash(big.NewInt(int64(i)))
+		value := crypto.Keccak256Hash([]byte("large-storage-slot"), slot[:])
+		value[0] |= 0x80 // Keep every stored word at the full 32-byte EVM width.
+		require.NoError(t, storage.Update(crypto.Keccak256(slot[:]), trieStorageValue(t, value)))
+	}
+
+	accountPath := crypto.Keccak256(registryproof.RegistryAddress[:])
+	account := &ethTypes.StateAccount{Nonce: 1, Balance: uint256.NewInt(0), Root: storage.Hash(), CodeHash: c.Pins.RegistryCodeHash.Bytes()}
+	accountRLP, err := rlp.EncodeToBytes(account)
+	require.NoError(t, err)
+	state := testTrie()
+	require.NoError(t, state.Update(accountPath, accountRLP))
+	withdrawals, beacon := ethTypes.EmptyWithdrawalsHash, common.Hash{}
+	zero := uint64(0)
+	header := &ethTypes.Header{
+		ParentHash: c.Blocks[0].Hash, UncleHash: ethTypes.EmptyUncleHash, Root: state.Hash(), TxHash: ethTypes.EmptyTxsHash,
+		ReceiptHash: ethTypes.EmptyReceiptsHash, Difficulty: new(big.Int), Number: big.NewInt(1),
+		GasLimit: 30_000_000, Time: 1_700_000_001, Extra: []byte("near-cap-registry-proof"), BaseFee: big.NewInt(7),
+		WithdrawalsHash: &withdrawals, BlobGasUsed: &zero, ExcessBlobGas: &zero, ParentBeaconRoot: &beacon,
+	}
+	headerRLP, err := rlp.EncodeToBytes(header)
+	require.NoError(t, err)
+	ctx := registryproof.Context{
+		RegistryAddress: c.Pins.RegistryAddress, RegistryCodeHash: c.Pins.RegistryCodeHash,
+		GenesisCommitment: c.Genesis.GenesisCommitment(), FullShardConfHash: c.Genesis.FullShardConfHash(),
+		ShardEpoch: 0, RootEpoch: c.Pins.RootEpoch, EVMGenesisHash: c.Genesis.EVMGenesisHash(),
+	}
+	target, err := NewTarget(TargetConfig{
+		NetworkID: 3, PartitionID: 8, ShardID: types.ShardID{}, FullShardConfHash: ctx.FullShardConfHash,
+		Registry: ctx, BlockHash: header.Hash(),
+	})
+	require.NoError(t, err)
+	ev := registryproof.Evidence{Header: headerRLP, AccountProof: proveTrie(t, state, accountPath), StorageProofs: make([][][]byte, registryproof.FieldCount)}
+	for i := range ev.StorageProofs {
+		slot := registryproof.SlotKey(i)
+		ev.StorageProofs[i] = proveTrie(t, storage, crypto.Keccak256(slot[:]))
+	}
+	return target, ev
+}
+
+func TestCryptographicallyValidLargeStorageWitness(t *testing.T) {
+	const fillerSlots = 1_000_000
+	chain, _ := fixtureTarget(t)
+	target, evidence := buildLargeStorageWitness(t, chain, fillerSlots)
+	raw, err := EncodeResponse(Response{Request: target.Request(), Outcome: OutcomeFound, Evidence: evidence})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(raw), 64<<10, "the fixture should retain a large authentic proof")
+	require.LessOrEqual(t, len(raw), MaxResponseBytes)
+	proofNodes, maxNodesPerStorageProof := len(evidence.AccountProof), 0
+	for _, proof := range evidence.StorageProofs {
+		proofNodes += len(proof)
+		if len(proof) > maxNodesPerStorageProof {
+			maxNodesPerStorageProof = len(proof)
+		}
+	}
+	latencies := make([]time.Duration, 20)
+	for i := range latencies {
+		started := time.Now()
+		verified, err := VerifyResponse(target, raw)
+		latencies[i] = time.Since(started)
+		require.NoError(t, err)
+		require.True(t, verified.Found())
+		require.Less(t, latencies[i], 5*time.Second)
+	}
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	t.Logf("cryptographically valid large-storage witness: filler_storage_slots=%d registry_proof_paths=%d evidence_bytes=%d response_bytes=%d response_cap_bytes=%d proof_nodes=%d max_storage_nodes_per_proof=%d verify_p50=%s verify_p99=%s", fillerSlots, registryproof.FieldCount, evidenceSize(evidence), len(raw), MaxResponseBytes, proofNodes, maxNodesPerStorageProof, latencies[(len(latencies)-1)/2], latencies[len(latencies)-1])
+}
+
+func evidenceSize(e registryproof.Evidence) int {
+	n := len(e.Header)
+	for _, proof := range append([][][]byte{e.AccountProof}, e.StorageProofs...) {
+		for _, node := range proof {
+			n += len(node)
+		}
+	}
+	return n
 }
 
 func TestVerifiedFoundAndOwnedBoundaries(t *testing.T) {
