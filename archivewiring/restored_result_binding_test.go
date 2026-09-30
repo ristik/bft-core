@@ -70,3 +70,55 @@ func TestRestoredArchiveCandidateKeepsArchivedResultBinding(t *testing.T) {
 	require.NoError(t, verify(ctx, request, archivedRecord))
 	require.NoError(t, verify(ctx, localRequest, localRecord))
 }
+
+func TestPeerCatchUpRepeatPreservesExistingCertifiedArchiveBinding(t *testing.T) {
+	ctx := context.Background()
+	f := newWiringFixture(t, 1)
+	source := f.entries[0]
+	request, archivedRecord := f.record(t, 0)
+
+	path := t.TempDir() + "/peer-catch-up-journal.db"
+	store, err := configuredprogress.OpenConfiguredV2(path, configuredprogress.Settings{Retain: 16})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	_, _, err = store.Initialize(ctx, f.context)
+	require.NoError(t, err)
+	require.NoError(t, store.EnableJournal(ctx, f.context, f.limits))
+	admit := func(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) {
+		t.Helper()
+		o, authErr := rootinput.AuthenticateObservationV2(ctx, f.context.Observation, uc, tr)
+		require.NoError(t, authErr)
+		prepared, _, prepErr := store.PrepareObservation(ctx, f.context, o)
+		require.NoError(t, prepErr)
+		_, _, commitErr := store.CommitObservation(prepared)
+		require.NoError(t, commitErr)
+	}
+
+	// The node already has the canonical first verified pair for this body.
+	admit(source.Candidate.AuthorizingUC, source.Candidate.AuthorizingTR)
+	require.NoError(t, store.PutHistoricalCertifiedJournalCandidate(ctx, f.context, f.limits,
+		source.Candidate, source.ResultingUC, source.ResultingTR))
+	admit(source.ResultingUC, source.ResultingTR)
+
+	// Peer catch-up returns a later, valid repeat UC for the same input record.
+	repeatUC, repeatTR := signWiring(t, f.chain, source.ResultingUC.InputRecord,
+		source.Candidate.Round+1, source.ResultingUC.GetRootRoundNumber()+1)
+	require.Greater(t, repeatUC.GetRootRoundNumber(), source.ResultingUC.GetRootRoundNumber())
+	require.NoError(t, store.PutHistoricalCertifiedJournalCandidate(ctx, f.context, f.limits,
+		source.Candidate, repeatUC, repeatTR))
+	require.NoError(t, store.BackfillJournalObservation(ctx, f.context, f.limits, repeatUC, repeatTR))
+
+	image, err := store.LoadJournal(ctx, f.context, f.limits)
+	require.NoError(t, err)
+	require.Len(t, image.Candidates, 1)
+	local := image.Candidates[0]
+	require.True(t, local.Certified)
+
+	localRequest, localRecord, err := FromJournal(ctx, f.context, f.subject, nil, local)
+	require.NoError(t, err)
+	verify := JournalVerifier(f.store, f.context, f.limits, f.subject)
+	require.NoError(t, verify(ctx, request, archivedRecord))
+	require.NoError(t, verify(ctx, localRequest, localRecord))
+	require.Equal(t, source.ResultingUC.GetRootRoundNumber(), local.ResultingUC.GetRootRoundNumber())
+	require.NotEqual(t, repeatUC.GetRootRoundNumber(), local.ResultingUC.GetRootRoundNumber())
+}

@@ -412,18 +412,41 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 			if !sameCandidateBody(w, prior) {
 				return fmt.Errorf("%w: same candidate hash has different bytes", ErrConflict)
 			}
-			if resultUC == nil {
-				w.Status, w.ResultingUC, w.ResultingTR = prior.Status, prior.ResultingUC, prior.ResultingTR
+			switch prior.Status {
+			case 0:
+				if len(prior.ResultingUC) != 0 || len(prior.ResultingTR) != 0 {
+					return ErrUntrusted
+				}
+				if resultUC == nil {
+					w.Status, w.ResultingUC, w.ResultingTR = prior.Status, nil, nil
+				}
+			case 1:
+				priorUC, _, verifyErr := verifiedPairBytes(ctx, c, prior.ResultingUC, prior.ResultingTR)
+				if verifyErr != nil {
+					return fmt.Errorf("%w: existing candidate result pair: %v", ErrUntrusted, verifyErr)
+				}
+				if priorUC.InputRecord == nil || priorUC.GetRoundNumber() != v.Round || priorUC.InputRecord.RoundNumber != v.Round ||
+					!bytes.Equal(priorUC.InputRecord.BlockHash, v.Hash) || !bytes.Equal(priorUC.InputRecord.Hash, v.StateRoot) ||
+					rootinput.CheckEpochCertificates(v.AuthorizingUC, priorUC) != nil ||
+					v.AuthorizingUC.GetRootEpoch() == priorUC.GetRootEpoch() && v.AuthorizingUC.GetRootRoundNumber() >= priorUC.GetRootRoundNumber() {
+					return fmt.Errorf("%w: existing candidate result pair does not bind after its authorization", ErrConflict)
+				}
+				// The first verified result pair is the immutable archive association.
+				// A later, valid repeat UC is still admitted as an observation, but it
+				// cannot change the certificate that originally certified this body.
+				w.Status, w.ResultingUC, w.ResultingTR = prior.Status, bytes.Clone(prior.ResultingUC), bytes.Clone(prior.ResultingTR)
+			default:
+				return ErrUntrusted
 			}
-			// LocallyBuilt records that this node authored the proposal. A peer
-			// may later return the same certified body during catch-up; that
-			// source does not change its original provenance.
-			w.LocallyBuilt = w.LocallyBuilt || prior.LocallyBuilt
+			// The first retained candidate record owns its provenance; a peer or
+			// local retry cannot reclassify the source on a repeated insertion.
+			w.LocallyBuilt = prior.LocallyBuilt
 			raw, e := encodeCandidate(w)
 			if e != nil {
 				return e
 			}
-			if !bytes.Equal(old, raw) {
+			candidateChanged := !bytes.Equal(old, raw)
+			if candidateChanged {
 				count, observed, total, countErr := journalCount(b)
 				if countErr != nil {
 					return countErr
@@ -431,30 +454,32 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 				if count > limits.Candidates || observed > limits.Observations || total-int64(len(old))+int64(len(raw)) > limits.Bytes {
 					return fmt.Errorf("%w: full-history journal capacity reached", ErrBounds)
 				}
-				if resultUC != nil {
-					cursor := b.Cursor()
-					for k, observationRaw := cursor.Seek(journalObservationPrefix); k != nil && bytes.HasPrefix(k, journalObservationPrefix); k, observationRaw = cursor.Next() {
-						o, decodeErr := decodeObservation(observationRaw)
-						if decodeErr != nil {
-							return decodeErr
-						}
-						if !bytes.Equal(o.TargetHash, v.Hash) {
-							continue
-						}
-						observedUC, _, verifyErr := verifiedPairBytes(ctx, c, o.UC, o.TR)
-						if verifyErr != nil || o.Round != v.Round || observedUC.InputRecord == nil || !bytes.Equal(observedUC.InputRecord.Hash, v.StateRoot) {
-							return fmt.Errorf("%w: observed certificate differs from historical candidate: %v", ErrConflict, verifyErr)
-						}
-						o.Unresolved = false
-						updated, encodeErr := encodeObservation(o)
-						if encodeErr != nil {
-							return encodeErr
-						}
-						if putErr := b.Put(k, updated); putErr != nil {
-							return putErr
-						}
+			}
+			if resultUC != nil {
+				cursor := b.Cursor()
+				for k, observationRaw := cursor.Seek(journalObservationPrefix); k != nil && bytes.HasPrefix(k, journalObservationPrefix); k, observationRaw = cursor.Next() {
+					o, decodeErr := decodeObservation(observationRaw)
+					if decodeErr != nil {
+						return decodeErr
+					}
+					if !bytes.Equal(o.TargetHash, v.Hash) {
+						continue
+					}
+					observedUC, _, verifyErr := verifiedPairBytes(ctx, c, o.UC, o.TR)
+					if verifyErr != nil || o.Round != v.Round || observedUC.InputRecord == nil || !bytes.Equal(observedUC.InputRecord.Hash, v.StateRoot) {
+						return fmt.Errorf("%w: observed certificate differs from historical candidate: %v", ErrConflict, verifyErr)
+					}
+					o.Unresolved = false
+					updated, encodeErr := encodeObservation(o)
+					if encodeErr != nil {
+						return encodeErr
+					}
+					if putErr := b.Put(k, updated); putErr != nil {
+						return putErr
 					}
 				}
+			}
+			if candidateChanged {
 				if err = b.Put(key, raw); err != nil {
 					return err
 				}
