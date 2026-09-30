@@ -594,6 +594,25 @@ func (c *BFTClient) verifyCertificationAuthorization(ctx context.Context, cr *ce
 	if err = cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, c.shardConfHash); err != nil {
 		return nil, fmt.Errorf("verifying unicity certificate: %w", err)
 	}
+	c.mu.Lock()
+	profile2, admission, previous := c.profile2, c.admission, c.luc
+	c.mu.Unlock()
+	if profile2 != nil {
+		if floor, installed := profile2.EpochFloor(); installed && epoch < floor {
+			return nil, ErrProfile2Epoch
+		}
+		if _, err = profile2.Classify(previous, &cr.UC); err != nil {
+			return nil, err
+		}
+	} else if history, ok := c.trustBaseStore.(interface{ IsV2Epoch(uint64) bool }); ok && history.IsV2Epoch(epoch) {
+		ready := false
+		if gate, ok := admission.(interface{ Profile2Ready(uint64) bool }); ok {
+			ready = gate.Profile2Ready(epoch)
+		}
+		if !ready {
+			return nil, ErrProfile2Unready
+		}
+	}
 	input, err := cr.UC.InputRecord.Bytes()
 	if err != nil {
 		return nil, fmt.Errorf("encoding certified input record: %w", err)

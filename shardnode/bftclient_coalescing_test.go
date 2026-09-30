@@ -255,3 +255,51 @@ func TestStaleCertificationResponseIsDroppedAfterNewest(t *testing.T) {
 	require.Same(t, before, client.luc, "a conflicting UC cannot replace the newer accepted certificate")
 	require.Equal(t, []uint64{f.ucMine.GetRoundNumber()}, driver.rounds())
 }
+
+type coalescingFutureEpochTrustStore struct{ stubTrustBaseStore }
+
+func (coalescingFutureEpochTrustStore) IsV2Epoch(epoch uint64) bool      { return epoch >= 2 }
+func (coalescingFutureEpochTrustStore) CurrentRootEpoch() (uint64, bool) { return 2, true }
+
+func TestUnreadyProfile2CertificateCannotSupersedeQueuedCurrentEpoch(t *testing.T) {
+	f := newConfBindingFixture(t)
+	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: authPartitionID, T2Timeout: 2500000000}
+	zero := make([]byte, 32)
+	trHash, err := f.technical.Hash()
+	require.NoError(t, err)
+	response := func(rootRound uint64) *certification.CertificationResponse {
+		t.Helper()
+		uc := testcertificates.CreateUnicityCertificate(t, f.signer, f.ucMine.InputRecord, pdr, rootRound, zero, trHash)
+		return &certification.CertificationResponse{
+			Partition: authPartitionID, Shard: types.ShardID{}, Technical: *f.technical, UC: *uc,
+		}
+	}
+	current := response(51)
+	future := response(52)
+	seal := *future.UC.UnicitySeal
+	seal.Epoch = 2
+	seal.Signatures = nil
+	var signerID string
+	for id := range f.ucMine.UnicitySeal.Signatures {
+		signerID = id
+		break
+	}
+	require.NotEmpty(t, signerID)
+	require.NoError(t, seal.Sign(signerID, f.signer))
+	future.UC.UnicitySeal = &seal
+	require.NoError(t, future.UC.Verify(f.tb, crypto.SHA256, authPartitionID, types.ShardID{}, f.confMine))
+
+	client, driver := f.client(f.confMine)
+	client.trustBaseStore = coalescingFutureEpochTrustStore{stubTrustBaseStore{tb: f.tb}}
+	queued := make(chan any, 1)
+	queued <- future
+	batch, closed := client.coalesceBufferedCertificationResponses(context.Background(), current, queued)
+	require.False(t, closed)
+	require.Len(t, batch, 2, "a signed but unready epoch cannot supersede the currently usable UC")
+	require.Same(t, current, batch[0])
+	require.Same(t, future, batch[1])
+	require.ErrorIs(t, client.handleCertificationResponse(context.Background(), future), ErrProfile2Unready)
+	require.NoError(t, client.handleCertificationResponse(context.Background(), current))
+	require.Equal(t, []uint64{current.UC.GetRoundNumber()}, driver.rounds(),
+		"the current-epoch certificate remains processable after the future epoch is gated")
+}
