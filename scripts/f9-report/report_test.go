@@ -66,7 +66,7 @@ func TestCollectBuildsFixtureReport(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/operator/status":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"currentRootEpoch":3,"journal":{"candidatesUsed":4,"candidatesCap":8,"observationsUsed":2,"observationsCap":8,"bytesUsed":1024,"bytesCap":4096},"certifiedTip":{"height":12,"hash":"0x12"},"pruneFrontier":{"height":10,"hash":"0x10"},"replicas":[{"replica":"peer-a","lastAcknowledgedHeight":8},{"replica":"peer-b","lastAcknowledgedHeight":12,"error":"transient"}]}`)
+			_, _ = fmt.Fprint(w, `{"currentRootEpoch":3,"journal":{"candidatesUsed":4,"candidatesCap":16,"observationsUsed":2,"observationsCap":8,"bytesUsed":1024,"bytesCap":4096},"certifiedTip":{"height":12,"hash":"0x12"},"pruneFrontier":{"height":10,"hash":"0x10"},"replicas":[{"replica":"peer-a","lastAcknowledgedHeight":8},{"replica":"peer-b","lastAcknowledgedHeight":12,"error":"transient"}]}`)
 		case "/api/v1/metrics":
 			n := metricsRequest.Add(1)
 			cpu, rss, fds, verifies, count, low, high, start, end := "2", "100", "5", "3", "3", "1", "3", "1000", "1000"

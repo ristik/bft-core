@@ -56,7 +56,7 @@ func signPeerBlock(t *testing.T, c *certifiedchain.Chain, i int) (*types.Unicity
 
 func TestPeerCatchUpBackfillsMissingCertifiedMiddle(t *testing.T) {
 	chain, origin, journalCtx, id := adapterFixtureBlocks(t, 3)
-	limits := configuredprogress.JournalLimits{Candidates: 8, Observations: 8, Bytes: 16 << 20}
+	limits := configuredprogress.JournalLimits{Candidates: 16, Observations: 8, Bytes: 16 << 20}
 	open := func() *configuredprogress.Store {
 		s, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 8})
 		require.NoError(t, err)
@@ -310,7 +310,7 @@ func TestPeerCatchUpBackfillsMissingCertifiedMiddle(t *testing.T) {
 
 func TestPeerCatchUpReusesLocallyBuiltCandidateAfterLeaderRestart(t *testing.T) {
 	chain, origin, journalCtx, id := adapterFixtureBlocks(t, 3)
-	limits := configuredprogress.JournalLimits{Candidates: 8, Observations: 8, Bytes: 16 << 20}
+	limits := configuredprogress.JournalLimits{Candidates: 16, Observations: 8, Bytes: 16 << 20}
 	open := func() *configuredprogress.Store {
 		s, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 8})
 		require.NoError(t, err)

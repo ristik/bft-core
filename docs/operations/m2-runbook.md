@@ -386,7 +386,7 @@ build/ubft shard-node restore --home REPLACE_NEW_EMPTY_NODE_HOME --executor engi
   --engine-fee-collector REPLACE_FEE_COLLECTOR_ADDRESS \
   --execution-journal REPLACE_NEW_EMPTY_EXECUTION_JOURNAL \
   --archive-store REPLACE_NEW_EMPTY_LOCAL_ARCHIVE --archive-prune \
-  --journal-candidates 8 \
+  --journal-candidates 16 \
   --archive-replica REPLACE_ARCHIVE_REPLICA_PEER_ID_1 \
   --archive-replica REPLACE_ARCHIVE_REPLICA_PEER_ID_2 \
   --signing-authority-socket REPLACE_SURVIVING_AUTHORITY_CLIENT_SOCKET \
