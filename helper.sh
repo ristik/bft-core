@@ -348,8 +348,10 @@ function start_one_evm_validator() {
 	  shardConfArgs=(--full-shard-conf "$EVM_FULL_SHARD_CONF")
 	fi
 	if [ -n "${EVM_ARCHIVE_ROOT:-}" ]; then
-	  local replicaCount=0 peerID
-	  executorArgs+=(--archive-store "$EVM_ARCHIVE_ROOT/evm$i" --archive-prune --journal-candidates 8)
+	  local replicaCount=0 peerID journalCandidates="${EVM_JOURNAL_CANDIDATES:-8}"
+	  # Keep quick archive lanes bounded tightly; long-history measurement runs may explicitly
+	  # raise the configured-progress candidate ceiling while remaining within the product maximum.
+	  executorArgs+=(--archive-store "$EVM_ARCHIVE_ROOT/evm$i" --archive-prune --journal-candidates "$journalCandidates")
 	  for j in $(seq 2 "$n"); do
 	    [ "$j" = "$i" ] && continue
 	    peerID=$(evm_validator_id "$j") || return 1

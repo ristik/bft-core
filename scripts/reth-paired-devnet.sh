@@ -702,6 +702,9 @@ elif [ "$postM2aMode" = f7 ]; then
   export EVM_ARCHIVE_ROOT=test-nodes/post-m2a-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
 fi
+# F9 and other measurement runs may supply a distinct archive root. Create it
+# before starting any shard nodes, which only create their per-node child.
+if [ -n "${EVM_ARCHIVE_ROOT:-}" ]; then mkdir -p "$EVM_ARCHIVE_ROOT"; fi
 export EVM_GENESIS_FILE="$chainSpec"
 export EVM_FULL_SHARD_CONF="test-nodes/shard-conf-${partitionID}_0.json"
 export EVM_ENGINE_FEE_COLLECTOR="${POST_M2A_FEE_COLLECTOR:-$URETH_PIN_FEE_COLLECTOR}"
@@ -826,7 +829,7 @@ if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
   pass "three aggregator shards certified alongside the EVM partition; UC/TR/EVM trace recorded"
 fi
 
-if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
+if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ] && [ "${F9_LOAD_RUN:-0}" != 1 ]; then
   echo "=== M2 profile-2: two certified root handoffs with paid execution ==="
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     f8_slow_stop_resume_evm || { fail "EVM delay/stop/resume probe failed"; exit 1; }
@@ -845,8 +848,12 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
   else
     pass "two profile-2 handoffs replaced validator keys and certified paid transactions"
   fi
-elif [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" = 1 ]; then
-  pass "T4 audit lane skipped the optional profile-2 root handoffs"
+elif [ "${M2_PROFILE2:-0}" = 1 ] && { [ "${POST_M2A_SKIP_HANDOFF:-0}" = 1 ] || [ "${F9_LOAD_RUN:-0}" = 1 ]; }; then
+  if [ "${F9_LOAD_RUN:-0}" = 1 ]; then
+    pass "F9 load lane skipped optional profile-2 root handoffs"
+  else
+    pass "T4 audit lane skipped optional profile-2 root handoffs"
+  fi
 fi
 
 echo
