@@ -617,10 +617,11 @@ not a complete recovery authority:
 
 1. **Frozen-parent selection and acceptance:** the read-only
    `shard-node certified-parent` query and fresh-tip `root handoff propose`
-   default are in the companion H6 CLI PR, not yet available to deployed
-   binaries. Use them only after that PR is merged and the approved BFT release
-   is deployed. The root's independent stale-parent check remains required; an
-   independent operator has not rehearsed the end-to-end selection/retry path.
+   default are in [H6 CLI PR #320](https://github.com/ristik/bft-core/pull/320),
+   not yet available to deployed binaries. Use them only after that PR is merged
+   and the approved BFT release is deployed. The root's independent stale-parent
+   check remains required; an independent operator has not rehearsed the
+   end-to-end selection/retry path.
 2. **Authority advancement evidence:** `signing-authority advance-epoch` is a
    real command, but the merged profile-2 lane does not call it for each EVM
    authority or rehearse its session replacement and shard reconnect sequence.
