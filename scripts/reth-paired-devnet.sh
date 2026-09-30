@@ -62,6 +62,10 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ]; then
   echo "profile-2 handoff lane requires four validators" >&2
   exit 2
 fi
+if [ "${M2A_FINAL_RESTORE:-0}" = 1 ] && { [ "${M2_PROFILE2:-0}" != 1 ] || [ "${SIGNING:-local}" != authority ] || [ "$validators" -ne 4 ]; }; then
+  echo "M2a final restore requires M2_PROFILE2=1, SIGNING=authority and four validators" >&2
+  exit 2
+fi
 partitionID=8
 if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ] && { [ "$validators" -ne 4 ] || [ "$rounds" -lt 10 ]; }; then
   echo "M1 fee accounting requires four validators and at least 10 rounds" >&2
@@ -149,6 +153,11 @@ cleanup() {
       [ -d "$d" ] || continue
       mkdir -p "$M2_RUN_LOG_DIR/$(basename "$d")"
       cp "$d"/*.log "$M2_RUN_LOG_DIR/$(basename "$d")/" 2>/dev/null || true
+    done
+    for d in test-nodes/h4-replaced test-nodes/auth1; do
+      [ -d "$d" ] || continue
+      mkdir -p "$M2_RUN_LOG_DIR/$(basename "$d")"
+      cp -R "$d"/. "$M2_RUN_LOG_DIR/$(basename "$d")/" 2>/dev/null || true
     done
   fi
 }
@@ -695,7 +704,9 @@ echo "=== 4. configure the checked v2 origin and seed the block-1 transaction ==
 # only now, after the startup negatives above have used it.
 cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
 if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_prepare; fi
-if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
+# Both the standalone H4 probe and the M2a final lane need persistent archive
+# publication before they stop validator 1; M2a restores it after Handoff 2.
+if [ "${H4_RESTORE_PROBE:-0}" = 1 ] || [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   export EVM_ARCHIVE_ROOT=test-nodes/h4-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
 elif [ "$postM2aMode" = f7 ]; then
@@ -865,13 +876,19 @@ fi
 if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   probeArgs=(--h4-restore-validator 1 --signing authority)
 fi
+if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
+  probeArgs=(--already-restored-validator 1)
+fi
 if [ -n "${D2C_FAULT_SCENARIO:-}" ]; then
   [ "$validators" -eq 4 ] && [ "$rounds" -ge 10 ] || { echo "D2C fault scenarios require four validators and >=10 blocks" >&2; exit 2; }
   faultArgs=(--fault-scenario "$D2C_FAULT_SCENARIO")
 fi
 d2cRecoveryProbe=${D2C_RESTART_PROBE:-0}
 [ -n "${D2C_FAULT_SCENARIO:-}" ] && d2cRecoveryProbe=1
-if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout 900 \
+d1Timeout=900
+if [ "$rounds" -gt 100 ]; then d1Timeout=6000; fi
+if [ -n "${D1_MONITOR_TIMEOUT:-}" ]; then d1Timeout=$D1_MONITOR_TIMEOUT; fi
+if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout "$d1Timeout" \
   ${traceArgs[@]+"${traceArgs[@]}"} ${probeArgs[@]+"${probeArgs[@]}"} ${faultArgs[@]+"${faultArgs[@]}"}; then
   pass "D1 observed $rounds consecutive blocks with a fresh canonical survivor quorum"
 else
