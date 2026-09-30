@@ -256,7 +256,7 @@ PY
   printf '%s\n' "$POST_M2A_RECEIPT" >test-nodes/post-m2a-evidence/t4-contract-actions/collector-split.receipt.json
   M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
 
-  POST_M2A_T4_COMPILER_VERSION=$(cat "$artifacts/solc-version.txt") \
+  if ! POST_M2A_T4_COMPILER_VERSION=$(cat "$artifacts/solc-version.txt") \
     POST_M2A_T4_BURN_CONTRACT=$burnContract POST_M2A_T4_BURN_TX=$burnHash POST_M2A_T4_BURN_VALUE=$burnValue \
     POST_M2A_T4_ORDINARY_CONTRACT=$ordinaryContract POST_M2A_T4_ORDINARY_DEPLOY_TX=$ordinaryDeployHash \
     POST_M2A_T4_ORDINARY_DESTROY_TX=$destroyHash POST_M2A_T4_ORDINARY_VALUE=$ordinaryValue \
@@ -265,7 +265,7 @@ PY
     POST_M2A_T4_WUCT_WITHDRAW_TX=$withdrawHash POST_M2A_T4_WUCT_WITHDRAW=$withdrawAmount \
     POST_M2A_T4_COLLECTOR=$collector POST_M2A_T4_SPLIT_TX=$splitHash \
     python3 - <<'PY' >test-nodes/post-m2a-evidence/t4-contract-actions.json
-import json,os
+import json,os,sys
 out={
  "compiler":os.environ["POST_M2A_T4_COMPILER_VERSION"],
  "selfdestructToSelf":{"contract":os.environ["POST_M2A_T4_BURN_CONTRACT"],"transactionHash":os.environ["POST_M2A_T4_BURN_TX"],"valueWei":os.environ["POST_M2A_T4_BURN_VALUE"]},
@@ -274,6 +274,10 @@ out={
  "feeCollector":{"address":os.environ["POST_M2A_T4_COLLECTOR"],"splitTransactionHash":os.environ["POST_M2A_T4_SPLIT_TX"]}}
 json.dump(out,sys.stdout,indent=2); print()
 PY
+  then
+    fail "could not write the T4 contract action manifest"
+    return 1
+  fi
   pass "deployed the Cancun same-transaction burn and ordinary SELFDESTRUCT fixtures"
   pass "nonzero WUCT deposit/withdrawal and FeeCollector split() liabilities were certified"
 }
