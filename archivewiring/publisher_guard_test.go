@@ -49,6 +49,7 @@ func TestFromJournalChecksResultingCertificateBlockHash(t *testing.T) {
 }
 
 func TestPublisherBacklogDoesNotUseConsensusWitnessAndRotates(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 6)
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
@@ -91,6 +92,7 @@ func TestPublisherBacklogDoesNotUseConsensusWitnessAndRotates(t *testing.T) {
 }
 
 func TestPublisherRejectsMismatchedLocalCopy(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 1)
 	q, rec := f.record(t, 0)
 	local, err := archive.Open(t.TempDir())
@@ -103,6 +105,7 @@ func TestPublisherRejectsMismatchedLocalCopy(t *testing.T) {
 }
 
 func TestPublisherReplicaDeliveryIsIndependent(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 1)
 	q, rec := f.record(t, 0)
 	local, err := archive.Open(t.TempDir())

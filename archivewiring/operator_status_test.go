@@ -11,6 +11,7 @@ import (
 )
 
 func TestReadOperatorStatusUsesFixtureJournalAndReceiptArchive(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 2)
 	local, err := archive.Open(t.TempDir() + "/archive")
 	require.NoError(t, err)

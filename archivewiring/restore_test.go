@@ -29,6 +29,7 @@ type restoreExecutorFixture struct {
 }
 
 func TestSingleEpochArchiveRestoreResolvesCertifiedQuietTip(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 1)
 	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	first := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
@@ -73,6 +74,7 @@ func TestSingleEpochArchiveRestoreResolvesCertifiedQuietTip(t *testing.T) {
 }
 
 func TestArchiveRestoreBackfillsAnUnresolvedHistoricalObservation(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 3)
 	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	first := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
@@ -212,6 +214,7 @@ func (e *restoreExecutorFixture) CheckBlockBinding(context.Context, shardnode.Bl
 }
 
 func TestSingleEpochArchiveRestoreReplaysBeyondJournalCapWithReplicaFailover(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 5)
 	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	failed := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))

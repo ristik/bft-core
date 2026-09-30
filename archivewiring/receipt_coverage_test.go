@@ -33,6 +33,7 @@ func TestCertifiedBindingRequiresReceiptCompleteV2(t *testing.T) {
 }
 
 func TestFrontierDoesNotCoverReceiptFreeV1Record(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 1)
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
@@ -54,6 +55,7 @@ func TestFrontierDoesNotCoverReceiptFreeV1Record(t *testing.T) {
 }
 
 func TestPublisherUpgradesV1AndFrontierAdvances(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 1)
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)

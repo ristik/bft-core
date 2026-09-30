@@ -142,6 +142,7 @@ func TestReplicaRefusalAndFrameAdmission(t *testing.T) {
 }
 
 func TestTwoInProcessReplicaReadbacksAndOneReplicaLoss(t *testing.T) {
+	t.Parallel()
 	q, rec := transportFixture()
 	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	first := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))

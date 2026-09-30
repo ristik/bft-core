@@ -46,6 +46,7 @@ func TestCaptureBlockReceiptsRetriesNullUntilSuccess(t *testing.T) {
 }
 
 func TestPublisherDoesNotPublishReceiptsStillNullAfterBound(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 1)
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
