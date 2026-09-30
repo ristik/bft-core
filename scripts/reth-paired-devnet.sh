@@ -29,6 +29,16 @@ if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   }
   URETH_BIN=$H4_URETH_BIN
   URETH_PIN_COMMIT=$H4_URETH_COMMIT
+elif [ -n "${POST_M2A_URETH_BIN:-}" ] || [ -n "${POST_M2A_URETH_COMMIT:-}" ]; then
+  [ "${M2_PROFILE2:-0}" = 1 ] || { echo "POST_M2A_URETH_BIN is only supported by profile-2 lanes" >&2; exit 2; }
+  [ -n "${POST_M2A_URETH_BIN:-}" ] && [ -n "${POST_M2A_URETH_COMMIT:-}" ] || {
+    echo "post-M2a lanes require both POST_M2A_URETH_BIN and POST_M2A_URETH_COMMIT" >&2
+    exit 2
+  }
+  URETH_BIN=$POST_M2A_URETH_BIN
+  URETH_PIN_COMMIT=$POST_M2A_URETH_COMMIT
+  M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2-$(date -u +%Y%m%dT%H%M%SZ)}
+  echo "profile-2 logs: $M2_RUN_LOG_DIR"
 elif [ "${M2_PROFILE2:-0}" = 1 ]; then
   URETH_PIN_COMMIT=ae6e6be94d6dc45d0df6574cb5fbedef398f5c2e
   M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2-$(date -u +%Y%m%dT%H%M%SZ)}

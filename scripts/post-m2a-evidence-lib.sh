@@ -117,7 +117,7 @@ post_m2a_after_bootstrap() {
   post_m2a_wait_initial_transactions || return 1
   mkdir -p test-nodes/post-m2a-evidence
   if [ "$postM2aMode" = f7 ]; then
-    local initcode deployHash contract lockHash receipt emitter topic lockBlock lockBlockNumber txIndex logIndex
+    local initcode deployHash contract lockHash receipt emitter topic
     initcode=$(go run ./scripts/evmtx -lock-initcode) || return 1
     post_m2a_send_transaction "$M2_NEXT_NONCE" -create -data "$initcode" -gas-limit 200000 -value 0 || return 1
     deployHash=$POST_M2A_TX_HASH
@@ -148,13 +148,15 @@ PY
       fail "the typed lock receipt does not contain the expected contract event"
       return 1
     fi
-    lockBlock=$(printf '%s' "$receipt" | pyget "['result']['blockHash']")
-    lockBlockNumber=$(printf '%s' "$receipt" | pyget "int(['result']['blockNumber'],16)")
-    txIndex=$(printf '%s' "$receipt" | pyget "int(['result']['transactionIndex'],16)")
-    logIndex=$(printf '%s' "$receipt" | pyget "int(['result']['logs'][0]['logIndex'],16)")
-    printf '{"blockHash":"%s","blockNumber":%s,"txIndex":%s,"logIndex":%s,"contract":"%s","transactionHash":"%s","topic":"%s"}\n' \
-      "$lockBlock" "$lockBlockNumber" "$txIndex" "$logIndex" "$emitter" "$lockHash" "$topic" \
-      >test-nodes/post-m2a-evidence/f7-lock-pin.json
+    python3 - "$receipt" "$emitter" "$lockHash" "$topic" \
+      >test-nodes/post-m2a-evidence/f7-lock-pin.json <<'PY'
+import json,sys
+receipt=json.loads(sys.argv[1])["result"]
+pin={"blockHash":receipt["blockHash"],"blockNumber":int(receipt["blockNumber"],16),
+ "txIndex":int(receipt["transactionIndex"],16),"logIndex":int(receipt["logs"][0]["logIndex"],16),
+ "contract":sys.argv[2],"transactionHash":sys.argv[3],"topic":sys.argv[4]}
+json.dump(pin,sys.stdout,separators=(",",":")); print()
+PY
     M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
     pass "deployed the payable lock contract with a typed receipt"
     pass "locked 42 wei; recorded (blockHash, txIndex, logIndex) from the certified real ureth receipt"
