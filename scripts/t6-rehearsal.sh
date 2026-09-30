@@ -14,6 +14,7 @@ T6_URETH_COMMIT=${T6_URETH_COMMIT:-055a314f759f78f045d55ceddfeb7e14b3b6a2f7}
 T6_URETH_REMOTE=${T6_URETH_REMOTE:-https://github.com/ristik/ureth.git}
 T6_CONTRACTS_COMMIT=${T6_CONTRACTS_COMMIT:-e7eb3216549b772a9e1df2b1214976d7dd9e6e62}
 T6_CONTRACTS_REMOTE=${T6_CONTRACTS_REMOTE:-https://github.com/ristik/unicity-pos-contracts.git}
+T6_RUST_TOOLCHAIN=${T6_RUST_TOOLCHAIN:-1.97.1}
 
 if [ "${T6_LOCKED:-0}" != 1 ]; then
   [ -x "$LOCK_SCRIPT" ] || { echo "FAIL: devnet lock helper missing at $LOCK_SCRIPT" >&2; exit 1; }
@@ -21,7 +22,8 @@ if [ "${T6_LOCKED:-0}" != 1 ]; then
     T6_LOCKED=1 T6_EVIDENCE_DIR="$EVIDENCE_DIR" T6_BFT_COMMIT="$T6_BFT_COMMIT" \
     T6_BFT_REMOTE="$T6_BFT_REMOTE" T6_BFT_REF="$T6_BFT_REF" T6_URETH_COMMIT="$T6_URETH_COMMIT" \
     T6_URETH_REMOTE="$T6_URETH_REMOTE" T6_CONTRACTS_COMMIT="$T6_CONTRACTS_COMMIT" \
-    T6_CONTRACTS_REMOTE="$T6_CONTRACTS_REMOTE" "$SCRIPT_PATH" "$@"
+    T6_CONTRACTS_REMOTE="$T6_CONTRACTS_REMOTE" T6_RUST_TOOLCHAIN="$T6_RUST_TOOLCHAIN" \
+    "$SCRIPT_PATH" "$@"
 fi
 
 mkdir -p "$EVIDENCE_DIR"
@@ -193,6 +195,9 @@ build_pinned_ureth() {
   URETH_PIN_LOCAL=$ISOLATION_ROOT/no-local-ureth-allowed
   URETH_PIN_CACHE_DIR=$ISOLATION_ROOT/cache/ureth-pin
   URETH_BIN=
+  command -v rustup >/dev/null 2>&1 || { fail "rustup is unavailable for the isolated toolchain install"; return 1; }
+  export RUSTUP_TOOLCHAIN=$T6_RUST_TOOLCHAIN
+  rustup toolchain install "$T6_RUST_TOOLCHAIN" --profile minimal
   URETH_PIN_COMMIT=$URETH_PIN_COMMIT URETH_PIN_REPO=$URETH_PIN_REPO \
     URETH_PIN_LOCAL=$URETH_PIN_LOCAL URETH_PIN_CACHE_DIR=$URETH_PIN_CACHE_DIR \
     urethPinResolve "$ISOLATION_ROOT/bin" | tee "$EVIDENCE_DIR/ureth-build.log"
@@ -207,10 +212,12 @@ build_pinned_ureth() {
     rustc --version
     cargo --version
   } >"$EVIDENCE_DIR/compiler-toolchains.txt"
+  printf 'Rust toolchain pin=%s\n' "$T6_RUST_TOOLCHAIN" >>"$EVIDENCE_DIR/source-pin.txt"
   rm -rf "$URETH_PIN_CACHE_DIR/target" "$URETH_PIN_CACHE_DIR/unicity-reth-src-$T6_URETH_COMMIT"
   # Cargo registry and rustup toolchains are fresh per this rehearsal. The verified client is
   # self-contained, so release those isolated build caches before the Solidity and devnet builds.
   rm -rf "$CARGO_HOME" "$RUSTUP_HOME"
+  unset RUSTUP_TOOLCHAIN CARGO_HOME RUSTUP_HOME
   local available_kb
   available_kb=$(df -Pk "$ISOLATION_ROOT" | awk 'NR==2 {print $4}')
   printf 'disk available after Ureth build and target cleanup: %s KiB\n' "$available_kb" >>"$EVIDENCE_DIR/disk-before.txt"
