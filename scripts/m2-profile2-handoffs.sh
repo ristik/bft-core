@@ -135,6 +135,36 @@ m2_send_paid() {
   return 1
 }
 
+# The #261 comparison needs both paid and idle certified blocks on each side of
+# the handoff. Do not infer idleness from an empty mempool or a short interval:
+# require a zero-transaction EL block that the active BFT node admitted in this
+# root epoch.
+m2_wait_certified_idle() {
+  local epoch=$1 source port head block hash count log
+  source=$(m2_online_validators | awk '{print $1}')
+  port=$((rethEthBase + source - 1))
+  log="test-nodes/evm$source/debug.log"
+  for attempt in $(seq 1 90); do
+    head=$(rpc "http://127.0.0.1:$port" eth_blockNumber '[]' | pyget "['result']") || head=
+    if [ -n "$head" ] && [ "$head" != None ]; then
+      block=$(rpc "http://127.0.0.1:$port" eth_getBlockByNumber "[\"$head\",true]") || block=
+      hash=$(printf '%s' "$block" | pyget "['result']['hash']" || true)
+      count=$(printf '%s' "$block" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["transactions"]))' 2>/dev/null) || count=-1
+      if [ "$count" = 0 ] && [ -n "$hash" ] && [ "$hash" != None ] &&
+        grep -Eq "msg=\"certificate admitted\" block=${hash#0x} .*rootEpoch=$epoch([[:space:]]|$)" "$log"; then
+        echo "certified idle root-epoch=$epoch block=$hash height=$((head)) source-validator=$source"
+        return 0
+      fi
+    fi
+    if [ $((attempt % 15)) -eq 0 ]; then
+      echo "waiting for a zero-transaction certificate in root epoch $epoch ($attempt/90)"
+    fi
+    sleep 1
+  done
+  echo "no certified zero-transaction block appeared in root epoch $epoch" >&2
+  return 1
+}
+
 m2_measure_pause() {
   local old=$1 new=$2
   local logValidator
@@ -368,6 +398,7 @@ m2_handoff() {
   if [ "$epoch" = 2 ]; then
     m2_send_paid "$epoch" "${M2_NEXT_NONCE:-$((epoch+1))}" || return 1
   fi
+  m2_wait_certified_idle "$epoch" || return 1
   m2_measure_pause "$((epoch-1))" "$epoch"
 }
 
@@ -476,6 +507,7 @@ if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
     m2_send_paid 1 "$M2_NEXT_NONCE" || return 1
     m2a_head=$(rpc "http://127.0.0.1:$((rethEthBase+1))" eth_blockNumber '[]' | pyget "['result']")
   done
+  m2_wait_certified_idle 1 || return 1
   bash scripts/h4-restore-probe.sh stop || return 1
   export M2A_VALIDATOR1_WIPED=1
 fi
@@ -522,5 +554,6 @@ if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   [ "$after" -gt "$before" ] || { echo "restored signer did not advance authority high-water: $before -> $after" >&2; return 1; }
   export M2A_VALIDATOR1_RESTORED=1
   m2_send_paid 3 "$M2_NEXT_NONCE" || return 1
+  m2_wait_certified_idle 3 || return 1
   echo "RESTORE PASS: epochs 2 and 3 activated; authority high-water $before -> $after"
 fi
