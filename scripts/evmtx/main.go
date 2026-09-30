@@ -32,6 +32,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
@@ -46,14 +47,23 @@ const eip1559TxType = 0x02
 
 func main() {
 	var (
-		alloc   = flag.Bool("alloc", false, "print a genesis alloc object funding the test account")
-		address = flag.Bool("address", false, "print the funded test account address")
-		send    = flag.Bool("send", false, "sign a transfer and submit it with eth_sendRawTransaction")
-		ethURL  = flag.String("eth-url", "http://127.0.0.1:8545", "eth_* endpoint")
-		chainID = flag.Int64("chain-id", 31337, "chain id to sign for")
-		nonce   = flag.Uint64("nonce", 0, "sender nonce")
-		tip     = flag.Int64("tip", 1_000_000_000, "maxPriorityFeePerGas in wei")
-		feeCap  = flag.Int64("fee-cap", 10_000_000_000, "maxFeePerGas in wei")
+		alloc         = flag.Bool("alloc", false, "print a genesis alloc object funding the test account")
+		address       = flag.Bool("address", false, "print the funded test account address")
+		send          = flag.Bool("send", false, "sign a transfer and submit it with eth_sendRawTransaction")
+		create        = flag.Bool("create", false, "create a contract instead of sending to an address")
+		createAddress = flag.Bool("create-address", false, "print the CREATE address for the funded key and nonce")
+		lockInitcode  = flag.Bool("lock-initcode", false, "print initcode for the demo payable Locked(uint256) receipt contract")
+		eventTopic    = flag.String("event-topic", "", "print the Keccak-256 topic for an event signature")
+		ethURL        = flag.String("eth-url", "http://127.0.0.1:8545", "eth_* endpoint")
+		chainID       = flag.Int64("chain-id", 31337, "chain id to sign for")
+		nonce         = flag.Uint64("nonce", 0, "sender nonce")
+		tip           = flag.Int64("tip", 1_000_000_000, "maxPriorityFeePerGas in wei")
+		feeCap        = flag.Int64("fee-cap", 10_000_000_000, "maxFeePerGas in wei")
+		to            = flag.String("to", "0x00000000000000000000000000000000000000ff", "transaction recipient")
+		value         = flag.String("value", "1", "transaction value in decimal or 0x-prefixed hex")
+		data          = flag.String("data", "0x", "transaction calldata or contract creation bytecode")
+		call          = flag.String("call", "", "zero-argument call signature; encoded as its 4-byte selector")
+		gasLimit      = flag.Uint64("gas-limit", 21000, "transaction gas limit")
 	)
 	flag.Parse()
 
@@ -67,6 +77,12 @@ func main() {
 	switch {
 	case *address:
 		fmt.Println(from)
+	case *createAddress:
+		fmt.Println(createAddressFor(from, *nonce))
+	case *lockInitcode:
+		fmt.Println("0x" + hex.EncodeToString(lockInitcodeBytes()))
+	case *eventTopic != "":
+		fmt.Println("0x" + hex.EncodeToString(keccak([]byte(*eventTopic))))
 	case *alloc:
 		// 10000 ETH, enough that fee experiments never run the account dry.
 		out, err := json.MarshalIndent(map[string]any{
@@ -77,7 +93,31 @@ func main() {
 		}
 		fmt.Println(string(out))
 	case *send:
-		raw, err := signTx(key, *chainID, *nonce, *tip, *feeCap)
+		var toBytes []byte
+		if !*create {
+			toBytes, err = hex.DecodeString(strings.TrimPrefix(*to, "0x"))
+			if err != nil || len(toBytes) != 20 {
+				fatal("recipient %q must be a 20-byte hex address", *to)
+			}
+		}
+		valueBig, ok := parseQuantity(*value)
+		if !ok || valueBig.Sign() < 0 {
+			fatal("value %q must be a non-negative decimal or 0x quantity", *value)
+		}
+		dataBytes, err := hex.DecodeString(strings.TrimPrefix(*data, "0x"))
+		if err != nil {
+			fatal("data must be 0x-prefixed hex: %v", err)
+		}
+		if *call != "" {
+			if *data != "0x" && *data != "" {
+				fatal("--call and --data cannot be combined")
+			}
+			dataBytes = methodSelector(*call)
+		}
+		if *gasLimit == 0 {
+			fatal("gas limit must be positive")
+		}
+		raw, err := signTx(key, *chainID, *nonce, *tip, *feeCap, toBytes, valueBig, dataBytes, *gasLimit)
 		if err != nil {
 			fatal("%v", err)
 		}
@@ -109,23 +149,19 @@ func keccak(parts ...[]byte) []byte {
 }
 
 // signTx builds and signs an EIP-1559 (type 0x02) transfer, returning the EIP-2718 encoding.
-func signTx(key *secp256k1.PrivateKey, chainID int64, nonce uint64, tip, feeCap int64) ([]byte, error) {
-	to, err := hex.DecodeString("00000000000000000000000000000000000000ff")
-	if err != nil {
-		return nil, fmt.Errorf("decoding recipient: %w", err)
-	}
-
+func signTx(key *secp256k1.PrivateKey, chainID int64, nonce uint64, tip, feeCap int64,
+	to []byte, value *big.Int, data []byte, gasLimit uint64) ([]byte, error) {
 	// The nine signed fields, in EIP-1559 order. An empty access list is an empty RLP list.
 	fields := [][]byte{
 		rlpUint(big.NewInt(chainID)),
 		rlpUint(new(big.Int).SetUint64(nonce)),
 		rlpUint(big.NewInt(tip)),
 		rlpUint(big.NewInt(feeCap)),
-		rlpUint(big.NewInt(21000)), // a plain transfer
+		rlpUint(new(big.Int).SetUint64(gasLimit)),
 		rlpBytes(to),
-		rlpUint(big.NewInt(1)), // 1 wei, so the transfer is real but trivially affordable
-		rlpBytes(nil),          // no calldata
-		rlpList(),              // empty access list
+		rlpUint(value),
+		rlpBytes(data),
+		rlpList(), // empty access list
 	}
 
 	// Signing hash is keccak256(0x02 || rlp(fields)).
@@ -150,6 +186,50 @@ func signTx(key *secp256k1.PrivateKey, chainID int64, nonce uint64, tip, feeCap 
 		rlpBytes(trimLeadingZeros(s)),
 	)
 	return append([]byte{eip1559TxType}, rlpList(signed...)...), nil
+}
+
+func parseQuantity(raw string) (*big.Int, bool) {
+	base := 10
+	text := raw
+	if strings.HasPrefix(text, "0x") {
+		base = 16
+		text = strings.TrimPrefix(text, "0x")
+	}
+	if text == "" {
+		return new(big.Int), true
+	}
+	n, ok := new(big.Int).SetString(text, base)
+	return n, ok
+}
+
+func methodSelector(signature string) []byte {
+	digest := keccak([]byte(signature))
+	return append([]byte(nil), digest[:4]...)
+}
+
+func createAddressFor(from string, nonce uint64) string {
+	address, err := hex.DecodeString(strings.TrimPrefix(from, "0x"))
+	if err != nil || len(address) != 20 {
+		fatal("invalid sender address %q", from)
+	}
+	raw := rlpList(rlpBytes(address), rlpUint(new(big.Int).SetUint64(nonce)))
+	digest := keccak(raw)
+	return "0x" + hex.EncodeToString(digest[len(digest)-20:])
+}
+
+func lockInitcodeBytes() []byte {
+	// Runtime accepts native value and emits Locked(uint256) with msg.value as data.
+	// The explicit init wrapper returns this exact runtime, including its event topic.
+	topic := keccak([]byte("Locked(uint256)"))
+	runtime := []byte{0x34, 0x60, 0x00, 0x52, 0x7f}
+	runtime = append(runtime, topic...)
+	runtime = append(runtime, 0x60, 0x20, 0x60, 0x00, 0xa1, 0x00)
+	if len(runtime) > 255 {
+		fatal("demo lock runtime is unexpectedly too large")
+	}
+	init := []byte{0x60, byte(len(runtime)), 0x60, 0x0c, 0x60, 0x00, 0x39,
+		0x60, byte(len(runtime)), 0x60, 0x00, 0xf3}
+	return append(init, runtime...)
 }
 
 func sendRaw(ethURL string, raw []byte) (string, error) {

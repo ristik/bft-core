@@ -84,10 +84,10 @@ m2_archive_root_state() {
 }
 
 m2_send_paid() {
-  local epoch=$1 nonce=$2 expected= sent= i receipt block hash status log j
+  local epoch=$1 nonce=${M2_NEXT_NONCE:-$2} expected='' sent='' i receipt block hash status log j
   for i in $(seq 1 "$validators"); do
     sent=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+i-1))" \
-      -chain-id 31337 -nonce "$nonce" 2>&1) || return 1
+      -chain-id "${M2_CHAIN_ID:-31337}" -nonce "$nonce" 2>&1) || return 1
     [[ "$sent" = 0x* ]] || return 1
     [ -z "$expected" ] || [ "$expected" = "$sent" ] || return 1
     expected=$sent
@@ -106,6 +106,7 @@ m2_send_paid() {
         if [ "$(python3 -c "print(int('$assignment',16))" 2>/dev/null)" = "$epoch" ] &&
            [ "$(python3 -c "print(int('$cursor',16))" 2>/dev/null)" = "$((epoch-1))" ]; then
           echo "paid epoch $epoch nonce $nonce hash=$expected registryRootEpoch=$epoch transitionCursor=$((epoch-1))"
+          if [ -n "${M2_NEXT_NONCE:-}" ]; then M2_NEXT_NONCE=$((nonce + 1)); fi
           return 0
         fi
       fi

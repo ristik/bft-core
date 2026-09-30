@@ -46,5 +46,7 @@ fi
 if [ "$start_vals" == true ]; then
   rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
   echo "starting $validators EVM shard validators (executor=$executor)..."
-  start_evm_validators "$validators" "$partition_id" "$rootBoot" "$executor"
+  rpcExpose=""
+  if [ "${EVM_OPERATOR_STATUS_RPC:-0}" = 1 ]; then rpcExpose=rpc; fi
+  start_evm_validators "$validators" "$partition_id" "$rootBoot" "$executor" "$rpcExpose"
 fi
