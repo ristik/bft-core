@@ -7,18 +7,25 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/archivewiring"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-type handoffOperatorStub struct{ planCalls, endorsements int }
+type handoffOperatorStub struct {
+	planCalls, endorsements int
+	parent                  []byte
+}
 
-func (s *handoffOperatorStub) BuildHandoffPlan(_ *types.RootTrustBaseV1, _ []byte) (abdrc.HandoffApprovalMsg, error) {
+func (s *handoffOperatorStub) BuildHandoffPlan(_ *types.RootTrustBaseV1, parent []byte) (abdrc.HandoffApprovalMsg, error) {
 	s.planCalls++
+	s.parent = append([]byte(nil), parent...)
 	return abdrc.HandoffApprovalMsg{Body: []byte{1}}, nil
 }
 
@@ -183,4 +190,50 @@ func TestRootHandoffOperatorHTTPIsLocalAndBounded(t *testing.T) {
 	endorse(response, post)
 	require.Equal(t, http.StatusNoContent, response.Code)
 	require.Equal(t, 1, stub.endorsements)
+}
+
+func TestRootHandoffProposeUsesLatestCertifiedParentAndRejectsStalePin(t *testing.T) {
+	latestHash := bytes.Repeat([]byte{0x42}, 32)
+	status := archivewiring.OperatorStatus{CertifiedTip: &archivewiring.BlockPin{
+		Height: 19, Hash: fmt.Sprintf("0x%x", latestHash), RootEpoch: 3, RootRound: 117,
+	}}
+	var statusRequests, planRequests int
+	statusServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		statusRequests++
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, "/api/v1/operator/status", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(status)
+	}))
+	defer statusServer.Close()
+	operator := &handoffOperatorStub{}
+	rootServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		planRequests++
+		rootHandoffPlanHandler(operator)(w, r)
+	}))
+	defer rootServer.Close()
+
+	nextFile := filepath.Join(t.TempDir(), "next-trust-base.json")
+	require.NoError(t, os.WriteFile(nextFile, []byte(`{}`), 0o600))
+	var stdout, stderr bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"handoff", "propose", "--next-trust-base", nextFile,
+		"--certified-parent-status-url", statusServer.URL, "--root-rpc", rootServer.URL})
+	require.NoError(t, root.Execute())
+	require.Equal(t, 1, statusRequests)
+	require.Equal(t, 1, planRequests)
+	require.Equal(t, latestHash, operator.parent)
+	require.Contains(t, stderr.String(), "using latest certified EVM parent")
+	require.Contains(t, stderr.String(), fmt.Sprintf("height=19 hash=0x%x", latestHash))
+
+	stale := strings.Repeat("11", 32)
+	root = newRootCmd()
+	root.SetArgs([]string{"handoff", "propose", "--next-trust-base", nextFile,
+		"--frozen-parent", stale, "--certified-parent-status-url", statusServer.URL, "--root-rpc", rootServer.URL})
+	err := root.Execute()
+	require.ErrorIs(t, err, ErrStaleCertifiedParent)
+	require.Equal(t, 2, statusRequests, "the explicit pin is compared with a fresh read-only status query")
+	require.Equal(t, 1, planRequests, "a stale explicit pin must not be submitted")
 }
