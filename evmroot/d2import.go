@@ -3,6 +3,7 @@ package evmroot
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"math/bits"
 )
@@ -256,13 +257,25 @@ func VerifyCompanionWitnesses(w CompanionWitness, ri RootInput, lastAppliedRootR
 	return CompanionAuth{OK: true}
 }
 
+// signedDeltaBytes encodes a signed value delta as exactly eight bytes in
+// big-endian two's-complement form. The uint64 conversion preserves the
+// two's-complement bit pattern modulo 2^64; keeping it in this named helper
+// makes that consensus encoding explicit instead of silently treating a
+// negative delta as an unsigned CBOR integer.
+func signedDeltaBytes(value int64) []byte {
+	var out [8]byte
+	binary.BigEndian.PutUint64(out[:], uint64(value))
+	return out[:]
+}
+
 // forcedDigest is a deterministic canonical-payload digest for a rejected
-// forced entry (position-bound so reorders change it).
+// forced entry (position-bound so reorders change it). ValueDelta is encoded
+// as a fixed-width eight-byte big-endian two's-complement byte string.
 func forcedDigest(pos int, e ForcedEntry) []byte {
 	if len(e.Digest) == 32 {
 		return e.Digest
 	}
-	return sha256Slice(marshalCBOR(cArray{cText("UNICITY_FORCED_ENTRY"), cUint(uint64(pos)), cText(e.Sender), cUint(uint64(e.ValueDelta)), cText(e.Reason)}))
+	return sha256Slice(marshalCBOR(cArray{cText("UNICITY_FORCED_ENTRY"), cUint(uint64(pos)), cText(e.Sender), cBytes(signedDeltaBytes(e.ValueDelta)), cText(e.Reason)}))
 }
 
 // DerivedSealOutcomes is the seal-registry record list the FinalizeStep

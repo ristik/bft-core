@@ -28,7 +28,8 @@ type creditState struct {
 	creditID    string
 	owner       string
 	fromDeposit string
-	consumedBy  int64 // queue seq the admission bound it to, -1 if unconsumed
+	consumedBy  uint64 // queue seq the admission bound it to when consumed is true
+	consumed    bool   // kept separately so the full uint64 sequence space is valid
 	reconciled  bool
 }
 
@@ -111,7 +112,7 @@ func (e *CreditEscrow) mintCredit(creditID, owner string) bool {
 		return false
 	}
 	e.available[owner]--
-	e.credits[creditID] = &creditState{creditID: creditID, owner: owner, consumedBy: -1}
+	e.credits[creditID] = &creditState{creditID: creditID, owner: owner}
 	return true
 }
 
@@ -160,19 +161,20 @@ func (e *CreditEscrow) ReconcileUnusedCredit(s RefundStatement, q *ForcedInbox) 
 	if c.reconciled {
 		return DepositResult{false, "credit already reconciled"}
 	}
-	if c.consumedBy >= 0 {
-		switch q.entryState(uint64(c.consumedBy)) {
+	if c.consumed {
+		switch q.entryState(c.consumedBy) {
 		case entryCertifiedConsumed:
 			return DepositResult{false, "credit backs a certified-consumed entry — nothing to refund"}
 		case entryTentativelyExecuted:
 			return DepositResult{false, "credit's entry is tentatively executed — awaiting a consumption certificate, not refundable"}
 		}
-		if !q.RevokeEntry(uint64(c.consumedBy), s.CreditID) {
+		if !q.RevokeEntry(c.consumedBy, s.CreditID) {
 			return DepositResult{false, "credit's admission is not a pending live entry in this queue"}
 		}
 	}
 	c.reconciled = true
-	c.consumedBy = -1
+	c.consumedBy = 0
+	c.consumed = false
 	e.available[c.owner]++
 	return DepositResult{Applied: true}
 }
@@ -213,14 +215,15 @@ type AdmissionLimits struct {
 // archive of certified-consumed entries (retained for proof export, never
 // re-executed).
 type ForcedInbox struct {
-	escrow    *CreditEscrow
-	limits    AdmissionLimits
-	nextSeq   uint64
-	live      []InboxEntry          // seq-ordered; pending or tentatively executed
-	archive   map[uint64]InboxEntry // certified-consumed, by seq
-	perSender map[string]int        // live-queue occupancy
-	watermark uint64                // highest seq certified-consumed
-	acked     bool                  // whether any consumption has been acknowledged
+	escrow       *CreditEscrow
+	limits       AdmissionLimits
+	nextSeq      uint64
+	seqExhausted bool
+	live         []InboxEntry          // seq-ordered; pending or tentatively executed
+	archive      map[uint64]InboxEntry // certified-consumed, by seq
+	perSender    map[string]int        // live-queue occupancy
+	watermark    uint64                // highest seq certified-consumed
+	acked        bool                  // whether any consumption has been acknowledged
 }
 
 func NewForcedInbox(escrow *CreditEscrow, limits AdmissionLimits) *ForcedInbox {
@@ -288,6 +291,8 @@ func (q *ForcedInbox) Admit(sender, creditID string, encodedBytes, declaredGas u
 		return AdmitResult{Code: "per_sender_queue_full"}, nil
 	case len(q.live) >= q.limits.GlobalQueue:
 		return AdmitResult{Code: "global_queue_full"}, nil
+	case q.seqExhausted:
+		return AdmitResult{Code: "sequence_exhausted"}, nil
 	}
 	if c, ok := q.escrow.credits[creditID]; ok {
 		if c.reconciled {
@@ -300,8 +305,14 @@ func (q *ForcedInbox) Admit(sender, creditID string, encodedBytes, declaredGas u
 	}
 
 	seq := q.nextSeq
-	q.nextSeq++
-	q.escrow.credits[creditID].consumedBy = int64(seq)
+	if seq == ^uint64(0) {
+		q.seqExhausted = true
+	} else {
+		q.nextSeq = seq + 1
+	}
+	credit := q.escrow.credits[creditID]
+	credit.consumedBy = seq
+	credit.consumed = true
 	q.live = append(q.live, InboxEntry{
 		Seq: seq, Sender: sender, CreditID: creditID, PayloadDigest: payloadDigest,
 		DeclaredGas: declaredGas, AdmissionRound: admissionRound, state: entryPending,

@@ -95,6 +95,13 @@ Phases: `Bonded → RetirementRequested → Draining → Released`.
 - `Admit` **mints one credit** for `sender` from its available balance and binds
   the credit to the queue `seq`. Each credit records its `owner` and originating
   deposit.
+- Queue sequences remain `uint64` end to end. A credit stores its bound
+  `consumedBy uint64` together with a separate `consumed` flag; no signed
+  sentinel represents an absent sequence. `MaxUint64` may be assigned once,
+  after which admission reports `sequence_exhausted` rather than wrapping and
+  reusing sequence zero. Refund reconciliation consults the bound sequence
+  only when `consumed` is true. For the matching D2 rejection-digest encoding
+  of signed `ValueDelta`, see the [D2 design note](d2-reth-system-call-fee-profile.md).
 - A second `Admit` with the same `creditID` is rejected
   (`credit_already_consumed`, or `credit_already_reconciled` if it was refunded).
   An `Admit` from a sender with no available credit is `no_credit`.

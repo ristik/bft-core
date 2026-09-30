@@ -337,6 +337,15 @@ Ethereum transaction:
     incompatible rules). It is **consumed** with an authenticated `reason` and
     `status 0`. It is **not** an EVM transaction, has **no** receipt, and is
     **never** an EVM revert.
+- **Rejected-entry digest encoding (D2/D5 shared).** When a rejected entry has
+  no supplied 32-byte payload digest, `forcedDigest` is
+  `SHA-256(CBOR(["UNICITY_FORCED_ENTRY", position, sender, valueDeltaBytes,
+  reason]))`. `valueDeltaBytes` is a CBOR byte string containing exactly eight
+  bytes: the signed `ValueDelta` in big-endian two's-complement form. This is a
+  fixed-width byte-string encoding, not a CBOR signed integer and not an
+  unsigned CBOR integer produced by a signed-to-unsigned cast. Ureth does not
+  yet implement this forced-entry digest; its matching implementation is
+  tracked in [ureth #43](https://github.com/ristik/ureth/issues/43).
 - **Where the off-trie commitment lives, and WHEN it is written.** The
   privileged operation runs in **two steps**:
   - The **first system call is presence-only** — mandatory on every successful
