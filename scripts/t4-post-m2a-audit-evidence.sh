@@ -40,7 +40,8 @@ import json,sys
 result=json.load(open(sys.argv[1],encoding="utf-8")); claim=json.load(open(sys.argv[2],encoding="utf-8"))
 if result.get("status") != "pass": raise SystemExit("auditor result is not pass")
 if not result.get("nativeSupply",{}).get("matches"): raise SystemExit("native supply did not reconcile exactly")
-if int(result.get("nativeSupply",{}).get("baseFeeBurn","0")) <= 0: raise SystemExit("no base-fee burn was observed")
+if int(result.get("nativeSupply",{}).get("ordinaryGasUsed","0")) <= 0: raise SystemExit("no ordinary receipt gas was observed")
+if int(result.get("nativeSupply",{}).get("baseFeeBurn","0")) <= 0: raise SystemExit("no base-fee burn from ordinary receipts was observed")
 if int(result["certifiedBlock"]["number"]) < int(claim["claimBlockNumber"],16):
     raise SystemExit("audit snapshot predates the vesting claim")
 PY

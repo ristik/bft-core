@@ -21,6 +21,54 @@ def rpc(url, method, params):
     return decoded["result"]
 
 
+def rpc_quantity(value, field):
+    if not isinstance(value, str) or not value.startswith("0x"):
+        raise RuntimeError(f"{field} is not an RPC hex quantity")
+    try:
+        return int(value, 16)
+    except ValueError as exc:
+        raise RuntimeError(f"{field} is not an RPC hex quantity") from exc
+
+
+def capture_fee_receipt(url, block, transaction, number, index):
+    tx_hash = transaction.get("hash")
+    if not isinstance(tx_hash, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash):
+        raise RuntimeError(f"block {number} transaction {index} has an invalid hash")
+    receipt = rpc(url, "eth_getTransactionReceipt", [tx_hash])
+    if not isinstance(receipt, dict):
+        raise RuntimeError(f"block {number} transaction {tx_hash} has no receipt")
+    if (str(receipt.get("transactionHash", "")).lower() != tx_hash.lower()
+            or str(receipt.get("blockHash", "")).lower() != str(block["hash"]).lower()
+            or rpc_quantity(receipt.get("blockNumber"), "receipt blockNumber") != number
+            or rpc_quantity(receipt.get("transactionIndex"), "receipt transactionIndex") != index):
+        raise RuntimeError(f"block {number} transaction {tx_hash} receipt is bound to different coordinates")
+
+    base_fee = rpc_quantity(block.get("baseFeePerGas"), f"block {number} baseFeePerGas")
+    gas_used = rpc_quantity(receipt.get("gasUsed"), f"receipt {tx_hash} gasUsed")
+    effective = rpc_quantity(receipt.get("effectiveGasPrice"), f"receipt {tx_hash} effectiveGasPrice")
+    if gas_used <= 0:
+        raise RuntimeError(f"block {number} transaction {tx_hash} has zero receipt gas")
+
+    if transaction.get("maxPriorityFeePerGas") is not None:
+        tip_cap = rpc_quantity(transaction.get("maxPriorityFeePerGas"), f"transaction {tx_hash} maxPriorityFeePerGas")
+        fee_cap = rpc_quantity(transaction.get("maxFeePerGas"), f"transaction {tx_hash} maxFeePerGas")
+        if fee_cap < base_fee:
+            raise RuntimeError(f"block {number} transaction {tx_hash} fee cap is below its base fee")
+        tip = min(tip_cap, fee_cap - base_fee)
+    else:
+        if effective < base_fee:
+            raise RuntimeError(f"block {number} transaction {tx_hash} effective gas price is below its base fee")
+        tip = effective - base_fee
+    if effective - tip != base_fee:
+        raise RuntimeError(f"block {number} transaction {tx_hash} effective gas price minus tip does not equal base fee")
+    return {
+        "transactionHash": tx_hash.lower(),
+        "gasUsed": hex(gas_used),
+        "effectiveGasPrice": hex(effective),
+        "priorityFeePerGas": hex(tip),
+    }
+
+
 def contains_selfdestruct(value):
     if isinstance(value, dict):
         for key in ("op", "opcode"):
@@ -164,10 +212,12 @@ def main():
             if not isinstance(miner, str) or not re.fullmatch(r"0x[0-9a-fA-F]{40}", miner):
                 raise RuntimeError(f"block {number} has an invalid fee-beneficiary address")
             known_accounts.add(miner.lower())
-            for transaction in transactions:
+            fee_receipts = []
+            for transaction_index, transaction in enumerate(transactions):
                 if not isinstance(transaction, dict):
                     raise RuntimeError(f"block {number} has a malformed transaction entry")
                 transaction_count += 1
+                fee_receipts.append(capture_fee_receipt(args.url, block, transaction, number, transaction_index))
                 if transaction.get("hash", "").lower() == claim_hash:
                     claim_seen = True
                 sender = transaction.get("from")
@@ -178,7 +228,12 @@ def main():
                 known_accounts.add(recipient.lower())
                 if recipient.lower() == "0x00000000000000000000000000000000000000ff":
                     transfer_count += 1
-            fee_burn += int(block["baseFeePerGas"], 16) * int(block["gasUsed"], 16)
+            ordinary_gas = sum(int(receipt["gasUsed"], 16) for receipt in fee_receipts)
+            header_gas = rpc_quantity(block["gasUsed"], f"block {number} gasUsed")
+            if ordinary_gas > header_gas:
+                raise RuntimeError(f"block {number} receipt gas exceeds gross header gas")
+            system_gas = header_gas - ordinary_gas
+            fee_burn += rpc_quantity(block["baseFeePerGas"], f"block {number} baseFeePerGas") * ordinary_gas
             blocks.append({
                 "number": number,
                 "hash": block["hash"].lower(),
@@ -186,11 +241,16 @@ def main():
                 "difficulty": block.get("difficulty", "0x0"),
                 "baseFeePerGas": block["baseFeePerGas"],
                 "gasUsed": block["gasUsed"],
+                "transactionCount": len(transactions),
+                "feeReceipts": fee_receipts,
                 "blobGasUsed": block["blobGasUsed"],
                 "withdrawalsCount": len(withdrawals),
                 "selfdestructTracesComplete": True,
                 "selfdestructs": [],
             })
+            if number <= 3:
+                print(f"T4 fee coverage B{number}: {len(fee_receipts)} ordinary receipt(s), "
+                      f"{ordinary_gas} paid gas + {system_gas} system gas", flush=True)
             previous_hash = block["hash"].lower()
         if previous_hash != final_hash:
             raise RuntimeError("last accounting header does not equal the certified tip")
@@ -219,7 +279,7 @@ def main():
         print(f"PASS: state balances/code and every required storage slot collected for {len(state_accounts)} controlled accounts")
 
         evidence = {
-            "version": "unicity/supply-audit-snapshot/v1",
+            "version": "unicity/supply-audit-snapshot/v2",
             "contractsCommit": "e7eb3216549b772a9e1df2b1214976d7dd9e6e62",
             "genesisHash": genesis_hash,
             "certifiedBlock": {"number": tip, "hash": final_hash, "certified": True},
