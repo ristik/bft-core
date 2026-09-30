@@ -139,6 +139,49 @@ engineapi_parent_witness_verification_duration_seconds_count 3
 	require.NotNil(t, report.Witness.P99Seconds)
 }
 
+func TestLocalProcessFixtureFillsMetricsMissingOnMacOS(t *testing.T) {
+	text := `# TYPE engineapi_parent_witness_verification_total counter
+engineapi_parent_witness_verification_total{outcome="verified"} 2
+# TYPE engineapi_parent_witness_verification_duration_seconds histogram
+engineapi_parent_witness_verification_duration_seconds_bucket{le="0.1"} 2
+engineapi_parent_witness_verification_duration_seconds_bucket{le="+Inf"} 2
+engineapi_parent_witness_verification_duration_seconds_count 2
+`
+	families, err := (&expfmt.TextParser{}).TextToMetricFamilies(strings.NewReader(text))
+	require.NoError(t, err)
+	first := sample{at: time.Unix(1, 0), process: &processSnapshot{CPUSeconds: 10, RSSBytes: 1024, OpenFDs: 4}}
+	last := sample{at: time.Unix(6, 0), metrics: families, process: &processSnapshot{CPUSeconds: 12, RSSBytes: 2048, OpenFDs: 7}}
+	got := nodeReport{Complete: true}
+	applyMetrics(&got, first, last, 2)
+	require.True(t, got.Complete, "%+v", got.Errors)
+	require.Equal(t, float64(12), *got.Process.CPUSecondsTotal)
+	require.Equal(t, float64(40), *got.Process.CPUPercent)
+	require.Equal(t, float64(2048), *got.Process.RSSBytes)
+	require.Equal(t, float64(7), *got.Process.OpenFDs)
+	require.False(t, got.Certification.PauseMetricsAvailable)
+	require.False(t, got.Certification.EpochTransitionObserved)
+}
+
+func TestParseProcessUsageAndBoundedFDCount(t *testing.T) {
+	cpu, rss, err := parsePSProcessStats([]byte("1-02:03:04.25  42368\n"))
+	require.NoError(t, err)
+	require.Equal(t, float64(93784.25), cpu)
+	require.Equal(t, float64(42368), rss)
+	_, _, err = parsePSProcessStats([]byte("not-a-usage-line"))
+	require.Error(t, err)
+
+	fds, err := countLsofFDs([]byte("p123\ncubft\nf cwd\nf txt\nf 0\nf 1\nn/dev/null\n"))
+	require.NoError(t, err)
+	require.EqualValues(t, 4, fds)
+	root := t.TempDir()
+	for _, name := range []string{"0", "1", "2"} {
+		require.NoError(t, os.WriteFile(filepath.Join(root, name), nil, 0600))
+	}
+	fds, err = countEntries(root)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, fds)
+}
+
 func TestMeasureArchiveMissingPathIsUncovered(t *testing.T) {
 	t.Parallel()
 	got := measureArchive(filepath.Join(t.TempDir(), "missing"), 10)

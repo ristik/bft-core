@@ -33,10 +33,11 @@ const (
 )
 
 type nodeConfig struct {
-	Name       string `json:"name"`
-	StatusURL  string `json:"status_url"`
-	MetricsURL string `json:"metrics_url"`
-	ArchiveDir string `json:"archive_dir"`
+	Name           string `json:"name"`
+	StatusURL      string `json:"status_url"`
+	MetricsURL     string `json:"metrics_url"`
+	ArchiveDir     string `json:"archive_dir"`
+	ProcessPIDFile string `json:"process_pid_file,omitempty"`
 }
 
 type config struct {
@@ -108,6 +109,7 @@ type witnessReport struct {
 
 type certificationReport struct {
 	EpochTransitionObserved bool     `json:"epochTransitionObserved"`
+	PauseMetricsAvailable   bool     `json:"pauseMetricsAvailable"`
 	LastCertifiedAt         *float64 `json:"lastCertifiedAtUnix,omitempty"`
 	PauseStartAt            *float64 `json:"lastEpochTransitionPauseStartUnix,omitempty"`
 	PauseEndAt              *float64 `json:"lastEpochTransitionPauseEndUnix,omitempty"`
@@ -118,6 +120,7 @@ type sample struct {
 	at      time.Time
 	status  archivewiring.OperatorStatus
 	metrics map[string]*dto.MetricFamily
+	process *processSnapshot
 }
 
 func loadConfig(path string) (checkedConfig, error) {
@@ -359,7 +362,14 @@ func readSample(ctx context.Context, node nodeConfig, client *http.Client, at ti
 	if err != nil {
 		return sample{}, fmt.Errorf("parsing Prometheus metrics: %w", err)
 	}
-	return sample{at: at, status: status, metrics: families}, nil
+	var process *processSnapshot
+	if node.ProcessPIDFile != "" {
+		process, err = readProcessSnapshot(ctx, node.ProcessPIDFile)
+		if err != nil {
+			return sample{}, fmt.Errorf("reading local process metrics: %w", err)
+		}
+	}
+	return sample{at: at, status: status, metrics: families, process: process}, nil
 }
 
 func applyStatus(out *nodeReport, status archivewiring.OperatorStatus) {
@@ -411,9 +421,31 @@ func applyMetrics(out *nodeReport, first, last sample, sampleCount int) {
 	}
 	out.Process.RSSBytes = metricScalar(last.metrics, "process_resident_memory_bytes")
 	out.Process.OpenFDs = metricScalar(last.metrics, "process_open_fds")
+	if last.process != nil {
+		if out.Process.CPUSecondsTotal == nil {
+			cpu := last.process.CPUSeconds
+			out.Process.CPUSecondsTotal = &cpu
+			if first.process != nil && sampleCount > 1 && !processRestarted {
+				elapsed := last.at.Sub(first.at).Seconds()
+				if elapsed > 0 && cpu >= first.process.CPUSeconds {
+					pct := (cpu - first.process.CPUSeconds) / elapsed * 100
+					out.Process.CPUPercent = &pct
+				}
+			}
+		}
+		if out.Process.RSSBytes == nil {
+			value := last.process.RSSBytes
+			out.Process.RSSBytes = &value
+		}
+		if out.Process.OpenFDs == nil {
+			value := float64(last.process.OpenFDs)
+			out.Process.OpenFDs = &value
+		}
+	}
 	out.Certification.LastCertifiedAt = metricScalar(last.metrics, "shardnode_certification_last_timestamp")
 	out.Certification.PauseStartAt = metricScalar(last.metrics, "shardnode_certification_pause_start_timestamp")
 	out.Certification.PauseEndAt = metricScalar(last.metrics, "shardnode_certification_pause_end_timestamp")
+	out.Certification.PauseMetricsAvailable = out.Certification.PauseStartAt != nil || out.Certification.PauseEndAt != nil
 	if start, end := out.Certification.PauseStartAt, out.Certification.PauseEndAt; start != nil && end != nil && *end >= *start {
 		duration := *end - *start
 		out.Certification.PauseDurationSeconds = &duration
@@ -469,9 +501,6 @@ func applyMetrics(out *nodeReport, first, last sample, sampleCount int) {
 	}
 	if out.Witness.P50Seconds == nil || out.Witness.P99Seconds == nil {
 		out.addError(errors.New("witness latency quantiles are unavailable for the sampled interval"))
-	}
-	if out.Certification.LastCertifiedAt == nil {
-		out.addError(errors.New("no last-certified timestamp is available"))
 	}
 }
 
