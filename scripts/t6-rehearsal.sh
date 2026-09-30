@@ -109,8 +109,8 @@ new_isolated_checkout() {
   ISOLATION_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/t6-rehearsal.XXXXXX")
   available_kb=$(df -Pk "$ISOLATION_ROOT" | awk 'NR==2 {print $4}')
   printf 'disk available before clean build: %s KiB\n' "$available_kb" | tee "$EVIDENCE_DIR/disk-before.txt"
-  if [ "$available_kb" -lt 7000000 ]; then
-    fail "less than 7 GiB free for separate Rust, Go, and Solidity caches; no build started"
+  if [ "$available_kb" -lt 5500000 ]; then
+    fail "less than 5.5 GiB free for the clean source build; no build started"
     return 1
   fi
   mkdir -p "$ISOLATION_ROOT/home" "$ISOLATION_ROOT/cache/go-build" \
@@ -205,6 +205,7 @@ build_pinned_ureth() {
   export PATH="$CARGO_HOME/bin:$PATH"
   export RUSTUP_TOOLCHAIN=$T6_RUST_TOOLCHAIN
   "$CARGO_HOME/bin/rustup" toolchain install "$T6_RUST_TOOLCHAIN" --profile minimal
+  require_free_kb 5000000 "Ureth compilation after isolated toolchain install" || return 1
   URETH_PIN_COMMIT=$URETH_PIN_COMMIT URETH_PIN_REPO=$URETH_PIN_REPO \
     URETH_PIN_LOCAL=$URETH_PIN_LOCAL URETH_PIN_CACHE_DIR=$URETH_PIN_CACHE_DIR \
     urethPinResolve "$ISOLATION_ROOT/bin" | tee "$EVIDENCE_DIR/ureth-build.log"
@@ -234,6 +235,7 @@ build_pinned_ureth() {
 
 run_paired_t6() {
   cd "$FRESH_REPO"
+  require_free_kb 2500000 "paired T6 network rehearsal" || return 1
   export POST_M2A_MODE=t6 POST_M2A_CHAIN_ID=1337
   export POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$T6_URETH_COMMIT"
   export M2_PROFILE2=1 SIGNING=authority M2A_FINAL_RESTORE=1
