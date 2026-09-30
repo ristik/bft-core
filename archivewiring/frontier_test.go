@@ -123,6 +123,7 @@ func TestCertifiedBindingAuthenticatesArchiveRolesAndHeader(t *testing.T) {
 }
 
 func TestFrontierJournalAdvancePruneAndRestart(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 6)
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
@@ -183,6 +184,7 @@ func TestFrontierJournalAdvancePruneAndRestart(t *testing.T) {
 }
 
 func TestFrontierPruneSweepKeepsTimeoutRepeatBodies(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixtureWithTimeouts(t, 8)
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
@@ -237,6 +239,7 @@ func TestFrontierPruneSweepKeepsTimeoutRepeatBodies(t *testing.T) {
 }
 
 func TestFrontierPacedAuditRepairsPrunedReplica(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 6)
 	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	firstPeer := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
@@ -378,8 +381,15 @@ func TestFrontierPruneKeepsIndependentSigningRecord(t *testing.T) {
 }
 
 func TestFrontierLongRunPastJournalCapsAndReplicaLoss(t *testing.T) {
-	const blocks = 518
-	limits := configuredprogress.JournalLimits{Candidates: 256, Observations: 512, Bytes: 64 << 20}
+	t.Parallel()
+	// Run beyond both configured retained-record caps, with a frontier prune
+	// every four blocks. Cumulative admissions stay above the caps while each
+	// live journal image remains bounded; 518 identical cycles only repeated
+	// the same invariant and made this package several minutes slower.
+	const blocks = 34
+	limits := configuredprogress.JournalLimits{Candidates: 16, Observations: 32, Bytes: 64 << 20}
+	require.Greater(t, blocks, limits.Candidates)
+	require.Greater(t, blocks, limits.Observations)
 	f := newWiringFixtureWithLimits(t, 0, limits)
 	peers := [2]peer.ID{"first", "second"}
 	availability := digestAvailability{copies: map[string]map[[32]byte][32]byte{peers[0].String(): {}, peers[1].String(): {}}}
@@ -427,7 +437,7 @@ func TestFrontierLongRunPastJournalCapsAndReplicaLoss(t *testing.T) {
 		require.NoError(t, err)
 		ack := sha256.Sum256(request)
 		availability.copies[peers[0].String()][q.BlockHash] = digest
-		if number <= 516 {
+		if number <= blocks-2 {
 			availability.copies[peers[1].String()][q.BlockHash] = digest
 		}
 		pending = append(pending, frontier.Coverage{Anchor: frontier.Record{Sequence: uint64(number), Round: resultUC.GetRootRoundNumber(), Height: uint64(number), StateRoot: state, Subject: q, Acks: [2]frontier.Acknowledgment{{Replica: peers[0].String(), RequestDigest: ack, ManifestDigest: digest}, {Replica: peers[1].String(), RequestDigest: ack, ManifestDigest: digest}}}, Material: rec})
@@ -445,11 +455,11 @@ func TestFrontierLongRunPastJournalCapsAndReplicaLoss(t *testing.T) {
 	// still admits the already certified block independently of archive work.
 	_, err = f.store.LoadJournal(context.Background(), f.context, limits)
 	require.NoError(t, err)
-	// The first 516 are pruned; two remaining certified records are pending.
+	// The acknowledged prefix is pruned; two remaining certified records are pending.
 	require.ErrorIs(t, f.store.AdvanceFrontier(context.Background(), f.context, limits, pending), frontier.ErrAcknowledgment)
 	image, err = f.store.LoadJournal(context.Background(), f.context, limits)
 	require.NoError(t, err)
-	require.EqualValues(t, 516, image.Frontier.Anchor.Height)
+	require.EqualValues(t, blocks-2, image.Frontier.Anchor.Height)
 	require.Len(t, image.Candidates, 3)
 	for _, item := range pending {
 		availability.copies[peers[1].String()][item.Anchor.Subject.BlockHash] = item.Anchor.Acks[1].ManifestDigest

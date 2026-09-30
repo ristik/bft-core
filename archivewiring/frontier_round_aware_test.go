@@ -19,6 +19,7 @@ import (
 )
 
 func TestRoundAwareFrontierBreaksUnresolvedObservationDeadlock(t *testing.T) {
+	t.Parallel()
 	limits := configuredprogress.JournalLimits{Candidates: 2, Observations: 8, Bytes: 16 << 20}
 	f := newWiringFixtureWithLimits(t, 1, limits)
 	ctx := context.Background()

@@ -18,6 +18,7 @@ import (
 )
 
 func TestRecoverySourceReadsAndVerifiesCertifiedArchiveSuffix(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 1)
 	q, rec := f.record(t, 0)
 	first := f.entries[0].Candidate
@@ -65,6 +66,7 @@ func TestRecoverySourceReadsAndVerifiesCertifiedArchiveSuffix(t *testing.T) {
 }
 
 func TestRecoverySourceSkipsCorruptFirstReplica(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 1)
 	q, rec := f.record(t, 0)
 	first := f.entries[0].Candidate

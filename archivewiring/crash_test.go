@@ -16,6 +16,7 @@ import (
 )
 
 func TestSIGKILLAfterArchivePublishAndAcknowledgement(t *testing.T) {
+	t.Parallel()
 	for _, point := range []string{"after-publish", "after-acknowledgement"} {
 		t.Run(point, func(t *testing.T) {
 			dir := t.TempDir()

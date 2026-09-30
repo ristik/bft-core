@@ -13,6 +13,7 @@ import (
 )
 
 func TestRoundIndexedArchiveLookupSurvivesRestartAndRefusesWrongContext(t *testing.T) {
+	t.Parallel()
 	f := newWiringFixture(t, 3)
 	dir := t.TempDir()
 	store, err := archive.Open(dir)
