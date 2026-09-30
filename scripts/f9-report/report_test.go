@@ -135,6 +135,8 @@ engineapi_parent_witness_verification_duration_seconds_count 3
 	require.EqualValues(t, 3, report.Witness.Count)
 	require.EqualValues(t, 2, report.Witness.ByOutcome["verified"])
 	require.EqualValues(t, 1, report.Witness.ByOutcome["invalid"])
+	require.EqualValues(t, 2, report.Witness.CumulativeByOutcome["verified"])
+	require.EqualValues(t, 1, report.Witness.CumulativeByOutcome["invalid"])
 	require.NotNil(t, report.Witness.P50Seconds)
 	require.NotNil(t, report.Witness.P99Seconds)
 }

@@ -100,11 +100,12 @@ type processReport struct {
 }
 
 type witnessReport struct {
-	Available  bool              `json:"available"`
-	Count      uint64            `json:"count"`
-	ByOutcome  map[string]uint64 `json:"byOutcome,omitempty"`
-	P50Seconds *float64          `json:"p50Seconds,omitempty"`
-	P99Seconds *float64          `json:"p99Seconds,omitempty"`
+	Available           bool              `json:"available"`
+	Count               uint64            `json:"count"`
+	ByOutcome           map[string]uint64 `json:"byOutcome,omitempty"`
+	CumulativeByOutcome map[string]uint64 `json:"cumulativeByOutcome,omitempty"`
+	P50Seconds          *float64          `json:"p50Seconds,omitempty"`
+	P99Seconds          *float64          `json:"p99Seconds,omitempty"`
 }
 
 type certificationReport struct {
@@ -460,7 +461,9 @@ func applyMetrics(out *nodeReport, first, last sample, sampleCount int) {
 	if len(lastCounter) > 0 {
 		out.Witness.Available = true
 		out.Witness.ByOutcome = make(map[string]uint64, len(lastCounter))
+		out.Witness.CumulativeByOutcome = make(map[string]uint64, len(lastCounter))
 		for name, value := range lastCounter {
+			out.Witness.CumulativeByOutcome[name] = uint64(value)
 			if before, ok := firstCounter[name]; ok && value >= before && sampleCount > 1 && !processRestarted {
 				value -= before
 			}
