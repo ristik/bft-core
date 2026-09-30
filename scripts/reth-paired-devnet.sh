@@ -286,7 +286,7 @@ for i in $(seq 1 "$validators"); do
     --port $((rethP2PBase + i - 1)) --disable-discovery \
     --ipcdisable --engine.persistence-threshold "$d2cPersistenceThreshold" \
     --builder.gaslimit 30000000 \
-    "${rethStorageArgs[@]}" \
+    ${rethStorageArgs[@]+"${rethStorageArgs[@]}"} \
     $(urethPinUnicityFlags) \
     >"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"
@@ -872,7 +872,7 @@ fi
 d2cRecoveryProbe=${D2C_RESTART_PROBE:-0}
 [ -n "${D2C_FAULT_SCENARIO:-}" ] && d2cRecoveryProbe=1
 if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout 900 \
-  "${traceArgs[@]}" ${probeArgs[@]+"${probeArgs[@]}"} ${faultArgs[@]+"${faultArgs[@]}"}; then
+  ${traceArgs[@]+"${traceArgs[@]}"} ${probeArgs[@]+"${probeArgs[@]}"} ${faultArgs[@]+"${faultArgs[@]}"}; then
   pass "D1 observed $rounds consecutive blocks with a fresh canonical survivor quorum"
 else
   fail "D1 continuous block observation failed"

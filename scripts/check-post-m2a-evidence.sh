@@ -24,13 +24,13 @@ lint_files=(
   scripts/post-m2a-evidence-lib.sh
 )
 
-bash -n "${syntax_files[@]}"
-printf 'PASS: bash -n parsed %d post-M2a evidence and lane-hook scripts\n' "${#syntax_files[@]}"
+bash -n ${syntax_files[@]+"${syntax_files[@]}"}
+printf 'PASS: bash -n parsed the post-M2a evidence and lane-hook scripts\n'
 
 shellcheck_bin=${SHELLCHECK:-shellcheck}
 command -v "$shellcheck_bin" >/dev/null 2>&1 || {
   printf 'FAIL: shellcheck is required; install it and rerun %s\n' "$0" >&2
   exit 1
 }
-"$shellcheck_bin" --external-sources "${lint_files[@]}"
-printf 'PASS: shellcheck checked %d post-M2a evidence runners and helpers\n' "${#lint_files[@]}"
+"$shellcheck_bin" --external-sources ${lint_files[@]+"${lint_files[@]}"}
+printf 'PASS: shellcheck checked the post-M2a evidence runners and helpers\n'

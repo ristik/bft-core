@@ -50,12 +50,27 @@ pass "MintReasonBundleV1 inclusion extracted from receipt-complete archive v2"
   --out "$EVIDENCE_DIR/unlocked-absence.cbor" || fail "archive absence extraction failed"
 pass "complete receipt-list absence bundle extracted for the distinct Unlocked(uint256) predicate"
 [ -s "$trust_base" ] || fail "epoch-1 root trust base is missing"
-# This verifier binary has no RPC client or archive dependency. Each invocation gets only the two
-# evidence files plus a fixed demo mode; env -i strips lane endpoints and credentials.
-env -i PATH="$PATH" "$tmp/verify-offline" --bundle "$EVIDENCE_DIR/locked.cbor" \
+# The verifier has no RPC/archive dependency, and sandbox-exec additionally denies all network
+# operations for each fresh process. Keep an explicit stripped-environment fallback for hosts
+# without macOS sandbox-exec; the evidence log labels that weaker mode precisely.
+sandboxExec=$(command -v sandbox-exec || true)
+if [ -n "$sandboxExec" ]; then
+  offlineProfile='(version 1) (allow default) (deny network*)'
+  run_offline_verifier() {
+    env -i PATH="$PATH" "$sandboxExec" -p "$offlineProfile" "$tmp/verify-offline" "$@"
+  }
+  pass "F7 verifier network sandbox enabled (deny network*)"
+else
+  run_offline_verifier() {
+    env -i PATH="$PATH" HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 \
+      ALL_PROXY=http://127.0.0.1:9 "$tmp/verify-offline" "$@"
+  }
+  pass "F7 verifier uses network-stripped env, not sandboxed"
+fi
+run_offline_verifier --bundle "$EVIDENCE_DIR/locked.cbor" \
   --trust-base "$trust_base" --mode locked >"$EVIDENCE_DIR/verify-locked.json" || fail "offline inclusion verification failed"
 pass "separate offline process verified the lock receipt using only bundle and epoch trust base"
-env -i PATH="$PATH" "$tmp/verify-offline" --bundle "$EVIDENCE_DIR/unlocked-absence.cbor" \
+run_offline_verifier --bundle "$EVIDENCE_DIR/unlocked-absence.cbor" \
   --trust-base "$trust_base" --mode absent >"$EVIDENCE_DIR/verify-absence.json" || fail "offline absence verification failed"
 pass "separate offline process verified absence of the distinct event predicate"
 cp test-nodes/post-m2a-evidence/f7-lock-pin.json "$EVIDENCE_DIR/lock-pin.json"
