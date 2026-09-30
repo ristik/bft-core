@@ -1025,4 +1025,11 @@ if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ]; then
     fi
   fi
 fi
+if [ -n "${F9_REPORT_CONFIG:-}" ]; then
+  f9ReportOut=${F9_REPORT_OUT:-test-nodes/f9-report.json}
+  # Run before the EXIT cleanup stops the nodes so the final status, Prometheus
+  # counters and archive scan all describe the completed history.
+  go run ./scripts/f9-report --config "$F9_REPORT_CONFIG" --out "$f9ReportOut" || \
+    fail "F9 final measurement report was incomplete"
+fi
 [ "$failures" -eq 0 ]
