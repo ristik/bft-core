@@ -64,7 +64,8 @@ type handoffArchiveReader interface {
 }
 
 type handoffHistoricalCandidateWriter interface {
-	PutHistoricalJournalCandidate(context.Context, configuredprogress.Context, configuredprogress.JournalLimits, configuredprogress.JournalCandidate) error
+	PutHistoricalCertifiedJournalCandidate(context.Context, configuredprogress.Context, configuredprogress.JournalLimits,
+		configuredprogress.JournalCandidate, *types.UnicityCertificate, *certification.TechnicalRecord) error
 }
 
 // runProfile2JournalStartup is the startup boundary for proof-aware journal
@@ -154,8 +155,11 @@ func reapplyHandoffTerminalCertificatesWithArchive(ctx context.Context, store ha
 		}
 		var originalUC types.UnicityCertificate
 		var originalTR certification.TechnicalRecord
-		if record == nil || types.Cbor.Unmarshal(record.OriginalUC, &originalUC) != nil || types.Cbor.Unmarshal(record.OriginalTR, &originalTR) != nil {
-			return fmt.Errorf("%w: archived handoff terminal body has invalid authorizing certificate", configuredprogress.ErrUntrusted)
+		var resultingUC types.UnicityCertificate
+		var resultingTR certification.TechnicalRecord
+		if record == nil || types.Cbor.Unmarshal(record.OriginalUC, &originalUC) != nil || types.Cbor.Unmarshal(record.OriginalTR, &originalTR) != nil ||
+			types.Cbor.Unmarshal(record.ResultingUC, &resultingUC) != nil || types.Cbor.Unmarshal(record.ResultingTR, &resultingTR) != nil {
+			return fmt.Errorf("%w: archived handoff terminal body has invalid certificate binding", configuredprogress.ErrUntrusted)
 		}
 		block, blockErr := engineapi.BlockFromArchive(q, record, originalUC.GetRootRoundNumber(), terminal.uc.InputRecord.RoundNumber)
 		if blockErr != nil {
@@ -172,7 +176,7 @@ func reapplyHandoffTerminalCertificatesWithArchive(ctx context.Context, store ha
 			Raw:         bytes.Clone(block.Raw), BlockSize: block.BlockSize, StateSize: block.StateSize,
 			AuthorizingUC: &originalUC, AuthorizingTR: &originalTR,
 		}
-		if err := candidateWriter.PutHistoricalJournalCandidate(ctx, journalCtx, limits, candidate); err != nil {
+		if err := candidateWriter.PutHistoricalCertifiedJournalCandidate(ctx, journalCtx, limits, candidate, &resultingUC, &resultingTR); err != nil {
 			return fmt.Errorf("retaining verified archived handoff terminal body %x: %w", q.BlockHash, err)
 		}
 		if err := store.BackfillJournalObservation(ctx, journalCtx, limits, terminal.uc, terminal.tr); err != nil {
