@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,11 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/unicitynetwork/bft-core/archivewiring"
+)
+
+var (
+	ErrCertifiedParentUnavailable = errors.New("certified EVM parent unavailable")
+	ErrStaleCertifiedParent       = errors.New("frozen parent is not the latest certified EVM parent")
 )
 
 type shardNodeStatusFlags struct {
@@ -71,6 +77,55 @@ func fetchShardNodeStatus(ctx context.Context, base string) (archivewiring.Opera
 		return status, errors.New("shard-node status response has trailing JSON")
 	}
 	return status, nil
+}
+
+// certifiedParentFromStatus reads the current certified tip from the shard node's
+// read-only operator endpoint. The root node still validates this pin when it
+// builds the handoff plan, so a tip that advances after this GET is refused.
+func certifiedParentFromStatus(ctx context.Context, base string) (*archivewiring.BlockPin, []byte, error) {
+	status, err := fetchShardNodeStatus(ctx, base)
+	if err != nil {
+		return nil, nil, err
+	}
+	if status.CertifiedTip == nil {
+		return nil, nil, ErrCertifiedParentUnavailable
+	}
+	hashText := strings.TrimPrefix(status.CertifiedTip.Hash, "0x")
+	hash, err := hex.DecodeString(hashText)
+	if err != nil || len(hash) != 32 {
+		return nil, nil, fmt.Errorf("%w: status has an invalid certified-tip hash", ErrCertifiedParentUnavailable)
+	}
+	pin := *status.CertifiedTip
+	return &pin, hash, nil
+}
+
+func shardNodeCertifiedParentCmd() *cobra.Command {
+	var base string
+	var timeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "certified-parent",
+		Short: "Read the latest certified EVM parent from a shard node",
+		Long:  "Read the shard node's certified-tip pin through the read-only operator status endpoint and print its 32-byte block hash.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if base == "" {
+				return errors.New("--url is required")
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), timeout)
+			defer cancel()
+			pin, hash, err := certifiedParentFromStatus(ctx, base)
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "0x%x\n", hash); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "latest certified parent: height=%d rootEpoch=%d rootRound=%d\n", pin.Height, pin.RootEpoch, pin.RootRound)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&base, "url", "", "base URL of the shard node's read-only status server")
+	cmd.Flags().DurationVar(&timeout, "timeout", 5*time.Second, "status request timeout")
+	return cmd
 }
 
 func errorString(err error) string {

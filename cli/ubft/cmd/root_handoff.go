@@ -152,7 +152,35 @@ func newRootCmd() *cobra.Command {
 	root := &cobra.Command{Use: "root", Short: "Root chain operator commands"}
 	handoff := &cobra.Command{Use: "handoff", Short: "Profile-2 validator handoff"}
 	var nextFile, parent, rootRPCs string
+	var parentStatusURL string
 	propose := &cobra.Command{Use: "propose", Short: "Request old-validator endorsements for a new root trust base", RunE: func(cmd *cobra.Command, _ []string) error {
+		var parentBytes []byte
+		if parent != "" {
+			var err error
+			parentBytes, err = hex.DecodeString(strings.TrimPrefix(parent, "0x"))
+			if err != nil || len(parentBytes) != 32 {
+				return errors.New("frozen parent must be a 32-byte hex block hash")
+			}
+		}
+		if parent == "" || parentStatusURL != "" {
+			if parentStatusURL == "" {
+				return ErrCertifiedParentUnavailable
+			}
+			statusCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
+			pin, latestParent, err := certifiedParentFromStatus(statusCtx, parentStatusURL)
+			cancel()
+			if err != nil {
+				return err
+			}
+			if len(parentBytes) != 0 && !bytes.Equal(parentBytes, latestParent) {
+				return fmt.Errorf("%w: supplied=0x%x latest=0x%x at height %d", ErrStaleCertifiedParent, parentBytes, latestParent, pin.Height)
+			}
+			if len(parentBytes) == 0 {
+				parentBytes = latestParent
+				parent = fmt.Sprintf("0x%x", latestParent)
+				fmt.Fprintf(cmd.ErrOrStderr(), "using latest certified EVM parent from %s: height=%d hash=%s\n", parentStatusURL, pin.Height, parent)
+			}
+		}
 		raw, err := os.ReadFile(nextFile)
 		if err != nil {
 			return err
@@ -205,10 +233,10 @@ func newRootCmd() *cobra.Command {
 		return err
 	}}
 	propose.Flags().StringVar(&nextFile, "next-trust-base", "", "next epoch trust base JSON")
-	propose.Flags().StringVar(&parent, "frozen-parent", "", "certified EVM parent block hash (32-byte hex)")
+	propose.Flags().StringVar(&parent, "frozen-parent", "", "certified EVM parent block hash (32-byte hex); defaults to current tip when --certified-parent-status-url is set")
+	propose.Flags().StringVar(&parentStatusURL, "certified-parent-status-url", "", "base URL of a shard node's read-only operator status server; selects the current tip if --frozen-parent is omitted")
 	propose.Flags().StringVar(&rootRPCs, "root-rpc", "", "comma-separated local old validator RPC URLs")
 	_ = propose.MarkFlagRequired("next-trust-base")
-	_ = propose.MarkFlagRequired("frozen-parent")
 	_ = propose.MarkFlagRequired("root-rpc")
 	handoff.AddCommand(propose)
 	var networkID, oldEpoch, attempt uint64
