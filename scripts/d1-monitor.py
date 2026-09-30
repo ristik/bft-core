@@ -13,12 +13,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-def rpc(port, method, params):
+def rpc(port, method, params, timeout=3):
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}", body, {"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=3) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         answer = json.load(resp)
     if "error" in answer:
         raise RuntimeError(f"{method} on {port}: {answer['error']}")
@@ -93,6 +93,27 @@ def execution_evidence(nodes, height, block_hash, commitment, validators, allow_
     return derived[0], partition_rounds[0], (
         ",".join(root_rounds) if allow_root_round_skew else root_rounds[0]
     )
+
+
+def capture_t4_trace(trace_dir, port_base, height, block, source_validator):
+    """Persist one certified block's full trace before ureth evicts its execution binding."""
+    trace = rpc(port_base + source_validator - 1, "debug_traceBlockByHash",
+                [block.get("hash"), {}], timeout=60)
+    transactions = block.get("transactions")
+    block_hash = str(block.get("hash", "")).lower()
+    if (not isinstance(transactions, list) or not block_hash
+            or not isinstance(trace, list) or len(trace) != len(transactions)):
+        raise RuntimeError(f"B{height} lacks complete debug trace coverage")
+    record = {"number": height, "blockHash": block_hash,
+              "validator": source_validator, "trace": trace}
+    directory = Path(trace_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"block-{height:06d}.json"
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(record, separators=(",", ":")) + "\n")
+    temporary.replace(path)
+    print(f"T4 trace coverage PASS: B{height} {block_hash} from validator "
+          f"{source_validator}; {len(trace)} transaction trace(s)", flush=True)
 
 
 def authority_status(nodes, validator):
@@ -414,6 +435,10 @@ def main():
     parser.add_argument("--fault-scenario", choices=("pair-term", "pair-kill", "ureth-kill",
                         "all-kill", "leader-kill", "proof-outage", "proof-corrupt",
                         "missing-body", "wrong-genesis", "hostile-builder", "hostile-fee-recipient"), default="")
+    parser.add_argument("--capture-t4-traces", type=Path,
+                        help="capture each certified block trace immediately into this directory")
+    parser.add_argument("--trace-rpc-base", type=int, default=18545,
+                        help="first validator's HTTP RPC port for incremental T4 traces")
     args = parser.parse_args()
     if args.validators != 4 or args.blocks < 10:
         parser.error("D1 requires four validators and at least ten blocks")
@@ -511,6 +536,9 @@ def main():
                 args.nodes, height, block["hash"], block["extraData"], block_ids,
                 allow_root_round_skew=os.environ.get("F8_MIXED_LANE") == "1",
             )
+            if args.capture_t4_traces is not None:
+                capture_t4_trace(args.capture_t4_traces, args.trace_rpc_base,
+                                 height, block, block_ids[0])
         except (OSError, RuntimeError) as exc:
             print(f"D1 FAIL: B{height} lacks cross-validator certificate/v2 evidence: {exc}", flush=True)
             return 1

@@ -274,7 +274,7 @@ urethPinCacheEntry() {
 # flags default to the kernel's pinned profile and must stay at those defaults so a lane measures the
 # configured profile rather than a lane-local one.
 urethPinUnicityFlags() {
-  echo "--unicity.fee-collector $URETH_PIN_FEE_COLLECTOR"
+  echo "--unicity.fee-collector ${URETH_PIN_FEE_COLLECTOR_OVERRIDE:-$URETH_PIN_FEE_COLLECTOR}"
 }
 
 # urethPinObtain <cache-dir> <dest-dir>

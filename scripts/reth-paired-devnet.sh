@@ -29,6 +29,16 @@ if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   }
   URETH_BIN=$H4_URETH_BIN
   URETH_PIN_COMMIT=$H4_URETH_COMMIT
+elif [ -n "${POST_M2A_URETH_BIN:-}" ] || [ -n "${POST_M2A_URETH_COMMIT:-}" ]; then
+  [ "${M2_PROFILE2:-0}" = 1 ] || { echo "POST_M2A_URETH_BIN is only supported by profile-2 lanes" >&2; exit 2; }
+  [ -n "${POST_M2A_URETH_BIN:-}" ] && [ -n "${POST_M2A_URETH_COMMIT:-}" ] || {
+    echo "post-M2a lanes require both POST_M2A_URETH_BIN and POST_M2A_URETH_COMMIT" >&2
+    exit 2
+  }
+  URETH_BIN=$POST_M2A_URETH_BIN
+  URETH_PIN_COMMIT=$POST_M2A_URETH_COMMIT
+  M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2-$(date -u +%Y%m%dT%H%M%SZ)}
+  echo "profile-2 logs: $M2_RUN_LOG_DIR"
 elif [ "${M2_PROFILE2:-0}" = 1 ]; then
   URETH_PIN_COMMIT=ae6e6be94d6dc45d0df6574cb5fbedef398f5c2e
   M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2-$(date -u +%Y%m%dT%H%M%SZ)}
@@ -37,6 +47,17 @@ fi
 
 validators=${1:-4}
 rounds=${2:-10}
+postM2aMode=${POST_M2A_MODE:-}
+postM2aChainID=${POST_M2A_CHAIN_ID:-31337}
+if [ -n "$postM2aMode" ]; then
+  case "$postM2aMode" in f7 | t1 | t4) ;; *) echo "POST_M2A_MODE must be f7, t1 or t4" >&2; exit 2 ;; esac
+  [ "${M2_PROFILE2:-0}" = 1 ] || { echo "post-M2a evidence requires M2_PROFILE2=1" >&2; exit 2; }
+  [ "$validators" -eq 4 ] || { echo "post-M2a evidence requires four validators" >&2; exit 2; }
+  if [ "${POST_M2A_SKIP_HANDOFF:-0}" = 1 ] && [ "$postM2aMode" != t4 ]; then
+    echo "POST_M2A_SKIP_HANDOFF is only supported by the T4 audit lane" >&2
+    exit 2
+  fi
+fi
 if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ]; then
   echo "profile-2 handoff lane requires four validators" >&2
   exit 2
@@ -81,6 +102,11 @@ failures=0
 pass() { echo "  PASS: $1"; }
 fail() { echo "  FAIL: $1"; failures=$((failures + 1)); }
 info() { echo "  info: $1"; }
+
+if [ -n "$postM2aMode" ]; then
+  source scripts/post-m2a-evidence-lib.sh || { echo "post-M2a evidence helper could not be loaded" >&2; exit 2; }
+  export URETH_PIN_FEE_COLLECTOR_OVERRIDE
+fi
 
 # The extra single-purpose reth instances the section-3 negatives start, by directory. They are
 # killed inline on the happy path; listing them here is what stops an interrupted or failed run
@@ -196,7 +222,7 @@ fi
 echo "=== 1. generate the shard topology and chain spec ==="
 rootValidators=3
 if [ "${M2_PROFILE2:-0}" = 1 ]; then rootValidators=4; fi
-./setup-evm-nodes.sh -r "$rootValidators" -v "$validators" >/dev/null || { echo "setup failed" >&2; exit 1; }
+./setup-evm-nodes.sh -r "$rootValidators" -v "$validators" -c "$postM2aChainID" >/dev/null || { echo "setup failed" >&2; exit 1; }
 genesisSHA=$(shasum -a 256 test-nodes/evm-genesis.json | cut -d' ' -f1)
 echo "generated genesis sha256=$genesisSHA"
 
@@ -205,6 +231,13 @@ echo "generated genesis sha256=$genesisSHA"
 # Fund one well-known test account so §6 can prove the adapter really builds and commits a block.
 # Real genesis funding is T1 (#28); this is test-only and derived from the generated file, so the
 # chainId and fork schedule still come from the shard conf.
+if [ "$postM2aMode" = t1 ] || [ "$postM2aMode" = t4 ]; then
+  post_m2a_compile_manifest_genesis || { fail "default T1 manifest export/compile failed"; exit 1; }
+  chainSpec=test-nodes/evm-genesis-finalized-funded.json
+  fullShardConf=test-nodes/evm-full-shard-conf-v2.json
+  fundedSHA=$(shasum -a 256 "$chainSpec" | cut -d' ' -f1)
+  pass "default allocation manifest exported and compiled into the finalized genesis (sha256=$fundedSHA)"
+else
 python3 - <<'PY'
 import json, subprocess
 g = json.load(open("test-nodes/evm-genesis.json"))
@@ -225,6 +258,7 @@ build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}
   --alloc-source test-nodes/evm-genesis-funded.json --out "$chainSpec" \
   --full-shard-conf "$fullShardConf" || { echo "finalized funded genesis failed" >&2; exit 1; }
 echo "finalized funded genesis sha256=$(shasum -a 256 "$chainSpec" | cut -d' ' -f1)"
+fi
 if [ "${SIGNING:-local}" = authority ]; then
   # The full configuration is the one the root chain will certify, so enroll against it rather
   # than the base configuration emitted by setup-evm-nodes.sh.
@@ -236,6 +270,8 @@ fi
 
 echo
 echo "=== 2. start one reth per validator on that chain spec ==="
+rethStorageArgs=()
+if [ "$postM2aMode" = t1 ] || [ "$postM2aMode" = t4 ]; then rethStorageArgs=(--storage.v2 false); fi
 for i in $(seq 1 "$validators"); do
   mkdir -p "test-nodes/reth$i"
   # Each validator's adapter reads this exact file (helper.sh's start_one_evm_validator passes
@@ -250,6 +286,7 @@ for i in $(seq 1 "$validators"); do
     --port $((rethP2PBase + i - 1)) --disable-discovery \
     --ipcdisable --engine.persistence-threshold "$d2cPersistenceThreshold" \
     --builder.gaslimit 30000000 \
+    ${rethStorageArgs[@]+"${rethStorageArgs[@]}"} \
     $(urethPinUnicityFlags) \
     >"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"
@@ -661,10 +698,15 @@ if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_prepare; fi
 if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   export EVM_ARCHIVE_ROOT=test-nodes/h4-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
+elif [ "$postM2aMode" = f7 ]; then
+  export EVM_ARCHIVE_ROOT=test-nodes/post-m2a-archives
+  mkdir -p "$EVM_ARCHIVE_ROOT"
 fi
 export EVM_GENESIS_FILE="$chainSpec"
 export EVM_FULL_SHARD_CONF="test-nodes/shard-conf-${partitionID}_0.json"
-export EVM_ENGINE_FEE_COLLECTOR="$URETH_PIN_FEE_COLLECTOR"
+export EVM_ENGINE_FEE_COLLECTOR="${POST_M2A_FEE_COLLECTOR:-$URETH_PIN_FEE_COLLECTOR}"
+if [ -n "$postM2aMode" ]; then export EVM_OPERATOR_STATUS_RPC=1; fi
+export M2_CHAIN_ID="$postM2aChainID"
 if [ -n "${D2C_FAULT_SCENARIO:-}" ]; then
   export EVM_EXECUTION_JOURNAL_ROOT="test-nodes/execution-journals"
   mkdir -p "$EVM_EXECUTION_JOURNAL_ROOT"
@@ -689,7 +731,7 @@ for nonce in 0 1 2; do
   expected=""
   for i in $(seq 1 "$validators"); do
     sent=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase + i - 1))" \
-      -chain-id 31337 -nonce "$nonce" 2>&1)
+      -chain-id "$postM2aChainID" -nonce "$nonce" 2>&1)
     if [[ "$sent" != 0x* ]]; then
       fail "could not seed validator $i's mempool at nonce $nonce: $sent"
       exit 1
@@ -763,6 +805,10 @@ if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   pass "all four validators imported the certified bootstrap block before H4"
 fi
 
+if [ -n "$postM2aMode" ]; then
+  post_m2a_after_bootstrap || { fail "post-M2a transaction evidence failed"; exit 1; }
+fi
+
 # Wait until the bootstrap partition certificate is committed before joining the three
 # independent aggregator shards. Their handshakes ask roots for partition state, so starting
 # them before block 1 is certified creates a needless unknown-partition retry loop.
@@ -780,7 +826,7 @@ if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
   pass "three aggregator shards certified alongside the EVM partition; UC/TR/EVM trace recorded"
 fi
 
-if [ "${M2_PROFILE2:-0}" = 1 ]; then
+if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
   echo "=== M2 profile-2: two certified root handoffs with paid execution ==="
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     f8_slow_stop_resume_evm || { fail "EVM delay/stop/resume probe failed"; exit 1; }
@@ -799,6 +845,8 @@ if [ "${M2_PROFILE2:-0}" = 1 ]; then
   else
     pass "two profile-2 handoffs replaced validator keys and certified paid transactions"
   fi
+elif [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" = 1 ]; then
+  pass "T4 audit lane skipped the optional profile-2 root handoffs"
 fi
 
 echo
@@ -806,6 +854,10 @@ echo "=== 6. D1 continuous certified execution through block $rounds ==="
 echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, proof window=64 blocks"
 probeArgs=()
 faultArgs=()
+traceArgs=()
+if [ "$postM2aMode" = t4 ]; then
+  traceArgs=(--capture-t4-traces test-nodes/post-m2a-evidence/t4-traces --trace-rpc-base "$rethEthBase")
+fi
 if [ "${D2C_RESTART_PROBE:-0}" = 1 ]; then
   [ "$validators" -eq 4 ] && [ "$rounds" -ge 10 ] || { echo "D2C probe requires four validators and >=10 blocks" >&2; exit 2; }
   probeArgs=(--restart-validator 1 --signing "${SIGNING:-local}")
@@ -820,7 +872,7 @@ fi
 d2cRecoveryProbe=${D2C_RESTART_PROBE:-0}
 [ -n "${D2C_FAULT_SCENARIO:-}" ] && d2cRecoveryProbe=1
 if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout 900 \
-  ${probeArgs[@]+"${probeArgs[@]}"} ${faultArgs[@]+"${faultArgs[@]}"}; then
+  ${traceArgs[@]+"${traceArgs[@]}"} ${probeArgs[@]+"${probeArgs[@]}"} ${faultArgs[@]+"${faultArgs[@]}"}; then
   pass "D1 observed $rounds consecutive blocks with a fresh canonical survivor quorum"
 else
   fail "D1 continuous block observation failed"
@@ -913,6 +965,20 @@ if ! $divergenceLogged; then
     pass "no unexpected divergence or equivocation; each validator logged the armed fee-recipient INVALID refusal"
   else
     pass "no validator logged divergence or equivocation"
+  fi
+fi
+
+if [ -n "$postM2aMode" ]; then
+  if [ "$failures" -eq 0 ]; then
+    if ! post_m2a_after_lane; then
+      if [ "$postM2aMode" = t4 ]; then
+        fail "post-M2a T4 audit evidence failed"
+      else
+        fail "post-M2a post-handoff/prune evidence failed"
+      fi
+    fi
+  else
+    fail "post-M2a evidence collection skipped because an earlier lane check failed"
   fi
 fi
 
