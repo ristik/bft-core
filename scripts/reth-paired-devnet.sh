@@ -854,6 +854,10 @@ echo "=== 6. D1 continuous certified execution through block $rounds ==="
 echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, proof window=64 blocks"
 probeArgs=()
 faultArgs=()
+traceArgs=()
+if [ "$postM2aMode" = t4 ]; then
+  traceArgs=(--capture-t4-traces test-nodes/post-m2a-evidence/t4-traces --trace-rpc-base "$rethEthBase")
+fi
 if [ "${D2C_RESTART_PROBE:-0}" = 1 ]; then
   [ "$validators" -eq 4 ] && [ "$rounds" -ge 10 ] || { echo "D2C probe requires four validators and >=10 blocks" >&2; exit 2; }
   probeArgs=(--restart-validator 1 --signing "${SIGNING:-local}")
@@ -868,7 +872,7 @@ fi
 d2cRecoveryProbe=${D2C_RESTART_PROBE:-0}
 [ -n "${D2C_FAULT_SCENARIO:-}" ] && d2cRecoveryProbe=1
 if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout 900 \
-  ${probeArgs[@]+"${probeArgs[@]}"} ${faultArgs[@]+"${faultArgs[@]}"}; then
+  "${traceArgs[@]}" ${probeArgs[@]+"${probeArgs[@]}"} ${faultArgs[@]+"${faultArgs[@]}"}; then
   pass "D1 observed $rounds consecutive blocks with a fresh canonical survivor quorum"
 else
   fail "D1 continuous block observation failed"

@@ -137,6 +137,32 @@ print(f'handoff {old}->{new} certification pause={(first-last).total_seconds():.
 PY
 }
 
+# Use the latest common canonical EVM head only after each validator has logged
+# its positive-height certificate admission. A log line from one root node is
+# not a freshness or quorum check, and its subscription may have zero receivers.
+m2_latest_certified_parent() {
+  local i url head block hash blockNumber expectedHead= expectedHash= hashLower
+  for i in $(seq 1 "$validators"); do
+    url="http://127.0.0.1:$((rethEthBase+i-1))"
+    head=$(rpc "$url" eth_blockNumber '[]' | pyget "['result']") || return 1
+    [[ "$head" = 0x* ]] || return 1
+    block=$(rpc "$url" eth_getBlockByNumber "[\"$head\",false]") || return 1
+    hash=$(printf '%s' "$block" | pyget "['result']['hash']") || return 1
+    blockNumber=$(printf '%s' "$block" | pyget "['result']['number']") || return 1
+    [ -n "$hash" ] && [ "$hash" != None ] && [ "$blockNumber" = "$head" ] || return 1
+    hashLower=$(printf '%s' "$hash" | tr '[:upper:]' '[:lower:]')
+    grep -Eq "msg=\"certificate admitted\" block=${hashLower#0x} .*height=[1-9][0-9]* round=[0-9]+ rootRound=[0-9]+" \
+      "test-nodes/evm$i/debug.log" || return 1
+    if [ -z "$expectedHead" ]; then
+      expectedHead=$head
+      expectedHash=$hashLower
+    elif [ "$head" != "$expectedHead" ] || [ "$hashLower" != "$expectedHash" ]; then
+      return 1
+    fi
+  done
+  printf '%s\n' "$expectedHash"
+}
+
 m2_handoff() {
   local epoch=$1 replace=$2 new=$3 previous=$4 oldBoot=$5 oldRpcs=$6
   local nextFile="trust-base-epoch${epoch}.json"
@@ -146,17 +172,11 @@ m2_handoff() {
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     local parent logStart outcome waitStep activated committed=false oldEpoch=$((epoch-1))
     for attempt in $(seq 1 30); do
-      parent=$(python3 - test-nodes/root1/debug.log <<'PY'
-import re,sys
-last=''
-for line in open(sys.argv[1], errors='replace'):
-    if 'sending CertificationResponse' not in line: continue
-    block=re.search(r'Block Hash: ([0-9A-F]{64})\b', line)
-    if block: last='0x'+block.group(1).lower()
-print(last)
-PY
-      )
-      [[ "$parent" = 0x* ]] || { sleep 1; continue; }
+      parent=$(m2_latest_certified_parent) || {
+        echo "F8 handoff attempt $attempt: waiting for a common certified EVM parent"
+        sleep 1
+        continue
+      }
       logStart=$(wc -l < test-nodes/root1/debug.log)
       if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" \
         --frozen-parent "$parent" --root-rpc "$oldRpcs"; then
@@ -192,17 +212,11 @@ PY
   local parent waitStep oldEpoch=$((epoch-1)) outcome logStart
   local committed=false
   for i in $(seq 1 30); do
-    parent=$(python3 - test-nodes/root1/debug.log <<'PY'
-import re,sys
-last=''
-for line in open(sys.argv[1], errors='replace'):
-    if 'sending CertificationResponse' not in line: continue
-    block=re.search(r'Block Hash: ([0-9A-F]{64})\b', line)
-    if block: last='0x'+block.group(1).lower()
-print(last)
-PY
-    )
-    [[ "$parent" = 0x* ]] || { sleep 1; continue; }
+    parent=$(m2_latest_certified_parent) || {
+      echo "handoff attempt $i: waiting for a common certified EVM parent"
+      sleep 1
+      continue
+    }
     logStart=$(wc -l < test-nodes/root1/debug.log)
     if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" \
       --frozen-parent "$parent" --root-rpc "$oldRpcs"; then

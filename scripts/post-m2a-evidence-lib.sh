@@ -264,9 +264,10 @@ PY
   fi
   if [ "$postM2aMode" = t4 ]; then
     python3 scripts/post-m2a-t4-rpc-capture.py --url "http://127.0.0.1:$rethEthBase" \
-      --nodes test-nodes --output test-nodes/post-m2a-evidence/t4-rpc-accounting.json || {
+      --nodes test-nodes --trace-dir test-nodes/post-m2a-evidence/t4-traces \
+      --output test-nodes/post-m2a-evidence/t4-rpc-accounting.json || {
         fail "could not capture certified block headers and SELFDESTRUCT trace coverage"; return 1;
       }
-    pass "certified block history and per-block SELFDESTRUCT trace coverage captured"
+    pass "certified block history and incrementally captured per-block SELFDESTRUCT trace coverage captured"
   fi
 }

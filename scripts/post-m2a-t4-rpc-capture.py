@@ -73,6 +73,8 @@ def main():
     parser.add_argument("--url", required=True, help="validator 1's pinned ureth eth/debug endpoint")
     parser.add_argument("--nodes", required=True, type=Path, help="paired lane test-nodes directory")
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--trace-dir", required=True, type=Path,
+                        help="incremental per-block traces captured by d1-monitor while bindings were live")
     parser.add_argument("--eth-base", type=int, default=18545)
     parser.add_argument("--validators", type=int, default=4)
     args = parser.parse_args()
@@ -137,9 +139,22 @@ def main():
             transactions = block.get("transactions")
             if not isinstance(transactions, list):
                 raise RuntimeError(f"block {number} omits its full transaction list")
-            trace = rpc(args.url, "debug_traceBlockByNumber", [hex(number), {}])
-            if not isinstance(trace, list) or len(trace) != len(transactions):
-                raise RuntimeError(f"block {number} trace count does not match its transaction count")
+            trace_path = args.trace_dir / f"block-{number:06d}.json"
+            try:
+                trace_record = json.loads(trace_path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"block {number} lacks incremental trace coverage: {exc}") from exc
+            if not isinstance(trace_record, dict):
+                raise RuntimeError(f"block {number} trace coverage is uncovered: record is not an object")
+            trace = trace_record.get("trace")
+            if (trace_record.get("number") != number
+                    or str(trace_record.get("blockHash", "")).lower() != block["hash"].lower()
+                    or not isinstance(trace_record.get("validator"), int)
+                    or trace_record["validator"] < 1
+                    or trace_record["validator"] > args.validators
+                    or not isinstance(trace, list)
+                    or len(trace) != len(transactions)):
+                raise RuntimeError(f"block {number} trace coverage is missing, incomplete or bound to another block")
             if contains_selfdestruct(trace):
                 raise RuntimeError(f"block {number} contains SELFDESTRUCT; this lane only accepts complete empty trace sets")
             if contains_creation(trace):
