@@ -70,6 +70,28 @@ func tr(round, epoch uint64, leader string) *certification.TechnicalRecord {
 	return &certification.TechnicalRecord{Round: round, Epoch: epoch, Leader: leader, StatHash: []byte{0x01}, FeeHash: []byte{0x01}}
 }
 
+type invalidSelfVerification struct {
+	*executortest.Fake
+	verifyCalls int
+}
+
+func (e *invalidSelfVerification) Verify(context.Context, shardnode.Block, shardnode.RoundParams) (shardnode.Status, error) {
+	e.verifyCalls++
+	return shardnode.StatusInvalid, nil
+}
+
+func TestRound_RefusesCertificationWhenSelfVerificationIsInvalid(t *testing.T) {
+	exec := &invalidSelfVerification{Fake: executortest.New()}
+	sub := &recordingSubmitter{}
+	r, nodeID := newTestRound(t, exec, sub)
+
+	err := r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, nodeID))
+
+	require.ErrorContains(t, err, "refusing to submit it for certification")
+	require.Equal(t, 1, exec.verifyCalls, "the candidate must be checked before the certification boundary")
+	require.Empty(t, sub.got, "a candidate rejected by Ureth must never become a certification request")
+}
+
 func TestRound_SingleValidator_GenesisToThreeRounds(t *testing.T) {
 	ctx := context.Background()
 	exec := executortest.New()
