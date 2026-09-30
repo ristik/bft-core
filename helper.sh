@@ -365,8 +365,13 @@ function start_one_evm_validator() {
   # function mid-way for a `set -u` caller: the node was never started and nothing said so.
   # scripts/chaos-evm.sh never hit it because it does not set -u; scripts/reth-chaos.sh does.
   local rpcArgs=()
-  if [ "$exposeRPC" == "rpc" ]; then
+  if [ "$exposeRPC" == "rpc" ] || [ "${EVM_OPERATOR_STATUS_RPC:-0}" = 1 ]; then
     rpcArgs=(--rpc-server-address "$(evm_validator_rpc_addr "$i")")
+  fi
+
+  local metricsArgs=()
+  if [ -n "${EVM_METRICS_EXPORTER:-}" ]; then
+    metricsArgs=(--metrics "$EVM_METRICS_EXPORTER")
   fi
 
   local signingArgs=()
@@ -390,6 +395,7 @@ function start_one_evm_validator() {
     ${shardConfArgs[@]+"${shardConfArgs[@]}"} \
     --log-format text --log-level "${EVM_VALIDATOR_LOG_LEVEL:-info}" \
     ${executorArgs[@]+"${executorArgs[@]}"} ${rpcArgs[@]+"${rpcArgs[@]}"} \
+    ${metricsArgs[@]+"${metricsArgs[@]}"} \
     ${signingArgs[@]+"${signingArgs[@]}"} \
     ${profileArgs[@]+"${profileArgs[@]}"} \
     >> "test-nodes/evm$i/debug.log" 2>&1 &

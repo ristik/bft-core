@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/common/expfmt"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/archivewiring"
 )
@@ -111,6 +112,31 @@ func TestCollectBuildsFixtureReport(t *testing.T) {
 	encoded, err := json.Marshal(result)
 	require.NoError(t, err)
 	require.Contains(t, string(encoded), `"witnessVerification"`)
+}
+
+func TestJournalBackedParentWitnessMetricsAreCollected(t *testing.T) {
+	text := `# TYPE engineapi_parent_witness_verification_total counter
+engineapi_parent_witness_verification_total{outcome="verified"} 2
+engineapi_parent_witness_verification_total{outcome="invalid"} 1
+# TYPE engineapi_parent_witness_verification_duration_seconds histogram
+engineapi_parent_witness_verification_duration_seconds_bucket{le="0.1"} 2
+engineapi_parent_witness_verification_duration_seconds_bucket{le="1"} 3
+engineapi_parent_witness_verification_duration_seconds_bucket{le="+Inf"} 3
+engineapi_parent_witness_verification_duration_seconds_sum 0.5
+engineapi_parent_witness_verification_duration_seconds_count 3
+`
+	families, err := (&expfmt.TextParser{}).TextToMetricFamilies(strings.NewReader(text))
+	require.NoError(t, err)
+	first := sample{at: time.Unix(1, 0)}
+	last := sample{at: time.Unix(2, 0), metrics: families}
+	report := nodeReport{}
+	applyMetrics(&report, first, last, 2)
+	require.True(t, report.Witness.Available)
+	require.EqualValues(t, 3, report.Witness.Count)
+	require.EqualValues(t, 2, report.Witness.ByOutcome["verified"])
+	require.EqualValues(t, 1, report.Witness.ByOutcome["invalid"])
+	require.NotNil(t, report.Witness.P50Seconds)
+	require.NotNil(t, report.Witness.P99Seconds)
 }
 
 func TestMeasureArchiveMissingPathIsUncovered(t *testing.T) {

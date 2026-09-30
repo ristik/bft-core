@@ -1351,7 +1351,7 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 		}
 		if verifier != nil && verifier.GenesisOrigin.Valid() {
 			budget := engineapi.DefaultParentWitnessBudget()
-			if err := adapter.EnableParentWitness(ctx, budget); err != nil {
+			if err := adapter.EnableParentWitness(ctx, budget, flags.observe.Meter("engineapi")); err != nil {
 				return nil, fmt.Errorf("engine-api executor failed to enable local parent witness acquisition: %w", err)
 			}
 			flags.observe.Logger().Info("local parent witness acquisition enabled",

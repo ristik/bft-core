@@ -16,6 +16,8 @@ for root in test-nodes/root*/debug.log; do
   echo "D2C_RESTART_BOUNDARY validator=$i" >>"$root"
 done
 rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
-start_one_evm_validator "$i" 4 8 "$rootBoot" engine-api
+rpcExpose=""
+if [ "${EVM_OPERATOR_STATUS_RPC:-0}" = 1 ]; then rpcExpose=rpc; fi
+start_one_evm_validator "$i" 4 8 "$rootBoot" engine-api "$rpcExpose"
 new=$(cat "test-nodes/evm$i/pid")
 echo "restarted validator $i shard pid $old -> $new; reth and authority unchanged"

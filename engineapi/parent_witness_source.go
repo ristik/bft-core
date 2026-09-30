@@ -18,6 +18,7 @@ import (
 	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/registrywitness"
 	"github.com/unicitynetwork/bft-core/shardnode"
+	"go.opentelemetry.io/otel/metric"
 )
 
 var (
@@ -58,6 +59,7 @@ type ParentWitnessSource struct {
 	last      registryproof.Snapshot // one immutable, verified parent; never a failed acquisition
 	lastProof shardnode.ProofEvidence
 	log       *slog.Logger
+	metrics   *ParentWitnessMetrics
 	closed    bool
 }
 
@@ -85,12 +87,20 @@ func (s *ParentWitnessSource) Acquire(ctx context.Context, parent shardnode.Bloc
 // AcquireWithProvenance returns the evidence digest and its original verification
 // time, including on cache hits. The digest is over the verified proof bytes.
 func (s *ParentWitnessSource) AcquireWithProvenance(ctx context.Context, parent shardnode.BlockRef) (registryproof.Snapshot, shardnode.ProofEvidence, error) {
+	started := time.Now()
+	outcome := "invalid"
+	var metrics *ParentWitnessMetrics
+	if s != nil {
+		metrics = s.metrics
+	}
+	defer func() { metrics.record(ctx, outcome, time.Since(started)) }()
 	if s == nil || s.requester == nil || parent.Number == 0 || len(parent.Hash) != common.HashLength || len(parent.StateRoot) != common.HashLength {
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: expected non-genesis parent with 32-byte hash and state root", ErrParentWitnessMismatch)
 	}
 	hash := common.BytesToHash(parent.Hash)
 	s.mu.Lock()
 	if s.closed {
+		outcome = "stopped"
 		s.mu.Unlock()
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, ErrParentWitnessStopped
 	}
@@ -100,11 +110,14 @@ func (s *ParentWitnessSource) AcquireWithProvenance(ctx context.Context, parent 
 	s.mu.Unlock()
 	if cached.Valid() && cached.ParentHash() == hash {
 		if cached.Number() != parent.Number || !bytes.Equal(cached.StateRoot().Bytes(), parent.StateRoot) {
+			outcome = "mismatch"
 			return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: cached parent %d/%s has state %s", ErrParentWitnessMismatch, cached.Number(), hash, cached.StateRoot())
 		}
 		if err := ctx.Err(); err != nil {
+			outcome = "cancelled"
 			return registryproof.Snapshot{}, shardnode.ProofEvidence{}, err
 		}
+		outcome = "cache_hit"
 		logParentWitness(ctx, log, parent, "hit", cachedProof)
 		return cached, cachedProof, nil
 	}
@@ -117,22 +130,27 @@ func (s *ParentWitnessSource) AcquireWithProvenance(ctx context.Context, parent 
 	}
 	result, requestErr := s.requester.Request(ctx, target)
 	if errors.Is(requestErr, parentwitness.ErrRequesterBackoff) {
+		outcome = "unavailable"
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: requester backoff", ErrParentWitnessUnavailable)
 	}
 	if requestErr != nil && result.Outcome == parentwitness.RequesterStopped {
+		outcome = "stopped"
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %w", ErrParentWitnessStopped, requestErr)
 	}
 	if requestErr != nil {
+		outcome = "invalid"
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %w", ErrParentWitnessInvalid, requestErr)
 	}
 	switch result.Outcome {
 	case parentwitness.RequesterVerified:
 		snapshot := result.Response.Snapshot()
 		if !result.Response.Found() || !snapshot.Valid() || snapshot.ParentHash() != hash || snapshot.Number() != parent.Number || !bytes.Equal(snapshot.StateRoot().Bytes(), parent.StateRoot) {
+			outcome = "mismatch"
 			return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: parent %d/%s has verified proof %d/%s with state %s", ErrParentWitnessMismatch, parent.Number, hash, snapshot.Number(), snapshot.ParentHash(), snapshot.StateRoot())
 		}
 		evidence, marshalErr := json.Marshal(result.Response.Evidence())
 		if marshalErr != nil {
+			outcome = "invalid"
 			return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: encoding verified evidence digest: %w", ErrParentWitnessInvalid, marshalErr)
 		}
 		digest := sha256.Sum256(evidence)
@@ -143,17 +161,23 @@ func (s *ParentWitnessSource) AcquireWithProvenance(ctx context.Context, parent 
 			s.lastProof = proof
 		}
 		s.mu.Unlock()
+		outcome = "verified"
 		logParentWitness(ctx, log, parent, "miss", proof)
 		return snapshot, proof, nil
 	case parentwitness.RequesterUnavailable:
+		outcome = "unavailable"
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %s", ErrParentWitnessUnavailable, result.Detail)
 	case parentwitness.RequesterInvalid:
+		outcome = "invalid"
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %s", ErrParentWitnessInvalid, result.Detail)
 	case parentwitness.RequesterBudgetExhausted:
+		outcome = "budget_exhausted"
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %s", ErrParentWitnessBudget, result.Detail)
 	case parentwitness.RequesterSuperseded:
+		outcome = "superseded"
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %s", ErrParentWitnessSuperseded, result.Detail)
 	default:
+		outcome = "stopped"
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: %s", ErrParentWitnessStopped, result.Detail)
 	}
 }
@@ -178,7 +202,7 @@ func (s *ParentWitnessSource) Close() {
 
 // EnableParentWitness binds acquisition to the checked genesis and the verifier's own identity.
 // The source is owned by Adapter and is closed when the node exits.
-func (a *Adapter) EnableParentWitness(ctx context.Context, budget parentwitness.RequesterBudget) error {
+func (a *Adapter) EnableParentWitness(ctx context.Context, budget parentwitness.RequesterBudget, meter metric.Meter) error {
 	if a == nil || a.verifier == nil || !a.verifier.GenesisOrigin.Valid() || len(a.verifier.ShardConfHash) != common.HashLength {
 		return fmt.Errorf("%w: checked genesis and verifier configuration required", ErrParentWitnessInvalid)
 	}
@@ -192,6 +216,10 @@ func (a *Adapter) EnableParentWitness(ctx context.Context, budget parentwitness.
 		return fmt.Errorf("%w: adapter source already enabled or closed", ErrParentWitnessInvalid)
 	}
 	caller := registrywitness.NewHTTPCaller(a.eth.url, budget.PerAttempt)
+	metrics, err := NewParentWitnessMetrics(meter)
+	if err != nil {
+		return err
+	}
 	source, err := NewParentWitnessSource(ctx, ParentWitnessPins{
 		NetworkID: a.verifier.NetworkID, PartitionID: a.verifier.PartitionID, ShardID: a.verifier.ShardID,
 		FullShardConfHash: full, Registry: a.verifier.GenesisOrigin.ProofContext(),
@@ -201,6 +229,7 @@ func (a *Adapter) EnableParentWitness(ctx context.Context, budget parentwitness.
 	}
 	a.parentWitness = source
 	source.log = a.log
+	source.metrics = metrics
 	return nil
 }
 

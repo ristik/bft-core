@@ -434,9 +434,17 @@ func applyMetrics(out *nodeReport, first, last sample, sampleCount int) {
 			out.Witness.Count += count
 		}
 	}
-	if histLast, ok := metricHistogram(last.metrics, "recordwiring_witness_verification_duration"); ok {
+	histLast, histOK := metricHistogram(last.metrics, "recordwiring_witness_verification_duration")
+	if !histOK {
+		histLast, histOK = metricHistogram(last.metrics, "engineapi_parent_witness_verification_duration")
+	}
+	if histOK {
 		if sampleCount > 1 && !processRestarted {
-			if histFirst, firstOK := metricHistogram(first.metrics, "recordwiring_witness_verification_duration"); firstOK && histLast.count >= histFirst.count {
+			histFirst, firstOK := metricHistogram(first.metrics, "recordwiring_witness_verification_duration")
+			if !firstOK {
+				histFirst, firstOK = metricHistogram(first.metrics, "engineapi_parent_witness_verification_duration")
+			}
+			if firstOK && histLast.count >= histFirst.count {
 				histLast = subtractHistogram(histLast, histFirst)
 			}
 		}
@@ -503,7 +511,7 @@ func findFamily(families map[string]*dto.MetricFamily, fragment string) *dto.Met
 func metricCounterOutcomes(families map[string]*dto.MetricFamily) map[string]float64 {
 	var family *dto.MetricFamily
 	for name, candidate := range families {
-		if strings.Contains(name, "recordwiring_witness_verification") && !strings.Contains(name, "duration") && candidate.GetType() == dto.MetricType_COUNTER {
+		if (strings.Contains(name, "recordwiring_witness_verification") || strings.Contains(name, "engineapi_parent_witness_verification")) && !strings.Contains(name, "duration") && candidate.GetType() == dto.MetricType_COUNTER {
 			family = candidate
 			break
 		}

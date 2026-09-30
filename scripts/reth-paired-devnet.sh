@@ -871,7 +871,7 @@ if [ -n "${D2C_FAULT_SCENARIO:-}" ]; then
 fi
 d2cRecoveryProbe=${D2C_RESTART_PROBE:-0}
 [ -n "${D2C_FAULT_SCENARIO:-}" ] && d2cRecoveryProbe=1
-if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout 900 \
+if python3 scripts/d1-monitor.py --nodes test-nodes --validators "$validators" --blocks "$rounds" --timeout "${D1_MONITOR_TIMEOUT:-900}" \
   ${traceArgs[@]+"${traceArgs[@]}"} ${probeArgs[@]+"${probeArgs[@]}"} ${faultArgs[@]+"${faultArgs[@]}"}; then
   pass "D1 observed $rounds consecutive blocks with a fresh canonical survivor quorum"
 else
