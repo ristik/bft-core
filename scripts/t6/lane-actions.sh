@@ -88,6 +88,17 @@ PY
 t6_exercise_f7() {
   local initcode lock_contract lock_hash lock_topic trust archive block_hash tx_index log_index emitter topic
   local extracted=0
+  # setup-evm-nodes.sh invokes `make clean build`, which removes every auxiliary binary that the
+  # fresh-clone build created. Rebuild the two offline proof tools after that reset, before the
+  # first archive extraction, so the tools remain available for the post-handoff replay too.
+  mkdir -p build
+  go build -o build/f7-mintproof-extract ./scripts/f7-mintproof-extract || {
+    fail "could not rebuild the F7 archive extractor after lane setup"; return 1;
+  }
+  go build -o build/f7-mintproof-verify ./scripts/f7-mintproof-verify || {
+    fail "could not rebuild the F7 offline verifier after lane setup"; return 1;
+  }
+  pass "rebuilt F7 offline tools after paired-lane setup cleaned auxiliary binaries"
   initcode=$(go run ./scripts/evmtx -lock-initcode) || return 1
   lock_contract=$(go run ./scripts/evmtx -create-address -nonce "$M2_NEXT_NONCE") || return 1
   post_m2a_send_transaction "$M2_NEXT_NONCE" -create -data "$initcode" -gas-limit 200000 -value 0 || return 1
