@@ -550,6 +550,7 @@ kill "$(cat test-nodes/reth-othergenesis/pid)" 2>/dev/null; rm -f test-nodes/ret
 # the fixed Cancun EVM profile: EthConfigHandler asks its EVM for the future fork's precompiles,
 # which refuses Prague. Thus eth_config returns a typed RPC error, and startup must fail closed on
 # the unreadable execution profile. The loaded schedule is independently visible in the node log.
+threeFFailuresBefore=$failures
 mkdir -p test-nodes/reth-laterfork
 python3 - <<'PYFORK'
 import json
@@ -641,6 +642,12 @@ else
   fi
 fi
 kill "$(cat test-nodes/reth-laterfork/pid)" 2>/dev/null; rm -f test-nodes/reth-laterfork/pid
+threeFFailureCount=$((failures - threeFFailuresBefore))
+if [ "$threeFFailureCount" -eq 0 ]; then
+  echo "3f status: PASS"
+else
+  echo "3f status: FAIL ($threeFFailureCount check(s) failed)"
+fi
 fi
 
 echo
@@ -909,11 +916,6 @@ if ! $divergenceLogged; then
   fi
 fi
 
-# #232 is a known independent startup-profile failure. Keep it visible; its preflight above
-# records the exact observed diagnosis, and D1's own verdict below is separate.
-if [ "${M2_PROFILE2:-0}" != 1 ]; then
-  echo "3f status: see section 3f (known issue #232; FAIL until fixed)"
-fi
 if [ "$failures" -gt "$preflightFailures" ]; then
   echo "D1 FAIL ($((failures - preflightFailures)) lane check(s) failed)"
 else
