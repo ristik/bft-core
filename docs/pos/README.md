@@ -3,6 +3,8 @@
 Start with [the contributor process](PROCESS.md) and [the roadmap](roadmap.md).
 The [specification snapshot](specification/README.md) makes the repaired Yellowpaper available
 for review. [The repair record](repair-plan.md) records its scope and validation.
+The [M2 closure status](m2-closure-status.md) records the F7/F8/M2a evidence, pins, limits and
+owner decisions without treating the remaining M2/H6 work as closed.
 
 This is a planning and reference change. It adds no consensus, reth or contract implementation,
 sets no production parameters, and authorizes no deployment or currency issuance.
@@ -15,8 +17,8 @@ The issue index added with publication maps stable roadmap IDs to GitHub issue n
 - BFT Core prototype `engine-api-adapter`: `627318b5e6e0ca79e601d58b35fc9c46498f2731`.
 - Local reth: `189c0df32617afc488e0f091dbface1bd72cceb4`.
 
-These are inventory observations, not approved release revisions. R0 establishes the working
-branch/repository policy; F1 reconciles and pins the actual integration baseline. Prototype
-file links in issues are discovery aids and may not exist on main yet. Other repositories' code
-is coordinated here; consumers close only after linked cross-repository changes and integration
-evidence are available. No external maintainer or repository has been assigned work implicitly.
+These are historical inventory observations, not approved release revisions. Current M2/T-track
+source and artifact pins are recorded in the closure-status and T5 dossier documents. Other
+repositories' code is coordinated here; consumers close only after linked cross-repository changes
+and integration evidence are available. No external maintainer or repository has been assigned work
+implicitly.
