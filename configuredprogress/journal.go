@@ -119,6 +119,14 @@ type JournalSnapshot struct {
 func journalCandidateKey(hash []byte) []byte {
 	return append(bytes.Clone(journalCandidatePrefix), hash...)
 }
+
+func sameCandidateBody(a, b journalCandidateWire) bool {
+	return a.Version == b.Version && bytes.Equal(a.Descriptor, b.Descriptor) && a.Round == b.Round && a.Number == b.Number &&
+		a.ParentNumber == b.ParentNumber && bytes.Equal(a.Hash, b.Hash) && bytes.Equal(a.StateRoot, b.StateRoot) &&
+		bytes.Equal(a.ParentHash, b.ParentHash) && bytes.Equal(a.ParentState, b.ParentState) && bytes.Equal(a.Raw, b.Raw) &&
+		a.BlockSize == b.BlockSize && a.StateSize == b.StateSize && bytes.Equal(a.AuthorizingUC, b.AuthorizingUC) &&
+		bytes.Equal(a.AuthorizingTR, b.AuthorizingTR)
+}
 func journalObservationKey(root, round uint64) []byte {
 	k := make([]byte, len(journalObservationPrefix)+16)
 	copy(k, journalObservationPrefix)
@@ -299,7 +307,7 @@ func verifiedPairBytes(ctx context.Context, c Context, u, t []byte) (*types.Unic
 // previously durable UC whose body arrived later. Repeated identical candidates are idempotent;
 // a hash reused for different bytes is a conflict. The configured origin is checked on every call.
 func (s *Store) PutJournalCandidate(ctx context.Context, c Context, limits JournalLimits, v JournalCandidate) error {
-	return s.putJournalCandidate(ctx, c, limits, v, false)
+	return s.putJournalCandidate(ctx, c, limits, v, false, nil, nil)
 }
 
 // PutHistoricalJournalCandidate retains a peer-recovered body whose original
@@ -307,10 +315,23 @@ func (s *Store) PutJournalCandidate(ctx context.Context, c Context, limits Journ
 // current admission authority; the caller must verify the resulting certificate
 // and the block binding before retaining the body.
 func (s *Store) PutHistoricalJournalCandidate(ctx context.Context, c Context, limits JournalLimits, v JournalCandidate) error {
-	return s.putJournalCandidate(ctx, c, limits, v, true)
+	return s.putJournalCandidate(ctx, c, limits, v, true, nil, nil)
 }
 
-func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits JournalLimits, v JournalCandidate, historical bool) error {
+// PutHistoricalCertifiedJournalCandidate retains a historical body with the
+// exact resulting certificate pair from its independently verified archive
+// record. A later repeat observation for the same input record does not replace
+// this immutable archive association.
+func (s *Store) PutHistoricalCertifiedJournalCandidate(ctx context.Context, c Context, limits JournalLimits, v JournalCandidate,
+	resultUC *types.UnicityCertificate, resultTR *certification.TechnicalRecord) error {
+	if resultUC == nil || resultTR == nil {
+		return ErrUntrusted
+	}
+	return s.putJournalCandidate(ctx, c, limits, v, true, resultUC, resultTR)
+}
+
+func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits JournalLimits, v JournalCandidate, historical bool,
+	resultUC *types.UnicityCertificate, resultTR *certification.TechnicalRecord) error {
 	if !s.journal {
 		return fmt.Errorf("%w: journal not enabled", ErrSettings)
 	}
@@ -342,6 +363,23 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 		return err
 	}
 	w := journalCandidateWire{Version: journalVersion, Descriptor: state.i.descriptorDigest[:], Round: v.Round, Number: v.Number, ParentNumber: v.ParentNumber, Hash: bytes.Clone(v.Hash), StateRoot: bytes.Clone(v.StateRoot), ParentHash: bytes.Clone(v.ParentHash), ParentState: bytes.Clone(v.ParentState), Raw: bytes.Clone(v.Raw), BlockSize: v.BlockSize, StateSize: v.StateSize, LocallyBuilt: v.LocallyBuilt, AuthorizingUC: u, AuthorizingTR: t}
+	if resultUC != nil || resultTR != nil {
+		if !historical || resultUC == nil || resultTR == nil || resultUC.InputRecord == nil ||
+			resultUC.GetRoundNumber() != v.Round || resultUC.InputRecord.RoundNumber != v.Round ||
+			!bytes.Equal(resultUC.InputRecord.BlockHash, v.Hash) || !bytes.Equal(resultUC.InputRecord.Hash, v.StateRoot) ||
+			rootinput.CheckEpochCertificates(v.AuthorizingUC, resultUC) != nil ||
+			v.AuthorizingUC.GetRootEpoch() == resultUC.GetRootEpoch() && v.AuthorizingUC.GetRootRoundNumber() >= resultUC.GetRootRoundNumber() {
+			return fmt.Errorf("%w: historical resulting certificate does not bind candidate after its authorization", ErrConflict)
+		}
+		if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, c.Observation, resultUC, resultTR); err != nil {
+			return err
+		}
+		resultBytes, resultTRBytes, err := pairBytes(resultUC, resultTR)
+		if err != nil {
+			return err
+		}
+		w.Status, w.ResultingUC, w.ResultingTR = 1, resultBytes, resultTRBytes
+	}
 	key := journalCandidateKey(v.Hash)
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
@@ -371,7 +409,12 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 			if e != nil {
 				return e
 			}
-			w.Status, w.ResultingUC, w.ResultingTR = prior.Status, prior.ResultingUC, prior.ResultingTR
+			if !sameCandidateBody(w, prior) {
+				return fmt.Errorf("%w: same candidate hash has different bytes", ErrConflict)
+			}
+			if resultUC == nil {
+				w.Status, w.ResultingUC, w.ResultingTR = prior.Status, prior.ResultingUC, prior.ResultingTR
+			}
 			// LocallyBuilt records that this node authored the proposal. A peer
 			// may later return the same certified body during catch-up; that
 			// source does not change its original provenance.
@@ -381,7 +424,40 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 				return e
 			}
 			if !bytes.Equal(old, raw) {
-				return fmt.Errorf("%w: same candidate hash has different bytes", ErrConflict)
+				count, observed, total, countErr := journalCount(b)
+				if countErr != nil {
+					return countErr
+				}
+				if count > limits.Candidates || observed > limits.Observations || total-int64(len(old))+int64(len(raw)) > limits.Bytes {
+					return fmt.Errorf("%w: full-history journal capacity reached", ErrBounds)
+				}
+				if resultUC != nil {
+					cursor := b.Cursor()
+					for k, observationRaw := cursor.Seek(journalObservationPrefix); k != nil && bytes.HasPrefix(k, journalObservationPrefix); k, observationRaw = cursor.Next() {
+						o, decodeErr := decodeObservation(observationRaw)
+						if decodeErr != nil {
+							return decodeErr
+						}
+						if !bytes.Equal(o.TargetHash, v.Hash) {
+							continue
+						}
+						observedUC, _, verifyErr := verifiedPairBytes(ctx, c, o.UC, o.TR)
+						if verifyErr != nil || o.Round != v.Round || observedUC.InputRecord == nil || !bytes.Equal(observedUC.InputRecord.Hash, v.StateRoot) {
+							return fmt.Errorf("%w: observed certificate differs from historical candidate: %v", ErrConflict, verifyErr)
+						}
+						o.Unresolved = false
+						updated, encodeErr := encodeObservation(o)
+						if encodeErr != nil {
+							return encodeErr
+						}
+						if putErr := b.Put(k, updated); putErr != nil {
+							return putErr
+						}
+					}
+				}
+				if err = b.Put(key, raw); err != nil {
+					return err
+				}
 			}
 			return nil
 		}

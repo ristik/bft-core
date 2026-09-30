@@ -234,7 +234,7 @@ func (r *ArchiveRestore) backfillRestoredObservation(ctx context.Context, baseHe
 	var q archive.Request
 	q.Context = r.Subject
 	copy(q.BlockHash[:], observation.TargetHash)
-	record, original, originalTR, result, _, header, err := r.verifiedRestoreRecord(ctx, q, observation.UC)
+	record, original, originalTR, result, resultTR, header, err := r.verifiedRestoreRecord(ctx, q, observation.UC)
 	if err != nil {
 		return fmt.Errorf("%w: restored observation body %x is unavailable or unverified", configuredprogress.ErrUnavailable, q.BlockHash)
 	}
@@ -257,7 +257,7 @@ func (r *ArchiveRestore) backfillRestoredObservation(ctx context.Context, baseHe
 		ParentState: bytes.Clone(observation.UC.InputRecord.PreviousHash), Raw: bytes.Clone(block.Raw),
 		BlockSize: block.BlockSize, StateSize: block.StateSize, AuthorizingUC: original, AuthorizingTR: originalTR,
 	}
-	if err := r.Journal.PutHistoricalJournalCandidate(ctx, r.Context, r.JournalLimits, candidate); err != nil {
+	if err := r.Journal.PutHistoricalCertifiedJournalCandidate(ctx, r.Context, r.JournalLimits, candidate, result, resultTR); err != nil {
 		return fmt.Errorf("backfilling archived restored body %x: %w", q.BlockHash, err)
 	}
 	if err := r.Journal.BackfillJournalObservation(ctx, r.Context, r.JournalLimits, observation.UC, observation.TR); err != nil {
