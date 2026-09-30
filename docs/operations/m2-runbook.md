@@ -6,11 +6,12 @@ operator other than the implementer; this document is not production approval.
 Cross-epoch full-disk restore and archive-replica maintenance are specifically
 pending. Do not use the test harness against production data.
 
-This runbook is limited to commands and observations present in the merged paired
-devnet scripts and `ubft` CLIs. Replace every `REPLACE_*` value before running a
-command. The H4 and D2C scripts operate on `test-nodes/`, stop processes, and in the
-H4 restore stage delete test datadirs. Use only a disposable, isolated checkout.
-For a live lane, obtain the devnet lock first; these instructions do not grant it.
+This runbook uses commands and observations present in the merged `ubft` CLIs,
+paired-devnet scripts, and F9 report tool. Replace every `REPLACE_*` value before
+running a command. The H4 and D2C scripts operate on `test-nodes/`, stop processes,
+and in the H4 restore stage delete test datadirs. Use only a disposable, isolated
+checkout. For a live lane, obtain the devnet lock first; these instructions do not
+grant it.
 
 ## Shared preflight and evidence
 
@@ -45,7 +46,38 @@ build/ubft shard-node status --url REPLACE_SHARD_RPC_BASE_URL \
   > REPLACE_EVIDENCE_DIR/node-status-before.json
 jq '{currentRootEpoch,activatedHandoffs,journal,pruneFrontier,restoreBase,latestLocalV2Archive,replicas,authority}' \
   REPLACE_EVIDENCE_DIR/node-status-before.json
+build/ubft shard-node certified-parent --url REPLACE_SHARD_RPC_BASE_URL \
+  > REPLACE_EVIDENCE_DIR/certified-parent-before.txt
 ```
+
+`shard-node certified-parent` is a read-only `GET` of the same #300
+`/api/v1/operator/status` endpoint and prints only the certified-tip block hash;
+its height, root epoch and root round are written to stderr. The endpoint is
+served only when the shard node has `--rpc-server-address`. Bind it to a trusted
+operator network and restrict access at the host/network boundary; the endpoint
+does not implement authentication.
+
+## Supported-version matrix
+
+This matrix is a conservative deployment rule, not a rolling-upgrade guarantee.
+The available evidence is pinned to exact artifacts: the final M2a run used BFT
+script tree `6e300cc1` and Ureth `055a314f759f78f045d55ceddfeb7e14b3b6a2f7`;
+this H6 implementation is based on BFT integration
+`dc8dd9aaa37e21e7c00a33819cb1110f24e9a58b`. `urethPinVerifyBinary` checks the
+Ureth executable against its chosen commit before launch.
+
+| Component | Compatibility rule supported by code/evidence | Deployment rule | Gap |
+|---|---|---|---|
+| BFT root nodes, shard nodes and `ubft` operators | Profile-2 and the operator commands are implemented in the BFT source tree; no mixed-BFT-version negotiation or rolling-upgrade acceptance is established. | Run one approved BFT commit across all participating root/shard processes and operator commands; record its full SHA. | Mixed-version compatibility, rollback and restoring new-format state with an older binary are unverified. |
+| Ureth execution client | The paired launcher verifies the executable's reported commit; the final M2a evidence names the exact Ureth pin above. | Pin and verify the same approved Ureth build on each EVM validator; record binary SHA-256 as well as commit. | A supported range of Ureth commits and mixed-version Engine API behavior have not been tested. |
+| Signing-authority operator/client protocol | The local protocol is version 1; the service and client reject a different version with `signing-unsupported-version`, with no negotiation (`signingauthority/service/wire.go`, `exchange.go`, `server.go`). | Use the matching `ubft` release for authority and shard node. An incompatible client must remain stopped. | No cross-release protocol compatibility matrix or upgrade negotiation exists. |
+| Authority session and persisted signing record | `replace-session` advances generation and fences the old client while retaining the signing record; `advance-epoch` also fences the session. | Replace/reconnect only with the live authority and the operator procedure below. | Authority process/key failover and a supported downgrade path are not implemented. |
+
+There is no release-level mixed-version promise beyond these exact-pin rules.
+Before an upgrade, record the old and new BFT/Ureth SHAs, binary hashes, trust
+bases and restore inputs, then rehearse the exact pair on disposable state. Do not
+roll back a node with newer journal, checkpoint or signing-record state unless a
+separately tested reader path exists.
 
 The exact successful shard log records used by the lane are:
 
@@ -116,31 +148,28 @@ endorsement, and returns after a quorum response. Root consensus commits or abor
 the attempt. There is no separate CLI `endorse` or `commit` command.
 
 Immediately before **every** propose call, including the initial call and each
-retry, re-read the latest certified EVM parent. The lane helper takes the last
-`Block Hash:` from a `sending CertificationResponse` line in root1's log. This is
-a lane-derived workaround; there is not yet a stable read-only parent query. Run
-the extraction again after every abort and never reuse a parent sampled for an
-earlier attempt:
+retry, read the latest certified EVM parent from a current healthy shard-node
+status endpoint. Capture the query result for the evidence record:
 
 ```sh
-PARENT=$(python3 - REPLACE_ROOT1_DEBUG_LOG <<'PY'
-import re,sys
-last=''
-for line in open(sys.argv[1], errors='replace'):
-    if 'sending CertificationResponse' not in line: continue
-    block=re.search(r'Block Hash: ([0-9A-F]{64})\b', line)
-    if block: last='0x'+block.group(1).lower()
-print(last)
-PY
-)
-case "$PARENT" in 0x*) ;; *) echo 'STOP: no certified EVM parent found' >&2; exit 1;; esac
-printf 'fresh FrozenParent=%s\n' "$PARENT"
+build/ubft shard-node certified-parent --url REPLACE_SHARD_RPC_BASE_URL \
+  > REPLACE_EVIDENCE_DIR/certified-parent.txt
 ```
+
+Prefer the proposal's own fresh query so the selected hash and proposal request
+are tied together. `--certified-parent-status-url` reads #300's `certifiedTip`
+immediately before building the plan, defaults `--frozen-parent` to that hash,
+and logs the selected height/hash. An explicit `--frozen-parent` may also be
+provided with that URL; if it differs from the freshly reported tip, the CLI
+returns `ErrStaleCertifiedParent` and does not submit the proposal. The root node
+independently checks that the parent is still eligible while building the plan.
+If it advanced after the GET, stop and retry only after confirming the previous
+attempt's terminal status. A query alone does not freeze the EVM parent.
 
 ```sh
 build/ubft root handoff propose \
   --next-trust-base REPLACE_NEXT_TRUST_BASE_JSON \
-  --frozen-parent "$PARENT" \
+  --certified-parent-status-url REPLACE_SHARD_RPC_BASE_URL \
   --root-rpc REPLACE_OLD_ROOT_RPC_1,REPLACE_OLD_ROOT_RPC_2,REPLACE_OLD_ROOT_RPC_3
 ```
 
@@ -177,8 +206,11 @@ build/ubft signing-authority advance-epoch \
 ```
 
 `advance-epoch` retains the authority's signing high-water record and fences its
-current client session. Issue a new session credential, then restart/reconnect the
-shard node with that credential before expecting it to sign:
+current client session. A transient socket failure alone does not require a new
+session: the BFT authority client keeps its connection and retries once after a
+dead cached connection (`signingauthority/service/exchange.go`). For a planned
+session replacement, write the replacement credential and reconnect the shard
+node as follows:
 
 ```sh
 build/ubft signing-authority replace-session \
@@ -192,6 +224,31 @@ status command and require the new `rootEpoch`, a higher `generation`, unchanged
 key fingerprint, no fault/lost-key state, and `reservedRound` not below its saved
 high-water. Require a subsequent `certification request signed` and new-epoch
 `certificate admitted` record before declaring the validator ready.
+
+`replace-session` fences the old credential as soon as the authority accepts the
+operation. It cannot be recovered from the authority; the command writes the new
+credential once with restrictive file permissions. If that output file cannot be
+written or is lost, run `replace-session` again and use only the newest credential.
+`shard-node run` reads its credential at startup (`cli/ubft/cmd/shard_node_signing.go`),
+so restart only the shard-node service with the new path; do not restart the
+signing-authority process. For a systemd-managed deployment, the service action is:
+
+```sh
+sudo systemctl stop REPLACE_SHARD_NODE_UNIT
+# Update only its --signing-authority-credential path to the new file.
+sudo systemctl start REPLACE_SHARD_NODE_UNIT
+sudo systemctl is-active REPLACE_SHARD_NODE_UNIT
+```
+
+Then inspect the node and authority statuses and wait for a later
+`certification request signed` and `certificate admitted` record. For a normal
+process/network reconnect using the same credential, the authority must remain
+alive; check `signing-authority status`, the shard-node `/api/v1/health` endpoint,
+and shard logs before rotating anything. The authority's signing key is
+process-local; stopping/restarting that process loses the key and is not a
+reconnect procedure. If status reports `keyLost`, `faulted`, a changed signing
+fingerprint, or an unexpected generation, stop and preserve logs rather than
+retrying with another credential.
 
 **STOP:** do not advance authorities before the root handoff commits. If any advance
 fails, do not restart that shard with the old client credential or manually edit
@@ -236,13 +293,13 @@ Retain the CLI's committed Abort record ID and ordered round with the exact
 target. A timeout is pending/unknown. A `too late` response means H committed;
 stop and do not retry. After observing committed Abort, retry the same network
 and predecessor at `attempt+1`, with new approvals and the same successor trust
-base. Refresh the parent immediately before the next proposal using the command
-in procedure 1, in the same shell session so the fresh `PARENT` value is used:
+base. The propose command must query the current certified parent again for the
+new attempt; do not reuse the previous hash:
 
 ```sh
 build/ubft root handoff propose \
   --next-trust-base REPLACE_NEXT_TRUST_BASE_JSON \
-  --frozen-parent "$PARENT" \
+  --certified-parent-status-url REPLACE_SHARD_RPC_BASE_URL \
   --root-rpc REPLACE_OLD_ROOT_RPC_1,REPLACE_OLD_ROOT_RPC_2,REPLACE_OLD_ROOT_RPC_3
 ```
 
@@ -391,10 +448,14 @@ empty BFT and archive paths.
 ## 4. Archive-replica maintenance
 
 **Evidence:** the publisher requires acknowledgements from both configured
-replicas before the frontier worker can prune. The merged scripts do not contain
-a one-replica-at-a-time maintenance/restart procedure. The new read-only
-`shard-node status` command exposes the durable frontier and per-replica
-acknowledgement heights; independent operator evidence remains pending.
+replicas before the frontier worker can prune. An archive replica is a shard-node
+process with a local archive store and the peer-gated archive server registered
+on its libp2p host; there is no separate `ubft archive-replica` daemon or
+service-manager command (`cli/ubft/cmd/shard_node_run.go`,
+`archivewiring/transport.go`). The deployment's process manager owns each
+replica-node service. The #300 status endpoint and #316 bounded F9 report give
+read-only acknowledgement/backlog measurements; independent operator evidence
+remains pending.
 
 Before taking a replica out, inspect the affected shard node's status. It must
 have been started with `--rpc-server-address HOST:PORT`:
@@ -410,6 +471,35 @@ Require a non-null prune frontier and both configured replicas' acknowledged
 heights at or above that frontier, with no reported replica error. A command
 failure or missing frontier is a STOP condition. This is a read-only snapshot;
 it does not authorize taking a replica offline.
+
+Check the actual service and process logs on the host running the selected
+replica. These are systemd examples; substitute the deployment's service manager
+and exact unit. Confirm only one of the two replica units will be stopped:
+
+```sh
+sudo systemctl status REPLACE_REPLICA_UNIT
+sudo systemctl is-active REPLACE_REPLICA_UNIT
+sudo journalctl -u REPLACE_REPLICA_UNIT --since '30 minutes ago' --no-pager
+curl -fsS REPLACE_REPLICA_STATUS_URL/api/v1/health
+```
+
+For an approved one-replica maintenance window, preserve its home, peer key,
+journal, archive and service arguments. Stop and start that unit through the
+deployment service manager, then confirm the process is active and inspect its
+log before checking the sender again:
+
+```sh
+sudo systemctl stop REPLACE_REPLICA_UNIT
+sudo systemctl is-active REPLACE_REPLICA_UNIT   # must report inactive
+sudo systemctl start REPLACE_REPLICA_UNIT
+sudo systemctl is-active REPLACE_REPLICA_UNIT   # must report active
+sudo journalctl -u REPLACE_REPLICA_UNIT -f
+```
+
+The replica's own `/api/v1/health` is a process health check, not proof that the
+sender has caught it up. Repeat `shard-node status` on each sender that names this
+peer and require its acknowledgement height to reach the current frontier with
+no transfer error. Do not stop the second peer until those checks pass.
 
 The Prometheus endpoint is an additional backlog cross-check:
 The node must have been started with `--metrics prometheus` and
@@ -427,6 +517,17 @@ The Prometheus exporter is configured with namespace `ab`, so these series are
 match or the exporter is unavailable; it does **not** mean the backlog is zero.
 Confirm `/api/v1/metrics` is enabled and inspect the full response before proceeding.
 
+For bounded multi-sample evidence, #316's report collector reads only the
+`GET /api/v1/operator/status` and `GET /api/v1/metrics` endpoints. Configure every
+measured shard node with `status_url`, `metrics_url`, and its local `archive_dir`;
+use at least two samples. The report writes incomplete evidence and exits
+nonzero if required metrics or status fields are absent:
+
+```sh
+go run ./scripts/f9-report --config REPLACE_F9_REPORT_CONFIG.json \
+  --out REPLACE_EVIDENCE_DIR/f9-replica-status.json
+```
+
 Before and after any maintenance, preserve the output and inspect the replica
 process log for these exact wait diagnostics:
 
@@ -442,8 +543,9 @@ replicas do not both acknowledge a recent certified record, or when
 status and metrics checks before touching the other replica. The status endpoint
 reports the last acknowledged heights and publisher's latest per-peer transfer
 error; it does not prove a replica process is healthy between read attempts.
-There is still no operator-safe replica restart command, so see Gaps and stop
-before any restart that lacks a deployment-owned procedure.
+There is no platform-independent operator-safe replica restart command. Use the
+deployment-owned service manager only after the acknowledgement/frontier checks;
+see Gaps for the remaining product and live-rehearsal limits.
 
 ## 5. Shard-node restart after handoffs
 
@@ -513,24 +615,29 @@ Stop and do not resume signing on any of these conditions:
 There are four concrete gaps; until closed, this document is a rehearsal guide,
 not a complete recovery authority:
 
-1. **Frozen-parent selection:** `root handoff propose` requires a certified EVM
-   parent, but there is no stable read-only CLI to return it. The M2 lane parses
-   `sending CertificationResponse` from `root1/debug.log` with inline Python.
-   Obtain an approved operator query before a human production run; do not guess
-   or copy an old hash.
+1. **Frozen-parent selection and acceptance:** the read-only
+   `shard-node certified-parent` query and fresh-tip `root handoff propose`
+   default are in [H6 CLI PR #320](https://github.com/ristik/bft-core/pull/320),
+   not yet available to deployed binaries. Use them only after that PR is merged
+   and the approved BFT release is deployed. The root's independent stale-parent
+   check remains required; an independent operator has not rehearsed the
+   end-to-end selection/retry path.
 2. **Authority advancement evidence:** `signing-authority advance-epoch` is a
    real command, but the merged profile-2 lane does not call it for each EVM
    authority or rehearse its session replacement and shard reconnect sequence.
-   The operator sequence in procedure 1 remains pending live/private acceptance.
-3. **Replica lifecycle:** `shard-node status` reports the durable frontier,
-   configured peer acknowledgement heights, and latest publisher errors. There
-   is still no operator-safe command to take one archive replica offline and
-   restart it; the lane's process helpers are topology-specific, not a service
-   manager.
-4. **Execution-version activation/support policy:** the lane prints source/client
-   pins and exercises current binaries, but there is no rolling version activation
-   command, supported-version matrix, rollback procedure, or defined recovery
-   authority for an incompatible upgrade.
+   The code-verified steps are documented in procedure 1, but live/private H6
+   acceptance remains pending.
+3. **Replica lifecycle:** `shard-node status`, `/api/v1/health`, Prometheus and
+   the #316 report are read-only. Actual stop/start uses the deployment-owned
+   service manager; no `ubft` command can safely take a replica offline, check
+   the other peer's service, or gate a restart on frontier acknowledgements.
+   Validate the systemd example against the deployment unit and rehearse it
+   independently before production use.
+4. **Execution-version compatibility:** the matrix records a conservative
+   same-release/exact-pin deployment rule. There is no rolling version activation,
+   mixed-version compatibility table, downgrade guarantee, or recovery authority
+   for incompatible persisted state. These require separate version-pair tests
+   before operators can widen the supported set.
 
 An operator who did not author this document must execute each supported rehearsal
 procedure in an isolated environment, record the above evidence, and review these

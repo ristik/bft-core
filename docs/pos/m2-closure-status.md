@@ -13,7 +13,7 @@ the named decision on #43. M3 requires M2a plus H6, F9 and H5 policy-only.
   distribution responsibility. An archive is never its own trust anchor.
 - **Operator pin:** retain the PoA checkpoint policy from D-M2-1: an independently
   provisioned checkpoint authority or currently trusted pin, monotonic sequence,
-  expiry and refresh, and documented key governance. H5 policy/CLI work and owner
+  expiry and refresh, and documented key governance. H5 policy-only work and owner
   acceptance remain open.
 - **T2 vesting:** the immutable vault uses linear EVM `block.timestamp` vesting with
   fixed start, cliff, duration, principal and recipient. This timestamp is a
