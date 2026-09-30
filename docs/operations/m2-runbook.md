@@ -1,9 +1,10 @@
 # M2 operations runbook: handoff, restore, and restart
 
-**Status:** rehearsal draft. M2a is still being closed. All five procedures below
-still need an evidence run led by an operator other than the implementer; none is
-production approval. Cross-epoch full-disk restore and archive-replica maintenance
-are specifically pending. Do not use the test harness against production data.
+**Status:** rehearsal draft. The M2a recovery-core lane has passed, while the M2
+and H6 gates remain open. Every procedure still needs an evidence run led by an
+operator other than the implementer; this document is not production approval.
+Cross-epoch full-disk restore and archive-replica maintenance are specifically
+pending. Do not use the test harness against production data.
 
 This runbook is limited to commands and observations present in the merged paired
 devnet scripts and `ubft` CLIs. Replace every `REPLACE_*` value before running a
@@ -109,15 +110,37 @@ this deployment; do not copy the lane's synthetic epoch arithmetic.
 
 ### Propose, endorse, and commit
 
-The only operator command is `root handoff propose`. It asks the first old root
+The proposal command is `root handoff propose`. It asks the first old root
 RPC to build and endorse the plan, sends that plan to the other old root RPCs for
 endorsement, and returns after a quorum response. Root consensus commits or aborts
 the attempt. There is no separate CLI `endorse` or `commit` command.
 
+Immediately before **every** propose call, including the initial call and each
+retry, re-read the latest certified EVM parent. The lane helper takes the last
+`Block Hash:` from a `sending CertificationResponse` line in root1's log. This is
+a lane-derived workaround; there is not yet a stable read-only parent query. Run
+the extraction again after every abort and never reuse a parent sampled for an
+earlier attempt:
+
+```sh
+PARENT=$(python3 - REPLACE_ROOT1_DEBUG_LOG <<'PY'
+import re,sys
+last=''
+for line in open(sys.argv[1], errors='replace'):
+    if 'sending CertificationResponse' not in line: continue
+    block=re.search(r'Block Hash: ([0-9A-F]{64})\b', line)
+    if block: last='0x'+block.group(1).lower()
+print(last)
+PY
+)
+case "$PARENT" in 0x*) ;; *) echo 'STOP: no certified EVM parent found' >&2; exit 1;; esac
+printf 'fresh FrozenParent=%s\n' "$PARENT"
+```
+
 ```sh
 build/ubft root handoff propose \
   --next-trust-base REPLACE_NEXT_TRUST_BASE_JSON \
-  --frozen-parent REPLACE_CERTIFIED_EVM_PARENT_HASH \
+  --frozen-parent "$PARENT" \
   --root-rpc REPLACE_OLD_ROOT_RPC_1,REPLACE_OLD_ROOT_RPC_2,REPLACE_OLD_ROOT_RPC_3
 ```
 
@@ -125,7 +148,7 @@ Wait for the committed outcome on the outgoing roots and then activation on **ev
 EVM validator. These are the exact lane checks (use the right log paths and epoch):
 
 ```sh
-grep -E 'msg="root handoff outcome" .*phase=committed .*rootEpoch=REPLACE_OLD_EPOCH([[:space:]]|$)' \
+grep -E 'msg="root handoff outcome" .*phase=committed .*attempt=REPLACE_ATTEMPT .*rootEpoch=REPLACE_OLD_EPOCH([[:space:]]|$)' \
   REPLACE_OLD_ROOT_DEBUG_LOG
 grep -E 'msg="handoff activated" rootEpoch=REPLACE_NEXT_ROOT_EPOCH([[:space:]]|$)' \
   REPLACE_EVM_VALIDATOR_DEBUG_LOG
@@ -175,30 +198,56 @@ fails, do not restart that shard with the old client credential or manually edit
 trust/config files. Keep enough unadvanced validators to preserve service and use
 the escalation path under Gaps.
 
-## 2. Aborted or stuck handoff: retry only after an observed abort
+## 2. Aborted or stuck handoff: commit Abort before retrying
 
-**Evidence:** `m2-profile2-handoffs.sh` retries after a protocol-produced abort
-using a newly sampled certified parent. It does not provide an operator abort
-command. Independent operator evidence is pending.
+**Evidence:** the protocol supports automatic abort, and `root handoff abort`
+provides an operator-triggered old-quorum abort for an exact prepared/endorsed
+attempt (#301). H6 live operator evidence is pending.
 
-First inspect every old root log. Retry only if the current attempt has an exact
-`msg="root handoff outcome" ... phase=aborted ... rootEpoch=<old>` record. A CLI
-failure from `root handoff propose` by itself is not evidence of an abort. The lane
-reuses the same successor trust base and selects a fresh frozen parent for its next
-attempt:
+First inspect every old root log. A retry is allowed only after an exact committed
+Abort or an observed protocol-produced `phase=aborted` outcome for the current
+attempt. A CLI failure from `root handoff propose` by itself is not evidence of an
+abort:
 
 ```sh
-grep -E 'msg="root handoff outcome" .*phase=aborted .*rootEpoch=REPLACE_OLD_EPOCH([[:space:]]|$)' \
+grep -E 'msg="root handoff outcome" .*phase=aborted .*attempt=REPLACE_CURRENT_ATTEMPT .*rootEpoch=REPLACE_OLD_EPOCH([[:space:]]|$)' \
   REPLACE_OLD_ROOT_DEBUG_LOG
+```
+
+If this reports the current attempt as aborted, do not submit another abort
+request. If no terminal outcome is present, do not infer the control state from
+the missing log line. Submit the operator command from `root-handoff-abort.md`
+only for the exact authenticated network, old epoch, predecessor, attempt, and
+successor body IDs. The command accepts only prepared/endorsed control, refuses
+an idle or mismatched target, and returns `too late` if H has already committed:
+
+```sh
+build/ubft root handoff abort \
+  --network REPLACE_NETWORK_ID \
+  --old-epoch REPLACE_OLD_EPOCH \
+  --predecessor-body-id REPLACE_PREDECESSOR_BODY_ID \
+  --attempt REPLACE_CURRENT_ATTEMPT \
+  --next-body-id REPLACE_NEXT_BODY_ID \
+  --root-rpc REPLACE_ROOT1_LOOPBACK_URL,REPLACE_ROOT2_LOOPBACK_URL,REPLACE_ROOT3_LOOPBACK_URL \
+  --timeout 2m
+```
+
+Retain the CLI's committed Abort record ID and ordered round with the exact
+target. A timeout is pending/unknown. A `too late` response means H committed;
+stop and do not retry. After observing committed Abort, retry the same network
+and predecessor at `attempt+1`, with new approvals and the same successor trust
+base. Refresh the parent immediately before the next proposal using the command
+in procedure 1, in the same shell session so the fresh `PARENT` value is used:
+
+```sh
 build/ubft root handoff propose \
   --next-trust-base REPLACE_NEXT_TRUST_BASE_JSON \
-  --frozen-parent REPLACE_NEW_CERTIFIED_EVM_PARENT_HASH \
+  --frozen-parent "$PARENT" \
   --root-rpc REPLACE_OLD_ROOT_RPC_1,REPLACE_OLD_ROOT_RPC_2,REPLACE_OLD_ROOT_RPC_3
 ```
 
 Then repeat the committed/activated/new-epoch checks in procedure 1. Record the
-new attempt number and frozen parent; do not reuse the parent from the aborted
-attempt.
+new attempt number and freshly sampled frozen parent.
 
 **STOP:** if the attempt remains prepared/endorsed, if no terminal `phase=aborted`
 record appears, if validators disagree about the outcome, or if no fresh certified
@@ -461,7 +510,7 @@ Stop and do not resume signing on any of these conditions:
 
 ## Gaps
 
-There are five concrete gaps; until closed, this document is a rehearsal guide,
+There are four concrete gaps; until closed, this document is a rehearsal guide,
 not a complete recovery authority:
 
 1. **Frozen-parent selection:** `root handoff propose` requires a certified EVM
@@ -469,19 +518,16 @@ not a complete recovery authority:
    `sending CertificationResponse` from `root1/debug.log` with inline Python.
    Obtain an approved operator query before a human production run; do not guess
    or copy an old hash.
-2. **Abort of an unresolved handoff:** there is no operator abort/cancel CLI. The
-   lane retries only after the protocol records `phase=aborted`. A prepared or
-   endorsed attempt with no terminal outcome has no documented recovery command.
-3. **Authority advancement evidence:** `signing-authority advance-epoch` is a
+2. **Authority advancement evidence:** `signing-authority advance-epoch` is a
    real command, but the merged profile-2 lane does not call it for each EVM
    authority or rehearse its session replacement and shard reconnect sequence.
    The operator sequence in procedure 1 remains pending live/private acceptance.
-4. **Replica lifecycle:** `shard-node status` reports the durable frontier,
+3. **Replica lifecycle:** `shard-node status` reports the durable frontier,
    configured peer acknowledgement heights, and latest publisher errors. There
    is still no operator-safe command to take one archive replica offline and
    restart it; the lane's process helpers are topology-specific, not a service
    manager.
-5. **Execution-version activation/support policy:** the lane prints source/client
+4. **Execution-version activation/support policy:** the lane prints source/client
    pins and exercises current binaries, but there is no rolling version activation
    command, supported-version matrix, rollback procedure, or defined recovery
    authority for an incompatible upgrade.

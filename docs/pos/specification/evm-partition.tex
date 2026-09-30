@@ -34,7 +34,7 @@ The timestamp is strictly increasing but can run ahead of real time at sub-secon
  Protocol deadlines use the certified root round recorded in state, with comparisons against thresholds rather than equality to an expected round. They do not use the EVM timestamp or block height as elapsed real time.
 \end{ruledef*}
 
-Allocation schedules state their units explicitly. A round-denominated vesting schedule promises progress in certified rounds, not calendar duration. Any future calendar schedule requires a separately reviewed certified-time rule. A client may use wall time to check the freshness of its trusted checkpoint; that is not a source of EVM execution input.
+Allocation schedules state their units explicitly. The owner-selected T2 vault is timestamp-based: it applies its linear start/cliff/duration schedule to deterministic EVM `block.timestamp`. The certified EVM timestamp is strictly increasing but can run ahead of wall time, so vesting does not promise a wall-clock duration. Protocol deadlines continue to use certified root rounds. A client may use wall time to check the freshness of its trusted checkpoint; that is not a source of EVM execution input.
 
 \section{Validity}\label{sec:evm-validity}
 

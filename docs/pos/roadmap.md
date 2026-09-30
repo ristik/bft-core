@@ -53,7 +53,7 @@ close; the old one-week/two-week estimates are not retained for unresolved proto
 |---|---|---|
 | M0 | Implementable protocol baseline | D1-D6 approved internally, wire/transition models and independent vectors available; scope and deferred guarantees explicit. |
 | M1 | Private paired PoA execution | F1-F6: authenticated system call, positive fees, idle progress, deterministic build/verify/replay and durable certified state. |
-| M2 | Recoverable PoA service | F7-F9, H1-H6, X1: real epoch replacement, certificate archive/export, checkpoint recovery and mixed aggregator/EVM operation. |
+| M2 | Recoverable PoA service | F7-F9, H1-H6, X1: real epoch replacement, certificate archive/export, checkpoint recovery and mixed aggregator/EVM operation. Current M2a evidence and remaining limits are tracked in [the closure status](m2-closure-status.md); that snapshot does not close the full M2 gate. |
 | M3 | Public UCT / TGE under PoA | M2, T1-T7, X2 remediation complete; exact production genesis rehearsed, funded first claims, custody/supply checks and upgrade recovery reviewed. T8 rewards optional and explicitly disabled if unfinished. |
 | M4B | Private bridge round trip | M3-equivalent test chain, B1-B6; both directions and supported-profile restrictions verified. No public custody. |
 | M5B | Public bridge | B7-B9 and X3 complete; every admitted history redeemable, independent SDK conformance, proof-service recovery and liability audit. |
@@ -270,6 +270,12 @@ wrong emitter/log index, wrong receipt root, old block beyond live key admission
 permanent storage. Restart and configured execution-state pruning preserve the promised export
 service. Unavailable data produces a typed failure, never a partial success.
 
+**Status (2026-09-30):** the receipt-complete archive, MintReasonBundleV1 extraction and offline
+verifier have a passing paired-devnet demo (evidence C in [the closure status](m2-closure-status.md)).
+The verifier receives the authentic trust base for the UC's epoch as an input; the accepted
+verification premise requires no ancestry proof or trust-body chain. F7's broad public account /
+storage export and permanent-storage service remain open.
+
 ### F8. Mixed-cadence partition integration
 
 **Dependencies:** F4-F6.
@@ -281,6 +287,10 @@ verification and existing root-selected shard leaders.
 **Accepts when:** slow or stopped EVM execution does not prevent unrelated aggregator certification;
 fast root leader rotation does not change an in-flight EVM leader; independent shard timeouts
 and invalid consistency proofs behave correctly. Reports distinguish the three round counters.
+
+**Status (2026-09-30):** the mixed lane passed with three aggregator shards, including a non-default
+shard ID, EVM stop/restart, reconnect and one root handoff; independent timeout and invalid-proof
+checks are in-process tests (evidence B in [the closure status](m2-closure-status.md)).
 
 ### F9. Proof-serving availability and resource bounds
 
@@ -394,32 +404,35 @@ privileged balance edit or pre-existing currency.
 
 **Dependencies:** T1.
 
-Implement round-denominated allocation release rules and the canonical wrapper. State explicitly
-that round vesting is not a calendar guarantee. Validate zero/boundary balances, rounding and
-withdrawal behavior. Custody upgrades and undeclared administrative drains are absent.
+Use the owner-approved immutable timestamp vesting vault and canonical wrapper. Vesting is linear
+from `start` over `duration`, with a `cliff`, immutable recipient and fixed principal; release is
+pull-based and donations stay outside the principal. The contract uses EVM `block.timestamp`, whose
+deterministic value can run ahead of wall time under the certified block clock, so this is not a
+wall-clock service guarantee. Custody upgrades and undeclared administrative drains are absent.
 
-**Accepts when:** funded recipients claim at the declared thresholds; skipped root rounds do not
-skip or duplicate entitlements; wrapper backing holds across deposits/withdrawals/reentrancy
-attempts; no release depends on block.timestamp.
+**Accepts when:** funded recipients claim at the declared timestamp thresholds; repeated releases
+never exceed principal and terminal release is exact; wrapper backing holds across
+deposits/withdrawals/reentrancy attempts.
 
 ### T3. FeeCollector and independent Treasury
 
 **Dependencies:** F5, T1.
 
-Account protocol priority-fee balance credits explicitly, since crediting the fee recipient
-does not run contract code. Separate earned fees, donations, reward-pot credits and treasury
-liabilities. Preserve the closing block's correct assignment attribution.
+Use the owner-approved revenue-only collector: its immutable 100/0 split assigns all unallocated
+revenue to a pull balance for the fixed treasury and none to T8 rewards. The fee beneficiary is the
+FeeCollector. It has no per-assignment attribution, settlement loop or governance path; T8 remains
+disabled. The split is permissionless, and only the treasury can withdraw its credit.
 
-**Accepts when:** fee settlement is idempotent across epoch changes; all amounts reconcile with
-receipts and balance changes; a failing claimant cannot affect others; parameter governance
-cannot exercise treasury spending authority.
+**Accepts when:** treasury liabilities never exceed collector balance; all amounts reconcile with
+the configured fee beneficiary and balance changes; a failing claimant cannot affect others.
 
 ### T4. Supply and custody invariant tooling
 
 **Dependencies:** T2-T3, D2.
 
 Define native supply as all account balances, with every enabled native destruction rule
-accounted. Test base fees and the pinned EVM's SELFDESTRUCT behavior rather than asserting
+accounted. Burned base fee is `baseFeePerGas × ordinary receipt gas`; reserved system-call gas is
+excluded. Test this fee rule and the pinned EVM's SELFDESTRUCT behavior rather than asserting
 that an opcode scan of project contracts proves the only possible sink. Track WUCT and native
 custody separately and keep disabled issuance/blob rules enforced.
 
