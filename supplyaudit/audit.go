@@ -74,6 +74,7 @@ type Snapshot struct {
 	GenesisHash     string             `json:"genesisHash"`
 	CertifiedBlock  CertifiedBlock     `json:"certifiedBlock"`
 	FullState       bool               `json:"fullState"`
+	IncompleteData  []string           `json:"incompleteData,omitempty"`
 	Addresses       Addresses          `json:"addresses"`
 	Accounts        map[string]Account `json:"accounts"`
 	Blocks          []BlockAccounting  `json:"blocks"`
@@ -146,8 +147,11 @@ type Result struct {
 }
 type Coverage struct {
 	FullState                  bool     `json:"fullState"`
+	HeadersComplete            bool     `json:"headersComplete"`
+	ReceiptsComplete           bool     `json:"receiptsComplete"`
 	TraceComplete              bool     `json:"selfdestructTracesComplete"`
 	UncoveredBlocks            []uint64 `json:"uncoveredSelfdestructTraceBlocks"`
+	IncompleteReasons          []string `json:"incompleteReasons,omitempty"`
 	CertificationAuthenticated bool     `json:"certificationAuthenticated"`
 }
 type NativeMetrics struct {
@@ -199,6 +203,21 @@ func Audit(genesisJSON, snapshotJSON []byte) (Result, error) {
 	if snapshot.ContractsCommit != ContractsCommit {
 		return result, inputError("contractsCommit must be pinned to %s", ContractsCommit)
 	}
+	traceReasons := make([]string, 0, len(snapshot.IncompleteData))
+	otherIncomplete := make([]string, 0)
+	for _, reason := range snapshot.IncompleteData {
+		switch {
+		case strings.HasPrefix(reason, "trace:"):
+			traceReasons = append(traceReasons, reason)
+		case strings.HasPrefix(reason, "header:"), strings.HasPrefix(reason, "receipt:"):
+			otherIncomplete = append(otherIncomplete, reason)
+		default:
+			otherIncomplete = append(otherIncomplete, "coverage: "+reason)
+		}
+	}
+	if len(otherIncomplete) > 0 {
+		return inconclusiveResult(snapshot, otherIncomplete), nil
+	}
 	if !snapshot.FullState {
 		return result, inputError("snapshot must assert fullState=true")
 	}
@@ -230,6 +249,10 @@ func Audit(genesisJSON, snapshotJSON []byte) (Result, error) {
 	if len(snapshot.Addresses.VestingVaults) == 0 {
 		return result, inputError("snapshot must list at least one vesting vault")
 	}
+	headerReasons, receiptReasons := missingAccountingEvidence(snapshot)
+	if len(headerReasons)+len(receiptReasons) > 0 {
+		return inconclusiveResult(snapshot, append(headerReasons, receiptReasons...)), nil
+	}
 
 	genesisSupply := new(big.Int)
 	for address, account := range genesis.Alloc {
@@ -259,7 +282,9 @@ func Audit(genesisJSON, snapshotJSON []byte) (Result, error) {
 		actualSupply.Add(actualSupply, balance)
 		stateAccounts[address] = account
 	}
-	result = Result{Version: ResultVersion, ContractsCommit: ContractsCommit, Status: "pass", CertifiedBlock: snapshot.CertifiedBlock, Coverage: Coverage{FullState: true, CertificationAuthenticated: false}}
+	result = Result{Version: ResultVersion, ContractsCommit: ContractsCommit, Status: "pass", CertifiedBlock: snapshot.CertifiedBlock,
+		Coverage: Coverage{FullState: true, HeadersComplete: true, ReceiptsComplete: true,
+			TraceComplete: len(traceReasons) == 0, IncompleteReasons: append([]string(nil), traceReasons...), CertificationAuthenticated: false}}
 	genesisAccounts := make(map[common.Address]GenesisAccount, len(genesis.Alloc))
 	for text, account := range genesis.Alloc {
 		genesisAccounts[common.HexToAddress(text)] = account
@@ -304,7 +329,7 @@ func Audit(genesisJSON, snapshotJSON []byte) (Result, error) {
 		return result, inputError("need exactly one accounting record for every block 1..%d", snapshot.CertifiedBlock.Number)
 	}
 	baseFeeBurn, ordinaryGasTotal, selfDestructBurn := new(big.Int), new(big.Int), new(big.Int)
-	traceComplete := true
+	traceComplete := len(traceReasons) == 0
 	uncovered := make([]uint64, 0)
 	previousHash := strings.ToLower(snapshot.GenesisHash)
 	for i, block := range snapshot.Blocks {
@@ -352,15 +377,11 @@ func Audit(genesisJSON, snapshotJSON []byte) (Result, error) {
 		if *block.WithdrawalsCount != 0 {
 			result.addViolation("withdrawals_disabled", fmt.Sprintf("block %d has withdrawals", block.Number), "0", fmt.Sprint(*block.WithdrawalsCount))
 		}
-		if block.SelfDestructTracesComplete == nil {
-			return result, inputError("block %d is missing selfdestructTracesComplete", block.Number)
-		}
-		if block.SelfDestructs == nil {
-			return result, inputError("block %d is missing selfdestructs array", block.Number)
-		}
-		if !*block.SelfDestructTracesComplete {
+		if block.SelfDestructTracesComplete == nil || block.SelfDestructs == nil || !*block.SelfDestructTracesComplete {
 			traceComplete = false
 			uncovered = append(uncovered, block.Number)
+			result.Coverage.IncompleteReasons = append(result.Coverage.IncompleteReasons,
+				fmt.Sprintf("trace: block %d has missing or incomplete SELFDESTRUCT trace coverage", block.Number))
 		}
 		seenTrace := make(map[string]struct{})
 		for _, trace := range block.SelfDestructs {
@@ -401,6 +422,7 @@ func Audit(genesisJSON, snapshotJSON []byte) (Result, error) {
 	expectedSupply.Sub(expectedSupply, selfDestructBurn)
 	result.Coverage.TraceComplete = traceComplete
 	result.Coverage.UncoveredBlocks = uncovered
+	result.Coverage.IncompleteReasons = uniqueStrings(result.Coverage.IncompleteReasons)
 	result.Native = NativeMetrics{GenesisSupply: genesisSupply.String(), BaseFeeBurn: baseFeeBurn.String(), OrdinaryGasUsed: ordinaryGasTotal.String(), SelfDestructBurn: selfDestructBurn.String(), ExpectedFromObservedBurns: expectedSupply.String(), Actual: actualSupply.String()}
 	if expectedSupply.Sign() < 0 {
 		result.addViolation("native_supply_formula", "observed burns exceed genesis supply", "non-negative", expectedSupply.String())
@@ -489,6 +511,71 @@ func Audit(genesisJSON, snapshotJSON []byte) (Result, error) {
 	}
 	sort.Slice(result.Violations, func(i, j int) bool { return result.Violations[i].Check < result.Violations[j].Check })
 	return result, nil
+}
+
+func missingAccountingEvidence(snapshot Snapshot) (headers, receipts []string) {
+	blockCount := len(snapshot.Blocks)
+	certifiedCount := snapshot.CertifiedBlock.Number
+	if uint64(blockCount) < certifiedCount {
+		headers = append(headers, fmt.Sprintf("header: history has %d records for certified blocks 1..%d", blockCount, certifiedCount))
+	}
+	limit := blockCount
+	if uint64(limit) > certifiedCount {
+		limit = int(certifiedCount)
+	}
+	for i := 0; i < limit; i++ {
+		block := snapshot.Blocks[i]
+		expected := uint64(i + 1)
+		if block.Number != expected {
+			headers = append(headers, fmt.Sprintf("header: expected block %d, found block %d", expected, block.Number))
+		}
+		if block.Hash == "" || block.ParentHash == "" || block.Difficulty == "" ||
+			block.BaseFeePerGas == "" || block.GasUsed == "" || block.BlobGasUsed == nil || block.WithdrawalsCount == nil {
+			headers = append(headers, fmt.Sprintf("header: block %d is missing a required header field", expected))
+		}
+		if block.TransactionCount == nil || block.FeeReceipts == nil ||
+			(block.TransactionCount != nil && uint64(len(block.FeeReceipts)) < *block.TransactionCount) {
+			receipts = append(receipts, fmt.Sprintf("receipt: block %d has incomplete ordinary transaction receipt coverage", expected))
+		}
+	}
+	return uniqueStrings(headers), uniqueStrings(receipts)
+}
+
+func inconclusiveResult(snapshot Snapshot, reasons []string) Result {
+	coverage := Coverage{FullState: snapshot.FullState, HeadersComplete: true, ReceiptsComplete: true, TraceComplete: true}
+	for _, reason := range reasons {
+		switch {
+		case strings.HasPrefix(reason, "header:"):
+			coverage.HeadersComplete = false
+		case strings.HasPrefix(reason, "receipt:"):
+			coverage.ReceiptsComplete = false
+		case strings.HasPrefix(reason, "trace:"):
+			coverage.TraceComplete = false
+		default:
+			coverage.HeadersComplete = false
+			coverage.ReceiptsComplete = false
+			coverage.TraceComplete = false
+		}
+	}
+	coverage.IncompleteReasons = uniqueStrings(reasons)
+	return Result{Version: ResultVersion, ContractsCommit: ContractsCommit, Status: "inconclusive",
+		CertifiedBlock: snapshot.CertifiedBlock, Coverage: coverage}
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+	return unique
 }
 
 func (r *Result) addViolation(check, message, expected, actual string) {
