@@ -117,8 +117,10 @@ Disposition and residual risk:
 ## Actions before commissioning / closing
 
 - **Owner:** freeze production S0, allocations, chain ID, treasury, fixed addresses,
-  fee profile and trust-pin governance at T6; decide whether the release gate
-  accepts the remaining M2a limits.
+  fee profile and trust-pin governance at T6. The owner has accepted M2a with limits
+  by the named decision on #43; M3 still requires H6, F9 and H5 policy-only. The
+  owner closed #16/#19/#29/#37 and closed #15 with limits; broad F7 public RPC,
+  SDK and account/storage proof work moves to bridge-track B5 (#66).
 - **Owner:** commission qualified independent X2 scope after T6, including
   remediation retest and explicit treatment of PoA trust-pin assumptions.
 - **Independent reviewer:** review T5 exact code/layout/immutables and sign the

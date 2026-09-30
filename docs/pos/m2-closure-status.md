@@ -2,8 +2,8 @@
 
 **Snapshot:** 2026-09-30. This is a status record, not a gate decision or a production
 authorization. The current BFT integration source is
-`d2332e10878aefe1c98fab423024491468de3218`. M2a recovery evidence passed, but the
-full M2 gate and H6 remain open.
+`d2332e10878aefe1c98fab423024491468de3218`. The owner accepted M2a with limits by
+the named decision on #43. M3 requires M2a plus H6, F9 and H5 policy-only.
 
 ## Recorded decisions
 
@@ -34,7 +34,7 @@ full M2 gate and H6 remain open.
 
 | Scope | Evidence status | Remaining boundary |
 |---|---|---|
-| F7 receipt-complete archive and mint-reason proof | Demo passed: typed-receipt inclusion and absence bundles were extracted from archive and verified offline after handoff/pruning. | Broad public account/storage export and permanent-storage service remain outside the completed core. The demo's verifier used a network-stripped environment, not a network sandbox. Evidence runner hardening is at `evidence/post-m2a-lanes` commit `034f2966`; no lane was rerun for this docs change. |
+| F7 receipt-complete archive and mint-reason proof | Demo passed: typed-receipt inclusion and absence bundles were extracted from archive and verified offline after handoff/pruning. The owner closed #15 with limits. | Broad public RPC, SDK and account/storage proof work moves to bridge-track B5 (#66). The demo's verifier used a network-stripped environment, not a network sandbox. Evidence runner hardening is at `evidence/post-m2a-lanes` commit `034f2966`; no lane was rerun for this docs change. |
 | F8 mixed cadence | Lane passed with the EVM plus three aggregator shards, non-default shard ID reconnect, EVM stop/restart, counters and a root handoff; independent timeout and invalid-proof checks are in-process tests. Aggregator pin: `dd5b1406a17fdeb415799045c5e81609619a870a`. | The evidence is the agreed F8 scope; it is not a sustained F9 resource benchmark. |
 | M2a recovery core | Final lane passed two handoffs, natural abort/retry, disk replacement across epochs 2/3, authority high-water 9→21, and B768. | First interruption measured 22.830s; second was not measured. Final frontier/ack snapshot and the mutation result are absent. H5, H6 second-operator rehearsal and F9 measurements remain open. |
 | T1/T4 supporting evidence | T1 default manifest genesis and funded first paid claim passed. T4 B20 reconciled exact supply and a paid-fee burn; injected +1 wei error was rejected. | T1 has no two independent clean-environment builds in the evidence set. T4 did not exercise CREATE/SELFDESTRUCT and had zero WUCT supply and collector liabilities; certification authentication is an input assertion. |
@@ -78,8 +78,10 @@ it as an external audit artifact.
 
 ## Owner and external actions
 
-- The maintainer decides whether M3 accepts M2a plus named service slices; this
-  snapshot does not waive H5, H6, F9 or broad F7 requirements.
+- The owner decision accepts M2a with the limits above for #43; M3 still requires
+  M2a, H6, F9 and H5 policy-only. #16, #19, #29 and #37 are closed. Broad F7
+  public RPC, SDK and account/storage proof work is deferred to B5 (#66); #15 is
+  closed with limits.
 - A second operator must execute the H6 recovery/upgrade/abort procedures and
   report interruption against owner-set objectives. `docs/operations/m2-runbook.md`
   is still a rehearsal draft; the abort-after-H live check is pending.
