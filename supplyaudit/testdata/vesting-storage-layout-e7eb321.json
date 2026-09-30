@@ -1,0 +1,31 @@
+{
+  "contractsCommit": "e7eb3216549b772a9e1df2b1214976d7dd9e6e62",
+  "artifactSha256": "18d059fae21cc9adc34fe825cb3997a0bde32f128e02551dd48e35ffecb9b242",
+  "storageLayout": {
+    "storage": [
+      {
+        "astId": 41891,
+        "contract": "src/ImmutableVestingVault.sol:ImmutableVestingVault",
+        "label": "_status",
+        "offset": 0,
+        "slot": "0",
+        "type": "t_uint256"
+      },
+      {
+        "astId": 45848,
+        "contract": "src/ImmutableVestingVault.sol:ImmutableVestingVault",
+        "label": "released",
+        "offset": 0,
+        "slot": "1",
+        "type": "t_uint256"
+      }
+    ],
+    "types": {
+      "t_uint256": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      }
+    }
+  }
+}

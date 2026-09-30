@@ -4,6 +4,7 @@ package supplyaudit
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,14 +18,17 @@ import (
 )
 
 const (
-	SnapshotVersion     = "unicity/supply-audit-snapshot/v1"
-	ResultVersion       = "unicity/supply-audit-result/v1"
-	ContractsCommit     = "e7eb3216549b772a9e1df2b1214976d7dd9e6e62"
-	wuctSupplySlot      = 2
-	collectorCreditSlot = 1
-	collectorRewardSlot = 2
-	vaultReleasedSlot   = 1
+	SnapshotVersion             = "unicity/supply-audit-snapshot/v2"
+	ResultVersion               = "unicity/supply-audit-result/v2"
+	ContractsCommit             = "e7eb3216549b772a9e1df2b1214976d7dd9e6e62"
+	wuctSupplySlot              = 2
+	collectorCreditSlot         = 1
+	collectorRewardSlot         = 2
+	pinnedVestingArtifactSHA256 = "18d059fae21cc9adc34fe825cb3997a0bde32f128e02551dd48e35ffecb9b242"
 )
+
+//go:embed testdata/vesting-storage-layout-e7eb321.json
+var pinnedVestingStorageLayoutJSON []byte
 
 var ErrInput = errors.New("supplyaudit: invalid input")
 
@@ -38,8 +42,27 @@ type Genesis struct {
 }
 
 type GenesisAccount struct {
-	Balance string `json:"balance"`
-	Code    string `json:"code"`
+	Balance string            `json:"balance"`
+	Code    string            `json:"code"`
+	Storage map[string]string `json:"storage"`
+}
+
+type artifactStorageField struct {
+	AstID    int    `json:"astId"`
+	Contract string `json:"contract"`
+	Label    string `json:"label"`
+	Slot     string `json:"slot"`
+	Offset   int    `json:"offset"`
+	Type     string `json:"type"`
+}
+
+type pinnedVestingLayoutDocument struct {
+	ContractsCommit string `json:"contractsCommit"`
+	ArtifactSHA256  string `json:"artifactSha256"`
+	StorageLayout   struct {
+		Storage []artifactStorageField `json:"storage"`
+		Types   json.RawMessage        `json:"types"`
+	} `json:"storageLayout"`
 }
 
 // Snapshot is an offline state dump plus the accounting facts needed to reconcile it.
@@ -78,10 +101,21 @@ type BlockAccounting struct {
 	Difficulty                 string              `json:"difficulty"`
 	BaseFeePerGas              string              `json:"baseFeePerGas"`
 	GasUsed                    string              `json:"gasUsed"`
+	TransactionCount           *uint64             `json:"transactionCount"`
+	FeeReceipts                []FeeReceipt        `json:"feeReceipts"`
 	BlobGasUsed                *string             `json:"blobGasUsed"`
 	WithdrawalsCount           *uint64             `json:"withdrawalsCount"`
 	SelfDestructTracesComplete *bool               `json:"selfdestructTracesComplete"`
 	SelfDestructs              []SelfDestructTrace `json:"selfdestructs"`
+}
+
+// FeeReceipt is the transaction fee data needed to separate paid ordinary gas from
+// Ureth's reserved system-call gas in the gross block header.
+type FeeReceipt struct {
+	TransactionHash   string `json:"transactionHash"`
+	GasUsed           string `json:"gasUsed"`
+	EffectiveGasPrice string `json:"effectiveGasPrice"`
+	PriorityFeePerGas string `json:"priorityFeePerGas"`
 }
 type SelfDestructTrace struct {
 	TransactionHash          string `json:"transactionHash"`
@@ -119,6 +153,7 @@ type Coverage struct {
 type NativeMetrics struct {
 	GenesisSupply             string `json:"genesisSupply"`
 	BaseFeeBurn               string `json:"baseFeeBurn"`
+	OrdinaryGasUsed           string `json:"ordinaryGasUsed"`
 	SelfDestructBurn          string `json:"selfdestructBurnObserved"`
 	ExpectedFromObservedBurns string `json:"expectedFromObservedBurns"`
 	Actual                    string `json:"actual"`
@@ -229,6 +264,14 @@ func Audit(genesisJSON, snapshotJSON []byte) (Result, error) {
 	for text, account := range genesis.Alloc {
 		genesisAccounts[common.HexToAddress(text)] = account
 	}
+	vestingStorage, err := pinnedVestingStorageLayout()
+	if err != nil {
+		return result, inputError("load pinned VestingVault storage layout: %v", err)
+	}
+	releasedSlot, err := artifactStorageSlot(vestingStorage, "released")
+	if err != nil {
+		return result, inputError("pinned VestingVault storage layout: %v", err)
+	}
 	accountFor := func(text string) (common.Address, Account, *big.Int, error) {
 		address := common.HexToAddress(text)
 		account, ok := stateAccounts[address]
@@ -260,7 +303,7 @@ func Audit(genesisJSON, snapshotJSON []byte) (Result, error) {
 	if len(snapshot.Blocks) != int(snapshot.CertifiedBlock.Number) {
 		return result, inputError("need exactly one accounting record for every block 1..%d", snapshot.CertifiedBlock.Number)
 	}
-	baseFeeBurn, selfDestructBurn := new(big.Int), new(big.Int)
+	baseFeeBurn, ordinaryGasTotal, selfDestructBurn := new(big.Int), new(big.Int), new(big.Int)
 	traceComplete := true
 	uncovered := make([]uint64, 0)
 	previousHash := strings.ToLower(snapshot.GenesisHash)
@@ -287,7 +330,12 @@ func Audit(genesisJSON, snapshotJSON []byte) (Result, error) {
 		if err != nil {
 			return result, inputError("block %d invalid gasUsed: %v", block.Number, err)
 		}
-		baseFeeBurn.Add(baseFeeBurn, new(big.Int).Mul(baseFee, gasUsed))
+		blockBurn, ordinaryGas, err := baseFeeBurnForBlock(block, baseFee, gasUsed)
+		if err != nil {
+			return result, inputError("block %d fee receipts: %v", block.Number, err)
+		}
+		baseFeeBurn.Add(baseFeeBurn, blockBurn)
+		ordinaryGasTotal.Add(ordinaryGasTotal, ordinaryGas)
 		if block.BlobGasUsed == nil {
 			return result, inputError("block %d is missing blobGasUsed", block.Number)
 		}
@@ -353,7 +401,7 @@ func Audit(genesisJSON, snapshotJSON []byte) (Result, error) {
 	expectedSupply.Sub(expectedSupply, selfDestructBurn)
 	result.Coverage.TraceComplete = traceComplete
 	result.Coverage.UncoveredBlocks = uncovered
-	result.Native = NativeMetrics{GenesisSupply: genesisSupply.String(), BaseFeeBurn: baseFeeBurn.String(), SelfDestructBurn: selfDestructBurn.String(), ExpectedFromObservedBurns: expectedSupply.String(), Actual: actualSupply.String()}
+	result.Native = NativeMetrics{GenesisSupply: genesisSupply.String(), BaseFeeBurn: baseFeeBurn.String(), OrdinaryGasUsed: ordinaryGasTotal.String(), SelfDestructBurn: selfDestructBurn.String(), ExpectedFromObservedBurns: expectedSupply.String(), Actual: actualSupply.String()}
 	if expectedSupply.Sign() < 0 {
 		result.addViolation("native_supply_formula", "observed burns exceed genesis supply", "non-negative", expectedSupply.String())
 	}
@@ -389,15 +437,21 @@ func Audit(genesisJSON, snapshotJSON []byte) (Result, error) {
 		if err != nil {
 			return result, err
 		}
-		code, err := decodeHex(account.Code)
-		if err != nil {
-			return result, inputError("vault %s code: %v", vaultAddress, err)
+		genesisVault, exists := genesisAccounts[vaultAddress]
+		if !exists {
+			return result, inputError("genesis allocation is missing vault %s", vaultAddress)
 		}
-		principal, err := readVaultPrincipal(code)
+		// Genesis export enforces vault balance == constructor principal. The principal is
+		// therefore taken from the exported genesis allocation; mutable released storage is
+		// located by the pinned contract artifact's storage layout below.
+		principal, err := quantity(genesisVault.Balance)
 		if err != nil {
-			return result, inputError("vault %s principal: %v", vaultAddress, err)
+			return result, inputError("vault %s genesis principal: %v", vaultAddress, err)
 		}
-		released, err := readStorage(account, vaultReleasedSlot)
+		if principal.Sign() <= 0 {
+			return result, inputError("vault %s genesis principal must be positive", vaultAddress)
+		}
+		released, err := readStorageAt(account, releasedSlot)
 		if err != nil {
 			return result, inputError("vault %s released storage: %v", vaultAddress, err)
 		}
@@ -498,7 +552,11 @@ func decodeHex(value string) ([]byte, error) {
 	return hex.DecodeString(value[2:])
 }
 func readStorage(account Account, slot uint64) (*big.Int, error) {
-	key := common.BigToHash(new(big.Int).SetUint64(slot)).Hex()
+	return readStorageAt(account, common.BigToHash(new(big.Int).SetUint64(slot)))
+}
+
+func readStorageAt(account Account, slot common.Hash) (*big.Int, error) {
+	key := slot.Hex()
 	value, ok := account.Storage[strings.ToLower(key)]
 	if !ok {
 		for k, v := range account.Storage {
@@ -520,17 +578,92 @@ func readStorage(account Account, slot uint64) (*big.Int, error) {
 	}
 	return n, nil
 }
-func readVaultPrincipal(code []byte) (*big.Int, error) {
-	// solc 0.8.37 / Cancun / via-IR artifact at ContractsCommit. Principal is the
-	// immutable with two runtime references at byte offsets 487 and 1142.
-	const first, second = 487, 1142
-	if len(code) < second+32 {
-		return nil, fmt.Errorf("runtime code too short for pinned immutable layout")
+
+func artifactStorageSlot(fields []artifactStorageField, label string) (common.Hash, error) {
+	var found *big.Int
+	for _, field := range fields {
+		if field.Label != label {
+			continue
+		}
+		if found != nil {
+			return common.Hash{}, fmt.Errorf("pinned artifact has duplicate %q storage fields", label)
+		}
+		if field.Type != "t_uint256" || field.Offset != 0 {
+			return common.Hash{}, fmt.Errorf("pinned artifact %q field is not a full uint256 slot", label)
+		}
+		slot, ok := new(big.Int).SetString(field.Slot, 10)
+		if !ok || slot.Sign() < 0 || slot.BitLen() > 256 {
+			return common.Hash{}, fmt.Errorf("pinned artifact %q field has invalid slot %q", label, field.Slot)
+		}
+		found = slot
 	}
-	a := new(big.Int).SetBytes(code[first : first+32])
-	b := new(big.Int).SetBytes(code[second : second+32])
-	if a.Cmp(b) != 0 {
-		return nil, errors.New("principal immutable references disagree")
+	if found == nil {
+		return common.Hash{}, fmt.Errorf("pinned artifact has no %q storage field", label)
 	}
-	return a, nil
+	return common.BigToHash(found), nil
+}
+
+func pinnedVestingStorageLayout() ([]artifactStorageField, error) {
+	var document pinnedVestingLayoutDocument
+	if err := strictDecode(pinnedVestingStorageLayoutJSON, &document); err != nil {
+		return nil, fmt.Errorf("decode embedded layout: %v", err)
+	}
+	if document.ContractsCommit != ContractsCommit || document.ArtifactSHA256 != pinnedVestingArtifactSHA256 {
+		return nil, errors.New("embedded layout is not pinned to contracts e7eb321")
+	}
+	if len(document.StorageLayout.Storage) == 0 {
+		return nil, errors.New("pinned VestingVault storage layout is empty")
+	}
+	return document.StorageLayout.Storage, nil
+}
+
+// baseFeeBurnForBlock uses ordinary transaction receipts rather than gross header gas.
+// At Ureth pin 0f0fc029, crates/unicity/execution/src/block_executor.rs:308-320 and :353-369
+// separate cumulative receipt gas from gross execution gas; crates/unicity/execution/src/block.rs:79-103
+// defines header gas as system + ordinary, and crates/unicity/execution/src/block_executor.rs:746-749
+// writes that gross total into the header. The reserved system prefix is not paid by ordinary
+// transactions, so it cannot contribute to base-fee burn.
+func baseFeeBurnForBlock(block BlockAccounting, baseFee, headerGas *big.Int) (*big.Int, *big.Int, error) {
+	if block.TransactionCount == nil {
+		return nil, nil, errors.New("transactionCount is missing")
+	}
+	if block.FeeReceipts == nil {
+		return nil, nil, errors.New("feeReceipts is missing")
+	}
+	if uint64(len(block.FeeReceipts)) != *block.TransactionCount {
+		return nil, nil, fmt.Errorf("got %d fee receipts for %d ordinary transactions", len(block.FeeReceipts), *block.TransactionCount)
+	}
+	ordinaryGas := new(big.Int)
+	seen := make(map[string]struct{}, len(block.FeeReceipts))
+	for i, receipt := range block.FeeReceipts {
+		if !isHash(receipt.TransactionHash) {
+			return nil, nil, fmt.Errorf("receipt %d has invalid transaction hash", i)
+		}
+		hash := strings.ToLower(receipt.TransactionHash)
+		if _, duplicate := seen[hash]; duplicate {
+			return nil, nil, fmt.Errorf("duplicate receipt transaction hash %s", hash)
+		}
+		seen[hash] = struct{}{}
+		gas, err := quantity(receipt.GasUsed)
+		if err != nil || gas.Sign() == 0 {
+			return nil, nil, fmt.Errorf("receipt %s has invalid gasUsed", hash)
+		}
+		effective, err := quantity(receipt.EffectiveGasPrice)
+		if err != nil {
+			return nil, nil, fmt.Errorf("receipt %s has invalid effectiveGasPrice", hash)
+		}
+		tip, err := quantity(receipt.PriorityFeePerGas)
+		if err != nil {
+			return nil, nil, fmt.Errorf("receipt %s has invalid priorityFeePerGas", hash)
+		}
+		basePaid := new(big.Int).Sub(effective, tip)
+		if basePaid.Sign() < 0 || basePaid.Cmp(baseFee) != 0 {
+			return nil, nil, fmt.Errorf("receipt %s effectiveGasPrice minus priority fee does not equal block base fee", hash)
+		}
+		ordinaryGas.Add(ordinaryGas, gas)
+	}
+	if ordinaryGas.Cmp(headerGas) > 0 {
+		return nil, nil, fmt.Errorf("ordinary receipt gas %s exceeds gross header gas %s", ordinaryGas, headerGas)
+	}
+	return new(big.Int).Mul(baseFee, ordinaryGas), ordinaryGas, nil
 }
