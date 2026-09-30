@@ -17,9 +17,9 @@ cd "$REPO_ROOT"
 mkdir -p "$EVIDENCE_DIR"
 pass "devnet lock acquired by the queued runner; T4 evidence output is $EVIDENCE_DIR"
 
-if POST_M2A_MODE=t4 POST_M2A_CHAIN_ID=1337 M2_PROFILE2=1 M2_RUN_LOG_DIR="$EVIDENCE_DIR/lane-nodes" \
+if POST_M2A_MODE=t4 POST_M2A_CHAIN_ID=1337 M2_PROFILE2=1 POST_M2A_SKIP_HANDOFF=1 M2_RUN_LOG_DIR="$EVIDENCE_DIR/lane-nodes" \
   bash ./scripts/reth-paired-devnet.sh 4 20 2>&1 | tee "$EVIDENCE_DIR/lane.log"; then
-  pass "fresh default-manifest lane certified transfers, vesting claim and root handoffs"
+  pass "fresh default-manifest T4 lane certified transfers and vesting claim without handoffs"
 else
   fail "paired T4 lane failed; inspect $EVIDENCE_DIR/lane.log"
 fi

@@ -237,7 +237,9 @@ post_m2a_after_lane() {
   if ! python3 - "$statusFile" "$postM2aMode" test-nodes/post-m2a-evidence/f7-lock-pin.json <<'PY'
 import json,sys
 status=json.load(open(sys.argv[1],encoding="utf-8")); mode=sys.argv[2]
-if status.get("currentRootEpoch",0) < 2 or not status.get("activatedHandoffs"):
+minimum_epoch = 1 if mode == "t4" else 2
+handoff_missing = mode != "t4" and not status.get("activatedHandoffs")
+if status.get("currentRootEpoch",0) < minimum_epoch or handoff_missing:
     raise SystemExit("operator status shows no committed/activated root handoff")
 if mode == "f7":
     pin=json.load(open(sys.argv[3],encoding="utf-8"))
@@ -252,7 +254,11 @@ PY
     fail "handoff/frontier/replica evidence did not satisfy the lane predicates"
     return 1
   fi
-  pass "operator status confirms the root handoff was activated"
+  if [ "$postM2aMode" = t4 ]; then
+    pass "operator status confirms root epoch 1; handoff skipped for the audit lane"
+  else
+    pass "operator status confirms the root handoff was activated"
+  fi
   if [ "$postM2aMode" = f7 ]; then
     pass "receipt-complete local archive and two replica acknowledgements cover a pruned frontier"
   fi

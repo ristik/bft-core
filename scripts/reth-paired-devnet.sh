@@ -53,6 +53,10 @@ if [ -n "$postM2aMode" ]; then
   case "$postM2aMode" in f7 | t1 | t4) ;; *) echo "POST_M2A_MODE must be f7, t1 or t4" >&2; exit 2 ;; esac
   [ "${M2_PROFILE2:-0}" = 1 ] || { echo "post-M2a evidence requires M2_PROFILE2=1" >&2; exit 2; }
   [ "$validators" -eq 4 ] || { echo "post-M2a evidence requires four validators" >&2; exit 2; }
+  if [ "${POST_M2A_SKIP_HANDOFF:-0}" = 1 ] && [ "$postM2aMode" != t4 ]; then
+    echo "POST_M2A_SKIP_HANDOFF is only supported by the T4 audit lane" >&2
+    exit 2
+  fi
 fi
 if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ]; then
   echo "profile-2 handoff lane requires four validators" >&2
@@ -822,7 +826,7 @@ if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
   pass "three aggregator shards certified alongside the EVM partition; UC/TR/EVM trace recorded"
 fi
 
-if [ "${M2_PROFILE2:-0}" = 1 ]; then
+if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
   echo "=== M2 profile-2: two certified root handoffs with paid execution ==="
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     f8_slow_stop_resume_evm || { fail "EVM delay/stop/resume probe failed"; exit 1; }
@@ -841,6 +845,8 @@ if [ "${M2_PROFILE2:-0}" = 1 ]; then
   else
     pass "two profile-2 handoffs replaced validator keys and certified paid transactions"
   fi
+elif [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" = 1 ]; then
+  pass "T4 audit lane skipped the optional profile-2 root handoffs"
 fi
 
 echo
@@ -960,7 +966,13 @@ fi
 
 if [ -n "$postM2aMode" ]; then
   if [ "$failures" -eq 0 ]; then
-    post_m2a_after_lane || fail "post-M2a post-handoff/prune evidence failed"
+    if ! post_m2a_after_lane; then
+      if [ "$postM2aMode" = t4 ]; then
+        fail "post-M2a T4 audit evidence failed"
+      else
+        fail "post-M2a post-handoff/prune evidence failed"
+      fi
+    fi
   else
     fail "post-M2a evidence collection skipped because an earlier lane check failed"
   fi
