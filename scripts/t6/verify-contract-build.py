@@ -58,7 +58,9 @@ def compare(name: str, published: dict, compiled: dict) -> None:
         fail(f"{name}: creation bytecode differs from the pinned Solidity rebuild")
     if norm_hex(published.get("runtime")) != norm_hex(compiled.get("deployedBytecode", {}).get("object")):
         fail(f"{name}: runtime bytecode differs from the pinned Solidity rebuild")
-    if published.get("immutableReferences", {}) != compiled.get("deployedBytecode", {}).get("immutableReferences", {}):
+    published_immutables = published.get("immutableReferences") or {}
+    compiled_immutables = compiled.get("deployedBytecode", {}).get("immutableReferences") or {}
+    if published_immutables != compiled_immutables:
         fail(f"{name}: immutable references differ from the pinned Solidity rebuild")
     if normalized_layout(published.get("storageLayout")) != normalized_layout(compiled.get("storageLayout")):
         fail(f"{name}: storage layout differs from the pinned Solidity rebuild")
