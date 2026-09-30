@@ -1,11 +1,42 @@
 #!/bin/bash
-# The D1 monitor invokes stop at B5 and restore after at least B15.
+# M2a final lane invokes stop before Handoff 1 and restore after Handoff 2.
 set -euo pipefail
 source helper.sh
 . scripts/lib/reth-pin.sh
 stage=${1:?stop or restore required}
 evidence=test-nodes/h4-replaced
 mkdir -p "$evidence"
+
+pid_is_running() {
+  local pid=$1 state
+  kill -0 "$pid" 2>/dev/null || return 1
+  state=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
+  [ -n "$state" ] && [[ "$state" != Z* ]]
+}
+
+stop_and_wait() {
+  local pid=$1 label=$2 pattern=$3
+  for _ in $(seq 1 300); do
+    if ! pid_is_running "$pid" || ! owned_pid "$pid" "$pattern"; then
+      echo "$label pid=$pid exited after SIGTERM"
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "$label pid=$pid did not exit within 30s after SIGTERM; sending SIGKILL" >&2
+  owned_pid "$pid" "$pattern" || { echo "$label pid=$pid is no longer owned by this checkout; refusing SIGKILL" >&2; return 1; }
+  kill -KILL "$pid" 2>/dev/null || true
+  for _ in $(seq 1 300); do
+    if ! pid_is_running "$pid" || ! owned_pid "$pid" "$pattern"; then
+      echo "$label pid=$pid exited after SIGKILL"
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "$label pid=$pid is still running after SIGKILL; refusing to wipe data" >&2
+  return 1
+}
+
 case "$stage" in
   stop)
     authPid=$(cat test-nodes/auth1/pid)
@@ -14,11 +45,23 @@ case "$stage" in
       --operator-credential test-nodes/auth1/operator.cred >"$evidence/authority-before.json"
     cp test-nodes/evm1/keys.json "$evidence/keys.json"
     cp test-nodes/evm1/jwt.hex "$evidence/jwt.hex"
-    stop_one_evm_validator 1 TERM
-    stop_pidfile test-nodes/reth1/pid 'reth.* node' TERM
+    cp test-nodes/evm1/debug.log "$evidence/evm1-before-wipe.log"
+    evmPid=$(cat test-nodes/evm1/pid)
+    rethPid=$(cat test-nodes/reth1/pid)
+    owned_pid "$evmPid" 'ubft shard-node run' || { echo "validator 1 BFT pid $evmPid is not owned by this checkout" >&2; exit 1; }
+    owned_pid "$rethPid" 'reth.* node' || { echo "validator 1 EL pid $rethPid is not owned by this checkout" >&2; exit 1; }
+    kill -TERM "$evmPid" 2>/dev/null || true
+    kill -TERM "$rethPid" 2>/dev/null || true
+    stop_and_wait "$evmPid" 'validator 1 BFT' 'ubft shard-node run' || exit 1
+    stop_and_wait "$rethPid" 'validator 1 EL' 'reth.* node' || exit 1
+    rm -f test-nodes/evm1/pid test-nodes/reth1/pid
     echo "$authPid" >"$evidence/authority-pid"
-    echo 'H4_STOPPED_AT_B5' >>test-nodes/evm1/debug.log
-    echo "stopped validator 1 BFT and EL; authority pid=$authPid survives"
+    # The restored shard uses a fresh home. Preserve only identity, JWT and evidence;
+    # remove both data directories only after both validator processes have exited.
+    rm -rf test-nodes/evm1 test-nodes/reth1/dd
+    mkdir -p test-nodes/evm1 test-nodes/reth1
+    echo 'H4_STOPPED_AND_BFT_EL_WIPED' >"$evidence/stop.txt"
+    echo "stopped validator 1; wiped BFT and EL data; authority pid=$authPid survives"
     ;;
   restore)
     authPid=$(cat "$evidence/authority-pid")
@@ -53,11 +96,17 @@ case "$stage" in
       curl -sS --max-time 5 -X POST http://127.0.0.1:18545 -H 'Content-Type: application/json' \
         -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"admin_addPeer\",\"params\":[\"$enode\"]}" >/dev/null
     done
-    go run ./scripts/h4-restore-pin test-nodes/h4-archives/evm2 test-nodes/trust-base.json "$evidence/tip" >"$evidence/pin.txt"
+    pinTrustBase=test-nodes/trust-base.json
+    restoreProfile2Args=()
+    if [ "${M2_PROFILE2:-0}" = 1 ]; then
+      restoreProfile2Args+=(--trust-history-profile-2)
+    fi
+    go run ./scripts/h4-restore-pin test-nodes/h4-archives/evm2 "$pinTrustBase" "$evidence/tip" >"$evidence/pin.txt"
     bodyID=$(tr ' ' '\n' <"$evidence/pin.txt" | sed -n 's/^bodyID=//p')
     rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
-    bootnodes="$rootBoot"
-    for j in 2 3 4; do bootnodes+=",$(evm_validator_addr "$j")"; done
+    bootnodes=$(evm_bootnodes_for_peers "$rootBoot" 1 2 3 4)
+    # Keep the journal bounded but leave room for a replica's one-at-a-time
+    # authority-advance restart and durable archive acknowledgement catch-up.
     build/ubft shard-node restore --home "$evidence" --executor engine-api \
       --address "/ip4/127.0.0.1/tcp/$evmValidatorPortStart" --bootnodes "$bootnodes" \
       --trust-base test-nodes/trust-base.json --full-shard-conf "$EVM_FULL_SHARD_CONF" \
@@ -65,7 +114,8 @@ case "$stage" in
       --eth-url http://127.0.0.1:18545 --jwt-secret "$evidence/jwt.hex" \
       --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" \
       --execution-journal "$evidence/journal.db" --archive-store "$evidence/archive" --archive-prune \
-      --journal-candidates 8 --archive-replica "$(evm_validator_id 2)" \
+      ${restoreProfile2Args[@]+"${restoreProfile2Args[@]}"} \
+      --journal-candidates 32 --archive-replica "$(evm_validator_id 2)" \
       --archive-replica "$(evm_validator_id 3)" \
       --signing-authority-socket test-nodes/auth1/client.sock \
       --signing-authority-credential test-nodes/auth1/client.cred \

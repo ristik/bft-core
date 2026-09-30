@@ -277,6 +277,44 @@ function evm_validator_addr() {
   echo "/ip4/127.0.0.1/tcp/$port/p2p/$(evm_validator_id "$i")"
 }
 
+# require_peer_id_address - fail before launching a node if a boot address has no peer ID.
+function require_peer_id_address() {
+  local address=$1 source=$2 peer
+  case "$address" in
+    */p2p/*) peer=${address##*/p2p/} ;;
+    *) echo "$source is missing its /p2p/<peer-id> suffix: '$address'" >&2; return 1 ;;
+  esac
+  if [ -z "$peer" ] || [[ "$peer" == */* ]] || [[ "$peer" == *[[:space:]]* ]]; then
+    echo "$source has an empty or malformed peer ID: '$address'" >&2
+    return 1
+  fi
+  printf '%s\n' "$peer"
+}
+
+# evm_bootnodes_for_peers - root address plus the listed online validators except $2.
+function evm_bootnodes_for_peers() {
+  local rootBoot=$1 exclude=$2
+  shift 2
+  local bootnodes=$rootBoot i peerID address addressPeer
+  require_peer_id_address "$rootBoot" "root boot node" >/dev/null || return 1
+  for i in "$@"; do
+    [ "$i" = "$exclude" ] && continue
+    peerID=$(evm_validator_id "$i") || peerID=
+    if [ -z "$peerID" ]; then
+      echo "online validator $i has no peer ID; refusing to build an incomplete boot-node list" >&2
+      return 1
+    fi
+    address=$(evm_validator_addr "$i") || return 1
+    addressPeer=$(require_peer_id_address "$address" "online validator $i boot node") || return 1
+    if [ "$addressPeer" != "$peerID" ]; then
+      echo "online validator $i boot-node peer ID $addressPeer does not match node ID $peerID" >&2
+      return 1
+    fi
+    bootnodes+=",$address"
+  done
+  printf '%s\n' "$bootnodes"
+}
+
 # start_evm_validators - start N shard-node processes, each bootstrapped to
 # the root chain AND directly to every sibling validator (a full mesh,
 # guaranteeing dissemination connectivity without depending on DHT peer
@@ -314,16 +352,21 @@ function start_evm_validators() {
 # $4 root boot address
 # $5 executor: "fake" or "engine-api"
 # $6 "rpc" (optional) - see start_evm_validators
+# $7 optional prevalidated comma-separated boot nodes for offline-peer lanes
 function start_one_evm_validator() {
   local i=$1 n=$2 partitionID=$3 rootBoot=$4 executor=$5 exposeRPC=${6:-}
   local port=$((evmValidatorPortStart + i - 1))
 
   local bootnodes="$rootBoot"
-  for j in $(seq 1 "$n"); do
-    if [ "$j" != "$i" ]; then
-      bootnodes+=",$(evm_validator_addr "$j")"
-    fi
-  done
+  if [ "$#" -ge 7 ]; then
+    bootnodes=$7
+  else
+    for j in $(seq 1 "$n"); do
+      if [ "$j" != "$i" ]; then
+        bootnodes+=",$(evm_validator_addr "$j")"
+      fi
+    done
+  fi
 
   local executorArgs=()
   local shardConfArgs=(--shard-conf "test-nodes/shard-conf-${partitionID}_0.json")
@@ -349,7 +392,9 @@ function start_one_evm_validator() {
 	fi
 	if [ -n "${EVM_ARCHIVE_ROOT:-}" ]; then
 	  local replicaCount=0 peerID
-	  executorArgs+=(--archive-store "$EVM_ARCHIVE_ROOT/evm$i" --archive-prune --journal-candidates 8)
+	  # Bounded at 32 to tolerate one-at-a-time authority restarts while archive
+	  # replicas catch up; a persistent publication stall still fails loudly.
+	  executorArgs+=(--archive-store "$EVM_ARCHIVE_ROOT/evm$i" --archive-prune --journal-candidates 32)
 	  for j in $(seq 2 "$n"); do
 	    [ "$j" = "$i" ] && continue
 	    peerID=$(evm_validator_id "$j") || return 1

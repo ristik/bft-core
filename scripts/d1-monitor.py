@@ -431,6 +431,8 @@ def main():
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--restart-validator", type=int, default=0)
     parser.add_argument("--h4-restore-validator", type=int, default=0)
+    parser.add_argument("--already-restored-validator", type=int, default=0,
+                        help="exclude a node restored before D1 from historical evidence, then verify it at the target")
     parser.add_argument("--signing", choices=("local", "authority"), default="local")
     parser.add_argument("--fault-scenario", choices=("pair-term", "pair-kill", "ureth-kill",
                         "all-kill", "leader-kill", "proof-outage", "proof-corrupt",
@@ -442,12 +444,20 @@ def main():
     args = parser.parse_args()
     if args.validators != 4 or args.blocks < 10:
         parser.error("D1 requires four validators and at least ten blocks")
+    if args.already_restored_validator and args.already_restored_validator not in range(1, 5):
+        parser.error("--already-restored-validator must be in 1..4")
+    if args.already_restored_validator and (args.restart_validator or args.h4_restore_validator):
+        parser.error("an already-restored validator cannot also use a D1 restart/restore probe")
 
     impaired = 1 if args.fault_scenario in {"missing-body", "wrong-genesis", "proof-corrupt"} else 0
-    survivors = [i for i in range(1, 5) if i != impaired] if impaired else [1, 2, 3, 4]
+    excluded = impaired or args.already_restored_validator
+    survivors = [i for i in range(1, 5) if i != excluded] if excluded else [1, 2, 3, 4]
     required_quorum = 3
     if impaired:
         print(f"D1 expected refusal: validator {impaired}; fresh survivor quorum={survivors}", flush=True)
+    elif args.already_restored_validator:
+        print(f"D1 restored validator {args.already_restored_validator}: historical evidence quorum={survivors}; "
+              "will require target-height execution and certificate after restore", flush=True)
     else:
         print(f"D1 fresh survivor quorum: any three of validators {survivors}", flush=True)
 
@@ -636,6 +646,23 @@ def main():
             return 1
         except RuntimeError as exc:
             print(f"D1 FAIL: {exc}", flush=True)
+            return 1
+    if args.already_restored_validator:
+        validator = args.already_restored_validator
+        try:
+            target_block = rpc(18544 + survivors[0], "eth_getBlockByNumber", [hex(target), False])
+            restored_block = rpc(18544 + validator, "eth_getBlockByNumber", [hex(target), False])
+            if not target_block or not restored_block or restored_block.get("hash") != target_block.get("hash"):
+                raise RuntimeError(f"validator {validator} has not executed the quorum target B{target}")
+            admissions = certificate_admissions(
+                (Path(args.nodes) / f"evm{validator}" / "debug.log").read_text(errors="replace").splitlines()
+            )
+            target_hash = target_block["hash"].removeprefix("0x").lower()
+            if not any(entry["height"] == target and entry["block"] == target_hash for entry in admissions):
+                raise RuntimeError(f"validator {validator} has no post-restore certificate admission for B{target}")
+            print(f"D1 restored validator {validator} executed and admitted the quorum block B{target}", flush=True)
+        except (OSError, RuntimeError, KeyError, ValueError) as exc:
+            print(f"D1 FAIL: restored validator did not rejoin at target: {exc}", flush=True)
             return 1
     print(f"D1 observed consecutive canonical blocks with a fresh survivor quorum of "
           f"{required_quorum} through B{target}; survivors={survivors}", flush=True)
