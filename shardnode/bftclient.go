@@ -358,6 +358,9 @@ func (c *BFTClient) Run(ctx context.Context) error {
 
 	received := c.net.ReceivedChannel()
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -642,18 +645,30 @@ func compareCertificationAuthorization(a, b *certificationAuthorization) int {
 	return 0
 }
 
-// coalesceBufferedCertificationResponses drains the currently queued feed before handing anything
-// to the synchronous round driver. Repeats for one exact InputRecord are one authorization stream:
-// once a newer, authenticated root round is present, earlier responses in that stream cannot
-// authorize useful work and are collapsed. Distinct InputRecords stay in arrival order because
-// each certified block may need to be applied. Equal-round conflicting statements are preserved
-// so the normal non-equivocation check still sees them.
+// coalesceBufferedCertificationResponses drains only the messages queued at entry before handing
+// anything to the synchronous round driver. Repeats for one exact InputRecord are one authorization
+// stream: once a newer, authenticated root round is present, earlier responses in that stream
+// cannot authorize useful work and are collapsed. Distinct InputRecords stay in arrival order
+// because each certified block may need to be applied. Equal-round conflicting statements are
+// preserved so the normal non-equivocation check still sees them. Identical copies are retained at
+// most twice, preserving one retry opportunity without allowing duplicate traffic to grow the batch.
 func (c *BFTClient) coalesceBufferedCertificationResponses(ctx context.Context, first any, received <-chan any) ([]any, bool) {
+	drainLimit := len(received)
 	queued := make([]queuedCertificationMessage, 0, 1)
 	activeInput := ""
 	activeAuth := (*certificationAuthorization)(nil)
 	activeIndices := make([]int, 0, 1)
 	activeAmbiguous := false
+	activePairCopies := make(map[[32]byte]int)
+	appendActive := func(entry queuedCertificationMessage) {
+		identity := entry.authorization.pairIdentity
+		if activePairCopies[identity] >= 2 {
+			return
+		}
+		activePairCopies[identity]++
+		activeIndices = append(activeIndices, len(queued))
+		queued = append(queued, entry)
+	}
 	appendMessage := func(message any) {
 		entry := queuedCertificationMessage{message: message}
 		cr, ok := message.(*certification.CertificationResponse)
@@ -674,12 +689,12 @@ func (c *BFTClient) coalesceBufferedCertificationResponses(ctx context.Context, 
 			activeAuth = entry.authorization
 			activeIndices = []int{len(queued)}
 			activeAmbiguous = false
+			activePairCopies = map[[32]byte]int{entry.authorization.pairIdentity: 1}
 			queued = append(queued, entry)
 			return
 		}
 		if activeAmbiguous {
-			activeIndices = append(activeIndices, len(queued))
-			queued = append(queued, entry)
+			appendActive(entry)
 			return
 		}
 
@@ -701,8 +716,7 @@ func (c *BFTClient) coalesceBufferedCertificationResponses(ctx context.Context, 
 			if activeAuth.pairIdentity != entry.authorization.pairIdentity {
 				activeAmbiguous = true
 			}
-			activeIndices = append(activeIndices, len(queued))
-			queued = append(queued, entry)
+			appendActive(entry)
 			return
 		}
 
@@ -716,11 +730,12 @@ func (c *BFTClient) coalesceBufferedCertificationResponses(ctx context.Context, 
 		}
 		activeAuth = entry.authorization
 		activeIndices = []int{firstIndex}
+		activePairCopies = map[[32]byte]int{entry.authorization.pairIdentity: 1}
 	}
 
 	appendMessage(first)
 	closed := false
-	for {
+	for drained := 0; drained < drainLimit; drained++ {
 		select {
 		case message, ok := <-received:
 			if !ok {

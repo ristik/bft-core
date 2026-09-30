@@ -303,3 +303,132 @@ func TestUnreadyProfile2CertificateCannotSupersedeQueuedCurrentEpoch(t *testing.
 	require.Equal(t, []uint64{current.UC.GetRoundNumber()}, driver.rounds(),
 		"the current-epoch certificate remains processable after the future epoch is gated")
 }
+
+func startContinuousCertificationFeed(ch chan<- any, response any) (func(), <-chan struct{}) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case ch <- response:
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(stop) }) }, done
+}
+
+func TestCoalescingContinuousCertificationFeedBoundsBatch(t *testing.T) {
+	f := newConfBindingFixture(t)
+	client, _ := f.client(f.confMine)
+	response := f.respond(f.ucMine)
+	received := make(chan any, 8)
+	for range cap(received) {
+		received <- response
+	}
+	stopFeed, feedDone := startContinuousCertificationFeed(received, response)
+	defer func() {
+		stopFeed()
+		<-feedDone
+	}()
+
+	type result struct {
+		batch  []any
+		closed bool
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		batch, closed := client.coalesceBufferedCertificationResponses(context.Background(), response, received)
+		resultCh <- result{batch: batch, closed: closed}
+	}()
+
+	select {
+	case got := <-resultCh:
+		require.False(t, got.closed)
+		require.LessOrEqual(t, len(got.batch), cap(received)+1,
+			"one first response plus the queue snapshot is the maximum batch")
+		require.LessOrEqual(t, len(got.batch), 2,
+			"identical same-round copies retain only one retry opportunity")
+	case <-time.After(3 * time.Second):
+		stopFeed()
+		select {
+		case <-resultCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("coalescing did not return after the continuous feed stopped")
+		}
+		t.Fatal("coalescing did not return while the channel was continuously fed")
+	}
+}
+
+type cancelOnCertificateDriver struct {
+	cancel context.CancelFunc
+	called chan struct{}
+	once   sync.Once
+}
+
+func (d *cancelOnCertificateDriver) HandleCertificate(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error {
+	d.once.Do(func() {
+		close(d.called)
+		d.cancel()
+	})
+	return nil
+}
+
+func TestRunReturnsToLoopAndHandlesCancellationWithContinuousFeed(t *testing.T) {
+	f := newConfBindingFixture(t)
+	response := f.respond(f.ucMine)
+	received := make(chan any, 8)
+	for range cap(received) {
+		received <- response
+	}
+	stopFeed, feedDone := startContinuousCertificationFeed(received, response)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	driver := &cancelOnCertificateDriver{cancel: cancel, called: make(chan struct{})}
+	net := &admissionTestNet{received: received}
+	client, _ := f.client(f.confMine)
+	client.net = net
+	client.signer = f.signer
+	client.driver = driver
+	client.opts = BFTClientOptions{
+		HandshakeNodes: 1, CertNodes: 1,
+		HeartbeatInterval: time.Hour, InactivityTimeout: time.Hour,
+	}
+	done := make(chan error, 1)
+	go func() { done <- client.Run(ctx) }()
+
+	joined := false
+	t.Cleanup(func() {
+		stopFeed()
+		cancel()
+		if !joined {
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Error("Run did not stop during test cleanup")
+			}
+		}
+		select {
+		case <-feedDone:
+		case <-time.After(time.Second):
+			t.Error("continuous feed did not stop")
+		}
+	})
+
+	select {
+	case <-driver.called:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return to certificate handling while the feed stayed full")
+	}
+	stopFeed()
+	select {
+	case err := <-done:
+		joined = true
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not handle cancellation after the bounded batch")
+	}
+}
