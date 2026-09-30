@@ -164,10 +164,10 @@
         "GasUsed": 21000,
         "Status": 0,
         "Reason": "insufficient_balance_at_turn",
-        "Digest": "TXvFUykwpDdiHISW2bcWYSYow0GJcLe2cDjL/RIsswA="
+        "Digest": "BQGgEF6Z3C46kAcjf+TsV1C74ANxJSAXpmiCYu8P13g="
       }
     ],
-    "seal_registry_commitment": "8ac7edd0cb6c68c88ade5df1f2feb804963677f6708b0cb3f9174b4b70eeb0c7",
+    "seal_registry_commitment": "1fbcf869da7f72e97c8e48c5880a6ef60bed50d593774856fc270471db41a20a",
     "ordinary_tx_count": 3,
     "successful_forced_tx_count_in_receipt_trie": 1,
     "header_gas_used": 12451000,
