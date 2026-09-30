@@ -17,6 +17,7 @@ import (
 const maxProcessCommandOutput = 4 << 20
 
 type processSnapshot struct {
+	PID        int
 	CPUSeconds float64
 	RSSBytes   float64
 	OpenFDs    uint64
@@ -72,7 +73,7 @@ func readProcessSnapshot(ctx context.Context, pidFile string) (*processSnapshot,
 	if err != nil {
 		return nil, fmt.Errorf("counting open files for pid %d: %w", pid, err)
 	}
-	return &processSnapshot{CPUSeconds: cpu, RSSBytes: rss * 1024, OpenFDs: fds}, nil
+	return &processSnapshot{PID: pid, CPUSeconds: cpu, RSSBytes: rss * 1024, OpenFDs: fds}, nil
 }
 
 func runProcessCommand(ctx context.Context, name string, args ...string) ([]byte, error) {

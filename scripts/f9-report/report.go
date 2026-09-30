@@ -405,6 +405,9 @@ func applyMetrics(out *nodeReport, first, last sample, sampleCount int) {
 	lastStart := metricScalar(last.metrics, "process_start_time_seconds")
 	out.Process.StartTimeUnix = lastStart
 	processRestarted := firstStart != nil && lastStart != nil && *firstStart != *lastStart
+	if first.process != nil && last.process != nil && first.process.PID != last.process.PID {
+		processRestarted = true
+	}
 	if processRestarted {
 		out.addError(errors.New("node process restarted during the sampling window"))
 	}

@@ -149,8 +149,8 @@ engineapi_parent_witness_verification_duration_seconds_count 2
 `
 	families, err := (&expfmt.TextParser{}).TextToMetricFamilies(strings.NewReader(text))
 	require.NoError(t, err)
-	first := sample{at: time.Unix(1, 0), process: &processSnapshot{CPUSeconds: 10, RSSBytes: 1024, OpenFDs: 4}}
-	last := sample{at: time.Unix(6, 0), metrics: families, process: &processSnapshot{CPUSeconds: 12, RSSBytes: 2048, OpenFDs: 7}}
+	first := sample{at: time.Unix(1, 0), process: &processSnapshot{PID: 123, CPUSeconds: 10, RSSBytes: 1024, OpenFDs: 4}}
+	last := sample{at: time.Unix(6, 0), metrics: families, process: &processSnapshot{PID: 123, CPUSeconds: 12, RSSBytes: 2048, OpenFDs: 7}}
 	got := nodeReport{Complete: true}
 	applyMetrics(&got, first, last, 2)
 	require.True(t, got.Complete, "%+v", got.Errors)
@@ -160,6 +160,11 @@ engineapi_parent_witness_verification_duration_seconds_count 2
 	require.Equal(t, float64(7), *got.Process.OpenFDs)
 	require.False(t, got.Certification.PauseMetricsAvailable)
 	require.False(t, got.Certification.EpochTransitionObserved)
+	last.process.PID = 124
+	restarted := nodeReport{Complete: true}
+	applyMetrics(&restarted, first, last, 2)
+	require.False(t, restarted.Complete)
+	require.Contains(t, restarted.Errors, "node process restarted during the sampling window")
 }
 
 func TestParseProcessUsageAndBoundedFDCount(t *testing.T) {
