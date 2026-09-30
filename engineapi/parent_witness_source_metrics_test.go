@@ -41,6 +41,7 @@ func TestParentWitnessSourceMetricsIncludeVerifiedCacheAndMismatch(t *testing.T)
 	var gathered metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(ctx, &gathered))
 	var outcomes map[string]int64
+	var downloadedBytes map[string]int64
 	var durationCount uint64
 	for _, scope := range gathered.ScopeMetrics {
 		for _, metric := range scope.Metrics {
@@ -60,9 +61,20 @@ func TestParentWitnessSourceMetricsIncludeVerifiedCacheAndMismatch(t *testing.T)
 				for _, point := range histogram.DataPoints {
 					durationCount += point.Count
 				}
+			case "engineapi.parent_witness.downloaded_bytes":
+				counter, ok := metric.Data.(metricdata.Sum[int64])
+				require.True(t, ok)
+				downloadedBytes = make(map[string]int64)
+				for _, point := range counter.DataPoints {
+					value, ok := point.Attributes.Value(attribute.Key("outcome"))
+					require.True(t, ok)
+					downloadedBytes[value.AsString()] = point.Value
+				}
 			}
 		}
 	}
 	require.Equal(t, map[string]int64{"verified": 1, "cache_hit": 1, "mismatch": 1}, outcomes)
+	require.Greater(t, downloadedBytes["verified"], int64(0))
+	require.NotContains(t, downloadedBytes, "cache_hit")
 	require.EqualValues(t, 3, durationCount)
 }

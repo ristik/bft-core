@@ -9,11 +9,13 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// ParentWitnessMetrics records bounded outcomes and acquisition latency for
-// the journal-backed D2 parent-witness path. Outcome is a fixed low-cardinality label.
+// ParentWitnessMetrics records bounded outcomes, downloaded response bytes and
+// acquisition latency for the journal-backed D2 parent-witness path. Outcome is
+// a fixed low-cardinality label.
 type ParentWitnessMetrics struct {
-	verifications metric.Int64Counter
-	duration      metric.Float64Histogram
+	verifications   metric.Int64Counter
+	downloadedBytes metric.Int64Counter
+	duration        metric.Float64Histogram
 }
 
 func NewParentWitnessMetrics(meter metric.Meter) (*ParentWitnessMetrics, error) {
@@ -23,6 +25,10 @@ func NewParentWitnessMetrics(meter metric.Meter) (*ParentWitnessMetrics, error) 
 		metric.WithDescription("D2 parent-witness acquisitions by outcome")); err != nil {
 		return nil, fmt.Errorf("creating parent-witness verification counter: %w", err)
 	}
+	if m.downloadedBytes, err = meter.Int64Counter("engineapi.parent_witness.downloaded_bytes",
+		metric.WithDescription("Raw response-body bytes downloaded for D2 parent-witness acquisitions"), metric.WithUnit("By")); err != nil {
+		return nil, fmt.Errorf("creating parent-witness downloaded-bytes counter: %w", err)
+	}
 	if m.duration, err = meter.Float64Histogram("engineapi.parent_witness.verification.duration",
 		metric.WithDescription("Time to acquire and verify the exact certified parent witness"), metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)); err != nil {
@@ -31,10 +37,14 @@ func NewParentWitnessMetrics(meter metric.Meter) (*ParentWitnessMetrics, error) 
 	return m, nil
 }
 
-func (m *ParentWitnessMetrics) record(ctx context.Context, outcome string, elapsed time.Duration) {
+func (m *ParentWitnessMetrics) record(ctx context.Context, outcome string, downloadedBytes int64, elapsed time.Duration) {
 	if m == nil {
 		return
 	}
-	m.verifications.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", outcome)))
+	attrs := metric.WithAttributes(attribute.String("outcome", outcome))
+	m.verifications.Add(ctx, 1, attrs)
+	if downloadedBytes > 0 {
+		m.downloadedBytes.Add(ctx, downloadedBytes, attrs)
+	}
 	m.duration.Record(ctx, elapsed.Seconds())
 }

@@ -100,12 +100,17 @@ type processReport struct {
 }
 
 type witnessReport struct {
-	Available           bool              `json:"available"`
-	Count               uint64            `json:"count"`
-	ByOutcome           map[string]uint64 `json:"byOutcome,omitempty"`
-	CumulativeByOutcome map[string]uint64 `json:"cumulativeByOutcome,omitempty"`
-	P50Seconds          *float64          `json:"p50Seconds,omitempty"`
-	P99Seconds          *float64          `json:"p99Seconds,omitempty"`
+	Available                bool              `json:"available"`
+	Count                    uint64            `json:"count"`
+	ByOutcome                map[string]uint64 `json:"byOutcome,omitempty"`
+	CumulativeByOutcome      map[string]uint64 `json:"cumulativeByOutcome,omitempty"`
+	BytesAvailable           bool              `json:"bytesAvailable"`
+	BytesDownloaded          uint64            `json:"bytesDownloaded"`
+	BytesByOutcome           map[string]uint64 `json:"bytesByOutcome,omitempty"`
+	CumulativeBytes          uint64            `json:"cumulativeBytesDownloaded"`
+	CumulativeBytesByOutcome map[string]uint64 `json:"cumulativeBytesByOutcome,omitempty"`
+	P50Seconds               *float64          `json:"p50Seconds,omitempty"`
+	P99Seconds               *float64          `json:"p99Seconds,omitempty"`
 }
 
 type certificationReport struct {
@@ -472,6 +477,24 @@ func applyMetrics(out *nodeReport, first, last sample, sampleCount int) {
 			out.Witness.Count += count
 		}
 	}
+	firstBytes := metricCounterOutcomesByFragment(first.metrics, "engineapi_parent_witness_downloaded_bytes")
+	lastBytes := metricCounterOutcomesByFragment(last.metrics, "engineapi_parent_witness_downloaded_bytes")
+	if len(lastBytes) > 0 {
+		out.Witness.BytesAvailable = true
+		out.Witness.BytesByOutcome = make(map[string]uint64, len(lastBytes))
+		out.Witness.CumulativeBytesByOutcome = make(map[string]uint64, len(lastBytes))
+		for name, value := range lastBytes {
+			cumulative := uint64(value)
+			out.Witness.CumulativeBytesByOutcome[name] = cumulative
+			out.Witness.CumulativeBytes += cumulative
+			if before, ok := firstBytes[name]; ok && value >= before && sampleCount > 1 && !processRestarted {
+				value -= before
+			}
+			count := uint64(value)
+			out.Witness.BytesByOutcome[name] = count
+			out.Witness.BytesDownloaded += count
+		}
+	}
 	histLast, histOK := metricHistogram(last.metrics, "recordwiring_witness_verification_duration")
 	if !histOK {
 		histLast, histOK = metricHistogram(last.metrics, "engineapi_parent_witness_verification_duration")
@@ -544,9 +567,17 @@ func findFamily(families map[string]*dto.MetricFamily, fragment string) *dto.Met
 }
 
 func metricCounterOutcomes(families map[string]*dto.MetricFamily) map[string]float64 {
+	return metricCounterOutcomesByFragment(families, "recordwiring_witness_verification", "engineapi_parent_witness_verification")
+}
+
+func metricCounterOutcomesByFragment(families map[string]*dto.MetricFamily, fragments ...string) map[string]float64 {
 	var family *dto.MetricFamily
 	for name, candidate := range families {
-		if (strings.Contains(name, "recordwiring_witness_verification") || strings.Contains(name, "engineapi_parent_witness_verification")) && !strings.Contains(name, "duration") && candidate.GetType() == dto.MetricType_COUNTER {
+		matches := false
+		for _, fragment := range fragments {
+			matches = matches || strings.Contains(name, fragment)
+		}
+		if matches && !strings.Contains(name, "duration") && candidate.GetType() == dto.MetricType_COUNTER {
 			family = candidate
 			break
 		}

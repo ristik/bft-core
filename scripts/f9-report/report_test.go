@@ -118,6 +118,9 @@ func TestJournalBackedParentWitnessMetricsAreCollected(t *testing.T) {
 	text := `# TYPE engineapi_parent_witness_verification_total counter
 engineapi_parent_witness_verification_total{outcome="verified"} 2
 engineapi_parent_witness_verification_total{outcome="invalid"} 1
+# TYPE engineapi_parent_witness_downloaded_bytes_total counter
+engineapi_parent_witness_downloaded_bytes_total{outcome="verified"} 267110
+engineapi_parent_witness_downloaded_bytes_total{outcome="invalid"} 256
 # TYPE engineapi_parent_witness_verification_duration_seconds histogram
 engineapi_parent_witness_verification_duration_seconds_bucket{le="0.1"} 2
 engineapi_parent_witness_verification_duration_seconds_bucket{le="1"} 3
@@ -137,6 +140,10 @@ engineapi_parent_witness_verification_duration_seconds_count 3
 	require.EqualValues(t, 1, report.Witness.ByOutcome["invalid"])
 	require.EqualValues(t, 2, report.Witness.CumulativeByOutcome["verified"])
 	require.EqualValues(t, 1, report.Witness.CumulativeByOutcome["invalid"])
+	require.True(t, report.Witness.BytesAvailable)
+	require.EqualValues(t, 267366, report.Witness.CumulativeBytes)
+	require.EqualValues(t, 267110, report.Witness.CumulativeBytesByOutcome["verified"])
+	require.EqualValues(t, 256, report.Witness.CumulativeBytesByOutcome["invalid"])
 	require.NotNil(t, report.Witness.P50Seconds)
 	require.NotNil(t, report.Witness.P99Seconds)
 }

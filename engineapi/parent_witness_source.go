@@ -89,11 +89,12 @@ func (s *ParentWitnessSource) Acquire(ctx context.Context, parent shardnode.Bloc
 func (s *ParentWitnessSource) AcquireWithProvenance(ctx context.Context, parent shardnode.BlockRef) (registryproof.Snapshot, shardnode.ProofEvidence, error) {
 	started := time.Now()
 	outcome := "invalid"
+	var downloadedBytes int64
 	var metrics *ParentWitnessMetrics
 	if s != nil {
 		metrics = s.metrics
 	}
-	defer func() { metrics.record(ctx, outcome, time.Since(started)) }()
+	defer func() { metrics.record(ctx, outcome, downloadedBytes, time.Since(started)) }()
 	if s == nil || s.requester == nil || parent.Number == 0 || len(parent.Hash) != common.HashLength || len(parent.StateRoot) != common.HashLength {
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: expected non-genesis parent with 32-byte hash and state root", ErrParentWitnessMismatch)
 	}
@@ -129,6 +130,7 @@ func (s *ParentWitnessSource) AcquireWithProvenance(ctx context.Context, parent 
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: constructing exact parent target: %w", ErrParentWitnessInvalid, err)
 	}
 	result, requestErr := s.requester.Request(ctx, target)
+	downloadedBytes = result.Downloaded
 	if errors.Is(requestErr, parentwitness.ErrRequesterBackoff) {
 		outcome = "unavailable"
 		return registryproof.Snapshot{}, shardnode.ProofEvidence{}, fmt.Errorf("%w: requester backoff", ErrParentWitnessUnavailable)
