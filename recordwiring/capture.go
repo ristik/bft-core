@@ -403,11 +403,18 @@ func (c *Capturer) capture(ctx context.Context, a Attempt) CaptureResult {
 		return fail(CaptureMalformed, err)
 	}
 
+	// A certificate of an EVM assignment other than the genesis one is recorded with the full configuration
+	// it commits to; a certificate whose configuration this node never installed is not published at all.
+	configPDR, err := c.cfg.Deployment.RecordConfig(uc.ShardConfHash)
+	if err != nil {
+		return fail(CapturePublishFailed, err)
+	}
+
 	// The expensive part of publication runs here, still off the round lock and outside the finality gate: the
 	// store verifies the record and the head it would replace, and decides staleness.
 	prepared, err := c.cfg.Store.Prepare(ctx, c.cfg.Deployment.StoreContext(), certifiedstore.Record{
 		BlockHash: a.BlockHash, BlockNumber: s.Number(), StateRoot: a.StateRoot, PartitionRound: a.Round,
-		Certificate: &uc, Technical: &tr, Witness: w.Evidence(),
+		Certificate: &uc, Technical: &tr, Witness: w.Evidence(), ConfigPDR: configPDR,
 	})
 	switch {
 	case errors.Is(err, certifiedstore.ErrStaleRecord):

@@ -44,6 +44,10 @@ type engineAPIGenesisFlags struct {
 	// RootEpoch is the root epoch of the genesis record's Pins. It must be non-zero:
 	// rootinput.ObservationProfileBindingV2 refuses RootEpoch 0.
 	RootEpoch uint64
+	// RegistryLayout selects the SealRegistry: 1 is the historical sealRegistry/v1 (the default, so existing
+	// deployments are unchanged), 2 the assignment-aware registry an M3 launch genesis must use so the
+	// validator assignment can ever change.
+	RegistryLayout uint64
 }
 
 func newEngineAPICmd(baseFlags *baseFlags) *cobra.Command {
@@ -137,6 +141,9 @@ source of truth and the origin is re-derivable from the finalized JSON.`,
 		"versioned allocation/build manifest to compile into the standard genesis JSON pipeline; mutually exclusive with --alloc-source and template-shaping flags")
 	cmd.Flags().Uint64Var(&flags.RootEpoch, "root-epoch", 1,
 		"root epoch of the genesis record's pins (must be non-zero)")
+	cmd.Flags().Uint64Var(&flags.RegistryLayout, "registry-layout", 1,
+		"SealRegistry layout: 1 is the historical sealRegistry/v1; 2 is the assignment-aware sealRegistry/v2 an M3 launch genesis needs "+
+			"(a live chain cannot be migrated to it, and a hash repin cannot replace live contract code)")
 	if err := cmd.MarkFlagRequired("out"); err != nil {
 		panic(err)
 	}
@@ -238,7 +245,7 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags, changed func(string) bool, o
 		}
 	}
 
-	art, err := registrygenesis.PinnedArtifact()
+	art, err := registrygenesis.PinnedArtifactForLayout(flags.RegistryLayout)
 	if err != nil {
 		return fmt.Errorf("loading the pinned seal-registry artifact: %w", err)
 	}
@@ -297,7 +304,12 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags, changed func(string) bool, o
 	// The identities, printed for an operator to compare. Deliberately not written beside the
 	// artifact: the origin is re-derivable from the finalized JSON, and a sidecar would be a second
 	// trusted file and a second source of truth.
+	fmt.Fprintf(out, "registry layout:            %d (code hash %s)\n", max(flags.RegistryLayout, 1), art.CodeHash)
 	fmt.Fprintf(out, "full shard conf hash:       %s\n", origin.FullShardConfHash())
+	if flags.RegistryLayout == registryproof.LayoutVersion2 {
+		fmt.Fprintf(out, "initial assignment:         shard epoch %d, active configuration hash %s (immutable genesis hash)\n",
+			shardConf.Epoch, origin.FullShardConfHash())
+	}
 	fmt.Fprintf(out, "state root:                 %s\n", origin.StateRoot())
 	fmt.Fprintf(out, "block hash:                 %s\n", origin.BlockHash())
 	fmt.Fprintf(out, "execution config identity:  %s\n", origin.ExecutionConfigIdentity())

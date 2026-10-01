@@ -258,3 +258,15 @@ This unit does not register a protocol, choose deployment budgets, perform peer 
 record, or activate node acquisition/readiness/signing. Node wiring must use this shared coordinator rather
 than independent local and archive retry loops. Rechecking current certificate continuity and readiness
 before use remains unwired.
+
+## H3 amendment: PDR-carrying bundles and layout 2
+
+Offline mint-reason bundles (`mintproof`) have a schema version 2 that carries the full canonical
+PartitionDescriptionRecord of the subject UC's configuration. The verifier checks
+`H(PDR) == bundle configuration == UC.ShardConfHash`, the UC under the caller's trust base for the UC's own
+root epoch, the PDR's non-membership configuration against the immutable genesis pin (including the
+`seal_registry_genesis` commitment), the validator set, and `UC.InputRecord.Epoch == PDR.Epoch`. Version 1
+bundles remain valid only under their explicit original configuration pin. `certifiedstore` record version 2
+carries the record's PDR the same way; the archive keeps a block's original resulting UC and never binds it
+to a later assignment. The registry proof reader accepts layout 2 (30 words). See
+[h3-evm-assignment.md](h3-evm-assignment.md) §6.

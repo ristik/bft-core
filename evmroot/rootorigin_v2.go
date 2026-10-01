@@ -135,8 +135,19 @@ func (ri RootInputV2) Validate() error {
 	if ri.Round == 0 || ri.TE.Round != ri.Round {
 		return fmt.Errorf("evmroot: v2 executable authorized round must be positive and equal TE round")
 	}
-	if ri.CertifiedEpoch != 0 || ri.AuthorizedEpoch != 0 || ri.TE.Epoch != 0 || ri.Origin.IR.Epoch != 0 {
-		return fmt.Errorf("evmroot: v2 initial profile supports only shard epoch zero")
+	// Shard epochs are authenticated values, not constants. The certified epoch is the
+	// certified input record's, the authorized epoch the technical record's. Ordinary
+	// execution runs where they agree; the authorized epoch is ahead of the certified
+	// one only while an assignment acknowledgement is pending, and then exactly one
+	// transition must carry it. The bootstrap origin's epoch-zero rule is Class's.
+	if ri.CertifiedEpoch != ri.Origin.IR.Epoch || ri.AuthorizedEpoch != ri.TE.Epoch {
+		return fmt.Errorf("evmroot: v2 root input epochs differ from the certified origin and technical record")
+	}
+	if ri.AuthorizedEpoch < ri.CertifiedEpoch {
+		return fmt.Errorf("evmroot: v2 authorized shard epoch %d is behind certified epoch %d", ri.AuthorizedEpoch, ri.CertifiedEpoch)
+	}
+	if ri.AuthorizedEpoch != ri.CertifiedEpoch && len(ri.Transitions) == 0 {
+		return fmt.Errorf("evmroot: v2 authorized shard epoch %d is ahead of certified epoch %d without an acknowledgement transition", ri.AuthorizedEpoch, ri.CertifiedEpoch)
 	}
 	if len(ri.ParentHash) != 32 {
 		return fmt.Errorf("evmroot: v2 parent hash must be 32 bytes, got %d", len(ri.ParentHash))

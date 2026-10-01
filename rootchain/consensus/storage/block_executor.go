@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -146,10 +147,10 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 }
 
 func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger) (*ExecutedBlock, error) {
-	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil)
+	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil, nil)
 }
 
-func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority) (*ExecutedBlock, error) {
+func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority, candidates candidateSource) (*ExecutedBlock, error) {
 	bootstrapChild := isEpochAnchorRoot(x)
 	if bootstrapChild && (newBlock.Anchor == nil || !bytes.Equal(newBlock.Anchor.GenesisID, x.BlockData.Anchor.GenesisID) ||
 		newBlock.Anchor.Slot != x.GetRound() || newBlock.Epoch != x.BlockData.Epoch) {
@@ -188,6 +189,13 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		if err != nil || record.Kind != "commit" || len(record.NextBodyID) != 32 || parentState.Control.Epoch+1 != newBlock.Epoch {
 			return nil, ErrControlCheckpoint
 		}
+		// The designated EVM shard installs the committed successor assignment
+		// here, once, from the configuration derived from committed history.
+		states, err := activateEVMAssignment(parentState.States, shardConfs, record, newBlock.Round, hash)
+		if err != nil {
+			return nil, err
+		}
+		parentState.States = states
 		parentState.Control = &evmroot.ControlState{Network: parentState.Control.Network,
 			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle"}
 	}
@@ -218,8 +226,27 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 				return nil, err
 			}
 			if control.Phase == "endorsed" || control.Phase == "committed" {
-				if _, err := frozenShard(nextShardState, shardConfs, control.FrozenParent); err != nil {
+				frozen, err := frozenShard(nextShardState, shardConfs, control.FrozenParent)
+				if err != nil {
 					return nil, err
+				}
+				if len(companion) != 0 && control.Phase == "endorsed" {
+					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration); err != nil {
+						return nil, err
+					}
+				}
+				if control.Phase == "committed" && nextShardState.Control.Phase == "endorsed" {
+					committed, err := decodeOrderedRecord(newBlock.Payload.HandoffRecords[0])
+					if err != nil {
+						return nil, err
+					}
+					want, err := expectedCommitSuccessorTR(candidates, committed, nextShardState.States[frozen], hash)
+					if err != nil {
+						return nil, err
+					}
+					if want != nil && !bytes.Equal(want, committed.SuccessorTRHash) {
+						return nil, errors.Join(ErrHandoffRecord, ErrAssignmentHistory)
+					}
 				}
 			}
 			nextShardState.Control = control
@@ -273,6 +300,68 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		RootHash:   ut.RootHash(),
 		ShardState: nextShardState,
 	}, nil
+}
+
+// verifyFreezeAssignment runs the EVM-state-dependent half of freeze
+// admission, after the authority has checked the candidate's static bindings.
+// The installed assignment is the authenticated configuration of the frozen
+// shard at this block, never a value the candidate supplies.
+func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.PartitionDescriptionRecord, orchestration Orchestration) error {
+	fc, err := ParseFreezeCompanion(companion)
+	if err != nil || si == nil || installed == nil {
+		return ErrHandoffRecord
+	}
+	// An installed assignment whose acknowledgement is not certified is exactly
+	// the state where TR already names the successor epoch but IR does not.
+	pending := si.TR.Epoch != si.IR.Epoch
+	if len(fc.Preimage) == 0 {
+		if pending {
+			return ErrAssignmentAckPending
+		}
+		return nil
+	}
+	candidate, err := evmassign.DecodeCandidate(fc.Preimage)
+	if err != nil {
+		return errors.Join(ErrHandoffRecord, err)
+	}
+	succ, err := candidate.Successor()
+	if err != nil {
+		return errors.Join(ErrHandoffRecord, err)
+	}
+	if candidate.Supersedes == nil && pending {
+		return ErrAssignmentAckPending
+	}
+	if err := evmassign.VerifyInstalled(candidate, succ, installed); err != nil {
+		return errors.Join(ErrHandoffRecord, err)
+	}
+	if candidate.Supersedes != nil {
+		return verifySupersession(candidate.Supersedes, si, orchestration)
+	}
+	return nil
+}
+
+// verifySupersession admits a replacement of the installed, unacknowledged
+// assignment on the same frozen parent. The frozen shard's IR is still the
+// acknowledged state P (a certified block after P would have acknowledged and
+// ended the pending state), the installed assignment is the latest committed
+// step, and the candidate's chain and acknowledged base equal the chain read
+// from this node's committed history. No successor-set quorum is involved.
+func verifySupersession(s *evmassign.Supersession, si *ShardInfo, orchestration Orchestration) error {
+	if si.TR.Epoch == si.IR.Epoch {
+		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid, ErrNothingToSupersede)
+	}
+	chain, err := CommittedChain(orchestration, si.PartitionID, si.ShardID, si.IR.Epoch)
+	if err != nil || len(chain.Steps) == 0 {
+		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid, err)
+	}
+	last := chain.Steps[len(chain.Steps)-1]
+	if last.ShardEpoch != si.TR.Epoch || !bytes.Equal(last.ConfHash, si.ShardConfHash) {
+		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid)
+	}
+	if err := evmassign.VerifyChain(s, chain); err != nil {
+		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid, err)
+	}
+	return nil
 }
 
 // The handoff binds one certified EVM parent. Its unique shard entry remains

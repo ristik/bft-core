@@ -130,8 +130,13 @@ type ObservationContextV2 struct {
 	PartitionID   types.PartitionID
 	ShardID       types.ShardID
 	ShardConfHash []byte
-	RootEpoch     uint64
-	TrustBases    TrustBases
+	// AlsoAcceptConfHashes lists further full configuration hashes a certificate may carry: the
+	// hashes of EVM assignments this verifier has installed from verified committed handoffs.
+	// Each one is a different shard assignment, never a replacement for the pinned genesis hash,
+	// and DeriveV2 later requires the exact hash the registry and acknowledgement name.
+	AlsoAcceptConfHashes [][]byte
+	RootEpoch            uint64
+	TrustBases           TrustBases
 	// EpochAuthority is set only for profile 2. It reports the epoch whose
 	// handoff has been installed; nil preserves the fixed genesis profile.
 	EpochAuthority RootEpochAuthority
@@ -214,7 +219,16 @@ func authenticateObservationV2(ctx context.Context, c ObservationContextV2, uc *
 		return VerifiedObservationV2{}, fmt.Errorf("%w: no local trust base for epoch %d", ErrUnauthenticated, u.GetRootEpoch())
 	}
 	if err = u.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
-		return VerifiedObservationV2{}, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
+		matched := false
+		for _, alt := range c.AlsoAcceptConfHashes {
+			if len(alt) == 32 && !bytes.Equal(alt, conf) && u.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, alt) == nil {
+				conf, matched = bytes.Clone(alt), true
+				break
+			}
+		}
+		if !matched {
+			return VerifiedObservationV2{}, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
+		}
 	}
 	if u.UnicitySeal == nil || uint64(u.UnicitySeal.NetworkID) != uint64(c.NetworkID) {
 		return VerifiedObservationV2{}, fmt.Errorf("%w: network", ErrWrongContext)
@@ -245,8 +259,10 @@ func authenticateObservationV2(ctx context.Context, c ObservationContextV2, uc *
 	if class == evmroot.OriginBootstrapV2 && (ir.SumOfEarnedFees != 0 || ir.SummaryValue != nil || ir.ETHash != nil) {
 		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: bootstrap requires the exact initial input record", ErrV2Shape))
 	}
-	if ir.Epoch != 0 || t.Epoch != 0 {
-		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: only shard epoch zero is supported", ErrV2Context))
+	// Shard epochs are authenticated by the certificate. The authorized (technical record) epoch
+	// is never behind the certified one; DeriveV2 binds both to the registry's assignment.
+	if t.Epoch < ir.Epoch {
+		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: authorized shard epoch %d is behind certified epoch %d", ErrV2Context, t.Epoch, ir.Epoch))
 	}
 	if t.Round == 0 || t.Round <= ir.RoundNumber {
 		return VerifiedObservationV2{}, unsupportedV2(fmt.Errorf("%w: authorized round %d must strictly advance certified round %d", ErrV2Shape, t.Round, ir.RoundNumber))
@@ -293,20 +309,50 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 		return ResultV2{}, fmt.Errorf("%w: chosen snapshot subject is not the pinned parent", ErrV2Ancestry)
 	}
 	r := c.Genesis.Record()
-	if uint64(o.network) != r.NetworkID || uint64(o.partition) != r.PartitionID || !bytes.Equal(o.shard, r.ShardID) || !bytes.Equal(o.conf, c.Genesis.FullShardConfHash().Bytes()) {
+	if uint64(o.network) != r.NetworkID || uint64(o.partition) != r.PartitionID || !bytes.Equal(o.shard, r.ShardID) {
 		return ResultV2{}, fmt.Errorf("%w: observation and genesis origin name different deployment contexts", ErrV2Context)
 	}
 	f := c.Parent.Fields()
+	layout2 := f.Layout == registryproof.LayoutVersion2
+	genesisConf := c.Genesis.FullShardConfHash().Bytes()
+	activeConf := genesisConf
+	var activeShardEpoch uint64
+	if layout2 {
+		activeConf, activeShardEpoch = f.ActiveConfHash.Bytes(), f.ShardEpoch
+	}
 	if c.TransitionsPending {
-		if transition.OldEpoch != f.RootEpoch || transition.NewEpoch != o.rootEpoch ||
-			!bytes.Equal(transition.Ack.FrozenParent[:], parent) {
-			return ResultV2{}, fmt.Errorf("%w: transition epoch or frozen parent mismatch", ErrV2Context)
+		expectedOldConf := genesisConf
+		if layout2 {
+			expectedOldConf = f.ActiveConfHash.Bytes()
 		}
-	} else if o.rootEpoch != f.RootEpoch {
-		return ResultV2{}, fmt.Errorf("%w: root epoch change requires installed transition", ErrV2Context)
+		if transition.OldRootEpoch != f.RootEpoch || transition.NewRootEpoch != o.rootEpoch ||
+			transition.OldShardEpoch != activeShardEpoch || !bytes.Equal(transition.OldActiveConfHash[:], expectedOldConf) ||
+			!bytes.Equal(transition.Ack.FrozenParent[:], parent) {
+			return ResultV2{}, fmt.Errorf("%w: transition epoch, registry assignment or frozen parent mismatch", ErrV2Context)
+		}
+		// The acknowledgement names the certified shard epoch of the parent and the latest
+		// installed assignment: the origin's IR epoch and the authenticated technical record.
+		if transition.OldShardEpoch != o.origin.IR.Epoch || transition.NewShardEpoch != o.tr.Epoch ||
+			!bytes.Equal(transition.NewActiveConfHash[:], o.conf) {
+			return ResultV2{}, fmt.Errorf("%w: transition does not match the certified origin and authorized assignment", ErrV2Context)
+		}
+		if !layout2 && (transition.NewShardEpoch != 0 || transition.SupersessionSpan != 0) {
+			return ResultV2{}, fmt.Errorf("%w: registry layout 1 cannot acknowledge an assignment change", ErrV2Context)
+		}
+	} else {
+		if o.rootEpoch != f.RootEpoch {
+			return ResultV2{}, fmt.Errorf("%w: root epoch change requires installed transition", ErrV2Context)
+		}
+		// Ordinary execution: certified epoch = authorized epoch = registry assignment, and the
+		// certificate carries that assignment's configuration.
+		if o.origin.IR.Epoch != activeShardEpoch || o.tr.Epoch != activeShardEpoch || !bytes.Equal(o.conf, activeConf) {
+			return ResultV2{}, fmt.Errorf("%w: certified/authorized shard epoch or configuration differs from the registry assignment", ErrV2Context)
+		}
 	}
 	pc := c.Genesis.ProofContext()
-	if c.Parent.VerifiedContext() != pc {
+	verified := c.Parent.VerifiedContext()
+	verified.Active = registryproof.Assignment{} // the authenticated assignment narrows a read; it is not deployment identity
+	if verified != pc {
 		return ResultV2{}, fmt.Errorf("%w: snapshot and genesis origin use different proof contexts", ErrV2Context)
 	}
 	if c.Round != o.tr.Round {

@@ -126,32 +126,27 @@ type VerifierContext struct {
 	BootstrapSnapshot registryproof.Snapshot
 }
 
-// InstallHandoffTransition retains a locally verified transition for the
-// first EVM block whose parent still carries the predecessor root epoch.
+// InstallHandoffTransition retains a locally verified one-step transition for the
+// first EVM block whose parent still carries the predecessor root epoch. Steps are
+// keyed by their old root epoch; a supersession folds consecutive steps when the
+// acknowledgement is finally built.
 func (v *VerifierContext) InstallHandoffTransition(bundle handoffdelivery.Bundle, checked handoffdelivery.Verified) error {
 	if v == nil || bundle.Proof.Record.Epoch == ^uint64(0) || bundle.Body.Epoch != bundle.Proof.Record.Epoch+1 || checked.Genesis.Epoch != bundle.Body.Epoch {
 		return handoff.ErrBoundary
 	}
 	// The old committee commits the successor assignment hash. The snapshot
-	// carries the assignment itself, including the first EVM round.
+	// carries the shard's last assignment; an assignment handoff advances it by one
+	// shard round and epoch, which the successor certificate re-authenticates.
 	if checked.Shard.TR == nil {
 		return handoff.ErrBoundary
 	}
-	successorTR, err := checked.Shard.TR.Hash()
-	if err != nil || checked.Shard.TR.Round == 0 || !bytes.Equal(successorTR, bundle.Proof.Record.SuccessorTRHash) {
+	step, err := handoffdelivery.AssignmentStepOf(bundle, checked)
+	if err != nil {
 		return handoff.ErrBoundary
 	}
-	var t handoff.EVMTransition
-	t.OldEpoch, t.NewEpoch = bundle.Proof.Record.Epoch, bundle.Body.Epoch
-	copy(t.NextBodyID[:], bundle.Proof.Record.NextBodyID)
-	copy(t.GenesisID[:], checked.Genesis.ID())
-	copy(t.Ack.FrozenID[:], bundle.Proof.Record.FrozenID)
-	copy(t.Ack.CommitID[:], bundle.Proof.Record.ID())
-	copy(t.Ack.FrozenParent[:], bundle.Proof.Control.FrozenParent)
-	t.Ack.SuccessorParent = t.Ack.FrozenParent
-	copy(t.Ack.SuccessorTR[:], bundle.Proof.Record.SuccessorTRHash)
-	t.Ack.EVMRound = checked.Shard.TR.Round
-	if !t.Valid() {
+	t, err := handoff.BuildTransition(bundle.Proof.Record, bundle.Proof.Control.FrozenParent, bundle.Body.Epoch,
+		checked.Genesis.ID(), checked.Shard.IRTR, step)
+	if err != nil {
 		return handoff.ErrBoundary
 	}
 	v.transitionMu.Lock()
@@ -159,22 +154,62 @@ func (v *VerifierContext) InstallHandoffTransition(bundle handoffdelivery.Bundle
 	if v.transitions == nil {
 		v.transitions = make(map[uint64]handoff.EVMTransition)
 	}
-	if old, ok := v.transitions[t.OldEpoch]; ok && old != t {
+	if old, ok := v.transitions[t.OldRootEpoch]; ok && old != t {
 		return handoff.ErrSuccessor
 	}
-	v.transitions[t.OldEpoch] = t
+	v.transitions[t.OldRootEpoch] = t
 	return nil
+}
+
+// ErrAssignmentSpanUnavailable reports that the committed handoff steps between the
+// registry's root epoch and the authenticated observation are not all retained. It
+// is a typed unavailable, never a bare epoch jump: the caller resumes catch-up.
+var ErrAssignmentSpanUnavailable = errors.New("engineapi: committed EVM assignment span is not fully retained")
+
+// InstalledConfHashes returns the full configuration hashes of every assignment the
+// installed transitions name, which a certificate of this shard may carry.
+func (v *VerifierContext) InstalledConfHashes() [][]byte {
+	v.transitionMu.RLock()
+	defer v.transitionMu.RUnlock()
+	seen := make(map[[32]byte]struct{}, len(v.transitions))
+	var out [][]byte
+	for _, t := range v.transitions {
+		for _, h := range [][32]byte{t.OldActiveConfHash, t.NewActiveConfHash} {
+			if _, ok := seen[h]; !ok {
+				seen[h] = struct{}{}
+				out = append(out, bytes.Clone(h[:]))
+			}
+		}
+	}
+	return out
 }
 
 func (v *VerifierContext) transitionFor(oldEpoch, newEpoch uint64) ([]byte, error) {
 	v.transitionMu.RLock()
-	t, ok := v.transitions[oldEpoch]
-	v.transitionMu.RUnlock()
-	if ok {
-		if t.NewEpoch != newEpoch {
-			return nil, rootinput.ErrV2Context
+	if newEpoch > oldEpoch && newEpoch-oldEpoch <= handoff.MaxSupersessionSpan {
+		steps := make([]handoff.EVMTransition, 0, newEpoch-oldEpoch)
+		complete := true
+		for e := oldEpoch; e < newEpoch; e++ {
+			step, ok := v.transitions[e]
+			if !ok || step.NewRootEpoch != e+1 {
+				complete = false
+				break
+			}
+			steps = append(steps, step)
 		}
-		return t.Encode()
+		v.transitionMu.RUnlock()
+		if complete {
+			folded, err := handoff.FoldTransitions(steps)
+			if err != nil {
+				return nil, errors.Join(rootinput.ErrV2Context, err)
+			}
+			return folded.Encode()
+		}
+		if v.EpochAuthority != nil {
+			return nil, fmt.Errorf("%w: %w", ErrAssignmentSpanUnavailable, rootinput.ErrV2Context)
+		}
+	} else {
+		v.transitionMu.RUnlock()
 	}
 	if v.EpochAuthority != nil {
 		return nil, rootinput.ErrV2Context
@@ -183,7 +218,7 @@ func (v *VerifierContext) transitionFor(oldEpoch, newEpoch uint64) ([]byte, erro
 		return nil, rootinput.ErrV2Context
 	}
 	t, err := handoff.DecodeEVMTransition(v.Transition)
-	if err != nil || t.OldEpoch != oldEpoch || t.NewEpoch != newEpoch {
+	if err != nil || t.OldRootEpoch != oldEpoch || t.NewRootEpoch != newEpoch {
 		return nil, rootinput.ErrV2Context
 	}
 	return bytes.Clone(v.Transition), nil
@@ -229,12 +264,12 @@ func (a *Adapter) InstallEpochTransition(raw []byte) error {
 		if err != nil {
 			return rootinput.ErrV2Context
 		}
-		if old.NewEpoch == transition.NewEpoch && bytes.Equal(previous, raw) {
+		if old.NewRootEpoch == transition.NewRootEpoch && bytes.Equal(previous, raw) {
 			return nil
 		}
-		current = old.NewEpoch
+		current = old.NewRootEpoch
 	}
-	if transition.OldEpoch != current {
+	if transition.OldRootEpoch != current {
 		return rootinput.ErrV2Context
 	}
 	a.installedTransition = bytes.Clone(raw)
@@ -529,16 +564,17 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 		}
 		if len(transitionBytes) != 0 {
 			installed, err := handoff.DecodeEVMTransition(transitionBytes)
-			if err != nil || (!dynamic && installed.OldEpoch != rootEpoch) {
+			if err != nil || (!dynamic && installed.OldRootEpoch != rootEpoch) {
 				return rootinput.ResultV2{}, fmt.Errorf("%w: invalid installed transition", rootinput.ErrV2Context)
 			}
-			rootEpoch = installed.NewEpoch
+			rootEpoch = installed.NewRootEpoch
 		}
 	}
 	observationContext := rootinput.ObservationContextV2{
 		NetworkID: a.verifier.NetworkID, PartitionID: a.verifier.PartitionID,
 		ShardID: a.verifier.ShardID, ShardConfHash: a.verifier.ShardConfHash,
-		RootEpoch: a.verifier.RootEpoch, TrustBases: a.verifier.TrustBases,
+		AlsoAcceptConfHashes: a.verifier.InstalledConfHashes(),
+		RootEpoch:            a.verifier.RootEpoch, TrustBases: a.verifier.TrustBases,
 		EpochAuthority: a.verifier.EpochAuthority,
 	}
 	if a.verifier.EpochAuthority == nil {
@@ -589,7 +625,7 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 				return rootinput.ResultV2{}, err
 			}
 			installed, decodeErr := handoff.DecodeEVMTransition(transitionBytes)
-			if decodeErr != nil || installed.OldEpoch != snapshot.Fields().RootEpoch || installed.NewEpoch != o.Origin().RootEpoch {
+			if decodeErr != nil || installed.OldRootEpoch != snapshot.Fields().RootEpoch || installed.NewRootEpoch != o.Origin().RootEpoch {
 				return rootinput.ResultV2{}, rootinput.ErrV2Context
 			}
 			transition = transitionBytes

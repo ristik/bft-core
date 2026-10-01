@@ -24,7 +24,7 @@ func TestBundleVerificationSelectsPredecessorTrustEpoch(t *testing.T) {
 	history := &recordingBundleHistory{}
 	q := archive.BundleRequest{Context: transportBundleContext(), Epoch: 2}
 	bundle := handoffdelivery.Bundle{Proof: handoff.OldCommitProof{Record: evmroot.OrderedHandoffRecord{Epoch: 1}}, Body: evmroot.TrustBaseBodyV2{Epoch: 2}}
-	raw, err := types.Cbor.Marshal(bundle)
+	raw, err := handoffdelivery.EncodeBundle(bundle)
 	require.NoError(t, err)
 	require.ErrorContains(t, VerifyBundle(context.Background(), q, raw, history), "unavailable predecessor")
 	require.Equal(t, []uint64{1}, history.requested)
@@ -32,7 +32,7 @@ func TestBundleVerificationSelectsPredecessorTrustEpoch(t *testing.T) {
 	require.ErrorIs(t, VerifyBundle(context.Background(), q, raw, history), archive.ErrInvalid)
 	require.Equal(t, []uint64{1}, history.requested, "wrong successor epoch never selects a trust base")
 	bundle.Proof.Record.Epoch, bundle.Body.Epoch = 2, 3
-	raw, err = types.Cbor.Marshal(bundle)
+	raw, err = handoffdelivery.EncodeBundle(bundle)
 	require.NoError(t, err)
 	require.ErrorContains(t, VerifyBundle(context.Background(), q, raw, history), "unavailable predecessor")
 	require.Equal(t, []uint64{1, 2}, history.requested)

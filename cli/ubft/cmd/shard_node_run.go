@@ -210,6 +210,9 @@ type shardNodeRunFlags struct {
 	FullShardConf          string
 	ExpectedOriginIdentity string
 	EVMTransitionFile      string
+	// RegistryLayout is the layout of the deployment's SealRegistry (1 or 2); it must be the one the genesis
+	// was generated with, because G commits to it.
+	RegistryLayout uint64
 
 	LUCStoreFile         string
 	ExecutionJournal     string
@@ -311,6 +314,8 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"path to the full shard configuration emitted by `ubft engine-api genesis` (the base conf plus "+
 			"seal_registry_genesis). The node runs on this configuration, because the v2 derivation requires the "+
 			"observation's shard configuration hash to equal the genesis origin's full configuration hash")
+	cmd.Flags().Uint64Var(&flags.RegistryLayout, "registry-layout", 1,
+		"SealRegistry layout the genesis was generated with: 1 (sealRegistry/v1) or 2 (assignment-aware sealRegistry/v2)")
 	cmd.Flags().StringVar(&flags.ExpectedOriginIdentity, "expected-origin-identity", "",
 		"optional 0x-prefixed 32-byte expected genesis origin identity; when set, startup refuses a mismatch")
 	cmd.Flags().StringVar(&flags.JWTSecret, "jwt-secret", "",
@@ -500,7 +505,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if flags.GenesisFile != "" {
 		// M1 pins one root epoch from trustBases[0]. H1/H2 multi-epoch trust bases must
 		// select the epoch bound to the genesis record instead of assuming the first.
-		origin, bootstrap, err = loadGenesisOrigin(shardConf, flags.GenesisFile, flags.ExpectedOriginIdentity, trustBases[0].GetEpoch())
+		origin, bootstrap, err = loadGenesisOriginLayout(shardConf, flags.GenesisFile, flags.ExpectedOriginIdentity, trustBases[0].GetEpoch(), flags.RegistryLayout)
 		if err != nil {
 			return err
 		}
@@ -714,7 +719,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						verified.Shard.UC.GetRoundNumber() != verified.Shard.IR.RoundNumber {
 						return errors.New("verified handoff lacks the terminal shard certificate")
 					}
-					terminal, err := rootinput.AuthenticateObservationV2(ctx, journalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
+					// The terminal certificate belongs to the epoch this handoff ends, whose configuration is the one the
+					// verified snapshot carries (checked against the followed assignment), not the genesis configuration.
+					terminalCtx := journalCtx
+					terminalCtx.Observation.ShardConfHash = bytes.Clone(verified.Shard.ShardConfHash)
+					terminal, err := rootinput.AuthenticateObservationV2(ctx, terminalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
 					if err != nil {
 						return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
 					}
@@ -723,7 +732,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						tr := *verified.Shard.TR
 						restoredHandoffTerminals = append(restoredHandoffTerminals, handoffTerminalCertificate{uc: &uc, tr: &tr})
 					} else {
-						prepared, _, err := journalStore.PrepareObservation(ctx, journalCtx, terminal)
+						prepared, _, err := journalStore.PrepareObservation(ctx, terminalCtx, terminal)
 						if err != nil {
 							return fmt.Errorf("preparing handoff terminal certificate: %w", err)
 						}
@@ -740,7 +749,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					}
 					anchor := &rctypes.EpochAnchor{GenesisID: verified.Genesis.ID(), Epoch: verified.Genesis.Epoch,
 						Slot: verified.Genesis.Start - 1, StateRoot: verified.Record.StateRoot[:]}
-					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR)
+					step, err := handoffdelivery.AssignmentStepOf(bundle, verified)
+					if err != nil {
+						return err
+					}
+					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR, step)
 					if err != nil {
 						return err
 					}
@@ -752,7 +765,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						return err
 					}
 					if archiveLocal != nil {
-						raw, err := types.Cbor.Marshal(bundle)
+						raw, err := handoffdelivery.EncodeBundle(bundle)
 						if err != nil {
 							return err
 						}
@@ -771,7 +784,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					raw, err := archivewiring.FetchBundle(ctx, archiveHost, id, archive.BundleRequest{Context: archiveSubject, Epoch: epoch}, archiveTransportLimits)
 					var bundle handoffdelivery.Bundle
 					if err == nil {
-						err = types.Cbor.Unmarshal(raw, &bundle)
+						bundle, err = handoffdelivery.DecodeBundle(raw)
 					}
 					return bundle, err
 				}
@@ -1172,7 +1185,11 @@ func parseHash32(s string) (common.Hash, error) {
 // notice it was handed the wrong genesis: every value it uses is this node's own configuration or the
 // pinned artifact, never a peer's.
 func loadGenesisOrigin(shardConf *types.PartitionDescriptionRecord, genesisPath, expectedIdentity string, rootEpoch uint64) (registrygenesis.GenesisOrigin, registryproof.Snapshot, error) {
-	art, err := registrygenesis.PinnedArtifact()
+	return loadGenesisOriginLayout(shardConf, genesisPath, expectedIdentity, rootEpoch, 1)
+}
+
+func loadGenesisOriginLayout(shardConf *types.PartitionDescriptionRecord, genesisPath, expectedIdentity string, rootEpoch, layout uint64) (registrygenesis.GenesisOrigin, registryproof.Snapshot, error) {
+	art, err := registrygenesis.PinnedArtifactForLayout(layout)
 	if err != nil {
 		return registrygenesis.GenesisOrigin{}, registryproof.Snapshot{}, fmt.Errorf("loading the pinned seal-registry artifact: %w", err)
 	}
@@ -1378,8 +1395,8 @@ func loadEngineEpochTransition(path string, oldEpoch uint64) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decoding --engine-epoch-transition %q: %w", path, err)
 	}
-	if transition.OldEpoch != oldEpoch {
-		return nil, fmt.Errorf("--engine-epoch-transition starts at epoch %d, configured root trust base is epoch %d", transition.OldEpoch, oldEpoch)
+	if transition.OldRootEpoch != oldEpoch {
+		return nil, fmt.Errorf("--engine-epoch-transition starts at epoch %d, configured root trust base is epoch %d", transition.OldRootEpoch, oldEpoch)
 	}
 	return raw, nil
 }

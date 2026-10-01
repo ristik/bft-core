@@ -56,7 +56,7 @@ func TestPreferPinUsesLatestEpochThenRoundAndPrefersV2(t *testing.T) {
 func TestArchiveTrustBodyIDReadsTheTipEpochBundle(t *testing.T) {
 	dir := t.TempDir()
 	bundle := handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{Epoch: 3, Version: evmroot.TrustBaseVersion}}
-	raw, err := types.Cbor.Marshal(bundle)
+	raw, err := handoffdelivery.EncodeBundle(bundle)
 	if err != nil {
 		t.Fatal(err)
 	}

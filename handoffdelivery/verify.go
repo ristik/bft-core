@@ -6,9 +6,11 @@ package handoffdelivery
 import (
 	"bytes"
 	"crypto"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -26,12 +28,55 @@ type Bundle struct {
 	Proof    handoff.OldCommitProof
 	Body     evmroot.TrustBaseBodyV2
 	Snapshot *abdrc.CommittedBlock
+	// Candidate is the H3 EVM assignment candidate preimage (successor PDR and
+	// possession proofs), carried once. It is empty for a root-only handoff.
+	Candidate []byte
+}
+
+// legacyBundle is the persisted shape before the candidate field existed.
+type legacyBundle struct {
+	_        struct{} `cbor:",toarray"`
+	Proof    handoff.OldCommitProof
+	Body     evmroot.TrustBaseBodyV2
+	Snapshot *abdrc.CommittedBlock
+}
+
+// EncodeBundle writes the legacy shape for a root-only bundle, so its bytes are
+// unchanged, and the candidate-carrying shape otherwise.
+func EncodeBundle(b Bundle) ([]byte, error) {
+	if len(b.Candidate) == 0 {
+		return types.Cbor.Marshal(legacyBundle{Proof: b.Proof, Body: b.Body, Snapshot: b.Snapshot})
+	}
+	return types.Cbor.Marshal(b)
+}
+
+// DecodeBundle accepts exactly the two canonical persisted shapes and refuses
+// everything else; a shape is never reinterpreted as the other.
+func DecodeBundle(raw []byte) (Bundle, error) {
+	var current Bundle
+	if err := types.Cbor.Unmarshal(raw, &current); err == nil && len(current.Candidate) != 0 {
+		if canonical, err := types.Cbor.Marshal(current); err == nil && bytes.Equal(canonical, raw) {
+			return current, nil
+		}
+		return Bundle{}, ErrBundle
+	}
+	var old legacyBundle
+	if err := types.Cbor.Unmarshal(raw, &old); err != nil {
+		return Bundle{}, ErrBundle
+	}
+	if canonical, err := types.Cbor.Marshal(old); err != nil || !bytes.Equal(canonical, raw) {
+		return Bundle{}, ErrBundle
+	}
+	return Bundle{Proof: old.Proof, Body: old.Body, Snapshot: old.Snapshot}, nil
 }
 
 type Verified struct {
 	Genesis evmroot.EpochGenesis
 	Record  handoff.VerifiedRecord
 	Shard   abdrc.ShardInfo
+	// NextConfHash is the full shard configuration hash the root certifies once this handoff activates: the
+	// activated assignment's for an EVM assignment step, otherwise the unchanged expected hash.
+	NextConfHash []byte
 }
 
 // Verify requires the caller's authenticated old trust base and exact local
@@ -47,6 +92,31 @@ func Verify(bundle Bundle, old *types.RootTrustBaseV1, partition types.Partition
 	g, err := evmroot.DeriveEpochGenesis(verified, bundle.Body)
 	if err != nil {
 		return Verified{}, fmt.Errorf("%w: successor body: %v", ErrBundle, err)
+	}
+	// The successor body binds exactly one candidate. A handoff that changes only the root members has no delivered
+	// preimage: its digest is recomputable from the body, so a candidate cannot be dropped from an assignment step.
+	r := bundle.Proof.Record
+	var digest [32]byte
+	if len(bundle.Candidate) != 0 {
+		digest = sha256.Sum256(bundle.Candidate)
+	} else {
+		var derr error
+		if digest, derr = evmroot.D4OperatorCandidateDigest(bundle.Body.Members); derr != nil {
+			return Verified{}, fmt.Errorf("%w: operator candidate: %v", ErrBundle, derr)
+		}
+	}
+	if !bytes.Equal(bundle.Body.ChangeRecordHash, evmroot.D4CandidateContextHash(r.Network, r.PredecessorBodyID, r.Attempt, digest[:], bundle.Body.EarliestActivation)) {
+		return Verified{}, fmt.Errorf("%w: candidate does not match the successor body's change record", ErrBundle)
+	}
+	nextConf := bytes.Clone(shardConfHash)
+	if len(bundle.Candidate) != 0 {
+		_, activated, derr := evmassign.ActivatedFromPreimage(bundle.Candidate, r.ActivationRound)
+		if derr != nil {
+			return Verified{}, fmt.Errorf("%w: candidate: %v", ErrBundle, derr)
+		}
+		if nextConf, derr = activated.Hash(crypto.SHA256); derr != nil || len(nextConf) != 32 {
+			return Verified{}, fmt.Errorf("%w: activated configuration hash", ErrBundle)
+		}
 	}
 	s := bundle.Snapshot
 	if s == nil || s.Block == nil || s.Control == nil || s.CommitQc == nil || s.CommitQc.LedgerCommitInfo == nil ||
@@ -67,7 +137,7 @@ func Verify(bundle Bundle, old *types.RootTrustBaseV1, partition types.Partition
 		!bytes.Equal(target.ShardConfHash, shardConfHash) {
 		return Verified{}, ErrBundle
 	}
-	return Verified{Genesis: g, Record: v, Shard: *target}, nil
+	return Verified{Genesis: g, Record: v, Shard: *target, NextConfHash: nextConf}, nil
 }
 
 func snapshotRoot(s *abdrc.CommittedBlock, partition types.PartitionID, shard types.ShardID) ([]byte, *abdrc.ShardInfo, error) {
@@ -132,4 +202,41 @@ func snapshotRoot(s *abdrc.CommittedBlock, partition types.PartitionID, shard ty
 		return nil, nil, err
 	}
 	return tree.RootHash(), target, nil
+}
+
+// AssignmentStepOf derives the EVM assignment context of one verified bundle: from
+// its candidate for an assignment handoff, from the checkpoint's own installed
+// configuration for a root-only one. The candidate was bound by the old root
+// quorum through the successor body, and its claim of the replaced assignment is
+// checked against the verified checkpoint's shard, so a bundle cannot name an
+// assignment the old committee never installed.
+func AssignmentStepOf(b Bundle, v Verified) (handoff.AssignmentStep, error) {
+	var step handoff.AssignmentStep
+	if len(v.Shard.ShardConfHash) != 32 {
+		return step, ErrBundle
+	}
+	installed := [32]byte(v.Shard.ShardConfHash)
+	if len(b.Candidate) == 0 {
+		step.OldShardEpoch, step.NewShardEpoch = v.Shard.IRTR.Epoch, v.Shard.IRTR.Epoch
+		step.OldActiveConfHash, step.NewActiveConfHash = installed, installed
+		return step, nil
+	}
+	c, err := evmassign.DecodeCandidate(b.Candidate)
+	if err != nil {
+		return step, errors.Join(ErrBundle, err)
+	}
+	succ, err := c.Successor()
+	if err != nil {
+		return step, errors.Join(ErrBundle, err)
+	}
+	activated, err := evmassign.Activate(succ, b.Proof.Record.ActivationRound)
+	if err != nil {
+		return step, errors.Join(ErrBundle, err)
+	}
+	newHash, err := evmassign.PDRHash(activated)
+	if err != nil || len(c.OldActiveHash) != 32 || c.OldShardEpoch != v.Shard.IRTR.Epoch || [32]byte(c.OldActiveHash) != installed {
+		return step, errors.Join(ErrBundle, errors.New("candidate does not replace the checkpoint's installed assignment"))
+	}
+	return handoff.AssignmentStep{Assignment: true, OldShardEpoch: c.OldShardEpoch, NewShardEpoch: succ.Epoch,
+		OldActiveConfHash: installed, NewActiveConfHash: newHash}, nil
 }

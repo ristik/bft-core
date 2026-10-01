@@ -163,7 +163,9 @@ func TestV2DerivationBindsSingleInstalledTransition(t *testing.T) {
 	// DeriveV2 receives an already authenticated successor observation.
 	o.rootEpoch, o.origin.RootEpoch = 2, 2
 	var tr handoff.EVMTransition
-	tr.OldEpoch, tr.NewEpoch = 1, 2
+	tr.OldRootEpoch, tr.NewRootEpoch = 1, 2
+	genesisConf := [32]byte(f.origin.FullShardConfHash())
+	tr.OldActiveConfHash, tr.NewActiveConfHash = genesisConf, genesisConf // a root-only step keeps the genesis assignment
 	tr.NextBodyID, tr.GenesisID = [32]byte{1}, [32]byte{2}
 	tr.Ack.FrozenID, tr.Ack.CommitID = [32]byte{3}, [32]byte{4}
 	copy(tr.Ack.FrozenParent[:], f.blocks[0].Hash.Bytes())
@@ -217,7 +219,7 @@ func TestV2AcknowledgementRebindsAfterT2Timeout(t *testing.T) {
 	o, err := AuthenticateObservationV2(context.Background(), observationContext, uc, technical)
 	require.NoError(t, err)
 
-	template := handoff.EVMTransition{OldEpoch: 1, NewEpoch: 2, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
+	template := handoff.EVMTransition{OldRootEpoch: 1, NewRootEpoch: 2, OldActiveConfHash: [32]byte(f.origin.FullShardConfHash()), NewActiveConfHash: [32]byte(f.origin.FullShardConfHash()), NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
 		Ack: handoff.AckRecord{FrozenID: [32]byte{3}, CommitID: [32]byte{4},
 			SuccessorTR: [32]byte{5}, EVMRound: assigned - 1}}
 	copy(template.Ack.FrozenParent[:], f.blocks[0].Hash.Bytes())

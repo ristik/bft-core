@@ -185,6 +185,11 @@ func TestInstalledTransitionAdapterUsesAssignedShardRound(t *testing.T) {
 	transition, err := handoff.DecodeEVMTransition(transitionBytes)
 	require.NoError(t, err)
 	require.NotEqual(t, anchor.Slot+1, transition.Ack.EVMRound)
+	// The replica's synthetic shard has its own configuration; this deployment's registry is at the genesis one.
+	genesisConf := [32]byte(origin.FullShardConfHash())
+	transition.OldActiveConfHash, transition.NewActiveConfHash = genesisConf, genesisConf
+	transitionBytes, err = transition.Encode()
+	require.NoError(t, err)
 
 	tr := certifiedchain.Technical(0)
 	tr.Round = transition.Ack.EVMRound
@@ -251,8 +256,12 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		require.NoError(t, err)
 		members[i] = evmroot.Member{StakingID: fmt.Sprintf("stake-%d", i), NodeID: newNodes[i].PeerConf.ID.String(), ConsensusKey: key, Weight: 1}
 	}
+	// A root-members-only handoff: the body binds the operator candidate digest, which Verify recomputes from the members.
+	operatorDigest, err := evmroot.D4OperatorCandidateDigest(members)
+	require.NoError(t, err)
 	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: 5, Epoch: 2, EarliestActivation: 7,
-		Members: members, RootThreshold: 3, PredecessorHash: link}
+		Members: members, RootThreshold: 3, PredecessorHash: link,
+		ChangeRecordHash: evmroot.D4CandidateContextHash(5, oldID, 0, operatorDigest[:], 7)}
 	require.NoError(t, body.Validate())
 	bodyID := body.Identity()
 	_, shardValidators := testutils.CreateTestNodes(t, 3)
@@ -365,7 +374,7 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		require.NoError(t, err)
 		transition, err := handoff.DecodeEVMTransition(transitionBytes)
 		require.NoError(t, err)
-		require.Equal(t, uint64(2), transition.NewEpoch)
+		require.Equal(t, uint64(2), transition.NewRootEpoch)
 		require.NotEqual(t, installed.Slot+1, shardState.TR.Round, "root and shard counters differ in this fixture")
 		require.Equal(t, shardState.TR.Round, transition.Ack.EVMRound)
 		require.Equal(t, parent, transition.Ack.FrozenParent[:])

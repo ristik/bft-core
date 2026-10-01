@@ -228,16 +228,36 @@ func (r *Readiness) Prepare(ctx context.Context, held *types.UnicityCertificate)
 	}
 	// VerifyAnchorEvidence authenticates every certificate first. The registry profile is narrower
 	// than #92's general predicate: all links must then name the one root epoch pinned by deployment.
-	for i, uc := range continuityCertificates(ev, held) {
-		if uc.GetRootEpoch() != c.Registry.RootEpoch {
-			return PreparedReadiness{}, fmt.Errorf("%w: authenticated continuity certificate %d names root epoch %d, deployment pins %d",
-				ErrContinuity, i, uc.GetRootEpoch(), c.Registry.RootEpoch)
+	// The deployment pins the genesis root epoch and shard epoch: nothing may precede them. Later ones are
+	// the verified history of installed handoffs, so an upper root epoch bound is the installed epoch.
+	current := c.Registry.RootEpoch
+	if c.EpochAuthority != nil {
+		var ready bool
+		if current, ready = c.EpochAuthority.CurrentRootEpoch(); !ready || current < c.Registry.RootEpoch {
+			return PreparedReadiness{}, fmt.Errorf("%w: installed root epoch is unavailable", ErrContinuity)
 		}
 	}
+	for i, uc := range continuityCertificates(ev, held) {
+		if got := uc.GetRootEpoch(); got < c.Registry.RootEpoch || got > current {
+			return PreparedReadiness{}, fmt.Errorf("%w: authenticated continuity certificate %d names root epoch %d, deployment history is %d..%d",
+				ErrContinuity, i, got, c.Registry.RootEpoch, current)
+		}
+	}
+	// A technical record is the authorization its certificate's configuration names: the genesis shard epoch
+	// under the genesis configuration, the installed assignment's own epoch under that assignment's.
+	ucs := continuityCertificates(ev, held)
 	for i, tr := range continuityTechnicalRecords(ev) {
-		if tr.Epoch != c.Registry.ShardEpoch {
-			return PreparedReadiness{}, fmt.Errorf("%w: authenticated continuity technical record %d names shard epoch %d, deployment pins %d",
-				ErrContinuity, i, tr.Epoch, c.Registry.ShardEpoch)
+		want := c.Registry.ShardEpoch
+		if conf := ucs[i].ShardConfHash; !bytes.Equal(conf, c.FullShardConfHash) {
+			pdr, err := r.deployment.RecordConfig(conf)
+			if err != nil || pdr == nil {
+				return PreparedReadiness{}, fmt.Errorf("%w: continuity certificate %d is of an assignment this node has not installed: %w", ErrContinuity, i, err)
+			}
+			want = pdr.Epoch
+		}
+		if tr.Epoch != want {
+			return PreparedReadiness{}, fmt.Errorf("%w: authenticated continuity technical record %d names shard epoch %d, its configuration pins %d",
+				ErrContinuity, i, tr.Epoch, want)
 		}
 	}
 	return PreparedReadiness{p: &preparedReadiness{owner: r, observationVersion: version, headToken: headToken, blockNumber: loaded.BlockNumber(),

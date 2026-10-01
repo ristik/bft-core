@@ -1,0 +1,185 @@
+# H3: changing the EVM validator assignment through the existing root handoff
+
+Status: implemented in the bft-core half of H3 (this branch). The contracts half is
+`ristik/unicity-pos-contracts#5` (`sealRegistry/v2`, 8b30801) and the Ureth half is
+`ristik/ureth#47` (5f3bb7e4). No lane was run for this change; the locked acceptance lane is a
+separate step. No combined root-and-EVM change and no migration of an already initialized chain is
+claimed.
+
+## 1. Protocol
+
+An EVM assignment change reuses `prepare → freeze/endorse → commit H → root activate → EVM
+acknowledge`, the existing old-root-quorum authority, Abort and attempt+1. The committed
+candidate gains an optional EVM assignment. There is no separate shard-handoff protocol.
+
+- Every handoff advances the root epoch `e → e+1`, **including an EVM-only rotation with identical
+  root keys**. The new epoch's root trust base is published with every rotation.
+- A root-only handoff keeps the shard epoch. An EVM assignment handoff advances the installed
+  assignment `s → s+1`.
+- For M3, root-only and EVM-only changes are supported separately. A candidate whose root members
+  differ from the installed ones **and** which carries an assignment is refused (`evmassign.ErrCombined`)
+  by the CLI path, every endorser and block admission. Two sequential handoffs give both changes.
+- One designated EVM shard (`PartitionTypeID 8`), unit effective weights (`Stake == 1`), at most 64
+  validators. Chain, fork, fee and execution settings are fixed: the successor PDR must equal the
+  installed one in every field except validators, epoch (+1) and activation round
+  (`evmassign.ConfigHash`).
+- Another handoff of any kind needs a certified acknowledgement first, except a **supersession**
+  (§4).
+
+## 2. Candidate binding, authorization, possession
+
+Package `evmassign` defines the canonical successor assignment, the proof of possession (PoP) and the
+version-2 candidate.
+
+- The **assignment hash** covers network/partition/shard, the new shard epoch, the sorted unique
+  validators (identity, key, unit weight) and the non-membership configuration hash (which includes
+  the immutable `seal_registry_genesis` commitment of G). The activation round is not part of it: it is
+  fixed by the commit, and the derived PDR hash that certificates carry includes it.
+- Every successor key, retained keys included, signs a domain-separated message over
+  `(network, partition, shard, assignment hash, predecessor root BodyID, attempt, frozen parent P,
+  node id)`. Signatures must be exactly 65 bytes and the recovery byte must recover the validator
+  key, so a signature has one accepted encoding.
+- The **candidate** (`evmassign.Candidate`, one encoding) binds the successor root members, the
+  replaced assignment's epoch and full hash, the successor PDR, the ordered PoPs and, for a
+  supersession, the superseded committed H and chain. Its SHA-256 digest is the 32-byte candidate hash
+  that `D4CandidateContextHash` binds into `TrustBaseBodyV2.ChangeRecordHash`. Hash order: assignment
+  hash → PoPs → candidate digest → change-record hash / next BodyID → FrozenID. No preimage contains its
+  enclosing BodyID, FrozenID or a regenerated genesis identity.
+- The preimage travels **once**: in the version-2 freeze companion
+  (`storage.FreezeAssignmentAuthorization`, retained under the successor BodyID) and in the retained
+  handoff bundle (`handoffdelivery.Bundle.Candidate`). It is verified again at endorsement
+  (`ConsensusManager.validateHandoffApproval`) and at block admission
+  (`v1HandoffAuthority.VerifyFreeze` + `verifyFreezeAssignment`), not only in the CLI. The root-input
+  `D[]` stays at most 16 KiB: it carries hashes and scalar epochs, never validator lists.
+- Old **root** quorum authorizes H. Old EVM signatures never authorize the successor; the successor
+  EVM quorum signs the acknowledgement. Local configuration and peer-supplied keys confer no authority.
+- Possession is not availability: successor restoration/readiness at P is the operator's check before
+  every attempt; an attempt+1 recollects PoPs for its own attempt (a replayed attempt-n PoP fails).
+
+## 3. The EVM configuration is derived from committed history
+
+Committed root storage is the only source: the genesis PDR plus the committed handoff records, their
+verified candidate preimages and activation boundaries. Orchestration holds a **derived index**.
+
+- At the first new-root block the executor installs, once, the derived PDR
+  (`activateEVMAssignment`): the committed successor technical record (TR) must equal the one H
+  committed (`SuccessorTRHash`), then the shard state is switched with the same `nextEpoch` the shard's
+  ordinary progress would use. The TR installed is the next monotone shard round, the successor epoch,
+  the new set's leader and the rolled fee/stat commitments; IR stays P's original IR.
+- `nextBlock` decides the epoch switch against the installed configuration hash, **not** `TR.Epoch !=
+  IR.Epoch`: that inequality is true throughout a delayed acknowledgement and previously re-ran
+  `nextEpoch` every root round, which reset the fee list repeatedly. The test
+  `TestEVMAssignmentActivatesOnceFromCommittedHistoryAndSurvivesRestart` fails if the old condition is
+  restored.
+- `Orchestration.InstallDerivedShardConfig` is idempotent and keyed by activation round with
+  provenance (`evmassign.Provenance`: H record id, candidate digest, root epoch). An identical entry is
+  a no-op; a different entry at the same key, or a gap in the epoch chain, is corruption
+  (`ErrDerivedConflict`) and refuses startup. After genesis (`Epoch != 0`) `AddShardConfig` and
+  `PUT /api/v1/configurations` refuse the designated EVM shard (`ErrDerivedOnly`); aggregator PDRs keep
+  using ordinary orchestration, including independent updates while an EVM acknowledgement is pending.
+- Order of operations: `InstallEpochAnchor` derives and installs the configuration **before** it writes
+  the anchor root. On startup `storage.New` runs `repairCommittedAssignment` (anchor root's committed H
+  + retained candidate + body) and `NewConsensusManager` runs `reconcileAssignmentHistory` (every
+  archived handoff bundle that carries a candidate), both before `initBlock` rebuilds trust bases,
+  before the frontier service and before any vote. A crash between committed storage and the derived
+  write is repaired from committed data. Missing candidate, body or bundle refuses activation; there is
+  no fallback to the genesis or retired PDR. `initBlock` also refuses a stored EVM shard whose
+  configuration hash is not the derived one.
+- Readers: `initBlock`, `block_store` readers, `nextBlock/nextRound/nextEpoch`, request/leader
+  verification and the frontier sampler all read `ShardConfigs(round)`, i.e. the derived view. Old
+  suffix blocks (committed phase) read the configuration at the **ordered** round, which is how the
+  overlap with the successor's first rounds is resolved.
+
+## 4. Freeze, supersession and the acknowledgement boundary
+
+- Branch-local freeze rejects EVM certification from the Freeze block through H. The old builder's
+  cancellation is optional responsiveness work and is not included; root validation supplies safety.
+- **Supersession.** If the installed assignment `s+k` has no certified acknowledgement, a new
+  EVM-only handoff may replace it on the **same frozen parent P**: the shard's IR is still P (a block
+  certified after P would have been the acknowledgement and ended the pending state) and the candidate
+  carries `Supersession{SupersededH, BaseRootEpoch, BaseShardEpoch, BaseActiveHash, ChainLen,
+  ChainCommitment}`. Block execution recomputes the chain from this validator's own derived history
+  (`storage.CommittedChain`) and requires the candidate to equal it. Every replacement advances the
+  installed shard and root epochs once. Only the newest installed set is in the shard trust base, so a
+  superseded set's late acknowledgement fails membership verification.
+- Abort before H discards the pending assignment only; attempt+1 recollects fresh P/PoPs. After a
+  superseding attempt aborts the previously installed assignment stays current. After H a replacement is
+  another committed supersession, never an Abort.
+- **Folded acknowledgement.** Transition encoding v3 (`handoff.EVMTransition`, shared vector
+  `handoff/testdata/evm-transition-v3.json` with Ureth) names old/new root epoch, old/new shard epoch,
+  old/new active configuration hash, a supersession span and commitment. A root-only step moves the root
+  epoch by 1 and keeps the shard epoch and hash. An assignment step moves both by 1. A supersession folds
+  `n` consecutive committed steps: root and shard deltas both equal `n ≤ 64`, the hash changes, the
+  commitment is non-zero. `handoff.FoldTransitions` builds it from per-step transitions and
+  `evmassign.ChainCommit` is the commitment; BFT verifies every intermediate step (the per-step
+  transition of each handoff is built from its own verified bundle), the contract and Ureth check only the
+  monotone jump and the commitment. Incomplete history is a typed
+  `engineapi.ErrAssignmentSpanUnavailable`, never a bare epoch-jump error.
+- The latest set builds one acknowledgement-only block on P; after it is certified, ordinary
+  transactions resume.
+
+## 5. Guard inventory
+
+The shard-epoch-zero rejection sites at the surveyed pins, all changed with tests:
+
+| Site | Change |
+| --- | --- |
+| `evmroot/rootorigin_v2.go` `RootInputV2.Validate` | certified epoch = origin IR epoch, authorized epoch = TE epoch, authorized ≥ certified, and authorized ahead only with a transition |
+| `rootinput/v2.go` `authenticateObservationV2` | authorized epoch ≥ certified epoch; `AlsoAcceptConfHashes` for installed assignments |
+| `rootchain/consensus/frontier_sampler.go` | IR epoch ≤ TR epoch; TR epoch equals the derived PDR's |
+| `rootchain/consensus/frontierclient/collector.go` | IR epoch ≤ TR epoch under the collector's configuration binding |
+| Ureth `crates/unicity/execution/src/lib.rs` | `ristik/ureth#47` |
+
+`RootOriginV2.Class`'s actual genesis check (epoch zero / null IR for the bootstrap class) and the
+root-epoch sentinels are different invariants and are kept. Also changed: `DeriveV2` (nonzero epochs,
+registry assignment, transition v3), `certifiedstore` (per-record PDR), `registryproof` (layout 2),
+`recordwiring`, `parentwitness`, `registrywitness`, `configuredprogress` descriptor layout, bundle codecs.
+
+## 6. F7 and immutable genesis versus active configuration
+
+- `SealRegistry` v2 keeps `config.shardConfHash` (the genesis full hash) immutable and adds
+  `assignment.activeConfHash` (initialized to it) and `assignment.spanCommitment`. `registryproof`
+  reads layout 1 exactly as before and layout 2 as the 30-word list the artifact pins; a v2 snapshot is
+  checked for internal consistency and, when the caller supplies it, against the authenticated active
+  assignment (`Context.Active`).
+- `mintproof` bundle **schema version 2** carries the full canonical PDR of its subject UC's
+  configuration. The verifier requires `H(PDR) == bundle configuration == UC.ShardConfHash`, verifies the
+  UC under the caller's trust base for the UC's root epoch (an EVM-only rotation advances the root epoch
+  with identical keys; publish that body), requires the PDR's non-membership configuration to equal the
+  immutable genesis pin, validates the validator set, and requires `UC.InputRecord.Epoch == PDR.Epoch`.
+  No H-proof chain is needed offline. Version 1 bundles stay valid only under their explicit original
+  configuration pin: a missing PDR is never read as the latest assignment.
+- `certifiedstore` record **version 2** carries the record's own PDR; version 1 bytes never change.
+  Each record is validated against its own PDR, not a deployment-wide hash. A recertification of P under
+  a successor assignment (certified epoch `s`, authorized `s+1`) is an authorization for the next
+  acknowledgement and fails as P's resulting evidence; the archive keeps P's original resulting UC.
+
+## 7. Durability and compatibility
+
+- Persisted shapes change with explicit decoders and refusals: freeze companion version 2; handoff
+  bundle with an optional `Candidate` (legacy shape written when empty, both decoded, nothing
+  reinterpreted); `certifiedstore` record v2; mint bundle v2; transition v3. The delivery protocol id
+  becomes `/unicity/root-handoff-bundle/2.0.0`: a peer that does not speak it cannot fetch an
+  assignment-bearing bundle and is refused before activation. `HandoffApprovalMsg` gains the candidate
+  preimage; peers must be upgraded together (the root network is one deployment).
+- Aggregator behavior is unchanged: after root activation they keep certifying while the EVM
+  acknowledgement is pending, and the EVM transition never resets aggregator PDRs, IRs, leaders or
+  counters.
+- `parentwitness` carries the registry layout in its context; its version-1 wire cannot name layout 2, so
+  a layout-2 context is refused rather than dropped.
+
+## 8. M3 genesis
+
+The assignment-capable registry must be in the **M3 launch genesis**: a hash repin cannot replace live
+contract code and migration of an initialized chain is separately specified. `ubft engine-api genesis
+--registry-layout 2` and `ubft shard-node run --registry-layout 2` select the pinned v2 artifact (code
+hash `0x7787f316…caf38`, also pinned independently of the embedded file); the default stays 1 so existing
+deployments are unchanged. Regenerating the final T1 export, gate hashes, storage/proof fixtures,
+T4 reconciliation and T5/T6 evidence for the M3 genesis is **not** done by this change and needs the
+external toolchain.
+
+## 9. Not claimed here
+
+The locked acceptance lane; the shard-node core's multi-assignment anchor-evidence and the H4 frontier
+restore *across* an assignment change beyond the guards above; the wire v2 of `parentwitness`; the final
+M3 genesis hashes. See the PR description for the exact test coverage.

@@ -103,6 +103,16 @@ type Record struct {
 	BaseConfigHash   common.Hash
 	ShardEpoch       uint64
 	RootEpoch        uint64
+	// Layout is the registry layout version G commits to: 1 or, for the assignment-aware registry, 2.
+	// Zero is read as 1, so every v1 record keeps its bytes.
+	Layout uint64
+}
+
+func (g Record) layoutVersion() uint64 {
+	if g.Layout == 0 {
+		return registryproof.LayoutVersion
+	}
+	return g.Layout
 }
 
 func (g Record) clone() Record {
@@ -113,7 +123,7 @@ func (g Record) clone() Record {
 // Encode is CBOR(G): deterministic CBOR of the twelve-element array of §5.1.
 func (g Record) Encode() ([]byte, error) {
 	return bfttypes.Cbor.Marshal([]any{
-		genesisDomain, uint64(registryproof.LayoutVersion),
+		genesisDomain, g.layoutVersion(),
 		g.NetworkID, g.PartitionID, g.ShardID, g.ChainID,
 		g.SystemAddress.Bytes(), g.RegistryAddress.Bytes(),
 		g.RegistryCodeHash.Bytes(), g.BaseConfigHash.Bytes(),
@@ -190,7 +200,7 @@ func Generate(config *bfttypes.PartitionDescriptionRecord, pins Pins, art Artifa
 	if err := pins.check(); err != nil {
 		return nil, err
 	}
-	art = Artifact{RuntimeCode: bytes.Clone(art.RuntimeCode), CodeHash: art.CodeHash}
+	art = Artifact{RuntimeCode: bytes.Clone(art.RuntimeCode), CodeHash: art.CodeHash, Layout: art.Layout}
 	if err := art.check(); err != nil {
 		return nil, err
 	}
@@ -222,6 +232,9 @@ func Generate(config *bfttypes.PartitionDescriptionRecord, pins Pins, art Artifa
 		RegistryCodeHash: pins.RegistryCodeHash, BaseConfigHash: baseHash,
 		ShardEpoch: base.Epoch, RootEpoch: pins.RootEpoch,
 	}
+	if art.layout() == registryproof.LayoutVersion2 {
+		g.Layout = registryproof.LayoutVersion2
+	}
 	enc, err := g.Encode()
 	if err != nil {
 		return nil, err
@@ -243,12 +256,17 @@ func Generate(config *bfttypes.PartitionDescriptionRecord, pins Pins, art Artifa
 
 	// Step 4.
 	words := map[string]common.Hash{
-		"layoutVersion":        wordUint(registryproof.LayoutVersion),
+		"layoutVersion":        wordUint(art.layout()),
 		"genesisCommitment":    commitment,
 		"config.shardConfHash": fullHash,
 		"assignment.epoch":     wordUint(g.ShardEpoch),
 		"assignment.rootEpoch": wordUint(g.RootEpoch),
 		"phase":                wordUint(2),
+	}
+	if art.layout() == registryproof.LayoutVersion2 {
+		// The genesis configuration hash stays immutable in config.shardConfHash; the active assignment
+		// hash starts equal to it and only a privileged acknowledgement changes it.
+		words["assignment.activeConfHash"] = fullHash
 	}
 
 	out := &Genesis{
@@ -305,9 +323,16 @@ func newTrie() *trie.Trie { return trie.NewEmpty(triedb.NewDatabase(rawdb.NewMem
 // 189c0df3), and takes the genesis proof for the §4.1 key list.
 func (g *Genesis) buildEVMGenesis(chainID uint64, art Artifact, evm EVMParams) error {
 	storage := newTrie()
-	slotPaths := make([][]byte, registryproof.FieldCount)
-	for i, name := range registryproof.SlotNames {
-		key := registryproof.SlotKey(i)
+	names, err := registryproof.SlotNamesFor(art.layout())
+	if err != nil {
+		return err
+	}
+	slotPaths := make([][]byte, len(names))
+	for i, name := range names {
+		key, err := registryproof.SlotKeyFor(art.layout(), i)
+		if err != nil {
+			return err
+		}
 		slotPaths[i] = crypto.Keccak256(key[:])
 		if w := g.storage[name]; w != (common.Hash{}) {
 			v, err := rlp.EncodeToBytes(common.TrimLeftZeroes(w[:]))
@@ -344,7 +369,7 @@ func (g *Genesis) buildEVMGenesis(chainID uint64, art Artifact, evm EVMParams) e
 	if err := state.Prove(accountPath, &accountProof); err != nil {
 		return err
 	}
-	g.evidence = registryproof.Evidence{Header: bytes.Clone(g.header), AccountProof: accountProof, StorageProofs: make([][][]byte, registryproof.FieldCount)}
+	g.evidence = registryproof.Evidence{Header: bytes.Clone(g.header), AccountProof: accountProof, StorageProofs: make([][][]byte, len(names))}
 	for i := range slotPaths {
 		var p nodeList
 		if err := storage.Prove(slotPaths[i], &p); err != nil {
@@ -353,7 +378,7 @@ func (g *Genesis) buildEVMGenesis(chainID uint64, art Artifact, evm EVMParams) e
 		g.evidence.StorageProofs[i] = p
 	}
 
-	g.genesisJSON, err = genesisJSON(chainID, evm, &allocation{address: g.pins.RegistryAddress, code: art.RuntimeCode, words: g.storage})
+	g.genesisJSON, err = genesisJSON(chainID, evm, &allocation{address: g.pins.RegistryAddress, code: art.RuntimeCode, words: g.storage, layout: art.layout()})
 	return err
 }
 
@@ -419,6 +444,7 @@ func (g *Genesis) ProofContext() registryproof.Context {
 		RegistryAddress: g.pins.RegistryAddress, RegistryCodeHash: g.pins.RegistryCodeHash,
 		GenesisCommitment: g.genesisCommitment, FullShardConfHash: g.fullShardConfHash,
 		ShardEpoch: g.record.ShardEpoch, RootEpoch: g.record.RootEpoch, EVMGenesisHash: g.evmGenesisHash,
+		Layout: g.record.Layout,
 	}
 }
 
@@ -549,15 +575,24 @@ type allocation struct {
 	address common.Address
 	code    []byte
 	words   map[string]common.Hash
+	layout  uint64
 }
 
 func genesisJSON(chainID uint64, evm EVMParams, a *allocation) ([]byte, error) {
 	alloc := map[string]allocAccount{}
 	if a != nil {
 		storage := map[string]string{}
-		for i, name := range registryproof.SlotNames {
+		names, err := registryproof.SlotNamesFor(a.layout)
+		if err != nil {
+			return nil, err
+		}
+		for i, name := range names {
 			if w := a.words[name]; w != (common.Hash{}) {
-				storage[registryproof.SlotKey(i).Hex()] = w.Hex()
+				k, err := registryproof.SlotKeyFor(a.layout, i)
+				if err != nil {
+					return nil, err
+				}
+				storage[k.Hex()] = w.Hex()
 			}
 		}
 		alloc[a.address.Hex()] = allocAccount{Balance: "0x0", Code: hexutil.Encode(a.code), Storage: storage}

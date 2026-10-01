@@ -39,9 +39,13 @@ func TestTwoChangedKeyHandoffsRestoreAtEachPhase(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		step, err := handoffdelivery.AssignmentStepOf(bundle, verified)
+		if err != nil {
+			return err
+		}
 		_, err = handoff.TransitionFromInstalledAnchor(bundle.Proof, prior, bundle.Body,
 			&rctypes.EpochAnchor{GenesisID: verified.Genesis.ID(), Epoch: verified.Genesis.Epoch,
-				Slot: verified.Genesis.Start - 1, StateRoot: verified.Record.StateRoot[:]}, verified.Shard.IRTR)
+				Slot: verified.Genesis.Start - 1, StateRoot: verified.Record.StateRoot[:]}, verified.Shard.IRTR, step)
 		if err != nil {
 			return err
 		}
@@ -102,9 +106,11 @@ func TestHistoricalTrustStoreHandoffRefusalsAndReplay(t *testing.T) {
 	require.Equal(t, [32]byte(f.Body.Identity()), gotBodyID)
 	epoch, _ = store.CurrentRootEpoch()
 	require.EqualValues(t, 1, epoch, "proof persistence alone does not activate certification")
+	step, err := handoffdelivery.AssignmentStepOf(bundle, verified)
+	require.NoError(t, err)
 	_, err = handoff.TransitionFromInstalledAnchor(bundle.Proof, f.Old, bundle.Body,
 		&rctypes.EpochAnchor{GenesisID: verified.Genesis.ID(), Epoch: verified.Genesis.Epoch,
-			Slot: verified.Genesis.Start - 1, StateRoot: verified.Record.StateRoot[:]}, verified.Shard.IRTR)
+			Slot: verified.Genesis.Start - 1, StateRoot: verified.Record.StateRoot[:]}, verified.Shard.IRTR, step)
 	require.NoError(t, err)
 	require.ErrorIs(t, store.ActivateHandoff(3), trusthistorystore.ErrHistory)
 	require.NoError(t, store.ActivateHandoff(2))

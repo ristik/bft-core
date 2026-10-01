@@ -29,6 +29,25 @@ type HandoffFollower struct {
 	CurrentRoots    []peer.ID
 	ArchiveReplicas []peer.ID
 	FetchArchive    func(context.Context, peer.ID, uint64) (handoffdelivery.Bundle, error)
+
+	// active is the shard configuration hash the root certifies at the epoch being followed: ConfHash (the genesis
+	// configuration) until a verified EVM assignment step activates another. Every handoff snapshot is checked against
+	// it, never against the genesis hash, so rotations and supersessions after the first keep verifying.
+	active   []byte
+	replayed bool
+}
+
+func (f *HandoffFollower) expected() []byte {
+	if len(f.active) == 32 {
+		return f.active
+	}
+	return f.ConfHash
+}
+
+func (f *HandoffFollower) advance(v handoffdelivery.Verified) {
+	if len(v.NextConfHash) == 32 {
+		f.active = append([]byte(nil), v.NextConfHash...)
+	}
 }
 
 type HandoffHistory interface {
@@ -46,12 +65,13 @@ func (f *HandoffFollower) Restore(ctx context.Context) error {
 	for epoch := f.AnchorEpoch + 1; epoch > f.AnchorEpoch; epoch++ {
 		bundle, err := f.load(epoch)
 		if errors.Is(err, os.ErrNotExist) {
+			f.replayed = true
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		verified, err := f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
+		verified, err := f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.expected())
 		if err != nil {
 			return err
 		}
@@ -60,6 +80,7 @@ func (f *HandoffFollower) Restore(ctx context.Context) error {
 				return err
 			}
 		}
+		f.advance(verified)
 	}
 	return errors.New("handoff follower: epoch overflow")
 }
@@ -73,7 +94,28 @@ func (f *HandoffFollower) Run(ctx context.Context) error {
 	}
 	start := f.AnchorEpoch
 	if active, ok := f.History.(interface{ CurrentRootEpoch() (uint64, bool) }); ok {
-		if epoch, ready := active.CurrentRootEpoch(); ready && epoch >= start { start = epoch }
+		if epoch, ready := active.CurrentRootEpoch(); ready && epoch >= start {
+			start = epoch
+		}
+	}
+	if !f.replayed {
+		// The followed configuration is derived from the durable handoffs; recompute it without repeating callbacks.
+		for epoch := f.AnchorEpoch + 1; epoch <= start; epoch++ {
+			bundle, err := f.load(epoch)
+			if err != nil {
+				break
+			}
+			old, err := f.History.GetByEpoch(ctx, bundle.Proof.Record.Epoch)
+			if err != nil {
+				return err
+			}
+			verified, err := handoffdelivery.Verify(bundle, old, f.Partition, f.Shard, f.expected())
+			if err != nil {
+				return err
+			}
+			f.advance(verified)
+		}
+		f.replayed = true
 	}
 	for epoch := start + 1; epoch > start; epoch++ {
 		for {
@@ -87,8 +129,11 @@ func (f *HandoffFollower) Run(ctx context.Context) error {
 			if errors.Is(err, os.ErrNotExist) {
 				bundle, err = f.fetch(ctx, epoch)
 				if err == nil {
-					verified, verifyErr := f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
+					verified, verifyErr := f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.expected())
 					if verifyErr == nil {
+						// Only a bundle Verify accepted in full is stored: a stored bundle is replayed on every restart, so
+						// one that failed verification afterwards would wedge the node permanently. The callback follows
+						// the save so a crash between them replays it.
 						if err = f.save(epoch, bundle); err != nil {
 							return err
 						}
@@ -96,12 +141,13 @@ func (f *HandoffFollower) Run(ctx context.Context) error {
 							err = f.OnInstalled(ctx, bundle, verified)
 						}
 						if err == nil {
+							f.advance(verified)
 							break
 						}
 					}
 				}
 			} else {
-				verified, verifyErr := f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
+				verified, verifyErr := f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.expected())
 				if verifyErr != nil {
 					return verifyErr
 				}
@@ -110,6 +156,7 @@ func (f *HandoffFollower) Run(ctx context.Context) error {
 						return err
 					}
 				}
+				f.advance(verified)
 				break
 			}
 			timer := time.NewTimer(time.Second)
@@ -132,7 +179,7 @@ func (f *HandoffFollower) fetch(ctx context.Context, epoch uint64) (handoffdeliv
 	try := func(id peer.ID, request func(context.Context, peer.ID, uint64) (handoffdelivery.Bundle, error)) (handoffdelivery.Bundle, bool) {
 		bundle, err := request(ctx, id, epoch)
 		if err == nil && bundle.Body.Epoch == epoch && bundle.Proof.Record.Epoch+1 == epoch {
-			_, err = f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
+			_, err = f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.expected())
 		} else {
 			return handoffdelivery.Bundle{}, false
 		}
@@ -186,7 +233,7 @@ func (f *HandoffFollower) CatchUp(ctx context.Context, target uint64) (map[uint6
 		if err != nil {
 			return nil, fmt.Errorf("epoch %d: %w", epoch, err)
 		}
-		verified, err := f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
+		verified, err := f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.expected())
 		if err != nil {
 			return nil, fmt.Errorf("epoch %d: %w", epoch, err)
 		}
@@ -200,11 +247,13 @@ func (f *HandoffFollower) CatchUp(ctx context.Context, target uint64) (map[uint6
 				return nil, err
 			}
 		}
+		f.advance(verified)
 		bundles[epoch] = bundle
 		if epoch == ^uint64(0) {
 			break
 		}
 	}
+	f.replayed = true
 	return bundles, nil
 }
 
@@ -213,19 +262,22 @@ func (f *HandoffFollower) path(epoch uint64) string {
 }
 
 func (f *HandoffFollower) load(epoch uint64) (handoffdelivery.Bundle, error) {
-	var bundle handoffdelivery.Bundle
 	raw, err := os.ReadFile(f.path(epoch))
 	if err != nil {
-		return bundle, err
+		return handoffdelivery.Bundle{}, err
 	}
-	if len(raw) == 0 || len(raw) > 64<<20 || types.Cbor.Unmarshal(raw, &bundle) != nil || bundle.Body.Epoch != epoch {
+	if len(raw) == 0 || len(raw) > 64<<20 {
+		return handoffdelivery.Bundle{}, handoffdelivery.ErrBundle
+	}
+	bundle, err := handoffdelivery.DecodeBundle(raw)
+	if err != nil || bundle.Body.Epoch != epoch {
 		return handoffdelivery.Bundle{}, handoffdelivery.ErrBundle
 	}
 	return bundle, nil
 }
 
 func (f *HandoffFollower) save(epoch uint64, bundle handoffdelivery.Bundle) error {
-	raw, err := types.Cbor.Marshal(bundle)
+	raw, err := handoffdelivery.EncodeBundle(bundle)
 	if err != nil || len(raw) == 0 || len(raw) > 64<<20 {
 		return handoffdelivery.ErrBundle
 	}

@@ -70,7 +70,7 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	state, err := cm.blockStore.GetState()
 	require.NoError(t, err)
 	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{IR: &types.InputRecord{BlockHash: parentHash}}}
-	plan, err := cm.buildHandoffPlanFromState(&next, parentHash, state)
+	plan, err := cm.buildHandoffPlanFromState(&next, parentHash, state, nil)
 	require.NoError(t, err)
 	bad := plan
 	bad.FrozenParent = bytes.Repeat([]byte{8}, 32)
@@ -145,12 +145,12 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	abortedControl.Attempt = 0
 	abortedHead.Control = &abortedControl
 	aborted.CommittedHead = &abortedHead
-	retry, err := cm.buildHandoffPlanFromState(&next, parentHash, &aborted)
+	retry, err := cm.buildHandoffPlanFromState(&next, parentHash, &aborted, nil)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, retry.Attempt)
 	require.NotEqual(t, plan.Body, retry.Body, "attempt+1 binds a new body and FrozenID")
 	abortedHead.Control.Attempt = ^uint64(0)
-	_, err = cm.buildHandoffPlanFromState(&next, parentHash, &aborted)
+	_, err = cm.buildHandoffPlanFromState(&next, parentHash, &aborted, nil)
 	require.ErrorIs(t, err, ErrHandoffApproval, "retry refuses attempt overflow")
 }
 

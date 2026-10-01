@@ -48,11 +48,20 @@ func (ss ShardStates) nextBlock(shardConfs map[types.PartitionShardID]*types.Par
 		if prevSI, ok := ss.States[k]; ok {
 			// prevSI.IR is the state in the shard when prevSI.TR was created - so when the epoch in the TR
 			// is different the previous round triggered epoch change in the shard and this round should
-			// switch the shard state into next epoch too
-			if prevSI.TR.Epoch != prevSI.IR.Epoch {
+			// switch the shard state into next epoch too. TR.Epoch != IR.Epoch stays true throughout a delayed
+			// acknowledgement, so the switch is decided against the installed configuration instead: the
+			// trust base and the fee/stat accumulators are installed exactly once per configuration.
+			pdrHash, err := pdr.Hash(hashAlg)
+			if err != nil {
+				return nextBlock, fmt.Errorf("calculating PDR hash of shard %s - %s: %w", pdr.PartitionID, pdr.ShardID, err)
+			}
+			if prevSI.TR.Epoch != prevSI.IR.Epoch && !bytes.Equal(prevSI.ShardConfHash, pdrHash) {
 				if nextBlock.States[k], err = prevSI.nextEpoch(pdr, hashAlg); err != nil {
-					return nextBlock, fmt.Errorf("creating ShardInfo %s - %s of the next epoch: %w",
-						prevSI.LastCR.Partition, prevSI.LastCR.Shard, err)
+					partition, shard := pdr.PartitionID, pdr.ShardID
+					if prevSI.LastCR != nil {
+						partition, shard = prevSI.LastCR.Partition, prevSI.LastCR.Shard
+					}
+					return nextBlock, fmt.Errorf("creating ShardInfo %s - %s of the next epoch: %w", partition, shard, err)
 				}
 				if ss.Control != nil {
 					next := nextBlock.States[k]

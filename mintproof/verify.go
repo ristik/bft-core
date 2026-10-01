@@ -24,17 +24,41 @@ type ExpectedClaim struct {
 	BlockNumber     uint64
 	TransactionHash *common.Hash
 	MatchLog        func(*gethtypes.Log) bool
+	// Pin is the immutable deployment expectation (the genesis configuration) a PDR-carrying bundle is
+	// checked against. It is required for version 2 bundles. For them ShardConf is only an optional exact
+	// historical-configuration pin that narrows acceptance; zero means any assignment of the deployment.
+	Pin GenesisPin
 }
 
 // Verify authenticates the subject UC with the caller's epoch trust base,
 // then verifies the EVM header and the inclusion or complete-block absence
 // evidence without network, filesystem, or historical-database access.
 func Verify(bundle []byte, trustBase types.RootTrustBase, expected ExpectedClaim, limits Limits) error {
-	b, err := DecodeBundle(bundle, limits)
+	version, err := bundleVersion(bundle)
 	if err != nil {
 		return err
 	}
-	if trustBase == nil || trustBase.GetNetworkID() != b.Context.Network || trustBase.GetEpoch() == 0 || expected.Network != b.Context.Network || expected.Partition != b.Context.Partition || !bytes.Equal(expected.Shard, b.Context.Shard) || expected.ShardConf != b.Context.ShardConf || len(b.Context.Shard) == 0 {
+	var b MintReasonBundleV1
+	var v2 *MintReasonBundleV2
+	switch version {
+	case 1:
+		// Legacy bundles are valid under their explicit original configuration pin only.
+		if b, err = DecodeBundle(bundle, limits); err != nil {
+			return err
+		}
+	case BundleVersion2:
+		decoded, err := DecodeBundleV2(bundle, limits)
+		if err != nil {
+			return err
+		}
+		b, v2 = decoded.MintReasonBundleV1, &decoded
+	default:
+		return fmt.Errorf("%w: bundle schema version %d", ErrInvalid, version)
+	}
+	if trustBase == nil || trustBase.GetNetworkID() != b.Context.Network || trustBase.GetEpoch() == 0 || expected.Network != b.Context.Network || expected.Partition != b.Context.Partition || !bytes.Equal(expected.Shard, b.Context.Shard) || len(b.Context.Shard) == 0 {
+		return ErrInvalid
+	}
+	if v2 == nil && expected.ShardConf != b.Context.ShardConf {
 		return ErrInvalid
 	}
 	if expected.BlockHash == ([32]byte{}) {
@@ -54,6 +78,14 @@ func Verify(bundle []byte, trustBase types.RootTrustBase, expected ExpectedClaim
 	}
 	if err := uc.Verify(trustBase, stdcrypto.SHA256, b.Context.Partition, shard, b.Context.ShardConf[:]); err != nil {
 		return fmt.Errorf("%w: subject UC: %v", ErrInvalid, err)
+	}
+	if v2 != nil {
+		// The UC's root-epoch trust base is the caller's; the PDR is the assignment its configuration
+		// hash commits to. Root epoch and shard epoch are independent: an EVM-only rotation advances the
+		// root epoch with identical root keys, and the caller supplies that epoch's trust base.
+		if _, err := verifyConfigPDR(*v2, &uc, expected); err != nil {
+			return err
+		}
 	}
 	if len(uc.InputRecord.BlockHash) != 32 || len(uc.InputRecord.Hash) != 32 {
 		return ErrInvalid

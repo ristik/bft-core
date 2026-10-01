@@ -30,7 +30,19 @@ type proofFixture struct {
 	receipts [][]byte
 }
 
+// variant makes the fixture's subject UC a certificate of an installed EVM assignment: it is signed over
+// pdr, at the given shard and root epochs. The archive namespace stays anchored to the genesis identity.
+type variant struct {
+	pdr                   *types.PartitionDescriptionRecord
+	shardEpoch, rootEpoch uint64
+}
+
 func newProofFixture(t *testing.T, statuses []uint64, corruptRoot, mismatchedType bool) proofFixture {
+	t.Helper()
+	return newProofFixtureWith(t, statuses, corruptRoot, mismatchedType, nil)
+}
+
+func newProofFixtureWith(t *testing.T, statuses []uint64, corruptRoot, mismatchedType bool, v *variant) proofFixture {
 	t.Helper()
 	chain := certifiedchain.New(t, 3, 0)
 	to := common.HexToAddress("0x2222000000000000000000000000000000002222")
@@ -68,7 +80,14 @@ func newProofFixture(t *testing.T, statuses []uint64, corruptRoot, mismatchedTyp
 	require.NoError(t, err)
 	tr := certifiedchain.Technical(1)
 	ir := &types.InputRecord{Version: 1, RoundNumber: 1, Epoch: 0, PreviousHash: bytes.Repeat([]byte{0x77}, 32), Hash: state.Bytes(), BlockHash: header.Hash().Bytes(), SummaryValue: []byte{}, Timestamp: 1_700_000_000}
-	uc := chain.Certify(chain.Signer, ir, tr, 5)
+	certified := chain.Full
+	if v != nil {
+		ir.Epoch, tr.Epoch, certified = v.shardEpoch, v.shardEpoch, v.pdr
+	}
+	uc := chain.CertifyFor(certified, chain.Signer, ir, tr, 5)
+	if v != nil {
+		uc.UnicitySeal.Epoch = v.rootEpoch
+	}
 	uc.UnicitySeal.NetworkID = 3
 	uc.UnicitySeal.Signatures = nil
 	verifier, err := chain.Signer.Verifier()

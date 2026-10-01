@@ -230,3 +230,26 @@ The inert model does not establish runtime completeness. Runtime review must
 cover suffix identity through every executor path, typed timeout/recovery
 plumbing, historic LastCR verification, and consumer suppression of late old
 UCs. The old quorum is a liveness dependency only until proof/state delivery.
+
+## H3 amendment: EVM assignment candidate, derived configuration, supersession
+
+The D4 machine is unchanged; H3 adds an optional EVM assignment to the candidate that
+`TrustBaseBodyV2.ChangeRecordHash` already binds through `D4CandidateContextHash`.
+
+- **Candidate.** `evmassign.Candidate` (version 2) binds the successor root members, the replaced
+  assignment (epoch, full hash), the successor PDR, the ordered PoPs and optionally a supersession.
+  Hash order: assignment hash → PoPs → candidate digest → change-record hash → next BodyID → FrozenID.
+  The preimage rides the version-2 freeze companion and the handoff bundle, once.
+- **Commit.** `SuccessorTRHash` for an assignment handoff is the hash of the successor technical record
+  (next monotone shard round, successor epoch, new leader, rolled fee/stat), derived from the retained
+  candidate and verified at admission. Old-epoch suffix blocks stay identity.
+- **Activation.** The first new-root block installs that record and the derived PDR once
+  (`activateEVMAssignment`); IR stays P's original IR, so the first recertification of P authorizes the
+  acknowledgement and never replaces P's resulting evidence.
+- **Supersession.** While the installed assignment is unacknowledged (`TR.Epoch != IR.Epoch` with the
+  configuration already installed), a handoff whose candidate extends the committed chain read from the
+  validator's own derived history may replace it on the same frozen parent. Every other handoff is
+  refused with `ErrAssignmentAckPending`.
+- **Races.** If the acknowledgement certifies first, P changes and the supersession proposal aborts and is
+  rebuilt; if the Freeze orders first the acknowledgement cannot certify. Ordinary root consensus decides;
+  there is no wall-clock override.

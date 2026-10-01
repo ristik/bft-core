@@ -28,25 +28,34 @@ type StorageProofResult struct {
 // carries exactly one proof for each SlotNames key; it verifies nothing, and the result is untrusted
 // until Verify accepts it. Nodes are shared with r: Verify copies them.
 func EvidenceFromGetProof(header []byte, r GetProofResult) (Evidence, error) {
+	return EvidenceFromGetProofFor(0, header, r)
+}
+
+// EvidenceFromGetProofFor is EvidenceFromGetProof for the given registry layout (zero or 1: v1, 2: v2).
+func EvidenceFromGetProofFor(version uint64, header []byte, r GetProofResult) (Evidence, error) {
+	lay, err := layoutFor(version)
+	if err != nil {
+		return Evidence{}, err
+	}
 	if r.Address != RegistryAddress {
 		return Evidence{}, fmt.Errorf("%w: response is for %s, not %s", ErrAccountProof, r.Address, RegistryAddress)
 	}
-	if len(r.StorageProof) != FieldCount {
-		return Evidence{}, fmt.Errorf("%w: %d storage proofs, want exactly %d", ErrStorageProof, len(r.StorageProof), FieldCount)
+	if len(r.StorageProof) != len(lay.names) {
+		return Evidence{}, fmt.Errorf("%w: %d storage proofs, want exactly %d", ErrStorageProof, len(r.StorageProof), len(lay.names))
 	}
-	ev := Evidence{Header: header, AccountProof: nodes(r.AccountProof), StorageProofs: make([][][]byte, FieldCount)}
-	seen := [FieldCount]bool{}
+	ev := Evidence{Header: header, AccountProof: nodes(r.AccountProof), StorageProofs: make([][][]byte, len(lay.names))}
+	seen := make([]bool, len(lay.names))
 	for _, sp := range r.StorageProof {
 		key, err := storageKey(sp.Key)
 		if err != nil {
 			return Evidence{}, fmt.Errorf("%w: %v", ErrStorageProof, err)
 		}
-		i := slotIndex(key)
+		i := lay.slotIndex(key)
 		if i < 0 {
 			return Evidence{}, fmt.Errorf("%w: unexpected storage key %s", ErrStorageProof, key)
 		}
 		if seen[i] {
-			return Evidence{}, fmt.Errorf("%w: duplicate proof for %s", ErrStorageProof, SlotNames[i])
+			return Evidence{}, fmt.Errorf("%w: duplicate proof for %s", ErrStorageProof, lay.names[i])
 		}
 		seen[i] = true
 		ev.StorageProofs[i] = nodes(sp.Proof)
@@ -71,9 +80,9 @@ func storageKey(s string) (common.Hash, error) {
 	return common.BytesToHash(b), nil
 }
 
-func slotIndex(key common.Hash) int {
-	for i := range slotKeys {
-		if slotKeys[i] == key {
+func (l *layout) slotIndex(key common.Hash) int {
+	for i := range l.slotKeys {
+		if l.slotKeys[i] == key {
 			return i
 		}
 	}

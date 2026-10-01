@@ -103,3 +103,23 @@ SealRegistry.
   minting a later same-state old UC.
 - A bare round or epoch-only trust-base lookup cannot authorize a certificate;
   typed proof, lineage, interval and shard continuity are required.
+
+## H3 amendment: the EVM assignment changes through the same handoff
+
+Full design: [h3-evm-assignment.md](../design/h3-evm-assignment.md).
+
+- The committed candidate may carry an EVM assignment (version-2 candidate, successor PDR, one proof of
+  possession per successor key). Old **root** quorum remains the only authority for H; old EVM signatures
+  never authorize the successor. Every handoff, including an EVM-only rotation with identical root keys,
+  advances the root epoch.
+- The EVM shard's configuration is **derived from committed history** (the committed record, successor
+  body, retained candidate and activation boundary) and installed once at the first new-root block.
+  Orchestration is a derived, idempotent index repaired on startup before the block tree loads; an
+  external write of that shard's configuration after genesis is refused.
+- The epoch switch is decided against the installed configuration hash, not `TR.Epoch != IR.Epoch`, which
+  stays true during a delayed acknowledgement.
+- An EVM assignment whose acknowledgement is not certified may be **superseded** on the same frozen
+  parent; only the newest installed set can acknowledge, and one folded acknowledgement summarizes the
+  committed span. Abort-before-H and attempt+1 are unchanged; there is no post-H rollback.
+- M3 supports root-only and EVM-only changes separately; a combined change is refused at the operator,
+  endorsement and admission boundaries.

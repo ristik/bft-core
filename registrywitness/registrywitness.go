@@ -295,9 +295,15 @@ func Acquire(ctx context.Context, rpc Caller, c registryproof.Context, parent co
 		return Witness{}, fmt.Errorf("%w: debug_getRawHeader: result is not hex bytes: %v", ErrInvalid, err)
 	}
 
-	keys := make([]common.Hash, registryproof.FieldCount)
+	fields, err := registryproof.FieldCountFor(c.Layout)
+	if err != nil {
+		return Witness{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+	}
+	keys := make([]common.Hash, fields)
 	for i := range keys {
-		keys[i] = registryproof.SlotKey(i)
+		if keys[i], err = registryproof.SlotKeyFor(c.Layout, i); err != nil {
+			return Witness{}, fmt.Errorf("%w: %w", ErrInvalid, err)
+		}
 	}
 	rawProof, err := rpc.Call(ctx, "eth_getProof", []any{registryproof.RegistryAddress, keys, map[string]any{"blockHash": parent}})
 	if err != nil {
@@ -310,7 +316,7 @@ func Acquire(ctx context.Context, rpc Caller, c registryproof.Context, parent co
 	if err := json.Unmarshal(rawProof, &proof); err != nil {
 		return Witness{}, fmt.Errorf("%w: eth_getProof: result does not decode: %v", ErrInvalid, err)
 	}
-	ev, err := registryproof.EvidenceFromGetProof(header, proof)
+	ev, err := registryproof.EvidenceFromGetProofFor(c.Layout, header, proof)
 	if err != nil {
 		return Witness{}, fmt.Errorf("%w: %w", ErrInvalid, err)
 	}

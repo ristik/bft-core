@@ -39,6 +39,12 @@ type EVMParams = registrygenesis.EVMParams
 // DefaultEVMParams are the values `ubft engine-api genesis` writes by default.
 var DefaultEVMParams = registrygenesis.DefaultEVMParams
 
+// ConfigHistory resolves the full configuration an installed EVM assignment's certificates commit to. It
+// is backed by assignments the node installed from verified committed handoffs, never by a peer.
+type ConfigHistory interface {
+	ConfigByHash(hash []byte) (*types.PartitionDescriptionRecord, bool)
+}
+
 // DeploymentConfig is the node's own configuration. None of it comes from the store, a certificate or a peer.
 type DeploymentConfig struct {
 	// Shard is the full shard configuration the node runs, carrying seal_registry_genesis.
@@ -52,6 +58,13 @@ type DeploymentConfig struct {
 	EVM       EVMParams
 	// ExpectedGenesisHash, when set, is the operator's independent statement of the EVM genesis hash.
 	ExpectedGenesisHash []byte
+	// Layout is the registry layout of the deployment: zero or 1 is the historical sealRegistry/v1, 2 the
+	// assignment-aware registry. Shard is always the GENESIS configuration: its hash is the registry's
+	// immutable config.shardConfHash, and G is regenerated from it, whichever EVM assignment is active.
+	Layout uint64
+	// Configs resolves the configuration of a certificate that is not the genesis assignment's. It may be
+	// nil for a deployment whose assignment never changed.
+	Configs ConfigHistory
 }
 
 // Deployment is the checked configuration. It is opaque, and every accessor returns a copy.
@@ -60,6 +73,7 @@ type Deployment struct {
 }
 
 type deployment struct {
+	configs      ConfigHistory
 	store        certifiedstore.Context
 	genesisState common.Hash
 	genesisProof registryproof.Evidence
@@ -90,7 +104,7 @@ func NewDeployment(ctx context.Context, cfg DeploymentConfig, executor shardnode
 		return Deployment{}, ErrNotSealRegistryDeployment
 	}
 
-	art, err := registrygenesis.PinnedArtifact()
+	art, err := registrygenesis.PinnedArtifactForLayout(cfg.Layout)
 	if err != nil {
 		return Deployment{}, fmt.Errorf("%w: pinned registry artifact: %w", ErrDeploymentConfig, err)
 	}
@@ -131,10 +145,12 @@ func NewDeployment(ctx context.Context, cfg DeploymentConfig, executor shardnode
 		return Deployment{}, fmt.Errorf("%w: the expected genesis hash is %x, configuration generates %s", ErrExecutorGenesis, cfg.ExpectedGenesisHash, g.EVMGenesisHash())
 	}
 
+	genesisPDR := cfg.Shard
 	return Deployment{d: &deployment{
+		configs: cfg.Configs,
 		store: certifiedstore.Context{
 			NetworkID: cfg.Shard.NetworkID, PartitionID: cfg.Shard.PartitionID, ShardID: cfg.Shard.ShardID,
-			FullShardConfHash: full.Bytes(), Registry: g.ProofContext(), TrustBases: cfg.TrustBases,
+			FullShardConfHash: full.Bytes(), GenesisPDR: genesisPDR, Registry: g.ProofContext(), TrustBases: cfg.TrustBases,
 		},
 		genesisState: g.StateRoot(), genesisProof: g.Evidence(),
 	}}, nil
@@ -148,6 +164,27 @@ func (d Deployment) StoreContext() certifiedstore.Context {
 	c := d.d.store
 	c.FullShardConfHash = bytes.Clone(c.FullShardConfHash)
 	return c
+}
+
+// ErrConfigUnavailable reports a certificate of an assignment this node has no installed configuration for.
+// A record for it cannot be validated, so it is never published.
+var ErrConfigUnavailable = errors.New("recordwiring: no installed configuration for the certificate's assignment")
+
+// RecordConfig returns the configuration PDR a certified-block record for a certificate carrying confHash must
+// carry: nil for the genesis assignment (a version 1 record), the installed assignment's PDR otherwise.
+func (d Deployment) RecordConfig(confHash []byte) (*types.PartitionDescriptionRecord, error) {
+	if !d.Valid() {
+		return nil, ErrConfigUnavailable
+	}
+	if bytes.Equal(confHash, d.d.store.FullShardConfHash) {
+		return nil, nil
+	}
+	if d.d.configs != nil {
+		if pdr, ok := d.d.configs.ConfigByHash(confHash); ok && pdr != nil {
+			return pdr, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: %x", ErrConfigUnavailable, confHash)
 }
 
 // ProofContext is the context for verifying registry witnesses.

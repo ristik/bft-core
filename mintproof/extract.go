@@ -2,6 +2,7 @@ package mintproof
 
 import (
 	"bytes"
+	"crypto"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -12,12 +13,44 @@ import (
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/archivewiring"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 type ExtractRequest struct {
 	Archive           archive.Request
 	Absence           bool
 	TxIndex, LogIndex uint64
+	// ConfigPDR, when set, makes ExtractV2 write a PDR-carrying bundle. It is the full configuration the
+	// record's resulting UC commits to; the archive namespace itself stays anchored to the immutable
+	// deployment identity.
+	ConfigPDR *types.PartitionDescriptionRecord
+}
+
+// ExtractV2 is Extract for a deployment whose EVM assignment has changed: the bundle carries the full
+// PDR of the record's own resulting UC. The archive keeps that original resulting evidence for a block
+// certified before an assignment; extraction never substitutes a later recertification or assignment.
+func ExtractV2(store *archive.Store, request ExtractRequest) (MintReasonBundleV2, error) {
+	if request.ConfigPDR == nil {
+		return MintReasonBundleV2{}, fmt.Errorf("%w: no configuration PDR for the record's certificate", ErrUnavailable)
+	}
+	v1, err := Extract(store, request)
+	if err != nil {
+		return MintReasonBundleV2{}, err
+	}
+	var uc types.UnicityCertificate
+	if err := types.Cbor.Unmarshal(v1.SubjectUC, &uc); err != nil {
+		return MintReasonBundleV2{}, ErrInvalid
+	}
+	hash, err := request.ConfigPDR.Hash(crypto.SHA256)
+	if err != nil || !bytes.Equal(hash, uc.ShardConfHash) {
+		return MintReasonBundleV2{}, fmt.Errorf("%w: the supplied PDR is not the configuration of the record's certificate", ErrInvalid)
+	}
+	raw, err := types.Cbor.Marshal(request.ConfigPDR)
+	if err != nil {
+		return MintReasonBundleV2{}, err
+	}
+	v1.Context.ShardConf = [32]byte(hash)
+	return MintReasonBundleV2{MintReasonBundleV1: v1, ConfigPDR: raw}, nil
 }
 
 // Extract reads only the immutable receipt-complete archive namespace. It

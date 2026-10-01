@@ -1,0 +1,136 @@
+{
+  "description": "H3 EVM assignment vectors (bft-core evmassign); regenerate with go test ./evmassign -run TestVectors -update-vectors",
+  "privateKeys": {
+    "validator-a": "0101010101010101010101010101010101010101010101010101010101010101",
+    "validator-b": "0202020202020202020202020202020202020202020202020202020202020202",
+    "validator-c": "0303030303030303030303030303030303030303030303030303030303030303"
+  },
+  "popContext": {
+    "attempt": 1,
+    "network": 5,
+    "parent": "2222222222222222222222222222222222222222222222222222222222222222",
+    "predecessor": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "hashes": {
+    "activatedPDRHash": "5df8acaa8e7bae718001ba16730ff9700690a32fa8f7cbee42338a88b6cd068e",
+    "assignmentHash": "81dabfff06a4b940ef69b2cccbe3b6e34090a649fbcfc74339f38f176f220362",
+    "candidateDigest": "22a1d2d1a9ffb5599cc243c87a41f7465100d2abc43d2762583d5f89ccdd6de8",
+    "configHash": "ec3d776a5e187e563469f0fba5593d6e20a8dc17395c7a24b6563fe5e7993482",
+    "installedPDRHash": "4358b60b470331af631210066381419959387da035bc2d274ed06933d6bf6ebb"
+  },
+  "messages": {
+    "validator-a": "8a781d554e49434954595f48335f45564d5f41535349474e4d454e545f504f500105084180582081dabfff06a4b940ef69b2cccbe3b6e34090a649fbcfc74339f38f176f2203625820111111111111111111111111111111111111111111111111111111111111111101582022222222222222222222222222222222222222222222222222222222222222226b76616c696461746f722d61",
+    "validator-b": "8a781d554e49434954595f48335f45564d5f41535349474e4d454e545f504f500105084180582081dabfff06a4b940ef69b2cccbe3b6e34090a649fbcfc74339f38f176f2203625820111111111111111111111111111111111111111111111111111111111111111101582022222222222222222222222222222222222222222222222222222222222222226b76616c696461746f722d62",
+    "validator-c": "8a781d554e49434954595f48335f45564d5f41535349474e4d454e545f504f500105084180582081dabfff06a4b940ef69b2cccbe3b6e34090a649fbcfc74339f38f176f2203625820111111111111111111111111111111111111111111111111111111111111111101582022222222222222222222222222222222222222222222222222222222222222226b76616c696461746f722d63"
+  },
+  "popSignatures": {
+    "validator-a": "ad3ea6611b30d837c3994bbde2d812b12b98ecc28b8175d39be1bc13cbdbb6471204dccb504765467bc63267c6cad979baeabf9725a77efc6ef17aedac68d5b800",
+    "validator-b": "fa9044183acea3a35e0f504b0382b04521be17e89a2cc7e67e47b9d60b79f71f553303ee360237ff9975715bd43aa045d901fc03689b85958a6fc24eb2ecc23800",
+    "validator-c": "bf0e0ecb37a654c877308f5eb7c15ca8a13a87d788da1e26ac6a61642e47f38a60a160221c2280599a2f5ee2f044e634987956d5df3693affe5fa18bd42acd6700"
+  },
+  "candidate": "827823554e49434954595f48335f45564d5f41535349474e4d454e545f43414e4449444154458b0205582011111111111111111111111111111111111111111111111111111111111111110158202222222222222222222222222222222222222222222222222222222222222222828366726f6f742d615821020202020202020202020202020202020202020202020202020202020202020202018366726f6f742d625821030303030303030303030303030303030303030303030303030303030303030303010058204358b60b470331af631210066381419959387da035bc2d274ed06933d6bf6ebb590117d998608f010508418008f608190100f61b000000012a05f200f6a268636861696e5f69646431333337757365616c5f72656769737472795f67656e65736973784037623864336334613166326535643663396230613866376536643563346233613239313830376636653564346333623261313930383766366535643463336232010083836b76616c696461746f722d615821031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f01836b76616c696461746f722d625821024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d076601836b76616c696461746f722d63582102531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe3370183836b76616c696461746f722d615821031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f5841ad3ea6611b30d837c3994bbde2d812b12b98ecc28b8175d39be1bc13cbdbb6471204dccb504765467bc63267c6cad979baeabf9725a77efc6ef17aedac68d5b800836b76616c696461746f722d625821024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d07665841fa9044183acea3a35e0f504b0382b04521be17e89a2cc7e67e47b9d60b79f71f553303ee360237ff9975715bd43aa045d901fc03689b85958a6fc24eb2ecc23800836b76616c696461746f722d63582102531fe6068134503d2723133227c867ac8fa6c83c537e9a44c3c5bdbdcb1fe3375841bf0e0ecb37a654c877308f5eb7c15ca8a13a87d788da1e26ac6a61642e47f38a60a160221c2280599a2f5ee2f044e634987956d5df3693affe5fa18bd42acd6700f6",
+  "chainCommit": {
+    "oneStep": "ac6176e0e7764867dadd1a4972b984b3604cc98e143270ff43dd062b4bdac06d",
+    "twoSteps": "1559e989a13201b1b81ef174c55ee031fedf0d475d177784664664304d31e87d"
+  },
+  "negativeMutations": [
+    {
+      "name": "network",
+      "mutates": "assignment hash input network",
+      "refusal": "ErrContext (candidate) / PoP verification failure",
+      "firstCheck": "VerifyBinding network",
+      "isolation": "re-signed PoPs; one field changed"
+    },
+    {
+      "name": "predecessor",
+      "mutates": "PoP context predecessor",
+      "refusal": "ErrPoP",
+      "firstCheck": "VerifyPoPs",
+      "isolation": "assignment unchanged"
+    },
+    {
+      "name": "attempt",
+      "mutates": "PoP context attempt (replay)",
+      "refusal": "ErrPoP",
+      "firstCheck": "VerifyPoPs",
+      "isolation": "assignment unchanged"
+    },
+    {
+      "name": "parent",
+      "mutates": "PoP context frozen parent",
+      "refusal": "ErrPoP",
+      "firstCheck": "VerifyPoPs",
+      "isolation": "assignment unchanged"
+    },
+    {
+      "name": "key",
+      "mutates": "one validator key",
+      "refusal": "ErrPoP (message and key bound)",
+      "firstCheck": "VerifyPoPs",
+      "isolation": "other validators' proofs valid"
+    },
+    {
+      "name": "weight",
+      "mutates": "a validator stake != 1",
+      "refusal": "ErrAssignment",
+      "firstCheck": "ValidateAssignment/IsValid",
+      "isolation": "otherwise valid"
+    },
+    {
+      "name": "config",
+      "mutates": "any non-membership PDR field",
+      "refusal": "ErrConfig",
+      "firstCheck": "ValidateSuccessor",
+      "isolation": "PoPs re-signed over the changed assignment"
+    },
+    {
+      "name": "epoch",
+      "mutates": "successor epoch != installed+1",
+      "refusal": "ErrEpoch",
+      "firstCheck": "ValidateSuccessor",
+      "isolation": "PoPs re-signed"
+    },
+    {
+      "name": "popMissing",
+      "mutates": "one proof removed",
+      "refusal": "ErrPoP",
+      "firstCheck": "VerifyPoPs",
+      "isolation": "assignment valid"
+    },
+    {
+      "name": "popRecovery",
+      "mutates": "recovery byte flipped",
+      "refusal": "ErrPoP",
+      "firstCheck": "VerifyPoPs",
+      "isolation": "signature otherwise valid"
+    },
+    {
+      "name": "rootMembers",
+      "mutates": "successor root members differ from the body",
+      "refusal": "ErrContext",
+      "firstCheck": "VerifyBinding",
+      "isolation": "assignment valid"
+    },
+    {
+      "name": "combined",
+      "mutates": "root members changed with an assignment",
+      "refusal": "ErrCombined",
+      "firstCheck": "VerifyBinding",
+      "isolation": "assignment valid"
+    },
+    {
+      "name": "installedEpoch",
+      "mutates": "OldShardEpoch != installed",
+      "refusal": "ErrContext",
+      "firstCheck": "VerifyInstalled",
+      "isolation": "assignment valid"
+    },
+    {
+      "name": "installedHash",
+      "mutates": "OldActiveHash != installed full hash",
+      "refusal": "ErrContext",
+      "firstCheck": "VerifyInstalled",
+      "isolation": "assignment valid"
+    }
+  ]
+}

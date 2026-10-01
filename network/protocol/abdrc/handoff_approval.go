@@ -17,4 +17,8 @@ type HandoffApprovalMsg struct {
 	Signer          string
 	Signature       hex.Bytes
 	AbortSignature  hex.Bytes
+	// CandidatePreimage is the canonical H3 EVM assignment candidate whose
+	// digest is Candidate. It is empty for a root-only plan, and then Candidate
+	// is the legacy operator candidate hash.
+	CandidatePreimage []byte
 }

@@ -23,24 +23,40 @@ import (
 
 type emptyRootOrchestration struct{}
 
+// rootOnlyStep is a root-only handoff of an installed configuration the tests do not inspect.
+var rootOnlyStep = handoff.AssignmentStep{OldActiveConfHash: [32]byte{9}, NewActiveConfHash: [32]byte{9}}
+
 func TestEVMTransitionSharedVector(t *testing.T) {
+	// The same bytes Ureth's decoder pins (ristik/ureth crates/unicity/execution/testdata/evm-transition-v3.json).
 	var vector struct {
-		Encoded  string `json:"encoded"`
-		OldEpoch uint64 `json:"oldEpoch"`
-		NewEpoch uint64 `json:"newEpoch"`
-		Ack      struct {
+		Encoded                string `json:"encoded"`
+		OldRootEpoch           uint64 `json:"oldRootEpoch"`
+		NewRootEpoch           uint64 `json:"newRootEpoch"`
+		OldShardEpoch          uint64 `json:"oldShardEpoch"`
+		NewShardEpoch          uint64 `json:"newShardEpoch"`
+		OldActiveConfHash      string `json:"oldActiveConfHash"`
+		NewActiveConfHash      string `json:"newActiveConfHash"`
+		SupersessionSpan       uint64 `json:"supersessionSpan"`
+		SupersessionCommitment string `json:"supersessionCommitment"`
+		Ack                    struct {
 			EVMRound uint64 `json:"evmRound"`
 		} `json:"ack"`
 	}
-	raw, err := os.ReadFile("testdata/evm-transition-v1.json")
+	raw, err := os.ReadFile("testdata/evm-transition-v3.json")
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(raw, &vector))
 	encoded, err := stdhex.DecodeString(strings.TrimPrefix(vector.Encoded, "0x"))
 	require.NoError(t, err)
 	got, err := handoff.DecodeEVMTransition(encoded)
 	require.NoError(t, err)
-	require.Equal(t, vector.OldEpoch, got.OldEpoch)
-	require.Equal(t, vector.NewEpoch, got.NewEpoch)
+	require.Equal(t, vector.OldRootEpoch, got.OldRootEpoch)
+	require.Equal(t, vector.NewRootEpoch, got.NewRootEpoch)
+	require.Equal(t, vector.OldShardEpoch, got.OldShardEpoch)
+	require.Equal(t, vector.NewShardEpoch, got.NewShardEpoch)
+	require.Equal(t, "0x"+stdhex.EncodeToString(got.OldActiveConfHash[:]), vector.OldActiveConfHash)
+	require.Equal(t, "0x"+stdhex.EncodeToString(got.NewActiveConfHash[:]), vector.NewActiveConfHash)
+	require.Equal(t, vector.SupersessionSpan, got.SupersessionSpan)
+	require.Equal(t, "0x"+stdhex.EncodeToString(got.SupersessionCommitment[:]), vector.SupersessionCommitment)
 	require.Equal(t, vector.Ack.EVMRound, got.Ack.EVMRound)
 	reencoded, err := got.Encode()
 	require.NoError(t, err)
@@ -221,7 +237,7 @@ func TestInstalledEVMTransitionBindsCommittedFrozenParent(t *testing.T) {
 		CommitSealRound: v.CommitSealRound, Epoch: v.SignerEpoch, Record: p.Record}, body)
 	require.NoError(t, err)
 	a := &rctypes.EpochAnchor{GenesisID: g.ID(), Epoch: g.Epoch, Slot: g.Start - 1, StateRoot: v.StateRoot[:]}
-	transition, err := handoff.TransitionFromInstalledAnchor(p, tb, body, a, successorTR)
+	transition, err := handoff.TransitionFromInstalledAnchor(p, tb, body, a, successorTR, rootOnlyStep)
 	require.NoError(t, err)
 	require.Equal(t, successorTR.Round, transition.Ack.EVMRound)
 	require.Equal(t, p.Control.FrozenParent, transition.Ack.FrozenParent[:])
@@ -232,14 +248,14 @@ func TestInstalledEVMTransitionBindsCommittedFrozenParent(t *testing.T) {
 	require.Equal(t, transition, decoded)
 	bad := *a
 	bad.GenesisID = bytes.Repeat([]byte{0x55}, 32)
-	_, err = handoff.TransitionFromInstalledAnchor(p, tb, body, &bad, successorTR)
+	_, err = handoff.TransitionFromInstalledAnchor(p, tb, body, &bad, successorTR, rootOnlyStep)
 	require.ErrorIs(t, err, handoff.ErrProof)
 	badTR := successorTR
 	badTR.Round++
-	_, err = handoff.TransitionFromInstalledAnchor(p, tb, body, a, badTR)
+	_, err = handoff.TransitionFromInstalledAnchor(p, tb, body, a, badTR, rootOnlyStep)
 	require.ErrorIs(t, err, handoff.ErrProof)
 	p.Control.FrozenParent[0] ^= 1
-	_, err = handoff.TransitionFromInstalledAnchor(p, tb, body, a, successorTR)
+	_, err = handoff.TransitionFromInstalledAnchor(p, tb, body, a, successorTR, rootOnlyStep)
 	require.ErrorIs(t, err, handoff.ErrProof)
 }
 

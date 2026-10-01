@@ -8,11 +8,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	"github.com/unicitynetwork/bft-core/internal/testutils/observability"
@@ -270,4 +275,36 @@ func doRequest(t *testing.T, hf http.HandlerFunc, method, path string) (*http.Re
 	responseBody, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 	return res, responseBody
+}
+
+// The handoff profile's guards are on before the local shard configurations load: a restart with a wrong-key EVM genesis
+// file is refused instead of replacing the stored history.
+func TestLoadShardConfsEnablesTheHandoffProfileFirst(t *testing.T) {
+	newConf := func() *types.PartitionDescriptionRecord {
+		signer, err := abcrypto.NewInMemorySecp256K1Signer()
+		require.NoError(t, err)
+		verifier, err := signer.Verifier()
+		require.NoError(t, err)
+		pub, err := verifier.MarshalPublicKey()
+		require.NoError(t, err)
+		return &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: evmassign.EVMPartitionTypeID,
+			UnitIDLen: 256, TypeIDLen: 32, T2Timeout: 2500 * time.Millisecond, EpochStart: 1,
+			Validators: []*types.NodeInfo{{NodeID: "16Uiu2HAmRfQpGuuCgV22ndLtYGpdJcfUKtNJwD79nJ9tCZ8cfjFr", SigKey: pub, Stake: 1}}}
+	}
+	genesis, wrongKey := newConf(), newConf()
+	path := filepath.Join(t.TempDir(), "orchestration.db")
+	open := func() *partitions.Orchestration {
+		o, err := partitions.NewOrchestration(5, path, logger.New(t))
+		require.NoError(t, err)
+		return o
+	}
+	first := open()
+	require.NoError(t, loadShardConfs(first, true, []*types.PartitionDescriptionRecord{genesis}))
+	require.NoError(t, first.Close())
+
+	restarted := open()
+	t.Cleanup(func() { _ = restarted.Close() })
+	require.NoError(t, loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{genesis}), "the same genesis file restarts")
+	err := loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{wrongKey})
+	require.ErrorIs(t, err, partitions.ErrDerivedConflict, "a wrong-key genesis file is refused under the handoff profile")
 }

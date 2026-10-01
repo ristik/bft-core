@@ -207,10 +207,8 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err != nil {
 		return fmt.Errorf("failed to load shard confs: %w", err)
 	}
-	for _, shardConf := range shardConfs {
-		if err := orchestration.AddShardConfig(shardConf); err != nil {
-			return fmt.Errorf("failed to add shard conf for partition: %d, %w", shardConf.PartitionID, err)
-		}
+	if err := loadShardConfs(orchestration, flags.Profile2, shardConfs); err != nil {
+		return err
 	}
 
 	signer, err := keyConf.Signer()
@@ -288,7 +286,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 				if fetchErr != nil {
 					continue
 				}
-				if _, installErr := cm.InstallEpochGenesis(bundle.Proof, bundle.Snapshot, bundle.Body); installErr != nil {
+				if _, installErr := cm.InstallEpochBundle(bundle); installErr != nil {
 					return fmt.Errorf("install handoff epoch %d: %w", epoch, installErr)
 				}
 				installed = true
@@ -330,6 +328,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if flags.Profile2 {
 			mux.HandleFunc("POST /api/v1/handoff/plan", rootHandoffPlanHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/endorse", rootHandoffEndorseHandler(cm))
+			mux.HandleFunc("POST /api/v1/handoff/evm-assignment/context", rootHandoffEVMContextHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/abort", rootHandoffAbortHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/abort/status", rootHandoffAbortStatusHandler(cm))
 		}
@@ -571,4 +570,19 @@ func getRoundInfoHandler(getState func() (*abdrc.StateMsg, error), obs Observabi
 			obs.Logger().Warn(fmt.Sprintf("GET roundInfo request: failed to write response: %v", err))
 		}
 	}
+}
+
+// loadShardConfs installs the locally configured shard configurations. Under the handoff profile the profile's guards
+// must already be on: they are the only thing refusing a local EVM entry that differs from the stored genesis one (a
+// wrong-key file would otherwise silently replace the history every derived assignment extends).
+func loadShardConfs(orchestration *partitions.Orchestration, handoffProfile bool, shardConfs []*types.PartitionDescriptionRecord) error {
+	if handoffProfile {
+		orchestration.EnableHandoffProfile()
+	}
+	for _, shardConf := range shardConfs {
+		if err := orchestration.AddShardConfig(shardConf); err != nil {
+			return fmt.Errorf("failed to add shard conf for partition: %d, %w", shardConf.PartitionID, err)
+		}
+	}
+	return nil
 }

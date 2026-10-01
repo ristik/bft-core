@@ -66,3 +66,48 @@ func TestVerifyNativeBundleGuards(t *testing.T) {
 		require.ErrorIs(t, err, ErrBundle)
 	})
 }
+
+func TestBundleCandidateMustMatchTheSuccessorBodyAndCodecsAreStrict(t *testing.T) {
+	f := handoffbundle.New(t)
+	base := Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot}
+	withCandidate := base
+	withCandidate.Candidate = []byte("not the candidate the body binds")
+	_, err := Verify(withCandidate, f.Old, f.Partition, f.Shard, f.ConfHash)
+	require.ErrorIs(t, err, ErrBundle)
+	require.ErrorContains(t, err, "candidate does not match the successor body")
+
+	legacy, err := EncodeBundle(base)
+	require.NoError(t, err)
+	got, err := DecodeBundle(legacy)
+	require.NoError(t, err)
+	require.Empty(t, got.Candidate)
+	current, err := EncodeBundle(withCandidate)
+	require.NoError(t, err)
+	got, err = DecodeBundle(current)
+	require.NoError(t, err)
+	require.Equal(t, withCandidate.Candidate, got.Candidate)
+	require.NotEqual(t, legacy, current)
+	// The four-element shape with an empty candidate is a second encoding of the legacy value: refused.
+	raw, err := types.Cbor.Marshal(base)
+	require.NoError(t, err)
+	_, err = DecodeBundle(raw)
+	require.ErrorIs(t, err, ErrBundle)
+	_, err = DecodeBundle(append(legacy, 0))
+	require.ErrorIs(t, err, ErrBundle)
+}
+
+// A byzantine root cannot strip the candidate from an EVM assignment step: the successor body binds the candidate digest,
+// so the bundle without it is refused by Verify itself, before anything is persisted.
+func TestVerifyRequiresTheCandidateTheBodyBinds(t *testing.T) {
+	preimage := []byte("an assignment candidate the successor body binds")
+	f := handoffbundle.NewBound(t, preimage)
+	stripped := Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot}
+	_, err := Verify(stripped, f.Old, f.Partition, f.Shard, f.ConfHash)
+	require.ErrorIs(t, err, ErrBundle)
+	require.ErrorContains(t, err, "change record")
+	// With the preimage the change record matches; the failure is then the preimage itself, not the binding.
+	stripped.Candidate = preimage
+	_, err = Verify(stripped, f.Old, f.Partition, f.Shard, f.ConfHash)
+	require.ErrorIs(t, err, ErrBundle)
+	require.NotContains(t, err.Error(), "change record")
+}

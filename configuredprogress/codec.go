@@ -172,7 +172,7 @@ func descriptorFor(o registrygenesis.GenesisOrigin) (descriptorWire, error) {
 	}
 	r := o.Record()
 	pc := o.ProofContext()
-	return descriptorWire{Version: FormatVersion, OriginIdentity: o.Identity().Bytes(), ExecutionConfigIdentity: o.ExecutionConfigIdentity().Bytes(), Context: descriptorContextWire{NetworkID: r.NetworkID, PartitionID: r.PartitionID, ShardID: bytes.Clone(r.ShardID), FullConf: o.FullShardConfHash().Bytes(), RegistryAddress: pc.RegistryAddress.Bytes(), RegistryCodeHash: pc.RegistryCodeHash.Bytes(), GenesisCommitment: pc.GenesisCommitment.Bytes(), ShardEpoch: pc.ShardEpoch, RootEpoch: pc.RootEpoch}, B0: o.BlockHash().Bytes(), S0: o.StateRoot().Bytes(), RootInputVersion: evmroot.ProfileVersionV2, RegistryLayoutVersion: registryproof.LayoutVersion}, nil
+	return descriptorWire{Version: FormatVersion, OriginIdentity: o.Identity().Bytes(), ExecutionConfigIdentity: o.ExecutionConfigIdentity().Bytes(), Context: descriptorContextWire{NetworkID: r.NetworkID, PartitionID: r.PartitionID, ShardID: bytes.Clone(r.ShardID), FullConf: o.FullShardConfHash().Bytes(), RegistryAddress: pc.RegistryAddress.Bytes(), RegistryCodeHash: pc.RegistryCodeHash.Bytes(), GenesisCommitment: pc.GenesisCommitment.Bytes(), ShardEpoch: pc.ShardEpoch, RootEpoch: pc.RootEpoch}, B0: o.BlockHash().Bytes(), S0: o.StateRoot().Bytes(), RootInputVersion: evmroot.ProfileVersionV2, RegistryLayoutVersion: layoutVersionOf(pc)}, nil
 }
 
 func encodeDescriptor(o registrygenesis.GenesisOrigin, identity ...[32]byte) ([]byte, [32]byte, error) {
@@ -261,4 +261,12 @@ func validRecordKey(k []byte) bool {
 }
 func recordKey(round uint64, h common.Hash) []byte {
 	return []byte(fmt.Sprintf("record/%020d/%064x", round, h[:]))
+}
+
+// layoutVersionOf is the registry layout a deployment's proof context pins; zero is the historical layout 1.
+func layoutVersionOf(pc registryproof.Context) uint64 {
+	if pc.Layout == 0 {
+		return registryproof.LayoutVersion
+	}
+	return pc.Layout
 }
