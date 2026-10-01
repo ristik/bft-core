@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
@@ -34,10 +35,12 @@ type ArchiveRestore struct {
 	Replicas      [2]peer.ID
 	Host          shardnode.EvidenceHost
 	Limits        Limits
-	Adapter       RestoreExecutor
-	Genesis       shardnode.BlockRef
-	TipUC         *types.UnicityCertificate
-	TipTR         *certification.TechnicalRecord
+	// Retry bounds the wait for a replica that cannot serve a record right now (zero value: DefaultFetchRetry).
+	Retry   FetchRetry
+	Adapter RestoreExecutor
+	Genesis shardnode.BlockRef
+	TipUC   *types.UnicityCertificate
+	TipTR   *certification.TechnicalRecord
 }
 
 // SingleEpochRestore is kept for callers of the original single-epoch route.
@@ -118,7 +121,7 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		}
 		q, rec, result, _, header, err := r.fetchChecked(ctx, current)
 		if err != nil {
-			return fmt.Errorf("%w: block %x: %v", ErrRestore, current, err)
+			return fmt.Errorf("%w: block %x: %w", ErrRestore, current, err)
 		}
 		if len(reverse) == 0 && !r.matchesTip(result) {
 			return fmt.Errorf("%w: selected record does not match pinned tip state", ErrRestore)
@@ -300,19 +303,34 @@ func (r *ArchiveRestore) verifiedRestoreRecord(ctx context.Context, q archive.Re
 			return rec, original, originalTR, result, resultTR, header, nil
 		}
 	}
-	for _, id := range r.Replicas {
-		rec, err := Fetch(ctx, r.Host, id, q, r.Limits)
-		if err != nil {
-			continue
+	var (
+		gotRec                  *archive.Record
+		gotOriginal, gotResult  *types.UnicityCertificate
+		gotOriginalTR, gotResTR *certification.TechnicalRecord
+		gotHeader               *gethtypes.Header
+	)
+	err := r.retryFetch(ctx, fmt.Sprintf("restored observation body %x", q.BlockHash), func() (bool, error) {
+		transient := false
+		for _, id := range r.Replicas {
+			rec, err := Fetch(ctx, r.Host, id, q, r.Limits)
+			if err != nil {
+				transient = transient || transientFetchError(ctx, err)
+				continue
+			}
+			original, originalTR, result, resultTR, header, checkErr := check(rec)
+			if checkErr != nil {
+				continue
+			}
+			_ = r.Archive.Put(q, rec) // a stale/corrupt local copy must not hide a verified replica.
+			gotRec, gotOriginal, gotOriginalTR, gotResult, gotResTR, gotHeader = rec, original, originalTR, result, resultTR, header
+			return false, nil
 		}
-		original, originalTR, result, resultTR, header, checkErr := check(rec)
-		if checkErr != nil {
-			continue
-		}
-		_ = r.Archive.Put(q, rec) // a stale/corrupt local copy must not hide a verified replica.
-		return rec, original, originalTR, result, resultTR, header, nil
+		return transient, archive.ErrUnavailable
+	})
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, err
 	}
-	return nil, nil, nil, nil, nil, nil, archive.ErrUnavailable
+	return gotRec, gotOriginal, gotOriginalTR, gotResult, gotResTR, gotHeader, nil
 }
 
 func sameBlockRef(a, b shardnode.BlockRef) bool {
@@ -344,6 +362,60 @@ func (r *ArchiveRestore) matchesTip(result *types.UnicityCertificate) bool {
 	return true
 }
 
+// FetchRetry bounds how long a restore waits for archive replicas that cannot serve a record at the
+// moment, for example because the source validators' global archive stream limit is reached while
+// they catch replicas up. Only fetch failures are retried; a record that was delivered and failed
+// verification is never retried and never accepted.
+type FetchRetry struct {
+	Initial time.Duration // first backoff
+	Max     time.Duration // backoff ceiling
+	Total   time.Duration // total wait before the restore fails with archive.ErrUnavailable
+}
+
+// DefaultFetchRetry waits up to 150s per record (the restore lanes allow 180s end to end).
+var DefaultFetchRetry = FetchRetry{Initial: 200 * time.Millisecond, Max: 5 * time.Second, Total: 150 * time.Second}
+
+func (p FetchRetry) orDefault() FetchRetry {
+	if p == (FetchRetry{}) {
+		return DefaultFetchRetry
+	}
+	return p
+}
+
+// retryFetch runs attempt until it succeeds, reports a non-transient failure, or the total wait is
+// spent. attempt reports transient=true only when a replica could not deliver (stream reset, limit,
+// transport error, not-found); verification failures are not transient.
+func (r *ArchiveRestore) retryFetch(ctx context.Context, what string, attempt func() (transient bool, err error)) error {
+	policy := r.Retry.orDefault()
+	started := time.Now()
+	delay := policy.Initial
+	for tries := 1; ; tries++ {
+		transient, err := attempt()
+		if err == nil || !transient {
+			return err
+		}
+		remaining := policy.Total - time.Since(started)
+		if remaining <= 0 {
+			return fmt.Errorf("%w: %s still unavailable from both replicas after %d attempts over %s (replicas saturated or missing the record)",
+				archive.ErrUnavailable, what, tries, policy.Total)
+		}
+		wait := min(delay, remaining)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		delay = min(delay*2, policy.Max)
+	}
+}
+
+// transientFetchError reports whether a failed replica fetch may succeed later.
+func transientFetchError(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() == nil && !errors.Is(err, archive.ErrInvalid)
+}
+
 func (r *ArchiveRestore) findTarget(ctx context.Context) ([32]byte, error) {
 	if len(r.TipUC.InputRecord.BlockHash) == 32 {
 		var hash [32]byte
@@ -351,24 +423,51 @@ func (r *ArchiveRestore) findTarget(ctx context.Context) ([32]byte, error) {
 		return hash, nil
 	}
 	query := archive.RoundRequest{Context: r.Subject, Round: r.TipUC.InputRecord.RoundNumber}
-	for _, id := range r.Replicas {
-		q, rec, err := FetchLatest(ctx, r.Host, id, query, r.Limits)
-		if err != nil {
-			continue
+	var found [32]byte
+	err := r.retryFetch(ctx, "quiet-tip record", func() (bool, error) {
+		transient := false
+		for _, id := range r.Replicas {
+			q, rec, err := FetchLatest(ctx, r.Host, id, query, r.Limits)
+			if err != nil {
+				transient = transient || transientFetchError(ctx, err)
+				continue
+			}
+			result, _, err := r.checkRecord(q, rec)
+			if err == nil && r.matchesTip(result) {
+				found = q.BlockHash
+				return false, nil
+			}
 		}
-		result, _, err := r.checkRecord(q, rec)
-		if err == nil && r.matchesTip(result) {
-			return q.BlockHash, nil
+		return transient, archive.ErrUnavailable
+	})
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return [32]byte{}, err
 		}
+		return [32]byte{}, fmt.Errorf("%w: neither replica supplied a certified record matching the quiet tip state: %w", ErrRestore, err)
 	}
-	return [32]byte{}, fmt.Errorf("%w: neither replica supplied a certified record matching the quiet tip state", ErrRestore)
+	return found, nil
 }
 
-func (r *ArchiveRestore) fetchChecked(ctx context.Context, hash [32]byte) (archive.Request, *archive.Record, *types.UnicityCertificate, *certification.TechnicalRecord, *gethtypes.Header, error) {
+func (r *ArchiveRestore) fetchChecked(ctx context.Context, hash [32]byte) (q archive.Request, rec *archive.Record, uc *types.UnicityCertificate, tr *certification.TechnicalRecord, header *gethtypes.Header, err error) {
+	err = r.retryFetch(ctx, fmt.Sprintf("archive record %x", hash), func() (bool, error) {
+		var transient bool
+		q, rec, uc, tr, header, transient, err = r.fetchCheckedOnce(ctx, hash)
+		return transient, err
+	})
+	if err != nil {
+		return archive.Request{}, nil, nil, nil, nil, err
+	}
+	return q, rec, uc, tr, header, nil
+}
+
+func (r *ArchiveRestore) fetchCheckedOnce(ctx context.Context, hash [32]byte) (archive.Request, *archive.Record, *types.UnicityCertificate, *certification.TechnicalRecord, *gethtypes.Header, bool, error) {
 	q := archive.Request{Context: r.Subject, BlockHash: hash}
+	transient := false
 	for _, id := range r.Replicas {
 		rec, err := Fetch(ctx, r.Host, id, q, r.Limits)
 		if err != nil {
+			transient = transient || transientFetchError(ctx, err)
 			continue
 		}
 		if !archive.HasReceiptList(rec) {
@@ -401,11 +500,11 @@ func (r *ArchiveRestore) fetchChecked(ctx context.Context, hash [32]byte) (archi
 		if err == nil {
 			var header gethtypes.Header
 			if err = rlp.DecodeBytes(rec.Header, &header); err == nil {
-				return q, rec, uc, tr, &header, nil
+				return q, rec, uc, tr, &header, false, nil
 			}
 		}
 	}
-	return archive.Request{}, nil, nil, nil, nil, archive.ErrUnavailable
+	return archive.Request{}, nil, nil, nil, nil, transient, archive.ErrUnavailable
 }
 
 func (r *ArchiveRestore) checkRecord(q archive.Request, rec *archive.Record) (*types.UnicityCertificate, *certification.TechnicalRecord, error) {
