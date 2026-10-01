@@ -138,7 +138,7 @@ func (o GenesisOrigin) ProofContext() registryproof.Context {
 	commitment, _ := o.record.Commitment()
 	return registryproof.Context{RegistryAddress: o.pins.RegistryAddress, RegistryCodeHash: o.pins.RegistryCodeHash,
 		GenesisCommitment: commitment, FullShardConfHash: o.full, ShardEpoch: o.record.ShardEpoch,
-		RootEpoch: o.record.RootEpoch, EVMGenesisHash: o.block}
+		RootEpoch: o.record.RootEpoch, EVMGenesisHash: o.block, Layout: o.record.Layout}
 }
 func (o GenesisOrigin) Evidence() registryproof.Evidence { return cloneEvidence(o.evidence) }
 func (o GenesisOrigin) clone() GenesisOrigin {

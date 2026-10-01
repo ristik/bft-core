@@ -365,7 +365,7 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		require.NoError(t, err)
 		transition, err := handoff.DecodeEVMTransition(transitionBytes)
 		require.NoError(t, err)
-		require.Equal(t, uint64(2), transition.NewEpoch)
+		require.Equal(t, uint64(2), transition.NewRootEpoch)
 		require.NotEqual(t, installed.Slot+1, shardState.TR.Round, "root and shard counters differ in this fixture")
 		require.Equal(t, shardState.TR.Round, transition.Ack.EVMRound)
 		require.Equal(t, parent, transition.Ack.FrozenParent[:])

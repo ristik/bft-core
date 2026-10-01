@@ -10,7 +10,7 @@ import (
 )
 
 func TestLoadEngineEpochTransition(t *testing.T) {
-	transition := handoff.EVMTransition{OldEpoch: 6, NewEpoch: 7, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
+	transition := handoff.EVMTransition{OldRootEpoch: 6, NewRootEpoch: 7, OldActiveConfHash: [32]byte{9}, NewActiveConfHash: [32]byte{9}, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
 		Ack: handoff.AckRecord{FrozenID: [32]byte{3}, CommitID: [32]byte{4}, FrozenParent: [32]byte{5},
 			SuccessorParent: [32]byte{5}, SuccessorTR: [32]byte{6}, EVMRound: 7}}
 	encoded, err := transition.Encode()

@@ -740,7 +740,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					}
 					anchor := &rctypes.EpochAnchor{GenesisID: verified.Genesis.ID(), Epoch: verified.Genesis.Epoch,
 						Slot: verified.Genesis.Start - 1, StateRoot: verified.Record.StateRoot[:]}
-					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR)
+					step, err := handoffdelivery.AssignmentStepOf(bundle, verified)
+					if err != nil {
+						return err
+					}
+					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR, step)
 					if err != nil {
 						return err
 					}
@@ -1378,8 +1382,8 @@ func loadEngineEpochTransition(path string, oldEpoch uint64) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decoding --engine-epoch-transition %q: %w", path, err)
 	}
-	if transition.OldEpoch != oldEpoch {
-		return nil, fmt.Errorf("--engine-epoch-transition starts at epoch %d, configured root trust base is epoch %d", transition.OldEpoch, oldEpoch)
+	if transition.OldRootEpoch != oldEpoch {
+		return nil, fmt.Errorf("--engine-epoch-transition starts at epoch %d, configured root trust base is epoch %d", transition.OldRootEpoch, oldEpoch)
 	}
 	return raw, nil
 }

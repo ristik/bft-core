@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -180,4 +181,41 @@ func snapshotRoot(s *abdrc.CommittedBlock, partition types.PartitionID, shard ty
 		return nil, nil, err
 	}
 	return tree.RootHash(), target, nil
+}
+
+// AssignmentStepOf derives the EVM assignment context of one verified bundle: from
+// its candidate for an assignment handoff, from the checkpoint's own installed
+// configuration for a root-only one. The candidate was bound by the old root
+// quorum through the successor body, and its claim of the replaced assignment is
+// checked against the verified checkpoint's shard, so a bundle cannot name an
+// assignment the old committee never installed.
+func AssignmentStepOf(b Bundle, v Verified) (handoff.AssignmentStep, error) {
+	var step handoff.AssignmentStep
+	if len(v.Shard.ShardConfHash) != 32 {
+		return step, ErrBundle
+	}
+	installed := [32]byte(v.Shard.ShardConfHash)
+	if len(b.Candidate) == 0 {
+		step.OldShardEpoch, step.NewShardEpoch = v.Shard.IRTR.Epoch, v.Shard.IRTR.Epoch
+		step.OldActiveConfHash, step.NewActiveConfHash = installed, installed
+		return step, nil
+	}
+	c, err := evmassign.DecodeCandidate(b.Candidate)
+	if err != nil {
+		return step, errors.Join(ErrBundle, err)
+	}
+	succ, err := c.Successor()
+	if err != nil {
+		return step, errors.Join(ErrBundle, err)
+	}
+	activated, err := evmassign.Activate(succ, b.Proof.Record.ActivationRound)
+	if err != nil {
+		return step, errors.Join(ErrBundle, err)
+	}
+	newHash, err := evmassign.PDRHash(activated)
+	if err != nil || len(c.OldActiveHash) != 32 || c.OldShardEpoch != v.Shard.IRTR.Epoch || [32]byte(c.OldActiveHash) != installed {
+		return step, errors.Join(ErrBundle, errors.New("candidate does not replace the checkpoint's installed assignment"))
+	}
+	return handoff.AssignmentStep{Assignment: true, OldShardEpoch: c.OldShardEpoch, NewShardEpoch: succ.Epoch,
+		OldActiveConfHash: installed, NewActiveConfHash: newHash}, nil
 }

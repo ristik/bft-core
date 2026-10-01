@@ -9,6 +9,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -84,14 +85,52 @@ func (x *BlockStore) RootAnchor() *rctypes.EpochAnchor {
 
 func (x *BlockStore) RootEpoch() uint64 { return x.blockTree.Root().BlockData.Epoch }
 
+// anchoredCommit returns the installed anchor root's committed record and the
+// frozen EVM shard H names, with the retained candidate preimage when H changes the
+// assignment.
+func (x *BlockStore) anchoredCommit() (*ExecutedBlock, evmroot.OrderedHandoffRecord, *ShardInfo, []byte, error) {
+	root := x.blockTree.Root()
+	if !isEpochAnchorRoot(root) || root.ShardState.Control == nil {
+		return nil, evmroot.OrderedHandoffRecord{}, nil, nil, rctypes.ErrEpochAnchor
+	}
+	control := root.ShardState.Control
+	record, err := decodeOrderedRecord(control.RecordBytes)
+	if err != nil || len(control.FrozenParent) != 32 {
+		return nil, record, nil, nil, rctypes.ErrEpochAnchor
+	}
+	configs, err := x.orchestration.ShardConfigs(control.OrderedRound)
+	if err != nil {
+		return nil, record, nil, nil, err
+	}
+	key, err := frozenShard(root.ShardState, configs, control.FrozenParent)
+	if err != nil {
+		return nil, record, nil, nil, rctypes.ErrEpochAnchor
+	}
+	preimage, err := x.HandoffCandidate(record.NextBodyID)
+	if err != nil {
+		return nil, record, nil, nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	return root, record, root.ShardState.States[key], preimage, nil
+}
+
 // AnchoredTechnicalRecord selects the committed shard assignment named by H.
-// It is available only while the installed snapshot is still the root.
+// It is available only while the installed snapshot is still the root. For an
+// assignment-bearing H the committed record is the one the retained candidate
+// derives, so the returned record is the shard's last one in the checkpoint, which
+// the caller advances by exactly one shard round; the hash is checked here.
 func (x *BlockStore) AnchoredTechnicalRecord(hash []byte) (certification.TechnicalRecord, error) {
 	x.lock.RLock()
 	defer x.lock.RUnlock()
 	root := x.blockTree.Root()
 	if !isEpochAnchorRoot(root) || len(hash) != 32 {
 		return certification.TechnicalRecord{}, rctypes.ErrEpochAnchor
+	}
+	if _, record, si, preimage, err := x.anchoredCommit(); err == nil && len(preimage) != 0 {
+		want, err := AssignmentSuccessorTRHash(si, preimage, record.ActivationRound, x.hash)
+		if err != nil || !bytes.Equal(want, hash) || !bytes.Equal(record.SuccessorTRHash, hash) {
+			return certification.TechnicalRecord{}, rctypes.ErrEpochAnchor
+		}
+		return si.TR, nil
 	}
 	var matched *certification.TechnicalRecord
 	for _, shard := range root.ShardState.States {
@@ -114,6 +153,37 @@ func (x *BlockStore) AnchoredTechnicalRecord(hash []byte) (certification.Technic
 		return certification.TechnicalRecord{}, rctypes.ErrEpochAnchor
 	}
 	return *matched, nil
+}
+
+// AnchoredAssignmentStep is the EVM assignment context of the committed H: the
+// retained candidate's replacement for an assignment handoff, the shard's own
+// unchanged assignment for a root-only one.
+func (x *BlockStore) AnchoredAssignmentStep(record evmroot.OrderedHandoffRecord) (handoff.AssignmentStep, error) {
+	x.lock.RLock()
+	defer x.lock.RUnlock()
+	_, committed, si, preimage, err := x.anchoredCommit()
+	if err != nil || !bytes.Equal(committed.ID(), record.ID()) {
+		return handoff.AssignmentStep{}, rctypes.ErrEpochAnchor
+	}
+	var installed [32]byte
+	if len(si.ShardConfHash) != 32 {
+		return handoff.AssignmentStep{}, rctypes.ErrEpochAnchor
+	}
+	copy(installed[:], si.ShardConfHash)
+	if len(preimage) == 0 {
+		return handoff.AssignmentStep{OldShardEpoch: si.TR.Epoch, NewShardEpoch: si.TR.Epoch,
+			OldActiveConfHash: installed, NewActiveConfHash: installed}, nil
+	}
+	c, pdr, err := candidateActivatedPDR(preimage, committed.ActivationRound)
+	if err != nil {
+		return handoff.AssignmentStep{}, err
+	}
+	newHash, err := evmassign.PDRHash(pdr)
+	if err != nil || c.OldShardEpoch != si.TR.Epoch || !bytes.Equal(c.OldActiveHash, installed[:]) {
+		return handoff.AssignmentStep{}, errors.Join(ErrAssignmentHistory, err)
+	}
+	return handoff.AssignmentStep{Assignment: true, OldShardEpoch: c.OldShardEpoch, NewShardEpoch: pdr.Epoch,
+		OldActiveConfHash: installed, NewActiveConfHash: newHash}, nil
 }
 
 // AnchoredFrozenParent binds the EVM shard assignment named by H to the last
@@ -141,10 +211,17 @@ func (x *BlockStore) AnchoredFrozenParent(trHash, parent []byte) error {
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(digest, trHash) {
-		return rctypes.ErrEpochAnchor
+	if bytes.Equal(digest, trHash) {
+		return nil
 	}
-	return nil
+	// An assignment-bearing H commits the derived successor record instead.
+	if _, record, si, preimage, cerr := x.anchoredCommit(); cerr == nil && si == shard && len(preimage) != 0 {
+		want, werr := AssignmentSuccessorTRHash(si, preimage, record.ActivationRound, x.hash)
+		if werr == nil && bytes.Equal(want, trHash) {
+			return nil
+		}
+	}
+	return rctypes.ErrEpochAnchor
 }
 
 // VerifyRecoveryAnchor reconstructs the received recovery ShardInfo and P_CTL

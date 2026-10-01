@@ -233,7 +233,11 @@ func (x *ConsensusManager) InstalledEVMTransition(proof handoff.OldCommitProof,
 	if err != nil {
 		return nil, fmt.Errorf("verified successor shard assignment: %w", err)
 	}
-	transition, err := handoff.TransitionFromInstalledAnchor(proof, old, body, x.epochAnchor, successorTR)
+	step, err := x.blockStore.AnchoredAssignmentStep(proof.Record)
+	if err != nil {
+		return nil, err
+	}
+	transition, err := handoff.TransitionFromInstalledAnchor(proof, old, body, x.epochAnchor, successorTR, step)
 	if err != nil {
 		return nil, err
 	}

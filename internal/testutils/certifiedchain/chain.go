@@ -48,6 +48,8 @@ type Block struct {
 
 // Chain is a deployment and its certified blocks. Blocks[0] is the EVM genesis.
 type Chain struct {
+	// Layout is the registry layout of the deployment: 1 (zero) or 2, the assignment-aware registry.
+	Layout    uint64
 	T         *testing.T
 	Signer    abcrypto.Signer
 	TrustBase *types.RootTrustBaseV1
@@ -69,12 +71,26 @@ func Config(network types.NetworkID) *types.PartitionDescriptionRecord {
 
 // New generates the deployment for network, at root epoch 1, and blocks executed blocks after genesis.
 func New(t *testing.T, network types.NetworkID, blocks int) *Chain {
+	return newChain(t, network, blocks, 1)
+}
+
+// NewV2 is New for the assignment-aware sealRegistry/v2 deployment.
+func NewV2(t *testing.T, network types.NetworkID, blocks int) *Chain {
+	return newChain(t, network, blocks, 2)
+}
+
+func newChain(t *testing.T, network types.NetworkID, blocks int, layout uint64) *Chain {
 	signer, err := abcrypto.NewInMemorySecp256K1SignerFromKey(Key)
 	require.NoError(t, err)
 	tb, ok := testtrustbase.NewTrustBase(t, signer).(*types.RootTrustBaseV1)
 	require.True(t, ok)
 
-	art, err := registrygenesis.PinnedArtifact()
+	var art registrygenesis.Artifact
+	if layout == 2 {
+		art, err = registrygenesis.PinnedArtifactV2()
+	} else {
+		art, err = registrygenesis.PinnedArtifact()
+	}
 	require.NoError(t, err)
 	pins := registrygenesis.Pins{RootEpoch: 1, RegistryCodeHash: art.CodeHash, SystemAddress: registrygenesis.SystemAddress, RegistryAddress: registryproof.RegistryAddress}
 	g, err := registrygenesis.Generate(Config(network), pins, art, registrygenesis.DefaultEVMParams)
@@ -83,6 +99,11 @@ func New(t *testing.T, network types.NetworkID, blocks int) *Chain {
 	require.NoError(t, err)
 
 	c := &Chain{T: t, Signer: signer, TrustBase: tb, Pins: pins, Genesis: g, Full: full}
+	if layout == 2 {
+		c.Layout = 2
+	} else {
+		c.Layout = 0
+	}
 	c.Blocks = []Block{{Hash: g.EVMGenesisHash(), Number: 0, StateRoot: g.StateRoot(), Round: 0, Evidence: g.Evidence()}}
 	for i := 1; i <= blocks; i++ {
 		c.Blocks = append(c.Blocks, c.Executed(c.Blocks[i-1], uint64(i), uint64(4+i)))
@@ -108,6 +129,12 @@ func (c *Chain) Executed(parent Block, round, rootRound uint64) Block {
 // ExecutedWith is Executed with the header's extraData given, so a test can build another block for the same
 // round, parent and state.
 func (c *Chain) ExecutedWith(parent Block, round, rootRound uint64, extra []byte) Block {
+	return c.ExecutedState(parent, round, rootRound, extra, nil)
+}
+
+// ExecutedState is ExecutedWith with further registry words set, so a test can show the registry as it stands
+// after an acknowledgement: its assignment words, cursor and transition record.
+func (c *Chain) ExecutedState(parent Block, round, rootRound uint64, extra []byte, more map[string]common.Hash) Block {
 	t := c.T
 	words := c.Genesis.Storage()
 	named := func(s string) common.Hash { return crypto.Keccak256Hash([]byte(s)) }
@@ -120,10 +147,16 @@ func (c *Chain) ExecutedWith(parent Block, round, rootRound uint64, extra []byte
 	} {
 		words[k] = v
 	}
+	for k, v := range more {
+		words[k] = v
+	}
+	names, err := registryproof.SlotNamesFor(c.Layout)
+	require.NoError(t, err)
 	storage := newTrie()
-	paths := make([][]byte, registryproof.FieldCount)
-	for i, name := range registryproof.SlotNames {
-		key := registryproof.SlotKey(i)
+	paths := make([][]byte, len(names))
+	for i, name := range names {
+		key, err := registryproof.SlotKeyFor(c.Layout, i)
+		require.NoError(t, err)
 		paths[i] = crypto.Keccak256(key[:])
 		if w := words[name]; w != (common.Hash{}) {
 			v, err := rlp.EncodeToBytes(common.TrimLeftZeroes(w[:]))
@@ -148,7 +181,7 @@ func (c *Chain) ExecutedWith(parent Block, round, rootRound uint64, extra []byte
 	require.NoError(t, err)
 	var accountProof nodeList
 	require.NoError(t, state.Prove(accountPath, &accountProof))
-	ev := registryproof.Evidence{Header: header, AccountProof: accountProof, StorageProofs: make([][][]byte, registryproof.FieldCount)}
+	ev := registryproof.Evidence{Header: header, AccountProof: accountProof, StorageProofs: make([][][]byte, len(names))}
 	for i := range paths {
 		var p nodeList
 		require.NoError(t, storage.Prove(paths[i], &p))
@@ -180,9 +213,15 @@ func Technical(round uint64) *certification.TechnicalRecord {
 
 // Certify signs a certificate for ir and tr over the full shard configuration.
 func (c *Chain) Certify(signer abcrypto.Signer, ir *types.InputRecord, tr *certification.TechnicalRecord, rootRound uint64) *types.UnicityCertificate {
+	return c.CertifyFor(c.Full, signer, ir, tr, rootRound)
+}
+
+// CertifyFor signs a certificate over the given shard configuration: the genesis one, or the configuration of
+// an installed EVM assignment.
+func (c *Chain) CertifyFor(full *types.PartitionDescriptionRecord, signer abcrypto.Signer, ir *types.InputRecord, tr *certification.TechnicalRecord, rootRound uint64) *types.UnicityCertificate {
 	trHash, err := tr.Hash()
 	require.NoError(c.T, err)
-	uc := testcertificates.CreateUnicityCertificate(c.T, signer, ir, c.Full, rootRound, bytes.Repeat([]byte{0xb0}, 32), trHash)
+	uc := testcertificates.CreateUnicityCertificate(c.T, signer, ir, full, rootRound, bytes.Repeat([]byte{0xb0}, 32), trHash)
 	require.NotNil(c.T, uc)
 	return uc
 }

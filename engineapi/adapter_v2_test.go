@@ -29,14 +29,14 @@ func TestAdapterRequiresCanonicalTransitionFromConfiguredEpoch(t *testing.T) {
 	verifier.Transition = []byte{0x80}
 	_, err := a.deriveV2(context.Background(), params, params.AuthorizingCertificate, params.AuthorizingTechnicalRecord)
 	require.ErrorIs(t, err, rootinput.ErrV2Context)
-	tx := handoff.EVMTransition{OldEpoch: 2, NewEpoch: 3, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
+	tx := handoff.EVMTransition{OldRootEpoch: 2, NewRootEpoch: 3, OldActiveConfHash: [32]byte{9}, NewActiveConfHash: [32]byte{9}, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
 		Ack: handoff.AckRecord{FrozenID: [32]byte{3}, CommitID: [32]byte{4}, FrozenParent: [32]byte{5},
 			SuccessorParent: [32]byte{5}, SuccessorTR: [32]byte{6}, EVMRound: 1}}
 	verifier.Transition, err = tx.Encode()
 	require.NoError(t, err)
 	_, err = a.deriveV2(context.Background(), params, params.AuthorizingCertificate, params.AuthorizingTechnicalRecord)
 	require.ErrorIs(t, err, rootinput.ErrV2Context)
-	tx.OldEpoch, tx.NewEpoch = 1, 2
+	tx.OldRootEpoch, tx.NewRootEpoch = 1, 2
 	verifier.Transition, err = tx.Encode()
 	require.NoError(t, err)
 	_, err = a.deriveV2(context.Background(), params, params.AuthorizingCertificate, params.AuthorizingTechnicalRecord)
@@ -47,7 +47,7 @@ func TestAdapterInstallsConsecutiveTransitions(t *testing.T) {
 	a := NewAdapter(Config{Verifier: &VerifierContext{RootEpoch: 1}}, nil)
 	makeTransition := func(old uint64, marker byte) []byte {
 		t.Helper()
-		tx := handoff.EVMTransition{OldEpoch: old, NewEpoch: old + 1,
+		tx := handoff.EVMTransition{OldRootEpoch: old, NewRootEpoch: old + 1, OldActiveConfHash: [32]byte{9}, NewActiveConfHash: [32]byte{9},
 			NextBodyID: [32]byte{marker}, GenesisID: [32]byte{marker + 1},
 			Ack: handoff.AckRecord{FrozenID: [32]byte{marker + 2}, CommitID: [32]byte{marker + 3},
 				FrozenParent: [32]byte{marker + 4}, SuccessorParent: [32]byte{marker + 4},
@@ -72,7 +72,7 @@ func TestAdapterInstallsConsecutiveTransitions(t *testing.T) {
 func TestAdapterSelectsEachInstalledHandoffTransition(t *testing.T) {
 	v := &VerifierContext{transitions: make(map[uint64]handoff.EVMTransition)}
 	for old := uint64(1); old <= 2; old++ {
-		tx := handoff.EVMTransition{OldEpoch: old, NewEpoch: old + 1, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
+		tx := handoff.EVMTransition{OldRootEpoch: old, NewRootEpoch: old + 1, OldActiveConfHash: [32]byte{9}, NewActiveConfHash: [32]byte{9}, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
 			Ack: handoff.AckRecord{FrozenID: [32]byte{3}, CommitID: [32]byte{4}, FrozenParent: [32]byte{5},
 				SuccessorParent: [32]byte{5}, SuccessorTR: [32]byte{6}, EVMRound: 1}}
 		v.transitions[old] = tx
@@ -82,8 +82,8 @@ func TestAdapterSelectsEachInstalledHandoffTransition(t *testing.T) {
 		require.NoError(t, err)
 		decoded, err := handoff.DecodeEVMTransition(raw)
 		require.NoError(t, err)
-		require.Equal(t, old, decoded.OldEpoch)
-		require.Equal(t, old+1, decoded.NewEpoch)
+		require.Equal(t, old, decoded.OldRootEpoch)
+		require.Equal(t, old+1, decoded.NewRootEpoch)
 	}
 	_, err := v.transitionFor(1, 3)
 	require.ErrorIs(t, err, rootinput.ErrV2Context)
@@ -100,7 +100,7 @@ func TestTransitionLookupFailsClosed(t *testing.T) {
 	v.Transition = []byte{0x80}
 	_, err = v.transitionFor(1, 2)
 	require.ErrorIs(t, err, rootinput.ErrV2Context, "malformed legacy transition")
-	tx := handoff.EVMTransition{OldEpoch: 2, NewEpoch: 3, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
+	tx := handoff.EVMTransition{OldRootEpoch: 2, NewRootEpoch: 3, OldActiveConfHash: [32]byte{9}, NewActiveConfHash: [32]byte{9}, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
 		Ack: handoff.AckRecord{FrozenID: [32]byte{3}, CommitID: [32]byte{4}, FrozenParent: [32]byte{5},
 			SuccessorParent: [32]byte{5}, SuccessorTR: [32]byte{6}, EVMRound: 7}}
 	v.Transition, err = tx.Encode()
@@ -126,7 +126,8 @@ func TestInstalledTransitionUsesCommittedSuccessorRound(t *testing.T) {
 	bundle.Proof.Record.FrozenID = bytes.Repeat([]byte{2}, 32)
 	bundle.Proof.Record.SuccessorTRHash = hash
 	bundle.Proof.Control.FrozenParent = bytes.Repeat([]byte{3}, 32)
-	checked := handoffdelivery.Verified{Genesis: evmroot.EpochGenesis{Epoch: 2}, Shard: abdrc.ShardInfo{TR: tr}}
+	checked := handoffdelivery.Verified{Genesis: evmroot.EpochGenesis{Epoch: 2},
+		Shard: abdrc.ShardInfo{TR: tr, IRTR: *tr, ShardConfHash: bytes.Repeat([]byte{9}, 32)}}
 	v := new(VerifierContext)
 	require.NoError(t, v.InstallHandoffTransition(bundle, checked))
 	require.NoError(t, v.InstallHandoffTransition(bundle, checked), "reinstalling the same verified handoff is idempotent")
@@ -136,8 +137,9 @@ func TestInstalledTransitionUsesCommittedSuccessorRound(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(41), transition.Ack.EVMRound)
 	checked.Shard.TR = &certification.TechnicalRecord{Round: 42}
+	checked.Shard.IRTR = *checked.Shard.TR
 	require.ErrorIs(t, v.InstallHandoffTransition(bundle, checked), handoff.ErrBoundary)
-	checked.Shard.TR = tr
+	checked.Shard.TR, checked.Shard.IRTR = tr, *tr
 	bundle.Proof.Control.FrozenParent[0] ^= 1
 	require.ErrorIs(t, v.InstallHandoffTransition(bundle, checked), handoff.ErrSuccessor)
 }
@@ -319,7 +321,7 @@ func TestAdapterV2BootstrapBuildSendsCanonicalInput(t *testing.T) {
 
 func TestAdapterV2BuildSendsTransitionInEngineSealInput(t *testing.T) {
 	verifier, params, derived := bootstrapAdapterFixture(t)
-	transition := handoff.EVMTransition{OldEpoch: 1, NewEpoch: 2, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
+	transition := handoff.EVMTransition{OldRootEpoch: 1, NewRootEpoch: 2, OldActiveConfHash: [32]byte{9}, NewActiveConfHash: [32]byte{9}, NextBodyID: [32]byte{1}, GenesisID: [32]byte{2},
 		Ack: handoff.AckRecord{FrozenID: [32]byte{3}, CommitID: [32]byte{4}, FrozenParent: [32]byte{5},
 			SuccessorParent: [32]byte{5}, SuccessorTR: [32]byte{6}, EVMRound: params.Round}}
 	encoded, err := transition.Encode()
