@@ -7,8 +7,10 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
@@ -243,6 +245,13 @@ func (x *ConsensusManager) handoffPredecessor() ([]byte, error) {
 // signature is collected. A caller submits this identical plan locally to
 // each old validator; each signer decides independently whether to endorse.
 func (x *ConsensusManager) BuildHandoffPlan(next *types.RootTrustBaseV1, frozenParent []byte) (abdrc.HandoffApprovalMsg, error) {
+	return x.BuildHandoffPlanEVM(next, frozenParent, nil)
+}
+
+// BuildHandoffPlanEVM is BuildHandoffPlan for an EVM-only rotation. A non-nil
+// proposal carries the successor validators and their possession proofs; the
+// root members must stay identical, because M3 refuses a combined change.
+func (x *ConsensusManager) BuildHandoffPlanEVM(next *types.RootTrustBaseV1, frozenParent []byte, proposal *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
 	if !x.blockStore.HighQCFrozenParent(frozenParent) {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
@@ -250,13 +259,19 @@ func (x *ConsensusManager) BuildHandoffPlan(next *types.RootTrustBaseV1, frozenP
 	if err != nil {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
-	return x.buildHandoffPlanFromState(next, frozenParent, state)
+	return x.buildHandoffPlanFromState(next, frozenParent, state, proposal)
 }
 
 // BuildAndEndorseHandoff uses one committed checkpoint for the proposed plan
 // and this validator's endorsement. Root rounds may advance between separate
 // operator HTTP calls while the shard remains live.
 func (x *ConsensusManager) BuildAndEndorseHandoff(ctx context.Context, next *types.RootTrustBaseV1, frozenParent []byte) (abdrc.HandoffApprovalMsg, error) {
+	return x.BuildAndEndorseHandoffEVM(ctx, next, frozenParent, nil)
+}
+
+// BuildAndEndorseHandoffEVM is BuildAndEndorseHandoff with an optional EVM
+// assignment proposal.
+func (x *ConsensusManager) BuildAndEndorseHandoffEVM(ctx context.Context, next *types.RootTrustBaseV1, frozenParent []byte, proposal *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
 	if !x.blockStore.HighQCFrozenParent(frozenParent) {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
@@ -264,7 +279,7 @@ func (x *ConsensusManager) BuildAndEndorseHandoff(ctx context.Context, next *typ
 	if err != nil {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
-	plan, err := x.buildHandoffPlanFromState(next, frozenParent, state)
+	plan, err := x.buildHandoffPlanFromState(next, frozenParent, state, proposal)
 	if err != nil {
 		return abdrc.HandoffApprovalMsg{}, err
 	}
@@ -274,7 +289,7 @@ func (x *ConsensusManager) BuildAndEndorseHandoff(ctx context.Context, next *typ
 	return plan, nil
 }
 
-func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1, frozenParent []byte, state *abdrc.StateMsg) (abdrc.HandoffApprovalMsg, error) {
+func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1, frozenParent []byte, state *abdrc.StateMsg, proposal *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
 	old := x.trustBase.Load()
 	if old == nil || next == nil || old.Epoch == ^uint64(0) || next.Epoch != old.Epoch+1 ||
 		next.NetworkID != old.NetworkID || len(frozenParent) != 32 || bytes.Equal(frozenParent, make([]byte, 32)) {
@@ -327,6 +342,15 @@ func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1
 		return abdrc.HandoffApprovalMsg{}, err
 	}
 	candidate := sha256.Sum256(candidateWire)
+	var preimage []byte
+	if proposal != nil {
+		preimage, candidate, err = x.buildAssignmentCandidate(old, next, predecessor, attempt, frozenParent, state, proposal)
+		if err != nil {
+			return abdrc.HandoffApprovalMsg{}, err
+		}
+	} else if err := x.refuseRootChangeWhileAckPending(state, frozenParent); err != nil {
+		return abdrc.HandoffApprovalMsg{}, err
+	}
 	aMin := round + 16
 	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: uint64(old.NetworkID), Epoch: next.Epoch,
 		EarliestActivation: aMin, Members: members, RootThreshold: evmroot.RootQuorumThreshold(uint64(len(members))),
@@ -346,7 +370,155 @@ func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1
 	}
 	return abdrc.HandoffApprovalMsg{Body: body.Encode(), FrozenParent: bytes.Clone(frozenParent),
 		Candidate: candidate[:], PreFreezeRound: round, PreFreezeRoot: bytes.Clone(root),
-		ActivationRound: aMin, Attempt: attempt}, nil
+		ActivationRound: aMin, Attempt: attempt, CandidatePreimage: preimage}, nil
+}
+
+// pendingAssignmentAck reports whether the shard's technical record already
+// names an assignment epoch whose acknowledgement the input record has not
+// certified.
+func pendingAssignmentAck(shard abdrc.ShardInfo) bool {
+	return shard.IR != nil && shard.IRTR.Epoch != shard.IR.Epoch
+}
+
+// installedEVMFromState selects the unique certified shard with the frozen
+// parent in the committed checkpoint and, when withConfig is set, its
+// authenticated configuration at the checkpoint's root round.
+func (x *ConsensusManager) installedEVMFromState(state *abdrc.StateMsg, parent []byte, withConfig bool) (abdrc.ShardInfo, *types.PartitionDescriptionRecord, error) {
+	var found *abdrc.ShardInfo
+	if state == nil || state.CommittedHead == nil || state.CommittedHead.Block == nil {
+		return abdrc.ShardInfo{}, nil, ErrHandoffApproval
+	}
+	for i := range state.CommittedHead.ShardInfo {
+		if shard := &state.CommittedHead.ShardInfo[i]; shard.IR != nil && bytes.Equal(shard.IR.BlockHash, parent) {
+			if found != nil {
+				return abdrc.ShardInfo{}, nil, ErrHandoffApproval
+			}
+			found = shard
+		}
+	}
+	if found == nil {
+		return abdrc.ShardInfo{}, nil, ErrHandoffApproval
+	}
+	if !withConfig {
+		return *found, nil, nil
+	}
+	configs, err := x.orchestration.ShardConfigs(state.CommittedHead.Block.Round)
+	if err != nil {
+		return abdrc.ShardInfo{}, nil, ErrHandoffApproval
+	}
+	conf := configs[types.PartitionShardID{PartitionID: found.Partition, ShardID: found.Shard.Key()}]
+	if conf == nil {
+		return abdrc.ShardInfo{}, nil, ErrHandoffApproval
+	}
+	return *found, conf, nil
+}
+
+// refuseRootChangeWhileAckPending applies the normal acknowledgement
+// prerequisite to a root-only handoff: an installed EVM assignment without a
+// certified acknowledgement admits only a supersession.
+func (x *ConsensusManager) refuseRootChangeWhileAckPending(state *abdrc.StateMsg, parent []byte) error {
+	shard, _, err := x.installedEVMFromState(state, parent, false)
+	if err != nil {
+		return err
+	}
+	if pendingAssignmentAck(shard) {
+		return fmt.Errorf("%w: %w", ErrHandoffApproval, storage.ErrAssignmentAckPending)
+	}
+	return nil
+}
+
+func rootMembers(nodes []*types.NodeInfo) ([]evmassign.RootMember, error) {
+	out := make([]evmassign.RootMember, 0, len(nodes))
+	for _, n := range nodes {
+		if n == nil {
+			return nil, ErrHandoffApproval
+		}
+		out = append(out, evmassign.RootMember{NodeID: n.NodeID, Key: bytes.Clone(n.SigKey), Weight: n.Stake})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
+	return out, nil
+}
+
+func popContext(network uint64, predecessor []byte, attempt uint64, parent []byte) (evmassign.PoPContext, error) {
+	c := evmassign.PoPContext{Network: network, Attempt: attempt}
+	if len(predecessor) != 32 || len(parent) != 32 {
+		return c, ErrHandoffApproval
+	}
+	copy(c.Predecessor[:], predecessor)
+	copy(c.Parent[:], parent)
+	return c, nil
+}
+
+// buildAssignmentCandidate assembles the one candidate byte sequence for an
+// EVM-only rotation. It refuses before any endorsement is signed when the
+// possession proofs are missing or wrong, the installed assignment has an
+// unacknowledged successor, or the root members change as well.
+func (x *ConsensusManager) buildAssignmentCandidate(old, next *types.RootTrustBaseV1, predecessor []byte, attempt uint64,
+	parent []byte, state *abdrc.StateMsg, proposal *evmassign.Proposal) ([]byte, [32]byte, error) {
+	var none [32]byte
+	oldRoot, err := rootMembers(old.RootNodes)
+	if err != nil {
+		return nil, none, err
+	}
+	nextRoot, err := rootMembers(next.RootNodes)
+	if err != nil {
+		return nil, none, err
+	}
+	if !reflect.DeepEqual(oldRoot, nextRoot) {
+		return nil, none, errors.Join(ErrHandoffApproval, evmassign.ErrCombined)
+	}
+	shard, installed, err := x.installedEVMFromState(state, parent, true)
+	if err != nil {
+		return nil, none, err
+	}
+	if pendingAssignmentAck(shard) {
+		return nil, none, fmt.Errorf("%w: %w", ErrHandoffApproval, storage.ErrAssignmentAckPending)
+	}
+	if proposal.Supersede {
+		return nil, none, fmt.Errorf("%w: no unacknowledged assignment to supersede", ErrHandoffApproval)
+	}
+	succ, err := evmassign.NewSuccessor(installed, proposal.Validators)
+	if err != nil {
+		return nil, none, errors.Join(ErrHandoffApproval, err)
+	}
+	pop, err := popContext(uint64(old.NetworkID), predecessor, attempt, parent)
+	if err != nil {
+		return nil, none, err
+	}
+	candidate, err := evmassign.NewCandidate(pop, nextRoot, installed, succ, proposal.PoPs, nil)
+	if err != nil {
+		return nil, none, errors.Join(ErrHandoffApproval, err)
+	}
+	raw, err := candidate.Encode()
+	if err != nil {
+		return nil, none, errors.Join(ErrHandoffApproval, err)
+	}
+	return raw, sha256.Sum256(raw), nil
+}
+
+// verifyApprovalAssignment re-checks the candidate preimage of an approval
+// that carries one. It needs no EVM state, so it is independent of local timing.
+func (x *ConsensusManager) verifyApprovalAssignment(msg *abdrc.HandoffApprovalMsg, body evmroot.TrustBaseBodyV2,
+	predecessor []byte, old *types.RootTrustBaseV1) (evmassign.Candidate, error) {
+	if len(msg.CandidatePreimage) == 0 {
+		return evmassign.Candidate{}, nil
+	}
+	pop, err := popContext(body.NetworkID, predecessor, msg.Attempt, msg.FrozenParent)
+	if err != nil {
+		return evmassign.Candidate{}, err
+	}
+	ctx := evmassign.BindingContext{PoPContext: pop, Digest: msg.Candidate}
+	if ctx.CurrentRoot, err = rootMembers(old.RootNodes); err != nil {
+		return evmassign.Candidate{}, err
+	}
+	for _, m := range body.Members {
+		ctx.SuccessorRoot = append(ctx.SuccessorRoot, evmassign.RootMember{NodeID: m.NodeID, Key: bytes.Clone(m.ConsensusKey), Weight: m.Weight})
+	}
+	c, _, err := evmassign.VerifyBinding(msg.CandidatePreimage, ctx)
+	if err != nil {
+		return evmassign.Candidate{}, errors.Join(ErrHandoffApproval, err)
+	}
+	return c, nil
 }
 
 func (x *ConsensusManager) validateHandoffApproval(msg *abdrc.HandoffApprovalMsg) (*pendingHandoff, uint64, error) {
@@ -375,6 +547,9 @@ func (x *ConsensusManager) validateHandoffApproval(msg *abdrc.HandoffApprovalMsg
 		if err != nil {
 			return nil, 0, err
 		}
+	}
+	if _, err := x.verifyApprovalAssignment(msg, body, predecessor, old); err != nil {
+		return nil, 0, err
 	}
 	if !bytes.Equal(body.PredecessorHash, link) ||
 		!bytes.Equal(body.StateSummary, evmroot.D4PreFreezeSummary(body.NetworkID, predecessor, msg.Attempt, msg.PreFreezeRound, msg.PreFreezeRoot, msg.FrozenParent)) ||
@@ -451,6 +626,13 @@ func (x *ConsensusManager) endorseHandoffAtState(ctx context.Context, plan abdrc
 		return ErrHandoffApproval
 	}
 	plan.Signer = x.id.String()
+	if len(plan.CandidatePreimage) != 0 {
+		if err := x.verifyEndorsedAssignmentInstalled(plan, state); err != nil {
+			return err
+		}
+	} else if err := x.refuseRootChangeWhileAckPending(state, plan.FrozenParent); err != nil {
+		return err
+	}
 	// The domain is independent of the record's eventual ordering round.
 	body, err := storage.DecodeHandoffBody(plan.Body)
 	if err != nil {
@@ -498,6 +680,31 @@ func (x *ConsensusManager) endorseHandoffAtState(ctx context.Context, plan abdrc
 	return nil
 }
 
+// verifyEndorsedAssignmentInstalled is the signer's own decision: the candidate
+// must replace exactly the assignment installed in this validator's committed
+// checkpoint, which must have a certified acknowledgement.
+func (x *ConsensusManager) verifyEndorsedAssignmentInstalled(plan abdrc.HandoffApprovalMsg, state *abdrc.StateMsg) error {
+	c, err := evmassign.DecodeCandidate(plan.CandidatePreimage)
+	if err != nil {
+		return errors.Join(ErrHandoffApproval, err)
+	}
+	succ, err := c.Successor()
+	if err != nil {
+		return errors.Join(ErrHandoffApproval, err)
+	}
+	shard, installed, err := x.installedEVMFromState(state, plan.FrozenParent, true)
+	if err != nil {
+		return err
+	}
+	if pendingAssignmentAck(shard) && c.Supersedes == nil {
+		return fmt.Errorf("%w: %w", ErrHandoffApproval, storage.ErrAssignmentAckPending)
+	}
+	if err := evmassign.VerifyInstalled(c, succ, installed); err != nil {
+		return errors.Join(ErrHandoffApproval, err)
+	}
+	return nil
+}
+
 func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.HandoffApprovalMsg) error {
 	plan, weight, err := x.validateHandoffApproval(msg)
 	if err != nil {
@@ -532,7 +739,8 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 		stored.abortSignatures = make(map[string]hex.Bytes)
 		x.handoffPlans[id] = stored
 	} else if !bytes.Equal(stored.plan.Body, msg.Body) || !bytes.Equal(stored.plan.FrozenParent, msg.FrozenParent) ||
-		!bytes.Equal(stored.plan.Candidate, msg.Candidate) || stored.plan.ActivationRound != msg.ActivationRound ||
+		!bytes.Equal(stored.plan.Candidate, msg.Candidate) || !bytes.Equal(stored.plan.CandidatePreimage, msg.CandidatePreimage) ||
+		stored.plan.ActivationRound != msg.ActivationRound ||
 		stored.plan.PreFreezeRound != msg.PreFreezeRound || !bytes.Equal(stored.plan.PreFreezeRoot, msg.PreFreezeRoot) || stored.plan.Attempt != msg.Attempt {
 		return ErrHandoffApproval
 	}
@@ -632,9 +840,16 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		record.ActivationRound = previous.ActivationRound
 		record.Kind = "freeze"
 		record.SuccessorTRHash = make([]byte, 32)
-		companion, err := (storage.FreezeAuthorization{Version: 1, Body: bytes.Clone(plan.plan.Body),
-			Parent: bytes.Clone(plan.plan.FrozenParent), Candidate: bytes.Clone(plan.plan.Candidate),
-			Signatures: plan.signatures}).Bytes()
+		var companion []byte
+		if len(plan.plan.CandidatePreimage) != 0 {
+			companion, err = (storage.FreezeAssignmentAuthorization{Version: 2, Body: bytes.Clone(plan.plan.Body),
+				Parent: bytes.Clone(plan.plan.FrozenParent), Candidate: bytes.Clone(plan.plan.Candidate),
+				Preimage: bytes.Clone(plan.plan.CandidatePreimage), Signatures: plan.signatures}).Bytes()
+		} else {
+			companion, err = (storage.FreezeAuthorization{Version: 1, Body: bytes.Clone(plan.plan.Body),
+				Parent: bytes.Clone(plan.plan.FrozenParent), Candidate: bytes.Clone(plan.plan.Candidate),
+				Signatures: plan.signatures}).Bytes()
+		}
 		if err != nil {
 			return nil, err
 		}

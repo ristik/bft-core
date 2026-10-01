@@ -31,6 +31,10 @@ var (
 	keyEpochAnchor  = []byte("epochAnchor")
 	keyHandoffBody  = []byte("handoff/body/")
 	keyHandoffProof = []byte("handoff/bundle/")
+	// keyHandoffCandidate retains the verified H3 assignment candidate by the
+	// successor body it authorizes; it is committed-history input for the
+	// derived EVM configuration, never a local schedule.
+	keyHandoffCandidate = []byte("handoff/candidate/")
 )
 
 func handoffMetadataKey(prefix, id []byte) []byte {
@@ -72,6 +76,41 @@ func (db BoltDB) HandoffBody(id []byte) ([]byte, error) {
 			return ErrHandoffRecord
 		}
 		data = bytes.Clone(b.Get(handoffMetadataKey(keyHandoffBody, id)))
+		return nil
+	})
+	return data, err
+}
+
+// StoreHandoffCandidate retains the verified H3 candidate preimage. Rewriting
+// different bytes under the same body id is refused.
+func (db BoltDB) StoreHandoffCandidate(id, candidate []byte) error {
+	if len(id) != 32 || len(candidate) == 0 || len(candidate) > 1<<20 {
+		return ErrHandoffRecord
+	}
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return ErrHandoffRecord
+		}
+		key := handoffMetadataKey(keyHandoffCandidate, id)
+		if existing := b.Get(key); existing != nil && !bytes.Equal(existing, candidate) {
+			return ErrHandoffRecord
+		}
+		return b.Put(key, candidate)
+	})
+}
+
+func (db BoltDB) HandoffCandidate(id []byte) ([]byte, error) {
+	if len(id) != 32 {
+		return nil, ErrHandoffRecord
+	}
+	var data []byte
+	err := db.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return ErrHandoffRecord
+		}
+		data = bytes.Clone(b.Get(handoffMetadataKey(keyHandoffCandidate, id)))
 		return nil
 	})
 	return data, err

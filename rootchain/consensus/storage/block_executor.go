@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -218,8 +219,14 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 				return nil, err
 			}
 			if control.Phase == "endorsed" || control.Phase == "committed" {
-				if _, err := frozenShard(nextShardState, shardConfs, control.FrozenParent); err != nil {
+				frozen, err := frozenShard(nextShardState, shardConfs, control.FrozenParent)
+				if err != nil {
 					return nil, err
+				}
+				if len(companion) != 0 && control.Phase == "endorsed" {
+					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen]); err != nil {
+						return nil, err
+					}
 				}
 			}
 			nextShardState.Control = control
@@ -273,6 +280,41 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		RootHash:   ut.RootHash(),
 		ShardState: nextShardState,
 	}, nil
+}
+
+// verifyFreezeAssignment runs the EVM-state-dependent half of freeze
+// admission, after the authority has checked the candidate's static bindings.
+// The installed assignment is the authenticated configuration of the frozen
+// shard at this block, never a value the candidate supplies.
+func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.PartitionDescriptionRecord) error {
+	fc, err := ParseFreezeCompanion(companion)
+	if err != nil || si == nil || installed == nil {
+		return ErrHandoffRecord
+	}
+	// An installed assignment whose acknowledgement is not certified is exactly
+	// the state where TR already names the successor epoch but IR does not.
+	pending := si.TR.Epoch != si.IR.Epoch
+	if len(fc.Preimage) == 0 {
+		if pending {
+			return ErrAssignmentAckPending
+		}
+		return nil
+	}
+	candidate, err := evmassign.DecodeCandidate(fc.Preimage)
+	if err != nil {
+		return errors.Join(ErrHandoffRecord, err)
+	}
+	succ, err := candidate.Successor()
+	if err != nil {
+		return errors.Join(ErrHandoffRecord, err)
+	}
+	if candidate.Supersedes == nil && pending {
+		return ErrAssignmentAckPending
+	}
+	if err := evmassign.VerifyInstalled(candidate, succ, installed); err != nil {
+		return errors.Join(ErrHandoffRecord, err)
+	}
+	return nil
 }
 
 // The handoff binds one certified EVM parent. Its unique shard entry remains

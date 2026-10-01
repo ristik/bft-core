@@ -14,6 +14,10 @@ var (
 	ErrAbortAfterH   = errors.New("root handoff Abort follows committed H")
 	ErrHandoffSuffix = errors.New("nonempty old-epoch handoff suffix")
 	ErrHandoffFrozen = errors.New("EVM certification frozen by root handoff")
+	// ErrAssignmentAckPending refuses another handoff while the installed EVM
+	// assignment has no certified acknowledgement, unless it supersedes that
+	// assignment on the same frozen parent.
+	ErrAssignmentAckPending = errors.New("EVM assignment acknowledgement pending: only a supersession may follow")
 )
 
 type handoffAuthority interface {
@@ -136,7 +140,10 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 			return nil, ErrHandoffRecord
 		}
 		frozenParent, err = authority.VerifyFreeze(r, companion)
-		if err != nil || len(frozenParent) != 32 {
+		if err != nil {
+			return nil, errors.Join(ErrHandoffRecord, err)
+		}
+		if len(frozenParent) != 32 {
 			return nil, ErrHandoffRecord
 		}
 		phase = "endorsed"

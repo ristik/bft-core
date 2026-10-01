@@ -255,13 +255,22 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 		if decodeErr != nil || record.Kind != "freeze" {
 			return nil, ErrHandoffRecord
 		}
-		var companion FreezeAuthorization
-		if err := types.Cbor.Unmarshal(block.Payload.HandoffRecords[1], &companion); err != nil {
+		companion, err := ParseFreezeCompanion(block.Payload.HandoffRecords[1])
+		if err != nil {
 			return nil, ErrHandoffRecord
 		}
 		if archive, ok := x.storage.(interface{ StoreHandoffBody([]byte, []byte) error }); ok {
 			if err := archive.StoreHandoffBody(record.NextBodyID, companion.Body); err != nil {
 				return nil, fmt.Errorf("retaining verified successor body: %w", err)
+			}
+		}
+		if len(companion.Preimage) != 0 {
+			archive, ok := x.storage.(interface{ StoreHandoffCandidate([]byte, []byte) error })
+			if !ok {
+				return nil, fmt.Errorf("%w: candidate retention unavailable", ErrHandoffRecord)
+			}
+			if err := archive.StoreHandoffCandidate(record.NextBodyID, companion.Preimage); err != nil {
+				return nil, fmt.Errorf("retaining verified assignment candidate: %w", err)
 			}
 		}
 	}
@@ -364,6 +373,16 @@ func (x *BlockStore) HandoffBody(id []byte) ([]byte, error) {
 		return nil, ErrHandoffRecord
 	}
 	return archive.HandoffBody(id)
+}
+
+// HandoffCandidate returns the retained H3 candidate preimage for a successor
+// body, or nil for a root-only handoff.
+func (x *BlockStore) HandoffCandidate(id []byte) ([]byte, error) {
+	archive, ok := x.storage.(interface{ HandoffCandidate([]byte) ([]byte, error) })
+	if !ok {
+		return nil, ErrHandoffRecord
+	}
+	return archive.HandoffCandidate(id)
 }
 
 func (x *BlockStore) HandoffCheckpoint() (*abdrc.CommittedBlock, *types.UnicityTreeCertificate, evmroot.OrderedHandoffRecord, error) {

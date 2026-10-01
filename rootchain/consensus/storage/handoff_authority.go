@@ -5,7 +5,9 @@ import (
 	"crypto"
 	"errors"
 	"math"
+	"sort"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
@@ -25,6 +27,65 @@ type FreezeAuthorization struct {
 }
 
 func (a FreezeAuthorization) Bytes() ([]byte, error) { return types.Cbor.Marshal(a) }
+
+// FreezeAssignmentAuthorization is the version-2 freeze companion. It carries
+// the H3 candidate preimage once, so every voter and the retained handoff
+// bundle can verify the successor EVM assignment and its possession proofs.
+type FreezeAssignmentAuthorization struct {
+	_          struct{} `cbor:",toarray"`
+	Version    uint64
+	Body       []byte
+	Parent     []byte
+	Candidate  []byte // digest of Preimage
+	Preimage   []byte // canonical evmassign.Candidate
+	Signatures map[string]hex.Bytes
+}
+
+func (a FreezeAssignmentAuthorization) Bytes() ([]byte, error) { return types.Cbor.Marshal(a) }
+
+// FreezeCompanion is the decoded form of either companion version.
+type FreezeCompanion struct {
+	Version    uint64
+	Body       []byte
+	Parent     []byte
+	Candidate  []byte
+	Preimage   []byte // nil for the legacy root-only companion
+	Signatures map[string]hex.Bytes
+}
+
+// ParseFreezeCompanion accepts exactly one canonical encoding of version 1
+// (root-only) or version 2 (assignment-bearing).
+func ParseFreezeCompanion(raw []byte) (FreezeCompanion, error) {
+	var out FreezeCompanion
+	if !validFreezeCompanionSize(len(raw)) {
+		return out, ErrHandoffRecord
+	}
+	var shape []any
+	if err := types.Cbor.Unmarshal(raw, &shape); err != nil || len(shape) == 0 {
+		return out, ErrHandoffRecord
+	}
+	switch version, _ := shape[0].(uint64); version {
+	case 1:
+		var v FreezeAuthorization
+		if err := types.Cbor.Unmarshal(raw, &v); err != nil || len(v.Signatures) == 0 {
+			return out, ErrHandoffRecord
+		}
+		if canonical, err := v.Bytes(); err != nil || !bytes.Equal(canonical, raw) {
+			return out, ErrHandoffRecord
+		}
+		return FreezeCompanion{Version: 1, Body: v.Body, Parent: v.Parent, Candidate: v.Candidate, Signatures: v.Signatures}, nil
+	case 2:
+		var v FreezeAssignmentAuthorization
+		if err := types.Cbor.Unmarshal(raw, &v); err != nil || len(v.Signatures) == 0 || len(v.Preimage) == 0 {
+			return out, ErrHandoffRecord
+		}
+		if canonical, err := v.Bytes(); err != nil || !bytes.Equal(canonical, raw) {
+			return out, ErrHandoffRecord
+		}
+		return FreezeCompanion{Version: 2, Body: v.Body, Parent: v.Parent, Candidate: v.Candidate, Preimage: v.Preimage, Signatures: v.Signatures}, nil
+	}
+	return out, ErrHandoffRecord
+}
 
 // AbortAuthorization is the block-local old-set quorum proof for an abort.
 type AbortAuthorization struct {
@@ -128,12 +189,8 @@ func (a *v1HandoffAuthority) VerifyFreeze(r evmroot.OrderedHandoffRecord, compan
 		!bytes.Equal(r.PredecessorBodyID, a.predecessor) {
 		return nil, ErrHandoffRecord
 	}
-	var proof FreezeAuthorization
-	if err := types.Cbor.Unmarshal(companion, &proof); err != nil || proof.Version != 1 || len(proof.Signatures) == 0 {
-		return nil, ErrHandoffRecord
-	}
-	canonical, err := proof.Bytes()
-	if err != nil || !bytes.Equal(canonical, companion) {
+	proof, err := ParseFreezeCompanion(companion)
+	if err != nil {
 		return nil, ErrHandoffRecord
 	}
 	body, err := decodeD3Body(proof.Body)
@@ -151,6 +208,11 @@ func (a *v1HandoffAuthority) VerifyFreeze(r evmroot.OrderedHandoffRecord, compan
 			return nil, ErrHandoffRecord
 		}
 	}
+	if proof.Version == 2 {
+		if err := a.verifyAssignmentBinding(r, proof, body); err != nil {
+			return nil, err
+		}
+	}
 	id := body.Identity()
 	if !bytes.Equal(id[:], r.NextBodyID) {
 		return nil, ErrHandoffRecord
@@ -163,6 +225,34 @@ func (a *v1HandoffAuthority) VerifyFreeze(r evmroot.OrderedHandoffRecord, compan
 		return nil, ErrHandoffRecord
 	}
 	return bytes.Clone(proof.Parent), nil
+}
+
+// verifyAssignmentBinding checks everything about an H3 candidate that needs
+// no EVM state: its digest, the exact root/attempt/parent context, that the
+// root members do not change in the same operation, and a possession proof
+// for every successor key. State-dependent checks run in block execution.
+func (a *v1HandoffAuthority) verifyAssignmentBinding(r evmroot.OrderedHandoffRecord, proof FreezeCompanion, body evmroot.TrustBaseBodyV2) error {
+	ctx := evmassign.BindingContext{Digest: proof.Candidate,
+		PoPContext: evmassign.PoPContext{Network: r.Network, Attempt: r.Attempt}}
+	if len(r.PredecessorBodyID) != 32 || len(proof.Parent) != 32 {
+		return ErrHandoffRecord
+	}
+	copy(ctx.Predecessor[:], r.PredecessorBodyID)
+	copy(ctx.Parent[:], proof.Parent)
+	for _, m := range body.Members {
+		ctx.SuccessorRoot = append(ctx.SuccessorRoot, evmassign.RootMember{NodeID: m.NodeID, Key: m.ConsensusKey, Weight: m.Weight})
+	}
+	for _, n := range a.trust.RootNodes {
+		if n == nil {
+			return ErrHandoffRecord
+		}
+		ctx.CurrentRoot = append(ctx.CurrentRoot, evmassign.RootMember{NodeID: n.NodeID, Key: n.SigKey, Weight: n.Stake})
+	}
+	sort.Slice(ctx.CurrentRoot, func(i, j int) bool { return ctx.CurrentRoot[i].NodeID < ctx.CurrentRoot[j].NodeID })
+	if _, _, err := evmassign.VerifyBinding(proof.Preimage, ctx); err != nil {
+		return errors.Join(ErrHandoffRecord, err)
+	}
+	return nil
 }
 
 func (a *v1HandoffAuthority) VerifyAbort(r evmroot.OrderedHandoffRecord, companion []byte) error {
