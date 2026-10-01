@@ -43,8 +43,12 @@ All members of the old validator set must run a version that understands the
 bounded abort-approval peer message before operators use this path. An older
 peer will not contribute an approval; the old trust base's ordinary quorum
 availability requirement still applies.
+Prepare comes first: it freezes the EVM and the ROOT binds the frozen parent (the EVM IR
+certified in the branch) in the prepared control state; endorsements are collected after
+the Prepare is committed, over that parent, and a Freeze naming any other parent is
+refused (ADR 0006).
 Freeze signs `FrozenID`, which binds the D3 body, pre-freeze summary, last
-certified EVM parent, candidate, attempt and predecessor. Endorsement never
+certified EVM parent (the Prepare-bound one), candidate, attempt and predecessor. Endorsement never
 binds the later `A*` or successor TR. The D3 body contains `A_min` and uses the
 non-circular pre-freeze and candidate-context hashes specified in D3; `A*`
 lives in H. H fixes network, old epoch, predecessor BodyID, attempt, FrozenID,

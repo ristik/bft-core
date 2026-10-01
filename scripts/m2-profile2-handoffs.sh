@@ -270,32 +270,6 @@ m2_advance_authorities() {
   done
 }
 
-# Use the latest common canonical EVM head only after each validator has logged
-# its positive-height certificate admission. A log line from one root node is
-# not a freshness or quorum check, and its subscription may have zero receivers.
-m2_latest_certified_parent() {
-  local i url head block hash blockNumber expectedHead= expectedHash= hashLower
-  for i in $(m2_online_validators); do
-    url="http://127.0.0.1:$((rethEthBase+i-1))"
-    head=$(rpc "$url" eth_blockNumber '[]' | pyget "['result']") || return 1
-    [[ "$head" = 0x* ]] || return 1
-    block=$(rpc "$url" eth_getBlockByNumber "[\"$head\",false]") || return 1
-    hash=$(printf '%s' "$block" | pyget "['result']['hash']") || return 1
-    blockNumber=$(printf '%s' "$block" | pyget "['result']['number']") || return 1
-    [ -n "$hash" ] && [ "$hash" != None ] && [ "$blockNumber" = "$head" ] || return 1
-    hashLower=$(printf '%s' "$hash" | tr '[:upper:]' '[:lower:]')
-    grep -Eq "msg=\"certificate admitted\" block=${hashLower#0x} .*height=[1-9][0-9]* round=[0-9]+ rootRound=[0-9]+" \
-      "test-nodes/evm$i/debug.log" || return 1
-    if [ -z "$expectedHead" ]; then
-      expectedHead=$head
-      expectedHash=$hashLower
-    elif [ "$head" != "$expectedHead" ] || [ "$hashLower" != "$expectedHash" ]; then
-      return 1
-    fi
-  done
-  printf '%s\n' "$expectedHash"
-}
-
 m2_handoff() {
   local epoch=$1 replace=$2 new=$3 previous=$4 oldBoot=$5 oldRpcs=$6
   local nextFile="trust-base-epoch${epoch}.json"
@@ -303,16 +277,10 @@ m2_handoff() {
   generate_log_configuration "test-nodes/root$new/"
   m2_next_trust_base "$epoch" "$replace" "$new" "$previous" "$nextFile" || return 1
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
-    local parent logStart outcome waitStep activated committed=false oldEpoch=$((epoch-1))
+    local logStart outcome waitStep activated committed=false oldEpoch=$((epoch-1))
     for attempt in $(seq 1 30); do
-      parent=$(m2_latest_certified_parent) || {
-        echo "F8 handoff attempt $attempt: waiting for a common certified EVM parent"
-        sleep 1
-        continue
-      }
       logStart=$(wc -l < test-nodes/root1/debug.log)
-      if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" \
-        --frozen-parent "$parent" --root-rpc "$oldRpcs"; then
+      if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" --root-rpc "$oldRpcs"; then
         sleep 1
         continue
       fi
@@ -324,7 +292,7 @@ m2_handoff() {
         sleep 1
       done
       $committed && break
-      [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=dropped* ]] && echo "F8 handoff attempt $attempt aborted; retrying with the current certified parent"
+      [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=dropped* ]] && echo "F8 handoff attempt $attempt aborted or lapsed; retrying with the next attempt"
     done
     $committed || { echo "F8 root handoff did not commit after retries" >&2; return 1; }
     for i in $(seq 1 "$validators"); do
@@ -340,19 +308,13 @@ m2_handoff() {
     echo "F8 root handoff epoch $epoch committed and activated while aggregators remained live"
     return 0
   fi
-  # Root validators enforce the ordered freeze. The operator only selects a
-  # currently certified EVM tip and retries if an endorser has advanced.
-  local parent waitStep oldEpoch=$((epoch-1)) outcome logStart
+  # Root validators enforce the ordered freeze and bind the frozen parent at the Prepare: the operator names no parent and only
+  # retries (next attempt) if a Prepare lapsed or an attempt was aborted.
+  local waitStep oldEpoch=$((epoch-1)) outcome logStart
   local committed=false
   for i in $(seq 1 30); do
-    parent=$(m2_latest_certified_parent) || {
-      echo "handoff attempt $i: waiting for a common certified EVM parent"
-      sleep 1
-      continue
-    }
     logStart=$(wc -l < test-nodes/root1/debug.log)
-    if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" \
-      --frozen-parent "$parent" --root-rpc "$oldRpcs"; then
+    if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" --root-rpc "$oldRpcs"; then
       sleep 1
       continue
     fi
@@ -361,7 +323,7 @@ m2_handoff() {
         grep -E "msg=\"root handoff outcome\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
       if [[ "$outcome" = *phase=committed* ]]; then committed=true; break; fi
       if [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=dropped* ]]; then
-        echo "root handoff aborted; selecting a fresh certified parent and attempt"
+        echo "root handoff aborted or its Prepare lapsed; retrying with the next attempt"
         break
       fi
       sleep 1
@@ -421,13 +383,12 @@ m2_same_members_trust_base() {
 
 m2_config_only_handoff() { # epoch roots oldRpcs
   local epoch=$1 roots=$2 oldRpcs=$3 oldEpoch=$(($1-1)) nextFile="trust-base-epoch$1.json"
-  local i parent logStart outcome waitStep committed=false first boot prev activated
+  local i logStart outcome waitStep committed=false first boot prev activated
   first=$(echo "$roots" | awk '{print $1}')
   m2_same_members_trust_base "$epoch" "$roots" "$nextFile" || return 1
   for i in $(seq 1 30); do
-    parent=$(m2_latest_certified_parent) || { echo "config-only handoff attempt $i: waiting for a common certified EVM parent"; sleep 1; continue; }
     logStart=$(wc -l < "test-nodes/root$first/debug.log")
-    if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" --frozen-parent "$parent" --root-rpc "$oldRpcs"; then
+    if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" --root-rpc "$oldRpcs"; then
       sleep 1; continue
     fi
     outcome=
@@ -435,7 +396,7 @@ m2_config_only_handoff() { # epoch roots oldRpcs
       outcome=$(tail -n +"$((logStart+1))" "test-nodes/root$first/debug.log" |
         grep -E "msg=\"root handoff outcome\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
       [[ "$outcome" = *phase=committed* ]] && { committed=true; break; }
-      [[ "$outcome" = *phase=aborted* ]] && { echo "config-only handoff aborted; retrying with a fresh certified parent"; break; }
+      [[ "$outcome" = *phase=aborted* ]] && { echo "config-only handoff aborted; retrying with the next attempt"; break; }
       sleep 1
     done
     $committed && break

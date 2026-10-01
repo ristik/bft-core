@@ -34,29 +34,52 @@ apply a terminal repeat as a timeout or reject a subsequent new UC.
    state before consulting the volatile handoff-plan cache. Handoff approval
    receipt is not cancellation: only a committed Abort is final. A racing H
    wins or loses under ordinary BFT locks; H cannot be rewound. Retry uses
-   `attempt+1` and newly observed parent state. **Prepare freezes the EVM
-   shard.** From the Prepare record (not only from Freeze) the designated EVM
-   shard, selected by partition type, refuses every certification, timeouts
-   included; Abort returns the control state to `aborted`, which lifts the
-   Prepare-time and the Freeze-time freeze by the same transition. A leader
-   orders Prepare only while the plan's frozen parent is still the certified
-   EVM IR in its own branch; otherwise it drops the plan (outcome `dropped`,
-   nothing ordered, nothing frozen) and the operator re-plans from the current
-   parent. The EVM therefore cannot move between Prepare and Freeze, so the
-   Freeze check no longer aborts under load: a busy EVM certifying every round
-   can be handed off. The cost is an EVM certification pause that starts about
-   one root round earlier. Endorsement signatures, possession proofs and the
-   parent binding are unchanged. Prepare carries no signatures, so a single
+   `attempt+1` and newly observed parent state. **Prepare comes first and
+   freezes the EVM; the root, not the operator, binds the frozen parent.** The
+   order is: (1) the operator plans (`root handoff propose`): the plan fixes the
+   D3 body and candidate and names **no EVM parent**; every old validator holds
+   it as its intent; (2) the leader orders a Prepare for the held intent, and
+   when a block executes it the ROOT binds the frozen parent as the EVM IR
+   certified in that branch (`ControlState.FrozenParent`, set at `prepared`)
+   and freezes the designated EVM shard, selected by partition type, so it
+   refuses every certification, timeouts included; (3) only after the Prepare
+   is in a validator's committed state does that validator endorse, and each
+   endorsement commits to the Prepare-bound parent and the Prepare's activation
+   round (`ErrEndorseBeforePrepare`, `ErrEndorsedParentMismatch`,
+   `ErrEndorsedPlanMismatch`); (4) the leader orders Freeze with the quorum of
+   endorsements and block validation refuses a Freeze whose parent is not the
+   bound one (`ErrFreezeParentUnbound`) or that has no Prepare
+   (`ErrFreezeBeforePrepare`). Because the parent is fixed by the same record
+   that freezes the EVM, nothing the operator or the endorsers do can race a
+   busy EVM, and no plan goes stale for want of a parent (the earlier "plan
+   goes stale, leader drops it" mechanism is gone). The body's state summary
+   therefore no longer carries the pre-freeze round, root and parent (they are
+   zero in `D4PreFreezeSummary`: those values are fixed by the Prepare, which is
+   ordered after the body); `FrozenID` still commits to the bound parent. Possession proofs bind
+   network, predecessor and attempt, not the parent, so they are collected
+   before the Prepare. Abort returns the control state to `aborted`, which lifts the
+   Prepare-time and the Freeze-time freeze by the same transition. The cost is
+   an EVM certification pause that starts at the Prepare, before the endorsements
+   are collected. Prepare carries no signatures, so a single
    faulty leader could order one for an unendorsed body: the Prepare-time
    freeze therefore **lapses by itself** `PrepareFreezeLapseRounds` (24) root
    rounds after the Prepare unless a Freeze for that attempt was ordered in
-   the window. The lapse is a function of the Prepare's ordered round and the
+   the window. The window now has to cover endorsement collection: the Prepare
+   commits two to three rounds after it is ordered, the operator polls once a
+   second (about one round) and the endorsements reach the leader within a
+   round, so an honest Freeze is ordered about 6 to 8 rounds after the Prepare,
+   and a faulty leader in the rotation adds at most one skipped round per
+   faulty leader before the next honest one; 24 keeps a margin of about three
+   times and no new constant was needed. The Prepare's activation round is
+   `max(A_min, prepareRound + 24 + 8)`, so a Freeze ordered at the very end of
+   the window still commits before activation. The lapse is a function of the
+   Prepare's ordered round and the
    executing block's round, so every root agrees; the EVM certifies again, the
-   lapsed attempt is dead (a Freeze for it is refused) and the next Prepare
+   lapsed attempt is dead (a Freeze or an endorsement for it is refused) and the next Prepare
    uses `attempt+1`, as after an abort, once `PrepareCooldownRounds` (24) more
    rounds have passed. Residual: a faulty leader repeating the attack can still
    freeze the EVM for at most 24 of every 48 rounds; removing that needs a
-   signed Prepare. A handoff left `prepared` with no cached plan therefore no
+   signed Prepare. A handoff left `prepared` with no endorsements therefore no
    longer needs an operator abort to unfreeze the EVM (root-handoff-abort.md
    still applies to `endorsed`).
 2. A voter reads authenticated parent-branch control state before every old

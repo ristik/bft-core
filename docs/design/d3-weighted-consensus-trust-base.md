@@ -120,12 +120,16 @@ normative:
 [ version, networkId, epoch, earliestActivation,
   [ [stakingID, nodeID, consensusKey, weight], … ]   ; members, sorted bytewise by nodeID
   rootThreshold,             ; must equal ⌊2·ΣWeight/3⌋+1
-  stateSummary,              ; SHA256(CBOR(["UNICITY_HANDOFF_PREFREEZE_STATE",1,networkId,predecessorHash,attempt,preFreezeRootRound,preFreezeRootHash,lastCertifiedEVMParent]))
+  stateSummary,              ; SHA256(CBOR(["UNICITY_HANDOFF_PREFREEZE_STATE",1,networkId,predecessorHash,attempt,0,32 zero bytes,32 zero bytes])) in the Prepare-first order (below)
   changeRecordHash,          ; SHA256(CBOR(["UNICITY_HANDOFF_CANDIDATE_CONTEXT",1,networkId,predecessorHash,attempt,candidateHash,A_min]))
   predecessorHash ]          ; v2 body identity of the current trust base (32 bytes)
 ```
 
-The pre-freeze snapshot is the root-ordered, fully drained snapshot selected
+In the Prepare-first order the body is fixed BEFORE the root orders the Prepare, so the
+snapshot fields of `stateSummary` (round, root hash, last certified EVM parent) are zero:
+the Prepare record fixes that state afterwards, the root binds the frozen EVM parent in
+the Prepare's control state, and `FrozenID` (D4) commits to it. The earlier text follows
+for the general definition. The pre-freeze snapshot is the root-ordered, fully drained snapshot selected
 before constructing this successor body; its root excludes every record
 containing this body or FrozenID. `candidateHash` hashes the fixed
 candidate/preparation payload, excluding the resulting trust-base body,
