@@ -98,7 +98,6 @@ func newAssignmentFixture(t *testing.T) *assignmentFixture {
 	f.nextRootKey = newEVMKey(t, "new-e")
 	f.pop = evmassign.PoPContext{Network: 5, Attempt: 0}
 	copy(f.pop.Predecessor[:], f.predecessor)
-	copy(f.pop.Parent[:], f.parent)
 	return f
 }
 
@@ -184,7 +183,7 @@ func (f *assignmentFixture) candidate(t *testing.T) evmassign.Candidate {
 	old, err := evmassign.PDRHash(installed)
 	require.NoError(t, err)
 	return evmassign.Candidate{Version: evmassign.CandidateVersion, Network: 5, Predecessor: bytes.Clone(f.predecessor),
-		Attempt: f.pop.Attempt, Parent: bytes.Clone(f.parent), RootMembers: f.successorRoot(), OldShardEpoch: installed.Epoch,
+		Attempt: f.pop.Attempt, RootMembers: f.successorRoot(), OldShardEpoch: installed.Epoch,
 		OldActiveHash: old[:], Assignment: raw, PoPs: f.pops(t, f.pop, f.succ), Supersedes: f.supersedes, Bindings: f.bindings(), Changes: f.changes}
 }
 
@@ -334,9 +333,6 @@ func TestFreezeAssignmentBindingIsolatedMutations(t *testing.T) {
 			ctx.Attempt = 9
 			c.PoPs = f.pops(t, ctx, f.succ)
 		}, evmassign.ErrPoP, "verification failed"},
-		{"candidate names another parent", func(t *testing.T, f *assignmentFixture, c *evmassign.Candidate, _ *[]func(*FreezeAssignmentAuthorization, *evmroot.TrustBaseBodyV2)) {
-			c.Parent = bytes.Repeat([]byte{6}, 32)
-		}, evmassign.ErrContext, "parent"},
 		{"candidate names another attempt", func(t *testing.T, f *assignmentFixture, c *evmassign.Candidate, _ *[]func(*FreezeAssignmentAuthorization, *evmroot.TrustBaseBodyV2)) {
 			c.Attempt = 1
 		}, evmassign.ErrContext, "attempt"},

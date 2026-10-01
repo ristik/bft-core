@@ -831,6 +831,7 @@ func TestHandoffIsolatedGuards(t *testing.T) {
 	t.Run("terminal_outcome", func(t *testing.T) {
 		prepared, err := applyHandoffRecord(initialControl(5), record("prepare", 2, 7, zero, body, zero), 5, 1, 2, testRecordAuthority{}, nil)
 		require.NoError(t, err)
+		prepared.FrozenParent = bytes.Repeat([]byte{0x42}, 32) // bound by the executor when it executes the Prepare
 		frozenState, err := applyHandoffRecord(prepared, record("freeze", 3, 7, frozen, body, zero), 5, 1, 3, testRecordAuthority{}, nil)
 		require.NoError(t, err)
 		committed, err := applyHandoffRecord(frozenState, record("commit", 4, 7, frozen, body, tr), 5, 1, 4, testRecordAuthority{}, nil)

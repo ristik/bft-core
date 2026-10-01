@@ -18,7 +18,6 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	tbstore "github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
-	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 	"github.com/unicitynetwork/bft-core/trustactivation"
@@ -28,7 +27,9 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
 
-func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
+// Prepare comes before endorsement: the plan names no EVM parent, the leader orders a Prepare for the intent, the ROOT binds the
+// frozen parent there, and validators endorse only that Prepare-bound state.
+func TestOperatorHandoffPreparesBeforeEndorsement(t *testing.T) {
 	ctx := context.Background()
 	node := testutils.NewTestNode(t)
 	others := []*testutils.TestNode{testutils.NewTestNode(t), testutils.NewTestNode(t), testutils.NewTestNode(t)}
@@ -55,6 +56,13 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	mockNet := testnetwork.NewRootMockNetwork()
 	cm, err := NewConsensusManager(node.PeerConf.ID, store, orchestration, mockNet, node.Signer, db, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
 	require.NoError(t, err)
+	nodeVerifier, err := node.Signer.Verifier()
+	require.NoError(t, err)
+	nodeKey, err := nodeVerifier.MarshalPublicKey()
+	require.NoError(t, err)
+	require.NoError(t, orchestration.InitGenesisShardConfigs(&types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8,
+		PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, EpochStart: 1, T2Timeout: 5 * time.Second,
+		Validators: []*types.NodeInfo{{NodeID: node.PeerConf.ID.String(), SigKey: nodeKey, Stake: 1}}}))
 	next := *old
 	next.Epoch = 2
 	replacement := testutils.NewTestNode(t)
@@ -65,47 +73,122 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	next.RootNodes = append([]*types.NodeInfo(nil), old.RootNodes...)
 	next.RootNodes[3] = &types.NodeInfo{NodeID: replacement.PeerConf.ID.String(), SigKey: key, Stake: 1}
 	parentHash := bytes.Repeat([]byte{7}, 32)
-	_, err = cm.BuildHandoffPlan(&next, parentHash)
-	require.ErrorIs(t, err, ErrHandoffApproval, "the operator cannot freeze an uncertified EVM parent")
+
+	_, err = cm.PlanHandoff(&next, nil)
+	require.ErrorIs(t, err, ErrHandoffApproval, "no certified EVM shard in the committed state: nothing to plan for")
 	state, err := cm.blockStore.GetState()
 	require.NoError(t, err)
-	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{IR: &types.InputRecord{BlockHash: parentHash}}}
-	plan, err := cm.buildHandoffPlanFromState(&next, parentHash, state, nil)
+	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: parentHash}}}
+	plan, err := cm.buildHandoffPlanFromState(&next, state, nil)
 	require.NoError(t, err)
-	bad := plan
-	bad.FrozenParent = bytes.Repeat([]byte{8}, 32)
-	require.ErrorIs(t, cm.EndorseHandoff(ctx, bad), ErrHandoffApproval)
-	stale := *state
-	staleHead := *state.CommittedHead
-	staleHead.ShardInfo = []abdrc.ShardInfo{{IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{9}, 32)}}}
-	stale.CommittedHead = &staleHead
-	require.ErrorIs(t, cm.endorseHandoffAtState(ctx, plan, &stale), ErrHandoffApproval,
-		"an endorser cannot sign a plan for an older certified EVM tip")
-	staleHead.ShardInfo = state.CommittedHead.ShardInfo
-	staleQC := *state.CommittedHead.CommitQc
-	staleSeal := *staleQC.LedgerCommitInfo
-	staleSeal.Hash = bytes.Repeat([]byte{0xaa}, 32)
-	staleQC.LedgerCommitInfo = &staleSeal
-	staleHead.CommitQc = &staleQC
-	require.ErrorIs(t, cm.endorseHandoffAtState(ctx, plan, &stale), ErrHandoffApproval,
-		"an endorser cannot sign a different pre-freeze root")
+	require.Empty(t, plan.FrozenParent, "the plan binds no EVM parent: the root binds it at Prepare")
+	body, err := storage.DecodeHandoffBody(plan.Body)
+	require.NoError(t, err)
+	id := body.Identity()
+
+	t.Run("endorsement before Prepare is refused", func(t *testing.T) {
+		require.ErrorIs(t, cm.endorseHandoffAtState(ctx, plan, state), ErrEndorseBeforePrepare)
+		withParent := plan
+		withParent.FrozenParent = bytes.Clone(parentHash) // naming the current tip does not make the handoff prepared
+		require.ErrorIs(t, cm.endorseHandoffAtState(ctx, withParent, state), ErrEndorseBeforePrepare)
+	})
+
+	t.Run("the leader orders Prepare for the held intent only", func(t *testing.T) {
+		parentQC := cm.blockStore.GetHighQc()
+		records, err := cm.handoffRecordsForRound(parentQC.GetRound()+1, parentQC)
+		require.NoError(t, err)
+		require.Empty(t, records, "no intent held: no Prepare")
+		stale := plan
+		stale.Attempt = 3
+		cm.setHandoffIntent(stale)
+		records, err = cm.handoffRecordsForRound(parentQC.GetRound()+1, parentQC)
+		require.NoError(t, err)
+		require.Empty(t, records, "an intent for another attempt is dead")
+		cm.setHandoffIntent(plan)
+		records, err = cm.handoffRecordsForRound(parentQC.GetRound()+1, parentQC)
+		require.NoError(t, err)
+		require.Len(t, records, 1, "Prepare alone: no endorsement exists yet")
+		prepare, err := storage.DecodeOrderedHandoffRecord(records[0])
+		require.NoError(t, err)
+		require.Equal(t, "prepare", prepare.Kind)
+		require.Equal(t, id[:], []byte(prepare.NextBodyID))
+		require.GreaterOrEqual(t, prepare.ActivationRound, prepare.OrderedRound+storage.PrepareFreezeLapseRounds+8,
+			"the activation leaves the whole endorsement window")
+	})
+
+	// The Prepare as the executor leaves it: control "prepared", the frozen parent bound by the root.
+	prepareRecord := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: state.CommittedHead.Block.Round + 1,
+		ActivationRound: state.CommittedHead.Block.Round + 1 + storage.PrepareFreezeLapseRounds + 8, PredecessorBodyID: bytes.Clone(state.CommittedHead.Control.PredecessorBodyID),
+		NextBodyID: id[:], FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32), Kind: "prepare"}
+	preparedWith := func(mutate func(*evmroot.ControlState)) *abdrc.StateMsg {
+		control := *state.CommittedHead.Control
+		control.Phase, control.OrderedRound, control.RecordBytes = "prepared", prepareRecord.OrderedRound, prepareRecord.Bytes()
+		control.PreviousDigest, control.FrozenParent = bytes.Repeat([]byte{9}, 32), bytes.Clone(parentHash)
+		if mutate != nil {
+			mutate(&control)
+		}
+		cp := *state
+		head := *state.CommittedHead
+		head.Control = &control
+		cp.CommittedHead = &head
+		return &cp
+	}
+	prepared := preparedWith(nil)
+
+	t.Run("endorsed parent must be the Prepare-bound parent", func(t *testing.T) {
+		bad := plan
+		bad.FrozenParent = bytes.Repeat([]byte{8}, 32)
+		require.ErrorIs(t, cm.endorseHandoffAtState(ctx, bad, prepared), ErrEndorsedParentMismatch)
+	})
+	t.Run("endorsed plan must be the prepared one", func(t *testing.T) {
+		other := *old
+		other.Epoch = 2
+		other.RootNodes = append([]*types.NodeInfo(nil), next.RootNodes...)
+		other.RootNodes[2] = other.RootNodes[3]
+		otherPlan, err := cm.buildHandoffPlanFromState(&next, state, nil)
+		require.NoError(t, err)
+		otherPlan.Body = append(bytes.Clone(otherPlan.Body[:len(otherPlan.Body)-1]), otherPlan.Body[len(otherPlan.Body)-1]^1)
+		require.ErrorIs(t, cm.endorseHandoffAtState(ctx, otherPlan, prepared), ErrEndorsedPlanMismatch)
+		wrongAttempt := plan
+		wrongAttempt.Attempt = 1
+		require.ErrorIs(t, cm.endorseHandoffAtState(ctx, wrongAttempt, prepared), ErrEndorsedPlanMismatch)
+	})
+	t.Run("endorsement after the freeze lapsed is refused", func(t *testing.T) {
+		lapsed := preparedWith(nil)
+		head := *lapsed.CommittedHead
+		blockCopy := *head.Block
+		blockCopy.Round = prepareRecord.OrderedRound + storage.PrepareFreezeLapseRounds + 1
+		head.Block = &blockCopy
+		lapsed.CommittedHead = &head
+		require.ErrorIs(t, cm.endorseHandoffAtState(ctx, plan, lapsed), ErrPrepareLapsed)
+		at := *lapsed.CommittedHead
+		atBlock := *at.Block
+		atBlock.Round = prepareRecord.OrderedRound + storage.PrepareFreezeLapseRounds
+		at.Block = &atBlock
+		last := *lapsed
+		last.CommittedHead = &at
+		require.NoError(t, cm.endorseHandoffAtState(ctx, plan, &last), "the last round of the window still endorses")
+		cm.handoffPlans = nil
+	})
+
 	cm.handoffPlans = make(map[[32]byte]*pendingHandoff)
 	for i := byte(1); i <= 4; i++ {
 		cm.handoffPlans[[32]byte{i}] = &pendingHandoff{signatures: make(map[string]hex.Bytes)}
 	}
-	require.NoError(t, cm.endorseHandoffAtState(ctx, plan, state))
+	require.NoError(t, cm.endorseHandoffAtState(ctx, plan, prepared))
 	require.Len(t, cm.handoffPlans, 4)
+	stored := cm.handoffPlans[id]
+	require.Equal(t, parentHash, []byte(stored.plan.FrozenParent), "the endorsement carries the Prepare-bound parent")
+	require.Equal(t, prepareRecord.ActivationRound, stored.plan.ActivationRound, "and the Prepare's activation round")
 	_, err = cm.readyHandoff()
 	require.ErrorIs(t, err, ErrHandoffApproval, "one signature cannot authorize a four-validator handoff")
-	body, err := storage.DecodeHandoffBody(plan.Body)
+	domain, err := storage.EndorsementBytes(stored.record)
 	require.NoError(t, err)
-	id := body.Identity()
-	domain, err := storage.EndorsementBytes(cm.handoffPlans[id].record)
+	abortDomain, err := storage.AbortEndorsementBytes(stored.record)
 	require.NoError(t, err)
-	abortDomain, err := storage.AbortEndorsementBytes(cm.handoffPlans[id].record)
-	require.NoError(t, err)
+	endorsed := stored.plan
 	for i, other := range others[:2] {
-		signed := plan
+		signed := endorsed
 		signed.Signer = other.PeerConf.ID.String()
 		signed.Signature, err = other.Signer.SignBytes(domain)
 		require.NoError(t, err)
@@ -121,45 +204,40 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	approved, err := cm.readyHandoff()
 	require.NoError(t, err)
 	require.Equal(t, plan.Body, approved.plan.Body)
-	var records [][]byte
-	parent := cm.blockStore.GetHighQc()
-	parentBlock, err := cm.blockStore.Block(parent.GetRound())
-	require.NoError(t, err)
-	evmKey := types.PartitionShardID{PartitionID: 8}
-	parentBlock.ShardState.States[evmKey] = &storage.ShardInfo{IR: &types.InputRecord{BlockHash: bytes.Clone(parentHash)}}
 
-	// Prepare freezes the EVM shard, so it is ordered only while the plan's parent is still the certified EVM IR in this branch. If
-	// the EVM certified a newer block the plan is stale: it is dropped, nothing is ordered and nothing is frozen.
-	savedPlan := cm.handoffPlans[id]
-	parentBlock.ShardState.States[evmKey].IR.BlockHash = bytes.Repeat([]byte{0x77}, 32)
-	records, err = cm.handoffRecordsForRound(parent.GetRound()+1, parent)
+	// With a quorum of endorsements of the PREPARED state, the leader orders the Freeze that names the bound parent.
+	parentQC := cm.blockStore.GetHighQc()
+	parentBlock, err := cm.blockStore.Block(parentQC.GetRound())
 	require.NoError(t, err)
-	require.Empty(t, records, "a stale plan orders no Prepare")
-	require.NotContains(t, cm.handoffPlans, id, "the stale plan is dropped, not retried")
-	_, err = cm.readyHandoff()
-	require.ErrorIs(t, err, ErrHandoffApproval)
-	_, frozen, err := cm.blockStore.FrozenShardAt(parent.GetRound())
+	parentBlock.ShardState.Control = prepared.CommittedHead.Control
+	parentBlock.ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}] = &storage.ShardInfo{IR: &types.InputRecord{BlockHash: bytes.Clone(parentHash)}}
+	records, err := cm.handoffRecordsForRound(prepared.CommittedHead.Control.OrderedRound+1, parentQC)
 	require.NoError(t, err)
-	require.False(t, frozen, "a dropped plan never leaves the EVM frozen")
-	// The operator re-plans from the current parent; the fresh plan is ordered.
-	cm.handoffPlans[id] = savedPlan
-	parentBlock.ShardState.States[evmKey].IR.BlockHash = bytes.Clone(parentHash)
-	records, err = cm.handoffRecordsForRound(parent.GetRound()+1, parent)
+	require.Len(t, records, 2)
+	freeze, err := storage.DecodeOrderedHandoffRecord(records[0])
 	require.NoError(t, err)
-	require.Len(t, records, 1)
-	prepared, err := storage.DecodeOrderedHandoffRecord(records[0])
+	require.Equal(t, "freeze", freeze.Kind)
+	require.Equal(t, prepareRecord.ActivationRound, freeze.ActivationRound)
+	companion, err := storage.ParseFreezeCompanion(records[1])
 	require.NoError(t, err)
-	require.Equal(t, "prepare", prepared.Kind)
-	require.GreaterOrEqual(t, prepared.ActivationRound, prepared.OrderedRound+8)
-	cm.leaderSelector = constLeader{leader: cm.id}
-	cm.pacemaker.Reset(ctx, parent.GetRound(), nil, nil)
-	shard := types.PartitionShardID{PartitionID: 8}
-	cm.irReqBuffer.irChgReqBuffer[shard] = &irChange{Req: &rctypes.IRChangeReq{Partition: 8, CertReason: rctypes.Quorum}, InputRecord: &types.InputRecord{Version: 1}}
-	cm.processNewRoundEvent(ctx)
-	proposal := testutils.MockAwaitMessage[*abdrc.ProposalMsg](t, mockNet, network.ProtocolRootProposal)
-	require.Len(t, proposal.Block.Payload.HandoffRecords, 1)
-	require.Empty(t, proposal.Block.Payload.Requests)
-	require.NotEmpty(t, cm.irReqBuffer.irChgReqBuffer, "handoff proposal retains buffered shard work")
+	require.Equal(t, parentHash, []byte(companion.Parent))
+	// A Freeze whose companion names another parent is never ordered.
+	for _, p := range cm.handoffPlans {
+		p.plan.FrozenParent = bytes.Repeat([]byte{8}, 32)
+	}
+	records, err = cm.handoffRecordsForRound(prepared.CommittedHead.Control.OrderedRound+1, parentQC)
+	require.NoError(t, err)
+	require.Empty(t, records)
+	for _, p := range cm.handoffPlans {
+		p.plan.FrozenParent = bytes.Clone(parentHash)
+	}
+	// After the lapse the leader orders nothing for the dead attempt, and the next attempt number is planned.
+	lapsedRound := prepared.CommittedHead.Control.OrderedRound + storage.PrepareFreezeLapseRounds + 1
+	records, err = cm.handoffRecordsForRound(lapsedRound, parentQC)
+	require.NoError(t, err)
+	require.Empty(t, records, "no Freeze for a lapsed Prepare, and no new Prepare before the cooldown")
+
+	// Retry after an abort, or after a lapse: attempt+1.
 	aborted := *state
 	abortedHead := *state.CommittedHead
 	abortedControl := *abortedHead.Control
@@ -167,13 +245,22 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	abortedControl.Attempt = 0
 	abortedHead.Control = &abortedControl
 	aborted.CommittedHead = &abortedHead
-	retry, err := cm.buildHandoffPlanFromState(&next, parentHash, &aborted, nil)
+	retry, err := cm.buildHandoffPlanFromState(&next, &aborted, nil)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, retry.Attempt)
 	require.NotEqual(t, plan.Body, retry.Body, "attempt+1 binds a new body and FrozenID")
 	abortedHead.Control.Attempt = ^uint64(0)
-	_, err = cm.buildHandoffPlanFromState(&next, parentHash, &aborted, nil)
+	_, err = cm.buildHandoffPlanFromState(&next, &aborted, nil)
 	require.ErrorIs(t, err, ErrHandoffApproval, "retry refuses attempt overflow")
+	lapsedState := preparedWith(nil)
+	lapsedHead := *lapsedState.CommittedHead
+	lapsedBlock := *lapsedHead.Block
+	lapsedBlock.Round = prepareRecord.OrderedRound + storage.PrepareFreezeLapseRounds + 1
+	lapsedHead.Block = &lapsedBlock
+	lapsedState.CommittedHead = &lapsedHead
+	retry, err = cm.buildHandoffPlanFromState(&next, lapsedState, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, retry.Attempt, "a lapsed Prepare is dead: the next plan is attempt+1")
 }
 
 func TestLeaderAbortsWhenEVMAdvancesPastFrozenParent(t *testing.T) {
@@ -223,6 +310,7 @@ func TestLeaderAbortsWhenEVMAdvancesPastFrozenParent(t *testing.T) {
 		FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32), ActivationRound: 9, Kind: "prepare"}
 	parent.ShardState.Control.Phase = "prepared"
 	parent.ShardState.Control.RecordBytes = previous.Bytes()
+	parent.ShardState.Control.FrozenParent = bytes.Clone(frozenParent) // bound by the root at Prepare
 	cm.handoffPlans = map[[32]byte]*pendingHandoff{{}: {
 		plan:   abdrc.HandoffApprovalMsg{Body: bytes.Repeat([]byte{2}, 32), FrozenParent: frozenParent},
 		record: previous, signatures: map[string]hex.Bytes{node.PeerConf.ID.String(): {1}},

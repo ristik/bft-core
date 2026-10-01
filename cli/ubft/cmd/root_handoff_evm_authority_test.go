@@ -58,8 +58,7 @@ func TestEVMPoPFromASigningAuthority(t *testing.T) {
 	key, err := authority.SigningPublicKey()
 	require.NoError(t, err)
 	infos := []*types.NodeInfo{{NodeID: "ev-auth", SigKey: key, Stake: 1}}
-	ctx := consensus.EVMAssignmentContext{Network: uint64(installed.NetworkID), Predecessor: bytes.Repeat([]byte{1}, 32), Attempt: 1,
-		FrozenParent: bytes.Repeat([]byte{2}, 32), Installed: installed}
+	ctx := consensus.EVMAssignmentContext{Network: uint64(installed.NetworkID), Predecessor: bytes.Repeat([]byte{1}, 32), Attempt: 1, Installed: installed}
 	contextFile := writeJSON(t, dir, "context.json", ctx)
 	validatorsFile := writeJSON(t, dir, "validators.json", infos)
 

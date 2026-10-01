@@ -160,7 +160,6 @@ func (f *operatorAssignmentFixture) proposal(t *testing.T, mutate ...func(*evmas
 	require.NoError(t, err)
 	ctx := evmassign.PoPContext{Network: 5, Attempt: 0}
 	copy(ctx.Predecessor[:], f.predecessor)
-	copy(ctx.Parent[:], f.parent)
 	for _, m := range mutate {
 		m(&ctx)
 	}
@@ -177,9 +176,29 @@ func (f *operatorAssignmentFixture) proposal(t *testing.T, mutate ...func(*evmas
 	return p
 }
 
+// preparedState is the committed state after the root ordered the Prepare of plan: control "prepared", with the frozen parent the
+// root bound (the certified EVM IR) and the Prepare's activation round.
+func (f *operatorAssignmentFixture) preparedState(t *testing.T, plan abdrc.HandoffApprovalMsg) *abdrc.StateMsg {
+	t.Helper()
+	body, err := storage.DecodeHandoffBody(plan.Body)
+	require.NoError(t, err)
+	id := body.Identity()
+	round := f.state.CommittedHead.Block.Round
+	record := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, Attempt: plan.Attempt, OrderedRound: round + 1, ActivationRound: plan.ActivationRound,
+		PredecessorBodyID: bytes.Clone(f.predecessor), NextBodyID: id[:], FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32), Kind: "prepare"}
+	control := *f.state.CommittedHead.Control
+	control.Phase, control.Attempt, control.OrderedRound, control.RecordBytes = "prepared", plan.Attempt, record.OrderedRound, record.Bytes()
+	control.PreviousDigest, control.FrozenParent = bytes.Repeat([]byte{9}, 32), bytes.Clone(f.parent)
+	cp := *f.state
+	head := *f.state.CommittedHead
+	head.Control = &control
+	cp.CommittedHead = &head
+	return &cp
+}
+
 func TestOperatorBuildsAssignmentCandidateAndEndorsersVerifyIt(t *testing.T) {
 	f := newOperatorAssignmentFixture(t)
-	plan, err := f.cm.buildHandoffPlanFromState(f.next, f.parent, f.state, f.proposal(t))
+	plan, err := f.cm.buildHandoffPlanFromState(f.next, f.state, f.proposal(t))
 	require.NoError(t, err)
 	require.NotEmpty(t, plan.CandidatePreimage)
 	digest := sha256.Sum256(plan.CandidatePreimage)
@@ -189,7 +208,7 @@ func TestOperatorBuildsAssignmentCandidateAndEndorsersVerifyIt(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, evmroot.D4CandidateContextHash(5, f.predecessor, plan.Attempt, plan.Candidate, body.EarliestActivation), body.ChangeRecordHash)
 
-	require.NoError(t, f.cm.endorseHandoffAtState(context.Background(), plan, f.state))
+	require.NoError(t, f.cm.endorseHandoffAtState(context.Background(), plan, f.preparedState(t, plan)))
 	require.Len(t, f.cm.handoffPlans, 1)
 
 	// A peer's endorsement with the preimage altered is refused before it is cached.
@@ -200,7 +219,7 @@ func TestOperatorBuildsAssignmentCandidateAndEndorsersVerifyIt(t *testing.T) {
 	require.ErrorIs(t, err, ErrHandoffApproval)
 
 	// A root-only plan (same committee) carries no preimage and keeps the legacy candidate hash.
-	root, err := f.cm.buildHandoffPlanFromState(f.sameRoot, f.parent, f.state, nil)
+	root, err := f.cm.buildHandoffPlanFromState(f.sameRoot, f.state, nil)
 	require.NoError(t, err)
 	require.Empty(t, root.CandidatePreimage)
 	require.NotEqual(t, plan.Candidate, root.Candidate)
@@ -219,9 +238,6 @@ func TestOperatorRefusesBadAssignmentProposalsBeforeAnyEndorsement(t *testing.T)
 		}, evmassign.ErrPoP},
 		{"PoP for another attempt", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
 			return f.next, f.state, f.proposal(t, func(c *evmassign.PoPContext) { c.Attempt = 4 })
-		}, evmassign.ErrPoP},
-		{"PoP for another frozen parent", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
-			return f.next, f.state, f.proposal(t, func(c *evmassign.PoPContext) { c.Parent = [32]byte{1} })
 		}, evmassign.ErrPoP},
 		{"PoP for another predecessor", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
 			return f.next, f.state, f.proposal(t, func(c *evmassign.PoPContext) { c.Predecessor = [32]byte{1} })
@@ -260,7 +276,7 @@ func TestOperatorRefusesBadAssignmentProposalsBeforeAnyEndorsement(t *testing.T)
 		t.Run(tc.name, func(t *testing.T) {
 			f := newOperatorAssignmentFixture(t)
 			next, state, proposal := tc.build(t, f)
-			_, err := f.cm.buildHandoffPlanFromState(next, f.parent, state, proposal)
+			_, err := f.cm.buildHandoffPlanFromState(next, state, proposal)
 			require.ErrorIs(t, err, ErrHandoffApproval)
 			require.ErrorIs(t, err, tc.want)
 			require.Empty(t, f.cm.handoffPlans, "a refused proposal leaves no endorsement state")
@@ -268,14 +284,14 @@ func TestOperatorRefusesBadAssignmentProposalsBeforeAnyEndorsement(t *testing.T)
 	}
 	t.Run("a root-only committee change on a coupled chain is refused by the planner", func(t *testing.T) {
 		f := newOperatorAssignmentFixture(t)
-		_, err := f.cm.buildHandoffPlanFromState(f.next, f.parent, f.state, nil)
+		_, err := f.cm.buildHandoffPlanFromState(f.next, f.state, nil)
 		require.ErrorIs(t, err, ErrHandoffApproval)
 		require.ErrorIs(t, err, evmassign.ErrCoupling)
 	})
 	t.Run("a pending acknowledgement also refuses a root-only handoff", func(t *testing.T) {
 		f := newOperatorAssignmentFixture(t)
 		f.state.CommittedHead.ShardInfo[0].IRTR.Epoch = 1
-		_, err := f.cm.buildHandoffPlanFromState(f.sameRoot, f.parent, f.state, nil)
+		_, err := f.cm.buildHandoffPlanFromState(f.sameRoot, f.state, nil)
 		require.ErrorIs(t, err, storage.ErrAssignmentAckPending)
 	})
 }
@@ -319,7 +335,6 @@ func TestOperatorBuildsAndVerifiesAnAggregatorKeyReplacement(t *testing.T) {
 		}
 		ctx := evmassign.PoPContext{Network: 5, Attempt: 0}
 		copy(ctx.Predecessor[:], f.predecessor)
-		copy(ctx.Parent[:], f.parent)
 		pop, err := evmassign.SignPoP(sf.nextKey.signer, ctx, succ, sf.nextKey.id)
 		require.NoError(t, err)
 		ch, err := evmassign.EncodeReplaceShardValidators(installed.PartitionID, installed.ShardID, installed, succ, []evmassign.PoP{pop})
@@ -331,12 +346,12 @@ func TestOperatorBuildsAndVerifiesAnAggregatorKeyReplacement(t *testing.T) {
 		f, sf := setup(t)
 		p := f.proposal(t)
 		p.Changes = []evmassign.Change{change(t, f, sf, sf.conf, nil)}
-		plan, err := f.cm.buildHandoffPlanFromState(f.next, f.parent, f.state, p)
+		plan, err := f.cm.buildHandoffPlanFromState(f.next, f.state, p)
 		require.NoError(t, err)
 		c, err := evmassign.DecodeCandidate(plan.CandidatePreimage)
 		require.NoError(t, err)
 		require.Len(t, c.Changes, 1)
-		require.NoError(t, f.cm.endorseHandoffAtState(context.Background(), plan, f.state))
+		require.NoError(t, f.cm.endorseHandoffAtState(context.Background(), plan, f.preparedState(t, plan)))
 		// A tampered change in the preimage no longer matches the digest the body binds.
 		tampered := plan
 		tampered.Signer = f.node.PeerConf.ID.String()
@@ -373,7 +388,6 @@ func TestOperatorBuildsAndVerifiesAnAggregatorKeyReplacement(t *testing.T) {
 			require.NoError(t, err)
 			ctx := evmassign.PoPContext{Network: 5, Attempt: 3}
 			copy(ctx.Predecessor[:], f.predecessor)
-			copy(ctx.Parent[:], f.parent)
 			pop, err := evmassign.SignPoP(sf.nextKey.signer, ctx, succ, sf.nextKey.id)
 			require.NoError(t, err)
 			ch, err := evmassign.EncodeReplaceShardValidators(9, sf.conf.ShardID, sf.conf, succ, []evmassign.PoP{pop})
@@ -386,7 +400,7 @@ func TestOperatorBuildsAndVerifiesAnAggregatorKeyReplacement(t *testing.T) {
 			f, sf := setup(t)
 			p := f.proposal(t)
 			p.Changes = tc.build(t, f, sf)
-			_, err := f.cm.buildHandoffPlanFromState(f.next, f.parent, f.state, p)
+			_, err := f.cm.buildHandoffPlanFromState(f.next, f.state, p)
 			require.ErrorIs(t, err, ErrHandoffApproval)
 			require.ErrorIs(t, err, tc.want)
 			require.Empty(t, f.cm.handoffPlans, "a refused proposal leaves no endorsement state")
@@ -397,7 +411,7 @@ func TestOperatorBuildsAndVerifiesAnAggregatorKeyReplacement(t *testing.T) {
 		f.state.CommittedHead.ShardInfo[1].IRTR.Epoch = 1
 		p := f.proposal(t)
 		p.Changes = []evmassign.Change{change(t, f, sf, sf.conf, nil)}
-		_, err := f.cm.buildHandoffPlanFromState(f.next, f.parent, f.state, p)
+		_, err := f.cm.buildHandoffPlanFromState(f.next, f.state, p)
 		require.ErrorIs(t, err, storage.ErrAssignmentAckPending)
 	})
 }

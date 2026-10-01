@@ -105,7 +105,6 @@ func (p pendingAssignment) supersedeWith(t *testing.T, binding *evmassign.Supers
 	f.predecessor = p.body1
 	f.pop = evmassign.PoPContext{Network: 5, Attempt: 0}
 	copy(f.pop.Predecessor[:], p.body1)
-	copy(f.pop.Parent[:], f.parent)
 	f.base = base
 	built := f.build(t, f.candidate(t))
 	return supersession{p: p, built: built, preimage: built.preimage}
