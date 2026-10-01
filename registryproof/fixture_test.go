@@ -83,6 +83,7 @@ type spec struct {
 	codeHash *common.Hash      // nil: registryCodeHash
 	absent   bool              // no account at RegistryAddress
 	fillers  int               // other accounts in the state trie
+	layout   uint64            // registry layout; zero is v1
 	header   func(*types.Header)
 }
 
@@ -122,8 +123,10 @@ func cancunHeader(number uint64, parent, root common.Hash) *types.Header {
 }
 
 func build(t testing.TB, s spec) block {
+	lay, err := layoutFor(s.layout)
+	require.NoError(t, err)
 	storage := newTrie()
-	for i, name := range SlotNames {
+	for i, name := range lay.names {
 		v, ok := s.raw[name]
 		if !ok {
 			if w := s.words[name]; w != (common.Hash{}) {
@@ -133,7 +136,7 @@ func build(t testing.TB, s spec) block {
 			}
 		}
 		if v != nil {
-			require.NoError(t, storage.Update(trieSlotKeys[i], v))
+			require.NoError(t, storage.Update(lay.trieKeys[i], v))
 		}
 	}
 	storageRoot := storage.Hash()
@@ -166,9 +169,9 @@ func build(t testing.TB, s spec) block {
 	require.NoError(t, err)
 	require.Equal(t, h.Hash(), crypto.Keccak256Hash(enc), "fixture: the header hash is Keccak-256 of its RLP")
 
-	ev := Evidence{Header: enc, AccountProof: prove(t, state, accountTrieKey), StorageProofs: make([][][]byte, FieldCount)}
-	for i := range SlotNames {
-		ev.StorageProofs[i] = prove(t, storage, trieSlotKeys[i])
+	ev := Evidence{Header: enc, AccountProof: prove(t, state, accountTrieKey), StorageProofs: make([][][]byte, len(lay.names))}
+	for i := range lay.names {
+		ev.StorageProofs[i] = prove(t, storage, lay.trieKeys[i])
 	}
 	return block{hash: h.Hash(), number: s.number, stateRoot: stateRoot, storageRoot: storageRoot, ev: ev, state: state, storage: storage}
 }

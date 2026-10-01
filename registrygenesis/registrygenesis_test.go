@@ -56,7 +56,7 @@ func TestPinnedArtifact(t *testing.T) {
 func TestTamperedArtifactIsRefused(t *testing.T) {
 	var base map[string]any
 	require.NoError(t, json.Unmarshal(pinnedArtifactJSON, &base))
-	_, err := parseArtifact(pinnedArtifactJSON)
+	_, err := parseArtifact(pinnedArtifactJSON, 1)
 	require.NoError(t, err, "premise: the embedded artifact parses")
 
 	for name, change := range map[string]func(m map[string]any){
@@ -77,7 +77,7 @@ func TestTamperedArtifactIsRefused(t *testing.T) {
 			change(m)
 			raw, err := json.Marshal(m)
 			require.NoError(t, err)
-			_, err = parseArtifact(raw)
+			_, err = parseArtifact(raw, 1)
 			require.ErrorIs(t, err, ErrArtifact)
 		})
 	}

@@ -239,9 +239,11 @@ func ValidateFinalizedGenesisJSON(full *bfttypes.PartitionDescriptionRecord, pin
 
 func registryAccount(g *Genesis, art Artifact) importedAccount {
 	s := make(map[common.Hash]common.Hash)
-	for i, n := range registryproof.SlotNames {
+	names, _ := registryproof.SlotNamesFor(g.record.layoutVersion())
+	for i, n := range names {
 		if v := g.storage[n]; v != (common.Hash{}) {
-			s[registryproof.SlotKey(i)] = v
+			k, _ := registryproof.SlotKeyFor(g.record.layoutVersion(), i)
+			s[k] = v
 		}
 	}
 	return importedAccount{balance: new(big.Int), code: bytes.Clone(art.RuntimeCode), storage: s}
@@ -345,13 +347,20 @@ func rebuildImported(g *Genesis, in *importedGenesis, l GenesisJSONLimits) error
 	if err = state.Prove(path, &ap); err != nil {
 		return err
 	}
-	g.evidence = registryproof.Evidence{Header: bytes.Clone(g.header), AccountProof: ap, StorageProofs: make([][][]byte, registryproof.FieldCount)}
+	fields, err := registryproof.FieldCountFor(g.record.layoutVersion())
+	if err != nil {
+		return err
+	}
+	g.evidence = registryproof.Evidence{Header: bytes.Clone(g.header), AccountProof: ap, StorageProofs: make([][][]byte, fields)}
 	if registryStorage == nil {
 		return fmt.Errorf("%w: registry absent", ErrReservedAccount)
 	}
-	for i := range registryproof.SlotNames {
+	for i := 0; i < fields; i++ {
 		var p nodeList
-		k := registryproof.SlotKey(i)
+		k, err := registryproof.SlotKeyFor(g.record.layoutVersion(), i)
+		if err != nil {
+			return err
+		}
 		if err = registryStorage.trie.Prove(crypto.Keccak256(k[:]), &p); err != nil {
 			return err
 		}
