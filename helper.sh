@@ -101,7 +101,12 @@ function start_root_nodes() {
     fi
 
     local profileArgs=()
-    if [ "${M2_PROFILE2:-0}" = 1 ]; then profileArgs=(--profile-2); fi
+    if [ "${M2_PROFILE2:-0}" = 1 ]; then
+      profileArgs=(--profile-2)
+      # Under the handoff profile PUT /api/v1/configurations is refused (#329): the genesis shard
+      # configurations are fixed at start, so hand every one of them over by flag.
+      for shardConf in test-nodes/shard-conf-*; do profileArgs+=(--shard-conf "$shardConf"); done
+    fi
     build/ubft root-node run \
                     --home test-nodes/root$i \
                     --address "/ip4/127.0.0.1/tcp/$p2pPort" \
@@ -127,7 +132,7 @@ function start_root_nodes() {
       exit
     fi
 
-    if ls test-nodes/shard-conf-* >/dev/null 2>&1; then
+    if [ "${M2_PROFILE2:-0}" != 1 ] && ls test-nodes/shard-conf-* >/dev/null 2>&1; then
       # uplaod all shard confs
       for shardConf in test-nodes/shard-conf-*
       do
