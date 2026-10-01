@@ -1,6 +1,7 @@
 package handoffbundle
 
 import (
+	"crypto/sha256"
 	"bytes"
 	"crypto"
 	"fmt"
@@ -32,7 +33,11 @@ type Fixture struct {
 	Nodes     []*testutils.TestNode
 }
 
-func New(t *testing.T) Fixture {
+func New(t *testing.T) Fixture { return NewBound(t, nil) }
+
+// NewBound builds the fixture with the successor body binding the digest of the given candidate preimage; nil binds the
+// root-members-only operator candidate. The preimage itself is not delivered: the caller attaches it to the Bundle.
+func NewBound(t *testing.T, preimage []byte) Fixture {
 	t.Helper()
 	oldNodes := make([]*testutils.TestNode, 4)
 	oldSigners := make(map[string]abcrypto.Signer, 4)
@@ -59,6 +64,13 @@ func New(t *testing.T) Fixture {
 	}
 	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: uint64(old.NetworkID), Epoch: 2,
 		EarliestActivation: 7, Members: members, RootThreshold: 3, PredecessorHash: link}
+	// A root-members-only handoff: the body binds the candidate digest every holder of the body can recompute.
+	operatorDigest, err := evmroot.D4OperatorCandidateDigest(body.Members)
+	require.NoError(t, err)
+	if preimage != nil {
+		operatorDigest = sha256.Sum256(preimage)
+	}
+	body.ChangeRecordHash = evmroot.D4CandidateContextHash(uint64(old.NetworkID), oldID, 0, operatorDigest[:], body.EarliestActivation)
 	require.NoError(t, body.Validate())
 	bodyID := body.Identity()
 	_, shardValidators := testutils.CreateTestNodes(t, 3)
@@ -129,6 +141,9 @@ func Next(t *testing.T, first Fixture, old *types.RootTrustBaseV1) Fixture {
 	body.Members[1].NodeID = nextNodes[1].PeerConf.ID.String()
 	body.Members[1].ConsensusKey, err = verifier.MarshalPublicKey()
 	require.NoError(t, err)
+	operatorDigest, err := evmroot.D4OperatorCandidateDigest(body.Members)
+	require.NoError(t, err)
+	body.ChangeRecordHash = evmroot.D4CandidateContextHash(first.Body.NetworkID, priorID[:], 0, operatorDigest[:], body.EarliestActivation)
 	require.NoError(t, body.Validate())
 	bodyID := body.Identity()
 	state := *first.State

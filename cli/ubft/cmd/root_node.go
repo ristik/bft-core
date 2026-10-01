@@ -207,10 +207,8 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err != nil {
 		return fmt.Errorf("failed to load shard confs: %w", err)
 	}
-	for _, shardConf := range shardConfs {
-		if err := orchestration.AddShardConfig(shardConf); err != nil {
-			return fmt.Errorf("failed to add shard conf for partition: %d, %w", shardConf.PartitionID, err)
-		}
+	if err := loadShardConfs(orchestration, flags.Profile2, shardConfs); err != nil {
+		return err
 	}
 
 	signer, err := keyConf.Signer()
@@ -572,4 +570,19 @@ func getRoundInfoHandler(getState func() (*abdrc.StateMsg, error), obs Observabi
 			obs.Logger().Warn(fmt.Sprintf("GET roundInfo request: failed to write response: %v", err))
 		}
 	}
+}
+
+// loadShardConfs installs the locally configured shard configurations. Under the handoff profile the profile's guards
+// must already be on: they are the only thing refusing a local EVM entry that differs from the stored genesis one (a
+// wrong-key file would otherwise silently replace the history every derived assignment extends).
+func loadShardConfs(orchestration *partitions.Orchestration, handoffProfile bool, shardConfs []*types.PartitionDescriptionRecord) error {
+	if handoffProfile {
+		orchestration.EnableHandoffProfile()
+	}
+	for _, shardConf := range shardConfs {
+		if err := orchestration.AddShardConfig(shardConf); err != nil {
+			return fmt.Errorf("failed to add shard conf for partition: %d, %w", shardConf.PartitionID, err)
+		}
+	}
+	return nil
 }

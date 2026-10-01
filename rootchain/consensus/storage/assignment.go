@@ -92,15 +92,7 @@ func successorTechnicalRecord(si *ShardInfo, pdr *types.PartitionDescriptionReco
 // candidateActivatedPDR decodes a verified preimage and applies the committed
 // activation round.
 func candidateActivatedPDR(preimage []byte, activation uint64) (evmassign.Candidate, *types.PartitionDescriptionRecord, error) {
-	c, err := evmassign.DecodeCandidate(preimage)
-	if err != nil {
-		return c, nil, errors.Join(ErrAssignmentHistory, err)
-	}
-	succ, err := c.Successor()
-	if err != nil {
-		return c, nil, errors.Join(ErrAssignmentHistory, err)
-	}
-	pdr, err := evmassign.Activate(succ, activation)
+	c, pdr, err := evmassign.ActivatedFromPreimage(preimage, activation)
 	if err != nil {
 		return c, nil, errors.Join(ErrAssignmentHistory, err)
 	}

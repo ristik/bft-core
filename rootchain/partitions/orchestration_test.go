@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
@@ -260,4 +261,25 @@ func TestNewOrchestration_Sync(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = throwaway.Close() })
 	require.True(t, throwaway.db.NoSync, "WithNoSync must disable syncing")
+}
+
+// Under the handoff profile a local entry for the designated EVM shard that differs from the stored genesis one (a
+// wrong-key file, say) is refused: the profile guards are the only thing standing between it and the history every
+// derived assignment extends. Re-supplying the identical genesis entry stays idempotent.
+func TestHandoffProfileRefusesAWrongKeyEVMGenesisEntry(t *testing.T) {
+	o, err := NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), logger.New(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Close() })
+	o.EnableHandoffProfile()
+	genesis := createShardConf(t, 8, types.ShardID{}, 1)
+	genesis.PartitionTypeID = evmassign.EVMPartitionTypeID
+	require.NoError(t, o.AddShardConfig(genesis))
+	require.NoError(t, o.AddShardConfig(genesis), "the identical genesis entry is idempotent")
+
+	wrongKey := createShardConf(t, 8, types.ShardID{}, 1) // same activation key, different validator
+	wrongKey.PartitionTypeID = evmassign.EVMPartitionTypeID
+	require.ErrorIs(t, o.AddShardConfig(wrongKey), ErrDerivedConflict)
+	stored, err := o.ShardConfig(8, types.ShardID{}, 1)
+	require.NoError(t, err)
+	require.Equal(t, genesis.Validators[0].SigKey, stored.Validators[0].SigKey, "the stored genesis entry is untouched")
 }

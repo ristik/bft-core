@@ -95,3 +95,19 @@ func TestBundleCandidateMustMatchTheSuccessorBodyAndCodecsAreStrict(t *testing.T
 	_, err = DecodeBundle(append(legacy, 0))
 	require.ErrorIs(t, err, ErrBundle)
 }
+
+// A byzantine root cannot strip the candidate from an EVM assignment step: the successor body binds the candidate digest,
+// so the bundle without it is refused by Verify itself, before anything is persisted.
+func TestVerifyRequiresTheCandidateTheBodyBinds(t *testing.T) {
+	preimage := []byte("an assignment candidate the successor body binds")
+	f := handoffbundle.NewBound(t, preimage)
+	stripped := Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot}
+	_, err := Verify(stripped, f.Old, f.Partition, f.Shard, f.ConfHash)
+	require.ErrorIs(t, err, ErrBundle)
+	require.ErrorContains(t, err, "change record")
+	// With the preimage the change record matches; the failure is then the preimage itself, not the binding.
+	stripped.Candidate = preimage
+	_, err = Verify(stripped, f.Old, f.Partition, f.Shard, f.ConfHash)
+	require.ErrorIs(t, err, ErrBundle)
+	require.NotContains(t, err.Error(), "change record")
+}

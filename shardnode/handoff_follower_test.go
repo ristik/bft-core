@@ -149,6 +149,7 @@ func TestHandoffFollowerStartsAfterActiveEpoch(t *testing.T) {
 			for _, epoch := range []uint64{2, 3} {
 				require.NoError(t, f.save(epoch, handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{Epoch: epoch}}))
 			}
+			f.replayed = true // the durable epochs were replayed by Restore, as in the node's startup order
 			require.NoError(t, f.Run(ctx))
 			require.Equal(t, []uint64{tc.want}, history.installed)
 		})

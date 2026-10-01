@@ -74,6 +74,9 @@ type Verified struct {
 	Genesis evmroot.EpochGenesis
 	Record  handoff.VerifiedRecord
 	Shard   abdrc.ShardInfo
+	// NextConfHash is the full shard configuration hash the root certifies once this handoff activates: the
+	// activated assignment's for an EVM assignment step, otherwise the unchanged expected hash.
+	NextConfHash []byte
 }
 
 // Verify requires the caller's authenticated old trust base and exact local
@@ -90,11 +93,29 @@ func Verify(bundle Bundle, old *types.RootTrustBaseV1, partition types.Partition
 	if err != nil {
 		return Verified{}, fmt.Errorf("%w: successor body: %v", ErrBundle, err)
 	}
+	// The successor body binds exactly one candidate. A handoff that changes only the root members has no delivered
+	// preimage: its digest is recomputable from the body, so a candidate cannot be dropped from an assignment step.
+	r := bundle.Proof.Record
+	var digest [32]byte
 	if len(bundle.Candidate) != 0 {
-		digest := sha256.Sum256(bundle.Candidate)
-		r := bundle.Proof.Record
-		if !bytes.Equal(bundle.Body.ChangeRecordHash, evmroot.D4CandidateContextHash(r.Network, r.PredecessorBodyID, r.Attempt, digest[:], bundle.Body.EarliestActivation)) {
-			return Verified{}, fmt.Errorf("%w: candidate does not match the successor body's change record", ErrBundle)
+		digest = sha256.Sum256(bundle.Candidate)
+	} else {
+		var derr error
+		if digest, derr = evmroot.D4OperatorCandidateDigest(bundle.Body.Members); derr != nil {
+			return Verified{}, fmt.Errorf("%w: operator candidate: %v", ErrBundle, derr)
+		}
+	}
+	if !bytes.Equal(bundle.Body.ChangeRecordHash, evmroot.D4CandidateContextHash(r.Network, r.PredecessorBodyID, r.Attempt, digest[:], bundle.Body.EarliestActivation)) {
+		return Verified{}, fmt.Errorf("%w: candidate does not match the successor body's change record", ErrBundle)
+	}
+	nextConf := bytes.Clone(shardConfHash)
+	if len(bundle.Candidate) != 0 {
+		_, activated, derr := evmassign.ActivatedFromPreimage(bundle.Candidate, r.ActivationRound)
+		if derr != nil {
+			return Verified{}, fmt.Errorf("%w: candidate: %v", ErrBundle, derr)
+		}
+		if nextConf, derr = activated.Hash(crypto.SHA256); derr != nil || len(nextConf) != 32 {
+			return Verified{}, fmt.Errorf("%w: activated configuration hash", ErrBundle)
 		}
 	}
 	s := bundle.Snapshot
@@ -116,7 +137,7 @@ func Verify(bundle Bundle, old *types.RootTrustBaseV1, partition types.Partition
 		!bytes.Equal(target.ShardConfHash, shardConfHash) {
 		return Verified{}, ErrBundle
 	}
-	return Verified{Genesis: g, Record: v, Shard: *target}, nil
+	return Verified{Genesis: g, Record: v, Shard: *target, NextConfHash: nextConf}, nil
 }
 
 func snapshotRoot(s *abdrc.CommittedBlock, partition types.PartitionID, shard types.ShardID) ([]byte, *abdrc.ShardInfo, error) {

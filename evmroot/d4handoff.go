@@ -571,6 +571,19 @@ func D4PreFreezeSummary(network uint64, predecessor []byte, attempt, round uint6
 	return h[:]
 }
 
+// D4OperatorCandidateDigest is the candidate digest of a handoff that changes only the root members (no EVM
+// assignment): the hash of the operator candidate wire for the successor members. Everyone holding the successor
+// body can recompute it, so a bundle for such a handoff needs no separately delivered candidate.
+func D4OperatorCandidateDigest(members WeightSet) ([32]byte, error) {
+	sorted := append(WeightSet(nil), members...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].NodeID < sorted[j].NodeID })
+	wire, err := base.Cbor.Marshal([]any{"UNICITY_D4_OPERATOR_CANDIDATE", uint64(1), sorted})
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(wire), nil
+}
+
 func D4CandidateContextHash(network uint64, predecessor []byte, attempt uint64, candidate []byte, aMin uint64) []byte {
 	h := sha256.Sum256(marshalCBOR(cArray{cText("UNICITY_HANDOFF_CANDIDATE_CONTEXT"), cUint(1), cUint(network), cBytes(predecessor), cUint(attempt), cBytes(candidate), cUint(aMin)}))
 	return h[:]

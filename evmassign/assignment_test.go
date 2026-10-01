@@ -2,6 +2,7 @@ package evmassign
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/sha256"
 	"fmt"
 	"testing"
@@ -397,4 +398,34 @@ func TestActivateSetsOnlyTheActivationRound(t *testing.T) {
 	full0, _ := PDRHash(f.succ)
 	full1, _ := PDRHash(act)
 	require.NotEqual(t, full0, full1, "the full configuration hash a certificate commits to includes the activation round")
+}
+
+// Shard nodes following handoffs derive the configuration hash the root certifies after an assignment step from the
+// candidate alone: the successor with the committed activation round, hashed in full.
+func TestActivatedFromPreimageDerivesTheCertifiedConfigurationHash(t *testing.T) {
+	f := newFixture(t)
+	c := f.candidate(t)
+	raw, err := c.Encode()
+	require.NoError(t, err)
+	_, activated, err := ActivatedFromPreimage(raw, 40)
+	require.NoError(t, err)
+	require.Equal(t, f.succ.Epoch, activated.Epoch)
+	require.Equal(t, uint64(40), activated.EpochStart)
+	want, err := Activate(f.succ, 40)
+	require.NoError(t, err)
+	wantHash, err := want.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	gotHash, err := activated.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, wantHash, gotHash)
+	currentHash, err := f.current.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	require.NotEqual(t, currentHash, gotHash, "the follower's expected hash really changes at an assignment step")
+	_, other, err := ActivatedFromPreimage(raw, 41)
+	require.NoError(t, err)
+	otherHash, err := other.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	require.NotEqual(t, gotHash, otherHash, "the activation round is part of the certified hash")
+	_, _, err = ActivatedFromPreimage([]byte("garbage"), 40)
+	require.Error(t, err)
 }

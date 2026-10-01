@@ -361,3 +361,23 @@ func VerifyChain(s *Supersession, c Chain) error {
 	}
 	return nil
 }
+
+// ActivatedFromPreimage decodes a candidate preimage and applies the committed
+// activation round: the configuration the shard runs from that round, whose
+// Hash is the shard configuration hash the root certifies afterwards. It is
+// the one derivation shared by the root and by shard nodes following handoffs.
+func ActivatedFromPreimage(preimage []byte, activation uint64) (Candidate, *types.PartitionDescriptionRecord, error) {
+	c, err := DecodeCandidate(preimage)
+	if err != nil {
+		return c, nil, err
+	}
+	succ, err := c.Successor()
+	if err != nil {
+		return c, nil, err
+	}
+	pdr, err := Activate(succ, activation)
+	if err != nil {
+		return c, nil, err
+	}
+	return c, pdr, nil
+}

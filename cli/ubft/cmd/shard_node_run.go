@@ -719,7 +719,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						verified.Shard.UC.GetRoundNumber() != verified.Shard.IR.RoundNumber {
 						return errors.New("verified handoff lacks the terminal shard certificate")
 					}
-					terminal, err := rootinput.AuthenticateObservationV2(ctx, journalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
+					// The terminal certificate belongs to the epoch this handoff ends, whose configuration is the one the
+					// verified snapshot carries (checked against the followed assignment), not the genesis configuration.
+					terminalCtx := journalCtx
+					terminalCtx.Observation.ShardConfHash = bytes.Clone(verified.Shard.ShardConfHash)
+					terminal, err := rootinput.AuthenticateObservationV2(ctx, terminalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
 					if err != nil {
 						return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
 					}
@@ -728,7 +732,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						tr := *verified.Shard.TR
 						restoredHandoffTerminals = append(restoredHandoffTerminals, handoffTerminalCertificate{uc: &uc, tr: &tr})
 					} else {
-						prepared, _, err := journalStore.PrepareObservation(ctx, journalCtx, terminal)
+						prepared, _, err := journalStore.PrepareObservation(ctx, terminalCtx, terminal)
 						if err != nil {
 							return fmt.Errorf("preparing handoff terminal certificate: %w", err)
 						}
