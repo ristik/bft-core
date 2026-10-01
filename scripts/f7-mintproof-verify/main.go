@@ -36,6 +36,8 @@ func run(args []string) int {
 	bundlePath := flags.String("bundle", "", "MintReasonBundleV1 CBOR file")
 	trustBasePath := flags.String("trust-base", "", "epoch RootTrustBaseV1 JSON file")
 	mode := flags.String("mode", "", "fixed demo predicate: locked or absent")
+	genesisConf := flags.String("genesis-conf", "", "JSON of the genesis full shard configuration (the immutable deployment pin); required for a version 2 (PDR-carrying) bundle")
+	lockContract := flags.String("lock-contract", "", "lock contract address (default: the demo deployment's)")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -55,8 +57,24 @@ func run(args []string) int {
 	if err = json.Unmarshal(trustRaw, trustBase); err != nil {
 		return fail(fmt.Errorf("decode epoch trust base: %w", err))
 	}
-	bundle, err := mintproof.DecodeBundle(bundleRaw, mintproof.DefaultLimits())
-	if err != nil {
+	var pin mintproof.GenesisPin
+	if *genesisConf != "" {
+		rawConf, readErr := os.ReadFile(*genesisConf)
+		if readErr != nil {
+			return fail(readErr)
+		}
+		pin.Genesis = new(types.PartitionDescriptionRecord)
+		if err = json.Unmarshal(rawConf, pin.Genesis); err != nil {
+			return fail(fmt.Errorf("decode genesis configuration: %w", err))
+		}
+	}
+	var bundle mintproof.MintReasonBundleV1
+	if v2, v2err := mintproof.DecodeBundleV2(bundleRaw, mintproof.DefaultLimits()); v2err == nil {
+		bundle = v2.MintReasonBundleV1
+		if pin.Genesis == nil {
+			return fail(errors.New("a version 2 bundle needs --genesis-conf"))
+		}
+	} else if bundle, err = mintproof.DecodeBundle(bundleRaw, mintproof.DefaultLimits()); err != nil {
 		return fail(err)
 	}
 	if bundle.Evidence.Absence != (*mode == "absent") {
@@ -67,6 +85,9 @@ func run(args []string) int {
 		return fail(errors.New("bundle has an invalid EVM header"))
 	}
 	lockAddress := crypto.CreateAddress(common.HexToAddress(demoSender), lockDeployNonce)
+	if *lockContract != "" {
+		lockAddress = common.HexToAddress(*lockContract)
+	}
 	eventSignature := lockedEventName
 	if *mode == "absent" {
 		eventSignature = unlockedEventName
@@ -79,8 +100,8 @@ func run(args []string) int {
 		// untrusted bundle metadata. The full shard-conf hash varies with each freshly enrolled
 		// validator set; it is bound into the signed UC and checked by Verify against the same bundle.
 		Network: types.NetworkID(demoNetworkID), Partition: types.PartitionID(demoPartitionID),
-		Shard: []byte{demoShardID}, ShardConf: bundle.Context.ShardConf,
-		BlockHash: blockHash, BlockNumber: header.Number.Uint64(),
+		Shard: []byte{demoShardID}, ShardConf: shardConfPin(bundle, pin),
+		BlockHash: blockHash, BlockNumber: header.Number.Uint64(), Pin: pin,
 		MatchLog: func(log *gethtypes.Log) bool {
 			return log.Address == lockAddress && len(log.Topics) > 0 && log.Topics[0] == eventTopic
 		},
@@ -103,4 +124,13 @@ func run(args []string) int {
 func fail(err error) int {
 	fmt.Fprintln(os.Stderr, "f7-mintproof-verify: FAIL:", err)
 	return 1
+}
+
+// shardConfPin is the exact configuration pin: the bundle's own for a version 1 bundle, none for a
+// PDR-carrying one (the genesis pin and the carried PDR decide instead).
+func shardConfPin(b mintproof.MintReasonBundleV1, pin mintproof.GenesisPin) [32]byte {
+	if pin.Genesis != nil {
+		return [32]byte{}
+	}
+	return b.Context.ShardConf
 }

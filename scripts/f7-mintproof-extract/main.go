@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/archivewiring"
 	"github.com/unicitynetwork/bft-core/mintproof"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 func main() { os.Exit(run(os.Args[1:])) }
@@ -37,6 +39,7 @@ func run(args []string) int {
 	emitterText := flags.String("emitter", "", "expected lock contract address")
 	topicText := flags.String("topic", "", "expected event topic")
 	absence := flags.Bool("absence", false, "extract the complete receipt list for an absence proof")
+	configPDR := flags.String("config-pdr", "", "JSON of the full configuration (PDR) the block's certificate commits to: writes a version 2 bundle (needed after an EVM assignment change)")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -53,9 +56,27 @@ func run(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	var bundle mintproof.MintReasonBundleV1
+	var pdr *types.PartitionDescriptionRecord
+	if *configPDR != "" {
+		rawPDR, readErr := os.ReadFile(*configPDR)
+		if readErr != nil {
+			return fail(readErr)
+		}
+		pdr = new(types.PartitionDescriptionRecord)
+		if err = json.Unmarshal(rawPDR, pdr); err != nil {
+			return fail(fmt.Errorf("decode --config-pdr: %w", err))
+		}
+	}
+	var bundle interface{ MarshalCBOR() ([]byte, error) }
+	extract := func(req mintproof.ExtractRequest) (interface{ MarshalCBOR() ([]byte, error) }, error) {
+		if pdr == nil {
+			return mintproof.Extract(store, req)
+		}
+		req.ConfigPDR = pdr
+		return mintproof.ExtractV2(store, req)
+	}
 	if *absence {
-		bundle, err = mintproof.Extract(store, mintproof.ExtractRequest{Archive: request, Absence: true})
+		bundle, err = extract(mintproof.ExtractRequest{Archive: request, Absence: true})
 	} else {
 		if !common.IsHexAddress(*emitterText) || !validHash(*topicText) {
 			return fail(errors.New("positive extraction requires --emitter and --topic"))
@@ -95,7 +116,7 @@ func run(args []string) int {
 		if target == nil || target.Address != common.HexToAddress(*emitterText) || len(target.Topics) == 0 || target.Topics[0] != common.HexToHash(*topicText) {
 			return fail(errors.New("selected archived log does not match expected emitter and topic"))
 		}
-		bundle, err = mintproof.Extract(store, mintproof.ExtractRequest{Archive: request, TxIndex: *txIndex, LogIndex: localLogIndex})
+		bundle, err = extract(mintproof.ExtractRequest{Archive: request, TxIndex: *txIndex, LogIndex: localLogIndex})
 	}
 	if err != nil {
 		return fail(err)

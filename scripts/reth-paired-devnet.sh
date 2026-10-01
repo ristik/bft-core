@@ -712,7 +712,10 @@ cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
 if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_prepare; fi
 # Both the standalone H4 probe and the M2a final lane need persistent archive
 # publication before they stop validator 1; M2a restores it after Handoff 2.
-if [ "${H4_RESTORE_PROBE:-0}" = 1 ] || [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
+if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then
+  export EVM_ARCHIVE_ROOT=test-nodes/h3-archives
+  mkdir -p "$EVM_ARCHIVE_ROOT"
+elif [ "${H4_RESTORE_PROBE:-0}" = 1 ] || [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   export EVM_ARCHIVE_ROOT=test-nodes/h4-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
 elif [ "$postM2aMode" = f7 ]; then
@@ -720,6 +723,7 @@ elif [ "$postM2aMode" = f7 ]; then
   mkdir -p "$EVM_ARCHIVE_ROOT"
 fi
 export EVM_GENESIS_FILE="$chainSpec"
+if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then export EVM_REGISTRY_LAYOUT=2; fi
 export EVM_FULL_SHARD_CONF="test-nodes/shard-conf-${partitionID}_0.json"
 export EVM_ENGINE_FEE_COLLECTOR="${POST_M2A_FEE_COLLECTOR:-$URETH_PIN_FEE_COLLECTOR}"
 if [ -n "$postM2aMode" ]; then export EVM_OPERATOR_STATUS_RPC=1; fi
@@ -851,9 +855,16 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
     f8_inflight_evm_probe || { fail "EVM proposal did not certify during root leader rotation"; exit 1; }
     pass "aggregators continued through delayed/stopped EVM; reconnect and in-flight EVM proposal passed"
   fi
-  if ! source scripts/m2-profile2-handoffs.sh; then
+  handoffScript=scripts/m2-profile2-handoffs.sh
+  if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then handoffScript=scripts/h3-assignment-steps.sh; fi
+  if ! source "$handoffScript"; then
     fail "profile-2 two-handoff lane failed"
     exit 1
+  fi
+  if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then
+    # The H3 lane makes its own agreement checks; the D1 monitor below assumes every validator stays live.
+    echo "H3 lane failures: $failures"
+    [ "$failures" -eq 0 ] && exit 0 || exit 1
   fi
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     f8_trace || { fail "aggregator shards lost root coverage after handoff"; exit 1; }
