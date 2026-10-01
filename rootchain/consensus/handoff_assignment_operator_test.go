@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -46,6 +47,7 @@ func newEVMSigner(t *testing.T, id string) evmSigner {
 type operatorAssignmentFixture struct {
 	cm          *ConsensusManager
 	old, next   *types.RootTrustBaseV1
+	sameRoot    *types.RootTrustBaseV1 // root epoch 2 with the committee unchanged (a configuration-only boundary)
 	state       *abdrc.StateMsg
 	parent      []byte
 	current     *types.PartitionDescriptionRecord
@@ -76,7 +78,7 @@ func newOperatorAssignmentFixture(t *testing.T) *operatorAssignmentFixture {
 	}
 	f.current = &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 8,
 		TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 5 * time.Second, Epoch: 0, EpochStart: 1,
-		PartitionParams: map[string]string{"seal_registry_genesis": "g"}, Validators: infos}
+		PartitionParams: map[string]string{"seal_registry_genesis": "g", evmassign.CouplingParam: "true"}, Validators: infos}
 	require.NoError(t, orchestration.AddShardConfig(f.current))
 
 	signers := map[string]abcrypto.Signer{f.node.PeerConf.ID.String(): f.node.Signer}
@@ -95,8 +97,18 @@ func newOperatorAssignmentFixture(t *testing.T) *operatorAssignmentFixture {
 	f.cm, err = NewConsensusManager(f.node.PeerConf.ID, store, orchestration, testnetwork.NewRootMockNetwork(), f.node.Signer, db, obs,
 		WithConsensusParams(params), WithRecoveryProfile2(history))
 	require.NoError(t, err)
-	next := *f.old
-	next.Epoch = 2 // EVM-only rotation: identical root members, root epoch still advances
+	same := *f.old
+	same.Epoch = 2 // identical root members, root epoch still advances
+	f.sameRoot = &same
+	// The coupled change: one root entity is replaced together with the EVM assignment.
+	next := same
+	next.RootNodes = append([]*types.NodeInfo(nil), f.old.RootNodes...)
+	replacement := testutils.NewTestNode(t)
+	rv, err := replacement.Signer.Verifier()
+	require.NoError(t, err)
+	rkey, err := rv.MarshalPublicKey()
+	require.NoError(t, err)
+	next.RootNodes[3] = &types.NodeInfo{NodeID: replacement.PeerConf.ID.String(), SigKey: rkey, Stake: 1}
 	f.next = &next
 	f.state, err = f.cm.blockStore.GetState()
 	require.NoError(t, err)
@@ -106,6 +118,31 @@ func newOperatorAssignmentFixture(t *testing.T) *operatorAssignmentFixture {
 
 	f.nextKeys = []evmSigner{f.oldKeys[0], newEVMSigner(t, "ev-e"), newEVMSigner(t, "ev-f"), newEVMSigner(t, "ev-g")}
 	return f
+}
+
+// bindings pairs the sorted committee of next with the successor validators in order.
+func (f *operatorAssignmentFixture) bindings(succ *types.PartitionDescriptionRecord, next *types.RootTrustBaseV1) []evmassign.Binding {
+	ids := make([]string, 0, len(next.RootNodes))
+	for _, n := range next.RootNodes {
+		ids = append(ids, n.NodeID)
+	}
+	sort.Strings(ids)
+	out := make([]evmassign.Binding, len(ids))
+	for i, id := range ids {
+		out[i] = evmassign.Binding{RootNodeID: id, EVMNodeID: succ.Validators[i].NodeID}
+	}
+	return out
+}
+
+func (f *operatorAssignmentFixture) succForBindings(t *testing.T) *types.PartitionDescriptionRecord {
+	t.Helper()
+	infos := make([]*types.NodeInfo, 0, len(f.nextKeys))
+	for _, k := range f.nextKeys {
+		infos = append(infos, k.info)
+	}
+	succ, err := evmassign.NewSuccessor(f.current, infos)
+	require.NoError(t, err)
+	return succ
 }
 
 func (f *operatorAssignmentFixture) proposal(t *testing.T, mutate ...func(*evmassign.PoPContext)) *evmassign.Proposal {
@@ -122,7 +159,7 @@ func (f *operatorAssignmentFixture) proposal(t *testing.T, mutate ...func(*evmas
 	for _, m := range mutate {
 		m(&ctx)
 	}
-	p := &evmassign.Proposal{Validators: infos}
+	p := &evmassign.Proposal{Validators: infos, Bindings: f.bindings(succ, f.next)}
 	for _, v := range succ.Validators {
 		for _, k := range f.nextKeys {
 			if k.id == v.NodeID {
@@ -157,8 +194,8 @@ func TestOperatorBuildsAssignmentCandidateAndEndorsersVerifyIt(t *testing.T) {
 	_, _, err = f.cm.validateHandoffApproval(&tampered)
 	require.ErrorIs(t, err, ErrHandoffApproval)
 
-	// A root-only plan carries no preimage and keeps the legacy candidate hash.
-	root, err := f.cm.buildHandoffPlanFromState(f.next, f.parent, f.state, nil)
+	// A root-only plan (same committee) carries no preimage and keeps the legacy candidate hash.
+	root, err := f.cm.buildHandoffPlanFromState(f.sameRoot, f.parent, f.state, nil)
 	require.NoError(t, err)
 	require.Empty(t, root.CandidatePreimage)
 	require.NotEqual(t, plan.Candidate, root.Candidate)
@@ -184,17 +221,21 @@ func TestOperatorRefusesBadAssignmentProposalsBeforeAnyEndorsement(t *testing.T)
 		{"PoP for another predecessor", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
 			return f.next, f.state, f.proposal(t, func(c *evmassign.PoPContext) { c.Predecessor = [32]byte{1} })
 		}, evmassign.ErrPoP},
-		{"combined root and EVM change", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
-			changed := *f.next
-			changed.RootNodes = append([]*types.NodeInfo(nil), f.next.RootNodes...)
-			replacement := testutils.NewTestNode(t)
-			v, err := replacement.Signer.Verifier()
-			require.NoError(t, err)
-			key, err := v.MarshalPublicKey()
-			require.NoError(t, err)
-			changed.RootNodes[3] = &types.NodeInfo{NodeID: replacement.PeerConf.ID.String(), SigKey: key, Stake: 1}
-			return &changed, f.state, f.proposal(t)
-		}, evmassign.ErrCombined},
+		{"EVM-only change (committee unchanged)", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
+			p := f.proposal(t)
+			p.Bindings = f.bindings(f.succForBindings(t), f.sameRoot)
+			return f.sameRoot, f.state, p
+		}, evmassign.ErrEVMOnly},
+		{"root entity without its EVM binding", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
+			p := f.proposal(t)
+			p.Bindings = p.Bindings[:len(p.Bindings)-1]
+			return f.next, f.state, p
+		}, evmassign.ErrCoupling},
+		{"binding to an EVM key that is not in the set", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
+			p := f.proposal(t)
+			p.Bindings[0].EVMNodeID = "nobody"
+			return f.next, f.state, p
+		}, evmassign.ErrCoupling},
 		{"acknowledgement still pending", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
 			f.state.CommittedHead.ShardInfo[0].IRTR.Epoch = 1
 			return f.next, f.state, f.proposal(t)
@@ -220,10 +261,30 @@ func TestOperatorRefusesBadAssignmentProposalsBeforeAnyEndorsement(t *testing.T)
 			require.Empty(t, f.cm.handoffPlans, "a refused proposal leaves no endorsement state")
 		})
 	}
+	t.Run("a root-only committee change on a coupled chain is refused by the planner", func(t *testing.T) {
+		f := newOperatorAssignmentFixture(t)
+		_, err := f.cm.buildHandoffPlanFromState(f.next, f.parent, f.state, nil)
+		require.ErrorIs(t, err, ErrHandoffApproval)
+		require.ErrorIs(t, err, evmassign.ErrCoupling)
+	})
 	t.Run("a pending acknowledgement also refuses a root-only handoff", func(t *testing.T) {
 		f := newOperatorAssignmentFixture(t)
 		f.state.CommittedHead.ShardInfo[0].IRTR.Epoch = 1
-		_, err := f.cm.buildHandoffPlanFromState(f.next, f.parent, f.state, nil)
+		_, err := f.cm.buildHandoffPlanFromState(f.sameRoot, f.parent, f.state, nil)
 		require.ErrorIs(t, err, storage.ErrAssignmentAckPending)
 	})
+}
+
+// The abort path names which condition tripped, so a moving frozen parent can be told apart from an uncommitted one.
+func TestFrozenParentLossNamesTheCondition(t *testing.T) {
+	f := newOperatorAssignmentFixture(t)
+	frozen, newer := bytes.Repeat([]byte{7}, 32), bytes.Repeat([]byte{8}, 32)
+	parentWith := func(hash []byte) *storage.ExecutedBlock {
+		return &storage.ExecutedBlock{ShardState: storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{
+			{PartitionID: 8}: {PartitionID: 8, IR: &types.InputRecord{BlockHash: hash}}}}}
+	}
+	require.Contains(t, f.cm.frozenParentLoss(parentWith(frozen), newer, frozen), "differs from the plan")
+	require.Contains(t, f.cm.frozenParentLoss(parentWith(newer), frozen, frozen), "no longer the frozen parent")
+	require.Contains(t, f.cm.frozenParentLoss(parentWith(frozen), frozen, frozen), "not in the committed state",
+		"the fixture's committed state does not hold this parent")
 }

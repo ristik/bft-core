@@ -30,9 +30,27 @@ var (
 	ErrValidators = errors.New("evmassign: invalid validator set")
 	ErrPoP        = errors.New("evmassign: invalid proof of possession")
 	ErrCandidate  = errors.New("evmassign: invalid candidate")
-	ErrCombined   = errors.New("evmassign: combined root and EVM change is unsupported")
-	ErrContext    = errors.New("evmassign: candidate context mismatch")
+	// ErrCoupling reports a candidate whose root entities and EVM participants are not one coupled set: validator-set
+	// changes are always coupled, one root committee member to one delegated EVM key with the same weight.
+	ErrCoupling = errors.New("evmassign: root entities and EVM participants are not a coupled set")
+	// ErrEVMOnly refuses an EVM validator-set change while the root committee is unchanged. A configuration-only boundary
+	// that keeps both halves identical stays valid.
+	ErrEVMOnly = errors.New("evmassign: EVM-only validator change is unsupported; root and EVM change together")
+	ErrContext = errors.New("evmassign: candidate context mismatch")
 )
+
+// CouplingParam is the EVM shard configuration parameter that makes validator-set changes always coupled: with
+// validator_coupling=true no handoff may change the root committee without the matching delegated EVM assignment. It is part of
+// the committed (hashed) configuration, so every root validator evaluates the same rule, and it survives assignment changes.
+const CouplingParam = "validator_coupling"
+
+// CouplingRequired reports whether the installed EVM configuration demands coupled committee changes.
+func CouplingRequired(pdr *types.PartitionDescriptionRecord) bool {
+	return pdr != nil && pdr.PartitionParams[CouplingParam] == "true"
+}
+
+// SameCommittee reports whether two root committees are identical (ids, keys, weights; both in candidate order).
+func SameCommittee(a, b []RootMember) bool { return sameRoot(a, b) }
 
 // EVMPartitionTypeID identifies the designated EVM partition type. Its
 // configuration changes only through a committed root handoff.
@@ -253,6 +271,8 @@ type Proposal struct {
 	// Supersede asks to replace the installed assignment, which has no
 	// certified acknowledgement, on the same frozen parent.
 	Supersede bool `json:"supersede,omitempty"`
+	// Bindings couple each successor root member to its delegated EVM validator (same weight, distinct keys).
+	Bindings []Binding `json:"bindings"`
 }
 
 // SignPoP signs the possession message with the successor key itself.

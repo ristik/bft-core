@@ -110,7 +110,7 @@ Full design: [h3-evm-assignment.md](../design/h3-evm-assignment.md).
 
 - The committed candidate may carry an EVM assignment (version-2 candidate, successor PDR, one proof of
   possession per successor key). Old **root** quorum remains the only authority for H; old EVM signatures
-  never authorize the successor. Every handoff, including an EVM-only rotation with identical root keys,
+  never authorize the successor. Every handoff, including a configuration-only boundary with identical root keys,
   advances the root epoch.
 - The EVM shard's configuration is **derived from committed history** (the committed record, successor
   body, retained candidate and activation boundary) and installed once at the first new-root block.
@@ -121,5 +121,7 @@ Full design: [h3-evm-assignment.md](../design/h3-evm-assignment.md).
 - An EVM assignment whose acknowledgement is not certified may be **superseded** on the same frozen
   parent; only the newest installed set can acknowledge, and one folded acknowledgement summarizes the
   committed span. Abort-before-H and attempt+1 are unchanged; there is no post-H rollback.
-- M3 supports root-only and EVM-only changes separately; a combined change is refused at the operator,
-  endorsement and admission boundaries.
+- Validator-set changes are always coupled (owner decision 2026-10-01): the candidate binds each successor root
+  entity to one delegated EVM validator of the same weight and a different key. An EVM-only change is refused,
+  and where the EVM configuration carries `validator_coupling=true` so is a root-only committee change, in every root
+  validator's block validation (the legacy root-only freeze companion included), the endorsers and the CLI.

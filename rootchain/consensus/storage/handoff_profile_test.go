@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
@@ -34,6 +35,8 @@ func (a testRecordAuthority) Predecessor() []byte {
 	}
 	return make([]byte, 32)
 }
+func (testRecordAuthority) CurrentRoot() []evmassign.RootMember { return []evmassign.RootMember{} }
+
 func (testRecordAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) ([]byte, error) {
 	return bytes.Repeat([]byte{0x42}, 32), nil
 }

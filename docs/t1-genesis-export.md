@@ -19,3 +19,11 @@ The export executes FeeCollector, WUCT, team vault, and ecosystem vault construc
 The exported account state contains runtime code, its Keccak hash, account nonce, and initialized storage. The code is compared with the pinned runtime template after masking only compiler-declared immutable byte ranges. This preserves constructor-set immutables. In particular, vault storage slot 0 is exported as the constructor initializes ReentrancyGuard. Temporary deployer funding is not emitted: only manifest allocations enter the compiled genesis. Zero-value FeeCollector and WUCT allocations carry their deployed code and storage without changing `nativeSupply`.
 
 Export is deterministic: repeated execution over the same manifest and embedded artifacts produces byte-identical output. The existing `engine-api genesis --manifest` path compiles exported code, storage, and balances into the standard JSON pipeline, then `PrepareGenesisJSON` adds the pinned registry account and derives the full shard configuration.
+
+## Launch EVM configuration: coupled validator-set changes
+
+`ubft engine-api genesis --registry-layout 2` (the launch, assignment-aware registry) always sets the EVM shard configuration
+parameter `validator_coupling=true` in the exported full shard configuration, whatever the input shard conf says; an input that
+sets it to anything else is refused. The parameter is part of the hashed configuration, so every root validator refuses a
+committee change that is not coupled to its EVM assignment (docs/operations/h3-evm-assignment-runbook.md). The allocation
+manifest itself carries no shard-configuration parameters, so the default example is unchanged.

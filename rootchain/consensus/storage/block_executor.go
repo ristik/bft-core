@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"sort"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
@@ -231,7 +232,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					return nil, err
 				}
 				if len(companion) != 0 && control.Phase == "endorsed" {
-					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration); err != nil {
+					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration, authority.CurrentRoot()); err != nil {
 						return nil, err
 					}
 				}
@@ -306,15 +307,34 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 // admission, after the authority has checked the candidate's static bindings.
 // The installed assignment is the authenticated configuration of the frozen
 // shard at this block, never a value the candidate supplies.
-func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.PartitionDescriptionRecord, orchestration Orchestration) error {
+func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.PartitionDescriptionRecord, orchestration Orchestration, currentRoot []evmassign.RootMember) error {
 	fc, err := ParseFreezeCompanion(companion)
 	if err != nil || si == nil || installed == nil {
 		return ErrHandoffRecord
 	}
 	// An installed assignment whose acknowledgement is not certified is exactly
 	// the state where TR already names the successor epoch but IR does not.
+	if currentRoot == nil {
+		return ErrHandoffRecord // the old committee is required: coupling is judged against it
+	}
 	pending := si.TR.Epoch != si.IR.Epoch
 	if len(fc.Preimage) == 0 {
+		// The legacy root-only companion carries no EVM binding: on a chain that requires coupling it must not change
+		// the committee (it could otherwise add a root entity without its delegated EVM key).
+		if evmassign.CouplingRequired(installed) {
+			body, bodyErr := decodeD3Body(fc.Body)
+			if bodyErr != nil {
+				return errors.Join(ErrHandoffRecord, bodyErr)
+			}
+			next := make([]evmassign.RootMember, 0, len(body.Members))
+			for _, m := range body.Members {
+				next = append(next, evmassign.RootMember{NodeID: m.NodeID, Key: m.ConsensusKey, Weight: m.Weight})
+			}
+			sort.Slice(next, func(i, j int) bool { return next[i].NodeID < next[j].NodeID })
+			if !evmassign.SameCommittee(next, currentRoot) {
+				return errors.Join(ErrHandoffRecord, evmassign.ErrCoupling)
+			}
+		}
 		if pending {
 			return ErrAssignmentAckPending
 		}
@@ -331,7 +351,7 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 	if candidate.Supersedes == nil && pending {
 		return ErrAssignmentAckPending
 	}
-	if err := evmassign.VerifyInstalled(candidate, succ, installed); err != nil {
+	if err := evmassign.VerifyInstalled(candidate, succ, installed, currentRoot); err != nil {
 		return errors.Join(ErrHandoffRecord, err)
 	}
 	if candidate.Supersedes != nil {

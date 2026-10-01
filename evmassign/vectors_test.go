@@ -97,8 +97,8 @@ func buildVectors(t *testing.T) vectorFile {
 		out.PoPs[v.NodeID] = hex.EncodeToString(p.Signature)
 		pops = append(pops, p)
 	}
-	root := []RootMember{{NodeID: "root-a", Key: bytes.Repeat([]byte{2}, 33), Weight: 1}, {NodeID: "root-b", Key: bytes.Repeat([]byte{3}, 33), Weight: 1}}
-	c, err := NewCandidate(ctx, root, &old, succ, pops, nil)
+	root := []RootMember{{NodeID: "root-a", Key: bytes.Repeat([]byte{2}, 33), Weight: 1}, {NodeID: "root-b", Key: bytes.Repeat([]byte{3}, 33), Weight: 1}, {NodeID: "root-c", Key: bytes.Repeat([]byte{4}, 33), Weight: 1}}
+	c, err := NewCandidate(ctx, root, &old, succ, pops, nil, bindingsFor(root, succ))
 	require.NoError(t, err)
 	raw, err := c.Encode()
 	require.NoError(t, err)
@@ -125,7 +125,8 @@ func buildVectors(t *testing.T) vectorFile {
 		{"popMissing", "one proof removed", "ErrPoP", "VerifyPoPs", "assignment valid"},
 		{"popRecovery", "recovery byte flipped", "ErrPoP", "VerifyPoPs", "signature otherwise valid"},
 		{"rootMembers", "successor root members differ from the body", "ErrContext", "VerifyBinding", "assignment valid"},
-		{"combined", "root members changed with an assignment", "ErrCombined", "VerifyBinding", "assignment valid"},
+		{"coupling", "a root member without its delegated EVM key (or a shared key, a weight mismatch)", "ErrCoupling", "VerifyBinding", "assignment valid"},
+		{"evmOnly", "EVM validators changed with the root committee unchanged", "ErrEVMOnly", "VerifyInstalled", "assignment valid"},
 		{"installedEpoch", "OldShardEpoch != installed", "ErrContext", "VerifyInstalled", "assignment valid"},
 		{"installedHash", "OldActiveHash != installed full hash", "ErrContext", "VerifyInstalled", "assignment valid"},
 	}

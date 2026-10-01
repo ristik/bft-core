@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,6 +63,8 @@ func TestEVMAssignmentCLIFlow(t *testing.T) {
 		FrozenParent: bytes.Repeat([]byte{2}, 32), Installed: installedPDR(t)}
 	contextFile := writeJSON(t, dir, "context.json", ctx)
 	validatorsFile := writeJSON(t, dir, "validators.json", infos)
+	// Validator-set changes are coupled: each successor root entity has one delegated EVM validator.
+	bindingsFile := writeJSON(t, dir, "bindings.json", []evmassign.Binding{{RootNodeID: "r-a", EVMNodeID: "ev-a"}, {RootNodeID: "r-b", EVMNodeID: "ev-b"}, {RootNodeID: "r-c", EVMNodeID: "ev-c"}})
 
 	proofFiles := make([]string, 0, len(keys))
 	for _, k := range keys {
@@ -81,7 +84,7 @@ func TestEVMAssignmentCLIFlow(t *testing.T) {
 	cmd := newRootCmd()
 	cmd.SetOut(&assembled)
 	cmd.SetArgs([]string{"handoff", "evm-assemble", "--context", contextFile, "--validators", validatorsFile,
-		"--pops", proofFiles[0] + "," + proofFiles[1] + "," + proofFiles[2], "--out", assignment})
+		"--pops", proofFiles[0] + "," + proofFiles[1] + "," + proofFiles[2], "--bindings", bindingsFile, "--out", assignment})
 	require.NoError(t, cmd.Execute())
 	require.Contains(t, assembled.String(), "assignment epoch 1 for 3 validators")
 
@@ -105,7 +108,7 @@ func TestEVMAssignmentCLIFlow(t *testing.T) {
 	t.Run("assembling refuses a missing proof", func(t *testing.T) {
 		cmd := newRootCmd()
 		cmd.SetOut(&bytes.Buffer{})
-		cmd.SetArgs([]string{"handoff", "evm-assemble", "--context", contextFile, "--validators", validatorsFile, "--pops", proofFiles[0] + "," + proofFiles[1]})
+		cmd.SetArgs([]string{"handoff", "evm-assemble", "--context", contextFile, "--validators", validatorsFile, "--pops", proofFiles[0] + "," + proofFiles[1], "--bindings", bindingsFile})
 		require.ErrorContains(t, cmd.Execute(), `no proof of possession for successor validator "ev-c"`)
 	})
 	t.Run("assembling refuses a proof signed for another context", func(t *testing.T) {
@@ -115,20 +118,23 @@ func TestEVMAssignmentCLIFlow(t *testing.T) {
 		cmd := newRootCmd()
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetArgs([]string{"handoff", "evm-assemble", "--context", otherContext, "--validators", validatorsFile,
-			"--pops", proofFiles[0] + "," + proofFiles[1] + "," + proofFiles[2]})
+			"--pops", proofFiles[0] + "," + proofFiles[1] + "," + proofFiles[2], "--bindings", bindingsFile})
 		require.ErrorIs(t, cmd.Execute(), evmassign.ErrPoP)
 	})
 	t.Run("supersede needs a pending acknowledgement", func(t *testing.T) {
 		cmd := newRootCmd()
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetArgs([]string{"handoff", "evm-assemble", "--context", contextFile, "--validators", validatorsFile, "--supersede",
-			"--pops", proofFiles[0] + "," + proofFiles[1] + "," + proofFiles[2]})
+			"--pops", proofFiles[0] + "," + proofFiles[1] + "," + proofFiles[2], "--bindings", bindingsFile})
 		require.ErrorContains(t, cmd.Execute(), "pending")
 	})
 	t.Run("an assignment file must prove every successor key", func(t *testing.T) {
-		short := writeJSON(t, dir, "short.json", evmassign.Proposal{Validators: infos, PoPs: proposal.PoPs[:2]})
+		short := writeJSON(t, dir, "short.json", evmassign.Proposal{Validators: infos, PoPs: proposal.PoPs[:2], Bindings: proposal.Bindings})
 		_, err := readEVMAssignment(short)
 		require.ErrorContains(t, err, "every successor key, retained ones included")
+		unbound := writeJSON(t, dir, "unbound.json", evmassign.Proposal{Validators: infos, PoPs: proposal.PoPs})
+		_, err = readEVMAssignment(unbound)
+		require.ErrorContains(t, err, "root-entity bindings", "validator-set changes are always coupled")
 		empty := writeJSON(t, dir, "empty.json", evmassign.Proposal{})
 		_, err = readEVMAssignment(empty)
 		require.ErrorContains(t, err, "no successor validators")
@@ -151,9 +157,10 @@ func TestProposeCarriesTheEVMAssignmentToTheOperator(t *testing.T) {
 		require.NoError(t, err)
 		proofs = append(proofs, p)
 	}
-	assignment := writeJSON(t, dir, "assignment.json", evmassign.Proposal{Validators: succ.Validators, PoPs: proofs})
-	nextFile := filepath.Join(dir, "next.json")
-	require.NoError(t, os.WriteFile(nextFile, []byte(`{}`), 0o600))
+	bindings := []evmassign.Binding{{RootNodeID: "r-a", EVMNodeID: "ev-a"}, {RootNodeID: "r-b", EVMNodeID: "ev-b"}}
+	assignment := writeJSON(t, dir, "assignment.json", evmassign.Proposal{Validators: succ.Validators, PoPs: proofs, Bindings: bindings})
+	rootA, rootB := newSuccessorKey(t, "r-a"), newSuccessorKey(t, "r-b")
+	nextFile := writeJSON(t, dir, "next.json", types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{rootA.info, rootB.info}})
 
 	operator := &handoffOperatorStub{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { rootHandoffPlanHandler(operator)(w, r) }))
@@ -202,4 +209,37 @@ func TestEVMContextEndpointIsLocalAndBounded(t *testing.T) {
 	require.Equal(t, http.StatusOK, post("127.0.0.1:1", `{"frozenParent":"0x`+string(bytes.Repeat([]byte{'2'}, 64))+`"}`).Code)
 	require.Equal(t, bytes.Repeat([]byte{0x22}, 32), stub.parent)
 	_ = abcrypto.NewInMemorySecp256K1Signer
+}
+
+// The CLI refuses, before any endorsement, a proposal whose EVM participants are not the coupled image of the next committee.
+func TestProposeRefusesAnUncoupledAssignment(t *testing.T) {
+	dir := t.TempDir()
+	keys := []successorKey{newSuccessorKey(t, "ev-a"), newSuccessorKey(t, "ev-b")}
+	succ, err := evmassign.NewSuccessor(installedPDR(t), []*types.NodeInfo{keys[0].info, keys[1].info})
+	require.NoError(t, err)
+	rootA, rootB, rootC := newSuccessorKey(t, "r-a"), newSuccessorKey(t, "r-b"), newSuccessorKey(t, "r-c")
+	good := []evmassign.Binding{{RootNodeID: "r-a", EVMNodeID: "ev-a"}, {RootNodeID: "r-b", EVMNodeID: "ev-b"}}
+	next := writeJSON(t, dir, "next.json", types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{rootA.info, rootB.info}})
+	grown := writeJSON(t, dir, "grown.json", types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{rootA.info, rootB.info, rootC.info}})
+	pops := make([]evmassign.PoP, 2) // the CLI checks the coupling before it looks at the proofs
+	for name, tc := range map[string]struct {
+		next     string
+		bindings []evmassign.Binding
+	}{
+		"a root entity without a binding": {grown, good},
+		"a binding to an unknown EVM key": {next, []evmassign.Binding{{RootNodeID: "r-a", EVMNodeID: "ev-a"}, {RootNodeID: "r-b", EVMNodeID: "zz"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assignment := writeJSON(t, dir, "a-"+strings.ReplaceAll(name, " ", "-")+".json", evmassign.Proposal{Validators: succ.Validators, PoPs: pops, Bindings: tc.bindings})
+			operator := &handoffOperatorStub{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { rootHandoffPlanHandler(operator)(w, r) }))
+			defer server.Close()
+			cmd := newRootCmd()
+			cmd.SetOut(&bytes.Buffer{})
+			cmd.SetArgs([]string{"handoff", "propose", "--next-trust-base", tc.next, "--frozen-parent", "0x" + string(bytes.Repeat([]byte{'4'}, 64)),
+				"--root-rpc", server.URL, "--next-evm-assignment", assignment})
+			require.ErrorIs(t, cmd.Execute(), evmassign.ErrCoupling)
+			require.Zero(t, operator.evmCalls, "nothing reaches the operator")
+		})
+	}
 }

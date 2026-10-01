@@ -7,8 +7,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"reflect"
 	"sort"
+	"strings"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
@@ -350,6 +350,8 @@ func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1
 		}
 	} else if err := x.refuseRootChangeWhileAckPending(state, frozenParent); err != nil {
 		return abdrc.HandoffApprovalMsg{}, err
+	} else if err := x.refuseUncoupledCommitteeChange(old, next, state, frozenParent); err != nil {
+		return abdrc.HandoffApprovalMsg{}, err
 	}
 	aMin := round + 16
 	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: uint64(old.NetworkID), Epoch: next.Epoch,
@@ -427,6 +429,29 @@ func (x *ConsensusManager) refuseRootChangeWhileAckPending(state *abdrc.StateMsg
 	return nil
 }
 
+// refuseUncoupledCommitteeChange is the planner's early refusal of what block validation refuses authoritatively
+// (storage.verifyFreezeAssignment): a root-only handoff that changes the committee on a chain that requires coupling.
+func (x *ConsensusManager) refuseUncoupledCommitteeChange(old, next *types.RootTrustBaseV1, state *abdrc.StateMsg, parent []byte) error {
+	_, installed, err := x.installedEVMFromState(state, parent, true)
+	if err != nil || !evmassign.CouplingRequired(installed) {
+		// An unavailable configuration is not a reason to refuse here: the planner is only the early refusal, and block
+		// validation (which always has the installed configuration) decides.
+		return nil
+	}
+	oldRoot, err := rootMembers(old.RootNodes)
+	if err != nil {
+		return err
+	}
+	nextRoot, err := rootMembers(next.RootNodes)
+	if err != nil {
+		return err
+	}
+	if !evmassign.SameCommittee(oldRoot, nextRoot) {
+		return errors.Join(ErrHandoffApproval, evmassign.ErrCoupling)
+	}
+	return nil
+}
+
 func rootMembers(nodes []*types.NodeInfo) ([]evmassign.RootMember, error) {
 	out := make([]evmassign.RootMember, 0, len(nodes))
 	for _, n := range nodes {
@@ -464,9 +489,6 @@ func (x *ConsensusManager) buildAssignmentCandidate(old, next *types.RootTrustBa
 	if err != nil {
 		return nil, none, err
 	}
-	if !reflect.DeepEqual(oldRoot, nextRoot) {
-		return nil, none, errors.Join(ErrHandoffApproval, evmassign.ErrCombined)
-	}
 	shard, installed, err := x.installedEVMFromState(state, parent, true)
 	if err != nil {
 		return nil, none, err
@@ -497,8 +519,11 @@ func (x *ConsensusManager) buildAssignmentCandidate(old, next *types.RootTrustBa
 	if err != nil {
 		return nil, none, err
 	}
-	candidate, err := evmassign.NewCandidate(pop, nextRoot, installed, succ, proposal.PoPs, supersedes)
+	candidate, err := evmassign.NewCandidate(pop, nextRoot, installed, succ, proposal.PoPs, supersedes, proposal.Bindings)
 	if err != nil {
+		return nil, none, errors.Join(ErrHandoffApproval, err)
+	}
+	if err := evmassign.VerifyInstalled(candidate, succ, installed, oldRoot); err != nil {
 		return nil, none, errors.Join(ErrHandoffApproval, err)
 	}
 	raw, err := candidate.Encode()
@@ -520,9 +545,6 @@ func (x *ConsensusManager) verifyApprovalAssignment(msg *abdrc.HandoffApprovalMs
 		return evmassign.Candidate{}, err
 	}
 	ctx := evmassign.BindingContext{PoPContext: pop, Digest: msg.Candidate}
-	if ctx.CurrentRoot, err = rootMembers(old.RootNodes); err != nil {
-		return evmassign.Candidate{}, err
-	}
 	for _, m := range body.Members {
 		ctx.SuccessorRoot = append(ctx.SuccessorRoot, evmassign.RootMember{NodeID: m.NodeID, Key: bytes.Clone(m.ConsensusKey), Weight: m.Weight})
 	}
@@ -714,7 +736,16 @@ func (x *ConsensusManager) verifyEndorsedAssignmentInstalled(plan abdrc.HandoffA
 	if !pendingAssignmentAck(shard) && c.Supersedes != nil {
 		return fmt.Errorf("%w: %w", ErrHandoffApproval, storage.ErrSupersessionInvalid)
 	}
-	if err := evmassign.VerifyInstalled(c, succ, installed); err != nil {
+	var currentRoot []evmassign.RootMember
+	if old := x.trustBase.Load(); old != nil {
+		if currentRoot, err = rootMembers(old.RootNodes); err != nil {
+			return err
+		}
+	}
+	if currentRoot == nil {
+		return ErrHandoffApproval // the EVM-only refusal needs the old committee
+	}
+	if err := evmassign.VerifyInstalled(c, succ, installed, currentRoot); err != nil {
 		return errors.Join(ErrHandoffApproval, err)
 	}
 	return nil
@@ -849,7 +880,8 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		if err != nil || !bytes.Equal(previous.NextBodyID, record.NextBodyID) || previous.Attempt != record.Attempt {
 			return nil, nil
 		}
-		if !parentHasFrozenShard(parent, plan.plan.FrozenParent) || !x.blockStore.CommittedFrozenParent(plan.plan.FrozenParent) {
+		if reason := x.frozenParentLoss(parent, plan.plan.FrozenParent, plan.plan.FrozenParent); reason != "" {
+			x.logHandoffAbort("freeze", round, previous.Attempt, reason, plan.plan.FrozenParent, parent)
 			return abortHandoffRecords(round, previous, plan.abortSignatures)
 		}
 		record.ActivationRound = previous.ActivationRound
@@ -874,8 +906,8 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		if err != nil || !bytes.Equal(previous.NextBodyID, record.NextBodyID) || previous.Attempt != record.Attempt {
 			return nil, nil
 		}
-		if !bytes.Equal(control.FrozenParent, plan.plan.FrozenParent) || !parentHasFrozenShard(parent, control.FrozenParent) ||
-			!x.blockStore.CommittedFrozenParent(control.FrozenParent) {
+		if reason := x.frozenParentLoss(parent, plan.plan.FrozenParent, control.FrozenParent); reason != "" {
+			x.logHandoffAbort("commit", round, previous.Attempt, reason, control.FrozenParent, parent)
 			return abortHandoffRecords(round, previous, plan.abortSignatures)
 		}
 		record.ActivationRound = previous.ActivationRound
@@ -927,6 +959,35 @@ func (x *ConsensusManager) readyHandoffAbort(target abdrc.HandoffAbortTarget) (m
 		signatures[signer] = bytes.Clone(signature)
 	}
 	return signatures, true
+}
+
+// frozenParentLoss names why a prepared or endorsed handoff can no longer proceed on its frozen parent, or returns "" when it
+// can: the endorsed parent differs from the plan, the parent block's shard IR is no longer that block (the shard certified
+// a newer one), or the frozen parent is not in the committed state.
+func (x *ConsensusManager) frozenParentLoss(parent *storage.ExecutedBlock, planned, frozen []byte) string {
+	switch {
+	case !bytes.Equal(frozen, planned):
+		return "the endorsed frozen parent differs from the plan"
+	case !parentHasFrozenShard(parent, frozen):
+		return "the shard's certified IR in the parent block is no longer the frozen parent (a newer EVM block was certified)"
+	case !x.blockStore.CommittedFrozenParent(frozen):
+		return "the frozen parent is not in the committed state"
+	}
+	return ""
+}
+
+func (x *ConsensusManager) logHandoffAbort(phase string, round, attempt uint64, reason string, frozen []byte, parent *storage.ExecutedBlock) {
+	var shards []string
+	if parent != nil {
+		for key, shard := range parent.ShardState.States {
+			if shard != nil && shard.IR != nil {
+				shards = append(shards, fmt.Sprintf("%s=%x", key.PartitionID, shard.IR.BlockHash))
+			}
+		}
+	}
+	sort.Strings(shards)
+	x.log.Info("root handoff abort ordered", "phase", phase, "round", round, "attempt", attempt, "reason", reason,
+		"frozenParent", fmt.Sprintf("%x", frozen), "parentBlockShardIRs", strings.Join(shards, ","))
 }
 
 func parentHasFrozenShard(parent *storage.ExecutedBlock, frozenParent []byte) bool {
