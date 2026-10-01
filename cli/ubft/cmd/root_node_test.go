@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -307,4 +308,55 @@ func TestLoadShardConfsEnablesTheHandoffProfileFirst(t *testing.T) {
 	require.NoError(t, loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{genesis}), "the same genesis file restarts")
 	err := loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{wrongKey})
 	require.ErrorIs(t, err, partitions.ErrDerivedConflict, "a wrong-key genesis file is refused under the handoff profile")
+}
+
+// Under the handoff profile the PUT path writes nothing; without it the legacy handler is untouched.
+func TestConfigurationsPUTIsRefusedUnderTheHandoffProfile(t *testing.T) {
+	added := 0
+	add := func(*types.PartitionDescriptionRecord) error { added++; return nil }
+	body := `{"version":1}`
+	for _, tc := range []struct {
+		profile bool
+		status  int
+	}{{true, http.StatusForbidden}, {false, http.StatusOK}} {
+		rec := httptest.NewRecorder()
+		configurationsHandler(tc.profile, add)(rec, httptest.NewRequest(http.MethodPut, "/api/v1/configurations", strings.NewReader(body)))
+		if tc.profile {
+			require.Equal(t, tc.status, rec.Code)
+			require.Zero(t, added, "nothing was registered")
+		} else {
+			require.NotEqual(t, http.StatusForbidden, rec.Code, "the legacy path is not refused")
+		}
+	}
+}
+
+// A restart with an edited aggregator configuration file is refused under the handoff profile, like the EVM one: every shard
+// configuration after genesis comes from committed history, so a local edit cannot diverge one root.
+func TestLoadShardConfsRefusesAnEditedAggregatorConfigurationUnderTheHandoffProfile(t *testing.T) {
+	newConf := func(epoch, start uint64) *types.PartitionDescriptionRecord {
+		signer, err := abcrypto.NewInMemorySecp256K1Signer()
+		require.NoError(t, err)
+		verifier, err := signer.Verifier()
+		require.NoError(t, err)
+		pub, err := verifier.MarshalPublicKey()
+		require.NoError(t, err)
+		return &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 9, PartitionTypeID: 9,
+			UnitIDLen: 256, TypeIDLen: 32, T2Timeout: 2500 * time.Millisecond, Epoch: epoch, EpochStart: start,
+			Validators: []*types.NodeInfo{{NodeID: "16Uiu2HAmRfQpGuuCgV22ndLtYGpdJcfUKtNJwD79nJ9tCZ8cfjFr", SigKey: pub, Stake: 1}}}
+	}
+	genesis, edited, later := newConf(0, 1), newConf(0, 1), newConf(1, 50)
+	path := filepath.Join(t.TempDir(), "orchestration.db")
+	open := func() *partitions.Orchestration {
+		o, err := partitions.NewOrchestration(5, path, logger.New(t))
+		require.NoError(t, err)
+		return o
+	}
+	first := open()
+	require.NoError(t, loadShardConfs(first, true, []*types.PartitionDescriptionRecord{genesis}))
+	require.NoError(t, first.Close())
+	restarted := open()
+	t.Cleanup(func() { _ = restarted.Close() })
+	require.NoError(t, loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{genesis}))
+	require.ErrorIs(t, loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{edited}), partitions.ErrDerivedConflict)
+	require.ErrorIs(t, loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{later}), partitions.ErrDerivedOnly)
 }

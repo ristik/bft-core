@@ -232,7 +232,7 @@ func (a *v1HandoffAuthority) VerifyFreeze(r evmroot.OrderedHandoffRecord, compan
 // root entities and EVM participants form one coupled set, and a possession
 // proof for every successor key. State-dependent checks run in block execution.
 func (a *v1HandoffAuthority) verifyAssignmentBinding(r evmroot.OrderedHandoffRecord, proof FreezeCompanion, body evmroot.TrustBaseBodyV2) error {
-	ctx := evmassign.BindingContext{Digest: proof.Candidate,
+	ctx := evmassign.BindingContext{Digest: proof.Candidate, ControlPartition: evmroot.D4ControlPartition,
 		PoPContext: evmassign.PoPContext{Network: r.Network, Attempt: r.Attempt}}
 	if len(r.PredecessorBodyID) != 32 || len(proof.Parent) != 32 {
 		return ErrHandoffRecord

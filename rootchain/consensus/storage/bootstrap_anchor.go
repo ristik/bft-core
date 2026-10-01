@@ -367,10 +367,11 @@ func installCommittedAssignmentFrom(db PersistentStore, orchestration Orchestrat
 	if err != nil {
 		return err
 	}
-	pdr, provenance, err := DeriveActivatedPDR(record, body, preimage, control.FrozenParent)
+	confs, provenance, changes, err := DeriveActivatedConfigs(record, body, preimage, control.FrozenParent)
 	if err != nil {
 		return err
 	}
+	pdr := confs[0]
 	c, err := evmassign.DecodeCandidate(preimage)
 	if err != nil {
 		return errors.Join(ErrAssignmentHistory, err)
@@ -382,6 +383,11 @@ func installCommittedAssignmentFrom(db PersistentStore, orchestration Orchestrat
 	if err := evmassign.VerifyInstalled(c, succ, configs[key], nil); err != nil {
 		return errors.Join(ErrAssignmentHistory, err)
 	}
+	for _, d := range changes {
+		if err := evmassign.VerifyChangeInstalled(d, configs[d.Key()]); err != nil {
+			return errors.Join(ErrAssignmentHistory, err)
+		}
+	}
 	tr, err := successorTechnicalRecord(si, pdr, hashAlg)
 	if err != nil {
 		return err
@@ -390,11 +396,7 @@ func installCommittedAssignmentFrom(db PersistentStore, orchestration Orchestrat
 	if err != nil || !bytes.Equal(digest, record.SuccessorTRHash) {
 		return fmt.Errorf("%w: derived successor technical record differs from H", ErrAssignmentHistory)
 	}
-	installer, ok := orchestration.(DerivedConfigInstaller)
-	if !ok {
-		return fmt.Errorf("%w: orchestration cannot install a derived configuration", ErrAssignmentHistory)
-	}
-	return installer.InstallDerivedShardConfig(pdr, provenance)
+	return InstallDerived(orchestration, confs, provenance)
 }
 
 // repairCommittedAssignment runs before the block tree is loaded. When the

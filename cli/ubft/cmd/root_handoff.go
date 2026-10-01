@@ -261,7 +261,7 @@ func newRootCmd() *cobra.Command {
 	_ = propose.MarkFlagRequired("next-trust-base")
 	_ = propose.MarkFlagRequired("root-rpc")
 	handoff.AddCommand(propose)
-	handoff.AddCommand(newEVMContextCmd(), newEVMPoPCmd(), newEVMAssembleCmd())
+	handoff.AddCommand(newEVMContextCmd(), newEVMPoPCmd(), newEVMAssembleCmd(), newShardAssembleCmd())
 	var networkID, oldEpoch, attempt uint64
 	var predecessorBodyID, nextBodyID, abortRPCs string
 	var abortTimeout time.Duration

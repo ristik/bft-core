@@ -519,11 +519,17 @@ func (x *ConsensusManager) buildAssignmentCandidate(old, next *types.RootTrustBa
 	if err != nil {
 		return nil, none, err
 	}
-	candidate, err := evmassign.NewCandidate(pop, nextRoot, installed, succ, proposal.PoPs, supersedes, proposal.Bindings)
+	candidate, err := evmassign.NewCandidate(pop, nextRoot, installed, succ, proposal.PoPs, supersedes, proposal.Bindings, proposal.Changes)
 	if err != nil {
 		return nil, none, errors.Join(ErrHandoffApproval, err)
 	}
 	if err := evmassign.VerifyInstalled(candidate, succ, installed, oldRoot); err != nil {
+		return nil, none, errors.Join(ErrHandoffApproval, err)
+	}
+	if _, err := evmassign.ValidateChanges(candidate.Changes, candidate.SourceRef, pop, evmroot.D4ControlPartition); err != nil {
+		return nil, none, errors.Join(ErrHandoffApproval, err)
+	}
+	if err := x.verifyChangesAgainstState(candidate, pop, state); err != nil {
 		return nil, none, errors.Join(ErrHandoffApproval, err)
 	}
 	raw, err := candidate.Encode()
@@ -531,6 +537,52 @@ func (x *ConsensusManager) buildAssignmentCandidate(old, next *types.RootTrustBa
 		return nil, none, errors.Join(ErrHandoffApproval, err)
 	}
 	return raw, sha256.Sum256(raw), nil
+}
+
+// verifyChangesAgainstState checks the aggregator validator replacements of a candidate against this validator's committed
+// checkpoint: each target is an existing non-EVM shard, the change replaces exactly its installed configuration, and its last
+// replacement is acknowledged. A supersession carries none. The possession proofs were verified with the binding.
+func (x *ConsensusManager) verifyChangesAgainstState(c evmassign.Candidate, _ evmassign.PoPContext, state *abdrc.StateMsg) error {
+	if len(c.Changes) == 0 {
+		return nil
+	}
+	if c.Supersedes != nil {
+		return fmt.Errorf("%w: a supersession carries no aggregator changes", evmassign.ErrChange)
+	}
+	if state == nil || state.CommittedHead == nil || state.CommittedHead.Block == nil {
+		return ErrHandoffApproval
+	}
+	configs, err := x.orchestration.ShardConfigs(state.CommittedHead.Block.Round)
+	if err != nil {
+		return ErrHandoffApproval
+	}
+	for _, ch := range c.Changes {
+		if ch.Kind != evmassign.ChangeReplaceShardValidators {
+			return evmassign.ErrUnsupportedChange
+		}
+		r, succ, err := evmassign.DecodeReplaceShardValidators(ch.Payload)
+		if err != nil {
+			return err
+		}
+		var shard *abdrc.ShardInfo
+		for i := range state.CommittedHead.ShardInfo {
+			si := &state.CommittedHead.ShardInfo[i]
+			if si.Partition == succ.PartitionID && si.Shard.Equal(succ.ShardID) {
+				shard = si
+			}
+		}
+		if shard == nil || shard.IR == nil {
+			return fmt.Errorf("%w: shard %d does not exist", evmassign.ErrChange, succ.PartitionID)
+		}
+		key := types.PartitionShardID{PartitionID: succ.PartitionID, ShardID: succ.ShardID.Key()}
+		if err := evmassign.VerifyChangeInstalled(evmassign.DecodedChange{Replace: r, Successor: succ}, configs[key]); err != nil {
+			return err
+		}
+		if pendingAssignmentAck(*shard) {
+			return fmt.Errorf("%w: shard %d has an unacknowledged configuration", storage.ErrAssignmentAckPending, succ.PartitionID)
+		}
+	}
+	return nil
 }
 
 // verifyApprovalAssignment re-checks the candidate preimage of an approval
@@ -544,7 +596,7 @@ func (x *ConsensusManager) verifyApprovalAssignment(msg *abdrc.HandoffApprovalMs
 	if err != nil {
 		return evmassign.Candidate{}, err
 	}
-	ctx := evmassign.BindingContext{PoPContext: pop, Digest: msg.Candidate}
+	ctx := evmassign.BindingContext{PoPContext: pop, Digest: msg.Candidate, ControlPartition: evmroot.D4ControlPartition}
 	for _, m := range body.Members {
 		ctx.SuccessorRoot = append(ctx.SuccessorRoot, evmassign.RootMember{NodeID: m.NodeID, Key: bytes.Clone(m.ConsensusKey), Weight: m.Weight})
 	}
@@ -735,6 +787,9 @@ func (x *ConsensusManager) verifyEndorsedAssignmentInstalled(plan abdrc.HandoffA
 	}
 	if !pendingAssignmentAck(shard) && c.Supersedes != nil {
 		return fmt.Errorf("%w: %w", ErrHandoffApproval, storage.ErrSupersessionInvalid)
+	}
+	if err := x.verifyChangesAgainstState(c, evmassign.PoPContext{}, state); err != nil {
+		return errors.Join(ErrHandoffApproval, err)
 	}
 	var currentRoot []evmassign.RootMember
 	if old := x.trustBase.Load(); old != nil {

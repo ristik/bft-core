@@ -29,7 +29,7 @@ var derivedBucketName = []byte("derived")
 var (
 	// ErrDerivedOnly refuses an external write of a designated EVM shard
 	// configuration after genesis: only verified committed history may change it.
-	ErrDerivedOnly = errors.New("orchestration: EVM shard configuration changes only through a committed root handoff")
+	ErrDerivedOnly = errors.New("orchestration: shard configuration changes only through a committed root handoff")
 	// ErrDerivedConflict reports an existing entry that differs from the one
 	// derived from committed history. It is corruption and refuses startup.
 	ErrDerivedConflict = errors.New("orchestration: conflicting derived shard configuration")
@@ -188,15 +188,16 @@ func (o *Orchestration) AddShardConfig(shardConf *types.PartitionDescriptionReco
 	if shardConf.NetworkID != o.networkID {
 		return fmt.Errorf("invalid networkID %d, expected %d", shardConf.NetworkID, o.networkID)
 	}
-	designatedEVM := o.reserveControl && shardConf.PartitionTypeID == evmassign.EVMPartitionTypeID
-	if designatedEVM && shardConf.Epoch != 0 {
+	// Under the handoff profile every shard configuration after genesis comes from committed handoff history, never from a
+	// local write: epoch > 0 is refused for every partition, and an epoch-0 entry must equal the stored one.
+	if o.reserveControl && shardConf.Epoch != 0 {
 		return ErrDerivedOnly
 	}
 	err := o.db.Update(func(tx *bolt.Tx) error {
 		if err := verifyShardConf(tx, shardConf); err != nil {
 			return fmt.Errorf("verify shard conf: %w", err)
 		}
-		if designatedEVM {
+		if o.reserveControl {
 			// Genesis initialization is idempotent; a different genesis entry
 			// would silently rewrite the history every derived entry extends.
 			if err := sameStoredShardConf(tx, shardConf); err != nil {
@@ -264,45 +265,65 @@ func derivedKey(conf *types.PartitionDescriptionRecord) []byte {
 // Provenance (the committed record and candidate digests) is never an authority
 // by itself; the caller derived the configuration from committed data.
 func (o *Orchestration) InstallDerivedShardConfig(conf *types.PartitionDescriptionRecord, provenance []byte) error {
-	if conf == nil || conf.Epoch == 0 || conf.EpochStart == 0 {
+	return o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{conf}, provenance)
+}
+
+// InstallDerivedShardConfigs installs every configuration one committed handoff derives (the EVM assignment and any
+// aggregator validator replacements) in a single transaction: a crash leaves all of them or none, never a partial batch.
+func (o *Orchestration) InstallDerivedShardConfigs(confs []*types.PartitionDescriptionRecord, provenance []byte) error {
+	if len(confs) == 0 {
 		return ErrDerivedConflict
 	}
 	if _, err := evmassign.DecodeProvenance(provenance); err != nil {
 		return ErrDerivedConflict
 	}
-	if conf.NetworkID != o.networkID {
-		return fmt.Errorf("invalid networkID %d, expected %d", conf.NetworkID, o.networkID)
-	}
-	if err := conf.IsValid(); err != nil {
-		return err
+	for _, conf := range confs {
+		if conf == nil || conf.Epoch == 0 || conf.EpochStart == 0 {
+			return ErrDerivedConflict
+		}
+		if conf.NetworkID != o.networkID {
+			return fmt.Errorf("invalid networkID %d, expected %d", conf.NetworkID, o.networkID)
+		}
+		if err := conf.IsValid(); err != nil {
+			return err
+		}
 	}
 	return o.db.Update(func(tx *bolt.Tx) error {
 		derived := tx.Bucket(derivedBucketName)
 		if derived == nil {
 			return fmt.Errorf("bucket %q does not exist", derivedBucketName)
 		}
-		key := derivedKey(conf)
-		if bucket := getShardBucket(tx, conf.PartitionID, conf.ShardID); bucket != nil && bucket.Get(uint64ToKey(conf.EpochStart)) != nil {
-			if err := sameStoredShardConf(tx, conf); err != nil {
+		for _, conf := range confs {
+			if err := installDerived(tx, derived, conf, provenance); err != nil {
 				return err
 			}
-			if prior := derived.Get(key); prior != nil && !bytes.Equal(prior, provenance) {
-				return ErrDerivedConflict
-			}
-			return derived.Put(key, provenance)
 		}
-		last, err := getShardConf(tx, conf.PartitionID, conf.ShardID, math.MaxUint64)
-		if err != nil {
+		return nil
+	})
+}
+
+func installDerived(tx *bolt.Tx, derived *bolt.Bucket, conf *types.PartitionDescriptionRecord, provenance []byte) error {
+	key := derivedKey(conf)
+	if bucket := getShardBucket(tx, conf.PartitionID, conf.ShardID); bucket != nil && bucket.Get(uint64ToKey(conf.EpochStart)) != nil {
+		if err := sameStoredShardConf(tx, conf); err != nil {
 			return err
 		}
-		if last == nil || conf.Verify(last) != nil || derived.Get(key) != nil {
+		if prior := derived.Get(key); prior != nil && !bytes.Equal(prior, provenance) {
 			return ErrDerivedConflict
 		}
-		if err := storeShardConf(tx, conf); err != nil {
-			return err
-		}
 		return derived.Put(key, provenance)
-	})
+	}
+	last, err := getShardConf(tx, conf.PartitionID, conf.ShardID, math.MaxUint64)
+	if err != nil {
+		return err
+	}
+	if last == nil || conf.Verify(last) != nil || derived.Get(key) != nil {
+		return ErrDerivedConflict
+	}
+	if err := storeShardConf(tx, conf); err != nil {
+		return err
+	}
+	return derived.Put(key, provenance)
 }
 
 // ShardConfigByEpoch returns the stored configuration with the given shard

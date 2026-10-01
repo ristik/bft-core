@@ -1,6 +1,7 @@
 package partitions
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -282,4 +283,81 @@ func TestHandoffProfileRefusesAWrongKeyEVMGenesisEntry(t *testing.T) {
 	stored, err := o.ShardConfig(8, types.ShardID{}, 1)
 	require.NoError(t, err)
 	require.Equal(t, genesis.Validators[0].SigKey, stored.Validators[0].SigKey, "the stored genesis entry is untouched")
+}
+
+// Under the handoff profile no shard configuration is written locally: every partition's epoch>0 entry is refused, and an
+// epoch-0 entry must equal the stored one (a startup reload is idempotent, an edited file is a conflict). Without the profile
+// the legacy behavior is unchanged.
+func TestHandoffProfileRefusesLocalShardConfigurationWrites(t *testing.T) {
+	open := func(t *testing.T, profile bool) *Orchestration {
+		o, err := NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), logger.New(t))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = o.Close() })
+		if profile {
+			o.EnableHandoffProfile()
+		}
+		return o
+	}
+	aggregator := createShardConf(t, 9, types.ShardID{}, 1)
+
+	t.Run("an aggregator epoch>0 entry is refused", func(t *testing.T) {
+		o := open(t, true)
+		require.NoError(t, o.AddShardConfig(aggregator))
+		next := *aggregator
+		next.Epoch, next.EpochStart = 1, 50
+		require.ErrorIs(t, o.AddShardConfig(&next), ErrDerivedOnly)
+		stored, err := o.ShardConfigs(100)
+		require.NoError(t, err)
+		require.EqualValues(t, 0, stored[types.PartitionShardID{PartitionID: 9, ShardID: types.ShardID{}.Key()}].Epoch, "nothing was written")
+	})
+	t.Run("an epoch-0 reload is idempotent and an edited one conflicts", func(t *testing.T) {
+		o := open(t, true)
+		require.NoError(t, o.AddShardConfig(aggregator))
+		require.NoError(t, o.AddShardConfig(aggregator))
+		edited := *aggregator
+		edited.Validators = createShardConf(t, 9, types.ShardID{}, 1).Validators // another key at the same activation
+		require.ErrorIs(t, o.AddShardConfig(&edited), ErrDerivedConflict)
+	})
+	t.Run("without the profile the legacy path still accepts a later epoch", func(t *testing.T) {
+		o := open(t, false)
+		require.NoError(t, o.AddShardConfig(aggregator))
+		next := *aggregator
+		next.Epoch, next.EpochStart = 1, 50
+		next.Validators = createShardConf(t, 9, types.ShardID{}, 50).Validators
+		require.NoError(t, o.AddShardConfig(&next))
+	})
+}
+
+// One handoff's derived configurations install atomically: a conflicting member leaves none of the batch behind.
+func TestInstallDerivedShardConfigsIsAtomic(t *testing.T) {
+	o, err := NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), logger.New(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Close() })
+	o.EnableHandoffProfile()
+	evm := createShardConf(t, 8, types.ShardID{}, 1)
+	evm.PartitionTypeID = evmassign.EVMPartitionTypeID
+	agg := createShardConf(t, 9, types.ShardID{}, 1)
+	require.NoError(t, o.AddShardConfig(evm))
+	require.NoError(t, o.AddShardConfig(agg))
+	provenance, err := evmassign.Provenance{RecordID: bytes.Repeat([]byte{1}, 32), CandidateDigest: bytes.Repeat([]byte{2}, 32), RootEpoch: 2}.Bytes()
+	require.NoError(t, err)
+	next := func(c *types.PartitionDescriptionRecord, start uint64) *types.PartitionDescriptionRecord {
+		n := *c
+		n.Epoch, n.EpochStart = 1, start
+		n.Validators = createShardConf(t, c.PartitionID, types.ShardID{}, start).Validators
+		return &n
+	}
+	evmNext, aggNext := next(evm, 7), next(agg, 7)
+	aggBroken := *aggNext
+	aggBroken.Epoch = 5 // a gap in the epoch chain: refused
+	require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{evmNext, &aggBroken}, provenance), ErrDerivedConflict)
+	confs, err := o.ShardConfigs(7)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, confs[types.PartitionShardID{PartitionID: 8, ShardID: types.ShardID{}.Key()}].Epoch, "the EVM entry of the failed batch was rolled back")
+	require.NoError(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{evmNext, aggNext}, provenance))
+	confs, err = o.ShardConfigs(7)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, confs[types.PartitionShardID{PartitionID: 8, ShardID: types.ShardID{}.Key()}].Epoch)
+	require.EqualValues(t, 1, confs[types.PartitionShardID{PartitionID: 9, ShardID: types.ShardID{}.Key()}].Epoch)
+	require.NoError(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{evmNext, aggNext}, provenance), "idempotent")
 }

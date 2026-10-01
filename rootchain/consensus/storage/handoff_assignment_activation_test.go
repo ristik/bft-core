@@ -445,14 +445,14 @@ func TestActivationRefusesACheckpointWhoseCommittedRecordIsNotTheDerivedOne(t *t
 	configs, err := f.orch.ShardConfigs(7)
 	require.NoError(t, err)
 	record := h.commit
-	_, err = activateEVMAssignment(root.ShardState.States, configs, record, 7, crypto.SHA256)
+	_, err = activateEVMAssignment(root.ShardState.States, configs, record, 7, crypto.SHA256, nil)
 	require.NoError(t, err)
 	wrong := record
 	wrong.SuccessorTRHash = bytes.Repeat([]byte{0x99}, 32)
-	_, err = activateEVMAssignment(root.ShardState.States, configs, wrong, 7, crypto.SHA256)
+	_, err = activateEVMAssignment(root.ShardState.States, configs, wrong, 7, crypto.SHA256, nil)
 	require.ErrorIs(t, err, ErrControlCheckpoint)
 	require.ErrorContains(t, err, "differs from the derived assignment")
-	_, err = activateEVMAssignment(root.ShardState.States, configs, record, 8, crypto.SHA256)
+	_, err = activateEVMAssignment(root.ShardState.States, configs, record, 8, crypto.SHA256, nil)
 	require.ErrorIs(t, err, ErrControlCheckpoint, "the derived configuration activates only at its own boundary")
 }
 

@@ -390,7 +390,7 @@ func (x *ConsensusManager) validateTimeoutCert(tc *rctypes.TimeoutCert) error {
 // derived one.
 func reconcileAssignmentHistory(db any, trust *trustbase.TrustBaseStore, orchestration Orchestration) error {
 	archive, ok := db.(handoffBundleArchive)
-	installer, installOK := orchestration.(storage.DerivedConfigInstaller)
+	_, installOK := orchestration.(storage.DerivedConfigInstaller)
 	if !ok || !installOK {
 		return nil
 	}
@@ -421,11 +421,11 @@ func reconcileAssignmentHistory(db any, trust *trustbase.TrustBaseStore, orchest
 		if _, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
 			return fmt.Errorf("%w: epoch %d: %w", storage.ErrAssignmentHistory, epoch, err)
 		}
-		pdr, provenance, err := storage.DeriveActivatedPDR(bundle.Proof.Record, bundle.Body, bundle.Candidate, bundle.Proof.Control.FrozenParent)
+		confs, provenance, _, err := storage.DeriveActivatedConfigs(bundle.Proof.Record, bundle.Body, bundle.Candidate, bundle.Proof.Control.FrozenParent)
 		if err != nil {
 			return fmt.Errorf("epoch %d: %w", epoch, err)
 		}
-		if err := installer.InstallDerivedShardConfig(pdr, provenance); err != nil {
+		if err := storage.InstallDerived(orchestration, confs, provenance); err != nil {
 			return fmt.Errorf("epoch %d: %w", epoch, err)
 		}
 	}

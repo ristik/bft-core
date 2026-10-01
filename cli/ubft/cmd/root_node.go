@@ -321,7 +321,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if pr := flags.observe.PrometheusRegisterer(); pr != nil {
 			mux.Handle("/api/v1/metrics", promhttp.HandlerFor(pr.(prometheus.Gatherer), promhttp.HandlerOpts{MaxRequestsInFlight: 1}))
 		}
-		mux.HandleFunc("PUT /api/v1/configurations", putShardConfigHandler(orchestration.AddShardConfig))
+		mux.HandleFunc("PUT /api/v1/configurations", configurationsHandler(flags.Profile2, orchestration.AddShardConfig))
 		mux.HandleFunc("PUT /api/v1/trustbases", putTrustBaseHandler(trustBaseStore.Store))
 		mux.HandleFunc("GET /api/v1/trustbases", getTrustBaseHandler(trustBaseStore, obs))
 		mux.HandleFunc("GET /api/v1/roundInfo", getRoundInfoHandler(cm.GetState, obs))
@@ -483,6 +483,17 @@ func putTrustBaseHandler(addTrustBaseFn func(trustBase types.RootTrustBase) erro
 
 		w.WriteHeader(http.StatusOK)
 	}
+}
+
+// configurationsHandler serves PUT /api/v1/configurations. Under the unified (handoff) profile it refuses every write:
+// configurations are ordered by root consensus in the handoff and rebuilt from committed history, never written per node.
+func configurationsHandler(handoffProfile bool, add func(*types.PartitionDescriptionRecord) error) http.HandlerFunc {
+	if handoffProfile {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "shard configurations change only through a committed root handoff", http.StatusForbidden)
+		}
+	}
+	return putShardConfigHandler(add)
 }
 
 func putShardConfigHandler(addShardConfFn func(shardConf *types.PartitionDescriptionRecord) error) http.HandlerFunc {

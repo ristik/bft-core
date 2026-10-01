@@ -190,3 +190,13 @@ external toolchain.
 The locked acceptance lane; the shard-node core's multi-assignment anchor-evidence and the H4 frontier
 restore *across* an assignment change beyond the guards above; the wire v2 of `parentwitness`; the final
 M3 genesis hashes. See the PR description for the exact test coverage.
+
+## Amendment: aggregator node-key replacement (candidate version 4)
+
+The candidate gains `Changes[]` (kind 1 = `ReplaceShardValidators`: partition, shard, expected installed PDR hash, successor PDR,
+possession proofs; kinds 2 and 3 are reserved tag numbers only and refused as unsupported) and `SourceRef` (must be empty).
+`ConfigHash` equality makes a change validators-only. All derived configurations of one H (the EVM assignment and each
+replacement) install in one transaction; restart re-derives them from the retained candidate. The first new-root block
+activates every replacement like the EVM assignment: immediate technical-record advance and trust-base install, so the retired
+key's first request is refused. There is no aggregator freeze. Under the handoff profile PUT and any local epoch>0 or edited
+epoch-0 configuration are refused.

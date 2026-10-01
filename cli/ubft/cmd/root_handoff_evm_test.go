@@ -243,3 +243,86 @@ func TestProposeRefusesAnUncoupledAssignment(t *testing.T) {
 		})
 	}
 }
+
+// An aggregator node-key replacement from the operator's side: each new key proves possession against the aggregator shard's
+// installed configuration, shard-assemble builds the change (validators only), and evm-assemble carries it in the proposal.
+func TestShardKeyReplacementCLIFlow(t *testing.T) {
+	dir := t.TempDir()
+	evmKeys := []successorKey{newSuccessorKey(t, "ev-a"), newSuccessorKey(t, "ev-b")}
+	evmInfos := []*types.NodeInfo{evmKeys[0].info, evmKeys[1].info}
+	ctx := consensus.EVMAssignmentContext{Network: 5, Predecessor: bytes.Repeat([]byte{1}, 32), Attempt: 2,
+		FrozenParent: bytes.Repeat([]byte{2}, 32), Installed: installedPDR(t)}
+	contextFile := writeJSON(t, dir, "context.json", ctx)
+	_, pop, err := readContextFile(contextFile)
+	require.NoError(t, err)
+
+	oldAgg := newSuccessorKey(t, "agg-old")
+	aggregator := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 9, PartitionTypeID: 9, TypeIDLen: 8, UnitIDLen: 256,
+		T2Timeout: 2500 * time.Millisecond, Epoch: 0, EpochStart: 1, PartitionParams: map[string]string{"proof_type": "aggregator_rsmt_v1"},
+		Validators: []*types.NodeInfo{oldAgg.info}}
+	installedFile := writeJSON(t, dir, "aggregator-installed.json", aggregator)
+	newAgg := newSuccessorKey(t, "agg-new")
+	aggValidators := writeJSON(t, dir, "agg-validators.json", []*types.NodeInfo{newAgg.info})
+
+	run := func(args ...string) (string, error) {
+		var out bytes.Buffer
+		cmd := newRootCmd()
+		cmd.SetOut(&out)
+		cmd.SetArgs(append([]string{"handoff"}, args...))
+		err := cmd.Execute()
+		return out.String(), err
+	}
+	keyFile := writeJSON(t, dir, "agg-new-keys.json", newAgg.conf)
+	popOut, err := run("evm-pop", "--context", contextFile, "--validators", aggValidators, "--node-id", "agg-new", "--key-conf", keyFile, "--installed", installedFile)
+	require.NoError(t, err)
+	aggPop := filepath.Join(dir, "agg-new-pop.json")
+	require.NoError(t, os.WriteFile(aggPop, []byte(popOut), 0o600))
+
+	changeFile := filepath.Join(dir, "change.json")
+	out, err := run("shard-assemble", "--context", contextFile, "--installed", installedFile, "--validators", aggValidators, "--pops", aggPop, "--out", changeFile)
+	require.NoError(t, err)
+	require.Contains(t, out, "partition 9 shard epoch 1 for 1 validators")
+
+	t.Run("a proof for another key is refused", func(t *testing.T) {
+		other := newSuccessorKey(t, "agg-new")
+		_, err := run("evm-pop", "--context", contextFile, "--validators", aggValidators, "--node-id", "agg-new",
+			"--key-conf", writeJSON(t, dir, "impostor.json", other.conf), "--installed", installedFile)
+		require.ErrorContains(t, err, "not the successor key")
+	})
+	t.Run("a missing proof is refused", func(t *testing.T) {
+		two := writeJSON(t, dir, "two.json", []*types.NodeInfo{newAgg.info, oldAgg.info})
+		_, err := run("shard-assemble", "--context", contextFile, "--installed", installedFile, "--validators", two, "--pops", aggPop)
+		require.ErrorContains(t, err, "no proof of possession")
+	})
+
+	// The change rides in the EVM assignment's proposal.
+	evmValidators := writeJSON(t, dir, "validators.json", evmInfos)
+	evmPops := make([]string, 0, 2)
+	for _, k := range evmKeys {
+		o, err := run("evm-pop", "--context", contextFile, "--validators", evmValidators, "--node-id", k.id, "--key-conf", writeJSON(t, dir, k.id+"-k.json", k.conf))
+		require.NoError(t, err)
+		path := filepath.Join(dir, k.id+"-pop.json")
+		require.NoError(t, os.WriteFile(path, []byte(o), 0o600))
+		evmPops = append(evmPops, path)
+	}
+	bindings := writeJSON(t, dir, "bindings.json", []evmassign.Binding{{RootNodeID: "r-a", EVMNodeID: "ev-a"}, {RootNodeID: "r-b", EVMNodeID: "ev-b"}})
+	assignment := filepath.Join(dir, "assignment.json")
+	_, err = run("evm-assemble", "--context", contextFile, "--validators", evmValidators, "--pops", strings.Join(evmPops, ","),
+		"--bindings", bindings, "--changes", changeFile, "--out", assignment)
+	require.NoError(t, err)
+	proposal, err := readEVMAssignment(assignment)
+	require.NoError(t, err)
+	require.Len(t, proposal.Changes, 1)
+	decoded, err := evmassign.ValidateChanges(proposal.Changes, nil, pop, 0x7fff)
+	require.NoError(t, err)
+	require.NoError(t, evmassign.VerifyChangeInstalled(decoded[0], aggregator))
+
+	t.Run("a supersession carries no changes", func(t *testing.T) {
+		pending := ctx
+		pending.Pending = true
+		pendingFile := writeJSON(t, dir, "pending-context.json", pending)
+		_, err := run("evm-assemble", "--context", pendingFile, "--validators", evmValidators, "--pops", strings.Join(evmPops, ","),
+			"--bindings", bindings, "--changes", changeFile, "--supersede", "--out", filepath.Join(dir, "x.json"))
+		require.ErrorContains(t, err, "no aggregator changes")
+	})
+}

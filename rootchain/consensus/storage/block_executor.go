@@ -192,7 +192,11 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		}
 		// The designated EVM shard installs the committed successor assignment
 		// here, once, from the configuration derived from committed history.
-		states, err := activateEVMAssignment(parentState.States, shardConfs, record, newBlock.Round, hash)
+		derivedShards, err := derivedChangeShards(candidates, record)
+		if err != nil {
+			return nil, err
+		}
+		states, err := activateEVMAssignment(parentState.States, shardConfs, record, newBlock.Round, hash, derivedShards)
 		if err != nil {
 			return nil, err
 		}
@@ -232,7 +236,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					return nil, err
 				}
 				if len(companion) != 0 && control.Phase == "endorsed" {
-					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration, authority.CurrentRoot()); err != nil {
+					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration, authority.CurrentRoot(), nextShardState.States, shardConfs); err != nil {
 						return nil, err
 					}
 				}
@@ -307,7 +311,8 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 // admission, after the authority has checked the candidate's static bindings.
 // The installed assignment is the authenticated configuration of the frozen
 // shard at this block, never a value the candidate supplies.
-func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.PartitionDescriptionRecord, orchestration Orchestration, currentRoot []evmassign.RootMember) error {
+func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.PartitionDescriptionRecord, orchestration Orchestration, currentRoot []evmassign.RootMember,
+	states map[types.PartitionShardID]*ShardInfo, shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord) error {
 	fc, err := ParseFreezeCompanion(companion)
 	if err != nil || si == nil || installed == nil {
 		return ErrHandoffRecord
@@ -354,8 +359,42 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 	if err := evmassign.VerifyInstalled(candidate, succ, installed, currentRoot); err != nil {
 		return errors.Join(ErrHandoffRecord, err)
 	}
+	if err := verifyShardChanges(candidate, states, shardConfs); err != nil {
+		return errors.Join(ErrHandoffRecord, err)
+	}
 	if candidate.Supersedes != nil {
 		return verifySupersession(candidate.Supersedes, si, orchestration)
+	}
+	return nil
+}
+
+// verifyShardChanges is the state-dependent half of the aggregator validator replacements a candidate carries: each replaces
+// exactly the installed configuration of an existing non-EVM shard whose last replacement is already acknowledged (its technical
+// record names the epoch its input record certified). The static half (kinds, bounds, possession proofs) ran with the binding.
+func verifyShardChanges(c evmassign.Candidate, states map[types.PartitionShardID]*ShardInfo, shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord) error {
+	if c.Supersedes != nil && len(c.Changes) != 0 {
+		// Aggregator changes of the superseded H are already activated and never replayed; a supersession carries none.
+		return fmt.Errorf("%w: a supersession carries no aggregator changes", evmassign.ErrChange)
+	}
+	for _, ch := range c.Changes {
+		if ch.Kind != evmassign.ChangeReplaceShardValidators {
+			return evmassign.ErrUnsupportedChange
+		}
+		r, succ, err := evmassign.DecodeReplaceShardValidators(ch.Payload)
+		if err != nil {
+			return err
+		}
+		key := types.PartitionShardID{PartitionID: succ.PartitionID, ShardID: succ.ShardID.Key()}
+		si := states[key]
+		if si == nil {
+			return fmt.Errorf("%w: shard %s does not exist", evmassign.ErrChange, key)
+		}
+		if err := evmassign.VerifyChangeInstalled(evmassign.DecodedChange{Replace: r, Successor: succ}, shardConfs[key]); err != nil {
+			return err
+		}
+		if si.TR.Epoch != si.IR.Epoch {
+			return fmt.Errorf("%w: shard %s has an unacknowledged configuration", ErrAssignmentAckPending, key)
+		}
 	}
 	return nil
 }

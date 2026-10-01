@@ -51,13 +51,15 @@ type assignmentFixture struct {
 	nextRootKey evmKey // the root entity that replaces the last committee member in the successor committee
 	// baseCommittee, when set, is the committee being replaced (a later handoff): the previous successor.
 	baseCommittee []evmassign.RootMember
-	succ          *types.PartitionDescriptionRecord
-	pop           evmassign.PoPContext
-	orch          *partitions.Orchestration
-	base          uint64 // ordered round of the prepare record; zero means 2
-	rootEpoch     uint64 // old root epoch of the handoff being built; zero means 1
-	supersedes    *evmassign.Supersession
-	current0      *types.PartitionDescriptionRecord // installed configuration the candidate replaces; nil means f.current
+	// changes are aggregator validator replacements the candidate carries (see addAggregator).
+	changes    []evmassign.Change
+	succ       *types.PartitionDescriptionRecord
+	pop        evmassign.PoPContext
+	orch       *partitions.Orchestration
+	base       uint64 // ordered round of the prepare record; zero means 2
+	rootEpoch  uint64 // old root epoch of the handoff being built; zero means 1
+	supersedes *evmassign.Supersession
+	current0   *types.PartitionDescriptionRecord // installed configuration the candidate replaces; nil means f.current
 }
 
 func newAssignmentFixture(t *testing.T) *assignmentFixture {
@@ -183,7 +185,7 @@ func (f *assignmentFixture) candidate(t *testing.T) evmassign.Candidate {
 	require.NoError(t, err)
 	return evmassign.Candidate{Version: evmassign.CandidateVersion, Network: 5, Predecessor: bytes.Clone(f.predecessor),
 		Attempt: f.pop.Attempt, Parent: bytes.Clone(f.parent), RootMembers: f.successorRoot(), OldShardEpoch: installed.Epoch,
-		OldActiveHash: old[:], Assignment: raw, PoPs: f.pops(t, f.pop, f.succ), Supersedes: f.supersedes, Bindings: f.bindings()}
+		OldActiveHash: old[:], Assignment: raw, PoPs: f.pops(t, f.pop, f.succ), Supersedes: f.supersedes, Bindings: f.bindings(), Changes: f.changes}
 }
 
 // rootOnly builds the legacy (version 1) root-only freeze whose successor committee is the given one: it carries no EVM

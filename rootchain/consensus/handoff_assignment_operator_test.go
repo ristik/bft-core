@@ -288,3 +288,114 @@ func TestFrozenParentLossNamesTheCondition(t *testing.T) {
 	require.Contains(t, f.cm.frozenParentLoss(parentWith(frozen), frozen, frozen), "not in the committed state",
 		"the fixture's committed state does not hold this parent")
 }
+
+// An aggregator key replacement rides in the same handoff: the planner builds it, every endorser re-verifies it against its own
+// committed checkpoint, and each refusal is isolated.
+func TestOperatorBuildsAndVerifiesAnAggregatorKeyReplacement(t *testing.T) {
+	type shardFixture struct {
+		conf    *types.PartitionDescriptionRecord
+		oldKey  evmSigner
+		nextKey evmSigner
+	}
+	setup := func(t *testing.T) (*operatorAssignmentFixture, shardFixture) {
+		f := newOperatorAssignmentFixture(t)
+		sf := shardFixture{oldKey: newEVMSigner(t, "agg-old"), nextKey: newEVMSigner(t, "agg-new")}
+		sf.conf = &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 9, PartitionTypeID: 9, TypeIDLen: 8, UnitIDLen: 256,
+			T2Timeout: 2500 * time.Millisecond, Epoch: 0, EpochStart: 1,
+			PartitionParams: map[string]string{"proof_type": "aggregator_rsmt_v1"}, Validators: []*types.NodeInfo{sf.oldKey.info}}
+		orch, ok := f.cm.orchestration.(*partitions.Orchestration)
+		require.True(t, ok)
+		require.NoError(t, orch.AddShardConfig(sf.conf))
+		f.state.CommittedHead.ShardInfo = append(f.state.CommittedHead.ShardInfo, abdrc.ShardInfo{Partition: 9, IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{3}, 32)}})
+		return f, sf
+	}
+	change := func(t *testing.T, f *operatorAssignmentFixture, sf shardFixture, installed *types.PartitionDescriptionRecord, mutate func(*types.PartitionDescriptionRecord)) evmassign.Change {
+		succ, err := evmassign.NewSuccessor(installed, []*types.NodeInfo{sf.nextKey.info})
+		require.NoError(t, err)
+		if mutate != nil {
+			mutate(succ)
+		}
+		ctx := evmassign.PoPContext{Network: 5, Attempt: 0}
+		copy(ctx.Predecessor[:], f.predecessor)
+		copy(ctx.Parent[:], f.parent)
+		pop, err := evmassign.SignPoP(sf.nextKey.signer, ctx, succ, sf.nextKey.id)
+		require.NoError(t, err)
+		ch, err := evmassign.EncodeReplaceShardValidators(installed.PartitionID, installed.ShardID, installed, succ, []evmassign.PoP{pop})
+		require.NoError(t, err)
+		return ch
+	}
+
+	t.Run("built, endorsed and re-verified by a voter", func(t *testing.T) {
+		f, sf := setup(t)
+		p := f.proposal(t)
+		p.Changes = []evmassign.Change{change(t, f, sf, sf.conf, nil)}
+		plan, err := f.cm.buildHandoffPlanFromState(f.next, f.parent, f.state, p)
+		require.NoError(t, err)
+		c, err := evmassign.DecodeCandidate(plan.CandidatePreimage)
+		require.NoError(t, err)
+		require.Len(t, c.Changes, 1)
+		require.NoError(t, f.cm.endorseHandoffAtState(context.Background(), plan, f.state))
+		// A tampered change in the preimage no longer matches the digest the body binds.
+		tampered := plan
+		tampered.Signer = f.node.PeerConf.ID.String()
+		tampered.CandidatePreimage = append(bytes.Clone(plan.CandidatePreimage[:len(plan.CandidatePreimage)-1]), plan.CandidatePreimage[len(plan.CandidatePreimage)-1]^1)
+		_, _, err = f.cm.validateHandoffApproval(&tampered)
+		require.ErrorIs(t, err, ErrHandoffApproval)
+	})
+
+	refusals := []struct {
+		name  string
+		build func(t *testing.T, f *operatorAssignmentFixture, sf shardFixture) []evmassign.Change
+		want  error
+	}{
+		{"a proof_type change", func(t *testing.T, f *operatorAssignmentFixture, sf shardFixture) []evmassign.Change {
+			return []evmassign.Change{change(t, f, sf, sf.conf, func(s *types.PartitionDescriptionRecord) { s.PartitionParams["proof_type"] = "sp1" })}
+		}, evmassign.ErrConfig},
+		{"a configuration that is not the installed one", func(t *testing.T, f *operatorAssignmentFixture, sf shardFixture) []evmassign.Change {
+			stale := *sf.conf
+			stale.T2Timeout += time.Second
+			return []evmassign.Change{change(t, f, sf, &stale, nil)}
+		}, evmassign.ErrContext},
+		{"a shard that does not exist", func(t *testing.T, f *operatorAssignmentFixture, sf shardFixture) []evmassign.Change {
+			ghost := *sf.conf
+			ghost.PartitionID = 77
+			return []evmassign.Change{change(t, f, sf, &ghost, nil)}
+		}, evmassign.ErrChange},
+		{"a reserved kind", func(t *testing.T, f *operatorAssignmentFixture, sf shardFixture) []evmassign.Change {
+			ch := change(t, f, sf, sf.conf, nil)
+			ch.Kind = evmassign.ChangeAddPartition
+			return []evmassign.Change{ch}
+		}, evmassign.ErrUnsupportedChange},
+		{"a possession proof for another attempt", func(t *testing.T, f *operatorAssignmentFixture, sf shardFixture) []evmassign.Change {
+			succ, err := evmassign.NewSuccessor(sf.conf, []*types.NodeInfo{sf.nextKey.info})
+			require.NoError(t, err)
+			ctx := evmassign.PoPContext{Network: 5, Attempt: 3}
+			copy(ctx.Predecessor[:], f.predecessor)
+			copy(ctx.Parent[:], f.parent)
+			pop, err := evmassign.SignPoP(sf.nextKey.signer, ctx, succ, sf.nextKey.id)
+			require.NoError(t, err)
+			ch, err := evmassign.EncodeReplaceShardValidators(9, sf.conf.ShardID, sf.conf, succ, []evmassign.PoP{pop})
+			require.NoError(t, err)
+			return []evmassign.Change{ch}
+		}, evmassign.ErrPoP},
+	}
+	for _, tc := range refusals {
+		t.Run(tc.name, func(t *testing.T) {
+			f, sf := setup(t)
+			p := f.proposal(t)
+			p.Changes = tc.build(t, f, sf)
+			_, err := f.cm.buildHandoffPlanFromState(f.next, f.parent, f.state, p)
+			require.ErrorIs(t, err, ErrHandoffApproval)
+			require.ErrorIs(t, err, tc.want)
+			require.Empty(t, f.cm.handoffPlans, "a refused proposal leaves no endorsement state")
+		})
+	}
+	t.Run("an unacknowledged aggregator configuration", func(t *testing.T) {
+		f, sf := setup(t)
+		f.state.CommittedHead.ShardInfo[1].IRTR.Epoch = 1
+		p := f.proposal(t)
+		p.Changes = []evmassign.Change{change(t, f, sf, sf.conf, nil)}
+		_, err := f.cm.buildHandoffPlanFromState(f.next, f.parent, f.state, p)
+		require.ErrorIs(t, err, storage.ErrAssignmentAckPending)
+	})
+}
