@@ -60,6 +60,10 @@ type Context struct {
 	EVMGenesisHash    common.Hash
 	ShardEpoch        uint64
 	RootEpoch         uint64
+	// Layout is the SealRegistry layout of the deployment (zero or 1: sealRegistry/v1; 2: sealRegistry/v2). The
+	// wire context of protocol version 1 has no field for it, so a layout-2 context is never encoded: it fails
+	// closed instead of being read by a v1 peer as the other registry.
+	Layout uint64
 }
 
 type Request struct {
@@ -115,6 +119,9 @@ func init() {
 	}
 }
 
+// ErrLayoutUnsupported refuses to put a registry layout the wire version cannot name on the wire.
+var ErrLayoutUnsupported = errors.New("parent witness: registry layout is not representable in this wire version")
+
 func contextToWire(c Context) contextWire {
 	return contextWire{NetworkID: uint64(c.NetworkID), PartitionID: uint64(c.PartitionID), ShardID: bytes.Clone(c.ShardID.Bytes()), FullShardConfHash: c.FullShardConfHash.Bytes(), RegistryAddress: c.RegistryAddress.Bytes(), RegistryCodeHash: c.RegistryCodeHash.Bytes(), GenesisCommitment: c.GenesisCommitment.Bytes(), EVMGenesisHash: c.EVMGenesisHash.Bytes(), ShardEpoch: c.ShardEpoch, RootEpoch: c.RootEpoch}
 }
@@ -149,10 +156,13 @@ func shardFromBytes(b []byte) (types.ShardID, error) {
 }
 
 func (c Context) proofContext() registryproof.Context {
-	return registryproof.Context{RegistryAddress: c.RegistryAddress, RegistryCodeHash: c.RegistryCodeHash, GenesisCommitment: c.GenesisCommitment, FullShardConfHash: c.FullShardConfHash, ShardEpoch: c.ShardEpoch, RootEpoch: c.RootEpoch, EVMGenesisHash: c.EVMGenesisHash}
+	return registryproof.Context{RegistryAddress: c.RegistryAddress, RegistryCodeHash: c.RegistryCodeHash, GenesisCommitment: c.GenesisCommitment, FullShardConfHash: c.FullShardConfHash, ShardEpoch: c.ShardEpoch, RootEpoch: c.RootEpoch, EVMGenesisHash: c.EVMGenesisHash, Layout: c.Layout}
 }
 
 func validateRequest(r Request) error {
+	if r.Context.Layout > registryproof.LayoutVersion2 {
+		return fmt.Errorf("%w: registry layout %d", ErrInvalidRequest, r.Context.Layout)
+	}
 	if r.BlockHash == (common.Hash{}) {
 		return fmt.Errorf("%w: zero block hash", ErrInvalidRequest)
 	}
@@ -199,6 +209,9 @@ func EncodeRequest(r Request) ([]byte, error) {
 	if err := validateRequest(r); err != nil {
 		return nil, err
 	}
+	if r.Context.Layout > 1 {
+		return nil, ErrLayoutUnsupported
+	}
 	raw, err := marshalCanonical(requestWire{Version: Version, Context: contextToWire(r.Context), BlockHash: r.BlockHash.Bytes()})
 	if err != nil {
 		return nil, err
@@ -234,6 +247,9 @@ func DecodeRequest(raw []byte) (Request, error) {
 func EncodeResponse(r Response) ([]byte, error) {
 	if err := validateRequest(r.Request); err != nil {
 		return nil, err
+	}
+	if r.Request.Context.Layout > 1 {
+		return nil, ErrLayoutUnsupported
 	}
 	if r.Outcome > OutcomeInvalidRequest {
 		return nil, fmt.Errorf("%w: unknown outcome", ErrWire)

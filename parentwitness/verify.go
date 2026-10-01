@@ -36,7 +36,7 @@ func NewTarget(c TargetConfig) (Target, error) {
 	if err != nil {
 		return Target{}, fmt.Errorf("%w: shard: %v", ErrContext, err)
 	}
-	r := Request{Context: Context{NetworkID: c.NetworkID, PartitionID: c.PartitionID, ShardID: shard, FullShardConfHash: c.FullShardConfHash, RegistryAddress: c.Registry.RegistryAddress, RegistryCodeHash: c.Registry.RegistryCodeHash, GenesisCommitment: c.Registry.GenesisCommitment, EVMGenesisHash: c.Registry.EVMGenesisHash, ShardEpoch: c.Registry.ShardEpoch, RootEpoch: c.Registry.RootEpoch}, BlockHash: c.BlockHash}
+	r := Request{Context: Context{NetworkID: c.NetworkID, PartitionID: c.PartitionID, ShardID: shard, FullShardConfHash: c.FullShardConfHash, RegistryAddress: c.Registry.RegistryAddress, RegistryCodeHash: c.Registry.RegistryCodeHash, GenesisCommitment: c.Registry.GenesisCommitment, EVMGenesisHash: c.Registry.EVMGenesisHash, ShardEpoch: c.Registry.ShardEpoch, RootEpoch: c.Registry.RootEpoch, Layout: c.Registry.Layout}, BlockHash: c.BlockHash}
 	if err := validateRequest(r); err != nil {
 		return Target{}, err
 	}

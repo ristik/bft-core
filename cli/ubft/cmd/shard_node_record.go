@@ -48,7 +48,7 @@ func startCertifiedRecord(ctx context.Context, flags *shardNodeRunFlags, shardCo
 	}
 	deployment, err := recordwiring.NewDeployment(ctx, recordwiring.DeploymentConfig{
 		Shard: shardConf, ShardConfHash: confHash, TrustBases: trustBases, RootEpoch: rootEpoch,
-		EVM: evm, ExpectedGenesisHash: expected,
+		EVM: evm, ExpectedGenesisHash: expected, Layout: flags.RegistryLayout,
 	}, executor)
 	if err != nil {
 		return nil, fmt.Errorf("checking the certified-record deployment: %w", err)

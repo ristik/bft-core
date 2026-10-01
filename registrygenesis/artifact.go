@@ -96,6 +96,18 @@ func PinnedArtifactV2() (Artifact, error) {
 	return a, nil
 }
 
+// PinnedArtifactForLayout selects the pinned artifact: layout 0 or 1 is the historical sealRegistry/v1, 2 the
+// assignment-aware sealRegistry/v2 an M3 launch genesis must use. Any other layout is refused.
+func PinnedArtifactForLayout(layout uint64) (Artifact, error) {
+	switch layout {
+	case 0, 1:
+		return PinnedArtifact()
+	case 2:
+		return PinnedArtifactV2()
+	}
+	return Artifact{}, fmt.Errorf("%w: registry layout %d", ErrArtifact, layout)
+}
+
 func parseArtifact(raw []byte, layout uint64) (Artifact, error) {
 	var f artifactFile
 	if err := json.Unmarshal(raw, &f); err != nil {
