@@ -256,8 +256,12 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		require.NoError(t, err)
 		members[i] = evmroot.Member{StakingID: fmt.Sprintf("stake-%d", i), NodeID: newNodes[i].PeerConf.ID.String(), ConsensusKey: key, Weight: 1}
 	}
+	// A root-members-only handoff: the body binds the operator candidate digest, which Verify recomputes from the members.
+	operatorDigest, err := evmroot.D4OperatorCandidateDigest(members)
+	require.NoError(t, err)
 	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: 5, Epoch: 2, EarliestActivation: 7,
-		Members: members, RootThreshold: 3, PredecessorHash: link}
+		Members: members, RootThreshold: 3, PredecessorHash: link,
+		ChangeRecordHash: evmroot.D4CandidateContextHash(5, oldID, 0, operatorDigest[:], 7)}
 	require.NoError(t, body.Validate())
 	bodyID := body.Identity()
 	_, shardValidators := testutils.CreateTestNodes(t, 3)
