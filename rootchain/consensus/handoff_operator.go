@@ -799,6 +799,17 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 	return nil
 }
 
+// dropHandoffPlan forgets the cached endorsed plan of a body so it is neither retried nor left to order a stale Prepare.
+func (x *ConsensusManager) dropHandoffPlan(bodyID []byte) {
+	x.handoffMu.Lock()
+	defer x.handoffMu.Unlock()
+	for id, plan := range x.handoffPlans {
+		if bytes.Equal(plan.record.NextBodyID, bodyID) {
+			delete(x.handoffPlans, id)
+		}
+	}
+}
+
 func (x *ConsensusManager) readyHandoff(attempt ...uint64) (*pendingHandoff, error) {
 	x.handoffMu.Lock()
 	defer x.handoffMu.Unlock()
@@ -865,6 +876,15 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	record.OrderedRound = round
 	switch control.Phase {
 	case "idle", "aborted":
+		// Prepare freezes the EVM shard from this record onward, so it is ordered only while the plan's frozen parent is still the
+		// certified EVM IR in this branch. If the EVM certified a newer block since the plan was endorsed the plan is stale: drop it
+		// (nothing is frozen, the operator re-plans from the current parent) instead of ordering a Prepare whose Freeze would abort.
+		if !parentHasFrozenShard(parent, plan.plan.FrozenParent) {
+			x.dropHandoffPlan(plan.record.NextBodyID)
+			x.log.Info("root handoff outcome", "phase", "dropped", "attempt", plan.plan.Attempt, "rootEpoch", control.Epoch, "rootRound", parentQC.GetRound(),
+				"reason", "the plan's frozen parent is no longer the certified EVM IR in this branch", "frozenParent", fmt.Sprintf("%x", plan.plan.FrozenParent))
+			return nil, nil
+		}
 		record.Kind = "prepare"
 		if round > ^uint64(0)-8 {
 			return nil, ErrHandoffApproval

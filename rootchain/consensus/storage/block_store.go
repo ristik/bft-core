@@ -442,15 +442,14 @@ func (x *BlockStore) FrozenShardAt(round uint64) (types.PartitionShardID, bool, 
 		return zero, false, err
 	}
 	control := parent.ShardState.Control
-	if control == nil || control.Phase != "endorsed" {
+	if control == nil || (control.Phase != "prepared" && control.Phase != "endorsed") {
 		return zero, false, nil
 	}
 	configs, err := x.orchestration.ShardConfigs(parent.GetRound())
 	if err != nil {
 		return zero, false, err
 	}
-	key, err := frozenShard(parent.ShardState, configs, control.FrozenParent)
-	return key, err == nil, err
+	return frozenShardOf(parent.ShardState, configs, control)
 }
 
 // CertifiedEVMShardAt selects the sole EVM shard with the verified parent at

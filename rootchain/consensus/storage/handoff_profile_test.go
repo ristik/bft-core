@@ -979,3 +979,109 @@ func TestProfileHandoffRejectsEpochJumpOnEveryBlockPath(t *testing.T) {
 	_, err = New(crypto.SHA256, reloadStore.storage, emptyOrchestration(), logger.New(t), ProfileHandoff)
 	require.ErrorIs(t, err, ErrNetworkProfile)
 }
+
+// movingParentAuthority admits any freeze, naming the frozen parent the test currently plans.
+type movingParentAuthority struct{ parent *[]byte }
+
+func (movingParentAuthority) Predecessor() []byte                                    { return make([]byte, 32) }
+func (movingParentAuthority) CurrentRoot() []evmassign.RootMember                    { return []evmassign.RootMember{} }
+func (movingParentAuthority) VerifyAbort(evmroot.OrderedHandoffRecord, []byte) error { return nil }
+func (a movingParentAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) ([]byte, error) {
+	return bytes.Clone(*a.parent), nil
+}
+
+// evmRequestBlock adds a block whose only content is an EVM certification of a new block hash.
+func evmRequestBlock(s *BlockStore, round uint64, records [][]byte, hash []byte) error {
+	parent, err := s.Block(round - 1)
+	if err != nil {
+		return err
+	}
+	block := &rctypes.BlockData{Version: 2, Round: round, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}, HandoffRecords: records},
+		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}
+	_, err = s.Add(block, mockIRVerifier{verify: func(_ uint64, _ *rctypes.IRChangeReq) (*types.InputRecord, error) {
+		return &types.InputRecord{Version: 1, RoundNumber: round, BlockHash: bytes.Clone(hash)}, nil
+	}})
+	return err
+}
+
+// Prepare freezes the designated EVM shard (by type: no parent is bound yet), an aggregator shard stays live, and Abort lifts the
+// Prepare-time freeze exactly as it lifts the Freeze-time one: the control state returns to "aborted", which freezes nothing.
+func TestPrepareFreezesTheEVMShardAndAbortLiftsItLikeFreeze(t *testing.T) {
+	s := profileStore(t)
+	installTestFrozenShard(t, s, bytes.Repeat([]byte{0x42}, 32))
+	aggregators := installTestAggregatorShards(t, s)
+	evm := types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}
+	zero := make([]byte, 32)
+	body := bytes.Repeat([]byte{1}, 32)
+
+	require.NoError(t, evmRequestBlock(s, 2, nil, bytes.Repeat([]byte{0x50}, 32)), "before Prepare the EVM certifies")
+	_, active, err := s.FrozenShardAt(2)
+	require.NoError(t, err)
+	require.False(t, active)
+
+	addProfileBlock(t, s, 3, [][]byte{record("prepare", 3, 9, zero, body, zero)})
+	key, active, err := s.FrozenShardAt(3)
+	require.NoError(t, err)
+	require.True(t, active, "Prepare freezes the EVM shard")
+	require.Equal(t, evm, key)
+	require.ErrorIs(t, evmRequestBlock(s, 4, nil, bytes.Repeat([]byte{0x51}, 32)), ErrHandoffFrozen, "an EVM certification is refused from Prepare")
+	// An aggregator shard stays live.
+	parent, err := s.Block(3)
+	require.NoError(t, err)
+	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 4, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: aggregators[0].PartitionID}}},
+		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, Epoch: 1, CurrentRootHash: parent.RootHash}}},
+		mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) {
+			return &types.InputRecord{Version: 1, RoundNumber: 4, BlockHash: bytes.Repeat([]byte{0x60}, 32)}, nil
+		}})
+	require.NoError(t, err)
+
+	addProfileBlock(t, s, 5, [][]byte{record("abort", 5, 9, zero, body, zero)})
+	_, active, err = s.FrozenShardAt(5)
+	require.NoError(t, err)
+	require.False(t, active, "Abort lifts the Prepare-time freeze")
+	require.NoError(t, evmRequestBlock(s, 6, nil, bytes.Repeat([]byte{0x52}, 32)), "the EVM certifies again after Abort")
+}
+
+// A busy EVM that certifies in every round can be handed off: Prepare freezes it, so the parent the leader checked when it ordered
+// Prepare is still the certified EVM IR when Freeze is ordered. A Freeze naming any other parent is refused.
+func TestBusyEVMCanBeHandedOffBecausePrepareFreezesIt(t *testing.T) {
+	s := profileStore(t)
+	installTestFrozenShard(t, s, bytes.Repeat([]byte{0x40}, 32))
+	planned := bytes.Repeat([]byte{0x40}, 32)
+	s.handoffAuth = movingParentAuthority{parent: &planned}
+	evm := types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}
+	zero := make([]byte, 32)
+	body, frozenID := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
+
+	// The EVM certifies a new block in every round; the operator's plan names the latest one it saw.
+	var latest []byte
+	for round := uint64(2); round <= 6; round++ {
+		latest = bytes.Repeat([]byte{byte(0x50 + round)}, 32)
+		require.NoError(t, evmRequestBlock(s, round, nil, latest))
+	}
+	planned = bytes.Clone(latest)
+	tip, err := s.Block(6)
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(planned, tip.ShardState.States[evm].IR.BlockHash), "the leader's check: the plan's parent is the certified EVM IR in its branch")
+
+	addProfileBlock(t, s, 7, [][]byte{record("prepare", 7, 15, zero, body, zero)})
+	// The EVM keeps wanting to certify but is refused, so the parent cannot move before Freeze.
+	require.ErrorIs(t, evmRequestBlock(s, 8, nil, bytes.Repeat([]byte{0x99}, 32)), ErrHandoffFrozen)
+
+	t.Run("a Freeze naming a stale parent is refused", func(t *testing.T) {
+		stale := bytes.Repeat([]byte{0x51}, 32)
+		planned = stale
+		parent, err := s.Block(7)
+		require.NoError(t, err)
+		_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 8, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{record("freeze", 8, 15, frozenID, body, zero)}},
+			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
+		require.ErrorIs(t, err, ErrHandoffRecord)
+		planned = bytes.Clone(latest)
+	})
+	addProfileBlock(t, s, 8, [][]byte{record("freeze", 8, 15, frozenID, body, zero)})
+	frozen := mustBlock(t, s, 8).ShardState.States[evm]
+	require.True(t, bytes.Equal(planned, frozen.IR.BlockHash), "Freeze bound the parent that Prepare froze")
+}

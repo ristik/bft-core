@@ -280,11 +280,11 @@ m2_handoff() {
         outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
           grep -E "msg=\\\"root handoff outcome\\\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
         [[ "$outcome" = *phase=committed* ]] && { committed=true; break; }
-        [[ "$outcome" = *phase=aborted* ]] && break
+        [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=dropped* ]] && break
         sleep 1
       done
       $committed && break
-      [[ "$outcome" = *phase=aborted* ]] && echo "F8 handoff attempt $attempt aborted; retrying with the current certified parent"
+      [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=dropped* ]] && echo "F8 handoff attempt $attempt aborted; retrying with the current certified parent"
     done
     $committed || { echo "F8 root handoff did not commit after retries" >&2; return 1; }
     for i in $(seq 1 "$validators"); do
@@ -320,7 +320,7 @@ m2_handoff() {
       outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
         grep -E "msg=\"root handoff outcome\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
       if [[ "$outcome" = *phase=committed* ]]; then committed=true; break; fi
-      if [[ "$outcome" = *phase=aborted* ]]; then
+      if [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=dropped* ]]; then
         echo "root handoff aborted; selecting a fresh certified parent and attempt"
         break
       fi
