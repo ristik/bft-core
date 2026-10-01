@@ -752,7 +752,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						return err
 					}
 					if archiveLocal != nil {
-						raw, err := types.Cbor.Marshal(bundle)
+						raw, err := handoffdelivery.EncodeBundle(bundle)
 						if err != nil {
 							return err
 						}
@@ -771,7 +771,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					raw, err := archivewiring.FetchBundle(ctx, archiveHost, id, archive.BundleRequest{Context: archiveSubject, Epoch: epoch}, archiveTransportLimits)
 					var bundle handoffdelivery.Bundle
 					if err == nil {
-						err = types.Cbor.Unmarshal(raw, &bundle)
+						bundle, err = handoffdelivery.DecodeBundle(raw)
 					}
 					return bundle, err
 				}

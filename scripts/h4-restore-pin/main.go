@@ -113,8 +113,8 @@ func archiveTrustBodyID(archiveDir string, epoch uint64, anchor *types.RootTrust
 		if !strings.HasPrefix(entry.Name(), fmt.Sprintf("bundle-%016x-", epoch)) || string(want[:]) != string(raw[:sha256.Size]) {
 			continue
 		}
-		var bundle handoffdelivery.Bundle
-		if types.Cbor.Unmarshal(raw[sha256.Size:], &bundle) != nil || bundle.Body.Epoch != epoch {
+		bundle, decodeErr := handoffdelivery.DecodeBundle(raw[sha256.Size:])
+		if decodeErr != nil || bundle.Body.Epoch != epoch {
 			continue
 		}
 		return [32]byte(bundle.Body.Identity()), nil

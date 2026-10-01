@@ -875,7 +875,13 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 			return nil, fmt.Errorf("%w: %w", ErrHandoffApproval, err)
 		}
 		shard := parent.ShardState.States[key]
-		record.SuccessorTRHash, err = shard.TR.Hash()
+		if len(plan.plan.CandidatePreimage) != 0 {
+			// An assignment-bearing H commits the technical record the successor
+			// configuration installs, not the retiring one.
+			record.SuccessorTRHash, err = storage.AssignmentSuccessorTRHash(shard, plan.plan.CandidatePreimage, record.ActivationRound, x.params.HashAlgorithm)
+		} else {
+			record.SuccessorTRHash, err = shard.TR.Hash()
+		}
 		if err != nil {
 			return nil, err
 		}

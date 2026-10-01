@@ -15,7 +15,10 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-const Protocol = "/unicity/root-handoff-bundle/1.0.0"
+// Protocol 2.0.0 serves bundles that carry an EVM assignment candidate. The
+// protocol identifier is the explicit capability: a peer that does not speak it
+// cannot fetch an assignment-bearing bundle, and is refused before activation.
+const Protocol = "/unicity/root-handoff-bundle/2.0.0"
 
 const (
 	maxRequestBytes  = 256

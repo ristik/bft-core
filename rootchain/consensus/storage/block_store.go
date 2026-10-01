@@ -54,6 +54,9 @@ func New(hashAlgo crypto.Hash, db PersistentStore, orchestration Orchestration, 
 	if err != nil {
 		return nil, err
 	}
+	if err := repairCommittedAssignment(db, orchestration, hashAlgo, profile); err != nil {
+		return nil, fmt.Errorf("reconciling committed EVM assignment: %w", err)
+	}
 	blTree, err := NewBlockTree(db, orchestration, profile)
 	if err != nil {
 		return nil, fmt.Errorf("initializing block tree: %w", err)
@@ -245,7 +248,7 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 		}
 	}
 	// Extend state from parent block
-	exeBlock, err := parentBlock.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth)
+	exeBlock, err := parentBlock.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth, x)
 	if err != nil {
 		return nil, fmt.Errorf("error processing block round %v, %w", block.Round, err)
 	}
@@ -380,7 +383,9 @@ func (x *BlockStore) HandoffBody(id []byte) ([]byte, error) {
 func (x *BlockStore) HandoffCandidate(id []byte) ([]byte, error) {
 	archive, ok := x.storage.(interface{ HandoffCandidate([]byte) ([]byte, error) })
 	if !ok {
-		return nil, ErrHandoffRecord
+		// A store without candidate retention cannot have admitted an
+		// assignment-bearing freeze, which is refused when it is added.
+		return nil, nil
 	}
 	return archive.HandoffCandidate(id)
 }

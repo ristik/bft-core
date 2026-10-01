@@ -73,7 +73,9 @@ func (f *HandoffFollower) Run(ctx context.Context) error {
 	}
 	start := f.AnchorEpoch
 	if active, ok := f.History.(interface{ CurrentRootEpoch() (uint64, bool) }); ok {
-		if epoch, ready := active.CurrentRootEpoch(); ready && epoch >= start { start = epoch }
+		if epoch, ready := active.CurrentRootEpoch(); ready && epoch >= start {
+			start = epoch
+		}
 	}
 	for epoch := start + 1; epoch > start; epoch++ {
 		for {
@@ -213,19 +215,22 @@ func (f *HandoffFollower) path(epoch uint64) string {
 }
 
 func (f *HandoffFollower) load(epoch uint64) (handoffdelivery.Bundle, error) {
-	var bundle handoffdelivery.Bundle
 	raw, err := os.ReadFile(f.path(epoch))
 	if err != nil {
-		return bundle, err
+		return handoffdelivery.Bundle{}, err
 	}
-	if len(raw) == 0 || len(raw) > 64<<20 || types.Cbor.Unmarshal(raw, &bundle) != nil || bundle.Body.Epoch != epoch {
+	if len(raw) == 0 || len(raw) > 64<<20 {
+		return handoffdelivery.Bundle{}, handoffdelivery.ErrBundle
+	}
+	bundle, err := handoffdelivery.DecodeBundle(raw)
+	if err != nil || bundle.Body.Epoch != epoch {
 		return handoffdelivery.Bundle{}, handoffdelivery.ErrBundle
 	}
 	return bundle, nil
 }
 
 func (f *HandoffFollower) save(epoch uint64, bundle handoffdelivery.Bundle) error {
-	raw, err := types.Cbor.Marshal(bundle)
+	raw, err := handoffdelivery.EncodeBundle(bundle)
 	if err != nil || len(raw) == 0 || len(raw) > 64<<20 {
 		return handoffdelivery.ErrBundle
 	}

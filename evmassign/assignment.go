@@ -34,6 +34,10 @@ var (
 	ErrContext    = errors.New("evmassign: candidate context mismatch")
 )
 
+// EVMPartitionTypeID identifies the designated EVM partition type. Its
+// configuration changes only through a committed root handoff.
+const EVMPartitionTypeID types.PartitionTypeID = 8
+
 const (
 	// MaxValidators bounds the successor set so the candidate stays far below
 	// the 1 MiB freeze companion limit.

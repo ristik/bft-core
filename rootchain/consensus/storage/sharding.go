@@ -57,8 +57,11 @@ func (ss ShardStates) nextBlock(shardConfs map[types.PartitionShardID]*types.Par
 			}
 			if prevSI.TR.Epoch != prevSI.IR.Epoch && !bytes.Equal(prevSI.ShardConfHash, pdrHash) {
 				if nextBlock.States[k], err = prevSI.nextEpoch(pdr, hashAlg); err != nil {
-					return nextBlock, fmt.Errorf("creating ShardInfo %s - %s of the next epoch: %w",
-						pdr.PartitionID, pdr.ShardID, err)
+					partition, shard := pdr.PartitionID, pdr.ShardID
+					if prevSI.LastCR != nil {
+						partition, shard = prevSI.LastCR.Partition, prevSI.LastCR.Shard
+					}
+					return nextBlock, fmt.Errorf("creating ShardInfo %s - %s of the next epoch: %w", partition, shard, err)
 				}
 				if ss.Control != nil {
 					next := nextBlock.States[k]

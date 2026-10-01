@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -49,6 +50,8 @@ type assignmentFixture struct {
 	nextKeys    []evmKey
 	succ        *types.PartitionDescriptionRecord
 	pop         evmassign.PoPContext
+	orch        *partitions.Orchestration
+	base        uint64 // ordered round of the prepare record; zero means 2
 }
 
 func newAssignmentFixture(t *testing.T) *assignmentFixture {
@@ -96,9 +99,11 @@ func (f *assignmentFixture) installShard(t *testing.T, conf *types.PartitionDesc
 	require.NoError(t, err)
 	tweak(si)
 	f.shard = types.PartitionShardID{PartitionID: conf.PartitionID, ShardID: conf.ShardID.Key()}
-	f.store.orchestration = mockOrchestration{shardConfigs: func(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
-		return map[types.PartitionShardID]*types.PartitionDescriptionRecord{f.shard: conf}, nil
-	}}
+	if f.orch == nil {
+		f.store.orchestration = mockOrchestration{shardConfigs: func(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
+			return map[types.PartitionShardID]*types.PartitionDescriptionRecord{f.shard: conf}, nil
+		}}
+	}
 	root := f.store.blockTree.Root()
 	root.ShardState.States[f.shard] = si
 	tree, _, err := root.ShardState.UnicityTree(crypto.SHA256)
@@ -143,7 +148,7 @@ func (f *assignmentFixture) candidate(t *testing.T) evmassign.Candidate {
 	old, err := evmassign.PDRHash(f.current)
 	require.NoError(t, err)
 	return evmassign.Candidate{Version: evmassign.CandidateVersion, Network: 5, Predecessor: bytes.Clone(f.predecessor),
-		Attempt: 0, Parent: bytes.Clone(f.parent), RootMembers: f.rootMembers(), OldShardEpoch: f.current.Epoch,
+		Attempt: f.pop.Attempt, Parent: bytes.Clone(f.parent), RootMembers: f.rootMembers(), OldShardEpoch: f.current.Epoch,
 		OldActiveHash: old[:], Assignment: raw, PoPs: f.pops(t, f.pop, f.succ)}
 }
 
@@ -172,7 +177,7 @@ func (f *assignmentFixture) build(t *testing.T, c evmassign.Candidate, mutate ..
 	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: 5, Epoch: 2, EarliestActivation: 7, Members: members,
 		RootThreshold:    evmroot.RootQuorumThreshold(uint64(len(members))),
 		StateSummary:     bytes.Repeat([]byte{3}, 32),
-		ChangeRecordHash: evmroot.D4CandidateContextHash(5, f.predecessor, 0, digest[:], 7), PredecessorHash: link}
+		ChangeRecordHash: evmroot.D4CandidateContextHash(5, f.predecessor, f.pop.Attempt, digest[:], 7), PredecessorHash: link}
 	auth := FreezeAssignmentAuthorization{Version: 2, Parent: bytes.Clone(f.parent), Candidate: digest[:], Preimage: raw}
 	for _, m := range mutate {
 		m(&auth, &body)
@@ -180,11 +185,15 @@ func (f *assignmentFixture) build(t *testing.T, c evmassign.Candidate, mutate ..
 	require.NoError(t, body.Validate())
 	auth.Body = body.Encode()
 	id := body.Identity()
-	frozen := evmroot.D4FrozenID(id[:], body.StateSummary, f.parent, auth.Candidate, 0, f.predecessor)
-	freeze := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: 3, ActivationRound: 7,
+	frozen := evmroot.D4FrozenID(id[:], body.StateSummary, f.parent, auth.Candidate, f.pop.Attempt, f.predecessor)
+	base := f.base
+	if base == 0 {
+		base = 2
+	}
+	freeze := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, Attempt: f.pop.Attempt, OrderedRound: base + 1, ActivationRound: 7 + base - 2,
 		PredecessorBodyID: f.predecessor, NextBodyID: id[:], FrozenID: frozen, SuccessorTRHash: make([]byte, 32), Kind: "freeze"}
 	prepare := freeze
-	prepare.Kind, prepare.OrderedRound, prepare.FrozenID = "prepare", 2, make([]byte, 32)
+	prepare.Kind, prepare.OrderedRound, prepare.FrozenID = "prepare", base, make([]byte, 32)
 	message, err := EndorsementBytes(freeze)
 	require.NoError(t, err)
 	auth.Signatures = map[string]hex.Bytes{}

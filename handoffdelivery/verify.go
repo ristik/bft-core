@@ -6,6 +6,7 @@ package handoffdelivery
 import (
 	"bytes"
 	"crypto"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 
@@ -26,6 +27,46 @@ type Bundle struct {
 	Proof    handoff.OldCommitProof
 	Body     evmroot.TrustBaseBodyV2
 	Snapshot *abdrc.CommittedBlock
+	// Candidate is the H3 EVM assignment candidate preimage (successor PDR and
+	// possession proofs), carried once. It is empty for a root-only handoff.
+	Candidate []byte
+}
+
+// legacyBundle is the persisted shape before the candidate field existed.
+type legacyBundle struct {
+	_        struct{} `cbor:",toarray"`
+	Proof    handoff.OldCommitProof
+	Body     evmroot.TrustBaseBodyV2
+	Snapshot *abdrc.CommittedBlock
+}
+
+// EncodeBundle writes the legacy shape for a root-only bundle, so its bytes are
+// unchanged, and the candidate-carrying shape otherwise.
+func EncodeBundle(b Bundle) ([]byte, error) {
+	if len(b.Candidate) == 0 {
+		return types.Cbor.Marshal(legacyBundle{Proof: b.Proof, Body: b.Body, Snapshot: b.Snapshot})
+	}
+	return types.Cbor.Marshal(b)
+}
+
+// DecodeBundle accepts exactly the two canonical persisted shapes and refuses
+// everything else; a shape is never reinterpreted as the other.
+func DecodeBundle(raw []byte) (Bundle, error) {
+	var current Bundle
+	if err := types.Cbor.Unmarshal(raw, &current); err == nil && len(current.Candidate) != 0 {
+		if canonical, err := types.Cbor.Marshal(current); err == nil && bytes.Equal(canonical, raw) {
+			return current, nil
+		}
+		return Bundle{}, ErrBundle
+	}
+	var old legacyBundle
+	if err := types.Cbor.Unmarshal(raw, &old); err != nil {
+		return Bundle{}, ErrBundle
+	}
+	if canonical, err := types.Cbor.Marshal(old); err != nil || !bytes.Equal(canonical, raw) {
+		return Bundle{}, ErrBundle
+	}
+	return Bundle{Proof: old.Proof, Body: old.Body, Snapshot: old.Snapshot}, nil
 }
 
 type Verified struct {
@@ -47,6 +88,13 @@ func Verify(bundle Bundle, old *types.RootTrustBaseV1, partition types.Partition
 	g, err := evmroot.DeriveEpochGenesis(verified, bundle.Body)
 	if err != nil {
 		return Verified{}, fmt.Errorf("%w: successor body: %v", ErrBundle, err)
+	}
+	if len(bundle.Candidate) != 0 {
+		digest := sha256.Sum256(bundle.Candidate)
+		r := bundle.Proof.Record
+		if !bytes.Equal(bundle.Body.ChangeRecordHash, evmroot.D4CandidateContextHash(r.Network, r.PredecessorBodyID, r.Attempt, digest[:], bundle.Body.EarliestActivation)) {
+			return Verified{}, fmt.Errorf("%w: candidate does not match the successor body's change record", ErrBundle)
+		}
 	}
 	s := bundle.Snapshot
 	if s == nil || s.Block == nil || s.Control == nil || s.CommitQc == nil || s.CommitQc.LedgerCommitInfo == nil ||

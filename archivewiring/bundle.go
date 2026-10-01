@@ -19,12 +19,8 @@ func VerifyBundle(ctx context.Context, q archive.BundleRequest, raw []byte, hist
 	if history == nil || len(raw) == 0 || len(raw) > archive.MaxBundleBytes {
 		return archive.ErrInvalid
 	}
-	var bundle handoffdelivery.Bundle
-	if err := types.Cbor.Unmarshal(raw, &bundle); err != nil {
-		return err
-	}
-	canonical, err := types.Cbor.Marshal(bundle)
-	if err != nil || string(canonical) != string(raw) || bundle.Body.Epoch != q.Epoch || bundle.Proof.Record.Epoch+1 != q.Epoch {
+	bundle, err := handoffdelivery.DecodeBundle(raw)
+	if err != nil || bundle.Body.Epoch != q.Epoch || bundle.Proof.Record.Epoch+1 != q.Epoch {
 		return archive.ErrInvalid
 	}
 	old, err := history.GetByEpoch(ctx, q.Epoch-1)

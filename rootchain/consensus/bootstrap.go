@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/m2contract"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
@@ -33,6 +34,15 @@ func (x *ConsensusManager) InstalledRootEpoch() uint64 {
 // transport. Call it before Run with a proof under the lineage-verified old
 // trust base, the full native recovery checkpoint, and the successor body.
 func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, head *abdrc.CommittedBlock, body evmroot.TrustBaseBodyV2) (*rctypes.EpochAnchor, error) {
+	return x.InstallEpochBundle(handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: head})
+}
+
+// InstallEpochBundle installs a verified handoff bundle, including the H3 EVM
+// assignment candidate it carries: the candidate is retained, the successor
+// configuration is derived from it and checked against the committed record, and
+// only then is the anchor installed.
+func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (*rctypes.EpochAnchor, error) {
+	proof, head, body, candidate := incoming.Proof, incoming.Snapshot, incoming.Body, incoming.Candidate
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.pacemaker.GetCurrentRound() != 0 {
 		return nil, errors.New("epoch genesis requires stopped profile-2 consensus")
 	}
@@ -92,7 +102,7 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 	bodyID := body.Identity()
 	interval := m2contract.TrustInterval{Body: body, Activation: evmroot.ActivatedTrustBase{
 		BodyIdentity: bodyID[:], EpochStart: g.Start, ActivationCommitID: bytes.Clone(verified.RecordID[:])}}
-	bundle := handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: head}
+	bundle := handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: head, Candidate: bytes.Clone(candidate)}
 	if head == nil || len(head.ShardInfo) == 0 {
 		return nil, errors.New("handoff snapshot has no shards")
 	}
@@ -130,6 +140,9 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 	newTrust, err := x.trustBaseStore.InstallV2Projection(projected)
 	if err != nil {
 		return nil, err
+	}
+	if err := x.blockStore.RetainHandoffArtifacts(bodyID[:], body.Encode(), candidate); err != nil {
+		return nil, fmt.Errorf("retain handoff candidate: %w", err)
 	}
 	a, err := x.blockStore.InstallEpochAnchor(head, v, g)
 	if err != nil {
@@ -181,8 +194,8 @@ func retainEquivalentHandoffBundle(archive handoffBundleArchive, epoch uint64, i
 		return err
 	}
 	if len(existing) != 0 {
-		var stored handoffdelivery.Bundle
-		if err := basetypes.Cbor.Unmarshal(existing, &stored); err != nil {
+		stored, err := handoffdelivery.DecodeBundle(existing)
+		if err != nil {
 			return handoffdelivery.ErrBundle
 		}
 		if stored.Snapshot == nil || len(stored.Snapshot.ShardInfo) == 0 {
@@ -195,7 +208,7 @@ func retainEquivalentHandoffBundle(archive handoffBundleArchive, epoch uint64, i
 		}
 		return nil
 	}
-	encoded, err := basetypes.Cbor.Marshal(incoming)
+	encoded, err := handoffdelivery.EncodeBundle(incoming)
 	if err != nil {
 		return err
 	}
@@ -240,8 +253,8 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 			return nil, err
 		}
 		if len(raw) != 0 {
-			var bundle handoffdelivery.Bundle
-			if err := basetypes.Cbor.Unmarshal(raw, &bundle); err != nil {
+			bundle, err := handoffdelivery.DecodeBundle(raw)
+			if err != nil {
 				return nil, err
 			}
 			if bundle.Body.Epoch != epoch || bundle.Proof.Record.Epoch+1 != epoch {
@@ -273,8 +286,13 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 	if err != nil {
 		return nil, err
 	}
+	candidate, err := x.blockStore.HandoffCandidate(record.NextBodyID)
+	if err != nil {
+		return nil, err
+	}
 	bundle := handoffdelivery.Bundle{Proof: handoff.OldCommitProof{Profile: evmroot.D4Profile,
-		Record: record, Control: *head.Control, ControlPath: path, CommitQC: head.CommitQc}, Body: body, Snapshot: head}
+		Record: record, Control: *head.Control, ControlPath: path, CommitQC: head.CommitQc}, Body: body, Snapshot: head,
+		Candidate: candidate}
 	old, err := x.trustBaseStore.GetByEpoch(record.Epoch)
 	if err != nil || len(head.ShardInfo) == 0 {
 		return nil, handoffdelivery.ErrBundle
@@ -354,6 +372,57 @@ func (x *ConsensusManager) validateTimeoutCert(tc *rctypes.TimeoutCert) error {
 	for _, vote := range tc.Signatures {
 		if vote == nil || (vote.Anchor != nil && !x.matchesInstalledAnchor(vote.Anchor)) {
 			return rctypes.ErrEpochAnchor
+		}
+	}
+	return nil
+}
+
+// reconcileAssignmentHistory re-derives every committed EVM assignment the
+// durable bundle archive holds and makes the orchestration's derived index match
+// it. The install is idempotent, so a crash between committed storage and the
+// derived write is repaired here; an existing conflicting entry is corruption
+// and refuses startup. Epochs without a retained bundle derive nothing, and the
+// block tree's own check refuses any stored block whose configuration is not the
+// derived one.
+func reconcileAssignmentHistory(db any, trust *trustbase.TrustBaseStore, orchestration Orchestration) error {
+	archive, ok := db.(handoffBundleArchive)
+	installer, installOK := orchestration.(storage.DerivedConfigInstaller)
+	if !ok || !installOK {
+		return nil
+	}
+	last, err := trust.LoadLast()
+	if err != nil || last == nil {
+		return nil
+	}
+	for epoch := uint64(2); epoch <= last.Epoch; epoch++ {
+		raw, err := archive.HandoffBundle(epoch)
+		if err != nil {
+			return err
+		}
+		if len(raw) == 0 {
+			continue
+		}
+		bundle, err := handoffdelivery.DecodeBundle(raw)
+		if err != nil {
+			return err
+		}
+		if len(bundle.Candidate) == 0 {
+			continue
+		}
+		old, err := trust.GetByEpoch(bundle.Proof.Record.Epoch)
+		if err != nil || bundle.Snapshot == nil || len(bundle.Snapshot.ShardInfo) == 0 {
+			return fmt.Errorf("%w: epoch %d: old trust base unavailable", storage.ErrAssignmentHistory, epoch)
+		}
+		first := bundle.Snapshot.ShardInfo[0]
+		if _, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+			return fmt.Errorf("%w: epoch %d: %w", storage.ErrAssignmentHistory, epoch, err)
+		}
+		pdr, provenance, err := storage.DeriveActivatedPDR(bundle.Proof.Record, bundle.Body, bundle.Candidate, bundle.Proof.Control.FrozenParent)
+		if err != nil {
+			return fmt.Errorf("epoch %d: %w", epoch, err)
+		}
+		if err := installer.InstallDerivedShardConfig(pdr, provenance); err != nil {
+			return fmt.Errorf("epoch %d: %w", epoch, err)
 		}
 	}
 	return nil

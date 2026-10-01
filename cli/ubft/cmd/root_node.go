@@ -288,7 +288,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 				if fetchErr != nil {
 					continue
 				}
-				if _, installErr := cm.InstallEpochGenesis(bundle.Proof, bundle.Snapshot, bundle.Body); installErr != nil {
+				if _, installErr := cm.InstallEpochBundle(bundle); installErr != nil {
 					return fmt.Errorf("install handoff epoch %d: %w", epoch, installErr)
 				}
 				installed = true

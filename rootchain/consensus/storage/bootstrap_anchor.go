@@ -5,7 +5,9 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"slices"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -47,6 +49,12 @@ func (x *BlockStore) InstallEpochAnchor(head *abdrc.CommittedBlock, v evmroot.Ve
 	oldRoot, err := NewRootBlock(head, crypto.SHA256, x.orchestration, ProfileHandoff)
 	if err != nil {
 		return nil, fmt.Errorf("reconstruct old checkpoint: %w", err)
+	}
+	// Derive and install the committed successor assignment before the anchor is
+	// written. Either order of a crash is repaired from committed history: the
+	// install is idempotent and startup reconciles it before any block is read.
+	if err := x.installCommittedAssignment(oldRoot, v, g); err != nil {
+		return nil, err
 	}
 	oldRoot.BlockData = &rctypes.BlockData{Version: 2, Epoch: a.Epoch, Round: a.Slot,
 		Payload: &rctypes.Payload{Version: 2}, Anchor: a}
@@ -197,4 +205,145 @@ func (x *BlockStore) NewFromAnchorState(head *abdrc.CommittedBlock) (*BlockStore
 	}
 	return &BlockStore{hash: x.hash, blockTree: tree, storage: x.storage,
 		orchestration: x.orchestration, profile: x.profile, log: x.log}, nil
+}
+
+// RetainHandoffArtifacts stores the successor body and, for an EVM assignment,
+// the candidate preimage a peer's handoff bundle carried, so a root that did not
+// order the freeze can derive the same configuration. Different bytes under the
+// same body id are refused.
+func (x *BlockStore) RetainHandoffArtifacts(bodyID, body, preimage []byte) error {
+	if archive, ok := x.storage.(interface{ StoreHandoffBody([]byte, []byte) error }); ok && len(body) != 0 {
+		if err := archive.StoreHandoffBody(bodyID, body); err != nil {
+			return err
+		}
+	}
+	if len(preimage) == 0 {
+		return nil
+	}
+	archive, ok := x.storage.(interface{ StoreHandoffCandidate([]byte, []byte) error })
+	if !ok {
+		return ErrAssignmentHistory
+	}
+	return archive.StoreHandoffCandidate(bodyID, preimage)
+}
+
+// installCommittedAssignment is the BlockStore form of installCommittedAssignmentFrom.
+func (x *BlockStore) installCommittedAssignment(oldRoot *ExecutedBlock, v evmroot.VerifiedHandoff, g evmroot.EpochGenesis) error {
+	return installCommittedAssignmentFrom(x.storage, x.orchestration, x.hash, oldRoot, v.Record, g.OrderedRound)
+}
+
+func readHandoffArtifact(db PersistentStore, name string, id []byte) ([]byte, error) {
+	switch name {
+	case "candidate":
+		if a, ok := db.(candidateSource); ok {
+			return a.HandoffCandidate(id)
+		}
+		return nil, nil
+	default:
+		if a, ok := db.(interface{ HandoffBody([]byte) ([]byte, error) }); ok {
+			return a.HandoffBody(id)
+		}
+		return nil, ErrAssignmentHistory
+	}
+}
+
+// installCommittedAssignmentFrom ties the committed H to the EVM shard of the
+// verified checkpoint. A root-only H must commit the shard's unchanged technical
+// record. An assignment-bearing H must have its retained candidate derive a
+// configuration whose successor technical record is exactly the committed one;
+// only then is that configuration installed at the activation round. Missing
+// candidate or body refuses activation; nothing falls back to the retired set.
+// It is idempotent, so startup repeats it for a crash between the anchor write
+// and the derived-index write.
+func installCommittedAssignmentFrom(db PersistentStore, orchestration Orchestration, hashAlg crypto.Hash,
+	oldRoot *ExecutedBlock, record evmroot.OrderedHandoffRecord, orderedRound uint64) error {
+	control := oldRoot.ShardState.Control
+	if control == nil || len(control.FrozenParent) != 32 {
+		return ErrAssignmentHistory
+	}
+	configs, err := orchestration.ShardConfigs(orderedRound)
+	if err != nil {
+		return err
+	}
+	key, err := frozenShard(oldRoot.ShardState, configs, control.FrozenParent)
+	if err != nil {
+		return errors.Join(ErrAssignmentHistory, err)
+	}
+	si := oldRoot.ShardState.States[key]
+	preimage, err := readHandoffArtifact(db, "candidate", record.NextBodyID)
+	if err != nil {
+		return errors.Join(ErrAssignmentHistory, err)
+	}
+	if len(preimage) == 0 {
+		digest, err := si.TR.Hash()
+		if err != nil || !bytes.Equal(digest, record.SuccessorTRHash) {
+			return fmt.Errorf("%w: the committed successor technical record is neither the shard's own nor derived from a retained assignment",
+				ErrAssignmentHistory)
+		}
+		return nil
+	}
+	rawBody, err := readHandoffArtifact(db, "body", record.NextBodyID)
+	if err != nil || len(rawBody) == 0 {
+		return fmt.Errorf("%w: successor body unavailable", ErrAssignmentHistory)
+	}
+	body, err := DecodeHandoffBody(rawBody)
+	if err != nil {
+		return err
+	}
+	pdr, provenance, err := DeriveActivatedPDR(record, body, preimage, control.FrozenParent)
+	if err != nil {
+		return err
+	}
+	c, err := evmassign.DecodeCandidate(preimage)
+	if err != nil {
+		return errors.Join(ErrAssignmentHistory, err)
+	}
+	succ, err := c.Successor()
+	if err != nil {
+		return errors.Join(ErrAssignmentHistory, err)
+	}
+	if err := evmassign.VerifyInstalled(c, succ, configs[key]); err != nil {
+		return errors.Join(ErrAssignmentHistory, err)
+	}
+	tr, err := successorTechnicalRecord(si, pdr, hashAlg)
+	if err != nil {
+		return err
+	}
+	digest, err := tr.Hash()
+	if err != nil || !bytes.Equal(digest, record.SuccessorTRHash) {
+		return fmt.Errorf("%w: derived successor technical record differs from H", ErrAssignmentHistory)
+	}
+	installer, ok := orchestration.(DerivedConfigInstaller)
+	if !ok {
+		return fmt.Errorf("%w: orchestration cannot install a derived configuration", ErrAssignmentHistory)
+	}
+	return installer.InstallDerivedShardConfig(pdr, provenance)
+}
+
+// repairCommittedAssignment runs before the block tree is loaded. When the
+// stored root is an epoch anchor, the derived configuration for its committed H
+// is recomputed from committed data and installed if the crash lost it, so the
+// first successor block, frontier service and voting never see the retired set.
+func repairCommittedAssignment(db PersistentStore, orchestration Orchestration, hashAlg crypto.Hash, profile uint64) error {
+	if profile != ProfileHandoff {
+		return nil
+	}
+	blocks, err := db.LoadBlocks()
+	if err != nil || len(blocks) == 0 {
+		return err
+	}
+	idx := slices.IndexFunc(blocks, func(b *ExecutedBlock) bool { return b.CommitQc != nil || isEpochAnchorRoot(b) })
+	if idx < 0 || !isEpochAnchorRoot(blocks[idx]) {
+		return nil
+	}
+	root := blocks[idx]
+	control := root.ShardState.Control
+	if control == nil || control.Phase != "committed" {
+		return nil
+	}
+	record, err := decodeOrderedRecord(control.RecordBytes)
+	if err != nil {
+		return errors.Join(ErrAssignmentHistory, err)
+	}
+	return installCommittedAssignmentFrom(db, orchestration, hashAlg, root, record, control.OrderedRound)
 }

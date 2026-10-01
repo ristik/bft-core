@@ -1,13 +1,17 @@
 package partitions
 
 import (
+	"bytes"
+	"crypto"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"time"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/logger"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
@@ -16,6 +20,20 @@ import (
 )
 
 var rootBucketName = []byte("root")
+
+// derivedBucketName records the provenance of configurations derived from
+// committed root handoff history. It is a sibling of rootBucketName, because
+// every child bucket of the latter is read as a partition.
+var derivedBucketName = []byte("derived")
+
+var (
+	// ErrDerivedOnly refuses an external write of a designated EVM shard
+	// configuration after genesis: only verified committed history may change it.
+	ErrDerivedOnly = errors.New("orchestration: EVM shard configuration changes only through a committed root handoff")
+	// ErrDerivedConflict reports an existing entry that differs from the one
+	// derived from committed history. It is corruption and refuses startup.
+	ErrDerivedConflict = errors.New("orchestration: conflicting derived shard configuration")
+)
 
 type (
 	Orchestration struct {
@@ -55,6 +73,9 @@ func NewOrchestration(networkID types.NetworkID, dbFile string, log *slog.Logger
 		_, err := tx.CreateBucketIfNotExists(rootBucketName)
 		if err != nil {
 			return fmt.Errorf("creating %q bucket: %w", rootBucketName, err)
+		}
+		if _, err = tx.CreateBucketIfNotExists(derivedBucketName); err != nil {
+			return fmt.Errorf("creating %q bucket: %w", derivedBucketName, err)
 		}
 		return nil
 	})
@@ -167,9 +188,20 @@ func (o *Orchestration) AddShardConfig(shardConf *types.PartitionDescriptionReco
 	if shardConf.NetworkID != o.networkID {
 		return fmt.Errorf("invalid networkID %d, expected %d", shardConf.NetworkID, o.networkID)
 	}
+	designatedEVM := o.reserveControl && shardConf.PartitionTypeID == evmassign.EVMPartitionTypeID
+	if designatedEVM && shardConf.Epoch != 0 {
+		return ErrDerivedOnly
+	}
 	err := o.db.Update(func(tx *bolt.Tx) error {
 		if err := verifyShardConf(tx, shardConf); err != nil {
 			return fmt.Errorf("verify shard conf: %w", err)
+		}
+		if designatedEVM {
+			// Genesis initialization is idempotent; a different genesis entry
+			// would silently rewrite the history every derived entry extends.
+			if err := sameStoredShardConf(tx, shardConf); err != nil {
+				return err
+			}
 		}
 		if err := storeShardConf(tx, shardConf); err != nil {
 			return fmt.Errorf("store shard conf: %w", err)
@@ -184,6 +216,102 @@ func (o *Orchestration) AddShardConfig(shardConf *types.PartitionDescriptionReco
 	o.log.Info(fmt.Sprintf("Added shard config for partition %d, epoch %d, epoch start %d",
 		shardConf.PartitionID, shardConf.Epoch, shardConf.EpochStart), logger.Error(err))
 	return err
+}
+
+func confHash(conf *types.PartitionDescriptionRecord) ([]byte, error) {
+	return conf.Hash(crypto.SHA256)
+}
+
+// sameStoredShardConf fails when an entry already stored at the configuration's
+// activation key differs from it.
+func sameStoredShardConf(tx *bolt.Tx, conf *types.PartitionDescriptionRecord) error {
+	bucket := getShardBucket(tx, conf.PartitionID, conf.ShardID)
+	if bucket == nil {
+		return nil
+	}
+	raw := bucket.Get(uint64ToKey(conf.EpochStart))
+	if raw == nil {
+		return nil
+	}
+	var existing *types.PartitionDescriptionRecord
+	if err := json.Unmarshal(raw, &existing); err != nil {
+		return fmt.Errorf("failed to unmarshal shard conf: %w", err)
+	}
+	a, err := confHash(existing)
+	if err != nil {
+		return err
+	}
+	b, err := confHash(conf)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(a, b) {
+		return ErrDerivedConflict
+	}
+	return nil
+}
+
+func derivedKey(conf *types.PartitionDescriptionRecord) []byte {
+	key := append([]byte(nil), conf.PartitionID.Bytes()...)
+	key = append(key, conf.ShardID.Bytes()...)
+	return append(key, uint64ToKey(conf.Epoch)...)
+}
+
+// InstallDerivedShardConfig installs a configuration derived from verified,
+// committed root handoff history at its activation round. It is idempotent: the
+// identical entry with the identical provenance is a no-op, and any other entry
+// at the same activation key, or a gap in the epoch chain, is corruption.
+// Provenance (the committed record and candidate digests) is never an authority
+// by itself; the caller derived the configuration from committed data.
+func (o *Orchestration) InstallDerivedShardConfig(conf *types.PartitionDescriptionRecord, provenance []byte) error {
+	if conf == nil || len(provenance) != 32 || conf.Epoch == 0 || conf.EpochStart == 0 {
+		return ErrDerivedConflict
+	}
+	if conf.NetworkID != o.networkID {
+		return fmt.Errorf("invalid networkID %d, expected %d", conf.NetworkID, o.networkID)
+	}
+	if err := conf.IsValid(); err != nil {
+		return err
+	}
+	return o.db.Update(func(tx *bolt.Tx) error {
+		derived := tx.Bucket(derivedBucketName)
+		if derived == nil {
+			return fmt.Errorf("bucket %q does not exist", derivedBucketName)
+		}
+		key := derivedKey(conf)
+		if bucket := getShardBucket(tx, conf.PartitionID, conf.ShardID); bucket != nil && bucket.Get(uint64ToKey(conf.EpochStart)) != nil {
+			if err := sameStoredShardConf(tx, conf); err != nil {
+				return err
+			}
+			if prior := derived.Get(key); prior != nil && !bytes.Equal(prior, provenance) {
+				return ErrDerivedConflict
+			}
+			return derived.Put(key, provenance)
+		}
+		last, err := getShardConf(tx, conf.PartitionID, conf.ShardID, math.MaxUint64)
+		if err != nil {
+			return err
+		}
+		if last == nil || conf.Verify(last) != nil || derived.Get(key) != nil {
+			return ErrDerivedConflict
+		}
+		if err := storeShardConf(tx, conf); err != nil {
+			return err
+		}
+		return derived.Put(key, provenance)
+	})
+}
+
+// DerivedProvenance returns the provenance recorded for a derived entry, or nil.
+func (o *Orchestration) DerivedProvenance(conf *types.PartitionDescriptionRecord) ([]byte, error) {
+	var out []byte
+	err := o.db.View(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(derivedBucketName); b != nil {
+			out = bytes.Clone(b.Get(derivedKey(conf)))
+		}
+		return nil
+	})
+	return out, err
 }
 
 func (o *Orchestration) Close() error {

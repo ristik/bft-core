@@ -147,10 +147,10 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 }
 
 func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger) (*ExecutedBlock, error) {
-	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil)
+	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil, nil)
 }
 
-func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority) (*ExecutedBlock, error) {
+func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority, candidates candidateSource) (*ExecutedBlock, error) {
 	bootstrapChild := isEpochAnchorRoot(x)
 	if bootstrapChild && (newBlock.Anchor == nil || !bytes.Equal(newBlock.Anchor.GenesisID, x.BlockData.Anchor.GenesisID) ||
 		newBlock.Anchor.Slot != x.GetRound() || newBlock.Epoch != x.BlockData.Epoch) {
@@ -189,6 +189,13 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		if err != nil || record.Kind != "commit" || len(record.NextBodyID) != 32 || parentState.Control.Epoch+1 != newBlock.Epoch {
 			return nil, ErrControlCheckpoint
 		}
+		// The designated EVM shard installs the committed successor assignment
+		// here, once, from the configuration derived from committed history.
+		states, err := activateEVMAssignment(parentState.States, shardConfs, record, newBlock.Round, hash)
+		if err != nil {
+			return nil, err
+		}
+		parentState.States = states
 		parentState.Control = &evmroot.ControlState{Network: parentState.Control.Network,
 			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle"}
 	}
@@ -226,6 +233,19 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 				if len(companion) != 0 && control.Phase == "endorsed" {
 					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen]); err != nil {
 						return nil, err
+					}
+				}
+				if control.Phase == "committed" && nextShardState.Control.Phase == "endorsed" {
+					committed, err := decodeOrderedRecord(newBlock.Payload.HandoffRecords[0])
+					if err != nil {
+						return nil, err
+					}
+					want, err := expectedCommitSuccessorTR(candidates, committed, nextShardState.States[frozen], hash)
+					if err != nil {
+						return nil, err
+					}
+					if want != nil && !bytes.Equal(want, committed.SuccessorTRHash) {
+						return nil, errors.Join(ErrHandoffRecord, ErrAssignmentHistory)
 					}
 				}
 			}

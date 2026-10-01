@@ -162,6 +162,18 @@ func NewConsensusManager(
 	}
 	log := observe.RoundLogger(pm.GetCurrentRound)
 
+	// The EVM shard's configuration is derived from committed handoff history.
+	// Reconcile it before the block tree rebuilds trust bases, before the frontier
+	// service starts and before this node can vote.
+	if cParams.NetworkProfileVersion == storage.ProfileHandoff {
+		if profileOrchestration, ok := orchestration.(interface{ EnableHandoffProfile() }); ok {
+			profileOrchestration.EnableHandoffProfile()
+		}
+		if err := reconcileAssignmentHistory(rcDB, trustBaseStore, orchestration); err != nil {
+			return nil, fmt.Errorf("reconciling committed EVM assignment history: %w", err)
+		}
+	}
+
 	store := rcDB
 	var frontier *frontierSampler
 	if optional.FrontierSampler != nil {
