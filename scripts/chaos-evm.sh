@@ -234,6 +234,7 @@ make clean build >"$buildLog" 2>&1 || { cat "$buildLog"; exit 1; }
 rm -f "$buildLog"
 rm -rf test-nodes
 mkdir test-nodes
+registry_layout_init || exit 1
 source helper.sh
 
 init_root_nodes 3

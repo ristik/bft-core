@@ -131,6 +131,7 @@ hexToDec() { python3 -c "print(int('${1:-0x0}',16))" 2>/dev/null || echo 0; }
 startReth() {
   local i=$1
   mkdir -p "test-nodes/reth$i"
+  registry_layout_require || return 1
   "$URETH_BIN" node --chain test-nodes/evm-genesis-funded.json --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \

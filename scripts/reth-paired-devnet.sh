@@ -30,7 +30,7 @@ if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   URETH_BIN=$H4_URETH_BIN
   URETH_PIN_COMMIT=$H4_URETH_COMMIT
 elif [ -n "${POST_M2A_URETH_BIN:-}" ] || [ -n "${POST_M2A_URETH_COMMIT:-}" ]; then
-  [ "${M2_PROFILE2:-0}" = 1 ] || { echo "POST_M2A_URETH_BIN is only supported by profile-2 lanes" >&2; exit 2; }
+  [ "${M2_PROFILE2:-0}" = 1 ] || [ "${D2C_RESTART_PROBE:-0}" = 1 ] || { echo "POST_M2A_URETH_BIN is only supported by profile-2 and D2C restart-probe lanes" >&2; exit 2; }
   [ -n "${POST_M2A_URETH_BIN:-}" ] && [ -n "${POST_M2A_URETH_COMMIT:-}" ] || {
     echo "post-M2a lanes require both POST_M2A_URETH_BIN and POST_M2A_URETH_COMMIT" >&2
     exit 2
@@ -44,11 +44,6 @@ elif [ "${M2_PROFILE2:-0}" = 1 ]; then
   M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2-$(date -u +%Y%m%dT%H%M%SZ)}
   echo "profile-2 logs: $M2_RUN_LOG_DIR"
 fi
-
-# A lane that supplies its own ureth (H4_URETH_BIN / POST_M2A_URETH_BIN) runs the current registry
-# layout (2) unless REGISTRY_LAYOUT=1 says that ureth is pre-#47; the built-in pins stay on layout 1.
-if [ -n "${H4_URETH_BIN:-}" ] || [ -n "${POST_M2A_URETH_BIN:-}" ]; then unset URETH_PIN_REGISTRY_LAYOUT; fi
-echo "registry layout=$(registry_layout)"
 
 validators=${1:-4}
 rounds=${2:-10}
@@ -105,7 +100,6 @@ urethPinResolve || exit 1
 export URETH_PIN_FEE_COLLECTOR
 echo "bft source commit=$(git rev-parse HEAD)"
 echo "ureth source commit=$URETH_PIN_COMMIT binary sha256=$(shasum -a 256 "$URETH_BIN" | cut -d' ' -f1)"
-echo "registry artifact (layout $(registry_layout)) sha256=$(shasum -a 256 "$(registry_artifact)" | cut -d' ' -f1)"
 
 failures=0
 pass() { echo "  PASS: $1"; }
@@ -237,6 +231,8 @@ echo "=== 1. generate the shard topology and chain spec ==="
 rootValidators=3
 if [ "${M2_PROFILE2:-0}" = 1 ]; then rootValidators=4; fi
 ./setup-evm-nodes.sh -r "$rootValidators" -v "$validators" -c "$postM2aChainID" >/dev/null || { echo "setup failed" >&2; exit 1; }
+registry_layout_require || exit 1
+echo "registry artifact (layout $(registry_layout)) sha256=$(shasum -a 256 "$(registry_artifact)" | cut -d' ' -f1)"
 genesisSHA=$(shasum -a 256 test-nodes/evm-genesis.json | cut -d' ' -f1)
 echo "generated genesis sha256=$genesisSHA"
 
@@ -292,6 +288,7 @@ for i in $(seq 1 "$validators"); do
   # --jwt-secret test-nodes/evm$i/jwt.hex), so the adapter's own JWT minting is what has to
   # satisfy reth - nothing here pre-authenticates on its behalf.
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
+  registry_layout_require || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
@@ -401,6 +398,7 @@ cat >test-nodes/wrong-genesis.json <<'EOF'
 "coinbase":"0x0000000000000000000000000000000000000000","alloc":{},
 "baseFeePerGas":"0x3b9aca00"}
 EOF
+registry_layout_require || exit 1
 "$URETH_BIN" node --chain test-nodes/wrong-genesis.json --datadir test-nodes/reth-wrong/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18651 \
   --http --http.addr 127.0.0.1 --http.port 18645 --http.api eth,net,web3 \
@@ -450,6 +448,7 @@ g = json.load(open("test-nodes/evm-genesis-finalized-funded.json"))
 g["config"]["chainId"] = 31338
 json.dump(g, open("test-nodes/wrong-chain-genesis.json", "w"))
 PYGEN
+registry_layout_require || exit 1
 "$URETH_BIN" node --chain test-nodes/wrong-chain-genesis.json --datadir test-nodes/reth-wrongchain/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18751 \
   --http --http.addr 127.0.0.1 --http.port 18745 --http.api eth,net,web3 \
@@ -461,7 +460,7 @@ for _ in $(seq 1 60); do
   rpc http://127.0.0.1:18745 eth_chainId '[]' 2>/dev/null | grep -q result && break
   sleep 1
 done
-boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api \
+boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
   --address /ip4/127.0.0.1/tcp/28001 --trust-base test-nodes/trust-base.json \
   --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
   --engine-url http://127.0.0.1:18751 --eth-url http://127.0.0.1:18745 \
@@ -487,6 +486,7 @@ g = json.load(open("test-nodes/evm-genesis-finalized-funded.json"))
 g["alloc"]["0x00000000000000000000000000000000000000aa"] = {"balance": "0x1"}
 json.dump(g, open("test-nodes/other-genesis.json", "w"))
 PYGEN
+registry_layout_require || exit 1
 "$URETH_BIN" node --chain test-nodes/other-genesis.json --datadir test-nodes/reth-othergenesis/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18851 \
   --http --http.addr 127.0.0.1 --http.port 18845 --http.api eth,net,web3 \
@@ -515,7 +515,7 @@ elif [ "$expectedGenesis" = "$otherGenesis" ]; then
 elif [ "$otherChainID" != "0x7a69" ]; then
   fail "3d premise: the other client reports chainId $otherChainID, not 0x7a69 — this would be caught by the chain-id check, not the genesis check"
 else
-  boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api \
+  boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
     --address /ip4/127.0.0.1/tcp/28002 --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
     --engine-url http://127.0.0.1:18851 --eth-url http://127.0.0.1:18845 \
@@ -542,7 +542,7 @@ else
   # would accept this. It is refused because both identity checks now read the authenticated Engine
   # connection too — standard eth_chainId/eth_getBlockByNumber on the authrpc port, which the
   # Engine API's underlying-protocol section requires and this pinned client serves.
-  boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api \
+  boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
     --address /ip4/127.0.0.1/tcp/28003 --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
     --engine-url http://127.0.0.1:18851 --eth-url "http://127.0.0.1:$rethEthBase" \
@@ -609,6 +609,7 @@ g = json.load(open("test-nodes/evm-genesis-finalized-funded.json"))
 g["config"]["pragueTime"] = 4102444800  # 2100-01-01; far enough that it cannot activate during a run
 json.dump(g, open("test-nodes/laterfork-genesis.json", "w"))
 PYFORK
+registry_layout_require || exit 1
 "$URETH_BIN" node --chain test-nodes/laterfork-genesis.json --datadir test-nodes/reth-laterfork/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port 18951 \
   --http --http.addr 127.0.0.1 --http.port 18945 --http.api eth,net,web3 \
@@ -647,7 +648,7 @@ elif [ "$okNext" != "None" ]; then
   fail "3f premise: the configured client's eth_config reports a scheduled fork ('$okNext'), so the positive path would be refused too"
 else
   info "premise holds: identical chain id and genesis, Prague loaded at 4102444800, eth_config refuses unsupported Prague"
-  boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api \
+  boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
     --address /ip4/127.0.0.1/tcp/28004 --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
     --engine-url http://127.0.0.1:18951 --eth-url http://127.0.0.1:18945 \
@@ -1032,6 +1033,7 @@ if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ]; then
       fail "reth1 process $feeOldRethPid did not exit before fee-floor restart"
     fi
     if [ "$failures" -eq 0 ]; then
+      registry_layout_require || exit 1
       "$URETH_BIN" node --chain "$chainSpec" --datadir test-nodes/reth1/dd \
         --authrpc.jwtsecret test-nodes/evm1/jwt.hex \
         --authrpc.addr 127.0.0.1 --authrpc.port "$rethEngineBase" \

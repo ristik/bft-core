@@ -163,6 +163,7 @@ for i in $(seq 1 "$validators"); do
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
   extra=(--no-persist-peers)
   [ "$i" = "1" ] && extra+=(--log.stdout.filter debug)
+  registry_layout_require || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
@@ -181,6 +182,7 @@ done
 for i in $(seq 1 "$bystanders"); do
   mkdir -p "test-nodes/byst$i"
   openssl rand -hex 32 >"test-nodes/byst$i/jwt.hex"
+  registry_layout_require || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/byst$i/dd" \
     --authrpc.jwtsecret "test-nodes/byst$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((18581 + i - 1)) \
@@ -296,7 +298,7 @@ restartValidator1() {
   : >test-nodes/evm1/debug.log
   local bootnodes="$rootBoot"
   for j in $(seq 2 "$validators"); do bootnodes+=",$(evm_validator_addr "$j")"; done
-  build/ubft shard-node run --home test-nodes/evm1 --executor engine-api \
+  build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
     --address "/ip4/127.0.0.1/tcp/$evmValidatorPortStart" --bootnodes "$bootnodes" \
     --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
