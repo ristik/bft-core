@@ -262,8 +262,12 @@ func (x *ConsensusManager) buildFrontierSample(req FrontierRequest) (*FrontierSa
 	if view.LastCR.Partition != req.PartitionID || !view.LastCR.Shard.Equal(req.ShardID) || view.LastCR.Technical.Epoch != pdr.Epoch {
 		return nil, fmt.Errorf("%w: LastCR context mismatch", ErrFrontierUnavailable)
 	}
-	if view.LastCR.UC.UnicitySeal.NetworkID != s.trust.NetworkID || view.LastCR.UC.UnicitySeal.Epoch != s.trust.Epoch || view.LastCR.UC.InputRecord.Epoch != 0 || view.LastCR.Technical.Epoch != 0 {
-		return nil, fmt.Errorf("%w: LastCR fixed profile mismatch", ErrFrontierUnavailable)
+	// Shard epochs are authenticated values: the configuration is the one committed history derives for the
+	// committed root round (checked above against the technical record's epoch), and the certified input
+	// record's epoch never exceeds the authorized one. The root epoch must be the sampled trust base's.
+	if view.LastCR.UC.UnicitySeal.NetworkID != s.trust.NetworkID || view.LastCR.UC.UnicitySeal.Epoch != s.trust.Epoch ||
+		view.LastCR.UC.InputRecord.Epoch > view.LastCR.Technical.Epoch {
+		return nil, fmt.Errorf("%w: LastCR profile mismatch", ErrFrontierUnavailable)
 	}
 	if err := view.LastCR.UC.Verify(s.trust, x.params.HashAlgorithm, req.PartitionID, req.ShardID, confHash); err != nil {
 		return nil, fmt.Errorf("%w: LastCR authentication: %v", ErrFrontierUnavailable, err)

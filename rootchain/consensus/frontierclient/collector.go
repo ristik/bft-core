@@ -479,7 +479,10 @@ func (c *Collector) authenticatePair(pair frontiercodec.Pair) ([32]byte, pairCla
 		}
 		return id, pairUnsupported, strictSignatures(c.trust, seal.Signatures, mustSealBytes(seal)), nil
 	}
-	if pair.UC.InputRecord.Epoch != 0 || pair.TR.Epoch != 0 || pair.TR.Round == 0 || pair.TR.Round <= pair.UC.InputRecord.RoundNumber {
+	// The collector is bound to one assignment's configuration hash (c.conf), so the shard epochs are
+	// authenticated by that binding rather than fixed at zero. The certified epoch never exceeds the
+	// authorized one, and the authorized round still strictly advances the certified one.
+	if pair.UC.InputRecord.Epoch > pair.TR.Epoch || pair.TR.Round == 0 || pair.TR.Round <= pair.UC.InputRecord.RoundNumber {
 		id, err := frontiercodec.PairIdentity(pair, c.context)
 		if err != nil {
 			return [32]byte{}, 0, nil, ErrUnauthentic
