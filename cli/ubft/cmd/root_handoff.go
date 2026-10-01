@@ -209,6 +209,9 @@ func newRootCmd() *cobra.Command {
 			if planRequest.EVMAssignment, err = readEVMAssignment(nextEVMAssignment); err != nil {
 				return err
 			}
+			if err = checkCoupledProposal(&next, planRequest.EVMAssignment); err != nil {
+				return err
+			}
 		}
 		request, err := json.Marshal(planRequest)
 		if err != nil {

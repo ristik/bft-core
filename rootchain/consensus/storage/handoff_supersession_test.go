@@ -19,12 +19,16 @@ import (
 // parent the companion carries. The candidate's static binding is exercised
 // against the real authority elsewhere; supersession evidence is checked by
 // block execution regardless of the authority.
-type fixedParentAuthority struct{ predecessor, parent []byte }
+type fixedParentAuthority struct {
+	predecessor, parent []byte
+	root                []evmassign.RootMember
+}
 
 func (a fixedParentAuthority) Predecessor() []byte { return a.predecessor }
 func (a fixedParentAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) ([]byte, error) {
 	return a.parent, nil
 }
+func (a fixedParentAuthority) CurrentRoot() []evmassign.RootMember                  { return a.root }
 func (fixedParentAuthority) VerifyAbort(evmroot.OrderedHandoffRecord, []byte) error { return nil }
 
 type pendingAssignment struct {
@@ -90,6 +94,9 @@ func (p pendingAssignment) supersedeWith(t *testing.T, binding *evmassign.Supers
 	for _, k := range f.nextKeys {
 		infos = append(infos, k.info)
 	}
+	// The replacement is a second coupled handoff: the committee of root epoch 2 changes again.
+	f.baseCommittee = f.successorRoot()
+	f.nextRootKey = newEVMKey(t, "new-f")
 	f.current0 = p.installed
 	f.succ, err = evmassign.NewSuccessor(p.installed, infos)
 	require.NoError(t, err)
@@ -122,7 +129,7 @@ func (s *supersession) addEpoch2(t *testing.T, store *BlockStore, round uint64, 
 func (s *supersession) admit(t *testing.T) error {
 	t.Helper()
 	store := s.p.store
-	store.handoffAuth = fixedParentAuthority{predecessor: s.p.body1, parent: s.p.f.parent}
+	store.handoffAuth = fixedParentAuthority{predecessor: s.p.body1, parent: s.p.f.parent, root: s.p.f.baseCommittee}
 	if _, err := s.addEpoch2(t, store, 8, s.built.prepare.Bytes()); err != nil {
 		return err
 	}
@@ -231,7 +238,7 @@ func TestSupersessionEvidenceIsolatedMutations(t *testing.T) {
 		require.NoError(t, err)
 		p.f.parent = ackBlock
 		sup := p.supersedeWith(t, stale, 9)
-		p.store.handoffAuth = fixedParentAuthority{predecessor: p.body1, parent: ackBlock}
+		p.store.handoffAuth = fixedParentAuthority{predecessor: p.body1, parent: ackBlock, root: p.f.baseCommittee}
 		_, err = sup.addEpoch2(t, p.store, 9, sup.built.prepare.Bytes())
 		require.NoError(t, err)
 		_, err = sup.addEpoch2(t, p.store, 10, sup.built.freeze.Bytes(), sup.built.companion)

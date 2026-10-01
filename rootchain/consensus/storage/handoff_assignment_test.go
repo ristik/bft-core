@@ -48,13 +48,16 @@ type assignmentFixture struct {
 	shard       types.PartitionShardID
 	oldKeys     []evmKey
 	nextKeys    []evmKey
-	succ        *types.PartitionDescriptionRecord
-	pop         evmassign.PoPContext
-	orch        *partitions.Orchestration
-	base        uint64 // ordered round of the prepare record; zero means 2
-	rootEpoch   uint64 // old root epoch of the handoff being built; zero means 1
-	supersedes  *evmassign.Supersession
-	current0    *types.PartitionDescriptionRecord // installed configuration the candidate replaces; nil means f.current
+	nextRootKey evmKey // the root entity that replaces the last committee member in the successor committee
+	// baseCommittee, when set, is the committee being replaced (a later handoff): the previous successor.
+	baseCommittee []evmassign.RootMember
+	succ          *types.PartitionDescriptionRecord
+	pop           evmassign.PoPContext
+	orch          *partitions.Orchestration
+	base          uint64 // ordered round of the prepare record; zero means 2
+	rootEpoch     uint64 // old root epoch of the handoff being built; zero means 1
+	supersedes    *evmassign.Supersession
+	current0      *types.PartitionDescriptionRecord // installed configuration the candidate replaces; nil means f.current
 }
 
 func newAssignmentFixture(t *testing.T) *assignmentFixture {
@@ -79,7 +82,7 @@ func newAssignmentFixture(t *testing.T) *assignmentFixture {
 	}
 	f.current = &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 8,
 		TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 5 * time.Second, Epoch: 0, EpochStart: 1,
-		PartitionParams: map[string]string{"seal_registry_genesis": "g"}, Validators: infos}
+		PartitionParams: map[string]string{"seal_registry_genesis": "g", evmassign.CouplingParam: "true"}, Validators: infos}
 	f.installShard(t, f.current, func(si *ShardInfo) { si.IR.BlockHash = bytes.Clone(f.parent) })
 
 	// Keep one old key and add three new ones: retained keys prove possession too.
@@ -90,6 +93,7 @@ func newAssignmentFixture(t *testing.T) *assignmentFixture {
 	}
 	f.succ, err = evmassign.NewSuccessor(f.current, next)
 	require.NoError(t, err)
+	f.nextRootKey = newEVMKey(t, "new-e")
 	f.pop = evmassign.PoPContext{Network: 5, Attempt: 0}
 	copy(f.pop.Predecessor[:], f.predecessor)
 	copy(f.pop.Parent[:], f.parent)
@@ -118,12 +122,35 @@ func (f *assignmentFixture) installShard(t *testing.T, conf *types.PartitionDesc
 	require.NoError(t, f.store.storage.WriteBlock(root, true))
 }
 
+// rootMembers is the OLD committee, in candidate order.
 func (f *assignmentFixture) rootMembers() []evmassign.RootMember {
 	out := make([]evmassign.RootMember, 0, len(f.tb.RootNodes))
 	for _, n := range f.tb.RootNodes {
 		out = append(out, evmassign.RootMember{NodeID: n.NodeID, Key: n.SigKey, Weight: n.Stake})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
+	return out
+}
+
+// successorRoot is the committee after the coupled handoff: the old committee with one entity replaced (so the root and
+// the EVM assignment change together, as the coupled-only rule requires).
+func (f *assignmentFixture) successorRoot() []evmassign.RootMember {
+	out := f.rootMembers()
+	if f.baseCommittee != nil {
+		out = append([]evmassign.RootMember(nil), f.baseCommittee...)
+	}
+	out[len(out)-1] = evmassign.RootMember{NodeID: f.nextRootKey.id, Key: f.nextRootKey.info.SigKey, Weight: 1}
+	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
+	return out
+}
+
+// bindings pairs each successor root entity with a delegated EVM validator of the successor set, in order.
+func (f *assignmentFixture) bindings() []evmassign.Binding {
+	root := f.successorRoot()
+	out := make([]evmassign.Binding, len(root))
+	for i, m := range root {
+		out[i] = evmassign.Binding{RootNodeID: m.NodeID, EVMNodeID: f.succ.Validators[i].NodeID}
+	}
 	return out
 }
 
@@ -155,8 +182,42 @@ func (f *assignmentFixture) candidate(t *testing.T) evmassign.Candidate {
 	old, err := evmassign.PDRHash(installed)
 	require.NoError(t, err)
 	return evmassign.Candidate{Version: evmassign.CandidateVersion, Network: 5, Predecessor: bytes.Clone(f.predecessor),
-		Attempt: f.pop.Attempt, Parent: bytes.Clone(f.parent), RootMembers: f.rootMembers(), OldShardEpoch: installed.Epoch,
-		OldActiveHash: old[:], Assignment: raw, PoPs: f.pops(t, f.pop, f.succ), Supersedes: f.supersedes}
+		Attempt: f.pop.Attempt, Parent: bytes.Clone(f.parent), RootMembers: f.successorRoot(), OldShardEpoch: installed.Epoch,
+		OldActiveHash: old[:], Assignment: raw, PoPs: f.pops(t, f.pop, f.succ), Supersedes: f.supersedes, Bindings: f.bindings()}
+}
+
+// rootOnly builds the legacy (version 1) root-only freeze whose successor committee is the given one: it carries no EVM
+// assignment and no EVM binding.
+func (f *assignmentFixture) rootOnly(t *testing.T, committee []evmassign.RootMember) builtFreeze {
+	t.Helper()
+	legacy := f.build(t, f.candidate(t))
+	auth := FreezeAuthorization{Version: 1, Parent: bytes.Clone(f.parent), Candidate: bytes.Repeat([]byte{4}, 32)}
+	body := legacy.body
+	body.Members = nil
+	for _, m := range committee {
+		body.Members = append(body.Members, evmroot.Member{StakingID: m.NodeID, NodeID: m.NodeID, ConsensusKey: m.Key, Weight: 1})
+	}
+	body.RootThreshold = evmroot.RootQuorumThreshold(uint64(len(body.Members)))
+	body.ChangeRecordHash = evmroot.D4CandidateContextHash(5, f.predecessor, 0, auth.Candidate, 7)
+	require.NoError(t, body.Validate())
+	auth.Body = body.Encode()
+	id := body.Identity()
+	freeze := legacy.freeze
+	freeze.NextBodyID = id[:]
+	freeze.FrozenID = evmroot.D4FrozenID(id[:], body.StateSummary, f.parent, auth.Candidate, 0, f.predecessor)
+	prepare := freeze
+	prepare.Kind, prepare.OrderedRound, prepare.FrozenID = "prepare", 2, make([]byte, 32)
+	message, err := EndorsementBytes(freeze)
+	require.NoError(t, err)
+	auth.Signatures = map[string]hex.Bytes{}
+	for _, name := range []string{"old-a", "old-b", "old-c"} {
+		sig, err := f.signers[name].SignBytes(message)
+		require.NoError(t, err)
+		auth.Signatures[name] = sig
+	}
+	companion, err := auth.Bytes()
+	require.NoError(t, err)
+	return builtFreeze{body: body, prepare: prepare, freeze: freeze, companion: companion}
 }
 
 type builtFreeze struct {
@@ -185,10 +246,9 @@ func (f *assignmentFixture) build(t *testing.T, c evmassign.Candidate, mutate ..
 		require.NoError(t, err)
 	}
 	members := make(evmroot.WeightSet, 0, len(f.tb.RootNodes))
-	for _, n := range f.tb.RootNodes {
-		members = append(members, evmroot.Member{StakingID: n.NodeID, NodeID: n.NodeID, ConsensusKey: n.SigKey, Weight: 1})
+	for _, m := range f.successorRoot() {
+		members = append(members, evmroot.Member{StakingID: m.NodeID, NodeID: m.NodeID, ConsensusKey: m.Key, Weight: 1})
 	}
-	sort.Slice(members, func(i, j int) bool { return members[i].NodeID < members[j].NodeID })
 	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: 5, Epoch: rootEpoch + 1, EarliestActivation: f.activation(), Members: members,
 		RootThreshold:    evmroot.RootQuorumThreshold(uint64(len(members))),
 		StateSummary:     bytes.Repeat([]byte{3}, 32),
@@ -287,7 +347,7 @@ func TestFreezeAssignmentBindingIsolatedMutations(t *testing.T) {
 		{"candidate root members differ from the body", func(t *testing.T, f *assignmentFixture, c *evmassign.Candidate, _ *[]func(*FreezeAssignmentAuthorization, *evmroot.TrustBaseBodyV2)) {
 			c.RootMembers = c.RootMembers[:3]
 		}, evmassign.ErrContext, "successor root members"},
-		{"combined root and EVM change", func(t *testing.T, f *assignmentFixture, c *evmassign.Candidate, extra *[]func(*FreezeAssignmentAuthorization, *evmroot.TrustBaseBodyV2)) {
+		{"a root entity without its EVM binding", func(t *testing.T, f *assignmentFixture, c *evmassign.Candidate, extra *[]func(*FreezeAssignmentAuthorization, *evmroot.TrustBaseBodyV2)) {
 			grown := append(append([]evmassign.RootMember(nil), c.RootMembers...), evmassign.RootMember{NodeID: "zz-new", Key: f.nextKeys[1].info.SigKey, Weight: 1})
 			c.RootMembers = grown
 			*extra = append(*extra, func(_ *FreezeAssignmentAuthorization, body *evmroot.TrustBaseBodyV2) {
@@ -295,7 +355,7 @@ func TestFreezeAssignmentBindingIsolatedMutations(t *testing.T) {
 					ConsensusKey: f.nextKeys[1].info.SigKey, Weight: 1})
 				body.RootThreshold = evmroot.RootQuorumThreshold(uint64(len(body.Members)))
 			})
-		}, evmassign.ErrCombined, ""},
+		}, evmassign.ErrCoupling, ""},
 		{"candidate digest differs from the companion", nil, evmassign.ErrContext, "candidate digest"},
 	}
 	for _, tc := range cases {
@@ -377,29 +437,7 @@ func TestPendingAssignmentAckRefusesEveryOtherHandoff(t *testing.T) {
 	t.Run("root only", func(t *testing.T) {
 		f := newAssignmentFixture(t)
 		f.installShard(t, f.current, func(si *ShardInfo) { si.IR.BlockHash = bytes.Clone(f.parent); pending(si) })
-		legacy := f.build(t, f.candidate(t))
-		auth := FreezeAuthorization{Version: 1, Body: legacy.body.Encode(), Parent: bytes.Clone(f.parent),
-			Candidate: bytes.Repeat([]byte{4}, 32)}
-		body := legacy.body
-		body.ChangeRecordHash = evmroot.D4CandidateContextHash(5, f.predecessor, 0, auth.Candidate, 7)
-		auth.Body = body.Encode()
-		id := body.Identity()
-		freeze := legacy.freeze
-		freeze.NextBodyID = id[:]
-		freeze.FrozenID = evmroot.D4FrozenID(id[:], body.StateSummary, f.parent, auth.Candidate, 0, f.predecessor)
-		prepare := freeze
-		prepare.Kind, prepare.OrderedRound, prepare.FrozenID = "prepare", 2, make([]byte, 32)
-		message, err := EndorsementBytes(freeze)
-		require.NoError(t, err)
-		auth.Signatures = map[string]hex.Bytes{}
-		for _, name := range []string{"old-a", "old-b", "old-c"} {
-			sig, err := f.signers[name].SignBytes(message)
-			require.NoError(t, err)
-			auth.Signatures[name] = sig
-		}
-		companion, err := auth.Bytes()
-		require.NoError(t, err)
-		err = f.admit(t, builtFreeze{body: body, prepare: prepare, freeze: freeze, companion: companion})
+		err := f.admit(t, f.rootOnly(t, f.rootMembers())) // the committee is unchanged
 		require.ErrorIs(t, err, ErrAssignmentAckPending)
 	})
 	t.Run("acknowledged assignment admits a fresh handoff", func(t *testing.T) {
@@ -433,4 +471,54 @@ func TestFreezeCompanionCodecRefusesNonCanonicalAndWrongShape(t *testing.T) {
 	require.NoError(t, err)
 	_, err = ParseFreezeCompanion(wrong)
 	require.ErrorIs(t, err, ErrHandoffRecord)
+}
+
+// Coupling is enforced in root block validation, on every path that can change the committee: the legacy root-only freeze
+// cannot add or replace a root entity (it carries no EVM binding) on a chain that requires coupling, while an identical
+// committee still passes.
+func TestRootOnlyCommitteeChangeWithoutEVMBindingIsRefusedAtBlockValidation(t *testing.T) {
+	t.Run("a replaced root entity is refused", func(t *testing.T) {
+		f := newAssignmentFixture(t)
+		err := f.admit(t, f.rootOnly(t, f.successorRoot()))
+		require.ErrorIs(t, err, ErrHandoffRecord)
+		require.ErrorIs(t, err, evmassign.ErrCoupling)
+	})
+	t.Run("an added root entity is refused", func(t *testing.T) {
+		f := newAssignmentFixture(t)
+		grown := append(f.rootMembers(), evmassign.RootMember{NodeID: f.nextRootKey.id, Key: f.nextRootKey.info.SigKey, Weight: 1})
+		sort.Slice(grown, func(i, j int) bool { return grown[i].NodeID < grown[j].NodeID })
+		err := f.admit(t, f.rootOnly(t, grown))
+		require.ErrorIs(t, err, evmassign.ErrCoupling)
+	})
+	t.Run("an unchanged committee still passes", func(t *testing.T) {
+		f := newAssignmentFixture(t)
+		require.NoError(t, f.admit(t, f.rootOnly(t, f.rootMembers())))
+	})
+	t.Run("a chain that does not require coupling keeps the legacy root-only change", func(t *testing.T) {
+		f := newAssignmentFixture(t)
+		plain := *f.current
+		plain.PartitionParams = map[string]string{"seal_registry_genesis": "g"}
+		f.installShard(t, &plain, func(si *ShardInfo) { si.IR.BlockHash = bytes.Clone(f.parent) })
+		require.NoError(t, f.admit(t, f.rootOnly(t, f.successorRoot())))
+	})
+}
+
+// A validator-set change is never EVM-only: the EVM set changes only together with the committee.
+func TestEVMOnlyAssignmentChangeIsRefusedAtBlockValidation(t *testing.T) {
+	f := newAssignmentFixture(t)
+	c := f.candidate(t)
+	c.RootMembers = f.rootMembers() // the committee is unchanged; bindings must still pair the (old) committee
+	root := f.rootMembers()
+	c.Bindings = make([]evmassign.Binding, len(root))
+	for i, m := range root {
+		c.Bindings[i] = evmassign.Binding{RootNodeID: m.NodeID, EVMNodeID: f.succ.Validators[i].NodeID}
+	}
+	err := f.admit(t, f.build(t, c, func(_ *FreezeAssignmentAuthorization, body *evmroot.TrustBaseBodyV2) {
+		body.Members = nil
+		for _, m := range root {
+			body.Members = append(body.Members, evmroot.Member{StakingID: m.NodeID, NodeID: m.NodeID, ConsensusKey: m.Key, Weight: 1})
+		}
+	}))
+	require.ErrorIs(t, err, ErrHandoffRecord)
+	require.ErrorIs(t, err, evmassign.ErrEVMOnly)
 }

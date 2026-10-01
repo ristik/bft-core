@@ -247,7 +247,7 @@ function generate_evm_shard_conf() {
   build/ubft shard-conf generate --home test-nodes \
     --network-id 3 --partition-id "$partitionID" --partition-type-id "$partitionID" \
     --shard-id 0x80 --epoch-start 1 --t2-timeout "$t2" \
-    --partition-params "proof_type=$proofType,chain_id=$chainID" \
+    --partition-params "proof_type=$proofType,chain_id=$chainID${EVM_PARTITION_PARAMS_EXTRA:+,$EVM_PARTITION_PARAMS_EXTRA}" \
     $nodeInfoFiles
 
   echo "generated test-nodes/shard-conf-${partitionID}_0.json"

@@ -229,8 +229,8 @@ func (a *v1HandoffAuthority) VerifyFreeze(r evmroot.OrderedHandoffRecord, compan
 
 // verifyAssignmentBinding checks everything about an H3 candidate that needs
 // no EVM state: its digest, the exact root/attempt/parent context, that the
-// root members do not change in the same operation, and a possession proof
-// for every successor key. State-dependent checks run in block execution.
+// root entities and EVM participants form one coupled set, and a possession
+// proof for every successor key. State-dependent checks run in block execution.
 func (a *v1HandoffAuthority) verifyAssignmentBinding(r evmroot.OrderedHandoffRecord, proof FreezeCompanion, body evmroot.TrustBaseBodyV2) error {
 	ctx := evmassign.BindingContext{Digest: proof.Candidate,
 		PoPContext: evmassign.PoPContext{Network: r.Network, Attempt: r.Attempt}}
@@ -242,17 +242,23 @@ func (a *v1HandoffAuthority) verifyAssignmentBinding(r evmroot.OrderedHandoffRec
 	for _, m := range body.Members {
 		ctx.SuccessorRoot = append(ctx.SuccessorRoot, evmassign.RootMember{NodeID: m.NodeID, Key: m.ConsensusKey, Weight: m.Weight})
 	}
-	for _, n := range a.trust.RootNodes {
-		if n == nil {
-			return ErrHandoffRecord
-		}
-		ctx.CurrentRoot = append(ctx.CurrentRoot, evmassign.RootMember{NodeID: n.NodeID, Key: n.SigKey, Weight: n.Stake})
-	}
-	sort.Slice(ctx.CurrentRoot, func(i, j int) bool { return ctx.CurrentRoot[i].NodeID < ctx.CurrentRoot[j].NodeID })
 	if _, _, err := evmassign.VerifyBinding(proof.Preimage, ctx); err != nil {
 		return errors.Join(ErrHandoffRecord, err)
 	}
 	return nil
+}
+
+// CurrentRoot is the old root committee in candidate order, for the EVM-only refusal at freeze admission.
+func (a *v1HandoffAuthority) CurrentRoot() []evmassign.RootMember {
+	out := make([]evmassign.RootMember, 0, len(a.trust.RootNodes))
+	for _, n := range a.trust.RootNodes {
+		if n == nil {
+			return nil // fail closed: the callers refuse a missing committee
+		}
+		out = append(out, evmassign.RootMember{NodeID: n.NodeID, Key: n.SigKey, Weight: n.Stake})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
+	return out
 }
 
 func (a *v1HandoffAuthority) VerifyAbort(r evmroot.OrderedHandoffRecord, companion []byte) error {

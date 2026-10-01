@@ -3,8 +3,8 @@
 Status: implemented in the bft-core half of H3 (this branch). The contracts half is
 `ristik/unicity-pos-contracts#5` (`sealRegistry/v2`, 8b30801) and the Ureth half is
 `ristik/ureth#47` (5f3bb7e4). No lane was run for this change; the locked acceptance lane is a
-separate step. No combined root-and-EVM change and no migration of an already initialized chain is
-claimed.
+separate step. Amended 2026-10-01: validator-set changes are always coupled (section 1). No migration
+of an already initialized chain is claimed.
 
 ## 1. Protocol
 
@@ -12,13 +12,20 @@ An EVM assignment change reuses `prepare → freeze/endorse → commit H → roo
 acknowledge`, the existing old-root-quorum authority, Abort and attempt+1. The committed
 candidate gains an optional EVM assignment. There is no separate shard-handoff protocol.
 
-- Every handoff advances the root epoch `e → e+1`, **including an EVM-only rotation with identical
+- Every handoff advances the root epoch `e → e+1`, **including a configuration-only boundary with identical
   root keys**. The new epoch's root trust base is published with every rotation.
 - A root-only handoff keeps the shard epoch. An EVM assignment handoff advances the installed
   assignment `s → s+1`.
-- For M3, root-only and EVM-only changes are supported separately. A candidate whose root members
-  differ from the installed ones **and** which carries an assignment is refused (`evmassign.ErrCombined`)
-  by the CLI path, every endorser and block admission. Two sequential handoffs give both changes.
+- **Coupled-only (candidate version 3).** The candidate carries `Bindings`: one `(rootNodeId, evmNodeId)` pair per
+  successor root member, sorted and one-to-one with the successor EVM validators, equal weights, and no shared signing
+  key (co-hosted processes never share keys). Root members and the assignment change together in one handoff
+  (`evmassign.ErrCombined` is removed). An EVM validator change with an unchanged committee is refused
+  (`ErrEVMOnly`); an identical committee and identical EVM validators (a configuration-only boundary) is allowed.
+  Where the EVM shard configuration carries `validator_coupling=true` (set at genesis, hashed with the configuration),
+  the legacy root-only freeze companion may not change the committee either: block validation in every root
+  validator refuses it (`ErrCoupling`), so no path adds a root entity without its EVM binding. The binding is
+  authorized by the old root quorum's endorsement of the candidate digest plus the EVM key's possession proof; a
+  signature by the successor root key over its binding is not required under PoA.
 - One designated EVM shard (`PartitionTypeID 8`), unit effective weights (`Stake == 1`), at most 64
   validators. Chain, fork, fee and execution settings are fixed: the successor PDR must equal the
   installed one in every field except validators, epoch (+1) and activation round

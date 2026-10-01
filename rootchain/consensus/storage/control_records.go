@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -28,6 +29,8 @@ type handoffAuthority interface {
 	Predecessor() []byte
 	VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) ([]byte, error)
 	VerifyAbort(evmroot.OrderedHandoffRecord, []byte) error
+	// CurrentRoot is the old root committee, which a coupled candidate is checked against (no EVM-only change).
+	CurrentRoot() []evmassign.RootMember
 }
 
 func recordNumber(v any) (uint64, bool) { n, ok := v.(uint64); return n, ok }

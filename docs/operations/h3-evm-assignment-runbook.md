@@ -7,9 +7,13 @@ a separate step; this is the procedure it follows.
 
 ## Rules
 
-- **One change at a time.** The EVM assignment and the root members change in separate handoffs. A
-  proposal carrying `--next-evm-assignment` whose `--next-trust-base` also changes root members is refused.
-- **Every handoff advances the root epoch**, including an EVM-only rotation with identical root keys.
+- **Validator-set changes are always coupled.** One handoff changes the root committee and the EVM assignment
+  together: every successor root entity has exactly one delegated EVM validator (same weight, a different key),
+  declared in `--bindings`. An EVM-only change (EVM validators change, root committee unchanged) is refused, and on a
+  chain whose EVM shard configuration carries `validator_coupling=true` a root-only committee change is refused too
+  (by every root validator at block validation, not only by the CLI). Keeping the committee and the EVM validators
+  identical (a configuration-only boundary) is allowed.
+- **Every handoff advances the root epoch**, including a configuration-only boundary with identical root keys.
   `--next-trust-base` is therefore the current trust base at the next epoch. Publish that trust base:
   offline verifiers need the body for each rotation's root epoch.
 - **Acknowledge before the next handoff.** While the installed assignment has no certified
@@ -46,8 +50,9 @@ The command refuses a key that is not the node's successor key.
 ## 3. Assemble the assignment
 
 ```sh
+# bindings.json: [{"rootNodeId": "<root entity>", "evmNodeId": "<its delegated EVM validator>"}, ...], one per successor root member
 build/ubft root handoff evm-assemble --context context.json --validators validators.json \
-  --pops a-pop.json,b-pop.json,c-pop.json --out assignment.json
+  --pops a-pop.json,b-pop.json,c-pop.json --bindings bindings.json --out assignment.json
 ```
 
 It checks every proof under the context before writing the file and prints the assignment hash to compare
@@ -63,7 +68,7 @@ build/ubft root handoff propose \
   --root-rpc REPLACE_ROOT1,REPLACE_ROOT2,REPLACE_ROOT3
 ```
 
-A bad or missing proof, a stale installed assignment, a combined root change or a pending
+A bad or missing proof, a stale installed assignment, an assignment not coupled to `--next-trust-base` or a pending
 acknowledgement is refused **before** any endorsement is signed. After H commits, restart the root
 validators with `--install-handoff-epoch N+1` as for any handoff; each fetches the bundle (delivery
 protocol `/unicity/root-handoff-bundle/2.0.0`), which carries the candidate, and derives and installs the

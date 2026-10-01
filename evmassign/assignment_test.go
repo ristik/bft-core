@@ -48,6 +48,9 @@ type fixture struct {
 	succ    *types.PartitionDescriptionRecord
 	ctx     PoPContext
 	root    []RootMember
+	// oldRoot is the committee being replaced: a different committee, so the fixture's change is a coupled one.
+	oldRoot  []RootMember
+	bindings []Binding
 }
 
 func newFixture(t *testing.T) fixture {
@@ -62,8 +65,27 @@ func newFixture(t *testing.T) fixture {
 	succ, err := NewSuccessor(cur, infos)
 	require.NoError(t, err)
 	return fixture{current: cur, next: next, succ: succ,
-		ctx:  PoPContext{Network: 5, Predecessor: [32]byte{1}, Attempt: 2, Parent: [32]byte{9}},
-		root: []RootMember{{NodeID: "r1", Key: bytes.Repeat([]byte{2}, 33), Weight: 1}, {NodeID: "r2", Key: bytes.Repeat([]byte{3}, 33), Weight: 1}}}
+		ctx:     PoPContext{Network: 5, Predecessor: [32]byte{1}, Attempt: 2, Parent: [32]byte{9}},
+		root:    rootOf("r", 2),
+		oldRoot: rootOf("o", 9), bindings: bindingsFor(rootOf("r", 2), succ)}
+}
+
+// rootOf is a four-member root committee; the EVM set of the fixture is the delegated image of it.
+func rootOf(prefix string, seed byte) []RootMember {
+	out := make([]RootMember, 4)
+	for i := range out {
+		out[i] = RootMember{NodeID: fmt.Sprintf("%s%d", prefix, i+1), Key: bytes.Repeat([]byte{seed + byte(i)}, 33), Weight: 1}
+	}
+	return out
+}
+
+// bindingsFor pairs the sorted root members with the successor validators in order.
+func bindingsFor(root []RootMember, succ *types.PartitionDescriptionRecord) []Binding {
+	out := make([]Binding, len(root))
+	for i, m := range root {
+		out[i] = Binding{RootNodeID: m.NodeID, EVMNodeID: succ.Validators[i].NodeID}
+	}
+	return out
 }
 
 func (f fixture) pops(t *testing.T) []PoP {
@@ -84,12 +106,12 @@ func (f fixture) pops(t *testing.T) []PoP {
 
 func (f fixture) verifyCtx(c Candidate) VerifyContext {
 	d, _ := c.Digest()
-	return VerifyContext{BindingContext: BindingContext{PoPContext: f.ctx, CurrentRoot: f.root, SuccessorRoot: f.root, Digest: d[:]}, Current: f.current}
+	return VerifyContext{BindingContext: BindingContext{PoPContext: f.ctx, SuccessorRoot: f.root, Digest: d[:]}, Current: f.current, CurrentRoot: f.oldRoot}
 }
 
 func (f fixture) candidate(t *testing.T) Candidate {
 	t.Helper()
-	c, err := NewCandidate(f.ctx, f.root, f.current, f.succ, f.pops(t), nil)
+	c, err := NewCandidate(f.ctx, f.root, f.current, f.succ, f.pops(t), nil, f.bindings)
 	require.NoError(t, err)
 	return c
 }
@@ -322,12 +344,50 @@ func TestCandidateVerifyContextIsolatedMutations(t *testing.T) {
 		require.ErrorIs(t, err, ErrContext)
 		require.ErrorContains(t, err, "candidate digest")
 	})
-	t.Run("combined change keeps matching candidate members", func(t *testing.T) {
-		grown := append(append([]RootMember(nil), f.root...), RootMember{NodeID: "r3", Key: bytes.Repeat([]byte{4}, 33), Weight: 1})
+	t.Run("a coupled committee change verifies", func(t *testing.T) {
+		_, _, err := Verify(raw, f.verifyCtx(c))
+		require.NoError(t, err)
+	})
+	t.Run("a root member without its EVM binding is refused", func(t *testing.T) {
+		grown := append(append([]RootMember(nil), f.root...), RootMember{NodeID: "r5", Key: bytes.Repeat([]byte{9}, 33), Weight: 1})
 		b, v := rebuild(func(c *Candidate) { c.RootMembers = grown })
 		v.SuccessorRoot = grown
 		_, _, err := Verify(b, v)
-		require.ErrorIs(t, err, ErrCombined)
+		require.ErrorIs(t, err, ErrCoupling)
+	})
+	t.Run("coupling is one-to-one, equal weight and distinct keys", func(t *testing.T) {
+		for name, mutate := range map[string]func(c *Candidate){
+			"missing binding":   func(c *Candidate) { c.Bindings = c.Bindings[:3] },
+			"duplicate evm id":  func(c *Candidate) { c.Bindings[1].EVMNodeID = c.Bindings[0].EVMNodeID },
+			"unknown evm id":    func(c *Candidate) { c.Bindings[0].EVMNodeID = "nobody" },
+			"unknown root id":   func(c *Candidate) { c.Bindings[0].RootNodeID = "r0" },
+			"unsorted bindings": func(c *Candidate) { c.Bindings[0], c.Bindings[1] = c.Bindings[1], c.Bindings[0] },
+			"shared key":        func(c *Candidate) { c.RootMembers[0].Key = f.succ.Validators[0].SigKey },
+			"weight differs":    func(c *Candidate) { c.RootMembers[0].Weight = 2 },
+		} {
+			t.Run(name, func(t *testing.T) {
+				b, v := rebuild(func(c *Candidate) { c.Bindings = append([]Binding(nil), c.Bindings...); mutate(c) })
+				v.SuccessorRoot = nil
+				d := sha256.Sum256(b)
+				dec, _ := DecodeCandidate(b)
+				v.SuccessorRoot = dec.RootMembers
+				v.Digest = d[:]
+				_, _, err := Verify(b, v)
+				require.ErrorIs(t, err, ErrCoupling)
+			})
+		}
+	})
+	t.Run("an EVM-only change is refused, a configuration-only boundary is not", func(t *testing.T) {
+		v := f.verifyCtx(c)
+		v.CurrentRoot = f.root // the committee does not change, the EVM validators do
+		_, _, err := Verify(raw, v)
+		require.ErrorIs(t, err, ErrEVMOnly)
+		// Same committee and same EVM validators at the next epoch (a configuration-only boundary) is allowed.
+		current := clonePDR(t, f.succ)
+		current.Epoch, current.EpochStart = f.succ.Epoch-1, 11
+		cc, err := NewCandidate(f.ctx, f.root, current, f.succ, f.pops(t), nil, f.bindings)
+		require.NoError(t, err)
+		require.NoError(t, VerifyInstalled(cc, f.succ, current, f.root))
 	})
 	t.Run("successor config drift", func(t *testing.T) {
 		p := clonePDR(t, f.succ)

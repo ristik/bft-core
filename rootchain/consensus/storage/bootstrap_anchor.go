@@ -379,7 +379,7 @@ func installCommittedAssignmentFrom(db PersistentStore, orchestration Orchestrat
 	if err != nil {
 		return errors.Join(ErrAssignmentHistory, err)
 	}
-	if err := evmassign.VerifyInstalled(c, succ, configs[key]); err != nil {
+	if err := evmassign.VerifyInstalled(c, succ, configs[key], nil); err != nil {
 		return errors.Join(ErrAssignmentHistory, err)
 	}
 	tr, err := successorTechnicalRecord(si, pdr, hashAlg)

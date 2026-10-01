@@ -10,7 +10,7 @@ import (
 
 // CandidateVersion is the only encoding of an assignment-bearing candidate.
 // The legacy root-only operator candidate (version 1) is unchanged.
-const CandidateVersion uint64 = 2
+const CandidateVersion uint64 = 3
 
 // MaxCandidateBytes bounds the retained preimage: it is carried once in the
 // freeze companion and the handoff bundle, never in the root-input D[] payload.
@@ -18,13 +18,20 @@ const MaxCandidateBytes = 256 * 1024
 
 const candidateDomain = "UNICITY_H3_EVM_ASSIGNMENT_CANDIDATE"
 
-// RootMember is one successor root-chain member, bound so a candidate names
-// both halves of an operation even though M3 supports only one changing at a time.
+// RootMember is one successor root-chain member, bound so a candidate names both halves of the one coupled operation.
 type RootMember struct {
 	_      struct{} `cbor:",toarray"`
 	NodeID string
 	Key    []byte
 	Weight uint64
+}
+
+// Binding couples one successor root entity to its delegated EVM participant. The two keys are distinct credentials; the
+// weights are equal (the EVM set mirrors the root's).
+type Binding struct {
+	_          struct{} `cbor:",toarray"`
+	RootNodeID string   `json:"rootNodeId"`
+	EVMNodeID  string   `json:"evmNodeId"`
 }
 
 // Supersession binds a replacement of an installed, still unacknowledged
@@ -57,6 +64,7 @@ type Candidate struct {
 	Assignment    []byte // canonical CBOR of the successor PDR, EpochStart zero
 	PoPs          []PoP
 	Supersedes    *Supersession
+	Bindings      []Binding // one per successor root member, sorted by RootNodeID
 }
 
 func (c Candidate) Encode() ([]byte, error) {
@@ -117,8 +125,11 @@ func (c Candidate) Successor() (*types.PartitionDescriptionRecord, error) {
 // NewCandidate assembles the candidate. PoPs must already be collected: every
 // successor key signs PoPMessage for this context before propose.
 func NewCandidate(c PoPContext, root []RootMember, current, succ *types.PartitionDescriptionRecord,
-	pops []PoP, supersedes *Supersession) (Candidate, error) {
+	pops []PoP, supersedes *Supersession, bindings []Binding) (Candidate, error) {
 	if err := ValidateSuccessor(current, succ); err != nil {
+		return Candidate{}, err
+	}
+	if err := ValidateCoupling(root, succ, bindings); err != nil {
 		return Candidate{}, err
 	}
 	if err := VerifyPoPs(c, succ, pops); err != nil {
@@ -134,7 +145,7 @@ func NewCandidate(c PoPContext, root []RootMember, current, succ *types.Partitio
 	}
 	out := Candidate{Version: CandidateVersion, Network: c.Network, Predecessor: bytes.Clone(c.Predecessor[:]),
 		Attempt: c.Attempt, Parent: bytes.Clone(c.Parent[:]), RootMembers: root, OldShardEpoch: current.Epoch,
-		OldActiveHash: old[:], Assignment: raw, PoPs: pops, Supersedes: supersedes}
+		OldActiveHash: old[:], Assignment: raw, PoPs: pops, Supersedes: supersedes, Bindings: bindings}
 	if _, err := out.Encode(); err != nil {
 		return Candidate{}, err
 	}
@@ -145,9 +156,6 @@ func NewCandidate(c PoPContext, root []RootMember, current, succ *types.Partitio
 // of the installed EVM configuration.
 type BindingContext struct {
 	PoPContext
-	// CurrentRoot is the old root membership; the successor body's members must
-	// equal it, because M3 refuses a combined root and EVM change.
-	CurrentRoot []RootMember
 	// SuccessorRoot is the member list of the successor trust-base body.
 	SuccessorRoot []RootMember
 	// Digest is the candidate hash the approval, companion and D3 context carry.
@@ -159,6 +167,56 @@ type VerifyContext struct {
 	BindingContext
 	// Current is the authenticated installed EVM configuration.
 	Current *types.PartitionDescriptionRecord
+	// CurrentRoot is the old root committee; nil skips the EVM-only refusal (see VerifyInstalled).
+	CurrentRoot []RootMember
+}
+
+func sameValidators(a, b []*types.NodeInfo) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] == nil || b[i] == nil || a[i].NodeID != b[i].NodeID || a[i].Stake != b[i].Stake || !bytes.Equal(a[i].SigKey, b[i].SigKey) {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateCoupling checks that the successor root members and the successor EVM validators are one coupled set: the
+// bindings are a bijection between them (sorted, unique, no unknown or missing id), each pair has equal weight, and a
+// pair never shares a signing key (co-hosted processes must not share private keys).
+func ValidateCoupling(root []RootMember, succ *types.PartitionDescriptionRecord, bindings []Binding) error {
+	if succ == nil || len(root) == 0 || len(bindings) != len(root) || len(succ.Validators) != len(root) {
+		return fmt.Errorf("%w: %d root members, %d EVM validators, %d bindings", ErrCoupling, len(root), lenValidators(succ), len(bindings))
+	}
+	byRoot := make(map[string]RootMember, len(root))
+	for _, m := range root {
+		byRoot[m.NodeID] = m
+	}
+	byEVM := make(map[string]*types.NodeInfo, len(succ.Validators))
+	for _, v := range succ.Validators {
+		byEVM[v.NodeID] = v
+	}
+	seenRoot, seenEVM := map[string]bool{}, map[string]bool{}
+	for i, b := range bindings {
+		if i > 0 && bindings[i-1].RootNodeID >= b.RootNodeID {
+			return fmt.Errorf("%w: bindings are not sorted by unique root node id", ErrCoupling)
+		}
+		m, okR := byRoot[b.RootNodeID]
+		v, okE := byEVM[b.EVMNodeID]
+		if !okR || !okE || seenRoot[b.RootNodeID] || seenEVM[b.EVMNodeID] {
+			return fmt.Errorf("%w: binding %q -> %q is not a one-to-one pair of a root member and an EVM validator", ErrCoupling, b.RootNodeID, b.EVMNodeID)
+		}
+		seenRoot[b.RootNodeID], seenEVM[b.EVMNodeID] = true, true
+		if m.Weight != v.Stake {
+			return fmt.Errorf("%w: %q has root weight %d but EVM weight %d", ErrCoupling, b.RootNodeID, m.Weight, v.Stake)
+		}
+		if bytes.Equal(m.Key, v.SigKey) {
+			return fmt.Errorf("%w: %q and its EVM validator share a signing key", ErrCoupling, b.RootNodeID)
+		}
+	}
+	return nil
 }
 
 func sameRoot(a, b []RootMember) bool {
@@ -201,14 +259,14 @@ func VerifyBinding(data []byte, v BindingContext) (Candidate, *types.PartitionDe
 	if !sameRoot(c.RootMembers, v.SuccessorRoot) {
 		return Candidate{}, nil, fmt.Errorf("%w: successor root members", ErrContext)
 	}
-	if !sameRoot(v.SuccessorRoot, v.CurrentRoot) {
-		return Candidate{}, nil, ErrCombined
-	}
 	succ, err := c.Successor()
 	if err != nil {
 		return Candidate{}, nil, err
 	}
 	if err := ValidateAssignment(succ); err != nil {
+		return Candidate{}, nil, err
+	}
+	if err := ValidateCoupling(c.RootMembers, succ, c.Bindings); err != nil {
 		return Candidate{}, nil, err
 	}
 	if err := VerifyPoPs(v.PoPContext, succ, c.PoPs); err != nil {
@@ -224,10 +282,15 @@ func VerifyBinding(data []byte, v BindingContext) (Candidate, *types.PartitionDe
 }
 
 // VerifyInstalled checks a bound candidate against the authenticated installed
-// configuration it replaces.
-func VerifyInstalled(c Candidate, succ, current *types.PartitionDescriptionRecord) error {
+// configuration it replaces. currentRoot is the old root committee: an EVM validator change while it is unchanged is
+// refused (ErrEVMOnly). A caller that has only the installed configuration (re-derivation at activation, after the
+// freeze already enforced this) passes nil.
+func VerifyInstalled(c Candidate, succ, current *types.PartitionDescriptionRecord, currentRoot []RootMember) error {
 	if err := ValidateSuccessor(current, succ); err != nil {
 		return err
+	}
+	if currentRoot != nil && sameRoot(c.RootMembers, currentRoot) && !sameValidators(succ.Validators, current.Validators) {
+		return ErrEVMOnly
 	}
 	old, err := PDRHash(current)
 	if err != nil {
@@ -248,7 +311,7 @@ func Verify(data []byte, v VerifyContext) (Candidate, *types.PartitionDescriptio
 	if err != nil {
 		return Candidate{}, nil, err
 	}
-	if err := VerifyInstalled(c, succ, v.Current); err != nil {
+	if err := VerifyInstalled(c, succ, v.Current, v.CurrentRoot); err != nil {
 		return Candidate{}, nil, err
 	}
 	return c, succ, nil
