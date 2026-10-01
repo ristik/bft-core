@@ -29,6 +29,8 @@ type handoffOperatorStub struct {
 	proposal    *evmassign.Proposal
 	evmCalls    int
 	endorseErr  error
+	// lapsedPlans is how many plans (attempts) end with the Prepare lapsed before they are endorsed.
+	lapsedPlans int
 }
 
 func (s *handoffOperatorStub) PlanHandoff(_ *types.RootTrustBaseV1, p *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
@@ -54,6 +56,9 @@ func (s *handoffOperatorStub) EndorseHandoff(_ context.Context, _ abdrc.HandoffA
 	defer s.mu.Unlock()
 	if s.endorseErr != nil {
 		return s.endorseErr
+	}
+	if s.lapsedPlans > 0 && s.planCalls <= s.lapsedPlans {
+		return consensus.ErrPrepareLapsed
 	}
 	s.attempts++
 	if s.attempts <= s.notPrepared {
@@ -258,6 +263,29 @@ func TestRootHandoffProposePlansThenEndorsesAfterPrepare(t *testing.T) {
 		require.Equal(t, 1, second.endorsements)
 		require.Equal(t, 1, third.endorsements)
 		require.Equal(t, 3, first.attempts, "refused twice before the Prepare was committed")
+	})
+	t.Run("a lapsed Prepare is re-planned for the next attempt and then endorsed", func(t *testing.T) {
+		stub := &handoffOperatorStub{lapsedPlans: 1}
+		server := newServer(stub)
+		defer server.Close()
+		var stdout, stderr bytes.Buffer
+		root := newRootCmd()
+		root.SetOut(&stdout)
+		root.SetErr(&stderr)
+		root.SetArgs([]string{"handoff", "propose", "--next-trust-base", nextFile, "--root-rpc", server.URL, "--prepare-timeout", "30s"})
+		require.NoError(t, root.Execute())
+		require.Equal(t, 2, stub.planCalls, "attempt 1 lapsed, attempt 2 was planned")
+		require.Equal(t, 1, stub.endorsements)
+		require.Contains(t, stderr.String(), "attempt 1 lapsed before it was endorsed; re-planning attempt 2")
+	})
+	t.Run("repeated lapses end in the typed outcome after the bounded attempts", func(t *testing.T) {
+		stub := &handoffOperatorStub{lapsedPlans: 100}
+		server := newServer(stub)
+		defer server.Close()
+		_, err := run(t, "--root-rpc", server.URL, "--prepare-timeout", "30s", "--max-attempts", "2")
+		require.ErrorIs(t, err, ErrHandoffLapsed)
+		require.Equal(t, 2, stub.planCalls, "bounded")
+		require.Zero(t, stub.endorsements)
 	})
 	t.Run("no EVM parent flag exists", func(t *testing.T) {
 		_, err := run(t, "--frozen-parent", "0x"+strings.Repeat("11", 32), "--root-rpc", "http://127.0.0.1:1")

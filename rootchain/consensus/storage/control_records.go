@@ -20,6 +20,8 @@ var (
 	ErrFreezeBeforePrepare = errors.New("root handoff Freeze without an ordered Prepare")
 	// ErrFreezeParentUnbound refuses a Freeze whose frozen parent is not the parent the Prepare bound.
 	ErrFreezeParentUnbound = errors.New("root handoff Freeze names a frozen parent other than the one bound at Prepare")
+	// ErrPrepareActivationFloor refuses a Prepare whose activation round leaves less than PrepareActivationFloorRounds after it.
+	ErrPrepareActivationFloor = errors.New("root handoff Prepare activation is closer than the endorsement window allows")
 	// ErrPrepareNoEVMParent refuses a Prepare when the designated EVM shard has no certified input record to bind.
 	ErrPrepareNoEVMParent = errors.New("root handoff Prepare without a certified EVM parent to bind")
 	// ErrAssignmentAckPending refuses another handoff while the installed EVM
@@ -116,20 +118,30 @@ func DecodeOrderedHandoffRecord(data []byte) (evmroot.OrderedHandoffRecord, erro
 // indefinitely. The lapse is a pure function of the Prepare's ordered round and the round of the block being executed, so every
 // root, on every branch, agrees on it.
 //
-// PrepareFreezeLapseRounds is how long a Prepare freezes the EVM without a Freeze. An honest handoff orders Freeze in the round after
-// Prepare (the plan is endorsed before Prepare is ordered), and the Prepare already reserves 8 rounds before activation, so a Freeze
-// that needs more than three times that has lost its leaders for the better part of a minute (rounds are ~1 s, partitions 1-3 s) and
-// is better restarted. After the lapse the EVM certifies again and the plan is dead: a fresh Prepare, with the next attempt number
-// (the lapse is treated like an abort for numbering), is needed.
+// PrepareFreezeLapseRounds is how long a Prepare freezes the EVM without a Freeze. The Prepare comes FIRST: the operator's plan is
+// held by the validators as an unsigned intent, the Prepare is ordered for it, and only then (once the Prepare is committed) are the
+// endorsements collected and the Freeze ordered. An honest operator needs about 6 to 8 rounds for that (the Prepare commits 2-3
+// rounds after it is ordered, the operator polls about once a round, the endorsements reach the leader within a round); 24 leaves
+// roughly three times that for a faulty leader or two in the rotation. After the lapse the EVM certifies again and the attempt is
+// dead: a fresh Prepare, with the next attempt number (the lapse is treated like an abort for numbering), needs a new plan.
+//
+// PrepareActivationFloorRounds is the least distance from a Prepare to its activation round: the whole lapse window plus the usual
+// 8 rounds of margin, so a Freeze ordered at the very end of the window still commits before activation. It is enforced here, by
+// block validation, not only by the leader that picks the activation round.
 //
 // PrepareCooldownRounds is the pause before that fresh Prepare may be ordered. It bounds what a faulty leader can do by repeating the
 // attack: the EVM is frozen at most PrepareFreezeLapseRounds in every PrepareFreezeLapseRounds+PrepareCooldownRounds (50%), where
 // without it the freeze could be renewed the moment it lapsed. That is a residual, deliberately kept simple: a faulty leader that
 // leads one round in n can still halve EVM availability; removing it needs a signed Prepare, which is a protocol change.
 const (
-	PrepareFreezeLapseRounds = 24
-	PrepareCooldownRounds    = 24
+	PrepareFreezeLapseRounds     = 24
+	PrepareCooldownRounds        = 24
+	PrepareActivationFloorRounds = PrepareFreezeLapseRounds + 8
 )
+
+// prepareActivationFloor is PrepareActivationFloorRounds; it is a variable only so that the storage tests, whose compressed timelines
+// activate within a few rounds of the Prepare, can lower it. Production never changes it.
+var prepareActivationFloor uint64 = PrepareActivationFloorRounds
 
 // PrepareLapsed reports whether a prepared control state's freeze has lapsed at the given block round: no Freeze followed within
 // PrepareFreezeLapseRounds of the Prepare.
@@ -176,6 +188,9 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 		}
 		if bytes.Equal(r.NextBodyID, make([]byte, 32)) || r.ActivationRound < r.OrderedRound {
 			return nil, ErrHandoffRecord
+		}
+		if r.ActivationRound < r.OrderedRound+prepareActivationFloor {
+			return nil, errors.Join(ErrHandoffRecord, ErrPrepareActivationFloor)
 		}
 		return &evmroot.ControlState{Network: network, Epoch: epoch, PredecessorBodyID: bytes.Clone(r.PredecessorBodyID), Attempt: r.Attempt, Phase: "prepared", OrderedRound: round, RecordBytes: bytes.Clone(data), PreviousDigest: previous.Digest()}, nil
 	}

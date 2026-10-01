@@ -172,6 +172,7 @@ func newRootCmd() *cobra.Command {
 	handoff := &cobra.Command{Use: "handoff", Short: "Profile-2 validator handoff"}
 	var nextFile, rootRPCs, nextEVMAssignment string
 	var prepareTimeout time.Duration
+	var maxAttempts int
 	propose := &cobra.Command{Use: "propose", Short: "Request old-validator endorsements for a new root trust base", Long: "Plans the handoff, has the root order a Prepare for it (which freezes the EVM and binds the frozen parent), and then collects the\n" +
 		"old validators' endorsements of that Prepare-bound state. The plan names no EVM parent. Endorsements are refused until the Prepare\n" +
 		"is committed, so this command waits for it (--prepare-timeout); a Prepare that gets no Freeze within the lapse window is dead and the\n" +
@@ -207,64 +208,27 @@ func newRootCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		// 1. Plan: the first validator builds it, every validator holds it as its intent, so the leader of the moment can order the
-		// Prepare.
-		var plan abdrc.HandoffApprovalMsg
-		if err = handoffPost(cmd.Context(), client, endpoints[0]+"/api/v1/handoff/plan", request, &plan); err != nil {
-			return err
-		}
-		data, err := json.Marshal(plan)
-		if err != nil {
-			return err
-		}
-		for _, endpoint := range endpoints[1:] {
-			if err = handoffPost(cmd.Context(), client, endpoint+"/api/v1/handoff/intent", data, nil); err != nil {
-				return fmt.Errorf("validator %s refused the plan: %w", endpoint, err)
+		for attemptNo := 1; ; attemptNo++ {
+			accepted, err := proposeOnce(cmd.Context(), client, endpoints, request, prepareTimeout, attemptNo > 1)
+			if err == nil {
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "submitted %d root endorsements for epoch %d\n", accepted, next.Epoch)
+				return err
 			}
-		}
-		// 2. Endorse the Prepare-bound state: each validator refuses until it has committed the Prepare of this plan.
-		deadline := time.Now().Add(prepareTimeout)
-		var wg sync.WaitGroup
-		results := make(chan error, len(endpoints))
-		for _, endpoint := range endpoints {
-			wg.Add(1)
-			go func(endpoint string) {
-				defer wg.Done()
-				for {
-					err := handoffPost(cmd.Context(), client, endpoint+"/api/v1/handoff/endorse", data, nil)
-					if err == nil || !strings.Contains(err.Error(), "before the handoff is prepared") || time.Now().After(deadline) {
-						results <- err
-						return
-					}
-					select {
-					case <-cmd.Context().Done():
-						results <- cmd.Context().Err()
-						return
-					case <-time.After(time.Second):
-					}
-				}
-			}(endpoint)
-		}
-		wg.Wait()
-		close(results)
-		accepted := 0
-		var refusals []error
-		for result := range results {
-			if result == nil {
-				accepted++
-			} else {
-				refusals = append(refusals, result)
+			if !errors.Is(err, ErrHandoffLapsed) {
+				return err
 			}
+			// The attempt's Prepare lapsed (no Freeze in time): the EVM certifies again and the attempt is dead. Re-plan for the next
+			// attempt, a bounded number of times.
+			if attemptNo >= maxAttempts {
+				return fmt.Errorf("%w: gave up after %d attempts", ErrHandoffLapsed, attemptNo)
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "attempt %d lapsed before it was endorsed; re-planning attempt %d\n", attemptNo, attemptNo+1)
 		}
-		if accepted < len(endpoints)*2/3+1 {
-			return fmt.Errorf("only %d/%d validators endorsed: %w", accepted, len(endpoints), errors.Join(refusals...))
-		}
-		_, err = fmt.Fprintf(cmd.OutOrStdout(), "submitted %d root endorsements for epoch %d\n", accepted, next.Epoch)
-		return err
 	}}
 	propose.Flags().StringVar(&nextFile, "next-trust-base", "", "next epoch trust base JSON")
 	propose.Flags().StringVar(&nextEVMAssignment, "next-evm-assignment", "",
 		"coupled validator assignment change (JSON: validators and one proof of possession per successor key, see `handoff evm-pop`)")
+	propose.Flags().IntVar(&maxAttempts, "max-attempts", 3, "how many attempts to plan when a Prepare lapses before it is endorsed (each lapse makes the attempt dead)")
 	propose.Flags().DurationVar(&prepareTimeout, "prepare-timeout", 60*time.Second, "how long to wait for the root to commit the Prepare before endorsing")
 	propose.Flags().StringVar(&rootRPCs, "root-rpc", "", "comma-separated local old validator RPC URLs")
 	_ = propose.MarkFlagRequired("next-trust-base")
@@ -424,4 +388,85 @@ func handoffPost(ctx context.Context, client *http.Client, url string, body []by
 		return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(out)
 	}
 	return nil
+}
+
+// ErrHandoffLapsed is the typed outcome of a propose whose Prepare lapsed: no Freeze followed in time, the EVM certifies again and the
+// attempt is dead. propose re-plans for the next attempt on its own, a bounded number of times, and returns this when it gives up.
+var ErrHandoffLapsed = errors.New("root handoff: the Prepare lapsed before it was endorsed")
+
+// proposeOnce plans one attempt, hands every validator the intent and endorses the Prepare-bound state at every validator, waiting
+// for the Prepare. It returns the number of endorsements, or ErrHandoffLapsed when the validators report that the attempt's Prepare
+// lapsed. A re-plan right after a lapse may find a validator that has not yet committed far enough to see the lapse, so its plan
+// request is retried briefly.
+func proposeOnce(ctx context.Context, client *http.Client, endpoints []string, request []byte, prepareTimeout time.Duration, replan bool) (int, error) {
+	var plan abdrc.HandoffApprovalMsg
+	planDeadline := time.Now()
+	if replan {
+		planDeadline = planDeadline.Add(30 * time.Second)
+	}
+	for {
+		err := handoffPost(ctx, client, endpoints[0]+"/api/v1/handoff/plan", request, &plan)
+		if err == nil {
+			break
+		}
+		if !replan || time.Now().After(planDeadline) {
+			return 0, err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	data, err := json.Marshal(plan)
+	if err != nil {
+		return 0, err
+	}
+	for _, endpoint := range endpoints[1:] {
+		if err = handoffPost(ctx, client, endpoint+"/api/v1/handoff/intent", data, nil); err != nil {
+			return 0, fmt.Errorf("validator %s refused the plan: %w", endpoint, err)
+		}
+	}
+	deadline := time.Now().Add(prepareTimeout)
+	var wg sync.WaitGroup
+	results := make(chan error, len(endpoints))
+	for _, endpoint := range endpoints {
+		wg.Add(1)
+		go func(endpoint string) {
+			defer wg.Done()
+			for {
+				err := handoffPost(ctx, client, endpoint+"/api/v1/handoff/endorse", data, nil)
+				if err == nil || !strings.Contains(err.Error(), "before the handoff is prepared") || time.Now().After(deadline) {
+					results <- err
+					return
+				}
+				select {
+				case <-ctx.Done():
+					results <- ctx.Err()
+					return
+				case <-time.After(time.Second):
+				}
+			}
+		}(endpoint)
+	}
+	wg.Wait()
+	close(results)
+	accepted, lapsed := 0, false
+	var refusals []error
+	for result := range results {
+		switch {
+		case result == nil:
+			accepted++
+		default:
+			lapsed = lapsed || strings.Contains(result.Error(), "the Prepare's freeze has lapsed")
+			refusals = append(refusals, result)
+		}
+	}
+	if accepted < len(endpoints)*2/3+1 {
+		if lapsed {
+			return accepted, fmt.Errorf("%w: %w", ErrHandoffLapsed, errors.Join(refusals...))
+		}
+		return accepted, fmt.Errorf("only %d/%d validators endorsed: %w", accepted, len(endpoints), errors.Join(refusals...))
+	}
+	return accepted, nil
 }

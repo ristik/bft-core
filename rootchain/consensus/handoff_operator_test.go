@@ -29,7 +29,18 @@ import (
 
 // Prepare comes before endorsement: the plan names no EVM parent, the leader orders a Prepare for the intent, the ROOT binds the
 // frozen parent there, and validators endorse only that Prepare-bound state.
-func TestOperatorHandoffPreparesBeforeEndorsement(t *testing.T) {
+type planFixture struct {
+	cm         *ConsensusManager
+	node       *testutils.TestNode
+	others     []*testutils.TestNode
+	old        *types.RootTrustBaseV1
+	next       types.RootTrustBaseV1
+	parentHash []byte
+	mockNet    *testnetwork.MockNet
+}
+
+// newPlanFixture is a four-validator root with a designated EVM shard and a next trust base that replaces one member.
+func newPlanFixture(t *testing.T) *planFixture {
 	ctx := context.Background()
 	node := testutils.NewTestNode(t)
 	others := []*testutils.TestNode{testutils.NewTestNode(t), testutils.NewTestNode(t), testutils.NewTestNode(t)}
@@ -74,7 +85,15 @@ func TestOperatorHandoffPreparesBeforeEndorsement(t *testing.T) {
 	next.RootNodes[3] = &types.NodeInfo{NodeID: replacement.PeerConf.ID.String(), SigKey: key, Stake: 1}
 	parentHash := bytes.Repeat([]byte{7}, 32)
 
-	_, err = cm.PlanHandoff(&next, nil)
+	return &planFixture{cm: cm, node: node, others: others, old: old, next: next, parentHash: parentHash, mockNet: mockNet}
+}
+
+func TestOperatorHandoffPreparesBeforeEndorsement(t *testing.T) {
+	ctx := context.Background()
+	f := newPlanFixture(t)
+	cm, node, others, old, next, parentHash, mockNet := f.cm, f.node, f.others, f.old, f.next, f.parentHash, f.mockNet
+	_, _, _ = node, old, mockNet
+	_, err := cm.PlanHandoff(&next, nil)
 	require.ErrorIs(t, err, ErrHandoffApproval, "no certified EVM shard in the committed state: nothing to plan for")
 	state, err := cm.blockStore.GetState()
 	require.NoError(t, err)
@@ -149,9 +168,17 @@ func TestOperatorHandoffPreparesBeforeEndorsement(t *testing.T) {
 		require.NoError(t, err)
 		otherPlan.Body = append(bytes.Clone(otherPlan.Body[:len(otherPlan.Body)-1]), otherPlan.Body[len(otherPlan.Body)-1]^1)
 		require.ErrorIs(t, cm.endorseHandoffAtState(ctx, otherPlan, prepared), ErrEndorsedPlanMismatch)
-		wrongAttempt := plan
-		wrongAttempt.Attempt = 1
-		require.ErrorIs(t, cm.endorseHandoffAtState(ctx, wrongAttempt, prepared), ErrEndorsedPlanMismatch)
+		nextAttempt := plan
+		nextAttempt.Attempt = 1
+		require.ErrorIs(t, cm.endorseHandoffAtState(ctx, nextAttempt, prepared), ErrEndorseBeforePrepare,
+			"a plan for the next attempt waits for its own Prepare")
+		overtaken := preparedWith(func(c *evmroot.ControlState) { c.Attempt = 1 })
+		require.ErrorIs(t, cm.endorseHandoffAtState(ctx, plan, overtaken), ErrEndorsedPlanMismatch,
+			"a plan for an attempt that is already over is never endorsed")
+		frozen := preparedWith(func(c *evmroot.ControlState) { c.Phase = "endorsed" })
+		require.ErrorIs(t, cm.endorseHandoffAtState(ctx, plan, frozen), ErrEndorseAfterFreeze, "nothing is left to endorse once frozen")
+		committed := preparedWith(func(c *evmroot.ControlState) { c.Phase = "committed" })
+		require.ErrorIs(t, cm.endorseHandoffAtState(ctx, plan, committed), ErrEndorseAfterFreeze)
 	})
 	t.Run("endorsement after the freeze lapsed is refused", func(t *testing.T) {
 		lapsed := preparedWith(nil)
@@ -591,4 +618,211 @@ func TestExplicitAbortIsIdempotentAndTooLateAfterCommit(t *testing.T) {
 	require.Equal(t, "too_late", status.State)
 	_, err = cm.SubmitHandoffAbort(ctx, target)
 	require.ErrorIs(t, err, ErrHandoffAbortTarget, "a committed H cannot be rewound by a late operator request")
+}
+
+// preparedControl is the control state the executor leaves after the Prepare of plan at the given round, with the bound parent.
+func (f *planFixture) preparedControl(t *testing.T, base *evmroot.ControlState, plan abdrc.HandoffApprovalMsg, round uint64) *evmroot.ControlState {
+	t.Helper()
+	body, err := storage.DecodeHandoffBody(plan.Body)
+	require.NoError(t, err)
+	id := body.Identity()
+	record := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, Attempt: plan.Attempt, OrderedRound: round,
+		ActivationRound: round + storage.PrepareActivationFloorRounds, PredecessorBodyID: bytes.Clone(base.PredecessorBodyID),
+		NextBodyID: id[:], FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32), Kind: "prepare"}
+	control := *base
+	control.Phase, control.Attempt, control.OrderedRound, control.RecordBytes = "prepared", plan.Attempt, round, record.Bytes()
+	control.PreviousDigest, control.FrozenParent = bytes.Repeat([]byte{9}, 32), bytes.Clone(f.parentHash)
+	return &control
+}
+
+func stateWith(state *abdrc.StateMsg, headRound uint64, control *evmroot.ControlState) *abdrc.StateMsg {
+	cp := *state
+	head := *state.CommittedHead
+	block := *head.Block
+	block.Round = headRound
+	head.Block, head.Control = &block, control
+	cp.CommittedHead = &head
+	return &cp
+}
+
+// After a lapse the next attempt can still be planned AND endorsed: its endorsement waits (ErrEndorseBeforePrepare, never
+// ErrPrepareLapsed, which belongs to the plan's own attempt) until the Prepare of the new attempt is committed, and then succeeds.
+func TestLapseThenReplanEndorsesAtTheNextAttempt(t *testing.T) {
+	ctx := context.Background()
+	f := newPlanFixture(t)
+	cm := f.cm
+	state, err := cm.blockStore.GetState()
+	require.NoError(t, err)
+	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parentHash}}}
+	idle := state.CommittedHead.Control
+	plan0, err := cm.buildHandoffPlanFromState(&f.next, state, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, plan0.Attempt)
+
+	const preparedAt = uint64(10)
+	lapsedControl := f.preparedControl(t, idle, plan0, preparedAt)
+	lapsed := stateWith(state, preparedAt+storage.PrepareFreezeLapseRounds+1, lapsedControl)
+	require.ErrorIs(t, cm.endorseHandoffAtState(ctx, plan0, lapsed), ErrPrepareLapsed, "the lapsed attempt's own plan is dead")
+
+	plan1, err := cm.buildHandoffPlanFromState(&f.next, lapsed, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, plan1.Attempt, "the lapse is treated like an abort for numbering")
+	err = cm.endorseHandoffAtState(ctx, plan1, lapsed)
+	require.ErrorIs(t, err, ErrEndorseBeforePrepare, "attempt 1 waits for its own Prepare, as the CLI's retry expects")
+	require.NotErrorIs(t, err, ErrPrepareLapsed)
+
+	// Prepare of attempt 1 is committed: now the same plan endorses.
+	preparedAt1 := preparedAt + storage.PrepareFreezeLapseRounds + storage.PrepareCooldownRounds + 2
+	prepared1 := stateWith(state, preparedAt1+3, f.preparedControl(t, idle, plan1, preparedAt1))
+	cm.handoffPlans = nil
+	require.NoError(t, cm.endorseHandoffAtState(ctx, plan1, prepared1))
+	body, err := storage.DecodeHandoffBody(plan1.Body)
+	require.NoError(t, err)
+	id := body.Identity()
+	require.Equal(t, f.parentHash, []byte(cm.handoffPlans[id].plan.FrozenParent))
+	require.EqualValues(t, 1, cm.handoffPlans[id].plan.Attempt)
+}
+
+// A lapse (or an Abort) leaves no plan behind: a Prepare is ordered only for a live plan of the attempt, once. A dead operator's
+// plan costs one more freeze window at most, never a cycle.
+func TestNoPrepareIsOrderedAfterALapseWithoutANewPlan(t *testing.T) {
+	f := newPlanFixture(t)
+	cm := f.cm
+	state, err := cm.blockStore.GetState()
+	require.NoError(t, err)
+	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parentHash}}}
+	idle := *state.CommittedHead.Control
+	plan0, err := cm.buildHandoffPlanFromState(&f.next, state, nil)
+	require.NoError(t, err)
+
+	parentQC := cm.blockStore.GetHighQc()
+	parentBlock, err := cm.blockStore.Block(parentQC.GetRound())
+	require.NoError(t, err)
+	preparedAt := parentQC.GetRound()
+	setControl := func(c *evmroot.ControlState) { parentBlock.ShardState.Control = c }
+	order := func(round uint64) [][]byte {
+		records, err := cm.handoffRecordsForRound(round, parentQC)
+		require.NoError(t, err)
+		return records
+	}
+	lapseEnd := preparedAt + storage.PrepareFreezeLapseRounds
+	cooldownEnd := lapseEnd + storage.PrepareCooldownRounds
+
+	// Attempt 0: the held intent is ordered once.
+	setControl(&idle)
+	cm.setHandoffIntent(plan0)
+	require.Len(t, order(preparedAt+1), 1, "a live plan of the right attempt orders a Prepare")
+
+	// Its Prepare is committed and then lapses.
+	prepared0 := f.preparedControl(t, &idle, plan0, preparedAt)
+	setControl(prepared0)
+	require.Empty(t, order(preparedAt+2), "no second Prepare while the first is prepared")
+	require.Nil(t, cm.pendingIntent(0), "the intent is spent by its Prepare")
+	cm.setHandoffIntent(plan0)
+	require.Nil(t, cm.pendingIntent(1), "an intent of attempt 0 is never taken for attempt 1")
+	require.Empty(t, order(lapseEnd+1), "inside the cooldown nothing is ordered")
+	require.Empty(t, order(cooldownEnd+1), "after the cooldown and a lapse, with no new plan, no Prepare is ordered (the dead plan is not reused)")
+	require.Empty(t, order(cooldownEnd+10), "and it stays quiet")
+
+	// A new plan for the next attempt is ordered once the cooldown is over, and not before.
+	lapsed := stateWith(state, lapseEnd+1, prepared0)
+	plan1, err := cm.buildHandoffPlanFromState(&f.next, lapsed, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, plan1.Attempt)
+	cm.setHandoffIntent(plan1)
+	require.Empty(t, order(lapseEnd+1), "the cooldown still applies")
+	records := order(cooldownEnd + 1)
+	require.Len(t, records, 1)
+	prepare, err := storage.DecodeOrderedHandoffRecord(records[0])
+	require.NoError(t, err)
+	require.EqualValues(t, 1, prepare.Attempt)
+
+	// It is spent as well: once that Prepare is in the control state, a lapse of attempt 1 needs yet another plan.
+	prepared1 := f.preparedControl(t, &idle, plan1, cooldownEnd+1)
+	setControl(prepared1)
+	require.Empty(t, order(cooldownEnd+2))
+	require.Nil(t, cm.pendingIntent(1))
+	require.Empty(t, order(cooldownEnd+1+storage.PrepareFreezeLapseRounds+storage.PrepareCooldownRounds+5), "no plan, no Prepare, however long")
+
+	// An Abort retires the plan as well.
+	cm.setHandoffIntent(plan1)
+	aborted := idle
+	aborted.Phase, aborted.Attempt = "aborted", 1
+	setControl(&aborted)
+	require.Empty(t, order(cooldownEnd+200), "attempt 1 was aborted: its plan is dead")
+	require.Nil(t, cm.pendingIntent(1))
+}
+
+// One validator's endorsement naming a wrong parent or activation is rejected on its own: it does not take the plan's slot and does
+// not keep the honest quorum from assembling.
+func TestWrongParentEndorsementDoesNotBlockTheQuorum(t *testing.T) {
+	ctx := context.Background()
+	f := newPlanFixture(t)
+	cm := f.cm
+	state, err := cm.blockStore.GetState()
+	require.NoError(t, err)
+	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parentHash}}}
+	idle := *state.CommittedHead.Control
+	plan, err := cm.buildHandoffPlanFromState(&f.next, state, nil)
+	require.NoError(t, err)
+	body, err := storage.DecodeHandoffBody(plan.Body)
+	require.NoError(t, err)
+	id := body.Identity()
+	predecessor, err := cm.handoffPredecessor()
+	require.NoError(t, err)
+
+	parentQC := cm.blockStore.GetHighQc()
+	parentBlock, err := cm.blockStore.Block(parentQC.GetRound())
+	require.NoError(t, err)
+	prepared := f.preparedControl(t, &idle, plan, parentQC.GetRound())
+
+	signAs := func(who *testutils.TestNode, parent []byte, activation uint64) abdrc.HandoffApprovalMsg {
+		msg := plan
+		msg.FrozenParent, msg.ActivationRound, msg.Signer = bytes.Clone(parent), activation, who.PeerConf.ID.String()
+		record := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, Attempt: plan.Attempt, OrderedRound: 1, ActivationRound: activation,
+			PredecessorBodyID: predecessor, NextBodyID: id[:], Kind: "freeze",
+			FrozenID: evmroot.D4FrozenID(id[:], body.StateSummary, parent, plan.Candidate, plan.Attempt, predecessor)}
+		domain, err := storage.EndorsementBytes(record)
+		require.NoError(t, err)
+		abortDomain, err := storage.AbortEndorsementBytes(record)
+		require.NoError(t, err)
+		msg.Signature, err = who.Signer.SignBytes(domain)
+		require.NoError(t, err)
+		msg.AbortSignature, err = who.Signer.SignBytes(abortDomain)
+		require.NoError(t, err)
+		return msg
+	}
+	activation := prepared.OrderedRound + storage.PrepareActivationFloorRounds
+	wrongParent := bytes.Repeat([]byte{0xee}, 32)
+
+	t.Run("rejected against the bound parent", func(t *testing.T) {
+		parentBlock.ShardState.Control = prepared
+		cm.handoffPlans = nil
+		bad := signAs(f.others[2], wrongParent, activation)
+		require.ErrorIs(t, cm.onHandoffApprovalMsg(ctx, &bad), ErrEndorsedParentMismatch)
+		badActivation := signAs(f.others[2], f.parentHash, activation+1)
+		require.ErrorIs(t, cm.onHandoffApprovalMsg(ctx, &badActivation), ErrEndorsedParentMismatch)
+		require.Empty(t, cm.handoffPlans, "a rejected endorsement takes no slot")
+		for _, honest := range f.others[:2] {
+			good := signAs(honest, f.parentHash, activation)
+			require.NoError(t, cm.onHandoffApprovalMsg(ctx, &good))
+		}
+		ready, err := cm.readyHandoff(plan.Attempt)
+		require.Error(t, err, "two of four is not yet a quorum")
+		require.Nil(t, ready)
+		require.Len(t, cm.handoffPlans[id].signatures, 2)
+	})
+	t.Run("a slot taken before the Prepare was known here is not kept", func(t *testing.T) {
+		parentBlock.ShardState.Control = &idle // this validator has not committed the Prepare yet
+		cm.handoffPlans = nil
+		early := signAs(f.others[2], wrongParent, activation)
+		require.NoError(t, cm.onHandoffApprovalMsg(ctx, &early), "nothing to compare with yet")
+		require.Equal(t, wrongParent, []byte(cm.handoffPlans[id].plan.FrozenParent))
+		parentBlock.ShardState.Control = prepared // now it has
+		good := signAs(f.others[0], f.parentHash, activation)
+		require.NoError(t, cm.onHandoffApprovalMsg(ctx, &good), "the honest endorsement replaces the bogus slot")
+		require.Equal(t, f.parentHash, []byte(cm.handoffPlans[id].plan.FrozenParent))
+		require.Len(t, cm.handoffPlans[id].signatures, 1)
+		require.Contains(t, cm.handoffPlans[id].signatures, f.others[0].PeerConf.ID.String())
+	})
 }

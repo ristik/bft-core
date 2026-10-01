@@ -72,7 +72,8 @@ apply a terminal repeat as a timeout or reject a subsequent new UC.
    faulty leader before the next honest one; 24 keeps a margin of about three
    times and no new constant was needed. The Prepare's activation round is
    `max(A_min, prepareRound + 24 + 8)`, so a Freeze ordered at the very end of
-   the window still commits before activation. The lapse is a function of the
+   the window still commits before activation; block validation enforces that
+   floor (`ErrPrepareActivationFloor`), not only the leader. The lapse is a function of the
    Prepare's ordered round and the
    executing block's round, so every root agrees; the EVM certifies again, the
    lapsed attempt is dead (a Freeze or an endorsement for it is refused) and the next Prepare
@@ -81,7 +82,15 @@ apply a terminal repeat as a timeout or reject a subsequent new UC.
    freeze the EVM for at most 24 of every 48 rounds; removing that needs a
    signed Prepare. A handoff left `prepared` with no endorsements therefore no
    longer needs an operator abort to unfreeze the EVM (root-handoff-abort.md
-   still applies to `endorsed`).
+   still applies to `endorsed`). The plan a Prepare was ordered for is spent by
+   that one Prepare: a lapse or an Abort leaves no plan for the leader to order
+   again, so the operator plans afresh for the next attempt. `root handoff
+   propose` does so on its own after a lapse (bounded by `--max-attempts`,
+   typed outcome `ErrHandoffLapsed`); the next attempt's endorsements wait
+   (`ErrEndorseBeforePrepare`) for its own Prepare, which the cooldown delays,
+   while `ErrPrepareLapsed` is reserved for the plan's own dead attempt. The
+   lapse is reported once per attempt in the root log
+   (`root handoff outcome phase=lapsed`).
 2. A voter reads authenticated parent-branch control state before every old
    proposal. Any descendant of H must have empty payload and execute as the
    identity on every shard/control field, including scheduled configuration,

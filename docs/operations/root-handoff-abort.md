@@ -69,6 +69,6 @@ document or a local approval response as that live evidence.
 A `prepared` handoff already refuses every EVM certification (the freeze starts at Prepare, not at Freeze), and the root has bound the
 frozen parent there. Prepare comes before the endorsements: if no Freeze follows within 24 root rounds (the operator went away,
 validators could not endorse, or a faulty leader ordered a Prepare nobody endorsed) the freeze lapses by itself, the EVM certifies
-again and the attempt is dead (`ErrPrepareLapsed`): no operator abort is needed to unfreeze it. Re-run `propose` for the next attempt
+again and the attempt is dead (`ErrPrepareLapsed`): no operator abort is needed to unfreeze it. `propose` re-plans the next attempt itself (the lapse is logged as `phase=lapsed`); if you drive it by hand, re-run `propose` for the next attempt
 (read `evm-context` again for the attempt number; a fresh Prepare is accepted 24 more rounds after the lapse). An `endorsed` handoff
 still needs the abort commands above.

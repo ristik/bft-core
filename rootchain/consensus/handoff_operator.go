@@ -28,8 +28,12 @@ var (
 	ErrEndorsedParentMismatch = errors.New("root handoff: endorsed frozen parent is not the parent bound at Prepare")
 	// ErrEndorsedPlanMismatch refuses an endorsement whose body or attempt is not the one the ordered Prepare names.
 	ErrEndorsedPlanMismatch = errors.New("root handoff: endorsed plan is not the prepared one")
-	// ErrPrepareLapsed refuses an endorsement for a Prepare whose freeze has lapsed: that attempt is dead.
-	ErrPrepareLapsed         = errors.New("root handoff: the Prepare's freeze has lapsed")
+	// ErrPrepareLapsed refuses an endorsement for a Prepare whose freeze has lapsed: that attempt is dead, and only a plan for the
+	// NEXT attempt can still be endorsed (the operator re-plans; it waits for that Prepare like for any other).
+	ErrPrepareLapsed = errors.New("root handoff: the Prepare's freeze has lapsed")
+	// ErrEndorseAfterFreeze refuses an endorsement once the handoff is already frozen (Freeze ordered) or committed: nothing is left to
+	// endorse, and waiting for a Prepare would never end.
+	ErrEndorseAfterFreeze    = errors.New("root handoff: the handoff is already frozen or committed")
 	ErrHandoffAbortTarget    = errors.New("root handoff abort: target does not match authenticated control state")
 	ErrHandoffAbortSignature = errors.New("root handoff abort: invalid old-validator signature")
 	ErrHandoffAbortCache     = errors.New("root handoff abort: approval cache full or conflicting")
@@ -319,6 +323,20 @@ func (x *ConsensusManager) setHandoffIntent(plan abdrc.HandoffApprovalMsg) {
 	cloned.Body, cloned.Candidate = bytes.Clone(plan.Body), bytes.Clone(plan.Candidate)
 	cloned.CandidatePreimage = bytes.Clone(plan.CandidatePreimage)
 	x.handoffIntent = &cloned
+}
+
+// retireIntent forgets the held intent once its attempt is spent: a Prepare (or an Abort) of that attempt or a later one is in the
+// control state. A Prepare is ordered at most once per intent, so a lapse or an Abort leaves no plan behind that a leader could
+// order another unendorsed Prepare for; the operator must plan again, for the next attempt.
+func (x *ConsensusManager) retireIntent(control *evmroot.ControlState) {
+	if control == nil || control.Phase == "idle" {
+		return
+	}
+	x.handoffMu.Lock()
+	defer x.handoffMu.Unlock()
+	if x.handoffIntent != nil && x.handoffIntent.Attempt <= control.Attempt {
+		x.handoffIntent = nil
+	}
 }
 
 // pendingIntent is the held intent for the given attempt, or nil. An intent for another attempt or another epoch is dead.
@@ -746,10 +764,16 @@ func (x *ConsensusManager) endorseHandoffAtState(ctx context.Context, plan abdrc
 		return ErrHandoffApproval
 	}
 	control := state.CommittedHead.Control
-	if control.Phase != "prepared" {
-		return fmt.Errorf("%w: %w (control phase %q)", ErrHandoffApproval, ErrEndorseBeforePrepare, control.Phase)
-	}
-	if storage.PrepareLapsed(control, state.CommittedHead.Block.Round) {
+	switch {
+	case control.Phase == "endorsed" || control.Phase == "committed" || control.Phase == "frozen":
+		return fmt.Errorf("%w: %w (control phase %q)", ErrHandoffApproval, ErrEndorseAfterFreeze, control.Phase)
+	case control.Phase == "aborted" && control.Attempt >= plan.Attempt, control.Phase == "prepared" && control.Attempt > plan.Attempt:
+		// A plan for an attempt that is already over: no Prepare for it will ever come.
+		return fmt.Errorf("%w: %w (control is at attempt %d, the plan is for %d)", ErrHandoffApproval, ErrEndorsedPlanMismatch, control.Attempt, plan.Attempt)
+	case control.Phase != "prepared" || control.Attempt < plan.Attempt:
+		// Idle, aborted, or an older Prepare (possibly lapsed) still in the way: the plan's own Prepare has yet to be committed.
+		return fmt.Errorf("%w: %w (control phase %q, attempt %d, plan for %d)", ErrHandoffApproval, ErrEndorseBeforePrepare, control.Phase, control.Attempt, plan.Attempt)
+	case storage.PrepareLapsed(control, state.CommittedHead.Block.Round):
 		return fmt.Errorf("%w: %w", ErrHandoffApproval, ErrPrepareLapsed)
 	}
 	prepared, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
@@ -869,10 +893,34 @@ func (x *ConsensusManager) verifyEndorsedAssignmentInstalled(plan abdrc.HandoffA
 	return nil
 }
 
+// boundPrepare is the frozen parent and activation round of the Prepare of the given attempt in this validator's committed state,
+// when that Prepare is committed here.
+func (x *ConsensusManager) boundPrepare(attempt uint64) ([]byte, uint64, bool) {
+	state, err := x.blockStore.GetState()
+	if err != nil || state == nil || state.CommittedHead == nil || state.CommittedHead.Control == nil {
+		return nil, 0, false
+	}
+	control := state.CommittedHead.Control
+	if control.Phase != "prepared" || control.Attempt != attempt {
+		return nil, 0, false
+	}
+	prepared, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
+	if err != nil {
+		return nil, 0, false
+	}
+	return bytes.Clone(control.FrozenParent), prepared.ActivationRound, true
+}
+
 func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.HandoffApprovalMsg) error {
 	plan, weight, err := x.validateHandoffApproval(msg)
 	if err != nil {
 		return err
+	}
+	// An endorsement naming a parent or an activation other than the Prepare's is rejected on its own, so a single faulty validator
+	// cannot occupy the plan's slot with a wrong one and keep the honest quorum from assembling until the lapse.
+	boundParent, boundActivation, bound := x.boundPrepare(msg.Attempt)
+	if bound && (!bytes.Equal(msg.FrozenParent, boundParent) || msg.ActivationRound != boundActivation) {
+		return errors.Join(ErrHandoffApproval, ErrEndorsedParentMismatch)
 	}
 	id := plan.body.Identity()
 	x.handoffMu.Lock()
@@ -881,6 +929,11 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 		x.handoffPlans = make(map[[32]byte]*pendingHandoff)
 	}
 	stored := x.handoffPlans[id]
+	if stored != nil && bound && (!bytes.Equal(stored.plan.FrozenParent, boundParent) || stored.plan.ActivationRound != boundActivation) {
+		// The slot was taken before the Prepare was committed here, by an endorsement that does not match it: forget that one.
+		delete(x.handoffPlans, id)
+		stored = nil
+	}
 	if stored == nil {
 		if len(x.handoffPlans) >= 4 {
 			if msg.Signer != x.id.String() {
@@ -917,17 +970,6 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 	return nil
 }
 
-// dropHandoffPlan forgets the cached endorsed plan of a body so it is neither retried nor left to order a stale Prepare.
-func (x *ConsensusManager) dropHandoffPlan(bodyID []byte) {
-	x.handoffMu.Lock()
-	defer x.handoffMu.Unlock()
-	for id, plan := range x.handoffPlans {
-		if bytes.Equal(plan.record.NextBodyID, bodyID) {
-			delete(x.handoffPlans, id)
-		}
-	}
-}
-
 func (x *ConsensusManager) readyHandoff(attempt ...uint64) (*pendingHandoff, error) {
 	x.handoffMu.Lock()
 	defer x.handoffMu.Unlock()
@@ -947,9 +989,9 @@ func (x *ConsensusManager) readyHandoff(attempt ...uint64) (*pendingHandoff, err
 	return nil, fmt.Errorf("%w: insufficient endorsements", ErrHandoffApproval)
 }
 
-// handoffRecordsForRound uses the authenticated parent control state. Only a
-// quorum-approved body can enter a proposal, and the three D4 records are
-// ordered in separate rounds on the same certified branch.
+// handoffRecordsForRound uses the authenticated parent control state. A Prepare is ordered for this validator's held intent (an
+// unsigned plan from its operator, spent by that one Prepare); Freeze needs a quorum of endorsements of the Prepare-bound state;
+// the records are ordered in separate rounds on the same certified branch.
 func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctypes.QuorumCert) ([][]byte, error) {
 	if parentQC == nil {
 		return nil, nil
@@ -959,6 +1001,7 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		return nil, nil
 	}
 	control := parent.ShardState.Control
+	x.retireIntent(control)
 	if control.Phase == "committed" {
 		return nil, nil
 	}
@@ -1159,14 +1202,14 @@ func (x *ConsensusManager) prepareRecordFor(intent abdrc.HandoffApprovalMsg, con
 	if err != nil {
 		return nil, nil
 	}
-	if round > ^uint64(0)-storage.PrepareFreezeLapseRounds-8 {
+	if round > ^uint64(0)-storage.PrepareActivationFloorRounds {
 		return nil, ErrHandoffApproval
 	}
 	id := body.Identity()
 	record := evmroot.OrderedHandoffRecord{Network: body.NetworkID, Epoch: control.Epoch, Attempt: intent.Attempt, OrderedRound: round,
 		ActivationRound: intent.ActivationRound, PredecessorBodyID: predecessor, NextBodyID: id[:], Kind: "prepare",
 		FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32)}
-	if floor := round + storage.PrepareFreezeLapseRounds + 8; record.ActivationRound < floor {
+	if floor := round + storage.PrepareActivationFloorRounds; record.ActivationRound < floor {
 		record.ActivationRound = floor
 	}
 	return [][]byte{record.Bytes()}, nil

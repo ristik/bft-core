@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -247,29 +249,20 @@ func TestCommitRequiresFrozenParentAtCommittedTip(t *testing.T) {
 	require.ErrorIs(t, err, ErrHandoffRecord)
 }
 
-func TestFrozenShardQueriesFollowCommittedAndHighQCBranches(t *testing.T) {
+func TestFrozenShardQueriesFollowTheCommittedBranch(t *testing.T) {
 	s := profileStore(t)
 	parent := bytes.Repeat([]byte{0x42}, 32)
 	installTestFrozenShard(t, s, parent)
 	other := bytes.Repeat([]byte{0x43}, 32)
 	require.True(t, s.CommittedFrozenParent(parent))
 	require.False(t, s.CommittedFrozenParent(other))
-	require.True(t, s.HighQCFrozenParent(parent))
-	require.False(t, s.HighQCFrozenParent(other))
 	_, active, err := s.FrozenShardAt(1)
 	require.NoError(t, err)
 	require.False(t, active)
 	_, _, err = s.FrozenShardAt(99)
 	require.Error(t, err)
-	qc := s.blockTree.highQc
-	s.blockTree.highQc = nil
-	require.False(t, s.HighQCFrozenParent(parent))
-	s.blockTree.highQc = &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 99}}
-	require.False(t, s.HighQCFrozenParent(parent))
-	s.blockTree.highQc = qc
 	s.profile = ProfileLegacy
 	require.False(t, s.CommittedFrozenParent(parent))
-	require.False(t, s.HighQCFrozenParent(parent))
 	_, active, err = s.FrozenShardAt(1)
 	require.NoError(t, err)
 	require.False(t, active)
@@ -1244,4 +1237,52 @@ func TestPrepareBindsTheFrozenParentAndFreezeMustNameIt(t *testing.T) {
 		control.FrozenParent = nil
 		require.ErrorIs(t, validateControl(&control), ErrControlCheckpoint)
 	})
+}
+
+// A Prepare whose freeze lapsed is reported once, when the committed root passes the end of its window, so the operator retries at
+// once instead of waiting out its own timeout.
+func TestLapsedPrepareIsReportedOnceAsAnOutcome(t *testing.T) {
+	var logs bytes.Buffer
+	s := &BlockStore{profile: ProfileHandoff, log: slog.New(slog.NewTextHandler(&logs, nil))}
+	committedAt := func(round uint64, phase string) *ExecutedBlock {
+		block := &ExecutedBlock{BlockData: &rctypes.BlockData{Round: round, Epoch: 1}}
+		block.ShardState.Control = &evmroot.ControlState{Network: 5, Epoch: 1, Attempt: 2, Phase: phase, OrderedRound: 10}
+		return block
+	}
+	count := func() int { return strings.Count(logs.String(), "phase=lapsed") }
+	s.logHandoffOutcome(committedAt(10+PrepareFreezeLapseRounds, "prepared"))
+	require.Zero(t, count(), "inside the window nothing is reported")
+	s.logHandoffOutcome(committedAt(10+PrepareFreezeLapseRounds+1, "prepared"))
+	require.Equal(t, 1, count())
+	require.Contains(t, logs.String(), "attempt=2")
+	s.logHandoffOutcome(committedAt(10+PrepareFreezeLapseRounds+2, "prepared"))
+	require.Equal(t, 1, count(), "reported once per attempt")
+	s.logHandoffOutcome(committedAt(10+PrepareFreezeLapseRounds+9, "endorsed"))
+	require.Equal(t, 1, count(), "a Freeze that came in time is no lapse")
+}
+
+// The activation floor is a block-validation rule, not only the leader's choice.
+func TestPrepareActivationFloorIsEnforcedByBlockValidation(t *testing.T) {
+	restore := prepareActivationFloor
+	prepareActivationFloor = PrepareActivationFloorRounds
+	t.Cleanup(func() { prepareActivationFloor = restore })
+	zero := make([]byte, 32)
+	body := bytes.Repeat([]byte{1}, 32)
+	const round = uint64(3)
+	prepareWith := func(t *testing.T, activation uint64) error {
+		s := profileStore(t)
+		installTestFrozenShard(t, s, bytes.Repeat([]byte{0x40}, 32))
+		addProfileBlock(t, s, 2, nil)
+		rec := (evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: round, PredecessorBodyID: zero, FrozenID: zero,
+			NextBodyID: body, ActivationRound: activation, SuccessorTRHash: zero, Kind: "prepare"}).Bytes()
+		parent, err := s.Block(round - 1)
+		require.NoError(t, err)
+		_, err = s.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{rec}},
+			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
+		return err
+	}
+	require.ErrorIs(t, prepareWith(t, round+PrepareActivationFloorRounds-1), ErrPrepareActivationFloor)
+	require.ErrorIs(t, prepareWith(t, round+8), ErrPrepareActivationFloor, "the old +8 margin is no longer enough")
+	require.NoError(t, prepareWith(t, round+PrepareActivationFloorRounds))
 }

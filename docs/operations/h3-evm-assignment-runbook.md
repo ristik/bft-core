@@ -69,7 +69,9 @@ build/ubft root handoff propose \
 `propose` plans the handoff, has the root order a Prepare (which freezes the EVM and binds the frozen parent) and
 then collects the endorsements of that Prepare-bound state; it waits for the Prepare (`--prepare-timeout`, default 60 s)
 and needs no parent. If the Prepare gets no Freeze within 24 root rounds the freeze lapses, the EVM certifies again and
-the attempt is dead: read the context again (attempt+1) and re-run it.
+the attempt is dead. `propose` re-plans for the next attempt on its own (up to `--max-attempts`, default 3; the context and
+proofs of possession are per attempt, so if you build them by hand read the context again and re-run). The root logs
+`root handoff outcome phase=lapsed` once per lapsed attempt.
 
 A bad or missing proof, a stale installed assignment, an assignment not coupled to `--next-trust-base` or a pending
 acknowledgement is refused **before** any endorsement is signed. After H commits, restart the root

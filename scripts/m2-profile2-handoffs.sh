@@ -288,11 +288,11 @@ m2_handoff() {
         outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
           grep -E "msg=\\\"root handoff outcome\\\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
         [[ "$outcome" = *phase=committed* ]] && { committed=true; break; }
-        [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=dropped* ]] && break
+        [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=lapsed* ]] && break
         sleep 1
       done
       $committed && break
-      [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=dropped* ]] && echo "F8 handoff attempt $attempt aborted or lapsed; retrying with the next attempt"
+      [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=lapsed* ]] && echo "F8 handoff attempt $attempt aborted or lapsed; retrying with the next attempt"
     done
     $committed || { echo "F8 root handoff did not commit after retries" >&2; return 1; }
     for i in $(seq 1 "$validators"); do
@@ -322,7 +322,7 @@ m2_handoff() {
       outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
         grep -E "msg=\"root handoff outcome\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
       if [[ "$outcome" = *phase=committed* ]]; then committed=true; break; fi
-      if [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=dropped* ]]; then
+      if [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=lapsed* ]]; then
         echo "root handoff aborted or its Prepare lapsed; retrying with the next attempt"
         break
       fi
