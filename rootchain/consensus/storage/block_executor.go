@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
@@ -280,6 +281,14 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			continue
 		}
 
+		// The verifier judges the request against the last COMMITTED shard state, which in and just after the activation block is
+		// still the pre-activation anchor (old trust base). Every signer must also belong to the configuration ACTIVE for this
+		// block, the state executed here; a retired key's request is ignored, identically on every root, like a request for a
+		// removed shard. It depends on block content only, so proposal and validation cannot disagree.
+		if member, memberErr := requestSignersAreActive(si, irChReq); !member {
+			log.Info(fmt.Sprintf("ignoring a request of shard %s signed outside its active configuration: %v", shardKey, memberErr))
+			continue
+		}
 		if si.IR, err = verifier.VerifyIRChangeReq(newBlock.Round, irChReq); err != nil {
 			return nil, fmt.Errorf("verifying change request: %w", err)
 		}
@@ -366,6 +375,20 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 		return verifySupersession(candidate.Supersedes, si, orchestration)
 	}
 	return nil
+}
+
+// requestSignersAreActive reports whether every block certification request of the IR change request is signed by a member of the
+// shard's executing configuration. A timeout request carries none.
+func requestSignersAreActive(si *ShardInfo, irChReq *rctypes.IRChangeReq) (bool, error) {
+	for _, req := range irChReq.Requests {
+		if req == nil {
+			return false, errors.New("nil block certification request")
+		}
+		if err := si.Verify(req.NodeID, func(abcrypto.Verifier) error { return nil }); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // verifyShardChanges is the state-dependent half of the aggregator validator replacements a candidate carries: each replaces

@@ -188,21 +188,14 @@ func (o *Orchestration) AddShardConfig(shardConf *types.PartitionDescriptionReco
 	if shardConf.NetworkID != o.networkID {
 		return fmt.Errorf("invalid networkID %d, expected %d", shardConf.NetworkID, o.networkID)
 	}
-	// Under the handoff profile every shard configuration after genesis comes from committed handoff history, never from a
-	// local write: epoch > 0 is refused for every partition, and an epoch-0 entry must equal the stored one.
-	if o.reserveControl && shardConf.Epoch != 0 {
-		return ErrDerivedOnly
+	// Under the handoff profile the genesis set is fixed once and every later shard configuration comes from committed handoff
+	// history: see InitGenesisShardConfigs.
+	if o.reserveControl {
+		return o.InitGenesisShardConfigs(shardConf)
 	}
 	err := o.db.Update(func(tx *bolt.Tx) error {
 		if err := verifyShardConf(tx, shardConf); err != nil {
 			return fmt.Errorf("verify shard conf: %w", err)
-		}
-		if o.reserveControl {
-			// Genesis initialization is idempotent; a different genesis entry
-			// would silently rewrite the history every derived entry extends.
-			if err := sameStoredShardConf(tx, shardConf); err != nil {
-				return err
-			}
 		}
 		if err := storeShardConf(tx, shardConf); err != nil {
 			return fmt.Errorf("store shard conf: %w", err)
@@ -217,6 +210,91 @@ func (o *Orchestration) AddShardConfig(shardConf *types.PartitionDescriptionReco
 	o.log.Info(fmt.Sprintf("Added shard config for partition %d, epoch %d, epoch start %d",
 		shardConf.PartitionID, shardConf.Epoch, shardConf.EpochStart), logger.Error(err))
 	return err
+}
+
+// InitGenesisShardConfigs writes the genesis shard configurations under the handoff profile, in one transaction. Into an empty
+// orchestration it stores every entry; afterwards it accepts only entries byte-equal to the stored genesis entry of an existing
+// shard (an idempotent reload), and refuses everything else: another epoch, other keys or activation round, a new partition or
+// shard. Every later configuration is derived from committed handoff history, so a local file can neither add nor edit one.
+func (o *Orchestration) InitGenesisShardConfigs(confs ...*types.PartitionDescriptionRecord) error {
+	if !o.reserveControl {
+		return fmt.Errorf("orchestration: genesis initialization requires the handoff profile")
+	}
+	for _, conf := range confs {
+		if conf == nil {
+			return fmt.Errorf("missing shard configuration")
+		}
+		if conf.PartitionID == rctypes.ControlPartition {
+			return rctypes.ErrControlPartition
+		}
+		if conf.NetworkID != o.networkID {
+			return fmt.Errorf("invalid networkID %d, expected %d", conf.NetworkID, o.networkID)
+		}
+		if conf.Epoch != 0 {
+			return ErrDerivedOnly
+		}
+	}
+	err := o.db.Update(func(tx *bolt.Tx) error {
+		rootBucket := tx.Bucket(rootBucketName)
+		if rootBucket == nil {
+			return fmt.Errorf("bucket %q does not exist", rootBucketName)
+		}
+		empty := true
+		_ = rootBucket.ForEach(func(_, v []byte) error {
+			if v == nil { // a partition bucket
+				empty = false
+			}
+			return nil
+		})
+		for _, conf := range confs {
+			if err := verifyShardConf(tx, conf); err != nil {
+				return fmt.Errorf("verify shard conf: %w", err)
+			}
+			bucket := getShardBucket(tx, conf.PartitionID, conf.ShardID)
+			if bucket == nil {
+				if !empty {
+					return fmt.Errorf("%w: partition %d shard %s is not part of the genesis configuration", ErrDerivedOnly, conf.PartitionID, conf.ShardID)
+				}
+				if err := storeShardConf(tx, conf); err != nil {
+					return fmt.Errorf("store shard conf: %w", err)
+				}
+				continue
+			}
+			if err := equalsGenesisEntry(bucket, conf); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		o.log.Error("Refused genesis shard configuration", logger.Error(err))
+	}
+	return err
+}
+
+// equalsGenesisEntry requires conf to be byte-equal (same activation round, same hash) to the stored epoch-0 entry of the shard.
+func equalsGenesisEntry(bucket *bolt.Bucket, conf *types.PartitionDescriptionRecord) error {
+	c := bucket.Cursor()
+	k, raw := c.First() // the genesis entry has the lowest activation round
+	if k == nil {
+		return ErrDerivedConflict
+	}
+	var genesis *types.PartitionDescriptionRecord
+	if err := json.Unmarshal(raw, &genesis); err != nil || genesis == nil || genesis.Epoch != 0 {
+		return ErrDerivedConflict
+	}
+	a, err := confHash(genesis)
+	if err != nil {
+		return err
+	}
+	b, err := confHash(conf)
+	if err != nil {
+		return err
+	}
+	if genesis.EpochStart != conf.EpochStart || !bytes.Equal(a, b) {
+		return fmt.Errorf("%w: the configuration differs from the stored genesis entry", ErrDerivedConflict)
+	}
+	return nil
 }
 
 func confHash(conf *types.PartitionDescriptionRecord) ([]byte, error) {

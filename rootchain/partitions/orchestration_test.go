@@ -285,10 +285,10 @@ func TestHandoffProfileRefusesAWrongKeyEVMGenesisEntry(t *testing.T) {
 	require.Equal(t, genesis.Validators[0].SigKey, stored.Validators[0].SigKey, "the stored genesis entry is untouched")
 }
 
-// Under the handoff profile no shard configuration is written locally: every partition's epoch>0 entry is refused, and an
-// epoch-0 entry must equal the stored one (a startup reload is idempotent, an edited file is a conflict). Without the profile
-// the legacy behavior is unchanged.
-func TestHandoffProfileRefusesLocalShardConfigurationWrites(t *testing.T) {
+// Under the handoff profile the genesis set is fixed once: an empty orchestration takes it in one transaction, afterwards only a
+// byte-equal reload of an existing shard's genesis entry passes. Another epoch, other keys (at the same or another activation
+// round), a new partition and a new shard are all refused, so no local file or call can add or edit a configuration.
+func TestHandoffProfileFixesTheGenesisShardConfigurations(t *testing.T) {
 	open := func(t *testing.T, profile bool) *Orchestration {
 		o, err := NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), logger.New(t))
 		require.NoError(t, err)
@@ -298,29 +298,64 @@ func TestHandoffProfileRefusesLocalShardConfigurationWrites(t *testing.T) {
 		}
 		return o
 	}
+	evm := createShardConf(t, 8, types.ShardID{}, 1)
+	evm.PartitionTypeID = evmassign.EVMPartitionTypeID
 	aggregator := createShardConf(t, 9, types.ShardID{}, 1)
-
-	t.Run("an aggregator epoch>0 entry is refused", func(t *testing.T) {
+	seeded := func(t *testing.T) *Orchestration {
 		o := open(t, true)
-		require.NoError(t, o.AddShardConfig(aggregator))
+		require.NoError(t, o.InitGenesisShardConfigs(evm, aggregator))
+		return o
+	}
+
+	t.Run("the genesis set is stored atomically and reloads identically", func(t *testing.T) {
+		o := seeded(t)
+		require.NoError(t, o.InitGenesisShardConfigs(evm, aggregator))
+		require.NoError(t, o.InitGenesisShardConfigs(aggregator), "a subset reload is idempotent too")
+		require.NoError(t, o.AddShardConfig(aggregator), "AddShardConfig is the same rule")
+		stored, err := o.ShardConfigs(100)
+		require.NoError(t, err)
+		require.Len(t, stored, 2)
+	})
+	t.Run("an epoch>0 entry is refused", func(t *testing.T) {
+		o := seeded(t)
 		next := *aggregator
 		next.Epoch, next.EpochStart = 1, 50
 		require.ErrorIs(t, o.AddShardConfig(&next), ErrDerivedOnly)
+	})
+	t.Run("other keys at another activation round are refused (B2 probe)", func(t *testing.T) {
+		o := seeded(t)
+		later := createShardConf(t, 9, types.ShardID{}, 100) // epoch 0, other validator, epoch_start 100
+		err := o.AddShardConfig(later)
+		require.ErrorIs(t, err, ErrDerivedConflict)
 		stored, err := o.ShardConfigs(100)
 		require.NoError(t, err)
-		require.EqualValues(t, 0, stored[types.PartitionShardID{PartitionID: 9, ShardID: types.ShardID{}.Key()}].Epoch, "nothing was written")
+		require.Equal(t, aggregator.Validators[0].SigKey, stored[types.PartitionShardID{PartitionID: 9, ShardID: types.ShardID{}.Key()}].Validators[0].SigKey,
+			"the new keys are not in effect at round 100")
 	})
-	t.Run("an epoch-0 reload is idempotent and an edited one conflicts", func(t *testing.T) {
+	t.Run("other keys at the same activation round are refused", func(t *testing.T) {
+		o := seeded(t)
+		require.ErrorIs(t, o.AddShardConfig(createShardConf(t, 9, types.ShardID{}, 1)), ErrDerivedConflict)
+	})
+	t.Run("a new partition or shard after genesis is refused (B2 probe)", func(t *testing.T) {
+		o := seeded(t)
+		require.ErrorIs(t, o.AddShardConfig(createShardConf(t, 11, types.ShardID{}, 1)), ErrDerivedOnly)
+		require.ErrorIs(t, o.InitGenesisShardConfigs(evm, createShardConf(t, 12, types.ShardID{}, 1)), ErrDerivedOnly, "one bad entry refuses the whole batch")
+		split, _ := (types.ShardID{}).Split()
+		sibling := createShardConf(t, 9, split, 1)
+		require.ErrorIs(t, o.AddShardConfig(sibling), ErrDerivedOnly, "a new shard of an existing partition")
+		stored, err := o.ShardConfigs(100)
+		require.NoError(t, err)
+		require.Len(t, stored, 2, "nothing was written")
+	})
+	t.Run("a first single write is the genesis, a second partition is not", func(t *testing.T) {
 		o := open(t, true)
 		require.NoError(t, o.AddShardConfig(aggregator))
-		require.NoError(t, o.AddShardConfig(aggregator))
-		edited := *aggregator
-		edited.Validators = createShardConf(t, 9, types.ShardID{}, 1).Validators // another key at the same activation
-		require.ErrorIs(t, o.AddShardConfig(&edited), ErrDerivedConflict)
+		require.ErrorIs(t, o.AddShardConfig(evm), ErrDerivedOnly)
 	})
-	t.Run("without the profile the legacy path still accepts a later epoch", func(t *testing.T) {
+	t.Run("without the profile the legacy path is unchanged", func(t *testing.T) {
 		o := open(t, false)
 		require.NoError(t, o.AddShardConfig(aggregator))
+		require.NoError(t, o.AddShardConfig(evm))
 		next := *aggregator
 		next.Epoch, next.EpochStart = 1, 50
 		next.Validators = createShardConf(t, 9, types.ShardID{}, 50).Validators
@@ -337,8 +372,7 @@ func TestInstallDerivedShardConfigsIsAtomic(t *testing.T) {
 	evm := createShardConf(t, 8, types.ShardID{}, 1)
 	evm.PartitionTypeID = evmassign.EVMPartitionTypeID
 	agg := createShardConf(t, 9, types.ShardID{}, 1)
-	require.NoError(t, o.AddShardConfig(evm))
-	require.NoError(t, o.AddShardConfig(agg))
+	require.NoError(t, o.InitGenesisShardConfigs(evm, agg))
 	provenance, err := evmassign.Provenance{RecordID: bytes.Repeat([]byte{1}, 32), CandidateDigest: bytes.Repeat([]byte{2}, 32), RootEpoch: 2}.Bytes()
 	require.NoError(t, err)
 	next := func(c *types.PartitionDescriptionRecord, start uint64) *types.PartitionDescriptionRecord {

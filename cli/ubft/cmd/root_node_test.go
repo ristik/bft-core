@@ -359,4 +359,10 @@ func TestLoadShardConfsRefusesAnEditedAggregatorConfigurationUnderTheHandoffProf
 	require.NoError(t, loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{genesis}))
 	require.ErrorIs(t, loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{edited}), partitions.ErrDerivedConflict)
 	require.ErrorIs(t, loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{later}), partitions.ErrDerivedOnly)
+	// B2 probes: other keys at another activation round, and a new partition, are refused at startup too.
+	otherKeysLater := newConf(0, 100)
+	require.ErrorIs(t, loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{genesis, otherKeysLater}), partitions.ErrDerivedConflict)
+	newPartition := newConf(0, 1)
+	newPartition.PartitionID = 11
+	require.ErrorIs(t, loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{genesis, newPartition}), partitions.ErrDerivedOnly)
 }

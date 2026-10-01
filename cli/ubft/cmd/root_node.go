@@ -589,6 +589,11 @@ func getRoundInfoHandler(getState func() (*abdrc.StateMsg, error), obs Observabi
 func loadShardConfs(orchestration *partitions.Orchestration, handoffProfile bool, shardConfs []*types.PartitionDescriptionRecord) error {
 	if handoffProfile {
 		orchestration.EnableHandoffProfile()
+		// Atomically: into an empty orchestration the genesis set; afterwards only an identical reload.
+		if err := orchestration.InitGenesisShardConfigs(shardConfs...); err != nil {
+			return fmt.Errorf("failed to load the genesis shard confs: %w", err)
+		}
+		return nil
 	}
 	for _, shardConf := range shardConfs {
 		if err := orchestration.AddShardConfig(shardConf); err != nil {

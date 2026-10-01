@@ -58,7 +58,9 @@ type operatorAssignmentFixture struct {
 	node        *testutils.TestNode
 }
 
-func newOperatorAssignmentFixture(t *testing.T) *operatorAssignmentFixture {
+// newOperatorAssignmentFixture builds the fixture; extra genesis shard configurations are written together with the EVM one,
+// before the consensus manager enables the handoff profile (after which no configuration can be added).
+func newOperatorAssignmentFixture(t *testing.T, extra ...*types.PartitionDescriptionRecord) *operatorAssignmentFixture {
 	t.Helper()
 	ctx := context.Background()
 	f := &operatorAssignmentFixture{node: testutils.NewTestNode(t), parent: bytes.Repeat([]byte{7}, 32)}
@@ -80,6 +82,9 @@ func newOperatorAssignmentFixture(t *testing.T) *operatorAssignmentFixture {
 		TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 5 * time.Second, Epoch: 0, EpochStart: 1,
 		PartitionParams: map[string]string{"seal_registry_genesis": "g", evmassign.CouplingParam: "true"}, Validators: infos}
 	require.NoError(t, orchestration.AddShardConfig(f.current))
+	for _, conf := range extra {
+		require.NoError(t, orchestration.AddShardConfig(conf))
+	}
 
 	signers := map[string]abcrypto.Signer{f.node.PeerConf.ID.String(): f.node.Signer}
 	for _, other := range f.others {
@@ -298,14 +303,11 @@ func TestOperatorBuildsAndVerifiesAnAggregatorKeyReplacement(t *testing.T) {
 		nextKey evmSigner
 	}
 	setup := func(t *testing.T) (*operatorAssignmentFixture, shardFixture) {
-		f := newOperatorAssignmentFixture(t)
 		sf := shardFixture{oldKey: newEVMSigner(t, "agg-old"), nextKey: newEVMSigner(t, "agg-new")}
 		sf.conf = &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 9, PartitionTypeID: 9, TypeIDLen: 8, UnitIDLen: 256,
 			T2Timeout: 2500 * time.Millisecond, Epoch: 0, EpochStart: 1,
 			PartitionParams: map[string]string{"proof_type": "aggregator_rsmt_v1"}, Validators: []*types.NodeInfo{sf.oldKey.info}}
-		orch, ok := f.cm.orchestration.(*partitions.Orchestration)
-		require.True(t, ok)
-		require.NoError(t, orch.AddShardConfig(sf.conf))
+		f := newOperatorAssignmentFixture(t, sf.conf)
 		f.state.CommittedHead.ShardInfo = append(f.state.CommittedHead.ShardInfo, abdrc.ShardInfo{Partition: 9, IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{3}, 32)}})
 		return f, sf
 	}

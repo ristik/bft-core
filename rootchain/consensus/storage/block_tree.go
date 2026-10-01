@@ -5,7 +5,6 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
-	"github.com/unicitynetwork/bft-core/evmassign"
 	"maps"
 	"slices"
 	"sync"
@@ -95,14 +94,14 @@ func initBlock(block *ExecutedBlock, orchestration Orchestration) error {
 		if !ok {
 			return fmt.Errorf("block has a shard %s but orchestration doesn't have such shard for round %d", k, block.GetRound())
 		}
-		// The designated EVM shard's installed configuration is authenticated
-		// state: the configuration derived from committed history must be the one
-		// the block stored, or the retired (or an unrecovered) set would be loaded
-		// into the trust base.
-		if block.ShardState.Control != nil && pdr.PartitionTypeID == evmassign.EVMPartitionTypeID {
+		// Every shard's installed configuration is authenticated state under the handoff profile: the configuration derived from
+		// committed history (genesis plus handoffs) must be the one the block stored, or a retired, edited or unrecovered set would
+		// be loaded into the trust base. A lost or stale derived index, or an edited genesis file, stops the root instead of
+		// silently loading other keys.
+		if block.ShardState.Control != nil {
 			pdrHash, err := pdr.Hash(crypto.SHA256)
 			if err != nil {
-				return fmt.Errorf("hashing EVM shard configuration (%s): %w", k, err)
+				return fmt.Errorf("hashing shard configuration (%s): %w", k, err)
 			}
 			if !bytes.Equal(pdrHash, si.ShardConfHash) {
 				return fmt.Errorf("%w: shard %s stores configuration %x, committed history derives %x for round %d",

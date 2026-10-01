@@ -130,3 +130,16 @@ while an EVM acknowledgement is pending an aggregator key change must wait for i
 
 `PUT /api/v1/configurations` is refused under the unified profile, and a root restarted with an edited shard configuration
 file (any partition) is refused: after genesis every configuration comes from committed handoff history.
+
+**Liveness corner.** While an EVM acknowledgement is pending only a supersession is admitted, and a supersession carries no
+aggregator changes, so a stuck acknowledgement also blocks an emergency aggregator key rotation until it is acknowledged or
+superseded.
+
+**Retired-key window.** A request signed by a key retired by an activated handoff is ignored by every root from the activation
+block on (the executed shard state, not the last committed one, decides membership); it is never certified. This covers the EVM
+shard's retired keys as well.
+
+**Genesis files.** After genesis the shard configuration set is fixed: a root accepts only a byte-equal reload of its genesis
+entries (any other epoch, keys, activation round, partition or shard is refused), and refuses to start if a stored shard's
+configuration hash differs from the one committed history derives. Before the first start, check every genesis shard
+configuration file against the pinned T1 manifest hash: a fresh database accepts the set it is given.

@@ -24,7 +24,8 @@ func (f *assignmentFixture) useRealOrchestration(t *testing.T) {
 	orch, err := partitions.NewOrchestration(5, filepath.Join(t.TempDir(), "orch.db"), logger.New(t), partitions.WithNoSync())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = orch.Close() })
-	orch.EnableHandoffProfile()
+	// The handoff profile is not enabled here: tests add further genesis shards (addAggregator) and the derived install does not
+	// depend on it. freshOrchestration (profile on, one atomic genesis) covers the profile's refusals.
 	require.NoError(t, orch.AddShardConfig(f.current))
 	f.orch = orch
 	f.store.orchestration = orch
@@ -180,13 +181,13 @@ func TestEVMAssignmentActivatesOnceFromCommittedHistoryAndSurvivesRestart(t *tes
 	}
 }
 
-func freshOrchestration(t *testing.T, f *assignmentFixture) *partitions.Orchestration {
+func freshOrchestration(t *testing.T, f *assignmentFixture, extra ...*types.PartitionDescriptionRecord) *partitions.Orchestration {
 	t.Helper()
 	orch, err := partitions.NewOrchestration(5, filepath.Join(t.TempDir(), "fresh.db"), logger.New(t), partitions.WithNoSync())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = orch.Close() })
 	orch.EnableHandoffProfile()
-	require.NoError(t, orch.AddShardConfig(f.current))
+	require.NoError(t, orch.InitGenesisShardConfigs(append([]*types.PartitionDescriptionRecord{f.current}, extra...)...))
 	return orch
 }
 
