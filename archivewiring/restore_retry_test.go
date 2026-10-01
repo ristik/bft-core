@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/configuredprogress"
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
 	"github.com/unicitynetwork/bft-core/shardnode"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 // saturatedHost fails the first failures CreateStream calls the way a source validator whose global
@@ -45,6 +46,10 @@ type retryRestoreFixture struct {
 }
 
 func newRetryRestoreFixture(t *testing.T, failures int64, retry FetchRetry) *retryRestoreFixture {
+	return newRetryRestoreFixtureT(t, failures, retry, false)
+}
+
+func newRetryRestoreFixtureT(t *testing.T, failures int64, retry FetchRetry, tamper bool) *retryRestoreFixture {
 	t.Helper()
 	f := newWiringFixture(t, 5)
 	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
@@ -57,6 +62,13 @@ func newRetryRestoreFixture(t *testing.T, failures int64, retry FetchRetry) *ret
 		for _, entry := range f.entries {
 			q, rec, err := FromJournal(context.Background(), f.context, f.subject, nil, entry)
 			require.NoError(t, err)
+			if tamper {
+				var uc types.UnicityCertificate
+				require.NoError(t, types.Cbor.Unmarshal(rec.ResultingUC, &uc))
+				uc.InputRecord.Hash[0] ^= 1
+				rec.ResultingUC, err = types.Cbor.Marshal(&uc)
+				require.NoError(t, err)
+			}
 			require.NoError(t, store.Put(q, rec))
 		}
 		server, err := NewServer(store, f.subject, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{sender.ID()}, DefaultLimits())
@@ -140,4 +152,18 @@ func TestArchiveRestoreRetryStopsOnContextCancel(t *testing.T) {
 	require.Error(t, err)
 	require.Less(t, time.Since(started), 5*time.Second)
 	require.True(t, errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled), "got %v", err)
+}
+
+func TestArchiveRestoreVerificationFailureIsNotRetried(t *testing.T) {
+	t.Parallel()
+	fx := newRetryRestoreFixtureT(t, 0, FetchRetry{Initial: time.Millisecond, Max: 5 * time.Millisecond, Total: time.Hour}, true)
+	started := time.Now()
+	err := fx.restore.Restore(context.Background())
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrRestore)
+	require.Less(t, time.Since(started), 3*time.Second)
+	require.Less(t, fx.host.calls.Load(), int64(8))
+	image, loadErr := fx.journal.LoadJournal(context.Background(), fx.wf.context, fx.limits)
+	require.NoError(t, loadErr)
+	require.Nil(t, image.Restored)
 }
