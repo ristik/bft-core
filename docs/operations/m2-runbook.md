@@ -448,15 +448,15 @@ empty BFT and archive paths.
 ### A validator behind the pruned hot-journal window
 
 A validator whose latest local height is below the cluster's prune frontier cannot catch up from peers: the peers have
-pruned the early certificates and bodies, and an unrestored node audits coverage from height one (D-M2-3, by design).
+pruned the early certificates and bodies, and an unrestored node audits coverage from height one (by design: there is exactly one supported recovery route, archive restore with paired-seal replay; generic EL sync is refused).
 It stays unready ("candidate lacks its retained authorizing or resulting certificate"; replicas answer "no certified
 association") and must be recovered with the archive restore procedure above, with fresh BFT and archive paths. Detect it
 with the status command on the lagging node and on a healthy peer: if the peer's `pruneFrontier.height` is above the
-lagging node's `latestLocalV2.height` (its journal head), the gap is past the window; a node still inside the window
+lagging node's `latestLocalV2Archive.height` (its latest local archive record), the gap is past the window; a node still inside the window
 (frontier gap zero or negative) catches up by itself.
 
 ```sh
-build/ubft shard-node status --url REPLACE_LAGGING_RPC | jq '{latestLocalV2,pruneFrontier}'
+build/ubft shard-node status --url REPLACE_LAGGING_RPC | jq '{latestLocalV2Archive,pruneFrontier}'
 build/ubft shard-node status --url REPLACE_HEALTHY_PEER_RPC | jq '{pruneFrontier}'
 ```
 
