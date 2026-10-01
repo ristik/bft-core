@@ -244,10 +244,11 @@ type shardNodeRunFlags struct {
 	RegistryEVMCoinbase  string
 	RegistryEVMExtraData string
 
-	HandshakeNodes    int
-	CertNodes         int
-	HeartbeatInterval time.Duration
-	InactivityTimeout time.Duration
+	HandshakeNodes           int
+	CertNodes                int
+	HeartbeatInterval        time.Duration
+	StartupHandshakeInterval time.Duration
+	InactivityTimeout        time.Duration
 
 	// EvidenceServe / EvidenceRecover switch the two halves of authenticated-evidence anchor
 	// recovery (#92) independently — see the flag help and shardnode.RecoveryOptions.
@@ -355,6 +356,7 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 	cmd.Flags().IntVar(&flags.HandshakeNodes, "handshake-nodes", shardnode.DefaultBFTClientOptions.HandshakeNodes, "number of root nodes to handshake with")
 	cmd.Flags().IntVar(&flags.CertNodes, "cert-nodes", shardnode.DefaultBFTClientOptions.CertNodes, "number of root nodes to submit each certification request to")
 	cmd.Flags().DurationVar(&flags.HeartbeatInterval, "heartbeat-interval", shardnode.DefaultBFTClientOptions.HeartbeatInterval, "how often to check for root-chain inactivity")
+	cmd.Flags().DurationVar(&flags.StartupHandshakeInterval, "startup-handshake-interval", shardnode.DefaultBFTClientOptions.StartupHandshakeInterval, "re-send the handshake this often (with backoff, capped at the inactivity timeout) until the first certificate arrives; zero disables")
 	cmd.Flags().DurationVar(&flags.InactivityTimeout, "inactivity-timeout", shardnode.DefaultBFTClientOptions.InactivityTimeout, "re-handshake if no certificate has been received for this long")
 	cmd.Flags().BoolVar(&flags.EvidenceServe, "evidence-serve", true,
 		"retain observed certificates and answer other validators' requests for anchor evidence (#92)")
@@ -614,10 +616,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		store,
 		flags.observe.Logger(),
 		shardnode.BFTClientOptions{
-			HandshakeNodes:    flags.HandshakeNodes,
-			CertNodes:         flags.CertNodes,
-			HeartbeatInterval: flags.HeartbeatInterval,
-			InactivityTimeout: flags.InactivityTimeout,
+			HandshakeNodes:           flags.HandshakeNodes,
+			CertNodes:                flags.CertNodes,
+			HeartbeatInterval:        flags.HeartbeatInterval,
+			InactivityTimeout:        flags.InactivityTimeout,
+			StartupHandshakeInterval: flags.StartupHandshakeInterval,
 		},
 	)
 	if err != nil {
