@@ -238,12 +238,12 @@ func Activate(succ *types.PartitionDescriptionRecord, activation uint64) (*types
 }
 
 // PoPContext is everything a possession signature is bound to besides the
-// assignment itself: the root predecessor, the attempt and the frozen parent.
+// assignment itself: the root predecessor and the attempt. The frozen EVM parent is deliberately NOT part of it: the root binds the
+// parent at the Prepare record, after possession proofs are collected, and the Freeze record's FrozenID commits to it.
 type PoPContext struct {
 	Network     uint64
 	Predecessor [32]byte
 	Attempt     uint64
-	Parent      [32]byte
 }
 
 // PoPMessage is the domain-separated canonical message signed by one successor key.
@@ -253,7 +253,7 @@ func PoPMessage(c PoPContext, succ *types.PartitionDescriptionRecord, nodeID str
 		return nil, err
 	}
 	return types.Cbor.Marshal([]any{popDomain, uint64(1), c.Network, uint64(succ.PartitionID), succ.ShardID.Bytes(),
-		h[:], c.Predecessor[:], c.Attempt, c.Parent[:], nodeID})
+		h[:], c.Predecessor[:], c.Attempt, nodeID})
 }
 
 // PoP is the possession evidence for one successor validator.

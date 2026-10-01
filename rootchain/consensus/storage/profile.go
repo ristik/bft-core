@@ -69,7 +69,7 @@ func validateControl(c *evmroot.ControlState) error {
 	}
 	switch c.Phase {
 	case "prepared":
-		if r.Kind != "prepare" || len(c.FrozenParent) != 0 {
+		if r.Kind != "prepare" || len(c.FrozenParent) != 32 {
 			return ErrControlCheckpoint
 		}
 	case "frozen", "endorsed":

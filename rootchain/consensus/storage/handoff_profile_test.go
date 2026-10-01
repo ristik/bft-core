@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -247,29 +249,20 @@ func TestCommitRequiresFrozenParentAtCommittedTip(t *testing.T) {
 	require.ErrorIs(t, err, ErrHandoffRecord)
 }
 
-func TestFrozenShardQueriesFollowCommittedAndHighQCBranches(t *testing.T) {
+func TestFrozenShardQueriesFollowTheCommittedBranch(t *testing.T) {
 	s := profileStore(t)
 	parent := bytes.Repeat([]byte{0x42}, 32)
 	installTestFrozenShard(t, s, parent)
 	other := bytes.Repeat([]byte{0x43}, 32)
 	require.True(t, s.CommittedFrozenParent(parent))
 	require.False(t, s.CommittedFrozenParent(other))
-	require.True(t, s.HighQCFrozenParent(parent))
-	require.False(t, s.HighQCFrozenParent(other))
 	_, active, err := s.FrozenShardAt(1)
 	require.NoError(t, err)
 	require.False(t, active)
 	_, _, err = s.FrozenShardAt(99)
 	require.Error(t, err)
-	qc := s.blockTree.highQc
-	s.blockTree.highQc = nil
-	require.False(t, s.HighQCFrozenParent(parent))
-	s.blockTree.highQc = &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 99}}
-	require.False(t, s.HighQCFrozenParent(parent))
-	s.blockTree.highQc = qc
 	s.profile = ProfileLegacy
 	require.False(t, s.CommittedFrozenParent(parent))
-	require.False(t, s.HighQCFrozenParent(parent))
 	_, active, err = s.FrozenShardAt(1)
 	require.NoError(t, err)
 	require.False(t, active)
@@ -831,6 +824,7 @@ func TestHandoffIsolatedGuards(t *testing.T) {
 	t.Run("terminal_outcome", func(t *testing.T) {
 		prepared, err := applyHandoffRecord(initialControl(5), record("prepare", 2, 7, zero, body, zero), 5, 1, 2, testRecordAuthority{}, nil)
 		require.NoError(t, err)
+		prepared.FrozenParent = bytes.Repeat([]byte{0x42}, 32) // bound by the executor when it executes the Prepare
 		frozenState, err := applyHandoffRecord(prepared, record("freeze", 3, 7, frozen, body, zero), 5, 1, 3, testRecordAuthority{}, nil)
 		require.NoError(t, err)
 		committed, err := applyHandoffRecord(frozenState, record("commit", 4, 7, frozen, body, tr), 5, 1, 4, testRecordAuthority{}, nil)
@@ -1169,4 +1163,126 @@ func TestFreezeWithinTheWindowKeepsTheEVMFrozenPastIt(t *testing.T) {
 		addProfileBlock(t, s, r, nil)
 	}
 	require.ErrorIs(t, evmRequestBlock(s, freezeRound+2*PrepareFreezeLapseRounds+1, nil, bytes.Repeat([]byte{0x73}, 32)), ErrHandoffFrozen)
+}
+
+// The root binds the frozen parent when it executes the Prepare: the EVM IR certified in that branch at that moment, whatever the
+// operator planned. Freeze may then name only that parent, and no Freeze exists without a Prepare.
+func TestPrepareBindsTheFrozenParentAndFreezeMustNameIt(t *testing.T) {
+	zero := make([]byte, 32)
+	body, frozenID := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
+	evm := types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}
+	newStore := func(t *testing.T, authorityParent []byte) *BlockStore {
+		s := profileStore(t)
+		installTestFrozenShard(t, s, bytes.Repeat([]byte{0x40}, 32))
+		s.handoffAuth = movingParentAuthority{parent: &authorityParent}
+		addProfileBlock(t, s, 2, nil)
+		return s
+	}
+	addAt := func(t *testing.T, s *BlockStore, round uint64, rec []byte) error {
+		parent, err := s.Block(round - 1)
+		require.NoError(t, err)
+		_, err = s.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{rec}},
+			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
+		return err
+	}
+
+	t.Run("Prepare binds the certified EVM IR of its branch", func(t *testing.T) {
+		s := newStore(t, nil)
+		latest := bytes.Repeat([]byte{0x51}, 32)
+		require.NoError(t, evmRequestBlock(s, 3, nil, latest))
+		prepared := addProfileBlock(t, s, 4, [][]byte{record("prepare", 4, 40, zero, body, zero)})
+		require.Equal(t, "prepared", prepared.ShardState.Control.Phase)
+		require.Equal(t, latest, prepared.ShardState.Control.FrozenParent, "the root bound the EVM IR certified at the Prepare, not an earlier one")
+		require.True(t, bytes.Equal(latest, prepared.ShardState.States[evm].IR.BlockHash))
+	})
+	t.Run("Freeze naming another parent is refused", func(t *testing.T) {
+		bound := bytes.Repeat([]byte{0x40}, 32)
+		other := bytes.Repeat([]byte{0x51}, 32)
+		s := newStore(t, other) // the endorsements name `other`, the Prepare bound the installed 0x40
+		addProfileBlock(t, s, 3, [][]byte{record("prepare", 3, 40, zero, body, zero)})
+		require.Equal(t, bound, mustBlock(t, s, 3).ShardState.Control.FrozenParent)
+		require.ErrorIs(t, addAt(t, s, 4, record("freeze", 4, 40, frozenID, body, zero)), ErrFreezeParentUnbound)
+	})
+	t.Run("Freeze naming the bound parent is accepted", func(t *testing.T) {
+		bound := bytes.Repeat([]byte{0x40}, 32)
+		s := newStore(t, bound)
+		addProfileBlock(t, s, 3, [][]byte{record("prepare", 3, 40, zero, body, zero)})
+		endorsed := addProfileBlock(t, s, 4, [][]byte{record("freeze", 4, 40, frozenID, body, zero)})
+		require.Equal(t, "endorsed", endorsed.ShardState.Control.Phase)
+		require.Equal(t, bound, endorsed.ShardState.Control.FrozenParent)
+	})
+	t.Run("Freeze without a Prepare is refused", func(t *testing.T) {
+		s := newStore(t, bytes.Repeat([]byte{0x40}, 32))
+		require.ErrorIs(t, addAt(t, s, 3, record("freeze", 3, 40, frozenID, body, zero)), ErrFreezeBeforePrepare)
+		_, err := applyHandoffRecord(initialControl(5), record("freeze", 2, 7, frozenID, body, zero), 5, 1, 2, testRecordAuthority{}, nil)
+		require.ErrorIs(t, err, ErrFreezeBeforePrepare)
+		aborted := initialControl(5)
+		aborted.Phase, aborted.Attempt = "aborted", 0
+		_, err = applyHandoffRecord(aborted, record("freeze", 2, 7, frozenID, body, zero), 5, 1, 2, testRecordAuthority{}, nil)
+		require.ErrorIs(t, err, ErrFreezeBeforePrepare)
+	})
+	t.Run("a Prepare with no certified EVM IR to bind is refused", func(t *testing.T) {
+		s := newStore(t, nil)
+		tip, err := s.Block(2)
+		require.NoError(t, err)
+		tip.ShardState.States[evm].IR.BlockHash = nil // never certified a block
+		require.ErrorIs(t, addAt(t, s, 3, record("prepare", 3, 40, zero, body, zero)), ErrPrepareNoEVMParent)
+	})
+	t.Run("a prepared checkpoint without a bound parent is invalid", func(t *testing.T) {
+		s := newStore(t, nil)
+		prepared := addProfileBlock(t, s, 3, [][]byte{record("prepare", 3, 40, zero, body, zero)})
+		control := *prepared.ShardState.Control
+		require.NoError(t, validateControl(&control))
+		control.FrozenParent = nil
+		require.ErrorIs(t, validateControl(&control), ErrControlCheckpoint)
+	})
+}
+
+// A Prepare whose freeze lapsed is reported once, when the committed root passes the end of its window, so the operator retries at
+// once instead of waiting out its own timeout.
+func TestLapsedPrepareIsReportedOnceAsAnOutcome(t *testing.T) {
+	var logs bytes.Buffer
+	s := &BlockStore{profile: ProfileHandoff, log: slog.New(slog.NewTextHandler(&logs, nil))}
+	committedAt := func(round uint64, phase string) *ExecutedBlock {
+		block := &ExecutedBlock{BlockData: &rctypes.BlockData{Round: round, Epoch: 1}}
+		block.ShardState.Control = &evmroot.ControlState{Network: 5, Epoch: 1, Attempt: 2, Phase: phase, OrderedRound: 10}
+		return block
+	}
+	count := func() int { return strings.Count(logs.String(), "phase=lapsed") }
+	s.logHandoffOutcome(committedAt(10+PrepareFreezeLapseRounds, "prepared"))
+	require.Zero(t, count(), "inside the window nothing is reported")
+	s.logHandoffOutcome(committedAt(10+PrepareFreezeLapseRounds+1, "prepared"))
+	require.Equal(t, 1, count())
+	require.Contains(t, logs.String(), "attempt=2")
+	s.logHandoffOutcome(committedAt(10+PrepareFreezeLapseRounds+2, "prepared"))
+	require.Equal(t, 1, count(), "reported once per attempt")
+	s.logHandoffOutcome(committedAt(10+PrepareFreezeLapseRounds+9, "endorsed"))
+	require.Equal(t, 1, count(), "a Freeze that came in time is no lapse")
+}
+
+// The activation floor is a block-validation rule, not only the leader's choice.
+func TestPrepareActivationFloorIsEnforcedByBlockValidation(t *testing.T) {
+	restore := prepareActivationFloor
+	prepareActivationFloor = PrepareActivationFloorRounds
+	t.Cleanup(func() { prepareActivationFloor = restore })
+	zero := make([]byte, 32)
+	body := bytes.Repeat([]byte{1}, 32)
+	const round = uint64(3)
+	prepareWith := func(t *testing.T, activation uint64) error {
+		s := profileStore(t)
+		installTestFrozenShard(t, s, bytes.Repeat([]byte{0x40}, 32))
+		addProfileBlock(t, s, 2, nil)
+		rec := (evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: round, PredecessorBodyID: zero, FrozenID: zero,
+			NextBodyID: body, ActivationRound: activation, SuccessorTRHash: zero, Kind: "prepare"}).Bytes()
+		parent, err := s.Block(round - 1)
+		require.NoError(t, err)
+		_, err = s.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{rec}},
+			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
+		return err
+	}
+	require.ErrorIs(t, prepareWith(t, round+PrepareActivationFloorRounds-1), ErrPrepareActivationFloor)
+	require.ErrorIs(t, prepareWith(t, round+8), ErrPrepareActivationFloor, "the old +8 margin is no longer enough")
+	require.NoError(t, prepareWith(t, round+PrepareActivationFloorRounds))
 }

@@ -57,7 +57,6 @@ type Candidate struct {
 	Network       uint64
 	Predecessor   []byte // predecessor root BodyID
 	Attempt       uint64
-	Parent        []byte // frozen certified EVM block P
 	RootMembers   []RootMember
 	OldShardEpoch uint64
 	OldActiveHash []byte // full hash of the installed configuration being replaced
@@ -146,7 +145,7 @@ func NewCandidate(c PoPContext, root []RootMember, current, succ *types.Partitio
 		return Candidate{}, err
 	}
 	out := Candidate{Version: CandidateVersion, Network: c.Network, Predecessor: bytes.Clone(c.Predecessor[:]),
-		Attempt: c.Attempt, Parent: bytes.Clone(c.Parent[:]), RootMembers: root, OldShardEpoch: current.Epoch,
+		Attempt: c.Attempt, RootMembers: root, OldShardEpoch: current.Epoch,
 		OldActiveHash: old[:], Assignment: raw, PoPs: pops, Supersedes: supersedes, Bindings: bindings, Changes: changes}
 	if _, err := out.Encode(); err != nil {
 		return Candidate{}, err
@@ -263,7 +262,6 @@ func VerifyBinding(data []byte, v BindingContext) (Candidate, *types.PartitionDe
 		{c.Network == v.Network, "network"},
 		{bytes.Equal(c.Predecessor, v.Predecessor[:]), "predecessor"},
 		{c.Attempt == v.Attempt, "attempt"},
-		{bytes.Equal(c.Parent, v.Parent[:]), "parent"},
 	} {
 		if !check.ok {
 			return Candidate{}, nil, fmt.Errorf("%w: %s", ErrContext, check.what)

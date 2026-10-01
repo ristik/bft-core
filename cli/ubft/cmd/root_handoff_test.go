@@ -10,32 +10,62 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"github.com/unicitynetwork/bft-core/archivewiring"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 type handoffOperatorStub struct {
-	planCalls, endorsements int
-	parent                  []byte
-	proposal                *evmassign.Proposal
-	evmCalls                int
+	mu                               sync.Mutex
+	planCalls, intents, endorsements int
+	// notPrepared is how many endorsement attempts per validator are refused before the Prepare is "committed".
+	notPrepared int
+	attempts    int
+	proposal    *evmassign.Proposal
+	evmCalls    int
+	endorseErr  error
+	// lapsedPlans is how many plans (attempts) end with the Prepare lapsed before they are endorsed.
+	lapsedPlans int
 }
 
-func (s *handoffOperatorStub) BuildAndEndorseHandoffEVM(ctx context.Context, next *types.RootTrustBaseV1, parent []byte, p *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
-	s.evmCalls++
-	s.proposal = p
-	return s.BuildAndEndorseHandoff(ctx, next, parent)
-}
-
-func (s *handoffOperatorStub) BuildHandoffPlan(_ *types.RootTrustBaseV1, parent []byte) (abdrc.HandoffApprovalMsg, error) {
+func (s *handoffOperatorStub) PlanHandoff(_ *types.RootTrustBaseV1, p *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.planCalls++
-	s.parent = append([]byte(nil), parent...)
+	if p != nil {
+		s.evmCalls++
+		s.proposal = p
+	}
 	return abdrc.HandoffApprovalMsg{Body: []byte{1}}, nil
+}
+
+func (s *handoffOperatorStub) AcceptHandoffIntent(_ abdrc.HandoffApprovalMsg) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.intents++
+	return nil
+}
+
+func (s *handoffOperatorStub) EndorseHandoff(_ context.Context, _ abdrc.HandoffApprovalMsg) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.endorseErr != nil {
+		return s.endorseErr
+	}
+	if s.lapsedPlans > 0 && s.planCalls <= s.lapsedPlans {
+		return consensus.ErrPrepareLapsed
+	}
+	s.attempts++
+	if s.attempts <= s.notPrepared {
+		return consensus.ErrEndorseBeforePrepare
+	}
+	s.endorsements++
+	return nil
 }
 
 func TestRootHandoffAbortCLIWaitsForCommittedStatus(t *testing.T) {
@@ -71,13 +101,6 @@ func TestRootHandoffAbortCLIWaitsForCommittedStatus(t *testing.T) {
 	require.GreaterOrEqual(t, statuses, 1)
 	require.Contains(t, stdout.String(), "committed Abort record 0xabort ordered at round 12")
 	require.Contains(t, stdout.String(), "committed root block 0xblock at round 14")
-}
-func (s *handoffOperatorStub) BuildAndEndorseHandoff(_ context.Context, next *types.RootTrustBaseV1, parent []byte) (abdrc.HandoffApprovalMsg, error) {
-	return s.BuildHandoffPlan(next, parent)
-}
-func (s *handoffOperatorStub) EndorseHandoff(_ context.Context, _ abdrc.HandoffApprovalMsg) error {
-	s.endorsements++
-	return nil
 }
 
 type handoffAbortOperatorStub struct {
@@ -162,16 +185,16 @@ func TestRootHandoffOperatorHTTPIsLocalAndBounded(t *testing.T) {
 		return r
 	}
 	remote := httptest.NewRecorder()
-	plan(remote, request("192.0.2.1:1234", `{"frozenParent":"0x00"}`))
+	plan(remote, request("192.0.2.1:1234", `{}`))
 	require.Equal(t, http.StatusForbidden, remote.Code)
 	require.Zero(t, stub.planCalls)
 	wrongType := httptest.NewRecorder()
-	wrongTypeRequest := request("127.0.0.1:1234", `{"frozenParent":"0x0102"}`)
+	wrongTypeRequest := request("127.0.0.1:1234", `{}`)
 	wrongTypeRequest.Header.Set("Content-Type", "text/plain")
 	plan(wrongType, wrongTypeRequest)
 	require.Equal(t, http.StatusUnsupportedMediaType, wrongType.Code)
 	fromBrowser := httptest.NewRecorder()
-	fromBrowserRequest := request("127.0.0.1:1234", `{"frozenParent":"0x0102"}`)
+	fromBrowserRequest := request("127.0.0.1:1234", `{}`)
 	fromBrowserRequest.Header.Set("Origin", "https://example.com")
 	plan(fromBrowser, fromBrowserRequest)
 	require.Equal(t, http.StatusUnsupportedMediaType, fromBrowser.Code)
@@ -179,7 +202,7 @@ func TestRootHandoffOperatorHTTPIsLocalAndBounded(t *testing.T) {
 	plan(oversized, request("127.0.0.1:1234", string(bytes.Repeat([]byte{'x'}, 1<<20+1))))
 	require.Equal(t, http.StatusBadRequest, oversized.Code)
 	local := httptest.NewRecorder()
-	plan(local, request("127.0.0.1:1234", `{"frozenParent":"0x0102"}`))
+	plan(local, request("127.0.0.1:1234", `{}`))
 	require.Equal(t, http.StatusOK, local.Code)
 	var approved abdrc.HandoffApprovalMsg
 	require.NoError(t, json.Unmarshal(local.Body.Bytes(), &approved))
@@ -201,48 +224,87 @@ func TestRootHandoffOperatorHTTPIsLocalAndBounded(t *testing.T) {
 	require.Equal(t, 1, stub.endorsements)
 }
 
-func TestRootHandoffProposeUsesLatestCertifiedParentAndRejectsStalePin(t *testing.T) {
-	latestHash := bytes.Repeat([]byte{0x42}, 32)
-	status := archivewiring.OperatorStatus{CertifiedTip: &archivewiring.BlockPin{
-		Height: 19, Hash: fmt.Sprintf("0x%x", latestHash), RootEpoch: 3, RootRound: 117,
-	}}
-	var statusRequests, planRequests int
-	statusServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		statusRequests++
-		require.Equal(t, http.MethodGet, r.Method)
-		require.Equal(t, "/api/v1/operator/status", r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(status)
-	}))
-	defer statusServer.Close()
-	operator := &handoffOperatorStub{}
-	rootServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		planRequests++
-		rootHandoffPlanHandler(operator)(w, r)
-	}))
-	defer rootServer.Close()
-
+// The CLI plans once, hands every validator the intent, and then endorses: each validator refuses until the Prepare is committed, so
+// the CLI waits for it. The plan names no EVM parent and there is no flag to supply one.
+func TestRootHandoffProposePlansThenEndorsesAfterPrepare(t *testing.T) {
+	newServer := func(operator *handoffOperatorStub) *httptest.Server {
+		mux := http.NewServeMux()
+		mux.HandleFunc("POST /api/v1/handoff/plan", rootHandoffPlanHandler(operator))
+		mux.HandleFunc("POST /api/v1/handoff/intent", rootHandoffIntentHandler(operator))
+		mux.HandleFunc("POST /api/v1/handoff/endorse", rootHandoffEndorseHandler(operator))
+		return httptest.NewServer(mux)
+	}
 	nextFile := filepath.Join(t.TempDir(), "next-trust-base.json")
-	require.NoError(t, os.WriteFile(nextFile, []byte(`{}`), 0o600))
-	var stdout, stderr bytes.Buffer
-	root := newRootCmd()
-	root.SetOut(&stdout)
-	root.SetErr(&stderr)
-	root.SetArgs([]string{"handoff", "propose", "--next-trust-base", nextFile,
-		"--certified-parent-status-url", statusServer.URL, "--root-rpc", rootServer.URL})
-	require.NoError(t, root.Execute())
-	require.Equal(t, 1, statusRequests)
-	require.Equal(t, 1, planRequests)
-	require.Equal(t, latestHash, operator.parent)
-	require.Contains(t, stderr.String(), "using latest certified EVM parent")
-	require.Contains(t, stderr.String(), fmt.Sprintf("height=19 hash=0x%x", latestHash))
+	require.NoError(t, os.WriteFile(nextFile, []byte(`{"epoch":2}`), 0o600))
+	run := func(t *testing.T, args ...string) (string, error) {
+		var stdout bytes.Buffer
+		root := newRootCmd()
+		root.SetOut(&stdout)
+		root.SetErr(&bytes.Buffer{})
+		root.SetArgs(append([]string{"handoff", "propose", "--next-trust-base", nextFile}, args...))
+		err := root.Execute()
+		return stdout.String(), err
+	}
 
-	stale := strings.Repeat("11", 32)
-	root = newRootCmd()
-	root.SetArgs([]string{"handoff", "propose", "--next-trust-base", nextFile,
-		"--frozen-parent", stale, "--certified-parent-status-url", statusServer.URL, "--root-rpc", rootServer.URL})
-	err := root.Execute()
-	require.ErrorIs(t, err, ErrStaleCertifiedParent)
-	require.Equal(t, 2, statusRequests, "the explicit pin is compared with a fresh read-only status query")
-	require.Equal(t, 1, planRequests, "a stale explicit pin must not be submitted")
+	t.Run("waits for the Prepare, then endorses at every validator", func(t *testing.T) {
+		first, second, third := &handoffOperatorStub{notPrepared: 2}, &handoffOperatorStub{notPrepared: 1}, &handoffOperatorStub{}
+		servers := []*httptest.Server{newServer(first), newServer(second), newServer(third)}
+		for _, server := range servers {
+			defer server.Close()
+		}
+		out, err := run(t, "--root-rpc", servers[0].URL+","+servers[1].URL+","+servers[2].URL, "--prepare-timeout", "30s")
+		require.NoError(t, err)
+		require.Contains(t, out, "submitted 3 root endorsements for epoch 2")
+		require.Equal(t, 1, first.planCalls, "the first validator builds the plan")
+		require.Zero(t, second.planCalls+third.planCalls)
+		require.Equal(t, 2, second.intents+third.intents, "every other validator holds the plan as its intent")
+		require.Zero(t, first.intents)
+		require.Equal(t, 1, first.endorsements)
+		require.Equal(t, 1, second.endorsements)
+		require.Equal(t, 1, third.endorsements)
+		require.Equal(t, 3, first.attempts, "refused twice before the Prepare was committed")
+	})
+	t.Run("a lapsed Prepare is re-planned for the next attempt and then endorsed", func(t *testing.T) {
+		stub := &handoffOperatorStub{lapsedPlans: 1}
+		server := newServer(stub)
+		defer server.Close()
+		var stdout, stderr bytes.Buffer
+		root := newRootCmd()
+		root.SetOut(&stdout)
+		root.SetErr(&stderr)
+		root.SetArgs([]string{"handoff", "propose", "--next-trust-base", nextFile, "--root-rpc", server.URL, "--prepare-timeout", "30s"})
+		require.NoError(t, root.Execute())
+		require.Equal(t, 2, stub.planCalls, "attempt 1 lapsed, attempt 2 was planned")
+		require.Equal(t, 1, stub.endorsements)
+		require.Contains(t, stderr.String(), "attempt 1 lapsed before it was endorsed; re-planning attempt 2")
+	})
+	t.Run("repeated lapses end in the typed outcome after the bounded attempts", func(t *testing.T) {
+		stub := &handoffOperatorStub{lapsedPlans: 100}
+		server := newServer(stub)
+		defer server.Close()
+		_, err := run(t, "--root-rpc", server.URL, "--prepare-timeout", "30s", "--max-attempts", "2")
+		require.ErrorIs(t, err, ErrHandoffLapsed)
+		require.Equal(t, 2, stub.planCalls, "bounded")
+		require.Zero(t, stub.endorsements)
+	})
+	t.Run("no EVM parent flag exists", func(t *testing.T) {
+		_, err := run(t, "--frozen-parent", "0x"+strings.Repeat("11", 32), "--root-rpc", "http://127.0.0.1:1")
+		require.ErrorContains(t, err, "unknown flag: --frozen-parent")
+	})
+	t.Run("a Prepare that never commits times out", func(t *testing.T) {
+		stub := &handoffOperatorStub{notPrepared: 1 << 20}
+		server := newServer(stub)
+		defer server.Close()
+		_, err := run(t, "--root-rpc", server.URL, "--prepare-timeout", "1500ms")
+		require.ErrorContains(t, err, "only 0/1 validators endorsed")
+		require.ErrorContains(t, err, consensus.ErrEndorseBeforePrepare.Error())
+	})
+	t.Run("any other refusal is final", func(t *testing.T) {
+		stub := &handoffOperatorStub{endorseErr: consensus.ErrEndorsedParentMismatch}
+		server := newServer(stub)
+		defer server.Close()
+		_, err := run(t, "--root-rpc", server.URL, "--prepare-timeout", "30s")
+		require.ErrorContains(t, err, consensus.ErrEndorsedParentMismatch.Error())
+		require.Zero(t, stub.attempts, "no retry")
+	})
 }

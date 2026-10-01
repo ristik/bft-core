@@ -65,7 +65,7 @@ func newFixture(t *testing.T) fixture {
 	succ, err := NewSuccessor(cur, infos)
 	require.NoError(t, err)
 	return fixture{current: cur, next: next, succ: succ,
-		ctx:     PoPContext{Network: 5, Predecessor: [32]byte{1}, Attempt: 2, Parent: [32]byte{9}},
+		ctx:     PoPContext{Network: 5, Predecessor: [32]byte{1}, Attempt: 2},
 		root:    rootOf("r", 2),
 		oldRoot: rootOf("o", 9), bindings: bindingsFor(rootOf("r", 2), succ)}
 }
@@ -234,10 +234,9 @@ func TestPoPIsolatedMutations(t *testing.T) {
 		{"extra proof", append(append([]PoP(nil), good...), good[0])},
 		{"wrong key signs", withIndex(1, signFor(1, f.ctx, f.succ, other.signer))},
 		{"retained key exempt-by-omission", withIndex(0, PoP{NodeID: good[0].NodeID, Key: good[0].Key, Signature: make([]byte, 65)})},
-		{"wrong network", withIndex(1, signFor(1, PoPContext{Network: 6, Predecessor: f.ctx.Predecessor, Attempt: f.ctx.Attempt, Parent: f.ctx.Parent}, f.succ, f.next[1].signer))},
-		{"wrong predecessor", withIndex(1, signFor(1, PoPContext{Network: 5, Predecessor: [32]byte{2}, Attempt: f.ctx.Attempt, Parent: f.ctx.Parent}, f.succ, f.next[1].signer))},
-		{"replayed attempt", withIndex(1, signFor(1, PoPContext{Network: 5, Predecessor: f.ctx.Predecessor, Attempt: 1, Parent: f.ctx.Parent}, f.succ, f.next[1].signer))},
-		{"wrong parent", withIndex(1, signFor(1, PoPContext{Network: 5, Predecessor: f.ctx.Predecessor, Attempt: f.ctx.Attempt, Parent: [32]byte{8}}, f.succ, f.next[1].signer))},
+		{"wrong network", withIndex(1, signFor(1, PoPContext{Network: 6, Predecessor: f.ctx.Predecessor, Attempt: f.ctx.Attempt}, f.succ, f.next[1].signer))},
+		{"wrong predecessor", withIndex(1, signFor(1, PoPContext{Network: 5, Predecessor: [32]byte{2}, Attempt: f.ctx.Attempt}, f.succ, f.next[1].signer))},
+		{"replayed attempt", withIndex(1, signFor(1, PoPContext{Network: 5, Predecessor: f.ctx.Predecessor, Attempt: 1}, f.succ, f.next[1].signer))},
 		{"reordered", func() []PoP { o := append([]PoP(nil), good...); o[1], o[2] = o[2], o[1]; return o }()},
 		{"other node id", func() []PoP { p := good[1]; p.NodeID = "zz"; return withIndex(1, p) }()},
 		{"short signature", func() []PoP { p := good[1]; p.Signature = p.Signature[:64]; return withIndex(1, p) }()},
@@ -315,7 +314,6 @@ func TestCandidateVerifyContextIsolatedMutations(t *testing.T) {
 		{"network", func(c *Candidate) { c.Network = 6 }, nil, ErrContext, "network"},
 		{"predecessor", func(c *Candidate) { c.Predecessor = bytes.Repeat([]byte{7}, 32) }, nil, ErrContext, "predecessor"},
 		{"attempt", func(c *Candidate) { c.Attempt++ }, nil, ErrContext, "attempt"},
-		{"parent", func(c *Candidate) { c.Parent = bytes.Repeat([]byte{7}, 32) }, nil, ErrContext, "parent"},
 		{"old shard epoch", func(c *Candidate) { c.OldShardEpoch++ }, nil, ErrContext, "installed assignment epoch"},
 		{"old active hash", func(c *Candidate) { c.OldActiveHash = bytes.Repeat([]byte{7}, 32) }, nil, ErrContext, "installed assignment hash"},
 		{"root members differ from body", func(c *Candidate) { c.RootMembers[0].NodeID = "r9" }, nil, ErrContext, "successor root members"},

@@ -23,9 +23,8 @@ import (
 )
 
 type rootHandoffOperator interface {
-	BuildHandoffPlan(*types.RootTrustBaseV1, []byte) (abdrc.HandoffApprovalMsg, error)
-	BuildAndEndorseHandoff(context.Context, *types.RootTrustBaseV1, []byte) (abdrc.HandoffApprovalMsg, error)
-	BuildAndEndorseHandoffEVM(context.Context, *types.RootTrustBaseV1, []byte, *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error)
+	PlanHandoff(*types.RootTrustBaseV1, *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error)
+	AcceptHandoffIntent(abdrc.HandoffApprovalMsg) error
 	EndorseHandoff(context.Context, abdrc.HandoffApprovalMsg) error
 }
 
@@ -36,7 +35,6 @@ type rootHandoffAbortOperator interface {
 
 type rootHandoffPlanRequest struct {
 	NextTrustBase *types.RootTrustBaseV1 `json:"nextTrustBase"`
-	FrozenParent  string                 `json:"frozenParent"`
 	// EVMAssignment asks for an EVM-only assignment change (H3). The root members of NextTrustBase must be
 	// the installed ones; combining a root and an EVM membership change is refused.
 	EVMAssignment *evmassign.Proposal `json:"evmAssignment,omitempty"`
@@ -66,23 +64,34 @@ func rootHandoffPlanHandler(operator rootHandoffOperator) http.HandlerFunc {
 			http.Error(w, "invalid handoff plan request", http.StatusBadRequest)
 			return
 		}
-		parent, err := hex.DecodeString(strings.TrimPrefix(request.FrozenParent, "0x"))
-		if err != nil {
-			http.Error(w, "invalid frozen parent", http.StatusBadRequest)
-			return
-		}
-		var plan abdrc.HandoffApprovalMsg
-		if request.EVMAssignment != nil {
-			plan, err = operator.BuildAndEndorseHandoffEVM(r.Context(), request.NextTrustBase, parent, request.EVMAssignment)
-		} else {
-			plan, err = operator.BuildAndEndorseHandoff(r.Context(), request.NextTrustBase, parent)
-		}
+		// The plan names no EVM parent: the root binds it when the Prepare is ordered.
+		plan, err := operator.PlanHandoff(request.NextTrustBase, request.EVMAssignment)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(plan)
+	}
+}
+
+// rootHandoffIntentHandler registers a plan another validator's endpoint built, so that whichever validator leads can order the
+// Prepare for it.
+func rootHandoffIntentHandler(operator rootHandoffOperator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !localOperatorRequest(w, r) {
+			return
+		}
+		var plan abdrc.HandoffApprovalMsg
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&plan) != nil {
+			http.Error(w, "invalid handoff intent", http.StatusBadRequest)
+			return
+		}
+		if err := operator.AcceptHandoffIntent(plan); err != nil {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -161,36 +170,13 @@ func decodeHandoffAbortTarget(w http.ResponseWriter, r *http.Request, target *ab
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{Use: "root", Short: "Root chain operator commands"}
 	handoff := &cobra.Command{Use: "handoff", Short: "Profile-2 validator handoff"}
-	var nextFile, parent, rootRPCs string
-	var parentStatusURL, nextEVMAssignment string
-	propose := &cobra.Command{Use: "propose", Short: "Request old-validator endorsements for a new root trust base", RunE: func(cmd *cobra.Command, _ []string) error {
-		var parentBytes []byte
-		if parent != "" {
-			var err error
-			parentBytes, err = hex.DecodeString(strings.TrimPrefix(parent, "0x"))
-			if err != nil || len(parentBytes) != 32 {
-				return errors.New("frozen parent must be a 32-byte hex block hash")
-			}
-		}
-		if parent == "" || parentStatusURL != "" {
-			if parentStatusURL == "" {
-				return ErrCertifiedParentUnavailable
-			}
-			statusCtx, cancel := context.WithTimeout(cmd.Context(), 5*time.Second)
-			pin, latestParent, err := certifiedParentFromStatus(statusCtx, parentStatusURL)
-			cancel()
-			if err != nil {
-				return err
-			}
-			if len(parentBytes) != 0 && !bytes.Equal(parentBytes, latestParent) {
-				return fmt.Errorf("%w: supplied=0x%x latest=0x%x at height %d", ErrStaleCertifiedParent, parentBytes, latestParent, pin.Height)
-			}
-			if len(parentBytes) == 0 {
-				parentBytes = latestParent
-				parent = fmt.Sprintf("0x%x", latestParent)
-				fmt.Fprintf(cmd.ErrOrStderr(), "using latest certified EVM parent from %s: height=%d hash=%s\n", parentStatusURL, pin.Height, parent)
-			}
-		}
+	var nextFile, rootRPCs, nextEVMAssignment string
+	var prepareTimeout time.Duration
+	var maxAttempts int
+	propose := &cobra.Command{Use: "propose", Short: "Request old-validator endorsements for a new root trust base", Long: "Plans the handoff, has the root order a Prepare for it (which freezes the EVM and binds the frozen parent), and then collects the\n" +
+		"old validators' endorsements of that Prepare-bound state. The plan names no EVM parent. Endorsements are refused until the Prepare\n" +
+		"is committed, so this command waits for it (--prepare-timeout); a Prepare that gets no Freeze within the lapse window is dead and the\n" +
+		"command must be run again for the next attempt.", RunE: func(cmd *cobra.Command, _ []string) error {
 		raw, err := os.ReadFile(nextFile)
 		if err != nil {
 			return err
@@ -199,12 +185,17 @@ func newRootCmd() *cobra.Command {
 		if err = json.Unmarshal(raw, &next); err != nil {
 			return err
 		}
-		endpoints := strings.Split(rootRPCs, ",")
+		var endpoints []string
+		for _, endpoint := range strings.Split(rootRPCs, ",") {
+			if endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/"); endpoint != "" {
+				endpoints = append(endpoints, endpoint)
+			}
+		}
 		if len(endpoints) == 0 {
 			return errors.New("root RPC endpoints required")
 		}
 		client := &http.Client{Timeout: 5 * time.Second}
-		planRequest := rootHandoffPlanRequest{NextTrustBase: &next, FrozenParent: parent}
+		planRequest := rootHandoffPlanRequest{NextTrustBase: &next}
 		if nextEVMAssignment != "" {
 			if planRequest.EVMAssignment, err = readEVMAssignment(nextEVMAssignment); err != nil {
 				return err
@@ -217,46 +208,28 @@ func newRootCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		var plan abdrc.HandoffApprovalMsg
-		if err = handoffPost(cmd.Context(), client, strings.TrimRight(endpoints[0], "/")+"/api/v1/handoff/plan", request, &plan); err != nil {
-			return err
-		}
-		data, err := json.Marshal(plan)
-		if err != nil {
-			return err
-		}
-		var wg sync.WaitGroup
-		results := make(chan error, len(endpoints))
-		for _, endpoint := range endpoints[1:] {
-			wg.Add(1)
-			go func(endpoint string) {
-				defer wg.Done()
-				results <- handoffPost(cmd.Context(), client, strings.TrimRight(strings.TrimSpace(endpoint), "/")+"/api/v1/handoff/endorse", data, nil)
-			}(endpoint)
-		}
-		wg.Wait()
-		close(results)
-		accepted := 1 // the plan endpoint already endorsed the same checkpoint
-		var refusals []error
-		for result := range results {
-			if result == nil {
-				accepted++
-			} else {
-				refusals = append(refusals, result)
+		for attemptNo := 1; ; attemptNo++ {
+			accepted, err := proposeOnce(cmd.Context(), client, endpoints, request, prepareTimeout, attemptNo > 1)
+			if err == nil {
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "submitted %d root endorsements for epoch %d\n", accepted, next.Epoch)
+				return err
 			}
+			if !errors.Is(err, ErrHandoffLapsed) {
+				return err
+			}
+			// The attempt's Prepare lapsed (no Freeze in time): the EVM certifies again and the attempt is dead. Re-plan for the next
+			// attempt, a bounded number of times.
+			if attemptNo >= maxAttempts {
+				return fmt.Errorf("%w: gave up after %d attempts", ErrHandoffLapsed, attemptNo)
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "attempt %d lapsed before it was endorsed; re-planning attempt %d\n", attemptNo, attemptNo+1)
 		}
-		if accepted < len(endpoints)*2/3+1 {
-			return fmt.Errorf("only %d/%d validators endorsed: %w", accepted, len(endpoints), errors.Join(refusals...))
-		}
-		_, err = fmt.Fprintf(cmd.OutOrStdout(), "submitted %d root endorsements for epoch %d\n", accepted, next.Epoch)
-		return err
 	}}
 	propose.Flags().StringVar(&nextFile, "next-trust-base", "", "next epoch trust base JSON")
-	propose.Flags().StringVar(&parent, "frozen-parent", "", "certified EVM parent block hash (32-byte hex); defaults to current tip when --certified-parent-status-url is set")
-	propose.Flags().StringVar(&parentStatusURL, "certified-parent-status-url", "", "base URL of a shard node's read-only operator status server; selects the current tip if --frozen-parent is omitted")
 	propose.Flags().StringVar(&nextEVMAssignment, "next-evm-assignment", "",
-		"EVM-only validator assignment change (JSON: validators and one proof of possession per successor key, see `handoff evm-pop`); "+
-			"--next-trust-base must then name the unchanged root members at the next root epoch")
+		"coupled validator assignment change (JSON: validators and one proof of possession per successor key, see `handoff evm-pop`)")
+	propose.Flags().IntVar(&maxAttempts, "max-attempts", 3, "how many attempts to plan when a Prepare lapses before it is endorsed (each lapse makes the attempt dead)")
+	propose.Flags().DurationVar(&prepareTimeout, "prepare-timeout", 60*time.Second, "how long to wait for the root to commit the Prepare before endorsing")
 	propose.Flags().StringVar(&rootRPCs, "root-rpc", "", "comma-separated local old validator RPC URLs")
 	_ = propose.MarkFlagRequired("next-trust-base")
 	_ = propose.MarkFlagRequired("root-rpc")
@@ -415,4 +388,85 @@ func handoffPost(ctx context.Context, client *http.Client, url string, body []by
 		return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(out)
 	}
 	return nil
+}
+
+// ErrHandoffLapsed is the typed outcome of a propose whose Prepare lapsed: no Freeze followed in time, the EVM certifies again and the
+// attempt is dead. propose re-plans for the next attempt on its own, a bounded number of times, and returns this when it gives up.
+var ErrHandoffLapsed = errors.New("root handoff: the Prepare lapsed before it was endorsed")
+
+// proposeOnce plans one attempt, hands every validator the intent and endorses the Prepare-bound state at every validator, waiting
+// for the Prepare. It returns the number of endorsements, or ErrHandoffLapsed when the validators report that the attempt's Prepare
+// lapsed. A re-plan right after a lapse may find a validator that has not yet committed far enough to see the lapse, so its plan
+// request is retried briefly.
+func proposeOnce(ctx context.Context, client *http.Client, endpoints []string, request []byte, prepareTimeout time.Duration, replan bool) (int, error) {
+	var plan abdrc.HandoffApprovalMsg
+	planDeadline := time.Now()
+	if replan {
+		planDeadline = planDeadline.Add(30 * time.Second)
+	}
+	for {
+		err := handoffPost(ctx, client, endpoints[0]+"/api/v1/handoff/plan", request, &plan)
+		if err == nil {
+			break
+		}
+		if !replan || time.Now().After(planDeadline) {
+			return 0, err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	data, err := json.Marshal(plan)
+	if err != nil {
+		return 0, err
+	}
+	for _, endpoint := range endpoints[1:] {
+		if err = handoffPost(ctx, client, endpoint+"/api/v1/handoff/intent", data, nil); err != nil {
+			return 0, fmt.Errorf("validator %s refused the plan: %w", endpoint, err)
+		}
+	}
+	deadline := time.Now().Add(prepareTimeout)
+	var wg sync.WaitGroup
+	results := make(chan error, len(endpoints))
+	for _, endpoint := range endpoints {
+		wg.Add(1)
+		go func(endpoint string) {
+			defer wg.Done()
+			for {
+				err := handoffPost(ctx, client, endpoint+"/api/v1/handoff/endorse", data, nil)
+				if err == nil || !strings.Contains(err.Error(), "before the handoff is prepared") || time.Now().After(deadline) {
+					results <- err
+					return
+				}
+				select {
+				case <-ctx.Done():
+					results <- ctx.Err()
+					return
+				case <-time.After(time.Second):
+				}
+			}
+		}(endpoint)
+	}
+	wg.Wait()
+	close(results)
+	accepted, lapsed := 0, false
+	var refusals []error
+	for result := range results {
+		switch {
+		case result == nil:
+			accepted++
+		default:
+			lapsed = lapsed || strings.Contains(result.Error(), "the Prepare's freeze has lapsed")
+			refusals = append(refusals, result)
+		}
+	}
+	if accepted < len(endpoints)*2/3+1 {
+		if lapsed {
+			return accepted, fmt.Errorf("%w: %w", ErrHandoffLapsed, errors.Join(refusals...))
+		}
+		return accepted, fmt.Errorf("only %d/%d validators endorsed: %w", accepted, len(endpoints), errors.Join(refusals...))
+	}
+	return accepted, nil
 }

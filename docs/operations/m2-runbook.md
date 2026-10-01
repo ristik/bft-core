@@ -147,29 +147,14 @@ RPC to build and endorse the plan, sends that plan to the other old root RPCs fo
 endorsement, and returns after a quorum response. Root consensus commits or aborts
 the attempt. There is no separate CLI `endorse` or `commit` command.
 
-Immediately before **every** propose call, including the initial call and each
-retry, read the latest certified EVM parent from a current healthy shard-node
-status endpoint. Capture the query result for the evidence record:
-
-```sh
-build/ubft shard-node certified-parent --url REPLACE_SHARD_RPC_BASE_URL \
-  > REPLACE_EVIDENCE_DIR/certified-parent.txt
-```
-
-Prefer the proposal's own fresh query so the selected hash and proposal request
-are tied together. `--certified-parent-status-url` reads #300's `certifiedTip`
-immediately before building the plan, defaults `--frozen-parent` to that hash,
-and logs the selected height/hash. An explicit `--frozen-parent` may also be
-provided with that URL; if it differs from the freshly reported tip, the CLI
-returns `ErrStaleCertifiedParent` and does not submit the proposal. The root node
-independently checks that the parent is still eligible while building the plan.
-If it advanced after the GET, stop and retry only after confirming the previous
-attempt's terminal status. A query alone does not freeze the EVM parent.
+`propose` names no EVM parent: it plans the handoff, the root orders a Prepare (which freezes the EVM and binds the
+frozen parent) and only then are the endorsements collected, over the Prepare-bound parent. There is nothing to sample or pin before
+the call, and `--frozen-parent` / `--certified-parent-status-url` no longer exist. Record the Prepare-bound parent from the root log
+(`root handoff outcome` / the committed record) for the evidence.
 
 ```sh
 build/ubft root handoff propose \
   --next-trust-base REPLACE_NEXT_TRUST_BASE_JSON \
-  --certified-parent-status-url REPLACE_SHARD_RPC_BASE_URL \
   --root-rpc REPLACE_OLD_ROOT_RPC_1,REPLACE_OLD_ROOT_RPC_2,REPLACE_OLD_ROOT_RPC_3
 ```
 
@@ -293,18 +278,16 @@ Retain the CLI's committed Abort record ID and ordered round with the exact
 target. A timeout is pending/unknown. A `too late` response means H committed;
 stop and do not retry. After observing committed Abort, retry the same network
 and predecessor at `attempt+1`, with new approvals and the same successor trust
-base. The propose command must query the current certified parent again for the
-new attempt; do not reuse the previous hash:
+base. Run `propose` again; the root binds the frozen parent anew at the next Prepare:
 
 ```sh
 build/ubft root handoff propose \
   --next-trust-base REPLACE_NEXT_TRUST_BASE_JSON \
-  --certified-parent-status-url REPLACE_SHARD_RPC_BASE_URL \
   --root-rpc REPLACE_OLD_ROOT_RPC_1,REPLACE_OLD_ROOT_RPC_2,REPLACE_OLD_ROOT_RPC_3
 ```
 
 Then repeat the committed/activated/new-epoch checks in procedure 1. Record the
-new attempt number and freshly sampled frozen parent.
+new attempt number and the newly bound frozen parent.
 
 **STOP:** if the attempt remains prepared/endorsed, if no terminal `phase=aborted`
 record appears, if validators disagree about the outcome, or if no fresh certified
@@ -633,13 +616,9 @@ Stop and do not resume signing on any of these conditions:
 There are four concrete gaps; until closed, this document is a rehearsal guide,
 not a complete recovery authority:
 
-1. **Frozen-parent selection and acceptance:** the read-only
-   `shard-node certified-parent` query and fresh-tip `root handoff propose`
-   default are in [H6 CLI PR #320](https://github.com/ristik/bft-core/pull/320),
-   not yet available to deployed binaries. Use them only after that PR is merged
-   and the approved BFT release is deployed. The root's independent stale-parent
-   check remains required; an independent operator has not rehearsed the
-   end-to-end selection/retry path.
+1. **Frozen-parent selection:** closed by the Prepare-first order. The root binds the frozen parent at the Prepare record and
+   `root handoff propose` names none; the `shard-node certified-parent` query remains a read-only status tool for evidence.
+
 2. **Authority advancement evidence:** `signing-authority advance-epoch` is a
    real command, but the merged profile-2 lane does not call it for each EVM
    authority or rehearse its session replacement and shard reconnect sequence.

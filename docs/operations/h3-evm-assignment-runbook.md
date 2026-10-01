@@ -21,17 +21,16 @@ a separate step; this is the procedure it follows.
 - **Every successor key proves possession**, retained keys included, over the exact context of this
   attempt. A proof cannot be reused for another attempt, predecessor or frozen parent.
 
-## 1. Choose the frozen parent and read the context
+## 1. Read the context
 
 ```sh
 build/ubft root handoff evm-context \
   --root-rpc REPLACE_LOCAL_OLD_VALIDATOR_RPC \
-  --frozen-parent REPLACE_CERTIFIED_EVM_PARENT_HASH \
   --out context.json
 ```
 
 `context.json` carries the network, the predecessor root body, the attempt (an aborted attempt n makes
-the next one n+1: collect proofs again), the frozen parent, the installed PDR and whether its
+the next one n+1: collect proofs again; so is a Prepare whose freeze lapsed), the installed PDR and whether its
 acknowledgement is pending. Also confirm the successor nodes can restore the parent from the archive in
 time; possession is not availability.
 
@@ -64,9 +63,15 @@ out of band.
 build/ubft root handoff propose \
   --next-trust-base next-trust-base-epoch-N+1.json \
   --next-evm-assignment assignment.json \
-  --frozen-parent REPLACE_CERTIFIED_EVM_PARENT_HASH \
   --root-rpc REPLACE_ROOT1,REPLACE_ROOT2,REPLACE_ROOT3
 ```
+
+`propose` plans the handoff, has the root order a Prepare (which freezes the EVM and binds the frozen parent) and
+then collects the endorsements of that Prepare-bound state; it waits for the Prepare (`--prepare-timeout`, default 60 s)
+and needs no parent. If the Prepare gets no Freeze within 24 root rounds the freeze lapses, the EVM certifies again and
+the attempt is dead. `propose` re-plans for the next attempt on its own (up to `--max-attempts`, default 3; the context and
+proofs of possession are per attempt, so if you build them by hand read the context again and re-run). The root logs
+`root handoff outcome phase=lapsed` once per lapsed attempt.
 
 A bad or missing proof, a stale installed assignment, an assignment not coupled to `--next-trust-base` or a pending
 acknowledgement is refused **before** any endorsement is signed. After H commits, restart the root
@@ -88,10 +93,10 @@ unaffected and no certified block is rolled back. Replace the unacknowledged ass
 
 ```sh
 build/ubft root handoff evm-assemble ... --supersede --out supersede.json   # context read after the stall
-build/ubft root handoff propose ... --next-evm-assignment supersede.json --frozen-parent <the same P>
+build/ubft root handoff propose ... --next-evm-assignment supersede.json
 ```
 
-The candidate must extend the committed chain this validator has derived (the same P, the superseded H
+The candidate must extend the committed chain this validator has derived (the Prepare-bound P, the superseded H
 and the acknowledged base), and the previous set's late acknowledgement is refused because only the newest
 installed set is in the shard trust base. One folded acknowledgement summarizes up to 64 consecutive
 committed steps.

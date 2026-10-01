@@ -498,8 +498,6 @@ func TestDeriveActivatedPDRIsolatedRefusals(t *testing.T) {
 	relinked.NextBodyID = otherID[:]
 	_, _, err = DeriveActivatedPDR(relinked, other, b.preimage, f.parent)
 	require.ErrorIs(t, err, ErrAssignmentHistory)
-	_, _, err = DeriveActivatedPDR(record, body, b.preimage, bytes.Repeat([]byte{7}, 32))
-	require.ErrorIs(t, err, ErrAssignmentHistory, "the candidate names another frozen parent")
 	wrongAttempt := record
 	wrongAttempt.Attempt = 3
 	_, _, err = DeriveActivatedPDR(wrongAttempt, body, b.preimage, f.parent)

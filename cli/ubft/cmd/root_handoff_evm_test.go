@@ -59,8 +59,7 @@ func TestEVMAssignmentCLIFlow(t *testing.T) {
 	dir := t.TempDir()
 	keys := []successorKey{newSuccessorKey(t, "ev-a"), newSuccessorKey(t, "ev-b"), newSuccessorKey(t, "ev-c")}
 	infos := []*types.NodeInfo{keys[0].info, keys[1].info, keys[2].info}
-	ctx := consensus.EVMAssignmentContext{Network: 5, Predecessor: bytes.Repeat([]byte{1}, 32), Attempt: 2,
-		FrozenParent: bytes.Repeat([]byte{2}, 32), Installed: installedPDR(t)}
+	ctx := consensus.EVMAssignmentContext{Network: 5, Predecessor: bytes.Repeat([]byte{1}, 32), Attempt: 2, Installed: installedPDR(t)}
 	contextFile := writeJSON(t, dir, "context.json", ctx)
 	validatorsFile := writeJSON(t, dir, "validators.json", infos)
 	// Validator-set changes are coupled: each successor root entity has one delegated EVM validator.
@@ -148,7 +147,7 @@ func TestProposeCarriesTheEVMAssignmentToTheOperator(t *testing.T) {
 	installed := installedPDR(t)
 	succ, err := evmassign.NewSuccessor(installed, succInfos)
 	require.NoError(t, err)
-	pop := evmassign.PoPContext{Network: 5, Attempt: 0, Predecessor: [32]byte{1}, Parent: [32]byte{2}}
+	pop := evmassign.PoPContext{Network: 5, Attempt: 0, Predecessor: [32]byte{1}}
 	var proofs []evmassign.PoP
 	for _, k := range keys {
 		signer, err := k.conf.Signer()
@@ -168,7 +167,7 @@ func TestProposeCarriesTheEVMAssignmentToTheOperator(t *testing.T) {
 
 	cmd := newRootCmd()
 	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetArgs([]string{"handoff", "propose", "--next-trust-base", nextFile, "--frozen-parent", "0x" + string(bytes.Repeat([]byte{'4'}, 64)),
+	cmd.SetArgs([]string{"handoff", "propose", "--next-trust-base", nextFile,
 		"--root-rpc", server.URL, "--next-evm-assignment", assignment})
 	require.NoError(t, cmd.Execute())
 	require.Equal(t, 1, operator.evmCalls, "an assignment request reaches the EVM-capable operator entry point")
@@ -180,16 +179,16 @@ func TestProposeCarriesTheEVMAssignmentToTheOperator(t *testing.T) {
 	operator = &handoffOperatorStub{}
 	cmd = newRootCmd()
 	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetArgs([]string{"handoff", "propose", "--next-trust-base", nextFile, "--frozen-parent", "0x" + string(bytes.Repeat([]byte{'4'}, 64)), "--root-rpc", server.URL})
+	cmd.SetArgs([]string{"handoff", "propose", "--next-trust-base", nextFile, "--root-rpc", server.URL})
 	require.NoError(t, cmd.Execute())
 	require.Zero(t, operator.evmCalls)
 }
 
-type evmContextStub struct{ parent []byte }
+type evmContextStub struct{ calls int }
 
-func (s *evmContextStub) EVMAssignmentContext(parent []byte) (consensus.EVMAssignmentContext, error) {
-	s.parent = parent
-	return consensus.EVMAssignmentContext{Network: 5, Predecessor: bytes.Repeat([]byte{1}, 32), FrozenParent: parent}, nil
+func (s *evmContextStub) EVMAssignmentContext() (consensus.EVMAssignmentContext, error) {
+	s.calls++
+	return consensus.EVMAssignmentContext{Network: 5, Predecessor: bytes.Repeat([]byte{1}, 32)}, nil
 }
 
 func TestEVMContextEndpointIsLocalAndBounded(t *testing.T) {
@@ -203,11 +202,10 @@ func TestEVMContextEndpointIsLocalAndBounded(t *testing.T) {
 		handler(w, r)
 		return w
 	}
-	require.Equal(t, http.StatusForbidden, post("192.0.2.1:1", `{"frozenParent":"0x`+string(bytes.Repeat([]byte{'2'}, 64))+`"}`).Code)
-	require.Nil(t, stub.parent)
-	require.Equal(t, http.StatusBadRequest, post("127.0.0.1:1", `{"frozenParent":"0x12"}`).Code)
-	require.Equal(t, http.StatusOK, post("127.0.0.1:1", `{"frozenParent":"0x`+string(bytes.Repeat([]byte{'2'}, 64))+`"}`).Code)
-	require.Equal(t, bytes.Repeat([]byte{0x22}, 32), stub.parent)
+	require.Equal(t, http.StatusForbidden, post("192.0.2.1:1", `{}`).Code)
+	require.Zero(t, stub.calls)
+	require.Equal(t, http.StatusOK, post("127.0.0.1:1", `{}`).Code)
+	require.Equal(t, 1, stub.calls, "the context names no EVM parent, so there is nothing to supply")
 	_ = abcrypto.NewInMemorySecp256K1Signer
 }
 
@@ -236,7 +234,7 @@ func TestProposeRefusesAnUncoupledAssignment(t *testing.T) {
 			defer server.Close()
 			cmd := newRootCmd()
 			cmd.SetOut(&bytes.Buffer{})
-			cmd.SetArgs([]string{"handoff", "propose", "--next-trust-base", tc.next, "--frozen-parent", "0x" + string(bytes.Repeat([]byte{'4'}, 64)),
+			cmd.SetArgs([]string{"handoff", "propose", "--next-trust-base", tc.next,
 				"--root-rpc", server.URL, "--next-evm-assignment", assignment})
 			require.ErrorIs(t, cmd.Execute(), evmassign.ErrCoupling)
 			require.Zero(t, operator.evmCalls, "nothing reaches the operator")
@@ -250,8 +248,7 @@ func TestShardKeyReplacementCLIFlow(t *testing.T) {
 	dir := t.TempDir()
 	evmKeys := []successorKey{newSuccessorKey(t, "ev-a"), newSuccessorKey(t, "ev-b")}
 	evmInfos := []*types.NodeInfo{evmKeys[0].info, evmKeys[1].info}
-	ctx := consensus.EVMAssignmentContext{Network: 5, Predecessor: bytes.Repeat([]byte{1}, 32), Attempt: 2,
-		FrozenParent: bytes.Repeat([]byte{2}, 32), Installed: installedPDR(t)}
+	ctx := consensus.EVMAssignmentContext{Network: 5, Predecessor: bytes.Repeat([]byte{1}, 32), Attempt: 2, Installed: installedPDR(t)}
 	contextFile := writeJSON(t, dir, "context.json", ctx)
 	_, pop, err := readContextFile(contextFile)
 	require.NoError(t, err)

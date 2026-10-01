@@ -18,7 +18,7 @@ func (f *fixture) popRequest(t *testing.T) signingauthority.HandoffPoPRequest {
 	succ := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: testPartitionID, PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256,
 		T2Timeout: 2500000000, Epoch: 1, Validators: []*types.NodeInfo{{NodeID: "node-1", SigKey: key, Stake: 1}}}
 	return signingauthority.HandoffPoPRequest{Domain: evmassign.PoPDomain, NodeID: "node-1", Successor: succ,
-		Context: evmassign.PoPContext{Network: 5, Attempt: 3, Predecessor: [32]byte{1}, Parent: [32]byte{2}}}
+		Context: evmassign.PoPContext{Network: 5, Attempt: 3, Predecessor: [32]byte{1}}}
 }
 
 // The operator channel serves the handoff possession proof, and it is the proof the handoff verifies.
@@ -38,7 +38,7 @@ func TestTheClientChannelRefusesTheHandoffPoP(t *testing.T) {
 	succ, err := types.Cbor.Marshal(req.Successor)
 	require.NoError(t, err)
 	payload, err := types.Cbor.Marshal(handoffPoPPayload{Domain: req.Domain, Network: req.Context.Network, Attempt: req.Context.Attempt,
-		Predecessor: req.Context.Predecessor[:], Parent: req.Context.Parent[:], Successor: succ, NodeID: req.NodeID})
+		Predecessor: req.Context.Predecessor[:], Successor: succ, NodeID: req.NodeID})
 	require.NoError(t, err)
 	for name, credential := range map[string][]byte{"the client's credential": client.ex.credential, "the operator's credential": f.operator.ex.credential} {
 		answer, err := rawCall(t, f.clientDir, wireRequest{Version: protocolVersion, Op: uint64(opSignHandoffPoP), Credential: credential, Payload: payload})
@@ -68,7 +68,6 @@ func TestTheHandoffPoPRefusalsKeepTheirNamesAcrossTheWire(t *testing.T) {
 		"another network":    func(r *signingauthority.HandoffPoPRequest) { r.Context.Network = 6 },
 		"another partition":  func(r *signingauthority.HandoffPoPRequest) { r.Successor.PartitionID++ },
 		"not the next epoch": func(r *signingauthority.HandoffPoPRequest) { r.Successor.Epoch = 5 },
-		"no frozen parent":   func(r *signingauthority.HandoffPoPRequest) { r.Context.Parent = [32]byte{} },
 	} {
 		bad := f.popRequest(t)
 		mutate(&bad)

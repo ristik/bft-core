@@ -25,6 +25,9 @@ type (
 		handoffAuth   handoffAuthority
 		lock          sync.RWMutex
 		log           *slog.Logger
+		// the attempt whose lapse was last reported (reported once)
+		lapseLogged                          bool
+		lapseLoggedEpoch, lapseLoggedAttempt uint64
 	}
 
 	PersistentStore interface {
@@ -161,15 +164,30 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 	if err != nil {
 		return nil, fmt.Errorf("committing new root block: %w", err)
 	}
-	if x.profile == ProfileHandoff && x.log != nil {
-		root := x.blockTree.Root()
-		if control := root.ShardState.Control; control != nil && root.GetRound() == control.OrderedRound &&
-			(control.Phase == "committed" || control.Phase == "aborted") {
-			x.log.Info("root handoff outcome", "phase", control.Phase, "attempt", control.Attempt,
-				"rootEpoch", control.Epoch, "rootRound", root.GetRound())
-		}
-	}
+	x.logHandoffOutcome(x.blockTree.Root())
 	return ucs, nil
+}
+
+// logHandoffOutcome reports the terminal outcomes of a handoff attempt when the committed root passes them: the committed or aborted
+// record, and the lapse of a Prepare (reported once per attempt).
+func (x *BlockStore) logHandoffOutcome(root *ExecutedBlock) {
+	if x.profile != ProfileHandoff || x.log == nil || root == nil {
+		return
+	}
+	if control := root.ShardState.Control; control != nil && root.GetRound() == control.OrderedRound &&
+		(control.Phase == "committed" || control.Phase == "aborted") {
+		x.log.Info("root handoff outcome", "phase", control.Phase, "attempt", control.Attempt,
+			"rootEpoch", control.Epoch, "rootRound", root.GetRound())
+	}
+	// A lapse is not an ordered record: it is the committed round passing the Prepare's window. Report it once per attempt so the
+	// operator (and the lane) retries at once instead of waiting out its own timeout.
+	if control := root.ShardState.Control; PrepareLapsed(control, root.GetRound()) &&
+		!(x.lapseLogged && x.lapseLoggedEpoch == control.Epoch && x.lapseLoggedAttempt == control.Attempt) {
+		x.lapseLogged, x.lapseLoggedEpoch, x.lapseLoggedAttempt = true, control.Epoch, control.Attempt
+		x.log.Info("root handoff outcome", "phase", "lapsed", "attempt", control.Attempt,
+			"rootEpoch", control.Epoch, "rootRound", root.GetRound(), "preparedRound", control.OrderedRound,
+			"reason", "no Freeze within the endorsement window; the EVM certifies again and the next plan is attempt+1")
+	}
 }
 
 // Add adds new round state to pipeline and returns the new state root hash a.k.a. execStateID
@@ -407,28 +425,6 @@ func (x *BlockStore) CommittedFrozenParent(parent []byte) bool {
 		return false
 	}
 	_, err = frozenShard(root.ShardState, configs, parent)
-	return err == nil
-}
-
-// HighQCFrozenParent detects an EVM change already ordered on the live branch
-// but not yet reflected in the committed checkpoint used for operator plans.
-func (x *BlockStore) HighQCFrozenParent(parent []byte) bool {
-	if x.profile != ProfileHandoff {
-		return false
-	}
-	qc := x.blockTree.HighQc()
-	if qc == nil {
-		return false
-	}
-	block, err := x.blockTree.FindBlock(qc.GetRound())
-	if err != nil {
-		return false
-	}
-	configs, err := x.orchestration.ShardConfigs(block.GetRound())
-	if err != nil {
-		return false
-	}
-	_, err = frozenShard(block.ShardState, configs, parent)
 	return err == nil
 }
 

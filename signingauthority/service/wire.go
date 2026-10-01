@@ -175,7 +175,6 @@ type handoffPoPPayload struct {
 	Network     uint64
 	Attempt     uint64
 	Predecessor []byte
-	Parent      []byte
 	Successor   []byte
 	NodeID      string
 }

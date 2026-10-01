@@ -18,7 +18,7 @@ func popFixture(t *testing.T) (*Authority, HandoffPoPRequest, []byte) {
 	succ := &types.PartitionDescriptionRecord{Version: 1, NetworkID: testNetworkID, PartitionID: testPartitionID, PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 2500000000,
 		Epoch: shardEpoch + 1, Validators: []*types.NodeInfo{{NodeID: testNodeID, SigKey: pub, Stake: 1}}}
 	req := HandoffPoPRequest{Domain: evmassign.PoPDomain, NodeID: testNodeID, Successor: succ,
-		Context: evmassign.PoPContext{Network: uint64(testNetworkID), Attempt: 2, Predecessor: [32]byte{1}, Parent: [32]byte{2}}}
+		Context: evmassign.PoPContext{Network: uint64(testNetworkID), Attempt: 2, Predecessor: [32]byte{1}}}
 	return a, req, pub
 }
 
@@ -34,7 +34,6 @@ func TestHandoffPoPVerifiesInTheHandoff(t *testing.T) {
 	for name, mutate := range map[string]func(*evmassign.PoPContext){
 		"attempt":     func(c *evmassign.PoPContext) { c.Attempt++ },
 		"predecessor": func(c *evmassign.PoPContext) { c.Predecessor = [32]byte{9} },
-		"parent":      func(c *evmassign.PoPContext) { c.Parent = [32]byte{9} },
 	} {
 		other := req.Context
 		mutate(&other)
@@ -64,7 +63,6 @@ func TestHandoffPoPRefusesAWrongContext(t *testing.T) {
 		"not the next shard epoch": func(r *HandoffPoPRequest, _ []byte) { r.Successor.Epoch += 1 },
 		"a shard epoch two ahead":  func(r *HandoffPoPRequest, _ []byte) { r.Successor.Epoch = shardEpoch + 2 },
 		"no predecessor":           func(r *HandoffPoPRequest, _ []byte) { r.Context.Predecessor = [32]byte{} },
-		"no frozen parent":         func(r *HandoffPoPRequest, _ []byte) { r.Context.Parent = [32]byte{} },
 		"no successor":             func(r *HandoffPoPRequest, _ []byte) { r.Successor = nil },
 		"the successor names another key": func(r *HandoffPoPRequest, _ []byte) {
 			other, err := New(Enrollment{AuthorityID: "x", NodeID: "x", NetworkID: testNetworkID, PartitionID: testPartitionID, RootEpoch: PinRootEpoch(rootEpoch), Profile: ProfileLegacyBCRv1}, trustStub{})
@@ -102,7 +100,7 @@ func TestHandoffPoPRefusesAWrongContext(t *testing.T) {
 		succ := &types.PartitionDescriptionRecord{Version: 1, NetworkID: testNetworkID, PartitionID: testPartitionID, PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 2500000000,
 			Epoch: shardEpoch + 1, Validators: []*types.NodeInfo{{NodeID: testNodeID, SigKey: pub, Stake: 1}}}
 		req := HandoffPoPRequest{Domain: evmassign.PoPDomain, NodeID: testNodeID, Successor: succ,
-			Context: evmassign.PoPContext{Network: uint64(testNetworkID), Predecessor: [32]byte{1}, Parent: [32]byte{2}}}
+			Context: evmassign.PoPContext{Network: uint64(testNetworkID), Predecessor: [32]byte{1}}}
 		pop, err := a.SignHandoffPoP(req)
 		require.NoError(t, err)
 		require.NoError(t, evmassign.VerifyPoPs(req.Context, succ, []evmassign.PoP{pop}))

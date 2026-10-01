@@ -25,11 +25,7 @@ import (
 
 // evmAssignmentContextOperator is the local read of the possession-proof context.
 type evmAssignmentContextOperator interface {
-	EVMAssignmentContext(frozenParent []byte) (consensus.EVMAssignmentContext, error)
-}
-
-type evmContextRequest struct {
-	FrozenParent string `json:"frozenParent"`
+	EVMAssignmentContext() (consensus.EVMAssignmentContext, error)
 }
 
 func rootHandoffEVMContextHandler(operator evmAssignmentContextOperator) http.HandlerFunc {
@@ -37,17 +33,7 @@ func rootHandoffEVMContextHandler(operator evmAssignmentContextOperator) http.Ha
 		if !localOperatorRequest(w, r) {
 			return
 		}
-		var request evmContextRequest
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&request) != nil {
-			http.Error(w, "invalid EVM assignment context request", http.StatusBadRequest)
-			return
-		}
-		parent, err := parseHandoffID(request.FrozenParent)
-		if err != nil {
-			http.Error(w, "invalid frozen parent", http.StatusBadRequest)
-			return
-		}
-		out, err := operator.EVMAssignmentContext(parent)
+		out, err := operator.EVMAssignmentContext()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
@@ -210,16 +196,14 @@ func newShardAssembleCmd() *cobra.Command {
 }
 
 func newEVMContextCmd() *cobra.Command {
-	var parent, rootRPC, out string
+	var rootRPC, out string
 	cmd := &cobra.Command{Use: "evm-context", Short: "Print the proof-of-possession context for a prospective EVM assignment change",
-		Long: "Reads the possession-proof context (network, predecessor root body, attempt, frozen parent) and the installed EVM assignment from a\n" +
+		Long: "Reads the possession-proof context (network, predecessor root body, attempt) and the installed EVM assignment from a\n" +
 			"local old validator. Every successor key signs a message over exactly this context (`handoff evm-pop`), so a proof cannot be\n" +
-			"replayed for another attempt, predecessor or frozen parent.",
+			"replayed for another attempt or predecessor. It names no EVM parent: the root binds the frozen parent when it orders the\n" +
+			"Prepare, after the proofs are collected.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			body, err := json.Marshal(evmContextRequest{FrozenParent: parent})
-			if err != nil {
-				return err
-			}
+			body := []byte("{}")
 			endpoint := strings.TrimRight(strings.Split(rootRPC, ",")[0], "/") + "/api/v1/handoff/evm-assignment/context"
 			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 			defer cancel()
@@ -237,10 +221,8 @@ func newEVMContextCmd() *cobra.Command {
 			_, err = fmt.Fprintln(cmd.OutOrStdout(), string(encoded))
 			return err
 		}}
-	cmd.Flags().StringVar(&parent, "frozen-parent", "", "certified EVM parent block hash (32-byte hex) the handoff will freeze")
 	cmd.Flags().StringVar(&rootRPC, "root-rpc", "", "local old validator RPC URL")
 	cmd.Flags().StringVar(&out, "out", "", "write the context JSON here instead of stdout")
-	_ = cmd.MarkFlagRequired("frozen-parent")
 	_ = cmd.MarkFlagRequired("root-rpc")
 	return cmd
 }
@@ -254,12 +236,11 @@ func readContextFile(path string) (consensus.EVMAssignmentContext, evmassign.PoP
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return c, evmassign.PoPContext{}, fmt.Errorf("decoding context %q: %w", path, err)
 	}
-	if len(c.Predecessor) != 32 || len(c.FrozenParent) != 32 || c.Installed == nil {
+	if len(c.Predecessor) != 32 || c.Installed == nil {
 		return c, evmassign.PoPContext{}, fmt.Errorf("context %q is incomplete", path)
 	}
 	pop := evmassign.PoPContext{Network: c.Network, Attempt: c.Attempt}
 	copy(pop.Predecessor[:], c.Predecessor)
-	copy(pop.Parent[:], c.FrozenParent)
 	return c, pop, nil
 }
 
