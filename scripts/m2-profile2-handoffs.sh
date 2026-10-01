@@ -112,9 +112,19 @@ m2_send_paid() {
         local registry=0xff00000000000000000000000000000000000002 assignment cursor
         assignment=$(rpc "http://127.0.0.1:$rpcPort" eth_getStorageAt "[\"$registry\",\"$m2_epoch_slot\",\"latest\"]" | pyget "['result']")
         cursor=$(rpc "http://127.0.0.1:$rpcPort" eth_getStorageAt "[\"$registry\",\"$m2_cursor_slot\",\"latest\"]" | pyget "['result']")
-        if [ "$(python3 -c "print(int('$assignment',16))" 2>/dev/null)" = "$epoch" ] &&
-           [ "$(python3 -c "print(int('$cursor',16))" 2>/dev/null)" = "$((epoch-1))" ]; then
-          echo "paid epoch $epoch nonce $nonce hash=$expected registryRootEpoch=$epoch transitionCursor=$((epoch-1))"
+        local registryOk=false shardEpoch=
+        if [ "$(registry_layout)" = 2 ]; then
+          # Layout 2 separates the root epoch (m2_epoch_slot) from the shard assignment epoch, which a coupled
+          # configuration-only advance leaves unchanged.
+          shardEpoch=$(rpc "http://127.0.0.1:$rpcPort" eth_getStorageAt "[\"$registry\",\"$m2_shard_epoch_slot\",\"latest\"]" | pyget "['result']")
+          if [ "$(python3 -c "print(int('$assignment',16))" 2>/dev/null)" = "$epoch" ] &&
+             [ "$(python3 -c "print(int('$shardEpoch',16))" 2>/dev/null)" = "${M2_EXPECT_SHARD_EPOCH:-0}" ]; then registryOk=true; fi
+        elif [ "$(python3 -c "print(int('$assignment',16))" 2>/dev/null)" = "$epoch" ] &&
+             [ "$(python3 -c "print(int('$cursor',16))" 2>/dev/null)" = "$((epoch-1))" ]; then
+          registryOk=true
+        fi
+        if $registryOk; then
+          echo "paid epoch $epoch nonce $nonce hash=$expected registryRootEpoch=$epoch transitionCursor=$((epoch-1)) layout=$(registry_layout)"
           if [ -n "${M2_NEXT_NONCE:-}" ]; then M2_NEXT_NONCE=$((nonce + 1)); fi
           return 0
         fi
@@ -361,8 +371,90 @@ m2_handoff() {
   m2_measure_pause "$((epoch-1))" "$epoch"
 }
 
+# --- Coupled configuration-only epoch advance (#328) -----------------------------------------------------
+# The same root committee with the same keys moves to the next root epoch; the EVM assignment (shard epoch) is
+# unchanged. No successor key signs a proof of possession, so it works with SIGNING=authority: the signing
+# authority still advances its epoch, validators restart under it, and restore/archive behaviour is exercised
+# above the authority high-water mark. A key-replacing coupled rotation needs successor PoPs (SIGNING=local) and
+# is covered by the H3 acceptance lane, not here.
+m2_same_members_trust_base() {
+  local epoch=$1 roots=$2 out=$3 i infos=()
+  for i in $roots; do infos+=(--node-info "test-nodes/root$i/node-info.json"); done
+  build/ubft trust-base generate --home test-nodes --network-id 3 --epoch "$epoch" \
+    --epoch-start "$((epoch * 100000))" --previous-trust-base "test-nodes/trust-base-epoch$((epoch-1)).json" \
+    --output-file-name "$out" "${infos[@]}" >/dev/null || return 1
+  for i in $roots; do
+    build/ubft trust-base sign --home "test-nodes/root$i" --trust-base "test-nodes/$out" >/dev/null || return 1
+  done
+}
+
+m2_config_only_handoff() { # epoch roots oldRpcs
+  local epoch=$1 roots=$2 oldRpcs=$3 oldEpoch=$(($1-1)) nextFile="trust-base-epoch$1.json"
+  local i parent logStart outcome waitStep committed=false first boot prev activated
+  first=$(echo "$roots" | awk '{print $1}')
+  m2_same_members_trust_base "$epoch" "$roots" "$nextFile" || return 1
+  for i in $(seq 1 30); do
+    parent=$(m2_latest_certified_parent) || { echo "config-only handoff attempt $i: waiting for a common certified EVM parent"; sleep 1; continue; }
+    logStart=$(wc -l < "test-nodes/root$first/debug.log")
+    if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" --frozen-parent "$parent" --root-rpc "$oldRpcs"; then
+      sleep 1; continue
+    fi
+    outcome=
+    for waitStep in $(seq 1 90); do
+      outcome=$(tail -n +"$((logStart+1))" "test-nodes/root$first/debug.log" |
+        grep -E "msg=\"root handoff outcome\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
+      [[ "$outcome" = *phase=committed* ]] && { committed=true; break; }
+      [[ "$outcome" = *phase=aborted* ]] && { echo "config-only handoff aborted; retrying with a fresh certified parent"; break; }
+      sleep 1
+    done
+    $committed && break
+  done
+  $committed || { echo "config-only handoff to epoch $epoch did not commit" >&2; return 1; }
+  # Every root restarts on the install epoch; each fetches and verifies the committed bundle.
+  for i in $roots; do
+    prev=$(echo "$roots" | tr ' ' '\n' | grep -vx "$i" | head -1)
+    boot=$(m2_root_addr "$prev")
+    stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return 1
+    for waitStep in $(seq 1 50); do
+      lsof -nP -iTCP:"$(m2_rpc_port "$i")" -sTCP:LISTEN >/dev/null 2>&1 || break
+      sleep 0.2
+    done
+    m2_archive_root_state "$i" "$epoch" || return 1
+    m2_start_root "$i" "$epoch" "$boot" || return 1
+  done
+  m2_wait_root_epoch "$first" "$epoch" || return 1
+  for i in $(m2_online_validators); do
+    activated=false
+    for waitStep in $(seq 1 90); do
+      if grep -Eq "msg=\"handoff activated\" rootEpoch=$epoch([[:space:]]|$)" "test-nodes/evm$i/debug.log"; then activated=true; break; fi
+      sleep 1
+    done
+    $activated || { echo "EVM validator $i did not activate root epoch $epoch" >&2; return 1; }
+  done
+  m2_advance_authorities "$epoch" "$nextFile" || return 1
+  m2_send_paid "$epoch" "${M2_NEXT_NONCE:-$((epoch+1))}" || return 1
+  m2_measure_pause "$oldEpoch" "$epoch"
+}
+
+# M2_HANDOFF_MODE: config-only (default on registry layout 2) or rotate (key-replacing, layout 1 only: layout 2
+# enforces coupled validator-set changes, which this root-only rotation is not).
+m2HandoffMode=${M2_HANDOFF_MODE:-}
+if [ -z "$m2HandoffMode" ]; then
+  if [ "$(registry_layout)" = 2 ]; then m2HandoffMode=config-only; else m2HandoffMode=rotate; fi
+fi
+case "$m2HandoffMode" in
+  config-only) ;;
+  rotate)
+    if [ "$(registry_layout)" = 2 ]; then
+      echo "M2_HANDOFF_MODE=rotate is refused on registry layout 2: root-only key rotation is not a coupled validator-set change (use config-only, or the H3 lane for coupled rotation)" >&2
+      return 1
+    fi ;;
+  *) echo "M2_HANDOFF_MODE must be config-only or rotate" >&2; return 1 ;;
+esac
+echo "M2 handoff mode: $m2HandoffMode (registry layout $(registry_layout))"
+
 cp test-nodes/trust-base.json test-nodes/trust-base-epoch1.json
-read -r m2_epoch_slot m2_cursor_slot < <(go run ./scripts/m2slots)
+read -r m2_epoch_slot m2_cursor_slot m2_shard_epoch_slot < <(go run ./scripts/m2slots)
 for initialHash in $(printf '%b' "$txHashes"); do
   initialReady=false
   for i in $(seq 1 90); do
@@ -387,14 +479,24 @@ if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   bash scripts/h4-restore-probe.sh stop || return 1
   export M2A_VALIDATOR1_WIPED=1
 fi
-m2_handoff 2 4 5 '1 2 3 4' "$(m2_root_addr 4)" \
-  'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
+if [ "$m2HandoffMode" = config-only ]; then
+  m2_config_only_handoff 2 '1 2 3 4' \
+    'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
+else
+  m2_handoff 2 4 5 '1 2 3 4' "$(m2_root_addr 4)" \
+    'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
+fi
 if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
   echo "F8 mixed lane completed one root handoff while all aggregator shards remained active"
   return 0
 fi
-m2_handoff 3 3 6 '1 2 3 5' "$(m2_root_addr 3)" \
-  'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25870' || return 1
+if [ "$m2HandoffMode" = config-only ]; then
+  m2_config_only_handoff 3 '1 2 3 4' \
+    'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
+else
+  m2_handoff 3 3 6 '1 2 3 5' "$(m2_root_addr 3)" \
+    'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25870' || return 1
+fi
 if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   bash scripts/h4-restore-probe.sh restore || return 1
   ln -sf ../h4-replaced/restore.log test-nodes/evm1/debug.log
