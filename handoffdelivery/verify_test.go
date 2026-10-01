@@ -66,3 +66,32 @@ func TestVerifyNativeBundleGuards(t *testing.T) {
 		require.ErrorIs(t, err, ErrBundle)
 	})
 }
+
+func TestBundleCandidateMustMatchTheSuccessorBodyAndCodecsAreStrict(t *testing.T) {
+	f := handoffbundle.New(t)
+	base := Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot}
+	withCandidate := base
+	withCandidate.Candidate = []byte("not the candidate the body binds")
+	_, err := Verify(withCandidate, f.Old, f.Partition, f.Shard, f.ConfHash)
+	require.ErrorIs(t, err, ErrBundle)
+	require.ErrorContains(t, err, "candidate does not match the successor body")
+
+	legacy, err := EncodeBundle(base)
+	require.NoError(t, err)
+	got, err := DecodeBundle(legacy)
+	require.NoError(t, err)
+	require.Empty(t, got.Candidate)
+	current, err := EncodeBundle(withCandidate)
+	require.NoError(t, err)
+	got, err = DecodeBundle(current)
+	require.NoError(t, err)
+	require.Equal(t, withCandidate.Candidate, got.Candidate)
+	require.NotEqual(t, legacy, current)
+	// The four-element shape with an empty candidate is a second encoding of the legacy value: refused.
+	raw, err := types.Cbor.Marshal(base)
+	require.NoError(t, err)
+	_, err = DecodeBundle(raw)
+	require.ErrorIs(t, err, ErrBundle)
+	_, err = DecodeBundle(append(legacy, 0))
+	require.ErrorIs(t, err, ErrBundle)
+}

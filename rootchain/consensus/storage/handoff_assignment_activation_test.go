@@ -433,3 +433,73 @@ func TestAcknowledgementEndsThePendingStateAndRetiredKeysStayRefused(t *testing.
 		require.ErrorContains(t, err, "not in the trustbase of the shard", retired)
 	}
 }
+
+func TestActivationRefusesACheckpointWhoseCommittedRecordIsNotTheDerivedOne(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedFees(t)
+	h := f.commitAssignment(t)
+	_, err := f.store.InstallEpochAnchor(h.head, h.verified, h.genesis)
+	require.NoError(t, err)
+	root := f.store.blockTree.Root()
+	configs, err := f.orch.ShardConfigs(7)
+	require.NoError(t, err)
+	record := h.commit
+	_, err = activateEVMAssignment(root.ShardState.States, configs, record, 7, crypto.SHA256)
+	require.NoError(t, err)
+	wrong := record
+	wrong.SuccessorTRHash = bytes.Repeat([]byte{0x99}, 32)
+	_, err = activateEVMAssignment(root.ShardState.States, configs, wrong, 7, crypto.SHA256)
+	require.ErrorIs(t, err, ErrControlCheckpoint)
+	require.ErrorContains(t, err, "differs from the derived assignment")
+	_, err = activateEVMAssignment(root.ShardState.States, configs, record, 8, crypto.SHA256)
+	require.ErrorIs(t, err, ErrControlCheckpoint, "the derived configuration activates only at its own boundary")
+}
+
+func TestAssignmentActivationRefusesADerivedRecordThatIsNotH(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	h := f.commitAssignment(t)
+	root := f.store.blockTree.Root()
+	wrong := h.commit
+	wrong.SuccessorTRHash = bytes.Repeat([]byte{0x99}, 32)
+	fresh := freshOrchestration(t, f)
+	err := installCommittedAssignmentFrom(f.store.storage, fresh, crypto.SHA256, snapshotRootOf(t, f, h), wrong, h.genesis.OrderedRound)
+	_ = root
+	require.ErrorIs(t, err, ErrAssignmentHistory)
+	require.ErrorContains(t, err, "derived successor technical record differs from H")
+}
+
+func snapshotRootOf(t *testing.T, f *assignmentFixture, h committedAssignment) *ExecutedBlock {
+	t.Helper()
+	block, err := NewRootBlock(h.head, crypto.SHA256, f.orch, ProfileHandoff)
+	require.NoError(t, err)
+	return block
+}
+
+func TestDeriveActivatedPDRIsolatedRefusals(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	c := f.candidate(t)
+	b := f.build(t, c)
+	body := b.body
+	record := b.freeze
+	record.Kind = "commit"
+	_, _, err := DeriveActivatedPDR(record, body, b.preimage, f.parent)
+	require.NoError(t, err)
+
+	other := body
+	other.ChangeRecordHash = bytes.Repeat([]byte{1}, 32)
+	_, _, err = DeriveActivatedPDR(record, other, b.preimage, f.parent)
+	require.ErrorIs(t, err, ErrAssignmentHistory)
+	_, _, err = DeriveActivatedPDR(record, body, b.preimage, bytes.Repeat([]byte{7}, 32))
+	require.ErrorIs(t, err, ErrAssignmentHistory, "the candidate names another frozen parent")
+	wrongAttempt := record
+	wrongAttempt.Attempt = 3
+	_, _, err = DeriveActivatedPDR(wrongAttempt, body, b.preimage, f.parent)
+	require.ErrorIs(t, err, ErrAssignmentHistory)
+	wrongBody := record
+	wrongBody.NextBodyID = bytes.Repeat([]byte{2}, 32)
+	_, _, err = DeriveActivatedPDR(wrongBody, body, b.preimage, f.parent)
+	require.ErrorIs(t, err, ErrAssignmentHistory)
+}

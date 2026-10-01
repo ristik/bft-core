@@ -185,6 +185,11 @@ func TestInstalledTransitionAdapterUsesAssignedShardRound(t *testing.T) {
 	transition, err := handoff.DecodeEVMTransition(transitionBytes)
 	require.NoError(t, err)
 	require.NotEqual(t, anchor.Slot+1, transition.Ack.EVMRound)
+	// The replica's synthetic shard has its own configuration; this deployment's registry is at the genesis one.
+	genesisConf := [32]byte(origin.FullShardConfHash())
+	transition.OldActiveConfHash, transition.NewActiveConfHash = genesisConf, genesisConf
+	transitionBytes, err = transition.Encode()
+	require.NoError(t, err)
 
 	tr := certifiedchain.Technical(0)
 	tr.Round = transition.Ack.EVMRound
