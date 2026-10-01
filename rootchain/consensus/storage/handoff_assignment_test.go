@@ -160,7 +160,7 @@ func (f *assignmentFixture) pops(t *testing.T, ctx evmassign.PoPContext, succ *t
 	t.Helper()
 	var out []evmassign.PoP
 	for _, v := range succ.Validators {
-		for _, k := range append(append([]evmKey(nil), f.oldKeys...), f.nextKeys...) {
+		for _, k := range append(append([]evmKey(nil), f.nextKeys...), f.oldKeys...) { // the successor key first: a rotation may keep a node id
 			if k.id == v.NodeID {
 				p, err := evmassign.SignPoP(k.signer, ctx, succ, k.id)
 				require.NoError(t, err)

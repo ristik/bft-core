@@ -378,13 +378,19 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 }
 
 // requestSignersAreActive reports whether every block certification request of the IR change request is signed by a member of the
-// shard's executing configuration. A timeout request carries none.
+// shard's executing configuration: the node is in the active trust base AND the signature verifies under the ACTIVE key of that node
+// (a rotation may keep a node id and change only its key, so membership by id alone would let the retired key through). A timeout
+// request carries none.
 func requestSignersAreActive(si *ShardInfo, irChReq *rctypes.IRChangeReq) (bool, error) {
 	for _, req := range irChReq.Requests {
 		if req == nil {
 			return false, errors.New("nil block certification request")
 		}
-		if err := si.Verify(req.NodeID, func(abcrypto.Verifier) error { return nil }); err != nil {
+		bs, err := req.Bytes()
+		if err != nil {
+			return false, err
+		}
+		if err := si.Verify(req.NodeID, func(v abcrypto.Verifier) error { return v.VerifyBytes(req.Signature, bs) }); err != nil {
 			return false, err
 		}
 	}

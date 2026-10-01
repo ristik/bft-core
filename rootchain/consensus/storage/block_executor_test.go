@@ -42,7 +42,7 @@ func TestNewGenesisBlock(t *testing.T) {
 }
 
 func TestExecutedBlock_Extend(t *testing.T) {
-	_, shardNodeInfos := testutils.CreateTestNodes(t, 3)
+	shardNodes, shardNodeInfos := testutils.CreateTestNodes(t, 3)
 	pdrEpoch1 := types.PartitionDescriptionRecord{
 		PartitionID: 1,
 		ShardID:     types.ShardID{},
@@ -75,6 +75,8 @@ func TestExecutedBlock_Extend(t *testing.T) {
 			SumOfEarnedFees: 3,
 		},
 	}
+	// The executor checks the request signature against the shard's active key (the verifier below is a mock).
+	require.NoError(t, certReq.Sign(shardNodes[0].Signer))
 	newBlock := drctypes.BlockData{
 		Author:    "test",
 		Round:     drctypes.GenesisRootRound + 1,

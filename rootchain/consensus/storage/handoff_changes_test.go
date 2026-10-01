@@ -223,41 +223,46 @@ func TestAggregatorKeyReplacementActivatesAtTheBoundaryAndSurvivesRestart(t *tes
 	})
 }
 
+// signedRequest is an IR change request whose block certification requests are signed by the given keys.
+func signedRequest(t *testing.T, key types.PartitionShardID, signers ...evmKey) *rctypes.IRChangeReq {
+	t.Helper()
+	reqs := make([]*certification.BlockCertificationRequest, 0, len(signers))
+	for _, k := range signers {
+		req := &certification.BlockCertificationRequest{PartitionID: key.PartitionID, ShardID: types.ShardID{}, NodeID: k.id,
+			InputRecord: &types.InputRecord{Version: 1, RoundNumber: 1, Hash: bytes.Repeat([]byte{0x41}, 32), PreviousHash: bytes.Repeat([]byte{0x40}, 32),
+				BlockHash: bytes.Repeat([]byte{0x42}, 32), SummaryValue: []byte{}}}
+		require.NoError(t, req.Sign(k.signer))
+		reqs = append(reqs, req)
+	}
+	return &rctypes.IRChangeReq{Partition: key.PartitionID, Shard: types.ShardID{}, CertReason: rctypes.Quorum, Requests: reqs}
+}
+
+// acceptingVerifier judges the request the way the real verifier does in the activation block: against the committed (anchor)
+// state, which accepts it.
+var acceptingVerifier = mockIRVerifier{verify: func(_ uint64, req *rctypes.IRChangeReq) (*types.InputRecord, error) {
+	return req.Requests[0].InputRecord, nil
+}}
+
+func addBlockWithRequests(t *testing.T, s *BlockStore, round uint64, anchor *rctypes.EpochAnchor, reqs ...*rctypes.IRChangeReq) *ExecutedBlock {
+	t.Helper()
+	block := &rctypes.BlockData{Version: 2, Round: round, Epoch: 2, Payload: &rctypes.Payload{Version: 2, Requests: reqs}}
+	if anchor != nil {
+		block.Anchor = anchor
+	} else {
+		prior := mustBlock(t, s, round-1)
+		block.Qc = &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 2, CurrentRootHash: prior.RootHash}}
+	}
+	_, err := s.Add(block, acceptingVerifier)
+	require.NoError(t, err)
+	return mustBlock(t, s, round)
+}
+
 // B1 (#329 review): requests are verified against the LAST COMMITTED shard state, which is still the pre-activation anchor in the
 // activation block, so a request set signed by a RETIRED key passed that verifier. The executor therefore also requires every
-// signer to be a member of the shard state it executes against, the configuration active for the block; a retired key's request is
-// skipped (not certified, no state change) identically on every root, in the activation block and the one after it, for an
-// aggregator shard and for the EVM shard.
+// signer to verify under the ACTIVE configuration of the shard (the state it executes against); a retired key's request is skipped
+// (not certified, no state change) identically on every root, in the activation block and the one after it, for an aggregator
+// shard and for the EVM shard.
 func TestRetiredKeyRequestIsNotCertifiedInTheActivationBlockOrTheNext(t *testing.T) {
-	// retiredRequest is a request set of retired members for the shard, built on the pre-activation state.
-	request := func(key types.PartitionShardID, nodes ...string) *rctypes.IRChangeReq {
-		reqs := make([]*certification.BlockCertificationRequest, 0, len(nodes))
-		for _, n := range nodes {
-			reqs = append(reqs, &certification.BlockCertificationRequest{PartitionID: key.PartitionID, ShardID: types.ShardID{}, NodeID: n,
-				InputRecord: &types.InputRecord{Version: 1, RoundNumber: 1, Hash: bytes.Repeat([]byte{0x41}, 32), PreviousHash: bytes.Repeat([]byte{0x40}, 32),
-					BlockHash: bytes.Repeat([]byte{0x42}, 32), SummaryValue: []byte{}}})
-		}
-		return &rctypes.IRChangeReq{Partition: key.PartitionID, Shard: types.ShardID{}, CertReason: rctypes.Quorum, Requests: reqs}
-	}
-	// A verifier that, like the real one in the activation block, judges the request against the committed (anchor) state and
-	// accepts it.
-	accept := mockIRVerifier{verify: func(_ uint64, req *rctypes.IRChangeReq) (*types.InputRecord, error) {
-		return req.Requests[0].InputRecord, nil
-	}}
-	addWith := func(t *testing.T, f *assignmentFixture, s *BlockStore, round uint64, anchor *rctypes.EpochAnchor, reqs ...*rctypes.IRChangeReq) *ExecutedBlock {
-		t.Helper()
-		block := &rctypes.BlockData{Version: 2, Round: round, Epoch: 2, Payload: &rctypes.Payload{Version: 2, Requests: reqs}}
-		if anchor != nil {
-			block.Anchor = anchor
-		} else {
-			prior := mustBlock(t, s, round-1)
-			block.Qc = &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 2, CurrentRootHash: prior.RootHash}}
-		}
-		_, err := s.Add(block, accept)
-		require.NoError(t, err)
-		return mustBlock(t, s, round)
-	}
-
 	f := newAssignmentFixture(t)
 	f.useRealOrchestration(t)
 	f.seedFees(t)
@@ -270,8 +275,8 @@ func TestRetiredKeyRequestIsNotCertifiedInTheActivationBlockOrTheNext(t *testing
 	require.NoError(t, err)
 
 	evm := f.shard
-	retiredEVM := []string{"ev-b", "ev-c", "ev-d"} // three of the four retired EVM keys: a quorum of the old set
-	for _, round := range []uint64{7, 8} {         // the activation block, then the next
+	retiredEVM := f.oldKeys[1:]            // three of the four retired EVM keys: a quorum of the old set
+	for _, round := range []uint64{7, 8} { // the activation block, then the next
 		var a0 *rctypes.EpochAnchor
 		if round == 7 {
 			a0 = anchor
@@ -282,7 +287,7 @@ func TestRetiredKeyRequestIsNotCertifiedInTheActivationBlockOrTheNext(t *testing
 				activated[key] = mustBlock(t, s, 7).ShardState.States[key].TR.Round
 			}
 		}
-		block := addWith(t, f, s, round, a0, request(a.key, a.oldKey.id), request(evm, retiredEVM...))
+		block := addBlockWithRequests(t, s, round, a0, signedRequest(t, a.key, a.oldKey), signedRequest(t, evm, retiredEVM...))
 		for name, key := range map[string]types.PartitionShardID{"aggregator": a.key, "EVM": evm} {
 			si := block.ShardState.States[key]
 			if round == 8 { // the activation block re-certifies every shard; afterwards an ignored request changes nothing
@@ -295,9 +300,51 @@ func TestRetiredKeyRequestIsNotCertifiedInTheActivationBlockOrTheNext(t *testing
 		}
 	}
 	t.Run("a request of the new members is still certified", func(t *testing.T) {
-		block := addWith(t, f, s, 9, nil, request(a.key, a.nextKey.id), request(evm, "ev-e", "ev-f", "ev-g"))
+		block := addBlockWithRequests(t, s, 9, nil, signedRequest(t, a.key, a.nextKey), signedRequest(t, evm, f.nextKeys[1:]...))
 		for name, key := range map[string]types.PartitionShardID{"aggregator": a.key, "EVM": evm} {
 			require.Contains(t, block.ShardState.Changed, key, "%s: the active members' request is processed", name)
 		}
 	})
+}
+
+// B1' (#329 review): a rotation that keeps a node id and changes only its signing key must refuse the retired key. Membership by
+// node id alone passed it; the signature must verify under the key of the ACTIVE configuration for that node, in the activation
+// block and the next, for an aggregator shard and for the EVM shard.
+func TestRotationKeepingTheNodeIDRefusesTheRetiredKey(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedFees(t)
+	a := f.addAggregator(t)
+	// The aggregator keeps its node id "agg-old" and gets a new key; EVM validator ev-a keeps its id with a new key too.
+	rotatedAgg := newEVMKey(t, a.oldKey.id)
+	rotated := aggregatorShard{conf: a.conf, key: a.key, oldKey: a.oldKey, nextKey: rotatedAgg}
+	rotatedEVM := newEVMKey(t, "ev-a")
+	f.nextKeys = []evmKey{rotatedEVM, newEVMKey(t, "ev-e"), newEVMKey(t, "ev-f"), newEVMKey(t, "ev-g")}
+	succ, err := evmassign.NewSuccessor(f.current, []*types.NodeInfo{f.nextKeys[0].info, f.nextKeys[1].info, f.nextKeys[2].info, f.nextKeys[3].info})
+	require.NoError(t, err)
+	f.succ = succ
+	f.changes = []evmassign.Change{f.replace(t, rotated, a.conf, nil)}
+	h := f.commitAssignment(t)
+	anchor, err := f.store.InstallEpochAnchor(h.head, h.verified, h.genesis)
+	require.NoError(t, err)
+	s, err := New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	evm := f.shard
+
+	for _, round := range []uint64{7, 8} {
+		var a0 *rctypes.EpochAnchor
+		if round == 7 {
+			a0 = anchor
+		}
+		block := addBlockWithRequests(t, s, round, a0, signedRequest(t, a.key, a.oldKey), signedRequest(t, evm, f.oldKeys[0]))
+		for name, key := range map[string]types.PartitionShardID{"aggregator": a.key, "EVM": evm} {
+			si := block.ShardState.States[key]
+			require.NotEqual(t, bytes.Repeat([]byte{0x42}, 32), []byte(si.IR.BlockHash), "%s round %d: the old key under the kept node id certified nothing", name, round)
+			require.EqualValues(t, 0, si.IR.Epoch, "%s round %d", name, round)
+		}
+	}
+	block := addBlockWithRequests(t, s, 9, nil, signedRequest(t, a.key, rotatedAgg), signedRequest(t, evm, rotatedEVM))
+	for name, key := range map[string]types.PartitionShardID{"aggregator": a.key, "EVM": evm} {
+		require.Contains(t, block.ShardState.Changed, key, "%s: the new key under the kept node id is accepted", name)
+	}
 }
