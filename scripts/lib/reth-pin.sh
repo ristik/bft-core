@@ -210,7 +210,10 @@ rethPinObtainPinned() {
 # Includes ureth #31's eth_config (EIP-7910) registration and #36's idempotent seal build.
 # Do not move this pin back below #31: CheckExecutionProfile needs eth_config at startup.
 URETH_PIN_REPO=https://github.com/ristik/ureth
-URETH_PIN_COMMIT=39d7e59db3054811d0b4020bf182a2e23f8a3b38
+# A lane that already resolved its own ureth exports URETH_PIN_COMMIT; child shells that source this file
+# (h4-restore-probe.sh, d2c-restart-validator.sh) must keep it, or the per-run registry layout check
+# (helper.sh registry_layout_require) would see the built-in pin instead of the ureth the lane runs.
+URETH_PIN_COMMIT=${URETH_PIN_COMMIT:-39d7e59db3054811d0b4020bf182a2e23f8a3b38}
 URETH_PIN_BIN=unicity-reth
 # The built-in pins (this one and the profile-2 pin in reth-paired-devnet.sh) predate ureth #47, so they need
 # the layout-1 SealRegistry: they are listed in REGISTRY_LAYOUT1_URETH_PINS in helper.sh. Drop them from that
