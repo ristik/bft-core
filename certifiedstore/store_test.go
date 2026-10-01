@@ -258,7 +258,7 @@ func TestLoadRefusalsAndNoFallback(t *testing.T) {
 			putRaw(t, s, headKeyFor(2), envelopeWith(t, RecordVersion, payload))
 		}, want: ErrRecordUntrusted},
 		"a future envelope version": {damage: func(t *testing.T, s *Store) {
-			putRaw(t, s, headKeyFor(2), envelopeWith(t, RecordVersion+1, []byte{0xff}))
+			putRaw(t, s, headKeyFor(2), envelopeWith(t, RecordVersionV2+1, []byte{0xff}))
 		}, want: ErrRecordVersion},
 		"a record for another deployment": {damage: func(t *testing.T, s *Store) {
 			enc, _, err := encodeRecord(other.ctx, other.record(2))

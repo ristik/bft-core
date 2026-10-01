@@ -70,12 +70,12 @@ func VerifyEncodedRecord(ctx context.Context, c Context, raw []byte) (Loaded, er
 	if !bytes.Equal(ucCanonical, sr.Certificate) || !bytes.Equal(trCanonical, sr.Technical) {
 		return Loaded{}, fmt.Errorf("%w: nested certificate or technical record is not canonical", ErrRecordUntrusted)
 	}
-	payload, err := types.Cbor.Marshal(sr)
+	payload, err := marshalPayload(sr)
 	if err != nil {
 		return Loaded{}, err
 	}
 	sum := sha256.Sum256(payload)
-	canonical, err := types.Cbor.Marshal(envelope{Version: RecordVersion, Payload: payload, Digest: sum[:]})
+	canonical, err := types.Cbor.Marshal(envelope{Version: sr.Version, Payload: payload, Digest: sum[:]})
 	if err != nil {
 		return Loaded{}, err
 	}
