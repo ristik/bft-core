@@ -12,14 +12,15 @@ read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(go run ./scri
 H3_REGISTRY=0xff00000000000000000000000000000000000002
 H3_ONLINE="1 2 3 4"
 H3_ROOTS="1 2 3 4"
-M2_NEXT_NONCE=${M2_NEXT_NONCE:-3}
+# the paired-devnet seeding leaves the funded sender at nonce 4 (run6c: "nonce too low: next nonce 4, tx nonce 3")
+M2_NEXT_NONCE=${M2_NEXT_NONCE:-4}
 M2_CHAIN_ID=31337
 
 h3_pass() { echo "  PASS: $*"; }
 h3_die() { echo "  FAIL: $*" >&2; exit 1; }
 h3_step() { local name=$1; shift; echo "--- H3 step: $name"; "$@" || h3_die "$name"; h3_pass "$name"; }
 
-h3_paid() { m2_send_paid "$1" "$M2_NEXT_NONCE"; }
+h3_paid() { M2_PAID_REGISTRY_CHECK=0 m2_send_paid "$1" "$M2_NEXT_NONCE"; }
 h3_mark() { local r; for r in $H3_ROOTS; do wc -l <"test-nodes/root$r/debug.log" >"$H3_DIR/mark-$r"; done; }
 h3_since_mark() { local r; for r in $H3_ROOTS; do tail -n +"$(( $(cat "$H3_DIR/mark-$r") + 1 ))" "test-nodes/root$r/debug.log"; done; }
 h3_rpc_url() { echo "http://127.0.0.1:$(m2_rpc_port "$1")"; }

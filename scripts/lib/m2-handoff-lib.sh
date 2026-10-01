@@ -110,6 +110,12 @@ m2_send_paid() {
       logValidator=$(m2_online_validators | awk '{print $1}')
       log="test-nodes/evm$logValidator/debug.log"
       if grep -Eq "msg=\"certificate admitted\" block=$block .*rootEpoch=$epoch([[:space:]]|$)" "$log"; then
+        if [ "${M2_PAID_REGISTRY_CHECK:-1}" = 0 ]; then
+          # a lane with its own registry layout (H3, layout 2) checks the registry itself
+          echo "paid epoch $epoch nonce $nonce hash=$expected"
+          if [ -n "${M2_NEXT_NONCE:-}" ]; then M2_NEXT_NONCE=$((nonce + 1)); fi
+          return 0
+        fi
         local registry=0xff00000000000000000000000000000000000002 assignment cursor
         assignment=$(rpc "http://127.0.0.1:$rpcPort" eth_getStorageAt "[\"$registry\",\"$m2_epoch_slot\",\"latest\"]" | pyget "['result']")
         cursor=$(rpc "http://127.0.0.1:$rpcPort" eth_getStorageAt "[\"$registry\",\"$m2_cursor_slot\",\"latest\"]" | pyget "['result']")
