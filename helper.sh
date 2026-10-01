@@ -253,14 +253,76 @@ function generate_evm_shard_conf() {
   echo "generated test-nodes/shard-conf-${partitionID}_0.json"
 }
 
+# --- SealRegistry layout: resolved ONCE per run, persisted in the run directory -----------------------
+# Layout 2 (registrygenesis/seal-registry-v2.json, code hash 0x7787f316...caf38, contracts ce3e40b4) is what
+# ureth unicity/main pins since #47 and is the default. Ureth commits listed in REGISTRY_LAYOUT1_URETH_PINS predate
+# it and need layout 1; REGISTRY_LAYOUT=1|2 overrides at resolution time only.
+# registry_layout_init writes test-nodes/registry-layout (layout, artifact sha256, ureth commit) once, at run start
+# (setup-evm-nodes.sh, reth-paired-devnet.sh and the f6b lanes via setup). Every script that seeds genesis or
+# starts/restarts shard-node or reth reads it from there, in whatever shell it runs, and refuses to start when the
+# file is missing, the artifact changed, or it was resolved for a different ureth commit than $URETH_PIN_COMMIT.
+REGISTRY_LAYOUT_FILE=${REGISTRY_LAYOUT_FILE:-test-nodes/registry-layout}
+REGISTRY_LAYOUT1_URETH_PINS="39d7e59d ae6e6be9 055a314f d2af1fb1"
+
+function registry_layout_for_commit() { # $1 ureth commit (may be empty)
+  local c=$1 p
+  if [ -n "${REGISTRY_LAYOUT:-}" ]; then echo "$REGISTRY_LAYOUT"; return; fi
+  for p in $REGISTRY_LAYOUT1_URETH_PINS; do
+    case "$c" in "$p"*) echo 1; return ;; esac
+  done
+  echo 2
+}
+
+function registry_layout_init() { # $1 ureth commit (default: $URETH_PIN_COMMIT)
+  local commit=${1:-${URETH_PIN_COMMIT:-}} layout
+  layout=$(registry_layout_for_commit "$commit")
+  case "$layout" in 1 | 2) ;; *) echo "registry layout: REGISTRY_LAYOUT must be 1 or 2, got '$layout'" >&2; return 1 ;; esac
+  mkdir -p "$(dirname "$REGISTRY_LAYOUT_FILE")"
+  printf 'layout=%s\nartifactSha256=%s\nurethCommit=%s\n' "$layout" \
+    "$(shasum -a 256 "registrygenesis/seal-registry-v$layout.json" | cut -d' ' -f1)" "$commit" >"$REGISTRY_LAYOUT_FILE"
+  echo "registry layout=$layout (resolved once for ureth '${commit:-unspecified}'; $REGISTRY_LAYOUT_FILE)"
+}
+
+function registry_layout_field() { sed -n "s/^$1=//p" "$REGISTRY_LAYOUT_FILE" 2>/dev/null | head -1; }
+
+# registry_layout_require - refuse (non-zero) unless the persisted layout exists, matches the artifact on disk and
+# the ureth pin in use. Call it before seeding genesis or starting/restarting shard-node or reth.
+function registry_layout_require() {
+  local layout sha stored commit
+  layout=$(registry_layout_field layout)
+  if [ "$layout" != 1 ] && [ "$layout" != 2 ]; then
+    echo "registry layout: $REGISTRY_LAYOUT_FILE is missing or invalid; resolve it once with registry_layout_init (setup-evm-nodes.sh does) before seeding or starting nodes" >&2
+    return 1
+  fi
+  sha=$(shasum -a 256 "registrygenesis/seal-registry-v$layout.json" | cut -d' ' -f1)
+  if [ "$sha" != "$(registry_layout_field artifactSha256)" ]; then
+    echo "registry layout: registrygenesis/seal-registry-v$layout.json changed since this run resolved layout $layout" >&2
+    return 1
+  fi
+  stored=$(registry_layout_field urethCommit)
+  commit=${URETH_PIN_COMMIT:-}
+  if [ -n "$commit" ] && [ -n "$stored" ] && [ "$commit" != "$stored" ]; then
+    echo "registry layout: resolved for ureth $stored but this launch uses $commit" >&2
+    return 1
+  fi
+  if [ -n "$commit" ] && [ "$(registry_layout_for_commit "$commit")" != "$layout" ]; then
+    echo "registry layout: layout $layout does not match ureth $commit (REGISTRY_LAYOUT overrides: ${REGISTRY_LAYOUT:-none})" >&2
+    return 1
+  fi
+}
+
+function registry_layout() { registry_layout_field layout; }
+function registry_artifact() { echo "registrygenesis/seal-registry-v$(registry_layout).json"; }
+
 # generate_evm_genesis - emit the reth chain spec derived from the shard
 # conf generate_evm_shard_conf just wrote — see engine_api_genesis.go for
 # why this must be derived, not hand-written separately.
 # $1 partition id
 function generate_evm_genesis() {
   local partitionID=$1
+  registry_layout_require || return 1
   build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-    --out test-nodes/evm-genesis.json
+    --out test-nodes/evm-genesis.json --registry-layout "$(registry_layout)"
 }
 
 # evm_validator_id - node id of EVM validator $1 (must already be initialized)
@@ -429,6 +491,13 @@ function start_one_evm_validator() {
     profileArgs=(--trust-history-profile-2)
   fi
 
+  # The registry layout only matters to the engine-api executor; resolve it from the run's persisted file.
+  local layoutArgs=()
+  if [ "$executor" = engine-api ]; then
+    registry_layout_require || return 1
+    layoutArgs=(--registry-layout "$(registry_layout)")
+  fi
+
   build/ubft shard-node run --home "test-nodes/evm$i" --executor "$executor" \
     --address "/ip4/127.0.0.1/tcp/$port" --bootnodes "$bootnodes" \
     --trust-base test-nodes/trust-base.json \
@@ -436,7 +505,7 @@ function start_one_evm_validator() {
     --log-format text --log-level "${EVM_VALIDATOR_LOG_LEVEL:-info}" \
     ${executorArgs[@]+"${executorArgs[@]}"} ${rpcArgs[@]+"${rpcArgs[@]}"} \
     ${signingArgs[@]+"${signingArgs[@]}"} \
-    ${profileArgs[@]+"${profileArgs[@]}"} \
+    ${profileArgs[@]+"${profileArgs[@]}"} ${layoutArgs[@]+"${layoutArgs[@]}"} \
     >> "test-nodes/evm$i/debug.log" 2>&1 &
   echo $! > "test-nodes/evm$i/pid"
 }

@@ -171,7 +171,7 @@ start_validator() {
   if [ "$i" -eq 1 ]; then
     extra=(--signing-authority-socket "$sockDir/client.sock" --signing-authority-credential "$scen/authority/client.cred")
   fi
-  start_any "v$i" "$home/debug.log" build/ubft shard-node run --home "$home" --executor engine-api \
+  start_any "v$i" "$home/debug.log" build/ubft shard-node run --home "$home" --executor engine-api --registry-layout 1 \
     --address "/ip4/127.0.0.1/tcp/$((valP2PBase + i - 1))" --bootnodes "$rootBoot,$addr" \
     --trust-base "$scen/trust-base.json" --shard-conf "$scen/shard-conf-${partitionID}_0.json" \
     --rpc-server-address "127.0.0.1:$((valRPCBase + i - 1))" \
@@ -353,7 +353,7 @@ setup_arm() {
     pass "the authority is enrolled for the configuration naming its key, session generation 1" ||
     { fail "unexpected status after enrollment"; return 1; }
 
-  ubft engine-api genesis --home "$scen" --shard-conf "$scen/shard-conf-${partitionID}_0.json" --out "$scen/evm-genesis.json" >>"$scen/setup.log" 2>&1 ||
+  ubft engine-api genesis --home "$scen" --shard-conf "$scen/shard-conf-${partitionID}_0.json" --out "$scen/evm-genesis.json" --registry-layout 1 >>"$scen/setup.log" 2>&1 ||
     { fail "engine-api genesis"; return 1; }
   python3 - "$scen/evm-genesis.json" "$scen/evm-genesis-funded.json" <<'PY' || { fail "could not fund the test genesis"; return 1; }
 import json, subprocess, sys
@@ -808,6 +808,12 @@ done
 # old RETH_BIN indirection is folded into the resolver's URETH_BIN, which is verified too: an
 # operator pointing at stock reth is refused rather than silently measured.
 urethPinResolve || exit 2
+# This lane seeds and runs the layout-1 SealRegistry explicitly (it has its own scenario directory, not test-nodes/),
+# so it must run a pre-#47 ureth (the built-in pin).
+case "$URETH_PIN_COMMIT" in
+  39d7e59d* | ae6e6be9*) ;;
+  *) echo "f6c-reth-backup: layout-1 lane refuses ureth $URETH_PIN_COMMIT (pre-#47 pins only)" >&2; exit 2 ;;
+esac
 
 startedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 invocation="$0 $*"

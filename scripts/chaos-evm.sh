@@ -235,6 +235,7 @@ rm -f "$buildLog"
 rm -rf test-nodes
 mkdir test-nodes
 source helper.sh
+registry_layout_init || exit 1
 
 init_root_nodes 3
 init_evm_validators "$validators"

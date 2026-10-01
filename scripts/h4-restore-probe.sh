@@ -71,6 +71,7 @@ case "$stage" in
       test-nodes/evm1/shard-node-luc.json
     rm -rf test-nodes/reth1/dd test-nodes/h4-archives/evm1 "$evidence/journal.db" "$evidence/journal.db.trust" "$evidence/archive"
     echo 'H4_DISKS_WIPED' >>test-nodes/evm1/debug.log
+    registry_layout_require || exit 1
     "$URETH_BIN" node --chain "$EVM_GENESIS_FILE" --datadir test-nodes/reth1/dd \
       --authrpc.jwtsecret "$evidence/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port 18551 \
       --http --http.addr 127.0.0.1 --http.port 18545 --http.api eth,net,web3,admin,debug \
@@ -112,7 +113,7 @@ case "$stage" in
       --trust-base test-nodes/trust-base.json --full-shard-conf "$EVM_FULL_SHARD_CONF" \
       --genesis "$EVM_GENESIS_FILE" --engine-url http://127.0.0.1:18551 \
       --eth-url http://127.0.0.1:18545 --jwt-secret "$evidence/jwt.hex" \
-      --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" \
+      --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" --registry-layout "$(registry_layout)" \
       --execution-journal "$evidence/journal.db" --archive-store "$evidence/archive" --archive-prune \
       ${restoreProfile2Args[@]+"${restoreProfile2Args[@]}"} \
       --journal-candidates 32 --archive-replica "$(evm_validator_id 2)" \

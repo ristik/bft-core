@@ -37,6 +37,9 @@ mkdir test-nodes
 
 source helper.sh
 
+# Resolve the SealRegistry layout once for this run; every later script reads it from test-nodes/registry-layout.
+registry_layout_init || exit 1
+
 init_root_nodes "$root_nodes"
 init_evm_validators "$validators"
 case "${SIGNING:-local}" in
