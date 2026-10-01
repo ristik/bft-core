@@ -69,8 +69,8 @@ func buildVectors(t *testing.T) vectorFile {
 	old.Validators = []*types.NodeInfo{infos[0]}
 	succ, err := NewSuccessor(&old, infos)
 	require.NoError(t, err)
-	ctx := PoPContext{Network: 5, Attempt: 1, Predecessor: [32]byte(bytes.Repeat([]byte{0x11}, 32)), Parent: [32]byte(bytes.Repeat([]byte{0x22}, 32))}
-	out.Context = map[string]any{"network": ctx.Network, "attempt": ctx.Attempt, "predecessor": hex.EncodeToString(ctx.Predecessor[:]), "parent": hex.EncodeToString(ctx.Parent[:])}
+	ctx := PoPContext{Network: 5, Attempt: 1, Predecessor: [32]byte(bytes.Repeat([]byte{0x11}, 32))}
+	out.Context = map[string]any{"network": ctx.Network, "attempt": ctx.Attempt, "predecessor": hex.EncodeToString(ctx.Predecessor[:])}
 
 	cfg, err := ConfigHash(succ)
 	require.NoError(t, err)
@@ -117,7 +117,6 @@ func buildVectors(t *testing.T) vectorFile {
 		{"network", "assignment hash input network", "ErrContext (candidate) / PoP verification failure", "VerifyBinding network", "re-signed PoPs; one field changed"},
 		{"predecessor", "PoP context predecessor", "ErrPoP", "VerifyPoPs", "assignment unchanged"},
 		{"attempt", "PoP context attempt (replay)", "ErrPoP", "VerifyPoPs", "assignment unchanged"},
-		{"parent", "PoP context frozen parent", "ErrPoP", "VerifyPoPs", "assignment unchanged"},
 		{"key", "one validator key", "ErrPoP (message and key bound)", "VerifyPoPs", "other validators' proofs valid"},
 		{"weight", "a validator stake != 1", "ErrAssignment", "ValidateAssignment/IsValid", "otherwise valid"},
 		{"config", "any non-membership PDR field", "ErrConfig", "ValidateSuccessor", "PoPs re-signed over the changed assignment"},

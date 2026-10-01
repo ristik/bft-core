@@ -22,6 +22,9 @@ import (
 
 const evmPartitionTypeID = 8
 
+// EVMPartitionTypeID is the partition type of the designated EVM shard.
+const EVMPartitionTypeID = evmPartitionTypeID
+
 type (
 	ExecutedBlock struct {
 		_          struct{}            `cbor:",toarray"`
@@ -230,6 +233,18 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			control, err := applyHandoffRecord(nextShardState.Control, newBlock.Payload.HandoffRecords[0], uint64(orchestration.NetworkID()), newBlock.Epoch, newBlock.Round, authority, companion)
 			if err != nil {
 				return nil, err
+			}
+			if control.Phase == "prepared" {
+				// The root, not the operator, binds the frozen parent: the EVM IR certified in this branch when the Prepare is
+				// executed. The EVM is frozen from this block on, so it is the parent the endorsements and the Freeze must name.
+				key, found, err := frozenEVMShard(nextShardState, shardConfs)
+				if err != nil {
+					return nil, err
+				}
+				if !found || nextShardState.States[key] == nil || nextShardState.States[key].IR == nil || len(nextShardState.States[key].IR.BlockHash) != 32 {
+					return nil, errors.Join(ErrHandoffRecord, ErrPrepareNoEVMParent)
+				}
+				control.FrozenParent = bytes.Clone(nextShardState.States[key].IR.BlockHash)
 			}
 			if control.Phase == "endorsed" || control.Phase == "committed" {
 				frozen, err := frozenShard(nextShardState, shardConfs, control.FrozenParent)

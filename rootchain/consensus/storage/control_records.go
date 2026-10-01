@@ -15,6 +15,13 @@ var (
 	ErrAbortAfterH   = errors.New("root handoff Abort follows committed H")
 	ErrHandoffSuffix = errors.New("nonempty old-epoch handoff suffix")
 	ErrHandoffFrozen = errors.New("EVM certification frozen by root handoff")
+	// ErrFreezeBeforePrepare refuses a Freeze when no Prepare of this attempt is ordered: the root binds the frozen EVM parent at
+	// the Prepare record, so the endorsements a Freeze carries can only follow it.
+	ErrFreezeBeforePrepare = errors.New("root handoff Freeze without an ordered Prepare")
+	// ErrFreezeParentUnbound refuses a Freeze whose frozen parent is not the parent the Prepare bound.
+	ErrFreezeParentUnbound = errors.New("root handoff Freeze names a frozen parent other than the one bound at Prepare")
+	// ErrPrepareNoEVMParent refuses a Prepare when the designated EVM shard has no certified input record to bind.
+	ErrPrepareNoEVMParent = errors.New("root handoff Prepare without a certified EVM parent to bind")
 	// ErrAssignmentAckPending refuses another handoff while the installed EVM
 	// assignment has no certified acknowledgement, unless it supersedes that
 	// assignment on the same frozen parent.
@@ -158,6 +165,9 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 	if lapsed && r.Kind == "prepare" && !PrepareMayFollowLapse(previous, round) {
 		return nil, ErrHandoffRecord
 	}
+	if (previous.Phase == "idle" || previous.Phase == "aborted") && r.Kind == "freeze" {
+		return nil, errors.Join(ErrHandoffRecord, ErrFreezeBeforePrepare)
+	}
 	if previous.Phase == "idle" || previous.Phase == "aborted" || (lapsed && r.Kind == "prepare") {
 		if r.Kind != "prepare" || len(companion) != 0 ||
 			(previous.Phase == "idle" && r.Attempt != 0) ||
@@ -189,6 +199,10 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 		}
 		if len(frozenParent) != 32 {
 			return nil, ErrHandoffRecord
+		}
+		// The frozen parent is the one the root bound when it ordered the Prepare, not one the operator or the endorsers chose.
+		if !bytes.Equal(frozenParent, previous.FrozenParent) {
+			return nil, errors.Join(ErrHandoffRecord, ErrFreezeParentUnbound)
 		}
 		phase = "endorsed"
 	case "commit":

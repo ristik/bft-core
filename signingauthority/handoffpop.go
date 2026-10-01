@@ -66,8 +66,8 @@ func (a *Authority) SignHandoffPoP(req HandoffPoPRequest) (evmassign.PoP, error)
 		// A retained validator is enrolled at the installed shard epoch and proves for the next one; a joining validator's authority
 		// is enrolled (possibly still pending) for the successor epoch itself, which no installed configuration names yet.
 		return evmassign.PoP{}, fmt.Errorf("%w: the successor is shard epoch %d, this authority is enrolled for %d", ErrContextMismatch, succ.Epoch, enroll.ShardEpoch)
-	case req.Context.Predecessor == [32]byte{} || req.Context.Parent == [32]byte{}:
-		return evmassign.PoP{}, fmt.Errorf("%w: the context names no predecessor or frozen parent", ErrContextMismatch)
+	case req.Context.Predecessor == [32]byte{}:
+		return evmassign.PoP{}, fmt.Errorf("%w: the context names no predecessor", ErrContextMismatch)
 	}
 	if err := evmassign.ValidateAssignment(succ); err != nil {
 		return evmassign.PoP{}, fmt.Errorf("%w: %v", ErrContextMismatch, err)

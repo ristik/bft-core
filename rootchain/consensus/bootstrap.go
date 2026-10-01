@@ -170,6 +170,7 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	x.trustBase.Store(newTrust)
 	x.handoffMu.Lock()
 	x.handoffPlans = nil
+	x.handoffIntent = nil
 	x.handoffAborts = nil
 	x.handoffMu.Unlock()
 	x.leaderSelector = selector

@@ -109,7 +109,9 @@ type (
 		epochAnchor      *drctypes.EpochAnchor
 		handoffMu        sync.Mutex
 		handoffPlans     map[[32]byte]*pendingHandoff
-		handoffAborts    map[handoffAbortKey]*pendingHandoffAbort
+		// handoffIntent is the operator plan this validator holds for the leader to order a Prepare for: unsigned, naming no parent.
+		handoffIntent *abdrc.HandoffApprovalMsg
+		handoffAborts map[handoffAbortKey]*pendingHandoffAbort
 
 		log    *slog.Logger
 		tracer trace.Tracer

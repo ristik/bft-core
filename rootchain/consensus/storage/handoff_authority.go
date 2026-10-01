@@ -234,11 +234,10 @@ func (a *v1HandoffAuthority) VerifyFreeze(r evmroot.OrderedHandoffRecord, compan
 func (a *v1HandoffAuthority) verifyAssignmentBinding(r evmroot.OrderedHandoffRecord, proof FreezeCompanion, body evmroot.TrustBaseBodyV2) error {
 	ctx := evmassign.BindingContext{Digest: proof.Candidate, ControlPartition: evmroot.D4ControlPartition,
 		PoPContext: evmassign.PoPContext{Network: r.Network, Attempt: r.Attempt}}
-	if len(r.PredecessorBodyID) != 32 || len(proof.Parent) != 32 {
+	if len(r.PredecessorBodyID) != 32 {
 		return ErrHandoffRecord
 	}
 	copy(ctx.Predecessor[:], r.PredecessorBodyID)
-	copy(ctx.Parent[:], proof.Parent)
 	for _, m := range body.Members {
 		ctx.SuccessorRoot = append(ctx.SuccessorRoot, evmassign.RootMember{NodeID: m.NodeID, Key: m.ConsensusKey, Weight: m.Weight})
 	}

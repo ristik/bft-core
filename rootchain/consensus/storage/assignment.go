@@ -127,7 +127,7 @@ func candidateActivatedPDR(preimage []byte, activation uint64) (evmassign.Candid
 // The chain is: record.NextBodyID (old root quorum) <- body identity <-
 // body.ChangeRecordHash <- candidate digest <- preimage. The caller supplies
 // the verified frozen parent so the possession proofs are checked in context.
-func DeriveActivatedPDR(record evmroot.OrderedHandoffRecord, body evmroot.TrustBaseBodyV2, preimage, frozenParent []byte) (*types.PartitionDescriptionRecord, []byte, error) {
+func DeriveActivatedPDR(record evmroot.OrderedHandoffRecord, body evmroot.TrustBaseBodyV2, preimage, _ []byte) (*types.PartitionDescriptionRecord, []byte, error) {
 	id := body.Identity()
 	digest := sha256.Sum256(preimage)
 	if !bytes.Equal(id[:], record.NextBodyID) || body.Epoch != record.Epoch+1 ||
@@ -138,8 +138,7 @@ func DeriveActivatedPDR(record evmroot.OrderedHandoffRecord, body evmroot.TrustB
 	if err != nil {
 		return nil, nil, err
 	}
-	if c.Network != record.Network || !bytes.Equal(c.Predecessor, record.PredecessorBodyID) || c.Attempt != record.Attempt ||
-		!bytes.Equal(c.Parent, frozenParent) {
+	if c.Network != record.Network || !bytes.Equal(c.Predecessor, record.PredecessorBodyID) || c.Attempt != record.Attempt {
 		return nil, nil, ErrAssignmentHistory
 	}
 	succ, err := c.Successor()
@@ -152,7 +151,6 @@ func DeriveActivatedPDR(record evmroot.OrderedHandoffRecord, body evmroot.TrustB
 	var pop evmassign.PoPContext
 	pop.Network, pop.Attempt = c.Network, c.Attempt
 	copy(pop.Predecessor[:], c.Predecessor)
-	copy(pop.Parent[:], c.Parent)
 	if err := evmassign.VerifyPoPs(pop, succ, c.PoPs); err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
@@ -179,7 +177,6 @@ func DeriveActivatedConfigs(record evmroot.OrderedHandoffRecord, body evmroot.Tr
 	var pop evmassign.PoPContext
 	pop.Network, pop.Attempt = c.Network, c.Attempt
 	copy(pop.Predecessor[:], c.Predecessor)
-	copy(pop.Parent[:], c.Parent)
 	changes, err := evmassign.ValidateChanges(c.Changes, c.SourceRef, pop, evmroot.D4ControlPartition)
 	if err != nil {
 		return nil, nil, nil, errors.Join(ErrAssignmentHistory, err)

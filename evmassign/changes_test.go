@@ -30,7 +30,7 @@ func newAggregatorFixture(t *testing.T) aggregatorFixture {
 	succ, err := NewSuccessor(current, []*types.NodeInfo{next[0].info})
 	require.NoError(t, err)
 	return aggregatorFixture{current: current, succ: succ, keys: next,
-		ctx: PoPContext{Network: 5, Attempt: 1, Predecessor: [32]byte{1}, Parent: [32]byte{9}}}
+		ctx: PoPContext{Network: 5, Attempt: 1, Predecessor: [32]byte{1}}}
 }
 
 func (a aggregatorFixture) change(t *testing.T) Change {

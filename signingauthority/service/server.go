@@ -417,7 +417,7 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
 			return nil, fmt.Errorf("%w: handoff possession proof request: %v", errMalformed, err)
 		}
-		if len(wire.Predecessor) != 32 || len(wire.Parent) != 32 {
+		if len(wire.Predecessor) != 32 {
 			return nil, fmt.Errorf("%w: the context names 32-byte hashes", errMalformed)
 		}
 		var succ types.PartitionDescriptionRecord
@@ -427,7 +427,6 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		request := signingauthority.HandoffPoPRequest{Domain: wire.Domain, Successor: &succ, NodeID: wire.NodeID,
 			Context: evmassign.PoPContext{Network: wire.Network, Attempt: wire.Attempt}}
 		copy(request.Context.Predecessor[:], wire.Predecessor)
-		copy(request.Context.Parent[:], wire.Parent)
 		pop, err := s.authority.SignHandoffPoP(request)
 		if err != nil {
 			s.log.Warn("refusing a handoff possession proof", slog.String("err", err.Error()))
