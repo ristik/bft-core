@@ -402,7 +402,10 @@ PY
 
 post_m2a_after_lane() {
   local statusFile=test-nodes/post-m2a-evidence/operator-status.json
-  build/ubft shard-node status --url "http://127.0.0.1:$evmRPCPortStart" --timeout 10s \
+  # Validator 1 may be running through the H4 restore command, which does not
+  # expose the shard-node status listener. Validator 2 stays online as the
+  # source publisher and reports the same configured archive/frontier view.
+  build/ubft shard-node status --url "http://127.0.0.1:$((evmRPCPortStart + 1))" --timeout 10s \
     >"$statusFile" 2>test-nodes/post-m2a-evidence/operator-status.txt || {
       fail "read-only operator status command failed after the handoff lane"; return 1;
     }

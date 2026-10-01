@@ -10,6 +10,7 @@ syntax_files=(
   scripts/f7-mintproof-evidence.sh
   scripts/t1-vesting-claim-evidence.sh
   scripts/t4-post-m2a-audit-evidence.sh
+  scripts/m2-replacement-client-lane.sh
   scripts/post-m2a-evidence-lib.sh
   scripts/reth-paired-devnet.sh
   scripts/m2-profile2-handoffs.sh
@@ -22,6 +23,7 @@ lint_files=(
   scripts/t1-vesting-claim-evidence.sh
   scripts/t4-post-m2a-audit-evidence.sh
   scripts/post-m2a-evidence-lib.sh
+  scripts/m2-replacement-client-lane.sh
 )
 
 bash -n ${syntax_files[@]+"${syntax_files[@]}"}
