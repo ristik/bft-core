@@ -1085,3 +1085,88 @@ func TestBusyEVMCanBeHandedOffBecausePrepareFreezesIt(t *testing.T) {
 	frozen := mustBlock(t, s, 8).ShardState.States[evm]
 	require.True(t, bytes.Equal(planned, frozen.IR.BlockHash), "Freeze bound the parent that Prepare froze")
 }
+
+func recordAttempt(kind string, round, activation, attempt uint64, frozen, body, tr []byte) []byte {
+	return (evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, Attempt: attempt, OrderedRound: round,
+		PredecessorBodyID: make([]byte, 32), FrozenID: frozen, NextBodyID: body,
+		ActivationRound: activation, SuccessorTRHash: tr, Kind: kind}).Bytes()
+}
+
+// Prepare carries no signatures, so one faulty leader can order one for an unendorsed body. Its EVM freeze lapses by itself after
+// PrepareFreezeLapseRounds (and not before); the attempt is dead, and a fresh Prepare needs the next attempt number and the cooldown.
+func TestUnendorsedPrepareLapsesAndRepeatedPreparesCannotFreezeContinuously(t *testing.T) {
+	s := profileStore(t)
+	installTestFrozenShard(t, s, bytes.Repeat([]byte{0x42}, 32))
+	zero := make([]byte, 32)
+	const prepared = uint64(3)
+	addProfileBlock(t, s, 2, nil)
+	lapse, cooldown := uint64(PrepareFreezeLapseRounds), uint64(PrepareCooldownRounds)
+	body := bytes.Repeat([]byte{1}, 32)
+	addProfileBlock(t, s, prepared, [][]byte{recordAttempt("prepare", prepared, prepared+8, 0, zero, body, zero)})
+
+	fill := func(from, to uint64) {
+		for r := from; r <= to; r++ {
+			addProfileBlock(t, s, r, nil)
+		}
+	}
+	fill(prepared+1, prepared+lapse-1)
+	// Still frozen on the last round of the window (a block at prepared+lapse is not yet lapsed), so not before K rounds.
+	require.ErrorIs(t, evmRequestBlock(s, prepared+lapse, nil, bytes.Repeat([]byte{0x70}, 32)), ErrHandoffFrozen)
+	fill(prepared+lapse, prepared+lapse)
+	require.NoError(t, evmRequestBlock(s, prepared+lapse+1, nil, bytes.Repeat([]byte{0x71}, 32)), "the EVM certifies again after K rounds")
+
+	t.Run("a Freeze for the lapsed attempt is refused", func(t *testing.T) {
+		planned := bytes.Repeat([]byte{0x71}, 32)
+		s.handoffAuth = movingParentAuthority{parent: &planned}
+		round := prepared + lapse + 2
+		parent, err := s.Block(round - 1)
+		require.NoError(t, err)
+		_, err = s.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{recordAttempt("freeze", round, prepared+8, 0, bytes.Repeat([]byte{2}, 32), body, zero)}},
+			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
+		require.ErrorIs(t, err, ErrHandoffRecord)
+	})
+
+	// Rounds prepared+lapse+1 .. are normal blocks from here (the EVM block above was round prepared+lapse+1).
+	next := prepared + lapse + 2
+	fill(next, prepared+lapse+cooldown-1)
+	prepareAt := func(round, attempt uint64) error {
+		parent, err := s.Block(round - 1)
+		require.NoError(t, err)
+		_, err = s.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{recordAttempt("prepare", round, round+8, attempt, zero, bytes.Repeat([]byte{byte(attempt + 5)}, 32), zero)}},
+			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
+		return err
+	}
+	cool := prepared + lapse + cooldown
+	require.ErrorIs(t, prepareAt(cool, 1), ErrHandoffRecord, "no fresh Prepare while the cooldown runs")
+	fill(cool, cool)
+	require.ErrorIs(t, prepareAt(cool+1, 0), ErrHandoffRecord, "the lapsed attempt number is not reused")
+	require.NoError(t, prepareAt(cool+1, 1), "the next attempt may be prepared once the cooldown has passed")
+	require.ErrorIs(t, evmRequestBlock(s, cool+2, nil, bytes.Repeat([]byte{0x72}, 32)), ErrHandoffFrozen, "and freezes the EVM again")
+	// Duty cycle: between the two Prepares the EVM was free for the whole cooldown, so a faulty leader repeating the attack freezes it
+	// for at most lapse rounds out of every lapse+cooldown.
+	require.GreaterOrEqual(t, cooldown, lapse)
+}
+
+// A Freeze ordered within the window keeps the EVM frozen past the window: the lapse only ends an unanswered Prepare.
+func TestFreezeWithinTheWindowKeepsTheEVMFrozenPastIt(t *testing.T) {
+	s := profileStore(t)
+	installTestFrozenShard(t, s, bytes.Repeat([]byte{0x40}, 32))
+	planned := bytes.Repeat([]byte{0x40}, 32)
+	s.handoffAuth = movingParentAuthority{parent: &planned}
+	zero := make([]byte, 32)
+	body, frozenID := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
+	const prepared = uint64(3)
+	addProfileBlock(t, s, 2, nil)
+	addProfileBlock(t, s, prepared, [][]byte{recordAttempt("prepare", prepared, prepared+8, 0, zero, body, zero)})
+	for r := prepared + 1; r < prepared+PrepareFreezeLapseRounds; r++ {
+		addProfileBlock(t, s, r, nil)
+	}
+	freezeRound := prepared + PrepareFreezeLapseRounds // the last round inside the window
+	addProfileBlock(t, s, freezeRound, [][]byte{recordAttempt("freeze", freezeRound, prepared+8, 0, frozenID, body, zero)})
+	for r := freezeRound + 1; r <= freezeRound+2*PrepareFreezeLapseRounds; r++ {
+		addProfileBlock(t, s, r, nil)
+	}
+	require.ErrorIs(t, evmRequestBlock(s, freezeRound+2*PrepareFreezeLapseRounds+1, nil, bytes.Repeat([]byte{0x73}, 32)), ErrHandoffFrozen)
+}

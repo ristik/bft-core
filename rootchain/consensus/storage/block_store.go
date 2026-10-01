@@ -432,7 +432,15 @@ func (x *BlockStore) HighQCFrozenParent(parent []byte) bool {
 	return err == nil
 }
 
+// FrozenShardAt is FrozenShardForBlock for the block built directly after round's block.
 func (x *BlockStore) FrozenShardAt(round uint64) (types.PartitionShardID, bool, error) {
+	return x.FrozenShardForBlock(round, round+1)
+}
+
+// FrozenShardForBlock is the shard a block of blockRound, built on parentRound's block, must not certify. The block round matters:
+// a Prepare-time freeze lapses by round count.
+func (x *BlockStore) FrozenShardForBlock(parentRound, blockRound uint64) (types.PartitionShardID, bool, error) {
+	round := parentRound
 	var zero types.PartitionShardID
 	if x.profile != ProfileHandoff {
 		return zero, false, nil
@@ -449,7 +457,7 @@ func (x *BlockStore) FrozenShardAt(round uint64) (types.PartitionShardID, bool, 
 	if err != nil {
 		return zero, false, err
 	}
-	return frozenShardOf(parent.ShardState, configs, control)
+	return frozenShardOf(parent.ShardState, configs, control, blockRound)
 }
 
 // CertifiedEVMShardAt selects the sole EVM shard with the verified parent at

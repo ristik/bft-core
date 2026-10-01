@@ -261,7 +261,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			return nil, ErrHandoffRecord
 		}
 		shardKey := types.PartitionShardID{PartitionID: irChReq.Partition, ShardID: irChReq.Shard.Key()}
-		if frozen, active, err := frozenShardOf(nextShardState, shardConfs, nextShardState.Control); err != nil {
+		if frozen, active, err := frozenShardOf(nextShardState, shardConfs, nextShardState.Control, newBlock.Round); err != nil {
 			return nil, err
 		} else if active && shardKey == frozen {
 			return nil, ErrHandoffFrozen
@@ -406,14 +406,18 @@ func frozenEVMShard(state ShardStates, configs map[types.PartitionShardID]*types
 
 // frozenShardOf is the shard whose certification the control state currently refuses: from Prepare the designated EVM shard,
 // from Freeze the shard the bound frozen parent identifies (the same shard; the EVM IR cannot move in between). Abort returns the
-// control to "aborted", which freezes nothing: one transition lifts the Prepare-time and the Freeze-time freeze alike.
-func frozenShardOf(state ShardStates, configs map[types.PartitionShardID]*types.PartitionDescriptionRecord, control *evmroot.ControlState) (types.PartitionShardID, bool, error) {
+// control to "aborted", which freezes nothing: one transition lifts the Prepare-time and the Freeze-time freeze alike. A Prepare-time
+// freeze also lapses by itself, PrepareFreezeLapseRounds after the Prepare.
+func frozenShardOf(state ShardStates, configs map[types.PartitionShardID]*types.PartitionDescriptionRecord, control *evmroot.ControlState, round uint64) (types.PartitionShardID, bool, error) {
 	var zero types.PartitionShardID
 	if control == nil {
 		return zero, false, nil
 	}
 	switch control.Phase {
 	case "prepared":
+		if PrepareLapsed(control, round) {
+			return zero, false, nil // no Freeze followed: the Prepare-time freeze has lapsed (see PrepareFreezeLapseRounds)
+		}
 		return frozenEVMShard(state, configs)
 	case "endorsed", "committed":
 		key, err := frozenShard(state, configs, control.FrozenParent)

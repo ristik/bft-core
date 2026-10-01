@@ -1194,7 +1194,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		if profile == storage.ProfileHandoff {
 			payload.Version = profile
 			if parentQC != nil {
-				frozen, active, err := x.blockStore.FrozenShardAt(parentQC.GetRound())
+				frozen, active, err := x.blockStore.FrozenShardForBlock(parentQC.GetRound(), round)
 				if err != nil {
 					x.log.WarnContext(ctx, "cannot establish frozen EVM shard", logger.Error(err))
 					return
