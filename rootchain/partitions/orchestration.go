@@ -264,7 +264,10 @@ func derivedKey(conf *types.PartitionDescriptionRecord) []byte {
 // Provenance (the committed record and candidate digests) is never an authority
 // by itself; the caller derived the configuration from committed data.
 func (o *Orchestration) InstallDerivedShardConfig(conf *types.PartitionDescriptionRecord, provenance []byte) error {
-	if conf == nil || len(provenance) != 32 || conf.Epoch == 0 || conf.EpochStart == 0 {
+	if conf == nil || conf.Epoch == 0 || conf.EpochStart == 0 {
+		return ErrDerivedConflict
+	}
+	if _, err := evmassign.DecodeProvenance(provenance); err != nil {
 		return ErrDerivedConflict
 	}
 	if conf.NetworkID != o.networkID {
@@ -300,6 +303,92 @@ func (o *Orchestration) InstallDerivedShardConfig(conf *types.PartitionDescripti
 		}
 		return derived.Put(key, provenance)
 	})
+}
+
+// ShardConfigByEpoch returns the stored configuration with the given shard
+// epoch, or nil.
+func (o *Orchestration) ShardConfigByEpoch(partitionID types.PartitionID, shardID types.ShardID, epoch uint64) (*types.PartitionDescriptionRecord, error) {
+	var found *types.PartitionDescriptionRecord
+	err := o.db.View(func(tx *bolt.Tx) error {
+		bucket := getShardBucket(tx, partitionID, shardID)
+		if bucket == nil {
+			return nil
+		}
+		return bucket.ForEach(func(_, v []byte) error {
+			var conf *types.PartitionDescriptionRecord
+			if err := json.Unmarshal(v, &conf); err != nil {
+				return fmt.Errorf("failed to unmarshal shard conf: %w", err)
+			}
+			if conf.Epoch == epoch {
+				found = conf
+			}
+			return nil
+		})
+	})
+	return found, err
+}
+
+// DerivedChain returns the configurations derived from committed handoffs for
+// the shard with a shard epoch above afterEpoch, oldest first, with their
+// provenance. Together with the acknowledged base it is the committed
+// supersession chain.
+func (o *Orchestration) DerivedChain(partitionID types.PartitionID, shardID types.ShardID, afterEpoch uint64) ([]evmassign.ChainStep, error) {
+	var steps []evmassign.ChainStep
+	err := o.db.View(func(tx *bolt.Tx) error {
+		derived := tx.Bucket(derivedBucketName)
+		if derived == nil {
+			return nil
+		}
+		prefix := append(append([]byte(nil), partitionID.Bytes()...), shardID.Bytes()...)
+		c := derived.Cursor()
+		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+			if len(k) != len(prefix)+8 {
+				continue
+			}
+			epoch := binary.BigEndian.Uint64(k[len(prefix):])
+			if epoch <= afterEpoch {
+				continue
+			}
+			p, err := evmassign.DecodeProvenance(v)
+			if err != nil {
+				return ErrDerivedConflict
+			}
+			conf, err := o.confAtEpochTx(tx, partitionID, shardID, epoch)
+			if err != nil {
+				return err
+			}
+			if conf == nil {
+				return ErrDerivedConflict
+			}
+			h, err := confHash(conf)
+			if err != nil {
+				return err
+			}
+			steps = append(steps, evmassign.ChainStep{ShardEpoch: epoch, ConfHash: h, RecordID: p.RecordID,
+				CandidateDigest: p.CandidateDigest, RootEpoch: p.RootEpoch})
+		}
+		return nil
+	})
+	return steps, err
+}
+
+func (o *Orchestration) confAtEpochTx(tx *bolt.Tx, partitionID types.PartitionID, shardID types.ShardID, epoch uint64) (*types.PartitionDescriptionRecord, error) {
+	bucket := getShardBucket(tx, partitionID, shardID)
+	if bucket == nil {
+		return nil, nil
+	}
+	var found *types.PartitionDescriptionRecord
+	err := bucket.ForEach(func(_, v []byte) error {
+		var conf *types.PartitionDescriptionRecord
+		if err := json.Unmarshal(v, &conf); err != nil {
+			return err
+		}
+		if conf.Epoch == epoch {
+			found = conf
+		}
+		return nil
+	})
+	return found, err
 }
 
 // DerivedProvenance returns the provenance recorded for a derived entry, or nil.

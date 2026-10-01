@@ -28,6 +28,45 @@ type DerivedConfigInstaller interface {
 	InstallDerivedShardConfig(conf *types.PartitionDescriptionRecord, provenance []byte) error
 }
 
+// derivedHistory is the orchestration's committed-history-derived record.
+type derivedHistory interface {
+	DerivedChain(partition types.PartitionID, shard types.ShardID, afterEpoch uint64) ([]evmassign.ChainStep, error)
+	ShardConfigByEpoch(partition types.PartitionID, shard types.ShardID, epoch uint64) (*types.PartitionDescriptionRecord, error)
+}
+
+// CommittedChain reads the committed, unacknowledged assignment steps of the
+// shard from the derived history: every derived configuration above the
+// acknowledged shard epoch, on the acknowledged base. An empty chain means no
+// assignment is pending.
+func CommittedChain(orchestration Orchestration, partition types.PartitionID, shard types.ShardID, acknowledged uint64) (evmassign.Chain, error) {
+	history, ok := orchestration.(derivedHistory)
+	if !ok {
+		return evmassign.Chain{}, fmt.Errorf("%w: orchestration keeps no derived history", ErrAssignmentHistory)
+	}
+	steps, err := history.DerivedChain(partition, shard, acknowledged)
+	if err != nil {
+		return evmassign.Chain{}, errors.Join(ErrAssignmentHistory, err)
+	}
+	if len(steps) == 0 {
+		return evmassign.Chain{}, nil
+	}
+	base, err := history.ShardConfigByEpoch(partition, shard, acknowledged)
+	if err != nil || base == nil {
+		return evmassign.Chain{}, fmt.Errorf("%w: acknowledged configuration unavailable", ErrAssignmentHistory)
+	}
+	baseHash, err := evmassign.PDRHash(base)
+	if err != nil {
+		return evmassign.Chain{}, err
+	}
+	for i, step := range steps {
+		if step.ShardEpoch != acknowledged+uint64(i)+1 || step.RootEpoch != steps[0].RootEpoch+uint64(i) {
+			return evmassign.Chain{}, fmt.Errorf("%w: derived steps are not consecutive", ErrAssignmentHistory)
+		}
+	}
+	return evmassign.Chain{BaseRootEpoch: steps[0].RootEpoch - 1, BaseShardEpoch: acknowledged,
+		BaseActiveHash: baseHash[:], Steps: steps}, nil
+}
+
 // candidateSource retains the verified H3 candidate preimages by body id.
 type candidateSource interface {
 	HandoffCandidate(bodyID []byte) ([]byte, error)
@@ -103,8 +142,11 @@ func DeriveActivatedPDR(record evmroot.OrderedHandoffRecord, body evmroot.TrustB
 	if err := evmassign.VerifyPoPs(pop, succ, c.PoPs); err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
-	provenance := sha256.Sum256(append(bytes.Clone(record.ID()), digest[:]...))
-	return pdr, provenance[:], nil
+	provenance, err := evmassign.Provenance{RecordID: record.ID(), CandidateDigest: digest[:], RootEpoch: record.Epoch + 1}.Bytes()
+	if err != nil {
+		return nil, nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	return pdr, provenance, nil
 }
 
 // activateEVMAssignment installs the committed successor assignment into the

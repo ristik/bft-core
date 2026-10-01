@@ -275,3 +275,89 @@ func ChainCommit(baseRootEpoch, baseShardEpoch uint64, baseActive []byte, steps 
 	}
 	return acc, nil
 }
+
+// Provenance is what the orchestration records beside a derived configuration:
+// the committed record that activated it and the candidate it came from. It is
+// an index entry, never an authority; supersession verification re-reads it only
+// to name the committed chain a replacement is built on.
+type Provenance struct {
+	_               struct{} `cbor:",toarray"`
+	RecordID        []byte   // committed H record id
+	CandidateDigest []byte
+	RootEpoch       uint64 // successor root epoch H activates
+}
+
+func (p Provenance) Bytes() ([]byte, error) {
+	if len(p.RecordID) != 32 || len(p.CandidateDigest) != 32 || p.RootEpoch < 2 {
+		return nil, ErrContext
+	}
+	return types.Cbor.Marshal(p)
+}
+
+func DecodeProvenance(raw []byte) (Provenance, error) {
+	var p Provenance
+	if err := types.Cbor.Unmarshal(raw, &p); err != nil {
+		return p, ErrContext
+	}
+	if canonical, err := p.Bytes(); err != nil || !bytes.Equal(canonical, raw) {
+		return Provenance{}, ErrContext
+	}
+	return p, nil
+}
+
+// Chain describes the committed, still unacknowledged assignment steps of one
+// shard, oldest first, and the acknowledged base they extend.
+type Chain struct {
+	BaseRootEpoch  uint64
+	BaseShardEpoch uint64
+	BaseActiveHash []byte
+	Steps          []ChainStep
+}
+
+// ChainStep is one committed handoff in a Chain.
+type ChainStep struct {
+	ShardEpoch      uint64
+	ConfHash        []byte
+	RecordID        []byte
+	CandidateDigest []byte
+	RootEpoch       uint64
+}
+
+// Commitment is ChainCommit over the steps' record identifiers.
+func (c Chain) Commitment() ([32]byte, error) {
+	ids := make([][]byte, 0, len(c.Steps))
+	for _, s := range c.Steps {
+		ids = append(ids, s.RecordID)
+	}
+	return ChainCommit(c.BaseRootEpoch, c.BaseShardEpoch, c.BaseActiveHash, ids)
+}
+
+// Supersession returns the candidate field binding this chain: the latest
+// committed H it replaces and the acknowledged base it extends.
+func (c Chain) Supersession() (*Supersession, error) {
+	if len(c.Steps) == 0 {
+		return nil, ErrContext
+	}
+	commit, err := c.Commitment()
+	if err != nil {
+		return nil, err
+	}
+	return &Supersession{SupersededH: bytes.Clone(c.Steps[len(c.Steps)-1].RecordID), BaseRootEpoch: c.BaseRootEpoch,
+		BaseShardEpoch: c.BaseShardEpoch, BaseActiveHash: bytes.Clone(c.BaseActiveHash), ChainLen: uint64(len(c.Steps)),
+		ChainCommitment: commit[:]}, nil
+}
+
+// VerifyChain checks a candidate's supersession binding against the chain read
+// from the verifier's own committed history.
+func VerifyChain(s *Supersession, c Chain) error {
+	want, err := c.Supersession()
+	if err != nil {
+		return err
+	}
+	if s == nil || !bytes.Equal(s.SupersededH, want.SupersededH) || s.BaseRootEpoch != want.BaseRootEpoch ||
+		s.BaseShardEpoch != want.BaseShardEpoch || !bytes.Equal(s.BaseActiveHash, want.BaseActiveHash) ||
+		s.ChainLen != want.ChainLen || !bytes.Equal(s.ChainCommitment, want.ChainCommitment) {
+		return fmt.Errorf("%w: supersession differs from the committed chain", ErrContext)
+	}
+	return nil
+}

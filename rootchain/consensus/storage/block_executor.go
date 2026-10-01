@@ -231,7 +231,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					return nil, err
 				}
 				if len(companion) != 0 && control.Phase == "endorsed" {
-					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen]); err != nil {
+					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration); err != nil {
 						return nil, err
 					}
 				}
@@ -306,7 +306,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 // admission, after the authority has checked the candidate's static bindings.
 // The installed assignment is the authenticated configuration of the frozen
 // shard at this block, never a value the candidate supplies.
-func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.PartitionDescriptionRecord) error {
+func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.PartitionDescriptionRecord, orchestration Orchestration) error {
 	fc, err := ParseFreezeCompanion(companion)
 	if err != nil || si == nil || installed == nil {
 		return ErrHandoffRecord
@@ -333,6 +333,33 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 	}
 	if err := evmassign.VerifyInstalled(candidate, succ, installed); err != nil {
 		return errors.Join(ErrHandoffRecord, err)
+	}
+	if candidate.Supersedes != nil {
+		return verifySupersession(candidate.Supersedes, si, orchestration)
+	}
+	return nil
+}
+
+// verifySupersession admits a replacement of the installed, unacknowledged
+// assignment on the same frozen parent. The frozen shard's IR is still the
+// acknowledged state P (a certified block after P would have acknowledged and
+// ended the pending state), the installed assignment is the latest committed
+// step, and the candidate's chain and acknowledged base equal the chain read
+// from this node's committed history. No successor-set quorum is involved.
+func verifySupersession(s *evmassign.Supersession, si *ShardInfo, orchestration Orchestration) error {
+	if si.TR.Epoch == si.IR.Epoch {
+		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid, evmassign.ErrContext)
+	}
+	chain, err := CommittedChain(orchestration, si.PartitionID, si.ShardID, si.IR.Epoch)
+	if err != nil || len(chain.Steps) == 0 {
+		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid, err)
+	}
+	last := chain.Steps[len(chain.Steps)-1]
+	if last.ShardEpoch != si.TR.Epoch || !bytes.Equal(last.ConfHash, si.ShardConfHash) {
+		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid)
+	}
+	if err := evmassign.VerifyChain(s, chain); err != nil {
+		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid, err)
 	}
 	return nil
 }

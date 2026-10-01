@@ -471,11 +471,23 @@ func (x *ConsensusManager) buildAssignmentCandidate(old, next *types.RootTrustBa
 	if err != nil {
 		return nil, none, err
 	}
-	if pendingAssignmentAck(shard) {
+	var supersedes *evmassign.Supersession
+	pending := pendingAssignmentAck(shard)
+	switch {
+	case pending && !proposal.Supersede:
 		return nil, none, fmt.Errorf("%w: %w", ErrHandoffApproval, storage.ErrAssignmentAckPending)
-	}
-	if proposal.Supersede {
+	case !pending && proposal.Supersede:
 		return nil, none, fmt.Errorf("%w: no unacknowledged assignment to supersede", ErrHandoffApproval)
+	case pending:
+		// Bind the committed chain this replacement extends, read from this
+		// validator's own committed history and the acknowledged base at P.
+		chain, err := storage.CommittedChain(x.orchestration, shard.Partition, shard.Shard, shard.IR.Epoch)
+		if err != nil || len(chain.Steps) == 0 {
+			return nil, none, errors.Join(ErrHandoffApproval, storage.ErrSupersessionInvalid, err)
+		}
+		if supersedes, err = chain.Supersession(); err != nil {
+			return nil, none, errors.Join(ErrHandoffApproval, err)
+		}
 	}
 	succ, err := evmassign.NewSuccessor(installed, proposal.Validators)
 	if err != nil {
@@ -485,7 +497,7 @@ func (x *ConsensusManager) buildAssignmentCandidate(old, next *types.RootTrustBa
 	if err != nil {
 		return nil, none, err
 	}
-	candidate, err := evmassign.NewCandidate(pop, nextRoot, installed, succ, proposal.PoPs, nil)
+	candidate, err := evmassign.NewCandidate(pop, nextRoot, installed, succ, proposal.PoPs, supersedes)
 	if err != nil {
 		return nil, none, errors.Join(ErrHandoffApproval, err)
 	}
@@ -698,6 +710,9 @@ func (x *ConsensusManager) verifyEndorsedAssignmentInstalled(plan abdrc.HandoffA
 	}
 	if pendingAssignmentAck(shard) && c.Supersedes == nil {
 		return fmt.Errorf("%w: %w", ErrHandoffApproval, storage.ErrAssignmentAckPending)
+	}
+	if !pendingAssignmentAck(shard) && c.Supersedes != nil {
+		return fmt.Errorf("%w: %w", ErrHandoffApproval, storage.ErrSupersessionInvalid)
 	}
 	if err := evmassign.VerifyInstalled(c, succ, installed); err != nil {
 		return errors.Join(ErrHandoffApproval, err)

@@ -240,7 +240,9 @@ func TestConflictingDerivedEntryRefusesStartup(t *testing.T) {
 	require.NoError(t, err)
 	rogue, err := evmassign.Activate(other, 7)
 	require.NoError(t, err)
-	require.NoError(t, conflicting.InstallDerivedShardConfig(rogue, bytes.Repeat([]byte{9}, 32)))
+	rogueProvenance, err := evmassign.Provenance{RecordID: bytes.Repeat([]byte{9}, 32), CandidateDigest: bytes.Repeat([]byte{8}, 32), RootEpoch: 2}.Bytes()
+	require.NoError(t, err)
+	require.NoError(t, conflicting.InstallDerivedShardConfig(rogue, rogueProvenance))
 	_, err = New(crypto.SHA256, f.store.storage, conflicting, logger.New(t), ProfileHandoff)
 	require.ErrorIs(t, err, partitions.ErrDerivedConflict)
 	// The unrelated REST/config path cannot write an EVM epoch after genesis.

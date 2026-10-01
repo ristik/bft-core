@@ -52,6 +52,9 @@ type assignmentFixture struct {
 	pop         evmassign.PoPContext
 	orch        *partitions.Orchestration
 	base        uint64 // ordered round of the prepare record; zero means 2
+	rootEpoch   uint64 // old root epoch of the handoff being built; zero means 1
+	supersedes  *evmassign.Supersession
+	current0    *types.PartitionDescriptionRecord // installed configuration the candidate replaces; nil means f.current
 }
 
 func newAssignmentFixture(t *testing.T) *assignmentFixture {
@@ -145,11 +148,15 @@ func (f *assignmentFixture) candidate(t *testing.T) evmassign.Candidate {
 	t.Helper()
 	raw, err := types.Cbor.Marshal(f.succ)
 	require.NoError(t, err)
-	old, err := evmassign.PDRHash(f.current)
+	installed := f.current
+	if f.current0 != nil {
+		installed = f.current0
+	}
+	old, err := evmassign.PDRHash(installed)
 	require.NoError(t, err)
 	return evmassign.Candidate{Version: evmassign.CandidateVersion, Network: 5, Predecessor: bytes.Clone(f.predecessor),
-		Attempt: f.pop.Attempt, Parent: bytes.Clone(f.parent), RootMembers: f.rootMembers(), OldShardEpoch: f.current.Epoch,
-		OldActiveHash: old[:], Assignment: raw, PoPs: f.pops(t, f.pop, f.succ)}
+		Attempt: f.pop.Attempt, Parent: bytes.Clone(f.parent), RootMembers: f.rootMembers(), OldShardEpoch: installed.Epoch,
+		OldActiveHash: old[:], Assignment: raw, PoPs: f.pops(t, f.pop, f.succ), Supersedes: f.supersedes}
 }
 
 type builtFreeze struct {
@@ -167,17 +174,25 @@ func (f *assignmentFixture) build(t *testing.T, c evmassign.Candidate, mutate ..
 	raw, err := c.Encode()
 	require.NoError(t, err)
 	digest := sha256.Sum256(raw)
-	link, err := evmroot.FirstV2PredecessorHash(evmroot.V1Anchor{Version: 1, NetworkID: 5, Epoch: 1, HashIncludingSigs: f.predecessor})
-	require.NoError(t, err)
+	rootEpoch := f.rootEpoch
+	if rootEpoch == 0 {
+		rootEpoch = 1
+	}
+	link := f.predecessor
+	if rootEpoch == 1 {
+		var err error
+		link, err = evmroot.FirstV2PredecessorHash(evmroot.V1Anchor{Version: 1, NetworkID: 5, Epoch: 1, HashIncludingSigs: f.predecessor})
+		require.NoError(t, err)
+	}
 	members := make(evmroot.WeightSet, 0, len(f.tb.RootNodes))
 	for _, n := range f.tb.RootNodes {
 		members = append(members, evmroot.Member{StakingID: n.NodeID, NodeID: n.NodeID, ConsensusKey: n.SigKey, Weight: 1})
 	}
 	sort.Slice(members, func(i, j int) bool { return members[i].NodeID < members[j].NodeID })
-	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: 5, Epoch: 2, EarliestActivation: 7, Members: members,
+	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: 5, Epoch: rootEpoch + 1, EarliestActivation: f.activation(), Members: members,
 		RootThreshold:    evmroot.RootQuorumThreshold(uint64(len(members))),
 		StateSummary:     bytes.Repeat([]byte{3}, 32),
-		ChangeRecordHash: evmroot.D4CandidateContextHash(5, f.predecessor, f.pop.Attempt, digest[:], 7), PredecessorHash: link}
+		ChangeRecordHash: evmroot.D4CandidateContextHash(5, f.predecessor, f.pop.Attempt, digest[:], f.activation()), PredecessorHash: link}
 	auth := FreezeAssignmentAuthorization{Version: 2, Parent: bytes.Clone(f.parent), Candidate: digest[:], Preimage: raw}
 	for _, m := range mutate {
 		m(&auth, &body)
@@ -190,7 +205,7 @@ func (f *assignmentFixture) build(t *testing.T, c evmassign.Candidate, mutate ..
 	if base == 0 {
 		base = 2
 	}
-	freeze := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, Attempt: f.pop.Attempt, OrderedRound: base + 1, ActivationRound: 7 + base - 2,
+	freeze := evmroot.OrderedHandoffRecord{Network: 5, Epoch: rootEpoch, Attempt: f.pop.Attempt, OrderedRound: base + 1, ActivationRound: f.activation(),
 		PredecessorBodyID: f.predecessor, NextBodyID: id[:], FrozenID: frozen, SuccessorTRHash: make([]byte, 32), Kind: "freeze"}
 	prepare := freeze
 	prepare.Kind, prepare.OrderedRound, prepare.FrozenID = "prepare", base, make([]byte, 32)
@@ -205,6 +220,15 @@ func (f *assignmentFixture) build(t *testing.T, c evmassign.Candidate, mutate ..
 	companion, err := auth.Bytes()
 	require.NoError(t, err)
 	return builtFreeze{body: body, prepare: prepare, freeze: freeze, companion: companion, preimage: raw}
+}
+
+// activation is the earliest activation round of the handoff being built.
+func (f *assignmentFixture) activation() uint64 {
+	base := f.base
+	if base == 0 {
+		base = 2
+	}
+	return 7 + base - 2
 }
 
 func (f *assignmentFixture) admit(t *testing.T, b builtFreeze) error {

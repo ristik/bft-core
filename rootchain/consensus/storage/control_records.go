@@ -17,6 +17,7 @@ var (
 	// ErrAssignmentAckPending refuses another handoff while the installed EVM
 	// assignment has no certified acknowledgement, unless it supersedes that
 	// assignment on the same frozen parent.
+	ErrSupersessionInvalid  = errors.New("EVM assignment supersession does not extend the committed unacknowledged chain")
 	ErrAssignmentAckPending = errors.New("EVM assignment acknowledgement pending: only a supersession may follow")
 )
 
