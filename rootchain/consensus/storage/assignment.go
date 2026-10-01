@@ -28,6 +28,28 @@ type DerivedConfigInstaller interface {
 	InstallDerivedShardConfig(conf *types.PartitionDescriptionRecord, provenance []byte) error
 }
 
+// DerivedBatchInstaller installs everything one handoff derives atomically.
+type DerivedBatchInstaller interface {
+	InstallDerivedShardConfigs(confs []*types.PartitionDescriptionRecord, provenance []byte) error
+}
+
+// InstallDerived installs a handoff's derived configurations: atomically when the orchestration can, else one by one.
+func InstallDerived(orchestration Orchestration, confs []*types.PartitionDescriptionRecord, provenance []byte) error {
+	if batch, ok := orchestration.(DerivedBatchInstaller); ok {
+		return batch.InstallDerivedShardConfigs(confs, provenance)
+	}
+	installer, ok := orchestration.(DerivedConfigInstaller)
+	if !ok {
+		return fmt.Errorf("%w: orchestration cannot install a derived configuration", ErrAssignmentHistory)
+	}
+	for _, conf := range confs {
+		if err := installer.InstallDerivedShardConfig(conf, provenance); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // derivedHistory is the orchestration's committed-history-derived record.
 type derivedHistory interface {
 	DerivedChain(partition types.PartitionID, shard types.ShardID, afterEpoch uint64) ([]evmassign.ChainStep, error)
@@ -141,18 +163,84 @@ func DeriveActivatedPDR(record evmroot.OrderedHandoffRecord, body evmroot.TrustB
 	return pdr, provenance, nil
 }
 
+// DeriveActivatedConfigs is DeriveActivatedPDR plus the aggregator validator replacements the same candidate commits: it
+// returns the EVM configuration first, then one activated configuration per change (sorted as committed), all verified
+// against the record, body and preimage, with the shared provenance. The state-dependent half (each change replaces exactly the
+// installed configuration of an existing non-EVM shard) is checked by the callers that hold the installed configurations.
+func DeriveActivatedConfigs(record evmroot.OrderedHandoffRecord, body evmroot.TrustBaseBodyV2, preimage, frozenParent []byte) ([]*types.PartitionDescriptionRecord, []byte, []evmassign.DecodedChange, error) {
+	evm, provenance, err := DeriveActivatedPDR(record, body, preimage, frozenParent)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	c, err := evmassign.DecodeCandidate(preimage)
+	if err != nil {
+		return nil, nil, nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	var pop evmassign.PoPContext
+	pop.Network, pop.Attempt = c.Network, c.Attempt
+	copy(pop.Predecessor[:], c.Predecessor)
+	copy(pop.Parent[:], c.Parent)
+	changes, err := evmassign.ValidateChanges(c.Changes, c.SourceRef, pop, evmroot.D4ControlPartition)
+	if err != nil {
+		return nil, nil, nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	confs := []*types.PartitionDescriptionRecord{evm}
+	for _, d := range changes {
+		activated, err := evmassign.Activate(d.Successor, record.ActivationRound)
+		if err != nil {
+			return nil, nil, nil, errors.Join(ErrAssignmentHistory, err)
+		}
+		confs = append(confs, activated)
+	}
+	return confs, provenance, changes, nil
+}
+
 // activateEVMAssignment installs the committed successor assignment into the
 // designated EVM shard at the first new-root execution boundary. A shard whose
 // installed configuration already equals the one in effect is untouched, which
 // makes the activation idempotent: it runs once per (epoch, configuration, H).
 // The successor technical record derived from the new configuration must equal
 // the one H committed, or the whole checkpoint is refused.
+//
+// The same boundary activates every aggregator validator replacement the committed candidate names (derived, a key of
+// derivedShards): their technical record advances at once and the new trust base is installed immediately, so the retired
+// key's first post-boundary request is refused. Such a shard has no committed successor technical record: every root derives it
+// from the same configuration and shard state, exactly as an ordinary round would.
 func activateEVMAssignment(states map[types.PartitionShardID]*ShardInfo, shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord,
-	record evmroot.OrderedHandoffRecord, round uint64, hashAlg crypto.Hash) (map[types.PartitionShardID]*ShardInfo, error) {
+	record evmroot.OrderedHandoffRecord, round uint64, hashAlg crypto.Hash, derivedShards map[types.PartitionShardID]struct{}) (map[types.PartitionShardID]*ShardInfo, error) {
 	out := maps.Clone(states)
 	for key, conf := range shardConfs {
 		si := states[key]
-		if si == nil || conf == nil || conf.PartitionTypeID != evmassign.EVMPartitionTypeID {
+		if si == nil || conf == nil {
+			continue
+		}
+		if _, derived := derivedShards[key]; derived && conf.PartitionTypeID != evmassign.EVMPartitionTypeID {
+			installed, err := conf.Hash(hashAlg)
+			if err != nil {
+				return nil, err
+			}
+			if bytes.Equal(installed, si.ShardConfHash) {
+				continue
+			}
+			if conf.EpochStart != round || conf.Epoch != si.TR.Epoch+1 {
+				return nil, fmt.Errorf("%w: shard %s configuration epoch %d starting at %d does not follow the installed epoch %d at boundary %d",
+					ErrControlCheckpoint, key, conf.Epoch, conf.EpochStart, si.TR.Epoch, round)
+			}
+			tr, err := successorTechnicalRecord(si, conf, hashAlg)
+			if err != nil {
+				return nil, err
+			}
+			advanced := *si
+			advanced.Fees = maps.Clone(si.Fees)
+			advanced.TR = tr
+			next, err := advanced.nextEpoch(conf, hashAlg)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = next
+			continue
+		}
+		if conf.PartitionTypeID != evmassign.EVMPartitionTypeID {
 			continue
 		}
 		installed, err := conf.Hash(hashAlg)
@@ -223,4 +311,34 @@ func AssignmentSuccessorTRHash(si *ShardInfo, preimage []byte, activation uint64
 		return nil, err
 	}
 	return tr.Hash()
+}
+
+// derivedChangeShards names the aggregator shards the committed candidate of H replaces validators of.
+func derivedChangeShards(candidates candidateSource, record evmroot.OrderedHandoffRecord) (map[types.PartitionShardID]struct{}, error) {
+	if candidates == nil {
+		return nil, nil
+	}
+	preimage, err := candidates.HandoffCandidate(record.NextBodyID)
+	if err != nil {
+		return nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	if len(preimage) == 0 {
+		return nil, nil
+	}
+	c, err := evmassign.DecodeCandidate(preimage)
+	if err != nil {
+		return nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	out := make(map[types.PartitionShardID]struct{}, len(c.Changes))
+	for _, ch := range c.Changes {
+		if ch.Kind != evmassign.ChangeReplaceShardValidators {
+			return nil, errors.Join(ErrAssignmentHistory, evmassign.ErrUnsupportedChange)
+		}
+		_, succ, err := evmassign.DecodeReplaceShardValidators(ch.Payload)
+		if err != nil {
+			return nil, errors.Join(ErrAssignmentHistory, err)
+		}
+		out[types.PartitionShardID{PartitionID: succ.PartitionID, ShardID: succ.ShardID.Key()}] = struct{}{}
+	}
+	return out, nil
 }

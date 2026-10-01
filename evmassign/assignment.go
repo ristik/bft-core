@@ -273,6 +273,8 @@ type Proposal struct {
 	Supersede bool `json:"supersede,omitempty"`
 	// Bindings couple each successor root member to its delegated EVM validator (same weight, distinct keys).
 	Bindings []Binding `json:"bindings"`
+	// Changes are aggregator validator (node-key) replacements committed in the same handoff; each is a ReplaceShardValidators.
+	Changes []Change `json:"changes,omitempty"`
 }
 
 // SignPoP signs the possession message with the successor key itself.

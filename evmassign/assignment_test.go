@@ -111,7 +111,7 @@ func (f fixture) verifyCtx(c Candidate) VerifyContext {
 
 func (f fixture) candidate(t *testing.T) Candidate {
 	t.Helper()
-	c, err := NewCandidate(f.ctx, f.root, f.current, f.succ, f.pops(t), nil, f.bindings)
+	c, err := NewCandidate(f.ctx, f.root, f.current, f.succ, f.pops(t), nil, f.bindings, nil)
 	require.NoError(t, err)
 	return c
 }
@@ -385,7 +385,7 @@ func TestCandidateVerifyContextIsolatedMutations(t *testing.T) {
 		// Same committee and same EVM validators at the next epoch (a configuration-only boundary) is allowed.
 		current := clonePDR(t, f.succ)
 		current.Epoch, current.EpochStart = f.succ.Epoch-1, 11
-		cc, err := NewCandidate(f.ctx, f.root, current, f.succ, f.pops(t), nil, f.bindings)
+		cc, err := NewCandidate(f.ctx, f.root, current, f.succ, f.pops(t), nil, f.bindings, nil)
 		require.NoError(t, err)
 		require.NoError(t, VerifyInstalled(cc, f.succ, current, f.root))
 	})

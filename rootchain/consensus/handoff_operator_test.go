@@ -187,9 +187,15 @@ func TestLeaderAbortsWhenEVMAdvancesPastFrozenParent(t *testing.T) {
 	require.NoError(t, err)
 	key, err := verifier.MarshalPublicKey()
 	require.NoError(t, err)
-	require.NoError(t, orchestration.AddShardConfig(&types.PartitionDescriptionRecord{Version: 1,
-		NetworkID: 5, PartitionID: 8, PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, EpochStart: 1, T2Timeout: 5 * time.Second,
-		Validators: []*types.NodeInfo{{NodeID: node.PeerConf.ID.String(), SigKey: key, Stake: 1}}}))
+	// The genesis set is one atomic initialization: the EVM shard and an unrelated aggregator shard (the endorsed branch carries it,
+	// and Commit must bind H to the frozen EVM assignment rather than the map's only entry).
+	require.NoError(t, orchestration.InitGenesisShardConfigs(
+		&types.PartitionDescriptionRecord{Version: 1,
+			NetworkID: 5, PartitionID: 8, PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, EpochStart: 1, T2Timeout: 5 * time.Second,
+			Validators: []*types.NodeInfo{{NodeID: node.PeerConf.ID.String(), SigKey: key, Stake: 1}}},
+		&types.PartitionDescriptionRecord{Version: 1,
+			NetworkID: 5, PartitionID: 9, PartitionTypeID: 9, TypeIDLen: 8, UnitIDLen: 256, EpochStart: 1, T2Timeout: 5 * time.Second,
+			Validators: []*types.NodeInfo{{NodeID: node.PeerConf.ID.String(), SigKey: key, Stake: 1}}}))
 	previous := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: parentQC.GetRound(),
 		PredecessorBodyID: make([]byte, 32), NextBodyID: bytes.Repeat([]byte{1}, 32),
 		FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32), ActivationRound: 9, Kind: "prepare"}
@@ -223,12 +229,7 @@ func TestLeaderAbortsWhenEVMAdvancesPastFrozenParent(t *testing.T) {
 	require.EqualValues(t, 1, authorization.Version)
 	require.Equal(t, hex.Bytes{2}, authorization.Signatures[node.PeerConf.ID.String()])
 
-	// The endorsed branch carries an unrelated aggregator shard. Commit must
-	// bind H to the frozen EVM assignment rather than the map's only entry.
 	aggKey := types.PartitionShardID{PartitionID: 9, ShardID: (types.ShardID{}).Key()}
-	require.NoError(t, orchestration.AddShardConfig(&types.PartitionDescriptionRecord{Version: 1,
-		NetworkID: 5, PartitionID: 9, PartitionTypeID: 9, TypeIDLen: 8, UnitIDLen: 256, EpochStart: 1, T2Timeout: 5 * time.Second,
-		Validators: []*types.NodeInfo{{NodeID: node.PeerConf.ID.String(), SigKey: key, Stake: 1}}}))
 	parent.ShardState.States[shardKey].IR.BlockHash = bytes.Clone(frozenParent)
 	parent.ShardState.States[shardKey].TR.Round = 3
 	parent.ShardState.States[shardKey].TR.Leader = "evm"

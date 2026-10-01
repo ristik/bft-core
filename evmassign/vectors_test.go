@@ -98,7 +98,7 @@ func buildVectors(t *testing.T) vectorFile {
 		pops = append(pops, p)
 	}
 	root := []RootMember{{NodeID: "root-a", Key: bytes.Repeat([]byte{2}, 33), Weight: 1}, {NodeID: "root-b", Key: bytes.Repeat([]byte{3}, 33), Weight: 1}, {NodeID: "root-c", Key: bytes.Repeat([]byte{4}, 33), Weight: 1}}
-	c, err := NewCandidate(ctx, root, &old, succ, pops, nil, bindingsFor(root, succ))
+	c, err := NewCandidate(ctx, root, &old, succ, pops, nil, bindingsFor(root, succ), nil)
 	require.NoError(t, err)
 	raw, err := c.Encode()
 	require.NoError(t, err)

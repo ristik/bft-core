@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
@@ -192,7 +193,11 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		}
 		// The designated EVM shard installs the committed successor assignment
 		// here, once, from the configuration derived from committed history.
-		states, err := activateEVMAssignment(parentState.States, shardConfs, record, newBlock.Round, hash)
+		derivedShards, err := derivedChangeShards(candidates, record)
+		if err != nil {
+			return nil, err
+		}
+		states, err := activateEVMAssignment(parentState.States, shardConfs, record, newBlock.Round, hash, derivedShards)
 		if err != nil {
 			return nil, err
 		}
@@ -232,7 +237,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					return nil, err
 				}
 				if len(companion) != 0 && control.Phase == "endorsed" {
-					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration, authority.CurrentRoot()); err != nil {
+					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration, authority.CurrentRoot(), nextShardState.States, shardConfs); err != nil {
 						return nil, err
 					}
 				}
@@ -276,6 +281,14 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			continue
 		}
 
+		// The verifier judges the request against the last COMMITTED shard state, which in and just after the activation block is
+		// still the pre-activation anchor (old trust base). Every signer must also belong to the configuration ACTIVE for this
+		// block, the state executed here; a retired key's request is ignored, identically on every root, like a request for a
+		// removed shard. It depends on block content only, so proposal and validation cannot disagree.
+		if member, memberErr := requestSignersAreActive(si, irChReq); !member {
+			log.Info(fmt.Sprintf("ignoring a request of shard %s signed outside its active configuration: %v", shardKey, memberErr))
+			continue
+		}
 		if si.IR, err = verifier.VerifyIRChangeReq(newBlock.Round, irChReq); err != nil {
 			return nil, fmt.Errorf("verifying change request: %w", err)
 		}
@@ -307,7 +320,8 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 // admission, after the authority has checked the candidate's static bindings.
 // The installed assignment is the authenticated configuration of the frozen
 // shard at this block, never a value the candidate supplies.
-func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.PartitionDescriptionRecord, orchestration Orchestration, currentRoot []evmassign.RootMember) error {
+func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.PartitionDescriptionRecord, orchestration Orchestration, currentRoot []evmassign.RootMember,
+	states map[types.PartitionShardID]*ShardInfo, shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord) error {
 	fc, err := ParseFreezeCompanion(companion)
 	if err != nil || si == nil || installed == nil {
 		return ErrHandoffRecord
@@ -354,8 +368,62 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 	if err := evmassign.VerifyInstalled(candidate, succ, installed, currentRoot); err != nil {
 		return errors.Join(ErrHandoffRecord, err)
 	}
+	if err := verifyShardChanges(candidate, states, shardConfs); err != nil {
+		return errors.Join(ErrHandoffRecord, err)
+	}
 	if candidate.Supersedes != nil {
 		return verifySupersession(candidate.Supersedes, si, orchestration)
+	}
+	return nil
+}
+
+// requestSignersAreActive reports whether every block certification request of the IR change request is signed by a member of the
+// shard's executing configuration: the node is in the active trust base AND the signature verifies under the ACTIVE key of that node
+// (a rotation may keep a node id and change only its key, so membership by id alone would let the retired key through). A timeout
+// request carries none.
+func requestSignersAreActive(si *ShardInfo, irChReq *rctypes.IRChangeReq) (bool, error) {
+	for _, req := range irChReq.Requests {
+		if req == nil {
+			return false, errors.New("nil block certification request")
+		}
+		bs, err := req.Bytes()
+		if err != nil {
+			return false, err
+		}
+		if err := si.Verify(req.NodeID, func(v abcrypto.Verifier) error { return v.VerifyBytes(req.Signature, bs) }); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// verifyShardChanges is the state-dependent half of the aggregator validator replacements a candidate carries: each replaces
+// exactly the installed configuration of an existing non-EVM shard whose last replacement is already acknowledged (its technical
+// record names the epoch its input record certified). The static half (kinds, bounds, possession proofs) ran with the binding.
+func verifyShardChanges(c evmassign.Candidate, states map[types.PartitionShardID]*ShardInfo, shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord) error {
+	if c.Supersedes != nil && len(c.Changes) != 0 {
+		// Aggregator changes of the superseded H are already activated and never replayed; a supersession carries none.
+		return fmt.Errorf("%w: a supersession carries no aggregator changes", evmassign.ErrChange)
+	}
+	for _, ch := range c.Changes {
+		if ch.Kind != evmassign.ChangeReplaceShardValidators {
+			return evmassign.ErrUnsupportedChange
+		}
+		r, succ, err := evmassign.DecodeReplaceShardValidators(ch.Payload)
+		if err != nil {
+			return err
+		}
+		key := types.PartitionShardID{PartitionID: succ.PartitionID, ShardID: succ.ShardID.Key()}
+		si := states[key]
+		if si == nil {
+			return fmt.Errorf("%w: shard %s does not exist", evmassign.ErrChange, key)
+		}
+		if err := evmassign.VerifyChangeInstalled(evmassign.DecodedChange{Replace: r, Successor: succ}, shardConfs[key]); err != nil {
+			return err
+		}
+		if si.TR.Epoch != si.IR.Epoch {
+			return fmt.Errorf("%w: shard %s has an unacknowledged configuration", ErrAssignmentAckPending, key)
+		}
 	}
 	return nil
 }

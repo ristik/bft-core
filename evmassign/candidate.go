@@ -10,7 +10,7 @@ import (
 
 // CandidateVersion is the only encoding of an assignment-bearing candidate.
 // The legacy root-only operator candidate (version 1) is unchanged.
-const CandidateVersion uint64 = 3
+const CandidateVersion uint64 = 4
 
 // MaxCandidateBytes bounds the retained preimage: it is carried once in the
 // freeze companion and the handoff bundle, never in the root-input D[] payload.
@@ -65,6 +65,8 @@ type Candidate struct {
 	PoPs          []PoP
 	Supersedes    *Supersession
 	Bindings      []Binding // one per successor root member, sorted by RootNodeID
+	Changes       []Change  // aggregator validator replacements, at most one per shard (kind 1 only)
+	SourceRef     []byte    // reserved: must be empty
 }
 
 func (c Candidate) Encode() ([]byte, error) {
@@ -125,7 +127,7 @@ func (c Candidate) Successor() (*types.PartitionDescriptionRecord, error) {
 // NewCandidate assembles the candidate. PoPs must already be collected: every
 // successor key signs PoPMessage for this context before propose.
 func NewCandidate(c PoPContext, root []RootMember, current, succ *types.PartitionDescriptionRecord,
-	pops []PoP, supersedes *Supersession, bindings []Binding) (Candidate, error) {
+	pops []PoP, supersedes *Supersession, bindings []Binding, changes []Change) (Candidate, error) {
 	if err := ValidateSuccessor(current, succ); err != nil {
 		return Candidate{}, err
 	}
@@ -145,7 +147,7 @@ func NewCandidate(c PoPContext, root []RootMember, current, succ *types.Partitio
 	}
 	out := Candidate{Version: CandidateVersion, Network: c.Network, Predecessor: bytes.Clone(c.Predecessor[:]),
 		Attempt: c.Attempt, Parent: bytes.Clone(c.Parent[:]), RootMembers: root, OldShardEpoch: current.Epoch,
-		OldActiveHash: old[:], Assignment: raw, PoPs: pops, Supersedes: supersedes, Bindings: bindings}
+		OldActiveHash: old[:], Assignment: raw, PoPs: pops, Supersedes: supersedes, Bindings: bindings, Changes: changes}
 	if _, err := out.Encode(); err != nil {
 		return Candidate{}, err
 	}
@@ -160,6 +162,8 @@ type BindingContext struct {
 	SuccessorRoot []RootMember
 	// Digest is the candidate hash the approval, companion and D3 context carry.
 	Digest []byte
+	// ControlPartition is the reserved control partition id, which no change may target.
+	ControlPartition types.PartitionID
 }
 
 // VerifyContext adds the authenticated installed EVM configuration.
@@ -185,7 +189,8 @@ func sameValidators(a, b []*types.NodeInfo) bool {
 
 // ValidateCoupling checks that the successor root members and the successor EVM validators are one coupled set: the
 // bindings are a bijection between them (sorted, unique, no unknown or missing id), each pair has equal weight, and a
-// pair never shares a signing key (co-hosted processes must not share private keys).
+// signing key is shared across roles: no root key is any entity's EVM key (global distinctness, co-hosted processes must not
+// share private keys).
 func ValidateCoupling(root []RootMember, succ *types.PartitionDescriptionRecord, bindings []Binding) error {
 	if succ == nil || len(root) == 0 || len(bindings) != len(root) || len(succ.Validators) != len(root) {
 		return fmt.Errorf("%w: %d root members, %d EVM validators, %d bindings", ErrCoupling, len(root), lenValidators(succ), len(bindings))
@@ -212,8 +217,16 @@ func ValidateCoupling(root []RootMember, succ *types.PartitionDescriptionRecord,
 		if m.Weight != v.Stake {
 			return fmt.Errorf("%w: %q has root weight %d but EVM weight %d", ErrCoupling, b.RootNodeID, m.Weight, v.Stake)
 		}
-		if bytes.Equal(m.Key, v.SigKey) {
-			return fmt.Errorf("%w: %q and its EVM validator share a signing key", ErrCoupling, b.RootNodeID)
+	}
+	// Keys are distinct across roles, not only within a bound pair: no root key is any entity's EVM key (a root key signing
+	// as another entity's EVM participant would defeat the delegation), and no EVM key is a root key.
+	rootKeys := make(map[string]string, len(root))
+	for _, m := range root {
+		rootKeys[string(m.Key)] = m.NodeID
+	}
+	for _, v := range succ.Validators {
+		if owner, shared := rootKeys[string(v.SigKey)]; shared {
+			return fmt.Errorf("%w: EVM validator %q uses the signing key of root entity %q", ErrCoupling, v.NodeID, owner)
 		}
 	}
 	return nil
@@ -270,6 +283,9 @@ func VerifyBinding(data []byte, v BindingContext) (Candidate, *types.PartitionDe
 		return Candidate{}, nil, err
 	}
 	if err := VerifyPoPs(v.PoPContext, succ, c.PoPs); err != nil {
+		return Candidate{}, nil, err
+	}
+	if _, err := ValidateChanges(c.Changes, c.SourceRef, v.PoPContext, v.ControlPartition); err != nil {
 		return Candidate{}, nil, err
 	}
 	if s := c.Supersedes; s != nil {

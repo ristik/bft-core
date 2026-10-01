@@ -105,3 +105,41 @@ committed steps.
   (archive replicas) and restart.
 - Offline verification of a mint after a rotation needs only the bundle (version 2, carrying the PDR), the
   expected claim, the genesis pin and the trust base for the UC's root epoch.
+
+## Aggregator node-key replacement in the same handoff
+
+A handoff may also replace the node keys (validators only) of existing aggregator shards: no `proof_type` or other setting
+changes, no aggregator freeze, one change per shard, at most 8 per handoff. The EVM/aggregator keys and the root keys are
+distinct everywhere: no root key may be any entity's EVM key.
+
+1. Read the context as above (`evm-context`): every new aggregator key proves possession over the same attempt context.
+2. For each new aggregator key, run on its holder: `build/ubft root handoff evm-pop --context context.json --validators agg-validators.json
+   --node-id AGG_NODE --key-conf AGG_KEYS --installed AGG_INSTALLED_SHARD_CONF.json` (the shard's currently installed
+   configuration, not the EVM one).
+3. `build/ubft root handoff shard-assemble --context context.json --installed AGG_INSTALLED_SHARD_CONF.json --validators agg-validators.json
+   --pops agg-pop.json --out change.json`.
+4. Add `--changes change.json[,change2.json]` to `evm-assemble` and propose as usual. Every root validator refuses, before it
+   endorses and again at block validation, a change that does not replace exactly the shard's installed configuration, that
+   changes anything but validators and epoch, that targets the EVM or control partition, or whose shard still has an
+   unacknowledged earlier replacement.
+
+At the first new-root block the new keys install, the shard's technical record advances to the new epoch and the root sends a
+repeat certificate; the retired key's requests are refused from that block. The aggregator restarts with its new key and resumes
+from that repeat certificate. A supersession carries no aggregator changes (those of the superseded H are already active), so
+while an EVM acknowledgement is pending an aggregator key change must wait for it.
+
+`PUT /api/v1/configurations` is refused under the unified profile, and a root restarted with an edited shard configuration
+file (any partition) is refused: after genesis every configuration comes from committed handoff history.
+
+**Liveness corner.** While an EVM acknowledgement is pending only a supersession is admitted, and a supersession carries no
+aggregator changes, so a stuck acknowledgement also blocks an emergency aggregator key rotation until it is acknowledged or
+superseded.
+
+**Retired-key window.** A request signed by a key retired by an activated handoff is ignored by every root from the activation
+block on (the executed shard state, not the last committed one, decides membership); it is never certified. This covers the EVM
+shard's retired keys as well.
+
+**Genesis files.** After genesis the shard configuration set is fixed: a root accepts only a byte-equal reload of its genesis
+entries (any other epoch, keys, activation round, partition or shard is refused), and refuses to start if a stored shard's
+configuration hash differs from the one committed history derives. Before the first start, check every genesis shard
+configuration file against the pinned T1 manifest hash: a fresh database accepts the set it is given.
