@@ -73,7 +73,7 @@ for path in source.rglob("*"):
       if path.is_file() and (path.suffix == ".log" or path.name in {
         "t6-contract-actions.json", "f7-lock-pin.json", "operator-status.json",
         "t6-wallet-finalized-before-handoff.json", "t6-wallet-finalized-after-restore.json",
-        "t6-f7-verify.json", "t6-trust-base-epoch1.json", "t6-f7-locked.cbor",
+        "t6-f7-verify.json", "t6-trust-base-epoch1.json", "t6-f7-locked.cbor", "t6-finality-monitor.jsonl",
       }):
         target=destination/path.relative_to(source)
         target.parent.mkdir(parents=True,exist_ok=True)

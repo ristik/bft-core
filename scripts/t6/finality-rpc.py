@@ -76,16 +76,9 @@ def check_finalized(rpc_url: str, status_url: str, log_path: Path):
     latest_height = parse_int(latest.get("number"), "latest.number")
     final_hash = str(final.get("hash", "")).lower()
     latest_hash = str(latest.get("hash", "")).lower()
+    tip_height, tip_hash = read_tip(status_url)
+
     certs = certified_from_log(log_path)
-    if status_url is None:
-        # The H4 restore command does not expose a shard-node status listener, so a restored
-        # validator's certified tip is the highest certificate it has itself admitted.
-        if not certs:
-            raise CheckError(f"{log_path}: restored validator has no certificate-admitted log record")
-        tip_height = max(certs)
-        tip_hash = sorted(certs[tip_height])[-1]
-    else:
-        tip_height, tip_hash = read_tip(status_url)
     if final_height:
         known = certs.get(final_height, set())
         # Certificate logging follows the durable certification operation. Give a just-committed
@@ -167,12 +160,22 @@ def watch(args) -> int:
         print(json.dumps({"event": "watch-start", "validators": args.validators}), file=stream, flush=True)
         while not stop.exists():
             for index, (rpc_url, status_url, log_path) in enumerate(zip(urls, status_urls, logs), start=1):
+                # The H4 restore command exposes neither a status listener nor (for a while) a
+                # stable RPC on the restored validator. After restore, sample that validator's
+                # slot through a survivor and record which node answered.
+                answered_by = index
+                sample_rpc, sample_status, sample_log = rpc_url, status_url, log_path
+                if index == args.allow_offline_validator and restore_certified(Path(args.restore_log)):
+                    answered_by = next(i for i in range(1, args.validators + 1) if i != index)
+                    sample_rpc = urls[answered_by - 1]
+                    sample_status = status_urls[answered_by - 1]
+                    sample_log = logs[answered_by - 1]
                 try:
-                    restored_status_less = (
-                        index == args.allow_offline_validator and restore_certified(Path(args.restore_log))
-                    )
-                    sample = check_finalized(rpc_url, None if restored_status_less else status_url, log_path)
-                    sample.update({"event": "finality-sample", "validator": index, "unixTime": time.time()})
+                    sample = check_finalized(sample_rpc, sample_status, sample_log)
+                    sample.update({
+                        "event": "finality-sample", "validator": index, "answeredBy": answered_by,
+                        "unixTime": time.time(),
+                    })
                     counts[index - 1] += 1
                     print(json.dumps(sample, separators=(",", ":")), file=stream, flush=True)
                 except CheckError as exc:
@@ -198,6 +201,15 @@ def watch(args) -> int:
                             flush=True,
                         )
                     else:
+                        print(
+                            json.dumps({
+                                "event": "finality-failure", "validator": index, "answeredBy": answered_by,
+                                "rpc": sample_rpc, "status": sample_status, "error": str(exc),
+                                "unixTime": time.time(),
+                            }),
+                            file=stream,
+                            flush=True,
+                        )
                         raise
             if not ready.exists() and all(count > 0 for count in counts):
                 ready.write_text("ready\n", encoding="utf-8")
