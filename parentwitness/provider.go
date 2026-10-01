@@ -49,7 +49,7 @@ func (p *Provider) Serve(ctx context.Context, request Request) (Response, error)
 	if !found {
 		return Response{Request: owned, Outcome: OutcomeUnavailable, Detail: "not retained"}, nil
 	}
-	ownedEvidence, err := ownEvidence(evidence)
+	ownedEvidence, err := ownEvidence(evidence, p.registry.Layout)
 	if err != nil {
 		return Response{}, fmt.Errorf("parent witness provider evidence: %w", err)
 	}
