@@ -51,7 +51,7 @@ PY
   build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
     --manifest test-nodes/post-m2a-allocation-build-v1.exported.json \
     --out test-nodes/evm-genesis-finalized-funded.json \
-    --full-shard-conf test-nodes/evm-full-shard-conf-v2.json || return 1
+    --full-shard-conf test-nodes/evm-full-shard-conf-v2.json --registry-layout "$(registry_layout)" || return 1
 }
 
 post_m2a_wait_initial_transactions() {

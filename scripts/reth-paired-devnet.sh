@@ -45,6 +45,11 @@ elif [ "${M2_PROFILE2:-0}" = 1 ]; then
   echo "profile-2 logs: $M2_RUN_LOG_DIR"
 fi
 
+# A lane that supplies its own ureth (H4_URETH_BIN / POST_M2A_URETH_BIN) runs the current registry
+# layout (2) unless REGISTRY_LAYOUT=1 says that ureth is pre-#47; the built-in pins stay on layout 1.
+if [ -n "${H4_URETH_BIN:-}" ] || [ -n "${POST_M2A_URETH_BIN:-}" ]; then unset URETH_PIN_REGISTRY_LAYOUT; fi
+echo "registry layout=$(registry_layout)"
+
 validators=${1:-4}
 rounds=${2:-10}
 postM2aMode=${POST_M2A_MODE:-}
@@ -100,7 +105,7 @@ urethPinResolve || exit 1
 export URETH_PIN_FEE_COLLECTOR
 echo "bft source commit=$(git rev-parse HEAD)"
 echo "ureth source commit=$URETH_PIN_COMMIT binary sha256=$(shasum -a 256 "$URETH_BIN" | cut -d' ' -f1)"
-echo "registry artifact sha256=$(shasum -a 256 registrygenesis/seal-registry-v1.json | cut -d' ' -f1)"
+echo "registry artifact (layout $(registry_layout)) sha256=$(shasum -a 256 "$(registry_artifact)" | cut -d' ' -f1)"
 
 failures=0
 pass() { echo "  PASS: $1"; }
@@ -265,7 +270,7 @@ chainSpec=test-nodes/evm-genesis-finalized-funded.json
 fullShardConf=test-nodes/evm-full-shard-conf-v2.json
 build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
   --alloc-source test-nodes/evm-genesis-funded.json --out "$chainSpec" \
-  --full-shard-conf "$fullShardConf" || { echo "finalized funded genesis failed" >&2; exit 1; }
+  --full-shard-conf "$fullShardConf" --registry-layout "$(registry_layout)" || { echo "finalized funded genesis failed" >&2; exit 1; }
 echo "finalized funded genesis sha256=$(shasum -a 256 "$chainSpec" | cut -d' ' -f1)"
 fi
 if [ "${SIGNING:-local}" = authority ]; then

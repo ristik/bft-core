@@ -212,6 +212,9 @@ rethPinObtainPinned() {
 URETH_PIN_REPO=https://github.com/ristik/ureth
 URETH_PIN_COMMIT=39d7e59db3054811d0b4020bf182a2e23f8a3b38
 URETH_PIN_BIN=unicity-reth
+# The built-in pins (this one and the profile-2 pin in reth-paired-devnet.sh) predate ureth #47, so
+# they need the layout-1 SealRegistry. Bump this to 2 together with the pin (helper.sh registry_layout).
+URETH_PIN_REGISTRY_LAYOUT=1
 
 # The fee collector every Unicity lane passes. A test devnet needs a fixed, obviously-not-real
 # address: the zero address is a real burn destination and any plausible address could be someone's,

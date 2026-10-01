@@ -253,6 +253,20 @@ function generate_evm_shard_conf() {
   echo "generated test-nodes/shard-conf-${partitionID}_0.json"
 }
 
+# registry_layout - the SealRegistry layout every lane seeds into genesis and runs shard-node with.
+# Layout 2 (registrygenesis/seal-registry-v2.json, code hash 0x7787f316...caf38, contracts ce3e40b4) is
+# what ureth unicity/main pins since #47, so it is the default. REGISTRY_LAYOUT=1 selects the legacy
+# v1 artifact for a lane that must run an older ureth. URETH_PIN_REGISTRY_LAYOUT is the layout of the
+# built-in ureth pins in scripts/lib/reth-pin.sh (REGISTRY_LAYOUT wins over it).
+function registry_layout() {
+  echo "${REGISTRY_LAYOUT:-${URETH_PIN_REGISTRY_LAYOUT:-2}}"
+}
+
+# registry_artifact - repo path of the SealRegistry artifact registry_layout selects
+function registry_artifact() {
+  echo "registrygenesis/seal-registry-v$(registry_layout).json"
+}
+
 # generate_evm_genesis - emit the reth chain spec derived from the shard
 # conf generate_evm_shard_conf just wrote — see engine_api_genesis.go for
 # why this must be derived, not hand-written separately.
@@ -260,7 +274,7 @@ function generate_evm_shard_conf() {
 function generate_evm_genesis() {
   local partitionID=$1
   build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
-    --out test-nodes/evm-genesis.json
+    --out test-nodes/evm-genesis.json --registry-layout "$(registry_layout)"
 }
 
 # evm_validator_id - node id of EVM validator $1 (must already be initialized)
@@ -436,7 +450,7 @@ function start_one_evm_validator() {
     --log-format text --log-level "${EVM_VALIDATOR_LOG_LEVEL:-info}" \
     ${executorArgs[@]+"${executorArgs[@]}"} ${rpcArgs[@]+"${rpcArgs[@]}"} \
     ${signingArgs[@]+"${signingArgs[@]}"} \
-    ${profileArgs[@]+"${profileArgs[@]}"} \
+    ${profileArgs[@]+"${profileArgs[@]}"} --registry-layout "$(registry_layout)" \
     >> "test-nodes/evm$i/debug.log" 2>&1 &
   echo $! > "test-nodes/evm$i/pid"
 }

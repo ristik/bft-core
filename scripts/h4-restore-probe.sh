@@ -112,7 +112,7 @@ case "$stage" in
       --trust-base test-nodes/trust-base.json --full-shard-conf "$EVM_FULL_SHARD_CONF" \
       --genesis "$EVM_GENESIS_FILE" --engine-url http://127.0.0.1:18551 \
       --eth-url http://127.0.0.1:18545 --jwt-secret "$evidence/jwt.hex" \
-      --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" \
+      --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" --registry-layout "$(registry_layout)" \
       --execution-journal "$evidence/journal.db" --archive-store "$evidence/archive" --archive-prune \
       ${restoreProfile2Args[@]+"${restoreProfile2Args[@]}"} \
       --journal-candidates 32 --archive-replica "$(evm_validator_id 2)" \
