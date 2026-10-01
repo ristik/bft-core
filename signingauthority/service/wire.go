@@ -61,6 +61,8 @@ const (
 	// configuration, never a hash, because the authority checks the configuration names its own key.
 	opCompleteEnrollment op = 104
 	opAdvanceEpoch       op = 105
+	// opSignHandoffPoP asks for the handoff possession proof the authority's own key owes a coupled handoff. Operator channel only.
+	opSignHandoffPoP op = 106
 )
 
 func (o op) servedToClient() bool {
@@ -73,7 +75,7 @@ func (o op) servedToClient() bool {
 
 func (o op) servedToOperator() bool {
 	switch o {
-	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch:
+	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP:
 		return true
 	}
 	return false
@@ -101,6 +103,8 @@ func (o op) String() string {
 		return "complete-enrollment"
 	case opAdvanceEpoch:
 		return "advance-epoch"
+	case opSignHandoffPoP:
+		return "sign-handoff-pop"
 	}
 	return fmt.Sprintf("unknown(%d)", uint64(o))
 }
@@ -161,6 +165,19 @@ type enrollmentPayload struct {
 	_          struct{} `cbor:",toarray"`
 	Enrollment []byte
 	PublicKey  []byte
+}
+
+// handoffPoPPayload is the structured request of opSignHandoffPoP: the domain tag, the attempt context, the successor binding and
+// the node. Nothing in it is bytes to be signed.
+type handoffPoPPayload struct {
+	_           struct{} `cbor:",toarray"`
+	Domain      string
+	Network     uint64
+	Attempt     uint64
+	Predecessor []byte
+	Parent      []byte
+	Successor   []byte
+	NodeID      string
 }
 
 type advanceEpochPayload struct {

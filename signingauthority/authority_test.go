@@ -447,7 +447,7 @@ func TestAuthorityOffersNoGenericSigningOrKeyImport(t *testing.T) {
 	}
 	require.ElementsMatch(t, []string{
 		"AdvanceEpoch", "Authenticate", "Close", "CompleteEnrollment", "Enrollment", "MarkUntrusted", "Release", "ReplaceSession",
-		"Reserve", "RetainResponse", "Sign", "SigningPublicKey", "Status",
+		"Reserve", "RetainResponse", "Sign", "SignHandoffPoP", "SigningPublicKey", "Status",
 	}, methods,
 		"this authority admits structured requests only: no generic signing, key import, key export or journal load")
 
@@ -457,6 +457,13 @@ func TestAuthorityOffersNoGenericSigningOrKeyImport(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, 2, signMethod.Type.NumIn(), "Sign takes the receiver and a session, and nothing else")
 	require.Equal(t, reflect.TypeOf(Session{}), signMethod.Type.In(1))
+
+	// The one exception, SignHandoffPoP, is as narrow: a structured request (a domain tag, a context, a successor binding, a node), no
+	// bytes. The signature is what makes that checkable.
+	popMethod, ok := at.MethodByName("SignHandoffPoP")
+	require.True(t, ok)
+	require.Equal(t, 2, popMethod.Type.NumIn(), "SignHandoffPoP takes the receiver and one structured request")
+	require.Equal(t, reflect.TypeOf(HandoffPoPRequest{}), popMethod.Type.In(1))
 
 	f := newFixture(t, 1)
 	t.Run("an enrollment naming a key is refused", func(t *testing.T) {

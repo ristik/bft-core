@@ -17,6 +17,9 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
+	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/signingauthority/service"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -273,7 +276,7 @@ func readValidators(path string) ([]*types.NodeInfo, error) {
 }
 
 func newEVMPoPCmd() *cobra.Command {
-	var contextFile, validatorsFile, nodeID, keyFile, installedFile string
+	var contextFile, validatorsFile, nodeID, keyFile, installedFile, authoritySocket, authorityCredential string
 	cmd := &cobra.Command{Use: "evm-pop", Short: "Sign a proof of possession for one successor EVM validator key",
 		Long: "Run by the holder of a successor signing key, offline. It signs the domain-separated possession message for the successor\n" +
 			"assignment and the context printed by `handoff evm-context`. Retained keys must sign too.",
@@ -299,17 +302,28 @@ func newEVMPoPCmd() *cobra.Command {
 			if err := evmassign.ValidateAssignment(succ); err != nil {
 				return err
 			}
-			raw, err := os.ReadFile(keyFile) // #nosec G304 -- operator supplied local key file
-			if err != nil {
-				return err
+			if keyFile != "" && (authoritySocket != "" || authorityCredential != "") {
+				return errors.New("give either --key-conf or the signing authority flags, not both: a key is signed for by exactly one holder")
 			}
-			var conf KeyConf
-			if err := json.Unmarshal(raw, &conf); err != nil {
-				return fmt.Errorf("decoding key configuration %q: %w", keyFile, err)
+			if authoritySocket != "" && authorityCredential == "" {
+				return errors.New("--authority-socket needs --authority-credential")
 			}
-			signer, err := conf.Signer()
-			if err != nil {
-				return err
+			var signer abcrypto.Signer
+			if authoritySocket == "" {
+				if keyFile == "" {
+					return errors.New("give --key-conf, or --authority-socket and --authority-credential for an authority-backed validator")
+				}
+				raw, err := os.ReadFile(keyFile) // #nosec G304 -- operator supplied local key file
+				if err != nil {
+					return err
+				}
+				var conf KeyConf
+				if err := json.Unmarshal(raw, &conf); err != nil {
+					return fmt.Errorf("decoding key configuration %q: %w", keyFile, err)
+				}
+				if signer, err = conf.Signer(); err != nil {
+					return err
+				}
 			}
 			var validator *types.NodeInfo
 			for _, v := range succ.Validators {
@@ -320,8 +334,23 @@ func newEVMPoPCmd() *cobra.Command {
 			if validator == nil {
 				return fmt.Errorf("node %q is not a successor validator", nodeID)
 			}
-			proof, err := evmassign.SignPoP(signer, pop, succ, nodeID)
-			if err != nil {
+			var proof evmassign.PoP
+			if authoritySocket != "" {
+				// An authority-backed validator's key never leaves its signing authority: the operator channel signs the proof for
+				// its own key, in this context and for this successor binding, and nothing else.
+				credential, err := readCredentialFile(authorityCredential)
+				if err != nil {
+					return fmt.Errorf("loading the authority operator credential: %w", err)
+				}
+				operator, err := service.NewOperatorClient(service.ClientConfig{Dial: service.UnixDialer(authoritySocket), Credential: credential, Timeout: 15 * time.Second})
+				if err != nil {
+					return err
+				}
+				defer func() { _ = operator.Close() }()
+				if proof, err = operator.SignHandoffPoP(cmd.Context(), signingauthority.HandoffPoPRequest{Domain: evmassign.PoPDomain, Context: pop, Successor: succ, NodeID: nodeID}); err != nil {
+					return fmt.Errorf("the signing authority refused the possession proof: %w", err)
+				}
+			} else if proof, err = evmassign.SignPoP(signer, pop, succ, nodeID); err != nil {
 				return err
 			}
 			// The key must be the validator's own: refuse to hand out a proof that would be rejected later.
@@ -340,7 +369,9 @@ func newEVMPoPCmd() *cobra.Command {
 	cmd.Flags().StringVar(&nodeID, "node-id", "", "successor validator this key belongs to")
 	cmd.Flags().StringVar(&keyFile, "key-conf", "", "key configuration holding the validator's signing key")
 	cmd.Flags().StringVar(&installedFile, "installed", "", "installed shard configuration JSON of an aggregator shard whose node keys are replaced (default: the EVM assignment in the context)")
-	for _, f := range []string{"context", "validators", "node-id", "key-conf"} {
+	cmd.Flags().StringVar(&authoritySocket, "authority-socket", "", "operator socket of the validator's signing authority (instead of --key-conf)")
+	cmd.Flags().StringVar(&authorityCredential, "authority-credential", "", "path to the signing authority's operator credential")
+	for _, f := range []string{"context", "validators", "node-id"} {
 		_ = cmd.MarkFlagRequired(f)
 	}
 	return cmd

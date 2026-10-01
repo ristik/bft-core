@@ -10,6 +10,10 @@ var (
 	// Enrollment is a guard, never a namespace a caller may move to escape an earlier decision.
 	ErrContextMismatch = errors.New("signing-context-mismatch")
 
+	// ErrPoPDomain is a handoff possession-proof request that does not name the possession-proof domain: the authority signs exactly
+	// that one message for its own key, never anything a caller labels differently.
+	ErrPoPDomain = errors.New("signing-pop-domain-mismatch")
+
 	// ErrUnauthenticated is a request whose certificate, seal quorum, inclusion paths or bound
 	// TechnicalRecord do not verify against the authority's own trust.
 	ErrUnauthenticated = errors.New("signing-unauthenticated-input")

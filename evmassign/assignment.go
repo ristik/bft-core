@@ -65,6 +65,9 @@ const (
 
 	assignmentDomain = "UNICITY_H3_EVM_ASSIGNMENT"
 	popDomain        = "UNICITY_H3_EVM_ASSIGNMENT_POP"
+	// PoPDomain is the domain tag of the possession message. Signers that refuse generic signing (the signing authority) require
+	// a request to name it before they sign exactly this message for their own key.
+	PoPDomain = popDomain
 )
 
 func hashCBOR(v ...any) ([32]byte, error) {
