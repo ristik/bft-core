@@ -63,3 +63,10 @@ behavior. The H6 live acceptance is pending separately: it must demonstrate a
 committed Abort, a paid transaction on real ureth after Abort, an attempt+1
 handoff, and refusal of a request that races behind H. Do not treat this
 document or a local approval response as that live evidence.
+
+## The EVM is frozen from Prepare
+
+A `prepared` handoff already refuses every EVM certification (the freeze starts at Prepare, not at Freeze). If a handoff stays
+`prepared` because no root holds its endorsed plan any more (all leaders restarted), the EVM stays paused until you abort it with
+the commands above; aggregator shards keep certifying. A plan that goes stale before Prepare is ordered is dropped by the leader
+(`root handoff outcome ... phase=dropped` in the root log): nothing was frozen, re-run `propose` from the current certified parent.

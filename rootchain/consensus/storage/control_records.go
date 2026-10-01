@@ -104,6 +104,37 @@ func DecodeOrderedHandoffRecord(data []byte) (evmroot.OrderedHandoffRecord, erro
 	return decodeOrderedRecord(data)
 }
 
+// A Prepare record carries no signatures: any single leader can order one for a body no root endorsed. It freezes the EVM shard from
+// its round, so the freeze must end by itself when no Freeze for that attempt follows, or one faulty leader could pause the EVM
+// indefinitely. The lapse is a pure function of the Prepare's ordered round and the round of the block being executed, so every
+// root, on every branch, agrees on it.
+//
+// PrepareFreezeLapseRounds is how long a Prepare freezes the EVM without a Freeze. An honest handoff orders Freeze in the round after
+// Prepare (the plan is endorsed before Prepare is ordered), and the Prepare already reserves 8 rounds before activation, so a Freeze
+// that needs more than three times that has lost its leaders for the better part of a minute (rounds are ~1 s, partitions 1-3 s) and
+// is better restarted. After the lapse the EVM certifies again and the plan is dead: a fresh Prepare, with the next attempt number
+// (the lapse is treated like an abort for numbering), is needed.
+//
+// PrepareCooldownRounds is the pause before that fresh Prepare may be ordered. It bounds what a faulty leader can do by repeating the
+// attack: the EVM is frozen at most PrepareFreezeLapseRounds in every PrepareFreezeLapseRounds+PrepareCooldownRounds (50%), where
+// without it the freeze could be renewed the moment it lapsed. That is a residual, deliberately kept simple: a faulty leader that
+// leads one round in n can still halve EVM availability; removing it needs a signed Prepare, which is a protocol change.
+const (
+	PrepareFreezeLapseRounds = 24
+	PrepareCooldownRounds    = 24
+)
+
+// PrepareLapsed reports whether a prepared control state's freeze has lapsed at the given block round: no Freeze followed within
+// PrepareFreezeLapseRounds of the Prepare.
+func PrepareLapsed(c *evmroot.ControlState, round uint64) bool {
+	return c != nil && c.Phase == "prepared" && round > c.OrderedRound+PrepareFreezeLapseRounds
+}
+
+// PrepareMayFollowLapse reports whether a fresh Prepare (next attempt) may be ordered over a lapsed Prepare at this round.
+func PrepareMayFollowLapse(c *evmroot.ControlState, round uint64) bool {
+	return PrepareLapsed(c, round) && round > c.OrderedRound+PrepareFreezeLapseRounds+PrepareCooldownRounds
+}
+
 func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, epoch, round uint64, authority handoffAuthority, companion []byte) (*evmroot.ControlState, error) {
 	if previous == nil {
 		return nil, ErrNetworkProfile
@@ -121,10 +152,16 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 	if authority == nil || !bytes.Equal(r.PredecessorBodyID, authority.Predecessor()) || previous.Phase == "committed" {
 		return nil, ErrHandoffRecord
 	}
-	if previous.Phase == "idle" || previous.Phase == "aborted" {
+	// A Prepare whose freeze lapsed is dead (the EVM certifies again); a fresh Prepare may follow it, with the next attempt number,
+	// once the cooldown has passed. A Freeze for the lapsed attempt is refused below.
+	lapsed := PrepareLapsed(previous, round)
+	if lapsed && r.Kind == "prepare" && !PrepareMayFollowLapse(previous, round) {
+		return nil, ErrHandoffRecord
+	}
+	if previous.Phase == "idle" || previous.Phase == "aborted" || (lapsed && r.Kind == "prepare") {
 		if r.Kind != "prepare" || len(companion) != 0 ||
 			(previous.Phase == "idle" && r.Attempt != 0) ||
-			(previous.Phase == "aborted" && (previous.Attempt == ^uint64(0) || r.Attempt != previous.Attempt+1)) {
+			(previous.Phase != "idle" && (previous.Attempt == ^uint64(0) || r.Attempt != previous.Attempt+1)) {
 			return nil, ErrHandoffRecord
 		}
 		if bytes.Equal(r.NextBodyID, make([]byte, 32)) || r.ActivationRound < r.OrderedRound {
@@ -143,7 +180,7 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 	frozenParent := bytes.Clone(previous.FrozenParent)
 	switch r.Kind {
 	case "freeze":
-		if previous.Phase != "prepared" || !bytes.Equal(r.NextBodyID, old.NextBodyID) || bytes.Equal(r.FrozenID, make([]byte, 32)) || r.ActivationRound != old.ActivationRound {
+		if previous.Phase != "prepared" || lapsed || !bytes.Equal(r.NextBodyID, old.NextBodyID) || bytes.Equal(r.FrozenID, make([]byte, 32)) || r.ActivationRound != old.ActivationRound {
 			return nil, ErrHandoffRecord
 		}
 		frozenParent, err = authority.VerifyFreeze(r, companion)

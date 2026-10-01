@@ -303,12 +303,14 @@ func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1
 		state.CommittedHead.CommitQc == nil || state.CommittedHead.CommitQc.LedgerCommitInfo == nil {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
+	// A Prepare whose freeze lapsed counts as aborted for planning the next attempt (see storage.PrepareFreezeLapseRounds).
+	headLapsed := storage.PrepareLapsed(state.CommittedHead.Control, state.CommittedHead.Block.Round)
 	if state.CommittedHead.Control == nil ||
-		(state.CommittedHead.Control.Phase != "idle" && state.CommittedHead.Control.Phase != "aborted") {
+		(state.CommittedHead.Control.Phase != "idle" && state.CommittedHead.Control.Phase != "aborted" && !headLapsed) {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
 	attempt := uint64(0)
-	if state.CommittedHead.Control.Phase == "aborted" {
+	if state.CommittedHead.Control.Phase == "aborted" || headLapsed {
 		if state.CommittedHead.Control.Attempt == ^uint64(0) {
 			return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 		}
@@ -687,13 +689,14 @@ func (x *ConsensusManager) endorseHandoffAtState(ctx context.Context, plan abdrc
 	if state == nil || state.CommittedHead == nil || state.CommittedHead.Block == nil ||
 		state.CommittedHead.CommitQc == nil || state.CommittedHead.CommitQc.LedgerCommitInfo == nil ||
 		state.CommittedHead.Control == nil ||
-		(state.CommittedHead.Control.Phase != "idle" && state.CommittedHead.Control.Phase != "aborted") ||
+		(state.CommittedHead.Control.Phase != "idle" && state.CommittedHead.Control.Phase != "aborted" &&
+			!storage.PrepareLapsed(state.CommittedHead.Control, state.CommittedHead.Block.Round)) ||
 		plan.PreFreezeRound != state.CommittedHead.Block.Round ||
 		!bytes.Equal(plan.PreFreezeRoot, state.CommittedHead.CommitQc.LedgerCommitInfo.Hash) {
 		return ErrHandoffApproval
 	}
 	expectedAttempt := uint64(0)
-	if state.CommittedHead.Control.Phase == "aborted" {
+	if state.CommittedHead.Control.Phase == "aborted" || storage.PrepareLapsed(state.CommittedHead.Control, state.CommittedHead.Block.Round) {
 		if state.CommittedHead.Control.Attempt == ^uint64(0) {
 			return ErrHandoffApproval
 		}
@@ -854,6 +857,17 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 	return nil
 }
 
+// dropHandoffPlan forgets the cached endorsed plan of a body so it is neither retried nor left to order a stale Prepare.
+func (x *ConsensusManager) dropHandoffPlan(bodyID []byte) {
+	x.handoffMu.Lock()
+	defer x.handoffMu.Unlock()
+	for id, plan := range x.handoffPlans {
+		if bytes.Equal(plan.record.NextBodyID, bodyID) {
+			delete(x.handoffPlans, id)
+		}
+	}
+}
+
 func (x *ConsensusManager) readyHandoff(attempt ...uint64) (*pendingHandoff, error) {
 	x.handoffMu.Lock()
 	defer x.handoffMu.Unlock()
@@ -903,8 +917,14 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 			}
 		}
 	}
+	// A Prepare whose freeze lapsed is dead: no Freeze is ordered for it, and once the cooldown has passed the leader may start the
+	// next attempt exactly as after an abort.
+	lapsed := storage.PrepareLapsed(control, round)
+	if lapsed && !storage.PrepareMayFollowLapse(control, round) {
+		return nil, nil
+	}
 	expectedAttempt := uint64(0)
-	if control.Phase == "aborted" {
+	if control.Phase == "aborted" || lapsed {
 		if control.Attempt == ^uint64(0) {
 			return nil, ErrHandoffApproval
 		}
@@ -918,8 +938,21 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	}
 	record := plan.record
 	record.OrderedRound = round
-	switch control.Phase {
+	phase := control.Phase
+	if lapsed {
+		phase = "aborted"
+	}
+	switch phase {
 	case "idle", "aborted":
+		// Prepare freezes the EVM shard from this record onward, so it is ordered only while the plan's frozen parent is still the
+		// certified EVM IR in this branch. If the EVM certified a newer block since the plan was endorsed the plan is stale: drop it
+		// (nothing is frozen, the operator re-plans from the current parent) instead of ordering a Prepare whose Freeze would abort.
+		if !parentHasFrozenShard(parent, plan.plan.FrozenParent) {
+			x.dropHandoffPlan(plan.record.NextBodyID)
+			x.log.Info("root handoff outcome", "phase", "dropped", "attempt", plan.plan.Attempt, "rootEpoch", control.Epoch, "rootRound", parentQC.GetRound(),
+				"reason", "the plan's frozen parent is no longer the certified EVM IR in this branch", "frozenParent", fmt.Sprintf("%x", plan.plan.FrozenParent))
+			return nil, nil
+		}
 		record.Kind = "prepare"
 		if round > ^uint64(0)-8 {
 			return nil, ErrHandoffApproval

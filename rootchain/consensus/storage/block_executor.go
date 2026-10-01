@@ -266,14 +266,10 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			return nil, ErrHandoffRecord
 		}
 		shardKey := types.PartitionShardID{PartitionID: irChReq.Partition, ShardID: irChReq.Shard.Key()}
-		if nextShardState.Control != nil && (nextShardState.Control.Phase == "endorsed" || nextShardState.Control.Phase == "committed") {
-			frozen, err := frozenShard(nextShardState, shardConfs, nextShardState.Control.FrozenParent)
-			if err != nil {
-				return nil, err
-			}
-			if shardKey == frozen {
-				return nil, ErrHandoffFrozen
-			}
+		if frozen, active, err := frozenShardOf(nextShardState, shardConfs, nextShardState.Control, newBlock.Round); err != nil {
+			return nil, err
+		} else if active && shardKey == frozen {
+			return nil, ErrHandoffFrozen
 		}
 		si, ok := nextShardState.States[shardKey]
 		if !ok {
@@ -455,6 +451,49 @@ func verifySupersession(s *evmassign.Supersession, si *ShardInfo, orchestration 
 // The handoff binds one certified EVM parent. Its unique shard entry remains
 // identifiable by that hash while the root refuses changes to it. Other
 // partitions retain their normal certification path.
+// frozenEVMShard is the designated EVM shard (the only shard of the designated partition type) a prepared handoff freezes
+// from its Prepare record onward, before the frozen parent is bound at Freeze. It is selected by type, never by a parent hash.
+func frozenEVMShard(state ShardStates, configs map[types.PartitionShardID]*types.PartitionDescriptionRecord) (types.PartitionShardID, bool, error) {
+	var selected types.PartitionShardID
+	found := false
+	for key, conf := range configs {
+		if conf == nil || conf.PartitionTypeID != evmPartitionTypeID {
+			continue
+		}
+		if _, live := state.States[key]; !live {
+			continue
+		}
+		if found {
+			return selected, false, ErrHandoffRecord
+		}
+		selected, found = key, true
+	}
+	// A chain without a designated EVM shard has nothing to freeze before the parent is bound.
+	return selected, found, nil
+}
+
+// frozenShardOf is the shard whose certification the control state currently refuses: from Prepare the designated EVM shard,
+// from Freeze the shard the bound frozen parent identifies (the same shard; the EVM IR cannot move in between). Abort returns the
+// control to "aborted", which freezes nothing: one transition lifts the Prepare-time and the Freeze-time freeze alike. A Prepare-time
+// freeze also lapses by itself, PrepareFreezeLapseRounds after the Prepare.
+func frozenShardOf(state ShardStates, configs map[types.PartitionShardID]*types.PartitionDescriptionRecord, control *evmroot.ControlState, round uint64) (types.PartitionShardID, bool, error) {
+	var zero types.PartitionShardID
+	if control == nil {
+		return zero, false, nil
+	}
+	switch control.Phase {
+	case "prepared":
+		if PrepareLapsed(control, round) {
+			return zero, false, nil // no Freeze followed: the Prepare-time freeze has lapsed (see PrepareFreezeLapseRounds)
+		}
+		return frozenEVMShard(state, configs)
+	case "endorsed", "committed":
+		key, err := frozenShard(state, configs, control.FrozenParent)
+		return key, err == nil, err
+	}
+	return zero, false, nil
+}
+
 func frozenShard(state ShardStates, configs map[types.PartitionShardID]*types.PartitionDescriptionRecord, parent []byte) (types.PartitionShardID, error) {
 	var selected types.PartitionShardID
 	found := false

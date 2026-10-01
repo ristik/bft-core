@@ -34,7 +34,31 @@ apply a terminal repeat as a timeout or reject a subsequent new UC.
    state before consulting the volatile handoff-plan cache. Handoff approval
    receipt is not cancellation: only a committed Abort is final. A racing H
    wins or loses under ordinary BFT locks; H cannot be rewound. Retry uses
-   `attempt+1` and newly observed parent state.
+   `attempt+1` and newly observed parent state. **Prepare freezes the EVM
+   shard.** From the Prepare record (not only from Freeze) the designated EVM
+   shard, selected by partition type, refuses every certification, timeouts
+   included; Abort returns the control state to `aborted`, which lifts the
+   Prepare-time and the Freeze-time freeze by the same transition. A leader
+   orders Prepare only while the plan's frozen parent is still the certified
+   EVM IR in its own branch; otherwise it drops the plan (outcome `dropped`,
+   nothing ordered, nothing frozen) and the operator re-plans from the current
+   parent. The EVM therefore cannot move between Prepare and Freeze, so the
+   Freeze check no longer aborts under load: a busy EVM certifying every round
+   can be handed off. The cost is an EVM certification pause that starts about
+   one root round earlier. Endorsement signatures, possession proofs and the
+   parent binding are unchanged. Prepare carries no signatures, so a single
+   faulty leader could order one for an unendorsed body: the Prepare-time
+   freeze therefore **lapses by itself** `PrepareFreezeLapseRounds` (24) root
+   rounds after the Prepare unless a Freeze for that attempt was ordered in
+   the window. The lapse is a function of the Prepare's ordered round and the
+   executing block's round, so every root agrees; the EVM certifies again, the
+   lapsed attempt is dead (a Freeze for it is refused) and the next Prepare
+   uses `attempt+1`, as after an abort, once `PrepareCooldownRounds` (24) more
+   rounds have passed. Residual: a faulty leader repeating the attack can still
+   freeze the EVM for at most 24 of every 48 rounds; removing that needs a
+   signed Prepare. A handoff left `prepared` with no cached plan therefore no
+   longer needs an operator abort to unfreeze the EVM (root-handoff-abort.md
+   still applies to `endorsed`).
 2. A voter reads authenticated parent-branch control state before every old
    proposal. Any descendant of H must have empty payload and execute as the
    identity on every shard/control field, including scheduled configuration,

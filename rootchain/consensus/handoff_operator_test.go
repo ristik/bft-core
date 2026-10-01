@@ -121,8 +121,30 @@ func TestOperatorHandoffEndorsementReachesPrepare(t *testing.T) {
 	approved, err := cm.readyHandoff()
 	require.NoError(t, err)
 	require.Equal(t, plan.Body, approved.plan.Body)
+	var records [][]byte
 	parent := cm.blockStore.GetHighQc()
-	records, err := cm.handoffRecordsForRound(parent.GetRound()+1, parent)
+	parentBlock, err := cm.blockStore.Block(parent.GetRound())
+	require.NoError(t, err)
+	evmKey := types.PartitionShardID{PartitionID: 8}
+	parentBlock.ShardState.States[evmKey] = &storage.ShardInfo{IR: &types.InputRecord{BlockHash: bytes.Clone(parentHash)}}
+
+	// Prepare freezes the EVM shard, so it is ordered only while the plan's parent is still the certified EVM IR in this branch. If
+	// the EVM certified a newer block the plan is stale: it is dropped, nothing is ordered and nothing is frozen.
+	savedPlan := cm.handoffPlans[id]
+	parentBlock.ShardState.States[evmKey].IR.BlockHash = bytes.Repeat([]byte{0x77}, 32)
+	records, err = cm.handoffRecordsForRound(parent.GetRound()+1, parent)
+	require.NoError(t, err)
+	require.Empty(t, records, "a stale plan orders no Prepare")
+	require.NotContains(t, cm.handoffPlans, id, "the stale plan is dropped, not retried")
+	_, err = cm.readyHandoff()
+	require.ErrorIs(t, err, ErrHandoffApproval)
+	_, frozen, err := cm.blockStore.FrozenShardAt(parent.GetRound())
+	require.NoError(t, err)
+	require.False(t, frozen, "a dropped plan never leaves the EVM frozen")
+	// The operator re-plans from the current parent; the fresh plan is ordered.
+	cm.handoffPlans[id] = savedPlan
+	parentBlock.ShardState.States[evmKey].IR.BlockHash = bytes.Clone(parentHash)
+	records, err = cm.handoffRecordsForRound(parent.GetRound()+1, parent)
 	require.NoError(t, err)
 	require.Len(t, records, 1)
 	prepared, err := storage.DecodeOrderedHandoffRecord(records[0])
