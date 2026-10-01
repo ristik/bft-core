@@ -429,7 +429,6 @@ PY
   if [ "$postM2aMode" = t6 ]; then
     t6_exercise_contracts || return 1
   fi
-  fi
 }
 
 post_m2a_after_lane() {
