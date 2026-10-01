@@ -156,6 +156,7 @@ def watch(args) -> int:
     counts = [0] * args.validators
     started = time.monotonic()
     restored_at = None
+    restart_seen: dict[int, float] = {}
     with out.open("a", encoding="utf-8") as stream:
         print(json.dumps({"event": "watch-start", "validators": args.validators}), file=stream, flush=True)
         while not stop.exists():
@@ -188,7 +189,20 @@ def watch(args) -> int:
                         and Path(args.offline_marker).exists()
                         and not restored
                     )
-                    if expected_offline:
+                    planned_restart = False
+                    if args.restart_marker_dir:
+                        marker = Path(args.restart_marker_dir) / str(index)
+                        if marker.exists():
+                            restart_seen[index] = time.monotonic()
+                        planned_restart = marker.exists() or (
+                            index in restart_seen and time.monotonic() - restart_seen[index] < 15)
+                    if planned_restart:
+                        print(
+                            json.dumps({"event": "expected-planned-restart", "validator": index, "error": str(exc), "unixTime": time.time()}),
+                            file=stream,
+                            flush=True,
+                        )
+                    elif expected_offline:
                         print(
                             json.dumps({"event": "expected-restore-outage", "validator": index, "error": str(exc), "unixTime": time.time()}),
                             file=stream,
@@ -292,6 +306,7 @@ def main() -> int:
     w.add_argument("--offline-marker", required=True)
     w.add_argument("--restore-log", required=True)
     w.add_argument("--allow-offline-validator", type=int, default=1)
+    w.add_argument("--restart-marker-dir", help="a file named <validator> here marks a planned restart of that validator")
     w.add_argument("--interval", type=float, default=0.5)
     w.add_argument("--minimum-runtime", type=float, default=10)
     w.add_argument("--minimum-samples", type=int, default=3)
