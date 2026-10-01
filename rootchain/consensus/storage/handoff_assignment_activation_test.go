@@ -488,9 +488,14 @@ func TestDeriveActivatedPDRIsolatedRefusals(t *testing.T) {
 	_, _, err := DeriveActivatedPDR(record, body, b.preimage, f.parent)
 	require.NoError(t, err)
 
+	// S12: the body names another candidate context, but the record is re-linked to that body's identity, so
+	// only the D4 change-record check can refuse it.
 	other := body
 	other.ChangeRecordHash = bytes.Repeat([]byte{1}, 32)
-	_, _, err = DeriveActivatedPDR(record, other, b.preimage, f.parent)
+	relinked := record
+	otherID := other.Identity()
+	relinked.NextBodyID = otherID[:]
+	_, _, err = DeriveActivatedPDR(relinked, other, b.preimage, f.parent)
 	require.ErrorIs(t, err, ErrAssignmentHistory)
 	_, _, err = DeriveActivatedPDR(record, body, b.preimage, bytes.Repeat([]byte{7}, 32))
 	require.ErrorIs(t, err, ErrAssignmentHistory, "the candidate names another frozen parent")

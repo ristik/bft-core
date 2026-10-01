@@ -348,7 +348,7 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 // from this node's committed history. No successor-set quorum is involved.
 func verifySupersession(s *evmassign.Supersession, si *ShardInfo, orchestration Orchestration) error {
 	if si.TR.Epoch == si.IR.Epoch {
-		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid, evmassign.ErrContext)
+		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid, ErrNothingToSupersede)
 	}
 	chain, err := CommittedChain(orchestration, si.PartitionID, si.ShardID, si.IR.Epoch)
 	if err != nil || len(chain.Steps) == 0 {

@@ -237,5 +237,6 @@ func TestSupersessionEvidenceIsolatedMutations(t *testing.T) {
 		_, err = sup.addEpoch2(t, p.store, 10, sup.built.freeze.Bytes(), sup.built.companion)
 		require.ErrorIs(t, err, ErrHandoffRecord)
 		require.ErrorIs(t, err, ErrSupersessionInvalid)
+		require.ErrorIs(t, err, ErrNothingToSupersede, "S3: the acknowledged state is refused by its own guard, not by the empty chain")
 	})
 }
