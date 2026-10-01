@@ -67,3 +67,12 @@ records, local-key signing, and an absent or unhealthy authority or pin. A faile
 written journal state: restart from **new empty disks**. Generic EL P2P, snap,
 and pipeline sync do not establish the paired seal history and cannot be used
 as a restore source; the pinned client and Engine API checks remain mandatory.
+
+## H3 note
+
+A deployment whose EVM assignment changes is no longer single-epoch for the shard configuration. The archive
+namespace stays anchored to the immutable deployment identity (the genesis full configuration hash); a
+record's own configuration travels with it (`certifiedstore` record v2, mint bundle v2) and the committed
+handoff bundles carry the assignment candidates a restoring node needs to re-derive its configuration
+history. Restore across a missed supersession history needs every consecutive bundle; an incomplete span is
+a typed unavailable result. See [design/h3-evm-assignment.md](design/h3-evm-assignment.md).

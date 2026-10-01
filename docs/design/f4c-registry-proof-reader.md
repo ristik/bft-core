@@ -146,3 +146,15 @@ window, retention and acquisition remain #153 §8, F6 (#14) and F7 (#15).
 No RPC client, no retained-witness store, no call site in `rootinput`, `shardnode`, `engineapi` or the CLI,
 no genesis generation, no activation, no `v0` removal and no WithSealV1 advertisement. #10, #11 and #12 stay
 open.
+
+## H3 addition: layout 2
+
+`registryproof.Context.Layout` selects the layout (zero or 1: the 28-word `sealRegistry/v1`; 2: the 30-word
+`sealRegistry/v2`, `SlotNamesV2`, in the order the artifact pins). Layout 2 adds `assignment.activeConfHash`
+(initialized to the immutable `config.shardConfHash`) and `assignment.spanCommitment`. The genesis block
+must have `activeConfHash == shardConfHash`, shard epoch equal to G's and an empty span commitment; later
+states need a non-zero active hash that equals the genesis hash exactly when the shard epoch is unchanged,
+a shard-epoch delta no larger than the root-epoch delta, and `rootEpoch ≥ G.rootEpoch + cursor` (an
+acknowledgement advances the root epoch by one, or by the folded span). A caller that has authenticated the
+active assignment supplies it as `Context.Active` and the registry must hold exactly it. Evidence of the
+other layout's size is refused by length.

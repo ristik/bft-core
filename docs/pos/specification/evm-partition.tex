@@ -73,6 +73,8 @@ The feed may skip root rounds but may not silently skip configuration transition
  Each EVM shard round names one root assignment and uses its validator identities and effective weights. A new root assignment becomes the EVM assignment at the committed shard handoff, before its first new proposal is authorized.
 \end{ruledef*}
 
+The assignment changes through the committed root handoff: the old root quorum authorizes the successor assignment, every successor key proves possession of its signing key, and the successor assignment is derived from committed handoff history and installed once at the first new-root execution boundary. The registry keeps the genesis configuration hash immutable and a separate active configuration hash; the successor set acknowledges its assignment before any user transaction. An assignment whose acknowledgement is not yet certified may be superseded on the same certified parent by another committed handoff; only the newest installed set can acknowledge, and one acknowledgement summarizes the committed span. An EVM-only change advances the root epoch with unchanged root keys. The initial profile changes the root and the EVM assignment in separate handoffs.
+
 The root epoch handoff drains or cancels outstanding governance-shard work and records its last certified block (Sec.~\ref{sec:gov-trust-base}). There is no interval in which a removed set can authorize a new governance block. A canceled proposal is never revived under the new assignment. The shard resumes from the certified parent under the leader selected by the new technical record. Other aggregator assignments change only through their own configuration records.
 
 \section{Native Currency}\label{sec:evm-native-currency}
