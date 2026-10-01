@@ -274,3 +274,17 @@ func TestOperatorRefusesBadAssignmentProposalsBeforeAnyEndorsement(t *testing.T)
 		require.ErrorIs(t, err, storage.ErrAssignmentAckPending)
 	})
 }
+
+// The abort path names which condition tripped, so a moving frozen parent can be told apart from an uncommitted one.
+func TestFrozenParentLossNamesTheCondition(t *testing.T) {
+	f := newOperatorAssignmentFixture(t)
+	frozen, newer := bytes.Repeat([]byte{7}, 32), bytes.Repeat([]byte{8}, 32)
+	parentWith := func(hash []byte) *storage.ExecutedBlock {
+		return &storage.ExecutedBlock{ShardState: storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{
+			{PartitionID: 8}: {PartitionID: 8, IR: &types.InputRecord{BlockHash: hash}}}}}
+	}
+	require.Contains(t, f.cm.frozenParentLoss(parentWith(frozen), newer, frozen), "differs from the plan")
+	require.Contains(t, f.cm.frozenParentLoss(parentWith(newer), frozen, frozen), "no longer the frozen parent")
+	require.Contains(t, f.cm.frozenParentLoss(parentWith(frozen), frozen, frozen), "not in the committed state",
+		"the fixture's committed state does not hold this parent")
+}

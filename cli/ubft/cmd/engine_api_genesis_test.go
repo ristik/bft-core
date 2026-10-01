@@ -17,6 +17,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	testobserve "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
@@ -285,4 +286,55 @@ func writeGenesisSource(t *testing.T, chainID uint64, alloc map[string]any) stri
 	path := filepath.Join(t.TempDir(), "source.json")
 	require.NoError(t, os.WriteFile(path, raw, 0600))
 	return path
+}
+
+// The launch genesis (registry layout 2) always sets validator_coupling=true in the exported EVM configuration, so every root
+// validator refuses an uncoupled committee change; layout 1 keeps its legacy configuration.
+func TestEngineAPIGenesis_Layout2ExportsTheCouplingParameter(t *testing.T) {
+	shardConfPath := writeGenesisShardConf(t)
+	dir := t.TempDir()
+	exportFull := func(t *testing.T, conf string, extra ...string) (types.PartitionDescriptionRecord, error) {
+		t.Helper()
+		full := filepath.Join(dir, "full-"+filepath.Base(t.Name())+".json")
+		args := append([]string{"--shard-conf", conf, "--out", filepath.Join(dir, "g-"+filepath.Base(t.Name())+".json"), "--full-shard-conf", full}, extra...)
+		if _, err := runEngineAPIGenesis(t, args...); err != nil {
+			return types.PartitionDescriptionRecord{}, err
+		}
+		var out types.PartitionDescriptionRecord
+		_, err := util.ReadJsonFile(full, &out)
+		return out, err
+	}
+	t.Run("layout 2 carries it and the hash commits to it", func(t *testing.T) {
+		full, err := exportFull(t, shardConfPath, "--registry-layout", "2")
+		require.NoError(t, err)
+		require.Equal(t, "true", full.PartitionParams[evmassign.CouplingParam])
+		require.True(t, evmassign.CouplingRequired(&full))
+		without := full
+		without.PartitionParams = map[string]string{}
+		for k, v := range full.PartitionParams {
+			if k != evmassign.CouplingParam {
+				without.PartitionParams[k] = v
+			}
+		}
+		a, err := full.Hash(crypto.SHA256)
+		require.NoError(t, err)
+		b, err := without.Hash(crypto.SHA256)
+		require.NoError(t, err)
+		require.NotEqual(t, a, b, "the full configuration hash commits to the parameter")
+	})
+	t.Run("layout 1 is unchanged", func(t *testing.T) {
+		full, err := exportFull(t, shardConfPath)
+		require.NoError(t, err)
+		require.NotContains(t, full.PartitionParams, evmassign.CouplingParam)
+	})
+	t.Run("an explicit opt-out is refused", func(t *testing.T) {
+		var base types.PartitionDescriptionRecord
+		_, err := util.ReadJsonFile(shardConfPath, &base)
+		require.NoError(t, err)
+		base.PartitionParams = map[string]string{"chain_id": base.PartitionParams["chain_id"], evmassign.CouplingParam: "false"}
+		optOut := filepath.Join(t.TempDir(), "optout.json")
+		require.NoError(t, util.WriteJsonFile(optOut, &base))
+		_, err = exportFull(t, optOut, "--registry-layout", "2")
+		require.ErrorContains(t, err, "requires validator_coupling=true")
+	})
 }

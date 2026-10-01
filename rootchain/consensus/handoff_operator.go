@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
@@ -879,7 +880,8 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		if err != nil || !bytes.Equal(previous.NextBodyID, record.NextBodyID) || previous.Attempt != record.Attempt {
 			return nil, nil
 		}
-		if !parentHasFrozenShard(parent, plan.plan.FrozenParent) || !x.blockStore.CommittedFrozenParent(plan.plan.FrozenParent) {
+		if reason := x.frozenParentLoss(parent, plan.plan.FrozenParent, plan.plan.FrozenParent); reason != "" {
+			x.logHandoffAbort("freeze", round, previous.Attempt, reason, plan.plan.FrozenParent, parent)
 			return abortHandoffRecords(round, previous, plan.abortSignatures)
 		}
 		record.ActivationRound = previous.ActivationRound
@@ -904,8 +906,8 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		if err != nil || !bytes.Equal(previous.NextBodyID, record.NextBodyID) || previous.Attempt != record.Attempt {
 			return nil, nil
 		}
-		if !bytes.Equal(control.FrozenParent, plan.plan.FrozenParent) || !parentHasFrozenShard(parent, control.FrozenParent) ||
-			!x.blockStore.CommittedFrozenParent(control.FrozenParent) {
+		if reason := x.frozenParentLoss(parent, plan.plan.FrozenParent, control.FrozenParent); reason != "" {
+			x.logHandoffAbort("commit", round, previous.Attempt, reason, control.FrozenParent, parent)
 			return abortHandoffRecords(round, previous, plan.abortSignatures)
 		}
 		record.ActivationRound = previous.ActivationRound
@@ -957,6 +959,35 @@ func (x *ConsensusManager) readyHandoffAbort(target abdrc.HandoffAbortTarget) (m
 		signatures[signer] = bytes.Clone(signature)
 	}
 	return signatures, true
+}
+
+// frozenParentLoss names why a prepared or endorsed handoff can no longer proceed on its frozen parent, or returns "" when it
+// can: the endorsed parent differs from the plan, the parent block's shard IR is no longer that block (the shard certified
+// a newer one), or the frozen parent is not in the committed state.
+func (x *ConsensusManager) frozenParentLoss(parent *storage.ExecutedBlock, planned, frozen []byte) string {
+	switch {
+	case !bytes.Equal(frozen, planned):
+		return "the endorsed frozen parent differs from the plan"
+	case !parentHasFrozenShard(parent, frozen):
+		return "the shard's certified IR in the parent block is no longer the frozen parent (a newer EVM block was certified)"
+	case !x.blockStore.CommittedFrozenParent(frozen):
+		return "the frozen parent is not in the committed state"
+	}
+	return ""
+}
+
+func (x *ConsensusManager) logHandoffAbort(phase string, round, attempt uint64, reason string, frozen []byte, parent *storage.ExecutedBlock) {
+	var shards []string
+	if parent != nil {
+		for key, shard := range parent.ShardState.States {
+			if shard != nil && shard.IR != nil {
+				shards = append(shards, fmt.Sprintf("%s=%x", key.PartitionID, shard.IR.BlockHash))
+			}
+		}
+	}
+	sort.Strings(shards)
+	x.log.Info("root handoff abort ordered", "phase", phase, "round", round, "attempt", attempt, "reason", reason,
+		"frozenParent", fmt.Sprintf("%x", frozen), "parentBlockShardIRs", strings.Join(shards, ","))
 }
 
 func parentHasFrozenShard(parent *storage.ExecutedBlock, frozenParent []byte) bool {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
@@ -212,6 +213,17 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags, changed func(string) bool, o
 		return fmt.Errorf("engine-api genesis requires exactly one --shard-conf, got %d", len(shardConfs))
 	}
 	shardConf := shardConfs[0]
+	if flags.RegistryLayout == registryproof.LayoutVersion2 {
+		// The launch (assignment-aware) genesis always requires coupled validator-set changes: the parameter is part of the
+		// hashed full configuration, so every root validator enforces it. An explicit opt-out is a mistake, not a choice.
+		if v, set := shardConf.PartitionParams[evmassign.CouplingParam]; set && v != "true" {
+			return fmt.Errorf("a registry layout 2 genesis requires %s=true, the shard conf says %q", evmassign.CouplingParam, v)
+		}
+		if shardConf.PartitionParams == nil {
+			shardConf.PartitionParams = map[string]string{}
+		}
+		shardConf.PartitionParams[evmassign.CouplingParam] = "true"
+	}
 
 	chainID, ok := zkverifier.ParseChainIDFromParams(shardConf.PartitionParams)
 	if !ok {
