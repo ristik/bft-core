@@ -466,6 +466,19 @@ def main():
     probe = None
     probe_started = None
     target = args.blocks
+    if args.already_restored_validator:
+        # The restore may happen long after block --blocks (T6 runs transactions and handoffs first),
+        # so B<blocks> was admitted before the restore. Require the post-restore admission at a
+        # height above the survivors' current tip instead.
+        tips = []
+        for i in survivors:
+            try:
+                tips.append(int(rpc(18544 + i, "eth_blockNumber", []), 16))
+            except (OSError, ValueError, RuntimeError):
+                pass
+        if len(tips) >= required_quorum:
+            target = max(target, sorted(tips)[-required_quorum] + 3)
+            print(f"D1 restored validator {args.already_restored_validator}: post-restore target B{target}", flush=True)
     print("height hash parent stateRoot commitment txs heads partitionRound rootRound elapsed_s", flush=True)
     height = 1
     while height <= target:
