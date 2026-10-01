@@ -95,9 +95,9 @@ m2_send_paid() {
   local epoch=$1 nonce=${M2_NEXT_NONCE:-$2} expected='' sent='' i receipt block hash status log j rpcPort logValidator
   for i in $(m2_online_validators); do
     sent=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+i-1))" \
-      -chain-id "${M2_CHAIN_ID:-31337}" -nonce "$nonce" 2>&1) || return 1
-    [[ "$sent" = 0x* ]] || return 1
-    [ -z "$expected" ] || [ "$expected" = "$sent" ] || return 1
+      -chain-id "${M2_CHAIN_ID:-31337}" -nonce "$nonce" 2>&1) || { echo "m2_send_paid: evmtx failed on validator $i (nonce $nonce): $sent" >&2; return 1; }
+    [[ "$sent" = 0x* ]] || { echo "m2_send_paid: validator $i returned no transaction hash (nonce $nonce): $sent" >&2; return 1; }
+    [ -z "$expected" ] || [ "$expected" = "$sent" ] || { echo "m2_send_paid: validators disagree on the transaction hash: $expected vs $sent" >&2; return 1; }
     expected=$sent
   done
   for j in $(seq 1 180); do
