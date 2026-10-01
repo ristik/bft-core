@@ -50,13 +50,34 @@ type BFTClientOptions struct {
 	CertNodes         int           // how many root nodes to submit certification requests to
 	HeartbeatInterval time.Duration // how often to check for inactivity
 	InactivityTimeout time.Duration // re-handshake if no UC received for this long
+	// StartupHandshakeInterval is how often the handshake is re-sent until the first certificate arrives (zero
+	// disables the early retry). A root that has not yet loaded the shard drops the handshake without an answer; waiting
+	// a full InactivityTimeout for the next one let a validator fall far behind the cluster (H3 lane run3).
+	StartupHandshakeInterval time.Duration
 }
+
+// startupHandshakeDelay is the wait before startup handshake attempt n (0-based): the base interval for the first
+// startupFixedAttempts, then doubling, never longer than ceiling (the InactivityTimeout the steady state uses).
+func startupHandshakeDelay(base, ceiling time.Duration, n int) time.Duration {
+	d := base
+	for i := startupFixedAttempts; i <= n && d < ceiling; i++ {
+		d *= 2
+	}
+	if ceiling > 0 && d > ceiling {
+		d = ceiling
+	}
+	return d
+}
+
+const startupFixedAttempts = 5
 
 var DefaultBFTClientOptions = BFTClientOptions{
 	HandshakeNodes:    defaultHandshakeNodes,
 	CertNodes:         defaultNofRootNodes,
 	HeartbeatInterval: 5 * time.Second,
 	InactivityTimeout: 30 * time.Second,
+
+	StartupHandshakeInterval: 2 * time.Second,
 }
 
 // BFTClient is the shard-node framework's root-chain protocol client: it
@@ -129,7 +150,9 @@ type BFTClient struct {
 	unapplied *deliveryAttempt
 
 	lastCertResponseTime atomic.Int64
-	profile2             *Profile2Consumer
+	// firstResponse is set once any certification response has arrived; it ends the early startup handshake retry.
+	firstResponse atomic.Bool
+	profile2      *Profile2Consumer
 }
 
 // SetProfile2Consumer enables the proof-gated epoch boundary before Run.
@@ -356,6 +379,16 @@ func (c *BFTClient) Run(ctx context.Context) error {
 	heartbeat := time.NewTicker(c.opts.HeartbeatInterval)
 	defer heartbeat.Stop()
 
+	// Until the first certificate arrives, re-send the handshake early (see StartupHandshakeInterval).
+	var startupC <-chan time.Time
+	startupAttempt := 0
+	var startup *time.Timer
+	if c.opts.StartupHandshakeInterval > 0 && !c.firstResponse.Load() {
+		startup = time.NewTimer(startupHandshakeDelay(c.opts.StartupHandshakeInterval, c.opts.InactivityTimeout, 0))
+		defer startup.Stop()
+		startupC = startup.C
+	}
+
 	received := c.net.ReceivedChannel()
 	for {
 		if err := ctx.Err(); err != nil {
@@ -385,6 +418,19 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			if closed {
 				return errors.New("shardnode: network received channel closed")
 			}
+		case <-startupC:
+			if c.firstResponse.Load() {
+				startupC = nil
+				break
+			}
+			if c.log != nil {
+				c.log.WarnContext(ctx, "no certificate yet, re-sending handshake", slog.Int("attempt", startupAttempt+1))
+			}
+			if err := c.sendHandshake(ctx); err != nil && c.log != nil {
+				c.log.ErrorContext(ctx, "startup re-handshake failed", slog.String("err", err.Error()))
+			}
+			startupAttempt++
+			startup.Reset(startupHandshakeDelay(c.opts.StartupHandshakeInterval, c.opts.InactivityTimeout, startupAttempt))
 		case <-heartbeat.C:
 			last := time.UnixMilli(c.lastCertResponseTime.Load())
 			if time.Since(last) > c.opts.InactivityTimeout {
@@ -926,6 +972,7 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 		return errors.New("nil certification response")
 	}
 	c.lastCertResponseTime.Store(time.Now().UnixMilli())
+	c.firstResponse.Store(true)
 	c.mu.Lock()
 	admission := c.admission
 	profile2 := c.profile2

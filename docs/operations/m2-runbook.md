@@ -445,6 +445,24 @@ the reserved round did not increase; or no certificate under the current epoch i
 admitted. A failed restore may have written partial journal state: restart with new
 empty BFT and archive paths.
 
+### A validator behind the pruned hot-journal window
+
+A validator whose latest local height is below the cluster's prune frontier cannot catch up from peers: the peers have
+pruned the early certificates and bodies, and an unrestored node audits coverage from height one (D-M2-3, by design).
+It stays unready ("candidate lacks its retained authorizing or resulting certificate"; replicas answer "no certified
+association") and must be recovered with the archive restore procedure above, with fresh BFT and archive paths. Detect it
+with the status command on the lagging node and on a healthy peer: if the peer's `pruneFrontier.height` is above the
+lagging node's `latestLocalV2.height` (its journal head), the gap is past the window; a node still inside the window
+(frontier gap zero or negative) catches up by itself.
+
+```sh
+build/ubft shard-node status --url REPLACE_LAGGING_RPC | jq '{latestLocalV2,pruneFrontier}'
+build/ubft shard-node status --url REPLACE_HEALTHY_PEER_RPC | jq '{pruneFrontier}'
+```
+
+A validator that only misses its first handshake no longer falls behind this way: the client re-sends the handshake every
+2 s (backing off to the inactivity timeout) until its first certificate (`--startup-handshake-interval`).
+
 ## 4. Archive-replica maintenance
 
 **Evidence:** the publisher requires acknowledgements from both configured
