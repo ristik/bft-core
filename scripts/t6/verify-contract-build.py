@@ -72,11 +72,18 @@ def main() -> int:
     parser.add_argument("--bft-root", required=True, type=Path)
     parser.add_argument("--contracts-root", required=True, type=Path)
     parser.add_argument("--contracts-commit", required=True)
+    parser.add_argument("--registry-layout", type=int, choices=(1, 2), default=2,
+                        help="SealRegistry artifact (registrygenesis/seal-registry-v<N>.json) the genesis embeds")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--registry-only", action="store_true",
+                      help="check only the SealRegistry runtime against this (registry) contracts build")
+    mode.add_argument("--skip-registry", action="store_true",
+                      help="check only the manifest contracts (the registry is verified against its own pin)")
     args = parser.parse_args()
 
     manifest = read_json(args.manifest)
-    manifest_contracts = manifest.get("contracts", [])
-    if len(manifest_contracts) != 4:
+    manifest_contracts = [] if args.registry_only else manifest.get("contracts", [])
+    if not args.registry_only and len(manifest_contracts) != 4:
         fail(f"placeholder manifest has {len(manifest_contracts)} contracts, expected four")
     for contract in manifest_contracts:
         if contract.get("sourceCommit", "").lower() != args.contracts_commit.lower():
@@ -100,7 +107,9 @@ def main() -> int:
         compare(name, published, read_json(compiled_path))
         print(f"PASS: {name} manifest artifact and clean pinned build match (sha256={digest})")
 
-    embedded_path = args.bft_root / "registrygenesis" / "seal-registry-v1.json"
+    if args.skip_registry:
+        return 0
+    embedded_path = args.bft_root / "registrygenesis" / f"seal-registry-v{args.registry_layout}.json"
     embedded = read_json(embedded_path)
     compiled_registry = read_json(args.contracts_root / "out" / "SealRegistry.sol" / "SealRegistry.json")
     published_runtime = norm_hex(embedded.get("runtimeBytecode"))

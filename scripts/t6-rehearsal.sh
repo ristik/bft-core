@@ -10,9 +10,11 @@ EVIDENCE_DIR=${T6_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/t6-rehearsal-$(dat
 T6_BFT_COMMIT=${T6_BFT_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}
 T6_BFT_REMOTE=${T6_BFT_REMOTE:-$(git -C "$SOURCE_ROOT" remote get-url origin)}
 T6_BFT_REF=${T6_BFT_REF:-t6/rehearsal-harness}
-T6_URETH_COMMIT=${T6_URETH_COMMIT:-055a314f759f78f045d55ceddfeb7e14b3b6a2f7}
+T6_URETH_COMMIT=${T6_URETH_COMMIT:-b4e7cb0ace07eee70e753241e0139c4d42b516d4}
 T6_URETH_REMOTE=${T6_URETH_REMOTE:-https://github.com/ristik/ureth.git}
 T6_CONTRACTS_COMMIT=${T6_CONTRACTS_COMMIT:-e7eb3216549b772a9e1df2b1214976d7dd9e6e62}
+# The layout-2 SealRegistry (ureth #47 and later) is built from contracts ce3e40b4; the four allocation contracts keep their e7eb3216 source commit.
+T6_REGISTRY_CONTRACTS_COMMIT=${T6_REGISTRY_CONTRACTS_COMMIT:-ce3e40b479de0a0ef8787d8830ba77189aa11171}
 T6_CONTRACTS_REMOTE=${T6_CONTRACTS_REMOTE:-https://github.com/ristik/unicity-pos-contracts.git}
 T6_RUST_TOOLCHAIN=${T6_RUST_TOOLCHAIN:-1.97.1}
 
@@ -21,7 +23,7 @@ if [ "${T6_LOCKED:-0}" != 1 ]; then
   exec "$LOCK_SCRIPT" "T6 placeholder-manifest rehearsal" env \
     T6_LOCKED=1 T6_EVIDENCE_DIR="$EVIDENCE_DIR" T6_BFT_COMMIT="$T6_BFT_COMMIT" \
     T6_BFT_REMOTE="$T6_BFT_REMOTE" T6_BFT_REF="$T6_BFT_REF" T6_URETH_COMMIT="$T6_URETH_COMMIT" \
-    T6_URETH_REMOTE="$T6_URETH_REMOTE" T6_CONTRACTS_COMMIT="$T6_CONTRACTS_COMMIT" \
+    T6_URETH_REMOTE="$T6_URETH_REMOTE" T6_CONTRACTS_COMMIT="$T6_CONTRACTS_COMMIT" T6_REGISTRY_CONTRACTS_COMMIT="$T6_REGISTRY_CONTRACTS_COMMIT" \
     T6_CONTRACTS_REMOTE="$T6_CONTRACTS_REMOTE" T6_RUST_TOOLCHAIN="$T6_RUST_TOOLCHAIN" \
     "$SCRIPT_PATH" "$@"
 fi
@@ -81,8 +83,17 @@ for path in source.rglob("*"):
 PY
 }
 
+# The isolated checkout's Go module cache is read-only, so a plain rm -rf leaves it behind (17 GB had piled up in
+# TMPDIR); make it writable first. A failing run keeps its checkout for inspection; a passing run never does.
+remove_isolation_root() {
+  [ -n "${ISOLATION_ROOT:-}" ] && [ -d "$ISOLATION_ROOT" ] || return 0
+  chmod -R u+w "$ISOLATION_ROOT" 2>/dev/null || true
+  rm -rf "$ISOLATION_ROOT"
+}
+
 on_exit() {
   local status=$?
+  if [ "$status" -eq 0 ]; then remove_isolation_root; fi
   if [ "$status" -ne 0 ]; then
     if [ -n "$FRESH_REPO" ]; then capture_partial "$FRESH_REPO/test-nodes" "$EVIDENCE_DIR/partial-test-nodes" || true; fi
     printf 'T6 harness rehearsal: FAIL (exit %s)\n\n' "$status" >"$EVIDENCE_DIR/run-summary.md"
@@ -182,8 +193,17 @@ build_pinned_contracts() {
   python3 "$FRESH_REPO/scripts/t6/verify-contract-build.py" \
     --manifest "$FRESH_REPO/registrygenesis/testdata/allocation-build-v1.example.json" \
     --bft-root "$FRESH_REPO" --contracts-root "$FRESH_CONTRACTS" \
-    --contracts-commit "$T6_CONTRACTS_COMMIT" | tee "$EVIDENCE_DIR/contracts-rebuild.log"
-  printf 'contracts commit=%s\nforge version=%s\n' "$T6_CONTRACTS_COMMIT" "$(forge --version | head -1)" >>"$EVIDENCE_DIR/source-pin.txt"
+    --contracts-commit "$T6_CONTRACTS_COMMIT" --skip-registry | tee "$EVIDENCE_DIR/contracts-rebuild.log"
+  # The registry the genesis embeds (layout 2) is rebuilt from its own pinned contracts commit.
+  git -C "$FRESH_CONTRACTS" checkout --detach "$T6_REGISTRY_CONTRACTS_COMMIT" >>"$EVIDENCE_DIR/contracts-clone.log" 2>&1
+  git -C "$FRESH_CONTRACTS" submodule update --init --recursive >>"$EVIDENCE_DIR/contracts-clone.log" 2>&1
+  [ "$(git -C "$FRESH_CONTRACTS" rev-parse HEAD)" = "$T6_REGISTRY_CONTRACTS_COMMIT" ] || return 1
+  (cd "$FRESH_CONTRACTS" && forge build --force)
+  python3 "$FRESH_REPO/scripts/t6/verify-contract-build.py" \
+    --manifest "$FRESH_REPO/registrygenesis/testdata/allocation-build-v1.example.json" \
+    --bft-root "$FRESH_REPO" --contracts-root "$FRESH_CONTRACTS" \
+    --contracts-commit "$T6_REGISTRY_CONTRACTS_COMMIT" --registry-layout 2 --registry-only | tee -a "$EVIDENCE_DIR/contracts-rebuild.log"
+  printf 'contracts commit=%s\nregistry contracts commit=%s\nforge version=%s\n' "$T6_CONTRACTS_COMMIT" "$T6_REGISTRY_CONTRACTS_COMMIT" "$(forge --version | head -1)" >>"$EVIDENCE_DIR/source-pin.txt"
 }
 
 build_pinned_ureth() {
@@ -322,7 +342,7 @@ PY
 }
 
 cleanup_isolated_build() {
-  rm -rf "$ISOLATION_ROOT"
+  remove_isolation_root
   printf 'disk available after isolated checkout/cache cleanup:\n' >"$EVIDENCE_DIR/disk-after-cleanup.txt"
   df -h "$AGRE_ROOT" >>"$EVIDENCE_DIR/disk-after-cleanup.txt"
   python3 - "$EVIDENCE_DIR" <<'PY'
