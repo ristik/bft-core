@@ -76,9 +76,16 @@ def check_finalized(rpc_url: str, status_url: str, log_path: Path):
     latest_height = parse_int(latest.get("number"), "latest.number")
     final_hash = str(final.get("hash", "")).lower()
     latest_hash = str(latest.get("hash", "")).lower()
-    tip_height, tip_hash = read_tip(status_url)
-
     certs = certified_from_log(log_path)
+    if status_url is None:
+        # The H4 restore command does not expose a shard-node status listener, so a restored
+        # validator's certified tip is the highest certificate it has itself admitted.
+        if not certs:
+            raise CheckError(f"{log_path}: restored validator has no certificate-admitted log record")
+        tip_height = max(certs)
+        tip_hash = sorted(certs[tip_height])[-1]
+    else:
+        tip_height, tip_hash = read_tip(status_url)
     if final_height:
         known = certs.get(final_height, set())
         # Certificate logging follows the durable certification operation. Give a just-committed
@@ -161,7 +168,10 @@ def watch(args) -> int:
         while not stop.exists():
             for index, (rpc_url, status_url, log_path) in enumerate(zip(urls, status_urls, logs), start=1):
                 try:
-                    sample = check_finalized(rpc_url, status_url, log_path)
+                    restored_status_less = (
+                        index == args.allow_offline_validator and restore_certified(Path(args.restore_log))
+                    )
+                    sample = check_finalized(rpc_url, None if restored_status_less else status_url, log_path)
                     sample.update({"event": "finality-sample", "validator": index, "unixTime": time.time()})
                     counts[index - 1] += 1
                     print(json.dumps(sample, separators=(",", ":")), file=stream, flush=True)
