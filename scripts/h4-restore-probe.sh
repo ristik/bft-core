@@ -50,6 +50,8 @@ case "$stage" in
     rethPid=$(cat test-nodes/reth1/pid)
     owned_pid "$evmPid" 'ubft shard-node run' || { echo "validator 1 BFT pid $evmPid is not owned by this checkout" >&2; exit 1; }
     owned_pid "$rethPid" 'reth.* node' || { echo "validator 1 EL pid $rethPid is not owned by this checkout" >&2; exit 1; }
+    # Shutdown can take a while; observers must know validator 1 is expected to be unreachable from now on.
+    echo 'H4_STOPPING' >"$evidence/stopping.txt"
     kill -TERM "$evmPid" 2>/dev/null || true
     kill -TERM "$rethPid" 2>/dev/null || true
     stop_and_wait "$evmPid" 'validator 1 BFT' 'ubft shard-node run' || exit 1

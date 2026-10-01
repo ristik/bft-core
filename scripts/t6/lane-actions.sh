@@ -18,7 +18,7 @@ t6_start_finality_monitor() {
     --validators 4 --out test-nodes/post-m2a-evidence/t6-finality-monitor.jsonl \
     --ready-file test-nodes/post-m2a-evidence/t6-finality-ready \
     --stop-file test-nodes/post-m2a-evidence/t6-finality-stop \
-    --offline-marker test-nodes/h4-replaced/stop.txt \
+    --offline-marker test-nodes/h4-replaced/stopping.txt \
     --restore-log test-nodes/h4-replaced/restore.log \
     --minimum-runtime 10 --minimum-samples 3 \
     >test-nodes/post-m2a-evidence/t6-finality-monitor.log 2>&1 &
