@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/signingauthority"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -94,6 +95,33 @@ func (o *OperatorClient) AdvanceEpoch(ctx context.Context, conf *types.Partition
 	}
 	_, err = o.ex.call(ctx, opAdvanceEpoch, payload)
 	return err
+}
+
+// SignHandoffPoP asks the authority for the possession proof its own key owes a coupled handoff: the one signing operation
+// outside certification, narrow and domain-separated (see signingauthority.SignHandoffPoP). It is an operator operation: the shard
+// node's client channel refuses it.
+func (o *OperatorClient) SignHandoffPoP(ctx context.Context, req signingauthority.HandoffPoPRequest) (evmassign.PoP, error) {
+	if req.Successor == nil {
+		return evmassign.PoP{}, fmt.Errorf("%w: no successor binding", signingauthority.ErrContextMismatch)
+	}
+	succ, err := types.Cbor.Marshal(req.Successor)
+	if err != nil {
+		return evmassign.PoP{}, err
+	}
+	payload, err := types.Cbor.Marshal(handoffPoPPayload{Domain: req.Domain, Network: req.Context.Network, Attempt: req.Context.Attempt,
+		Predecessor: req.Context.Predecessor[:], Parent: req.Context.Parent[:], Successor: succ, NodeID: req.NodeID})
+	if err != nil {
+		return evmassign.PoP{}, err
+	}
+	answer, err := o.ex.call(ctx, opSignHandoffPoP, payload)
+	if err != nil {
+		return evmassign.PoP{}, err
+	}
+	var pop evmassign.PoP
+	if err := types.Cbor.Unmarshal(answer, &pop); err != nil {
+		return evmassign.PoP{}, fmt.Errorf("decoding the possession proof: %w", err)
+	}
+	return pop, nil
 }
 
 // Status reports what the authority is holding.

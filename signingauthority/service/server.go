@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/signingauthority"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -411,6 +412,28 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		s.hasSession = false
 		s.credential = nil
 		return nil, nil
+	case opSignHandoffPoP:
+		var wire handoffPoPPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: handoff possession proof request: %v", errMalformed, err)
+		}
+		if len(wire.Predecessor) != 32 || len(wire.Parent) != 32 {
+			return nil, fmt.Errorf("%w: the context names 32-byte hashes", errMalformed)
+		}
+		var succ types.PartitionDescriptionRecord
+		if err := types.Cbor.Unmarshal(wire.Successor, &succ); err != nil {
+			return nil, fmt.Errorf("%w: successor binding: %v", errMalformed, err)
+		}
+		request := signingauthority.HandoffPoPRequest{Domain: wire.Domain, Successor: &succ, NodeID: wire.NodeID,
+			Context: evmassign.PoPContext{Network: wire.Network, Attempt: wire.Attempt}}
+		copy(request.Context.Predecessor[:], wire.Predecessor)
+		copy(request.Context.Parent[:], wire.Parent)
+		pop, err := s.authority.SignHandoffPoP(request)
+		if err != nil {
+			s.log.Warn("refusing a handoff possession proof", slog.String("err", err.Error()))
+			return nil, err
+		}
+		return types.Cbor.Marshal(pop)
 	case opCompleteEnrollment:
 		var conf types.PartitionDescriptionRecord
 		if err := types.Cbor.Unmarshal(payload, &conf); err != nil {
