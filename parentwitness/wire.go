@@ -259,7 +259,7 @@ func EncodeResponse(r Response) ([]byte, error) {
 	}
 	var ev *evidenceWire
 	if r.Outcome == OutcomeFound {
-		owned, err := ownEvidence(r.Evidence)
+		owned, err := ownEvidence(r.Evidence, r.Request.Context.Layout)
 		if err != nil {
 			return nil, err
 		}
@@ -301,7 +301,7 @@ func decodeResponse(raw []byte) (Response, error) {
 		if w.Evidence == nil {
 			return Response{}, fmt.Errorf("%w: found without evidence", ErrWire)
 		}
-		r.Evidence, err = ownEvidence(registryproof.Evidence{Header: w.Evidence.Header, AccountProof: w.Evidence.AccountProof, StorageProofs: w.Evidence.StorageProofs})
+		r.Evidence, err = ownEvidence(registryproof.Evidence{Header: w.Evidence.Header, AccountProof: w.Evidence.AccountProof, StorageProofs: w.Evidence.StorageProofs}, c.Layout)
 		if err != nil {
 			return Response{}, err
 		}
@@ -315,8 +315,20 @@ func evidencePresent(e registryproof.Evidence) bool {
 	return len(e.Header) != 0 || len(e.AccountProof) != 0 || len(e.StorageProofs) != 0
 }
 
-func ownEvidence(e registryproof.Evidence) (registryproof.Evidence, error) {
-	if len(e.Header) == 0 || len(e.Header) > 1024 || len(e.StorageProofs) != registryproof.FieldCount {
+// ErrProofCount reports an evidence whose number of storage proofs is not the number its registry layout carries.
+var ErrProofCount = errors.New("parent witness: storage proof count does not match the registry layout")
+
+// ownEvidence copies and bounds the evidence. The exact proof count is the layout's own (layout 1: 28 fields, layout 2:
+// 30), taken from the registry layout the context names, never a constant of one layout.
+func ownEvidence(e registryproof.Evidence, layout uint64) (registryproof.Evidence, error) {
+	want, err := registryproof.FieldCountFor(layout)
+	if err != nil {
+		return registryproof.Evidence{}, fmt.Errorf("%w: %v", ErrBounds, err)
+	}
+	if len(e.StorageProofs) != want {
+		return registryproof.Evidence{}, errors.Join(ErrBounds, fmt.Errorf("%w: %d proofs, layout %d carries %d", ErrProofCount, len(e.StorageProofs), layout, want))
+	}
+	if len(e.Header) == 0 || len(e.Header) > 1024 {
 		return registryproof.Evidence{}, fmt.Errorf("%w: evidence shape", ErrBounds)
 	}
 	total := len(e.Header)
@@ -334,8 +346,7 @@ func ownEvidence(e registryproof.Evidence) (registryproof.Evidence, error) {
 		}
 		return out, nil
 	}
-	out := registryproof.Evidence{Header: bytes.Clone(e.Header), StorageProofs: make([][][]byte, registryproof.FieldCount)}
-	var err error
+	out := registryproof.Evidence{Header: bytes.Clone(e.Header), StorageProofs: make([][][]byte, want)}
 	if out.AccountProof, err = copyNodes(e.AccountProof); err != nil {
 		return registryproof.Evidence{}, err
 	}

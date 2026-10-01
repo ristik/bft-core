@@ -56,6 +56,7 @@ type VerifiedResponse struct {
 	detail   string
 	snapshot registryproof.Snapshot
 	evidence registryproof.Evidence
+	layout   uint64
 }
 
 func (r VerifiedResponse) Valid() bool                      { return r.valid }
@@ -65,7 +66,7 @@ func (r VerifiedResponse) Detail() string                   { return r.detail }
 func (r VerifiedResponse) Snapshot() registryproof.Snapshot { return r.snapshot }
 
 func (r VerifiedResponse) Evidence() registryproof.Evidence {
-	e, _ := ownEvidence(r.evidence)
+	e, _ := ownEvidence(r.evidence, r.layout)
 	return e
 }
 
@@ -91,7 +92,7 @@ func VerifyResponse(t Target, raw []byte) (VerifiedResponse, error) {
 }
 
 func verifyEvidence(t Target, evidence registryproof.Evidence, detail string) (VerifiedResponse, error) {
-	owned, err := ownEvidence(evidence)
+	owned, err := ownEvidence(evidence, t.registry.Layout)
 	if err != nil {
 		return VerifiedResponse{}, err
 	}
@@ -99,7 +100,7 @@ func verifyEvidence(t Target, evidence registryproof.Evidence, detail string) (V
 	if err != nil {
 		return VerifiedResponse{}, err
 	}
-	return VerifiedResponse{valid: true, outcome: OutcomeFound, detail: detail, snapshot: snapshot, evidence: owned}, nil
+	return VerifiedResponse{valid: true, outcome: OutcomeFound, detail: detail, snapshot: snapshot, evidence: owned, layout: t.registry.Layout}, nil
 }
 
 func cloneBoundedResponse(raw []byte) ([]byte, error) {
