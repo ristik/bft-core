@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -24,6 +25,7 @@ import (
 type rootHandoffOperator interface {
 	BuildHandoffPlan(*types.RootTrustBaseV1, []byte) (abdrc.HandoffApprovalMsg, error)
 	BuildAndEndorseHandoff(context.Context, *types.RootTrustBaseV1, []byte) (abdrc.HandoffApprovalMsg, error)
+	BuildAndEndorseHandoffEVM(context.Context, *types.RootTrustBaseV1, []byte, *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error)
 	EndorseHandoff(context.Context, abdrc.HandoffApprovalMsg) error
 }
 
@@ -35,6 +37,9 @@ type rootHandoffAbortOperator interface {
 type rootHandoffPlanRequest struct {
 	NextTrustBase *types.RootTrustBaseV1 `json:"nextTrustBase"`
 	FrozenParent  string                 `json:"frozenParent"`
+	// EVMAssignment asks for an EVM-only assignment change (H3). The root members of NextTrustBase must be
+	// the installed ones; combining a root and an EVM membership change is refused.
+	EVMAssignment *evmassign.Proposal `json:"evmAssignment,omitempty"`
 }
 
 func localOperatorRequest(w http.ResponseWriter, r *http.Request) bool {
@@ -66,7 +71,12 @@ func rootHandoffPlanHandler(operator rootHandoffOperator) http.HandlerFunc {
 			http.Error(w, "invalid frozen parent", http.StatusBadRequest)
 			return
 		}
-		plan, err := operator.BuildAndEndorseHandoff(r.Context(), request.NextTrustBase, parent)
+		var plan abdrc.HandoffApprovalMsg
+		if request.EVMAssignment != nil {
+			plan, err = operator.BuildAndEndorseHandoffEVM(r.Context(), request.NextTrustBase, parent, request.EVMAssignment)
+		} else {
+			plan, err = operator.BuildAndEndorseHandoff(r.Context(), request.NextTrustBase, parent)
+		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return
@@ -152,7 +162,7 @@ func newRootCmd() *cobra.Command {
 	root := &cobra.Command{Use: "root", Short: "Root chain operator commands"}
 	handoff := &cobra.Command{Use: "handoff", Short: "Profile-2 validator handoff"}
 	var nextFile, parent, rootRPCs string
-	var parentStatusURL string
+	var parentStatusURL, nextEVMAssignment string
 	propose := &cobra.Command{Use: "propose", Short: "Request old-validator endorsements for a new root trust base", RunE: func(cmd *cobra.Command, _ []string) error {
 		var parentBytes []byte
 		if parent != "" {
@@ -194,7 +204,13 @@ func newRootCmd() *cobra.Command {
 			return errors.New("root RPC endpoints required")
 		}
 		client := &http.Client{Timeout: 5 * time.Second}
-		request, err := json.Marshal(rootHandoffPlanRequest{NextTrustBase: &next, FrozenParent: parent})
+		planRequest := rootHandoffPlanRequest{NextTrustBase: &next, FrozenParent: parent}
+		if nextEVMAssignment != "" {
+			if planRequest.EVMAssignment, err = readEVMAssignment(nextEVMAssignment); err != nil {
+				return err
+			}
+		}
+		request, err := json.Marshal(planRequest)
 		if err != nil {
 			return err
 		}
@@ -235,10 +251,14 @@ func newRootCmd() *cobra.Command {
 	propose.Flags().StringVar(&nextFile, "next-trust-base", "", "next epoch trust base JSON")
 	propose.Flags().StringVar(&parent, "frozen-parent", "", "certified EVM parent block hash (32-byte hex); defaults to current tip when --certified-parent-status-url is set")
 	propose.Flags().StringVar(&parentStatusURL, "certified-parent-status-url", "", "base URL of a shard node's read-only operator status server; selects the current tip if --frozen-parent is omitted")
+	propose.Flags().StringVar(&nextEVMAssignment, "next-evm-assignment", "",
+		"EVM-only validator assignment change (JSON: validators and one proof of possession per successor key, see `handoff evm-pop`); "+
+			"--next-trust-base must then name the unchanged root members at the next root epoch")
 	propose.Flags().StringVar(&rootRPCs, "root-rpc", "", "comma-separated local old validator RPC URLs")
 	_ = propose.MarkFlagRequired("next-trust-base")
 	_ = propose.MarkFlagRequired("root-rpc")
 	handoff.AddCommand(propose)
+	handoff.AddCommand(newEVMContextCmd(), newEVMPoPCmd(), newEVMAssembleCmd())
 	var networkID, oldEpoch, attempt uint64
 	var predecessorBodyID, nextBodyID, abortRPCs string
 	var abortTimeout time.Duration

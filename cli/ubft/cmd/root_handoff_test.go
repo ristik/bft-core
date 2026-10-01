@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/archivewiring"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -21,6 +22,14 @@ import (
 type handoffOperatorStub struct {
 	planCalls, endorsements int
 	parent                  []byte
+	proposal                *evmassign.Proposal
+	evmCalls                int
+}
+
+func (s *handoffOperatorStub) BuildAndEndorseHandoffEVM(ctx context.Context, next *types.RootTrustBaseV1, parent []byte, p *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
+	s.evmCalls++
+	s.proposal = p
+	return s.BuildAndEndorseHandoff(ctx, next, parent)
 }
 
 func (s *handoffOperatorStub) BuildHandoffPlan(_ *types.RootTrustBaseV1, parent []byte) (abdrc.HandoffApprovalMsg, error) {

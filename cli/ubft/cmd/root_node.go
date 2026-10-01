@@ -330,6 +330,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if flags.Profile2 {
 			mux.HandleFunc("POST /api/v1/handoff/plan", rootHandoffPlanHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/endorse", rootHandoffEndorseHandler(cm))
+			mux.HandleFunc("POST /api/v1/handoff/evm-assignment/context", rootHandoffEVMContextHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/abort", rootHandoffAbortHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/abort/status", rootHandoffAbortStatusHandler(cm))
 		}

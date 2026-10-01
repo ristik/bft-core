@@ -954,3 +954,50 @@ func abortHandoffRecords(round uint64, previous evmroot.OrderedHandoffRecord, si
 	}
 	return [][]byte{previous.Bytes(), proof}, nil
 }
+
+// EVMAssignmentContext is what every successor key signs a possession proof over
+// besides the assignment itself, plus the installed assignment the proposal
+// replaces. It is read from the committed checkpoint and carries no authority:
+// each endorser re-derives the same values before it signs.
+type EVMAssignmentContext struct {
+	Network      uint64                            `json:"network"`
+	Predecessor  hex.Bytes                         `json:"predecessor"`
+	Attempt      uint64                            `json:"attempt"`
+	FrozenParent hex.Bytes                         `json:"frozenParent"`
+	Installed    *types.PartitionDescriptionRecord `json:"installed"`
+	Pending      bool                              `json:"acknowledgementPending"`
+}
+
+// EVMAssignmentContext reports the possession-proof context for a proposal that freezes
+// frozenParent now. A successor key holder signs evmassign.PoPMessage for exactly this
+// network, predecessor, attempt and parent; a stale or different context is refused later.
+func (x *ConsensusManager) EVMAssignmentContext(frozenParent []byte) (EVMAssignmentContext, error) {
+	if !x.blockStore.HighQCFrozenParent(frozenParent) {
+		return EVMAssignmentContext{}, ErrHandoffApproval
+	}
+	state, err := x.blockStore.GetState()
+	if err != nil || state == nil || state.CommittedHead == nil || state.CommittedHead.Control == nil {
+		return EVMAssignmentContext{}, ErrHandoffApproval
+	}
+	control := state.CommittedHead.Control
+	if control.Phase != "idle" && control.Phase != "aborted" {
+		return EVMAssignmentContext{}, ErrHandoffApproval
+	}
+	attempt := uint64(0)
+	if control.Phase == "aborted" {
+		if control.Attempt == ^uint64(0) {
+			return EVMAssignmentContext{}, ErrHandoffApproval
+		}
+		attempt = control.Attempt + 1
+	}
+	predecessor, err := x.handoffPredecessor()
+	if err != nil {
+		return EVMAssignmentContext{}, err
+	}
+	shard, installed, err := x.installedEVMFromState(state, frozenParent, true)
+	if err != nil {
+		return EVMAssignmentContext{}, err
+	}
+	return EVMAssignmentContext{Network: uint64(x.orchestration.NetworkID()), Predecessor: predecessor, Attempt: attempt,
+		FrozenParent: bytes.Clone(frozenParent), Installed: installed, Pending: pendingAssignmentAck(shard)}, nil
+}
