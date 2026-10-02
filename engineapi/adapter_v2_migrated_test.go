@@ -308,3 +308,61 @@ func TestAdapterV2VerifyQuietBlockIsExactlyTheParent(t *testing.T) {
 		})
 	}
 }
+
+// Replaces TestAdapter_Verify_RejectsTamperedAttributes_WithoutCallingNewPayload. The payload-field
+// comparison runs after authentication; this pins that every derived field is still compared and that a
+// divergence is refused before the execution client sees the block. The leader's companion and
+// commitment are genuine in every case; exactly one payload field differs from the control.
+func TestAdapterV2VerifyRefusesEachDivergentPayloadFieldBeforeExecution(t *testing.T) {
+	verifier, params, want := bootstrapAdapterFixture(t)
+	engine, eth := newMockReth(t, Secret{}), newMockReth(t, Secret{})
+	calls := 0
+	engine.on("engine_newPayloadWithSealV1", func(json.RawMessage) (any, *rpcError) {
+		calls++
+		return PayloadStatusV1{Status: PayloadStatusValid}, nil
+	})
+	eth.on("eth_getBlockByHash", func(json.RawMessage) (any, *rpcError) {
+		return blockHeaderJSON{Number: 0, Hash: data32(verifier.GenesisOrigin.BlockHash()), Timestamp: 0}, nil
+	})
+	a, closeFn := newTestAdapterWithVerifier(t, engine, eth, verifier)
+	defer closeFn()
+	a.feeCollector = [20]byte{19: 0xad}
+	witnesses, err := encodeSealCompanionWitnesses(params.AuthorizingCertificate, params.AuthorizingTechnicalRecord)
+	require.NoError(t, err)
+	attrs := DeriveAttributesV2(want.Input, ParentHeader{}, a.feeCollector)
+	mk := func(tamper func(*ExecutionPayloadV3)) shardnode.Block {
+		p := samplePayload()
+		p.ParentHash = data32(verifier.GenesisOrigin.BlockHash())
+		p.BlockNumber = 1
+		p.Timestamp, p.PrevRandao, p.FeeRecipient, p.Withdrawals = attrs.Timestamp, attrs.PrevRandao, attrs.SuggestedFeeRecipient, attrs.Withdrawals
+		p.ExtraData = want.Commitment[:]
+		if tamper != nil {
+			tamper(&p)
+		}
+		b, err := EncodeBlockWithSealCompanion(p, &SealCompanion{RootInput: want.Encoded, Witnesses: witnesses, Provenance: "build"})
+		require.NoError(t, err)
+		return b
+	}
+
+	status, err := a.Verify(context.Background(), mk(nil), params)
+	require.NoError(t, err)
+	require.Equal(t, shardnode.StatusValid, status, "control: the untampered block is accepted")
+	require.Equal(t, 1, calls)
+
+	for _, tc := range []struct {
+		name   string
+		tamper func(*ExecutionPayloadV3)
+	}{
+		{"timestamp", func(p *ExecutionPayloadV3) { p.Timestamp++ }},
+		{"prevRandao", func(p *ExecutionPayloadV3) { p.PrevRandao[0] ^= 1 }},
+		{"fee recipient", func(p *ExecutionPayloadV3) { p.FeeRecipient[0] ^= 1 }},
+		{"withdrawals", func(p *ExecutionPayloadV3) { p.Withdrawals = []WithdrawalV1{{Index: 1}} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, err := a.Verify(context.Background(), mk(tc.tamper), params)
+			require.NoError(t, err, "a field divergence stays StatusInvalid with a local warning, not an error return")
+			require.Equal(t, shardnode.StatusInvalid, status)
+			require.Equal(t, 1, calls, "a tampered payload is refused before reth sees it")
+		})
+	}
+}
