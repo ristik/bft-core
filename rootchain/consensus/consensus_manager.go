@@ -1321,6 +1321,10 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		blockStore, err = storage.NewFromState(x.params.HashAlgorithm, rsp.CommittedHead, x.blockStore.GetDB(), x.orchestration, x.log, x.params.NetworkProfileVersion)
 	}
 	if err != nil {
+		if errors.Is(err, storage.ErrRefusedBeforeWrite) {
+			// The state was refused before the first write: the store is untouched, so there is no uncertainty to latch.
+			recoveryWriteStarted = false
+		}
 		return fmt.Errorf("recovery, new block store init failed: %w", err)
 	}
 	if x.params.NetworkProfileVersion == storage.ProfileHandoff {

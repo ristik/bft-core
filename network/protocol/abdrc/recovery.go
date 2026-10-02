@@ -220,6 +220,12 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 	}
 	if history != nil {
 		epoch := tb.GetEpoch()
+		// The head's commit QC commits the head, so the empty seal of a QC that commits nothing is never valid there. A QC elsewhere in the
+		// state may carry it (recoveryQCEpoch); refusing it here keeps the typed epoch refusal this slot had before the empty seal was
+		// admitted, instead of leaving the root to find the inconsistency when it builds the head (NewRootBlock).
+		if !anchorHead && sm.CommittedHead.CommitQc != nil && isEmptyCommitInfo(sm.CommittedHead.CommitQc.LedgerCommitInfo) {
+			return fmt.Errorf("%w: the committed head's commit QC commits nothing", ErrRecoveryEpoch)
+		}
 		if sm.CommittedHead.Block.Epoch != epoch ||
 			(!anchorHead && (!recoveryQCEpoch(sm.CommittedHead.Block.Qc, epoch) ||
 				!recoveryQCEpoch(sm.CommittedHead.Qc, epoch) ||
