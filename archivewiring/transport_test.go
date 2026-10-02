@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +31,16 @@ func transportFixture() (archive.Request, *archive.Record) {
 	return q, rec
 }
 
+// serveOneDeadline bounds every wait in serveOne. The server answers only after it has verified and durably stored the record, which
+// can take seconds when the disk is busy (the full suite runs many fsync-heavy packages at once), so the bound is generous; what matters
+// is that it exists. The production server bounds the same work by Limits.Deadline (20 s, DefaultLimits).
+var (
+	serveOneDeadline = 15 * time.Second
+	// serveOneDrain bounds the wait for Serve to return after the client has given up: the server may still be verifying and storing
+	// the record, and returns as soon as its reply write fails.
+	serveOneDrain = 60 * time.Second
+)
+
 func serveOne(t *testing.T, s *Server, request []byte) ([]byte, error) {
 	t.Helper()
 	client, server := net.Pipe()
@@ -36,7 +48,7 @@ func serveOne(t *testing.T, s *Server, request []byte) ([]byte, error) {
 	defer server.Close()
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(context.Background(), server) }()
-	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+	_ = client.SetDeadline(time.Now().Add(serveOneDeadline))
 	if err := writeFrame(client, request); err != nil {
 		t.Fatal(err)
 	}
@@ -49,13 +61,33 @@ func serveOne(t *testing.T, s *Server, request []byte) ([]byte, error) {
 		answer, err := readFrame(client, archive.MaxWireBytes)
 		read <- readResult{answer: answer, err: err}
 	}()
+	// waitServer collects Serve's own result without blocking forever. A net.Pipe write blocks until the peer reads, so a server
+	// whose reply the client has stopped waiting for would never return; closing the client first lets that write fail.
+	waitServer := func() error {
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(serveOneDrain):
+			t.Fatalf("serveOne: the server did not return within %v", serveOneDrain)
+			return nil
+		}
+	}
 	select {
 	case result := <-read:
-		return result.answer, <-done
+		if result.err != nil {
+			_ = client.Close()
+			serverErr := waitServer()
+			return nil, fmt.Errorf("serveOne: no reply within %v: %w (server: %v)", serveOneDeadline, result.err, serverErr)
+		}
+		return result.answer, waitServer()
 	case serverErr := <-done:
 		if serverErr == nil {
-			result := <-read // a successful Serve has written a full response.
-			return result.answer, nil
+			select {
+			case result := <-read: // a successful Serve has written a full response.
+				return result.answer, result.err
+			case <-time.After(serveOneDeadline):
+				t.Fatalf("serveOne: the server returned but its reply was not readable within %v", serveOneDeadline)
+			}
 		}
 		select {
 		case result := <-read:
@@ -431,5 +463,109 @@ func TestAnUnauthorizedPeerIsRefusedByNameAndServedOnceAdmitted(t *testing.T) {
 	got, err := Fetch(context.Background(), sender, remote.ID(), q, DefaultLimits())
 	if err != nil || !equalRecord(q, rec, got) {
 		t.Fatalf("an admitted peer is served: %v", err)
+	}
+}
+
+// serveOne used to wait on the server forever when the client's read deadline expired first: the server's reply write on the pipe
+// then had no reader and the client was closed only after serveOne returned, so one slow verify-and-store turned into the package's
+// 30-minute timeout. A server slower than the deadline must now fail the call promptly, as an error that names the missed reply.
+func TestServeOneFailsInsteadOfHangingWhenTheServerIsSlowerThanItsDeadline(t *testing.T) {
+	savedDeadline, savedDrain := serveOneDeadline, serveOneDrain
+	serveOneDeadline, serveOneDrain = 300*time.Millisecond, 5*time.Second
+	defer func() { serveOneDeadline, serveOneDrain = savedDeadline, savedDrain }()
+	q, rec := transportFixture()
+	store, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(store, q.Context, func(context.Context, archive.Request, *archive.Record) error {
+		time.Sleep(time.Second)
+		return nil
+	}, []peer.ID{"configured"}, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := archive.EncodeResponse(archive.Response{Request: q, Outcome: archive.OK, Record: rec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	answer, err := serveOne(t, s, append([]byte{1}, encoded...))
+	if err == nil || answer != nil || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("a server slower than the deadline must fail the call with the deadline error: answer=%x err=%v", answer, err)
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("serveOne took %v: it is waiting on the server again", elapsed)
+	}
+}
+
+// stalledStream is a libp2p stream over a net.Pipe whose far end stops reading, which makes the server's reply write block exactly
+// as it does to a peer that has stopped draining its connection. Like a real stream it honours SetDeadline for reads and writes.
+type stalledStream struct {
+	libp2pnetwork.Stream
+	conn net.Conn
+	id   peer.ID
+}
+
+type stalledConn struct {
+	libp2pnetwork.Conn
+	id peer.ID
+}
+
+func (c stalledConn) RemotePeer() peer.ID             { return c.id }
+func (s stalledStream) Conn() libp2pnetwork.Conn      { return stalledConn{id: s.id} }
+func (s stalledStream) Read(p []byte) (int, error)    { return s.conn.Read(p) }
+func (s stalledStream) Write(p []byte) (int, error)   { return s.conn.Write(p) }
+func (s stalledStream) SetDeadline(t time.Time) error { return s.conn.SetDeadline(t) }
+func (s stalledStream) Close() error                  { return s.conn.Close() }
+func (s stalledStream) Reset() error                  { return s.conn.Close() }
+
+// A peer that sends a valid request and then never reads the reply must not pin a server goroutine or its reservation: the production
+// stream handler gives the whole exchange Limits.Deadline (transport.go handle), so the blocked reply write fails at that bound, the
+// handler returns, and the global and per-peer reservations are released. This is the product-side half of the serveOne hang: the
+// pipe in that test had no deadline, a real stream does.
+func TestHandlerExitsAtItsDeadlineWhenThePeerStopsReading(t *testing.T) {
+	q, rec := transportFixture()
+	store, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(q, rec); err != nil {
+		t.Fatal(err)
+	}
+	const id = peer.ID("configured")
+	limits := Limits{Deadline: 400 * time.Millisecond, Pending: 4, PerPeer: 4}
+	s, err := NewServer(store, q.Context, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{id}, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.ctx = context.Background() // what Register sets; the handler derives its exchange context from it
+	client, server := net.Pipe()
+	defer client.Close()
+	request, err := archive.EncodeRequest(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	started := time.Now()
+	go func() {
+		defer close(exited)
+		s.handle(stalledStream{conn: server, id: id})
+	}()
+	if err := writeFrame(client, append([]byte{2}, request...)); err != nil {
+		t.Fatal(err) // the request is delivered; the client now stops reading and never drains the reply
+	}
+	select {
+	case <-exited:
+	case <-time.After(10 * limits.Deadline):
+		t.Fatalf("the handler is still blocked writing to a peer that stopped reading after %v (Limits.Deadline %v)", time.Since(started), limits.Deadline)
+	}
+	if elapsed := time.Since(started); elapsed < limits.Deadline/2 {
+		t.Fatalf("the handler returned after %v, before the reply write could have blocked: the test no longer stalls the write", elapsed)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pending != 0 || len(s.byPeer) != 0 {
+		t.Fatalf("reservations leaked after the handler exited: pending=%d byPeer=%v", s.pending, s.byPeer)
 	}
 }

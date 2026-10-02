@@ -38,6 +38,7 @@ type Publisher struct {
 	mu              sync.Mutex
 	ack             map[[32]byte]uint8
 	bundleAck       map[uint64]uint8
+	bundleConflict  map[uint64]uint8 // per epoch, the replicas that refused our bundle as semantically different: never retried
 	cursor          int
 	replicaCursor   [2]int
 	status          Status
@@ -226,13 +227,31 @@ func (p *Publisher) publishBundles(ctx context.Context) error {
 			return err
 		}
 		p.mu.Lock()
-		bits := p.bundleAck[epoch]
+		bits := p.bundleAck[epoch] | p.bundleConflict[epoch]
 		p.mu.Unlock()
 		for i, id := range p.Replicas {
 			if bits&(1<<i) != 0 {
 				continue
 			}
 			if err := PutBundleAndReadBack(ctx, p.Host, id, q, raw, p.Limits, p.BundleVerifier); err != nil {
+				if errors.Is(err, archive.ErrBundleConflict) {
+					// The replica holds a verified bundle for this epoch that is semantically different from ours: two honest
+					// bundles for one epoch cannot differ, so this is equivocation or a bug. Retrying cannot change it, and the
+					// copy is never acknowledged, so record it once at ERROR and stop offering this bundle to this replica.
+					log := p.Log
+					if log == nil {
+						log = slog.New(slog.DiscardHandler)
+					}
+					log.ErrorContext(ctx, "CONFLICTING HANDOFF BUNDLE: the replica refused our bundle as semantically different from the one it holds for this epoch; not retrying (equivocation or a bug)",
+						"epoch", epoch, "replica", id.String(), "err", err)
+					p.mu.Lock()
+					if p.bundleConflict == nil {
+						p.bundleConflict = make(map[uint64]uint8)
+					}
+					p.bundleConflict[epoch] |= 1 << i
+					p.mu.Unlock()
+					continue
+				}
 				waiting = errors.Join(waiting, fmt.Errorf("epoch %d replica %s: %w", epoch, id, err))
 				continue
 			}

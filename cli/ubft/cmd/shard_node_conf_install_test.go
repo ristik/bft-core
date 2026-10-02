@@ -308,7 +308,7 @@ func TestTheHandoffTerminalCertificateIsRecordedUnderTheTerminalContext(t *testi
 					t.Errorf("OnInstalled assigns %s: the store's genesis pin and resolver are set only by configuredprogress.TerminalContext", src(sel))
 				}
 			}
-			if len(n.Lhs) == 1 && len(n.Rhs) == 1 && src(n.Lhs[0]) == "terminalCtx" {
+			if len(n.Lhs) >= 1 && len(n.Rhs) == 1 && src(n.Lhs[0]) == "terminalCtx" { // terminalCtx, err := ...
 				if call, ok := n.Rhs[0].(*ast.CallExpr); ok && src(call.Fun) == "configuredprogress.TerminalContext" {
 					for _, a := range call.Args {
 						terminalCtx = append(terminalCtx, src(a))

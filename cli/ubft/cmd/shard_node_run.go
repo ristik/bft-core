@@ -50,6 +50,25 @@ import (
 
 const lucStoreFileName = "shard-node-luc.json"
 
+// ErrRestoreTrustAnchorEpoch is returned when a restore is started with a --trust-base whose epoch is not the genesis root epoch. The
+// restore replays every archived block from block 1, so it must verify forward from the genesis-epoch trust base through every missed
+// handoff; a later anchor leaves the earlier epochs' trust, assignment transitions and shard configurations uninstalled.
+var ErrRestoreTrustAnchorEpoch = errors.New("restore trust anchor is not the genesis root epoch")
+
+// requireRestoreTrustAnchor refuses a restore whose CLI trust base is not at the genesis root epoch. It reads only the checked origin and
+// the trust epoch, so it can run before anything is constructed or written. Ordinary runs are not restricted: a later trust base remains
+// valid for a node that has its own history. A restore without a checked origin is refused later by the journal requirements.
+func requireRestoreTrustAnchor(restore bool, origin registrygenesis.GenesisOrigin, trustEpoch uint64) error {
+	if !restore || !origin.Valid() {
+		return nil
+	}
+	if genesisEpoch := origin.Record().RootEpoch; trustEpoch != genesisEpoch {
+		return fmt.Errorf("%w: --trust-base is at root epoch %d but the genesis was generated at root epoch %d; supply the genesis-epoch trust base to --trust-base (the current trust base is pinned separately by --trust-body-id)",
+			ErrRestoreTrustAnchorEpoch, trustEpoch, genesisEpoch)
+	}
+	return nil
+}
+
 type handoffTerminalCertificate struct {
 	uc *types.UnicityCertificate
 	tr *certification.TechnicalRecord
@@ -521,6 +540,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return err
 		}
 	}
+	if err := requireRestoreTrustAnchor(flags.Restore, origin, trustBases[0].GetEpoch()); err != nil {
+		return err
+	}
 	if err := validateExecutionJournalFlags(flags, origin); err != nil {
 		return err
 	}
@@ -751,8 +773,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					}
 					// The terminal certificate belongs to the epoch this handoff ends, whose configuration is the one the
 					// verified snapshot carries (checked against the followed assignment), not the genesis configuration. The store
-					// stays bound to the genesis origin; only the per-epoch configuration for the certificate's own shard epoch changes.
-					terminalCtx := configuredprogress.TerminalContext(journalCtx, verified.Shard.ShardConfHash, verified.Shard.TR.Epoch)
+					// stays bound to the genesis origin; the per-epoch resolver adds the certificate's own shard epoch to the installed set
+					// (the store's other durable state sits at other epochs) and refuses a conflict with an installed configuration.
+					terminalCtx, err := configuredprogress.TerminalContext(journalCtx, verified.Shard.ShardConfHash, verified.Shard.TR.Epoch)
+					if err != nil {
+						return fmt.Errorf("handoff terminal certificate context: %w", err)
+					}
 					terminal, err := rootinput.AuthenticateObservationV2(ctx, terminalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
 					if err != nil {
 						return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
