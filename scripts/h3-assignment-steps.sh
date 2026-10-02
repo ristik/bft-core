@@ -384,11 +384,15 @@ h3_step "root quorum restarted at epoch 3; roots and aggregators progress while 
 h3_assert_rejected() { # node id, what
   local id=$1 what=$2 i refusals=0 accepted
   for i in $(seq 1 90); do
-    refusals=$(h3_since_mark | grep -F "processing *certification.BlockCertificationRequest" | grep -cF "node \"$id\" is not in the trustbase of the shard" || true)
+    # The root refuses a retired or never-active key in one of two places, both of them the active-set check: at the handshake
+    # ("node ID is not in active validator set ... <id>", the node then never gets a certificate and sends no request) or, for a
+    # request that does arrive, at the request ("node <id> is not in the trustbase of the shard").
+    refusals=$(h3_since_mark | grep -E "processing \*(certification.BlockCertificationRequest|handshake.Handshake)" |
+      grep -cE "node \"$id\" is not in the trustbase of the shard|node ID is not in active validator set .*$id" || true)
     [ "$refusals" -ge 1 ] && break
     sleep 1
   done
-  [ "$refusals" -ge 1 ] || { echo "$what: no root logged the exact refusal 'node \"$id\" is not in the trustbase of the shard'" >&2; return 1; }
+  [ "$refusals" -ge 1 ] || { echo "$what: no root logged an active-set refusal for $id (handshake or request)" >&2; return 1; }
   accepted=$(h3_since_mark | grep -F "reached consensus" | grep -F "requestNodeIDs" | grep -cF "$id" || true)
   [ "$accepted" -eq 0 ] || { echo "$what: root accepted $accepted request set(s) containing $id" >&2; return 1; }
   echo "$what: $refusals exact root refusal(s) for $id; 0 accepted request sets contain it"
