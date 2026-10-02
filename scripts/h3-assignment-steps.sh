@@ -506,7 +506,7 @@ h3_step "root quorum restarted at epoch 3; roots and aggregators progress while 
 # *certification.BlockCertificationRequest"). It must (1) appear in a root log since the mark, and (2) the id must never
 # appear among the requestNodeIDs of a request set the root accepted ("reached consensus"), i.e. nothing it sent certified.
 h3_assert_rejected() { # node id, what, [seconds to wait: a node that must first RESTORE needs minutes to reach the roots]
-  local id=$1 what=$2 window=${3:-90} i refusals=0 accepted
+  local id=$1 what=$2 window=${3:-90} alt_log=${4:-} i refusals=0 accepted
   for i in $(seq 1 "$window"); do
     # The root refuses a retired or never-active key in one of two places, both of them the active-set check: at the handshake
     # ("node ID is not in active validator set ... <id>", the node then never gets a certificate and sends no request) or, for a
@@ -514,12 +514,19 @@ h3_assert_rejected() { # node id, what, [seconds to wait: a node that must first
     refusals=$(h3_since_mark | grep -E "processing \*(certification.BlockCertificationRequest|handshake.Handshake)" |
       grep -cE "node \"$id\" is not in the trustbase of the shard|node ID is not in active validator set .*$id" || true)
     [ "$refusals" -ge 1 ] && break
+    # A retired key is refused one layer earlier too: the validators' archive replicas serve only the ACTIVE assignment's validators, so a
+    # node that must first restore from them is refused there ("archive peer is not allowed") and never reaches a root at all.
+    if [ -n "$alt_log" ] && grep -aq "archive peer is not allowed" "$alt_log" 2>/dev/null; then
+      echo "$what: refused by the archive replicas (archive peer is not allowed): $id is not in the active assignment, so it cannot even restore"
+      refusals=1
+      break
+    fi
     sleep 1
   done
-  [ "$refusals" -ge 1 ] || { echo "$what: no root logged an active-set refusal for $id (handshake or request)" >&2; return 1; }
+  [ "$refusals" -ge 1 ] || { echo "$what: no root logged an active-set refusal for $id (handshake or request), and no archive replica refused it" >&2; return 1; }
   accepted=$(h3_since_mark | grep -F "reached consensus" | grep -F "requestNodeIDs" | grep -cF "$id" || true)
   [ "$accepted" -eq 0 ] || { echo "$what: root accepted $accepted request set(s) containing $id" >&2; return 1; }
-  echo "$what: $refusals exact root refusal(s) for $id; 0 accepted request sets contain it"
+  echo "$what: $refusals refusal(s) for $id (root or archive); 0 accepted request sets contain it"
 }
 
 h3_retired_key_rejected() {
@@ -673,7 +680,7 @@ h3_late_s2_ack_refused() {
   h3_mark
   h3_enroll_authority 6 2 || { echo "enrolling the evm6 authority against the s=2 configuration failed" >&2; return 1; }
   h3_restore_validator 6 1 || true            # the s=2 key tries to acknowledge late
-  h3_assert_rejected "$id6" "late s=2 acknowledgement from evm6" 480 || return 1
+  h3_assert_rejected "$id6" "late s=2 acknowledgement from evm6" 480 test-nodes/evm6/debug.log || return 1
   h3_registry_is 3 5                          # the registry shows s=3's folded acknowledgement, not s=2's
 }
 h3_step "s=2's late acknowledgement is rejected" h3_late_s2_ack_refused
