@@ -16,6 +16,58 @@ The current engine-api-adapter branch is a prototype starting point, not the pub
 baseline. In particular, its single-epoch shard trust-base store, count-based QC/TC formation,
 standard Engine API attributes and latest-only UC storage do not implement the repaired rules.
 
+## 0. Owner architecture decisions (2026-10-01)
+
+The owner decisions of 2026-10-01 are recorded in [ADR 0012](../adr/0012-validator-entity-model.md) and the
+[specification amendment](specification/amendments/0012-validator-entity-model.md). They govern where a ticket below says
+otherwise; each affected ticket carries an "Amended 2026-10-01" note rather than a rewrite, so the earlier text stays reviewable.
+
+- **Validator = one entity**, authenticated at the top level only by its BFT Core consensus key (listed in the current Unicity
+  Trust Base entry; each new entry is signed by the previous set). It co-hosts an EVM node (reth) and helper processes and **fully
+  trusts that EVM node**. The co-hosted BFT Core and EVM processes **share no private keys**; EVM and signing-authority keys are
+  delegated and procedural. PoA now, PoS later, both at this level only.
+- **Validator-set changes are always coupled:** one root handoff changes the BFT Core committee and the EVM assignment together.
+  EVM-only rotation is not a supported operation (code may support it; runbooks and lanes do not use it). Supersession of a failed
+  successor stays. (H2, H3)
+- **Proofs:** only certified **positive** execution proofs are required from the EVM. Absence proofs are not a requirement; existing
+  code may stay and gets no further work. (F7, D6)
+- **Weights:** PoS weights apply at the root/validator-entity level only. The EVM shard mirrors root weights; **aggregator shards are
+  unweighted**. Q2 and Q3 shrink accordingly; P3 binds only the root key. (D3, Q2, Q3, P3)
+- **I-track deferred:** bounded forced inclusion (I1-I5) is deferred, not deleted (section 9).
+- **Aggregator shards run centrally at launch** (aggregator-go is production; rugregator is experimental) **without consistency
+  proofs** (`proof_type` none). The root certifies the presented transitions; see the disclosure below. Data availability and backup,
+  endpoint discovery and liveness are solved by aggregator-go or the payment gateway and are out of scope at this layer. (F8)
+- **New aggregator partitions and shard splits happen only at a BFT Core epoch boundary**, ordered by root consensus and carried by
+  the same epoch-boundary handoff record; there is no per-root-node HTTP PUT. The source of a change is an operator (PoA) at
+  launch and later possibly EVM smart contracts (slot auctions and the like); the data structures and flows are prepared now. (H2, H3, F8)
+- **Broad F7** (public RPC, SDK, account/storage proofs, permanent-storage service) moves to the bridge track, B5
+  ([#66](https://github.com/ristik/bft-core/issues/66)); F7's receipt-complete archive and positive-proof export stay in M2.
+
+### Trust-assumption disclosure: aggregator shards at launch
+
+With `proof_type` none and a central operator, the root and the certification protocol give the following, and nothing beyond it.
+
+The root **does** guarantee, for an aggregator shard:
+
+- certificates are issued only for the shard configuration ordered by root consensus at an epoch boundary, under the trust base of
+  the certificate's epoch;
+- each certified round carries a request that passed the certification protocol's checks (matching signed requests from the
+  shard's configured validators, round and epoch binding, non-equivocation per round, technical-record rules);
+- the order of certified state transitions per partition and shard, and that a certificate once issued for a round is not replaced.
+
+The root does **not** guarantee:
+
+- that a certified transition is valid under the aggregator's application rules: with no consistency proof the root certifies the
+  transition that was presented, it does not verify it;
+- availability or retention of the data behind a certified state, endpoint discovery, or liveness of the aggregator service;
+- protection against a malicious or compromised operator of a centrally run shard (censoring, reordering inside its own rounds,
+  presenting an incorrect but well-formed transition);
+- any stake backing: aggregator shards are unweighted.
+
+Relying clients trust the aggregator operator for the correctness of transitions, and the root for ordering, configuration binding
+and non-equivocation. Any change (a proof type other than none, decentralized aggregation) is a separate versioned decision with
+its own activation gate.
+
 ## 1. Delivery policy
 
 - Complete and validate each safety dependency before activating its consumer. Private devnets,
@@ -23,7 +75,7 @@ standard Engine API attributes and latest-only UC storage do not implement the r
 - Keep the first public chain under PoA. Add PoS only after the full epoch/evidence/retirement
   cycle works with unequal weights and failures. An operator flag alone cannot activate it.
 - Use attested execution initially, with root and EVM assignments sharing the same effective
-  weights. Stateless execution and succinct execution proofs are later upgrades.
+  weights (the EVM shard mirrors the root weights; aggregator shards are unweighted: section 0). Stateless execution and succinct execution proofs are later upgrades.
 - Initial rewards pay assigned weight per certified root interval. They do not measure uptime.
   Downtime slashing and jailing from missing QC signatures are disabled.
 - Initial PoS may use self-bond only. Port only accounting components justified by a reuse
@@ -53,11 +105,11 @@ close; the old one-week/two-week estimates are not retained for unresolved proto
 |---|---|---|
 | M0 | Implementable protocol baseline | D1-D6 approved internally, wire/transition models and independent vectors available; scope and deferred guarantees explicit. |
 | M1 | Private paired PoA execution | F1-F6: authenticated system call, positive fees, idle progress, deterministic build/verify/replay and durable certified state. |
-| M2 | Recoverable PoA service | F7-F9, H1-H6, X1: real epoch replacement, certificate archive/export, checkpoint recovery and mixed aggregator/EVM operation. Current M2a evidence and remaining limits are tracked in [the closure status](m2-closure-status.md); that snapshot does not close the full M2 gate. |
+| M2 | Recoverable PoA service | F7-F9 (broad F7 export moves to B5, section 0), H1-H6, X1: real epoch replacement, certificate archive/export, checkpoint recovery and mixed aggregator/EVM operation. Current M2a evidence and remaining limits are tracked in [the closure status](m2-closure-status.md); that snapshot does not close the full M2 gate. |
 | M3 | Public UCT / TGE under PoA | M2, T1-T7, X2 remediation complete; exact production genesis rehearsed, funded first claims, custody/supply checks and upgrade recovery reviewed. T8 rewards optional and explicitly disabled if unfinished. |
 | M4B | Private bridge round trip | M3-equivalent test chain, B1-B6; both directions and supported-profile restrictions verified. No public custody. |
 | M5B | Public bridge | B7-B9 and X3 complete; every admitted history redeemable, independent SDK conformance, proof-service recovery and liability audit. |
-| M4S | PoS shadow and adversarial testnet | M2 foundation, Q1-Q4, P1-P7, S1-S4, I1-I5, H7, X4; contract output observed in shadow while PoA remains authoritative. |
+| M4S | PoS shadow and adversarial testnet | M2 foundation, Q1-Q4 (Q2/Q3 narrowed, section 0), P1-P7, S1-S4, H7, X4; I1-I5 deferred (section 9); contract output observed in shadow while PoA remains authoritative. |
 | M5S | Authoritative PoS | M3, M4S, P8 and X5: integrated audit closed, real weighted handoffs and evidence exercised, checkpoint and retirement protection operational. |
 | Later | Optional capabilities | Separately versioned delegation, bridge split/merge, performance accounting, downtime slashing, execution proofs and history accumulator. |
 
@@ -118,6 +170,10 @@ vectors cover greater than two-thirds root weight, greater than one-half shard w
 the configured faulty-weight bound for timeout amplification, duplicate keys/signers,
 minority stake with majority identities and sum overflow. No assumed bound on seats substitutes
 for the paired EVM's actual weighted threshold.
+
+**Amended 2026-10-01:** the weighted arithmetic stands but applies at the root/validator-entity level; the EVM shard's threshold is
+taken over the mirrored root weights and aggregator shards stay unweighted (ADR 0012). "Greater than one-half shard weight" above
+reads as the EVM shard.
 
 ### D4. Epoch handoff state machine
 
@@ -276,6 +332,10 @@ The verifier receives the authentic trust base for the UC's epoch as an input; t
 verification premise requires no ancestry proof or trust-body chain. F7's broad public account /
 storage export and permanent-storage service remain open.
 
+**Amended 2026-10-01:** broad F7 (public RPC, SDK, account/storage proof export, permanent-storage service) is carried by B5
+([#66](https://github.com/ristik/bft-core/issues/66)); the M2 deliverable is the receipt-complete archive and the positive-proof
+export above. Only certified positive execution proofs are required; absence proofs are not a requirement and get no further work.
+
 ### F8. Mixed-cadence partition integration
 
 **Dependencies:** F4-F6.
@@ -304,6 +364,11 @@ proof verification against timeouts; deployment limits derive from measurements.
 unbounded memory/CPU growth or false certification. Published bounds cover verification work,
 payload availability and recovery, not merely process counts.
 
+**Amended 2026-10-01:** aggregator shards run centrally at launch with `proof_type` none; "preserve consistency-proof
+verification" means the verification path stays available for any shard that configures a proof type, not that launch shards
+produce proofs. The launch trust assumption is the disclosure in section 0. New aggregator partitions and shard splits are
+introduced only at an epoch boundary through the root-ordered handoff record (H2/H3), never by per-node HTTP PUT.
+
 ## 5. H: epoch and checkpoint foundation under PoA
 
 ### H1. Authenticated multi-epoch trust-base storage
@@ -329,6 +394,10 @@ data. Protect durable endorsement state and enforce committed prepare/abort/acti
 A locally inserted future trust base cannot become authoritative without the committed handoff.
 Every old-quorum signature used for activation is bound to the same agreed boundary and body.
 
+**Amended 2026-10-01:** configuration changes, including new aggregator partitions and shard splits, are ordered by root consensus
+and carried by this same epoch-boundary handoff record; REST accepts a proposal but never installs one on a single node. The source
+of a change is an operator (PoA) at launch, later possibly EVM contracts; the data structures and flows are prepared now.
+
 ### H3. EVM assignment handoff and acknowledgement
 
 **Dependencies:** H2, F4.
@@ -340,6 +409,10 @@ Only one unacknowledged governance handoff may be prepared at a time.
 **Accepts when:** membership changes while an EVM block is building cannot certify that proposal
 after cancellation; the successor resumes from the agreed parent. Root rounds can advance while
 the EVM acknowledgement lags. Other aggregator assignments remain unchanged.
+
+**Amended 2026-10-01:** validator-set changes are always coupled: one handoff changes the BFT Core committee and the EVM
+assignment together (each successor root entity bound to one delegated EVM validator). EVM-only rotation is not a supported
+operation; supersession of a failed successor stays.
 
 ### H4. Joining readiness and recovery
 
@@ -385,6 +458,10 @@ inbox evidence watermark to custody withdrawal eligibility.
 **Accepts when:** an unbond request just after snapshot, key rotation, canceled successor,
 indefinite epoch extension and delayed evidence processing cannot unlock assigned or accused
 collateral. Merely exceeding an operational extension target never permits withdrawal.
+
+**Amended 2026-10-01 (I-track deferred):** the I4 dependency and the "inbox evidence watermark" in H7 are suspended while the
+I-track is deferred. How collateral withdrawal is protected against unprocessed evidence without the watermark is an open question
+(see section 9); H7 is not closed by this change.
 
 ## 6. T: public UCT under PoA
 
@@ -522,6 +599,11 @@ zero-effective members, duplicate key identities and unready incompatible nodes.
 silently certify under different thresholds; certificates from either version are verified with
 their own rules. Threshold and body-hash transitions survive restart.
 
+**Amended 2026-10-01 (Q2, Q3):** weights exist only at the root/validator-entity level. Q2 shrinks to the EVM shard, whose
+thresholds mirror the active root weights; aggregator shards are unweighted and keep their unit behavior, so no weighted
+aggregator-shard certificates are needed. Q3 shrinks to activating root weights (and the mirrored EVM weights) at an agreed
+configuration boundary.
+
 ### Q4. Weighted adversarial integration gate
 
 **Dependencies:** Q3, F8.
@@ -568,6 +650,10 @@ retain old bindings and collateral attribution.
 
 **Accepts when:** copied keys, duplicate identities and mismatched node derivation are rejected;
 owner rotation cannot erase a prior consensus offense; proof verification uses the offense epoch.
+
+**Amended 2026-10-01:** P3 binds only the root key: a stable staking identity, its owner key and the validator's BFT Core consensus
+key, with possession proof and unique active bindings. EVM and signing-authority keys are delegated and procedural, are not
+separate staking-registry roles, and are never shared with the co-hosted BFT Core process.
 
 ### P4. Retirement queue and protected claims
 
@@ -667,7 +753,7 @@ rotation; ordinary trust-base cache eviction does not prevent verification of a 
 
 ### S4. End-to-end slashing exercise
 
-**Dependencies:** S2-S3, I4-I5, H7.
+**Dependencies:** S2-S3, I4-I5 (suspended while the I-track is deferred, section 9), H7.
 
 Deliberately double-sign in a controlled testnet, censor the evidence at an EVM leader, then use
 the root inbox and verify retirement remains blocked until evidence executes.
@@ -677,6 +763,15 @@ validator is slashed and a duplicate costs no additional principal. Repeat with 
 and root epoch extension. Root-quorum loss is recorded as a recovery limitation, not success.
 
 ## 9. I: bounded forced inclusion
+
+> **Status: DEFERRED (owner decision, 2026-10-01; [ADR 0012](../adr/0012-validator-entity-model.md)). Not deleted.** Forced
+> inclusion defends access against a censoring EVM producer. Under the validator-entity model a node fully trusts its co-hosted EVM
+> node, only positive proofs are required and PoS weights stay at the root level, so I1-I5 are not a prerequisite of the PoA launch
+> (M3) or of PoS shadow (M4S): the M4S gate above no longer lists them. Their dependents H7 (I4), S4 (I4-I5) and X4 (I5) carry an
+> amendment note below, because each used the I-track as a safeguard (the inbox evidence watermark and the censored-evidence
+> scenario) and **what replaces that safeguard is an open question for the owner and the H7/S2 reviewers**; this change does not
+> decide it. The tickets below stay as the reference scope; they are reinstated only by a new owner decision with its own activation
+> gate, and authoritative PoS (M5S) must re-decide before it relies on forced inclusion. The D5 design is kept.
 
 ### I1. Certified admission and available payload queue
 
@@ -790,6 +885,9 @@ Replay, duplicate burns and a reverting recipient cannot consume others' backing
 
 **Dependencies:** B4, F7, H5.
 
+**Amended 2026-10-01:** B5 also carries broad F7: the public RPC, SDK, account/storage proof export and permanent-storage service
+that were deferred from M2 (ADR 0012; M2 keeps the receipt-complete archive and the positive-proof export).
+
 Register the enshrined immutable lock-reference reason in both SDKs and token specification.
 Carry UC/state proof as replaceable verification witness, outside signed/certified token identity.
 Verify account/storage paths, chain configuration, checkpoint and historical authentication.
@@ -881,9 +979,12 @@ type restrictions, nullifiers, long-history liveness, retries and archival recon
 **Accepts when:** M5B blockers are closed and independently generated negative vectors pass.
 An audit of an upstream prover or generic SDK does not replace review of the assembled bridge.
 
+**Amended 2026-10-01 (S4, I-track deferred):** the I4-I5 dependency and the "censor the evidence at an EVM leader, then use the
+root inbox" scenario are suspended with the I-track; the rest of the exercise stands. See the open question in section 9.
+
 ### X4. PoS shadow comparison and long-running fault exercise
 
-**Dependencies:** Q4, P7, S4, I5, H7.
+**Dependencies:** Q4, P7, S4, I5 (suspended while the I-track is deferred, section 9), H7.
 
 Observe contract candidates and modeled handoffs while PoA stays authoritative. Separately run
 an authoritative PoS testnet; shadow equality alone cannot test activation, penalties or exits.
@@ -892,6 +993,9 @@ Cover multiple replacements, rotations, evidence windows, pool exhaustion and re
 **Accepts when:** shadow divergence is zero for a declared interval and integrated testnet evidence
 covers real post-switch behavior. The test report records assumptions, limits and every enabled
 optional feature.
+
+**Amended 2026-10-01 (X4, I-track deferred):** the I5 dependency is suspended with the I-track; no inbox/forced-inclusion case is part of the
+exercise until it is reinstated (section 9).
 
 ### X5. Integrated PoS audit and activation gate
 
@@ -914,9 +1018,9 @@ security dependency does not qualify the remaining system for M5S.
 | Unsynchronized snapshots/activation | Governance Election and Trust Base Derivation | D4, H1-H7, P5-P6 |
 | Local UC bytes/signature subset determinism | EVM Seal Feed; appendix rootInput | D1, F2-F4 |
 | QC omission treated as downtime | Governance Rewards and Slashing | D5, T8, S1-S4; downtime disabled |
-| Unsafe unbonding/epoch extension | Governance Economic Invariants | D5, P2-P4, H7, I4 |
+| Unsafe unbonding/epoch extension | Governance Economic Invariants | D5, P2-P4, H7, I4 (I4 suspended: I-track deferred, open question in section 9) |
 | Key cache mistaken for weak subjectivity | EVM Historical Trust; appendix Proof Export | D6, H1, H5, S3, B5 |
-| Poisonable/unavailable forced queue | appendix Forced Inclusion | D5, I1-I5 |
+| Poisonable/unavailable forced queue | appendix Forced Inclusion | D5, I1-I5 (I-track deferred 2026-10-01) |
 | Wrong signed-vote/round binding | appendix Evidence | D5, S1-S4 |
 | No gas-funded genesis claimant | appendix Genesis State | T1, T6 |
 | Missing historical execution export | EVM Execution Evidence; appendix Proof Export | D6, F6-F9 |

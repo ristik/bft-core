@@ -4,6 +4,10 @@ Issue: [#7 D5](https://github.com/ristik/bft-core/issues/7) · Milestone: M0 ·
 Prereqs: [#3 D1](https://github.com/ristik/bft-core/issues/3),
 [#6 D4](https://github.com/ristik/bft-core/issues/6) · Status: **proposed for freeze**
 
+> **Forced-inbox part deferred 2026-10-01 ([ADR 0012](../adr/0012-validator-entity-model.md)).** The I-track (roadmap I1-I5)
+> is deferred by the owner decisions; this design stays as the reference. The slashable vote domain and the retirement
+> protection are unaffected.
+
 D5 fixes three things the initial PoS needs and the prototype does not have:
 
 1. the exact **slashable vote domain** and the `VoteInfo → LedgerCommitInfo`

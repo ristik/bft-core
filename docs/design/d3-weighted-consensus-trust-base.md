@@ -20,6 +20,10 @@ Evidence.
 
 ---
 
+> **Amended 2026-10-01 ([ADR 0012](../adr/0012-validator-entity-model.md)).** The arithmetic below is unchanged; its scope
+> narrows. PoS weights apply at the root/validator-entity level only; the EVM shard mirrors the root weights and aggregator
+> shards are unweighted. Q2/Q3 shrink accordingly.
+
 ## 1. Weight model
 
 - A member weight `bᵥ` is an **unsigned 64-bit** count of the configured atomic
