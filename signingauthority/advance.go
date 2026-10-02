@@ -108,6 +108,14 @@ func (a *Authority) AdvanceEpoch(ctx context.Context, conf *types.PartitionDescr
 	}
 	// The high-water record is not cleared, and old reservations cannot be
 	// signed or released after the context changes.
+	if conf.Epoch > old.ShardEpoch {
+		// A new shard epoch: if this authority acknowledged (operated at) the epoch it leaves, that is the input-record epoch to expect
+		// while the successor's acknowledgement is pending; otherwise the base it had stays (or stays unknown).
+		if a.irAckSeen {
+			a.irBase, a.irBaseKnown = old.ShardEpoch, true
+		}
+		a.irAckSeen = false
+	}
 	a.enroll.ShardEpoch = conf.Epoch
 	a.enroll.ShardConfHash = bytes.Clone(hash)
 	a.enroll.RootEpoch = PinRootEpoch(owned.Epoch)
