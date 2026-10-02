@@ -232,7 +232,7 @@ func (p *Publisher) publishBundles(ctx context.Context) error {
 			if bits&(1<<i) != 0 {
 				continue
 			}
-			if err := PutBundleAndReadBack(ctx, p.Host, id, q, raw, p.Limits); err != nil {
+			if err := PutBundleAndReadBack(ctx, p.Host, id, q, raw, p.Limits, p.BundleVerifier); err != nil {
 				waiting = errors.Join(waiting, fmt.Errorf("epoch %d replica %s: %w", epoch, id, err))
 				continue
 			}

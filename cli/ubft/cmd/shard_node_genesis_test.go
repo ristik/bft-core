@@ -237,3 +237,27 @@ func TestLoadGenesisOrigin_RefusesAGenesisAtRootEpochZeroOrBeyondTheTrustBase(t 
 	_, _, err = loadGenesisOrigin(zero, zeroPath, "", 3)
 	require.ErrorIs(t, err, registrygenesis.ErrGenesisRootEpoch, "root epoch zero is not a root epoch")
 }
+
+// The node's own activation retains the bundle through RetainActivatedBundle, so a conflicting or unverifiable archive copy cannot stop
+// it; a direct PutBundle there (which fails on any difference) is the defect that took evm3 down.
+func TestShardNodeRunRetainsTheActivatedBundleWithoutAFatalPut(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "shard_node_run.go", nil, 0)
+	require.NoError(t, err)
+	var retained, direct bool
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				switch sel.Sel.Name {
+				case "RetainActivatedBundle":
+					retained = true
+				case "PutBundle":
+					direct = true
+				}
+			}
+		}
+		return true
+	})
+	require.True(t, retained)
+	require.False(t, direct)
+}
