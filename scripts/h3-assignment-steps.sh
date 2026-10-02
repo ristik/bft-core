@@ -348,7 +348,8 @@ h3_config_only() {
   h3_retry_handoff 1 h3_config_attempt || return 1
   h3_restart_roots 2 || { echo "root restart into epoch 2 failed" >&2; return 1; }
   echo "roots restarted into epoch 2" >&2
-  m2_advance_authorities 2 trust-base-epoch2.json || { echo "authority advance to root epoch 2 failed" >&2; return 1; }
+  # the F8 lane keeps certifying empty EVM blocks, so the "latest head" the replica wait targets moves faster than the peers acknowledge it
+  M2_ADVANCE_NO_REPLICA_WAIT=1 m2_advance_authorities 2 trust-base-epoch2.json || { echo "authority advance to root epoch 2 failed" >&2; return 1; }
   h3_paid 2 || { echo "paid transaction at root epoch 2 was not certified" >&2; return 1; }
   # the registry's root epoch is written by an EVM block after the new root epoch is installed: poll like the later steps do
   local i
