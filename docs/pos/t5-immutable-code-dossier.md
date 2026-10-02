@@ -1,7 +1,8 @@
 # T5 immutable-code and system-contract dossier
 
-**Draft for independent review; not a signoff.** BFT source pin:
-`d2332e10878aefe1c98fab423024491468de3218`. Genesis-contract source pin:
+**Draft for independent review; not a signoff.** BFT source pin (refreshed 2026-10-02 by the final T1
+export, [`t1-final-export.md`](t1-final-export.md)): `626b6ebd73e151a9f635fcf26daf22f33cbbedbd`; the
+earlier draft was written at `d2332e10878aefe1c98fab423024491468de3218`. Genesis-contract source pin:
 unicity-pos-contracts `e7eb3216549b772a9e1df2b1214976d7dd9e6e62`. Ureth
 source pin: `055a314f759f78f045d55ceddfeb7e14b3b6a2f7`. The values below describe
 the synthetic allocation example, not a production deployment.
@@ -23,8 +24,10 @@ accounts (`:207-208`). Artifact file hashes cover the full compiler artifact JSO
 | Ecosystem ImmutableVestingVault | same source | same artifact SHA-256, checked independently per manifest entry | `0x57147941a002fab8675efd2fc7c20fe508afc9bbc49f87ac9313d29b39af39c1` |
 
 Instance hashes above are for
-`registrygenesis/testdata/allocation-build-v1.example.json` at BFT source pin
-`d2332e10`; constructor immutables change their runtime hashes. The exporter
+`registrygenesis/testdata/allocation-build-v1.example.json` (SHA-256
+`94dd351415fbb97ea3ab2fa755a51828bae9931019770370d19e8f53e5a43194`); the final T1 export at
+BFT source pin `626b6ebd` regenerated the same exported manifest and artifact SHA-256 values as at
+`d2332e10` (exported manifest `29eefe02…`), so these instance hashes still hold; constructor immutables change their runtime hashes. The exporter
 verifies these at generation time. Source does not contain the instance-specific
 patched runtime as a reusable template.
 
@@ -71,6 +74,18 @@ The embedded-artifact provenance comment in
 `6b4e221737c13a645400b9e19dd5259d02e5cc5c`. The artifact bytes at that commit
 and e7eb321 have the same SHA-256, and SealRegistry.sol is unchanged between
 those commits; retain this explicit provenance check when updating the pin.
+
+**Registry layout in the M3 genesis.** The text and storage-word table below describe the historical
+`sealRegistry/v1` artifact. An M3 launch genesis is exported with `--registry-layout 2`, the
+assignment-aware `registrygenesis/seal-registry-v2.json` (SHA-256
+`62ea3d2e1012f5ae216c8b9a5c9a2bf73ea8e04ff9fea99c17bb8ab8b55a9caa`, code hash
+`0x7787f3166565c8e5ebd73801bf71cbacf0cf69f6bcfb8dea8bedbef8198caf38`, independently pinned by
+`PinnedCodeHashV2`), built from unicity-pos-contracts `8b30801afaa887db0d7aa2e4957ecae2c01293e4`
+(`src/SealRegistry.sol` SHA-256 `1f857c29068d0a5dd1a08a71e4db6ca0c14da021a7c91ccf783237332ef3d8fa`;
+the artifact bytes at that commit equal the embedded file). **The v2 slot table, caller permissions and
+genesis-word values are not yet re-derived in this dossier; the reviewer must treat the v1 table below
+as superseded for M3 and a v2 section is required before signoff.** The T1 final export records the v2
+genesis, full shard configuration hash and state root.
 
 There are no Solidity state variables or constructor. The genesis allocation
 writes the initial six words: `layoutVersion`, `genesisCommitment`,
@@ -156,4 +171,5 @@ registry requires a new code hash and genesis commitment, then a reviewed
 software/chain migration; no secret system key can rewrite its bytecode. The
 execution client is responsible for enforcing the system-call rules that the
 contract itself cannot enforce. Independent T5 reviewer signoff and final
-production parameter selection are still required.
+production parameter selection are still required. The signoff is an **OWNER** item: it names the
+reviewer and binds to the exact hashes in `t1-final-export.md`; nothing here records it.
