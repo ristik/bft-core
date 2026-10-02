@@ -377,6 +377,8 @@ func resetReasonName(err error) string {
 		return "per_peer_limit"
 	case errors.Is(err, ErrPendingLimit):
 		return "pending_limit"
+	case errors.Is(err, archive.ErrBundleConflict):
+		return "bundle_conflict"
 	case errors.Is(err, ErrVerifier):
 		return "verifier_error"
 	default:
@@ -393,6 +395,8 @@ func resetFrame(err error) []byte {
 		code = 2
 	case errors.Is(err, ErrPendingLimit):
 		code = 3
+	case errors.Is(err, archive.ErrBundleConflict):
+		code = 6 // checked before the generic handler code: it is the same failure class, with the semantic sentinel kept
 	case errors.Is(err, ErrVerifier):
 		code = 4
 	case errors.Is(err, ErrHandler):
@@ -420,6 +424,9 @@ func decodeResetFrame(frame []byte, id peer.ID, payload []byte) error {
 		reason = ErrVerifier
 	case 5:
 		reason = ErrHandler
+	case 6:
+		// Still a handler failure (existing callers match ErrHandler), and the semantic sentinel survives the wire.
+		reason = fmt.Errorf("%w: %w", ErrHandler, archive.ErrBundleConflict)
 	default:
 		return ErrReplica
 	}
