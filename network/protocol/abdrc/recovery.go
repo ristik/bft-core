@@ -19,6 +19,9 @@ var (
 	ErrHistoricalTrustBase = errors.New("historical trust base unavailable or unverified")
 	ErrHistoricalUC        = errors.New("historical certificate invalid")
 	ErrRecoveryEpoch       = errors.New("pending consensus recovery crosses epoch")
+	// ErrRecoveryState refuses a recovery state that is malformed: a field that must be present is nil. A peer chooses every field of
+	// the message, so each is checked before it is used.
+	ErrRecoveryState = errors.New("recovery state is malformed")
 )
 
 // HistoricalTrustBases returns only lineage-verified epoch bodies.
@@ -194,7 +197,19 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 	if err := sm.CommittedHead.IsValid(); err != nil {
 		return fmt.Errorf("invalid commit head: %w", err)
 	}
+	for i, block := range sm.Pending {
+		if block == nil {
+			return fmt.Errorf("%w: pending block %d is nil", ErrRecoveryState, i)
+		}
+	}
 	anchorHead := sm.CommittedHead.Anchor != nil
+	// CommittedBlock.IsValid has already refused a non-anchor head without its block, QC and commit QC, except for one shape it accepts: the
+	// first block after an epoch anchor, which carries the anchor instead of a QC and which the QC verification below would dereference.
+	if head := sm.CommittedHead; !anchorHead && head.Block.Qc == nil && head.Block.Anchor != nil && head.GetRound() > rctypes.GenesisRootRound {
+		// Recovering from it would mean verifying it against the installed anchor, which this path does not do: refuse, and the root
+		// recovers from the next state message once the committed head has moved on (a wait of about a round).
+		return fmt.Errorf("%w: the committed head is the first successor of an epoch anchor", ErrRecoveryEpoch)
+	}
 	if anchorHead {
 		if history == nil || anchor == nil {
 			return ErrRecoveryEpoch
@@ -275,13 +290,18 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 			if history != nil {
 				return fmt.Errorf("%w for %s-%s: %w", ErrHistoricalUC, c.Partition, c.Shard, err)
 			}
-			return fmt.Errorf("certificate for %s is invalid: %w", c.UC.UnicityTreeCertificate.Partition, err)
+			return fmt.Errorf("certificate for %s is invalid: %w", c.Partition, err)
 		}
 	}
 	return nil
 }
 
 func verifyRecoveryUC(c ShardInfo, trust types.RootTrustBase, hashAlgorithm crypto.Hash, historical bool) error {
+	// ShardInfo.IsValid permits an absent last certificate and has refused every incomplete one; only the legacy path, which has no
+	// shard without a certificate, would dereference the absent one.
+	if c.UC == nil {
+		return fmt.Errorf("%w: shard %s-%s has no certificate", ErrRecoveryState, c.Partition, c.Shard)
+	}
 	partition, shard, conf := c.UC.GetPartitionID(), c.UC.GetShardID(), []byte(nil)
 	if historical {
 		partition, shard, conf = c.Partition, c.Shard, c.ShardConfHash
@@ -413,6 +433,9 @@ func (si *ShardInfo) IsValid() error {
 	if si.UC != nil {
 		if err := si.UC.IsValid(si.Partition, si.Shard, si.ShardConfHash); err != nil {
 			return fmt.Errorf("invalid UC: %w", err)
+		}
+		if si.TR == nil {
+			return fmt.Errorf("%w: missing TR of CertificationResponse", ErrRecoveryState)
 		}
 		if err := si.TR.IsValid(); err != nil {
 			return fmt.Errorf("invalid TR of CertificationResponse: %w", err)

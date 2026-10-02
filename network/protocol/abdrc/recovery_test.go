@@ -444,6 +444,101 @@ func TestStateMsg_Verify(t *testing.T) {
 			require.ErrorIs(t, sm.VerifyWithHistory(crypto.SHA256, current, history), ErrRecoveryEpoch)
 		})
 
+		// Every pointer of a peer's StateMsg can be nil or empty, whatever the peer is. Verification must refuse such a message, never panic
+		// (a remote peer could otherwise stop a recovering root), and the refusals that have a reason carry a typed error.
+		t.Run("no nil or empty field of a peer's state panics verification", func(t *testing.T) {
+			type mutation struct {
+				name   string
+				mutate func(*StateMsg)
+				want   error // nil: it must only be refused, with any error
+			}
+			// The certificate is shared by the fixture: copy it before taking a part away.
+			ownUC := func(sm *StateMsg) *types.UnicityCertificate {
+				c := *sm.CommittedHead.ShardInfo[0].UC
+				sm.CommittedHead.ShardInfo[0].UC = &c
+				return &c
+			}
+			mutations := []mutation{
+				{"no committed head", func(sm *StateMsg) { sm.CommittedHead = nil }, nil},
+				{"head without a block", func(sm *StateMsg) { sm.CommittedHead.Block = nil }, nil},
+				{"head block without a payload", func(sm *StateMsg) { sm.CommittedHead.Block.Payload = nil }, nil},
+				{"head block without a QC", func(sm *StateMsg) { sm.CommittedHead.Block.Qc = nil }, nil},
+				{"head block QC without vote info", func(sm *StateMsg) { sm.CommittedHead.Block.Qc.VoteInfo = nil }, nil},
+				{"head block QC without commit info", func(sm *StateMsg) { sm.CommittedHead.Block.Qc.LedgerCommitInfo = nil }, nil},
+				{"head block QC without signatures", func(sm *StateMsg) { sm.CommittedHead.Block.Qc.Signatures = nil }, nil},
+				{"head without a QC", func(sm *StateMsg) { sm.CommittedHead.Qc = nil }, nil},
+				{"head QC without vote info", func(sm *StateMsg) { sm.CommittedHead.Qc.VoteInfo = nil }, nil},
+				{"head QC without commit info", func(sm *StateMsg) { sm.CommittedHead.Qc.LedgerCommitInfo = nil }, nil},
+				{"head without a commit QC", func(sm *StateMsg) { sm.CommittedHead.CommitQc = nil }, nil},
+				{"head commit QC without vote info", func(sm *StateMsg) { sm.CommittedHead.CommitQc.VoteInfo = nil }, nil},
+				{"head commit QC without commit info", func(sm *StateMsg) { sm.CommittedHead.CommitQc.LedgerCommitInfo = nil }, nil},
+				{"shard info without a certificate", func(sm *StateMsg) { sm.CommittedHead.ShardInfo[0].UC = nil }, nil},
+				{"shard info certificate without a seal", func(sm *StateMsg) { ownUC(sm).UnicitySeal = nil }, nil},
+				{"shard info certificate without a unicity tree certificate", func(sm *StateMsg) { ownUC(sm).UnicityTreeCertificate = nil }, nil},
+				{"shard info certificate with an empty shard tree certificate", func(sm *StateMsg) {
+					ownUC(sm).ShardTreeCertificate = types.ShardTreeCertificate{}
+				}, nil},
+				{"shard info certificate without an input record", func(sm *StateMsg) { ownUC(sm).InputRecord = nil }, nil},
+				{"shard info without an input record", func(sm *StateMsg) { sm.CommittedHead.ShardInfo[0].IR = nil }, nil},
+				{"shard info without a technical record", func(sm *StateMsg) { sm.CommittedHead.ShardInfo[0].TR = nil }, ErrRecoveryState},
+				{"shard info without fees", func(sm *StateMsg) { sm.CommittedHead.ShardInfo[0].Fees = nil }, nil},
+				{"a nil pending block", func(sm *StateMsg) { sm.Pending = []*rctypes.BlockData{nil} }, ErrRecoveryState},
+				{"a nil pending block after a valid one", func(sm *StateMsg) { sm.Pending = append(sm.Pending, nil) }, ErrRecoveryState},
+				{"pending block without a payload", func(sm *StateMsg) { sm.Pending[0].Payload = nil }, nil},
+				{"pending block without a QC", func(sm *StateMsg) { sm.Pending[0].Qc = nil }, nil},
+				{"pending QC without vote info", func(sm *StateMsg) { sm.Pending[0].Qc.VoteInfo = nil }, nil},
+				{"pending QC without commit info", func(sm *StateMsg) { sm.Pending[0].Qc.LedgerCommitInfo = nil }, nil},
+				{"pending block carrying an anchor the head does not", func(sm *StateMsg) {
+					sm.Pending[0].Anchor = &rctypes.EpochAnchor{GenesisID: make([]byte, 32), Epoch: 1, Slot: 1, StateRoot: make([]byte, 32)}
+				}, nil},
+				{"a head that is the first successor of an anchor (anchor set, no QC): wait for the next state", func(sm *StateMsg) {
+					a := &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 4, StateRoot: bytes.Repeat([]byte{2}, 32)}
+					sm.CommittedHead.Block.Version, sm.CommittedHead.Block.Payload.Version = 2, 2
+					sm.CommittedHead.Block.Anchor, sm.CommittedHead.Block.Qc = a, nil
+					sm.CommittedHead.Block.Epoch, sm.CommittedHead.Block.Round = a.Epoch, a.Slot+1
+					sm.CommittedHead.Control = &evmroot.ControlState{Network: 5, Epoch: a.Epoch, PredecessorBodyID: make([]byte, 32)}
+				}, ErrRecoveryEpoch},
+				{"a head with an anchor but no control checkpoint", func(sm *StateMsg) {
+					sm.CommittedHead.Anchor = &rctypes.EpochAnchor{GenesisID: make([]byte, 32), Epoch: 1, Slot: 1, StateRoot: make([]byte, 32)}
+				}, nil},
+				{"a head with a control checkpoint but a v1 block", func(sm *StateMsg) {
+					sm.CommittedHead.Control = &evmroot.ControlState{Network: 5, Epoch: 1, PredecessorBodyID: make([]byte, 32)}
+				}, nil},
+			}
+			// The test trust base accepts any signature, so a QC that only lacks signatures verifies; nothing else on this list may.
+			acceptable := map[string]bool{"head block QC without signatures": true}
+			// A profile-2 state may legitimately carry a shard without a last certificate; the legacy path has no such shard.
+			acceptableInHistory := map[string]bool{"shard info without a certificate": true}
+			verifiers := map[string]func(StateMsg) error{
+				"legacy":  func(sm StateMsg) error { return sm.Verify(crypto.SHA256, current) },
+				"history": func(sm StateMsg) error { return sm.VerifyWithHistory(crypto.SHA256, current, history) },
+				"anchor": func(sm StateMsg) error {
+					return sm.VerifyWithAnchor(crypto.SHA256, current, history, anchorRecoveryVerifier{expected: bytes.Repeat([]byte{1}, 32)})
+				},
+			}
+			for _, m := range mutations {
+				for name, verify := range verifiers {
+					t.Run(m.name+" ("+name+")", func(t *testing.T) {
+						sm := makeState()
+						if m.name != "no committed head" {
+							sm.Pending = append([]*rctypes.BlockData(nil), sm.Pending...)
+						}
+						require.NotPanics(t, func() {
+							m.mutate(&sm)
+							err := verify(sm)
+							if !acceptable[m.name] && !(acceptableInHistory[m.name] && name != "legacy") {
+								require.Error(t, err)
+							}
+							if m.want != nil {
+								require.ErrorIs(t, err, m.want)
+							}
+							_ = sm.CanRecoverToRound(6)
+						})
+					})
+				}
+			}
+		})
+
 		// A QC that commits nothing (after a timed-out round, or right after an epoch anchor) carries the empty seal. Recovery accepts it
 		// when what it VOTES for is in the epoch, and still refuses everything that names another epoch (#366).
 		t.Run("a QC that commits nothing is in the epoch if its vote is", func(t *testing.T) {
