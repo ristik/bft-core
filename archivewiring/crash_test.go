@@ -22,10 +22,10 @@ func TestSIGKILLAfterArchivePublishAndAcknowledgement(t *testing.T) {
 			dir := t.TempDir()
 			cmd := exec.Command(os.Args[0], "-test.run=^TestArchiveCrashChild$")
 			cmd.Env = append(os.Environ(), "ARCHIVE_CRASH_POINT="+point, "ARCHIVE_CRASH_DIR="+dir)
-			err := cmd.Run()
+			out, err := cmd.CombinedOutput()
 			var exit *exec.ExitError
 			if !errors.As(err, &exit) || exit.ProcessState == nil || exit.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
-				t.Fatalf("child was not killed at %s: %v", point, err)
+				t.Fatalf("child was not killed at %s: %v\nchild output:\n%s", point, err, out)
 			}
 			q, rec := transportFixture()
 			local, err := archive.Open(filepath.Join(dir, "local"))
