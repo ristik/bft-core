@@ -76,12 +76,12 @@ worktree of `ce3e40b4`, Foundry 1.8.1, `script/seal-registry-artifact.sh` regene
 build of this source. Compiler profile in the artifact: solc 0.8.37, cancun, optimizer 200, via-IR,
 `bytecode_hash` none, `cbor_metadata` false (the same as the other contracts). The artifact's
 `systemCaller` is `0xff00000000000000000000000000000000000001`. `ArtifactSourceV2` still names the branch
-commit `8b30801a` (`registrygenesis/artifact.go:18`); update it to the merge commit when convenient. It is
+commit `8b30801a` (`registrygenesis/artifact.go:18`); whether to update it to the merge commit is open question (5) below. It is
 a provenance comment, not a check.
 
 **Callable surface (the whole contract).** No constructor, no Solidity state variables, no `receive`,
 `fallback`, proxy, owner or selfdestruct; the only inline assembly is `sload`/`sstore` at constant keys
-(`SealRegistry.sol:23-24, 364-376`).
+(`SealRegistry.sol:22-24, 364-376`).
 - `open(…24 arguments incl. AssignmentProjection)` (`:167-282`): reverts `NotSystemCaller` unless
   `msg.sender == A_SYS`, the constant `0xff00…0001` (`:34, :193`).
 - `finalize(uint64, bytes32)` (`:355-362`): the same caller check (`:356`).
@@ -167,14 +167,17 @@ All other fields, including `assignment.spanCommitment`, `transition.*` and `inb
 embed the synthetic manifest's full shard configuration, so they change with any production input; the
 final export repeats on the production manifest.
 
-**Reviewer notes.** (1) The Go side lists the same 30 names as the artifact (`registryproof.go:143-157`) and the
+**Reviewer notes.** Items (3) to (5) are open questions for the T5 reviewer; this PR resolves none of them. (1) The Go side lists the same 30 names as the artifact (`registryproof.go:143-157`) and the
 same seven-word genesis list as the contract header (`registryproof.go:182`; `SealRegistry.sol:19`). (2) What a reviewer cannot take from
 the contract alone is the execution-client side (the bullet list above), which T5 must assess in ureth. (3) The stale-root-round check (O5, `:211`) runs only on the
 no-transition path; an accepted acknowledgement (`:216-260`) stores `rootRound` (`:276`) without comparing it
 with `clock.rootRound`. The new root epoch must exceed the stored one, so the epoch is monotonic, but the clock
-word's monotonicity on that path rests on the execution client's authenticated input. T5 should confirm that
-rule in ureth or have the contract refuse it. (4) `inbox.consumed` is a pinned name without a use in v2; harmless today, worth removing or documenting if the
-artifact is ever regenerated.
+word's monotonicity on that path rests on the execution client's authenticated input. Open: does T5 confirm that
+rule in ureth, or require the contract to refuse it? (4) Open: `inbox.consumed` is a pinned name without a use in v2
+(the source comment at `:100` calls it "genesis-only", yet the genesis has no word for it); is it acceptable as is, or
+should it be removed or documented if the artifact is ever regenerated? (5) Open: `ArtifactSourceV2` (`registrygenesis/artifact.go:18`) names the
+branch commit `8b30801a`, not the merge `ce3e40b4`; the two are byte-identical for the source and the artifact, so
+is the provenance string to be left or updated?
 
 ## SealRegistry v1 and system caller (historical)
 
