@@ -473,8 +473,10 @@ function start_one_evm_validator() {
 	if [ -n "${EVM_ARCHIVE_ROOT:-}" ]; then
 	  local replicaCount=0 peerID
 	  # Bounded at 32 to tolerate one-at-a-time authority restarts while archive
-	  # replicas catch up; a persistent publication stall still fails loudly.
-	  executorArgs+=(--archive-store "$EVM_ARCHIVE_ROOT/evm$i" --archive-prune --journal-candidates 32)
+	  # replicas catch up; a persistent publication stall still fails loudly. A lane that stops and restores validators on purpose
+	  # (the H3 rotation lane) raises it with EVM_JOURNAL_CANDIDATES: with two replicas down the frontier cannot advance for the
+	  # whole acknowledgement window.
+	  executorArgs+=(--archive-store "$EVM_ARCHIVE_ROOT/evm$i" --archive-prune --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}")
 	  for j in $(seq 2 "$n"); do
 	    [ "$j" = "$i" ] && continue
 	    peerID=$(evm_validator_id "$j") || return 1

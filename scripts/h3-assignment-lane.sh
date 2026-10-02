@@ -34,7 +34,7 @@ pass "devnet lock acquired by the queued runner; evidence directory $EVIDENCE_DI
 echo "bft-core head=$(git rev-parse HEAD) ureth=$H3_URETH_COMMIT ubft sha256=$(shasum -a 256 build/ubft | cut -d' ' -f1)" | tee "$EVIDENCE_DIR/heads.txt"
 
 set +e
-H3_ASSIGNMENT_LANE=1 F8_MIXED_LANE=1 M2_PROFILE2=1 SIGNING=local \
+EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-256} H3_ASSIGNMENT_LANE=1 F8_MIXED_LANE=1 M2_PROFILE2=1 SIGNING=local \
   POST_M2A_URETH_BIN="$H3_URETH_BIN" POST_M2A_URETH_COMMIT="$H3_URETH_COMMIT" \
   M2_RUN_LOG_DIR="$EVIDENCE_DIR/nodes" F8_LOG_DIR="$EVIDENCE_DIR/f8" \
   bash ./scripts/reth-paired-devnet.sh 4 10 2>&1 | tee "$EVIDENCE_DIR/lane.log"
