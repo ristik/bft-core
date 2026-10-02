@@ -80,6 +80,13 @@ protocol `/unicity/root-handoff-bundle/2.0.0`), which carries the candidate, and
 configuration before it serves a block. The successor EVM set restores the parent and certifies the
 acknowledgement block; ordinary transactions resume after it. Aggregator shards keep certifying throughout.
 
+A joiner's restore can reach a retained validator before that validator has installed the assignment step that admits it. The
+replica refuses it by name (`archive wiring: archive peer is not allowed`) and the joiner's handoff catch-up and archive restore
+retry exactly that refusal with bounded backoff (about 90 s for the catch-up, 150 s per archive record) before ending with an error
+that says so. If it ends that way, wait until the retained validators log `handoff activated` for the epoch and rerun the restore on a
+fresh archive directory. After a restart a validator authorizes no archive peer until its persisted verified assignment steps are
+replayed, then exactly the active assignment's validators.
+
 ## Before H: abort and retry
 
 `build/ubft root handoff abort` (see [root-handoff-abort.md](root-handoff-abort.md)) discards the pending
