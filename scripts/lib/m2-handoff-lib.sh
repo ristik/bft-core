@@ -6,7 +6,6 @@ m2_rpc_port() { echo $((25866 + $1 - 1)); }
 m2_p2p_port() { echo $((rootPortStart + $1 - 1)); }
 m2_root_addr() { boot_node "test-nodes/root$1" "$(m2_p2p_port "$1")"; }
 m2_online_validators() {
-  if [ -n "${H3_ONLINE:-}" ]; then echo "$H3_ONLINE"; return 0; fi
   if [ "${M2A_VALIDATOR1_WIPED:-0}" = 1 ] && [ "${M2A_VALIDATOR1_RESTORED:-0}" != 1 ]; then
     echo "2 3 4"
   else
@@ -119,9 +118,19 @@ m2_send_paid() {
         local registry=0xff00000000000000000000000000000000000002 assignment cursor
         assignment=$(rpc "http://127.0.0.1:$rpcPort" eth_getStorageAt "[\"$registry\",\"$m2_epoch_slot\",\"latest\"]" | pyget "['result']")
         cursor=$(rpc "http://127.0.0.1:$rpcPort" eth_getStorageAt "[\"$registry\",\"$m2_cursor_slot\",\"latest\"]" | pyget "['result']")
-        if [ "$(python3 -c "print(int('$assignment',16))" 2>/dev/null)" = "$epoch" ] &&
-           [ "$(python3 -c "print(int('$cursor',16))" 2>/dev/null)" = "$((epoch-1))" ]; then
-          echo "paid epoch $epoch nonce $nonce hash=$expected registryRootEpoch=$epoch transitionCursor=$((epoch-1))"
+        local registryOk=false shardEpoch=
+        if [ "$(registry_layout)" = 2 ]; then
+          # Layout 2 separates the root epoch (m2_epoch_slot) from the shard assignment epoch, which a coupled
+          # configuration-only advance leaves unchanged.
+          shardEpoch=$(rpc "http://127.0.0.1:$rpcPort" eth_getStorageAt "[\"$registry\",\"$m2_shard_epoch_slot\",\"latest\"]" | pyget "['result']")
+          if [ "$(python3 -c "print(int('$assignment',16))" 2>/dev/null)" = "$epoch" ] &&
+             [ "$(python3 -c "print(int('$shardEpoch',16))" 2>/dev/null)" = "${M2_EXPECT_SHARD_EPOCH:-0}" ]; then registryOk=true; fi
+        elif [ "$(python3 -c "print(int('$assignment',16))" 2>/dev/null)" = "$epoch" ] &&
+             [ "$(python3 -c "print(int('$cursor',16))" 2>/dev/null)" = "$((epoch-1))" ]; then
+          registryOk=true
+        fi
+        if $registryOk; then
+          echo "paid epoch $epoch nonce $nonce hash=$expected registryRootEpoch=$epoch transitionCursor=$((epoch-1)) layout=$(registry_layout)"
           if [ -n "${M2_NEXT_NONCE:-}" ]; then M2_NEXT_NONCE=$((nonce + 1)); fi
           return 0
         fi
@@ -288,11 +297,11 @@ m2_handoff() {
         outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
           grep -E "msg=\\\"root handoff outcome\\\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
         [[ "$outcome" = *phase=committed* ]] && { committed=true; break; }
-        [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=dropped* ]] && break
+        [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=lapsed* ]] && break
         sleep 1
       done
       $committed && break
-      [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=dropped* ]] && echo "F8 handoff attempt $attempt aborted or lapsed; retrying with the next attempt"
+      [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=lapsed* ]] && echo "F8 handoff attempt $attempt aborted or lapsed; retrying with the next attempt"
     done
     $committed || { echo "F8 root handoff did not commit after retries" >&2; return 1; }
     for i in $(seq 1 "$validators"); do
@@ -308,8 +317,8 @@ m2_handoff() {
     echo "F8 root handoff epoch $epoch committed and activated while aggregators remained live"
     return 0
   fi
-  # Root validators enforce the ordered freeze. The operator only selects a
-  # currently certified EVM tip and retries if an endorser has advanced.
+  # Root validators enforce the ordered freeze and bind the frozen parent at the Prepare: the operator names no parent and only
+  # retries (next attempt) if a Prepare lapsed or an attempt was aborted.
   local waitStep oldEpoch=$((epoch-1)) outcome logStart
   local committed=false
   for i in $(seq 1 30); do
@@ -322,7 +331,7 @@ m2_handoff() {
       outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
         grep -E "msg=\"root handoff outcome\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
       if [[ "$outcome" = *phase=committed* ]]; then committed=true; break; fi
-      if [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=dropped* ]]; then
+      if [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=lapsed* ]]; then
         echo "root handoff aborted or its Prepare lapsed; retrying with the next attempt"
         break
       fi
@@ -360,6 +369,7 @@ m2_handoff() {
   if [ "$epoch" = 2 ]; then
     m2_send_paid "$epoch" "${M2_NEXT_NONCE:-$((epoch+1))}" || return 1
   fi
+  m2_wait_certified_idle "$epoch" || return 1
   m2_measure_pause "$((epoch-1))" "$epoch"
 }
 
