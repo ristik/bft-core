@@ -443,6 +443,41 @@ func TestStateMsg_Verify(t *testing.T) {
 			sm.Pending[0].Epoch++
 			require.ErrorIs(t, sm.VerifyWithHistory(crypto.SHA256, current, history), ErrRecoveryEpoch)
 		})
+
+		// A QC that commits nothing (after a timed-out round, or right after an epoch anchor) carries the empty seal. Recovery accepts it
+		// when what it VOTES for is in the epoch, and still refuses everything that names another epoch (#366).
+		t.Run("a QC that commits nothing is in the epoch if its vote is", func(t *testing.T) {
+			epoch := current.GetEpoch()
+			withQC := func(voteEpoch uint64, seal func(previous []byte) *types.UnicitySeal) StateMsg {
+				sm := makeState()
+				info := *sm.Pending[0].Qc.VoteInfo
+				info.Epoch = voteEpoch
+				h, err := info.Hash(crypto.SHA256)
+				require.NoError(t, err)
+				sm.Pending[0].Qc = &rctypes.QuorumCert{VoteInfo: &info, LedgerCommitInfo: seal(h), Signatures: map[string]hex.Bytes{"test": test.RandomBytes(65)}}
+				return sm
+			}
+			empty := func(previous []byte) *types.UnicitySeal {
+				return &types.UnicitySeal{Version: 1, PreviousHash: previous}
+			}
+			commits := func(sealEpoch uint64) func([]byte) *types.UnicitySeal {
+				return func(previous []byte) *types.UnicitySeal {
+					return &types.UnicitySeal{Version: 1, PreviousHash: previous, NetworkID: 1, Epoch: sealEpoch, RootChainRoundNumber: 5, Hash: test.RandomBytes(32), Timestamp: 7}
+				}
+			}
+			sm := withQC(epoch, empty)
+			require.NoError(t, sm.VerifyWithHistory(crypto.SHA256, current, history), "the empty seal of a QC voting in this epoch")
+			sm = withQC(epoch, commits(epoch))
+			require.NoError(t, sm.VerifyWithHistory(crypto.SHA256, current, history), "control: a committing QC of this epoch")
+
+			for name, bad := range map[string]StateMsg{
+				"the empty seal of a QC that votes in another epoch": withQC(epoch+1, empty),
+				"a committing seal of another epoch":                 withQC(epoch, commits(epoch+1)),
+				"a committing seal of another epoch and vote":        withQC(epoch+1, commits(epoch+1)),
+			} {
+				require.ErrorIs(t, bad.VerifyWithHistory(crypto.SHA256, current, history), ErrRecoveryEpoch, name)
+			}
+		})
 	})
 }
 
@@ -557,4 +592,38 @@ func TestRecoveryBlock_IsValid(t *testing.T) {
 		r.CommitQc = nil
 		require.ErrorContains(t, r.IsValid(), "commit head is missing commit qc certificate")
 	})
+}
+
+// recoveryQCEpoch skips the commit epoch only for the exact empty seal. The table runs in epoch 3 so that "epoch 0" is never the epoch.
+func TestRecoveryQCEpochAcceptsOnlyTheExactEmptySealWithoutACommitEpoch(t *testing.T) {
+	const epoch = 3
+	qc := func(voteEpoch uint64, seal *types.UnicitySeal) *rctypes.QuorumCert {
+		return &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{Epoch: voteEpoch}, LedgerCommitInfo: seal}
+	}
+	empty := func() *types.UnicitySeal { return &types.UnicitySeal{Version: 1, PreviousHash: []byte{1}} }
+	with := func(mutate func(*types.UnicitySeal)) *types.UnicitySeal { s := empty(); mutate(s); return s }
+	for _, tc := range []struct {
+		name string
+		qc   *rctypes.QuorumCert
+		want bool
+	}{
+		{"no QC", nil, true},
+		{"the empty seal, voting in the epoch", qc(epoch, empty()), true},
+		{"a seal committing in the epoch, voting in the epoch", qc(epoch, with(func(s *types.UnicitySeal) { s.Epoch, s.RootChainRoundNumber, s.Hash = epoch, 9, []byte{7} })), true},
+		{"the empty seal, voting in another epoch", qc(epoch+1, empty()), false},
+		{"the empty seal, voting in an older epoch", qc(epoch-1, empty()), false},
+		{"a seal committing in another epoch", qc(epoch, with(func(s *types.UnicitySeal) { s.Epoch, s.RootChainRoundNumber, s.Hash = epoch-1, 9, []byte{7} })), false},
+		{"epoch 0 but a committed round", qc(epoch, with(func(s *types.UnicitySeal) { s.RootChainRoundNumber = 9 })), false},
+		{"epoch 0 but a root hash", qc(epoch, with(func(s *types.UnicitySeal) { s.Hash = []byte{7} })), false},
+		{"epoch 0 but a network", qc(epoch, with(func(s *types.UnicitySeal) { s.NetworkID = 5 })), false},
+		{"epoch 0 but a timestamp", qc(epoch, with(func(s *types.UnicitySeal) { s.Timestamp = 7 })), false},
+		{"no vote info", &rctypes.QuorumCert{LedgerCommitInfo: empty()}, false},
+		{"no commit info", &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{Epoch: epoch}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, recoveryQCEpoch(tc.qc, epoch))
+		})
+	}
+	require.True(t, isEmptyCommitInfo(empty()))
+	require.False(t, isEmptyCommitInfo(nil))
 }

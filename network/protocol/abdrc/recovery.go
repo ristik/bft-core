@@ -311,9 +311,21 @@ func v2UCTrustBase(record trusthistorystore.Record) (*types.RootTrustBaseV1, err
 		types.WithEpoch(body.Epoch), types.WithEpochStart(record.Start), types.WithQuorumThreshold(body.RootThreshold))
 }
 
+// recoveryQCEpoch reports whether a QC of recovery state belongs to the receiver's epoch. The epoch of what the QC votes for is always
+// required. The epoch of what it commits is required whenever it commits something; a QC that commits nothing carries the empty seal
+// (isEmptyCommitInfo) and has no committed block that could cross an epoch. QuorumCert.Verify binds the vote info, and so its epoch, to the
+// signed commit info, so skipping the commit epoch for the empty seal accepts nothing that names an old-epoch block.
 func recoveryQCEpoch(qc *rctypes.QuorumCert, epoch uint64) bool {
 	return qc == nil || (qc.VoteInfo != nil && qc.LedgerCommitInfo != nil &&
-		qc.VoteInfo.Epoch == epoch && qc.LedgerCommitInfo.Epoch == epoch)
+		qc.VoteInfo.Epoch == epoch && (isEmptyCommitInfo(qc.LedgerCommitInfo) || qc.LedgerCommitInfo.Epoch == epoch))
+}
+
+// isEmptyCommitInfo is the commit info of a QC that commits nothing, exactly as SafetyModule.constructCommitInfo builds it: a seal that
+// names no committed block (epoch 0, root round 0, no hash) and no network or time. Every other field of the seal that identifies a
+// commit is zero; matching only the epoch would let a seal that names a round or a root hash skip the epoch check.
+func isEmptyCommitInfo(seal *types.UnicitySeal) bool {
+	return seal != nil && seal.Epoch == 0 && seal.RootChainRoundNumber == 0 && len(seal.Hash) == 0 &&
+		seal.NetworkID == 0 && seal.Timestamp == 0
 }
 
 func (r *CommittedBlock) GetRound() uint64 {
