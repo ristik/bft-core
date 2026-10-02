@@ -161,7 +161,13 @@ func operatorStatusSummary(s archivewiring.OperatorStatus) string {
 	}
 	if s.Authority != nil {
 		if s.Authority.Reachable {
-			fmt.Fprintf(&b, "; authority epoch=%d high-water=%d", s.Authority.RootEpoch, s.Authority.ReservedRound)
+			if s.Authority.RootEpoch == 0 {
+				// Root epochs start at 1: an authority built before the epochs were added to its status answers the old layout, whose
+				// epochs decode as zero (signingauthority/service statusPayloadV1). Zero is "not reported", not epoch 0.
+				fmt.Fprintf(&b, "; authority epoch not reported high-water=%d", s.Authority.ReservedRound)
+			} else {
+				fmt.Fprintf(&b, "; authority epoch=%d high-water=%d", s.Authority.RootEpoch, s.Authority.ReservedRound)
+			}
 		} else {
 			fmt.Fprintf(&b, "; authority unavailable (%s)", s.Authority.Error)
 		}

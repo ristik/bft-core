@@ -107,3 +107,38 @@ func TestShardNodeStatusRejectsIncompatibleAuthorityEncoding(t *testing.T) {
 		t.Fatalf("incompatible authority encoding error = %v, want clear unknown-field refusal", err)
 	}
 }
+
+// An authority built before the status carried epochs answers the old layout and its epoch decodes as zero; root epochs start at 1, so the
+// summary says "not reported" instead of printing a root epoch that does not exist (#340).
+func TestShardNodeStatusSummaryDoesNotPrintEpochZeroForAnOldAuthority(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		authority archivewiring.AuthorityReport
+		want      string
+		not       string
+	}{
+		{"old authority", archivewiring.AuthorityReport{Reachable: true, RootEpoch: 0, ReservedRound: 14}, "authority epoch not reported high-water=14", "epoch=0"},
+		{"current authority", archivewiring.AuthorityReport{Reachable: true, RootEpoch: 3, ReservedRound: 14}, "authority epoch=3 high-water=14", "not reported"},
+		{"unreachable authority", archivewiring.AuthorityReport{Reachable: false, Error: "refused"}, "authority unavailable (refused)", "authority epoch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			authority := tc.authority
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(archivewiring.OperatorStatus{CurrentRootEpoch: 3, Authority: &authority})
+			}))
+			defer server.Close()
+			var stdout, stderr strings.Builder
+			cmd := shardNodeStatusCmd()
+			cmd.SetArgs([]string{"--url", server.URL})
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			if err := cmd.ExecuteContext(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(stderr.String(), tc.want) || strings.Contains(stderr.String(), tc.not) {
+				t.Fatalf("summary %q: want %q and not %q", stderr.String(), tc.want, tc.not)
+			}
+		})
+	}
+}

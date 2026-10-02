@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	"github.com/unicitynetwork/bft-core/network"
@@ -264,4 +266,73 @@ func TestAdapterV2ImportWorkDoesNotGrowWithSkippedRoundsOrInstalledHistory(t *te
 			require.InDelta(t, base.allocs, got.allocs, tc.slack, "allocations per import must not depend on history or the gap")
 		})
 	}
+}
+
+// A LATE-epoch certificate: signed under an installed assignment's configuration (not the genesis one) with a technical record at that
+// shard epoch. Under the old scan this is the case where the loop actually ran: the genesis hash failed and every installed
+// configuration was tried with a full signature verification. Now the certificate's shard epoch selects exactly one configuration, whatever
+// is installed before it. The parent registry is still at the genesis assignment, so a certificate that authenticates is then refused by
+// the derivation's own binding to the registry (ErrV2Context), which is the proof that authentication passed and is not what refuses it.
+func TestAdapterV2AuthenticatesALateEpochCertificateUnderItsOwnInstalledConfiguration(t *testing.T) {
+	g := newConfEpochChain(t)
+	succ, err := evmassign.NewSuccessor(g.chain.Full, g.chain.Full.Validators)
+	require.NoError(t, err)
+	succ.Validators[0].NodeID = "validator-late"
+	pdr, err := evmassign.Activate(succ, 10)
+	require.NoError(t, err)
+	late, err := evmassign.PDRHash(pdr)
+	require.NoError(t, err)
+	require.NotEqual(t, g.verifier.ShardConfHash, late[:], "premise: the late epoch's configuration is not the genesis one")
+
+	tr := *g.tr
+	tr.Epoch = 1
+	uc := g.chain.CertifyFor(pdr, g.chain.Signer, g.chain.InputRecord(1), &tr, 5)
+	uc.UnicitySeal.NetworkID = g.verifier.NetworkID
+	uc.UnicitySeal.Signatures = nil
+	require.NoError(t, uc.UnicitySeal.Sign(g.signerID, g.chain.Signer))
+	params := g.params(uc)
+	params.AuthorizingTechnicalRecord = &tr
+
+	derive := func(t *testing.T, installed map[uint64][]byte, history int) (error, *confResolver, *countingTrust) {
+		resolver := &confResolver{byEpoch: installed}
+		for e := 2; e < history; e++ { // a long installed history before the certificate's own epoch
+			var h [32]byte
+			h[0], h[1], h[2] = byte(e), byte(e>>8), 0xee
+			resolver.byEpoch[uint64(e)] = h[:]
+		}
+		g.verifier.SetConfForEpoch(resolver.lookup)
+		trust := &countingTrust{inner: g.verifier.TrustBases}
+		g.verifier.TrustBases = trust
+		a, _ := g.follower()
+		_, err := a.deriveV2(context.Background(), params, uc, &tr)
+		return err, resolver, trust
+	}
+	genesis := g.verifier.ShardConfHash
+
+	for _, history := range []int{2, 2048} {
+		t.Run(fmt.Sprintf("its epoch's configuration is installed, with %d installed epochs", history), func(t *testing.T) {
+			err, resolver, trust := derive(t, map[uint64][]byte{0: bytes.Clone(genesis), 1: bytes.Clone(late[:])}, history)
+			require.ErrorIs(t, err, rootinput.ErrV2Context, "authentication passed; the derivation refuses it against the genesis-assignment registry")
+			require.NotErrorIs(t, err, rootinput.ErrUnauthenticated)
+			require.NotErrorIs(t, err, rootinput.ErrConfEpochUnknown)
+			require.Equal(t, 1, resolver.calls, "one configuration lookup, however long the installed history")
+			require.Equal(t, 1, trust.calls, "one trust-base lookup")
+		})
+	}
+	t.Run("the epoch has no installed configuration", func(t *testing.T) {
+		err, _, _ := derive(t, map[uint64][]byte{0: bytes.Clone(genesis)}, 2)
+		require.ErrorIs(t, err, rootinput.ErrConfEpochUnknown)
+		require.NotErrorIs(t, err, rootinput.ErrUnauthenticated, "not a forgery: its assignment is not installed here yet")
+	})
+	t.Run("the epoch holds another configuration", func(t *testing.T) {
+		other := bytes.Clone(late[:])
+		other[0] ^= 1
+		err, _, _ := derive(t, map[uint64][]byte{0: bytes.Clone(genesis), 1: other}, 2)
+		require.ErrorIs(t, err, rootinput.ErrUnauthenticated)
+		require.NotErrorIs(t, err, rootinput.ErrConfEpochUnknown)
+	})
+	t.Run("the genesis configuration installed for the late epoch does not authenticate it", func(t *testing.T) {
+		err, _, _ := derive(t, map[uint64][]byte{0: bytes.Clone(genesis), 1: bytes.Clone(genesis)}, 2)
+		require.ErrorIs(t, err, rootinput.ErrUnauthenticated, "no fallback to another epoch's hash")
+	})
 }

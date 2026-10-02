@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"cmp"
 	"crypto"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -30,6 +32,7 @@ type (
 		roundToNode map[uint64]*node
 		highQc      *abdrc.QuorumCert
 		blocksDB    PersistentStore
+		log         *slog.Logger // optional: set by the BlockStore that owns the tree
 		m           sync.RWMutex
 	}
 )
@@ -526,7 +529,64 @@ func (bt *BlockTree) captureHandoffCheckpoint(old, next *ExecutedBlock) error {
 	if err != nil {
 		return fmt.Errorf("encoding the handoff checkpoint: %w", err)
 	}
+	bt.compareWithStoredCheckpoint(record.Epoch+1, store, raw)
 	return store.StoreHandoffCheckpoint(record.Epoch+1, raw)
+}
+
+// compareWithStoredCheckpoint looks at a checkpoint that is about to be stored again. The store keeps the first copy and a second store is a
+// no-op (a replayed commit can carry another valid signature subset of the same certificate, and refusing it would fail a commit over bytes
+// that mean the same thing), so a copy that differs only in signatures is expected and silent. One that differs in anything else means this
+// root captured two different checkpoints for one handoff, which must not happen: it is logged at ERROR, not refused, because refusing in
+// the middle of a commit would stall the root over a copy that is never served.
+func (bt *BlockTree) compareWithStoredCheckpoint(epoch uint64, store handoffCheckpointStore, incoming []byte) {
+	stored, err := store.HandoffCheckpoint(epoch)
+	if err != nil || len(stored) == 0 || bytes.Equal(stored, incoming) {
+		return
+	}
+	log := bt.log
+	if log == nil {
+		log = slog.Default()
+	}
+	was, errWas := checkpointIdentity(stored)
+	now, errNow := checkpointIdentity(incoming)
+	if errWas == nil && errNow == nil && was == now {
+		return
+	}
+	log.Error("HANDOFF CHECKPOINT MISMATCH: this root already holds a canonical checkpoint for the handoff whose content differs from the one just re-captured, beyond signatures; keeping the stored one (equivocation, corruption or a bug)",
+		"epoch", epoch, "storedIdentity", fmt.Sprintf("%x", was), "recapturedIdentity", fmt.Sprintf("%x", now), "storedDecodeError", errWas, "recapturedDecodeError", errNow)
+}
+
+// checkpointIdentity is the hash of a stored checkpoint with every signature removed: two checkpoints of one handoff that carry different
+// signature subsets of the same certificates have the same identity.
+func checkpointIdentity(raw []byte) ([32]byte, error) {
+	var c canonicalCheckpoint
+	if err := basetypes.Cbor.Unmarshal(raw, &c); err != nil || c.Block == nil {
+		return [32]byte{}, fmt.Errorf("decoding a handoff checkpoint: %w", errors.Join(ErrHandoffRecord, err))
+	}
+	stripQC := func(qc *abdrc.QuorumCert) {
+		if qc == nil {
+			return
+		}
+		qc.Signatures = nil
+		if qc.LedgerCommitInfo != nil {
+			qc.LedgerCommitInfo.Signatures = nil
+		}
+	}
+	if c.Block.Block != nil {
+		stripQC(c.Block.Block.Qc)
+	}
+	stripQC(c.Block.Qc)
+	stripQC(c.Block.CommitQc)
+	for i := range c.Block.ShardInfo {
+		if uc := c.Block.ShardInfo[i].UC; uc != nil && uc.UnicitySeal != nil {
+			uc.UnicitySeal.Signatures = nil
+		}
+	}
+	stripped, err := basetypes.Cbor.Marshal(c)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(stripped), nil
 }
 
 // checkpointOf is the committed block as a handoff checkpoint, with a path for its control leaf.

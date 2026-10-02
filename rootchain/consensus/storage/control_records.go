@@ -39,12 +39,16 @@ var (
 	ErrSupersessionChainTooLong = errors.New("EVM assignment supersession would make the unacknowledged chain longer than the supersession span")
 )
 
+// ChainTooLongAdvice is what the operator is told when the unacknowledged chain is at its limit: only an acknowledged assignment resets
+// it, and an unacknowledged one can only be superseded.
+const ChainTooLongAdvice = "get the installed assignment acknowledged first (the EVM must certify its acknowledgement block) before proposing another change"
+
 // CheckSupersessionChainLength is the one rule for how long the unacknowledged chain may get: committed is the number of committed,
 // unacknowledged steps the new supersession would extend, and the chain after it (committed+1 steps) must not exceed
 // handoff.MaxSupersessionSpan. Root block validation and the operator's planner both use it.
 func CheckSupersessionChainLength(committed int) error {
 	if committed < 0 || uint64(committed)+1 > handoff.MaxSupersessionSpan {
-		return fmt.Errorf("%w: %d committed unacknowledged steps, the chain may not exceed %d", ErrSupersessionChainTooLong, committed, handoff.MaxSupersessionSpan)
+		return fmt.Errorf("%w: %d committed unacknowledged steps, the chain may not exceed %d; "+ChainTooLongAdvice, ErrSupersessionChainTooLong, committed, handoff.MaxSupersessionSpan)
 	}
 	return nil
 }
@@ -140,8 +144,13 @@ func DecodeOrderedHandoffRecord(data []byte) (evmroot.OrderedHandoffRecord, erro
 // roughly three times that for a faulty leader or two in the rotation. After the lapse the EVM certifies again and the attempt is
 // dead: a fresh Prepare, with the next attempt number (the lapse is treated like an abort for numbering), needs a new plan.
 //
-// PrepareActivationFloorRounds is the least distance from a Prepare to its activation round: the whole lapse window plus the usual
-// 8 rounds of margin, so a Freeze ordered at the very end of the window still commits before activation. It is enforced here, by
+// HandoffActivationMarginRounds is the margin the protocol leaves between a record and the activation round it must still commit before.
+// It is one number used twice, so the two cannot drift apart: in PrepareActivationFloorRounds (the whole lapse window plus this margin,
+// so a Freeze ordered at the very end of the window still commits before activation) and in the leader's Commit adjustment
+// (CommitActivationRound: the activation is never nearer than this many rounds after the Commit is ordered).
+//
+// PrepareActivationFloorRounds is the least distance from a Prepare to its activation round: the whole lapse window plus
+// HandoffActivationMarginRounds, so a Freeze ordered at the very end of the window still commits before activation. It is enforced here, by
 // block validation, not only by the leader that picks the activation round.
 //
 // PrepareCooldownRounds is the pause before that fresh Prepare may be ordered. It bounds what a faulty leader can do by repeating the
@@ -149,9 +158,10 @@ func DecodeOrderedHandoffRecord(data []byte) (evmroot.OrderedHandoffRecord, erro
 // without it the freeze could be renewed the moment it lapsed. That is a residual, deliberately kept simple: a faulty leader that
 // leads one round in n can still halve EVM availability; removing it needs a signed Prepare, which is a protocol change.
 const (
-	PrepareFreezeLapseRounds     = 24
-	PrepareCooldownRounds        = 24
-	PrepareActivationFloorRounds = PrepareFreezeLapseRounds + 8
+	PrepareFreezeLapseRounds      = 24
+	PrepareCooldownRounds         = 24
+	HandoffActivationMarginRounds = 8
+	PrepareActivationFloorRounds  = PrepareFreezeLapseRounds + HandoffActivationMarginRounds
 )
 
 // prepareActivationFloor is PrepareActivationFloorRounds; it is a variable only so that the storage tests, whose compressed timelines
@@ -253,4 +263,14 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 		return nil, ErrHandoffRecord
 	}
 	return &evmroot.ControlState{Network: network, Epoch: epoch, PredecessorBodyID: bytes.Clone(r.PredecessorBodyID), Attempt: r.Attempt, Phase: phase, OrderedRound: round, RecordBytes: bytes.Clone(data), PreviousDigest: previous.Digest(), FrozenParent: frozenParent}, nil
+}
+
+// CommitActivationRound is the activation round of a Commit ordered at `round` for a handoff whose Prepare asked for `previous`: the
+// Prepare's, unless that is nearer than HandoffActivationMarginRounds after the Commit, in which case the margin. ok is false when the
+// round is so large that the margin would overflow.
+func CommitActivationRound(previous, round uint64) (activation uint64, ok bool) {
+	if round > ^uint64(0)-HandoffActivationMarginRounds {
+		return 0, false
+	}
+	return max(previous, round+HandoffActivationMarginRounds), true
 }
