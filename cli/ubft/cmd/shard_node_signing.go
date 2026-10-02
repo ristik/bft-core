@@ -43,11 +43,17 @@ type certificationSigning struct {
 	// authority is installed on the round in place of the local key.
 	authority shardnode.CertificationSigner
 	// deferred is set instead of a fixed expected key when a RESTORING node's shard configuration does not name it yet (a joiner): the
-	// key is bound from the verified handoff history (bindJoinerKey), and the signer signs nothing until then.
+	// key is bound from the verified handoff history (noteJoinerStep, finishJoinerKey), and the signer signs nothing until then.
 	deferred *shardnode.DeferredAuthoritySigner
 	nodeID   string
-	describe string
-	close    func()
+	// joinerKey is the key the LATEST verified installed step that names this node gives it, recorded as the steps are replayed and bound
+	// once (finishJoinerKey) when the replay is complete. localKey is the key configuration's own signing key, which no installed
+	// configuration may name for a node signed by an authority.
+	joinerKey   abcrypto.Verifier
+	joinerEpoch uint64
+	localKey    []byte
+	describe    string
+	close       func()
 }
 
 /*
@@ -70,7 +76,7 @@ configuration and nothing else:
 Setting an authority flag without the socket is refused rather than ignored, so that a mistyped
 deployment does not start signing with the local key.
 */
-func buildCertificationSigning(flags *shardNodeSigningFlags, keyConf *KeyConf, shardConf *types.PartitionDescriptionRecord, restoring bool) (*certificationSigning, error) {
+func buildCertificationSigning(flags *shardNodeSigningFlags, keyConf *KeyConf, shardConf *types.PartitionDescriptionRecord, deriveKey bool) (*certificationSigning, error) {
 	if flags.SigningAuthoritySocket == "" {
 		if flags.SigningAuthorityCredential != "" || flags.SigningAuthorityTimeout != 0 {
 			return nil, errors.New("--signing-authority-credential or --signing-authority-timeout is set without --signing-authority-socket; " +
@@ -97,9 +103,10 @@ func buildCertificationSigning(flags *shardNodeSigningFlags, keyConf *KeyConf, s
 			break
 		}
 	}
-	if named == nil && restoring {
-		// A joiner restores before any configuration it is named in is installed: the authority's expected key comes later, from the
-		// activated assignment of a verified handoff bundle, never from a flag.
+	if named == nil && deriveKey {
+		// A joiner starts (restoring, or restarting) before the genesis configuration names it: the authority's expected key comes from the
+		// activated assignment of a verified, installed handoff bundle (catch-up on a restore; the persisted steps replayed on a restart),
+		// never from a flag. deriveKey is set only when there is verified handoff history to derive it from.
 		credential, err := readCredentialFile(flags.SigningAuthorityCredential)
 		if err != nil {
 			return nil, fmt.Errorf("loading the signing authority credential: %w", err)
@@ -120,7 +127,7 @@ func buildCertificationSigning(flags *shardNodeSigningFlags, keyConf *KeyConf, s
 			return nil, err
 		}
 		return &certificationSigning{
-			authority: deferred, deferred: deferred, nodeID: nodeID.String(),
+			authority: deferred, deferred: deferred, nodeID: nodeID.String(), localKey: localSigningKeyBytes(keyConf),
 			describe: fmt.Sprintf("signing authority at %s, key to be bound from the verified handoff history", flags.SigningAuthoritySocket),
 			close:    func() { _ = client.Close() },
 		}, nil
@@ -184,4 +191,10 @@ func localSigningKey(keyConf *KeyConf) ([]byte, bool) {
 		return nil, false
 	}
 	return pub, true
+}
+
+// localSigningKeyBytes is the key configuration's own public signing key, nil when it has none.
+func localSigningKeyBytes(keyConf *KeyConf) []byte {
+	key, _ := localSigningKey(keyConf)
+	return key
 }

@@ -105,8 +105,8 @@ recordKeepingSigner is a CertificationSigner whose every signature is admitted b
 signing record: the authority's, which refuses a lower assigned round, refuses different bytes for the
 round it holds, and answers identical bytes with the one response it retained (#105 step 4).
 
-It is sealed on purpose. The method is unexported, so only this package can implement it, and only
-authoritySigner does. A restored Round signs through a signer only if it has this property (see
+It is sealed on purpose. The method is unexported, so only this package can implement it: authoritySigner,
+and DeferredAuthoritySigner by delegation to one (it signs nothing before its key is bound). A restored Round signs through a signer only if it has this property (see
 Round.abstainRestored); a local key, a test double or a wrapper does not have it and cannot claim it.
 What the property does not include, and what each request establishes for itself: that the credential
 is current, that the authority still holds the key of its lifetime, that the request authenticates,
@@ -216,6 +216,9 @@ var ErrAuthorityKeyUnbound = errors.New("shardnode: the signing authority's expe
 
 // ErrAuthorityKeyConflict is a second, different expected key for a deferred signer that is already bound. The authority's key is fixed
 // for its lifetime, so a verified configuration that names this node with another key is an inconsistency, never a rotation.
+//
+// A joiner whose installed history names it with SEVERAL keys (a later rotation) binds the latest, after the replay; the authority's key is
+// fixed for its lifetime, so a new authority key is a new node identity, not a rebinding.
 var ErrAuthorityKeyConflict = errors.New("shardnode: the signing authority's expected key is already bound to a different key")
 
 /*
@@ -259,6 +262,9 @@ func (d *DeferredAuthoritySigner) BindKey(key abcrypto.Verifier) error {
 	d.bound, d.key = &authoritySigner{client: d.client, authorityKey: key}, bytes.Clone(raw)
 	return nil
 }
+
+// Bound reports whether the expected key has been bound.
+func (d *DeferredAuthoritySigner) Bound() bool { return d.current() != nil }
 
 func (d *DeferredAuthoritySigner) current() *authoritySigner {
 	d.mu.Lock()

@@ -153,7 +153,7 @@ func TestShardNodeSigningSelection(t *testing.T) {
 			confNaming("some-other-node", authorityKey), "does not name this node")
 	})
 
-	t.Run("a restoring joiner (a configuration that does not name it) gets a signer whose key is bound later", func(t *testing.T) {
+	t.Run("a joiner restoring or restarting with verified history (a configuration that does not name it) gets a signer whose key is bound later", func(t *testing.T) {
 		flags := &shardNodeSigningFlags{SigningAuthoritySocket: socket, SigningAuthorityCredential: credentialPath}
 		signing, err := buildCertificationSigning(flags, keyConf, confNaming("some-other-node", authorityKey), true)
 		require.NoError(t, err)
@@ -166,7 +166,7 @@ func TestShardNodeSigningSelection(t *testing.T) {
 		require.NoError(t, err)
 		defer named.close()
 		require.Nil(t, named.deferred)
-		// and a plain run of a node the configuration does not name is still refused
+		// and a plain run with no verified handoff history to derive it from is still refused
 		_, err = buildCertificationSigning(flags, keyConf, confNaming("some-other-node", authorityKey), false)
 		require.ErrorContains(t, err, "does not name this node")
 	})

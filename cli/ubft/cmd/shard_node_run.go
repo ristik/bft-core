@@ -432,7 +432,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	// How certification requests are signed is decided once, here, before anything is built: with the
 	// key configuration's signing key as before, or through a signing authority when one is configured
 	// (#105). In the second case no local signer is kept or passed to the round.
-	signing, err := buildCertificationSigning(&flags.shardNodeSigningFlags, keyConf, shardConf, flags.Restore)
+	signing, err := buildCertificationSigning(&flags.shardNodeSigningFlags, keyConf, shardConf, flags.Restore || flags.TrustHistoryProfile2)
 	if err != nil {
 		return fmt.Errorf("configuring certification signing: %w", err)
 	}
@@ -789,7 +789,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if err := installVerifiedAssignment(node, activePeers, bundle, step); err != nil {
 						return err
 					}
-					if err := bindJoinerKey(signing, bundle, step, node.ShardConfForEpoch); err != nil {
+					if err := noteJoinerStep(signing, bundle, step, node.ShardConfForEpoch); err != nil {
 						return err
 					}
 					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR, step)
@@ -858,6 +858,13 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			flags.observe.Logger().Error("profile2 handoff terminal repair failed", "error", startupErr)
 			return startupErr
 		}
+		// A plain restart of a joiner: the persisted verified steps were replayed above; bind the key of the latest one that names this
+		// node, or refuse. (A restore does the same after its catch-up, below.)
+		if !flags.Restore {
+			if err := finishJoinerKey(signing); err != nil {
+				return err
+			}
+		}
 		if flags.TrustHistoryProfile2 && !flags.Restore {
 			// The persisted verified steps are replayed into the set (OnInstalled): serving may start with the rebuilt set.
 			activePeers.Release()
@@ -882,8 +889,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if _, err := handoffFollower.CatchUp(ctx, uc.GetRootEpoch()); err != nil {
 						return err
 					}
-					// Every step up to the pinned epoch is verified and installed: the set is rebuilt.
+					// Every step up to the pinned epoch is verified and installed: the set is rebuilt, and a joiner's key is bound.
 					activePeers.Release()
+					if err := finishJoinerKey(signing); err != nil {
+						return err
+					}
 					pin, err := hexToHash(flags.RestoreTrustBodyID)
 					if err != nil {
 						return err
