@@ -58,7 +58,7 @@ each handoff carries the installed acknowledgement transition, even if it has
 no user transactions. The final Engine head, state root,
 certified journal candidate, and restore anchor must agree before the normal
 readiness gate can release signing. A failed or hostile replica is bypassed per
-record. The frontier resumes only after two replicas acknowledge later blocks.
+record. The frontier resumes only after two replicas acknowledge later blocks. If a configured replica was replaced, follow the one-replica-at-a-time rule in `docs/operations/m2-runbook.md` §4 ("Replacing a configured archive replica"); replacing both or reordering the pair is refused with `frontier.ErrContext`.
 
 The command refuses a copied BFT journal, a non-genesis or non-finalized fresh
 EL head, a nonempty local archive, an incompatible archive/context/version,
