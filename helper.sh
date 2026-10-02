@@ -83,6 +83,18 @@ function wait_for_root_chain_settle() {
   sleep 5
 }
 
+# collect_shard_conf_args - fill shardConfArgs with --shard-conf <file> for every test-nodes/shard-conf-* file. Without any such
+# file the unmatched glob stays a literal pattern in a plain for loop, so skip entries that do not exist instead of handing the
+# literal "test-nodes/shard-conf-*" to the root node.
+function collect_shard_conf_args() {
+  local conf
+  shardConfArgs=()
+  for conf in test-nodes/shard-conf-*; do
+    [ -e "$conf" ] || continue
+    shardConfArgs+=(--shard-conf "$conf")
+  done
+}
+
 function start_root_nodes() {
   # use root node 1 as bootstrap node
   local bootNode=""
@@ -105,7 +117,8 @@ function start_root_nodes() {
       profileArgs=(--profile-2)
       # Under the handoff profile PUT /api/v1/configurations is refused (#329): the genesis shard
       # configurations are fixed at start, so hand every one of them over by flag.
-      for shardConf in test-nodes/shard-conf-*; do profileArgs+=(--shard-conf "$shardConf"); done
+      collect_shard_conf_args
+      profileArgs+=(${shardConfArgs[@]+"${shardConfArgs[@]}"})
     fi
     build/ubft root-node run \
                     --home test-nodes/root$i \

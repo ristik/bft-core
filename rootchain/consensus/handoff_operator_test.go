@@ -826,3 +826,46 @@ func TestWrongParentEndorsementDoesNotBlockTheQuorum(t *testing.T) {
 		require.Contains(t, cm.handoffPlans[id].signatures, f.others[0].PeerConf.ID.String())
 	})
 }
+
+// The leader-side cooldown: a validator holding a live plan for the next attempt orders no Prepare while the lapsed Prepare's
+// cooldown runs (voters would refuse it, wasting the leader's round), at its exact last round either, and orders exactly one the
+// round after.
+func TestLeaderOrdersNoPrepareDuringTheCooldownAndOneAfterIt(t *testing.T) {
+	f := newPlanFixture(t)
+	cm := f.cm
+	state, err := cm.blockStore.GetState()
+	require.NoError(t, err)
+	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parentHash}}}
+	idle := *state.CommittedHead.Control
+	plan0, err := cm.buildHandoffPlanFromState(&f.next, state, nil)
+	require.NoError(t, err)
+
+	parentQC := cm.blockStore.GetHighQc()
+	parentBlock, err := cm.blockStore.Block(parentQC.GetRound())
+	require.NoError(t, err)
+	preparedAt := parentQC.GetRound()
+	prepared0 := f.preparedControl(t, &idle, plan0, preparedAt)
+	parentBlock.ShardState.Control = prepared0
+	lapsed := stateWith(state, preparedAt+storage.PrepareFreezeLapseRounds+1, prepared0)
+	plan1, err := cm.buildHandoffPlanFromState(&f.next, lapsed, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, plan1.Attempt)
+	cm.setHandoffIntent(plan1)
+	order := func(round uint64) [][]byte {
+		records, err := cm.handoffRecordsForRound(round, parentQC)
+		require.NoError(t, err)
+		return records
+	}
+	lapseEnd := preparedAt + storage.PrepareFreezeLapseRounds
+	cooldownEnd := lapseEnd + storage.PrepareCooldownRounds
+
+	require.Empty(t, order(lapseEnd), "the freeze has not lapsed yet at its last round: nothing is ordered over a live Prepare")
+	for _, round := range []uint64{lapseEnd + 1, lapseEnd + storage.PrepareCooldownRounds/2, cooldownEnd} {
+		require.Empty(t, order(round), "round %d is inside the cooldown (lapse ends at %d, cooldown at %d)", round, lapseEnd, cooldownEnd)
+	}
+	records := order(cooldownEnd + 1)
+	require.Len(t, records, 1, "the first round after the cooldown orders the next attempt's Prepare")
+	prepare, err := storage.DecodeOrderedHandoffRecord(records[0])
+	require.NoError(t, err)
+	require.EqualValues(t, 1, prepare.Attempt)
+}

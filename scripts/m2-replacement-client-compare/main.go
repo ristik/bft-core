@@ -111,6 +111,33 @@ func run(args []string) int {
 	return 0
 }
 
+// The comparison's refusals, one sentinel each so callers and tests can tell which check refused.
+var (
+	ErrTooFewBlocks            = errors.New("too few receipt-complete certified blocks")
+	ErrNoRestoreEvidence       = errors.New("replacement log lacks authenticated restore, handoff activation and post-boundary epoch-3 activity")
+	ErrNoPostBoundaryAdmission = errors.New("replacement did not admit a certificate after the epoch boundary")
+	ErrHeightGap               = errors.New("common archived range has a height gap")
+	ErrNotParentLinked         = errors.New("compared source history is not parent-linked")
+	ErrMissingAdmission        = errors.New("source validator has no certificate-admitted log entry for the block")
+	ErrMissingRootInput        = errors.New("source validator has no verified canonical rootInput log entry for the block")
+	ErrRootInputMismatch       = errors.New("source verified-execution log rootInput differs from its receipt-complete archive")
+	ErrNoSuccessfulReceipt     = errors.New("paid history has no successful typed receipt")
+	ErrEpochCoverage           = errors.New("root epoch lacks both paid and idle blocks")
+	ErrNoEpochCrossing         = errors.New("compared history does not cross root epoch 1 -> 2")
+	ErrNoRestoredBlock         = errors.New("restored validator's post-restore epoch-3 admitted block is absent from the compared history")
+	ErrBlockMismatch           = errors.New("source and replacement differ")
+)
+
+// historyInput is everything compareHistories judges: the two archives' verified blocks and what the two logs say about them.
+type historyInput struct {
+	sourceDir, replacementDir string
+	source, replacement       map[uint64]*storedBlock
+	sourceAdmissions          map[string]bool
+	sourceRootInputs          map[string][]byte
+	replacementText           []byte
+	replacementEpoch3         map[string]bool
+}
+
 func compare(sourceDir, replacementDir, sourceLog, replacementLog string) (*report, error) {
 	source, err := readArchive(sourceDir)
 	if err != nil {
@@ -121,50 +148,54 @@ func compare(sourceDir, replacementDir, sourceLog, replacementLog string) (*repo
 		return nil, fmt.Errorf("replacement archive: %w", err)
 	}
 	if len(source) < 4 || len(replacement) < 4 {
-		return nil, fmt.Errorf("need at least four receipt-complete blocks in both archives; source=%d replacement=%d", len(source), len(replacement))
+		return nil, fmt.Errorf("%w: need at least four in both archives; source=%d replacement=%d", ErrTooFewBlocks, len(source), len(replacement))
 	}
-	sourceAdmissions, sourceErr := certificateAdmissions(sourceLog)
-	if sourceErr != nil {
-		return nil, sourceErr
+	sourceAdmissions, err := certificateAdmissions(sourceLog)
+	if err != nil {
+		return nil, err
 	}
 	restoreText, err := os.ReadFile(replacementLog)
 	if err != nil {
 		return nil, fmt.Errorf("read replacement log: %w", err)
 	}
-	if !bytes.Contains(restoreText, []byte("execution journal restored")) ||
-		!bytes.Contains(restoreText, []byte("handoff activated")) ||
-		!bytes.Contains(restoreText, []byte("rootEpoch=3")) {
-		return nil, errors.New("replacement log lacks authenticated restore, handoff activation and post-boundary epoch-3 activity")
-	}
-	if !regexp.MustCompile(`msg="certificate admitted" .*rootEpoch=3`).Match(restoreText) {
-		return nil, errors.New("replacement did not admit a certificate after the epoch boundary")
-	}
 	replacementEpoch3, err := certifiedEpoch3Hashes(replacementLog)
 	if err != nil {
 		return nil, err
 	}
-
-	commonHeights := make([]uint64, 0, len(source))
-	for height := range source {
-		if replacement[height] != nil {
-			commonHeights = append(commonHeights, height)
-		}
-	}
-	if len(commonHeights) < 4 {
-		return nil, fmt.Errorf("source and replacement share only %d receipt-complete certified blocks", len(commonHeights))
-	}
-	sort.Slice(commonHeights, func(i, j int) bool { return commonHeights[i] < commonHeights[j] })
-	for i := 1; i < len(commonHeights); i++ {
-		if commonHeights[i] != commonHeights[i-1]+1 {
-			return nil, fmt.Errorf("common archived range has a height gap B%d -> B%d", commonHeights[i-1], commonHeights[i])
-		}
-	}
-
 	sourceRootInputs, err := verifiedInputs(sourceLog)
 	if err != nil {
 		return nil, err
 	}
-	out := &report{Result: "PASS", SourceArchive: sourceDir, ReplacementArchive: replacementDir,
+	return compareHistories(historyInput{sourceDir: sourceDir, replacementDir: replacementDir, source: source, replacement: replacement,
+		sourceAdmissions: sourceAdmissions, sourceRootInputs: sourceRootInputs, replacementText: restoreText, replacementEpoch3: replacementEpoch3})
+}
+
+func compareHistories(in historyInput) (*report, error) {
+	if !bytes.Contains(in.replacementText, []byte("execution journal restored")) ||
+		!bytes.Contains(in.replacementText, []byte("handoff activated")) ||
+		!bytes.Contains(in.replacementText, []byte("rootEpoch=3")) {
+		return nil, ErrNoRestoreEvidence
+	}
+	if !regexp.MustCompile(`msg="certificate admitted" .*rootEpoch=3`).Match(in.replacementText) {
+		return nil, ErrNoPostBoundaryAdmission
+	}
+	commonHeights := make([]uint64, 0, len(in.source))
+	for height := range in.source {
+		if in.replacement[height] != nil {
+			commonHeights = append(commonHeights, height)
+		}
+	}
+	if len(commonHeights) < 4 {
+		return nil, fmt.Errorf("%w: source and replacement share only %d", ErrTooFewBlocks, len(commonHeights))
+	}
+	sort.Slice(commonHeights, func(i, j int) bool { return commonHeights[i] < commonHeights[j] })
+	for i := 1; i < len(commonHeights); i++ {
+		if commonHeights[i] != commonHeights[i-1]+1 {
+			return nil, fmt.Errorf("%w: B%d -> B%d", ErrHeightGap, commonHeights[i-1], commonHeights[i])
+		}
+	}
+
+	out := &report{Result: "PASS", SourceArchive: in.sourceDir, ReplacementArchive: in.replacementDir,
 		SourceValidator: 2, ReplacementValidator: 1, ComparedBlocks: len(commonHeights),
 		FirstHeight: commonHeights[0], LastHeight: commonHeights[len(commonHeights)-1],
 		PaidBlocksPerEpoch: map[uint64]int{}, IdleBlocksPerEpoch: map[uint64]int{},
@@ -173,25 +204,25 @@ func compare(sourceDir, replacementDir, sourceLog, replacementLog string) (*repo
 	replacementBlockSeen := map[string]bool{}
 	var previous *storedBlock
 	for _, height := range commonHeights {
-		a, b := source[height], replacement[height]
+		a, b := in.source[height], in.replacement[height]
 		if err := equalCertifiedBlock(height, a, b); err != nil {
 			return nil, err
 		}
 		if previous != nil && a.header.ParentHash != previous.header.Hash() {
-			return nil, fmt.Errorf("compared source history is not parent-linked at B%d", height)
+			return nil, fmt.Errorf("%w: at B%d", ErrNotParentLinked, height)
 		}
 		hash := fmt.Sprintf("%x", a.request.BlockHash)
-		if !sourceAdmissions[hash] {
-			return nil, fmt.Errorf("source validator has no positive-height BFT certificate-admitted log entry for B%d %s", height, hash)
+		if !in.sourceAdmissions[hash] {
+			return nil, fmt.Errorf("%w: B%d %s", ErrMissingAdmission, height, hash)
 		}
-		if rootInput, ok := sourceRootInputs[hash]; ok && !bytes.Equal(rootInput, a.input) {
-			return nil, fmt.Errorf("source verified-execution log rootInput differs from its receipt-complete archive at B%d", height)
+		if rootInput, ok := in.sourceRootInputs[hash]; ok && !bytes.Equal(rootInput, a.input) {
+			return nil, fmt.Errorf("%w: at B%d", ErrRootInputMismatch, height)
 		} else if !ok {
-			return nil, fmt.Errorf("source validator has no verified canonical rootInput log entry for B%d %s", height, hash)
+			return nil, fmt.Errorf("%w: B%d %s", ErrMissingRootInput, height, hash)
 		}
 		epoch := a.uc.GetRootEpoch()
 		epochSet[epoch] = true
-		if replacementEpoch3[hash] {
+		if in.replacementEpoch3[hash] {
 			replacementBlockSeen[hash] = true
 		}
 		receiptEnvelopes, decodeErr := archivewiring.DecodeReceiptList(a.record)
@@ -212,7 +243,7 @@ func compare(sourceDir, replacementDir, sourceLog, replacementLog string) (*repo
 		}
 		if len(a.body.Transactions) != 0 {
 			if successful == 0 {
-				return nil, fmt.Errorf("paid history has no successful typed receipt at B%d", height)
+				return nil, fmt.Errorf("%w: at B%d", ErrNoSuccessfulReceipt, height)
 			}
 			out.PaidBlocksPerEpoch[epoch]++
 		} else {
@@ -231,15 +262,15 @@ func compare(sourceDir, replacementDir, sourceLog, replacementLog string) (*repo
 	for epoch := range epochSet {
 		out.Epochs = append(out.Epochs, epoch)
 		if out.PaidBlocksPerEpoch[epoch] == 0 || out.IdleBlocksPerEpoch[epoch] == 0 {
-			return nil, fmt.Errorf("root epoch %d lacks both paid and idle blocks (paid=%d idle=%d)", epoch, out.PaidBlocksPerEpoch[epoch], out.IdleBlocksPerEpoch[epoch])
+			return nil, fmt.Errorf("%w: epoch %d (paid=%d idle=%d)", ErrEpochCoverage, epoch, out.PaidBlocksPerEpoch[epoch], out.IdleBlocksPerEpoch[epoch])
 		}
 	}
 	sort.Slice(out.Epochs, func(i, j int) bool { return out.Epochs[i] < out.Epochs[j] })
 	if !epochSet[1] || !epochSet[2] {
-		return nil, fmt.Errorf("compared history does not cross root epoch 1 -> 2 (epochs=%v)", out.Epochs)
+		return nil, fmt.Errorf("%w (epochs=%v)", ErrNoEpochCrossing, out.Epochs)
 	}
 	if len(replacementBlockSeen) == 0 {
-		return nil, errors.New("restored validator's post-restore epoch-3 admitted block is absent from the compared history")
+		return nil, ErrNoRestoredBlock
 	}
 	return out, nil
 }
@@ -336,7 +367,7 @@ func readArchive(dir string) (map[uint64]*storedBlock, error) {
 
 func equalCertifiedBlock(height uint64, a, b *storedBlock) error {
 	if a.header.Hash() != b.header.Hash() || a.header.Root != b.header.Root || a.header.ReceiptHash != b.header.ReceiptHash {
-		return fmt.Errorf("source/replacement block, state or receipt root differs at B%d", height)
+		return fmt.Errorf("%w: block, state or receipt root at B%d", ErrBlockMismatch, height)
 	}
 	fields := []struct {
 		name string
@@ -351,7 +382,7 @@ func equalCertifiedBlock(height uint64, a, b *storedBlock) error {
 	}
 	for _, field := range fields {
 		if !bytes.Equal(field.a, field.b) {
-			return fmt.Errorf("source/replacement %s differs at B%d", field.name, height)
+			return fmt.Errorf("%w: %s at B%d", ErrBlockMismatch, field.name, height)
 		}
 	}
 	return nil

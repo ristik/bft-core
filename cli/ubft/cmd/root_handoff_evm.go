@@ -256,6 +256,9 @@ func readValidators(path string) ([]*types.NodeInfo, error) {
 	return v, nil
 }
 
+// errBothKeyHolders refuses a possession proof request that names two holders for one key.
+var errBothKeyHolders = errors.New("give either --key-conf or the signing authority flags, not both: a key is signed for by exactly one holder")
+
 func newEVMPoPCmd() *cobra.Command {
 	var contextFile, validatorsFile, nodeID, keyFile, installedFile, authoritySocket, authorityCredential string
 	cmd := &cobra.Command{Use: "evm-pop", Short: "Sign a proof of possession for one successor EVM validator key",
@@ -284,7 +287,7 @@ func newEVMPoPCmd() *cobra.Command {
 				return err
 			}
 			if keyFile != "" && (authoritySocket != "" || authorityCredential != "") {
-				return errors.New("give either --key-conf or the signing authority flags, not both: a key is signed for by exactly one holder")
+				return errBothKeyHolders
 			}
 			if authoritySocket != "" && authorityCredential == "" {
 				return errors.New("--authority-socket needs --authority-credential")

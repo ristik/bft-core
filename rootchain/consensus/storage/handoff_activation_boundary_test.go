@@ -112,3 +112,79 @@ func TestFirstBlockOfAnEpochWithAnAnchorOffTheCommittedActivationIsRefused(t *te
 		require.NoError(t, err, "first block at round %d", round)
 	}
 }
+
+// Two competing first blocks of the epoch, both children of the epoch anchor (the epoch starts at 7: one at 7, one at 8 after a timed-out
+// round, as a fork), activate exactly the same state: the activation derives from the committed record and the anchor, never from the
+// round the proposer happened to reach, so honest roots that voted for different forks still agree on what the epoch installs.
+func TestTwoChildrenOfTheAnchorActivateIdentically(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedFees(t)
+	a := f.addAggregator(t)
+	f.changes = []evmassign.Change{f.replace(t, a, a.conf, nil)}
+	h := f.commitAssignment(t)
+	anchor, err := f.store.InstallEpochAnchor(h.head, h.verified, h.genesis)
+	require.NoError(t, err)
+	require.EqualValues(t, 6, anchor.Slot)
+
+	s, err := New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	atStart := f.addSuccessorBlock(t, s, 7, anchor)
+	afterTimeout := f.addSuccessorBlock(t, s, 8, anchor)
+	require.NotEqual(t, atStart.BlockData.Round, afterTimeout.BlockData.Round, "two distinct blocks of a fork")
+	require.Equal(t, atStart.RootHash, afterTimeout.RootHash, "the root hash is the activated shard states' hash, so it does not depend on the round")
+
+	for _, shard := range []types.PartitionShardID{f.shard, a.key} {
+		x, y := atStart.ShardState.States[shard], afterTimeout.ShardState.States[shard]
+		require.Equal(t, []byte(x.ShardConfHash), []byte(y.ShardConfHash), "installed configuration, shard %v", shard)
+		xt, err := x.TR.Hash()
+		require.NoError(t, err)
+		yt, err := y.TR.Hash()
+		require.NoError(t, err)
+		require.Equal(t, xt, yt, "installed technical record, shard %v", shard)
+		require.Equal(t, x.IR, y.IR, "input record, shard %v", shard)
+		require.Equal(t, x.nodeIDs, y.nodeIDs, "trust base, shard %v", shard)
+		require.Equal(t, x.Fees, y.Fees, "fees, shard %v", shard)
+		require.Equal(t, []byte(x.PrevEpochFees), []byte(y.PrevEpochFees), "rolled fees, shard %v", shard)
+	}
+	require.Equal(t, atStart.ShardState.Control, afterTimeout.ShardState.Control, "the control state after the activation")
+	xTree, _, err := atStart.ShardState.UnicityTree(crypto.SHA256)
+	require.NoError(t, err)
+	yTree, _, err := afterTimeout.ShardState.UnicityTree(crypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, xTree.RootHash(), yTree.RootHash(), "the shard states' unicity tree root hash")
+}
+
+// A restart between the anchor and the first block of the epoch reloads the anchor from the database: the first block, at a round past
+// the start, is accepted by a store that never saw the anchor installed in this process and activates what a store that did see it
+// would, and a store that lost the anchor refuses it with the sentinel instead of guessing.
+func TestFirstBlockOfAnEpochAfterARestartReloadsTheAnchorFromTheDatabase(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedFees(t)
+	h := f.commitAssignment(t)
+	anchor, err := f.store.InstallEpochAnchor(h.head, h.verified, h.genesis)
+	require.NoError(t, err)
+
+	// Reference: the store that installed the anchor.
+	live, err := New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	want := f.addSuccessorBlock(t, live, 8, anchor)
+
+	// A restart: a fresh store over the same database. The anchor is the persisted root, loaded rather than passed in memory.
+	restarted, err := New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	root := restarted.blockTree.Root()
+	require.EqualValues(t, anchor.Slot, root.GetRound(), "the anchor is reloaded as the root")
+	require.True(t, isEpochAnchorRoot(root), "and it is still recognized as an epoch anchor")
+	got := f.addSuccessorBlock(t, restarted, 8, root.BlockData.Anchor)
+	evmHash, err := evmassign.PDRHash(h.activated)
+	require.NoError(t, err)
+	require.Equal(t, evmHash[:], []byte(got.ShardState.States[f.shard].ShardConfHash), "the reloaded anchor activates the committed assignment")
+	require.Equal(t, want.ShardState.States[f.shard].ShardConfHash, got.ShardState.States[f.shard].ShardConfHash)
+	wantTree, _, err := want.ShardState.UnicityTree(crypto.SHA256)
+	require.NoError(t, err)
+	gotTree, _, err := got.ShardState.UnicityTree(crypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, wantTree.RootHash(), gotTree.RootHash(), "the same shard-state root as before the restart")
+}

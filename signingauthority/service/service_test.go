@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"encoding/binary"
 	"errors"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -60,7 +61,9 @@ func socketDir(t *testing.T) string {
 	return dir
 }
 
-func newFixture(t *testing.T) *fixture {
+func newFixture(t *testing.T) *fixture { return newFixtureWithLog(t, nil) }
+
+func newFixtureWithLog(t *testing.T, log *slog.Logger) *fixture {
 	t.Helper()
 	rootSigner, err := abcrypto.NewInMemorySecp256K1Signer()
 	require.NoError(t, err)
@@ -92,7 +95,7 @@ func newFixture(t *testing.T) *fixture {
 
 	operatorCredential, err := NewCredential()
 	require.NoError(t, err)
-	server, err := NewServer(authority, Config{OperatorCredential: operatorCredential})
+	server, err := NewServer(authority, Config{OperatorCredential: operatorCredential, Log: log})
 	require.NoError(t, err)
 	t.Cleanup(server.Close)
 

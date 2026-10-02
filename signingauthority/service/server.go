@@ -432,6 +432,10 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 			s.log.Warn("refusing a handoff possession proof", slog.String("err", err.Error()))
 			return nil, err
 		}
+		// The authority's only signature outside certification: audit every one, not only the refusals.
+		s.log.Info("signed a handoff possession proof",
+			slog.String("node", wire.NodeID), slog.Uint64("successorEpoch", succ.Epoch), slog.Uint64("attempt", wire.Attempt),
+			slog.String("predecessor", fmt.Sprintf("%x", wire.Predecessor)))
 		return types.Cbor.Marshal(pop)
 	case opCompleteEnrollment:
 		var conf types.PartitionDescriptionRecord
