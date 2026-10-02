@@ -512,3 +512,33 @@ func TestV2RefusesEmptyOptionalSignedBytes(t *testing.T) {
 	_, e := o.Class()
 	require.Error(t, e)
 }
+
+// Replaces TestSealRegistryCursorZeroValueIsRefusedNotTreatedAsCursorZero. The v1 cursor was a value a
+// caller could forget to construct, so its zero value had to be refused. In v2 the cursor is read from
+// the verified parent snapshot, and the equivalent hazard is a derivation fed a zero observation,
+// genesis origin or snapshot. Each is refused as ErrV2Context on its own, with the other two valid.
+func TestV2DeriveRefusesAnyZeroValueInput(t *testing.T) {
+	f := newV2Fixture(t)
+	obs, _ := f.signed(t, &types.InputRecord{Version: 1}, 7, 4)
+	valid := ContextV2{Genesis: f.origin, Parent: f.snapshot(t, 0), Round: 7, ParentHash: f.blocks[0].Hash.Bytes()}
+	_, err := DeriveV2(valid, obs)
+	require.NoError(t, err, "control: the three inputs are valid together")
+
+	noGenesis, noSnapshot := valid, valid
+	noGenesis.Genesis = ContextV2{}.Genesis
+	noSnapshot.Parent = ContextV2{}.Parent
+	for _, tc := range []struct {
+		name string
+		c    ContextV2
+		o    VerifiedObservationV2
+	}{
+		{"zero observation", valid, VerifiedObservationV2{}},
+		{"zero genesis origin", noGenesis, obs},
+		{"zero parent snapshot", noSnapshot, obs},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DeriveV2(tc.c, tc.o)
+			require.ErrorIs(t, err, ErrV2Context)
+		})
+	}
+}
