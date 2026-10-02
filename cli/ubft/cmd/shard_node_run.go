@@ -805,7 +805,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						if err != nil {
 							return err
 						}
-						if err := archiveLocal.PutBundle(archive.BundleRequest{Context: archiveSubject, Epoch: bundle.Body.Epoch}, raw); err != nil {
+						// The archive copy is availability for others: a second, conflicting or unverifiable copy never stops this node's own
+						// activation (only a fault of the local store does).
+						if err := archivewiring.RetainActivatedBundle(ctx, archiveLocal, archive.BundleRequest{Context: archiveSubject, Epoch: bundle.Body.Epoch}, raw,
+							archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch), flags.observe.Logger()); err != nil {
 							return err
 						}
 					}
