@@ -174,6 +174,7 @@ func Test_ShardInfo_ValidRequest(t *testing.T) {
 
 		bcr.NodeID = "unknown"
 		require.EqualError(t, si.ValidRequest(bcr), `invalid certification request: node "unknown" is not in the trustbase of the shard`)
+		require.ErrorIs(t, si.ValidRequest(bcr), ErrNodeNotInTrustBase)
 	})
 
 	t.Run("round number", func(t *testing.T) {

@@ -431,7 +431,7 @@ func TestAcknowledgementEndsThePendingStateAndRetiredKeysStayRefused(t *testing.
 	for _, retired := range []string{"ev-b", "ev-c", "ev-d"} {
 		err = si.ValidRequest(&certification.BlockCertificationRequest{PartitionID: 8, NodeID: retired,
 			InputRecord: &types.InputRecord{Version: 1, Epoch: si.TR.Epoch}})
-		require.ErrorContains(t, err, "not in the trustbase of the shard", retired)
+		require.ErrorIs(t, err, ErrNodeNotInTrustBase, retired)
 	}
 }
 

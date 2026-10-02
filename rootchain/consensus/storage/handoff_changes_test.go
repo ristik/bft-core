@@ -166,7 +166,7 @@ func TestAggregatorKeyReplacementActivatesAtTheBoundaryAndSurvivesRestart(t *tes
 		require.EqualValues(t, 0, si.IR.Epoch, when+": the shard's input record is unchanged until it certifies at the new epoch")
 		require.Contains(t, si.nodeIDs, a.nextKey.id, when)
 		require.NotContains(t, si.nodeIDs, a.oldKey.id, when)
-		require.ErrorContains(t, si.Verify(a.oldKey.id, func(abcrypto.Verifier) error { return nil }), "not in the trustbase", when+": the retired key is refused")
+		require.ErrorIs(t, si.Verify(a.oldKey.id, func(abcrypto.Verifier) error { return nil }), ErrNodeNotInTrustBase, when+": the retired key is refused")
 		require.NoError(t, si.Verify(a.nextKey.id, func(abcrypto.Verifier) error { return nil }), when)
 	}
 	check(first, "activation block")

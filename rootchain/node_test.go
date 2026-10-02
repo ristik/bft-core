@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"maps"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -298,6 +299,43 @@ func Test_onHandshake(t *testing.T) {
 			NodeID:      nodeID.String(),
 		}
 		require.NoError(t, node.onHandshake(t.Context(), &msg))
+	})
+
+	// A retired or superseded validator key is refused at the handshake by the installed set's membership check:
+	// it gets no response and no subscription, and the refusal is the typed membership error.
+	t.Run("a node outside the active set is refused and not subscribed", func(t *testing.T) {
+		retired := generateNodeID(t)
+		sends := 0
+		partNet := mockPartitionNet{
+			send: func(ctx context.Context, msg any, receivers ...p2peer.ID) error {
+				sends++
+				return nil
+			},
+		}
+		cm := mockConsensusManager{
+			shardInfo: func(partition types.PartitionID, shard types.ShardID) (*storage.ShardInfo, error) {
+				return newMockShardInfo(t, nodeID.String(), publicKey, certResp), nil // the active set is {nodeID}
+			},
+		}
+		node, err := New(&nwPeer, partNet, cm, nopObs)
+		require.NoError(t, err)
+		msg := handshake.Handshake{PartitionID: certResp.Partition, ShardID: certResp.Shard, NodeID: retired.String()}
+		err = node.onHandshake(t.Context(), &msg)
+		require.ErrorIs(t, err, storage.ErrNodeNotInTrustBase)
+		require.ErrorContains(t, err, "node ID is not in active validator set")
+		require.Zero(t, sends, "a refused node receives no certificate")
+		subscribed := func() map[p2peer.ID]int {
+			node.subscription.mu.RLock()
+			defer node.subscription.mu.RUnlock()
+			return maps.Clone(node.subscription.subs[partitionShard{certResp.Partition, certResp.Shard.Key()}])
+		}
+		require.NotContains(t, subscribed(), retired, "a refused node is not subscribed")
+
+		// Control: the active member of the same set is accepted by the same code path.
+		msg.NodeID = nodeID.String()
+		require.NoError(t, node.onHandshake(t.Context(), &msg))
+		require.Equal(t, 1, sends)
+		require.Contains(t, subscribed(), nodeID)
 	})
 
 	// Regression: a partition that has already produced certified blocks must
@@ -867,6 +905,7 @@ func Test_onBlockCertificationRequest(t *testing.T) {
 
 		err = node.onBlockCertificationRequest(t.Context(), &validCertRequest)
 		require.EqualError(t, err, `invalid block certification request: invalid certification request: node "`+nodeID+`" is not in the trustbase of the shard`)
+		require.ErrorIs(t, err, storage.ErrNodeNotInTrustBase)
 		require.EqualValues(t, 1, sendCallCnt)
 
 		/*** case 2: invalid request from a node in the trustbase ***/
