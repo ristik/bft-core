@@ -27,6 +27,6 @@ Printed identities (both runs): registry layout 2, code hash `0x7787f3166565c8e5
 ## Limits
 - One host and one toolchain: the builds are independent environments, not independent machines or operators.
 - These hashes are for the synthetic v2 genesis. The 2026-09-30 genesis used layout 1 (genesis `f0de30fe…`, state root `0xb14f8126…`) and is superseded for M3.
-- The run needed a retry of `go mod download` after proxy read errors in one side (cold cache each time); the retry does not affect the result.
+- One side needed a retry of `go mod download` after proxy read errors (cold cache each time), per the operator; the retained logs do not show it (side A's `modules.log` is empty, side B's earlier script version kept no module log). Modules are verified against `go.sum` (`-mod=readonly`), and the outputs of both sides are byte-identical.
 - Any later change under `registrygenesis/`, the contracts pin, the artifacts or the genesis command invalidates this record; regenerate it on the final build.
 - Logs, scripts and outputs: `briefs/t1-independent-builds-20261002/` (local, not in the repo): `run.sh`, `run-a/`, `run-b/` with `SHA256SUMS`, `toolchain.txt`, `genesis.log`.
