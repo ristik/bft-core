@@ -92,14 +92,18 @@ var DefaultBFTClientOptions = BFTClientOptions{
 type BFTClient struct {
 	partitionID types.PartitionID
 	shardID     types.ShardID
-	// shardConfHash is the hash of the shard configuration THIS NODE was started with, and every
-	// certificate must commit to it (#134). It is owned by this client — cloned on the way in — so a
-	// caller that later mutates its own slice cannot change what this node enforces, and it is never
-	// derived from a certificate, a checkpoint, a peer or the execution client: those are the claims
-	// under test. UnicityCertificate.IsValid compares it only when it is non-nil, so an empty value
-	// would not weaken the check, it would remove it; the constructor refuses one.
+	// shardConfHash is the hash of the GENESIS shard configuration THIS NODE was started with: the deployment identity pin. It is
+	// owned by this client — cloned on the way in — so a caller that later mutates its own slice cannot change what this node
+	// enforces, and it is never derived from a certificate, a checkpoint, a peer or the execution client: those are the claims under
+	// test. The identity handed to the admission factory is this hash, always: assignments never replace it (see confs).
 	shardConfHash []byte
-	nodeID        string
+	// confs is what every certificate must commit to (#134): the shard configuration hash of the shard epoch the certificate itself
+	// claims (its technical record's epoch, which the unicity certificate binds). It starts with the genesis entry (epoch 0) and gains
+	// an entry only from a verified committed assignment step (InstallShardConf), so an old-epoch certificate keeps verifying under its
+	// own hash, a new one under its own, and a certificate of epoch N carrying epoch N-1's hash is refused.
+	confs   map[uint64][]byte
+	confsMu sync.RWMutex
+	nodeID  string
 
 	peer           *network.Peer
 	net            RootNetwork
@@ -229,6 +233,7 @@ func NewBFTClient(
 		partitionID:    partitionID,
 		shardID:        shardID,
 		shardConfHash:  bytes.Clone(shardConfHash),
+		confs:          map[uint64][]byte{0: bytes.Clone(shardConfHash)},
 		nodeID:         peer.ID().String(),
 		peer:           peer,
 		net:            net,
@@ -632,6 +637,10 @@ func (c *BFTClient) verifyCertificationAuthorization(ctx context.Context, cr *ce
 	if cr.UC.InputRecord == nil || cr.UC.UnicitySeal == nil {
 		return nil, errors.New("invalid certification response: unicity certificate is incomplete")
 	}
+	conf, err := c.expectedShardConf(cr.Technical.Epoch)
+	if err != nil {
+		return nil, err
+	}
 	epoch := cr.UC.GetRootEpoch()
 	tb, err := c.trustBaseStore.GetByEpoch(ctx, epoch)
 	if err != nil {
@@ -640,7 +649,7 @@ func (c *BFTClient) verifyCertificationAuthorization(ctx context.Context, cr *ce
 	if tb == nil {
 		return nil, fmt.Errorf("loading trust base for epoch %d: trust base is nil", epoch)
 	}
-	if err = cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, c.shardConfHash); err != nil {
+	if err = cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, conf); err != nil {
 		return nil, fmt.Errorf("verifying unicity certificate: %w", err)
 	}
 	c.mu.Lock()
@@ -998,7 +1007,11 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 				if err != nil {
 					return fmt.Errorf("loading trust base for epoch %d: %w", certificateEpoch, err)
 				}
-				if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, c.shardConfHash); err != nil {
+				conf, err := c.expectedShardConf(cr.Technical.Epoch)
+				if err != nil {
+					return fmt.Errorf("%w: %w", ErrStaleEpochCertificateInvalid, err)
+				}
+				if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, conf); err != nil {
 					return fmt.Errorf("%w: %w", ErrStaleEpochCertificateInvalid, err)
 				}
 				if c.log != nil {
@@ -1060,7 +1073,11 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	if len(c.shardConfHash) == 0 {
 		return errors.New("this client has no configured shard configuration hash, so a certificate's configuration cannot be checked")
 	}
-	if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, c.shardConfHash); err != nil {
+	conf, err := c.expectedShardConf(cr.Technical.Epoch)
+	if err != nil {
+		return err
+	}
+	if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, conf); err != nil {
 		return fmt.Errorf("verifying unicity certificate: %w", err)
 	}
 
@@ -1203,4 +1220,50 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 	c.submittedSinceHandshake = true
 	c.mu.Unlock()
 	return nil
+}
+
+// ErrShardConfEpochUnknown refuses a certificate whose shard epoch has no installed configuration: its assignment's committed handoff
+// has not been verified and installed here yet. It is retryable after the install, and it never falls back to another epoch's hash.
+var ErrShardConfEpochUnknown = errors.New("shardnode: no installed shard configuration for the certificate's shard epoch")
+
+// ErrShardConfConflict refuses to install a configuration hash for a shard epoch that already has a different one.
+var ErrShardConfConflict = errors.New("shardnode: a different shard configuration is already installed for this shard epoch")
+
+// InstallShardConf records the shard configuration hash in effect from the given shard epoch. It is called only with what a verified
+// committed assignment step names (handoffdelivery.AssignmentStepOf on a verified bundle): never with a value a certificate, a peer
+// or the execution client supplied. Installing the same hash again is a no-op; a different hash for an epoch is refused.
+func (c *BFTClient) InstallShardConf(epoch uint64, hash []byte) error {
+	if err := validateShardConfHashWidth(hash); err != nil {
+		return err
+	}
+	c.confsMu.Lock()
+	defer c.confsMu.Unlock()
+	if c.confs == nil {
+		c.confs = map[uint64][]byte{}
+		if len(c.shardConfHash) != 0 {
+			c.confs[0] = bytes.Clone(c.shardConfHash)
+		}
+	}
+	if have, ok := c.confs[epoch]; ok {
+		if !bytes.Equal(have, hash) {
+			return fmt.Errorf("%w: shard epoch %d", ErrShardConfConflict, epoch)
+		}
+		return nil
+	}
+	c.confs[epoch] = bytes.Clone(hash)
+	return nil
+}
+
+// expectedShardConf is the hash a certificate claiming the given shard epoch must commit to.
+func (c *BFTClient) expectedShardConf(epoch uint64) ([]byte, error) {
+	c.confsMu.RLock()
+	defer c.confsMu.RUnlock()
+	conf, ok := c.confs[epoch]
+	if !ok && epoch == 0 && len(c.shardConfHash) != 0 {
+		return bytes.Clone(c.shardConfHash), nil // the genesis entry, for a client assembled without the constructor
+	}
+	if !ok {
+		return nil, fmt.Errorf("%w: shard epoch %d", ErrShardConfEpochUnknown, epoch)
+	}
+	return bytes.Clone(conf), nil
 }

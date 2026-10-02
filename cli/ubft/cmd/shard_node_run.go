@@ -756,6 +756,16 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if err != nil {
 						return err
 					}
+					// The step is verified (the bundle's candidate must replace the checkpoint's installed assignment): it is the only
+					// source of the shard configuration hashes the client will accept per shard epoch. Installed before the handoff is
+					// activated, so no certificate of the new root epoch can be verifiable while its configuration is still unknown; and
+					// again from every persisted bundle on restart, which rebuilds the set from genesis plus the verified history.
+					if err := node.InstallShardConf(step.OldShardEpoch, step.OldActiveConfHash[:]); err != nil {
+						return err
+					}
+					if err := node.InstallShardConf(step.NewShardEpoch, step.NewActiveConfHash[:]); err != nil {
+						return err
+					}
 					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR, step)
 					if err != nil {
 						return err

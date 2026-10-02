@@ -137,6 +137,12 @@ func New(
 	}, nil
 }
 
+// InstallShardConf records the shard configuration hash in effect from a shard epoch, from a verified committed assignment step. See
+// BFTClient.InstallShardConf.
+func (n *Node) InstallShardConf(epoch uint64, hash []byte) error {
+	return n.client.InstallShardConf(epoch, hash)
+}
+
 /*
 resumeFrom installs an authenticated persisted certificate, and is the only place production code
 calls SeedLUC.
