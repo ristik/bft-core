@@ -335,3 +335,67 @@ func TestTheHandoffTerminalCertificateIsRecordedUnderTheTerminalContext(t *testi
 		"the certificate is authenticated under the terminal context, with the technical record whose epoch the resolver names")
 	require.Equal(t, []string{"ctx", "terminalCtx", "terminal"}, prepared, "the certificate is recorded under the same context")
 }
+
+// Every shard-membership consumer in shardNodeRun follows activePeers (the verified, installed assignment), not the genesis validator
+// list: dissemination, the archive and journal servers' authorizers, the journal suffix providers and the evidence providers.
+func TestShardNodeRunMembershipConsumersFollowTheActivePeers(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "shard_node_run.go", nil, 0)
+	require.NoError(t, err)
+	authorizers, restricted, providerSources, fixedProviders := 0, 0, 0, 0
+	var disseminatorGetsActive bool
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+				switch sel.Sel.Name {
+				case "SetPeerAuthorizer":
+					authorizers++
+				case "RestrictToPeers":
+					restricted++
+				}
+			}
+			if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "buildDisseminator" {
+				for _, a := range x.Args {
+					if i, ok := a.(*ast.Ident); ok && i.Name == "activePeers" {
+						disseminatorGetsActive = true
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			for _, l := range x.Lhs {
+				if sel, ok := l.(*ast.SelectorExpr); ok {
+					switch sel.Sel.Name {
+					case "ProviderSource":
+						providerSources++
+					case "Providers":
+						fixedProviders++
+					}
+				}
+			}
+		}
+		return true
+	})
+	require.Equal(t, 2, authorizers, "the archive server and the journal server")
+	require.Zero(t, restricted, "no fixed allowlist")
+	require.Equal(t, 2, providerSources, "the journal suffix coordinator and the evidence recovery")
+	require.Zero(t, fixedProviders, "no fixed provider list")
+	require.True(t, disseminatorGetsActive)
+
+	// and buildDisseminator hands that source (not a list read from the genesis validators) to the transport
+	var fromActive bool
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "buildDisseminator" {
+			ast.Inspect(fn, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "NewNetDisseminatorFrom" && len(call.Args) == 3 {
+						if id, ok := call.Args[2].(*ast.Ident); ok && id.Name == "active" {
+							fromActive = true
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	require.True(t, fromActive, "buildDisseminator addresses the active peers")
+}

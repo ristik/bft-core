@@ -61,6 +61,8 @@ type RecoveryOptions struct {
 	// Providers is who to ask, used only when Recover is set. Empty means recovery is configured
 	// and has nobody to ask, which is reported as such rather than silently doing nothing.
 	Providers EvidenceProviders
+	// ProviderSource, when set, replaces Providers: who to ask follows the active assignment at the time of each fetch.
+	ProviderSource ProviderSource
 
 	Buffer    EvidenceBufferLimits
 	Transport EvidenceTransportLimits
@@ -162,7 +164,11 @@ func NewRecoveryStack(opts RecoveryOptions, deps RecoveryDeps) (*RecoveryStack, 
 	}
 
 	if opts.Recover {
-		if len(opts.Providers) == 0 {
+		var providers ProviderSource = opts.Providers
+		if opts.ProviderSource != nil {
+			providers = opts.ProviderSource
+		}
+		if len(providers.EvidenceProviders()) == 0 {
 			return nil, fmt.Errorf("recovery lifecycle: recovery is enabled with no providers to ask — a node that cannot ask anybody recovers nothing, which is the situation this exists to fix")
 		}
 		if len(deps.ShardConfHash) == 0 {
@@ -182,7 +188,7 @@ func NewRecoveryStack(opts RecoveryOptions, deps RecoveryDeps) (*RecoveryStack, 
 			ShardConfs:    deps.ShardConfs,
 			TrustBases:    deps.TrustBases,
 			Fetcher:       &transportFetcher{host: deps.Host, limits: opts.Transport},
-			Providers:     opts.Providers,
+			Providers:     providers,
 			Limits:        opts.Evidence,
 			Budget:        opts.Budget,
 			Log:           deps.Log,

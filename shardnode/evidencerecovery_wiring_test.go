@@ -227,6 +227,25 @@ func TestRecoveryStack_RefusesConfigurationsThatCannotDoWhatTheySay(t *testing.T
 		st.Close() // safe on nil, so a caller need not branch
 	})
 
+	t.Run("the providers follow the active assignment: a source stands in for the fixed list, and an empty one is refused", func(t *testing.T) {
+		self, other := newPeerID(t), newPeerID(t)
+		active, err := NewActivePeers(self, nodeInfos(self, other))
+		require.NoError(t, err)
+		opts := DefaultRecoveryOptions()
+		opts.Recover = true
+		opts.Providers = nil
+		opts.ProviderSource = active
+		st, err := NewRecoveryStack(opts, deps())
+		require.NoError(t, err, "no fixed list: the source names the providers")
+		t.Cleanup(st.Close)
+
+		lonely, err := NewActivePeers(self, nodeInfos(self))
+		require.NoError(t, err)
+		opts.ProviderSource = lonely
+		_, err = NewRecoveryStack(opts, deps())
+		require.ErrorContains(t, err, "no providers to ask")
+	})
+
 	t.Run("recovery with nobody to ask is refused, not silently idle", func(t *testing.T) {
 		opts := DefaultRecoveryOptions()
 		opts.Recover = true

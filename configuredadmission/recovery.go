@@ -43,17 +43,20 @@ func DefaultRecoveryLimits() RecoveryLimits {
 // ExecutionRecovery selects authority only from the independently verified
 // journal. It never promotes a candidate or an executor head into authority.
 type ExecutionRecovery struct {
-	mu              sync.Mutex
-	Store           *configuredprogress.Store
-	Context         configuredprogress.Context
-	JournalLimits   configuredprogress.JournalLimits
-	Executor        RecoveryExecutor
-	Gate            *shardnode.FinalityGate
-	Log             *slog.Logger
-	Genesis         shardnode.BlockRef
-	Limits          RecoveryLimits
-	Host            shardnode.EvidenceHost
-	Providers       []peer.ID
+	mu            sync.Mutex
+	Store         *configuredprogress.Store
+	Context       configuredprogress.Context
+	JournalLimits configuredprogress.JournalLimits
+	Executor      RecoveryExecutor
+	Gate          *shardnode.FinalityGate
+	Log           *slog.Logger
+	Genesis       shardnode.BlockRef
+	Limits        RecoveryLimits
+	Host          shardnode.EvidenceHost
+	Providers     []peer.ID
+	// ProviderSource, when set, names the providers at the time they are needed (the active assignment's validators); Providers is the
+	// fixed list of a deployment that follows no assignment.
+	ProviderSource  interface{ Peers() []peer.ID }
 	TransportLimits shardnode.JournalTransportLimits
 	snapshot        func(context.Context) (configuredprogress.JournalSnapshot, error) // deterministic fault fixtures
 	fetch           func(context.Context, peer.ID, shardnode.JournalFetchRequest) ([]shardnode.JournalFetchEntry, error)
@@ -281,7 +284,10 @@ func (r *ExecutionRecovery) Recover(ctx context.Context, held *types.UnicityCert
 	}
 	c, err := r.load(ctx)
 	if err != nil {
-		if r.Host == nil && r.fetch == nil || len(r.Providers) == 0 || !errors.Is(err, ErrRecoveryUnavailable) {
+		// Acquisition needs somewhere to ask: hot-journal peers (a transport and at least one provider), or the authenticated archive. After
+		// an assignment shrinks the set to {self} there are no peers, and the archive alone must still be tried; retired peers are never
+		// used in its place.
+		if !r.canAcquire() || !errors.Is(err, ErrRecoveryUnavailable) {
 			return shardnode.BlockRef{}, err
 		}
 		if fetchErr := r.acquireMissing(ctx); fetchErr != nil {
@@ -485,7 +491,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 	}
 	var last error
 	var spent int64
-	for index, provider := range r.Providers {
+	for index, provider := range r.providerList() {
 		if index >= 4 {
 			break
 		}
@@ -547,7 +553,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 		}
 	}
 	if last != nil {
-		peerErr := fmt.Errorf("%w: target %x unavailable from %d peers: %v", ErrRecoveryUnavailable, target, len(r.Providers), last)
+		peerErr := fmt.Errorf("%w: target %x unavailable from %d peers: %v", ErrRecoveryUnavailable, target, len(r.providerList()), last)
 		if r.FetchArchive != nil {
 			archiveErr := r.fetchFromArchive(ctx, after, target, advance)
 			if archiveErr == nil {
@@ -576,7 +582,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 		}
 		return fmt.Errorf("%w: target %x unavailable from peers and archive: %v", ErrRecoveryUnavailable, target, archiveErr)
 	}
-	return fmt.Errorf("%w: target %x unavailable from %d peers", ErrRecoveryUnavailable, target, len(r.Providers))
+	return fmt.Errorf("%w: target %x unavailable from %d peers", ErrRecoveryUnavailable, target, len(r.providerList()))
 }
 
 func (r *ExecutionRecovery) archiveBudgetUnavailable(ctx context.Context, target []byte, err error) error {
@@ -836,3 +842,17 @@ func (r *ExecutionRecovery) Revalidate(ctx context.Context, ticket shardnode.Rea
 
 var _ shardnode.JournalRecovery = (*ExecutionRecovery)(nil)
 var _ shardnode.ChildReadiness = (*ExecutionRecovery)(nil)
+
+// providerList is the peers to ask for a journal suffix: the source's current answer, else the fixed list.
+func (r *ExecutionRecovery) providerList() []peer.ID {
+	if r.ProviderSource != nil {
+		return r.ProviderSource.Peers()
+	}
+	return r.Providers
+}
+
+// canAcquire: there is something to ask for a missing journal body: peers over a transport, or the authenticated archive source.
+func (r *ExecutionRecovery) canAcquire() bool {
+	peers := (r.Host != nil || r.fetch != nil) && len(r.providerList()) > 0
+	return peers || r.FetchArchive != nil
+}
