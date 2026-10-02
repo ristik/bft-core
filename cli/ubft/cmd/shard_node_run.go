@@ -78,6 +78,10 @@ type handoffObservationBackfiller interface {
 	BackfillJournalObservation(context.Context, configuredprogress.Context, configuredprogress.JournalLimits, *types.UnicityCertificate, *certification.TechnicalRecord) error
 }
 
+type handoffDischargeReader interface {
+	LoadTerminalDischarge(context.Context, configuredprogress.Context, configuredprogress.JournalLimits) (configuredprogress.TerminalDischarge, error)
+}
+
 type handoffArchiveReader interface {
 	Get(archive.Request) (*archive.Record, error)
 }
@@ -144,6 +148,45 @@ func runProfile2ArchiveRestore(ctx context.Context, catchUp, setupArchive, resto
 		}
 	}
 	return nil
+}
+
+// undischargedHandoffTerminals drops every replayed terminal that the authenticated journal already discharges: covered by the
+// persisted frontier (at or below its pruned floor or anchor) or by the verified restore base. Re-inserting such a body would only
+// resurrect history that was pruned or restored from the archive, and could exhaust the hot journal before startup completes. It
+// reads the frontier and restore base through LoadJournal, so the frontier must be enabled first; a terminal the discharge does not
+// cover is kept for repair, unchanged.
+func undischargedHandoffTerminals(ctx context.Context, reader handoffDischargeReader, journalCtx configuredprogress.Context,
+	limits configuredprogress.JournalLimits, terminals []handoffTerminalCertificate) ([]handoffTerminalCertificate, error) {
+	if len(terminals) == 0 {
+		return nil, nil
+	}
+	discharge, err := reader.LoadTerminalDischarge(ctx, journalCtx, limits)
+	if err != nil {
+		return nil, fmt.Errorf("reading the discharged handoff history: %w", err)
+	}
+	pending := make([]handoffTerminalCertificate, 0, len(terminals))
+	for _, terminal := range terminals {
+		if terminal.uc != nil && terminal.tr != nil && discharge.Covers(terminal.uc) {
+			continue
+		}
+		pending = append(pending, terminal)
+	}
+	return pending, nil
+}
+
+// repairUndischargedHandoffTerminals is the production terminal repair: the discharged prefix is skipped, the rest is repaired
+// (backfilled, recovering a pruned body from the local archive).
+func repairUndischargedHandoffTerminals(ctx context.Context, journal interface {
+	handoffDischargeReader
+	handoffObservationBackfiller
+	handoffHistoricalCandidateWriter
+}, localArchive handoffArchiveReader, archiveContext archive.Context, journalCtx configuredprogress.Context,
+	limits configuredprogress.JournalLimits, terminals []handoffTerminalCertificate) error {
+	pending, err := undischargedHandoffTerminals(ctx, journal, journalCtx, limits, terminals)
+	if err != nil {
+		return err
+	}
+	return reapplyHandoffTerminalCertificatesWithArchive(ctx, journal, journal, localArchive, archiveContext, journalCtx, limits, pending)
 }
 
 func reapplyHandoffTerminalCertificates(ctx context.Context, store handoffObservationBackfiller, journalCtx configuredprogress.Context,
@@ -885,10 +928,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				return err
 			},
 			func(ctx context.Context) error { return journalStore.EnableJournal(ctx, journalCtx, limits) },
-			func(ctx context.Context) error {
-				return reapplyHandoffTerminalCertificatesWithArchive(ctx, journalStore, journalStore, archiveLocal,
-					archiveSubject, journalCtx, limits, restoredHandoffTerminals)
-			}); startupErr != nil {
+			nil); startupErr != nil {
 			flags.observe.Logger().Error("profile2 handoff terminal repair failed", "error", startupErr)
 			return startupErr
 		}
@@ -920,6 +960,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 			if err := enableArchiveFrontier(ctx); err != nil {
 				return err
+			}
+			// The terminal repair runs only now, against the authenticated frontier and restore base: a terminal they already discharge
+			// is skipped, not resurrected into the hot journal (the frontier cannot be enabled any earlier, as it needs the validated set).
+			if err := repairUndischargedHandoffTerminals(ctx, journalStore, archiveLocal, archiveSubject, journalCtx, limits, restoredHandoffTerminals); err != nil {
+				flags.observe.Logger().Error("profile2 handoff terminal repair failed", "error", err)
+				return fmt.Errorf("repairing saved handoff observations: %w", err)
 			}
 		}
 		if flags.Restore {
@@ -971,7 +1017,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if flags.TrustHistoryProfile2 {
 				repairRestoredHandoffs = func(ctx context.Context) error {
 					restoringHandoffHistory = false
-					return reapplyHandoffTerminalCertificatesWithArchive(ctx, journalStore, journalStore, archiveLocal,
+					return repairUndischargedHandoffTerminals(ctx, journalStore, archiveLocal,
 						archiveSubject, journalCtx, limits, restoredHandoffTerminals)
 				}
 			}
