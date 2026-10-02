@@ -3,6 +3,7 @@ package registrygenesis
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -902,4 +903,46 @@ func marshalImported(g *importedGenesis) ([]byte, error) {
 		ExcessBlobGas string          `json:"excessBlobGas"`
 	}{Config: config, Nonce: fmt.Sprintf("0x%x", g.nonce), Timestamp: fmt.Sprintf("0x%x", g.timestamp), ExtraData: hexutil.Encode(g.extra), GasLimit: fmt.Sprintf("0x%x", g.gasLimit), Difficulty: fmt.Sprintf("0x%x", g.difficulty), MixHash: g.mixHash.Hex(), Coinbase: g.coinbase.Hex(), Alloc: alloc, BaseFee: fmt.Sprintf("0x%x", g.baseFee), Number: "0x0", ParentHash: common.Hash{}.Hex(), GasUsed: "0x0", BlobGasUsed: "0x0", ExcessBlobGas: "0x0"}
 	return json.MarshalIndent(out, "", "  ")
+}
+
+// ErrGenesisRootEpoch is a finalized genesis whose root epoch cannot be a root epoch this node can run under: absent, zero, or not
+// representable.
+var ErrGenesisRootEpoch = errors.New("registrygenesis: the finalized genesis carries no usable root epoch")
+
+// RootEpochOf reads the root epoch a finalized genesis was generated at: the a_sr storage word assignment.rootEpoch. It is only a
+// reading: ValidateFinalizedGenesisJSON re-derives the genesis with this value and refuses unless the commitment and the predeployed
+// account reproduce exactly, so a number that was not the one G commits to fails there. The genesis is authenticated by block 0 and the
+// root-certified registry snapshots, never by the number alone.
+func RootEpochOf(finalized []byte, layout uint64, limits GenesisJSONLimits) (uint64, error) {
+	l, err := limits.checked()
+	if err != nil {
+		return 0, err
+	}
+	in, err := parseGenesisJSON(finalized, l, true)
+	if err != nil {
+		return 0, err
+	}
+	names, err := registryproof.SlotNamesFor(layout)
+	if err != nil {
+		return 0, err
+	}
+	acct, ok := in.alloc[registryproof.RegistryAddress]
+	if !ok {
+		return 0, fmt.Errorf("%w: a_sr %s is not allocated", ErrGenesisRootEpoch, registryproof.RegistryAddress)
+	}
+	for i, n := range names {
+		if n != "assignment.rootEpoch" {
+			continue
+		}
+		k, err := registryproof.SlotKeyFor(layout, i)
+		if err != nil {
+			return 0, err
+		}
+		v := acct.storage[k]
+		if new(big.Int).SetBytes(v[:]).BitLen() > 64 {
+			return 0, fmt.Errorf("%w: the word does not fit 64 bits", ErrGenesisRootEpoch)
+		}
+		return binary.BigEndian.Uint64(v[24:]), nil
+	}
+	return 0, fmt.Errorf("%w: layout %d has no assignment.rootEpoch slot", ErrGenesisRootEpoch, layout)
 }

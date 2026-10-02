@@ -1228,14 +1228,17 @@ func loadGenesisOrigin(shardConf *types.PartitionDescriptionRecord, genesisPath,
 	return loadGenesisOriginLayout(shardConf, genesisPath, expectedIdentity, rootEpoch, 1)
 }
 
-func loadGenesisOriginLayout(shardConf *types.PartitionDescriptionRecord, genesisPath, expectedIdentity string, rootEpoch, layout uint64) (registrygenesis.GenesisOrigin, registryproof.Snapshot, error) {
+// loadGenesisOriginLayout validates the finalized genesis. The root epoch it pins is the one the genesis was generated at, read from the
+// genesis itself, not the epoch of the node's trust base: a node started after a root handoff (a restore above all) runs under a later
+// trust base than the genesis was made at. trustBaseEpoch only bounds it: a genesis cannot be from a root epoch the node's own trust base
+// has not reached. Reading the number authenticates nothing; the commitment re-derived with it and the predeployed registry account must
+// reproduce exactly (below), and block 0 and the root-certified registry snapshots bind the genesis the node actually runs.
+func loadGenesisOriginLayout(shardConf *types.PartitionDescriptionRecord, genesisPath, expectedIdentity string, trustBaseEpoch, layout uint64) (registrygenesis.GenesisOrigin, registryproof.Snapshot, error) {
 	art, err := registrygenesis.PinnedArtifactForLayout(layout)
 	if err != nil {
 		return registrygenesis.GenesisOrigin{}, registryproof.Snapshot{}, fmt.Errorf("loading the pinned seal-registry artifact: %w", err)
 	}
 	pins := registrygenesis.Pins{
-		// The root epoch of the configured trust base, which is the epoch the deployment pins.
-		RootEpoch:        rootEpoch,
 		RegistryCodeHash: art.CodeHash,
 		SystemAddress:    registrygenesis.SystemAddress,
 		RegistryAddress:  registryproof.RegistryAddress,
@@ -1244,6 +1247,14 @@ func loadGenesisOriginLayout(shardConf *types.PartitionDescriptionRecord, genesi
 	if err != nil {
 		return registrygenesis.GenesisOrigin{}, registryproof.Snapshot{}, fmt.Errorf("reading the finalized genesis %q: %w", genesisPath, err)
 	}
+	rootEpoch, err := registrygenesis.RootEpochOf(finalized, layout, registrygenesis.DefaultGenesisJSONLimits())
+	if err != nil {
+		return registrygenesis.GenesisOrigin{}, registryproof.Snapshot{}, fmt.Errorf("reading the genesis root epoch: %w", err)
+	}
+	if rootEpoch == 0 || rootEpoch > trustBaseEpoch {
+		return registrygenesis.GenesisOrigin{}, registryproof.Snapshot{}, fmt.Errorf("%w: the genesis is at root epoch %d, the node's trust base is at %d", registrygenesis.ErrGenesisRootEpoch, rootEpoch, trustBaseEpoch)
+	}
+	pins.RootEpoch = rootEpoch
 	var expected *common.Hash
 	if expectedIdentity != "" {
 		h, err := parseHash32(expectedIdentity)
