@@ -2,6 +2,8 @@ package signingauthority
 
 import (
 	"bytes"
+	"context"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -154,4 +156,62 @@ func TestIREpochRule(t *testing.T) {
 			require.Equal(t, tc.want, irEpochAdmitted(tc.ir, tc.enrolled, tc.base, tc.known, tc.acked))
 		})
 	}
+}
+
+// firstCallBlockingTrust blocks only its first lookup (until released): the one a slow trust lookup would hold open.
+type firstCallBlockingTrust struct {
+	tb      *types.RootTrustBaseV1
+	entered chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func (b *firstCallBlockingTrust) GetByEpoch(ctx context.Context, _ uint64) (*types.RootTrustBaseV1, error) {
+	b.mu.Lock()
+	b.calls++
+	first := b.calls == 1
+	b.mu.Unlock()
+	if !first {
+		return b.tb, nil
+	}
+	close(b.entered)
+	select {
+	case <-b.release:
+		return b.tb, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// The one-way latch holds against concurrent requests: an older-input-record request already inside its (slow) trust lookup when the
+// acknowledged request is reserved is refused at reservation, not reserved and signed afterwards.
+func TestTheAcknowledgementLatchHoldsAgainstAConcurrentOlderRequest(t *testing.T) {
+	f := newFixture(t, 1)
+	a := f.pending(t)
+	conf := ownConf(t, a)
+	require.NoError(t, a.CompleteEnrollment(conf))
+	session, err := a.ReplaceSession()
+	require.NoError(t, err)
+	_, err = a.Reserve(t.Context(), session, f.requestUnder(t, conf))
+	require.NoError(t, err)
+	require.NoError(t, a.Sign(session))
+	require.NoError(t, a.RetainResponse(session))
+	next := confAt(conf, shardEpoch+1)
+	require.NoError(t, a.AdvanceEpoch(t.Context(), next, successorTrust(f, 2)))
+	session, err = a.ReplaceSession()
+	require.NoError(t, err)
+
+	trust := &firstCallBlockingTrust{tb: successorTrust(f, 2), entered: make(chan struct{}), release: make(chan struct{})}
+	a.trust = trust
+	older := ackWindowRequest(t, f, next, 2, 20, shardEpoch)        // input record at the predecessor epoch, the higher round
+	acknowledged := ackWindowRequest(t, f, next, 2, 10, next.Epoch) // input record at the enrolled epoch
+	done := make(chan error, 1)
+	go func() { _, err := a.Reserve(context.Background(), session, older); done <- err }()
+	<-trust.entered // the older request has read the latch (still open) and is paused in its trust lookup
+	_, err = a.Reserve(t.Context(), session, acknowledged)
+	require.NoError(t, err, "the acknowledged request is reserved: the latch is set")
+	close(trust.release)
+	require.ErrorIs(t, <-done, ErrContextMismatch, "the older request is refused at reservation")
+	require.EqualValues(t, 10, a.Status().ReservedRound, "and it did not take the higher round")
 }

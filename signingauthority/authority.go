@@ -8,10 +8,10 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"github.com/unicitynetwork/bft-core/handoff"
 	"math"
 	"sync"
 
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -397,6 +397,12 @@ func (a *Authority) Reserve(ctx context.Context, s Session, req Request) (*Autho
 	}
 	if err := a.admitLocked(s); err != nil {
 		return nil, err
+	}
+	// Authenticate read the one-way latch and released the lock for the trust lookup, which can block; a request that reached the
+	// acknowledged input-record epoch may have been reserved in the meantime. The rule is applied again under the lock, so no
+	// older-input-record request is reserved (and then signed) after the acknowledgement.
+	if !irEpochAdmitted(auth.irEpoch, a.enroll.ShardEpoch, a.irBase, a.irBaseKnown, a.irAckSeen) {
+		return nil, fmt.Errorf("%w: input-record epoch %d is not admitted after the acknowledgement of epoch %d", ErrContextMismatch, auth.irEpoch, a.enroll.ShardEpoch)
 	}
 	switch {
 	case a.rec.empty() || auth.AssignedRound > a.rec.reserved:
