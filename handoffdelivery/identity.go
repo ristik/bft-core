@@ -23,6 +23,11 @@ func SemanticIdentity(b Bundle) ([32]byte, error) {
 	if err != nil {
 		return [32]byte{}, err
 	}
+	return identityOf(&c)
+}
+
+// identityOf strips the per-root parts from c, which it changes, and hashes what is left.
+func identityOf(c *Bundle) ([32]byte, error) {
 	strip := func(qc *rctypes.QuorumCert) {
 		if qc != nil {
 			qc.Signatures = nil

@@ -82,8 +82,16 @@ func (f *assignmentFixture) snapshot(t *testing.T, b certifiedchain.Block, activ
 func (f *assignmentFixture) obsContext(rootEpoch uint64, extra ...[32]byte) ObservationContextV2 {
 	c := ObservationContextV2{NetworkID: 3, PartitionID: 8, ShardID: types.ShardID{}, ShardConfHash: f.origin.FullShardConfHash().Bytes(),
 		RootEpoch: rootEpoch, TrustBases: stubTrustBases{tb: f.trust(rootEpoch)}}
-	for _, h := range extra {
-		c.AlsoAcceptConfHashes = append(c.AlsoAcceptConfHashes, bytes.Clone(h[:]))
+	if len(extra) != 0 {
+		// The installed per-epoch configurations: the genesis entry, then one per later shard epoch in order.
+		installed := map[uint64][32]byte{0: f.hash[0]}
+		for i, h := range extra {
+			installed[uint64(i+1)] = h
+		}
+		c.ConfForEpoch = func(epoch uint64) ([]byte, bool) {
+			h, ok := installed[epoch]
+			return bytes.Clone(h[:]), ok
+		}
 	}
 	return c
 }
@@ -210,7 +218,9 @@ func TestAcknowledgementIsBoundToTheCertifiedOriginAndAuthorizedEpoch(t *testing
 	t.Run("authorized epoch differs from the transition's new epoch", func(t *testing.T) {
 		tr := technicalAt(2, 11) // the technical record authorizes epoch 2, the transition installs 1
 		uc := f.certify(t, f.pdr[1], f.irAt(p, f.blocks[0], 0), tr, 12, 2)
-		o, err := AuthenticateObservationV2(context.Background(), f.obsContext(2, f.hash[1]), uc, tr)
+		// Epochs 1 and 2 are installed with the same configuration, so authentication passes and the derivation's own binding of
+		// the authorized epoch to the transition is what refuses.
+		o, err := AuthenticateObservationV2(context.Background(), f.obsContext(2, f.hash[1], f.hash[1]), uc, tr)
 		require.NoError(t, err)
 		_, err = f.derive(t, p, snap, 11, o, raw)
 		require.ErrorIs(t, err, ErrV2Context)
