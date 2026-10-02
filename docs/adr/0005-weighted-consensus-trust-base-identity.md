@@ -52,6 +52,13 @@ Adopt trust-base **version 2** and the weighted arithmetic in
    `Hash`. Nothing reinterprets a v1 body as v2.
 6. **Genesis** QC authenticity stays an explicit rule, not a weighted quorum.
 
+## Amendment 2026-10-01 (owner decisions, ADR 0012)
+
+The weighted arithmetic and the v2 body above are unchanged. Their scope narrows: PoS weights apply at the
+root/validator-entity level only. The EVM shard **mirrors** the root weights, so its `⌊W/2⌋+1` threshold is taken over the
+mirrored root weights; **aggregator shards are unweighted** (unit stake, as today). `Q2` and `Q3` shrink to that scope and the
+"every quorum path" inventory is read for the root and the EVM shard. See [ADR 0012](0012-validator-entity-model.md).
+
 ## Deliverables
 
 - `evmroot/d3weights.go` — `WeightSet` (checked `TotalWeight`), the three

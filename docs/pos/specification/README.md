@@ -23,3 +23,9 @@ replacement/additional wording for standard reth genesis JSON and configuration-
 It is a separate proposed normative amendment, with explicit application order and implementation gates.
 The seven `.tex` files and `repair.patch` above remain unchanged; the historical compilation claim applies
 only to that snapshot. No upstream publication or new LaTeX build is claimed.
+
+[ADR 0012 / owner decisions of 2026-10-01](amendments/0012-validator-entity-model.md) records the validator-entity model:
+weights only at the root/validator level (EVM mirrors, aggregator shards unweighted), root-key-only identity, coupled
+validator-set changes, positive proofs only, the deferred forced-inclusion track, centrally run aggregator shards without
+consistency proofs, epoch-boundary root-ordered aggregator reconfiguration and the move of broad F7 to the bridge track.
+It is a separate accepted amendment with its own supersession table; the seven `.tex` files above remain unchanged.

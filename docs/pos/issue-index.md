@@ -83,4 +83,14 @@ Start with [#2 R0](https://github.com/ristik/bft-core/issues/2), then [#3 D1](ht
 
 T8 is optional while rewards are disabled; P7 depends on T8 when enabled. B1 additionally depends on Q3 before use under PoS. M4B needs an equivalent private T6 chain, not a public launch.
 
+**Amended 2026-10-01 ([ADR 0012](../adr/0012-validator-entity-model.md)).** The owner decisions change the scope of these rows;
+the table and `issue-manifest.json` keep the original IDs and dependencies, and the GitHub issues are not edited by this change:
+[#49 Q2](https://github.com/ristik/bft-core/issues/49) and [#50 Q3](https://github.com/ristik/bft-core/issues/50) shrink to root weights
+mirrored by the EVM shard (aggregator shards unweighted); [#31 P3](https://github.com/ristik/bft-core/issues/31) binds only the root
+key; the I-track ([#24 I1](https://github.com/ristik/bft-core/issues/24), [#25 I2](https://github.com/ristik/bft-core/issues/25),
+[#26 I3](https://github.com/ristik/bft-core/issues/26), [#35 I4](https://github.com/ristik/bft-core/issues/35),
+[#56 I5](https://github.com/ristik/bft-core/issues/56)) is deferred and no longer part of M4S, with the open question on H7/S4/X4
+recorded in the roadmap (section 9); broad F7 ([#15](https://github.com/ristik/bft-core/issues/15), closed with limits) moves to
+[#66 B5](https://github.com/ristik/bft-core/issues/66).
+
 The machine-readable manifest records full and transitively reduced hard dependencies. Native GitHub blockers are the reduced graph; every full prerequisite remains in the issue body. New scope must update both representations.

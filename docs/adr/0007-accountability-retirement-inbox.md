@@ -2,6 +2,11 @@
 
 ## Status
 
+> **Forced-inbox part deferred 2026-10-01 ([ADR 0012](0012-validator-entity-model.md)).** The I-track (bounded forced
+> inclusion, roadmap I1-I5) is deferred by the owner decisions of 2026-10-01: a node fully trusts its co-hosted EVM node, and
+> forced inclusion is not a launch or PoS-shadow prerequisite. This ADR stays as the reference design; the accountability and
+> retirement parts are unaffected.
+
 Proposed (D5, issue #7). Revised after the first review (#81): a three-state
 entry lifecycle (pending → tentatively executed → certified-consumed + archived)
 that releases queue capacity and never re-executes on replay; the withdrawal

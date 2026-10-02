@@ -6,6 +6,11 @@ Refs [#15](https://github.com/ristik/bft-core/issues/15). **Proposed design only
 The owner chose shard-internal libp2p first for this bounded slice; a broader HTTP archive API is separate.
 No code, protocol registration, storage migration, activation or readiness change is included.
 
+> **Scope note 2026-10-01 ([ADR 0012](../adr/0012-validator-entity-model.md)).** Broad F7 (public RPC, SDK, account/storage
+> proof export, permanent-storage service) moves to the bridge track B5 ([#66](https://github.com/ristik/bft-core/issues/66));
+> this slice (retained parent-registry witness retrieval) is unaffected. Only certified positive execution proofs are required
+> from the EVM; absence proofs get no further work.
+
 ## 1. Boundary and sources
 
 The consumer already knows the authenticated exact EVM block B and checked deployment context, but its

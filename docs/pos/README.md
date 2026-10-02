@@ -6,6 +6,10 @@ for review. [The repair record](repair-plan.md) records its scope and validation
 The [M2 closure status](m2-closure-status.md) records the F7/F8/M2a evidence, pins, limits and
 owner decisions without treating the remaining M2/H6 work as closed.
 
+The [owner architecture decisions of 2026-10-01](../adr/0012-validator-entity-model.md) (validator-entity model, weights
+at the root level only, coupled validator-set changes, deferred I-track, centrally run aggregator shards) amend the roadmap
+below; the roadmap carries a decision section and per-ticket amendment notes.
+
 This is a planning and reference change. It adds no consensus, reth or contract implementation,
 sets no production parameters, and authorizes no deployment or currency issuance.
 GitHub issues are the work tracker; this roadmap is the initial design and release baseline.
