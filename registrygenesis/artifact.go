@@ -14,8 +14,8 @@ import (
 // ArtifactSource names the embedded file exactly: the merged SealRegistry artifact (contracts PR #2).
 const ArtifactSource = "ristik/unicity-pos-contracts artifacts/seal-registry-v1.json at 6b4e221737c13a645400b9e19dd5259d02e5cc5c"
 
-// ArtifactSourceV2 names the assignment-aware SealRegistry (contracts PR 5, h3/contracts-assignment).
-const ArtifactSourceV2 = "ristik/unicity-pos-contracts artifacts/seal-registry-v2.json at 8b30801afaa887db0d7aa2e4957ecae2c01293e4"
+// ArtifactSourceV2 names the assignment-aware SealRegistry as merged (contracts PR 5, main).
+const ArtifactSourceV2 = "ristik/unicity-pos-contracts artifacts/seal-registry-v2.json at ce3e40b479de0a0ef8787d8830ba77189aa11171"
 
 // PinnedCodeHashV2 is the runtime code hash of the pinned v2 artifact, an independent pin: the artifact
 // file is checked against it, so replacing the file alone cannot change the deployment's code.
