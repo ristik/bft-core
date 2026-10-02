@@ -363,3 +363,103 @@ m2_handoff() {
   m2_measure_pause "$((epoch-1))" "$epoch"
 }
 
+# --- Coupled configuration-only epoch advance (#328) -----------------------------------------------------
+# The same root committee with the same keys moves to the next root epoch; the EVM assignment (shard epoch) is
+# unchanged. No successor key signs a proof of possession, so it works with SIGNING=authority: the signing
+# authority still advances its epoch, validators restart under it, and restore/archive behaviour is exercised
+# above the authority high-water mark. A key-replacing coupled rotation needs successor PoPs (SIGNING=local) and
+# is covered by the H3 acceptance lane, not here.
+m2_same_members_trust_base() {
+  local epoch=$1 roots=$2 out=$3 i infos=()
+  for i in $roots; do infos+=(--node-info "test-nodes/root$i/node-info.json"); done
+  build/ubft trust-base generate --home test-nodes --network-id 3 --epoch "$epoch" \
+    --epoch-start "$((epoch * 100000))" --previous-trust-base "test-nodes/trust-base-epoch$((epoch-1)).json" \
+    --output-file-name "$out" "${infos[@]}" >/dev/null || return 1
+  for i in $roots; do
+    build/ubft trust-base sign --home "test-nodes/root$i" --trust-base "test-nodes/$out" >/dev/null || return 1
+  done
+}
+
+m2_config_only_handoff() { # epoch roots oldRpcs
+  local epoch=$1 roots=$2 oldRpcs=$3 oldEpoch=$(($1-1)) nextFile="trust-base-epoch$1.json"
+  local i logStart outcome waitStep committed=false first boot prev activated
+  first=$(echo "$roots" | awk '{print $1}')
+  m2_same_members_trust_base "$epoch" "$roots" "$nextFile" || return 1
+  for i in $(seq 1 30); do
+    logStart=$(wc -l < "test-nodes/root$first/debug.log")
+    if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" --root-rpc "$oldRpcs"; then
+      sleep 1; continue
+    fi
+    outcome=
+    for waitStep in $(seq 1 90); do
+      outcome=$(tail -n +"$((logStart+1))" "test-nodes/root$first/debug.log" |
+        grep -E "msg=\"root handoff outcome\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
+      [[ "$outcome" = *phase=committed* ]] && { committed=true; break; }
+      # An aborted attempt, or one whose Prepare lapsed (#336: no Freeze in time), is dead: re-plan now instead of sitting out the wait.
+      if [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=lapsed* ]]; then
+        echo "config-only handoff attempt ended ${outcome##*phase=}; retrying with the next attempt"
+        break
+      fi
+      sleep 1
+    done
+    $committed && break
+  done
+  $committed || { echo "config-only handoff to epoch $epoch did not commit" >&2; return 1; }
+  # Every root restarts on the install epoch; each fetches and verifies the committed bundle.
+  for i in $roots; do
+    prev=$(echo "$roots" | tr ' ' '\n' | grep -vx "$i" | head -1)
+    boot=$(m2_root_addr "$prev")
+    stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return 1
+    for waitStep in $(seq 1 50); do
+      lsof -nP -iTCP:"$(m2_rpc_port "$i")" -sTCP:LISTEN >/dev/null 2>&1 || break
+      sleep 0.2
+    done
+    m2_archive_root_state "$i" "$epoch" || return 1
+    m2_start_root "$i" "$epoch" "$boot" || return 1
+  done
+  m2_wait_root_epoch "$first" "$epoch" || return 1
+  for i in $(m2_online_validators); do
+    activated=false
+    for waitStep in $(seq 1 90); do
+      if grep -Eq "msg=\"handoff activated\" rootEpoch=$epoch([[:space:]]|$)" "test-nodes/evm$i/debug.log"; then activated=true; break; fi
+      sleep 1
+    done
+    $activated || { echo "EVM validator $i did not activate root epoch $epoch" >&2; return 1; }
+  done
+  m2_advance_authorities "$epoch" "$nextFile" || return 1
+  m2_send_paid "$epoch" "${M2_NEXT_NONCE:-$((epoch+1))}" || return 1
+  m2_measure_pause "$oldEpoch" "$epoch"
+}
+
+# M2_HANDOFF_MODE: config-only (default on registry layout 2) or rotate (key-replacing, layout 1 only: layout 2
+# enforces coupled validator-set changes, which this root-only rotation is not).
+
+# The #261 comparison needs both paid and idle certified blocks on each side of
+# the handoff. Do not infer idleness from an empty mempool or a short interval:
+# require a zero-transaction EL block that the active BFT node admitted in this
+# root epoch.
+m2_wait_certified_idle() {
+  local epoch=$1 source port head block hash count log
+  source=$(m2_online_validators | awk '{print $1}')
+  port=$((rethEthBase + source - 1))
+  log="test-nodes/evm$source/debug.log"
+  for attempt in $(seq 1 90); do
+    head=$(rpc "http://127.0.0.1:$port" eth_blockNumber '[]' | pyget "['result']") || head=
+    if [ -n "$head" ] && [ "$head" != None ]; then
+      block=$(rpc "http://127.0.0.1:$port" eth_getBlockByNumber "[\"$head\",true]") || block=
+      hash=$(printf '%s' "$block" | pyget "['result']['hash']" || true)
+      count=$(printf '%s' "$block" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["transactions"]))' 2>/dev/null) || count=-1
+      if [ "$count" = 0 ] && [ -n "$hash" ] && [ "$hash" != None ] &&
+        grep -Eq "msg=\"certificate admitted\" block=${hash#0x} .*rootEpoch=$epoch([[:space:]]|$)" "$log"; then
+        echo "certified idle root-epoch=$epoch block=$hash height=$((head)) source-validator=$source"
+        return 0
+      fi
+    fi
+    if [ $((attempt % 15)) -eq 0 ]; then
+      echo "waiting for a zero-transaction certificate in root epoch $epoch ($attempt/90)"
+    fi
+    sleep 1
+  done
+  echo "no certified zero-transaction block appeared in root epoch $epoch" >&2
+  return 1
+}
