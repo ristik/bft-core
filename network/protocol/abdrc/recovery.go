@@ -11,6 +11,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
@@ -168,29 +169,29 @@ func (sm *StateMsg) CanRecoverToRound(round uint64) error {
 	return nil
 }
 
-func (sm *StateMsg) Verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase) error {
-	return sm.verify(hashAlgorithm, tb, nil, nil)
+func (sm *StateMsg) Verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, pin ...*trustbase.GenesisPin) error {
+	return sm.verify(hashAlgorithm, tb, nil, nil, pin)
 }
 
 // VerifyWithHistory verifies inherited LastCRs under their own signer epochs.
 // Consensus certificates remain on the current, same-epoch recovery path.
-func (sm *StateMsg) VerifyWithHistory(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases) error {
+func (sm *StateMsg) VerifyWithHistory(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases, pin ...*trustbase.GenesisPin) error {
 	if history == nil {
 		return ErrHistoricalTrustBase
 	}
-	return sm.verify(hashAlgorithm, tb, history, nil)
+	return sm.verify(hashAlgorithm, tb, history, nil, pin)
 }
 
 // VerifyWithAnchor is the profile-2 recovery path after local proof and
 // snapshot installation. Ordinary recovery remains on VerifyWithHistory.
-func (sm *StateMsg) VerifyWithAnchor(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases, anchor RecoveryAnchorVerifier) error {
+func (sm *StateMsg) VerifyWithAnchor(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases, anchor RecoveryAnchorVerifier, pin ...*trustbase.GenesisPin) error {
 	if history == nil || anchor == nil {
 		return ErrHistoricalTrustBase
 	}
-	return sm.verify(hashAlgorithm, tb, history, anchor)
+	return sm.verify(hashAlgorithm, tb, history, anchor, pin)
 }
 
-func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases, anchor RecoveryAnchorVerifier) error {
+func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases, anchor RecoveryAnchorVerifier, pin []*trustbase.GenesisPin) error {
 	if sm.CommittedHead == nil {
 		return recoveryStateError("commit head is nil")
 	}
@@ -244,15 +245,15 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 	}
 	// Block from genesis round does not have a Qc
 	if !anchorHead && sm.CommittedHead.GetRound() > rctypes.GenesisRootRound {
-		if err := sm.CommittedHead.Block.Qc.Verify(tb); err != nil {
+		if err := sm.CommittedHead.Block.Qc.Verify(tb, pin...); err != nil {
 			return fmt.Errorf("block qc verification error: %w", err)
 		}
 	}
 	if !anchorHead {
-		if err := sm.CommittedHead.Qc.Verify(tb); err != nil {
+		if err := sm.CommittedHead.Qc.Verify(tb, pin...); err != nil {
 			return fmt.Errorf("qc verification error: %w", err)
 		}
-		if err := sm.CommittedHead.CommitQc.Verify(tb); err != nil {
+		if err := sm.CommittedHead.CommitQc.Verify(tb, pin...); err != nil {
 			return fmt.Errorf("commit qc verification error: %w", err)
 		}
 	}
@@ -262,7 +263,7 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 			return fmt.Errorf("invalid block node: %w", err)
 		}
 		if n.Qc != nil {
-			if err := n.Qc.Verify(tb); err != nil {
+			if err := n.Qc.Verify(tb, pin...); err != nil {
 				return fmt.Errorf("block node qc verification error: %w", err)
 			}
 		}

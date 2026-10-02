@@ -26,6 +26,32 @@ type TrustBaseStore struct {
 	mu    sync.RWMutex
 	log   *slog.Logger
 	cache map[uint64]*types.RootTrustBaseV1
+	// genesis identifies the local genesis quorum certificate, the only round-1 QC the verifiers accept without signatures.
+	genesis *GenesisPin
+}
+
+// GenesisPin identifies the local genesis quorum certificate by the hash of its vote info and the signed bytes of its commit info. It is
+// plain data so that this package, which the QC types import, does not have to import them.
+type GenesisPin struct {
+	VoteInfoHash []byte
+	CommitInfo   []byte
+}
+
+// SetGenesisPin records the local genesis QC the verifiers that take this store compare a round-1 QC with.
+func (s *TrustBaseStore) SetGenesisPin(p *GenesisPin) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.genesis = p
+}
+
+// GenesisPin is the pin recorded by SetGenesisPin, or nil: with none, no round-1 QC verifies.
+func (s *TrustBaseStore) GenesisPin() *GenesisPin {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.genesis
 }
 
 func NewTrustBaseStore(db keyvaluedb.KeyValueDB, log *slog.Logger) (*TrustBaseStore, error) {

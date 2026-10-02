@@ -146,7 +146,7 @@ func (x *Timeout) Verify(tbs *trustbase.TrustBaseStore) error {
 	if err != nil {
 		return fmt.Errorf("failed to get trust base for high QC verification, epoch %d: %w", x.HighQc.VoteInfo.Epoch, err)
 	}
-	if err := x.HighQc.Verify(highQcTrustBase); err != nil {
+	if err := x.HighQc.Verify(highQcTrustBase, tbs.GenesisPin()); err != nil {
 		return fmt.Errorf("invalid high QC: %w", err)
 	}
 

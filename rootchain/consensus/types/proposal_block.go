@@ -8,6 +8,8 @@ import (
 
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 )
 
 var (
@@ -157,7 +159,7 @@ func (x *BlockData) IsValid() error {
 	return nil
 }
 
-func (x *BlockData) Verify(tb types.RootTrustBase) error {
+func (x *BlockData) Verify(tb types.RootTrustBase, pin ...*trustbase.GenesisPin) error {
 	if err := x.IsValid(); err != nil {
 		return fmt.Errorf("invalid block data: %w", err)
 	}
@@ -166,7 +168,7 @@ func (x *BlockData) Verify(tb types.RootTrustBase) error {
 		// checkpoint by the consensus bootstrap admission path.
 		return nil
 	}
-	if err := x.Qc.Verify(tb); err != nil {
+	if err := x.Qc.Verify(tb, pin...); err != nil {
 		return fmt.Errorf("invalid block data QC: %w", err)
 	}
 	return nil

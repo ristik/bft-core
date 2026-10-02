@@ -593,7 +593,9 @@ func TestGetState_WithoutShards(t *testing.T) {
 	require.Equal(t, uint64(1), stateMsg.CommittedHead.Qc.GetRound())
 	// the verification of hard-coded CommittedHead should succeed despite having no signatures
 	require.Len(t, stateMsg.CommittedHead.CommitQc.Signatures, 0)
-	require.NoError(t, stateMsg.Verify(crypto.SHA256, trustBase))
+	require.NoError(t, stateMsg.Verify(crypto.SHA256, trustBase, cm.trustBaseStore.GenesisPin()))
+	// ... because it is the local genesis QC: without the pin nothing says so
+	require.ErrorIs(t, stateMsg.Verify(crypto.SHA256, trustBase), drctypes.ErrNotGenesisQC)
 
 	// advance to round 2
 	lastProposalMsg := testutils.MockAwaitMessage[*abdrc.ProposalMsg](t, mockNet, network.ProtocolRootProposal)
@@ -615,7 +617,8 @@ func TestGetState_WithoutShards(t *testing.T) {
 	// but a new commitQc was produced with signatures
 	require.Equal(t, uint64(2), stateMsg.CommittedHead.CommitQc.GetRound())
 	require.Len(t, stateMsg.CommittedHead.CommitQc.Signatures, 1)
-	require.NoError(t, stateMsg.Verify(crypto.SHA256, trustBase))
+	// the genesis QC is still the head's QC and the QC of the round-2 block, so the pin is still needed
+	require.NoError(t, stateMsg.Verify(crypto.SHA256, trustBase, cm.trustBaseStore.GenesisPin()))
 }
 
 func TestGetState_WithShards(t *testing.T) {

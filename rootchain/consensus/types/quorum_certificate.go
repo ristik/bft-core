@@ -9,6 +9,8 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
+
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 )
 
 const (
@@ -80,7 +82,50 @@ func (x *QuorumCert) IsValid() error {
 	return nil
 }
 
-func (x *QuorumCert) Verify(tb types.RootTrustBase) error {
+// ErrNotGenesisQC refuses a quorum certificate of the genesis round that is not the local genesis QC. No QC of round 1 is ever signed: the
+// genesis QC is fixed by the software, so any other certificate claiming round 1 has no signatures to check and nothing to vouch for it.
+var ErrNotGenesisQC = errors.New("round-1 quorum certificate is not the local genesis QC")
+
+// ErrPinNotGenesisRound refuses to pin a certificate whose vote round is not the genesis round: a pin made of a later certificate (the commit
+// QC a block carries after it is committed) would refuse the genuine genesis QC.
+var ErrPinNotGenesisRound = errors.New("pinned certificate is not of the genesis round")
+
+// GenesisPinOf identifies a genesis QC: the hash of its vote info and the signed bytes of its commit info. The input must be of round 1.
+func GenesisPinOf(genesis *QuorumCert) (*trustbase.GenesisPin, error) {
+	if genesis == nil || genesis.VoteInfo == nil || genesis.LedgerCommitInfo == nil {
+		return nil, errors.New("genesis QC is incomplete")
+	}
+	if genesis.VoteInfo.RoundNumber != GenesisRootRound {
+		return nil, fmt.Errorf("%w: vote round %d", ErrPinNotGenesisRound, genesis.VoteInfo.RoundNumber)
+	}
+	h, err := genesis.VoteInfo.Hash(gocrypto.SHA256)
+	if err != nil {
+		return nil, fmt.Errorf("hashing the genesis vote info: %w", err)
+	}
+	bs, err := genesis.LedgerCommitInfo.SigBytes()
+	if err != nil {
+		return nil, fmt.Errorf("marshalling the genesis commit info: %w", err)
+	}
+	return &trustbase.GenesisPin{VoteInfoHash: h, CommitInfo: bs}, nil
+}
+
+// IsGenesisQC reports whether x is the genesis QC the pin identifies: the same vote info and the same signed commit info. Signatures it may
+// carry are not part of its identity (the genesis QC has none to verify), so they neither help nor hurt.
+func (x *QuorumCert) IsGenesisQC(pin *trustbase.GenesisPin) bool {
+	if x == nil || pin == nil || x.VoteInfo == nil || x.LedgerCommitInfo == nil {
+		return false
+	}
+	h, err := x.VoteInfo.Hash(gocrypto.SHA256)
+	if err != nil || !bytes.Equal(h, pin.VoteInfoHash) {
+		return false
+	}
+	bs, err := x.LedgerCommitInfo.SigBytes()
+	return err == nil && bytes.Equal(bs, pin.CommitInfo)
+}
+
+// Verify checks the QC against the trust base. The genesis QC has no signatures to verify: it is accepted only when it is the local one, which
+// the caller identifies by a pin (the store's GenesisPin); with no pin, or another round-1 QC, the QC is refused with ErrNotGenesisQC.
+func (x *QuorumCert) Verify(tb types.RootTrustBase, pin ...*trustbase.GenesisPin) error {
 	if err := x.IsValid(); err != nil {
 		return fmt.Errorf("invalid quorum certificate: %w", err)
 	}
@@ -98,8 +143,10 @@ func (x *QuorumCert) Verify(tb types.RootTrustBase) error {
 	}*/
 
 	if x.GetRound() == GenesisRootRound {
-		// Skip signature verification for genesis round QC - it is hard-coded and not signed
-		return nil
+		if len(pin) == 1 && x.IsGenesisQC(pin[0]) {
+			return nil
+		}
+		return ErrNotGenesisQC
 	}
 
 	bs, err := x.LedgerCommitInfo.SigBytes()
