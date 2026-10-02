@@ -42,6 +42,14 @@ t6_coupled_rotation_s1() {
   next=$((cur + 1)); T6_ROTATION_NEXT_EPOCH=$next
   echo "T6 coupled rotation: root epoch $cur -> $next, shard epoch 0 -> 1; evm4 (root 4) retires, evm5 (root 5) joins"
 
+  # The H4 restore of validator 1 wiped its home and ran from test-nodes/h4-replaced, keeping the identity there: put it back, so the node id
+  # can be read and the validator can be restored into its own home again.
+  if [ ! -f test-nodes/evm1/keys.json ] && [ -f test-nodes/h4-replaced/keys.json ]; then
+    mkdir -p test-nodes/evm1
+    cp test-nodes/h4-replaced/keys.json test-nodes/evm1/keys.json
+    [ -f test-nodes/evm1/logger-config.yaml ] || cp test-nodes/evm2/logger-config.yaml test-nodes/evm1/logger-config.yaml 2>/dev/null || true
+    [ -f test-nodes/evm1/jwt.hex ] || cp test-nodes/h4-replaced/jwt.hex test-nodes/evm1/jwt.hex 2>/dev/null || true
+  fi
   h3_spare_identity 5 || return 1
   h3_prepare_coupled "$next" 4 5 || return 1
   h3_spare_authority 5 1 "$next" "trust-base-epoch${next}.json" || return 1
