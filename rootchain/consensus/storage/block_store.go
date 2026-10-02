@@ -92,6 +92,15 @@ func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSt
 	if err != nil {
 		return nil, fmt.Errorf("creating block tree from recovery: %w", err)
 	}
+	// A root that recovers with the block that CARRIES the handoff record as its head captures the canonical checkpoint now: the next
+	// commit would find the record already committed and skip it. The carrier is the one block whose round is the control state's
+	// ordered round. A head past the carrier cannot be captured (the carrier is pruned everywhere): such a root refuses to serve the
+	// checkpoint and the follower asks another root.
+	if c := rootNode.ShardState.Control; c != nil && rootNode.GetRound() == c.OrderedRound {
+		if err := blTree.captureHandoffCheckpoint(nil, rootNode); err != nil {
+			return nil, fmt.Errorf("capturing the handoff checkpoint of the recovered head: %w", err)
+		}
+	}
 	return &BlockStore{
 		hash:          hash,
 		blockTree:     blTree,

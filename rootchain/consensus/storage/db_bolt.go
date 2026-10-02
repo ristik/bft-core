@@ -120,8 +120,9 @@ func (db BoltDB) HandoffCandidate(id []byte) ([]byte, error) {
 	return data, err
 }
 
-// StoreHandoffCheckpoint retains the canonical checkpoint of the handoff into successor epoch `epoch`. The first copy is kept: a second
-// store of the same checkpoint (a replayed commit) is a no-op, and a different one is refused.
+// StoreHandoffCheckpoint retains the canonical checkpoint of the handoff into successor epoch `epoch`. The first copy is kept and a second
+// store is a no-op, whatever it holds: a replayed commit can carry another valid signature subset of the same certificate, and refusing
+// it would fail a commit over bytes that mean the same thing. What the store serves is therefore always the first copy.
 func (db BoltDB) StoreHandoffCheckpoint(epoch uint64, data []byte) error {
 	if epoch < 2 || !validHandoffBundleSize(len(data)) {
 		return ErrHandoffRecord

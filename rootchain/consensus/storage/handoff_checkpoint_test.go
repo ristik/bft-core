@@ -177,3 +177,45 @@ func TestShardEntriesAreInCanonicalOrder(t *testing.T) {
 		require.Equal(t, first, order)
 	}
 }
+
+// recoverFrom is a second root that recovers from the donor's committed head, as a lagging root does from a peer's state.
+func recoverFrom(t *testing.T, donor committedHandoff) *BlockStore {
+	t.Helper()
+	state, err := donor.s.GetState()
+	require.NoError(t, err)
+	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "recovered.db"), WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	s, err := NewFromState(crypto.SHA256, state.CommittedHead, db, donor.s.orchestration, logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	s.handoffAuth = testRecordAuthority{}
+	return s
+}
+
+// A root that recovers with the block that carries the record as its head captures the canonical checkpoint itself: its checkpoint is
+// byte-identical to the donor's, before and after it commits a later block (which would otherwise skip the capture).
+func TestARootRecoveredWithTheCarrierAsHeadServesTheCanonicalCheckpoint(t *testing.T) {
+	donor := newCommittedHandoff(t, 0)
+	want := checkpointBytes(t, donor.s)
+	recovered := recoverFrom(t, donor)
+	require.EqualValues(t, 4, recovered.blockTree.Root().GetRound())
+	require.Equal(t, want, checkpointBytes(t, recovered))
+
+	addProfileBlock(t, recovered, 5, nil)
+	commitRound(t, recovered, 5)
+	require.EqualValues(t, 5, recovered.blockTree.Root().GetRound())
+	require.Equal(t, want, checkpointBytes(t, recovered), "a later commit does not change what it serves")
+}
+
+// A root that recovers to a head PAST the carrier cannot capture it (every peer pruned it): it refuses, with ErrHandoffRecord, and never
+// serves the current root, which would be a non-canonical copy that the bundle archive then keeps for good.
+func TestARootRecoveredPastTheCarrierRefusesToServeTheCheckpoint(t *testing.T) {
+	donor := newCommittedHandoff(t, 2)
+	require.EqualValues(t, 6, donor.s.blockTree.Root().GetRound())
+	recovered := recoverFrom(t, donor)
+	require.EqualValues(t, 6, recovered.blockTree.Root().GetRound())
+	_, _, _, err := recovered.HandoffCheckpoint()
+	require.ErrorIs(t, err, ErrHandoffRecord)
+	// while a root that committed it serves it
+	require.NotEmpty(t, checkpointBytes(t, donor.s))
+}

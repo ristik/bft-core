@@ -558,8 +558,10 @@ func checkpointOf(root *ExecutedBlock) (*rcnet.CommittedBlock, *basetypes.Unicit
 // checkpoint: a different byte string for the same handoff). The tree lock keeps the current record and the stored checkpoint from
 // different handoffs from being paired.
 //
-// A root whose commit predates the capture (or that learned the committed state by recovery, not by committing it) holds no stored
-// checkpoint and serves the current committed root, as before: valid, but not canonical.
+// A root whose store retains checkpoints but holds none for this record (its commit predates the capture, or it recovered to a head PAST
+// the carrier, which is pruned everywhere) REFUSES with ErrHandoffRecord rather than serve the current root: a non-canonical copy served
+// once is retained by the bundle archive and served for good, and replicas then refuse the canonical one. The follower asks every root,
+// so another one, which did capture it, serves it. Only a store without checkpoint retention (tests) serves the current root.
 func (bt *BlockTree) HandoffCheckpoint() (*rcnet.CommittedBlock, *basetypes.UnicityTreeCertificate, evmroot.OrderedHandoffRecord, error) {
 	bt.m.Lock()
 	defer bt.m.Unlock()
@@ -584,6 +586,7 @@ func (bt *BlockTree) HandoffCheckpoint() (*rcnet.CommittedBlock, *basetypes.Unic
 			}
 			return stored.Block, stored.Path, record, nil
 		}
+		return nil, nil, evmroot.OrderedHandoffRecord{}, fmt.Errorf("%w: this root holds no canonical checkpoint for the handoff into epoch %d", ErrHandoffRecord, record.Epoch+1)
 	}
 	head, path, err := checkpointOf(root)
 	if err != nil {
