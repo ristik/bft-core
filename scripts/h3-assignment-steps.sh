@@ -62,7 +62,10 @@ for shard in ('a-left','a-right','b-left'):
         raise SystemExit(f"{sys.argv[3]}: aggregator {shard}: root made no TR progress for it")
     if int(a[shard]['certifiedIRRound'])<int(b[shard]['certifiedIRRound']) or int(a[shard]['aggregatorBlockHeight'])<int(b[shard]['aggregatorBlockHeight']):
         raise SystemExit(f"{sys.argv[3]}: aggregator {shard} went backwards")
-if int(a['evm']['certifiedIRRound'])<=int(b['evm']['certifiedIRRound']):
+# While a successor assignment's acknowledgement is held (or its set is unavailable) the EVM must NOT certify: the lane then asserts
+# the roots and aggregators only (H3_EVM_STALLED=1), and the stall itself is asserted by its own step.
+import os
+if os.environ.get('H3_EVM_STALLED')!='1' and int(a['evm']['certifiedIRRound'])<=int(b['evm']['certifiedIRRound']):
     raise SystemExit(f"{sys.argv[3]}: EVM certified no new round")
 if int(a['a-left']['rootRound'])<=int(b['a-left']['rootRound']):
     raise SystemExit(f"{sys.argv[3]}: root round did not advance")
@@ -367,7 +370,7 @@ h3_root_quorum_restart() {
   local row0 row1
   row0=$(h3_evm_row | jq -c '{round: .roundNumber, tr: .trRound}')
   h3_activate_coupled 3 4 5 || return 1       # the root quorum restarts (new root 5 first), the replaced root 4 stops
-  h3_progress "after root quorum restart (ack still held)" 10 || return 1
+  H3_EVM_STALLED=1 h3_progress "after root quorum restart (ack still held)" 10 || return 1
   h3_registry_is 0 2 || return 1             # the successor set has not acknowledged: registry is still at the old shard epoch
   row1=$(h3_evm_row | jq -c '{round: .roundNumber, tr: .trRound}')
   echo "EVM row before restart $row0, after $row1"
@@ -508,7 +511,7 @@ h3_s2_stalls() {
   sleep 25
   [ "$(h3_evm_row | jq -r '.roundNumber')" = "$base" ] || { echo "EVM certified past H without an s=2 quorum" >&2; return 1; }
   h3_registry_is 1 3 || return 1
-  h3_progress "s=2 stalled EVM" 8
+  H3_EVM_STALLED=1 h3_progress "s=2 stalled EVM" 8
 }
 h3_step "EVM waits (no certification) while root and aggregators progress" h3_s2_stalls
 
