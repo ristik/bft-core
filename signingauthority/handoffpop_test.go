@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -55,15 +56,13 @@ func TestHandoffPoPRefusesAWrongDomain(t *testing.T) {
 // Each context check refuses on its own, with the sentinel the contract names.
 func TestHandoffPoPRefusesAWrongContext(t *testing.T) {
 	cases := map[string]func(*HandoffPoPRequest, []byte){
-		"another node":             func(r *HandoffPoPRequest, _ []byte) { r.NodeID = "someone-else" },
-		"another network (ctx)":    func(r *HandoffPoPRequest, _ []byte) { r.Context.Network++ },
-		"another network (succ)":   func(r *HandoffPoPRequest, _ []byte) { r.Successor.NetworkID++ },
-		"another partition":        func(r *HandoffPoPRequest, _ []byte) { r.Successor.PartitionID++ },
-		"another shard":            func(r *HandoffPoPRequest, _ []byte) { r.Successor.ShardID, _ = (types.ShardID{}).Split() },
-		"not the next shard epoch": func(r *HandoffPoPRequest, _ []byte) { r.Successor.Epoch += 1 },
-		"a shard epoch two ahead":  func(r *HandoffPoPRequest, _ []byte) { r.Successor.Epoch = shardEpoch + 2 },
-		"no predecessor":           func(r *HandoffPoPRequest, _ []byte) { r.Context.Predecessor = [32]byte{} },
-		"no successor":             func(r *HandoffPoPRequest, _ []byte) { r.Successor = nil },
+		"another node":           func(r *HandoffPoPRequest, _ []byte) { r.NodeID = "someone-else" },
+		"another network (ctx)":  func(r *HandoffPoPRequest, _ []byte) { r.Context.Network++ },
+		"another network (succ)": func(r *HandoffPoPRequest, _ []byte) { r.Successor.NetworkID++ },
+		"another partition":      func(r *HandoffPoPRequest, _ []byte) { r.Successor.PartitionID++ },
+		"another shard":          func(r *HandoffPoPRequest, _ []byte) { r.Successor.ShardID, _ = (types.ShardID{}).Split() },
+		"no predecessor":         func(r *HandoffPoPRequest, _ []byte) { r.Context.Predecessor = [32]byte{} },
+		"no successor":           func(r *HandoffPoPRequest, _ []byte) { r.Successor = nil },
 		"the successor names another key": func(r *HandoffPoPRequest, _ []byte) {
 			other, err := New(Enrollment{AuthorityID: "x", NodeID: "x", NetworkID: testNetworkID, PartitionID: testPartitionID, RootEpoch: PinRootEpoch(rootEpoch), Profile: ProfileLegacyBCRv1}, trustStub{})
 			if err == nil {
@@ -117,5 +116,45 @@ func TestHandoffPoPRefusesAWrongContext(t *testing.T) {
 		pop, err := a.SignHandoffPoP(req)
 		require.NoError(t, err)
 		require.NoError(t, evmassign.VerifyPoPs(req.Context, succ, []evmassign.PoP{pop}))
+	})
+}
+
+// The successor shard epochs a proof may name for an authority enrolled at shard epoch E: E itself (a joiner's pending enrollment, the
+// rule before this bound existed and kept), E+1 (the next handoff) up to E+handoff.MaxSupersessionSpan (a supersession of an
+// unacknowledged chain: the successor follows the latest installed technical record). Nothing below E and nothing further ahead: a
+// proof is a forward commitment, so a compromised operator channel cannot pre-sign far-future proofs.
+func TestHandoffPoPSuccessorEpochRange(t *testing.T) {
+	span := handoff.MaxSupersessionSpan
+	for name, tc := range map[string]struct {
+		epoch  uint64
+		accept bool
+	}{
+		"the enrolled epoch itself (pending joiner)": {shardEpoch, true},
+		"the next epoch":               {shardEpoch + 1, true},
+		"two ahead (a supersession)":   {shardEpoch + 2, true},
+		"exactly the span ahead":       {shardEpoch + span, true},
+		"one past the span":            {shardEpoch + span + 1, false},
+		"far in the future":            {shardEpoch + 1_000_000, false},
+		"one below the enrolled epoch": {shardEpoch - 1, false},
+		"epoch zero":                   {0, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, req, _ := popFixture(t)
+			req.Successor.Epoch = tc.epoch
+			pop, err := a.SignHandoffPoP(req)
+			if tc.accept {
+				require.NoError(t, err)
+				require.NoError(t, evmassign.VerifyPoPs(req.Context, req.Successor, []evmassign.PoP{pop}))
+				return
+			}
+			require.ErrorIs(t, err, ErrContextMismatch)
+		})
+	}
+	t.Run("an enrolled epoch near the top of the range cannot overflow the bound", func(t *testing.T) {
+		a, req, _ := popFixture(t)
+		a.enroll.ShardEpoch = ^uint64(0) - 1
+		req.Successor.Epoch = 3
+		_, err := a.SignHandoffPoP(req)
+		require.ErrorIs(t, err, ErrContextMismatch)
 	})
 }

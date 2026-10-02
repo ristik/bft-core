@@ -67,10 +67,10 @@ func TestTheHandoffPoPRefusalsKeepTheirNamesAcrossTheWire(t *testing.T) {
 	require.ErrorIs(t, err, signingauthority.ErrPoPDomain)
 
 	for name, mutate := range map[string]func(*signingauthority.HandoffPoPRequest){
-		"another node":       func(r *signingauthority.HandoffPoPRequest) { r.NodeID = "node-2" },
-		"another network":    func(r *signingauthority.HandoffPoPRequest) { r.Context.Network = 6 },
-		"another partition":  func(r *signingauthority.HandoffPoPRequest) { r.Successor.PartitionID++ },
-		"not the next epoch": func(r *signingauthority.HandoffPoPRequest) { r.Successor.Epoch = 5 },
+		"another node":      func(r *signingauthority.HandoffPoPRequest) { r.NodeID = "node-2" },
+		"another network":   func(r *signingauthority.HandoffPoPRequest) { r.Context.Network = 6 },
+		"another partition": func(r *signingauthority.HandoffPoPRequest) { r.Successor.PartitionID++ },
+		"beyond the span":   func(r *signingauthority.HandoffPoPRequest) { r.Successor.Epoch = 1_000 },
 	} {
 		bad := f.popRequest(t)
 		mutate(&bad)
