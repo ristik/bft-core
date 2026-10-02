@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,13 +24,18 @@ import (
 // conf: the finalized genesis JSON and the full shard configuration. The full configuration is
 // returned as a value and written to a file, because both the loader test and the origin test need it.
 func preparedGenesisFixture(t *testing.T, chainID uint64) (*types.PartitionDescriptionRecord, string, string) {
+	return preparedGenesisFixtureAt(t, chainID, 1)
+}
+
+// preparedGenesisFixtureAt is preparedGenesisFixture for a genesis generated at the given root epoch.
+func preparedGenesisFixtureAt(t *testing.T, chainID, rootEpoch uint64) (*types.PartitionDescriptionRecord, string, string) {
 	t.Helper()
 	base := certifiedchain.Config(3)
 	base.PartitionParams = map[string]string{registrygenesis.ChainIDParam: strconv.FormatUint(chainID, 10)}
 	art, err := registrygenesis.PinnedArtifact()
 	require.NoError(t, err)
 	pins := registrygenesis.Pins{
-		RootEpoch: 1, RegistryCodeHash: art.CodeHash,
+		RootEpoch: rootEpoch, RegistryCodeHash: art.CodeHash,
 		SystemAddress: registrygenesis.SystemAddress, RegistryAddress: registryproof.RegistryAddress,
 	}
 	prepared, err := registrygenesis.PrepareGenesisJSON(base, pins, art, sourceGenesisJSON(t, chainID), registrygenesis.DefaultGenesisJSONLimits())
@@ -107,9 +115,9 @@ func TestLoadGenesisOrigin_Refusals(t *testing.T) {
 		require.ErrorContains(t, err, "parsing --expected-origin-identity")
 	})
 
-	t.Run("root epoch does not reproduce the commitment", func(t *testing.T) {
-		_, _, err := loadGenesisOrigin(full, genesisPath, "", 2)
-		require.Error(t, err)
+	t.Run("trust base before the genesis root epoch", func(t *testing.T) {
+		_, _, err := loadGenesisOrigin(full, genesisPath, "", 0)
+		require.ErrorIs(t, err, registrygenesis.ErrGenesisRootEpoch)
 	})
 
 	t.Run("malformed finalized artifact", func(t *testing.T) {
@@ -170,19 +178,62 @@ func TestShardNodeRun_JournalFlagsForSealOrigin(t *testing.T) {
 	}
 }
 
-// A node restored under a later root epoch's trust base still validates the genesis against the epoch it was generated at.
-func TestLoadGenesisOrigin_PinsTheGenesisRootEpochNotTheTrustBasesAfterARootHandoff(t *testing.T) {
+// A node started under a later root epoch's trust base validates the genesis against the epoch the genesis was generated at, which it
+// reads from the genesis. shardNodeRun passes only the trust base's epoch, as the bound, so a revert to pinning it cannot compile away
+// this property.
+func TestLoadGenesisOrigin_DerivesTheGenesisRootEpochAndBoundsItByTheTrustBase(t *testing.T) {
 	full, genesisPath, _ := preparedGenesisFixture(t, 1337)
-	_, _, err := loadGenesisOrigin(full, genesisPath, "", 3) // the trust base's epoch after two root handoffs
-	require.Error(t, err, "pinning the trust base epoch fails")
-	pin, err := genesisPinEpoch(1, 3)
-	require.NoError(t, err)
-	_, _, err = loadGenesisOrigin(full, genesisPath, "", pin)
-	require.NoError(t, err, "pinning the genesis epoch validates")
+	for _, trustBaseEpoch := range []uint64{1, 3, 7} {
+		_, _, err := loadGenesisOrigin(full, genesisPath, "", trustBaseEpoch)
+		require.NoError(t, err, "the genesis at root epoch 1 under a trust base at epoch %d", trustBaseEpoch)
+	}
+	_, _, err := loadGenesisOrigin(full, genesisPath, "", 0)
+	require.ErrorIs(t, err, registrygenesis.ErrGenesisRootEpoch, "a trust base before the genesis' epoch")
+}
 
-	pin, err = genesisPinEpoch(0, 3)
+// shardNodeRun is the one caller: it must hand the trust base's epoch to the loader as the bound, and the loader derives the pin. An
+// earlier revision passed the trust base's epoch AS the pin, which no unit test of the loader can see.
+func TestShardNodeRunPassesTheTrustBasesEpochAsTheGenesisBound(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "shard_node_run.go", nil, 0)
 	require.NoError(t, err)
-	require.EqualValues(t, 3, pin, "unset keeps the trust base's epoch")
-	_, err = genesisPinEpoch(4, 3)
-	require.Error(t, err, "a pin after the trust base's own epoch is refused")
+	var found bool
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name == "loadGenesisOrigin" {
+			continue // the layout-1 convenience wrapper passes a literal
+		}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "loadGenesisOriginLayout" {
+				return true
+			}
+			require.Len(t, call.Args, 5)
+			arg, ok := call.Args[3].(*ast.CallExpr)
+			require.True(t, ok, "the fourth argument is the trust base's epoch")
+			sel, ok := arg.Fun.(*ast.SelectorExpr)
+			require.True(t, ok)
+			require.Equal(t, "GetEpoch", sel.Sel.Name)
+			found = true
+			return true
+		})
+	}
+	require.True(t, found, "shardNodeRun loads the genesis through loadGenesisOriginLayout")
+}
+
+func TestLoadGenesisOrigin_RefusesAGenesisAtRootEpochZeroOrBeyondTheTrustBase(t *testing.T) {
+	full, path, _ := preparedGenesisFixtureAt(t, 1337, 5)
+	_, _, err := loadGenesisOrigin(full, path, "", 7)
+	require.NoError(t, err, "a genesis at epoch 5 under a trust base at epoch 7")
+	_, _, err = loadGenesisOrigin(full, path, "", 5)
+	require.NoError(t, err, "under a trust base at the genesis' own epoch")
+	_, _, err = loadGenesisOrigin(full, path, "", 4)
+	require.ErrorIs(t, err, registrygenesis.ErrGenesisRootEpoch, "the trust base has not reached the genesis' epoch")
+
+	zero, zeroPath, _ := preparedGenesisFixtureAt(t, 1337, 0)
+	_, _, err = loadGenesisOrigin(zero, zeroPath, "", 3)
+	require.ErrorIs(t, err, registrygenesis.ErrGenesisRootEpoch, "root epoch zero is not a root epoch")
 }
