@@ -2,11 +2,13 @@ package service
 
 import (
 	"context"
+	"io"
 	"net"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -87,6 +89,8 @@ func TestStatusFromAnAuthorityBuiltBeforeTheEpochsReadsWithZeroEpochs(t *testing
 }
 
 // Only the two layouts the client knows are accepted: any other length (a future layout, damage, a different message) is refused.
+// Every array is built from correctly typed fields in the status order, so length is the only thing a refused one gets wrong: the
+// same builder's six- and eight-field arrays decode.
 func TestStatusDecoderRefusesEveryUnknownLayout(t *testing.T) {
 	current, err := types.Cbor.Marshal(statusPayload{Generation: 1, RootEpoch: 2, ShardEpoch: 3})
 	require.NoError(t, err)
@@ -95,28 +99,28 @@ func TestStatusDecoderRefusesEveryUnknownLayout(t *testing.T) {
 	require.EqualValues(t, 2, decoded.RootEpoch)
 	require.EqualValues(t, 3, decoded.ShardEpoch)
 
-	type five struct {
-		_       struct{} `cbor:",toarray"`
-		A, B    uint64
-		C, D, E bool
-	}
-	type nine struct {
-		_                struct{} `cbor:",toarray"`
-		A, B             uint64
-		C, D, E, F       bool
-		RootEpoch, Shard uint64
-		Future           uint64
-	}
-	for name, value := range map[string]any{"five fields": five{}, "nine fields (a future layout)": nine{}, "a bare integer": uint64(7), "an empty array": []uint64{}} {
-		raw, err := types.Cbor.Marshal(value)
-		require.NoError(t, err, name)
+	fields := []any{uint64(7), uint64(12), true, false, true, false, uint64(2), uint64(3), uint64(4), uint64(5), uint64(6)}
+	for n := 0; n <= len(fields); n++ {
+		raw, err := types.Cbor.Marshal(fields[:n])
+		require.NoError(t, err)
 		_, err = decodeStatus(raw)
-		require.Error(t, err, name)
+		if n == 6 || n == 8 {
+			require.NoError(t, err, "%d fields: a known layout", n)
+			continue
+		}
+		var typeErr *cbor.UnmarshalTypeError
+		require.ErrorAs(t, err, &typeErr, "%d fields: an unknown layout", n)
 	}
+	bare, err := types.Cbor.Marshal(uint64(7))
+	require.NoError(t, err)
+	_, err = decodeStatus(bare)
+	var typeErr *cbor.UnmarshalTypeError
+	require.ErrorAs(t, err, &typeErr, "a bare integer")
 	_, err = decodeStatus(append(append([]byte{}, current...), 0x00))
-	require.Error(t, err, "trailing bytes after a status")
+	var extra *cbor.ExtraneousDataError
+	require.ErrorAs(t, err, &extra, "trailing bytes after a status")
 	_, err = decodeStatus(nil)
-	require.Error(t, err, "no status")
+	require.ErrorIs(t, err, io.EOF, "no status")
 }
 
 // The other direction cannot be supported: a build that predates the epochs decodes a status with toarray, which refuses an array of
@@ -125,7 +129,8 @@ func TestAnOldClientCannotReadANewStatus(t *testing.T) {
 	current, err := types.Cbor.Marshal(statusPayload{Generation: 1, RootEpoch: 2, ShardEpoch: 3})
 	require.NoError(t, err)
 	var legacy oldStatus
-	require.Error(t, types.Cbor.Unmarshal(current, &legacy), "a six-field decoder refuses the eight-field status")
+	var typeErr *cbor.UnmarshalTypeError
+	require.ErrorAs(t, types.Cbor.Unmarshal(current, &legacy), &typeErr, "a six-field decoder refuses the eight-field status with a typed error")
 }
 
 // Asking for the status over either channel is read-only: the authority holds exactly what it held, with a session, a reservation or
