@@ -250,6 +250,8 @@ m2_advance_authorities() {
     if [ "$i" = 1 ] && [ "${M2A_VALIDATOR1_WIPED:-0}" = 1 ] && [ "${M2A_VALIDATOR1_RESTORED:-0}" != 1 ]; then
       offline=true
     else
+      # Observers (the T6 finality monitor) treat a planned restart as an expected outage, not a failure.
+      mkdir -p test-nodes/post-m2a-evidence/restarting && : >"test-nodes/post-m2a-evidence/restarting/$i"
       stop_one_evm_validator "$i" || return 1
     fi
     build/ubft signing-authority advance-epoch \
@@ -266,6 +268,7 @@ m2_advance_authorities() {
       start_one_evm_validator "$i" "$validators" "$partitionID" "$rootBoot" engine-api rpc "$bootnodes" || return 1
       m2_wait_archive_replica_catchup "$i" "$startLine" || return 1
     fi
+    rm -f "test-nodes/post-m2a-evidence/restarting/$i"
     echo "authority $i advanced to root epoch $epoch"
   done
 }
@@ -396,7 +399,11 @@ m2_config_only_handoff() { # epoch roots oldRpcs
       outcome=$(tail -n +"$((logStart+1))" "test-nodes/root$first/debug.log" |
         grep -E "msg=\"root handoff outcome\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
       [[ "$outcome" = *phase=committed* ]] && { committed=true; break; }
-      [[ "$outcome" = *phase=aborted* ]] && { echo "config-only handoff aborted; retrying with the next attempt"; break; }
+      # An aborted attempt, or one whose Prepare lapsed (#336: no Freeze in time), is dead: re-plan now instead of sitting out the wait.
+      if [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=lapsed* ]]; then
+        echo "config-only handoff attempt ended ${outcome##*phase=}; retrying with the next attempt"
+        break
+      fi
       sleep 1
     done
     $committed && break

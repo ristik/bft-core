@@ -4,7 +4,10 @@
 # shellcheck disable=SC2154 # These lane variables are initialized by reth-paired-devnet.sh before source.
 
 post_m2a_default_manifest=registrygenesis/testdata/allocation-build-v1.example.json
-if [ "$postM2aMode" = t1 ] || [ "$postM2aMode" = t4 ]; then
+if [ "$postM2aMode" = t6 ]; then
+  source scripts/t6/lane-actions.sh
+fi
+if [ "$postM2aMode" = t1 ] || [ "$postM2aMode" = t4 ] || [ "$postM2aMode" = t6 ]; then
   POST_M2A_FEE_COLLECTOR=$(python3 - "$post_m2a_default_manifest" <<'PY'
 import json, sys
 print(json.load(open(sys.argv[1], encoding="utf-8"))["feeBeneficiary"])
@@ -15,13 +18,19 @@ PY
 fi
 
 post_m2a_compile_manifest_genesis() {
-  local signer
+  local signer treasurySigner
   signer=$(go run ./scripts/evmtx -address) || return 1
-  python3 - "$post_m2a_default_manifest" "$signer" test-nodes/post-m2a-allocation-build-v1.json <<'PY' || return 1
+  treasurySigner=
+  if [ "$postM2aMode" = t6 ]; then
+    [ -n "${T6_TREASURY_TEST_KEY:-}" ] || { fail "T6 disposable treasury test key is unset"; return 1; }
+    treasurySigner=$(go run ./scripts/evmtx -private-key "$T6_TREASURY_TEST_KEY" -address) || return 1
+  fi
+  python3 - "$post_m2a_default_manifest" "$signer" "$treasurySigner" "$postM2aMode" \
+    test-nodes/post-m2a-allocation-build-v1.json <<'PY' || return 1
 import json, sys
 from decimal import Decimal
 
-source, signer, target = sys.argv[1:]
+source, signer, treasury_signer, mode, target = sys.argv[1:]
 manifest = json.load(open(source, encoding="utf-8"))
 bootstrap = [item for item in manifest["allocations"]
              if item.get("purpose") == "bootstrap_validator_gas" and item.get("kind") == "eoa"]
@@ -38,13 +47,22 @@ budgets = [item for item in manifest["bootstrapGasBudgets"]
 if len(budgets) != 1:
     raise SystemExit("expected the default gas budget for the third bootstrap EOA")
 budgets[0]["recipient"] = signer
+if mode == "t6":
+    foundations = [item for item in manifest["allocations"]
+                   if item.get("purpose") == "foundation_treasury" and item.get("kind") == "eoa"]
+    if len(foundations) != 1 or not treasury_signer:
+        raise SystemExit("T6 needs one placeholder foundation treasury and its funded disposable test key")
+    if signer.lower() == treasury_signer.lower():
+        raise SystemExit("T6 requires distinct funded user and treasury test accounts")
+    manifest["addresses"]["treasury"] = treasury_signer
+    foundations[0]["recipient"] = treasury_signer
 total = sum((Decimal(item["amount"]) for item in manifest["allocations"]), Decimal(0))
 if total != Decimal(manifest["nativeSupply"]):
     raise SystemExit(f"manifest allocations sum to {total}, expected {manifest['nativeSupply']}")
 with open(target, "w", encoding="utf-8") as out:
     json.dump(manifest, out, indent=2)
     out.write("\n")
-print(f"evidence bootstrap EOA={signer}; unchanged native supply={total}")
+print(f"evidence bootstrap EOA={signer}; test treasury={treasury_signer or manifest['addresses']['treasury']}; unchanged native supply={total}")
 PY
   build/ubft engine-api export-manifest --manifest test-nodes/post-m2a-allocation-build-v1.json \
     --out test-nodes/post-m2a-allocation-build-v1.exported.json || return 1
@@ -285,6 +303,12 @@ PY
 post_m2a_after_bootstrap() {
   post_m2a_wait_initial_transactions || return 1
   mkdir -p test-nodes/post-m2a-evidence
+  if [ "$postM2aMode" = t6 ]; then
+    t6_start_finality_monitor || return 1
+    # The F7 demo verifier intentionally pins the default signer and deployment nonce 3.
+    # Generate and verify that bundle before any other evidence transaction or handoff.
+    t6_exercise_f7 || return 1
+  fi
   if [ "$postM2aMode" = f7 ]; then
     local initcode deployHash contract lockHash receipt emitter topic
     initcode=$(go run ./scripts/evmtx -lock-initcode) || return 1
@@ -331,7 +355,7 @@ PY
     pass "locked 42 wei; recorded (blockHash, txIndex, logIndex) from the certified real ureth receipt"
   else
     local vault beneficiary sender collector beforeBeneficiary afterBeneficiary beforeCollector afterCollector
-    local claimHash claimBlock claimNumber afterBlock
+    local claimHash claimBlock claimNumber afterBlock readTag
     vault=$(python3 - "$post_m2a_default_manifest" <<'PY'
 import json,sys
 print(json.load(open(sys.argv[1],encoding="utf-8"))["addresses"]["ecosystemVesting"])
@@ -345,10 +369,13 @@ PY
     ) || return 1
     sender=$(go run ./scripts/evmtx -address) || return 1
     collector=$POST_M2A_FEE_COLLECTOR
-    beforeBeneficiary=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBalance "[\"$beneficiary\",\"latest\"]" | pyget "['result']") || return 1
-    beforeCollector=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBalance "[\"$collector\",\"latest\"]" | pyget "['result']") || return 1
+    readTag=latest
+    [ "$postM2aMode" = t6 ] && readTag=finalized
+    beforeBeneficiary=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBalance "[\"$beneficiary\",\"$readTag\"]" | pyget "['result']") || return 1
+    beforeCollector=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBalance "[\"$collector\",\"$readTag\"]" | pyget "['result']") || return 1
     post_m2a_send_transaction "$M2_NEXT_NONCE" -to "$vault" -call 'release()' -gas-limit 200000 -value 0 || return 1
     claimHash=$POST_M2A_TX_HASH
+    POST_M2A_CLAIM_TX=$claimHash
     post_m2a_wait_certified_receipt "$claimHash" 1 || return 1
     [ "$(printf '%s' "$POST_M2A_RECEIPT" | pyget "['result']['type']")" = 0x2 ] || {
       fail "vesting claim did not use an EIP-1559 typed transaction"; return 1;
@@ -356,6 +383,7 @@ PY
     claimBlock=$(printf '%s' "$POST_M2A_RECEIPT" | pyget "['result']['blockHash']")
     claimNumber=$(printf '%s' "$POST_M2A_RECEIPT" | pyget "['result']['blockNumber']")
     afterBlock=$(printf '%s' "$claimNumber" | python3 -c 'import sys; print(hex(int(sys.stdin.read().strip(),16)))')
+    [ "$postM2aMode" = t6 ] && afterBlock=finalized
     afterBeneficiary=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBalance "[\"$beneficiary\",\"$afterBlock\"]" | pyget "['result']") || return 1
     afterCollector=$(rpc "http://127.0.0.1:$rethEthBase" eth_getBalance "[\"$collector\",\"$afterBlock\"]" | pyget "['result']") || return 1
     if ! python3 - "$beforeBeneficiary" "$afterBeneficiary" "$beforeCollector" "$afterCollector" "$POST_M2A_RECEIPT" <<'PY'
@@ -397,6 +425,9 @@ PY
   fi
   if [ "$postM2aMode" = t4 ]; then
     post_m2a_t4_exercise_contracts || return 1
+  fi
+  if [ "$postM2aMode" = t6 ]; then
+    t6_exercise_contracts || return 1
   fi
 }
 
@@ -444,5 +475,10 @@ PY
         fail "could not capture certified block headers and SELFDESTRUCT trace coverage"; return 1;
       }
     pass "certified block history and incrementally captured per-block SELFDESTRUCT trace coverage captured"
+  fi
+  if [ "$postM2aMode" = t6 ]; then
+    t6_stop_finality_monitor || return 1
+    t6_finalized_wallet_check test-nodes/post-m2a-evidence/t6-wallet-finalized-after-restore.json 1 2 || return 1
+    pass "post-restore wallet reads through the restored validator 1's own RPC and log resolve at certified finalized state (certified tip from survivor validator 2)"
   fi
 }

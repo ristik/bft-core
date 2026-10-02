@@ -50,7 +50,7 @@ rounds=${2:-10}
 postM2aMode=${POST_M2A_MODE:-}
 postM2aChainID=${POST_M2A_CHAIN_ID:-31337}
 if [ -n "$postM2aMode" ]; then
-  case "$postM2aMode" in f7 | t1 | t4) ;; *) echo "POST_M2A_MODE must be f7, t1 or t4" >&2; exit 2 ;; esac
+  case "$postM2aMode" in f7 | t1 | t4 | t6) ;; *) echo "POST_M2A_MODE must be f7, t1, t4 or t6" >&2; exit 2 ;; esac
   [ "${M2_PROFILE2:-0}" = 1 ] || { echo "post-M2a evidence requires M2_PROFILE2=1" >&2; exit 2; }
   [ "$validators" -eq 4 ] || { echo "post-M2a evidence requires four validators" >&2; exit 2; }
   if [ "${POST_M2A_SKIP_HANDOFF:-0}" = 1 ] && [ "$postM2aMode" != t4 ]; then
@@ -241,7 +241,7 @@ echo "generated genesis sha256=$genesisSHA"
 # Fund one well-known test account so §6 can prove the adapter really builds and commits a block.
 # Real genesis funding is T1 (#28); this is test-only and derived from the generated file, so the
 # chainId and fork schedule still come from the shard conf.
-if [ "$postM2aMode" = t1 ] || [ "$postM2aMode" = t4 ]; then
+if [ "$postM2aMode" = t1 ] || [ "$postM2aMode" = t4 ] || [ "$postM2aMode" = t6 ]; then
   post_m2a_compile_manifest_genesis || { fail "default T1 manifest export/compile failed"; exit 1; }
   chainSpec=test-nodes/evm-genesis-finalized-funded.json
   fullShardConf=test-nodes/evm-full-shard-conf-v2.json

@@ -48,6 +48,7 @@ const eip1559TxType = 0x02
 func main() {
 	var (
 		alloc           = flag.Bool("alloc", false, "print a genesis alloc object funding the test account")
+		privateKeyHex   = flag.String("private-key", testKeyHex, "32-byte hex private key for this disposable test account")
 		address         = flag.Bool("address", false, "print the funded test account address")
 		send            = flag.Bool("send", false, "sign a transfer and submit it with eth_sendRawTransaction")
 		create          = flag.Bool("create", false, "create a contract instead of sending to an address")
@@ -68,9 +69,9 @@ func main() {
 	)
 	flag.Parse()
 
-	keyBytes, err := hex.DecodeString(testKeyHex)
-	if err != nil {
-		fatal("decoding the test key: %v", err)
+	keyBytes, err := hex.DecodeString(strings.TrimPrefix(*privateKeyHex, "0x"))
+	if err != nil || len(keyBytes) != 32 {
+		fatal("-private-key must be a 32-byte hexadecimal key")
 	}
 	key := secp256k1.PrivKeyFromBytes(keyBytes)
 	from := addressOf(key)
