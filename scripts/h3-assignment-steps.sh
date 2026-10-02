@@ -313,7 +313,7 @@ h3_restore_validator() {
   build/ubft shard-node restore --home "$evidence" --executor engine-api \
     --address "/ip4/127.0.0.1/tcp/$((evmValidatorPortStart + i - 1))" --bootnodes "$bootnodes" \
     --trust-base "$H3_RESTORE_TRUST_BASE" --full-shard-conf "$EVM_FULL_SHARD_CONF" --registry-layout 2 \
-    --genesis "$EVM_GENESIS_FILE" --engine-url "http://127.0.0.1:$((rethEngineBase+i-1))" \
+    --genesis "$EVM_GENESIS_FILE" --genesis-root-epoch 1 --engine-url "http://127.0.0.1:$((rethEngineBase+i-1))" \
     --eth-url "http://127.0.0.1:$((rethEthBase+i-1))" --jwt-secret "$evidence/jwt.hex" \
     --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" --execution-journal "$evidence/journal.db" \
     --archive-store "$evidence/archive" --archive-prune --trust-history-profile-2 --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}" \
