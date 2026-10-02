@@ -69,6 +69,8 @@ t6_coupled_rotation_s1() {
   h3_activate_coupled "$next" 4 5 || return 1
 
   H3_ONLINE="1 2 3 5"
+  # the retired evm4 is no longer a valid archive replica: the restarted retained validators name members of the successor set
+  export EVM_ARCHIVE_REPLICA_POOL="2 3 5"
   h3_advance_authorities "$next" 1 1 2 3 || { echo "authority advance to root epoch $next / shard epoch 1 failed" >&2; return 1; }
   h3_enroll_authority 5 1 || { echo "enrolling the evm5 authority failed" >&2; return 1; }
   h3_restore_validator 5 2 || return 1

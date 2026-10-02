@@ -488,7 +488,9 @@ function start_one_evm_validator() {
 	  # (the H3 rotation lane) raises it with EVM_JOURNAL_CANDIDATES: with two replicas down the frontier cannot advance for the
 	  # whole acknowledgement window.
 	  executorArgs+=(--archive-store "$EVM_ARCHIVE_ROOT/evm$i" --archive-prune --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}")
-	  for j in $(seq 2 "$n"); do
+	  # EVM_ARCHIVE_REPLICA_POOL (ids) names the candidates after a validator-set change: a retired validator is not a valid replica
+	  # of the installed assignment, and the node refuses to start naming one.
+	  for j in ${EVM_ARCHIVE_REPLICA_POOL:-$(seq 2 "$n")}; do
 	    [ "$j" = "$i" ] && continue
 	    peerID=$(evm_validator_id "$j") || return 1
 	    executorArgs+=(--archive-replica "$peerID")
