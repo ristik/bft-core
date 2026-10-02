@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,6 +31,16 @@ func transportFixture() (archive.Request, *archive.Record) {
 	return q, rec
 }
 
+// serveOneDeadline bounds every wait in serveOne. The server answers only after it has verified and durably stored the record, which
+// can take seconds when the disk is busy (the full suite runs many fsync-heavy packages at once), so the bound is generous; what matters
+// is that it exists. The production server bounds the same work by Limits.Deadline (20 s, DefaultLimits).
+var (
+	serveOneDeadline = 15 * time.Second
+	// serveOneDrain bounds the wait for Serve to return after the client has given up: the server may still be verifying and storing
+	// the record, and returns as soon as its reply write fails.
+	serveOneDrain = 60 * time.Second
+)
+
 func serveOne(t *testing.T, s *Server, request []byte) ([]byte, error) {
 	t.Helper()
 	client, server := net.Pipe()
@@ -36,7 +48,7 @@ func serveOne(t *testing.T, s *Server, request []byte) ([]byte, error) {
 	defer server.Close()
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(context.Background(), server) }()
-	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+	_ = client.SetDeadline(time.Now().Add(serveOneDeadline))
 	if err := writeFrame(client, request); err != nil {
 		t.Fatal(err)
 	}
@@ -49,13 +61,33 @@ func serveOne(t *testing.T, s *Server, request []byte) ([]byte, error) {
 		answer, err := readFrame(client, archive.MaxWireBytes)
 		read <- readResult{answer: answer, err: err}
 	}()
+	// waitServer collects Serve's own result without blocking forever. A net.Pipe write blocks until the peer reads, so a server
+	// whose reply the client has stopped waiting for would never return; closing the client first lets that write fail.
+	waitServer := func() error {
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(serveOneDrain):
+			t.Fatalf("serveOne: the server did not return within %v", serveOneDrain)
+			return nil
+		}
+	}
 	select {
 	case result := <-read:
-		return result.answer, <-done
+		if result.err != nil {
+			_ = client.Close()
+			serverErr := waitServer()
+			return nil, fmt.Errorf("serveOne: no reply within %v: %w (server: %v)", serveOneDeadline, result.err, serverErr)
+		}
+		return result.answer, waitServer()
 	case serverErr := <-done:
 		if serverErr == nil {
-			result := <-read // a successful Serve has written a full response.
-			return result.answer, nil
+			select {
+			case result := <-read: // a successful Serve has written a full response.
+				return result.answer, result.err
+			case <-time.After(serveOneDeadline):
+				t.Fatalf("serveOne: the server returned but its reply was not readable within %v", serveOneDeadline)
+			}
 		}
 		select {
 		case result := <-read:
@@ -431,5 +463,38 @@ func TestAnUnauthorizedPeerIsRefusedByNameAndServedOnceAdmitted(t *testing.T) {
 	got, err := Fetch(context.Background(), sender, remote.ID(), q, DefaultLimits())
 	if err != nil || !equalRecord(q, rec, got) {
 		t.Fatalf("an admitted peer is served: %v", err)
+	}
+}
+
+// serveOne used to wait on the server forever when the client's read deadline expired first: the server's reply write on the pipe
+// then had no reader and the client was closed only after serveOne returned, so one slow verify-and-store turned into the package's
+// 30-minute timeout. A server slower than the deadline must now fail the call promptly, as an error that names the missed reply.
+func TestServeOneFailsInsteadOfHangingWhenTheServerIsSlowerThanItsDeadline(t *testing.T) {
+	savedDeadline, savedDrain := serveOneDeadline, serveOneDrain
+	serveOneDeadline, serveOneDrain = 300*time.Millisecond, 5*time.Second
+	defer func() { serveOneDeadline, serveOneDrain = savedDeadline, savedDrain }()
+	q, rec := transportFixture()
+	store, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(store, q.Context, func(context.Context, archive.Request, *archive.Record) error {
+		time.Sleep(time.Second)
+		return nil
+	}, []peer.ID{"configured"}, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := archive.EncodeResponse(archive.Response{Request: q, Outcome: archive.OK, Record: rec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	answer, err := serveOne(t, s, append([]byte{1}, encoded...))
+	if err == nil || answer != nil || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("a server slower than the deadline must fail the call with the deadline error: answer=%x err=%v", answer, err)
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("serveOne took %v: it is waiting on the server again", elapsed)
 	}
 }
