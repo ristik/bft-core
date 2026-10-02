@@ -625,5 +625,6 @@ function stop_one_evm_validator() {
   local i=$1 sig=${2:-TERM}
   local pidfile="test-nodes/evm$i/pid"
   [ -f "$pidfile" ] || { echo "no pid file for validator $i (already stopped?)" >&2; return 1; }
-  stop_pidfile "$pidfile" 'ubft shard-node run' "$sig"
+  # a validator brought back by `shard-node restore` is as much this validator as one started by `run`
+  stop_pidfile "$pidfile" 'ubft shard-node (run|restore)' "$sig"
 }
