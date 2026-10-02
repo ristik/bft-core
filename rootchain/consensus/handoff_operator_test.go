@@ -131,13 +131,13 @@ func TestOperatorHandoffPreparesBeforeEndorsement(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "prepare", prepare.Kind)
 		require.Equal(t, id[:], []byte(prepare.NextBodyID))
-		require.GreaterOrEqual(t, prepare.ActivationRound, prepare.OrderedRound+storage.PrepareFreezeLapseRounds+8,
+		require.GreaterOrEqual(t, prepare.ActivationRound, prepare.OrderedRound+storage.PrepareFreezeLapseRounds+storage.HandoffActivationMarginRounds,
 			"the activation leaves the whole endorsement window")
 	})
 
 	// The Prepare as the executor leaves it: control "prepared", the frozen parent bound by the root.
 	prepareRecord := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: state.CommittedHead.Block.Round + 1,
-		ActivationRound: state.CommittedHead.Block.Round + 1 + storage.PrepareFreezeLapseRounds + 8, PredecessorBodyID: bytes.Clone(state.CommittedHead.Control.PredecessorBodyID),
+		ActivationRound: state.CommittedHead.Block.Round + 1 + storage.PrepareFreezeLapseRounds + storage.HandoffActivationMarginRounds, PredecessorBodyID: bytes.Clone(state.CommittedHead.Control.PredecessorBodyID),
 		NextBodyID: id[:], FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32), Kind: "prepare"}
 	preparedWith := func(mutate func(*evmroot.ControlState)) *abdrc.StateMsg {
 		control := *state.CommittedHead.Control

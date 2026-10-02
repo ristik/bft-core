@@ -1102,13 +1102,11 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 			x.logHandoffAbort("commit", round, previous.Attempt, reason, control.FrozenParent, parent)
 			return abortHandoffRecords(round, previous, plan.abortSignatures)
 		}
-		record.ActivationRound = previous.ActivationRound
-		if round > ^uint64(0)-8 {
+		activation, ok := storage.CommitActivationRound(previous.ActivationRound, round)
+		if !ok {
 			return nil, ErrHandoffApproval
 		}
-		if record.ActivationRound < round+8 {
-			record.ActivationRound = round + 8
-		}
+		record.ActivationRound = activation
 		key, err := x.blockStore.CertifiedEVMShardAt(parent.GetRound(), control.FrozenParent)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrHandoffApproval, err)
