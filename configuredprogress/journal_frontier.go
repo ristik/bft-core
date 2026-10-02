@@ -119,11 +119,16 @@ func (s *Store) EnableFrontier(ctx context.Context, c Context, limits JournalLim
 	}
 	p.Context.ExecutionIdentity = bytes.Clone(p.Context.ExecutionIdentity)
 	s.frontier = &p
+	var persisted FrontierSnapshot
 	err = s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
-		_, err := readFrontier(b, state.i.descriptorDigest, p)
+		var err error
+		persisted, err = readFrontier(b, state.i.descriptorDigest, p)
 		return err
 	})
+	if err == nil && persisted.Anchor != nil && persisted.Anchor.Migrated() {
+		err = s.migrateReplicaPair(persisted.Anchor, p)
+	}
 	if err != nil {
 		s.frontier = nil
 		return err
@@ -133,6 +138,23 @@ func (s *Store) EnableFrontier(ctx context.Context, c Context, limits JournalLim
 		s.frontier = nil
 	}
 	return err
+}
+
+// migrateReplicaPair accepts a configured replica pair that replaces exactly one
+// of the replicas that acknowledged the durable position. Replacing the pair is a
+// policy change: the position and its pruned prefix stay valid because two
+// replicas acknowledged them at the time, the retired replica's acknowledgments
+// are dropped on every read, and pruning resumes only after the configured pair
+// has acknowledged beyond the position. Replacing both replicas is refused.
+func (s *Store) migrateReplicaPair(anchor *frontier.Record, p frontier.Policy) error {
+	if anchor.Acks[0].Dropped() && anchor.Acks[1].Dropped() {
+		return fmt.Errorf("%w: replica pair change must retain one acknowledging replica", frontier.ErrContext)
+	}
+	if s.log != nil {
+		s.log.Warn("archive replica pair changed; durable frontier position kept, retired acknowledgments dropped, pruning waits for the new pair to acknowledge beyond it",
+			"previous", anchor.PersistedReplicas(), "configured", p.Replicas, "height", anchor.Height, "round", anchor.Round)
+	}
+	return nil
 }
 
 func readFrontier(b *bolt.Bucket, dd [32]byte, policy frontier.Policy) (FrontierSnapshot, error) {
@@ -173,7 +195,7 @@ func readFrontier(b *bolt.Bucket, dd [32]byte, policy frontier.Policy) (Frontier
 		return out, frontier.ErrContext
 	}
 	policy.MinimumSequence = floor.Sequence
-	r, err := frontier.Decode(w.Frontier, policy)
+	r, err := frontier.DecodeMigrating(w.Frontier, policy)
 	if err != nil {
 		return out, err
 	}
@@ -238,6 +260,9 @@ func (s *Store) VerifyFrontierCopies(ctx context.Context, c Context, limits Jour
 		return err
 	}
 	for _, ack := range f.Anchor.Acks {
+		if ack.Dropped() {
+			continue // a retired replica's acknowledgment no longer counts
+		}
 		if err := s.frontier.Availability.VerifyAvailable(ack.Replica, f.Anchor.Subject, ack.ManifestDigest); err != nil {
 			return fmt.Errorf("%w: %v", frontier.ErrUnavailable, err)
 		}
@@ -280,7 +305,7 @@ func (s *Store) LoadCoverage(ctx context.Context, c Context, limits JournalLimit
 			if raw == nil {
 				return frontier.ErrInvalid
 			}
-			r, err := frontier.Decode(raw, *s.frontier)
+			r, err := frontier.DecodeMigrating(raw, *s.frontier)
 			if err != nil || r.Height != h {
 				return frontier.ErrInvalid
 			}
@@ -322,7 +347,7 @@ func (s *Store) VerifyCoveredArchive(ctx context.Context, c Context, limits Jour
 		if raw == nil {
 			return frontier.ErrUnavailable
 		}
-		r, err := frontier.Decode(raw, *s.frontier)
+		r, err := frontier.DecodeMigrating(raw, *s.frontier)
 		if err != nil || r.Subject.BlockHash != q.BlockHash || !sameCoverageSubject(r.Subject, q) {
 			return frontier.ErrInvalid
 		}
@@ -565,7 +590,7 @@ func checkPruneCoverage(b *bolt.Bucket, policy frontier.Policy, baseHeight uint6
 	if covered == nil {
 		return frontier.ErrObligation
 	}
-	claimed, err := frontier.Decode(covered, policy)
+	claimed, err := frontier.DecodeMigrating(covered, policy)
 	if err != nil || !bytes.Equal(claimed.Subject.BlockHash[:], w.Hash) {
 		return frontier.ErrObligation
 	}
@@ -603,6 +628,9 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 		}
 		if f.Floor == f.Anchor.Height {
 			return nil
+		}
+		if f.Anchor.Migrated() {
+			return fmt.Errorf("%w: pruning waits for the configured replicas to acknowledge beyond the migrated position", frontier.ErrAcknowledgment)
 		}
 		anchorUC, _, err := verifiedPairBytes(ctx, c, f.Record.ResultingUC, f.Record.ResultingTR)
 		if err != nil {

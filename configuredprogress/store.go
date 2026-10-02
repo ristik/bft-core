@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -107,7 +108,11 @@ type Store struct {
 	checkpoint func(string) error
 	journal    bool
 	frontier   *frontier.Policy
+	log        *slog.Logger
 }
+
+// SetLogger sets the logger EnableFrontier reports a replica pair change to.
+func (s *Store) SetLogger(l *slog.Logger) { s.log = l }
 
 // OpenConfiguredV2 opens an isolated v2 database without creating its bucket or initializing data.
 func OpenConfiguredV2(path string, s Settings) (*Store, error) {

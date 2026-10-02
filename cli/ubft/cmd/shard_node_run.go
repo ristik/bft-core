@@ -878,6 +878,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				return nil
 			}
 			policy := frontier.Policy{Context: archiveSubject, Replicas: [2]string{archiveReplicas[0].String(), archiveReplicas[1].String()}, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
+			journalStore.SetLogger(flags.observe.Logger())
 			if e := journalStore.EnableFrontier(ctx, journalCtx, limits, policy); e != nil {
 				return fmt.Errorf("authenticating certified frontier: %w", e)
 			}
