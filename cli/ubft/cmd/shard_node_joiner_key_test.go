@@ -294,3 +294,95 @@ func TestShardNodeRunDefersTheJoinersKeyOnAPlainStartWithHandoffHistory(t *testi
 	})
 	require.ElementsMatch(t, []string{"Restore", "TrustHistoryProfile2"}, seen)
 }
+
+// The joiner's key is bound ONCE, after the replay of the persisted verified steps (plain start) or after the catch-up (restore). The call
+// count above cannot see WHERE the calls are: bound before the replay, the oldest installed step's key would win over a later rotation (see
+// TestTheLatestInstalledStepThatNamesTheNodeIsBoundAndBindsOnce), and bound inside OnInstalled it would bind on the first step. This pins the
+// order in the source: the plain-start bind is guarded by !flags.Restore and follows the whole runProfile2JournalStartup call (its replay);
+// the restore bind sits in the catch-up closure after handoffFollower.CatchUp; and neither the OnInstalled closure nor the restoreLineage
+// closure binds.
+func TestTheJoinersKeyIsBoundOnlyAfterTheReplayOfThePersistedSteps(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "shard_node_run.go", nil, 0)
+	require.NoError(t, err)
+	callName := func(call *ast.CallExpr) string {
+		switch f := call.Fun.(type) {
+		case *ast.Ident:
+			return f.Name
+		case *ast.SelectorExpr:
+			if x, ok := f.X.(*ast.Ident); ok {
+				return x.Name + "." + f.Sel.Name
+			}
+		}
+		return ""
+	}
+	var startup, catchUp *ast.CallExpr
+	var binds []*ast.CallExpr
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			switch callName(call) {
+			case "runProfile2JournalStartup":
+				startup = call
+			case "handoffFollower.CatchUp":
+				catchUp = call
+			case "finishJoinerKey":
+				binds = append(binds, call)
+			}
+		}
+		return true
+	})
+	require.NotNil(t, startup, "the replay of the persisted steps")
+	require.NotNil(t, catchUp, "the restore's catch-up")
+	require.Len(t, binds, 2)
+
+	inside := func(outer ast.Node, call *ast.CallExpr) bool {
+		return outer.Pos() <= call.Pos() && call.End() <= outer.End()
+	}
+	var plain, restore *ast.CallExpr
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.IfStmt:
+			// if !flags.Restore { finishJoinerKey(signing) }
+			if un, ok := n.Cond.(*ast.UnaryExpr); ok && un.Op == token.NOT {
+				if sel, ok := un.X.(*ast.SelectorExpr); ok && sel.Sel.Name == "Restore" {
+					for _, b := range binds {
+						if inside(n.Body, b) {
+							plain = b
+						}
+					}
+				}
+			}
+		case *ast.FuncLit:
+			for _, b := range binds {
+				if inside(n.Body, b) && inside(n.Body, catchUp) {
+					restore = b
+				}
+			}
+		}
+		return true
+	})
+	require.NotNil(t, plain, "the plain-start bind is guarded by !flags.Restore")
+	require.NotNil(t, restore, "the restore bind is in the closure that runs the catch-up")
+	require.NotEqual(t, plain, restore)
+	require.True(t, startup.End() <= plain.Pos(), "the plain-start bind comes after the whole replay (runProfile2JournalStartup)")
+	require.True(t, catchUp.End() <= restore.Pos(), "the restore bind comes after the catch-up")
+
+	// No bind inside the per-step install or the lineage restore: either would bind the first replayed step's key.
+	ast.Inspect(file, func(n ast.Node) bool {
+		if kv, ok := n.(*ast.KeyValueExpr); ok {
+			if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "OnInstalled" {
+				for _, b := range binds {
+					require.False(t, inside(kv.Value, b), "OnInstalled must only record the step (noteJoinerStep)")
+				}
+			}
+		}
+		if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 {
+			if id, ok := as.Lhs[0].(*ast.Ident); ok && id.Name == "restoreLineage" {
+				for _, b := range binds {
+					require.False(t, inside(as, b), "the lineage restore must not bind")
+				}
+			}
+		}
+		return true
+	})
+}
