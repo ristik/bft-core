@@ -148,7 +148,20 @@ h3_enroll_authority() { # id shard epoch
 h3_advance_authorities() { # root epoch, shard epoch, ids...
   local rootEpoch=$1 shardEpoch=$2 pdr; shift 2
   pdr=$(h3_pdr_file "$shardEpoch") || return 1
-  M2_ADVANCE_TOLERATE_STOPPED=1 M2_ADVANCE_NO_REPLICA_WAIT=1 m2_advance_authorities "$rootEpoch" "trust-base-epoch${rootEpoch}.json" "$pdr" "$*"
+  local retained=() joiners=() i
+  for i in "$@"; do if [ "$i" -ge 5 ]; then joiners+=("$i"); else retained+=("$i"); fi; done
+  if [ "${#retained[@]}" -gt 0 ]; then
+    M2_ADVANCE_TOLERATE_STOPPED=1 M2_ADVANCE_NO_REPLICA_WAIT=1 m2_advance_authorities "$rootEpoch" "trust-base-epoch${rootEpoch}.json" "$pdr" "${retained[*]}" || return 1
+  fi
+  # A joiner's genesis configuration does not name it, so a plain start of its node is refused: it comes back by RESTORING (its signing key
+  # is bound from the verified handoff history), under its advanced authority.
+  for i in ${joiners[@]+"${joiners[@]}"}; do
+    stop_one_evm_validator "$i" 2>/dev/null || true
+    build/ubft signing-authority advance-epoch --operator-socket "test-nodes/auth$i/operator.sock" \
+      --operator-credential "test-nodes/auth$i/operator.cred" --trust-base "test-nodes/trust-base-epoch${rootEpoch}.json" --shard-conf "$pdr" || return 1
+    h3_restore_validator "$i" 2 || return 1
+    echo "joiner $i advanced to root epoch $rootEpoch and restored"
+  done
 }
 
 # Same root keys at the next epoch (a configuration-only boundary advances the root epoch with unchanged members).
