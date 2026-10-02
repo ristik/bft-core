@@ -261,9 +261,10 @@ h3_assert_rejected() { # node id, what, [seconds to wait: a node that must first
   for i in $(seq 1 "$window"); do
     # The root refuses a retired or never-active key in one of two places, both of them the active-set check: at the handshake
     # ("node ID is not in active validator set ... <id>", the node then never gets a certificate and sends no request) or, for a
-    # request that does arrive, at the request ("node <id> is not in the trustbase of the shard").
+    # request that does arrive, at the request ("node <id> is not in the trustbase of the shard"). slog text escapes the quotes around the id
+    # inside err="...", so the pattern allows an optional backslash before each quote.
     refusals=$(h3_since_mark | grep -E "processing \*(certification.BlockCertificationRequest|handshake.Handshake)" |
-      grep -cE "node \"$id\" is not in the trustbase of the shard|node ID is not in active validator set .*$id" || true)
+      grep -cE "node \\\\?\"$id\\\\?\" is not in the trustbase of the shard|node ID is not in active validator set .*$id" || true)
     [ "$refusals" -ge 1 ] && break
     # A retired key is refused one layer earlier too: the validators' archive replicas serve only the ACTIVE assignment's validators, so a
     # node that must first restore from them is refused there ("archive peer is not allowed") and never reaches a root at all.
