@@ -60,6 +60,29 @@ func TestActivePeersFollowTheInstalledAssignment(t *testing.T) {
 		require.Len(t, peers.Peers(), 2)
 	})
 	t.Run("a malformed validator id is refused", func(t *testing.T) {
-		require.Error(t, peers.Install(4, []*types.NodeInfo{{NodeID: "not-a-peer-id", SigKey: []byte{1}, Stake: 1}}))
+		require.ErrorIs(t, peers.Install(4, []*types.NodeInfo{{NodeID: "not-a-peer-id", SigKey: []byte{1}, Stake: 1}}), ErrActivePeersInvalid)
+		require.ErrorIs(t, peers.Install(4, []*types.NodeInfo{nil}), ErrActivePeersInvalid)
 	})
+}
+
+// After a restart the persisted verified steps are replayed AFTER the archive server could already be asked who may connect. Until the
+// replay is done the set is held: nobody is authorized (the genesis set may still name a validator a persisted step retired), the
+// installs made by the replay still update the set, and releasing opens exactly the replayed set.
+func TestActivePeersAreHeldUntilThePersistedStepsAreReplayed(t *testing.T) {
+	self, v2, v3, v4, joiner := newPeerID(t), newPeerID(t), newPeerID(t), newPeerID(t), newPeerID(t)
+	peers, err := NewActivePeers(self, validatorsOf(self, v2, v3, v4))
+	require.NoError(t, err)
+	peers.Hold()
+	require.False(t, peers.Allowed(v2) || peers.Allowed(v3) || peers.Allowed(v4), "a held set authorizes nobody, not even the genesis validators")
+	require.False(t, peers.Allowed(joiner))
+
+	// the replay installs the persisted step that retired v4 and admitted the joiner
+	require.NoError(t, peers.Install(1, validatorsOf(self, v2, v3, joiner)))
+	require.False(t, peers.Allowed(v2) || peers.Allowed(joiner), "still held while the replay runs")
+	require.Len(t, peers.Peers(), 3, "the held set is still rebuilt: only authorization is withheld")
+
+	peers.Release()
+	require.True(t, peers.Allowed(v2) && peers.Allowed(v3) && peers.Allowed(joiner))
+	require.False(t, peers.Allowed(v4), "the retired validator was never authorized after the restart")
+	require.False(t, peers.Allowed(self))
 }

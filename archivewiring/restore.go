@@ -311,10 +311,12 @@ func (r *ArchiveRestore) verifiedRestoreRecord(ctx context.Context, q archive.Re
 	)
 	err := r.retryFetch(ctx, fmt.Sprintf("restored observation body %x", q.BlockHash), func() (bool, error) {
 		transient := false
+		var lastFetch error
 		for _, id := range r.Replicas {
 			rec, err := Fetch(ctx, r.Host, id, q, r.Limits)
 			if err != nil {
 				transient = transient || transientFetchError(ctx, err)
+				lastFetch = err
 				continue
 			}
 			original, originalTR, result, resultTR, header, checkErr := check(rec)
@@ -325,7 +327,7 @@ func (r *ArchiveRestore) verifiedRestoreRecord(ctx context.Context, q archive.Re
 			gotRec, gotOriginal, gotOriginalTR, gotResult, gotResTR, gotHeader = rec, original, originalTR, result, resultTR, header
 			return false, nil
 		}
-		return transient, archive.ErrUnavailable
+		return transient, unavailableBecause(lastFetch)
 	})
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, err
@@ -396,8 +398,8 @@ func (r *ArchiveRestore) retryFetch(ctx context.Context, what string, attempt fu
 		}
 		remaining := policy.Total - time.Since(started)
 		if remaining <= 0 {
-			return fmt.Errorf("%w: %s still unavailable from both replicas after %d attempts over %s (replicas saturated or missing the record)",
-				archive.ErrUnavailable, what, tries, policy.Total)
+			return fmt.Errorf("%w: %s still unavailable from both replicas after %d attempts over %s (replicas saturated, refusing this node, or missing the record): %w",
+				archive.ErrUnavailable, what, tries, policy.Total, err)
 		}
 		wait := min(delay, remaining)
 		timer := time.NewTimer(wait)
@@ -409,6 +411,15 @@ func (r *ArchiveRestore) retryFetch(ctx context.Context, what string, attempt fu
 		}
 		delay = min(delay*2, policy.Max)
 	}
+}
+
+// unavailableBecause is archive.ErrUnavailable carrying the last replica failure, so that a final error still names the cause (for
+// example archivewiring.ErrPeerNotAllowed when the replicas have not admitted this node yet) to errors.Is.
+func unavailableBecause(last error) error {
+	if last == nil {
+		return archive.ErrUnavailable
+	}
+	return errors.Join(archive.ErrUnavailable, last)
 }
 
 // transientFetchError reports whether a failed replica fetch may succeed later.
@@ -426,10 +437,12 @@ func (r *ArchiveRestore) findTarget(ctx context.Context) ([32]byte, error) {
 	var found [32]byte
 	err := r.retryFetch(ctx, "quiet-tip record", func() (bool, error) {
 		transient := false
+		var lastFetch error
 		for _, id := range r.Replicas {
 			q, rec, err := FetchLatest(ctx, r.Host, id, query, r.Limits)
 			if err != nil {
 				transient = transient || transientFetchError(ctx, err)
+				lastFetch = err
 				continue
 			}
 			result, _, err := r.checkRecord(q, rec)
@@ -438,7 +451,7 @@ func (r *ArchiveRestore) findTarget(ctx context.Context) ([32]byte, error) {
 				return false, nil
 			}
 		}
-		return transient, archive.ErrUnavailable
+		return transient, unavailableBecause(lastFetch)
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -464,10 +477,12 @@ func (r *ArchiveRestore) fetchChecked(ctx context.Context, hash [32]byte) (q arc
 func (r *ArchiveRestore) fetchCheckedOnce(ctx context.Context, hash [32]byte) (archive.Request, *archive.Record, *types.UnicityCertificate, *certification.TechnicalRecord, *gethtypes.Header, bool, error) {
 	q := archive.Request{Context: r.Subject, BlockHash: hash}
 	transient := false
+	var lastFetch error
 	for _, id := range r.Replicas {
 		rec, err := Fetch(ctx, r.Host, id, q, r.Limits)
 		if err != nil {
 			transient = transient || transientFetchError(ctx, err)
+			lastFetch = err
 			continue
 		}
 		if !archive.HasReceiptList(rec) {
@@ -487,7 +502,9 @@ func (r *ArchiveRestore) fetchCheckedOnce(ctx context.Context, hash [32]byte) (a
 			// read-backs before the record can serve as pruning coverage.
 			complete := true
 			for _, replica := range r.Replicas {
-				if PutAndReadBack(ctx, r.Host, replica, q, rec, r.Limits) != nil {
+				if putErr := PutAndReadBack(ctx, r.Host, replica, q, rec, r.Limits); putErr != nil {
+					transient = transient || transientFetchError(ctx, putErr)
+					lastFetch = putErr
 					complete = false
 					break
 				}
@@ -504,7 +521,7 @@ func (r *ArchiveRestore) fetchCheckedOnce(ctx context.Context, hash [32]byte) (a
 			}
 		}
 	}
-	return archive.Request{}, nil, nil, nil, nil, transient, archive.ErrUnavailable
+	return archive.Request{}, nil, nil, nil, nil, transient, unavailableBecause(lastFetch)
 }
 
 func (r *ArchiveRestore) checkRecord(q archive.Request, rec *archive.Record) (*types.UnicityCertificate, *certification.TechnicalRecord, error) {

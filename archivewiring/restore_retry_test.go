@@ -50,6 +50,13 @@ func newRetryRestoreFixture(t *testing.T, failures int64, retry FetchRetry) *ret
 }
 
 func newRetryRestoreFixtureT(t *testing.T, failures int64, retry FetchRetry, tamper bool) *retryRestoreFixture {
+	return buildRetryRestoreFixture(t, failures, retry, tamper, nil)
+}
+
+// buildRetryRestoreFixture is the fixture with, optionally, replicas whose peer authorizer refuses the next *refusals requests
+// (decremented per request) before admitting the restoring node: the real server-side refusal of a retained validator that has not
+// installed the assignment step yet, which reaches the client as a reset frame carrying ErrPeerNotAllowed.
+func buildRetryRestoreFixture(t *testing.T, failures int64, retry FetchRetry, tamper bool, refusals *atomic.Int64) *retryRestoreFixture {
 	t.Helper()
 	f := newWiringFixture(t, 5)
 	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
@@ -73,6 +80,9 @@ func newRetryRestoreFixtureT(t *testing.T, failures int64, retry FetchRetry, tam
 		}
 		server, err := NewServer(store, f.subject, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{sender.ID()}, DefaultLimits())
 		require.NoError(t, err)
+		if refusals != nil {
+			server.SetPeerAuthorizer(func(peer.ID) bool { return refusals.Add(-1) < 0 })
+		}
 		server.Register(context.Background(), remote)
 		id := remote.ID()
 		replicas = append(replicas, &id)
@@ -166,4 +176,38 @@ func TestArchiveRestoreVerificationFailureIsNotRetried(t *testing.T) {
 	image, loadErr := fx.journal.LoadJournal(context.Background(), fx.wf.context, fx.limits)
 	require.NoError(t, loadErr)
 	require.Nil(t, image.Restored)
+}
+
+// A joiner whose restore reaches a retained validator before that validator has installed the assignment step is refused with
+// ErrPeerNotAllowed (a reset frame from the replica's peer authorizer). The restore retries that refusal with bounded backoff and
+// completes once the replicas admit it.
+func TestArchiveRestoreRetriesWhileReplicasHaveNotAdmittedThisNodeYet(t *testing.T) {
+	t.Parallel()
+	var refusals atomic.Int64
+	refusals.Store(6)
+	fx := buildRetryRestoreFixture(t, 0, FetchRetry{Initial: time.Millisecond, Max: 5 * time.Millisecond, Total: 20 * time.Second}, false, &refusals)
+	require.NoError(t, fx.restore.Restore(context.Background()))
+	require.Less(t, refusals.Load(), int64(0), "the replicas refused first and then admitted the node")
+	require.EqualValues(t, 5, fx.executor.head.Number)
+}
+
+// If no replica ever admits it, the restore ends after the bounded wait and says why: the final error names the restore refusal,
+// the unavailable record AND the replicas' refusal, all reachable with errors.Is.
+func TestArchiveRestoreEndsWithAClearErrorWhenNoReplicaEverAdmitsThisNode(t *testing.T) {
+	t.Parallel()
+	var refusals atomic.Int64
+	refusals.Store(1 << 40)
+	fx := buildRetryRestoreFixture(t, 0, FetchRetry{Initial: 5 * time.Millisecond, Max: 20 * time.Millisecond, Total: 300 * time.Millisecond}, false, &refusals)
+	started := time.Now()
+	err := fx.restore.Restore(context.Background())
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrRestore)
+	require.ErrorIs(t, err, archive.ErrUnavailable)
+	require.ErrorIs(t, err, ErrPeerNotAllowed, "the final error says the replicas refused this node, not just that a record was missing")
+	require.ErrorContains(t, err, "refusing this node")
+	require.GreaterOrEqual(t, time.Since(started), 300*time.Millisecond)
+	require.Less(t, time.Since(started), 10*time.Second)
+	image, loadErr := fx.journal.LoadJournal(context.Background(), fx.wf.context, fx.limits)
+	require.NoError(t, loadErr)
+	require.Nil(t, image.Restored, "nothing is retained from a refused restore")
 }
