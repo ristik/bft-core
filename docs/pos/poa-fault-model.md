@@ -4,7 +4,7 @@ Written for the X1 matrix row X-42 ([#42](https://github.com/ristik/bft-core/iss
 
 ## Setting
 
-Proof of Authority, equal weights. One validator is one organizational entity: a BFT Core node plus its co-hosted EVM node (ADR 0012, decision 1). Validator-set changes are coupled: one root handoff changes the root committee and the EVM assignment together (decision 2). The M2 evidence lanes use four validators and four root nodes (`scripts/reth-paired-devnet.sh:62` requires four validators; `devnet-runs/m2a-final-merged-20260930T071819Z/start-evm.log:14` records "started 4 root nodes").
+Proof of Authority, equal weights. One validator is one organizational entity: a BFT Core node plus its co-hosted EVM node (ADR 0012, decision 1). Validator-set changes are coupled: one root handoff changes the root committee and the EVM assignment together (decision 2). The M2 evidence lanes use four validators and a four-member root committee (`scripts/reth-paired-devnet.sh:61-64` requires four validators for the profile-2 handoff lane; `devnet-runs/m2a-final-merged-20260930T071819Z/start-evm.log:14` records "started 4 root nodes"). Each lane handoff replaces one root by a new one (`scripts/m2-profile2-handoffs.sh:338-350`), so that run has six root directories but four committee members in every epoch.
 
 ## Quorum rules, by layer
 
@@ -12,14 +12,14 @@ Proof of Authority, equal weights. One validator is one organizational entity: a
 
 | Layer | Quorum rule | Where set | Safety against Byzantine members | Liveness | n = 4 |
 |---|---|---|---|---|---|
-| Root chain (BFT Core consensus) | q = ⌊2n/3⌋ + 1 by default; a lower threshold is refused | `bft-go-base@v1.1.1-0.20260421100318-01ab63a83bf5` (`go.mod:24`) `types/root_trust_base.go:84-97`; the handoff body recomputes it as `evmroot.RootQuorumThreshold` at `evmroot/d3weights.go:136` and `rootchain/consensus/handoff_operator.go:401`; vote weights at `rootchain/consensus/vote_register.go:131` | f < n/3 | n − q members may be down | q = 3, f = 1 |
-| EVM shard certification requests | q = ⌊n/2⌋ + 1 of the configured shard keys, one vote per key | `rootchain/consensus/storage/sharding.go:681`; checked when the root admits the request at `rootchain/request_buffer.go:221` and `rootchain/consensus/types/ir_change_request.go:123` | two conflicting quorums overlap in at least 2q − n signers, so n = 4 needs two double-signers | q members must be up | q = 3; tolerates 1 down, 1 Byzantine |
+| Root chain (BFT Core consensus) | q = ⌊2W/3⌋ + 1 over the total stake W by default; a lower threshold is refused. PoA roots have unit stake (refused otherwise at `rootchain/consensus/handoff_operator.go:376` and `rootchain/consensus/frontier_sampler.go:111`), so W = n and q = ⌊2n/3⌋ + 1 | `bft-go-base@v1.1.1-0.20260421100318-01ab63a83bf5` (`go.mod:24`) `types/root_trust_base.go:84-97`; the handoff body recomputes it as `evmroot.RootQuorumThreshold` at `evmroot/d3weights.go:136` and `rootchain/consensus/handoff_operator.go:401`; vote weights at `rootchain/consensus/vote_register.go:131` (one per vote unless the profile uses stake weighting) | f < n/3, that is f ≤ n − q | n − q members may be down | q = 3, f = 1 |
+| EVM shard certification requests | q = ⌊n/2⌋ + 1 of the configured shard keys, one vote per key | `rootchain/consensus/storage/sharding.go:681`; checked when the root admits the request at `rootchain/request_buffer.go:221` and `rootchain/consensus/types/ir_change_request.go:123` | two conflicting quorums overlap in at least 2q − n signers, so n = 4 needs two double-signers | q members must be up | q = 3; tolerates 1 down or 1 Byzantine, not both |
 | Aggregator shards | the same unweighted majority rule, over that shard's configured keys | `rootchain/partitions/partition_trust_base.go:22`, `rootchain/consensus/storage/sharding.go:681` | see below: the keys are held by one operator | q members must be up | q = 1, 2, 2, 3 for n = 1 to 4 |
 
 Notes.
 
-- **Root consensus** also requires `2N/3 < q ≤ N` wherever a root quorum is verified from a trust base outside the voting path (`rootchain/consensus/frontier_sampler.go:121`). Handoff approval needs q old-committee members to be live (`rootchain/consensus/handoff_operator.go:1146`): with four roots, three. This is the accepted "needs a live old quorum" limit.
-- **FaultyWeightBound** (`evmroot/d3weights.go:147`) is W − q: the weight that may be Byzantine while a root quorum is still safe; timeout amplification triggers when timeout-voting weight exceeds it. For equal weights and n = 4 it is 1.
+- **Root consensus** also requires `2N/3 < q ≤ N` wherever a root quorum is verified from a trust base outside the voting path (`rootchain/consensus/frontier_sampler.go:121`). Handoff approval needs endorsements of weight q from the old committee (`rootchain/consensus/handoff_operator.go:981-983`), and so does a handoff abort (`:1146`): with four roots, three live members. This is the accepted "needs a live old quorum" limit.
+- **Faulty bound.** The running root takes n − q (or W − q under stake weighting) as the weight that may be Byzantine while a root quorum is still safe (`rootchain/consensus/vote_register.go:162`, from `GetMaxFaultyNodes` in the pinned bft-go-base); the pacemaker jumps to the timeout state once timeout votes exceed it (`rootchain/consensus/pacemaker.go:198`). The D3 specification helper `FaultyWeightBound` (`evmroot/d3weights.go:147`) states the same W − q but is used only by the vector generator. For n = 4 it is 1.
 - **EVM shard threshold in code versus design.** The design defines `ShardAttestationThreshold = ⌊W/2⌋ + 1` over root-assignment weights (`evmroot/d3weights.go:141`), but that function is used only by the D3 vector generator (`evmroot/d3vectors.go:153`); the running EVM shard uses the unweighted count rule above. Under PoA's equal weights the two coincide; they diverge only when weights differ (PoS), which is outside this model.
 - **Root round timeouts and shard no-quorum.** When a shard cannot form a quorum, the root issues a repeat certificate (on a proven no-quorum or after the T2 timeout), never a different state (ADR 0012, "What the root checks"; `rootchain/consensus/types/ir_change_request.go:129-141` refuses to certify "no quorum" unless a quorum is truly impossible).
 
@@ -34,7 +34,7 @@ Notes.
 | Two validators Byzantine | root safety lost | conflicting shard quorums possible | outside the assumption |
 | Signing key lost with its state | rotate the key through a certified coupled handoff while the old quorum lives; no same-key restore (D-M2-2) | same | X-17 limit |
 
-The matrix does not claim behaviour for two simultaneous faults; the lanes inject one fault at a time.
+Precisely: with four roots and q = 3, `f = 1` is one faulty validator in total, of any kind (crashed, isolated or Byzantine), not one of each. With one Byzantine root, safety holds; liveness then needs the other three roots up and connected, because they are exactly a quorum. One crash plus one Byzantine member is two faults and is outside the assumption. The matrix does not claim behaviour for two simultaneous faults; the lanes inject one fault at a time.
 
 ## Co-hosted trust
 
