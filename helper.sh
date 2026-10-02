@@ -283,7 +283,8 @@ function generate_evm_shard_conf() {
 
 # --- SealRegistry layout: resolved ONCE per run, persisted in the run directory -----------------------
 # Layout 2 (registrygenesis/seal-registry-v2.json, code hash 0x7787f316...caf38, contracts ce3e40b4) is what
-# ureth unicity/main pins since #47 and is the default. Ureth commits listed in REGISTRY_LAYOUT1_URETH_PINS predate
+# ureth unicity/main pins since #47 and is the default (use the H3 Ureth 5f3bb7e4 or later; the layout-1 pins below are
+# legacy, kept only so an old client is still classified as layout 1, and cannot run the current epoch-transition encoding). Ureth commits listed in REGISTRY_LAYOUT1_URETH_PINS predate
 # it and need layout 1; REGISTRY_LAYOUT=1|2 overrides at resolution time only.
 # registry_layout_init writes test-nodes/registry-layout (layout, artifact sha256, ureth commit) once, at run start
 # (setup-evm-nodes.sh, reth-paired-devnet.sh and the f6b lanes via setup). Every script that seeds genesis or

@@ -61,7 +61,14 @@ does not implement authentication.
 
 This matrix is a conservative deployment rule, not a rolling-upgrade guarantee.
 The available evidence is pinned to exact artifacts: the final M2a run used BFT
-script tree `6e300cc1` and Ureth `055a314f759f78f045d55ceddfeb7e14b3b6a2f7`;
+script tree `6e300cc1` and Ureth `055a314f759f78f045d55ceddfeb7e14b3b6a2f7`
+(historical evidence; a registry-layout-1 client). On current integration the supported
+execution client is the H3 Ureth `5f3bb7e4ee9f82e70630e5c4b73783e7a392a7d3` with registry
+layout 2: a layout-1 client such as `055a314f` refuses the H3-era epoch transition
+(`invalid epoch transition encoding`, shown by an unmodified-integration control run), and
+there is no migration of an already initialized chain. The profile-2 lane on integration is run
+with `H4_URETH_BIN`/`H4_URETH_COMMIT` set to the H3 Ureth and is then a configuration-only
+lane (`M2_HANDOFF_MODE` defaults to `config-only` on layout 2);
 this H6 implementation is based on BFT integration
 `dc8dd9aaa37e21e7c00a33819cb1110f24e9a58b`. `urethPinVerifyBinary` checks the
 Ureth executable against its chosen commit before launch.
