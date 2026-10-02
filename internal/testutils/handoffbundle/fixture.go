@@ -1,9 +1,9 @@
 package handoffbundle
 
 import (
-	"crypto/sha256"
 	"bytes"
 	"crypto"
+	"crypto/sha256"
 	"fmt"
 	"testing"
 	"time"
@@ -37,7 +37,11 @@ func New(t *testing.T) Fixture { return NewBound(t, nil) }
 
 // NewBound builds the fixture with the successor body binding the digest of the given candidate preimage; nil binds the
 // root-members-only operator candidate. The preimage itself is not delivered: the caller attaches it to the Bundle.
-func NewBound(t *testing.T, preimage []byte) Fixture {
+func NewBound(t *testing.T, preimage []byte) Fixture { return NewBoundAtShardEpoch(t, preimage, 0) }
+
+// NewBoundAtShardEpoch is NewBound with the shard at the given shard epoch: epoch 0 is the genesis configuration, a higher epoch a
+// successor assignment's, so the snapshot carries that epoch's configuration hash (ConfHash).
+func NewBoundAtShardEpoch(t *testing.T, preimage []byte, shardEpoch uint64) Fixture {
 	t.Helper()
 	oldNodes := make([]*testutils.TestNode, 4)
 	oldSigners := make(map[string]abcrypto.Signer, 4)
@@ -78,7 +82,7 @@ func NewBound(t *testing.T, preimage []byte) Fixture {
 	shard := types.ShardID{}
 	conf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: old.NetworkID,
 		PartitionID: partition, ShardID: shard, PartitionTypeID: 999, TypeIDLen: 8, UnitIDLen: 256,
-		T2Timeout: 2500 * time.Millisecond, Validators: shardValidators, Epoch: 0, EpochStart: 1}
+		T2Timeout: 2500 * time.Millisecond, Validators: shardValidators, Epoch: shardEpoch, EpochStart: 1 + 2*shardEpoch}
 	state, err := storage.NewShardInfo(conf, crypto.SHA256)
 	require.NoError(t, err)
 	state.IR.BlockHash = bytes.Repeat([]byte{5}, 32)

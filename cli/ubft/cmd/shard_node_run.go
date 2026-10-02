@@ -700,7 +700,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				return fmt.Errorf("starting archive replica: %w", e)
 			}
 			if flags.TrustHistoryProfile2 {
-				archiveServer.SetBundleVerifier(archivewiring.BundleAdmission(historicalTrust))
+				archiveServer.SetBundleVerifier(archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch))
 			}
 			archiveServer.SetLogger(flags.observe.Logger())
 			archiveServer.Register(ctx, peer)
@@ -761,10 +761,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					// source of the shard configuration hashes the client will accept per shard epoch. Installed before the handoff is
 					// activated, so no certificate of the new root epoch can be verifiable while its configuration is still unknown; and
 					// again from every persisted bundle on restart, which rebuilds the set from genesis plus the verified history.
-					if err := node.InstallShardConf(step.OldShardEpoch, step.OldActiveConfHash[:]); err != nil {
-						return err
-					}
-					if err := node.InstallShardConf(step.NewShardEpoch, step.NewActiveConfHash[:]); err != nil {
+					if err := installAssignmentStepConfs(node, step); err != nil {
 						return err
 					}
 					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR, step)
@@ -950,7 +947,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 			publisher = &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics, ReceiptSource: executor.(*engineapi.Adapter)}
 			if flags.TrustHistoryProfile2 {
-				publisher.BundleVerifier = archivewiring.BundleAdmission(historicalTrust)
+				publisher.BundleVerifier = archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch)
 			}
 			if e := publisher.Validate(); e != nil {
 				_ = metrics.Close()
@@ -1413,4 +1410,22 @@ func loadEngineEpochTransition(path string, oldEpoch uint64) ([]byte, error) {
 		return nil, fmt.Errorf("--engine-epoch-transition starts at epoch %d, configured root trust base is epoch %d", transition.OldRootEpoch, oldEpoch)
 	}
 	return raw, nil
+}
+
+// shardConfInstaller is the node surface a verified assignment step is installed into.
+type shardConfInstaller interface {
+	InstallShardConf(epoch uint64, hash []byte) error
+}
+
+// installAssignmentStepConfs records the shard configuration hashes a VERIFIED assignment step names, the old epoch's before the new
+// epoch's: the only production source of the node's per-epoch configuration set. A contradiction with what is installed is an error
+// (the handoff is not activated).
+func installAssignmentStepConfs(node shardConfInstaller, step handoff.AssignmentStep) error {
+	if err := node.InstallShardConf(step.OldShardEpoch, step.OldActiveConfHash[:]); err != nil {
+		return fmt.Errorf("installing the old shard configuration: %w", err)
+	}
+	if err := node.InstallShardConf(step.NewShardEpoch, step.NewActiveConfHash[:]); err != nil {
+		return fmt.Errorf("installing the new shard configuration: %w", err)
+	}
+	return nil
 }
