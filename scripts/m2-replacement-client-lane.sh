@@ -73,4 +73,4 @@ pass "comparison report includes per-block BFT certificate and canonical input d
 if [ "$laneStatus" -ne 0 ]; then
   fail "paired restore lane had an ancillary failure; comparison evidence is preserved in $EVIDENCE_DIR"
 fi
-pass "M2 #261 integrated replacement-client lane complete"
+pass "M2 #261 integrated replacement-client lane complete" | tee -a "$laneLog"
