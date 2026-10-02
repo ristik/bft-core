@@ -311,9 +311,13 @@ h3_start_reth() { # spare execution client i, peered with the running ones
 # Restore validator i (fresh home and execution client, identity kept) from a surviving replica's archive, through its surviving authority.
 h3_restore_validator() {
   local i=$1 replica=$2; shift 2
-  local evidence="$H3_DIR/restore-$i" bodyID rootBoot bootnodes peers=() p
-  rm -rf "$evidence"; mkdir -p "$evidence"
-  cp "test-nodes/evm$i/keys.json" "test-nodes/evm$i/node-info.json" "$evidence/" || return 1
+  # The restored node lives in the validator's own home, with the paths a plain start uses (journal, archive store, debug.log), so the
+  # lane's later authority-advance restarts (start_one_evm_validator) find it where they expect it. Its stale state is cleared first.
+  local evidence="test-nodes/evm$i" bodyID rootBoot bootnodes peers=() p
+  stop_one_evm_validator "$i" 2>/dev/null || true
+  find "$evidence" -mindepth 1 ! -name keys.json ! -name node-info.json ! -name jwt.hex ! -name logger-config.yaml -exec rm -rf {} + 2>/dev/null
+  rm -rf "test-nodes/h3-archives/evm$i"
+  mkdir -p "$evidence"
   # the authority (not the node) holds the signing key: a fresh session for the restored node, the old client being gone
   build/ubft signing-authority replace-session --operator-socket "test-nodes/auth$i/operator.sock" \
     --operator-credential "test-nodes/auth$i/operator.cred" --out "test-nodes/auth$i/client.cred" || return 1
@@ -335,14 +339,12 @@ h3_restore_validator() {
     --trust-base "$H3_RESTORE_TRUST_BASE" --full-shard-conf "$EVM_FULL_SHARD_CONF" --registry-layout 2 \
     --genesis "$EVM_GENESIS_FILE" --engine-url "http://127.0.0.1:$((rethEngineBase+i-1))" \
     --eth-url "http://127.0.0.1:$((rethEthBase+i-1))" --jwt-secret "$evidence/jwt.hex" \
-    --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" --execution-journal "$evidence/journal.db" \
-    --archive-store "$evidence/archive" --archive-prune --trust-history-profile-2 --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}" \
+    --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" --execution-journal "$evidence/execution-journal.db" \
+    --archive-store "test-nodes/h3-archives/evm$i" --archive-prune --trust-history-profile-2 --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}" \
     --signing-authority-socket "test-nodes/auth$i/client.sock" --signing-authority-credential "test-nodes/auth$i/client.cred" \
     "${peers[@]}" --tip-uc "$evidence/tip.uc.cbor" --tip-tr "$evidence/tip.tr.cbor" --trust-body-id "$bodyID" \
-    --log-format text --log-level info >>"$evidence/restore.log" 2>&1 &
+    --log-format text --log-level info >>"$evidence/debug.log" 2>&1 &
   echo $! >"$evidence/pid"
-  cp "$evidence/pid" "test-nodes/evm$i/pid"
-  ln -sf "restore-$i/restore.log" "test-nodes/evm$i/debug.log" 2>/dev/null || true
 }
 
 h3_head_after_all() { # wait until every id in $@ logs a new certificate admitted at root epoch $1
@@ -553,13 +555,13 @@ h3_restore_s1() {
   h3_restore_validator 1 2 || return 1
   H3_ONLINE="1 2 3 5"
   for i in $(seq 1 180); do
-    grep -Eq 'handoff activated.*rootEpoch=3' "$H3_DIR/restore-1/restore.log" &&
-      grep -q 'submitting block certification request' "$H3_DIR/restore-1/restore.log" &&
-      grep -Eq 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "$H3_DIR/restore-1/restore.log" && return 0
-    kill -0 "$(cat "$H3_DIR/restore-1/pid")" 2>/dev/null || { tail -40 "$H3_DIR/restore-1/restore.log" >&2; return 1; }
+    grep -Eq 'handoff activated.*rootEpoch=3' "test-nodes/evm1/debug.log" &&
+      grep -q 'submitting block certification request' "test-nodes/evm1/debug.log" &&
+      grep -Eq 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "test-nodes/evm1/debug.log" && return 0
+    kill -0 "$(cat "test-nodes/evm1/pid")" 2>/dev/null || { tail -40 "test-nodes/evm1/debug.log" >&2; return 1; }
     sleep 1
   done
-  tail -40 "$H3_DIR/restore-1/restore.log" >&2
+  tail -40 "test-nodes/evm1/debug.log" >&2
   return 1
 }
 h3_step "H4 restore at s=1: validator 1 restores, verifies epoch 3 and resumes signing" h3_restore_s1
