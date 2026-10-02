@@ -211,6 +211,39 @@ func TestRolledRootsRejoinFromStatesWithQCsThatCommitNothing(t *testing.T) {
 	}
 }
 
+// commitsNothingInNextEpoch is a QC of the state's own shape that commits nothing (the empty seal, as taken from a QC of the state that does) but
+// votes in the next epoch, its vote hash kept consistent. It goes into a slot that the epoch rule inspects BEFORE any signature is verified (the head
+// block's own QC is refused earlier, as an inconsistent block, and so cannot test the rule): refusing it with the typed epoch error is the epoch rule,
+// whereas a rule that waived the vote epoch for the empty seal would let it through to the signature check and fail there with another error.
+func commitsNothingInNextEpoch(t *testing.T, s *abdrc.StateMsg) *rctypes.QuorumCert {
+	t.Helper()
+	var src *rctypes.QuorumCert
+	for _, qc := range append([]*rctypes.QuorumCert{s.CommittedHead.Block.Qc, s.CommittedHead.Qc, s.CommittedHead.CommitQc}, pendingQCs(s)...) {
+		if commitsNothing(qc) {
+			src = qc
+			break
+		}
+	}
+	require.NotNil(t, src, "premise: a QC of the state commits nothing, so this case would not test what it names")
+	info := *src.VoteInfo
+	info.Epoch++
+	h, err := info.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	seal := *src.LedgerCommitInfo
+	seal.PreviousHash = h
+	qc := *src
+	qc.VoteInfo, qc.LedgerCommitInfo = &info, &seal
+	return &qc
+}
+
+func pendingQCs(s *abdrc.StateMsg) []*rctypes.QuorumCert {
+	var qcs []*rctypes.QuorumCert
+	for _, b := range s.Pending {
+		qcs = append(qcs, b.Qc)
+	}
+	return qcs
+}
+
 // What recovery still refuses, with a typed error and without changing the store: a state of another epoch, and a state whose commit info
 // names another epoch's block.
 func TestRecoveryStillRefusesStateOfAnotherEpochWithTypedErrors(t *testing.T) {
@@ -218,26 +251,11 @@ func TestRecoveryStillRefusesStateOfAnotherEpochWithTypedErrors(t *testing.T) {
 	state := c.pastTheFirstSuccessor()
 	require.True(t, hasQCThatCommitsNothing(state), "premise: the state contains a QC that commits nothing")
 	for name, mutate := range map[string]func(*abdrc.StateMsg){
-		"a pending QC that commits nothing but votes in another epoch": func(s *abdrc.StateMsg) {
-			for _, b := range s.Pending {
-				if commitsNothing(b.Qc) {
-					info := *b.Qc.VoteInfo
-					info.Epoch++
-					h, err := info.Hash(crypto.SHA256)
-					require.NoError(t, err)
-					qc := *b.Qc
-					qc.VoteInfo = &info
-					seal := *qc.LedgerCommitInfo
-					seal.PreviousHash = h
-					qc.LedgerCommitInfo = &seal
-					b.Qc = &qc
-					return
-				}
-			}
-			s.Pending[len(s.Pending)-1].Epoch++
-		},
-		"a block of another epoch in the pending suffix": func(s *abdrc.StateMsg) { s.Pending[len(s.Pending)-1].Epoch++ },
-		"a head block of another epoch":                  func(s *abdrc.StateMsg) { s.CommittedHead.Block.Epoch++ },
+		"a head QC that commits nothing but votes in another epoch":        func(s *abdrc.StateMsg) { s.CommittedHead.Qc = commitsNothingInNextEpoch(t, s) },
+		"a head commit QC that commits nothing but votes in another epoch": func(s *abdrc.StateMsg) { s.CommittedHead.CommitQc = commitsNothingInNextEpoch(t, s) },
+		"a pending QC that commits nothing but votes in another epoch":     func(s *abdrc.StateMsg) { s.Pending[0].Qc = commitsNothingInNextEpoch(t, s) },
+		"a block of another epoch in the pending suffix":                   func(s *abdrc.StateMsg) { s.Pending[len(s.Pending)-1].Epoch++ },
+		"a head block of another epoch":                                    func(s *abdrc.StateMsg) { s.CommittedHead.Block.Epoch++ },
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := restartedRoot(t, firstReplica(c.replicas))

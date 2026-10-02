@@ -542,9 +542,43 @@ func TestStateMsg_Verify(t *testing.T) {
 		// A QC that commits nothing (after a timed-out round, or right after an epoch anchor) carries the empty seal. Recovery accepts it
 		// when what it VOTES for is in the epoch, and still refuses everything that names another epoch (#366).
 		t.Run("a QC that commits nothing is in the epoch if its vote is", func(t *testing.T) {
-			epoch := current.GetEpoch()
-			withQC := func(voteEpoch uint64, seal func(previous []byte) *types.UnicitySeal) StateMsg {
+			// The epoch must not be 0: the empty seal's own epoch is 0, so in an epoch-0 fixture the pre-#366 rule (every commit info
+			// must be in the epoch) accepts the empty seal as well, and nothing here could tell the two rules apart.
+			const epoch = 7
+			current := epochTrustBase{RootTrustBase: current, epoch: epoch}
+			inEpoch := func(qc *rctypes.QuorumCert) *rctypes.QuorumCert {
+				info := *qc.VoteInfo
+				info.Epoch = epoch
+				h, err := info.Hash(crypto.SHA256)
+				require.NoError(t, err)
+				seal := *qc.LedgerCommitInfo
+				seal.PreviousHash = h
+				if !isEmptyCommitInfo(&seal) {
+					seal.Epoch = epoch
+				}
+				out := *qc
+				out.VoteInfo, out.LedgerCommitInfo = &info, &seal
+				return &out
+			}
+			stateInEpoch := func() StateMsg {
 				sm := makeState()
+				head := *sm.CommittedHead
+				block := *head.Block
+				block.Epoch = epoch
+				block.Qc = inEpoch(block.Qc)
+				head.Block, head.Qc, head.CommitQc = &block, inEpoch(head.Qc), inEpoch(head.CommitQc)
+				sm.CommittedHead = &head
+				pending := make([]*rctypes.BlockData, len(sm.Pending))
+				for i, b := range sm.Pending {
+					cp := *b
+					cp.Epoch, cp.Qc = epoch, inEpoch(b.Qc)
+					pending[i] = &cp
+				}
+				sm.Pending = pending
+				return sm
+			}
+			withQC := func(voteEpoch uint64, seal func(previous []byte) *types.UnicitySeal) StateMsg {
+				sm := stateInEpoch()
 				info := *sm.Pending[0].Qc.VoteInfo
 				info.Epoch = voteEpoch
 				h, err := info.Hash(crypto.SHA256)
@@ -560,6 +594,9 @@ func TestStateMsg_Verify(t *testing.T) {
 					return &types.UnicitySeal{Version: 1, PreviousHash: previous, NetworkID: 1, Epoch: sealEpoch, RootChainRoundNumber: 5, Hash: test.RandomBytes(32), Timestamp: 7}
 				}
 			}
+			base := stateInEpoch()
+			require.NoError(t, base.VerifyWithHistory(crypto.SHA256, current, history), "control: the whole fixture state in the epoch")
+			require.True(t, isEmptyCommitInfo(base.CommittedHead.Qc.LedgerCommitInfo), "premise: the head QCs of the fixture commit nothing")
 			sm := withQC(epoch, empty)
 			require.NoError(t, sm.VerifyWithHistory(crypto.SHA256, current, history), "the empty seal of a QC voting in this epoch")
 			sm = withQC(epoch, commits(epoch))
@@ -722,3 +759,11 @@ func TestRecoveryQCEpochAcceptsOnlyTheExactEmptySealWithoutACommitEpoch(t *testi
 	require.True(t, isEmptyCommitInfo(empty()))
 	require.False(t, isEmptyCommitInfo(nil))
 }
+
+// epochTrustBase reports another epoch than the always-valid trust base, which is epoch 0.
+type epochTrustBase struct {
+	types.RootTrustBase
+	epoch uint64
+}
+
+func (e epochTrustBase) GetEpoch() uint64 { return e.epoch }
