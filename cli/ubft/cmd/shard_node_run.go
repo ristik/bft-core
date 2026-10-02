@@ -749,8 +749,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					}
 					// The terminal certificate belongs to the epoch this handoff ends, whose configuration is the one the
 					// verified snapshot carries (checked against the followed assignment), not the genesis configuration. The store
-					// stays bound to the genesis origin; only the per-epoch configuration for the certificate's own shard epoch changes.
-					terminalCtx := configuredprogress.TerminalContext(journalCtx, verified.Shard.ShardConfHash, verified.Shard.TR.Epoch)
+					// stays bound to the genesis origin; the per-epoch resolver adds the certificate's own shard epoch to the installed set
+					// (the store's other durable state sits at other epochs) and refuses a conflict with an installed configuration.
+					terminalCtx, err := configuredprogress.TerminalContext(journalCtx, verified.Shard.ShardConfHash, verified.Shard.TR.Epoch)
+					if err != nil {
+						return fmt.Errorf("handoff terminal certificate context: %w", err)
+					}
 					terminal, err := rootinput.AuthenticateObservationV2(ctx, terminalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
 					if err != nil {
 						return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
