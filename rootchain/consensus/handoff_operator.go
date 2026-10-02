@@ -569,6 +569,11 @@ func (x *ConsensusManager) buildAssignmentCandidate(old, next *types.RootTrustBa
 		if err != nil || len(chain.Steps) == 0 {
 			return nil, none, errors.Join(ErrHandoffApproval, storage.ErrSupersessionInvalid, err)
 		}
+		// The early refusal of what root block validation would refuse (storage.verifySupersession): no plan, so no Prepare, is ever
+		// built for a supersession that would make the unacknowledged chain longer than handoff.MaxSupersessionSpan.
+		if err := storage.CheckSupersessionChainLength(len(chain.Steps)); err != nil {
+			return nil, none, errors.Join(ErrHandoffApproval, storage.ErrSupersessionInvalid, err)
+		}
 		if supersedes, err = chain.Supersession(); err != nil {
 			return nil, none, errors.Join(ErrHandoffApproval, err)
 		}
