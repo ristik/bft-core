@@ -66,7 +66,6 @@ func (f *confEpochFixture) client(t *testing.T) (*BFTClient, *recordingDriver) {
 	t.Helper()
 	b := &confBindingFixture{tb: f.tb}
 	c, drv := b.client(f.conf0)
-	c.confs = map[uint64][]byte{0: f.conf0}
 	return c, drv
 }
 
@@ -129,7 +128,6 @@ func TestRestartRebuildsTheConfigurationSetFromGenesisAndTheFollowedSteps(t *tes
 	ctx := context.Background()
 	f := newConfEpochFixture(t)
 	fresh, _ := f.client(t)
-	delete(fresh.confs, 0)
 	fresh.confs = nil // as constructed: only the genesis pin, no assignment known
 	err := fresh.handleCertificationResponse(ctx, f.respond(f.uc1, f.tr1))
 	require.ErrorIs(t, err, ErrShardConfEpochUnknown, "never trust the startup configuration alone")
@@ -153,10 +151,16 @@ func TestAdmissionIdentityStaysTheGenesisConfigurationAfterAnAssignmentIsInstall
 	f := newConfEpochFixture(t)
 	c, _ := f.client(t)
 	require.NoError(t, c.InstallShardConf(1, f.conf1))
-	id, err := ownAdmissionIdentity(c.partitionID, c.shardID, c.shardConfHash, c.trustBaseStore)
+	id, err := ownAdmissionIdentity(c.partitionID, c.shardID, c.shardConfHash, c.trustBaseStore, c.installedConfForEpoch)
 	require.NoError(t, err)
 	require.Equal(t, f.conf0, id.FullShardConfHash)
 	require.NotEqual(t, f.conf1, id.FullShardConfHash)
+	// ...while what an observation is authenticated against follows the installed epochs.
+	got, ok := id.ConfForEpoch(1)
+	require.True(t, ok)
+	require.Equal(t, f.conf1, got)
+	_, ok = id.ConfForEpoch(2)
+	require.False(t, ok, "an epoch that was never installed has no configuration")
 }
 
 // The queue-side authorization check (an ordering guard that repeats the delivery checks) takes the hash of the claimed epoch too.
@@ -208,5 +212,152 @@ func TestRetiredRootEpochCertificatesAreAuthenticatedUnderTheirOwnConfiguration(
 		client, response := build(t)
 		require.NoError(t, client.InstallShardConf(1, f.conf1))
 		require.NoError(t, client.handleCertificationResponse(context.Background(), response))
+	})
+}
+
+// A restart after a successor assignment's certificate was persisted: the persisted certificate is authenticated against the set rebuilt
+// from genesis plus the verified followed steps, never against the startup configuration alone.
+func TestRestartAfterASuccessorEpochCertificateWasPersisted(t *testing.T) {
+	f := newConfEpochFixture(t)
+	store := stubTrustBaseStore{tb: f.tb}
+	fs := NewFileStore(t.TempDir() + "/luc.cbor")
+	require.NoError(t, fs.SaveLUC(f.uc1)) // certified under the successor configuration (IR still at the previous epoch: not yet acknowledged)
+	loaded, err := fs.LoadLUC()
+	require.NoError(t, err)
+
+	rebuilt := func(t *testing.T, steps map[uint64][]byte) *ShardConfSet {
+		c, _ := f.client(t)
+		for epoch, hash := range steps {
+			require.NoError(t, c.InstallShardConf(epoch, hash))
+		}
+		set, err := c.shardConfSet()
+		require.NoError(t, err)
+		return set
+	}
+	t.Run("succeeds once the verified step is installed", func(t *testing.T) {
+		require.NoError(t, verifyRestoredLUCWithConfs(loaded, store, authPartitionID, types.ShardID{}, rebuilt(t, map[uint64][]byte{1: f.conf1})))
+	})
+	t.Run("refused with only the startup configuration: never trusted alone", func(t *testing.T) {
+		err := verifyRestoredLUCWithConfs(loaded, store, authPartitionID, types.ShardID{}, rebuilt(t, nil))
+		require.ErrorIs(t, err, ErrRestoredCertificateConf)
+	})
+	t.Run("the node is seeded from the verified steps before the check", func(t *testing.T) {
+		c, _ := f.client(t)
+		require.NoError(t, seedInstalledShardConfs(c, map[uint64][]byte{1: f.conf1}))
+		set, err := c.shardConfSet()
+		require.NoError(t, err)
+		require.NoError(t, verifyRestoredLUCWithConfs(loaded, store, authPartitionID, types.ShardID{}, set))
+		require.ErrorIs(t, seedInstalledShardConfs(c, map[uint64][]byte{0: f.conf1}), ErrShardConfConflict, "a seed cannot contradict genesis")
+	})
+}
+
+// A persisted certificate whose epoch/hash pair is wrong is refused, with a sentinel and not as a forgery.
+func TestPersistedCertificateWithAWrongEpochHashPairIsRefused(t *testing.T) {
+	f := newConfEpochFixture(t)
+	store := stubTrustBaseStore{tb: f.tb}
+	c, _ := f.client(t)
+	require.NoError(t, c.InstallShardConf(1, f.conf1))
+	set, err := c.shardConfSet()
+	require.NoError(t, err)
+
+	t.Run("an earlier epoch's configuration at a newer shard epoch", func(t *testing.T) {
+		// epoch 1 in its input record, but the epoch 0 configuration
+		stale := f.uc1Rebuilt(t, 1, 0)
+		err := verifyRestoredLUCWithConfs(stale, store, authPartitionID, types.ShardID{}, set)
+		require.ErrorIs(t, err, ErrRestoredCertificateConf)
+	})
+	t.Run("a configuration that is none of the installed ones", func(t *testing.T) {
+		confOther := newConfBindingFixture(t)
+		// signed by another trust base: use the binding fixture's own store and genuine other-configuration certificate
+		err := verifyRestoredLUCWithConfs(confOther.ucOther, stubTrustBaseStore{tb: confOther.tb}, authPartitionID, types.ShardID{}, set2(t, confOther.confMine))
+		require.ErrorIs(t, err, ErrRestoredCertificateConf)
+	})
+	t.Run("a forged seal is a forgery, not a configuration refusal", func(t *testing.T) {
+		forged := *f.uc0
+		seal := *forged.UnicitySeal
+		seal.Signatures = types.SignatureMap{"nobody": []byte("not a signature")}
+		forged.UnicitySeal = &seal
+		err := verifyRestoredLUCWithConfs(&forged, store, authPartitionID, types.ShardID{}, set)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, ErrRestoredCertificateConf)
+	})
+	t.Run("the right pair is accepted", func(t *testing.T) {
+		require.NoError(t, verifyRestoredLUCWithConfs(f.uc0, store, authPartitionID, types.ShardID{}, set))
+	})
+}
+
+func set2(t *testing.T, genesis []byte) *ShardConfSet {
+	t.Helper()
+	set, err := NewShardConfSet(genesis)
+	require.NoError(t, err)
+	return set
+}
+
+// uc1Rebuilt is a genuinely signed certificate whose INPUT RECORD names shard epoch irEpoch and which carries epoch confEpoch's
+// configuration (0 or 1).
+func (f *confEpochFixture) uc1Rebuilt(t *testing.T, irEpoch, confEpoch uint64) *types.UnicityCertificate {
+	t.Helper()
+	zero := make([]byte, 32)
+	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: authPartitionID, T2Timeout: 2500000000, Epoch: confEpoch}
+	if confEpoch == 1 {
+		pdr.EpochStart = 20
+	}
+	tr := f.tr0
+	if irEpoch == 1 {
+		tr = f.tr1
+	}
+	h, err := tr.Hash()
+	require.NoError(t, err)
+	ir := &types.InputRecord{Version: 1, RoundNumber: 30, Epoch: irEpoch, PreviousHash: zero, Hash: zero, SummaryValue: []byte{}, Timestamp: 3}
+	return testcertificates.CreateUnicityCertificate(t, f.signer, ir, pdr, 70, zero, h)
+}
+
+// Peer evidence is judged against the same set: evidence of a successor assignment verifies after a rotation, a stale epoch's
+// configuration never does.
+func TestAnchorEvidenceIsJudgedAgainstTheShardConfigurationSet(t *testing.T) {
+	genesisOnly := func(f *evidenceFixture) *ShardConfSet {
+		set, err := NewShardConfSet(f.conf)
+		require.NoError(t, err)
+		return set
+	}
+	t.Run("the genesis configuration at its epoch", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		c.ShardConfs = genesisOnly(f)
+		_, err := verifyFixture(t, ev, c)
+		require.NoError(t, err)
+	})
+	t.Run("a genesis entry that is not this chain's is refused", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()
+		other, err := NewShardConfSet(h32(0x42))
+		require.NoError(t, err)
+		c.ShardConfs = other
+		_, err = verifyFixture(t, ev, c)
+		require.ErrorIs(t, err, ErrEvidenceWrongContext)
+	})
+	t.Run("a successor assignment's certificates verify once it is installed", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		ev, c := f.quietTail()                 // certified under f.conf at shard epoch 0
+		set, err := NewShardConfSet(h32(0x42)) // genesis differs: only the installed epoch 1 entry matches these certificates
+		require.NoError(t, err)
+		require.NoError(t, set.Install(1, f.conf))
+		c.ShardConfs = set
+		_, err = verifyFixture(t, ev, c)
+		require.NoError(t, err, "a later installed epoch's configuration is acceptable for a certificate whose input record is still at the previous epoch")
+	})
+	t.Run("an earlier epoch's configuration at a newer shard epoch is refused", func(t *testing.T) {
+		f := newEvidenceFixture(t)
+		stateA, stateB, blockB := h32(0x0a), h32(0x0b), h32(0xbb)
+		source := f.certAtEpoch(10, 100, stateA, stateB, blockB, 12, 1)
+		mid := f.certAtEpoch(12, 110, stateB, stateB, nil, 16, 1)
+		head := f.certAtEpoch(16, 120, stateB, stateB, nil, 19, 1)
+		ev := AnchorEvidence{Source: source.UC, SourceTechnical: source.Technical, Tail: []EvidenceLink{mid, head}}
+		set, err := NewShardConfSet(f.conf) // the certificates carry THIS (epoch 0) configuration but name shard epoch 1
+		require.NoError(t, err)
+		require.NoError(t, set.Install(1, h32(0x43)))
+		c := AnchorEvidenceContext{PartitionID: evidencePartitionID, ShardConfs: set, TrustBases: f.trust, Held: head.UC}
+		_, err = verifyFixture(t, ev, c)
+		require.ErrorIs(t, err, ErrEvidenceWrongContext)
 	})
 }

@@ -88,7 +88,11 @@ type AnchorEvidenceContext struct {
 	PartitionID   types.PartitionID
 	ShardID       types.ShardID
 	ShardConfHash []byte // may be nil while F2 (#10) has not plumbed it through; see Verify below
-	TrustBases    TrustBaseStore
+	// ShardConfs, when set, replaces ShardConfHash as the expectation: a certificate must carry the configuration of the shard epoch its
+	// input record names or of a later installed one (ShardConfSet.ForIREpoch), so evidence of a successor assignment verifies after
+	// a rotation and a stale epoch's configuration never does.
+	ShardConfs *ShardConfSet
+	TrustBases TrustBaseStore
 
 	// Held is the certificate this node has itself verified and is being asked to build on. The
 	// evidence must end exactly here, or it is about some other point in the chain.
@@ -254,8 +258,21 @@ func verifyContinuity(ctx context.Context, ev AnchorEvidence, c AnchorEvidenceCo
 		if !uc.GetShardID().Equal(c.ShardID) {
 			return fmt.Errorf("%w: certificate is for shard %s, this node runs %s", ErrEvidenceWrongContext, uc.GetShardID(), c.ShardID)
 		}
-		if len(c.ShardConfHash) != 0 && !bytes.Equal(uc.ShardConfHash, c.ShardConfHash) {
-			return fmt.Errorf("%w: certificate names shard configuration %x, this node runs %x", ErrEvidenceWrongContext, uc.ShardConfHash, c.ShardConfHash)
+		expected := c.ShardConfHash
+		if c.ShardConfs != nil {
+			expected = nil
+			for _, conf := range c.ShardConfs.ForIREpoch(uc.InputRecord.Epoch) {
+				if bytes.Equal(uc.ShardConfHash, conf) {
+					expected = conf
+					break
+				}
+			}
+			if expected == nil {
+				return fmt.Errorf("%w: certificate names shard configuration %x, which this node has not installed for shard epoch %d", ErrEvidenceWrongContext, uc.ShardConfHash, uc.InputRecord.Epoch)
+			}
+		}
+		if len(expected) != 0 && !bytes.Equal(uc.ShardConfHash, expected) {
+			return fmt.Errorf("%w: certificate names shard configuration %x, this node runs %x", ErrEvidenceWrongContext, uc.ShardConfHash, expected)
 		}
 		// The trust base comes from the node's own store, keyed by the root epoch the certificate
 		// names — never from anything travelling with the evidence. An unknown epoch is a refusal,
@@ -264,7 +281,7 @@ func verifyContinuity(ctx context.Context, ev AnchorEvidence, c AnchorEvidenceCo
 		if err != nil {
 			return fmt.Errorf("%w: root epoch %d: %w", ErrEvidenceUnauthenticated, uc.GetRootEpoch(), err)
 		}
-		if err := uc.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, c.ShardConfHash); err != nil {
+		if err := uc.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, expected); err != nil {
 			return fmt.Errorf("%w: %w", ErrEvidenceUnauthenticated, err)
 		}
 		// The epoch comparison comes LAST, AFTER the signature. It used to come first, which meant

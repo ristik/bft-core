@@ -63,7 +63,7 @@ func journalContext(origin registrygenesis.GenesisOrigin, id shardnode.Admission
 	if uint64(id.PartitionID) != r.PartitionID || !bytes.Equal(id.ShardID.Bytes(), r.ShardID) || !bytes.Equal(id.FullShardConfHash, origin.FullShardConfHash().Bytes()) {
 		return configuredprogress.Context{}, fmt.Errorf("configuredadmission: journal identity differs from origin")
 	}
-	obs := rootinput.ObservationContextV2{NetworkID: types.NetworkID(r.NetworkID), PartitionID: id.PartitionID, ShardID: id.ShardID, ShardConfHash: bytes.Clone(id.FullShardConfHash), RootEpoch: r.RootEpoch, TrustBases: id.TrustBases}
+	obs := rootinput.ObservationContextV2{NetworkID: types.NetworkID(r.NetworkID), PartitionID: id.PartitionID, ShardID: id.ShardID, ShardConfHash: bytes.Clone(id.FullShardConfHash), ConfForEpoch: id.ConfForEpoch, RootEpoch: r.RootEpoch, TrustBases: id.TrustBases}
 	record := certifiedstore.Context{NetworkID: types.NetworkID(r.NetworkID), PartitionID: id.PartitionID, ShardID: id.ShardID, FullShardConfHash: bytes.Clone(id.FullShardConfHash), Registry: origin.ProofContext(), TrustBases: id.TrustBases}
 	return configuredprogress.Context{Origin: origin, Observation: obs, Record: record}, nil
 }

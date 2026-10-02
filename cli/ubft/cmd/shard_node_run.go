@@ -641,7 +641,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		defer journalStore.Close()
 		recordCtx := certifiedstore.Context{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, FullShardConfHash: confHash, Registry: origin.ProofContext(), TrustBases: trustBaseStore}
-		journalCtx := configuredprogress.Context{Origin: origin, ExecutionConfigV2: executionID, Observation: rootinput.ObservationContextV2{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, ShardConfHash: confHash, RootEpoch: trustBases[0].GetEpoch(), TrustBases: trustBaseStore}, Record: recordCtx}
+		journalCtx := configuredprogress.Context{Origin: origin, ExecutionConfigV2: executionID, Observation: rootinput.ObservationContextV2{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, ShardConfHash: confHash, ConfForEpoch: node.ShardConfForEpoch, RootEpoch: trustBases[0].GetEpoch(), TrustBases: trustBaseStore}, Record: recordCtx}
 		if flags.TrustHistoryProfile2 {
 			journalCtx.Observation.EpochAuthority = historicalTrust
 			journalCtx.Record.EpochAuthority = historicalTrust
@@ -726,6 +726,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					// verified snapshot carries (checked against the followed assignment), not the genesis configuration.
 					terminalCtx := journalCtx
 					terminalCtx.Observation.ShardConfHash = bytes.Clone(verified.Shard.ShardConfHash)
+					terminalCtx.Observation.ConfForEpoch = nil // the verified snapshot's own configuration is the expectation here
 					terminal, err := rootinput.AuthenticateObservationV2(ctx, terminalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
 					if err != nil {
 						return fmt.Errorf("authenticating handoff terminal certificate: %w", err)

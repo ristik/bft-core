@@ -58,7 +58,7 @@ func (f Factory) Start(ctx context.Context, id shardnode.AdmissionIdentity, gate
 	if uint64(id.PartitionID) != r.PartitionID || !bytes.Equal(id.ShardID.Bytes(), r.ShardID) || !bytes.Equal(id.FullShardConfHash, f.Origin.FullShardConfHash().Bytes()) {
 		return nil, fmt.Errorf("configuredadmission: client identity does not match trusted genesis origin")
 	}
-	obs := rootinput.ObservationContextV2{NetworkID: types.NetworkID(r.NetworkID), PartitionID: id.PartitionID, ShardID: id.ShardID, ShardConfHash: bytes.Clone(id.FullShardConfHash), RootEpoch: r.RootEpoch, TrustBases: id.TrustBases}
+	obs := rootinput.ObservationContextV2{NetworkID: types.NetworkID(r.NetworkID), PartitionID: id.PartitionID, ShardID: id.ShardID, ShardConfHash: bytes.Clone(id.FullShardConfHash), ConfForEpoch: id.ConfForEpoch, RootEpoch: r.RootEpoch, TrustBases: id.TrustBases}
 	record := certifiedstore.Context{NetworkID: types.NetworkID(r.NetworkID), PartitionID: id.PartitionID, ShardID: id.ShardID, FullShardConfHash: bytes.Clone(id.FullShardConfHash), Registry: f.Origin.ProofContext(), TrustBases: id.TrustBases}
 	coordinator, err := configuredprogress.NewAdmissionCoordinator(ctx, configuredprogress.AdmissionConfig{
 		Store: f.Store, Context: configuredprogress.Context{Origin: f.Origin, Observation: obs, Record: record}, Gate: finalityGate{boundary: gate}, Invalidate: f.Invalidate,
