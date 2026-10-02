@@ -200,7 +200,12 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		if err != nil {
 			return nil, err
 		}
-		states, err := activateEVMAssignment(parentState.States, shardConfs, record, newBlock.Round, hash, derivedShards)
+		// The epoch starts at the committed activation round, which is the round after the epoch anchor (the genesis start): every
+		// root derives the same value from the committed record, whatever rounds timed out before this first block was proposed.
+		if x.GetRound()+1 != record.ActivationRound || newBlock.Round < record.ActivationRound {
+			return nil, errors.Join(ErrControlCheckpoint, ErrActivationBoundary)
+		}
+		states, err := activateEVMAssignment(parentState.States, shardConfs, record, record.ActivationRound, hash, derivedShards)
 		if err != nil {
 			return nil, err
 		}

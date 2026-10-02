@@ -19,6 +19,8 @@ var (
 	// inconsistent or unverifiable. It refuses readiness: the genesis or a
 	// retired configuration is never used instead.
 	ErrAssignmentHistory = errors.New("EVM assignment history unavailable or inconsistent")
+	// ErrActivationBoundary refuses an activation whose configuration does not start at the committed activation round.
+	ErrActivationBoundary = errors.New("configuration start is not the committed activation round")
 )
 
 // DerivedConfigInstaller is the orchestration's internal writer. Verified
@@ -193,7 +195,10 @@ func DeriveActivatedConfigs(record evmroot.OrderedHandoffRecord, body evmroot.Tr
 }
 
 // activateEVMAssignment installs the committed successor assignment into the
-// designated EVM shard at the first new-root execution boundary. A shard whose
+// designated EVM shard at the first new-root execution boundary. epochStart is the COMMITTED activation round of the handoff
+// (record.ActivationRound, the root epoch's start): every configuration it installs must start exactly there. It is deliberately not
+// the round of the block that executes the boundary: that block is the first one a successor-committee leader manages to propose,
+// and rounds that time out before it (a restarting committee, a faulty leader) move it past the epoch start. A shard whose
 // installed configuration already equals the one in effect is untouched, which
 // makes the activation idempotent: it runs once per (epoch, configuration, H).
 // The successor technical record derived from the new configuration must equal
@@ -204,7 +209,7 @@ func DeriveActivatedConfigs(record evmroot.OrderedHandoffRecord, body evmroot.Tr
 // key's first post-boundary request is refused. Such a shard has no committed successor technical record: every root derives it
 // from the same configuration and shard state, exactly as an ordinary round would.
 func activateEVMAssignment(states map[types.PartitionShardID]*ShardInfo, shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord,
-	record evmroot.OrderedHandoffRecord, round uint64, hashAlg crypto.Hash, derivedShards map[types.PartitionShardID]struct{}) (map[types.PartitionShardID]*ShardInfo, error) {
+	record evmroot.OrderedHandoffRecord, epochStart uint64, hashAlg crypto.Hash, derivedShards map[types.PartitionShardID]struct{}) (map[types.PartitionShardID]*ShardInfo, error) {
 	out := maps.Clone(states)
 	for key, conf := range shardConfs {
 		si := states[key]
@@ -219,9 +224,9 @@ func activateEVMAssignment(states map[types.PartitionShardID]*ShardInfo, shardCo
 			if bytes.Equal(installed, si.ShardConfHash) {
 				continue
 			}
-			if conf.EpochStart != round || conf.Epoch != si.TR.Epoch+1 {
-				return nil, fmt.Errorf("%w: shard %s configuration epoch %d starting at %d does not follow the installed epoch %d at boundary %d",
-					ErrControlCheckpoint, key, conf.Epoch, conf.EpochStart, si.TR.Epoch, round)
+			if conf.EpochStart != epochStart || conf.Epoch != si.TR.Epoch+1 {
+				return nil, fmt.Errorf("%w: %w: shard %s configuration epoch %d starting at %d does not follow the installed epoch %d at the committed activation %d",
+					ErrControlCheckpoint, ErrActivationBoundary, key, conf.Epoch, conf.EpochStart, si.TR.Epoch, epochStart)
 			}
 			tr, err := successorTechnicalRecord(si, conf, hashAlg)
 			if err != nil {
@@ -247,9 +252,9 @@ func activateEVMAssignment(states map[types.PartitionShardID]*ShardInfo, shardCo
 		if bytes.Equal(installed, si.ShardConfHash) {
 			continue
 		}
-		if conf.EpochStart != round || conf.Epoch != si.TR.Epoch+1 {
-			return nil, fmt.Errorf("%w: configuration epoch %d starting at %d does not follow the installed epoch %d at boundary %d",
-				ErrControlCheckpoint, conf.Epoch, conf.EpochStart, si.TR.Epoch, round)
+		if conf.EpochStart != epochStart || conf.Epoch != si.TR.Epoch+1 {
+			return nil, fmt.Errorf("%w: %w: configuration epoch %d starting at %d does not follow the installed epoch %d at the committed activation %d",
+				ErrControlCheckpoint, ErrActivationBoundary, conf.Epoch, conf.EpochStart, si.TR.Epoch, epochStart)
 		}
 		tr, err := successorTechnicalRecord(si, conf, hashAlg)
 		if err != nil {
