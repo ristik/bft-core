@@ -55,14 +55,46 @@ h3_evm_row() { h3_root_info | jq -c '.partitionShards[] | select(.partitionId==8
 # Both the EVM shard and the three aggregator shards must advance: certified IR round for each, root round, aggregator height.
 # Polls until every shard has advanced (an aggregator shard's authorized TR round moves with its T2 timeout, up to 7.5 s, so a fixed
 # short window is not a fair measure): up to ${2:-10}+25 s, then it reports which shard did not.
+# Per-shard progress of the root's authorized TR round between the two traces: the shards that advanced.
+h3_progress_shards() {
+  python3 - "$H3_DIR/progress-before.jsonl" "$H3_DIR/progress-after.jsonl" <<'PY'
+import json,sys
+b={}; a={}
+for path,d in ((sys.argv[1],b),(sys.argv[2],a)):
+    for line in open(path):
+        if line.strip():
+            r=json.loads(line); d[r['shard']]=r
+print(" ".join(s for s in ('a-left','a-right','b-left') if int(a[s]['authorizedTRRound'])>int(b[s]['authorizedTRRound'])))
+PY
+}
+
+# h3_progress <label> [seconds before the first look] [window seconds]. The window defaults to the pause plus 25 s; the steps right after a
+# ROOT restart pass a longer one (about 3 minutes): an aggregator shard whose subscription the restart dropped is covered again only after
+# its own inactivity re-handshake, which takes tens of seconds to minutes. That lag is MEASURED, not hidden: the time to the first TR progress
+# of each shard is written to the lane output.
 h3_progress() {
-  local label=$1 waited=0 limit=$(( ${2:-10} + 25 )) rc=1
+  local label=$1 waited=0 pause=${2:-10} limit start now shard seen
+  limit=${3:-$(( pause + 25 ))}
+  local first_a=- first_r=- first_b=-
   f8_trace >"$H3_DIR/progress-before.jsonl" || return 1
-  sleep "${2:-10}"
+  start=$(date +%s)
+  sleep "$pause"
   while :; do
     f8_trace >"$H3_DIR/progress-after.jsonl" || return 1
-    h3_progress_check "$label" && return 0
-    waited=$((waited + 3)); [ "$waited" -lt "$limit" ] || return 1
+    now=$(( $(date +%s) - start ))
+    seen=$(h3_progress_shards 2>/dev/null)
+    case " $seen " in *" a-left "*) [ "$first_a" = - ] && first_a=$now;; esac
+    case " $seen " in *" a-right "*) [ "$first_r" = - ] && first_r=$now;; esac
+    case " $seen " in *" b-left "*) [ "$first_b" = - ] && first_b=$now;; esac
+    if h3_progress_check "$label"; then
+      echo "progress lag [$label]: time to first TR progress a-left=${first_a}s a-right=${first_r}s b-left=${first_b}s (window ${limit}s)"
+      return 0
+    fi
+    waited=$((waited + 3))
+    if [ "$waited" -ge "$limit" ]; then
+      echo "progress lag [$label]: time to first TR progress a-left=${first_a}s a-right=${first_r}s b-left=${first_b}s (window ${limit}s; '-' = none)" >&2
+      return 1
+    fi
     sleep 3
   done
 }
@@ -401,7 +433,7 @@ h3_config_only() {
   return 1
 }
 h3_step "baseline: configuration-only epoch advance (same committee): shard epoch stays 0, root epoch 2, paid tx certified" h3_config_only
-h3_step "aggregators and EVM progress after the configuration-only advance" h3_progress config-only 8
+h3_step "aggregators and EVM progress after the configuration-only advance" h3_progress config-only 8 180
 h3_has_coupling_param() { jq -e '.partitionParams.validator_coupling == "true"' "$fullShardConf" >/dev/null; }
 h3_step "the genesis EVM configuration requires coupled validator-set changes (validator_coupling=true)" h3_has_coupling_param
 
@@ -456,7 +488,7 @@ h3_root_quorum_restart() {
   local row0 row1
   row0=$(h3_evm_row | jq -c '{round: .roundNumber, tr: .trRound}')
   h3_activate_coupled 3 4 5 || return 1       # the root quorum restarts (new root 5 first), the replaced root 4 stops
-  H3_EVM_STALLED=1 h3_progress "after root quorum restart (ack still held)" 10 || return 1
+  H3_EVM_STALLED=1 h3_progress "after root quorum restart (ack still held)" 10 180 || return 1
   h3_registry_is 0 2 || return 1             # the successor set has not acknowledged: registry is still at the old shard epoch
   row1=$(h3_evm_row | jq -c '{round: .roundNumber, tr: .trRound}')
   echo "EVM row before restart $row0, after $row1"
@@ -606,7 +638,7 @@ h3_s2_stalls() {
   sleep 25
   [ "$(h3_evm_row | jq -r '.roundNumber')" = "$base" ] || { echo "EVM certified past H without an s=2 quorum" >&2; return 1; }
   h3_registry_is 1 3 || return 1
-  H3_EVM_STALLED=1 h3_progress "s=2 stalled EVM" 8
+  H3_EVM_STALLED=1 h3_progress "s=2 stalled EVM" 8 180
 }
 h3_step "EVM waits (no certification) while root and aggregators progress" h3_s2_stalls
 
