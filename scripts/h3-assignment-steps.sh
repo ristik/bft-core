@@ -305,7 +305,7 @@ h3_config_only() {
   h3_retry_handoff 1 h3_config_attempt || return 1
   h3_restart_roots 2 || { echo "root restart into epoch 2 failed" >&2; return 1; }
   echo "roots restarted into epoch 2" >&2
-  M2_NEXT_NONCE=$M2_NEXT_NONCE h3_paid 2 || { echo "paid transaction at root epoch 2 was not certified" >&2; return 1; }
+  h3_paid 2 || { echo "paid transaction at root epoch 2 was not certified" >&2; return 1; }
   # the registry's root epoch is written by an EVM block after the new root epoch is installed: poll like the later steps do
   local i
   for i in $(seq 1 120); do h3_registry_is 0 2 && return 0; sleep 1; done
@@ -353,7 +353,7 @@ h3_evm_s1() {
   h3_prepare_coupled 3 4 5 || return 1
   # keep an old-epoch proposal in flight: submit a paid tx to every validator, then propose before it certifies
   for i in 1 2 3 4; do
-    tx=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+i-1))" -chain-id 31337 -nonce "$M2_NEXT_NONCE" 2>&1) || return 1
+    tx=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+i-1))" -chain-id 31337 -nonce "$M2_NEXT_NONCE" 2>&1) || { echo "in-flight tx to validator $i failed (nonce $M2_NEXT_NONCE): $tx" >&2; return 1; }
   done
   M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
   h3_retry_handoff 2 h3_s1_attempt || return 1
@@ -414,7 +414,7 @@ h3_ack_s1() {
   local i
   for i in $(seq 1 180); do h3_registry_is 1 3 && break; sleep 1; done
   h3_registry_is 1 3 || { echo "registry did not reach shard epoch 1 / root epoch 3" >&2; return 1; }
-  M2_NEXT_NONCE=$M2_NEXT_NONCE h3_paid 3
+  h3_paid 3
 }
 h3_step "s=1 acknowledgement certified; paid transaction certified at root epoch 3" h3_ack_s1
 
