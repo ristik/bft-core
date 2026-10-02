@@ -7,6 +7,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -32,7 +33,21 @@ var (
 	ErrNothingToSupersede   = errors.New("EVM assignment already acknowledged: nothing to supersede")
 	ErrSupersessionInvalid  = errors.New("EVM assignment supersession does not extend the committed unacknowledged chain")
 	ErrAssignmentAckPending = errors.New("EVM assignment acknowledgement pending: only a supersession may follow")
+	// ErrSupersessionChainTooLong refuses a supersession that would make the unacknowledged chain longer than
+	// handoff.MaxSupersessionSpan: the whole chain is folded into one acknowledgement (and decoded by the engine) under that same
+	// bound, so a longer chain admitted here could never be acknowledged.
+	ErrSupersessionChainTooLong = errors.New("EVM assignment supersession would make the unacknowledged chain longer than the supersession span")
 )
+
+// CheckSupersessionChainLength is the one rule for how long the unacknowledged chain may get: committed is the number of committed,
+// unacknowledged steps the new supersession would extend, and the chain after it (committed+1 steps) must not exceed
+// handoff.MaxSupersessionSpan. Root block validation and the operator's planner both use it.
+func CheckSupersessionChainLength(committed int) error {
+	if committed < 0 || uint64(committed)+1 > handoff.MaxSupersessionSpan {
+		return fmt.Errorf("%w: %d committed unacknowledged steps, the chain may not exceed %d", ErrSupersessionChainTooLong, committed, handoff.MaxSupersessionSpan)
+	}
+	return nil
+}
 
 type handoffAuthority interface {
 	Predecessor() []byte

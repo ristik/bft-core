@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/handoff"
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
 	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
@@ -413,5 +414,57 @@ func TestOperatorBuildsAndVerifiesAnAggregatorKeyReplacement(t *testing.T) {
 		p.Changes = []evmassign.Change{change(t, f, sf, sf.conf, nil)}
 		_, err := f.cm.buildHandoffPlanFromState(f.next, f.state, p)
 		require.ErrorIs(t, err, storage.ErrAssignmentAckPending)
+	})
+}
+
+// chainOrchestration is the consensus manager's orchestration with a derived history of n committed, unacknowledged assignment steps.
+type chainOrchestration struct {
+	Orchestration
+	steps []evmassign.ChainStep
+	base  *types.PartitionDescriptionRecord
+}
+
+func (o chainOrchestration) DerivedChain(types.PartitionID, types.ShardID, uint64) ([]evmassign.ChainStep, error) {
+	return o.steps, nil
+}
+
+func (o chainOrchestration) ShardConfigByEpoch(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error) {
+	return o.base, nil
+}
+
+// The operator's planner refuses, before any endorsement is signed or any Prepare is ordered, the supersession that root block
+// validation would refuse (the unacknowledged chain may not grow past handoff.MaxSupersessionSpan): a refused proposal leaves no plan
+// and no intent, and the leader orders a record only for a plan the planner built, so it can never propose such a record.
+func TestPlannerRefusesASupersessionThatWouldOverflowTheChain(t *testing.T) {
+	span := int(handoff.MaxSupersessionSpan)
+	plan := func(t *testing.T, committed int) (*operatorAssignmentFixture, error) {
+		f := newOperatorAssignmentFixture(t)
+		o := chainOrchestration{Orchestration: f.cm.orchestration, base: f.current}
+		for i := 1; i <= committed; i++ {
+			o.steps = append(o.steps, evmassign.ChainStep{ShardEpoch: uint64(i), RootEpoch: uint64(10 + i),
+				ConfHash: bytes.Repeat([]byte{byte(i)}, 32), RecordID: bytes.Repeat([]byte{byte(0x80 + i)}, 32), CandidateDigest: bytes.Repeat([]byte{byte(0x40 + i)}, 32)})
+		}
+		f.cm.orchestration = o
+		f.state.CommittedHead.ShardInfo[0].IRTR.Epoch = uint64(committed) // pending: the technical record is ahead of the certified IR
+		p := f.proposal(t)
+		p.Supersede = true
+		_, err := f.cm.buildHandoffPlanFromState(f.next, f.state, p)
+		return f, err
+	}
+	t.Run("the limit is not what stops a chain that stays within it", func(t *testing.T) {
+		_, err := plan(t, span-1)
+		require.NotErrorIs(t, err, storage.ErrSupersessionChainTooLong, "%d committed steps plus this supersession is exactly the span", span-1)
+	})
+	t.Run("a supersession past the limit is refused with the sentinel and leaves no plan or intent", func(t *testing.T) {
+		for _, committed := range []int{span, span + 1} {
+			f, err := plan(t, committed)
+			require.ErrorIs(t, err, ErrHandoffApproval)
+			require.ErrorIs(t, err, storage.ErrSupersessionChainTooLong, "%d committed steps", committed)
+			require.ErrorIs(t, err, storage.ErrSupersessionInvalid)
+			require.Empty(t, f.cm.handoffPlans, "no endorsement state")
+			for attempt := uint64(0); attempt < 3; attempt++ {
+				require.Nil(t, f.cm.pendingIntent(attempt), "no intent, so the leader has nothing to order a Prepare for")
+			}
+		}
 	})
 }
