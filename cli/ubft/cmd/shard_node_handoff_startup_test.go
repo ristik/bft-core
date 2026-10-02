@@ -53,6 +53,7 @@ func TestProfile2RestoreCatchesUpTrustBeforeArchiveReplayAndRepairsAfterward(t *
 			steps = append(steps, "handoff-catch-up")
 			return nil
 		},
+		func(context.Context) error { steps = append(steps, "archive-setup"); return nil },
 		func(context.Context) error {
 			require.Equal(t, uint64(3), installedEpoch, "archive replay must use the verified trust lineage")
 			require.True(t, restoringHandoffHistory, "terminal observations are deferred during archive restore")
@@ -65,7 +66,7 @@ func TestProfile2RestoreCatchesUpTrustBeforeArchiveReplayAndRepairsAfterward(t *
 			return nil
 		})
 	require.NoError(t, err)
-	require.Equal(t, []string{"handoff-catch-up", "archive-replay", "terminal-observation-repair"}, steps)
+	require.Equal(t, []string{"handoff-catch-up", "archive-setup", "archive-replay", "terminal-observation-repair"}, steps)
 	require.False(t, restoringHandoffHistory)
 }
 

@@ -176,7 +176,7 @@ func TestTheActivePeerSetIsHeldUntilThePersistedStepsAreReplayed(t *testing.T) {
 		pos  token.Pos
 		root string
 	}
-	var holds, releases, registers, startups, catchUps []site
+	var holds, releases, direct, registers, startups, catchUps []site
 	var catchUpFunc *ast.FuncLit
 	ast.Inspect(file, func(n ast.Node) bool {
 		if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 {
@@ -200,15 +200,19 @@ func TestTheActivePeerSetIsHeldUntilThePersistedStepsAreReplayed(t *testing.T) {
 			case recv == "activePeers" && fn.Sel.Name == "Hold":
 				holds = append(holds, site{call.Pos(), recv})
 			case recv == "activePeers" && fn.Sel.Name == "Release":
-				releases = append(releases, site{call.Pos(), recv})
+				direct = append(direct, site{call.Pos(), recv})
 			case recv == "archiveServer" && fn.Sel.Name == "Register":
 				registers = append(registers, site{call.Pos(), recv})
 			case fn.Sel.Name == "CatchUp":
 				catchUps = append(catchUps, site{call.Pos(), recv})
 			}
 		case *ast.Ident:
-			if fn.Name == "runProfile2JournalStartup" {
+			switch fn.Name {
+			case "runProfile2JournalStartup":
 				startups = append(startups, site{call.Pos(), fn.Name})
+			case "admitArchivePeers":
+				// The only way the hold ends: it validates the configured replicas against the replayed set first.
+				releases = append(releases, site{call.Pos(), fn.Name})
 			}
 		}
 		return true
@@ -217,17 +221,18 @@ func TestTheActivePeerSetIsHeldUntilThePersistedStepsAreReplayed(t *testing.T) {
 	require.Len(t, registers, 1)
 	require.Len(t, startups, 1)
 	require.Len(t, catchUps, 1)
-	require.Len(t, releases, 2, "released after the startup replay (restart) and after CatchUp (restore), and nowhere else")
+	require.Empty(t, direct, "the hold ends only through admitArchivePeers, which validates the archive replicas first")
+	require.Len(t, releases, 3, "admitted after the startup replay (restart), without history (a profile-off restore) and after CatchUp (restore), and nowhere else")
 	require.Less(t, holds[0].pos, registers[0].pos, "held before the archive server is registered")
 	require.NotNil(t, catchUpFunc, "the restore's catchUpHistory closure")
 	var afterStartup, afterCatchUp bool
 	for _, r := range releases {
-		if r.pos > startups[0].pos {
-			afterStartup = afterStartup || (catchUpFunc.Pos() > r.pos || catchUpFunc.End() < r.pos)
+		inCatchUp := r.pos >= catchUpFunc.Pos() && r.pos <= catchUpFunc.End()
+		if r.pos > startups[0].pos && !inCatchUp {
+			afterStartup = true
 		}
-		if r.pos >= catchUpFunc.Pos() && r.pos <= catchUpFunc.End() {
+		if inCatchUp && r.pos > catchUps[0].pos {
 			afterCatchUp = true
-			require.Greater(t, r.pos, catchUps[0].pos, "released after CatchUp has installed every step")
 		}
 	}
 	require.True(t, afterStartup, "a release after runProfile2JournalStartup")
