@@ -19,7 +19,26 @@ M2_NEXT_NONCE=${M2_NEXT_NONCE:-4}
 M2_CHAIN_ID=31337
 
 h3_pass() { echo "  PASS: $*"; }
-h3_die() { echo "  FAIL: $*" >&2; exit 1; }
+# A failed step stops the lane at once: every process this lane started (including the joiners' and restored nodes, which the devnet's
+# own cleanup does not know) is stopped, so the output pipe closes, the lane exits non-zero and any watcher fires.
+h3_teardown() {
+  local p i
+  for i in 5 6 7; do
+    for p in "test-nodes/evm$i/pid" "test-nodes/auth$i/pid" "test-nodes/reth$i/pid" "test-nodes/h3/restore-$i/pid"; do
+      [ -f "$p" ] && kill -INT "$(cat "$p")" 2>/dev/null
+    done
+  done
+  for p in $(owned_pids 'ubft root-node run|ubft shard-node (run|restore)|ubft signing-authority run|reth.* node|aggregator'); do
+    kill -INT "$p" 2>/dev/null
+  done
+  return 0
+}
+h3_die() {
+  echo "  FAIL: $*" >&2
+  for i in 1 2 3 4 5 6; do [ -f "test-nodes/evm$i/debug.log" ] && { echo "--- tail of evm$i/debug.log" >&2; tail -n 6 "test-nodes/evm$i/debug.log" | cut -c1-300 >&2; }; done
+  h3_teardown
+  exit 1
+}
 h3_step() { local name=$1; shift; echo "--- H3 step: $name"; "$@" || h3_die "$name"; h3_pass "$name"; }
 
 h3_paid() { M2_PAID_REGISTRY_CHECK=0 m2_send_paid "$1" "$M2_NEXT_NONCE"; }
