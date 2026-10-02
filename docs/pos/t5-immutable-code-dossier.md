@@ -75,9 +75,9 @@ worktree of `ce3e40b4`, Foundry 1.8.1, `script/seal-registry-artifact.sh` regene
 `artifacts/seal-registry-v2.json` with the same SHA-256 and code hash, so the embedded runtime code is the
 build of this source. Compiler profile in the artifact: solc 0.8.37, cancun, optimizer 200, via-IR,
 `bytecode_hash` none, `cbor_metadata` false (the same as the other contracts). The artifact's
-`systemCaller` is `0xff00000000000000000000000000000000000001`. `ArtifactSourceV2` still names the branch
-commit `8b30801a` (`registrygenesis/artifact.go:18`); whether to update it to the merge commit is open question (5) below. It is
-a provenance comment, not a check.
+`systemCaller` is `0xff00000000000000000000000000000000000001`. `ArtifactSourceV2` (`registrygenesis/artifact.go:18`)
+names the branch commit `8b30801a` at `626b6ebd` and the merge commit `ce3e40b4` from the #382 change on; the
+artifact and source are byte-identical at both. It is a provenance string, not a check.
 
 **Callable surface (the whole contract).** No constructor, no Solidity state variables, no `receive`,
 `fallback`, proxy, owner or selfdestruct; the only inline assembly is `sload`/`sstore` at constant keys
@@ -112,8 +112,9 @@ The immutable genesis hash is never written after genesis: no `_store` targets `
 
 **Storage layout.** The source defines 29 fixed slot keys (`:41-99`); the artifact and
 bft-core pin 30 names (`registryproof/registryproof.go:143-157`, `FieldCountV2 = 30`). The extra one,
-`inbox.consumed`, is pinned but never read or written by this contract (source comment `:100`); it is not
-in the genesis. Each key is `keccak256("unicity.seal-registry.v1/" || name)`; the table is the artifact's
+`inbox.consumed`, is a reserved v1 field: the contract never reads or writes it (source comment `:100`), the
+genesis has no word for it, so it is zero, and bft-core's reader refuses a non-zero value
+(`registryproof/registryproof.go:667-668`, `ErrConfiguration`, same lines at `626b6ebd`; design `f4a-seal-registry-contract.md` §10). Each key is `keccak256("unicity.seal-registry.v1/" || name)`; the table is the artifact's
 `slotKeys`, and every key was recomputed with `cast keccak` and matches.
 
 | Field | Slot key |
@@ -167,7 +168,7 @@ All other fields, including `assignment.spanCommitment`, `transition.*` and `inb
 embed the synthetic manifest's full shard configuration, so they change with any production input; the
 final export repeats on the production manifest.
 
-**Reviewer notes.** Items (3) to (5) are open questions for the T5 reviewer; this PR resolves none of them. (1) The Go side lists the same 30 names as the artifact (`registryproof.go:143-157`) and the
+**Reviewer notes.** Item (3) is an open question for the T5 reviewer; items (4) and (5) were raised in review and are resolved below. (1) The Go side lists the same 30 names as the artifact (`registryproof.go:143-157`) and the
 same seven-word genesis list as the contract header (`registryproof.go:182`; `SealRegistry.sol:19`). (2) What a reviewer cannot take from
 the contract alone is the execution-client side (the bullet list above), which T5 must assess in ureth. (3) Root round is ordered within a root epoch, not across a handoff.
 The contract's stale-root-round check (O5, `SealRegistry.sol:211`) runs only on the no-transition path; an
@@ -181,11 +182,14 @@ root round with the registry clock on any path (it passes `root_round` into `ope
 `crates/unicity/execution/src/lib.rs:404-430`, at `unicity/main` `b4e7cb0ac`), so the ordering rests on the
 contract's `:211` check and the BFT adapter's check. The acknowledgement's round is authenticated by the new
 epoch's root certificate; the residual risk is a wrong round from a validly signed certificate, which would stall
-the chain until the next epoch, not break safety. No fix is proposed. (4) Open: `inbox.consumed` is a pinned name without a use in v2
-(the source comment at `:100` calls it "genesis-only", yet the genesis has no word for it); is it acceptable as is, or
-should it be removed or documented if the artifact is ever regenerated? (5) Open: `ArtifactSourceV2` (`registrygenesis/artifact.go:18`) names the
-branch commit `8b30801a`, not the merge `ce3e40b4`; the two are byte-identical for the source and the artifact, so
-is the provenance string to be left or updated?
+the chain until the next epoch, not break safety. No fix is proposed. (4) Resolved as documented: `inbox.consumed` is a reserved v1 field kept in the layout. It is kept, and the
+reason is the pinned schema, not the runtime code: dropping the name from the artifact's `slotKeys` (30 to 29
+entries) leaves the 4,301 runtime bytes and the code hash `0x7787f316…` unchanged (checked on the embedded
+artifact: keccak of its `runtimeBytecode` is the same before and after), but it changes the artifact file and so its
+SHA-256 `62ea3d2e…`, and it breaks the 30-name layout that `registryproof` pins (`FieldCountV2 = 30`) and that the
+reader's zero refusal (`registryproof.go:667-668`) relies on. The source comment `:100` saying "genesis-only" is
+imprecise: the genesis writes no word for it. (5) Resolved: `ArtifactSourceV2` names the merge `ce3e40b4`; source and artifact are
+byte-identical to the branch commit `8b30801a` (SHA-256 `1f857c29…` and `62ea3d2e…` at both).
 
 ## SealRegistry v1 and system caller (historical)
 

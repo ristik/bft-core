@@ -11,7 +11,7 @@ Status: **skeleton, not a decision.** This is the assembly point for [#46 T7](ht
 |---|---|---|
 | bft-core build | _commit and `ubft` binary SHA-256 of the release_ | OWNER DECISION: pin the release commit |
 | ureth build | _commit and `unicity-reth` SHA-256_ | OWNER DECISION |
-| Contracts | unicity-pos-contracts `e7eb3216549b772a9e1df2b1214976d7dd9e6e62` (WUCT, FeeCollector, vesting vault); SealRegistry v2 artifact at `8b30801afaa887db0d7aa2e4957ecae2c01293e4` (code hash `0x7787f3166565c8e5ebd73801bf71cbacf0cf69f6bcfb8dea8bedbef8198caf38`) | `registrygenesis/artifact.go`; T5 dossier |
+| Contracts | unicity-pos-contracts `e7eb3216549b772a9e1df2b1214976d7dd9e6e62` (WUCT, FeeCollector, vesting vault); SealRegistry v2 artifact at `ce3e40b479de0a0ef8787d8830ba77189aa11171` (byte-identical to the earlier pin `8b30801a`) (code hash `0x7787f3166565c8e5ebd73801bf71cbacf0cf69f6bcfb8dea8bedbef8198caf38`) | `registrygenesis/artifact.go`; T5 dossier |
 | Genesis, full shard configuration, manifest hashes | synthetic v2 export on `626b6ebd`: genesis `3a183dc4…9fd6`, full shard conf `a9902b87…5979`, manifest `29eefe02…bad` (full hashes in `docs/pos/t1-final-export.md`, [#369](https://github.com/ristik/bft-core/pull/369)); production export pending | T1 export record |
 | Production chain ID, S0, allocations, addresses, fee parameters | **not selected**: every manifest value is a synthetic example | OWNER DECISION |
 
@@ -46,7 +46,7 @@ Evidence: unicity-pos-contracts #3 and #4 (merged), pin `e7eb3216`; linear `bloc
 Evidence: #298, #312, #321; run `t4-auditor-fixes-20260930T0857Z`; `docs/pos/t4-supply-auditor.md`. Status: MET-WITH-LIMIT (CREATE and SELFDESTRUCT not exercised; zero WUCT supply in the run). Rerun on the final genesis.
 
 ## 9. T5 immutable-code review and signoff ([#39](https://github.com/ristik/bft-core/issues/39))
-Evidence: dossier `docs/pos/t5-immutable-code-dossier.md` (#314; pins refreshed in #369). The SealRegistry v2 section is in (#371, read from the contracts at `ce3e40b4` and the export; the artifact was regenerated from source and matches), and #372 replaced its note on root-round ordering. Its remaining reviewer findings stay open: `inbox.consumed` is a pinned name v2 never uses, and `ArtifactSourceV2` names the branch commit `8b30801a`, not the merge. The execution-client rules the contract cannot enforce are for the reviewer to assess in ureth. Status: dossier MET; signoff **OWNER**.
+Evidence: dossier `docs/pos/t5-immutable-code-dossier.md` (#314; pins refreshed in #369). The SealRegistry v2 section is in (#371, read from the contracts at `ce3e40b4` and the export; the artifact was regenerated from source and matches), and #372 replaced its note on root-round ordering. The two remaining reviewer findings are addressed in #382: `ArtifactSourceV2` names the merge `ce3e40b4`, and `inbox.consumed` is kept as a reserved v1 field in the pinned 30-name layout, refused when non-zero by the reader (the code hash does not depend on it). The execution-client rules the contract cannot enforce are for the reviewer to assess in ureth. Status: dossier MET; signoff **OWNER**.
 OWNER DECISION: an independent reviewer signs off the genesis manifest and code permissions against the exact hashes in §0 and §6; record name, date and artifact hashes here.
 
 ## 10. T6 reproducible public rehearsal ([#44](https://github.com/ristik/bft-core/issues/44))
