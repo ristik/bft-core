@@ -359,14 +359,19 @@ h3_restore_validator() {
   # The restored node lives in the validator's own home, with the paths a plain start uses (journal, archive store, debug.log), so the
   # lane's later authority-advance restarts (start_one_evm_validator) find it where they expect it. Its stale state is cleared first.
   local evidence="test-nodes/evm$i" bodyID rootBoot bootnodes peers=() p
-  local oldpid
-  oldpid=$(cat "$evidence/pid" 2>/dev/null || true)
   stop_one_evm_validator "$i" 2>/dev/null || true
-  # Clearing state under a live node can corrupt it (and the evidence): the process must be GONE first, or the lane fails.
-  if [ -n "$oldpid" ]; then
-    for _ in $(seq 1 120); do kill -0 "$oldpid" 2>/dev/null || break; sleep 0.5; done
-    if kill -0 "$oldpid" 2>/dev/null; then echo "validator $i (pid $oldpid) did not exit within 60s: refusing to clear its state" >&2; return 1; fi
-  fi
+  stop_pidfile "test-nodes/reth$i/pid" 'reth.* node' 2>/dev/null || true
+  # Clearing state under a live node can corrupt it (and the evidence): every process that owns this validator's node home or its
+  # execution client's data directory must be GONE first, or the lane fails. Found by pattern, not only by pid file (a pid file names the
+  # last process started, not one that is still shutting down).
+  local waited=0 alive
+  while :; do
+    alive=$(pgrep -f -- "--home test-nodes/evm$i( |$)|test-nodes/reth$i/dd" 2>/dev/null | tr '\n' ' ')
+    [ -z "$alive" ] && break
+    waited=$((waited + 1))
+    if [ "$waited" -ge 120 ]; then echo "validator $i: process(es) $alive still running after 60s: refusing to clear its state" >&2; return 1; fi
+    sleep 0.5
+  done
   find "$evidence" -mindepth 1 ! -name keys.json ! -name node-info.json ! -name jwt.hex ! -name logger-config.yaml -exec rm -rf {} + 2>/dev/null
   rm -rf "test-nodes/h3-archives/evm$i"
   mkdir -p "$evidence"
