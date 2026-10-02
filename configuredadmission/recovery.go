@@ -284,7 +284,10 @@ func (r *ExecutionRecovery) Recover(ctx context.Context, held *types.UnicityCert
 	}
 	c, err := r.load(ctx)
 	if err != nil {
-		if r.Host == nil && r.fetch == nil || len(r.providerList()) == 0 || !errors.Is(err, ErrRecoveryUnavailable) {
+		// Acquisition needs somewhere to ask: hot-journal peers (a transport and at least one provider), or the authenticated archive. After
+		// an assignment shrinks the set to {self} there are no peers, and the archive alone must still be tried; retired peers are never
+		// used in its place.
+		if !r.canAcquire() || !errors.Is(err, ErrRecoveryUnavailable) {
 			return shardnode.BlockRef{}, err
 		}
 		if fetchErr := r.acquireMissing(ctx); fetchErr != nil {
@@ -550,7 +553,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 		}
 	}
 	if last != nil {
-		peerErr := fmt.Errorf("%w: target %x unavailable from %d peers: %v", ErrRecoveryUnavailable, target, len(r.Providers), last)
+		peerErr := fmt.Errorf("%w: target %x unavailable from %d peers: %v", ErrRecoveryUnavailable, target, len(r.providerList()), last)
 		if r.FetchArchive != nil {
 			archiveErr := r.fetchFromArchive(ctx, after, target, advance)
 			if archiveErr == nil {
@@ -579,7 +582,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 		}
 		return fmt.Errorf("%w: target %x unavailable from peers and archive: %v", ErrRecoveryUnavailable, target, archiveErr)
 	}
-	return fmt.Errorf("%w: target %x unavailable from %d peers", ErrRecoveryUnavailable, target, len(r.Providers))
+	return fmt.Errorf("%w: target %x unavailable from %d peers", ErrRecoveryUnavailable, target, len(r.providerList()))
 }
 
 func (r *ExecutionRecovery) archiveBudgetUnavailable(ctx context.Context, target []byte, err error) error {
@@ -846,4 +849,10 @@ func (r *ExecutionRecovery) providerList() []peer.ID {
 		return r.ProviderSource.Peers()
 	}
 	return r.Providers
+}
+
+// canAcquire: there is something to ask for a missing journal body: peers over a transport, or the authenticated archive source.
+func (r *ExecutionRecovery) canAcquire() bool {
+	peers := (r.Host != nil || r.fetch != nil) && len(r.providerList()) > 0
+	return peers || r.FetchArchive != nil
 }

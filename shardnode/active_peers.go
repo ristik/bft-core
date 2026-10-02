@@ -123,7 +123,7 @@ func (a *ActivePeers) Allowed(id peer.ID) bool {
 
 // Peers is the active assignment's other validators, sorted, never including this node. It is what an OUTBOUND consumer addresses (block
 // dissemination recipients, journal suffix providers, evidence providers): the hold does not apply, because holding exists so that a stale
-// set never AUTHORIZES an inbound peer, and asking or sending to a validator that a persisted step has since retired only fails.
+// set never AUTHORIZES an inbound peer, and asking or sending to a validator that a persisted step has since retired may still be answered, but every answer is authenticated independently of who sent it, so it cannot bypass those checks.
 func (a *ActivePeers) Peers() []peer.ID {
 	a.mu.RLock()
 	defer a.mu.RUnlock()

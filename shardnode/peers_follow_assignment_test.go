@@ -69,12 +69,12 @@ func TestBlockDisseminationFollowsTheInstalledAssignment(t *testing.T) {
 	}
 	require.NoError(t, leaderDiss.Publish(ctx, 1, block))
 	require.NoError(t, await(retainedDiss, 1, 5*time.Second), "before the step the genesis set is addressed")
-	require.Error(t, await(successorDiss, 1, 500*time.Millisecond))
+	require.ErrorIs(t, await(successorDiss, 1, 500*time.Millisecond), context.DeadlineExceeded, "the successor is not addressed yet")
 
 	require.NoError(t, active.Install(1, nodesOf(leader.ID(), successor.ID())), "the verified step is installed")
 	require.NoError(t, leaderDiss.Publish(ctx, 2, block))
 	require.NoError(t, await(successorDiss, 2, 5*time.Second), "after the step the successor is addressed")
-	require.Error(t, await(retainedDiss, 2, 500*time.Millisecond), "and the retired validator is not")
+	require.ErrorIs(t, await(retainedDiss, 2, 500*time.Millisecond), context.DeadlineExceeded, "and the retired validator is not")
 }
 
 // Evidence providers and journal-suffix providers follow the same source, and the journal server's allowlist is the active set (held
