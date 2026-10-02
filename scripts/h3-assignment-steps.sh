@@ -499,9 +499,9 @@ h3_step "root quorum restarted at epoch 3; roots and aggregators progress while 
 # `node "<id>" is not in the trustbase of the shard` (ShardInfo.Verify, logged by the root as "processing
 # *certification.BlockCertificationRequest"). It must (1) appear in a root log since the mark, and (2) the id must never
 # appear among the requestNodeIDs of a request set the root accepted ("reached consensus"), i.e. nothing it sent certified.
-h3_assert_rejected() { # node id, what
-  local id=$1 what=$2 i refusals=0 accepted
-  for i in $(seq 1 90); do
+h3_assert_rejected() { # node id, what, [seconds to wait: a node that must first RESTORE needs minutes to reach the roots]
+  local id=$1 what=$2 window=${3:-90} i refusals=0 accepted
+  for i in $(seq 1 "$window"); do
     # The root refuses a retired or never-active key in one of two places, both of them the active-set check: at the handshake
     # ("node ID is not in active validator set ... <id>", the node then never gets a certificate and sends no request) or, for a
     # request that does arrive, at the request ("node <id> is not in the trustbase of the shard").
@@ -667,7 +667,7 @@ h3_late_s2_ack_refused() {
   h3_mark
   h3_enroll_authority 6 2 || { echo "enrolling the evm6 authority against the s=2 configuration failed" >&2; return 1; }
   h3_restore_validator 6 1 || true            # the s=2 key tries to acknowledge late
-  h3_assert_rejected "$id6" "late s=2 acknowledgement from evm6" || return 1
+  h3_assert_rejected "$id6" "late s=2 acknowledgement from evm6" 480 || return 1
   h3_registry_is 3 5                          # the registry shows s=3's folded acknowledgement, not s=2's
 }
 h3_step "s=2's late acknowledgement is rejected" h3_late_s2_ack_refused
