@@ -461,6 +461,7 @@ func TestPlannerRefusesASupersessionThatWouldOverflowTheChain(t *testing.T) {
 			require.ErrorIs(t, err, ErrHandoffApproval)
 			require.ErrorIs(t, err, storage.ErrSupersessionChainTooLong, "%d committed steps", committed)
 			require.ErrorIs(t, err, storage.ErrSupersessionInvalid)
+			require.ErrorContains(t, err, storage.ChainTooLongAdvice, "the operator who proposed it is told what to do")
 			require.Empty(t, f.cm.handoffPlans, "no endorsement state")
 			for attempt := uint64(0); attempt < 3; attempt++ {
 				require.Nil(t, f.cm.pendingIntent(attempt), "no intent, so the leader has nothing to order a Prepare for")

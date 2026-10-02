@@ -39,12 +39,16 @@ var (
 	ErrSupersessionChainTooLong = errors.New("EVM assignment supersession would make the unacknowledged chain longer than the supersession span")
 )
 
+// ChainTooLongAdvice is what the operator is told when the unacknowledged chain is at its limit: only an acknowledged assignment resets
+// it, and an unacknowledged one can only be superseded.
+const ChainTooLongAdvice = "get the installed assignment acknowledged first (the EVM must certify its acknowledgement block) before proposing another change"
+
 // CheckSupersessionChainLength is the one rule for how long the unacknowledged chain may get: committed is the number of committed,
 // unacknowledged steps the new supersession would extend, and the chain after it (committed+1 steps) must not exceed
 // handoff.MaxSupersessionSpan. Root block validation and the operator's planner both use it.
 func CheckSupersessionChainLength(committed int) error {
 	if committed < 0 || uint64(committed)+1 > handoff.MaxSupersessionSpan {
-		return fmt.Errorf("%w: %d committed unacknowledged steps, the chain may not exceed %d", ErrSupersessionChainTooLong, committed, handoff.MaxSupersessionSpan)
+		return fmt.Errorf("%w: %d committed unacknowledged steps, the chain may not exceed %d; "+ChainTooLongAdvice, ErrSupersessionChainTooLong, committed, handoff.MaxSupersessionSpan)
 	}
 	return nil
 }

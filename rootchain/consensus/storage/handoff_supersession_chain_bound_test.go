@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -74,6 +75,15 @@ func TestSupersessionChainLengthIsBoundedAtRootAdmission(t *testing.T) {
 			require.ErrorIs(t, err, ErrSupersessionInvalid)
 			require.ErrorIs(t, err, ErrHandoffRecord)
 		}
+	})
+	t.Run("the refusal tells the operator to get the installed assignment acknowledged first", func(t *testing.T) {
+		for _, err := range []error{CheckSupersessionChainLength(span), supersedeChain(t, span)} {
+			require.ErrorIs(t, err, ErrSupersessionChainTooLong)
+			require.ErrorContains(t, err, ChainTooLongAdvice)
+			require.ErrorContains(t, err, "acknowledged first")
+			require.ErrorContains(t, err, fmt.Sprintf("may not exceed %d", span), "and still names the limit")
+		}
+		require.NoError(t, CheckSupersessionChainLength(span-1), "no advice where there is no refusal")
 	})
 	t.Run("the shared rule is the same limit", func(t *testing.T) {
 		require.NoError(t, CheckSupersessionChainLength(span-1))
