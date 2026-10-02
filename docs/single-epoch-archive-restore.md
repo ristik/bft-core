@@ -24,6 +24,14 @@ replay; start a fresh node through the ordinary genesis procedure instead.
    the genesis trust base to `--trust-base`. With profile 2 enabled, the node
    verifies each missed handoff and requires the final verified BodyID to match
    `--trust-body-id`.
+
+   > **STOP.** `--trust-base` must be the trust base at the genesis root epoch.
+   > A current (later-epoch) trust base cannot replace it: restore replays from
+   > block 1 and needs the genesis-era trust and every missed handoff verified
+   > forward from it. A restore with any other epoch is refused before anything
+   > is built or written, with `restore trust anchor is not the genesis root
+   > epoch`, naming both epochs. The current BodyID is still mandatory, in
+   > `--trust-body-id`; it is a different input.
 4. Run `ubft shard-node restore` with the same network, shard, genesis,
    `--full-shard-conf`, Engine API, and identity flags used by `shard-node run`,
    plus:
