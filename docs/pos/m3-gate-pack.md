@@ -46,7 +46,7 @@ Evidence: unicity-pos-contracts #3 and #4 (merged), pin `e7eb3216`; linear `bloc
 Evidence: #298, #312, #321; run `t4-auditor-fixes-20260930T0857Z`; `docs/pos/t4-supply-auditor.md`. Status: MET-WITH-LIMIT (CREATE and SELFDESTRUCT not exercised; zero WUCT supply in the run). Rerun on the final genesis.
 
 ## 9. T5 immutable-code review and signoff ([#39](https://github.com/ristik/bft-core/issues/39))
-Evidence: dossier `docs/pos/t5-immutable-code-dossier.md` (#314; pins refreshed in #369). Open before signoff: the dossier's SealRegistry slot table is v1 and a v2 section is required. Status: dossier MET; signoff **OWNER**.
+Evidence: dossier `docs/pos/t5-immutable-code-dossier.md` (#314; pins refreshed in #369). Open before signoff: the dossier's SealRegistry slot table is v1 and a v2 section is required. Status: MISSING (manifest); the dossier is written, signoff **OWNER**.
 OWNER DECISION: an independent reviewer signs off the genesis manifest and code permissions against the exact hashes in §0 and §6; record name, date and artifact hashes here.
 
 ## 10. T6 reproducible public rehearsal ([#44](https://github.com/ristik/bft-core/issues/44))
@@ -69,7 +69,7 @@ OWNER DECISION: engage the auditor, accept the report, and decide for each findi
 | Hosted CI and real-reth fault evidence ([#90](https://github.com/ristik/bft-core/issues/90)) | not an M3 requirement; depends on CI capacity | OWNER |
 
 ## 14. Feature state of the rehearsed release
-PoS, bridge, forced inbox (I-track deferred 2026-10-01), absence proofs and unfinished reward functions (T8) are disabled. OWNER DECISION: confirm the final enabled and disabled list matches the rehearsed release.
+PoS, bridge, forced inbox (I-track deferred 2026-10-01), absence proofs and unfinished reward functions (T8) are disabled. Status: MET-WITH-LIMIT (the final list is part of T7). OWNER DECISION: confirm the final enabled and disabled list matches the rehearsed release.
 
 ## 15. Operational signoffs and the readiness decision
 - Named readiness decision for M3: **OWNER DECISION** (name, date, evidence set).
