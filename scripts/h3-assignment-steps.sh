@@ -304,6 +304,7 @@ h3_restore_validator() {
   rm -rf "test-nodes/reth$i/dd"
   cp "$evidence/jwt.hex" "test-nodes/evm$i/jwt.hex"
   h3_start_reth "$i" || return 1
+  cp "test-nodes/evm$i/jwt.hex" "$evidence/jwt.hex"   # h3_start_reth drew a new secret for the new execution client
   go run ./scripts/h4-restore-pin "test-nodes/h3-archives/evm$replica" "$H3_RESTORE_TRUST_BASE" "$evidence/tip" >"$evidence/pin.txt" || return 1
   bodyID=$(tr ' ' '\n' <"$evidence/pin.txt" | sed -n 's/^bodyID=//p')
   rootBoot=$(m2_root_addr "$(h3_first_root)")
@@ -313,7 +314,7 @@ h3_restore_validator() {
   build/ubft shard-node restore --home "$evidence" --executor engine-api \
     --address "/ip4/127.0.0.1/tcp/$((evmValidatorPortStart + i - 1))" --bootnodes "$bootnodes" \
     --trust-base "$H3_RESTORE_TRUST_BASE" --full-shard-conf "$EVM_FULL_SHARD_CONF" --registry-layout 2 \
-    --genesis "$EVM_GENESIS_FILE" --genesis-root-epoch 1 --engine-url "http://127.0.0.1:$((rethEngineBase+i-1))" \
+    --genesis "$EVM_GENESIS_FILE" --engine-url "http://127.0.0.1:$((rethEngineBase+i-1))" \
     --eth-url "http://127.0.0.1:$((rethEthBase+i-1))" --jwt-secret "$evidence/jwt.hex" \
     --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" --execution-journal "$evidence/journal.db" \
     --archive-store "$evidence/archive" --archive-prune --trust-history-profile-2 --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}" \
