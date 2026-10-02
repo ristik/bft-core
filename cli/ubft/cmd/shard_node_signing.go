@@ -140,8 +140,7 @@ func buildCertificationSigning(flags *shardNodeSigningFlags, keyConf *KeyConf, s
 		return nil, fmt.Errorf("the shard configuration's signing key for this node: %w", err)
 	}
 	if local, ok := localSigningKey(keyConf); ok && bytes.Equal(local, named.SigKey) {
-		return nil, errors.New("the shard configuration names this node's local signing key from the key configuration, not a signing authority's key; " +
-			"generate the configuration from `signing-authority node-info`")
+		return nil, ErrGenesisLocalKey
 	}
 
 	credential, err := readCredentialFile(flags.SigningAuthorityCredential)

@@ -18,6 +18,19 @@ import (
 // the only refusal CatchUp retries; the caller maps its transport's refusal onto it (the archive wiring's ErrPeerNotAllowed).
 var ErrHandoffPeerNotReady = errors.New("handoff follower: an archive replica has not installed the assignment step that admits this node yet")
 
+// ErrHandoffSourceUnavailable is a handoff epoch that no current root, old root or archive replica could serve at all (as opposed to
+// a replica that answered that it has not installed the assignment step yet, ErrHandoffPeerNotReady).
+var ErrHandoffSourceUnavailable = errors.New("handoff follower: no bundle source could serve the epoch")
+
+// bundleSourceUnavailable carries the historical message text for ErrHandoffSourceUnavailable.
+type bundleSourceUnavailable struct{ epoch uint64 }
+
+func (e *bundleSourceUnavailable) Error() string {
+	return fmt.Sprintf("handoff follower: epoch %d unavailable from current roots, old roots and archive replicas", e.epoch)
+}
+
+func (e *bundleSourceUnavailable) Unwrap() error { return ErrHandoffSourceUnavailable }
+
 // BundleRetry bounds the wait of CatchUp for a replica that refuses with ErrHandoffPeerNotReady: exponential backoff from Initial to
 // Max, giving up after Total with an error that wraps the sentinel. The zero value is DefaultBundleRetry. (The same shape as the
 // archive restore's FetchRetry, which lives in archivewiring and cannot be imported here.)
@@ -239,7 +252,7 @@ func (f *HandoffFollower) fetch(ctx context.Context, epoch uint64) (handoffdeliv
 	if notReady {
 		return handoffdelivery.Bundle{}, fmt.Errorf("%w: epoch %d is unavailable from current roots and old roots, and an archive replica refused it", ErrHandoffPeerNotReady, epoch)
 	}
-	return handoffdelivery.Bundle{}, fmt.Errorf("handoff follower: epoch %d unavailable from current roots, old roots and archive replicas", epoch)
+	return handoffdelivery.Bundle{}, &bundleSourceUnavailable{epoch: epoch}
 }
 
 // fetchWithRetry is fetch for CatchUp: a refusal that says the replica has not installed the assignment step yet is retried with

@@ -316,6 +316,7 @@ func TestStateMsg_Verify(t *testing.T) {
 			Pending:       nil,
 		}
 		require.ErrorContains(t, sm.Verify(crypto.SHA256, &types.RootTrustBaseV1{}), "commit head is nil")
+		require.ErrorIs(t, sm.Verify(crypto.SHA256, &types.RootTrustBaseV1{}), ErrRecoveryState)
 	})
 
 	t.Run("commit head, invalid block", func(t *testing.T) {
@@ -472,17 +473,17 @@ func TestStateMsg_Verify(t *testing.T) {
 				return &c
 			}
 			mutations := []mutation{
-				{"no committed head", func(sm *StateMsg) { sm.CommittedHead = nil }, nil},
+				{"no committed head", func(sm *StateMsg) { sm.CommittedHead = nil }, ErrRecoveryState},
 				{"head without a block", func(sm *StateMsg) { sm.CommittedHead.Block = nil }, nil},
 				{"head block without a payload", func(sm *StateMsg) { sm.CommittedHead.Block.Payload = nil }, nil},
 				{"head block without a QC", func(sm *StateMsg) { sm.CommittedHead.Block.Qc = nil }, nil},
 				{"head block QC without vote info", func(sm *StateMsg) { sm.CommittedHead.Block.Qc.VoteInfo = nil }, nil},
 				{"head block QC without commit info", func(sm *StateMsg) { sm.CommittedHead.Block.Qc.LedgerCommitInfo = nil }, nil},
 				{"head block QC without signatures", func(sm *StateMsg) { sm.CommittedHead.Block.Qc.Signatures = nil }, nil},
-				{"head without a QC", func(sm *StateMsg) { sm.CommittedHead.Qc = nil }, nil},
+				{"head without a QC", func(sm *StateMsg) { sm.CommittedHead.Qc = nil }, ErrRecoveryState},
 				{"head QC without vote info", func(sm *StateMsg) { sm.CommittedHead.Qc.VoteInfo = nil }, nil},
 				{"head QC without commit info", func(sm *StateMsg) { sm.CommittedHead.Qc.LedgerCommitInfo = nil }, nil},
-				{"head without a commit QC", func(sm *StateMsg) { sm.CommittedHead.CommitQc = nil }, nil},
+				{"head without a commit QC", func(sm *StateMsg) { sm.CommittedHead.CommitQc = nil }, ErrRecoveryState},
 				{"head commit QC without vote info", func(sm *StateMsg) { sm.CommittedHead.CommitQc.VoteInfo = nil }, nil},
 				{"head commit QC without commit info", func(sm *StateMsg) { sm.CommittedHead.CommitQc.LedgerCommitInfo = nil }, nil},
 				{"shard info without a certificate", func(sm *StateMsg) { sm.CommittedHead.ShardInfo[0].UC = nil }, nil},
@@ -730,12 +731,14 @@ func TestRecoveryBlock_IsValid(t *testing.T) {
 		r := validBlock()
 		r.Qc = nil
 		require.ErrorContains(t, r.IsValid(), "commit head is missing qc certificate")
+		require.ErrorIs(t, r.IsValid(), ErrRecoveryState)
 	})
 
 	t.Run("head is missing commit qc", func(t *testing.T) {
 		r := validBlock()
 		r.CommitQc = nil
 		require.ErrorContains(t, r.IsValid(), "commit head is missing commit qc certificate")
+		require.ErrorIs(t, r.IsValid(), ErrRecoveryState)
 	})
 }
 

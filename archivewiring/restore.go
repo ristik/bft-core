@@ -88,7 +88,7 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		head, headErr := r.Adapter.Head(ctx)
 		finalized, finalErr := r.Adapter.Finalized(ctx)
 		if headErr != nil || finalErr != nil || !sameBlockRef(head, expected) || !sameBlockRef(finalized, expected) {
-			return fmt.Errorf("%w: retry requires the EL head and finality at the verified restore base: head=%v finalized=%v", ErrRestore, headErr, finalErr)
+			return restoreCause(errors.Join(headErr, finalErr), "retry requires the EL head and finality at the verified restore base: head=%v finalized=%v", headErr, finalErr)
 		}
 		return r.backfillRestoredObservations(ctx)
 	}
@@ -97,11 +97,11 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 	}
 	head, err := r.Adapter.Head(ctx)
 	if err != nil || !sameBlockRef(head, r.Genesis) {
-		return fmt.Errorf("%w: EL head must be the checked genesis on an empty disk: %v", ErrRestore, err)
+		return restoreCause(err, "EL head must be the checked genesis on an empty disk: %v", err)
 	}
 	finalized, err := r.Adapter.Finalized(ctx)
 	if err != nil || !sameBlockRef(finalized, r.Genesis) {
-		return fmt.Errorf("%w: EL finalized head must be the checked genesis: %v", ErrRestore, err)
+		return restoreCause(err, "EL finalized head must be the checked genesis: %v", err)
 	}
 	replayCtx := ctx
 	if adapter, ok := r.Adapter.(interface {
@@ -176,11 +176,11 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 			AuthorizingCertificate: original, AuthorizingTechnicalRecord: originalTR}
 		status, err := r.Adapter.Verify(replayCtx, block, params)
 		if err != nil || status != shardnode.StatusValid {
-			return fmt.Errorf("%w: paired seal import %d returned %s: %v", ErrRestore, block.Number, status, err)
+			return restoreCause(err, "paired seal import %d returned %s: %v", block.Number, status, err)
 		}
 		status, err = r.Adapter.RecoveryForkchoice(ctx, block.Hash, r.Genesis.Hash)
 		if err != nil || status != shardnode.StatusValid {
-			return fmt.Errorf("%w: advancing replay head %d returned %s: %v", ErrRestore, block.Number, status, err)
+			return restoreCause(err, "advancing replay head %d returned %s: %v", block.Number, status, err)
 		}
 		parent = shardnode.BlockRef{Number: block.Number, Hash: block.Hash, StateRoot: block.StateRoot}
 		targetUC, targetTR, targetBlock = resulting, resultingTR, block
@@ -190,15 +190,15 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 	}
 	status, err := r.Adapter.Commit(ctx, parent.Hash)
 	if err != nil || status != shardnode.StatusValid {
-		return fmt.Errorf("%w: finalizing replay target: %s: %v", ErrRestore, status, err)
+		return restoreCause(err, "finalizing replay target: %s: %v", status, err)
 	}
 	head, err = r.Adapter.Head(ctx)
 	if err != nil || !sameBlockRef(head, parent) {
-		return fmt.Errorf("%w: EL head differs from replay target: %v", ErrRestore, err)
+		return restoreCause(err, "EL head differs from replay target: %v", err)
 	}
 	finalized, err = r.Adapter.Finalized(ctx)
 	if err != nil || !sameBlockRef(finalized, parent) {
-		return fmt.Errorf("%w: EL finalized head differs from replay target: %v", ErrRestore, err)
+		return restoreCause(err, "EL finalized head differs from replay target: %v", err)
 	}
 	if err := r.recordTip(ctx, firstUC, firstTR, targetUC, targetTR, targetBlock, reverse[0]); err != nil {
 		return err
@@ -616,4 +616,27 @@ func (r *ArchiveRestore) restoreCandidate(ctx context.Context, resultUC *types.U
 		ParentNumber: block.Number - 1, Hash: block.Hash, StateRoot: block.StateRoot, ParentHash: block.ParentHash,
 		ParentState: parentState, Raw: block.Raw, BlockSize: block.BlockSize, StateSize: block.StateSize,
 		AuthorizingUC: original, AuthorizingTR: originalTR}, nil
+}
+
+// restoreError is an ErrRestore refusal that also carries the executor's cause, so a caller can tell a stopped context
+// (context.Canceled, context.DeadlineExceeded) or any typed executor failure from a refusal of the restored state. The
+// message text is the ErrRestore text followed by the formatted detail, exactly as the former "%w: ...: %v" refusals read.
+type restoreError struct {
+	msg   string
+	cause error
+}
+
+func (e *restoreError) Error() string { return e.msg }
+
+func (e *restoreError) Unwrap() []error {
+	if e.cause == nil {
+		return []error{ErrRestore}
+	}
+	return []error{ErrRestore, e.cause}
+}
+
+// restoreCause builds an ErrRestore refusal whose message is unchanged by the executor cause being wrapped. cause may be
+// nil, when the refusal is a value mismatch rather than an executor failure.
+func restoreCause(cause error, format string, args ...any) error {
+	return &restoreError{msg: fmt.Sprintf("%v: "+format, append([]any{ErrRestore}, args...)...), cause: cause}
 }
