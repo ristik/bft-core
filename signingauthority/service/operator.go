@@ -130,8 +130,8 @@ func (o *OperatorClient) Status(ctx context.Context) (signingauthority.Status, e
 	if err != nil {
 		return signingauthority.Status{}, err
 	}
-	var wire statusPayload
-	if err := types.Cbor.Unmarshal(answer, &wire); err != nil {
+	wire, err := decodeStatus(answer)
+	if err != nil {
 		return signingauthority.Status{}, fmt.Errorf("decoding the status: %w", err)
 	}
 	return signingauthority.Status{

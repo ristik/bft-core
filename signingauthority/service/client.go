@@ -124,8 +124,8 @@ func (c *Client) RestoreStatus(ctx context.Context) (signingauthority.Status, er
 	if err != nil {
 		return signingauthority.Status{}, err
 	}
-	var wire statusPayload
-	if err := types.Cbor.Unmarshal(answer, &wire); err != nil {
+	wire, err := decodeStatus(answer)
+	if err != nil {
 		return signingauthority.Status{}, fmt.Errorf("decoding restore status: %w", err)
 	}
 	return signingauthority.Status{RootEpoch: wire.RootEpoch, ShardEpoch: wire.ShardEpoch,
