@@ -36,6 +36,11 @@ type Acknowledgment struct {
 	RequestDigest  [32]byte
 	ManifestDigest [32]byte
 }
+
+// Dropped reports an acknowledgment that a replica-pair migration removed. Only
+// the replica identity is cleared; the digests stay as the record's binding.
+func (a Acknowledgment) Dropped() bool { return a.Replica == "" }
+
 type Record struct {
 	Sequence  uint64
 	Epoch     uint64 // zero decodes a pre-epoch frontier in the configured anchor epoch
@@ -44,7 +49,26 @@ type Record struct {
 	StateRoot [32]byte
 	Subject   archive.Request
 	Acks      [2]Acknowledgment
+	// Retired holds, by slot, the replica names whose acknowledgments a pair
+	// migration dropped. It is never encoded; only DecodeMigrating sets it.
+	Retired [2]string
 }
+
+// Migrated reports whether DecodeMigrating dropped an acknowledgment, so the
+// position was certified by replicas that are not all in the current policy.
+func (r Record) Migrated() bool { return r.Acks[0].Dropped() || r.Acks[1].Dropped() }
+
+// PersistedReplicas returns the replica names the record was written under.
+func (r Record) PersistedReplicas() [2]string {
+	out := [2]string{r.Acks[0].Replica, r.Acks[1].Replica}
+	for i := range out {
+		if r.Acks[i].Dropped() {
+			out[i] = r.Retired[i]
+		}
+	}
+	return out
+}
+
 type Policy struct {
 	Context         archive.Context
 	Replicas        [2]string
@@ -79,7 +103,17 @@ func equalContext(a, b archive.Context) bool {
 	// The identity is checked separately because it is a byte slice.
 	return reflect.DeepEqual(a, b)
 }
-func valid(r Record, p Policy) error {
+func valid(r Record, p Policy) error { return validRecord(r, p, false) }
+
+// validHistorical additionally accepts acknowledgments dropped by a migration.
+// Nothing new is ever encoded or planned from such a record.
+func validHistorical(r Record, p Policy) error { return validRecord(r, p, true) }
+
+func policyReplicasValid(p Policy) bool {
+	return len(p.Replicas[0]) != 0 && len(p.Replicas[0]) <= 64 && len(p.Replicas[1]) != 0 && len(p.Replicas[1]) <= 64 && p.Replicas[0] != p.Replicas[1]
+}
+
+func validRecord(r Record, p Policy, historical bool) error {
 	if r.Sequence == 0 || r.Round == 0 || r.Height == 0 || r.StateRoot == ([32]byte{}) {
 		return ErrInvalid
 	}
@@ -93,8 +127,13 @@ func valid(r Record, p Policy) error {
 	if !equalContext(r.Subject.Context, p.Context) || !bytes.Equal(r.Subject.Context.ExecutionIdentity, p.Context.ExecutionIdentity) {
 		return ErrContext
 	}
-	if len(p.Replicas[0]) == 0 || len(p.Replicas[0]) > 64 || len(p.Replicas[1]) == 0 || len(p.Replicas[1]) > 64 || p.Replicas[0] == p.Replicas[1] || r.Acks[0].Replica != p.Replicas[0] || r.Acks[1].Replica != p.Replicas[1] {
+	if !policyReplicasValid(p) {
 		return ErrContext
+	}
+	for i, a := range r.Acks {
+		if a.Replica != p.Replicas[i] && !(historical && a.Dropped()) {
+			return ErrContext
+		}
 	}
 	digest := sha256.Sum256(q)
 	for _, a := range r.Acks {
@@ -115,7 +154,15 @@ func Encode(r Record, p Policy) ([]byte, error) {
 	if err := valid(r, p); err != nil {
 		return nil, err
 	}
-	q, _ := subjectBytes(r)
+	return encodeRecord(r)
+}
+
+// encodeRecord writes the record exactly as its acknowledgments name it.
+func encodeRecord(r Record) ([]byte, error) {
+	q, err := subjectBytes(r)
+	if err != nil {
+		return nil, ErrInvalid
+	}
 	var b bytes.Buffer
 	b.WriteString(domain)
 	if r.Epoch == 0 {
@@ -144,7 +191,56 @@ func Encode(r Record, p Policy) ([]byte, error) {
 	}
 	return b.Bytes(), nil
 }
-func Decode(raw []byte, p Policy) (Record, error) {
+func Decode(raw []byte, p Policy) (Record, error) { return decode(raw, p, false) }
+
+// DecodeMigrating decodes a persisted record under a policy whose replicas may
+// differ from the ones that acknowledged it. A same-size replacement drops each
+// acknowledgment whose replica is outside the policy (clearing its name, keeping
+// the position and digests) and records the retired name. A record already
+// naming the policy's replicas in order decodes exactly as Decode. A reordering,
+// a duplicate or an invalid policy pair is refused with ErrContext.
+func DecodeMigrating(raw []byte, p Policy) (Record, error) { return decode(raw, p, true) }
+
+func migrateAcks(r Record, p Policy) (Record, error) {
+	if r.Acks[0].Replica == r.Acks[1].Replica {
+		return Record{}, ErrContext
+	}
+	slot := func(name string) int {
+		for j, replica := range p.Replicas {
+			if name == replica {
+				return j
+			}
+		}
+		return -1
+	}
+	s0, s1 := slot(r.Acks[0].Replica), slot(r.Acks[1].Replica)
+	switch {
+	case s0 >= 0 && s1 >= 0:
+		// Nothing is replaced. validRecord refuses the same two replicas in
+		// another order, exactly as the strict decoder does.
+		return r, nil
+	case s0 < 0 && s1 < 0:
+		r.Retired = [2]string{r.Acks[0].Replica, r.Acks[1].Replica}
+		r.Acks[0].Replica, r.Acks[1].Replica = "", ""
+		return r, nil
+	}
+	// Exactly one replica remains configured: it keeps its acknowledgment in
+	// the slot the policy now names it by, and the other acknowledgment is dropped.
+	kept, gone := 0, 1
+	if s1 >= 0 {
+		kept, gone = 1, 0
+	}
+	out := r
+	out.Acks[slot(r.Acks[kept].Replica)] = r.Acks[kept]
+	dropped := slot(r.Acks[kept].Replica) ^ 1
+	out.Acks[dropped] = r.Acks[gone]
+	out.Retired = [2]string{}
+	out.Retired[dropped] = r.Acks[gone].Replica
+	out.Acks[dropped].Replica = ""
+	return out, nil
+}
+
+func decode(raw []byte, p Policy, migrate bool) (Record, error) {
 	var out Record
 	if len(raw) > MaxBytes || len(raw) < len(domain)+1+24+32+4+2*(1+64)+32 {
 		return out, ErrInvalid
@@ -205,11 +301,20 @@ func Decode(raw []byte, p Policy) (Record, error) {
 	if remaining != 0 {
 		return Record{}, ErrInvalid
 	}
-	if err = valid(out, p); err != nil {
+	persisted := out
+	if migrate {
+		if out, err = migrateAcks(out, p); err != nil {
+			return Record{}, err
+		}
+		err = validHistorical(out, p)
+	} else {
+		err = valid(out, p)
+	}
+	if err != nil {
 		return Record{}, err
 	}
-	again, _ := Encode(out, p)
-	if !bytes.Equal(payload[len(domain)+1:len(payload)-remaining], again[len(domain)+1:len(again)-32]) {
+	again, err := encodeRecord(persisted)
+	if err != nil || !bytes.Equal(payload[len(domain)+1:len(payload)-remaining], again[len(domain)+1:len(again)-32]) {
 		return Record{}, ErrInvalid
 	}
 	return out, nil
@@ -243,7 +348,7 @@ func PlanAdvance(current *Record, next Record, p Policy, covered []Coverage, obl
 		return Plan{}, err
 	}
 	if current != nil {
-		if err := valid(*current, p); err != nil {
+		if err := validHistorical(*current, p); err != nil {
 			return Plan{}, err
 		}
 		if next.Sequence <= current.Sequence || !laterEpochRound(epochOf(next, p), next.Round, epochOf(*current, p), current.Round) || next.Height <= current.Height {

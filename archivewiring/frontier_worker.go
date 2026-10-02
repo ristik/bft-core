@@ -66,7 +66,7 @@ func (w *FrontierWorker) Pass(ctx context.Context) error {
 	// the next pass. Prune itself is idempotent.
 	if f, err := w.Journal.LoadFrontier(ctx, w.Context, w.Limits); err != nil {
 		return err
-	} else if f.Anchor != nil && f.Floor < f.Anchor.Height {
+	} else if f.Anchor != nil && f.Floor < f.Anchor.Height && !f.Anchor.Migrated() {
 		if err := w.Journal.PruneFrontier(ctx, w.Context, w.Limits); err != nil {
 			return err
 		}
@@ -223,6 +223,9 @@ func (w *FrontierWorker) audit(ctx context.Context) error {
 				return frontier.ErrInvalid
 			}
 			for _, ack := range r.Acks {
+				if ack.Dropped() {
+					continue // a retired replica is neither verified nor repaired
+				}
 				if availability.VerifyAvailable(ack.Replica, r.Subject, ack.ManifestDigest) == nil {
 					continue
 				}

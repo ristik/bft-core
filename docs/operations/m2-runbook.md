@@ -554,6 +554,37 @@ There is no platform-independent operator-safe replica restart command. Use the
 deployment-owned service manager only after the acknowledgement/frontier checks;
 see Gaps for the remaining product and live-rehearsal limits.
 
+### Replacing a configured archive replica (`--archive-replica`)
+
+After a validator-set change retires one configured replica, a retained validator
+can switch to a replacement replica by changing its `--archive-replica` pair and
+restarting. Both configured replicas are checked against the installed (verified)
+validator set after replay (catch-up on restore), not against genesis.
+
+Rules. Each one is refused at startup with `frontier.ErrContext` ("frontier: wrong
+context or configured replicas") if broken:
+
+- Replace **exactly one** replica per restart. Keep the other one, which must be one
+  of the replicas that acknowledged the last durable frontier.
+- Do **not** replace both replicas at once.
+- Do **not** reorder an unchanged pair. Keep the configured order exactly.
+
+What happens on the restart:
+
+- The durable frontier position and the already-pruned floor stay valid. Two
+  replicas acknowledged them when they were written.
+- The retired replica's acknowledgment is dropped. The node logs one WARN: "archive
+  replica pair changed; durable frontier position kept, retired acknowledgments
+  dropped, pruning waits for the new pair to acknowledge beyond it".
+- Pruning resumes only after **both** configured replicas acknowledge beyond that
+  position. Until then the hot journal grows. Watch `pruneFrontier` and the
+  `replicas` acknowledgment heights with `shard-node status`, as above.
+
+To move off both old replicas, do it in two steps. Replace one replica, wait until
+`shard-node status` shows a new durable frontier acknowledged by the new pair, then
+replace the second. Never delete or discard the journal or the frontier record to
+get past a refusal. That would discard the evidence the frontier protects.
+
 ## 5. Shard-node restart after handoffs
 
 **Evidence:** the D2C helper restarts the shard process while retaining its local

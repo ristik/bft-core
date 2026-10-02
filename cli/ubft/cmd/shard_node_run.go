@@ -120,11 +120,17 @@ func handoffArchiveRefusal(err error) error {
 }
 
 // runProfile2ArchiveRestore keeps verified handoff installation ahead of
-// archive replay, then repairs any terminal observations saved during catch-up.
-func runProfile2ArchiveRestore(ctx context.Context, catchUp, restore, repair func(context.Context) error) error {
+// archive replay, then repairs any terminal observations saved during catch-up. The catch-up step also validates the configured archive
+// replicas against the installed set; the archive setup (frontier enablement) follows it and precedes the replay.
+func runProfile2ArchiveRestore(ctx context.Context, catchUp, setupArchive, restore, repair func(context.Context) error) error {
 	if catchUp != nil {
 		if err := catchUp(ctx); err != nil {
 			return fmt.Errorf("restoring handoff history: %w", err)
+		}
+	}
+	if setupArchive != nil {
+		if err := setupArchive(ctx); err != nil {
+			return fmt.Errorf("setting up the archive: %w", err)
 		}
 	}
 	if restore != nil {
@@ -729,7 +735,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if e != nil {
 				return e
 			}
-			archiveReplicas, e = configuredArchiveReplicas(flags.ArchiveReplicas, archiveAllowed, peer.ID())
+			// Structure only: membership is checked against the installed set after the replay (admitArchivePeers).
+			archiveReplicas, e = parseArchiveReplicas(flags.ArchiveReplicas, peer.ID())
 			if e != nil {
 				return e
 			}
@@ -892,14 +899,27 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				return err
 			}
 		}
-		if flags.TrustHistoryProfile2 && !flags.Restore {
-			// The persisted verified steps are replayed into the set (OnInstalled): serving may start with the rebuilt set.
-			activePeers.Release()
-		}
-		if archiveLocal != nil && flags.ArchivePrune {
+		// Frontier enablement is part of the archive setup that follows the replica validation: it runs from this one action after the
+		// persisted replay on a plain run, and after CatchUp and before the archive replay on a restore.
+		enableArchiveFrontier := func(ctx context.Context) error {
+			if archiveLocal == nil || !flags.ArchivePrune {
+				return nil
+			}
 			policy := frontier.Policy{Context: archiveSubject, Replicas: [2]string{archiveReplicas[0].String(), archiveReplicas[1].String()}, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
+			journalStore.SetLogger(flags.observe.Logger())
 			if e := journalStore.EnableFrontier(ctx, journalCtx, limits, policy); e != nil {
 				return fmt.Errorf("authenticating certified frontier: %w", e)
+			}
+			return nil
+		}
+		if !flags.Restore {
+			// The persisted verified steps are replayed into the set (OnInstalled): the configured replicas are validated against the
+			// rebuilt set, and only then may serving start (the hold ends) and the frontier use them.
+			if err := admitArchivePeers(activePeers, archiveReplicas, archiveLocal != nil, flags.TrustHistoryProfile2); err != nil {
+				return err
+			}
+			if err := enableArchiveFrontier(ctx); err != nil {
+				return err
 			}
 		}
 		if flags.Restore {
@@ -907,30 +927,35 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if pinErr != nil {
 				return pinErr
 			}
-			var catchUpHistory func(context.Context) error
-			if flags.TrustHistoryProfile2 {
-				catchUpHistory = func(ctx context.Context) error {
-					if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
-						return fmt.Errorf("restore bootstrap connect: %w", err)
-					}
-					if _, err := handoffFollower.CatchUp(ctx, uc.GetRootEpoch()); err != nil {
-						return err
-					}
-					// Every step up to the pinned epoch is verified and installed: the set is rebuilt, and a joiner's key is bound.
-					activePeers.Release()
-					if err := finishJoinerKey(signing); err != nil {
-						return err
-					}
-					pin, err := hexToHash(flags.RestoreTrustBodyID)
-					if err != nil {
-						return err
-					}
-					bodyID, err := historicalTrust.BodyID(uc.GetRootEpoch())
-					if err != nil || !bytes.Equal(pin, bodyID[:]) {
-						return fmt.Errorf("restore trust BodyID differs from verified current history: %v", err)
-					}
-					return nil
+			catchUpHistory := func(ctx context.Context) error {
+				if !flags.TrustHistoryProfile2 {
+					// No handoff history to install: the installed set is the genesis one, and the replicas are validated against it
+					// before the archive replay.
+					return admitArchivePeers(activePeers, archiveReplicas, archiveLocal != nil, false)
 				}
+				if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
+					return fmt.Errorf("restore bootstrap connect: %w", err)
+				}
+				if _, err := handoffFollower.CatchUp(ctx, uc.GetRootEpoch()); err != nil {
+					return err
+				}
+				// Every step up to the pinned epoch is verified and installed: the set is rebuilt. The configured replicas are validated
+				// against it before the hold ends; a failed catch-up or validation never releases the hold.
+				if err := admitArchivePeers(activePeers, archiveReplicas, archiveLocal != nil, true); err != nil {
+					return err
+				}
+				if err := finishJoinerKey(signing); err != nil {
+					return err
+				}
+				pin, err := hexToHash(flags.RestoreTrustBodyID)
+				if err != nil {
+					return err
+				}
+				bodyID, err := historicalTrust.BodyID(uc.GetRootEpoch())
+				if err != nil || !bytes.Equal(pin, bodyID[:]) {
+					return fmt.Errorf("restore trust BodyID differs from verified current history: %v", err)
+				}
+				return nil
 			}
 			restoreArchive := func(ctx context.Context) error {
 				genesis, genesisErr := executor.GenesisBlock(ctx)
@@ -950,7 +975,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						archiveSubject, journalCtx, limits, restoredHandoffTerminals)
 				}
 			}
-			if restoreErr := runProfile2ArchiveRestore(ctx, catchUpHistory, restoreArchive, repairRestoredHandoffs); restoreErr != nil {
+			if restoreErr := runProfile2ArchiveRestore(ctx, catchUpHistory, enableArchiveFrontier, restoreArchive, repairRestoredHandoffs); restoreErr != nil {
 				flags.observe.Logger().Error("profile2 archive restore failed", "error", restoreErr)
 				return restoreErr
 			}
@@ -1187,12 +1212,11 @@ func buildDisseminator(p *network.Peer, obs Observability, validators []*types.N
 	return shardnode.NewNetDisseminatorFrom(p, obs, active)
 }
 
-// shardPeers is the shard's other validators from the shard conf, excluding this node. It is the
-// set the leader disseminates blocks to and the set a returning node asks for anchor evidence —
-// deliberately the same set, because both are "the validators of this shard" and a node that is
-// trusted to send blocks is no more trusted to serve evidence: the evidence predicate authenticates
-// everything against this node's own trust base regardless of who supplied it (§3).
-func configuredArchiveReplicas(raws []string, validators []libp2ppeer.ID, self libp2ppeer.ID) ([2]libp2ppeer.ID, error) {
+// parseArchiveReplicas is the structural half of the archive replica configuration: exactly two distinct, valid peer IDs, neither this
+// node. It runs at startup, before the handoff follower is built, because the follower fetches its verified bundles from these replicas;
+// they supply availability only, never the installed membership (their bytes pass the bundle verifier before anything is installed).
+// Whether they are validators of the installed assignment is requireArchiveReplicasInstalled, which needs the replayed set.
+func parseArchiveReplicas(raws []string, self libp2ppeer.ID) ([2]libp2ppeer.ID, error) {
 	var out [2]libp2ppeer.ID
 	if len(raws) != 2 {
 		return out, archivewiring.ErrConfig
@@ -1200,26 +1224,55 @@ func configuredArchiveReplicas(raws []string, validators []libp2ppeer.ID, self l
 	for i, raw := range raws {
 		id, err := libp2ppeer.Decode(raw)
 		if err != nil {
-			return out, fmt.Errorf("%w: archive replica %d: %v", archivewiring.ErrConfig, i, err)
+			return [2]libp2ppeer.ID{}, fmt.Errorf("%w: archive replica %d: %v", archivewiring.ErrConfig, i, err)
 		}
 		if id == self {
-			return out, fmt.Errorf("%w: archive replica cannot be self", archivewiring.ErrConfig)
-		}
-		configured := false
-		for _, candidate := range validators {
-			configured = configured || candidate == id
-		}
-		if !configured {
-			return out, fmt.Errorf("%w: archive replica %s is not a configured shard validator", archivewiring.ErrConfig, id)
+			return [2]libp2ppeer.ID{}, fmt.Errorf("%w: archive replica cannot be self", archivewiring.ErrConfig)
 		}
 		out[i] = id
 	}
 	if out[0] == out[1] {
-		return [2]libp2ppeer.ID{}, archivewiring.ErrConfig
+		return [2]libp2ppeer.ID{}, fmt.Errorf("%w: the two archive replicas must be distinct", archivewiring.ErrConfig)
 	}
 	return out, nil
 }
 
+// requireArchiveReplicasInstalled is the membership half: both replicas must be validators of the INSTALLED assignment (installed is
+// ActivePeers.Peers(), which reflects the replayed verified steps and never contains this node). Run it only after the persisted replay
+// (plain run) or CatchUp (restore); against the genesis set it would refuse a replica that a later step installed.
+func requireArchiveReplicasInstalled(replicas [2]libp2ppeer.ID, installed []libp2ppeer.ID) error {
+	for _, replica := range replicas {
+		found := false
+		for _, candidate := range installed {
+			found = found || candidate == replica
+		}
+		if !found {
+			return fmt.Errorf("%w: archive replica %s is not a validator of the installed shard assignment", archivewiring.ErrConfig, replica)
+		}
+	}
+	return nil
+}
+
+// admitArchivePeers validates the configured replicas against the installed set and only then ends the startup hold on the archive peer
+// set (held: the node holds it, which is the profile-2 case). A refusal leaves the hold in place, so nobody is authorized from a set
+// the node has just found inconsistent with its configuration. archived is whether an archive is configured at all.
+func admitArchivePeers(peers *shardnode.ActivePeers, replicas [2]libp2ppeer.ID, archived, held bool) error {
+	if archived {
+		if err := requireArchiveReplicasInstalled(replicas, peers.Peers()); err != nil {
+			return err
+		}
+	}
+	if held {
+		peers.Release()
+	}
+	return nil
+}
+
+// shardPeers is the shard's other validators from the shard conf, excluding this node. It is the
+// set the leader disseminates blocks to and the set a returning node asks for anchor evidence —
+// deliberately the same set, because both are "the validators of this shard" and a node that is
+// trusted to send blocks is no more trusted to serve evidence: the evidence predicate authenticates
+// everything against this node's own trust base regardless of who supplied it (§3).
 func shardPeers(p *network.Peer, validators []*types.NodeInfo) ([]libp2ppeer.ID, error) {
 	selfID := p.ID().String()
 	var peers []libp2ppeer.ID
