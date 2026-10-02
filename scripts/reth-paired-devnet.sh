@@ -1016,6 +1016,23 @@ if [ -n "$postM2aMode" ]; then
   fi
 fi
 
+# T6 rehearsal: one key-replacing coupled rotation after every existing T6 check (kept green by construction: they all ran before it).
+if [ "$postM2aMode" = t6 ] && [ "${T6_COUPLED_ROTATION:-0}" = 1 ]; then
+  echo
+  echo "=== T6: coupled key-replacing rotation s=1 (evm4 retires, evm5 joins) ==="
+  if [ "$failures" -eq 0 ]; then
+    source scripts/t6/coupled-rotation.sh
+    if t6_coupled_rotation_s1; then
+      pass "T6 coupled rotation s=1: authority-backed PoPs, handoff, acknowledgement (registry shard epoch 1), and a paid mint under the new set verified offline"
+    else
+      fail "T6 coupled rotation s=1 failed"
+    fi
+    t6_rotation_teardown
+  else
+    fail "T6 coupled rotation skipped because an earlier lane check failed"
+  fi
+fi
+
 if [ "$failures" -gt "$preflightFailures" ]; then
   echo "D1 FAIL ($((failures - preflightFailures)) lane check(s) failed)"
 else

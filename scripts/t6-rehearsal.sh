@@ -260,8 +260,11 @@ run_paired_t6() {
   export POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$T6_URETH_COMMIT"
   export M2_PROFILE2=1 SIGNING=authority M2A_FINAL_RESTORE=1
   export M2_RUN_LOG_DIR="$EVIDENCE_DIR/paired-node-logs"
+  # one key-replacing coupled rotation (s=1) after the existing checks; the validators stop and restart on purpose, so the journal bound is raised
+  export T6_COUPLED_ROTATION=${T6_COUPLED_ROTATION:-1} EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-256}
   bash ./scripts/reth-paired-devnet.sh 4 20 2>&1 | tee "$EVIDENCE_DIR/paired-lane.log"
-  pass "paired network completed placeholder claims, WUCT wrap/unwrap, treasury withdrawal, handoffs, restore, and finality checks"
+  grep -q "T6 coupled rotation s=1: authority-backed" "$EVIDENCE_DIR/paired-lane.log" || [ "${T6_COUPLED_ROTATION:-1}" != 1 ] || { fail "the coupled rotation step did not pass"; return 1; }
+  pass "paired network completed placeholder claims, WUCT wrap/unwrap, treasury withdrawal, handoffs, restore, finality checks, and a coupled key-replacing rotation"
 }
 
 extract_verify_f7() {
@@ -309,6 +312,7 @@ collect_evidence() {
   cp test-nodes/post-m2a-allocation-build-v1.json test-nodes/evm-genesis-finalized-funded.json \
     "$EVIDENCE_DIR/paired-evidence/"
   cp -R test-nodes/post-m2a-evidence "$EVIDENCE_DIR/paired-evidence/"
+  [ ! -d test-nodes/h3 ] || cp -R test-nodes/h3 "$EVIDENCE_DIR/paired-evidence/coupled-rotation"
   python3 - "$FRESH_REPO/test-nodes" "$EVIDENCE_DIR/node-logs" <<'PY'
 import shutil,sys
 from pathlib import Path
