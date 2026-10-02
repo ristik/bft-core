@@ -506,7 +506,7 @@ h3_step "root quorum restarted at epoch 3; roots and aggregators progress while 
 # *certification.BlockCertificationRequest"). It must (1) appear in a root log since the mark, and (2) the id must never
 # appear among the requestNodeIDs of a request set the root accepted ("reached consensus"), i.e. nothing it sent certified.
 h3_assert_rejected() { # node id, what, [seconds to wait: a node that must first RESTORE needs minutes to reach the roots]
-  local id=$1 what=$2 window=${3:-90} alt_log=${4:-} i refusals=0 accepted
+  local id=$1 what=$2 window=${3:-90} alt_log=${4:-} i refusals=0 accepted alt_used=0
   for i in $(seq 1 "$window"); do
     # The root refuses a retired or never-active key in one of two places, both of them the active-set check: at the handshake
     # ("node ID is not in active validator set ... <id>", the node then never gets a certificate and sends no request) or, for a
@@ -518,7 +518,10 @@ h3_assert_rejected() { # node id, what, [seconds to wait: a node that must first
     # node that must first restore from them is refused there ("archive peer is not allowed") and never reaches a root at all.
     if [ -n "$alt_log" ] && grep -aq "archive peer is not allowed" "$alt_log" 2>/dev/null; then
       echo "$what: refused by the archive replicas (archive peer is not allowed): $id is not in the active assignment, so it cannot even restore"
+      echo "NOTE: the ROOT-level refusal of this late acknowledgement was NOT exercised end to end in this run: the node was stopped earlier, at the archive, and never reached a root."
+      echo "NOTE: root-side refusal of a superseded or retired set is covered by unit tests: TestSupersessionReplacesAnUnacknowledgedAssignmentOnTheSameParent (rootchain/consensus/storage/handoff_supersession_test.go: the superseded s=2 keys are 'not in the trustbase of the shard'), TestAcknowledgementEndsThePendingStateAndRetiredKeysStayRefused and TestRetiredKeyRequestIsNotCertifiedInTheActivationBlockOrTheNext (handoff_assignment_activation_test.go, handoff_changes_test.go), and Test_onBlockCertificationRequest case 1 (rootchain/node_test.go: the root rejects a request from a node outside the shard's trust base). The handshake-time refusal (rootchain/node.go 'node ID is not in active validator set') has NO unit test; the lane's retired-key (evm4) step exercises it end to end for the s=0 key only." >&2
       refusals=1
+      alt_used=1
       break
     fi
     sleep 1
@@ -526,7 +529,11 @@ h3_assert_rejected() { # node id, what, [seconds to wait: a node that must first
   [ "$refusals" -ge 1 ] || { echo "$what: no root logged an active-set refusal for $id (handshake or request), and no archive replica refused it" >&2; return 1; }
   accepted=$(h3_since_mark | grep -F "reached consensus" | grep -F "requestNodeIDs" | grep -cF "$id" || true)
   [ "$accepted" -eq 0 ] || { echo "$what: root accepted $accepted request set(s) containing $id" >&2; return 1; }
-  echo "$what: $refusals refusal(s) for $id (root or archive); 0 accepted request sets contain it"
+  if [ "$alt_used" = 1 ]; then
+    echo "$what: refused at the ARCHIVE (not at a root); 0 accepted request sets contain $id"
+  else
+    echo "$what: $refusals exact root refusal(s) for $id; 0 accepted request sets contain it"
+  fi
 }
 
 h3_retired_key_rejected() {
@@ -683,7 +690,7 @@ h3_late_s2_ack_refused() {
   h3_assert_rejected "$id6" "late s=2 acknowledgement from evm6" 480 test-nodes/evm6/debug.log || return 1
   h3_registry_is 3 5                          # the registry shows s=3's folded acknowledgement, not s=2's
 }
-h3_step "s=2's late acknowledgement is rejected" h3_late_s2_ack_refused
+h3_step "s=2's late acknowledgement does not succeed (refused at the root when the node reaches one, otherwise at the archive: the output says which)" h3_late_s2_ack_refused
 h3_final() {
   stop_one_evm_validator 6 2>/dev/null || true
   H3_ONLINE="1 2 3 5"
