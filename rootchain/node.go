@@ -237,7 +237,7 @@ func (v *Node) onHandshake(ctx context.Context, req *handshake.Handshake) error 
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("node ID is not in active validator set %s - %s - %s", req.PartitionID, req.ShardID, req.NodeID)
+		return fmt.Errorf("node ID is not in active validator set %s - %s - %s: %w", req.PartitionID, req.ShardID, req.NodeID, err)
 	}
 
 	// (Re)subscribe on every handshake. Subscriptions have a bounded response

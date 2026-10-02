@@ -192,8 +192,14 @@ func TestSupersessionReplacesAnUnacknowledgedAssignmentOnTheSameParent(t *testin
 		require.NotContains(t, si.nodeIDs, superseded, "the superseded set cannot certify a late acknowledgement")
 		err := si.ValidRequest(&certification.BlockCertificationRequest{PartitionID: 8, NodeID: superseded,
 			InputRecord: &types.InputRecord{Version: 1, Epoch: si.TR.Epoch}})
-		require.ErrorContains(t, err, "not in the trustbase of the shard", superseded)
+		require.ErrorIs(t, err, ErrNodeNotInTrustBase, superseded)
 	}
+	// Control: a member of the replacement set sending the same stale-shaped request is not refused for membership,
+	// so the refusal above is the membership check and not some other validity rule that also fires.
+	err = si.ValidRequest(&certification.BlockCertificationRequest{PartitionID: 8, NodeID: "ev-k",
+		InputRecord: &types.InputRecord{Version: 1, Epoch: si.TR.Epoch}})
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrNodeNotInTrustBase, "an active member is refused for another reason")
 }
 
 func TestSupersessionEvidenceIsolatedMutations(t *testing.T) {

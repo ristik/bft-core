@@ -687,11 +687,15 @@ func (si *ShardInfo) GetTotalNodes() uint64 {
 	return uint64(len(si.trustBase))
 }
 
+// ErrNodeNotInTrustBase is the refusal of a node the shard's installed validator set does not contain: a
+// retired or superseded key, or one that never belonged. The message text is unchanged (the lanes match it).
+var ErrNodeNotInTrustBase = errors.New("not in the trustbase of the shard")
+
 func (si *ShardInfo) Verify(nodeID string, f func(v abcrypto.Verifier) error) error {
 	if v, ok := si.trustBase[nodeID]; ok {
 		return f(v)
 	}
-	return fmt.Errorf("node %q is not in the trustbase of the shard", nodeID)
+	return fmt.Errorf("node %q is %w", nodeID, ErrNodeNotInTrustBase)
 }
 
 func (si *ShardInfo) selectLeader(seed uint64) string {
