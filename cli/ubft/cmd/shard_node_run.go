@@ -645,6 +645,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err != nil {
 		return fmt.Errorf("creating shard node: %w", err)
 	}
+	// The adapter authenticates certificates under the same per-epoch configuration set as the admission, not under a scan of every
+	// installed assignment. Set before Run.
+	verifierContext.SetConfForEpoch(node.ShardConfForEpoch)
 	if signing.authority != nil {
 		// Before Run, and before anything else is attached. P-id still applies ahead of this signer. A
 		// node resumed from its checkpoint signs only through this signer's authority record; with the

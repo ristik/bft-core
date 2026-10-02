@@ -133,18 +133,13 @@ type ObservationContextV2 struct {
 	PartitionID   types.PartitionID
 	ShardID       types.ShardID
 	ShardConfHash []byte
-	// AlsoAcceptConfHashes lists further full configuration hashes a certificate may carry: the
-	// hashes of EVM assignments this verifier has installed from verified committed handoffs.
-	// Each one is a different shard assignment, never a replacement for the pinned genesis hash,
-	// and DeriveV2 later requires the exact hash the registry and acknowledgement name.
-	AlsoAcceptConfHashes [][]byte
-	// ConfForEpoch, when set, supersedes ShardConfHash and AlsoAcceptConfHashes: the certificate must commit to exactly the
+	// ConfForEpoch, when set, supersedes ShardConfHash: the certificate must commit to exactly the
 	// configuration hash installed for the shard epoch its technical record names (which the unicity certificate binds). A shard epoch
 	// with no installed configuration is ErrConfEpochUnknown (retryable once its assignment is installed), never a fallback to
 	// another epoch's hash. The pinned ShardConfHash stays the deployment's genesis identity.
 	ConfForEpoch func(shardEpoch uint64) ([]byte, bool)
-	RootEpoch            uint64
-	TrustBases           TrustBases
+	RootEpoch    uint64
+	TrustBases   TrustBases
 	// EpochAuthority is set only for profile 2. It reports the epoch whose
 	// handoff has been installed; nil preserves the fixed genesis profile.
 	EpochAuthority RootEpochAuthority
@@ -236,16 +231,7 @@ func authenticateObservationV2(ctx context.Context, c ObservationContextV2, uc *
 			return VerifiedObservationV2{}, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 		}
 	} else if err = u.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
-		matched := false
-		for _, alt := range c.AlsoAcceptConfHashes {
-			if len(alt) == 32 && !bytes.Equal(alt, conf) && u.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, alt) == nil {
-				conf, matched = bytes.Clone(alt), true
-				break
-			}
-		}
-		if !matched {
-			return VerifiedObservationV2{}, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
-		}
+		return VerifiedObservationV2{}, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 	}
 	if u.UnicitySeal == nil || uint64(u.UnicitySeal.NetworkID) != uint64(c.NetworkID) {
 		return VerifiedObservationV2{}, fmt.Errorf("%w: network", ErrWrongContext)
