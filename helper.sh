@@ -201,9 +201,12 @@ function init_evm_validators() {
 
 # Keep each authority outside its shard node's process and home. Its key exists only for this
 # process lifetime, so the paired lane must leave it running while shard nodes are restarted.
+#
+# Optional $3..$6 start authorities first..n at another scope (default: 1..n at shard epoch 0, root epoch 1 under the genesis trust base):
+# a joining validator's authority is started pending at the successor scope it will operate in.
 function init_evm_authorities() {
-  local n=$1 partitionID=$2 i home nodeID attempt
-  for i in $(seq 1 "$n"); do
+  local n=$1 partitionID=$2 first=${3:-1} shardEpoch=${4:-0} rootEpoch=${5:-1} trustBase=${6:-test-nodes/trust-base.json} i home nodeID attempt
+  for i in $(seq "$first" "$n"); do
     home="test-nodes/auth$i"
     mkdir -p "$home"
     chmod 700 "$home"
@@ -213,7 +216,7 @@ function init_evm_authorities() {
       --client-socket "$home/client.sock" --operator-socket "$home/operator.sock" \
       --operator-credential "$home/operator.cred" --authority-id "paired-evm-$i" \
       --node-id "$nodeID" --network-id 3 --partition-id "$partitionID" --shard-id 0x80 \
-      --shard-epoch 0 --root-epoch 1 --trust-base test-nodes/trust-base.json \
+      --shard-epoch "$shardEpoch" --root-epoch "$rootEpoch" --trust-base "$trustBase" \
       --log-format text --log-level info >"$home/authority.log" 2>&1 &
     echo $! >"$home/pid"
     for attempt in $(seq 1 100); do
@@ -231,13 +234,15 @@ function init_evm_authorities() {
   done
 }
 
+# Optional $3/$4 enroll first..n against another configuration (default: validators 1..n against the genesis shard configuration).
 function enroll_evm_authorities() {
-  local n=$1 partitionID=$2 i home
-  for i in $(seq 1 "$n"); do
+  local n=$1 partitionID=$2 first=${3:-1} conf=${4:-} i home
+  conf=${conf:-test-nodes/shard-conf-${partitionID}_0.json}
+  for i in $(seq "$first" "$n"); do
     home="test-nodes/auth$i"
     build/ubft signing-authority complete-enrollment --operator-socket "$home/operator.sock" \
       --operator-credential "$home/operator.cred" \
-      --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" || return 1
+      --shard-conf "$conf" || return 1
     build/ubft signing-authority replace-session --operator-socket "$home/operator.sock" \
       --operator-credential "$home/operator.cred" --out "$home/client.cred" || return 1
   done

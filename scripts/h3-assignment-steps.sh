@@ -1,7 +1,9 @@
-# Sourced by reth-paired-devnet.sh (H3_ASSIGNMENT_LANE=1, F8_MIXED_LANE=1, M2_PROFILE2=1, SIGNING=local) after the
+# Sourced by reth-paired-devnet.sh (H3_ASSIGNMENT_LANE=1, F8_MIXED_LANE=1, M2_PROFILE2=1, SIGNING=authority) after the
 # first paid certified block, in place of m2-profile2-handoffs.sh. Every step prints PASS or FAIL; a FAIL exits nonzero.
-# SIGNING=local: successor keys sign their own proofs of possession, so the authority-backed rotation (signing authority
-# advance-epoch) is NOT exercised by this lane.
+# SIGNING=authority is the only mode: every validator signs through its own signing authority (as in production), a joiner's authority
+# signs its proof of possession on the operator channel (`evm-pop --authority-socket`) and is enrolled against the activated
+# configuration, retained validators' authorities advance (`advance-epoch`) at each activation, and a restored validator restores
+# through its surviving authority (a local-key restore is refused by design).
 # Design: briefs/h3-evm-assignment-design.md section 8 as amended: validator-set changes are always coupled (root entity and its
 # delegated EVM validator). Root epochs: 1 genesis, 2 configuration-only advance, 3 coupled s=1, 4 coupled s=2, 5 coupled s=3. EVM validators: evm1-4 genesis; evm5-7 spare identities that appear only in successor sets.
 source scripts/lib/m2-handoff-lib.sh
@@ -86,7 +88,7 @@ h3_evm_certifies_after() { # a certified EVM IR round above $1 within $2 seconds
 
 h3_validators_json() { # ids -> sorted JSON array of successor node infos
   local out=$1 id files=; shift
-  for id in "$@"; do files+=" test-nodes/evm$id/node-info.json"; done
+  for id in "$@"; do files+=" test-nodes/auth$id/node-info.json"; done
   # shellcheck disable=SC2086
   jq -s 'map({nodeId, sigKey, stake: 1}) | sort_by(.nodeId)' $files >"$out"
 }
@@ -95,6 +97,39 @@ h3_spare_identity() {
   local i=$1
   [ -f "test-nodes/evm$i/node-info.json" ] || build/ubft shard-node init --home "test-nodes/evm$i" -g >/dev/null || return 1
   mkdir -p "test-nodes/reth$i"
+}
+
+# A joining validator's signing authority, started pending at the successor scope it will operate in (shard epoch, root epoch, that
+# root epoch's trust base). Its key is what the successor assignment names; it is enrolled against the activated configuration later
+# (h3_enroll_authority). Idempotent.
+h3_spare_authority() { # id shardEpoch rootEpoch trustFile
+  local i=$1
+  if [ -f "test-nodes/auth$i/pid" ] && kill -0 "$(cat "test-nodes/auth$i/pid")" 2>/dev/null; then return 0; fi
+  source helper.sh
+  init_evm_authorities "$i" "$partitionID" "$i" "$2" "$3" "test-nodes/$4" || return 1
+}
+
+# The activated configuration of the EVM shard at a shard epoch, from the derived index of the first root (after the handoff activated).
+h3_pdr_file() { # shard epoch -> path
+  local out="$H3_DIR/pdr-$1.json"
+  go run ./scripts/h3-pdr --orchestration "test-nodes/root$(h3_first_root)/orchestration.db" --epoch "$1" >"$out" || return 1
+  echo "$out"
+}
+
+# Enroll a joiner's pending authority against the activated configuration and issue its session.
+h3_enroll_authority() { # id shard epoch
+  local pdr
+  pdr=$(h3_pdr_file "$2") || return 1
+  source helper.sh
+  enroll_evm_authorities "$1" "$partitionID" "$1" "$pdr" || return 1
+}
+
+# Advance the retained validators' authorities to the activated scope (root epoch, shard epoch) and restart their nodes with the new
+# sessions: the M2 lane's advance-epoch pattern, for the given validators only.
+h3_advance_authorities() { # root epoch, shard epoch, ids...
+  local rootEpoch=$1 shardEpoch=$2 pdr; shift 2
+  pdr=$(h3_pdr_file "$shardEpoch") || return 1
+  M2_ADVANCE_TOLERATE_STOPPED=1 M2_ADVANCE_NO_REPLICA_WAIT=1 m2_advance_authorities "$rootEpoch" "trust-base-epoch${rootEpoch}.json" "$pdr" "$*"
 }
 
 # Same root keys at the next epoch (a configuration-only boundary advances the root epoch with unchanged members).
@@ -158,7 +193,8 @@ h3_build_assignment() {
   local pops=
   for id in "$@"; do
     build/ubft root handoff evm-pop --context "$H3_DIR/$tag-context.json" --validators "$H3_DIR/$tag-validators.json" \
-      --node-id "$(evm_validator_id "$id")" --key-conf "test-nodes/evm$id/keys.json" >"$H3_DIR/$tag-pop-$id.json" || return 1
+      --node-id "$(evm_validator_id "$id")" --authority-socket "test-nodes/auth$id/operator.sock" \
+      --authority-credential "test-nodes/auth$id/operator.cred" >"$H3_DIR/$tag-pop-$id.json" || return 1
     pops+="${pops:+,}$H3_DIR/$tag-pop-$id.json"
   done
   local sup=(); [ "$H3_SUPERSEDE" = 1 ] && sup=(--supersede)
@@ -253,12 +289,15 @@ h3_start_reth() { # spare execution client i, peered with the running ones
   done
 }
 
-# Restore validator i (fresh home and execution client, identity kept) from a surviving replica's archive; local signing.
+# Restore validator i (fresh home and execution client, identity kept) from a surviving replica's archive, through its surviving authority.
 h3_restore_validator() {
   local i=$1 replica=$2; shift 2
   local evidence="$H3_DIR/restore-$i" bodyID rootBoot bootnodes peers=() p
   rm -rf "$evidence"; mkdir -p "$evidence"
   cp "test-nodes/evm$i/keys.json" "test-nodes/evm$i/node-info.json" "$evidence/" || return 1
+  # the authority (not the node) holds the signing key: a fresh session for the restored node, the old client being gone
+  build/ubft signing-authority replace-session --operator-socket "test-nodes/auth$i/operator.sock" \
+    --operator-credential "test-nodes/auth$i/operator.cred" --out "test-nodes/auth$i/client.cred" || return 1
   cp "test-nodes/evm$i/jwt.hex" "$evidence/jwt.hex" 2>/dev/null || openssl rand -hex 32 >"$evidence/jwt.hex"
   stop_one_evm_validator "$i" 2>/dev/null || true
   stop_pidfile "test-nodes/reth$i/pid" 'reth.* node' 2>/dev/null || true
@@ -276,7 +315,8 @@ h3_restore_validator() {
     --genesis "$EVM_GENESIS_FILE" --engine-url "http://127.0.0.1:$((rethEngineBase+i-1))" \
     --eth-url "http://127.0.0.1:$((rethEthBase+i-1))" --jwt-secret "$evidence/jwt.hex" \
     --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" --execution-journal "$evidence/journal.db" \
-    --archive-store "$evidence/archive" --archive-prune --trust-history-profile-2 --journal-candidates 32 \
+    --archive-store "$evidence/archive" --archive-prune --trust-history-profile-2 --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}" \
+    --signing-authority-socket "test-nodes/auth$i/client.sock" --signing-authority-credential "test-nodes/auth$i/client.cred" \
     "${peers[@]}" --tip-uc "$evidence/tip.uc.cbor" --tip-tr "$evidence/tip.tr.cbor" --trust-body-id "$bodyID" \
     --log-format text --log-level info >>"$evidence/restore.log" 2>&1 &
   echo $! >"$evidence/pid"
@@ -297,7 +337,7 @@ h3_head_after_all() { # wait until every id in $@ logs a new certificate admitte
 
 # ----------------------------------------------------------------------------------------------------------------
 echo "=== H3 acceptance lane: M3-shaped genesis (layout 2) + three aggregator shards ==="
-echo "NOTE: this lane uses LOCAL signing (SIGNING=local); the signing-authority-backed rotation is not exercised."
+echo "NOTE: every validator signs through its own signing authority (SIGNING=authority): the rotation is authority-backed."
 h3_step "baseline: EVM certifies and all three aggregator shards progress" h3_progress baseline 8
 h3_step "genesis registry is layout 2, shard epoch 0, root epoch 1" h3_registry_is 0 1
 
@@ -308,6 +348,7 @@ h3_config_only() {
   h3_retry_handoff 1 h3_config_attempt || return 1
   h3_restart_roots 2 || { echo "root restart into epoch 2 failed" >&2; return 1; }
   echo "roots restarted into epoch 2" >&2
+  m2_advance_authorities 2 trust-base-epoch2.json || { echo "authority advance to root epoch 2 failed" >&2; return 1; }
   h3_paid 2 || { echo "paid transaction at root epoch 2 was not certified" >&2; return 1; }
   # the registry's root epoch is written by an EVM block after the new root epoch is installed: poll like the later steps do
   local i
@@ -326,6 +367,7 @@ h3_spare_identity 5; h3_spare_identity 6; h3_spare_identity 7
 h3_bad_pop() {
   local start outcomeBefore
   h3_prepare_coupled 3 4 5 || return 1
+  h3_spare_authority 5 1 3 trust-base-epoch3.json || return 1
   H3_BIND_ROOTS="1 2 3 5" h3_build_assignment bad 1 2 3 5 || return 1
   python3 - "$H3_DIR/bad-assignment.json" <<'PY'
 import json,sys
@@ -414,8 +456,10 @@ stop_one_evm_validator 4 2>/dev/null || true
 # 4. Acknowledge with s=1: restart retained evm3 and restore evm5; certify the ack and a paid mint.
 h3_ack_s1() {
   H3_ONLINE="1 2 3 5"
-  start_one_evm_validator 3 "$validators" "$partitionID" "$(m2_root_addr "$(h3_first_root)")" engine-api rpc \
-    "$(evm_bootnodes_for_peers "$(m2_root_addr "$(h3_first_root)")" 3 1 2)" || return 1
+  # The retained validators' authorities (1 and 2 running, 3 held down) advance to the activated scope (root epoch 3, shard epoch 1)
+  # and their nodes restart with the new sessions; the joiner's authority is enrolled against the activated configuration.
+  h3_advance_authorities 3 1 1 2 3 || { echo "authority advance to root epoch 3 / shard epoch 1 failed" >&2; return 1; }
+  h3_enroll_authority 5 1 || { echo "enrolling the evm5 authority failed" >&2; return 1; }
   H3_RESTORE_TRUST_BASE=test-nodes/trust-base-epoch3.json
   h3_restore_validator 5 1 || return 1
   local i
@@ -505,6 +549,8 @@ h3_s2_attempt() {
 }
 h3_evm_s2() {
   h3_prepare_coupled 4 3 6 || return 1       # root 3 -> 6, committee {1,2,5,6}
+  h3_spare_authority 6 2 4 trust-base-epoch4.json || return 1
+  h3_spare_authority 7 2 4 trust-base-epoch4.json || return 1
   h3_retry_handoff 3 h3_s2_attempt || return 1
   h3_activate_coupled 4 3 6 || return 1
 }
@@ -527,6 +573,9 @@ h3_supersede_s3() {
   h3_propose s3 5 || return 1
   h3_wait_committed 4 || return 1
   h3_activate_coupled 5 2 7 || return 1
+  # the folded acknowledgement needs the retained and returning validators' authorities at the activated scope (root epoch 5, shard epoch 3)
+  H3_ONLINE="1 2 3 5"
+  h3_advance_authorities 5 3 1 2 3 5 || { echo "authority advance to root epoch 5 / shard epoch 3 failed" >&2; return 1; }
   local i
   for i in $(seq 1 180); do h3_registry_is 3 5 && return 0; sleep 1; done
   echo "registry did not reach shard epoch 3 / root epoch 5" >&2
@@ -539,6 +588,7 @@ h3_late_s2_ack_refused() {
   H3_RESTORE_TRUST_BASE=test-nodes/trust-base-epoch4.json
   H3_ONLINE="1 2 3 5"
   h3_mark
+  h3_enroll_authority 6 2 || { echo "enrolling the evm6 authority against the s=2 configuration failed" >&2; return 1; }
   h3_restore_validator 6 1 || true            # the s=2 key tries to acknowledge late
   h3_assert_rejected "$id6" "late s=2 acknowledgement from evm6" || return 1
   h3_registry_is 3 5                          # the registry shows s=3's folded acknowledgement, not s=2's

@@ -207,24 +207,28 @@ PY
   return 1
 }
 
+# Advance the authorities (default 1..4) to the successor scope: root trust `trustFile` and shard configuration `$3` (default the genesis
+# full configuration: a root-only advance). `$4` lists the validators to advance. M2_ADVANCE_TOLERATE_STOPPED=1 lets a validator whose node
+# is already stopped be advanced and restarted (the H3 lane holds validators down on purpose); M2_ADVANCE_NO_REPLICA_WAIT=1 skips the
+# archive-replica catch-up wait after each restart (replicas that are down on purpose cannot acknowledge).
 m2_advance_authorities() {
-  local epoch=$1 trustFile=$2 i offline rootBoot onlineValidators bootnodes startLine
+  local epoch=$1 trustFile=$2 conf=${3:-$fullShardConf} ids=${4:-1 2 3 4} i offline rootBoot onlineValidators bootnodes startLine
   [ "${SIGNING:-local}" = authority ] || return 0
   rootBoot=$(m2_root_addr 1) || return 1
   onlineValidators=$(m2_online_validators)
-  for i in 1 2 3 4; do
+  for i in $ids; do
     offline=false
     if [ "$i" = 1 ] && [ "${M2A_VALIDATOR1_WIPED:-0}" = 1 ] && [ "${M2A_VALIDATOR1_RESTORED:-0}" != 1 ]; then
       offline=true
     else
       # Observers (the T6 finality monitor) treat a planned restart as an expected outage, not a failure.
       mkdir -p test-nodes/post-m2a-evidence/restarting && : >"test-nodes/post-m2a-evidence/restarting/$i"
-      stop_one_evm_validator "$i" || return 1
+      stop_one_evm_validator "$i" || [ "${M2_ADVANCE_TOLERATE_STOPPED:-0}" = 1 ] || return 1
     fi
     build/ubft signing-authority advance-epoch \
       --operator-socket "test-nodes/auth$i/operator.sock" \
       --operator-credential "test-nodes/auth$i/operator.cred" \
-      --trust-base "test-nodes/$trustFile" --shard-conf "$fullShardConf" || return 1
+      --trust-base "test-nodes/$trustFile" --shard-conf "$conf" || return 1
     build/ubft signing-authority replace-session \
       --operator-socket "test-nodes/auth$i/operator.sock" \
       --operator-credential "test-nodes/auth$i/operator.cred" \
@@ -233,7 +237,7 @@ m2_advance_authorities() {
       bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $onlineValidators) || return 1
       startLine=$(wc -l < "test-nodes/evm$i/debug.log")
       start_one_evm_validator "$i" "$validators" "$partitionID" "$rootBoot" engine-api rpc "$bootnodes" || return 1
-      m2_wait_archive_replica_catchup "$i" "$startLine" || return 1
+      [ "${M2_ADVANCE_NO_REPLICA_WAIT:-0}" = 1 ] || m2_wait_archive_replica_catchup "$i" "$startLine" || return 1
     fi
     rm -f "test-nodes/post-m2a-evidence/restarting/$i"
     echo "authority $i advanced to root epoch $epoch"
