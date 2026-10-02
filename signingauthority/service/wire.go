@@ -165,6 +165,37 @@ type statusPayload struct {
 	ShardEpoch       uint64
 }
 
+// statusPayloadV1 is the first status layout, before the root and shard epochs were added: the six fields an authority built before
+// that change answers with. A status is a read-only operator view, neither authenticated nor stored, so unlike the stored and
+// authenticated formats (F6e, F7: no unknown trailing items) a client accepts exactly the two layouts it knows and refuses every
+// other length. A client therefore reads an old authority's status (the epochs it never sent decode as zero: root epochs start at 1,
+// so a zero RootEpoch means "not reported"); an old client cannot read a new authority's status, because toarray decoding refuses a
+// longer array. Upgrade the clients (shard nodes, the operator CLI) before the authorities.
+type statusPayloadV1 struct {
+	_                struct{} `cbor:",toarray"`
+	Generation       uint64
+	ReservedRound    uint64
+	HasReservation   bool
+	ResponseRetained bool
+	Faulted          bool
+	KeyLost          bool
+}
+
+// decodeStatus reads a status in either known layout.
+func decodeStatus(raw []byte) (statusPayload, error) {
+	var current statusPayload
+	currentErr := types.Cbor.Unmarshal(raw, &current)
+	if currentErr == nil {
+		return current, nil
+	}
+	var v1 statusPayloadV1
+	if err := types.Cbor.Unmarshal(raw, &v1); err != nil {
+		return statusPayload{}, currentErr // neither layout: report the current one
+	}
+	return statusPayload{Generation: v1.Generation, ReservedRound: v1.ReservedRound, HasReservation: v1.HasReservation,
+		ResponseRetained: v1.ResponseRetained, Faulted: v1.Faulted, KeyLost: v1.KeyLost}, nil
+}
+
 type enrollmentPayload struct {
 	_          struct{} `cbor:",toarray"`
 	Enrollment []byte
