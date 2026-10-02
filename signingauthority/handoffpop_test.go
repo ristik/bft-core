@@ -82,6 +82,19 @@ func TestHandoffPoPRefusesAWrongContext(t *testing.T) {
 			require.ErrorIs(t, err, ErrContextMismatch)
 		})
 	}
+	t.Run("a faulted authority signs nothing", func(t *testing.T) {
+		a, req, _ := popFixture(t)
+		a.MarkUntrusted("an operator saw something this authority cannot see")
+		_, err := a.SignHandoffPoP(req)
+		require.ErrorIs(t, err, ErrStateUntrusted, "a latched fault refuses the possession proof like any other signature")
+		require.NotErrorIs(t, err, ErrContextMismatch)
+	})
+	t.Run("a successor epoch below the enrolled one is refused", func(t *testing.T) {
+		a, req, _ := popFixture(t)
+		req.Successor.Epoch = shardEpoch - 1
+		_, err := a.SignHandoffPoP(req)
+		require.ErrorIs(t, err, ErrContextMismatch)
+	})
 	t.Run("a closed authority has no key to sign with", func(t *testing.T) {
 		a, req, _ := popFixture(t)
 		a.Close()

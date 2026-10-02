@@ -39,6 +39,10 @@ var errFrameTooLarge = errors.New("signing-frame-too-large")
 // replace a session, or an operator asking to sign. Endpoints do not fall back to each other.
 var errWrongEndpoint = errors.New("signing-operation-not-served-here")
 
+// ErrWrongEndpoint is the refusal a caller receives when an operation is not served on the endpoint it reached (for example a
+// possession proof requested on the shard node's client socket).
+var ErrWrongEndpoint = errWrongEndpoint
+
 // errOperatorUnauthenticated is an operator-endpoint call without the operator credential.
 var errOperatorUnauthenticated = errors.New("signing-operator-unauthenticated")
 

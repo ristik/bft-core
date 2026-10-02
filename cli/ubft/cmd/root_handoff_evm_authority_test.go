@@ -84,7 +84,17 @@ func TestEVMPoPFromASigningAuthority(t *testing.T) {
 	t.Run("the shard node's client socket is not the operator channel", func(t *testing.T) {
 		_, err := run("--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-auth",
 			"--authority-socket", filepath.Join(dir, "client.sock"), "--authority-credential", credentialPath)
-		require.Error(t, err, "the client endpoint does not serve a possession proof")
+		require.ErrorIs(t, err, service.ErrWrongEndpoint, "the client endpoint does not serve a possession proof")
+	})
+	t.Run("a key file and the authority flags together are refused", func(t *testing.T) {
+		keyConf := writeJSON(t, dir, "keys.json", map[string]string{"unused": "the refusal comes before the key is read"})
+		_, err := run("--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-auth", "--key-conf", keyConf,
+			"--authority-socket", filepath.Join(dir, "operator.sock"), "--authority-credential", credentialPath)
+		require.ErrorIs(t, err, errBothKeyHolders)
+		// Either authority flag alone with a key file is the same conflict.
+		_, err = run("--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-auth", "--key-conf", keyConf,
+			"--authority-credential", credentialPath)
+		require.ErrorIs(t, err, errBothKeyHolders)
 	})
 	t.Run("a node that is not the authority's is refused", func(t *testing.T) {
 		other := []*types.NodeInfo{{NodeID: "someone-else", SigKey: key, Stake: 1}}

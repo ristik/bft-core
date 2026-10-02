@@ -1,8 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -83,4 +86,51 @@ func reflectMethods(v any) map[string]struct{} {
 		out[t.Method(i).Name] = struct{}{}
 	}
 	return out
+}
+
+// syncBuffer is a log sink the server goroutines and the test can share.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *syncBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
+}
+
+// The possession proof is the authority's only signature outside certification, so every signing is audited, and a refusal is not
+// logged as one.
+func TestASignedHandoffPoPIsLoggedAndARefusalIsNot(t *testing.T) {
+	var sink syncBuffer
+	f := newFixtureWithLog(t, slog.New(slog.NewTextHandler(&sink, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	req := f.popRequest(t)
+	_, err := f.operator.SignHandoffPoP(context.Background(), req)
+	require.NoError(t, err)
+	line := sink.String()
+	require.Contains(t, line, "signed a handoff possession proof")
+	require.Contains(t, line, "node=node-1")
+	require.Contains(t, line, "attempt=3")
+	require.Contains(t, line, "successorEpoch=")
+	require.Contains(t, line, "predecessor=01")
+
+	sink.Reset()
+	req.Domain = "certification"
+	_, err = f.operator.SignHandoffPoP(context.Background(), req)
+	require.ErrorIs(t, err, signingauthority.ErrPoPDomain)
+	require.NotContains(t, sink.String(), "signed a handoff possession proof")
+	require.Contains(t, sink.String(), "refusing a handoff possession proof")
 }
