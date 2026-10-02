@@ -400,3 +400,6 @@ h3_final() {
 h3_step "certify and verify a paid mint under s=3 (epoch-5 trust base, s=3 PDR)" h3_final
 h3_step "aggregators progressed through the whole lane" h3_progress final 8
 echo "H3 acceptance lane: all steps PASSED"
+# A green lane stops what it started too: the joiners' and restored nodes are not known to the devnet's own cleanup, and a process left running
+# keeps the lane's output pipe (and the devnet lock) open long after the last step.
+h3_teardown
