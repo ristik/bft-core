@@ -39,34 +39,20 @@ otherwise; each affected ticket carries an "Amended 2026-10-01" note rather than
   endpoint discovery and liveness are solved by aggregator-go or the payment gateway and are out of scope at this layer. (F8)
 - **New aggregator partitions and shard splits happen only at a BFT Core epoch boundary**, ordered by root consensus and carried by
   the same epoch-boundary handoff record; there is no per-root-node HTTP PUT. The source of a change is an operator (PoA) at
-  launch and later possibly EVM smart contracts (slot auctions and the like); the data structures and flows are prepared now. (H2, H3, F8)
+  launch and later possibly EVM smart contracts (slot auctions and the like); the data structures and flows are to be prepared now. (H2, H3, F8)
 - **Broad F7** (public RPC, SDK, account/storage proofs, permanent-storage service) moves to the bridge track, B5
   ([#66](https://github.com/ristik/bft-core/issues/66)); F7's receipt-complete archive and positive-proof export stay in M2.
 
 ### Trust-assumption disclosure: aggregator shards at launch
 
-With `proof_type` none and a central operator, the root and the certification protocol give the following, and nothing beyond it.
-
-The root **does** guarantee, for an aggregator shard:
-
-- certificates are issued only for the shard configuration ordered by root consensus at an epoch boundary, under the trust base of
-  the certificate's epoch;
-- each certified round carries a request that passed the certification protocol's checks (matching signed requests from the
-  shard's configured validators, round and epoch binding, non-equivocation per round, technical-record rules);
-- the order of certified state transitions per partition and shard, and that a certificate once issued for a round is not replaced.
-
-The root does **not** guarantee:
-
-- that a certified transition is valid under the aggregator's application rules: with no consistency proof the root certifies the
-  transition that was presented, it does not verify it;
-- availability or retention of the data behind a certified state, endpoint discovery, or liveness of the aggregator service;
-- protection against a malicious or compromised operator of a centrally run shard (censoring, reordering inside its own rounds,
-  presenting an incorrect but well-formed transition);
-- any stake backing: aggregator shards are unweighted.
-
-Relying clients trust the aggregator operator for the correctness of transitions, and the root for ordering, configuration binding
-and non-equivocation. Any change (a proof type other than none, decentralized aggregation) is a separate versioned decision with
-its own activation gate.
+The authoritative text, with code references, is in [ADR 0012](../adr/0012-validator-entity-model.md#trust-assumption-disclosure-aggregator-shards-at-launch).
+In short, with `proof_type` none and a central operator the root checks, for each certified aggregator round: signatures from the
+shard's configured keys, a count majority (unweighted, one vote per key) on one input record, continuity with the last certified
+state (previous hash, round, epoch, timestamp), and the binding of the certificate to the configuration installed at genesis or by a
+committed root handoff. It does **not** check the correctness of the state (SMT) transition, which goes through a no-op verifier, or
+the availability of the data behind a certified root; with a centrally run shard the operator holds the configured keys, so the
+quorum attests only that the operator signed. Aggregator shards are unweighted. Relying clients trust the operator for the
+correctness and availability of transitions, and the root for the signature quorum, continuity, ordering and configuration binding.
 
 ## 1. Delivery policy
 
@@ -396,7 +382,7 @@ Every old-quorum signature used for activation is bound to the same agreed bound
 
 **Amended 2026-10-01:** configuration changes, including new aggregator partitions and shard splits, are ordered by root consensus
 and carried by this same epoch-boundary handoff record; REST accepts a proposal but never installs one on a single node. The source
-of a change is an operator (PoA) at launch, later possibly EVM contracts; the data structures and flows are prepared now.
+of a change is an operator (PoA) at launch, later possibly EVM contracts; the data structures and flows are to be prepared now.
 
 ### H3. EVM assignment handoff and acknowledgement
 
@@ -762,6 +748,9 @@ the root inbox and verify retirement remains blocked until evidence executes.
 validator is slashed and a duplicate costs no additional principal. Repeat with a delayed EVM
 and root epoch extension. Root-quorum loss is recorded as a recovery limitation, not success.
 
+**Amended 2026-10-01 (S4, I-track deferred):** the I4-I5 dependency and the "censor the evidence at an EVM leader, then use the
+root inbox" scenario are suspended with the I-track; the rest of the exercise stands. See the open question in section 9.
+
 ## 9. I: bounded forced inclusion
 
 > **Status: DEFERRED (owner decision, 2026-10-01; [ADR 0012](../adr/0012-validator-entity-model.md)). Not deleted.** Forced
@@ -978,9 +967,6 @@ type restrictions, nullifiers, long-history liveness, retries and archival recon
 
 **Accepts when:** M5B blockers are closed and independently generated negative vectors pass.
 An audit of an upstream prover or generic SDK does not replace review of the assembled bridge.
-
-**Amended 2026-10-01 (S4, I-track deferred):** the I4-I5 dependency and the "censor the evidence at an EVM leader, then use the
-root inbox" scenario are suspended with the I-track; the rest of the exercise stands. See the open question in section 9.
 
 ### X4. PoS shadow comparison and long-running fault exercise
 

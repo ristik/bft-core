@@ -36,7 +36,7 @@ roadmap ticket says otherwise, this ADR governs; each affected document carries 
    BFT Core epoch boundary**. Configuration changes are ordered by root consensus, carried by the
    same epoch-boundary handoff record, never by a per-root-node HTTP PUT. At launch the source of a
    change is an operator (PoA); later it may be EVM smart contracts (slot auctions and the like).
-   The data structures and data flows are prepared now.
+   The data structures and data flows are to be prepared now.
 9. **Broad F7** (public account/storage proof export, SDK and RPC) belongs to the bridge track
    (B5, [#66](https://github.com/ristik/bft-core/issues/66)). F7's receipt-complete archive and
    positive-proof export stay in the foundation.
@@ -44,33 +44,67 @@ roadmap ticket says otherwise, this ADR governs; each affected document carries 
 ## Trust-assumption disclosure: aggregator shards at launch
 
 Aggregator partitions run with `proof_type` none and a central operator. The root and the BFT Core
-certification protocol therefore give the following, and nothing beyond it.
+certification protocol therefore give the following, and nothing beyond it. Code references are to
+the integration branch at the time of this ADR.
 
-**The root does guarantee, for an aggregator shard:**
+**What the root checks before it certifies an aggregator round:**
 
-- certificates are issued only for the shard's configuration as ordered by root consensus at an
-  epoch boundary (no per-node configuration drift), under the trust base of the certificate's epoch;
-- each certified round carries a request that satisfied the certification protocol's checks
-  (matching signed requests from the shard's configured validators, round and epoch binding,
-  non-equivocation per round, the technical-record rules);
-- the order of certified state transitions per partition and shard, and that a certificate, once
-  issued for a round, is not replaced by a different one.
+- **Signatures from the configured keys.** Every counted certification request is signed by a key
+  in the shard's installed configuration (`ShardInfo.ValidRequest` in
+  `rootchain/consensus/storage/sharding.go`; `BlockCertificationRequest.IsValid`).
+- **A count majority on one record.** More than half of the configured keys, one vote per key and
+  unweighted (`GetQuorum`), signed the same input record, block size and state size
+  (`IRChangeReq.Verify` in `rootchain/consensus/types/ir_change_request.go`). A key's second,
+  different request in the same round is refused and not counted (`rootchain/request_buffer.go`);
+  it is not recorded as evidence or penalised.
+- **Chain continuity and binding.** The request's previous state hash equals the last certified
+  state hash, its round and epoch equal the last technical record, its timestamp equals the last
+  unicity seal's, and the input record is well formed (a block hash exactly when the state hash
+  changes). Every root validator re-verifies the change request instead of trusting the root
+  leader (`rootchain/consensus/ir_change_req_verifier.go`).
+- **Configuration binding.** The certificate carries the configuration hash the root has installed
+  for the shard and is sealed by the root committee of its epoch. Under the handoff profile that
+  configuration is the genesis one or one activated by a committed root handoff at its boundary
+  (`rootchain/consensus/storage/assignment.go`); a per-node `PUT /api/v1/configurations` is
+  refused (`cli/ubft/cmd/root_node.go`, `rootchain/partitions/orchestration.go`). New aggregator
+  partitions and shard splits are not yet carried by the handoff record (decision 8: to be prepared).
+- **Order.** Each certified state extends the previous certified state of the same partition and
+  shard, so certified states form one chain; a later certificate for the same round only repeats
+  the same input record (repeat UC), never a different state.
 
-**The root does not guarantee:**
+**What the root does not check:**
 
-- that a certified state transition is *valid* for the aggregator's application rules: with no
-  consistency proof the root certifies the transition that was presented, it does not verify it;
-- availability or retention of the data behind a certified state, endpoint discovery, or liveness
-  of the aggregator service (these are solved by aggregator-go or the payment gateway);
-- protection against a malicious or compromised operator of a centrally run shard: censoring,
-  reordering within the operator's own rounds, or presenting an incorrect but well-formed
-  transition are not detected at this layer;
-- any stake backing for the shard: aggregator shards are unweighted.
+- **The correctness of the state transition.** With `proof_type` none the root uses the
+  `NoOpVerifier` (`rootchain/consensus/zkverifier/registry.go`), and `verifyZKProof` returns before
+  reading any proof (`rootchain/node.go`). The root sees only the previous and new state roots, the
+  block hash and the summary; it never sees the SMT leaves or the block. It certifies the transition
+  presented by the signing quorum, it does not verify that the transition is valid under the
+  aggregator's rules.
+- **Data availability.** Nothing at this layer ensures that the data behind a certified root is
+  available or retained; nor endpoint discovery or service liveness (these are solved by
+  aggregator-go or the payment gateway). If no quorum forms, the root issues only a repeat
+  certificate (on a proven no-quorum or after the T2 timeout).
+- **Independence of the signers.** With a centrally run shard the operator holds the configured
+  keys, so the quorum attests only that the operator signed. Censoring, reordering within the
+  operator's own rounds, and an incorrect but well-formed transition are not detected at this
+  layer.
+- **Stake.** Aggregator shards are unweighted; no stake backs their certificates.
 
-Clients that rely on an aggregator shard's certificates therefore trust its operator for
-correctness of the transitions, and the root for ordering, configuration binding and
-non-equivocation. Changing this (a proof type other than none, decentralized aggregation) is a
-separate, versioned decision with its own activation gate.
+Clients that rely on an aggregator shard's certificates therefore trust its operator for the
+correctness and availability of the transitions, and the root for the signature quorum, chain
+continuity, ordering and configuration binding. Changing this (a proof type other than none,
+decentralized aggregation) needs a separate owner decision.
+
+## Open owner questions
+
+These are recorded, not decided, by this ADR:
+
+1. **Disclosure wording.** The trust-assumption disclosure above is derived from the decision text and the
+   certification code, not dictated by the owner; the owner is asked to confirm it.
+2. **What replaces the I-track safeguard.** H7 (the I4 inbox evidence watermark for withdrawal), S4 (the
+   censored-evidence scenario) and X4 (I5) used forced inclusion as a safeguard. What protects them while the
+   I-track is deferred is open, as is whether bridge nullifier non-membership (`appendix-bridging.tex`) is a bridge
+   data-structure check outside decision 5 rather than an EVM absence proof.
 
 ## Consequences
 

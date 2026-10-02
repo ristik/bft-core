@@ -25,8 +25,9 @@ handoff passages of `governance.tex`/`bft.tex` (the assignment changes through t
 2. **Coupled changes.** A validator-set change is one handoff that changes the BFT Core committee and the EVM assignment
    together; an EVM-only rotation is not a supported operation (ADR 0006 as amended, H3 design and runbook).
 3. **Proofs.** Only certified positive execution proofs are required from the EVM; absence proofs are not a requirement and
-   receive no further work (existing code may stay). Bridge-side nullifier non-membership is a separate bridge
-   data-structure check and is not changed here.
+   receive no further work (existing code may stay). Bridge-side nullifier non-membership (`appendix-bridging.tex`) is
+   not changed here; whether it counts as a bridge data-structure check rather than an EVM absence proof is an open owner
+   question (ADR 0012, "Open owner questions").
 4. **Aggregator shards at launch** run centrally with `proof_type` none; the trust-assumption disclosure in ADR 0012 is part
    of this amendment.
 5. **Reconfiguration.** New aggregator partitions and shard splits happen only at a BFT Core epoch boundary, ordered by
