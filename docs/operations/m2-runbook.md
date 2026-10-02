@@ -358,6 +358,12 @@ and full shard configuration, the pinned latest UC/TR/body ID, two configured
 archive replicas, and the surviving authority. Enable `--trust-history-profile-2`
 when the pin follows one or more root handoffs.
 
+**STOP.** `--trust-base` must be the trust base at the genesis root epoch, never
+the current one. Restore replays from block 1 and verifies each missed handoff
+forward from that anchor; a later-epoch trust base is refused before anything is
+built or written (`restore trust anchor is not the genesis root epoch`, naming
+both epochs). The current BodyID stays mandatory in `--trust-body-id`.
+
 ```sh
 build/ubft shard-node restore --home REPLACE_NEW_EMPTY_NODE_HOME --executor engine-api \
   --address REPLACE_SHARD_P2P_MULTIADDRESS --bootnodes REPLACE_CURRENT_ROOT_AND_SHARD_BOOTNODES \
