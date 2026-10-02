@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"testing"
 
@@ -271,4 +272,66 @@ func TestTheArchiveFetchMapsOnlyThePeerNotAllowedRefusal(t *testing.T) {
 		return true
 	})
 	require.True(t, mappedCall, "FetchArchive returns the replica's refusal through handoffArchiveRefusal")
+}
+
+// The follower's OnInstalled closure records a handoff's terminal certificate under the genesis-bound store: the context comes from
+// configuredprogress.TerminalContext with the verified snapshot's configuration for exactly the epoch of the certificate's own technical
+// record, both the authentication and the store use that context, and nothing in the closure rewrites the observation's genesis pin or
+// resolver by hand (the override that stopped validators at the folded s=3 supersession). A unit test of TerminalContext cannot see
+// the call site, so this pins it in the source.
+func TestTheHandoffTerminalCertificateIsRecordedUnderTheTerminalContext(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "shard_node_run.go", nil, 0)
+	require.NoError(t, err)
+	var onInstalled *ast.FuncLit
+	ast.Inspect(file, func(n ast.Node) bool {
+		if kv, ok := n.(*ast.KeyValueExpr); ok {
+			if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "OnInstalled" {
+				onInstalled, _ = kv.Value.(*ast.FuncLit)
+			}
+		}
+		return true
+	})
+	require.NotNil(t, onInstalled, "the follower's OnInstalled closure")
+	src := func(e ast.Expr) string {
+		var b bytes.Buffer
+		require.NoError(t, printer.Fprint(&b, fset, e))
+		return b.String()
+	}
+	var terminalCtx []string
+	var authenticated, prepared []string
+	ast.Inspect(onInstalled, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if sel, ok := lhs.(*ast.SelectorExpr); ok && (sel.Sel.Name == "ShardConfHash" || sel.Sel.Name == "ConfForEpoch") {
+					t.Errorf("OnInstalled assigns %s: the store's genesis pin and resolver are set only by configuredprogress.TerminalContext", src(sel))
+				}
+			}
+			if len(n.Lhs) == 1 && len(n.Rhs) == 1 && src(n.Lhs[0]) == "terminalCtx" {
+				if call, ok := n.Rhs[0].(*ast.CallExpr); ok && src(call.Fun) == "configuredprogress.TerminalContext" {
+					for _, a := range call.Args {
+						terminalCtx = append(terminalCtx, src(a))
+					}
+				}
+			}
+		case *ast.CallExpr:
+			switch src(n.Fun) {
+			case "rootinput.AuthenticateObservationV2":
+				for _, a := range n.Args {
+					authenticated = append(authenticated, src(a))
+				}
+			case "journalStore.PrepareObservation":
+				for _, a := range n.Args {
+					prepared = append(prepared, src(a))
+				}
+			}
+		}
+		return true
+	})
+	require.Equal(t, []string{"journalCtx", "verified.Shard.ShardConfHash", "verified.Shard.TR.Epoch"}, terminalCtx,
+		"the terminal context is the genesis-bound journal context with the snapshot's configuration for the certificate's own shard epoch")
+	require.Equal(t, []string{"ctx", "terminalCtx.Observation", "verified.Shard.UC", "verified.Shard.TR"}, authenticated,
+		"the certificate is authenticated under the terminal context, with the technical record whose epoch the resolver names")
+	require.Equal(t, []string{"ctx", "terminalCtx", "terminal"}, prepared, "the certificate is recorded under the same context")
 }
