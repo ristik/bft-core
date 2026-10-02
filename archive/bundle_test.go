@@ -25,13 +25,13 @@ func TestBundleCustodyAcrossRestartAndContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := []byte("authenticated bundle bytes")
-	if err := store.PutBundle(q, raw); err != nil {
-		t.Fatal(err)
+	if stored, err := store.PutBundle(q, raw, nil); err != nil || !stored {
+		t.Fatal(stored, err)
 	}
-	if err := store.PutBundle(q, raw); err != nil {
-		t.Fatal(err)
+	if stored, err := store.PutBundle(q, raw, nil); err != nil || stored {
+		t.Fatal(stored, err)
 	}
-	if err := store.PutBundle(q, []byte("different")); !errors.Is(err, ErrInvalid) {
+	if _, err := store.PutBundle(q, []byte("different"), nil); !errors.Is(err, ErrBundleConflict) {
 		t.Fatalf("mutable bundle: %v", err)
 	}
 	reopened, err := Open(dir)

@@ -74,7 +74,7 @@ func TestBundlePublisherContinuesAfterOneReplicaFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := local.PutBundle(q, raw); err != nil {
+	if _, err := local.PutBundle(q, raw, nil); err != nil {
 		t.Fatal(err)
 	}
 	remote, err := archive.Open(t.TempDir())

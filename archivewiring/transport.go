@@ -339,7 +339,7 @@ func (s *Server) serveBundle(ctx context.Context, rw io.ReadWriter, op byte, pay
 	if err := s.bundleVerify(ctx, q, raw); err != nil {
 		return fmt.Errorf("%w: %w: %w", ErrVerifier, ErrReplica, err)
 	}
-	if err := s.store.PutBundle(q, raw); err != nil {
+	if _, err := RetainBundle(ctx, s.store, q, raw, s.bundleVerify, s.log); err != nil {
 		return fmt.Errorf("%w: %w", ErrHandler, err)
 	}
 	return typedHandlerError(writeFrame(rw, []byte{1}))
@@ -451,7 +451,9 @@ func FetchBundle(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, q
 	return answer[1:], nil
 }
 
-func PutBundleAndReadBack(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, q archive.BundleRequest, raw []byte, limits Limits) error {
+// PutBundleAndReadBack stores the bundle on the replica and reads it back. The replica may keep a different valid copy of the same handoff
+// (it retains the first it was given), so the read-back must be the same bytes or, when verify is set, the same handoff under verification.
+func PutBundleAndReadBack(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, q archive.BundleRequest, raw []byte, limits Limits, verify BundleVerifier) error {
 	if len(raw) == 0 || len(raw) > archive.MaxBundleBytes {
 		return archive.ErrInvalid
 	}
@@ -471,10 +473,25 @@ func PutBundleAndReadBack(ctx context.Context, host shardnode.EvidenceHost, id p
 		return ErrReplica
 	}
 	got, err := FetchBundle(ctx, host, id, q, limits)
-	if err != nil || !bytes.Equal(got, raw) {
+	if err != nil {
+		return ErrReplica
+	}
+	if !readBackMatches(ctx, q, verify, got, raw) {
 		return ErrReplica
 	}
 	return nil
+}
+
+// readBackMatches: the replica holds the same bytes, or (when it can be verified) the same handoff.
+func readBackMatches(ctx context.Context, q archive.BundleRequest, verify BundleVerifier, got, raw []byte) bool {
+	if bytes.Equal(got, raw) {
+		return true
+	}
+	if verify == nil {
+		return false
+	}
+	same, err := SameBundle(ctx, q, verify, got, raw)
+	return err == nil && same
 }
 
 // PutAndReadBack verifies the exact manifest digest from a separately fetched
