@@ -69,6 +69,7 @@ type Server struct {
 	log          *slog.Logger
 	limits       Limits
 	allowed      map[peer.ID]struct{}
+	authorize    func(peer.ID) bool
 	mu           sync.Mutex
 	pending      int
 	byPeer       map[peer.ID]int
@@ -77,6 +78,10 @@ type Server struct {
 func (s *Server) SetBundleVerifier(v BundleVerifier) { s.bundleVerify = v }
 
 func (s *Server) SetLogger(log *slog.Logger) { s.log = log }
+
+// SetPeerAuthorizer makes the server authorize peers through the given predicate instead of the static set it was built with: the
+// validators of the ACTIVE assignment, which changes at every rotation. Call before Register.
+func (s *Server) SetPeerAuthorizer(allowed func(peer.ID) bool) { s.authorize = allowed }
 
 func NewServer(store *archive.Store, contextValue archive.Context, verify Verifier, allowed []peer.ID, limits Limits) (*Server, error) {
 	if store == nil || verify == nil || !limits.valid() || len(allowed) == 0 {
@@ -107,7 +112,11 @@ func (s *Server) Register(ctx context.Context, host shardnode.EvidenceHost) {
 func (s *Server) reservePending(id peer.ID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.allowed[id]; !ok {
+	if s.authorize != nil {
+		if !s.authorize(id) {
+			return ErrPeerNotAllowed
+		}
+	} else if _, ok := s.allowed[id]; !ok {
 		return ErrPeerNotAllowed
 	}
 	if s.pending >= s.limits.Pending {

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/internal/testutils/handoffbundle"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -110,4 +111,29 @@ func TestVerifyRequiresTheCandidateTheBodyBinds(t *testing.T) {
 	_, err = Verify(stripped, f.Old, f.Partition, f.Shard, f.ConfHash)
 	require.ErrorIs(t, err, ErrBundle)
 	require.NotContains(t, err.Error(), "change record")
+}
+
+// The validator set an assignment bundle installs is the activated successor's; a root-only bundle carries none.
+func TestAssignmentValidatorsAreTheActivatedSuccessorsOrNoneForARootOnlyBundle(t *testing.T) {
+	succ := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, Epoch: 3,
+		Validators: []*types.NodeInfo{{NodeID: "validator-a", SigKey: bytes.Repeat([]byte{2}, 33), Stake: 1}, {NodeID: "validator-b", SigKey: bytes.Repeat([]byte{3}, 33), Stake: 1}}}
+	raw, err := types.Cbor.Marshal(succ)
+	require.NoError(t, err)
+	candidate, err := evmassign.Candidate{Version: evmassign.CandidateVersion, Assignment: raw}.Encode()
+	require.NoError(t, err)
+	f := handoffbundle.New(t)
+	bundle := Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot, Candidate: candidate}
+	epoch, validators, ok, err := AssignmentValidators(bundle)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.EqualValues(t, 3, epoch)
+	require.Equal(t, []string{"validator-a", "validator-b"}, []string{validators[0].NodeID, validators[1].NodeID})
+
+	_, _, ok, err = AssignmentValidators(Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot})
+	require.NoError(t, err)
+	require.False(t, ok, "a root-only handoff leaves the shard's validators unchanged")
+
+	bundle.Candidate = []byte("not a candidate")
+	_, _, _, err = AssignmentValidators(bundle)
+	require.ErrorIs(t, err, ErrBundle)
 }
