@@ -45,7 +45,7 @@ func TestActivationHoldsWhenTheFirstNewEpochRoundsTimeOut(t *testing.T) {
 			require.NoError(t, err)
 			agg := block.ShardState.States[a.key]
 			require.Equal(t, aggHash[:], []byte(agg.ShardConfHash), "and so is the aggregator key replacement")
-			require.ErrorContains(t, agg.Verify(a.oldKey.id, func(abcrypto.Verifier) error { return nil }), "not in the trustbase")
+			require.ErrorIs(t, agg.Verify(a.oldKey.id, func(abcrypto.Verifier) error { return nil }), ErrNodeNotInTrustBase)
 			// the epoch goes on
 			next := f.addSuccessorBlock(t, s, first+1, nil)
 			require.Equal(t, evmHash[:], []byte(next.ShardState.States[f.shard].ShardConfHash))
