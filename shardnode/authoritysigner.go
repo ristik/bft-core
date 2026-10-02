@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/signingauthority"
@@ -103,8 +105,8 @@ recordKeepingSigner is a CertificationSigner whose every signature is admitted b
 signing record: the authority's, which refuses a lower assigned round, refuses different bytes for the
 round it holds, and answers identical bytes with the one response it retained (#105 step 4).
 
-It is sealed on purpose. The method is unexported, so only this package can implement it, and only
-authoritySigner does. A restored Round signs through a signer only if it has this property (see
+It is sealed on purpose. The method is unexported, so only this package can implement it: authoritySigner,
+and DeferredAuthoritySigner by delegation to one (it signs nothing before its key is bound). A restored Round signs through a signer only if it has this property (see
 Round.abstainRestored); a local key, a test double or a wrapper does not have it and cannot claim it.
 What the property does not include, and what each request establishes for itself: that the credential
 is current, that the authority still holds the key of its lifetime, that the request authenticates,
@@ -206,4 +208,84 @@ func cloneRequest(req *certification.BlockCertificationRequest) (*certification.
 		return nil, fmt.Errorf("decoding: %w", err)
 	}
 	return &owned, nil
+}
+
+// ErrAuthorityKeyUnbound is a signing request made before the authority's expected key is known. A deferred signer fails closed: it
+// signs nothing until the key has been bound from a verified source.
+var ErrAuthorityKeyUnbound = errors.New("shardnode: the signing authority's expected key is not bound yet")
+
+// ErrAuthorityKeyConflict is a second, different expected key for a deferred signer that is already bound. The authority's key is fixed
+// for its lifetime, so a verified configuration that names this node with another key is an inconsistency, never a rotation.
+//
+// A joiner whose installed history names it with SEVERAL keys (a later rotation) binds the latest, after the replay; the authority's key is
+// fixed for its lifetime, so a new authority key is a new node identity, not a rebinding.
+var ErrAuthorityKeyConflict = errors.New("shardnode: the signing authority's expected key is already bound to a different key")
+
+/*
+DeferredAuthoritySigner is an authority signer whose expected key is not known when the node starts: a JOINER, whose key appears only
+in a shard configuration the genesis one precedes. The client is provisioned as for NewAuthoritySigner; the expected key is bound later,
+once, from a configuration the node has VERIFIED (the activated assignment of a verified handoff bundle), and never from the authority's
+own answer. Until it is bound the signer refuses every request (ErrAuthorityKeyUnbound); once bound it is exactly NewAuthoritySigner's.
+It keeps the record-keeping property of that signer: the restore readiness and status probes need the client only.
+*/
+type DeferredAuthoritySigner struct {
+	mu     sync.Mutex
+	client SigningAuthorityClient
+	bound  *authoritySigner
+	key    []byte
+}
+
+func NewDeferredAuthoritySigner(client SigningAuthorityClient) (*DeferredAuthoritySigner, error) {
+	if client == nil {
+		return nil, fmt.Errorf("shardnode: no signing authority client")
+	}
+	return &DeferredAuthoritySigner{client: client}, nil
+}
+
+// BindKey fixes the expected key. Binding the same key again is a no-op; a different one is ErrAuthorityKeyConflict.
+func (d *DeferredAuthoritySigner) BindKey(key abcrypto.Verifier) error {
+	if key == nil {
+		return fmt.Errorf("shardnode: no expected signing key for the authority")
+	}
+	raw, err := key.MarshalPublicKey()
+	if err != nil {
+		return fmt.Errorf("shardnode: reading the expected signing key: %w", err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.bound != nil {
+		if !bytes.Equal(d.key, raw) {
+			return ErrAuthorityKeyConflict
+		}
+		return nil
+	}
+	d.bound, d.key = &authoritySigner{client: d.client, authorityKey: key}, bytes.Clone(raw)
+	return nil
+}
+
+// Bound reports whether the expected key has been bound.
+func (d *DeferredAuthoritySigner) Bound() bool { return d.current() != nil }
+
+func (d *DeferredAuthoritySigner) current() *authoritySigner {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.bound
+}
+
+func (d *DeferredAuthoritySigner) signsOnlyWhatAnIndependentRecordAdmits() {}
+
+func (d *DeferredAuthoritySigner) Sign(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord, proposed *certification.BlockCertificationRequest) (*certification.BlockCertificationRequest, error) {
+	s := d.current()
+	if s == nil {
+		return nil, ErrAuthorityKeyUnbound
+	}
+	return s.Sign(ctx, uc, tr, proposed)
+}
+
+func (d *DeferredAuthoritySigner) RestoreReadiness(ctx context.Context, round uint64) error {
+	return (&authoritySigner{client: d.client}).RestoreReadiness(ctx, round)
+}
+
+func (d *DeferredAuthoritySigner) RestoreStatus(ctx context.Context) (signingauthority.Status, error) {
+	return (&authoritySigner{client: d.client}).RestoreStatus(ctx)
 }

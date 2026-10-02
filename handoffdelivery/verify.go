@@ -245,12 +245,23 @@ func AssignmentStepOf(b Bundle, v Verified) (handoff.AssignmentStep, error) {
 // carries one (ok false for a root-only handoff, which leaves the shard's validators unchanged). The candidate is the one the verified
 // successor body binds (Verify checked it), so call this on a verified bundle.
 func AssignmentValidators(b Bundle) (epoch uint64, validators []*types.NodeInfo, ok bool, err error) {
+	activated, ok, err := AssignmentConf(b)
+	if err != nil || !ok {
+		return 0, nil, false, err
+	}
+	return activated.Epoch, activated.Validators, true, nil
+}
+
+// AssignmentConf is the full shard configuration the EVM assignment of a bundle activates (validators, keys, parameters), for a bundle
+// that carries one. Its hash is the NextConfHash Verify checked against the root-certified change record, so call this on a verified
+// bundle and compare the hash with the configuration hash installed for the epoch before relying on any field of it.
+func AssignmentConf(b Bundle) (*types.PartitionDescriptionRecord, bool, error) {
 	if len(b.Candidate) == 0 {
-		return 0, nil, false, nil
+		return nil, false, nil
 	}
 	_, activated, err := evmassign.ActivatedFromPreimage(b.Candidate, b.Proof.Record.ActivationRound)
 	if err != nil {
-		return 0, nil, false, errors.Join(ErrBundle, err)
+		return nil, false, errors.Join(ErrBundle, err)
 	}
-	return activated.Epoch, activated.Validators, true, nil
+	return activated, true, nil
 }

@@ -116,7 +116,7 @@ func TestShardNodeSigningSelection(t *testing.T) {
 	socket := filepath.Join(home, "client.sock")
 
 	t.Run("without authority flags the local key signs, as before", func(t *testing.T) {
-		signing, err := buildCertificationSigning(&shardNodeSigningFlags{}, keyConf, conf)
+		signing, err := buildCertificationSigning(&shardNodeSigningFlags{}, keyConf, conf, false)
 		require.NoError(t, err)
 		require.NotNil(t, signing.local)
 		require.Nil(t, signing.authority)
@@ -125,7 +125,7 @@ func TestShardNodeSigningSelection(t *testing.T) {
 	t.Run("with an authority no local signer is kept", func(t *testing.T) {
 		signing, err := buildCertificationSigning(&shardNodeSigningFlags{
 			SigningAuthoritySocket: socket, SigningAuthorityCredential: credentialPath,
-		}, keyConf, conf)
+		}, keyConf, conf, false)
 		require.NoError(t, err)
 		defer signing.close()
 		require.Nil(t, signing.local, "the round has no local key to fall back to")
@@ -134,7 +134,7 @@ func TestShardNodeSigningSelection(t *testing.T) {
 
 	refused := func(t *testing.T, flags *shardNodeSigningFlags, conf *types.PartitionDescriptionRecord, contains string) {
 		t.Helper()
-		signing, err := buildCertificationSigning(flags, keyConf, conf)
+		signing, err := buildCertificationSigning(flags, keyConf, conf, false)
 		require.ErrorContains(t, err, contains)
 		require.Nil(t, signing)
 	}
@@ -151,6 +151,24 @@ func TestShardNodeSigningSelection(t *testing.T) {
 	t.Run("a configuration that does not name this node", func(t *testing.T) {
 		refused(t, &shardNodeSigningFlags{SigningAuthoritySocket: socket, SigningAuthorityCredential: credentialPath},
 			confNaming("some-other-node", authorityKey), "does not name this node")
+	})
+
+	t.Run("a joiner restoring or restarting with verified history (a configuration that does not name it) gets a signer whose key is bound later", func(t *testing.T) {
+		flags := &shardNodeSigningFlags{SigningAuthoritySocket: socket, SigningAuthorityCredential: credentialPath}
+		signing, err := buildCertificationSigning(flags, keyConf, confNaming("some-other-node", authorityKey), true)
+		require.NoError(t, err)
+		defer signing.close()
+		require.NotNil(t, signing.deferred)
+		require.Nil(t, signing.local, "still no local signer to fall back to")
+		require.Equal(t, nodeID.String(), signing.nodeID)
+		// a node the genesis configuration does name keeps its fixed key, restoring or not
+		named, err := buildCertificationSigning(flags, keyConf, conf, true)
+		require.NoError(t, err)
+		defer named.close()
+		require.Nil(t, named.deferred)
+		// and a plain run with no verified handoff history to derive it from is still refused
+		_, err = buildCertificationSigning(flags, keyConf, confNaming("some-other-node", authorityKey), false)
+		require.ErrorContains(t, err, "does not name this node")
 	})
 
 	t.Run("a configuration naming the key configuration's own signing key", func(t *testing.T) {
@@ -298,9 +316,9 @@ func TestSigningAuthorityDeploymentSequence(t *testing.T) {
 
 	// The shard node's side, built from its own configuration.
 	flags := &shardNodeSigningFlags{SigningAuthoritySocket: clientSocket, SigningAuthorityCredential: clientCredential}
-	_, err = buildCertificationSigning(flags, keyConf, localConf)
+	_, err = buildCertificationSigning(flags, keyConf, localConf, false)
 	require.ErrorContains(t, err, "local signing key")
-	signing, err := buildCertificationSigning(flags, keyConf, conf)
+	signing, err := buildCertificationSigning(flags, keyConf, conf, false)
 	require.NoError(t, err)
 	t.Cleanup(signing.close)
 	require.Nil(t, signing.local)
