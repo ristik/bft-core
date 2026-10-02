@@ -36,6 +36,9 @@ t6_coupled_rotation_s1() {
   H3_REGISTRY=0xff00000000000000000000000000000000000002
   H3_LOOP_MARK=$H3_DIR/loop-mark
   M2_CHAIN_ID=${POST_M2A_CHAIN_ID:-1337}
+  # set before anything that can restore (h3_advance_authorities restores the H3_RESTORE_RESTART validators): anchored at the genesis trust
+  # base, the restore catches up forward through the verified handoffs
+  H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
   H3_RESTORE_RESTART="1"          # the retained validator that is running through `restore` comes back by restoring, not by a plain start
   read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(go run ./scripts/h3slots) || return 1
   cur=$(h3_root_info | jq -r '.epochNumber') || return 1
@@ -54,6 +57,9 @@ t6_coupled_rotation_s1() {
   h3_prepare_coupled "$next" 4 5 || return 1
   h3_spare_authority 5 1 "$next" "trust-base-epoch${next}.json" || return 1
   h3_start_reth 5 || return 1
+  # Test hook (documented, off by default): T6_TEST_FAIL_AFTER_AUTH5=return fails this step, =abort aborts the shell (as an unbound variable
+  # does under set -u), right after the joiner's authority and execution client started: the run must still stop them and exit.
+  case "${T6_TEST_FAIL_AFTER_AUTH5:-}" in return) return 1 ;; abort) exit 1 ;; esac
   h3_retry_handoff "$cur" t6_rotation_attempt || return 1
   echo "T6 coupled rotation: H committed at root epoch $cur"
 
@@ -65,7 +71,6 @@ t6_coupled_rotation_s1() {
   H3_ONLINE="1 2 3 5"
   h3_advance_authorities "$next" 1 1 2 3 || { echo "authority advance to root epoch $next / shard epoch 1 failed" >&2; return 1; }
   h3_enroll_authority 5 1 || { echo "enrolling the evm5 authority failed" >&2; return 1; }
-  H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json   # anchored at the genesis trust base: the restore catches up forward through the verified handoffs
   h3_restore_validator 5 2 || return 1
   for i in $(seq 1 180); do h3_registry_is 1 "$next" && break; sleep 1; done
   h3_registry_is 1 "$next" || { echo "registry did not reach shard epoch 1 / root epoch $next" >&2; return 1; }

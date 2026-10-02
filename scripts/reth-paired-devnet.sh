@@ -135,6 +135,11 @@ cleanup() {
   for i in $(seq 1 "$validators"); do
     stop_pidfile "test-nodes/auth$i/pid" 'ubft signing-authority run'
   done
+  # Lanes that start spare validators (the T6 rotation's evm5/auth5/reth5/root5) own processes beyond $validators; a step that aborts
+  # the shell never reaches its own teardown, and `wait` below would otherwise block on the orphans. Sweep by ownership.
+  for p in $(owned_pids 'ubft signing-authority run|ubft shard-node (run|restore)'); do
+    kill "$p" 2>/dev/null || true
+  done
   for i in $(seq 1 "$validators"); do
     stop_pidfile "test-nodes/reth$i/pid" 'reth.* node' INT
   done

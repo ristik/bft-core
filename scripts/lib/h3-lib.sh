@@ -238,6 +238,9 @@ h3_start_reth() { # spare execution client i, peered with the running ones
 # Restore validator i (fresh home and execution client, identity kept) from a surviving replica's archive, through its surviving authority.
 h3_restore_validator() {
   local i=$1 replica=$2; shift 2
+  # No default: an empty trust base would restore against the wrong anchor. The caller sets it before any path that can restore
+  # (h3_advance_authorities restores the H3_RESTORE_RESTART validators too).
+  [ -n "${H3_RESTORE_TRUST_BASE:-}" ] || { echo "h3_restore_validator $i: H3_RESTORE_TRUST_BASE is not set" >&2; return 1; }
   # The restored node lives in the validator's own home, with the paths a plain start uses (journal, archive store, debug.log), so the
   # lane's later authority-advance restarts (start_one_evm_validator) find it where they expect it. Its stale state is cleared first.
   local evidence="test-nodes/evm$i" bodyID rootBoot bootnodes peers=() p
