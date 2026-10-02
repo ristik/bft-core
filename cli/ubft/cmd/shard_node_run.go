@@ -432,7 +432,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	// How certification requests are signed is decided once, here, before anything is built: with the
 	// key configuration's signing key as before, or through a signing authority when one is configured
 	// (#105). In the second case no local signer is kept or passed to the round.
-	signing, err := buildCertificationSigning(&flags.shardNodeSigningFlags, keyConf, shardConf)
+	signing, err := buildCertificationSigning(&flags.shardNodeSigningFlags, keyConf, shardConf, flags.Restore)
 	if err != nil {
 		return fmt.Errorf("configuring certification signing: %w", err)
 	}
@@ -784,6 +784,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					// activated, so no certificate of the new root epoch can be verifiable while its configuration is still unknown; and
 					// again from every persisted bundle on restart, which rebuilds the set from genesis plus the verified history.
 					if err := installVerifiedAssignment(node, activePeers, bundle, step); err != nil {
+						return err
+					}
+					if err := bindJoinerKey(signing, bundle, step, node.ShardConfForEpoch); err != nil {
 						return err
 					}
 					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR, step)
