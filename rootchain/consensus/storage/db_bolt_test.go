@@ -731,3 +731,27 @@ func TestNewBoltStorage_Sync(t *testing.T) {
 	t.Cleanup(func() { _ = throwaway.Close() })
 	require.True(t, throwaway.db.NoSync, "WithNoSync must disable syncing")
 }
+
+// The canonical checkpoint is kept across a restart and the first copy wins: a second store of a (replayed) commit never replaces it.
+func TestHandoffCheckpointSurvivesRestartAndKeepsTheFirstCopy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "handoff-checkpoint.db")
+	db, err := NewBoltStorage(path, WithNoSync())
+	require.NoError(t, err)
+	got, err := db.HandoffCheckpoint(2)
+	require.NoError(t, err)
+	require.Empty(t, got, "none captured yet")
+	require.NoError(t, db.StoreHandoffCheckpoint(2, []byte("first")))
+	require.NoError(t, db.StoreHandoffCheckpoint(2, []byte("second")), "a replayed capture is a no-op")
+	require.ErrorIs(t, db.StoreHandoffCheckpoint(1, []byte("x")), ErrHandoffRecord, "there is no handoff into epoch 1")
+	require.ErrorIs(t, db.StoreHandoffCheckpoint(3, nil), ErrHandoffRecord)
+	require.NoError(t, db.Close())
+	db, err = NewBoltStorage(path, WithNoSync())
+	require.NoError(t, err)
+	defer db.Close()
+	got, err = db.HandoffCheckpoint(2)
+	require.NoError(t, err)
+	require.Equal(t, []byte("first"), got)
+	other, err := db.HandoffCheckpoint(3)
+	require.NoError(t, err)
+	require.Empty(t, other)
+}

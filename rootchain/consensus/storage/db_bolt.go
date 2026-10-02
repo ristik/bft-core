@@ -31,6 +31,10 @@ var (
 	keyEpochAnchor  = []byte("epochAnchor")
 	keyHandoffBody  = []byte("handoff/body/")
 	keyHandoffProof = []byte("handoff/bundle/")
+	// keyHandoffCheckpoint retains the canonical handoff checkpoint of a successor epoch: the committed block that carries the handoff
+	// commit record, with its commit certificate and everything a bundle needs. The block itself is pruned from the block store once a
+	// later block commits, so this is the only durable copy.
+	keyHandoffCheckpoint = []byte("handoff/checkpoint/")
 	// keyHandoffCandidate retains the verified H3 assignment candidate by the
 	// successor body it authorizes; it is committed-history input for the
 	// derived EVM configuration, never a local schedule.
@@ -111,6 +115,43 @@ func (db BoltDB) HandoffCandidate(id []byte) ([]byte, error) {
 			return ErrHandoffRecord
 		}
 		data = bytes.Clone(b.Get(handoffMetadataKey(keyHandoffCandidate, id)))
+		return nil
+	})
+	return data, err
+}
+
+// StoreHandoffCheckpoint retains the canonical checkpoint of the handoff into successor epoch `epoch`. The first copy is kept: a second
+// store of the same checkpoint (a replayed commit) is a no-op, and a different one is refused.
+func (db BoltDB) StoreHandoffCheckpoint(epoch uint64, data []byte) error {
+	if epoch < 2 || !validHandoffBundleSize(len(data)) {
+		return ErrHandoffRecord
+	}
+	var number [8]byte
+	binary.BigEndian.PutUint64(number[:], epoch)
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return ErrHandoffRecord
+		}
+		key := handoffMetadataKey(keyHandoffCheckpoint, number[:])
+		if existing := b.Get(key); existing != nil {
+			return nil
+		}
+		return b.Put(key, data)
+	})
+}
+
+// HandoffCheckpoint returns the retained canonical checkpoint of the successor epoch, or nil when none was captured.
+func (db BoltDB) HandoffCheckpoint(epoch uint64) ([]byte, error) {
+	var number [8]byte
+	binary.BigEndian.PutUint64(number[:], epoch)
+	var data []byte
+	err := db.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return ErrHandoffRecord
+		}
+		data = bytes.Clone(b.Get(handoffMetadataKey(keyHandoffCheckpoint, number[:])))
 		return nil
 	})
 	return data, err

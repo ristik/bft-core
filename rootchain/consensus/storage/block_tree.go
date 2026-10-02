@@ -2,11 +2,13 @@ package storage
 
 import (
 	"bytes"
+	"cmp"
 	"crypto"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
@@ -430,6 +432,11 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert) ([]*certification.Certif
 	}
 	// update the new root with commit QC info
 	commitNode.data.CommitQc = commitQc
+	// The block that first commits the handoff record is THE checkpoint of that handoff. It is captured here, once, and persisted before
+	// the block becomes the root (a later commit prunes it), so every honest root serves the same one whenever it is asked.
+	if err := bt.captureHandoffCheckpoint(bt.root.data, commitNode.data); err != nil {
+		return nil, persistenceUncertain(err)
+	}
 
 	if err := bt.blocksDB.WriteBlock(commitNode.data, true); err != nil {
 		return nil, persistenceUncertain(err)
@@ -471,37 +478,123 @@ func (bt *BlockTree) CurrentState() (*rcnet.StateMsg, error) {
 	}, nil
 }
 
-// HandoffCheckpoint returns the current committed H (or an unchanged suffix)
-// with a path for its control leaf. The tree lock keeps the snapshot and path
-// from different committed roots from being paired by a concurrent request.
+// handoffCheckpointStore is the optional durable store of canonical handoff checkpoints.
+type handoffCheckpointStore interface {
+	StoreHandoffCheckpoint(epoch uint64, data []byte) error
+	HandoffCheckpoint(epoch uint64) ([]byte, error)
+}
+
+// canonicalCheckpoint is the persisted form: the committed block that carries the handoff record (with its commit certificate, shard
+// entries, control state) and the path of its control leaf. The record is decoded from the control state, never stored twice.
+type canonicalCheckpoint struct {
+	_     struct{} `cbor:",toarray"`
+	Block *rcnet.CommittedBlock
+	Path  *basetypes.UnicityTreeCertificate
+}
+
+// committedRecord is the handoff commit record of a block's control state, when the block's control state is the committed phase.
+func committedRecord(block *ExecutedBlock) (evmroot.OrderedHandoffRecord, bool) {
+	if block == nil || block.ShardState.Control == nil || block.ShardState.Control.Phase != "committed" {
+		return evmroot.OrderedHandoffRecord{}, false
+	}
+	record, err := decodeOrderedRecord(block.ShardState.Control.RecordBytes)
+	if err != nil || record.Kind != "commit" {
+		return evmroot.OrderedHandoffRecord{}, false
+	}
+	return record, true
+}
+
+// captureHandoffCheckpoint persists the checkpoint when `next` is the block that first commits a handoff record: its control state is
+// the committed phase and the old root's is not the same committed handoff.
+func (bt *BlockTree) captureHandoffCheckpoint(old, next *ExecutedBlock) error {
+	record, ok := committedRecord(next)
+	if !ok {
+		return nil
+	}
+	if prior, committed := committedRecord(old); committed && prior.Epoch == record.Epoch && bytes.Equal(old.ShardState.Control.RecordBytes, next.ShardState.Control.RecordBytes) {
+		return nil // the record was committed by an earlier block: that one is the checkpoint
+	}
+	store, ok := bt.blocksDB.(handoffCheckpointStore)
+	if !ok {
+		return nil
+	}
+	head, path, err := checkpointOf(next)
+	if err != nil {
+		return err
+	}
+	raw, err := basetypes.Cbor.Marshal(canonicalCheckpoint{Block: head, Path: path})
+	if err != nil {
+		return fmt.Errorf("encoding the handoff checkpoint: %w", err)
+	}
+	return store.StoreHandoffCheckpoint(record.Epoch+1, raw)
+}
+
+// checkpointOf is the committed block as a handoff checkpoint, with a path for its control leaf.
+func checkpointOf(root *ExecutedBlock) (*rcnet.CommittedBlock, *basetypes.UnicityTreeCertificate, error) {
+	if root == nil || root.CommitQc == nil {
+		return nil, nil, ErrHandoffRecord
+	}
+	if _, ok := committedRecord(root); !ok {
+		return nil, nil, ErrHandoffRecord
+	}
+	tree, _, err := root.ShardState.UnicityTree(crypto.SHA256)
+	if err != nil {
+		return nil, nil, err
+	}
+	path, err := tree.Certificate(evmroot.D4ControlPartition)
+	if err != nil {
+		return nil, nil, err
+	}
+	shards, err := toRecoveryShardInfo(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &rcnet.CommittedBlock{Block: root.BlockData, ShardInfo: shards, Qc: root.Qc,
+		CommitQc: root.CommitQc, Control: root.ShardState.Control}, path, nil
+}
+
+// HandoffCheckpoint returns the canonical checkpoint of the committed handoff: the block that carried the commit record, as captured
+// when it committed, and not whatever the current committed root happens to be (a later empty block would give another, equally valid,
+// checkpoint: a different byte string for the same handoff). The tree lock keeps the current record and the stored checkpoint from
+// different handoffs from being paired.
+//
+// A root whose commit predates the capture (or that learned the committed state by recovery, not by committing it) holds no stored
+// checkpoint and serves the current committed root, as before: valid, but not canonical.
 func (bt *BlockTree) HandoffCheckpoint() (*rcnet.CommittedBlock, *basetypes.UnicityTreeCertificate, evmroot.OrderedHandoffRecord, error) {
 	bt.m.Lock()
 	defer bt.m.Unlock()
 	root := bt.root.data
-	if root == nil || root.ShardState.Control == nil || root.ShardState.Control.Phase != "committed" || root.CommitQc == nil {
+	record, ok := committedRecord(root)
+	if !ok || root.CommitQc == nil {
 		return nil, nil, evmroot.OrderedHandoffRecord{}, ErrHandoffRecord
 	}
-	record, err := decodeOrderedRecord(root.ShardState.Control.RecordBytes)
-	if err != nil || record.Kind != "commit" {
-		return nil, nil, evmroot.OrderedHandoffRecord{}, ErrHandoffRecord
+	if store, ok := bt.blocksDB.(handoffCheckpointStore); ok {
+		raw, err := store.HandoffCheckpoint(record.Epoch + 1)
+		if err != nil {
+			return nil, nil, evmroot.OrderedHandoffRecord{}, err
+		}
+		if len(raw) != 0 {
+			var stored canonicalCheckpoint
+			if err := basetypes.Cbor.Unmarshal(raw, &stored); err != nil || stored.Block == nil || stored.Path == nil || stored.Block.Control == nil ||
+				stored.Block.CommitQc == nil {
+				return nil, nil, evmroot.OrderedHandoffRecord{}, ErrHandoffRecord
+			}
+			if !bytes.Equal(stored.Block.Control.RecordBytes, root.ShardState.Control.RecordBytes) {
+				return nil, nil, evmroot.OrderedHandoffRecord{}, ErrHandoffRecord
+			}
+			return stored.Block, stored.Path, record, nil
+		}
 	}
-	tree, _, err := root.ShardState.UnicityTree(crypto.SHA256)
+	head, path, err := checkpointOf(root)
 	if err != nil {
 		return nil, nil, evmroot.OrderedHandoffRecord{}, err
 	}
-	path, err := tree.Certificate(evmroot.D4ControlPartition)
-	if err != nil {
-		return nil, nil, evmroot.OrderedHandoffRecord{}, err
-	}
-	shards, err := toRecoveryShardInfo(root)
-	if err != nil {
-		return nil, nil, evmroot.OrderedHandoffRecord{}, err
-	}
-	head := &rcnet.CommittedBlock{Block: root.BlockData, ShardInfo: shards, Qc: root.Qc,
-		CommitQc: root.CommitQc, Control: root.ShardState.Control}
 	return head, path, record, nil
 }
 
+// toRecoveryShardInfo lists the block's shard entries in canonical order (partition, then shard): the entries come from a map, and an
+// order that depends on its iteration makes two honest roots serve different bytes for the same state. The root hash does not depend on
+// the order (it is built from the entries by partition and shard).
 func toRecoveryShardInfo(block *ExecutedBlock) ([]rcnet.ShardInfo, error) {
 	si := make([]rcnet.ShardInfo, len(block.ShardState.States))
 	idx := 0
@@ -524,5 +617,11 @@ func toRecoveryShardInfo(block *ExecutedBlock) ([]rcnet.ShardInfo, error) {
 
 		idx++
 	}
+	slices.SortFunc(si, func(a, b rcnet.ShardInfo) int {
+		if a.Partition != b.Partition {
+			return cmp.Compare(a.Partition, b.Partition)
+		}
+		return strings.Compare(string(a.Shard.Key()), string(b.Shard.Key()))
+	})
 	return si, nil
 }
