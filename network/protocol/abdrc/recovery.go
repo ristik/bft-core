@@ -192,7 +192,7 @@ func (sm *StateMsg) VerifyWithAnchor(hashAlgorithm crypto.Hash, tb types.RootTru
 
 func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases, anchor RecoveryAnchorVerifier) error {
 	if sm.CommittedHead == nil {
-		return fmt.Errorf("commit head is nil")
+		return recoveryStateError("commit head is nil")
 	}
 	if err := sm.CommittedHead.IsValid(); err != nil {
 		return fmt.Errorf("invalid commit head: %w", err)
@@ -401,10 +401,10 @@ func (r *CommittedBlock) IsValid() error {
 	}
 
 	if r.Qc == nil {
-		return errors.New("commit head is missing qc certificate")
+		return recoveryStateError("commit head is missing qc certificate")
 	}
 	if r.CommitQc == nil {
-		return errors.New("commit head is missing commit qc certificate")
+		return recoveryStateError("commit head is missing commit qc certificate")
 	}
 	return nil
 }
@@ -444,3 +444,13 @@ func (si *ShardInfo) IsValid() error {
 
 	return nil
 }
+
+// malformedRecoveryState is an ErrRecoveryState refusal whose message is the bare detail, as the checks that predate the sentinel
+// reported it: errors.Is reaches ErrRecoveryState while the text stays unchanged.
+type malformedRecoveryState string
+
+func (e malformedRecoveryState) Error() string { return string(e) }
+
+func (e malformedRecoveryState) Unwrap() error { return ErrRecoveryState }
+
+func recoveryStateError(detail string) error { return malformedRecoveryState(detail) }

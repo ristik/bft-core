@@ -772,11 +772,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				ConfHash: confHash, AnchorEpoch: trustBases[0].GetEpoch(), Directory: flags.ExecutionJournal + ".handoffs", CurrentRoots: currentRoots,
 				ArchiveReplicas: archiveReplicas[:],
 				OnInstalled: func(ctx context.Context, bundle handoffdelivery.Bundle, verified handoffdelivery.Verified) error {
-					if verified.Shard.UC == nil || verified.Shard.UC.InputRecord == nil || verified.Shard.TR == nil || verified.Shard.IR == nil ||
-						!bytes.Equal(verified.Shard.IR.BlockHash, bundle.Proof.Control.FrozenParent) ||
-						!bytes.Equal(verified.Shard.UC.InputRecord.BlockHash, verified.Shard.IR.BlockHash) ||
-						verified.Shard.UC.GetRoundNumber() != verified.Shard.IR.RoundNumber {
-						return errors.New("verified handoff lacks the terminal shard certificate")
+					if err := checkTerminalCertificate(bundle, verified); err != nil {
+						return err
 					}
 					// The terminal certificate belongs to the epoch this handoff ends, whose configuration is the one the
 					// verified snapshot carries (checked against the followed assignment), not the genesis configuration. The store
@@ -951,11 +948,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if err != nil {
 					return err
 				}
-				bodyID, err := historicalTrust.BodyID(uc.GetRootEpoch())
-				if err != nil || !bytes.Equal(pin, bodyID[:]) {
-					return fmt.Errorf("restore trust BodyID differs from verified current history: %v", err)
-				}
-				return nil
+				return checkRestoreTrustBodyID(pin, historicalTrust, uc.GetRootEpoch())
 			}
 			restoreArchive := func(ctx context.Context) error {
 				genesis, genesisErr := executor.GenesisBlock(ctx)
@@ -1593,4 +1586,27 @@ func installVerifiedAssignment(conf shardConfInstaller, peers peerInstaller, bun
 		return err
 	}
 	return installAssignmentPeers(peers, bundle)
+}
+
+// checkTerminalCertificate refuses a verified handoff whose closing shard certificate is absent or does not belong to the frozen
+// parent the handoff proof names, before the successor is installed or activated.
+func checkTerminalCertificate(bundle handoffdelivery.Bundle, verified handoffdelivery.Verified) error {
+	if verified.Shard.UC == nil || verified.Shard.UC.InputRecord == nil || verified.Shard.TR == nil || verified.Shard.IR == nil ||
+		!bytes.Equal(verified.Shard.IR.BlockHash, bundle.Proof.Control.FrozenParent) ||
+		!bytes.Equal(verified.Shard.UC.InputRecord.BlockHash, verified.Shard.IR.BlockHash) ||
+		verified.Shard.UC.GetRoundNumber() != verified.Shard.IR.RoundNumber {
+		return ErrHandoffTerminalCertificate
+	}
+	return nil
+}
+
+// checkRestoreTrustBodyID compares the operator's --trust-body-id pin with the BodyID of the verified current history after catch-up.
+func checkRestoreTrustBodyID(pin []byte, history interface {
+	BodyID(uint64) ([32]byte, error)
+}, epoch uint64) error {
+	bodyID, err := history.BodyID(epoch)
+	if err != nil || !bytes.Equal(pin, bodyID[:]) {
+		return trustBodyIDMismatch(err)
+	}
+	return nil
 }

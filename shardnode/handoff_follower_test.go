@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
@@ -375,4 +376,46 @@ func TestHandoffFollowerCatchUpRejectsOlderArchiveBundleAndFallsThrough(t *testi
 	saved, err := f.load(3)
 	require.NoError(t, err)
 	require.EqualValues(t, 3, saved.Body.Epoch, "an older bundle must not be stored as epoch 3")
+}
+
+// An epoch that no root and no archive replica can serve at all is its own typed refusal, distinct from the replica that says it has not
+// installed the step yet (ErrHandoffPeerNotReady, the only one CatchUp retries), and CatchUp keeps it behind its epoch prefix.
+func TestHandoffFollowerCompleteSourceUnavailabilityIsTyped(t *testing.T) {
+	const message = "handoff follower: epoch 2 unavailable from current roots, old roots and archive replicas"
+	shardPeer := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	newFollower := func(fetchArchive func(context.Context, peer.ID, uint64) (handoffdelivery.Bundle, error)) *HandoffFollower {
+		return &HandoffFollower{Host: shardPeer, History: &followerHistory{old: &types.RootTrustBaseV1{}}, Partition: 8,
+			ConfHash: bytes.Repeat([]byte{5}, 32), AnchorEpoch: 1, Directory: t.TempDir(),
+			ArchiveReplicas: []peer.ID{"archive"}, FetchArchive: fetchArchive,
+			Retry: BundleRetry{Initial: time.Millisecond, Max: time.Millisecond, Total: 50 * time.Millisecond}}
+	}
+
+	t.Run("no source at all", func(t *testing.T) {
+		_, err := newFollower(nil).fetch(context.Background(), 2)
+		require.ErrorIs(t, err, ErrHandoffSourceUnavailable)
+		require.NotErrorIs(t, err, ErrHandoffPeerNotReady)
+		require.EqualError(t, err, message)
+	})
+	t.Run("an archive replica that fails for another reason", func(t *testing.T) {
+		f := newFollower(func(context.Context, peer.ID, uint64) (handoffdelivery.Bundle, error) {
+			return handoffdelivery.Bundle{}, errors.New("replica down")
+		})
+		_, err := f.fetch(context.Background(), 2)
+		require.ErrorIs(t, err, ErrHandoffSourceUnavailable)
+		require.NotErrorIs(t, err, ErrHandoffPeerNotReady)
+	})
+	t.Run("a replica that has not installed the step stays the other class", func(t *testing.T) {
+		f := newFollower(func(context.Context, peer.ID, uint64) (handoffdelivery.Bundle, error) {
+			return handoffdelivery.Bundle{}, ErrHandoffPeerNotReady
+		})
+		_, err := f.fetch(context.Background(), 2)
+		require.ErrorIs(t, err, ErrHandoffPeerNotReady)
+		require.NotErrorIs(t, err, ErrHandoffSourceUnavailable)
+	})
+	t.Run("through CatchUp", func(t *testing.T) {
+		_, err := newFollower(nil).CatchUp(context.Background(), 2)
+		require.ErrorIs(t, err, ErrHandoffSourceUnavailable)
+		require.NotErrorIs(t, err, ErrHandoffPeerNotReady)
+		require.EqualError(t, err, "epoch 2: "+message)
+	})
 }
