@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -208,6 +209,23 @@ func NewConsensusManager(
 	if err != nil {
 		return nil, fmt.Errorf("consensus block storage init failed: %w", err)
 	}
+	// Pin the genesis QC, so that the only round-1 QC a verifier accepts without signatures is this node's own: the QC of the genesis block the
+	// store still holds (its Qc: the CommitQc is replaced when the block is committed, so after QC2 it is a round-2 certificate), else the one the software builds for an empty store (a store that has moved past round 1 no longer holds the block).
+	genesisQC := (*drctypes.QuorumCert)(nil)
+	if b, err := bStore.Block(drctypes.GenesisRootRound); err == nil && b.Qc != nil {
+		genesisQC = b.Qc
+	} else {
+		genesis, err := storage.NewGenesisBlock(orchestration.NetworkID(), crypto.SHA256, cParams.NetworkProfileVersion)
+		if err != nil {
+			return nil, fmt.Errorf("deriving the genesis QC: %w", err)
+		}
+		genesisQC = genesis.CommitQc
+	}
+	pin, err := drctypes.GenesisPinOf(genesisQC)
+	if err != nil {
+		return nil, fmt.Errorf("pinning the genesis QC: %w", err)
+	}
+	trustBaseStore.SetGenesisPin(pin)
 	reqVerifier, err := NewIRChangeReqVerifier(cParams, bStore)
 	if err != nil {
 		return nil, fmt.Errorf("block verifier construct error: %w", err)
@@ -1293,9 +1311,9 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		if x.recoveryHistory == nil {
 			return fmt.Errorf("recovery response verification failed: %w", abdrc.ErrHistoricalTrustBase)
 		}
-		verifyErr = rsp.VerifyWithAnchor(x.params.HashAlgorithm, x.trustBase.Load(), x.recoveryHistory, x.blockStore)
+		verifyErr = rsp.VerifyWithAnchor(x.params.HashAlgorithm, x.trustBase.Load(), x.recoveryHistory, x.blockStore, x.trustBaseStore.GenesisPin())
 	} else {
-		verifyErr = rsp.Verify(x.params.HashAlgorithm, x.trustBase.Load())
+		verifyErr = rsp.Verify(x.params.HashAlgorithm, x.trustBase.Load(), x.trustBaseStore.GenesisPin())
 	}
 	if err := verifyErr; err != nil {
 		return fmt.Errorf("recovery response verification failed: %w", err)

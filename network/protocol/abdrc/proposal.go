@@ -55,7 +55,7 @@ func (x *ProposalMsg) Verify(tbs *trustbase.TrustBaseStore) error {
 	if err != nil {
 		return fmt.Errorf("failed to get trust base for block verification, epoch %d: %w", x.Block.Epoch, err)
 	}
-	if err := x.Block.Verify(tb); err != nil {
+	if err := x.Block.Verify(tb, tbs.GenesisPin()); err != nil {
 		return fmt.Errorf("block verification failed: %w", err)
 	}
 	bb, err := x.Block.Bytes()
