@@ -169,11 +169,19 @@ final export repeats on the production manifest.
 
 **Reviewer notes.** Items (3) to (5) are open questions for the T5 reviewer; this PR resolves none of them. (1) The Go side lists the same 30 names as the artifact (`registryproof.go:143-157`) and the
 same seven-word genesis list as the contract header (`registryproof.go:182`; `SealRegistry.sol:19`). (2) What a reviewer cannot take from
-the contract alone is the execution-client side (the bullet list above), which T5 must assess in ureth. (3) The stale-root-round check (O5, `:211`) runs only on the
-no-transition path; an accepted acknowledgement (`:216-260`) stores `rootRound` (`:276`) without comparing it
-with `clock.rootRound`. The new root epoch must exceed the stored one, so the epoch is monotonic, but the clock
-word's monotonicity on that path rests on the execution client's authenticated input. Open: does T5 confirm that
-rule in ureth, or require the contract to refuse it? (4) Open: `inbox.consumed` is a pinned name without a use in v2
+the contract alone is the execution-client side (the bullet list above), which T5 must assess in ureth. (3) Root round is ordered within a root epoch, not across a handoff.
+The contract's stale-root-round check (O5, `SealRegistry.sol:211`) runs only on the no-transition path; an
+accepted acknowledgement (`:216-260`) stores `rootRound` (`:276`) without comparing it with `clock.rootRound`,
+and requires instead that the new root epoch exceed the stored one (`:221`). This is by design: an adjacent
+root handoff may reset the scalar root round (`rootinput/certificate_order.go:9-18`), so the acknowledgement's
+round, from the new root epoch, can lawfully be below the clock set in the old one, and a `>=` require there
+would reject valid handoffs. The BFT adapter applies the same split: it refuses a root round behind the
+committed cursor except for a pending acknowledgement (`rootinput/v2.go:376-378`). Ureth does not compare the
+root round with the registry clock on any path (it passes `root_round` into `open`,
+`crates/unicity/execution/src/lib.rs:404-430`, at `unicity/main` `b4e7cb0ac`), so the ordering rests on the
+contract's `:211` check and the BFT adapter's check. The acknowledgement's round is authenticated by the new
+epoch's root certificate; the residual risk is a wrong round from a validly signed certificate, which would stall
+the chain until the next epoch, not break safety. No fix is proposed. (4) Open: `inbox.consumed` is a pinned name without a use in v2
 (the source comment at `:100` calls it "genesis-only", yet the genesis has no word for it); is it acceptable as is, or
 should it be removed or documented if the artifact is ever regenerated? (5) Open: `ArtifactSourceV2` (`registrygenesis/artifact.go:18`) names the
 branch commit `8b30801a`, not the merge `ce3e40b4`; the two are byte-identical for the source and the artifact, so
