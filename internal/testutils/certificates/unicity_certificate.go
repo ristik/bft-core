@@ -70,12 +70,18 @@ func CreateUnicityCertificate(
 	}
 }
 
+// SealTimestamp is the round-creation time every test certificate's seal carries. It was the wall clock, and the canonical root input
+// and the signing authority's request digest both commit to it, so two certificates built for the same statement a second apart
+// differed in bytes: a test asserting "identical bytes" or re-admitting "the same request" failed whenever the two builds straddled
+// a second. A test that needs another time sets UnicitySeal.Timestamp itself before signing.
+const SealTimestamp uint64 = 1_700_000_000
+
 func createUnicitySeal(rootHash []byte, roundNumber uint64, previousHash []byte) *types.UnicitySeal {
 	return &types.UnicitySeal{
 		Version:              1,
 		Epoch:                1,
 		RootChainRoundNumber: roundNumber,
-		Timestamp:            types.NewTimestamp(),
+		Timestamp:            SealTimestamp,
 		PreviousHash:         previousHash,
 		Hash:                 rootHash,
 	}
