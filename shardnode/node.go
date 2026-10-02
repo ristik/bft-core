@@ -86,6 +86,9 @@ func New(
 	if err != nil {
 		return nil, fmt.Errorf("creating BFT client: %w", err)
 	}
+	if err := seedInstalledShardConfs(client, clientOpts.InstalledShardConfs); err != nil {
+		return nil, err
+	}
 
 	round := NewRound(peer.ID().String(), partitionID, shardID, executor, disseminator, signer, client, log)
 
@@ -104,7 +107,7 @@ func New(
 			// The trust base comes from the configured store, never from the checkpoint —
 			// the checkpoint names a root epoch, and that name is exactly what is in
 			// question, so an unknown or untrusted epoch must fail rather than be adopted.
-			if err := verifyRestoredLUC(luc, trustBaseStore, partitionID, shardID, shardConfHash); err != nil {
+			if err := verifyRestoredLUCWithConfs(luc, trustBaseStore, partitionID, shardID, client.confs); err != nil {
 				return nil, fmt.Errorf("authenticating persisted certificate (round %d, root round %d): %w",
 					luc.GetRoundNumber(), luc.GetRootRoundNumber(), err)
 			}
@@ -130,11 +133,24 @@ func New(
 			PartitionID:   partitionID,
 			ShardID:       shardID,
 			ShardConfHash: shardConfHash,
+			ShardConfs:    client.confs,
 			TrustBases:    trustBaseStore,
 			Gate:          NewFinalityGate(),
 			Log:           log,
 		},
 	}, nil
+}
+
+// ShardConfForEpoch is the installed shard configuration hash for a shard epoch (false when none is installed): what the configured
+// admission and the journal authenticate a certificate's observation against, so they share this node's set.
+func (n *Node) ShardConfForEpoch(epoch uint64) ([]byte, bool) {
+	return n.client.installedConfForEpoch(epoch)
+}
+
+// InstallShardConf records the shard configuration hash in effect from a shard epoch, from a verified committed assignment step. See
+// BFTClient.InstallShardConf.
+func (n *Node) InstallShardConf(epoch uint64, hash []byte) error {
+	return n.client.InstallShardConf(epoch, hash)
 }
 
 /*
@@ -417,6 +433,43 @@ func verifyRestoredLUC(uc *types.UnicityCertificate, trustBaseStore TrustBaseSto
 		return fmt.Errorf("verifying certificate: %w", err)
 	}
 	return nil
+}
+
+// seedInstalledShardConfs installs the verified assignment steps the caller replayed before building the node, ahead of the check of the
+// persisted certificate.
+func seedInstalledShardConfs(client *BFTClient, installed map[uint64][]byte) error {
+	for epoch, hash := range installed {
+		if err := client.InstallShardConf(epoch, hash); err != nil {
+			return fmt.Errorf("installing verified shard configuration for epoch %d: %w", epoch, err)
+		}
+	}
+	return nil
+}
+
+// ErrRestoredCertificateConf refuses a persisted certificate whose shard configuration is not one this node has installed for the shard
+// epoch its input record names (or a later one): an unknown configuration, or an earlier epoch's configuration at a newer epoch.
+var ErrRestoredCertificateConf = errors.New("persisted certificate's shard configuration is not an installed one for its shard epoch")
+
+// verifyRestoredLUCWithConfs is verifyRestoredLUC against the node's configuration set rather than the genesis hash alone: the
+// persisted certificate may be one of a successor assignment (the node restarted after a rotation). The certificate alone names its
+// shard epoch only through its input record, so its configuration must be that of this epoch or of a later installed one (a
+// successor certified but not yet acknowledged); the configuration of an earlier epoch is refused, and so is any unknown hash.
+func verifyRestoredLUCWithConfs(uc *types.UnicityCertificate, trustBaseStore TrustBaseStore, partitionID types.PartitionID, shardID types.ShardID, confs *ShardConfSet) error {
+	if confs == nil {
+		return errors.New("no shard configuration set configured, so the certificate's shard configuration cannot be checked")
+	}
+	if uc == nil || uc.InputRecord == nil {
+		return errors.New("persisted certificate is incomplete")
+	}
+	// The certificate names its own configuration; it is acceptable only if that is an installed one for this shard epoch (or a later
+	// one), and then it must verify under exactly that hash, so a forged seal stays a forgery and is never reported as a configuration
+	// refusal (nor the other way round).
+	for _, conf := range confs.ForIREpoch(uc.InputRecord.Epoch) {
+		if bytes.Equal(conf, uc.ShardConfHash) {
+			return verifyRestoredLUC(uc, trustBaseStore, partitionID, shardID, conf)
+		}
+	}
+	return fmt.Errorf("%w: the certificate carries %x at shard epoch %d", ErrRestoredCertificateConf, uc.ShardConfHash, uc.InputRecord.Epoch)
 }
 
 // validateShardConfHashWidth rejects malformed local expectations before network work.

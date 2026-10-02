@@ -23,7 +23,11 @@ type AdmissionIdentity struct {
 	PartitionID       types.PartitionID
 	ShardID           types.ShardID
 	FullShardConfHash []byte
-	TrustBases        TrustBaseStore
+	// ConfForEpoch is the client's installed shard configuration for a shard epoch (false when none is installed). FullShardConfHash
+	// stays the deployment's GENESIS identity pin (the factories refuse any other value); ConfForEpoch is what a certificate's
+	// observation is authenticated against, so an installed assignment's certificates are admitted and nothing else is.
+	ConfForEpoch func(shardEpoch uint64) ([]byte, bool)
+	TrustBases   TrustBaseStore
 }
 
 // FinalityBoundary is the narrow gate surface needed by a persistence-before-delivery adapter.
@@ -67,7 +71,7 @@ type CertificateAdmissionFactory interface {
 	Start(context.Context, AdmissionIdentity, FinalityBoundary, AdmissionCallbacks) (CertificateAdmission, error)
 }
 
-func ownAdmissionIdentity(partition types.PartitionID, shard types.ShardID, conf []byte, trust TrustBaseStore) (AdmissionIdentity, error) {
+func ownAdmissionIdentity(partition types.PartitionID, shard types.ShardID, conf []byte, trust TrustBaseStore, confForEpoch func(uint64) ([]byte, bool)) (AdmissionIdentity, error) {
 	text, err := shard.MarshalText()
 	if err != nil {
 		return AdmissionIdentity{}, err
@@ -79,5 +83,5 @@ func ownAdmissionIdentity(partition types.PartitionID, shard types.ShardID, conf
 	if len(conf) == 0 || trust == nil {
 		return AdmissionIdentity{}, fmt.Errorf("%w: incomplete client identity", ErrAdmissionMode)
 	}
-	return AdmissionIdentity{PartitionID: partition, ShardID: ownedShard, FullShardConfHash: bytes.Clone(conf), TrustBases: trust}, nil
+	return AdmissionIdentity{PartitionID: partition, ShardID: ownedShard, FullShardConfHash: bytes.Clone(conf), ConfForEpoch: confForEpoch, TrustBases: trust}, nil
 }

@@ -641,7 +641,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		defer journalStore.Close()
 		recordCtx := certifiedstore.Context{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, FullShardConfHash: confHash, Registry: origin.ProofContext(), TrustBases: trustBaseStore}
-		journalCtx := configuredprogress.Context{Origin: origin, ExecutionConfigV2: executionID, Observation: rootinput.ObservationContextV2{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, ShardConfHash: confHash, RootEpoch: trustBases[0].GetEpoch(), TrustBases: trustBaseStore}, Record: recordCtx}
+		journalCtx := configuredprogress.Context{Origin: origin, ExecutionConfigV2: executionID, Observation: rootinput.ObservationContextV2{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, ShardConfHash: confHash, ConfForEpoch: node.ShardConfForEpoch, RootEpoch: trustBases[0].GetEpoch(), TrustBases: trustBaseStore}, Record: recordCtx}
 		if flags.TrustHistoryProfile2 {
 			journalCtx.Observation.EpochAuthority = historicalTrust
 			journalCtx.Record.EpochAuthority = historicalTrust
@@ -700,7 +700,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				return fmt.Errorf("starting archive replica: %w", e)
 			}
 			if flags.TrustHistoryProfile2 {
-				archiveServer.SetBundleVerifier(archivewiring.BundleAdmission(historicalTrust))
+				archiveServer.SetBundleVerifier(archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch))
 			}
 			archiveServer.SetLogger(flags.observe.Logger())
 			archiveServer.Register(ctx, peer)
@@ -726,6 +726,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					// verified snapshot carries (checked against the followed assignment), not the genesis configuration.
 					terminalCtx := journalCtx
 					terminalCtx.Observation.ShardConfHash = bytes.Clone(verified.Shard.ShardConfHash)
+					terminalCtx.Observation.ConfForEpoch = nil // the verified snapshot's own configuration is the expectation here
 					terminal, err := rootinput.AuthenticateObservationV2(ctx, terminalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
 					if err != nil {
 						return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
@@ -754,6 +755,13 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						Slot: verified.Genesis.Start - 1, StateRoot: verified.Record.StateRoot[:]}
 					step, err := handoffdelivery.AssignmentStepOf(bundle, verified)
 					if err != nil {
+						return err
+					}
+					// The step is verified (the bundle's candidate must replace the checkpoint's installed assignment): it is the only
+					// source of the shard configuration hashes the client will accept per shard epoch. Installed before the handoff is
+					// activated, so no certificate of the new root epoch can be verifiable while its configuration is still unknown; and
+					// again from every persisted bundle on restart, which rebuilds the set from genesis plus the verified history.
+					if err := installAssignmentStepConfs(node, step); err != nil {
 						return err
 					}
 					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR, step)
@@ -939,7 +947,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 			publisher = &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics, ReceiptSource: executor.(*engineapi.Adapter)}
 			if flags.TrustHistoryProfile2 {
-				publisher.BundleVerifier = archivewiring.BundleAdmission(historicalTrust)
+				publisher.BundleVerifier = archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch)
 			}
 			if e := publisher.Validate(); e != nil {
 				_ = metrics.Close()
@@ -1402,4 +1410,22 @@ func loadEngineEpochTransition(path string, oldEpoch uint64) ([]byte, error) {
 		return nil, fmt.Errorf("--engine-epoch-transition starts at epoch %d, configured root trust base is epoch %d", transition.OldRootEpoch, oldEpoch)
 	}
 	return raw, nil
+}
+
+// shardConfInstaller is the node surface a verified assignment step is installed into.
+type shardConfInstaller interface {
+	InstallShardConf(epoch uint64, hash []byte) error
+}
+
+// installAssignmentStepConfs records the shard configuration hashes a VERIFIED assignment step names, the old epoch's before the new
+// epoch's: the only production source of the node's per-epoch configuration set. A contradiction with what is installed is an error
+// (the handoff is not activated).
+func installAssignmentStepConfs(node shardConfInstaller, step handoff.AssignmentStep) error {
+	if err := node.InstallShardConf(step.OldShardEpoch, step.OldActiveConfHash[:]); err != nil {
+		return fmt.Errorf("installing the old shard configuration: %w", err)
+	}
+	if err := node.InstallShardConf(step.NewShardEpoch, step.NewActiveConfHash[:]); err != nil {
+		return fmt.Errorf("installing the new shard configuration: %w", err)
+	}
+	return nil
 }

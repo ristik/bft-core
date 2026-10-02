@@ -319,3 +319,51 @@ func TestEpochGuardsAreAuthenticatedValuesNotConstants(t *testing.T) {
 }
 
 func word(v uint64) common.Hash { return common.BigToHash(new(big.Int).SetUint64(v)) }
+
+// With an epoch resolver the observation is authenticated against exactly the configuration installed for the shard epoch the
+// certificate's technical record names: nothing else, and no fallback to another epoch's hash.
+func TestObservationIsAuthenticatedUnderTheClaimedShardEpochsConfiguration(t *testing.T) {
+	f := newAssignmentFixture(t)
+	p := f.blocks[1]
+	resolver := func(installed map[uint64][32]byte) func(uint64) ([]byte, bool) {
+		return func(epoch uint64) ([]byte, bool) {
+			h, ok := installed[epoch]
+			return bytes.Clone(h[:]), ok
+		}
+	}
+	both := map[uint64][32]byte{0: f.hash[0], 1: f.hash[1]}
+	obs := func(installed map[uint64][32]byte) ObservationContextV2 {
+		c := f.obsContext(2)
+		c.ConfForEpoch = resolver(installed)
+		return c
+	}
+	ir := f.irAt(p, f.blocks[0], 0)
+	tr1 := technicalAt(1, 11)
+	successorUC := f.certify(t, f.pdr[1], ir, tr1, 12, 2) // the successor configuration at shard epoch 1
+
+	t.Run("an epoch with no installed configuration is refused, retryably", func(t *testing.T) {
+		_, err := AuthenticateObservationV2(context.Background(), obs(map[uint64][32]byte{0: f.hash[0]}), successorUC, tr1)
+		require.ErrorIs(t, err, ErrConfEpochUnknown)
+		require.NotErrorIs(t, err, ErrUnauthenticated, "an unknown epoch is not a forgery")
+	})
+	t.Run("the installed epoch's configuration authenticates", func(t *testing.T) {
+		_, err := AuthenticateObservationV2(context.Background(), obs(both), successorUC, tr1)
+		require.NoError(t, err)
+	})
+	t.Run("an older epoch's certificate still authenticates under its own configuration", func(t *testing.T) {
+		tr0 := technicalAt(0, 11)
+		oldUC := f.certify(t, f.pdr[0], ir, tr0, 12, 2)
+		_, err := AuthenticateObservationV2(context.Background(), obs(both), oldUC, tr0)
+		require.NoError(t, err)
+	})
+	t.Run("a certificate claiming epoch 1 with epoch 0's configuration is refused", func(t *testing.T) {
+		stale := f.certify(t, f.pdr[0], ir, tr1, 12, 2)
+		_, err := AuthenticateObservationV2(context.Background(), obs(both), stale, tr1)
+		require.ErrorIs(t, err, ErrUnauthenticated)
+		require.NotErrorIs(t, err, ErrConfEpochUnknown)
+	})
+	t.Run("without a resolver the pinned genesis hash alone still refuses a successor certificate", func(t *testing.T) {
+		_, err := AuthenticateObservationV2(context.Background(), f.obsContext(2), successorUC, tr1)
+		require.ErrorIs(t, err, ErrUnauthenticated)
+	})
+}

@@ -146,7 +146,9 @@ type RecoveryConfig struct {
 	PartitionID   types.PartitionID
 	ShardID       types.ShardID
 	ShardConfHash []byte
-	TrustBases    TrustBaseStore
+	// ShardConfs is the node's configuration set; when set, evidence is judged against it (see AnchorEvidenceContext.ShardConfs).
+	ShardConfs *ShardConfSet
+	TrustBases TrustBaseStore
 
 	Fetcher   EvidenceFetcher
 	Providers ProviderSource
@@ -909,6 +911,7 @@ func (r *EvidenceRequester) verifyContext(held *types.UnicityCertificate) Anchor
 		PartitionID:   r.cfg.PartitionID,
 		ShardID:       r.cfg.ShardID,
 		ShardConfHash: r.cfg.ShardConfHash,
+		ShardConfs:    r.cfg.ShardConfs,
 		TrustBases:    r.cfg.TrustBases,
 		Held:          held,
 	}

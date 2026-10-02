@@ -115,9 +115,12 @@ type RecoveryDeps struct {
 	// to start without it rather than running with a check quietly disabled. It is never taken from a
 	// certificate or a peer: their claim about the configuration is what is in question.
 	ShardConfHash []byte
-	TrustBases    TrustBaseStore
-	Gate          *FinalityGate
-	Log           *slog.Logger
+	// ShardConfs is the node's shard configuration set (genesis plus verified assignments), shared with the certificate client: peer
+	// evidence of a successor assignment is judged against it. Nil keeps the genesis-only expectation.
+	ShardConfs *ShardConfSet
+	TrustBases TrustBaseStore
+	Gate       *FinalityGate
+	Log        *slog.Logger
 }
 
 /*
@@ -176,6 +179,7 @@ func NewRecoveryStack(opts RecoveryOptions, deps RecoveryDeps) (*RecoveryStack, 
 			PartitionID:   deps.PartitionID,
 			ShardID:       deps.ShardID,
 			ShardConfHash: deps.ShardConfHash,
+			ShardConfs:    deps.ShardConfs,
 			TrustBases:    deps.TrustBases,
 			Fetcher:       &transportFetcher{host: deps.Host, limits: opts.Transport},
 			Providers:     opts.Providers,

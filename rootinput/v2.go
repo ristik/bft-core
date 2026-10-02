@@ -124,6 +124,9 @@ func IsUnsupportedObservationV2(err error) bool {
 	return ok
 }
 
+// ErrConfEpochUnknown refuses an observation whose shard epoch has no installed configuration yet.
+var ErrConfEpochUnknown = errors.New("rootinput: no installed shard configuration for the certificate's shard epoch")
+
 // ObservationContextV2 contains only locally configured trust and identity pins.
 type ObservationContextV2 struct {
 	NetworkID     types.NetworkID
@@ -135,6 +138,11 @@ type ObservationContextV2 struct {
 	// Each one is a different shard assignment, never a replacement for the pinned genesis hash,
 	// and DeriveV2 later requires the exact hash the registry and acknowledgement name.
 	AlsoAcceptConfHashes [][]byte
+	// ConfForEpoch, when set, supersedes ShardConfHash and AlsoAcceptConfHashes: the certificate must commit to exactly the
+	// configuration hash installed for the shard epoch its technical record names (which the unicity certificate binds). A shard epoch
+	// with no installed configuration is ErrConfEpochUnknown (retryable once its assignment is installed), never a fallback to
+	// another epoch's hash. The pinned ShardConfHash stays the deployment's genesis identity.
+	ConfForEpoch func(shardEpoch uint64) ([]byte, bool)
 	RootEpoch            uint64
 	TrustBases           TrustBases
 	// EpochAuthority is set only for profile 2. It reports the epoch whose
@@ -218,7 +226,16 @@ func authenticateObservationV2(ctx context.Context, c ObservationContextV2, uc *
 	if tb == nil {
 		return VerifiedObservationV2{}, fmt.Errorf("%w: no local trust base for epoch %d", ErrUnauthenticated, u.GetRootEpoch())
 	}
-	if err = u.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
+	if c.ConfForEpoch != nil {
+		installed, ok := c.ConfForEpoch(t.Epoch)
+		if !ok || len(installed) != 32 {
+			return VerifiedObservationV2{}, fmt.Errorf("%w: shard epoch %d", ErrConfEpochUnknown, t.Epoch)
+		}
+		conf = bytes.Clone(installed)
+		if err = u.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
+			return VerifiedObservationV2{}, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
+		}
+	} else if err = u.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
 		matched := false
 		for _, alt := range c.AlsoAcceptConfHashes {
 			if len(alt) == 32 && !bytes.Equal(alt, conf) && u.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, alt) == nil {
