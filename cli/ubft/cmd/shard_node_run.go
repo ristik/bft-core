@@ -91,6 +91,15 @@ func runProfile2JournalStartup(ctx context.Context, restore, initialize, enable,
 	return nil
 }
 
+// handoffArchiveRefusal names an archive replica's refusal of this node (it has not installed the assignment step that admits it yet)
+// as the follower's retryable sentinel; every other error passes through unchanged.
+func handoffArchiveRefusal(err error) error {
+	if errors.Is(err, archivewiring.ErrPeerNotAllowed) {
+		return fmt.Errorf("%w: %w", shardnode.ErrHandoffPeerNotReady, err)
+	}
+	return err
+}
+
 // runProfile2ArchiveRestore keeps verified handoff installation ahead of
 // archive replay, then repairs any terminal observations saved during catch-up.
 func runProfile2ArchiveRestore(ctx context.Context, catchUp, restore, repair func(context.Context) error) error {
@@ -607,6 +616,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err != nil {
 		return fmt.Errorf("deriving the shard peers: %w", err)
 	}
+	if flags.TrustHistoryProfile2 && flags.ExecutionJournal != "" {
+		// The archive server authorizes peers from this set. It is created from the genesis validators and rebuilt from the persisted
+		// verified assignment steps further down (handoff follower Restore, or CatchUp for a restoring node); until that is done it
+		// authorizes nobody instead of a genesis set that a persisted step may have retired. Released right after the replay.
+		activePeers.Hold()
+	}
 	node, err := shardnode.New(
 		peer,
 		shardNet,
@@ -800,6 +815,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if archiveLocal != nil {
 				handoffFollower.FetchArchive = func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (handoffdelivery.Bundle, error) {
 					raw, err := archivewiring.FetchBundle(ctx, archiveHost, id, archive.BundleRequest{Context: archiveSubject, Epoch: epoch}, archiveTransportLimits)
+					err = handoffArchiveRefusal(err)
 					var bundle handoffdelivery.Bundle
 					if err == nil {
 						bundle, err = handoffdelivery.DecodeBundle(raw)
@@ -833,6 +849,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			flags.observe.Logger().Error("profile2 handoff terminal repair failed", "error", startupErr)
 			return startupErr
 		}
+		if flags.TrustHistoryProfile2 && !flags.Restore {
+			// The persisted verified steps are replayed into the set (OnInstalled): serving may start with the rebuilt set.
+			activePeers.Release()
+		}
 		if archiveLocal != nil && flags.ArchivePrune {
 			policy := frontier.Policy{Context: archiveSubject, Replicas: [2]string{archiveReplicas[0].String(), archiveReplicas[1].String()}, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
 			if e := journalStore.EnableFrontier(ctx, journalCtx, limits, policy); e != nil {
@@ -853,6 +873,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if _, err := handoffFollower.CatchUp(ctx, uc.GetRootEpoch()); err != nil {
 						return err
 					}
+					// Every step up to the pinned epoch is verified and installed: the set is rebuilt.
+					activePeers.Release()
 					pin, err := hexToHash(flags.RestoreTrustBodyID)
 					if err != nil {
 						return err

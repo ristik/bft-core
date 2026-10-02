@@ -12,6 +12,9 @@ import (
 // ErrActivePeersConflict refuses to install a different validator set for a shard epoch that already has one.
 var ErrActivePeersConflict = errors.New("shardnode: a different validator set is already installed for this shard epoch")
 
+// ErrActivePeersInvalid refuses a validator set that cannot be a peer set (a nil validator or a node id that is not a peer id).
+var ErrActivePeersInvalid = errors.New("shardnode: invalid validator for the active peer set")
+
 // ActivePeers is the set of validator peers this node serves and talks to: the validators of the ACTIVE shard assignment, seeded with
 // the genesis set and replaced only from verified committed assignment steps, in the same install path as ShardConfSet. A joiner is a
 // peer from the moment its assignment is installed (it must be able to restore from the archive before it can acknowledge); a retired
@@ -21,6 +24,10 @@ type ActivePeers struct {
 	self  peer.ID
 	epoch uint64
 	set   map[peer.ID]struct{}
+	// held is set from process start until the persisted verified assignment steps have been replayed into the set: until then the set
+	// is only the genesis one, which may still name a validator that a later step retired. A held set authorizes nobody (a peer refused
+	// in that window retries; see archivewiring.ErrPeerNotAllowed) rather than authorizing a stale set.
+	held bool
 }
 
 // NewActivePeers starts with the genesis validators as the shard epoch 0 set.
@@ -38,11 +45,11 @@ func peerSet(self peer.ID, validators []*types.NodeInfo) (map[peer.ID]struct{}, 
 	set := make(map[peer.ID]struct{}, len(validators))
 	for _, v := range validators {
 		if v == nil {
-			return nil, errors.New("shardnode: nil validator")
+			return nil, fmt.Errorf("%w: nil validator", ErrActivePeersInvalid)
 		}
 		id, err := peer.Decode(v.NodeID)
 		if err != nil {
-			return nil, fmt.Errorf("shardnode: invalid validator node id %q: %w", v.NodeID, err)
+			return nil, fmt.Errorf("%w: node id %q: %v", ErrActivePeersInvalid, v.NodeID, err)
 		}
 		if id != self {
 			set[id] = struct{}{}
@@ -86,10 +93,29 @@ func sameSet(a, b map[peer.ID]struct{}) bool {
 	return true
 }
 
-// Allowed reports whether the peer is a validator of the active assignment (never this node itself).
+// Hold makes Allowed refuse every peer until Release. A node that replays persisted assignment steps at startup holds the set from
+// construction, so that the genesis set is never used to authorize a peer after a restart that had installed a later step.
+func (a *ActivePeers) Hold() {
+	a.mu.Lock()
+	a.held = true
+	a.mu.Unlock()
+}
+
+// Release ends the hold: the set now reflects every verified step that was replayed.
+func (a *ActivePeers) Release() {
+	a.mu.Lock()
+	a.held = false
+	a.mu.Unlock()
+}
+
+// Allowed reports whether the peer is a validator of the active assignment (never this node itself), and false for everyone while the
+// set is held.
 func (a *ActivePeers) Allowed(id peer.ID) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	if a.held {
+		return false
+	}
 	_, ok := a.set[id]
 	return ok
 }

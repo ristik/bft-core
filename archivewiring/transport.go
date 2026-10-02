@@ -161,6 +161,14 @@ func (s *Server) handle(stream libp2pnetwork.Stream) {
 	id := stream.Conn().RemotePeer()
 	_ = stream.SetDeadline(time.Now().Add(s.limits.Deadline))
 	if err := s.reservePending(id); err != nil {
+		if errors.Is(err, ErrPeerNotAllowed) {
+			// A peer this node does not (yet) authorize is told so, by name, without reading its request: a joiner that reached
+			// a retained validator before the validator installed the assignment step that admits it can then retry exactly this
+			// refusal (shardnode.ErrHandoffPeerNotReady) instead of seeing a bare reset. Only the fixed two-byte reset frame is
+			// written, and the stream is closed, not reset, so the frame is delivered.
+			s.rejectNamed(stream, id, err)
+			return
+		}
 		s.reject(stream, id, "unknown", err, false)
 		return
 	}
@@ -207,6 +215,19 @@ func (s *Server) reject(stream libp2pnetwork.Stream, id peer.ID, operation strin
 		}
 	}
 	_ = stream.Reset()
+}
+
+// rejectNamed is reject for a peer refused before its request is read: it logs like reject, writes the typed reset frame and leaves the
+// close to the caller's deferred stream.Close, which delivers the frame (a Reset would discard it).
+func (s *Server) rejectNamed(stream libp2pnetwork.Stream, id peer.ID, err error) {
+	log := s.log
+	if log == nil {
+		log = slog.Default()
+	}
+	log.WarnContext(context.Background(), "archive stream reset", "peer", id.String(), "operation", "unknown", "reason", resetReasonName(err), "error", err)
+	if writeFrame(stream, resetFrame(err)) != nil {
+		_ = stream.Reset()
+	}
 }
 
 // Serve handles one exchange. The frame cap is checked before allocation or

@@ -393,3 +393,43 @@ func TestArchiveAdmissionFollowsThePeerAuthorizer(t *testing.T) {
 		t.Fatalf("a retired peer: %v", err)
 	}
 }
+
+// A peer the replica does not (yet) authorize is told so by name, over the real transport and without its request being read: the
+// client sees a StreamResetError carrying ErrPeerNotAllowed (not a bare reset), for fetches and for bundle fetches alike, and is served
+// as soon as the authorizer admits it.
+func TestAnUnauthorizedPeerIsRefusedByNameAndServedOnceAdmitted(t *testing.T) {
+	t.Parallel()
+	q, rec := transportFixture()
+	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	remote := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	sender.Network().Peerstore().AddAddrs(remote.ID(), remote.MultiAddresses(), peerstore.PermanentAddrTTL)
+	store, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(q, rec); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(store, q.Context, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{sender.ID()}, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var admitted atomic.Bool
+	server.SetPeerAuthorizer(func(peer.ID) bool { return admitted.Load() })
+	server.Register(context.Background(), remote)
+
+	_, err = Fetch(context.Background(), sender, remote.ID(), q, DefaultLimits())
+	var reset *StreamResetError
+	if !errors.Is(err, ErrPeerNotAllowed) || !errors.As(err, &reset) {
+		t.Fatalf("a not yet admitted peer must be refused by name, got: %v", err)
+	}
+	_, err = FetchBundle(context.Background(), sender, remote.ID(), archive.BundleRequest{Context: q.Context, Epoch: 2}, DefaultLimits())
+	if !errors.Is(err, ErrPeerNotAllowed) {
+		t.Fatalf("bundle fetch of a not yet admitted peer: %v", err)
+	}
+	admitted.Store(true)
+	got, err := Fetch(context.Background(), sender, remote.ID(), q, DefaultLimits())
+	if err != nil || !equalRecord(q, rec, got) {
+		t.Fatalf("an admitted peer is served: %v", err)
+	}
+}

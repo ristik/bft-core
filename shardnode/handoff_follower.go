@@ -13,6 +13,24 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
+// ErrHandoffPeerNotReady is the refusal of an archive replica that would serve a handoff bundle but does not yet authorize this node:
+// the retained validator has not installed the assignment step that admits a joiner (the joiner's restore reached it first). It is
+// the only refusal CatchUp retries; the caller maps its transport's refusal onto it (the archive wiring's ErrPeerNotAllowed).
+var ErrHandoffPeerNotReady = errors.New("handoff follower: an archive replica has not installed the assignment step that admits this node yet")
+
+// BundleRetry bounds the wait of CatchUp for a replica that refuses with ErrHandoffPeerNotReady: exponential backoff from Initial to
+// Max, giving up after Total with an error that wraps the sentinel. The zero value is DefaultBundleRetry. (The same shape as the
+// archive restore's FetchRetry, which lives in archivewiring and cannot be imported here.)
+type BundleRetry struct {
+	Initial time.Duration
+	Max     time.Duration
+	Total   time.Duration
+}
+
+// DefaultBundleRetry waits up to 90 s: a retained validator polls the roots every second, so it installs a step within seconds of the
+// bundle being served.
+var DefaultBundleRetry = BundleRetry{Initial: 200 * time.Millisecond, Max: 5 * time.Second, Total: 90 * time.Second}
+
 // HandoffFollower fetches the next committed proof and full checkpoint from
 // current root peers, old root peers, then configured archive replicas.
 // Old peers are chosen from verified trust history;
@@ -29,6 +47,8 @@ type HandoffFollower struct {
 	CurrentRoots    []peer.ID
 	ArchiveReplicas []peer.ID
 	FetchArchive    func(context.Context, peer.ID, uint64) (handoffdelivery.Bundle, error)
+	// Retry bounds CatchUp's wait for archive replicas that have not installed the assignment step yet (zero: DefaultBundleRetry).
+	Retry BundleRetry
 
 	// active is the shard configuration hash the root certifies at the epoch being followed: ConfHash (the genesis
 	// configuration) until a verified EVM assignment step activates another. Every handoff snapshot is checked against
@@ -176,8 +196,12 @@ func (f *HandoffFollower) fetch(ctx context.Context, epoch uint64) (handoffdeliv
 	if err != nil {
 		return handoffdelivery.Bundle{}, err
 	}
+	notReady := false
 	try := func(id peer.ID, request func(context.Context, peer.ID, uint64) (handoffdelivery.Bundle, error)) (handoffdelivery.Bundle, bool) {
 		bundle, err := request(ctx, id, epoch)
+		if errors.Is(err, ErrHandoffPeerNotReady) {
+			notReady = true
+		}
 		if err == nil && bundle.Body.Epoch == epoch && bundle.Proof.Record.Epoch+1 == epoch {
 			_, err = f.History.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.expected())
 		} else {
@@ -212,7 +236,40 @@ func (f *HandoffFollower) fetch(ctx context.Context, epoch uint64) (handoffdeliv
 			}
 		}
 	}
+	if notReady {
+		return handoffdelivery.Bundle{}, fmt.Errorf("%w: epoch %d is unavailable from current roots and old roots, and an archive replica refused it", ErrHandoffPeerNotReady, epoch)
+	}
 	return handoffdelivery.Bundle{}, fmt.Errorf("handoff follower: epoch %d unavailable from current roots, old roots and archive replicas", epoch)
+}
+
+// fetchWithRetry is fetch for CatchUp: a refusal that says the replica has not installed the assignment step yet is retried with
+// bounded backoff; every other failure is returned at once, as before.
+func (f *HandoffFollower) fetchWithRetry(ctx context.Context, epoch uint64) (handoffdelivery.Bundle, error) {
+	policy := f.Retry
+	if policy == (BundleRetry{}) {
+		policy = DefaultBundleRetry
+	}
+	started := time.Now()
+	delay := policy.Initial
+	for attempt := 1; ; attempt++ {
+		bundle, err := f.fetch(ctx, epoch)
+		if err == nil || !errors.Is(err, ErrHandoffPeerNotReady) {
+			return bundle, err
+		}
+		remaining := policy.Total - time.Since(started)
+		if remaining <= 0 {
+			return handoffdelivery.Bundle{}, fmt.Errorf("%w: epoch %d still refused after %d attempts over %s: the retained validators have not installed the assignment step that admits this node (start joiners after the retained validators have activated, or rerun the restore on a fresh archive directory)",
+				ErrHandoffPeerNotReady, epoch, attempt, policy.Total)
+		}
+		timer := time.NewTimer(min(delay, remaining))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return handoffdelivery.Bundle{}, ctx.Err()
+		case <-timer.C:
+		}
+		delay = min(delay*2, policy.Max)
+	}
 }
 
 // CatchUp walks every pinned boundary before an empty-disk restore begins.
@@ -228,7 +285,7 @@ func (f *HandoffFollower) CatchUp(ctx context.Context, target uint64) (map[uint6
 		bundle, err := f.load(epoch)
 		fetched := errors.Is(err, os.ErrNotExist)
 		if fetched {
-			bundle, err = f.fetch(ctx, epoch)
+			bundle, err = f.fetchWithRetry(ctx, epoch)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("epoch %d: %w", epoch, err)

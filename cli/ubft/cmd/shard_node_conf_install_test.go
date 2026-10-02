@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	crand "crypto/rand"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -13,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/archivewiring"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
@@ -159,4 +162,113 @@ func TestTheOnInstalledPathAndTheArchiveServerAreWiredToTheActiveSet(t *testing.
 	require.NotNil(t, onInstalled, "the follower's OnInstalled closure")
 	require.True(t, calls(onInstalled)["installVerifiedAssignment"], "OnInstalled installs the verified assignment's configuration and validator set")
 	require.True(t, calls(file)["SetPeerAuthorizer"], "the archive server authorizes peers through the active assignment's validators")
+}
+
+// After a restart the archive server must not authorize peers from the genesis set while the persisted verified assignment steps are
+// still being replayed: the set is held from its creation (before the server is registered) and released only after the replay, at the
+// end of the startup for a restarting node and after CatchUp for a restoring one.
+func TestTheActivePeerSetIsHeldUntilThePersistedStepsAreReplayed(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "shard_node_run.go", nil, 0)
+	require.NoError(t, err)
+	type site struct {
+		pos  token.Pos
+		root string
+	}
+	var holds, releases, registers, startups, catchUps []site
+	var catchUpFunc *ast.FuncLit
+	ast.Inspect(file, func(n ast.Node) bool {
+		if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 {
+			if id, ok := as.Lhs[0].(*ast.Ident); ok && id.Name == "catchUpHistory" && len(as.Rhs) == 1 {
+				if fl, ok := as.Rhs[0].(*ast.FuncLit); ok {
+					catchUpFunc = fl
+				}
+			}
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fn := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			recv := ""
+			if id, ok := fn.X.(*ast.Ident); ok {
+				recv = id.Name
+			}
+			switch {
+			case recv == "activePeers" && fn.Sel.Name == "Hold":
+				holds = append(holds, site{call.Pos(), recv})
+			case recv == "activePeers" && fn.Sel.Name == "Release":
+				releases = append(releases, site{call.Pos(), recv})
+			case recv == "archiveServer" && fn.Sel.Name == "Register":
+				registers = append(registers, site{call.Pos(), recv})
+			case fn.Sel.Name == "CatchUp":
+				catchUps = append(catchUps, site{call.Pos(), recv})
+			}
+		case *ast.Ident:
+			if fn.Name == "runProfile2JournalStartup" {
+				startups = append(startups, site{call.Pos(), fn.Name})
+			}
+		}
+		return true
+	})
+	require.Len(t, holds, 1, "the peer set is held once, at its creation")
+	require.Len(t, registers, 1)
+	require.Len(t, startups, 1)
+	require.Len(t, catchUps, 1)
+	require.Len(t, releases, 2, "released after the startup replay (restart) and after CatchUp (restore), and nowhere else")
+	require.Less(t, holds[0].pos, registers[0].pos, "held before the archive server is registered")
+	require.NotNil(t, catchUpFunc, "the restore's catchUpHistory closure")
+	var afterStartup, afterCatchUp bool
+	for _, r := range releases {
+		if r.pos > startups[0].pos {
+			afterStartup = afterStartup || (catchUpFunc.Pos() > r.pos || catchUpFunc.End() < r.pos)
+		}
+		if r.pos >= catchUpFunc.Pos() && r.pos <= catchUpFunc.End() {
+			afterCatchUp = true
+			require.Greater(t, r.pos, catchUps[0].pos, "released after CatchUp has installed every step")
+		}
+	}
+	require.True(t, afterStartup, "a release after runProfile2JournalStartup")
+	require.True(t, afterCatchUp, "a release inside the restore's catch-up closure")
+}
+
+// The follower's archive fetch names exactly the replica's "not admitted yet" refusal as the retryable sentinel and leaves every other
+// error alone, and the follower is wired through that mapping.
+func TestTheArchiveFetchMapsOnlyThePeerNotAllowedRefusal(t *testing.T) {
+	refused := fmt.Errorf("fetching: %w", archivewiring.ErrPeerNotAllowed)
+	mapped := handoffArchiveRefusal(refused)
+	require.ErrorIs(t, mapped, shardnode.ErrHandoffPeerNotReady)
+	require.ErrorIs(t, mapped, archivewiring.ErrPeerNotAllowed, "the cause stays reachable")
+	for _, other := range []error{archivewiring.ErrPendingLimit, archivewiring.ErrTransport, archivewiring.ErrReplica, errors.New("boom")} {
+		require.NotErrorIs(t, handoffArchiveRefusal(other), shardnode.ErrHandoffPeerNotReady, "%v is not retried by the catch-up", other)
+	}
+	require.NoError(t, handoffArchiveRefusal(nil))
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "shard_node_run.go", nil, 0)
+	require.NoError(t, err)
+	var fetchArchive *ast.FuncLit
+	ast.Inspect(file, func(n ast.Node) bool {
+		if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 && len(as.Rhs) == 1 {
+			// the follower's closure (the journal coordinator has a FetchArchive of its own)
+			if sel, ok := as.Lhs[0].(*ast.SelectorExpr); ok && sel.Sel.Name == "FetchArchive" {
+				if recv, ok := sel.X.(*ast.Ident); ok && recv.Name == "handoffFollower" {
+					fetchArchive, _ = as.Rhs[0].(*ast.FuncLit)
+				}
+			}
+		}
+		return true
+	})
+	require.NotNil(t, fetchArchive, "the follower's FetchArchive closure")
+	mappedCall := false
+	ast.Inspect(fetchArchive, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "handoffArchiveRefusal" {
+				mappedCall = true
+			}
+		}
+		return true
+	})
+	require.True(t, mappedCall, "FetchArchive returns the replica's refusal through handoffArchiveRefusal")
 }
