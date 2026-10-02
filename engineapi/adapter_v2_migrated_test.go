@@ -218,9 +218,8 @@ func TestAdapterV2BuildKeepsRootInputRefusalClassesDistinct(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			verifier, params, _ := bootstrapAdapterFixture(t)
-			v := *verifier
-			tc.mutate(&v, &params)
-			a := NewAdapter(Config{EngineURL: "http://127.0.0.1:1", EthURL: "http://127.0.0.1:1", Verifier: &v}, nil)
+			tc.mutate(verifier, &params)
+			a := NewAdapter(Config{EngineURL: "http://127.0.0.1:1", EthURL: "http://127.0.0.1:1", Verifier: verifier}, nil)
 			_, err := a.Build(context.Background(), params)
 			require.ErrorIs(t, err, tc.want, "the refusal must arrive as its own class")
 			require.NotErrorIs(t, err, tc.notWant, "and must not be collapsed into another class")

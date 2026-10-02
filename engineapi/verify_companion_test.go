@@ -9,7 +9,6 @@ package engineapi
 // have derived and shows it differs.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -115,29 +114,6 @@ func blockFromEnvelope(t *testing.T, envelope ProposalEnvelope) shardnode.Block 
 	return shardnode.Block{Raw: raw}
 }
 
-// 5. A payload whose extraData does not match the recomputed commitment is rejected, and the
-// rejection is local: reth is never asked to execute it.
-func TestAdapter_Verify_RejectsExtraDataThatDoesNotMatchTheRecomputedCommitment(t *testing.T) {
-	t.Skip("U5d: v1 adapter fixture awaits migration to the RPC parent witness; v2 bootstrap is covered by adapter_v2_test.go")
-	h := newCompanionHarness(t, CursorNotActivated())
-	defer h.close()
-
-	uc, tr := h.f.cert(t, 4, 5, 50)
-	parent := shardnode.BlockRef{Number: 4, Hash: shardnode.Hash(fixedHashBytes(0x01))}
-	params := paramsFor(parent, uc, tr)
-	envelope, derived := companionEnvelope(t, h.f, params, uc, tr)
-
-	// The header claims a commitment other than the one this node derives. It is a well-formed
-	// 32-byte value, so nothing about its shape gives it away.
-	envelope.ExecutionPayload.ExtraData = bytes.Repeat([]byte{0x00}, 32)
-	require.NotEqual(t, derived.Commitment[:], envelope.ExecutionPayload.ExtraData)
-
-	status, err := h.adapter.Verify(context.Background(), blockFromEnvelope(t, envelope), params)
-	require.ErrorIs(t, err, ErrCompanionCommitment, "the mismatch must be reported as itself")
-	require.Equal(t, shardnode.StatusInvalid, status)
-	require.Zero(t, h.sealCalls, "a wrong commitment must be refused before reth sees the payload")
-}
-
 // 6. Refusals stay distinct across the companion boundary: each rootinput class still arrives at the
 // call site as itself (F2c §10 negative 6 / §8). Each case reaches Adapter.Verify with otherwise-valid
 // bytes and differs only in one field, so the class it reports is the field's — ErrUnauthenticated
@@ -212,47 +188,6 @@ func TestAdapter_Verify_RefusalClassesStayDistinctAcrossTheCompanionBoundary(t *
 			require.Zero(t, h.sealCalls, "a refused companion must never reach reth")
 		})
 	}
-}
-
-// 7. Asymmetric delivery agrees. Node B holds a later valid repeat the proposer did not bind; node A
-// holds only the bound certificate. Both validate the binding, so both accept and derive the same
-// commitment. The test also derives from B's own certificate and shows the commitment differs, which
-// is what re-selecting would have produced — so the test is capable of failing.
-func TestAdapter_Verify_AsymmetricDeliveryAgreesOnTheBlockBoundCertificate(t *testing.T) {
-	t.Skip("U5d: v1 adapter fixture awaits migration to the RPC parent witness; v2 bootstrap is covered by adapter_v2_test.go")
-	ctx := context.Background()
-	h := newCompanionHarness(t, CursorNotActivated())
-	defer h.close()
-
-	bound, boundTR := h.f.cert(t, 4, 5, 50)
-	repeat, repeatTR := h.f.cert(t, 4, 5, 60) // same input record and technical record, later root round
-	require.NotEqual(t, bound.UnicitySeal.RootChainRoundNumber, repeat.UnicitySeal.RootChainRoundNumber)
-
-	parent := shardnode.BlockRef{Number: 4, Hash: shardnode.Hash(fixedHashBytes(0x01))}
-	// The block the leader disseminated is bound to `bound`, whichever certificate each follower
-	// happens to hold.
-	leaderParams := paramsFor(parent, bound, boundTR)
-	envelope, derived := companionEnvelope(t, h.f, leaderParams, bound, boundTR)
-	block := blockFromEnvelope(t, envelope)
-
-	nodeAParams := paramsFor(parent, bound, boundTR)
-	nodeBParams := paramsFor(parent, repeat, repeatTR) // node B's own view
-
-	statusA, err := h.adapter.Verify(ctx, block, nodeAParams)
-	require.NoError(t, err)
-	require.Equal(t, shardnode.StatusValid, statusA)
-
-	statusB, err := h.adapter.Verify(ctx, block, nodeBParams)
-	require.NoError(t, err, "node B accepts the same block even though its own inbox holds the repeat")
-	require.Equal(t, shardnode.StatusValid, statusB)
-	require.Equal(t, 2, h.sealCalls, "both nodes reached newPayloadWithSealV1")
-
-	// Capability to fail: had node B re-selected from its own view, it would have derived these
-	// bytes, which are not the ones the block commits to.
-	rePicked := h.f.derive(t, nodeBParams.Round, nodeBParams.Parent.Hash, repeat, repeatTR)
-	require.False(t, bytes.Equal(rePicked.Encoded, envelope.SealCompanion.RootInput),
-		"re-selecting from node B's own certificate would derive different bytes for this block")
-	require.NotEqual(t, rePicked.Commitment, derived.Commitment, "and a different commitment")
 }
 
 // 8. Evidence yes, verdict no. A substituted or unauthenticated companion certificate is refused
