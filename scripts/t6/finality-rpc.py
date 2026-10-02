@@ -38,7 +38,7 @@ def request_json(url: str, body: dict | None = None):
     payload = None if body is None else json.dumps(body).encode()
     request = Request(url, data=payload, headers={"Content-Type": "application/json"} if payload else {})
     try:
-        with urlopen(request, timeout=3) as response:
+        with urlopen(request, timeout=10) as response:
             return json.loads(response.read())
     except (OSError, URLError) as exc:
         raise TransportError(f"request {url} failed: {exc}") from exc
