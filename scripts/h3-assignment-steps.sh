@@ -482,7 +482,7 @@ h3_ack_s1() {
   # and their nodes restart with the new sessions; the joiner's authority is enrolled against the activated configuration.
   h3_advance_authorities 3 1 1 2 3 || { echo "authority advance to root epoch 3 / shard epoch 1 failed" >&2; return 1; }
   h3_enroll_authority 5 1 || { echo "enrolling the evm5 authority failed" >&2; return 1; }
-  H3_RESTORE_TRUST_BASE=test-nodes/trust-base-epoch3.json
+  H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json   # anchored at the genesis trust base: the restore catches up forward through the verified handoffs
   h3_restore_validator 5 1 || return 1
   local i
   for i in $(seq 1 180); do h3_registry_is 1 3 && break; sleep 1; done
@@ -607,7 +607,7 @@ h3_step "coupled s=3 (root 2->7) supersedes s=2 on the same parent; folded ackno
 h3_late_s2_ack_refused() {
   local id6
   id6=$(evm_validator_id 6)
-  H3_RESTORE_TRUST_BASE=test-nodes/trust-base-epoch4.json
+  H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json   # anchored at the genesis trust base: the restore catches up forward through the verified handoffs
   H3_ONLINE="1 2 3 5"
   h3_mark
   h3_enroll_authority 6 2 || { echo "enrolling the evm6 authority against the s=2 configuration failed" >&2; return 1; }
