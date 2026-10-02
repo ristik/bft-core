@@ -163,7 +163,7 @@ func TestEVMAssignmentActivatesOnceFromCommittedHistoryAndSurvivesRestart(t *tes
 		require.Equal(t, h.successorT, trHash, rounds+": the installed TR is exactly the one H committed")
 		require.Contains(t, si.nodeIDs, "ev-e", rounds)
 		require.NotContains(t, si.nodeIDs, "ev-b", rounds+": a retired key is not in the shard's trust base")
-		require.ErrorContains(t, si.Verify("ev-b", func(abcrypto.Verifier) error { return nil }), "not in the trustbase", rounds)
+		require.ErrorIs(t, si.Verify("ev-b", func(abcrypto.Verifier) error { return nil }), ErrNodeNotInTrustBase, rounds)
 		var prev map[string]uint64
 		require.NoError(t, types.Cbor.Unmarshal(si.PrevEpochFees, &prev), rounds)
 		require.EqualValues(t, 7, prev["ev-a"], rounds+": the retired epoch's fees are rolled exactly once")
