@@ -132,7 +132,7 @@ The shard-epoch-zero rejection sites at the surveyed pins, all changed with test
 | Site | Change |
 | --- | --- |
 | `evmroot/rootorigin_v2.go` `RootInputV2.Validate` | certified epoch = origin IR epoch, authorized epoch = TE epoch, authorized ≥ certified, and authorized ahead only with a transition |
-| `rootinput/v2.go` `authenticateObservationV2` | authorized epoch ≥ certified epoch; `AlsoAcceptConfHashes` for installed assignments |
+| `rootinput/v2.go` `authenticateObservationV2` | authorized epoch ≥ certified epoch; `ConfForEpoch`: the certificate's shard epoch selects exactly one installed configuration (no scan of installed assignments) |
 | `rootchain/consensus/frontier_sampler.go` | IR epoch ≤ TR epoch; TR epoch equals the derived PDR's |
 | `rootchain/consensus/frontierclient/collector.go` | IR epoch ≤ TR epoch under the collector's configuration binding |
 | Ureth `crates/unicity/execution/src/lib.rs` | `ristik/ureth#47` |

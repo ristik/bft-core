@@ -115,6 +115,11 @@ type VerifierContext struct {
 	Transition   []byte
 	transitionMu sync.RWMutex
 	transitions  map[uint64]handoff.EVMTransition
+	// confForEpoch is the node's installed shard configuration for a shard epoch (SetConfForEpoch). With it set, a certificate
+	// must commit to exactly the configuration installed for the shard epoch its technical record names, so authenticating one
+	// certificate costs one lookup however many assignments were installed before it. Without it only the pinned ShardConfHash
+	// is accepted.
+	confForEpoch func(shardEpoch uint64) ([]byte, bool)
 	Cursor       SealRegistryCursor // retained for callers of the former v1 API; v2 reads the verified parent snapshot
 
 	// GenesisOrigin is the checked execution genesis this node was configured with, and
@@ -161,28 +166,24 @@ func (v *VerifierContext) InstallHandoffTransition(bundle handoffdelivery.Bundle
 	return nil
 }
 
+// SetConfForEpoch installs the per-epoch shard configuration lookup. It is set once, before the node runs, from the same set the
+// certificate admission uses, so the adapter and the admission cannot disagree about which configuration a shard epoch carries.
+func (v *VerifierContext) SetConfForEpoch(f func(shardEpoch uint64) ([]byte, bool)) {
+	v.transitionMu.Lock()
+	defer v.transitionMu.Unlock()
+	v.confForEpoch = f
+}
+
+func (v *VerifierContext) installedConfForEpoch() func(uint64) ([]byte, bool) {
+	v.transitionMu.RLock()
+	defer v.transitionMu.RUnlock()
+	return v.confForEpoch
+}
+
 // ErrAssignmentSpanUnavailable reports that the committed handoff steps between the
 // registry's root epoch and the authenticated observation are not all retained. It
 // is a typed unavailable, never a bare epoch jump: the caller resumes catch-up.
 var ErrAssignmentSpanUnavailable = errors.New("engineapi: committed EVM assignment span is not fully retained")
-
-// InstalledConfHashes returns the full configuration hashes of every assignment the
-// installed transitions name, which a certificate of this shard may carry.
-func (v *VerifierContext) InstalledConfHashes() [][]byte {
-	v.transitionMu.RLock()
-	defer v.transitionMu.RUnlock()
-	seen := make(map[[32]byte]struct{}, len(v.transitions))
-	var out [][]byte
-	for _, t := range v.transitions {
-		for _, h := range [][32]byte{t.OldActiveConfHash, t.NewActiveConfHash} {
-			if _, ok := seen[h]; !ok {
-				seen[h] = struct{}{}
-				out = append(out, bytes.Clone(h[:]))
-			}
-		}
-	}
-	return out
-}
 
 func (v *VerifierContext) transitionFor(oldEpoch, newEpoch uint64) ([]byte, error) {
 	v.transitionMu.RLock()
@@ -573,8 +574,8 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 	observationContext := rootinput.ObservationContextV2{
 		NetworkID: a.verifier.NetworkID, PartitionID: a.verifier.PartitionID,
 		ShardID: a.verifier.ShardID, ShardConfHash: a.verifier.ShardConfHash,
-		AlsoAcceptConfHashes: a.verifier.InstalledConfHashes(),
-		RootEpoch:            a.verifier.RootEpoch, TrustBases: a.verifier.TrustBases,
+		ConfForEpoch: a.verifier.installedConfForEpoch(),
+		RootEpoch:    a.verifier.RootEpoch, TrustBases: a.verifier.TrustBases,
 		EpochAuthority: a.verifier.EpochAuthority,
 	}
 	if a.verifier.EpochAuthority == nil {
