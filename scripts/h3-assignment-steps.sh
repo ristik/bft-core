@@ -347,6 +347,12 @@ h3_restore_validator() {
   bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $H3_ONLINE) || return 1
   # exactly two replicas: each is two array elements (the flag and the node id)
   for p in $H3_ONLINE; do [ "$p" = "$i" ] || [ "${#peers[@]}" -ge 4 ] || peers+=(--archive-replica "$(evm_validator_id "$p")"); done
+  # a node that was still shutting down may have re-created its archive store: the restore needs a fresh one
+  for _ in $(seq 1 50); do
+    rm -rf "test-nodes/h3-archives/evm$i" "$evidence/execution-journal.db" 2>/dev/null
+    [ ! -e "test-nodes/h3-archives/evm$i" ] && break
+    sleep 0.2
+  done
   build/ubft shard-node restore --home "$evidence" --executor engine-api \
     --address "/ip4/127.0.0.1/tcp/$((evmValidatorPortStart + i - 1))" --bootnodes "$bootnodes" \
     --trust-base "$H3_RESTORE_TRUST_BASE" --full-shard-conf "$EVM_FULL_SHARD_CONF" --registry-layout 2 \
