@@ -590,7 +590,13 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			"fullShardConfHash", origin.FullShardConfHash().Hex())
 	}
 
-	disseminator, err := buildDisseminator(peer, flags.observe, shardConf.Validators)
+	activePeers, err := shardnode.NewActivePeers(peer.ID(), shardConf.Validators)
+	if err != nil {
+		return fmt.Errorf("deriving the shard peers: %w", err)
+	}
+	// Every shard-membership consumer (block dissemination, the archive and journal servers, the journal suffix and evidence providers)
+	// follows this set: the genesis validators until a verified assignment step is installed, then the active assignment's.
+	disseminator, err := buildDisseminator(peer, flags.observe, shardConf.Validators, activePeers, flags.TrustHistoryProfile2)
 	if err != nil {
 		return fmt.Errorf("creating dissemination transport: %w", err)
 	}
@@ -612,10 +618,6 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		store = nil
 	}
 
-	activePeers, err := shardnode.NewActivePeers(peer.ID(), shardConf.Validators)
-	if err != nil {
-		return fmt.Errorf("deriving the shard peers: %w", err)
-	}
 	if flags.TrustHistoryProfile2 && flags.ExecutionJournal != "" {
 		// The archive server authorizes peers from this set. It is created from the genesis validators and rebuilt from the persisted
 		// verified assignment steps further down (handoff follower Restore, or CatchUp for a restoring node); until that is done it
@@ -957,17 +959,14 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return fmt.Errorf("reading recovery genesis identity: %w", genesisErr)
 		}
 		coordinator := &configuredadmission.ExecutionRecovery{Store: journalStore, Context: journalCtx, JournalLimits: limits, Executor: recoveryExecutor, Gate: node.FinalityGate(), Log: flags.observe.Logger(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
-		providers, peerErr := shardPeers(peer, shardConf.Validators)
-		if peerErr != nil {
-			return fmt.Errorf("resolving journal suffix providers: %w", peerErr)
-		}
 		server, serverErr := shardnode.NewJournalServer(configuredadmission.JournalProvider{Store: journalStore, Context: journalCtx, Limits: limits}, shardnode.DefaultJournalTransportLimits())
 		if serverErr != nil {
 			return fmt.Errorf("starting journal suffix server: %w", serverErr)
 		}
-		server.RestrictToPeers(providers)
+		// Who may fetch from this node's journal and whom it asks follow the active assignment (held until the persisted steps are replayed).
+		server.SetPeerAuthorizer(activePeers.Allowed)
 		server.Register(peer)
-		coordinator.Host, coordinator.Providers, coordinator.TransportLimits = peer, providers, shardnode.DefaultJournalTransportLimits()
+		coordinator.Host, coordinator.ProviderSource, coordinator.TransportLimits = peer, activePeers, shardnode.DefaultJournalTransportLimits()
 		if archiveLocal != nil {
 			source := &archivewiring.RecoverySource{Context: journalCtx, Subject: archiveSubject, Local: archiveLocal, Host: archiveHost,
 				Replicas: archiveReplicas, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks, Log: flags.observe.Logger()}
@@ -1072,11 +1071,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	recoveryOpts.Serve = flags.EvidenceServe
 	recoveryOpts.Recover = flags.EvidenceRecover
 	if recoveryOpts.Recover {
-		providers, perr := shardPeers(peer, shardConf.Validators)
-		if perr != nil {
-			return fmt.Errorf("resolving evidence providers: %w", perr)
-		}
-		recoveryOpts.Providers = providers
+		recoveryOpts.ProviderSource = activePeers
 	}
 	if err := node.EnableRecovery(recoveryOpts); err != nil {
 		return fmt.Errorf("enabling anchor recovery: %w", err)
@@ -1153,15 +1148,17 @@ func serveShardNodeRPC(ctx context.Context, flags *shardNodeRunFlags, node *shar
 // LoopbackDisseminator costs nothing and is never called. Two or more means
 // a real multi-validator shard (C2), which needs NetDisseminator's actual
 // libp2p connection to the others.
-func buildDisseminator(p *network.Peer, obs Observability, validators []*types.NodeInfo) (shardnode.Disseminator, error) {
+func buildDisseminator(p *network.Peer, obs Observability, validators []*types.NodeInfo, active shardnode.PeerLister, followsAssignments bool) (shardnode.Disseminator, error) {
 	peers, err := shardPeers(p, validators)
 	if err != nil {
 		return nil, err
 	}
-	if len(peers) == 0 {
+	if len(peers) == 0 && !followsAssignments {
 		return shardnode.NewLoopbackDisseminator(), nil
 	}
-	return shardnode.NewNetDisseminator(p, obs, peers)
+	// The recipients are the active assignment's validators as of each publish, not the genesis ones: after a rotation the successor
+	// quorum must be reachable.
+	return shardnode.NewNetDisseminatorFrom(p, obs, active)
 }
 
 // shardPeers is the shard's other validators from the shard conf, excluding this node. It is the

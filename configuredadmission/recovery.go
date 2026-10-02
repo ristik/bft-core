@@ -43,17 +43,20 @@ func DefaultRecoveryLimits() RecoveryLimits {
 // ExecutionRecovery selects authority only from the independently verified
 // journal. It never promotes a candidate or an executor head into authority.
 type ExecutionRecovery struct {
-	mu              sync.Mutex
-	Store           *configuredprogress.Store
-	Context         configuredprogress.Context
-	JournalLimits   configuredprogress.JournalLimits
-	Executor        RecoveryExecutor
-	Gate            *shardnode.FinalityGate
-	Log             *slog.Logger
-	Genesis         shardnode.BlockRef
-	Limits          RecoveryLimits
-	Host            shardnode.EvidenceHost
-	Providers       []peer.ID
+	mu            sync.Mutex
+	Store         *configuredprogress.Store
+	Context       configuredprogress.Context
+	JournalLimits configuredprogress.JournalLimits
+	Executor      RecoveryExecutor
+	Gate          *shardnode.FinalityGate
+	Log           *slog.Logger
+	Genesis       shardnode.BlockRef
+	Limits        RecoveryLimits
+	Host          shardnode.EvidenceHost
+	Providers     []peer.ID
+	// ProviderSource, when set, names the providers at the time they are needed (the active assignment's validators); Providers is the
+	// fixed list of a deployment that follows no assignment.
+	ProviderSource  interface{ Peers() []peer.ID }
 	TransportLimits shardnode.JournalTransportLimits
 	snapshot        func(context.Context) (configuredprogress.JournalSnapshot, error) // deterministic fault fixtures
 	fetch           func(context.Context, peer.ID, shardnode.JournalFetchRequest) ([]shardnode.JournalFetchEntry, error)
@@ -281,7 +284,7 @@ func (r *ExecutionRecovery) Recover(ctx context.Context, held *types.UnicityCert
 	}
 	c, err := r.load(ctx)
 	if err != nil {
-		if r.Host == nil && r.fetch == nil || len(r.Providers) == 0 || !errors.Is(err, ErrRecoveryUnavailable) {
+		if r.Host == nil && r.fetch == nil || len(r.providerList()) == 0 || !errors.Is(err, ErrRecoveryUnavailable) {
 			return shardnode.BlockRef{}, err
 		}
 		if fetchErr := r.acquireMissing(ctx); fetchErr != nil {
@@ -485,7 +488,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 	}
 	var last error
 	var spent int64
-	for index, provider := range r.Providers {
+	for index, provider := range r.providerList() {
 		if index >= 4 {
 			break
 		}
@@ -836,3 +839,11 @@ func (r *ExecutionRecovery) Revalidate(ctx context.Context, ticket shardnode.Rea
 
 var _ shardnode.JournalRecovery = (*ExecutionRecovery)(nil)
 var _ shardnode.ChildReadiness = (*ExecutionRecovery)(nil)
+
+// providerList is the peers to ask for a journal suffix: the source's current answer, else the fixed list.
+func (r *ExecutionRecovery) providerList() []peer.ID {
+	if r.ProviderSource != nil {
+		return r.ProviderSource.Peers()
+	}
+	return r.Providers
+}

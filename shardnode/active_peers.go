@@ -3,6 +3,7 @@ package shardnode
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -120,7 +121,9 @@ func (a *ActivePeers) Allowed(id peer.ID) bool {
 	return ok
 }
 
-// Peers is the active set, for callers that address every validator.
+// Peers is the active assignment's other validators, sorted, never including this node. It is what an OUTBOUND consumer addresses (block
+// dissemination recipients, journal suffix providers, evidence providers): the hold does not apply, because holding exists so that a stale
+// set never AUTHORIZES an inbound peer, and asking or sending to a validator that a persisted step has since retired only fails.
 func (a *ActivePeers) Peers() []peer.ID {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -128,5 +131,9 @@ func (a *ActivePeers) Peers() []peer.ID {
 	for id := range a.set {
 		out = append(out, id)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
 }
+
+// EvidenceProviders makes ActivePeers the evidence ProviderSource: who to ask follows the active assignment.
+func (a *ActivePeers) EvidenceProviders() []peer.ID { return a.Peers() }

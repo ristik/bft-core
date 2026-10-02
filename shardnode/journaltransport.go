@@ -80,6 +80,9 @@ type JournalServer struct {
 	limits    JournalTransportLimits
 	admission *streamAdmission
 	allowed   map[peer.ID]struct{}
+	// authorize, when set, decides who may fetch (the active assignment's validators); allowed is the fixed list of a deployment that
+	// follows no assignment.
+	authorize func(peer.ID) bool
 }
 
 // RestrictToPeers must be called before Register. The configured shard
@@ -90,6 +93,10 @@ func (s *JournalServer) RestrictToPeers(peers []peer.ID) {
 		s.allowed[id] = struct{}{}
 	}
 }
+
+// SetPeerAuthorizer makes the active assignment decide who may fetch from this node's journal, in place of a fixed list. Call before
+// Register.
+func (s *JournalServer) SetPeerAuthorizer(allow func(peer.ID) bool) { s.authorize = allow }
 
 func NewJournalServer(provider JournalFetchProvider, limits JournalTransportLimits) (*JournalServer, error) {
 	if provider == nil {
@@ -105,14 +112,24 @@ func (s *JournalServer) Register(host EvidenceHost) {
 	host.RegisterProtocolHandler(ProtocolJournalSuffix, s.handle)
 }
 
+// permits: the authorizer when one is set (the active assignment), else the fixed list, else everyone (a deployment that configured none).
+func (s *JournalServer) permits(remote peer.ID) bool {
+	if s.authorize != nil {
+		return s.authorize(remote)
+	}
+	if s.allowed != nil {
+		_, ok := s.allowed[remote]
+		return ok
+	}
+	return true
+}
+
 func (s *JournalServer) handle(st libp2pnetwork.Stream) {
 	defer st.Close()
 	remote := st.Conn().RemotePeer()
-	if s.allowed != nil {
-		if _, ok := s.allowed[remote]; !ok {
-			_ = st.Reset()
-			return
-		}
+	if !s.permits(remote) {
+		_ = st.Reset()
+		return
 	}
 	from := remote.String()
 	if err := s.admission.acquire(from); err != nil {

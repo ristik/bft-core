@@ -46,7 +46,7 @@ type disseminatedBlock struct {
 // never share a receive channel — see NewNetDisseminator.
 type NetDisseminator struct {
 	net   *network.LibP2PNetwork
-	peers []peer.ID // the shard's other validators, excluding this node
+	peers PeerLister // the shard's other validators, excluding this node, as of each publish
 
 	mu      sync.Mutex
 	waiters map[uint64]chan Block
@@ -60,6 +60,20 @@ type NetDisseminator struct {
 // shard's validator set, resolved from their node IDs — never including
 // this node's own ID.
 func NewNetDisseminator(p *network.Peer, obs network.Observability, peers []peer.ID) (*NetDisseminator, error) {
+	return NewNetDisseminatorFrom(p, obs, StaticPeers(peers))
+}
+
+// PeerLister is the shard's other validators at the moment it is asked.
+type PeerLister interface{ Peers() []peer.ID }
+
+// StaticPeers is a fixed peer list (a deployment that follows no assignment).
+type StaticPeers []peer.ID
+
+func (s StaticPeers) Peers() []peer.ID { return []peer.ID(s) }
+
+// NewNetDisseminatorFrom is NewNetDisseminator for a recipient set that follows the verified, installed assignment: every publish
+// addresses the validators the source names then, not the ones the genesis configuration named.
+func NewNetDisseminatorFrom(p *network.Peer, obs network.Observability, peers PeerLister) (*NetDisseminator, error) {
 	net, err := network.NewLibP2PNetwork(p, 100, obs)
 	if err != nil {
 		return nil, fmt.Errorf("shardnode: creating dissemination network: %w", err)
@@ -129,7 +143,8 @@ func (d *NetDisseminator) deliver(db *disseminatedBlock) {
 }
 
 func (d *NetDisseminator) Publish(ctx context.Context, round uint64, b Block) error {
-	if len(d.peers) == 0 {
+	peers := d.peers.Peers()
+	if len(peers) == 0 {
 		return nil // single-validator shard: nothing to disseminate to
 	}
 	msg := &disseminatedBlock{
@@ -142,7 +157,7 @@ func (d *NetDisseminator) Publish(ctx context.Context, round uint64, b Block) er
 		BlockSize:  b.BlockSize,
 		StateSize:  b.StateSize,
 	}
-	return d.net.Send(ctx, msg, d.peers...)
+	return d.net.Send(ctx, msg, peers...)
 }
 
 func (d *NetDisseminator) Await(ctx context.Context, round uint64) (Block, error) {
