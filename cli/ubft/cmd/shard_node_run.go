@@ -213,6 +213,10 @@ type shardNodeRunFlags struct {
 	// RegistryLayout is the layout of the deployment's SealRegistry (1 or 2); it must be the one the genesis
 	// was generated with, because G commits to it.
 	RegistryLayout uint64
+	// GenesisRootEpoch is the root epoch the finalized genesis pins (the epoch G was generated at). Zero means the epoch of the
+	// configured trust base, which is right until the root epoch has changed: a node started under a later trust base (a restore
+	// after a root handoff) must still validate the genesis against the epoch it was generated at.
+	GenesisRootEpoch uint64
 
 	LUCStoreFile         string
 	ExecutionJournal     string
@@ -317,6 +321,9 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 			"observation's shard configuration hash to equal the genesis origin's full configuration hash")
 	cmd.Flags().Uint64Var(&flags.RegistryLayout, "registry-layout", 1,
 		"SealRegistry layout the genesis was generated with: 1 (sealRegistry/v1) or 2 (assignment-aware sealRegistry/v2)")
+	cmd.Flags().Uint64Var(&flags.GenesisRootEpoch, "genesis-root-epoch", 0,
+		"root epoch the finalized genesis was generated at (the deployment's pin); 0 uses the epoch of --trust-base. "+
+			"Required when the node starts under a trust base of a later root epoch than the genesis, as a restore after a root handoff does")
 	cmd.Flags().StringVar(&flags.ExpectedOriginIdentity, "expected-origin-identity", "",
 		"optional 0x-prefixed 32-byte expected genesis origin identity; when set, startup refuses a mismatch")
 	cmd.Flags().StringVar(&flags.JWTSecret, "jwt-secret", "",
@@ -507,7 +514,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if flags.GenesisFile != "" {
 		// M1 pins one root epoch from trustBases[0]. H1/H2 multi-epoch trust bases must
 		// select the epoch bound to the genesis record instead of assuming the first.
-		origin, bootstrap, err = loadGenesisOriginLayout(shardConf, flags.GenesisFile, flags.ExpectedOriginIdentity, trustBases[0].GetEpoch(), flags.RegistryLayout)
+		genesisRootEpoch, err := genesisPinEpoch(flags.GenesisRootEpoch, trustBases[0].GetEpoch())
+		if err != nil {
+			return err
+		}
+		origin, bootstrap, err = loadGenesisOriginLayout(shardConf, flags.GenesisFile, flags.ExpectedOriginIdentity, genesisRootEpoch, flags.RegistryLayout)
 		if err != nil {
 			return err
 		}
@@ -1204,6 +1215,18 @@ func parseHash32(s string) (common.Hash, error) {
 // pinned artifact, never a peer's.
 func loadGenesisOrigin(shardConf *types.PartitionDescriptionRecord, genesisPath, expectedIdentity string, rootEpoch uint64) (registrygenesis.GenesisOrigin, registryproof.Snapshot, error) {
 	return loadGenesisOriginLayout(shardConf, genesisPath, expectedIdentity, rootEpoch, 1)
+}
+
+// genesisPinEpoch is the root epoch the finalized genesis is validated against: the configured one, or the epoch of the trust
+// base the node starts under. A genesis cannot be pinned to a root epoch later than the node's own trust base.
+func genesisPinEpoch(configured, trustBaseEpoch uint64) (uint64, error) {
+	if configured == 0 {
+		return trustBaseEpoch, nil
+	}
+	if configured > trustBaseEpoch {
+		return 0, fmt.Errorf("--genesis-root-epoch %d is after the configured trust base's epoch %d", configured, trustBaseEpoch)
+	}
+	return configured, nil
 }
 
 func loadGenesisOriginLayout(shardConf *types.PartitionDescriptionRecord, genesisPath, expectedIdentity string, rootEpoch, layout uint64) (registrygenesis.GenesisOrigin, registryproof.Snapshot, error) {

@@ -169,3 +169,20 @@ func TestShardNodeRun_JournalFlagsForSealOrigin(t *testing.T) {
 		})
 	}
 }
+
+// A node restored under a later root epoch's trust base still validates the genesis against the epoch it was generated at.
+func TestLoadGenesisOrigin_PinsTheGenesisRootEpochNotTheTrustBasesAfterARootHandoff(t *testing.T) {
+	full, genesisPath, _ := preparedGenesisFixture(t, 1337)
+	_, _, err := loadGenesisOrigin(full, genesisPath, "", 3) // the trust base's epoch after two root handoffs
+	require.Error(t, err, "pinning the trust base epoch fails")
+	pin, err := genesisPinEpoch(1, 3)
+	require.NoError(t, err)
+	_, _, err = loadGenesisOrigin(full, genesisPath, "", pin)
+	require.NoError(t, err, "pinning the genesis epoch validates")
+
+	pin, err = genesisPinEpoch(0, 3)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, pin, "unset keeps the trust base's epoch")
+	_, err = genesisPinEpoch(4, 3)
+	require.Error(t, err, "a pin after the trust base's own epoch is refused")
+}
