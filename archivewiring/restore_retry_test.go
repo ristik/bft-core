@@ -3,6 +3,7 @@ package archivewiring
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -210,4 +211,48 @@ func TestArchiveRestoreEndsWithAClearErrorWhenNoReplicaEverAdmitsThisNode(t *tes
 	image, loadErr := fx.journal.LoadJournal(context.Background(), fx.wf.context, fx.limits)
 	require.NoError(t, loadErr)
 	require.Nil(t, image.Restored, "nothing is retained from a refused restore")
+}
+
+// A restore whose context ends during an attempt used to return the replica's failure alone: transientFetchError answers false once the
+// context is done, so retryFetch returned the attempt's error and errors.Is(err, context.Canceled/DeadlineExceeded) did not hold
+// (TestArchiveRestoreRetryStopsOnContextCancel failed once under load). Cancellation is now always visible, with the replica failure
+// kept for diagnosis; a non-transient failure on a live context is returned as before.
+func TestRetryFetchKeepsTheContextCauseWhenTheContextEndsDuringAnAttempt(t *testing.T) {
+	r := &ArchiveRestore{Retry: FetchRetry{Initial: time.Millisecond, Max: 2 * time.Millisecond, Total: time.Hour}}
+	replica := errors.Join(ErrPendingLimit, errors.New("replica saturated"))
+	for _, tc := range []struct {
+		name  string
+		setup func() (context.Context, func())
+		cause error
+	}{
+		{"cancelled", func() (context.Context, func()) {
+			ctx, cancel := context.WithCancel(context.Background())
+			return ctx, cancel
+		}, context.Canceled},
+		{"deadline exceeded", func() (context.Context, func()) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			return ctx, func() { time.Sleep(60 * time.Millisecond); cancel() }
+		}, context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, end := tc.setup()
+			defer end()
+			err := r.retryFetch(ctx, "record", func() (bool, error) {
+				end() // the context ends while the replica fetch is in flight, which then fails
+				return transientFetchError(ctx, replica), replica
+			})
+			require.ErrorIs(t, err, tc.cause)
+			require.ErrorIs(t, err, ErrPendingLimit, "the replica failure is kept")
+			require.NotErrorIs(t, err, archive.ErrUnavailable, "this is a stop, not an exhausted wait")
+		})
+	}
+	t.Run("a non-transient failure on a live context is returned unchanged", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		bad := fmt.Errorf("%w: forged", archive.ErrInvalid)
+		err := r.retryFetch(ctx, "record", func() (bool, error) { return transientFetchError(ctx, bad), bad })
+		require.ErrorIs(t, err, archive.ErrInvalid)
+		require.NotErrorIs(t, err, context.Canceled)
+		require.NotErrorIs(t, err, context.DeadlineExceeded)
+	})
 }

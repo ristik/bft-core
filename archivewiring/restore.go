@@ -393,7 +393,16 @@ func (r *ArchiveRestore) retryFetch(ctx context.Context, what string, attempt fu
 	delay := policy.Initial
 	for tries := 1; ; tries++ {
 		transient, err := attempt()
-		if err == nil || !transient {
+		if err == nil {
+			return nil
+		}
+		if !transient {
+			// transientFetchError reports false once the context is done, so a restore cancelled or timed out during an attempt
+			// arrives here carrying the replica's failure. The caller asked to stop, and must be able to tell that from a replica
+			// that refused: keep both causes.
+			if cause := ctx.Err(); cause != nil {
+				return fmt.Errorf("%w: restore stopped while fetching %s: %w", cause, what, err)
+			}
 			return err
 		}
 		remaining := policy.Total - time.Since(started)
