@@ -229,6 +229,11 @@ function init_evm_authorities() {
       sleep 0.1
     done
     [ -S "$home/operator.sock" ] || { echo "authority $i did not open its socket" >&2; return 1; }
+    # the socket file can exist a moment before the authority accepts: the process says so when it is serving
+    for attempt in $(seq 1 100); do
+      grep -q 'signing authority running' "$home/authority.log" 2>/dev/null && break
+      sleep 0.1
+    done
     build/ubft signing-authority node-info --operator-socket "$home/operator.sock" \
       --operator-credential "$home/operator.cred" --out "$home/node-info.json" || return 1
   done
