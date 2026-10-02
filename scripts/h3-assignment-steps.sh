@@ -70,7 +70,8 @@ PY
 
 # h3_progress <label> [seconds before the first look] [window seconds]. The window defaults to the pause plus 25 s; the steps right after a
 # ROOT restart pass a longer one (about 3 minutes): an aggregator shard whose subscription the restart dropped is covered again only after
-# its own inactivity re-handshake, which takes tens of seconds to minutes. That lag is MEASURED, not hidden: the time to the first TR progress
+# its own inactivity re-handshake, which takes tens of seconds to minutes. H3_POST_RESTART_WINDOW (seconds) widens those steps (unset: the
+# default window, which is what the lane asserts once the root recovers promptly). That lag is MEASURED, not hidden: the time to the first TR progress
 # of each shard is written to the lane output.
 h3_progress() {
   local label=$1 waited=0 pause=${2:-10} limit start now shard seen
@@ -438,7 +439,7 @@ h3_config_only() {
   return 1
 }
 h3_step "baseline: configuration-only epoch advance (same committee): shard epoch stays 0, root epoch 2, paid tx certified" h3_config_only
-h3_step "aggregators and EVM progress after the configuration-only advance" h3_progress config-only 8 180
+h3_step "aggregators and EVM progress after the configuration-only advance" h3_progress config-only 8 "${H3_POST_RESTART_WINDOW:-}"
 h3_has_coupling_param() { jq -e '.partitionParams.validator_coupling == "true"' "$fullShardConf" >/dev/null; }
 h3_step "the genesis EVM configuration requires coupled validator-set changes (validator_coupling=true)" h3_has_coupling_param
 
@@ -493,7 +494,7 @@ h3_root_quorum_restart() {
   local row0 row1
   row0=$(h3_evm_row | jq -c '{round: .roundNumber, tr: .trRound}')
   h3_activate_coupled 3 4 5 || return 1       # the root quorum restarts (new root 5 first), the replaced root 4 stops
-  H3_EVM_STALLED=1 h3_progress "after root quorum restart (ack still held)" 10 180 || return 1
+  H3_EVM_STALLED=1 h3_progress "after root quorum restart (ack still held)" 10 "${H3_POST_RESTART_WINDOW:-}" || return 1
   h3_registry_is 0 2 || return 1             # the successor set has not acknowledged: registry is still at the old shard epoch
   row1=$(h3_evm_row | jq -c '{round: .roundNumber, tr: .trRound}')
   echo "EVM row before restart $row0, after $row1"
@@ -643,7 +644,7 @@ h3_s2_stalls() {
   sleep 25
   [ "$(h3_evm_row | jq -r '.roundNumber')" = "$base" ] || { echo "EVM certified past H without an s=2 quorum" >&2; return 1; }
   h3_registry_is 1 3 || return 1
-  H3_EVM_STALLED=1 h3_progress "s=2 stalled EVM" 8 180
+  H3_EVM_STALLED=1 h3_progress "s=2 stalled EVM" 8 "${H3_POST_RESTART_WINDOW:-}"
 }
 h3_step "EVM waits (no certification) while root and aggregators progress" h3_s2_stalls
 
