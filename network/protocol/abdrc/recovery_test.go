@@ -276,9 +276,11 @@ func TestStateMsg_Verify(t *testing.T) {
 				CommitQc: &rctypes.QuorumCert{
 					VoteInfo: r6vInfo,
 					LedgerCommitInfo: &types.UnicitySeal{
-						Version:      1,
-						PreviousHash: h6,
-						Signatures:   map[string]hex.Bytes{"test": test.RandomBytes(65)},
+						Version:              1,
+						PreviousHash:         h6,
+						RootChainRoundNumber: 5, // the head's commit QC commits the head: it names what it commits
+						Hash:                 test.RandomBytes(32),
+						Signatures:           map[string]hex.Bytes{"test": test.RandomBytes(65)},
 					},
 					Signatures: map[string]hex.Bytes{"test": test.RandomBytes(65)},
 				},
@@ -372,6 +374,17 @@ func TestStateMsg_Verify(t *testing.T) {
 		current := testtb.NewAlwaysValidTrustBase(t) // consensus QCs in this fixture
 		sm := makeState()
 		require.NoError(t, sm.VerifyWithHistory(crypto.SHA256, current, history))
+
+		// The head's commit QC commits the head, so the empty seal of a QC that commits nothing is never valid in that slot (it is elsewhere): the
+		// typed epoch refusal, at verification.
+		sm = makeState()
+		commitQc := *sm.CommittedHead.CommitQc
+		seal := *commitQc.LedgerCommitInfo
+		seal.RootChainRoundNumber, seal.Hash = 0, nil
+		commitQc.LedgerCommitInfo = &seal
+		sm.CommittedHead.CommitQc = &commitQc
+		require.ErrorIs(t, sm.VerifyWithHistory(crypto.SHA256, current, history), ErrRecoveryEpoch)
+		sm = makeState()
 		// The legacy path remains available with the switch off.
 		require.NoError(t, sm.Verify(crypto.SHA256, current))
 

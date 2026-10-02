@@ -75,18 +75,29 @@ func New(hashAlgo crypto.Hash, db PersistentStore, orchestration Orchestration, 
 	}, nil
 }
 
+// ErrRefusedBeforeWrite marks a recovery state that NewFromState or NewFromAnchorState refused before writing anything: the store is as it
+// was, so the caller has nothing to be uncertain about. The wrapped error and its message are unchanged.
+var ErrRefusedBeforeWrite = errors.New("recovery state refused before any write")
+
+type refusedBeforeWrite struct{ err error }
+
+func (e refusedBeforeWrite) Error() string      { return e.err.Error() }
+func (e refusedBeforeWrite) Unwrap() error      { return e.err }
+func (refusedBeforeWrite) Is(target error) bool { return target == ErrRefusedBeforeWrite }
+
 func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger, networkProfile ...uint64) (*BlockStore, error) {
 	if db == nil {
-		return nil, errors.New("storage is nil")
+		return nil, refusedBeforeWrite{errors.New("storage is nil")}
 	}
 
 	profile, err := profileVersion(networkProfile)
 	if err != nil {
-		return nil, err
+		return nil, refusedBeforeWrite{err}
 	}
 	rootNode, err := NewRootBlock(block, hash, orchestration, profile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create new root node: %w", err)
+		// Nothing has been written: the first write is NewBlockTreeWithRootBlock below.
+		return nil, refusedBeforeWrite{fmt.Errorf("failed to create new root node: %w", err)}
 	}
 
 	blTree, err := NewBlockTreeWithRootBlock(rootNode, db)

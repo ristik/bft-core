@@ -270,11 +270,11 @@ func (x *BlockStore) reconstructAnchorHead(head *abdrc.CommittedBlock) (*Execute
 // divergent pending blocks before applying the received successor suffix.
 func (x *BlockStore) NewFromAnchorState(head *abdrc.CommittedBlock) (*BlockStore, error) {
 	if err := x.VerifyRecoveryAnchor(head); err != nil {
-		return nil, err
+		return nil, refusedBeforeWrite{err}
 	}
 	root, err := x.reconstructAnchorHead(head)
 	if err != nil {
-		return nil, err
+		return nil, refusedBeforeWrite{err} // nothing is written before NewBlockTreeWithRootBlock
 	}
 	tree, err := NewBlockTreeWithRootBlock(root, x.storage)
 	if err != nil {
