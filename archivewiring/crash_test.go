@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
@@ -67,8 +68,7 @@ func TestArchiveCrashChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	if point == "after-publish" {
-		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
-		t.Fatal("SIGKILL returned")
+		killSelf(t)
 	}
 	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	receiver := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
@@ -86,10 +86,18 @@ func TestArchiveCrashChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	if point == "after-acknowledgement" {
-		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
-		t.Fatal("SIGKILL returned")
+		killSelf(t)
 	}
 	t.Fatalf("unknown crash point %q", point)
+}
+
+// killSelf SIGKILLs this process and does not return normally. kill(2) on oneself only queues the signal: under load the process can
+// keep running for a while before the kernel delivers it, and a child that fell through to t.Fatal in that window exited with status 1
+// instead of dying by SIGKILL (the parent then reported "child was not killed"). Wait for the signal to land instead.
+func killSelf(t *testing.T) {
+	_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+	time.Sleep(30 * time.Second)
+	t.Fatal("SIGKILL was not delivered within 30s")
 }
 
 func equalRecord(q archive.Request, a, b *archive.Record) bool {
