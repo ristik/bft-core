@@ -554,7 +554,8 @@ h3_restore_s1() {
   H3_ONLINE="2 3 5"
   h3_restore_validator 1 2 || return 1
   H3_ONLINE="1 2 3 5"
-  for i in $(seq 1 180); do
+  # the restored node re-executes the whole EL chain from its peers before it certifies: allow for a long lane (about 3 blocks/s)
+  for i in $(seq 1 600); do
     grep -Eq 'handoff activated.*rootEpoch=3' "test-nodes/evm1/debug.log" &&
       grep -q 'submitting block certification request' "test-nodes/evm1/debug.log" &&
       grep -Eq 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "test-nodes/evm1/debug.log" && return 0
