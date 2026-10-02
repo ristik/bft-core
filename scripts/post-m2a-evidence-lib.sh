@@ -478,7 +478,7 @@ PY
   fi
   if [ "$postM2aMode" = t6 ]; then
     t6_stop_finality_monitor || return 1
-    t6_finalized_wallet_check test-nodes/post-m2a-evidence/t6-wallet-finalized-after-restore.json 2 || return 1
-    pass "post-handoff restored-validator wallet reads still resolve at certified finalized state"
+    t6_finalized_wallet_check test-nodes/post-m2a-evidence/t6-wallet-finalized-after-restore.json 1 2 || return 1
+    pass "post-restore wallet reads through the restored validator 1's own RPC and log resolve at certified finalized state (certified tip from survivor validator 2)"
   fi
 }

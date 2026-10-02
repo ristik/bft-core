@@ -20,14 +20,20 @@ class CheckError(Exception):
     pass
 
 
+class TransportError(CheckError):
+    """The endpoint could not be reached or did not answer: the only failure a planned restart or restore may excuse."""
+
+
 def request_json(url: str, body: dict | None = None):
     payload = None if body is None else json.dumps(body).encode()
     request = Request(url, data=payload, headers={"Content-Type": "application/json"} if payload else {})
     try:
         with urlopen(request, timeout=3) as response:
             return json.loads(response.read())
-    except (OSError, URLError, json.JSONDecodeError) as exc:
-        raise CheckError(f"request {url} failed: {exc}") from exc
+    except (OSError, URLError) as exc:
+        raise TransportError(f"request {url} failed: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise CheckError(f"request {url} returned a malformed answer: {exc}") from exc
 
 
 def rpc(url: str, method: str, params: list):
@@ -189,8 +195,13 @@ def watch(args) -> int:
                         and Path(args.offline_marker).exists()
                         and not restored
                     )
+                    # A finality violation (an uncertified finalized candidate, a bad tip, a JSON-RPC error) is never excused
+                    # by a restart or restore: only a failure to reach the endpoint is.
+                    if not isinstance(exc, TransportError):
+                        expected_offline = False
+                        restored_at = None
                     planned_restart = False
-                    if args.restart_marker_dir:
+                    if args.restart_marker_dir and isinstance(exc, TransportError):
                         marker = Path(args.restart_marker_dir) / str(index)
                         if marker.exists():
                             restart_seen[index] = time.monotonic()

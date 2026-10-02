@@ -52,11 +52,12 @@ t6_stop_finality_monitor() {
   pass "finalized-state monitor passed every sample through the validator restore"
 }
 
-# t6_finalized_wallet_check <out> [validator]: wallet-style reads at the finalized tag through one validator's RPC, status listener
-# and log (default 1). After the H4 restore validator 1 runs through the restore command, which has no status listener, so the
-# post-restore check reads through a survivor.
+# t6_finalized_wallet_check <out> [validator] [status-validator]: wallet-style reads at the finalized tag through one validator's
+# RPC and log (default 1), checked against the status listener of status-validator (default: the same validator). After the H4
+# restore validator 1 runs through the restore command, which has no status listener, so the post-restore check reads
+# validator 1's own RPC and log and takes the certified tip from a survivor's status listener.
 t6_finalized_wallet_check() {
-  local output=$1 v=${2:-1} signer treasury_signer wuct collector beneficiary balance_selector supply_selector credit_selector balance_data
+  local output=$1 v=${2:-1} sv=${3:-${2:-1}} signer treasury_signer wuct collector beneficiary balance_selector supply_selector credit_selector balance_data
   signer=$(go run ./scripts/evmtx -address) || return 1
   treasury_signer=$(go run ./scripts/evmtx -private-key "$T6_TREASURY_TEST_KEY" -address) || return 1
   wuct=$(python3 - "$post_m2a_default_manifest" <<'PY'
@@ -80,7 +81,7 @@ PY
   credit_selector=$(go run ./scripts/evmtx -method-selector 'treasuryCredit()') || return 1
   balance_data="${balance_selector}$(printf '%024s' '' | tr ' ' 0)${signer#0x}"
   python3 scripts/t6/finality-rpc.py wallet \
-    --rpc-url "http://127.0.0.1:$((rethEthBase+v-1))" --status-url "http://127.0.0.1:$((evmRPCPortStart+v-1))" \
+    --rpc-url "http://127.0.0.1:$((rethEthBase+v-1))" --status-url "http://127.0.0.1:$((evmRPCPortStart+sv-1))" \
     --log-path "test-nodes/evm$v/debug.log" --wallet "$signer" --beneficiary "$beneficiary" \
     --treasury "$treasury_signer" --wuct "$wuct" --balance-of-data "$balance_data" \
     --total-supply-data "$supply_selector" --fee-collector "$collector" \
