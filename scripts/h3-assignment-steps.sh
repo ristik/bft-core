@@ -308,7 +308,8 @@ h3_restore_validator() {
   bodyID=$(tr ' ' '\n' <"$evidence/pin.txt" | sed -n 's/^bodyID=//p')
   rootBoot=$(m2_root_addr "$(h3_first_root)")
   bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $H3_ONLINE) || return 1
-  for p in $H3_ONLINE; do [ "$p" = "$i" ] || [ "${#peers[@]}" -ge 2 ] || peers+=(--archive-replica "$(evm_validator_id "$p")"); done
+  # exactly two replicas: each is two array elements (the flag and the node id)
+  for p in $H3_ONLINE; do [ "$p" = "$i" ] || [ "${#peers[@]}" -ge 4 ] || peers+=(--archive-replica "$(evm_validator_id "$p")"); done
   build/ubft shard-node restore --home "$evidence" --executor engine-api \
     --address "/ip4/127.0.0.1/tcp/$((evmValidatorPortStart + i - 1))" --bootnodes "$bootnodes" \
     --trust-base "$H3_RESTORE_TRUST_BASE" --full-shard-conf "$EVM_FULL_SHARD_CONF" --registry-layout 2 \
