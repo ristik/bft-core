@@ -369,3 +369,27 @@ func admissionTestServer(t *testing.T, limits Limits) *Server {
 	}
 	return s
 }
+
+// A server given a peer authorizer asks it at every request, so the set of peers it serves changes with the active assignment
+// without rebuilding the server; the static set it was built with no longer decides.
+func TestArchiveAdmissionFollowsThePeerAuthorizer(t *testing.T) {
+	s := admissionTestServer(t, Limits{Deadline: time.Second, Pending: 8, PerPeer: 4})
+	active := map[peer.ID]bool{"joiner": false}
+	s.SetPeerAuthorizer(func(id peer.ID) bool { return active[id] })
+	if err := s.reservePending("joiner"); !errors.Is(err, ErrPeerNotAllowed) {
+		t.Fatalf("a peer the authorizer does not allow: %v", err)
+	}
+	active["joiner"] = true
+	if err := s.reservePending("joiner"); err != nil {
+		t.Fatalf("a peer the authorizer allows after the install: %v", err)
+	}
+	s.leave("joiner")
+	// the static genesis set no longer decides: a genesis peer the authorizer does not know is refused
+	if err := s.reservePending("sender"); !errors.Is(err, ErrPeerNotAllowed) {
+		t.Fatalf("a peer only the static set allows: %v", err)
+	}
+	active["joiner"] = false
+	if err := s.reservePending("joiner"); !errors.Is(err, ErrPeerNotAllowed) {
+		t.Fatalf("a retired peer: %v", err)
+	}
+}

@@ -603,6 +603,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		store = nil
 	}
 
+	activePeers, err := shardnode.NewActivePeers(peer.ID(), shardConf.Validators)
+	if err != nil {
+		return fmt.Errorf("deriving the shard peers: %w", err)
+	}
 	node, err := shardnode.New(
 		peer,
 		shardNet,
@@ -702,6 +706,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if flags.TrustHistoryProfile2 {
 				archiveServer.SetBundleVerifier(archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch))
 			}
+			// Who may fetch from and publish to this node's archive is the validator set of the ACTIVE assignment, not the genesis one:
+			// a joiner must be able to restore before it can acknowledge, and a retired validator must not keep access.
+			archiveServer.SetPeerAuthorizer(activePeers.Allowed)
 			archiveServer.SetLogger(flags.observe.Logger())
 			archiveServer.Register(ctx, peer)
 		}
@@ -761,7 +768,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					// source of the shard configuration hashes the client will accept per shard epoch. Installed before the handoff is
 					// activated, so no certificate of the new root epoch can be verifiable while its configuration is still unknown; and
 					// again from every persisted bundle on restart, which rebuilds the set from genesis plus the verified history.
-					if err := installAssignmentStepConfs(node, step); err != nil {
+					if err := installVerifiedAssignment(node, activePeers, bundle, step); err != nil {
 						return err
 					}
 					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR, step)
@@ -1428,4 +1435,35 @@ func installAssignmentStepConfs(node shardConfInstaller, step handoff.Assignment
 		return fmt.Errorf("installing the new shard configuration: %w", err)
 	}
 	return nil
+}
+
+// peerInstaller is the surface a verified assignment's validator set is installed into.
+type peerInstaller interface {
+	Install(epoch uint64, validators []*types.NodeInfo) error
+}
+
+// installAssignmentPeers makes the validators of the assignment a VERIFIED bundle installs the active peer set (who may use this node's
+// archive), in the same install path as the shard configuration set. A root-only bundle changes nothing.
+func installAssignmentPeers(peers peerInstaller, bundle handoffdelivery.Bundle) error {
+	epoch, validators, ok, err := handoffdelivery.AssignmentValidators(bundle)
+	if err != nil {
+		return fmt.Errorf("reading the assignment's validators: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	if err := peers.Install(epoch, validators); err != nil {
+		return fmt.Errorf("installing the assignment's validators: %w", err)
+	}
+	return nil
+}
+
+// installVerifiedAssignment is everything a VERIFIED assignment step installs into the node before the handoff is activated: the shard
+// configuration hashes (the certificate client, the admission and the bundle check follow them) and the validator set (who may use this
+// node's archive). It is the single call the OnInstalled path makes; shard_node_install_wiring_test.go pins that it does.
+func installVerifiedAssignment(conf shardConfInstaller, peers peerInstaller, bundle handoffdelivery.Bundle, step handoff.AssignmentStep) error {
+	if err := installAssignmentStepConfs(conf, step); err != nil {
+		return err
+	}
+	return installAssignmentPeers(peers, bundle)
 }
