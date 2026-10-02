@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -16,8 +17,9 @@ type HandoffPoPRequest struct {
 	// Context is the attempt context the proof binds (network, predecessor root body, attempt, frozen parent), as printed by
 	// `root handoff evm-context`.
 	Context evmassign.PoPContext
-	// Successor is the candidate binding: the successor configuration of the enrolled shard (next shard epoch, EpochStart zero)
-	// whose validator set names this authority's node with this authority's key.
+	// Successor is the candidate binding: the successor configuration of the enrolled shard (a later shard epoch within the
+	// supersession span, or the enrolled one for a pending joiner; EpochStart zero) whose validator set names this authority's node
+	// with this authority's key.
 	Successor *types.PartitionDescriptionRecord
 	// NodeID is the validator the proof is for; it must be the enrolled node.
 	NodeID string
@@ -30,8 +32,9 @@ candidate binding and the given attempt context. It is the single, narrow except
   - the message is built here, by evmassign, from structured fields; the caller supplies no bytes and chooses no domain (a request
     naming another domain is refused with ErrPoPDomain);
   - the proof is for the enrolled node and the key this authority generated, for the enrolled network, partition and shard, and for
-    the enrolled shard epoch or the one after it (a joining validator's authority may still be pending its configuration, which
-    cannot name it before the handoff): anything else is ErrContextMismatch;
+    a successor shard epoch from the enrolled one (a joining validator's authority may still be pending its configuration, which
+    cannot name it before the handoff) up to handoff.MaxSupersessionSpan after it (the next handoff, or a supersession of an
+    unacknowledged chain): anything else is ErrContextMismatch;
   - the successor must be a well-formed assignment that names this node with this key, and the context must name a nonzero
     predecessor and frozen parent.
 
@@ -62,10 +65,13 @@ func (a *Authority) SignHandoffPoP(req HandoffPoPRequest) (evmassign.PoP, error)
 		return evmassign.PoP{}, fmt.Errorf("%w: another network", ErrContextMismatch)
 	case succ.PartitionID != enroll.PartitionID || !succ.ShardID.Equal(enroll.ShardID):
 		return evmassign.PoP{}, fmt.Errorf("%w: another partition or shard", ErrContextMismatch)
-	case succ.Epoch != enroll.ShardEpoch+1 && succ.Epoch != enroll.ShardEpoch:
-		// A retained validator is enrolled at the installed shard epoch and proves for the next one; a joining validator's authority
-		// is enrolled (possibly still pending) for the successor epoch itself, which no installed configuration names yet.
-		return evmassign.PoP{}, fmt.Errorf("%w: the successor is shard epoch %d, this authority is enrolled for %d", ErrContextMismatch, succ.Epoch, enroll.ShardEpoch)
+	case !popEpochInRange(enroll.ShardEpoch, succ.Epoch):
+		// A retained validator is enrolled at the installed shard epoch and proves for the next one, or, when it supersedes an
+		// unacknowledged chain of assignments, for one up to the supersession span ahead (the successor's epoch follows the latest
+		// installed technical record, not the acknowledged one); a joining validator's authority is enrolled (possibly still pending)
+		// for the successor epoch itself, which no installed configuration names yet. A proof is a forward commitment, so nothing
+		// further ahead is signed: a compromised operator channel cannot pre-sign far-future proofs.
+		return evmassign.PoP{}, fmt.Errorf("%w: the successor is shard epoch %d, this authority is enrolled for %d (a proof covers the enrolled epoch and the next %d)", ErrContextMismatch, succ.Epoch, enroll.ShardEpoch, handoff.MaxSupersessionSpan)
 	case req.Context.Predecessor == [32]byte{}:
 		return evmassign.PoP{}, fmt.Errorf("%w: the context names no predecessor", ErrContextMismatch)
 	}
@@ -86,4 +92,14 @@ func (a *Authority) SignHandoffPoP(req HandoffPoPRequest) (evmassign.PoP, error)
 		return evmassign.PoP{}, fmt.Errorf("%w: the successor does not name this node with this authority's key", ErrContextMismatch)
 	}
 	return evmassign.SignPoP(a.signer, req.Context, succ, enroll.NodeID)
+}
+
+// popEpochInRange is the successor shard epochs a possession proof may name for an authority enrolled at the given shard epoch: that
+// epoch itself (a joiner's pending enrollment) and the next handoff.MaxSupersessionSpan epochs, the same bound root validation puts on
+// a folded acknowledgement. Nothing below the enrolled epoch and nothing further ahead.
+func popEpochInRange(enrolled, successor uint64) bool {
+	if successor == enrolled {
+		return true
+	}
+	return successor > enrolled && successor-enrolled <= handoff.MaxSupersessionSpan
 }
