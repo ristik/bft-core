@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -68,30 +69,51 @@ func bundleName(q BundleRequest) (string, error) {
 	return fmt.Sprintf("bundle-%016x-%s", q.Epoch, hex.EncodeToString(digest[:])), nil
 }
 
-// PutBundle atomically retains untrusted availability bytes. Verification of
-// the proof, full snapshot and lineage belongs to the caller.
-func (s *Store) PutBundle(q BundleRequest, raw []byte) error {
+// ErrBundleConflict is a handoff bundle that is semantically different from the one already retained under the same key. Two honest
+// copies of one handoff may differ in bytes (the signatures the commit certificate carries, the order of the snapshot's shard entries), but
+// they never differ in what they commit to: a difference there is evidence of equivocation or of a bug, and is never absorbed.
+var ErrBundleConflict = errors.New("archive: a semantically different handoff bundle is already retained under this key")
+
+// BundleEquivalence decides whether two byte-different bundles under one key are the same handoff. The store cannot: it holds
+// untrusted availability bytes and knows no handoff format. The caller verifies BOTH bundles before it compares them.
+type BundleEquivalence func(existing, incoming []byte) (bool, error)
+
+// PutBundle atomically retains untrusted availability bytes. Verification of the proof, full snapshot and lineage belongs to the caller.
+//
+// Under an existing key, identical bytes are a no-op. Different bytes are compared with same: an equivalent bundle is a no-op and the
+// first copy is kept (stored is false), a different one is refused with ErrBundleConflict, and so is any difference when same is nil.
+func (s *Store) PutBundle(q BundleRequest, raw []byte, same BundleEquivalence) (stored bool, err error) {
 	if len(raw) == 0 || len(raw) > MaxBundleBytes {
-		return ErrInvalid
+		return false, ErrInvalid
 	}
 	name, err := bundleName(q)
 	if err != nil {
-		return err
+		return false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := filepath.Join(s.dir, name)
 	if old, err := readBundle(path); err == nil {
-		if !bytes.Equal(old, raw) {
-			return ErrInvalid
+		if bytes.Equal(old, raw) {
+			return false, nil
 		}
-		return nil
+		if same == nil {
+			return false, ErrBundleConflict
+		}
+		equal, err := same(old, raw)
+		if err != nil {
+			return false, err
+		}
+		if !equal {
+			return false, ErrBundleConflict
+		}
+		return false, nil
 	} else if err != ErrUnavailable {
-		return err
+		return false, err
 	}
 	file, err := os.CreateTemp(s.dir, ".bundle-*")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer os.Remove(file.Name())
 	digest := sha256.Sum256(raw)
@@ -103,15 +125,15 @@ func (s *Store) PutBundle(q BundleRequest, raw []byte) error {
 	}
 	closeErr := file.Close()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if closeErr != nil {
-		return closeErr
+		return false, closeErr
 	}
 	if err = os.Rename(file.Name(), path); err != nil {
-		return err
+		return false, err
 	}
-	return syncDir(s.dir)
+	return true, syncDir(s.dir)
 }
 
 func readBundle(path string) ([]byte, error) {
