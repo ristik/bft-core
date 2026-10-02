@@ -28,6 +28,8 @@ class Stub(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.mode == "garbage":
             data = b"not json"
+        elif self.mode == "null":
+            data = json.dumps({"jsonrpc": "2.0", "id": 1, "result": None}).encode()
         else:
             tag = body["params"][0]
             block = {"number": "0x5", "hash": FINAL_HASH if tag == "finalized" else "0x" + "cd" * 32}
@@ -55,8 +57,8 @@ def expect(kind, fn, label):
     try:
         fn()
     except kind as exc:
-        if kind is mod.CheckError and isinstance(exc, mod.TransportError):
-            sys.exit(f"FAIL {label}: a finality violation was classified as a transport error: {exc}")
+        if kind is mod.CheckError and isinstance(exc, mod.EXCUSABLE):
+            sys.exit(f"FAIL {label}: a finality violation was classified as excusable: {exc}")
         print(f"PASS {label}: {type(exc).__name__}")
         return
     except Exception as exc:  # noqa: BLE001
@@ -75,6 +77,8 @@ with tempfile.TemporaryDirectory() as tmp:
     expect(mod.TransportError, lambda: mod.check_finalized(dead, base, log), "an unreachable RPC is a transport error")
     expect(mod.TransportError, lambda: mod.check_finalized(base, dead, log), "an unreachable status listener is a transport error")
     expect(mod.CheckError, lambda: mod.check_finalized(base, base, log), "an uncertified finalized candidate is a finality violation")
+    Stub.mode = "null"
+    expect(mod.NotReadyError, lambda: mod.check_finalized(base, base, log), "a restored client with no finalized block yet is not-ready, which is excusable")
     Stub.mode = "garbage"
     expect(mod.CheckError, lambda: mod.check_finalized(base, base, log), "a malformed answer is a finality violation, not an outage")
 print("finality monitor classification OK")

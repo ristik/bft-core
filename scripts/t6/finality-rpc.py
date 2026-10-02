@@ -21,7 +21,17 @@ class CheckError(Exception):
 
 
 class TransportError(CheckError):
-    """The endpoint could not be reached or did not answer: the only failure a planned restart or restore may excuse."""
+    """The endpoint could not be reached or did not answer."""
+
+
+class NotReadyError(CheckError):
+    """The endpoint answered but has no finalized/latest block yet (a freshly restored execution client before its first
+    forkchoice update). Nothing is exposed as finalized, so unlike a finality violation it is excusable in a restart window."""
+
+
+# The only failures a planned restart or the restore window may excuse: nothing was reachable or nothing was ready. A finality
+# violation (an uncertified finalized candidate, a bad tip, a JSON-RPC error, a malformed answer) is never excusable.
+EXCUSABLE = (TransportError, NotReadyError)
 
 
 def request_json(url: str, body: dict | None = None):
@@ -69,7 +79,7 @@ def read_tip(status_url: str):
     status = request_json(status_url.rstrip("/") + "/api/v1/operator/status")
     tip = status.get("certifiedTip")
     if not isinstance(tip, dict) or not tip.get("hash"):
-        raise CheckError(f"{status_url}: operator status has no certifiedTip")
+        raise NotReadyError(f"{status_url}: operator status has no certifiedTip")
     return int(tip["height"]), tip["hash"].lower()
 
 
@@ -77,7 +87,7 @@ def check_finalized(rpc_url: str, status_url: str, log_path: Path):
     final = rpc(rpc_url, "eth_getBlockByNumber", ["finalized", False])
     latest = rpc(rpc_url, "eth_getBlockByNumber", ["latest", False])
     if not isinstance(final, dict) or not isinstance(latest, dict):
-        raise CheckError(f"{rpc_url}: finalized/latest RPC returned no block")
+        raise NotReadyError(f"{rpc_url}: finalized/latest RPC returned no block")
     final_height = parse_int(final.get("number"), "finalized.number")
     latest_height = parse_int(latest.get("number"), "latest.number")
     final_hash = str(final.get("hash", "")).lower()
@@ -197,11 +207,11 @@ def watch(args) -> int:
                     )
                     # A finality violation (an uncertified finalized candidate, a bad tip, a JSON-RPC error) is never excused
                     # by a restart or restore: only a failure to reach the endpoint is.
-                    if not isinstance(exc, TransportError):
+                    if not isinstance(exc, EXCUSABLE):
                         expected_offline = False
                         restored_at = None
                     planned_restart = False
-                    if args.restart_marker_dir and isinstance(exc, TransportError):
+                    if args.restart_marker_dir and isinstance(exc, EXCUSABLE):
                         marker = Path(args.restart_marker_dir) / str(index)
                         if marker.exists():
                             restart_seen[index] = time.monotonic()
