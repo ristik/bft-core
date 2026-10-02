@@ -11,6 +11,7 @@ import (
 	"math"
 	"sync"
 
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -52,6 +53,32 @@ type Authority struct {
 	// rec is the one reservation this authority holds.
 	rec          record
 	scopeVersion uint64
+
+	// While a successor assignment's acknowledgement is pending, the certificate an authority is asked to extend carries the new
+	// configuration and technical-record epoch but its INPUT RECORD is still at an earlier epoch: that is exactly the request that
+	// certifies the acknowledgement. An input-record epoch is therefore admitted when it is the enrolled epoch or, until an
+	// acknowledged request has been reserved, an earlier one not before irBase: the epoch this authority last operated at (its
+	// predecessor scope), when it is known. irAckSeen latches (per scope, reset by an advance) once a request whose input record is at
+	// the enrolled epoch was reserved, after which no older input-record epoch is admitted again: acknowledgement is one-way.
+	// irBaseKnown is false for an authority that has not operated yet (a joiner enrolled for the successor epoch): the bound then falls
+	// back to handoff.MaxSupersessionSpan epochs before the enrolled one.
+	irBase      uint64
+	irBaseKnown bool
+	irAckSeen   bool
+}
+
+// irEpochAdmitted is the rule above for an input-record epoch against the enrolled shard epoch.
+func irEpochAdmitted(ir, enrolled, base uint64, baseKnown, ackSeen bool) bool {
+	switch {
+	case ir == enrolled:
+		return true
+	case ir > enrolled || ackSeen:
+		return false
+	case baseKnown:
+		return ir >= base
+	default:
+		return enrolled-ir <= handoff.MaxSupersessionSpan
+	}
 }
 
 type currentTrust struct{ base *types.RootTrustBaseV1 }
@@ -371,6 +398,12 @@ func (a *Authority) Reserve(ctx context.Context, s Session, req Request) (*Autho
 	if err := a.admitLocked(s); err != nil {
 		return nil, err
 	}
+	// Authenticate read the one-way latch and released the lock for the trust lookup, which can block; a request that reached the
+	// acknowledged input-record epoch may have been reserved in the meantime. The rule is applied again under the lock, so no
+	// older-input-record request is reserved (and then signed) after the acknowledgement.
+	if !irEpochAdmitted(auth.irEpoch, a.enroll.ShardEpoch, a.irBase, a.irBaseKnown, a.irAckSeen) {
+		return nil, fmt.Errorf("%w: input-record epoch %d is not admitted after the acknowledgement of epoch %d", ErrContextMismatch, auth.irEpoch, a.enroll.ShardEpoch)
+	}
 	switch {
 	case a.rec.empty() || auth.AssignedRound > a.rec.reserved:
 		// A higher round replaces the record, including any response for the older one: the slot is
@@ -396,6 +429,7 @@ func (a *Authority) Reserve(ctx context.Context, s Session, req Request) (*Autho
 			digest:          auth.UnsignedDigest,
 			authorizationID: bytes.Clone(auth.ID),
 		}
+		a.noteReservedLocked(auth)
 		return auth, nil
 	case auth.AssignedRound < a.rec.reserved:
 		return nil, fmt.Errorf("%w: round %d is below the reserved round %d", ErrStale, auth.AssignedRound, a.rec.reserved)
@@ -404,7 +438,16 @@ func (a *Authority) Reserve(ctx context.Context, s Session, req Request) (*Autho
 	case !a.rec.sameRequest(auth.Unsigned):
 		return nil, fmt.Errorf("%w: round %d is reserved for different bytes", ErrConflict, a.rec.reserved)
 	default:
+		a.noteReservedLocked(auth)
 		return auth, nil
+	}
+}
+
+// noteReservedLocked latches that the acknowledgement was reached once a request whose input record is at the enrolled shard epoch is
+// reserved (see irAckSeen). Reserving is what authorizes signing, and it is idempotent, so noting it twice is harmless.
+func (a *Authority) noteReservedLocked(auth *Authorization) {
+	if auth.irEpoch == a.enroll.ShardEpoch {
+		a.irAckSeen = true
 	}
 }
 
@@ -522,6 +565,7 @@ refuses it. Keeping the two apart is the point of the split, because authenticit
 func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorization, error) {
 	a.mu.Lock()
 	enroll, trust, hasKey, scopeVersion := a.enroll.clone(), a.trust, a.signer != nil, a.scopeVersion
+	irBase, irBaseKnown, irAckSeen := a.irBase, a.irBaseKnown, a.irAckSeen
 	a.mu.Unlock()
 
 	if !hasKey {
@@ -618,7 +662,7 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 	if own.Technical.Epoch != enroll.ShardEpoch {
 		return nil, fmt.Errorf("%w: assignment is for shard epoch %d, this authority is enrolled for %d", ErrContextMismatch, own.Technical.Epoch, enroll.ShardEpoch)
 	}
-	if own.UC.InputRecord.Epoch != enroll.ShardEpoch {
+	if !irEpochAdmitted(own.UC.InputRecord.Epoch, enroll.ShardEpoch, irBase, irBaseKnown, irAckSeen) {
 		return nil, fmt.Errorf("%w: certificate is for shard epoch %d, this authority is enrolled for %d", ErrContextMismatch, own.UC.InputRecord.Epoch, enroll.ShardEpoch)
 	}
 
@@ -636,6 +680,7 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 		scopeVersion:   scopeVersion,
 		AssignedRound:  own.Technical.Round,
 		AssignedEpoch:  own.Technical.Epoch,
+		irEpoch:        own.UC.InputRecord.Epoch,
 		ID:             id,
 		Unsigned:       unsigned,
 		UnsignedDigest: sha256.Sum256(unsigned),

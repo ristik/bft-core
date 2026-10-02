@@ -36,6 +36,9 @@ type Authorization struct {
 	// AssignedRound and AssignedEpoch come from the authenticated TechnicalRecord.
 	AssignedRound uint64
 	AssignedEpoch uint64
+	// irEpoch is the shard epoch the certificate's input record is at: the enrolled epoch, or (while an acknowledgement is pending) an
+	// earlier one. Reserve uses it to latch that the acknowledgement was reached (see Authority.irAckSeen).
+	irEpoch uint64
 
 	// ID identifies the authorization. Equal IDs mean the same assignment, including across valid
 	// seal signer subsets.
