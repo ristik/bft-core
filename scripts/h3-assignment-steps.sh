@@ -327,7 +327,14 @@ h3_restore_validator() {
   # The restored node lives in the validator's own home, with the paths a plain start uses (journal, archive store, debug.log), so the
   # lane's later authority-advance restarts (start_one_evm_validator) find it where they expect it. Its stale state is cleared first.
   local evidence="test-nodes/evm$i" bodyID rootBoot bootnodes peers=() p
+  local oldpid
+  oldpid=$(cat "$evidence/pid" 2>/dev/null || true)
   stop_one_evm_validator "$i" 2>/dev/null || true
+  # Clearing state under a live node can corrupt it (and the evidence): the process must be GONE first, or the lane fails.
+  if [ -n "$oldpid" ]; then
+    for _ in $(seq 1 120); do kill -0 "$oldpid" 2>/dev/null || break; sleep 0.5; done
+    if kill -0 "$oldpid" 2>/dev/null; then echo "validator $i (pid $oldpid) did not exit within 60s: refusing to clear its state" >&2; return 1; fi
+  fi
   find "$evidence" -mindepth 1 ! -name keys.json ! -name node-info.json ! -name jwt.hex ! -name logger-config.yaml -exec rm -rf {} + 2>/dev/null
   rm -rf "test-nodes/h3-archives/evm$i"
   mkdir -p "$evidence"
@@ -347,12 +354,6 @@ h3_restore_validator() {
   bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $H3_ONLINE) || return 1
   # exactly two replicas: each is two array elements (the flag and the node id)
   for p in $H3_ONLINE; do [ "$p" = "$i" ] || [ "${#peers[@]}" -ge 4 ] || peers+=(--archive-replica "$(evm_validator_id "$p")"); done
-  # a node that was still shutting down may have re-created its archive store: the restore needs a fresh one
-  for _ in $(seq 1 50); do
-    rm -rf "test-nodes/h3-archives/evm$i" "$evidence/execution-journal.db" 2>/dev/null
-    [ ! -e "test-nodes/h3-archives/evm$i" ] && break
-    sleep 0.2
-  done
   build/ubft shard-node restore --home "$evidence" --executor engine-api \
     --address "/ip4/127.0.0.1/tcp/$((evmValidatorPortStart + i - 1))" --bootnodes "$bootnodes" \
     --trust-base "$H3_RESTORE_TRUST_BASE" --full-shard-conf "$EVM_FULL_SHARD_CONF" --registry-layout 2 \
