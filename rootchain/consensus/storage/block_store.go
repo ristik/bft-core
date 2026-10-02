@@ -64,6 +64,7 @@ func New(hashAlgo crypto.Hash, db PersistentStore, orchestration Orchestration, 
 	if err != nil {
 		return nil, fmt.Errorf("initializing block tree: %w", err)
 	}
+	blTree.log = log
 	return &BlockStore{
 		hash:          hashAlgo,
 		blockTree:     blTree,
@@ -92,6 +93,7 @@ func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSt
 	if err != nil {
 		return nil, fmt.Errorf("creating block tree from recovery: %w", err)
 	}
+	blTree.log = log
 	// A root that recovers with the block that CARRIES the handoff record as its head captures the canonical checkpoint now: the next
 	// commit would find the record already committed and skip it. The carrier is the one block whose round is the control state's
 	// ordered round. A head past the carrier cannot be captured (the carrier is pruned everywhere): such a root refuses to serve the

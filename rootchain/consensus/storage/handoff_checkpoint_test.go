@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"crypto"
 	"fmt"
+	"log/slog"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
 
 // commitRound commits the block of `round` with a commit certificate for it: the same certificate for every root, as every honest root
@@ -218,4 +222,100 @@ func TestARootRecoveredPastTheCarrierRefusesToServeTheCheckpoint(t *testing.T) {
 	require.ErrorIs(t, err, ErrHandoffRecord)
 	// while a root that committed it serves it
 	require.NotEmpty(t, checkpointBytes(t, donor.s))
+}
+
+// logSink collects the records a logger wrote.
+type logSink struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logSink) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, string(p))
+	return len(p), nil
+}
+
+func (l *logSink) errors() (n int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, line := range l.lines {
+		if strings.Contains(line, "level=ERROR") && strings.Contains(line, "HANDOFF CHECKPOINT MISMATCH") {
+			n++
+		}
+	}
+	return n
+}
+
+// A checkpoint captured again for a handoff that already has one is compared by its signature-stripped identity (#355): another valid
+// signature subset of the same certificates is the same checkpoint and is silent, anything else is logged at ERROR, and neither is refused.
+func TestARecapturedCheckpointIsComparedBySignatureStrippedIdentity(t *testing.T) {
+	h := newCommittedHandoff(t, 0)
+	store := h.s.storage.(BoltDB)
+	sink := &logSink{}
+	h.s.blockTree.log = slog.New(slog.NewTextHandler(sink, nil))
+	stored, err := store.HandoffCheckpoint(2)
+	require.NoError(t, err)
+	require.NotEmpty(t, stored)
+
+	checkpoint := func(mutate func(*canonicalCheckpoint)) []byte {
+		var c canonicalCheckpoint
+		require.NoError(t, types.Cbor.Unmarshal(stored, &c))
+		mutate(&c)
+		raw, err := types.Cbor.Marshal(c)
+		require.NoError(t, err)
+		return raw
+	}
+	t.Run("the identical bytes are silent", func(t *testing.T) {
+		h.s.blockTree.compareWithStoredCheckpoint(2, store, stored)
+		require.Zero(t, sink.errors())
+	})
+	t.Run("another signature subset of the same certificates is silent", func(t *testing.T) {
+		other := checkpoint(func(c *canonicalCheckpoint) {
+			sign := func(qc *rctypes.QuorumCert, fill byte) {
+				if qc == nil {
+					return
+				}
+				qc.Signatures = map[string]hex.Bytes{"another-root": bytes.Repeat([]byte{fill}, 65)}
+				if qc.LedgerCommitInfo != nil {
+					qc.LedgerCommitInfo.Signatures = types.SignatureMap{"another-root": bytes.Repeat([]byte{fill + 1}, 65)}
+				}
+			}
+			sign(c.Block.CommitQc, 7)
+			sign(c.Block.Qc, 9)
+			sign(c.Block.Block.Qc, 11)
+		})
+		require.NotEqual(t, stored, other, "premise: the bytes differ")
+		a, err := checkpointIdentity(stored)
+		require.NoError(t, err)
+		b, err := checkpointIdentity(other)
+		require.NoError(t, err)
+		require.Equal(t, a, b, "the identity ignores signatures")
+		h.s.blockTree.compareWithStoredCheckpoint(2, store, other)
+		require.Zero(t, sink.errors())
+	})
+	t.Run("a different record, block or garbage is logged at ERROR", func(t *testing.T) {
+		for name, raw := range map[string][]byte{
+			"another control record": checkpoint(func(c *canonicalCheckpoint) {
+				c.Block.Control.RecordBytes = append(bytes.Clone(c.Block.Control.RecordBytes), 0)
+			}),
+			"another block":     checkpoint(func(c *canonicalCheckpoint) { c.Block.Block.Round++ }),
+			"another root hash": checkpoint(func(c *canonicalCheckpoint) { c.Block.CommitQc.LedgerCommitInfo.Hash = bytes.Repeat([]byte{1}, 32) }),
+			"garbage":           []byte("not a checkpoint"),
+		} {
+			before := sink.errors()
+			h.s.blockTree.compareWithStoredCheckpoint(2, store, raw)
+			require.Equal(t, before+1, sink.errors(), name)
+		}
+	})
+	t.Run("nothing stored yet is silent, and storing again never refuses or replaces", func(t *testing.T) {
+		before := sink.errors()
+		h.s.blockTree.compareWithStoredCheckpoint(9, store, []byte("anything")) // no checkpoint for epoch 9
+		require.Equal(t, before, sink.errors())
+		require.NoError(t, store.StoreHandoffCheckpoint(2, []byte("different bytes")), "a second store is still a no-op, not a refusal")
+		after, err := store.HandoffCheckpoint(2)
+		require.NoError(t, err)
+		require.Equal(t, stored, after, "the first copy is what is served")
+	})
 }
