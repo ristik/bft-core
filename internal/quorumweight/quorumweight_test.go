@@ -29,6 +29,12 @@ func TestFaultyBound(t *testing.T) {
 	f, err := FaultyBound(9)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, f)
+	for total := uint64(1); total <= 64; total++ { // the bound is total - threshold and never wraps
+		f, err = FaultyBound(total)
+		require.NoError(t, err)
+		th, _ := Threshold(total)
+		require.Equal(t, total-th, f)
+	}
 	f, err = FaultyBound(1)
 	require.NoError(t, err)
 	require.EqualValues(t, 0, f)
@@ -132,4 +138,11 @@ func TestVerifySignedRefusesOverflow(t *testing.T) {
 	tb := &fakeTB{stake: map[string]uint64{"a": math.MaxUint64, "b": 1}, bad: map[string]bool{}, threshold: 2}
 	_, err := VerifySigned(tb, nil, sigs("a", "b"))
 	require.ErrorIs(t, err, ErrWeightOverflow)
+}
+
+func TestVerifySignedWithoutMemberListClassifiesFailureAsInvalid(t *testing.T) {
+	tb := &fakeTB{stake: map[string]uint64{}, bad: map[string]bool{}, threshold: 1}
+	_, err := VerifySigned(tb, nil, sigs("x"))
+	require.ErrorIs(t, err, ErrInvalidSignature, "with no member list a failed lookup cannot be called unknown")
+	require.NotErrorIs(t, err, ErrUnknownSigner)
 }

@@ -62,10 +62,7 @@ func FaultyBound(total uint64) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if t > total {
-		return 0, nil
-	}
-	return total - t, nil
+	return total - t, nil // t <= total for every total >= 1
 }
 
 // TotalWeight sums the stake of the members with overflow refusal. Duplicate node ids and nil members are refused.
