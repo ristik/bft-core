@@ -159,6 +159,9 @@ func TestMaintainBacksOffAfterAFailedEpisodeAndStopsWithItsContext(t *testing.T)
 	for _, w := range waits {
 		require.Equal(t, PassBackoff, w, "a failed episode waits one backoff, never spins")
 	}
+	// An episode makes two exchanges (two passes), separated by one backoff, and Maintain adds one more
+	// before the next episode: a hot loop would record only half as many waits as exchanges.
+	require.GreaterOrEqual(t, len(waits), int(calls.Load())-2)
 }
 
 func TestMaintainReportsEachEpisodeOutcome(t *testing.T) {

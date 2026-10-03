@@ -1,8 +1,12 @@
 package configuredadmission
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -302,4 +306,53 @@ func TestExecutionRecoveryReadinessIsGatedOnFreshness(t *testing.T) {
 	require.ErrorIs(t, err, ErrFreshnessRequired)
 	err = r.Revalidate(context.Background(), recoveryTicket{anchor: shardnode.BlockRef{Hash: make([]byte, 32)}}, held)
 	require.ErrorIs(t, err, ErrFreshnessRequired)
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+func (l *lockedBuffer) String() string { l.mu.Lock(); defer l.mu.Unlock(); return l.b.String() }
+
+func TestFreshnessReportsAFailedAcquisitionToTheOperator(t *testing.T) {
+	chain, _, id, factory := newFreshnessFixture(t)
+	logs := &lockedBuffer{}
+	f := freshnessFor(chain, &deadOpener{})
+	f.Logger = slog.New(slog.NewTextHandler(logs, nil))
+	startFreshAdmission(t, context.Background(), *factory, id, f)
+	require.Eventually(t, func() bool { return strings.Contains(logs.String(), "bootstrap receipt acquisition failed") }, 10*time.Second, 10*time.Millisecond)
+	require.NotContains(t, logs.String(), "bootstrap receipt acquired")
+}
+
+func TestAcknowledgeReportsOrdinaryEvidenceThatCouldNotBeAdmitted(t *testing.T) {
+	chain, c, _, _ := newFreshnessFixture(t)
+	logs := &lockedBuffer{}
+	g, err := newBootstrapGuard(context.Background(), c, fixtureTrust(chain), false, func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error {
+		return errors.New("journal refused")
+	}, slog.New(slog.NewTextHandler(logs, nil)))
+	require.NoError(t, err)
+	uc, tr := signAdapterObservation(t, chain)
+	retained, err := g.AcknowledgePair(uc, tr)
+	require.NoError(t, err)
+	require.True(t, retained, "the latch holds whether or not the admission accepts the evidence")
+	require.Eventually(t, func() bool { return strings.Contains(logs.String(), "was not admitted") }, 5*time.Second, 10*time.Millisecond)
+	require.True(t, g.BootstrapState().BootstrapInvalidated)
+}
+
+func TestAcknowledgeRefusesOversizeEvidenceWithoutInvalidating(t *testing.T) {
+	chain, c, _, _ := newFreshnessFixture(t)
+	g, err := newBootstrapGuard(context.Background(), c, fixtureTrust(chain), false, nil, nil)
+	require.NoError(t, err)
+	uc, tr := signAdapterObservation(t, chain)
+	uc.InputRecord.SummaryValue = make([]byte, configuredprogress.MaxPairBytes+1)
+	retained, err := g.AcknowledgePair(uc, tr)
+	require.False(t, retained)
+	require.ErrorIs(t, err, configuredprogress.ErrBounds)
+	require.True(t, g.BootstrapState().Allowed())
 }
