@@ -75,3 +75,27 @@ func TestValidateFrontierProfileEnforcesTheFixedProfile(t *testing.T) {
 	lowQuorum.QuorumThreshold = uint64(len(good.RootNodes)) * 2 / 3
 	require.Error(t, ValidateFrontierProfile(&lowQuorum), "q must exceed 2N/3")
 }
+
+// A root that joined after the pinned trust base was cut (a successor member of the handoff profile) is not
+// enrolled in it. It must be able to find that out before building its consensus manager, which refuses it.
+func TestValidateFrontierSignerRequiresEnrollmentUnderThePinnedTrustBase(t *testing.T) {
+	nodes, infos := rctest.CreateTestNodes(t, 3)
+	trust, err := types.NewTrustBase(5, infos[:2])
+	require.NoError(t, err)
+	id := func(i int) string { return nodes[i].PeerConf.ID.String() }
+
+	require.NoError(t, ValidateFrontierSigner(trust, id(0), nodes[0].Signer))
+	require.ErrorContains(t, ValidateFrontierSigner(trust, id(2), nodes[2].Signer), "not enrolled", "a later member is not in the pinned trust base")
+	require.ErrorContains(t, ValidateFrontierSigner(trust, id(0), nodes[1].Signer), "does not match", "the enrolled identity with another key")
+	require.Error(t, ValidateFrontierSigner(trust, "", nodes[0].Signer))
+	require.Error(t, ValidateFrontierSigner(trust, id(0), nil))
+	require.Error(t, ValidateFrontierSigner(nil, id(0), nodes[0].Signer))
+
+	// The same check is what refuses the manager: the validation and the constructor cannot disagree.
+	_, shardInfos := rctest.CreateTestNodes(t, 1)
+	cms, _ := createConsensusManagersWithOptions(t, 1, shardInfos, func(tb *types.RootTrustBaseV1) []Option {
+		return []Option{WithFrontierSampler(DefaultFrontierSamplerConfig(tb)), WithFrontierSigning()}
+	}, nil)
+	require.NotNil(t, cms[0].frontier)
+	require.True(t, cms[0].frontier.signing)
+}

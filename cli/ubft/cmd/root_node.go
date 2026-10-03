@@ -253,6 +253,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	frontierServing := false
 	if profileErr := consensus.ValidateFrontierProfile(trustBase); profileErr != nil {
 		log.Warn("root frontier service disabled: the trust base is outside the bootstrap-freshness profile", "error", profileErr)
+	} else if signerErr := consensus.ValidateFrontierSigner(trustBase, nodeID.String(), signer); signerErr != nil {
+		// A root that joined at a successor epoch is not in the first trust base the service is pinned to.
+		log.Warn("root frontier service disabled: this root cannot sign under the pinned trust base", "error", signerErr)
 	} else {
 		frontierServing = true
 		options = append(options, consensus.WithFrontierSampler(consensus.DefaultFrontierSamplerConfig(trustBase)), consensus.WithFrontierSigning())

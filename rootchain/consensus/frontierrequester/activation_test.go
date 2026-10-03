@@ -116,7 +116,7 @@ func TestFreshnessRequesterIsActivatedByProductionStartup(t *testing.T) {
 	// The root's default startup enables the sampler and signing and registers both protocols.
 	rootSel := selectors(parseFile(t, filepath.Join(root, "cli", "ubft", "cmd", "root_node.go")))
 	for _, want := range []string{
-		"consensus.WithFrontierSampler", "consensus.WithFrontierSigning", "consensus.ValidateFrontierProfile",
+		"consensus.WithFrontierSampler", "consensus.WithFrontierSigning", "consensus.ValidateFrontierProfile", "consensus.ValidateFrontierSigner",
 		"frontiertransport.FrontierProtocolID", "frontiertransport.CutProtocolID", "frontiertransport.NewServer",
 	} {
 		require.True(t, rootSel[want], "root-node run must reference %s", want)

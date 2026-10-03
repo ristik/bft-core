@@ -652,8 +652,12 @@ What changes for operators:
 
 - **Roots serve it by default.** At start each root logs `root frontier service enabled` (with the
   validator count) or `root frontier service disabled` with the reason: a trust base outside the fixed
-  profile (unit-weight roots, `2N/3 < q <= N`, one epoch), or shards with no usable validator set. A root
-  that logs "disabled" cannot confirm a bootstrap, so a fresh shard validator stays unready.
+  profile (unit-weight roots, `2N/3 < q <= N`, one epoch), a root that is not in the first trust base the
+  service is pinned to (`this root cannot sign under the pinned trust base`: a root that joined at a successor
+  handoff epoch), or shards with no usable validator set. A root that logs "disabled" does not answer, and a
+  fresh shard validator needs a quorum of answering roots, so it stays unready if too few remain. The service is
+  specified for one pinned root epoch: once the original roots have all been replaced, a fresh genesis
+  bootstrap can no longer be confirmed. That does not affect validators that already hold ordinary progress.
 - **Only the shard validators named in the root's `--shard-conf` files may ask.** The set is fixed when
   the root starts. A configuration added later through `PUT /api/v1/configurations` is served after
   the root's next restart.

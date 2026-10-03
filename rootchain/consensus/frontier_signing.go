@@ -60,11 +60,20 @@ type signedFrontierRequest struct {
 }
 
 func (s *frontierSampler) enableSigning(author string, signer abcrypto.Signer) error {
+	if err := checkFrontierSigner(s.trust, author, signer); err != nil {
+		return err
+	}
+	s.signing, s.author, s.signer = true, author, signer
+	return nil
+}
+
+// checkFrontierSigner reports whether signer is the key the pinned trust base enrolls for author.
+func checkFrontierSigner(trust *types.RootTrustBaseV1, author string, signer abcrypto.Signer) error {
 	if signer == nil || len(author) == 0 || len(author) > frontierMaxAuthor {
 		return errors.New("invalid frontier signing identity")
 	}
 	var enrolledKey []byte
-	for _, n := range s.trust.RootNodes {
+	for _, n := range trust.RootNodes {
 		if n.NodeID == author {
 			enrolledKey = n.SigKey
 			break
@@ -84,8 +93,17 @@ func (s *frontierSampler) enableSigning(author string, signer abcrypto.Signer) e
 	if !bytes.Equal(key, enrolledKey) {
 		return errors.New("frontier signing key does not match enrolled author")
 	}
-	s.signing, s.author, s.signer = true, author, signer
 	return nil
+}
+
+// ValidateFrontierSigner reports whether a root with this identity can serve frontier replies under trust: its
+// key must be the one the pinned trust base enrolls. A root that joined after that trust base (a successor
+// member of the handoff profile) is not enrolled and must run without the service, not fail to start.
+func ValidateFrontierSigner(trust *types.RootTrustBaseV1, author string, signer abcrypto.Signer) error {
+	if trust == nil {
+		return errors.New("invalid frontier trust profile")
+	}
+	return checkFrontierSigner(trust, author, signer)
 }
 
 func (x *ConsensusManager) SampleSignedFrontier(ctx context.Context, req SignedFrontierRequest) (*SignedFrontierResponse, error) {
