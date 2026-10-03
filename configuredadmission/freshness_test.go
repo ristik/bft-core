@@ -1,0 +1,305 @@
+package configuredadmission
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	libnetwork "github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/configuredprogress"
+	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
+	"github.com/unicitynetwork/bft-core/network"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontierrequester"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontiertransport"
+	"github.com/unicitynetwork/bft-core/rootinput"
+	"github.com/unicitynetwork/bft-core/shardnode"
+	"github.com/unicitynetwork/bft-go-base/types"
+)
+
+// deadOpener models roots that never answer: every exchange fails, so no receipt is ever issued.
+// calls proves the requester was actually started.
+type deadOpener struct{ calls atomic.Int32 }
+
+func (o *deadOpener) CreateStream(context.Context, peer.ID, string) (libnetwork.Stream, error) {
+	o.calls.Add(1)
+	return nil, errors.New("root unreachable")
+}
+
+var journalLimits = configuredprogress.JournalLimits{Candidates: 2, Observations: 3, Bytes: 16 << 20}
+
+func newFreshnessFixture(t *testing.T) (*certifiedchain.Chain, configuredprogress.Context, shardnode.AdmissionIdentity, *JournalFactory) {
+	t.Helper()
+	chain, origin, c, id := adapterFixture(t)
+	store, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 2})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	_, _, err = store.Initialize(context.Background(), c)
+	require.NoError(t, err)
+	require.NoError(t, store.EnableJournal(context.Background(), c, journalLimits))
+	return chain, c, id, &JournalFactory{Store: store, Origin: origin, Limits: journalLimits}
+}
+
+func startFreshAdmission(t *testing.T, ctx context.Context, factory JournalFactory, id shardnode.AdmissionIdentity, f *Freshness) *journalAdmission {
+	t.Helper()
+	factory.Freshness = f
+	a, err := factory.Start(ctx, id, adapterGate{}, shardnode.AdmissionCallbacks{
+		AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {},
+		DeliverDurable:    func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error { return nil },
+	})
+	require.NoError(t, err, "freshness trouble must never stop the node from starting")
+	t.Cleanup(func() { require.NoError(t, a.Close()) })
+	return a.(*journalAdmission)
+}
+
+// fixtureTrust is the chain's root trust at the network the adapter fixture certifies under (3):
+// the requester refuses a trust base whose network differs from the shard's.
+func fixtureTrust(chain *certifiedchain.Chain) *types.RootTrustBaseV1 {
+	tb := *chain.TrustBase
+	tb.NetworkID = 3
+	return &tb
+}
+
+func freshnessFor(chain *certifiedchain.Chain, o frontiertransport.StreamOpener) *Freshness {
+	return &Freshness{Opener: o, TrustBase: fixtureTrust(chain)}
+}
+
+func unsupportedPair(t *testing.T, chain *certifiedchain.Chain) (*types.UnicityCertificate, *certification.TechnicalRecord) {
+	t.Helper()
+	tr := certifiedchain.Technical(0)
+	tr.Round = 1
+	uc := chain.Certify(chain.Signer, &types.InputRecord{Version: 1, SumOfEarnedFees: 1}, tr, 4)
+	uc.UnicitySeal.NetworkID = 3
+	uc.UnicitySeal.Signatures = nil
+	v, err := chain.Signer.Verifier()
+	require.NoError(t, err)
+	pk, err := v.MarshalPublicKey()
+	require.NoError(t, err)
+	id, err := network.NodeIDFromPublicKeyBytes(pk)
+	require.NoError(t, err)
+	require.NoError(t, uc.UnicitySeal.Sign(id.String(), chain.Signer))
+	return uc, tr
+}
+
+// The requester is active in default startup: starting the admission with nothing but the root trust
+// base and a stream opener makes it begin acquiring, and until a receipt exists bootstrap readiness
+// is refused.
+func TestFreshnessStartsAcquiringAndRefusesBootstrapWithoutReceipt(t *testing.T) {
+	chain, _, id, factory := newFreshnessFixture(t)
+	opener := &deadOpener{}
+	f := freshnessFor(chain, opener)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startFreshAdmission(t, ctx, *factory, id, f)
+	require.Eventually(t, func() bool { return opener.calls.Load() > 0 }, 5*time.Second, 10*time.Millisecond, "the requester must start with the admission")
+	require.ErrorIs(t, f.Require(), ErrFreshnessRequired)
+}
+
+func TestFreshnessIsUnavailableBeforeStartAndWhenItsProfileIsRefused(t *testing.T) {
+	require.ErrorIs(t, (&Freshness{}).Require(), ErrFreshnessUnavailable, "not started")
+	chain, _, id, factory := newFreshnessFixture(t)
+	f := &Freshness{TrustBase: fixtureTrust(chain)} // no opener: the profile cannot be served
+	startFreshAdmission(t, context.Background(), *factory, id, f)
+	require.ErrorIs(t, f.Require(), ErrFreshnessUnavailable)
+	var nilFreshness *Freshness
+	require.NoError(t, nilFreshness.Require(), "a deployment without the gate is unchanged")
+}
+
+type scriptedReceipts struct{ validate error }
+
+func (s scriptedReceipts) Current() frontierrequester.Receipt       { return frontierrequester.Receipt{} }
+func (s scriptedReceipts) Validate(frontierrequester.Receipt) error { return s.validate }
+
+// A receipt that has expired, was replaced or lost its caller no longer validates; readiness follows it
+// at once and recovers when a new one validates.
+func TestRequireFollowsTheReceiptLifetime(t *testing.T) {
+	chain, c, _, _ := newFreshnessFixture(t)
+	g, err := newBootstrapGuard(context.Background(), c, fixtureTrust(chain), false, nil, nil)
+	require.NoError(t, err)
+	f := &Freshness{guard: g, requester: scriptedReceipts{}}
+	require.NoError(t, f.Require())
+	f.requester = scriptedReceipts{validate: frontierrequester.ErrInvalidated}
+	require.ErrorIs(t, f.Require(), ErrFreshnessRequired)
+	f.requester = scriptedReceipts{}
+	require.NoError(t, f.Require())
+}
+
+func TestRequireRefusesAStoppedProcess(t *testing.T) {
+	chain, c, _, _ := newFreshnessFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	g, err := newBootstrapGuard(ctx, c, fixtureTrust(chain), false, nil, nil)
+	require.NoError(t, err)
+	f := &Freshness{guard: g, requester: scriptedReceipts{}}
+	require.NoError(t, f.Require())
+	cancel()
+	require.ErrorIs(t, f.Require(), ErrFreshnessUnavailable)
+}
+
+// Ordinary progress authenticated by the admission supersedes bootstrap even though the write that
+// follows fails: learning it is what ends eligibility, not persisting it.
+func TestOrdinaryAdmissionSupersedesBootstrapBeforeItIsPersisted(t *testing.T) {
+	chain, _, id, factory := newFreshnessFixture(t)
+	opener := &deadOpener{}
+	f := freshnessFor(chain, opener)
+	a := startFreshAdmission(t, context.Background(), *factory, id, f)
+	require.ErrorIs(t, f.Require(), ErrFreshnessRequired)
+	ordinary, tr := signAdapterObservation(t, chain)
+	err := a.Submit(context.Background(), ordinary, tr)
+	require.ErrorIs(t, err, configuredprogress.ErrUnavailable, "a fresh journal must begin with the bootstrap certificate, so nothing was written")
+	status, ok := f.Status()
+	require.True(t, ok)
+	require.True(t, status.Invalidated)
+	require.NoError(t, f.Require(), "ordinary progress needs no bootstrap receipt")
+}
+
+func TestBootstrapAdmissionDoesNotSupersedeBootstrap(t *testing.T) {
+	chain, _, id, factory := newFreshnessFixture(t)
+	f := freshnessFor(chain, &deadOpener{})
+	a := startFreshAdmission(t, context.Background(), *factory, id, f)
+	uc, tr := journalBootstrap(t, chain)
+	require.NoError(t, a.Submit(context.Background(), uc, tr))
+	status, _ := f.Status()
+	require.False(t, status.Invalidated)
+	require.ErrorIs(t, f.Require(), ErrFreshnessRequired, "persisting the bootstrap certificate is data, not freshness")
+}
+
+// A restart keeps ordinary progress forever, and keeps bootstrap data only as data.
+func TestRestartNeedsNoReceiptForOrdinaryProgressAndNeverRestoresOne(t *testing.T) {
+	chain, _, id, factory := newFreshnessFixture(t)
+	first := freshnessFor(chain, &deadOpener{})
+	a := startFreshAdmission(t, context.Background(), *factory, id, first)
+	boot, bootTR := journalBootstrap(t, chain)
+	require.NoError(t, a.Submit(context.Background(), boot, bootTR))
+	require.NoError(t, a.Close())
+
+	opener := &deadOpener{}
+	restarted := freshnessFor(chain, opener)
+	startFreshAdmission(t, context.Background(), *factory, id, restarted)
+	require.ErrorIs(t, restarted.Require(), ErrFreshnessRequired, "bootstrap-only store: persisted data is not a renewed permit")
+	require.Eventually(t, func() bool { return opener.calls.Load() > 0 }, 5*time.Second, 10*time.Millisecond)
+
+	ordinary, tr := signAdapterObservation(t, chain)
+	second := startFreshAdmission(t, context.Background(), *factory, id, freshnessFor(chain, &deadOpener{}))
+	_ = second.Submit(context.Background(), ordinary, tr) // durable, though its body is unresolved
+	require.NoError(t, second.Close())
+
+	quiet := &deadOpener{}
+	final := freshnessFor(chain, quiet)
+	startFreshAdmission(t, context.Background(), *factory, id, final)
+	status, _ := final.Status()
+	require.True(t, status.Invalidated, "durable ordinary progress is known at start")
+	require.NoError(t, final.Require())
+	time.Sleep(50 * time.Millisecond)
+	require.Zero(t, quiet.calls.Load(), "no acquisition runs once ordinary progress is durable")
+}
+
+func TestAcknowledgeUnsupportedEvidenceRefusesBootstrap(t *testing.T) {
+	chain, c, _, _ := newFreshnessFixture(t)
+	g, err := newBootstrapGuard(context.Background(), c, fixtureTrust(chain), false, nil, nil)
+	require.NoError(t, err)
+	f := &Freshness{guard: g, requester: scriptedReceipts{}}
+	uc, tr := unsupportedPair(t, chain)
+	retained, err := g.AcknowledgePair(uc, tr)
+	require.True(t, retained)
+	require.True(t, rootinput.IsUnsupportedObservationV2(err))
+	state := g.BootstrapState()
+	require.True(t, state.BootstrapInvalidated)
+	require.True(t, state.UnsupportedSeen)
+	require.ErrorIs(t, f.Require(), ErrBootstrapRefused, "a live receipt cannot outvote unsupported evidence")
+}
+
+func TestAcknowledgeOrdinaryEvidenceLatchesRetainsAndForwards(t *testing.T) {
+	chain, c, _, _ := newFreshnessFixture(t)
+	forwarded := make(chan *types.UnicityCertificate, 2)
+	g, err := newBootstrapGuard(context.Background(), c, fixtureTrust(chain), false, func(_ context.Context, uc *types.UnicityCertificate, _ *certification.TechnicalRecord) error {
+		forwarded <- uc
+		return nil
+	}, nil)
+	require.NoError(t, err)
+	require.True(t, g.BootstrapState().Allowed())
+	uc, tr := signAdapterObservation(t, chain)
+	retained, err := g.AcknowledgePair(uc, tr)
+	require.NoError(t, err)
+	require.True(t, retained)
+	state := g.BootstrapState()
+	require.True(t, state.BootstrapInvalidated)
+	require.False(t, state.UnsupportedSeen)
+	select {
+	case got := <-forwarded:
+		require.Equal(t, uc.GetRootRoundNumber(), got.GetRootRoundNumber())
+	case <-time.After(5 * time.Second):
+		t.Fatal("ordinary evidence was not handed to the journal admission")
+	}
+	status := g.Status()
+	require.NotEmpty(t, status.FirstOrdinary)
+	require.Equal(t, status.FirstOrdinary, status.LatestOrdinary)
+}
+
+func TestAcknowledgeRefusesBootstrapAndForgedEvidenceWithoutInvalidating(t *testing.T) {
+	chain, c, _, _ := newFreshnessFixture(t)
+	var forwards atomic.Int32
+	g, err := newBootstrapGuard(context.Background(), c, fixtureTrust(chain), false, func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error {
+		forwards.Add(1)
+		return nil
+	}, nil)
+	require.NoError(t, err)
+	boot, bootTR := journalBootstrap(t, chain)
+	retained, err := g.AcknowledgePair(boot, bootTR)
+	require.False(t, retained)
+	require.ErrorIs(t, err, configuredprogress.ErrConflict, "bootstrap evidence is not negative evidence")
+	uc, tr := signAdapterObservation(t, chain)
+	for signer, sig := range uc.UnicitySeal.Signatures {
+		sig[0] ^= 0xff
+		uc.UnicitySeal.Signatures[signer] = sig
+	}
+	retained, err = g.AcknowledgePair(uc, tr)
+	require.False(t, retained)
+	require.Error(t, err)
+	require.True(t, g.BootstrapState().Allowed(), "forged evidence must not end bootstrap")
+	require.Zero(t, forwards.Load())
+	require.Empty(t, g.Status().FirstOrdinary)
+}
+
+func TestGuardRefusesATrustBaseOfAnotherEpoch(t *testing.T) {
+	chain, c, _, _ := newFreshnessFixture(t)
+	other := *chain.TrustBase
+	other.Epoch = c.Observation.RootEpoch + 1
+	_, err := newBootstrapGuard(context.Background(), c, &other, false, nil, nil)
+	require.ErrorIs(t, err, frontierrequester.ErrSettings)
+}
+
+func TestRootPeersFollowTheTrustBase(t *testing.T) {
+	chain, _, _, _ := newFreshnessFixture(t)
+	peers, err := RootPeers(chain.TrustBase)
+	require.NoError(t, err)
+	require.Len(t, peers, len(chain.TrustBase.RootNodes))
+	for i, p := range peers {
+		require.Equal(t, chain.TrustBase.RootNodes[i].NodeID, p.Author)
+		require.Equal(t, p.Author, p.PeerID.String())
+	}
+	bad := *chain.TrustBase
+	bad.RootNodes = append([]*types.NodeInfo{{NodeID: "not-a-peer-id"}}, bad.RootNodes...)
+	_, err = RootPeers(&bad)
+	require.ErrorIs(t, err, frontierrequester.ErrSettings)
+	_, err = RootPeers(nil)
+	require.ErrorIs(t, err, frontierrequester.ErrSettings)
+}
+
+// Readiness consults freshness before touching the executor or the journal, at preparation and again
+// inside the finality gate. The recovery here has neither, so only the gate can answer.
+func TestExecutionRecoveryReadinessIsGatedOnFreshness(t *testing.T) {
+	chain, c, _, _ := newFreshnessFixture(t)
+	g, err := newBootstrapGuard(context.Background(), c, fixtureTrust(chain), false, nil, nil)
+	require.NoError(t, err)
+	f := &Freshness{guard: g, requester: scriptedReceipts{validate: frontierrequester.ErrInvalidated}}
+	r := &ExecutionRecovery{Freshness: f}
+	held, _ := journalBootstrap(t, chain)
+	_, err = r.Prepare(context.Background(), held)
+	require.ErrorIs(t, err, ErrFreshnessRequired)
+	err = r.Revalidate(context.Background(), recoveryTicket{anchor: shardnode.BlockRef{Hash: make([]byte, 32)}}, held)
+	require.ErrorIs(t, err, ErrFreshnessRequired)
+}

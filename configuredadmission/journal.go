@@ -11,6 +11,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/certifiedstore"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/rootinput"
@@ -30,6 +31,9 @@ type JournalFactory struct {
 	OnStop            func(error)
 	Logger            *slog.Logger
 	EpochAuthority    rootinput.RootEpochAuthority
+	// Freshness, when set, is started with the admission: it runs the automatic root-quorum
+	// bootstrap acquisition and learns of ordinary progress the admission authenticates (#350).
+	Freshness *Freshness
 }
 
 type journalAdmission struct {
@@ -42,6 +46,7 @@ type journalAdmission struct {
 	callbacks       shardnode.AdmissionCallbacks
 	epoch           uint64
 	catchUp         func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
+	guard           *bootstrapGuard
 	onStop          func(error)
 	logger          *slog.Logger
 	ctx             context.Context
@@ -83,6 +88,9 @@ func (f JournalFactory) Start(ctx context.Context, id shardnode.AdmissionIdentit
 		return nil, fmt.Errorf("loading execution journal: %w", err)
 	}
 	a := &journalAdmission{store: f.Store, context: c, limits: f.Limits, gate: gate, callbacks: callbacks, epoch: c.Observation.RootEpoch, catchUp: f.CatchUp, onStop: f.OnStop, logger: f.Logger, ctx: ctx, closeCh: make(chan struct{})}
+	if f.Freshness != nil {
+		a.guard = f.Freshness.start(ctx, c, f.Store, a.Submit)
+	}
 	return a, nil
 }
 
@@ -138,6 +146,11 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 		return err
 	}
 	authenticatedUC, authenticatedTR = o.Certificate(), o.TechnicalRecord()
+	if o.Class() != evmroot.OriginBootstrapV2 {
+		// Ordinary progress ends bootstrap eligibility the moment it authenticates, before any
+		// write that could fail (F6f section 4).
+		a.guard.NoteOrdinary()
+	}
 	p, _, err := a.store.PrepareObservation(ctx, a.context, o)
 	if err != nil {
 		if a.catchUp == nil || !errors.Is(err, configuredprogress.ErrConflict) && !errors.Is(err, configuredprogress.ErrUnavailable) {

@@ -1,6 +1,8 @@
-// Package frontierrequester implements the inactive bounded acquisition of a
-// root frontier quorum and committed cut. It performs no node registration,
-// readiness transition, bootstrap activation, or durable permission write.
+// Package frontierrequester implements the bounded acquisition of a root
+// frontier quorum and committed cut, and the process-local receipt it issues.
+// The requester itself performs no readiness transition and writes no durable
+// permission: configuredadmission owns its production registration, and shard
+// readiness consults the live receipt (F6f section 7, unit 4).
 package frontierrequester
 
 import (
@@ -31,6 +33,10 @@ const (
 	MaxPeers         = 64
 	MaxPasses        = 2
 	PassBackoff      = 5 * time.Second
+	// MaintainPoll is how often Maintain rechecks a live receipt. A receipt is
+	// invalidated by events, not by a timer, so this only bounds how long an
+	// expired or invalidated receipt goes unnoticed.
+	MaintainPoll = time.Second
 )
 
 var (
@@ -47,12 +53,25 @@ type RootPeer struct {
 	PeerID peer.ID
 }
 
+// Admission is the live admission state the requester consults and the
+// acknowledged boundary it hands negative evidence to. Both
+// *configuredprogress.AdmissionCoordinator and the journal-backed guard in
+// configuredadmission implement it.
+type Admission interface {
+	EvidenceProfileBinding() [32]byte
+	BootstrapState() configuredprogress.BootstrapAdmissionState
+	AcknowledgePair(*types.UnicityCertificate, *certification.TechnicalRecord) (retained bool, err error)
+}
+
 type Config struct {
 	Process   context.Context
 	Profile   frontierclient.Profile
 	Peers     []RootPeer
 	Opener    frontiertransport.StreamOpener
-	Admission *configuredprogress.AdmissionCoordinator
+	Admission Admission
+	// Report, when set, is told the outcome of each acquisition episode Maintain runs (nil on
+	// success). It is for operator visibility only and must not block.
+	Report func(error)
 }
 
 type clock interface {
@@ -109,7 +128,8 @@ type Requester struct {
 	profile   frontierclient.Profile
 	peers     []RootPeer
 	opener    frontiertransport.StreamOpener
-	admission *configuredprogress.AdmissionCoordinator
+	admission Admission
+	report    func(error)
 	clock     clock
 	random    io.Reader
 
@@ -183,7 +203,47 @@ func newRequester(cfg Config, clk clock, random io.Reader) (*Requester, error) {
 	if !peerWeight.Reached(profile.TrustBase.QuorumThreshold) {
 		return nil, ErrSettings
 	}
-	return &Requester{process: cfg.Process, profile: profile, peers: peers, opener: cfg.Opener, admission: cfg.Admission, clock: clk, random: random}, nil
+	return &Requester{process: cfg.Process, profile: profile, peers: peers, opener: cfg.Opener, admission: cfg.Admission, report: cfg.Report, clock: clk, random: random}, nil
+}
+
+// Current returns the receipt of the most recent successful acquisition, or
+// the zero Receipt. It is a copy: Valid and Validate still consult live state.
+func (r *Requester) Current() Receipt {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.receipt
+}
+
+// Maintain keeps one live receipt for as long as bootstrap admission is still
+// allowed: it acquires, and after expiry, replacement or caller cancellation
+// acquires again, backing off between failed episodes. It returns ErrInvalidated
+// once ordinary or unsupported evidence (or coordinator shutdown) makes
+// bootstrap permanently refused for this process, and the context error when
+// ctx ends. Nothing is persisted: a restarted process begins with no receipt.
+func (r *Requester) Maintain(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !r.admission.BootstrapState().Allowed() {
+			return ErrInvalidated
+		}
+		wait := MaintainPoll
+		if !r.Current().Valid() {
+			res := r.Acquire(ctx)
+			if r.report != nil && ctx.Err() == nil {
+				r.report(res.Err)
+			}
+			if res.Err != nil {
+				wait = PassBackoff
+			} else {
+				continue
+			}
+		}
+		if err := r.clock.Wait(ctx, wait); err != nil {
+			return err
+		}
+	}
 }
 
 func ownProfile(p frontierclient.Profile) (frontierclient.Profile, error) {

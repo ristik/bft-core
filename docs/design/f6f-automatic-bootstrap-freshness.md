@@ -310,7 +310,26 @@ and process contexts, nonce/profile binding, live collector and admission state,
 minutes from nonce creation. Copies cannot bypass replacement, cancellation, expiry, ordinary evidence or
 unsupported evidence. Closing the admission coordinator also invalidates the receipt. Resolving a valid receipt
 returns owned copies of the genuine UC/TR and the cut identity; those copies do not carry a portable freshness
-verdict. The requester remains unregistered and grants no readiness or bootstrap activation.
+verdict. The requester itself grants no readiness or signing authority; its activation in default startup
+(unit 4, #350) is described next.
+
+**Activation (#350).** Default startup now includes unit 4. Roots enable the sampler and signing and register
+both transport protocols for the validators of the shards in their `--shard-conf` files (fixed at root start);
+a trust base outside the fixed profile logs a warning and the root serves nothing. A shard validator's journal
+admission starts the requester (`configuredadmission.Freshness`), which `Maintain`s one receipt while bootstrap
+is still the only known state. The requester takes a narrow `Admission` interface: the journal path supplies a
+guard that holds the sticky invalidation latch and the acknowledged retention of authenticated negative evidence,
+and hands ordinary evidence to the journal admission. Readiness is gated in `ExecutionRecovery.Prepare` and
+again in `Revalidate` (inside the finality gate): bootstrap needs a live receipt; ordinary progress needs none
+and never consults one; authenticated unsupported evidence with no ordinary progress refuses. The latch is set
+when the journal admission authenticates an ordinary certificate, before that certificate is persisted, and from
+durable ordinary state at start. Admission of the bootstrap certificate itself remains data and is not gated
+(F6e section 2). No receipt is stored. Choices this unit made where the design was open: gate readiness, not
+admission; one acquisition owner per process that re-acquires after expiry (a gap of one acquisition at expiry);
+root eligibility from configured shard validators at start; a trust base outside the profile disables root
+serving instead of failing root startup; a requester that cannot be built leaves bootstrap unready rather than
+failing node startup. Genuine initial timeout repeats are not chained into the receipt: each repeat is covered by
+the process's live receipt, and a new acquisition covers a lapse.
 
 The small [intersection model](models/bootstrap_frontier.py) enumerates unit-vote quorum/fault sets and
 checks the floor argument plus counterexamples for local-status/minimum-floor/rollback substitutions.

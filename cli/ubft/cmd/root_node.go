@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -31,6 +32,7 @@ import (
 	"github.com/unicitynetwork/bft-core/observability"
 	"github.com/unicitynetwork/bft-core/rootchain"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontiertransport"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
@@ -245,6 +247,17 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		options = append(options, consensus.WithRecoveryProfile2(history))
 	}
 
+	// The root serves the automatic bootstrap-freshness protocol (F6f, #350) in default
+	// startup. A trust base outside its fixed profile cannot serve it: say so and run
+	// without, so replacement shard validators stay unready rather than the root failing.
+	frontierServing := false
+	if profileErr := consensus.ValidateFrontierProfile(trustBase); profileErr != nil {
+		log.Warn("root frontier service disabled: the trust base is outside the bootstrap-freshness profile", "error", profileErr)
+	} else {
+		frontierServing = true
+		options = append(options, consensus.WithFrontierSampler(consensus.DefaultFrontierSamplerConfig(trustBase)), consensus.WithFrontierSigning())
+	}
+
 	cm, err := consensus.NewConsensusManager(
 		host.ID(),
 		trustBaseStore,
@@ -257,6 +270,13 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed initiate distributed consensus manager: %w", err)
+	}
+	if frontierServing {
+		stopFrontier, serveErr := serveRootFrontier(ctx, log, host, cm, shardConfs)
+		if serveErr != nil {
+			return serveErr
+		}
+		defer stopFrontier()
 	}
 	if flags.Profile2 {
 		server, err := handoffdelivery.NewServer(cm)
@@ -602,4 +622,54 @@ func loadShardConfs(orchestration *partitions.Orchestration, handoffProfile bool
 		}
 	}
 	return nil
+}
+
+// frontierEligiblePeers is the distinct set of shard validators allowed to query the root's frontier service.
+func frontierEligiblePeers(shardConfs []*types.PartitionDescriptionRecord) ([]peer.ID, error) {
+	seen := map[peer.ID]struct{}{}
+	var eligible []peer.ID
+	for _, conf := range shardConfs {
+		for _, v := range conf.Validators {
+			id, err := peer.Decode(v.NodeID)
+			if err != nil {
+				return nil, fmt.Errorf("frontier service: shard validator %q is not a peer ID: %w", v.NodeID, err)
+			}
+			if _, dup := seen[id]; !dup {
+				seen[id] = struct{}{}
+				eligible = append(eligible, id)
+			}
+		}
+	}
+	return eligible, nil
+}
+
+// serveRootFrontier registers the root-bootstrap frontier and cut protocols for the validators of
+// the shards this root was configured with. The eligible set is fixed when the root starts: a shard
+// configuration added later through the RPC server is served after the next restart.
+func serveRootFrontier(ctx context.Context, log *slog.Logger, host *network.Peer, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord) (func(), error) {
+	limits := consensus.DefaultFrontierServerLimits()
+	eligible, err := frontierEligiblePeers(shardConfs)
+	if err != nil {
+		return nil, err
+	}
+	if len(eligible) == 0 || len(eligible) > limits.MaxEligiblePeers {
+		log.Warn("root frontier service disabled: the configured shards have no usable validator set", "validators", len(eligible))
+		return func() {}, nil
+	}
+	handlers, err := cm.FrontierHandlers()
+	if err != nil {
+		return nil, err
+	}
+	server, err := frontiertransport.NewServer(ctx, eligible, limits, handlers)
+	if err != nil {
+		return nil, fmt.Errorf("frontier service: %w", err)
+	}
+	host.RegisterProtocolHandler(frontiertransport.FrontierProtocolID, server.FrontierHandler)
+	host.RegisterProtocolHandler(frontiertransport.CutProtocolID, server.CutHandler)
+	log.Info("root frontier service enabled", "validators", len(eligible))
+	return func() {
+		host.RemoveProtocolHandler(frontiertransport.FrontierProtocolID)
+		host.RemoveProtocolHandler(frontiertransport.CutProtocolID)
+		server.Close()
+	}, nil
 }
