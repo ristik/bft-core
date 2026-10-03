@@ -266,3 +266,40 @@ func TestVerifyTrustBaseLineage(t *testing.T) {
 }
 
 type testDouble struct{ types.RootTrustBase }
+
+func TestNewTrustBaseRefusesWhatGoBaseWouldWrap(t *testing.T) {
+	node := func(id string, stake uint64) *types.NodeInfo {
+		return &types.NodeInfo{NodeID: id, SigKey: []byte{1}, Stake: stake}
+	}
+
+	// the sum wraps around to 3: go-base builds a trust base with threshold 3 for a committee of enormous weight
+	wrapping := []*types.NodeInfo{node("a", math.MaxUint64), node("b", 4)}
+	tb, err := types.NewTrustBase(5, wrapping)
+	require.NoError(t, err, "unchecked go-base accepts the wrapped sum")
+	require.EqualValues(t, 3, tb.QuorumThreshold)
+	_, err = NewTrustBase(5, []*types.NodeInfo{node("a", math.MaxUint64), node("b", 4)})
+	require.ErrorIs(t, err, ErrWeightOverflow)
+
+	// the sum fits but doubling it for the minimum threshold does not
+	_, err = NewTrustBase(5, []*types.NodeInfo{node("a", math.MaxUint64/2+1)})
+	require.ErrorIs(t, err, ErrWeightOverflow)
+
+	_, err = NewTrustBase(5, []*types.NodeInfo{node("a", 1), node("a", 1)})
+	require.ErrorIs(t, err, ErrDuplicateSigner)
+	_, err = NewTrustBase(5, []*types.NodeInfo{node("a", 1), nil})
+	require.ErrorIs(t, err, ErrUnknownSigner)
+	_, err = NewTrustBase(5, nil)
+	require.ErrorIs(t, err, ErrZeroWeight)
+	_, err = NewTrustBase(5, []*types.NodeInfo{node("a", 0)})
+	require.ErrorIs(t, err, ErrZeroWeight)
+
+	// a valid committee builds exactly what go-base builds, options included
+	got, err := NewTrustBase(5, []*types.NodeInfo{node("b", 6), node("a", 1), node("c", 1), node("d", 1)}, types.WithEpoch(2), types.WithQuorumThreshold(8))
+	require.NoError(t, err)
+	want, err := types.NewTrustBase(5, []*types.NodeInfo{node("b", 6), node("a", 1), node("c", 1), node("d", 1)}, types.WithEpoch(2), types.WithQuorumThreshold(8))
+	require.NoError(t, err)
+	require.Equal(t, want.QuorumThreshold, got.QuorumThreshold)
+	require.EqualValues(t, 8, got.QuorumThreshold)
+	require.EqualValues(t, 2, got.Epoch)
+	require.Equal(t, "a", got.RootNodes[0].NodeID)
+}

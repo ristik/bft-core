@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// go-base's NewTrustBase must not be called directly either (see the case below).
 // go-base's UnicityCertificate.Verify and UnicitySeal.Verify decide the root quorum through the unchecked
 // RootTrustBase.VerifyQuorumSignatures (silent skip of unknown signers, wrapping stake sum). Every production call must
 // therefore pass the trust base through Checked, and nothing may call the unchecked verifiers directly.
@@ -24,7 +25,7 @@ func TestEveryProductionUCVerifyRoutesThroughChecked(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if n := d.Name(); n == ".git" || n == "vendor" || n == "quorumweight" {
+			if n := d.Name(); n == ".git" || n == "vendor" || n == "quorumweight" || n == "testutils" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -47,6 +48,8 @@ func TestEveryProductionUCVerifyRoutesThroughChecked(t *testing.T) {
 			switch {
 			case sel.Sel.Name == "VerifyQuorumSignatures":
 				t.Errorf("%s: direct call of the unchecked VerifyQuorumSignatures", pos)
+			case sel.Sel.Name == "NewTrustBase" && isPackage(sel.X, "types", "basetypes"):
+				t.Errorf("%s: direct call of go-base NewTrustBase sums stake unchecked; use quorumweight.NewTrustBase", pos)
 			case sel.Sel.Name == "VerifySignatures":
 				t.Errorf("%s: direct call of go-base VerifySignatures; use quorumweight.VerifyTrustBase", pos)
 			case sel.Sel.Name == "Verify" && len(call.Args) == 5 && !isPackage(sel.X, "handoffdelivery"):
@@ -74,7 +77,15 @@ func TestEveryProductionUCVerifyRoutesThroughChecked(t *testing.T) {
 	require.GreaterOrEqual(t, verifyCalls, 14, "the walk must see the known UC verification sites")
 }
 
-func isPackage(x ast.Expr, name string) bool {
+func isPackage(x ast.Expr, names ...string) bool {
 	id, ok := x.(*ast.Ident)
-	return ok && id.Name == name
+	if !ok {
+		return false
+	}
+	for _, n := range names {
+		if id.Name == n {
+			return true
+		}
+	}
+	return false
 }

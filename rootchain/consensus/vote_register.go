@@ -187,24 +187,49 @@ func signedTimeoutWeight(votes map[string]*drctypes.TimeoutVote, quorum QuorumIn
 	return tally.Weight(), nil
 }
 
+// committeeWeight is the total voting weight of the committee through the checked tally: the member's stake under
+// profile 2 and 1 per unique member otherwise (the same unit weight authorWeight gives each signer). It reports false
+// for a QuorumInfo that does not list its members, which only a test double can be.
+func committeeWeight(quorum QuorumInfo) (uint64, bool, error) {
+	members, ok := quorum.(interface{ GetRootNodes() []*types.NodeInfo })
+	if !ok {
+		return 0, false, nil
+	}
+	_, weighted := quorum.(interface{ usesStakeWeighting() })
+	var tally quorumweight.Tally
+	for _, member := range members.GetRootNodes() {
+		if member == nil {
+			return 0, true, quorumweight.ErrUnknownSigner
+		}
+		w := uint64(1)
+		if weighted {
+			w = member.Stake
+		}
+		if err := tally.Add(member.NodeID, w); err != nil {
+			return 0, true, err
+		}
+	}
+	if tally.Weight() == 0 {
+		return 0, true, quorumweight.ErrZeroWeight
+	}
+	return tally.Weight(), true, nil
+}
+
 // maxFaultyWeight is the timeout-vote weight that is still tolerated before the pacemaker jumps to the timeout state:
-// total - threshold under profile 2, GetMaxFaultyNodes otherwise. A weighted committee that is empty or whose total
+// total weight - threshold, with the total taken through committeeWeight. A committee that is empty or whose total
 // overflows can never amplify, so it returns the largest value.
 func maxFaultyWeight(quorum QuorumInfo) uint64 {
-	if _, enabled := quorum.(interface{ usesStakeWeighting() }); !enabled {
-		return quorum.GetMaxFaultyNodes()
+	total, listed, err := committeeWeight(quorum)
+	if !listed {
+		return quorum.GetMaxFaultyNodes() // a test double without members; a production trust base always lists them
 	}
-	if members, ok := quorum.(interface{ GetRootNodes() []*types.NodeInfo }); ok {
-		total, err := quorumweight.TotalWeight(members.GetRootNodes())
-		if err != nil {
-			return math.MaxUint64
-		}
-		if threshold := quorum.GetQuorumThreshold(); total >= threshold {
-			return total - threshold
-		}
-		return 0
+	if err != nil {
+		return math.MaxUint64
 	}
-	return quorum.GetMaxFaultyNodes()
+	if threshold := quorum.GetQuorumThreshold(); total >= threshold {
+		return total - threshold
+	}
+	return 0
 }
 
 func (v *VoteRegister) Reset() {

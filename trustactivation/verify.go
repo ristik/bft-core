@@ -10,6 +10,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/m2contract"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -81,7 +82,7 @@ func Project(r trusthistorystore.Record) (*types.RootTrustBaseV1, error) {
 	for i, m := range r.V2.Members {
 		nodes[i] = &types.NodeInfo{NodeID: m.NodeID, SigKey: bytes.Clone(m.ConsensusKey), Stake: m.Weight}
 	}
-	tb, err := types.NewTrustBase(types.NetworkID(r.V2.NetworkID), nodes, types.WithEpoch(r.Epoch), types.WithEpochStart(r.Start), types.WithQuorumThreshold(r.V2.RootThreshold))
+	tb, err := quorumweight.NewTrustBase(types.NetworkID(r.V2.NetworkID), nodes, types.WithEpoch(r.Epoch), types.WithEpochStart(r.Start), types.WithQuorumThreshold(r.V2.RootThreshold))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", trusthistorystore.ErrHistory, err)
 	}

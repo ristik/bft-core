@@ -192,3 +192,38 @@ func TestVoteRegisterDuplicateRefusalsAreSentinels(t *testing.T) {
 	_, _, err = r.InsertTimeoutVote(NewDummyTimeoutVote(nil, 7, "l1"), skewed())
 	require.ErrorIs(t, err, quorumweight.ErrDuplicateSigner)
 }
+
+// The legacy profile is reachable in production (voteQuorumInfo returns the raw trust base). Its timeout amplification
+// bound now comes from the checked unit-weight total; for every valid unit-stake committee it is exactly the count bound
+// go-base computed (len(nodes) - threshold), for both the default and the largest configurable threshold.
+func TestLegacyProfileFaultyBoundEqualsTheCountBoundForUnitStake(t *testing.T) {
+	for n := 1; n <= 40; n++ {
+		nodes := make([]*types.NodeInfo, n)
+		for i := range nodes {
+			nodes[i] = &types.NodeInfo{NodeID: string(rune('A' + i)), SigKey: []byte{1}, Stake: 1}
+		}
+		min := uint64(2*n/3 + 1)
+		for threshold := min; threshold <= uint64(n); threshold++ {
+			tb := &types.RootTrustBaseV1{Version: 1, Epoch: 1, RootNodes: nodes, QuorumThreshold: threshold}
+			require.Equal(t, tb.GetMaxFaultyNodes(), maxFaultyWeight(tb), "n=%d threshold=%d", n, threshold)
+			require.Equal(t, tb.GetMaxFaultyNodes(), maxFaultyWeight(profile2QuorumInfo{QuorumInfo: tb}), "n=%d threshold=%d weighted", n, threshold)
+		}
+	}
+}
+
+func TestLegacyProfileFaultyBoundIsCheckedForUnlistedAndDegenerateCommittees(t *testing.T) {
+	// stake does not matter without the profile: unit weight per member
+	tb := &types.RootTrustBaseV1{Version: 1, Epoch: 1, QuorumThreshold: 3,
+		RootNodes: []*types.NodeInfo{{NodeID: "a", Stake: 100}, {NodeID: "b", Stake: 100}, {NodeID: "c", Stake: 100}, {NodeID: "d", Stake: 100}}}
+	require.EqualValues(t, 1, maxFaultyWeight(tb))
+	// an empty or duplicate-member committee can never amplify
+	require.EqualValues(t, uint64(math.MaxUint64), maxFaultyWeight(&types.RootTrustBaseV1{QuorumThreshold: 1}))
+	dup := &types.RootTrustBaseV1{QuorumThreshold: 1, RootNodes: []*types.NodeInfo{{NodeID: "a", Stake: 1}, {NodeID: "a", Stake: 1}}}
+	require.EqualValues(t, uint64(math.MaxUint64), maxFaultyWeight(dup))
+	_, _, err := committeeWeight(dup)
+	require.ErrorIs(t, err, quorumweight.ErrDuplicateSigner)
+	_, _, err = committeeWeight(&types.RootTrustBaseV1{})
+	require.ErrorIs(t, err, quorumweight.ErrZeroWeight)
+	// a double that lists no members keeps its own bound
+	require.EqualValues(t, 2, maxFaultyWeight(NewDummyQuorum(3, 2)))
+}

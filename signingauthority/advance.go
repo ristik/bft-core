@@ -8,6 +8,8 @@ import (
 	"math"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 )
 
 // AdvanceEpoch accepts operator-provisioned successor root trust and shard
@@ -81,7 +83,7 @@ func (a *Authority) AdvanceEpoch(ctx context.Context, conf *types.PartitionDescr
 		}
 		seen[node.NodeID] = true
 	}
-	if _, err := types.NewTrustBase(owned.NetworkID, owned.RootNodes,
+	if _, err := quorumweight.NewTrustBase(owned.NetworkID, owned.RootNodes,
 		types.WithEpoch(owned.Epoch), types.WithEpochStart(owned.EpochStart),
 		types.WithQuorumThreshold(owned.QuorumThreshold)); err != nil {
 		return fmt.Errorf("%w: invalid successor trust: %v", ErrContextMismatch, err)

@@ -335,7 +335,7 @@ func v2UCTrustBase(record trusthistorystore.Record) (*types.RootTrustBaseV1, err
 	for _, member := range body.Members {
 		nodes = append(nodes, &types.NodeInfo{NodeID: member.NodeID, SigKey: member.ConsensusKey, Stake: member.Weight})
 	}
-	return types.NewTrustBase(types.NetworkID(body.NetworkID), nodes,
+	return quorumweight.NewTrustBase(types.NetworkID(body.NetworkID), nodes,
 		types.WithEpoch(body.Epoch), types.WithEpochStart(record.Start), types.WithQuorumThreshold(body.RootThreshold))
 }
 

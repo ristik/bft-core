@@ -221,3 +221,18 @@ func VerifyTrustBase(r, prev *types.RootTrustBaseV1) error {
 	}
 	return nil
 }
+
+// NewTrustBase is types.NewTrustBase with the stake arithmetic checked first. go-base sums the stake and doubles it for
+// the minimum threshold unchecked, so a member list whose total overflows (or exceeds MaxUint64/2) would silently wrap
+// into a small threshold. Overflow is ErrWeightOverflow, a nil member ErrUnknownSigner, a repeated node id
+// ErrDuplicateSigner and an empty or zero-weight list ErrZeroWeight; none of them reaches types.NewTrustBase.
+func NewTrustBase(networkID types.NetworkID, rootNodes []*types.NodeInfo, opts ...types.Option) (*types.RootTrustBaseV1, error) {
+	total, err := TotalWeight(rootNodes)
+	if err != nil {
+		return nil, fmt.Errorf("trust base members: %w", err)
+	}
+	if _, err := Threshold(total); err != nil {
+		return nil, fmt.Errorf("trust base members: %w", err)
+	}
+	return types.NewTrustBase(networkID, rootNodes, opts...)
+}

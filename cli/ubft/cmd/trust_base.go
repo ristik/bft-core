@@ -107,7 +107,7 @@ func trustBaseGenerate(flags *trustBaseGenerateFlags) error {
 		return fmt.Errorf("failed to read node info files: %w", err)
 	}
 
-	trustBase, err := types.NewTrustBase(types.NetworkID(flags.NetworkID), nodes,
+	trustBase, err := quorumweight.NewTrustBase(types.NetworkID(flags.NetworkID), nodes,
 		types.WithQuorumThreshold(flags.QuorumThreshold),
 		types.WithEpoch(flags.Epoch),
 		types.WithEpochStart(flags.EpochStart),
