@@ -25,9 +25,11 @@ h3_pass() { echo "  PASS: $*"; }
 h3_teardown() {
   local p i
   for i in 5 6 7; do
-    for p in "test-nodes/evm$i/pid" "test-nodes/auth$i/pid" "test-nodes/reth$i/pid" "test-nodes/h3/restore-$i/pid"; do
-      [ -f "$p" ] && kill -INT "$(cat "$p")" 2>/dev/null
-    done
+    # a pid file's value is signalled only if that process is this checkout's and matches the command (stop_pidfile; a reused pid is not)
+    stop_pidfile "test-nodes/evm$i/pid" 'ubft shard-node (run|restore)' INT
+    stop_pidfile "test-nodes/auth$i/pid" 'ubft signing-authority run' INT
+    stop_pidfile "test-nodes/reth$i/pid" 'reth.* node' INT
+    stop_pidfile "test-nodes/h3/restore-$i/pid" 'ubft shard-node restore' INT
   done
   for p in $(owned_pids 'ubft root-node run|ubft shard-node (run|restore)|ubft signing-authority run|reth.* node|aggregator'); do
     kill -INT "$p" 2>/dev/null

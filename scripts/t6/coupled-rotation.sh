@@ -13,9 +13,11 @@ source scripts/lib/h3-lib.sh
 # The rotation starts processes the devnet's own cleanup does not know (the joiner's node, authority, execution client and root): stop them.
 t6_rotation_teardown() {
   local p
-  for p in test-nodes/evm5/pid test-nodes/auth5/pid test-nodes/reth5/pid test-nodes/root5/pid; do
-    [ -f "$p" ] && kill -INT "$(cat "$p")" 2>/dev/null
-  done
+  # a pid file's value is signalled only if that process is this checkout's and matches the command (stop_pidfile; a reused pid is not)
+  stop_pidfile test-nodes/evm5/pid 'ubft shard-node (run|restore)' INT
+  stop_pidfile test-nodes/auth5/pid 'ubft signing-authority run' INT
+  stop_pidfile test-nodes/reth5/pid 'reth.* node' INT
+  stop_pidfile test-nodes/root5/pid 'ubft root-node run' INT
   for p in $(owned_pids 'ubft root-node run|ubft shard-node (run|restore)|ubft signing-authority run|reth.* node'); do
     kill -INT "$p" 2>/dev/null
   done

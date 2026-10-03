@@ -345,4 +345,3 @@ h3_verify_mint() { # root epoch (trust base) shard epoch (PDR)
     --genesis-conf "$fullShardConf" --lock-contract "$contract" --mode locked >"$tmp/verify-locked.json" || return 1
   cat "$tmp/verify-locked.json"
 }
-

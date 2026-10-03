@@ -110,9 +110,10 @@ on_exit() {
 import hashlib,sys
 from pathlib import Path
 root=Path(sys.argv[1])
+# t6-rehearsal.log is excluded: the harness writes to it after this point (the remaining PASS lines), so a hash taken here could never match.
 with (root/"SHA256SUMS").open("w",encoding="utf-8") as out:
     for path in sorted(root.rglob("*")):
-        if path.is_file() and path.name != "SHA256SUMS":
+        if path.is_file() and path.name not in ("SHA256SUMS", "t6-rehearsal.log"):
             out.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root)}\n")
 PY
     printf '\nFAIL: T6 harness stopped with exit %s. Isolated checkout: %s\n' "$status" "${ISOLATION_ROOT:-not-created}" >&2
@@ -358,9 +359,10 @@ PY
 import hashlib,sys
 from pathlib import Path
 root=Path(sys.argv[1])
+# t6-rehearsal.log is excluded: the harness writes to it after this point (the remaining PASS lines), so a hash taken here could never match.
 with (root/"SHA256SUMS").open("w",encoding="utf-8") as out:
     for path in sorted(root.rglob("*")):
-        if path.is_file() and path.name != "SHA256SUMS":
+        if path.is_file() and path.name not in ("SHA256SUMS", "t6-rehearsal.log"):
             digest=hashlib.sha256(path.read_bytes()).hexdigest()
             out.write(f"{digest}  {path.relative_to(root)}\n")
 PY
@@ -375,9 +377,10 @@ cleanup_isolated_build() {
 import hashlib,sys
 from pathlib import Path
 root=Path(sys.argv[1])
+# t6-rehearsal.log is excluded: the harness writes to it after this point (the remaining PASS lines), so a hash taken here could never match.
 with (root/"SHA256SUMS").open("w",encoding="utf-8") as out:
     for path in sorted(root.rglob("*")):
-        if path.is_file() and path.name != "SHA256SUMS":
+        if path.is_file() and path.name not in ("SHA256SUMS", "t6-rehearsal.log"):
             out.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root)}\n")
 PY
   ISOLATION_ROOT=
