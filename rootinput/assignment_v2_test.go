@@ -377,3 +377,50 @@ func TestObservationIsAuthenticatedUnderTheClaimedShardEpochsConfiguration(t *te
 		require.ErrorIs(t, err, ErrUnauthenticated)
 	})
 }
+
+// An acknowledgement crosses a root epoch, and a handoff may reset the scalar root round
+// (certificate_order.go), so the guard on this path is the epoch, not the round. The parent here
+// records clock.rootRound 5.
+func TestAcknowledgementRootEpochOrderingIsByEpochNotRound(t *testing.T) {
+	f := newAssignmentFixture(t)
+	p := f.blocks[1]
+	require.EqualValues(t, 5, f.snapshot(t, p, registryproof.Assignment{}).LastAppliedRootRound())
+	ack := f.step(1, 0, f.hash[0], f.hash[1], 0xa1, p.Hash)
+	raw, err := ack.Encode()
+	require.NoError(t, err)
+	observe := func(t *testing.T, certEpoch, rootRound uint64) VerifiedObservationV2 {
+		tr := technicalAt(1, 11)
+		uc := f.certify(t, f.pdr[1], f.irAt(p, f.blocks[0], 0), tr, rootRound, certEpoch)
+		o, err := AuthenticateObservationV2(context.Background(), f.obsContext(certEpoch, f.hash[1]), uc, tr)
+		require.NoError(t, err)
+		return o
+	}
+
+	t.Run("the next epoch is accepted at root round 4 behind the parent's round 5", func(t *testing.T) {
+		snap := f.snapshot(t, p, registryproof.Assignment{Set: true, ShardEpoch: 0, RootEpoch: 1, ActiveConfHash: f.origin.FullShardConfHash()})
+		_, err := f.derive(t, p, snap, 11, observe(t, 2, 4), raw)
+		require.NoError(t, err)
+	})
+	t.Run("a same-epoch certificate cannot acknowledge, at any round", func(t *testing.T) {
+		snap := f.snapshot(t, p, registryproof.Assignment{Set: true, ShardEpoch: 0, RootEpoch: 1, ActiveConfHash: f.origin.FullShardConfHash()})
+		for _, round := range []uint64{4, 5, 6} {
+			_, err := f.derive(t, p, snap, 11, observe(t, 1, round), raw)
+			require.ErrorIs(t, err, ErrV2Context, "round %d", round)
+			require.ErrorContains(t, err, "registry assignment")
+		}
+	})
+	t.Run("an earlier-epoch certificate is refused, even at a later round", func(t *testing.T) {
+		// The registry already records root epoch 2: the acknowledgement of epoch 2 was imported.
+		p2 := f.c.ExecutedState(p, 2, 5, []byte("ack"), map[string]common.Hash{
+			"assignment.epoch": word(1), "assignment.rootEpoch": word(2), "assignment.activeConfHash": common.Hash(f.hash[1]),
+			"transition.cursor": word(1), "transition.bodyID": word(7), "transition.genesisID": word(8), "transition.frozenID": word(9),
+			"transition.commitID": word(10), "transition.frozenParent": common.Hash(p.Hash), "transition.successorTR": word(12), "origin.rootEpoch": word(2),
+		})
+		snap := f.snapshot(t, p2, registryproof.Assignment{Set: true, ShardEpoch: 1, RootEpoch: 2, ActiveConfHash: common.Hash(f.hash[1])})
+		raw2, err := f.step(1, 0, f.hash[0], f.hash[1], 0xa1, p2.Hash).Encode()
+		require.NoError(t, err)
+		_, err = f.derive(t, p2, snap, 11, observe(t, 1, 99), raw2)
+		require.ErrorIs(t, err, ErrV2Context)
+		require.ErrorContains(t, err, "registry assignment")
+	})
+}
