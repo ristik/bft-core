@@ -425,7 +425,7 @@ if [ "$doctorStatus" -ne 0 ] && echo "$doctorOut" | grep -qE '^\[FAIL\] chain id
 else
   fail "chainId mismatch NOT detected; doctor said: $(echo "$doctorOut" | tail -3)"
 fi
-kill "$(cat test-nodes/reth-wrong/pid)" 2>/dev/null; rm -f test-nodes/reth-wrong/pid
+stop_pidfile test-nodes/reth-wrong/pid 'reth.* node'   # ownership-checked; removes the pid file
 
 # 3b. no Engine API at all behind the URL. CheckCapabilities must fail closed rather than
 # starting and stalling. Require the specific engine-link failure, not another doctor failure
@@ -477,7 +477,7 @@ if [ "$runStatus" -ne 0 ] && [ "$runStatus" -ne 124 ] && echo "$runOut" | grep -
 else
   fail "shard-node run did not refuse the wrong chain (exit $runStatus): $(echo "$runOut" | tail -3)"
 fi
-kill "$(cat test-nodes/reth-wrongchain/pid)" 2>/dev/null; rm -f test-nodes/reth-wrongchain/pid
+stop_pidfile test-nodes/reth-wrongchain/pid 'reth.* node'   # ownership-checked; removes the pid file
 
 # 3d. Same chain id, DIFFERENT genesis (#89 item 2). Chain id does not establish genesis identity:
 # this client is on chainId 31337 exactly as configured, and differs only in its allocation, which
@@ -596,7 +596,7 @@ else
     echo "--- captured output ---"; echo "$okDoctor" | grep -i genesis; echo "--- end ---"
   fi
 fi
-kill "$(cat test-nodes/reth-othergenesis/pid)" 2>/dev/null; rm -f test-nodes/reth-othergenesis/pid
+stop_pidfile test-nodes/reth-othergenesis/pid 'reth.* node'   # ownership-checked; removes the pid file
 
 # 3f. Same chain id, SAME genesis, a different FORK SCHEDULE (#89 item 2). The client below is started
 # from exactly the funded spec the validators use, plus one field: Prague scheduled for a future
@@ -698,7 +698,7 @@ else
     echo "--- captured output ---"; echo "$okProfile" | grep -i profile; echo "--- end ---"
   fi
 fi
-kill "$(cat test-nodes/reth-laterfork/pid)" 2>/dev/null; rm -f test-nodes/reth-laterfork/pid
+stop_pidfile test-nodes/reth-laterfork/pid 'reth.* node'   # ownership-checked; removes the pid file
 threeFFailureCount=$((failures - threeFFailuresBefore))
 if [ "$threeFFailureCount" -eq 0 ]; then
   echo "3f status: PASS"
