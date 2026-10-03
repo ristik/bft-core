@@ -1646,6 +1646,11 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 	}
 
 	if leader == r.nodeID {
+		// Build and Seal are synchronous and nothing here reacts to a root handoff: there is no handoff-triggered
+		// cancellation of a build in progress. A proposal built across the freeze is ABANDONED: the root refuses to certify it
+		// (ErrHandoffFrozen, rootchain/consensus/storage/block_executor.go) and the successor builds on the agreed certified
+		// parent. Safety is the root freeze, not the builder. This is the project's simple-design choice and is
+		// owner-overridable (docs/design/h3-evm-assignment.md treats builder cancellation as optional responsiveness work).
 		buildStart := time.Now()
 		id, err := r.buildFinal(ctx, params, held, ticket)
 		if err != nil {
