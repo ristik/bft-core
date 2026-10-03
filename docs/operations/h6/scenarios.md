@@ -209,8 +209,8 @@ hand-edit trust files or restart authorities. Finish with network.md's teardown.
 
 ## 3. Coupled key rotation, stalled successors and archive-backed restore
 
-Run H3 from an ordinary shell after releasing the manual lock. Use a **new clone**
-of the same BFT pin (replace the fresh name if it already exists). This lane creates
+Run H3 from an ordinary shell after exiting the manual-network shell (and
+releasing its lock, if used). Use a **new clone** of the same BFT pin (replace the fresh name if it already exists). This lane creates
 its own genesis; it is not a continuation of scenario 2.
 
 ```sh
@@ -220,19 +220,27 @@ cd "$H6_RUN/h3-source"
 make build
 export H3_URETH_BIN="$H6_RUN/bin/ureth-$H6_NEW" H3_URETH_COMMIT="$H6_NEW"
 export H3_EVIDENCE_DIR="$H6_RUN/h3"
-# Entry point expects briefs/devnet-lock.sh beside its repository parent.
-# Here that is H6_RUN, so invoke the shared lock explicitly and mark it held.
-"$H6_BASE/briefs/devnet-lock.sh" 'H6 H3 independent rehearsal' \
-  env H3_LANE_LOCKED=1 bash "$H6_RUN/bin/run-h3.sh"
+H6_LOCK=()
+if [ "$H6_SHARED_HOST" = 1 ]; then
+  H6_LOCK=(bash "$H6_GUIDE/scripts/h6/devnet-lock.sh" 'H6 H3 independent rehearsal')
+fi
+"${H6_LOCK[@]}" env H3_LANE_LOCKED=1 bash "$H6_RUN/bin/run-h3.sh"
 ```
+
+The pinned `scripts/h3-assignment-lane.sh:14–28` computes its repository's
+parent and, by default, looks for `briefs/devnet-lock.sh` under that parent.
+That is an optional developer-workspace convention; the file is not in this
+repository. `H3_LANE_LOCKED=1` already bypasses that lookup, so no lane edit is
+needed. Set it both on a dedicated host and under the optional outer lock, as
+above. `H3_EVIDENCE_DIR` overrides the lane's developer-workspace evidence default.
 
 Inputs: the pinned Ureth and `RUGREGATOR_BIN`/`RUGREGATOR_SOURCE` from build.md.
 The thin `run-h3.sh` supervisor drains owned H3 children after the final scenario
 PASS marker and checks the lane exit status. The pinned paired launcher otherwise
 only stops the original four authorities and standard restore home before `wait`;
 H3 creates extra authority/restore children. It uses a 1,800 s outer budget,
-preserves failures and keeps the lock if an owned process will not stop. This
-teardown is final disposal, never a recoverable authority restart.
+preserves failures and keeps the supervisor alive (and any outer lock held) if
+an owned process will not stop. This teardown is final disposal, never a recoverable authority restart.
 Outputs: `$H3_EVIDENCE_DIR/lane.log`, `heads.txt`, `h3/`, `nodes/`, `f8/`, plus
 private node state in this fresh clone. This entry point exits nonzero on the
 first failed step and requires `H3 acceptance lane: all steps PASSED`
@@ -273,17 +281,29 @@ allocation, exercises claims, WUCT deposit/withdrawal and treasury withdrawal,
 performs configuration-only handoffs and cross-epoch restore, and watches wallet
 finality. Its parameters are placeholders, not production allocations.
 
-From the original pinned clone, outside the manual lock:
+From the original pinned clone, after exiting the manual-network shell:
 
 ```sh
 cd "$H6_SRC"
 export T6_EVIDENCE_DIR="$H6_RUN/t6"
-"$H6_BASE/briefs/devnet-lock.sh" 'H6 T6 independent rehearsal' env T6_LOCKED=1 \
+H6_LOCK=()
+if [ "$H6_SHARED_HOST" = 1 ]; then
+  H6_LOCK=(bash "$H6_GUIDE/scripts/h6/devnet-lock.sh" 'H6 T6 independent rehearsal')
+fi
+"${H6_LOCK[@]}" env T6_LOCKED=1 \
   T6_BFT_COMMIT="$H6_BFT" T6_BFT_REF=integration/enshrined-evm \
   T6_URETH_COMMIT="$H6_NEW" T6_CONTRACTS_COMMIT="$H6_ALLOC" \
   T6_REGISTRY_CONTRACTS_COMMIT="$H6_REGISTRY" T6_RUST_TOOLCHAIN=1.97.1 \
   bash scripts/t6-rehearsal.sh
 ```
+
+The pinned `scripts/t6-rehearsal.sh:5–28` likewise looks for
+`briefs/devnet-lock.sh` under its repository's parent by default. This is the
+same optional developer-workspace convention, not a required file. `T6_LOCKED=1`
+skips the lookup; `T6_EVIDENCE_DIR` replaces the workspace-specific output default.
+The command above works on a dedicated host without creating any lock, or inside
+the optional repository lock on a shared host. Do not invoke either lane without
+these overrides outside the original developer workspace.
 
 Outputs include `t6-rehearsal.log`, `paired-lane.log`, build/contract comparison
 logs, `source-pin.txt`, `compiler-toolchains.txt`, evidence checksums and summary.

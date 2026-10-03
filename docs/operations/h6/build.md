@@ -31,8 +31,13 @@ set -eo pipefail
 # Start in the checkout containing this guide and its thin operator adapter.
 export H6_GUIDE="$(pwd)"
 test -f "$H6_GUIDE/scripts/h6/prepare-handoff.py"
-export H6_BASE=/Users/risto/uni/agre
-export H6_RUN="$H6_BASE/briefs/devnet-runs/h6-$(date -u +%Y%m%dT%H%M%SZ)"
+# Choose an absolute directory on your host; this example is under your home.
+export H6_BASE="$HOME/h6-rehearsal"
+mkdir -p "$H6_BASE"
+export H6_BASE="$(cd "$H6_BASE" && pwd -P)"
+# 0: dedicated host, no lock. 1: shared host, use the repository lock helper.
+export H6_SHARED_HOST=0
+export H6_RUN="$H6_BASE/runs/h6-$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$H6_RUN"
 chmod 700 "$H6_RUN"
 export H6_BFT=624620c334006e2c8fe1b920a4b0a90c67cbbfd7
@@ -78,7 +83,8 @@ mkdir -p "$H6_RUN/bin"
 cp "$H6_GUIDE/scripts/h6/prepare-handoff.py" "$H6_RUN/bin/prepare-handoff.py"
 cp "$H6_GUIDE/scripts/h6/run-h3.sh" "$H6_RUN/bin/run-h3.sh"
 git -C "$H6_GUIDE" rev-parse HEAD > "$H6_RUN/documentation-revision.txt"
-shasum -a 256 "$H6_RUN/bin/prepare-handoff.py" "$H6_RUN/bin/run-h3.sh" > "$H6_RUN/helper.sha256"
+shasum -a 256 "$H6_RUN/bin/prepare-handoff.py" "$H6_RUN/bin/run-h3.sh" \
+  "$H6_GUIDE/scripts/h6/devnet-lock.sh" > "$H6_RUN/helper.sha256"
 for pin in "$H6_OLD" "$H6_NEW"; do
   git clone https://github.com/ristik/ureth.git "$H6_RUN/ureth-$pin"
   git -C "$H6_RUN/ureth-$pin" fetch origin "$pin"

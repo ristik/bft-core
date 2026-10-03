@@ -1,7 +1,7 @@
 # Manual network: setup, lifecycle and configuration
 
-Complete [build.md](build.md), then enter the lock shell from [README](README.md).
-The exported `H6_*` variables are inherited by that shell. All following blocks
+Complete [build.md](build.md), then enter the manual-network shell from [README](README.md).
+It acquires a lock only when `H6_SHARED_HOST=1`. The exported `H6_*` variables are inherited by that shell. All following blocks
 run in the same shell. Every block stops on failure; preserve its output in the
 run directory. Do not rerun generation over an existing network.
 
@@ -237,6 +237,7 @@ defaults unchanged; save full `--help` output with the evidence for those defaul
 | Input/flag/file | Source and rule |
 |---|---|
 | `H6_BASE`, `H6_RUN`, `H6_SRC`, compiler/cache variables | Operator-owned absolute paths; fresh clone/run; run directory outside `test-nodes/`. |
+| `H6_SHARED_HOST`, `H6_GUIDE` | Dedicated host: 0 (no lock); shared host: 1 (all operators share H6_BASE). Guide checkout supplies the optional lock and operator adapters. |
 | `H6_BFT`, `H6_OLD`, `H6_NEW`, contract/aggregator pins, binary paths | build.md; immutable full SHAs, verified executable metadata and SHA-256. |
 | `--home`, `--key-conf`, pid/log paths | Topology above; init generates keys and node-info, pidfiles record launched processes; do not share homes. |
 | `SIGNING=authority`, authority ID/sockets/operator credential | `init_evm_authorities`: `paired-evm-i`, `auth<i>/`; credential files mode-restricted; keys volatile. |

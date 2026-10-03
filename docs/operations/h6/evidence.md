@@ -83,7 +83,10 @@ coordinated Ureth stop/swap/restart; 180 s to restore one validator and resume i
 signing. Keep cluster service interruption and one-node restore time separate.
 The latter two are provisional budgets, not measured upgrade/restore guarantees.
 
-Measured T6 examples in the evidence workspace include 23.136 s and 24.998 s
+Optional historical developer-workspace note: the paths in this paragraph are
+provenance references only, are not shipped in the repository, and are not inputs
+to your rehearsal. Record your own measurements under `$H6_RUN`.
+Measured T6 examples in that historical evidence workspace include 23.136 s and 24.998 s
 (`briefs/devnet-runs/t6-rehearsal-20261002T033706Z/t6-rehearsal.log:1824,1837`),
 22.843 s in the run4 monitor-timeout attempt (`:312`), and 31.936 s in another
 failed attempt (`t6-rotation-run4-attempt2-monitor-timeout/t6-rehearsal.log:313`).
@@ -114,7 +117,7 @@ but do not substitute it for upgrade (same epoch), pre-H Abort (same epoch), or
 user-visible transaction recovery. The T6 finality observer provides raw JSONL
 and checks monotonic finalized history; preserve `t6-finality-monitor.jsonl`.
 For manual work, use this standard-library observer in a second terminal inside
-the same locked session (background child); stop it only after recovery:
+the same manual-network session (background child; locked only on shared hosts); stop it only after recovery:
 
 ```sh
 python3 -u - "$H6_RUN/observations.jsonl" <<'PY' &
@@ -202,7 +205,7 @@ private state and raw environment dumps. Hashes do not redact secrets.
 
 A fresh agent with no repository context may follow only this guide, the linked
 operations sections, documented `--help`, command output and generated run
-artifacts under the shared devnet lock. It may execute the named lane/library
+artifacts on a dedicated host or under the optional repository lock on a shared host. It may execute the named lane/library
 calls but must not read their source, previous private notes or developer
 transcripts to fill gaps. Missing variables, unexplained flags, hidden files,
 manual source edits, undocumented recovery choices, stale evidence passing checks,

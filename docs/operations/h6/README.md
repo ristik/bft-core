@@ -25,18 +25,40 @@ replacement consensus/recovery implementation in this kit.
 
 ## Lock and workspace
 
-On the shared rehearsal host, obtain the lock **before creating or starting nodes**:
+Choose `H6_BASE` in [build.md](build.md): it is the absolute directory for your
+clones, caches and evidence on **your own host**. `H6_GUIDE` points to the checkout
+containing this guide and the operator helpers. No external workspace is needed.
+On a dedicated host no lock is needed. Leave `H6_SHARED_HOST=0` (the default).
+On a shared host set `H6_SHARED_HOST=1`; all operators sharing the fixture ports
+must agree on the same `H6_BASE`, since the optional lock is `$H6_BASE/.h6-devnet-lock`.
+The repository provides `scripts/h6/devnet-lock.sh` for that case.
+
+After the build, start the manual-network shell with the selected policy:
 
 ```sh
-cd /Users/risto/uni/agre
-briefs/devnet-lock.sh 'H6 independent operator' bash --noprofile --norc
+if [ "$H6_SHARED_HOST" = 1 ]; then
+  bash "$H6_GUIDE/scripts/h6/devnet-lock.sh" 'H6 independent operator' \
+    bash --noprofile --norc
+else
+  bash --noprofile --norc
+fi
 ```
 
 Keep that shell open for the entire manual network lifetime, including teardown.
-Do not acquire the lock recursively: the H3/T6 entry points acquire it themselves,
-so run them from a new ordinary shell after the manual shell has exited. Never
-remove a live lock, use machine-wide `pkill`, or use another operator's checkout.
-The lock is a shared-host scheduling mechanism, not signing-key fencing.
+Run H3/T6 from the parent shell after it exits; scenarios.md applies the same
+optional lock policy. Never acquire the lock recursively, remove a live lock,
+use machine-wide `pkill`, or use another operator's checkout. The lock is a
+shared-host scheduling mechanism, not signing-key fencing. An interrupted lock
+holder can leave the lock directory: confirm its recorded PID and all network
+processes have stopped before manually removing that directory. There is no
+automatic stale-lock takeover.
+
+The pinned H3 and T6 entry points have developer-workspace lock defaults that
+are **not repository dependencies**. The commands in scenarios.md bypass those
+defaults with `H3_LANE_LOCKED=1` and `T6_LOCKED=1`, respectively, after selecting
+dedicated-host execution or acquiring the repository-provided lock. These flags
+skip the lanes' lock lookup; they do not acquire a lock themselves. H3's existing
+“devnet lock acquired” log line is not proof of locking when that lookup is bypassed.
 
 Use the isolated clone made in build.md. `make clean` and `setup-evm-nodes.sh`
 delete `test-nodes/`; run setup exactly once per disposable clone. Restart is a

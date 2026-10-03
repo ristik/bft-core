@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Run from a disposable pinned BFT clone, inside the shared devnet lock.
+# Run from a disposable pinned BFT clone on a dedicated host or under the optional H6 lock.
 # The pinned paired launcher waits for children but only stops auth1..4 and
 # the standard restore home. H3 adds authorities/restores; drain those after
 # the final H3 PASS marker so launcher cleanup can finish. No scenario changes.
 set -eo pipefail
 : "${H3_EVIDENCE_DIR:?set a fresh absolute evidence directory}"
-: "${H3_LANE_LOCKED:?invoke under briefs/devnet-lock.sh with H3_LANE_LOCKED=1}"
+: "${H3_LANE_LOCKED:?set H3_LANE_LOCKED=1 on a dedicated host or under scripts/h6/devnet-lock.sh}"
 [ "$H3_LANE_LOCKED" = 1 ] || exit 2
 [ ! -e "$H3_EVIDENCE_DIR" ] || { echo 'STOP: evidence directory already exists'; exit 2; }
 [ ! -e test-nodes ] || { echo 'STOP: H3 requires a fresh clone without test-nodes'; exit 2; }
@@ -22,7 +22,7 @@ cleanup() {
     [ -z "$remaining" ] && return 0
     sleep 1
   done
-  echo "STOP: owned processes remain: $remaining; retain the lock and inspect logs" >&2
+  echo "STOP: owned processes remain: $remaining; keep this session open (and any lock held) and inspect logs" >&2
   return 1
 }
 on_exit() {
@@ -32,7 +32,7 @@ on_exit() {
     kill -TERM "$runner" 2>/dev/null || true
   fi
   if ! cleanup; then
-    # Keep the lock-owning parent command alive until the operator resolves this.
+    # Keep the parent command alive (and any outer lock held) until the operator resolves this.
     # No automatic SIGKILL of authorities or unrelated process sweeps.
     while ! cleanup; do sleep 5; done
     status=1
