@@ -76,6 +76,20 @@ written journal state: restart from **new empty disks**. Generic EL P2P, snap,
 and pipeline sync do not establish the paired seal history and cannot be used
 as a restore source; the pinned client and Engine API checks remain mandatory.
 
+## Freshness assumption
+
+The replicas and root peers are availability sources, never trust anchors. A restoring node accepts
+a history only if (1) every record's certificate verifies under the trust base of **its own epoch**,
+derived forward from the genesis-epoch `--trust-base` through the verified handoffs, and (2) the
+replayed head, state root and certified tip equal the pin the operator obtained independently:
+the latest certified UC and technical record and the current `--trust-body-id`. A continuation that
+is signed only by keys retired at a handoff, or that does not lead to the pinned tip, is refused
+(`archivewiring/restore_retired_key_test.go`); the restore ends with `ErrRestore` after bypassing
+the record, leaves no restore pin, and leaves the EL at its genesis head. The guarantee is only as
+fresh as the pin: a pin taken from a stale replica or a stale tip restores a stale but genuine
+history. The operator must therefore obtain the tip and BodyID from the current deployment (a quorum
+of current roots or an independent operator record), not from the replica being restored from.
+
 ## H3 note
 
 A deployment whose EVM assignment changes is no longer single-epoch for the shard configuration. The archive
