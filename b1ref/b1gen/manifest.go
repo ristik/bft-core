@@ -119,7 +119,7 @@ var OpenItems = []OpenItem{
 	{"O5", "Null versus empty signature container in a seal: structural or semantic?", "null is malformed (ErrShape); an empty map is false through the native nonempty-signatures rule (ErrNativeInvalid)"},
 	{"O6", "Unequal complete seals in a shared call, and the value of S for the gas count when no common seal exists.", "false (ErrSealMismatch); S is the signature-map size of the first claim's seal; the review suggests the maximum across claims instead"},
 	{"O7", "Trust view with no members, unknown sourceKind, or weight other than 1.", "empty and unknown kind are malformed (ErrViewEmpty, ErrViewKind); weight is false (ErrWeightProfile)"},
-	{"O8", "The design never says the seal epoch must equal the trust view epoch.", "required, false otherwise (ErrSealEpoch)"},
+	{"O8", "The design never says the seal epoch must equal the trust view epoch.", "required, false otherwise (ErrSealEpoch). Not a discretionary trust-source choice: the registry authenticates the view for one epoch, so a seal is authorised by that view only if the seal's own epoch is that epoch; any other seal epoch would let one epoch's key commitment authorise a seal claiming another"},
 }
 
 // Notes qualify every number in the manifest.

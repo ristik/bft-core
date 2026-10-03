@@ -390,6 +390,7 @@ func shapeSeal(it *item) (*item, error) {
 // ucFolds runs the native UC validation and the two native tree folds and
 // returns the unicity tree root they imply.
 func ucFolds(c *claim) error {
+	work("fold")
 	uc := c.uc
 	if uc.UnicityTreeCertificate.Partition != types.PartitionID(c.partition) {
 		return ErrPartition

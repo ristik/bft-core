@@ -65,6 +65,15 @@ func certCallVerdict(in []byte, reg *Registry, shared bool) (Verdict, error) {
 	if err != nil {
 		return Verdict{}, err
 	}
+	return finishCertCall(call, reg)
+}
+
+// finishCertCall is everything after the structural scan: point decoding, then
+// the semantic relation. Run calls it only once the full charge is reserved.
+func finishCertCall(call *certCall, reg *Registry) (Verdict, error) {
+	if err := call.view.decodePoints(); err != nil {
+		return Verdict{}, fmt.Errorf("trust view: %w", err)
+	}
 	v := Verdict{Gas: call.charge}
 	if v.Why = evalCertCall(call, reg); v.Why == nil {
 		v.Valid = true
@@ -186,6 +195,7 @@ func checkSignature(m *member, sig, sigBytes []byte) error {
 	if r.Sign() == 0 || r.Cmp(curveN) >= 0 || s.Sign() == 0 || s.Cmp(halfN) > 0 {
 		return ErrSigRange
 	}
+	work("signature")
 	if err := m.ver.VerifyBytes(sig, sigBytes); err != nil {
 		return ErrSigInvalid
 	}
@@ -237,20 +247,42 @@ func Run(op Op, in []byte, reg *Registry, gas uint64) (out []byte, used uint64, 
 	}
 	var v Verdict
 	switch op {
-	case OpUC:
-		v, err = UC(in, reg)
-	case OpShared:
-		v, err = Shared(in, reg)
+	case OpUC, OpShared:
+		call, perr := parseCertCall(in, op == OpShared)
+		if perr != nil {
+			return nil, gas, perr
+		}
+		// The full charge is known from the structural scan alone. It is
+		// reserved here, before any point decoding, path fold or signature check.
+		if gas < call.charge {
+			return nil, gas, ErrOutOfGas
+		}
+		v, err = finishCertCall(call, reg)
 	case OpMember:
-		v, err = Member(in)
+		mc, perr := parseMember(in)
+		if perr != nil {
+			return nil, gas, perr
+		}
+		if gas < mc.gas {
+			return nil, gas, ErrOutOfGas
+		}
+		v = evalMember(mc)
 	default:
 		return nil, gas, errors.New("b1ref: unknown op")
 	}
 	if err != nil {
 		return nil, gas, err
 	}
-	if gas < v.Gas {
-		return nil, gas, ErrOutOfGas
-	}
 	return Output(v.Valid), v.Gas, nil
+}
+
+// onWork is test instrumentation: when set, it is called with "point",
+// "signature", "fold" or "rsmt-fold" immediately before each such operation.
+// It never changes behaviour.
+var onWork func(kind string)
+
+func work(kind string) {
+	if onWork != nil {
+		onWork(kind)
+	}
 }

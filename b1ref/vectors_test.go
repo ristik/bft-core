@@ -250,6 +250,9 @@ func TestRunGas(t *testing.T) {
 		if err == nil || out != nil || used != 7_000_000 {
 			t.Fatalf("%s: malformed must consume all gas: out=%x used=%d err=%v", v.ID, out, used, err)
 		}
+		if want := sentinels[v.Expected.Sentinel]; want == nil || !errors.Is(err, want) || !errors.Is(err, b1ref.ErrMalformed) {
+			t.Fatalf("%s: Run returned %v, want %s in the malformed family", v.ID, err, v.Expected.Sentinel)
+		}
 	}
 }
 
@@ -272,6 +275,49 @@ func TestMaxGas(t *testing.T) {
 	}
 	if g := b1ref.RSMTGas(12392, 256); g != 264_522 {
 		t.Fatalf("RSMT worst case %d", g)
+	}
+}
+
+// countWork records the expensive operations (point decodes, signature
+// checks, path folds) that Run performs.
+func countWork(t *testing.T) map[string]int {
+	t.Helper()
+	counts := map[string]int{}
+	b1ref.SetWorkHook(func(kind string) { counts[kind]++ })
+	t.Cleanup(func() { b1ref.SetWorkHook(nil) })
+	return counts
+}
+
+// TestRunReservesChargeBeforeWork: at charge-1 Run fails out of gas before any
+// point is decoded, any signature checked or any path folded; at the exact
+// charge the same call does that work.
+func TestRunReservesChargeBeforeWork(t *testing.T) {
+	m, _ := loadGolden(t)
+	for _, id := range []string{"cert.single.ok", "rsmt.small.ok"} {
+		var v b1gen.Vector
+		for _, c := range m.Vectors {
+			if c.ID == id {
+				v = c
+			}
+		}
+		if v.ID == "" {
+			t.Fatalf("vector %s missing", id)
+		}
+		req, _ := hex.DecodeString(v.Request)
+		reg := registry(t, v.PreState)
+		counts := countWork(t)
+		if _, _, err := b1ref.Run(op(v), req, reg, v.Expected.Gas-1); !errors.Is(err, b1ref.ErrOutOfGas) {
+			t.Fatalf("%s: charge-1: %v", id, err)
+		}
+		if len(counts) != 0 {
+			t.Fatalf("%s: work done before the charge was reserved: %v", id, counts)
+		}
+		if _, _, err := b1ref.Run(op(v), req, reg, v.Expected.Gas); err != nil {
+			t.Fatalf("%s: exact charge: %v", id, err)
+		}
+		if len(counts) == 0 {
+			t.Fatalf("%s: the counting hook saw no work at the exact charge, so the test proves nothing", id)
+		}
 	}
 }
 

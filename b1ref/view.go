@@ -35,7 +35,7 @@ type trustView struct {
 	hash       [32]byte
 }
 
-// scanView validates and decodes the deterministic CBOR TrustView
+// scanView validates the deterministic CBOR TrustView
 // [1, network, epoch, sourceKind, sourceBodyID, members].
 func scanView(raw []byte, tokens *int) (*trustView, error) {
 	root, err := scanOne(raw, tokens)
@@ -75,11 +75,7 @@ func scanView(raw []byte, tokens *int) (*trustView, error) {
 		if len(m.kids[0].data) > MaxNodeIDBytes {
 			return nil, ErrNodeIDTooLong
 		}
-		ver, err := crypto.NewVerifierSecp256k1(m.kids[1].data)
-		if err != nil {
-			return nil, ErrViewKey
-		}
-		v.members = append(v.members, member{nodeID: string(m.kids[0].data), key: m.kids[1].data, weight: m.kids[2].arg, ver: ver})
+		v.members = append(v.members, member{nodeID: string(m.kids[0].data), key: m.kids[1].data, weight: m.kids[2].arg})
 	}
 	for i := 1; i < len(v.members); i++ {
 		if v.members[i-1].nodeID > v.members[i].nodeID { // Go string order is raw UTF-8 byte order
@@ -87,6 +83,22 @@ func scanView(raw []byte, tokens *int) (*trustView, error) {
 		}
 	}
 	return v, nil
+}
+
+// decodePoints turns every member key into a curve point. It is the first
+// expensive step of a call and runs only after the full charge is reserved
+// (Run) or the call is being evaluated (UC, Shared); a key that is not a point
+// is malformed (O1).
+func (v *trustView) decodePoints() error {
+	for i := range v.members {
+		work("point")
+		ver, err := crypto.NewVerifierSecp256k1(v.members[i].key)
+		if err != nil {
+			return ErrViewKey
+		}
+		v.members[i].ver = ver
+	}
+	return nil
 }
 
 // semantic checks of a decoded view that are false rather than malformed.

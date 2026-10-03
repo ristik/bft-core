@@ -35,8 +35,8 @@ var provisional = map[string]string{
 	"quorum.dup-node-id": "O3", "quorum.dup-key": "O3",
 	"view.shape": "O4", "enc.cbor.depth-16": "O4",
 	"seal.sigs-null": "O5", "seal.sigs-empty": "O5",
-	"cert.shared.mixed-subsets.false": "O6",
-	"view.empty":                      "O7", "view.kind": "O7", "quorum.weight": "O7",
+	"cert.shared.mixed-subsets.false": "O6", "cert.shared.sigcount-3-4.false": "O6", "cert.shared.sigcount-4-3.false": "O6",
+	"view.empty": "O7", "view.kind": "O7", "quorum.weight": "O7",
 	"cert.neg.epoch": "O8", "time.seal-epoch.after-origin": "O8",
 }
 
@@ -133,6 +133,16 @@ func (g *gen) certificates(seed string) {
 	g.ok("cert.shared.mixed-subsets.false", fam, opShared, "shared call whose seals carry different quorum subsets",
 		newRequest(f.view.cbor(), claimOf(subA), claimOf(cs.get(2, "0")), claimOf(f.build("a", f.round, f.vals[1:], false).get(3, ""))).wire(), pre,
 		shapeOf(f.view, subA, cs.get(2, "0"), cs.get(3, "")), "ErrSealMismatch", nil, nil)
+
+	// unequal signature counts across the seals: the call is false either way, and the vectors pin the provisional
+	// gas count (S is the first claim's signature-map size, O6) in both orders.
+	full4 := f.build("a", f.round, f.vals, false)
+	few, many := claimOf(subA), claimOf(full4.get(3, ""))
+	g.ok("cert.shared.sigcount-3-4.false", fam, opShared, "seals with 3 then 4 signatures: S is the first claim's 3",
+		newRequest(f.view.cbor(), few, many).wire(), pre, shapeOf(f.view, subA, full4.get(3, "")), "ErrSealMismatch", nil, nil)
+	g.ok("cert.shared.sigcount-4-3.false", fam, opShared, "seals with 4 then 3 signatures: S is the first claim's 4",
+		newRequest(f.view.cbor(), claimOf(full4.get(1, "")), claimOf(f.build("a", f.round, f.vals[:3], false).get(3, ""))).wire(), pre,
+		shapeOf(f.view, full4.get(1, ""), f.build("a", f.round, f.vals[:3], false).get(3, "")), "ErrSealMismatch", nil, nil)
 
 	// single perturbations.
 	reseal := func(mod func(*sealSpec)) ucSpec {
