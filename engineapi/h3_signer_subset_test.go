@@ -28,6 +28,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
@@ -87,9 +88,14 @@ type x2World struct {
 	step     handoff.EVMTransition
 	// active is the assignment the parent registry shows: the genesis one until the acknowledgement is imported.
 	active registryproof.Assignment
+	// genesisParent makes the genesis block the acknowledgement block's parent.
+	genesisParent bool
 }
 
-func newX2World(t *testing.T) *x2World {
+// newX2World builds the deployment with the acknowledgement block's parent either the post-genesis block B1 (registry
+// witness served over RPC) or the genesis block itself (the configured bootstrap snapshot, the shape Ureth's own
+// acknowledgement kernel tests use).
+func newX2World(t *testing.T, genesisParent bool) *x2World {
 	t.Helper()
 	c := certifiedchain.NewV2(t, 3, 0)
 	var doc map[string]json.RawMessage
@@ -110,7 +116,10 @@ func newX2World(t *testing.T) *x2World {
 	require.NoError(t, err)
 	o := p.Origin()
 	b0 := certifiedchain.Block{Hash: o.BlockHash(), StateRoot: o.StateRoot(), Evidence: o.Evidence()}
-	w := &x2World{t: t, chain: c, origin: o, genesis: b0, parent: c.Executed(b0, 1, 5), trust: x2Trust{}}
+	w := &x2World{t: t, chain: c, origin: o, genesis: b0, parent: c.Executed(b0, 1, 5), trust: x2Trust{}, genesisParent: genesisParent}
+	if genesisParent {
+		w.parent = b0
+	}
 
 	// Four root nodes: three signatures make a quorum, so several distinct valid subsets exist.
 	w.signers = []abcrypto.Signer{c.Signer}
@@ -184,6 +193,9 @@ func nodeID(t *testing.T, s abcrypto.Signer) string {
 }
 
 func (w *x2World) irAt() *types.InputRecord {
+	if w.genesisParent { // the exact bootstrap input record (#153 §7.3 E2)
+		return &types.InputRecord{Version: 1}
+	}
 	return &types.InputRecord{Version: 1, RoundNumber: w.parent.Round, Epoch: 0, PreviousHash: w.genesis.StateRoot.Bytes(),
 		Hash: w.parent.StateRoot.Bytes(), SummaryValue: []byte{}, Timestamp: 1_700_000_000 + w.parent.Round, BlockHash: w.parent.Hash.Bytes()}
 }
@@ -244,15 +256,19 @@ func (w *x2World) path(mutate func(*VerifierContext), epoch uint64) *x2Path {
 		mutate(v)
 	}
 
-	registry := w.origin.ProofContext()
-	registry.Active = w.active
-	srv := x2WitnessServer(w.t, w.parent.Hash, w.parent.Evidence)
-	w.t.Cleanup(srv.Close)
-	source, err := NewParentWitnessSource(context.Background(), ParentWitnessPins{NetworkID: v.NetworkID, PartitionID: v.PartitionID,
-		ShardID: v.ShardID, FullShardConfHash: w.origin.FullShardConfHash(), Registry: registry},
-		registrywitness.NewHTTPCaller(srv.URL, time.Second), DefaultParentWitnessBudget())
-	require.NoError(w.t, err)
-	w.t.Cleanup(source.Close)
+	var source *ParentWitnessSource
+	if !w.genesisParent {
+		registry := w.origin.ProofContext()
+		registry.Active = w.active
+		srv := x2WitnessServer(w.t, w.parent.Hash, w.parent.Evidence)
+		w.t.Cleanup(srv.Close)
+		var err error
+		source, err = NewParentWitnessSource(context.Background(), ParentWitnessPins{NetworkID: v.NetworkID, PartitionID: v.PartitionID,
+			ShardID: v.ShardID, FullShardConfHash: w.origin.FullShardConfHash(), Registry: registry},
+			registrywitness.NewHTTPCaller(srv.URL, time.Second), DefaultParentWitnessBudget())
+		require.NoError(w.t, err)
+		w.t.Cleanup(source.Close)
+	}
 
 	seen := &x2Seen{}
 	engine, eth := newMockReth(w.t, Secret{}), newMockReth(w.t, Secret{})
@@ -294,7 +310,9 @@ func (w *x2World) path(mutate func(*VerifierContext), epoch uint64) *x2Path {
 	})
 	a, closeFn := newTestAdapterWithVerifier(w.t, engine, eth, v)
 	w.t.Cleanup(closeFn)
-	a.parentWitness = source
+	if source != nil {
+		a.parentWitness = source
+	}
 	return &x2Path{a: a, verifier: v, seen: seen}
 }
 
@@ -418,7 +436,11 @@ func (w *x2World) run(subset ...int) (builder, follower, replay x2Result, uc *ty
 }
 
 func TestX2NonemptyAssignmentTransitionIsSignerSubsetIndependent(t *testing.T) {
-	w := newX2World(t)
+	t.Run("parent is the post-genesis block", func(t *testing.T) { x2SubsetIndependence(t, newX2World(t, false), false) })
+	t.Run("parent is the genesis block", func(t *testing.T) { x2SubsetIndependence(t, newX2World(t, true), true) })
+}
+
+func x2SubsetIndependence(t *testing.T, w *x2World, export bool) {
 
 	// Two distinct valid three-of-four subsets; B excludes root node 0, which A includes.
 	bA, fA, rA, ucA := w.run(0, 1, 2)
@@ -451,6 +473,9 @@ func TestX2NonemptyAssignmentTransitionIsSignerSubsetIndependent(t *testing.T) {
 	}
 	require.Len(t, bA.commitment, 32)
 
+	if !export {
+		return
+	}
 	// The vector the ureth state-equality test consumes: per subset the build input, the commitment the header carries, the
 	// beacon root the follower forwards, and the companion witnesses, which are the only subset-dependent bytes.
 	vec := x2Vector{Network: 3, Partition: 8, ParentHash: hexOf(w.parent.Hash.Bytes()), RootEpoch: x2RootEpoch, ShardRound: x2ShardRound,
@@ -473,13 +498,28 @@ func TestX2NonemptyAssignmentTransitionIsSignerSubsetIndependent(t *testing.T) {
 	want, err := json.MarshalIndent(vec, "", "  ")
 	require.NoError(t, err)
 	want = append(want, '\n')
-	path := filepath.Join("testdata", "h3-assignment-signer-subsets.json")
+	checkGolden(t, "h3-assignment-signer-subsets.json", want)
+
+	// The genesis the parent block belongs to, so the consumer starts from the very registry state this world's B0 names.
+	var genesis core.Genesis
+	genesisJSON := w.chain.Genesis.GenesisJSON()
+	require.NoError(t, json.Unmarshal(genesisJSON, &genesis))
+	require.Equal(t, w.genesis.Hash, genesis.ToBlock().Hash(), "the exported genesis hashes to the parent block")
+	var indented bytes.Buffer
+	require.NoError(t, json.Indent(&indented, genesisJSON, "", "  "))
+	indented.WriteByte('\n')
+	checkGolden(t, "h3-assignment-genesis.json", indented.Bytes())
+}
+
+func checkGolden(t *testing.T, name string, want []byte) {
+	t.Helper()
+	path := filepath.Join("testdata", name)
 	if os.Getenv("X2_UPDATE_VECTORS") == "1" {
 		require.NoError(t, os.WriteFile(path, want, 0o644))
 	}
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
-	require.Equal(t, string(want), string(got), "testdata is stale; regenerate with X2_UPDATE_VECTORS=1")
+	require.True(t, bytes.Equal(want, got), "%s is stale; regenerate with X2_UPDATE_VECTORS=1", name)
 }
 
 // x2Vector is the exported cross-repo vector (consumed by ristik/ureth crates/unicity/payload/tests/execution_payload.rs).
@@ -509,7 +549,7 @@ func hexOf(b []byte) string { return hex.EncodeToString(b) }
 // Every case below changes exactly one thing relative to a control that is accepted on the same construction, and each
 // refusal must arrive as its own sentinel and before anything reaches the execution client.
 func TestX2RefusalsOnANonemptyAssignmentTransition(t *testing.T) {
-	w := newX2World(t)
+	w := newX2World(t, false)
 	tr := w.technical()
 	uc := w.certify(tr, x2AuthRootRound, x2RootEpoch, 0, 1, 2)
 	params := w.params(uc, tr)
