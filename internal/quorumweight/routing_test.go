@@ -50,6 +50,8 @@ func TestEveryProductionUCVerifyRoutesThroughChecked(t *testing.T) {
 				t.Errorf("%s: direct call of the unchecked VerifyQuorumSignatures", pos)
 			case sel.Sel.Name == "NewTrustBase" && isPackage(sel.X, "types", "basetypes"):
 				t.Errorf("%s: direct call of go-base NewTrustBase sums stake unchecked; use quorumweight.NewTrustBase", pos)
+			case sel.Sel.Name == "Verify" && len(call.Args) == 1 && isNil(call.Args[0]):
+				t.Errorf("%s: Verify(nil) is go-base's genesis trust base check; use quorumweight.VerifyTrustBase", pos)
 			case sel.Sel.Name == "VerifySignatures":
 				t.Errorf("%s: direct call of go-base VerifySignatures; use quorumweight.VerifyTrustBase", pos)
 			case sel.Sel.Name == "Verify" && len(call.Args) == 5 && !isPackage(sel.X, "handoffdelivery"):
@@ -88,4 +90,9 @@ func isPackage(x ast.Expr, names ...string) bool {
 		}
 	}
 	return false
+}
+
+func isNil(x ast.Expr) bool {
+	id, ok := x.(*ast.Ident)
+	return ok && id.Name == "nil"
 }

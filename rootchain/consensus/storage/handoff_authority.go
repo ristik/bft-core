@@ -130,7 +130,7 @@ func (x *BlockStore) ConfigureHandoffAuthority(tb *types.RootTrustBaseV1) error 
 	if err := types.Cbor.Unmarshal(raw, &owned); err != nil {
 		return err
 	}
-	if err := owned.Verify(nil); err != nil {
+	if err := quorumweight.VerifyTrustBase(&owned, nil); err != nil {
 		return errors.Join(ErrHandoffRecord, err)
 	}
 	predecessor, err := owned.Hash(crypto.SHA256)
