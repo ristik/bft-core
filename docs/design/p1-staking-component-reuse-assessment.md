@@ -293,12 +293,10 @@ Test mappings (the "Removed upstream test" column; row 4 split into its three in
 | 10 OZ 0.5 unit tests | **wrong** | OZ tests are in neither repo |
 
 Counts: 22 mappings (10 component, 12 test) — **8 verified, 12 wrong, 2
-unverifiable**. The "wrong" and "unverifiable" entries are corrected in the
-matrix rows above; none is evidence of a removed obligation. The golden fixture
-and Go model (`evmroot/testdata/p1-reuse-matrix.json`, `p1matrix.go`) still carry
-the earlier wording and are **not** changed by this documentation-only revision;
-refresh them with `go run ./evmroot/cmd/p1matrix -update` when the model is next
-touched.
+unverifiable**. The "wrong" and "unverifiable" entries are corrected in the matrix rows above and
+mirrored in `evmroot/p1matrix.go` and the regenerated golden fixture
+`evmroot/testdata/p1-reuse-matrix.json`; none is evidence of a removed obligation.
+The model's SPDX fields are a working label for the licence gate, not a finding.
 
 ## 4. Three options, compared on engineering merit
 
