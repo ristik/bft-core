@@ -356,3 +356,30 @@ func TestAcknowledgeRefusesOversizeEvidenceWithoutInvalidating(t *testing.T) {
 	require.ErrorIs(t, err, configuredprogress.ErrBounds)
 	require.True(t, g.BootstrapState().Allowed())
 }
+
+// The evidence bound is exact: a pair of MaxPairBytes is within it, one byte more is not.
+func TestPairBytesBoundIsExact(t *testing.T) {
+	chain, _, _, _ := newFreshnessFixture(t)
+	uc, tr := signAdapterObservation(t, chain)
+	size := func(pad int) int {
+		uc.InputRecord.SummaryValue = make([]byte, pad)
+		ub, err := types.Cbor.Marshal(uc)
+		require.NoError(t, err)
+		tb, err := types.Cbor.Marshal(tr)
+		require.NoError(t, err)
+		return len(ub) + len(tb)
+	}
+	pad := configuredprogress.MaxPairBytes - size(0)
+	for size(pad) > configuredprogress.MaxPairBytes {
+		pad--
+	}
+	for size(pad+1) <= configuredprogress.MaxPairBytes {
+		pad++
+	}
+	require.Equal(t, configuredprogress.MaxPairBytes, size(pad), "the header size is stable at this length")
+	_, err := pairBytes(uc, tr)
+	require.NoError(t, err)
+	size(pad + 1)
+	_, err = pairBytes(uc, tr)
+	require.ErrorIs(t, err, configuredprogress.ErrBounds)
+}

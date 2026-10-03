@@ -195,3 +195,19 @@ func TestMaintainWithAnEndedContextAsksNoRoot(t *testing.T) {
 	require.ErrorIs(t, r.Maintain(ctx), context.Canceled)
 	require.Zero(t, frontierCalls.Load())
 }
+
+func TestFailedEpisodeNamesItsStageAndLastExchangeFailure(t *testing.T) {
+	r := &Requester{}
+	require.EqualError(t, r.explain(ErrExpired), ErrExpired.Error()+" (stage )")
+	r.note("cut", nil)
+	require.EqualError(t, r.explain(ErrExpired), ErrExpired.Error()+" (stage cut)", "no exchange failure to report")
+	r.note("cut", io.ErrUnexpectedEOF)
+	r.note("frontier", nil)
+	require.EqualError(t, r.explain(ErrUnavailable), ErrUnavailable.Error()+" (stage frontier, last exchange: unexpected EOF)", "a later note without an error keeps the last failure")
+	require.NoError(t, r.explain(nil))
+
+	failing, _, _, _ := reviewPolicyRequester(t, func(context.Context, peer.ID, string) (libnetwork.Stream, error) { return nil, io.EOF })
+	got := failing.Acquire(context.Background())
+	require.ErrorIs(t, got.Err, ErrUnavailable)
+	require.ErrorContains(t, got.Err, "stage frontier, last exchange: ")
+}
