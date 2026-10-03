@@ -52,6 +52,8 @@
       "target_obligation": "Assigned-weight reward per certified root interval.",
       "disposition": "remove",
       "replaces_duty_key": "assigned-weight-reward",
+      "removed_upstream_test": "matic-contracts eef53596046eda70a53653a8e5ff79b1cbf0a4f9 and pos-contracts ffa83a740dff3f4764277d855faf6c9388e06d90, test/units/staking/stakeManager/StakeManager.test.js (verified 2026-10-03): proposer bonus with delegation (matic L365, pos L362) expects validator rewards 3250/2250/2250; unequal-stake bonus cases (matic L552-599, pos L549-596) expect 3000/6000 at 10% and 6166666666666666666666/12333333333333333333333 after the update to 5%; three-validator cadence cases (matic L601, pos L598) expect 1500/3000/4500 then 3930/7860/11790 and 6630/13260/19890; testCheckpointing (L29-59) asserts validatorReward. Replaced by assigned-weight settlement: reward proportional to stake and to the progress the interval covers (certified root rounds instead of checkpoint cadence). Disappear: the proposer fixed bonus and updateProposerBonus, the validator/delegator split (combinedStakePower), and any dependence on checkpoint signing.",
+      "local_home": "T8 / P7 (assigned-weight reward settlement); not retained as upstream vectors.",
       "replacement": "Replaced by the governance.tex closed-interval reward formula; see accounting replacement \"assigned-weight-reward\".",
       "note": "Checkpoint coupling: the whole accrual is driven by RootChain checkpoint submission and a per-checkpoint decreasing pool. The new reward is a function of certified root-round progress and effective weight only."
     },
