@@ -6,6 +6,10 @@ operator other than the implementer; this document is not production approval.
 Cross-epoch full-disk restore and archive-replica maintenance are specifically
 pending. Do not use the test harness against production data.
 
+For a fresh private network and the H6 rehearsal sequence, start with the
+[H6 operator guide](h6/README.md). It provides pinned builds, setup, configuration,
+lifecycle commands and the independent-operator evidence checklist.
+
 This runbook uses commands and observations present in the merged `ubft` CLIs,
 paired-devnet scripts, and F9 report tool. Replace every `REPLACE_*` value before
 running a command. The H4 and D2C scripts operate on `test-nodes/`, stop processes,
