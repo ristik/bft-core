@@ -306,6 +306,9 @@ stop_one_evm_validator 4 2>/dev/null || true
 # 4. Acknowledge with s=1: restart retained evm3 and restore evm5; certify the ack and a paid mint.
 h3_ack_s1() {
   H3_ONLINE="1 2 3 5"
+  # After s=1 evm4 is retired: a node refuses to start naming it as an archive replica (#365), so the restarts below name the s=1
+  # candidates (evm5 joins; evm1 is never a replica candidate, as in the default pool).
+  export EVM_ARCHIVE_REPLICA_POOL="2 3 5"
   # The retained validators' authorities (1 and 2 running, 3 held down) advance to the activated scope (root epoch 3, shard epoch 1)
   # and their nodes restart with the new sessions; the joiner's authority is enrolled against the activated configuration.
   h3_advance_authorities 3 1 1 2 3 || { echo "authority advance to root epoch 3 / shard epoch 1 failed" >&2; return 1; }
