@@ -205,7 +205,7 @@ func TestFreshnessActivationEndToEndWithProductionServing(t *testing.T) {
 	before := restarted
 	require.NoError(t, before.Require())
 	err = restartedAdmission.Submit(context.Background(), pair.UC, pair.TR)
-	require.Error(t, err, "the journal has no bootstrap certificate to continue from, so nothing is written")
+	require.ErrorIs(t, err, configuredprogress.ErrUnavailable, "the journal has no bootstrap certificate to continue from, so nothing is written")
 	require.False(t, errors.Is(err, configuredadmission.ErrFreshnessRequired))
 	status, ok = restarted.Status()
 	require.True(t, ok)

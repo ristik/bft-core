@@ -51,6 +51,10 @@ type Freshness struct {
 	guard     *bootstrapGuard
 	requester receiptSource
 	startErr  error
+	// ordinary latches that authenticated ordinary progress is known. It lives here, not only in the
+	// guard, so it survives a guard or requester that cannot be constructed: ordinary operation never
+	// depends on the bootstrap receipt machinery.
+	ordinary bool
 }
 
 // receiptSource is the part of the requester that readiness consults.
@@ -87,19 +91,25 @@ func (f *Freshness) start(ctx context.Context, c configuredprogress.Context, sto
 		if f.Logger != nil {
 			f.Logger.ErrorContext(ctx, "bootstrap freshness cannot start; a node with no ordinary progress stays unready", slog.String("error", err.Error()))
 		}
-		return nil
-	}
-	if f.Opener == nil || f.TrustBase == nil {
-		return fail(frontierrequester.ErrSettings)
+		return f.guard
 	}
 	st, _, err := store.Load(ctx, c)
 	if err != nil {
 		return fail(err)
 	}
-	g, err := newBootstrapGuard(ctx, c, f.TrustBase, st.Ordinary(), submit, f.Logger)
+	if st.Ordinary() {
+		f.ordinary = true
+	}
+	if f.Opener == nil || f.TrustBase == nil {
+		return fail(frontierrequester.ErrSettings)
+	}
+	g, err := newBootstrapGuard(ctx, c, f.TrustBase, f.ordinary, submit, f.Logger)
 	if err != nil {
 		return fail(err)
 	}
+	// The guard is kept from here on, even if the requester cannot be built: it carries the ordinary
+	// latch for the journal admission.
+	f.guard = g
 	peers, err := RootPeers(f.TrustBase)
 	if err != nil {
 		return fail(err)
@@ -123,7 +133,7 @@ func (f *Freshness) start(ctx context.Context, c configuredprogress.Context, sto
 	if err != nil {
 		return fail(err)
 	}
-	f.guard, f.requester = g, r
+	f.requester = r
 	if g.BootstrapState().Allowed() {
 		go func() {
 			err := r.Maintain(ctx)
@@ -144,8 +154,11 @@ func (f *Freshness) Require() error {
 		return nil
 	}
 	f.mu.Lock()
-	g, r, startErr := f.guard, f.requester, f.startErr
+	g, r, startErr, ordinary := f.guard, f.requester, f.startErr, f.ordinary
 	f.mu.Unlock()
+	if ordinary || g.OrdinaryKnown() {
+		return nil // authenticated ordinary progress supersedes any bootstrap or unsupported evidence
+	}
 	if g == nil || r == nil {
 		if startErr != nil {
 			return startErr
@@ -162,10 +175,20 @@ func (f *Freshness) Require() error {
 		}
 		return nil
 	}
-	if state.UnsupportedSeen {
-		return ErrBootstrapRefused
+	return ErrBootstrapRefused // unsupported evidence and no ordinary progress
+}
+
+// noteOrdinary records authenticated ordinary progress, in the Freshness itself and in the guard
+// when one exists. It is the journal admission's entry point and is safe on a nil receiver.
+func (f *Freshness) noteOrdinary() {
+	if f == nil {
+		return
 	}
-	return nil // ordinary progress is known: no bootstrap receipt applies
+	f.mu.Lock()
+	f.ordinary = true
+	g := f.guard
+	f.mu.Unlock()
+	g.NoteOrdinary()
 }
 
 // Status is a diagnostic snapshot of the guard (nil when freshness never started).
@@ -197,6 +220,7 @@ func (t fixedTrust) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1,
 type BootstrapGuardStatus struct {
 	Invalidated     bool
 	UnsupportedSeen bool
+	Ordinary        bool
 	FirstOrdinary   []byte
 	LatestOrdinary  []byte
 }
@@ -215,6 +239,7 @@ type bootstrapGuard struct {
 	mu          sync.Mutex
 	invalidated bool
 	unsupported bool
+	ordinary    bool
 	first       []byte
 	latest      []byte
 	queued      *pairValue
@@ -248,7 +273,7 @@ func newBootstrapGuard(process context.Context, c configuredprogress.Context, tr
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", frontierrequester.ErrSettings, err)
 	}
-	return &bootstrapGuard{process: process, obs: obs, binding: binding, forward: forward, log: log, invalidated: ordinaryKnown}, nil
+	return &bootstrapGuard{process: process, obs: obs, binding: binding, forward: forward, log: log, invalidated: ordinaryKnown, ordinary: ordinaryKnown}, nil
 }
 
 func (g *bootstrapGuard) EvidenceProfileBinding() [32]byte { return g.binding }
@@ -267,14 +292,25 @@ func (g *bootstrapGuard) NoteOrdinary() {
 		return
 	}
 	g.mu.Lock()
-	g.invalidated = true
+	g.invalidated, g.ordinary = true, true
 	g.mu.Unlock()
+}
+
+// OrdinaryKnown reports whether authenticated ordinary progress is known. Unsupported evidence alone
+// does not set it, so a node whose only evidence is unsupported keeps refusing bootstrap.
+func (g *bootstrapGuard) OrdinaryKnown() bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.ordinary
 }
 
 func (g *bootstrapGuard) Status() BootstrapGuardStatus {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return BootstrapGuardStatus{Invalidated: g.invalidated, UnsupportedSeen: g.unsupported, FirstOrdinary: bytes.Clone(g.first), LatestOrdinary: bytes.Clone(g.latest)}
+	return BootstrapGuardStatus{Invalidated: g.invalidated, UnsupportedSeen: g.unsupported, Ordinary: g.ordinary, FirstOrdinary: bytes.Clone(g.first), LatestOrdinary: bytes.Clone(g.latest)}
 }
 
 // AcknowledgePair reauthenticates evidence the requester collected under the fixed local trust and
@@ -308,7 +344,7 @@ func (g *bootstrapGuard) AcknowledgePair(uc *types.UnicityCertificate, tr *certi
 		return false, fmt.Errorf("%w: bootstrap evidence is not negative", configuredprogress.ErrConflict)
 	}
 	g.mu.Lock()
-	g.invalidated = true
+	g.invalidated, g.ordinary = true, true
 	if len(g.first) == 0 {
 		g.first = bytes.Clone(raw)
 	}

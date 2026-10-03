@@ -63,17 +63,17 @@ func TestValidateFrontierProfileEnforcesTheFixedProfile(t *testing.T) {
 	}, nil)
 	good := cms[0].frontier.trust
 	require.NoError(t, ValidateFrontierProfile(good))
-	require.Error(t, ValidateFrontierProfile(nil))
+	require.ErrorIs(t, ValidateFrontierProfile(nil), ErrFrontierProfile)
 
 	weighted := *good
 	weighted.RootNodes = append([]*types.NodeInfo(nil), good.RootNodes...)
 	first := weighted.RootNodes[0]
 	weighted.RootNodes[0] = &types.NodeInfo{NodeID: first.NodeID, SigKey: first.SigKey, Stake: 2}
-	require.Error(t, ValidateFrontierProfile(&weighted), "weighted roots are outside the profile")
+	require.ErrorIs(t, ValidateFrontierProfile(&weighted), ErrFrontierProfile, "weighted roots are outside the profile")
 
 	lowQuorum := *good
 	lowQuorum.QuorumThreshold = uint64(len(good.RootNodes)) * 2 / 3
-	require.Error(t, ValidateFrontierProfile(&lowQuorum), "q must exceed 2N/3")
+	require.ErrorIs(t, ValidateFrontierProfile(&lowQuorum), ErrFrontierProfile, "q must exceed 2N/3")
 }
 
 // A root that joined after the pinned trust base was cut (a successor member of the handoff profile) is not
@@ -85,11 +85,11 @@ func TestValidateFrontierSignerRequiresEnrollmentUnderThePinnedTrustBase(t *test
 	id := func(i int) string { return nodes[i].PeerConf.ID.String() }
 
 	require.NoError(t, ValidateFrontierSigner(trust, id(0), nodes[0].Signer))
-	require.ErrorContains(t, ValidateFrontierSigner(trust, id(2), nodes[2].Signer), "not enrolled", "a later member is not in the pinned trust base")
-	require.ErrorContains(t, ValidateFrontierSigner(trust, id(0), nodes[1].Signer), "does not match", "the enrolled identity with another key")
-	require.Error(t, ValidateFrontierSigner(trust, "", nodes[0].Signer))
-	require.Error(t, ValidateFrontierSigner(trust, id(0), nil))
-	require.Error(t, ValidateFrontierSigner(nil, id(0), nodes[0].Signer))
+	require.ErrorIs(t, ValidateFrontierSigner(trust, id(2), nodes[2].Signer), ErrFrontierSigner, "a later member is not in the pinned trust base")
+	require.ErrorIs(t, ValidateFrontierSigner(trust, id(0), nodes[1].Signer), ErrFrontierSigner, "the enrolled identity with another key")
+	require.ErrorIs(t, ValidateFrontierSigner(trust, "", nodes[0].Signer), ErrFrontierSigner)
+	require.ErrorIs(t, ValidateFrontierSigner(trust, id(0), nil), ErrFrontierSigner)
+	require.ErrorIs(t, ValidateFrontierSigner(nil, id(0), nodes[0].Signer), ErrFrontierProfile)
 
 	// The same check is what refuses the manager: the validation and the constructor cannot disagree.
 	_, shardInfos := rctest.CreateTestNodes(t, 1)

@@ -46,7 +46,7 @@ type journalAdmission struct {
 	callbacks       shardnode.AdmissionCallbacks
 	epoch           uint64
 	catchUp         func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error
-	guard           *bootstrapGuard
+	freshness       *Freshness
 	onStop          func(error)
 	logger          *slog.Logger
 	ctx             context.Context
@@ -89,7 +89,8 @@ func (f JournalFactory) Start(ctx context.Context, id shardnode.AdmissionIdentit
 	}
 	a := &journalAdmission{store: f.Store, context: c, limits: f.Limits, gate: gate, callbacks: callbacks, epoch: c.Observation.RootEpoch, catchUp: f.CatchUp, onStop: f.OnStop, logger: f.Logger, ctx: ctx, closeCh: make(chan struct{})}
 	if f.Freshness != nil {
-		a.guard = f.Freshness.start(ctx, c, f.Store, a.Submit)
+		a.freshness = f.Freshness
+		f.Freshness.start(ctx, c, f.Store, a.Submit)
 	}
 	return a, nil
 }
@@ -149,7 +150,7 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 	if o.Class() != evmroot.OriginBootstrapV2 {
 		// Ordinary progress ends bootstrap eligibility the moment it authenticates, before any
 		// write that could fail (F6f section 4).
-		a.guard.NoteOrdinary()
+		a.freshness.noteOrdinary()
 	}
 	p, _, err := a.store.PrepareObservation(ctx, a.context, o)
 	if err != nil {

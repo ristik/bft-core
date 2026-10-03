@@ -256,13 +256,19 @@ func TestAcknowledgeRefusesBootstrapAndForgedEvidenceWithoutInvalidating(t *test
 	require.False(t, retained)
 	require.ErrorIs(t, err, configuredprogress.ErrConflict, "bootstrap evidence is not negative evidence")
 	uc, tr := signAdapterObservation(t, chain)
+	// Isolated mutation: exactly one signature is corrupted, nothing else about the pair changes.
+	corrupted := false
 	for signer, sig := range uc.UnicitySeal.Signatures {
 		sig[0] ^= 0xff
 		uc.UnicitySeal.Signatures[signer] = sig
+		corrupted = true
+		break
 	}
+	require.True(t, corrupted)
 	retained, err = g.AcknowledgePair(uc, tr)
 	require.False(t, retained)
-	require.Error(t, err)
+	require.ErrorIs(t, err, rootinput.ErrUnauthenticated)
+	require.False(t, rootinput.IsUnsupportedObservationV2(err), "forged evidence is not unsupported evidence")
 	require.True(t, g.BootstrapState().Allowed(), "forged evidence must not end bootstrap")
 	require.Zero(t, forwards.Load())
 	require.Empty(t, g.Status().FirstOrdinary)
@@ -382,4 +388,152 @@ func TestPairBytesBoundIsExact(t *testing.T) {
 	size(pad + 1)
 	_, err = pairBytes(uc, tr)
 	require.ErrorIs(t, err, configuredprogress.ErrBounds)
+}
+
+func ordinaryGuardFixture(t *testing.T) (*certifiedchain.Chain, *bootstrapGuard, *Freshness) {
+	t.Helper()
+	chain, c, _, _ := newFreshnessFixture(t)
+	g, err := newBootstrapGuard(context.Background(), c, fixtureTrust(chain), false, nil, nil)
+	require.NoError(t, err)
+	return chain, g, &Freshness{guard: g, requester: scriptedReceipts{}}
+}
+
+// recoveryAfterFreshness drives the real readiness entry points far enough to tell whether the
+// freshness predicate let them through: the recovery here is deliberately unwired, so a pass shows
+// as the later incomplete-wiring refusal and never as a freshness refusal.
+func recoveryAfterFreshness(t *testing.T, chain *certifiedchain.Chain, f *Freshness) (prepare, revalidate error) {
+	t.Helper()
+	r := &ExecutionRecovery{Freshness: f}
+	held, _ := journalBootstrap(t, chain)
+	_, prepare = r.Prepare(context.Background(), held)
+	revalidate = r.Revalidate(context.Background(), recoveryTicket{anchor: shardnode.BlockRef{Hash: make([]byte, 32)}}, held)
+	return prepare, revalidate
+}
+
+// Authenticated ordinary progress supersedes unsupported bootstrap evidence: the node that saw an
+// unsupported pair first and then genuine ordinary progress is ordinary, and readiness follows.
+func TestAuthenticatedOrdinaryProgressSupersedesUnsupportedEvidence(t *testing.T) {
+	chain, g, f := ordinaryGuardFixture(t)
+	uc, tr := unsupportedPair(t, chain)
+	retained, err := g.AcknowledgePair(uc, tr)
+	require.True(t, retained)
+	require.ErrorIs(t, err, rootinput.ErrV2Shape)
+	require.False(t, g.OrdinaryKnown(), "unsupported evidence is not ordinary progress")
+	require.ErrorIs(t, f.Require(), ErrBootstrapRefused)
+	prepare, revalidate := recoveryAfterFreshness(t, chain, f)
+	require.ErrorIs(t, prepare, ErrBootstrapRefused)
+	require.ErrorIs(t, revalidate, ErrBootstrapRefused)
+
+	ordinary, ordinaryTR := signAdapterObservation(t, chain)
+	retained, err = g.AcknowledgePair(ordinary, ordinaryTR)
+	require.NoError(t, err)
+	require.True(t, retained)
+	require.True(t, g.OrdinaryKnown())
+	require.NoError(t, f.Require())
+	prepare, revalidate = recoveryAfterFreshness(t, chain, f)
+	require.ErrorIs(t, prepare, ErrRecoveryUnavailable, "freshness no longer refuses; the unwired recovery does")
+	require.NotErrorIs(t, prepare, ErrBootstrapRefused)
+	require.ErrorIs(t, revalidate, ErrRecoveryUnavailable)
+	require.NotErrorIs(t, revalidate, ErrBootstrapRefused)
+	status := g.Status()
+	require.True(t, status.UnsupportedSeen, "the refusal of bootstrap receipts stays irreversible")
+	require.True(t, status.Ordinary)
+	require.False(t, g.BootstrapState().Allowed())
+}
+
+// The opposite order: unsupported evidence arriving after ordinary progress cannot take ordinary
+// operation away, and still cannot reopen bootstrap.
+func TestUnsupportedEvidenceAfterOrdinaryProgressDoesNotRefuseOrdinaryOperation(t *testing.T) {
+	chain, g, f := ordinaryGuardFixture(t)
+	ordinary, ordinaryTR := signAdapterObservation(t, chain)
+	retained, err := g.AcknowledgePair(ordinary, ordinaryTR)
+	require.NoError(t, err)
+	require.True(t, retained)
+	require.NoError(t, f.Require())
+
+	uc, tr := unsupportedPair(t, chain)
+	retained, err = g.AcknowledgePair(uc, tr)
+	require.True(t, retained)
+	require.ErrorIs(t, err, rootinput.ErrV2Shape)
+	require.True(t, g.Status().UnsupportedSeen)
+	require.NoError(t, f.Require(), "ordinary progress needs no receipt, whatever unsupported evidence follows")
+	require.False(t, g.BootstrapState().Allowed(), "bootstrap stays closed")
+}
+
+// The journal admission's own ordinary notification supersedes unsupported evidence too.
+func TestJournalOrdinaryAdmissionSupersedesUnsupportedEvidence(t *testing.T) {
+	chain, _, id, factory := newFreshnessFixture(t)
+	f := freshnessFor(chain, &deadOpener{})
+	a := startFreshAdmission(t, context.Background(), *factory, id, f)
+	f.mu.Lock()
+	g := f.guard
+	f.mu.Unlock()
+	require.NotNil(t, g)
+	uc, tr := unsupportedPair(t, chain)
+	_, err := g.AcknowledgePair(uc, tr)
+	require.ErrorIs(t, err, rootinput.ErrV2Shape)
+	require.ErrorIs(t, f.Require(), ErrBootstrapRefused)
+	ordinary, ordinaryTR := signAdapterObservation(t, chain)
+	err = a.Submit(context.Background(), ordinary, ordinaryTR)
+	require.ErrorIs(t, err, configuredprogress.ErrUnavailable, "the fresh journal has no bootstrap certificate; ordinary progress was still learned")
+	require.NoError(t, f.Require())
+}
+
+// weightedRootTrust is valid for the node but outside the frontier's unit-weight profile, so the
+// requester cannot be constructed over it.
+func weightedRootTrust(chain *certifiedchain.Chain) *types.RootTrustBaseV1 {
+	tb := fixtureTrust(chain)
+	nodes := append([]*types.NodeInfo(nil), tb.RootNodes...)
+	first := nodes[0]
+	nodes[0] = &types.NodeInfo{NodeID: first.NodeID, SigKey: first.SigKey, Stake: 2}
+	tb.RootNodes = nodes
+	return tb
+}
+
+// Ordinary operation does not depend on the bootstrap requester: durable ordinary progress is kept,
+// with its guard, when the requester cannot be built, and bootstrap-only state still refuses.
+func TestDurableOrdinaryProgressSurvivesRequesterConstructionFailure(t *testing.T) {
+	chain, _, id, factory := newFreshnessFixture(t)
+	first := startFreshAdmission(t, context.Background(), *factory, id, freshnessFor(chain, &deadOpener{}))
+	boot, bootTR := journalBootstrap(t, chain)
+	require.NoError(t, first.Submit(context.Background(), boot, bootTR))
+	require.NoError(t, first.Close())
+
+	bootstrapOnly := &Freshness{Opener: &deadOpener{}, TrustBase: weightedRootTrust(chain)}
+	startFreshAdmission(t, context.Background(), *factory, id, bootstrapOnly)
+	require.ErrorIs(t, bootstrapOnly.Require(), ErrFreshnessUnavailable, "bootstrap-only state is never granted without the receipt")
+
+	ordinary, tr := signAdapterObservation(t, chain)
+	second := startFreshAdmission(t, context.Background(), *factory, id, freshnessFor(chain, &deadOpener{}))
+	_ = second.Submit(context.Background(), ordinary, tr) // durable, though its body is unresolved
+	require.NoError(t, second.Close())
+
+	restarted := &Freshness{Opener: &deadOpener{}, TrustBase: weightedRootTrust(chain)}
+	startFreshAdmission(t, context.Background(), *factory, id, restarted)
+	require.NoError(t, restarted.Require(), "durable ordinary progress needs no requester")
+	status, ok := restarted.Status()
+	require.True(t, ok, "the guard is kept when the requester cannot be constructed")
+	require.True(t, status.Ordinary)
+}
+
+// Ordinary progress learned after startup is latched even when neither requester nor guard exists,
+// and the admission never calls a nil guard.
+func TestNewlyLearnedOrdinaryProgressSurvivesMissingRequesterAndGuard(t *testing.T) {
+	for name, f := range map[string]func(*certifiedchain.Chain) *Freshness{
+		"requester refused": func(chain *certifiedchain.Chain) *Freshness {
+			return &Freshness{Opener: &deadOpener{}, TrustBase: weightedRootTrust(chain)}
+		},
+		"no guard": func(chain *certifiedchain.Chain) *Freshness { return &Freshness{TrustBase: fixtureTrust(chain)} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			chain, _, id, factory := newFreshnessFixture(t)
+			fresh := f(chain)
+			a := startFreshAdmission(t, context.Background(), *factory, id, fresh)
+			require.ErrorIs(t, fresh.Require(), ErrFreshnessUnavailable)
+			ordinary, tr := signAdapterObservation(t, chain)
+			err := a.Submit(context.Background(), ordinary, tr)
+			require.ErrorIs(t, err, configuredprogress.ErrUnavailable)
+			require.NoError(t, fresh.Require(), "ordinary progress needs no requester")
+		})
+	}
 }

@@ -2,6 +2,7 @@ package frontierrequester
 
 import (
 	"context"
+	"github.com/unicitynetwork/bft-core/rootinput"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -127,7 +128,7 @@ func TestMaintainStopsOnceBootstrapIsRefusedAndAsksNoRootAgain(t *testing.T) {
 	uc, tr := supersedingEvidence(t, chain)
 	retained, err := admission.AcknowledgePair(uc, tr)
 	require.True(t, retained)
-	require.Error(t, err)
+	require.ErrorIs(t, err, rootinput.ErrV2Shape, "the acknowledged pair is unsupported evidence")
 	require.ErrorIs(t, finished(t, done), ErrInvalidated)
 	require.ErrorIs(t, r.Validate(receipt), ErrInvalidated)
 	calls := frontierCalls.Load()
