@@ -74,6 +74,7 @@ func (x *ConsensusManager) serveFrontier(ctx context.Context, request frontiertr
 		Nonce:                 request.Nonce,
 	})
 	if err != nil {
+		x.log.DebugContext(ctx, "frontier request not served", "error", err)
 		return nil, err
 	}
 	return response.CanonicalBytes(), nil
@@ -87,8 +88,12 @@ func (x *ConsensusManager) serveCut(ctx context.Context, request frontiertranspo
 	if err != nil {
 		return nil, err
 	}
+	var committed uint64
 	for {
 		cut, readErr := x.blockStore.ReadFrontierCutSnapshot(request.Context.PartitionID, shard)
+		if readErr == nil {
+			committed = cut.RootRound
+		}
 		if readErr == nil && cut.RootRound >= request.Floor {
 			var binding [32]byte
 			copy(binding[:], request.AcquisitionBinding)
@@ -96,6 +101,7 @@ func (x *ConsensusManager) serveCut(ctx context.Context, request frontiertranspo
 		}
 		select {
 		case <-ctx.Done():
+			x.log.InfoContext(ctx, "frontier cut request not served", "floor", request.Floor, "committedRound", committed, "readError", readErr)
 			if readErr != nil {
 				return nil, fmt.Errorf("committed cut unavailable: %w", readErr)
 			}
