@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 )
 
 type Option func(*RoundInfo)
@@ -95,8 +97,10 @@ func TestQuorumCert_Verify(t *testing.T) {
 			qc.Signatures[signerID] = []byte{1, 2, 3}
 			break
 		}
-		// the invalid signature must trigger error
-		require.ErrorContains(t, qc.Verify(rootTrust), "failed to verify quorum signatures: quorum not reached, signed_votes=2 quorum_threshold=3")
+		// the invalid signature must trigger error; D3 section 3: a bad signer rejects the certificate, it is not skipped
+		err := qc.Verify(rootTrust)
+		require.ErrorIs(t, err, quorumweight.ErrInvalidSignature)
+		require.ErrorContains(t, err, signerID)
 	})
 }
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontierclient"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontiertransport"
@@ -173,7 +174,13 @@ func newRequester(cfg Config, clk clock, random io.Reader) (*Requester, error) {
 		seenAuthors[p.Author], seenPeers[p.PeerID] = struct{}{}, struct{}{}
 		peers[i] = p
 	}
-	if uint64(len(peers)) < profile.TrustBase.QuorumThreshold {
+	var peerWeight quorumweight.Tally
+	for _, n := range profile.TrustBase.RootNodes {
+		if _, ok := seenAuthors[n.NodeID]; ok && peerWeight.Add(n.NodeID, n.Stake) != nil {
+			return nil, ErrSettings
+		}
+	}
+	if !peerWeight.Reached(profile.TrustBase.QuorumThreshold) {
 		return nil, ErrSettings
 	}
 	return &Requester{process: cfg.Process, profile: profile, peers: peers, opener: cfg.Opener, admission: cfg.Admission, clock: clk, random: random}, nil

@@ -7,6 +7,7 @@ import (
 	"math"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
 	"github.com/unicitynetwork/bft-go-base/tree/imt"
@@ -43,15 +44,7 @@ func verifyOldQC(qc *rctypes.QuorumCert, tb *types.RootTrustBaseV1) error {
 	if err != nil {
 		return ErrProof
 	}
-	var weight uint64
-	for id, signature := range qc.Signatures {
-		stake, err := tb.VerifySignature(bs, signature, id)
-		if err != nil || math.MaxUint64-weight < stake {
-			return ErrProof
-		}
-		weight += stake
-	}
-	if weight < tb.QuorumThreshold {
+	if _, err := quorumweight.VerifySigned(tb, bs, qc.Signatures); err != nil {
 		return ErrProof
 	}
 	return nil

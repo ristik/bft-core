@@ -14,6 +14,7 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/internal/frontiercodec"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -159,6 +160,7 @@ type group struct {
 	floor   uint64
 	qc      []byte
 	authors []string
+	weight  uint64
 }
 
 type Collector struct {
@@ -240,8 +242,11 @@ func NewCollector(p Profile) (*Collector, error) {
 		}
 		verifiers[n.NodeID] = v
 	}
-	n := uint64(len(trust.RootNodes))
-	if trust.QuorumThreshold <= 2*n/3 || trust.QuorumThreshold > n {
+	n, err := quorumweight.TotalWeight(trust.RootNodes)
+	if err != nil {
+		return nil, ErrProfile
+	}
+	if min, err := quorumweight.Threshold(n); err != nil || trust.QuorumThreshold < min || trust.QuorumThreshold > n {
 		return nil, ErrProfile
 	}
 	shardBytes, err := types.Cbor.Marshal(p.ShardID)
@@ -263,6 +268,16 @@ func NewCollector(p Profile) (*Collector, error) {
 		return nil, ErrProfile
 	}
 	return &Collector{trust: &trust, verifiers: verifiers, context: context, nonce: bytes.Clone(p.Nonce), partition: p.PartitionID, shard: shard, conf: bytes.Clone(p.FullShardConfHash), quorum: trust.QuorumThreshold, authors: make(map[string]struct{}, len(verifiers)), groups: make(map[[32]byte]*group), binding: binding}, nil
+}
+
+// stakeOf is the weight of a trust-base member; the quorum over replies is a weight, not an author count.
+func (c *Collector) stakeOf(author string) (uint64, bool) {
+	for _, n := range c.trust.RootNodes {
+		if n.NodeID == author {
+			return n.Stake, true
+		}
+	}
+	return 0, false
 }
 
 func (c *Collector) Add(raw []byte) AddResult {
@@ -342,17 +357,28 @@ func (c *Collector) add(raw []byte, expectedAuthor string) AddResult {
 	if _, duplicate := c.authors[reply.Author]; duplicate {
 		return AddResult{Status: Duplicate}
 	}
-	c.authors[reply.Author] = struct{}{}
+	stake, ok := c.stakeOf(reply.Author)
+	if !ok {
+		return AddResult{Err: ErrUnauthentic}
+	}
 	g := c.groups[pairID]
+	if g != nil {
+		if _, err := quorumweight.Add(g.weight, stake); err != nil {
+			return AddResult{Err: ErrUnauthentic}
+		}
+	}
+	c.authors[reply.Author] = struct{}{}
+	g = c.groups[pairID]
 	if g == nil {
 		g = &group{pair: bytes.Clone(reply.Pair), id: pairID}
 		c.groups[pairID] = g
 	}
 	g.authors = append(g.authors, reply.Author)
+	g.weight += stake // cannot overflow: checked above
 	if round := qc.VoteInfo.RoundNumber; round > g.floor {
 		g.floor, g.qc = round, bytes.Clone(reply.QC)
 	}
-	if uint64(len(g.authors)) >= c.quorum && !c.ordinary && !c.unsupported && !c.exhausted {
+	if quorumweight.Reached(g.weight, c.quorum) && !c.ordinary && !c.unsupported && !c.exhausted {
 		authors := slices.Clone(g.authors)
 		sort.Strings(authors)
 		c.candidate = Candidate{pair: bytes.Clone(g.pair), qc: bytes.Clone(g.qc), id: g.id, floor: g.floor, authors: authors, binding: c.binding}
@@ -559,18 +585,12 @@ func strictSignatures(trust *types.RootTrustBaseV1, signatures map[string]hex.By
 	if signatureBounds(signatures) != nil || len(data) == 0 {
 		return ErrUnauthentic
 	}
-	var votes uint64
 	for author, sig := range signatures {
 		if len(author) == 0 || len(author) > frontiercodec.MaxAuthor || len(sig) == 0 || len(sig) > frontiercodec.MaxSignature {
 			return ErrUnauthentic
 		}
-		stake, err := trust.VerifySignature(data, sig, author)
-		if err != nil || votes > ^uint64(0)-stake {
-			return ErrUnauthentic
-		}
-		votes += stake
 	}
-	if votes < trust.QuorumThreshold {
+	if _, err := quorumweight.VerifySigned(trust, data, signatures); err != nil {
 		return ErrUnauthentic
 	}
 	return nil

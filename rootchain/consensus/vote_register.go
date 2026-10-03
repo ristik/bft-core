@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -94,7 +96,11 @@ func (v *VoteRegister) InsertVote(vote *abdrc.VoteMsg, quorumInfo QuorumInfo) (*
 	quorum := v.hashToSignatures[commitInfoHash]
 	quorum.signatures[vote.Author] = vote.Signature
 	// Check QC
-	if signedWeight(quorum.signatures, quorumInfo) >= quorumInfo.GetQuorumThreshold() {
+	weight, err := signedWeight(quorum.signatures, quorumInfo)
+	if err != nil {
+		return nil, fmt.Errorf("vote weight: %w", err)
+	}
+	if reached(weight, quorumInfo) {
 		qc := drctypes.NewQuorumCertificateFromVote(quorum.voteInfo, quorum.commitInfo, quorum.signatures)
 		return qc, nil
 	}
@@ -120,56 +126,81 @@ func (v *VoteRegister) InsertTimeoutVote(timeout *abdrc.TimeoutMsg, quorumInfo Q
 	}
 
 	// Check if TC can be formed
-	sigCount := signedTimeoutWeight(v.timeoutCert.Signatures, quorumInfo)
-	if sigCount >= quorumInfo.GetQuorumThreshold() {
+	sigCount, err := signedTimeoutWeight(v.timeoutCert.Signatures, quorumInfo)
+	if err != nil {
+		return nil, 0, fmt.Errorf("timeout vote weight: %w", err)
+	}
+	if reached(sigCount, quorumInfo) {
 		return v.timeoutCert, sigCount, nil
 	}
 	// No quorum yet, but also no error all is fine
 	return nil, sigCount, nil
 }
 
-func authorWeight(quorum QuorumInfo, author string) uint64 {
+// reached is the quorum test over an already checked weight sum.
+func reached(weight uint64, quorum QuorumInfo) bool {
+	return quorumweight.Reached(weight, quorum.GetQuorumThreshold())
+}
+
+// authorWeight is the weight of one author: the member's stake under profile 2, 1 per author otherwise. An author that
+// is not a member of a weighted committee is an error, not weight 0.
+func authorWeight(quorum QuorumInfo, author string) (uint64, error) {
 	if _, enabled := quorum.(interface{ usesStakeWeighting() }); !enabled {
-		return 1
+		return 1, nil
 	}
 	if members, ok := quorum.(interface{ GetRootNodes() []*types.NodeInfo }); ok {
 		for _, member := range members.GetRootNodes() {
-			if member.NodeID == author {
-				return member.Stake
+			if member != nil && member.NodeID == author {
+				return member.Stake, nil
 			}
 		}
-		return 0
+		return 0, fmt.Errorf("%w: %q", quorumweight.ErrUnknownSigner, author)
 	}
-	return 1
+	return 1, nil
 }
 
-func signedWeight(votes map[string]hex.Bytes, quorum QuorumInfo) uint64 {
-	var weight uint64
+func signedWeight(votes map[string]hex.Bytes, quorum QuorumInfo) (uint64, error) {
+	var tally quorumweight.Tally
 	for author := range votes {
-		weight += authorWeight(quorum, author)
+		w, err := authorWeight(quorum, author)
+		if err != nil {
+			return 0, err
+		}
+		if err := tally.Add(author, w); err != nil {
+			return 0, err
+		}
 	}
-	return weight
+	return tally.Weight(), nil
 }
 
-func signedTimeoutWeight(votes map[string]*drctypes.TimeoutVote, quorum QuorumInfo) uint64 {
-	var weight uint64
+func signedTimeoutWeight(votes map[string]*drctypes.TimeoutVote, quorum QuorumInfo) (uint64, error) {
+	var tally quorumweight.Tally
 	for author := range votes {
-		weight += authorWeight(quorum, author)
+		w, err := authorWeight(quorum, author)
+		if err != nil {
+			return 0, err
+		}
+		if err := tally.Add(author, w); err != nil {
+			return 0, err
+		}
 	}
-	return weight
+	return tally.Weight(), nil
 }
 
+// maxFaultyWeight is the timeout-vote weight that is still tolerated before the pacemaker jumps to the timeout state:
+// total - threshold under profile 2, GetMaxFaultyNodes otherwise. A weighted committee that is empty or whose total
+// overflows can never amplify, so it returns the largest value.
 func maxFaultyWeight(quorum QuorumInfo) uint64 {
 	if _, enabled := quorum.(interface{ usesStakeWeighting() }); !enabled {
 		return quorum.GetMaxFaultyNodes()
 	}
 	if members, ok := quorum.(interface{ GetRootNodes() []*types.NodeInfo }); ok {
-		var total uint64
-		for _, member := range members.GetRootNodes() {
-			total += member.Stake
+		total, err := quorumweight.TotalWeight(members.GetRootNodes())
+		if err != nil {
+			return math.MaxUint64
 		}
-		if total >= quorum.GetQuorumThreshold() {
-			return total - quorum.GetQuorumThreshold()
+		if threshold := quorum.GetQuorumThreshold(); total >= threshold {
+			return total - threshold
 		}
 		return 0
 	}

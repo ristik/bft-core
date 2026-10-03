@@ -8,6 +8,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 	"github.com/unicitynetwork/bft-go-base/util"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 )
 
@@ -256,7 +257,7 @@ func (x *TimeoutCert) Verify(tbs *trustbase.TrustBaseStore) error {
 	if err != nil {
 		return fmt.Errorf("failed to get trust base for vote verification, epoch %d: %w", x.Timeout.Epoch, err)
 	}
-	var signedVotes uint64
+	var signedVotes quorumweight.Tally
 	var maxSignedRound uint64
 	highQcRound := x.Timeout.GetHqcRound()
 	// Check all signatures and remember the max QC round over all the signatures received
@@ -269,13 +270,15 @@ func (x *TimeoutCert) Verify(tbs *trustbase.TrustBaseStore) error {
 		if err != nil {
 			return fmt.Errorf("timeout certificate signature verification failed: %w", err)
 		}
-		signedVotes += stake
+		if err := signedVotes.Add(author, stake); err != nil {
+			return fmt.Errorf("timeout certificate weight: %w", err)
+		}
 		if timeoutSig.Anchor == nil && maxSignedRound < timeoutSig.HqcRound {
 			maxSignedRound = timeoutSig.HqcRound
 		}
 	}
-	if signedVotes < tb.GetQuorumThreshold() {
-		return fmt.Errorf("quorum requires %d votes but certificate has %d", tb.GetQuorumThreshold(), signedVotes)
+	if !signedVotes.Reached(tb.GetQuorumThreshold()) {
+		return fmt.Errorf("quorum requires %d votes but certificate has %d", tb.GetQuorumThreshold(), signedVotes.Weight())
 	}
 	// Verify that the highest quorum certificate stored has max QC round over all timeout votes received
 	if x.Timeout.Anchor == nil && highQcRound != maxSignedRound {

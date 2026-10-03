@@ -10,6 +10,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 )
 
@@ -153,7 +154,8 @@ func (x *QuorumCert) Verify(tb types.RootTrustBase, pin ...*trustbase.GenesisPin
 	if err != nil {
 		return fmt.Errorf("failed to marshal ledger commit info: %w", err)
 	}
-	if err := tb.VerifyQuorumSignatures(bs, x.Signatures); err != nil {
+	// Strict check (D3 section 3): a bad or unknown signer rejects the certificate instead of being skipped.
+	if _, err := quorumweight.VerifySigned(tb, bs, x.Signatures); err != nil {
 		return fmt.Errorf("failed to verify quorum signatures: %w", err)
 	}
 	return nil

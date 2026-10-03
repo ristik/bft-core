@@ -9,6 +9,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -281,15 +282,7 @@ func (a *v1HandoffAuthority) VerifyAbort(r evmroot.OrderedHandoffRecord, compani
 }
 
 func (a *v1HandoffAuthority) verifyQuorum(message []byte, signatures map[string]hex.Bytes) error {
-	var weight uint64
-	for signer, signature := range signatures {
-		stake, err := a.trust.VerifySignature(message, signature, signer)
-		if err != nil || math.MaxUint64-weight < stake {
-			return ErrHandoffRecord
-		}
-		weight += stake
-	}
-	if err := a.trust.VerifyQuorumSignatures(message, signatures); err != nil {
+	if _, err := quorumweight.VerifySigned(a.trust, message, signatures); err != nil {
 		return ErrHandoffRecord
 	}
 	return nil

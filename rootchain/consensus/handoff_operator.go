@@ -12,6 +12,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -216,11 +217,12 @@ func (x *ConsensusManager) onHandoffAbortApprovalMsg(msg *abdrc.HandoffAbortAppr
 		}
 		return nil
 	}
-	if ^uint64(0)-pending.weight < weight {
-		return ErrHandoffAbortSignature
+	sum, err := quorumweight.Add(pending.weight, weight)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrHandoffAbortSignature, err)
 	}
 	pending.signatures[msg.Signer] = bytes.Clone(msg.Signature)
-	pending.weight += weight
+	pending.weight = sum
 	return nil
 }
 
@@ -372,12 +374,20 @@ func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
 	members := make(evmroot.WeightSet, 0, len(next.RootNodes))
+	var memberWeight quorumweight.Tally
 	for _, node := range next.RootNodes {
 		if node == nil || node.Stake != 1 {
 			return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 		}
+		if memberWeight.Add(node.NodeID, node.Stake) != nil {
+			return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
+		}
 		members = append(members, evmroot.Member{StakingID: node.NodeID, NodeID: node.NodeID,
 			ConsensusKey: bytes.Clone(node.SigKey), Weight: node.Stake})
+	}
+	rootThreshold, err := quorumweight.Threshold(memberWeight.Weight())
+	if err != nil {
+		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
 	sort.Slice(members, func(i, j int) bool { return members[i].NodeID < members[j].NodeID })
 	candidateWire, err := types.Cbor.Marshal([]any{"UNICITY_D4_OPERATOR_CANDIDATE", uint64(1), members})
@@ -398,7 +408,7 @@ func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1
 	}
 	aMin := round + 16
 	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: uint64(old.NetworkID), Epoch: next.Epoch,
-		EarliestActivation: aMin, Members: members, RootThreshold: evmroot.RootQuorumThreshold(uint64(len(members))),
+		EarliestActivation: aMin, Members: members, RootThreshold: rootThreshold,
 		StateSummary:     intentSummary(uint64(old.NetworkID), predecessor, attempt),
 		ChangeRecordHash: evmroot.D4CandidateContextHash(uint64(old.NetworkID), predecessor, attempt, candidate[:], aMin)}
 	if old.Epoch == 1 {
@@ -969,9 +979,13 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 	if _, exists := stored.signatures[msg.Signer]; exists {
 		return nil
 	}
+	sum, err := quorumweight.Add(stored.weight, weight)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrHandoffApproval, err)
+	}
 	stored.signatures[msg.Signer] = bytes.Clone(msg.Signature)
 	stored.abortSignatures[msg.Signer] = bytes.Clone(msg.AbortSignature)
-	stored.weight += weight
+	stored.weight = sum
 	return nil
 }
 
@@ -980,7 +994,7 @@ func (x *ConsensusManager) readyHandoff(attempt ...uint64) (*pendingHandoff, err
 	defer x.handoffMu.Unlock()
 	threshold := x.trustBase.Load().QuorumThreshold
 	for _, plan := range x.handoffPlans {
-		if plan.weight >= threshold && (len(attempt) == 0 || plan.plan.Attempt == attempt[0]) {
+		if quorumweight.Reached(plan.weight, threshold) && (len(attempt) == 0 || plan.plan.Attempt == attempt[0]) {
 			copyPlan := *plan
 			copyPlan.signatures = make(map[string]hex.Bytes, len(plan.signatures))
 			copyPlan.abortSignatures = make(map[string]hex.Bytes, len(plan.abortSignatures))
@@ -1141,7 +1155,7 @@ func (x *ConsensusManager) readyHandoffAbort(target abdrc.HandoffAbortTarget) (m
 	x.handoffMu.Lock()
 	defer x.handoffMu.Unlock()
 	pending := x.handoffAborts[key]
-	if pending == nil || !bytes.Equal(pending.target.NextBodyID, target.NextBodyID) || pending.weight < trust.QuorumThreshold {
+	if pending == nil || !bytes.Equal(pending.target.NextBodyID, target.NextBodyID) || !quorumweight.Reached(pending.weight, trust.QuorumThreshold) {
 		return nil, false
 	}
 	signatures := make(map[string]hex.Bytes, len(pending.signatures))
