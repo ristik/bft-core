@@ -141,6 +141,35 @@ type Requester struct {
 	receipt    Receipt
 	invalid    bool
 	handoffErr error
+	// stage and lastErr describe the furthest point the current episode reached and its most recent
+	// per-exchange failure, so a failed episode names a cause instead of only "unavailable" or "expired".
+	stage   string
+	lastErr error
+}
+
+// note records the episode's stage and, when err is non-nil, its latest exchange failure.
+func (r *Requester) note(stage string, err error) {
+	r.mu.Lock()
+	r.stage = stage
+	if err != nil {
+		r.lastErr = err
+	}
+	r.mu.Unlock()
+}
+
+// explain adds the episode's stage and last exchange failure to a failure that would otherwise be
+// bare. The sentinel stays matchable with errors.Is.
+func (r *Requester) explain(err error) error {
+	if err == nil {
+		return nil
+	}
+	r.mu.Lock()
+	stage, last := r.stage, r.lastErr
+	r.mu.Unlock()
+	if last == nil {
+		return fmt.Errorf("%w (stage %s)", err, stage)
+	}
+	return fmt.Errorf("%w (stage %s, last exchange: %v)", err, stage, last)
 }
 
 func New(cfg Config) (*Requester, error) {
@@ -284,6 +313,7 @@ func (r *Requester) Acquire(ctx context.Context) Result {
 	r.generation++
 	generation := r.generation
 	r.current, r.receipt, r.invalid, r.handoffErr, r.caller = nil, Receipt{}, false, nil, ctx
+	r.stage, r.lastErr = "start", nil
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); r.running = false; r.mu.Unlock() }()
 
@@ -317,6 +347,7 @@ func (r *Requester) Acquire(ctx context.Context) Result {
 	frontierReq := frontiertransport.FrontierRequest{Version: frontiercodec.Version, Context: requestContext, Nonce: nonce[:]}
 
 	for pass := 0; pass < MaxPasses; pass++ {
+		r.note("frontier", nil)
 		r.runFrontierBatch(episode, frontierReq, budget, collector)
 		if r.hasNegative(collector) {
 			return Result{Err: r.negativeError(collector)}
@@ -332,13 +363,14 @@ func (r *Requester) Acquire(ctx context.Context) Result {
 	}
 	snapshot := collector.Snapshot()
 	if !snapshot.Candidate().Valid() {
-		return Result{Err: preferEpisode(episode, budget, ErrUnavailable)}
+		return Result{Err: r.explain(preferEpisode(episode, budget, ErrUnavailable))}
 	}
 	candidate := snapshot.Candidate()
 	binding := collector.AcquisitionBinding()
 	cutReq := frontiertransport.CutRequest{Version: frontiercodec.Version, Context: requestContext, Nonce: nonce[:], AcquisitionBinding: binding[:], Floor: candidate.Floor()}
 	var lastCutErr error
 	for pass := 0; pass < MaxPasses; pass++ {
+		r.note("cut", nil)
 		lastCutErr = r.runCuts(episode, cutReq, budget, collector)
 		if r.hasNegative(collector) {
 			return Result{Err: r.negativeError(collector)}
@@ -355,14 +387,14 @@ func (r *Requester) Acquire(ctx context.Context) Result {
 	snapshot = collector.Snapshot()
 	cut := snapshot.VerifiedCut()
 	if contextExpired(episode) || contextExpired(r.process) || contextExpired(ctx) {
-		return Result{Err: ErrExpired}
+		return Result{Err: r.explain(ErrExpired)}
 	}
 	if snapshot.Exhausted() || !snapshot.Candidate().Valid() || !cut.Valid() || cut.AcquisitionBinding() != binding || cut.PairIdentity() != snapshot.Candidate().PairIdentity() {
 		fallback := error(ErrUnavailable)
 		if lastCutErr != nil {
 			fallback = fmt.Errorf("%w: cut: %v", ErrUnavailable, lastCutErr)
 		}
-		return Result{Err: preferEpisode(episode, budget, fallback)}
+		return Result{Err: r.explain(preferEpisode(episode, budget, fallback))}
 	}
 	var cutRoot [32]byte
 	copy(cutRoot[:], cut.RootHash())
@@ -390,6 +422,7 @@ func (r *Requester) runCuts(ctx context.Context, request frontiertransport.CutRe
 		} else {
 			lastErr = result.Err
 		}
+		r.note("cut", lastErr)
 		snapshot := collector.Snapshot()
 		if snapshot.VerifiedCut().Valid() || snapshot.Ordinary() || snapshot.Unsupported() || snapshot.Exhausted() {
 			return lastErr
@@ -426,8 +459,11 @@ func (r *Requester) runFrontierBatch(ctx context.Context, request frontiertransp
 	}()
 	for result := range results {
 		if result.res.Complete {
-			collector.AddFrom(result.res.Raw, result.peer.Author)
+			added := collector.AddFrom(result.res.Raw, result.peer.Author)
+			r.note("frontier", added.Err)
 			r.acknowledgeNegatives(collector)
+		} else {
+			r.note("frontier", result.res.Err)
 		}
 	}
 }
