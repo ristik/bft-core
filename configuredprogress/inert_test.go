@@ -46,6 +46,6 @@ func TestOnlyJournalWiringImportsConfiguredProgress(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{filepath.Join("archivewiring", "frontier.go"), filepath.Join("archivewiring", "frontier_worker.go"), filepath.Join("archivewiring", "operator_status.go"), filepath.Join("archivewiring", "publisher.go"), filepath.Join("archivewiring", "record.go"), filepath.Join("archivewiring", "recovery.go"), filepath.Join("archivewiring", "restore.go"), filepath.Join("cli", "ubft", "cmd", "shard_node_run.go"), filepath.Join("configuredadmission", "journal.go"), filepath.Join("configuredadmission", "journal_provider.go"), filepath.Join("configuredadmission", "recovery.go")}, importers,
+	require.Equal(t, []string{filepath.Join("archivewiring", "frontier.go"), filepath.Join("archivewiring", "frontier_worker.go"), filepath.Join("archivewiring", "operator_status.go"), filepath.Join("archivewiring", "publisher.go"), filepath.Join("archivewiring", "record.go"), filepath.Join("archivewiring", "recovery.go"), filepath.Join("archivewiring", "restore.go"), filepath.Join("cli", "ubft", "cmd", "shard_node_run.go"), filepath.Join("configuredadmission", "freshness.go"), filepath.Join("configuredadmission", "journal.go"), filepath.Join("configuredadmission", "journal_provider.go"), filepath.Join("configuredadmission", "recovery.go")}, importers,
 		"configured progress is activated only through explicit journal wiring")
 }
