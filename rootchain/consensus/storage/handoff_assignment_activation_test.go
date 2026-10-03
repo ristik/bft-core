@@ -66,6 +66,9 @@ func (f *assignmentFixture) commitAssignment(t *testing.T) committedAssignment {
 		Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{b.freeze.Bytes(), b.companion}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
 	require.NoError(t, err)
+	if f.afterFreeze != nil {
+		f.afterFreeze(t)
+	}
 
 	frozen := f.store.blockTree.Root().ShardState.States[f.shard]
 	activated, err := evmassign.Activate(f.succ, b.freeze.ActivationRound)
