@@ -66,7 +66,8 @@ if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   ln -sf ../h4-replaced/restore.log test-nodes/evm1/debug.log
   restoreLog=test-nodes/h4-replaced/restore.log
   restored=false
-  for waitStep in $(seq 1 180); do
+  # H4_RESTORE_WAIT_SECONDS (default 180): a restore that replays many blocks needs longer (H4_WAIT_BLOCKS runs)
+  for waitStep in $(seq 1 "${H4_RESTORE_WAIT_SECONDS:-180}"); do
     if grep -Eq 'handoff activated.*rootEpoch=2' "$restoreLog" &&
        grep -Eq 'handoff activated.*rootEpoch=3' "$restoreLog" &&
        grep -q 'submitting block certification request' "$restoreLog" &&
