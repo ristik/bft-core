@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -648,7 +649,7 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 	if tb.GetNetworkID() != enroll.NetworkID {
 		return nil, fmt.Errorf("%w: trust base is for network %d, this authority is enrolled for %d", ErrContextMismatch, tb.GetNetworkID(), enroll.NetworkID)
 	}
-	if err := own.UC.Verify(tb, gocrypto.SHA256, enroll.PartitionID, enroll.ShardID, enroll.ShardConfHash); err != nil {
+	if err := own.UC.Verify(quorumweight.Checked(tb), gocrypto.SHA256, enroll.PartitionID, enroll.ShardID, enroll.ShardConfHash); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 	}
 	if err := own.Technical.IsValid(); err != nil {

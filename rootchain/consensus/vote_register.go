@@ -79,7 +79,7 @@ func (v *VoteRegister) InsertVote(vote *abdrc.VoteMsg, quorumInfo QuorumInfo) (*
 			// new equivocating vote, this is a security event
 			return nil, fmt.Errorf("equivocating vote, previous %X, new %X", prevVoteHash, commitInfoHash)
 		}
-		return nil, fmt.Errorf("duplicate vote")
+		return nil, fmt.Errorf("%w: duplicate vote from %q", quorumweight.ErrDuplicateSigner, vote.Author)
 	}
 	// Store vote from author
 	v.authorToVote[vote.Author] = commitInfoHash

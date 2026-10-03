@@ -8,6 +8,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -295,7 +296,8 @@ func TestVoteRegister_Tc(t *testing.T) {
 	require.EqualValues(t, 2, voteCnt)
 	// attempt to add vote1 again should fail
 	tc, voteCnt, err = register.InsertTimeoutVote(timeoutVoteMsg, quorumInfo)
-	require.EqualError(t, err, `failed to add vote to timeout certificate: node1 already voted in round 4`)
+	require.ErrorIs(t, err, quorumweight.ErrDuplicateSigner)
+	require.ErrorContains(t, err, "node1 already voted in round 4")
 	require.Nil(t, tc)
 	require.Zero(t, voteCnt)
 	// adding another unique vote should get us quorum
@@ -318,6 +320,7 @@ func TestVoteRegister_ErrDuplicateVote(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, qc)
 	qc, err = register.InsertVote(NewDummyVote(t, "node1", 2, []byte{1, 2, 3}), quorumInfo)
+	require.ErrorIs(t, err, quorumweight.ErrDuplicateSigner)
 	require.ErrorContains(t, err, "duplicate vote")
 	require.Nil(t, qc)
 }

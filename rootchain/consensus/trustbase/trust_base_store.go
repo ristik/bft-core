@@ -10,6 +10,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/keyvaluedb"
 	"github.com/unicitynetwork/bft-core/logger"
 )
@@ -185,7 +186,7 @@ func (s *TrustBaseStore) Store(trustBase types.RootTrustBase) error {
 	if !ok {
 		return fmt.Errorf("failed to cast provided trust base to version 1 for epoch %d", epoch)
 	}
-	if err := trustBaseV1.Verify(previousTrustBase); err != nil {
+	if err := quorumweight.VerifyTrustBase(trustBaseV1, previousTrustBase); err != nil {
 		return fmt.Errorf("failed to verify trust base: %w", err)
 	}
 

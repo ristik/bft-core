@@ -154,7 +154,7 @@ func (x *QuorumCert) Verify(tb types.RootTrustBase, pin ...*trustbase.GenesisPin
 	if err != nil {
 		return fmt.Errorf("failed to marshal ledger commit info: %w", err)
 	}
-	// Strict check (D3 section 3): a bad or unknown signer rejects the certificate instead of being skipped.
+	// D3 section 3: an unknown or duplicate signer rejects the certificate; v1 still skips an invalid signature of a known member.
 	if _, err := quorumweight.VerifySigned(tb, bs, x.Signatures); err != nil {
 		return fmt.Errorf("failed to verify quorum signatures: %w", err)
 	}

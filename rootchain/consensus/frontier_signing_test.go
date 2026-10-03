@@ -627,7 +627,7 @@ func TestFrontierClientBudgetBindingAndCanonicalRejection(t *testing.T) {
 	require.NotEqual(t, mutated, before.CanonicalPair())
 }
 
-func TestFrontierClientRetainsOrdinaryDespiteInvalidOuterAndExtraSealSignature(t *testing.T) {
+func TestFrontierClientRetainsOrdinaryDespiteInvalidOuterAndRefusesUnknownSealSigner(t *testing.T) {
 	h := newFrontierHarnessWithSigner(t, nil, true)
 	h.start(t)
 	request := signedRequest(t, h, 0x79)
@@ -649,6 +649,13 @@ func TestFrontierClientRetainsOrdinaryDespiteInvalidOuterAndExtraSealSignature(t
 	wire.QC = nil
 	wire.Signature = nil // Negative evidence is independent of positive-only outer fields.
 	altered, err := types.Cbor.Marshal(wire)
+	require.NoError(t, err)
+	// D3 section 3: a signer that is not a member rejects the certificate; it is no longer skipped
+	require.ErrorIs(t, c.Add(altered).Err, frontierclient.ErrUnauthentic)
+	delete(pair.UC.UnicitySeal.Signatures, "unknown-root")
+	wire.Pair, err = types.Cbor.Marshal(pair)
+	require.NoError(t, err)
+	altered, err = types.Cbor.Marshal(wire)
 	require.NoError(t, err)
 	result := c.Add(altered)
 	require.Equal(t, frontierclient.OrdinaryObserved, result.Status)

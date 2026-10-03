@@ -18,6 +18,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
@@ -657,7 +658,7 @@ func (c *BFTClient) verifyCertificationAuthorization(ctx context.Context, cr *ce
 	if tb == nil {
 		return nil, fmt.Errorf("loading trust base for epoch %d: trust base is nil", epoch)
 	}
-	if err = cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, conf); err != nil {
+	if err = cr.UC.Verify(quorumweight.Checked(tb), crypto.SHA256, c.partitionID, c.shardID, conf); err != nil {
 		return nil, fmt.Errorf("verifying unicity certificate: %w", err)
 	}
 	c.mu.Lock()
@@ -1019,7 +1020,7 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 				if err != nil {
 					return fmt.Errorf("%w: %w", ErrStaleEpochCertificateInvalid, err)
 				}
-				if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, conf); err != nil {
+				if err := cr.UC.Verify(quorumweight.Checked(tb), crypto.SHA256, c.partitionID, c.shardID, conf); err != nil {
 					return fmt.Errorf("%w: %w", ErrStaleEpochCertificateInvalid, err)
 				}
 				if c.log != nil {
@@ -1085,7 +1086,7 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	if err != nil {
 		return err
 	}
-	if err := cr.UC.Verify(tb, crypto.SHA256, c.partitionID, c.shardID, conf); err != nil {
+	if err := cr.UC.Verify(quorumweight.Checked(tb), crypto.SHA256, c.partitionID, c.shardID, conf); err != nil {
 		return fmt.Errorf("verifying unicity certificate: %w", err)
 	}
 

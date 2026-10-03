@@ -12,6 +12,8 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 	"github.com/unicitynetwork/bft-go-base/util"
+
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 )
 
 const trustBaseFileName = "trust-base.json"
@@ -206,7 +208,7 @@ func trustBaseVerify(flags *trustBaseVerifyFlags) error {
 
 	var prev *types.RootTrustBaseV1
 	for _, trustBase := range trustBases {
-		if err := trustBase.Verify(prev); err != nil {
+		if err := quorumweight.VerifyTrustBase(trustBase, prev); err != nil {
 			return fmt.Errorf("failed to verify trust base: %w", err)
 		}
 		prev = trustBase

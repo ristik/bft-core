@@ -1,13 +1,16 @@
 package consensus
 
 import (
+	"context"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 )
@@ -124,4 +127,68 @@ func TestCheckWeightEpochRefusesOtherEpoch(t *testing.T) {
 	m.trustBase.Store(&types.RootTrustBaseV1{Version: 1, Epoch: 2})
 	require.NoError(t, m.checkWeightEpoch(2))
 	require.ErrorIs(t, m.checkWeightEpoch(1), ErrVoteEpoch)
+}
+
+func TestVoteRegisterTCFormsFromHeavyPlusOneLightMinorityByCount(t *testing.T) {
+	// 2 of 4 timeout votes by count, 7 of 9 by weight; both arrival orders, with the heavy vote last and first
+	for _, order := range [][]string{{"l1", "heavy"}, {"heavy", "l1"}} {
+		r := NewVoteRegister()
+		tc, w, err := r.InsertTimeoutVote(NewDummyTimeoutVote(nil, 7, order[0]), skewed())
+		require.NoError(t, err)
+		require.Nil(t, tc, "%s alone is below the threshold", order[0])
+		tc, w, err = r.InsertTimeoutVote(NewDummyTimeoutVote(nil, 7, order[1]), skewed())
+		require.NoError(t, err)
+		require.NotNil(t, tc, "order %v", order)
+		require.EqualValues(t, 7, w)
+	}
+}
+
+func TestPacemakerTimeoutAmplificationIsByWeight(t *testing.T) {
+	newPM := func(t *testing.T) *Pacemaker {
+		pm, err := NewPacemaker(8*time.Second, 10*time.Second, observability.Default(t))
+		require.NoError(t, err)
+		t.Cleanup(pm.Stop)
+		pm.Reset(context.Background(), 6, nil, nil)
+		return pm
+	}
+	inTimeout := func(pm *Pacemaker) bool { return pm.status.Load() == uint32(pmsRoundTimeout) }
+
+	// f = total - threshold = 2: two light timeout votes (2 of 4 by count) weigh 2, which is not more than f
+	pm := newPM(t)
+	for _, a := range []string{"l1", "l2"} {
+		tc, err := pm.RegisterTimeoutVote(context.Background(), NewDummyTimeoutVote(nil, 7, a), skewed())
+		require.NoError(t, err)
+		require.Nil(t, tc)
+		require.False(t, inTimeout(pm), "weight at most f must not move the pacemaker to the timeout state")
+	}
+	tc, err := pm.RegisterTimeoutVote(context.Background(), NewDummyTimeoutVote(nil, 7, "l3"), skewed())
+	require.NoError(t, err)
+	require.Nil(t, tc)
+	require.True(t, inTimeout(pm), "three light votes weigh 3 > f: the quorum is no longer possible, jump to timeout")
+
+	// a single heavy vote (1 of 4 by count, which a count rule would call at most f=1) weighs 6 > f
+	pm = newPM(t)
+	tc, err = pm.RegisterTimeoutVote(context.Background(), NewDummyTimeoutVote(nil, 7, "heavy"), skewed())
+	require.NoError(t, err)
+	require.Nil(t, tc)
+	require.True(t, inTimeout(pm))
+
+	// a committee whose total overflows never amplifies
+	pm = newPM(t)
+	_, err = pm.RegisterTimeoutVote(context.Background(), NewDummyTimeoutVote(nil, 7, "a"), hugeCommittee())
+	require.NoError(t, err)
+	require.False(t, inTimeout(pm))
+}
+
+func TestVoteRegisterDuplicateRefusalsAreSentinels(t *testing.T) {
+	r := NewVoteRegister()
+	_, err := r.InsertVote(NewDummyVote(t, "l1", 7, []byte{1}), skewed())
+	require.NoError(t, err)
+	_, err = r.InsertVote(NewDummyVote(t, "l1", 7, []byte{1}), skewed())
+	require.ErrorIs(t, err, quorumweight.ErrDuplicateSigner)
+
+	_, _, err = r.InsertTimeoutVote(NewDummyTimeoutVote(nil, 7, "l1"), skewed())
+	require.NoError(t, err)
+	_, _, err = r.InsertTimeoutVote(NewDummyTimeoutVote(nil, 7, "l1"), skewed())
+	require.ErrorIs(t, err, quorumweight.ErrDuplicateSigner)
 }

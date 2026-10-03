@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
@@ -227,10 +228,10 @@ func authenticateObservationV2(ctx context.Context, c ObservationContextV2, uc *
 			return VerifiedObservationV2{}, fmt.Errorf("%w: shard epoch %d", ErrConfEpochUnknown, t.Epoch)
 		}
 		conf = bytes.Clone(installed)
-		if err = u.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
+		if err = u.Verify(quorumweight.Checked(tb), crypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
 			return VerifiedObservationV2{}, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 		}
-	} else if err = u.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
+	} else if err = u.Verify(quorumweight.Checked(tb), crypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
 		return VerifiedObservationV2{}, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 	}
 	if u.UnicitySeal == nil || uint64(u.UnicitySeal.NetworkID) != uint64(c.NetworkID) {

@@ -491,7 +491,7 @@ func (c *Collector) authenticatePair(pair frontiercodec.Pair) ([32]byte, pairCla
 	if signatureBounds(pair.UC.UnicitySeal.Signatures) != nil {
 		return [32]byte{}, 0, nil, ErrUnauthentic
 	}
-	if err := pair.TR.IsValid(); err != nil || pair.TR.HashMatches(pair.UC.TRHash) != nil || pair.UC.Verify(c.trust, crypto.SHA256, c.partition, c.shard, c.conf) != nil {
+	if err := pair.TR.IsValid(); err != nil || pair.TR.HashMatches(pair.UC.TRHash) != nil || pair.UC.Verify(quorumweight.Checked(c.trust), crypto.SHA256, c.partition, c.shard, c.conf) != nil {
 		return [32]byte{}, 0, nil, ErrUnauthentic
 	}
 	seal := pair.UC.UnicitySeal
@@ -590,7 +590,7 @@ func strictSignatures(trust *types.RootTrustBaseV1, signatures map[string]hex.By
 			return ErrUnauthentic
 		}
 	}
-	if _, err := quorumweight.VerifySigned(trust, data, signatures); err != nil {
+	if _, err := quorumweight.VerifySignedStrict(trust, data, signatures); err != nil {
 		return ErrUnauthentic
 	}
 	return nil

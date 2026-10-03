@@ -123,11 +123,22 @@ type Verifier interface {
 
 type memberLister interface{ GetRootNodes() []*types.NodeInfo }
 
-// VerifySigned is the strict certificate check: every signature must verify against a member of the trust base, no
-// signer may repeat, the weights are added with overflow refusal, and the sum must reach the trust base threshold.
-// A bad or unknown signer rejects the whole certificate (D3 section 3: it is not silently dropped). It returns the
-// verified signer weight.
+// VerifySigned is the D3 certificate check (docs/design/d3-weighted-consensus-trust-base.md section 3 and its v1
+// compatibility rule): a signer that is not a member of the trust base rejects the certificate, no signer may repeat, the
+// weights of the verified signatures are added with overflow refusal and the sum must reach the trust base threshold.
+// As under v1, an invalid signature from a KNOWN member is skipped and carries no weight. It returns the verified
+// signer weight.
 func VerifySigned(tb Verifier, data []byte, signatures map[string]hex.Bytes) (uint64, error) {
+	return verifySigned(tb, data, signatures, false)
+}
+
+// VerifySignedStrict is VerifySigned for the sites that always refused a certificate carrying any invalid signature
+// (handoff proofs and authority, frontier replies): an invalid signature from a known member is ErrInvalidSignature.
+func VerifySignedStrict(tb Verifier, data []byte, signatures map[string]hex.Bytes) (uint64, error) {
+	return verifySigned(tb, data, signatures, true)
+}
+
+func verifySigned(tb Verifier, data []byte, signatures map[string]hex.Bytes, strict bool) (uint64, error) {
 	threshold := tb.GetQuorumThreshold()
 	if threshold == 0 {
 		return 0, ErrZeroWeight
@@ -147,7 +158,7 @@ func VerifySigned(tb Verifier, data []byte, signatures map[string]hex.Bytes) (ui
 	for id := range signatures {
 		signers = append(signers, id)
 	}
-	sort.Strings(signers) // deterministic error for a certificate with several bad signers
+	sort.Strings(signers) // deterministic error for a certificate with several bad signatures
 	var tally Tally
 	for _, id := range signers {
 		stake, err := tb.VerifySignature(data, signatures[id], id)
@@ -156,6 +167,9 @@ func VerifySigned(tb Verifier, data []byte, signatures map[string]hex.Bytes) (ui
 				if _, ok := members[id]; !ok {
 					return 0, fmt.Errorf("%w: %q", ErrUnknownSigner, id)
 				}
+			}
+			if !strict {
+				continue // v1 legacy acceptance: an invalid signature of a known member counts for nothing
 			}
 			return 0, fmt.Errorf("%w: signer %q: %w", ErrInvalidSignature, id, err)
 		}
@@ -167,4 +181,43 @@ func VerifySigned(tb Verifier, data []byte, signatures map[string]hex.Bytes) (ui
 		return tally.Weight(), notReached{weight: tally.Weight(), threshold: threshold}
 	}
 	return tally.Weight(), nil
+}
+
+// Checked returns tb with VerifyQuorumSignatures replaced by VerifySigned, so that go-base verifiers that take a
+// RootTrustBase (UnicityCertificate.Verify, UnicitySeal.Verify) decide through the checked arithmetic instead of
+// go-base's unchecked sum. Only the production *RootTrustBaseV1 is wrapped; any other implementation (a test double)
+// is returned unchanged.
+func Checked(tb types.RootTrustBase) types.RootTrustBase {
+	v1, ok := tb.(*types.RootTrustBaseV1)
+	if !ok || v1 == nil {
+		return tb
+	}
+	return checkedTrustBase{RootTrustBase: v1}
+}
+
+type checkedTrustBase struct{ types.RootTrustBase }
+
+func (c checkedTrustBase) VerifyQuorumSignatures(data []byte, signatures map[string]hex.Bytes) error {
+	_, err := VerifySigned(c.RootTrustBase, data, signatures)
+	return err
+}
+
+// VerifyTrustBase is RootTrustBaseV1.Verify with the signature quorum decided by VerifySigned: the structural link to
+// prev (IsValid) and then the signatures of the previous epoch's validators (self-signed for the genesis epoch).
+func VerifyTrustBase(r, prev *types.RootTrustBaseV1) error {
+	if err := r.IsValid(prev); err != nil {
+		return err
+	}
+	signer := prev // r.IsValid has refused a missing prev for every epoch above 1
+	if r.Epoch == 1 {
+		signer = r
+	}
+	sigBytes, err := r.SigBytes()
+	if err != nil {
+		return fmt.Errorf("failed to get trust base sig bytes: %w", err)
+	}
+	if _, err := VerifySigned(signer, sigBytes, r.Signatures); err != nil {
+		return fmt.Errorf("failed to verify signatures: %w", err)
+	}
+	return nil
 }

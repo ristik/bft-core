@@ -44,7 +44,7 @@ func verifyOldQC(qc *rctypes.QuorumCert, tb *types.RootTrustBaseV1) error {
 	if err != nil {
 		return ErrProof
 	}
-	if _, err := quorumweight.VerifySigned(tb, bs, qc.Signatures); err != nil {
+	if _, err := quorumweight.VerifySignedStrict(tb, bs, qc.Signatures); err != nil {
 		return ErrProof
 	}
 	return nil

@@ -199,7 +199,7 @@ func (x *TimeoutCert) Add(author string, timeout *Timeout, signature []byte) err
 	}
 	// if already added then reject
 	if _, found := x.Signatures[author]; found {
-		return fmt.Errorf("%s already voted in round %d", author, x.Timeout.Round)
+		return fmt.Errorf("%w: %s already voted in round %d", quorumweight.ErrDuplicateSigner, author, x.Timeout.Round)
 	}
 	if timeout.Epoch != x.Timeout.Epoch || (timeout.Anchor != nil && timeout.IsValid() != nil) {
 		return ErrEpochAnchor
@@ -278,7 +278,7 @@ func (x *TimeoutCert) Verify(tbs *trustbase.TrustBaseStore) error {
 		}
 	}
 	if !signedVotes.Reached(tb.GetQuorumThreshold()) {
-		return fmt.Errorf("quorum requires %d votes but certificate has %d", tb.GetQuorumThreshold(), signedVotes.Weight())
+		return fmt.Errorf("%w: quorum requires %d votes but certificate has %d", quorumweight.ErrQuorumNotReached, tb.GetQuorumThreshold(), signedVotes.Weight())
 	}
 	// Verify that the highest quorum certificate stored has max QC round over all timeout votes received
 	if x.Timeout.Anchor == nil && highQcRound != maxSignedRound {

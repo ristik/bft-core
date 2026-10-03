@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 )
@@ -429,7 +430,7 @@ func verifyRestoredLUC(uc *types.UnicityCertificate, trustBaseStore TrustBaseSto
 	if err != nil {
 		return fmt.Errorf("loading trust base for root epoch %d: %w", uc.GetRootEpoch(), err)
 	}
-	if err := uc.Verify(tb, crypto.SHA256, partitionID, shardID, shardConfHash); err != nil {
+	if err := uc.Verify(quorumweight.Checked(tb), crypto.SHA256, partitionID, shardID, shardConfHash); err != nil {
 		return fmt.Errorf("verifying certificate: %w", err)
 	}
 	return nil

@@ -32,6 +32,7 @@ import (
 	"fmt"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -166,7 +167,7 @@ func Derive(ctx context.Context, c Context, uc *types.UnicityCertificate, tr *ce
 	}
 	// Quorum signatures, both inclusion paths, the partition and shard, and the configuration
 	// commitment — all against values this node was configured with, never the certificate's own.
-	if err := ownedUC.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, confHash); err != nil {
+	if err := ownedUC.Verify(quorumweight.Checked(tb), crypto.SHA256, c.PartitionID, c.ShardID, confHash); err != nil {
 		return Result{}, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 	}
 	if uint64(ownedUC.UnicitySeal.NetworkID) != uint64(c.NetworkID) {

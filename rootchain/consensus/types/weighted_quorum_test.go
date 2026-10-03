@@ -69,21 +69,24 @@ func TestQuorumCert_VerifyIsWeightedNotCounted(t *testing.T) {
 	require.ErrorContains(t, err, "signed_votes=3 quorum_threshold=7")
 }
 
-func TestQuorumCert_VerifyRefusesBadAndUnknownSigners(t *testing.T) {
+func TestQuorumCert_VerifyFollowsD3ForBadAndUnknownSigners(t *testing.T) {
 	sb := newStructBuilder(t, 4)
 	tb, heavy, light := skewedTrust(t, sb)
 	qc := sb.QC(t, 10)
 	good := keep(qc.Signatures, heavy, light[0])
 
-	t.Run("an invalid extra signature fails an otherwise sufficient certificate", func(t *testing.T) {
-		qc.Signatures = keep(good)
+	t.Run("an invalid extra signature of a known member is skipped as under v1 (D3 compatibility)", func(t *testing.T) {
+		qc.Signatures = keep(good, heavy, light[0])
 		qc.Signatures[light[1]] = []byte{1, 2, 3}
-		err := qc.Verify(tb)
-		require.ErrorIs(t, err, quorumweight.ErrInvalidSignature)
-		require.NotErrorIs(t, err, quorumweight.ErrUnknownSigner)
+		require.NoError(t, qc.Verify(tb))
+	})
+	t.Run("an invalid signature carries no weight", func(t *testing.T) {
+		qc.Signatures = keep(good, light[0])
+		qc.Signatures[heavy] = []byte{1, 2, 3}
+		require.ErrorIs(t, qc.Verify(tb), quorumweight.ErrQuorumNotReached)
 	})
 	t.Run("an unknown extra signer fails an otherwise sufficient certificate", func(t *testing.T) {
-		qc.Signatures = keep(good)
+		qc.Signatures = keep(good, heavy, light[0])
 		qc.Signatures["stranger"] = good[heavy]
 		err := qc.Verify(tb)
 		require.ErrorIs(t, err, quorumweight.ErrUnknownSigner)
@@ -126,5 +129,47 @@ func TestTimeoutCert_VerifyIsWeightedNotCounted(t *testing.T) {
 	require.NoError(t, tc.Verify(tbs), "2 of 4 by count, 7 of 9 by weight")
 
 	tc.Signatures = pick(light...)
-	require.ErrorContains(t, tc.Verify(tbs), "quorum requires 7 votes but certificate has 3")
+	err = tc.Verify(tbs)
+	require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached)
+	require.ErrorContains(t, err, "quorum requires 7 votes but certificate has 3")
+}
+
+func TestTimeoutCert_VerifyRefusesWeightOverflow(t *testing.T) {
+	sb := newStructBuilder(t, 2)
+	ids := make([]string, 0, 2)
+	var nodes []*types.NodeInfo
+	for id := range sb.signers {
+		pub, err := sb.verifiers[id].MarshalPublicKey()
+		require.NoError(t, err)
+		ids = append(ids, id)
+		nodes = append(nodes, &types.NodeInfo{NodeID: id, SigKey: pub, Stake: math.MaxUint64 - 1})
+	}
+	sort.Strings(ids)
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].NodeID < nodes[j].NodeID })
+	tb := &types.RootTrustBaseV1{Version: 1, NetworkID: 5, Epoch: 1, RootNodes: nodes, QuorumThreshold: 5}
+	tb.Signatures = map[string]hex.Bytes{}
+	// the genesis trust base is self-signed; one member alone reaches the threshold, so it installs
+	require.NoError(t, tb.Sign(ids[0], sb.signers[ids[0]]))
+	tbs, err := trustbase.NewTrustBaseStore(memorydb.New(), logger.New(t))
+	require.NoError(t, err)
+	require.NoError(t, tbs.Store(tb))
+
+	tc := sb.TimeoutCert(t)
+	// the embedded high QC must authenticate (one member alone reaches the threshold), so that the refusal comes from the
+	// TC's own weight sum over both signers
+	tc.Timeout.HighQc.Signatures = keep(tc.Timeout.HighQc.Signatures, ids[0])
+	err = tc.Verify(tbs)
+	require.ErrorIs(t, err, quorumweight.ErrWeightOverflow)
+	require.ErrorContains(t, err, "timeout certificate weight")
+}
+
+func TestTimeoutCert_AddRefusesDuplicateSigner(t *testing.T) {
+	sb := newStructBuilder(t, 4)
+	tc := sb.TimeoutCert(t)
+	id := ""
+	for id = range tc.Signatures {
+		break
+	}
+	err := tc.Add(id, tc.Timeout, tc.Signatures[id].Signature)
+	require.ErrorIs(t, err, quorumweight.ErrDuplicateSigner)
 }

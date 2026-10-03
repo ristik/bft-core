@@ -273,7 +273,7 @@ func (x *ConsensusManager) buildFrontierSample(req FrontierRequest) (*FrontierSa
 		view.LastCR.UC.InputRecord.Epoch > view.LastCR.Technical.Epoch {
 		return nil, fmt.Errorf("%w: LastCR profile mismatch", ErrFrontierUnavailable)
 	}
-	if err := view.LastCR.UC.Verify(s.trust, x.params.HashAlgorithm, req.PartitionID, req.ShardID, confHash); err != nil {
+	if err := view.LastCR.UC.Verify(quorumweight.Checked(s.trust), x.params.HashAlgorithm, req.PartitionID, req.ShardID, confHash); err != nil {
 		return nil, fmt.Errorf("%w: LastCR authentication: %v", ErrFrontierUnavailable, err)
 	}
 	safety, err := s.reader.ReadSafetySnapshot()

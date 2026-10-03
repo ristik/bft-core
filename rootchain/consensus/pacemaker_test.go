@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -110,7 +111,8 @@ func TestPacemaker_RegisterVote(t *testing.T) {
 		require.Nil(t, qc)
 
 		qc, mature, err = pacemaker.RegisterVote(vote, quorum)
-		require.EqualError(t, err, `vote register error: duplicate vote`)
+		require.ErrorIs(t, err, quorumweight.ErrDuplicateSigner)
+		require.ErrorContains(t, err, "duplicate vote")
 		require.False(t, mature)
 		require.Nil(t, qc)
 	})
@@ -179,7 +181,8 @@ func TestPacemaker_RegisterTimeoutVote(t *testing.T) {
 	require.Nil(t, tc)
 	// node 1 send duplicate
 	tc, err = pacemaker.RegisterTimeoutVote(context.Background(), vote, quorum)
-	require.EqualError(t, err, "inserting to pending votes: failed to add vote to timeout certificate: node1 already voted in round 6")
+	require.ErrorIs(t, err, quorumweight.ErrDuplicateSigner)
+	require.ErrorContains(t, err, "node1 already voted in round 6")
 	require.Nil(t, tc)
 	vote = NewDummyTimeoutVote(hQc, 6, "node2")
 	tc, err = pacemaker.RegisterTimeoutVote(context.Background(), vote, quorum)

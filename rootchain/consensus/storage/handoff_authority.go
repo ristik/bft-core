@@ -282,7 +282,7 @@ func (a *v1HandoffAuthority) VerifyAbort(r evmroot.OrderedHandoffRecord, compani
 }
 
 func (a *v1HandoffAuthority) verifyQuorum(message []byte, signatures map[string]hex.Bytes) error {
-	if _, err := quorumweight.VerifySigned(a.trust, message, signatures); err != nil {
+	if _, err := quorumweight.VerifySignedStrict(a.trust, message, signatures); err != nil {
 		return ErrHandoffRecord
 	}
 	return nil

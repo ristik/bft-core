@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network"
@@ -351,7 +352,7 @@ func TestV2QuorumSubsetAuthenticationAndContextRefusals(t *testing.T) {
 	require.NoError(t, foreignUC.UnicitySeal.Sign(foreignID.String(), foreign))
 	_, err = AuthenticateObservationV2(context.Background(), c, foreignUC, tr)
 	require.ErrorIs(t, err, ErrUnauthenticated)
-	require.ErrorContains(t, err, "quorum not reached", "a non-member signer must be rejected")
+	require.ErrorIs(t, err, quorumweight.ErrUnknownSigner, "a non-member signer must be rejected (D3 section 3)")
 
 	valid := makeUC(0, 1, 2)
 	wrongPartition := c

@@ -8,6 +8,7 @@ import (
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	"github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
@@ -111,4 +112,33 @@ func TestTrustBaseStore_AlreadyExists(t *testing.T) {
 
 	// attempt to store the modified trust base
 	require.ErrorIs(t, trustBaseStore.Store(tb2), ErrAlreadyExists)
+}
+
+// The lineage check decides through the checked quorum: a genesis trust base signed by a non-member in addition to its own
+// member is refused (go-base would skip the stranger), and so is a successor signed below the previous epoch's threshold.
+func TestTrustBaseStoreVerifiesLineageThroughTheCheckedQuorum(t *testing.T) {
+	newSigner := func() (abcrypto.Signer, abcrypto.Verifier) {
+		s, err := abcrypto.NewInMemorySecp256K1Signer()
+		require.NoError(t, err)
+		v, err := s.Verifier()
+		require.NoError(t, err)
+		return s, v
+	}
+	signer, verifier := newSigner()
+	stranger, _ := newSigner()
+	genesis, err := types.NewTrustBase(5, []*types.NodeInfo{trustbase.NewNodeInfoFromVerifier(t, "test", verifier)})
+	require.NoError(t, err)
+	require.NoError(t, genesis.Sign("test", signer))
+	require.NoError(t, genesis.Sign("stranger", stranger))
+	require.NoError(t, genesis.Verify(nil), "go-base alone accepts the extra non-member signature")
+
+	store, err := NewTrustBaseStore(memorydb.New(), logger.New(t))
+	require.NoError(t, err)
+	err = store.Store(genesis)
+	require.ErrorIs(t, err, quorumweight.ErrUnknownSigner)
+	_, err = store.GetByEpoch(1)
+	require.ErrorIs(t, err, ErrNotFound)
+
+	delete(genesis.Signatures, "stranger")
+	require.NoError(t, store.Store(genesis))
 }

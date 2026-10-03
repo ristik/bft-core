@@ -13,6 +13,8 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 )
 
 type ExpectedClaim struct {
@@ -76,7 +78,7 @@ func Verify(bundle []byte, trustBase types.RootTrustBase, expected ExpectedClaim
 	if err != nil || !bytes.Equal(canonicalUC, b.SubjectUC) || uc.InputRecord == nil || uc.UnicitySeal == nil || uc.GetRootEpoch() != trustBase.GetEpoch() || uc.UnicitySeal.NetworkID != b.Context.Network {
 		return ErrInvalid
 	}
-	if err := uc.Verify(trustBase, stdcrypto.SHA256, b.Context.Partition, shard, b.Context.ShardConf[:]); err != nil {
+	if err := uc.Verify(quorumweight.Checked(trustBase), stdcrypto.SHA256, b.Context.Partition, shard, b.Context.ShardConf[:]); err != nil {
 		return fmt.Errorf("%w: subject UC: %v", ErrInvalid, err)
 	}
 	if v2 != nil {
