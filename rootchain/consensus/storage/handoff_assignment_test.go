@@ -39,6 +39,8 @@ func newEVMKey(t *testing.T, id string) evmKey {
 // assignmentFixture is a four-root-node network whose single EVM shard has a
 // valid installed PDR, ready for an EVM-only assignment handoff.
 type assignmentFixture struct {
+	// afterFreeze, when set, runs inside commitAssignment once the Freeze block is in the store and before the Commit record.
+	afterFreeze func(t *testing.T)
 	store       *BlockStore
 	signers     map[string]abcrypto.Signer
 	tb          *types.RootTrustBaseV1
