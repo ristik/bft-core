@@ -266,8 +266,8 @@ Component mappings (the "Upstream unit" column):
 |---|---|---|
 | 1 `StakeManager` bonding / unbond, `WITHDRAWAL_DELAY = 2**13` | verified | `StakeManager.sol` `stakeFor` L449, `unstake` L414, `unstakeClaim` L462, `WITHDRAWAL_DELAY` L94 (`matic`); L456/404/471/93 (`pos`) |
 | 2 reward / checkpoint units | verified | `checkSignatures`, `_increaseRewardAndAssertConsensus`, `rewardPerStake`, `CHECKPOINT_REWARD`, `_updateRewardsAndCommit`, `combinedStakePower` exist at both pins |
-| 3 `slash` + `updateSlashedAmounts` + `verifyConsensus` | verified (at `matic` only) | `StakeManager.slash` L686-; `SlashingManager.sol` `updateSlashedAmounts` L38, `verifyConsensus` L91; `pos` has `StakeManager.slash` but no `SlashingManager` |
-| 4 "amount cap, bounty, remainder" | **wrong** | no cap exists; bounty, proposer share and remainder do (`SlashingManager.sol` L53-84) |
+| 3 `slash` + `updateSlashedAmounts` + `verifyConsensus` | verified (at `matic` only) | `StakeManager.slash` L685; `SlashingManager.sol` `updateSlashedAmounts` L39, `verifyConsensus` L91; `pos` has `StakeManager.slash` but no `SlashingManager` |
+| 4 "amount cap, bounty, remainder" | **wrong** | no cap exists; bounty, proposer share and remainder do (`SlashingManager.sol` L56-88) |
 | 5 `ValidatorShare` units incl. `commissionRate` formula | **wrong** (location) | exchange-rate and voucher units are in `ValidatorShare.sol`; the commission formula is in `StakeManager._getValidatorAndDelegationReward` (`matic` L1035-1040, `pos` L1022-1027) |
 | 6 `StakingNFT`, auction functions | verified | `StakingNFT.sol`; `startAuction`, `confirmAuctionBid`, `dethroneAndStake` in `StakeManager.sol` |
 | 7 `StakingInfo` incl. `verifyConsensus` | **wrong** (in part) | `getStakerDetails`, `getAccountStateRoot`, `updateNonce` exist; `verifyConsensus` is in `SlashingManager` (`matic`) and absent at `pos` |
@@ -330,7 +330,9 @@ which upstream does not have.
 **(a) is not excluded.** It is rejected for *these* units on the surface,
 storage-coupling and toolchain grounds above. A later unit with a closer surface
 match — and the vendored `common/oz` primitives in particular — can revisit it,
-and the matrix's licence gate will admit it under the declared destination.## 5. Explicit accounting replacements
+and the matrix's licence gate will admit it under the declared destination.
+
+## 5. Explicit accounting replacements
 
 Every duty a removed Polygon unit performed is re-homed. Full text and spec
 references live in `evmroot/testdata/p1-reuse-matrix.json`
