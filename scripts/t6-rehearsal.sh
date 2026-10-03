@@ -36,6 +36,11 @@ FRESH_REPO=
 FRESH_CONTRACTS=
 URETH_BIN=
 FAILURE=0
+# Evidence mode: the clean source build is the only mode that produces evidence. T6_URETH_BIN (a prebuilt Ureth, DEVELOPMENT iterations only) is
+# checked against the pin but skips the cold build, and marks the run as NOT EVIDENCE everywhere it is recorded.
+T6_RUN_MODE="clean build (evidence run)"
+if [ -n "${T6_URETH_BIN:-}" ]; then T6_RUN_MODE="DEVELOPMENT OVERRIDE: prebuilt Ureth ${T6_URETH_BIN}: NOT EVIDENCE"; fi
+printf 'T6 run mode: %s\n' "$T6_RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
 
 pass() { printf 'PASS: %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; }
@@ -96,7 +101,7 @@ on_exit() {
   if [ "$status" -eq 0 ]; then remove_isolation_root; fi
   if [ "$status" -ne 0 ]; then
     if [ -n "$FRESH_REPO" ]; then capture_partial "$FRESH_REPO/test-nodes" "$EVIDENCE_DIR/partial-test-nodes" || true; fi
-    printf 'T6 harness rehearsal: FAIL (exit %s)\n\n' "$status" >"$EVIDENCE_DIR/run-summary.md"
+    printf 'T6 harness rehearsal: FAIL (exit %s)\nRun mode: %s\n\n' "$status" "$T6_RUN_MODE" >"$EVIDENCE_DIR/run-summary.md"
     printf 'Isolated checkout: %s\nBFT commit: %s\nUreth commit: %s\nContracts commit: %s\n' \
       "${ISOLATION_ROOT:-not-created}" "$T6_BFT_COMMIT" "$T6_URETH_COMMIT" "$T6_CONTRACTS_COMMIT" \
       >>"$EVIDENCE_DIR/run-summary.md"
@@ -105,9 +110,10 @@ on_exit() {
 import hashlib,sys
 from pathlib import Path
 root=Path(sys.argv[1])
+# t6-rehearsal.log is excluded: the harness writes to it after this point (the remaining PASS lines), so a hash taken here could never match.
 with (root/"SHA256SUMS").open("w",encoding="utf-8") as out:
     for path in sorted(root.rglob("*")):
-        if path.is_file() and path.name != "SHA256SUMS":
+        if path.is_file() and path.name not in ("SHA256SUMS", "t6-rehearsal.log"):
             out.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root)}\n")
 PY
     printf '\nFAIL: T6 harness stopped with exit %s. Isolated checkout: %s\n' "$status" "${ISOLATION_ROOT:-not-created}" >&2
@@ -209,6 +215,22 @@ build_pinned_contracts() {
 build_pinned_ureth() {
   cd "$FRESH_REPO"
   local pathBeforeCargo=$PATH rustupBin
+  if [ -n "${T6_URETH_BIN:-}" ]; then
+    # DEVELOPMENT iterations only: a prebuilt binary whose reported commit equals the pin replaces the cold build. It is verified, never trusted,
+    # and the run is recorded as NOT EVIDENCE (run-mode.txt, source-pin.txt, run-summary.md).
+    [ -x "$T6_URETH_BIN" ] || { fail "T6_URETH_BIN=$T6_URETH_BIN is not an executable file"; return 1; }
+    . scripts/lib/reth-pin.sh
+    urethPinVerifyBinary "$T6_URETH_BIN" "$T6_URETH_COMMIT" || { fail "T6_URETH_BIN does not report the pinned commit $T6_URETH_COMMIT: refusing the override"; return 1; }
+    cp "$T6_URETH_BIN" "$ISOLATION_ROOT/bin/unicity-reth"
+    URETH_BIN=$ISOLATION_ROOT/bin/unicity-reth
+    export URETH_BIN
+    printf 'ureth commit=%s\nureth binary=%s\nureth binary sha256=%s\n' "$T6_URETH_COMMIT" "$URETH_BIN" "$(sha256 "$URETH_BIN")" >>"$EVIDENCE_DIR/source-pin.txt"
+    "$URETH_BIN" --version >"$EVIDENCE_DIR/ureth-version.txt" 2>&1
+    { go version; rustc --version 2>&1 || true; cargo --version 2>&1 || true; } >"$EVIDENCE_DIR/compiler-toolchains.txt"
+    printf 'RUN MODE: %s\n' "$T6_RUN_MODE" >>"$EVIDENCE_DIR/source-pin.txt"
+    printf 'WARNING: %s\n' "$T6_RUN_MODE" >&2
+    return 0
+  fi
   require_free_kb 4500000 "cold Ureth build" || return 1
   . scripts/lib/reth-pin.sh
   URETH_PIN_COMMIT=$T6_URETH_COMMIT
@@ -260,8 +282,11 @@ run_paired_t6() {
   export POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$T6_URETH_COMMIT"
   export M2_PROFILE2=1 SIGNING=authority M2A_FINAL_RESTORE=1
   export M2_RUN_LOG_DIR="$EVIDENCE_DIR/paired-node-logs"
+  # one key-replacing coupled rotation (s=1) after the existing checks; the validators stop and restart on purpose, so the journal bound is raised
+  export T6_COUPLED_ROTATION=${T6_COUPLED_ROTATION:-1} EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-256}
   bash ./scripts/reth-paired-devnet.sh 4 20 2>&1 | tee "$EVIDENCE_DIR/paired-lane.log"
-  pass "paired network completed placeholder claims, WUCT wrap/unwrap, treasury withdrawal, handoffs, restore, and finality checks"
+  grep -q "T6 coupled rotation s=1: authority-backed" "$EVIDENCE_DIR/paired-lane.log" || [ "${T6_COUPLED_ROTATION:-1}" != 1 ] || { fail "the coupled rotation step did not pass"; return 1; }
+  pass "paired network completed placeholder claims, WUCT wrap/unwrap, treasury withdrawal, handoffs, restore, finality checks, and a coupled key-replacing rotation"
 }
 
 extract_verify_f7() {
@@ -309,6 +334,7 @@ collect_evidence() {
   cp test-nodes/post-m2a-allocation-build-v1.json test-nodes/evm-genesis-finalized-funded.json \
     "$EVIDENCE_DIR/paired-evidence/"
   cp -R test-nodes/post-m2a-evidence "$EVIDENCE_DIR/paired-evidence/"
+  [ ! -d test-nodes/h3 ] || cp -R test-nodes/h3 "$EVIDENCE_DIR/paired-evidence/coupled-rotation"
   python3 - "$FRESH_REPO/test-nodes" "$EVIDENCE_DIR/node-logs" <<'PY'
 import shutil,sys
 from pathlib import Path
@@ -320,10 +346,11 @@ for path in source.rglob("*"):
         target.parent.mkdir(parents=True,exist_ok=True)
         shutil.copy2(path,target)
 PY
+  printf 'run mode: %s\n' "$T6_RUN_MODE" >"$EVIDENCE_DIR/run-pins.txt"
   printf 'bft commit: %s\nureth commit: %s\ncontracts commit: %s\nplaceholder manifest SHA-256: %s\n' \
     "$T6_BFT_COMMIT" "$T6_URETH_COMMIT" "$T6_CONTRACTS_COMMIT" \
-    "$(sha256 "$EVIDENCE_DIR/placeholder-manifest.json")" >"$EVIDENCE_DIR/run-pins.txt"
-  printf 'T6 harness rehearsal: PASS\n\n' >"$EVIDENCE_DIR/run-summary.md"
+    "$(sha256 "$EVIDENCE_DIR/placeholder-manifest.json")" >>"$EVIDENCE_DIR/run-pins.txt"
+  printf 'T6 harness rehearsal: PASS\nRun mode: %s\n\n' "$T6_RUN_MODE" >"$EVIDENCE_DIR/run-summary.md"
   printf 'Source pins and binary hash: `run-pins.txt` and `source-pin.txt`.\n' >>"$EVIDENCE_DIR/run-summary.md"
   printf 'Paired lane: `paired-lane.log`; node logs and per-step contract/RPC evidence are under `node-logs/` and `paired-evidence/`.\n' >>"$EVIDENCE_DIR/run-summary.md"
   printf 'F7 proof: `f7-lock-pin.json`, `f7-locked.cbor`, `f7-verify.json`.\n\n' >>"$EVIDENCE_DIR/run-summary.md"
@@ -332,9 +359,10 @@ PY
 import hashlib,sys
 from pathlib import Path
 root=Path(sys.argv[1])
+# t6-rehearsal.log is excluded: the harness writes to it after this point (the remaining PASS lines), so a hash taken here could never match.
 with (root/"SHA256SUMS").open("w",encoding="utf-8") as out:
     for path in sorted(root.rglob("*")):
-        if path.is_file() and path.name != "SHA256SUMS":
+        if path.is_file() and path.name not in ("SHA256SUMS", "t6-rehearsal.log"):
             digest=hashlib.sha256(path.read_bytes()).hexdigest()
             out.write(f"{digest}  {path.relative_to(root)}\n")
 PY
@@ -349,9 +377,10 @@ cleanup_isolated_build() {
 import hashlib,sys
 from pathlib import Path
 root=Path(sys.argv[1])
+# t6-rehearsal.log is excluded: the harness writes to it after this point (the remaining PASS lines), so a hash taken here could never match.
 with (root/"SHA256SUMS").open("w",encoding="utf-8") as out:
     for path in sorted(root.rglob("*")):
-        if path.is_file() and path.name != "SHA256SUMS":
+        if path.is_file() and path.name not in ("SHA256SUMS", "t6-rehearsal.log"):
             out.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root)}\n")
 PY
   ISOLATION_ROOT=
@@ -366,6 +395,7 @@ write_prerehearsal_pins() {
   hash=$(sha256 "$manifest")
   printf 'bft commit=%s\nbft remote=%s\nbft ref=%s\nbft ubft sha256=%s\n' \
     "$T6_BFT_COMMIT" "$T6_BFT_REMOTE" "$T6_BFT_REF" "$(sha256 build/ubft)" >"$EVIDENCE_DIR/source-pin.txt"
+  printf 'run mode=%s\n' "$T6_RUN_MODE" >>"$EVIDENCE_DIR/source-pin.txt"
   printf 'f7 extractor sha256=%s\nf7 verifier sha256=%s\nevmtx sha256=%s\n' \
     "$(sha256 build/f7-mintproof-extract)" "$(sha256 build/f7-mintproof-verify)" \
     "$(sha256 build/evmtx)" >>"$EVIDENCE_DIR/source-pin.txt"
@@ -393,4 +423,4 @@ run_step "paired T6 rehearsal with handoffs and documented restore" run_paired_t
 run_step "retain and recheck pre-handoff offline F7 bundle" extract_verify_f7
 run_step "evidence and SHA-256 manifest" collect_evidence
 run_step "isolated build cleanup and final evidence hashes" cleanup_isolated_build
-pass "T6 placeholder harness run complete; production rerun pending owner parameters"
+pass "T6 placeholder harness run complete [$T6_RUN_MODE]; production rerun pending owner parameters"

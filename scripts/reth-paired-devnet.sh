@@ -135,6 +135,11 @@ cleanup() {
   for i in $(seq 1 "$validators"); do
     stop_pidfile "test-nodes/auth$i/pid" 'ubft signing-authority run'
   done
+  # Lanes that start spare validators (the T6 rotation's evm5/auth5/reth5/root5) own processes beyond $validators; a step that aborts
+  # the shell never reaches its own teardown, and `wait` below would otherwise block on the orphans. Sweep by ownership.
+  for p in $(owned_pids 'ubft signing-authority run|ubft shard-node (run|restore)'); do
+    kill "$p" 2>/dev/null || true
+  done
   for i in $(seq 1 "$validators"); do
     stop_pidfile "test-nodes/reth$i/pid" 'reth.* node' INT
   done
@@ -420,7 +425,7 @@ if [ "$doctorStatus" -ne 0 ] && echo "$doctorOut" | grep -qE '^\[FAIL\] chain id
 else
   fail "chainId mismatch NOT detected; doctor said: $(echo "$doctorOut" | tail -3)"
 fi
-kill "$(cat test-nodes/reth-wrong/pid)" 2>/dev/null; rm -f test-nodes/reth-wrong/pid
+stop_pidfile test-nodes/reth-wrong/pid 'reth.* node'   # ownership-checked; removes the pid file
 
 # 3b. no Engine API at all behind the URL. CheckCapabilities must fail closed rather than
 # starting and stalling. Require the specific engine-link failure, not another doctor failure
@@ -472,7 +477,7 @@ if [ "$runStatus" -ne 0 ] && [ "$runStatus" -ne 124 ] && echo "$runOut" | grep -
 else
   fail "shard-node run did not refuse the wrong chain (exit $runStatus): $(echo "$runOut" | tail -3)"
 fi
-kill "$(cat test-nodes/reth-wrongchain/pid)" 2>/dev/null; rm -f test-nodes/reth-wrongchain/pid
+stop_pidfile test-nodes/reth-wrongchain/pid 'reth.* node'   # ownership-checked; removes the pid file
 
 # 3d. Same chain id, DIFFERENT genesis (#89 item 2). Chain id does not establish genesis identity:
 # this client is on chainId 31337 exactly as configured, and differs only in its allocation, which
@@ -591,7 +596,7 @@ else
     echo "--- captured output ---"; echo "$okDoctor" | grep -i genesis; echo "--- end ---"
   fi
 fi
-kill "$(cat test-nodes/reth-othergenesis/pid)" 2>/dev/null; rm -f test-nodes/reth-othergenesis/pid
+stop_pidfile test-nodes/reth-othergenesis/pid 'reth.* node'   # ownership-checked; removes the pid file
 
 # 3f. Same chain id, SAME genesis, a different FORK SCHEDULE (#89 item 2). The client below is started
 # from exactly the funded spec the validators use, plus one field: Prague scheduled for a future
@@ -693,7 +698,7 @@ else
     echo "--- captured output ---"; echo "$okProfile" | grep -i profile; echo "--- end ---"
   fi
 fi
-kill "$(cat test-nodes/reth-laterfork/pid)" 2>/dev/null; rm -f test-nodes/reth-laterfork/pid
+stop_pidfile test-nodes/reth-laterfork/pid 'reth.* node'   # ownership-checked; removes the pid file
 threeFFailureCount=$((failures - threeFFailuresBefore))
 if [ "$threeFFailureCount" -eq 0 ]; then
   echo "3f status: PASS"
@@ -1013,6 +1018,23 @@ if [ -n "$postM2aMode" ]; then
     fi
   else
     fail "post-M2a evidence collection skipped because an earlier lane check failed"
+  fi
+fi
+
+# T6 rehearsal: one key-replacing coupled rotation after every existing T6 check (kept green by construction: they all ran before it).
+if [ "$postM2aMode" = t6 ] && [ "${T6_COUPLED_ROTATION:-0}" = 1 ]; then
+  echo
+  echo "=== T6: coupled key-replacing rotation s=1 (evm4 retires, evm5 joins) ==="
+  if [ "$failures" -eq 0 ]; then
+    source scripts/t6/coupled-rotation.sh
+    if t6_coupled_rotation_s1; then
+      pass "T6 coupled rotation s=1: authority-backed PoPs, handoff, acknowledgement (registry shard epoch 1), and a paid mint under the new set verified offline"
+    else
+      fail "T6 coupled rotation s=1 failed"
+    fi
+    t6_rotation_teardown
+  else
+    fail "T6 coupled rotation skipped because an earlier lane check failed"
   fi
 fi
 
