@@ -566,6 +566,14 @@ func (si *ShardInfo) IsValid() error {
 }
 
 func (si *ShardInfo) nextEpoch(shardConf *types.PartitionDescriptionRecord, hashAlg crypto.Hash) (*ShardInfo, error) {
+	return si.nextEpochWith(shardConf, hashAlg, (*ShardInfo).resetTrustBase)
+}
+
+// nextEpochWith is nextEpoch with the derivation of the successor's trust base supplied. Production always supplies
+// resetTrustBase (unit weights); the request view derives a successor technical record from a weighted fixture
+// configuration with resetMembers, which installs the members and no request context.
+func (si *ShardInfo) nextEpochWith(shardConf *types.PartitionDescriptionRecord, hashAlg crypto.Hash,
+	reset func(*ShardInfo, *types.PartitionDescriptionRecord, crypto.Hash, []byte) error) (*ShardInfo, error) {
 	if si.TR.Epoch != shardConf.Epoch {
 		return nil, fmt.Errorf("epochs must be consecutive, expected %d proposed next %d", si.TR.Epoch, shardConf.Epoch)
 	}
@@ -593,7 +601,7 @@ func (si *ShardInfo) nextEpoch(shardConf *types.PartitionDescriptionRecord, hash
 	}
 
 	nextSI.resetFeeList(shardConf)
-	if err = nextSI.resetTrustBase(shardConf, hashAlg, shardConfHash); err != nil {
+	if err = reset(nextSI, shardConf, hashAlg, shardConfHash); err != nil {
 		return nil, fmt.Errorf("initializing shard trustbase: %w", err)
 	}
 
@@ -606,6 +614,11 @@ generating CertificationResponse. The "pdr" argument must be the shard configura
 for the next round.
 */
 func (si *ShardInfo) nextRound(req *certification.BlockCertificationRequest, pdr *types.PartitionDescriptionRecord, hashAlg crypto.Hash) (err error) {
+	return si.nextRoundWith(req, pdr, hashAlg, (*ShardInfo).resetTrustBase)
+}
+
+func (si *ShardInfo) nextRoundWith(req *certification.BlockCertificationRequest, pdr *types.PartitionDescriptionRecord, hashAlg crypto.Hash,
+	reset func(*ShardInfo, *types.PartitionDescriptionRecord, crypto.Hash, []byte) error) (err error) {
 	// timeout IRChangeRequest doesn't have BlockCertificationRequest
 	if req != nil {
 		si.update(req, si.TR.Leader)
@@ -614,7 +627,7 @@ func (si *ShardInfo) nextRound(req *certification.BlockCertificationRequest, pdr
 	nextShardInfo := si
 	if si.TR.Epoch != pdr.Epoch {
 		si.TR.Epoch++
-		if nextShardInfo, err = si.nextEpoch(pdr, hashAlg); err != nil {
+		if nextShardInfo, err = si.nextEpochWith(pdr, hashAlg, reset); err != nil {
 			return fmt.Errorf("creating ShardInfo of the next epoch: %w", err)
 		}
 	}

@@ -10,7 +10,8 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-var ErrDuplicateChangeReq = errors.New("duplicate ir change request")
+// ErrDuplicateChangeReq is shared with the storage view verifier, so both refuse with one identity.
+var ErrDuplicateChangeReq = storage.ErrDuplicateChangeReq
 
 type (
 	State interface {
@@ -22,6 +23,8 @@ type (
 	IRChangeReqVerifier struct {
 		params *Parameters
 		state  State
+		// history, when set, selects the view-aware branch (Q2-C). Production leaves it nil: legacy dispatch stays selected.
+		history storage.RequestHistory
 	}
 
 	PartitionTimeoutGenerator struct {
@@ -42,6 +45,32 @@ func NewIRChangeReqVerifier(c *Parameters, sMonitor State) (*IRChangeReqVerifier
 		params: c,
 		state:  sMonitor,
 	}, nil
+}
+
+// SetRequestHistory selects the view-aware branch: requests are judged under views resolved from this committed history.
+func (x *IRChangeReqVerifier) SetRequestHistory(h storage.RequestHistory) { x.history = h }
+
+// RequestHistory is the history of the view-aware branch, nil under legacy dispatch.
+func (x *IRChangeReqVerifier) RequestHistory() storage.RequestHistory { return x.history }
+
+// PendingChange is the change of the shard in the uncommitted pipeline.
+func (x *IRChangeReqVerifier) PendingChange(partition types.PartitionID, shard types.ShardID) *types.InputRecord {
+	return x.state.IsChangeInProgress(partition, shard)
+}
+
+// VerifyIRChangeReqView judges a proof under the supplied view only: it never reads the last committed ShardInfo, so the
+// committed anchor lagging behind an activation cannot select another assignment.
+func (x *IRChangeReqVerifier) VerifyIRChangeReqView(view *storage.RequestRoundView, irChReq *drctypes.IRChangeReq) (*storage.VerifiedRequest, error) {
+	if view == nil {
+		return nil, fmt.Errorf("%w: no request view", drctypes.ErrInvalidRequest)
+	}
+	if irChReq == nil {
+		return nil, fmt.Errorf("IR change request is nil: %w", drctypes.ErrInvalidRequest)
+	}
+	if x.params.NetworkProfileVersion == 2 && irChReq.Partition == drctypes.ControlPartition {
+		return nil, drctypes.ErrControlPartition
+	}
+	return view.VerifyIRChangeReq(irChReq, t2TimeoutToRootRounds(view.T2Timeout(), x.params.BlockRate/2))
 }
 
 func (x *IRChangeReqVerifier) VerifyIRChangeReq(rootRound uint64, irChReq *drctypes.IRChangeReq) (*types.InputRecord, error) {
