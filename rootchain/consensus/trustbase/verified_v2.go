@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"crypto"
 	"errors"
+	"fmt"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 )
 
 // InstallV2Projection persists the runtime signature-verification view of a
@@ -52,4 +55,27 @@ func (s *TrustBaseStore) InstallV2Projection(projected *types.RootTrustBaseV1) (
 	}
 	s.cache[projected.Epoch] = projected
 	return projected, nil
+}
+
+// InstallVerified persists the verifier projection of an epoch whose protocol configuration the bound verified history holds. cfg
+// must be exactly the history's configuration for that epoch: the projection cannot select its own scheme. It is idempotent and
+// otherwise InstallV2Projection (a different projection for an installed epoch is ErrAlreadyExists).
+func (s *TrustBaseStore) InstallVerified(projected *types.RootTrustBaseV1, cfg votesig.Config) (*types.RootTrustBaseV1, error) {
+	if projected == nil {
+		return nil, errors.New("invalid successor projection")
+	}
+	s.mu.RLock()
+	authority := s.signing.authority
+	s.mu.RUnlock()
+	if authority == nil {
+		return nil, fmt.Errorf("%w: no verified history is bound", ErrSigningHistory)
+	}
+	want, err := authority.Signing(projected.Epoch)
+	if err != nil {
+		return nil, fmt.Errorf("%w: epoch %d: %w", ErrSigningHistory, projected.Epoch, err)
+	}
+	if want != cfg || cfg.Network != uint64(projected.NetworkID) {
+		return nil, fmt.Errorf("%w: epoch %d: configuration differs from the verified history's", ErrSigningHistory, projected.Epoch)
+	}
+	return s.InstallV2Projection(projected)
 }

@@ -3,6 +3,7 @@ package trustbase
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
@@ -18,10 +19,42 @@ var (
 // property of the root epoch, so signing, verification and the epoch's weights change together at one epoch boundary; no
 // wall-clock switch, flag or seal-version heuristic exists. An epoch with no activation at or below it is scheme 1.
 //
-// The registry is installed from the authenticated configuration history when the store is opened and when a successor
-// epoch is installed. Nothing in production installs an activation yet, so every epoch resolves to scheme 1.
+// A store that is bound to the verified, durable history (BindSigningAuthority) takes every epoch's configuration from it and
+// from nothing else: ActivateSigning is refused, and an epoch the history does not hold is an error, never scheme 1. Production
+// has no caller of ActivateSigning (TestNoProductionCallerOfActivateSigning); it is the seam for tests of the signing rules.
 type signingRegistry struct {
-	byEpoch map[uint64]votesig.Config
+	byEpoch   map[uint64]votesig.Config
+	authority SigningAuthority
+}
+
+// SigningAuthority is the verified history that decides each epoch's signing configuration (q3format.History, retained durably
+// by q3active). Its answer for an unknown epoch must be an error.
+type SigningAuthority interface {
+	Signing(epoch uint64) (votesig.Config, error)
+}
+
+// sameAuthority is identity of a comparable authority; a value of an uncomparable type is never the same one, so binding it twice is
+// refused rather than a panic.
+func sameAuthority(a, b SigningAuthority) bool {
+	return reflect.TypeOf(a).Comparable() && a == b
+}
+
+// BindSigningAuthority makes the verified history the only source of signing configurations. It is refused if an in-memory
+// activation was already recorded (two sources would disagree) or another authority is bound.
+func (s *TrustBaseStore) BindSigningAuthority(a SigningAuthority) error {
+	if a == nil {
+		return fmt.Errorf("%w: no authority", ErrSigningHistory)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.signing.byEpoch) != 0 {
+		return fmt.Errorf("%w: an in-memory activation is already recorded", ErrSigningHistory)
+	}
+	if s.signing.authority != nil && !sameAuthority(s.signing.authority, a) {
+		return fmt.Errorf("%w: another authority is bound", ErrSigningHistory)
+	}
+	s.signing.authority = a
+	return nil
 }
 
 // ActivateSigning records that the given epoch is the first to sign with cfg (scheme 2). The epoch's trust base must be
@@ -43,6 +76,9 @@ func (s *TrustBaseStore) ActivateSigning(epoch uint64, cfg votesig.Config) error
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.signing.authority != nil {
+		return fmt.Errorf("%w: the store takes its configurations from the verified history", ErrSigningHistory)
+	}
 	if s.signing.byEpoch == nil {
 		s.signing.byEpoch = make(map[uint64]votesig.Config)
 	}
@@ -74,6 +110,16 @@ func (s *TrustBaseStore) SigningConfig(epoch uint64) (votesig.Config, error) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if a := s.signing.authority; a != nil {
+		cfg, err := a.Signing(epoch)
+		if err != nil {
+			return votesig.Config{}, fmt.Errorf("%w: epoch %d: %w", ErrSigningHistory, epoch, err)
+		}
+		if cfg.Network != uint64(tb.NetworkID) {
+			return votesig.Config{}, fmt.Errorf("%w: epoch %d: history network %d differs from the trust base network %d", ErrSigningHistory, epoch, cfg.Network, tb.NetworkID)
+		}
+		return cfg, nil
+	}
 	epochs := make([]uint64, 0, len(s.signing.byEpoch))
 	for e := range s.signing.byEpoch {
 		epochs = append(epochs, e)

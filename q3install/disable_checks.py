@@ -35,6 +35,9 @@ cases=[
  ('config_verifier','cfg.Bundles == nil || ','','^TestBundleMustAuthenticate$','TestBundleMustAuthenticate'),
  ('config_count','len(cfg.Components) != numSteps','false','^TestBundleMustAuthenticate$','TestBundleMustAuthenticate'),
  ('config_steps','if cfg.Components[s] == nil {','if false {','^TestBundleMustAuthenticate$','TestBundleMustAuthenticate'),
+ ('restore_finished','if r, ok := j.cfg.Components[s].(Restorer); ok && st.done {','if r, ok := j.cfg.Components[s].(Restorer); ok && false {','^TestRecoverRestoresVolatileStateOfFinishedActivationsBeforeVerifying$','TestRecoverRestoresVolatileStateOfFinishedActivationsBeforeVerifying'),
+ ('restore_only_finished','ok && st.done {','ok {','^TestRecoverDoesNotRestoreAnUnfinishedActivation$','TestRecoverDoesNotRestoreAnUnfinishedActivation'),
+ ('restore_error','return fmt.Errorf("q3install: restore %s: %w", s, err)','_ = err','^TestRestoreFailureRefusesRecovery$','TestRestoreFailureRefusesRecovery'),
 ]
 try:
  for name,needle,replacement,selector,marker in cases:

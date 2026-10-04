@@ -11,6 +11,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -138,9 +139,17 @@ func candidateActivatedPDR(preimage []byte, activation uint64) (evmassign.Candid
 // the verified frozen parent so the possession proofs are checked in context.
 func DeriveActivatedPDR(record evmroot.OrderedHandoffRecord, body evmroot.TrustBaseBodyV2, preimage, _ []byte) (*types.PartitionDescriptionRecord, []byte, error) {
 	id := body.Identity()
+	return deriveActivatedPDR(record, id[:], body.Epoch, body.EarliestActivation, body.ChangeRecordHash, preimage, weightvalidation.ModeUnit)
+}
+
+// deriveActivatedPDR is DeriveActivatedPDR over the facts of a body of either version: its identity, epoch, earliest activation and
+// change-record hash. mode selects the validator weight rules of the successor assignment; only a verified V3 activation passes
+// ModeWeighted.
+func deriveActivatedPDR(record evmroot.OrderedHandoffRecord, bodyID []byte, bodyEpoch, earliest uint64, changeRecordHash, preimage []byte,
+	mode weightvalidation.Mode) (*types.PartitionDescriptionRecord, []byte, error) {
 	digest := sha256.Sum256(preimage)
-	if !bytes.Equal(id[:], record.NextBodyID) || body.Epoch != record.Epoch+1 ||
-		!bytes.Equal(body.ChangeRecordHash, evmroot.D4CandidateContextHash(record.Network, record.PredecessorBodyID, record.Attempt, digest[:], body.EarliestActivation)) {
+	if !bytes.Equal(bodyID, record.NextBodyID) || bodyEpoch != record.Epoch+1 ||
+		!bytes.Equal(changeRecordHash, evmroot.D4CandidateContextHash(record.Network, record.PredecessorBodyID, record.Attempt, digest[:], earliest)) {
 		return nil, nil, ErrAssignmentHistory
 	}
 	c, pdr, err := candidateActivatedPDR(preimage, record.ActivationRound)
@@ -154,7 +163,7 @@ func DeriveActivatedPDR(record evmroot.OrderedHandoffRecord, body evmroot.TrustB
 	if err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
-	if err := evmassign.ValidateAssignment(succ); err != nil {
+	if err := validateAssignment(succ, mode); err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
 	var pop evmassign.PoPContext
@@ -168,6 +177,21 @@ func DeriveActivatedPDR(record evmroot.OrderedHandoffRecord, body evmroot.TrustB
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
 	return pdr, provenance, nil
+}
+
+// validateAssignment is evmassign.ValidateAssignment under the validator weight rules of mode: the unit rules unchanged, or, for
+// a verified Q3 activation, the bounded weights of the weighted rules.
+func validateAssignment(succ *types.PartitionDescriptionRecord, mode weightvalidation.Mode) error {
+	if mode == weightvalidation.ModeUnit {
+		return evmassign.ValidateAssignment(succ)
+	}
+	if err := weightvalidation.PDR(succ, weightvalidation.RoleEVM, mode); err != nil {
+		return fmt.Errorf("%w: %v", evmassign.ErrAssignment, err)
+	}
+	if succ.EpochStart != 0 {
+		return fmt.Errorf("%w: activation round is set before commit", evmassign.ErrEpoch)
+	}
+	return nil
 }
 
 // ErrRecordNotCommitted refuses a handoff record that is not a verified committed record (a freeze, an abort, a malformed record,
@@ -209,6 +233,55 @@ func ActivationFromHandoff(committed CommittedHandoffs, record evmroot.OrderedHa
 		}
 	}
 	return newRequestActivation(pdr, hashAlg, quorumweight.PolicyUnit, nil, record.Epoch+1, record.NextBodyID, record.ActivationRound, record.SuccessorTRHash, version)
+}
+
+// VerifiedActivation is the verified Q3 history's entry for an activated epoch (q3format.Entry, which only the history mints, from
+// the old committee's authenticated commit). The storage package states it as an interface because q3format's own tests build on
+// this package; like CommittedHandoffs it is provenance by the verifier the caller holds, and an entry that is not an activation
+// (a legacy or zero one) answers Handoff false and is refused.
+type VerifiedActivation interface {
+	Handoff() (evmroot.VerifiedHandoff, evmroot.EpochGenesis, bool)
+	Epoch() uint64
+	Start() uint64
+	EarliestActivation() uint64
+	BodyID() [32]byte
+	ActivationCommitID() [32]byte
+	Projection() *types.RootTrustBaseV1
+}
+
+// ActivationFromVerifiedV3 is ActivationFromHandoff for a Q3 activation, and the only way a weighted request policy is reached.
+// The committed record is the verified history's own (the entry's activation record id, body and boundary must be the record's,
+// so a freeze, an abort or a record the history did not mint cannot be presented), the successor assignment is validated under
+// the weighted rules, the candidate's root members must be the entry's committee with its exact weights, and the EVM request
+// context is the mirrored weighted one built from that coupling. A legacy entry has no weighted branch: it is refused.
+func ActivationFromVerifiedV3(entry VerifiedActivation, record evmroot.OrderedHandoffRecord, preimage []byte, hashAlg crypto.Hash, version uint64) (*RequestActivation, error) {
+	commit := entry.ActivationCommitID()      // zero for a legacy or zero entry: no record has that id
+	if !bytes.Equal(record.ID(), commit[:]) { // the id commits to the record's kind, epoch, boundary, body and candidate context
+		return nil, fmt.Errorf("%w: the record is not the one that activated epoch %d", ErrRecordNotCommitted, entry.Epoch())
+	}
+	body, projection := entry.BodyID(), entry.Projection()
+	pdr, _, err := deriveActivatedPDR(record, body[:], entry.Epoch(), entry.EarliestActivation(), projection.ChangeRecordHash, preimage, weightvalidation.ModeWeighted)
+	if err != nil {
+		return nil, err
+	}
+	c, err := evmassign.DecodeCandidate(preimage)
+	if err != nil {
+		return nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	if len(c.RootMembers) != len(projection.RootNodes) {
+		return nil, fmt.Errorf("%w: the candidate's root committee is not the activated one", ErrAssignmentHistory)
+	}
+	for i, m := range c.RootMembers {
+		n := projection.RootNodes[i]
+		if m.NodeID != n.NodeID || m.Weight != n.Stake || !bytes.Equal(m.Key, n.SigKey) {
+			return nil, fmt.Errorf("%w: the candidate's root member %q is not the activated committee's", ErrAssignmentHistory, m.NodeID)
+		}
+	}
+	if err := evmassign.ValidateCoupling(c.RootMembers, pdr, c.Bindings); err != nil {
+		return nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	coupling := &quorumweight.Coupling{RootEpoch: entry.Epoch(), RootBodyID: bytes.Clone(body[:]), Root: c.RootMembers, Bindings: c.Bindings}
+	return newRequestActivation(pdr, hashAlg, quorumweight.PolicyEVMWeighted, coupling, entry.Epoch(), body[:], record.ActivationRound, record.SuccessorTRHash, version)
 }
 
 // DeriveActivatedConfigs is DeriveActivatedPDR plus the aggregator validator replacements the same candidate commits: it

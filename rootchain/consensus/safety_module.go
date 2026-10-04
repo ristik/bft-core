@@ -29,6 +29,9 @@ var (
 	// ErrStoredMessage is returned when the signed message recorded with a decision cannot be decoded or is not the node's own
 	// message for that (epoch, round).
 	ErrStoredMessage = errors.New("recorded signed message does not match its decision")
+	// ErrNoSigningHistory is returned by a module with an activation gate but no signing resolver: without the authenticated
+	// history an epoch's scheme is unknown, and unknown is never scheme 1.
+	ErrNoSigningHistory = errors.New("no authenticated signing history for the epoch")
 )
 
 type (
@@ -43,6 +46,14 @@ type (
 		// committed gives the executed block behind a committed round: scheme 2 votes sign no timestamp, so the native seal
 		// timestamp comes from the locally executed block, never from the (timestamp-less) QC.
 		committed CommittedLookup
+		// gate admits signing in an epoch; nil admits every epoch the signing resolver knows (the legacy behaviour).
+		gate ActivationGate
+	}
+
+	// ActivationGate is the verified history's signer admission (q3active.Runtime). It refuses an epoch the history does not hold
+	// and an activated epoch whose installation is not complete, so the module signs nothing under a half-installed activation.
+	ActivationGate interface {
+		Admit(epoch uint64) error
 	}
 
 	// SigningResolver is the authenticated per-epoch signing configuration (trustbase.TrustBaseStore).
@@ -100,6 +111,19 @@ func WithDomainBoundSigning(r SigningResolver, committed CommittedLookup) Safety
 	return func(s *SafetyModule) { s.signing, s.committed = r, committed }
 }
 
+// WithActivationGate makes every signing decision of the module wait for the verified history's admission of its epoch. With a gate
+// the module also refuses to fall back to a legacy configuration when it has no signing resolver: absent history is an error.
+func WithActivationGate(g ActivationGate) SafetyOption {
+	return func(s *SafetyModule) { s.gate = g }
+}
+
+// BoundTo reports whether the module's activation gate is the given authority (a q3active.Runtime), which is how the install
+// journal knows the module cannot sign outside the verified history.
+func (s *SafetyModule) BoundTo(authority any) bool {
+	g, ok := authority.(ActivationGate)
+	return ok && s.gate == g
+}
+
 func NewSafetyModule(network types.NetworkID, id string, signer crypto.Signer, db SafetyStorage, opts ...SafetyOption) (*SafetyModule, error) {
 	ver, err := signer.Verifier()
 	if err != nil {
@@ -115,6 +139,14 @@ func NewSafetyModule(network types.NetworkID, id string, signer crypto.Signer, d
 
 // config is the signing configuration of the epoch; without a resolver everything is legacy.
 func (s *SafetyModule) config(epoch uint64) (votesig.Config, error) {
+	if s.gate != nil {
+		if err := s.gate.Admit(epoch); err != nil {
+			return votesig.Config{}, fmt.Errorf("epoch %d is not admitted for signing: %w", epoch, err)
+		}
+		if s.signing == nil {
+			return votesig.Config{}, fmt.Errorf("%w: epoch %d", ErrNoSigningHistory, epoch)
+		}
+	}
 	if s.signing == nil {
 		return votesig.Config{Scheme: votesig.SchemeLegacy}, nil
 	}

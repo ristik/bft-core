@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -356,7 +357,7 @@ func verify(ctx context.Context, c Context, sr storedRecord) (Loaded, error) {
 	// record, the record's own full configuration, checked against the genesis pin, for a version 2 record.
 	conf, wantEpoch := c.FullShardConfHash, c.Registry.ShardEpoch
 	if sr.Version == RecordVersionV2 {
-		pdr, err := verifyConfigPDR(c, sr.ConfigPDR)
+		pdr, err := verifyConfigPDR(c, sr.ConfigPDR, uc.GetRootEpoch())
 		if err != nil {
 			return Loaded{}, err
 		}
@@ -448,7 +449,7 @@ func verify(ctx context.Context, c Context, sr storedRecord) (Loaded, error) {
 // verifyConfigPDR decodes a version 2 record's configuration and checks it against the deployment: the
 // genesis pin supplies the immutable identity, so only the validator set, shard epoch and activation round
 // may differ from it.
-func verifyConfigPDR(c Context, raw []byte) (*types.PartitionDescriptionRecord, error) {
+func verifyConfigPDR(c Context, raw []byte, rootEpoch uint64) (*types.PartitionDescriptionRecord, error) {
 	if len(raw) == 0 || len(raw) > MaxRecordBytes {
 		return nil, fmt.Errorf("%w: configuration PDR is %d bytes", ErrRecordUntrusted, len(raw))
 	}
@@ -477,7 +478,13 @@ func verifyConfigPDR(c Context, raw []byte) (*types.PartitionDescriptionRecord, 
 	if err != nil || got != want {
 		return nil, fmt.Errorf("%w: configuration PDR changes a non-membership setting of the genesis configuration", ErrWrongContext)
 	}
-	if err := evmassign.ValidateSet(pdr.Validators); err != nil {
+	// The validator weights are unit unless the verified history holds the certificate's root epoch as an activated Q3 epoch: the
+	// mode comes from the trust source, never from the record or the caller.
+	mode, err := weightvalidation.ModeFor(c.TrustBases, rootEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrEpoch, err)
+	}
+	if err := weightvalidation.EVMSet(pdr.Validators, mode); err != nil {
 		return nil, fmt.Errorf("%w: configuration PDR: %v", ErrWrongContext, err)
 	}
 	return &pdr, nil

@@ -92,6 +92,13 @@ type Component interface {
 	Verify(context.Context, Activation) error
 }
 
+// Restorer is implemented by a component whose installed state is volatile (the published snapshot): Recover calls Restore for
+// every activation whose completion marker is durable, before it verifies the stores, so a restart rebuilds what a process loses.
+// An unfinished activation is not restored: its install step runs when the installation resumes. Restore must be idempotent.
+type Restorer interface {
+	Restore(context.Context, Activation) error
+}
+
 // BundleVerifier authenticates a staged bundle against the committed claim, under the verified history's authority. A nil
 // verifier is a configuration error: an unauthenticated bundle is never journaled or resumed.
 type BundleVerifier func(bundle []byte, committed q3format.Claim) error
@@ -397,6 +404,28 @@ func (j *Journal) verifyAll(ctx context.Context, a Activation) error {
 	return nil
 }
 
+// Staged returns every journaled activation in epoch order, finished or not, exactly as stored. Its bundles are bytes the
+// journal has already checked for shape and identity; they are authenticated only by the verified history that replays them, which
+// is how a restart rebuilds that history from the retained proof bytes (the journal is the durable retention of the V3 lineage).
+func (j *Journal) Staged() ([]Activation, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	states, err := j.load()
+	if err != nil {
+		return nil, err
+	}
+	epochs := make([]uint64, 0, len(states))
+	for e := range states {
+		epochs = append(epochs, e)
+	}
+	sort.Slice(epochs, func(a, b int) bool { return epochs[a] < epochs[b] })
+	out := make([]Activation, 0, len(epochs))
+	for _, e := range epochs {
+		out = append(out, states[e].stage.activation())
+	}
+	return out, nil
+}
+
 // Recover is the startup pass. committed returns the verified history's record for an epoch. Every journaled epoch must be
 // one the history holds with exactly the journaled record and a bundle that still authenticates; an unfinished installation is
 // completed, a finished one must agree with every store. Any other outcome refuses startup. Nothing is erased on refusal.
@@ -420,6 +449,13 @@ func (j *Journal) Recover(ctx context.Context, committed func(epoch uint64) (q3f
 		}
 		if err := j.check(st.stage, c); err != nil {
 			return err
+		}
+		for _, s := range Steps {
+			if r, ok := j.cfg.Components[s].(Restorer); ok && st.done {
+				if err := r.Restore(ctx, st.stage.activation()); err != nil {
+					return fmt.Errorf("q3install: restore %s: %w", s, err)
+				}
+			}
 		}
 		if err := j.finish(ctx, st); err != nil {
 			return err
