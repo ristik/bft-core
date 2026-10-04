@@ -424,3 +424,33 @@ func (rv mockReqVerifier) ValidRequest(req *certification.BlockCertificationRequ
 	}
 	return rv.validReq(req)
 }
+
+// A malformed timeout proof is an ErrInvalidRequest (design v2 section 3.3) with its text unchanged; each refusal is isolated
+// by changing one thing only, and an accepted timeout does not carry the sentinel.
+func TestTimeoutProofMalformedSentinels(t *testing.T) {
+	luc := &types.UnicityCertificate{Version: 1, InputRecord: &types.InputRecord{Version: 1, Hash: []byte{1}, RoundNumber: 1},
+		UnicitySeal: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 1}}
+	verifier := mockReqVerifier{nodeCnt: 3, validReq: func(*certification.BlockCertificationRequest) error { return nil }}
+	const partition1 types.PartitionID = 1
+	reqS1 := certification.BlockCertificationRequest{PartitionID: partition1, NodeID: "1", InputRecord: &types.InputRecord{Version: 1}}
+	t.Run("unexpected proof request", func(t *testing.T) {
+		x := &IRChangeReq{Partition: partition1, CertReason: T2Timeout, Requests: []*certification.BlockCertificationRequest{&reqS1}}
+		ir, err := x.Verify(verifier, luc, 100, 5)
+		require.ErrorIs(t, err, ErrInvalidRequest)
+		require.ErrorContains(t, err, "proof contains requests")
+		require.Nil(t, ir)
+	})
+	t.Run("premature timeout", func(t *testing.T) {
+		x := &IRChangeReq{Partition: partition1, CertReason: T2Timeout}
+		ir, err := x.Verify(verifier, luc, 5, 5)
+		require.ErrorIs(t, err, ErrInvalidRequest)
+		require.ErrorContains(t, err, "time from latest UC 4, timeout in rounds 5")
+		require.Nil(t, ir)
+	})
+	t.Run("due timeout is accepted", func(t *testing.T) {
+		x := &IRChangeReq{Partition: partition1, CertReason: T2Timeout}
+		ir, err := x.Verify(verifier, luc, 6, 5)
+		require.NoError(t, err)
+		require.NotNil(t, ir)
+	})
+}

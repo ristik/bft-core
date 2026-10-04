@@ -149,14 +149,14 @@ func (x *IRChangeReq) Verify(tb RequestVerifier, luc *types.UnicityCertificate, 
 		// timeout does not carry proof in form of certification requests
 		// again this is not fatal in itself, but we should not encourage redundant info
 		if len(x.Requests) != 0 {
-			return nil, fmt.Errorf("invalid partition %s timeout proof: proof contains requests", x.Partition)
+			return nil, withSentinels{fmt.Errorf("invalid partition %s timeout proof: proof contains requests", x.Partition), []error{ErrInvalidRequest}}
 		}
 
 		// validate timeout against LUC age
 		idleRounds := rootRound - luc.GetRootRoundNumber()
 		if idleRounds < t2InRounds {
-			return nil, fmt.Errorf("invalid partition %s timeout proof: time from latest UC %v, timeout in rounds %v",
-				x.Partition, idleRounds, t2InRounds)
+			return nil, withSentinels{fmt.Errorf("invalid partition %s timeout proof: time from latest UC %v, timeout in rounds %v",
+				x.Partition, idleRounds, t2InRounds), []error{ErrInvalidRequest}}
 		}
 		// initiate repeat UC
 		return luc.InputRecord.NewRepeatIR(), nil
