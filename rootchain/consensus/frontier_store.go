@@ -27,6 +27,27 @@ func (s *frontierPersistentStore) SetHighestVotedRound(round uint64) error {
 func (s *frontierPersistentStore) SetHighestQcRound(qcRound, votedRound uint64) error {
 	return s.fault(s.PersistentStore.SetHighestQcRound(qcRound, votedRound))
 }
+
+// SignedDecision and RecordSignedDecision forward the one-decision store that the safety module finds by interface; embedding
+// the PersistentStore interface alone would hide them.
+func (s *frontierPersistentStore) SignedDecision(kind storage.DecisionKind, epoch, round uint64) ([]byte, []byte, error) {
+	store, ok := s.PersistentStore.(DecisionStorage)
+	if !ok {
+		return nil, nil, s.fault(errors.New("durable decision store unavailable"))
+	}
+	return store.SignedDecision(kind, epoch, round)
+}
+func (s *frontierPersistentStore) RecordSignedDecision(kind storage.DecisionKind, epoch, round uint64, statement, message []byte) error {
+	store, ok := s.PersistentStore.(DecisionStorage)
+	if !ok {
+		return s.fault(errors.New("durable decision store unavailable"))
+	}
+	err := store.RecordSignedDecision(kind, epoch, round, statement, message)
+	if errors.Is(err, storage.ErrDecisionConflict) {
+		return err // a refusal, not a storage fault
+	}
+	return s.fault(err)
+}
 func (s *frontierPersistentStore) WriteBlock(block *storage.ExecutedBlock, root bool) error {
 	return s.fault(s.PersistentStore.WriteBlock(block, root))
 }

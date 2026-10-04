@@ -142,11 +142,17 @@ Second return value is number of signatures in the TC.
 */
 func (v *VoteRegister) InsertTimeoutVote(timeout *abdrc.TimeoutMsg, quorumInfo QuorumInfo) (*drctypes.TimeoutCert, uint64, error) {
 	// Create partial timeout cert on first vote received
+	scheme := timeoutScheme(timeout)
 	if v.timeoutCert == nil {
 		v.timeoutCert = &drctypes.TimeoutCert{
 			Timeout:    timeout.Timeout,
 			Signatures: make(map[string]*drctypes.TimeoutVote),
+			Scheme:     scheme,
 		}
+	}
+	// the certificate is of one scheme: a vote of the other one is refused, never mixed into it
+	if v.timeoutCert.Scheme != scheme {
+		return nil, 0, fmt.Errorf("%w: timeout vote of %q is scheme %d, the certificate being formed is scheme %d", votesig.ErrScheme, timeout.Author, scheme, v.timeoutCert.Scheme)
 	}
 	// append signature
 	if err := v.timeoutCert.Add(timeout.Author, timeout.Timeout, timeout.Signature); err != nil {
@@ -264,4 +270,12 @@ func (v *VoteRegister) Reset() {
 	clear(v.hashToSignatures)
 	clear(v.authorToVote)
 	v.timeoutCert = nil
+}
+
+// timeoutScheme is the wire scheme of a timeout vote: 2 for the domain-bound form, 0 for the legacy one (0 and 1 are the same form).
+func timeoutScheme(t *abdrc.TimeoutMsg) uint64 {
+	if t.Scheme == votesig.SchemeDomainBound {
+		return votesig.SchemeDomainBound
+	}
+	return 0
 }
