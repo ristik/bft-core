@@ -21,6 +21,7 @@ type Client struct {
 	http       *http.Client
 	checkMu    sync.RWMutex
 	beforeCall func(context.Context) error
+	beforeQ3   func(context.Context) error // the Q3 execution-protocol pin; independent of beforeCall
 	// requireSeal selects seal-path admission: stock V3 forkchoice/build capabilities plus
 	// all three seal siblings, without stock newPayloadV3.
 	requireSeal bool
@@ -42,6 +43,12 @@ adapter retains the V3 payload method for its non-seal client path. A caller tha
 the seal path keeps the stock V3 requirement.
 */
 func (c *Client) RequireSealCapabilities() { c.requireSeal = true }
+
+func (c *Client) setBeforeQ3(check func(context.Context) error) {
+	c.checkMu.Lock()
+	defer c.checkMu.Unlock()
+	c.beforeQ3 = check
+}
 
 func (c *Client) setBeforeCall(check func(context.Context) error) {
 	c.checkMu.Lock()
@@ -77,13 +84,15 @@ type rpcResponse struct {
 // POST, and surface either a transport error, an RPC-level error, or the
 // raw result for the caller to unmarshal into its specific response type.
 func (c *Client) call(ctx context.Context, method string, params []any, out any) error {
-	if method != "engine_sealConfigV1" {
+	if method != "engine_sealConfigV1" && method != q3ProtocolMethod {
 		c.checkMu.RLock()
-		check := c.beforeCall
+		check, q3 := c.beforeCall, c.beforeQ3
 		c.checkMu.RUnlock()
-		if check != nil {
-			if err := check(ctx); err != nil {
-				return err
+		for _, f := range []func(context.Context) error{check, q3} {
+			if f != nil {
+				if err := f(ctx); err != nil {
+					return err
+				}
 			}
 		}
 	}
