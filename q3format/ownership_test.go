@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -142,4 +143,50 @@ func TestRetainedLinkIsCheckedAgainstTheEntry(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The record id does not commit to the commit QC's signatures or the inclusion path, so a retained link must authenticate the
+// proof it supplies as a fresh activation would: genuine replay passes, forged evidence under the right record is a conflict.
+func TestRetainedLinkRejectsForgedCommitEvidence(t *testing.T) {
+	w := newWorld(t, 0)
+	l := w.claimed(spec{})
+	h, err := w.h.VerifyEnvelope(envelopeOf(l))
+	require.NoError(t, err)
+	_, err = h.VerifyEnvelope(envelopeOf(l))
+	require.NoError(t, err, "control: the genuine proof again")
+
+	forged := func(edit func(*handoff.OldCommitProof)) Link {
+		p, err := decodeProof(l.Proof)
+		require.NoError(t, err)
+		edit(&p)
+		raw, err := types.Cbor.Marshal(p)
+		require.NoError(t, err)
+		bad := l
+		bad.Proof = raw
+		return bad
+	}
+	flip := func(p *handoff.OldCommitProof) {
+		for _, sig := range p.CommitQC.Signatures {
+			sig[0] ^= 1
+			return
+		}
+		t.Fatal("no signatures")
+	}
+	bad := forged(flip)
+	require.Equal(t, mustRecord(t, l.Proof), mustRecord(t, bad.Proof), "only the signature differs: record, body, evidence, receipts and claim are unchanged")
+	_, err = w.h.VerifyEnvelope(envelopeOf(bad))
+	require.ErrorIs(t, err, ErrActivation, "control: a fresh history refuses it")
+	_, err = h.VerifyEnvelope(envelopeOf(bad))
+	require.ErrorIs(t, err, ErrConflict)
+	require.ErrorIs(t, err, ErrActivation)
+
+	_, err = h.VerifyEnvelope(envelopeOf(forged(func(p *handoff.OldCommitProof) { p.Control.PreviousDigest = fill(9) })))
+	require.ErrorIs(t, err, ErrConflict, "a forged control leaf under the right record")
+}
+
+func mustRecord(t *testing.T, proof []byte) []byte {
+	t.Helper()
+	p, err := decodeProof(proof)
+	require.NoError(t, err)
+	return p.Record.ID()
 }

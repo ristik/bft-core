@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+
+	"github.com/unicitynetwork/bft-core/handoff"
 )
 
 var (
@@ -146,8 +148,10 @@ func readLink(f *reader) (Link, error) {
 // retained checks a link for an epoch the history already holds. It is a reference to the verified entry, not a second
 // verification, so nothing the link carries may differ from it: the claim, the recomputed identity of the supplied canonical
 // body (a claim alone never names the body), and the committed record, candidate evidence and receipts the link presents. Any
-// difference is ErrConflict; conflicting evidence is never ignored because the claim happens to match.
-func (e Entry) retained(l Link) error {
+// difference is ErrConflict; conflicting evidence is never ignored because the claim happens to match. The supplied commit
+// proof is authenticated in full under the retained predecessor's committee (the record id does not commit to the signatures
+// or the inclusion path), exactly as a fresh activation would be: a forged proof that names the right record is a conflict.
+func (e Entry) retained(prior Entry, l Link) error {
 	conflict := func(what string) error { return fmt.Errorf("%w: epoch %d: %s", ErrConflict, l.Body.Epoch, what) }
 	if e.claim() != l.Claim {
 		return conflict("claim")
@@ -159,7 +163,14 @@ func (e Entry) retained(l Link) error {
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(p.Record.ID(), e.commitID[:]) { // the record id commits to its body, boundary, attempt and rounds
+	if prior.scheme != 1 {
+		return fmt.Errorf("%w: scheme %d", ErrScheme, prior.scheme)
+	}
+	v, err := handoff.VerifyOldCommitProof(p, prior.tb)
+	if err != nil {
+		return errors.Join(ErrConflict, ErrActivation, err)
+	}
+	if v.RecordID != e.commitID || !bytes.Equal(p.Record.ID(), e.commitID[:]) { // the record id commits to its body, boundary, attempt and rounds
 		return conflict("committed record")
 	}
 	if err := bindCandidate(l.Body, p.Record, l.Evidence); err != nil {
@@ -180,7 +191,11 @@ func (h *History) VerifyEnvelope(e Envelope) (*History, error) {
 	cur := h
 	for _, l := range e.Links {
 		if have, err := cur.ForEpoch(l.Body.Epoch); err == nil {
-			if err := have.retained(l); err != nil {
+			prior, perr := cur.ForEpoch(l.Body.Epoch - 1)
+			if l.Body.Epoch == 0 || perr != nil {
+				return nil, fmt.Errorf("%w: epoch %d has no retained predecessor to authenticate the proof", ErrConflict, l.Body.Epoch)
+			}
+			if err := have.retained(prior, l); err != nil {
 				return nil, err
 			}
 			continue
