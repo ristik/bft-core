@@ -109,13 +109,18 @@ func TestWeightedRefusals(t *testing.T) {
 	t.Run("invalid key stays refused", func(t *testing.T) {
 		n := good()
 		n[1].SigKey = []byte{1, 2, 3}
-		require.Error(t, Node(n[1], RoleRoot, ModeWeighted))
-		require.NotErrorIs(t, Node(n[1], RoleRoot, ModeWeighted), ErrWeight)
+		err := Node(n[1], RoleRoot, ModeWeighted)
+		require.ErrorIs(t, err, ErrMember)
+		require.ErrorContains(t, err, "signing key is invalid")
+		require.NotErrorIs(t, err, ErrWeight)
 	})
 	t.Run("nil member and empty set", func(t *testing.T) {
-		require.Error(t, Node(nil, RoleRoot, ModeWeighted))
-		_, err := Nodes([]*types.NodeInfo{nil}, RoleRoot, ModeWeighted)
-		require.Error(t, err)
+		err := Node(nil, RoleRoot, ModeWeighted)
+		require.ErrorIs(t, err, ErrMember)
+		require.ErrorContains(t, err, "node info is empty")
+		_, err = Nodes([]*types.NodeInfo{nil}, RoleRoot, ModeWeighted)
+		require.ErrorIs(t, err, ErrMember)
+		require.ErrorContains(t, err, "node info is empty")
 		_, err = Nodes(nil, RoleRoot, ModeWeighted)
 		require.ErrorIs(t, err, ErrMembers)
 	})
@@ -143,7 +148,10 @@ func TestRootTrustBaseThreshold(t *testing.T) {
 			require.ErrorIs(t, err, ErrThreshold, "threshold %d", th)
 		}
 	}
-	require.Error(t, RootTrustBase(trustBase(t, n, 7), ModeUnit), "weights are not unit")
+	err := RootTrustBase(trustBase(t, n, 7), ModeUnit)
+	require.ErrorIs(t, err, ErrMember, "weights are not unit")
+	require.ErrorContains(t, err, "node must have stake == 1")
+	require.NotErrorIs(t, err, ErrWeight)
 	require.ErrorIs(t, RootTrustBase(nil, ModeWeighted), ErrMembers)
 	require.ErrorIs(t, RootTrustBase(trustBase(t, nil, 1), ModeWeighted), ErrMembers)
 }
@@ -176,6 +184,8 @@ func TestPDRKeepsGoBaseStructuralRules(t *testing.T) {
 	n := members(t, 6, 1, 1, 1)
 	p := pdr(n)
 	require.NoError(t, PDR(p, RoleEVM, ModeWeighted))
+	wantText := map[string]string{"network": "invalid network identifier", "t2 timeout": "t2 timeout value out of allowed range",
+		"unit id len": "unit id length", "duplicate id": "duplicate validator"}
 	for name, mutate := range map[string]func(*types.PartitionDescriptionRecord){
 		"network":      func(p *types.PartitionDescriptionRecord) { p.NetworkID = 0 },
 		"t2 timeout":   func(p *types.PartitionDescriptionRecord) { p.T2Timeout = time.Millisecond },
@@ -185,11 +195,13 @@ func TestPDRKeepsGoBaseStructuralRules(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			q := pdr(members(t, 6, 1, 1, 1))
 			mutate(q)
-			require.Error(t, PDR(q, RoleEVM, ModeWeighted))
-			require.NotErrorIs(t, PDR(q, RoleEVM, ModeWeighted), ErrWeight)
+			err := PDR(q, RoleEVM, ModeWeighted)
+			require.ErrorIs(t, err, ErrPartition)
+			require.ErrorContains(t, err, wantText[name])
+			require.NotErrorIs(t, err, ErrWeight)
 		})
 	}
-	require.Error(t, PDR(nil, RoleEVM, ModeWeighted))
+	require.ErrorIs(t, PDR(nil, RoleEVM, ModeWeighted), types.ErrSystemDescriptionIsNil)
 	require.Equal(t, uint64(6), p.Validators[0].Stake, "validation leaves the input weights untouched")
 }
 
@@ -204,4 +216,16 @@ func TestUnknownContextIsRefused(t *testing.T) {
 	require.ErrorIs(t, RootTrustBase(trustBase(t, n, 2), 0), ErrContext)
 	require.ErrorIs(t, PDR(pdr(n), RoleRoot, ModeWeighted), ErrContext)
 	require.ErrorIs(t, EVMSet(n, 0), ErrContext)
+}
+
+func TestUnitModeKeepsGoBaseErrors(t *testing.T) {
+	bad := members(t, 1, 1)[0]
+	bad.SigKey = []byte{1, 2, 3}
+	require.Equal(t, bad.IsValid(), Node(bad, RoleRoot, ModeUnit), "legacy Node is NodeInfo.IsValid, unwrapped")
+	require.NotErrorIs(t, Node(bad, RoleRoot, ModeUnit), ErrMember)
+	q := pdr(members(t, 1, 1, 1))
+	q.NetworkID = 0
+	require.Equal(t, q.IsValid(), PDR(q, RoleEVM, ModeUnit), "legacy PDR is PartitionDescriptionRecord.IsValid, unwrapped")
+	require.NotErrorIs(t, PDR(q, RoleEVM, ModeUnit), ErrPartition)
+	require.ErrorIs(t, PDR(nil, RoleEVM, ModeUnit), types.ErrSystemDescriptionIsNil)
 }

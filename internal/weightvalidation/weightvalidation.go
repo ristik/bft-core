@@ -52,7 +52,23 @@ var (
 	ErrThreshold = errors.New("weightvalidation: root threshold is not the exact threshold of the members")
 	// ErrMembers is returned for an empty, nil, duplicated or unordered member set.
 	ErrMembers = errors.New("weightvalidation: invalid member set")
+	// ErrMember is returned for a structurally invalid member record (nil, empty id, missing or invalid key) found by the
+	// weighted rules or by Nodes and RootTrustBase. go-base's own error stays in the chain; ModeUnit Node and PDR return
+	// go-base's error unchanged.
+	ErrMember = errors.New("weightvalidation: invalid member record")
+	// ErrPartition is returned when a weighted partition description fails go-base's structural rules. A nil record is
+	// types.ErrSystemDescriptionIsNil, unchanged.
+	ErrPartition = errors.New("weightvalidation: invalid partition description")
 )
+
+// asMember classifies a go-base structural refusal of a member as ErrMember, keeping it in the chain and leaving this
+// package's own sentinels alone.
+func asMember(err error) error {
+	if err == nil || errors.Is(err, ErrMember) || errors.Is(err, ErrContext) || errors.Is(err, ErrNonUnitAggregator) || errors.Is(err, ErrWeight) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrMember, err)
+}
 
 func checkContext(role Role, mode Mode) error {
 	if role < RoleRoot || role > RoleAggregator || mode < ModeUnit || mode > ModeWeighted {
@@ -80,6 +96,14 @@ func weightInRange(n *types.NodeInfo) error {
 // Node validates one validator record. ModeUnit is NodeInfo.IsValid; ModeWeighted accepts any weight in range for the root and
 // EVM roles. A non-unit aggregator is ErrNonUnitAggregator (joined with go-base's own refusal) in both modes.
 func Node(n *types.NodeInfo, role Role, mode Mode) error {
+	err := node(n, role, mode)
+	if mode == ModeWeighted {
+		return asMember(err)
+	}
+	return err
+}
+
+func node(n *types.NodeInfo, role Role, mode Mode) error {
 	if err := checkContext(role, mode); err != nil {
 		return err
 	}
@@ -108,7 +132,7 @@ func Nodes(nodes []*types.NodeInfo, role Role, mode Mode) (uint64, error) {
 	keys := make(map[string]string, len(nodes))
 	for i, n := range nodes {
 		if err := Node(n, role, mode); err != nil {
-			return 0, fmt.Errorf("member %d: %w", i, err)
+			return 0, fmt.Errorf("member %d: %w", i, asMember(err))
 		}
 		if err := total.Add(n.NodeID, n.Stake); err != nil {
 			return 0, fmt.Errorf("%w: duplicate node id %q: %w", ErrMembers, n.NodeID, err)
@@ -187,7 +211,7 @@ func PDR(pdr *types.PartitionDescriptionRecord, role Role, mode Mode) error {
 		cp.Validators[i] = unitCopy(v)
 	}
 	if err := cp.IsValid(); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrPartition, err)
 	}
 	_, err := Nodes(pdr.Validators, RoleEVM, ModeWeighted)
 	return err
