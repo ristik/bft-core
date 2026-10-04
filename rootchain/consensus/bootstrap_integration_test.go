@@ -18,6 +18,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
 	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
@@ -50,6 +51,7 @@ type anchorReplica struct {
 	proof      handoff.OldCommitProof
 	body       evmroot.TrustBaseBodyV2
 	oldSigners map[string]abcrypto.Signer
+	dbPath     string // the bolt file behind db, to close it and open it again from disk
 }
 
 type oneEpochTrust struct{ tb *types.RootTrustBaseV1 }
@@ -225,7 +227,26 @@ func TestInstalledTransitionAdapterUsesAssignedShardRound(t *testing.T) {
 }
 
 func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]byte) (map[peer.ID]*anchorReplica, *rctypes.EpochAnchor, time.Time) {
+	return newWeightedAnchorReplicas(t, nil, commitSealRound, frozenParent...)
+}
+
+// newWeightedAnchorReplicas is newAnchorReplicas with the stake of the four epoch-1 members given; nil keeps weight 1 each. The
+// epoch-2 committee always has four members of weight 1 and threshold 3: the verified lineage refuses a non-unit weight in a
+// successor body (m2contract.ErrNonUnitWeight).
+func newWeightedAnchorReplicas(t *testing.T, weights []uint64, commitSealRound uint64, frozenParent ...[]byte) (map[peer.ID]*anchorReplica, *rctypes.EpochAnchor, time.Time) {
+	return newAnchorReplicasWith(t, anchorOptions{weights: weights}, commitSealRound, frozenParent...)
+}
+
+// anchorOptions: weights are the epoch-1 stakes (nil: weight 1 each); syncDB opens the replicas' bolt files with fsync on, for
+// tests that close them and open them again from disk and claim what survived.
+type anchorOptions struct {
+	weights []uint64
+	syncDB  bool
+}
+
+func newAnchorReplicasWith(t *testing.T, opts anchorOptions, commitSealRound uint64, frozenParent ...[]byte) (map[peer.ID]*anchorReplica, *rctypes.EpochAnchor, time.Time) {
 	t.Helper()
+	weights := opts.weights
 	parent := bytes.Repeat([]byte{5}, 32)
 	if len(frozenParent) == 1 {
 		parent = frozenParent[0]
@@ -238,6 +259,21 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		oldSigners[node.PeerConf.ID.String()] = node.Signer
 	}
 	oldTrust := testtrustbase.NewTrustBaseFromSigners(t, oldSigners).(*types.RootTrustBaseV1)
+	if weights != nil {
+		infos := make([]*types.NodeInfo, len(oldNodes))
+		for i, node := range oldNodes {
+			verifier, err := node.Signer.Verifier()
+			require.NoError(t, err)
+			infos[i] = testtrustbase.NewNodeInfoFromVerifier(t, node.PeerConf.ID.String(), verifier)
+			infos[i].Stake = weights[i]
+		}
+		weighted, err := quorumweight.NewTrustBase(5, infos)
+		require.NoError(t, err)
+		oldTrust = weighted
+		for _, node := range oldNodes {
+			require.NoError(t, oldTrust.Sign(node.PeerConf.ID.String(), node.Signer))
+		}
+	}
 	oldID, err := oldTrust.Hash(crypto.SHA256)
 	require.NoError(t, err)
 	link, err := evmroot.FirstV2PredecessorHash(evmroot.V1Anchor{Version: 1, NetworkID: 5, Epoch: 1, HashIncludingSigs: oldID})
@@ -336,7 +372,12 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 	for _, node := range newNodes {
 		obs := testobservability.Default(t)
 		dir := t.TempDir()
-		db, err := storage.NewBoltStorage(filepath.Join(dir, "root.db"), storage.WithNoSync())
+		dbPath := filepath.Join(dir, "root.db")
+		var dbOpts []storage.BoltOption
+		if !opts.syncDB {
+			dbOpts = append(dbOpts, storage.WithNoSync())
+		}
+		db, err := storage.NewBoltStorage(dbPath, dbOpts...)
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, db.Close()) })
 		orchestration, err := partitions.NewOrchestration(5, filepath.Join(dir, "orchestration.db"), obs.Logger(), partitions.WithNoSync())
@@ -386,7 +427,7 @@ func newAnchorReplicas(t *testing.T, commitSealRound uint64, frozenParent ...[]b
 		}
 		manager.pacemaker.Reset(context.Background(), anchor.Slot, nil, nil)
 		t.Cleanup(manager.pacemaker.Stop)
-		replicas[node.PeerConf.ID] = &anchorReplica{manager: manager, net: net, store: trust, history: history, db: db, oldHead: head, proof: proof, body: body, oldSigners: oldSigners}
+		replicas[node.PeerConf.ID] = &anchorReplica{manager: manager, net: net, store: trust, history: history, db: db, dbPath: dbPath, oldHead: head, proof: proof, body: body, oldSigners: oldSigners}
 	}
 	return replicas, anchor, oldUCAt
 }

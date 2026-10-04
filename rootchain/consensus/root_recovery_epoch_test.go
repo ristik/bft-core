@@ -66,6 +66,11 @@ type anchorCluster struct {
 
 func newAnchorCluster(t *testing.T) *anchorCluster {
 	replicas, anchor, _ := newAnchorReplicas(t, 4)
+	return startAnchorCluster(t, replicas, anchor)
+}
+
+// startAnchorCluster opens the first round of the new epoch on replicas built by newAnchorReplicas or newWeightedAnchorReplicas.
+func startAnchorCluster(t *testing.T, replicas map[peer.ID]*anchorReplica, anchor *rctypes.EpochAnchor) *anchorCluster {
 	c := &anchorCluster{t: t, replicas: replicas, anchor: anchor}
 	ctx := context.Background()
 	// The anchor round was committed by the old epoch; the first round of the new one starts from it.
