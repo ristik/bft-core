@@ -88,6 +88,10 @@ type saClientJob struct {
 	Iterations int      `json:"iterations"`
 	// Start, when set, is a file the client waits for before its first operation.
 	Start string `json:"start,omitempty"`
+	// Ready, when set, is created once the client has finished its setup (job decoded, requests read, service client
+	// built) and is about to wait for Start. A test that races several clients touches Start only after every Ready
+	// exists, so no client is still starting up while another runs its whole series.
+	Ready string `json:"ready,omitempty"`
 	// Marker, when set, is a file whose existence is recorded when each iteration begins.
 	Marker string `json:"marker,omitempty"`
 	// Stop, when set, ends the loop once it exists.
@@ -219,6 +223,11 @@ func runSigningClientJob(jobPath string) int {
 	defer func() { _ = out.Close() }()
 	encoder := json.NewEncoder(out)
 
+	if job.Ready != "" {
+		if err := os.WriteFile(job.Ready, nil, 0o600); err != nil {
+			return fail("creating the ready file: %v", err)
+		}
+	}
 	for job.Start != "" && !saExists(job.Start) {
 		if ctx.Err() != nil {
 			return fail("the start file never appeared")
@@ -877,8 +886,13 @@ func TestSigningRecordAtTheProcessBoundary(t *testing.T) {
 		xPath, yPath := l.writeRequest("x", x), l.writeRequest("y", y)
 		start := filepath.Join(l.dir, "start-conflicting")
 		const iterations = 40
-		px := l.startClient("race-x", saClientJob{Credential: credential, Requests: []string{xPath}, Steps: saExchangeSteps, Iterations: iterations, Start: start})
-		py := l.startClient("race-y", saClientJob{Credential: credential, Requests: []string{yPath}, Steps: saExchangeSteps, Iterations: iterations, Start: start})
+		readyX, readyY := filepath.Join(l.dir, "ready-race-x"), filepath.Join(l.dir, "ready-race-y")
+		px := l.startClient("race-x", saClientJob{Credential: credential, Requests: []string{xPath}, Steps: saExchangeSteps, Iterations: iterations, Start: start, Ready: readyX})
+		py := l.startClient("race-y", saClientJob{Credential: credential, Requests: []string{yPath}, Steps: saExchangeSteps, Iterations: iterations, Start: start, Ready: readyY})
+		// both processes are fully set up before either may begin: a process still starting while the other runs its
+		// whole series is not a race, and under load that skew exceeded the series
+		saWaitFile(t, readyX, 60*time.Second)
+		saWaitFile(t, readyY, 60*time.Second)
 		saTouch(t, start)
 		results := map[string][]saExchange{"x": px.wait(90 * time.Second), "y": py.wait(90 * time.Second)}
 		requireOverlap(t, results["x"], results["y"])
@@ -913,8 +927,11 @@ func TestSigningRecordAtTheProcessBoundary(t *testing.T) {
 		z := l.work(7, 42, 0, 0)
 		zPath := l.writeRequest("z", z)
 		startIdentical := filepath.Join(l.dir, "start-identical")
-		p1 := l.startClient("identical-1", saClientJob{Credential: credential, Requests: []string{zPath}, Steps: saExchangeSteps, Iterations: iterations, Start: startIdentical})
-		p2 := l.startClient("identical-2", saClientJob{Credential: credential, Requests: []string{zPath}, Steps: saExchangeSteps, Iterations: iterations, Start: startIdentical})
+		ready1, ready2 := filepath.Join(l.dir, "ready-identical-1"), filepath.Join(l.dir, "ready-identical-2")
+		p1 := l.startClient("identical-1", saClientJob{Credential: credential, Requests: []string{zPath}, Steps: saExchangeSteps, Iterations: iterations, Start: startIdentical, Ready: ready1})
+		p2 := l.startClient("identical-2", saClientJob{Credential: credential, Requests: []string{zPath}, Steps: saExchangeSteps, Iterations: iterations, Start: startIdentical, Ready: ready2})
+		saWaitFile(t, ready1, 60*time.Second)
+		saWaitFile(t, ready2, 60*time.Second)
 		saTouch(t, startIdentical)
 		identical := map[string]bool{}
 		first, second := p1.wait(90*time.Second), p2.wait(90*time.Second)
