@@ -286,15 +286,31 @@ func TestSkewedWeightObserverSeesStatementsThatDifferInOneSignedField(t *testing
 // without (their durability is not claimed).
 func newSkewedCluster(t *testing.T, domainBound bool, heavyPos int, syncNodes ...int) *skewedCluster {
 	t.Helper()
+	return newClusterOf(t, clusterSpec{heavy: skewedStakes[0], light: 1, n: len(skewedStakes), heavyPos: heavyPos, domainBound: domainBound}, syncNodes...)
+}
+
+// clusterSpec is a committee of n members with one heavy member (at heavyPos in the sorted committee) and n-1 equal light ones.
+// weightedLeader activates the root-wrr-v1 leader policy for the genesis epoch in every node's trust base store, so the real
+// manager constructor builds the weighted selector.
+type clusterSpec struct {
+	heavy, light   uint64
+	n, heavyPos    int
+	domainBound    bool
+	weightedLeader bool
+}
+
+func newClusterOf(t *testing.T, spec clusterSpec, syncNodes ...int) *skewedCluster {
+	t.Helper()
+	heavyPos, domainBound := spec.heavyPos, spec.domainBound
 	observe := testobservability.Default(t)
-	sorted, _ := testutils.CreateTestNodes(t, len(skewedStakes))
+	sorted, _ := testutils.CreateTestNodes(t, spec.n)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].PeerConf.ID.String() < sorted[j].PeerConf.ID.String() })
 	infos := make([]*types.NodeInfo, len(sorted))
 	for i, n := range sorted {
 		infos[i] = n.NodeInfo(t)
-		infos[i].Stake = 1
+		infos[i].Stake = spec.light
 		if i == heavyPos {
-			infos[i].Stake = skewedStakes[0]
+			infos[i].Stake = spec.heavy
 		}
 	}
 	testNodes := append([]*testutils.TestNode{sorted[heavyPos]}, append(append([]*testutils.TestNode{}, sorted[:heavyPos]...), sorted[heavyPos+1:]...)...)
@@ -303,9 +319,10 @@ func newSkewedCluster(t *testing.T, domainBound bool, heavyPos int, syncNodes ..
 	for _, n := range testNodes {
 		require.NoError(t, trust.Sign(n.PeerConf.ID.String(), n.Signer))
 	}
-	require.EqualValues(t, skewedThreshold, trust.QuorumThreshold, "premise: the committee 6,1,1,1 has the threshold 7")
+	total := spec.heavy + uint64(spec.n-1)*spec.light
+	require.EqualValues(t, 2*total/3+1, trust.QuorumThreshold, "premise: the root threshold is floor(2W/3)+1")
 	require.Equal(t, sorted[heavyPos].PeerConf.ID.String(), trust.RootNodes[heavyPos].NodeID, "premise: the trust base lists the members in sorted order")
-	require.EqualValues(t, 6, trust.RootNodes[heavyPos].Stake)
+	require.EqualValues(t, spec.heavy, trust.RootNodes[heavyPos].Stake)
 
 	params := *NewConsensusParams()
 	params.NetworkProfileVersion = storage.ProfileHandoff // stake-weighted voting is a handoff-profile rule
@@ -324,6 +341,9 @@ func newSkewedCluster(t *testing.T, domainBound bool, heavyPos int, syncNodes ..
 		require.NoError(t, store.Store(trust))
 		if domainBound {
 			require.NoError(t, store.ActivateSigning(1, skewedConfig()))
+		}
+		if spec.weightedLeader {
+			require.NoError(t, store.ActivateLeaderPolicy(1, tbstore.LeaderPolicyWeightedV1))
 		}
 		node.tbStore = store
 		c.nodes = append(c.nodes, node)

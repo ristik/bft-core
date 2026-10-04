@@ -310,10 +310,15 @@ func NewConsensusManager(
 	}
 	var chosenLeader Leader = ls
 	if installedAnchor != nil {
-		chosenLeader, err = newBootstrapLeader(ls, installedAnchor.Slot+1, trustBase.RootNodes)
-		if err != nil {
-			return nil, err
-		}
+		chosenLeader, err = newEpochLeader(trustBaseStore, installedAnchor.Epoch, installedAnchor.Slot+1, trustBase.RootNodes,
+			func() (Leader, error) { return newBootstrapLeader(ls, installedAnchor.Slot+1, trustBase.RootNodes) })
+	} else if cParams.NetworkProfileVersion == storage.ProfileHandoff {
+		// the genesis epoch: its schedule starts at the genesis round, whatever start the trust base records
+		chosenLeader, err = newEpochLeader(trustBaseStore, trustBase.GetEpoch(), max(trustBase.GetEpochStart(), 1), trustBase.RootNodes,
+			func() (Leader, error) { return ls, nil })
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	consensusManager := &ConsensusManager{
