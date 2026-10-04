@@ -93,7 +93,7 @@ func (x *QuorumCert) UnmarshalCBOR(data []byte) error {
 		}
 		p := w.Payload
 		if p.LedgerCommitInfo == nil {
-			return fmt.Errorf("%w: scheme 2 certificate has no commit info", votesig.ErrStatement)
+			return fmt.Errorf("%w: scheme 2 certificate has no commit info: %w", ErrMalformedQC, votesig.ErrStatement)
 		}
 		*x = QuorumCert{Scheme: votesig.SchemeDomainBound, LedgerCommitInfo: p.LedgerCommitInfo, Signatures: p.VoteSignatures, SealSignatures: p.SealSignatures,
 			VoteInfo: &RoundInfo{Version: 1, RoundNumber: p.VoteInfo.Round, Epoch: p.VoteInfo.Epoch, ParentRoundNumber: p.VoteInfo.Parent, CurrentRootHash: p.VoteInfo.Exec}}

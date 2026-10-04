@@ -41,7 +41,9 @@ func TestQuorumCertWireForms(t *testing.T) {
 	rawNoCommit, err := types.Cbor.Marshal(noCommit)
 	require.NoError(t, err)
 	var refused QuorumCert
-	require.ErrorIs(t, types.Cbor.Unmarshal(rawNoCommit, &refused), votesig.ErrStatement, "only LedgerCommitInfo is null")
+	err = types.Cbor.Unmarshal(rawNoCommit, &refused)
+	require.ErrorIs(t, err, ErrMalformedQC, "only LedgerCommitInfo is null")
+	require.ErrorIs(t, err, votesig.ErrStatement, "only LedgerCommitInfo is null")
 
 	// a scheme 2 certificate without vote info cannot be written
 	_, err = (QuorumCert{Scheme: votesig.SchemeDomainBound}).MarshalCBOR()
