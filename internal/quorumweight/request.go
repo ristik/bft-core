@@ -94,7 +94,7 @@ type RequestContext struct {
 	typeID     types.PartitionTypeID
 	network    types.NetworkID
 	partition  types.PartitionID
-	shard      types.ShardID
+	shard      string // ShardID key, copied at construction
 	shardEpoch uint64
 	confHash   []byte
 	rootEpoch  uint64
@@ -165,7 +165,7 @@ func newContext(pdr *types.PartitionDescriptionRecord, hashAlg crypto.Hash, comm
 		typeID:     pdr.PartitionTypeID,
 		network:    pdr.NetworkID,
 		partition:  pdr.PartitionID,
-		shard:      pdr.ShardID,
+		shard:      pdr.ShardID.String(),
 		shardEpoch: pdr.Epoch,
 		confHash:   bytes.Clone(h),
 	}, nil
@@ -201,7 +201,10 @@ func (c *RequestContext) finish(pdr *types.PartitionDescriptionRecord, weight fu
 		if sum > MaxTotalWeight && c.policy == PolicyEVMWeighted {
 			return nil, fmt.Errorf("%w: total weight above %d", ErrWeightCap, MaxTotalWeight)
 		}
-		ver, err := v.SigVerifier()
+		// Built from a private copy of the key, never through NodeInfo.SigVerifier: that caches the verifier on the caller's
+		// NodeInfo, so a key changed after an earlier call would leave this context verifying with another key than the
+		// one it hashed and checked for duplicates.
+		ver, err := abcrypto.NewVerifierSecp256k1(bytes.Clone(v.SigKey))
 		if err != nil {
 			return nil, fmt.Errorf("creating verifier for validator %q: %w", v.NodeID, err)
 		}

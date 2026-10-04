@@ -451,3 +451,28 @@ func TestContextIsImmuneToConstructorInputMutation(t *testing.T) {
 	_, err = ctx.SignerWeight("mutated")
 	require.ErrorIs(t, err, ErrUnknownSigner)
 }
+
+// NodeInfo.SigVerifier caches a verifier on the caller's NodeInfo; a context must verify with the key it was built from,
+// not with a verifier cached for an earlier key.
+func TestContextVerifierIgnoresCallerVerifierCache(t *testing.T) {
+	signerA, err := abcrypto.NewInMemorySecp256K1SignerFromKey(append(make([]byte, 31), 1))
+	require.NoError(t, err)
+	signerB, err := abcrypto.NewInMemorySecp256K1SignerFromKey(append(make([]byte, 31), 2))
+	require.NoError(t, err)
+	p := pdr(1, nodeInfos(t, member{"a", 1}))
+	_, err = p.Validators[0].SigVerifier() // caches the verifier of key A on the NodeInfo
+	require.NoError(t, err)
+	p.Validators[0].SigKey = key(t, 2) // key B afterwards
+
+	ctx, err := NewUnitRequestContext(p, crypto.SHA256, confHash(t, p))
+	require.NoError(t, err)
+	ver, err := ctx.Verifier("a")
+	require.NoError(t, err)
+	data := []byte("request")
+	sigB, err := signerB.SignBytes(data)
+	require.NoError(t, err)
+	sigA, err := signerA.SignBytes(data)
+	require.NoError(t, err)
+	require.NoError(t, ver.VerifyBytes(sigB, data))
+	require.Error(t, ver.VerifyBytes(sigA, data))
+}
