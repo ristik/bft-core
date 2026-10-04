@@ -1,6 +1,7 @@
 package q3format
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 )
@@ -142,6 +143,34 @@ func readLink(f *reader) (Link, error) {
 	return l, nil
 }
 
+// retained checks a link for an epoch the history already holds. It is a reference to the verified entry, not a second
+// verification, so nothing the link carries may differ from it: the claim, the recomputed identity of the supplied canonical
+// body (a claim alone never names the body), and the committed record, candidate evidence and receipts the link presents. Any
+// difference is ErrConflict; conflicting evidence is never ignored because the claim happens to match.
+func (e Entry) retained(l Link) error {
+	conflict := func(what string) error { return fmt.Errorf("%w: epoch %d: %s", ErrConflict, l.Body.Epoch, what) }
+	if e.claim() != l.Claim {
+		return conflict("claim")
+	}
+	if id := l.Body.Identity(); id != e.bodyID || id != l.Claim.BodyID {
+		return conflict("body identity")
+	}
+	p, err := decodeProof(l.Proof)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(p.Record.ID(), e.commitID[:]) { // the record id commits to its body, boundary, attempt and rounds
+		return conflict("committed record")
+	}
+	if err := bindCandidate(l.Body, p.Record, l.Evidence); err != nil {
+		return errors.Join(ErrConflict, err)
+	}
+	if err := VerifyReceipts(l.Body, ContextFor(l.Body, p.Record.Attempt, [32]byte(l.Evidence.CandidateDigest)), l.Receipts); err != nil {
+		return errors.Join(ErrConflict, err)
+	}
+	return nil
+}
+
 // VerifyEnvelope extends h with the envelope's lineage and returns the extended history, leaving h untouched. A link for an
 // epoch h already holds is a reference to a retained verified entry: it must be that entry exactly (ErrConflict otherwise).
 // Any other link must extend the tip and passes WithV3; an epoch the history lacks, with nothing supplied before it, is
@@ -151,8 +180,8 @@ func (h *History) VerifyEnvelope(e Envelope) (*History, error) {
 	cur := h
 	for _, l := range e.Links {
 		if have, err := cur.ForEpoch(l.Body.Epoch); err == nil {
-			if have.claim() != l.Claim { // the claim names the body
-				return nil, fmt.Errorf("%w: epoch %d", ErrConflict, l.Body.Epoch)
+			if err := have.retained(l); err != nil {
+				return nil, err
 			}
 			continue
 		}

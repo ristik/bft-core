@@ -150,7 +150,12 @@ func TestVerifyEnvelope(t *testing.T) {
 		bad.Proof = bytes.Clone(l.Proof)
 		bad.Proof[len(bad.Proof)-1] ^= 1
 		_, err = w.h.VerifyEnvelope(envelopeOf(bad))
-		require.Error(t, err)
+		require.ErrorIs(t, err, ErrFormat, "a corrupted proof is not canonical")
+		require.NotErrorIs(t, err, ErrActivation)
+		forged := w.link(spec{signedBy: []string{"a"}}) // well-formed, but one of four is not the old committee's quorum
+		_, err = w.h.VerifyEnvelope(envelopeOf(forged))
+		require.ErrorIs(t, err, ErrActivation, "an unauthenticated proof")
+		require.NotErrorIs(t, err, ErrFormat)
 	})
 }
 

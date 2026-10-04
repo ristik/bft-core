@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
 
 var (
@@ -112,11 +113,43 @@ func NewHistory(genesis *types.RootTrustBaseV1) (*History, error) {
 	if err != nil {
 		return nil, errors.Join(ErrHistory, err)
 	}
+	owned := cloneTrustBase(genesis) // the history is the owner of its authority: a later change by the caller must not alter it
 	h := &History{network: uint64(genesis.NetworkID)}
 	copy(h.genesis[:], id)
-	e := Entry{epoch: 1, start: genesis.EpochStart, version: 1, scheme: 1, bodyID: h.genesis, tb: genesis}
+	e := Entry{epoch: 1, start: genesis.EpochStart, version: 1, scheme: 1, bodyID: h.genesis, tb: owned}
 	h.entries = []Entry{e}
 	return h, nil
+}
+
+// cloneTrustBase is a deep copy: new node records (not copies of a NodeInfo, which carries a sync.Once), keys, hashes and signatures.
+func cloneTrustBase(tb *types.RootTrustBaseV1) *types.RootTrustBaseV1 {
+	c := *tb
+	c.RootNodes = make([]*types.NodeInfo, len(tb.RootNodes))
+	for i, n := range tb.RootNodes {
+		if n != nil {
+			c.RootNodes[i] = &types.NodeInfo{NodeID: n.NodeID, SigKey: bytes.Clone(n.SigKey), Stake: n.Stake}
+		}
+	}
+	c.StateHash, c.ChangeRecordHash, c.PreviousEntryHash = bytes.Clone(tb.StateHash), bytes.Clone(tb.ChangeRecordHash), bytes.Clone(tb.PreviousEntryHash)
+	if tb.Signatures != nil {
+		c.Signatures = make(map[string]hex.Bytes, len(tb.Signatures))
+		for k, v := range tb.Signatures {
+			c.Signatures[k] = bytes.Clone(v)
+		}
+	}
+	return &c
+}
+
+// cloneBodyV2 is a deep copy of a V2 body: its member slice, keys and byte fields.
+func cloneBodyV2(b evmroot.TrustBaseBodyV2) evmroot.TrustBaseBodyV2 {
+	members := make(evmroot.WeightSet, len(b.Members))
+	for i, m := range b.Members {
+		m.ConsensusKey = bytes.Clone(m.ConsensusKey)
+		members[i] = m
+	}
+	b.Members = members
+	b.StateSummary, b.ChangeRecordHash, b.PredecessorHash = bytes.Clone(b.StateSummary), bytes.Clone(b.ChangeRecordHash), bytes.Clone(b.PredecessorHash)
+	return b
 }
 
 // Network and Genesis are the authority a body's network and tuple are checked against.
@@ -288,6 +321,7 @@ func bindCandidate(b BodyV3, r evmroot.OrderedHandoffRecord, ev Evidence) error 
 // WithV2 appends one legacy V2 epoch through the existing verifier (trustactivation), so that a chain that already took V2
 // handoffs can reach its first V3 link. V2 weights are unit and no V3 epoch can be followed by a V2 one.
 func (h *History) WithV2(body evmroot.TrustBaseBodyV2, proof []byte) (*History, error) {
+	body = cloneBodyV2(body) // the retained body and the authority used below are owned by the history, not the caller
 	tip := h.Tip()
 	if tip.version == BodyVersion {
 		return nil, fmt.Errorf("%w: a V2 epoch cannot follow V3", ErrHistory)
@@ -309,6 +343,9 @@ func (h *History) WithV2(body evmroot.TrustBaseBodyV2, proof []byte) (*History, 
 	in := m2contract.TrustInterval{Body: body, Activation: evmroot.ActivatedTrustBase{BodyIdentity: id[:], EpochStart: p.Record.ActivationRound, ActivationCommitID: p.Record.ID()}}
 	if err := (trustactivation.Verifier{}).VerifyActivation(context.Background(), prior, in, proof); err != nil {
 		return nil, errors.Join(ErrActivation, err)
+	}
+	if p.Record.ActivationRound < body.EarliestActivation { // trustactivation does not check A_min; the V3 path does
+		return nil, fmt.Errorf("%w: A*=%d before A_min=%d", ErrBinding, p.Record.ActivationRound, body.EarliestActivation)
 	}
 	if p.Record.ActivationRound <= tip.start {
 		return nil, fmt.Errorf("%w: A*=%d does not follow the epoch start %d", ErrBinding, p.Record.ActivationRound, tip.start)
