@@ -31,7 +31,14 @@ type trustView struct {
 	sourceKind uint64
 	bodyID     [32]byte
 	members    []member
-	hash       [32]byte
+	raw        []byte // the scanned preimage; hashed only by digest, after the full charge is reserved
+}
+
+// digest is SHA-256 of the carried view. It is the first hashing of the request and is called only from admit, that is
+// after Run has reserved the complete charge.
+func (v *trustView) digest() [32]byte {
+	work("hash")
+	return sha256.Sum256(v.raw)
 }
 
 // scanView validates the structure of the deterministic CBOR TrustView
@@ -65,7 +72,7 @@ func scanView(raw []byte, tokens *int) (*trustView, error) {
 	if k[5].arg > MaxMembers {
 		return nil, ErrTooManyMembers
 	}
-	v := &trustView{network: uint16(k[1].arg), epoch: k[2].arg, sourceKind: k[3].arg, hash: sha256.Sum256(raw)}
+	v := &trustView{network: uint16(k[1].arg), epoch: k[2].arg, sourceKind: k[3].arg, raw: raw}
 	copy(v.bodyID[:], k[4].data)
 	v.members = make([]member, 0, len(k[5].kids))
 	for i := range k[5].kids {

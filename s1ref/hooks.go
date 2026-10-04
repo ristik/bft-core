@@ -3,8 +3,8 @@ package s1ref
 // Test instrumentation. Neither hook is set outside tests, and neither changes
 // behaviour unless a test installs it.
 
-// onWork, when set, is called with "point" or "signature" immediately before
-// each such operation, so tests can prove no expensive work precedes the full
+// onWork, when set, is called with "hash", "point" or "signature" immediately
+// before each such operation, so tests can prove no expensive work precedes the full
 // gas reservation.
 var onWork func(kind string)
 

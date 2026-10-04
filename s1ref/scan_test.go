@@ -3,6 +3,7 @@ package s1ref
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -133,18 +134,23 @@ func TestScannerTextAndTrailing(t *testing.T) {
 }
 
 func TestSignatureShape(t *testing.T) {
-	for n, ok := range map[int]bool{0: false, 1: false, 63: false, 64: true, 65: true, 66: false, 128: false} {
-		sig := make([]byte, n)
-		if err := sigShape(sig); (err == nil) != ok {
-			t.Errorf("length %d: %v", n, err)
+	// each negative is the named shape refusal, not merely some error; the valid controls are nil
+	check := func(what string, err error, ok bool) {
+		t.Helper()
+		switch {
+		case ok && err != nil:
+			t.Errorf("%s: valid shape refused: %v", what, err)
+		case !ok && !errors.Is(err, ErrSigShape):
+			t.Errorf("%s: want ErrSigShape, got %v", what, err)
 		}
+	}
+	for n, ok := range map[int]bool{0: false, 1: false, 63: false, 64: true, 65: true, 66: false, 128: false} {
+		check(fmt.Sprintf("length %d", n), sigShape(make([]byte, n)), ok)
 	}
 	for v, ok := range map[byte]bool{0: true, 1: true, 2: false, 27: false, 255: false} {
 		sig := make([]byte, 65)
 		sig[64] = v
-		if err := sigShape(sig); (err == nil) != ok {
-			t.Errorf("v=%d: %v", v, err)
-		}
+		check(fmt.Sprintf("v=%d", v), sigShape(sig), ok)
 	}
 	if err := sigShape(nil); !errors.Is(err, ErrSigShape) {
 		t.Errorf("nil: %v", err)

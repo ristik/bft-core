@@ -440,9 +440,11 @@ func TestFalseVsMalformedSplit(t *testing.T) {
 // signatures and parses every member key.
 func TestWorkOrder(t *testing.T) {
 	m, _ := loadGolden(t)
-	var points, sigs int
+	var hashes, points, sigs int
 	s1ref.SetWorkHook(func(kind string) {
 		switch kind {
+		case "hash":
+			hashes++
 		case "point":
 			points++
 		case "signature":
@@ -452,19 +454,24 @@ func TestWorkOrder(t *testing.T) {
 	defer s1ref.SetWorkHook(nil)
 	for _, v := range m.Vectors {
 		req, ctx := requestOf(t, v), contextOf(t, v.Context)
-		points, sigs = 0, 0
+		hashes, points, sigs = 0, 0, 0
 		switch v.Expected.Status {
 		case "error":
 			s1ref.Run(req, ctx, 10_000_000)
-			if points != 0 || sigs != 0 {
-				t.Fatalf("%s: malformed request did expensive work (%d points, %d signatures)", v.ID, points, sigs)
+			if hashes != 0 || points != 0 || sigs != 0 {
+				t.Fatalf("%s: malformed request did expensive work (%d hashes, %d points, %d signatures)", v.ID, hashes, points, sigs)
 			}
 		case "ok":
-			s1ref.Run(req, ctx, v.Expected.Gas-1)
-			if points != 0 || sigs != 0 {
-				t.Fatalf("%s: under-funded request did expensive work (%d points, %d signatures)", v.ID, points, sigs)
+			if _, _, err := s1ref.Run(req, ctx, v.Expected.Gas-1); !errors.Is(err, s1ref.ErrOutOfGas) {
+				t.Fatalf("%s: charge minus one: %v", v.ID, err)
+			}
+			if hashes != 0 || points != 0 || sigs != 0 {
+				t.Fatalf("%s: under-funded request did expensive work (%d hashes, %d points, %d signatures)", v.ID, hashes, points, sigs)
 			}
 			s1ref.Run(req, ctx, v.Expected.Gas)
+			if hashes > 1 {
+				t.Fatalf("%s: the view was hashed %d times", v.ID, hashes)
+			}
 			if sigs > 4 {
 				t.Fatalf("%s: %d signature verifications", v.ID, sigs)
 			}
@@ -476,9 +483,12 @@ func TestWorkOrder(t *testing.T) {
 			if v.ID != id {
 				continue
 			}
-			points, sigs = 0, 0
+			hashes, points, sigs = 0, 0, 0
 			if _, _, err := s1ref.Run(requestOf(t, v), contextOf(t, v.Context), v.Expected.Gas); err != nil {
 				t.Fatal(err)
+			}
+			if hashes != 1 {
+				t.Fatalf("%s: %d hashes of the view, want exactly 1 after the charge", id, hashes)
 			}
 			wantSigs := map[string]int{"res.members-64.pair-committing.ok": 4, "s2.committing.ok": 2, "s1.noncommitting.ok": 1}[id]
 			if sigs != wantSigs || points == 0 {
@@ -578,4 +588,33 @@ func TestManifestNotesAndPins(t *testing.T) {
 	if sum := sha256.Sum256(q1); m.SourceSHA256 != hex.EncodeToString(sum[:]) {
 		t.Error("the manifest was generated from another Q1 vectors file")
 	}
+}
+
+// TestChargeIsReservedBeforeHashingTheView: the committing pair with 64 members at exactly the charge minus one is
+// out of gas with no hashing, no point parsing and no signature verification; at the charge it hashes the view once.
+func TestChargeIsReservedBeforeHashingTheView(t *testing.T) {
+	m, _ := loadGolden(t)
+	var ops []string
+	s1ref.SetWorkHook(func(kind string) { ops = append(ops, kind) })
+	defer s1ref.SetWorkHook(nil)
+	for _, v := range m.Vectors {
+		if v.ID != "res.members-64.pair-committing.ok" {
+			continue
+		}
+		req, ctx := requestOf(t, v), contextOf(t, v.Context)
+		if _, _, err := s1ref.Run(req, ctx, v.Expected.Gas-1); !errors.Is(err, s1ref.ErrOutOfGas) {
+			t.Fatalf("charge minus one: %v", err)
+		}
+		if len(ops) != 0 {
+			t.Fatalf("work before the full charge: %v", ops)
+		}
+		if _, _, err := s1ref.Run(req, ctx, v.Expected.Gas); err != nil {
+			t.Fatal(err)
+		}
+		if len(ops) == 0 || ops[0] != "hash" {
+			t.Fatalf("the view hash is the first operation after the charge, got %v", ops[:min(3, len(ops))])
+		}
+		return
+	}
+	t.Fatal("vector not found")
 }

@@ -1,7 +1,7 @@
 {
  "format": "s1-vectors/1",
  "seed": "s1-oracle-v1",
- "q1VectorsSHA256": "e2191022b67485b9c023e28f235ba5fca362e2d031e2f0286280fcd35bfa36e5",
+ "q1VectorsSHA256": "3f913e56c6976f36ef1cce216a50d0c3658a5db44a5f28046786ca4f21ee40c2",
  "pins": {
   "B": "1384caf2b61a4700980ec7b6bbda7fa10adcec7e (bft-core, B1 oracle #390)",
   "G": "01ab63a83bf5 (bft-go-base)",

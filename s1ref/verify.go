@@ -135,7 +135,8 @@ func Output(v Verdict) []byte {
 // returns the return data and the gas used, or an error with all forwarded gas
 // consumed. The byte bound and the base-plus-byte charge are checked before
 // scanning, the full charge (known from the structural scan alone) before
-// point parsing, hashing or any signature verification.
+// hashing the view, point parsing or any signature verification: the scan
+// keeps the view bytes and hashes nothing.
 func Run(in []byte, ctx *Context, gas uint64) (out []byte, used uint64, err error) {
 	if uint64(len(in)) > MaxInputBytes {
 		return nil, gas, ErrInputTooLarge
@@ -298,7 +299,7 @@ func admit(view *trustView, ctx *Context) (EpochEntry, error) {
 	if (!ok || entry.ViewHash == [32]byte{}) && !skipped("unknown-epoch") {
 		return EpochEntry{}, ErrUnknownEpoch
 	}
-	if entry.ViewHash != view.hash && !skipped("view-hash") {
+	if entry.ViewHash != view.digest() && !skipped("view-hash") {
 		return EpochEntry{}, ErrViewHash
 	}
 	if entry.BodyID != view.bodyID && !skipped("body-id") {

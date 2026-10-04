@@ -2,6 +2,7 @@ package s1ref_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -31,12 +32,12 @@ func contexts(t testing.TB) (ctxs []*s1ref.Context, own map[string]int, m *s1gen
 	return ctxs, own, m
 }
 
+// contextKey is a complete stable encoding of the injected context (the JSON of every field, BodyID and SigNetwork
+// included), so two contexts that differ in any field never share fuzz coverage.
 func contextKey(c *s1gen.ContextJSON) string {
-	b := []byte{byte(c.Network >> 8), byte(c.Network), byte(c.OpenEpoch)}
-	for _, e := range c.Epochs {
-		b = append(b, e.ViewHash...)
-		b = append(b, e.Genesis...)
-		b = append(b, byte(e.Scheme), byte(e.Epoch), byte(e.Start), byte(e.End), byte(e.SourceKind))
+	b, err := json.Marshal(c)
+	if err != nil {
+		panic(err)
 	}
 	return string(b)
 }
