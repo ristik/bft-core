@@ -157,6 +157,13 @@ func (x *IrReqBuffer) GeneratePayload(round uint64, timeouts []*types.UnicityCer
 // key, the assignment, the shard round and anchor and the digest of an owned copy of the proof. An entry buffered under another
 // assignment, round or anchor is stale: it is retired before the duplicate and equivocation comparison, so an old proof can never
 // make fresh work look equivocating. Nothing changes unless the new proof verified.
+var (
+	// ErrTimeoutRequest is returned for a node-submitted T2 timeout request: only a leader issuing a new block proposes one.
+	ErrTimeoutRequest = errors.New("invalid ir change request, timeout can only be proposed by leader issuing a new block")
+	// ErrEquivocation is returned when a buffered request is contradicted, under the same view, by another reason or result.
+	ErrEquivocation = errors.New("equivocating request")
+)
+
 func (x *IrReqBuffer) AddView(view *storage.RequestRoundView, irChReq *drctypes.IRChangeReq, ver ViewVerifier) error {
 	if view == nil {
 		return fmt.Errorf("%w: no request view", drctypes.ErrInvalidRequest)
@@ -168,7 +175,7 @@ func (x *IrReqBuffer) AddView(view *storage.RequestRoundView, irChReq *drctypes.
 		return drctypes.ErrControlPartition
 	}
 	if irChReq.CertReason == drctypes.T2Timeout {
-		return errors.New("invalid ir change request, timeout can only be proposed by leader issuing a new block")
+		return ErrTimeoutRequest
 	}
 	owned, err := cloneProof(irChReq)
 	if err != nil {
@@ -187,7 +194,7 @@ func (x *IrReqBuffer) AddView(view *storage.RequestRoundView, irChReq *drctypes.
 			delete(x.irChgReqBuffer, psID)
 		} else {
 			if old.Reason != next.Reason {
-				return fmt.Errorf("equivocating request for partition %s, reason has changed", psID.PartitionID)
+				return fmt.Errorf("%w for partition %s, reason has changed", ErrEquivocation, psID.PartitionID)
 			}
 			if b, err := types.EqualIR(old.InputRecord, next.InputRecord); b || err != nil {
 				if err != nil {
@@ -196,7 +203,7 @@ func (x *IrReqBuffer) AddView(view *storage.RequestRoundView, irChReq *drctypes.
 				x.log.Debug("duplicate IR change request, ignored", logger.Shard(owned.Partition, owned.Shard))
 				return nil
 			}
-			return fmt.Errorf("equivocating request for partition %s-%s", owned.Partition, owned.Shard)
+			return fmt.Errorf("%w for partition %s-%s", ErrEquivocation, owned.Partition, owned.Shard)
 		}
 	}
 	x.irChgReqBuffer[psID] = next

@@ -23,12 +23,15 @@ type RequestViewResolver struct {
 	cache   *storage.RequestViewCache
 }
 
+// ErrNoParentSource is returned when a resolver is built without the source of the verified parent state.
+var ErrNoParentSource = errors.New("no parent source")
+
 func NewRequestViewResolver(h storage.RequestHistory, hashAlg crypto.Hash, parent ParentSource, cache *storage.RequestViewCache) (*RequestViewResolver, error) {
 	if h == nil {
 		return nil, fmt.Errorf("%w: no committed request history", storage.ErrAssignmentHistory)
 	}
 	if parent == nil {
-		return nil, errors.New("no parent source")
+		return nil, ErrNoParentSource
 	}
 	return &RequestViewResolver{history: h, hashAlg: hashAlg, parent: parent, cache: cache}, nil
 }

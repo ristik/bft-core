@@ -89,6 +89,20 @@ func (f *fixture) proof(t *testing.T, v *storage.RequestRoundView, hash byte) *d
 	return &drctypes.IRChangeReq{Partition: 1, Shard: types.ShardID{}, CertReason: drctypes.Quorum, Requests: reqs}
 }
 
+// notPossible is a proof that no quorum is possible: all three nodes report different results.
+func (f *fixture) notPossible(t *testing.T, v *storage.RequestRoundView) *drctypes.IRChangeReq {
+	t.Helper()
+	tr := v.ExpectedTR()
+	var reqs []*certification.BlockCertificationRequest
+	for i := 0; i < 3; i++ {
+		req := &certification.BlockCertificationRequest{PartitionID: 1, ShardID: types.ShardID{}, NodeID: f.infos[i].NodeID, InputRecord: &types.InputRecord{
+			Version: 1, RoundNumber: tr.Round, PreviousHash: v.PreviousStateHash(), Hash: []byte{byte(20 + i)}, BlockHash: []byte{8}, SummaryValue: []byte{3}, Timestamp: 1000}}
+		require.NoError(t, req.Sign(f.nodes[i].Signer))
+		reqs = append(reqs, req)
+	}
+	return &drctypes.IRChangeReq{Partition: 1, Shard: types.ShardID{}, CertReason: drctypes.QuorumNotPossible, Requests: reqs}
+}
+
 func newViewVerifier(t *testing.T) *IRChangeReqVerifier {
 	ver, err := NewIRChangeReqVerifier(&Parameters{BlockRate: 900 * time.Millisecond}, &MockState{})
 	require.NoError(t, err)
@@ -123,7 +137,9 @@ func TestAddViewRefusalsLeaveTheBufferUnchanged(t *testing.T) {
 	require.ErrorIs(t, b.AddView(nil, f.proof(t, v, 9), ver), drctypes.ErrInvalidRequest)
 	require.ErrorIs(t, b.AddView(v, nil, ver), drctypes.ErrInvalidRequest)
 	timeout := &drctypes.IRChangeReq{Partition: 1, CertReason: drctypes.T2Timeout}
-	require.ErrorContains(t, b.AddView(v, timeout, ver), "timeout can only be proposed by leader")
+	err := b.AddView(v, timeout, ver)
+	require.ErrorIs(t, err, ErrTimeoutRequest)
+	require.ErrorContains(t, err, "timeout can only be proposed by leader")
 	one := f.proof(t, v, 9)
 	one.Requests = one.Requests[:1]
 	require.ErrorIs(t, b.AddView(v, one, ver), quorumweight.ErrQuorumNotReached, "a proof short of the quorum is refused by the verifier")
@@ -157,10 +173,20 @@ func TestAddViewBuffersOwnedTaggedCopyAndComparesWithinOneView(t *testing.T) {
 	require.EqualValues(t, 9, entry.Req.Requests[0].InputRecord.Hash[0], "mutating the caller's proof does not change the buffered one")
 
 	require.NoError(t, b.AddView(v, f.proof(t, v, 9), ver), "the same result under the same view is a duplicate")
-	require.ErrorContains(t, b.AddView(v, f.proof(t, v, 7), ver), "equivocating request", "another result under the same view is equivocation")
+	err := b.AddView(v, f.proof(t, v, 7), ver)
+	require.ErrorIs(t, err, ErrEquivocation, "another result under the same view is equivocation")
+	require.ErrorContains(t, err, "equivocating request for partition")
+	require.NotContains(t, err.Error(), "reason has changed")
+	// only the reason differs and nothing else is true of it: a quorum proof does not prove that no quorum is possible
 	timeoutReason := f.proof(t, v, 9)
 	timeoutReason.CertReason = drctypes.QuorumNotPossible
-	require.Error(t, b.AddView(v, timeoutReason, ver))
+	err = b.AddView(v, timeoutReason, ver)
+	require.ErrorIs(t, err, drctypes.ErrInvalidRequest)
+	require.NotErrorIs(t, err, ErrEquivocation)
+	// a genuine proof that no quorum is possible, against the buffered quorum result, is a changed reason
+	err = b.AddView(v, f.notPossible(t, v), ver)
+	require.ErrorIs(t, err, ErrEquivocation)
+	require.ErrorContains(t, err, "reason has changed")
 }
 
 // A proof buffered under an earlier shard round, anchor or assignment is retired before the comparison: it neither makes fresh
@@ -357,7 +383,7 @@ func TestRequestViewResolverResolvesFromTheSuppliedParentOnly(t *testing.T) {
 	}, nil)
 	require.ErrorIs(t, err, storage.ErrAssignmentHistory)
 	_, err = NewRequestViewResolver(&fakeHistory{}, crypto.SHA256, nil, nil)
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoParentSource)
 	r, err := NewRequestViewResolver(&fakeHistory{}, crypto.SHA256, func(types.PartitionID, types.ShardID) (*storage.ShardInfo, []byte, *types.InputRecord, error) {
 		return nil, nil, nil, errors.New("no parent")
 	}, nil)
