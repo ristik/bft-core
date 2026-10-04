@@ -128,7 +128,7 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 				return nil, fmt.Errorf("%w: statistics differ from technical record", ErrControlCheckpoint)
 			}
 		}
-		if err := si.resetTrustBase(shardConf); err != nil {
+		if err := si.resetTrustBase(shardConf, crypto.SHA256, shardConfHash); err != nil {
 			return nil, fmt.Errorf("initializing shard trustbase: %w", err)
 		}
 		shardState.States[shardKey] = si

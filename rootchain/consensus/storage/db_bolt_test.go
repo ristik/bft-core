@@ -296,6 +296,7 @@ func Test_BoltDB_Block(t *testing.T) {
 			key := types.PartitionShardID{PartitionID: pdr.PartitionID, ShardID: pdr.ShardID.Key()}
 			b.ShardState.States[key].nodeIDs = nil
 			b.ShardState.States[key].trustBase = nil
+			b.ShardState.States[key].requestCtx = nil
 			require.Equal(t, b, blocks[0])
 		}
 	})

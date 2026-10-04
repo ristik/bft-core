@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
@@ -332,7 +333,7 @@ func NewShardInfo(shardConf *types.PartitionDescriptionRecord, hashAlg crypto.Ha
 
 	si.resetFeeList(shardConf)
 
-	if err = si.resetTrustBase(shardConf); err != nil {
+	if err = si.resetTrustBase(shardConf, hashAlg, shardConfHash); err != nil {
 		return nil, fmt.Errorf("shard info init: %w", err)
 	}
 
@@ -408,6 +409,9 @@ type ShardInfo struct {
 
 	nodeIDs   []string // sorted list of partition node IDs
 	trustBase map[string]abcrypto.Verifier
+	// requestCtx is the immutable request quorum context derived from the installed configuration (Q2): unit-weighted in
+	// production. Like trustBase it is derived state, never serialised.
+	requestCtx *quorumweight.RequestContext
 }
 
 // shardInfoV1 is used for CBOR serialization/deserialization with toarray format.
@@ -520,7 +524,16 @@ func (si *ShardInfo) resetFeeList(shardConf *types.PartitionDescriptionRecord) {
 	si.Fees = fees
 }
 
-func (si *ShardInfo) resetTrustBase(shardConf *types.PartitionDescriptionRecord) error {
+// resetTrustBase derives the verifiers and the request quorum context from shardConf. The context is bound to committed,
+// the configuration hash the caller has authenticated for shardConf (the ShardInfo's own ShardConfHash wherever the site
+// verifies it); shardConf must hash to it under hashAlg. Every validator must be unit-weight: a non-unit configuration is
+// refused, not normalised.
+func (si *ShardInfo) resetTrustBase(shardConf *types.PartitionDescriptionRecord, hashAlg crypto.Hash, committed []byte) error {
+	reqCtx, err := quorumweight.NewUnitRequestContext(shardConf, hashAlg, committed)
+	if err != nil {
+		return fmt.Errorf("request quorum context: %w", err)
+	}
+	si.requestCtx = reqCtx
 	si.nodeIDs = make([]string, 0, len(shardConf.Validators))
 	si.trustBase = make(map[string]abcrypto.Verifier)
 	for _, v := range shardConf.Validators {
@@ -535,6 +548,9 @@ func (si *ShardInfo) resetTrustBase(shardConf *types.PartitionDescriptionRecord)
 
 	return si.IsValid()
 }
+
+// RequestContext is the immutable request quorum context of the installed configuration (nil until resetTrustBase ran).
+func (si *ShardInfo) RequestContext() *quorumweight.RequestContext { return si.requestCtx }
 
 func (si *ShardInfo) IsValid() error {
 	if n := len(si.Fees); n != len(si.nodeIDs) {
@@ -576,7 +592,7 @@ func (si *ShardInfo) nextEpoch(shardConf *types.PartitionDescriptionRecord, hash
 	}
 
 	nextSI.resetFeeList(shardConf)
-	if err = nextSI.resetTrustBase(shardConf); err != nil {
+	if err = nextSI.resetTrustBase(shardConf, hashAlg, shardConfHash); err != nil {
 		return nil, fmt.Errorf("initializing shard trustbase: %w", err)
 	}
 

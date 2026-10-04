@@ -639,7 +639,10 @@ func TestInvalidRSMTRootClaimsDoNotBlockAnotherShard(t *testing.T) {
 			signer, verifier := testsig.CreateSignerAndVerifier(t)
 			sigKey, err := verifier.MarshalPublicKey()
 			require.NoError(t, err)
-			validators := []*types.NodeInfo{{NodeID: nodeID, SigKey: sigKey}, {NodeID: nodeID2, SigKey: sigKey}}
+			signer2, verifier2 := testsig.CreateSignerAndVerifier(t)
+			sigKey2, err := verifier2.MarshalPublicKey()
+			require.NoError(t, err)
+			validators := []*types.NodeInfo{{NodeID: nodeID, SigKey: sigKey, Stake: 1}, {NodeID: nodeID2, SigKey: sigKey2, Stake: 1}}
 
 			makeShardInfo := func(id types.ShardID, root []byte) *storage.ShardInfo {
 				t.Helper()
@@ -746,7 +749,7 @@ func TestInvalidRSMTRootClaimsDoNotBlockAnotherShard(t *testing.T) {
 			second.NodeID = nodeID2
 			second.InputRecord = first.InputRecord.NewRepeatIR()
 			second.ZkProof = append([]byte(nil), first.ZkProof...)
-			require.NoError(t, second.Sign(signer))
+			require.NoError(t, second.Sign(signer2))
 			require.NoError(t, node.onBlockCertificationRequest(t.Context(), &first))
 			require.NoError(t, node.onBlockCertificationRequest(t.Context(), &second))
 			require.Len(t, certified, 1, "the other shard reaches certification in the same node window")
@@ -818,9 +821,12 @@ func Test_onBlockCertificationRequest(t *testing.T) {
 	signer, verifier := testsig.CreateSignerAndVerifier(t)
 	sigKey, err := verifier.MarshalPublicKey()
 	require.NoError(t, err)
+	signer2, verifier2 := testsig.CreateSignerAndVerifier(t)
+	sigKey2, err := verifier2.MarshalPublicKey()
+	require.NoError(t, err)
 	shardConf.Validators = []*types.NodeInfo{
-		{NodeID: nodeID, SigKey: sigKey},
-		{NodeID: nodeID2, SigKey: sigKey},
+		{NodeID: nodeID, SigKey: sigKey, Stake: 1},
+		{NodeID: nodeID2, SigKey: sigKey2, Stake: 1},
 	}
 	si, err := storage.NewShardInfo(shardConf, crypto.SHA256)
 	require.NoError(t, err)
@@ -1005,7 +1011,7 @@ func Test_onBlockCertificationRequest(t *testing.T) {
 		// add valid request from another node, should reach consensus...
 		cr := validCertRequest
 		cr.NodeID = nodeID2
-		require.NoError(t, cr.Sign(signer))
+		require.NoError(t, cr.Sign(signer2))
 		// ...but CM returns error
 		err = node.onBlockCertificationRequest(t.Context(), &cr)
 		require.ErrorIs(t, err, expErr)
@@ -1050,7 +1056,7 @@ func Test_onBlockCertificationRequest(t *testing.T) {
 		// second request
 		cr := validCertRequest
 		cr.NodeID = nodeID2
-		require.NoError(t, cr.Sign(signer))
+		require.NoError(t, cr.Sign(signer2))
 		err = node.onBlockCertificationRequest(t.Context(), &cr)
 		require.NoError(t, err)
 		require.EqualValues(t, 1, certReqCalls, "expected request to be sent to CM")
@@ -1109,7 +1115,7 @@ func Test_onBlockCertificationRequest(t *testing.T) {
 		cr := validCertRequest
 		cr.BlockSize++
 		cr.NodeID = nodeID2
-		require.NoError(t, cr.Sign(signer))
+		require.NoError(t, cr.Sign(signer2))
 		err = node.onBlockCertificationRequest(t.Context(), &cr)
 		require.NoError(t, err)
 		require.EqualValues(t, 1, certReqCalls, "expected request to certify")
@@ -1295,7 +1301,7 @@ func validCertificationResponse(t *testing.T) certification.CertificationRespons
 
 func newMockShardInfo(t *testing.T, nodeID string, nodeSigningPubKey []byte, certResp certification.CertificationResponse) *storage.ShardInfo {
 	shardConf := &types.PartitionDescriptionRecord{
-		Validators: []*types.NodeInfo{{NodeID: nodeID, SigKey: nodeSigningPubKey}},
+		Validators: []*types.NodeInfo{{NodeID: nodeID, SigKey: nodeSigningPubKey, Stake: 1}},
 	}
 	si, err := storage.NewShardInfo(shardConf, crypto.SHA256)
 	require.NoError(t, err)
