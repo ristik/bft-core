@@ -774,3 +774,25 @@ func TestD4_ReservedControlNotShard(t *testing.T) {
 	assertIs(t, e, ErrD4Snapshot)
 	_ = base.PartitionID(1)
 }
+
+// InstallEpochBundle projects the successor body with NewTrustBase, which sums stakes unchecked; the weight caps are
+// enforced earlier, by the Validate inside DeriveEpochGenesis. This pins that order: an over-cap body never derives a
+// genesis, so it cannot reach the projection.
+func TestD4_DeriveEpochGenesisValidatesWeightsBeforeProjection(t *testing.T) {
+	oldHash := bytes.Repeat([]byte{0x71}, 32)
+	link, err := FirstV2PredecessorHash(V1Anchor{Version: 1, NetworkID: 3, Epoch: 1, HashIncludingSigs: oldHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	members := d3Assignment()
+	members[0].Weight = MaxMemberWeight + 1
+	body := TrustBaseBodyV2{Version: 2, NetworkID: 3, Epoch: 2, EarliestActivation: 7,
+		Members: members, RootThreshold: 1, PredecessorHash: link}
+	id := body.Identity()
+	record := OrderedHandoffRecord{Network: 3, Epoch: 1, OrderedRound: 4, ActivationRound: 7,
+		PredecessorBodyID: oldHash, NextBodyID: id[:], FrozenID: bytes.Repeat([]byte{2}, 32),
+		SuccessorTRHash: bytes.Repeat([]byte{3}, 32), Kind: "commit"}
+	if _, err := DeriveEpochGenesis(VerifiedHandoff{Record: record}, body); !errors.Is(err, ErrD4Anchor) {
+		t.Fatalf("an over-cap member weight must be refused before projection: %v", err)
+	}
+}

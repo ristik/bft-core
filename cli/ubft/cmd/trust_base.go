@@ -12,6 +12,8 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 	"github.com/unicitynetwork/bft-go-base/util"
+
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 )
 
 const trustBaseFileName = "trust-base.json"
@@ -26,7 +28,7 @@ type (
 
 		NetworkID         uint16
 		NodeInfoFiles     []string // paths to node info files
-		QuorumThreshold   uint64   // optional custom quorum threshold (default len(nodes)*2/3 + 1)
+		QuorumThreshold   uint64   // optional custom quorum threshold (default floor(2*total_stake/3)+1)
 		Epoch             uint64
 		EpochStart        uint64
 		PreviousTrustBase string // path to previous trust base file
@@ -72,7 +74,7 @@ func trustBaseGenerateCmd(baseFlags *baseFlags) *cobra.Command {
 	if err := cmd.MarkFlagRequired("node-info"); err != nil {
 		panic(err)
 	}
-	cmd.Flags().Uint64Var(&flags.QuorumThreshold, "quorum-threshold", 0, "define custom quorum threshold (default: len(nodes)*2/3+1")
+	cmd.Flags().Uint64Var(&flags.QuorumThreshold, "quorum-threshold", 0, "define custom quorum threshold (default: floor(2*total_stake/3)+1)")
 	cmd.Flags().Uint64Var(&flags.Epoch, "epoch", 1, "epoch assigned to this trust base, must be "+
 		"one greater than the epoch of the previous trust base. The genesis epoch must be 1.")
 	cmd.Flags().Uint64Var(&flags.EpochStart, "epoch-start", 0, "root round in which this trust base is activated")
@@ -105,7 +107,7 @@ func trustBaseGenerate(flags *trustBaseGenerateFlags) error {
 		return fmt.Errorf("failed to read node info files: %w", err)
 	}
 
-	trustBase, err := types.NewTrustBase(types.NetworkID(flags.NetworkID), nodes,
+	trustBase, err := quorumweight.NewTrustBase(types.NetworkID(flags.NetworkID), nodes,
 		types.WithQuorumThreshold(flags.QuorumThreshold),
 		types.WithEpoch(flags.Epoch),
 		types.WithEpochStart(flags.EpochStart),
@@ -206,7 +208,7 @@ func trustBaseVerify(flags *trustBaseVerifyFlags) error {
 
 	var prev *types.RootTrustBaseV1
 	for _, trustBase := range trustBases {
-		if err := trustBase.Verify(prev); err != nil {
+		if err := quorumweight.VerifyTrustBase(trustBase, prev); err != nil {
 			return fmt.Errorf("failed to verify trust base: %w", err)
 		}
 		prev = trustBase

@@ -25,6 +25,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -373,7 +374,7 @@ func verify(ctx context.Context, c Context, sr storedRecord) (Loaded, error) {
 	if err != nil {
 		return Loaded{}, fmt.Errorf("%w: root epoch %d: %v", ErrCertificate, uc.GetRootEpoch(), err)
 	}
-	if err := uc.Verify(tb, gocrypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
+	if err := uc.Verify(quorumweight.Checked(tb), gocrypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
 		return Loaded{}, fmt.Errorf("%w: %v", ErrCertificate, err)
 	}
 	trHash, err := tr.Hash()

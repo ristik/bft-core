@@ -3,10 +3,12 @@ package storage
 import (
 	"bytes"
 	"crypto"
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/trustactivation"
@@ -388,5 +390,50 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err = f.store.Add(block, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
+	})
+}
+
+// ConfigureHandoffAuthority authenticates the genesis trust base through the checked quorum: go-base's own Verify skips
+// a signature of a non-member and wraps a stake sum, both of which would otherwise install the base.
+func TestConfigureHandoffAuthorityVerifiesThroughTheCheckedQuorum(t *testing.T) {
+	clone := func(tb *types.RootTrustBaseV1) *types.RootTrustBaseV1 {
+		raw, err := types.Cbor.Marshal(tb)
+		require.NoError(t, err)
+		var out types.RootTrustBaseV1
+		require.NoError(t, types.Cbor.Unmarshal(raw, &out))
+		return &out
+	}
+	t.Run("an added unknown identity", func(t *testing.T) {
+		f := newAuthorizedFixture(t)
+		tb := clone(f.store.handoffAuth.(*v1HandoffAuthority).trust)
+		stranger, err := abcrypto.NewInMemorySecp256K1Signer()
+		require.NoError(t, err)
+		require.NoError(t, tb.Sign("stranger", stranger))
+		require.NoError(t, tb.Verify(nil), "go-base alone accepts the base carrying the stranger's signature")
+		err = profileStore(t).ConfigureHandoffAuthority(tb)
+		require.ErrorIs(t, err, ErrHandoffRecord)
+		require.ErrorIs(t, err, quorumweight.ErrUnknownSigner)
+	})
+	t.Run("a member-weight sum that wraps", func(t *testing.T) {
+		var nodes []*types.NodeInfo
+		signers := map[string]abcrypto.Signer{}
+		for _, id := range []string{"a", "b"} {
+			s, err := abcrypto.NewInMemorySecp256K1Signer()
+			require.NoError(t, err)
+			v, err := s.Verifier()
+			require.NoError(t, err)
+			pub, err := v.MarshalPublicKey()
+			require.NoError(t, err)
+			signers[id] = s
+			nodes = append(nodes, &types.NodeInfo{NodeID: id, SigKey: pub, Stake: math.MaxUint64 - 1})
+		}
+		tb := &types.RootTrustBaseV1{Version: 1, NetworkID: 5, Epoch: 1, RootNodes: nodes, QuorumThreshold: 5, Signatures: map[string]hex.Bytes{}}
+		for id, s := range signers {
+			require.NoError(t, tb.Sign(id, s))
+		}
+		require.NoError(t, tb.Verify(nil), "go-base wraps the sum and still reaches the threshold")
+		err := profileStore(t).ConfigureHandoffAuthority(tb)
+		require.ErrorIs(t, err, ErrHandoffRecord)
+		require.ErrorIs(t, err, quorumweight.ErrWeightOverflow)
 	})
 }

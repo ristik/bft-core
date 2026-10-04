@@ -25,6 +25,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/logger"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -759,6 +760,10 @@ func (x *ConsensusManager) onVoteMsg(ctx context.Context, vote *abdrc.VoteMsg) e
 	if err := vote.Verify(x.trustBaseStore); err != nil {
 		return fmt.Errorf("invalid vote: %w", err)
 	}
+	// The author was authenticated under the trust base of the vote's epoch; its weight is taken from the current one.
+	if err := x.checkWeightEpoch(vote.VoteInfo.Epoch); err != nil {
+		return err
+	}
 	if x.epochAnchor != nil {
 		if vote.VoteInfo.Epoch != x.epochAnchor.Epoch ||
 			(vote.Anchor != nil && !x.matchesInstalledAnchor(vote.Anchor)) ||
@@ -785,11 +790,11 @@ func (x *ConsensusManager) onVoteMsg(ctx context.Context, vote *abdrc.VoteMsg) e
 		// NB! it seems that it's quite common that votes arrive before proposal and going into recovery
 		// too early is counterproductive... maybe do not trigger recovery here at all - if we're lucky
 		// proposal will arrive on time, otherwise round will likely TO anyway?
-		var bufferedWeight uint64
-		for author := range x.voteBuffer {
-			bufferedWeight += authorWeight(x.trustBase.Load(), author)
+		bufferedWeight, err := x.bufferedWeight()
+		if err != nil {
+			return fmt.Errorf("buffered vote weight: %w", err)
 		}
-		if bufferedWeight >= x.trustBase.Load().GetQuorumThreshold() {
+		if reached(bufferedWeight, x.voteQuorumInfo()) {
 			err := fmt.Errorf("have received vote weight %d but no proposal, entering recovery", bufferedWeight)
 			if e := x.sendRecoveryRequests(ctx, vote); e != nil {
 				err = errors.Join(err, fmt.Errorf("sending recovery requests failed: %w", e))
@@ -836,6 +841,39 @@ func (x *ConsensusManager) onVoteMsg(ctx context.Context, vote *abdrc.VoteMsg) e
 	return nil
 }
 
+// bufferedVoteWeight is the weight of the authors of the buffered future-round votes, under the same weighting as QC
+// formation: it must be taken from the profile-aware quorum info, not from the raw trust base.
+func bufferedVoteWeight(buffer map[string]*abdrc.VoteMsg, quorum QuorumInfo) (uint64, error) {
+	var tally quorumweight.Tally
+	for author := range buffer {
+		w, err := authorWeight(quorum, author)
+		if err == nil {
+			err = tally.Add(author, w)
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+	return tally.Weight(), nil
+}
+
+// bufferedWeight weighs the buffered votes with the manager's profile-aware quorum info (see voteQuorumInfo).
+func (x *ConsensusManager) bufferedWeight() (uint64, error) {
+	return bufferedVoteWeight(x.voteBuffer, x.voteQuorumInfo())
+}
+
+// ErrVoteEpoch is returned for a vote or timeout vote whose epoch is not the epoch the voting weights are taken from.
+var ErrVoteEpoch = errors.New("vote epoch differs from the weighting epoch")
+
+// checkWeightEpoch refuses a vote for another epoch than the current trust base: its author would be weighed by a
+// committee that did not authenticate it (an author of the previous epoch is unknown, or has another weight, here).
+func (x *ConsensusManager) checkWeightEpoch(epoch uint64) error {
+	if tb := x.trustBase.Load(); tb != nil && tb.Epoch != epoch {
+		return fmt.Errorf("%w: message epoch %d, trust base epoch %d", ErrVoteEpoch, epoch, tb.Epoch)
+	}
+	return nil
+}
+
 func (x *ConsensusManager) voteQuorumInfo() QuorumInfo {
 	trust := x.trustBase.Load()
 	if x.params.NetworkProfileVersion == storage.ProfileHandoff {
@@ -856,6 +894,9 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	// verify signature on vote
 	if err := vote.Verify(x.trustBaseStore); err != nil {
 		return fmt.Errorf("invalid timeout vote: %w", err)
+	}
+	if err := x.checkWeightEpoch(vote.Timeout.Epoch); err != nil {
+		return err
 	}
 	if err := x.validateTimeoutParent(vote.Timeout); err != nil {
 		return err

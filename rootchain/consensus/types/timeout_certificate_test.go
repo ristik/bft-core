@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -165,7 +167,8 @@ func TestTimeoutCert_Verify(t *testing.T) {
 			break
 		}
 		err := tc.Verify(sb.trustBaseStore)
-		require.EqualError(t, err, `quorum requires 3 votes but certificate has 2`)
+		require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached)
+		require.ErrorContains(t, err, "quorum requires 3 votes but certificate has 2")
 	})
 
 	t.Run("invalid signature", func(t *testing.T) {

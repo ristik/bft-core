@@ -9,6 +9,7 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 )
 
@@ -281,7 +282,7 @@ func verifyContinuity(ctx context.Context, ev AnchorEvidence, c AnchorEvidenceCo
 		if err != nil {
 			return fmt.Errorf("%w: root epoch %d: %w", ErrEvidenceUnauthenticated, uc.GetRootEpoch(), err)
 		}
-		if err := uc.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, expected); err != nil {
+		if err := uc.Verify(quorumweight.Checked(tb), crypto.SHA256, c.PartitionID, c.ShardID, expected); err != nil {
 			return fmt.Errorf("%w: %w", ErrEvidenceUnauthenticated, err)
 		}
 		// The epoch comparison comes LAST, AFTER the signature. It used to come first, which meant

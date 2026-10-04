@@ -95,7 +95,7 @@ func TestQuorumCert_Verify(t *testing.T) {
 			qc.Signatures[signerID] = []byte{1, 2, 3}
 			break
 		}
-		// the invalid signature must trigger error
+		// the invalid signature of a known member is skipped as under v1 (D3 compatibility), so the quorum is not reached
 		require.ErrorContains(t, qc.Verify(rootTrust), "failed to verify quorum signatures: quorum not reached, signed_votes=2 quorum_threshold=3")
 	})
 }

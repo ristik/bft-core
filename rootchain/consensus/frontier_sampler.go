@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -116,8 +117,11 @@ func newFrontierSampler(c FrontierSamplerConfig, reader frontierSafetyReader) (*
 		}
 		seen[n.NodeID] = struct{}{}
 	}
-	n := uint64(len(trust.RootNodes))
-	if trust.QuorumThreshold == 0 || trust.QuorumThreshold > n || trust.QuorumThreshold <= 2*n/3 {
+	n, err := quorumweight.TotalWeight(trust.RootNodes)
+	if err != nil {
+		return nil, fmt.Errorf("frontier root weight: %w", err)
+	}
+	if min, err := quorumweight.Threshold(n); err != nil || trust.QuorumThreshold < min || trust.QuorumThreshold > n {
 		return nil, errors.New("frontier quorum must satisfy 2N/3 < q <= N")
 	}
 	ownedEncoding, err := types.Cbor.Marshal(&trust)
@@ -269,7 +273,7 @@ func (x *ConsensusManager) buildFrontierSample(req FrontierRequest) (*FrontierSa
 		view.LastCR.UC.InputRecord.Epoch > view.LastCR.Technical.Epoch {
 		return nil, fmt.Errorf("%w: LastCR profile mismatch", ErrFrontierUnavailable)
 	}
-	if err := view.LastCR.UC.Verify(s.trust, x.params.HashAlgorithm, req.PartitionID, req.ShardID, confHash); err != nil {
+	if err := view.LastCR.UC.Verify(quorumweight.Checked(s.trust), x.params.HashAlgorithm, req.PartitionID, req.ShardID, confHash); err != nil {
 		return nil, fmt.Errorf("%w: LastCR authentication: %v", ErrFrontierUnavailable, err)
 	}
 	safety, err := s.reader.ReadSafetySnapshot()

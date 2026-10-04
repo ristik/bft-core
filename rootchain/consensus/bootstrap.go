@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/m2contract"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
@@ -92,7 +93,7 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	for i, member := range body.Members {
 		nodes[i] = &basetypes.NodeInfo{NodeID: member.NodeID, SigKey: bytes.Clone(member.ConsensusKey), Stake: member.Weight}
 	}
-	projected, err := basetypes.NewTrustBase(old.NetworkID, nodes, basetypes.WithEpoch(g.Epoch),
+	projected, err := quorumweight.NewTrustBase(old.NetworkID, nodes, basetypes.WithEpoch(g.Epoch),
 		basetypes.WithEpochStart(g.Start), basetypes.WithQuorumThreshold(body.RootThreshold), basetypes.WithPreviousTrustBaseHash(oldID))
 	if err != nil {
 		return nil, fmt.Errorf("project successor root committee: %w", err)
