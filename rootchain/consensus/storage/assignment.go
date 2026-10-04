@@ -170,11 +170,31 @@ func DeriveActivatedPDR(record evmroot.OrderedHandoffRecord, body evmroot.TrustB
 	return pdr, provenance, nil
 }
 
+// ErrRecordNotCommitted refuses a handoff record that is not a verified committed record (a freeze, an abort, a malformed record,
+// or one the committed history does not vouch for) as the source of an activation. It is also ErrAssignmentHistory.
+var ErrRecordNotCommitted error = &requestSentinel{"handoff record is not a verified committed record", ErrAssignmentHistory}
+
+// CommittedHandoffs is the committed consensus history that vouches for a handoff record: the commit proof and the predecessor
+// linkage against an established anchor. The record's contents agreeing with its body and candidate is not that.
+type CommittedHandoffs interface {
+	VerifyCommitted(record evmroot.OrderedHandoffRecord) error
+}
+
 // ActivationFromHandoff authenticates a committed handoff (record, successor body and candidate preimage verified against each
 // other by DeriveActivatedPDR) and returns the assignment it activates at record.ActivationRound, with the root identity that
 // authorises it and the successor technical record digest it committed. Coupling is rechecked where the configuration
 // requires it. Production policy is unit; a weighted policy is not reachable from here before Q3.
-func ActivationFromHandoff(record evmroot.OrderedHandoffRecord, body evmroot.TrustBaseBodyV2, preimage, frozenParent []byte, hashAlg crypto.Hash, version uint64) (*RequestActivation, error) {
+func ActivationFromHandoff(committed CommittedHandoffs, record evmroot.OrderedHandoffRecord, body evmroot.TrustBaseBodyV2, preimage, frozenParent []byte, hashAlg crypto.Hash, version uint64) (*RequestActivation, error) {
+	// only a verified committed record mints an activation: checked before anything is derived from its contents
+	if committed == nil {
+		return nil, fmt.Errorf("%w: no committed history", ErrRecordNotCommitted)
+	}
+	if !record.Valid() {
+		return nil, fmt.Errorf("%w: kind %q", ErrRecordNotCommitted, record.Kind)
+	}
+	if err := committed.VerifyCommitted(record); err != nil {
+		return nil, errors.Join(ErrRecordNotCommitted, err)
+	}
 	pdr, _, err := DeriveActivatedPDR(record, body, preimage, frozenParent)
 	if err != nil {
 		return nil, err

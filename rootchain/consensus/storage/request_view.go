@@ -165,6 +165,15 @@ func NewRequestSnapshot(network uint64, hashAlg crypto.Hash, parent *ShardInfo, 
 			return nil, fmt.Errorf("%w: activation %d does not follow activation %d", ErrAssignmentHistory, i, i-1)
 		}
 	}
+	// the network is authenticated by the history and the previous UC, never asserted beside them
+	for i, a := range chain {
+		if uint64(a.pdr.NetworkID) != network {
+			return nil, fmt.Errorf("%w: snapshot network %d, activation %d is of network %d", quorumweight.ErrRequestContext, network, i, a.pdr.NetworkID)
+		}
+	}
+	if seal := parent.LastCR.UC.UnicitySeal; seal == nil || uint64(seal.NetworkID) != network {
+		return nil, fmt.Errorf("%w: snapshot network %d, previous UC is of another network or unsealed", quorumweight.ErrRequestContext, network)
+	}
 	idx := slices.IndexFunc(chain, func(a *RequestActivation) bool { return a.pdr.Epoch == parent.TR.Epoch })
 	if idx < 0 {
 		return nil, fmt.Errorf("%w: no activation for shard epoch %d", ErrAssignmentHistory, parent.TR.Epoch)
@@ -190,11 +199,18 @@ func NewRequestSnapshot(network uint64, hashAlg crypto.Hash, parent *ShardInfo, 
 	frozen.Fees, frozen.Stat = maps.Clone(parent.Fees), parent.Stat
 	frozen.PrevEpochFees, frozen.PrevEpochStat = bytes.Clone(parent.PrevEpochFees), bytes.Clone(parent.PrevEpochStat)
 	frozen.RootHash, frozen.IR, frozen.LastCR = bytes.Clone(parent.RootHash), nil, nil
+	frozen.TR, frozen.ShardConfHash = cloneTR(parent.TR), bytes.Clone(parent.ShardConfHash)
+	frozen.PartitionParams = maps.Clone(parent.PartitionParams)
 	s := &RequestSnapshot{frozen: &frozen, network: network, partition: parent.PartitionID, shard: parent.ShardID, parentID: bytes.Clone(parentID), hashAlg: hashAlg,
-		chain: slices.Clone(chain), parent: shardParent{tr: parent.TR, lastTR: parent.LastCR.Technical, uc: uc, ucDigest: ucDigest,
+		chain: slices.Clone(chain), parent: shardParent{tr: cloneTR(parent.TR), lastTR: cloneTR(parent.LastCR.Technical), uc: uc, ucDigest: ucDigest,
 			rootHash: bytes.Clone(parent.RootHash), confHash: bytes.Clone(parent.ShardConfHash), pending: pend}}
-	s.parent.tr.StatHash, s.parent.tr.FeeHash = bytes.Clone(parent.TR.StatHash), bytes.Clone(parent.TR.FeeHash)
 	return s, nil
+}
+
+// cloneTR is a technical record owning its hash bytes.
+func cloneTR(tr certification.TechnicalRecord) certification.TechnicalRecord {
+	tr.StatHash, tr.FeeHash = bytes.Clone(tr.StatHash), bytes.Clone(tr.FeeHash)
+	return tr
 }
 
 func cloneCBOR[T any](v *T) (*T, error) {
@@ -310,9 +326,7 @@ func (v *RequestRoundView) PDR() (*types.PartitionDescriptionRecord, error) { re
 
 // ExpectedTR is the technical record every request of the round must carry the round and epoch of.
 func (v *RequestRoundView) ExpectedTR() certification.TechnicalRecord {
-	tr := v.expectedTR
-	tr.StatHash, tr.FeeHash = bytes.Clone(tr.StatHash), bytes.Clone(tr.FeeHash)
-	return tr
+	return cloneTR(v.expectedTR)
 }
 
 // PreviousUC returns a copy of the shard's previous certified UC.
@@ -413,7 +427,7 @@ func expectedTR(snap *RequestSnapshot, idx int) (certification.TechnicalRecord, 
 	act, p := snap.chain[idx], snap.parent
 	switch {
 	case idx > 0 && p.lastTR.Epoch+1 == act.pdr.Epoch:
-		tr := p.tr
+		tr := cloneTR(p.tr)
 		if tr.Epoch+1 == act.pdr.Epoch {
 			derived, err := successorTechnicalRecordWith(snap.frozen, act.pdr, snap.hashAlg, resetMembers)
 			if err != nil {
@@ -427,7 +441,7 @@ func expectedTR(snap *RequestSnapshot, idx int) (certification.TechnicalRecord, 
 		}
 		return tr, nil
 	case p.lastTR.Epoch == act.pdr.Epoch:
-		return p.lastTR, nil
+		return cloneTR(p.lastTR), nil
 	}
 	return certification.TechnicalRecord{}, fmt.Errorf("%w: shard epoch %d is not that of the assignment in force (%d)", ErrStaleRequestContext, p.lastTR.Epoch, act.pdr.Epoch)
 }
@@ -435,7 +449,19 @@ func expectedTR(snap *RequestSnapshot, idx int) (certification.TechnicalRecord, 
 // ValidRequest is the admission check of one block certification request under the view: membership and signature under the
 // context's own key for that node, the shard, and the expected round, epoch, state hash and timestamp. It is the same check at
 // collection, in a follower's proof verification and at execution.
+//
+// A signer that is not a member and a bad signature keep their own identities; every other refusal (a nil or malformed request,
+// another shard, stale continuity) also matches rctypes.ErrInvalidRequest, preserving the underlying error and its continuity
+// identity (ErrStaleRequestContext).
 func (v *RequestRoundView) ValidRequest(req *certification.BlockCertificationRequest) error {
+	err := v.validRequest(req)
+	if err == nil || errors.Is(err, ErrNodeNotInTrustBase) || errors.Is(err, quorumweight.ErrInvalidSignature) {
+		return err
+	}
+	return malformedRequest{err}
+}
+
+func (v *RequestRoundView) validRequest(req *certification.BlockCertificationRequest) error {
 	if req == nil {
 		return fmt.Errorf("invalid certification request: %w", certification.ErrBlockCertificationRequestIsNil)
 	}

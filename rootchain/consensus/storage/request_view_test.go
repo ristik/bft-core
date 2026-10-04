@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"crypto"
+	"errors"
 	"sort"
 	"testing"
 	"time"
@@ -664,4 +665,129 @@ func TestHistoryMustBeginAtAnAnchorAndATimeoutProofOfAnotherShardIsRefused(t *te
 	require.NoError(t, err)
 	_, err = v.VerifyIRChangeReq(&rctypes.IRChangeReq{Partition: 2, CertReason: rctypes.T2Timeout}, t2Rounds)
 	require.ErrorIs(t, err, rctypes.ErrInvalidRequest, "an empty timeout proof names its shard, and it is not this view's")
+}
+
+// The snapshot's network is bound to its authenticated history and previous UC, never asserted beside them.
+func TestSnapshotNetworkMustMatchTheAuthenticatedHistory(t *testing.T) {
+	s := newScenario(t, []uint64{1, 1, 1, 1}, []uint64{1, 1, 1, 1}, nil)
+	_, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, s.parent, s.parentID, nil, s.anchor, s.succ)
+	require.NoError(t, err, "control")
+
+	// only the network argument changes
+	snap, err := NewRequestSnapshot(fxNetwork+1, crypto.SHA256, s.parent, s.parentID, nil, s.anchor, s.succ)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
+	require.Nil(t, snap)
+
+	// only the previous UC's network changes
+	other := *s.parent
+	lastCR := *s.parent.LastCR
+	seal := *lastCR.UC.UnicitySeal
+	seal.NetworkID++
+	lastCR.UC.UnicitySeal = &seal
+	other.LastCR = &lastCR
+	snap, err = NewRequestSnapshot(fxNetwork, crypto.SHA256, &other, s.parentID, nil, s.anchor, s.succ)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
+	require.Nil(t, snap)
+
+	// an unsealed previous UC has no network to bind
+	unsealed := *s.parent
+	noSeal := *s.parent.LastCR
+	noSeal.UC.UnicitySeal = nil
+	unsealed.LastCR = &noSeal
+	_, err = NewRequestSnapshot(fxNetwork, crypto.SHA256, &unsealed, s.parentID, nil, s.anchor, s.succ)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
+
+	// only an activation's network changes
+	foreign := *s.pdr0
+	foreign.NetworkID = fxNetwork + 1
+	h, err := foreign.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	a := *s.anchor
+	a.pdr, a.confHash = &foreign, h
+	_, err = NewRequestSnapshot(fxNetwork, crypto.SHA256, s.parent, s.parentID, nil, &a)
+	require.Error(t, err)
+	require.True(t, errors.Is(err, quorumweight.ErrRequestContext) || errors.Is(err, ErrAssignmentHistory))
+}
+
+// Certified technical records are owned: mutating the caller's copy after the snapshot or view was built changes neither, for a
+// historical (non-boundary) view, a boundary view and a fresh resolution.
+func TestViewOwnsCertifiedTechnicalRecords(t *testing.T) {
+	s := newScenario(t, []uint64{1, 1, 1, 1}, []uint64{1, 1, 1, 1}, nil)
+	snap := s.snapshot(s.parent, nil)
+	hist := s.mustResolve(snap, fxActivate-1, 3, fxBody0, PurposeCertify)
+	key, tr := hist.ViewKey(), hist.ExpectedTR()
+	boundary := s.mustResolve(snap, fxActivate, 4, fxBody1, PurposeExecute)
+	bKey, bTR := boundary.ViewKey(), boundary.ExpectedTR()
+
+	s.parent.LastCR.Technical.StatHash[0] ^= 0xFF
+	s.parent.LastCR.Technical.FeeHash[0] ^= 0xFF
+	s.parent.TR.StatHash[0] ^= 0xFF
+	s.parent.TR.FeeHash[0] ^= 0xFF
+	require.Equal(t, tr, hist.ExpectedTR(), "the historical view does not alias the caller's record")
+	require.Equal(t, key, hist.ViewKey())
+	require.Equal(t, bTR, boundary.ExpectedTR())
+	require.Equal(t, bKey, boundary.ViewKey())
+	again := s.mustResolve(snap, fxActivate-1, 3, fxBody0, PurposeCertify)
+	require.Equal(t, key, again.ViewKey(), "re-resolution from the same snapshot is unchanged")
+	require.Equal(t, tr, again.ExpectedTR())
+
+	// the getter's copy is the caller's too
+	got := hist.ExpectedTR()
+	got.StatHash[0] ^= 0xFF
+	require.Equal(t, tr, hist.ExpectedTR())
+}
+
+// Direct admission carries ErrInvalidRequest on malformed and continuity refusals, keeps the underlying and continuity
+// identities, and leaves the unknown-signer and bad-signature identities separate.
+func TestViewAdmissionSentinels(t *testing.T) {
+	s := newScenario(t, []uint64{1, 1, 1, 1}, []uint64{1, 1, 1, 1}, nil)
+	v := s.mustResolve(s.snapshot(s.parent, nil), fxActivate-1, 3, fxBody0, PurposeCertify)
+	require.NoError(t, v.ValidRequest(s.request(v, 0, 0, 1)), "control")
+
+	t.Run("nil request", func(t *testing.T) {
+		err := v.ValidRequest(nil)
+		require.ErrorIs(t, err, rctypes.ErrInvalidRequest)
+		require.ErrorIs(t, err, certification.ErrBlockCertificationRequestIsNil)
+	})
+	t.Run("nil input record", func(t *testing.T) {
+		req := s.request(v, 0, 0, 1)
+		req.InputRecord = nil
+		err := v.ValidRequest(req)
+		require.ErrorIs(t, err, rctypes.ErrInvalidRequest)
+		require.ErrorIs(t, err, types.ErrInputRecordIsNil)
+	})
+	t.Run("another shard", func(t *testing.T) {
+		req := s.request(v, 0, 0, 1)
+		req.PartitionID = 2
+		require.NoError(t, req.Sign(s.f.nodes[0].Signer))
+		require.ErrorIs(t, v.ValidRequest(req), rctypes.ErrInvalidRequest)
+	})
+	for name, mutate := range map[string]func(*certification.BlockCertificationRequest){
+		"round":     func(r *certification.BlockCertificationRequest) { r.InputRecord.RoundNumber++ },
+		"epoch":     func(r *certification.BlockCertificationRequest) { r.InputRecord.Epoch++ },
+		"state":     func(r *certification.BlockCertificationRequest) { r.InputRecord.PreviousHash = []byte("other") },
+		"timestamp": func(r *certification.BlockCertificationRequest) { r.InputRecord.Timestamp++ },
+	} {
+		t.Run("continuity "+name, func(t *testing.T) {
+			req := s.request(v, 0, 0, 1)
+			mutate(req)
+			require.NoError(t, req.Sign(s.f.nodes[0].Signer))
+			err := v.ValidRequest(req)
+			require.ErrorIs(t, err, rctypes.ErrInvalidRequest)
+			require.ErrorIs(t, err, ErrStaleRequestContext)
+		})
+	}
+	t.Run("unknown signer keeps its identity", func(t *testing.T) {
+		req := s.request(v, 0, 0, 1)
+		req.NodeID = s.f.id(5)
+		err := v.ValidRequest(req)
+		require.ErrorIs(t, err, ErrNodeNotInTrustBase)
+		require.NotErrorIs(t, err, rctypes.ErrInvalidRequest)
+	})
+	t.Run("bad signature keeps its identity", func(t *testing.T) {
+		req := s.request(v, 0, 1, 1) // signed with another member's key
+		err := v.ValidRequest(req)
+		require.ErrorIs(t, err, quorumweight.ErrInvalidSignature)
+		require.NotErrorIs(t, err, rctypes.ErrInvalidRequest)
+	})
 }

@@ -101,16 +101,25 @@ func TestVerifyIRChangeReqViewTimeoutIsElapsedRounds(t *testing.T) {
 	const t2 = 6 // uint64(2500ms / 450ms) + 1
 	timeout := &abtypes.IRChangeReq{Partition: 1, CertReason: abtypes.T2Timeout}
 
-	early := newViewTarget(t, 10+t2-1, storage.PurposeTimeout)
-	_, err = ver.VerifyIRChangeReqView(early.view, timeout)
-	require.Error(t, err)
 	due := newViewTarget(t, 10+t2, storage.PurposeTimeout)
 	res, err := ver.VerifyIRChangeReqView(due.view, timeout)
-	require.NoError(t, err)
+	require.NoError(t, err, "control: the due timeout with an empty proof is accepted")
 	require.NotNil(t, res.IR)
-	_, err = ver.VerifyIRChangeReqView(due.view, &abtypes.IRChangeReq{Partition: 1, CertReason: abtypes.T2Timeout,
-		Requests: []*certification.BlockCertificationRequest{due.request(t, 0)}})
-	require.Error(t, err, "a timeout carries no requests")
+
+	t.Run("premature timeout", func(t *testing.T) {
+		early := newViewTarget(t, 10+t2-1, storage.PurposeTimeout)
+		res, err := ver.VerifyIRChangeReqView(early.view, timeout)
+		require.ErrorIs(t, err, abtypes.ErrInvalidRequest)
+		require.ErrorContains(t, err, "timeout proof")
+		require.Nil(t, res)
+	})
+	t.Run("timeout proof with requests", func(t *testing.T) {
+		res, err := ver.VerifyIRChangeReqView(due.view, &abtypes.IRChangeReq{Partition: 1, CertReason: abtypes.T2Timeout,
+			Requests: []*certification.BlockCertificationRequest{due.request(t, 0)}})
+		require.ErrorIs(t, err, abtypes.ErrInvalidRequest)
+		require.ErrorContains(t, err, "proof contains requests")
+		require.Nil(t, res)
+	})
 }
 
 func TestVerifyIRChangeReqViewRefusesTheControlPartitionInProfile2(t *testing.T) {

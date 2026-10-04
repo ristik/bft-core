@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -183,7 +184,7 @@ func TestActivationFromHandoffAuthenticatesTheCommittedRecord(t *testing.T) {
 	b := f.build(t, f.candidate(t))
 	record := b.freeze
 	record.Kind = "commit"
-	a, err := ActivationFromHandoff(record, b.body, b.preimage, f.parent, crypto.SHA256, fxVersion)
+	a, err := ActivationFromHandoff(vouches{}, record, b.body, b.preimage, f.parent, crypto.SHA256, fxVersion)
 	require.NoError(t, err)
 	require.Equal(t, record.ActivationRound, a.start)
 	require.Equal(t, record.Epoch+1, a.rootEpoch)
@@ -193,8 +194,43 @@ func TestActivationFromHandoffAuthenticatesTheCommittedRecord(t *testing.T) {
 
 	wrong := record
 	wrong.NextBodyID = bytes.Repeat([]byte{2}, 32)
-	_, err = ActivationFromHandoff(wrong, b.body, b.preimage, f.parent, crypto.SHA256, fxVersion)
+	_, err = ActivationFromHandoff(vouches{}, wrong, b.body, b.preimage, f.parent, crypto.SHA256, fxVersion)
 	require.ErrorIs(t, err, ErrAssignmentHistory)
-	_, err = ActivationFromHandoff(record, b.body, b.preimage, f.parent, crypto.SHA256, 0)
+	_, err = ActivationFromHandoff(vouches{}, record, b.body, b.preimage, f.parent, crypto.SHA256, 0)
 	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
+}
+
+// vouches is committed history that accepts every record it is shown; rejects refuses every one.
+type vouches struct{}
+
+func (vouches) VerifyCommitted(evmroot.OrderedHandoffRecord) error { return nil }
+
+type rejects struct{ err error }
+
+func (r rejects) VerifyCommitted(evmroot.OrderedHandoffRecord) error { return r.err }
+
+// Only a verified committed record mints the activation: an uncommitted freeze whose contents agree with its body and candidate,
+// a record the committed history does not vouch for and a missing history are each refused, in isolation.
+func TestUncommittedRecordCannotMintAnActivation(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	b := f.build(t, f.candidate(t))
+	record := b.freeze
+	record.Kind = "commit"
+	_, err := ActivationFromHandoff(vouches{}, record, b.body, b.preimage, f.parent, crypto.SHA256, fxVersion)
+	require.NoError(t, err, "control: the committed record is accepted")
+
+	freeze := record
+	freeze.Kind = "freeze"
+	_, err = ActivationFromHandoff(vouches{}, freeze, b.body, b.preimage, f.parent, crypto.SHA256, fxVersion)
+	require.ErrorIs(t, err, ErrRecordNotCommitted)
+	require.ErrorIs(t, err, ErrAssignmentHistory)
+
+	boom := errors.New("no commit proof")
+	_, err = ActivationFromHandoff(rejects{boom}, record, b.body, b.preimage, f.parent, crypto.SHA256, fxVersion)
+	require.ErrorIs(t, err, ErrRecordNotCommitted)
+	require.ErrorIs(t, err, boom)
+
+	_, err = ActivationFromHandoff(nil, record, b.body, b.preimage, f.parent, crypto.SHA256, fxVersion)
+	require.ErrorIs(t, err, ErrRecordNotCommitted)
 }
