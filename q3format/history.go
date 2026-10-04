@@ -92,6 +92,9 @@ func (e Entry) claim() Claim {
 	return Claim{e.epoch, e.start, e.bodyID, e.commitID, e.priorVersion, e.priorID}
 }
 
+// Claim is the committed record's identity for this verified entry: what a durable install journal binds itself to.
+func (e Entry) Claim() Claim { return e.claim() }
+
 // History is the explicit, ordered, verified chain of epochs from the root genesis. Its network and genesis identity are the
 // authority every later body is checked against. It is immutable: the With methods return an extended copy.
 type History struct {
