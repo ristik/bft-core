@@ -748,7 +748,7 @@ func TestViewOwnsCertifiedTechnicalRecords(t *testing.T) {
 	// the getter's copy is the caller's too
 	got := hist.ExpectedTR()
 	got.StatHash[0] ^= 0xFF
-	require.Equal(t, wantStat, hist.ExpectedTR().StatHash)
+	require.Equal(t, wantStat, []byte(hist.ExpectedTR().StatHash))
 }
 
 // Direct admission carries ErrInvalidRequest on malformed and continuity refusals, keeps the underlying and continuity
