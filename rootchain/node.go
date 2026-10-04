@@ -268,6 +268,10 @@ func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certificati
 		return rctypes.ErrControlPartition
 	}
 
+	if req == nil {
+		return fmt.Errorf("%w: %w", rctypes.ErrInvalidRequest, certification.ErrBlockCertificationRequestIsNil)
+	}
+
 	si, err := v.consensusManager.ShardInfo(req.PartitionID, req.ShardID)
 	if err != nil {
 		return fmt.Errorf("acquiring shard %s - %s info: %w", req.PartitionID, req.ShardID, err)

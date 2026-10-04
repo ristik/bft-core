@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	test "github.com/unicitynetwork/bft-core/internal/testutils"
 	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	"github.com/unicitynetwork/bft-core/internal/testutils/peer"
@@ -877,6 +878,19 @@ func Test_onBlockCertificationRequest(t *testing.T) {
 		require.ErrorContains(t, err, `invalid receiver id: failed to parse peer ID: invalid cid: selected encoding not supported`)
 	})
 
+	t.Run("nil request is refused at entry", func(t *testing.T) {
+		cm := &mockConsensusManager{shardInfo: func(types.PartitionID, types.ShardID) (*storage.ShardInfo, error) {
+			t.Fatal("a nil request reached the shard info lookup")
+			return nil, nil
+		}}
+		node, err := New(&nwPeer, mockPartitionNet{}, cm, testobservability.Default(t))
+		require.NoError(t, err)
+		err = node.onBlockCertificationRequest(t.Context(), nil)
+		require.ErrorIs(t, err, rctypes.ErrInvalidRequest)
+		require.ErrorIs(t, err, certification.ErrBlockCertificationRequestIsNil)
+		require.Empty(t, node.incomingRequests.store)
+	})
+
 	t.Run("invalid request", func(t *testing.T) {
 		// in case of invalid request we respond with the latest cert of the shard
 		// wrapped in a rejection envelope (Status=RequestInvalid, Message=why).
@@ -912,6 +926,7 @@ func Test_onBlockCertificationRequest(t *testing.T) {
 		err = node.onBlockCertificationRequest(t.Context(), &validCertRequest)
 		require.EqualError(t, err, `invalid block certification request: invalid certification request: node "`+nodeID+`" is not in the trustbase of the shard`)
 		require.ErrorIs(t, err, storage.ErrNodeNotInTrustBase)
+		require.ErrorIs(t, err, quorumweight.ErrUnknownSigner)
 		require.EqualValues(t, 1, sendCallCnt)
 
 		/*** case 2: invalid request from a node in the trustbase ***/
@@ -925,6 +940,7 @@ func Test_onBlockCertificationRequest(t *testing.T) {
 		cr.BlockSize++
 		err = node.onBlockCertificationRequest(t.Context(), &cr)
 		require.EqualError(t, err, `invalid block certification request: invalid certification request: signature verification: verification failed`)
+		require.ErrorIs(t, err, quorumweight.ErrInvalidSignature)
 		require.EqualValues(t, 2, sendCallCnt, "expected that the latest Cert is sent to the node")
 	})
 
@@ -1229,8 +1245,11 @@ type mockQuorumInfo struct {
 	nodeCount, quorum uint64
 }
 
-func (qi mockQuorumInfo) GetQuorum() uint64     { return qi.quorum }
-func (qi mockQuorumInfo) GetTotalNodes() uint64 { return qi.nodeCount }
+func (qi mockQuorumInfo) MemberCount() int                    { return int(qi.nodeCount) }
+func (qi mockQuorumInfo) TotalWeight() uint64                 { return qi.nodeCount }
+func (qi mockQuorumInfo) Threshold() uint64                   { return qi.quorum }
+func (qi mockQuorumInfo) SignerWeight(string) (uint64, error) { return 1, nil }
+func (qi mockQuorumInfo) Identity() string                    { return "mock" }
 
 func newMockPartitionNet() (mockPartitionNet, chan any) {
 	nwc := make(chan any, 1)

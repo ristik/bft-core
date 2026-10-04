@@ -1,10 +1,10 @@
 package rootchain
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -12,8 +12,10 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/observability"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-go-base/hash"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -21,9 +23,12 @@ import (
 type (
 	QuorumStatus uint8
 
+	// QuorumInfo is what the buffer counts requests with: the weights of the shard round and the identity of the
+	// assignment they come from. Tallies are tagged with the identity, so requests counted under one assignment are never
+	// retallied with the weights of another.
 	QuorumInfo interface {
-		GetQuorum() uint64
-		GetTotalNodes() uint64
+		rctypes.RequestWeights
+		Identity() string
 	}
 
 	CertRequestBuffer struct {
@@ -45,8 +50,12 @@ type (
 	requestBuffer struct {
 		// index of nodes which have voted (key is node identifier)
 		nodeRequest map[string]struct{}
-		// index to count votes, key is IR record hash
+		// index to count votes, key is the hash of IR record and sizes
 		requests map[sha256Hash][]*certification.BlockCertificationRequest
+		// weights of the received requests, nil while the buffer is empty
+		tally *rctypes.RequestTally
+		// identity of the assignment the tally was counted under
+		identity string
 		qState   QuorumStatus
 
 		start     time.Time
@@ -106,14 +115,27 @@ equivocating and in both cases error is returned. Clear in order to receive new 
 collecting requests for the next round).
 */
 func (c *CertRequestBuffer) Add(ctx context.Context, request *certification.BlockCertificationRequest, tb QuorumInfo) (QuorumStatus, []*certification.BlockCertificationRequest, error) {
+	if request == nil || request.InputRecord == nil {
+		return QuorumUnknown, nil, fmt.Errorf("%w: missing request or input record", rctypes.ErrInvalidRequest)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	rs := c.get(request.PartitionID, request.ShardID)
-	qs, bcr, err := rs.add(request, tb)
-	if err == nil {
-		c.updQuorumStatus(ctx, rs, qs)
+	// A store for a shard not seen before is published only once the request has been admitted: a refusal leaves no shard state.
+	key := partitionShard{partition: request.PartitionID, shard: request.ShardID.Key()}
+	rs, known := c.store[key]
+	if !known {
+		rs = newRequestStore()
+		rs.attrShard = observability.Shard(request.PartitionID, request.ShardID)
 	}
+	qs, bcr, err := rs.add(request, tb)
+	if err != nil {
+		return qs, bcr, err
+	}
+	if !known {
+		c.store[key] = rs
+	}
+	c.updQuorumStatus(ctx, rs, qs)
 	return qs, bcr, err
 }
 
@@ -121,6 +143,10 @@ func (c *CertRequestBuffer) IsConsensusReceived(partition types.PartitionID, sha
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	rs := c.get(partition, shard)
+	if rs.tally != nil && tb != nil && rs.identity != tb.Identity() {
+		// counted under another assignment: the status says nothing about this one
+		return QuorumUnknown
+	}
 	return rs.qState
 }
 
@@ -178,14 +204,21 @@ func newRequestStore() *requestBuffer {
 	return s
 }
 
-// add stores a new input record received from the node.
+// add stores a new input record received from the node. Whatever is refused leaves the buffer, the tally and the status
+// unchanged: the new state is computed on copies and published only at the end.
 func (rs *requestBuffer) add(req *certification.BlockCertificationRequest, tb QuorumInfo) (QuorumStatus, []*certification.BlockCertificationRequest, error) {
-	if _, f := rs.nodeRequest[req.NodeID]; f {
-		return QuorumUnknown, nil, errors.New("request of the node in this round already stored")
+	if req == nil || req.InputRecord == nil {
+		return QuorumUnknown, nil, fmt.Errorf("%w: missing request or input record", rctypes.ErrInvalidRequest)
 	}
-	if len(rs.nodeRequest) == 0 {
-		// start clock to track time until consensus is achieved
-		rs.start = time.Now()
+	if tb == nil {
+		return QuorumUnknown, nil, fmt.Errorf("%w: no quorum information", quorumweight.ErrRequestContext)
+	}
+	empty := len(rs.nodeRequest) == 0
+	if !empty && rs.identity != tb.Identity() {
+		return QuorumUnknown, nil, fmt.Errorf("%w: requests are counted under assignment %q, not %q", quorumweight.ErrRequestContext, rs.identity, tb.Identity())
+	}
+	if _, f := rs.nodeRequest[req.NodeID]; f {
+		return QuorumUnknown, nil, dupRequest{}
 	}
 
 	h, err := hash.HashValues(crypto.SHA256, req.InputRecord, req.BlockSize, req.StateSize)
@@ -194,47 +227,106 @@ func (rs *requestBuffer) add(req *certification.BlockCertificationRequest, tb Qu
 	}
 	reqID := sha256Hash(h)
 
+	var tally *rctypes.RequestTally
+	if empty || rs.tally == nil {
+		tally = rctypes.NewRequestTally(tb)
+	} else {
+		tally = rs.tally.CloneWith(tb)
+	}
+	if err := tally.Add(req.NodeID, reqID); err != nil {
+		return QuorumUnknown, nil, fmt.Errorf("counting the request: %w", err)
+	}
+	res, err := decide(tally, tb)
+	if err != nil {
+		return QuorumUnknown, nil, err
+	}
+
+	if empty {
+		// start clock to track time until consensus is achieved
+		rs.start = time.Now()
+	}
+	rs.tally, rs.identity = tally, tb.Identity()
 	rs.nodeRequest[req.NodeID] = struct{}{}
-	rs.requests[reqID] = append(rs.requests[reqID], req)
-	proof, res := rs.isConsensusReceived(tb)
-	return res, proof, nil
+	rs.requests[reqID] = append(rs.requests[reqID], cloneRequest(req))
+	return res, rs.proof(res, tally, tb), nil
 }
+
+// cloneRequest is a private copy of req: the buffer neither keeps the caller's request nor hands out its own, so a request
+// mutated after Add or a proof mutated after it was returned cannot change what is counted.
+func cloneRequest(req *certification.BlockCertificationRequest) *certification.BlockCertificationRequest {
+	c := *req
+	c.ZkProof = bytes.Clone(req.ZkProof)
+	c.Signature = bytes.Clone(req.Signature)
+	ir := *req.InputRecord
+	ir.PreviousHash = bytes.Clone(ir.PreviousHash)
+	ir.Hash = bytes.Clone(ir.Hash)
+	ir.SummaryValue = bytes.Clone(ir.SummaryValue)
+	ir.BlockHash = bytes.Clone(ir.BlockHash)
+	ir.ETHash = bytes.Clone(ir.ETHash)
+	c.InputRecord = &ir
+	return &c
+}
+
+func cloneRequests(reqs []*certification.BlockCertificationRequest) []*certification.BlockCertificationRequest {
+	out := make([]*certification.BlockCertificationRequest, len(reqs))
+	for i, r := range reqs {
+		out[i] = cloneRequest(r)
+	}
+	return out
+}
+
+// dupRequest is the refusal of a second request of the same node in the round, with its long-standing text.
+type dupRequest struct{}
+
+func (dupRequest) Error() string        { return "request of the node in this round already stored" }
+func (dupRequest) Is(target error) bool { return target == quorumweight.ErrDuplicateSigner }
 
 func (rs *requestBuffer) reset() {
 	clear(rs.nodeRequest)
 	clear(rs.requests)
+	rs.tally, rs.identity = nil, ""
 	rs.qState = QuorumInProgress
 }
 
-func (rs *requestBuffer) isConsensusReceived(tb QuorumInfo) ([]*certification.BlockCertificationRequest, QuorumStatus) {
-	// find most voted IR
-	votes := uint64(0)
-	var bcReqs []*certification.BlockCertificationRequest
-	for _, reqs := range rs.requests {
-		nofReps := uint64(len(reqs))
-		if votes < nofReps {
-			votes = nofReps
-			bcReqs = reqs
-		}
+// decide is the quorum status of a tally. Quorum needs the heaviest group to reach Q; no quorum is possible exactly when
+// M+U < Q strictly. Neither verdict is ever given on an inconsistent tally: that is an error.
+func decide(tally *rctypes.RequestTally, tb QuorumInfo) (QuorumStatus, error) {
+	if err := tally.Validate(); err != nil {
+		return QuorumUnknown, fmt.Errorf("deciding the quorum status: %w", err)
 	}
-
-	quorum := tb.GetQuorum()
-	if votes >= quorum {
-		return bcReqs, QuorumAchieved
+	if tally.QuorumReached() {
+		return QuorumAchieved, nil
 	}
-
-	if tb.GetTotalNodes()-uint64(len(rs.nodeRequest))+votes < quorum {
-		// enough nodes have voted and even if the rest of the votes are for
-		// the most popular option, quorum is still not possible
-		allReq := make([]*certification.BlockCertificationRequest, 0, len(rs.nodeRequest))
-		for _, req := range rs.requests {
-			allReq = append(allReq, req...)
-		}
-		return allReq, QuorumNotPossible
+	impossible, err := tally.QuorumImpossible()
+	if err != nil {
+		return QuorumUnknown, fmt.Errorf("deciding the quorum status: %w", err)
 	}
-
+	if impossible {
+		// enough weight has voted and even if the rest of it joined the most popular option, quorum is still not possible
+		return QuorumNotPossible, nil
+	}
 	// consensus possible in the future
-	return nil, QuorumInProgress
+	return QuorumInProgress, nil
+}
+
+// proof is the evidence for a status: the one matching group for a quorum (only one group can hold more than half of the
+// total weight), every request for no quorum.
+func (rs *requestBuffer) proof(res QuorumStatus, tally *rctypes.RequestTally, tb QuorumInfo) []*certification.BlockCertificationRequest {
+	switch res {
+	case QuorumAchieved:
+		for g, reqs := range rs.requests {
+			if quorumweight.Reached(tally.GroupWeight(g), tb.Threshold()) {
+				return cloneRequests(reqs)
+			}
+		}
+	case QuorumNotPossible:
+		all := make([]*certification.BlockCertificationRequest, 0, len(rs.nodeRequest))
+		for _, reqs := range rs.requests {
+			all = append(all, reqs...)
+		}
+		return cloneRequests(all)
+	}
+	return nil
 }
 
 var (

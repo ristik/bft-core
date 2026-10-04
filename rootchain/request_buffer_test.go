@@ -134,10 +134,11 @@ func Test_requestBuffer_add(t *testing.T) {
 		assert.Equal(t, QuorumInProgress, qs)
 
 		// request from node B
-		bcrA.NodeID = nodeIdB
-		qs, r, err = rs.add(&bcrA, tb)
+		bcrB := bcrA
+		bcrB.NodeID = nodeIdB
+		qs, r, err = rs.add(&bcrB, tb)
 		require.NoError(t, err)
-		assert.ElementsMatch(t, []*certification.BlockCertificationRequest{&bcrA, &bcrA}, r)
+		assert.ElementsMatch(t, []*certification.BlockCertificationRequest{&bcrA, &bcrB}, r)
 		assert.Equal(t, QuorumAchieved, qs)
 	})
 }

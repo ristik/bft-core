@@ -8,9 +8,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	testsig "github.com/unicitynetwork/bft-core/internal/testutils/sig"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -171,10 +173,16 @@ func Test_ShardInfo_ValidRequest(t *testing.T) {
 		// changing some property should invalidate the signature
 		bcr.InputRecord.RoundNumber++
 		require.EqualError(t, si.ValidRequest(bcr), `invalid certification request: signature verification: verification failed`)
+		require.ErrorIs(t, si.ValidRequest(bcr), quorumweight.ErrInvalidSignature, "a forged request is told from a malformed one")
+		require.NotErrorIs(t, si.ValidRequest(bcr), ErrNodeNotInTrustBase)
 
 		bcr.NodeID = "unknown"
 		require.EqualError(t, si.ValidRequest(bcr), `invalid certification request: node "unknown" is not in the trustbase of the shard`)
 		require.ErrorIs(t, si.ValidRequest(bcr), ErrNodeNotInTrustBase)
+		require.ErrorIs(t, si.ValidRequest(bcr), quorumweight.ErrUnknownSigner)
+		require.NotErrorIs(t, si.ValidRequest(bcr), quorumweight.ErrInvalidSignature)
+
+		require.ErrorIs(t, si.ValidRequest(nil), certification.ErrBlockCertificationRequestIsNil)
 	})
 
 	t.Run("round number", func(t *testing.T) {
@@ -625,4 +633,27 @@ func (mo mockOrchestration) ShardConfigs(rootRound uint64) (map[types.PartitionS
 
 func (mo mockOrchestration) ShardConfig(partitionID types.PartitionID, shardID types.ShardID, rootRound uint64) (*types.PartitionDescriptionRecord, error) {
 	return mo.shardConfig(partitionID, shardID, rootRound)
+}
+
+// A nil or malformed request carries rctypes.ErrInvalidRequest and keeps the underlying error; an unknown signer and a bad
+// signature keep their own identities and are not "malformed".
+func Test_ShardInfo_ValidRequestMalformedSentinel(t *testing.T) {
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	verifier, err := signer.Verifier()
+	require.NoError(t, err)
+	si := &ShardInfo{PartitionID: 22, trustBase: map[string]abcrypto.Verifier{"1111": verifier}}
+
+	err = si.ValidRequest(nil)
+	require.ErrorIs(t, err, rctypes.ErrInvalidRequest)
+	require.ErrorIs(t, err, certification.ErrBlockCertificationRequestIsNil)
+
+	err = si.ValidRequest(&certification.BlockCertificationRequest{PartitionID: 22, NodeID: "1111"})
+	require.ErrorIs(t, err, rctypes.ErrInvalidRequest)
+	require.ErrorIs(t, err, types.ErrInputRecordIsNil)
+	require.EqualError(t, err, "invalid certification request: invalid input record: "+types.ErrInputRecordIsNil.Error())
+
+	err = si.ValidRequest(&certification.BlockCertificationRequest{PartitionID: 22, NodeID: "nobody"})
+	require.ErrorIs(t, err, ErrNodeNotInTrustBase)
+	require.NotErrorIs(t, err, rctypes.ErrInvalidRequest)
 }

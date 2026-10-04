@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -663,11 +664,31 @@ func (si *ShardInfo) update(req *certification.BlockCertificationRequest, leader
 	si.Stat.MaxStateSize = max(si.Stat.MaxStateSize, req.StateSize)
 }
 
+// malformedRequest keeps the text and the identities of err and additionally matches rctypes.ErrInvalidRequest.
+type malformedRequest struct{ err error }
+
+func (e malformedRequest) Error() string   { return e.err.Error() }
+func (e malformedRequest) Unwrap() []error { return []error{e.err, rctypes.ErrInvalidRequest} }
+
+// ValidRequest checks signature, membership and continuity of a request. A signer that is not a member and a bad signature
+// keep their own identities; every other refusal (a nil or malformed request, another shard, stale continuity) also matches
+// rctypes.ErrInvalidRequest, preserving the underlying error.
 func (si *ShardInfo) ValidRequest(req *certification.BlockCertificationRequest) error {
+	err := si.validRequest(req)
+	if err == nil || errors.Is(err, ErrNodeNotInTrustBase) || errors.Is(err, quorumweight.ErrInvalidSignature) {
+		return err
+	}
+	return malformedRequest{err}
+}
+
+func (si *ShardInfo) validRequest(req *certification.BlockCertificationRequest) error {
 	// req.IsValid checks that req is not nil and comes from valid validator.
 	// It also calls IR.IsValid which implements (CR.IR.h = CR.IR.h′) = (CR.IR.hB = ⊥)
 	// check so we do not repeat it here.
-	if err := si.Verify(req.NodeID, req.IsValid); err != nil {
+	if req == nil {
+		return fmt.Errorf("invalid certification request: %w", certification.ErrBlockCertificationRequestIsNil)
+	}
+	if err := si.Verify(req.NodeID, func(v abcrypto.Verifier) error { return req.IsValid(signatureVerifier{v}) }); err != nil {
 		return fmt.Errorf("invalid certification request: %w", err)
 	}
 
@@ -694,6 +715,53 @@ func (si *ShardInfo) ValidRequest(req *certification.BlockCertificationRequest) 
 	return nil
 }
 
+// errNoRequestContext is the refusal to count requests of a shard that has no request context installed: never a fallback
+// to counting members.
+var errNoRequestContext = fmt.Errorf("%w: no request context installed", quorumweight.ErrRequestContext)
+
+// The weights requests are counted with are the installed request context's (unit in production, A). A ShardInfo without
+// one has no members, no weight and no threshold, and counts nothing.
+
+// MemberCount is the number of members of the installed context.
+func (si *ShardInfo) MemberCount() int {
+	if si.requestCtx == nil {
+		return 0
+	}
+	return si.requestCtx.MemberCount()
+}
+
+// TotalWeight is W of the installed context.
+func (si *ShardInfo) TotalWeight() uint64 {
+	if si.requestCtx == nil {
+		return 0
+	}
+	return si.requestCtx.TotalWeight()
+}
+
+// Threshold is Q of the installed context.
+func (si *ShardInfo) Threshold() uint64 {
+	if si.requestCtx == nil {
+		return 0
+	}
+	return si.requestCtx.Threshold()
+}
+
+// SignerWeight is the weight of a member of the installed context; a non-member is quorumweight.ErrUnknownSigner.
+func (si *ShardInfo) SignerWeight(id string) (uint64, error) {
+	if si.requestCtx == nil {
+		return 0, errNoRequestContext
+	}
+	return si.requestCtx.SignerWeight(id)
+}
+
+// Identity is the assignment identity the requests are tagged with.
+func (si *ShardInfo) Identity() string {
+	if si.requestCtx == nil {
+		return ""
+	}
+	return si.requestCtx.Identity()
+}
+
 func (si *ShardInfo) GetQuorum() uint64 {
 	// at least 50%
 	return (uint64(len(si.trustBase)) / 2) + 1
@@ -705,7 +773,30 @@ func (si *ShardInfo) GetTotalNodes() uint64 {
 
 // ErrNodeNotInTrustBase is the refusal of a node the shard's installed validator set does not contain: a
 // retired or superseded key, or one that never belonged. The message text is unchanged (the lanes match it).
-var ErrNodeNotInTrustBase = errors.New("not in the trustbase of the shard")
+var ErrNodeNotInTrustBase error = notInTrustBase{}
+
+// notInTrustBase also matches quorumweight.ErrUnknownSigner, the sentinel of a signer that is not a member.
+type notInTrustBase struct{}
+
+func (notInTrustBase) Error() string        { return "not in the trustbase of the shard" }
+func (notInTrustBase) Is(target error) bool { return target == quorumweight.ErrUnknownSigner }
+
+// signatureVerifier marks a failed signature check as quorumweight.ErrInvalidSignature, so a forged request is told from
+// a structurally invalid one.
+type signatureVerifier struct{ abcrypto.Verifier }
+
+func (v signatureVerifier) VerifyBytes(sig, data []byte) error {
+	if err := v.Verifier.VerifyBytes(sig, data); err != nil {
+		return invalidSignature{err}
+	}
+	return nil
+}
+
+// invalidSignature keeps the verifier's error text (the lanes match it) and matches quorumweight.ErrInvalidSignature.
+type invalidSignature struct{ err error }
+
+func (e invalidSignature) Error() string   { return e.err.Error() }
+func (e invalidSignature) Unwrap() []error { return []error{e.err, quorumweight.ErrInvalidSignature} }
 
 func (si *ShardInfo) Verify(nodeID string, f func(v abcrypto.Verifier) error) error {
 	if v, ok := si.trustBase[nodeID]; ok {

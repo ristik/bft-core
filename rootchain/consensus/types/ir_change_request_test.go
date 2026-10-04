@@ -3,10 +3,12 @@ package types
 import (
 	"crypto"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -379,20 +381,76 @@ func TestIRChangeReq_String(t *testing.T) {
 	require.Equal(t, "00000002->timeout", x.String())
 }
 
+// mockReqVerifier is unit-weighted with nodeCnt members, or weighted by weights when set.
 type mockReqVerifier struct {
 	nodeCnt  uint64
+	weights  map[string]uint64
 	validReq func(req *certification.BlockCertificationRequest) error
 }
 
-func (rv mockReqVerifier) GetQuorum() uint64 {
-	return (rv.nodeCnt / 2) + 1
+func (rv mockReqVerifier) MemberCount() int {
+	if rv.weights != nil {
+		return len(rv.weights)
+	}
+	return int(rv.nodeCnt)
 }
 
-func (rv mockReqVerifier) GetTotalNodes() uint64 { return rv.nodeCnt }
+func (rv mockReqVerifier) TotalWeight() uint64 {
+	if rv.weights == nil {
+		return rv.nodeCnt
+	}
+	var t uint64
+	for _, w := range rv.weights {
+		t += w
+	}
+	return t
+}
+
+func (rv mockReqVerifier) Threshold() uint64 { return rv.TotalWeight()/2 + 1 }
+
+func (rv mockReqVerifier) SignerWeight(id string) (uint64, error) {
+	if rv.weights == nil {
+		return 1, nil
+	}
+	if w, ok := rv.weights[id]; ok {
+		return w, nil
+	}
+	return 0, fmt.Errorf("%w: %q", quorumweight.ErrUnknownSigner, id)
+}
 
 func (rv mockReqVerifier) ValidRequest(req *certification.BlockCertificationRequest) error {
 	if rv.validReq == nil {
 		return errors.New("validReq of mockReqVerifier not assigned")
 	}
 	return rv.validReq(req)
+}
+
+// A malformed timeout proof is an ErrInvalidRequest (design v2 section 3.3) with its text unchanged; each refusal is isolated
+// by changing one thing only, and an accepted timeout does not carry the sentinel.
+func TestTimeoutProofMalformedSentinels(t *testing.T) {
+	luc := &types.UnicityCertificate{Version: 1, InputRecord: &types.InputRecord{Version: 1, Hash: []byte{1}, RoundNumber: 1},
+		UnicitySeal: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 1}}
+	verifier := mockReqVerifier{nodeCnt: 3, validReq: func(*certification.BlockCertificationRequest) error { return nil }}
+	const partition1 types.PartitionID = 1
+	reqS1 := certification.BlockCertificationRequest{PartitionID: partition1, NodeID: "1", InputRecord: &types.InputRecord{Version: 1}}
+	t.Run("unexpected proof request", func(t *testing.T) {
+		x := &IRChangeReq{Partition: partition1, CertReason: T2Timeout, Requests: []*certification.BlockCertificationRequest{&reqS1}}
+		ir, err := x.Verify(verifier, luc, 100, 5)
+		require.ErrorIs(t, err, ErrInvalidRequest)
+		require.ErrorContains(t, err, "proof contains requests")
+		require.Nil(t, ir)
+	})
+	t.Run("premature timeout", func(t *testing.T) {
+		x := &IRChangeReq{Partition: partition1, CertReason: T2Timeout}
+		ir, err := x.Verify(verifier, luc, 5, 5)
+		require.ErrorIs(t, err, ErrInvalidRequest)
+		require.ErrorContains(t, err, "time from latest UC 4, timeout in rounds 5")
+		require.Nil(t, ir)
+	})
+	t.Run("due timeout is accepted", func(t *testing.T) {
+		x := &IRChangeReq{Partition: partition1, CertReason: T2Timeout}
+		ir, err := x.Verify(verifier, luc, 6, 5)
+		require.NoError(t, err)
+		require.NotNil(t, ir)
+	})
 }
