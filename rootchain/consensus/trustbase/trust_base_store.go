@@ -29,6 +29,8 @@ type TrustBaseStore struct {
 	cache map[uint64]*types.RootTrustBaseV1
 	// genesis identifies the local genesis quorum certificate, the only round-1 QC the verifiers accept without signatures.
 	genesis *GenesisPin
+	// signing is the history of the epochs that activated the domain-bound signing scheme (signing.go).
+	signing signingRegistry
 }
 
 // GenesisPin identifies the local genesis quorum certificate by the hash of its vote info and the signed bytes of its commit info. It is

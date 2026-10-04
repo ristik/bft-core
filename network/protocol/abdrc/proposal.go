@@ -55,6 +55,10 @@ func (x *ProposalMsg) Verify(tbs *trustbase.TrustBaseStore) error {
 	if err != nil {
 		return fmt.Errorf("failed to get trust base for block verification, epoch %d: %w", x.Block.Epoch, err)
 	}
+	// the block's QC is verified by the legacy rule of the epoch the block names, or refused if that epoch is domain-bound
+	if err := tbs.RequireLegacySigning(x.Block.Epoch); err != nil {
+		return fmt.Errorf("block verification failed: %w", err)
+	}
 	if err := x.Block.Verify(tb, tbs.GenesisPin()); err != nil {
 		return fmt.Errorf("block verification failed: %w", err)
 	}
