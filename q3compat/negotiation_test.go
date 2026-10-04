@@ -150,3 +150,22 @@ func TestHelloCodec(t *testing.T) {
 		require.True(t, errors.Is(err, ErrLegacyPeer), name)
 	}
 }
+
+func TestHelloLimitsAreInclusive(t *testing.T) {
+	f := newNeg(t)
+	max := string(make([]byte, maxText))
+	raw, err := f.hello(t, func(h *Hello) { h.NodeID, h.Protocol, h.Signature = max, max, make([]byte, maxSig) }).Encode()
+	require.NoError(t, err)
+	_, err = DecodeHello(raw)
+	require.NoError(t, err, "fields exactly at their limits are well-formed")
+	require.Less(t, len(raw), maxHello)
+}
+
+func TestSameEpochDifferentIdentityIsNeverHistorical(t *testing.T) {
+	f := newNeg(t)
+	other := f
+	other.id.BodyID = fill(0xe)
+	f.exp.Past = func(uint64) (Identity, bool) { return other.id, true } // would match, if the epoch were earlier
+	_, err := f.exp.Verify(other.hello(t, nil), f.sess)
+	require.ErrorIs(t, err, ErrConfiguration)
+}
