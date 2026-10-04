@@ -169,7 +169,8 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	if err != nil {
 		return nil, fmt.Errorf("successor T2 timeout generator: %w", err)
 	}
-	selector, err := newBootstrapLeader(x.leaderSelector, g.Start, newTrust.RootNodes)
+	selector, err := newEpochLeader(x.trustBaseStore, g.Epoch, g.Start, newTrust.RootNodes,
+		func() (Leader, error) { return newBootstrapLeader(x.leaderSelector, g.Start, newTrust.RootNodes) })
 	if err != nil {
 		return nil, err
 	}
