@@ -805,3 +805,27 @@ func TestViewAdmissionSentinels(t *testing.T) {
 		require.NotErrorIs(t, err, rctypes.ErrInvalidRequest)
 	})
 }
+
+// The isolated weighted anchor is the weighted activation of a coupled EVM assignment and nothing else: it needs its coupling, takes
+// its weights from the authenticated assignment, and an aggregator shard cannot select the weighted policy.
+func TestIsolatedWeightedRequestAnchor(t *testing.T) {
+	f := newViewFixture(t)
+	pdr, c := f.pdr(0, 1, 3, fxBody0, f.member(0, 0, 6), f.member(1, 1, 1), f.member(2, 2, 1), f.member(3, 3, 1))
+
+	a, err := NewIsolatedWeightedRequestAnchor(pdr, crypto.SHA256, c, 3, fxBody0, fxVersion)
+	require.NoError(t, err)
+	require.NotNil(t, a)
+
+	_, err = NewIsolatedWeightedRequestAnchor(pdr, crypto.SHA256, nil, 3, fxBody0, fxVersion)
+	require.ErrorIs(t, err, quorumweight.ErrCouplingRequired, "no coupling evidence, no weighted context")
+	_, err = NewIsolatedWeightedRequestAnchor(pdr, crypto.SHA256, c, 3, nil, fxVersion)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "an incomplete activation")
+	_, err = NewIsolatedWeightedRequestAnchor(pdr, crypto.SHA256, c, 3, fxBody0, 0)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
+
+	// the weights of the activation are the assignment's: an aggregator shard cannot select the weighted policy
+	unit, _ := f.pdr(0, 1, 3, fxBody0, f.member(0, 0, 1), f.member(1, 1, 1), f.member(2, 2, 1), f.member(3, 3, 1))
+	unit.PartitionTypeID = 1
+	_, err = NewIsolatedWeightedRequestAnchor(unit, crypto.SHA256, c, 3, fxBody0, fxVersion)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "a request cannot pick its own policy")
+}

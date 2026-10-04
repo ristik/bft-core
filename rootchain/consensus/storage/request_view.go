@@ -113,6 +113,16 @@ func newRequestActivation(pdr *types.PartitionDescriptionRecord, hashAlg crypto.
 		start: start, trHash: bytes.Clone(trHash), version: version}, nil
 }
 
+// NewIsolatedWeightedRequestAnchor is the mirrored-weight activation of a coupled EVM assignment installed from a trusted
+// checkpoint, for isolated fixtures and the Q3 integration that will install weighted configurations. Weighted configurations
+// are not installed in production before Q3 (genesis and historical configurations stay unit-only), and nothing in production
+// calls this: it exists so that a collector, a leader or a follower can be exercised end to end with weights, through the same
+// activation type the committed history produces. The coupling is authenticated by the weighted request context.
+func NewIsolatedWeightedRequestAnchor(pdr *types.PartitionDescriptionRecord, hashAlg crypto.Hash, coupling *quorumweight.Coupling,
+	rootEpoch uint64, rootBody []byte, version uint64) (*RequestActivation, error) {
+	return newRequestActivation(pdr, hashAlg, quorumweight.PolicyEVMWeighted, coupling, rootEpoch, rootBody, 0, nil, version)
+}
+
 // NewRequestAnchor is the unit-weight activation of a trusted genesis or checkpoint configuration, in force from the start.
 func NewRequestAnchor(pdr *types.PartitionDescriptionRecord, hashAlg crypto.Hash, rootEpoch uint64, rootBody []byte, version uint64) (*RequestActivation, error) {
 	return newRequestActivation(pdr, hashAlg, quorumweight.PolicyUnit, nil, rootEpoch, rootBody, 0, nil, version)

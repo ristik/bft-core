@@ -733,6 +733,21 @@ func (x *ConsensusManager) onPartitionIRChangeReq(ctx context.Context, req *IRCh
 // production, which keeps the legacy dispatch.
 func (x *ConsensusManager) SetViewResolver(r ViewResolver) { x.viewResolver = r }
 
+// RequestView resolves the authenticated view the node's collector admits the shard's certification requests under, for the next
+// proposal round and the collection purpose (which may name a committed successor before its activation round: the view is then
+// collection-only). enabled is false while the view-aware branch is not selected, so the collector keeps the committed ShardInfo.
+// A node in recovery refuses, like ShardInfo.
+func (x *ConsensusManager) RequestView(partition types.PartitionID, shard types.ShardID) (*storage.RequestRoundView, bool, error) {
+	if x.viewResolver == nil {
+		return nil, false, nil
+	}
+	if x.recovery.InRecovery() {
+		return nil, true, fmt.Errorf("node is in recovery: %s", x.recovery)
+	}
+	view, err := x.viewResolver.ResolveView(partition, shard, x.pacemaker.GetCurrentRound()+1, storage.PurposeCollect)
+	return view, true, err
+}
+
 // bufferIRChange buffers an IR change request of the next proposal, under the view resolved for it when the view-aware branch is
 // selected, else by the legacy round-only verification.
 func (x *ConsensusManager) bufferIRChange(req *drctypes.IRChangeReq) error {
