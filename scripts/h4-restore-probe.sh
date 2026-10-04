@@ -1,11 +1,22 @@
 #!/bin/bash
 # M2a final lane invokes stop before Handoff 1 and restore after Handoff 2.
+# H4_WAIT_BLOCKS=N (default 0): the restore stage first waits until surviving validator 2 has certified-executed at least N blocks
+# beyond its height at the stop (H4_WAIT_TIMEOUT seconds, default 1800), and requires the restored pin to be at least N blocks
+# past the stop height. The lane's proof window is 64, so N >= 65 makes validator 1 miss more than the window.
 set -euo pipefail
 source helper.sh
 . scripts/lib/reth-pin.sh
 stage=${1:?stop or restore required}
 evidence=test-nodes/h4-replaced
 mkdir -p "$evidence"
+
+survivor_height() {
+  local hex
+  hex=$(curl -sS --max-time 5 -X POST http://127.0.0.1:18546 -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' 2>/dev/null |
+    python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"], 16))' 2>/dev/null) || return 1
+  echo "$hex"
+}
 
 pid_is_running() {
   local pid=$1 state
@@ -51,6 +62,7 @@ case "$stage" in
     owned_pid "$evmPid" 'ubft shard-node run' || { echo "validator 1 BFT pid $evmPid is not owned by this checkout" >&2; exit 1; }
     owned_pid "$rethPid" 'reth.* node' || { echo "validator 1 EL pid $rethPid is not owned by this checkout" >&2; exit 1; }
     # Shutdown can take a while; observers must know validator 1 is expected to be unreachable from now on.
+    survivor_height >"$evidence/stop-height.txt" || { echo "cannot read surviving validator 2's height" >&2; exit 1; }
     echo 'H4_STOPPING' >"$evidence/stopping.txt"
     kill -TERM "$evmPid" 2>/dev/null || true
     kill -TERM "$rethPid" 2>/dev/null || true
@@ -66,6 +78,19 @@ case "$stage" in
     echo "stopped validator 1; wiped BFT and EL data; authority pid=$authPid survives"
     ;;
   restore)
+    waitBlocks=${H4_WAIT_BLOCKS:-0}
+    case "$waitBlocks" in '' | *[!0-9]*) echo "H4_WAIT_BLOCKS must be a non-negative integer" >&2; exit 2 ;; esac
+    if [ "$waitBlocks" -gt 0 ]; then
+      stopHeight=$(cat "$evidence/stop-height.txt")
+      waitDeadline=$((SECONDS + ${H4_WAIT_TIMEOUT:-1800}))
+      while :; do
+        head=$(survivor_height || echo "$stopHeight")
+        [ "$head" -ge $((stopHeight + waitBlocks)) ] && break
+        [ "$SECONDS" -lt "$waitDeadline" ] || { echo "survivors did not reach $((stopHeight + waitBlocks)) (at $head) within the wait budget" >&2; exit 1; }
+        sleep 2
+      done
+      echo "H4_WAITED_BLOCKS stop=$stopHeight survivor=$head wait=$waitBlocks"
+    fi
     authPid=$(cat "$evidence/authority-pid")
     owned_pid "$authPid" 'ubft signing-authority run'
     [ "$(cat test-nodes/auth1/pid)" = "$authPid" ]
@@ -106,6 +131,12 @@ case "$stage" in
     fi
     go run ./scripts/h4-restore-pin test-nodes/h4-archives/evm2 "$pinTrustBase" "$evidence/tip" >"$evidence/pin.txt"
     bodyID=$(tr ' ' '\n' <"$evidence/pin.txt" | sed -n 's/^bodyID=//p')
+    if [ "$waitBlocks" -gt 0 ]; then
+      pinHeight=$(tr ' ' '\n' <"$evidence/pin.txt" | sed -n 's/^height=//p')
+      missed=$((pinHeight - stopHeight))
+      echo "H4_MISSED_BLOCKS=$missed stop=$stopHeight pin=$pinHeight proofWindow=64" | tee -a "$evidence/restore.log"
+      [ "$missed" -ge "$waitBlocks" ] || { echo "restored pin is only $missed blocks past the stop; wanted $waitBlocks" >&2; exit 1; }
+    fi
     rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
     bootnodes=$(evm_bootnodes_for_peers "$rootBoot" 1 2 3 4)
     # Keep the journal bounded but leave room for a replica's one-at-a-time

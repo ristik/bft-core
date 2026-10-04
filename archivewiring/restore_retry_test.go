@@ -58,6 +58,16 @@ func newRetryRestoreFixtureT(t *testing.T, failures int64, retry FetchRetry, tam
 // (decremented per request) before admitting the restoring node: the real server-side refusal of a retained validator that has not
 // installed the assignment step yet, which reaches the client as a reset frame carrying ErrPeerNotAllowed.
 func buildRetryRestoreFixture(t *testing.T, failures int64, retry FetchRetry, tamper bool, refusals *atomic.Int64) *retryRestoreFixture {
+	var mutate func(*wiringFixture, *types.UnicityCertificate)
+	if tamper {
+		mutate = func(_ *wiringFixture, uc *types.UnicityCertificate) { uc.InputRecord.Hash[0] ^= 1 }
+	}
+	return buildRetryRestoreFixtureMutating(t, failures, retry, mutate, refusals)
+}
+
+// buildRetryRestoreFixtureMutating serves every archived record from both replicas with its resulting UC altered by mutate (nil
+// serves them unchanged); the pinned tip stays the genuine certificate.
+func buildRetryRestoreFixtureMutating(t *testing.T, failures int64, retry FetchRetry, mutate func(*wiringFixture, *types.UnicityCertificate), refusals *atomic.Int64) *retryRestoreFixture {
 	t.Helper()
 	f := newWiringFixture(t, 5)
 	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
@@ -70,10 +80,10 @@ func buildRetryRestoreFixture(t *testing.T, failures int64, retry FetchRetry, ta
 		for _, entry := range f.entries {
 			q, rec, err := FromJournal(context.Background(), f.context, f.subject, nil, entry)
 			require.NoError(t, err)
-			if tamper {
+			if mutate != nil {
 				var uc types.UnicityCertificate
 				require.NoError(t, types.Cbor.Unmarshal(rec.ResultingUC, &uc))
-				uc.InputRecord.Hash[0] ^= 1
+				mutate(f, &uc)
 				rec.ResultingUC, err = types.Cbor.Marshal(&uc)
 				require.NoError(t, err)
 			}
