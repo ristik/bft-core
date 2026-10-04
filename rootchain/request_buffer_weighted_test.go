@@ -285,3 +285,47 @@ func TestCertRequestBufferFirstRefusedAddPublishesNothing(t *testing.T) {
 		})
 	}
 }
+
+// taggedTB is a QuorumInfo that also names the shard round and anchor its requests build on.
+type taggedTB struct {
+	QuorumInfo
+	tag string
+}
+
+func (t taggedTB) RoundTag() string { return t.tag }
+
+// Stale buffer status: a quorum counted for one shard round/anchor says nothing about the next, new requests are refused
+// against it with the request-context sentinel and never retallied, and only retiring it (the round advanced) or Clear starts
+// the next tally. A buffer counted under the same tag, an empty one and an unknown shard are not retired.
+func TestRequestBufferTagsTheShardRoundAndAnchor(t *testing.T) {
+	cs, err := NewCertificationRequestBuffer(observability.Default(t).Meter("test"))
+	require.NoError(t, err)
+	base := partitions.NewWeightedPartitionTrustBase("same", map[string]uint64{"a": 6, "b": 1, "c": 1, "d": 1})
+	r1, r2 := taggedTB{base, "round-1"}, taggedTB{base, "round-2"}
+	shard := types.ShardID{}
+	ctx := context.Background()
+
+	qs, _, err := cs.Add(ctx, voteReq(requestvectors.Vote{Signer: "a", Group: "X"}), r1)
+	require.NoError(t, err)
+	require.Equal(t, QuorumAchieved, qs)
+	require.Equal(t, QuorumAchieved, cs.IsConsensusReceived(sysID1, shard, r1))
+	require.Equal(t, QuorumUnknown, cs.IsConsensusReceived(sysID1, shard, r2), "the stale status is not the next round's")
+	require.Equal(t, QuorumUnknown, cs.IsConsensusReceived(sysID1, shard, base), "an untagged context never reads a tagged tally")
+
+	before := snapshot(cs.store[partitionShard{partition: sysID1, shard: shard.Key()}])
+	qs, proof, err := cs.Add(ctx, voteReq(requestvectors.Vote{Signer: "b", Group: "X"}), r2)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
+	require.Equal(t, QuorumUnknown, qs)
+	require.Nil(t, proof)
+	require.Equal(t, before, snapshot(cs.store[partitionShard{partition: sysID1, shard: shard.Key()}]), "a refused request changes nothing")
+
+	require.False(t, cs.Retire(sysID1, shard, r1), "counted under this tag")
+	require.False(t, cs.Retire(sysID1, shard, nil))
+	require.False(t, cs.Retire(sysID2, shard, r2), "no buffer for the shard")
+	require.True(t, cs.Retire(sysID1, shard, r2))
+	require.False(t, cs.Retire(sysID1, shard, r2), "already empty")
+	require.Equal(t, QuorumInProgress, cs.IsConsensusReceived(sysID1, shard, r2))
+	qs, _, err = cs.Add(ctx, voteReq(requestvectors.Vote{Signer: "b", Group: "X"}), r2)
+	require.NoError(t, err)
+	require.Equal(t, QuorumInProgress, qs, "a's old weight-6 signature is not counted again: only b's 1 of 9")
+}

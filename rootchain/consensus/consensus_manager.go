@@ -98,6 +98,9 @@ type (
 		orchestration  Orchestration
 		irReqVerifier  *IRChangeReqVerifier
 		t2Timeouts     *PartitionTimeoutGenerator
+		// viewResolver selects the view-aware branch (Q2-C2) for leader admission, timeouts and payload generation. Production
+		// leaves it nil: the legacy round-only dispatch stays selected.
+		viewResolver ViewResolver
 		// votes need to be buffered when CM will be the next leader (so other nodes
 		// will send votes to it) but it hasn't got the proposal yet, so it can't process
 		// the votes. voteBuffer maps author id to vote, so we do not buffer same vote
@@ -670,7 +673,7 @@ func (x *ConsensusManager) onPartitionIRChangeReq(ctx context.Context, req *IRCh
 		return fmt.Errorf("failed to get next leader to forward IR change request: %w", err)
 	}
 	if nextLeader == x.id {
-		if err := x.irReqBuffer.Add(x.pacemaker.GetCurrentRound(), irReq, x.irReqVerifier); err != nil {
+		if err := x.bufferIRChange(irReq); err != nil {
 			return fmt.Errorf("failed to add IR change request from partition %s into buffer: %w", irReq.Partition, err)
 		}
 		x.log.DebugContext(ctx, "IR change request buffered", logger.Shard(req.Partition, req.Shard))
@@ -691,6 +694,31 @@ func (x *ConsensusManager) onPartitionIRChangeReq(ctx context.Context, req *IRCh
 	return nil
 }
 
+// SetViewResolver selects the view-aware branch of the leader's buffer, timeouts and proposal payload. It is not called in
+// production, which keeps the legacy dispatch.
+func (x *ConsensusManager) SetViewResolver(r ViewResolver) { x.viewResolver = r }
+
+// bufferIRChange buffers an IR change request of the next proposal, under the view resolved for it when the view-aware branch is
+// selected, else by the legacy round-only verification.
+func (x *ConsensusManager) bufferIRChange(req *drctypes.IRChangeReq) error {
+	if x.viewResolver == nil || req == nil {
+		return x.irReqBuffer.Add(x.pacemaker.GetCurrentRound(), req, x.irReqVerifier)
+	}
+	view, err := x.viewResolver.ResolveView(req.Partition, req.Shard, x.pacemaker.GetCurrentRound()+1, storage.PurposeCertify)
+	if err != nil {
+		return fmt.Errorf("resolving the request view: %w", err)
+	}
+	return x.irReqBuffer.AddView(view, req, x.irReqVerifier)
+}
+
+// carryRequestHistory keeps the history the view-aware branch resolves from across a recovery that replaces the verifier: it is
+// committed state, not recovered state, and losing it would silently select the legacy dispatch.
+func carryRequestHistory(from, to *IRChangeReqVerifier) {
+	if from != nil && to != nil {
+		to.SetRequestHistory(from.RequestHistory())
+	}
+}
+
 // onIRChangeMsg handles IR change request messages from other root nodes
 func (x *ConsensusManager) onIRChangeMsg(ctx context.Context, irChangeMsg *abdrc.IrChangeReqMsg) error {
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.onIRChangeMsg")
@@ -709,7 +737,7 @@ func (x *ConsensusManager) onIRChangeMsg(ctx context.Context, irChangeMsg *abdrc
 	// if the node will be the next leader then buffer the request to be included in the block proposal
 	// todo: if in recovery then forward to next?
 	if nextLeader == x.id {
-		if err := x.irReqBuffer.Add(x.pacemaker.GetCurrentRound(), irChangeMsg.IrChangeReq, x.irReqVerifier); err != nil {
+		if err := x.bufferIRChange(irChangeMsg.IrChangeReq); err != nil {
 			// if duplicate - the same is already in progress, then it is ok; this is just most likely a delayed request
 			if errors.Is(err, ErrDuplicateChangeReq) {
 				return nil
@@ -1228,7 +1256,11 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	}
 	var timedOutShards []*types.UnicityCertificate
 	if !oldSuffix {
-		timedOutShards, err = x.t2Timeouts.GetT2Timeouts(round)
+		if x.viewResolver != nil {
+			timedOutShards, err = x.t2Timeouts.GetT2TimeoutsView(round, x.viewResolver)
+		} else {
+			timedOutShards, err = x.t2Timeouts.GetT2Timeouts(round)
+		}
 	}
 	if err != nil {
 		// error here is not fatal, still make a proposal, hopefully the next node will generate timeout
@@ -1251,7 +1283,15 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	if len(handoffRecords) != 0 {
 		payload.HandoffRecords = handoffRecords
 	} else if !oldSuffix {
-		payload = x.irReqBuffer.GeneratePayload(round, timedOutShards, x.blockStore.IsChangeInProgress)
+		if x.viewResolver != nil {
+			var perr error
+			if payload, perr = x.irReqBuffer.GeneratePayloadView(round, timedOutShards, x.blockStore.IsChangeInProgress, x.viewResolver, x.irReqVerifier); perr != nil {
+				x.log.WarnContext(ctx, "cannot resolve the request views of the proposal", logger.Error(perr))
+				return
+			}
+		} else {
+			payload = x.irReqBuffer.GeneratePayload(round, timedOutShards, x.blockStore.IsChangeInProgress)
+		}
 		if profile == storage.ProfileHandoff {
 			payload.Version = profile
 			if parentQC != nil {
@@ -1440,6 +1480,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	}
 	// all ok
 	x.blockStore = blockStore
+	carryRequestHistory(x.irReqVerifier, reqVerifier)
 	x.irReqVerifier = reqVerifier
 	x.t2Timeouts = t2TimeoutGen
 	// exit recovery status and replay buffered messages
