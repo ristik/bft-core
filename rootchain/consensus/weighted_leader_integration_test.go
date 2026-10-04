@@ -101,7 +101,7 @@ func TestWeightedLeaderBelowThresholdMakesNoProgress(t *testing.T) {
 
 // The quorum-preserving control: in 3,2,2,2,2 (W=11, Q=8) the four lights weigh exactly 8, so with the heavy node offline timeouts
 // form TCs and the schedule (the heavy node leads at most two consecutive rounds) gives responsive leaders in a bounded number of
-// rounds: commits recur. The gap is measured as the number of rounds between successive commit advances after the first.
+// rounds: commits recur. The gap is measured in elapsed time between successive advances of the committed round after the first (at most 40 seconds, with at least six advances), not in rounds.
 func TestWeightedLeaderHeavyOfflineWithQuorumLeftHasABoundedGap(t *testing.T) {
 	c := newClusterOf(t, weightedSpec(3, 2, 5, 0))
 	c.start(1, 2, 3, 4)

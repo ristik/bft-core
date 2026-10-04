@@ -417,6 +417,34 @@ func TestWeightedRejectsInvalidInputs(t *testing.T) {
 	_, err = NewWeighted(1, dup)
 	require.ErrorIs(t, err, ErrDuplicateMember)
 
+	// peer.Decode accepts the base58 form and the libp2p-key CID form of one peer: identity is the decoded ID
+	alias := func(nodeID string) string {
+		id, err := peer.Decode(nodeID)
+		require.NoError(t, err)
+		a := peer.ToCid(id).String()
+		require.NotEqual(t, nodeID, a, "premise: the alias is another string")
+		back, err := peer.Decode(a)
+		require.NoError(t, err)
+		require.Equal(t, id, back, "premise: the alias decodes to the same peer")
+		return a
+	}
+	aliasDup := clone()
+	aliasDup[2].NodeID = alias(aliasDup[1].NodeID)
+	_, err = NewWeighted(1, aliasDup)
+	require.ErrorIs(t, err, ErrDuplicateMember, "two encodings of one peer are one member")
+	require.NotErrorIs(t, err, ErrInvalidMember)
+
+	aliasDupFirst := clone()
+	aliasDupFirst[1].NodeID = alias(aliasDupFirst[2].NodeID) // the alias sorts first as a string or last: either way a duplicate
+	_, err = NewWeighted(1, aliasDupFirst)
+	require.ErrorIs(t, err, ErrDuplicateMember)
+
+	nonCanonical := clone()
+	nonCanonical[2].NodeID = alias(nonCanonical[2].NodeID) // no other member is that peer: only the encoding is wrong
+	_, err = NewWeighted(1, nonCanonical)
+	require.ErrorIs(t, err, ErrInvalidMember, "only the canonical encoding is a node ID")
+	require.NotErrorIs(t, err, ErrDuplicateMember)
+
 	zero := clone()
 	zero[1].Stake = 0
 	_, err = NewWeighted(1, zero)

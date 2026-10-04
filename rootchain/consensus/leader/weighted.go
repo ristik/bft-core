@@ -17,9 +17,9 @@ import (
 var (
 	// ErrNoMembers is returned for an empty committee.
 	ErrNoMembers = errors.New("weighted leader: no members")
-	// ErrInvalidMember is returned for a nil member or a node ID that is not a peer ID.
+	// ErrInvalidMember is returned for a nil member, a node ID that is not a peer ID, or a peer ID in a non-canonical encoding.
 	ErrInvalidMember = errors.New("weighted leader: invalid member")
-	// ErrDuplicateMember is returned when two members have the same node ID.
+	// ErrDuplicateMember is returned when two members decode to the same peer ID, however they are encoded.
 	ErrDuplicateMember = errors.New("weighted leader: duplicate member")
 	// ErrInvalidWeight is returned for a member whose weight is zero.
 	ErrInvalidWeight = errors.New("weighted leader: invalid weight")
@@ -76,22 +76,39 @@ func NewWeighted(start uint64, nodes []*types.NodeInfo) (*Weighted, error) {
 			return nil, fmt.Errorf("%w: nil member", ErrInvalidMember)
 		}
 	}
-	ordered := slices.Clone(nodes)
-	slices.SortFunc(ordered, func(a, b *types.NodeInfo) int { return strings.Compare(a.NodeID, b.NodeID) })
-	w := &Weighted{start: start, total: new(big.Int), last: start - 1}
-	for i, n := range ordered {
-		if i > 0 && n.NodeID == ordered[i-1].NodeID {
-			return nil, fmt.Errorf("%w: %q", ErrDuplicateMember, n.NodeID)
-		}
+	// Identity is the DECODED peer ID: peer.Decode accepts several encodings of one peer (the base58 form and the libp2p-key
+	// CID form), so strings alone neither detect a duplicate nor give one ordering. Duplicates are refused on the decoded ID,
+	// and only the canonical encoding of an ID is a valid NodeID (the trust base looks signers up by that string).
+	type entry struct {
+		id peer.ID
+		n  *types.NodeInfo
+	}
+	ordered := make([]entry, len(nodes))
+	seen := make(map[peer.ID]string, len(nodes))
+	for i, n := range nodes {
 		id, err := peer.Decode(n.NodeID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %q: %w", ErrInvalidMember, n.NodeID, err)
 		}
-		if n.Stake == 0 {
-			return nil, fmt.Errorf("%w: %q has weight 0", ErrInvalidWeight, n.NodeID)
+		if first, dup := seen[id]; dup {
+			return nil, fmt.Errorf("%w: %q and %q are the same peer", ErrDuplicateMember, first, n.NodeID)
 		}
-		weight := new(big.Int).SetUint64(n.Stake)
-		w.members = append(w.members, id)
+		seen[id] = n.NodeID
+		ordered[i] = entry{id, n}
+	}
+	for _, e := range ordered {
+		if canonical := e.id.String(); e.n.NodeID != canonical {
+			return nil, fmt.Errorf("%w: %q is not the canonical encoding %q", ErrInvalidMember, e.n.NodeID, canonical)
+		}
+	}
+	slices.SortFunc(ordered, func(a, b entry) int { return strings.Compare(a.id.String(), b.id.String()) })
+	w := &Weighted{start: start, total: new(big.Int), last: start - 1}
+	for _, e := range ordered {
+		if e.n.Stake == 0 {
+			return nil, fmt.Errorf("%w: %q has weight 0", ErrInvalidWeight, e.n.NodeID)
+		}
+		weight := new(big.Int).SetUint64(e.n.Stake)
+		w.members = append(w.members, e.id)
 		w.weights = append(w.weights, weight)
 		w.total.Add(w.total, weight)
 	}
