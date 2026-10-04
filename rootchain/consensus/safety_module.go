@@ -1,17 +1,35 @@
 package consensus
 
 import (
+	"bytes"
 	gocrypto "crypto"
 	"errors"
 	"fmt"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-var ErrAlreadyVotedForRound = errors.New("already voted for round")
+var (
+	ErrAlreadyVotedForRound = errors.New("already voted for round")
+	// ErrNotSafeToVote and ErrNotSafeToTimeout classify a refusal by the voting and timeout rules (as opposed to a storage or
+	// signing failure); ErrBlockNotExtendingQC and ErrHighQcRoundTooLow name the two rules the decision tests isolate.
+	ErrNotSafeToVote       = errors.New("not safe to vote")
+	ErrNotSafeToTimeout    = errors.New("not safe to time-out")
+	ErrBlockNotExtendingQC = errors.New("block does not extend its QC")
+	ErrHighQcRoundTooLow   = errors.New("timeout high QC round is smaller than the highest QC round seen")
+	// ErrNoDecisionStore is returned when an epoch signs with scheme 2 but the safety storage cannot persist a decision.
+	ErrNoDecisionStore = errors.New("safety storage cannot persist signing decisions")
+	// ErrCommittedBlock is returned when the committed block of a committing scheme 2 vote is not the locally executed one.
+	ErrCommittedBlock = errors.New("committed block does not match the executed block")
+	// ErrStoredMessage is returned when the signed message recorded with a decision cannot be decoded or is not the node's own
+	// message for that (epoch, round).
+	ErrStoredMessage = errors.New("recorded signed message does not match its decision")
+)
 
 type (
 	SafetyModule struct {
@@ -20,7 +38,35 @@ type (
 		signer   crypto.Signer
 		verifier crypto.Verifier
 		storage  SafetyStorage
+		// signing selects the scheme per epoch; nil keeps every vote and timeout legacy.
+		signing SigningResolver
+		// committed gives the executed block behind a committed round: scheme 2 votes sign no timestamp, so the native seal
+		// timestamp comes from the locally executed block, never from the (timestamp-less) QC.
+		committed CommittedLookup
 	}
+
+	// SigningResolver is the authenticated per-epoch signing configuration (trustbase.TrustBaseStore).
+	SigningResolver interface {
+		SigningConfig(epoch uint64) (votesig.Config, error)
+	}
+
+	// CommittedBlockInfo is what a committing scheme 2 vote takes from the executed block of the committed round.
+	CommittedBlockInfo struct {
+		Epoch     uint64
+		RootHash  []byte
+		Timestamp uint64
+	}
+	CommittedLookup func(round uint64) (CommittedBlockInfo, error)
+
+	// DecisionStorage persists the one signing decision per (kind, epoch, round) together with the complete signed message
+	// (vote or timeout, with its HighQC and signatures) in one transaction. RecordSignedDecision is idempotent for the same
+	// statement and returns storage.ErrDecisionConflict for a different one.
+	DecisionStorage interface {
+		SignedDecision(kind storage.DecisionKind, epoch, round uint64) (statement, message []byte, err error)
+		RecordSignedDecision(kind storage.DecisionKind, epoch, round uint64, statement, message []byte) error
+	}
+
+	SafetyOption func(*SafetyModule)
 
 	Signable interface {
 		Sign(s crypto.Signer) error
@@ -35,17 +81,52 @@ type (
 	}
 )
 
+// ruleError is a refusal by one of the voting or timeout rules: its text is the rule's own message and it matches the
+// rule's sentinel with errors.Is.
+type ruleError struct {
+	msg  string
+	rule error
+}
+
+func (e *ruleError) Error() string        { return e.msg }
+func (e *ruleError) Is(target error) bool { return target == e.rule }
+
 func isConsecutive(blockRound, round uint64) bool {
 	return round+1 == blockRound
 }
 
-func NewSafetyModule(network types.NetworkID, id string, signer crypto.Signer, db SafetyStorage) (*SafetyModule, error) {
+// WithDomainBoundSigning lets the module sign the scheme 2 statements in epochs whose authenticated configuration says so.
+func WithDomainBoundSigning(r SigningResolver, committed CommittedLookup) SafetyOption {
+	return func(s *SafetyModule) { s.signing, s.committed = r, committed }
+}
+
+func NewSafetyModule(network types.NetworkID, id string, signer crypto.Signer, db SafetyStorage, opts ...SafetyOption) (*SafetyModule, error) {
 	ver, err := signer.Verifier()
 	if err != nil {
 		return nil, fmt.Errorf("invalid root validator signing key: %w", err)
 	}
 
-	return &SafetyModule{network: network, peerID: id, signer: signer, verifier: ver, storage: db}, nil
+	m := &SafetyModule{network: network, peerID: id, signer: signer, verifier: ver, storage: db}
+	for _, o := range opts {
+		o(m)
+	}
+	return m, nil
+}
+
+// config is the signing configuration of the epoch; without a resolver everything is legacy.
+func (s *SafetyModule) config(epoch uint64) (votesig.Config, error) {
+	if s.signing == nil {
+		return votesig.Config{Scheme: votesig.SchemeLegacy}, nil
+	}
+	return s.signing.SigningConfig(epoch)
+}
+
+func (s *SafetyModule) decisions() (DecisionStorage, error) {
+	d, ok := s.storage.(DecisionStorage)
+	if !ok {
+		return nil, ErrNoDecisionStore
+	}
+	return d, nil
 }
 
 func (s *SafetyModule) isSafeToVote(block *drctypes.BlockData, lastRoundTC *drctypes.TimeoutCert) error {
@@ -61,7 +142,7 @@ func (s *SafetyModule) isSafeToVote(block *drctypes.BlockData, lastRoundTC *drct
 	// normal case, block is extended from last QC
 	if lastRoundTC == nil {
 		if !isConsecutive(blockRound, qcRound) {
-			return fmt.Errorf("block round %d does not extend from block qc round %d", blockRound, qcRound)
+			return &ruleError{fmt.Sprintf("block round %d does not extend from block qc round %d", blockRound, qcRound), ErrBlockNotExtendingQC}
 		}
 		// all is fine
 		return nil
@@ -104,8 +185,15 @@ func (s *SafetyModule) MakeVote(block *drctypes.BlockData, execStateID []byte, h
 	}
 	qcRound := block.GetParentRound()
 	votingRound := block.Round
+	cfg, err := s.config(block.Epoch)
+	if err != nil {
+		return nil, fmt.Errorf("signing configuration of epoch %d: %w", block.Epoch, err)
+	}
+	if cfg.Scheme == votesig.SchemeDomainBound {
+		return s.makeVoteDomainBound(cfg, block, execStateID, highQC, lastRoundTC)
+	}
 	if err := s.isSafeToVote(block, lastRoundTC); err != nil {
-		return nil, fmt.Errorf("not safe to vote, %w", err)
+		return nil, fmt.Errorf("%w, %w", ErrNotSafeToVote, err)
 	}
 	if err := s.storage.SetHighestQcRound(qcRound, votingRound); err != nil {
 		return nil, fmt.Errorf("persisting voting rounds: %w", err)
@@ -143,10 +231,17 @@ func (s *SafetyModule) SignTimeout(tmoVote *abdrc.TimeoutMsg, lastRoundTC *drcty
 	if err := tmoVote.IsValid(); err != nil {
 		return fmt.Errorf("timeout message not valid, %w", err)
 	}
+	cfg, err := s.config(tmoVote.Timeout.Epoch)
+	if err != nil {
+		return fmt.Errorf("signing configuration of epoch %d: %w", tmoVote.Timeout.Epoch, err)
+	}
+	if cfg.Scheme == votesig.SchemeDomainBound {
+		return s.signTimeoutDomainBound(cfg, tmoVote, lastRoundTC)
+	}
 	qcRound := tmoVote.Timeout.GetHqcRound()
 	round := tmoVote.GetRound()
 	if err := s.isSafeToTimeout(round, qcRound, lastRoundTC); err != nil {
-		return fmt.Errorf("not safe to time-out, %w", err)
+		return fmt.Errorf("%w, %w", ErrNotSafeToTimeout, err)
 	}
 	// stop voting for this round, all other request to sign a normal vote for this round will be rejected
 	if err := s.storage.SetHighestVotedRound(round); err != nil {
@@ -163,7 +258,7 @@ func (s *SafetyModule) Sign(msg Signable) error {
 func (s *SafetyModule) isSafeToTimeout(round, tmoHighQCRound uint64, lastRoundTC *drctypes.TimeoutCert) error {
 	if hqc := s.storage.GetHighestQcRound(); tmoHighQCRound < hqc {
 		// respect highest qc round
-		return fmt.Errorf("timeout high qc round %d is smaller than highest qc round %d seen", tmoHighQCRound, hqc)
+		return &ruleError{fmt.Sprintf("timeout high qc round %d is smaller than highest qc round %d seen", tmoHighQCRound, hqc), ErrHighQcRoundTooLow}
 	}
 	if round <= tmoHighQCRound {
 		return fmt.Errorf("timeout round %v is in the past, timeout msg high qc is for round %v",
@@ -195,4 +290,202 @@ func (s *SafetyModule) isCommitCandidate(block *drctypes.BlockData) *drctypes.Ro
 		return block.Qc.VoteInfo
 	}
 	return nil
+}
+
+// makeVoteDomainBound makes a scheme 2 vote the way Diem/Aptos SafetyRules do. Both signatures are made first, in memory, and
+// the statement (PV and, for a committing vote, the native seal bytes) is recorded durably together with the COMPLETE signed
+// vote, HighQC and anchor included, in one transaction before the vote is returned. Nothing signed leaves the node before it is
+// on disk, so a crash earlier leaves no decision and a retry is free; a crash later, or a restart, finds the decision and
+// returns the recorded message itself, never a re-signed one. A different statement for the same (epoch, round) is refused
+// with ErrDecisionConflict.
+func (s *SafetyModule) makeVoteDomainBound(cfg votesig.Config, block *drctypes.BlockData, execStateID []byte, highQC *drctypes.QuorumCert, lastRoundTC *drctypes.TimeoutCert) (*abdrc.VoteMsg, error) {
+	decisions, err := s.decisions()
+	if err != nil {
+		return nil, err
+	}
+	qcRound := block.GetParentRound()
+	info := &drctypes.RoundInfo{Version: 1, RoundNumber: block.Round, Epoch: block.Epoch, ParentRoundNumber: qcRound, CurrentRootHash: execStateID}
+	vi := votesig.VoteInfo{Epoch: info.Epoch, Round: info.RoundNumber, Parent: qcRound}
+	copy(vi.Exec[:], execStateID)
+	vh, err := cfg.VoteInfoHash(vi)
+	if err != nil {
+		return nil, err
+	}
+	seal, err := s.constructCommitInfoDomainBound(block, vh[:])
+	if err != nil {
+		return nil, err
+	}
+	pv, sealBytes, _, err := drctypes.DomainBoundStatement(cfg, info, seal, false)
+	if err != nil {
+		return nil, fmt.Errorf("vote statement: %w", err)
+	}
+	statement, err := types.Cbor.Marshal([][]byte{pv, sealBytes})
+	if err != nil {
+		return nil, fmt.Errorf("encoding vote statement: %w", err)
+	}
+	existing, stored, err := decisions.SignedDecision(storage.DecisionVote, block.Epoch, block.Round)
+	if err != nil {
+		return nil, fmt.Errorf("reading signing decision: %w", err)
+	}
+	if existing != nil {
+		// a retry after a restart or a crash before the vote was sent: only the recorded statement, as the recorded message
+		if !bytes.Equal(existing, statement) {
+			return nil, fmt.Errorf("not safe to vote, %w: epoch %d round %d", storage.ErrDecisionConflict, block.Epoch, block.Round)
+		}
+		var voteMsg abdrc.VoteMsg
+		if err := types.Cbor.Unmarshal(stored, &voteMsg); err != nil {
+			return nil, fmt.Errorf("%w: vote epoch %d round %d: %w", ErrStoredMessage, block.Epoch, block.Round, err)
+		}
+		if voteMsg.VoteInfo == nil || voteMsg.VoteInfo.Epoch != block.Epoch || voteMsg.VoteInfo.RoundNumber != block.Round || voteMsg.Author != s.peerID {
+			return nil, fmt.Errorf("%w: vote epoch %d round %d", ErrStoredMessage, block.Epoch, block.Round)
+		}
+		if err := s.storage.SetHighestQcRound(qcRound, block.Round); err != nil {
+			return nil, fmt.Errorf("persisting voting rounds: %w", err)
+		}
+		return &voteMsg, nil
+	}
+	if err := s.isSafeToVote(block, lastRoundTC); err != nil {
+		return nil, fmt.Errorf("%w, %w", ErrNotSafeToVote, err)
+	}
+	voteMsg := &abdrc.VoteMsg{VoteInfo: info, LedgerCommitInfo: seal, HighQc: highQC, Anchor: block.Anchor, Author: s.peerID}
+	if err := voteMsg.SignDomainBound(s.signer, cfg); err != nil {
+		return nil, err
+	}
+	message, err := types.Cbor.Marshal(voteMsg)
+	if err != nil {
+		return nil, fmt.Errorf("encoding signed vote: %w", err)
+	}
+	if err := decisions.RecordSignedDecision(storage.DecisionVote, block.Epoch, block.Round, statement, message); err != nil {
+		return nil, fmt.Errorf("persisting signing decision: %w", err)
+	}
+	if err := s.storage.SetHighestQcRound(qcRound, block.Round); err != nil {
+		return nil, fmt.Errorf("persisting voting rounds: %w", err)
+	}
+	return voteMsg, nil
+}
+
+// constructCommitInfoDomainBound is constructCommitInfo for scheme 2: the committed block is the locally executed one, whose
+// epoch and state must be those of the committed round, and the seal timestamp is its timestamp.
+func (s *SafetyModule) constructCommitInfoDomainBound(block *drctypes.BlockData, voteInfoHash []byte) (*types.UnicitySeal, error) {
+	committedRound := s.isCommitCandidate(block)
+	if committedRound == nil {
+		return &types.UnicitySeal{Version: 1, PreviousHash: voteInfoHash}, nil
+	}
+	if s.committed == nil {
+		return nil, fmt.Errorf("%w: no executed block source", ErrCommittedBlock)
+	}
+	executed, err := s.committed(committedRound.RoundNumber)
+	if err != nil {
+		return nil, fmt.Errorf("%w: round %d: %w", ErrCommittedBlock, committedRound.RoundNumber, err)
+	}
+	if executed.Epoch != committedRound.Epoch || !bytes.Equal(executed.RootHash, committedRound.CurrentRootHash) {
+		return nil, fmt.Errorf("%w: round %d", ErrCommittedBlock, committedRound.RoundNumber)
+	}
+	return &types.UnicitySeal{
+		Version:              1,
+		NetworkID:            s.network,
+		PreviousHash:         voteInfoHash,
+		RootChainRoundNumber: committedRound.RoundNumber,
+		Epoch:                committedRound.Epoch,
+		Timestamp:            executed.Timestamp,
+		Hash:                 committedRound.CurrentRootHash,
+	}, nil
+}
+
+// signTimeoutDomainBound signs PT with the same rule as the vote: the signature is made in memory, then PT and the complete
+// signed timeout (HighQC and last TC included) are recorded in one transaction, and only then is the message returned. A
+// recorded decision for the same statement hands back the recorded message; a different statement is refused.
+func (s *SafetyModule) signTimeoutDomainBound(cfg votesig.Config, tmoVote *abdrc.TimeoutMsg, lastRoundTC *drctypes.TimeoutCert) error {
+	decisions, err := s.decisions()
+	if err != nil {
+		return err
+	}
+	statement, err := tmoVote.Preimage(cfg)
+	if err != nil {
+		return fmt.Errorf("timeout statement: %w", err)
+	}
+	epoch, round := tmoVote.Timeout.Epoch, tmoVote.GetRound()
+	existing, stored, err := decisions.SignedDecision(storage.DecisionTimeout, epoch, round)
+	if err != nil {
+		return fmt.Errorf("reading signing decision: %w", err)
+	}
+	if existing != nil {
+		if !bytes.Equal(existing, statement) {
+			return fmt.Errorf("not safe to time-out, %w: epoch %d round %d", storage.ErrDecisionConflict, epoch, round)
+		}
+		recorded, err := s.decodeStoredTimeout(stored, epoch, round)
+		if err != nil {
+			return err
+		}
+		if err := s.storage.SetHighestVotedRound(round); err != nil {
+			return fmt.Errorf("storing voted round: %w", err)
+		}
+		*tmoVote = *recorded
+		return nil
+	}
+	if err := s.isSafeToTimeout(round, tmoVote.Timeout.GetHqcRound(), lastRoundTC); err != nil {
+		return fmt.Errorf("%w, %w", ErrNotSafeToTimeout, err)
+	}
+	if err := tmoVote.SignDomainBound(s.signer, cfg); err != nil {
+		return err
+	}
+	message, err := types.Cbor.Marshal(tmoVote)
+	if err != nil {
+		tmoVote.Signature = nil
+		return fmt.Errorf("encoding signed timeout: %w", err)
+	}
+	if err := decisions.RecordSignedDecision(storage.DecisionTimeout, epoch, round, statement, message); err != nil {
+		tmoVote.Signature = nil // nothing signed is returned that is not on disk
+		return fmt.Errorf("persisting signing decision: %w", err)
+	}
+	if err := s.storage.SetHighestVotedRound(round); err != nil {
+		return fmt.Errorf("storing voted round: %w", err)
+	}
+	return nil
+}
+
+// RecordedTimeout is the complete signed timeout this node recorded for (epoch, round), or nil when it recorded none. A node
+// that restarted after signing a timeout sends this message again instead of building a new one from its (possibly advanced)
+// HighQC, which the recorded decision would refuse. It is nil, without touching the store, for an epoch that signs legacy.
+func (s *SafetyModule) RecordedTimeout(epoch, round uint64) (*abdrc.TimeoutMsg, error) {
+	cfg, err := s.config(epoch)
+	if err != nil {
+		return nil, fmt.Errorf("signing configuration of epoch %d: %w", epoch, err)
+	}
+	if cfg.Scheme != votesig.SchemeDomainBound {
+		return nil, nil // only scheme 2 records decisions; a legacy epoch never touches the decision store
+	}
+	decisions, err := s.decisions()
+	if err != nil {
+		if errors.Is(err, ErrNoDecisionStore) {
+			return nil, nil // a store without decisions has recorded none
+		}
+		return nil, err
+	}
+	statement, stored, err := decisions.SignedDecision(storage.DecisionTimeout, epoch, round)
+	if err != nil {
+		return nil, fmt.Errorf("reading signing decision: %w", err)
+	}
+	if statement == nil {
+		return nil, nil
+	}
+	recorded, err := s.decodeStoredTimeout(stored, epoch, round)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.storage.SetHighestVotedRound(round); err != nil {
+		return nil, fmt.Errorf("storing voted round: %w", err)
+	}
+	return recorded, nil
+}
+
+func (s *SafetyModule) decodeStoredTimeout(stored []byte, epoch, round uint64) (*abdrc.TimeoutMsg, error) {
+	var msg abdrc.TimeoutMsg
+	if err := types.Cbor.Unmarshal(stored, &msg); err != nil {
+		return nil, fmt.Errorf("%w: timeout epoch %d round %d: %w", ErrStoredMessage, epoch, round, err)
+	}
+	if msg.Timeout == nil || msg.Timeout.Epoch != epoch || msg.Timeout.Round != round || msg.Author != s.peerID {
+		return nil, fmt.Errorf("%w: timeout epoch %d round %d", ErrStoredMessage, epoch, round)
+	}
+	return &msg, nil
 }

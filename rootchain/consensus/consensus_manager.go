@@ -284,7 +284,17 @@ func NewConsensusManager(
 			return nil, fmt.Errorf("handoff authority: %w", err)
 		}
 	}
-	safetyModule, err := NewSafetyModule(trustBase.GetNetworkID(), nodeID.String(), signer, store)
+	// The lookup reads the manager's CURRENT block store: recovery replaces x.blockStore, and a store captured here would go stale.
+	// The manager is assigned below, before anything can sign.
+	var manager *ConsensusManager
+	safetyModule, err := NewSafetyModule(trustBase.GetNetworkID(), nodeID.String(), signer, store,
+		WithDomainBoundSigning(trustBaseStore, func(round uint64) (CommittedBlockInfo, error) {
+			b, err := manager.blockStore.Block(round)
+			if err != nil {
+				return CommittedBlockInfo{}, err
+			}
+			return CommittedBlockInfo{Epoch: b.BlockData.Epoch, RootHash: b.RootHash, Timestamp: b.BlockData.Timestamp}, nil
+		}))
 	if err != nil {
 		return nil, err
 	}
@@ -335,6 +345,7 @@ func NewConsensusManager(
 	if err := consensusManager.initMetrics(observe); err != nil {
 		return nil, fmt.Errorf("initializing metrics: %w", err)
 	}
+	manager = consensusManager
 	return consensusManager, nil
 }
 
@@ -621,13 +632,25 @@ func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 		} else {
 			timeout = drctypes.NewTimeout(x.pacemaker.GetCurrentRound(), x.trustBase.Load().Epoch, qc)
 		}
-		timeoutVoteMsg = abdrc.NewTimeoutMsg(
-			timeout,
-			x.id.String(),
-			x.pacemaker.LastRoundTC())
-		if err := x.safety.SignTimeout(timeoutVoteMsg, x.pacemaker.LastRoundTC()); err != nil {
-			x.log.WarnContext(ctx, "failed to sign timeout", logger.Error(err))
+		// A timeout this node already signed for the round (and recorded with its decision before it left the node) is sent
+		// again as it was, with the HighQC it carried: a node restarted after the signing may hold a newer HighQC, and a
+		// timeout built from it would be a different statement that the decision refuses.
+		recorded, err := x.safety.RecordedTimeout(timeout.Epoch, timeout.Round)
+		if err != nil {
+			x.log.WarnContext(ctx, "failed to read the recorded timeout", logger.Error(err))
 			return
+		}
+		if recorded != nil {
+			timeoutVoteMsg = recorded
+		} else {
+			timeoutVoteMsg = abdrc.NewTimeoutMsg(
+				timeout,
+				x.id.String(),
+				x.pacemaker.LastRoundTC())
+			if err := x.safety.SignTimeout(timeoutVoteMsg, x.pacemaker.LastRoundTC()); err != nil {
+				x.log.WarnContext(ctx, "failed to sign timeout", logger.Error(err))
+				return
+			}
 		}
 		if err := x.blockStore.StoreLastVote(timeoutVoteMsg); err != nil {
 			x.log.WarnContext(ctx, "failed to store timeout vote", logger.Error(err))
