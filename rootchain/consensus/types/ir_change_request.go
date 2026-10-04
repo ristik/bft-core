@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -29,9 +30,10 @@ type (
 		Requests []*certification.BlockCertificationRequest
 	}
 
+	// RequestVerifier decides which requests are valid for the shard round (ValidRequest: signature, membership and
+	// continuity) and carries the weights they are counted with.
 	RequestVerifier interface {
-		GetQuorum() uint64
-		GetTotalNodes() uint64
+		RequestWeights
 		ValidRequest(req *certification.BlockCertificationRequest) error
 	}
 
@@ -55,16 +57,6 @@ func (r IRChangeReason) String() string {
 	return fmt.Sprintf("unknown IR change reason %d", int(r))
 }
 
-func getMaxHashCount(hashCnt map[sha256Hash]uint64) uint64 {
-	var cnt uint64 = 0
-	for _, c := range hashCnt {
-		if c > cnt {
-			cnt = c
-		}
-	}
-	return cnt
-}
-
 func (x *IRChangeReq) IsValid() error {
 	// ignore other values for now, just make sure it is not negative
 	if x.CertReason > T2Timeout {
@@ -80,62 +72,72 @@ func (x *IRChangeReq) Verify(tb RequestVerifier, luc *types.UnicityCertificate, 
 	if err := x.IsValid(); err != nil {
 		return nil, fmt.Errorf("invalid IR Change Request: %w", err)
 	}
-	// quick sanity check, there cannot be more requests than known partition nodes
-	if uint64(len(x.Requests)) > tb.GetTotalNodes() {
-		return nil, errors.New("IR Change Request contains more requests than registered partition nodes")
+	// quick sanity check, there cannot be more requests than known partition nodes (a member count, not a weight)
+	if uint64(len(x.Requests)) > uint64(tb.MemberCount()) {
+		return nil, withSentinels{errors.New("IR Change Request contains more requests than registered partition nodes"), []error{ErrInvalidRequest}}
 	}
-	// verify IR change proof
-	// monitor hash counts
-	hashCnt := make(map[sha256Hash]uint64)
-	// duplicate requests
-	nodeIDs := make(map[string]struct{})
-	// validate all block request in the proof
+	// verify IR change proof: every request is validated and counted from the proof alone, never from a claimed total
+	tally := NewRequestTally(tb)
 	for _, req := range x.Requests {
+		if req == nil {
+			return nil, fmt.Errorf("invalid partition %s proof: %w: nil request", x.Partition, ErrInvalidRequest)
+		}
 		if x.Partition != req.PartitionID || !x.Shard.Equal(req.ShardID) {
-			return nil, fmt.Errorf("shard of the change request is %s-%s but block certification request is for %s=%s",
-				x.Partition, x.Shard, req.PartitionID, req.ShardID)
+			return nil, withSentinels{fmt.Errorf("shard of the change request is %s-%s but block certification request is for %s=%s",
+				x.Partition, x.Shard, req.PartitionID, req.ShardID), []error{ErrInvalidRequest}}
 		}
 		if err := tb.ValidRequest(req); err != nil {
 			return nil, fmt.Errorf("invalid certification request: %w", err)
 		}
-		if _, found := nodeIDs[req.NodeID]; found {
-			return nil, fmt.Errorf("invalid partition %s proof: contains duplicate request from node %v", x.Partition, req.NodeID)
-		}
-		// register node id
-		nodeIDs[req.NodeID] = struct{}{}
-		// get hash of IR and add to hash counter
+		// the group of the request: its IR and sizes
 		hash, err := abhash.HashValues(crypto.SHA256, req.InputRecord, req.BlockSize, req.StateSize)
 		if err != nil {
-			return nil, fmt.Errorf("failed to calculate hash: %w", err)
+			return nil, withSentinels{fmt.Errorf("failed to calculate hash: %w", err), []error{ErrInvalidRequest}}
 		}
-		hashCnt[sha256Hash(hash)] = hashCnt[sha256Hash(hash)] + 1
+		if err := tally.Add(req.NodeID, sha256Hash(hash)); err != nil {
+			if errors.Is(err, quorumweight.ErrDuplicateSigner) {
+				return nil, withSentinels{fmt.Errorf("invalid partition %s proof: contains duplicate request from node %v", x.Partition, req.NodeID),
+					[]error{quorumweight.ErrDuplicateSigner, ErrInvalidRequest}}
+			}
+			return nil, fmt.Errorf("invalid certification request: %w", err)
+		}
 	}
 	// match request type to proof
 	switch x.CertReason {
 	case Quorum:
+		if err := tally.Validate(); err != nil {
+			return nil, withSentinels{fmt.Errorf("invalid partition %s proof: %w", x.Partition, err), []error{ErrInvalidRequest}}
+		}
 		// 1. require that all input records served as proof are the same
 		// reject requests carrying redundant info, there is no use for proofs that do not participate in quorum
 		// perhaps this is a bit harsh, but let's not waste bandwidth
-		if len(hashCnt) != 1 {
-			return nil, fmt.Errorf("invalid partition %s quorum proof: contains proofs for different state hashes", x.Partition)
+		if tally.Groups() != 1 {
+			return nil, withSentinels{fmt.Errorf("invalid partition %s quorum proof: contains proofs for different state hashes", x.Partition), []error{ErrInvalidRequest}}
 		}
-		// 2. more than 50% of the nodes must have voted for the same IR
-		if count, q := getMaxHashCount(hashCnt), tb.GetQuorum(); count < q {
-			return nil, fmt.Errorf("invalid partition %s quorum proof: not enough requests to prove quorum (got %d, need %d)", x.Partition, count, q)
+		// 2. the matching weight must reach the threshold, more than 50% of the total
+		if !tally.QuorumReached() {
+			return nil, withSentinels{fmt.Errorf("invalid partition %s quorum proof: not enough requests to prove quorum (got %d, need %d)", x.Partition, tally.Matching(), tb.Threshold()),
+				[]error{quorumweight.ErrQuorumNotReached, ErrInvalidRequest}}
 		}
 		// if any request did not extend previous state the whole IRChange request is rejected in validation step
 		// NB! there was at least one request, otherwise we would not be here
 		return x.Requests[0].InputRecord, nil
 	case QuorumNotPossible:
-		maxHC := getMaxHashCount(hashCnt)
-		if maxHC >= tb.GetQuorum() {
-			return nil, fmt.Errorf("can't certify 'no quorum' as one input already does have quorum (%d votes, quorum is %d)", maxHC, tb.GetQuorum())
+		if err := tally.Validate(); err != nil {
+			return nil, withSentinels{fmt.Errorf("invalid partition %s proof: %w", x.Partition, err), []error{ErrInvalidRequest}}
 		}
-		// Verify that enough partition nodes have voted for different IR change
-		// a) find how many votes are missing (nof nodes - requests)
-		// b) if the missing votes would also vote for the most popular hash, it must be still not enough to come to a quorum
-		if vc := tb.GetTotalNodes() - uint64(len(x.Requests)) + maxHC; vc >= tb.GetQuorum() {
-			return nil, fmt.Errorf("not enough votes to prove 'no quorum' - it is possible to get %d votes, quorum is %d", vc, tb.GetQuorum())
+		if tally.QuorumReached() {
+			return nil, withSentinels{fmt.Errorf("can't certify 'no quorum' as one input already does have quorum (%d votes, quorum is %d)", tally.Matching(), tb.Threshold()), []error{ErrInvalidRequest}}
+		}
+		// Verify that enough weight has voted for different IR change: even if all the weight still missing (W-R) joined
+		// the heaviest group, M+U must be strictly below Q. M+U == Q is still possible.
+		impossible, err := tally.QuorumImpossible()
+		if err != nil {
+			return nil, withSentinels{fmt.Errorf("invalid partition %s 'no quorum' proof: %w", x.Partition, err), []error{ErrInvalidRequest}}
+		}
+		if !impossible {
+			return nil, withSentinels{fmt.Errorf("not enough votes to prove 'no quorum' - it is possible to get %d votes, quorum is %d",
+				tb.TotalWeight()-tally.Received()+tally.Matching(), tb.Threshold()), []error{ErrInvalidRequest}}
 		}
 		// initiate repeat UC
 		return luc.InputRecord.NewRepeatIR(), nil

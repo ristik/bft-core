@@ -3,10 +3,12 @@ package types
 import (
 	"crypto"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -379,16 +381,42 @@ func TestIRChangeReq_String(t *testing.T) {
 	require.Equal(t, "00000002->timeout", x.String())
 }
 
+// mockReqVerifier is unit-weighted with nodeCnt members, or weighted by weights when set.
 type mockReqVerifier struct {
 	nodeCnt  uint64
+	weights  map[string]uint64
 	validReq func(req *certification.BlockCertificationRequest) error
 }
 
-func (rv mockReqVerifier) GetQuorum() uint64 {
-	return (rv.nodeCnt / 2) + 1
+func (rv mockReqVerifier) MemberCount() int {
+	if rv.weights != nil {
+		return len(rv.weights)
+	}
+	return int(rv.nodeCnt)
 }
 
-func (rv mockReqVerifier) GetTotalNodes() uint64 { return rv.nodeCnt }
+func (rv mockReqVerifier) TotalWeight() uint64 {
+	if rv.weights == nil {
+		return rv.nodeCnt
+	}
+	var t uint64
+	for _, w := range rv.weights {
+		t += w
+	}
+	return t
+}
+
+func (rv mockReqVerifier) Threshold() uint64 { return rv.TotalWeight()/2 + 1 }
+
+func (rv mockReqVerifier) SignerWeight(id string) (uint64, error) {
+	if rv.weights == nil {
+		return 1, nil
+	}
+	if w, ok := rv.weights[id]; ok {
+		return w, nil
+	}
+	return 0, fmt.Errorf("%w: %q", quorumweight.ErrUnknownSigner, id)
+}
 
 func (rv mockReqVerifier) ValidRequest(req *certification.BlockCertificationRequest) error {
 	if rv.validReq == nil {

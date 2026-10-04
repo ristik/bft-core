@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	testsig "github.com/unicitynetwork/bft-core/internal/testutils/sig"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -171,10 +172,16 @@ func Test_ShardInfo_ValidRequest(t *testing.T) {
 		// changing some property should invalidate the signature
 		bcr.InputRecord.RoundNumber++
 		require.EqualError(t, si.ValidRequest(bcr), `invalid certification request: signature verification: verification failed`)
+		require.ErrorIs(t, si.ValidRequest(bcr), quorumweight.ErrInvalidSignature, "a forged request is told from a malformed one")
+		require.NotErrorIs(t, si.ValidRequest(bcr), ErrNodeNotInTrustBase)
 
 		bcr.NodeID = "unknown"
 		require.EqualError(t, si.ValidRequest(bcr), `invalid certification request: node "unknown" is not in the trustbase of the shard`)
 		require.ErrorIs(t, si.ValidRequest(bcr), ErrNodeNotInTrustBase)
+		require.ErrorIs(t, si.ValidRequest(bcr), quorumweight.ErrUnknownSigner)
+		require.NotErrorIs(t, si.ValidRequest(bcr), quorumweight.ErrInvalidSignature)
+
+		require.ErrorIs(t, si.ValidRequest(nil), certification.ErrBlockCertificationRequestIsNil)
 	})
 
 	t.Run("round number", func(t *testing.T) {
