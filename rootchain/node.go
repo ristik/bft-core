@@ -305,6 +305,8 @@ func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certificati
 		return fmt.Errorf("subscribing the sender: %w", err)
 	}
 
+	// requests counted for an earlier shard round, anchor or assignment are retired, never counted again
+	v.incomingRequests.Retire(req.PartitionID, req.ShardID, si)
 	// check if consensus is already achieved
 	if res := v.incomingRequests.IsConsensusReceived(req.PartitionID, req.ShardID, si); res != QuorumInProgress {
 		v.log.DebugContext(ctx, fmt.Sprintf("dropping stale block certification request (%s) for partition %s", res, req.PartitionID), logger.Shard(req.PartitionID, req.ShardID))

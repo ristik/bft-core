@@ -775,6 +775,14 @@ func (si *ShardInfo) Identity() string {
 	return si.requestCtx.Identity()
 }
 
+// RoundTag is the shard round and anchor the shard's next requests build on, the same tag a view of the shard carries.
+func (si *ShardInfo) RoundTag() string {
+	if si.LastCR == nil {
+		return ""
+	}
+	return roundTag(si.LastCR.Technical.Round, si.LastCR.Technical.Epoch, si.RootHash, si.LastCR.UC.UnicitySeal.Timestamp)
+}
+
 func (si *ShardInfo) GetQuorum() uint64 {
 	// at least 50%
 	return (uint64(len(si.trustBase)) / 2) + 1

@@ -12,6 +12,7 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -288,6 +289,25 @@ func assignmentKey(a *RequestActivation, hashAlg crypto.Hash) []byte {
 func (v *RequestRoundView) AssignmentKey() []byte { return bytes.Clone(v.assignKey) }
 func (v *RequestRoundView) ViewKey() []byte       { return bytes.Clone(v.viewKey) }
 
+// Identity is the assignment identity the buffer tags tallies with: the AssignmentKey, never the shard epoch alone.
+func (v *RequestRoundView) Identity() string { return hex.EncodeToString(v.assignKey) }
+
+// RoundTag is the shard round and anchor the requests of the view build on.
+func (v *RequestRoundView) RoundTag() string {
+	return roundTag(v.expectedTR.Round, v.expectedTR.Epoch, v.prevHash, v.prevUC.UnicitySeal.Timestamp)
+}
+
+// roundTag is the canonical tag of the shard round and anchor (expected round, epoch, previous state hash and timestamp).
+func roundTag(round, epoch uint64, prevHash []byte, timestamp uint64) string {
+	h := sha256.New()
+	lp(h, []byte("UNICITY_Q2_ROUND_TAG"))
+	lpu(h, round)
+	lpu(h, epoch)
+	lp(h, prevHash)
+	lpu(h, timestamp)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 func (v *RequestRoundView) bindViewKey(hashAlg crypto.Hash) {
 	h := sha256.New()
 	lp(h, []byte("UNICITY_Q2_VIEW_KEY"))
@@ -336,6 +356,9 @@ func (v *RequestRoundView) PreviousUC() (*types.UnicityCertificate, error) {
 
 // PreviousStateHash is the last certified state hash requests must build on.
 func (v *RequestRoundView) PreviousStateHash() []byte { return bytes.Clone(v.prevHash) }
+
+// HasPendingChange reports whether the snapshot froze a change of the shard in the uncommitted pipeline.
+func (v *RequestRoundView) HasPendingChange() bool { return v.pending != nil }
 
 // T2Timeout is the configured timeout of the authorised configuration; only elapsed root rounds ever use it.
 func (v *RequestRoundView) T2Timeout() time.Duration { return v.t2 }
@@ -580,12 +603,25 @@ func viewDispatch(v IRChangeReqVerifier) RequestViewVerifier {
 // resolveExecutionView resolves the view a block executes the shard's requests under, from the verified state the block is
 // being executed on (parent) and the committed history, never from the last committed ShardInfo.
 func resolveExecutionView(vv RequestViewVerifier, parent *ShardInfo, parentID []byte, round uint64, hashAlg crypto.Hash) (*RequestRoundView, error) {
-	h := vv.RequestHistory()
+	return ResolveParentView(vv.RequestHistory(), vv.PendingChange(parent.PartitionID, parent.ShardID), parent, parentID, round, hashAlg, PurposeExecute, nil)
+}
+
+// ResolveParentView resolves the view of the shard's requests for the target root round and purpose from the committed
+// history and the verified parent state (with the change still in its pipeline). It is the one resolution shared by execution,
+// the leader's admission and proposal, and timeout generation; a failure returns no view and is never answered from the last
+// committed state.
+func ResolveParentView(h RequestHistory, pending *types.InputRecord, parent *ShardInfo, parentID []byte, round uint64, hashAlg crypto.Hash, purpose RequestPurpose, cache *RequestViewCache) (*RequestRoundView, error) {
+	if h == nil {
+		return nil, fmt.Errorf("%w: no committed request history", ErrAssignmentHistory)
+	}
+	if parent == nil {
+		return nil, fmt.Errorf("%w: no verified parent state", ErrAssignmentHistory)
+	}
 	chain, err := h.Chain(parent.PartitionID, parent.ShardID)
 	if err != nil {
 		return nil, errors.Join(ErrAssignmentHistory, err)
 	}
-	snap, err := NewRequestSnapshot(h.Network(), hashAlg, parent, parentID, vv.PendingChange(parent.PartitionID, parent.ShardID), chain...)
+	snap, err := NewRequestSnapshot(h.Network(), hashAlg, parent, parentID, pending, chain...)
 	if err != nil {
 		return nil, err
 	}
@@ -593,8 +629,12 @@ func resolveExecutionView(vv RequestViewVerifier, parent *ShardInfo, parentID []
 	if err != nil {
 		return nil, errors.Join(ErrAssignmentHistory, err)
 	}
-	return ResolveRequestContext(RequestQuery{Network: h.Network(), Partition: parent.PartitionID, Shard: parent.ShardID, RootEpoch: rootEpoch,
-		RootRound: round, RootBodyID: rootBody, Version: h.Version(), ParentID: parentID, PrevUCDigest: snap.parent.ucDigest, Purpose: PurposeExecute}, snap)
+	q := RequestQuery{Network: h.Network(), Partition: parent.PartitionID, Shard: parent.ShardID, RootEpoch: rootEpoch,
+		RootRound: round, RootBodyID: rootBody, Version: h.Version(), ParentID: parentID, PrevUCDigest: snap.parent.ucDigest, Purpose: purpose}
+	if cache != nil {
+		return cache.Resolve(q, snap)
+	}
+	return ResolveRequestContext(q, snap)
 }
 
 // ineligibleAtExecution reports whether a request is outside the view for a reason that makes it ineligible rather than the

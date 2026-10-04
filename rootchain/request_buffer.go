@@ -31,6 +31,12 @@ type (
 		Identity() string
 	}
 
+	// RoundTagged is implemented by a QuorumInfo that also knows the shard round and anchor its requests build on (expected
+	// round, epoch, previous state hash and timestamp). Tallies are tagged with it too; one that does not tag is untagged.
+	RoundTagged interface {
+		RoundTag() string
+	}
+
 	CertRequestBuffer struct {
 		mu    sync.RWMutex
 		store map[partitionShard]*requestBuffer
@@ -56,6 +62,8 @@ type (
 		tally *rctypes.RequestTally
 		// identity of the assignment the tally was counted under
 		identity string
+		// shard round and anchor the tally was counted for
+		roundTag string
 		qState   QuorumStatus
 
 		start     time.Time
@@ -143,11 +151,37 @@ func (c *CertRequestBuffer) IsConsensusReceived(partition types.PartitionID, sha
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	rs := c.get(partition, shard)
-	if rs.tally != nil && tb != nil && rs.identity != tb.Identity() {
-		// counted under another assignment: the status says nothing about this one
+	if rs.tally != nil && tb != nil && (rs.identity != tb.Identity() || rs.roundTag != tagOf(tb)) {
+		// counted under another assignment, shard round or anchor: the status says nothing about this one
 		return QuorumUnknown
 	}
 	return rs.qState
+}
+
+// Retire forgets what was counted for the shard when it was counted under another assignment, shard round or anchor than tb
+// names, and reports whether it did. Old signatures are dropped, never retallied with the weights of the new context. A buffer
+// counted under tb, or an empty one, is untouched.
+func (c *CertRequestBuffer) Retire(partition types.PartitionID, shard types.ShardID, tb QuorumInfo) bool {
+	if tb == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := partitionShard{partition: partition, shard: shard.Key()}
+	rs, ok := c.store[key]
+	if !ok || rs.tally == nil || (rs.identity == tb.Identity() && rs.roundTag == tagOf(tb)) {
+		return false
+	}
+	rs.reset()
+	return true
+}
+
+// tagOf is the shard round and anchor tag of tb, empty for a QuorumInfo that does not carry one.
+func tagOf(tb QuorumInfo) string {
+	if t, ok := tb.(RoundTagged); ok {
+		return t.RoundTag()
+	}
+	return ""
 }
 
 /*
@@ -217,6 +251,9 @@ func (rs *requestBuffer) add(req *certification.BlockCertificationRequest, tb Qu
 	if !empty && rs.identity != tb.Identity() {
 		return QuorumUnknown, nil, fmt.Errorf("%w: requests are counted under assignment %q, not %q", quorumweight.ErrRequestContext, rs.identity, tb.Identity())
 	}
+	if !empty && rs.roundTag != tagOf(tb) {
+		return QuorumUnknown, nil, fmt.Errorf("%w: requests are counted for shard round/anchor %q, not %q", quorumweight.ErrRequestContext, rs.roundTag, tagOf(tb))
+	}
 	if _, f := rs.nodeRequest[req.NodeID]; f {
 		return QuorumUnknown, nil, dupRequest{}
 	}
@@ -245,7 +282,7 @@ func (rs *requestBuffer) add(req *certification.BlockCertificationRequest, tb Qu
 		// start clock to track time until consensus is achieved
 		rs.start = time.Now()
 	}
-	rs.tally, rs.identity = tally, tb.Identity()
+	rs.tally, rs.identity, rs.roundTag = tally, tb.Identity(), tagOf(tb)
 	rs.nodeRequest[req.NodeID] = struct{}{}
 	rs.requests[reqID] = append(rs.requests[reqID], cloneRequest(req))
 	return res, rs.proof(res, tally, tb), nil
@@ -284,7 +321,7 @@ func (dupRequest) Is(target error) bool { return target == quorumweight.ErrDupli
 func (rs *requestBuffer) reset() {
 	clear(rs.nodeRequest)
 	clear(rs.requests)
-	rs.tally, rs.identity = nil, ""
+	rs.tally, rs.identity, rs.roundTag = nil, "", ""
 	rs.qState = QuorumInProgress
 }
 

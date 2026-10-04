@@ -153,3 +153,49 @@ func (x *PartitionTimeoutGenerator) GetT2Timeouts(currentRound uint64) ([]*types
 func t2TimeoutToRootRounds(t2Timeout time.Duration, blockRate time.Duration) uint64 {
 	return uint64(t2Timeout/blockRate) + 1 /* #nosec G115 its unlikely that t2Timeout/blockRate exceeds uint64 max value */
 }
+
+// GetT2TimeoutsView is GetT2Timeouts for the proposal of currentRound with every shard's previous UC, T2 and pending state
+// taken from the view resolved for it (purpose timeout), so all shards of one proposal are judged under one snapshot. The
+// exclusions are kept: only shards with a UC time out, none with a change in its pipeline, none of the control partition. A
+// target round before the previous UC's round is refused before the subtraction. Time is elapsed root rounds only: weights and
+// the assignment never enter. A shard whose view cannot be resolved is reported in the returned error and never timed out
+// from other state; the rest are still returned.
+func (x *PartitionTimeoutGenerator) GetT2TimeoutsView(currentRound uint64, res ViewResolver) ([]*types.UnicityCertificate, error) {
+	var errs []error
+	ucs := x.state.GetCertificates()
+	timedOutShards := make([]*types.UnicityCertificate, 0, len(ucs))
+	for _, uc := range ucs {
+		if uc == nil {
+			continue
+		}
+		if x.profile == 2 && uc.GetPartitionID() == drctypes.ControlPartition {
+			continue
+		}
+		pID, sID := uc.GetPartitionID(), uc.GetShardID()
+		if x.state.IsChangeInProgress(pID, sID) != nil {
+			continue
+		}
+		view, err := res.ResolveView(pID, sID, currentRound, storage.PurposeTimeout)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("resolving the view of %s-%s for round %d: %w", pID, sID, currentRound, err))
+			continue
+		}
+		if view.HasPendingChange() {
+			continue
+		}
+		prev, err := view.PreviousUC()
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		last := prev.GetRootRoundNumber()
+		if currentRound < last {
+			errs = append(errs, fmt.Errorf("round %d is before the previous UC round %d of %s-%s: %w", currentRound, last, pID, sID, storage.ErrStaleRequestContext))
+			continue
+		}
+		if currentRound-last >= t2TimeoutToRootRounds(view.T2Timeout(), x.blockRate/2) {
+			timedOutShards = append(timedOutShards, prev)
+		}
+	}
+	return timedOutShards, errors.Join(errs...)
+}
