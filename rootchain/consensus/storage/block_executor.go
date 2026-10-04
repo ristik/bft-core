@@ -11,6 +11,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -301,16 +302,41 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			continue
 		}
 
-		// The verifier judges the request against the last COMMITTED shard state, which in and just after the activation block is
-		// still the pre-activation anchor (old trust base). Every signer must also belong to the configuration ACTIVE for this
-		// block, the state executed here; a retired key's request is ignored, identically on every root, like a request for a
-		// removed shard. It depends on block content only, so proposal and validation cannot disagree.
-		if member, memberErr := requestSignersAreActive(si, irChReq); !member {
-			log.Info(fmt.Sprintf("ignoring a request of shard %s signed outside its active configuration: %v", shardKey, memberErr))
-			continue
-		}
-		if si.IR, err = verifier.VerifyIRChangeReq(newBlock.Round, irChReq); err != nil {
-			return nil, fmt.Errorf("verifying change request: %w", err)
+		if vv := viewDispatch(verifier); vv != nil {
+			// View-aware branch: the request is judged under the view resolved from the state this block executes on and the
+			// committed history, so the committed anchor lagging behind the activation cannot select another assignment.
+			parentID, err := x.BlockData.Hash(hash)
+			if err != nil {
+				return nil, fmt.Errorf("hashing parent block: %w", err)
+			}
+			view, err := resolveExecutionView(vv, si, parentID, newBlock.Round, hash)
+			if err != nil {
+				return nil, fmt.Errorf("resolving request context: %w", err)
+			}
+			if ignore, why := ineligibleAtExecution(view, irChReq); ignore {
+				log.Info(fmt.Sprintf("ignoring a request of shard %s outside its request context: %v", shardKey, why))
+				continue
+			}
+			res, err := vv.VerifyIRChangeReqView(view, irChReq)
+			if err != nil {
+				return nil, fmt.Errorf("verifying change request: %w", err)
+			}
+			if !bytes.Equal(res.ViewKey, view.ViewKey()) {
+				return nil, fmt.Errorf("%w: verifier judged another view than the one resolved", quorumweight.ErrRequestContext)
+			}
+			si.IR = res.IR
+		} else {
+			// The verifier judges the request against the last COMMITTED shard state, which in and just after the activation block is
+			// still the pre-activation anchor (old trust base). Every signer must also belong to the configuration ACTIVE for this
+			// block, the state executed here; a retired key's request is ignored, identically on every root, like a request for a
+			// removed shard. It depends on block content only, so proposal and validation cannot disagree.
+			if member, memberErr := requestSignersAreActive(si, irChReq); !member {
+				log.Info(fmt.Sprintf("ignoring a request of shard %s signed outside its active configuration: %v", shardKey, memberErr))
+				continue
+			}
+			if si.IR, err = verifier.VerifyIRChangeReq(newBlock.Round, irChReq); err != nil {
+				return nil, fmt.Errorf("verifying change request: %w", err)
+			}
 		}
 
 		// timeout IR change request do not have BCR

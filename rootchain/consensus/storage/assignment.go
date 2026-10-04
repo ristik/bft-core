@@ -10,6 +10,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -102,12 +103,18 @@ type candidateSource interface {
 // SuccessorTRHash, and exactly what the shard's next ordinary round would
 // produce, so activation and ordinary progression cannot disagree.
 func successorTechnicalRecord(si *ShardInfo, pdr *types.PartitionDescriptionRecord, hashAlg crypto.Hash) (certification.TechnicalRecord, error) {
+	return successorTechnicalRecordWith(si, pdr, hashAlg, (*ShardInfo).resetTrustBase)
+}
+
+// successorTechnicalRecordWith is successorTechnicalRecord with the successor's trust base derivation supplied.
+func successorTechnicalRecordWith(si *ShardInfo, pdr *types.PartitionDescriptionRecord, hashAlg crypto.Hash,
+	reset func(*ShardInfo, *types.PartitionDescriptionRecord, crypto.Hash, []byte) error) (certification.TechnicalRecord, error) {
 	if si == nil || pdr == nil || si.TR.Epoch == ^uint64(0) || pdr.Epoch != si.TR.Epoch+1 {
 		return certification.TechnicalRecord{}, ErrAssignmentHistory
 	}
 	clone := *si
 	clone.Fees = maps.Clone(si.Fees)
-	if err := clone.nextRound(nil, pdr, hashAlg); err != nil {
+	if err := clone.nextRoundWith(nil, pdr, hashAlg, reset); err != nil {
 		return certification.TechnicalRecord{}, fmt.Errorf("deriving successor technical record: %w", err)
 	}
 	return clone.TR, nil
@@ -161,6 +168,27 @@ func DeriveActivatedPDR(record evmroot.OrderedHandoffRecord, body evmroot.TrustB
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
 	return pdr, provenance, nil
+}
+
+// ActivationFromHandoff authenticates a committed handoff (record, successor body and candidate preimage verified against each
+// other by DeriveActivatedPDR) and returns the assignment it activates at record.ActivationRound, with the root identity that
+// authorises it and the successor technical record digest it committed. Coupling is rechecked where the configuration
+// requires it. Production policy is unit; a weighted policy is not reachable from here before Q3.
+func ActivationFromHandoff(record evmroot.OrderedHandoffRecord, body evmroot.TrustBaseBodyV2, preimage, frozenParent []byte, hashAlg crypto.Hash, version uint64) (*RequestActivation, error) {
+	pdr, _, err := DeriveActivatedPDR(record, body, preimage, frozenParent)
+	if err != nil {
+		return nil, err
+	}
+	c, err := evmassign.DecodeCandidate(preimage)
+	if err != nil {
+		return nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	if evmassign.CouplingRequired(pdr) {
+		if err := evmassign.ValidateCoupling(c.RootMembers, pdr, c.Bindings); err != nil {
+			return nil, errors.Join(ErrAssignmentHistory, err)
+		}
+	}
+	return newRequestActivation(pdr, hashAlg, quorumweight.PolicyUnit, nil, record.Epoch+1, record.NextBodyID, record.ActivationRound, record.SuccessorTRHash, version)
 }
 
 // DeriveActivatedConfigs is DeriveActivatedPDR plus the aggregator validator replacements the same candidate commits: it
