@@ -3,7 +3,6 @@ package storage
 import (
 	"bytes"
 	"crypto"
-	"errors"
 	"sort"
 	"testing"
 	"time"
@@ -704,9 +703,10 @@ func TestSnapshotNetworkMustMatchTheAuthenticatedHistory(t *testing.T) {
 	require.NoError(t, err)
 	a := *s.anchor
 	a.pdr, a.confHash = &foreign, h
-	_, err = NewRequestSnapshot(fxNetwork, crypto.SHA256, s.parent, s.parentID, nil, &a)
-	require.Error(t, err)
-	require.True(t, errors.Is(err, quorumweight.ErrRequestContext) || errors.Is(err, ErrAssignmentHistory))
+	bound := *s.parent // its configuration hash is the foreign one's, so no other check can refuse
+	bound.ShardConfHash = h
+	_, err = NewRequestSnapshot(fxNetwork, crypto.SHA256, &bound, s.parentID, nil, &a)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
 }
 
 // Certified technical records are owned: mutating the caller's copy after the snapshot or view was built changes neither, for a
@@ -716,25 +716,39 @@ func TestViewOwnsCertifiedTechnicalRecords(t *testing.T) {
 	snap := s.snapshot(s.parent, nil)
 	hist := s.mustResolve(snap, fxActivate-1, 3, fxBody0, PurposeCertify)
 	key, tr := hist.ViewKey(), hist.ExpectedTR()
+	wantStat := bytes.Clone(tr.StatHash)
 	boundary := s.mustResolve(snap, fxActivate, 4, fxBody1, PurposeExecute)
 	bKey, bTR := boundary.ViewKey(), boundary.ExpectedTR()
 
+	// TR and LastCR.Technical share their backing arrays in this fixture, so each is changed exactly once
 	s.parent.LastCR.Technical.StatHash[0] ^= 0xFF
 	s.parent.LastCR.Technical.FeeHash[0] ^= 0xFF
-	s.parent.TR.StatHash[0] ^= 0xFF
-	s.parent.TR.FeeHash[0] ^= 0xFF
 	require.Equal(t, tr, hist.ExpectedTR(), "the historical view does not alias the caller's record")
 	require.Equal(t, key, hist.ViewKey())
 	require.Equal(t, bTR, boundary.ExpectedTR())
 	require.Equal(t, bKey, boundary.ViewKey())
+	require.Equal(t, bKey, s.mustResolve(snap, fxActivate, 4, fxBody1, PurposeExecute).ViewKey(), "the derived successor record is built from the frozen copy, not the caller's state")
 	again := s.mustResolve(snap, fxActivate-1, 3, fxBody0, PurposeCertify)
 	require.Equal(t, key, again.ViewKey(), "re-resolution from the same snapshot is unchanged")
 	require.Equal(t, tr, again.ExpectedTR())
 
+	// the executing state that already installed the assignment: its record is the view's expected one
+	installed := *s.parent
+	installed.TR = cloneTR(s.succTR)
+	installed.ShardConfHash = s.succ.confHash
+	isnap := s.snapshot(&installed, nil)
+	inst := s.mustResolve(isnap, fxActivate, 4, fxBody1, PurposeExecute)
+	instKey, instTR := inst.ViewKey(), inst.ExpectedTR()
+	installed.TR.StatHash[0] ^= 0xFF
+	installed.TR.FeeHash[0] ^= 0xFF
+	require.Equal(t, instTR, inst.ExpectedTR())
+	require.Equal(t, instKey, inst.ViewKey())
+	require.Equal(t, instKey, s.mustResolve(isnap, fxActivate, 4, fxBody1, PurposeExecute).ViewKey())
+
 	// the getter's copy is the caller's too
 	got := hist.ExpectedTR()
 	got.StatHash[0] ^= 0xFF
-	require.Equal(t, tr, hist.ExpectedTR())
+	require.Equal(t, wantStat, hist.ExpectedTR().StatHash)
 }
 
 // Direct admission carries ErrInvalidRequest on malformed and continuity refusals, keeps the underlying and continuity
