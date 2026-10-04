@@ -593,7 +593,11 @@ func TestSkewedWeightBelowThresholdMakesNoProgress(t *testing.T) {
 // same close/reopen test on the epoch-2 anchor cluster (TestSkewedWeightScheme2DecisionSurvivesRestart).
 func TestSkewedWeightRestartMidRoundKeepsOneDecisionAndNeverDoubleSigns(t *testing.T) {
 	const victim = 2
-	c := newSkewedCluster(t, false, 0, victim)
+	// Every node syncs its stores to disk, not only the victim. With the victim the only fsyncing node, the other three run
+	// unsynced rounds ahead of it: the rounds it leads time out, three consecutive QCs never form and nothing commits within
+	// the wait below (observed on an unloaded machine, with and without #398). Equal per-round cost keeps the schedule the one
+	// the test describes; the durability under test is still the victim's.
+	c := newSkewedCluster(t, false, 0, 0, 1, victim)
 	c.start(0, 1, 2)
 	require.Eventually(t, func() bool { return c.committedRound(0) >= 3 && len(c.signedRounds(victim, "vote")) > 0 }, 30*time.Second, 20*time.Millisecond)
 
