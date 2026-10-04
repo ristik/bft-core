@@ -12,10 +12,6 @@ var (
 	// ErrSigningHistory is returned when the signing configuration of an epoch cannot be established from the authenticated
 	// history: an unknown epoch, or an activation that does not fit the recorded ones.
 	ErrSigningHistory = errors.New("signing configuration history")
-	// ErrSchemeUnsupported is returned for a message form whose signing scheme this build cannot verify for the epoch it names:
-	// the legacy form in an epoch that activated the domain-bound scheme, or any form of an activated epoch whose
-	// certificates (QC) have no scheme 2 form yet.
-	ErrSchemeUnsupported = errors.New("signing scheme not supported for the epoch")
 )
 
 // signingRegistry is the authenticated history of the epochs that activated the domain-bound scheme. The scheme is a
@@ -89,18 +85,4 @@ func (s *TrustBaseStore) SigningConfig(epoch uint64) (votesig.Config, error) {
 		}
 	}
 	return votesig.Config{Scheme: votesig.SchemeLegacy, Network: uint64(tb.NetworkID)}, nil
-}
-
-// RequireLegacySigning is the gate in front of every legacy-form certificate (QC): it passes only when the epoch the
-// certificate names signs with scheme 1. A certificate of an activated epoch has a scheme 2 form that this build does not
-// carry, so a legacy-form one is never reinterpreted and the epoch's own rule is a refusal, not a fallback.
-func (s *TrustBaseStore) RequireLegacySigning(epoch uint64) error {
-	cfg, err := s.SigningConfig(epoch)
-	if err != nil {
-		return err
-	}
-	if cfg.Scheme != votesig.SchemeLegacy {
-		return fmt.Errorf("%w: epoch %d signs with scheme %d", ErrSchemeUnsupported, epoch, cfg.Scheme)
-	}
-	return nil
 }

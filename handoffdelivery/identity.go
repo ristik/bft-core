@@ -30,7 +30,7 @@ func SemanticIdentity(b Bundle) ([32]byte, error) {
 func identityOf(c *Bundle) ([32]byte, error) {
 	strip := func(qc *rctypes.QuorumCert) {
 		if qc != nil {
-			qc.Signatures = nil
+			qc.Signatures, qc.SealSignatures = nil, nil
 		}
 	}
 	strip(c.Proof.CommitQC)

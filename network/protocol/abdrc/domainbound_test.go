@@ -158,10 +158,10 @@ func TestDomainBoundVoteVerifiesOnlyInADomainBoundEpoch(t *testing.T) {
 		require.ErrorIs(t, early.Verify(g.store), votesig.ErrScheme)
 	})
 
-	t.Run("an embedded high QC of the activated epoch has no legacy form", func(t *testing.T) {
+	t.Run("an embedded legacy-form high QC of the activated epoch is the wrong scheme", func(t *testing.T) {
 		v := f.voteV2(t, "1", 2, 12, true, f.legacyQC(t, 2, 11))
 		err := v.Verify(f.store)
-		require.ErrorIs(t, err, trustbase.ErrSchemeUnsupported)
+		require.ErrorIs(t, err, votesig.ErrScheme)
 	})
 }
 
@@ -298,7 +298,7 @@ func TestDomainBoundTimeoutDispatchAndNegatives(t *testing.T) {
 	require.ErrorIs(t, single(func(c *TimeoutMsg) { c.Signature = c.Signature[:63] }), votesig.ErrSignatureShape)
 	require.ErrorIs(t, single(func(c *TimeoutMsg) { c.Signature = highS(t, c.Signature) }), votesig.ErrBadSignature)
 	require.ErrorIs(t, single(func(c *TimeoutMsg) { c.Timeout.HighQc = f.legacyQC(t, 1, 10); c.Timeout.Round = 11 }), votesig.ErrBadSignature, "the round and the high QC round are signed")
-	require.ErrorIs(t, single(func(c *TimeoutMsg) { c.Timeout.HighQc = f.legacyQC(t, 2, 11) }), trustbase.ErrSchemeUnsupported, "the activated epoch has no legacy QC")
+	require.ErrorIs(t, single(func(c *TimeoutMsg) { c.Timeout.HighQc = f.legacyQC(t, 2, 11) }), votesig.ErrScheme, "a legacy-form QC of the activated epoch is the wrong scheme")
 
 	// other network or root: the same timeout statement under another configuration does not verify
 	for name, other := range map[string]votesig.Config{
@@ -457,7 +457,92 @@ func TestProposalInADomainBoundEpochIsRefusedWithTheTypedError(t *testing.T) {
 	block := &drctypes.BlockData{Author: "1", Round: 12, Epoch: 2, Timestamp: 1000, Payload: &drctypes.Payload{}, Qc: f.legacyQC(t, 2, 11)}
 	p := &ProposalMsg{Block: block, Signature: []byte{1}}
 	require.NoError(t, p.IsValid())
-	require.NotErrorIs(t, p.Verify(f.store), trustbase.ErrSchemeUnsupported, "while epoch 2 signs with scheme 1 the gate passes")
+	require.NotErrorIs(t, p.Verify(f.store), votesig.ErrScheme, "while epoch 2 signs with scheme 1 the QC is the right form")
 	f.activate(t, 2)
-	require.ErrorIs(t, p.Verify(f.store), trustbase.ErrSchemeUnsupported)
+	require.ErrorIs(t, p.Verify(f.store), votesig.ErrScheme)
+}
+
+// Isolated single-field mutations of a signed scheme 2 timeout: each leaves the message structurally valid (a stub last TC supplies
+// the structure a changed round or high QC round needs) so that the signature is the only thing that can refuse it.
+func TestDomainBoundTimeoutIsolatedFieldMutations(t *testing.T) {
+	f := newDBFixture(t)
+	f.activate(t, 2)
+	high := f.legacyQC(t, 1, 11)
+	stubTC := func(round uint64) *drctypes.TimeoutCert {
+		return &drctypes.TimeoutCert{Timeout: drctypes.NewTimeout(round, 2, high)}
+	}
+	signed := f.timeoutV2(t, "2", 2, 12, high)
+	require.NoError(t, signed.Verify(f.store))
+
+	epochOnly := f.timeoutV2(t, "2", 2, 12, high)
+	epochOnly.Timeout.Epoch = 3
+	require.ErrorIs(t, epochOnly.Verify(f.store), votesig.ErrBadSignature, "the epoch alone")
+
+	roundOnly := f.timeoutV2(t, "2", 2, 12, high)
+	roundOnly.Timeout.Round, roundOnly.LastTC = 13, stubTC(12)
+	require.NoError(t, roundOnly.IsValid(), "premise: structurally valid")
+	require.ErrorIs(t, roundOnly.Verify(f.store), votesig.ErrBadSignature, "the round alone")
+
+	hqcOnly := f.timeoutV2(t, "2", 2, 12, high)
+	hqcOnly.Timeout.HighQc, hqcOnly.LastTC = f.legacyQC(t, 1, 10), stubTC(11)
+	require.NoError(t, hqcOnly.IsValid(), "premise: structurally valid")
+	require.ErrorIs(t, hqcOnly.Verify(f.store), votesig.ErrBadSignature, "the high QC round alone")
+}
+
+// A key that the successor committee dropped signs nothing for the successor epoch, while its messages of its own epoch still verify.
+func TestDomainBoundRetiredKeyFailsForTheCurrentEpochOnly(t *testing.T) {
+	f := newDBFixture(t)
+	f.activate(t, 2)
+	// epoch 4: the committee of 1, 2, 3 and a new key; "4" is retired
+	var nodes []*types.NodeInfo
+	for _, id := range []string{"1", "2", "3", "5"} {
+		s := fixedSigner(t, id)
+		v, err := s.Verifier()
+		require.NoError(t, err)
+		key, err := v.MarshalPublicKey()
+		require.NoError(t, err)
+		f.signers[id] = s
+		nodes = append(nodes, &types.NodeInfo{NodeID: id, SigKey: key, Stake: 1})
+	}
+	prev, err := f.store.GetByEpoch(3)
+	require.NoError(t, err)
+	h, err := prev.Hash(gocrypto.SHA256)
+	require.NoError(t, err)
+	tb, err := types.NewTrustBase(5, nodes, types.WithEpoch(4), types.WithEpochStart(30), types.WithPreviousTrustBaseHash(h))
+	require.NoError(t, err)
+	for _, id := range []string{"1", "2", "3", "4"} { // signed by the previous committee
+		require.NoError(t, tb.Sign(id, f.signers[id]))
+	}
+	require.NoError(t, f.store.Store(tb))
+
+	high := f.legacyQC(t, 1, 11)
+	ownEpoch := f.timeoutV2(t, "4", 2, 12, high)
+	require.NoError(t, ownEpoch.Verify(f.store), "the retired key still verifies its own epoch's message")
+	current := f.timeoutV2(t, "4", 4, 12, high)
+	require.ErrorIs(t, current.Verify(f.store), votesig.ErrBadSignature, "and nothing of the epoch that dropped it")
+	require.NoError(t, f.timeoutV2(t, "5", 4, 12, high).Verify(f.store), "the key that replaced it does")
+}
+
+// A scheme 2 timeout may carry the last TC of an earlier, legacy epoch: that certificate is verified by its own epoch's rule, and
+// relabelling only it as scheme 2 is refused.
+func TestDomainBoundTimeoutWithAnOldSchemeLastTC(t *testing.T) {
+	f := newDBFixture(t)
+	f.activate(t, 2)
+	oldTC := &drctypes.TimeoutCert{Timeout: drctypes.NewTimeout(11, 1, f.legacyQC(t, 1, 10)), Signatures: map[string]*drctypes.TimeoutVote{}}
+	for _, id := range f.ids {
+		vote := &drctypes.TimeoutVote{HqcRound: 10}
+		sig, err := f.signers[id].SignBytes(drctypes.BytesFromTimeoutVote(oldTC.Timeout, id, vote))
+		require.NoError(t, err)
+		vote.Signature = sig
+		oldTC.Signatures[id] = vote
+	}
+	m := NewTimeoutMsg(drctypes.NewTimeout(12, 2, f.legacyQC(t, 1, 10)), "2", oldTC)
+	require.NoError(t, m.SignDomainBound(f.signers["2"], f.cfg))
+	require.NoError(t, m.Verify(f.store), "the old legacy last TC keeps its own epoch's rule")
+
+	relabelled := *m
+	tc := *oldTC
+	tc.Scheme = votesig.SchemeDomainBound
+	relabelled.LastTC = &tc
+	require.ErrorIs(t, relabelled.Verify(f.store), votesig.ErrScheme, "only the last TC relabelled")
 }

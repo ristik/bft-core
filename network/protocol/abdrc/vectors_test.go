@@ -131,6 +131,27 @@ func buildVectors(t *testing.T) vectorSet {
 		sigs[id] = h(sig)
 	}
 	require.NoError(t, tc.Verify(f.store))
+	for _, committing := range []bool{true, false} {
+		qc := f.qcV2(t, committing, "1", "2", "3")
+		require.NoError(t, qc.VerifyWith(f.store))
+		pv, sealBytes, _, err := drctypes.DomainBoundStatement(f.cfg, qc.VoteInfo, qc.LedgerCommitInfo, len(qc.SealSignatures) != 0)
+		require.NoError(t, err)
+		sigs := map[string]string{}
+		for _, id := range []string{"1", "2", "3"} {
+			sigs["vote/"+id] = h(qc.Signatures[id])
+			if committing {
+				sigs["seal/"+id] = h(qc.SealSignatures[id])
+			}
+		}
+		derived := map[string]string{"voteInfoHash": h(qc.LedgerCommitInfo.PreviousHash)}
+		name := "domain-bound non-committing quorum certificate"
+		if committing {
+			derived["nativeSealSigBytes"] = h(sealBytes)
+			name = "domain-bound committing quorum certificate (paired signature maps)"
+		}
+		set.Vectors = append(set.Vectors, vector{Name: name, Scheme: 2, Kind: "quorumCertificate",
+			Inputs: map[string]any{"epoch": 2, "round": 12, "parentRound": 11, "signers": []string{"1", "2", "3"}}, Signed: h(pv), Digest: dg(pv), Signature: sigs, Wire: marshal(qc), Extra: derived})
+	}
 	set.Vectors = append(set.Vectors, vector{Name: "domain-bound timeout certificate with different signer high QC rounds", Scheme: 2, Kind: "timeoutCertificate",
 		Inputs: map[string]any{"epoch": 2, "round": 13, "highQcRoundsByAuthor": map[string]any{"1": 11, "2": 10, "3": 11, "4": 9}}, Signature: sigs, Wire: marshal(tc)})
 	return set
@@ -184,6 +205,10 @@ func TestCommittedVectorsVerify(t *testing.T) {
 				g := newDBFixture(t)
 				require.NoError(t, m.Verify(g.store), v.Name)
 			}
+		case "quorumCertificate":
+			var qc drctypes.QuorumCert
+			require.NoError(t, types.Cbor.Unmarshal(wire, &qc), v.Name)
+			require.NoError(t, qc.VerifyWith(f.store), v.Name)
 		case "timeoutCertificate":
 			var tc drctypes.TimeoutCert
 			require.NoError(t, types.Cbor.Unmarshal(wire, &tc), v.Name)
@@ -193,5 +218,5 @@ func TestCommittedVectorsVerify(t *testing.T) {
 		}
 		n++
 	}
-	require.Equal(t, 7, n)
+	require.Equal(t, 9, n)
 }

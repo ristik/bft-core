@@ -576,7 +576,7 @@ func checkpointIdentity(raw []byte) ([32]byte, error) {
 		if qc == nil {
 			return
 		}
-		qc.Signatures = nil
+		qc.Signatures, qc.SealSignatures = nil, nil
 		if qc.LedgerCommitInfo != nil {
 			qc.LedgerCommitInfo.Signatures = nil
 		}

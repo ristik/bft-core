@@ -2,6 +2,7 @@ package handoffdelivery
 
 import (
 	"flag"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
 	"os"
 	"reflect"
 	"sort"
@@ -69,6 +70,11 @@ func excludedLeaf(path string) bool {
 		"Bundle.Proof.OptionalQC.Signatures{}",
 		"Bundle.Snapshot.Qc.Signatures{}",
 		"Bundle.Snapshot.CommitQc.Signatures{}",
+		// the second signature map of a scheme 2 certificate is a signature set like the first
+		"Bundle.Proof.CommitQC.SealSignatures{}",
+		"Bundle.Proof.OptionalQC.SealSignatures{}",
+		"Bundle.Snapshot.Qc.SealSignatures{}",
+		"Bundle.Snapshot.CommitQc.SealSignatures{}",
 		"Bundle.Snapshot.ShardInfo[].UC.UnicitySeal.Signatures{}",
 	} {
 		if path == p || path == p+"#keys" {
@@ -244,6 +250,17 @@ func TestPerturbingEachBundleLeafChangesTheIdentityExactlyWhenItIsHashed(t *test
 		undo := perturb()
 		got, err := semanticIdentityOf(b)
 		undo()
+		if strings.HasSuffix(path, ".Scheme") {
+			// the in-memory marker of a certificate's wire form (not itself a CBOR field); TestSchemeOfACertificateIsPartOfTheIdentity
+			// checks that the form is hashed, which a perturbation of the marker alone cannot (only the value 2 selects the wrapper)
+			checked++
+			return
+		}
+		if !excludedLeaf(path) && strings.Contains(path, ".SealSignatures{}") {
+			// on the wire only in a scheme 2 certificate: the block's own QC hashes it (TestSchemeOfACertificateIsPartOfTheIdentity)
+			checked++
+			return
+		}
 		if excludedLeaf(path) {
 			require.NoError(t, err, path)
 			require.Equal(t, want, got, "%s is excluded from the identity but changes it", path)
@@ -304,4 +321,55 @@ func deepCopy(dst, src reflect.Value) {
 	default:
 		dst.Set(src)
 	}
+}
+
+// A certificate in the scheme 2 wire form and the same certificate in the legacy form are different statements: the form is hashed.
+// The two signature maps of a scheme 2 certificate are signature sets and are not.
+func TestSchemeOfACertificateIsPartOfTheIdentity(t *testing.T) {
+	f := handoffbundle.New(t)
+	b := Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot}
+	legacy, err := semanticIdentityOf(b)
+	require.NoError(t, err)
+
+	qc := *b.Proof.CommitQC
+	qc.Scheme = 2
+	qc.SealSignatures = map[string]hex.Bytes{"a": {1}}
+	b2 := b
+	b2.Proof.CommitQC = &qc
+	twoSealed, err := semanticIdentityOf(b2)
+	require.NoError(t, err)
+	require.NotEqual(t, legacy, twoSealed, "the wire form is part of the identity")
+
+	// the block's own QC is proposed content, identical on every root: in the scheme 2 form its seal signatures are hashed
+	blockQC := *b.Proof.CommitQC
+	blockQC.Scheme = 2
+	blockQC.SealSignatures = map[string]hex.Bytes{"a": {1}}
+	snapshot := *b.Snapshot
+	block := *snapshot.Block
+	block.Qc = &blockQC
+	snapshot.Block = &block
+	b4 := b
+	b4.Snapshot = &snapshot
+	sealed, err := semanticIdentityOf(b4)
+	require.NoError(t, err)
+	blockQC2 := blockQC
+	blockQC2.SealSignatures = map[string]hex.Bytes{"a": {9}}
+	block2 := block
+	block2.Qc = &blockQC2
+	snapshot2 := snapshot
+	snapshot2.Block = &block2
+	b5 := b
+	b5.Snapshot = &snapshot2
+	changed, err := semanticIdentityOf(b5)
+	require.NoError(t, err)
+	require.NotEqual(t, sealed, changed, "Block.Qc is hashed whole, whichever signature map")
+
+	qc2 := qc
+	qc2.SealSignatures = map[string]hex.Bytes{"b": {2, 3}}
+	qc2.Signatures = map[string]hex.Bytes{"c": {4}}
+	b3 := b
+	b3.Proof.CommitQC = &qc2
+	other, err := semanticIdentityOf(b3)
+	require.NoError(t, err)
+	require.Equal(t, twoSealed, other, "the signature maps of a scheme 2 certificate are not")
 }

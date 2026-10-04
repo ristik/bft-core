@@ -9,6 +9,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
@@ -23,6 +24,9 @@ type (
 		voteInfo   *drctypes.RoundInfo
 		commitInfo *types.UnicitySeal
 		signatures map[string]hex.Bytes
+		// scheme 2: the seal signatures of the same voters, kept only for a committing statement
+		scheme         uint64
+		sealSignatures map[string]hex.Bytes
 	}
 
 	VoteRegister struct {
@@ -71,6 +75,17 @@ func (v *VoteRegister) InsertVote(vote *abdrc.VoteMsg, quorumInfo QuorumInfo) (*
 		return nil, fmt.Errorf("failed to marshal unicity seal: %w", err)
 	}
 	commitInfoHash := sha256.Sum256(bs)
+	domainBound := vote.Scheme == votesig.SchemeDomainBound
+	committing := len(vote.LedgerCommitInfo.Hash) != 0 || vote.LedgerCommitInfo.RootChainRoundNumber != 0
+	if domainBound {
+		// votes of the two schemes are never grouped, and so never counted, together: the group key carries the scheme. The
+		// native seal bytes bind the vote info hash (and with it the epoch and round) and the commit data, which together
+		// determine the signed statement PV.
+		commitInfoHash = sha256.Sum256(append([]byte{byte(votesig.SchemeDomainBound)}, bs...))
+		if committing && len(vote.SealSignature) == 0 {
+			return nil, fmt.Errorf("%w: committing scheme 2 vote from %q has no seal signature", votesig.ErrSignerSets, vote.Author)
+		}
+	}
 
 	// has the author already voted in this round?
 	if prevVoteHash, voted := v.authorToVote[vote.Author]; voted {
@@ -91,10 +106,19 @@ func (v *VoteRegister) InsertVote(vote *abdrc.VoteMsg, quorumInfo QuorumInfo) (*
 			voteInfo:   vote.VoteInfo,
 			signatures: make(map[string]hex.Bytes),
 		}
+		if domainBound {
+			v.hashToSignatures[commitInfoHash].scheme = votesig.SchemeDomainBound
+			if committing {
+				v.hashToSignatures[commitInfoHash].sealSignatures = make(map[string]hex.Bytes)
+			}
+		}
 	}
 	// Add signature from vote
 	quorum := v.hashToSignatures[commitInfoHash]
 	quorum.signatures[vote.Author] = vote.Signature
+	if quorum.sealSignatures != nil {
+		quorum.sealSignatures[vote.Author] = vote.SealSignature
+	}
 	// Check QC
 	weight, err := signedWeight(quorum.signatures, quorumInfo)
 	if err != nil {
@@ -102,6 +126,10 @@ func (v *VoteRegister) InsertVote(vote *abdrc.VoteMsg, quorumInfo QuorumInfo) (*
 	}
 	if reached(weight, quorumInfo) {
 		qc := drctypes.NewQuorumCertificateFromVote(quorum.voteInfo, quorum.commitInfo, quorum.signatures)
+		if quorum.scheme == votesig.SchemeDomainBound {
+			// the certificate is made of the two signature maps of the one set of voters; the seal map is the only one a UC takes
+			qc.Scheme, qc.SealSignatures = votesig.SchemeDomainBound, quorum.sealSignatures
+		}
 		return qc, nil
 	}
 	// Vote registered, no QC could be formed

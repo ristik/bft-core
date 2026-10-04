@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -82,7 +83,14 @@ type Verified struct {
 // Verify requires the caller's authenticated old trust base and exact local
 // shard configuration hash. It does not trust any identity supplied by a peer.
 func Verify(bundle Bundle, old *types.RootTrustBaseV1, partition types.PartitionID, shard types.ShardID, shardConfHash []byte) (Verified, error) {
-	v, err := handoff.VerifyOldCommitProof(bundle.Proof, old)
+	return VerifySigning(bundle, old, votesig.Config{Scheme: votesig.SchemeLegacy}, partition, shard, shardConfHash)
+}
+
+// VerifySigning is Verify by the rule of the old epoch: cfg is its signing configuration, and the commit QC of the proof must be in the
+// wire form the configuration requires. Verify is VerifySigning in the legacy scheme, for the verifiers (shard-side history stores) that
+// hold no signing configuration of their own.
+func VerifySigning(bundle Bundle, old *types.RootTrustBaseV1, cfg votesig.Config, partition types.PartitionID, shard types.ShardID, shardConfHash []byte) (Verified, error) {
+	v, err := handoff.VerifyOldCommitProofSigning(bundle.Proof, old, cfg)
 	if err != nil {
 		return Verified{}, fmt.Errorf("%w: old commit: %v", ErrBundle, err)
 	}

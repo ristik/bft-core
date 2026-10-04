@@ -185,7 +185,14 @@ func NewConsensusManager(
 		if !ok {
 			return nil, errors.New("frontier sampler requires checked safety reader")
 		}
-		frontier, err = newFrontierSampler(*optional.FrontierSampler, reader)
+		samplerConfig := *optional.FrontierSampler
+		if samplerConfig.TrustBase != nil {
+			// the covering QCs are in the wire form the sampled epoch signs with; an epoch not in the store keeps the legacy default
+			if signing, serr := trustBaseStore.SigningConfig(samplerConfig.TrustBase.Epoch); serr == nil {
+				samplerConfig.Signing = signing
+			}
+		}
+		frontier, err = newFrontierSampler(samplerConfig, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -1347,19 +1354,14 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	if x.epochAnchor != nil && !x.recoveryProfile2 {
 		return fmt.Errorf("recovery response verification failed: %w", abdrc.ErrRecoveryEpoch)
 	}
-	// Every QC of a state message is of the receiver's epoch (an older one is refused above as ErrRecoveryEpoch, never verified
-	// under another rule); the legacy-form QCs it carries are refused when that epoch signs with the domain-bound scheme.
-	if err := x.trustBaseStore.RequireLegacySigning(x.trustBase.Load().Epoch); err != nil {
-		return fmt.Errorf("recovery response verification failed: %w", err)
-	}
 	var verifyErr error
 	if x.recoveryProfile2 {
 		if x.recoveryHistory == nil {
 			return fmt.Errorf("recovery response verification failed: %w", abdrc.ErrHistoricalTrustBase)
 		}
-		verifyErr = rsp.VerifyWithAnchor(x.params.HashAlgorithm, x.trustBase.Load(), x.recoveryHistory, x.blockStore, x.trustBaseStore.GenesisPin())
+		verifyErr = rsp.VerifyWithAnchorSigning(x.params.HashAlgorithm, x.trustBase.Load(), x.recoveryHistory, x.blockStore, x.trustBaseStore, x.trustBaseStore.GenesisPin())
 	} else {
-		verifyErr = rsp.Verify(x.params.HashAlgorithm, x.trustBase.Load(), x.trustBaseStore.GenesisPin())
+		verifyErr = rsp.VerifySigning(x.params.HashAlgorithm, x.trustBase.Load(), x.trustBaseStore, x.trustBaseStore.GenesisPin())
 	}
 	if err := verifyErr; err != nil {
 		return fmt.Errorf("recovery response verification failed: %w", err)

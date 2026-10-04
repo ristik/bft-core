@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -596,6 +597,16 @@ func (x *ExecutedBlock) GenerateCertificates(commitQc *rctypes.QuorumCert) ([]*c
 		return nil, nil
 	}
 
+	// The UC carries the signatures of the native seal. A legacy QC's signatures are those; a scheme 2 QC has two maps, and only its seal
+	// signatures (the same voters' signatures over the unchanged native seal bytes) are the UC's: copying the vote signatures into a
+	// seal would produce a certificate that does not verify, and none is produced from a scheme 2 QC that has no seal signatures.
+	sealSignatures := commitQc.Signatures
+	if commitQc.Scheme == votesig.SchemeDomainBound {
+		if len(commitQc.SealSignatures) == 0 {
+			return nil, fmt.Errorf("%w: scheme 2 commit QC has no seal signatures", votesig.ErrSignerSets)
+		}
+		sealSignatures = commitQc.SealSignatures
+	}
 	// create UnicitySeal for pending certificates
 	uSeal := &types.UnicitySeal{
 		Version:              1,
@@ -605,7 +616,7 @@ func (x *ExecutedBlock) GenerateCertificates(commitQc *rctypes.QuorumCert) ([]*c
 		Hash:                 commitQc.LedgerCommitInfo.Hash,
 		Timestamp:            commitQc.LedgerCommitInfo.Timestamp,
 		PreviousHash:         commitQc.LedgerCommitInfo.PreviousHash,
-		Signatures:           commitQc.Signatures,
+		Signatures:           sealSignatures,
 	}
 	for _, cr := range crs {
 		cr.UC.UnicitySeal = uSeal

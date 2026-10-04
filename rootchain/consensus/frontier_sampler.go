@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -33,6 +34,9 @@ type FrontierSamplerConfig struct {
 	TrustBase  *types.RootTrustBaseV1
 	QueueSize  int
 	MaxPending int
+	// Signing is the signing configuration of the sampled trust base's epoch: the wire form of the QCs the sampler accepts as
+	// covering evidence. The zero value is the legacy scheme.
+	Signing votesig.Config
 }
 
 type FrontierRequest struct {
@@ -73,6 +77,7 @@ type frontierSafetyReader interface {
 }
 type frontierSampler struct {
 	trust     *types.RootTrustBaseV1
+	scheme    votesig.Config
 	trustHash [32]byte
 	requests  chan frontierRequest
 	pending   chan struct{}
@@ -130,7 +135,7 @@ func newFrontierSampler(c FrontierSamplerConfig, reader frontierSafetyReader) (*
 	if err != nil {
 		return nil, fmt.Errorf("encoding frontier trust base: %w", err)
 	}
-	return &frontierSampler{trust: &trust, trustHash: sha256.Sum256(ownedEncoding), requests: make(chan frontierRequest, c.QueueSize), pending: make(chan struct{}, c.MaxPending), stopped: make(chan struct{}), reader: reader}, nil
+	return &frontierSampler{trust: &trust, scheme: c.Signing, trustHash: sha256.Sum256(ownedEncoding), requests: make(chan frontierRequest, c.QueueSize), pending: make(chan struct{}, c.MaxPending), stopped: make(chan struct{}), reader: reader}, nil
 }
 
 func (s *frontierSampler) latchFault() {
@@ -282,18 +287,18 @@ func (x *ConsensusManager) buildFrontierSample(req FrontierRequest) (*FrontierSa
 	if err != nil {
 		return nil, fmt.Errorf("%w: checked safety read: %v", ErrFrontierUnavailable, err)
 	}
-	selected := selectFrontierQCCandidate(view.CommitQC, view.HighQC, s.trust, safety.HighestQCRound, view.CommittedRootRound)
+	selected := selectFrontierQCCandidate(view.CommitQC, view.HighQC, s.trust, s.scheme, safety.HighestQCRound, view.CommittedRootRound)
 	if selected == 0 {
 		return nil, fmt.Errorf("%w: covering-qc-unavailable", ErrFrontierUnavailable)
 	}
 	return &FrontierSample{Safety: safety, View: view, CoveringQC: selected}, nil
 }
 
-func selectFrontierQCCandidate(commitQC, highQC *drctypes.QuorumCert, trust *types.RootTrustBaseV1, highestQC, committed uint64) FrontierQCCandidate {
-	if verifyFrontierQC(commitQC, trust, highestQC, committed) == nil {
+func selectFrontierQCCandidate(commitQC, highQC *drctypes.QuorumCert, trust *types.RootTrustBaseV1, cfg votesig.Config, highestQC, committed uint64) FrontierQCCandidate {
+	if verifyFrontierQC(commitQC, trust, cfg, highestQC, committed) == nil {
 		return FrontierCommitQC
 	}
-	if verifyFrontierQC(highQC, trust, highestQC, committed) == nil {
+	if verifyFrontierQC(highQC, trust, cfg, highestQC, committed) == nil {
 		return FrontierHighQC
 	}
 	return 0
@@ -333,7 +338,7 @@ func validateFrontierTrustBounds(trust *types.RootTrustBaseV1) error {
 	return nil
 }
 
-func verifyFrontierQC(qc *drctypes.QuorumCert, trust *types.RootTrustBaseV1, highestQC, committed uint64) error {
+func verifyFrontierQC(qc *drctypes.QuorumCert, trust *types.RootTrustBaseV1, cfg votesig.Config, highestQC, committed uint64) error {
 	if qc == nil || qc.VoteInfo == nil || qc.LedgerCommitInfo == nil {
 		return errors.New("incomplete QC")
 	}
@@ -347,5 +352,6 @@ func verifyFrontierQC(qc *drctypes.QuorumCert, trust *types.RootTrustBaseV1, hig
 	if qc.VoteInfo.Epoch != trust.Epoch || qc.LedgerCommitInfo.Epoch != trust.Epoch || qc.LedgerCommitInfo.NetworkID != trust.NetworkID {
 		return errors.New("QC context mismatch")
 	}
-	return qc.Verify(trust)
+	// the covering QC is verified by the rule of its epoch, in the wire form that epoch signs with
+	return qc.VerifyScheme(trust, cfg)
 }

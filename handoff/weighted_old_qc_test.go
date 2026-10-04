@@ -1,7 +1,9 @@
 package handoff
 
 import (
+	"bytes"
 	"crypto"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"math"
 	"sort"
 	"testing"
@@ -65,10 +67,10 @@ func TestVerifyOldQCIsWeightedNotCounted(t *testing.T) {
 	qc, tb, ids := oldQC(t, 4, 6, 7) // total 9
 	all := qc.Signatures
 	keepSigs(qc, ids[0], ids[1])
-	require.NoError(t, verifyOldQC(qc, tb), "2 of 4 by count, 7 of 9 by weight")
+	require.NoError(t, verifyOldQC(qc, tb, votesig.Config{}), "2 of 4 by count, 7 of 9 by weight")
 	qc.Signatures = all
 	keepSigs(qc, ids[1:]...)
-	require.ErrorIs(t, verifyOldQC(qc, tb), ErrProof, "3 of 4 by count, 3 of 9 by weight")
+	require.ErrorIs(t, verifyOldQC(qc, tb, votesig.Config{}), ErrProof, "3 of 4 by count, 3 of 9 by weight")
 }
 
 func TestVerifyOldQCRefusesBadUnknownAndOverflow(t *testing.T) {
@@ -76,12 +78,36 @@ func TestVerifyOldQCRefusesBadUnknownAndOverflow(t *testing.T) {
 	all := qc.Signatures
 	keepSigs(qc, ids[0], ids[1])
 	qc.Signatures[ids[2]] = []byte{1, 2, 3}
-	require.ErrorIs(t, verifyOldQC(qc, tb), ErrProof, "an invalid extra signature fails the QC")
+	require.ErrorIs(t, verifyOldQC(qc, tb, votesig.Config{}), ErrProof, "an invalid extra signature fails the QC")
 	qc.Signatures = all
 	keepSigs(qc, ids[0], ids[1])
 	qc.Signatures["stranger"] = all[ids[0]]
-	require.ErrorIs(t, verifyOldQC(qc, tb), ErrProof, "an unknown extra signer fails the QC")
+	require.ErrorIs(t, verifyOldQC(qc, tb, votesig.Config{}), ErrProof, "an unknown extra signer fails the QC")
 
 	hqc, htb, _ := oldQC(t, 2, math.MaxUint64, 5)
-	require.ErrorIs(t, verifyOldQC(hqc, htb), ErrProof, "weights that overflow fail closed")
+	require.ErrorIs(t, verifyOldQC(hqc, htb, votesig.Config{}), ErrProof, "weights that overflow fail closed")
+}
+
+// The old epoch's commit QC must be in the wire form its epoch signs with, in either direction.
+func TestVerifyOldQCRefusesTheOtherSchemesForm(t *testing.T) {
+	tb := &types.RootTrustBaseV1{Version: 1, NetworkID: 5, Epoch: 1, QuorumThreshold: 1}
+	legacy := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{Version: 1, RoundNumber: 5, ParentRoundNumber: 4, Epoch: 1, Timestamp: types.GenesisTime + 1, CurrentRootHash: bytes.Repeat([]byte{1}, 32)},
+		LedgerCommitInfo: &types.UnicitySeal{Version: 1, PreviousHash: []byte{1}, Timestamp: types.GenesisTime + 1}, Signatures: map[string]hex.Bytes{"a": {1}}}
+	require.ErrorIs(t, verifyOldQC(legacy, tb, votesig.Config{Scheme: votesig.SchemeDomainBound, Network: 5, Genesis: [32]byte{1}}), votesig.ErrScheme, "a legacy certificate of a domain-bound epoch")
+
+	v2 := *legacy
+	v2.Scheme = votesig.SchemeDomainBound
+	err := verifyOldQC(&v2, tb, votesig.Config{Scheme: votesig.SchemeLegacy})
+	require.ErrorIs(t, err, ErrProof)
+	require.ErrorIs(t, err, votesig.ErrScheme, "a scheme 2 certificate of a legacy epoch")
+}
+
+// The genesis round is never an old commit QC, in either wire form.
+func TestVerifyOldQCRefusesTheGenesisRound(t *testing.T) {
+	tb := &types.RootTrustBaseV1{Version: 1, NetworkID: 5, Epoch: 1, QuorumThreshold: 1}
+	for _, cfg := range []votesig.Config{{}, {Scheme: votesig.SchemeDomainBound, Network: 5, Genesis: [32]byte{1}}} {
+		qc := &rctypes.QuorumCert{Scheme: cfg.Scheme, VoteInfo: &rctypes.RoundInfo{Version: 1, RoundNumber: rctypes.GenesisRootRound, Epoch: 1, Timestamp: types.GenesisTime + 1},
+			LedgerCommitInfo: &types.UnicitySeal{Version: 1, PreviousHash: []byte{1}}, Signatures: map[string]hex.Bytes{"a": {1}}}
+		require.ErrorIs(t, verifyOldQC(qc, tb, cfg), ErrProof)
+	}
 }

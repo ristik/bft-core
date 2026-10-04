@@ -18,6 +18,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/internal/frontiercodec"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -42,6 +43,8 @@ type Profile struct {
 	RootEpoch             uint64
 	GenesisOriginIdentity []byte
 	Nonce                 []byte
+	// Signing is the signing configuration of RootEpoch: the wire form of the QCs the collector accepts. The zero value is the legacy scheme.
+	Signing votesig.Config
 }
 
 type Status uint8
@@ -165,6 +168,7 @@ type group struct {
 
 type Collector struct {
 	trust             *types.RootTrustBaseV1
+	signing           votesig.Config
 	verifiers         map[string]abcrypto.Verifier
 	context           frontiercodec.Context
 	nonce             []byte
@@ -267,7 +271,7 @@ func NewCollector(p Profile) (*Collector, error) {
 	if err != nil {
 		return nil, ErrProfile
 	}
-	return &Collector{trust: &trust, verifiers: verifiers, context: context, nonce: bytes.Clone(p.Nonce), partition: p.PartitionID, shard: shard, conf: bytes.Clone(p.FullShardConfHash), quorum: trust.QuorumThreshold, authors: make(map[string]struct{}, len(verifiers)), groups: make(map[[32]byte]*group), binding: binding}, nil
+	return &Collector{trust: &trust, signing: p.Signing, verifiers: verifiers, context: context, nonce: bytes.Clone(p.Nonce), partition: p.PartitionID, shard: shard, conf: bytes.Clone(p.FullShardConfHash), quorum: trust.QuorumThreshold, authors: make(map[string]struct{}, len(verifiers)), groups: make(map[[32]byte]*group), binding: binding}, nil
 }
 
 // stakeOf is the weight of a trust-base member; the quorum over replies is a weight, not an author count.
@@ -619,8 +623,15 @@ func (c *Collector) verifyQC(qc *drctypes.QuorumCert) error {
 	if vote == drctypes.GenesisRootRound || parent == 0 || commit == 0 || vote == ^uint64(0) || vote != parent+1 || commit != parent || qc.VoteInfo.Epoch != c.context.RootEpoch || qc.LedgerCommitInfo.Epoch != c.context.RootEpoch || qc.LedgerCommitInfo.NetworkID != c.context.NetworkID {
 		return ErrUnauthentic
 	}
-	if err := qc.Verify(c.trust); err != nil {
+	if err := qc.VerifyScheme(c.trust, c.signing); err != nil {
 		return ErrUnauthentic
+	}
+	if c.signing.Scheme == votesig.SchemeDomainBound {
+		// VerifyScheme checked both signature maps of the scheme 2 certificate strictly; only the bounds of the second map remain
+		if len(qc.SealSignatures) != 0 && signatureBounds(qc.SealSignatures) != nil {
+			return ErrUnauthentic
+		}
+		return nil
 	}
 	b, err := qc.LedgerCommitInfo.SigBytes()
 	if err != nil {

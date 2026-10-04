@@ -52,7 +52,6 @@ func TestSigningConfigIsAPropertyOfTheEpoch(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, votesig.SchemeLegacy, c.Scheme)
 		require.EqualValues(t, 5, c.Network)
-		require.NoError(t, s.RequireLegacySigning(epoch))
 	}
 	require.NoError(t, s.ActivateSigning(2, cfg2()))
 	c, err := s.SigningConfig(1)
@@ -62,16 +61,13 @@ func TestSigningConfigIsAPropertyOfTheEpoch(t *testing.T) {
 		c, err = s.SigningConfig(epoch)
 		require.NoError(t, err)
 		require.Equal(t, cfg2(), c, "at and after the boundary")
-		require.ErrorIs(t, s.RequireLegacySigning(epoch), ErrSchemeUnsupported)
 	}
-	require.NoError(t, s.RequireLegacySigning(1))
 }
 
 func TestMissingHistoryIsAnErrorNotAnImplicitLegacyChoice(t *testing.T) {
 	s := threeEpochStore(t)
 	_, err := s.SigningConfig(4)
 	require.ErrorIs(t, err, ErrSigningHistory)
-	require.ErrorIs(t, s.RequireLegacySigning(4), ErrSigningHistory)
 	require.ErrorIs(t, s.ActivateSigning(4, cfg2()), ErrSigningHistory, "an activation needs the epoch's trust base")
 }
 

@@ -39,6 +39,9 @@ var (
 	ErrStatement = errors.New("invalid signing statement")
 	// ErrSignatureShape is returned for a signature that is not 64 bytes, or 65 bytes with recovery byte 0 or 1.
 	ErrSignatureShape = errors.New("invalid signature shape")
+	// ErrSignerSets is returned for a committing scheme 2 certificate whose vote signatures and seal signatures are not made by
+	// exactly the same signers, or for any other pairing of the two signature maps that is not one-to-one.
+	ErrSignerSets = errors.New("vote and seal signer sets differ")
 	// ErrNotCanonical is returned by Decode for bytes that are not the canonical encoding of the supported value types.
 	ErrNotCanonical = errors.New("not canonical CBOR")
 )

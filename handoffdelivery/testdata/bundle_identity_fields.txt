@@ -20,6 +20,9 @@ Bundle.Proof.CommitQC.LedgerCommitInfo.Signatures{} hashed
 Bundle.Proof.CommitQC.LedgerCommitInfo.Signatures{}#keys hashed
 Bundle.Proof.CommitQC.LedgerCommitInfo.Timestamp hashed
 Bundle.Proof.CommitQC.LedgerCommitInfo.Version hashed
+Bundle.Proof.CommitQC.Scheme hashed
+Bundle.Proof.CommitQC.SealSignatures{} excluded
+Bundle.Proof.CommitQC.SealSignatures{}#keys excluded
 Bundle.Proof.CommitQC.Signatures{} excluded
 Bundle.Proof.CommitQC.Signatures{}#keys excluded
 Bundle.Proof.CommitQC.VoteInfo.CurrentRootHash hashed
@@ -50,6 +53,9 @@ Bundle.Proof.OptionalQC.LedgerCommitInfo.Signatures{} hashed
 Bundle.Proof.OptionalQC.LedgerCommitInfo.Signatures{}#keys hashed
 Bundle.Proof.OptionalQC.LedgerCommitInfo.Timestamp hashed
 Bundle.Proof.OptionalQC.LedgerCommitInfo.Version hashed
+Bundle.Proof.OptionalQC.Scheme hashed
+Bundle.Proof.OptionalQC.SealSignatures{} excluded
+Bundle.Proof.OptionalQC.SealSignatures{}#keys excluded
 Bundle.Proof.OptionalQC.Signatures{} excluded
 Bundle.Proof.OptionalQC.Signatures{}#keys excluded
 Bundle.Proof.OptionalQC.VoteInfo.CurrentRootHash hashed
@@ -110,6 +116,9 @@ Bundle.Snapshot.Block.Qc.LedgerCommitInfo.Signatures{} hashed
 Bundle.Snapshot.Block.Qc.LedgerCommitInfo.Signatures{}#keys hashed
 Bundle.Snapshot.Block.Qc.LedgerCommitInfo.Timestamp hashed
 Bundle.Snapshot.Block.Qc.LedgerCommitInfo.Version hashed
+Bundle.Snapshot.Block.Qc.Scheme hashed
+Bundle.Snapshot.Block.Qc.SealSignatures{} hashed
+Bundle.Snapshot.Block.Qc.SealSignatures{}#keys hashed
 Bundle.Snapshot.Block.Qc.Signatures{} hashed
 Bundle.Snapshot.Block.Qc.Signatures{}#keys hashed
 Bundle.Snapshot.Block.Qc.VoteInfo.CurrentRootHash hashed
@@ -130,6 +139,9 @@ Bundle.Snapshot.CommitQc.LedgerCommitInfo.Signatures{} hashed
 Bundle.Snapshot.CommitQc.LedgerCommitInfo.Signatures{}#keys hashed
 Bundle.Snapshot.CommitQc.LedgerCommitInfo.Timestamp hashed
 Bundle.Snapshot.CommitQc.LedgerCommitInfo.Version hashed
+Bundle.Snapshot.CommitQc.Scheme hashed
+Bundle.Snapshot.CommitQc.SealSignatures{} excluded
+Bundle.Snapshot.CommitQc.SealSignatures{}#keys excluded
 Bundle.Snapshot.CommitQc.Signatures{} excluded
 Bundle.Snapshot.CommitQc.Signatures{}#keys excluded
 Bundle.Snapshot.CommitQc.VoteInfo.CurrentRootHash hashed
@@ -156,6 +168,9 @@ Bundle.Snapshot.Qc.LedgerCommitInfo.Signatures{} hashed
 Bundle.Snapshot.Qc.LedgerCommitInfo.Signatures{}#keys hashed
 Bundle.Snapshot.Qc.LedgerCommitInfo.Timestamp hashed
 Bundle.Snapshot.Qc.LedgerCommitInfo.Version hashed
+Bundle.Snapshot.Qc.Scheme hashed
+Bundle.Snapshot.Qc.SealSignatures{} excluded
+Bundle.Snapshot.Qc.SealSignatures{}#keys excluded
 Bundle.Snapshot.Qc.Signatures{} excluded
 Bundle.Snapshot.Qc.Signatures{}#keys excluded
 Bundle.Snapshot.Qc.VoteInfo.CurrentRootHash hashed
