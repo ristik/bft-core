@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"crypto"
 	"errors"
 	"testing"
@@ -172,4 +173,28 @@ func TestExecutionJudgesRequestsUnderTheResolvedView(t *testing.T) {
 		require.Nil(t, viewDispatch(nilHistory))
 		require.NotNil(t, viewDispatch(v))
 	})
+}
+
+// A committed handoff authenticates to the activation the resolver reads: the root identity, the activation round and the
+// committed successor record come from the verified record, and a record that does not match its body or candidate is refused.
+func TestActivationFromHandoffAuthenticatesTheCommittedRecord(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	b := f.build(t, f.candidate(t))
+	record := b.freeze
+	record.Kind = "commit"
+	a, err := ActivationFromHandoff(record, b.body, b.preimage, f.parent, crypto.SHA256, fxVersion)
+	require.NoError(t, err)
+	require.Equal(t, record.ActivationRound, a.start)
+	require.Equal(t, record.Epoch+1, a.rootEpoch)
+	require.Equal(t, record.NextBodyID, a.rootBody)
+	require.Equal(t, record.SuccessorTRHash, a.trHash)
+	require.Equal(t, quorumweight.PolicyUnit, a.ctx.Policy(), "production activations are unit-weighted")
+
+	wrong := record
+	wrong.NextBodyID = bytes.Repeat([]byte{2}, 32)
+	_, err = ActivationFromHandoff(wrong, b.body, b.preimage, f.parent, crypto.SHA256, fxVersion)
+	require.ErrorIs(t, err, ErrAssignmentHistory)
+	_, err = ActivationFromHandoff(record, b.body, b.preimage, f.parent, crypto.SHA256, 0)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
 }
