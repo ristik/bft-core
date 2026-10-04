@@ -1347,6 +1347,11 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	if x.epochAnchor != nil && !x.recoveryProfile2 {
 		return fmt.Errorf("recovery response verification failed: %w", abdrc.ErrRecoveryEpoch)
 	}
+	// Every QC of a state message is of the receiver's epoch (an older one is refused above as ErrRecoveryEpoch, never verified
+	// under another rule); the legacy-form QCs it carries are refused when that epoch signs with the domain-bound scheme.
+	if err := x.trustBaseStore.RequireLegacySigning(x.trustBase.Load().Epoch); err != nil {
+		return fmt.Errorf("recovery response verification failed: %w", err)
+	}
 	var verifyErr error
 	if x.recoveryProfile2 {
 		if x.recoveryHistory == nil {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 )
 
 type Timeout struct {
@@ -31,6 +32,71 @@ type TimeoutCert struct {
 	_          struct{}                `cbor:",toarray"`
 	Timeout    *Timeout                `json:"timeout"`    // Round and epoch of the timeout event
 	Signatures map[string]*TimeoutVote `json:"signatures"` // 2f+1 signatures from nodes confirming TC
+	// Scheme is the signing scheme of the wire form: 0 or 1 legacy, 2 the domain-bound wrapper [2, payload]. Not part of the
+	// legacy encoding; the epoch of the timeout decides which one a verifier accepts.
+	Scheme uint64 `cbor:"-" json:"-"`
+}
+
+type timeoutCertWire TimeoutCert
+
+type timeoutCertV2Wire struct {
+	_       struct{} `cbor:",toarray"`
+	Scheme  uint64
+	Payload timeoutCertWire
+}
+
+// MarshalCBOR writes the legacy array, or the scheme wrapper for a scheme 2 certificate.
+func (x TimeoutCert) MarshalCBOR() ([]byte, error) {
+	if x.Scheme == votesig.SchemeDomainBound {
+		return base.Cbor.Marshal(timeoutCertV2Wire{Scheme: x.Scheme, Payload: timeoutCertWire(x)})
+	}
+	return base.Cbor.Marshal(timeoutCertWire(x))
+}
+
+// UnmarshalCBOR reads the legacy array or the scheme 2 wrapper; any other wrapper version is refused.
+func (x *TimeoutCert) UnmarshalCBOR(data []byte) error {
+	wrapped, err := votesig.PeekWrapper(data)
+	if err != nil {
+		return err
+	}
+	if wrapped {
+		var w timeoutCertV2Wire
+		if err := base.Cbor.Unmarshal(data, &w); err != nil {
+			return err
+		}
+		*x = TimeoutCert(w.Payload)
+		x.Scheme = votesig.SchemeDomainBound
+		return nil
+	}
+	var legacy timeoutCertWire
+	if err := base.Cbor.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+	*x = TimeoutCert(legacy)
+	x.Scheme = 0
+	return nil
+}
+
+func (x *TimeoutCert) signingScheme() uint64 {
+	if x.Scheme == votesig.SchemeDomainBound {
+		return votesig.SchemeDomainBound
+	}
+	return votesig.SchemeLegacy
+}
+
+// TimeoutPreimage is the scheme 2 bytes (PT) one entry of the certificate signed, rebuilt from that entry (its own high QC
+// round and anchor), the certificate's epoch and round, and the author: never from the maximum high QC round of the
+// certificate.
+func (x *TimeoutCert) TimeoutPreimage(cfg votesig.Config, author string, vote *TimeoutVote) ([]byte, error) {
+	t := votesig.Timeout{Epoch: x.Timeout.Epoch, Round: x.Timeout.Round, HighQcRound: vote.HqcRound, Author: author}
+	if a := vote.Anchor; a != nil {
+		if len(a.GenesisID) != 32 {
+			return nil, fmt.Errorf("%w: anchor genesis id is %d bytes", votesig.ErrStatement, len(a.GenesisID))
+		}
+		t.Anchor = &votesig.Anchor{Epoch: a.Epoch, Slot: a.Slot}
+		copy(t.Anchor.GenesisID[:], a.GenesisID)
+	}
+	return cfg.TimeoutPreimage(t)
 }
 
 // NewTimeout creates new Timeout for round (epoch) and highest QC seen
@@ -147,6 +213,10 @@ func (x *Timeout) Verify(tbs *trustbase.TrustBaseStore) error {
 	if err != nil {
 		return fmt.Errorf("failed to get trust base for high QC verification, epoch %d: %w", x.HighQc.VoteInfo.Epoch, err)
 	}
+	// the high QC is verified by the rule of its own epoch; a legacy-form QC of an activated epoch is never reinterpreted
+	if err := tbs.RequireLegacySigning(x.HighQc.VoteInfo.Epoch); err != nil {
+		return fmt.Errorf("invalid high QC: %w", err)
+	}
 	if err := x.HighQc.Verify(highQcTrustBase, tbs.GenesisPin()); err != nil {
 		return fmt.Errorf("invalid high QC: %w", err)
 	}
@@ -257,6 +327,13 @@ func (x *TimeoutCert) Verify(tbs *trustbase.TrustBaseStore) error {
 	if err != nil {
 		return fmt.Errorf("failed to get trust base for vote verification, epoch %d: %w", x.Timeout.Epoch, err)
 	}
+	cfg, err := tbs.SigningConfig(x.Timeout.Epoch)
+	if err != nil {
+		return err
+	}
+	if x.signingScheme() != cfg.Scheme {
+		return fmt.Errorf("%w: timeout certificate is scheme %d, epoch %d requires scheme %d", votesig.ErrScheme, x.signingScheme(), x.Timeout.Epoch, cfg.Scheme)
+	}
 	var signedVotes quorumweight.Tally
 	var maxSignedRound uint64
 	highQcRound := x.Timeout.GetHqcRound()
@@ -266,9 +343,19 @@ func (x *TimeoutCert) Verify(tbs *trustbase.TrustBaseStore) error {
 			return ErrEpochAnchor
 		}
 		timeoutBytes := BytesFromTimeoutVote(x.Timeout, author, timeoutSig)
+		if cfg.Scheme == votesig.SchemeDomainBound {
+			// every entry is checked under scheme 2 alone: an entry signed over the legacy bytes does not verify, so a mixed
+			// certificate is refused whole, and its signature shape is the scheme 2 one
+			if err := votesig.CheckSignatureShape(timeoutSig.Signature); err != nil {
+				return fmt.Errorf("timeout certificate entry %q: %w", author, err)
+			}
+			if timeoutBytes, err = x.TimeoutPreimage(cfg, author, timeoutSig); err != nil {
+				return fmt.Errorf("timeout certificate entry %q: %w", author, err)
+			}
+		}
 		stake, err := tb.VerifySignature(timeoutBytes, timeoutSig.Signature, author)
 		if err != nil {
-			return fmt.Errorf("timeout certificate signature verification failed: %w", err)
+			return fmt.Errorf("timeout certificate signature verification failed: %w", votesig.BadSignature(err))
 		}
 		if err := signedVotes.Add(author, stake); err != nil {
 			return fmt.Errorf("timeout certificate weight: %w", err)

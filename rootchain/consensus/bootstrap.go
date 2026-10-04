@@ -54,6 +54,10 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	if err != nil {
 		return nil, fmt.Errorf("old root trust lineage: %w", err)
 	}
+	// the old epoch's commit QC is verified by that epoch's own rule: legacy form only while it signs with scheme 1
+	if err := x.trustBaseStore.RequireLegacySigning(proof.Record.Epoch); err != nil {
+		return nil, fmt.Errorf("old root trust lineage: %w", err)
+	}
 	prior, err := x.recoveryHistory.ByEpoch(proof.Record.Epoch)
 	if err != nil {
 		return nil, fmt.Errorf("old root trust lineage: %w", err)
