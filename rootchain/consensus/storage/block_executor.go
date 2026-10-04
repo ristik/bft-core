@@ -41,6 +41,10 @@ type (
 	}
 )
 
+// ErrShardConfMismatch is the refusal of a checkpoint whose shard configuration hash does not match the local
+// orchestration's configuration of that shard.
+var ErrShardConfMismatch = errors.New("calculated shard conf hash doesn't match the value in block data")
+
 func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration Orchestration, networkProfile ...uint64) (*ExecutedBlock, error) {
 	profile, err := profileVersion(networkProfile)
 	if err != nil {
@@ -94,7 +98,7 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 			return nil, fmt.Errorf("calculating PDR hash: %w", err)
 		}
 		if !bytes.Equal(d.ShardConfHash, shardConfHash) {
-			return nil, fmt.Errorf("calculated shard conf hash doesn't match the value in block data for %s - %s", d.Partition, d.Shard)
+			return nil, fmt.Errorf("%w for %s - %s", ErrShardConfMismatch, d.Partition, d.Shard)
 		}
 
 		si := &ShardInfo{

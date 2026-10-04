@@ -143,6 +143,18 @@ func NewWeightedRequestContext(pdr *types.PartitionDescriptionRecord, hashAlg cr
 	if len(pdr.Validators) > evmassign.MaxValidators {
 		return nil, fmt.Errorf("%w: %d validators", ErrWeightCap, len(pdr.Validators))
 	}
+	// member structure first: ValidateCoupling dereferences every validator
+	seen := make(map[string]struct{}, len(pdr.Validators))
+	for _, v := range pdr.Validators {
+		if v == nil || v.NodeID == "" {
+			return nil, fmt.Errorf("%w: missing member identity", ErrUnknownSigner)
+		}
+		if _, dup := seen[v.NodeID]; dup {
+			// a repeated identity is also not a bijection with the root members
+			return nil, fmt.Errorf("%w: %q: %w", ErrDuplicateSigner, v.NodeID, evmassign.ErrCoupling)
+		}
+		seen[v.NodeID] = struct{}{}
+	}
 	if err := evmassign.ValidateCoupling(coupling.Root, pdr, coupling.Bindings); err != nil {
 		return nil, fmt.Errorf("coupled root assignment: %w", err)
 	}

@@ -134,7 +134,8 @@ func TestNewRootBlockRestoreRefusesAlteredConfiguration(t *testing.T) {
 	altered := *pdr
 	altered.Validators = append(append([]*types.NodeInfo{}, pdr.Validators...), testutils.NewTestNode(t).NodeInfo(t))
 	_, err = NewRootBlock(head, crypto.SHA256, orchestrationOf(&altered), ProfileLegacy)
-	require.ErrorContains(t, err, "shard conf hash doesn't match")
+	require.ErrorIs(t, err, ErrShardConfMismatch)
+	require.ErrorContains(t, err, "shard conf hash doesn't match", "the text is unchanged")
 
 	heavy := *pdr
 	heavy.Validators = []*types.NodeInfo{{NodeID: pdr.Validators[0].NodeID, SigKey: pdr.Validators[0].SigKey, Stake: 5}}

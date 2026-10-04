@@ -379,7 +379,8 @@ func TestWeightedRequestContextRefusals(t *testing.T) {
 		p, c := coupled(t, 1, 1, 1)
 		p.Validators[1].NodeID = p.Validators[0].NodeID
 		_, err := NewWeightedRequestContext(p, crypto.SHA256, confHash(t, p), c)
-		require.Error(t, err) // refused by the coupling bijection or by the identity check, never accepted
+		require.ErrorIs(t, err, ErrDuplicateSigner)
+		require.ErrorIs(t, err, evmassign.ErrCoupling, "a repeated identity is also not a bijection")
 		p, c = coupled(t, 1, 1, 1)
 		p.Validators[1].SigKey = p.Validators[0].SigKey
 		_, err = NewWeightedRequestContext(p, crypto.SHA256, confHash(t, p), c)
@@ -474,5 +475,33 @@ func TestContextVerifierIgnoresCallerVerifierCache(t *testing.T) {
 	sigA, err := signerA.SignBytes(data)
 	require.NoError(t, err)
 	require.NoError(t, ver.VerifyBytes(sigB, data))
-	require.Error(t, ver.VerifyBytes(sigA, data))
+	require.ErrorIs(t, ver.VerifyBytes(sigA, data), abcrypto.ErrVerificationFailed)
+}
+
+// A nil weighted member is refused by error before the coupling check dereferences it.
+func TestWeightedNilMemberIsRefused(t *testing.T) {
+	p, c := coupled(t, 1, 1)
+	p.Validators[0] = nil
+	ctx, err := NewWeightedRequestContext(p, crypto.SHA256, confHash(t, p), c)
+	require.ErrorIs(t, err, ErrUnknownSigner)
+	require.Nil(t, ctx)
+	p, c = coupled(t, 1, 1)
+	p.Validators[1].NodeID = ""
+	_, err = NewWeightedRequestContext(p, crypto.SHA256, confHash(t, p), c)
+	require.ErrorIs(t, err, ErrUnknownSigner)
+}
+
+// The shard is part of the identity, and as a string copied at construction it cannot change afterwards (ShardID's bits
+// are unexported and have no mutator, so no caller input aliasing exists to test beyond this).
+func TestIdentityBindsTheShard(t *testing.T) {
+	left, right := types.ShardID{}.Split()
+	var ids []string
+	for _, sh := range []types.ShardID{{}, left, right} {
+		p := pdr(1, nodeInfos(t, member{"a", 1}))
+		p.ShardID = sh
+		ctx, err := NewUnitRequestContext(p, crypto.SHA256, confHash(t, p))
+		require.NoError(t, err)
+		require.NotContains(t, ids, ctx.Identity())
+		ids = append(ids, ctx.Identity())
+	}
 }
