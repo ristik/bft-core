@@ -113,7 +113,16 @@ func initBlock(block *ExecutedBlock, orchestration Orchestration) error {
 					ErrAssignmentHistory, k, si.ShardConfHash, pdrHash, block.GetRound())
 			}
 		}
-		if err = si.resetTrustBase(pdr); err != nil {
+		// The context is bound to the configuration hash this site has authenticated. Under the handoff profile that is the
+		// stored hash (checked above); outside it the stored hash was never compared and still is not, so the context binds to
+		// the loaded configuration exactly as the trust base always did.
+		committed := si.ShardConfHash
+		if block.ShardState.Control == nil {
+			if committed, err = pdr.Hash(crypto.SHA256); err != nil {
+				return fmt.Errorf("hashing shard configuration (%s): %w", k, err)
+			}
+		}
+		if err = si.resetTrustBase(pdr, crypto.SHA256, committed); err != nil {
 			return fmt.Errorf("init shard trustbase (%s): %w", k, err)
 		}
 	}
