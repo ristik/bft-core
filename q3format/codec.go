@@ -163,7 +163,7 @@ func (r *reader) len() int { return len(r.items) }
 
 // expect checks the domain text of the first item.
 func (r *reader) expect(domain string) {
-	if got := r.text(len(domain)); r.err == nil && got != domain {
+	if got := r.text(maxText); r.err == nil && got != domain {
 		r.fail(fmt.Errorf("%w: domain %q, want %q", ErrVersion, got, domain))
 	}
 }
