@@ -121,11 +121,21 @@ func (c *CertRequestBuffer) Add(ctx context.Context, request *certification.Bloc
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	rs := c.get(request.PartitionID, request.ShardID)
-	qs, bcr, err := rs.add(request, tb)
-	if err == nil {
-		c.updQuorumStatus(ctx, rs, qs)
+	// A store for a shard not seen before is published only once the request has been admitted: a refusal leaves no shard state.
+	key := partitionShard{partition: request.PartitionID, shard: request.ShardID.Key()}
+	rs, known := c.store[key]
+	if !known {
+		rs = newRequestStore()
+		rs.attrShard = observability.Shard(request.PartitionID, request.ShardID)
 	}
+	qs, bcr, err := rs.add(request, tb)
+	if err != nil {
+		return qs, bcr, err
+	}
+	if !known {
+		c.store[key] = rs
+	}
+	c.updQuorumStatus(ctx, rs, qs)
 	return qs, bcr, err
 }
 

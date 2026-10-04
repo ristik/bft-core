@@ -255,3 +255,33 @@ func TestRequestBufferNoQuorumProofIsACopy(t *testing.T) {
 		}
 	}
 }
+
+// The first public Add of a shard is atomic: a refusal publishes no shard state, and the shard is still empty afterwards.
+func TestCertRequestBufferFirstRefusedAddPublishesNothing(t *testing.T) {
+	tb := partitions.NewWeightedPartitionTrustBase("w", map[string]uint64{"a": 3, "b": 2, "c": 1})
+	for _, tc := range []struct {
+		name string
+		req  *certification.BlockCertificationRequest
+		tb   QuorumInfo
+		is   error
+	}{
+		{"unknown signer", voteReq(requestvectors.Vote{Signer: "zz", Group: "X"}), tb, quorumweight.ErrUnknownSigner},
+		{"no quorum information", voteReq(requestvectors.Vote{Signer: "a", Group: "X"}), nil, quorumweight.ErrRequestContext},
+		{"inconsistent threshold", voteReq(requestvectors.Vote{Signer: "a", Group: "X"}), inconsistentTB{tb}, quorumweight.ErrInconsistentTally},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, err := NewCertificationRequestBuffer(observability.Default(t).Meter("test"))
+			require.NoError(t, err)
+			qs, proof, err := cs.Add(context.Background(), tc.req, tc.tb)
+			require.ErrorIs(t, err, tc.is)
+			require.Equal(t, QuorumUnknown, qs)
+			require.Nil(t, proof)
+			require.Empty(t, cs.store, "a refused first Add must not register the shard")
+			// and the same request is accepted afterwards under a good context
+			qs, _, err = cs.Add(context.Background(), voteReq(requestvectors.Vote{Signer: "a", Group: "X"}), tb)
+			require.NoError(t, err)
+			require.Equal(t, QuorumInProgress, qs)
+			require.Len(t, cs.store, 1)
+		})
+	}
+}

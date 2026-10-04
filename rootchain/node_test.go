@@ -878,6 +878,19 @@ func Test_onBlockCertificationRequest(t *testing.T) {
 		require.ErrorContains(t, err, `invalid receiver id: failed to parse peer ID: invalid cid: selected encoding not supported`)
 	})
 
+	t.Run("nil request is refused at entry", func(t *testing.T) {
+		cm := &mockConsensusManager{shardInfo: func(types.PartitionID, types.ShardID) (*storage.ShardInfo, error) {
+			t.Fatal("a nil request reached the shard info lookup")
+			return nil, nil
+		}}
+		node, err := New(&nwPeer, mockPartitionNet{}, cm, testobservability.Default(t))
+		require.NoError(t, err)
+		err = node.onBlockCertificationRequest(t.Context(), nil)
+		require.ErrorIs(t, err, rctypes.ErrInvalidRequest)
+		require.ErrorIs(t, err, certification.ErrBlockCertificationRequestIsNil)
+		require.Empty(t, node.incomingRequests.store)
+	})
+
 	t.Run("invalid request", func(t *testing.T) {
 		// in case of invalid request we respond with the latest cert of the shard
 		// wrapped in a rejection envelope (Status=RequestInvalid, Message=why).

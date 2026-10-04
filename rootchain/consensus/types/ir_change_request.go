@@ -60,7 +60,7 @@ func (r IRChangeReason) String() string {
 func (x *IRChangeReq) IsValid() error {
 	// ignore other values for now, just make sure it is not negative
 	if x.CertReason > T2Timeout {
-		return fmt.Errorf("unknown reason (%d)", x.CertReason)
+		return withSentinels{fmt.Errorf("unknown reason (%d)", x.CertReason), []error{ErrInvalidRequest}}
 	}
 	return nil
 }
@@ -87,6 +87,10 @@ func (x *IRChangeReq) Verify(tb RequestVerifier, luc *types.UnicityCertificate, 
 				x.Partition, x.Shard, req.PartitionID, req.ShardID), []error{ErrInvalidRequest}}
 		}
 		if err := tb.ValidRequest(req); err != nil {
+			// an unknown signer and a bad signature keep their own identities; any other refusal is a malformed request
+			if !errors.Is(err, ErrInvalidRequest) && !errors.Is(err, quorumweight.ErrUnknownSigner) && !errors.Is(err, quorumweight.ErrInvalidSignature) {
+				err = withSentinels{err, []error{ErrInvalidRequest}}
+			}
 			return nil, fmt.Errorf("invalid certification request: %w", err)
 		}
 		// the group of the request: its IR and sizes

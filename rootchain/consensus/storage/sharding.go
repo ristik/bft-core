@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -663,7 +664,24 @@ func (si *ShardInfo) update(req *certification.BlockCertificationRequest, leader
 	si.Stat.MaxStateSize = max(si.Stat.MaxStateSize, req.StateSize)
 }
 
+// malformedRequest keeps the text and the identities of err and additionally matches rctypes.ErrInvalidRequest.
+type malformedRequest struct{ err error }
+
+func (e malformedRequest) Error() string   { return e.err.Error() }
+func (e malformedRequest) Unwrap() []error { return []error{e.err, rctypes.ErrInvalidRequest} }
+
+// ValidRequest checks signature, membership and continuity of a request. A signer that is not a member and a bad signature
+// keep their own identities; every other refusal (a nil or malformed request, another shard, stale continuity) also matches
+// rctypes.ErrInvalidRequest, preserving the underlying error.
 func (si *ShardInfo) ValidRequest(req *certification.BlockCertificationRequest) error {
+	err := si.validRequest(req)
+	if err == nil || errors.Is(err, ErrNodeNotInTrustBase) || errors.Is(err, quorumweight.ErrInvalidSignature) {
+		return err
+	}
+	return malformedRequest{err}
+}
+
+func (si *ShardInfo) validRequest(req *certification.BlockCertificationRequest) error {
 	// req.IsValid checks that req is not nil and comes from valid validator.
 	// It also calls IR.IsValid which implements (CR.IR.h = CR.IR.h′) = (CR.IR.hB = ⊥)
 	// check so we do not repeat it here.

@@ -276,11 +276,17 @@ func TestTallyAddIsAtomic(t *testing.T) {
 	tb := mockReqVerifier{weights: map[string]uint64{"a": 3, "b": 2}}
 	tally := NewRequestTally(tb)
 	require.NoError(t, tally.Add("a", [32]byte{1}))
-	for _, bad := range []string{"a", "zz"} {
-		require.Error(t, tally.Add(bad, [32]byte{1}))
-		require.EqualValues(t, 3, tally.Received())
-		require.EqualValues(t, 3, tally.Matching())
-		require.Equal(t, 1, tally.Signers())
+	for name, c := range map[string]struct {
+		signer string
+		want   error
+	}{
+		"duplicate signer": {"a", quorumweight.ErrDuplicateSigner},
+		"unknown signer":   {"zz", quorumweight.ErrUnknownSigner},
+	} {
+		require.ErrorIs(t, tally.Add(c.signer, [32]byte{1}), c.want, name)
+		require.EqualValues(t, 3, tally.Received(), name)
+		require.EqualValues(t, 3, tally.Matching(), name)
+		require.Equal(t, 1, tally.Signers(), name)
 	}
 	over := NewRequestTally(overflowWeights{})
 	require.NoError(t, over.Add("a", [32]byte{1}))
@@ -298,3 +304,25 @@ func (overflowWeights) SignerWeight(string) (uint64, error) { return ^uint64(0),
 type zeroWeights struct{ brokenWeights }
 
 func (zeroWeights) SignerWeight(string) (uint64, error) { return 0, nil }
+
+// A proof with an unknown reason, or one whose request is malformed, matches ErrInvalidRequest and keeps the underlying error.
+func TestProofMalformedSentinels(t *testing.T) {
+	tb := mockReqVerifier{nodeCnt: 3, validReq: func(*certification.BlockCertificationRequest) error { return nil }}
+	x := proofOf([]requestvectors.Vote{{Signer: "a", Group: "X"}}, 255)
+	_, err := x.Verify(tb, luc(), 5, 1)
+	require.ErrorIs(t, err, ErrInvalidRequest)
+
+	underlying := types.ErrInputRecordIsNil
+	bad := mockReqVerifier{nodeCnt: 3, validReq: func(*certification.BlockCertificationRequest) error { return underlying }}
+	_, err = proofOf([]requestvectors.Vote{{Signer: "a", Group: "X"}}, Quorum).Verify(bad, luc(), 5, 1)
+	require.ErrorIs(t, err, ErrInvalidRequest)
+	require.ErrorIs(t, err, underlying)
+
+	// an unknown signer and a forged signature are not reclassified as malformed
+	for _, id := range []error{quorumweight.ErrUnknownSigner, quorumweight.ErrInvalidSignature} {
+		tb := mockReqVerifier{nodeCnt: 3, validReq: func(*certification.BlockCertificationRequest) error { return id }}
+		_, err = proofOf([]requestvectors.Vote{{Signer: "a", Group: "X"}}, Quorum).Verify(tb, luc(), 5, 1)
+		require.ErrorIs(t, err, id)
+		require.NotErrorIs(t, err, ErrInvalidRequest)
+	}
+}
