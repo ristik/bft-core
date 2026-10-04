@@ -140,6 +140,28 @@ func TestAttestChecksTheTupleItSigns(t *testing.T) {
 	}
 }
 
+// A report that agrees with a partial or legacy tuple is still refused: the tuple is validated before it is compared, and each
+// case differs from the valid tuple in one field only.
+func TestExecutionRequirementValidatesTheTuple(t *testing.T) {
+	valid := q3format.Q3Config(testNetwork, fill(9))
+	require.NoError(t, pinned.Check(goodExec(), valid), "acceptance control: the valid tuple")
+	for name, tc := range map[string]struct {
+		mut    func(*q3format.ProtocolConfig)
+		report func(*ExecutionReport)
+	}{
+		"layout 1":         {func(c *q3format.ProtocolConfig) { c.RegistryLayout = 1 }, func(r *ExecutionReport) { r.RegistryLayout = 1 }},
+		"old protocol":     {func(c *q3format.ProtocolConfig) { c.RequiredExecutionProtocol = "q2/0" }, func(r *ExecutionReport) { r.Protocols = []string{"q2/0"} }},
+		"scheme 1":         {func(c *q3format.ProtocolConfig) { c.SigningScheme = 1 }, func(*ExecutionReport) {}},
+		"unknown revision": {func(c *q3format.ProtocolConfig) { c.Revision = 7 }, func(r *ExecutionReport) { r.ConfigRevisions = []uint64{7} }},
+		"no network":       {func(c *q3format.ProtocolConfig) { c.Network = 0 }, func(*ExecutionReport) {}},
+	} {
+		cfg, r := valid, goodExec()
+		tc.mut(&cfg)
+		tc.report(&r)
+		require.ErrorIs(t, pinned.Check(r, cfg), q3format.ErrConfig, name)
+	}
+}
+
 func TestExecutionRequirementNeedsLocalPins(t *testing.T) {
 	cfg := q3format.Q3Config(testNetwork, fill(9))
 	require.NoError(t, pinned.Check(goodExec(), cfg), "acceptance control")

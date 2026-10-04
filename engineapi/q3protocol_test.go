@@ -96,18 +96,21 @@ func TestPinnedQ3ExecutionIsRecheckedBeforeEngineCalls(t *testing.T) {
 	require.NoError(t, a.CheckCapabilities(context.Background()), "an unchanged client passes")
 	require.Equal(t, 1, called)
 
-	for name, mut := range map[string]func(*q3ProtocolWire){
-		"reconnected to layout 1":   func(w *q3ProtocolWire) { w.RegistryLayout = 1 },
-		"reconnected to other code": func(w *q3ProtocolWire) { w.CodeHash = "0x" + strings.Repeat("78", 32) },
-		"lost the protocol":         func(w *q3ProtocolWire) { w.Protocols = nil },
-		"gained a protocol":         func(w *q3ProtocolWire) { w.Protocols = []string{"q3/1", "q3/2"} },
-		"gained a codec":            func(w *q3ProtocolWire) { w.TransitionCodecs = []uint64{1, 2} },
+	for name, tc := range map[string]struct {
+		mut  func(*q3ProtocolWire)
+		want error
+	}{
+		"reconnected to layout 1":   {func(w *q3ProtocolWire) { w.RegistryLayout = 1 }, q3compat.ErrExecutionLayout},
+		"reconnected to other code": {func(w *q3ProtocolWire) { w.CodeHash = "0x" + strings.Repeat("78", 32) }, q3compat.ErrExecutionIdentity},
+		"lost the protocol":         {func(w *q3ProtocolWire) { w.Protocols = nil }, q3compat.ErrExecutionProtocol},
+		"gained a protocol":         {func(w *q3ProtocolWire) { w.Protocols = []string{"q3/1", "q3/2"} }, ErrQ3ProtocolChanged},
+		"gained a codec":            {func(w *q3ProtocolWire) { w.TransitionCodecs = []uint64{1, 2} }, ErrQ3ProtocolChanged},
 	} {
 		current = q3Wire()
-		mut(&current)
+		tc.mut(&current)
 		before := called
 		err := a.CheckCapabilities(context.Background())
-		require.Error(t, err, name)
+		require.ErrorIs(t, err, tc.want, name)
 		require.Equal(t, before, called, "%s: the call is refused before it reaches the client", name)
 	}
 	current = q3Wire()
@@ -116,6 +119,34 @@ func TestPinnedQ3ExecutionIsRecheckedBeforeEngineCalls(t *testing.T) {
 	current = q3Wire()
 	current.Protocols = []string{"q3/1", "q3/2"} // still satisfies the requirement, but is not the pinned report
 	require.ErrorIs(t, a.CheckCapabilities(context.Background()), ErrQ3ProtocolChanged)
+}
+
+// A tuple that fails validation is never pinned, even when the client's report agrees with it; the valid tuple is the control.
+func TestPinRefusesAnInvalidTuple(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mut  func(*q3format.ProtocolConfig)
+		wire func(*q3ProtocolWire)
+	}{
+		"layout 1":     {func(c *q3format.ProtocolConfig) { c.RegistryLayout = 1 }, func(w *q3ProtocolWire) { w.RegistryLayout = 1 }},
+		"old protocol": {func(c *q3format.ProtocolConfig) { c.RequiredExecutionProtocol = "q2/0" }, func(w *q3ProtocolWire) { w.Protocols = []string{"q2/0"} }},
+		"scheme 1":     {func(c *q3format.ProtocolConfig) { c.SigningScheme = 1 }, func(*q3ProtocolWire) {}},
+	} {
+		w := q3Wire()
+		tc.wire(&w)
+		a, engine, closeFn := q3Adapter(t, func(json.RawMessage) (any, *rpcError) { return w, nil })
+		engine.on("engine_exchangeCapabilities", func(json.RawMessage) (any, *rpcError) { return requiredCapabilities, nil })
+		cfg := q3Cfg
+		tc.mut(&cfg)
+		_, err := a.CheckQ3Execution(context.Background(), cfg, q3Want)
+		require.ErrorIs(t, err, q3format.ErrConfig, name)
+		require.ErrorIs(t, a.PinQ3Execution(context.Background(), cfg, q3Want), q3format.ErrConfig, name)
+		require.NoError(t, a.CheckCapabilities(context.Background()), "%s: nothing was pinned, so later calls are not gated", name)
+		closeFn()
+	}
+	a, engine, closeFn := q3Adapter(t, func(json.RawMessage) (any, *rpcError) { return q3Wire(), nil })
+	defer closeFn()
+	engine.on("engine_exchangeCapabilities", func(json.RawMessage) (any, *rpcError) { return requiredCapabilities, nil })
+	require.NoError(t, a.PinQ3Execution(context.Background(), q3Cfg, q3Want), "acceptance control: the valid tuple")
 }
 
 func TestQ3PinDoesNotReplaceTheSealPin(t *testing.T) {

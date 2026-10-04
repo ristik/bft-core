@@ -46,7 +46,12 @@ type ExecutionRequirement struct {
 }
 
 // Check refuses a report that does not satisfy the tuple and the local pins.
+// The tuple is validated first, so that a partial or legacy tuple (layout 1, an old protocol, scheme 1) can never be matched by a
+// report that merely agrees with it: errors.Is(q3format.ErrConfig).
 func (w ExecutionRequirement) Check(r ExecutionReport, cfg q3format.ProtocolConfig) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 	switch {
 	case r.Version != ExecutionReportVersion:
 		return fmt.Errorf("%w: %d", ErrExecutionVersion, r.Version)
