@@ -157,6 +157,23 @@ old nonce after a lost response: query `eth_getTransactionCount` for
 `scripts/lib/m2-handoff-lib.sh:93`. Root startup waits on its listener; if it
 hangs, inspect the current root log and stop that owned process, not the host.
 
+### Bootstrap readiness (automatic root-quorum receipt)
+
+Roots now serve the bootstrap-freshness protocol in default startup, and a shard validator that
+knows only the genesis bootstrap certificate stays unready until a fresh root quorum confirms it
+([M2 runbook section 5a](../m2-runbook.md#5a-bootstrap-freshness-the-automatic-root-quorum-receipt)).
+For this guide that changes two things:
+
+- Start all roots before the shard validators (`start_root_nodes` and `wait_for_root_chain_settle`
+  above already do) and confirm each root log has `root frontier service enabled`. The eligible
+  validators are those in the `--shard-conf` files given at root start, which is why this guide
+  supplies the full genesis configuration there and performs no post-genesis configuration PUT.
+- Each validator log shows `bootstrap receipt acquired from a fresh root quorum` before its first
+  `certificate admitted` with a block. The paid certification check that follows therefore waits
+  for it plus up to one T2 (5000 ms here). If the line is missing after a minute, treat it as a
+  STOP condition and read the `bootstrap receipt acquisition failed` warnings; do not restart
+  validators to force readiness.
+
 ## Health and process lifecycle
 
 ```sh
@@ -246,6 +263,7 @@ defaults unchanged; save full `--help` output with the evidence for those defaul
 | T2 5000 ms, `proof_type=exec` | `generate_evm_shard_conf`; H3 adds three aggregator configurations automatically. |
 | `--registry-layout 2`, `test-nodes/registry-layout` | Resolves registry artifact hash and Ureth pin once; preserved through restarts. Upgrade changes only recorded client pin after compatibility checks. |
 | `--alloc-source`, `--out`, `--full-shard-conf`, `--genesis` | Funded fixture allocation, finalized JSON and full configuration generated together; never hand-edit after initialization. |
+| Bootstrap freshness | No flag. Roots serve it and validators require it in default startup; the roots' trust base must be unit-weight with `2N/3 < q <= N`. Restore pins (`--tip-uc`) are unaffected. |
 | `--profile-2`, root `--shard-conf`, `--trust-base` | Full genesis config supplied at root startup; epoch-1 trust anchor retained; no post-genesis configuration PUT. |
 | Root `--install-handoff-epoch` | Only after H is committed; derived from successor epoch, verified bundle must exist. |
 | `--address`, `--bootnodes`, RPC URLs | Port table; bootnode addresses include generated `/p2p/<node-id>`; shards peer with roots and siblings. |

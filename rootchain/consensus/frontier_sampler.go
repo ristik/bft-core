@@ -19,6 +19,8 @@ import (
 )
 
 var (
+	// ErrFrontierProfile marks a trust base or configuration outside the frontier's fixed unit-weight profile.
+	ErrFrontierProfile     = errors.New("root frontier profile refused")
 	ErrFrontierDisabled    = errors.New("root frontier sampler is disabled")
 	ErrFrontierUnavailable = errors.New("root frontier sample unavailable")
 	ErrFrontierBusy        = errors.New("root frontier sampler is busy")
@@ -87,13 +89,13 @@ type frontierSampler struct {
 
 func newFrontierSampler(c FrontierSamplerConfig, reader frontierSafetyReader) (*frontierSampler, error) {
 	if reader == nil || c.TrustBase == nil || c.QueueSize <= 0 || c.MaxPending <= 0 || c.QueueSize > c.MaxPending {
-		return nil, errors.New("invalid frontier sampler configuration")
+		return nil, fmt.Errorf("%w: invalid frontier sampler configuration", ErrFrontierProfile)
 	}
 	if err := validateFrontierTrustBounds(c.TrustBase); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrFrontierProfile, err)
 	}
 	if c.TrustBase.Version != 1 || c.TrustBase.NetworkID == 0 || c.TrustBase.Epoch == 0 {
-		return nil, errors.New("invalid frontier trust profile")
+		return nil, fmt.Errorf("%w: invalid frontier trust profile", ErrFrontierProfile)
 	}
 	b, err := types.Cbor.Marshal(c.TrustBase)
 	if err != nil {
@@ -107,10 +109,10 @@ func newFrontierSampler(c FrontierSamplerConfig, reader frontierSafetyReader) (*
 	seen := make(map[string]struct{}, len(trust.RootNodes))
 	for _, n := range trust.RootNodes {
 		if err := n.IsValid(); err != nil {
-			return nil, fmt.Errorf("invalid frontier root: %w", err)
+			return nil, fmt.Errorf("%w: invalid frontier root: %w", ErrFrontierProfile, err)
 		}
 		if n.Stake != 1 {
-			return nil, errors.New("frontier roots must have unit weight")
+			return nil, fmt.Errorf("%w: frontier roots must have unit weight", ErrFrontierProfile)
 		}
 		if _, ok := seen[n.NodeID]; ok {
 			return nil, fmt.Errorf("duplicate frontier root %q", n.NodeID)
@@ -122,7 +124,7 @@ func newFrontierSampler(c FrontierSamplerConfig, reader frontierSafetyReader) (*
 		return nil, fmt.Errorf("frontier root weight: %w", err)
 	}
 	if min, err := quorumweight.Threshold(n); err != nil || trust.QuorumThreshold < min || trust.QuorumThreshold > n {
-		return nil, errors.New("frontier quorum must satisfy 2N/3 < q <= N")
+		return nil, fmt.Errorf("%w: frontier quorum must satisfy 2N/3 < q <= N", ErrFrontierProfile)
 	}
 	ownedEncoding, err := types.Cbor.Marshal(&trust)
 	if err != nil {

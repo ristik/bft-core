@@ -1,6 +1,8 @@
-// Package frontierrequester implements the inactive bounded acquisition of a
-// root frontier quorum and committed cut. It performs no node registration,
-// readiness transition, bootstrap activation, or durable permission write.
+// Package frontierrequester implements the bounded acquisition of a root
+// frontier quorum and committed cut, and the process-local receipt it issues.
+// The requester itself performs no readiness transition and writes no durable
+// permission: configuredadmission owns its production registration, and shard
+// readiness consults the live receipt (F6f section 7, unit 4).
 package frontierrequester
 
 import (
@@ -31,6 +33,10 @@ const (
 	MaxPeers         = 64
 	MaxPasses        = 2
 	PassBackoff      = 5 * time.Second
+	// MaintainPoll is how often Maintain rechecks a live receipt. A receipt is
+	// invalidated by events, not by a timer, so this only bounds how long an
+	// expired or invalidated receipt goes unnoticed.
+	MaintainPoll = time.Second
 )
 
 var (
@@ -47,12 +53,25 @@ type RootPeer struct {
 	PeerID peer.ID
 }
 
+// Admission is the live admission state the requester consults and the
+// acknowledged boundary it hands negative evidence to. Both
+// *configuredprogress.AdmissionCoordinator and the journal-backed guard in
+// configuredadmission implement it.
+type Admission interface {
+	EvidenceProfileBinding() [32]byte
+	BootstrapState() configuredprogress.BootstrapAdmissionState
+	AcknowledgePair(*types.UnicityCertificate, *certification.TechnicalRecord) (retained bool, err error)
+}
+
 type Config struct {
 	Process   context.Context
 	Profile   frontierclient.Profile
 	Peers     []RootPeer
 	Opener    frontiertransport.StreamOpener
-	Admission *configuredprogress.AdmissionCoordinator
+	Admission Admission
+	// Report, when set, is told the outcome of each acquisition episode Maintain runs (nil on
+	// success). It is for operator visibility only and must not block.
+	Report func(error)
 }
 
 type clock interface {
@@ -109,7 +128,8 @@ type Requester struct {
 	profile   frontierclient.Profile
 	peers     []RootPeer
 	opener    frontiertransport.StreamOpener
-	admission *configuredprogress.AdmissionCoordinator
+	admission Admission
+	report    func(error)
 	clock     clock
 	random    io.Reader
 
@@ -121,6 +141,35 @@ type Requester struct {
 	receipt    Receipt
 	invalid    bool
 	handoffErr error
+	// stage and lastErr describe the furthest point the current episode reached and its most recent
+	// per-exchange failure, so a failed episode names a cause instead of only "unavailable" or "expired".
+	stage   string
+	lastErr error
+}
+
+// note records the episode's stage and, when err is non-nil, its latest exchange failure.
+func (r *Requester) note(stage string, err error) {
+	r.mu.Lock()
+	r.stage = stage
+	if err != nil {
+		r.lastErr = err
+	}
+	r.mu.Unlock()
+}
+
+// explain adds the episode's stage and last exchange failure to a failure that would otherwise be
+// bare. The sentinel stays matchable with errors.Is.
+func (r *Requester) explain(err error) error {
+	if err == nil {
+		return nil
+	}
+	r.mu.Lock()
+	stage, last := r.stage, r.lastErr
+	r.mu.Unlock()
+	if last == nil {
+		return fmt.Errorf("%w (stage %s)", err, stage)
+	}
+	return fmt.Errorf("%w (stage %s, last exchange: %v)", err, stage, last)
 }
 
 func New(cfg Config) (*Requester, error) {
@@ -183,7 +232,47 @@ func newRequester(cfg Config, clk clock, random io.Reader) (*Requester, error) {
 	if !peerWeight.Reached(profile.TrustBase.QuorumThreshold) {
 		return nil, ErrSettings
 	}
-	return &Requester{process: cfg.Process, profile: profile, peers: peers, opener: cfg.Opener, admission: cfg.Admission, clock: clk, random: random}, nil
+	return &Requester{process: cfg.Process, profile: profile, peers: peers, opener: cfg.Opener, admission: cfg.Admission, report: cfg.Report, clock: clk, random: random}, nil
+}
+
+// Current returns the receipt of the most recent successful acquisition, or
+// the zero Receipt. It is a copy: Valid and Validate still consult live state.
+func (r *Requester) Current() Receipt {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.receipt
+}
+
+// Maintain keeps one live receipt for as long as bootstrap admission is still
+// allowed: it acquires, and after expiry, replacement or caller cancellation
+// acquires again, backing off between failed episodes. It returns ErrInvalidated
+// once ordinary or unsupported evidence (or coordinator shutdown) makes
+// bootstrap permanently refused for this process, and the context error when
+// ctx ends. Nothing is persisted: a restarted process begins with no receipt.
+func (r *Requester) Maintain(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !r.admission.BootstrapState().Allowed() {
+			return ErrInvalidated
+		}
+		wait := MaintainPoll
+		if !r.Current().Valid() {
+			res := r.Acquire(ctx)
+			if r.report != nil && ctx.Err() == nil {
+				r.report(res.Err)
+			}
+			if res.Err != nil {
+				wait = PassBackoff
+			} else {
+				continue
+			}
+		}
+		if err := r.clock.Wait(ctx, wait); err != nil {
+			return err
+		}
+	}
 }
 
 func ownProfile(p frontierclient.Profile) (frontierclient.Profile, error) {
@@ -224,6 +313,7 @@ func (r *Requester) Acquire(ctx context.Context) Result {
 	r.generation++
 	generation := r.generation
 	r.current, r.receipt, r.invalid, r.handoffErr, r.caller = nil, Receipt{}, false, nil, ctx
+	r.stage, r.lastErr = "start", nil
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); r.running = false; r.mu.Unlock() }()
 
@@ -257,6 +347,7 @@ func (r *Requester) Acquire(ctx context.Context) Result {
 	frontierReq := frontiertransport.FrontierRequest{Version: frontiercodec.Version, Context: requestContext, Nonce: nonce[:]}
 
 	for pass := 0; pass < MaxPasses; pass++ {
+		r.note("frontier", nil)
 		r.runFrontierBatch(episode, frontierReq, budget, collector)
 		if r.hasNegative(collector) {
 			return Result{Err: r.negativeError(collector)}
@@ -272,13 +363,14 @@ func (r *Requester) Acquire(ctx context.Context) Result {
 	}
 	snapshot := collector.Snapshot()
 	if !snapshot.Candidate().Valid() {
-		return Result{Err: preferEpisode(episode, budget, ErrUnavailable)}
+		return Result{Err: r.explain(preferEpisode(episode, budget, ErrUnavailable))}
 	}
 	candidate := snapshot.Candidate()
 	binding := collector.AcquisitionBinding()
 	cutReq := frontiertransport.CutRequest{Version: frontiercodec.Version, Context: requestContext, Nonce: nonce[:], AcquisitionBinding: binding[:], Floor: candidate.Floor()}
 	var lastCutErr error
 	for pass := 0; pass < MaxPasses; pass++ {
+		r.note("cut", nil)
 		lastCutErr = r.runCuts(episode, cutReq, budget, collector)
 		if r.hasNegative(collector) {
 			return Result{Err: r.negativeError(collector)}
@@ -295,14 +387,14 @@ func (r *Requester) Acquire(ctx context.Context) Result {
 	snapshot = collector.Snapshot()
 	cut := snapshot.VerifiedCut()
 	if contextExpired(episode) || contextExpired(r.process) || contextExpired(ctx) {
-		return Result{Err: ErrExpired}
+		return Result{Err: r.explain(ErrExpired)}
 	}
 	if snapshot.Exhausted() || !snapshot.Candidate().Valid() || !cut.Valid() || cut.AcquisitionBinding() != binding || cut.PairIdentity() != snapshot.Candidate().PairIdentity() {
 		fallback := error(ErrUnavailable)
 		if lastCutErr != nil {
 			fallback = fmt.Errorf("%w: cut: %v", ErrUnavailable, lastCutErr)
 		}
-		return Result{Err: preferEpisode(episode, budget, fallback)}
+		return Result{Err: r.explain(preferEpisode(episode, budget, fallback))}
 	}
 	var cutRoot [32]byte
 	copy(cutRoot[:], cut.RootHash())
@@ -330,6 +422,7 @@ func (r *Requester) runCuts(ctx context.Context, request frontiertransport.CutRe
 		} else {
 			lastErr = result.Err
 		}
+		r.note("cut", lastErr)
 		snapshot := collector.Snapshot()
 		if snapshot.VerifiedCut().Valid() || snapshot.Ordinary() || snapshot.Unsupported() || snapshot.Exhausted() {
 			return lastErr
@@ -366,8 +459,11 @@ func (r *Requester) runFrontierBatch(ctx context.Context, request frontiertransp
 	}()
 	for result := range results {
 		if result.res.Complete {
-			collector.AddFrom(result.res.Raw, result.peer.Author)
+			added := collector.AddFrom(result.res.Raw, result.peer.Author)
+			r.note("frontier", added.Err)
 			r.acknowledgeNegatives(collector)
+		} else {
+			r.note("frontier", result.res.Err)
 		}
 	}
 }

@@ -162,9 +162,9 @@ rechecked before and after `SignBytes`; cancellation cannot abort cryptographic 
 but no reply is published afterward. The signer receives an owned preimage and no caller can supply evidence
 to be signed. This API remains optional and has no registered production transport or caller. The separate
 inactive transport package supplies bounded libp2p handlers and a one-exchange client with a shared receive
-budget, but no node registers it. The separate inactive requester now supplies bounded gathering and the acknowledged
-ordinary handoff, and issues only a process-local receipt after a live cut recheck and worker drain. No node
-constructs or consumes that requester yet; readiness and bootstrap activation remain later units.
+budget; roots register it in default startup (#350, F6f section 7). The requester supplies bounded gathering and the
+acknowledged ordinary handoff, and issues only a process-local receipt after a live cut recheck and worker drain. Shard
+nodes construct it in default startup and gate bootstrap readiness on it (F6f section 7, "Activation").
 The separate inert `frontierclient` package now strictly verifies bounded canonical replies and groups a fixed
 unit-weight root quorum by PairIdentity. It preserves independently authenticated ordinary or unsupported
 evidence even when the outer response is ineligible, and its diagnostic candidate carries the verified

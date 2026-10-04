@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -365,4 +367,31 @@ func TestLoadShardConfsRefusesAnEditedAggregatorConfigurationUnderTheHandoffProf
 	newPartition := newConf(0, 1)
 	newPartition.PartitionID = 11
 	require.ErrorIs(t, loadShardConfs(restarted, true, []*types.PartitionDescriptionRecord{genesis, newPartition}), partitions.ErrDerivedOnly)
+}
+
+func TestFrontierEligiblePeersAreTheDistinctShardValidators(t *testing.T) {
+	a, b := frontierTestPeerID(t, 1), frontierTestPeerID(t, 2)
+	confs := []*types.PartitionDescriptionRecord{
+		{Validators: []*types.NodeInfo{{NodeID: a.String()}, {NodeID: b.String()}}},
+		{Validators: []*types.NodeInfo{{NodeID: b.String()}}},
+	}
+	got, err := frontierEligiblePeers(confs)
+	require.NoError(t, err)
+	require.Equal(t, []peer.ID{a, b}, got, "a validator shared between shards is listed once, in configuration order")
+
+	got, err = frontierEligiblePeers(nil)
+	require.NoError(t, err)
+	require.Empty(t, got)
+
+	_, err = frontierEligiblePeers([]*types.PartitionDescriptionRecord{{Validators: []*types.NodeInfo{{NodeID: "not-a-peer-id"}}}})
+	require.Error(t, err, "a validator that is not a peer ID is a configuration error, not an omission")
+}
+
+func frontierTestPeerID(t *testing.T, seed byte) peer.ID {
+	t.Helper()
+	priv, _, err := libp2pcrypto.GenerateEd25519Key(bytes.NewReader(bytes.Repeat([]byte{seed}, 64)))
+	require.NoError(t, err)
+	id, err := peer.IDFromPrivateKey(priv)
+	require.NoError(t, err)
+	return id
 }

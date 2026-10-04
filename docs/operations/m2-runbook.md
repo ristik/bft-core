@@ -636,6 +636,57 @@ Do not apply that helper to production homes: it invokes the lane's `helper.sh`
 process ownership and fixed test topology. Production process-manager restart
 commands are deployment-specific and are not present in the merged scripts.
 
+## 5a. Bootstrap freshness: the automatic root-quorum receipt
+
+**Evidence:** merged with #350; covered by unit and in-process real-root tests. A devnet lane
+run is recorded in the PR. Independent operator evidence is pending.
+
+A shard validator whose only known state is the **genesis bootstrap certificate** no longer trusts
+that certificate because it arrived over the root handshake. In default startup it asks the roots
+(`/ab/root-bootstrap/frontier/1.0.0`, `/ab/root-bootstrap/cut/1.0.0`) for a nonce-bound quorum
+frontier and a committed-cut proof, and holds the resulting process-local **receipt**. Until a live
+receipt exists the node does not lead and does not sign for the bootstrap certificate's child; it
+keeps receiving and validating. The design is F6e section 5 and F6f; no new flag is needed or accepted.
+
+What changes for operators:
+
+- **Roots serve it by default.** At start each root logs `root frontier service enabled` (with the
+  validator count) or `root frontier service disabled` with the reason: a trust base outside the fixed
+  profile (unit-weight roots, `2N/3 < q <= N`, one epoch), a root that is not in the first trust base the
+  service is pinned to (`this root cannot sign under the pinned trust base`: a root that joined at a successor
+  handoff epoch), or shards with no usable validator set. A root that logs "disabled" does not answer, and a
+  fresh shard validator needs a quorum of answering roots, so it stays unready if too few remain. The service is
+  specified for one pinned root epoch: once the original roots have all been replaced, a fresh genesis
+  bootstrap can no longer be confirmed. That does not affect validators that already hold ordinary progress.
+- **Only the shard validators named in the root's `--shard-conf` files may ask.** The set is fixed when
+  the root starts. A configuration added later through `PUT /api/v1/configurations` is served after
+  the root's next restart.
+- **Fresh start.** After the first root round commits, each validator logs
+  `bootstrap receipt acquired from a fresh root quorum`; readiness follows at the next certificate
+  the validator handles. The root repeats the initial certificate at the shard's T2, so a fresh
+  network can need up to one T2 after acquisition before the first block. The receipt lives five
+  minutes; while bootstrap is still the only known state it is acquired again after expiry, and
+  readiness pauses for the length of that acquisition.
+- **Unready reasons you will see.** In the node health voting reason (`/api/v1/health`):
+  `certified-record readiness is not established ...: configuredadmission: bootstrap needs a live fresh
+  root-quorum receipt`. Warnings `bootstrap receipt acquisition failed; ...` repeat at most every five
+  seconds with the cause (roots unreachable, no committed root yet, a stale or conflicting reply).
+  `bootstrap freshness is unavailable` means the requester could not be built (see the ERROR line
+  `bootstrap freshness cannot start`); the node still runs and still follows ordinary progress.
+- **Restart.** Nothing is restored from disk. A restart with bootstrap-only data acquires a new
+  receipt; a restart whose journal holds ordinary progress needs none and logs no acquisition.
+- **Ordinary progress ends it.** The first ordinary certificate the node authenticates (from the root
+  feed, or from a root's reply during acquisition) ends bootstrap eligibility for the process, before
+  that certificate is written. After that readiness no longer consults a receipt.
+- **Mixed versions fail unready, not unsafe.** A new shard validator against roots that do not serve
+  the protocol never becomes ready from bootstrap. Upgrade roots before shard validators.
+
+The operator trust pin is unchanged. `shard-node restore` with `--tip-uc`/`--tip-tr`/`--trust-body-id`
+([bootstrap-trust-pin.md](bootstrap-trust-pin.md), D-M2-1) installs ordinary progress from the pinned
+tip and never needs the receipt; the pin and the receipt answer different questions (which history to
+replay, versus whether genesis is still the current state). Do not use a pin to bypass an unready fresh
+bootstrap: there is no manual fallback for that case.
+
 ## 6. Checks and stop conditions
 
 Before every procedure, capture source/client pins, health, current trust base,
@@ -657,7 +708,9 @@ Stop and do not resume signing on any of these conditions:
   be independently read and matched to both replicas;
 - restored block hash, state root, or receipts root differs from a survivor;
 - a command would require reusing non-empty restore disks, bypassing the archive,
-  editing trust files by hand, or restarting an authority process.
+  editing trust files by hand, or restarting an authority process;
+- a fresh validator logs `bootstrap receipt acquisition failed` repeatedly, or a root logs
+  `root frontier service disabled`: do not force readiness; fix the root service or trust profile.
 
 ## Gaps
 

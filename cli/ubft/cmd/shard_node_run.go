@@ -1048,7 +1048,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		if genesisErr != nil {
 			return fmt.Errorf("reading recovery genesis identity: %w", genesisErr)
 		}
-		coordinator := &configuredadmission.ExecutionRecovery{Store: journalStore, Context: journalCtx, JournalLimits: limits, Executor: recoveryExecutor, Gate: node.FinalityGate(), Log: flags.observe.Logger(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
+		// Automatic root-quorum bootstrap freshness (F6f, #350) is part of default startup: a node
+		// whose only known state is bootstrap stays unready until a live receipt exists, and a
+		// store that already holds ordinary progress never needs one. The operator trust pin of
+		// `shard-node restore` (D-M2-1) is unchanged and independent of it.
+		freshness := &configuredadmission.Freshness{Opener: peer, TrustBase: trustBases[0], Logger: flags.observe.Logger()}
+		coordinator := &configuredadmission.ExecutionRecovery{Freshness: freshness, Store: journalStore, Context: journalCtx, JournalLimits: limits, Executor: recoveryExecutor, Gate: node.FinalityGate(), Log: flags.observe.Logger(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
 		server, serverErr := shardnode.NewJournalServer(configuredadmission.JournalProvider{Store: journalStore, Context: journalCtx, Limits: limits}, shardnode.DefaultJournalTransportLimits())
 		if serverErr != nil {
 			return fmt.Errorf("starting journal suffix server: %w", serverErr)
@@ -1072,7 +1077,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 		}
 		node.SetJournalRecovery(coordinator, coordinator)
-		if openErr = node.SetJournalAdmission(configuredadmission.JournalFactory{Store: journalStore, Origin: origin, ExecutionConfigV2: executionID, Limits: limits, CatchUp: coordinator.AcquireForCertificate, OnStop: node.ReportJournalStop, Logger: flags.observe.Logger(), EpochAuthority: journalCtx.Observation.EpochAuthority}); openErr != nil {
+		if openErr = node.SetJournalAdmission(configuredadmission.JournalFactory{Store: journalStore, Origin: origin, ExecutionConfigV2: executionID, Limits: limits, CatchUp: coordinator.AcquireForCertificate, OnStop: node.ReportJournalStop, Logger: flags.observe.Logger(), EpochAuthority: journalCtx.Observation.EpochAuthority, Freshness: freshness}); openErr != nil {
 			return fmt.Errorf("enabling journal certification admission: %w", openErr)
 		}
 		flags.observe.Logger().Info("execution journal verified", "candidates", len(journalImage.Candidates), "observations", len(journalImage.Observations), "bytes", journalImage.Bytes)

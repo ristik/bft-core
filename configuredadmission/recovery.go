@@ -52,8 +52,11 @@ type ExecutionRecovery struct {
 	Log           *slog.Logger
 	Genesis       shardnode.BlockRef
 	Limits        RecoveryLimits
-	Host          shardnode.EvidenceHost
-	Providers     []peer.ID
+	// Freshness gates bootstrap readiness on a live root-quorum receipt (#350). Nil disables the
+	// gate, as in fixtures with no root network.
+	Freshness *Freshness
+	Host      shardnode.EvidenceHost
+	Providers []peer.ID
 	// ProviderSource, when set, names the providers at the time they are needed (the active assignment's validators); Providers is the
 	// fixed list of a deployment that follows no assignment.
 	ProviderSource  interface{ Peers() []peer.ID }
@@ -784,6 +787,9 @@ type recoveryTicket struct {
 func (t recoveryTicket) Valid() bool { return len(t.anchor.Hash) == 32 }
 
 func (r *ExecutionRecovery) Prepare(ctx context.Context, held *types.UnicityCertificate) (shardnode.ReadinessTicket, error) {
+	if err := r.Freshness.Require(); err != nil {
+		return nil, err
+	}
 	c, err := r.load(ctx)
 	if err != nil {
 		return nil, err
@@ -821,6 +827,9 @@ func (r *ExecutionRecovery) Revalidate(ctx context.Context, ticket shardnode.Rea
 	t, ok := ticket.(recoveryTicket)
 	if !ok || !t.Valid() {
 		return ErrRecoveryIdentity
+	}
+	if err := r.Freshness.Require(); err != nil {
+		return err
 	}
 	c, err := r.load(ctx)
 	if err != nil {

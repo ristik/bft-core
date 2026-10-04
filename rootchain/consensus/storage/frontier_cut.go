@@ -63,6 +63,19 @@ func (bt *BlockTree) ReadFrontierCutSnapshot(partition types.PartitionID, shard 
 		return nil, fmt.Errorf("copying committed root hash: %w", err)
 	}
 	states := ShardStates{States: make(map[types.PartitionShardID]*ShardInfo, len(root.ShardState.States))}
+	if control := root.ShardState.Control; control != nil {
+		// The handoff network profile commits its control record as one more unicity-tree leaf. The
+		// rebuilt tree must carry it or its root can never equal the stored root of a profile-2 root.
+		ownedControl := *control
+		var copyErr error
+		for _, field := range []*[]byte{&ownedControl.PredecessorBodyID, &ownedControl.RecordBytes, &ownedControl.PreviousDigest, &ownedControl.FrozenParent} {
+			if *field, copyErr = copyFrontierBytes(*field, &budget); copyErr != nil {
+				bt.m.RUnlock()
+				return nil, fmt.Errorf("copying handoff control record: %w", copyErr)
+			}
+		}
+		states.Control = &ownedControl
+	}
 	var requested *certification.CertificationResponse
 	for key, source := range root.ShardState.States {
 		if source == nil || source.IR == nil || source.TR.Round == 0 || len(source.ShardConfHash) == 0 || source.ShardID.Length() > frontierMaxShardBits {

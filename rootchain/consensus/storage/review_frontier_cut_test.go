@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -16,9 +17,22 @@ import (
 // exercised separately by the real-root-loop client tests.
 func reviewCutTree(t *testing.T) (*BlockTree, *ExecutedBlock, types.PartitionShardID, string) {
 	t.Helper()
+	return reviewCutTreeWithControl(t, nil)
+}
+
+// reviewCutTreeWithControl is reviewCutTree for a handoff-profile root: its committed state carries the
+// control record, which is a leaf of the unicity tree the root hash commits to.
+func reviewCutTreeWithControl(t *testing.T, control *evmroot.ControlState) (*BlockTree, *ExecutedBlock, types.PartitionShardID, string) {
+	t.Helper()
 	conf := newShardConf(t)
 	conf.T2Timeout = 5 * time.Second
 	root := genesisBlockWithShard(t, conf)
+	if control != nil {
+		root.ShardState.Control = control
+		ut, _, err := root.ShardState.UnicityTree(crypto.SHA256)
+		require.NoError(t, err)
+		root.RootHash = ut.RootHash()
+	}
 	root.BlockData.Round = 4
 	root.BlockData.Epoch = 1
 	root.CommitQc.LedgerCommitInfo.Epoch = 1
@@ -143,4 +157,25 @@ func TestReviewFrontierCutIgnoresPendingBlocksAndUnrelatedHistory(t *testing.T) 
 	cut, err := bt.ReadFrontierCutSnapshot(key.PartitionID, si.ShardID)
 	require.NoError(t, err)
 	require.EqualValues(t, 6, cut.RootRound)
+}
+
+// A profile-2 root commits its handoff control record in the unicity tree. The cut snapshot must rebuild the
+// same tree, or no replacement validator can ever obtain a cut from such a root (found by the H3 lane, #350).
+func TestReviewFrontierCutSnapshotCarriesTheHandoffControlLeaf(t *testing.T) {
+	control := &evmroot.ControlState{Network: 5, Epoch: 1, Attempt: 1, Phase: "committed", OrderedRound: 3,
+		PredecessorBodyID: bytes.Repeat([]byte{1}, 32), RecordBytes: []byte{2, 3}, PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: bytes.Repeat([]byte{5}, 32)}
+	bt, root, key, _ := reviewCutTreeWithControl(t, control)
+	last := root.ShardState.States[key].LastCR
+	cut, err := bt.ReadFrontierCutSnapshot(key.PartitionID, last.Shard)
+	require.NoError(t, err)
+	shardRoot, err := cut.ShardTreeCertificate.ComputeCertificateHash(cut.LastCR.UC.InputRecord, cut.LastCR.UC.TRHash, cut.LastCR.UC.ShardConfHash, crypto.SHA256)
+	require.NoError(t, err)
+	computed, err := cut.UnicityTreeCertificate.EvalAuthPath(shardRoot, crypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, []byte(root.RootHash), []byte(computed), "the membership path must reach the stored root that includes the control leaf")
+
+	control.RecordBytes[0] ^= 0xff
+	again, err := bt.ReadFrontierCutSnapshot(key.PartitionID, last.Shard)
+	require.ErrorContains(t, err, "does not match stored root", "a control record that no longer matches the stored root is refused, not papered over")
+	require.Nil(t, again)
 }
