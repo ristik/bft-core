@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -230,8 +231,8 @@ func TestFrontierSamplerRealLoopLifecycleAndVerifiedSample(t *testing.T) {
 	// while the same genuine QC remains usable through the high-QC slot.
 	invalidHigh := cloneFrontierQC(t, sample.View.CommitQC)
 	invalidHigh.VoteInfo.RoundNumber++
-	require.Equal(t, FrontierCommitQC, selectFrontierQCCandidate(sample.View.CommitQC, invalidHigh, h.trust, sample.Safety.HighestQCRound, sample.View.CommittedRootRound))
-	require.Equal(t, FrontierHighQC, selectFrontierQCCandidate(nil, sample.View.CommitQC, h.trust, sample.Safety.HighestQCRound, sample.View.CommittedRootRound))
+	require.Equal(t, FrontierCommitQC, selectFrontierQCCandidate(sample.View.CommitQC, invalidHigh, h.trust, votesig.Config{}, sample.Safety.HighestQCRound, sample.View.CommittedRootRound))
+	require.Equal(t, FrontierHighQC, selectFrontierQCCandidate(nil, sample.View.CommitQC, h.trust, votesig.Config{}, sample.Safety.HighestQCRound, sample.View.CommittedRootRound))
 
 	tests := []struct {
 		name   string
@@ -252,7 +253,7 @@ func TestFrontierSamplerRealLoopLifecycleAndVerifiedSample(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			qc := cloneFrontierQC(t, sample.View.CommitQC)
 			tc.mutate(qc)
-			require.Error(t, verifyFrontierQC(qc, h.trust, sample.Safety.HighestQCRound, sample.View.CommittedRootRound))
+			require.Error(t, verifyFrontierQC(qc, h.trust, votesig.Config{}, sample.Safety.HighestQCRound, sample.View.CommittedRootRound))
 		})
 	}
 

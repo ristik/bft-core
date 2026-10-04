@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"errors"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -130,7 +131,7 @@ func TestSignedFrontierInitialAndOrdinaryPairsFromRealLoop(t *testing.T) {
 		require.Zero(t, pair.UC.InputRecord.RoundNumber)
 		var qc drctypes.QuorumCert
 		require.NoError(t, types.Cbor.Unmarshal(reply.QC, &qc))
-		require.NoError(t, verifyFrontierQC(&qc, h.trust, 0, 2))
+		require.NoError(t, verifyFrontierQC(&qc, h.trust, votesig.Config{}, 0, 2))
 		verifier, err := h.rootSigner.Verifier()
 		require.NoError(t, err)
 		confHash := h.request(t).FullShardConfHash

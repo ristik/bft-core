@@ -40,7 +40,7 @@ func restartedRoot(t *testing.T, source *anchorReplica) *ConsensusManager {
 	bodyID := source.body.Identity()
 	require.NoError(t, db.StoreHandoffBody(bodyID[:], source.body.Encode()))
 	identity := sha256.Sum256([]byte("root-recovery-epoch-test"))
-	history, err := trusthistorystore.Open(context.Background(), memorydb.New(), old, identity, trustactivation.Verifier{})
+	history, err := trusthistorystore.Open(context.Background(), memorydb.New(), old, identity, trustactivation.Verifier{Signing: trust.SigningConfig})
 	require.NoError(t, err)
 	params := *NewConsensusParams()
 	params.NetworkProfileVersion = storage.ProfileHandoff

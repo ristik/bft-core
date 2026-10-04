@@ -19,6 +19,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 )
 
 // The epoch guard on the live vote and timeout handlers, driven with authenticated messages of the old epoch through the
@@ -175,7 +176,7 @@ type secondHandoff struct {
 	signers map[string]abcrypto.Signer // the epoch 2 members
 }
 
-func newSecondHandoff(t *testing.T, source *anchorReplica, signers map[string]abcrypto.Signer) secondHandoff {
+func newSecondHandoff(t *testing.T, source *anchorReplica, signers map[string]abcrypto.Signer, domainBound ...bool) secondHandoff {
 	t.Helper()
 	root := restartedRoot(t, source)
 	require.EqualValues(t, 2, root.trustBase.Load().Epoch)
@@ -225,20 +226,44 @@ func newSecondHandoff(t *testing.T, source *anchorReplica, signers map[string]ab
 	timestamp := types.NewTimestamp()
 	voteInfo := &rctypes.RoundInfo{Version: 1, RoundNumber: commitSealRound + 1, ParentRoundNumber: commitSealRound, Epoch: 2,
 		Timestamp: timestamp, CurrentRootHash: tree.RootHash()}
-	voteHash, err := voteInfo.Hash(crypto.SHA256)
-	require.NoError(t, err)
-	seal := &types.UnicitySeal{Version: 1, NetworkID: 5, RootChainRoundNumber: commitSealRound, Epoch: 2,
-		Timestamp: timestamp, Hash: tree.RootHash(), PreviousHash: voteHash}
-	message, err := seal.SigBytes()
-	require.NoError(t, err)
-	qc := &rctypes.QuorumCert{VoteInfo: voteInfo, LedgerCommitInfo: seal, Signatures: map[string]hex.Bytes{}}
-	for id, signer := range signers {
-		sig, err := signer.SignBytes(message)
+	var qc *rctypes.QuorumCert
+	var oldSigning votesig.Config
+	if len(domainBound) == 1 && domainBound[0] {
+		// epoch 2 signs with scheme 2: the commit QC is the paired-signature form, without a vote info timestamp
+		oldSigning = domainBoundConfig()
+		voteInfo.Timestamp = 0
+		vh, err := oldSigning.VoteInfoHash(votesig.VoteInfo{Epoch: 2, Round: commitSealRound + 1, Parent: commitSealRound, Exec: [32]byte(tree.RootHash())})
 		require.NoError(t, err)
-		qc.Signatures[id] = sig
+		seal := &types.UnicitySeal{Version: 1, NetworkID: 5, RootChainRoundNumber: commitSealRound, Epoch: 2, Timestamp: timestamp, Hash: tree.RootHash(), PreviousHash: vh[:]}
+		sealBytes, err := seal.SigBytes()
+		require.NoError(t, err)
+		pv, _, _, err := rctypes.DomainBoundStatement(oldSigning, voteInfo, seal, true)
+		require.NoError(t, err)
+		qc = &rctypes.QuorumCert{Scheme: votesig.SchemeDomainBound, VoteInfo: voteInfo, LedgerCommitInfo: seal, Signatures: map[string]hex.Bytes{}, SealSignatures: map[string]hex.Bytes{}}
+		for id, signer := range signers {
+			sig, err := signer.SignBytes(pv)
+			require.NoError(t, err)
+			qc.Signatures[id] = sig
+			sealSig, err := signer.SignBytes(sealBytes)
+			require.NoError(t, err)
+			qc.SealSignatures[id] = sealSig
+		}
+	} else {
+		voteHash, err := voteInfo.Hash(crypto.SHA256)
+		require.NoError(t, err)
+		seal := &types.UnicitySeal{Version: 1, NetworkID: 5, RootChainRoundNumber: commitSealRound, Epoch: 2,
+			Timestamp: timestamp, Hash: tree.RootHash(), PreviousHash: voteHash}
+		message, err := seal.SigBytes()
+		require.NoError(t, err)
+		qc = &rctypes.QuorumCert{VoteInfo: voteInfo, LedgerCommitInfo: seal, Signatures: map[string]hex.Bytes{}}
+		for id, signer := range signers {
+			sig, err := signer.SignBytes(message)
+			require.NoError(t, err)
+			qc.Signatures[id] = sig
+		}
 	}
 	proof := handoff.OldCommitProof{Profile: evmroot.D4Profile, Record: record, Control: control, ControlPath: path, CommitQC: qc}
-	_, err = handoff.VerifyOldCommitProof(proof, old2)
+	_, err = handoff.VerifyOldCommitProofSigning(proof, old2, oldSigning)
 	require.NoError(t, err)
 	block := &storage.ExecutedBlock{HashAlgo: crypto.SHA256, RootHash: tree.RootHash(), ShardState: state}
 	_, err = block.GenerateCertificates(qc)

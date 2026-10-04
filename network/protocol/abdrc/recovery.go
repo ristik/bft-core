@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
 
@@ -170,8 +171,14 @@ func (sm *StateMsg) CanRecoverToRound(round uint64) error {
 	return nil
 }
 
+// EpochSigning resolves the signing configuration of a root epoch: the scheme its certificates are in. A nil EpochSigning is the
+// legacy configuration for every epoch (the verification paths that predate scheme 2).
+type EpochSigning interface {
+	SigningConfig(epoch uint64) (votesig.Config, error)
+}
+
 func (sm *StateMsg) Verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, pin ...*trustbase.GenesisPin) error {
-	return sm.verify(hashAlgorithm, tb, nil, nil, pin)
+	return sm.verify(hashAlgorithm, tb, nil, nil, nil, pin)
 }
 
 // VerifyWithHistory verifies inherited LastCRs under their own signer epochs.
@@ -180,7 +187,7 @@ func (sm *StateMsg) VerifyWithHistory(hashAlgorithm crypto.Hash, tb types.RootTr
 	if history == nil {
 		return ErrHistoricalTrustBase
 	}
-	return sm.verify(hashAlgorithm, tb, history, nil, pin)
+	return sm.verify(hashAlgorithm, tb, history, nil, nil, pin)
 }
 
 // VerifyWithAnchor is the profile-2 recovery path after local proof and
@@ -189,10 +196,39 @@ func (sm *StateMsg) VerifyWithAnchor(hashAlgorithm crypto.Hash, tb types.RootTru
 	if history == nil || anchor == nil {
 		return ErrHistoricalTrustBase
 	}
-	return sm.verify(hashAlgorithm, tb, history, anchor, pin)
+	return sm.verify(hashAlgorithm, tb, history, anchor, nil, pin)
 }
 
-func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases, anchor RecoveryAnchorVerifier, pin []*trustbase.GenesisPin) error {
+// VerifyWithAnchorSigning is VerifyWithAnchor with the signing configuration of each certificate's own epoch: every QC of the state
+// is verified in the wire form its epoch signs with, and a certificate of the other scheme is refused with votesig.ErrScheme.
+func (sm *StateMsg) VerifyWithAnchorSigning(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases, anchor RecoveryAnchorVerifier, signing EpochSigning, pin ...*trustbase.GenesisPin) error {
+	if history == nil || anchor == nil {
+		return ErrHistoricalTrustBase
+	}
+	return sm.verify(hashAlgorithm, tb, history, anchor, signing, pin)
+}
+
+// VerifySigning is Verify with the signing configuration of each certificate's own epoch.
+func (sm *StateMsg) VerifySigning(hashAlgorithm crypto.Hash, tb types.RootTrustBase, signing EpochSigning, pin ...*trustbase.GenesisPin) error {
+	return sm.verify(hashAlgorithm, tb, nil, nil, signing, pin)
+}
+
+// verifyStateQC verifies one QC of a state by the rule of its epoch.
+func verifyStateQC(qc *rctypes.QuorumCert, tb types.RootTrustBase, signing EpochSigning, pin []*trustbase.GenesisPin) error {
+	var cfg votesig.Config
+	if signing != nil && qc != nil && qc.VoteInfo != nil {
+		var err error
+		if cfg, err = signing.SigningConfig(qc.VoteInfo.Epoch); err != nil {
+			return err
+		}
+	}
+	if qc == nil {
+		return qc.Verify(tb, pin...) // the nil QC's own refusal
+	}
+	return qc.VerifyScheme(tb, cfg, pin...)
+}
+
+func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, history HistoricalTrustBases, anchor RecoveryAnchorVerifier, signing EpochSigning, pin []*trustbase.GenesisPin) error {
 	if sm.CommittedHead == nil {
 		return recoveryStateError("commit head is nil")
 	}
@@ -246,15 +282,15 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 	}
 	// Block from genesis round does not have a Qc
 	if !anchorHead && sm.CommittedHead.GetRound() > rctypes.GenesisRootRound {
-		if err := sm.CommittedHead.Block.Qc.Verify(tb, pin...); err != nil {
+		if err := verifyStateQC(sm.CommittedHead.Block.Qc, tb, signing, pin); err != nil {
 			return fmt.Errorf("block qc verification error: %w", err)
 		}
 	}
 	if !anchorHead {
-		if err := sm.CommittedHead.Qc.Verify(tb, pin...); err != nil {
+		if err := verifyStateQC(sm.CommittedHead.Qc, tb, signing, pin); err != nil {
 			return fmt.Errorf("qc verification error: %w", err)
 		}
-		if err := sm.CommittedHead.CommitQc.Verify(tb, pin...); err != nil {
+		if err := verifyStateQC(sm.CommittedHead.CommitQc, tb, signing, pin); err != nil {
 			return fmt.Errorf("commit qc verification error: %w", err)
 		}
 	}
@@ -264,7 +300,7 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 			return fmt.Errorf("invalid block node: %w", err)
 		}
 		if n.Qc != nil {
-			if err := n.Qc.Verify(tb, pin...); err != nil {
+			if err := verifyStateQC(n.Qc, tb, signing, pin); err != nil {
 				return fmt.Errorf("block node qc verification error: %w", err)
 			}
 		}

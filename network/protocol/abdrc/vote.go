@@ -162,37 +162,7 @@ func (x *VoteMsg) signingScheme() uint64 {
 // preimage PV and, for a committing vote, the native seal bytes the second signature covers. The vote info hash must be the
 // one the commit info carries, so that the two halves are one statement.
 func (x *VoteMsg) domainBoundStatement(cfg votesig.Config) (pv, sealBytes []byte, committing bool, err error) {
-	if len(x.VoteInfo.CurrentRootHash) != 32 {
-		return nil, nil, false, fmt.Errorf("%w: executed state hash is %d bytes", votesig.ErrStatement, len(x.VoteInfo.CurrentRootHash))
-	}
-	vi := votesig.VoteInfo{Epoch: x.VoteInfo.Epoch, Round: x.VoteInfo.RoundNumber, Parent: x.VoteInfo.ParentRoundNumber}
-	copy(vi.Exec[:], x.VoteInfo.CurrentRootHash)
-	vh, err := cfg.VoteInfoHash(vi)
-	if err != nil {
-		return nil, nil, false, err
-	}
-	seal := x.LedgerCommitInfo
-	if !bytes.Equal(vh[:], seal.PreviousHash) {
-		return nil, nil, false, fmt.Errorf("%w: vote info hash does not match hash in commit info", votesig.ErrStatement)
-	}
-	var commit votesig.Commit
-	committing = len(seal.Hash) != 0 || seal.RootChainRoundNumber != 0
-	if committing {
-		if seal.NetworkID != types.NetworkID(cfg.Network) || seal.Epoch == 0 || seal.Epoch > vi.Epoch {
-			return nil, nil, false, fmt.Errorf("%w: commit info network or epoch", votesig.ErrStatement)
-		}
-		commit = votesig.Commit{Hash: seal.Hash, Round: seal.RootChainRoundNumber}
-		if sealBytes, err = seal.SigBytes(); err != nil {
-			return nil, nil, false, fmt.Errorf("failed to marshal unicity seal: %w", err)
-		}
-	} else if seal.Epoch != 0 || seal.NetworkID != 0 || seal.Timestamp != 0 || len(x.SealSignature) != 0 {
-		// a non-committing vote carries the empty native seal (only the vote info hash) and no seal signature
-		return nil, nil, false, fmt.Errorf("%w: non-committing vote with commit data", votesig.ErrStatement)
-	}
-	if pv, err = cfg.VotePreimage(vi, commit); err != nil {
-		return nil, nil, false, err
-	}
-	return pv, sealBytes, committing, nil
+	return drctypes.DomainBoundStatement(cfg, x.VoteInfo, x.LedgerCommitInfo, len(x.SealSignature) != 0)
 }
 
 // SignDomainBound signs a scheme 2 vote: the preimage PV, and for a committing vote also the native seal bytes, both with
@@ -223,7 +193,7 @@ func (x *VoteMsg) SignDomainBound(signer crypto.Signer, cfg votesig.Config) erro
 }
 
 // verifyContext checks what a vote carries besides its own signature: the anchor or the high QC. The high QC is verified by the
-// rule of its own epoch, and a legacy-form QC of an activated epoch is refused rather than reinterpreted.
+// rule of its own epoch, and a certificate of the other scheme is refused rather than reinterpreted.
 func (x *VoteMsg) verifyContext(tbs *trustbase.TrustBaseStore) error {
 	if x.Anchor != nil {
 		if x.HighQc != nil || x.Anchor.IsValid() != nil || x.VoteInfo.Epoch != x.Anchor.Epoch || x.VoteInfo.ParentRoundNumber != x.Anchor.Slot {
@@ -236,14 +206,11 @@ func (x *VoteMsg) verifyContext(tbs *trustbase.TrustBaseStore) error {
 		return fmt.Errorf("vote from '%s' high QC is missing vote info", x.Author)
 	}
 	if x.HighQc != nil {
-		highQcTrustBase, err := tbs.GetByEpoch(x.HighQc.VoteInfo.Epoch)
-		if err != nil {
+		if _, err := tbs.GetByEpoch(x.HighQc.VoteInfo.Epoch); err != nil {
 			return fmt.Errorf("failed to get trust base for high QC verification epoch %d: %w", x.HighQc.VoteInfo.Epoch, err)
 		}
-		if err := tbs.RequireLegacySigning(x.HighQc.VoteInfo.Epoch); err != nil {
-			return fmt.Errorf("vote from '%s' high QC error: %w", x.Author, err)
-		}
-		if err := x.HighQc.Verify(highQcTrustBase, tbs.GenesisPin()); err != nil {
+		// the high QC is verified by the rule of its own epoch, in the wire form that epoch signs with
+		if err := x.HighQc.VerifyWith(tbs); err != nil {
 			return fmt.Errorf("vote from '%s' high QC error: %w", x.Author, err)
 		}
 	}

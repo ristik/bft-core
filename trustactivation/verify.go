@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/m2contract"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -22,9 +23,13 @@ func proofSizeAllowed(n int) bool { return n > 0 && n <= maxProofBytes }
 
 // Verifier binds the old-set commit proof to the exact next body and the
 // actual activation round stored in the trust history.
-type Verifier struct{}
+type Verifier struct {
+	// Signing resolves the signing configuration of the old epoch, so that its commit proof is verified in the wire form that epoch signs
+	// with. Nil is the legacy scheme for every epoch (a verifier that has no configuration history of its own).
+	Signing func(epoch uint64) (votesig.Config, error)
+}
 
-func (Verifier) VerifyActivation(_ context.Context, prior trusthistorystore.Record, in m2contract.TrustInterval, proof []byte) error {
+func (vf Verifier) VerifyActivation(_ context.Context, prior trusthistorystore.Record, in m2contract.TrustInterval, proof []byte) error {
 	if !proofSizeAllowed(len(proof)) {
 		return trusthistorystore.ErrProof
 	}
@@ -57,7 +62,13 @@ func (Verifier) VerifyActivation(_ context.Context, prior trusthistorystore.Reco
 			return trusthistorystore.ErrProof
 		}
 	}
-	v, err := handoff.VerifyOldCommitProof(p, old)
+	cfg := votesig.Config{Scheme: votesig.SchemeLegacy}
+	if vf.Signing != nil {
+		if cfg, err = vf.Signing(prior.Epoch); err != nil {
+			return fmt.Errorf("%w: %v", trusthistorystore.ErrProof, err)
+		}
+	}
+	v, err := handoff.VerifyOldCommitProofSigning(p, old, cfg)
 	if err != nil {
 		return fmt.Errorf("%w: %v", trusthistorystore.ErrProof, err)
 	}

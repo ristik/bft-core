@@ -295,6 +295,30 @@ func TestARecapturedCheckpointIsComparedBySignatureStrippedIdentity(t *testing.T
 		h.s.blockTree.compareWithStoredCheckpoint(2, store, other)
 		require.Zero(t, sink.errors())
 	})
+	t.Run("another subset of the signatures of scheme 2 certificates is silent: both signature maps are witnesses", func(t *testing.T) {
+		scheme2 := func(vote, seal byte) []byte {
+			return checkpoint(func(c *canonicalCheckpoint) {
+				for _, qc := range []*rctypes.QuorumCert{c.Block.CommitQc, c.Block.Qc, c.Block.Block.Qc} {
+					if qc != nil {
+						if qc.LedgerCommitInfo == nil {
+							qc.LedgerCommitInfo = &types.UnicitySeal{Version: 1, PreviousHash: []byte{1}} // a scheme 2 certificate always has commit info
+						}
+						qc.Scheme = 2
+						qc.Signatures = map[string]hex.Bytes{"a-root": bytes.Repeat([]byte{vote}, 65)}
+						qc.SealSignatures = map[string]hex.Bytes{"a-root": bytes.Repeat([]byte{seal}, 65)}
+					}
+				}
+			})
+		}
+		a, err := checkpointIdentity(scheme2(1, 2))
+		require.NoError(t, err)
+		b, err := checkpointIdentity(scheme2(3, 4))
+		require.NoError(t, err)
+		require.Equal(t, a, b, "neither the vote nor the seal signatures are part of the identity")
+		plain, err := checkpointIdentity(stored)
+		require.NoError(t, err)
+		require.NotEqual(t, a, plain, "the wire form is")
+	})
 	t.Run("a different record, block or garbage is logged at ERROR", func(t *testing.T) {
 		for name, raw := range map[string][]byte{
 			"another control record": checkpoint(func(c *canonicalCheckpoint) {

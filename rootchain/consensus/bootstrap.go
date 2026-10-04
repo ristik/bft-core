@@ -54,10 +54,6 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	if err != nil {
 		return nil, fmt.Errorf("old root trust lineage: %w", err)
 	}
-	// the old epoch's commit QC is verified by that epoch's own rule: legacy form only while it signs with scheme 1
-	if err := x.trustBaseStore.RequireLegacySigning(proof.Record.Epoch); err != nil {
-		return nil, fmt.Errorf("old root trust lineage: %w", err)
-	}
 	prior, err := x.recoveryHistory.ByEpoch(proof.Record.Epoch)
 	if err != nil {
 		return nil, fmt.Errorf("old root trust lineage: %w", err)
@@ -77,7 +73,12 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	if err != nil {
 		return nil, err
 	}
-	verified, err := handoff.VerifyOldCommitProof(proof, old)
+	// the old epoch's commit QC is verified by that epoch's own rule, in the wire form the epoch signs with
+	oldSigning, err := x.trustBaseStore.SigningConfig(proof.Record.Epoch)
+	if err != nil {
+		return nil, fmt.Errorf("old root trust lineage: %w", err)
+	}
+	verified, err := handoff.VerifyOldCommitProofSigning(proof, old, oldSigning)
 	if err != nil {
 		return nil, fmt.Errorf("old handoff commit proof: %w", err)
 	}
@@ -112,11 +113,11 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 		return nil, errors.New("handoff snapshot has no shards")
 	}
 	first := head.ShardInfo[0]
-	if _, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+	if _, err := verifyHandoffBundle(x.trustBaseStore, bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
 		return nil, err
 	}
 	if archive, ok := x.blockStore.GetDB().(handoffBundleArchive); ok {
-		if err := retainEquivalentHandoffBundle(archive, g.Epoch, bundle, old, g.ID()); err != nil {
+		if err := retainEquivalentHandoffBundle(x.trustBaseStore, archive, g.Epoch, bundle, old, g.ID()); err != nil {
 			return nil, err
 		}
 	}
@@ -193,7 +194,7 @@ type handoffBundleArchive interface {
 // A later empty old-epoch suffix can produce another valid commit QC for H.
 // Both bundles derive the same genesis; retain the first served bundle so a
 // shard that fetched it and a root that installs a later suffix agree.
-func retainEquivalentHandoffBundle(archive handoffBundleArchive, epoch uint64, incoming handoffdelivery.Bundle,
+func retainEquivalentHandoffBundle(trust *trustbase.TrustBaseStore, archive handoffBundleArchive, epoch uint64, incoming handoffdelivery.Bundle,
 	old *basetypes.RootTrustBaseV1, genesisID []byte) error {
 	existing, err := archive.HandoffBundle(epoch)
 	if err != nil {
@@ -208,7 +209,7 @@ func retainEquivalentHandoffBundle(archive handoffBundleArchive, epoch uint64, i
 			return handoffdelivery.ErrBundle
 		}
 		first := stored.Snapshot.ShardInfo[0]
-		verified, err := handoffdelivery.Verify(stored, old, first.Partition, first.Shard, first.ShardConfHash)
+		verified, err := verifyHandoffBundle(trust, stored, old, first.Partition, first.Shard, first.ShardConfHash)
 		if err != nil || stored.Body.Epoch != epoch || !bytes.Equal(verified.Genesis.ID(), genesisID) {
 			return handoffdelivery.ErrBundle
 		}
@@ -278,7 +279,7 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 				return nil, handoffdelivery.ErrBundle
 			}
 			first := bundle.Snapshot.ShardInfo[0]
-			if _, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+			if _, err := verifyHandoffBundle(x.trustBaseStore, bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
 				return nil, err
 			}
 			return &bundle, nil
@@ -308,15 +309,15 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 		return nil, handoffdelivery.ErrBundle
 	}
 	first := head.ShardInfo[0]
-	if _, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+	if _, err := verifyHandoffBundle(x.trustBaseStore, bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
 		return nil, err
 	}
 	if ok {
-		verified, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash)
+		verified, err := verifyHandoffBundle(x.trustBaseStore, bundle, old, first.Partition, first.Shard, first.ShardConfHash)
 		if err != nil {
 			return nil, err
 		}
-		if err := retainEquivalentHandoffBundle(archive, epoch, bundle, old, verified.Genesis.ID()); err != nil {
+		if err := retainEquivalentHandoffBundle(x.trustBaseStore, archive, epoch, bundle, old, verified.Genesis.ID()); err != nil {
 			return nil, err
 		}
 	}
@@ -424,7 +425,7 @@ func reconcileAssignmentHistory(db any, trust *trustbase.TrustBaseStore, orchest
 			return fmt.Errorf("%w: epoch %d: old trust base unavailable", storage.ErrAssignmentHistory, epoch)
 		}
 		first := bundle.Snapshot.ShardInfo[0]
-		if _, err := handoffdelivery.Verify(bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+		if _, err := verifyHandoffBundle(trust, bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
 			return fmt.Errorf("%w: epoch %d: %w", storage.ErrAssignmentHistory, epoch, err)
 		}
 		confs, provenance, _, err := storage.DeriveActivatedConfigs(bundle.Proof.Record, bundle.Body, bundle.Candidate, bundle.Proof.Control.FrozenParent)
@@ -436,4 +437,14 @@ func reconcileAssignmentHistory(db any, trust *trustbase.TrustBaseStore, orchest
 		}
 	}
 	return nil
+}
+
+// verifyHandoffBundle is handoffdelivery.Verify by the rule of the old epoch the bundle's proof was committed in: the signing
+// configuration of that epoch is resolved from the trust base store, so the commit QC must be in the wire form the epoch signs with.
+func verifyHandoffBundle(trust *trustbase.TrustBaseStore, bundle handoffdelivery.Bundle, old *basetypes.RootTrustBaseV1, partition basetypes.PartitionID, shard basetypes.ShardID, conf []byte) (handoffdelivery.Verified, error) {
+	cfg, err := trust.SigningConfig(old.Epoch)
+	if err != nil {
+		return handoffdelivery.Verified{}, err
+	}
+	return handoffdelivery.VerifySigning(bundle, old, cfg, partition, shard, conf)
 }

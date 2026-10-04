@@ -240,7 +240,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			return hashErr
 		}
 		identity := sha256.Sum256(append([]byte("unicity/root-profile-2/history/1"), anchorHash...))
-		history, openErr := trusthistorystore.Open(ctx, rootHistoryDB, trustBase, identity, trustactivation.Verifier{})
+		history, openErr := trusthistorystore.Open(ctx, rootHistoryDB, trustBase, identity, trustactivation.Verifier{Signing: trustBaseStore.SigningConfig})
 		if openErr != nil {
 			return fmt.Errorf("opening root profile-2 history: %w", openErr)
 		}

@@ -209,15 +209,11 @@ func (x *Timeout) Verify(tbs *trustbase.TrustBaseStore) error {
 		// proof-verified epoch checkpoint before accepting a timeout.
 		return nil
 	}
-	highQcTrustBase, err := tbs.GetByEpoch(x.HighQc.VoteInfo.Epoch)
-	if err != nil {
+	if _, err := tbs.GetByEpoch(x.HighQc.VoteInfo.Epoch); err != nil {
 		return fmt.Errorf("failed to get trust base for high QC verification, epoch %d: %w", x.HighQc.VoteInfo.Epoch, err)
 	}
-	// the high QC is verified by the rule of its own epoch; a legacy-form QC of an activated epoch is never reinterpreted
-	if err := tbs.RequireLegacySigning(x.HighQc.VoteInfo.Epoch); err != nil {
-		return fmt.Errorf("invalid high QC: %w", err)
-	}
-	if err := x.HighQc.Verify(highQcTrustBase, tbs.GenesisPin()); err != nil {
+	// the high QC is verified by the rule of its own epoch, in the wire form that epoch signs with
+	if err := x.HighQc.VerifyWith(tbs); err != nil {
 		return fmt.Errorf("invalid high QC: %w", err)
 	}
 

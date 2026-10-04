@@ -159,6 +159,21 @@ func (x *BlockData) IsValid() error {
 	return nil
 }
 
+// VerifyWith is Verify by the rule of the epoch of the block's QC, resolved in the store (trust base, signing configuration, genesis pin).
+func (x *BlockData) VerifyWith(tbs *trustbase.TrustBaseStore) error {
+	if err := x.IsValid(); err != nil {
+		return fmt.Errorf("invalid block data: %w", err)
+	}
+	if x.Anchor != nil {
+		// authenticated against the locally installed handoff checkpoint by the consensus bootstrap admission path
+		return nil
+	}
+	if err := x.Qc.VerifyWith(tbs); err != nil {
+		return fmt.Errorf("invalid block data QC: %w", err)
+	}
+	return nil
+}
+
 func (x *BlockData) Verify(tb types.RootTrustBase, pin ...*trustbase.GenesisPin) error {
 	if err := x.IsValid(); err != nil {
 		return fmt.Errorf("invalid block data: %w", err)
