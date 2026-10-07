@@ -491,14 +491,14 @@ func validateCommittedAssignment(orchestration Orchestration, hashAlg crypto.Has
 	if err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
+	// Recovery may already hold this handoff's derived successor. Reconstruct only the committed prefix installed in the
+	// authenticated old checkpoint, never that successor or anything indexed after it.
+	chain, err := CommittedChain(orchestration, si.PartitionID, si.ShardID, si.IR.Epoch)
+	if err != nil {
+		return nil, nil, errors.Join(ErrSupersessionInvalid, err)
+	}
+	chain.Steps = slices.DeleteFunc(chain.Steps, func(step evmassign.ChainStep) bool { return step.ShardEpoch > si.TR.Epoch })
 	if c.Supersedes != nil {
-		chain, err := CommittedChain(orchestration, si.PartitionID, si.ShardID, si.IR.Epoch)
-		if err != nil {
-			return nil, nil, errors.Join(ErrSupersessionInvalid, err)
-		}
-		// Recovery may already hold this handoff's derived successor. Reconstruct only the
-		// committed prefix installed in the authenticated old checkpoint, never that successor.
-		chain.Steps = slices.DeleteFunc(chain.Steps, func(step evmassign.ChainStep) bool { return step.ShardEpoch > si.TR.Epoch })
 		if err := verifySupersessionChain(c.Supersedes, si, chain); err != nil {
 			return nil, nil, err
 		}
@@ -509,6 +509,22 @@ func validateCommittedAssignment(orchestration Orchestration, hashAlg crypto.Has
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
 	if err := evmassign.VerifyInstalledWith(weightvalidation.EVMRules(body.mode), c, succ, configs[key], nil); err != nil {
+		return nil, nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	// The same state-dependent kind rules freeze admission runs: exact incumbent K, continuity, lineage and the recovery allowance.
+	history, ok := orchestration.(identityHistory)
+	if !ok {
+		return nil, nil, errors.Join(ErrAssignmentHistory, fmt.Errorf("%w: orchestration keeps no incumbent baseline", ErrLifecycle))
+	}
+	policy, err := ContinuityPolicy(configs[key])
+	if err != nil {
+		return nil, nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	lctx, err := lifecycleOver(history, si.PartitionID, si.ShardID, si.IR.Epoch, policy, chain)
+	if err != nil {
+		return nil, nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	if err := evmassign.VerifyLifecycle(c, lctx); err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
 	tr, err := successorTechnicalRecord(si, pdr, hashAlg)

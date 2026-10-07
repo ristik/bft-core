@@ -87,19 +87,14 @@ func (p pendingAssignment) supersede(t *testing.T, mutate func(*evmassign.Supers
 func (p pendingAssignment) supersedeWith(t *testing.T, binding *evmassign.Supersession, base uint64) supersession {
 	t.Helper()
 	f := p.f
-	var err error
-	infos := []*types.NodeInfo{f.oldKeys[0].info}
-	f.nextKeys = []evmKey{f.oldKeys[0], newEVMKey(t, "ev-k"), newEVMKey(t, "ev-l"), newEVMKey(t, "ev-m")}
-	infos = infos[:0]
-	for _, k := range f.nextKeys {
-		infos = append(infos, k.info)
-	}
-	// The replacement is a second coupled handoff: the committee of root epoch 2 changes again.
-	f.baseCommittee = f.successorRoot()
-	f.nextRootKey = newEVMKey(t, "new-f")
-	f.current0 = p.installed
-	f.succ, err = evmassign.NewSuccessor(p.installed, infos)
+	// The only replacement of a committed, unacknowledged primary is the recovery: exactly K, derived from the primary.
+	lc, succ, root, bindings, err := evmassign.DeriveRecovery(evmassign.Head{Candidate: p.first.candidate, Successor: f.succ}, p.installed)
 	require.NoError(t, err)
+	f.nextKeys = nil
+	f.baseCommittee = f.successorRoot() // the committee of root epoch 2 is the primary's: the recovery replaces it with K's
+	f.recovery = &recoveryPlan{lc: lc, root: root, bindings: bindings}
+	f.current0 = p.installed
+	f.succ = succ
 	f.supersedes = binding
 	f.rootEpoch = 2
 	f.predecessor = p.body1
@@ -187,8 +182,8 @@ func TestSupersessionReplacesAnUnacknowledgedAssignmentOnTheSameParent(t *testin
 	require.EqualValues(t, 2, si.TR.Epoch)
 	require.EqualValues(t, 0, si.IR.Epoch, "P's acknowledged state is untouched")
 	require.Equal(t, bytes.Repeat([]byte{5}, 32), []byte(si.IR.BlockHash), "same frozen parent")
-	require.Contains(t, si.nodeIDs, "ev-k")
-	for _, superseded := range []string{"ev-e", "ev-f", "ev-g"} {
+	require.Contains(t, si.nodeIDs, "ev-d", "the recovery installs exactly K")
+	for _, superseded := range []string{"ev-e"} {
 		require.NotContains(t, si.nodeIDs, superseded, "the superseded set cannot certify a late acknowledgement")
 		err := si.ValidRequest(&certification.BlockCertificationRequest{PartitionID: 8, NodeID: superseded,
 			InputRecord: &types.InputRecord{Version: 1, Epoch: si.TR.Epoch}})
@@ -196,7 +191,7 @@ func TestSupersessionReplacesAnUnacknowledgedAssignmentOnTheSameParent(t *testin
 	}
 	// Control: a member of the replacement set sending the same stale-shaped request is not refused for membership,
 	// so the refusal above is the membership check and not some other validity rule that also fires.
-	err = si.ValidRequest(&certification.BlockCertificationRequest{PartitionID: 8, NodeID: "ev-k",
+	err = si.ValidRequest(&certification.BlockCertificationRequest{PartitionID: 8, NodeID: "ev-d",
 		InputRecord: &types.InputRecord{Version: 1, Epoch: si.TR.Epoch}})
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrNodeNotInTrustBase, "an active member is refused for another reason")

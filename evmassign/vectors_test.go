@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"os"
+	"sort"
 	"testing"
 	"time"
 
@@ -28,6 +29,16 @@ type vectorFile struct {
 	Candidate   string            `json:"candidate"`
 	Chain       map[string]string `json:"chainCommit"`
 	Mutations   []vectorMutation  `json:"negativeMutations"`
+	// Lifecycle holds the signed primary/recovery fixtures of #85: the accepted controls and the isolated refusals, each a full
+	// candidate encoding and the sentinel its verification must name. The deployment context is fixed by the Context block.
+	Lifecycle []vectorLifecycle `json:"lifecycle"`
+}
+
+type vectorLifecycle struct {
+	Name      string `json:"name"`
+	Candidate string `json:"candidate"`
+	Check     string `json:"check"`  // the verification that refuses it
+	Expect    string `json:"expect"` // "ok" or the sentinel name
 }
 
 type vectorMutation struct {
@@ -69,12 +80,17 @@ func buildVectors(t *testing.T) vectorFile {
 	old.Validators = []*types.NodeInfo{infos[0]}
 	succ, err := NewSuccessor(&old, infos)
 	require.NoError(t, err)
-	ctx := PoPContext{Network: 5, Attempt: 1, Predecessor: [32]byte(bytes.Repeat([]byte{0x11}, 32))}
-	out.Context = map[string]any{"network": ctx.Network, "attempt": ctx.Attempt, "predecessor": hex.EncodeToString(ctx.Predecessor[:])}
+	root := []RootMember{{NodeID: "root-a", Key: bytes.Repeat([]byte{2}, 33), Weight: 1}, {NodeID: "root-b", Key: bytes.Repeat([]byte{3}, 33), Weight: 1}, {NodeID: "root-c", Key: bytes.Repeat([]byte{4}, 33), Weight: 1}}
+	bindings := bindingsFor(root, succ)
+	ids := identitiesFor(root, succ, bindings, "")
+	idDigest, err := IdentitiesDigest(ids)
+	require.NoError(t, err)
+	ctx := PoPContext{Network: 5, Attempt: 1, Predecessor: [32]byte(bytes.Repeat([]byte{0x11}, 32)), Identities: idDigest}
+	out.Context = map[string]any{"network": ctx.Network, "attempt": ctx.Attempt, "predecessor": hex.EncodeToString(ctx.Predecessor[:]), "identities": hex.EncodeToString(ctx.Identities[:])}
 
 	cfg, err := ConfigHash(succ)
 	require.NoError(t, err)
-	ah, err := AssignmentHash(succ)
+	ah, err := AssignmentHash(succ, ctx.Identities)
 	require.NoError(t, err)
 	oldHash, err := PDRHash(&old)
 	require.NoError(t, err)
@@ -97,8 +113,16 @@ func buildVectors(t *testing.T) vectorFile {
 		out.PoPs[v.NodeID] = hex.EncodeToString(p.Signature)
 		pops = append(pops, p)
 	}
-	root := []RootMember{{NodeID: "root-a", Key: bytes.Repeat([]byte{2}, 33), Weight: 1}, {NodeID: "root-b", Key: bytes.Repeat([]byte{3}, 33), Weight: 1}, {NodeID: "root-c", Key: bytes.Repeat([]byte{4}, 33), Weight: 1}}
-	c, err := NewCandidate(ctx, root, &old, succ, pops, nil, bindingsFor(root, succ), nil)
+	incumbentRoot := []RootMember{{NodeID: "old-a", Key: bytes.Repeat([]byte{7}, 33), Weight: 1}}
+	incumbent := identitiesFor(incumbentRoot, &old, bindingsFor(incumbentRoot, &old), "")
+	baseHash, err := AssignmentHash(&old, mustDigest(t, incumbent))
+	require.NoError(t, err)
+	auth := authFor(5, bytes.Repeat([]byte{0x10}, 32), baseHash, incumbent)
+	out.Hashes["identitiesDigest"] = hex.EncodeToString(idDigest[:])
+	authDigest, err := auth.Digest()
+	require.NoError(t, err)
+	out.Hashes["authorizationDigest"] = hex.EncodeToString(authDigest[:])
+	c, err := NewCandidate(ctx, root, &old, succ, pops, nil, bindings, Lifecycle{Kind: KindPrimary, Identities: ids, Authorization: auth}, nil)
 	require.NoError(t, err)
 	raw, err := c.Encode()
 	require.NoError(t, err)
@@ -129,6 +153,60 @@ func buildVectors(t *testing.T) vectorFile {
 		{"installedEpoch", "OldShardEpoch != installed", "ErrContext", "VerifyInstalled", "assignment valid"},
 		{"installedHash", "OldActiveHash != installed full hash", "ErrContext", "VerifyInstalled", "assignment valid"},
 	}
+	out.Lifecycle = lifecycleVectors(t)
+	return out
+}
+
+// lifecycleVectors builds the fixed-key #85 fixtures: a primary J that replaces one of four incumbents, its derived recovery K, and
+// the single-field refusals around them.
+func lifecycleVectors(t *testing.T) []vectorLifecycle {
+	t.Helper()
+	w := newLifecycleWorldWith(t, fixedKeyed(0x41))
+	var out []vectorLifecycle
+	add := func(name, check string, c Candidate, want error) {
+		raw, err := c.Encode()
+		require.NoError(t, err, name)
+		var got error
+		switch check {
+		case "VerifyBinding":
+			_, _, got = VerifyBinding(raw, w.binding(c))
+		case "VerifyAuthorization":
+			got = VerifyAuthorization(c)
+		default:
+			t.Fatal(check)
+		}
+		expect := "ok"
+		if want != nil {
+			require.ErrorIs(t, got, want, name)
+			expect = want.Error()
+		} else {
+			require.NoError(t, got, name)
+		}
+		out = append(out, vectorLifecycle{Name: name, Candidate: hex.EncodeToString(raw), Check: check, Expect: expect})
+	}
+	rc, _ := w.recovery(t)
+	add("primary-accepted", "VerifyBinding", w.j, nil)
+	add("recovery-accepted-without-fresh-proofs", "VerifyBinding", rc, nil)
+	swapped := w.j
+	swapped.Identities = cloneIdentities(w.j.Identities)
+	swapped.Identities[2].OperatorPayee = bytes.Repeat([]byte{0xEE}, PayeeLen)
+	add("primary-payee-swapped-after-signing", "VerifyBinding", swapped, ErrPoP)
+	short := w.j
+	short.PoPs = w.j.PoPs[:3]
+	add("primary-missing-a-fresh-proof", "VerifyBinding", short, ErrPoP)
+	for name, mutate := range map[string]func(*Identity){
+		"recovery-changed-payee":    func(i *Identity) { i.OperatorPayee = bytes.Repeat([]byte{0xAB}, PayeeLen) },
+		"recovery-changed-exposure": func(i *Identity) { i.ExposureDigest = bytes.Repeat([]byte{0xAB}, DigestLen) },
+		"recovery-changed-weight":   func(i *Identity) { i.Weight = 2 },
+		"recovery-changed-root-key": func(i *Identity) { i.RootKey = bytes.Repeat([]byte{0xAB}, 33) },
+		"recovery-changed-evm-key":  func(i *Identity) { i.EVMKey = bytes.Repeat([]byte{0xAB}, 33) },
+	} {
+		c := rc
+		c.Identities = cloneIdentities(rc.Identities)
+		mutate(&c.Identities[0])
+		add(name, "VerifyAuthorization", c, ErrNotIncumbent)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 

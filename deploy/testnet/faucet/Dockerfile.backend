@@ -1,0 +1,14 @@
+FROM golang:1.24.13-alpine3.22@sha256:3641e0d9b931dc4f2f185dcd669c4679670e9277c8166a838ddb98a2d4389cb5 AS build
+WORKDIR /src
+ADD https://codeload.github.com/chainflag/eth-faucet/tar.gz/e7572628addc86c634d8acc3a61d5899667f0e33 /tmp/upstream.tgz
+RUN echo 'd25a539edeaa61e29b26bdc3e45d9d23aec7601acbc0e4251e3c7285c9cd6af2  /tmp/upstream.tgz' | sha256sum -c - \
+    && tar xzf /tmp/upstream.tgz --strip-components=1 \
+    && mkdir -p web/dist && echo 'Internal signer; use the guarded UI.' > web/dist/index.html \
+    && CGO_ENABLED=0 go build -trimpath -o /eth-faucet .
+FROM alpine:3.22.2@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /eth-faucet /app/eth-faucet
+COPY --from=build /src/LICENSE /app/UPSTREAM-LICENSE
+COPY backend-entrypoint.sh /app/
+USER 10001:10001
+ENTRYPOINT ["/bin/sh", "/app/backend-entrypoint.sh"]

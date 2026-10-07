@@ -3,6 +3,7 @@ package evmassign
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -10,7 +11,7 @@ import (
 
 // CandidateVersion is the only encoding of an assignment-bearing candidate.
 // The legacy root-only operator candidate (version 1) is unchanged.
-const CandidateVersion uint64 = 4
+const CandidateVersion uint64 = 5
 
 // MaxCandidateBytes bounds the retained preimage: it is carried once in the
 // freeze companion and the handoff bundle, never in the root-input D[] payload.
@@ -54,6 +55,7 @@ type Supersession struct {
 type Candidate struct {
 	_             struct{} `cbor:",toarray"`
 	Version       uint64
+	Kind          uint64 // KindPrimary or KindRecovery
 	Network       uint64
 	Predecessor   []byte // predecessor root BodyID
 	Attempt       uint64
@@ -64,13 +66,51 @@ type Candidate struct {
 	PoPs          []PoP
 	Supersedes    *Supersession
 	Bindings      []Binding // one per successor root member, sorted by RootNodeID
-	Changes       []Change  // aggregator validator replacements, at most one per shard (kind 1 only)
-	SourceRef     []byte    // reserved: must be empty
+	// Identities are the frozen identity records, sorted by StakingID: the one authenticated description of the coupled set that
+	// RootMembers, Bindings and the successor validators must agree with, operator payees included.
+	Identities []Identity
+	// Authorization is the recovery authorization (K) both kinds carry; ReplacedAssignment is set by a recovery only.
+	Authorization      *Authorization
+	ReplacedAssignment []byte
+	Changes            []Change // aggregator validator replacements, at most one per shard (kind 1 only)
+	SourceRef          []byte   // reserved: must be empty
+}
+
+// Lifecycle is the candidate's kind-defining part.
+func (c Candidate) Lifecycle() Lifecycle {
+	return Lifecycle{Kind: c.Kind, Identities: c.Identities, Authorization: c.Authorization, ReplacedAssignment: c.ReplacedAssignment}
+}
+
+// PoPContext is the context every possession proof of this candidate signs.
+func (c Candidate) PoPContext() (PoPContext, error) {
+	pop := PoPContext{Network: c.Network, Attempt: c.Attempt}
+	if len(c.Predecessor) != 32 {
+		return pop, ErrCandidate
+	}
+	copy(pop.Predecessor[:], c.Predecessor)
+	digest, err := IdentitiesDigest(c.Identities)
+	if err != nil {
+		return pop, err
+	}
+	pop.Identities = digest
+	return pop, nil
+}
+
+// VerifyCandidatePoPs verifies the possession proofs of a primary candidate under the context it carries. A recovery carries none.
+func VerifyCandidatePoPs(c Candidate, succ *types.PartitionDescriptionRecord) error {
+	pop, err := c.PoPContext()
+	if err != nil {
+		return err
+	}
+	return VerifyPoPs(pop, succ, c.PoPs)
 }
 
 func (c Candidate) Encode() ([]byte, error) {
 	if c.Version != CandidateVersion {
 		return nil, ErrCandidate
+	}
+	if err := c.Lifecycle().validShape(len(c.PoPs)); err != nil {
+		return nil, errors.Join(ErrCandidate, err)
 	}
 	b, err := types.Cbor.Marshal([]any{candidateDomain, c})
 	if err != nil || len(b) > MaxCandidateBytes {
@@ -126,21 +166,31 @@ func (c Candidate) Successor() (*types.PartitionDescriptionRecord, error) {
 // NewCandidate assembles the candidate. PoPs must already be collected: every
 // successor key signs PoPMessage for this context before propose.
 func NewCandidate(c PoPContext, root []RootMember, current, succ *types.PartitionDescriptionRecord,
-	pops []PoP, supersedes *Supersession, bindings []Binding, changes []Change) (Candidate, error) {
-	return NewCandidateWith(UnitRules, c, root, current, succ, pops, supersedes, bindings, changes)
+	pops []PoP, supersedes *Supersession, bindings []Binding, lc Lifecycle, changes []Change) (Candidate, error) {
+	return NewCandidateWith(UnitRules, c, root, current, succ, pops, supersedes, bindings, lc, changes)
 }
 
 // NewCandidateWith is NewCandidate with the successor's validator set checked under the rules r.
 func NewCandidateWith(r Rules, c PoPContext, root []RootMember, current, succ *types.PartitionDescriptionRecord,
-	pops []PoP, supersedes *Supersession, bindings []Binding, changes []Change) (Candidate, error) {
+	pops []PoP, supersedes *Supersession, bindings []Binding, lc Lifecycle, changes []Change) (Candidate, error) {
 	if err := ValidateSuccessorWith(r, current, succ); err != nil {
 		return Candidate{}, err
 	}
 	if err := ValidateCoupling(root, succ, bindings); err != nil {
 		return Candidate{}, err
 	}
-	if err := VerifyPoPs(c, succ, pops); err != nil {
+	if err := ValidateIdentities(lc.Identities, root, succ, bindings); err != nil {
 		return Candidate{}, err
+	}
+	digest, err := IdentitiesDigest(lc.Identities)
+	if err != nil {
+		return Candidate{}, err
+	}
+	c.Identities = digest
+	if lc.Kind == KindPrimary {
+		if err := VerifyPoPs(c, succ, pops); err != nil {
+			return Candidate{}, err
+		}
 	}
 	old, err := PDRHash(current)
 	if err != nil {
@@ -150,9 +200,10 @@ func NewCandidateWith(r Rules, c PoPContext, root []RootMember, current, succ *t
 	if err != nil {
 		return Candidate{}, err
 	}
-	out := Candidate{Version: CandidateVersion, Network: c.Network, Predecessor: bytes.Clone(c.Predecessor[:]),
+	out := Candidate{Version: CandidateVersion, Kind: lc.Kind, Network: c.Network, Predecessor: bytes.Clone(c.Predecessor[:]),
 		Attempt: c.Attempt, RootMembers: root, OldShardEpoch: current.Epoch,
-		OldActiveHash: old[:], Assignment: raw, PoPs: pops, Supersedes: supersedes, Bindings: bindings, Changes: changes}
+		OldActiveHash: old[:], Assignment: raw, PoPs: pops, Supersedes: supersedes, Bindings: bindings,
+		Identities: lc.Identities, Authorization: lc.Authorization, ReplacedAssignment: lc.ReplacedAssignment, Changes: changes}
 	if _, err := out.Encode(); err != nil {
 		return Candidate{}, err
 	}
@@ -295,7 +346,7 @@ func VerifyBinding(data []byte, v BindingContext) (Candidate, *types.PartitionDe
 	if err := ValidateCoupling(c.RootMembers, succ, c.Bindings); err != nil {
 		return Candidate{}, nil, err
 	}
-	if err := VerifyPoPs(v.PoPContext, succ, c.PoPs); err != nil {
+	if err := VerifyKind(c, succ); err != nil {
 		return Candidate{}, nil, err
 	}
 	if _, err := ValidateChanges(c.Changes, c.SourceRef, v.PoPContext, v.ControlPartition); err != nil {
@@ -382,11 +433,20 @@ type Provenance struct {
 	RecordID        []byte   // committed H record id
 	CandidateDigest []byte
 	RootEpoch       uint64 // successor root epoch H activates
+	Kind            uint64 // KindPrimary or KindRecovery of the committed candidate
+	// Preimage is the committed candidate. It is an index copy re-verified against CandidateDigest and Kind on every decode, so the
+	// lifecycle rules (incumbent, head, spent recovery allowance) are read from retained committed data, never from a local flag.
+	Preimage []byte
 }
 
 func (p Provenance) Bytes() ([]byte, error) {
 	if len(p.RecordID) != 32 || len(p.CandidateDigest) != 32 || p.RootEpoch < 2 {
 		return nil, ErrContext
+	}
+	digest := sha256.Sum256(p.Preimage)
+	c, err := DecodeCandidate(p.Preimage)
+	if err != nil || !bytes.Equal(digest[:], p.CandidateDigest) || c.Kind != p.Kind {
+		return nil, fmt.Errorf("%w: provenance candidate", ErrContext)
 	}
 	return types.Cbor.Marshal(p)
 }
@@ -418,6 +478,8 @@ type ChainStep struct {
 	RecordID        []byte
 	CandidateDigest []byte
 	RootEpoch       uint64
+	Kind            uint64
+	Preimage        []byte
 }
 
 // Commitment is ChainCommit over the steps' record identifiers.

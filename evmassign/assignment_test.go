@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -51,6 +52,8 @@ type fixture struct {
 	// oldRoot is the committee being replaced: a different committee, so the fixture's change is a coupled one.
 	oldRoot  []RootMember
 	bindings []Binding
+	ids      []Identity
+	auth     *Authorization
 }
 
 func newFixture(t *testing.T) fixture {
@@ -64,10 +67,53 @@ func newFixture(t *testing.T) fixture {
 	}
 	succ, err := NewSuccessor(cur, infos)
 	require.NoError(t, err)
+	root, oldRoot := rootOf("r", 2), rootOf("o", 9)
+	bindings := bindingsFor(root, succ)
+	ids := identitiesFor(root, succ, bindings, "")
+	// K is the incumbent committee: root members o1..o4 bound to the installed validators a..d
+	incumbent := identitiesFor(oldRoot, cur, bindingsFor(oldRoot, cur), "")
+	baseHash, err := AssignmentHash(cur, mustDigest(t, incumbent))
+	require.NoError(t, err)
+	digest := mustDigest(t, ids)
 	return fixture{current: cur, next: next, succ: succ,
-		ctx:     PoPContext{Network: 5, Predecessor: [32]byte{1}, Attempt: 2},
-		root:    rootOf("r", 2),
-		oldRoot: rootOf("o", 9), bindings: bindingsFor(rootOf("r", 2), succ)}
+		ctx:  PoPContext{Network: 5, Predecessor: [32]byte{1}, Attempt: 2, Identities: digest},
+		root: root, oldRoot: oldRoot, bindings: bindings, ids: ids, auth: authFor(5, bytes.Clone(append([]byte{1}, make([]byte, 31)...)), baseHash, incumbent)}
+}
+
+func mustDigest(t *testing.T, ids []Identity) [32]byte {
+	t.Helper()
+	d, err := IdentitiesDigest(ids)
+	require.NoError(t, err)
+	return d
+}
+
+// identitiesFor builds one record per binding, found by node id; payee, exposure and staking id derive from the root node id.
+func identitiesFor(root []RootMember, succ *types.PartitionDescriptionRecord, bindings []Binding, payeeTag string) []Identity {
+	byRoot := map[string]RootMember{}
+	for _, m := range root {
+		byRoot[m.NodeID] = m
+	}
+	byEVM := map[string]*types.NodeInfo{}
+	for _, v := range succ.Validators {
+		byEVM[v.NodeID] = v
+	}
+	sum := func(tag, id string) [32]byte { return sha256.Sum256([]byte(tag + "/" + id)) }
+	out := make([]Identity, 0, len(bindings))
+	for _, b := range bindings {
+		m, v := byRoot[b.RootNodeID], byEVM[b.EVMNodeID]
+		sid, payee, exp := sum("staking", b.RootNodeID), sum("payee"+payeeTag, b.RootNodeID), sum("exposure", b.RootNodeID)
+		out = append(out, Identity{StakingID: sid[:], Generation: 1, RootNodeID: m.NodeID, RootKey: bytes.Clone(m.Key), EVMNodeID: v.NodeID,
+			EVMKey: bytes.Clone(v.SigKey), Weight: m.Weight, OperatorPayee: payee[:20], ExposureDigest: exp[:]})
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i].StakingID, out[j].StakingID) < 0 })
+	return out
+}
+
+func authFor(network uint64, baseBody []byte, baseAssignment [32]byte, k []Identity) *Authorization {
+	exposure, _ := ExposureCommit(k)
+	h := func(tag string) []byte { s := sha256.Sum256([]byte(tag)); return s[:] }
+	return &Authorization{Network: network, Chain: 1, Contracts: h("contracts"), ResultID: h("result"), SnapshotDigest: h("snapshot"),
+		BaseRootBodyID: bytes.Clone(baseBody), BaseAssignmentHash: baseAssignment[:], K: k, ExposureDigest: exposure[:], Policies: h("policies")}
 }
 
 // rootOf is a four-member root committee; the EVM set of the fixture is the delegated image of it.
@@ -111,7 +157,8 @@ func (f fixture) verifyCtx(c Candidate) VerifyContext {
 
 func (f fixture) candidate(t *testing.T) Candidate {
 	t.Helper()
-	c, err := NewCandidate(f.ctx, f.root, f.current, f.succ, f.pops(t), nil, f.bindings, nil)
+	c, err := NewCandidate(f.ctx, f.root, f.current, f.succ, f.pops(t), nil, f.bindings,
+		Lifecycle{Kind: KindPrimary, Identities: f.ids, Authorization: f.auth}, nil)
 	require.NoError(t, err)
 	return c
 }
@@ -127,7 +174,7 @@ func clonePDR(t *testing.T, p *types.PartitionDescriptionRecord) *types.Partitio
 
 func TestAssignmentHashBindsEachFieldIndependently(t *testing.T) {
 	f := newFixture(t)
-	base, err := AssignmentHash(f.succ)
+	base, err := AssignmentHash(f.succ, f.ctx.Identities)
 	require.NoError(t, err)
 	mutations := map[string]func(p *types.PartitionDescriptionRecord){
 		"network":       func(p *types.PartitionDescriptionRecord) { p.NetworkID++ },
@@ -149,7 +196,7 @@ func TestAssignmentHashBindsEachFieldIndependently(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p := clonePDR(t, f.succ)
 			mutate(p)
-			h, err := AssignmentHash(p)
+			h, err := AssignmentHash(p, f.ctx.Identities)
 			require.NoError(t, err)
 			require.NotEqual(t, base, h)
 		})
@@ -157,7 +204,7 @@ func TestAssignmentHashBindsEachFieldIndependently(t *testing.T) {
 	// The activation round is not part of the assignment: it is fixed by the commit.
 	p := clonePDR(t, f.succ)
 	p.EpochStart = 99
-	h, err := AssignmentHash(p)
+	h, err := AssignmentHash(p, f.ctx.Identities)
 	require.NoError(t, err)
 	require.Equal(t, base, h)
 }
@@ -383,7 +430,8 @@ func TestCandidateVerifyContextIsolatedMutations(t *testing.T) {
 		// Same committee and same EVM validators at the next epoch (a configuration-only boundary) is allowed.
 		current := clonePDR(t, f.succ)
 		current.Epoch, current.EpochStart = f.succ.Epoch-1, 11
-		cc, err := NewCandidate(f.ctx, f.root, current, f.succ, f.pops(t), nil, f.bindings, nil)
+		cc, err := NewCandidate(f.ctx, f.root, current, f.succ, f.pops(t), nil, f.bindings,
+			Lifecycle{Kind: KindPrimary, Identities: f.ids, Authorization: f.auth}, nil)
 		require.NoError(t, err)
 		require.NoError(t, VerifyInstalled(cc, f.succ, current, f.root))
 	})
@@ -444,9 +492,9 @@ func TestActivateSetsOnlyTheActivationRound(t *testing.T) {
 	act, err := Activate(f.succ, 42)
 	require.NoError(t, err)
 	require.EqualValues(t, 42, act.EpochStart)
-	want, err := AssignmentHash(f.succ)
+	want, err := AssignmentHash(f.succ, f.ctx.Identities)
 	require.NoError(t, err)
-	got, err := AssignmentHash(act)
+	got, err := AssignmentHash(act, f.ctx.Identities)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 	_, err = Activate(act, 43)

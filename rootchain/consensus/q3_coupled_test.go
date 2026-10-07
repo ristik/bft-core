@@ -170,8 +170,8 @@ func TestTheRequestHistoryServesTheActivatedWeightedAssignment(t *testing.T) {
 	t.Run("before the boundary the retired unit assignment is the one certifying", func(t *testing.T) {
 		view, err := storage.ResolveParentView(hist, nil, parent, parentID, 6, crypto.SHA256, storage.PurposeCertify, nil)
 		require.NoError(t, err)
-		require.EqualValues(t, 3, view.Context().TotalWeight(), "the three unit validators of the anchor")
-		require.EqualValues(t, 2, view.Context().Threshold())
+		require.EqualValues(t, 4, view.Context().TotalWeight(), "the four unit validators of the anchor")
+		require.EqualValues(t, 3, view.Context().Threshold())
 	})
 	t.Run("the root identity of an earlier round is the genesis epoch's", func(t *testing.T) {
 		epoch, _, err := hist.RootIdentity(3)

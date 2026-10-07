@@ -109,7 +109,7 @@ func (o *OperatorClient) SignHandoffPoP(ctx context.Context, req signingauthorit
 		return evmassign.PoP{}, err
 	}
 	payload, err := types.Cbor.Marshal(handoffPoPPayload{Domain: req.Domain, Network: req.Context.Network, Attempt: req.Context.Attempt,
-		Predecessor: req.Context.Predecessor[:], Successor: succ, NodeID: req.NodeID})
+		Predecessor: req.Context.Predecessor[:], Successor: succ, NodeID: req.NodeID, Identities: req.Context.Identities[:]})
 	if err != nil {
 		return evmassign.PoP{}, err
 	}

@@ -149,12 +149,14 @@ func TestFoldTransitionsBindsTheCommittedChain(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, a, one)
 
+	c := step(3, 2, word(0x30), word(0x40), 0xa3)
 	cases := map[string][]handoff.EVMTransition{
-		"empty":                  nil,
-		"gap in root epochs":     {a, step(3, 1, word(0x20), word(0x30), 0xa2)},
-		"gap in shard epochs":    {a, step(2, 2, word(0x20), word(0x30), 0xa2)},
-		"hash does not continue": {a, step(2, 1, word(0x99), word(0x30), 0xa2)},
-		"another frozen parent":  {a, func() handoff.EVMTransition { s := b; s.Ack = ack(0xa2, 0x34); return s }()},
+		"empty": nil,
+		"a third transition (no recovery ladder)": {a, b, c},
+		"gap in root epochs":                      {a, step(3, 1, word(0x20), word(0x30), 0xa2)},
+		"gap in shard epochs":                     {a, step(2, 2, word(0x20), word(0x30), 0xa2)},
+		"hash does not continue":                  {a, step(2, 1, word(0x99), word(0x30), 0xa2)},
+		"another frozen parent":                   {a, func() handoff.EVMTransition { s := b; s.Ack = ack(0xa2, 0x34); return s }()},
 		"a root-only step in a chain": {a, func() handoff.EVMTransition {
 			s := base()
 			s.OldRootEpoch, s.NewRootEpoch = 2, 3

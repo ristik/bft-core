@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/internal/testutils/identityfix"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -55,6 +56,31 @@ func installedPDR(t *testing.T) *types.PartitionDescriptionRecord {
 		Validators: []*types.NodeInfo{old.info}}
 }
 
+// identityFixture writes the identity records and the recovery authorization of a successor whose validators "ev-x" are the delegated
+// EVM validators of root entities "r-x", and returns the files, the records and their digest. K is a fabricated incumbent.
+func identityFixture(t *testing.T, dir string, installed *types.PartitionDescriptionRecord, succ *types.PartitionDescriptionRecord, predecessor []byte) (idsFile, authFile string, ids []evmassign.Identity, digest [32]byte) {
+	t.Helper()
+	var root []evmassign.RootMember
+	var bindings []evmassign.Binding
+	for i, v := range succ.Validators {
+		id := "r-" + strings.TrimPrefix(v.NodeID, "ev-")
+		root = append(root, evmassign.RootMember{NodeID: id, Key: bytes.Repeat([]byte{byte(0x30 + i)}, 33), Weight: v.Stake})
+		bindings = append(bindings, evmassign.Binding{RootNodeID: id, EVMNodeID: v.NodeID})
+	}
+	ids = identityfix.Identities(root, succ, bindings)
+	var err error
+	digest, err = evmassign.IdentitiesDigest(ids)
+	require.NoError(t, err)
+	incumbent := identityfix.Identities([]evmassign.RootMember{{NodeID: "r-old", Key: bytes.Repeat([]byte{0x20}, 33), Weight: 1}}, installed,
+		[]evmassign.Binding{{RootNodeID: "r-old", EVMNodeID: installed.Validators[0].NodeID}})
+	incDigest, err := evmassign.IdentitiesDigest(incumbent)
+	require.NoError(t, err)
+	base, err := evmassign.AssignmentHash(installed, incDigest)
+	require.NoError(t, err)
+	auth := identityfix.Authorization(5, predecessor, base, incumbent)
+	return writeJSON(t, dir, "identities.json", ids), writeJSON(t, dir, "authorization.json", auth), ids, digest
+}
+
 func TestEVMAssignmentCLIFlow(t *testing.T) {
 	dir := t.TempDir()
 	keys := []successorKey{newSuccessorKey(t, "ev-a"), newSuccessorKey(t, "ev-b"), newSuccessorKey(t, "ev-c")}
@@ -64,6 +90,9 @@ func TestEVMAssignmentCLIFlow(t *testing.T) {
 	validatorsFile := writeJSON(t, dir, "validators.json", infos)
 	// Validator-set changes are coupled: each successor root entity has one delegated EVM validator.
 	bindingsFile := writeJSON(t, dir, "bindings.json", []evmassign.Binding{{RootNodeID: "r-a", EVMNodeID: "ev-a"}, {RootNodeID: "r-b", EVMNodeID: "ev-b"}, {RootNodeID: "r-c", EVMNodeID: "ev-c"}})
+	flowSucc, err := evmassign.NewSuccessor(ctx.Installed, infos)
+	require.NoError(t, err)
+	identitiesFile, authorizationFile, _, identitiesDigest := identityFixture(t, dir, ctx.Installed, flowSucc, ctx.Predecessor)
 
 	proofFiles := make([]string, 0, len(keys))
 	for _, k := range keys {
@@ -71,7 +100,7 @@ func TestEVMAssignmentCLIFlow(t *testing.T) {
 		var out bytes.Buffer
 		cmd := newRootCmd()
 		cmd.SetOut(&out)
-		cmd.SetArgs([]string{"handoff", "evm-pop", "--context", contextFile, "--validators", validatorsFile, "--node-id", k.id, "--key-conf", keyFile})
+		cmd.SetArgs([]string{"handoff", "evm-pop", "--context", contextFile, "--validators", validatorsFile, "--node-id", k.id, "--key-conf", keyFile, "--identities", identitiesFile})
 		require.NoError(t, cmd.Execute())
 		path := filepath.Join(dir, k.id+"-pop.json")
 		require.NoError(t, os.WriteFile(path, out.Bytes(), 0o600))
@@ -83,7 +112,8 @@ func TestEVMAssignmentCLIFlow(t *testing.T) {
 	cmd := newRootCmd()
 	cmd.SetOut(&assembled)
 	cmd.SetArgs([]string{"handoff", "evm-assemble", "--context", contextFile, "--validators", validatorsFile,
-		"--pops", proofFiles[0] + "," + proofFiles[1] + "," + proofFiles[2], "--bindings", bindingsFile, "--out", assignment})
+		"--pops", proofFiles[0] + "," + proofFiles[1] + "," + proofFiles[2], "--bindings", bindingsFile, "--out", assignment,
+		"--identities", identitiesFile, "--authorization", authorizationFile})
 	require.NoError(t, cmd.Execute())
 	require.Contains(t, assembled.String(), "assignment epoch 1 for 3 validators")
 
@@ -93,6 +123,7 @@ func TestEVMAssignmentCLIFlow(t *testing.T) {
 	require.NoError(t, err)
 	_, pop, err := readContextFile(contextFile)
 	require.NoError(t, err)
+	pop.Identities = identitiesDigest
 	require.NoError(t, evmassign.VerifyPoPs(pop, succ, proposal.PoPs), "the assembled proofs verify under the context they were signed for")
 
 	t.Run("a key that is not the successor key cannot sign for the node", func(t *testing.T) {
@@ -100,14 +131,15 @@ func TestEVMAssignmentCLIFlow(t *testing.T) {
 		keyFile := writeJSON(t, dir, "impostor-keys.json", impostor.conf)
 		cmd := newRootCmd()
 		cmd.SetOut(&bytes.Buffer{})
-		cmd.SetArgs([]string{"handoff", "evm-pop", "--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-a", "--key-conf", keyFile})
+		cmd.SetArgs([]string{"handoff", "evm-pop", "--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-a", "--key-conf", keyFile, "--identities", identitiesFile})
 		err := cmd.Execute()
 		require.ErrorContains(t, err, "not the successor key")
 	})
 	t.Run("assembling refuses a missing proof", func(t *testing.T) {
 		cmd := newRootCmd()
 		cmd.SetOut(&bytes.Buffer{})
-		cmd.SetArgs([]string{"handoff", "evm-assemble", "--context", contextFile, "--validators", validatorsFile, "--pops", proofFiles[0] + "," + proofFiles[1], "--bindings", bindingsFile})
+		cmd.SetArgs([]string{"handoff", "evm-assemble", "--context", contextFile, "--validators", validatorsFile, "--pops", proofFiles[0] + "," + proofFiles[1], "--bindings", bindingsFile,
+			"--identities", identitiesFile, "--authorization", authorizationFile})
 		require.ErrorContains(t, cmd.Execute(), `no proof of possession for successor validator "ev-c"`)
 	})
 	t.Run("assembling refuses a proof signed for another context", func(t *testing.T) {
@@ -117,14 +149,16 @@ func TestEVMAssignmentCLIFlow(t *testing.T) {
 		cmd := newRootCmd()
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetArgs([]string{"handoff", "evm-assemble", "--context", otherContext, "--validators", validatorsFile,
-			"--pops", proofFiles[0] + "," + proofFiles[1] + "," + proofFiles[2], "--bindings", bindingsFile})
+			"--pops", proofFiles[0] + "," + proofFiles[1] + "," + proofFiles[2], "--bindings", bindingsFile,
+			"--identities", identitiesFile, "--authorization", authorizationFile})
 		require.ErrorIs(t, cmd.Execute(), evmassign.ErrPoP)
 	})
 	t.Run("supersede needs a pending acknowledgement", func(t *testing.T) {
 		cmd := newRootCmd()
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetArgs([]string{"handoff", "evm-assemble", "--context", contextFile, "--validators", validatorsFile, "--supersede",
-			"--pops", proofFiles[0] + "," + proofFiles[1] + "," + proofFiles[2], "--bindings", bindingsFile})
+			"--pops", proofFiles[0] + "," + proofFiles[1] + "," + proofFiles[2], "--bindings", bindingsFile,
+			"--identities", identitiesFile, "--authorization", authorizationFile})
 		require.ErrorContains(t, cmd.Execute(), "pending")
 	})
 	t.Run("an assignment file must prove every successor key", func(t *testing.T) {
@@ -148,6 +182,8 @@ func TestProposeCarriesTheEVMAssignmentToTheOperator(t *testing.T) {
 	succ, err := evmassign.NewSuccessor(installed, succInfos)
 	require.NoError(t, err)
 	pop := evmassign.PoPContext{Network: 5, Attempt: 0, Predecessor: [32]byte{1}}
+	_, _, propIDs, propDigest := identityFixture(t, dir, installed, succ, pop.Predecessor[:])
+	pop.Identities = propDigest
 	var proofs []evmassign.PoP
 	for _, k := range keys {
 		signer, err := k.conf.Signer()
@@ -157,7 +193,13 @@ func TestProposeCarriesTheEVMAssignmentToTheOperator(t *testing.T) {
 		proofs = append(proofs, p)
 	}
 	bindings := []evmassign.Binding{{RootNodeID: "r-a", EVMNodeID: "ev-a"}, {RootNodeID: "r-b", EVMNodeID: "ev-b"}}
-	assignment := writeJSON(t, dir, "assignment.json", evmassign.Proposal{Validators: succ.Validators, PoPs: proofs, Bindings: bindings})
+	_, propAuth, _, _ := identityFixture(t, dir, installed, succ, pop.Predecessor[:])
+	var authorization evmassign.Authorization
+	rawAuth, err := os.ReadFile(propAuth)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(rawAuth, &authorization))
+	assignment := writeJSON(t, dir, "assignment.json", evmassign.Proposal{Validators: succ.Validators, PoPs: proofs, Bindings: bindings,
+		Kind: evmassign.KindPrimary, Identities: propIDs, Authorization: &authorization})
 	rootA, rootB := newSuccessorKey(t, "r-a"), newSuccessorKey(t, "r-b")
 	nextFile := writeJSON(t, dir, "next.json", types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{rootA.info, rootB.info}})
 
@@ -219,7 +261,8 @@ func TestProposeRefusesAnUncoupledAssignment(t *testing.T) {
 	good := []evmassign.Binding{{RootNodeID: "r-a", EVMNodeID: "ev-a"}, {RootNodeID: "r-b", EVMNodeID: "ev-b"}}
 	next := writeJSON(t, dir, "next.json", types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{rootA.info, rootB.info}})
 	grown := writeJSON(t, dir, "grown.json", types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{rootA.info, rootB.info, rootC.info}})
-	pops := make([]evmassign.PoP, 2) // the CLI checks the coupling before it looks at the proofs
+	pops := make([]evmassign.PoP, 2)        // the CLI checks the coupling before it looks at the proofs
+	shaped := make([]evmassign.Identity, 2) // and before it looks at the identity records
 	for name, tc := range map[string]struct {
 		next     string
 		bindings []evmassign.Binding
@@ -228,7 +271,8 @@ func TestProposeRefusesAnUncoupledAssignment(t *testing.T) {
 		"a binding to an unknown EVM key": {next, []evmassign.Binding{{RootNodeID: "r-a", EVMNodeID: "ev-a"}, {RootNodeID: "r-b", EVMNodeID: "zz"}}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			assignment := writeJSON(t, dir, "a-"+strings.ReplaceAll(name, " ", "-")+".json", evmassign.Proposal{Validators: succ.Validators, PoPs: pops, Bindings: tc.bindings})
+			assignment := writeJSON(t, dir, "a-"+strings.ReplaceAll(name, " ", "-")+".json", evmassign.Proposal{Validators: succ.Validators, PoPs: pops, Bindings: tc.bindings,
+				Kind: evmassign.KindPrimary, Identities: shaped, Authorization: &evmassign.Authorization{}})
 			operator := &handoffOperatorStub{}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { rootHandoffPlanHandler(operator)(w, r) }))
 			defer server.Close()
@@ -294,9 +338,13 @@ func TestShardKeyReplacementCLIFlow(t *testing.T) {
 
 	// The change rides in the EVM assignment's proposal.
 	evmValidators := writeJSON(t, dir, "validators.json", evmInfos)
+	evmSucc, err := evmassign.NewSuccessor(ctx.Installed, evmInfos)
+	require.NoError(t, err)
+	evmIdentities, evmAuthorization, _, _ := identityFixture(t, dir, ctx.Installed, evmSucc, ctx.Predecessor)
 	evmPops := make([]string, 0, 2)
 	for _, k := range evmKeys {
-		o, err := run("evm-pop", "--context", contextFile, "--validators", evmValidators, "--node-id", k.id, "--key-conf", writeJSON(t, dir, k.id+"-k.json", k.conf))
+		o, err := run("evm-pop", "--context", contextFile, "--validators", evmValidators, "--node-id", k.id, "--key-conf", writeJSON(t, dir, k.id+"-k.json", k.conf),
+			"--identities", evmIdentities)
 		require.NoError(t, err)
 		path := filepath.Join(dir, k.id+"-pop.json")
 		require.NoError(t, os.WriteFile(path, []byte(o), 0o600))
@@ -305,7 +353,7 @@ func TestShardKeyReplacementCLIFlow(t *testing.T) {
 	bindings := writeJSON(t, dir, "bindings.json", []evmassign.Binding{{RootNodeID: "r-a", EVMNodeID: "ev-a"}, {RootNodeID: "r-b", EVMNodeID: "ev-b"}})
 	assignment := filepath.Join(dir, "assignment.json")
 	_, err = run("evm-assemble", "--context", contextFile, "--validators", evmValidators, "--pops", strings.Join(evmPops, ","),
-		"--bindings", bindings, "--changes", changeFile, "--out", assignment)
+		"--bindings", bindings, "--changes", changeFile, "--out", assignment, "--identities", evmIdentities, "--authorization", evmAuthorization)
 	require.NoError(t, err)
 	proposal, err := readEVMAssignment(assignment)
 	require.NoError(t, err)
@@ -319,7 +367,8 @@ func TestShardKeyReplacementCLIFlow(t *testing.T) {
 		pending.Pending = true
 		pendingFile := writeJSON(t, dir, "pending-context.json", pending)
 		_, err := run("evm-assemble", "--context", pendingFile, "--validators", evmValidators, "--pops", strings.Join(evmPops, ","),
-			"--bindings", bindings, "--changes", changeFile, "--supersede", "--out", filepath.Join(dir, "x.json"))
+			"--bindings", bindings, "--changes", changeFile, "--supersede", "--out", filepath.Join(dir, "x.json"),
+			"--identities", evmIdentities, "--authorization", evmAuthorization)
 		require.ErrorContains(t, err, "no aggregator changes")
 	})
 }

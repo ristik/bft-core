@@ -1,0 +1,71 @@
+services:
+  signer:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      WEB3_PROVIDER: http://relay:8545
+      HCAPTCHA_SITEKEY: ${HCAPTCHA_SITEKEY:?Set hCaptcha site key}
+    secrets: [faucet_keystore, faucet_password, hcaptcha_secret]
+    networks: [faucet]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    # Standard V3 scrypt keystores need roughly 256 MiB just for decryption.
+    mem_limit: 512m
+    cpus: 0.5
+    depends_on: [relay]
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    entrypoint: [python3, -u, relay.py]
+    volumes:
+      - ./network.json:/config/network.json:ro
+    networks: [faucet, validators]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    depends_on: [signer]
+    ports: ["127.0.0.1:8088:8080"]
+    volumes:
+      - ./network.json:/config/network.json:ro
+      - claims:/state
+    networks: [faucet]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=10)"]
+      interval: 30s
+      timeout: 12s
+      retries: 3
+networks:
+  validators:
+    external: true
+    name: ${VALIDATOR_NETWORK:?Set existing private validator Docker network}
+  faucet:
+    ipam:
+      config:
+        - subnet: 172.30.88.0/24
+          gateway: 172.30.88.1
+volumes:
+  claims:
+secrets:
+  faucet_keystore:
+    file: ${FAUCET_KEYSTORE_FILE:?Set dedicated keystore file}
+  faucet_password:
+    file: ${FAUCET_PASSWORD_FILE:?Set password file}
+  hcaptcha_secret:
+    file: ${HCAPTCHA_SECRET_FILE:?Set captcha secret file}
