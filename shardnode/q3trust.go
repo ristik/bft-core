@@ -89,3 +89,22 @@ func (s *Q3TrustStore) BodyID(epoch uint64) ([32]byte, error) {
 	}
 	return id, nil
 }
+
+// Verified is the trust lookup the install itself uses: a V3 epoch's projection straight from the verified history, without waiting for
+// the journal's completion marker. The marker gates what the node serves and signs for; the install of epoch N (and its replay after a
+// restart, before the journal has finished recovering) must verify the certificates and commit of epoch N-1, which the history already
+// authenticates from the pinned genesis. A legacy epoch is the base's, after the history agrees with it.
+func (s *Q3TrustStore) Verified() TrustBaseStore { return verifiedLookup{s} }
+
+type verifiedLookup struct{ s *Q3TrustStore }
+
+func (l verifiedLookup) GetByEpoch(ctx context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	e, err := l.s.rt.History().ForEpoch(epoch)
+	if err != nil {
+		return nil, err
+	}
+	if _, active := e.Config(); active {
+		return e.Projection(), nil
+	}
+	return l.s.guarded.GetByEpoch(ctx, epoch)
+}

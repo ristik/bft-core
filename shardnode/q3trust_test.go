@@ -8,6 +8,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3process"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
+	"github.com/unicitynetwork/bft-core/q3format"
 )
 
 func TestQ3TrustStoreServesAV3EpochOnlyOnceTheJournalCompletedItAndFollowsTheHistory(t *testing.T) {
@@ -57,4 +58,36 @@ func TestQ3TrustStoreServesAV3EpochOnlyOnceTheJournalCompletedItAndFollowsTheHis
 	require.ErrorIs(t, s.ActivateQ3(epoch+1), ErrQ3Epoch, "an epoch the history does not activate")
 
 	require.True(t, s.Guarded().BoundTo(rt))
+}
+
+// While an installation is still running (the root step, before the journal's completion marker), the install can verify the epoch it
+// replaces from the history, though the node does not yet serve the new epoch to anything else.
+func TestTheInstallVerifiesFromTheHistoryBeforeTheJournalAdmitsTheEpoch(t *testing.T) {
+	ctx := context.Background()
+	f := q3fixture.New(t, q3fixture.Options{})
+	p := q3process.New(t, f)
+	rt := p.Start()
+	base, err := NewHistoricalTrustBaseStore(ctx, memorydb.New(), f.Old, [32]byte{1}, true)
+	require.NoError(t, err)
+	s := NewQ3TrustStore(base, rt)
+	epoch := f.Claim.Epoch
+
+	var during, served error
+	p.Root.OnInstall = func(e q3format.Entry) {
+		_, during = s.Verified().GetByEpoch(ctx, e.Epoch())
+		_, served = s.GetByEpoch(ctx, e.Epoch())
+	}
+	require.NoError(t, rt.Recover(ctx))
+	require.NoError(t, rt.Activate(ctx, p.Bundle()))
+	require.NoError(t, during, "the install reads the verified history")
+	require.Error(t, served, "but the node does not serve an epoch the journal has not completed")
+	got, err := s.GetByEpoch(ctx, epoch)
+	require.NoError(t, err, "served once complete")
+	require.EqualValues(t, epoch, got.Epoch)
+
+	genesis, err := s.Verified().GetByEpoch(ctx, 1)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, genesis.Epoch)
+	_, err = s.Verified().GetByEpoch(ctx, epoch+1)
+	require.Error(t, err, "an epoch the history does not hold")
 }
