@@ -160,7 +160,7 @@ func (c Context) proofContext() registryproof.Context {
 }
 
 func validateRequest(r Request) error {
-	if r.Context.Layout > registryproof.LayoutVersion2 {
+	if r.Context.Layout > registryproof.FreshB1 {
 		return fmt.Errorf("%w: registry layout %d", ErrInvalidRequest, r.Context.Layout)
 	}
 	if r.BlockHash == (common.Hash{}) {
