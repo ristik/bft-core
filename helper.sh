@@ -522,6 +522,8 @@ function start_one_evm_validator() {
       return 1
     fi
     profileArgs=(--trust-history-profile-2)
+    # Q3 #50: the shard node runs the verified coupled runtime (its own verification from the pinned genesis)
+    [ "${Q3_WEIGHT_LANE:-0}" != 1 ] || profileArgs+=(--q3-lane)
   fi
 
   # The registry layout only matters to the engine-api executor; resolve it from the run's persisted file.
