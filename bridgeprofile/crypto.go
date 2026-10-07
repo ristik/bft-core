@@ -2,6 +2,7 @@ package bridgeprofile
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"math/big"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -94,3 +95,6 @@ func ParseKey(b []byte) (*secp256k1.PublicKey, error) {
 	}
 	return k, nil
 }
+
+func hx(b []byte) string    { return hex.EncodeToString(b) }
+func h32(b [32]byte) string { return hex.EncodeToString(b[:]) }

@@ -48,16 +48,18 @@ func LockDigest(cfg [32]byte, n uint64, k []byte) [32]byte {
 	return H(cat(head(4, 4), CBytes([]byte("UNICITY_BR_LOCK")), CBytes(cfg[:]), CUint(n), k))
 }
 
-// MintJustification is tag(39049,[1,chainId,b(vault),b(zeroAddress),n]).
-func MintJustification(chainID uint64, vault, zero [20]byte, n uint64) []byte {
-	return CTag(TagMintLock, CArr(CUint(WireVersion), CUint(chainID), CBytes(vault[:]), CBytes(zero[:]), CUint(n)))
+// MintJustification is J = tag(39049,[2,chainId,b(vault),b(zeroAddress),n,LockProof]),
+// the native lock reason body version 2 with the complete immutable evidence
+// nested inline. It is carried as the SDK mint's justification byte string.
+func MintJustification(chainID uint64, vault, zero [20]byte, n uint64, proof *LockProof) []byte {
+	return CTag(TagMintLock, CArr(CUint(LockReasonVersion), CUint(chainID), CBytes(vault[:]), CBytes(zero[:]), CUint(n), proof.Bytes()))
 }
 
 // ReturnReason is R, the exact terminal transfer data:
 // tag(39048,[1,chainId,b(vault),b(zeroAddress),b(ty),b(aid),b(recipient),b(amount),b(zeroAddress),b(empty),0]).
 // The last three slots are fixed (no fee token, no fee, no deadline).
 func ReturnReason(chainID uint64, vault, zero [20]byte, ty, aid [32]byte, recipient [20]byte, amount *big.Int) []byte {
-	return CTag(TagReturnReason, CArr(CUint(WireVersion), CUint(chainID), CBytes(vault[:]), CBytes(zero[:]),
+	return CTag(TagReturnReason, CArr(CUint(ReturnVersion), CUint(chainID), CBytes(vault[:]), CBytes(zero[:]),
 		CBytes(ty[:]), CBytes(aid[:]), CBytes(recipient[:]), CAmount(amount), CBytes(zero[:]), CBytes([]byte{}), CUint(0)))
 }
 
