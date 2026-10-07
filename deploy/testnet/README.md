@@ -259,3 +259,23 @@ external client transfer, faucet dispense, restart, quiesced restore and real re
 are **pending** when no daemon/server is available; see evidence/README.md. Do not
 close #432/#434 without server rehearsal, second-operator results and independent
 internal review. No merge is authorized by this package.
+
+## Package regression checks
+
+PR CI requires `docker compose config --quiet` for generated fixture topologies
+N=3,4,7; this parsing step needs no Docker daemon. Package tests check the
+signer's generated invocation against the tracked script permissions (the image
+copies a readable script and invokes it through `/bin/sh`), the RSMT environment
+setting, and rejection of an otherwise valid allowed JSON-RPC request larger
+than 16 KiB before any relay call.
+
+CI also builds rugregator from `pins.json`'s revision and runs
+`validate-generation.py --aggregator <pinned-binary>`: a native three-root probe
+using generated keys, partition configurations and aggregator environment, with
+host paths and loopback transport addresses substituted. It checks the pinned
+binary's effective `AGGREGATOR_CONSISTENCY_PROOF_MODE=rsmt`, submits a real SDK
+request, waits for its certified inclusion proof, and requires the root's
+partition-9 certified round and state root to advance. HTTP admission or empty
+rounds alone cannot pass. No EVM validator or faucet is started by this probe;
+it does not supply the owner-server deployment, recovery or campaign evidence
+required above. Local validation is deferred to PR CI for this revision.

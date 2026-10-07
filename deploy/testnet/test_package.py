@@ -1,5 +1,7 @@
 import http.client
 import json
+import os
+import subprocess
 from pathlib import Path
 import tempfile
 import threading
@@ -38,7 +40,7 @@ class PublicRPC(unittest.TestCase):
             self.assertEqual(self.rpc(method)[0],400)
         self.assertEqual(self.relay.calls,[])
     def test_malformed_batch_and_size(self):
-        for body in ['{','[]','null',json.dumps([{'method':'eth_chainId'}]),'x'*16385]:
+        for body in ['{','[]','null',json.dumps([{'method':'eth_chainId'}]),json.dumps({'jsonrpc':'2.0','id':1,'method':'eth_sendRawTransaction','params':['0x'+'ab'*gateway.MAX_BODY]})]:
             self.assertEqual(self.send(body)[0],400)
         self.assertEqual(self.relay.calls,[])
     def test_rate_limit(self):
@@ -54,7 +56,7 @@ class Topology(unittest.TestCase):
     def test_private_pods_and_limits(self):
         for n in [3,4,7]:
             with tempfile.TemporaryDirectory() as tmp:
-                out=Path(tmp);(out/'aggregator').mkdir()
+                out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()
                 (out/'aggregator/keys.json').write_text(json.dumps({'authKey':{'privateKey':'0x01'},'sigKey':{'privateKey':'0x02'}}))
                 images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
                 cfg=generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},images,'captcha')
@@ -64,6 +66,26 @@ class Topology(unittest.TestCase):
                     self.assertEqual(svc['logging']['options']['max-file'],'3')
                     for port in svc.get('ports',[]): self.assertTrue(port.startswith('127.0.0.1:'))
                     if name.startswith(('root','shard','authority','ureth')): self.assertNotIn('ports',svc)
+                # Compose overrides the image entrypoint: verify the actual invocation.
+                script=Path(__file__).parent/'faucet/backend-entrypoint.sh'
+                signer=cfg['services']['signer']['entrypoint']
+                if signer[0]=='/app/backend-entrypoint.sh':
+                    self.assertTrue(os.access(script,os.X_OK), 'direct entrypoint must be executable')
+                else:
+                    self.assertEqual(signer,['/bin/sh','/app/backend-entrypoint.sh'])
+                    self.assertTrue(os.access(script,os.R_OK))
+                for svc in cfg['services'].values():
+                    command=svc['entrypoint']
+                    if command[0].endswith('.sh'):
+                        source=Path(__file__).parent/'faucet'/Path(command[0]).name
+                        self.assertTrue(source.is_file() and os.access(source,os.X_OK),command)
+                env=cfg['services']['aggregator']['environment']
+                self.assertEqual(env['AGGREGATOR_CONSISTENCY_PROOF_MODE'],'rsmt')
+                self.assertNotIn('AGGREGATOR_CONSISTENCY_PROOFS',env)
+                if os.environ.get('TN_REQUIRE_COMPOSE')=='1':
+                    # config needs no daemon; do not silently skip this check in CI.
+                    generate.write(out/'compose.yaml',cfg)
+                    subprocess.run(['docker','compose','-f',str(out/'compose.yaml'),'config','--quiet'],check=True)
                 self.assertTrue(cfg['networks']['validators']['internal'])
                 for i in range(1,n+1):
                     shard=cfg['services']['shard%d'%i]['entrypoint']

@@ -13,6 +13,7 @@ p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--ubft',required=True,type=Path)
 p.add_argument('--keygen',required=True,type=Path)
 p.add_argument('--check-prometheus',action='store_true')
+p.add_argument('--aggregator',type=Path,help='CI native nonempty-batch certification probe')
 a=p.parse_args()
 with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
     base=Path(tmp)
@@ -47,9 +48,14 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
                 keys.append(hashlib.sha256(key.read_bytes()).hexdigest())
             assert (generation/f'validator{val}/auth/client.cred').is_file()
         assert len(keys)==len(set(keys)), 'validator key material reused'
+        if a.aggregator and i==0:
+            import importlib.util
+            spec=importlib.util.spec_from_file_location('aggregator_probe',HERE/'validate-aggregator.py')
+            probe=importlib.util.module_from_spec(spec);spec.loader.exec_module(probe)
+            probe.validate(generation,a.ubft.resolve(),a.aggregator.resolve())
         generations.append(manifest)
     assert generations[0]['genesis_hash']!=generations[1]['genesis_hash']
     assert generations[0]['faucet_address']!=generations[1]['faucet_address']
-    print(json.dumps({'validation':'offline fixtures only; no containers started',
+    print(json.dumps({'validation':'offline fixtures; optional native aggregator probe; no deployable cluster',
         'generations':[{'genesis_hash':g['genesis_hash'],'faucet_address':g['faucet_address']} for g in generations],
         'result':'PASS'},indent=2))

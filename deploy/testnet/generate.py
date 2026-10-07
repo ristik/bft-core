@@ -73,13 +73,13 @@ def topology(out, n, ids, images, captcha):
         'AGGREGATOR_BFT_ADDR':'/dns4/root1/tcp/8000','AGGREGATOR_P2P_ADDR':'/ip4/0.0.0.0/tcp/0',
         'AGGREGATOR_DB_PATH':'/state/db','AGGREGATOR_SMT_BACKEND':'disk',
         'AGGREGATOR_ROUND_DURATION_MS':'1000','AGGREGATOR_FAKE_STATE_TRANSITIONS':'false',
-        'AGGREGATOR_UC_TIMEOUT_MS':'30000','AGGREGATOR_BATCH_LIMIT':'1000','AGGREGATOR_CONSISTENCY_PROOFS':'true'}
+        'AGGREGATOR_UC_TIMEOUT_MS':'30000','AGGREGATOR_BATCH_LIMIT':'1000','AGGREGATOR_CONSISTENCY_PROOF_MODE':'rsmt'}
     (out/'aggregator/secrets.env').write_text('AGGREGATOR_AUTH_KEY='+keys['authKey']['privateKey'].removeprefix('0x')+'\nAGGREGATOR_SIG_KEY='+keys['sigKey']['privateKey'].removeprefix('0x')+'\n')
     service('aggregator',node,['rugregator'],['./aggregator:/state',network],memory='512m',cpu=0.75,environment=env,env_file=['./aggregator/secrets.env'])
     service('rpc',images['rpc'],['python3','-u','gateway.py'],[network],memory='128m',networks=['validators','edge'],environment={'TRUSTED_PROXY_IP':'172.30.89.1'},
         ports=['127.0.0.1:8545:8545'],healthcheck={'test':['CMD','python3','-c',"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8545/healthz', timeout=10)"],'interval':'30s','timeout':'12s','retries':3})
     service('relay',images['guard'],['python3','-u','relay.py'],['./network/network.json:/config/network.json:ro'],memory='128m',networks=['validators','faucet'])
-    service('signer',images['signer'],['/app/backend-entrypoint.sh'],memory='512m',networks=['faucet'],
+    service('signer',images['signer'],['/bin/sh','/app/backend-entrypoint.sh'],memory='512m',networks=['faucet'],
         environment={'WEB3_PROVIDER':'http://relay:8545','HCAPTCHA_SITEKEY':captcha},secrets=['faucet_keystore','faucet_password','hcaptcha_secret'])
     service('faucet',images['guard'],['python3','-u','gateway.py'],['./network/network.json:/config/network.json:ro','./claims:/state'],
         memory='128m',networks=['faucet'],ports=['127.0.0.1:8088:8080'],depends_on=['signer'])
