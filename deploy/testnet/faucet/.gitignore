@@ -1,0 +1,5 @@
+network.json
+.env
+secrets/
+*.sqlite*
+__pycache__/
