@@ -1,5 +1,6 @@
-name: ci
+name: go-ci
 
+# A new filename leaves legacy ci.yml disabled on old feature branches.
 # Go checks run for code changes on the two integration targets, not feature pushes.
 # Owner addendum, 2026-10-07: protection may be enabled only after merge and a green integration run.
 on:

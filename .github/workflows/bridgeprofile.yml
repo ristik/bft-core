@@ -1,6 +1,6 @@
 name: bridgeprofile
 
-# Normal bridgeprofile coverage belongs to ci.yml's full-suite shards.
+# Normal bridgeprofile coverage belongs to go-ci.yml's full-suite shards.
 # Keep a focused manual entry point rather than running ./... a second time.
 on:
   workflow_dispatch:
