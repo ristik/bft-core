@@ -319,7 +319,13 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 			if historical.Epoch != c.UC.GetRootEpoch() {
 				return fmt.Errorf("%w for epoch %d: returned epoch %d", ErrHistoricalTrustBase, c.UC.GetRootEpoch(), historical.Epoch)
 			}
-			if historical.V1 != nil && historical.V2 == nil {
+			if historical.Verified != nil {
+				// an epoch the verified Q3 history activated: its own projection, with its own weights, never a V1 or V2 body
+				if historical.V1 != nil || historical.V2 != nil || historical.Verified.Epoch != historical.Epoch {
+					return fmt.Errorf("%w for epoch %d: invalid body variant", ErrHistoricalTrustBase, historical.Epoch)
+				}
+				ucTrust = historical.Verified
+			} else if historical.V1 != nil && historical.V2 == nil {
 				ucTrust = historical.V1
 			} else if historical.V2 != nil && historical.V1 == nil {
 				ucTrust, err = v2UCTrustBase(historical)

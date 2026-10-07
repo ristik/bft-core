@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -98,3 +100,48 @@ type modeTrustBase struct {
 func (t modeTrustBase) ValidationMode() weightvalidation.Mode { return t.mode }
 
 var _ weightvalidation.ModeSource = (*Guarded)(nil)
+
+// Lineage is the recovery history of a runtime: the abdrc.HistoricalTrustBases a StateMsg is verified against. An epoch the verified
+// Q3 history activated is served as its own exact-weight projection, only once the journal has completed its installation; every
+// other epoch is the base lineage's record, after the history has checked the base agrees with it (the genesis epoch). An epoch
+// the history does not hold is refused, never answered by the base alone.
+type Lineage struct {
+	rt   *Runtime
+	base abdrc.HistoricalTrustBases
+}
+
+var _ abdrc.HistoricalTrustBases = (*Lineage)(nil)
+
+// Lineage is the lineage view over this runtime's history, with base serving the genesis epoch.
+func (r *Runtime) Lineage(base abdrc.HistoricalTrustBases) abdrc.HistoricalTrustBases {
+	return &Lineage{rt: r, base: base}
+}
+
+// ByEpoch implements abdrc.HistoricalTrustBases.
+func (l *Lineage) ByEpoch(epoch uint64) (trusthistorystore.Record, error) {
+	e, err := l.rt.History().ForEpoch(epoch)
+	if err != nil {
+		return trusthistorystore.Record{}, err
+	}
+	if _, active := e.Config(); !active {
+		if l.base == nil {
+			return trusthistorystore.Record{}, trusthistorystore.ErrNotFound
+		}
+		rec, err := l.base.ByEpoch(epoch)
+		if err != nil {
+			return trusthistorystore.Record{}, err
+		}
+		if rec.V1 == nil || rec.V2 != nil || rec.Verified != nil || !sameTrust(rec.V1, e.Projection()) {
+			return trusthistorystore.Record{}, fmt.Errorf("%w: epoch %d", ErrConflict, epoch)
+		}
+		return rec, nil
+	}
+	if err := l.rt.Admit(epoch); err != nil {
+		return trusthistorystore.Record{}, err
+	}
+	rec := trusthistorystore.Record{Epoch: epoch, Start: e.Start(), BodyID: e.BodyID(), Verified: e.Projection()}
+	if next, err := l.rt.History().ForEpoch(epoch + 1); err == nil {
+		rec.End = next.Start()
+	}
+	return rec, nil
+}

@@ -40,10 +40,10 @@ type Options struct {
 	Weights         []uint64 // successor weights in member order; four members
 	CommitSealRound uint64   // the old committee's commit round (>= the ordered round 4)
 	SignedBy        int      // how many of the four old members sign the commit; default 3 (the unit threshold); fewer is a forgery
-	// After makes this the second activation of a chain whose first activation is the given fixture: the old committee is that
-	// fixture's weighted epoch-2 committee, whose scheme 2 commit this one's proof carries, and this fixture's body is epoch 3. The
+	// After appends an activation to the given fixture's chain: its weighted committee commits this fixture's successor body
+	// under scheme 2. The
 	// old committee signs with its first SignedBy members in member order (default 2: the heavy member and one light one, weight 7
-	// of 9). The commit is sealed at CommitSealRound (default 12) and activates at A*=15.
+	// of 9). By default the commit and activation are eight rounds after the predecessor's.
 	After *Fixture
 	// Frozen is the frozen EVM parent the checkpoint and the evidence name; default 32 bytes of 5.
 	Frozen []byte
@@ -52,7 +52,8 @@ type Options struct {
 	Chain *Fixture
 	// Assignment makes the handoff coupled: the committed candidate carries a successor EVM assignment whose validators mirror the
 	// root weights, with proofs of possession and the root-to-EVM bindings. The activation is then the one the install of a
-	// candidate-bearing handoff takes; the manager does not install it (ErrQ3Candidate), the request-policy selection does.
+	// candidate-bearing handoff takes: the manager installs it only with the committed candidate (ErrQ3Candidate otherwise), and the
+	// request history serves its weighted context.
 	Assignment bool
 	// CandidateRootWeights are the weights the candidate states for the successor root committee (in node-id order) when they are not
 	// the body's, and EVMWeights the EVM validators' weights when they do not mirror the candidate's root weights (a coupling
@@ -62,6 +63,9 @@ type Options struct {
 	// MutateCandidate edits the candidate before its digest is bound, so that the chain of hashes stays consistent and only the
 	// edited property is wrong.
 	MutateCandidate func(*evmassign.Candidate)
+	// ShardState and Installed supply the authenticated state and configuration for a successive coupled handoff.
+	ShardState *storage.ShardInfo
+	Installed  *types.PartitionDescriptionRecord
 }
 
 // Fixture is one activation and everything that authenticates it.
@@ -86,6 +90,7 @@ type Fixture struct {
 	Successor       *types.PartitionDescriptionRecord // the EVM assignment it activates (before the activation round is set)
 	FrozenParent    []byte
 	CommitSealRound uint64
+	EVMSigners      map[string]abcrypto.Signer
 	Prev            *Fixture // the first activation this one follows, with Options.After
 }
 
@@ -107,7 +112,7 @@ func New(t *testing.T, o Options) *Fixture {
 	if o.CommitSealRound == 0 {
 		o.CommitSealRound = 4
 		if o.After != nil {
-			o.CommitSealRound = 12
+			o.CommitSealRound = o.After.CommitSealRound + 8
 		}
 	}
 	if o.SignedBy == 0 {
@@ -143,14 +148,14 @@ func New(t *testing.T, o Options) *Fixture {
 	if o.After != nil {
 		h, err := q3format.NewHistory(f.Old)
 		require.NoError(t, err)
-		h, err = h.WithV3(o.After.Link)
-		require.NoError(t, err, "the first activation must be valid")
+		h, err = h.VerifyEnvelope(o.After.Envelope)
+		require.NoError(t, err, "the preceding activations must be valid")
 		tip := h.Tip()
 		oldCfg, err = h.Signing(tip.Epoch())
 		require.NoError(t, err)
 		tipID := tip.BodyID()
 		oldID, oldEpoch, oldVersion, oldTB = tipID[:], tip.Epoch(), tip.Version(), tip.Projection()
-		bodyEpoch, aMin, activate, ordered = oldEpoch+1, 15, 15, o.CommitSealRound
+		bodyEpoch, aMin, activate, ordered = oldEpoch+1, tip.Start()+8, tip.Start()+8, o.CommitSealRound
 		f.Prev = o.After
 	}
 
@@ -180,6 +185,9 @@ func New(t *testing.T, o Options) *Fixture {
 	if o.After != nil {
 		shardConf = o.After.ShardConf // the same shard: the node's orchestration holds one configuration of it
 	}
+	if o.Installed != nil {
+		shardConf = o.Installed
+	}
 	f.ShardConf = shardConf
 	if o.Assignment {
 		operator = f.assignment(t, o, oldID)
@@ -191,10 +199,25 @@ func New(t *testing.T, o Options) *Fixture {
 
 	state, err := storage.NewShardInfo(f.ShardConf, crypto.SHA256)
 	require.NoError(t, err)
+	if o.ShardState != nil {
+		copyState := *o.ShardState
+		copyIR := *o.ShardState.IR
+		copyState.IR = &copyIR
+		state = &copyState
+	}
 	state.IR.BlockHash = bytes.Clone(o.Frozen)
 	state.IR.Hash = bytes.Repeat([]byte{0x37}, 32)
 	trHash, err := state.TR.Hash()
 	require.NoError(t, err)
+	if o.Assignment { // a coupled handoff commits the technical record derived from the candidate's successor assignment
+		derived, derr := storage.AssignmentSuccessorTRHash(state, f.Candidate, activate, crypto.SHA256)
+		switch {
+		case derr == nil:
+			trHash = derived
+		case o.MutateCandidate == nil && o.EVMWeights == nil && o.CandidateRootWeights == nil:
+			require.NoError(t, derr) // only a deliberately malformed candidate may fail to derive
+		}
+	}
 
 	f.Evidence = q3format.Evidence{Summary: bytes.Repeat([]byte{0x55}, 32), FrozenParent: bytes.Clone(o.Frozen), CandidateDigest: operator[:]}
 	record := evmroot.OrderedHandoffRecord{Network: Network, Epoch: oldEpoch, Attempt: attempt, OrderedRound: ordered, ActivationRound: activate,
@@ -281,7 +304,7 @@ func New(t *testing.T, o Options) *Fixture {
 		h, err := q3format.NewHistory(f.Old)
 		require.NoError(t, err)
 		if o.After != nil {
-			h, err = h.WithV3(o.After.Link)
+			h, err = h.VerifyEnvelope(o.After.Envelope)
 			require.NoError(t, err)
 		}
 		next, err := h.WithV3(f.Link)
@@ -290,8 +313,8 @@ func New(t *testing.T, o Options) *Fixture {
 	}
 	f.Link.Claim = f.Claim
 	f.Envelope = q3format.Envelope{RootInput: []byte{0xAB}, TargetParent: bytes.Clone(o.Frozen), Links: []q3format.Link{f.Link}}
-	if o.After != nil { // the lineage segment carries the first activation too, so the history rebuilds from the genesis alone
-		f.Envelope.Links = []q3format.Link{o.After.Link, f.Link}
+	if o.After != nil { // retain the whole lineage so the history rebuilds from the genesis alone
+		f.Envelope.Links = append(append([]q3format.Link(nil), o.After.Envelope.Links...), f.Link)
 	}
 	f.EnvelopeBytes, err = f.Envelope.Encode()
 	require.NoError(t, err)
@@ -315,6 +338,7 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 		signer abcrypto.Signer
 		info   *types.NodeInfo
 	}
+	f.EVMSigners = make(map[string]abcrypto.Signer)
 	keys := make([]evmKey, len(root))
 	validators := make([]*types.NodeInfo, len(root))
 	for i, m := range root {
@@ -330,6 +354,7 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 		}
 		keys[i] = evmKey{signer, &types.NodeInfo{NodeID: fmt.Sprintf("evm-%d", i), SigKey: pub, Stake: weight}}
 		validators[i] = keys[i].info
+		f.EVMSigners[keys[i].info.NodeID] = signer
 	}
 	succ, err := evmassign.NewSuccessor(f.ShardConf, validators)
 	require.NoError(t, err)

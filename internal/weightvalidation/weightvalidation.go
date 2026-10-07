@@ -236,3 +236,12 @@ func EVMSet(validators []*types.NodeInfo, mode Mode) error {
 	_, err := Nodes(validators, RoleEVM, ModeWeighted)
 	return err
 }
+
+type evmRules struct{ mode Mode }
+
+func (r evmRules) PDR(p *types.PartitionDescriptionRecord) error { return PDR(p, RoleEVM, r.mode) }
+func (r evmRules) Set(v []*types.NodeInfo) error                 { return EVMSet(v, r.mode) }
+
+// EVMRules is the successor EVM assignment rule set of a mode, for evmassign's *With functions: ModeUnit is evmassign.UnitRules
+// behaviour, ModeWeighted the bounded weights of a verified Q3 activation.
+func EVMRules(mode Mode) evmassign.Rules { return evmRules{mode} }

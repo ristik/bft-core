@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	test "github.com/unicitynetwork/bft-core/internal/testutils"
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	testsig "github.com/unicitynetwork/bft-core/internal/testutils/sig"
@@ -19,6 +20,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
@@ -436,6 +438,59 @@ func TestStateMsg_Verify(t *testing.T) {
 			err = sm.VerifyWithHistory(crypto.SHA256, current, onlyFirst)
 			require.ErrorIs(t, err, ErrHistoricalTrustBase)
 			require.ErrorIs(t, err, trusthistorystore.ErrNotFound)
+		})
+
+		// A record the verified Q3 history serves (Verified) carries the exact weights of an activated epoch: the certificate of that epoch
+		// is checked under them, so the heavy member and one light member (7 of 9) are a quorum and three light members are not.
+		t.Run("a verified weighted projection is the trust base of its epoch", func(t *testing.T) {
+			ids := []string{"a-heavy", "b", "c", "d"}
+			weights := []uint64{6, 1, 1, 1}
+			signers := map[string]abcrypto.Signer{}
+			var nodes []*types.NodeInfo
+			for i, id := range ids {
+				s, v := testsig.CreateSignerAndVerifier(t)
+				key, err := v.MarshalPublicKey()
+				require.NoError(t, err)
+				signers[id] = s
+				nodes = append(nodes, &types.NodeInfo{NodeID: id, SigKey: key, Stake: weights[i]})
+			}
+			weighted, err := quorumweight.NewTrustBase(first.NetworkID, nodes, types.WithEpoch(2), types.WithEpochStart(11), types.WithQuorumThreshold(7))
+			require.NoError(t, err)
+			signedBy := func(by ...string) *types.UnicityCertificate {
+				weightedUC := testcertificates.CreateUnicityCertificate(t, signer, headIR, &secondConf, 11, make([]byte, 32), make([]byte, 32))
+				weightedUC.UnicitySeal.Epoch = 2
+				weightedUC.UnicitySeal.Signatures = nil
+				for _, id := range by {
+					require.NoError(t, weightedUC.UnicitySeal.Sign(id, signers[id]))
+				}
+				return weightedUC
+			}
+			serve := func(trust *types.RootTrustBaseV1) HistoricalTrustBases {
+				return recoveryHistoryRecordOverride{history, trusthistorystore.Record{Epoch: 2, Start: 11, Verified: trust}}
+			}
+			stateWith := func(uc *types.UnicityCertificate) StateMsg {
+				sm := makeState()
+				sm.CommittedHead.ShardInfo[1].UC = uc
+				return sm
+			}
+			sm := stateWith(signedBy("a-heavy", "b"))
+			require.NoError(t, sm.VerifyWithHistory(crypto.SHA256, current, serve(weighted)), "acceptance control: 7 of 9")
+
+			sm = stateWith(signedBy("b", "c", "d"))
+			require.ErrorIs(t, sm.VerifyWithHistory(crypto.SHA256, current, serve(weighted)), ErrHistoricalUC, "three light members are 3 of 9")
+			sm = stateWith(signedBy("a-heavy"))
+			require.ErrorIs(t, sm.VerifyWithHistory(crypto.SHA256, current, serve(weighted)), ErrHistoricalUC, "the heavy member alone is 6 of 9")
+
+			other := *weighted
+			other.Epoch = 3
+			sm = stateWith(signedBy("a-heavy", "b"))
+			err = sm.VerifyWithHistory(crypto.SHA256, current, serve(&other))
+			require.ErrorIs(t, err, ErrHistoricalTrustBase, "a projection of another epoch is not this epoch's")
+			require.ErrorContains(t, err, "invalid body variant")
+
+			both := trusthistorystore.Record{Epoch: 2, Start: 11, Verified: weighted, V1: weighted}
+			err = sm.VerifyWithHistory(crypto.SHA256, current, recoveryHistoryRecordOverride{history, both})
+			require.ErrorIs(t, err, ErrHistoricalTrustBase, "a record carries one variant")
 		})
 
 		t.Run("missing resolver refuses", func(t *testing.T) {
