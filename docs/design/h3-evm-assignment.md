@@ -235,3 +235,22 @@ in production, and there is no migration (greenroom, one format).
   `bytes32`, so the one canonical image is `evmassign.NodeIDWord(id) = keccak256(utf8(id))`: derived at the boundary, never carried or
   signed in place of the string, injective up to collisions, and tied to the key by the key hash that sits beside it in every signed
   binding. Keys stay 33-byte compressed secp256k1.
+- **Root records, progress, closure and UC time (`rootrecords`).** The projection custody imports (`IRootRecords`): a linked log of
+  SessionClosed, Ack, RecoveryAck, Closure and Retirement records, each with the canonical progress p and UC time of the moment it was
+  ordered. The record identifier is `keccak256(abi.encode(index, predecessor, kind, progress, ucTime, data))`, payloads are the static
+  words of `P85Types.sol`. Progress is `offset_e + (r - firstRound_e)` over ordinary committed rounds of the current epoch; ordering H at
+  round h fixes the endpoint `p(e,h)`, the successor offset `p(e,h)+1` is derived (never supplied), and progress stays at the endpoint
+  until the successor has an ordinary round, so seal rounds, arrival time and old-epoch suffix rounds cannot move it. A closure is keyed by
+  `(epoch, H record, H round)` and carries no proof: the first one fixes p_close and its UC time, an identical repeat is a no-op, a
+  different identity is `ErrClosureConflict`, and none can anchor before the successor has ordinary progress. UC time is the seal
+  timestamp of the verified root certificate's `RootOrigin` (`ReferenceTime`), imported on one lineage (network, then epoch and round) and
+  never backwards; a record cannot be ordered before a time was imported. `rootrecords/testdata/records-vectors.json` is produced by this
+  projection and replayed verbatim by the custody contracts' tests.
+- **Open: the root's own timestamp rule.** The UC seal timestamp is the proposer's wall clock (`types.NewTimestamp()` in the proposal
+  builder) and block validation only requires it nonzero: no rule bounds it against the parent block or a local clock. The import above
+  enforces monotonicity on the importer's side, but a single proposer could still commit a far-future time that every honest importer
+  must then accept. Bounding it (greater than the parent QC's time, within a skew of the validator's clock) is a root consensus rule and
+  is not part of this change.
+- **Not implemented here:** the on-chain `IRootRecords` implementation in the SealRegistry and its feed from Ureth; the reference model
+  above and the vectors are what it must match. The Closure and Retirement digest words (exposure, key history, reference digest) are
+  contract-derived and opaque labels in the vectors.
