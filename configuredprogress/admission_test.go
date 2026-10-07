@@ -23,6 +23,20 @@ func (g *admissionGate) WithinFinality(ctx context.Context, f func() error) erro
 	return f()
 }
 
+// Hold background work until the test has inspected the ingress boundary.
+type heldAdmissionClock struct {
+	wallAdmissionClock
+	start <-chan struct{}
+}
+
+func (c heldAdmissionClock) Episode(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	select {
+	case <-c.start:
+	case <-ctx.Done():
+	}
+	return c.wallAdmissionClock.Episode(ctx, d)
+}
+
 type controlledClock struct {
 	waits    chan time.Duration
 	release  chan struct{}
@@ -277,7 +291,7 @@ func TestAdmissionRefusesCompetingFirstOrdinaryLatch(t *testing.T) {
 	require.True(t, sameObservation(first, competing))
 }
 
-func TestAdmissionCancellationWhileBlockedAtGateDoesNotCommit(t *testing.T) {
+func TestAdmissionCancellationWhileBlockedAtGateRetainsForWorker(t *testing.T) {
 	f := newFixture(t, 1)
 	s, _ := f.open(2)
 	defer s.Close()
@@ -285,21 +299,34 @@ func TestAdmissionCancellationWhileBlockedAtGateDoesNotCommit(t *testing.T) {
 	require.NoError(t, err)
 	gate := &admissionGate{}
 	gate.mu.Lock()
+	var unlockOnce sync.Once
+	unlock := func() { unlockOnce.Do(gate.mu.Unlock) }
+	defer unlock()
+	start := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(start) }) }
+	defer release()
 	var invalidations atomic.Int32
-	c := newTestAdmission(t, f, s, gate, wallAdmissionClock{}, admissionPolicy{attempts: 3, duration: time.Second, cooldown: time.Hour}, func() { invalidations.Add(1) }, func(context.Context, rootinput.VerifiedObservationV2) error { return nil })
+	c := newTestAdmission(t, f, s, gate, heldAdmissionClock{start: start}, admissionPolicy{attempts: 3, duration: time.Second, cooldown: time.Hour}, func() { invalidations.Add(1) }, func(context.Context, rootinput.VerifiedObservationV2) error { return nil })
 	u, tr := f.sign(f.c.InputRecord(1), 2, 5)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { _, e := c.Submit(ctx, u, tr); done <- e }()
-	time.Sleep(10 * time.Millisecond)
+	waitAdmission(t, func() bool { return c.Status().BootstrapInvalidated })
 	cancel()
-	gate.mu.Unlock()
+	unlock()
 	require.ErrorIs(t, <-done, context.Canceled)
 	require.True(t, c.Status().BootstrapInvalidated, "authenticated ordinary knowledge is sticky even when gate acquisition is canceled")
-	waitAdmission(t, func() bool { return invalidations.Load() == 1 })
 	st, _, err := s.Load(context.Background(), f.ctx)
 	require.NoError(t, err)
-	require.Zero(t, st.Revision())
+	require.Zero(t, st.Revision(), "canceled ingress cannot synchronously commit")
+	// The worker owns the retained ordinary evidence independently of the caller.
+	release()
+	waitAdmission(t, func() bool { return invalidations.Load() == 1 })
+	waitAdmission(t, func() bool {
+		st, _, err := s.Load(context.Background(), f.ctx)
+		return err == nil && st.Revision() == 1
+	})
 }
 
 func TestAdmissionEpisodeDeadlineReachesBlockingDelivery(t *testing.T) {
