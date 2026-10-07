@@ -17,6 +17,7 @@ import (
 	rcnet "github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	abdrc "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -450,6 +451,18 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert) ([]*certification.Certif
 		return nil, persistenceUncertain(err)
 	}
 
+	// The P85 records the newly committed blocks projected, oldest first, are retained before the commit block becomes the root: a crash
+	// in between repeats an idempotent append, never loses a record.
+	if recs := committedRecords(path); len(recs) > 0 {
+		store, ok := bt.blocksDB.(RecordStore)
+		if !ok {
+			return nil, persistenceUncertain(ErrNoRecordStore)
+		}
+		if err := store.AppendRecords(recs); err != nil {
+			return nil, persistenceUncertain(err)
+		}
+	}
+
 	if err := bt.blocksDB.WriteBlock(commitNode.data, true); err != nil {
 		return nil, persistenceUncertain(err)
 	}
@@ -696,4 +709,13 @@ func toRecoveryShardInfo(block *ExecutedBlock) ([]rcnet.ShardInfo, error) {
 		return strings.Compare(string(a.Shard.Key()), string(b.Shard.Key()))
 	})
 	return si, nil
+}
+
+// committedRecords are the records the blocks of a commit path projected, oldest block first (the path lists the newest block first).
+func committedRecords(path []*ExecutedBlock) []rootrecords.Record {
+	var recs []rootrecords.Record
+	for i := len(path) - 1; i >= 0; i-- {
+		recs = append(recs, path[i].ShardState.Records...)
+	}
+	return recs
 }

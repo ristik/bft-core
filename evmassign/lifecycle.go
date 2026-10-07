@@ -415,3 +415,25 @@ func DeriveRecovery(head Head, installed *types.PartitionDescriptionRecord) (Lif
 	}
 	return Lifecycle{Kind: KindRecovery, Identities: a.K, Authorization: a, ReplacedAssignment: replaced[:]}, succ, root, bindings, nil
 }
+
+// AssignmentID is the assignment hash of the candidate's successor assignment under its frozen identity records: the identifier a
+// recovery names for the committee it re-installs and the one custody keys the assignment by.
+func (c Candidate) AssignmentID() ([32]byte, error) {
+	succ, err := c.Successor()
+	if err != nil {
+		return [32]byte{}, err
+	}
+	digest, err := IdentitiesDigest(c.Identities)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return AssignmentHash(succ, digest)
+}
+
+// ResultID is the election result the candidate's authorization names.
+func (c Candidate) ResultID() (id [32]byte) {
+	if c.Authorization != nil {
+		copy(id[:], c.Authorization.ResultID)
+	}
+	return id
+}

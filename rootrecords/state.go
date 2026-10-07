@@ -21,14 +21,12 @@ import (
 // The registry-side reference model (Projector, Tracker, Clock) is a second implementation of the same progress rules and is compared
 // against this one event by event in the tests.
 type State struct {
-	// Progress tracker. The current epoch advances from Offset on First; Last is its highest ordinary round. After H is ordered the
-	// tracker is Frozen at Endpoint = p(e,h) until the successor (NextEpoch, from NextOffset on NextFirst) has an ordinary round.
-	Epoch, Offset, First, Last       uint64
+	// Progress tracker. The current epoch advances from Offset on First. After H is ordered the tracker is Frozen at Endpoint = p(e,h)
+	// until the successor (NextEpoch, from NextOffset on NextFirst) has an ordinary round.
+	Epoch, Offset, First             uint64
 	Frozen                           bool
 	Endpoint                         uint64
 	NextEpoch, NextOffset, NextFirst uint64
-	// Time is the committed UC time: the largest block timestamp so far.
-	Time uint64
 	// Pending are the committed handoffs that installed an assignment and wait for the EVM to acknowledge them, oldest first, at most
 	// MaxPending (a primary and its recovery).
 	Pending []PendingH
@@ -142,10 +140,9 @@ func (s State) Commit(h, nextEpoch, nextFirst uint64, assignment bool, bodyID [3
 
 // append links one record to the log: next index, the tip as predecessor, anchored now. The anchors may not fall below the last one.
 func (s State) append(kind Kind, data []byte, at Anchor) (State, Record, error) {
-	if at.UCTime < s.LastTime {
-		at.UCTime = s.LastTime // committed times are strictly increasing since #445; the clamp keeps the log's anchors monotone regardless
-	}
-	if at.Progress < s.LastProgress {
+	// Committed timestamps are strictly increasing since #445, so a record's UC time can never fall below the previous record's; if one
+	// does, the block is refused rather than its anchor rewritten.
+	if at.Progress < s.LastProgress || at.UCTime < s.LastTime {
 		return State{}, Record{}, fmt.Errorf("%w: (%d,%d) after (%d,%d)", ErrMonotonic, at.Progress, at.UCTime, s.LastProgress, s.LastTime)
 	}
 	if at.UCTime == 0 {

@@ -263,6 +263,22 @@ in production, and there is no migration (greenroom, one format).
   epoch, then at most one RejectResult, then retirements in strictly ascending `(id, generation)`; at most 32 controls. A control-bearing
   payload is never empty, so a post-H old-epoch suffix with a control is `ErrHandoffSuffix`. The legacy profile keeps its one-element
   payload. Proof checks and lifecycle rules belong to the executor (next slice).
+- **Root source of the record log (`rootrecords.State`, `ControlState.Pos`).** The root keeps one canonical, copyable source state in the
+  control state, committed by the control digest (so a checkpoint and a handoff bundle carry it verifiably): the progress tracker
+  (current epoch, offset, first round, and while H's successor has not started, the frozen endpoint and the successor's offset/first
+  round), the committed assignment handoffs awaiting their EVM acknowledgement (at most a primary and its recovery, each with the body
+  that names its retained candidate), and the cursor of the log (count, tip, last anchors). It changes only at events: a committed H
+  (`Commit` fixes p(e,h), the successor's offset p(e,h)+1 on its activation round), the first successor block at or after the
+  activation (ends the freeze), and a projected record. An ordinary or empty block leaves the digest alone, and an old-epoch suffix
+  block moves nothing. The designated EVM shard's certified acknowledgement (its IR epoch catching up with the installed TR epoch while
+  a handoff is pending) projects `Ack` (one pending handoff) or `RecoveryAck` (a primary and its recovery) from the offsets fixed at
+  commit, never derived again, with the election result and assignment id read from the retained candidates, anchored at the
+  acknowledging block's progress and committed timestamp. The genesis epoch's ordinary rounds start after the genesis round. The
+  records of a block are kept in `ShardStates.Records` (omitted from the encoding when empty, so a chain that projects none keeps
+  byte-identical blocks) and are retained durably, oldest block first, when the block commits (`BoltDB.AppendRecords`, idempotent and
+  linked); `Records`/`RecordCount` read them back. A control state without a source state projects nothing (fixtures that predate it).
+  Not yet projected: SessionClosed, Closure and Retirement (the controls' executor), and a checkpoint taken from a snapshot does not
+  carry the log's earlier records.
 - **Not implemented here:** the on-chain `IRootRecords` implementation in the SealRegistry and its feed from Ureth; the reference model
   above and the vectors are what it must match. The Closure and Retirement digest words (exposure, key history, reference digest) are
   contract-derived and opaque labels in the vectors.

@@ -158,11 +158,10 @@ func TestStateRecordsLinkAndKeepAnchorsMonotone(t *testing.T) {
 	require.EqualValues(t, 1, r2.Index)
 	require.NoError(t, Verify([]Record{r1, r2}))
 	require.Equal(t, r2.ID, s2.Tip)
-	// a UC time below the last record's is clamped up to it
+	// a UC time below the last record's is refused, not rewritten
 	late := mustCommit(t, mustBlock(t, s2, 3, 160), 170, 4, 171, true)
-	_, r3, err := late.Ack(171, 900, id32(5), id32(6), 3)
-	require.NoError(t, err)
-	require.EqualValues(t, 1_200, r3.UCTime)
+	_, _, err = late.Ack(171, 900, id32(5), id32(6), 3)
+	require.ErrorIs(t, err, ErrMonotonic)
 	// a progress below the last record's is refused
 	low := s2
 	low.LastProgress = 1 << 40
@@ -194,13 +193,14 @@ func TestStateEncodingRoundTripsAndIsCanonical(t *testing.T) {
 func TestDecodeStateRefusals(t *testing.T) {
 	good := NewState(1, 1)
 	bad := map[string]State{
-		"first round zero":           {Epoch: 1},
-		"frozen without successor":   {Epoch: 1, First: 1, Frozen: true},
-		"successor without H":        {Epoch: 1, First: 1, NextEpoch: 2},
-		"offset not endpoint plus 1": {Epoch: 1, First: 1, Frozen: true, Endpoint: 5, NextEpoch: 2, NextOffset: 9, NextFirst: 3},
-		"three pending":              {Epoch: 1, First: 1, Pending: make([]PendingH, 3)},
-		"count without a tip":        {Epoch: 1, First: 1, Count: 2},
-		"tip without a count":        {Epoch: 1, First: 1, Tip: id32(1)},
+		"first round zero":                 {Epoch: 1},
+		"frozen without successor":         {Epoch: 1, First: 1, Frozen: true},
+		"successor without H":              {Epoch: 1, First: 1, NextEpoch: 2},
+		"offset not endpoint plus 1":       {Epoch: 1, First: 1, Frozen: true, Endpoint: 5, NextEpoch: 2, NextOffset: 9, NextFirst: 3},
+		"three pending":                    {Epoch: 1, First: 1, Pending: make([]PendingH, 3)},
+		"count without a tip":              {Epoch: 1, First: 1, Count: 2},
+		"pending beyond the current epoch": {Epoch: 1, First: 1, Pending: []PendingH{{Epoch: 1, HRound: 3, Offset: 3, First: 9, RootEpoch: 5, BodyID: id32(1)}}},
+		"tip without a count":              {Epoch: 1, First: 1, Tip: id32(1)},
 	}
 	for name, st := range bad {
 		_, err := DecodeState(st.Bytes())
