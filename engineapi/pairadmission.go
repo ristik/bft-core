@@ -111,6 +111,10 @@ func (a *Adapter) EnablePair(cfg *PairConfig) { a.pair = cfg }
 // PairEnabled reports whether builds and imports carry the pair binding.
 func (a *Adapter) PairEnabled() bool { return a.pair != nil }
 
+// ErrAdmissionVerifier is returned when restart admission is asked of an adapter that holds no verifier context: the head is re-derived from
+// this node's own trust, never from the execution client's claims, so without it nothing can be admitted.
+var ErrAdmissionVerifier = errors.New("engineapi: restart admission requires the verifier context")
+
 // ErrAdmissionInput is returned when the root input the execution client retained for its head is not the one this node derives from the
 // witnesses retained with it.
 var ErrAdmissionInput = errors.New("engineapi: the retained root input is not this node's own derivation of the head's authorizing certificate")
@@ -126,7 +130,7 @@ func (a *Adapter) AdmitHead(ctx context.Context) error {
 		return fmt.Errorf("%w: pair binding is not configured", ErrPairBinding)
 	}
 	if a.verifier == nil {
-		return errors.New("engineapi: restart admission requires the verifier context: the head is re-derived from this node's own trust")
+		return ErrAdmissionVerifier
 	}
 	head, err := a.eth.header(ctx, "latest")
 	if err != nil {

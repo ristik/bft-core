@@ -312,7 +312,7 @@ func TestRestartAdmissionPresentsTheNodesOwnDerivationOfTheHead(t *testing.T) {
 	require.ErrorIs(t, a.AdmitHead(context.Background()), ErrPairBinding)
 	a.pair = cfg
 	a.verifier = nil
-	require.Error(t, a.AdmitHead(context.Background()))
+	require.ErrorIs(t, a.AdmitHead(context.Background()), ErrAdmissionVerifier)
 }
 
 func word(b byte) [32]byte { return [32]byte{0: b, 31: b} }
