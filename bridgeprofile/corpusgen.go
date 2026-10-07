@@ -140,6 +140,7 @@ func BuildCorpus() (*Corpus, error) {
 	fs.Cfgs["dev-replacement-vault"] = fixtureJSON("dev-replacement-vault", &dev2)
 	g.fs = fs
 
+	g.networkBoundaries()
 	g.config()
 	g.vault()
 	g.unlock()
@@ -152,6 +153,57 @@ func BuildCorpus() (*Corpus, error) {
 		return nil, g.failed
 	}
 	return g.pack()
+}
+
+// networkBoundaries reconstructs the identities, cfg-bound proof, salt, ID and
+// genesis signature; a zero-network failure cannot be a stale-identity failure.
+func (g *gen) networkBoundaries() {
+	owner := KeyFromSeed("network-boundary-owner")
+	for _, network := range []uint16{0, 1, 65535} {
+		f := *g.d.F
+		c := *f.Cfg
+		c.Network = network
+		c.Ty = DeriveType(network, c.RootGenesis, c.ExecutionGenesis, c.ChainID)
+		c.Aid = DeriveAsset(network, c.RootGenesis, c.ExecutionGenesis, c.ChainID)
+		f.Cfg = &c
+		h, err := f.BuildToken(7, big.NewInt(12345), []*secp256k1.PrivateKey{owner})
+		g.must(err)
+		cfg := c.Bytes()
+		add := func(id, op string, input []byte) {
+			g.add(Case{ID: fmt.Sprintf("network-%d-%s", network, id), Family: "config", Op: op,
+				Description: "SDK NetworkId boundary with reconstructed signed genesis", Input: hx(input)})
+		}
+		add("cfg", "cfg-decode", cfg)
+		mint, err := EncodeKernelInput(1, cfg, h.Bytes())
+		g.must(err)
+		add("mint", "kernel", mint)
+		prepare, err := EncodeKernelInput(0, cfg, PreparePayload(7, big.NewInt(12345), h.Mint.Recipient.Bytes()))
+		g.must(err)
+		add("prepare", "kernel", prepare)
+	}
+	// uint16 cannot represent 65536; replace the encoded field for overflow cases.
+	c := g.d.F.Cfg
+	cfg := bytes.Replace(c.Bytes(), append(CBytes([]byte(cfgDomain)), CUint(uint64(c.Network))...), append(CBytes([]byte(cfgDomain)), CUint(65536)...), 1)
+	g.add(Case{ID: "network-65536-cfg", Family: "config", Op: "cfg-decode", Input: hx(cfg), Description: "network above SDK uint16 maximum"})
+	for _, op := range []uint8{0, 1} {
+		input, err := EncodeKernelInput(op, cfg, CNull)
+		g.must(err)
+		g.add(Case{ID: fmt.Sprintf("network-65536-kernel-%d", op), Family: "config", Op: "kernel", Input: hx(input), Description: "overflow Cfg before payload decoding"})
+	}
+	// Independently exercise the mint wire decoder under a valid Cfg.
+	for _, network := range []uint64{0, 65536} {
+		h, err := g.d.F.BuildToken(7, big.NewInt(12345), []*secp256k1.PrivateKey{owner})
+		g.must(err)
+		// Preserve the tagged eight-field mint header and replace only its network.
+		prefix := append(CTag(TagMint, nil), 0x88, byte(TxVersion))
+		old := append(append([]byte{}, prefix...), CUint(uint64(c.Network))...)
+		next := append(append([]byte{}, prefix...), CUint(network)...)
+		mint := bytes.Replace(h.Mint.Bytes(), old, next, 1)
+		history := CArr(CArr(mint, h.MintCD.Bytes(), CUint(h.MintTime)), CArr())
+		input, err := EncodeKernelInput(1, c.Bytes(), history)
+		g.must(err)
+		g.add(Case{ID: fmt.Sprintf("network-%d-mint-wire", network), Family: "config", Op: "kernel", Input: hx(input), Description: "mint wire NetworkId range independent of valid Cfg"})
+	}
 }
 
 func (g *gen) config() {

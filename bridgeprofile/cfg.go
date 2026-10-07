@@ -80,6 +80,9 @@ func DecodeCfg(b []byte) (*Cfg, error) {
 	if err != nil {
 		return nil, err
 	}
+	if nw == 0 {
+		return nil, ErrIntRange
+	}
 	c.Network = uint16(nw)
 	if err := fixed(&k[2], c.RootGenesis[:]); err != nil {
 		return nil, err

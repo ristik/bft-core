@@ -81,6 +81,11 @@ func TestCorpusCoversTheDesign(t *testing.T) {
 	c, err := BuildCorpus()
 	require.NoError(t, err)
 	want := map[string]string{ // id -> reason ("" = ok)
+		"network-0-cfg": "ErrIntRange", "network-0-mint": "ErrIntRange", "network-0-prepare": "ErrIntRange",
+		"network-1-cfg": "", "network-1-mint": "", "network-1-prepare": "",
+		"network-65535-cfg": "", "network-65535-mint": "", "network-65535-prepare": "",
+		"network-65536-cfg": "ErrIntRange", "network-65536-kernel-0": "ErrIntRange", "network-65536-kernel-1": "ErrIntRange",
+		"network-0-mint-wire": "ErrIntRange", "network-65536-mint-wire": "ErrIntRange",
 		"deadline-null-valid": "", "deadline-explicit-before": "", "deadline-explicit-equal": "ErrDeadlineExpired",
 		"deadline-explicit-after": "ErrDeadlineExpired", "deadline-cd-differs": "ErrDeadlineMismatch",
 		"wire-cd-deadline-zero": "ErrDeadline", "wire-pre30-mint": "ErrShape", "wire-pre30-transfer": "ErrShape",
@@ -112,6 +117,16 @@ func TestCorpusCoversTheDesign(t *testing.T) {
 			require.Equal(t, "ok", e.Status, id)
 		} else {
 			require.Equal(t, reason, e.Reason, id)
+		}
+	}
+	for _, network := range []string{"1", "65535"} {
+		for _, op := range []string{"mint", "prepare"} {
+			id := "network-" + network + "-" + op
+			out, err := hex.DecodeString(got[id].Output)
+			require.NoError(t, err, id)
+			valid, _, err := DecodeResult(out)
+			require.NoError(t, err, id)
+			require.True(t, valid, id)
 		}
 	}
 	// A successful kernel output is 448+128*m bytes.

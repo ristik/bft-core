@@ -248,6 +248,9 @@ func decodeMint(it *item, _ []byte, m *MintTx) error {
 	if err != nil {
 		return err
 	}
+	if nw == 0 {
+		return ErrIntRange
+	}
 	m.Network = uint16(nw)
 	if m.Recipient, err = decodePredicate(&k[2]); err != nil {
 		return err
