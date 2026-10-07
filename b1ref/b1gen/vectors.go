@@ -5,54 +5,38 @@ import "crypto/sha256"
 // Build generates the whole manifest from a seed. It is a pure function of the
 // seed: same seed, same bytes.
 func Build(seed string) *Manifest {
-	g := &gen{m: &Manifest{Format: FormatVersion, Seed: seed, Pins: Pins, Notes: Notes, OpenItems: OpenItems}}
+	g := &gen{m: &Manifest{Format: FormatVersion, Seed: seed, Pins: Pins, Notes: Notes}}
 	g.certificates(seed)
 	g.structure(seed)
 	g.quorum(seed)
 	g.timeAdmission(seed)
 	g.encoding(seed)
 	g.resources(seed)
+	g.aprime(seed)
 	g.rsmt(seed)
 	g.m.Deferred = []Deferred{
-		{"Time/history", "change actualStart to EarliestActivation", "needs the transition-v4 history projection and layout-3 registry"},
-		{"Time/history", "omitted or reordered intermediate epoch", "needs the transition-v4 history projection and layout-3 registry"},
-		{"Time/history", "forged activationCommitID", "needs the transition-v4 history projection and layout-3 registry"},
-		{"State/path parity", "builder, follower, replay, eth_call, two nodes, reorg", "needs the Rust/EVM execution paths and the layout-3 registry"},
-		{"Gas/resources", "warm/cold/cache-enabled charge parity", "needs an EVM host with registry state reads"},
-	}
-	for i := range g.m.Vectors {
-		g.m.Vectors[i].Provisional = provisional[g.m.Vectors[i].ID]
+		{"State/path parity", "builder/follower/replay/RPC/trace/reorg and journal warmth", "requires PR1b authenticated admission and PR4 EVM integration"},
+		{"Gas/resources", "runtime/artifact pins and G_rest", "requires PR3 EVM runtime and bounded gas analysis"},
 	}
 	return g.m
-}
-
-// provisional maps a vector to the open item its expectation depends on.
-var provisional = map[string]string{
-	"view.key":          "O1",
-	"quorum.sig.r-zero": "O2", "quorum.sig.s-zero": "O2", "quorum.sig.r-n": "O2", "quorum.sig.high-s": "O2",
-	"quorum.sig.short": "O2", "quorum.sig.v2": "O2", "quorum.sig.v255": "O2",
-	"cert.shared.order": "O3", "cert.shared.order-shard": "O3", "cert.shared.duplicate": "O3", "view.order": "O3",
-	"quorum.dup-node-id": "O3", "quorum.dup-key": "O3",
-	"view.shape": "O4", "enc.cbor.depth-16": "O4",
-	"seal.sigs-null": "O5", "seal.sigs-empty": "O5",
-	"cert.shared.mixed-subsets.false": "O6", "cert.shared.sigcount-3-4.false": "O6", "cert.shared.sigcount-4-3.false": "O6",
-	"view.empty": "O7", "view.kind": "O7", "quorum.weight": "O7",
-	"cert.neg.epoch": "O8", "time.seal-epoch.after-origin": "O8",
 }
 
 type gen struct{ m *Manifest }
 
 // shape is what the gas formula needs of a well-formed call.
-type shape struct{ members, sigs, claims, steps int }
+type shape struct{ sigs, claims, steps int }
 
 func (s shape) gas(reqLen int) uint64 {
-	return 60000 + 16*uint64(reqLen) + 1000*uint64(s.members) + 6000*uint64(s.sigs) + 2000*uint64(s.claims) + 250*uint64(s.steps)
+	return 60000 + 16*uint64(reqLen) + 1000*64 + 1117700 + 6000*uint64(s.sigs) + 2000*uint64(s.claims) + 250*uint64(s.steps)
 }
 
-func shapeOf(v viewSpec, ucs ...ucSpec) shape {
-	s := shape{members: len(v.members), sigs: len(ucs[0].seal.sigs), claims: len(ucs)}
+func shapeOf(ucs ...ucSpec) shape {
+	s := shape{sigs: len(ucs[0].seal.sigs), claims: len(ucs)}
 	for _, u := range ucs {
 		s.steps += len(u.shardSibs) + len(u.steps)
+		if len(u.seal.sigs) > s.sigs {
+			s.sigs = len(u.seal.sigs)
+		}
 	}
 	return s
 }
@@ -101,10 +85,10 @@ func (g *gen) certificates(seed string) {
 	q := f.vals[:3] // threshold floor(8/3)+1 = 3
 	cs := f.build("a", f.round, q, false)
 	u := cs.get(1, "")
-	one := func(u ucSpec) []byte { return newRequest(f.view.cbor(), claimOf(u)).wire() }
+	one := func(u ucSpec) []byte { return newRequest(claimOf(u)).wire() }
 
 	seal := u.seal
-	g.ok("cert.single.ok", fam, opUC, "single shard, one seal, quorum 3 of 4", one(u), pre, shapeOf(f.view, u), "", &seal, inter(cs, u))
+	g.ok("cert.single.ok", fam, opUC, "single shard, one seal, quorum 3 of 4", one(u), pre, shapeOf(u), "", &seal, inter(cs, u))
 
 	var all []ucSpec
 	for _, k := range [][2]interface{}{{uint32(1), ""}, {uint32(2), "0"}, {uint32(2), "1"}, {uint32(3), ""}} {
@@ -117,32 +101,31 @@ func (g *gen) certificates(seed string) {
 		}
 		return c
 	}
-	g.ok("cert.shared.ok", fam, opShared, "four claims over three partitions and two shards, one common seal", newRequest(f.view.cbor(), claims(all)...).wire(), pre, shapeOf(f.view, all...), "", &seal, inter(cs, all[1]))
-	g.ok("cert.shared.single.ok", fam, opShared, "shared call with one claim", one(u), pre, shapeOf(f.view, u), "", &seal, nil)
-	g.ok("cert.uc.shard.ok", fam, opUC, "two-shard partition, shard 1", one(all[2]), pre, shapeOf(f.view, all[2]), "", &seal, inter(cs, all[2]))
+	g.ok("cert.shared.ok", fam, opShared, "four claims over three partitions and two shards, one common seal", newRequest(claims(all)...).wire(), pre, shapeOf(all...), "", &seal, inter(cs, all[1]))
+	g.ok("cert.shared.single.ok", fam, opShared, "shared call with one claim", one(u), pre, shapeOf(u), "", &seal, nil)
+	g.ok("cert.uc.shard.ok", fam, opUC, "two-shard partition, shard 1", one(all[2]), pre, shapeOf(all[2]), "", &seal, inter(cs, all[2]))
 
 	// repeated IR: the same IR certified again at a later root round.
 	rep := f.build("a", f.round+3, q, false).get(1, "")
-	g.ok("cert.repeat-ir.ok", fam, opUC, "repeat UC: identical input record under a later seal", one(rep), pre, shapeOf(f.view, rep), "", &rep.seal, nil)
+	g.ok("cert.repeat-ir.ok", fam, opUC, "repeat UC: identical input record under a later seal", one(rep), pre, shapeOf(rep), "", &rep.seal, nil)
 
 	// distinct valid quorum subsets of the same statement.
 	subA := f.build("a", f.round, f.vals[:3], false).get(1, "")
 	subB := f.build("a", f.round, f.vals[1:], false).get(1, "")
-	g.ok("cert.subset-a.ok", fam, opUC, "quorum subset {0,1,2}", one(subA), pre, shapeOf(f.view, subA), "", &subA.seal, nil)
-	g.ok("cert.subset-b.ok", fam, opUC, "quorum subset {1,2,3}", one(subB), pre, shapeOf(f.view, subB), "", &subB.seal, nil)
+	g.ok("cert.subset-a.ok", fam, opUC, "quorum subset {0,1,2}", one(subA), pre, shapeOf(subA), "", &subA.seal, nil)
+	g.ok("cert.subset-b.ok", fam, opUC, "quorum subset {1,2,3}", one(subB), pre, shapeOf(subB), "", &subB.seal, nil)
 	g.ok("cert.shared.mixed-subsets.false", fam, opShared, "shared call whose seals carry different quorum subsets",
-		newRequest(f.view.cbor(), claimOf(subA), claimOf(cs.get(2, "0")), claimOf(f.build("a", f.round, f.vals[1:], false).get(3, ""))).wire(), pre,
-		shapeOf(f.view, subA, cs.get(2, "0"), cs.get(3, "")), "ErrSealMismatch", nil, nil)
+		newRequest(claimOf(subA), claimOf(cs.get(2, "0")), claimOf(f.build("a", f.round, f.vals[1:], false).get(3, ""))).wire(), pre,
+		shapeOf(subA, cs.get(2, "0"), cs.get(3, "")), "ErrSealMismatch", nil, nil)
 
-	// unequal signature counts across the seals: the call is false either way, and the vectors pin the provisional
-	// gas count (S is the first claim's signature-map size, O6) in both orders.
+	// Unequal full seals fail with S=max signature count, in both orders.
 	full4 := f.build("a", f.round, f.vals, false)
 	few, many := claimOf(subA), claimOf(full4.get(3, ""))
-	g.ok("cert.shared.sigcount-3-4.false", fam, opShared, "seals with 3 then 4 signatures: S is the first claim's 3",
-		newRequest(f.view.cbor(), few, many).wire(), pre, shapeOf(f.view, subA, full4.get(3, "")), "ErrSealMismatch", nil, nil)
-	g.ok("cert.shared.sigcount-4-3.false", fam, opShared, "seals with 4 then 3 signatures: S is the first claim's 4",
-		newRequest(f.view.cbor(), claimOf(full4.get(1, "")), claimOf(f.build("a", f.round, f.vals[:3], false).get(3, ""))).wire(), pre,
-		shapeOf(f.view, full4.get(1, ""), f.build("a", f.round, f.vals[:3], false).get(3, "")), "ErrSealMismatch", nil, nil)
+	g.ok("cert.shared.sigcount-3-4.false", fam, opShared, "seals with 3 then 4 signatures: S is the maximum 4",
+		newRequest(few, many).wire(), pre, shapeOf(subA, full4.get(3, "")), "ErrSealMismatch", nil, nil)
+	g.ok("cert.shared.sigcount-4-3.false", fam, opShared, "seals with 4 then 3 signatures: S is the maximum 4",
+		newRequest(claimOf(full4.get(1, "")), claimOf(f.build("a", f.round, f.vals[:3], false).get(3, ""))).wire(), pre,
+		shapeOf(full4.get(1, ""), f.build("a", f.round, f.vals[:3], false).get(3, "")), "ErrSealMismatch", nil, nil)
 
 	// single perturbations.
 	reseal := func(mod func(*sealSpec)) ucSpec {
@@ -152,7 +135,7 @@ func (g *gen) certificates(seed string) {
 		return x
 	}
 	bad := func(id, desc, want string, x ucSpec, c claimSpec) {
-		g.ok(id, fam, opUC, desc, newRequest(f.view.cbor(), c).wire(), pre, shapeOf(f.view, x), want, nil, nil)
+		g.ok(id, fam, opUC, desc, newRequest(c).wire(), pre, shapeOf(x), want, nil, nil)
 	}
 	x := reseal(func(s *sealSpec) { s.network = 4 })
 	bad("cert.neg.network", "seal network changed and re-signed", "ErrNetwork", x, claimOf(x))
@@ -183,7 +166,7 @@ func (g *gen) certificates(seed string) {
 	x.seal.root = flip32(x.seal.root)
 	bad("cert.neg.root", "seal tree root flipped (unsigned)", "ErrTreeRoot", x, claimOf(x))
 	x = reseal(func(s *sealSpec) { s.epoch = 6 })
-	bad("cert.neg.epoch", "seal epoch changed and re-signed", "ErrSealEpoch", x, claimOf(x))
+	bad("cert.neg.epoch", "seal epoch changed and re-signed", "ErrUnknownEpoch", x, claimOf(x))
 	x = u
 	x.seal.timestamp++
 	bad("cert.neg.signed-byte", "one signed seal byte changed after signing", "ErrSigInvalid", x, claimOf(x))
@@ -193,7 +176,7 @@ func (g *gen) certificates(seed string) {
 	x.seal.sigs[0] = entry{u.seal.sigs[0].key, other.sign(u.seal.sigBytes(), false)}
 	bad("cert.neg.signer-key", "a signature made by a key other than the named member's", "ErrSigInvalid", x, claimOf(x))
 	rawReq, rawUC := rawConcatRequest(f, cs, q)
-	g.ok("cert.neg.raw-concat-fold", fam, opUC, "shard fold computed as raw SHA256(left||right) instead of CBOR operands", rawReq, pre, shapeOf(f.view, rawUC), "ErrTreeRoot", nil, nil)
+	g.ok("cert.neg.raw-concat-fold", fam, opUC, "shard fold computed as raw SHA256(left||right) instead of CBOR operands", rawReq, pre, shapeOf(rawUC), "ErrTreeRoot", nil, nil)
 }
 
 // rawConcatRequest builds a UC for shard 2/0 whose unicity tree was built from
@@ -218,5 +201,5 @@ func rawConcatRequest(f *fixture, cs *certSet, q []validator) ([]byte, ucSpec) {
 	u.seal.root = root.hash
 	u.steps = root.path(key)
 	u.seal.signWith(q, false)
-	return newRequest(f.view.cbor(), claimOf(u)).wire(), u
+	return newRequest(claimOf(u)).wire(), u
 }

@@ -88,38 +88,28 @@ func pad32(x *big.Int) []byte {
 	return append(make([]byte, 32-len(b)), b...)
 }
 
-// ---- trust view -----------------------------------------------------------
+// ---- registry authority -----------------------------------------------------------
 
-type viewMember struct {
+type authorityMember struct {
 	id     string
 	pub    []byte
 	weight uint64
 }
 
-type viewSpec struct {
+type authoritySpec struct {
 	network    uint16
 	epoch      uint64
 	sourceKind uint64
 	bodyID     [32]byte
-	members    []viewMember // wire order
+	members    []authorityMember // wire order
 }
 
-func (v viewSpec) cbor() []byte {
-	ms := make([][]byte, len(v.members))
-	for i, m := range v.members {
-		ms[i] = cArr(cText(m.id), cBytes(m.pub), cUint(m.weight))
-	}
-	return cArr(cUint(1), cUint(uint64(v.network)), cUint(v.epoch), cUint(v.sourceKind), cBytes(v.bodyID[:]), cArr(ms...))
-}
-
-func (v viewSpec) hash() [32]byte { return sha256.Sum256(v.cbor()) }
-
-func viewOf(network uint16, epoch uint64, kind uint64, body [32]byte, vals []validator) viewSpec {
+func authorityOf(network uint16, epoch uint64, kind uint64, body [32]byte, vals []validator) authoritySpec {
 	sorted := append([]validator{}, vals...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].id < sorted[j].id })
-	v := viewSpec{network: network, epoch: epoch, sourceKind: kind, bodyID: body}
+	v := authoritySpec{network: network, epoch: epoch, sourceKind: kind, bodyID: body}
 	for _, x := range sorted {
-		v.members = append(v.members, viewMember{id: x.id, pub: x.pub, weight: 1})
+		v.members = append(v.members, authorityMember{id: x.id, pub: x.pub, weight: 1})
 	}
 	return v
 }
@@ -373,8 +363,6 @@ func claimOf(u ucSpec) claimSpec {
 type requestSpec struct {
 	version, flags byte
 	count          *uint16 // nil = len(claims)
-	view           []byte
-	viewLen        *uint32
 	claims         []claimSpec
 	trailing       []byte
 }
@@ -384,21 +372,15 @@ func (r requestSpec) wire() []byte {
 	if r.count != nil {
 		n = *r.count
 	}
-	vl := uint32(len(r.view))
-	if r.viewLen != nil {
-		vl = *r.viewLen
-	}
-	h := []byte{r.version, r.flags, byte(n >> 8), byte(n), 0, 0, 0, 0}
-	binary.BigEndian.PutUint32(h[4:], vl)
-	out := cat(h, r.view)
+	out := []byte{r.version, r.flags, byte(n >> 8), byte(n)}
 	for _, c := range r.claims {
 		out = append(out, c.wire()...)
 	}
 	return append(out, r.trailing...)
 }
 
-func newRequest(view []byte, claims ...claimSpec) requestSpec {
-	return requestSpec{version: 1, view: view, claims: claims}
+func newRequest(claims ...claimSpec) requestSpec {
+	return requestSpec{version: 1, claims: claims}
 }
 
 func hex32(b [32]byte) string { return fmt.Sprintf("%x", b[:]) }

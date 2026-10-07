@@ -113,7 +113,7 @@ func TestScanClaimedLengthsDoNotAllocate(t *testing.T) {
 }
 
 func TestUCGasMaximum(t *testing.T) {
-	if g := UCGas(MaxCallBytes, MaxMembers, MaxSigsPerSeal, MaxClaims, MaxClaims*(MaxShardSiblings+MaxUnicitySteps)); g != 5_294_304 {
+	if g := UCGas(MaxCallBytes, MaxSigsPerSeal, MaxClaims, MaxClaims*(MaxShardSiblings+MaxUnicitySteps)); g != 6_412_004 {
 		t.Fatalf("%d", g)
 	}
 	if MaxRSMTInputBytes != 12392 {

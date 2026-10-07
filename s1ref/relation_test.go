@@ -5,7 +5,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/unicitynetwork/bft-core/b1ref"
 	"github.com/unicitynetwork/bft-core/s1ref"
 )
 
@@ -49,20 +48,15 @@ func TestOutputLayout(t *testing.T) {
 	}
 }
 
-// TestClassificationDiffersFromB1 documents the classifications S1 follows
-// from B1 v2 where the merged provisional b1ref oracle chose differently.
-func TestClassificationDiffersFromB1(t *testing.T) {
+// TestClassification pins S1 caller classifications. A′ B1 no longer accepts
+// a caller authority view; its authority defects fail admission instead.
+func TestClassification(t *testing.T) {
 	for name, e := range map[string]error{
 		"unsorted view": s1ref.ErrViewOrder, "invalid point": s1ref.ErrViewKey, "empty view": s1ref.ErrViewEmpty,
 		"duplicate": s1ref.ErrViewDuplicate, "weight": s1ref.ErrWeightProfile,
 	} {
 		if !errors.Is(e, s1ref.ErrInvalid) || errors.Is(e, s1ref.ErrMalformed) {
 			t.Errorf("%s must be false in S1", name)
-		}
-	}
-	for name, e := range map[string]error{"unsorted view": b1ref.ErrViewOrder, "invalid point": b1ref.ErrViewKey, "empty view": b1ref.ErrViewEmpty} {
-		if !errors.Is(e, b1ref.ErrMalformed) {
-			t.Errorf("b1ref %s is no longer provisional-malformed: revisit the S1 classification note", name)
 		}
 	}
 	for name, e := range map[string]error{"bad signature length": s1ref.ErrSigShape, "bad scheme": s1ref.ErrScheme, "bad kind": s1ref.ErrViewKind} {

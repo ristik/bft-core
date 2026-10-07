@@ -1,10 +1,9 @@
 package b1ref
 
-// Hard admission limits of profile 1 (design section 4).
+// Hard limits from the A′ design.
 const (
 	MaxCallBytes      = 262144
 	MaxUCBytes        = 24576
-	MaxViewBytes      = 16384
 	MaxClaims         = 8
 	MaxMembers        = 64
 	MaxSigsPerSeal    = 64
@@ -35,10 +34,10 @@ const (
 	gasPerPathStep = 250
 )
 
-// UCGas is the charge of UC_V1/SHARED_SEAL_V1: 60000 + 16*B + 1000*M + 6000*S + 2000*N + 250*P.
-// All operands are bounded, so the sum cannot overflow uint64.
-func UCGas(b, m, s, n, p uint64) uint64 {
-	return ucBaseGas + gasPerByte*b + gasPerMember*m + gasPerSig*s + gasPerClaim*n + gasPerPathStep*p
+// UCGas is the charge of UC_V1/SHARED_SEAL_V1: 60000 + 16*B + 64000 + 6000*S + 2000*N + 250*P + 1117700.
+// Operands are pre-scanned and bounded by the caller profile.
+func UCGas(b, s, n, p uint64) uint64 {
+	return ucBaseGas + gasPerByte*b + gasPerMember*MaxMembers + gasPerSig*s + gasPerClaim*n + gasPerPathStep*p + 1117700
 }
 
 // RSMTGas is the charge of RSMT_MEMBER_V1: 2000 + 16*B + 250*(1+popcount(bitmap)).

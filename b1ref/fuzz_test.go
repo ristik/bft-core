@@ -55,9 +55,9 @@ func FuzzCertCall(f *testing.F) {
 	reg := registry(f, pre)
 	f.Fuzz(func(t *testing.T, in []byte) {
 		v, err := b1ref.UC(in, reg)
-		checkVerdict(t, v, err, in, 5_294_304, b1ref.MaxCallBytes)
+		checkVerdict(t, v, err, in, 6_412_004, b1ref.MaxCallBytes)
 		v, err = b1ref.Shared(in, reg)
-		checkVerdict(t, v, err, in, 5_294_304, b1ref.MaxCallBytes)
+		checkVerdict(t, v, err, in, 6_412_004, b1ref.MaxCallBytes)
 	})
 }
 
