@@ -71,3 +71,49 @@ func activatingProof(env q3format.Envelope) (handoff.OldCommitProof, error) {
 	}
 	return p, nil
 }
+
+// BundleFor assembles the staged bundle of the activation a validator holds the evidence of (consensus.Q3ActivationEvidence): the link, the
+// committed checkpoint and the candidate preimage. The history derives the link's claim and verifies the old committee's commit proof under
+// its own epoch's keys, weights and scheme; the lineage of earlier activations is the journal's own retained envelope, so the envelope the
+// bundle carries rebuilds the whole history from the pinned genesis. An activation the history already holds is returned as the journal
+// staged it. Nothing the caller passes is trusted: a link the history does not authenticate is an error.
+func (r *Runtime) BundleFor(l q3format.Link, head *abdrc.CommittedBlock, candidate []byte) (Bundle, error) {
+	staged, err := r.journal.Staged()
+	if err != nil {
+		return Bundle{}, err
+	}
+	var lineage []q3format.Link
+	for _, a := range staged {
+		b, env, err := DecodeBundle(a.Bundle)
+		if err != nil {
+			return Bundle{}, err
+		}
+		if a.Claim.Epoch == l.Body.Epoch {
+			return b, nil // already staged: serve exactly what the journal holds
+		}
+		lineage = env.Links
+	}
+	h := r.History()
+	if _, err := h.ForEpoch(l.Body.Epoch); err == nil {
+		return Bundle{}, fmt.Errorf("%w: epoch %d is in the history but was never staged here", ErrBundle, l.Body.Epoch)
+	}
+	next, err := h.WithV3(l)
+	if err != nil {
+		return Bundle{}, err
+	}
+	l.Claim = next.Tip().Claim()
+	p, err := activatingProof(q3format.Envelope{Links: []q3format.Link{l}})
+	if err != nil {
+		return Bundle{}, err
+	}
+	env := q3format.Envelope{RootInput: p.Record.Bytes(), TargetParent: bytes.Clone(l.Evidence.FrozenParent),
+		Links: append(append([]q3format.Link(nil), lineage...), l)}
+	raw, err := env.Encode()
+	if err != nil {
+		return Bundle{}, err
+	}
+	if _, err := h.VerifyEnvelope(env); err != nil {
+		return Bundle{}, err
+	}
+	return Bundle{Envelope: raw, Snapshot: head, Candidate: bytes.Clone(candidate)}, nil
+}
