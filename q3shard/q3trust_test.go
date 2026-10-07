@@ -8,6 +8,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3process"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
+	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/shardnode"
 )
@@ -26,7 +27,7 @@ func TestQ3TrustStoreServesAV3EpochOnlyOnceTheJournalCompletedItAndFollowsTheHis
 	require.NoError(t, err, "the pinned genesis epoch")
 	require.EqualValues(t, 1, tb.Epoch)
 	_, err = s.GetByEpoch(ctx, epoch)
-	require.Error(t, err, "an epoch the verified history does not hold is refused")
+	require.ErrorIs(t, err, q3format.ErrUnknownEpoch, "an epoch the verified history does not hold is refused")
 	require.False(t, s.IsV2Epoch(epoch))
 	current, ok := s.CurrentRootEpoch()
 	require.True(t, ok)
@@ -81,7 +82,7 @@ func TestTheInstallVerifiesFromTheHistoryBeforeTheJournalAdmitsTheEpoch(t *testi
 	require.NoError(t, rt.Recover(ctx))
 	require.NoError(t, rt.Activate(ctx, p.Bundle()))
 	require.NoError(t, during, "the install reads the verified history")
-	require.Error(t, served, "but the node does not serve an epoch the journal has not completed")
+	require.ErrorIs(t, served, q3active.ErrNotActive, "but the node does not serve an epoch the journal has not completed")
 	got, err := s.GetByEpoch(ctx, epoch)
 	require.NoError(t, err, "served once complete")
 	require.EqualValues(t, epoch, got.Epoch)
@@ -90,5 +91,5 @@ func TestTheInstallVerifiesFromTheHistoryBeforeTheJournalAdmitsTheEpoch(t *testi
 	require.NoError(t, err)
 	require.EqualValues(t, 1, genesis.Epoch)
 	_, err = s.Verified().GetByEpoch(ctx, epoch+1)
-	require.Error(t, err, "an epoch the history does not hold")
+	require.ErrorIs(t, err, q3format.ErrUnknownEpoch, "an epoch the history does not hold")
 }

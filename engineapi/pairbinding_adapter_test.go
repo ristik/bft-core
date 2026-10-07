@@ -231,3 +231,99 @@ func TestAdapterPresentsItsOwnBindingForRecoveryAdmission(t *testing.T) {
 	require.ErrorIs(t, a.AdmitRecoveredHead(context.Background(), want, parent, 0, head), ErrPairBinding)
 	require.Nil(t, presented)
 }
+
+// The node's restart admission: the head's authorizing certificate retained with the companion is authenticated again, the root input is
+// derived from it, and the client's retained root input must be that derivation. Only then is the binding presented.
+func TestRestartAdmissionPresentsTheNodesOwnDerivationOfTheHead(t *testing.T) {
+	verifier, params, want := bootstrapAdapterFixture(t)
+	cfg := pairTestConfig(verifier.GenesisOrigin.BlockHash())
+	genesis := verifier.GenesisOrigin.BlockHash()
+	head := hexw(word(0x11))
+	witnesses, err := encodeSealCompanionWitnesses(params.AuthorizingCertificate, params.AuthorizingTechnicalRecord)
+	require.NoError(t, err)
+	hexed := make([]string, len(witnesses))
+	for i, w := range witnesses {
+		hexed[i] = "0x" + hexString(w)
+	}
+
+	setup := func(mutate func(rootInput *[]byte, witnesses *[]string, number *string)) (*Adapter, func(), *json.RawMessage, *int) {
+		eth, engine := newMockReth(t, Secret{}), newMockReth(t, Secret{})
+		rootInput, ws, number := append([]byte(nil), want.Encoded...), append([]string(nil), hexed...), "0x1"
+		if mutate != nil {
+			mutate(&rootInput, &ws, &number)
+		}
+		eth.on("eth_getBlockByNumber", func(json.RawMessage) (any, *rpcError) {
+			return map[string]any{"number": number, "hash": head, "parentHash": hexw([32]byte(genesis)), "stateRoot": hexw(word(0x55))}, nil
+		})
+		eth.on("eth_getBlockByHash", func(json.RawMessage) (any, *rpcError) {
+			return map[string]any{"number": "0x0", "hash": hexw([32]byte(genesis)), "parentHash": hexw(word(0)), "stateRoot": hexw([32]byte(verifier.GenesisOrigin.StateRoot()))}, nil
+		})
+		eth.on("unicity_getSealCompanionV1", func(json.RawMessage) (any, *rpcError) {
+			return map[string]any{"status": "found", "companion": map[string]any{"rootInput": "0x" + hexString(rootInput), "pairBinding": "0x00", "witnesses": ws, "provenance": "build"}}, nil
+		})
+		engine.on("engine_sealConfigV1", pairSealConfigHandler(3, cfg.Pins.RootGenesisID))
+		var presented json.RawMessage
+		calls := 0
+		engine.on("engine_admitParentV1", func(r json.RawMessage) (any, *rpcError) {
+			calls++
+			var args []json.RawMessage
+			require.NoError(t, json.Unmarshal(r, &args))
+			presented = args[0]
+			return nil, nil
+		})
+		a, closeFn := newTestAdapterWithVerifier(t, engine, eth, verifier)
+		a.pair = cfg
+		return a, closeFn, &presented, &calls
+	}
+
+	a, closeFn, presented, calls := setup(nil)
+	defer closeFn()
+	require.NoError(t, a.AdmitHead(context.Background()))
+	require.Equal(t, 1, *calls)
+	var raw data
+	require.NoError(t, json.Unmarshal(*presented, &raw))
+	b, err := DecodePairBinding(raw)
+	require.NoError(t, err)
+	require.Equal(t, PairImport, b.Kind)
+	require.Equal(t, word(0x11), b.SubjectID, "the head block")
+	require.Equal(t, [32]byte(genesis), b.ParentHash)
+	require.EqualValues(t, 0, b.ParentNumber)
+	require.Equal(t, [32]byte(want.Commitment), b.RootInputHash, "the node's own derivation, not a hash the client reported")
+
+	refused := func(name string, cause error, mutate func(*[]byte, *[]string, *string)) {
+		t.Helper()
+		a, closeFn, _, calls := setup(mutate)
+		defer closeFn()
+		err := a.AdmitHead(context.Background())
+		require.ErrorIs(t, err, cause, name)
+		require.Zero(t, *calls, "%s: nothing is presented", name)
+	}
+	refused("a retained root input that is not the derivation", ErrAdmissionInput, func(ri *[]byte, _ *[]string, _ *string) { (*ri)[len(*ri)-1] ^= 1 })
+	refused("witnesses that are not [certificate, technical record]", ErrCompanionWitnesses, func(_ *[]byte, ws *[]string, _ *string) { *ws = (*ws)[:1] })
+
+	// a client with nothing beyond genesis has nothing to admit
+	a, closeFn2, _, calls := setup(func(_ *[]byte, _ *[]string, number *string) { *number = "0x0" })
+	defer closeFn2()
+	require.NoError(t, a.AdmitHead(context.Background()))
+	require.Zero(t, *calls)
+
+	// the node has no pair binding configured, or no verifier: it re-derives nothing
+	a.pair = nil
+	require.ErrorIs(t, a.AdmitHead(context.Background()), ErrPairBinding)
+	a.pair = cfg
+	a.verifier = nil
+	require.Error(t, a.AdmitHead(context.Background()))
+}
+
+func word(b byte) [32]byte { return [32]byte{0: b, 31: b} }
+
+func hexw(b [32]byte) string { return "0x" + hexString(b[:]) }
+
+func hexString(b []byte) string {
+	const digits = "0123456789abcdef"
+	out := make([]byte, 0, len(b)*2)
+	for _, c := range b {
+		out = append(out, digits[c>>4], digits[c&15])
+	}
+	return string(out)
+}

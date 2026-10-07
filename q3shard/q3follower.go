@@ -74,9 +74,12 @@ func (f *Q3Follower) activate(ctx context.Context, epoch uint64) error {
 
 // CatchUp activates every epoch after the current one up to target, each from the first root that serves one the runtime accepts, and fails
 // as soon as one cannot be had. It is the restore path: a node with an empty disk rebuilds the whole history from the pinned genesis.
+// ErrQ3FollowerConfig is returned when a follower is run without its runtime, its fetch or its anchor epoch.
+var ErrQ3FollowerConfig = errors.New("q3 follower: incomplete configuration")
+
 func (f *Q3Follower) CatchUp(ctx context.Context, target uint64) error {
 	if f == nil || f.Runtime == nil || f.Fetch == nil || f.AnchorEpoch == 0 {
-		return errors.New("q3 follower: incomplete configuration")
+		return ErrQ3FollowerConfig
 	}
 	for epoch := f.current() + 1; epoch <= target; epoch++ {
 		if err := f.activate(ctx, epoch); err != nil {
@@ -90,7 +93,7 @@ func (f *Q3Follower) CatchUp(ctx context.Context, target uint64) error {
 // waits and asks again. It returns nil on cancellation.
 func (f *Q3Follower) Run(ctx context.Context) error {
 	if f == nil || f.Runtime == nil || f.Fetch == nil || f.AnchorEpoch == 0 {
-		return errors.New("q3 follower: incomplete configuration")
+		return ErrQ3FollowerConfig
 	}
 	pause := f.Retry
 	if pause == 0 {

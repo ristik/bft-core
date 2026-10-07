@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 
+	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3format"
+	"github.com/unicitynetwork/bft-core/registrygenesis"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/shardnode"
@@ -29,6 +33,57 @@ type shardEpochTrust interface {
 
 // ErrQ3ShardEpoch is returned by the shard's V3 root sink for an activation it cannot install or that is not installed.
 var ErrQ3ShardEpoch = errors.New("shard node: V3 activation is not installed")
+
+// ErrQ3Candidate is returned when the candidate delivered with an activation is not the one the activated body binds, or is not a coupled
+// assignment of that body's own committee.
+var ErrQ3Candidate = errors.New("shard node: the delivered candidate is not the one the activated V3 body binds")
+
+// authenticateQ3Candidate checks the delivered candidate preimage against the verified entry before anything is installed from it: its digest
+// is the one the body's change record binds (for this network, predecessor, attempt and earliest activation), it is the candidate of THIS
+// handoff, its coupled assignment is valid, and its root members are exactly the body's committee, entity for entity and weight for weight.
+// An absent preimage must be the operator candidate the body's own members derive (a root-only change), so a candidate cannot be dropped.
+func authenticateQ3Candidate(entry q3format.Entry, r evmroot.OrderedHandoffRecord, candidate []byte) error {
+	body, err := q3format.DecodeBody(entry.BodyEncoding())
+	if err != nil {
+		return errors.Join(ErrQ3Candidate, err)
+	}
+	var digest [32]byte
+	if len(candidate) != 0 {
+		digest = sha256.Sum256(candidate)
+	} else if digest, err = evmroot.D4OperatorCandidateDigest(body.Members); err != nil {
+		return errors.Join(ErrQ3Candidate, err)
+	}
+	if !bytes.Equal(body.ChangeRecordHash, evmroot.D4CandidateContextHash(r.Network, r.PredecessorBodyID, r.Attempt, digest[:], body.EarliestActivation)) {
+		return fmt.Errorf("%w: its digest is not the body's change record", ErrQ3Candidate)
+	}
+	if len(candidate) == 0 {
+		return nil
+	}
+	c, err := evmassign.DecodeCandidate(candidate)
+	if err != nil {
+		return errors.Join(ErrQ3Candidate, err)
+	}
+	if c.Network != r.Network || !bytes.Equal(c.Predecessor, r.PredecessorBodyID) || c.Attempt != r.Attempt {
+		return fmt.Errorf("%w: it is the candidate of another handoff", ErrQ3Candidate)
+	}
+	if _, err := c.Successor(); err != nil { // the assignment's own validity, proofs of possession and coupling
+		return errors.Join(ErrQ3Candidate, err)
+	}
+	if len(c.RootMembers) != len(body.Members) {
+		return fmt.Errorf("%w: %d root members for a committee of %d", ErrQ3Candidate, len(c.RootMembers), len(body.Members))
+	}
+	committee := make(map[string]evmroot.Member, len(body.Members))
+	for _, m := range body.Members {
+		committee[m.NodeID] = m
+	}
+	for _, m := range c.RootMembers {
+		b, ok := committee[m.NodeID]
+		if !ok || b.Weight != m.Weight || !bytes.Equal(b.ConsensusKey, m.Key) {
+			return fmt.Errorf("%w: root member %q is not the body's", ErrQ3Candidate, m.NodeID)
+		}
+	}
+	return nil
+}
 
 // shardQ3Sink is the shard node's root participant of the install journal: the shard node has no consensus manager, so "installing a root
 // epoch" is installing everything the shard needs from it (the shard configuration of the activated assignment, the execution transition,
@@ -156,6 +211,9 @@ func (i *shardQ3Installer) Apply(ctx context.Context, entry q3format.Entry, proo
 	if err != nil {
 		return err
 	}
+	if err := authenticateQ3Candidate(entry, proof.Record, candidate); err != nil {
+		return err
+	}
 	nextConf, err := q3NextConf(activeConf, proof, candidate)
 	if err != nil {
 		return err
@@ -203,4 +261,58 @@ func (i *shardQ3Installer) Apply(ctx context.Context, entry q3format.Entry, proo
 		i.Log(newEpoch)
 	}
 	return nil
+}
+
+// ErrQ3Pair is returned when a lane shard node cannot bind its execution client to the pair: the Q3 runtime needs the engine-api executor and
+// the checked genesis origin the binding is anchored in.
+var ErrQ3Pair = errors.New("shard node: --q3-lane needs the engine-api executor and a checked genesis origin for the pair binding")
+
+// headAdmitter is the node's restart admission of its execution client's head (engineapi.Adapter.AdmitHead).
+type headAdmitter interface {
+	AdmitHead(ctx context.Context) error
+}
+
+// admitRestartedHead has the node re-authenticate its execution client's canonical head from its own verified trust before anything is built
+// or imported on it. A client whose head cannot be admitted resolves no cached accounting, so a node that proceeded would only answer
+// SYNCING to every round: it refuses to start instead, with the cause.
+func admitRestartedHead(ctx context.Context, a headAdmitter) error {
+	if err := a.AdmitHead(ctx); err != nil {
+		return fmt.Errorf("restart admission of the execution client's head: %w", err)
+	}
+	return nil
+}
+
+// q3PairConfig is the paired-execution binding configuration of a lane shard node: the network and root genesis its execution client is
+// pinned to (the history's own), the execution genesis it was configured with, and the verified activation of a root epoch for an input
+// that carries no transition.
+func q3PairConfig(rt *q3active.Runtime, network uint64, executionGenesis [32]byte) *engineapi.PairConfig {
+	return &engineapi.PairConfig{
+		Pins:             engineapi.PairPins{NetworkID: network, RootGenesisID: rt.History().Genesis()},
+		ExecutionGenesis: executionGenesis,
+		ActivationID: func(epoch uint64) ([32]byte, bool) {
+			e, ok := rt.Activated(epoch)
+			if !ok {
+				return [32]byte{}, false
+			}
+			return e.ActivationCommitID(), true
+		},
+	}
+}
+
+// pairEnabler is what a lane shard node's executor must offer to carry the pair binding.
+type pairEnabler interface {
+	EnablePair(*engineapi.PairConfig)
+	PairEnabled() bool
+	headAdmitter
+}
+
+// wireQ3Pair turns the pair binding on in the node's executor, from the node's own verified runtime, and returns the executor's restart
+// admission. Without it every build and import would leave the execution client without the binding it requires.
+func wireQ3Pair(executor any, rt *q3active.Runtime, network uint64, origin registrygenesis.GenesisOrigin) (headAdmitter, error) {
+	adapter, ok := executor.(pairEnabler)
+	if !ok || !origin.Valid() {
+		return nil, ErrQ3Pair
+	}
+	adapter.EnablePair(q3PairConfig(rt, network, [32]byte(origin.BlockHash())))
+	return adapter, nil
 }

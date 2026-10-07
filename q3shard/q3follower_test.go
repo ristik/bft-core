@@ -123,6 +123,6 @@ func TestQ3FollowerRunWaitsForTheNextBundleAndStopsOnCancel(t *testing.T) {
 	cancel()
 	require.NoError(t, <-done)
 
-	require.Error(t, (*Q3Follower)(nil).CatchUp(context.Background(), 2))
-	require.Error(t, (&Q3Follower{Runtime: act}).Run(context.Background()))
+	require.ErrorIs(t, (*Q3Follower)(nil).CatchUp(context.Background(), 2), ErrQ3FollowerConfig)
+	require.ErrorIs(t, (&Q3Follower{Runtime: act}).Run(context.Background()), ErrQ3FollowerConfig)
 }

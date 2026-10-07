@@ -96,3 +96,36 @@ func mustEncode(t *testing.T, b q3active.Bundle) []byte {
 	require.NoError(t, err)
 	return raw
 }
+
+// A completed activation is served from the journal alone: after the roots have moved on there is no live evidence to assemble it from,
+// and a restarted process serves it too.
+func TestAStagedActivationIsServedFromTheJournalWithoutLiveEvidence(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{})
+	p := q3process.New(t, f)
+	rt := p.Start()
+
+	_, ok, err := rt.StagedBundle(f.Claim.Epoch)
+	require.NoError(t, err)
+	require.False(t, ok, "nothing is staged before the activation")
+
+	link, candidate := evidenceOf(f)
+	b, err := rt.BundleFor(link, f.Snapshot, candidate)
+	require.NoError(t, err)
+	require.NoError(t, rt.Recover(context.Background()))
+	require.NoError(t, rt.Activate(context.Background(), b))
+
+	got, ok, err := rt.StagedBundle(f.Claim.Epoch)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, mustEncode(t, b), mustEncode(t, got))
+
+	_, ok, err = rt.StagedBundle(f.Claim.Epoch + 1)
+	require.NoError(t, err)
+	require.False(t, ok, "another epoch is not served")
+
+	restarted := p.Start()
+	got, ok, err = restarted.StagedBundle(f.Claim.Epoch)
+	require.NoError(t, err)
+	require.True(t, ok, "the journal survives the restart")
+	require.Equal(t, mustEncode(t, b), mustEncode(t, got))
+}

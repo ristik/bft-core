@@ -206,3 +206,45 @@ func TestV3FreezeBuiltByTheLeaderIsAcceptedByTheCommitteesAuthority(t *testing.T
 }
 
 var _ = abdrc.HandoffApprovalMsg{}
+
+// The receipts are signed over the exact body the members were shown. Its earliest activation and change record depend on the committed round it
+// was derived at, so planning after the ordinary round moved must reuse that body, not rebuild one the receipts do not verify for.
+func TestV3PlanKeepsTheBodyTheMembersSignedAfterTheCommittedRoundMoves(t *testing.T) {
+	f := newPlanFixtureOpts(t, true)
+	next := f.weightedNext()
+	state := certifiedParentState(t, f)
+	cand, err := f.cm.v3CandidateFromState(&next, state, nil)
+	require.NoError(t, err)
+	receipts := f.receiptsFor(t, cand)
+	f.cm.v3Planned.Store(&cand)
+
+	later := *state
+	head := *state.CommittedHead
+	block := *head.Block
+	block.Round += 3
+	head.Block = &block
+	later.CommittedHead = &head
+	moved, err := f.cm.v3CandidateFromState(&next, &later, nil)
+	require.NoError(t, err)
+	require.Equal(t, cand.Candidate, moved.Candidate, "the digest does not see the round")
+	require.NotEqual(t, cand.Body.Identity(), moved.Body.Identity(), "the rebuilt body does: this is what the receipts must not be checked against")
+
+	plan, err := f.cm.buildHandoffPlanV3FromState(&next, &later, nil, receipts)
+	require.NoError(t, err)
+	require.Equal(t, cand.Body.Encode(), []byte(plan.Body), "the plan carries the body the members signed")
+	require.Equal(t, cand.ActivationRound, plan.ActivationRound)
+	_, _, err = f.cm.checkPlanBody(&plan)
+	require.NoError(t, err)
+
+	// without the derived candidate the rebuild is refused, with the receipt sentinel
+	f.cm.v3Planned.Store(nil)
+	_, err = f.cm.buildHandoffPlanV3FromState(&next, &later, nil, receipts)
+	require.ErrorIs(t, err, q3format.ErrReceiptSignature)
+
+	// a candidate derived for another attempt is superseded, with its own sentinel
+	stale := cand
+	stale.Attempt = cand.Attempt + 1
+	f.cm.v3Planned.Store(&stale)
+	_, err = f.cm.buildHandoffPlanV3FromState(&next, &later, nil, receipts)
+	require.ErrorIs(t, err, ErrV3CandidateSuperseded)
+}

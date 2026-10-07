@@ -72,6 +72,24 @@ func activatingProof(env q3format.Envelope) (handoff.OldCommitProof, error) {
 	return p, nil
 }
 
+// StagedBundle is the bundle of an activation exactly as the journal staged it, for a node that has already installed (or begun to install)
+// that epoch: it needs no live evidence from the committed tree, which no longer holds the old tip once the roots have moved on. ok is false
+// when the journal holds no activation of the epoch.
+func (r *Runtime) StagedBundle(epoch uint64) (b Bundle, ok bool, err error) {
+	staged, err := r.journal.Staged()
+	if err != nil {
+		return Bundle{}, false, err
+	}
+	for _, a := range staged {
+		if a.Claim.Epoch != epoch {
+			continue
+		}
+		b, _, err := DecodeBundle(a.Bundle)
+		return b, err == nil, err
+	}
+	return Bundle{}, false, nil
+}
+
 // BundleFor assembles the staged bundle of the activation a validator holds the evidence of (consensus.Q3ActivationEvidence): the link, the
 // committed checkpoint and the candidate preimage. The history derives the link's claim and verifies the old committee's commit proof under
 // its own epoch's keys, weights and scheme; the lineage of earlier activations is the journal's own retained envelope, so the envelope the

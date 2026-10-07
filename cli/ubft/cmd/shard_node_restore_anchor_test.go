@@ -108,3 +108,44 @@ func TestShardNodeRunChecksTheRestoreAnchorBeforeAnyConstructionOrWrite(t *testi
 		require.Less(t, first["requireRestoreTrustAnchor"], first[later], "before %s", later)
 	}
 }
+
+// The lane node binds its executor to the pair from its verified runtime before anything is built on it, and re-authenticates the execution
+// client's head after the restart replay and before the node serves a round. A helper test cannot see either call being dropped or moved.
+func TestShardNodeRunWiresThePairAndAdmitsTheRestartedHeadInOrder(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "shard_node_run.go", nil, 0)
+	require.NoError(t, err)
+	var run *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "shardNodeRun" {
+			run = fn
+		}
+	}
+	require.NotNil(t, run)
+	first := map[string]token.Pos{}
+	ast.Inspect(run.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		var name string
+		switch fun := call.Fun.(type) {
+		case *ast.Ident:
+			name = fun.Name
+		case *ast.SelectorExpr:
+			if id, ok := fun.X.(*ast.Ident); ok {
+				name = id.Name + "." + fun.Sel.Name
+			}
+		}
+		if _, seen := first[name]; !seen {
+			first[name] = call.Pos()
+		}
+		return true
+	})
+	for _, name := range []string{"wireQ3Pair", "q3active.New", "q3shard.NewQ3TrustStore", "runProfile2JournalStartup", "admitRestartedHead"} {
+		require.Contains(t, first, name)
+	}
+	require.Less(t, first["q3active.New"], first["wireQ3Pair"], "the pair is configured from the node's own runtime")
+	require.Less(t, first["wireQ3Pair"], first["q3shard.NewQ3TrustStore"])
+	require.Less(t, first["runProfile2JournalStartup"], first["admitRestartedHead"], "after the restart replay")
+}

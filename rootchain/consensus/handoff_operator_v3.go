@@ -128,8 +128,17 @@ func (x *ConsensusManager) PlanV3Candidate(next *types.RootTrustBaseV1, proposal
 	if err != nil {
 		return V3Candidate{}, ErrHandoffApproval
 	}
-	return x.v3CandidateFromState(next, state, proposal)
+	c, err := x.v3CandidateFromState(next, state, proposal)
+	if err != nil {
+		return V3Candidate{}, err
+	}
+	x.v3Planned.Store(&c)
+	return c, nil
 }
+
+// ErrV3CandidateSuperseded is returned when the candidate the members signed readiness for is not the one this validator would derive any
+// more: the attempt it was derived for is over.
+var ErrV3CandidateSuperseded = errors.New("consensus: the V3 candidate was derived for another attempt")
 
 // PlanHandoffV3 builds the plan of a coupled V3 handoff from the candidate PlanV3Candidate derived and the readiness receipts of every
 // successor member, and registers it as this validator's intent exactly as PlanHandoff does. The receipts are checked against the body and
@@ -154,6 +163,15 @@ func (x *ConsensusManager) buildHandoffPlanV3FromState(next *types.RootTrustBase
 	c, err := x.v3CandidateFromState(next, state, proposal)
 	if err != nil {
 		return abdrc.HandoffApprovalMsg{}, err
+	}
+	// The receipts are bound to the exact body the members were asked about, and its earliest activation and change record depend on the
+	// committed round it was derived at. The candidate derived here carries the SAME digest when it is the same candidate, so the body
+	// is the one derived then, not a rebuild at the current round; only a candidate of another attempt is refused as superseded.
+	if staged := x.v3Planned.Load(); staged != nil && staged.Candidate == c.Candidate {
+		if staged.Attempt != c.Attempt {
+			return abdrc.HandoffApprovalMsg{}, errors.Join(ErrHandoffApproval, ErrV3CandidateSuperseded)
+		}
+		c = *staged
 	}
 	raw := c.Body.Encode()
 	if err := x.q3.FreezeRules().VerifyReceipts(raw, receipts, c.Attempt, c.Candidate[:]); err != nil {

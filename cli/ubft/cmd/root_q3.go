@@ -52,6 +52,11 @@ type q3BundleProvider struct {
 }
 
 func (p q3BundleProvider) Q3Bundle(_ context.Context, epoch uint64) (q3active.Bundle, error) {
+	// an activation this node has already staged is served from the journal: once the roots have moved on, the committed tree no longer
+	// holds the old tip its live evidence needs
+	if b, ok, err := p.rt.StagedBundle(epoch); err != nil || ok {
+		return b, err
+	}
 	link, head, candidate, err := p.cm.Q3ActivationEvidence(epoch)
 	if err != nil {
 		return q3active.Bundle{}, err
