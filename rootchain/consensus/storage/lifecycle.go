@@ -68,11 +68,19 @@ func LifecycleFor(orchestration Orchestration, partition types.PartitionID, shar
 	if err != nil {
 		return ctx, err
 	}
-	ids, hash, err := history.AcknowledgedIdentities(partition, shard, acknowledged)
+	chain, err := CommittedChain(orchestration, partition, shard, acknowledged)
 	if err != nil {
 		return ctx, errors.Join(ErrLifecycle, err)
 	}
-	chain, err := CommittedChain(orchestration, partition, shard, acknowledged)
+	return lifecycleOver(history, partition, shard, acknowledged, policy, chain)
+}
+
+// lifecycleOver is LifecycleFor over an explicit pending chain. Replay of a committed handoff passes only the steps installed in the
+// authenticated pre-activation checkpoint, so the candidate being replayed (and anything indexed after it) is never part of its own
+// context.
+func lifecycleOver(history identityHistory, partition types.PartitionID, shard types.ShardID, acknowledged uint64, policy continuity.Policy, chain evmassign.Chain) (evmassign.LifecycleContext, error) {
+	var ctx evmassign.LifecycleContext
+	ids, hash, err := history.AcknowledgedIdentities(partition, shard, acknowledged)
 	if err != nil {
 		return ctx, errors.Join(ErrLifecycle, err)
 	}

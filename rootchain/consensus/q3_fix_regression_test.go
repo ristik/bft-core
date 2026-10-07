@@ -89,7 +89,7 @@ func TestSuccessiveCoupledSupersessionInstall(t *testing.T) {
 			if mutate != nil {
 				mutate(binding)
 			}
-			second := q3fixture.New(t, q3fixture.Options{After: f, Assignment: true, Installed: configs[key], ShardState: pending, MutateCandidate: func(c *evmassign.Candidate) {
+			second := q3fixture.New(t, q3fixture.Options{After: f, Assignment: true, Recovery: true, Installed: configs[key], ShardState: pending, MutateCandidate: func(c *evmassign.Candidate) {
 				if name != "omitted supersession" {
 					c.Supersedes = binding
 				}

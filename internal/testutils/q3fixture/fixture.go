@@ -8,6 +8,8 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -67,6 +69,12 @@ type Options struct {
 	// ShardState and Installed supply the authenticated state and configuration for a successive coupled handoff.
 	ShardState *storage.ShardInfo
 	Installed  *types.PartitionDescriptionRecord
+	// Recovery makes this handoff the recovery of the unacknowledged primary After: the candidate is evmassign.DeriveRecovery of that
+	// primary (exactly K, no fresh proofs), the root committee is K's (the committee After replaced) and Installed must be the
+	// primary's configuration. The only replacement of a committed primary.
+	Recovery bool
+	// Params are extra partition parameters of the genesis configuration (the continuity budget, say).
+	Params map[string]string
 }
 
 // Fixture is one activation and everything that authenticates it.
@@ -97,6 +105,7 @@ type Fixture struct {
 	BaseAssignment  [32]byte                 // its assignment hash
 	Authorization   *evmassign.Authorization // the recovery authorization the candidate carries
 	Prev            *Fixture                 // the first activation this one follows, with Options.After
+	GenesisEVM      []*testutils.TestNode    // the EVM validators of the genesis configuration (K's EVM members, which the primary keeps three of)
 }
 
 // Signers maps node id to signer for a committee.
@@ -166,6 +175,20 @@ func New(t *testing.T, o Options) *Fixture {
 
 	f.NewNodes = append([]*testutils.TestNode(nil), f.OldNodes[:3]...)
 	f.NewNodes = append(f.NewNodes, testutils.NewTestNode(t))
+	if o.Recovery {
+		require.NotNil(t, o.After, "a recovery follows the primary it replaces")
+		require.NotNil(t, o.Installed, "a recovery replaces the primary's installed configuration")
+		f.NewNodes = append([]*testutils.TestNode(nil), o.After.OldNodes...) // K's root committee is the one the primary replaced
+		o.Weights = make([]uint64, len(f.NewNodes))
+		for i, n := range f.NewNodes {
+			for _, id := range o.After.Incumbent {
+				if id.RootNodeID == n.PeerConf.ID.String() {
+					o.Weights[i] = id.Weight
+				}
+			}
+			require.NotZero(t, o.Weights[i], "every K member is a node of the replaced committee")
+		}
+	}
 	for i, n := range f.NewNodes {
 		verifier, err := n.Signer.Verifier()
 		require.NoError(t, err)
@@ -184,11 +207,17 @@ func New(t *testing.T, o Options) *Fixture {
 	operator, err := evmroot.D4OperatorCandidateDigest(f.Members)
 	require.NoError(t, err)
 	var shardConf *types.PartitionDescriptionRecord
-	_, validators := testutils.CreateTestNodes(t, 3)
+	genesisEVM, validators := testutils.CreateTestNodes(t, 4)
+	// The fixture's primary replaces one of four members while the weights move from unit to the heavy member; the distance budget is
+	// widened so that these tests exercise installation and replay, not the budget (continuity has its own tests).
 	shardConf = &types.PartitionDescriptionRecord{Version: 1, NetworkID: Network, PartitionID: PartitionID, ShardID: types.ShardID{},
-		PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 2500 * time.Millisecond, Validators: validators, Epoch: 0, EpochStart: 1}
+		PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 2500 * time.Millisecond, Validators: validators, Epoch: 0, EpochStart: 1,
+		PartitionParams: map[string]string{storage.ParamContinuityMaxDist: "2/1"}}
+	maps.Copy(shardConf.PartitionParams, o.Params)
+	f.GenesisEVM = genesisEVM
 	if o.After != nil {
 		shardConf = o.After.ShardConf // the same shard: the node's orchestration holds one configuration of it
+		f.GenesisEVM = o.After.GenesisEVM
 	}
 	if o.Installed != nil {
 		shardConf = o.Installed
@@ -329,6 +358,9 @@ func New(t *testing.T, o Options) *Fixture {
 // assignment builds the coupled candidate for the successor committee and returns its digest, which the body binds.
 func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 	t.Helper()
+	if o.Recovery {
+		return f.recoveryAssignment(t, o, oldID)
+	}
 	root := make([]evmassign.RootMember, len(f.Members))
 	for i, m := range f.Members {
 		root[i] = evmassign.RootMember{NodeID: m.NodeID, Key: m.ConsensusKey, Weight: m.Weight}
@@ -347,16 +379,27 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 	keys := make([]evmKey, len(root))
 	validators := make([]*types.NodeInfo, len(root))
 	for i, m := range root {
+		weight := m.Weight
+		if o.EVMWeights != nil {
+			weight = o.EVMWeights[i]
+		}
+		if o.After == nil {
+			// a root member that stays keeps its EVM validator, so the primary differs from K by one replaced member only
+			if j := slices.IndexFunc(f.OldNodes[:3], func(n *testutils.TestNode) bool { return n.PeerConf.ID.String() == m.NodeID }); j >= 0 {
+				v := f.ShardConf.Validators[j]
+				kept := &types.NodeInfo{NodeID: v.NodeID, SigKey: bytes.Clone(v.SigKey), Stake: weight}
+				keys[i] = evmKey{f.GenesisEVM[j].Signer, kept}
+				validators[i] = keys[i].info
+				f.EVMSigners[kept.NodeID] = keys[i].signer
+				continue
+			}
+		}
 		signer, err := abcrypto.NewInMemorySecp256K1Signer()
 		require.NoError(t, err)
 		verifier, err := signer.Verifier()
 		require.NoError(t, err)
 		pub, err := verifier.MarshalPublicKey()
 		require.NoError(t, err)
-		weight := m.Weight
-		if o.EVMWeights != nil {
-			weight = o.EVMWeights[i]
-		}
 		keys[i] = evmKey{signer, &types.NodeInfo{NodeID: fmt.Sprintf("evm-%d", i), SigKey: pub, Stake: weight}}
 		validators[i] = keys[i].info
 		f.EVMSigners[keys[i].info.NodeID] = signer
@@ -376,17 +419,26 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 	require.NoError(t, err2)
 	// K is a fabricated incumbent committee bound to the installed validators; tests that run lifecycle checks record it as the
 	// shard's genesis baseline (Incumbent, BaseAssignment).
-	var incRoot []evmassign.RootMember
-	var incBindings []evmassign.Binding
-	for i, v := range f.ShardConf.Validators {
-		incRoot = append(incRoot, evmassign.RootMember{NodeID: fmt.Sprintf("inc-%d", i), Key: bytes.Repeat([]byte{byte(100 + i)}, 33), Weight: v.Stake})
-		incBindings = append(incBindings, evmassign.Binding{RootNodeID: fmt.Sprintf("inc-%d", i), EVMNodeID: v.NodeID})
+	if o.After != nil { // K is the last acknowledged committee: the pending primary does not change it
+		f.Incumbent, f.BaseAssignment = o.After.Incumbent, o.After.BaseAssignment
+	} else {
+		var incRoot []evmassign.RootMember
+		var incBindings []evmassign.Binding
+		for i, v := range f.ShardConf.Validators {
+			verifier, err := f.OldNodes[i].Signer.Verifier()
+			require.NoError(t, err)
+			key, err := verifier.MarshalPublicKey()
+			require.NoError(t, err)
+			id := f.OldNodes[i].PeerConf.ID.String()
+			incRoot = append(incRoot, evmassign.RootMember{NodeID: id, Key: key, Weight: v.Stake})
+			incBindings = append(incBindings, evmassign.Binding{RootNodeID: id, EVMNodeID: v.NodeID})
+		}
+		f.Incumbent = identityfix.Identities(incRoot, f.ShardConf, incBindings)
+		incDigest, err2 := evmassign.IdentitiesDigest(f.Incumbent)
+		require.NoError(t, err2)
+		f.BaseAssignment, err2 = evmassign.AssignmentHash(f.ShardConf, incDigest)
+		require.NoError(t, err2)
 	}
-	f.Incumbent = identityfix.Identities(incRoot, f.ShardConf, incBindings)
-	incDigest, err2 := evmassign.IdentitiesDigest(f.Incumbent)
-	require.NoError(t, err2)
-	f.BaseAssignment, err2 = evmassign.AssignmentHash(f.ShardConf, incDigest)
-	require.NoError(t, err2)
 	f.Authorization = identityfix.Authorization(Network, oldID, f.BaseAssignment, f.Incumbent)
 	var pops []evmassign.PoP
 	for _, k := range keys {
@@ -394,12 +446,41 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 		require.NoError(t, err)
 		pops = append(pops, pop)
 	}
+	sort.Slice(pops, func(i, j int) bool { return pops[i].NodeID < pops[j].NodeID }) // proofs follow the validators' NodeID order
 	raw, err := types.Cbor.Marshal(succ)
 	require.NoError(t, err)
 	old, err := evmassign.PDRHash(f.ShardConf)
 	require.NoError(t, err)
 	c := evmassign.Candidate{Version: evmassign.CandidateVersion, Kind: evmassign.KindPrimary, Network: Network, Predecessor: bytes.Clone(oldID), Attempt: attempt, RootMembers: root,
 		OldShardEpoch: f.ShardConf.Epoch, OldActiveHash: old[:], Assignment: raw, PoPs: pops, Bindings: bindings, Identities: f.Identities, Authorization: f.Authorization}
+	if o.MutateCandidate != nil {
+		o.MutateCandidate(&c)
+	}
+	f.Candidate, err = c.Encode()
+	require.NoError(t, err)
+	return sha256.Sum256(f.Candidate)
+}
+
+// recoveryAssignment builds the recovery of the unacknowledged primary o.After: evmassign.DeriveRecovery over that primary, so the
+// candidate is exactly K with no fresh proofs, naming the assignment it replaces.
+func (f *Fixture) recoveryAssignment(t *testing.T, o Options, oldID []byte) [32]byte {
+	t.Helper()
+	first, err := evmassign.DecodeCandidate(o.After.Candidate)
+	require.NoError(t, err)
+	lc, succ, root, bindings, err := evmassign.DeriveRecovery(evmassign.Head{Candidate: first, Successor: o.After.Successor}, o.Installed)
+	require.NoError(t, err)
+	f.Successor, f.Incumbent, f.BaseAssignment, f.Authorization, f.Identities = succ, o.After.Incumbent, o.After.BaseAssignment, lc.Authorization, lc.Identities
+	f.EVMSigners = make(map[string]abcrypto.Signer)
+	for i, n := range f.GenesisEVM {
+		f.EVMSigners[f.Prev.ShardConf.Validators[i].NodeID] = n.Signer
+	}
+	raw, err := types.Cbor.Marshal(succ)
+	require.NoError(t, err)
+	old, err := evmassign.PDRHash(f.ShardConf)
+	require.NoError(t, err)
+	c := evmassign.Candidate{Version: evmassign.CandidateVersion, Kind: evmassign.KindRecovery, Network: Network, Predecessor: bytes.Clone(oldID), Attempt: attempt,
+		RootMembers: root, OldShardEpoch: f.ShardConf.Epoch, OldActiveHash: old[:], Assignment: raw, Bindings: bindings, Identities: lc.Identities,
+		Authorization: lc.Authorization, ReplacedAssignment: lc.ReplacedAssignment}
 	if o.MutateCandidate != nil {
 		o.MutateCandidate(&c)
 	}

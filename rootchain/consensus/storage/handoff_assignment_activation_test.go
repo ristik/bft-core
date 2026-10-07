@@ -194,6 +194,8 @@ func freshOrchestration(t *testing.T, f *assignmentFixture, extra ...*types.Part
 	t.Cleanup(func() { _ = orch.Close() })
 	orch.EnableHandoffProfile()
 	require.NoError(t, orch.InitGenesisShardConfigs(append([]*types.PartitionDescriptionRecord{f.current}, extra...)...))
+	incumbent, _ := f.incumbent()
+	require.NoError(t, orch.SetGenesisIdentities(f.current.PartitionID, f.current.ShardID, incumbent))
 	return orch
 }
 
