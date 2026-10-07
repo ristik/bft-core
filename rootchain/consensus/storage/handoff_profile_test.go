@@ -118,12 +118,12 @@ func TestFrozenEVMShardSelectionRejectsIsolatedMutations(t *testing.T) {
 	other := types.PartitionShardID{PartitionID: 10}
 	base := func() (ShardStates, map[types.PartitionShardID]*types.PartitionDescriptionRecord) {
 		return ShardStates{States: map[types.PartitionShardID]*ShardInfo{
-				evm:   {IR: &types.InputRecord{BlockHash: bytes.Clone(parent)}},
-				agg:   {IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{1}, 32)}},
-				other: {IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{2}, 32)}},
-			}}, map[types.PartitionShardID]*types.PartitionDescriptionRecord{
-				evm: {PartitionTypeID: 8}, agg: {PartitionTypeID: 9}, other: {PartitionTypeID: 9},
-			}
+			evm:   {IR: &types.InputRecord{BlockHash: bytes.Clone(parent)}},
+			agg:   {IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{1}, 32)}},
+			other: {IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{2}, 32)}},
+		}}, map[types.PartitionShardID]*types.PartitionDescriptionRecord{
+			evm: {PartitionTypeID: 8}, agg: {PartitionTypeID: 9}, other: {PartitionTypeID: 9},
+		}
 	}
 	state, configs := base()
 	key, err := frozenShard(state, configs, parent)
@@ -416,6 +416,7 @@ func TestInstallEpochAnchorFromRecoveryCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 	rec := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: 4, PredecessorBodyID: zero,
 		FrozenID: frozen, NextBodyID: body, ActivationRound: 7, SuccessorTRHash: tr, Kind: "commit"}
+	suffix.BlockData.Timestamp = 12345 // retained across anchor installation and reload
 	head := &abdrc.CommittedBlock{Block: suffix.BlockData, Control: suffix.ShardState.Control,
 		CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: suffix.RootHash}}}
 	head.ShardInfo, err = toRecoveryShardInfo(suffix)
@@ -432,6 +433,7 @@ func TestInstallEpochAnchorFromRecoveryCheckpoint(t *testing.T) {
 	require.ErrorIs(t, s.AnchoredFrozenParent(anchoredTR, []byte{1}), rctypes.ErrEpochAnchor)
 	require.ErrorIs(t, s.AnchoredFrozenParent(bytes.Repeat([]byte{0x44}, 32), bytes.Repeat([]byte{0x42}, 32)), rctypes.ErrEpochAnchor)
 	anchoredRoot := s.blockTree.Root()
+	require.Equal(t, head.Block.Timestamp, anchoredRoot.BlockData.Timestamp)
 	shardKey := types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}
 	anchoredShard := anchoredRoot.ShardState.States[shardKey]
 	anchoredRoot.ShardState.States[shardKey] = nil
@@ -445,11 +447,17 @@ func TestInstallEpochAnchorFromRecoveryCheckpoint(t *testing.T) {
 	require.True(t, isEpochAnchorRoot(s.blockTree.Root()))
 	reloaded, err := New(crypto.SHA256, s.storage, s.orchestration, logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
+	require.Equal(t, head.Block.Timestamp, reloaded.blockTree.Root().BlockData.Timestamp)
 	require.True(t, isEpochAnchorRoot(reloaded.blockTree.Root()))
 	anchorState, err := reloaded.GetState()
 	require.NoError(t, err)
 	require.Equal(t, a, anchorState.CommittedHead.Anchor)
 	require.NoError(t, reloaded.VerifyRecoveryAnchor(anchorState.CommittedHead))
+	changedTime := *anchorState.CommittedHead
+	changedBlock := *changedTime.Block
+	changedBlock.Timestamp++
+	changedTime.Block = &changedBlock
+	require.ErrorIs(t, reloaded.VerifyRecoveryAnchor(&changedTime), rctypes.ErrEpochAnchor)
 	corrupt := *anchorState.CommittedHead
 	controlCopy := *corrupt.Control
 	controlCopy.PreviousDigest = bytes.Repeat([]byte{9}, 32)

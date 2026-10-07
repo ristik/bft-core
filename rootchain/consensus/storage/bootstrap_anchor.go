@@ -60,7 +60,8 @@ func (x *BlockStore) InstallEpochAnchor(head *abdrc.CommittedBlock, v evmroot.Ve
 		return nil, err
 	}
 	oldRoot.BlockData = &rctypes.BlockData{Version: 2, Epoch: a.Epoch, Round: a.Slot,
-		Payload: &rctypes.Payload{Version: 2}, Anchor: a}
+		// Preserve the old committed time across the synthetic epoch anchor.
+		Timestamp: head.Block.Timestamp, Payload: &rctypes.Payload{Version: 2}, Anchor: a}
 	oldRoot.Qc, oldRoot.CommitQc = nil, nil
 	installer, ok := x.storage.(interface {
 		InstallEpochAnchorRoot(*ExecutedBlock, *rctypes.EpochAnchor) error
@@ -238,6 +239,10 @@ func (x *BlockStore) VerifyRecoveryAnchor(head *abdrc.CommittedBlock) error {
 		return rctypes.ErrEpochAnchor
 	}
 	root := x.blockTree.Root()
+	// The peer cannot replace the locally installed checkpoint time floor.
+	if head.Block == nil || head.Block.Timestamp != root.BlockData.Timestamp {
+		return rctypes.ErrEpochAnchor
+	}
 	if root.ShardState.Control == nil || head.Control == nil ||
 		!bytes.Equal(root.ShardState.Control.Digest(), head.Control.Digest()) {
 		return ErrControlCheckpoint

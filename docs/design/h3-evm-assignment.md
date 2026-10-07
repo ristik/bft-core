@@ -234,3 +234,19 @@ in production, and there is no migration (greenroom, one format).
 - Not in this part: the Ureth decoder and Registry limit (two), proof-independent progress/closure and UC-time import, paired Ureth replay of
   the vectors in `evmassign/testdata/h3-vectors.json` (now with signed lifecycle fixtures), and reconciling the NodeID encoding with the
   custody contracts (`bytes32` there, strings here).
+
+## Root UC time (#445)
+
+Live root voting requires a proposal timestamp strictly greater than its executed
+QC parent's timestamp and at most `MaxClockSkew` (DEV: 30 seconds) ahead of the
+voter's local clock. Proposers use `max(now, parent+1)`, including TC rounds and
+restart/recovery; epoch anchors retain the old checkpoint time. Scheme 2 QCs have
+no timestamp, so the time floor comes from local executed storage. UC sealing
+uses the committed block time. Importers keep their monotonic checks.
+
+Clock checks apply only to live voting, never certified-history verification or
+catch-up replay. There is no past-time cutoff, to preserve delayed recovery.
+Whole-second strict increases may force voting to wait for wall clocks under
+subsecond production. The root specification's UC seal timestamp section records
+the rationale and pinned Aptos references; this DEV rule requires validators to
+upgrade together.

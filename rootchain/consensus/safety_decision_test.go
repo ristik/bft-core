@@ -127,7 +127,7 @@ func (r *decisionRig) nonCommittingBlock(round uint64) (*drctypes.BlockData, *dr
 	qc, err := newQuorumCertificate(r.t, info, nil)
 	require.NoError(r.t, err)
 	tc := &drctypes.TimeoutCert{Timeout: &drctypes.Timeout{Epoch: 1, Round: round - 1, HighQc: qc}}
-	return &drctypes.BlockData{Round: round, Epoch: 1, Qc: qc}, tc
+	return &drctypes.BlockData{Round: round, Epoch: 1, Timestamp: 100, Qc: qc}, tc
 }
 
 func (r *decisionRig) verifyVote(v *abdrc.VoteMsg) {
@@ -412,7 +412,7 @@ func TestSafetyModuleKeepsTheLegacyFormWhereTheEpochIsLegacy(t *testing.T) {
 	info.Epoch = 1
 	qc, err := newQuorumCertificate(t, info, nil)
 	require.NoError(t, err)
-	v, err := m.MakeVote(&drctypes.BlockData{Round: 5, Epoch: 1, Qc: qc}, hash32(2), nil, nil)
+	v, err := m.MakeVote(&drctypes.BlockData{Round: 5, Epoch: 1, Timestamp: info.Timestamp + 1, Qc: qc}, hash32(2), nil, nil)
 	require.NoError(t, err)
 	require.Zero(t, v.Scheme)
 	require.Empty(t, v.SealSignature)

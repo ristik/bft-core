@@ -295,6 +295,13 @@ func NewConsensusManager(
 	// The manager is assigned below, before anything can sign.
 	var manager *ConsensusManager
 	safetyOptions := []SafetyOption{
+		WithParentTimestamp(func(round uint64) (uint64, error) {
+			b, err := manager.blockStore.Block(round)
+			if err != nil {
+				return 0, err
+			}
+			return b.BlockData.Timestamp, nil
+		}),
 		WithDomainBoundSigning(trustBaseStore, func(round uint64) (CommittedBlockInfo, error) {
 			b, err := manager.blockStore.Block(round)
 			if err != nil {
@@ -1101,6 +1108,10 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 	if l.String() != proposal.Block.Author {
 		return fmt.Errorf("expected %s to be leader of the round %d but got proposal from %s", l, proposal.Block.Round, proposal.Block.Author)
 	}
+	// Refuse invalid live time before executing or mutating the pacemaker.
+	if err := x.safety.validateVoteTimestamp(proposal.Block); err != nil {
+		return fmt.Errorf("proposal timestamp: %w", err)
+	}
 	// Every proposal must carry a QC or TC for previous round
 	// Process QC first, update round
 	x.processQC(ctx, proposal.Block.Qc)
@@ -1390,13 +1401,27 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	if x.epochAnchor != nil && parentQC == nil {
 		parentAnchor = x.epochAnchor
 	}
+	parentRound := parentQC.GetRound()
+	if parentAnchor != nil {
+		parentRound = parentAnchor.Slot
+	}
+	parent, err := x.blockStore.Block(parentRound)
+	if err != nil {
+		x.log.WarnContext(ctx, "cannot read proposal parent timestamp", logger.Error(err))
+		return
+	}
+	timestamp, err := proposalTimestamp(types.NewTimestamp(), parent.BlockData.Timestamp)
+	if err != nil {
+		x.log.WarnContext(ctx, "cannot advance proposal timestamp", logger.Error(err))
+		return
+	}
 	proposalMsg := &abdrc.ProposalMsg{
 		Block: &drctypes.BlockData{
 			Version:   types.Version(profile),
 			Author:    x.id.String(),
 			Round:     round,
 			Epoch:     x.trustBase.Load().Epoch,
-			Timestamp: types.NewTimestamp(),
+			Timestamp: timestamp,
 			Payload:   payload,
 			Qc:        parentQC,
 			Anchor:    parentAnchor,
@@ -1564,6 +1589,10 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		}
 	}
 	if prop, ok := triggerMsg.(*abdrc.ProposalMsg); ok {
+		// Recheck after recovery with the current store and current clock.
+		if err := x.safety.validateVoteTimestamp(prop.Block); err != nil {
+			return fmt.Errorf("recovery proposal timestamp: %w", err)
+		}
 		// the proposal was verified when it was received, so try and execute it now
 		// Every proposal must carry a QC or TC for previous round
 		// Process QC first, update round

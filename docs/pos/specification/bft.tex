@@ -1050,7 +1050,7 @@ Periodically, do the following:
 
   \item Based on the array of Shard Input Records, build the Shard Trees.
 
-  \item Based on the roots of Shard Trees, build the Unicity Tree. Extract root hash value. Obtain wall clock time. Create the Unicity Certificate.
+  \item Based on the roots of Shard Trees, build the Unicity Tree. Extract root hash value. Create the Unicity Certificate using the committed block timestamp, which was approved by consensus; do not sample a new wall clock time at certification.
 
   \item For every record in IR changes array, respond to the shard based on request context from the request buffer. Then, clean up $req$ buffer, and reset respective \texttt{t2} timer.
 
@@ -1744,3 +1744,38 @@ Unicity Trust Base is a tuple of aggregate public key and a numeric parameter ($
 A standardization attempt of the closest appropriate signature scheme is available from IETF --- \url{https://datatracker.ietf.org/doc/draft-irtf-cfrg-bls-signature/}.
 
 Specifically, threshold signature schemes are avoided because of 1) accountability requirement 2) complicated and security-critical key setup, and 3) missing support of non-equal voting powers.
+
+\subsection{UC seal timestamps (DEV)}
+Rounds remain the primary consensus measure of time. The UC seal timestamp is
+quorum-approved wall-clock time in whole seconds. For an ordinary proposal with
+parent QC, the parent is the locally executed block certified by that QC (not
+necessarily the block committed by its ledger commit info). Its timestamp must
+be strictly greater than the parent's timestamp. A timeout certificate does not
+change this parent or relax the rule. Across an epoch anchor, use the retained
+old committed checkpoint timestamp as the time floor.
+
+A proposer selects $\max(\mathit{now}, \mathit{parentTime}+1)$, even after clock
+rollback, and refuses to propose if the parent timestamp cannot be incremented.
+Before issuing any live vote, including a recovery-triggered vote or a durable
+vote retry after restart, a voter rejects a timestamp more than
+\texttt{MaxClockSkew} (DEV: 30 seconds) ahead of its current local clock.
+Missing executed parent state prevents voting. Scheme 2 QCs omit timestamps;
+validators therefore read the timestamp from executed storage rather than the QC.
+
+There is no past-time cutoff: delayed proposals can safely advance a recovering
+node, while a cutoff could stall it after a long outage. Local-clock checks must
+never be applied when verifying or replaying already-certified history. The
+bounds assume honest voters have reasonably synchronized clocks; they do not
+prove an absolute UTC bound. Strict increases in whole seconds can run ahead
+of wall time under subsecond production; the skew guard then withholds votes
+until clocks catch up. This is an intentional liveness tradeoff in DEV.
+
+This follows the Diem/Aptos separation of monotonic consensus time and local
+clock admission: Aptos' proposal generator documents increasing branch times,
+and its block store waits until local time reaches a proposed timestamp.
+BFT Core uses a bounded 30-second voting tolerance instead of that wait, and
+requires strict increases even for empty suffix blocks (Aptos has a
+reconfiguration exception). See the pinned implementation:
+\url{https://github.com/aptos-labs/aptos-core/blob/4ee095f5cd2b2448ba92bb06729e1c0be7be172d/consensus/src/liveness/proposal_generator.rs}
+and
+\url{https://github.com/aptos-labs/aptos-core/blob/4ee095f5cd2b2448ba92bb06729e1c0be7be172d/consensus/src/block_storage/block_store.rs}.
