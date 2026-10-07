@@ -1,4 +1,4 @@
-package shardnode
+package q3shard
 
 import (
 	"context"

@@ -44,6 +44,7 @@ import (
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3delivery"
 	"github.com/unicitynetwork/bft-core/q3format"
+	"github.com/unicitynetwork/bft-core/q3shard"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -643,8 +644,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	var executionID [32]byte
 	var handoffFollower *shardnode.HandoffFollower
 	var q3rt *q3active.Runtime
-	var q3Trust *shardnode.Q3TrustStore
-	var q3Follower *shardnode.Q3Follower
+	var q3Trust *q3shard.Q3TrustStore
+	var q3Follower *q3shard.Q3Follower
 	var epochTrust shardEpochTrust
 	if flags.ExecutionJournal != "" {
 		adapter, ok := executor.(*engineapi.Adapter)
@@ -684,7 +685,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if q3rt, jErr = q3active.New(q3active.Config{DB: journalDB, Genesis: trustBases[0]}); jErr != nil {
 				return fmt.Errorf("q3 runtime: %w", jErr)
 			}
-			q3Trust = shardnode.NewQ3TrustStore(historical, q3rt)
+			q3Trust = q3shard.NewQ3TrustStore(historical, q3rt)
 			trustBaseStore, epochTrust = q3Trust, q3Trust
 			verifierContext.TrustBases = q3Trust
 			verifierContext.EpochAuthority = q3Trust
@@ -1054,7 +1055,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if err := q3rt.Attach(q3active.Participants{Root: sink, Safety: q3rt.Trust(nil), Shard: q3Trust.Guarded(), Authority: q3rt.Trust(nil)}); err != nil {
 				return fmt.Errorf("q3 runtime: %w", err)
 			}
-			q3Follower = &shardnode.Q3Follower{Runtime: q3rt, AnchorEpoch: trustBases[0].GetEpoch(), CurrentRoots: currentRoots,
+			q3Follower = &q3shard.Q3Follower{Runtime: q3rt, AnchorEpoch: trustBases[0].GetEpoch(), CurrentRoots: currentRoots,
 				Fetch: func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
 					return q3delivery.Request(ctx, peer, id, epoch)
 				}}

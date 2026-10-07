@@ -1,4 +1,4 @@
-package shardnode
+package q3shard
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3process"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
 	"github.com/unicitynetwork/bft-core/q3format"
+	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
 func TestQ3TrustStoreServesAV3EpochOnlyOnceTheJournalCompletedItAndFollowsTheHistory(t *testing.T) {
@@ -16,7 +17,7 @@ func TestQ3TrustStoreServesAV3EpochOnlyOnceTheJournalCompletedItAndFollowsTheHis
 	f := q3fixture.New(t, q3fixture.Options{})
 	p := q3process.New(t, f)
 	rt := p.Start()
-	base, err := NewHistoricalTrustBaseStore(ctx, memorydb.New(), f.Old, [32]byte{1}, true)
+	base, err := shardnode.NewHistoricalTrustBaseStore(ctx, memorydb.New(), f.Old, [32]byte{1}, true)
 	require.NoError(t, err)
 	s := NewQ3TrustStore(base, rt)
 
@@ -67,7 +68,7 @@ func TestTheInstallVerifiesFromTheHistoryBeforeTheJournalAdmitsTheEpoch(t *testi
 	f := q3fixture.New(t, q3fixture.Options{})
 	p := q3process.New(t, f)
 	rt := p.Start()
-	base, err := NewHistoricalTrustBaseStore(ctx, memorydb.New(), f.Old, [32]byte{1}, true)
+	base, err := shardnode.NewHistoricalTrustBaseStore(ctx, memorydb.New(), f.Old, [32]byte{1}, true)
 	require.NoError(t, err)
 	s := NewQ3TrustStore(base, rt)
 	epoch := f.Claim.Epoch

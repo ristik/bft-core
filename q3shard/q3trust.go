@@ -1,4 +1,4 @@
-package shardnode
+package q3shard
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/unicitynetwork/bft-core/q3active"
+	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -23,14 +24,14 @@ var ErrQ3Epoch = errors.New("shardnode: V3 epoch is not the next activation of t
 // authenticated the old committee's commit of it. Nothing a peer, a certificate or the execution client supplies selects a committee or a
 // scheme.
 type Q3TrustStore struct {
-	*HistoricalTrustBaseStore
+	*shardnode.HistoricalTrustBaseStore
 	rt      *q3active.Runtime
 	guarded *q3active.Guarded
 	active  atomic.Uint64 // the latest V3 epoch the follower finished installing (0: none)
 }
 
 // NewQ3TrustStore wraps the historical store with the runtime's guarded lookup.
-func NewQ3TrustStore(base *HistoricalTrustBaseStore, rt *q3active.Runtime) *Q3TrustStore {
+func NewQ3TrustStore(base *shardnode.HistoricalTrustBaseStore, rt *q3active.Runtime) *Q3TrustStore {
 	return &Q3TrustStore{HistoricalTrustBaseStore: base, rt: rt, guarded: rt.Trust(base)}
 }
 
@@ -94,7 +95,7 @@ func (s *Q3TrustStore) BodyID(epoch uint64) ([32]byte, error) {
 // the journal's completion marker. The marker gates what the node serves and signs for; the install of epoch N (and its replay after a
 // restart, before the journal has finished recovering) must verify the certificates and commit of epoch N-1, which the history already
 // authenticates from the pinned genesis. A legacy epoch is the base's, after the history agrees with it.
-func (s *Q3TrustStore) Verified() TrustBaseStore { return verifiedLookup{s} }
+func (s *Q3TrustStore) Verified() shardnode.TrustBaseStore { return verifiedLookup{s} }
 
 type verifiedLookup struct{ s *Q3TrustStore }
 
