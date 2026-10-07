@@ -1,11 +1,13 @@
 package types
 
 import (
+	"bytes"
 	gocrypto "crypto"
 	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/fxamacker/cbor/v2"
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -42,6 +44,9 @@ type Payload struct {
 	Requests       []*IRChangeReq `json:"requests"` // IR change requests with quorum or no quorum possible
 	Version        uint64         `json:"version,omitempty"`
 	HandoffRecords [][]byte       `json:"handoffRecords,omitempty"`
+	// PosControls are the P85 root controls (CloseLiability, Retirement, RejectResult), only in a version 2 payload. The version 2 wire
+	// form is exactly the four-element tuple [2, Requests, HandoffRecords, PosControls], every collection a definite array.
+	PosControls []PosControl `json:"posControls,omitempty"`
 }
 
 type payloadV1 struct {
@@ -53,6 +58,7 @@ type payloadV2 struct {
 	Version        uint64
 	Requests       []*IRChangeReq
 	HandoffRecords [][]byte
+	PosControls    []PosControl
 }
 
 func (x *Payload) MarshalCBOR() ([]byte, error) {
@@ -60,34 +66,93 @@ func (x *Payload) MarshalCBOR() ([]byte, error) {
 		return types.Cbor.Marshal(nil)
 	}
 	if x.Version == 2 {
-		return types.Cbor.Marshal(payloadV2{Version: 2, Requests: x.Requests, HandoffRecords: x.HandoffRecords})
+		// every collection is a definite array, empty rather than null
+		v := payloadV2{Version: 2, Requests: x.Requests, HandoffRecords: x.HandoffRecords, PosControls: x.PosControls}
+		if v.Requests == nil {
+			v.Requests = []*IRChangeReq{}
+		}
+		if v.HandoffRecords == nil {
+			v.HandoffRecords = [][]byte{}
+		}
+		if v.PosControls == nil {
+			v.PosControls = []PosControl{}
+		}
+		return types.Cbor.Marshal(v)
 	}
-	if x.Version != 0 && x.Version != 1 || len(x.HandoffRecords) != 0 {
+	if x.Version != 0 && x.Version != 1 || len(x.HandoffRecords) != 0 || len(x.PosControls) != 0 {
 		return nil, errors.New("invalid payload version")
 	}
 	return types.Cbor.Marshal(payloadV1{Requests: x.Requests})
 }
 
+// ErrPayloadEncoding reports a version 2 payload that is not the canonical four-element tuple: another arity, another profile tag, a
+// collection that is not a definite array, a null element, trailing bytes or any encoding that is not the one the codec writes.
+var ErrPayloadEncoding = errors.New("non-canonical root payload")
+
 func (x *Payload) UnmarshalCBOR(data []byte) error {
-	var v2 payloadV2
-	if err := types.Cbor.Unmarshal(data, &v2); err == nil {
-		if v2.Version != 2 {
-			return errors.New("invalid payload version")
+	var top []cbor.RawMessage
+	if err := types.Cbor.Unmarshal(data, &top); err != nil {
+		return fmt.Errorf("%w: %v", ErrPayloadEncoding, err)
+	}
+	if len(top) == 1 { // the legacy profile's payload is the one-element array [Requests]
+		var v1 payloadV1
+		if err := types.Cbor.Unmarshal(data, &v1); err != nil {
+			return err
 		}
-		*x = Payload{Version: 2, Requests: v2.Requests, HandoffRecords: v2.HandoffRecords}
+		*x = Payload{Requests: v1.Requests}
 		return nil
 	}
-	var v1 payloadV1
-	if err := types.Cbor.Unmarshal(data, &v1); err != nil {
-		return err
+	if len(top) != 4 {
+		return fmt.Errorf("%w: %d elements, want 4", ErrPayloadEncoding, len(top))
 	}
-	*x = Payload{Requests: v1.Requests}
+	var version uint64
+	if err := types.Cbor.Unmarshal(top[0], &version); err != nil || version != 2 {
+		return fmt.Errorf("%w: profile tag", ErrPayloadEncoding)
+	}
+	for i, raw := range top[1:] {
+		// each collection is a definite-length array whose elements are real values, never null
+		if len(raw) == 0 || raw[0]>>5 != 4 || raw[0] == 0x9f {
+			return fmt.Errorf("%w: collection %d is not a definite array", ErrPayloadEncoding, i+1)
+		}
+		var elems []cbor.RawMessage
+		if err := types.Cbor.Unmarshal(raw, &elems); err != nil {
+			return fmt.Errorf("%w: collection %d: %v", ErrPayloadEncoding, i+1, err)
+		}
+		for j, e := range elems {
+			if len(e) == 1 && e[0] == 0xf6 {
+				return fmt.Errorf("%w: collection %d element %d is null", ErrPayloadEncoding, i+1, j)
+			}
+		}
+	}
+	var v2 payloadV2
+	if err := types.Cbor.Unmarshal(data, &v2); err != nil {
+		return fmt.Errorf("%w: %v", ErrPayloadEncoding, err)
+	}
+	// an empty collection is the nil slice in memory (the wire form is always the definite empty array), so a payload round-trips equal
+	nilIfEmpty := func(n int) bool { return n == 0 }
+	if nilIfEmpty(len(v2.Requests)) {
+		v2.Requests = nil
+	}
+	if nilIfEmpty(len(v2.HandoffRecords)) {
+		v2.HandoffRecords = nil
+	}
+	if nilIfEmpty(len(v2.PosControls)) {
+		v2.PosControls = nil
+	}
+	*x = Payload{Version: 2, Requests: v2.Requests, HandoffRecords: v2.HandoffRecords, PosControls: v2.PosControls}
+	again, err := x.MarshalCBOR()
+	if err != nil || !bytes.Equal(again, data) {
+		return fmt.Errorf("%w: does not re-encode to the bytes read", ErrPayloadEncoding)
+	}
 	return nil
 }
 
 func (x *Payload) IsValid() error {
-	if x.Version > 2 || (x.Version != 2 && len(x.HandoffRecords) > 0) {
+	if x.Version > 2 || (x.Version != 2 && (len(x.HandoffRecords) > 0 || len(x.PosControls) > 0)) {
 		return errors.New("invalid payload version")
+	}
+	if err := validatePosControls(x.PosControls); err != nil {
+		return err
 	}
 	// there can only be one request per partition shard in a block
 	sysIdSet := map[types.PartitionShardID]struct{}{}
@@ -113,7 +178,7 @@ func (x *Payload) IsValid() error {
 }
 
 func (x *Payload) IsEmpty() bool {
-	return x != nil && len(x.Requests) == 0 && len(x.HandoffRecords) == 0
+	return x != nil && len(x.Requests) == 0 && len(x.HandoffRecords) == 0 && len(x.PosControls) == 0
 }
 
 func (x *BlockData) IsValid() error {

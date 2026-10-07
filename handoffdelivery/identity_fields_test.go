@@ -2,6 +2,7 @@ package handoffdelivery
 
 import (
 	"flag"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 	"os"
 	"reflect"
@@ -243,6 +244,13 @@ func TestPerturbingEachBundleLeafChangesTheIdentityExactlyWhenItIsHashed(t *test
 	b := Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot}
 	var n byte
 	populate(reflect.ValueOf(&b).Elem(), &n, map[reflect.Type]int{})
+	// an arbitrary populated control is not a valid one (op 53 has no context): keep one real control so that the base encodes, and let
+	// each perturbation of it either change the identity or be refused by the codec, as for every other committed value
+	if b.Snapshot.Block != nil && b.Snapshot.Block.Payload != nil {
+		b.Snapshot.Block.Payload.Version = 2
+		b.Snapshot.Block.Payload.PosControls = []rctypes.PosControl{{Network: 5, Op: rctypes.OpCloseLiability, OrderingEpoch: 2, OrderingRound: 9,
+			Close: &rctypes.CloseContext{ClosedEpoch: 1}, Data: make([]byte, 192)}}
+	}
 	want, err := semanticIdentityOf(b)
 	require.NoError(t, err)
 	checked := 0

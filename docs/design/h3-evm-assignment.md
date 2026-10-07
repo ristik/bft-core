@@ -253,6 +253,16 @@ in production, and there is no migration (greenroom, one format).
   ristik/bft-core#447; see Root UC time below), so the time custody gates exits on is a bounded, quorum-attested measure, not an
   operator or EVM value. The importer additionally keeps it monotonic on one lineage; that check is defence in depth and does not
   replace the root rule.
+- **Root payload and P85 controls (`rootchain/consensus/types`).** The profile-2 root payload is exactly the definite four-element tuple
+  `[2, Requests, HandoffRecords, PosControls]`; every collection is a definite array (empty is `80`, never null), so the empty payload is
+  `8402808080`. The retired three-element form, a null or indefinite collection, other arities or tags and any non-canonical encoding
+  are refused. A `PosControl` is `["UNICITY_P85_CONTROL", network, chainID, custody, orderingEpoch, orderingRound, op, context, data,
+  witnessHash]` for op 1 CloseLiability (context `[closedEpoch, bundleSemanticID]`, 192-byte ClosureData), op 2 Retirement (context
+  `[evmBlockHash, evmStateRoot]`, 96 bytes) or op 3 RejectResult (context `[predecessorBodyID, attempt, evmBlockHash, evmStateRoot]`,
+  32 bytes); `data` is the exact ABI payload, uint64 words within range. Within a block closures come first in strictly ascending closed
+  epoch, then at most one RejectResult, then retirements in strictly ascending `(id, generation)`; at most 32 controls. A control-bearing
+  payload is never empty, so a post-H old-epoch suffix with a control is `ErrHandoffSuffix`. The legacy profile keeps its one-element
+  payload. Proof checks and lifecycle rules belong to the executor (next slice).
 - **Not implemented here:** the on-chain `IRootRecords` implementation in the SealRegistry and its feed from Ureth; the reference model
   above and the vectors are what it must match. The Closure and Retirement digest words (exposure, key history, reference digest) are
   contract-derived and opaque labels in the vectors.
