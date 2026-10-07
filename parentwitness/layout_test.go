@@ -30,8 +30,15 @@ func TestRegistryLayoutIsCarriedIntoTheProofContextAndNeverDroppedOnTheWire(t *t
 	require.NoError(t, err)
 	require.EqualValues(t, 0, decoded.Context.Layout)
 
-	_, err = EncodeRequest(Request{Context: layoutContext(3), BlockHash: common.Hash{9}})
+	_, err = EncodeRequest(Request{Context: layoutContext(registryproof.FreshB1 + 1), BlockHash: common.Hash{9}})
 	require.ErrorIs(t, err, ErrInvalidRequest)
+
+	require.EqualValues(t, registryproof.FreshB1, layoutContext(registryproof.FreshB1).proofContext().Layout)
+	_, err = EncodeRequest(Request{Context: layoutContext(registryproof.FreshB1), BlockHash: common.Hash{9}})
+	require.ErrorIs(t, err, ErrLayoutUnsupported)
+	fresh, err := NewTarget(TargetConfig{NetworkID: 3, PartitionID: 8, ShardID: types.ShardID{}, FullShardConfHash: common.Hash{1}, Registry: layoutContext(registryproof.FreshB1).proofContext(), BlockHash: common.Hash{9}})
+	require.NoError(t, err)
+	require.EqualValues(t, registryproof.FreshB1, fresh.Request().Context.Layout)
 
 	target, err := NewTarget(TargetConfig{NetworkID: 3, PartitionID: 8, ShardID: types.ShardID{}, FullShardConfHash: common.Hash{1},
 		Registry: layoutContext(2).proofContext(), BlockHash: common.Hash{9}})

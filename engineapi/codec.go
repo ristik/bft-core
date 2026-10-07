@@ -46,15 +46,16 @@ type ProposalEnvelope struct {
 
 // SealCompanion is what ureth's
 // reth_unicity_execution::wire::SealCompanion deserializes. The wire contract
-// is exact: the keys are rootInput, witnesses and provenance; rootInput and
-// each witness are 0x-prefixed hex DATA strings; and ureth declares
-// deny_unknown_fields, so a fourth key is a hard decode error rather than
-// something ignored. TestSealCompanionVector pins the exact bytes.
+// uses rootInput, witnesses and provenance for existing deployments. The
+// inactive fresh B1 profile additionally carries b1Update as hex DATA. PR4 must
+// update ureth's deny_unknown_fields decoder before activation. The legacy wire
+// bytes remain pinned by TestSealCompanionVector.
 //
 // Provenance carries D2's "build" | "newPayload" | "devp2p" | "reexec"
 // label. It is not a commitment field, so the set is documented but not
 // enforced here, matching the ureth side.
 type SealCompanion struct {
+	B1Update   data   `json:"b1Update,omitempty"`
 	RootInput  data   `json:"rootInput"`
 	Witnesses  []data `json:"witnesses"`
 	Provenance string `json:"provenance"`
@@ -139,10 +140,12 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 		witnesses = []data{}
 	}
 	return json.Marshal(struct {
+		B1Update   data   `json:"b1Update,omitempty"`
 		RootInput  data   `json:"rootInput"`
 		Witnesses  []data `json:"witnesses"`
 		Provenance string `json:"provenance"`
 	}{
+		B1Update:   c.B1Update,
 		RootInput:  c.RootInput,
 		Witnesses:  witnesses,
 		Provenance: c.Provenance,
@@ -152,7 +155,8 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 // SealBuildInput is the sealBuildInput parameter of
 // engine_forkchoiceUpdatedWithSealV1, and the JSON envelope ureth's
 // reth_unicity_execution::wire::SealBuildInput deserializes under
-// deny_unknown_fields: exactly rootInput and transitions.
+// deny_unknown_fields: rootInput and transitions. Inactive fresh B1 adds
+// b1Update; the matching ureth decoder change is an activation prerequisite.
 //
 // RootInput is canonical CBOR for one root input. Transitions is the outer
 // committed-body array passed to ureth's execution path. It mirrors the
@@ -160,6 +164,7 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 // both from the same verified parent snapshot. An empty array means no
 // transition is pending, never that unauthenticated data was dropped.
 type SealBuildInput struct {
+	B1Update    data   `json:"b1Update,omitempty"`
 	RootInput   data   `json:"rootInput"`
 	Transitions []data `json:"transitions"`
 }
@@ -173,9 +178,11 @@ func (s SealBuildInput) MarshalJSON() ([]byte, error) {
 		transitions = []data{}
 	}
 	return json.Marshal(struct {
+		B1Update    data   `json:"b1Update,omitempty"`
 		RootInput   data   `json:"rootInput"`
 		Transitions []data `json:"transitions"`
 	}{
+		B1Update:    s.B1Update,
 		RootInput:   s.RootInput,
 		Transitions: transitions,
 	})

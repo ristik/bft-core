@@ -1,8 +1,8 @@
 package b1state
 
 // OperationalSlots is the one fresh deployment's operational field inventory.
-// It preserves field meaning while replacing the old slot domain. This is a
-// specification export, not the live registryproof reader or PR3 artifact.
+// It preserves field meaning while replacing the old slot domain. The fresh
+// proof reader and pinned artifact checks consume this same inventory.
 func OperationalSlots() []string {
 	return []string{
 		"genesisCommitment", "config.shardConfHash", "assignment.epoch", "assignment.rootEpoch",

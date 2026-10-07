@@ -169,7 +169,11 @@ type layout struct {
 func newLayout(version uint64, names []string, genesis []string) *layout {
 	l := &layout{version: version, names: names, idx: make(map[string]int, len(names)), genesis: genesis}
 	for i, name := range names {
-		k := crypto.Keccak256Hash([]byte(slotDomain + name))
+		domain := slotDomain
+		if version == FreshB1 {
+			domain = "unicity.seal-registry/"
+		}
+		k := crypto.Keccak256Hash([]byte(domain + name))
 		l.slotKeys = append(l.slotKeys, k)
 		l.trieKeys = append(l.trieKeys, crypto.Keccak256(k[:]))
 		l.idx[name] = i
@@ -190,6 +194,8 @@ func layoutFor(version uint64) (*layout, error) {
 		return layoutV1, nil
 	case LayoutVersion2:
 		return layoutV2, nil
+	case FreshB1:
+		return layoutB1, nil
 	}
 	return nil, fmt.Errorf("%w: unsupported registry layout %d", ErrContext, version)
 }
@@ -242,7 +248,7 @@ type Context struct {
 	ShardEpoch        uint64         // G.shardEpoch
 	RootEpoch         uint64         // G.rootEpoch
 	EVMGenesisHash    common.Hash    // evmGenesisHash
-	// Layout selects the registry layout: zero or 1 is sealRegistry/v1, 2 is sealRegistry/v2.
+	// Layout selects a historical reader (zero/1 or 2), or the inactive FreshB1 allocation.
 	Layout uint64
 	// Active is the authenticated active assignment of a v2 parent; see Assignment.
 	Active Assignment
@@ -269,7 +275,7 @@ func (c Context) check() error {
 type Evidence struct {
 	Header        []byte     // RLP(header)
 	AccountProof  [][]byte   // trie nodes for Keccak-256(RegistryAddress)
-	StorageProofs [][][]byte // exactly FieldCount entries, in SlotNames order
+	StorageProofs [][][]byte // exactly FieldCountFor(Layout) entries, in that layout's fixed-slot order
 }
 
 // limits are the §7.4 bounds; docs/design/f4c-registry-proof-reader.md gives the derivation.
@@ -433,6 +439,7 @@ type Snapshot struct {
 }
 
 type record struct {
+	storageRoot      common.Hash
 	f                Fields
 	context          Context     // the complete immutable local context Verify used
 	evmGenesisHash   common.Hash // the configured evmGenesisHash Verify compared the parent with
@@ -496,14 +503,16 @@ type Fields struct {
 	// against §5.4 instead of the parent-consistency rule.
 	Genesis bool
 
-	LayoutVersion     uint64
-	GenesisCommitment common.Hash
-	ShardConfHash     common.Hash
-	ShardEpoch        uint64
-	RootEpoch         uint64
-	// Layout is the registry layout the snapshot was read under (1 or 2).
+	B1Initialized, B1Network, B1WCert, B1Head, B1Count uint64
+	B1ProfileHash                                      common.Hash
+	LayoutVersion                                      uint64
+	GenesisCommitment                                  common.Hash
+	ShardConfHash                                      common.Hash
+	ShardEpoch                                         uint64
+	RootEpoch                                          uint64
+	// Layout is the local registry reader selector, including FreshB1.
 	Layout uint64
-	// ActiveConfHash and SpanCommitment exist in layout 2 only. ShardConfHash stays the immutable genesis hash.
+	// ActiveConfHash and SpanCommitment exist in layout 2 and FreshB1. ShardConfHash stays the immutable genesis hash.
 	ActiveConfHash                                                    common.Hash
 	SpanCommitment                                                    common.Hash
 	ClockRootRound                                                    uint64
@@ -534,10 +543,34 @@ func decodeFields(lay *layout, w []common.Hash) (Fields, error) {
 		name string
 		dst  *uint64
 	}{
-		{"layoutVersion", &s.LayoutVersion}, {"assignment.epoch", &s.ShardEpoch}, {"assignment.rootEpoch", &s.RootEpoch},
+		{"assignment.epoch", &s.ShardEpoch}, {"assignment.rootEpoch", &s.RootEpoch},
 		{"clock.rootRound", &s.ClockRootRound}, {"origin.rootEpoch", &s.OriginRootEpoch}, {"origin.timestamp", &s.OriginTimestamp},
 		{"round.authorized", &s.RoundAuthorized}, {"certified.round", &s.CertifiedRound}, {"phase", &s.Phase},
 		{"outcomes.round", &s.OutcomesRound}, {"transition.cursor", &s.TransitionCursor}, {"inbox.consumed", &s.InboxConsumed},
+	}
+	if lay.version == FreshB1 {
+		scalars = append(scalars, struct {
+			name string
+			dst  *uint64
+		}{"b1.initialized", &s.B1Initialized}, struct {
+			name string
+			dst  *uint64
+		}{"b1.network", &s.B1Network}, struct {
+			name string
+			dst  *uint64
+		}{"b1.wCert", &s.B1WCert}, struct {
+			name string
+			dst  *uint64
+		}{"b1.head", &s.B1Head}, struct {
+			name string
+			dst  *uint64
+		}{"b1.count", &s.B1Count})
+		s.B1ProfileHash = at("b1.profileHash")
+	} else {
+		scalars = append(scalars, struct {
+			name string
+			dst  *uint64
+		}{"layoutVersion", &s.LayoutVersion})
 	}
 	for _, sc := range scalars {
 		word := at(sc.name)
@@ -554,7 +587,7 @@ func decodeFields(lay *layout, w []common.Hash) (Fields, error) {
 	s.TransitionBodyID, s.TransitionGenesisID = at("transition.bodyID"), at("transition.genesisID")
 	s.TransitionFrozenID, s.TransitionCommitID = at("transition.frozenID"), at("transition.commitID")
 	s.TransitionFrozenParent, s.TransitionSuccessorTR = at("transition.frozenParent"), at("transition.successorTR")
-	if lay.version == LayoutVersion2 {
+	if lay.version == LayoutVersion2 || lay.version == FreshB1 {
 		s.ActiveConfHash, s.SpanCommitment = at("assignment.activeConfHash"), at("assignment.spanCommitment")
 	}
 
@@ -646,17 +679,19 @@ func (l limits) verify(c Context, parentHash common.Hash, ev Evidence) (Snapshot
 	s.ParentHash, s.Number, s.StateRoot = parentHash, h.Number.Uint64(), h.Root
 
 	// Step 5. Zero-valued fields mean their genesis values only after these hold.
-	if s.LayoutVersion == 0 || s.GenesisCommitment == (common.Hash{}) {
+	if (lay.version != FreshB1 && s.LayoutVersion == 0) || (lay.version == FreshB1 && s.B1Initialized != 1) || s.GenesisCommitment == (common.Hash{}) {
 		return Snapshot{}, fmt.Errorf("%w: at block %d", ErrNotInitialized, s.Number)
 	}
 	switch {
-	case s.LayoutVersion != lay.version:
+	case lay.version == FreshB1 && (s.B1Network == 0 || s.B1Network > 65535 || s.B1WCert >= 16 || s.B1Head > s.B1WCert || s.B1Count == 0 || s.B1Count > s.B1WCert+1 || s.B1ProfileHash == (common.Hash{})):
+		return Snapshot{}, ErrConfiguration
+	case lay.version != FreshB1 && s.LayoutVersion != lay.version:
 		return Snapshot{}, fmt.Errorf("%w: layout version %d, expected %d", ErrConfiguration, s.LayoutVersion, lay.version)
 	case s.GenesisCommitment != c.GenesisCommitment:
 		return Snapshot{}, fmt.Errorf("%w: genesis commitment %s, configured %s", ErrConfiguration, s.GenesisCommitment, c.GenesisCommitment)
 	case s.ShardConfHash != c.FullShardConfHash:
 		return Snapshot{}, fmt.Errorf("%w: shard configuration hash %s, configured %s", ErrConfiguration, s.ShardConfHash, c.FullShardConfHash)
-	case lay.version == LayoutVersion2:
+	case lay.version == LayoutVersion2 || lay.version == FreshB1:
 		if err := verifyAssignmentV2(s, c); err != nil {
 			return Snapshot{}, err
 		}
@@ -666,11 +701,11 @@ func (l limits) verify(c Context, parentHash common.Hash, ev Evidence) (Snapshot
 	switch {
 	case s.InboxConsumed != 0:
 		return Snapshot{}, fmt.Errorf("%w: unsupported inbox cursor", ErrConfiguration)
-	case s.TransitionCursor == 0 && lay.version == LayoutVersion2:
+	case s.TransitionCursor == 0 && (lay.version == LayoutVersion2 || lay.version == FreshB1):
 		if s.RootEpoch != c.RootEpoch || s.SpanCommitment != (common.Hash{}) || s.TransitionBodyID != (common.Hash{}) || s.TransitionGenesisID != (common.Hash{}) || s.TransitionFrozenID != (common.Hash{}) || s.TransitionCommitID != (common.Hash{}) || s.TransitionFrozenParent != (common.Hash{}) || s.TransitionSuccessorTR != (common.Hash{}) {
 			return Snapshot{}, fmt.Errorf("%w: missing epoch transition", ErrConfiguration)
 		}
-	case s.TransitionCursor > 0 && lay.version == LayoutVersion2:
+	case s.TransitionCursor > 0 && (lay.version == LayoutVersion2 || lay.version == FreshB1):
 		// Each acknowledgement advances the root epoch by at least one: exactly one for an ordinary or
 		// root-only step, by the folded span for a supersession.
 		if s.TransitionCursor > ^uint64(0)-c.RootEpoch || s.RootEpoch < c.RootEpoch+s.TransitionCursor || s.TransitionBodyID == (common.Hash{}) || s.TransitionGenesisID == (common.Hash{}) || s.TransitionFrozenID == (common.Hash{}) || s.TransitionCommitID == (common.Hash{}) || s.TransitionFrozenParent == (common.Hash{}) || s.TransitionSuccessorTR == (common.Hash{}) {
@@ -712,7 +747,7 @@ func (l limits) verify(c Context, parentHash common.Hash, ev Evidence) (Snapshot
 			return Snapshot{}, fmt.Errorf("%w: outcomes round %d for authorized round %d", ErrNotFinalized, s.OutcomesRound, s.RoundAuthorized)
 		}
 	}
-	return Snapshot{r: &record{f: s, context: c, evmGenesisHash: c.EVMGenesisHash, headerParentHash: h.ParentHash}}, nil
+	return Snapshot{r: &record{storageRoot: account.Root, f: s, context: c, evmGenesisHash: c.EVMGenesisHash, headerParentHash: h.ParentHash}}, nil
 }
 
 func (l *layout) isGenesisField(i int) bool {

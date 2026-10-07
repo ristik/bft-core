@@ -3,6 +3,7 @@ package evmroot
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 )
 
@@ -107,6 +108,8 @@ func (o RootOriginV2) Class() (OriginClassV2, error) {
 }
 func (o RootOriginV2) Validate() error { _, err := o.Class(); return err }
 
+var ErrB1UpdateHash = errors.New("evmroot: B1 update hash must be 32 bytes")
+
 // RootInputV2 is the inactive v2 tuple. It deliberately does not share v1 validation.
 type RootInputV2 struct {
 	Version, NetworkID, PartitionID        uint64
@@ -116,6 +119,7 @@ type RootInputV2 struct {
 	Origin                                 RootOriginV2
 	TE                                     TechnicalRecord
 	Transitions                            [][]byte
+	B1UpdateHash                           []byte
 }
 
 func (ri RootInputV2) canonicalBody() cArray {
@@ -124,11 +128,18 @@ func (ri RootInputV2) canonicalBody() cArray {
 	for i, b := range ri.Transitions {
 		d[i] = cBytes(b)
 	}
-	return cArray{cUint(ri.Version), cUint(ri.NetworkID), cUint(ri.PartitionID), cBytes(ri.ShardID), cUint(ri.Round), cUint(ri.CertifiedEpoch), cUint(ri.AuthorizedEpoch), cBytes(ri.ParentHash), ri.Origin.canonicalBody(), te, d}
+	body := cArray{cUint(ri.Version), cUint(ri.NetworkID), cUint(ri.PartitionID), cBytes(ri.ShardID), cUint(ri.Round), cUint(ri.CertifiedEpoch), cUint(ri.AuthorizedEpoch), cBytes(ri.ParentHash), ri.Origin.canonicalBody(), te, d}
+	if ri.B1UpdateHash != nil {
+		body = append(body, cBytes(ri.B1UpdateHash))
+	}
+	return body
 }
 func (ri RootInputV2) Encode() []byte    { return marshalCBOR(ri.canonicalBody()) }
 func (ri RootInputV2) ExtraData() Hash32 { return sha256.Sum256(ri.Encode()) }
 func (ri RootInputV2) Validate() error {
+	if ri.B1UpdateHash != nil && len(ri.B1UpdateHash) != 32 {
+		return ErrB1UpdateHash
+	}
 	if ri.Version != ProfileVersionV2 {
 		return fmt.Errorf("evmroot: v2 rootInput version %d", ri.Version)
 	}
