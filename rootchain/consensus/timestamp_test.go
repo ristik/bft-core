@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
@@ -151,6 +152,9 @@ func TestCertifiedHistoryHasNoClockCheck(t *testing.T) {
 func TestManagerTimestampBuilderAndEarlyRefusal(t *testing.T) {
 	net := testnetwork.NewRootMockNetwork()
 	cm, node, _ := initConsensusManager(t, net)
+	// This test drives proposals without Run, so allow its certificate batches
+	// to queue even when a mutation lets invalid proposals reach processQC.
+	cm.ucSink = make(chan []*certification.CertificationResponse, 4)
 	ctx := context.Background()
 	qc := cm.blockStore.GetHighQc()
 	parent, err := cm.blockStore.Block(qc.GetRound())
