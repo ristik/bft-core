@@ -17,8 +17,8 @@ var (
 
 // Clock imports UC time: the timestamp of the quorum-approved unicity seal of a verified root certificate, read from the same
 // RootOrigin the executed block binds (no EVM timestamp, no operator-supplied time). Imports must stay on one lineage and the time may
-// not decrease. The clock enforces what custody and the registry rely on; whether a root proposer's timestamp is itself bounded is a
-// property of root consensus, not of this import.
+// not decrease. The seal timestamp is quorum-approved wall-clock time, bounded by root consensus (monotonic, voter clock skew:
+// ristik/bft-core#445); the import keeps it monotonic on one lineage as well, which is what custody and the registry rely on.
 type Clock struct {
 	started             bool
 	network, epoch, rnd uint64

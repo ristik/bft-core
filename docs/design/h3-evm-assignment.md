@@ -246,11 +246,10 @@ in production, and there is no migration (greenroom, one format).
   timestamp of the verified root certificate's `RootOrigin` (`ReferenceTime`), imported on one lineage (network, then epoch and round) and
   never backwards; a record cannot be ordered before a time was imported. `rootrecords/testdata/records-vectors.json` is produced by this
   projection and replayed verbatim by the custody contracts' tests.
-- **Open: the root's own timestamp rule.** The UC seal timestamp is the proposer's wall clock (`types.NewTimestamp()` in the proposal
-  builder) and block validation only requires it nonzero: no rule bounds it against the parent block or a local clock. The import above
-  enforces monotonicity on the importer's side, but a single proposer could still commit a far-future time that every honest importer
-  must then accept. Bounding it (greater than the parent QC's time, within a skew of the validator's clock) is a root consensus rule tracked
-  separately as ristik/bft-core#445 and is not part of this change.
+- **UC time is quorum-approved wall-clock time.** The seal timestamp is the root proposer's wall clock, approved by the voting quorum.
+  Root consensus bounds it by a monotonic rule against the parent and a 30 s voter clock skew (ristik/bft-core#445, being implemented
+  now), so the time custody gates exits on is a bounded, quorum-attested measure, not an operator or EVM value. The importer
+  additionally keeps it monotonic on one lineage; that check is defence in depth and does not replace the root rule.
 - **Not implemented here:** the on-chain `IRootRecords` implementation in the SealRegistry and its feed from Ureth; the reference model
   above and the vectors are what it must match. The Closure and Retirement digest words (exposure, key history, reference digest) are
   contract-derived and opaque labels in the vectors.
