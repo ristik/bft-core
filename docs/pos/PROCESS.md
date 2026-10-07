@@ -15,7 +15,7 @@
 4. R0 approves the integration branch and reference PR. Before R0 closes, D1 exploration and
    read-only code inventories can proceed, but do not merge dependent protocol implementations.
    D2 and D3 are the first independent design tracks after D1. Future production audit work waits
-   until public TN-S is reached; internal design/implementation review continues throughout.
+   until public TN-S #430 is reached; internal design/implementation review continues throughout.
 5. Use an isolated branch/worktree per ticket from the accepted integration base. Do not assume
    main contains the prototype. Use draft stacked PRs only with explicit base/dependency links.
    Never combine an unrelated local change into a ticket commit.
@@ -72,11 +72,11 @@ DN-0/M1 and M0 remain historical acceptance. DN-1/M2 covers recoverable PoA devn
 DN-B/M4B covers the supported private bridge; DN-S/M4S covers shadow and separate isolated
 authoritative PoS. Preserve each closed ticket's evidence and explicit limitations.
 
-The public network milestones must be reached in order: **TN-1 -> TN-B -> TN-S**. TN-1 includes
+The public network milestones must be reached in order: **TN-1 #428 -> TN-B #429 -> TN-S #430**. TN-1 #428 includes
 public access, a UCT gas faucet, exact test manifests, internal review, measured limits and initial
 one-bare-metal-server operations. Independent runbook execution does not mean independent
-physical hosts. TN-B adds fake-value bridging with common SDK epoch/weight support and a working
-exit for every admitted history. TN-S adds authoritative public PoS, required funded operator
+physical hosts. TN-B #429 adds fake-value bridging with common SDK epoch/weight support and a working
+exit for every admitted history. TN-S #430 adds authoritative public PoS, required funded operator
 rewards, ordinary EVM evidence, protected claims and integrated bridge/PoS acceptance.
 
 Greenroom applies through testnet: arbitrary resets, no backwards compatibility or obligation to
@@ -84,16 +84,16 @@ preserve assets, and no continuity-within-a-generation promise. State this publi
 of the network's own history, authenticated transitions and custody invariants are still required.
 Use a fresh identity/genesis for a reset; do not disguise discarded history as a valid continuation.
 
-Future mainnet preparation starts after TN-S. Production T5/T6, X1-MAIN, MN-POLICY/MN-OPS,
+Future mainnet preparation starts after TN-S #430. Production T5/T6, X1-MAIN #440, MN-POLICY #439/MN-OPS #441,
 X2/X3/X5, T7/TGE, real-value custody and final governance authority belong there. Mainnet bridge
 readiness MN-B/M5B precedes T7/MN-1/M3, so TGE cannot be ready without bridging. Remove the old
 M3 -> M5B and T7 -> B9 ordering. Production PoS remains a separate MN-S/M5S gate and authorization.
 
 When splitting a ticket, append an `Amended 2026-10-07 (stage restructure)` note identifying the
 new acceptance owner, prerequisites and retained scope; do not rewrite away earlier obligations.
-T5-TEST/T6-TEST/X1-TEST/P8-TEST provide internal development/testnet slices. Production parents
+T5-TEST #431/T6-TEST #432/X1-TEST #433/P8-TEST #437 provide internal development/testnet slices. Production parents
 remain open until their own obligations are met. B3/B5 private-profile closure must identify
-transferred public-profile cases under B-TEST. A label or milestone rename is never closure evidence.
+transferred public-profile cases under B-TEST #438. A label or milestone rename is never closure evidence.
 
 Keep full semantic prerequisites in issue bodies and recompute native blocking edges after a
 split. Validate acyclicity and reachability, including removal of every I-track path to active gates.
