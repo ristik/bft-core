@@ -231,6 +231,7 @@ in production, and there is no migration (greenroom, one format).
   chain, its head and the committed recovery count from that, so a restart, a new attempt or an abort cannot reset the allowance and an
   uncommitted retry consumes none. One committed recovery per frozen parent (`ErrRecoveryUsed`); no primary may replace a committed primary
   (`ErrPendingPrimary`); the unacknowledged chain is at most two (`ErrSpan`, `handoff.MaxSupersessionSpan = 2`).
-- Not in this part: the Ureth decoder and Registry limit (two), proof-independent progress/closure and UC-time import, paired Ureth replay of
-  the vectors in `evmassign/testdata/h3-vectors.json` (now with signed lifecycle fixtures), and reconciling the NodeID encoding with the
-  custody contracts (`bytes32` there, strings here).
+- **NodeID encoding for custody.** Root chain NodeIDs stay libp2p peer-ID strings here. The custody contracts treat them as opaque
+  `bytes32`, so the one canonical image is `evmassign.NodeIDWord(id) = keccak256(utf8(id))`: derived at the boundary, never carried or
+  signed in place of the string, injective up to collisions, and tied to the key by the key hash that sits beside it in every signed
+  binding. Keys stay 33-byte compressed secp256k1.
