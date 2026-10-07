@@ -30,9 +30,7 @@ func (f *planFixture) weightedNext() types.RootTrustBaseV1 {
 	next.Epoch = 2
 	next.RootNodes = make([]*types.NodeInfo, len(f.old.RootNodes))
 	for i, n := range f.old.RootNodes {
-		c := *n
-		c.Stake = 1
-		next.RootNodes[i] = &c
+		next.RootNodes[i] = &types.NodeInfo{NodeID: n.NodeID, SigKey: n.SigKey, Stake: 1}
 	}
 	next.RootNodes[0].Stake = 6
 	return next
