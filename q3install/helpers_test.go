@@ -84,6 +84,9 @@ type fakeComponent struct {
 	k Step
 }
 
+// errHoldsAnother is the fake participant's refusal to install over another activation's decisions.
+var errHoldsAnother = errors.New("holds another activation")
+
 func (f fakeComponent) Install(_ context.Context, a Activation) error {
 	if err := f.c.event(); err != nil {
 		return err
@@ -95,7 +98,7 @@ func (f fakeComponent) Install(_ context.Context, a Activation) error {
 		return err
 	}
 	if cur := f.s.held[heldKey{f.k, a.Claim.Epoch}]; len(cur) != 0 && !bytes.Equal(cur, a.ID[:]) {
-		return fmt.Errorf("%s holds another activation", f.k)
+		return fmt.Errorf("%s: %w", f.k, errHoldsAnother)
 	}
 	if f.k > StepRoot { // each step runs only after the previous step's marker is durable
 		var v []byte

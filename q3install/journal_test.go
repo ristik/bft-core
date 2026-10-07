@@ -289,7 +289,7 @@ func TestStoreConflict(t *testing.T) {
 		s := newStores()
 		s.held[heldKey{StepSafety, 5}] = []byte("a different activation's decisions")
 		err := s.mustOpen(t).Install(ctx, c, bundleFor(c))
-		require.Error(t, err)
+		require.ErrorIs(t, err, errHoldsAnother)
 		require.Equal(t, []Step{StepRoot, StepSafety}, s.order, "later steps do not run")
 		require.NotContains(t, s.keys(t), string(key(5, "step/2")))
 		require.ErrorIs(t, s.mustOpen(t).Gate(ctx, c), ErrIncomplete)
@@ -298,8 +298,9 @@ func TestStoreConflict(t *testing.T) {
 
 func TestOnlyOneActivationInFlight(t *testing.T) {
 	s := newStores()
-	s.installErr[StepShard] = errors.New("down")
-	require.Error(t, s.mustOpen(t).Install(ctx, claim(5), bundleFor(claim(5))))
+	down := errors.New("down")
+	s.installErr[StepShard] = down
+	require.ErrorIs(t, s.mustOpen(t).Install(ctx, claim(5), bundleFor(claim(5))), down)
 	delete(s.installErr, StepShard)
 	require.ErrorIs(t, s.mustOpen(t).Install(ctx, claim(6), bundleFor(claim(6))), ErrBusy)
 	require.NoError(t, s.mustOpen(t).Recover(ctx, lookup(claim(5))))
@@ -417,8 +418,9 @@ func TestDamagedJournalRefusesOpen(t *testing.T) {
 	})
 	t.Run("two unfinished", func(t *testing.T) {
 		s := newStores()
-		s.installErr[StepShard] = errors.New("down")
-		require.Error(t, s.mustOpen(t).Install(ctx, claim(5), bundleFor(claim(5))))
+		down := errors.New("down")
+		s.installErr[StepShard] = down
+		require.ErrorIs(t, s.mustOpen(t).Install(ctx, claim(5), bundleFor(claim(5))), down)
 		other := claim(6)
 		id := ActivationID(other, bundleFor(other))
 		raw, err := bfttypes.Cbor.Marshal(stageDisk{Epoch: 6, Start: other.Start, BodyID: other.BodyID[:], CommitID: other.CommitID[:],
