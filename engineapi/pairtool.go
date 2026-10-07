@@ -188,7 +188,7 @@ func RunPairControl(ctx context.Context, engineURL string, secret Secret, ethURL
 	attrs := UnicityPayloadAttributes{PayloadAttributesV3: PayloadAttributesV3{Timestamp: quantity(timestamp), PrevRandao: randao,
 		SuggestedFeeRecipient: recipient, Withdrawals: []WithdrawalV1{}, ParentBeaconBlockRoot: beacon}}
 	copy(attrs.Commitment[:], extra)
-	input := SealBuildInput{RootInput: rootInput, Transitions: transitions, Pair: evidence}
+	input := SealBuildInput{RootInput: rootInput, Transitions: transitions, Pair: evidence, PairEmpty: kind == ControlMissingEvidence}
 	engine := NewClient(engineURL, secret)
 	resp, err := engine.ForkchoiceUpdatedWithSealV1(ctx, ForkchoiceStateV1{HeadBlockHash: parentHash, SafeBlockHash: parentHash, FinalizedBlockHash: parentHash}, &attrs, input)
 	switch {

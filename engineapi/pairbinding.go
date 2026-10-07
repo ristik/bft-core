@@ -267,7 +267,19 @@ func (c *PairConfig) activationID(derived rootinput.ResultV2, conf [32]byte) ([3
 // pairWire is the JSON field the binding travels in, on the build input and on the seal companion. It is embedded in both request types so the
 // key name exists nowhere else; omitted when empty, which keeps every request to a client without ureth#52 byte-identical to what it was.
 type pairWire struct {
-	PairBinding data `json:"pairBinding,omitempty"`
+	PairBinding *data `json:"pairBinding,omitempty"`
+}
+
+// pairField is the wire value of a binding: absent when there is none, present (possibly empty) when the request must carry the field. A
+// control that withholds the evidence sends the field empty, so the execution client's own missing-evidence guard decides, not its schema.
+func pairField(binding data, explicit bool) *data {
+	if len(binding) == 0 && !explicit {
+		return nil
+	}
+	if binding == nil {
+		binding = data{}
+	}
+	return &binding
 }
 
 // pairConfigWire are the pins the execution client echoes in sealConfigV1.

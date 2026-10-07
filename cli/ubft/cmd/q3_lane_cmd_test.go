@@ -148,9 +148,13 @@ func TestACandidateDirectoryHoldsTheFilesTheLaneReads(t *testing.T) {
 type laneServices struct {
 	root, shard, eth *httptest.Server
 	rootStaged       *[32]byte
+	rootStatus       func(*q3StagedResponse) // edits what the root reports as staged
 	genesis          string
 	code             string
 	rootRefuses      bool
+	rootBody         [32]byte
+	rootAttempt      uint64
+	rootConfig       [32]byte
 }
 
 type stageFunc func(body []byte, candidate [32]byte, attempt uint64) error
@@ -159,31 +163,56 @@ func (f stageFunc) StageV3Candidate(body []byte, candidate [32]byte, attempt uin
 	return f(body, candidate, attempt)
 }
 
+// newShardStagingServer is a shard node's staging endpoints for the given chain; reportAs edits the staged record the node reports.
+func newShardStagingServer(cfg q3format.ProtocolConfig, reportAs func(*q3StagedResponse)) *httptest.Server {
+	st := &shardQ3Staging{cfg: func() (q3format.ProtocolConfig, error) { return cfg, nil }}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/q3/status", q3Endpoint(func(context.Context, json.RawMessage) (any, error) {
+		out, err := st.status()
+		if err == nil && out.Staged != nil && reportAs != nil {
+			reportAs(out.Staged)
+		}
+		return out, err
+	}))
+	mux.HandleFunc("POST /api/v1/q3/stage", q3Endpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
+		var req shardQ3StageRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, st.Stage(req)
+	}))
+	return httptest.NewServer(mux)
+}
+
 func newLaneServices(t *testing.T, body q3format.BodyV3, staged [32]byte) *laneServices {
 	t.Helper()
 	s := &laneServices{rootStaged: &staged, genesis: "0x" + hex.EncodeToString(bytes.Repeat([]byte{0x52}, 32)), code: "0x6001600155"}
 	rootMux := http.NewServeMux()
-	rootMux.HandleFunc("POST /api/v1/handoff/q3-stage", rootQ3StageHandler(stageFunc(func(b []byte, digest [32]byte, _ uint64) error {
+	rootMux.HandleFunc("POST /api/v1/handoff/q3-stage", rootQ3StageHandler(stageFunc(func(b []byte, digest [32]byte, attempt uint64) error {
 		if s.rootRefuses {
 			return errors.New("the candidate is not the next epoch of this chain")
 		}
-		if _, err := q3format.DecodeBody(b); err != nil {
+		decoded, err := q3format.DecodeBody(b)
+		if err != nil {
 			return err
 		}
 		*s.rootStaged = digest
+		s.rootBody, s.rootAttempt, s.rootConfig = decoded.Identity(), attempt, decoded.Config.Identity()
 		return nil
 	})))
 	rootMux.HandleFunc("POST /api/v1/q3/status", q3Endpoint(func(context.Context, json.RawMessage) (any, error) {
 		out := q3StatusResponse{Network: body.Network, Genesis: hex.EncodeToString(body.Config.Genesis[:])}
 		if *s.rootStaged != ([32]byte{}) {
-			out.Staged = &q3StagedResponse{CandidateDigest: hex.EncodeToString(s.rootStaged[:])}
+			out.Staged = &q3StagedResponse{CandidateDigest: hex.EncodeToString(s.rootStaged[:]), BodyID: hex.EncodeToString(s.rootBody[:]),
+				Attempt: s.rootAttempt, Config: hex.EncodeToString(s.rootConfig[:])}
+			if s.rootStatus != nil {
+				s.rootStatus(out.Staged)
+			}
 		}
 		return out, nil
 	}))
 	s.root = httptest.NewServer(rootMux)
-	shardMux := http.NewServeMux()
-	(&shardQ3Staging{cfg: func() (q3format.ProtocolConfig, error) { return body.Config, nil }}).register(shardMux)
-	s.shard = httptest.NewServer(shardMux)
+	s.shard = newShardStagingServer(body.Config, nil)
 	s.eth = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ Method string }
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -243,29 +272,43 @@ func TestEveryMembersReadinessReceiptVerifiesAndEachRefusalWritesNoReceipt(t *te
 		mutate(s)
 		out := filepath.Join(dir, "refused-"+name+".json")
 		err := runReadiness(t, ents[1], candidate, s, genesis, code, out)
-		if cause != nil {
-			require.ErrorIs(t, err, cause, name)
-		} else {
-			require.Error(t, err, name)
-			require.True(t, strings.Contains(err.Error(), "another network, genesis or protocol tuple") || strings.Contains(err.Error(), "bft node"), "%s: %v", name, err)
-		}
+		require.ErrorIs(t, err, cause, name)
 		_, statErr := os.Stat(out)
 		require.True(t, os.IsNotExist(statErr), "%s: no receipt is written", name)
 	}
-	refused("the root refuses the candidate", nil, func(s *laneServices) { s.rootRefuses = true }, genesisPin, codePin)
+	refused("the root refuses the candidate", ErrQ3StageRefused, func(s *laneServices) { s.rootRefuses = true }, genesisPin, codePin)
 	refused("execution genesis is not the pinned one", q3ready.ErrExecutionIdentity, func(s *laneServices) {
 		s.genesis = "0x" + hex.EncodeToString(bytes.Repeat([]byte{0x53}, 32))
 	}, genesisPin, codePin)
 	refused("registry code is not the pinned one", q3ready.ErrExecutionIdentity, func(s *laneServices) { s.code = "0x6002" }, genesisPin, codePin)
 	refused("the pin is the wrong value", q3ready.ErrExecutionIdentity, func(*laneServices) {}, "0x"+hex.EncodeToString(bytes.Repeat([]byte{0x54}, 32)), codePin)
-	refused("the shard node refuses another chain's candidate", nil, func(s *laneServices) {
+	refused("the shard node refuses another chain's candidate", ErrQ3StageRefused, func(s *laneServices) {
 		other := body
 		other.Config.Genesis[0] ^= 1
 		s.shard.Close()
-		mux := http.NewServeMux()
-		(&shardQ3Staging{cfg: func() (q3format.ProtocolConfig, error) { return other.Config, nil }}).register(mux)
-		s.shard = httptest.NewServer(mux)
+		s.shard = newShardStagingServer(other.Config, nil)
 	}, genesisPin, codePin)
+	// the staged context beyond the digest: each service's report differs from the control in exactly one of body, attempt and configuration
+	for name, edit := range map[string]func(*q3StagedResponse){
+		"body": func(r *q3StagedResponse) {
+			raw, _ := hex.DecodeString(r.BodyID)
+			raw[0] ^= 1
+			r.BodyID = hex.EncodeToString(raw)
+		},
+		"attempt": func(r *q3StagedResponse) { r.Attempt++ },
+		"config": func(r *q3StagedResponse) {
+			raw, _ := hex.DecodeString(r.Config)
+			raw[0] ^= 1
+			r.Config = hex.EncodeToString(raw)
+		},
+	} {
+		edit := edit
+		refused("the root reports another staged "+name, q3ready.ErrComponent, func(s *laneServices) { s.rootStatus = edit }, genesisPin, codePin)
+		refused("the shard node reports another staged "+name, q3ready.ErrComponent, func(s *laneServices) {
+			s.shard.Close()
+			s.shard = newShardStagingServer(body.Config, edit)
+		}, genesisPin, codePin)
+	}
 }
 
 func TestAPlanSubmittedWithReceiptsCarriesThemAsOneCanonicalSet(t *testing.T) {
@@ -349,7 +392,7 @@ func TestTheEvidenceCommandsWriteWhatTheRootServes(t *testing.T) {
 	// the committed certificate's signed weight 6 is below the threshold 7: no evidence file is written
 	signed = 7
 	_, err = runCLI(t, "q3", "signers", "--root-rpc", srv.URL, "--out", filepath.Join(dir, "signers.json"))
-	require.ErrorContains(t, err, "below the threshold")
+	require.ErrorIs(t, err, ErrQ3SignerQuorum)
 	_, statErr := os.Stat(filepath.Join(dir, "signers.json"))
 	require.True(t, os.IsNotExist(statErr))
 	signed = 6
@@ -358,4 +401,32 @@ func TestTheEvidenceCommandsWriteWhatTheRootServes(t *testing.T) {
 	raw, err = os.ReadFile(filepath.Join(dir, "signers.json"))
 	require.NoError(t, err)
 	require.Contains(t, string(raw), `"weight": 6`)
+}
+
+// The shard node's own refusals to stage, each with its sentinel and nothing staged.
+func TestTheShardNodeRefusesToStageWhatIsNotACandidateOfItsChain(t *testing.T) {
+	_, body, cand := laneCommittee(t)
+	st := &shardQ3Staging{cfg: func() (q3format.ProtocolConfig, error) { return body.Config, nil }}
+	good := shardQ3StageRequest{Body: cand.Body, Candidate: cand.Candidate[:], Attempt: 3}
+
+	short := good
+	short.Candidate = []byte{1}
+	require.ErrorIs(t, st.Stage(short), ErrQ3StageDigest)
+	garbled := good
+	garbled.Body = []byte("not a body")
+	require.ErrorIs(t, st.Stage(garbled), ErrQ3StageBody)
+	other := body
+	other.Config.Genesis[0] ^= 1
+	foreign := good
+	foreign.Body = other.Encode()
+	require.ErrorIs(t, st.Stage(foreign), ErrQ3StageChain)
+	status, err := st.status()
+	require.NoError(t, err)
+	require.Nil(t, status.Staged, "a refused candidate is not staged")
+
+	require.NoError(t, st.Stage(good))
+	status, err = st.status()
+	require.NoError(t, err)
+	require.EqualValues(t, 3, status.Staged.Attempt)
+	require.Equal(t, hex.EncodeToString(cand.Candidate[:]), status.Staged.CandidateDigest)
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
 
@@ -208,14 +209,18 @@ func TestTrustBaseGenerateWithExactRootWeights(t *testing.T) {
 		}
 	}
 
-	for name, tc := range map[string][]string{
-		"too few weights":  {"--root-weights", "6,1,1"},
-		"too many weights": {"--root-weights", "6,1,1,1,1"},
-		"a zero weight":    {"--root-weights", "6,1,1,0"},
-		"over the cap":     {"--root-weights", "1099511627777,1,1,1"},
+	for name, tc := range map[string]struct {
+		args  []string
+		cause error
+	}{
+		"too few weights":  {[]string{"--root-weights", "6,1,1"}, ErrRootWeightsCount},
+		"too many weights": {[]string{"--root-weights", "6,1,1,1,1"}, ErrRootWeightsCount},
+		"not a number":     {[]string{"--root-weights", "6,1,x,1"}, ErrRootWeightsParse},
+		"a zero weight":    {[]string{"--root-weights", "6,1,1,0"}, weightvalidation.ErrWeight},
+		"over the cap":     {[]string{"--root-weights", "1099511627777,1,1,1"}, weightvalidation.ErrWeight},
 	} {
-		_, err := generate(tc...)
-		require.Error(t, err, name)
+		_, err := generate(tc.args...)
+		require.ErrorIs(t, err, tc.cause, name)
 	}
 }
 

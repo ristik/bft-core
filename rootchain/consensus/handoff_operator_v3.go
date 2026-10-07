@@ -135,7 +135,7 @@ func (x *ConsensusManager) PlanV3Candidate(next *types.RootTrustBaseV1, proposal
 	x.v3Planned.Store(&c)
 	// The candidate this validator derived is the one its operator will have the entity attest readiness for: the staged value a
 	// readiness check compares with the candidate a receipt binds. It is a report of what this node holds, not an authority.
-	x.q3Staged.Store(&Q3Staged{CandidateDigest: c.Candidate, BodyID: c.Body.Identity(), Attempt: c.Attempt})
+	x.q3Staged.Store(&Q3Staged{CandidateDigest: c.Candidate, BodyID: c.Body.Identity(), Attempt: c.Attempt, Config: c.Body.Config.Identity()})
 	return c, nil
 }
 
@@ -144,6 +144,7 @@ type Q3Staged struct {
 	CandidateDigest [32]byte
 	BodyID          [32]byte
 	Attempt         uint64
+	Config          [32]byte // identity of the protocol configuration the staged body carries
 }
 
 // Q3Status is what this validator reports about itself for a readiness check: the chain it is bound to and the candidate it has staged.
@@ -309,6 +310,6 @@ func (x *ConsensusManager) StageV3Candidate(body []byte, candidate [32]byte, att
 	if old == nil || b.Config != cfg || b.Network != uint64(old.NetworkID) || b.Epoch != old.Epoch+1 {
 		return fmt.Errorf("%w: the candidate is not the next epoch of this chain", ErrHandoffApproval)
 	}
-	x.q3Staged.Store(&Q3Staged{CandidateDigest: candidate, BodyID: b.Identity(), Attempt: attempt})
+	x.q3Staged.Store(&Q3Staged{CandidateDigest: candidate, BodyID: b.Identity(), Attempt: attempt, Config: b.Config.Identity()})
 	return nil
 }

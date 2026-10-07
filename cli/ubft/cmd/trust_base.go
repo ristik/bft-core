@@ -3,6 +3,7 @@ package cmd
 import (
 	"cmp"
 	"crypto"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -259,17 +260,24 @@ func (f *trustBaseFlags) loadTrustBases(baseFlags *baseFlags) ([]*types.RootTrus
 	return trustBases, nil
 }
 
+var (
+	// ErrRootWeightsCount is returned when --root-weights does not name one weight per --node-info file.
+	ErrRootWeightsCount = errors.New("--root-weights: wrong number of weights")
+	// ErrRootWeightsParse is returned when a --root-weights entry is not an unsigned integer.
+	ErrRootWeightsParse = errors.New("--root-weights: weight is not an unsigned integer")
+)
+
 // applyRootWeights sets the exact weights of a weighted (Q3) committee, one per node in order. The result must be a valid weighted root
 // committee: bounded positive weights, unique ids and keys, a total within the cap. The threshold the trust base then derives is the
 // weighted one (floor(2W/3)+1) unless --quorum-threshold names another.
 func applyRootWeights(nodes []*types.NodeInfo, raw []string) error {
 	if len(raw) != len(nodes) {
-		return fmt.Errorf("--root-weights names %d weights for %d --node-info files", len(raw), len(nodes))
+		return fmt.Errorf("%w: %d weights for %d --node-info files", ErrRootWeightsCount, len(raw), len(nodes))
 	}
 	for i, n := range nodes {
 		w, err := strconv.ParseUint(strings.TrimSpace(raw[i]), 10, 64)
 		if err != nil {
-			return fmt.Errorf("--root-weights: weight %d %q is not an unsigned integer", i+1, raw[i])
+			return fmt.Errorf("%w: weight %d %q is not an unsigned integer", ErrRootWeightsParse, i+1, raw[i])
 		}
 		n.Stake = w
 	}

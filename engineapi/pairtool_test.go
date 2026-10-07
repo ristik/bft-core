@@ -105,10 +105,30 @@ func TestEachControlSubmitsTheRetainedBuildWithExactlyOneThingChanged(t *testing
 			require.NoError(t, json.Unmarshal(args[0], &state))
 			require.NoError(t, json.Unmarshal(args[1], &attrs))
 			raw = args[2]
-			if accept {
-				return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid}, PayloadID: &pid}, nil
+			// the execution client's schema (ureth#52 wire.rs): the binding field is required, and then each comparison has its own variant
+			var wire struct {
+				PairBinding *data `json:"pairBinding"`
 			}
-			msg := "pair binding refused: Refused"
+			require.NoError(t, json.Unmarshal(args[2], &wire))
+			if wire.PairBinding == nil {
+				return nil, &rpcError{Code: -32602, Message: "invalid params: missing field `pairBinding`"}
+			}
+			verdict := "Missing"
+			if len(*wire.PairBinding) != 0 {
+				got, err := DecodePairBinding(*wire.PairBinding)
+				require.NoError(t, err)
+				switch want := c.binding; {
+				case got.ParentHash != want.ParentHash:
+					verdict = "ParentHashMismatch"
+				case got.SubjectID != want.SubjectID:
+					verdict = "JobMismatch"
+				case got.RootInputHash != want.RootInputHash:
+					verdict = "RootInputMismatch"
+				default:
+					return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid}, PayloadID: &pid}, nil
+				}
+			}
+			msg := "pair binding refused: " + verdict
 			return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusInvalid, ValidationError: &msg}}, nil
 		})
 		out, err := RunPairControl(context.Background(), urlOf(t, engine, true), Secret{}, urlOf(t, eth, false), kind)
@@ -142,16 +162,20 @@ func TestEachControlSubmitsTheRetainedBuildWithExactlyOneThingChanged(t *testing
 	require.Equal(t, c.binding, control, "the retained binding, unchanged")
 
 	// each refusal differs from the control in exactly one field
-	for kind, change := range map[PairControl]func(*PairBinding){
-		ControlWrongParent: func(b *PairBinding) { b.ParentHash[0] ^= 0xff },
-		ControlWrongJob: func(b *PairBinding) {
+	for kind, tc := range map[PairControl]struct {
+		change  func(*PairBinding)
+		variant string
+	}{
+		ControlWrongParent: {func(b *PairBinding) { b.ParentHash[0] ^= 0xff }, "ParentHashMismatch"},
+		ControlWrongJob: {func(b *PairBinding) {
 			b.SubjectID, _ = AttributesDigest(101, word(0x33), [20]byte{0: 0x77}, word(0x44))
-		},
-		ControlSubstitutedInput: func(b *PairBinding) { b.RootInputHash[0] ^= 0xff },
+		}, "JobMismatch"},
+		ControlSubstitutedInput: {func(b *PairBinding) { b.RootInputHash[0] ^= 0xff }, "RootInputMismatch"},
 	} {
+		change := tc.change
 		_, _, raw, out := run(kind, false)
 		require.False(t, out.Accepted, kind)
-		require.Contains(t, out.Detail, "pair binding refused", kind)
+		require.Contains(t, out.Detail, "pair binding refused: "+tc.variant, "%s is refused with its own typed variant", kind)
 		want := control
 		change(&want)
 		require.Equal(t, want, submitted(raw), "%s changes only its own field", kind)
@@ -159,7 +183,8 @@ func TestEachControlSubmitsTheRetainedBuildWithExactlyOneThingChanged(t *testing
 
 	_, _, raw, out = run(ControlMissingEvidence, false)
 	require.False(t, out.Accepted)
-	require.NotContains(t, string(raw), "pairBinding", "no evidence at all is no field at all")
+	require.Contains(t, out.Detail, "pair binding refused: Missing", "the client's own missing-evidence guard decided, not its parameter schema")
+	require.Contains(t, string(raw), `"pairBinding":"0x"`, "no evidence is an explicit empty field inside the schema")
 
 	_, err := RunPairControl(context.Background(), "http://127.0.0.1:1", Secret{}, urlOf(t, eth, false), PairControl("bogus"))
 	require.Error(t, err)

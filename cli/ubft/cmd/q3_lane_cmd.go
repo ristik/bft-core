@@ -151,6 +151,13 @@ func writeJSONFile(path string, v any) error {
 
 // ---- q3-candidate ------------------------------------------------------------------------------------------------------------------------
 
+var (
+	// ErrQ3StageRefused is returned when the entity's root or shard service refuses the candidate it is asked to stage.
+	ErrQ3StageRefused = errors.New("a service refused to stage the candidate")
+	// ErrQ3SignerQuorum is returned when the committed certificate the root serves does not carry the threshold weight.
+	ErrQ3SignerQuorum = errors.New("the committed certificate does not reach the threshold weight")
+)
+
 func newQ3CandidateCmd() *cobra.Command {
 	var nextFile, nextEVM, rootRPCs, outDir string
 	cmd := &cobra.Command{Use: "q3-candidate", Short: "Derive the V3 candidate of a coupled handoff for the members to declare readiness for",
@@ -269,12 +276,19 @@ func (s httpQ3Service) Report(ctx context.Context) (q3ready.ServiceReport, error
 		return q3ready.ServiceReport{}, errors.New("the service reported a genesis that is not 32 bytes")
 	}
 	copy(out.Genesis[:], genesis)
-	if st.Staged != nil { // nothing staged leaves the zero digest, which no candidate has
-		staged, err := hex.DecodeString(st.Staged.CandidateDigest)
-		if err != nil || len(staged) != 32 {
-			return q3ready.ServiceReport{}, errors.New("the service reported a staged digest that is not 32 bytes")
+	if st.Staged != nil { // nothing staged leaves the zero digest, body and configuration, which no candidate has
+		for _, f := range []struct {
+			name string
+			text string
+			into *[32]byte
+		}{{"digest", st.Staged.CandidateDigest, &out.Staged}, {"body identity", st.Staged.BodyID, &out.StagedBody}, {"protocol configuration", st.Staged.Config, &out.StagedConfig}} {
+			raw, err := hex.DecodeString(f.text)
+			if err != nil || len(raw) != 32 {
+				return q3ready.ServiceReport{}, fmt.Errorf("the service reported a staged %s that is not 32 bytes", f.name)
+			}
+			copy(f.into[:], raw)
 		}
-		copy(out.Staged[:], staged)
+		out.StagedAttempt = st.Staged.Attempt
 	}
 	return out, nil
 }
@@ -427,16 +441,22 @@ func stageOnRoot(ctx context.Context, client *http.Client, rootRPC string, cand 
 	if err != nil {
 		return err
 	}
-	return handoffPost(ctx, client, strings.TrimRight(rootRPC, "/")+"/api/v1/handoff/q3-stage", body, nil)
+	if err := handoffPost(ctx, client, strings.TrimRight(rootRPC, "/")+"/api/v1/handoff/q3-stage", body, nil); err != nil {
+		return fmt.Errorf("%w: %w", ErrQ3StageRefused, err)
+	}
+	return nil
 }
 
 // stageOnShard hands the shard service the candidate it will report as staged. The shard node refuses a body of another chain.
 func stageOnShard(ctx context.Context, client *http.Client, shardRPC string, cand q3CandidateFile) error {
-	body, err := json.Marshal(shardQ3StageRequest{Body: cand.Body, Candidate: cand.Candidate[:]})
+	body, err := json.Marshal(shardQ3StageRequest{Body: cand.Body, Candidate: cand.Candidate[:], Attempt: cand.Attempt})
 	if err != nil {
 		return err
 	}
-	return handoffPost(ctx, client, strings.TrimRight(shardRPC, "/")+"/api/v1/q3/stage", body, nil)
+	if err := handoffPost(ctx, client, strings.TrimRight(shardRPC, "/")+"/api/v1/q3/stage", body, nil); err != nil {
+		return fmt.Errorf("%w: %w", ErrQ3StageRefused, err)
+	}
+	return nil
 }
 
 // ---- q3-activation and the q3 evidence group -----------------------------------------------------------------------------------------------
@@ -507,7 +527,7 @@ func newQ3Cmd() *cobra.Command {
 				return err
 			}
 			if !resp.Quorum {
-				return fmt.Errorf("the committed certificate's signed weight %d is below the threshold %d", resp.SignedTotal, resp.Threshold)
+				return fmt.Errorf("%w: signed weight %d, threshold %d", ErrQ3SignerQuorum, resp.SignedTotal, resp.Threshold)
 			}
 			return writeJSONFile(out, resp.Signers)
 		}}

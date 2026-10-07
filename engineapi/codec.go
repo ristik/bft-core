@@ -154,7 +154,7 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 		RootInput:  c.RootInput,
 		Witnesses:  witnesses,
 		Provenance: c.Provenance,
-		pairWire:   pairWire{PairBinding: c.Pair},
+		pairWire:   pairWire{PairBinding: pairField(c.Pair, false)},
 	})
 }
 
@@ -176,6 +176,8 @@ type SealBuildInput struct {
 
 	// Pair is the canonical pair binding for this build job (pairbinding.go); empty for a client without one.
 	Pair data `json:"-"`
+	// PairEmpty sends the binding field present but empty: the missing-evidence control, which must reach the client's own guard.
+	PairEmpty bool `json:"-"`
 }
 
 // MarshalJSON normalizes a nil transitions slice to an empty array, for the
@@ -195,7 +197,7 @@ func (s SealBuildInput) MarshalJSON() ([]byte, error) {
 		B1Update:    s.B1Update,
 		RootInput:   s.RootInput,
 		Transitions: transitions,
-		pairWire:    pairWire{PairBinding: s.Pair},
+		pairWire:    pairWire{PairBinding: pairField(s.Pair, s.PairEmpty)},
 	})
 }
 
