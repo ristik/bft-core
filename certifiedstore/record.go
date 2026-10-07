@@ -425,7 +425,7 @@ func verify(ctx context.Context, c Context, sr storedRecord) (Loaded, error) {
 	if err != nil {
 		return Loaded{}, fmt.Errorf("%w: %w", ErrWitness, err)
 	}
-	if s.Fields().Layout == registryproof.LayoutVersion2 {
+	if l := s.Fields().Layout; l == registryproof.LayoutVersion2 || l == registryproof.FreshB1 {
 		// The registry's active assignment at B is the configuration B's certificate commits to.
 		if f := s.Fields(); f.ShardEpoch != wantEpoch || !bytes.Equal(f.ActiveConfHash.Bytes(), conf) {
 			return Loaded{}, fmt.Errorf("%w: registry assignment %d/%s differs from the record's configuration %d/%x",
