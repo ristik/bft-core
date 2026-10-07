@@ -52,7 +52,8 @@ type Options struct {
 	Chain *Fixture
 	// Assignment makes the handoff coupled: the committed candidate carries a successor EVM assignment whose validators mirror the
 	// root weights, with proofs of possession and the root-to-EVM bindings. The activation is then the one the install of a
-	// candidate-bearing handoff takes; the manager does not install it (ErrQ3Candidate), the request-policy selection does.
+	// candidate-bearing handoff takes: the manager installs it only with the committed candidate (ErrQ3Candidate otherwise), and the
+	// request history serves its weighted context.
 	Assignment bool
 	// CandidateRootWeights are the weights the candidate states for the successor root committee (in node-id order) when they are not
 	// the body's, and EVMWeights the EVM validators' weights when they do not mirror the candidate's root weights (a coupling
@@ -196,9 +197,12 @@ func New(t *testing.T, o Options) *Fixture {
 	trHash, err := state.TR.Hash()
 	require.NoError(t, err)
 	if o.Assignment { // a coupled handoff commits the technical record derived from the candidate's successor assignment
-		trHash, err = storage.AssignmentSuccessorTRHash(state, f.Candidate, activate, crypto.SHA256)
-		if err != nil && o.MutateCandidate == nil && o.EVMWeights == nil && o.CandidateRootWeights == nil {
-			require.NoError(t, err)
+		derived, derr := storage.AssignmentSuccessorTRHash(state, f.Candidate, activate, crypto.SHA256)
+		switch {
+		case derr == nil:
+			trHash = derived
+		case o.MutateCandidate == nil && o.EVMWeights == nil && o.CandidateRootWeights == nil:
+			require.NoError(t, derr) // only a deliberately malformed candidate may fail to derive
 		}
 	}
 

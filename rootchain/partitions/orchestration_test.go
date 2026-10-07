@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -394,4 +396,68 @@ func TestInstallDerivedShardConfigsIsAtomic(t *testing.T) {
 	require.EqualValues(t, 1, confs[types.PartitionShardID{PartitionID: 8, ShardID: types.ShardID{}.Key()}].Epoch)
 	require.EqualValues(t, 1, confs[types.PartitionShardID{PartitionID: 9, ShardID: types.ShardID{}.Key()}].Epoch)
 	require.NoError(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{evmNext, aggNext}, provenance), "idempotent")
+}
+
+// A weighted EVM assignment is derivable (the weighted rules of a verified Q3 activation); an aggregator configuration never is, and a
+// weight outside the bounds is refused for the EVM shard too. Each case differs from the accepted control in one thing, and a refused
+// batch leaves nothing behind.
+func TestDerivedConfigurationWeightRules(t *testing.T) {
+	provenance, err := evmassign.Provenance{RecordID: bytes.Repeat([]byte{1}, 32), CandidateDigest: bytes.Repeat([]byte{2}, 32), RootEpoch: 2}.Bytes()
+	require.NoError(t, err)
+	newOrch := func(t *testing.T) (*Orchestration, *types.PartitionDescriptionRecord, *types.PartitionDescriptionRecord) {
+		o, err := NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), logger.New(t))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = o.Close() })
+		o.EnableHandoffProfile()
+		evm := createShardConf(t, 8, types.ShardID{}, 1)
+		evm.PartitionTypeID = evmassign.EVMPartitionTypeID
+		agg := createShardConf(t, 9, types.ShardID{}, 1)
+		require.NoError(t, o.InitGenesisShardConfigs(evm, agg))
+		return o, evm, agg
+	}
+	weighted := func(c *types.PartitionDescriptionRecord, weights ...uint64) *types.PartitionDescriptionRecord {
+		n := *c
+		n.Epoch, n.EpochStart, n.Validators = 1, 7, nil
+		for i, w := range weights {
+			v := createShardConf(t, c.PartitionID, types.ShardID{}, 7).Validators[0]
+			v.NodeID = string(rune('a'+i)) + v.NodeID
+			v.Stake = w
+			n.Validators = append(n.Validators, v)
+		}
+		sort.Slice(n.Validators, func(i, j int) bool { return n.Validators[i].NodeID < n.Validators[j].NodeID })
+		return &n
+	}
+	t.Run("the weighted EVM assignment installs, and is idempotent", func(t *testing.T) {
+		o, evm, _ := newOrch(t)
+		next := weighted(evm, 6, 1, 1, 1)
+		require.NoError(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{next}, provenance))
+		require.NoError(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{next}, provenance))
+		confs, err := o.ShardConfigs(7)
+		require.NoError(t, err)
+		var weights []uint64
+		for _, v := range confs[types.PartitionShardID{PartitionID: 8, ShardID: types.ShardID{}.Key()}].Validators {
+			weights = append(weights, v.Stake)
+		}
+		require.ElementsMatch(t, []uint64{6, 1, 1, 1}, weights)
+	})
+	t.Run("an aggregator replacement with a weight is refused", func(t *testing.T) {
+		o, _, agg := newOrch(t)
+		err := o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{weighted(agg, 2, 1, 1)}, provenance)
+		require.ErrorIs(t, err, weightvalidation.ErrNonUnitAggregator)
+		confs, cerr := o.ShardConfigs(7)
+		require.NoError(t, cerr)
+		require.EqualValues(t, 0, confs[types.PartitionShardID{PartitionID: 9, ShardID: types.ShardID{}.Key()}].Epoch, "nothing was installed")
+	})
+	for name, weights := range map[string][]uint64{
+		"a zero weight":                 {6, 1, 1, 0},
+		"a weight above the member cap": {1<<40 + 1, 1, 1, 1},
+	} {
+		t.Run("the EVM shard: "+name, func(t *testing.T) {
+			o, evm, _ := newOrch(t)
+			require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{weighted(evm, weights...)}, provenance), weightvalidation.ErrWeight)
+			confs, err := o.ShardConfigs(7)
+			require.NoError(t, err)
+			require.EqualValues(t, 0, confs[types.PartitionShardID{PartitionID: 8, ShardID: types.ShardID{}.Key()}].Epoch)
+		})
+	}
 }

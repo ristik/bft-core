@@ -81,3 +81,23 @@ func TestARestartedRootRecoversInAnActivatedEpochFromAPeersState(t *testing.T) {
 		require.True(t, root.manager.recovery.InRecovery(), "nothing was adopted")
 	})
 }
+
+// The lineage a StateMsg is verified against is the verified history's view when the binary knows Q3, and the V1/V2 recovery history
+// alone otherwise: only the first can answer for an activated epoch.
+func TestTheStateHistoryOfAnActivatedEpochIsTheVerifiedLineage(t *testing.T) {
+	c := newQ3Cluster(t, q3fixture.Options{})
+	c.activateAll()
+	m := c.heavy().manager
+
+	rec, err := m.stateHistory().ByEpoch(2)
+	require.NoError(t, err)
+	require.NotNil(t, rec.Verified)
+	require.EqualValues(t, 7, rec.Verified.QuorumThreshold)
+	genesis, err := m.stateHistory().ByEpoch(1)
+	require.NoError(t, err)
+	require.NotNil(t, genesis.V1, "the genesis epoch is the recovery history's record")
+
+	m.q3 = nil
+	_, err = m.stateHistory().ByEpoch(2)
+	require.ErrorIs(t, err, trusthistorystore.ErrNotFound, "the V1/V2 history holds no body of the activated epoch")
+}

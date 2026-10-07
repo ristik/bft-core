@@ -192,7 +192,7 @@ func ValidateAssignmentWith(r Rules, succ *types.PartitionDescriptionRecord) err
 		return ErrAssignment
 	}
 	if err := r.PDR(succ); err != nil {
-		return fmt.Errorf("%w: %v", ErrAssignment, err)
+		return fmt.Errorf("%w: %w", ErrAssignment, err)
 	}
 	if succ.EpochStart != 0 {
 		return fmt.Errorf("%w: activation round is set before commit", ErrEpoch)
@@ -212,7 +212,7 @@ func ValidateSuccessorWith(r Rules, current, succ *types.PartitionDescriptionRec
 		return ErrAssignment
 	}
 	if err := r.PDR(succ); err != nil {
-		return fmt.Errorf("%w: %v", ErrAssignment, err)
+		return fmt.Errorf("%w: %w", ErrAssignment, err)
 	}
 	if current.Epoch == math.MaxUint64 || succ.Epoch != current.Epoch+1 || succ.EpochStart != 0 {
 		return ErrEpoch

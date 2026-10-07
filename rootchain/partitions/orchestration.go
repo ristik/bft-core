@@ -387,7 +387,7 @@ func (o *Orchestration) InstallDerivedShardConfigs(confs []*types.PartitionDescr
 // every other path (genesis, AddShardConfig) keeps go-base's unit validity.
 func validDerived(conf *types.PartitionDescriptionRecord) error {
 	if conf.PartitionTypeID != evmassign.EVMPartitionTypeID {
-		return conf.IsValid()
+		return weightvalidation.PDR(conf, weightvalidation.RoleAggregator, weightvalidation.ModeUnit)
 	}
 	return weightvalidation.PDR(conf, weightvalidation.RoleEVM, weightvalidation.ModeWeighted)
 }
