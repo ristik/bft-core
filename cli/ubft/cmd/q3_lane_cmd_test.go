@@ -10,14 +10,21 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	testobserve "github.com/unicitynetwork/bft-core/internal/testutils/observability"
+	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
+	"github.com/unicitynetwork/bft-core/internal/testutils/q3process"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/q3ready"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-go-base/types"
+	basehex "github.com/unicitynetwork/bft-go-base/types/hex"
 	"github.com/unicitynetwork/bft-go-base/util"
 )
 
@@ -275,4 +282,62 @@ func TestAPlanSubmittedWithReceiptsCarriesThemAsOneCanonicalSet(t *testing.T) {
 	require.NoError(t, os.WriteFile(bad, []byte("{"), 0o600))
 	_, err = readQ3Receipts([]string{bad})
 	require.Error(t, err)
+}
+
+func TestTheEvidenceCommandsWriteWhatTheRootServes(t *testing.T) {
+	ctx := context.Background()
+	f := q3fixture.New(t, q3fixture.Options{})
+	p := q3process.New(t, f)
+	rt := p.Start()
+	require.NoError(t, rt.Recover(ctx))
+	require.NoError(t, rt.Activate(ctx, p.Bundle()))
+
+	signed := uint64(7)
+	api := rootQ3API{Rt: rt, Bundle: func(context.Context, uint64) (q3active.Bundle, error) { return p.Bundle(), nil },
+		State: func() (*abdrc.StateMsg, error) {
+			return &abdrc.StateMsg{CommittedHead: &abdrc.CommittedBlock{CommitQc: &rctypes.QuorumCert{Scheme: 2,
+				VoteInfo: &rctypes.RoundInfo{Epoch: 2, RoundNumber: 3}, Signatures: map[string]basehex.Bytes{"heavy": {1}}}}}, nil
+		},
+		Trust: func(uint64) (*types.RootTrustBaseV1, error) {
+			return &types.RootTrustBaseV1{Epoch: 2, QuorumThreshold: signed, RootNodes: []*types.NodeInfo{{NodeID: "heavy", Stake: 6}}}, nil
+		}}
+	mux := http.NewServeMux()
+	api.register(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+
+	_, err := runCLI(t, "root", "handoff", "q3-activation", "--root-rpc", srv.URL, "--epoch", "2", "--out", filepath.Join(dir, "activation.json"))
+	require.NoError(t, err)
+	var rec q3active.ActivationRecord
+	raw, err := os.ReadFile(filepath.Join(dir, "activation.json"))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &rec))
+	require.EqualValues(t, 2, rec.SigningScheme)
+
+	_, err = runCLI(t, "q3", "history", "--root-rpc", srv.URL, "--out", filepath.Join(dir, "history.txt"))
+	require.NoError(t, err)
+	raw, err = os.ReadFile(filepath.Join(dir, "history.txt"))
+	require.NoError(t, err)
+	require.Len(t, strings.Split(strings.TrimSpace(string(raw)), "\n"), 2, "one line per epoch")
+
+	_, err = runCLI(t, "q3", "proof-envelope", "--root-rpc", srv.URL, "--epoch", "2", "--out", filepath.Join(dir, "envelope.cbor"))
+	require.NoError(t, err)
+	raw, err = os.ReadFile(filepath.Join(dir, "envelope.cbor"))
+	require.NoError(t, err)
+	_, _, err = q3active.DecodeBundle(raw)
+	require.NoError(t, err)
+
+	// the committed certificate's signed weight 6 is below the threshold 7: no evidence file is written
+	signed = 7
+	_, err = runCLI(t, "q3", "signers", "--root-rpc", srv.URL, "--out", filepath.Join(dir, "signers.json"))
+	require.ErrorContains(t, err, "below the threshold")
+	_, statErr := os.Stat(filepath.Join(dir, "signers.json"))
+	require.True(t, os.IsNotExist(statErr))
+	signed = 6
+	_, err = runCLI(t, "q3", "signers", "--root-rpc", srv.URL, "--out", filepath.Join(dir, "signers.json"))
+	require.NoError(t, err)
+	raw, err = os.ReadFile(filepath.Join(dir, "signers.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"weight": 6`)
 }
