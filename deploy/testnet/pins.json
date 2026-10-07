@@ -1,0 +1,7 @@
+{
+  "bft": "446a78cbd6cd18b476f4f433571594b304f45b6e",
+  "ureth": "b4e7cb0ace07eee70e753241e0139c4d42b516d4",
+  "rugregator": "dd5b1406a17fdeb415799045c5e81609619a870a",
+  "runtime": "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587",
+  "python": "python:3.13.12-alpine3.22@sha256:41351b07080ccfaa27bf38dde20de79ee6a0ac74a58c00c6d7a7d96ac4e69716"
+}

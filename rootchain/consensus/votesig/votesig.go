@@ -79,12 +79,15 @@ func (c Config) requireV2() error {
 	return c.Validate()
 }
 
-// VoteInfo is the signed consensus round data, VI = C([N, Dv, votingEpoch, votingRound, parentRound, execStateHash]).
+// VoteInfo is the signed consensus round data. New VI bytes append timestamp to
+// C([N, Dv, votingEpoch, votingRound, parentRound, execStateHash]).
 type VoteInfo struct {
 	Epoch  uint64
 	Round  uint64
 	Parent uint64
 	Exec   [32]byte
+	// Timestamp binds new votes to their proposal time. Zero retains historical VI bytes.
+	Timestamp uint64
 }
 
 // Commit is the commit side of a vote: the committed state hash and root round of the vote's LedgerCommitInfo. A
@@ -125,7 +128,14 @@ func (c Config) VoteInfoBytes(v VoteInfo) ([]byte, error) {
 		return nil, err
 	}
 	var e encoder
-	e.array(6).uint(c.Network).text(c.VoteDomain()).uint(v.Epoch).uint(v.Round).uint(v.Parent).bytes(v.Exec[:])
+	arity := 6
+	if v.Timestamp != 0 {
+		arity = 7
+	}
+	e.array(arity).uint(c.Network).text(c.VoteDomain()).uint(v.Epoch).uint(v.Round).uint(v.Parent).bytes(v.Exec[:])
+	if v.Timestamp != 0 {
+		e.uint(v.Timestamp)
+	}
 	return e.b, nil
 }
 

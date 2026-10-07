@@ -1,0 +1,11 @@
+UNICITY PUBLIC TESTNET — TEST ASSETS HAVE NO REAL VALUE
+
+UCT on this network is disposable gas for testing. This is not a TGE or allocation
+of real assets. The operator may reset the network arbitrarily, without notice,
+backward compatibility, migration or obligation. All balances, transactions and
+assets may be lost. Never deposit real assets or reuse valuable keys.
+
+Initially all validator entities, execution clients, aggregator, faucet and access
+services share one bare-metal host. Host, disk, network or operator failure can
+stop the entire testnet. Multiple validator containers do not create independent
+physical failure domains. No production SLA or continuity promise is made.

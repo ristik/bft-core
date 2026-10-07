@@ -231,6 +231,53 @@ in production, and there is no migration (greenroom, one format).
   chain, its head and the committed recovery count from that, so a restart, a new attempt or an abort cannot reset the allowance and an
   uncommitted retry consumes none. One committed recovery per frozen parent (`ErrRecoveryUsed`); no primary may replace a committed primary
   (`ErrPendingPrimary`); the unacknowledged chain is at most two (`ErrSpan`, `handoff.MaxSupersessionSpan = 2`).
-- Not in this part: the Ureth decoder and Registry limit (two), proof-independent progress/closure and UC-time import, paired Ureth replay of
-  the vectors in `evmassign/testdata/h3-vectors.json` (now with signed lifecycle fixtures), and reconciling the NodeID encoding with the
-  custody contracts (`bytes32` there, strings here).
+- **NodeID encoding for custody.** Root chain NodeIDs stay libp2p peer-ID strings here. The custody contracts treat them as opaque
+  `bytes32`, so the one canonical image is `evmassign.NodeIDWord(id) = keccak256(utf8(id))`: derived at the boundary, never carried or
+  signed in place of the string, injective up to collisions, and tied to the key by the key hash that sits beside it in every signed
+  binding. Keys stay 33-byte compressed secp256k1.
+- **Root records, progress, closure and UC time (`rootrecords`).** The projection custody imports (`IRootRecords`): a linked log of
+  SessionClosed, Ack, RecoveryAck, Closure and Retirement records, each with the canonical progress p and UC time of the moment it was
+  ordered. The record identifier is `keccak256(abi.encode(index, predecessor, kind, progress, ucTime, data))`, payloads are the static
+  words of `P85Types.sol`. Progress is `offset_e + (r - firstRound_e)` over ordinary committed rounds of the current epoch; ordering H at
+  round h fixes the endpoint `p(e,h)`, the successor offset `p(e,h)+1` is derived (never supplied), and progress stays at the endpoint
+  until the successor has an ordinary round, so seal rounds, arrival time and old-epoch suffix rounds cannot move it. A closure is keyed by
+  `(closed epoch, H record, H round)` with the terminal root and digests as its immutable value, and carries no proof. An epoch closes
+  once: the first closure fixes p_close and its UC time, an identical repeat is a no-op, any other closure of the epoch (another value,
+  H record or H round) is `ErrClosureConflict`, and none can anchor before some H was ordered and its successor has ordinary progress
+  (`ErrClosureEarly`). Custody applies the same rule; `closureCases` in the shared vectors are run against both. UC time is the seal
+  timestamp of the verified root certificate's `RootOrigin` (`ReferenceTime`), imported on one lineage (network, then epoch and round) and
+  never backwards; a record cannot be ordered before a time was imported. `rootrecords/testdata/records-vectors.json` is produced by this
+  projection and replayed verbatim by the custody contracts' tests.
+- **UC time is quorum-approved wall-clock time.** The seal timestamp is the root proposer's wall clock, approved by the voting quorum.
+  Root consensus bounds it by a monotonic rule against the parent and a 30 s voter clock skew (ristik/bft-core#445, merged in
+  ristik/bft-core#447; see Root UC time below), so the time custody gates exits on is a bounded, quorum-attested measure, not an
+  operator or EVM value. The importer additionally keeps it monotonic on one lineage; that check is defence in depth and does not
+  replace the root rule.
+- **Not implemented here:** the on-chain `IRootRecords` implementation in the SealRegistry and its feed from Ureth; the reference model
+  above and the vectors are what it must match. The Closure and Retirement digest words (exposure, key history, reference digest) are
+  contract-derived and opaque labels in the vectors.
+
+## Root UC time (#445)
+
+Live root voting requires a proposal timestamp strictly greater than its executed
+QC parent's timestamp and at most `MaxClockSkew` (DEV: 30 seconds) ahead of the
+voter's local clock. Proposers use `max(now, parent+1)`, including TC rounds and
+restart/recovery; epoch anchors retain the old checkpoint time. New scheme 2 votes and QCs authenticate the timestamp through an appended
+VoteInfo field. Recovery compares executed times against verified QCs and the
+committed head against its signed native seal before installing a time floor.
+Old timestamp-less QCs retain their exact historical verification bytes, but
+need a separate signed commit seal to authenticate a block time. UC sealing
+uses the committed block time. Importers keep their monotonic checks.
+
+Clock checks apply only to live voting, never certified-history verification or
+catch-up replay. There is no past-time cutoff, to preserve delayed recovery.
+Whole-second strict increases may force voting to wait for wall clocks under
+subsecond production. The root specification's UC seal timestamp section records
+the rationale and pinned Aptos references; this DEV rule requires validators to
+upgrade together.
+
+The timestamp-bound scheme 2 extension uses a five-field wire VoteInfo and a
+seven-field signed VoteInfo preimage. Old four/six-field encodings remain valid
+history; old readers refuse the new arity. DEV validators must upgrade together.
+A completed replay followed by a live timestamp refusal leaves frontier serving
+unfaulted; it is not an incomplete or uncertain recovery write.

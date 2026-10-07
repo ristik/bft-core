@@ -9,6 +9,7 @@ on:
       - integration/enshrined-evm
       - main
   pull_request:
+    types: [opened, synchronize, reopened, edited]
     branches:
       - integration/enshrined-evm
       - main
@@ -18,7 +19,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Metadata-only edits must not cancel an active Go run for this PR.
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event.action == 'edited' && !github.event.changes.base && '-metadata' || '' }}
   cancel-in-progress: true
 
 # setup-go caches both downloaded modules and Go build outputs, keyed by go.sum.
@@ -29,6 +31,8 @@ defaults:
 jobs:
   changes:
     name: Filter Go paths
+    # Retargeting changes the code under test; title/body edits do not.
+    if: github.event.action != 'edited' || github.event.changes.base
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
