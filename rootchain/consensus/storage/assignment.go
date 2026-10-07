@@ -166,13 +166,11 @@ func deriveActivatedPDR(record evmroot.OrderedHandoffRecord, bodyID []byte, body
 	if err := validateAssignment(succ, mode); err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
-	var pop evmassign.PoPContext
-	pop.Network, pop.Attempt = c.Network, c.Attempt
-	copy(pop.Predecessor[:], c.Predecessor)
-	if err := evmassign.VerifyPoPs(pop, succ, c.PoPs); err != nil {
+	if err := evmassign.VerifyKind(c, succ); err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
-	provenance, err := evmassign.Provenance{RecordID: record.ID(), CandidateDigest: digest[:], RootEpoch: record.Epoch + 1}.Bytes()
+	provenance, err := evmassign.Provenance{RecordID: record.ID(), CandidateDigest: digest[:], RootEpoch: record.Epoch + 1,
+		Kind: c.Kind, Preimage: preimage}.Bytes()
 	if err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}

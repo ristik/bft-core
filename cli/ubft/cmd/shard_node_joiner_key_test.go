@@ -18,6 +18,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
+	"github.com/unicitynetwork/bft-core/internal/testutils/identityfix"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/signingauthority"
 )
@@ -55,7 +56,7 @@ func newJoinerFixture(t *testing.T, named bool) joinerFixture {
 		T2Timeout: 2500 * time.Millisecond, Epoch: 1, Validators: validators}
 	raw, err := types.Cbor.Marshal(succ)
 	require.NoError(t, err)
-	candidate, err := evmassign.Candidate{Version: evmassign.CandidateVersion, Assignment: raw}.Encode()
+	candidate, err := identityfix.Shaped(evmassign.Candidate{Version: evmassign.CandidateVersion, Assignment: raw}).Encode()
 	require.NoError(t, err)
 	bundle := handoffdelivery.Bundle{Candidate: candidate}
 	bundle.Proof.Record.ActivationRound = 7
@@ -212,7 +213,7 @@ func TestTheLatestInstalledStepThatNamesTheNodeIsBoundAndBindsOnce(t *testing.T)
 		T2Timeout: 2500 * time.Millisecond, Epoch: 3, Validators: validators}
 	raw, err := types.Cbor.Marshal(succ)
 	require.NoError(t, err)
-	candidate, err := evmassign.Candidate{Version: evmassign.CandidateVersion, Assignment: raw}.Encode()
+	candidate, err := identityfix.Shaped(evmassign.Candidate{Version: evmassign.CandidateVersion, Assignment: raw}).Encode()
 	require.NoError(t, err)
 	bundle := handoffdelivery.Bundle{Candidate: candidate}
 	bundle.Proof.Record.ActivationRound = 9

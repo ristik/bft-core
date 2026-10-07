@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/internal/testutils/identityfix"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3format"
@@ -91,7 +92,11 @@ type Fixture struct {
 	FrozenParent    []byte
 	CommitSealRound uint64
 	EVMSigners      map[string]abcrypto.Signer
-	Prev            *Fixture // the first activation this one follows, with Options.After
+	Identities      []evmassign.Identity     // the successor's frozen identity records
+	Incumbent       []evmassign.Identity     // the fabricated last acknowledged committee (K)
+	BaseAssignment  [32]byte                 // its assignment hash
+	Authorization   *evmassign.Authorization // the recovery authorization the candidate carries
+	Prev            *Fixture                 // the first activation this one follows, with Options.After
 }
 
 // Signers maps node id to signer for a committee.
@@ -361,20 +366,40 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 	f.Successor = succ
 	ctx := evmassign.PoPContext{Network: Network, Attempt: attempt}
 	copy(ctx.Predecessor[:], oldID)
-	var pops []evmassign.PoP
 	var bindings []evmassign.Binding
 	for i, k := range keys {
+		bindings = append(bindings, evmassign.Binding{RootNodeID: root[i].NodeID, EVMNodeID: k.info.NodeID})
+	}
+	f.Identities = identityfix.Identities(root, succ, bindings)
+	var err2 error
+	ctx.Identities, err2 = evmassign.IdentitiesDigest(f.Identities)
+	require.NoError(t, err2)
+	// K is a fabricated incumbent committee bound to the installed validators; tests that run lifecycle checks record it as the
+	// shard's genesis baseline (Incumbent, BaseAssignment).
+	var incRoot []evmassign.RootMember
+	var incBindings []evmassign.Binding
+	for i, v := range f.ShardConf.Validators {
+		incRoot = append(incRoot, evmassign.RootMember{NodeID: fmt.Sprintf("inc-%d", i), Key: bytes.Repeat([]byte{byte(100 + i)}, 33), Weight: v.Stake})
+		incBindings = append(incBindings, evmassign.Binding{RootNodeID: fmt.Sprintf("inc-%d", i), EVMNodeID: v.NodeID})
+	}
+	f.Incumbent = identityfix.Identities(incRoot, f.ShardConf, incBindings)
+	incDigest, err2 := evmassign.IdentitiesDigest(f.Incumbent)
+	require.NoError(t, err2)
+	f.BaseAssignment, err2 = evmassign.AssignmentHash(f.ShardConf, incDigest)
+	require.NoError(t, err2)
+	f.Authorization = identityfix.Authorization(Network, oldID, f.BaseAssignment, f.Incumbent)
+	var pops []evmassign.PoP
+	for _, k := range keys {
 		pop, err := evmassign.SignPoP(k.signer, ctx, succ, k.info.NodeID)
 		require.NoError(t, err)
 		pops = append(pops, pop)
-		bindings = append(bindings, evmassign.Binding{RootNodeID: root[i].NodeID, EVMNodeID: k.info.NodeID})
 	}
 	raw, err := types.Cbor.Marshal(succ)
 	require.NoError(t, err)
 	old, err := evmassign.PDRHash(f.ShardConf)
 	require.NoError(t, err)
-	c := evmassign.Candidate{Version: evmassign.CandidateVersion, Network: Network, Predecessor: bytes.Clone(oldID), Attempt: attempt, RootMembers: root,
-		OldShardEpoch: f.ShardConf.Epoch, OldActiveHash: old[:], Assignment: raw, PoPs: pops, Bindings: bindings}
+	c := evmassign.Candidate{Version: evmassign.CandidateVersion, Kind: evmassign.KindPrimary, Network: Network, Predecessor: bytes.Clone(oldID), Attempt: attempt, RootMembers: root,
+		OldShardEpoch: f.ShardConf.Epoch, OldActiveHash: old[:], Assignment: raw, PoPs: pops, Bindings: bindings, Identities: f.Identities, Authorization: f.Authorization}
 	if o.MutateCandidate != nil {
 		o.MutateCandidate(&c)
 	}

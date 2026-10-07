@@ -200,3 +200,37 @@ replacement) install in one transaction; restart re-derives them from the retain
 activates every replacement like the EVM assignment: immediate technical-record advance and trust-base install, so the retired
 key's first request is refused. There is no aggregator freeze. Under the handoff profile PUT and any local epoch>0 or edited
 epoch-0 configuration are refused.
+
+## Amendment: #85 lifecycle (candidate version 5, PR 1a)
+
+Design: `briefs/p85-design-v5.md` sections 5 and 10 item 1 (docs/design/pos-architecture.md on PR #415). Inactive: nothing builds these candidates
+in production, and there is no migration (greenroom, one format).
+
+- **One candidate format, two kinds.** `Candidate.Kind` is `KindPrimary` (J) or `KindRecovery` (K). Both carry the full recovery
+  `Authorization` (K, the exact last acknowledged committee, with its base root body and assignment hash), so a primary whose K is not the
+  incumbent is refused at admission, not when recovery is needed. A primary carries a fresh possession proof from every successor key
+  (retained keys included); a recovery carries none and names the assignment hash of the committed primary it replaces
+  (`ReplacedAssignment`). `Encode` refuses a mismatched shape (`ErrKind`).
+- **Identity records.** `Candidate.Identities` is the one authenticated description of the coupled set, sorted by StakingID: StakingID,
+  generation, root and EVM NodeIDs and keys, weight, **operatorPayee** and exposure digest. Root members, bindings and the successor
+  validators are matched to it by identifier (their orders differ), never positionally (`ValidateIdentities`). `IdentitiesDigest` enters
+  `PoPContext` and therefore the assignment hash every possession message signs, so a proof authenticates the payee; `ExposureCommit`
+  binds payee, generation and exposure per identity into the authorization. A payee-only nomination is not a binding replacement.
+- **Continuity** (`continuity.Check`, exact integers): `r` shared identities with any changed binding field counted once,
+  `removed=|O\S|+r`, `added=|S\O|+r`, `M=removed+added` within the budget, `3*max(removed,added) < min(|O|,|S|)`, normalized weight
+  distance `D` within its bound, and unchanged-binding weight strictly above two thirds of both committees. It runs at O to J (primary,
+  O = the acknowledged committee) and J to K (recovery, O = the committed J). The budget is read from the committed EVM configuration
+  (`continuity_max_m`, `continuity_max_distance`, DEV-DEFAULT M<=4, D<=1/4).
+- **Recovery is derived, never chosen** (`DeriveRecovery`): exactly K, successor epoch +1, the primary's non-membership configuration.
+  Root admission (`VerifyLifecycle`, run by `verifyFreezeAssignment` after the supersession evidence and by the operator) requires the
+  authorization digest to be the committed primary's, K equal to the acknowledged committee, the replaced assignment to be that primary's,
+  and the J to K continuity predicates. A recovery-kind candidate whose committee differs from K in any member, key, weight, payee or
+  exposure is `ErrNotIncumbent`.
+- **Session count from committed history.** The orchestration retains each committed candidate with its kind (`Provenance`), and the
+  acknowledged committee (`SetGenesisIdentities` at genesis, the retained candidate afterwards). `storage.LifecycleFor` derives the pending
+  chain, its head and the committed recovery count from that, so a restart, a new attempt or an abort cannot reset the allowance and an
+  uncommitted retry consumes none. One committed recovery per frozen parent (`ErrRecoveryUsed`); no primary may replace a committed primary
+  (`ErrPendingPrimary`); the unacknowledged chain is at most two (`ErrSpan`, `handoff.MaxSupersessionSpan = 2`).
+- Not in this part: the Ureth decoder and Registry limit (two), proof-independent progress/closure and UC-time import, paired Ureth replay of
+  the vectors in `evmassign/testdata/h3-vectors.json` (now with signed lifecycle fixtures), and reconciling the NodeID encoding with the
+  custody contracts (`bytes32` there, strings here).
