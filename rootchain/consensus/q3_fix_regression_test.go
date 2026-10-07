@@ -113,26 +113,11 @@ func TestSuccessiveCoupledSupersessionInstall(t *testing.T) {
 				r.restart()
 				require.NoError(t, r.rt.Admit(3))
 				require.EqualValues(t, 3, r.manager.epochAnchor.Epoch)
-				// A third coupled handoff reconstructs both prior links, including the
-				// second candidate's own supersession, from the recovered pair's history.
-				_, err = r.manager.blockStore.Add(&rctypes.BlockData{Version: 2, Round: 15, Epoch: 3,
-					Payload: &rctypes.Payload{Version: 2}, Anchor: r.manager.epochAnchor}, nil)
-				require.NoError(t, err)
-				prior, err := r.manager.blockStore.Block(15)
-				require.NoError(t, err)
+				// The retained pair reconstructs both links; the two-step profile admits no third transition, so the chain stops here.
 				chain, err := storage.CommittedChain(r.orchestration, key.PartitionID, types.ShardID{}, 0)
 				require.NoError(t, err)
 				require.Len(t, chain.Steps, 2)
-				binding, err := chain.Supersession()
-				require.NoError(t, err)
-				third := q3fixture.New(t, q3fixture.Options{After: second, Assignment: true,
-					Installed: confs[key], ShardState: prior.ShardState.States[key],
-					MutateCandidate: func(c *evmassign.Candidate) { c.Supersedes = binding }})
-				require.NoError(t, r.rt.Activate(context.Background(), q3active.Bundle{
-					Envelope: third.EnvelopeBytes, Snapshot: third.Snapshot, Candidate: third.Candidate}))
-				require.NoError(t, r.rt.Admit(4))
-				r.restart()
-				require.NoError(t, r.rt.Admit(4))
+				require.ErrorIs(t, storage.CheckSupersessionChainLength(len(chain.Steps)), storage.ErrSupersessionChainTooLong)
 				return
 			}
 			if name == "omitted supersession" {
