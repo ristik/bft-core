@@ -39,11 +39,9 @@ import (
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/boltdb"
 	"github.com/unicitynetwork/bft-core/network"
-	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3delivery"
-	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/q3shard"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
@@ -954,60 +952,27 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			for _, root := range bootNodes {
 				currentRoots = append(currentRoots, root.ID)
 			}
-			// the full shard configuration hash active at each root epoch: the genesis one at the pinned epoch, then each verified step's
-			confByEpoch := map[uint64][]byte{trustBases[0].GetEpoch(): bytes.Clone(confHash)}
-			apply := func(ctx context.Context, entry q3format.Entry, proof handoff.OldCommitProof, head *abdrc.CommittedBlock, candidate []byte) error {
-				verifiedRecord, g, ok := entry.Handoff()
-				if !ok || entry.Epoch() == 0 {
-					return ErrQ3ShardEpoch
-				}
-				newEpoch, oldEpoch := entry.Epoch(), entry.Epoch()-1
-				activeConf, ok := confByEpoch[oldEpoch]
-				if !ok {
-					return fmt.Errorf("%w: no configuration is known for epoch %d", ErrQ3ShardEpoch, oldEpoch)
-				}
-				// the old committee's commit is verified once more under its own epoch's keys, weights and scheme, and the checkpoint
-				// against it: the sink depends on nothing another component checked
-				old, err := q3Trust.Verified().GetByEpoch(ctx, oldEpoch)
-				if err != nil {
-					return err
-				}
-				oldSigning, err := q3rt.Signing(oldEpoch)
-				if err != nil {
-					return err
-				}
-				rec, err := handoff.VerifyOldCommitProofSigning(proof, old, oldSigning)
-				if err != nil || !bytes.Equal(rec.RecordID[:], verifiedRecord.RecordID) {
-					return fmt.Errorf("%w: the proof is not the one that activated epoch %d", ErrQ3ShardEpoch, newEpoch)
-				}
-				target, err := handoffdelivery.VerifySnapshot(proof, rec, head, shardConf.PartitionID, shardConf.ShardID, activeConf)
-				if err != nil {
-					return err
-				}
-				nextConf, err := q3NextConf(activeConf, proof, candidate)
-				if err != nil {
-					return err
-				}
-				verified := handoffdelivery.Verified{Genesis: g, Record: rec, Shard: target, NextConfHash: nextConf}
-				view := handoffdelivery.Bundle{Proof: proof, Snapshot: head, Candidate: candidate}
-				if err := checkTerminalCertificate(view, verified); err != nil {
-					return err
-				}
-				terminalCtx, err := configuredprogress.TerminalContext(journalCtx, verified.Shard.ShardConfHash, verified.Shard.TR.Epoch)
-				if err != nil {
-					return fmt.Errorf("handoff terminal certificate context: %w", err)
-				}
-				// the terminal certificate belongs to the epoch this handoff ends: verified from the history, not from what the journal has admitted
-				terminalCtx.Observation.TrustBases = q3Trust.Verified()
-				terminalCtx.Record.TrustBases = q3Trust.Verified()
-				terminal, err := rootinput.AuthenticateObservationV2(ctx, terminalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
-				if err != nil {
-					return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
-				}
-				if restoringHandoffHistory {
-					uc, tr := *verified.Shard.UC, *verified.Shard.TR
-					restoredHandoffTerminals = append(restoredHandoffTerminals, handoffTerminalCertificate{uc: &uc, tr: &tr})
-				} else {
+			installer := &shardQ3Installer{
+				Partition: shardConf.PartitionID, Shard: shardConf.ShardID, AnchorEpoch: trustBases[0].GetEpoch(), AnchorConf: confHash,
+				Trust:   q3Trust.Verified().GetByEpoch,
+				Signing: q3rt.Signing,
+				Terminal: func(ctx context.Context, verified handoffdelivery.Verified) error {
+					terminalCtx, err := configuredprogress.TerminalContext(journalCtx, verified.Shard.ShardConfHash, verified.Shard.TR.Epoch)
+					if err != nil {
+						return fmt.Errorf("handoff terminal certificate context: %w", err)
+					}
+					// the terminal certificate belongs to the epoch this handoff ends: verified from the history, not from what the journal has admitted
+					terminalCtx.Observation.TrustBases = q3Trust.Verified()
+					terminalCtx.Record.TrustBases = q3Trust.Verified()
+					terminal, err := rootinput.AuthenticateObservationV2(ctx, terminalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
+					if err != nil {
+						return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
+					}
+					if restoringHandoffHistory {
+						uc, tr := *verified.Shard.UC, *verified.Shard.TR
+						restoredHandoffTerminals = append(restoredHandoffTerminals, handoffTerminalCertificate{uc: &uc, tr: &tr})
+						return nil
+					}
 					prepared, _, err := journalStore.PrepareObservation(ctx, terminalCtx, terminal)
 					if err != nil {
 						return fmt.Errorf("preparing handoff terminal certificate: %w", err)
@@ -1015,41 +980,22 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if _, _, err := journalStore.CommitObservation(prepared); err != nil {
 						return fmt.Errorf("persisting handoff terminal certificate: %w", err)
 					}
-				}
-				if err := verifierContext.InstallVerifiedTransition(view, verified, newEpoch); err != nil {
-					return err
-				}
-				step, err := handoffdelivery.AssignmentStepOf(view, verified)
-				if err != nil {
-					return err
-				}
-				if err := installVerifiedAssignment(node, activePeers, view, step); err != nil {
-					return err
-				}
-				if err := noteJoinerStep(signing, view, step, node.ShardConfForEpoch); err != nil {
-					return err
-				}
-				transition, err := handoff.BuildTransition(proof.Record, proof.Control.FrozenParent, g.Epoch, g.ID(), verified.Shard.IRTR, step)
-				if err != nil {
-					return err
-				}
-				rawTransition, err := transition.Encode()
-				if err != nil {
-					return err
-				}
-				if err := executor.(*engineapi.Adapter).InstallEpochTransition(rawTransition); err != nil {
-					return err
-				}
-				if have, seen := confByEpoch[newEpoch]; seen && !bytes.Equal(have, nextConf) {
-					return fmt.Errorf("%w: epoch %d was installed with another configuration", ErrQ3ShardEpoch, newEpoch)
-				}
-				confByEpoch[newEpoch] = nextConf
-				if err := q3Trust.ActivateQ3(newEpoch); err != nil {
-					return err
-				}
-				flags.observe.Logger().Info("handoff activated", "rootEpoch", newEpoch, "q3", true)
-				return nil
+					return nil
+				},
+				Transition: verifierContext.InstallVerifiedTransition,
+				InstallAssignment: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
+					return installVerifiedAssignment(node, activePeers, view, step)
+				},
+				NoteJoiner: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
+					return noteJoinerStep(signing, view, step, node.ShardConfForEpoch)
+				},
+				InstallEVMTransition: executor.(*engineapi.Adapter).InstallEpochTransition,
+				Activate:             q3Trust.ActivateQ3,
+				Log: func(epoch uint64) {
+					flags.observe.Logger().Info("handoff activated", "rootEpoch", epoch, "q3", true)
+				},
 			}
+			apply := installer.Apply
 			sink := &shardQ3Sink{verify: apply, holds: func(epoch uint64) bool {
 				current, ok := q3Trust.CurrentRootEpoch()
 				return ok && current >= epoch

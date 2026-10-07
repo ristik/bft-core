@@ -26,15 +26,28 @@ var ErrNoQ3Evidence = errors.New("no committed Q3 activation evidence for the ep
 // re-authenticated against the verified entry. The evidence is the leader's and every endorser's identical retained copy, so any root
 // peer can serve it.
 func (x *ConsensusManager) Q3ActivationEvidence(epoch uint64) (q3format.Link, *abdrc.CommittedBlock, []byte, error) {
-	none := q3format.Link{}
 	if x.q3 == nil || x.params.NetworkProfileVersion != storage.ProfileHandoff || epoch < 2 {
-		return none, nil, nil, fmt.Errorf("%w: epoch %d", ErrNoQ3Evidence, epoch)
+		return q3format.Link{}, nil, nil, fmt.Errorf("%w: epoch %d", ErrNoQ3Evidence, epoch)
 	}
-	head, path, record, err := x.blockStore.HandoffCheckpoint()
+	return q3ActivationEvidence(x.blockStore, epoch)
+}
+
+// q3EvidenceSource is what the evidence is assembled from: the committed checkpoint of the handoff and the artifacts retained when the
+// Freeze was admitted (the block store).
+type q3EvidenceSource interface {
+	HandoffCheckpoint() (*abdrc.CommittedBlock, *basetypes.UnicityTreeCertificate, evmroot.OrderedHandoffRecord, error)
+	HandoffBody(id []byte) ([]byte, error)
+	HandoffReceipts(id []byte) ([]byte, error)
+	HandoffCandidate(id []byte) ([]byte, error)
+}
+
+func q3ActivationEvidence(src q3EvidenceSource, epoch uint64) (q3format.Link, *abdrc.CommittedBlock, []byte, error) {
+	none := q3format.Link{}
+	head, path, record, err := src.HandoffCheckpoint()
 	if err != nil || head == nil || head.Control == nil || head.CommitQc == nil || record.Epoch+1 != epoch {
 		return none, nil, nil, fmt.Errorf("%w: no committed checkpoint into epoch %d", ErrNoQ3Evidence, epoch)
 	}
-	rawBody, err := x.blockStore.HandoffBody(record.NextBodyID)
+	rawBody, err := src.HandoffBody(record.NextBodyID)
 	if err != nil || len(rawBody) == 0 {
 		return none, nil, nil, fmt.Errorf("%w: no retained body", ErrNoQ3Evidence)
 	}
@@ -45,7 +58,7 @@ func (x *ConsensusManager) Q3ActivationEvidence(epoch uint64) (q3format.Link, *a
 	if id := body.Identity(); string(id[:]) != string(record.NextBodyID) {
 		return none, nil, nil, fmt.Errorf("%w: the retained body is not the committed one", ErrNoQ3Evidence)
 	}
-	rawReceipts, err := x.blockStore.HandoffReceipts(record.NextBodyID)
+	rawReceipts, err := src.HandoffReceipts(record.NextBodyID)
 	if err != nil || len(rawReceipts) == 0 {
 		return none, nil, nil, fmt.Errorf("%w: no retained readiness receipts", ErrNoQ3Evidence)
 	}
@@ -53,7 +66,7 @@ func (x *ConsensusManager) Q3ActivationEvidence(epoch uint64) (q3format.Link, *a
 	if err != nil {
 		return none, nil, nil, errors.Join(ErrNoQ3Evidence, err)
 	}
-	candidate, err := x.blockStore.HandoffCandidate(record.NextBodyID)
+	candidate, err := src.HandoffCandidate(record.NextBodyID)
 	if err != nil {
 		return none, nil, nil, errors.Join(ErrNoQ3Evidence, err)
 	}

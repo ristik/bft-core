@@ -219,7 +219,7 @@ func New(t *testing.T, o Options) *Fixture {
 		}
 	}
 
-	f.Evidence = q3format.Evidence{Summary: bytes.Repeat([]byte{0x55}, 32), FrozenParent: bytes.Clone(o.Frozen), CandidateDigest: operator[:]}
+	f.Evidence = q3format.Evidence{Summary: bytes.Clone(body.StateSummary), FrozenParent: bytes.Clone(o.Frozen), CandidateDigest: operator[:]}
 	record := evmroot.OrderedHandoffRecord{Network: Network, Epoch: oldEpoch, Attempt: attempt, OrderedRound: ordered, ActivationRound: activate,
 		PredecessorBodyID: oldID, NextBodyID: bodyID[:], SuccessorTRHash: trHash, Kind: "commit",
 		FrozenID: evmroot.D4FrozenID(bodyID[:], f.Evidence.Summary, f.Evidence.FrozenParent, f.Evidence.CandidateDigest, attempt, oldID)}
