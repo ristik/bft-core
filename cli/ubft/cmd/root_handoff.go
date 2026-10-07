@@ -185,7 +185,7 @@ func decodeHandoffAbortTarget(w http.ResponseWriter, r *http.Request, target *ab
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{Use: "root", Short: "Root chain operator commands"}
 	handoff := &cobra.Command{Use: "handoff", Short: "Profile-2 validator handoff"}
-	var nextFile, rootRPCs, nextEVMAssignment string
+	var nextFile, rootRPCs, nextEVMAssignment, readinessReceipts string
 	var prepareTimeout time.Duration
 	var maxAttempts int
 	propose := &cobra.Command{Use: "propose", Short: "Request old-validator endorsements for a new root trust base", Long: "Plans the handoff, has the root order a Prepare for it (which freezes the EVM and binds the frozen parent), and then collects the\n" +
@@ -219,6 +219,11 @@ func newRootCmd() *cobra.Command {
 				return err
 			}
 		}
+		if readinessReceipts != "" {
+			if planRequest.Q3Receipts, err = readQ3Receipts(splitList(readinessReceipts)); err != nil {
+				return err
+			}
+		}
 		request, err := json.Marshal(planRequest)
 		if err != nil {
 			return err
@@ -248,7 +253,10 @@ func newRootCmd() *cobra.Command {
 	propose.Flags().StringVar(&rootRPCs, "root-rpc", "", "comma-separated local old validator RPC URLs")
 	_ = propose.MarkFlagRequired("next-trust-base")
 	_ = propose.MarkFlagRequired("root-rpc")
+	propose.Flags().StringVar(&readinessReceipts, "readiness-receipts", "",
+		"comma-separated readiness receipt files of every successor member (`handoff q3-readiness`): the plan is then a V3 plan, and the root refuses it unless every member declared itself ready for exactly this candidate")
 	handoff.AddCommand(propose)
+	handoff.AddCommand(newQ3CandidateCmd(), newQ3ReadinessCmd(), newQ3ActivationCmd())
 	handoff.AddCommand(newEVMContextCmd(), newEVMPoPCmd(), newEVMAssembleCmd(), newShardAssembleCmd())
 	var networkID, oldEpoch, attempt uint64
 	var predecessorBodyID, nextBodyID, abortRPCs string

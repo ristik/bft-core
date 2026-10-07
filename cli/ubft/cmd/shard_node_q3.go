@@ -5,8 +5,12 @@ import (
 	"context"
 	"crypto"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"sync"
 
 	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/evmassign"
@@ -21,6 +25,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
+	basehex "github.com/unicitynetwork/bft-go-base/types/hex"
 )
 
 // shardEpochTrust is what the shard node asks of its root-epoch trust: certificate verification per epoch, which epoch is current, and the
@@ -315,4 +320,70 @@ func wireQ3Pair(executor any, rt *q3active.Runtime, network uint64, origin regis
 	}
 	adapter.EnablePair(q3PairConfig(rt, network, [32]byte(origin.BlockHash())))
 	return adapter, nil
+// shardQ3StageRequest hands the shard node the V3 candidate its entity's operator is about to attest readiness for.
+type shardQ3StageRequest struct {
+	Body      basehex.Bytes `json:"body"`
+	Candidate basehex.Bytes `json:"candidate"`
+}
+
+// shardQ3Staging is the shard node's side of the readiness check: it reports the chain its own verified history is rooted in and the
+// candidate it has been handed, which it accepts only for that chain. It is a report by a co-hosted service, not an attestation.
+type shardQ3Staging struct {
+	cfg    func() (q3format.ProtocolConfig, error)
+	mu     sync.Mutex
+	staged *[32]byte
+	body   [32]byte
+}
+
+// Stage records the candidate if its body is a valid V3 body of this node's chain.
+func (s *shardQ3Staging) Stage(req shardQ3StageRequest) error {
+	if len(req.Candidate) != 32 {
+		return errors.New("the candidate digest is not 32 bytes")
+	}
+	body, err := q3format.DecodeBody(req.Body)
+	if err != nil {
+		return err
+	}
+	cfg, err := s.cfg()
+	if err != nil {
+		return err
+	}
+	if body.Config != cfg {
+		return errors.New("the candidate is for another network, genesis or protocol tuple than this node's verified history")
+	}
+	var digest [32]byte
+	copy(digest[:], req.Candidate)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.staged, s.body = &digest, body.Identity()
+	return nil
+}
+
+func (s *shardQ3Staging) status() (q3StatusResponse, error) {
+	cfg, err := s.cfg()
+	if err != nil {
+		return q3StatusResponse{}, err
+	}
+	out := q3StatusResponse{Network: cfg.Network, Genesis: hex.EncodeToString(cfg.Genesis[:])}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.staged != nil {
+		out.Staged = &q3StagedResponse{CandidateDigest: hex.EncodeToString(s.staged[:]), BodyID: hex.EncodeToString(s.body[:])}
+	}
+	return out, nil
+}
+
+// register adds the shard node's lane endpoints to its operator mux.
+func (s *shardQ3Staging) register(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/v1/q3/status", q3Endpoint(func(context.Context, json.RawMessage) (any, error) { return s.status() }))
+	mux.HandleFunc("POST /api/v1/q3/stage", q3Endpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
+		var req shardQ3StageRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, err
+		}
+		if err := s.Stage(req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, nil
+	}))
 }
