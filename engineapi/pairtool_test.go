@@ -18,19 +18,6 @@ func urlOf(t *testing.T, m *mockReth, auth bool) string {
 	return srv.URL
 }
 
-func word(b byte) [32]byte { return [32]byte{0: b, 31: b} }
-
-func hexw(b [32]byte) string { return "0x" + hexString(b[:]) }
-
-func hexString(b []byte) string {
-	const digits = "0123456789abcdef"
-	out := make([]byte, 0, len(b)*2)
-	for _, c := range b {
-		out = append(out, digits[c>>4], digits[c&15])
-	}
-	return string(out)
-}
-
 // pairChain is the one block a pair retains: its header, its root input (with two transitions) and the binding its own Go side supplied.
 type pairChain struct {
 	header      map[string]any

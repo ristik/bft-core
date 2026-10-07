@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"crypto"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -215,4 +217,31 @@ func TestTrustBaseGenerateWithExactRootWeights(t *testing.T) {
 		_, err := generate(tc...)
 		require.Error(t, err, name)
 	}
+}
+
+func TestTrustBaseIDIsTheGenesisHash(t *testing.T) {
+	ctx := context.Background()
+	logF := testobserve.NewFactory(t)
+	home := t.TempDir()
+	cmd := New(logF)
+	cmd.baseCmd.SetArgs([]string{"root-node", "init", "--home", home, "--generate"})
+	require.NoError(t, cmd.Execute(ctx))
+	cmd = New(logF)
+	cmd.baseCmd.SetArgs([]string{"trust-base", "generate", "--home", home, "--node-info", filepath.Join(home, nodeInfoFileName), "--network-id", "5"})
+	require.NoError(t, cmd.Execute(ctx))
+	file := filepath.Join(home, "trust-base.json")
+
+	out, err := runCLI(t, "trust-base", "id", "--trust-base", file)
+	require.NoError(t, err)
+	tb, err := util.ReadJsonFile(file, &types.RootTrustBaseV1{})
+	require.NoError(t, err)
+	want, err := tb.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprintf("0x%x\n", want), out)
+
+	tb.Epoch = 2
+	later := filepath.Join(home, "later.json")
+	require.NoError(t, util.WriteJsonFile(later, tb))
+	_, err = runCLI(t, "trust-base", "id", "--trust-base", later)
+	require.ErrorContains(t, err, "epoch-1")
 }

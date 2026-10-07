@@ -7,12 +7,9 @@ package engineapi
 
 import (
 	"context"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -27,69 +24,6 @@ type PairExport struct {
 	RootInput   []byte
 	Transitions []byte // the canonical array of the transition byte strings, as the binding hashes it
 	Binding     []byte
-}
-
-type pairHeader struct {
-	Number                string            `json:"number"`
-	Hash                  string            `json:"hash"`
-	ParentHash            string            `json:"parentHash"`
-	StateRoot             string            `json:"stateRoot"`
-	MixHash               string            `json:"mixHash"`
-	Miner                 string            `json:"miner"`
-	Timestamp             string            `json:"timestamp"`
-	ExtraData             string            `json:"extraData"`
-	ParentBeaconBlockRoot string            `json:"parentBeaconBlockRoot"`
-	Withdrawals           []json.RawMessage `json:"withdrawals"`
-}
-
-func hexBytes(s string, size int) ([]byte, error) {
-	raw, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
-	if err != nil || (size >= 0 && len(raw) != size) {
-		return nil, fmt.Errorf("engineapi: %q is not a %d-byte hex value", s, size)
-	}
-	return raw, nil
-}
-
-func hexUint(s string) (uint64, error) { return strconv.ParseUint(strings.TrimPrefix(s, "0x"), 16, 64) }
-
-func (c *EthClient) header(ctx context.Context, tag string) (pairHeader, error) {
-	var h pairHeader
-	var raw json.RawMessage
-	if err := c.call(ctx, "eth_getBlockByNumber", []any{tag, false}, &raw); err != nil {
-		return h, err
-	}
-	if isJSONNull(raw) {
-		return h, fmt.Errorf("engineapi: the execution client has no block %s", tag)
-	}
-	return h, json.Unmarshal(raw, &h)
-}
-
-type pairCompanionLookup struct {
-	Status    string `json:"status"`
-	Companion struct {
-		RootInput   string `json:"rootInput"`
-		PairBinding string `json:"pairBinding"`
-	} `json:"companion"`
-}
-
-// ErrPairCompanion is returned when the execution client holds no companion for a block.
-var ErrPairCompanion = errors.New("engineapi: the execution client retains no companion for the block")
-
-func (c *EthClient) companion(ctx context.Context, hash string) (rootInput, binding []byte, err error) {
-	var l pairCompanionLookup
-	if err := c.call(ctx, "unicity_getSealCompanionV1", []any{hash}, &l); err != nil {
-		return nil, nil, err
-	}
-	if l.Status != "found" {
-		return nil, nil, fmt.Errorf("%w: %s (%s)", ErrPairCompanion, hash, l.Status)
-	}
-	if rootInput, err = hexBytes(l.Companion.RootInput, -1); err != nil {
-		return nil, nil, err
-	}
-	if binding, err = hexBytes(l.Companion.PairBinding, -1); err != nil {
-		return nil, nil, err
-	}
-	return rootInput, binding, nil
 }
 
 // rootInputTransitions is the canonical array of the transition byte strings inside a canonical root input: its last field.

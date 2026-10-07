@@ -59,6 +59,7 @@ func newTrustBaseCmd(baseConfig *baseFlags) *cobra.Command {
 	cmd.AddCommand(trustBaseGenerateCmd(baseConfig))
 	cmd.AddCommand(trustBaseSignCmd(baseConfig))
 	cmd.AddCommand(trustBaseVerifyCmd(baseConfig))
+	cmd.AddCommand(trustBaseIDCmd())
 	return cmd
 }
 
@@ -276,4 +277,29 @@ func applyRootWeights(nodes []*types.NodeInfo, raw []string) error {
 		return fmt.Errorf("--root-weights: %w", err)
 	}
 	return nil
+}
+
+// trustBaseIDCmd prints the identity a Q3 deployment pins as its root genesis: the SHA-256 of the genesis trust base, the value a verified
+// history is rooted in and an execution client is started with (--unicity.root-genesis-id).
+func trustBaseIDCmd() *cobra.Command {
+	var file string
+	cmd := &cobra.Command{Use: "id", Short: "Print the root-genesis identity of a genesis trust base (0x-prefixed SHA-256)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			tb, err := util.ReadJsonFile(file, &types.RootTrustBaseV1{})
+			if err != nil {
+				return fmt.Errorf("failed to load trust base %q: %w", file, err)
+			}
+			if tb.Epoch != 1 {
+				return fmt.Errorf("trust base %q is epoch %d: the root genesis is the epoch-1 trust base", file, tb.Epoch)
+			}
+			id, err := tb.Hash(crypto.SHA256)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "0x%x\n", id)
+			return err
+		}}
+	cmd.Flags().StringVar(&file, "trust-base", "", "the genesis (epoch 1) trust base file")
+	_ = cmd.MarkFlagRequired("trust-base")
+	return cmd
 }
