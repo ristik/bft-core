@@ -41,7 +41,10 @@ func TestPublishRefusesAnEntryThatIsNotAnActivationAndAnotherRecordOfThePublishe
 	require.ErrorIs(t, r.publish(q3format.Entry{}), ErrHistory)
 	require.Nil(t, r.Snapshot())
 	require.NoError(t, r.publish(first))
+	require.Nil(t, r.Snapshot(), "a provisional snapshot is not served before its epoch is complete")
 	require.NoError(t, r.publish(first), "the same record again, after a restart")
 	require.ErrorIs(t, r.publish(other), ErrRegress)
-	require.Equal(t, first.Claim(), r.Snapshot().Claim(), "the published handle was not replaced")
+	require.Equal(t, first.Claim(), r.snap.Load().Claim(), "the provisional handle was not replaced")
+	r.complete(first.Epoch())
+	require.Equal(t, first.Claim(), r.Snapshot().Claim(), "served once the epoch is complete")
 }

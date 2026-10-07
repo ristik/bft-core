@@ -60,7 +60,15 @@ type Entry struct {
 	// them from the verified history and never from a caller-built record.
 	handoff *evmroot.VerifiedHandoff
 	genesis *evmroot.EpochGenesis
+	// rootOnly is true when the candidate digest the committed record binds is the operator candidate recomputed from the body's own
+	// members: no EVM assignment preimage is committed, so none can be omitted.
+	rootOnly bool
 }
+
+// RootOnly reports whether the committed record binds exactly the root-only operator candidate of this entry's members. It is
+// derived from the authenticated record when the entry is minted; an entry whose committed candidate is anything else (an EVM
+// assignment) is not root-only, however its candidate bytes are presented later.
+func (e Entry) RootOnly() bool { return e.rootOnly }
 
 func (e Entry) Epoch() uint64 { return e.epoch }
 func (e Entry) Start() uint64 { return e.start } // the actual activation boundary A*
@@ -101,6 +109,8 @@ func (e Entry) Handoff() (evmroot.VerifiedHandoff, evmroot.EpochGenesis, bool) {
 	}
 	v, g := *e.handoff, *e.genesis
 	v.RecordID, v.Root, v.ControlDigest = bytes.Clone(v.RecordID), bytes.Clone(v.Root), bytes.Clone(v.ControlDigest)
+	v.Record.PredecessorBodyID, v.Record.FrozenID = bytes.Clone(v.Record.PredecessorBodyID), bytes.Clone(v.Record.FrozenID)
+	v.Record.NextBodyID, v.Record.SuccessorTRHash = bytes.Clone(v.Record.NextBodyID), bytes.Clone(v.Record.SuccessorTRHash)
 	g.NextBodyID, g.RecordID, g.Root, g.ControlDigest = bytes.Clone(g.NextBodyID), bytes.Clone(g.RecordID), bytes.Clone(g.Root), bytes.Clone(g.ControlDigest)
 	g.FrozenID, g.SuccessorTRHash = bytes.Clone(g.FrozenID), bytes.Clone(g.SuccessorTRHash)
 	return v, g, true
@@ -331,6 +341,11 @@ func (h *History) WithV3(l Link) (*History, error) {
 	if err := VerifyReceipts(b, ContextFor(b, r.Attempt, [32]byte(l.Evidence.CandidateDigest)), l.Receipts); err != nil {
 		return nil, err
 	}
+	operator, err := evmroot.D4OperatorCandidateDigest(b.Members)
+	if err != nil {
+		return nil, errors.Join(ErrBody, err)
+	}
+	rootOnly := bytes.Equal(l.Evidence.CandidateDigest, operator[:]) // bound into the committed FrozenID and the body's change-record hash above
 	tb, err := projection(b.Members, b.Network, b.Epoch, r.ActivationRound, b.RootThreshold)
 	if err != nil {
 		return nil, errors.Join(ErrBody, err)
@@ -342,7 +357,7 @@ func (h *History) WithV3(l Link) (*History, error) {
 	verified := evmroot.VerifiedHandoff{RecordID: bytes.Clone(v.RecordID[:]), Root: bytes.Clone(v.StateRoot[:]), ControlDigest: bytes.Clone(v.ControlDigest[:]),
 		OrderRound: v.OrderRound, CommitSealRound: v.CommitSealRound, Epoch: v.SignerEpoch, Record: r}
 	e := Entry{epoch: b.Epoch, start: r.ActivationRound, earliest: b.EarliestActivation, version: BodyVersion, scheme: cfg.SigningScheme, priorVersion: tip.version, priorID: tip.bodyID,
-		config: &cfg, bodyID: id, commitID: v.RecordID, tb: tb, handoff: &verified, genesis: &anchor}
+		config: &cfg, bodyID: id, commitID: v.RecordID, tb: tb, handoff: &verified, genesis: &anchor, rootOnly: rootOnly}
 	copy(e.anchorID[:], anchor.ID())
 	return h.extend(e), nil
 }

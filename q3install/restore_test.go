@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -141,6 +142,49 @@ func TestRecoverDoesNotRestoreAnUnfinishedActivation(t *testing.T) {
 	require.Empty(t, v2.restored, "an unfinished activation installs, it is not restored")
 	require.Equal(t, []string{"install 5", "verify 5"}, events)
 	require.NoError(t, j.Gate(ctx, c))
+}
+
+// TestRecoverRestoresAMarkedVolatileStepWhenOnlyTheCompletionWriteWasLost is the exact crash cut after the last step marker and
+// before the /done marker: every step is marked, the volatile participant's state died with the process, and nothing is erased.
+func TestRecoverRestoresAMarkedVolatileStepWhenOnlyTheCompletionWriteWasLost(t *testing.T) {
+	c := claim(5)
+	open := func(s *stores, cr *crasher, v *volatileComponent) *Journal {
+		comps := map[Step]Component{}
+		for _, k := range Steps {
+			comps[k] = fakeComponent{s, &crasher{n: -1}, k}
+		}
+		comps[StepSnapshot] = v
+		j, err := Open(Config{DB: crashDB{s.db, cr, &s.deletes}, Components: comps, Bundles: acceptBundle})
+		require.NoError(t, err)
+		return j
+	}
+	var events []string
+	ref := newStores()
+	refCrash := &crasher{n: -1}
+	require.NoError(t, open(ref, refCrash, newVolatile(ref, &events)).Install(ctx, c, bundleFor(c)))
+
+	s := newStores()
+	v := newVolatile(s, &events)
+	// the stage and the five step markers are durable; only the completion write dies
+	require.ErrorIs(t, open(s, &crasher{n: refCrash.events - 1}, v).Install(ctx, c, bundleFor(c)), errCrash)
+	var marker []byte
+	ok, err := s.db.Read(key(c.Epoch, "done"), &marker)
+	require.NoError(t, err)
+	require.False(t, ok, "the completion marker was not written")
+	ok, err = s.db.Read(key(c.Epoch, "step/"+strconv.Itoa(int(StepSnapshot))), &marker)
+	require.NoError(t, err)
+	require.True(t, ok, "the snapshot step is marked")
+
+	// restart: the volatile state is gone, no marker is erased
+	events = nil
+	v2 := newVolatile(s, &events)
+	j := open(s, &crasher{n: -1}, v2)
+	require.NoError(t, j.Recover(ctx, lookup(c)))
+	require.Equal(t, []uint64{5}, v2.restored, "the marked volatile step is restored although the journal was not complete")
+	require.Equal(t, []string{"restore 5", "verify 5"}, events)
+	require.Equal(t, 1, s.installs[StepSnapshot], "the marked step is not installed again")
+	require.NoError(t, j.Gate(ctx, c))
+	require.Zero(t, s.deletes, "no marker or safety state is erased to get there")
 }
 
 func TestRestoreFailureRefusesRecovery(t *testing.T) {

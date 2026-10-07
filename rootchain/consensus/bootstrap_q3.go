@@ -52,6 +52,9 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	if len(candidate) != 0 {
 		return nil, ErrQ3Candidate
 	}
+	if !entry.RootOnly() { // the committed candidate is an assignment: omitting its preimage must not turn it into a root-only install
+		return nil, fmt.Errorf("%w: the committed candidate is not the root-only operator candidate", ErrQ3Candidate)
+	}
 	if head == nil || len(head.ShardInfo) == 0 {
 		return nil, errors.New("handoff snapshot has no shards")
 	}

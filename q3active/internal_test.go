@@ -97,19 +97,19 @@ func TestSnapshotStepVerifiesWhatIsPublished(t *testing.T) {
 	activation := q3install.Activation{Claim: f.Claim, Bundle: bundleBytes(t, f)}
 	ctx := context.Background()
 
-	require.Error(t, step.Verify(ctx, activation), "nothing is published")
+	require.ErrorIs(t, step.Verify(ctx, activation), ErrSnapshot, "nothing is published")
 	require.NoError(t, rt.publish(entry))
 	require.NoError(t, step.Verify(ctx, activation))
 
 	later := activation
 	later.Claim.Epoch = 3
-	require.Error(t, step.Verify(ctx, later), "epoch 3 is not published")
+	require.ErrorIs(t, step.Verify(ctx, later), ErrSnapshot, "epoch 3 is not published")
 	earlier := activation
 	earlier.Claim.Epoch = 1
 	require.NoError(t, step.Verify(ctx, earlier), "a later epoch's snapshot covers an earlier activation")
 	other := activation
 	other.Claim.CommitID[0] ^= 0xFF
-	require.Error(t, step.Verify(ctx, other), "the snapshot of epoch 2 is another record's")
+	require.ErrorIs(t, step.Verify(ctx, other), ErrSnapshot, "the snapshot of epoch 2 is another record's")
 	require.NoError(t, step.Restore(ctx, activation), "a restart publishes the same snapshot again")
 }
 
@@ -149,6 +149,32 @@ func TestDecodeBundleRefusals(t *testing.T) {
 		_, err = EncodeBundle(Bundle{Envelope: f.EnvelopeBytes})
 		require.ErrorIs(t, err, ErrBundle)
 	})
+}
+
+// sized is the canonical bundle of exactly n bytes: the candidate is padded until the encoding is that long.
+func sized(t *testing.T, f *q3fixture.Fixture, n int) []byte {
+	t.Helper()
+	raw, err := EncodeBundle(Bundle{Envelope: f.EnvelopeBytes, Snapshot: f.Snapshot, Candidate: []byte{}})
+	require.NoError(t, err)
+	pad := n - len(raw)
+	for range 3 { // the byte string's length prefix grows with the padding
+		raw, err = EncodeBundle(Bundle{Envelope: f.EnvelopeBytes, Snapshot: f.Snapshot, Candidate: make([]byte, pad)})
+		require.NoError(t, err)
+		pad += n - len(raw)
+	}
+	require.Len(t, raw, n)
+	return raw
+}
+
+// The size bound is inclusive: a canonical bundle of exactly MaxEnvelopeBytes decodes, one byte more is refused.
+func TestDecodeBundleSizeBoundIsInclusive(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{})
+	b, env, err := DecodeBundle(sized(t, f, q3format.MaxEnvelopeBytes))
+	require.NoError(t, err, "exactly the limit")
+	require.NotEmpty(t, b.Candidate, "the padding is the candidate")
+	require.Len(t, env.Links, 1)
+	_, _, err = DecodeBundle(sized(t, f, q3format.MaxEnvelopeBytes+1))
+	require.ErrorIs(t, err, ErrBundle, "one byte over the limit")
 }
 
 // nonCanonical is the bundle with its top-level array in indefinite-length form: the same value, another encoding.

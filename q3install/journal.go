@@ -450,8 +450,8 @@ func (j *Journal) Recover(ctx context.Context, committed func(epoch uint64) (q3f
 		if err := j.check(st.stage, c); err != nil {
 			return err
 		}
-		for _, s := range Steps {
-			if r, ok := j.cfg.Components[s].(Restorer); ok && st.done {
+		for i, s := range Steps { // a marked step is restored whether or not the completion marker was written: a crash between them loses only volatile state
+			if r, ok := j.cfg.Components[s].(Restorer); ok && st.steps[i] {
 				if err := r.Restore(ctx, st.stage.activation()); err != nil {
 					return fmt.Errorf("q3install: restore %s: %w", s, err)
 				}

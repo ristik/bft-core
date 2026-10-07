@@ -161,27 +161,32 @@ func TestOldFormMessagesOfTheActivatedEpochAreRefused(t *testing.T) {
 func TestNoSignatureIsMadeBeforeTheJournalIsComplete(t *testing.T) {
 	c := newQ3Cluster(t, q3fixture.Options{})
 	ctx := context.Background()
-	// the last replica cannot complete: its authority was not given the guarded lookup
+	// the leader of the first successor round must be able to propose, so it is never the replica that cannot complete: replica 0
+	// installs first and tells who leads, and the stuck one is the last of the others
+	c.replicas[0].activate()
+	anchor := c.replicas[0].manager.epochAnchor
+	first, err := c.replicas[0].manager.leaderSelector.GetLeaderForRound(anchor.Slot + 1)
+	require.NoError(t, err)
+	leader := c.byID(first)
 	stuck := c.replicas[3]
+	if leader == stuck {
+		stuck = c.replicas[2]
+	}
+	// the stuck replica's authority was not given the guarded lookup
 	stuck.authority.off.Store(true)
-	for _, r := range c.replicas[:3] {
-		r.activate()
+	for _, r := range c.replicas[1:] {
+		if r != stuck {
+			r.activate()
+		}
 	}
 	require.NoError(t, stuck.rt.Recover(ctx))
-	err := stuck.rt.Activate(ctx, stuck.bundle())
+	err = stuck.rt.Activate(ctx, stuck.bundle())
 	require.ErrorIs(t, err, q3active.ErrNotBound)
 	require.ErrorIs(t, stuck.rt.Admit(2), q3active.ErrNotActive)
 	require.NotNil(t, stuck.manager.epochAnchor, "the root step finished: the manager holds the epoch")
 	stuck.startConsensus()
-	anchor := stuck.manager.epochAnchor
 
-	// the others propose; the stuck replica receives the proposal and signs nothing
-	first, err := c.replicas[0].manager.leaderSelector.GetLeaderForRound(anchor.Slot + 1)
-	require.NoError(t, err)
-	leader := c.byID(first)
-	if leader == stuck {
-		leader = c.replicas[0]
-	}
+	// the leader proposes; the stuck replica receives the proposal and signs nothing
 	leader.manager.processNewRoundEvent(ctx)
 	proposal := leader.net.WaitRootProposal(t)
 	before := stuck.db.GetHighestVotedRound()

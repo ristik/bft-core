@@ -39,6 +39,9 @@ var (
 	// ErrHistory is returned when a staged bundle does not replay into the verified history: the journal holds a record the
 	// history from the trusted genesis does not authenticate.
 	ErrHistory = errors.New("q3active: staged activation is not authenticated by the history")
+	// ErrSnapshot is returned by the snapshot step's check when the provisional snapshot is missing, older than the activation, or
+	// another record's of the same epoch. The journal wraps it in q3install.ErrStoreConflict.
+	ErrSnapshot = errors.New("q3active: the snapshot is not the activation's")
 	// ErrConflict is returned when a legacy view disagrees with the verified history for an epoch.
 	ErrConflict = errors.New("q3active: trust base differs from the verified history")
 )
@@ -84,7 +87,8 @@ type Runtime struct {
 	mu        sync.Mutex // serialises activation and recovery
 	journal   *q3install.Journal
 	hist      atomic.Pointer[q3format.History]
-	snap      atomic.Pointer[Snapshot]
+	snap      atomic.Pointer[Snapshot] // the installer's provisional snapshot: private until its epoch is journaled complete
+	active    atomic.Pointer[Snapshot] // the published active context: the provisional one once its epoch is complete
 	parts     atomic.Pointer[Participants]
 	completed sync.Map // epoch -> struct{}: journaled complete in this process
 }
@@ -174,8 +178,20 @@ func (r *Runtime) Activated(epoch uint64) (q3format.Entry, bool) {
 // History is the verified history. It is immutable: a later activation replaces it with an extended copy.
 func (r *Runtime) History() *q3format.History { return r.hist.Load() }
 
-// Snapshot is the published active-context handle, or nil before the first activation completes.
-func (r *Runtime) Snapshot() *Snapshot { return r.snap.Load() }
+// Snapshot is the published active-context handle, or nil before the first activation completes. An installation that is not
+// durably complete and recovered publishes nothing, however far its steps got.
+func (r *Runtime) Snapshot() *Snapshot { return r.active.Load() }
+
+// complete records that an epoch's installation is durably complete (and recovered), admits it, and publishes the provisional
+// snapshot when that is the epoch's.
+func (r *Runtime) complete(epoch uint64) {
+	r.completed.Store(epoch, struct{}{})
+	if s := r.snap.Load(); s != nil {
+		if _, ok := r.completed.Load(s.Epoch()); ok {
+			r.active.Store(s)
+		}
+	}
+}
 
 // Signing is the signing configuration of an epoch, from the verified history. An epoch the history does not hold is an error. It
 // is the trustbase.SigningAuthority a trust-base store is bound to; Admit is what gates signing.
@@ -284,7 +300,7 @@ func (r *Runtime) Activate(ctx context.Context, b Bundle) error {
 	if err := r.journal.Install(ctx, claim, raw); err != nil {
 		return err
 	}
-	r.completed.Store(claim.Epoch, struct{}{})
+	r.complete(claim.Epoch)
 	return nil
 }
 
@@ -311,7 +327,7 @@ func (r *Runtime) Recover(ctx context.Context) error {
 		return err
 	}
 	for _, a := range staged { // Recover finished or checked every one of them against every store
-		r.completed.Store(a.Claim.Epoch, struct{}{})
+		r.complete(a.Claim.Epoch)
 	}
 	return nil
 }
@@ -319,7 +335,7 @@ func (r *Runtime) Recover(ctx context.Context) error {
 // Gate is the journal's signer admission for a record: complete, the same record, every store in agreement.
 func (r *Runtime) Gate(ctx context.Context, c q3format.Claim) error { return r.journal.Gate(ctx, c) }
 
-// publish makes the epoch's snapshot the active context. A later epoch replaces an earlier one; the same epoch is a no-op; going
+// publish makes the epoch's snapshot the installer's provisional context (Snapshot serves it once the epoch is complete). A later epoch replaces an earlier one; the same epoch is a no-op; going
 // back is refused.
 func (r *Runtime) publish(e q3format.Entry) error {
 	cfg, ok := e.Config()
@@ -436,9 +452,9 @@ func (c *snapshotComponent) Verify(_ context.Context, a q3install.Activation) er
 	s := c.r.snap.Load()
 	switch {
 	case s == nil || s.Epoch() < a.Claim.Epoch:
-		return fmt.Errorf("epoch %d is not published", a.Claim.Epoch)
+		return fmt.Errorf("%w: epoch %d is not published", ErrSnapshot, a.Claim.Epoch)
 	case s.Epoch() == a.Claim.Epoch && s.claim != a.Claim:
-		return fmt.Errorf("the snapshot published for epoch %d is another record's", a.Claim.Epoch)
+		return fmt.Errorf("%w: the snapshot published for epoch %d is another record's", ErrSnapshot, a.Claim.Epoch)
 	}
 	return nil
 }

@@ -65,6 +65,26 @@ func TestEntryHandsOutTheVerifiedActivationAsCopies(t *testing.T) {
 		require.Equal(t, e.AnchorID(), [32]byte(g2.ID()))
 	})
 
+	t.Run("no byte slice of the returned handoff aliases the entry, the nested committed record included", func(t *testing.T) {
+		pristineV, pristineG, ok := e.Handoff()
+		require.True(t, ok)
+		v, g, _ := e.Handoff()
+		for name, b := range map[string][]byte{
+			"v.RecordID": v.RecordID, "v.Root": v.Root, "v.ControlDigest": v.ControlDigest,
+			"v.Record.PredecessorBodyID": v.Record.PredecessorBodyID, "v.Record.FrozenID": v.Record.FrozenID,
+			"v.Record.NextBodyID": v.Record.NextBodyID, "v.Record.SuccessorTRHash": v.Record.SuccessorTRHash,
+			"g.NextBodyID": g.NextBodyID, "g.RecordID": g.RecordID, "g.Root": g.Root, "g.ControlDigest": g.ControlDigest,
+			"g.FrozenID": g.FrozenID, "g.SuccessorTRHash": g.SuccessorTRHash,
+		} {
+			require.NotEmpty(t, b, name)
+			b[0] ^= 0xFF
+		}
+		v2, g2, _ := e.Handoff()
+		require.Equal(t, pristineV, v2, "mutating the returned verified handoff, record included, does not change the next one")
+		require.Equal(t, pristineG, g2)
+		require.Equal(t, e.AnchorID(), [32]byte(g2.ID()))
+	})
+
 	t.Run("a legacy or zero entry has no activation", func(t *testing.T) {
 		genesis, err := h.ForEpoch(1)
 		require.NoError(t, err)

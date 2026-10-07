@@ -283,7 +283,15 @@ func (s *SafetyModule) SignTimeout(tmoVote *abdrc.TimeoutMsg, lastRoundTC *drcty
 	return tmoVote.Sign(s.signer)
 }
 
-func (s *SafetyModule) Sign(msg Signable) error {
+// Sign signs a message that carries no voting rule (a proposal, an IR change request) as a member of the given epoch. With an
+// activation gate the epoch must be admitted, exactly as for a vote or timeout: a leader whose installed epoch is not completely
+// activated signs and broadcasts nothing.
+func (s *SafetyModule) Sign(epoch uint64, msg Signable) error {
+	if s.gate != nil {
+		if err := s.gate.Admit(epoch); err != nil {
+			return fmt.Errorf("epoch %d is not admitted for signing: %w", epoch, err)
+		}
+	}
 	return msg.Sign(s.signer)
 }
 

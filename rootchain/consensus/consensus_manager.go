@@ -726,7 +726,7 @@ func (x *ConsensusManager) onPartitionIRChangeReq(ctx context.Context, req *IRCh
 		Author:      x.id.String(),
 		IrChangeReq: irReq,
 	}
-	if err := x.safety.Sign(irMsg); err != nil {
+	if err := x.safety.Sign(x.trustBase.Load().Epoch, irMsg); err != nil {
 		return fmt.Errorf("failed to sign IR change request from partition %s: %w", irReq.Partition, err)
 	}
 	if err := x.net.Send(ctx, irMsg, nextLeader); err != nil {
@@ -1392,7 +1392,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		LastRoundTc: x.pacemaker.LastRoundTC(),
 	}
 	// safety makes simple sanity checks and signs if everything is ok
-	if err = x.safety.Sign(proposalMsg); err != nil {
+	if err = x.safety.Sign(proposalMsg.Block.Epoch, proposalMsg); err != nil {
 		x.log.WarnContext(ctx, "failed to send proposal message, signing failed", logger.Error(err))
 		return
 	}
