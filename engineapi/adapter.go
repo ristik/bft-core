@@ -151,6 +151,17 @@ func (v *VerifierContext) InstallHandoffTransition(bundle handoffdelivery.Bundle
 	if v == nil || bundle.Proof.Record.Epoch == ^uint64(0) || bundle.Body.Epoch != bundle.Proof.Record.Epoch+1 || checked.Genesis.Epoch != bundle.Body.Epoch {
 		return handoff.ErrBoundary
 	}
+	return v.InstallVerifiedTransition(bundle, checked, bundle.Body.Epoch)
+}
+
+// InstallVerifiedTransition is InstallHandoffTransition for a successor epoch whose body is not a V2 body: a V3 activation carries its
+// epoch and its epoch genesis from the verified history, so the caller names the epoch and the bundle need only carry the proof, the
+// checkpoint and the candidate. The checks are the same: the proof's record steps one root epoch, the verified genesis is that epoch's,
+// and the assignment step is derived from the verified checkpoint and candidate.
+func (v *VerifierContext) InstallVerifiedTransition(bundle handoffdelivery.Bundle, checked handoffdelivery.Verified, newEpoch uint64) error {
+	if v == nil || bundle.Proof.Record.Epoch == ^uint64(0) || newEpoch != bundle.Proof.Record.Epoch+1 || checked.Genesis.Epoch != newEpoch {
+		return handoff.ErrBoundary
+	}
 	// The old committee commits the successor assignment hash. The snapshot
 	// carries the shard's last assignment; an assignment handoff advances it by one
 	// shard round and epoch, which the successor certificate re-authenticates.
@@ -161,7 +172,7 @@ func (v *VerifierContext) InstallHandoffTransition(bundle handoffdelivery.Bundle
 	if err != nil {
 		return handoff.ErrBoundary
 	}
-	t, err := handoff.BuildTransition(bundle.Proof.Record, bundle.Proof.Control.FrozenParent, bundle.Body.Epoch,
+	t, err := handoff.BuildTransition(bundle.Proof.Record, bundle.Proof.Control.FrozenParent, newEpoch,
 		checked.Genesis.ID(), checked.Shard.IRTR, step)
 	if err != nil {
 		return handoff.ErrBoundary

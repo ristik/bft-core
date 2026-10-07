@@ -52,6 +52,13 @@ type RootSink interface {
 	HoldsVerifiedEpoch(entry q3format.Entry) error
 }
 
+// RootRestorer is implemented by a root sink whose installed state is volatile (a shard node's in-memory shard configuration set and
+// execution transitions): after a restart the journal restores every finished activation through it, in epoch order, before it verifies the
+// sinks. RestoreVerifiedEpoch must be idempotent and must rebuild exactly what InstallVerifiedEpoch installed.
+type RootRestorer interface {
+	RestoreVerifiedEpoch(entry q3format.Entry, proof handoff.OldCommitProof, head *abdrc.CommittedBlock, candidate []byte) error
+}
+
 // Consumer is a participant whose view of the root trust comes from a runtime: the safety module (its activation gate), the shard
 // node's trust lookup and the signing authority's TrustBases (a Guarded). BoundTo reports whether it is wired to that runtime.
 type Consumer interface {
@@ -162,6 +169,15 @@ func (r *Runtime) Activated(epoch uint64) (q3format.Entry, bool) {
 
 // History is the verified history. It is immutable: a later activation replaces it with an extended copy.
 func (r *Runtime) History() *q3format.History { return r.hist.Load() }
+
+// ActiveEpoch is the latest root epoch whose installation is complete and recovered, or 0 before the first activation completes. A node
+// anchored at the genesis epoch is at that epoch until then.
+func (r *Runtime) ActiveEpoch() uint64 {
+	if s := r.active.Load(); s != nil {
+		return s.Epoch()
+	}
+	return 0
+}
 
 // Snapshot is the published active-context handle, or nil before the first activation completes. An installation that is not
 // durably complete and recovered publishes nothing, however far its steps got.
@@ -376,6 +392,23 @@ func (c *rootComponent) Install(_ context.Context, a q3install.Activation) error
 	}
 	_, err = p.Root.InstallVerifiedEpoch(e, proof, b.Snapshot, b.Candidate)
 	return err
+}
+
+// Restore rebuilds the volatile state of a sink that has any; for one that does not (the root consensus manager is durable) it is a no-op.
+func (c *rootComponent) Restore(_ context.Context, a q3install.Activation) error {
+	p, err := c.r.participants()
+	if err != nil {
+		return err
+	}
+	restorer, ok := p.Root.(RootRestorer)
+	if !ok {
+		return nil
+	}
+	e, proof, b, err := c.r.resolve(a)
+	if err != nil {
+		return err
+	}
+	return restorer.RestoreVerifiedEpoch(e, proof, b.Snapshot, b.Candidate)
 }
 
 func (c *rootComponent) Verify(_ context.Context, a q3install.Activation) error {
