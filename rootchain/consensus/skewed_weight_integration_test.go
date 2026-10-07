@@ -45,6 +45,7 @@ type skewedNet struct {
 	mu     sync.Mutex
 	boxes  map[peer.ID]*skewedBox
 	filter func(from, to peer.ID, msg any) (drop bool)
+	sched  *q4Sched // optional Q4 fault adapter (q4_delivery_test.go); nil: every send is delivered, as before
 	done   chan struct{}
 }
 
@@ -97,26 +98,41 @@ func (n *skewedNet) connect(id peer.ID) *skewedConn {
 	return &skewedConn{net: n, id: id, box: box}
 }
 
-func (c *skewedConn) Send(_ context.Context, msg any, receivers ...peer.ID) error {
+func (c *skewedConn) Send(ctx context.Context, msg any, receivers ...peer.ID) error {
 	for _, to := range receivers {
-		if c.net.filter != nil && c.net.filter(c.id, to, msg) {
+		if c.net.sched != nil {
+			if err := c.net.sched.send(c.net, c.id, to, msg); err != nil {
+				return err
+			}
 			continue
 		}
-		c.net.mu.Lock()
-		box := c.net.boxes[to]
-		c.net.mu.Unlock()
-		if box == nil {
-			return fmt.Errorf("unknown receiver %s", to)
-		}
-		box.mu.Lock()
-		box.q = append(box.q, msg)
-		box.mu.Unlock()
-		select {
-		case box.wake <- struct{}{}:
-		default:
+		if _, err := c.net.deliver(c.id, to, msg); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// deliver applies the send-time filter and, when the message passes, queues it at the receiver. It reports whether the message was
+// queued: the filter dropping it (an offline party) is not an error.
+func (n *skewedNet) deliver(from, to peer.ID, msg any) (bool, error) {
+	if n.filter != nil && n.filter(from, to, msg) {
+		return false, nil
+	}
+	n.mu.Lock()
+	box := n.boxes[to]
+	n.mu.Unlock()
+	if box == nil {
+		return false, fmt.Errorf("unknown receiver %s", to)
+	}
+	box.mu.Lock()
+	box.q = append(box.q, msg)
+	box.mu.Unlock()
+	select {
+	case box.wake <- struct{}{}:
+	default:
+	}
+	return true, nil
 }
 
 func (c *skewedConn) ReceivedChannel() <-chan any { return c.box.rcv }
@@ -155,6 +171,7 @@ type skewedCluster struct {
 	params  Parameters
 	offline sync.Map // peer.ID -> struct{}: the firewall drops everything from and to an offline node
 	signing bool
+	roster  *q4Roster    // Q4 clusters: the canonical vector the nodes were built from; c.nodes follows its order
 	cutOn   atomic.Value // string: the author whose next delivered vote cuts that node off the network (a crash at an observed vote)
 
 	obsMu    sync.Mutex
@@ -297,39 +314,57 @@ type clusterSpec struct {
 	n, heavyPos    int
 	domainBound    bool
 	weightedLeader bool
+	// roster, when set, replaces heavy/light/n/heavyPos by an explicit canonical vector (Q4): c.nodes follows the roster's canonical
+	// order and faults are addressed by identity name (c.at).
+	roster *q4Roster
 }
 
 func newClusterOf(t *testing.T, spec clusterSpec, syncNodes ...int) *skewedCluster {
 	t.Helper()
 	heavyPos, domainBound := spec.heavyPos, spec.domainBound
 	observe := testobservability.Default(t)
-	sorted, _ := testutils.CreateTestNodes(t, spec.n)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].PeerConf.ID.String() < sorted[j].PeerConf.ID.String() })
+	var sorted, testNodes []*testutils.TestNode
+	var stakes []uint64
+	var total uint64
+	if spec.roster != nil {
+		for _, e := range spec.roster.Entities {
+			sorted = append(sorted, &testutils.TestNode{Signer: e.Signer, Verifier: e.Verifier, PeerConf: &network.PeerConfiguration{ID: e.ID}})
+		}
+		testNodes, stakes, total = sorted, spec.roster.Weights, spec.roster.Total()
+	} else {
+		sorted, _ = testutils.CreateTestNodes(t, spec.n)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].PeerConf.ID.String() < sorted[j].PeerConf.ID.String() })
+		for i := range sorted {
+			stakes = append(stakes, spec.light)
+			if i == heavyPos {
+				stakes[i] = spec.heavy
+			}
+		}
+		testNodes = append([]*testutils.TestNode{sorted[heavyPos]}, append(append([]*testutils.TestNode{}, sorted[:heavyPos]...), sorted[heavyPos+1:]...)...)
+		total = spec.heavy + uint64(spec.n-1)*spec.light
+	}
 	infos := make([]*types.NodeInfo, len(sorted))
 	for i, n := range sorted {
 		infos[i] = n.NodeInfo(t)
-		infos[i].Stake = spec.light
-		if i == heavyPos {
-			infos[i].Stake = spec.heavy
-		}
+		infos[i].Stake = stakes[i]
 	}
-	testNodes := append([]*testutils.TestNode{sorted[heavyPos]}, append(append([]*testutils.TestNode{}, sorted[:heavyPos]...), sorted[heavyPos+1:]...)...)
 	trust, err := quorumweight.NewTrustBase(5, infos)
 	require.NoError(t, err)
 	for _, n := range testNodes {
 		require.NoError(t, trust.Sign(n.PeerConf.ID.String(), n.Signer))
 	}
-	total := spec.heavy + uint64(spec.n-1)*spec.light
 	require.EqualValues(t, 2*total/3+1, trust.QuorumThreshold, "premise: the root threshold is floor(2W/3)+1")
-	require.Equal(t, sorted[heavyPos].PeerConf.ID.String(), trust.RootNodes[heavyPos].NodeID, "premise: the trust base lists the members in sorted order")
-	require.EqualValues(t, spec.heavy, trust.RootNodes[heavyPos].Stake)
+	if spec.roster == nil {
+		require.Equal(t, sorted[heavyPos].PeerConf.ID.String(), trust.RootNodes[heavyPos].NodeID, "premise: the trust base lists the members in sorted order")
+		require.EqualValues(t, spec.heavy, trust.RootNodes[heavyPos].Stake)
+	}
 
 	params := *NewConsensusParams()
 	params.NetworkProfileVersion = storage.ProfileHandoff // stake-weighted voting is a handoff-profile rule
 	params.BlockRate = 90 * time.Millisecond
 	params.LocalTimeout = 1000 * time.Millisecond
 
-	c := &skewedCluster{t: t, net: newSkewedNet(t), trust: trust, params: params, signing: domainBound}
+	c := &skewedCluster{t: t, net: newSkewedNet(t), trust: trust, params: params, signing: domainBound, roster: spec.roster}
 	for _, n := range testNodes {
 		node := &skewedNode{id: n.PeerConf.ID, signer: n.Signer, dir: t.TempDir(), conn: c.net.connect(n.PeerConf.ID)}
 		for _, i := range syncNodes {
