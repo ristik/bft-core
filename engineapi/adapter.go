@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math/big"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
@@ -63,6 +64,8 @@ type Adapter struct {
 	// Nil for an adapter that only runs the non-deriving checks (the doctor command); Build refuses
 	// rather than deriving against an invented context. See VerifierContext and F2c §3.
 	verifier            *VerifierContext
+	pair                *PairConfig // nil: no pair binding is sent (an execution client without ureth#52)
+	pairPinsOK          atomic.Bool
 	transitionMu        sync.RWMutex
 	installedTransition []byte
 
@@ -102,6 +105,9 @@ type Config struct {
 	// node's own configuration, never the certificate, so Build refuses without it rather than
 	// inferring one (F2c §3).
 	Verifier *VerifierContext
+
+	// Pair enables the paired-execution binding (pairbinding.go). Nil sends none.
+	Pair *PairConfig
 }
 
 // VerifierContext holds the verifier-owned identity and trust pins for v2 derivation.
@@ -246,6 +252,7 @@ func NewAdapter(cfg Config, log *slog.Logger) *Adapter {
 		log:          log,
 		feeCollector: cfg.FeeCollector,
 		verifier:     cfg.Verifier,
+		pair:         cfg.Pair,
 		pending:      make(map[shardnode.BuildID]buildContext),
 	}
 	return a
@@ -696,7 +703,11 @@ func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, der
 	}
 
 	state := ForkchoiceStateV1{HeadBlockHash: parentHash32, SafeBlockHash: parentHash32, FinalizedBlockHash: parentHash32}
-	resp, err := a.engine.ForkchoiceUpdatedWithSealV1(ctx, state, &sealAttrs, sealBuildInput(derived))
+	buildInput := sealBuildInput(derived)
+	if buildInput.Pair, err = a.pairBuildBinding(ctx, derived, parentHeader, attrs); err != nil {
+		return "", fmt.Errorf("engineapi: pair binding for the build: %w", err)
+	}
+	resp, err := a.engine.ForkchoiceUpdatedWithSealV1(ctx, state, &sealAttrs, buildInput)
 	if err != nil {
 		return "", fmt.Errorf("engineapi: forkchoiceUpdatedWithSealV1 (build): %w", err)
 	}
@@ -1016,7 +1027,11 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	//
 	// Only now does the execution client see it, over the JWT-authenticated Engine connection, with
 	// reth accepting the verdict produced above.
-	status, err := a.engine.NewPayloadWithSealV1(ctx, envelope.ExecutionPayload, envelope.ExpectedBlobVersionedHashes, attrs.ParentBeaconBlockRoot, *companion)
+	own := *companion
+	if own.Pair, err = a.pairImportBinding(ctx, derived, parentHeader, envelope.ExecutionPayload.BlockHash); err != nil {
+		return shardnode.StatusInvalid, fmt.Errorf("engineapi: pair binding for the import: %w", err)
+	}
+	status, err := a.engine.NewPayloadWithSealV1(ctx, envelope.ExecutionPayload, envelope.ExpectedBlobVersionedHashes, attrs.ParentBeaconBlockRoot, own)
 	if err != nil {
 		return shardnode.StatusSyncing, fmt.Errorf("engineapi: newPayloadWithSealV1: %w", err)
 	}
