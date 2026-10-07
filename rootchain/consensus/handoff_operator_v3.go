@@ -288,3 +288,27 @@ func (x *ConsensusManager) v3CandidateFromState(next *types.RootTrustBaseV1, sta
 	}
 	return V3Candidate{Body: body, Candidate: candidate, CandidatePreimage: preimage, Attempt: attempt, ActivationRound: aMin}, nil
 }
+
+// StageV3Candidate records a candidate another of this chain's validators derived (PlanV3Candidate) as the one this validator's operator
+// is about to have the entity attest readiness for. It checks what needs no signature and no EVM state: the body is a valid V3 body of
+// this chain's protocol tuple, the next epoch of the one installed here. The plan itself is checked in full, against this validator's own
+// state, when it is endorsed; staging only reports what this node holds.
+func (x *ConsensusManager) StageV3Candidate(body []byte, candidate [32]byte, attempt uint64) error {
+	if x.q3 == nil {
+		return fmt.Errorf("%w: no Q3 history", ErrHandoffApproval)
+	}
+	b, err := q3format.DecodeBody(body)
+	if err != nil {
+		return errors.Join(ErrHandoffApproval, err)
+	}
+	cfg, err := x.q3.ProtocolConfig()
+	if err != nil {
+		return errors.Join(ErrHandoffApproval, err)
+	}
+	old := x.trustBase.Load()
+	if old == nil || b.Config != cfg || b.Network != uint64(old.NetworkID) || b.Epoch != old.Epoch+1 {
+		return fmt.Errorf("%w: the candidate is not the next epoch of this chain", ErrHandoffApproval)
+	}
+	x.q3Staged.Store(&Q3Staged{CandidateDigest: candidate, BodyID: b.Identity(), Attempt: attempt})
+	return nil
+}

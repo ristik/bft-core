@@ -129,3 +129,31 @@ func rootQ3CandidateHandler(operator interface {
 			Attempt: c.Attempt, ActivationRound: c.ActivationRound})
 	}
 }
+
+// rootQ3StageRequest hands a root the candidate another validator derived.
+type rootQ3StageRequest struct {
+	Body      hex.Bytes `json:"body"`
+	Candidate hex.Bytes `json:"candidate"`
+	Attempt   uint64    `json:"attempt"`
+}
+
+// rootQ3StageHandler stages a candidate on this validator.
+func rootQ3StageHandler(operator interface {
+	StageV3Candidate(body []byte, candidate [32]byte, attempt uint64) error
+}) http.HandlerFunc {
+	return q3Endpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
+		var req rootQ3StageRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			return nil, err
+		}
+		if len(req.Candidate) != 32 {
+			return nil, errors.New("the candidate digest is not 32 bytes")
+		}
+		var digest [32]byte
+		copy(digest[:], req.Candidate)
+		if err := operator.StageV3Candidate(req.Body, digest, req.Attempt); err != nil {
+			return nil, err
+		}
+		return struct{}{}, nil
+	})
+}

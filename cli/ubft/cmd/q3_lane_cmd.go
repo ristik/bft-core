@@ -391,6 +391,9 @@ func newQ3ReadinessCmd() *cobra.Command {
 				return err
 			}
 			client := &http.Client{Timeout: 10 * time.Second}
+			if err := stageOnRoot(cmd.Context(), client, rootRPC, cand); err != nil {
+				return fmt.Errorf("bft node: %w", err)
+			}
 			if err := stageOnShard(cmd.Context(), client, shardRPC, cand); err != nil {
 				return fmt.Errorf("shard service: %w", err)
 			}
@@ -415,6 +418,16 @@ func newQ3ReadinessCmd() *cobra.Command {
 		_ = cmd.MarkFlagRequired(f)
 	}
 	return cmd
+}
+
+// stageOnRoot hands the entity's root node the candidate another validator derived. The root refuses a body that is not the next epoch of
+// its own chain.
+func stageOnRoot(ctx context.Context, client *http.Client, rootRPC string, cand q3CandidateFile) error {
+	body, err := json.Marshal(rootQ3StageRequest{Body: cand.Body, Candidate: cand.Candidate[:], Attempt: cand.Attempt})
+	if err != nil {
+		return err
+	}
+	return handoffPost(ctx, client, strings.TrimRight(rootRPC, "/")+"/api/v1/handoff/q3-stage", body, nil)
 }
 
 // stageOnShard hands the shard service the candidate it will report as staged. The shard node refuses a body of another chain.

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -149,12 +150,29 @@ type laneServices struct {
 	rootStaged       *[32]byte
 	genesis          string
 	code             string
+	rootRefuses      bool
+}
+
+type stageFunc func(body []byte, candidate [32]byte, attempt uint64) error
+
+func (f stageFunc) StageV3Candidate(body []byte, candidate [32]byte, attempt uint64) error {
+	return f(body, candidate, attempt)
 }
 
 func newLaneServices(t *testing.T, body q3format.BodyV3, staged [32]byte) *laneServices {
 	t.Helper()
 	s := &laneServices{rootStaged: &staged, genesis: "0x" + hex.EncodeToString(bytes.Repeat([]byte{0x52}, 32)), code: "0x6001600155"}
 	rootMux := http.NewServeMux()
+	rootMux.HandleFunc("POST /api/v1/handoff/q3-stage", rootQ3StageHandler(stageFunc(func(b []byte, digest [32]byte, _ uint64) error {
+		if s.rootRefuses {
+			return errors.New("the candidate is not the next epoch of this chain")
+		}
+		if _, err := q3format.DecodeBody(b); err != nil {
+			return err
+		}
+		*s.rootStaged = digest
+		return nil
+	})))
 	rootMux.HandleFunc("POST /api/v1/q3/status", q3Endpoint(func(context.Context, json.RawMessage) (any, error) {
 		out := q3StatusResponse{Network: body.Network, Genesis: hex.EncodeToString(body.Config.Genesis[:])}
 		if *s.rootStaged != ([32]byte{}) {
@@ -228,13 +246,13 @@ func TestEveryMembersReadinessReceiptVerifiesAndEachRefusalWritesNoReceipt(t *te
 		if cause != nil {
 			require.ErrorIs(t, err, cause, name)
 		} else {
-			require.ErrorContains(t, err, "another network, genesis or protocol tuple", name)
+			require.Error(t, err, name)
+			require.True(t, strings.Contains(err.Error(), "another network, genesis or protocol tuple") || strings.Contains(err.Error(), "bft node"), "%s: %v", name, err)
 		}
 		_, statErr := os.Stat(out)
 		require.True(t, os.IsNotExist(statErr), "%s: no receipt is written", name)
 	}
-	refused("root has nothing staged", q3ready.ErrNotReady, func(s *laneServices) { *s.rootStaged = [32]byte{} }, genesisPin, codePin)
-	refused("root staged another candidate", q3ready.ErrComponent, func(s *laneServices) { s.rootStaged[0] ^= 1 }, genesisPin, codePin)
+	refused("the root refuses the candidate", nil, func(s *laneServices) { s.rootRefuses = true }, genesisPin, codePin)
 	refused("execution genesis is not the pinned one", q3ready.ErrExecutionIdentity, func(s *laneServices) {
 		s.genesis = "0x" + hex.EncodeToString(bytes.Repeat([]byte{0x53}, 32))
 	}, genesisPin, codePin)
