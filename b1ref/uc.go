@@ -26,7 +26,6 @@ type claim struct {
 }
 
 type certCall struct {
-	view   *trustView
 	claims []claim
 	size   uint64
 	charge uint64
@@ -96,33 +95,11 @@ func parseCertCall(in []byte, shared bool) (*certCall, error) {
 	r := &reader{b: in, pos: 4}
 	tokens := 0
 
-	viewLen, err := r.u32()
-	if err != nil {
-		return nil, err
-	}
-	if viewLen > MaxViewBytes {
-		return nil, ErrViewTooLarge
-	}
-	viewRaw, err := r.take(viewLen)
-	if err != nil {
-		return nil, err
-	}
-	view, err := scanView(viewRaw, &tokens)
-	if err != nil {
-		return nil, fmt.Errorf("trust view: %w", err)
-	}
-
-	call := &certCall{view: view, size: uint64(len(in)), claims: make([]claim, 0, count)}
+	call := &certCall{size: uint64(len(in)), claims: make([]claim, 0, count)}
 	for i := 0; i < int(count); i++ {
 		c, err := parseClaim(r, &tokens)
 		if err != nil {
 			return nil, fmt.Errorf("claim %d: %w", i, err)
-		}
-		if i > 0 {
-			prev := &call.claims[i-1]
-			if cmp := compareClaimID(prev, &c); cmp > 0 {
-				return nil, ErrClaimOrder
-			}
 		}
 		call.claims = append(call.claims, c)
 	}
@@ -134,8 +111,13 @@ func parseCertCall(in []byte, shared bool) (*certCall, error) {
 	for i := range call.claims {
 		steps += call.claims[i].pathSteps
 	}
-	s := uint64(call.claims[0].sigs.arg)
-	call.charge = UCGas(call.size, uint64(len(view.members)), s, uint64(len(call.claims)), steps)
+	var s uint64
+	for _, c := range call.claims {
+		if c.sigs.arg > s {
+			s = c.sigs.arg
+		}
+	}
+	call.charge = UCGas(call.size, s, uint64(len(call.claims)), steps)
 	return call, nil
 }
 
@@ -305,7 +287,7 @@ func shapeShardCert(it *item) error {
 	if !k[0].isUint() || k[0].arg != 1 {
 		return ErrVersion
 	}
-	if k[1].major != majBytes || k[2].major != majArray {
+	if k[1].major != majBytes || (!k[2].null && k[2].major != majArray) {
 		return ErrShape
 	}
 	if len(k[1].data) == 0 {
@@ -314,15 +296,12 @@ func shapeShardCert(it *item) error {
 	if len(k[1].data) > MaxShardBytes {
 		return ErrShardTooDeep
 	}
-	shard, err := decodeShard(k[1].data)
+	_, err := decodeShard(k[1].data)
 	if err != nil {
 		return err
 	}
 	if k[2].arg > MaxShardSiblings {
 		return ErrTooManySiblings
-	}
-	if k[2].arg != uint64(shard.Length()) {
-		return ErrShape // exactly one sibling per shard bit
 	}
 	for i := range k[2].kids {
 		if !k[2].kids[i].isHash() {
@@ -341,7 +320,7 @@ func shapeUnicityCert(it *item) (steps uint64, err error) {
 	if !k[0].isUint() || k[0].arg != 1 {
 		return 0, ErrVersion
 	}
-	if !k[1].isUint() || k[1].arg > math.MaxUint32 || k[2].major != majArray {
+	if !k[1].isUint() || k[1].arg > math.MaxUint32 || (!k[2].null && k[2].major != majArray) {
 		return 0, ErrShape
 	}
 	if k[2].arg > MaxUnicitySteps {
@@ -369,7 +348,7 @@ func shapeSeal(it *item) (*item, error) {
 	if !k[1].isUint() || k[1].arg > math.MaxUint16 || !k[2].isUint() || !k[3].isUint() || !k[4].isUint() {
 		return nil, ErrShape
 	}
-	if !k[5].isHash() || !k[6].isHash() || k[7].major != majMap {
+	if !k[5].isHash() || !k[6].isHash() || (!k[7].null && k[7].major != majMap) {
 		return nil, ErrShape
 	}
 	if k[7].arg > MaxSigsPerSeal {
@@ -379,6 +358,9 @@ func shapeSeal(it *item) (*item, error) {
 		key, val := &k[7].kids[i], &k[7].kids[i+1]
 		if key.major != majText || val.major != majBytes {
 			return nil, ErrShape
+		}
+		if (len(val.data) != 64 && len(val.data) != 65) || (len(val.data) == 65 && val.data[64] > 1) {
+			return nil, ErrSigFormat
 		}
 		if len(key.data) > MaxNodeIDBytes {
 			return nil, ErrNodeIDTooLong

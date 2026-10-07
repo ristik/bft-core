@@ -12,10 +12,11 @@ import (
 
 	"github.com/unicitynetwork/bft-core/b1ref"
 	"github.com/unicitynetwork/bft-core/b1ref/b1gen"
+	"github.com/unicitynetwork/bft-core/b1state"
 )
 
 const (
-	goldenPath = "testdata/b1-vectors-v1.json"
+	goldenPath = "testdata/b1-vectors-aprime.json"
 	goldenSeed = "b1-oracle-v1"
 )
 
@@ -28,22 +29,18 @@ var sentinels = map[string]error{
 	"ErrDuplicateMapKey": b1ref.ErrDuplicateMapKey, "ErrForbiddenCBOR": b1ref.ErrForbiddenCBOR,
 	"ErrInvalidUTF8": b1ref.ErrInvalidUTF8, "ErrShape": b1ref.ErrShape, "ErrShardEncoding": b1ref.ErrShardEncoding,
 	"ErrRSMTLength": b1ref.ErrRSMTLength, "ErrInputTooLarge": b1ref.ErrInputTooLarge, "ErrUCTooLarge": b1ref.ErrUCTooLarge,
-	"ErrViewTooLarge": b1ref.ErrViewTooLarge, "ErrTooManyMembers": b1ref.ErrTooManyMembers, "ErrTooManySigs": b1ref.ErrTooManySigs,
+	"ErrTooManySigs":   b1ref.ErrTooManySigs,
 	"ErrNodeIDTooLong": b1ref.ErrNodeIDTooLong, "ErrShardTooDeep": b1ref.ErrShardTooDeep, "ErrTooManySiblings": b1ref.ErrTooManySiblings,
 	"ErrTooManySteps": b1ref.ErrTooManySteps, "ErrDepth": b1ref.ErrDepth, "ErrSummaryTooLong": b1ref.ErrSummaryTooLong,
 	"ErrValueTooLarge": b1ref.ErrValueTooLarge,
-	"ErrUnknownEpoch":  b1ref.ErrUnknownEpoch, "ErrViewHash": b1ref.ErrViewHash, "ErrBodyID": b1ref.ErrBodyID,
-	"ErrNetwork": b1ref.ErrNetwork, "ErrSealEpoch": b1ref.ErrSealEpoch, "ErrOpenInterval": b1ref.ErrOpenInterval,
+	"ErrUnknownEpoch":  b1ref.ErrUnknownEpoch, "ErrNetwork": b1ref.ErrNetwork, "ErrSealEpoch": b1ref.ErrSealEpoch, "ErrOpenInterval": b1ref.ErrOpenInterval,
 	"ErrBeforeStart": b1ref.ErrBeforeStart, "ErrAfterEnd": b1ref.ErrAfterEnd, "ErrFuture": b1ref.ErrFuture,
-	"ErrStale": b1ref.ErrStale, "ErrWeightProfile": b1ref.ErrWeightProfile, "ErrViewDuplicate": b1ref.ErrViewDuplicate,
-	"ErrPartition": b1ref.ErrPartition, "ErrShard": b1ref.ErrShard, "ErrShardConf": b1ref.ErrShardConf,
+	"ErrStale": b1ref.ErrStale, "ErrPartition": b1ref.ErrPartition, "ErrShard": b1ref.ErrShard, "ErrShardConf": b1ref.ErrShardConf,
 	"ErrTreeRoot": b1ref.ErrTreeRoot, "ErrStateRoot": b1ref.ErrStateRoot, "ErrIRHash": b1ref.ErrIRHash,
 	"ErrSealMismatch": b1ref.ErrSealMismatch, "ErrUnknownSigner": b1ref.ErrUnknownSigner, "ErrSigFormat": b1ref.ErrSigFormat,
 	"ErrSigRange": b1ref.ErrSigRange, "ErrSigInvalid": b1ref.ErrSigInvalid, "ErrQuorum": b1ref.ErrQuorum,
 	"ErrRSMTZeroRoot": b1ref.ErrRSMTZeroRoot, "ErrRSMTFold": b1ref.ErrRSMTFold,
-	"ErrDuplicateClaim": b1ref.ErrDuplicateClaim, "ErrClaimOrder": b1ref.ErrClaimOrder, "ErrViewOrder": b1ref.ErrViewOrder,
-	"ErrViewKey": b1ref.ErrViewKey, "ErrViewKind": b1ref.ErrViewKind, "ErrViewEmpty": b1ref.ErrViewEmpty,
-	"ErrNativeInvalid": b1ref.ErrNativeInvalid,
+	"ErrClaimOrder": b1ref.ErrClaimOrder, "ErrNativeInvalid": b1ref.ErrNativeInvalid,
 }
 
 // notInVectors are reasons no manifest vector can reach: ErrTokens is
@@ -70,14 +67,21 @@ func registry(t testing.TB, p *b1gen.PreState) *b1ref.Registry {
 	if p == nil {
 		return nil
 	}
-	reg := &b1ref.Registry{Network: p.Network, WCert: p.WCert, Origin: p.Origin, RootRound: p.ClockRound, Epochs: map[uint64]b1ref.EpochEntry{}}
+	reg := &b1ref.Registry{Initialized: true, Phase: 2, GenesisCommitment: [32]byte{1}, ProfileHash: [32]byte{2}, Network: p.Network, WCert: p.WCert, Origin: p.Origin, RootRound: p.ClockRound, Epochs: map[uint64]b1ref.EpochEntry{}}
 	for _, e := range p.Epochs {
-		vh, _ := hex.DecodeString(e.ViewHash)
 		bi, _ := hex.DecodeString(e.BodyID)
-		var ent b1ref.EpochEntry
-		copy(ent.ViewHash[:], vh)
+		ent := b1state.Entry{Epoch: e.Epoch, BodyKind: 2, ActivationCommitID: [32]byte{3}, Start: e.Start, SigningScheme: 1, SigningConfigHash: [32]byte{4}}
 		copy(ent.BodyID[:], bi)
-		ent.Start, ent.End = e.Start, e.End
+		if e.End != 0 {
+			end := e.End
+			ent.End = &end
+		}
+		for _, m := range e.Members {
+			key, _ := hex.DecodeString(m.Key)
+			member := b1state.Member{NodeID: m.NodeID, Weight: m.Weight}
+			copy(member.Key[:], key)
+			ent.Members = append(ent.Members, member)
+		}
 		reg.Epochs[e.Epoch] = ent
 	}
 	return reg
@@ -203,7 +207,7 @@ func TestManifestCoversFamilies(t *testing.T) {
 		t.Error("deferred rows are not marked")
 	}
 	for _, d := range m.Deferred {
-		if !strings.Contains(d.Reason, "layout-3") && !strings.Contains(d.Reason, "EVM") {
+		if !strings.Contains(d.Reason, "EVM") {
 			t.Errorf("deferred row %q has no dependency reason", d.Row)
 		}
 	}
@@ -270,7 +274,7 @@ func TestGasParity(t *testing.T) {
 
 // TestMaxGas pins the design's worst-case figures.
 func TestMaxGas(t *testing.T) {
-	if g := b1ref.UCGas(262144, 64, 64, 8, 2304); g != 5_294_304 {
+	if g := b1ref.UCGas(262144, 64, 8, 2304); g != 6_412_004 {
 		t.Fatalf("UC worst case %d", g)
 	}
 	if g := b1ref.RSMTGas(12392, 256); g != 264_522 {
@@ -420,29 +424,48 @@ func TestRecoveryByteIsPolicy(t *testing.T) {
 	}
 }
 
-// TestProvisionalMarking: every open item is exercised by a provisional
-// vector, and no provisional mark names an unknown item.
-func TestProvisionalMarking(t *testing.T) {
+// TestFrozenClassifications requires a fully frozen manifest.
+func TestFrozenClassifications(t *testing.T) {
 	m, _ := loadGolden(t)
-	items := map[string]bool{}
-	for _, o := range m.OpenItems {
-		items[o.ID] = false
-	}
-	for _, v := range m.Vectors {
-		if v.Provisional == "" {
-			continue
-		}
-		if _, ok := items[v.Provisional]; !ok {
-			t.Fatalf("%s names unknown open item %s", v.ID, v.Provisional)
-		}
-		items[v.Provisional] = true
-	}
-	for id, used := range items {
-		if !used {
-			t.Errorf("open item %s has no provisional vector", id)
-		}
-	}
 	if len(m.Notes) == 0 {
-		t.Error("manifest carries no notes")
+		t.Fatal("missing scope/price notes")
+	}
+}
+
+func TestAdmittedRegistryRefusals(t *testing.T) {
+	m, _ := loadGolden(t)
+	var fixture b1gen.Vector
+	for _, v := range m.Vectors {
+		if v.ID == "cert.single.ok" {
+			fixture = v
+		}
+	}
+	raw, _ := hex.DecodeString(fixture.Request)
+	for _, tc := range []struct {
+		name   string
+		change func(*b1ref.Registry)
+	}{
+		{"uninitialized", func(r *b1ref.Registry) { r.Initialized = false }},
+		{"no-genesis", func(r *b1ref.Registry) { r.GenesisCommitment = [32]byte{} }},
+		{"no-profile", func(r *b1ref.Registry) { r.ProfileHash = [32]byte{} }},
+		{"impossible-phase", func(r *b1ref.Registry) { r.Phase = 3 }},
+		{"bad-key", func(r *b1ref.Registry) { e := r.Epochs[7]; e.Members[0].Key = [33]byte{}; r.Epochs[7] = e }},
+		{"duplicate-key", func(r *b1ref.Registry) { e := r.Epochs[7]; e.Members[1].Key = e.Members[0].Key; r.Epochs[7] = e }},
+		{"missing-config", func(r *b1ref.Registry) { e := r.Epochs[7]; e.SigningConfigHash = [32]byte{}; r.Epochs[7] = e }},
+		{"wrong-epoch", func(r *b1ref.Registry) { e := r.Epochs[7]; e.Epoch = 8; r.Epochs[7] = e }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := registry(t, fixture.PreState)
+			tc.change(r)
+			if _, err := b1ref.UC(raw, r); !errors.Is(err, b1ref.ErrInfrastructure) || errors.Is(err, b1ref.ErrMalformed) {
+				t.Fatal(err)
+			}
+		})
+	}
+	r := registry(t, fixture.PreState)
+	r.Phase = 1
+	v, err := b1ref.UC(raw, r)
+	if err != nil || !errors.Is(v.Why, b1ref.ErrPhase) || v.Gas != fixture.Expected.Gas {
+		t.Fatal(v, err)
 	}
 }

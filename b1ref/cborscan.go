@@ -143,6 +143,7 @@ func (s *scanner) item(depth int) (item, error) {
 		}
 	case majSimp:
 		it.null = true // only 0xf6 passed the check above
+		it.arg = 0     // null collections have zero elements
 	}
 	it.end = s.pos
 	return it, nil

@@ -5,8 +5,8 @@ func (g *gen) timeAdmission(seed string) {
 	f := newFixture(seed, 4)
 	cs := f.build("a", f.round, f.vals[:3], false)
 	u := cs.get(1, "")
-	req := newRequest(f.view.cbor(), claimOf(u)).wire()
-	sh := shapeOf(f.view, u)
+	req := newRequest(claimOf(u)).wire()
+	sh := shapeOf(u)
 	// r is the seal root round, 990; the default pre-state is epoch 7 open
 	// from round 900, W_cert 50, O 1000, origin epoch 7.
 	run := func(id, desc, want string, mod func(*PreState)) {
@@ -28,11 +28,5 @@ func (g *gen) timeAdmission(seed string) {
 	run("time.wcert-zero.old", "W_cert = 0 with the certificate one round old", "ErrStale", func(p *PreState) { p.WCert = 0; p.ClockRound = 991 })
 	run("time.seal-epoch.after-origin", "seal epoch above the origin epoch", "ErrSealEpoch", func(p *PreState) { p.Origin = 6 })
 	run("time.epoch.missing", "no registry entry for the epoch", "ErrUnknownEpoch", func(p *PreState) { p.Epochs = nil })
-	run("time.epoch.zero-viewhash", "registry entry with an unset viewHash is an unknown epoch", "ErrUnknownEpoch", func(p *PreState) { p.Epochs[0].ViewHash = hex32([32]byte{}) })
-	run("time.viewhash.wrong", "registry viewHash differs from the supplied view", "ErrViewHash", func(p *PreState) {
-		h := f.view.hash()
-		p.Epochs[0].ViewHash = hex32(flip32(h))
-	})
-	run("time.bodyid.wrong", "registry bodyID differs from the view's sourceBodyID", "ErrBodyID", func(p *PreState) { p.Epochs[0].BodyID = hex32(flip32(f.body)) })
-	run("time.network.registry", "registry network differs from the view and seal", "ErrNetwork", func(p *PreState) { p.Network = 4 })
+	run("time.network.registry", "registry network differs from the seal", "ErrNetwork", func(p *PreState) { p.Network = 4 })
 }

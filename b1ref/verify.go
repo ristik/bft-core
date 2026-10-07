@@ -7,18 +7,11 @@ import (
 	"math/big"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/unicitynetwork/bft-core/b1state"
+	"github.com/unicitynetwork/bft-go-base/crypto"
 )
 
-// EpochEntry is the registry's five words for one epoch, minus the activation
-// commit ID, which no verification reads. A zero ViewHash means the epoch is
-// unknown. Start is inclusive; End is exclusive, zero meaning the open
-// interval.
-type EpochEntry struct {
-	ViewHash [32]byte
-	BodyID   [32]byte
-	Start    uint64
-	End      uint64
-}
+type EpochEntry = b1state.Entry
 
 // Registry is the explicit registry context of one call: everything the
 // builtins would read from authenticated EVM state, and nothing else. In this
@@ -26,11 +19,14 @@ type EpochEntry struct {
 // authenticated state, and nothing here establishes that. A Registry built by
 // a test is a simulation of the context, not authority.
 type Registry struct {
-	Network   uint16 // b1.network
-	WCert     uint64 // b1.wCert
-	Origin    uint64 // origin.rootEpoch
-	RootRound uint64 // clock.rootRound, O
-	Epochs    map[uint64]EpochEntry
+	GenesisCommitment, ProfileHash [32]byte
+	Initialized                    bool
+	Phase                          uint64
+	Network                        uint16 // b1.network
+	WCert                          uint64 // b1.wCert
+	Origin                         uint64 // origin.rootEpoch
+	RootRound                      uint64 // clock.rootRound, O
+	Epochs                         map[uint64]EpochEntry
 }
 
 // Verdict is the outcome of a well-formed call. Why is nil when Valid and
@@ -61,6 +57,10 @@ func VerifyShared(in []byte, reg *Registry) (bool, error) {
 }
 
 func certCallVerdict(in []byte, reg *Registry, shared bool) (Verdict, error) {
+	_, err := scanCertCall(in, shared)
+	if err != nil {
+		return Verdict{}, err
+	}
 	call, err := parseCertCall(in, shared)
 	if err != nil {
 		return Verdict{}, err
@@ -71,11 +71,15 @@ func certCallVerdict(in []byte, reg *Registry, shared bool) (Verdict, error) {
 // finishCertCall is everything after the structural scan: point decoding, then
 // the semantic relation. Run calls it only once the full charge is reserved.
 func finishCertCall(call *certCall, reg *Registry) (Verdict, error) {
-	if err := call.view.decodePoints(); err != nil {
-		return Verdict{}, fmt.Errorf("trust view: %w", err)
+	if reg == nil || !reg.Initialized || reg.GenesisCommitment == ([32]byte{}) || reg.ProfileHash == ([32]byte{}) || (reg.Phase != 1 && reg.Phase != 2) {
+		return Verdict{}, ErrInfrastructure
 	}
 	v := Verdict{Gas: call.charge}
-	if v.Why = evalCertCall(call, reg); v.Why == nil {
+	v.Why = evalCertCall(call, reg)
+	if errors.Is(v.Why, ErrInfrastructure) {
+		return Verdict{}, v.Why
+	}
+	if v.Why == nil {
 		v.Valid = true
 	}
 	return v, nil
@@ -84,13 +88,13 @@ func finishCertCall(call *certCall, reg *Registry) (Verdict, error) {
 // evalCertCall checks every claim and the one common seal, returning the first
 // reason the relation fails. It never short-circuits the signature loop.
 func evalCertCall(call *certCall, reg *Registry) error {
-	if err := call.view.check(); err != nil {
-		return err
+	if reg.Phase == 1 {
+		return ErrPhase
 	}
 	for i := range call.claims {
 		c := &call.claims[i]
-		if i > 0 && compareClaimID(&call.claims[i-1], c) == 0 {
-			return ErrDuplicateClaim
+		if i > 0 && compareClaimID(&call.claims[i-1], c) >= 0 {
+			return ErrClaimOrder
 		}
 		if !bytes.Equal(c.sealRaw, call.claims[0].sealRaw) {
 			return ErrSealMismatch
@@ -105,31 +109,31 @@ func evalCertCall(call *certCall, reg *Registry) error {
 }
 
 func evalSeal(call *certCall, reg *Registry) error {
-	view, seal := call.view, call.claims[0].uc.UnicitySeal
-	if view.network != reg.Network || uint64(seal.NetworkID) != uint64(reg.Network) {
+	seal := call.claims[0].uc.UnicitySeal
+	if uint64(seal.NetworkID) != uint64(reg.Network) {
 		return ErrNetwork
 	}
-	if seal.Epoch != view.epoch || seal.Epoch > reg.Origin {
+	if seal.Epoch > reg.Origin {
 		return ErrSealEpoch
 	}
-	entry, ok := reg.Epochs[view.epoch]
-	if !ok || entry.ViewHash == ([32]byte{}) {
+	entry, ok := reg.Epochs[seal.Epoch]
+	if !ok {
 		return ErrUnknownEpoch
 	}
-	if entry.ViewHash != view.hash {
-		return ErrViewHash
+	if entry.Epoch != seal.Epoch {
+		return ErrInfrastructure
 	}
-	if entry.BodyID != view.bodyID {
-		return ErrBodyID
+	if err := entry.Validate(); err != nil {
+		return errors.Join(ErrInfrastructure, err)
 	}
 	r := seal.RootChainRoundNumber
 	if r < entry.Start {
 		return ErrBeforeStart
 	}
-	if entry.End != 0 && r >= entry.End {
+	if entry.End != nil && r >= *entry.End {
 		return ErrAfterEnd
 	}
-	if entry.End == 0 && view.epoch != reg.Origin {
+	if entry.End == nil && seal.Epoch != reg.Origin {
 		return ErrOpenInterval
 	}
 	if r > reg.RootRound {
@@ -138,7 +142,7 @@ func evalSeal(call *certCall, reg *Registry) error {
 	if reg.RootRound-r > reg.WCert {
 		return ErrStale
 	}
-	return verifySignatures(call)
+	return verifySignatures(call, entry)
 }
 
 var curveN = ethcrypto.S256().Params().N
@@ -146,8 +150,7 @@ var curveN = ethcrypto.S256().Params().N
 // verifySignatures checks every supplied signature over SHA256(Seal.SigBytes())
 // and then the quorum. Any unknown signer or bad signature fails the call even
 // when the rest reach quorum; the loop does not stop at the first failure.
-func verifySignatures(call *certCall) error {
-	view := call.view
+func verifySignatures(call *certCall, entry EpochEntry) error {
 	sigBytes, err := call.claims[0].uc.UnicitySeal.SigBytes()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrFold, err)
@@ -155,7 +158,18 @@ func verifySignatures(call *certCall) error {
 	var first error
 	good := uint64(0)
 	for _, kv := range call.claims[0].sigs.pairs() {
-		m := view.lookup(string(kv[0]))
+		var m *member
+		for _, candidate := range entry.Members {
+			if candidate.NodeID == string(kv[0]) {
+				work("point")
+				ver, err := crypto.NewVerifierSecp256k1(candidate.Key[:])
+				if err != nil {
+					return errors.Join(ErrInfrastructure, err)
+				}
+				m = &member{weight: candidate.Weight, ver: ver}
+				break
+			}
+		}
 		if m == nil {
 			first = firstErr(first, ErrUnknownSigner)
 			continue
@@ -164,12 +178,14 @@ func verifySignatures(call *certCall) error {
 			first = firstErr(first, err)
 			continue
 		}
-		good++
+		good += m.weight
 	}
 	if first != nil {
 		return first
 	}
-	if good < view.threshold() {
+	total, _ := entry.TotalWeight()
+	threshold, _ := b1state.Threshold(total)
+	if good < threshold {
 		return ErrQuorum
 	}
 	return nil
@@ -232,8 +248,9 @@ const (
 )
 
 // Run is the EVM-facing wrapper of one builtin call with a gas limit: it
-// returns the 64 output bytes and the gas used, or an error with all
-// forwarded gas consumed. reg may be nil for OpMember.
+// returns output and gas, or a caller halt consuming forwarded gas. A host
+// error returns ErrInfrastructure with no EVM result (used=0). reg may be nil
+// for OpMember.
 func Run(op Op, in []byte, reg *Registry, gas uint64) (out []byte, used uint64, err error) {
 	limit, base := uint64(MaxCallBytes), uint64(ucBaseGas)
 	if op == OpMember {
@@ -248,14 +265,16 @@ func Run(op Op, in []byte, reg *Registry, gas uint64) (out []byte, used uint64, 
 	var v Verdict
 	switch op {
 	case OpUC, OpShared:
-		call, perr := parseCertCall(in, op == OpShared)
+		charge, perr := scanCertCall(in, op == OpShared)
 		if perr != nil {
 			return nil, gas, perr
 		}
-		// The full charge is known from the structural scan alone. It is
-		// reserved here, before any point decoding, path fold or signature check.
-		if gas < call.charge {
+		if gas < charge {
 			return nil, gas, ErrOutOfGas
+		}
+		call, perr := parseCertCall(in, op == OpShared)
+		if perr != nil {
+			return nil, gas, perr
 		}
 		v, err = finishCertCall(call, reg)
 	case OpMember:
@@ -271,6 +290,9 @@ func Run(op Op, in []byte, reg *Registry, gas uint64) (out []byte, used uint64, 
 		return nil, gas, errors.New("b1ref: unknown op")
 	}
 	if err != nil {
+		if errors.Is(err, ErrInfrastructure) {
+			return nil, 0, err
+		}
 		return nil, gas, err
 	}
 	return Output(v.Valid), v.Gas, nil
