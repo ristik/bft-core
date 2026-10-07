@@ -29,3 +29,9 @@ weights only at the root/validator level (EVM mirrors, aggregator shards unweigh
 validator-set changes, positive proofs only, the deferred forced-inclusion track, centrally run aggregator shards without
 consistency proofs, epoch-boundary root-ordered aggregator reconfiguration and the move of broad F7 to the bridge track.
 It is a separate accepted amendment with its own supersession table; the seven `.tex` files above remain unchanged.
+
+[B2 #63 PR 1 / whole-token bridge profile](amendments/b2-whole-token-bridge-profile.md) records the exact token bytes, the
+cfg-bound lock digest, the one-shard aggregator policy and ABI envelope, the unlock rule that binds the recovery ID and the
+nonce-keyed spent mapping that replaces the nullifier accumulator for the private whole-token native UCT bridge. It is a
+separate proposed amendment with its own supersession table; the seven `.tex` files above remain unchanged. Nothing in it
+activates in production.
