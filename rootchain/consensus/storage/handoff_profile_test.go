@@ -312,16 +312,20 @@ func TestHandoffControlLeafAndSuffix(t *testing.T) {
 		name     string
 		records  [][]byte
 		requests []*rctypes.IRChangeReq
+		controls []rctypes.PosControl
 	}{
-		{"prepare", [][]byte{record("prepare", 5, 8, zero, body, zero)}, nil},
-		{"freeze", [][]byte{record("freeze", 5, 8, frozen, body, zero)}, nil},
-		{"commit", [][]byte{record("commit", 5, 8, frozen, body, tr)}, nil},
-		{"abort", [][]byte{record("abort", 5, 8, frozen, body, zero)}, nil},
-		{"unknown", [][]byte{{0x01}}, nil},
-		{"request", nil, []*rctypes.IRChangeReq{{Partition: 1}}},
+		{"prepare", [][]byte{record("prepare", 5, 8, zero, body, zero)}, nil, nil},
+		{"freeze", [][]byte{record("freeze", 5, 8, frozen, body, zero)}, nil, nil},
+		{"commit", [][]byte{record("commit", 5, 8, frozen, body, tr)}, nil, nil},
+		{"abort", [][]byte{record("abort", 5, 8, frozen, body, zero)}, nil, nil},
+		{"unknown", [][]byte{{0x01}}, nil, nil},
+		{"request", nil, []*rctypes.IRChangeReq{{Partition: 1}}, nil},
+		// a control-bearing block is never an empty suffix, even a valid control
+		{"control", nil, nil, []rctypes.PosControl{{Network: 5, Op: rctypes.OpRejectResult, OrderingEpoch: 1, OrderingRound: 5,
+			Reject: &rctypes.RejectContext{Attempt: 1}, Data: make([]byte, 32)}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			block := &rctypes.BlockData{Version: 2, Round: 5, Epoch: 1, Payload: &rctypes.Payload{Version: 2, HandoffRecords: tc.records, Requests: tc.requests},
+			block := &rctypes.BlockData{Version: 2, Round: 5, Epoch: 1, Payload: &rctypes.Payload{Version: 2, HandoffRecords: tc.records, Requests: tc.requests, PosControls: tc.controls},
 				Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 4, Epoch: 1}}}
 			_, err := s.Add(block, nil)
 			require.ErrorIs(t, err, ErrHandoffSuffix)
