@@ -41,15 +41,16 @@ type closed struct {
 
 // Projector turns verified root events into the linked record log. Every anchor comes from its own Tracker and Clock.
 type Projector struct {
-	Log      Log
-	Tracker  *Tracker
-	Clock    Clock
-	closures map[uint64]closed // by closed epoch: an epoch has exactly one liability closure
+	Log          Log
+	Tracker      *Tracker
+	Clock        Clock
+	closedEpochs map[uint64]uint64 // record index -> closed epoch, for the Closure records
+	closures     map[uint64]closed // by closed epoch: an epoch has exactly one liability closure
 }
 
 // NewProjector starts at genesis: offset zero, the epoch's first ordinary round.
 func NewProjector(epoch, firstRound uint64) *Projector {
-	return &Projector{Tracker: NewGenesis(epoch, firstRound), closures: map[uint64]closed{}}
+	return &Projector{Tracker: NewGenesis(epoch, firstRound), closures: map[uint64]closed{}, closedEpochs: map[uint64]uint64{}}
 }
 
 // Anchor is the current canonical progress and UC time.
@@ -129,6 +130,7 @@ func (p *Projector) Close(k ClosureKey, c Closure) (Anchor, bool, error) {
 	}
 	at := Anchor{r.Progress, r.UCTime}
 	p.closures[k.Epoch] = closed{k, c, at}
+	p.closedEpochs[r.Index] = k.Epoch
 	return at, true, nil
 }
 

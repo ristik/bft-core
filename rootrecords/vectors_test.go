@@ -37,6 +37,10 @@ type closureCase struct {
 	Name   string `json:"name"`
 	Change string `json:"change"` // none, assignment, hRound, hRecord, terminalRoot, exposureDigest, keyHistoryDigest
 	Expect string `json:"expect"` // repeat or reject
+	// CustodyError is the exact custom error custody reverts with (empty: the case is not applicable to custody). The projection has
+	// no stored digests to validate against, so a changed digest is a conflict here but a ClosureDigestMismatch there; the change of
+	// an assignment inside the closed epoch cannot be expressed in custody, which derives the epoch from the assignment.
+	CustodyError string `json:"custodyError,omitempty"`
 }
 
 type vectorFile struct {
@@ -46,13 +50,13 @@ type vectorFile struct {
 }
 
 var closureCases = []closureCase{
-	{"an identical repeat is a no-op", "none", "repeat"},
-	{"another assignment", "assignment", "reject"},
-	{"another H round", "hRound", "reject"},
-	{"another H record", "hRecord", "reject"},
-	{"another terminal root", "terminalRoot", "reject"},
-	{"another exposure digest", "exposureDigest", "reject"},
-	{"another key-history digest", "keyHistoryDigest", "reject"},
+	{"an identical repeat is a no-op", "none", "repeat", ""},
+	{"another assignment in the closed epoch", "assignment", "reject", ""},
+	{"another H round", "hRound", "reject", "ConflictingClosure"},
+	{"another H record", "hRecord", "reject", "ConflictingClosure"},
+	{"another terminal root", "terminalRoot", "reject", "ConflictingClosure"},
+	{"another exposure digest", "exposureDigest", "reject", "ClosureDigestMismatch"},
+	{"another key-history digest", "keyHistoryDigest", "reject", "ClosureDigestMismatch"},
 }
 
 func label(s string) [32]byte {

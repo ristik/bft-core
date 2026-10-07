@@ -64,34 +64,39 @@
       "expect": "repeat"
     },
     {
-      "name": "another assignment",
+      "name": "another assignment in the closed epoch",
       "change": "assignment",
       "expect": "reject"
     },
     {
       "name": "another H round",
       "change": "hRound",
-      "expect": "reject"
+      "expect": "reject",
+      "custodyError": "ConflictingClosure"
     },
     {
       "name": "another H record",
       "change": "hRecord",
-      "expect": "reject"
+      "expect": "reject",
+      "custodyError": "ConflictingClosure"
     },
     {
       "name": "another terminal root",
       "change": "terminalRoot",
-      "expect": "reject"
+      "expect": "reject",
+      "custodyError": "ConflictingClosure"
     },
     {
       "name": "another exposure digest",
       "change": "exposureDigest",
-      "expect": "reject"
+      "expect": "reject",
+      "custodyError": "ClosureDigestMismatch"
     },
     {
       "name": "another key-history digest",
       "change": "keyHistoryDigest",
-      "expect": "reject"
+      "expect": "reject",
+      "custodyError": "ClosureDigestMismatch"
     }
   ]
 }
