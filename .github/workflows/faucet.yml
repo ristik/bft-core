@@ -1,0 +1,17 @@
+name: testnet-faucet
+on:
+  pull_request:
+    paths: ['deploy/testnet/faucet/**', '.github/workflows/faucet.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  guard-and-images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s deploy/testnet/faucet -v
+      - run: docker build -f deploy/testnet/faucet/Dockerfile.backend deploy/testnet/faucet -t faucet-signer:test
+      - run: docker run --rm --entrypoint /app/eth-faucet faucet-signer:test -version
+      - run: docker build -f deploy/testnet/faucet/Dockerfile.gateway deploy/testnet/faucet -t faucet-guard:test

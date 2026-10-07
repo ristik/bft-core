@@ -1,0 +1,22 @@
+test_atomic_concurrent_claims (test_gateway.GuardTests.test_atomic_concurrent_claims) ... ok
+test_durable_caps_and_reset (test_gateway.GuardTests.test_durable_caps_and_reset) ... ok
+test_global_budget_and_expiry (test_gateway.GuardTests.test_global_budget_and_expiry) ... ok
+test_health_rejects_wrong_chain_genesis_balance_and_signer (test_gateway.GuardTests.test_health_rejects_wrong_chain_genesis_balance_and_signer) ... ok
+test_http_validation_spoofing_and_uncertain_failure (test_gateway.GuardTests.test_http_validation_spoofing_and_uncertain_failure) ... 127.0.0.1 - - [07/Oct/2026 20:24:54] "POST /api/claim HTTP/1.1" 400 -
+127.0.0.1 - - [07/Oct/2026 20:24:54] "POST /api/claim HTTP/1.1" 409 -
+127.0.0.1 - - [07/Oct/2026 20:24:54] "POST /api/claim HTTP/1.1" 409 -
+127.0.0.1 - - [07/Oct/2026 20:24:54] "POST /api/claim HTTP/1.1" 400 -
+127.0.0.1 - - [07/Oct/2026 20:24:54] "POST /api/claim HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:24:55] "POST /api/claim HTTP/1.1" 429 -
+claim unavailable: TimeoutError
+127.0.0.1 - - [07/Oct/2026 20:24:55] "POST /api/claim HTTP/1.1" 503 -
+127.0.0.1 - - [07/Oct/2026 20:24:55] "POST /api/claim HTTP/1.1" 429 -
+ok
+test_broadcast_checks_all_pins_before_any_send (test_gateway.RelayTests.test_broadcast_checks_all_pins_before_any_send) ... ok
+test_geth_zero_argument_rpc_omits_params (test_gateway.RelayTests.test_geth_zero_argument_rpc_omits_params) ... 127.0.0.1 - - [07/Oct/2026 20:24:55] "POST / HTTP/1.1" 200 -
+ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 2.260s
+
+OK

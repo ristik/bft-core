@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Unicity test UCT faucet</title>
+<style>body{max-width:40rem;margin:4rem auto;padding:1rem;font:18px system-ui;background:#f6f7fa;color:#17233a}button{padding:1rem;font:inherit}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>
+<h1>Test UCT for gas</h1>
+<p>Get 0.01 UCT. One claim per wallet and IP every 24 hours, subject to availability.</p>
+<p><strong>No real value.</strong> This testnet may reset at any time. UCT and other assets may disappear without notice or obligation.</p>
+<p>Connect an EVM wallet configured for this testnet. Its chain ID and block-zero hash must match.</p>
+<div id="captcha"></div><p><button id="claim" disabled>Connect wallet and claim</button></p><pre id="result"></pre>
+<script src="https://js.hcaptcha.com/1/api.js?render=explicit" async defer></script>
+<script>
+let network, widget;
+const output = document.getElementById('result');
+async function init() {
+  network = await (await fetch('/api/network')).json();
+  output.textContent = `Chain ID: ${network.chain_id}\nGenesis: ${network.genesis_hash}`;
+  if (network.captcha_sitekey) {
+    const deadline = Date.now() + 10000;
+    while (!window.hcaptcha) {
+      if (Date.now() > deadline) throw Error('hCaptcha could not load. Reload when it is reachable.');
+      await new Promise(r => setTimeout(r, 100));
+    }
+    widget = hcaptcha.render('captcha', {sitekey: network.captcha_sitekey});
+  }
+  document.getElementById('claim').disabled = false;
+}
+document.getElementById('claim').onclick = async () => {
+  try {
+    if (!window.ethereum) throw Error('Install or open an EVM wallet.');
+    const [address] = await ethereum.request({method:'eth_requestAccounts'});
+    const chain = await ethereum.request({method:'eth_chainId'});
+    const genesis = await ethereum.request({method:'eth_getBlockByNumber',params:['0x0',false]});
+    if (Number(BigInt(chain)) !== network.chain_id || genesis.hash.toLowerCase() !== network.genesis_hash)
+      throw Error('Wrong network or reset genesis. Reconfigure your wallet before claiming.');
+    const response = await fetch('/api/claim', {method:'POST',headers:{'Content-Type':'application/json',
+      'h-captcha-response':widget === undefined ? '' : hcaptcha.getResponse(widget)},
+      body:JSON.stringify({address,chain_id:network.chain_id,genesis_hash:genesis.hash.toLowerCase()})});
+    output.textContent = JSON.stringify(await response.json(),null,2);
+    if (widget !== undefined) hcaptcha.reset(widget);
+  } catch (error) { output.textContent = error.message; }
+};
+init().catch(error => {output.textContent = error.message;});
+</script></html>
