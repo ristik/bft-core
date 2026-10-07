@@ -241,8 +241,10 @@ in production, and there is no migration (greenroom, one format).
   words of `P85Types.sol`. Progress is `offset_e + (r - firstRound_e)` over ordinary committed rounds of the current epoch; ordering H at
   round h fixes the endpoint `p(e,h)`, the successor offset `p(e,h)+1` is derived (never supplied), and progress stays at the endpoint
   until the successor has an ordinary round, so seal rounds, arrival time and old-epoch suffix rounds cannot move it. A closure is keyed by
-  `(epoch, H record, H round)` and carries no proof: the first one fixes p_close and its UC time, an identical repeat is a no-op, a
-  different identity is `ErrClosureConflict`, and none can anchor before the successor has ordinary progress. UC time is the seal
+  `(closed epoch, H record, H round)` with the terminal root and digests as its immutable value, and carries no proof. An epoch closes
+  once: the first closure fixes p_close and its UC time, an identical repeat is a no-op, any other closure of the epoch (another value,
+  H record or H round) is `ErrClosureConflict`, and none can anchor before some H was ordered and its successor has ordinary progress
+  (`ErrClosureEarly`). Custody applies the same rule; `closureCases` in the shared vectors are run against both. UC time is the seal
   timestamp of the verified root certificate's `RootOrigin` (`ReferenceTime`), imported on one lineage (network, then epoch and round) and
   never backwards; a record cannot be ordered before a time was imported. `rootrecords/testdata/records-vectors.json` is produced by this
   projection and replayed verbatim by the custody contracts' tests.

@@ -109,11 +109,23 @@ func (l *Log) At(i uint64) (Record, bool) {
 	if i >= l.Len() {
 		return Record{}, false
 	}
-	return l.records[i], true
+	return l.records[i].clone(), true
 }
 
-// Records returns a copy of the sequence.
-func (l *Log) Records() []Record { return append([]Record(nil), l.records...) }
+// clone gives a record its own payload: the log is append-only, so no returned value may alias a stored one.
+func (r Record) clone() Record {
+	r.Data = append([]byte(nil), r.Data...)
+	return r
+}
+
+// Records returns a deep copy of the sequence.
+func (l *Log) Records() []Record {
+	out := make([]Record, len(l.records))
+	for i, r := range l.records {
+		out[i] = r.clone()
+	}
+	return out
+}
 
 // Append orders one record at the anchor. The anchor may not be below the previous record's.
 func (l *Log) Append(kind Kind, data []byte, at Anchor) (Record, error) {
@@ -130,7 +142,7 @@ func (l *Log) Append(kind Kind, data []byte, at Anchor) (Record, error) {
 	}
 	r.ID = RecordID(r.Index, r.Predecessor, r.Kind, r.Progress, r.UCTime, r.Data)
 	l.records = append(l.records, r)
-	return r, nil
+	return r.clone(), nil
 }
 
 // Verify re-derives a received sequence from its first record: sequential indexes, linked predecessors, content-derived identifiers,

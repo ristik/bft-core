@@ -10,8 +10,8 @@ import (
 var (
 	// ErrClosureConflict reports a second closure of one (epoch, H record, H round) with a different identity.
 	ErrClosureConflict = errors.New("rootrecords: a different closure of the same H is already imported")
-	// ErrClosureEarly reports a closure before the successor has ordinary progress: the closure rides the successor's first ordinary
-	// control record, so none can anchor at H's endpoint.
+	// ErrClosureEarly reports a closure before the successor has ordinary progress, or of an epoch that is not before the current one:
+	// the closure rides the successor's first ordinary control record, so none can anchor at H's endpoint or precede every H.
 	ErrClosureEarly = errors.New("rootrecords: closure before the successor has ordinary progress")
 	// ErrNoUCTime reports a record ordered before any UC time was imported: a record without a time anchor can only fail exits closed.
 	ErrNoUCTime = errors.New("rootrecords: no UC time imported")
@@ -34,8 +34,9 @@ type Closure struct {
 }
 
 type closed struct {
-	id Closure
-	at Anchor
+	key ClosureKey
+	id  Closure
+	at  Anchor
 }
 
 // Projector turns verified root events into the linked record log. Every anchor comes from its own Tracker and Clock.
@@ -43,12 +44,12 @@ type Projector struct {
 	Log      Log
 	Tracker  *Tracker
 	Clock    Clock
-	closures map[ClosureKey]closed
+	closures map[uint64]closed // by closed epoch: an epoch has exactly one liability closure
 }
 
 // NewProjector starts at genesis: offset zero, the epoch's first ordinary round.
 func NewProjector(epoch, firstRound uint64) *Projector {
-	return &Projector{Tracker: NewGenesis(epoch, firstRound), closures: map[ClosureKey]closed{}}
+	return &Projector{Tracker: NewGenesis(epoch, firstRound), closures: map[uint64]closed{}}
 }
 
 // Anchor is the current canonical progress and UC time.
@@ -106,16 +107,20 @@ func (p *Projector) RecoveryAck(resultID, recoveryAssignmentID [32]byte, hRound,
 	})
 }
 
-// Close imports a liability closure. The first closure of a key fixes p_close and its UC time and appends a record; an identical repeat
-// returns the first anchor and appends nothing; a different identity for the same key is ErrClosureConflict.
+// Close imports a liability closure. An epoch closes once: the first closure fixes p_close and its UC time and appends a record; an
+// identical repeat (same epoch, H record, H round and value) returns the first anchor and appends nothing; any other closure of the
+// epoch, whether another value for the key or another H record or round, is ErrClosureConflict. Custody applies the same rule.
 func (p *Projector) Close(k ClosureKey, c Closure) (Anchor, bool, error) {
-	if first, ok := p.closures[k]; ok {
-		if first.id != c {
+	// One epoch closes once: the same key and value is a repeat, any other key (another H record or H round) or value is a conflict.
+	if first, ok := p.closures[k.Epoch]; ok {
+		if first.key != k || first.id != c {
 			return Anchor{}, false, fmt.Errorf("%w: epoch %d round %d", ErrClosureConflict, k.Epoch, k.HRound)
 		}
 		return first.at, false, nil
 	}
-	if p.Tracker.Frozen() {
+	// A closure rides the successor's first ordinary control record: some H must have been ordered and its successor must have made
+	// ordinary progress, so the closed epoch is strictly before the epoch now advancing and the freeze is over.
+	if p.Tracker.Frozen() || k.Epoch >= p.Tracker.Epoch() {
 		return Anchor{}, false, ErrClosureEarly
 	}
 	r, err := p.emit(KindClosure, c.AssignmentID[:], word(k.HRound), k.HRecordID[:], c.TerminalRoot[:], c.ExposureDigest[:], c.KeyHistoryDigest[:])
@@ -123,14 +128,17 @@ func (p *Projector) Close(k ClosureKey, c Closure) (Anchor, bool, error) {
 		return Anchor{}, false, err
 	}
 	at := Anchor{r.Progress, r.UCTime}
-	p.closures[k] = closed{c, at}
+	p.closures[k.Epoch] = closed{k, c, at}
 	return at, true, nil
 }
 
 // Closed reports the anchor of an imported closure; an obligation stays open until one exists.
 func (p *Projector) Closed(k ClosureKey) (Anchor, bool) {
-	c, ok := p.closures[k]
-	return c.at, ok
+	c, ok := p.closures[k.Epoch]
+	if !ok || c.key != k {
+		return Anchor{}, false
+	}
+	return c.at, true
 }
 
 // Retire records the retirement of an identity generation with the digest of its references.

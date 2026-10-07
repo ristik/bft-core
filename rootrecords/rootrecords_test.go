@@ -310,18 +310,101 @@ func TestClosureFirstFixesTheAnchorAndRepeatsAreNoOps(t *testing.T) {
 	require.Equal(t, at, got)
 }
 
-func TestClosureKeyedByEpochRecordAndRound(t *testing.T) {
+func TestClosureIsOncePerEpoch(t *testing.T) {
 	p, k := closureProjector(t)
 	c := Closure{id32(1), id32(2), id32(3), id32(4)}
 	_, _, err := p.Close(k, c)
 	require.NoError(t, err)
-	for _, other := range []ClosureKey{{2, k.HRecordID, k.HRound}, {k.Epoch, id32(0xcd), k.HRound}, {k.Epoch, k.HRecordID, 9}} {
-		_, first, err := p.Close(other, c)
-		require.NoError(t, err)
-		require.True(t, first, "a different key is a different closure")
+	// the same epoch with another H record or another H round is another closure of a closed epoch
+	for _, other := range []ClosureKey{{k.Epoch, id32(0xcd), k.HRound}, {k.Epoch, k.HRecordID, 9}} {
+		_, _, err := p.Close(other, c)
+		require.ErrorIs(t, err, ErrClosureConflict)
+		_, open := p.Closed(other)
+		require.False(t, open, "the refused key is not closed")
 	}
+	// an earlier epoch is its own closure
+	_, first, err := p.Close(ClosureKey{0, k.HRecordID, k.HRound}, c)
+	require.NoError(t, err)
+	require.True(t, first)
 }
 
+func TestCloseBeforeAnyHIsRefused(t *testing.T) {
+	p := newProj(t) // genesis: no H, no successor, the log and closure map are empty
+	_, _, err := p.Close(ClosureKey{1, id32(0xab), 8}, Closure{id32(1), id32(2), id32(3), id32(4)})
+	require.ErrorIs(t, err, ErrClosureEarly)
+	require.Zero(t, p.Log.Len())
+	_, open := p.Closed(ClosureKey{1, id32(0xab), 8})
+	require.False(t, open)
+	// the current epoch can never be the closed one, even with ordinary progress
+	require.NoError(t, p.Tracker.Observe(1, 40))
+	_, _, err = p.Close(ClosureKey{1, id32(0xab), 8}, Closure{})
+	require.ErrorIs(t, err, ErrClosureEarly)
+}
+
+func TestReviewLogReturnedDataIsIndependent(t *testing.T) {
+	flip := func(r Record) { r.Data[0] ^= 1 }
+	t.Run("Append", func(t *testing.T) {
+		var l Log
+		r, err := l.Append(KindSessionClosed, make([]byte, 32), Anchor{1, 1})
+		require.NoError(t, err)
+		flip(r)
+		require.NoError(t, Verify(l.Records()))
+	})
+	t.Run("At", func(t *testing.T) {
+		var l Log
+		_, err := l.Append(KindSessionClosed, make([]byte, 32), Anchor{1, 1})
+		require.NoError(t, err)
+		r, _ := l.At(0)
+		flip(r)
+		require.NoError(t, Verify(l.Records()))
+	})
+	t.Run("Records", func(t *testing.T) {
+		var l Log
+		_, err := l.Append(KindSessionClosed, make([]byte, 32), Anchor{1, 1})
+		require.NoError(t, err)
+		flip(l.Records()[0])
+		require.NoError(t, Verify(l.Records()))
+	})
+	t.Run("the appended input", func(t *testing.T) {
+		var l Log
+		data := make([]byte, 32)
+		_, err := l.Append(KindSessionClosed, data, Anchor{1, 1})
+		require.NoError(t, err)
+		data[0] ^= 1
+		require.NoError(t, Verify(l.Records()))
+	})
+}
+
+func TestProgressOverflowIsRefusedAndLeavesState(t *testing.T) {
+	const max = ^uint64(0)
+	t.Run("the successor offset", func(t *testing.T) {
+		tr := NewGenesis(1, 1)
+		_, err := tr.OrderH(max, 2, 1) // p(1,max) = max-1, the offset is max: fine
+		require.NoError(t, err)
+		require.NoError(t, tr.Observe(2, 1)) // progress max
+		require.Equal(t, max, tr.Progress())
+		require.ErrorIs(t, tr.Observe(2, 2), ErrProgress) // would wrap to zero
+		require.Equal(t, max, tr.Progress())
+	})
+	t.Run("p plus one", func(t *testing.T) {
+		tr := NewGenesis(1, 0)
+		before := *tr
+		_, err := tr.OrderH(max, 2, 1) // p(1,max) = max: the offset max+1 does not exist
+		require.ErrorIs(t, err, ErrProgress)
+		require.Equal(t, before, *tr)
+	})
+	t.Run("an ordinary round", func(t *testing.T) {
+		tr := NewGenesis(1, 0)
+		require.NoError(t, tr.Observe(1, max))
+		require.Equal(t, max, tr.Progress())
+		tr = NewGenesis(1, 1)
+		_, err := tr.OrderH(max, 2, 1)
+		require.NoError(t, err)
+		before := *tr
+		require.NoError(t, tr.Observe(2, 1))
+		require.NotEqual(t, before, *tr)
+	})
+}
 func TestClosureConflict(t *testing.T) {
 	p, k := closureProjector(t)
 	c := Closure{id32(1), id32(2), id32(3), id32(4)}

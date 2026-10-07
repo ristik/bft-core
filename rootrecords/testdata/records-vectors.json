@@ -56,5 +56,42 @@
         }
       ]
     }
+  ],
+  "closureCases": [
+    {
+      "name": "an identical repeat is a no-op",
+      "change": "none",
+      "expect": "repeat"
+    },
+    {
+      "name": "another assignment",
+      "change": "assignment",
+      "expect": "reject"
+    },
+    {
+      "name": "another H round",
+      "change": "hRound",
+      "expect": "reject"
+    },
+    {
+      "name": "another H record",
+      "change": "hRecord",
+      "expect": "reject"
+    },
+    {
+      "name": "another terminal root",
+      "change": "terminalRoot",
+      "expect": "reject"
+    },
+    {
+      "name": "another exposure digest",
+      "change": "exposureDigest",
+      "expect": "reject"
+    },
+    {
+      "name": "another key-history digest",
+      "change": "keyHistoryDigest",
+      "expect": "reject"
+    }
   ]
 }

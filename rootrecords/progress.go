@@ -3,6 +3,7 @@ package rootrecords
 import (
 	"errors"
 	"fmt"
+	"math/bits"
 )
 
 var (
@@ -32,7 +33,11 @@ func (t *Tracker) at(p epochPos, round uint64) (uint64, error) {
 	if round < p.first {
 		return 0, fmt.Errorf("%w: round %d precedes first round %d of epoch %d", ErrProgress, round, p.first, p.epoch)
 	}
-	return p.offset + (round - p.first), nil
+	hi, carry := bits.Add64(p.offset, round-p.first, 0)
+	if carry != 0 {
+		return 0, fmt.Errorf("%w: progress of round %d in epoch %d overflows", ErrProgress, round, p.epoch)
+	}
+	return hi, nil
 }
 
 // At is p(e,r) for the current epoch.
@@ -63,11 +68,17 @@ func (t *Tracker) Observe(epoch, round uint64) error {
 		if round < t.next.first {
 			return fmt.Errorf("%w: round %d precedes successor first round %d", ErrProgress, round, t.next.first)
 		}
+		if _, err := t.at(*t.next, round); err != nil {
+			return err
+		}
 		t.cur, t.last, t.endpoint, t.next = *t.next, round, nil, nil
 		return nil
 	}
 	if epoch != t.cur.epoch || round < t.last {
 		return fmt.Errorf("%w: ordinary round %d of epoch %d does not extend (%d,%d)", ErrProgress, round, epoch, t.cur.epoch, t.last)
+	}
+	if _, err := t.at(t.cur, round); err != nil {
+		return err
 	}
 	t.last = round
 	return nil
@@ -89,6 +100,9 @@ func (t *Tracker) OrderH(h, nextEpoch, nextFirst uint64) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+	if p == ^uint64(0) {
+		return 0, fmt.Errorf("%w: the successor offset p(e,h)+1 overflows", ErrProgress)
+	}
 	t.endpoint = &p
 	t.next = &epochPos{nextEpoch, p + 1, nextFirst}
 	return p + 1, nil
@@ -102,3 +116,6 @@ func (t *Tracker) enter() {
 
 // Frozen reports that H is ordered and the successor has no ordinary progress yet.
 func (t *Tracker) Frozen() bool { return t.endpoint != nil }
+
+// Epoch is the epoch whose ordinary rounds currently advance progress.
+func (t *Tracker) Epoch() uint64 { return t.cur.epoch }

@@ -31,9 +31,28 @@ type vectorScenario struct {
 	Records []vectorRecord `json:"records"`
 }
 
+// closureCase is a second closure of an epoch that is already closed, with one thing changed. Both this model and custody must
+// treat the identical one as a repeat (no new record, anchors unchanged) and every other as rejected.
+type closureCase struct {
+	Name   string `json:"name"`
+	Change string `json:"change"` // none, assignment, hRound, hRecord, terminalRoot, exposureDigest, keyHistoryDigest
+	Expect string `json:"expect"` // repeat or reject
+}
+
 type vectorFile struct {
-	Format    string           `json:"format"`
-	Scenarios []vectorScenario `json:"scenarios"`
+	Format       string           `json:"format"`
+	Scenarios    []vectorScenario `json:"scenarios"`
+	ClosureCases []closureCase    `json:"closureCases"`
+}
+
+var closureCases = []closureCase{
+	{"an identical repeat is a no-op", "none", "repeat"},
+	{"another assignment", "assignment", "reject"},
+	{"another H round", "hRound", "reject"},
+	{"another H record", "hRecord", "reject"},
+	{"another terminal root", "terminalRoot", "reject"},
+	{"another exposure digest", "exposureDigest", "reject"},
+	{"another key-history digest", "keyHistoryDigest", "reject"},
 }
 
 func label(s string) [32]byte {
@@ -93,7 +112,7 @@ func buildVectors(t *testing.T) vectorFile {
 	_, err = r.RecoveryAck(resJ, asgK, 100, 2, 101, 130, 3, 131, 3)
 	require.NoError(t, err)
 
-	return vectorFile{Format: "UNICITY_P85_ROOT_RECORDS/v1", Scenarios: []vectorScenario{toVector("handoff-closure-retirement", h.Log.Records()), toVector("recovery", r.Log.Records())}}
+	return vectorFile{Format: "UNICITY_P85_ROOT_RECORDS/v1", Scenarios: []vectorScenario{toVector("handoff-closure-retirement", h.Log.Records()), toVector("recovery", r.Log.Records())}, ClosureCases: closureCases}
 }
 
 func TestVectorsAreTheProjection(t *testing.T) {
@@ -137,4 +156,42 @@ func kinds(rs []Record) (out []Kind) {
 		out = append(out, r.Kind)
 	}
 	return
+}
+
+func TestClosureCasesAreTheProjectionsRule(t *testing.T) {
+	for _, c := range closureCases {
+		p, k := closureProjector(t)
+		base := Closure{id32(1), id32(2), id32(3), id32(4)}
+		first, isFirst, err := p.Close(k, base)
+		require.NoError(t, err)
+		require.True(t, isFirst)
+		n := p.Log.Len()
+		k2, c2 := k, base
+		switch c.Change {
+		case "assignment":
+			c2.AssignmentID = id32(9)
+		case "hRound":
+			k2.HRound++
+		case "hRecord":
+			k2.HRecordID = id32(0xcd)
+		case "terminalRoot":
+			c2.TerminalRoot = id32(9)
+		case "exposureDigest":
+			c2.ExposureDigest = id32(9)
+		case "keyHistoryDigest":
+			c2.KeyHistoryDigest = id32(9)
+		}
+		// later progress and time: a repeat must not move the anchors
+		require.NoError(t, p.Tracker.Observe(2, 90))
+		require.NoError(t, p.Import(origin(1, 12, 9_999)))
+		at, again, err := p.Close(k2, c2)
+		if c.Expect == "repeat" {
+			require.NoError(t, err, c.Name)
+			require.False(t, again, c.Name)
+			require.Equal(t, first, at, c.Name)
+		} else {
+			require.ErrorIs(t, err, ErrClosureConflict, c.Name)
+		}
+		require.Equal(t, n, p.Log.Len(), c.Name)
+	}
 }
