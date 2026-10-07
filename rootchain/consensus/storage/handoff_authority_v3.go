@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"errors"
 	"math"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
@@ -10,6 +11,24 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
+
+// Typed causes of a refused V3 freeze. Each is joined with ErrHandoffRecord, so a caller that only needs the family still matches it.
+var (
+	ErrFreezeV3Disabled    = errors.New("storage: V3 freeze rules are not enabled for this committee")
+	ErrFreezeV3Body        = errors.New("storage: V3 freeze body is invalid or not the successor of this epoch")
+	ErrFreezeV3Predecessor = errors.New("storage: V3 freeze body does not name this epoch as its predecessor")
+	ErrFreezeV3Context     = errors.New("storage: V3 freeze candidate, parent or frozen identity does not match the record")
+	ErrFreezeV3Binding     = errors.New("storage: V3 freeze candidate does not bind the successor committee")
+	ErrFreezeV3Receipts    = errors.New("storage: V3 freeze readiness receipts are missing or invalid")
+	ErrFreezeV3Quorum      = errors.New("storage: V3 freeze lacks the old committee's weighted quorum")
+)
+
+func freezeV3Refused(cause error, detail error) error {
+	if detail != nil {
+		return errors.Join(ErrHandoffRecord, cause, detail)
+	}
+	return errors.Join(ErrHandoffRecord, cause)
+}
 
 // freezeV3Version is the Freeze companion of a V3 (weighted, coupled) successor body. It carries what the V2 companion carries and
 // the readiness receipts of every successor member, so each voter checks them before the old committee's endorsement is accepted
@@ -87,23 +106,28 @@ func (x *BlockStore) EnableV3Freeze(rules V3FreezeRules) error {
 // verifyFreezeV3 is VerifyFreeze for a version-3 companion: the same chain record <- body <- change-record hash <- candidate <- preimage,
 // under the weighted rules, with the readiness receipts of every successor member required.
 func (a *v1HandoffAuthority) verifyFreezeV3(r evmroot.OrderedHandoffRecord, proof FreezeCompanion) ([]byte, error) {
-	if a.v3 == nil || r.Epoch == math.MaxUint64 {
-		return nil, ErrHandoffRecord
+	if a.v3 == nil {
+		return nil, freezeV3Refused(ErrFreezeV3Disabled, nil)
+	}
+	if r.Epoch == math.MaxUint64 {
+		return nil, freezeV3Refused(ErrFreezeV3Body, nil)
 	}
 	body, err := a.v3.VerifyBody(proof.Body)
 	if err != nil {
-		return nil, ErrHandoffRecord
+		return nil, freezeV3Refused(ErrFreezeV3Body, err)
+	}
+	if body.Network != r.Network || body.Epoch != r.Epoch+1 || body.EarliestActivation == 0 || body.EarliestActivation > r.ActivationRound {
+		return nil, freezeV3Refused(ErrFreezeV3Body, nil)
 	}
 	link, err := a.v3.Prior(r.Network, r.Epoch, a.priorVersion, a.predecessor)
-	if err != nil || body.Network != r.Network || body.Epoch != r.Epoch+1 || body.EarliestActivation == 0 ||
-		body.EarliestActivation > r.ActivationRound || !bytes.Equal(body.PredecessorHash, link) {
-		return nil, ErrHandoffRecord
+	if err != nil || !bytes.Equal(body.PredecessorHash, link) {
+		return nil, freezeV3Refused(ErrFreezeV3Predecessor, err)
 	}
 	if len(proof.Parent) != 32 || bytes.Equal(proof.Parent, make([]byte, 32)) || len(proof.Candidate) != 32 ||
 		!bytes.Equal(body.ChangeRecordHash, evmroot.D4CandidateContextHash(r.Network, r.PredecessorBodyID, r.Attempt, proof.Candidate, body.EarliestActivation)) ||
 		!bytes.Equal(r.FrozenID, evmroot.D4FrozenID(r.NextBodyID, body.StateSummary, proof.Parent, proof.Candidate, r.Attempt, r.PredecessorBodyID)) ||
 		!bytes.Equal(body.ID[:], r.NextBodyID) {
-		return nil, ErrHandoffRecord
+		return nil, freezeV3Refused(ErrFreezeV3Context, nil)
 	}
 	if len(proof.Preimage) != 0 {
 		ctx := evmassign.BindingContext{Digest: proof.Candidate, ControlPartition: evmroot.D4ControlPartition,
@@ -111,15 +135,18 @@ func (a *v1HandoffAuthority) verifyFreezeV3(r evmroot.OrderedHandoffRecord, proo
 		copy(ctx.Predecessor[:], r.PredecessorBodyID)
 		ctx.SuccessorRoot = append(ctx.SuccessorRoot, body.Members...)
 		if _, _, err := evmassign.VerifyBinding(proof.Preimage, ctx); err != nil {
-			return nil, ErrHandoffRecord
+			return nil, freezeV3Refused(ErrFreezeV3Binding, err)
 		}
 	}
-	if a.v3.VerifyReceipts(proof.Body, proof.Receipts, r.Attempt, proof.Candidate) != nil {
-		return nil, ErrHandoffRecord
+	if err := a.v3.VerifyReceipts(proof.Body, proof.Receipts, r.Attempt, proof.Candidate); err != nil {
+		return nil, freezeV3Refused(ErrFreezeV3Receipts, err)
 	}
 	message, err := EndorsementBytes(r)
-	if err != nil || a.verifyQuorum(message, proof.Signatures) != nil {
-		return nil, ErrHandoffRecord
+	if err != nil {
+		return nil, freezeV3Refused(ErrFreezeV3Quorum, err)
+	}
+	if err := a.verifyQuorum(message, proof.Signatures); err != nil {
+		return nil, freezeV3Refused(ErrFreezeV3Quorum, err)
 	}
 	return bytes.Clone(proof.Parent), nil
 }
