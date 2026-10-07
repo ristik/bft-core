@@ -23,9 +23,10 @@ var (
 	// ErrNotStopped is returned when an epoch is installed into a manager that is not the stopped profile-2 consensus the install
 	// requires.
 	ErrNotStopped = errors.New("epoch genesis requires stopped profile-2 consensus")
-	// ErrQ3Candidate is returned for a V3 install that carries an EVM assignment candidate: its derivation still takes a V2 body,
-	// so a root-only activation is the only one wired.
-	ErrQ3Candidate = errors.New("a Q3 install with an EVM assignment candidate is not wired")
+	// ErrQ3Candidate is returned for a V3 install whose candidate is not the one the committed record binds: a root-only record
+	// installed with an assignment, an assignment record installed without or with another one, or a candidate that does not derive
+	// the weighted coupled assignment the verified entry activates.
+	ErrQ3Candidate = errors.New("the Q3 install's candidate is not the committed one")
 	// ErrNoCheckpoint is returned for a V3 install whose handoff snapshot is absent or holds no shards: there is no committed
 	// checkpoint to verify or to anchor the epoch on.
 	ErrNoCheckpoint = errors.New("handoff snapshot is not a checkpoint")
@@ -52,11 +53,18 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 		return nil, ErrNotVerifiedEpoch
 	}
 	cfg, _ := entry.Config() // an entry with a handoff is an activation: it has its tuple
-	if len(candidate) != 0 {
-		return nil, ErrQ3Candidate
-	}
-	if !entry.RootOnly() { // the committed candidate is an assignment: omitting its preimage must not turn it into a root-only install
+	switch {
+	case len(candidate) == 0 && !entry.RootOnly(): // the committed candidate is an assignment: omitting its preimage must not turn it into a root-only install
 		return nil, fmt.Errorf("%w: the committed candidate is not the root-only operator candidate", ErrQ3Candidate)
+	case len(candidate) != 0 && entry.RootOnly():
+		return nil, fmt.Errorf("%w: the committed candidate is the root-only operator candidate", ErrQ3Candidate)
+	case len(candidate) != 0:
+		// the whole chain record <- body <- change-record hash <- candidate digest <- preimage, the entry's own committee and the
+		// mirrored coupling, under the weighted rules: nothing about the candidate is taken from the caller
+		// (the version only labels the activation built to check)
+		if _, err := storage.ActivationFromVerifiedV3(entry, v.Record, candidate, x.params.HashAlgorithm, 1); err != nil {
+			return nil, errors.Join(ErrQ3Candidate, err)
+		}
 	}
 	if head == nil || len(head.ShardInfo) == 0 {
 		return nil, fmt.Errorf("%w: no shards", ErrNoCheckpoint)
@@ -99,6 +107,12 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	newTrust, err := x.trustBaseStore.InstallVerified(projected, signing)
 	if err != nil {
 		return nil, err
+	}
+	if len(candidate) != 0 { // retained before the anchor, which derives the activated configuration from the retained pair
+		bodyID := entry.BodyID()
+		if err := x.blockStore.RetainHandoffArtifacts(bodyID[:], entry.BodyEncoding(), candidate); err != nil {
+			return nil, fmt.Errorf("retain handoff candidate: %w", err)
+		}
 	}
 	a, err := x.blockStore.InstallEpochAnchor(head, v, g)
 	if err != nil {

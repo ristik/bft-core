@@ -195,6 +195,12 @@ func New(t *testing.T, o Options) *Fixture {
 	state.IR.Hash = bytes.Repeat([]byte{0x37}, 32)
 	trHash, err := state.TR.Hash()
 	require.NoError(t, err)
+	if o.Assignment { // a coupled handoff commits the technical record derived from the candidate's successor assignment
+		trHash, err = storage.AssignmentSuccessorTRHash(state, f.Candidate, activate, crypto.SHA256)
+		if err != nil && o.MutateCandidate == nil && o.EVMWeights == nil && o.CandidateRootWeights == nil {
+			require.NoError(t, err)
+		}
+	}
 
 	f.Evidence = q3format.Evidence{Summary: bytes.Repeat([]byte{0x55}, 32), FrozenParent: bytes.Clone(o.Frozen), CandidateDigest: operator[:]}
 	record := evmroot.OrderedHandoffRecord{Network: Network, Epoch: oldEpoch, Attempt: attempt, OrderedRound: ordered, ActivationRound: activate,

@@ -58,6 +58,8 @@ type Entry struct {
 	// rootOnly is true when the candidate digest the committed record binds is the operator candidate recomputed from the body's own
 	// members: no EVM assignment preimage is committed, so none can be omitted.
 	rootOnly bool
+	// body is the canonical encoding of the V3 body the committed record names: SHA-256 of it is the committed NextBodyID.
+	body []byte
 }
 
 // RootOnly reports whether the committed record binds exactly the root-only operator candidate of this entry's members. It is
@@ -110,6 +112,10 @@ func (e Entry) Handoff() (evmroot.VerifiedHandoff, evmroot.EpochGenesis, bool) {
 	g.FrozenID, g.SuccessorTRHash = bytes.Clone(g.FrozenID), bytes.Clone(g.SuccessorTRHash)
 	return v, g, true
 }
+
+// BodyEncoding is a copy of the canonical V3 body bytes this activation's identity is the hash of; nil for a legacy entry. A consumer
+// that retains the body for derivation (the root's candidate-bearing install) takes it from here, never from the caller.
+func (e Entry) BodyEncoding() []byte { return bytes.Clone(e.body) }
 
 // Claim is what an envelope asserts about an entry; the verifier derives the same value and compares every field.
 type Claim struct {
@@ -351,7 +357,7 @@ func (h *History) WithV3(l Link) (*History, error) {
 	verified := evmroot.VerifiedHandoff{RecordID: bytes.Clone(v.RecordID[:]), Root: bytes.Clone(v.StateRoot[:]), ControlDigest: bytes.Clone(v.ControlDigest[:]),
 		OrderRound: v.OrderRound, CommitSealRound: v.CommitSealRound, Epoch: v.SignerEpoch, Record: r}
 	e := Entry{epoch: b.Epoch, start: r.ActivationRound, earliest: b.EarliestActivation, version: BodyVersion, scheme: cfg.SigningScheme, priorVersion: tip.version, priorID: tip.bodyID,
-		config: &cfg, bodyID: id, commitID: v.RecordID, tb: tb, handoff: &verified, genesis: &anchor, rootOnly: rootOnly}
+		config: &cfg, bodyID: id, commitID: v.RecordID, tb: tb, handoff: &verified, genesis: &anchor, rootOnly: rootOnly, body: b.Encode()}
 	copy(e.anchorID[:], anchor.ID())
 	return h.extend(e), nil
 }

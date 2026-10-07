@@ -289,7 +289,53 @@ func ActivationFromVerifiedV3(entry VerifiedActivation, record evmroot.OrderedHa
 // against the record, body and preimage, with the shared provenance. The state-dependent half (each change replaces exactly the
 // installed configuration of an existing non-EVM shard) is checked by the callers that hold the installed configurations.
 func DeriveActivatedConfigs(record evmroot.OrderedHandoffRecord, body evmroot.TrustBaseBodyV2, preimage, frozenParent []byte) ([]*types.PartitionDescriptionRecord, []byte, []evmassign.DecodedChange, error) {
-	evm, provenance, err := DeriveActivatedPDR(record, body, preimage, frozenParent)
+	id := body.Identity()
+	return deriveActivatedConfigs(record, retainedBody{id: id[:], epoch: body.Epoch, earliest: body.EarliestActivation, changeRecordHash: body.ChangeRecordHash, mode: weightvalidation.ModeUnit}, preimage)
+}
+
+// retainedBody is what the derivation needs of a retained successor body of either version: its identity, epoch, earliest activation and
+// change-record hash, and the validator weight rules of its assignment.
+type retainedBody struct {
+	id               []byte
+	epoch, earliest  uint64
+	changeRecordHash []byte
+	mode             weightvalidation.Mode
+}
+
+const retainedV3Domain = "UNICITY_TRUSTBASE_V3"
+
+// decodeRetainedBody reads the body retained under the committed body identity. A V2 body is decoded and validated in full, as before.
+// A V3 body is a domain-tagged array whose identity is the SHA-256 of exactly these bytes: the facts the derivation reads are
+// authenticated by that identity, which deriveActivatedPDR compares with the committed record's NextBodyID, and the body was
+// validated in full when the verified history minted its activation. Its assignment weights are the weighted rules'.
+func decodeRetainedBody(raw []byte) (retainedBody, error) {
+	var outer []any
+	if err := types.Cbor.Unmarshal(raw, &outer); err == nil && len(outer) == 2 {
+		if domain, _ := outer[0].(string); domain == retainedV3Domain {
+			fields, ok := outer[1].([]any)
+			if !ok || len(fields) != 10 {
+				return retainedBody{}, ErrHandoffRecord
+			}
+			epoch, eOK := fields[2].(uint64)
+			earliest, aOK := fields[3].(uint64)
+			crh, cOK := optionalD3Bytes(fields[7])
+			if version, _ := fields[0].(uint64); version != 3 || !eOK || !aOK || !cOK {
+				return retainedBody{}, ErrHandoffRecord
+			}
+			id := sha256.Sum256(raw)
+			return retainedBody{id: id[:], epoch: epoch, earliest: earliest, changeRecordHash: crh, mode: weightvalidation.ModeWeighted}, nil
+		}
+	}
+	body, err := DecodeHandoffBody(raw)
+	if err != nil {
+		return retainedBody{}, err
+	}
+	id := body.Identity()
+	return retainedBody{id: id[:], epoch: body.Epoch, earliest: body.EarliestActivation, changeRecordHash: body.ChangeRecordHash, mode: weightvalidation.ModeUnit}, nil
+}
+
+func deriveActivatedConfigs(record evmroot.OrderedHandoffRecord, body retainedBody, preimage []byte) ([]*types.PartitionDescriptionRecord, []byte, []evmassign.DecodedChange, error) {
+	evm, provenance, err := deriveActivatedPDR(record, body.id, body.epoch, body.earliest, body.changeRecordHash, preimage, body.mode)
 	if err != nil {
 		return nil, nil, nil, err
 	}

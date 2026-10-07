@@ -10,6 +10,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -363,11 +364,11 @@ func installCommittedAssignmentFrom(db PersistentStore, orchestration Orchestrat
 	if err != nil || len(rawBody) == 0 {
 		return fmt.Errorf("%w: successor body unavailable", ErrAssignmentHistory)
 	}
-	body, err := DecodeHandoffBody(rawBody)
+	body, err := decodeRetainedBody(rawBody)
 	if err != nil {
 		return err
 	}
-	confs, provenance, changes, err := DeriveActivatedConfigs(record, body, preimage, control.FrozenParent)
+	confs, provenance, changes, err := deriveActivatedConfigs(record, body, preimage)
 	if err != nil {
 		return err
 	}
@@ -380,7 +381,7 @@ func installCommittedAssignmentFrom(db PersistentStore, orchestration Orchestrat
 	if err != nil {
 		return errors.Join(ErrAssignmentHistory, err)
 	}
-	if err := evmassign.VerifyInstalled(c, succ, configs[key], nil); err != nil {
+	if err := evmassign.VerifyInstalledWith(weightvalidation.EVMRules(body.mode), c, succ, configs[key], nil); err != nil {
 		return errors.Join(ErrAssignmentHistory, err)
 	}
 	for _, d := range changes {

@@ -162,28 +162,56 @@ func ValidateSet(validators []*types.NodeInfo) error {
 	return nil
 }
 
+// Rules is the validator weight rule set a successor EVM assignment is checked under. The zero choice, UnitRules, is the legacy
+// unit-weight world; a coupled Q3 activation passes the weighted rules (weightvalidation.EVMRules), which this package cannot
+// import. Aggregator replacements never take weights and always use UnitRules.
+type Rules interface {
+	// PDR is the validity of the whole partition description, its validator set included.
+	PDR(*types.PartitionDescriptionRecord) error
+	// Set is the validity of the validator set alone: bounded size, strict order, valid unique keys and the weight rule.
+	Set([]*types.NodeInfo) error
+}
+
+type unitRules struct{}
+
+func (unitRules) PDR(p *types.PartitionDescriptionRecord) error { return p.IsValid() }
+func (unitRules) Set(v []*types.NodeInfo) error                 { return ValidateSet(v) }
+
+// UnitRules is the unit-weight rule set.
+var UnitRules Rules = unitRules{}
+
 // ValidateAssignment checks what depends on the successor alone: a valid PDR
 // with no activation round and a well-formed unit-weight validator set.
 func ValidateAssignment(succ *types.PartitionDescriptionRecord) error {
+	return ValidateAssignmentWith(UnitRules, succ)
+}
+
+// ValidateAssignmentWith is ValidateAssignment under the rules r.
+func ValidateAssignmentWith(r Rules, succ *types.PartitionDescriptionRecord) error {
 	if succ == nil {
 		return ErrAssignment
 	}
-	if err := succ.IsValid(); err != nil {
+	if err := r.PDR(succ); err != nil {
 		return fmt.Errorf("%w: %v", ErrAssignment, err)
 	}
 	if succ.EpochStart != 0 {
 		return fmt.Errorf("%w: activation round is set before commit", ErrEpoch)
 	}
-	return ValidateSet(succ.Validators)
+	return r.Set(succ.Validators)
 }
 
 // ValidateSuccessor checks succ against the currently installed configuration:
 // identical in every non-membership setting, epoch+1, EpochStart unset.
 func ValidateSuccessor(current, succ *types.PartitionDescriptionRecord) error {
+	return ValidateSuccessorWith(UnitRules, current, succ)
+}
+
+// ValidateSuccessorWith is ValidateSuccessor under the rules r.
+func ValidateSuccessorWith(r Rules, current, succ *types.PartitionDescriptionRecord) error {
 	if current == nil || succ == nil {
 		return ErrAssignment
 	}
-	if err := succ.IsValid(); err != nil {
+	if err := r.PDR(succ); err != nil {
 		return fmt.Errorf("%w: %v", ErrAssignment, err)
 	}
 	if current.Epoch == math.MaxUint64 || succ.Epoch != current.Epoch+1 || succ.EpochStart != 0 {
@@ -197,7 +225,7 @@ func ValidateSuccessor(current, succ *types.PartitionDescriptionRecord) error {
 	if err != nil || a != b {
 		return ErrConfig
 	}
-	return ValidateSet(succ.Validators)
+	return r.Set(succ.Validators)
 }
 
 // AssignmentHash binds network/partition/shard, the new shard epoch, the sorted

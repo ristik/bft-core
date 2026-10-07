@@ -111,6 +111,7 @@ type (
 		frontier         *frontierSampler
 		recoveryProfile2 bool
 		recoveryHistory  *trusthistorystore.Store
+		q3               Q3Authority // the verified Q3 history, nil when the binary does not know it
 		epochAnchor      *drctypes.EpochAnchor
 		handoffMu        sync.Mutex
 		handoffPlans     map[[32]byte]*pendingHandoff
@@ -349,6 +350,7 @@ func NewConsensusManager(
 		frontier:         frontier,
 		recoveryProfile2: optional.RecoveryProfile2,
 		recoveryHistory:  optional.RecoveryHistory,
+		q3:               optional.Q3,
 		epochAnchor:      installedAnchor,
 		log:              log,
 		tracer:           observe.Tracer("cm.distributed"),
@@ -766,6 +768,16 @@ func (x *ConsensusManager) bufferIRChange(req *drctypes.IRChangeReq) error {
 		return fmt.Errorf("resolving the request view: %w", err)
 	}
 	return x.irReqBuffer.AddView(view, req, x.irReqVerifier)
+}
+
+// stateHistory is the lineage a StateMsg's certificates are verified against: the verified Q3 history's view over the recovery
+// history when the binary knows Q3, so that the certificates of an activated epoch are checked under its own weights, and the
+// recovery history alone otherwise.
+func (x *ConsensusManager) stateHistory() abdrc.HistoricalTrustBases {
+	if x.q3 != nil {
+		return x.q3.Lineage(x.recoveryHistory)
+	}
+	return x.recoveryHistory
 }
 
 // carryRequestHistory keeps the history the view-aware branch resolves from across a recovery that replaces the verifier: it is
@@ -1453,7 +1465,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		if x.recoveryHistory == nil {
 			return fmt.Errorf("recovery response verification failed: %w", abdrc.ErrHistoricalTrustBase)
 		}
-		verifyErr = rsp.VerifyWithAnchorSigning(x.params.HashAlgorithm, x.trustBase.Load(), x.recoveryHistory, x.blockStore, x.trustBaseStore, x.trustBaseStore.GenesisPin())
+		verifyErr = rsp.VerifyWithAnchorSigning(x.params.HashAlgorithm, x.trustBase.Load(), x.stateHistory(), x.blockStore, x.trustBaseStore, x.trustBaseStore.GenesisPin())
 	} else {
 		verifyErr = rsp.VerifySigning(x.params.HashAlgorithm, x.trustBase.Load(), x.trustBaseStore, x.trustBaseStore.GenesisPin())
 	}
@@ -1492,7 +1504,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			if err := blockStore.ConfigureHandoffAuthority(x.trustBase.Load()); err != nil {
 				return fmt.Errorf("recovery handoff authority: %w", err)
 			}
-		} else {
+		} else if !q3Activated(x.q3, x.epochAnchor) {
 			prior, historyErr := x.recoveryHistory.ByEpoch(x.epochAnchor.Epoch)
 			if historyErr != nil {
 				return fmt.Errorf("recovery handoff authority lineage: %w", historyErr)
@@ -1500,7 +1512,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			if err := blockStore.ConfigureHandoffV2Authority(x.trustBase.Load(), prior); err != nil {
 				return fmt.Errorf("recovery handoff authority: %w", err)
 			}
-		}
+		} // else: the anchor is a Q3 activation; as at construction, no handoff authority is configured for its epoch
 	}
 	// create new verifier
 	reqVerifier, err := NewIRChangeReqVerifier(x.params, blockStore)

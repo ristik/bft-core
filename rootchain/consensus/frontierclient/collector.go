@@ -15,6 +15,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/internal/frontiercodec"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -45,6 +46,9 @@ type Profile struct {
 	Nonce                 []byte
 	// Signing is the signing configuration of RootEpoch: the wire form of the QCs the collector accepts. The zero value is the legacy scheme.
 	Signing votesig.Config
+	// Mode is the validation rule set of RootEpoch's committee: the zero value is the unit-weight profile; only a verified Q3
+	// activation's epoch is weighted.
+	Mode weightvalidation.Mode
 }
 
 type Status uint8
@@ -212,7 +216,7 @@ func NewCollector(p Profile) (*Collector, error) {
 	}
 	total := len(p.TrustBase.StateHash) + len(p.TrustBase.ChangeRecordHash) + len(p.TrustBase.PreviousEntryHash)
 	for _, n := range p.TrustBase.RootNodes {
-		if n == nil || n.Stake != 1 || len(n.NodeID) == 0 || len(n.NodeID) > frontiercodec.MaxAuthor || len(n.SigKey) == 0 || len(n.SigKey) > frontiercodec.MaxAuthor || len(n.NodeID) > frontiercodec.MaxPart-total || len(n.SigKey) > frontiercodec.MaxPart-total-len(n.NodeID) {
+		if n == nil || len(n.NodeID) == 0 || len(n.NodeID) > frontiercodec.MaxAuthor || len(n.SigKey) == 0 || len(n.SigKey) > frontiercodec.MaxAuthor || len(n.NodeID) > frontiercodec.MaxPart-total || len(n.SigKey) > frontiercodec.MaxPart-total-len(n.NodeID) {
 			return nil, ErrProfile
 		}
 		total += len(n.NodeID) + len(n.SigKey)
@@ -234,7 +238,7 @@ func NewCollector(p Profile) (*Collector, error) {
 	slices.SortFunc(trust.RootNodes, func(a, b *types.NodeInfo) int { return bytes.Compare([]byte(a.NodeID), []byte(b.NodeID)) })
 	verifiers := make(map[string]abcrypto.Verifier, len(trust.RootNodes))
 	for _, n := range trust.RootNodes {
-		if n == nil || n.Stake != 1 || len(n.NodeID) == 0 || len(n.NodeID) > frontiercodec.MaxAuthor || len(n.SigKey) == 0 || len(n.SigKey) > frontiercodec.MaxAuthor {
+		if n == nil || len(n.NodeID) == 0 || len(n.NodeID) > frontiercodec.MaxAuthor || len(n.SigKey) == 0 || len(n.SigKey) > frontiercodec.MaxAuthor {
 			return nil, ErrProfile
 		}
 		if _, exists := verifiers[n.NodeID]; exists {
@@ -246,11 +250,11 @@ func NewCollector(p Profile) (*Collector, error) {
 		}
 		verifiers[n.NodeID] = v
 	}
-	n, err := quorumweight.TotalWeight(trust.RootNodes)
-	if err != nil {
-		return nil, ErrProfile
+	mode := p.Mode
+	if mode == 0 {
+		mode = weightvalidation.ModeUnit
 	}
-	if min, err := quorumweight.Threshold(n); err != nil || trust.QuorumThreshold < min || trust.QuorumThreshold > n {
+	if err := weightvalidation.RootTrustBase(&trust, mode); err != nil { // the unit profile, or the exact weighted threshold of a Q3 epoch
 		return nil, ErrProfile
 	}
 	shardBytes, err := types.Cbor.Marshal(p.ShardID)

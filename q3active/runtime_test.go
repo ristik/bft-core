@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
@@ -13,6 +14,7 @@ import (
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/q3install"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -413,3 +415,71 @@ type noopComponent struct{}
 
 func (noopComponent) Install(context.Context, q3install.Activation) error { return nil }
 func (noopComponent) Verify(context.Context, q3install.Activation) error  { return nil }
+
+type staticHistory map[uint64]trusthistorystore.Record
+
+func (h staticHistory) ByEpoch(epoch uint64) (trusthistorystore.Record, error) {
+	if r, ok := h[epoch]; ok {
+		return r, nil
+	}
+	return trusthistorystore.Record{}, trusthistorystore.ErrNotFound
+}
+
+func TestLineageServesTheVerifiedProjectionOfAnActivatedEpoch(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{})
+	p := newProcess(t, f)
+	rt := p.start()
+	base := staticHistory{1: {Epoch: 1, V1: f.Old}}
+	lineage := rt.Lineage(base)
+	var beforeInstall error
+	p.root.OnInstall = func(q3format.Entry) { _, beforeInstall = lineage.ByEpoch(2) }
+	require.NoError(t, rt.Activate(ctx, p.bundle()))
+	require.ErrorIs(t, beforeInstall, q3active.ErrNotActive, "an epoch whose installation is incomplete is not served")
+
+	t.Run("an activated epoch is the history's own projection, with its weights", func(t *testing.T) {
+		rec, err := lineage.ByEpoch(2)
+		require.NoError(t, err)
+		require.Nil(t, rec.V1)
+		require.Nil(t, rec.V2)
+		require.NotNil(t, rec.Verified)
+		require.EqualValues(t, 2, rec.Epoch)
+		require.EqualValues(t, 7, rec.Start)
+		require.EqualValues(t, 7, rec.Verified.QuorumThreshold)
+		var total uint64
+		for _, n := range rec.Verified.RootNodes {
+			total += n.Stake
+		}
+		require.EqualValues(t, 9, total)
+		require.Equal(t, epoch2(t, rt).BodyID(), rec.BodyID)
+		rec.Verified.RootNodes[0].Stake = 1000
+		again, err := lineage.ByEpoch(2)
+		require.NoError(t, err)
+		require.NotEqual(t, uint64(1000), again.Verified.RootNodes[0].Stake, "the served projection is a copy")
+	})
+	t.Run("the genesis epoch is the base's record once it agrees with the history", func(t *testing.T) {
+		rec, err := lineage.ByEpoch(1)
+		require.NoError(t, err)
+		require.Same(t, f.Old, rec.V1)
+	})
+	t.Run("the base never answers where the history disagrees or holds nothing", func(t *testing.T) {
+		bent := *f.Old
+		bent.QuorumThreshold = 1
+		for name, rec := range map[string]trusthistorystore.Record{
+			"another committee":     {Epoch: 1, V1: &bent},
+			"a V2 body":             {Epoch: 1, V1: f.Old, V2: &evmroot.TrustBaseBodyV2{}},
+			"a verified projection": {Epoch: 1, V1: f.Old, Verified: f.Old},
+			"no V1":                 {Epoch: 1},
+		} {
+			_, err := rt.Lineage(staticHistory{1: rec}).ByEpoch(1)
+			require.ErrorIs(t, err, q3active.ErrConflict, name)
+		}
+		_, err := rt.Lineage(nil).ByEpoch(1)
+		require.ErrorIs(t, err, trusthistorystore.ErrNotFound, "no base, no genesis record")
+		_, err = rt.Lineage(staticHistory{}).ByEpoch(1)
+		require.ErrorIs(t, err, trusthistorystore.ErrNotFound)
+	})
+	t.Run("an epoch the history does not hold is refused, whatever the base says", func(t *testing.T) {
+		_, err := rt.Lineage(staticHistory{3: {Epoch: 3, V1: f.Old}}).ByEpoch(3)
+		require.ErrorIs(t, err, q3format.ErrUnknownEpoch)
+	})
+}

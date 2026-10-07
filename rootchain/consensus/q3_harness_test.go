@@ -143,7 +143,7 @@ func (r *q3Replica) release() {
 func (r *q3Replica) close() { r.release() }
 
 func (r *q3Replica) bundle() q3active.Bundle {
-	return q3active.Bundle{Envelope: r.f.EnvelopeBytes, Snapshot: r.f.Snapshot}
+	return q3active.Bundle{Envelope: r.f.EnvelopeBytes, Snapshot: r.f.Snapshot, Candidate: r.f.Candidate}
 }
 
 // activate runs the whole activation and starts the successor's consensus at the anchor.

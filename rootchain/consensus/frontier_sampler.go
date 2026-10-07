@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
@@ -20,7 +21,7 @@ import (
 )
 
 var (
-	// ErrFrontierProfile marks a trust base or configuration outside the frontier's fixed unit-weight profile.
+	// ErrFrontierProfile marks a trust base or configuration outside the frontier's profile: unit weights, or the exact weighted threshold of a verified Q3 epoch.
 	ErrFrontierProfile     = errors.New("root frontier profile refused")
 	ErrFrontierDisabled    = errors.New("root frontier sampler is disabled")
 	ErrFrontierUnavailable = errors.New("root frontier sample unavailable")
@@ -37,6 +38,16 @@ type FrontierSamplerConfig struct {
 	// Signing is the signing configuration of the sampled trust base's epoch: the wire form of the QCs the sampler accepts as
 	// covering evidence. The zero value is the legacy scheme.
 	Signing votesig.Config
+	// Mode is the validation rule set of the sampled epoch's committee: the zero value is the unit-weight profile, and only a verified
+	// Q3 activation's epoch (weightvalidation.ModeFor through the verified history) is weighted.
+	Mode weightvalidation.Mode
+}
+
+func (c FrontierSamplerConfig) mode() weightvalidation.Mode {
+	if c.Mode == 0 {
+		return weightvalidation.ModeUnit
+	}
+	return c.Mode
 }
 
 type FrontierRequest struct {
@@ -111,25 +122,8 @@ func newFrontierSampler(c FrontierSamplerConfig, reader frontierSafetyReader) (*
 		return nil, fmt.Errorf("copying frontier trust base: %w", err)
 	}
 	slices.SortFunc(trust.RootNodes, func(a, b *types.NodeInfo) int { return bytes.Compare([]byte(a.NodeID), []byte(b.NodeID)) })
-	seen := make(map[string]struct{}, len(trust.RootNodes))
-	for _, n := range trust.RootNodes {
-		if err := n.IsValid(); err != nil {
-			return nil, fmt.Errorf("%w: invalid frontier root: %w", ErrFrontierProfile, err)
-		}
-		if n.Stake != 1 {
-			return nil, fmt.Errorf("%w: frontier roots must have unit weight", ErrFrontierProfile)
-		}
-		if _, ok := seen[n.NodeID]; ok {
-			return nil, fmt.Errorf("duplicate frontier root %q", n.NodeID)
-		}
-		seen[n.NodeID] = struct{}{}
-	}
-	n, err := quorumweight.TotalWeight(trust.RootNodes)
-	if err != nil {
-		return nil, fmt.Errorf("frontier root weight: %w", err)
-	}
-	if min, err := quorumweight.Threshold(n); err != nil || trust.QuorumThreshold < min || trust.QuorumThreshold > n {
-		return nil, fmt.Errorf("%w: frontier quorum must satisfy 2N/3 < q <= N", ErrFrontierProfile)
+	if err := weightvalidation.RootTrustBase(&trust, c.mode()); err != nil {
+		return nil, fmt.Errorf("%w: frontier roots: %w", ErrFrontierProfile, err)
 	}
 	ownedEncoding, err := types.Cbor.Marshal(&trust)
 	if err != nil {

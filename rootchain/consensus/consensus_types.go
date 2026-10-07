@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"time"
 
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
@@ -73,6 +74,9 @@ func WithRecoveryProfile2(history *trusthistorystore.Store) Option {
 type Q3Authority interface {
 	ActivationGate
 	Activated(epoch uint64) (q3format.Entry, bool)
+	// Lineage is the recovery history a StateMsg is verified against: the base's record for the genesis epoch and the verified
+	// history's own exact-weight projection for an activated one.
+	Lineage(base abdrc.HistoricalTrustBases) abdrc.HistoricalTrustBases
 }
 
 // WithQ3 gives the manager the verified Q3 history. Without it nothing changes.
