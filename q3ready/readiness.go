@@ -95,6 +95,9 @@ func (e Entity) Attest(ctx context.Context, rc q3format.ReceiptContext, cfg q3fo
 			return q3format.Receipt{}, fmt.Errorf("%w: %s: %w", ErrNotReady, c.name, ErrProbe)
 		}
 		r, err := c.svc.Report(ctx)
+		if errors.Is(err, ErrComponent) { // a report that arrived but names an incomplete or foreign context is a component refusal, not an outage
+			return q3format.Receipt{}, fmt.Errorf("%w: %s: %w", ErrNotReady, c.name, err)
+		}
 		if err != nil {
 			return q3format.Receipt{}, fmt.Errorf("%w: %s: %w: %v", ErrNotReady, c.name, ErrProbe, err)
 		}

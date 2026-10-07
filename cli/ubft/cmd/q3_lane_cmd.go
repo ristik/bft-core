@@ -284,11 +284,14 @@ func (s httpQ3Service) Report(ctx context.Context) (q3ready.ServiceReport, error
 		}{{"digest", st.Staged.CandidateDigest, &out.Staged}, {"body identity", st.Staged.BodyID, &out.StagedBody}, {"protocol configuration", st.Staged.Config, &out.StagedConfig}} {
 			raw, err := hex.DecodeString(f.text)
 			if err != nil || len(raw) != 32 {
-				return q3ready.ServiceReport{}, fmt.Errorf("the service reported a staged %s that is not 32 bytes", f.name)
+				return q3ready.ServiceReport{}, fmt.Errorf("%w: the service reported a staged %s that is not 32 bytes", q3ready.ErrComponent, f.name)
 			}
 			copy(f.into[:], raw)
 		}
-		out.StagedAttempt = st.Staged.Attempt
+		if st.Staged.Attempt == nil {
+			return q3ready.ServiceReport{}, fmt.Errorf("%w: the service reported a staged candidate without its attempt", q3ready.ErrComponent)
+		}
+		out.StagedAttempt = *st.Staged.Attempt
 	}
 	return out, nil
 }

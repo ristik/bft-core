@@ -70,10 +70,10 @@ type q3HistoryResponse struct {
 }
 
 type q3StagedResponse struct {
-	CandidateDigest string `json:"candidateDigest"`
-	BodyID          string `json:"bodyId"`
-	Attempt         uint64 `json:"attempt"`
-	Config          string `json:"config"`
+	CandidateDigest string  `json:"candidateDigest"`
+	BodyID          string  `json:"bodyId"`
+	Attempt         *uint64 `json:"attempt"` // a pointer: attempt zero is a value, an absent field is not
+	Config          string  `json:"config"`
 }
 
 // q3StatusResponse is what a validator's BFT node reports about itself: the chain it is bound to and the candidate it has staged.
@@ -92,7 +92,7 @@ func (a rootQ3API) statusResponse() (q3StatusResponse, error) {
 	out := q3StatusResponse{Network: st.Network, Genesis: hex.EncodeToString(st.Genesis[:]), ActiveEpoch: st.ActiveEpoch}
 	if st.Staged != nil {
 		out.Staged = &q3StagedResponse{CandidateDigest: hex.EncodeToString(st.Staged.CandidateDigest[:]),
-			BodyID: hex.EncodeToString(st.Staged.BodyID[:]), Attempt: st.Staged.Attempt, Config: hex.EncodeToString(st.Staged.Config[:])}
+			BodyID: hex.EncodeToString(st.Staged.BodyID[:]), Attempt: &st.Staged.Attempt, Config: hex.EncodeToString(st.Staged.Config[:])}
 	}
 	return out, nil
 }

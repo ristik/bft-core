@@ -203,8 +203,9 @@ func newLaneServices(t *testing.T, body q3format.BodyV3, staged [32]byte) *laneS
 	rootMux.HandleFunc("POST /api/v1/q3/status", q3Endpoint(func(context.Context, json.RawMessage) (any, error) {
 		out := q3StatusResponse{Network: body.Network, Genesis: hex.EncodeToString(body.Config.Genesis[:])}
 		if *s.rootStaged != ([32]byte{}) {
+			attempt := s.rootAttempt
 			out.Staged = &q3StagedResponse{CandidateDigest: hex.EncodeToString(s.rootStaged[:]), BodyID: hex.EncodeToString(s.rootBody[:]),
-				Attempt: s.rootAttempt, Config: hex.EncodeToString(s.rootConfig[:])}
+				Attempt: &attempt, Config: hex.EncodeToString(s.rootConfig[:])}
 			if s.rootStatus != nil {
 				s.rootStatus(out.Staged)
 			}
@@ -266,12 +267,13 @@ func TestEveryMembersReadinessReceiptVerifiesAndEachRefusalWritesNoReceipt(t *te
 	require.NoError(t, q3format.VerifyReceipts(body, q3format.ContextFor(body, cand.Attempt, cand.Candidate), receipts))
 
 	// each refusal differs from the control in one thing, and writes no receipt
+	current := candidate
 	refused := func(name string, cause error, mutate func(*laneServices), genesis, code string) {
 		t.Helper()
 		s := newLaneServices(t, body, cand.Candidate)
 		mutate(s)
 		out := filepath.Join(dir, "refused-"+name+".json")
-		err := runReadiness(t, ents[1], candidate, s, genesis, code, out)
+		err := runReadiness(t, ents[1], current, s, genesis, code, out)
 		require.ErrorIs(t, err, cause, name)
 		_, statErr := os.Stat(out)
 		require.True(t, os.IsNotExist(statErr), "%s: no receipt is written", name)
@@ -289,13 +291,35 @@ func TestEveryMembersReadinessReceiptVerifiesAndEachRefusalWritesNoReceipt(t *te
 		s.shard = newShardStagingServer(other.Config, nil)
 	}, genesisPin, codePin)
 	// the staged context beyond the digest: each service's report differs from the control in exactly one of body, attempt and configuration
+	// a field the service did not report at all is not a value. Attempt zero is a valid attempt, so the absence of the field is tested on a
+	// candidate whose attempt IS zero (a decoded absence would otherwise equal it), with a positive control first.
+	zero := cand
+	zero.Attempt = 0
+	rawZero, err := zero.encode()
+	require.NoError(t, err)
+	current = filepath.Join(dir, "candidate-zero.cbor")
+	require.NoError(t, os.WriteFile(current, rawZero, 0o600))
+	require.NoError(t, runReadiness(t, ents[1], current, newLaneServices(t, body, cand.Candidate), genesisPin, codePin, filepath.Join(dir, "zero-control.json")), "attempt zero is a valid attempt")
+	for name, drop := range map[string]func(*q3StagedResponse){
+		"attempt": func(r *q3StagedResponse) { r.Attempt = nil },
+		"body":    func(r *q3StagedResponse) { r.BodyID = "" },
+		"config":  func(r *q3StagedResponse) { r.Config = "" },
+	} {
+		drop := drop
+		refused("the root omits the staged "+name, q3ready.ErrComponent, func(s *laneServices) { s.rootStatus = drop }, genesisPin, codePin)
+		refused("the shard node omits the staged "+name, q3ready.ErrComponent, func(s *laneServices) {
+			s.shard.Close()
+			s.shard = newShardStagingServer(body.Config, drop)
+		}, genesisPin, codePin)
+	}
+	current = candidate
 	for name, edit := range map[string]func(*q3StagedResponse){
 		"body": func(r *q3StagedResponse) {
 			raw, _ := hex.DecodeString(r.BodyID)
 			raw[0] ^= 1
 			r.BodyID = hex.EncodeToString(raw)
 		},
-		"attempt": func(r *q3StagedResponse) { r.Attempt++ },
+		"attempt": func(r *q3StagedResponse) { *r.Attempt++ },
 		"config": func(r *q3StagedResponse) {
 			raw, _ := hex.DecodeString(r.Config)
 			raw[0] ^= 1
