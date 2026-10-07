@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/m2contract"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -48,17 +49,33 @@ const MaxOldCommitProof = 1 << 20
 // authenticates it; a caller cannot construct an activation.
 type Entry struct {
 	epoch, start, version, scheme uint64
+	earliest                      uint64 // the body's A_min
 	priorVersion                  uint64
 	config                        *ProtocolConfig
 	bodyID, commitID, anchorID    [32]byte
 	priorID                       [32]byte
 	tb                            *types.RootTrustBaseV1 // verifier projection of this epoch's committee
 	v2                            *evmroot.TrustBaseBodyV2
+	// handoff and genesis are what the old committee's verified commit derived, kept for a V3 entry so that an installer takes
+	// them from the verified history and never from a caller-built record.
+	handoff *evmroot.VerifiedHandoff
+	genesis *evmroot.EpochGenesis
+	// rootOnly is true when the candidate digest the committed record binds is the operator candidate recomputed from the body's own
+	// members: no EVM assignment preimage is committed, so none can be omitted.
+	rootOnly bool
 }
 
-func (e Entry) Epoch() uint64   { return e.epoch }
-func (e Entry) Start() uint64   { return e.start } // the actual activation boundary A*
-func (e Entry) Version() uint64 { return e.version }
+// RootOnly reports whether the committed record binds exactly the root-only operator candidate of this entry's members. It is
+// derived from the authenticated record when the entry is minted; an entry whose committed candidate is anything else (an EVM
+// assignment) is not root-only, however its candidate bytes are presented later.
+func (e Entry) RootOnly() bool { return e.rootOnly }
+
+func (e Entry) Epoch() uint64 { return e.epoch }
+func (e Entry) Start() uint64 { return e.start } // the actual activation boundary A*
+
+// EarliestActivation is the body's A_min, the lower bound A* had to meet.
+func (e Entry) EarliestActivation() uint64 { return e.earliest }
+func (e Entry) Version() uint64            { return e.version }
 
 // Scheme is the explicit signing scheme of the epoch: 1 for every legacy epoch, the tuple's for a V3 epoch.
 func (e Entry) Scheme() uint64               { return e.scheme }
@@ -78,6 +95,25 @@ func (e Entry) Anchor() (epoch, round uint64) {
 		return e.epoch, 0 // the genesis epoch has no predecessor to anchor on
 	}
 	return e.epoch, e.start - 1
+}
+
+// Projection is a private copy of the epoch's verifier projection (members, exact weights, threshold, start). For a V3 entry it
+// carries the body's state summary and change-record hash. It is a derived view: it is never the configuration identity.
+func (e Entry) Projection() *types.RootTrustBaseV1 { return cloneTrustBase(e.tb) }
+
+// Handoff is the verified old-committee commit this V3 entry was activated by and the epoch genesis derived from it. It is
+// false for a legacy entry. The values are copies.
+func (e Entry) Handoff() (evmroot.VerifiedHandoff, evmroot.EpochGenesis, bool) {
+	if e.handoff == nil || e.genesis == nil {
+		return evmroot.VerifiedHandoff{}, evmroot.EpochGenesis{}, false
+	}
+	v, g := *e.handoff, *e.genesis
+	v.RecordID, v.Root, v.ControlDigest = bytes.Clone(v.RecordID), bytes.Clone(v.Root), bytes.Clone(v.ControlDigest)
+	v.Record.PredecessorBodyID, v.Record.FrozenID = bytes.Clone(v.Record.PredecessorBodyID), bytes.Clone(v.Record.FrozenID)
+	v.Record.NextBodyID, v.Record.SuccessorTRHash = bytes.Clone(v.Record.NextBodyID), bytes.Clone(v.Record.SuccessorTRHash)
+	g.NextBodyID, g.RecordID, g.Root, g.ControlDigest = bytes.Clone(g.NextBodyID), bytes.Clone(g.RecordID), bytes.Clone(g.Root), bytes.Clone(g.ControlDigest)
+	g.FrozenID, g.SuccessorTRHash = bytes.Clone(g.FrozenID), bytes.Clone(g.SuccessorTRHash)
+	return v, g, true
 }
 
 // Claim is what an envelope asserts about an entry; the verifier derives the same value and compares every field.
@@ -168,6 +204,19 @@ func (h *History) ForEpoch(epoch uint64) (Entry, error) {
 		}
 	}
 	return Entry{}, fmt.Errorf("%w: epoch %d", ErrUnknownEpoch, epoch)
+}
+
+// Signing is the explicit signing configuration of an epoch's messages: scheme 1 for a verified legacy epoch, the tuple's scheme
+// and the chain's genesis identity for a verified V3 epoch. An epoch the history does not hold is ErrUnknownEpoch, never scheme 1.
+func (h *History) Signing(epoch uint64) (votesig.Config, error) {
+	e, err := h.ForEpoch(epoch)
+	if err != nil {
+		return votesig.Config{}, err
+	}
+	if e.config == nil {
+		return votesig.Config{Scheme: votesig.SchemeLegacy, Network: h.network}, nil
+	}
+	return votesig.Config{Scheme: e.config.SigningScheme, Network: e.config.Network, Genesis: e.config.Genesis}, nil
 }
 
 // ForRound is the entry whose interval [A*, next A*) holds round.
@@ -292,15 +341,23 @@ func (h *History) WithV3(l Link) (*History, error) {
 	if err := VerifyReceipts(b, ContextFor(b, r.Attempt, [32]byte(l.Evidence.CandidateDigest)), l.Receipts); err != nil {
 		return nil, err
 	}
+	operator, err := evmroot.D4OperatorCandidateDigest(b.Members)
+	if err != nil {
+		return nil, errors.Join(ErrBody, err)
+	}
+	rootOnly := bytes.Equal(l.Evidence.CandidateDigest, operator[:]) // bound into the committed FrozenID and the body's change-record hash above
 	tb, err := projection(b.Members, b.Network, b.Epoch, r.ActivationRound, b.RootThreshold)
 	if err != nil {
 		return nil, errors.Join(ErrBody, err)
 	}
+	tb.StateHash, tb.ChangeRecordHash = bytes.Clone(b.StateSummary), bytes.Clone(b.ChangeRecordHash)
 	cfg := b.Config
 	anchor := evmroot.EpochGenesis{Network: b.Network, Epoch: b.Epoch, Start: r.ActivationRound, OrderedRound: r.OrderedRound, NextBodyID: id[:],
 		RecordID: v.RecordID[:], Root: v.StateRoot[:], ControlDigest: v.ControlDigest[:], FrozenID: r.FrozenID, SuccessorTRHash: r.SuccessorTRHash}
-	e := Entry{epoch: b.Epoch, start: r.ActivationRound, version: BodyVersion, scheme: cfg.SigningScheme, priorVersion: tip.version, priorID: tip.bodyID,
-		config: &cfg, bodyID: id, commitID: v.RecordID, tb: tb}
+	verified := evmroot.VerifiedHandoff{RecordID: bytes.Clone(v.RecordID[:]), Root: bytes.Clone(v.StateRoot[:]), ControlDigest: bytes.Clone(v.ControlDigest[:]),
+		OrderRound: v.OrderRound, CommitSealRound: v.CommitSealRound, Epoch: v.SignerEpoch, Record: r}
+	e := Entry{epoch: b.Epoch, start: r.ActivationRound, earliest: b.EarliestActivation, version: BodyVersion, scheme: cfg.SigningScheme, priorVersion: tip.version, priorID: tip.bodyID,
+		config: &cfg, bodyID: id, commitID: v.RecordID, tb: tb, handoff: &verified, genesis: &anchor, rootOnly: rootOnly}
 	copy(e.anchorID[:], anchor.ID())
 	return h.extend(e), nil
 }
@@ -357,7 +414,7 @@ func (h *History) WithV2(body evmroot.TrustBaseBodyV2, proof []byte) (*History, 
 	if err != nil {
 		return nil, errors.Join(ErrHistory, err)
 	}
-	e := Entry{epoch: body.Epoch, start: p.Record.ActivationRound, version: 2, scheme: 1, priorVersion: tip.version, priorID: tip.bodyID,
+	e := Entry{epoch: body.Epoch, start: p.Record.ActivationRound, earliest: body.EarliestActivation, version: 2, scheme: 1, priorVersion: tip.version, priorID: tip.bodyID,
 		bodyID: id, tb: tb, v2: &body}
 	copy(e.commitID[:], p.Record.ID())
 	return h.extend(e), nil

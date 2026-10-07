@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"time"
 
+	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
 
@@ -30,6 +31,7 @@ type (
 		FrontierSigning  bool
 		RecoveryProfile2 bool
 		RecoveryHistory  *trusthistorystore.Store
+		Q3               Q3Authority
 	}
 
 	Option func(c *Optional)
@@ -63,6 +65,19 @@ func WithFrontierSigning() Option {
 // WithRecoveryProfile2 enables per-certificate historical LastCR verification.
 func WithRecoveryProfile2(history *trusthistorystore.Store) Option {
 	return func(c *Optional) { c.RecoveryProfile2, c.RecoveryHistory = true, history }
+}
+
+// Q3Authority is the verified Q3 history the manager reads: the signer admission of every epoch (the safety module takes it as
+// its activation gate) and the verified entry of an activated epoch (q3active.Runtime). It is what lets a restart across an
+// activation recover an epoch anchor whose lineage is a V3 body the V1/V2 recovery history does not hold.
+type Q3Authority interface {
+	ActivationGate
+	Activated(epoch uint64) (q3format.Entry, bool)
+}
+
+// WithQ3 gives the manager the verified Q3 history. Without it nothing changes.
+func WithQ3(a Q3Authority) Option {
+	return func(c *Optional) { c.Q3 = a }
 }
 
 func LoadConf(opts []Option) (*Optional, error) {

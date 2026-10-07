@@ -126,26 +126,36 @@ func VerifySigning(bundle Bundle, old *types.RootTrustBaseV1, cfg votesig.Config
 			return Verified{}, fmt.Errorf("%w: activated configuration hash", ErrBundle)
 		}
 	}
-	s := bundle.Snapshot
-	if s == nil || s.Block == nil || s.Control == nil || s.CommitQc == nil || s.CommitQc.LedgerCommitInfo == nil ||
-		s.Block.Epoch != v.SignerEpoch || s.Block.Round != v.CommitSealRound || !s.Control.Matches(bundle.Proof.Record) ||
-		!bytes.Equal(s.Control.Digest(), v.ControlDigest[:]) || !bytes.Equal(s.CommitQc.LedgerCommitInfo.Hash, v.StateRoot[:]) {
-		return Verified{}, ErrBundle
-	}
-	proofQC, err := types.Cbor.Marshal(bundle.Proof.CommitQC)
+	target, err := VerifySnapshot(bundle.Proof, v, bundle.Snapshot, partition, shard, shardConfHash)
 	if err != nil {
 		return Verified{}, err
 	}
+	return Verified{Genesis: g, Record: v, Shard: target, NextConfHash: nextConf}, nil
+}
+
+// VerifySnapshot checks the native recovery checkpoint of a handoff against the old committee's verified commit: the same QC, the
+// control state the record committed, and the complete shard tree under the committed root, with the local shard's own
+// configuration hash. It is the part of Verify that does not depend on the successor body's version, so the V2 and V3 bundles share it.
+func VerifySnapshot(proof handoff.OldCommitProof, v handoff.VerifiedRecord, s *abdrc.CommittedBlock, partition types.PartitionID, shard types.ShardID, shardConfHash []byte) (abdrc.ShardInfo, error) {
+	if s == nil || s.Block == nil || s.Control == nil || s.CommitQc == nil || s.CommitQc.LedgerCommitInfo == nil ||
+		s.Block.Epoch != v.SignerEpoch || s.Block.Round != v.CommitSealRound || !s.Control.Matches(proof.Record) ||
+		!bytes.Equal(s.Control.Digest(), v.ControlDigest[:]) || !bytes.Equal(s.CommitQc.LedgerCommitInfo.Hash, v.StateRoot[:]) {
+		return abdrc.ShardInfo{}, ErrBundle
+	}
+	proofQC, err := types.Cbor.Marshal(proof.CommitQC)
+	if err != nil {
+		return abdrc.ShardInfo{}, err
+	}
 	snapshotQC, err := types.Cbor.Marshal(s.CommitQc)
 	if err != nil || !bytes.Equal(proofQC, snapshotQC) {
-		return Verified{}, ErrBundle
+		return abdrc.ShardInfo{}, ErrBundle
 	}
 	root, target, err := snapshotRoot(s, partition, shard)
 	if err != nil || !bytes.Equal(root, v.StateRoot[:]) || target == nil ||
 		!bytes.Equal(target.ShardConfHash, shardConfHash) {
-		return Verified{}, ErrBundle
+		return abdrc.ShardInfo{}, ErrBundle
 	}
-	return Verified{Genesis: g, Record: v, Shard: *target, NextConfHash: nextConf}, nil
+	return *target, nil
 }
 
 func snapshotRoot(s *abdrc.CommittedBlock, partition types.PartitionID, shard types.ShardID) ([]byte, *abdrc.ShardInfo, error) {

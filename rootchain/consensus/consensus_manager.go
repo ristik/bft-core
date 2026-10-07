@@ -278,6 +278,9 @@ func NewConsensusManager(
 		if err := bStore.ConfigureHandoffAuthority(trustBase); err != nil {
 			return nil, fmt.Errorf("handoff authority: %w", err)
 		}
+	} else if cParams.NetworkProfileVersion == storage.ProfileHandoff && installedAnchor != nil && q3Activated(optional.Q3, installedAnchor) {
+		// The anchor is the first epoch of a Q3 activation: its lineage is the verified history, and the V2 handoff authority has no
+		// body to be built from. No handoff authority is configured, so a further handoff from this epoch is refused.
 	} else if cParams.NetworkProfileVersion == storage.ProfileHandoff && installedAnchor != nil {
 		prior, historyErr := optional.RecoveryHistory.ByEpoch(installedAnchor.Epoch)
 		if historyErr != nil {
@@ -290,14 +293,18 @@ func NewConsensusManager(
 	// The lookup reads the manager's CURRENT block store: recovery replaces x.blockStore, and a store captured here would go stale.
 	// The manager is assigned below, before anything can sign.
 	var manager *ConsensusManager
-	safetyModule, err := NewSafetyModule(trustBase.GetNetworkID(), nodeID.String(), signer, store,
+	safetyOptions := []SafetyOption{
 		WithDomainBoundSigning(trustBaseStore, func(round uint64) (CommittedBlockInfo, error) {
 			b, err := manager.blockStore.Block(round)
 			if err != nil {
 				return CommittedBlockInfo{}, err
 			}
 			return CommittedBlockInfo{Epoch: b.BlockData.Epoch, RootHash: b.RootHash, Timestamp: b.BlockData.Timestamp}, nil
-		}))
+		})}
+	if optional.Q3 != nil {
+		safetyOptions = append(safetyOptions, WithActivationGate(optional.Q3))
+	}
+	safetyModule, err := NewSafetyModule(trustBase.GetNetworkID(), nodeID.String(), signer, store, safetyOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -719,7 +726,7 @@ func (x *ConsensusManager) onPartitionIRChangeReq(ctx context.Context, req *IRCh
 		Author:      x.id.String(),
 		IrChangeReq: irReq,
 	}
-	if err := x.safety.Sign(irMsg); err != nil {
+	if err := x.safety.Sign(x.trustBase.Load().Epoch, irMsg); err != nil {
 		return fmt.Errorf("failed to sign IR change request from partition %s: %w", irReq.Partition, err)
 	}
 	if err := x.net.Send(ctx, irMsg, nextLeader); err != nil {
@@ -1385,7 +1392,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		LastRoundTc: x.pacemaker.LastRoundTC(),
 	}
 	// safety makes simple sanity checks and signs if everything is ok
-	if err = x.safety.Sign(proposalMsg); err != nil {
+	if err = x.safety.Sign(proposalMsg.Block.Epoch, proposalMsg); err != nil {
 		x.log.WarnContext(ctx, "failed to send proposal message, signing failed", logger.Error(err))
 		return
 	}

@@ -921,7 +921,7 @@ func Test_ConsensusManager_messages(t *testing.T) {
 				Requests:   buildBlockCertificationRequest(t, shardNodes[0:2], si.LastCR),
 			},
 		}
-		require.NoError(t, cmOther.safety.Sign(irChReqMsg))
+		require.NoError(t, cmOther.safety.Sign(cmOther.trustBase.Load().Epoch, irChReqMsg))
 		require.NoError(t, cmOther.net.Send(ctx, irChReqMsg, cmLeader.id))
 
 		// IRCR must be included into broadcast proposal, either this or next round
@@ -975,7 +975,7 @@ func Test_ConsensusManager_messages(t *testing.T) {
 				Requests:   buildBlockCertificationRequest(t, shardNodes[0:2], nil),
 			},
 		}
-		require.NoError(t, cmLeader.safety.Sign(irChReqMsg))
+		require.NoError(t, cmLeader.safety.Sign(cmLeader.trustBase.Load().Epoch, irChReqMsg))
 		rootNet.Send(irChReqMsg, nonLeaderNode.id)
 
 		// non-leader is not the next leader and must forward the request to the leader node

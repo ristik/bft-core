@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -101,7 +102,7 @@ func (g GenesisPin) valid() bool { return g.Genesis != nil }
 
 // verifyConfigPDR checks a bundle's PDR and returns it. The root-authenticated UC carries the
 // configuration hash, so no other evidence of the assignment is needed offline.
-func verifyConfigPDR(b MintReasonBundleV2, uc *types.UnicityCertificate, expected ExpectedClaim) (*types.PartitionDescriptionRecord, error) {
+func verifyConfigPDR(b MintReasonBundleV2, uc *types.UnicityCertificate, expected ExpectedClaim, mode weightvalidation.Mode) (*types.PartitionDescriptionRecord, error) {
 	if !expected.Pin.valid() {
 		return nil, fmt.Errorf("%w: no genesis pin for a PDR-carrying bundle", ErrInvalid)
 	}
@@ -137,7 +138,7 @@ func verifyConfigPDR(b MintReasonBundleV2, uc *types.UnicityCertificate, expecte
 	}
 	// Every non-membership field is pinned above by the genesis configuration hash, so only the
 	// validator set carries assignment schema to validate here.
-	if err := evmassign.ValidateSet(pdr.Validators); err != nil {
+	if err := weightvalidation.EVMSet(pdr.Validators, mode); err != nil {
 		return nil, fmt.Errorf("%w: configuration PDR validators: %v", ErrInvalid, err)
 	}
 	// The certified input record's epoch is signed by the root; the PDR it commits to must be that

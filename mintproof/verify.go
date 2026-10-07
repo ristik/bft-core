@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 )
 
 type ExpectedClaim struct {
@@ -85,7 +86,7 @@ func Verify(bundle []byte, trustBase types.RootTrustBase, expected ExpectedClaim
 		// The UC's root-epoch trust base is the caller's; the PDR is the assignment its configuration
 		// hash commits to. Root epoch and shard epoch are independent: an EVM-only rotation advances the
 		// root epoch with identical root keys, and the caller supplies that epoch's trust base.
-		if _, err := verifyConfigPDR(*v2, &uc, expected); err != nil {
+		if _, err := verifyConfigPDR(*v2, &uc, expected, weightvalidation.ModeOfTrustBase(trustBase)); err != nil {
 			return err
 		}
 	}
