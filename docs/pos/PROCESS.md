@@ -5,7 +5,7 @@
 1. Read the program index, this process, the ticket, its prerequisite issues and the pinned
    specification. The D tickets settle wire formats and state machines before their consumers.
 2. Use native GitHub blocking relationships and the ticket's full dependency list to find
-   eligible work. Optional rewards and PoS-only bridge conditions are explicitly conditional.
+   eligible work. Read the latest stage amendment and the acceptance slice consumed by each gate.
    A closed issue is insufficient if its acceptance evidence is absent. Keep dependencies
    accurate when splitting or changing a ticket. No manually maintained ready/blocked label
    is authoritative.
@@ -14,7 +14,8 @@
    not assign other people. Post a short approach and the intended base revision before editing.
 4. R0 approves the integration branch and reference PR. Before R0 closes, D1 exploration and
    read-only code inventories can proceed, but do not merge dependent protocol implementations.
-   D2 and D3 are the first independent design tracks after D1. Audit scoping can begin early.
+   D2 and D3 are the first independent design tracks after D1. Future production audit work waits
+   until public TN-S is reached; internal design/implementation review continues throughout.
 5. Use an isolated branch/worktree per ticket from the accepted integration base. Do not assume
    main contains the prototype. Use draft stacked PRs only with explicit base/dependency links.
    Never combine an unrelated local change into a ticket commit.
@@ -33,19 +34,22 @@
   branch in the claim; link companion PRs and pin compatible revisions. Contract and SDK owners
   choose approved homes before adding production code. This planning PR does not create them.
 - For Go changes run affected tests plus the repository build/vet/test checks appropriate to
-  the change. The observed CI uses `make build`, `go vet ./...`, `make test`; FFI jobs are disabled
-  and fake-executor chaos/compose jobs are not real-reth evidence. F1 must define PR-triggered
-  mandatory checks and a pinned real-reth integration lane. Read each repository's current
-  contribution instructions before running or changing its checks.
+  the change. Current focused Go CI runs formatting, build, vet, four full-suite test shards and
+  a bounded race suite. Documentation-only PRs skip Go work inside reporting jobs, so required
+  checks still report. Fake-executor chaos/compose and ordinary Go checks are not real-reth
+  acceptance; #90 retains the pinned real-reth smoke/fault evidence obligations. Read each
+  repository's current contribution instructions before running or changing its checks.
 - Consensus changes require adversarial weights, signature/domain/context rejection and
-  restart/safety-state cases. Persistent state changes need migration and fault injection.
+  restart/safety-state cases. Persistent state changes need fault injection and correct replay of
+  the exercised network history. DN/TN may reset to fresh genesis without compatibility with
+  discarded formats; production continuity/migration policy is a separate mainnet requirement.
   Reth changes need builder/follower/import/replay agreement. Contract changes need invariant,
   malicious-caller/reentrancy and boundary tests. Proof paths need independent positive and
   negative vectors. A mock or benchmark alone cannot replace the required integrated evidence.
 - Every PR includes the issue link, behavioral change, validation commands/results, affected
   protocol/storage versions and migration/activation behavior. Independent review is required
-  before merging. The owner decided on 2026-09-06 to keep branch protection off for trusted contributors.
-  F1 implements PR-triggered CI; it does not enable branch protection or required-check rules.
+  before merging. Focused GitHub CI and protection of `integration/enshrined-evm` are enabled
+  as of 2026-10-07. Follow the configured required checks; do not bypass protection.
 
 ## Definition of done
 
@@ -63,15 +67,42 @@ production deployment/issuance/activation remains a separate explicit authorizat
 
 ## Staged release rules
 
-M1 is private paired execution; M2 adds real PoA rotation, recovery and evidence export.
-M3 is a public UCT/TGE readiness gate under PoA. M4B is private bridge validation; M5B requires
-long-history redemption and independent review before public custody. M4S includes both PoA
-shadow comparison and a separate authoritative PoS testnet; M5S is authoritative PoS readiness.
-Bridge and PoS are independent after M3. T8 is optional and must remain disabled if unfinished.
-Do not close the private-bridge gate only because a public TGE exists; use an M3-equivalent
-private test chain and never require public funds to exercise it.
+Follow the [stage contracts, milestone aliases and dependency summary](roadmap.md#2-stage-contracts-and-logical-milestones).
+DN-0/M1 and M0 remain historical acceptance. DN-1/M2 covers recoverable PoA devnet/staging;
+DN-B/M4B covers the supported private bridge; DN-S/M4S covers shadow and separate isolated
+authoritative PoS. Preserve each closed ticket's evidence and explicit limitations.
 
-D4, D5 and D6 may require multiple design iterations. Record counterexamples and amend consumers.
-Uniform leader selection, self-bond staking, assigned-weight rewards and whole-token bridges are
-initial simplifications; they do not waive weighted safety, historical trust or safe exits.
-No fixed calendar estimates are assigned before design and ownership uncertainties are closed.
+The public network milestones must be reached in order: **TN-1 -> TN-B -> TN-S**. TN-1 includes
+public access, a UCT gas faucet, exact test manifests, internal review, measured limits and initial
+one-bare-metal-server operations. Independent runbook execution does not mean independent
+physical hosts. TN-B adds fake-value bridging with common SDK epoch/weight support and a working
+exit for every admitted history. TN-S adds authoritative public PoS, required funded operator
+rewards, ordinary EVM evidence, protected claims and integrated bridge/PoS acceptance.
+
+Greenroom applies through testnet: arbitrary resets, no backwards compatibility or obligation to
+preserve assets, and no continuity-within-a-generation promise. State this publicly. Correct replay
+of the network's own history, authenticated transitions and custody invariants are still required.
+Use a fresh identity/genesis for a reset; do not disguise discarded history as a valid continuation.
+
+Future mainnet preparation starts after TN-S. Production T5/T6, X1-MAIN, MN-POLICY/MN-OPS,
+X2/X3/X5, T7/TGE, real-value custody and final governance authority belong there. Mainnet bridge
+readiness MN-B/M5B precedes T7/MN-1/M3, so TGE cannot be ready without bridging. Remove the old
+M3 -> M5B and T7 -> B9 ordering. Production PoS remains a separate MN-S/M5S gate and authorization.
+
+When splitting a ticket, append an `Amended 2026-10-07 (stage restructure)` note identifying the
+new acceptance owner, prerequisites and retained scope; do not rewrite away earlier obligations.
+T5-TEST/T6-TEST/X1-TEST/P8-TEST provide internal development/testnet slices. Production parents
+remain open until their own obligations are met. B3/B5 private-profile closure must identify
+transferred public-profile cases under B-TEST. A label or milestone rename is never closure evidence.
+
+Keep full semantic prerequisites in issue bodies and recompute native blocking edges after a
+split. Validate acyclicity and reachability, including removal of every I-track path to active gates.
+Removing I4 -> H7 must preserve H3/P4/S2; removing I5 -> S4 must preserve H7/S2/S3. Restore I4 -> I5
+inside the deferred graph. Ordinary evidence and authenticated closure/protected claims replace
+the active inbox dependency; do not claim bounded censorship resistance. H4/H6 may collect their
+remaining evidence in one coordinated rehearsal without circular closure conditions.
+
+D4, D5 and D6 reference models remain accepted evidence within their recorded scope. Amend
+consumers when new counterexamples affect acceptance. Self-bond staking and whole-token bridges
+remain simplifications, not exemptions from weighted safety, historical trust or safe exits.
+No fixed calendar estimates or production parameters are implied by this restructure.
