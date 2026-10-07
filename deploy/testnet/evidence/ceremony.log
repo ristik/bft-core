@@ -1,0 +1,15 @@
+Error: signing-authority-unavailable: dial unix /private/tmp/tnops-validation-gm0wopuo/tn-ceremony-0/validator2/auth/operator.sock: connect: no such file or directory
+{
+  "validation": "offline fixtures only; no containers started",
+  "generations": [
+    {
+      "genesis_hash": "0x5b35eed374e7261201ba12509561eebd148e5bb8f7a12009fb3467209fad91f7",
+      "faucet_address": "0xA10E31c49C0F0F3cE35c0A9B249Da8E4D1FAB3b5"
+    },
+    {
+      "genesis_hash": "0x63559e186a7c6eef8b7515c69846029800953bb2463c426c2f8184c6da36be29",
+      "faucet_address": "0xc03E8265C6Bee3fB74D3fB66A6Db2E3dA888F850"
+    }
+  ],
+  "result": "PASS"
+}

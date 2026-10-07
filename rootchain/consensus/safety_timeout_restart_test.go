@@ -28,7 +28,7 @@ func pairedQC(t *testing.T, c *pairedCommittee, round uint64) *drctypes.QuorumCe
 	for _, id := range c.ids[:3] {
 		v := c.vote(t, id, nil)
 		v.VoteInfo.RoundNumber, v.VoteInfo.ParentRoundNumber = round, round-1
-		vh, err := c.cfg.VoteInfoHash(votesig.VoteInfo{Epoch: 2, Round: round, Parent: round - 1, Exec: [32]byte(v.VoteInfo.CurrentRootHash)})
+		vh, err := c.cfg.VoteInfoHash(votesig.VoteInfo{Epoch: 2, Round: round, Parent: round - 1, Exec: [32]byte(v.VoteInfo.CurrentRootHash), Timestamp: v.VoteInfo.Timestamp})
 		require.NoError(t, err)
 		v.LedgerCommitInfo.PreviousHash = vh[:]
 		require.NoError(t, v.SignDomainBound(c.signers[id], c.cfg))

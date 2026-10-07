@@ -45,9 +45,9 @@ func TestCompetingHandoffAbortAndCommitFollowDurableVoteLocks(t *testing.T) {
 	commit.OrderedRound = 3
 	commit.SuccessorTRHash = bytes.Repeat([]byte{4}, 32)
 	parentQC := &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 1, Epoch: 1, CurrentRootHash: bytes.Repeat([]byte{9}, 32)}}
-	abortBlock := &drctypes.BlockData{Version: 2, Round: 2, Epoch: 1, Qc: parentQC,
+	abortBlock := &drctypes.BlockData{Version: 2, Round: 2, Epoch: 1, Timestamp: 1, Qc: parentQC,
 		Payload: &drctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), abortProof}}}
-	commitBlock := &drctypes.BlockData{Version: 2, Round: 2, Epoch: 1, Qc: parentQC,
+	commitBlock := &drctypes.BlockData{Version: 2, Round: 2, Epoch: 1, Timestamp: 1, Qc: parentQC,
 		Payload: &drctypes.Payload{Version: 2, HandoffRecords: [][]byte{commit.Bytes()}}}
 	validators := 4
 	var abortVotes, commitVotes int

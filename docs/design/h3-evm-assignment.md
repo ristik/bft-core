@@ -249,9 +249,35 @@ in production, and there is no migration (greenroom, one format).
   never backwards; a record cannot be ordered before a time was imported. `rootrecords/testdata/records-vectors.json` is produced by this
   projection and replayed verbatim by the custody contracts' tests.
 - **UC time is quorum-approved wall-clock time.** The seal timestamp is the root proposer's wall clock, approved by the voting quorum.
-  Root consensus bounds it by a monotonic rule against the parent and a 30 s voter clock skew (ristik/bft-core#445, being implemented
-  now), so the time custody gates exits on is a bounded, quorum-attested measure, not an operator or EVM value. The importer
-  additionally keeps it monotonic on one lineage; that check is defence in depth and does not replace the root rule.
+  Root consensus bounds it by a monotonic rule against the parent and a 30 s voter clock skew (ristik/bft-core#445, merged in
+  ristik/bft-core#447; see Root UC time below), so the time custody gates exits on is a bounded, quorum-attested measure, not an
+  operator or EVM value. The importer additionally keeps it monotonic on one lineage; that check is defence in depth and does not
+  replace the root rule.
 - **Not implemented here:** the on-chain `IRootRecords` implementation in the SealRegistry and its feed from Ureth; the reference model
   above and the vectors are what it must match. The Closure and Retirement digest words (exposure, key history, reference digest) are
   contract-derived and opaque labels in the vectors.
+
+## Root UC time (#445)
+
+Live root voting requires a proposal timestamp strictly greater than its executed
+QC parent's timestamp and at most `MaxClockSkew` (DEV: 30 seconds) ahead of the
+voter's local clock. Proposers use `max(now, parent+1)`, including TC rounds and
+restart/recovery; epoch anchors retain the old checkpoint time. New scheme 2 votes and QCs authenticate the timestamp through an appended
+VoteInfo field. Recovery compares executed times against verified QCs and the
+committed head against its signed native seal before installing a time floor.
+Old timestamp-less QCs retain their exact historical verification bytes, but
+need a separate signed commit seal to authenticate a block time. UC sealing
+uses the committed block time. Importers keep their monotonic checks.
+
+Clock checks apply only to live voting, never certified-history verification or
+catch-up replay. There is no past-time cutoff, to preserve delayed recovery.
+Whole-second strict increases may force voting to wait for wall clocks under
+subsecond production. The root specification's UC seal timestamp section records
+the rationale and pinned Aptos references; this DEV rule requires validators to
+upgrade together.
+
+The timestamp-bound scheme 2 extension uses a five-field wire VoteInfo and a
+seven-field signed VoteInfo preimage. Old four/six-field encodings remain valid
+history; old readers refuse the new arity. DEV validators must upgrade together.
+A completed replay followed by a live timestamp refusal leaves frontier serving
+unfaulted; it is not an incomplete or uncertain recovery write.

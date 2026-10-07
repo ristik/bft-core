@@ -3,7 +3,10 @@ import http.server
 import json
 import os
 from pathlib import Path
-from gateway import request
+try:
+    from .gateway import request
+except ImportError:  # Standalone faucet image/CLI.
+    from gateway import request
 
 
 class Relay:
