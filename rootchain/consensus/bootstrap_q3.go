@@ -126,7 +126,10 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	if err != nil {
 		return nil, fmt.Errorf("successor T2 timeout generator: %w", err)
 	}
-	selector, err := newBootstrapLeader(x.leaderSelector, g.Start, newTrust.RootNodes)
+	// the leader policy is a per-epoch property of the authenticated history, as in the V2 install: an epoch that activated the weighted
+	// policy gets the weighted selector, every other the bootstrap one
+	selector, err := newEpochLeader(x.trustBaseStore, g.Epoch, g.Start, newTrust.RootNodes,
+		func() (Leader, error) { return newBootstrapLeader(x.leaderSelector, g.Start, newTrust.RootNodes) })
 	if err != nil {
 		return nil, err
 	}

@@ -57,6 +57,14 @@ type q3Replica struct {
 	shard         *q3active.Guarded
 	authority     *toggledConsumer
 	opened        int
+
+	// link, when set, is the manager's network in place of the mock one (a live cluster over skewedNet); durable opens the bolt files
+	// with fsync on, the stores a restart claims to read back
+	link    RootNet
+	durable bool
+	// weightedLeader activates the weighted leader policy (#403) for epoch 2 at every start that finds the epoch installed: the policy is
+	// the operator's startup configuration, not durable state
+	weightedLeader bool
 }
 
 func newQ3Replica(t *testing.T, f *q3fixture.Fixture, node *testutils.TestNode) *q3Replica {
@@ -71,10 +79,18 @@ func (r *q3Replica) open(withQ3 bool) error {
 	t := r.t
 	t.Helper()
 	obs := testobservability.Default(t)
-	db, err := storage.NewBoltStorage(filepath.Join(r.dir, "root.db"), storage.WithNoSync())
+	var dbOpts []storage.BoltOption
+	if !r.durable {
+		dbOpts = append(dbOpts, storage.WithNoSync())
+	}
+	db, err := storage.NewBoltStorage(filepath.Join(r.dir, "root.db"), dbOpts...)
 	require.NoError(t, err)
 	r.db = &db
-	orchestration, err := partitions.NewOrchestration(5, filepath.Join(r.dir, "orchestration.db"), obs.Logger(), partitions.WithNoSync())
+	var orchOpts []partitions.StoreOption
+	if !r.durable {
+		orchOpts = append(orchOpts, partitions.WithNoSync())
+	}
+	orchestration, err := partitions.NewOrchestration(5, filepath.Join(r.dir, "orchestration.db"), obs.Logger(), orchOpts...)
 	require.NoError(t, err)
 	r.orchestration = orchestration
 	require.NoError(t, orchestration.AddShardConfig(r.f.ShardConf))
@@ -84,6 +100,11 @@ func (r *q3Replica) open(withQ3 bool) error {
 		require.NoError(t, trust.Store(r.f.Old))
 	}
 	r.trust = trust
+	if r.weightedLeader {
+		if _, err := trust.GetByEpoch(2); err == nil {
+			require.NoError(t, trust.ActivateLeaderPolicy(2, tbstore.LeaderPolicyWeightedV1))
+		}
+	}
 	historyID := sha256.Sum256([]byte("q3-activation-integration"))
 	history, err := trusthistorystore.Open(context.Background(), r.historyDB, r.f.Old, historyID, trustactivation.Verifier{})
 	require.NoError(t, err)
@@ -99,7 +120,11 @@ func (r *q3Replica) open(withQ3 bool) error {
 		require.NoError(t, trust.BindSigningAuthority(rt))
 		opts = append(opts, WithQ3(rt))
 	}
-	manager, err := NewConsensusManager(r.id(), trust, orchestration, r.net, r.node.Signer, db, obs, opts...)
+	var rootNet RootNet = r.net
+	if r.link != nil {
+		rootNet = r.link
+	}
+	manager, err := NewConsensusManager(r.id(), trust, orchestration, rootNet, r.node.Signer, db, obs, opts...)
 	if err != nil {
 		r.release()
 		return err
