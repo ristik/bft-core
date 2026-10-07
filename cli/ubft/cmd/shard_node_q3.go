@@ -380,7 +380,8 @@ func (s *shardQ3Staging) status() (q3StatusResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.staged != nil {
-		out.Staged = &q3StagedResponse{CandidateDigest: hex.EncodeToString(s.staged[:]), BodyID: hex.EncodeToString(s.body[:]), Attempt: &s.attempt, Config: hex.EncodeToString(s.config[:])}
+		attempt := s.attempt // a copy: the response is encoded after the lock is released
+		out.Staged = &q3StagedResponse{CandidateDigest: hex.EncodeToString(s.staged[:]), BodyID: hex.EncodeToString(s.body[:]), Attempt: &attempt, Config: hex.EncodeToString(s.config[:])}
 	}
 	return out, nil
 }

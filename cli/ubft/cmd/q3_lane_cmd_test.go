@@ -451,6 +451,7 @@ func TestTheShardNodeRefusesToStageWhatIsNotACandidateOfItsChain(t *testing.T) {
 	require.NoError(t, st.Stage(good))
 	status, err = st.status()
 	require.NoError(t, err)
-	require.EqualValues(t, 3, status.Staged.Attempt)
+	require.NotNil(t, status.Staged.Attempt)
+	require.EqualValues(t, 3, *status.Staged.Attempt)
 	require.Equal(t, hex.EncodeToString(cand.Candidate[:]), status.Staged.CandidateDigest)
 }

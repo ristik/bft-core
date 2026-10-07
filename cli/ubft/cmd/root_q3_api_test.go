@@ -50,7 +50,8 @@ func TestTheRootStatusReportsTheChainAndTheStagedCandidate(t *testing.T) {
 	require.EqualValues(t, 5, got.Network)
 	require.Equal(t, hex.EncodeToString(genesis[:]), got.Genesis)
 	require.Equal(t, hex.EncodeToString(digest[:]), got.Staged.CandidateDigest)
-	require.EqualValues(t, 3, got.Staged.Attempt)
+	require.NotNil(t, got.Staged.Attempt)
+	require.EqualValues(t, 3, *got.Staged.Attempt)
 	require.EqualValues(t, 2, got.ActiveEpoch)
 
 	staged = nil
