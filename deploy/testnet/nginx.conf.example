@@ -1,0 +1,26 @@
+# Host nginx HTTP context. Replace hostnames and TLS paths before nginx -t.
+limit_req_zone $binary_remote_addr zone=tn_rpc:10m rate=5r/s;
+limit_conn_zone $binary_remote_addr zone=tn_conn:10m;
+server {
+    listen 443 ssl;
+    server_name rpc.testnet.example;
+    ssl_certificate /etc/letsencrypt/live/rpc.testnet.example/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/rpc.testnet.example/privkey.pem;
+    client_max_body_size 16k;
+    client_body_timeout 5s;
+    limit_conn tn_conn 4;
+    limit_req zone=tn_rpc burst=10 nodelay;
+    limit_req_status 429;
+    location = / {
+        limit_except POST { deny all; }
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header Host $host;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 15s;
+        proxy_send_timeout 10s;
+        proxy_pass http://127.0.0.1:8545;
+    }
+    location / { return 404; }
+}
+# Install faucet/nginx.conf.example separately for the faucet hostname/8088.
+# Only 443 (and 80 for certificate renewal) should be opened in the host firewall.

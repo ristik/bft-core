@@ -1,0 +1,6 @@
+FROM python:3.13.12-alpine3.22@sha256:41351b07080ccfaa27bf38dde20de79ee6a0ac74a58c00c6d7a7d96ac4e69716
+WORKDIR /app
+COPY gateway.py ./
+COPY faucet/relay.py faucet/gateway.py ./faucet/
+USER 10001:10001
+ENTRYPOINT ["python3", "-u", "gateway.py"]

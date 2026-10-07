@@ -1,0 +1,46 @@
+name: testnet-package
+on:
+  pull_request:
+    paths: ['deploy/testnet/**', '.github/workflows/testnet-package.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: testnet-package-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  guards-and-ceremony:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: docker compose version
+      - run: python3 -m unittest discover -s deploy/testnet -p test_package.py -v
+        env:
+          TN_REQUIRE_COMPOSE: '1'
+      - run: python3 -m unittest discover -s deploy/testnet/faucet -v
+      - uses: actions/checkout@v4
+        with:
+          ref: 446a78cbd6cd18b476f4f433571594b304f45b6e
+          path: pinned-bft
+      - run: make -C pinned-bft build
+      - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/rugregator
+          ref: dd5b1406a17fdeb415799045c5e81609619a870a
+          path: pinned-rugregator
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev libssl-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pinned-rugregator
+      - run: cargo build --locked -p uni-aggregator --bin aggregator
+        working-directory: pinned-rugregator
+      - run: python3 deploy/testnet/validate-generation.py --ubft pinned-bft/build/ubft --keygen /tmp/tn-keygen --check-prometheus --aggregator pinned-rugregator/target/debug/aggregator
+      - run: docker build -f deploy/testnet/Dockerfile.rpc deploy/testnet -t testnet-rpc:test
+      - run: docker run --rm --entrypoint python3 testnet-rpc:test -c 'import gateway; assert "eth_sign" not in gateway.PUBLIC'
