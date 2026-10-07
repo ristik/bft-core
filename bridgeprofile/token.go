@@ -61,46 +61,51 @@ func decodePredicate(it *item) (Predicate, error) {
 	return p, nil
 }
 
-// MintTx is a decoded mint M = tag(39041,[1,network,P0,b(salt),b(type),b(justification),b(data)]).
+// MintTx is a decoded mint
+// M = tag(39041,[2,network,P0,b(salt),b(type),b(justification),b(data),e]).
 type MintTx struct {
 	Network       uint16
 	Recipient     Predicate
 	Salt, Type    [32]byte
 	Justification []byte
 	Data          []byte
+	Deadline      Deadline
 }
 
 // Bytes is the exact encoding of the mint transaction.
 func (m *MintTx) Bytes() []byte {
-	return CTag(TagMint, CArr(CUint(WireVersion), CUint(uint64(m.Network)), m.Recipient.Bytes(),
-		CBytes(m.Salt[:]), CBytes(m.Type[:]), CNullOr(m.Justification), CNullOr(m.Data)))
+	return CTag(TagMint, CArr(CUint(TxVersion), CUint(uint64(m.Network)), m.Recipient.Bytes(),
+		CBytes(m.Salt[:]), CBytes(m.Type[:]), CNullOr(m.Justification), CNullOr(m.Data), CDeadline(m.Deadline)))
 }
 
-// TransferTx is a decoded transfer T = tag(39045,[1,Pnext,b(mask32),dataOrNull]).
+// TransferTx is a decoded transfer T = tag(39045,[2,Pnext,b(mask32),dataOrNull,e]).
 // The source hash and source predicate are reconstructed, never on the wire.
 type TransferTx struct {
 	Recipient Predicate
 	Mask      [32]byte
 	Data      []byte // nil means null
+	Deadline  Deadline
 }
 
 // Bytes is the exact encoding of the transfer transaction.
 func (t *TransferTx) Bytes() []byte {
-	return CTag(TagTransfer, CArr(CUint(WireVersion), t.Recipient.Bytes(), CBytes(t.Mask[:]), CNullOr(t.Data)))
+	return CTag(TagTransfer, CArr(CUint(TxVersion), t.Recipient.Bytes(), CBytes(t.Mask[:]), CNullOr(t.Data), CDeadline(t.Deadline)))
 }
 
-// Certification is CD = tag(39031,[1,Psource,b(sourceHash32),b(txHash32),b(unlock65)]).
+// Certification is CD = tag(39031,[2,Psource,b(sourceHash32),b(txHash32),e,b(unlock65)]).
+// Its deadline sits before the unlock and must equal the transaction's.
 type Certification struct {
 	Source     Predicate
 	SourceHash [32]byte
 	TxHash     [32]byte
+	Deadline   Deadline
 	Unlock     []byte
 }
 
 // Bytes is the exact encoding of the certification data.
 func (c *Certification) Bytes() []byte {
-	return CTag(TagCertification, CArr(CUint(WireVersion), c.Source.Bytes(), CBytes(c.SourceHash[:]),
-		CBytes(c.TxHash[:]), CBytes(c.Unlock)))
+	return CTag(TagCertification, CArr(CUint(CertVersion), c.Source.Bytes(), CBytes(c.SourceHash[:]),
+		CBytes(c.TxHash[:]), CDeadline(c.Deadline), CBytes(c.Unlock)))
 }
 
 func decodeCD(it *item) (*Certification, error) {
@@ -108,10 +113,10 @@ func decodeCD(it *item) (*Certification, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !c.isArray(5) {
+	if !c.isArray(6) {
 		return nil, ErrShape
 	}
-	if err := c.kids[0].version(); err != nil {
+	if err := c.kids[0].version(CertVersion); err != nil {
 		return nil, err
 	}
 	var cd Certification
@@ -124,21 +129,28 @@ func decodeCD(it *item) (*Certification, error) {
 	if err := fixed(&c.kids[3], cd.TxHash[:]); err != nil {
 		return nil, err
 	}
-	if !c.kids[4].isBytes() {
+	if cd.Deadline, err = c.kids[4].deadline(); err != nil {
+		return nil, err
+	}
+	if !c.kids[5].isBytes() {
 		return nil, ErrShape
 	}
-	cd.Unlock = c.kids[4].data
+	cd.Unlock = c.kids[5].data
 	return &cd, nil
 }
 
-// History is the compact proof-transport projection
-// C([M,CD0],[[T1,CD1],...]) holding the unchanged tagged transaction and CD
-// items. It is not a token identity.
+// History is the compact B2 projection
+// C([M,CD0,t0],[[T1,CD1,t1],...]) holding the unchanged tagged transaction and
+// CD items and each proof's reference time t. These are projection tuples, not
+// SDK certified-transaction tuples. Every t is untrusted until the exported
+// leaf value is proven under an admitted root.
 type History struct {
 	Mint      MintTx
 	MintCD    Certification
+	MintTime  uint64
 	Transfers []TransferTx
 	CDs       []Certification
+	Times     []uint64
 
 	mintRaw      []byte
 	transfersRaw [][]byte
@@ -146,11 +158,11 @@ type History struct {
 
 // Bytes encodes the history. Decoded histories re-encode to the input.
 func (h *History) Bytes() []byte {
-	pairs := make([][]byte, len(h.Transfers))
+	triples := make([][]byte, len(h.Transfers))
 	for i := range h.Transfers {
-		pairs[i] = CArr(h.Transfers[i].Bytes(), h.CDs[i].Bytes())
+		triples[i] = CArr(h.Transfers[i].Bytes(), h.CDs[i].Bytes(), CUint(h.Times[i]))
 	}
-	return CArr(CArr(h.Mint.Bytes(), h.MintCD.Bytes()), CArr(pairs...))
+	return CArr(CArr(h.Mint.Bytes(), h.MintCD.Bytes(), CUint(h.MintTime)), CArr(triples...))
 }
 
 // DecodeHistory strictly decodes a history. Mint and transfer wire fields are
@@ -165,25 +177,29 @@ func DecodeHistory(b []byte) (*History, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !root.isArray(2) || !root.kids[0].isArray(2) || root.kids[1].major != majArray {
+	if !root.isArray(2) || !root.kids[0].isArray(3) || root.kids[1].major != majArray {
 		return nil, ErrShape
 	}
 	if len(root.kids[1].kids) > MaxTransfers {
 		return nil, ErrTooManyTx
 	}
 	h := &History{}
-	if err := decodeMint(&root.kids[0].kids[0], b, &h.Mint); err != nil {
+	m := &root.kids[0]
+	if err := decodeMint(&m.kids[0], b, &h.Mint); err != nil {
 		return nil, err
 	}
-	h.mintRaw = root.kids[0].kids[0].raw(b)
-	cd, err := decodeCD(&root.kids[0].kids[1])
+	h.mintRaw = m.kids[0].raw(b)
+	cd, err := decodeCD(&m.kids[1])
 	if err != nil {
 		return nil, err
 	}
 	h.MintCD = *cd
+	if h.MintTime, err = m.kids[2].uintMax(^uint64(0)); err != nil {
+		return nil, err
+	}
 	for i := range root.kids[1].kids {
 		p := &root.kids[1].kids[i]
-		if !p.isArray(2) {
+		if !p.isArray(3) {
 			return nil, ErrShape
 		}
 		var t TransferTx
@@ -194,8 +210,13 @@ func DecodeHistory(b []byte) (*History, error) {
 		if err != nil {
 			return nil, err
 		}
+		rt, err := p.kids[2].uintMax(^uint64(0))
+		if err != nil {
+			return nil, err
+		}
 		h.Transfers = append(h.Transfers, t)
 		h.CDs = append(h.CDs, *cd)
+		h.Times = append(h.Times, rt)
 		h.transfersRaw = append(h.transfersRaw, p.kids[0].raw(b))
 	}
 	return h, nil
@@ -216,16 +237,19 @@ func decodeMint(it *item, _ []byte, m *MintTx) error {
 	if err != nil {
 		return err
 	}
-	if !c.isArray(7) {
+	if !c.isArray(8) {
 		return ErrShape
 	}
 	k := c.kids
-	if err := k[0].version(); err != nil {
+	if err := k[0].version(TxVersion); err != nil {
 		return err
 	}
 	nw, err := k[1].uintMax(0xffff)
 	if err != nil {
 		return err
+	}
+	if nw == 0 {
+		return ErrIntRange
 	}
 	m.Network = uint16(nw)
 	if m.Recipient, err = decodePredicate(&k[2]); err != nil {
@@ -243,6 +267,9 @@ func decodeMint(it *item, _ []byte, m *MintTx) error {
 	if m.Data, err = nullableBytes(&k[6]); err != nil {
 		return err
 	}
+	if m.Deadline, err = k[7].deadline(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -251,11 +278,11 @@ func decodeTransfer(it *item, t *TransferTx) error {
 	if err != nil {
 		return err
 	}
-	if !c.isArray(4) {
+	if !c.isArray(5) {
 		return ErrShape
 	}
 	k := c.kids
-	if err := k[0].version(); err != nil {
+	if err := k[0].version(TxVersion); err != nil {
 		return err
 	}
 	if t.Recipient, err = decodePredicate(&k[1]); err != nil {
@@ -267,14 +294,26 @@ func decodeTransfer(it *item, t *TransferTx) error {
 	if t.Data, err = nullableBytes(&k[3]); err != nil {
 		return err
 	}
+	if t.Deadline, err = k[4].deadline(); err != nil {
+		return err
+	}
 	return nil
 }
 
-// Leaf is one inclusion obligation (sid, txHash). The relation exports it; it
-// does not assert inclusion.
+// LeafValue is the certified leaf value v = H(C(b(txHash32), t)). Neither the
+// txHash alone nor a 34-byte imprint is the value; the raw 32 bytes go to RSMT
+// membership.
+func LeafValue(txHash [32]byte, t uint64) [32]byte {
+	return H(CArr(CBytes(txHash[:]), CUint(t)))
+}
+
+// Leaf is one inclusion obligation (sid, txHash, t, v). The relation exports
+// it; it does not assert inclusion.
 type Leaf struct {
-	SID    [32]byte
-	TxHash [32]byte
+	SID           [32]byte
+	TxHash        [32]byte
+	ReferenceTime uint64
+	Value         [32]byte
 }
 
 // Result is the kernel output (cfg, nonce, amount, tokenId, salt,
@@ -381,7 +420,7 @@ func verifyHistory(cfg *Cfg, h *History) (*Result, [32]byte, error) {
 	if m.Type != cfg.Ty {
 		return nil, zero, ErrMintType
 	}
-	n, err := parseJustification(cfg, m.Justification)
+	n, _, err := ParseJustification(cfg, m.Justification)
 	if err != nil {
 		return nil, zero, err
 	}
@@ -409,7 +448,7 @@ func verifyHistory(cfg *Cfg, h *History) (*Result, [32]byte, error) {
 	minterPred := SignaturePredicate(mk.PubKey().SerializeCompressed())
 	h0 := MintSourceHash(id)
 	seen := map[[32]byte]bool{}
-	leaf, err := checkStep(minterPred, h0, h.mintRaw, &h.MintCD, mk.PubKey(), seen)
+	leaf, err := checkStep(minterPred, h0, h.mintRaw, m.Deadline, &h.MintCD, h.MintTime, mk.PubKey(), seen)
 	if err != nil {
 		return nil, zero, err
 	}
@@ -423,7 +462,7 @@ func verifyHistory(cfg *Cfg, h *History) (*Result, [32]byte, error) {
 		// owner is the mint recipient or the previous intermediate recipient,
 		// both already required to be signature predicates, so ParseKey cannot fail.
 		key, _ := ParseKey(owner.Params)
-		leaf, err := checkStep(owner, state, h.transfersRaw[i], &h.CDs[i], key, seen)
+		leaf, err := checkStep(owner, state, h.transfersRaw[i], t.Deadline, &h.CDs[i], h.Times[i], key, seen)
 		if err != nil {
 			return nil, zero, err
 		}
@@ -451,7 +490,7 @@ func verifyHistory(cfg *Cfg, h *History) (*Result, [32]byte, error) {
 	return res, state, nil
 }
 
-func checkStep(source Predicate, sourceHash [32]byte, txRaw []byte, cd *Certification, key *secp256k1.PublicKey, seen map[[32]byte]bool) (Leaf, error) {
+func checkStep(source Predicate, sourceHash [32]byte, txRaw []byte, e Deadline, cd *Certification, t uint64, key *secp256k1.PublicKey, seen map[[32]byte]bool) (Leaf, error) {
 	if !bytes.Equal(cd.Source.Bytes(), source.Bytes()) || cd.SourceHash != sourceHash {
 		return Leaf{}, ErrCDMismatch
 	}
@@ -459,66 +498,100 @@ func checkStep(source Predicate, sourceHash [32]byte, txRaw []byte, cd *Certific
 	if cd.TxHash != txHash {
 		return Leaf{}, ErrCDMismatch
 	}
+	// The CD deadline must equal the transaction deadline exactly, including
+	// null; a null deadline is never synthesised into a value.
+	if cd.Deadline != e {
+		return Leaf{}, ErrDeadlineMismatch
+	}
 	if err := VerifyUnlock(key, sourceHash, txHash, cd.Unlock); err != nil {
 		return Leaf{}, err
+	}
+	// An explicit deadline binds the reference time: t < e, equality rejects.
+	// No clock, EVM block time or current root round is consulted.
+	if e.Set && t >= e.At {
+		return Leaf{}, ErrDeadlineExpired
 	}
 	sid := StateID(source, sourceHash)
 	if seen[sid] {
 		return Leaf{}, ErrRepeatedSID
 	}
 	seen[sid] = true
-	return Leaf{SID: sid, TxHash: txHash}, nil
+	return Leaf{SID: sid, TxHash: txHash, ReferenceTime: t, Value: LeafValue(txHash, t)}, nil
 }
 
-// parseJustification requires the exact lock justification matching Cfg and a
-// nonzero nonce, and rejects external backing (39047), null and any other kind.
-func parseJustification(cfg *Cfg, j []byte) (uint64, error) {
+// ParseJustification requires the exact lock reason J matching Cfg and a
+// nonzero nonce, scans the embedded LockProof structure within its bounds and
+// binds its cfg, and rejects external backing (39047), null, the pre-3.0
+// pointer-only reason and any other kind. It authenticates nothing: the
+// historical backing is verified offline by VerifyLockProof.
+func ParseJustification(cfg *Cfg, j []byte) (uint64, *LockProof, error) {
 	if j == nil {
-		return 0, ErrMintJustif
+		return 0, nil, ErrMintJustif
+	}
+	if len(j) > MaxJustificationBytes {
+		return 0, nil, ErrJustificationTooLarge
 	}
 	root, err := scanOne(j)
 	if err != nil {
-		return 0, ErrMintJustif
+		return 0, nil, ErrMintJustif
 	}
 	c, err := root.tagContent(TagMintLock)
-	if err != nil || !c.isArray(5) {
-		return 0, ErrMintJustif
+	if err != nil || !c.isArray(6) {
+		return 0, nil, ErrMintJustif
 	}
-	if c.kids[0].version() != nil {
-		return 0, ErrMintJustif
+	if c.kids[0].version(LockReasonVersion) != nil {
+		return 0, nil, ErrMintJustif
 	}
 	chain, err := c.kids[1].uintMax(^uint64(0))
 	if err != nil || chain != cfg.ChainID {
-		return 0, ErrMintJustif
+		return 0, nil, ErrMintJustif
 	}
 	var vault, zero [20]byte
 	if fixed(&c.kids[2], vault[:]) != nil || vault != cfg.Vault || fixed(&c.kids[3], zero[:]) != nil || zero != cfg.ZeroAddress {
-		return 0, ErrMintJustif
+		return 0, nil, ErrMintJustif
 	}
 	n, err := c.kids[4].uintMax(^uint64(0))
 	if err != nil || n == 0 {
-		return 0, ErrMintJustif
+		return 0, nil, ErrMintJustif
 	}
-	if !bytes.Equal(MintJustification(chain, vault, zero, n), j) {
-		return 0, ErrMintJustif
+	lp, err := decodeLockProof(&c.kids[5])
+	if err != nil {
+		return 0, nil, err
 	}
-	return n, nil
+	if lp.Cfg != cfg.Hash() {
+		return 0, nil, ErrLockProofCfg
+	}
+	if !bytes.Equal(MintJustification(chain, vault, zero, n, lp), j) {
+		return 0, nil, ErrMintJustif
+	}
+	return n, lp, nil
 }
 
-// parseMintData requires data = C(b(aid),b(amount)) for the configured asset.
+// parseMintData requires the exact value envelope
+// tag(39050,[1,[[b(aid32),b(amount)]],null]) for the configured asset: one
+// inline entry, minimal positive amount, null memo/extension slot.
 func parseMintData(cfg *Cfg, d []byte) (*big.Int, error) {
 	if d == nil {
 		return nil, ErrMintData
 	}
 	root, err := scanOne(d)
-	if err != nil || !root.isArray(2) {
+	if err != nil {
 		return nil, ErrMintData
 	}
+	c, err := root.tagContent(TagValue)
+	if err != nil || !c.isArray(3) || c.kids[0].version(ValueVersion) != nil || !c.kids[2].null {
+		return nil, ErrMintData
+	}
+	assets := &c.kids[1]
+	if assets.major != majArray || len(assets.kids) != 1 || !assets.kids[0].isArray(2) {
+		return nil, ErrMintData
+	}
+	e := assets.kids[0].kids
 	var aid [32]byte
-	if fixed(&root.kids[0], aid[:]) != nil || aid != cfg.Aid {
+	if fixed(&e[0], aid[:]) != nil || aid != cfg.Aid {
 		return nil, ErrMintData
 	}
-	amt, err := root.kids[1].amount()
+	amt, err := e[1].amount()
 	if err != nil {
 		return nil, ErrMintData
 	}
@@ -544,7 +617,7 @@ func checkReturn(cfg *Cfg, res *Result, t *TransferTx) error {
 		return ErrReturnData
 	}
 	k := c.kids
-	if k[0].version() != nil {
+	if k[0].version(ReturnVersion) != nil {
 		return ErrReturnData
 	}
 	chain, err := k[1].uintMax(^uint64(0))

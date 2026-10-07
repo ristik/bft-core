@@ -85,6 +85,7 @@ func VerifyV2(ctx context.Context, oc rootinput.ObservationContextV2, dc rootinp
 	if err != nil {
 		return rootinput.ResultV2{}, fmt.Errorf("inputcarrier: %w", err)
 	}
+	dc.Context = ctx
 	res, err := rootinput.DeriveV2(dc, obs)
 	if err != nil {
 		return rootinput.ResultV2{}, fmt.Errorf("inputcarrier: %w", err)

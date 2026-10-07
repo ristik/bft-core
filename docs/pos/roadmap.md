@@ -1,7 +1,8 @@
 # Development roadmap: enshrined EVM, UCT and Proof of Stake
 
-Draft delivery tickets following the Unicity Yellowpaper. Ticket IDs below are the new IDs; the
-migration table at the end records the disposition of the earlier work.
+Delivery tickets following the Unicity Yellowpaper. Stable technical IDs and accepted evidence
+are retained. The stage contracts below restructure future work; they do not expand historical
+closure claims or reopen accepted deliverables. The earlier-ticket disposition remains at the end.
 
 The target remains Setup 2: each BFT Core operator runs a paired reth execution node.
 BFT Core performs consensus and certification; EVM contracts execute staking and governance.
@@ -10,7 +11,9 @@ cadence. Root rounds, shard rounds and EVM block heights are different counters.
 
 UCT is issued natively at genesis. WUCT is an EVM wrapper; the Unicity Execution-layer token
 is a separate custody-backed representation. There is no previous supply migration, ALPHA
-currency or PoW issuance. TGE may precede PoS and the bridge.
+currency or PoW issuance. Public testnets progress from PoA to PoA with bridging to PoS.
+All functionality through public PoS testnet precedes future mainnet preparation. No TGE is
+ready without mainnet bridge readiness; production PoS activation remains separately gated.
 
 The current engine-api-adapter branch is a prototype starting point, not the public-release
 baseline. In particular, its single-epoch shard trust-base store, count-based QC/TC formation,
@@ -62,10 +65,11 @@ correctness and availability of transitions, and the root for the signature quor
   cycle works with unequal weights and failures. An operator flag alone cannot activate it.
 - Use attested execution initially, with root and EVM assignments sharing the same effective
   weights (the EVM shard mirrors the root weights; aggregator shards are unweighted: section 0). Stateless execution and succinct execution proofs are later upgrades.
-- Initial rewards pay assigned weight per certified root interval. They do not measure uptime.
-  Downtime slashing and jailing from missing QC signatures are disabled.
-- Initial PoS may use self-bond only. Port only accounting components justified by a reuse
-  assessment; importing Polygon's governance and lifecycle wholesale is not a prerequisite.
+- Funded rewards for BFT Core validator-entity operators are required PoS functionality.
+  PoA accounting remains external; there are no separate EVM-node incentives. Final production
+  economics are deferred. Downtime slashing and jailing from missing QC signatures are disabled.
+- Initial PoS may use self-bond only. Use the approved clean-room implementation direction,
+  with established designs as inspiration and explicit provenance for anything actually reused.
 - Initial bridged tokens support whole-token transfer and burn. Their pinned type rejects
   split, merge and unregistered mint extensions everywhere. Public bridging requires a
   succinct redemption fallback for long admitted histories. A direct-only bridge is private.
@@ -76,8 +80,9 @@ correctness and availability of transitions, and the root for the signature quor
   client policy; no contract execution reads wall time.
 - Custody credits are pulled using checks-effects-interactions and reentrancy guards. Pull
   accounting does not eliminate reentrancy by itself.
-- Numbers, address assignments, monetary allocations and wire encodings are release decisions
-  to freeze in D tickets. Draft examples are not production parameters.
+- Pin exact development/testnet values, addresses, formats and bounds in each exercised release.
+  Production allocations, economics and final authority are mainnet decisions after TN-S #430.
+  Draft examples and development defaults are not production parameters.
 
 Every ticket has dependencies, a concrete result and acceptance evidence. Protocol-design tickets
 are blockers until they have an executable transition model or independent vectors, not just an
@@ -85,28 +90,117 @@ ADR saying that implementation will be deterministic. Implementation tickets inc
 negative cases and crash/replay tests. An estimate should be added after its design dependencies
 close; the old one-week/two-week estimates are not retained for unresolved protocol changes.
 
-## 2. Logical milestones
+## 2. Stage contracts and logical milestones
 
-| Gate | Deliverable | Required tickets and evidence |
+The 2026-10-07 stage decision governs future delivery wherever older ticket text differs.
+Retain every accepted PR, model, vector and lane report with its original scope and limits.
+An old passing run validates a new release only where its artifact/configuration bindings still
+hold. In particular, M2a is partial foundation acceptance, Q2 is component evidence, and private
+bridge evidence does not establish a rotating public profile.
+
+| Stage | Entry and acceptance contract | Not prerequisites |
 |---|---|---|
-| M0 | Implementable protocol baseline | D1-D6 approved internally, wire/transition models and independent vectors available; scope and deferred guarantees explicit. |
-| M1 | Private paired PoA execution | F1-F6: authenticated system call, positive fees, idle progress, deterministic build/verify/replay and durable certified state. |
-| M2 | Recoverable PoA service | F7-F9 (broad F7 export moves to B5, section 0), H1-H6, X1: real epoch replacement, certificate archive/export, checkpoint recovery and mixed aggregator/EVM operation. Current M2a evidence and remaining limits are tracked in [the closure status](m2-closure-status.md); that snapshot does not close the full M2 gate. |
-| M3 | Public UCT / TGE under PoA | M2, T1-T7, X2 remediation complete; exact production genesis rehearsed, funded first claims, custody/supply checks and upgrade recovery reviewed. T8 rewards optional and explicitly disabled if unfinished. |
-| M4B | Private bridge round trip | M3-equivalent test chain, B1-B6; both directions and supported-profile restrictions verified. No public custody. |
-| M5B | Public bridge | B7-B9 and X3 complete; every admitted history redeemable, independent SDK conformance, proof-service recovery and liability audit. |
-| M4S | PoS shadow and adversarial testnet | M2 foundation, Q1-Q4 (Q2/Q3 narrowed, section 0), P1-P7, S1-S4, H7, X4; I1-I5 deferred (section 9); contract output observed in shadow while PoA remains authoritative. |
-| M5S | Authoritative PoS | M3, M4S, P8 and X5: integrated audit closed, real weighted handoffs and evidence exercised, checkpoint and retirement protection operational. |
-| Later | Optional capabilities | Separately versioned delegation, bridge split/merge, performance accounting, downtime slashing, execution proofs and history accumulator. |
+| DN: devnet / staging | Reviewed designs; compatible pinned clients; disposable manifest; enabled capabilities work across real paired clients with negative, restart/replay and recovery evidence; internal independent review. | Production economics/authority, X2/X3/X5 external audits, TGE, real-value custody and compatibility with abandoned formats. |
+| TN: public testnet | Accepted relevant DN capability; exact test parameters/builds; public access, gas distribution, operations and independent internal release review. Closure records an actually exercised public network, a declared observation/fault campaign, measured bounds and defect disposition. | Production allocations, external audits, final governance authority, production signoff or multi-host topology at TN-1 #428. |
+| MN: mainnet | Begin future preparation only after TN-S #430 is reached. Use testnet feedback to freeze production artifacts/economics, complete external audits/remediation, independent production signoff and production operations/authority policy. | Readiness never itself authorizes deployment, issuance, real-value custody or an authoritative production PoS switch. |
 
-M5B and M5S are independent; neither is a hidden prerequisite of the other. Development can
-overlap after the shared foundation. The sequence of public releases is M3 before either.
-A bridge can launch while root authority is PoA, with that assumption disclosed. A PoS chain
-can launch without bridged UCT.
+**Greenroom continues through public testnet.** Testnets may be reset arbitrarily; there is no
+backwards compatibility, continuity-within-a-generation or asset-persistence commitment, and
+users may lose all assets. Publish that limitation with the network and faucet. Correctness still
+requires that a network replay its own history, authenticate its transitions and conserve custody
+while it runs. A fresh genesis/reset identifies a new network; it is not a fabricated continuation.
+Do not add migration/layout-version maintenance for discarded development/testnet formats.
+Mainnet needs a reviewed continuity/upgrade policy rather than this disposable-network assumption.
 
-The TGE gate includes PoA configuration changes and recovery because the public chain must
-survive key rotation and upgrades before the PoS work is complete. It does not require a
-larger fleet merely to satisfy a topology milestone.
+**Initial operations fit one bare-metal server**, with a container per validator and its paired
+execution/helpers, separate keys, explicit limits, public/admin endpoint separation, backups,
+monitoring and incident ownership. Exercise process failure and restore/reset and disclose the
+shared whole-host failure mode. A second operator must be able to execute the runbook; this does
+not require a second physical host. Grow organically; independent physical failure domains and
+production survival/recovery objectives belong to MN-OPS #441, not TN-1 #428 acceptance.
+
+| GitHub milestone | Stage / legacy alias | Gate | Required scope |
+|---|---|---|---|
+| 1 (closed) | M0 — Implementable protocol baseline | #40 (closed) | Historical accepted D1-D6 models/vectors; retained limits. |
+| 2 (closed) | DN-0 — Private paired PoA foundation / M1 | #41 (closed) | Historical F1-F6 acceptance and transferred obligations remain intact. |
+| 3 | DN-1 — Recoverable PoA devnet and staging / M2 | #43 | DN-0, F7-F9, H1-H6, development X1. [M2a closure status](m2-closure-status.md) remains scoped evidence, not full DN-1 closure. |
+| 9 | TN-1 #428 — Public PoA testnet | #428 | DN-1; T5-TEST #431, T6-TEST #432, X1-TEST #433; TN-OPS #434; public UCT FAUCET #435; X-TEST #436 internal review; public network acceptance. |
+| 5 | DN-B — Private bridge integration / M4B | #73 | DN-1, reviewed disposable T6-TEST #432 manifest, B1-B6 supported private profile. |
+| 10 | TN-B #429 — Public PoA bridge testnet | #429 | TN-1 #428 reached; DN-B, B7/B8, B-TEST #438 public proof/history/service acceptance and common SDK #421 capabilities. Fake-value assets only. |
+| 7 | DN-S — PoS shadow and isolated authoritative integration / M4S | #59 | DN-1, Q1-Q4, P1-P7, S1-S4, H7, required T8, P8-TEST #437, X4; ordinary EVM evidence, I-track deferred. |
+| 11 | TN-S #430 — Public PoS testnet | #430 | TN-B #429 reached as a network milestone plus DN-S; weighted public PoS, funded rewards, protected exits, bridge/SDK integration and internal review. |
+| 6 | MN-B — Mainnet bridge readiness / M5B | #74 | After TN-S #430: exact production base/T6, public bridge evidence, X3 remediation and B9. Readiness precedes TGE; no live funds prerequisite. |
+| 4 | MN-1 — Mainnet PoA / UCT readiness / M3 | #72 | After TN-S #430: MN-POLICY #439, production T5/T6, X1-MAIN #440, MN-OPS #441, X2, MN-B and T7. No TGE without bridging. |
+| 8 | MN-S — Mainnet PoS readiness / M5S | #75 | TN-S #430, MN-1, final PoS policy/authority, X5 and production P8; separate activation authorization. |
+| None | Deferred I1-I5 and optional later capabilities | Separate future decision | Keep evidence and reference scope; no active stage gate depends on I1-I5. |
+
+Stage codes are stable references. The tracker restructure is applied; allocated issue and
+milestone numbers are recorded above. Existing issue and milestone numbers are retained. Closed T1-T4 and
+Q2 membership/evidence stays historical even where its milestone now names a later stage.
+
+### Acceptance slices retained as separate tickets
+
+| Work ID / GitHub issue | Acceptance boundary |
+|---|---|
+| T5-TEST #431 | Independent internal development/testnet genesis, code and permission review; replaces production T5 as B4's prerequisite. |
+| T6-TEST #432 | Clean disposable deployment, funded transaction and independent recovery/rotation/reset rehearsal; replaces production T6 at DN-B. |
+| X1-TEST #433 | Testnet failure matrix and measured limits on the chosen one-server topology; refresh at TN-B #429/TN-S #430. |
+| TN-OPS #434 | Public RPC/transaction access, endpoint/key isolation, monitoring, archives, incident ownership and independently usable runbooks. |
+| FAUCET #435 | Public test UCT dispensing so a fresh wallet can pay gas; funding/refill ownership, rate/abuse controls, failure handling and reset/network binding. |
+| X-TEST #436 | Independent internal review of the assembled TN-1 #428 release; TN-B #429/TN-S #430 repeat integrated review in their own gate acceptance. |
+| P8-TEST #437 | Activation implementation and isolated authoritative testnet rehearsal before X4; production P8 #61 remains mainnet-only. |
+| B-TEST #438 | Broader B3/B5 public-profile slices, common SDK evolution, independent conformance, long-history exits and proof-service recovery. |
+| MN-POLICY #439 | Production allocations, fees/limits, economics and final authority/control/continuity policy after TN-S #430; retains P7/T8 production slices. |
+| X1-MAIN #440 | Original X1 production-limit sustained-load and foundation evidence, after TN-S #430 and parameter selection. |
+| MN-OPS #441 | Production key custody, independent failure domains, availability/recovery/continuity policy and independent operational signoff. |
+
+A private B3/B5 slice may close only with explicit unsupported cases and a link to the transferred
+B-TEST #438 acceptance. B-TEST #438 requires working redemption for every admitted history, including
+histories exceeding the direct budget. SDK #421 is common functionality, not a bridge-private
+trust workaround; actual SDK implementation tickets, tested versions and epoch/weight support
+must be linked before its consumed capabilities are accepted. It does not block EVM-only TN-1 #428
+or the explicitly fixed-base private bridge profile.
+
+### Recomputed dependency summary
+
+Arrows mean prerequisite -> consumer. The tracker manifest contains the exact full graph and
+its acyclic native transitive reduction; this is the stage-level summary, including split work.
+All safety prerequisites remain in the full lists even when native edges are transitively reduced.
+
+```text
+DN-0 + development X1 (F/H recovery evidence) -> DN-1
+H6 + T4 -> T5-TEST #431; DN-1 + T5-TEST #431 -> T6-TEST #432
+T6-TEST #432 -> TN-OPS #434 + FAUCET #435 + X1-TEST #433 -> X-TEST #436 -> TN-1 #428
+T5-TEST #431 + B2 -> B4 -> B5; B3 + B5 -> B6
+T6-TEST #432 + B6 -> DN-B
+DN-B + B7/B8 + SDK #421 -> B-TEST #438; TN-1 #428 + B-TEST #438 -> TN-B #429
+H3 + P4 + S2 -> H7; S2 + S3 + H7 -> S4
+T8 + P6 + S2 -> P7; #399 + Q3/F8 -> Q4
+DN-1 + Q4 + P7 + S4 -> P8-TEST #437 -> X4 -> DN-S
+TN-B #429 + DN-S -> TN-S #430
+TN-S #430 -> MN-POLICY #439 -> production T5 -> production T6 -> X2
+TN-S #430 + production T6 + B-TEST #438 -> X3 -> B9 -> MN-B
+production T6 + MN-POLICY #439 + X1-TEST #433 -> X1-MAIN #440 -> MN-OPS #441
+X2 + MN-B + MN-OPS #441 -> T7 -> MN-1
+TN-S #430 + MN-POLICY #439 -> X5; X5 + T7 -> production P8
+MN-1 + production P8 -> MN-S
+```
+
+DN-B and DN-S implementation can progress independently. Public network order is strictly
+**TN-1 #428 -> TN-B #429 -> TN-S #430**; TN-S #430 depends on TN-B #429 having been reached, not on mainnet.
+The old M3 -> M5B and T7 -> B9 edges are removed: production bridge readiness #74 now blocks
+T7 #46, which blocks MN-1 #72. Retaining both historical gates avoids a cycle and preserves
+separate custody and issuance reviews. Neither readiness gate requires already deployed real value.
+
+Removing I4 -> H7 restores H3/P4/S2 as H7 prerequisites; removing I5 -> S4 restores H7/S2/S3.
+Within the deferred graph, I4 -> I5 is restored explicitly because H7 no longer carries I4.
+Ordinary EVM evidence, authenticated lifecycle/closure and protected claims remain required;
+there is no bounded censorship-resistance promise. Accepted design, signature verification,
+historical liability and delayed-EVM negative cases remain on the active path.
+
+Run H4's remaining acceptance and H6's independent rehearsal as one coordinated activity.
+Prerequisites gate final acceptance, not execution of that shared evidence run; do not add a
+reverse H6 -> H4 edge or require H4 closure before collecting its remaining H6-run evidence.
 
 ## 3. D: freeze the protocol before implementing it
 
@@ -411,6 +505,8 @@ root/EVM state synchronization from authenticated snapshots and archives, includ
 a replacement host catches up and joins across an epoch boundary. Root and EVM keys retain
 their documented owner/consensus/node role bindings.
 
+**Amended 2026-10-07 (stage restructure):** DN-1 acceptance retains joining/recovery safety and the existing evidence. Schedule the remaining operator cases with H6 #23 as one acceptance activity: H6 execution may use the implemented H4 path before H4's final closure. Do not add H6 as a blocker of H4 or wait for H4 closure to run the shared rehearsal. Keep closure evidence separate and close prerequisites in order. Later public access/one-server operations are TN-OPS #434.
+
 ### H5. Checkpoint production and client verification
 
 **Dependencies:** H1-H4, D6.
@@ -434,6 +530,8 @@ handoff on a private PoA network. Define support/version pinning and recovery au
 remains verifiable, and the exact recovery runbook is executed by someone other than its author.
 No rollback procedure reorganizes a certified monetary transaction.
 
+**Amended 2026-10-07 (stage restructure):** DN-1 independent private rehearsal remains required, with disposable values and correct replay of the exercised history. Coordinate the remaining H4 acceptance in the same run; prerequisite acceptance gates closure, not permission to execute that shared evidence run. No production compatibility, multi-host survival or production signoff is implied. Public-testnet operations move to TN-OPS #434; final production operations to MN-OPS #441.
+
 ### H7. PoS retirement acknowledgement integration
 
 **Dependencies:** H3, P4, S2, I4.
@@ -449,7 +547,9 @@ collateral. Merely exceeding an operational extension target never permits withd
 I-track is deferred. How collateral withdrawal is protected against unprocessed evidence without the watermark is an open question
 (see section 9); H7 is not closed by this change.
 
-## 6. T: public UCT under PoA
+**Amended 2026-10-07 (stage restructure):** Remove deferred I4 #35 from active prerequisites. The active full prerequisites are H3 #20, P4 #32 and S2 #34, with accepted #85 design inherited via custody. Implement authenticated retirement/closure, pending-successor handling and protected claims with ordinary EVM evidence. Evidence inclusion has no forced-inclusion guarantee; document censorship and delayed-EVM assumptions. Replacing the dependency does not close H7 or waive its negative cases.
+
+## 6. T: native UCT tooling and staged production readiness
 
 ### T1. Genesis manifest and funded first transaction
 
@@ -515,7 +615,9 @@ deployed later, but reserved addresses confer no preexisting permission.
 permissions. A defective immutable contract has a documented recovery/migration boundary; no
 secret proxy or shared system private key is required by the deployment.
 
-### T6. Reproducible public deployment rehearsal
+**Amended 2026-10-07 (stage restructure):** Retain this issue for the final production immutable-code/genesis/future-activation signoff, after TN-S #430 and MN-POLICY #439. Development/testnet internal review transfers to T5-TEST #431, which replaces this issue as B4's blocker. Existing dossier evidence remains reusable only for matching artifacts; no final production allocation or signoff is required by DN/TN gates.
+
+### T6. Reproducible production deployment rehearsal
 
 **Dependencies:** T5, M2.
 
@@ -524,6 +626,8 @@ distribution, realistic transactions, finality RPC, archival proof export and Po
 
 **Accepts when:** exchange/wallet integration uses certified finalized state; an uncertified
 candidate is never shown as finalized; bootstrap and recovery require only documented artifacts.
+
+**Amended 2026-10-07 (stage restructure):** Retain exact production deployment/recovery rehearsal here, after TN-S #430, final T5 #39 and DN-1 #43, using selected production artifacts and independent production signoff. The disposable development/testnet-manifest rehearsal transfers to T6-TEST #432, replacing #44 as a DN-B prerequisite. Preserve all existing rehearsal evidence with its artifact limits.
 
 ### T7. TGE gate pack
 
@@ -536,7 +640,9 @@ action; completing documentation or testnet tickets does not imply publishing.
 **Accepts when:** every M3 gate has linked evidence and a named release decision. PoS, bridge and
 unfinished reward functions remain explicitly disabled.
 
-### T8. Optional simple assignment rewards
+**Amended 2026-10-07 (stage restructure):** Mainnet-only TGE pack after TN-S #430, production T6/X2, X1-MAIN #440, MN-OPS #441 and MN-B #74 readiness. Bridge readiness is mandatory; the earlier acceptance text requiring bridging to stay disabled is superseded. PoA may remain the initial production authority, while any production PoS switch requires MN-S. No issuance is authorized by ticket closure; final governance/allocations/economics must match the production manifest.
+
+### T8. Funded PoS operator rewards
 
 **Dependencies:** T3, H3; required before enabling rewards, not before TGE.
 
@@ -547,6 +653,8 @@ exclude outstanding credits from available emission. There are no signer partici
 **Accepts when:** delayed imports, repeated UCs, rate changes and extended epochs reconcile exactly;
 settlement work is bounded; reward plus unclaimed credits never exceeds allocated funds.
 Published behavior admits that an assigned but idle validator can receive this initial reward.
+
+**Amended 2026-10-07 (stage restructure):** Funded rewards to BFT Core validator-entity operators are required PoS functionality and gate P7/DN-S; they are not optional for TN-S #430. No separate EVM-node incentives and no on-chain PoA reward requirement. Preserve bounded funded accounting, exhaustion, idempotence and conservation; use development values now. Final funding/rates/economics transfer to MN-POLICY #439 and production reviews.
 
 ## 7. Q and P: weighted consensus and staking
 
@@ -562,6 +670,8 @@ preimage from D5, including non-committing votes. Use checked arithmetic and aut
 stake cannot form root quorum; sufficient weight can form it with fewer identities. Invalid,
 duplicate and cross-epoch signatures do not count. Actual network progress exercises both QC
 and timeout paths.
+
+**Amended 2026-10-07 (stage restructure):** DN-S weighted consensus work retains merged evidence and outstanding live acceptance, including #399 weighted liveness. Production economics and compatibility with abandoned development/testnet formats do not gate this work. Preserve deterministic replay/authenticated weight transitions for the network exercised.
 
 ### Q2. Weighted shard requests and impossibility certificates
 
@@ -590,6 +700,8 @@ thresholds mirror the active root weights; aggregator shards are unweighted and 
 aggregator-shard certificates are needed. Q3 shrinks to activating root weights (and the mirrored EVM weights) at an agreed
 configuration boundary.
 
+**Amended 2026-10-07 (stage restructure):** DN-S integration remains required across root, paired EVM, signing authorities, aggregator-facing configuration and CLI. Greenroom/no backwards compatibility supersedes preservation of abandoned layouts. Preserve deterministic authenticated activation and replay of a network's own history. Closed Q2 component work does not establish Q3/Q4 live acceptance.
+
 ### Q4. Weighted adversarial integration gate
 
 **Dependencies:** Q3, F8.
@@ -600,6 +712,8 @@ many small Byzantine identities, withheld votes and changing weights across epoc
 **Accepts when:** valid progress occurs under the stated weighted assumptions and invalid state/
 configuration never finalizes in the tested schedules. The report distinguishes protocol
 assumptions from client bugs and records limitations of testing versus the D4 model.
+
+**Amended 2026-10-07 (stage restructure):** DN-S weighted adversarial evidence retains coupled real-client, crash/replay, admission and resource cases; #399 is an explicit prerequisite. Root-only component evidence cannot close the integrated gate. Measure development/test bounds now and refresh enabled public weighted/bridge cases at TN-S #430.
 
 ### P1. Staking component reuse assessment
 
@@ -613,6 +727,8 @@ a port. Vendor only the justified components.
 **Accepts when:** a reuse matrix identifies every retained dependency and removed test obligation.
 Root-certified lifecycle and assigned-weight rewards have explicit accounting replacements.
 Neither compiler modernization nor upstream test success is treated as a security audit.
+
+**Amended 2026-10-07 (stage restructure):** Retain the assessment and accepted evidence; reconcile remaining closure against the approved clean-room implementation direction (inspiration from established designs, no required Polygon port). #85 must provide accepted self-contained architecture and traceability. Production parameters and external review scheduling do not block DN-S design acceptance; preserve provenance obligations for anything actually reused.
 
 ### P2. Immutable native stake custody
 
@@ -653,6 +769,8 @@ and hold unresolved timely evidence. Specify the ordering of evidence drain befo
 delayed acknowledgement and parameter reduction cannot permit premature claims. Mature clean
 retirement remains withdrawable even if an unrelated recipient reverts.
 
+**Amended 2026-10-07 (stage restructure):** DN-S implementation/test acceptance uses ordinary paid EVM evidence and authenticated root lifecycle/closure records, not a forced-inbox watermark. Preserve reservations, inherited protection, pending-case settlement and safe claims through delayed EVM execution, rotation, abort and restart. Do not claim bounded censorship resistance. Parameter values are disposable development inputs; production policy is MN-POLICY #439.
+
 ### P5. Deterministic snapshot and election contract
 
 **Dependencies:** P2-P4, F4.
@@ -689,7 +807,9 @@ to emission/fee accounting and make inactive optional features fail closed.
 new rewards without trapping principal; changes to pacing/retention trigger checkpoint-policy
 review and cannot weaken existing custody protection.
 
-### P8. Authoritative switch ceremony
+**Amended 2026-10-07 (stage restructure):** DN-S/TN-S #430 governance functionality uses bounded development authority and exact test parameters. T8 #47 funded operator rewards is now mandatory, alongside P4-P6/S2. Final production authority, succession and economics transfer to MN-POLICY #439, X5 and production P8; the implementation must already enforce parameter constraints and inherited custody obligations.
+
+### P8. Production authoritative switch ceremony
 
 **Dependencies:** M4S, X5, T7.
 
@@ -699,6 +819,8 @@ Rehearse on the integrated testnet using production formats and unequal stakes.
 **Accepts when:** successive contract-elected sets actually drive root and paired EVM epochs;
 old PoA/config API credentials cannot choose a different set; rotation, evidence, retirement
 and recovery all work after the switch. Public activation requires its own release authorization.
+
+**Amended 2026-10-07 (stage restructure):** Retain only the production switch ceremony and exact production activation/recovery signoff here, after DN-S #59, X5 #60 and T7 #46. Implementation and isolated/testnet activation rehearsal transfer to P8-TEST #437; this issue no longer gates that work. Public TN-S #430 is reached before any of these production preparations. A production switch needs separate authorization.
 
 ## 8. S: objective evidence
 
@@ -726,6 +848,8 @@ claims. Downtime/QC-omission inputs are unsupported.
 rotation/unbonding cannot evade liability; honest repeated votes are not penalized. Total payouts
 and penalties stay within attributable funds.
 
+**Amended 2026-10-07 (stage restructure):** Ordinary paid EVM evidence is the active route. Require real S1 signature verification, authenticated historical liability, objective offence deduplication and protected retirement/claims; no forced-inbox watermark is an active prerequisite. Review censorship/delayed-inclusion assumptions explicitly. Slashing or undercoverage must not remove the exact-incumbent recovery slate; retain the operational carried-over-quorum and less-than-one-third-change assumptions in acceptance.
+
 ### S3. Evidence retention, discovery and submission
 
 **Dependencies:** S1-S2, F7.
@@ -751,6 +875,8 @@ and root epoch extension. Root-quorum loss is recorded as a recovery limitation,
 **Amended 2026-10-01 (S4, I-track deferred):** the I4-I5 dependency and the "censor the evidence at an EVM leader, then use the
 root inbox" scenario are suspended with the I-track; the rest of the exercise stands. See the open question in section 9.
 
+**Amended 2026-10-07 (stage restructure):** Remove deferred I5 #56 (and textual I4 #35) from active prerequisites. Active full prerequisites are S2 #34, S3 #55 and H7 #36. Exercise ordinary EVM evidence with delayed inclusion/execution, authenticated retirement/closure and protected claims; no root-inbox censorship guarantee. Real signatures, duplicate/false-evidence rejection, key rotation and delayed-EVM/root-extension cases remain required.
+
 ## 9. I: bounded forced inclusion
 
 > **Status: DEFERRED (owner decision, 2026-10-01; [ADR 0012](../adr/0012-validator-entity-model.md)). Not deleted.** Forced
@@ -761,6 +887,14 @@ root inbox" scenario are suspended with the I-track; the rest of the exercise st
 > scenario) and **what replaces that safeguard is an open question for the owner and the H7/S2 reviewers**; this change does not
 > decide it. The tickets below stay as the reference scope; they are reinstated only by a new owner decision with its own activation
 > gate, and authoritative PoS (M5S) must re-decide before it relies on forced inclusion. The D5 design is kept.
+
+**Amended 2026-10-07 (stage restructure):** ordinary paid EVM evidence is the active route.
+The earlier unresolved-route paragraph is superseded; the detailed authenticated closure and
+protected-claim design must still be accepted and implemented under P-DESIGN #85, P4, S2 and H7.
+Do not promise bounded censorship resistance. I1-I5 remain deferred and outside active DN/TN/MN
+milestones, with no path to active gates. Preserve the deferred I4 -> I5 dependency explicitly.
+Slashing/undercoverage must not remove the exact-incumbent recovery slate; retain the
+less-than-one-third-change and operational carried-over-quorum assumptions in the accepted design.
 
 ### I1. Certified admission and available payload queue
 
@@ -833,6 +967,8 @@ Calibrate bounds and gas with independent Go/Rust vectors.
 rounds and overflowing input are rejected consistently. Different local node configuration cannot
 change contract verification results. No historical accumulator is required.
 
+**Amended 2026-10-07 (stage restructure):** DN-B integrated acceptance requires real paired-client activation, replay and bounded measurements; Go/Rust kernel or fixture contract evidence alone is insufficient. Q3 remains required before using the builtins under weighted PoS and is inherited by DN-S/TN-S #430. The fixed unit-weight SDK private profile does not itself establish rotating public bridge readiness.
+
 ### B2. Supported-profile TokenVerifier and feasibility spike
 
 **Dependencies:** B1, D6.
@@ -858,6 +994,8 @@ Specify archival obligations and authenticated lineage when an aggregator shard 
 a root, and proof refresh works after an aggregator shard split. The service can reconstruct a
 common certified anchor even when the EVM was not certified in that root round.
 
+**Amended 2026-10-07 (stage restructure):** Retain supported private-profile proof assembly and B1/B2/F8/F9 prerequisites for DN-B. Transfer broader public shared-seal multi-shard/shard-split refresh acceptance to B-TEST #438 where that profile is admitted. A reduced private closure must enumerate unsupported/rejected cases and link the transferred tests; it must not claim the broader acceptance above is complete.
+
 ### B4. Native BridgeVault and permanent lock interface
 
 **Dependencies:** B2, T2-T5.
@@ -869,6 +1007,8 @@ transfers. Implement the nullifier accumulator and reentrancy-safe pull claims.
 **Accepts when:** lock digest and storage-slot vectors match SDKs; cumulative paid <= credited
 redemptions <= locked; balance equals outstanding backing plus credits plus unexpected value.
 Replay, duplicate burns and a reverting recipient cannot consume others' backing.
+
+**Amended 2026-10-07 (stage restructure):** DN-B vault development replaces production T5 #39 with T5-TEST #431 internal review; B2 and T2-T4 remain prerequisites (including their transitive paths). Preserve immutable locking, internal efficient nullifier tracking, conservation, replay/duplicate-burn and reentrancy cases. End-user non-inclusion proofs are not a required service. Assembled public-profile review is B-TEST #438; external custody audit remains X3.
 
 ### B5. Refreshable mint backing and offline SDKs
 
@@ -884,6 +1024,8 @@ Verify account/storage paths, chain configuration, checkpoint and historical aut
 **Accepts when:** mint backing verifies offline from a complete bundle; a much later fresh proof
 verifies the same unchanged token; a retired-key-only forged history fails. Old and fresh witnesses
 cannot alter amount, nonce, recipient, vault or token identifier.
+
+**Amended 2026-10-07 (stage restructure):** Retain fixed-base private offline backing/SDK integration for DN-B, with explicit supported history and trust limitations. Broader public RPC/account/storage proof service, rotation/trust evolution and full-profile history/recovery acceptance transfer to B-TEST #438. Keep tokens self-contained via the vault locking proof in the mint reason; use external SDK plug-ins. Common #421 capabilities, not component-private authority workarounds, gate public rotating/weighted use. Existing F7/H5 evidence remains a prerequisite with its limits.
 
 ### B6. Direct redemption and private round trip
 
@@ -910,6 +1052,8 @@ transition and public release commitments.
 long admitted histories redeem through the succinct path. Wrong public bindings and unsupported
 token shapes fail. Proving cost, capacity and proof refresh after stale anchors are measured.
 
+**Amended 2026-10-07 (stage restructure):** Implement and internally review the full supported-profile succinct fallback before TN-B #429. The external audit slice belongs to X3 #70 after TN-S #430; it does not block fake-value tests. Every admitted history needs a functioning redemption path even when the direct budget is exceeded. Revalidate exact production artifacts for MN-B.
+
 ### B8. Proof-service and prover recovery
 
 **Dependencies:** B7, F9.
@@ -922,7 +1066,9 @@ recipients without rewriting immutable token history.
 redeems a long history with no trusted operator. Retention failures have actionable diagnostics.
 Wallets explain admitted profile restrictions and required checkpoint refresh.
 
-### B9. Public bridge gate pack
+**Amended 2026-10-07 (stage restructure):** TN-B #429 acceptance requires long-history redemption and replacement proof-service/prover recovery after B7. Preserve archive reconstruction and independent conformance evidence, scoped to the selected test profile; production revalidation/signoff remains B9/X3/MN-B.
+
+### B9. Mainnet bridge gate pack
 
 **Dependencies:** B8, X3, T7.
 
@@ -933,6 +1079,8 @@ immutability. Define migration boundaries for a future split-capable type or cha
 **Accepts when:** every admitted history has a functioning redemption path; no remaining ticket
 is required to release existing user backing. If succinct verification is unfinished, M5B stays
 closed rather than launching one way or promising a future exit.
+
+**Amended 2026-10-07 (stage restructure):** Mainnet-only B9 bridge readiness pack now depends on B8 #69, X3 #70 and production T6 #44, not T7 #46. Freeze exact production vault/type/verifier/configuration and custody/exit evidence before issuance; use rehearsed artifacts without requiring live public funds. MN-B #74 then gates T7, removing the former launch-order cycle. Real-value deployment/custody still requires separate authorization.
 
 ## 11. X: review, assurance and release evidence
 
@@ -948,6 +1096,8 @@ not only process kills. Run sustained load at the selected production resource l
 operation; failures have reproducible diagnostics. Fleet size is chosen for the fault model,
 not as a substitute for coverage.
 
+**Amended 2026-10-07 (stage restructure):** This issue retains the DN-1 foundation matrix at selected development bounds. Public-testnet resource/failure evidence transfers to X1-TEST #433; the original sustained load at selected production limits transfers to X1-MAIN #440. Both remain explicit obligations. #43 consumes only the development slice. Historical single-host results are not production capacity acceptance.
+
 ### X2. Pre-TGE audit and remediation
 
 **Dependencies:** M2, T1-T6; scope preparation begins during D.
@@ -958,6 +1108,8 @@ immutable money contracts, proof export and PoA handoff/recovery. Remediate befo
 **Accepts when:** findings affecting public funds/finality are closed or the affected feature is
 disabled with a rechecked gate. A contracts-only audit does not satisfy this scope.
 
+**Amended 2026-10-07 (stage restructure):** Mainnet-only X2. Begin the production audit/remediation after TN-S #430 and exact production T6 #44. Internal independent testnet review is X-TEST #436 plus the TN-B #429/TN-S #430 gate reviews; none requires this audit. Preserve all original audit correctness scope for enabled production functionality.
+
 ### X3. Bridge audit and remediation
 
 **Dependencies:** B1-B8.
@@ -967,6 +1119,8 @@ type restrictions, nullifiers, long-history liveness, retries and archival recon
 
 **Accepts when:** M5B blockers are closed and independently generated negative vectors pass.
 An audit of an upstream prover or generic SDK does not replace review of the assembled bridge.
+
+**Amended 2026-10-07 (stage restructure):** Mainnet-only X3 audit/remediation starts after public TN-S #430, production T6 #44 and public bridge profile B-TEST #438, while retaining B1-B8 correctness scope. Internal bridge review and working exits already gate TN-B #429; audit scheduling must not block that network milestone.
 
 ### X4. PoS shadow comparison and long-running fault exercise
 
@@ -983,6 +1137,8 @@ optional feature.
 **Amended 2026-10-01 (X4, I-track deferred):** the I5 dependency is suspended with the I-track; no inbox/forced-inclusion case is part of the
 exercise until it is reinstated (section 9).
 
+**Amended 2026-10-07 (stage restructure):** DN-S X4 combines PoA-authoritative shadow comparison and separate isolated authoritative PoS runs. Add P8-TEST #437 for actual activation mechanics; retain Q4 #51, P7 #54, S4 #57 and H7 #36. I5 is deferred and not an active blocker. Test ordinary EVM evidence, protected exits and funded rewards. External X5, production P8 and TGE do not block this work.
+
 ### X5. Integrated PoS audit and activation gate
 
 **Dependencies:** X4; scope preparation begins during D3-D5.
@@ -994,6 +1150,8 @@ post-activation recovery. Define the disclosed procedure for failure beyond the 
 **Accepts when:** all authoritative-PoS blockers are remediated; P8 can reference concrete approved
 artifacts. Governance cannot bypass custody or consensus thresholds. Disabling an unready
 security dependency does not qualify the remaining system for M5S.
+
+**Amended 2026-10-07 (stage restructure):** Mainnet-only integrated PoS audit after public TN-S #430 and MN-POLICY #439, retaining X4 evidence and all enabled consensus/custody/governance/recovery scope. Replace deferred root-inbox assumptions with reviewed ordinary EVM evidence and authenticated closure/protected exits. External review does not block DN-S/TN-S #430; final production authority and economics remain required here.
 
 ## 12. Traceability and deferred work
 
@@ -1026,7 +1184,7 @@ security dependency does not qualify the remaining system for M5S.
 | F2 genesis/configuration | D1-D2, T1, T5-T6 |
 | F3 system transaction/registry | D1-D2, F2-F5, H1-H3 |
 | F3.7 participation counters | Removed; T8 assignment rewards. Performance accounting is a future protocol |
-| T1 money contracts and T2 rewards | T1-T8; rewards can be disabled at TGE |
+| T1 money contracts and T2 rewards | T1-T8; PoA accounting external, funded operator rewards required for PoS |
 | B1 builtins | B1 plus S1; separated by actual consumers |
 | B2 TokenVerifier/split port | B2-B3 with a restricted launch type; split support requires a new reviewed relation |
 | B3 vault/SDK/succinct path | B4-B9; succinct fallback is mandatory for public unbounded histories |

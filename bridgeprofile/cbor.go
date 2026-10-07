@@ -70,7 +70,9 @@ func AmountBytes(a *big.Int) []byte { return a.Bytes() }
 const (
 	majUint  = 0
 	majBytes = 2
+	majText  = 3
 	majArray = 4
+	majMap   = 5
 	majTag   = 6
 	majSimp  = 7
 )
@@ -88,11 +90,29 @@ type scanner struct {
 	b      []byte
 	pos    int
 	tokens int
+	// native admits definite text strings and maps, which the profile's own
+	// objects never use but the opaque native certificate inside an SDK
+	// inclusion proof does. Canonical key order inside that certificate is the
+	// certificate verifier's concern, not this scanner's.
+	native bool
 }
 
 // scanOne scans exactly one item spanning all of b.
 func scanOne(b []byte) (*item, error) {
 	return scanOneShared(b, new(int))
+}
+
+// scanOneNative is scanOne for items that embed a native certificate.
+func scanOneNative(b []byte) (*item, error) {
+	s := scanner{b: b, native: true}
+	it, err := s.item(0)
+	if err != nil {
+		return nil, err
+	}
+	if s.pos != len(b) {
+		return nil, ErrTrailing
+	}
+	return &it, nil
 }
 
 func scanOneShared(b []byte, tokens *int) (*item, error) {
@@ -144,7 +164,7 @@ func (s *scanner) item(depth int) (item, error) {
 		return item{}, ErrTooManyItems
 	}
 	if s.pos < len(s.b) {
-		if mj := s.b[s.pos] >> 5; mj == 3 || mj == 5 || (mj == majSimp && s.b[s.pos] != 0xf6) {
+		if mj := s.b[s.pos] >> 5; (!s.native && (mj == 3 || mj == 5)) || (mj == majSimp && s.b[s.pos] != 0xf6) {
 			return item{}, ErrForbiddenCBOR
 		}
 	}
@@ -156,13 +176,13 @@ func (s *scanner) item(depth int) (item, error) {
 	rest := uint64(len(s.b) - s.pos)
 	switch major {
 	case majUint:
-	case majBytes:
+	case majBytes, majText:
 		if arg > rest {
 			return item{}, ErrTruncated
 		}
 		it.data = s.b[s.pos : s.pos+int(arg)]
 		s.pos += int(arg)
-	case majArray, majTag:
+	case majArray, majTag, majMap:
 		if depth+1 > MaxCBORDepth {
 			return item{}, ErrTooDeep
 		}
@@ -171,6 +191,11 @@ func (s *scanner) item(depth int) (item, error) {
 			n = 1
 		} else if arg > rest {
 			return item{}, ErrTruncated
+		} else if major == majMap {
+			n = 2 * arg
+			if n > rest {
+				return item{}, ErrTruncated
+			}
 		}
 		it.kids = make([]item, 0, n)
 		for i := uint64(0); i < n; i++ {
@@ -230,15 +255,50 @@ func (it *item) uintMax(max uint64) (uint64, error) {
 	return it.arg, nil
 }
 
-// version checks the literal wire version field.
-func (it *item) version() error {
+// version checks a literal wire version field against the object's version.
+func (it *item) version(want uint64) error {
 	if !it.isUint() {
 		return ErrShape
 	}
-	if it.arg != WireVersion {
+	if it.arg != want {
 		return ErrVersion
 	}
 	return nil
+}
+
+// deadline reads the nullable deadline slot: null, or an integer in [1,2^64-1].
+func (it *item) deadline() (Deadline, error) {
+	if it.null {
+		return Deadline{}, nil
+	}
+	if !it.isUint() {
+		return Deadline{}, ErrDeadline
+	}
+	if it.arg == 0 {
+		return Deadline{}, ErrDeadline
+	}
+	return Deadline{Set: true, At: it.arg}, nil
+}
+
+// Deadline is the SDK 3.0.1 transaction deadline e: unset (null) or a u64
+// Unix-seconds bound in [1,2^64-1]. Null is never synthesised into a value.
+type Deadline struct {
+	Set bool
+	At  uint64
+}
+
+// NoDeadline is the null deadline constructors default to.
+var NoDeadline = Deadline{}
+
+// DeadlineAt is an explicit deadline.
+func DeadlineAt(e uint64) Deadline { return Deadline{Set: true, At: e} }
+
+// CDeadline is the deadline's CBOR item: null or the shortest unsigned integer.
+func CDeadline(d Deadline) []byte {
+	if !d.Set {
+		return CNull
+	}
+	return CUint(d.At)
 }
 
 // amount returns a positive minimal big-endian amount of at most 32 bytes.

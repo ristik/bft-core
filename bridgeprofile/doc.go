@@ -1,5 +1,11 @@
-// Package bridgeprofile is the Go reference ("oracle") for the B2/B4 whole-token
-// bridge profile of briefs/bridge-b2b4-design-v2.md, slice PR1: the exact
+// Package bridgeprofile is the Go reference ("oracle") and candidate-corpus
+// generator for the B2/B4 whole-token native bridge profile rebased on the
+// state-transition SDKs v3.0.1 (briefs/nbp-design.md): the strict SDK 3.0.1 token,
+// inclusion-proof, transaction and certification bytes with deadlines, the
+// embedded Unicity-certified EVM lock proof (version 2 lock reason) and its
+// offline verification, the identifiers of the unicity-native family, the value
+// envelope, the kernel ABI result, the anchor InputRecord opening and its time
+// check in the composition, and the corpus generator (cmd/gencorpus). The exact
 // token bytes, the immutable configuration Cfg, the one-shard aggregator
 // policy carrier and its ABI envelope, the cfg-bound lock digest, salt/token
 // ID/burn-reason derivations, the vault storage-slot derivations, the compact

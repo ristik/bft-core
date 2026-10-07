@@ -43,7 +43,8 @@ func TestNoProductionPackageImportsTheGenerator(t *testing.T) {
 		rel, _ := filepath.Rel(root, path)
 		// recordwiring is reached only through the shard-node command's opt-in record store, which its own
 		// guard enforces, and internal/testutils/certifiedchain is test fixture code.
-		if strings.HasPrefix(rel, "registrygenesis"+string(filepath.Separator)) ||
+		if strings.HasPrefix(rel, filepath.Join("scripts", "b1genesis")+string(filepath.Separator)) || strings.HasPrefix(rel, filepath.Join("internal", "testutils", "b1fixture")+string(filepath.Separator)) ||
+			strings.HasPrefix(rel, "registrygenesis"+string(filepath.Separator)) ||
 			strings.HasPrefix(rel, "recordwiring"+string(filepath.Separator)) ||
 			strings.HasPrefix(rel, filepath.Join("internal", "testutils", "certifiedchain")+string(filepath.Separator)) {
 			return nil

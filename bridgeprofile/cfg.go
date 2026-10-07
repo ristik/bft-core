@@ -1,6 +1,11 @@
 package bridgeprofile
 
-import "math/big"
+import (
+	"encoding/hex"
+	"math/big"
+	"strconv"
+	"strings"
+)
 
 // Cfg is the immutable configuration
 // C("UNICITY_BR_CFG",network,rootGenesis,chainId,executionGenesis,evmPartition,
@@ -75,6 +80,9 @@ func DecodeCfg(b []byte) (*Cfg, error) {
 	if err != nil {
 		return nil, err
 	}
+	if nw == 0 {
+		return nil, ErrIntRange
+	}
 	c.Network = uint16(nw)
 	if err := fixed(&k[2], c.RootGenesis[:]); err != nil {
 		return nil, err
@@ -112,20 +120,31 @@ func fixed(it *item, dst []byte) error {
 	return nil
 }
 
-// DeriveType is ty = H(C("UNICITY_NATIVE_WHOLE",network,executionGenesis,vault)):
-// network is a uint, executionGenesis and vault are bstr.
-func DeriveType(network uint16, executionGenesis [32]byte, vault [20]byte) [32]byte {
-	return H(CArr(CBytes([]byte("UNICITY_NATIVE_WHOLE")), CUint(uint64(network)),
-		CBytes(executionGenesis[:]), CBytes(vault[:])))
+// IdentityFamily is the bridge identity family of this profile. It is not a
+// CAIP-2 namespace.
+const IdentityFamily = "unicity-native"
+
+// identityD is D = networkDecimal:rootGenesisHex:executionGenesisHex:chainIdDecimal:zeroAddressHex.
+// Decimals have no leading zeros, genesis hex is 64 lowercase characters and
+// the zero address is 40 zero characters, none with a 0x prefix. The vault is
+// excluded: approved replacement vaults represent the same asset.
+func identityD(network uint16, rootGenesis, executionGenesis [32]byte, chainID uint64) string {
+	return strconv.FormatUint(uint64(network), 10) + ":" + hex.EncodeToString(rootGenesis[:]) + ":" +
+		hex.EncodeToString(executionGenesis[:]) + ":" + strconv.FormatUint(chainID, 10) + ":" + strings.Repeat("0", 40)
 }
 
-// DeriveAsset is aid = H(C("UNICITY_NATIVE_UCT",network,executionGenesis)).
-func DeriveAsset(network uint16, executionGenesis [32]byte) [32]byte {
-	return H(CArr(CBytes([]byte("UNICITY_NATIVE_UCT")), CUint(uint64(network)),
-		CBytes(executionGenesis[:])))
+// DeriveType is ty = SHA256(UTF8("unicity-bridge:unicity-native:" + D)).
+func DeriveType(network uint16, rootGenesis, executionGenesis [32]byte, chainID uint64) [32]byte {
+	return H([]byte("unicity-bridge:" + IdentityFamily + ":" + identityD(network, rootGenesis, executionGenesis, chainID)))
 }
 
-// MintData is the exact mint payload C(b(aid),b(amount)).
-func MintData(aid [32]byte, amount *big.Int) []byte {
-	return CArr(CBytes(aid[:]), CAmount(amount))
+// DeriveAsset is aid = SHA256(UTF8("unicity-bridge-coin:unicity-native:" + D)).
+func DeriveAsset(network uint16, rootGenesis, executionGenesis [32]byte, chainID uint64) [32]byte {
+	return H([]byte("unicity-bridge-coin:" + IdentityFamily + ":" + identityD(network, rootGenesis, executionGenesis, chainID)))
+}
+
+// ValueData is the genesis data: the common wallet value envelope
+// tag(39050,[1,[[b(aid32),b(amount)]],null]) with exactly one inline asset.
+func ValueData(aid [32]byte, amount *big.Int) []byte {
+	return CTag(TagValue, CArr(CUint(ValueVersion), CArr(CArr(CBytes(aid[:]), CAmount(amount))), CNull))
 }
