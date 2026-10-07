@@ -62,7 +62,9 @@ C_max reservation. Rust's matching wire change belongs to PR4.
 stored, and the fresh path reads only `unicity.seal-registry/` slots. Historical
 v1/v2 deployment readers and fixtures remain for existing inactive lanes; they
 cannot authorize B1 or parse its fresh allocation. Selecting a historical artifact
-alone cannot construct a B1 genesis. `GenerateB1` requires verified root genesis
+alone cannot construct a B1 genesis. Local parent-proof RPC contexts preserve
+FreshB1; the existing version-1 peer wire explicitly refuses layouts it cannot
+represent. `GenerateB1` requires verified root genesis
 and a complete pinned execution profile. Its genesis commitment binds both root
 genesis and profile, without embedding its own resulting execution genesis hash.
 `B1Origin` reconstructs and validates the complete fixed/dynamic allocation.

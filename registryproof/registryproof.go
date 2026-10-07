@@ -248,7 +248,7 @@ type Context struct {
 	ShardEpoch        uint64         // G.shardEpoch
 	RootEpoch         uint64         // G.rootEpoch
 	EVMGenesisHash    common.Hash    // evmGenesisHash
-	// Layout selects the registry layout: zero or 1 is sealRegistry/v1, 2 is sealRegistry/v2.
+	// Layout selects a historical reader (zero/1 or 2), or the inactive FreshB1 allocation.
 	Layout uint64
 	// Active is the authenticated active assignment of a v2 parent; see Assignment.
 	Active Assignment
@@ -275,7 +275,7 @@ func (c Context) check() error {
 type Evidence struct {
 	Header        []byte     // RLP(header)
 	AccountProof  [][]byte   // trie nodes for Keccak-256(RegistryAddress)
-	StorageProofs [][][]byte // exactly FieldCount entries, in SlotNames order
+	StorageProofs [][][]byte // exactly FieldCountFor(Layout) entries, in that layout's fixed-slot order
 }
 
 // limits are the §7.4 bounds; docs/design/f4c-registry-proof-reader.md gives the derivation.
@@ -510,9 +510,9 @@ type Fields struct {
 	ShardConfHash                                      common.Hash
 	ShardEpoch                                         uint64
 	RootEpoch                                          uint64
-	// Layout is the registry layout the snapshot was read under (1 or 2).
+	// Layout is the local registry reader selector, including FreshB1.
 	Layout uint64
-	// ActiveConfHash and SpanCommitment exist in layout 2 only. ShardConfHash stays the immutable genesis hash.
+	// ActiveConfHash and SpanCommitment exist in layout 2 and FreshB1. ShardConfHash stays the immutable genesis hash.
 	ActiveConfHash                                                    common.Hash
 	SpanCommitment                                                    common.Hash
 	ClockRootRound                                                    uint64

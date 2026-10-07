@@ -104,7 +104,7 @@ type Record struct {
 	BaseConfigHash   common.Hash
 	ShardEpoch       uint64
 	RootEpoch        uint64
-	// Layout is the registry layout version G commits to: 1 or, for the assignment-aware registry, 2.
+	// Layout selects a historical commitment (1/2) or the fresh B1 preimage.
 	// Zero is read as 1, so every v1 record keeps its bytes.
 	Layout                       uint64
 	RootGenesisID, B1ProfileHash common.Hash
@@ -122,7 +122,8 @@ func (g Record) clone() Record {
 	return g
 }
 
-// Encode is CBOR(G): deterministic CBOR of the twelve-element array of §5.1.
+// Encode is CBOR(G). Historical deployments preserve the twelve-field §5.1
+// array; FreshB1 binds root genesis and profile in thirteen fields with no layout word.
 func (g Record) Encode() ([]byte, error) {
 	if g.Layout == registryproof.FreshB1 {
 		return bfttypes.Cbor.Marshal([]any{genesisDomain, g.NetworkID, g.PartitionID, g.ShardID, g.ChainID, g.SystemAddress.Bytes(), g.RegistryAddress.Bytes(), g.RegistryCodeHash.Bytes(), g.BaseConfigHash.Bytes(), g.ShardEpoch, g.RootEpoch, g.RootGenesisID.Bytes(), g.B1ProfileHash.Bytes()})

@@ -60,7 +60,7 @@ type Context struct {
 	EVMGenesisHash    common.Hash
 	ShardEpoch        uint64
 	RootEpoch         uint64
-	// Layout is the SealRegistry layout of the deployment (zero or 1: sealRegistry/v1; 2: sealRegistry/v2). The
+	// Layout selects the historical registry (zero/1 or 2) or inactive FreshB1. The
 	// wire context of protocol version 1 has no field for it, so a layout-2 context is never encoded: it fails
 	// closed instead of being read by a v1 peer as the other registry.
 	Layout uint64

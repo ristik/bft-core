@@ -76,6 +76,7 @@ replace('bootstrap-parent-clock','rootinput/b1.go','if parent.Genesis() {','if f
 replace('export-entry-validity','b1state/storage.go','if err := e.Validate(); err != nil {','if err := e.Validate(); err != nil && false {','b1paired','TestEntryStorageRefusesInvalidAuthorityEntry')
 guard('fresh-allocation-config-required','registrygenesis/registrygenesis.go','art.b1 == nil','registrygenesis','TestFreshB1ArtifactGuards')
 guard('authority-capability-present','internal/b1authority/source.go','s == nil || s.history == nil','internal/b1authority','TestUnavailableCapabilityCannotGrantAuthority')
+guard('proof-layout-selector','parentwitness/wire.go','r.Context.Layout > registryproof.FreshB1','parentwitness','TestRegistryLayoutIsCarriedIntoTheProofContextAndNeverDroppedOnTheWire')
 # Error propagation / duplicated defense guards can be dominated. Record honestly.
 if len(sys.argv)>1:cases=[c for c in cases if c[0] in sys.argv[1:]]
 env=os.environ.copy();assert env['GOCACHE'].startswith('/private/tmp/')
