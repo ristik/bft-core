@@ -63,7 +63,6 @@ func TestSupersessionChainLengthIsBoundedAtRootAdmission(t *testing.T) {
 	span := int(handoff.MaxSupersessionSpan)
 	t.Run("a short chain is superseded", func(t *testing.T) {
 		require.NoError(t, supersedeChain(t, 1))
-		require.NoError(t, supersedeChain(t, 10))
 	})
 	t.Run("the supersession that makes the chain exactly the span is accepted", func(t *testing.T) {
 		require.NoError(t, supersedeChain(t, span-1), "%d committed steps plus this supersession is %d, the span", span-1, span)
@@ -91,7 +90,7 @@ func TestSupersessionChainLengthIsBoundedAtRootAdmission(t *testing.T) {
 		require.ErrorIs(t, CheckSupersessionChainLength(-1), ErrSupersessionChainTooLong)
 	})
 	t.Run("the length refusal is not what refuses a short chain with a bad binding", func(t *testing.T) {
-		o := newChainOrchestration(3)
+		o := newChainOrchestration(span - 1)
 		si := pendingShardOf(o)
 		chain, err := CommittedChain(o, si.PartitionID, si.ShardID, si.IR.Epoch)
 		require.NoError(t, err)

@@ -18,7 +18,7 @@ const EVMTransitionVersion uint64 = 3
 
 // MaxSupersessionSpan bounds the committed handoffs one folded acknowledgement
 // may summarize, matching the Ureth decoder.
-const MaxSupersessionSpan uint64 = 64
+const MaxSupersessionSpan uint64 = 2
 
 // EVMTransition is the single acknowledgement payload sent across the trusted
 // local bft-core/ureth link. The Ack encoding binds the EVM round and parent.

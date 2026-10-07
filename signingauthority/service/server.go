@@ -417,7 +417,7 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
 			return nil, fmt.Errorf("%w: handoff possession proof request: %v", errMalformed, err)
 		}
-		if len(wire.Predecessor) != 32 {
+		if len(wire.Predecessor) != 32 || len(wire.Identities) != 32 {
 			return nil, fmt.Errorf("%w: the context names 32-byte hashes", errMalformed)
 		}
 		var succ types.PartitionDescriptionRecord
@@ -427,6 +427,7 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		request := signingauthority.HandoffPoPRequest{Domain: wire.Domain, Successor: &succ, NodeID: wire.NodeID,
 			Context: evmassign.PoPContext{Network: wire.Network, Attempt: wire.Attempt}}
 		copy(request.Context.Predecessor[:], wire.Predecessor)
+		copy(request.Context.Identities[:], wire.Identities)
 		pop, err := s.authority.SignHandoffPoP(request)
 		if err != nil {
 			s.log.Warn("refusing a handoff possession proof", slog.String("err", err.Error()))
@@ -435,7 +436,7 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		// The authority's only signature outside certification: audit every one, not only the refusals.
 		s.log.Info("signed a handoff possession proof",
 			slog.String("node", wire.NodeID), slog.Uint64("successorEpoch", succ.Epoch), slog.Uint64("attempt", wire.Attempt),
-			slog.String("predecessor", fmt.Sprintf("%x", wire.Predecessor)))
+			slog.String("predecessor", fmt.Sprintf("%x", wire.Predecessor)), slog.String("identities", fmt.Sprintf("%x", wire.Identities)))
 		return types.Cbor.Marshal(pop)
 	case opCompleteEnrollment:
 		var conf types.PartitionDescriptionRecord

@@ -231,7 +231,10 @@ func ValidateSuccessorWith(r Rules, current, succ *types.PartitionDescriptionRec
 // AssignmentHash binds network/partition/shard, the new shard epoch, the sorted
 // validator identities with keys and unit weights, and the non-membership
 // configuration hash. PoPs are outside it, avoiding a cycle.
-func AssignmentHash(succ *types.PartitionDescriptionRecord) ([32]byte, error) {
+//
+// identities is the IdentitiesDigest of the frozen identity records (operator payees included); an aggregator replacement has no
+// identity records and passes the zero digest.
+func AssignmentHash(succ *types.PartitionDescriptionRecord, identities [32]byte) ([32]byte, error) {
 	if succ == nil {
 		return [32]byte{}, ErrAssignment
 	}
@@ -244,7 +247,7 @@ func AssignmentHash(succ *types.PartitionDescriptionRecord) ([32]byte, error) {
 		set = append(set, []any{v.NodeID, []byte(v.SigKey), v.Stake})
 	}
 	return hashCBOR(assignmentDomain, uint64(1), uint64(succ.NetworkID), uint64(succ.PartitionID),
-		succ.ShardID.Bytes(), succ.Epoch, set, cfg[:])
+		succ.ShardID.Bytes(), succ.Epoch, set, cfg[:], identities[:])
 }
 
 // Activate returns the configuration the root installs at the committed
@@ -272,11 +275,14 @@ type PoPContext struct {
 	Network     uint64
 	Predecessor [32]byte
 	Attempt     uint64
+	// Identities is the IdentitiesDigest of the successor's identity records; the possession message signs it through the assignment
+	// hash. Zero for an aggregator replacement.
+	Identities [32]byte
 }
 
 // PoPMessage is the domain-separated canonical message signed by one successor key.
 func PoPMessage(c PoPContext, succ *types.PartitionDescriptionRecord, nodeID string) ([]byte, error) {
-	h, err := AssignmentHash(succ)
+	h, err := AssignmentHash(succ, c.Identities)
 	if err != nil {
 		return nil, err
 	}
@@ -306,6 +312,12 @@ type Proposal struct {
 	Bindings []Binding `json:"bindings"`
 	// Changes are aggregator validator (node-key) replacements committed in the same handoff; each is a ReplaceShardValidators.
 	Changes []Change `json:"changes,omitempty"`
+	// Kind selects KindPrimary (the default zero value is read as primary) or KindRecovery. A recovery is derived from the committed
+	// primary (DeriveRecovery) and takes no validators, bindings or proofs from the operator.
+	Kind uint64 `json:"kind,omitempty"`
+	// Identities and Authorization are the primary's frozen identity records and recovery authorization.
+	Identities    []Identity     `json:"identities,omitempty"`
+	Authorization *Authorization `json:"authorization,omitempty"`
 }
 
 // SignPoP signs the possession message with the successor key itself.

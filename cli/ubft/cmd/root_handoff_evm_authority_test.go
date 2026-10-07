@@ -61,6 +61,9 @@ func TestEVMPoPFromASigningAuthority(t *testing.T) {
 	ctx := consensus.EVMAssignmentContext{Network: uint64(installed.NetworkID), Predecessor: bytes.Repeat([]byte{1}, 32), Attempt: 1, Installed: installed}
 	contextFile := writeJSON(t, dir, "context.json", ctx)
 	validatorsFile := writeJSON(t, dir, "validators.json", infos)
+	authSucc, err := evmassign.NewSuccessor(installed, infos)
+	require.NoError(t, err)
+	identitiesFile, _, _, identitiesDigest := identityFixture(t, dir, installed, authSucc, ctx.Predecessor)
 
 	run := func(args ...string) (string, error) {
 		var out bytes.Buffer
@@ -70,35 +73,36 @@ func TestEVMPoPFromASigningAuthority(t *testing.T) {
 		err := cmd.Execute()
 		return out.String(), err
 	}
-	out, err := run("--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-auth",
+	out, err := run("--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-auth", "--identities", identitiesFile,
 		"--authority-socket", filepath.Join(dir, "operator.sock"), "--authority-credential", credentialPath)
 	require.NoError(t, err)
 	var pop evmassign.PoP
 	require.NoError(t, json.Unmarshal([]byte(out), &pop))
 	_, popContext, err := readContextFile(contextFile)
 	require.NoError(t, err)
+	popContext.Identities = identitiesDigest
 	succ, err := evmassign.NewSuccessor(installed, infos)
 	require.NoError(t, err)
 	require.NoError(t, evmassign.VerifyPoPs(popContext, succ, []evmassign.PoP{pop}), "the authority's proof verifies in the handoff")
 
 	t.Run("the shard node's client socket is not the operator channel", func(t *testing.T) {
-		_, err := run("--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-auth",
+		_, err := run("--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-auth", "--identities", identitiesFile,
 			"--authority-socket", filepath.Join(dir, "client.sock"), "--authority-credential", credentialPath)
 		require.ErrorIs(t, err, service.ErrWrongEndpoint, "the client endpoint does not serve a possession proof")
 	})
 	t.Run("a key file and the authority flags together are refused", func(t *testing.T) {
 		keyConf := writeJSON(t, dir, "keys.json", map[string]string{"unused": "the refusal comes before the key is read"})
-		_, err := run("--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-auth", "--key-conf", keyConf,
+		_, err := run("--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-auth", "--key-conf", keyConf, "--identities", identitiesFile,
 			"--authority-socket", filepath.Join(dir, "operator.sock"), "--authority-credential", credentialPath)
 		require.ErrorIs(t, err, errBothKeyHolders)
 		// Either authority flag alone with a key file is the same conflict.
-		_, err = run("--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-auth", "--key-conf", keyConf,
+		_, err = run("--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-auth", "--key-conf", keyConf, "--identities", identitiesFile,
 			"--authority-credential", credentialPath)
 		require.ErrorIs(t, err, errBothKeyHolders)
 	})
 	t.Run("a node that is not the authority's is refused", func(t *testing.T) {
 		other := []*types.NodeInfo{{NodeID: "someone-else", SigKey: key, Stake: 1}}
-		_, err := run("--context", contextFile, "--validators", writeJSON(t, dir, "other.json", other), "--node-id", "someone-else",
+		_, err := run("--context", contextFile, "--validators", writeJSON(t, dir, "other.json", other), "--node-id", "someone-else", "--identities", identitiesFile,
 			"--authority-socket", filepath.Join(dir, "operator.sock"), "--authority-credential", credentialPath)
 		require.ErrorIs(t, err, signingauthority.ErrContextMismatch)
 	})
