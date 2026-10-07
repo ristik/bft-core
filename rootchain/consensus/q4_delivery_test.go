@@ -27,6 +27,7 @@ var (
 	errQ4TriggerNotFired = errors.New("q4 delivery: a required trigger never fired")
 	errQ4RuleNotHit      = errors.New("q4 delivery: a required rule never matched a message")
 	errQ4NoDecision      = errors.New("q4 delivery: replay has no recorded decision for this message")
+	errQ4CopyDecode      = errors.New("q4 delivery: recorded message cannot be decoded")
 	errQ4CopyMismatch    = errors.New("q4 delivery: message does not survive its serialized copy")
 )
 
@@ -86,7 +87,7 @@ func q4Copy(m q4Msg) (any, error) {
 		return nil, nil
 	}
 	if err := types.Cbor.Unmarshal(m.Raw, out); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errQ4CopyDecode, err)
 	}
 	again, err := types.Cbor.Marshal(out)
 	if err != nil || !bytes.Equal(again, m.Raw) {
@@ -135,6 +136,7 @@ type q4Rule struct {
 	After   string // name of the trigger that must have fired before the rule applies; empty: always
 	Require bool   // the rule must match at least one message
 	hits    int
+	retired bool
 }
 
 type q4Trigger struct {
@@ -256,7 +258,7 @@ func (s *q4Sched) route(n *skewedNet, from, to peer.ID, msg any) (uint64, error)
 		action = a
 	} else {
 		for _, r := range s.rules {
-			if !r.Match.matches(from, to, m) || !s.active(r) {
+			if r.retired || !r.Match.matches(from, to, m) || !s.active(r) {
 				continue
 			}
 			r.hits++
@@ -446,11 +448,29 @@ func (s *q4Sched) AddRule(r *q4Rule) {
 	s.rules = append([]*q4Rule{r}, s.rules...)
 }
 
-// RemoveRule stops the named rule matching; messages it already held stay held until released.
+// RemoveRule deactivates matching but retains the rule and its hit history for Finish.
+// Messages it already held stay held until released.
 func (s *q4Sched) RemoveRule(name string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.rules = slices.DeleteFunc(s.rules, func(r *q4Rule) bool { return r.Name == name })
+	for _, r := range s.rules {
+		if r.Name == name {
+			r.retired = true
+		}
+	}
+}
+
+// requireHits audits intended rule names independently of rule construction, so
+// omitting an entire direction is also a failed injection.
+func (s *q4Sched) requireHits(names ...string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, name := range names {
+		if !slices.ContainsFunc(s.rules, func(r *q4Rule) bool { return r.Name == name && r.hits > 0 }) {
+			return fmt.Errorf("%w: %s", errQ4RuleNotHit, name)
+		}
+	}
+	return nil
 }
 
 // Finish closes the scheduler (what is still held is recorded as discarded, so that nothing is lost silently) and reports every
@@ -643,6 +663,61 @@ func TestQ4Delivery(t *testing.T) {
 		require.ErrorIs(t, err, errQ4RuleNotHit)
 	})
 
+	t.Run("retired required rules keep their hit audit", func(t *testing.T) {
+		for _, hit := range []bool{true, false} {
+			t.Run(fmt.Sprintf("hit=%v", hit), func(t *testing.T) {
+				_, conns, sched := build(t, []*q4Rule{{Name: "retire-me", Match: q4Match{From: q4IDs(a), To: q4IDs(h)}, Action: q4Drop, Require: true}}, nil)
+				if hit {
+					send(conns[a.ID], vote(a, 6, 1), h.ID)
+				}
+				sched.RemoveRule("retire-me")
+				send(conns[a.ID], vote(a, 7, 1), h.ID)
+				require.EqualValues(t, 7, recv(conns[h.ID]).VoteInfo.RoundNumber, "retired rule no longer drops traffic")
+				if hit {
+					require.NoError(t, sched.Finish())
+				} else {
+					require.ErrorIs(t, sched.Finish(), errQ4RuleNotHit)
+				}
+			})
+		}
+	})
+
+	t.Run("bidirectional cut must hit both directions before retirement", func(t *testing.T) {
+		for _, missing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("missing-inbound=%v", missing), func(t *testing.T) {
+				run := &q4Run{r: r}
+				rules := run.cutRules([]string{"a"}, "both")
+				require.Len(t, rules, 2, "both intended directions must be installed")
+				if missing {
+					rules[1].Match.Epoch = 999 // reviewer's isolated zero-hit mutation
+				}
+				net, conns, sched := build(t, rules, nil)
+				send(conns[a.ID], vote(a, 6, 1), h.ID)
+				send(conns[h.ID], vote(h, 6, 1), a.ID)
+				require.Equal(t, 1, sched.Held("cut-out"))
+				if !missing {
+					require.Equal(t, 1, sched.Held("cut-in"))
+				}
+				if missing {
+					require.ErrorIs(t, sched.requireHits("cut-out", "cut-in"), errQ4RuleNotHit)
+				} else {
+					require.NoError(t, sched.requireHits("cut-out", "cut-in"))
+				}
+				_, err := sched.release(net, "", q4FIFO)
+				require.NoError(t, err)
+				sched.RemoveRule("cut-out")
+				sched.RemoveRule("cut-in")
+				if missing {
+					err := sched.Finish()
+					require.ErrorIs(t, err, errQ4RuleNotHit)
+					require.ErrorContains(t, err, "cut-in")
+				} else {
+					require.NoError(t, sched.Finish())
+				}
+			})
+		}
+	})
+
 	t.Run("held messages that are never released are recorded as discarded", func(t *testing.T) {
 		_, conns, s := build(t, []*q4Rule{{Name: "hold", Match: q4Match{Class: q4Vote}, Action: q4Hold}}, nil)
 		send(conns[a.ID], vote(a, 6, 1), h.ID)
@@ -707,9 +782,11 @@ func TestQ4Delivery(t *testing.T) {
 		_, err = q4Copy(m)
 		require.ErrorIs(t, err, errQ4CopyMismatch)
 
+		m, err = q4Describe(v) // isolate the trailing-byte mutation from the noncanonical encoding
+		require.NoError(t, err)
 		m.Raw = append(slices.Clone(m.Raw), 0xf6) // trailing bytes do not decode at all
 		_, err = q4Copy(m)
-		require.Error(t, err)
+		require.ErrorIs(t, err, errQ4CopyDecode)
 	})
 }
 

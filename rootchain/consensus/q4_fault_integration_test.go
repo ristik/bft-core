@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
@@ -45,9 +47,23 @@ type q4Run struct {
 	byz   map[string]bool // peer ID string of the Byzantine identities
 	start time.Time
 
-	mu      sync.Mutex
-	started map[int]bool
-	seen    map[int][]q4Commit
+	mu     sync.Mutex
+	seen   map[int][]q4Commit
+	blocks map[int]map[uint64]q4Block
+	chains map[int]map[uint64]q4Block
+	faults []error
+}
+
+var (
+	errQ4ChainConflict = errors.New("q4 finality: conflicting committed history")
+	errQ4ChainMissing  = errors.New("q4 finality: missing committed ancestry")
+	errQ4Recovery      = errors.New("q4 recovery: insufficient post-fault commits")
+)
+
+// q4Block owns its hash; no pointer into the mutable, pruning block store is retained.
+type q4Block struct {
+	Hash   []byte
+	Parent uint64
 }
 
 type q4Commit struct {
@@ -68,7 +84,7 @@ func newQ4Run(t *testing.T, r *q4Roster, man q4Manifest, rules []*q4Rule, trigge
 		}
 	}
 	c := newClusterOf(t, clusterSpec{roster: r, weightedLeader: true}, sync...)
-	run := &q4Run{t: t, r: r, c: c, man: &man, byz: map[string]bool{}, started: map[int]bool{}, seen: map[int][]q4Commit{}, start: time.Now()}
+	run := &q4Run{t: t, r: r, c: c, man: &man, byz: map[string]bool{}, seen: map[int][]q4Commit{}, blocks: map[int]map[uint64]q4Block{}, chains: map[int]map[uint64]q4Block{}, start: time.Now()}
 	for _, n := range q4Names(man.Byzantine, "root") {
 		run.byz[r.Entities[r.Index(n)].ID.String()] = true
 	}
@@ -76,9 +92,9 @@ func newQ4Run(t *testing.T, r *q4Roster, man q4Manifest, rules []*q4Rule, trigge
 	c.net.sched = run.s
 	t.Logf("manifest: set=%s seed=%s coverage=%s class=%s weights=%v W=%d Q=%d F=%d byzantine=%v unavailable=%v responsive=%d deadline=%s delta=%s",
 		r.Set.Name, r.Seed, man.Coverage, man.Class(r), r.Weights, r.Total(), r.Quorum(), r.Faulty(), man.Byzantine, man.Unavailable, man.Responsive(r), man.Deadline, man.Delta)
-	stop := make(chan struct{})
-	t.Cleanup(func() { close(stop) })
-	go run.sample(stop)
+	for i := range c.nodes {
+		run.observeStore(i)
+	}
 	return run
 }
 
@@ -119,11 +135,6 @@ func (run *q4Run) startNodes(names ...string) {
 	run.t.Helper()
 	indices := run.idx(names...)
 	run.c.start(indices...)
-	run.mu.Lock()
-	for _, i := range indices {
-		run.started[i] = true
-	}
-	run.mu.Unlock()
 }
 
 // startAll starts every running identity and puts the Byzantine identities on the network.
@@ -137,68 +148,143 @@ func (run *q4Run) startAll() {
 
 func (run *q4Run) stopNode(name string) {
 	i := run.idx(name)[0]
-	run.mu.Lock()
-	delete(run.started, i)
-	run.mu.Unlock()
 	run.c.stop(i)
 }
 
-func (run *q4Run) sample(stop chan struct{}) {
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-tick.C:
-		}
-		run.mu.Lock()
-		for i := range run.started {
-			round := run.c.committedRound(i)
-			if obs := run.seen[i]; round > 1 && (len(obs) == 0 || round > obs[len(obs)-1].Round) {
-				run.seen[i] = append(obs, q4Commit{round, time.Now()})
+// q4HistoryStore observes successful writes synchronously. Snapshot the block before the
+// root write prunes durable history; record a commit only after that write succeeds.
+// Embedding BoltDB preserves all optional storage capabilities (including Close).
+type q4HistoryStore struct {
+	storage.BoltDB
+	run   *q4Run
+	index int
+}
+
+func (run *q4Run) observeStore(i int) {
+	db, ok := run.c.nodes[i].db.(storage.BoltDB)
+	require.True(run.t, ok)
+	run.c.nodes[i].db = &q4HistoryStore{BoltDB: db, run: run, index: i}
+}
+
+func (s *q4HistoryStore) WriteBlock(b *storage.ExecutedBlock, root bool) error {
+	hash, err := b.BlockData.Hash(crypto.SHA256)
+	if err != nil {
+		return err
+	}
+	block := q4Block{Hash: slices.Clone(hash), Parent: b.GetParentRound()}
+	// Serialize the write and observation with mark: a completed pre-mark root write
+	// can never appear later as a post-mark commit, even if the head was not sampled.
+	s.run.mu.Lock()
+	defer s.run.mu.Unlock()
+	if err := s.BoltDB.WriteBlock(b, root); err != nil {
+		return err
+	}
+	s.run.recordBlock(s.index, b.GetRound(), block, root)
+	return nil
+}
+
+// recordBlock is called with run.mu held. Retain locally executed ancestry too:
+// a commit may finalize several pending ancestors at once. Recovery may install a
+// checkpoint whose earlier blocks this node never executed; it remains a boundary,
+// and chainsAgree refuses to skip an older head beyond that boundary.
+func (run *q4Run) recordBlock(i int, round uint64, b q4Block, root bool) {
+	if run.blocks[i] == nil {
+		run.blocks[i] = map[uint64]q4Block{}
+	}
+	if run.chains[i] == nil {
+		run.chains[i] = map[uint64]q4Block{}
+	}
+	b.Hash = slices.Clone(b.Hash)
+	run.blocks[i][round] = b
+	if !root {
+		return
+	}
+	for at := round; at > 1; {
+		block, ok := run.blocks[i][at]
+		if !ok {
+			break
+		} // a recovery checkpoint boundary, not a skipped comparison
+		if old, exists := run.chains[i][at]; exists {
+			if !bytes.Equal(old.Hash, block.Hash) {
+				run.faults = append(run.faults, fmt.Errorf("%w: node %d round %d", errQ4ChainConflict, i, at))
 			}
+			break
 		}
-		run.mu.Unlock()
+		run.chains[i][at] = block
+		if block.Parent >= at {
+			run.faults = append(run.faults, errQ4ChainMissing)
+			break
+		}
+		at = block.Parent
+	}
+	obs := run.seen[i]
+	if round > 1 && (len(obs) == 0 || round > obs[len(obs)-1].Round) {
+		run.seen[i] = append(obs, q4Commit{round, time.Now()})
 	}
 }
 
-// q4Mark is a point in each node's commit observations; commits are counted after it.
-type q4Mark map[int]int
+// q4Mark freezes both the observation counts and the start of the recovery deadline.
+type q4Mark struct {
+	At     time.Time
+	Counts map[int]int
+}
 
 func (run *q4Run) mark() q4Mark {
 	run.mu.Lock()
 	defer run.mu.Unlock()
-	m := q4Mark{}
+	m := q4Mark{At: time.Now(), Counts: map[int]int{}}
 	for i := range run.r.Entities {
-		m[i] = len(run.seen[i])
+		m.Counts[i] = len(run.seen[i])
 	}
 	return m
 }
 
-// commitsSince are the distinct committed rounds the node's committed head took after the mark: an observed lower bound of the
-// ordinary commits, since the head is sampled. A TC or round advance never counts.
+// commitsSince counts distinct successful ordinary committed-root writes. A QC,
+// TC, round advance, or reinstall of the same root never counts as a new commit.
 func (run *q4Run) commitsSince(i int, m q4Mark) []q4Commit {
 	run.mu.Lock()
 	defer run.mu.Unlock()
-	return slices.Clone(run.seen[i][m[i]:])
+	return slices.Clone(run.seen[i][m.Counts[i]:])
 }
 
-// requireRecovery waits until every named node took at least n new committed heads and returns the first and n-th latency.
+func (run *q4Run) recovery(m q4Mark, n int, names ...string) error {
+	for _, i := range run.idx(names...) {
+		obs := run.commitsSince(i, m)
+		if len(obs) < n || obs[n-1].At.After(m.At.Add(run.man.Deadline)) {
+			return fmt.Errorf("%w: %s needs %d", errQ4Recovery, run.r.Entities[i].Name, n)
+		}
+	}
+	return nil
+}
+
+// waitRecovery uses the same predicate and frozen post-mark deadline for live rows
+// and the early-stop regression. It returns a sentinel refusal for negative tests.
+func (run *q4Run) waitRecovery(ctx context.Context, m q4Mark, n int, names ...string) error {
+	timer := time.NewTimer(max(time.Until(m.At.Add(run.man.Deadline)), 0))
+	defer timer.Stop()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := run.recovery(m, n, names...); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w: %w", run.recovery(m, n, names...), ctx.Err())
+		case <-timer.C:
+			return run.recovery(m, n, names...)
+		case <-tick.C:
+		}
+	}
+}
+
+// requireRecovery waits until every named node has n new ordinary commits.
 func (run *q4Run) requireRecovery(m q4Mark, n int, names ...string) (first, nth time.Duration) {
 	run.t.Helper()
-	from, indices := time.Now(), run.idx(names...)
-	require.Eventually(run.t, func() bool {
-		for _, i := range indices {
-			if len(run.commitsSince(i, m)) < n {
-				return false
-			}
-		}
-		return true
-	}, run.man.Deadline, 20*time.Millisecond, "at least %d ordinary root commits at every node of %v within the frozen deadline %s", n, names, run.man.Deadline)
-	for _, i := range indices {
+	require.NoError(run.t, run.waitRecovery(context.Background(), m, n, names...), "post-fault recovery within %s", run.man.Deadline)
+	for _, i := range run.idx(names...) {
 		obs := run.commitsSince(i, m)
-		first, nth = max(first, obs[0].At.Sub(from)), max(nth, obs[n-1].At.Sub(from))
+		first, nth = max(first, obs[0].At.Sub(m.At)), max(nth, obs[n-1].At.Sub(m.At))
 	}
 	return first, nth
 }
@@ -235,29 +321,72 @@ func (run *q4Run) requireStalled(names ...string) map[int]q4State {
 	return last
 }
 
-// requireChainsAgree: at every round both nodes hold a block of, the blocks are the same, and the committed heads are on one chain.
-func (run *q4Run) requireChainsAgree(names ...string) {
-	run.t.Helper()
+// chainsAgree compares immutable finalized history, including blocks already
+// pruned by either store. It also requires the lower committed head to occur in
+// the higher node's recorded ancestry, so an empty intersection cannot pass.
+func (run *q4Run) chainsAgree(names ...string) error {
 	indices := run.idx(names...)
-	hashAt := func(i int, round uint64) []byte {
-		b, err := run.c.manager(i).blockStore.Block(round)
-		if err != nil || b == nil {
-			return nil
-		}
-		h, err := b.BlockData.Hash(crypto.SHA256)
-		require.NoError(run.t, err)
-		return h
-	}
+	// Check the current stores against their immutable observations as well. A
+	// deliberately corrupted retained head must not be hidden by its earlier copy.
+	heads := map[int]q4Block{}
+	rounds := map[int]uint64{}
 	for _, i := range indices {
-		for _, j := range indices {
-			upto := min(run.c.committedRound(i), run.c.committedRound(j))
-			for round := uint64(2); round <= upto; round++ {
-				if a, b := hashAt(i, round), hashAt(j, round); a != nil && b != nil {
-					require.Equal(run.t, a, b, "round %d: %s and %s hold the same committed block", round, run.r.Entities[i].Name, run.r.Entities[j].Name)
+		state, err := run.c.manager(i).blockStore.GetState()
+		if err != nil {
+			return fmt.Errorf("%w: %v", errQ4ChainMissing, err)
+		}
+		b := state.CommittedHead.Block
+		hash, err := b.Hash(crypto.SHA256)
+		if err != nil {
+			return err
+		}
+		heads[i], rounds[i] = q4Block{Hash: hash, Parent: b.GetParentRound()}, b.Round
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	for i, b := range heads {
+		if rounds[i] <= 1 {
+			return errQ4ChainMissing
+		}
+		old, ok := run.chains[i][rounds[i]]
+		if !ok {
+			return errQ4ChainMissing
+		}
+		if !bytes.Equal(old.Hash, b.Hash) || old.Parent != b.Parent {
+			return fmt.Errorf("%w: %s's stored head at round %d changed", errQ4ChainConflict, run.r.Entities[i].Name, rounds[i])
+		}
+	}
+	if err := errors.Join(run.faults...); err != nil {
+		return err
+	}
+	for x, i := range indices {
+		for _, j := range indices[x+1:] {
+			if len(run.seen[i]) == 0 || len(run.seen[j]) == 0 {
+				return errQ4ChainMissing
+			}
+			left, right := i, j
+			ri := run.seen[i][len(run.seen[i])-1].Round
+			rj := run.seen[j][len(run.seen[j])-1].Round
+			if ri > rj {
+				left, right = j, i
+			}
+			lower := min(ri, rj)
+			if _, ok := run.chains[right][lower]; !ok {
+				return fmt.Errorf("%w: %s lacks %s's committed round %d", errQ4ChainMissing, run.r.Entities[right].Name, run.r.Entities[left].Name, lower)
+			}
+			for round, a := range run.chains[i] {
+				if b, ok := run.chains[j][round]; ok && (!bytes.Equal(a.Hash, b.Hash) || a.Parent != b.Parent) {
+					return fmt.Errorf("%w: round %d, %s and %s", errQ4ChainConflict, round, run.r.Entities[i].Name, run.r.Entities[j].Name)
 				}
 			}
 		}
 	}
+	return nil
+}
+
+func (run *q4Run) requireChainsAgree(names ...string) {
+	run.t.Helper()
+	require.NoError(run.t, run.chainsAgree(names...))
 }
 
 // requireQCWeight checks the node's highest QC with the oracle: signers are members, each signature verifies over the seal bytes with
@@ -388,6 +517,10 @@ func runQ4Row(t *testing.T, row q4Row) {
 		}
 	}
 	if len(row.Cut) > 0 {
+		require.NoError(t, run.s.requireHits("cut-out"))
+		if row.CutDir == "both" {
+			require.NoError(t, run.s.requireHits("cut-in"))
+		}
 		require.Positive(t, run.s.Held(""), "premise: the isolation held traffic")
 		before := run.state(run.idx(online[0])[0]).Committed
 		released, err := run.s.release(run.c.net, "", q4FIFO)
@@ -537,6 +670,7 @@ func TestQ4Fault(t *testing.T) {
 		run.stopNode("H")
 		run.requireStalled("a", "b", "c")
 		run.c.reopen(hi)
+		run.observeStore(hi)
 		heal := run.mark()
 		run.startNodes("H")
 		run.requireRecovery(heal, q4RecoverRound, r.Names()...)
@@ -550,6 +684,7 @@ func TestQ4Fault(t *testing.T) {
 		}
 		for _, n := range r.Names() {
 			run.c.reopen(run.idx(n)[0])
+			run.observeStore(run.idx(n)[0])
 		}
 		heal = run.mark()
 		run.startNodes(r.Names()...)
@@ -656,17 +791,11 @@ func TestQ4FaultByzantine(t *testing.T) {
 			run := newQ4Run(t, r, q4Manifest{Byzantine: targets}, nil, []*q4Trigger{trig}, false)
 			require.Equal(t, map[bool]string{true: "IN-BOUND", false: "OUTSIDE-ASSUMPTIONS"}[row.inBound], run.man.Class(r))
 			honest := run.running()
-			base := run.mark()
 			run.startAll()
 			require.Eventually(t, func() bool { return run.s.Fired(trig.Name) > 0 }, run.man.Deadline, 10*time.Millisecond, "the honest event that triggers the injection was observed")
-			template := run.honestVote(honest)
-			var bad []uint64
-			for _, n := range row.byz {
-				sent := run.equivocate(n, template, honest)
-				bad = append(append(bad, sent.Forged...), sent.Mixed...)
-			}
+			bad, postFault := run.injectAndMark(row.byz, honest)
 			if row.inBound {
-				run.requireRecovery(base, q4RecoverRound+1, honest...) // progress after the injection
+				run.requireRecovery(postFault, q4RecoverRound, honest...) // strictly after all injections
 				run.requireQCWeight(honest[0])
 				run.requireChainsAgree(honest...)
 			} else {
@@ -681,6 +810,105 @@ func TestQ4FaultByzantine(t *testing.T) {
 			}
 		})
 	}
+}
+
+// injectAndMark is shared with the early-stop control: only successful committed
+// roots written strictly after the final Byzantine send can satisfy recovery.
+func (run *q4Run) injectAndMark(byzantine, honest []string) ([]uint64, q4Mark) {
+	template := run.honestVote(honest)
+	var bad []uint64
+	for _, n := range byzantine {
+		sent := run.equivocate(n, template, honest)
+		bad = append(append(bad, sent.Forged...), sent.Mixed...)
+	}
+	return bad, run.mark()
+}
+
+// TestQ4FaultControls commits the reviewer's deliberately corrupted-evidence and
+// early-stop controls. They test the exact checkers used by the live fault rows.
+func TestQ4FaultControls(t *testing.T) {
+	t.Run("historical hash conflict after pruning", func(t *testing.T) {
+		r := q4DefaultRoster(t, q4SetA)
+		run := newQ4Run(t, r, q4Manifest{}, nil, nil, false)
+		base := run.mark()
+		run.startNodes("H", "a")
+		run.requireRecovery(base, 4, "H", "a")
+		run.stopNode("a")
+		ai, hi := run.idx("a")[0], run.idx("H")[0]
+		round := run.c.committedRound(ai)
+		b, err := run.c.manager(ai).blockStore.Block(round)
+		require.NoError(t, err)
+		before := slices.Clone(run.chains[ai][round].Hash)
+		base = run.mark()
+		run.startNodes("b")
+		run.requireRecovery(base, 5, "H", "b")
+		run.stopNode("H")
+		run.stopNode("b")
+		_, err = run.c.manager(hi).blockStore.Block(round)
+		require.ErrorContains(t, err, "not found", "premise only: the other store really pruned the old round")
+		require.NoError(t, run.chainsAgree("H", "a"), "control: different heads share finalized history")
+
+		// The reviewer's corruption: change only the stopped node's older head.
+		b.BlockData.Timestamp++
+		require.Equal(t, before, run.chains[ai][round].Hash, "retained history owns its hash")
+		require.ErrorIs(t, run.chainsAgree("H", "a"), errQ4ChainConflict)
+		b.BlockData.Timestamp--
+		require.NoError(t, run.chainsAgree("H", "a"))
+
+		// Isolate the historical comparison from the current-head integrity guard:
+		// corrupt only the advanced node's retained copy of the now-pruned round.
+		saved := run.chains[hi][round]
+		bad := saved
+		bad.Hash = slices.Clone(saved.Hash)
+		bad.Hash[0] ^= 1
+		run.chains[hi][round] = bad
+		require.ErrorIs(t, run.chainsAgree("H", "a"), errQ4ChainConflict)
+		run.chains[hi][round] = saved
+		require.NoError(t, run.chainsAgree("H", "a"))
+
+		delete(run.chains[hi], round)
+		require.ErrorIs(t, run.chainsAgree("H", "a"), errQ4ChainMissing, "missing ancestry cannot silently skip the lower head")
+		run.chains[hi][round] = saved
+		require.NoError(t, run.chainsAgree("H", "a"))
+	})
+
+	t.Run("early stop cannot count four pre-injection commits", func(t *testing.T) {
+		r := q4DefaultRoster(t, q4SetA)
+		run := newQ4Run(t, r, q4Manifest{Byzantine: []q4Target{{"b", "root"}, {"c", "root"}}}, nil, nil, false)
+		base := run.mark()
+		run.startAll()
+		honest := run.running()
+		run.requireRecovery(base, 4, honest...)
+		bad, postFault := run.injectAndMark([]string{"b", "c"}, honest)
+		for _, n := range honest {
+			run.stopNode(n)
+		}
+		require.NoError(t, run.recovery(base, 4, honest...), "premise: the old pre-start mark falsely satisfies recovery")
+		require.ErrorIs(t, run.recovery(postFault, q4RecoverRound, honest...), errQ4Recovery)
+		// Cancel the negative control promptly; the live row keeps its frozen
+		// 120 s post-injection deadline and uses the same wait and predicate.
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		require.ErrorIs(t, run.waitRecovery(ctx, postFault, q4RecoverRound, honest...), errQ4Recovery)
+		run.finish(bad...)
+	})
+
+	t.Run("a completed unsampled root is excluded by the mark", func(t *testing.T) {
+		r := q4DefaultRoster(t, q4SetA)
+		run := newQ4Run(t, r, q4Manifest{}, nil, nil, false)
+		base := run.mark()
+		run.startAll()
+		run.requireRecovery(base, 4, r.Names()...)
+		for _, n := range r.Names() {
+			run.stopNode(n)
+		}
+		mark := run.mark()
+		for _, i := range run.idx(r.Names()...) {
+			require.Equal(t, run.c.committedRound(i), run.seen[i][mark.Counts[i]-1].Round, "every completed root write was observed synchronously")
+			require.Empty(t, run.commitsSince(i, mark), "no late sampler may credit a pre-mark commit")
+		}
+		require.ErrorIs(t, run.recovery(mark, 1, r.Names()...), errQ4Recovery)
+	})
 }
 
 // honestVote is the template of the Byzantine votes: an honest identity's traced vote of a round of at least 4 when there is one,
