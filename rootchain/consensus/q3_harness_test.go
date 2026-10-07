@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
 	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
@@ -57,6 +58,9 @@ type q3Replica struct {
 	shard         *q3active.Guarded
 	authority     *toggledConsumer
 	opened        int
+	// incumbent, when set, replaces the fixture's committee as the shard's recorded genesis baseline: the authenticated incumbent the
+	// candidate's recovery authorization is compared with
+	incumbent []evmassign.Identity
 
 	// link, when set, is the manager's network in place of the mock one (a live cluster over skewedNet); durable opens the bolt files
 	// with fsync on, the stores a restart claims to read back
@@ -94,6 +98,14 @@ func (r *q3Replica) open(withQ3 bool) error {
 	require.NoError(t, err)
 	r.orchestration = orchestration
 	require.NoError(t, orchestration.AddShardConfig(r.f.ShardConf))
+	// the shard's authenticated genesis baseline: the committee the first handoff's recovery authorization names
+	baseline := r.f.Incumbent
+	if r.incumbent != nil {
+		baseline = r.incumbent
+	}
+	if len(baseline) > 0 { // only a coupled fixture has a baseline; a root-only handoff keeps none
+		require.NoError(t, orchestration.SetGenesisIdentities(r.f.ShardConf.PartitionID, r.f.ShardConf.ShardID, baseline))
+	}
 	trust, err := tbstore.NewTrustBaseStore(r.trustDB, obs.Logger())
 	require.NoError(t, err)
 	if _, err := trust.GetByEpoch(1); err != nil {

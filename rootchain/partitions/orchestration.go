@@ -27,6 +27,10 @@ var rootBucketName = []byte("root")
 // every child bucket of the latter is read as a partition.
 var derivedBucketName = []byte("derived")
 
+// genesisIdentitiesBucketName holds the authenticated genesis committee identity records of each shard: the incumbent baseline of the
+// first election. A missing baseline is an invalid configuration, never a no-recovery operating mode.
+var genesisIdentitiesBucketName = []byte("genesis-identities")
+
 var (
 	// ErrDerivedOnly refuses an external write of a designated EVM shard
 	// configuration after genesis: only verified committed history may change it.
@@ -77,6 +81,9 @@ func NewOrchestration(networkID types.NetworkID, dbFile string, log *slog.Logger
 		}
 		if _, err = tx.CreateBucketIfNotExists(derivedBucketName); err != nil {
 			return fmt.Errorf("creating %q bucket: %w", derivedBucketName, err)
+		}
+		if _, err = tx.CreateBucketIfNotExists(genesisIdentitiesBucketName); err != nil {
+			return fmt.Errorf("creating %q bucket: %w", genesisIdentitiesBucketName, err)
 		}
 		return nil
 	})
@@ -476,7 +483,7 @@ func (o *Orchestration) DerivedChain(partitionID types.PartitionID, shardID type
 				return err
 			}
 			steps = append(steps, evmassign.ChainStep{ShardEpoch: epoch, ConfHash: h, RecordID: p.RecordID,
-				CandidateDigest: p.CandidateDigest, RootEpoch: p.RootEpoch})
+				CandidateDigest: p.CandidateDigest, RootEpoch: p.RootEpoch, Kind: p.Kind, Preimage: p.Preimage})
 		}
 		return nil
 	})
@@ -658,4 +665,68 @@ func uint64ToKey(n uint64) []byte {
 
 func keyToUint64(key []byte) uint64 {
 	return binary.BigEndian.Uint64(key)
+}
+
+// ErrNoBaseline reports an incumbent baseline that was never recorded for a shard, or one that cannot be reconstructed.
+var ErrNoBaseline = errors.New("orchestration: no authenticated incumbent baseline")
+
+func baselineKey(partitionID types.PartitionID, shardID types.ShardID) []byte {
+	return append(append([]byte(nil), partitionID.Bytes()...), shardID.Bytes()...)
+}
+
+// SetGenesisIdentities records the genesis committee identity records of a shard once. Recording the same set again is a no-op and
+// a different set is a conflict.
+func (o *Orchestration) SetGenesisIdentities(partitionID types.PartitionID, shardID types.ShardID, ids []evmassign.Identity) error {
+	raw, err := types.Cbor.Marshal(ids)
+	if err != nil || len(ids) == 0 {
+		return ErrNoBaseline
+	}
+	return o.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(genesisIdentitiesBucketName)
+		key := baselineKey(partitionID, shardID)
+		if prior := b.Get(key); prior != nil && !bytes.Equal(prior, raw) {
+			return ErrDerivedConflict
+		}
+		return b.Put(key, raw)
+	})
+}
+
+// AcknowledgedIdentities returns the identity records of the acknowledged assignment of the shard at shard epoch epoch, with that
+// assignment's hash: from the retained committed candidate when the epoch was derived by a handoff, otherwise from the genesis
+// baseline when epoch is the genesis one.
+func (o *Orchestration) AcknowledgedIdentities(partitionID types.PartitionID, shardID types.ShardID, epoch uint64) ([]evmassign.Identity, [32]byte, error) {
+	var none [32]byte
+	conf, err := o.ShardConfigByEpoch(partitionID, shardID, epoch)
+	if err != nil || conf == nil {
+		return nil, none, errors.Join(ErrNoBaseline, err)
+	}
+	var ids []evmassign.Identity
+	err = o.db.View(func(tx *bolt.Tx) error {
+		if raw := tx.Bucket(derivedBucketName).Get(derivedKey(conf)); raw != nil {
+			p, err := evmassign.DecodeProvenance(raw)
+			if err != nil {
+				return ErrDerivedConflict
+			}
+			c, err := evmassign.DecodeCandidate(p.Preimage)
+			if err != nil {
+				return ErrDerivedConflict
+			}
+			ids = c.Identities
+			return nil
+		}
+		raw := tx.Bucket(genesisIdentitiesBucketName).Get(baselineKey(partitionID, shardID))
+		if raw == nil || types.Cbor.Unmarshal(raw, &ids) != nil {
+			return ErrNoBaseline
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, none, err
+	}
+	digest, err := evmassign.IdentitiesDigest(ids)
+	if err != nil {
+		return nil, none, err
+	}
+	hash, err := evmassign.AssignmentHash(conf, digest)
+	return ids, hash, err
 }

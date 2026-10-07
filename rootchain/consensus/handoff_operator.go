@@ -588,15 +588,36 @@ func (x *ConsensusManager) buildAssignmentCandidate(old, next *types.RootTrustBa
 			return nil, none, errors.Join(ErrHandoffApproval, err)
 		}
 	}
-	succ, err := evmassign.NewSuccessor(installed, proposal.Validators)
-	if err != nil {
+	lc := evmassign.Lifecycle{Kind: proposal.Kind, Identities: proposal.Identities, Authorization: proposal.Authorization}
+	if lc.Kind == 0 {
+		lc.Kind = evmassign.KindPrimary
+	}
+	validators, bindings, pops := proposal.Validators, proposal.Bindings, proposal.PoPs
+	var succ *types.PartitionDescriptionRecord
+	lifecycle := func() (evmassign.LifecycleContext, error) {
+		return storage.LifecycleFor(x.orchestration, shard.Partition, shard.Shard, shard.IR.Epoch, installed)
+	}
+	if lc.Kind == evmassign.KindRecovery {
+		// Derived, never chosen: exactly K from the committed primary, with no fresh proofs.
+		lctx, err := lifecycle()
+		if err != nil {
+			return nil, none, errors.Join(ErrHandoffApproval, err)
+		}
+		if lctx.Head == nil {
+			return nil, none, errors.Join(ErrHandoffApproval, evmassign.ErrRecoveryLineage)
+		}
+		if lc, succ, _, bindings, err = evmassign.DeriveRecovery(*lctx.Head, installed); err != nil {
+			return nil, none, errors.Join(ErrHandoffApproval, err)
+		}
+		pops = nil
+	} else if succ, err = evmassign.NewSuccessor(installed, validators); err != nil {
 		return nil, none, errors.Join(ErrHandoffApproval, err)
 	}
 	pop, err := popContext(uint64(old.NetworkID), predecessor, attempt)
 	if err != nil {
 		return nil, none, err
 	}
-	candidate, err := evmassign.NewCandidate(pop, nextRoot, installed, succ, proposal.PoPs, supersedes, proposal.Bindings, proposal.Changes)
+	candidate, err := evmassign.NewCandidate(pop, nextRoot, installed, succ, pops, supersedes, bindings, lc, proposal.Changes)
 	if err != nil {
 		return nil, none, errors.Join(ErrHandoffApproval, err)
 	}
@@ -607,6 +628,13 @@ func (x *ConsensusManager) buildAssignmentCandidate(old, next *types.RootTrustBa
 		return nil, none, errors.Join(ErrHandoffApproval, err)
 	}
 	if err := x.verifyChangesAgainstState(candidate, pop, state); err != nil {
+		return nil, none, errors.Join(ErrHandoffApproval, err)
+	}
+	lctx, err := lifecycle()
+	if err != nil {
+		return nil, none, errors.Join(ErrHandoffApproval, err)
+	}
+	if err := evmassign.VerifyLifecycle(candidate, lctx); err != nil {
 		return nil, none, errors.Join(ErrHandoffApproval, err)
 	}
 	raw, err := candidate.Encode()

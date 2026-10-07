@@ -20,6 +20,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
+	"github.com/unicitynetwork/bft-core/internal/testutils/identityfix"
 	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
@@ -104,7 +105,7 @@ func TestVerifiedAssignmentInstallsTheValidatorSetAndTheConfiguration(t *testing
 		Validators: nodes(self, kept, joiner)}
 	raw, err := types.Cbor.Marshal(succ)
 	require.NoError(t, err)
-	candidate, err := evmassign.Candidate{Version: evmassign.CandidateVersion, Assignment: raw}.Encode()
+	candidate, err := identityfix.Shaped(evmassign.Candidate{Version: evmassign.CandidateVersion, Assignment: raw}).Encode()
 	require.NoError(t, err)
 	bundle := handoffdelivery.Bundle{Candidate: candidate}
 	bundle.Proof.Record.ActivationRound = 7

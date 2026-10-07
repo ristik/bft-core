@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/testutils/identityfix"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -23,7 +24,11 @@ type coupledWorld struct {
 	bindings []evmassign.Binding
 	pops     []evmassign.PoP
 	pop      evmassign.PoPContext
+	ids      []evmassign.Identity
+	auth     *evmassign.Authorization
 }
+
+func (w *coupledWorld) lifecycle() evmassign.Lifecycle { return identityfix.Primary(w.ids, w.auth) }
 
 func newCoupledWorld(t *testing.T, weights ...uint64) *coupledWorld {
 	t.Helper()
@@ -60,6 +65,22 @@ func newCoupledWorld(t *testing.T, weights ...uint64) *coupledWorld {
 	succ, err := evmassign.NewSuccessor(current, next)
 	require.NoError(t, err)
 	w.succ = succ
+	w.ids = identityfix.Identities(w.root, succ, w.bindings)
+	digest, err := evmassign.IdentitiesDigest(w.ids)
+	require.NoError(t, err)
+	w.pop.Identities = digest
+	var oldRoot []evmassign.RootMember
+	var oldBindings []evmassign.Binding
+	for i, v := range current.Validators {
+		oldRoot = append(oldRoot, evmassign.RootMember{NodeID: "o" + v.NodeID, Key: bytes.Repeat([]byte{byte(80 + i)}, 33), Weight: 1})
+		oldBindings = append(oldBindings, evmassign.Binding{RootNodeID: "o" + v.NodeID, EVMNodeID: v.NodeID})
+	}
+	incumbent := identityfix.Identities(oldRoot, current, oldBindings)
+	incDigest, err := evmassign.IdentitiesDigest(incumbent)
+	require.NoError(t, err)
+	baseHash, err := evmassign.AssignmentHash(current, incDigest)
+	require.NoError(t, err)
+	w.auth = identityfix.Authorization(5, w.pop.Predecessor[:], baseHash, incumbent)
 	for _, v := range succ.Validators {
 		pop, err := evmassign.SignPoP(signers[v.NodeID], w.pop, succ, v.NodeID)
 		require.NoError(t, err)
@@ -69,7 +90,7 @@ func newCoupledWorld(t *testing.T, weights ...uint64) *coupledWorld {
 }
 
 func (w *coupledWorld) candidate(r evmassign.Rules) (evmassign.Candidate, error) {
-	return evmassign.NewCandidateWith(r, w.pop, w.root, w.current, w.succ, w.pops, nil, w.bindings, nil)
+	return evmassign.NewCandidateWith(r, w.pop, w.root, w.current, w.succ, w.pops, nil, w.bindings, w.lifecycle(), nil)
 }
 
 // A coupled successor with mirrored weights is a candidate only under the weighted rules; the unit rules (the default of every
@@ -81,7 +102,7 @@ func TestWeightedRulesAdmitAMirroredAssignmentAndUnitRulesDoNot(t *testing.T) {
 
 	_, err = w.candidate(evmassign.UnitRules)
 	require.ErrorIs(t, err, evmassign.ErrAssignment, "the unit rules refuse a weight of 6")
-	_, err = evmassign.NewCandidate(w.pop, w.root, w.current, w.succ, w.pops, nil, w.bindings, nil)
+	_, err = evmassign.NewCandidate(w.pop, w.root, w.current, w.succ, w.pops, nil, w.bindings, w.lifecycle(), nil)
 	require.ErrorIs(t, err, evmassign.ErrAssignment, "the unit entry point is unchanged")
 
 	raw, err := c.Encode()

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/testutils/identityfix"
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -27,6 +28,8 @@ func (f *assignmentFixture) useRealOrchestration(t *testing.T) {
 	// The handoff profile is not enabled here: tests add further genesis shards (addAggregator) and the derived install does not
 	// depend on it. freshOrchestration (profile on, one atomic genesis) covers the profile's refusals.
 	require.NoError(t, orch.AddShardConfig(f.current))
+	incumbent, _ := f.incumbent()
+	require.NoError(t, orch.SetGenesisIdentities(f.current.PartitionID, f.current.ShardID, incumbent))
 	f.orch = orch
 	f.store.orchestration = orch
 }
@@ -165,8 +168,8 @@ func TestEVMAssignmentActivatesOnceFromCommittedHistoryAndSurvivesRestart(t *tes
 		require.NoError(t, err)
 		require.Equal(t, h.successorT, trHash, rounds+": the installed TR is exactly the one H committed")
 		require.Contains(t, si.nodeIDs, "ev-e", rounds)
-		require.NotContains(t, si.nodeIDs, "ev-b", rounds+": a retired key is not in the shard's trust base")
-		require.ErrorIs(t, si.Verify("ev-b", func(abcrypto.Verifier) error { return nil }), ErrNodeNotInTrustBase, rounds)
+		require.NotContains(t, si.nodeIDs, "ev-d", rounds+": a retired key is not in the shard's trust base")
+		require.ErrorIs(t, si.Verify("ev-d", func(abcrypto.Verifier) error { return nil }), ErrNodeNotInTrustBase, rounds)
 		var prev map[string]uint64
 		require.NoError(t, types.Cbor.Unmarshal(si.PrevEpochFees, &prev), rounds)
 		require.EqualValues(t, 7, prev["ev-a"], rounds+": the retired epoch's fees are rolled exactly once")
@@ -179,7 +182,7 @@ func TestEVMAssignmentActivatesOnceFromCommittedHistoryAndSurvivesRestart(t *tes
 	// A restart reloads the new set, never the retired one.
 	s = restart()
 	check(mustBlock(t, s, 10), "after restart")
-	for _, retired := range []string{"ev-b", "ev-c", "ev-d"} {
+	for _, retired := range []string{"ev-d"} {
 		require.NotContains(t, mustBlock(t, s, 10).ShardState.States[f.shard].nodeIDs, retired)
 	}
 }
@@ -191,6 +194,8 @@ func freshOrchestration(t *testing.T, f *assignmentFixture, extra ...*types.Part
 	t.Cleanup(func() { _ = orch.Close() })
 	orch.EnableHandoffProfile()
 	require.NoError(t, orch.InitGenesisShardConfigs(append([]*types.PartitionDescriptionRecord{f.current}, extra...)...))
+	incumbent, _ := f.incumbent()
+	require.NoError(t, orch.SetGenesisIdentities(f.current.PartitionID, f.current.ShardID, incumbent))
 	return orch
 }
 
@@ -244,7 +249,7 @@ func TestConflictingDerivedEntryRefusesStartup(t *testing.T) {
 	require.NoError(t, err)
 	rogue, err := evmassign.Activate(other, 7)
 	require.NoError(t, err)
-	rogueProvenance, err := evmassign.Provenance{RecordID: bytes.Repeat([]byte{9}, 32), CandidateDigest: bytes.Repeat([]byte{8}, 32), RootEpoch: 2}.Bytes()
+	rogueProvenance, err := testRogueProvenance(t).Bytes()
 	require.NoError(t, err)
 	require.NoError(t, conflicting.InstallDerivedShardConfig(rogue, rogueProvenance))
 	_, err = New(crypto.SHA256, f.store.storage, conflicting, logger.New(t), ProfileHandoff)
@@ -310,7 +315,8 @@ func TestAbortThenRetryWithAnotherAssignmentInstallsOnlyTheRetry(t *testing.T) {
 	// Attempt 1 carries a different successor set and fresh proofs of possession.
 	f.pop.Attempt = 1
 	f.base = 5
-	f.nextKeys = []evmKey{f.oldKeys[0], newEVMKey(t, "ev-h"), newEVMKey(t, "ev-i"), newEVMKey(t, "ev-j")}
+	f.nextKeys = []evmKey{f.oldKeys[0], f.oldKeys[1], f.oldKeys[2], newEVMKey(t, "ev-h")}
+	f.replacementEVM = "ev-h"
 	infos := make([]*types.NodeInfo, 0, 4)
 	for _, k := range f.nextKeys {
 		infos = append(infos, k.info)
@@ -431,7 +437,7 @@ func TestAcknowledgementEndsThePendingStateAndRetiredKeysStayRefused(t *testing.
 	s, err = New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
 	si := mustBlock(t, s, 9).ShardState.States[f.shard]
-	for _, retired := range []string{"ev-b", "ev-c", "ev-d"} {
+	for _, retired := range []string{"ev-d"} {
 		err = si.ValidRequest(&certification.BlockCertificationRequest{PartitionID: 8, NodeID: retired,
 			InputRecord: &types.InputRecord{Version: 1, Epoch: si.TR.Epoch}})
 		require.ErrorIs(t, err, ErrNodeNotInTrustBase, retired)
@@ -509,4 +515,11 @@ func TestDeriveActivatedPDRIsolatedRefusals(t *testing.T) {
 	wrongBody.NextBodyID = bytes.Repeat([]byte{2}, 32)
 	_, _, err = DeriveActivatedPDR(wrongBody, body, b.preimage, f.parent)
 	require.ErrorIs(t, err, ErrAssignmentHistory)
+}
+
+func testRogueProvenance(t *testing.T) evmassign.Provenance {
+	t.Helper()
+	p, err := identityfix.Provenance(9, 2, evmassign.KindPrimary, 8)
+	require.NoError(t, err)
+	return p
 }

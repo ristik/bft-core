@@ -35,6 +35,7 @@ import (
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
+	"github.com/unicitynetwork/bft-core/internal/testutils/identityfix"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -163,8 +164,8 @@ func newX2World(t *testing.T, genesisParent bool) *x2World {
 	require.NoError(t, evmassign.VerifyPoPs(popCtx, succ, []evmassign.PoP{pop}), "premise: the candidate carries a valid proof of possession")
 	assignment, err := types.Cbor.Marshal(succ)
 	require.NoError(t, err)
-	candidate, err := evmassign.Candidate{Version: evmassign.CandidateVersion, Network: 3, Predecessor: popCtx.Predecessor[:], Attempt: 1,
-		OldShardEpoch: 0, OldActiveHash: w.hash[0][:], Assignment: assignment, PoPs: []evmassign.PoP{pop}}.Encode()
+	candidate, err := identityfix.Shaped(evmassign.Candidate{Version: evmassign.CandidateVersion, Network: 3, Predecessor: popCtx.Predecessor[:], Attempt: 1,
+		OldShardEpoch: 0, OldActiveHash: w.hash[0][:], Assignment: assignment, PoPs: []evmassign.PoP{pop}}).Encode()
 	require.NoError(t, err)
 
 	// The committed H: root epoch 1 -> 2, shard epoch 0 -> 1, frozen on the parent P.

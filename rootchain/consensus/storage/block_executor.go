@@ -419,7 +419,17 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 		return errors.Join(ErrHandoffRecord, err)
 	}
 	if candidate.Supersedes != nil {
-		return verifySupersession(candidate.Supersedes, si, orchestration)
+		if err := verifySupersession(candidate.Supersedes, si, orchestration); err != nil {
+			return err
+		}
+	}
+	// The kind rules run over the committed history the supersession evidence was just checked against.
+	lctx, err := LifecycleFor(orchestration, si.PartitionID, si.ShardID, si.IR.Epoch, installed)
+	if err != nil {
+		return errors.Join(ErrHandoffRecord, err)
+	}
+	if err := evmassign.VerifyLifecycle(candidate, lctx); err != nil {
+		return errors.Join(ErrHandoffRecord, err)
 	}
 	return nil
 }
