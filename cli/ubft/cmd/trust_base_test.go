@@ -157,3 +157,62 @@ func TestTrustBaseSignPrevious(t *testing.T) {
 	cmd.baseCmd.SetArgs([]string{"trust-base", "verify", "--trust-base", trustBase0Path, "--trust-base", trustBase1Path})
 	require.NoError(t, cmd.Execute(context.Background()))
 }
+
+func TestTrustBaseGenerateWithExactRootWeights(t *testing.T) {
+	ctx := context.Background()
+	logF := testobserve.NewFactory(t)
+	var infos []string
+	var homes []string
+	for i := 0; i < 4; i++ {
+		home := t.TempDir()
+		cmd := New(logF)
+		cmd.baseCmd.SetArgs([]string{"root-node", "init", "--home", home, "--generate"})
+		require.NoError(t, cmd.Execute(ctx))
+		homes = append(homes, home)
+		infos = append(infos, filepath.Join(home, nodeInfoFileName))
+	}
+	generate := func(extra ...string) (*types.RootTrustBaseV1, error) {
+		args := []string{"trust-base", "generate", "--home", homes[0], "--network-id", "5", "--output-file-name", "weighted.json"}
+		for _, f := range infos {
+			args = append(args, "--node-info", f)
+		}
+		cmd := New(logF)
+		cmd.baseCmd.SetArgs(append(args, extra...))
+		if err := cmd.Execute(ctx); err != nil {
+			return nil, err
+		}
+		return util.ReadJsonFile(filepath.Join(homes[0], "weighted.json"), &types.RootTrustBaseV1{})
+	}
+
+	tb, err := generate("--root-weights", "6,1,1,1")
+	require.NoError(t, err)
+	var weights []uint64
+	var total uint64
+	for _, n := range tb.RootNodes {
+		weights = append(weights, n.Stake)
+		total += n.Stake
+	}
+	require.ElementsMatch(t, []uint64{6, 1, 1, 1}, weights)
+	require.EqualValues(t, 9, total)
+	require.EqualValues(t, 7, tb.QuorumThreshold, "the weighted threshold floor(2W/3)+1 of W=9")
+	// the weights follow the --node-info order: the first file is the heavy one
+	head, err := util.ReadJsonFile(infos[0], &types.NodeInfo{})
+	require.NoError(t, err)
+	for _, n := range tb.RootNodes {
+		if n.NodeID == head.NodeID {
+			require.EqualValues(t, 6, n.Stake)
+		} else {
+			require.EqualValues(t, 1, n.Stake)
+		}
+	}
+
+	for name, tc := range map[string][]string{
+		"too few weights":  {"--root-weights", "6,1,1"},
+		"too many weights": {"--root-weights", "6,1,1,1,1"},
+		"a zero weight":    {"--root-weights", "6,1,1,0"},
+		"over the cap":     {"--root-weights", "1099511627777,1,1,1"},
+	} {
+		_, err := generate(tc...)
+		require.Error(t, err, name)
+	}
+}

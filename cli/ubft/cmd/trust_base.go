@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -14,6 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/util"
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 )
 
 const trustBaseFileName = "trust-base.json"
@@ -31,8 +34,9 @@ type (
 		QuorumThreshold   uint64   // optional custom quorum threshold (default floor(2*total_stake/3)+1)
 		Epoch             uint64
 		EpochStart        uint64
-		PreviousTrustBase string // path to previous trust base file
-		OutputFileName    string // the generated trust base filename
+		PreviousTrustBase string   // path to previous trust base file
+		OutputFileName    string   // the generated trust base filename
+		RootWeights       []string // exact member weights in --node-info order (a Q3 weighted trust base); empty keeps each node-info file's own stake
 	}
 
 	trustBaseSignFlags struct {
@@ -80,6 +84,8 @@ func trustBaseGenerateCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd.Flags().Uint64Var(&flags.EpochStart, "epoch-start", 0, "root round in which this trust base is activated")
 	cmd.Flags().StringVar(&flags.PreviousTrustBase, "previous-trust-base", "", "previous epoch's trust base, not required for genesis epoch")
 	cmd.Flags().StringVar(&flags.OutputFileName, "output-file-name", trustBaseFileName, "the generated trust base file name, stored to homedir")
+	cmd.Flags().StringSliceVar(&flags.RootWeights, "root-weights", nil,
+		"exact member weights, one per --node-info in order (e.g. 6,1,1,1); the trust base is then a weighted one, validated under the Q3 weight rules")
 
 	return cmd
 }
@@ -105,6 +111,11 @@ func trustBaseGenerate(flags *trustBaseGenerateFlags) error {
 	nodes, err := loadNodeInfoFiles(flags.NodeInfoFiles)
 	if err != nil {
 		return fmt.Errorf("failed to read node info files: %w", err)
+	}
+	if len(flags.RootWeights) != 0 {
+		if err := applyRootWeights(nodes, flags.RootWeights); err != nil {
+			return err
+		}
 	}
 
 	trustBase, err := quorumweight.NewTrustBase(types.NetworkID(flags.NetworkID), nodes,
@@ -245,4 +256,24 @@ func (f *trustBaseFlags) loadTrustBases(baseFlags *baseFlags) ([]*types.RootTrus
 		}
 	}
 	return trustBases, nil
+}
+
+// applyRootWeights sets the exact weights of a weighted (Q3) committee, one per node in order. The result must be a valid weighted root
+// committee: bounded positive weights, unique ids and keys, a total within the cap. The threshold the trust base then derives is the
+// weighted one (floor(2W/3)+1) unless --quorum-threshold names another.
+func applyRootWeights(nodes []*types.NodeInfo, raw []string) error {
+	if len(raw) != len(nodes) {
+		return fmt.Errorf("--root-weights names %d weights for %d --node-info files", len(raw), len(nodes))
+	}
+	for i, n := range nodes {
+		w, err := strconv.ParseUint(strings.TrimSpace(raw[i]), 10, 64)
+		if err != nil {
+			return fmt.Errorf("--root-weights: weight %d %q is not an unsigned integer", i+1, raw[i])
+		}
+		n.Stake = w
+	}
+	if _, err := weightvalidation.Nodes(nodes, weightvalidation.RoleRoot, weightvalidation.ModeWeighted); err != nil {
+		return fmt.Errorf("--root-weights: %w", err)
+	}
+	return nil
 }
