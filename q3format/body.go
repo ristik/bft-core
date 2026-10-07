@@ -150,39 +150,32 @@ func DecodeBody(raw []byte) (BodyV3, error) {
 	return b, b.Validate()
 }
 
-// Version reports the body version of a canonical encoding: 3 for the V3 domain array, 2 for the V2 field array (whose first
-// field is its version). V1 is the go-base tagged trust base and is not a body. Anything else is ErrVersion.
+// Version reports the body version of a canonical encoding: 3 for the V3 domain array. Anything else, including an older body
+// layout this deployment never had, is ErrVersion.
 func Version(raw []byte) (uint64, error) {
 	r, err := parse(raw, maxBodyLen)
 	if err != nil {
 		return 0, err
 	}
-	switch first := r.take().(type) {
-	case string:
-		if first == bodyDomain {
-			return 3, nil
-		}
-	case uint64:
-		if first == evmroot.TrustBaseVersion && r.len() == 9 {
-			return 2, nil
-		}
+	if first, ok := r.take().(string); ok && first == bodyDomain {
+		return BodyVersion, nil
 	}
-	return 0, fmt.Errorf("%w: not a V2 or V3 body", ErrVersion)
+	return 0, fmt.Errorf("%w: not a V3 body", ErrVersion)
 }
 
-// Prior names the trust base a V3 body succeeds. BodyVersion 1 is the V1 trust base and Identity its hash including
-// signatures; 2 and 3 are body identities.
+// Prior names the trust base a V3 body succeeds. BodyVersion 1 is the genesis V1 trust base and Identity its hash including
+// signatures; 3 is a V3 body identity. A deployment has no V2 epoch.
 type Prior struct {
 	Network, Epoch, BodyVersion uint64
 	Identity                    []byte
 }
 
 // Hash is the PredecessorHash a V3 body must carry: the identity of a V3 prior directly, and for the first V3 body
-// SHA-256(CBOR(["UNICITY_TRUSTBASE_TO_V3", N, priorEpoch, priorBodyVersion, priorIdentity])), so that no V1 or V2 bytes are
+// SHA-256(CBOR(["UNICITY_TRUSTBASE_TO_V3", N, priorEpoch, priorBodyVersion, priorIdentity])), so that no V1 bytes are
 // reinterpreted as V3.
 func (p Prior) Hash() ([]byte, error) {
-	if p.Network == 0 || p.Epoch == 0 || len(p.Identity) != 32 || p.BodyVersion < 1 || p.BodyVersion > BodyVersion {
-		return nil, fmt.Errorf("%w: network, epoch, version 1..3 and a 32-byte identity are required", ErrPrior)
+	if p.Network == 0 || p.Epoch == 0 || len(p.Identity) != 32 || (p.BodyVersion != 1 && p.BodyVersion != BodyVersion) {
+		return nil, fmt.Errorf("%w: network, epoch, version 1 or 3 and a 32-byte identity are required", ErrPrior)
 	}
 	if p.BodyVersion == BodyVersion {
 		return bytes.Clone(p.Identity), nil

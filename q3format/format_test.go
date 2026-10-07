@@ -72,8 +72,6 @@ func TestVectors(t *testing.T) {
 	b := vectorBody(t)
 	h := func(v []byte) string { return hex.EncodeToString(v) }
 	id, cfg := b.Identity(), b.Config.Identity()
-	v2, err := Prior{Network: testNetwork, Epoch: 1, BodyVersion: 2, Identity: fill(0x11)}.Hash()
-	require.NoError(t, err)
 	ctx := ContextFor(b, 3, arr32(0x44))
 	for name, got := range map[string]string{
 		"configEncoding":    h(enc(configDomain, b.Config.fields())),
@@ -81,7 +79,6 @@ func TestVectors(t *testing.T) {
 		"bodyEncoding":      h(b.Encode()),
 		"bodyIdentity":      h(id[:]),
 		"predecessorFromV1": h(b.PredecessorHash),
-		"predecessorFromV2": h(v2),
 		"receiptMessage":    h(ctx.Message("n1")),
 		"receiptMessageHash": func() string {
 			m := sha256.Sum256(ctx.Message("n1"))
@@ -113,15 +110,12 @@ func TestConfigIsExactlyTheQ3Tuple(t *testing.T) {
 	g := arr32(7)
 	require.NoError(t, Q3Config(5, g).Validate(), "acceptance control")
 	for name, mutate := range map[string]func(*ProtocolConfig){
-		"revision":                  func(c *ProtocolConfig) { c.Revision = 2 },
-		"signingScheme":             func(c *ProtocolConfig) { c.SigningScheme = 1 },
-		"voteCodec":                 func(c *ProtocolConfig) { c.VoteCodec = 1 },
-		"quorumProfile":             func(c *ProtocolConfig) { c.QuorumProfile = "D2" },
-		"evmRequestPolicy":          func(c *ProtocolConfig) { c.EVMRequestPolicy = "unit-v1" },
-		"aggregatorPolicy":          func(c *ProtocolConfig) { c.AggregatorPolicy = "weighted-v1" },
-		"requiredPeerProtocol":      func(c *ProtocolConfig) { c.RequiredPeerProtocol = "q3/2" },
-		"requiredExecutionProtocol": func(c *ProtocolConfig) { c.RequiredExecutionProtocol = "" },
-		"registryLayout":            func(c *ProtocolConfig) { c.RegistryLayout = 1 },
+		"revision":         func(c *ProtocolConfig) { c.Revision = 2 },
+		"signingScheme":    func(c *ProtocolConfig) { c.SigningScheme = 1 },
+		"voteCodec":        func(c *ProtocolConfig) { c.VoteCodec = 1 },
+		"quorumProfile":    func(c *ProtocolConfig) { c.QuorumProfile = "D2" },
+		"evmRequestPolicy": func(c *ProtocolConfig) { c.EVMRequestPolicy = "unit-v1" },
+		"aggregatorPolicy": func(c *ProtocolConfig) { c.AggregatorPolicy = "weighted-v1" },
 	} {
 		c := Q3Config(5, g)
 		mutate(&c)
@@ -284,7 +278,7 @@ func TestDecodeBodyValidatesWhatItDecodes(t *testing.T) {
 	require.Empty(t, got.ChangeRecordHash)
 	f := vectorBody(t).fields()
 	tuple := f[9].([]any)
-	for _, bad := range [][]any{tuple[:10], append(append([]any{}, tuple...), uint64(0))} { // ten and twelve fields
+	for _, bad := range [][]any{tuple[:7], append(append([]any{}, tuple...), uint64(0))} { // seven and nine fields
 		f[9] = bad
 		_, err = DecodeBody(enc(bodyDomain, f))
 		require.ErrorIs(t, err, ErrFormat)
@@ -295,25 +289,19 @@ func TestPredecessorCodec(t *testing.T) {
 	id := fill(0x11)
 	v1, err := Prior{Network: 5, Epoch: 1, BodyVersion: 1, Identity: id}.Hash()
 	require.NoError(t, err)
-	v2, err := Prior{Network: 5, Epoch: 1, BodyVersion: 2, Identity: id}.Hash()
-	require.NoError(t, err)
 	v3, err := Prior{Network: 5, Epoch: 2, BodyVersion: 3, Identity: id}.Hash()
 	require.NoError(t, err)
 	require.Equal(t, id, v3, "a V3 prior is named directly")
 	require.NotEqual(t, id, v1)
-	require.NotEqual(t, v1, v2, "the prior version is in the preimage")
 	require.Equal(t, v1, func() []byte {
 		h := sha256.Sum256(enc("UNICITY_TRUSTBASE_TO_V3", uint64(5), uint64(1), uint64(1), id))
 		return h[:]
 	}())
-	old, err := evmroot.FirstV2PredecessorHash(evmroot.V1Anchor{Version: 1, NetworkID: 5, Epoch: 1, HashIncludingSigs: id})
-	require.NoError(t, err)
-	require.NotEqual(t, old, v1, "the V1 to V3 link is not the V1 to V2 link")
 	other, err := Prior{Network: 6, Epoch: 1, BodyVersion: 1, Identity: id}.Hash()
 	require.NoError(t, err)
 	require.NotEqual(t, v1, other)
 	for name, p := range map[string]Prior{
-		"network 0": {0, 1, 1, id}, "epoch 0": {5, 0, 1, id}, "version 0": {5, 1, 0, id}, "version 4": {5, 1, 4, id},
+		"network 0": {0, 1, 1, id}, "epoch 0": {5, 0, 1, id}, "version 0": {5, 1, 0, id}, "version 2": {5, 1, 2, id}, "version 4": {5, 1, 4, id},
 		"short identity": {5, 1, 1, id[:31]}, "long identity": {5, 1, 3, append(id, 0)},
 	} {
 		_, err := p.Hash()
@@ -327,15 +315,12 @@ func TestVersionCodec(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), v)
 	v2 := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: 5, Epoch: 2, EarliestActivation: 20, Members: b.Members, RootThreshold: 7, PredecessorHash: fill(1)}
-	v, err = Version(v2.Encode())
-	require.NoError(t, err)
-	require.Equal(t, uint64(2), v)
+	_, err = Version(v2.Encode())
+	require.ErrorIs(t, err, ErrVersion, "a V2 field array is not a body of this deployment")
 	_, err = Version(enc("UNICITY_TRUSTBASE_V4", b.fields()))
 	require.ErrorIs(t, err, ErrVersion)
 	_, err = Version(enc(uint64(1), uint64(2)))
 	require.ErrorIs(t, err, ErrVersion)
-	_, err = Version(enc(uint64(2), uint64(1), uint64(1)))
-	require.ErrorIs(t, err, ErrVersion, "a V2 body has nine fields")
 	_, err = Version([]byte{0xff, 0x00})
 	require.ErrorIs(t, err, ErrFormat)
 	_, err = DecodeBody(v2.Encode())

@@ -56,50 +56,6 @@ func TestHistoryOwnsItsGenesisAuthority(t *testing.T) {
 	require.Len(t, w.h.Tip().tb.RootNodes, 4)
 }
 
-// A V2 body the history retains, and uses as the old authority, is its own copy.
-func TestHistoryOwnsItsV2Body(t *testing.T) {
-	w := newWorld(t, 0)
-	second := newSigners(t, "e", "f", "g", "h")
-	v2, raw := w.v2(second, 10, 12, "a", "b", "c")
-	key := append([]byte(nil), v2.Members[0].ConsensusKey...)
-	h, err := w.h.WithV2(v2, raw)
-	require.NoError(t, err)
-
-	v2.Members[0].ConsensusKey[0] ^= 0xff
-	v2.Members[0].Weight = 5
-	v2.Members[1] = evmroot.Member{}
-	v2.StateSummary[0] ^= 1
-	retained := h.Tip().v2
-	require.Equal(t, key, retained.Members[0].ConsensusKey)
-	require.Equal(t, uint64(1), retained.Members[0].Weight)
-	require.Equal(t, "f", retained.Members[1].NodeID)
-	require.Equal(t, fill(1), retained.StateSummary)
-	rid := retained.Identity()
-	require.Equal(t, [32]byte(rid), h.Tip().BodyID(), "the retained body still has the retained identity")
-}
-
-// The first V2 epoch's A* may not precede the body's A_min.
-func TestV2MinimumActivation(t *testing.T) {
-	for _, tc := range []struct {
-		name          string
-		aMin, atStart uint64
-		ok            bool
-	}{{"below A_min", 40, 25, false}, {"one below", 40, 39, false}, {"equal", 40, 40, true}, {"above", 40, 41, true}} {
-		t.Run(tc.name, func(t *testing.T) {
-			w := newWorld(t, 0)
-			body, raw := w.v2(newSigners(t, "e", "f", "g", "h"), tc.aMin, tc.atStart, "a", "b", "c")
-			h, err := w.h.WithV2(body, raw)
-			if tc.ok {
-				require.NoError(t, err)
-				require.Equal(t, tc.atStart, h.Tip().Start())
-				return
-			}
-			require.ErrorIs(t, err, ErrBinding)
-			require.NotErrorIs(t, err, ErrActivation, "the proof is genuine; only the minimum is violated")
-		})
-	}
-}
-
 // A link for a retained epoch must carry that epoch's body, record and evidence; a matching claim alone is not enough.
 func TestRetainedLinkIsCheckedAgainstTheEntry(t *testing.T) {
 	w := newWorld(t, 0)

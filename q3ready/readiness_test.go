@@ -1,4 +1,4 @@
-package q3compat
+package q3ready
 
 import (
 	"context"
@@ -24,15 +24,12 @@ type stubExec struct {
 
 func (s stubExec) Report(context.Context) (ExecutionReport, error) { return s.r, s.err }
 
-var pinned = ExecutionRequirement{GenesisHash: fb(0x31), CodeHash: fb(0x32), TransitionCodec: 1}
+var pinned = ExecutionPin{GenesisHash: fb(0x31), CodeHash: fb(0x32)}
 
-func goodExec() ExecutionReport {
-	return ExecutionReport{Version: 1, Protocols: []string{"q3/1"}, RegistryLayout: 2, GenesisHash: fb(0x31), CodeHash: fb(0x32),
-		ConfigRevisions: []uint64{1}, TransitionCodec: []uint64{1}}
-}
+func goodExec() ExecutionReport { return ExecutionReport{GenesisHash: fb(0x31), CodeHash: fb(0x32)} }
 
 func goodService(rc q3format.ReceiptContext) ServiceReport {
-	return ServiceReport{Network: rc.Network, Genesis: rc.Genesis, Protocols: []string{"q3/0", "q3/1"}, Staged: rc.CandidateDigest}
+	return ServiceReport{Network: rc.Network, Genesis: rc.Genesis, Staged: rc.CandidateDigest}
 }
 
 func goodEntity(rc q3format.ReceiptContext, id string) Entity {
@@ -75,9 +72,6 @@ func TestAttest(t *testing.T) {
 	}
 	for name, role := range map[string]func(*Entity, Service){"bft": func(e *Entity, s Service) { e.BFT = s }, "authority": func(e *Entity, s Service) { e.Authority = s }} {
 		e := goodEntity(rc, "n1")
-		role(&e, service(func(s *ServiceReport) { s.Protocols = []string{"q3/0"} }))
-		cases = append(cases, tc{name + " old protocol", e, []error{ErrNotReady, ErrProtocol}})
-		e = goodEntity(rc, "n1")
 		role(&e, stubService{err: errors.New("down")})
 		cases = append(cases, tc{name + " unreachable", e, []error{ErrNotReady, ErrProbe}})
 		e = goodEntity(rc, "n1")
@@ -88,13 +82,9 @@ func TestAttest(t *testing.T) {
 		f    func(*ExecutionReport)
 		want error
 	}{
-		"layout 1":        {func(x *ExecutionReport) { x.RegistryLayout = 1 }, ErrExecutionLayout},
-		"unsupported":     {func(x *ExecutionReport) { x.Protocols = []string{"q3/0"} }, ErrExecutionProtocol},
-		"old report":      {func(x *ExecutionReport) { x.Version = 0 }, ErrExecutionVersion},
-		"no config codec": {func(x *ExecutionReport) { x.ConfigRevisions = nil }, ErrExecutionCodec},
-		"no transition":   {func(x *ExecutionReport) { x.TransitionCodec = []uint64{2} }, ErrExecutionCodec},
-		"other genesis":   {func(x *ExecutionReport) { x.GenesisHash = fb(0x77) }, ErrExecutionIdentity},
-		"other code":      {func(x *ExecutionReport) { x.CodeHash = fb(0x78) }, ErrExecutionIdentity},
+		"other genesis": {func(x *ExecutionReport) { x.GenesisHash = fb(0x77) }, ErrExecutionIdentity},
+		"other code":    {func(x *ExecutionReport) { x.CodeHash = fb(0x78) }, ErrExecutionIdentity},
+		"no identity":   {func(x *ExecutionReport) { x.GenesisHash, x.CodeHash = nil, nil }, ErrExecutionIdentity},
 	} {
 		e := goodEntity(rc, "n1")
 		e.Execution = exec(mut.f)
@@ -140,42 +130,17 @@ func TestAttestChecksTheTupleItSigns(t *testing.T) {
 	}
 }
 
-// A report that agrees with a partial or legacy tuple is still refused: the tuple is validated before it is compared, and each
-// case differs from the valid tuple in one field only.
-func TestExecutionRequirementValidatesTheTuple(t *testing.T) {
-	valid := q3format.Q3Config(testNetwork, fill(9))
-	require.NoError(t, pinned.Check(goodExec(), valid), "acceptance control: the valid tuple")
-	for name, tc := range map[string]struct {
-		mut    func(*q3format.ProtocolConfig)
-		report func(*ExecutionReport)
-	}{
-		"layout 1":         {func(c *q3format.ProtocolConfig) { c.RegistryLayout = 1 }, func(r *ExecutionReport) { r.RegistryLayout = 1 }},
-		"old protocol":     {func(c *q3format.ProtocolConfig) { c.RequiredExecutionProtocol = "q2/0" }, func(r *ExecutionReport) { r.Protocols = []string{"q2/0"} }},
-		"scheme 1":         {func(c *q3format.ProtocolConfig) { c.SigningScheme = 1 }, func(*ExecutionReport) {}},
-		"unknown revision": {func(c *q3format.ProtocolConfig) { c.Revision = 7 }, func(r *ExecutionReport) { r.ConfigRevisions = []uint64{7} }},
-		"no network":       {func(c *q3format.ProtocolConfig) { c.Network = 0 }, func(*ExecutionReport) {}},
-	} {
-		cfg, r := valid, goodExec()
-		tc.mut(&cfg)
-		tc.report(&r)
-		require.ErrorIs(t, pinned.Check(r, cfg), q3format.ErrConfig, name)
-	}
-}
-
-func TestExecutionRequirementNeedsLocalPins(t *testing.T) {
-	cfg := q3format.Q3Config(testNetwork, fill(9))
-	require.NoError(t, pinned.Check(goodExec(), cfg), "acceptance control")
-	empty := goodExec()
-	empty.GenesisHash, empty.CodeHash = nil, nil
-	require.ErrorIs(t, ExecutionRequirement{TransitionCodec: 1}.Check(empty, cfg), ErrExecutionIdentity, "no pins against a report without identity")
-	for name, w := range map[string]ExecutionRequirement{
-		"no genesis pin": {CodeHash: fb(0x32), TransitionCodec: 1},
-		"no code pin":    {GenesisHash: fb(0x31), TransitionCodec: 1},
+func TestExecutionPinNeedsLocalPins(t *testing.T) {
+	require.NoError(t, pinned.Check(goodExec()), "acceptance control")
+	for name, w := range map[string]ExecutionPin{
+		"no genesis pin": {CodeHash: fb(0x32)},
+		"no code pin":    {GenesisHash: fb(0x31)},
+		"no pin":         {},
 	} {
 		r := goodExec()
 		r.GenesisHash, r.CodeHash = nil, nil // an empty report must not match an empty pin
-		require.ErrorIs(t, w.Check(r, cfg), ErrExecutionIdentity, name)
-		require.ErrorIs(t, w.Check(goodExec(), cfg), ErrExecutionIdentity, name+" with a full report")
+		require.ErrorIs(t, w.Check(r), ErrExecutionIdentity, name)
+		require.ErrorIs(t, w.Check(goodExec()), ErrExecutionIdentity, name+" with a full report")
 	}
 }
 
