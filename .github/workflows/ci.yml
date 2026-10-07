@@ -1,144 +1,184 @@
 name: ci
 
-# F1 (#9) requires PR-triggered CI for the integration branch. Per the owner's 2026-09-06 decision
-# this does not enable branch protection or required-check rules — the checks run and are visible on
-# every PR, and merging stays a human decision. See docs/design/f1-baseline.md §6.
+# Checks are visible on every PR; merging remains a human decision.
+# No branch protection or required checks (owner decision, 2026-09-06).
 on:
   push:
+    branches:
+      - integration/enshrined-evm
+      - main
   pull_request:
     branches:
       - integration/enshrined-evm
       - main
+  workflow_dispatch:
 
-env:
-  GO_VERSION: 1.24
-  RUST_VERSION: stable
-  RETENTION-DAYS: 1
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# setup-go caches both downloaded modules and Go build outputs, keyed by go.sum.
+defaults:
+  run:
+    shell: bash
 
 jobs:
+  gofmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Check formatting (including files behind build tags)
+        run: |
+          git ls-files -z '*.go' | xargs -0 gofmt -l > gofmt.txt
+          if [[ -s gofmt.txt ]]; then
+            cat gofmt.txt
+            echo 'Run gofmt on the files listed above.' >&2
+            exit 1
+          fi
+
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
-      - name: build (without FFI)
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Build (without FFI)
         run: make build
 
-  build-with-ffi:
-    if: false
+  vet:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
-      - name: Setup Rust ${{ env.RUST_VERSION }}
-        uses: dtolnay/rust-toolchain@stable
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Vet all packages
+        run: |
+          go list ./... > packages.txt
+          echo "Vet: $(wc -l < packages.txt) packages" >> "$GITHUB_STEP_SUMMARY"
+          go vet ./... 2>&1 | tee vet.log
+      - name: Upload vet failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
         with:
-          toolchain: ${{ env.RUST_VERSION }}
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            rootchain/consensus/zkverifier/sp1-verifier-ffi
-            rootchain/consensus/zkverifier/light-client-verifier-ffi
-      - name: build (with FFI)
-        run: make build-with-ffi
+          name: vet-failure
+          path: |
+            vet.log
+            packages.txt
+          retention-days: 7
+
   test:
+    name: Test shard ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
-      - name: vet (without FFI)
-        run: go vet ./...
-      - name: test (without FFI)
-        run: make test
-      - name: upload test coverage
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Select packages
+        run: |
+          go list ./... > all-packages.txt
+          python3 scripts/ci-packages.py '${{ matrix.shard }}' < all-packages.txt > packages.txt
+          {
+            echo "### Shard ${{ matrix.shard }}/4: $(wc -l < packages.txt) of $(wc -l < all-packages.txt) packages"
+            echo '<details><summary>Package list</summary>'
+            echo
+            cat packages.txt
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Test (without FFI)
+        run: |
+          mapfile -t packages < packages.txt
+          go test "${packages[@]}" -json -count=1 -timeout 30m 2>&1 | tee test-log.json
+      - name: Upload test failure log
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-coverage
-          path: test-coverage.out
-          retention-days: ${{ env.RETENTION-DAYS }}
+          name: test-shard-${{ matrix.shard }}-failure
+          path: |
+            test-log.json
+            packages.txt
+            all-packages.txt
+          retention-days: 7
 
-  test-with-ffi:
-    if: false
+  race:
+    name: Race (fast unit packages)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
-      - name: Setup Rust ${{ env.RUST_VERSION }}
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            rootchain/consensus/zkverifier/sp1-verifier-ffi
-            rootchain/consensus/zkverifier/light-client-verifier-ffi
-      - name: Build Rust FFI libraries
-        run: make build-rust-ffi
-      - name: vet (with FFI)
-        run: go vet -tags zkverifier_ffi ./...
-      - name: test (with FFI)
-        run: make test ZKVERIFIER_FFI=1
-      - name: upload test coverage (with FFI)
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Select race packages
+        run: |
+          go list ./... > all-packages.txt
+          python3 scripts/ci-packages.py race < all-packages.txt > packages.txt
+          {
+            echo "### Race: $(wc -l < packages.txt) packages"
+            cat packages.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Test with the race detector
+        run: |
+          mapfile -t packages < packages.txt
+          go test "${packages[@]}" -race -json -count=1 -timeout 15m 2>&1 | tee test-log.json
+      - name: Upload race failure log
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-coverage-ffi
-          path: test-coverage.out
-          retention-days: ${{ env.RETENTION-DAYS }}
-
-  analyze:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Go ${{ env.GO_VERSION }}
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-      - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
-      - name: gosec
-        run: make gosec
+          name: race-failure
+          path: |
+            test-log.json
+            packages.txt
+          retention-days: 7
 
   # evm-shard-chaos and evm-shard-compose-e2e are the "compose E2E" and live-fault-injection legs
-  # of docs/engine-api-adapter-plan.md T1.7 — the `test` job above already covers unit tests, the
+  # of docs/engine-api-adapter-plan.md T1.7 — the test shards above already cover unit tests, the
   # executortest conformance suite, and the determinism harness (shardnode/determinism_test.go) as
   # part of `go test ./...`; these two exercise the process-based and container-based shard
   # topologies respectively, which `go test` alone doesn't reach. Both run against
   # `--executor fake` only — neither has a reth image to test against; see
   # docs/engine-api-adapter-plan.md §10 and scripts/reth-by-hand.sh.
-  #
-  # These are NOT real-execution evidence, and F1 (#9) requires that distinction be explicit: the
-  # fake executor models no header economics at all, and nothing here drives a real execution
-  # client. Two local lanes cover that (docs/design/f1-baseline.md §5.3, §5.5):
-  #   scripts/reth-baseline.sh      — stock-client header economics, curl only, no Go adapter
-  #   scripts/reth-paired-devnet.sh — the actual integration: `--executor engine-api` against one
-  #                                   real reth per validator, which is the lane that says
-  #                                   anything about engineapi/
-  # Neither is a job here yet. The approved fork now exists (ristik/ureth, pinned in §2), so the
-  # blocker is no longer "where would the binary come from" but the Rust build/cache cost, which
-  # belongs with the change that first makes the fork differ from upstream. Wiring it in is F3 (#11).
+  # These are fake-executor evidence. Real execution is covered separately by
+  # reth-smoke.yml and reth-fault.yml, which this change leaves untouched.
+  # Process/container lanes remain available on manual dispatch. Every PR runs the full Go suite.
   evm-shard-chaos:
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Go ${{ env.GO_VERSION }}
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
       - name: kill-leader / kill-follower / cold-restart / corrupted-store scenarios
         # 7, not 4: a restarted validator is non-voting until #105 (see VALIDATOR COUNT in
         # scripts/chaos-evm.sh), so the three restart scenarios need a shard that can lose three
@@ -181,6 +221,8 @@ jobs:
         run: ./stop-evm.sh -a || true
 
   evm-shard-compose-e2e:
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

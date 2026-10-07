@@ -40,7 +40,7 @@ func (h *stepHistory) InstallHandoff(_ context.Context, b handoffdelivery.Bundle
 func TestHandoffFollowerChecksEachHandoffAgainstTheActiveAssignment(t *testing.T) {
 	hash := func(b byte) []byte { return bytes.Repeat([]byte{b}, 32) }
 	genesis, s1, s2, s3 := hash(1), hash(2), hash(3), hash(4)
-	next := map[uint64][]byte{2: s1, 3: s2, 4: s3, 5: s3}    // rotation, rotation, supersession of s2 by s3, root-only
+	next := map[uint64][]byte{2: s1, 3: s2, 4: s3, 5: s3}      // rotation, rotation, supersession of s2 by s3, root-only
 	want := map[uint64][]byte{2: genesis, 3: s1, 4: s2, 5: s3} // the hash the root certifies when each commits
 	dir := t.TempDir()
 	newFollower := func(h *stepHistory) *HandoffFollower {
