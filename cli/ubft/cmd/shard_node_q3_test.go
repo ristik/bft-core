@@ -16,7 +16,6 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3process"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3format"
-	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -322,15 +321,15 @@ func TestTheLaneNodeWiresThePairIntoItsAdapterAndRefusesWhatCannotCarryIt(t *tes
 
 	adapter := engineapi.NewAdapter(engineapi.Config{EngineURL: "http://127.0.0.1:1", EthURL: "http://127.0.0.1:1"}, nil)
 	require.False(t, adapter.PairEnabled(), "off until the node wires it")
-	admit, err := wireQ3Pair(adapter, rt, 3, origin)
+	admit, err := wireQ3Pair(adapter, rt, 3, origin.Valid(), [32]byte(origin.BlockHash()))
 	require.NoError(t, err)
 	require.True(t, adapter.PairEnabled())
 	require.Same(t, adapter, admit, "the restart admission is the adapter's own")
 
 	other := engineapi.NewAdapter(engineapi.Config{EngineURL: "http://127.0.0.1:1", EthURL: "http://127.0.0.1:1"}, nil)
-	_, err = wireQ3Pair(other, rt, 3, registrygenesis.GenesisOrigin{})
+	_, err = wireQ3Pair(other, rt, 3, false, [32]byte{})
 	require.ErrorIs(t, err, ErrQ3Pair, "no checked origin")
 	require.False(t, other.PairEnabled(), "and nothing is enabled")
-	_, err = wireQ3Pair(struct{}{}, rt, 3, origin)
+	_, err = wireQ3Pair(struct{}{}, rt, 3, origin.Valid(), [32]byte(origin.BlockHash()))
 	require.ErrorIs(t, err, ErrQ3Pair, "an executor that cannot carry the binding")
 }

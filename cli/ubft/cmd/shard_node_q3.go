@@ -16,7 +16,6 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3format"
-	"github.com/unicitynetwork/bft-core/registrygenesis"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/shardnode"
@@ -308,11 +307,11 @@ type pairEnabler interface {
 
 // wireQ3Pair turns the pair binding on in the node's executor, from the node's own verified runtime, and returns the executor's restart
 // admission. Without it every build and import would leave the execution client without the binding it requires.
-func wireQ3Pair(executor any, rt *q3active.Runtime, network uint64, origin registrygenesis.GenesisOrigin) (headAdmitter, error) {
+func wireQ3Pair(executor any, rt *q3active.Runtime, network uint64, originChecked bool, executionGenesis [32]byte) (headAdmitter, error) {
 	adapter, ok := executor.(pairEnabler)
-	if !ok || !origin.Valid() {
+	if !ok || !originChecked {
 		return nil, ErrQ3Pair
 	}
-	adapter.EnablePair(q3PairConfig(rt, network, [32]byte(origin.BlockHash())))
+	adapter.EnablePair(q3PairConfig(rt, network, executionGenesis))
 	return adapter, nil
 }
