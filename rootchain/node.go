@@ -34,6 +34,15 @@ type (
 		ReceivedChannel() <-chan any
 	}
 
+	// RequestViewSource is the optional capability of a ConsensusManager that selects the view-aware branch of collector
+	// admission (Q2-C3). RequestView resolves, from the committed activation history and the verified parent state, the
+	// authenticated request view of the shard for collection. enabled is false for a manager that keeps the legacy dispatch,
+	// which then admits, dispatches proofs and counts under the committed ShardInfo exactly as before. A resolution error with
+	// enabled true is a refusal: nothing is answered from the committed ShardInfo instead.
+	RequestViewSource interface {
+		RequestView(partition types.PartitionID, shard types.ShardID) (view *storage.RequestRoundView, enabled bool, err error)
+	}
+
 	Observability interface {
 		Meter(name string, opts ...metric.MeterOption) metric.Meter
 		Tracer(name string, options ...trace.TracerOption) trace.Tracer
@@ -272,6 +281,16 @@ func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certificati
 		return fmt.Errorf("%w: %w", rctypes.ErrInvalidRequest, certification.ErrBlockCertificationRequestIsNil)
 	}
 
+	if src, ok := v.consensusManager.(RequestViewSource); ok {
+		view, enabled, err := src.RequestView(req.PartitionID, req.ShardID)
+		if err != nil {
+			return fmt.Errorf("resolving the request view of shard %s - %s: %w", req.PartitionID, req.ShardID, err)
+		}
+		if enabled {
+			return v.collectUnderView(ctx, req, view)
+		}
+	}
+
 	si, err := v.consensusManager.ShardInfo(req.PartitionID, req.ShardID)
 	if err != nil {
 		return fmt.Errorf("acquiring shard %s - %s info: %w", req.PartitionID, req.ShardID, err)
@@ -286,7 +305,7 @@ func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certificati
 	}
 
 	// Verify ZK proof (if verifier is enabled)
-	if err := v.verifyZKProof(ctx, req, si); err != nil {
+	if err := v.verifyZKProof(ctx, req, zkTarget{partition: si.PartitionID, shard: si.ShardID, epoch: si.IR.Epoch, params: si.PartitionParams}); err != nil {
 		v.log.WarnContext(ctx, "ZK proof verification failed - sending last valid UC",
 			logger.Error(err),
 			logger.Shard(req.PartitionID, req.ShardID))
@@ -305,17 +324,78 @@ func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certificati
 		return fmt.Errorf("subscribing the sender: %w", err)
 	}
 
+	return v.countRequest(ctx, req, si, false)
+}
+
+// requestAdmission is what collector admission uses of a resolved request view; *storage.RequestRoundView is the one
+// implementation (it is an interface so that the collection-only branch can be driven without a committed successor).
+type requestAdmission interface {
+	QuorumInfo
+	RoundTagged
+	ValidRequest(req *certification.BlockCertificationRequest) error
+	PDR() (*types.PartitionDescriptionRecord, error)
+	ExpectedTR() certification.TechnicalRecord
+	CollectionOnly() bool
+}
+
+var _ requestAdmission = (*storage.RequestRoundView)(nil)
+
+// collectUnderView is the admission of one request under the authenticated view resolved for it: membership, signature and
+// shard continuity (ValidRequest), the proof dispatched from the view's PDR, partition parameters and expected shard epoch,
+// and the buffer counted with the view's weights, assignment and shard-round tag. The committed ShardInfo is consulted for
+// nothing but the last response a rejection carries. A view resolved before its activation round collects only.
+func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCertificationRequest, view requestAdmission) error {
+	lastCR := func() *certification.CertificationResponse {
+		if si, err := v.consensusManager.ShardInfo(req.PartitionID, req.ShardID); err == nil && si != nil {
+			return si.LastCR
+		}
+		return nil
+	}
+	if err := view.ValidRequest(req); err != nil {
+		err = fmt.Errorf("invalid block certification request: %w", err)
+		if se := v.sendRejection(ctx, req.NodeID, lastCR(), certification.CertStatusRequestInvalid, err); se != nil {
+			err = errors.Join(err, fmt.Errorf("sending latest cert: %w", se))
+		}
+		return err
+	}
+	pdr, err := view.PDR()
+	if err != nil {
+		return fmt.Errorf("the PDR of the request view: %w", err)
+	}
+	target := zkTarget{partition: req.PartitionID, shard: req.ShardID, epoch: view.ExpectedTR().Epoch, params: pdr.GetPartitionParams(), viewed: true}
+	if err := v.verifyZKProof(ctx, req, target); err != nil {
+		v.log.WarnContext(ctx, "ZK proof verification failed - sending last valid UC", logger.Error(err), logger.Shard(req.PartitionID, req.ShardID))
+		if se := v.sendRejection(ctx, req.NodeID, lastCR(), certification.CertStatusProofInvalid, err); se != nil {
+			err = errors.Join(err, fmt.Errorf("failed to send last valid UC: %w", se))
+		}
+		return fmt.Errorf("ZK proof verification failed: %w", err)
+	}
+	if err := v.subscription.Subscribe(req.PartitionID, req.ShardID, req.NodeID); err != nil {
+		return fmt.Errorf("subscribing the sender: %w", err)
+	}
+	return v.countRequest(ctx, req, view, view.CollectionOnly())
+}
+
+// countRequest counts an admitted request under tb and asks for certification when a quorum, or the impossibility of one, is
+// reached. A collection-only view never certifies: a decisive outcome clears the shard's buffer, so that the requests sent again
+// from the activation round on are counted under the view then in force, never dropped as already decided.
+func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertificationRequest, tb QuorumInfo, collectionOnly bool) (rErr error) {
 	// requests counted for an earlier shard round, anchor or assignment are retired, never counted again
-	v.incomingRequests.Retire(req.PartitionID, req.ShardID, si)
+	v.incomingRequests.Retire(req.PartitionID, req.ShardID, tb)
 	// check if consensus is already achieved
-	if res := v.incomingRequests.IsConsensusReceived(req.PartitionID, req.ShardID, si); res != QuorumInProgress {
+	if res := v.incomingRequests.IsConsensusReceived(req.PartitionID, req.ShardID, tb); res != QuorumInProgress {
 		v.log.DebugContext(ctx, fmt.Sprintf("dropping stale block certification request (%s) for partition %s", res, req.PartitionID), logger.Shard(req.PartitionID, req.ShardID))
 		return
 	}
 	// store the new request and see if quorum is now achieved
-	res, requests, err := v.incomingRequests.Add(ctx, req, si)
+	res, requests, err := v.incomingRequests.Add(ctx, req, tb)
 	if err != nil {
 		return fmt.Errorf("storing request: %w", err)
+	}
+	if collectionOnly && res != QuorumInProgress {
+		v.log.DebugContext(ctx, "collection-only view: the outcome is not certified before the activation round", logger.Shard(req.PartitionID, req.ShardID))
+		v.incomingRequests.Clear(ctx, req.PartitionID, req.ShardID)
+		return nil
 	}
 	var reason consensus.CertReqReason
 	switch res {
@@ -367,17 +447,32 @@ func (v *Node) handleConsensus(ctx context.Context) error {
 	}
 }
 
+// zkTarget is where the proof registry takes its verifier from: the legacy path names the committed ShardInfo's identity,
+// epoch and parameters, the view-aware path the resolved view's PDR and expected shard epoch.
+type zkTarget struct {
+	partition types.PartitionID
+	shard     types.ShardID
+	epoch     uint64
+	params    map[string]string
+	viewed    bool
+}
+
 // verifyZKProof verifies the ZK proof in the block certification request
-func (v *Node) verifyZKProof(ctx context.Context, req *certification.BlockCertificationRequest, si *storage.ShardInfo) error {
+func (v *Node) verifyZKProof(ctx context.Context, req *certification.BlockCertificationRequest, target zkTarget) error {
 	ir := req.InputRecord
 	if ir == nil {
 		return fmt.Errorf("input record is nil")
 	}
 
 	// Get verifier for this partition's configuration
-	verifier, err := v.zkRegistry.GetVerifier(si.PartitionID, si.ShardID, si.IR.Epoch, si.PartitionParams)
+	// under a view the proof is checked for the view's shard epoch and no other: the request's own epoch is only ever compared
+	// with it, never used to select the verifier
+	if target.viewed && ir.Epoch != target.epoch {
+		return fmt.Errorf("proof for shard epoch %d, the view's is %d: %w", ir.Epoch, target.epoch, storage.ErrStaleRequestContext)
+	}
+	verifier, err := v.zkRegistry.GetVerifier(target.partition, target.shard, target.epoch, target.params)
 	if err != nil {
-		return fmt.Errorf("getting verifier for partition %s: %w", si.PartitionID, err)
+		return fmt.Errorf("getting verifier for partition %s: %w", target.partition, err)
 	}
 
 	if !verifier.IsEnabled() {

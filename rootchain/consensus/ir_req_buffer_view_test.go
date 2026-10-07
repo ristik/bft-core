@@ -12,6 +12,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -375,6 +376,47 @@ func TestManagerBuffersUnderTheViewOfTheNextProposal(t *testing.T) {
 	res.err = storage.ErrAssignmentHistory
 	require.ErrorIs(t, x.bufferIRChange(f.proof(t, v, 9)), storage.ErrAssignmentHistory)
 	require.False(t, inBuffer(x.irReqBuffer))
+}
+
+// The collector's view is the view of the next proposal for collection, and only when the view-aware branch is selected: with no
+// resolver the manager reports it disabled (the collector keeps the committed ShardInfo), a resolution failure is a refusal that
+// is never answered from other state, and a node in recovery refuses like ShardInfo.
+func TestManagerOffersTheCollectorTheViewOfTheNextProposal(t *testing.T) {
+	f := newFixture(t)
+	v := viewOf(t, f.infos, viewOpts{purpose: storage.PurposeCollect})
+	pm := &Pacemaker{}
+	pm.currentRound.Store(11)
+	x := &ConsensusManager{pacemaker: pm, recovery: &recoveryState{}}
+
+	got, enabled, err := x.RequestView(1, shard1)
+	require.NoError(t, err)
+	require.False(t, enabled, "no resolver: the legacy dispatch")
+	require.Nil(t, got)
+
+	res := &fixedResolver{view: v}
+	x.SetViewResolver(res)
+	got, enabled, err = x.RequestView(1, shard1)
+	require.NoError(t, err)
+	require.True(t, enabled)
+	require.Same(t, v, got)
+	require.Equal(t, []uint64{12}, res.rounds, "resolved for the next proposal round")
+	require.Equal(t, []storage.RequestPurpose{storage.PurposeCollect}, res.queries, "for collection")
+
+	res.err = storage.ErrAssignmentHistory
+	got, enabled, err = x.RequestView(1, shard1)
+	require.ErrorIs(t, err, storage.ErrAssignmentHistory)
+	require.True(t, enabled, "a failure is a refusal, not a fallback to the legacy dispatch")
+	_ = got
+
+	res.err = nil
+	x.recovery = &recoveryState{triggerMsg: &abdrc.TimeoutMsg{}, toRound: 42, sent: time.Now()}
+	n := len(res.rounds)
+	_, enabled, err = x.RequestView(1, shard1)
+	require.ErrorIs(t, err, ErrViewRecovery)
+	require.ErrorIs(t, err, storage.ErrAssignmentHistory)
+	require.ErrorContains(t, err, "node is in recovery")
+	require.True(t, enabled)
+	require.Len(t, res.rounds, n, "a node in recovery resolves nothing")
 }
 
 func TestRequestViewResolverResolvesFromTheSuppliedParentOnly(t *testing.T) {
