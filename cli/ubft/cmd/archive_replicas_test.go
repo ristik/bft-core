@@ -237,8 +237,8 @@ func TestShardNodeRunValidatesArchiveReplicasAfterReplayAndBeforeRelease(t *test
 
 	// The three admissions: plain run, restore without history, restore after CatchUp.
 	require.Len(t, calls["admitArchivePeers"], 3)
-	require.Len(t, calls["handoffFollower.CatchUp"], 1)
-	catchUp := calls["handoffFollower.CatchUp"][0]
+	require.Len(t, calls["catcher.CatchUp"], 1)
+	catchUp := calls["catcher.CatchUp"][0]
 
 	var catchUpFunc *ast.FuncLit
 	ast.Inspect(run, func(n ast.Node) bool {

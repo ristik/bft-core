@@ -647,6 +647,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	var q3Trust *q3shard.Q3TrustStore
 	var q3Follower *q3shard.Q3Follower
 	var epochTrust shardEpochTrust
+	var catcher shardCatchUp
 	if flags.ExecutionJournal != "" {
 		adapter, ok := executor.(*engineapi.Adapter)
 		if !ok || !origin.Valid() {
@@ -946,6 +947,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					return bundle, err
 				}
 			}
+			catcher = v2CatchUp{handoffFollower}
 		}
 		if q3rt != nil {
 			currentRoots := make([]libp2ppeer.ID, 0, len(bootNodes))
@@ -1059,6 +1061,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				Fetch: func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
 					return q3delivery.Request(ctx, peer, id, epoch)
 				}}
+			catcher = q3Follower
 		}
 		var restoreLineage func(context.Context) error
 		if q3rt != nil {
@@ -1144,11 +1147,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
 					return fmt.Errorf("restore bootstrap connect: %w", err)
 				}
-				if q3Follower != nil {
-					if err := q3Follower.CatchUp(ctx, uc.GetRootEpoch()); err != nil {
-						return err
-					}
-				} else if _, err := handoffFollower.CatchUp(ctx, uc.GetRootEpoch()); err != nil {
+				if err := catcher.CatchUp(ctx, uc.GetRootEpoch()); err != nil {
 					return err
 				}
 				// Every step up to the pinned epoch is verified and installed: the set is rebuilt. The configured replicas are validated

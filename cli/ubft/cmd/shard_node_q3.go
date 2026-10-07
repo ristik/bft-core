@@ -79,3 +79,17 @@ func q3NextConf(active []byte, record handoff.OldCommitProof, candidate []byte) 
 	}
 	return h, nil
 }
+
+// shardCatchUp is the restore's catch-up through the root handoffs: the V2 follower's or the V3 follower's. The restore has exactly one call
+// site, so the order of replay, catch-up and release the startup tests pin holds for either.
+type shardCatchUp interface {
+	CatchUp(ctx context.Context, target uint64) error
+}
+
+// v2CatchUp adapts the V2 follower, whose catch-up also returns the bundles it installed (only the archive restore of V2 consumes them).
+type v2CatchUp struct{ f *shardnode.HandoffFollower }
+
+func (c v2CatchUp) CatchUp(ctx context.Context, target uint64) error {
+	_, err := c.f.CatchUp(ctx, target)
+	return err
+}
