@@ -93,6 +93,7 @@ func TestCoupledInstallRefusesAnyOtherCandidate(t *testing.T) {
 		require.NoError(t, r.trust.BindSigningAuthority(pv))
 		_, err = r.manager.InstallVerifiedEpoch(pv.Tip(), plain.Proof, plain.Snapshot, f.Candidate)
 		require.ErrorIs(t, err, ErrQ3Candidate)
+		require.ErrorContains(t, err, "is the root-only operator candidate", "refused by the root-only binding itself, not only by the later derivation")
 	})
 	t.Run("acceptance control", func(t *testing.T) {
 		r := fresh(t)
