@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/internal/testutils/identityfix"
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
 	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
@@ -81,7 +82,9 @@ func newOperatorAssignmentFixture(t *testing.T, extra ...*types.PartitionDescrip
 	}
 	f.current = &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 8,
 		TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 5 * time.Second, Epoch: 0, EpochStart: 1,
-		PartitionParams: map[string]string{"seal_registry_genesis": "g", evmassign.CouplingParam: "true"}, Validators: infos}
+		PartitionParams: map[string]string{"seal_registry_genesis": "g", evmassign.CouplingParam: "true",
+			// replacing one of four equal members moves D to 1/2: the fixture states the wider (committed) policy it rotates under
+			storage.ParamContinuityMaxDist: "1/2"}, Validators: infos}
 	require.NoError(t, orchestration.AddShardConfig(f.current))
 	for _, conf := range extra {
 		require.NoError(t, orchestration.AddShardConfig(conf))
@@ -122,20 +125,65 @@ func newOperatorAssignmentFixture(t *testing.T, extra ...*types.PartitionDescrip
 	f.predecessor, err = f.cm.handoffPredecessor()
 	require.NoError(t, err)
 
-	f.nextKeys = []evmSigner{f.oldKeys[0], newEVMSigner(t, "ev-e"), newEVMSigner(t, "ev-f"), newEVMSigner(t, "ev-g")}
+	f.nextKeys = []evmSigner{f.oldKeys[0], f.oldKeys[1], f.oldKeys[2], newEVMSigner(t, "ev-e")}
+	// The incumbent baseline (K): the old root committee, in sorted order, bound to the installed validators ev-a..ev-d.
+	incumbent, _ := f.incumbent()
+	require.NoError(t, orchestration.SetGenesisIdentities(f.current.PartitionID, f.current.ShardID, incumbent))
 	return f
+}
+
+func rootIDs(tb *types.RootTrustBaseV1) []string {
+	ids := make([]string, 0, len(tb.RootNodes))
+	for _, n := range tb.RootNodes {
+		ids = append(ids, n.NodeID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func rootMembersOf(tb *types.RootTrustBaseV1) []evmassign.RootMember {
+	var out []evmassign.RootMember
+	for _, n := range tb.RootNodes {
+		out = append(out, evmassign.RootMember{NodeID: n.NodeID, Key: n.SigKey, Weight: n.Stake})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
+	return out
+}
+
+// incumbent is the last acknowledged committee: the old root committee bound to ev-a..ev-d in sorted order.
+func (f *operatorAssignmentFixture) incumbent() ([]evmassign.Identity, [32]byte) {
+	root := rootMembersOf(f.old)
+	bindings := make([]evmassign.Binding, len(root))
+	for i, m := range root {
+		bindings[i] = evmassign.Binding{RootNodeID: m.NodeID, EVMNodeID: f.oldKeys[i].id}
+	}
+	ids := identityfix.Identities(root, f.current, bindings)
+	d, err := evmassign.IdentitiesDigest(ids)
+	if err != nil {
+		panic(err)
+	}
+	h, err := evmassign.AssignmentHash(f.current, d)
+	if err != nil {
+		panic(err)
+	}
+	return ids, h
 }
 
 // bindings pairs the sorted committee of next with the successor validators in order.
 func (f *operatorAssignmentFixture) bindings(succ *types.PartitionDescriptionRecord, next *types.RootTrustBaseV1) []evmassign.Binding {
-	ids := make([]string, 0, len(next.RootNodes))
-	for _, n := range next.RootNodes {
-		ids = append(ids, n.NodeID)
+	oldIDs := rootIDs(f.old)
+	evmOf := map[string]string{}
+	for i, id := range oldIDs {
+		evmOf[id] = f.oldKeys[i].id // every continuing entity keeps its delegated validator
 	}
-	sort.Strings(ids)
+	ids := rootIDs(next)
 	out := make([]evmassign.Binding, len(ids))
 	for i, id := range ids {
-		out[i] = evmassign.Binding{RootNodeID: id, EVMNodeID: succ.Validators[i].NodeID}
+		evm, ok := evmOf[id]
+		if !ok {
+			evm = "ev-e" // the replacing entity
+		}
+		out[i] = evmassign.Binding{RootNodeID: id, EVMNodeID: evm}
 	}
 	return out
 }
@@ -153,6 +201,13 @@ func (f *operatorAssignmentFixture) succForBindings(t *testing.T) *types.Partiti
 
 func (f *operatorAssignmentFixture) proposal(t *testing.T, mutate ...func(*evmassign.PoPContext)) *evmassign.Proposal {
 	t.Helper()
+	return f.proposalFor(t, f.next, nil, mutate...)
+}
+
+// proposalFor is proposal for the successor committee next; rebind, when set, edits the bindings before the identity records and
+// proofs are derived from them, so the proposal stays internally consistent.
+func (f *operatorAssignmentFixture) proposalFor(t *testing.T, next *types.RootTrustBaseV1, rebind func([]evmassign.Binding), mutate ...func(*evmassign.PoPContext)) *evmassign.Proposal {
+	t.Helper()
 	infos := make([]*types.NodeInfo, 0, len(f.nextKeys))
 	for _, k := range f.nextKeys {
 		infos = append(infos, k.info)
@@ -161,10 +216,20 @@ func (f *operatorAssignmentFixture) proposal(t *testing.T, mutate ...func(*evmas
 	require.NoError(t, err)
 	ctx := evmassign.PoPContext{Network: 5, Attempt: 0}
 	copy(ctx.Predecessor[:], f.predecessor)
+	bindings := f.bindings(succ, next)
+	if rebind != nil {
+		rebind(bindings)
+	}
+	ids := identityfix.Identities(rootMembersOf(next), succ, bindings)
+	var err2 error
+	ctx.Identities, err2 = evmassign.IdentitiesDigest(ids)
+	require.NoError(t, err2)
 	for _, m := range mutate {
 		m(&ctx)
 	}
-	p := &evmassign.Proposal{Validators: infos, Bindings: f.bindings(succ, f.next)}
+	incumbent, base := f.incumbent()
+	p := &evmassign.Proposal{Validators: infos, Bindings: bindings, Kind: evmassign.KindPrimary, Identities: ids,
+		Authorization: identityfix.Authorization(5, f.predecessor, base, incumbent)}
 	for _, v := range succ.Validators {
 		for _, k := range f.nextKeys {
 			if k.id == v.NodeID {
@@ -244,8 +309,14 @@ func TestOperatorRefusesBadAssignmentProposalsBeforeAnyEndorsement(t *testing.T)
 			return f.next, f.state, f.proposal(t, func(c *evmassign.PoPContext) { c.Predecessor = [32]byte{1} })
 		}, evmassign.ErrPoP},
 		{"EVM-only change (committee unchanged)", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {
-			p := f.proposal(t)
-			p.Bindings = f.bindings(f.succForBindings(t), f.sameRoot)
+			// the committee is unchanged but its last entity now delegates the new validator ev-e: only the EVM set differs
+			p := f.proposalFor(t, f.sameRoot, func(b []evmassign.Binding) {
+				for i := range b {
+					if b[i].EVMNodeID == "ev-d" {
+						b[i].EVMNodeID = "ev-e"
+					}
+				}
+			})
 			return f.sameRoot, f.state, p
 		}, evmassign.ErrEVMOnly},
 		{"root entity without its EVM binding", func(t *testing.T, f *operatorAssignmentFixture) (*types.RootTrustBaseV1, *abdrc.StateMsg, *evmassign.Proposal) {

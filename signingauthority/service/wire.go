@@ -212,6 +212,8 @@ type handoffPoPPayload struct {
 	Predecessor []byte
 	Successor   []byte
 	NodeID      string
+	// Identities is the digest of the successor's frozen identity records (operator payees included) the proof signs.
+	Identities []byte
 }
 
 type advanceEpochPayload struct {

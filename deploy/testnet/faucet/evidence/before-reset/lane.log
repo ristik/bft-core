@@ -1,0 +1,183 @@
+profile-2 logs: /Users/risto/uni/agre/briefs/devnet-runs/faucet-20261007/final-nodes
+ureth engine.persistence-threshold=64 blocks (D2C replay visibility)
+ureth-pin: verified /private/tmp/t6-ureth/unicity-reth-b4e7cb0 reports the pinned commit b4e7cb0ace07eee70e753241e0139c4d42b516d4
+bft source commit=66fc865e1db7c5ef1e5ebdad2a0e2623d2c331e3
+ureth source commit=b4e7cb0ace07eee70e753241e0139c4d42b516d4 binary sha256=b0f08d26ad730a8d6891f1d801ad50fd19629370440e44a34ac4632e66ea6c23
+=== 1. generate the shard topology and chain spec ===
+registry artifact (layout 2) sha256=62ea3d2e1012f5ae216c8b9a5c9a2bf73ea8e04ff9fea99c17bb8ab8b55a9caa
+generated genesis sha256=ec23b84c7ece3e8d454fb1812dc0102590096fff884aa3e4a59724128d0893a4
+funded genesis source sha256=6c5eaefe3da6f5751ae1106273327db1931936d34761879c19032bdb3e863dfa
+wrote test-nodes/evm-genesis-finalized-funded.json (chainId=31337, shanghai+cancun at genesis, registry account at 0xff00000000000000000000000000000000000002)
+wrote test-nodes/evm-full-shard-conf-v2.json (full shard configuration)
+registry layout:            2 (code hash 0x7787f3166565c8e5ebd73801bf71cbacf0cf69f6bcfb8dea8bedbef8198caf38)
+full shard conf hash:       0xef0b81162e5371a1c032dddced1040ba0743310e1c8a28da4a92b0c0359571e5
+initial assignment:         shard epoch 0, active configuration hash 0xef0b81162e5371a1c032dddced1040ba0743310e1c8a28da4a92b0c0359571e5 (immutable genesis hash)
+state root:                 0xdcf73284ca5dc3661ad14ce27a71357f95ac8bb248f3994c3bb93c1037079529
+block hash:                 0x361b40498bcdd83caa34a650713df43fb04ac7d4df7c5bf779fb42fee54771d6
+execution config identity:  0x789e09cf2fe624921fc5cc0680ab81af67198403770a0edad001cacee5b63104
+origin identity:            0x6bf847166fbdeed6021ee040f3ef8de7e842344f3b15641135bda469818e7499
+finalized funded genesis sha256=fcaac519a52d71a67396227ef7239dac43c19a820b844e45c05725f7292cd59d
+enrolled 4 independent signing authorities against the full shard configuration
+
+=== 2. start one reth per validator on that chain spec ===
+  PASS: all 4 reth instances are up on the shard's generated chain spec
+  PASS: reth instances statically peered
+
+=== 4. configure the checked v2 origin and seed the block-1 transaction ===
+  paid nonce 0 hash=0x7ea8b9b57b6e4b7a4cdf2bfbcbb8008a8076ed0a85a0d49d4a5bef2e4ac8afe9 seeded on all 4 reth clients
+  paid nonce 1 hash=0x7126d65f2a9b02fad6e2117696766001181ca1dea65ca23282119276dca599ab seeded on all 4 reth clients
+  paid nonce 2 hash=0xcbed419397f5dfbf48bd0e96c102dc0f8f6ad116ab56874e5d5cc7f29510c329 seeded on all 4 reth clients
+  PASS: seeded three paid user transactions in every reth mempool before block 1
+
+=== 5. the v2 bootstrap certifies a real EVM block 1 ===
+waiting for block 1 and a certificate (up to 180s) ...
+  bootstrap probe 1: mined=false certified=false block=none
+  bootstrap probe 2: mined=false certified=false block=none
+  bootstrap probe 3: mined=false certified=false block=none
+  bootstrap probe 4: mined=false certified=false block=none
+  bootstrap probe 5: mined=false certified=false block=none
+  bootstrap probe 6: mined=false certified=false block=none
+  bootstrap probe 7: mined=true certified=true block=0x1
+  PASS: real reth executed 0x7ea8b9b57b6e4b7a4cdf2bfbcbb8008a8076ed0a85a0d49d4a5bef2e4ac8afe9 in certified v2 block 1
+127.0.0.1 - - [07/Oct/2026 20:26:16] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:21] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:21] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:21] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST /api/claim HTTP/1.1" 400 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST /api/claim HTTP/1.1" 409 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST /api/claim HTTP/1.1" 409 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:22] "POST /api/claim HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:26] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:26] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:26] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:26] "POST /api/claim HTTP/1.1" 429 -
+127.0.0.1 - - [07/Oct/2026 20:26:26] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:26] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:26] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:26] "POST /api/claim HTTP/1.1" 429 -
+127.0.0.1 - - [07/Oct/2026 20:26:26] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:26] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:26] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:26] "POST /api/claim HTTP/1.1" 429 -
+127.0.0.1 - - [07/Oct/2026 20:26:27] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:31] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:31] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:31] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:31] "POST / HTTP/1.1" 200 -
+127.0.0.1 - - [07/Oct/2026 20:26:31] "POST / HTTP/1.1" 200 -
+{
+  "config": {
+    "chain_id": 31337,
+    "genesis_hash": "0x361b40498bcdd83caa34a650713df43fb04ac7d4df7c5bf779fb42fee54771d6",
+    "funding_address": "0x2b6ac6530728f8e5b83357f3450bee1bfa1f1a68",
+    "rpc_url": "http://127.0.0.1:18845",
+    "backend_url": "http://127.0.0.1:18846",
+    "validator_rpc_urls": [
+      "http://127.0.0.1:18545",
+      "http://127.0.0.1:18546",
+      "http://127.0.0.1:18547",
+      "http://127.0.0.1:18548"
+    ],
+    "minimum_balance_wei": 20000000000000000,
+    "daily_claims": 10,
+    "captcha_sitekey": "",
+    "dev_only": true
+  },
+  "upstream_revision": "e7572628addc86c634d8acc3a61d5899667f0e33",
+  "faucet_address": "0x2b6ac6530728f8e5b83357f3450bee1bfa1f1a68",
+  "fresh_wallet": "0xd297bec595e5be5209c1752f94d1bbc536f6dd23",
+  "initial_balance": "0x0",
+  "funding": {
+    "transactionHash": "0x1d913d33bb54754482775caf53172d71be552d3481da15d6fec341d474ccc747",
+    "blockNumber": "0x4",
+    "blockHash": "0xe1caab7b4786165e91dd46c51143efa26e27295626874ab387fc83ff67358681",
+    "status": "0x1",
+    "gasUsed": "0x5208",
+    "effectiveGasPrice": "0x5e90f609",
+    "certified_validators": [
+      1,
+      2,
+      3,
+      4
+    ]
+  },
+  "invalid_address": [
+    400,
+    {
+      "message": "Invalid address or JSON body"
+    }
+  ],
+  "wrong_chain": [
+    409,
+    {
+      "message": "Wrong network or reset genesis; reconnect your wallet"
+    }
+  ],
+  "wrong_genesis": [
+    409,
+    {
+      "message": "Wrong network or reset genesis; reconnect your wallet"
+    }
+  ],
+  "dispense": {
+    "transactionHash": "0xb9c370ce265156d8f90500915babc5493b6f783996fd779e927f7a8a06ce6ef7",
+    "blockNumber": "0x6",
+    "blockHash": "0xc19055045839b3407179d9720bcb3fcef5bdfc4af752d3956ea2e67e24dba134",
+    "status": "0x1",
+    "gasUsed": "0x5208",
+    "effectiveGasPrice": "0x5660bba0",
+    "certified_validators": [
+      1,
+      2,
+      3,
+      4
+    ]
+  },
+  "duplicate": [
+    429,
+    {
+      "message": "One claim per address and IP per 24 hours; daily total capped"
+    }
+  ],
+  "same_ip_new_address": [
+    429,
+    {
+      "message": "One claim per address and IP per 24 hours; daily total capped"
+    }
+  ],
+  "restart_duplicate": [
+    429,
+    {
+      "message": "One claim per address and IP per 24 hours; daily total capped"
+    }
+  ],
+  "paid_transaction": {
+    "transactionHash": "0x6420a3b9e89f6fa7598be70490daa9e47f24d6d4d2a881f9cb2d9ba793cbdb20",
+    "blockNumber": "0x8",
+    "blockHash": "0xd6dc56479f63e94d824f582b4d59ea72a2ebed1a94f38f9f084d57378d8e3cf4",
+    "status": "0x1",
+    "gasUsed": "0x5208",
+    "effectiveGasPrice": "0x501b76dd",
+    "certified_validators": [
+      1,
+      2,
+      3,
+      4
+    ]
+  },
+  "final_balance": "0x236d4722d27f17",
+  "reset_old_state": "refused",
+  "wrong_rpc_genesis": "RPC genesis mismatch",
+  "exhaustion": "faucet exhausted: refill required"
+}
+  PASS: faucet fresh wallet, paid transfer, limits and identity checks
+FAUCET probe complete; stopping paired nodes before unrelated handoff/continuous-execution probes

@@ -1,0 +1,12 @@
+{
+  "bft_source": "66fc865e1db7c5ef1e5ebdad2a0e2623d2c331e3",
+  "ureth_source": "b4e7cb0ace07eee70e753241e0139c4d42b516d4",
+  "upstream_source": "e7572628addc86c634d8acc3a61d5899667f0e33",
+  "go_version": "go version go1.27.1 darwin/amd64",
+  "binary_sha256": {
+    "ubft": "68fad3dda512566dfb7af2abbcfee7d4e870c33bd37aaaa476ef0d6e0ecbd912",
+    "evmtx": "727ff462f05bdb64fecee3a4ec341b9e05f0b433e0b07a8358538577998f12a3",
+    "upstream_backend": "e5f14897dfe3a4c9a9ea74e1cef2dfc7d17bbed7a53382f4c85ae2708964d269",
+    "ureth": "b0f08d26ad730a8d6891f1d801ad50fd19629370440e44a34ac4632e66ea6c23"
+  }
+}

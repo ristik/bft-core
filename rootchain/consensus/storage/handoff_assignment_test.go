@@ -9,8 +9,10 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/continuity"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/testutils/identityfix"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
@@ -50,7 +52,11 @@ type assignmentFixture struct {
 	shard       types.PartitionShardID
 	oldKeys     []evmKey
 	nextKeys    []evmKey
-	nextRootKey evmKey // the root entity that replaces the last committee member in the successor committee
+	// replacementEVM is the EVM validator delegated to the replacing root entity; every other entity keeps its own.
+	replacementEVM string
+	// replacedRoot is the old root entity the replacing one takes the place of (the last member by default).
+	replacedRoot string
+	nextRootKey  evmKey // the root entity that replaces the last committee member in the successor committee
 	// baseCommittee, when set, is the committee being replaced (a later handoff): the previous successor.
 	baseCommittee []evmassign.RootMember
 	// changes are aggregator validator replacements the candidate carries (see addAggregator).
@@ -62,6 +68,15 @@ type assignmentFixture struct {
 	rootEpoch  uint64 // old root epoch of the handoff being built; zero means 1
 	supersedes *evmassign.Supersession
 	current0   *types.PartitionDescriptionRecord // installed configuration the candidate replaces; nil means f.current
+	// recovery, when set, makes candidate() the recovery of the committed primary: exactly K, derived, no fresh proofs.
+	recovery *recoveryPlan
+}
+
+// recoveryPlan is evmassign.DeriveRecovery's output for the fixture.
+type recoveryPlan struct {
+	lc       evmassign.Lifecycle
+	root     []evmassign.RootMember
+	bindings []evmassign.Binding
 }
 
 func newAssignmentFixture(t *testing.T) *assignmentFixture {
@@ -86,11 +101,13 @@ func newAssignmentFixture(t *testing.T) *assignmentFixture {
 	}
 	f.current = &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 8,
 		TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 5 * time.Second, Epoch: 0, EpochStart: 1,
-		PartitionParams: map[string]string{"seal_registry_genesis": "g", evmassign.CouplingParam: "true"}, Validators: infos}
+		PartitionParams: map[string]string{"seal_registry_genesis": "g", evmassign.CouplingParam: "true",
+			// replacing one of four equal members moves D to 1/2: the fixture states the wider (committed) policy it rotates under
+			ParamContinuityMaxDist: "1/2"}, Validators: infos}
 	f.installShard(t, f.current, func(si *ShardInfo) { si.IR.BlockHash = bytes.Clone(f.parent) })
 
 	// Keep one old key and add three new ones: retained keys prove possession too.
-	f.nextKeys = []evmKey{f.oldKeys[0], newEVMKey(t, "ev-e"), newEVMKey(t, "ev-f"), newEVMKey(t, "ev-g")}
+	f.nextKeys = []evmKey{f.oldKeys[0], f.oldKeys[1], f.oldKeys[2], newEVMKey(t, "ev-e")}
 	next := make([]*types.NodeInfo, 0, 4)
 	for _, k := range f.nextKeys {
 		next = append(next, k.info)
@@ -98,6 +115,7 @@ func newAssignmentFixture(t *testing.T) *assignmentFixture {
 	f.succ, err = evmassign.NewSuccessor(f.current, next)
 	require.NoError(t, err)
 	f.nextRootKey = newEVMKey(t, "new-e")
+	f.replacementEVM = "ev-e"
 	f.pop = evmassign.PoPContext{Network: 5, Attempt: 0}
 	copy(f.pop.Predecessor[:], f.predecessor)
 	return f
@@ -112,7 +130,7 @@ func (f *assignmentFixture) installShard(t *testing.T, conf *types.PartitionDesc
 	if f.orch == nil {
 		f.store.orchestration = mockOrchestration{shardConfigs: func(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
 			return map[types.PartitionShardID]*types.PartitionDescriptionRecord{f.shard: conf}, nil
-		}}
+		}, identities: f.incumbent}
 	}
 	root := f.store.blockTree.Root()
 	root.ShardState.States[f.shard] = si
@@ -138,23 +156,65 @@ func (f *assignmentFixture) rootMembers() []evmassign.RootMember {
 // successorRoot is the committee after the coupled handoff: the old committee with one entity replaced (so the root and
 // the EVM assignment change together, as the coupled-only rule requires).
 func (f *assignmentFixture) successorRoot() []evmassign.RootMember {
+	if f.recovery != nil {
+		return append([]evmassign.RootMember(nil), f.recovery.root...)
+	}
 	out := f.rootMembers()
 	if f.baseCommittee != nil {
 		out = append([]evmassign.RootMember(nil), f.baseCommittee...)
 	}
-	out[len(out)-1] = evmassign.RootMember{NodeID: f.nextRootKey.id, Key: f.nextRootKey.info.SigKey, Weight: 1}
+	at := len(out) - 1
+	for i, m := range out {
+		if m.NodeID == f.replacedRoot {
+			at = i
+		}
+	}
+	out[at] = evmassign.RootMember{NodeID: f.nextRootKey.id, Key: f.nextRootKey.info.SigKey, Weight: 1}
 	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
 	return out
 }
 
 // bindings pairs each successor root entity with a delegated EVM validator of the successor set, in order.
 func (f *assignmentFixture) bindings() []evmassign.Binding {
+	if f.recovery != nil {
+		return f.recovery.bindings
+	}
 	root := f.successorRoot()
 	out := make([]evmassign.Binding, len(root))
 	for i, m := range root {
-		out[i] = evmassign.Binding{RootNodeID: m.NodeID, EVMNodeID: f.succ.Validators[i].NodeID}
+		// every entity keeps its delegated EVM validator ("old-x" -> "ev-x"); the replacing entity takes the new one
+		out[i] = evmassign.Binding{RootNodeID: m.NodeID, EVMNodeID: "ev-" + m.NodeID[len(m.NodeID)-1:]}
+		if m.NodeID == f.nextRootKey.id {
+			out[i].EVMNodeID = f.replacementEVM
+		}
 	}
 	return out
+}
+
+// incumbent is the last acknowledged committee: the old root committee bound to the installed EVM validators.
+func (f *assignmentFixture) incumbent() ([]evmassign.Identity, [32]byte) {
+	root := f.rootMembers()
+	if f.baseCommittee != nil {
+		root = f.baseCommittee
+	}
+	installed := f.current
+	if f.current0 != nil {
+		installed = f.current0
+	}
+	bindings := make([]evmassign.Binding, len(root))
+	for i, m := range root {
+		bindings[i] = evmassign.Binding{RootNodeID: m.NodeID, EVMNodeID: "ev-" + m.NodeID[len(m.NodeID)-1:]}
+	}
+	ids := identityfix.Identities(root, installed, bindings)
+	d, err := evmassign.IdentitiesDigest(ids)
+	if err != nil {
+		panic(err)
+	}
+	h, err := evmassign.AssignmentHash(installed, d)
+	if err != nil {
+		panic(err)
+	}
+	return ids, h
 }
 
 func (f *assignmentFixture) pops(t *testing.T, ctx evmassign.PoPContext, succ *types.PartitionDescriptionRecord) []evmassign.PoP {
@@ -184,9 +244,22 @@ func (f *assignmentFixture) candidate(t *testing.T) evmassign.Candidate {
 	}
 	old, err := evmassign.PDRHash(installed)
 	require.NoError(t, err)
-	return evmassign.Candidate{Version: evmassign.CandidateVersion, Network: 5, Predecessor: bytes.Clone(f.predecessor),
+	if f.recovery != nil {
+		lc := f.recovery.lc
+		return evmassign.Candidate{Version: evmassign.CandidateVersion, Kind: evmassign.KindRecovery, Network: 5, Predecessor: bytes.Clone(f.predecessor),
+			Attempt: f.pop.Attempt, RootMembers: f.successorRoot(), OldShardEpoch: installed.Epoch,
+			OldActiveHash: old[:], Assignment: raw, Supersedes: f.supersedes, Bindings: f.bindings(), Identities: lc.Identities,
+			Authorization: lc.Authorization, ReplacedAssignment: lc.ReplacedAssignment, Changes: f.changes}
+	}
+	ids := identityfix.Identities(f.successorRoot(), f.succ, f.bindings())
+	f.pop.Identities, err = evmassign.IdentitiesDigest(ids)
+	require.NoError(t, err)
+	incumbent, base := f.incumbent()
+	auth := identityfix.Authorization(5, f.predecessor, base, incumbent)
+	return evmassign.Candidate{Version: evmassign.CandidateVersion, Kind: evmassign.KindPrimary, Network: 5, Predecessor: bytes.Clone(f.predecessor),
 		Attempt: f.pop.Attempt, RootMembers: f.successorRoot(), OldShardEpoch: installed.Epoch,
-		OldActiveHash: old[:], Assignment: raw, PoPs: f.pops(t, f.pop, f.succ), Supersedes: f.supersedes, Bindings: f.bindings(), Changes: f.changes}
+		OldActiveHash: old[:], Assignment: raw, PoPs: f.pops(t, f.pop, f.succ), Supersedes: f.supersedes, Bindings: f.bindings(),
+		Identities: ids, Authorization: auth, Changes: f.changes}
 }
 
 // rootOnly builds the legacy (version 1) root-only freeze whose successor committee is the given one: it carries no EVM
@@ -513,6 +586,12 @@ func TestEVMOnlyAssignmentChangeIsRefusedAtBlockValidation(t *testing.T) {
 	for i, m := range root {
 		c.Bindings[i] = evmassign.Binding{RootNodeID: m.NodeID, EVMNodeID: f.succ.Validators[i].NodeID}
 	}
+	// the identity records and proofs follow the unchanged committee, so only the EVM-only rule can refuse
+	c.Identities = identityfix.Identities(root, f.succ, c.Bindings)
+	var perr error
+	f.pop.Identities, perr = evmassign.IdentitiesDigest(c.Identities)
+	require.NoError(t, perr)
+	c.PoPs = f.pops(t, f.pop, f.succ)
 	err := f.admit(t, f.build(t, c, func(_ *FreezeAssignmentAuthorization, body *evmroot.TrustBaseBodyV2) {
 		body.Members = nil
 		for _, m := range root {
@@ -521,4 +600,73 @@ func TestEVMOnlyAssignmentChangeIsRefusedAtBlockValidation(t *testing.T) {
 	}))
 	require.ErrorIs(t, err, ErrHandoffRecord)
 	require.ErrorIs(t, err, evmassign.ErrEVMOnly)
+}
+
+// The kind and continuity rules are judged at block admission, each refusal isolated from the acceptance control
+// (TestFreezeAdmitsAssignmentCandidateAndRetainsPreimage).
+func TestFreezeAdmissionJudgesTheIdentityAndContinuityRules(t *testing.T) {
+	t.Run("the continuity membership budget", func(t *testing.T) {
+		f := newAssignmentFixture(t)
+		conf := *f.current
+		conf.PartitionParams = map[string]string{"seal_registry_genesis": "g", evmassign.CouplingParam: "true", ParamContinuityMaxDist: "1/2", ParamContinuityMaxM: "1"}
+		f.current = &conf
+		f.rederive(t)
+		err := f.admit(t, f.build(t, f.candidate(t)))
+		require.ErrorIs(t, err, ErrHandoffRecord)
+		require.ErrorIs(t, err, evmassign.ErrContinuity)
+		require.ErrorIs(t, err, continuity.ErrMembership)
+		require.NotErrorIs(t, err, continuity.ErrTurnover)
+		require.NotErrorIs(t, err, continuity.ErrWeightDistance)
+	})
+	t.Run("the continuity weight distance", func(t *testing.T) {
+		f := newAssignmentFixture(t)
+		conf := *f.current
+		conf.PartitionParams = map[string]string{"seal_registry_genesis": "g", evmassign.CouplingParam: "true", ParamContinuityMaxDist: "1/4"}
+		f.current = &conf
+		f.rederive(t)
+		err := f.admit(t, f.build(t, f.candidate(t)))
+		require.ErrorIs(t, err, continuity.ErrWeightDistance)
+		require.NotErrorIs(t, err, continuity.ErrMembership)
+	})
+	t.Run("K is not the acknowledged committee", func(t *testing.T) {
+		f := newAssignmentFixture(t)
+		forged, base := f.incumbent()
+		forged = append([]evmassign.Identity(nil), forged...)
+		forged[0].OperatorPayee = bytes.Repeat([]byte{0xEE}, evmassign.PayeeLen) // the baseline the root holds names another payee
+		f.store.orchestration = mockOrchestration{shardConfigs: f.store.orchestration.(mockOrchestration).shardConfigs,
+			identities: func() ([]evmassign.Identity, [32]byte) { return forged, base }}
+		err := f.admit(t, f.build(t, f.candidate(t)))
+		require.ErrorIs(t, err, ErrHandoffRecord)
+		require.ErrorIs(t, err, evmassign.ErrNotIncumbent)
+	})
+	t.Run("a payee swapped after the proofs were signed", func(t *testing.T) {
+		f := newAssignmentFixture(t)
+		c := f.candidate(t)
+		c.Identities = append([]evmassign.Identity(nil), c.Identities...)
+		c.Identities[1].OperatorPayee = bytes.Repeat([]byte{0xEE}, evmassign.PayeeLen)
+		err := f.admit(t, f.build(t, c))
+		require.ErrorIs(t, err, ErrHandoffRecord)
+		require.ErrorIs(t, err, evmassign.ErrPoP)
+	})
+	t.Run("a recovery-kind candidate with no committed primary", func(t *testing.T) {
+		f := newAssignmentFixture(t)
+		c := f.candidate(t)
+		c.Kind, c.PoPs, c.ReplacedAssignment = evmassign.KindRecovery, nil, bytes.Repeat([]byte{1}, 32)
+		err := f.admit(t, f.build(t, c))
+		require.ErrorIs(t, err, ErrHandoffRecord)
+		require.ErrorIs(t, err, evmassign.ErrNotIncumbent, "its committee is J's, not K")
+	})
+}
+
+// rederive re-installs the shard under a changed installed configuration and derives the successor from it again.
+func (f *assignmentFixture) rederive(t *testing.T) {
+	t.Helper()
+	f.installShard(t, f.current, func(si *ShardInfo) { si.IR.BlockHash = bytes.Clone(f.parent) })
+	next := make([]*types.NodeInfo, 0, len(f.nextKeys))
+	for _, k := range f.nextKeys {
+		next = append(next, k.info)
+	}
+	var err error
+	f.succ, err = evmassign.NewSuccessor(f.current, next)
+	require.NoError(t, err)
 }

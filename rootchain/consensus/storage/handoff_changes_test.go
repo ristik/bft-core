@@ -319,7 +319,9 @@ func TestRotationKeepingTheNodeIDRefusesTheRetiredKey(t *testing.T) {
 	rotatedAgg := newEVMKey(t, a.oldKey.id)
 	rotated := aggregatorShard{conf: a.conf, key: a.key, oldKey: a.oldKey, nextKey: rotatedAgg}
 	rotatedEVM := newEVMKey(t, "ev-a")
-	f.nextKeys = []evmKey{rotatedEVM, newEVMKey(t, "ev-e"), newEVMKey(t, "ev-f"), newEVMKey(t, "ev-g")}
+	// the replacing root entity takes over old-a's place and delegates the rotated ev-a (same id, new key); the others are unchanged
+	f.replacedRoot, f.replacementEVM = "old-a", "ev-a"
+	f.nextKeys = []evmKey{rotatedEVM, f.oldKeys[1], f.oldKeys[2], f.oldKeys[3]}
 	succ, err := evmassign.NewSuccessor(f.current, []*types.NodeInfo{f.nextKeys[0].info, f.nextKeys[1].info, f.nextKeys[2].info, f.nextKeys[3].info})
 	require.NoError(t, err)
 	f.succ = succ

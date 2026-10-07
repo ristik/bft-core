@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"crypto"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -621,6 +622,25 @@ func Test_ShardInfo_selectLeader(t *testing.T) {
 type mockOrchestration struct {
 	shardConfigs func(rootRound uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error)
 	shardConfig  func(partitionID types.PartitionID, shardID types.ShardID, rootRound uint64) (*types.PartitionDescriptionRecord, error)
+	// identities, when set, is the acknowledged incumbent baseline (the genesis committee of the shard).
+	identities func() ([]evmassign.Identity, [32]byte)
+}
+
+func (mo mockOrchestration) AcknowledgedIdentities(types.PartitionID, types.ShardID, uint64) ([]evmassign.Identity, [32]byte, error) {
+	if mo.identities == nil {
+		return nil, [32]byte{}, ErrLifecycle
+	}
+	ids, h := mo.identities()
+	return ids, h, nil
+}
+
+// DerivedChain is empty: a mock keeps no committed handoff history.
+func (mo mockOrchestration) DerivedChain(types.PartitionID, types.ShardID, uint64) ([]evmassign.ChainStep, error) {
+	return nil, nil
+}
+
+func (mo mockOrchestration) ShardConfigByEpoch(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error) {
+	return nil, nil
 }
 
 func (mo mockOrchestration) NetworkID() types.NetworkID {

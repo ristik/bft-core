@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/internal/testutils/handoffbundle"
+	"github.com/unicitynetwork/bft-core/internal/testutils/identityfix"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -119,7 +120,7 @@ func TestAssignmentValidatorsAreTheActivatedSuccessorsOrNoneForARootOnlyBundle(t
 		Validators: []*types.NodeInfo{{NodeID: "validator-a", SigKey: bytes.Repeat([]byte{2}, 33), Stake: 1}, {NodeID: "validator-b", SigKey: bytes.Repeat([]byte{3}, 33), Stake: 1}}}
 	raw, err := types.Cbor.Marshal(succ)
 	require.NoError(t, err)
-	candidate, err := evmassign.Candidate{Version: evmassign.CandidateVersion, Assignment: raw}.Encode()
+	candidate, err := identityfix.Shaped(evmassign.Candidate{Version: evmassign.CandidateVersion, Assignment: raw}).Encode()
 	require.NoError(t, err)
 	f := handoffbundle.New(t)
 	bundle := Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot, Candidate: candidate}

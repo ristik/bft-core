@@ -54,14 +54,25 @@ func readEVMAssignment(path string) (*evmassign.Proposal, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("decoding --next-evm-assignment %q: %w", path, err)
 	}
+	if p.Kind == evmassign.KindRecovery {
+		// A recovery is derived from the committed primary: nothing else may be supplied.
+		if len(p.Validators) != 0 || len(p.Bindings) != 0 || len(p.PoPs) != 0 || len(p.Identities) != 0 || p.Authorization != nil || !p.Supersede {
+			return nil, errors.New("--next-evm-assignment of kind recovery is derived and supersedes: it carries no validators, bindings, proofs, identities or authorization")
+		}
+		return &p, nil
+	}
 	if len(p.Validators) == 0 {
 		return nil, errors.New("--next-evm-assignment names no successor validators")
 	}
+
 	if len(p.Bindings) != len(p.Validators) {
 		return nil, fmt.Errorf("--next-evm-assignment has %d root-entity bindings for %d successor validators: every validator is the delegated EVM key of one root entity", len(p.Bindings), len(p.Validators))
 	}
 	if len(p.PoPs) != len(p.Validators) {
 		return nil, fmt.Errorf("--next-evm-assignment has %d proofs of possession for %d successor validators: every successor key, retained ones included, must prove possession", len(p.PoPs), len(p.Validators))
+	}
+	if len(p.Identities) != len(p.Validators) || p.Authorization == nil {
+		return nil, errors.New("--next-evm-assignment needs one identity record per successor validator and the recovery authorization")
 	}
 	return &p, nil
 }
@@ -244,6 +255,35 @@ func readContextFile(path string) (consensus.EVMAssignmentContext, evmassign.PoP
 	return c, pop, nil
 }
 
+// readIdentities reads the frozen identity records a primary assignment commits to (operator payees included) and returns them with
+// their digest, the value every possession proof signs.
+func readIdentities(path string) ([]evmassign.Identity, [32]byte, error) {
+	var none [32]byte
+	raw, err := os.ReadFile(path) // #nosec G304 -- operator supplied local file
+	if err != nil {
+		return nil, none, err
+	}
+	var ids []evmassign.Identity
+	if err := json.Unmarshal(raw, &ids); err != nil {
+		return nil, none, fmt.Errorf("decoding identities %q: %w", path, err)
+	}
+	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i].StakingID, ids[j].StakingID) < 0 })
+	digest, err := evmassign.IdentitiesDigest(ids)
+	return ids, digest, err
+}
+
+func readAuthorization(path string) (*evmassign.Authorization, error) {
+	raw, err := os.ReadFile(path) // #nosec G304 -- operator supplied local file
+	if err != nil {
+		return nil, err
+	}
+	var a evmassign.Authorization
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, fmt.Errorf("decoding authorization %q: %w", path, err)
+	}
+	return &a, nil
+}
+
 func readValidators(path string) ([]*types.NodeInfo, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- operator supplied local file
 	if err != nil {
@@ -260,7 +300,7 @@ func readValidators(path string) ([]*types.NodeInfo, error) {
 var errBothKeyHolders = errors.New("give either --key-conf or the signing authority flags, not both: a key is signed for by exactly one holder")
 
 func newEVMPoPCmd() *cobra.Command {
-	var contextFile, validatorsFile, nodeID, keyFile, installedFile, authoritySocket, authorityCredential string
+	var contextFile, validatorsFile, nodeID, keyFile, installedFile, authoritySocket, authorityCredential, identitiesFile string
 	cmd := &cobra.Command{Use: "evm-pop", Short: "Sign a proof of possession for one successor EVM validator key",
 		Long: "Run by the holder of a successor signing key, offline. It signs the domain-separated possession message for the successor\n" +
 			"assignment and the context printed by `handoff evm-context`. Retained keys must sign too.",
@@ -268,6 +308,14 @@ func newEVMPoPCmd() *cobra.Command {
 			c, pop, err := readContextFile(contextFile)
 			if err != nil {
 				return err
+			}
+			if installedFile == "" { // an EVM assignment proof signs the identity records, operator payees included
+				if identitiesFile == "" {
+					return errors.New("--identities is required: a possession proof signs the frozen identity records")
+				}
+				if _, pop.Identities, err = readIdentities(identitiesFile); err != nil {
+					return err
+				}
 			}
 			validators, err := readValidators(validatorsFile)
 			if err != nil {
@@ -353,6 +401,7 @@ func newEVMPoPCmd() *cobra.Command {
 	cmd.Flags().StringVar(&nodeID, "node-id", "", "successor validator this key belongs to")
 	cmd.Flags().StringVar(&keyFile, "key-conf", "", "key configuration holding the validator's signing key")
 	cmd.Flags().StringVar(&installedFile, "installed", "", "installed shard configuration JSON of an aggregator shard whose node keys are replaced (default: the EVM assignment in the context)")
+	cmd.Flags().StringVar(&identitiesFile, "identities", "", "JSON array of the successor's frozen identity records (staking id, bindings, weight, operator payee, exposure)")
 	cmd.Flags().StringVar(&authoritySocket, "authority-socket", "", "operator socket of the validator's signing authority (instead of --key-conf)")
 	cmd.Flags().StringVar(&authorityCredential, "authority-credential", "", "path to the signing authority's operator credential")
 	for _, f := range []string{"context", "validators", "node-id"} {
@@ -362,11 +411,29 @@ func newEVMPoPCmd() *cobra.Command {
 }
 
 func newEVMAssembleCmd() *cobra.Command {
-	var contextFile, validatorsFile, pops, out, bindingsFile, changesFiles string
-	var supersede bool
+	var contextFile, validatorsFile, pops, out, bindingsFile, changesFiles, identitiesFile, authorizationFile string
+	var supersede, recovery bool
 	cmd := &cobra.Command{Use: "evm-assemble", Short: "Collect proofs of possession into a --next-evm-assignment file",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, pop, err := readContextFile(contextFile)
+			if err != nil {
+				return err
+			}
+			if recovery {
+				if !supersede || !c.Pending {
+					return errors.New("--recovery replaces the installed, unacknowledged primary: give --supersede on a pending assignment")
+				}
+				return writeProposal(cmd, out, evmassign.Proposal{Kind: evmassign.KindRecovery, Supersede: true}, "recovery (derived from the committed primary)")
+			}
+			if identitiesFile == "" || authorizationFile == "" || validatorsFile == "" || pops == "" || bindingsFile == "" {
+				return errors.New("--identities, --authorization, --validators, --pops and --bindings are required for a primary assignment")
+			}
+			identities, identitiesDigest, err := readIdentities(identitiesFile)
+			if err != nil {
+				return err
+			}
+			pop.Identities = identitiesDigest
+			authorization, err := readAuthorization(authorizationFile)
 			if err != nil {
 				return err
 			}
@@ -425,23 +492,14 @@ func newEVMAssembleCmd() *cobra.Command {
 			if supersede && len(changes) != 0 {
 				return errors.New("--changes cannot accompany --supersede: a supersession carries no aggregator changes")
 			}
-			if _, err := evmassign.ValidateChanges(changes, nil, pop, evmroot.D4ControlPartition); err != nil {
+			aggregatorPop := pop
+			aggregatorPop.Identities = [32]byte{} // an aggregator replacement has no identity records
+			if _, err := evmassign.ValidateChanges(changes, nil, aggregatorPop, evmroot.D4ControlPartition); err != nil {
 				return err
 			}
-			encoded, err := json.MarshalIndent(evmassign.Proposal{Validators: succ.Validators, PoPs: ordered, Supersede: supersede, Bindings: bindings, Changes: changes}, "", "  ")
-			if err != nil {
-				return err
-			}
-			if out == "" {
-				_, err = fmt.Fprintln(cmd.OutOrStdout(), string(encoded))
-				return err
-			}
-			if err := os.WriteFile(out, encoded, 0o600); err != nil {
-				return err
-			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "wrote %s: assignment epoch %d for %d validators, %s\n", out, succ.Epoch, len(succ.Validators),
-				"assignment hash "+mustAssignmentHash(succ))
-			return err
+			return writeProposal(cmd, out, evmassign.Proposal{Kind: evmassign.KindPrimary, Validators: succ.Validators, PoPs: ordered, Supersede: supersede,
+				Bindings: bindings, Changes: changes, Identities: identities, Authorization: authorization},
+				fmt.Sprintf("assignment epoch %d for %d validators, assignment hash %s", succ.Epoch, len(succ.Validators), mustAssignmentHash(succ, identitiesDigest)))
 		}}
 	cmd.Flags().StringVar(&contextFile, "context", "", "context JSON from `handoff evm-context`")
 	cmd.Flags().StringVar(&validatorsFile, "validators", "", "JSON array of the successor validators")
@@ -449,15 +507,32 @@ func newEVMAssembleCmd() *cobra.Command {
 	cmd.Flags().StringVar(&out, "out", "", "output file for --next-evm-assignment (default: stdout)")
 	cmd.Flags().StringVar(&changesFiles, "changes", "", "comma-separated aggregator key-replacement files from `handoff shard-assemble` (optional)")
 	cmd.Flags().StringVar(&bindingsFile, "bindings", "", "JSON array of {rootNodeId, evmNodeId}: the delegated EVM validator of each successor root entity")
+	cmd.Flags().StringVar(&identitiesFile, "identities", "", "JSON array of the successor's frozen identity records (operator payees included)")
+	cmd.Flags().StringVar(&authorizationFile, "authorization", "", "JSON recovery authorization (K) published with this primary")
+	cmd.Flags().BoolVar(&recovery, "recovery", false, "derive the recovery candidate (exactly K) for the installed, unacknowledged primary; needs --supersede")
 	cmd.Flags().BoolVar(&supersede, "supersede", false, "replace the installed assignment, whose acknowledgement is still pending, on the same frozen parent")
-	for _, f := range []string{"context", "validators", "pops", "bindings"} {
-		_ = cmd.MarkFlagRequired(f)
-	}
+	_ = cmd.MarkFlagRequired("context")
 	return cmd
 }
 
-func mustAssignmentHash(succ *types.PartitionDescriptionRecord) string {
-	h, err := evmassign.AssignmentHash(succ)
+func writeProposal(cmd *cobra.Command, out string, p evmassign.Proposal, what string) error {
+	encoded, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	if out == "" {
+		_, err = fmt.Fprintln(cmd.OutOrStdout(), string(encoded))
+		return err
+	}
+	if err := os.WriteFile(out, encoded, 0o600); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(cmd.OutOrStdout(), "wrote %s: %s\n", out, what)
+	return err
+}
+
+func mustAssignmentHash(succ *types.PartitionDescriptionRecord, identities [32]byte) string {
+	h, err := evmassign.AssignmentHash(succ, identities)
 	if err != nil {
 		return "unavailable"
 	}

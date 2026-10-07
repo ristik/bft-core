@@ -1,7 +1,6 @@
 package partitions
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/internal/testutils/identityfix"
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -375,7 +375,7 @@ func TestInstallDerivedShardConfigsIsAtomic(t *testing.T) {
 	evm.PartitionTypeID = evmassign.EVMPartitionTypeID
 	agg := createShardConf(t, 9, types.ShardID{}, 1)
 	require.NoError(t, o.InitGenesisShardConfigs(evm, agg))
-	provenance, err := evmassign.Provenance{RecordID: bytes.Repeat([]byte{1}, 32), CandidateDigest: bytes.Repeat([]byte{2}, 32), RootEpoch: 2}.Bytes()
+	provenance, err := testProvenance(t).Bytes()
 	require.NoError(t, err)
 	next := func(c *types.PartitionDescriptionRecord, start uint64) *types.PartitionDescriptionRecord {
 		n := *c
@@ -402,7 +402,7 @@ func TestInstallDerivedShardConfigsIsAtomic(t *testing.T) {
 // weight outside the bounds is refused for the EVM shard too. Each case differs from the accepted control in one thing, and a refused
 // batch leaves nothing behind.
 func TestDerivedConfigurationWeightRules(t *testing.T) {
-	provenance, err := evmassign.Provenance{RecordID: bytes.Repeat([]byte{1}, 32), CandidateDigest: bytes.Repeat([]byte{2}, 32), RootEpoch: 2}.Bytes()
+	provenance, err := testProvenance(t).Bytes()
 	require.NoError(t, err)
 	newOrch := func(t *testing.T) (*Orchestration, *types.PartitionDescriptionRecord, *types.PartitionDescriptionRecord) {
 		o, err := NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), logger.New(t))
@@ -460,4 +460,11 @@ func TestDerivedConfigurationWeightRules(t *testing.T) {
 			require.EqualValues(t, 0, confs[types.PartitionShardID{PartitionID: 8, ShardID: types.ShardID{}.Key()}].Epoch)
 		})
 	}
+}
+
+func testProvenance(t *testing.T) evmassign.Provenance {
+	t.Helper()
+	p, err := identityfix.Provenance(1, 2, evmassign.KindPrimary, 2)
+	require.NoError(t, err)
+	return p
 }
