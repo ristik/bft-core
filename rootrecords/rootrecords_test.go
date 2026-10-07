@@ -386,6 +386,15 @@ func TestProgressOverflowIsRefusedAndLeavesState(t *testing.T) {
 		require.ErrorIs(t, tr.Observe(2, 2), ErrProgress) // would wrap to zero
 		require.Equal(t, max, tr.Progress())
 	})
+	t.Run("the successor's first observed round", func(t *testing.T) {
+		tr := NewGenesis(1, 1)
+		_, err := tr.OrderH(max, 2, 1) // the successor offset is max
+		require.NoError(t, err)
+		before := *tr
+		require.ErrorIs(t, tr.Observe(2, 2), ErrProgress) // entering the successor at round 2 would wrap to zero
+		require.Equal(t, before, *tr)
+		require.True(t, tr.Frozen())
+	})
 	t.Run("p plus one", func(t *testing.T) {
 		tr := NewGenesis(1, 0)
 		before := *tr
