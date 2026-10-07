@@ -399,6 +399,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			mux.HandleFunc("POST /api/v1/handoff/evm-assignment/context", rootHandoffEVMContextHandler(cm))
 			if q3rt != nil {
 				mux.HandleFunc("POST /api/v1/handoff/q3-candidate", rootQ3CandidateHandler(cm))
+				mux.HandleFunc("POST /api/v1/handoff/q3-stage", rootQ3StageHandler(cm))
+				rootQ3API{Status: cm.Q3Status, Rt: q3rt, Bundle: q3BundleProvider{cm: cm, rt: q3rt}.Q3Bundle, State: cm.GetState,
+					Trust: func(epoch uint64) (*types.RootTrustBaseV1, error) { return trustBaseStore.GetByEpoch(epoch) }}.register(mux)
 			}
 			mux.HandleFunc("POST /api/v1/handoff/abort", rootHandoffAbortHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/abort/status", rootHandoffAbortStatusHandler(cm))

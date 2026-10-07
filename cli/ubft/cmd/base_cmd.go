@@ -48,6 +48,7 @@ func (a *UnicityBFTApp) Execute(ctx context.Context) (err error) {
 func (a *UnicityBFTApp) AddSubcommands() {
 	a.baseCmd.AddCommand(newRootNodeCmd(a.baseConfig))
 	a.baseCmd.AddCommand(newRootCmd())
+	a.baseCmd.AddCommand(newQ3Cmd())
 	a.baseCmd.AddCommand(newTrustBaseCmd(a.baseConfig))
 	a.baseCmd.AddCommand(newShardNodeCmd(a.baseConfig))
 	a.baseCmd.AddCommand(newShardConfCmd(a.baseConfig))

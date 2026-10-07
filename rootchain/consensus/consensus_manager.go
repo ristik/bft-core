@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -113,6 +114,7 @@ type (
 		recoveryHistory  *trusthistorystore.Store
 		q3               Q3Authority                 // the verified Q3 history, nil when the binary does not know it
 		v3Planned        atomic.Pointer[V3Candidate] // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
+		q3Staged         atomic.Pointer[Q3Staged]    // the V3 candidate this validator last derived for its operator
 		epochAnchor      *drctypes.EpochAnchor
 		handoffMu        sync.Mutex
 		handoffPlans     map[[32]byte]*pendingHandoff
@@ -675,6 +677,7 @@ func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 		}
 		if recorded != nil {
 			timeoutVoteMsg = recorded
+			x.log.InfoContext(ctx, "recovered recorded timeout vote", "epoch", timeout.Epoch, "round", timeout.Round, "messageID", timeoutMessageID(recorded))
 		} else {
 			timeoutVoteMsg = abdrc.NewTimeoutMsg(
 				timeout,
@@ -684,6 +687,7 @@ func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 				x.log.WarnContext(ctx, "failed to sign timeout", logger.Error(err))
 				return
 			}
+			x.log.InfoContext(ctx, "signed timeout vote", "epoch", timeout.Epoch, "round", timeout.Round, "messageID", timeoutMessageID(timeoutVoteMsg))
 		}
 		if err := x.blockStore.StoreLastVote(timeoutVoteMsg); err != nil {
 			x.log.WarnContext(ctx, "failed to store timeout vote", logger.Error(err))
@@ -693,6 +697,7 @@ func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 	// in the case root chain has not made any progress (less than quorum nodes online), broadcast the same vote again
 	// broadcast timeout vote
 	x.log.LogAttrs(ctx, logger.LevelTrace, "broadcasting timeout vote")
+	x.log.InfoContext(ctx, "broadcast timeout vote", "round", x.pacemaker.GetCurrentRound(), "messageID", timeoutMessageID(timeoutVoteMsg))
 	if err := x.net.Send(ctx, timeoutVoteMsg, x.Validators()...); err != nil {
 		x.log.WarnContext(ctx, "error on broadcasting timeout vote", logger.Error(err))
 	}
@@ -1802,3 +1807,14 @@ var (
 	attrSetVoteForQC = metric.WithAttributeSet(attribute.NewSet(attribute.String("reason", "proposal")))
 	attrSetVoteForTC = metric.WithAttributeSet(attribute.NewSet(attribute.String("reason", "timeout")))
 )
+
+// timeoutMessageID identifies the exact statement a timeout vote is: the SHA-256 of its canonical encoding, signature included. The same
+// recorded message recovered after a restart and broadcast again has the same identity; a different statement for the round has another.
+func timeoutMessageID(msg *abdrc.TimeoutMsg) string {
+	raw, err := types.Cbor.Marshal(msg)
+	if err != nil {
+		return "unencodable"
+	}
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("%x", sum)
+}

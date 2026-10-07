@@ -2,10 +2,13 @@ package cmd
 
 import (
 	"context"
+	"crypto"
+	"fmt"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
 
@@ -156,4 +159,94 @@ func TestTrustBaseSignPrevious(t *testing.T) {
 	cmd = New(logF)
 	cmd.baseCmd.SetArgs([]string{"trust-base", "verify", "--trust-base", trustBase0Path, "--trust-base", trustBase1Path})
 	require.NoError(t, cmd.Execute(context.Background()))
+}
+
+func TestTrustBaseGenerateWithExactRootWeights(t *testing.T) {
+	ctx := context.Background()
+	logF := testobserve.NewFactory(t)
+	var infos []string
+	var homes []string
+	for i := 0; i < 4; i++ {
+		home := t.TempDir()
+		cmd := New(logF)
+		cmd.baseCmd.SetArgs([]string{"root-node", "init", "--home", home, "--generate"})
+		require.NoError(t, cmd.Execute(ctx))
+		homes = append(homes, home)
+		infos = append(infos, filepath.Join(home, nodeInfoFileName))
+	}
+	generate := func(extra ...string) (*types.RootTrustBaseV1, error) {
+		args := []string{"trust-base", "generate", "--home", homes[0], "--network-id", "5", "--output-file-name", "weighted.json"}
+		for _, f := range infos {
+			args = append(args, "--node-info", f)
+		}
+		cmd := New(logF)
+		cmd.baseCmd.SetArgs(append(args, extra...))
+		if err := cmd.Execute(ctx); err != nil {
+			return nil, err
+		}
+		return util.ReadJsonFile(filepath.Join(homes[0], "weighted.json"), &types.RootTrustBaseV1{})
+	}
+
+	tb, err := generate("--root-weights", "6,1,1,1")
+	require.NoError(t, err)
+	var weights []uint64
+	var total uint64
+	for _, n := range tb.RootNodes {
+		weights = append(weights, n.Stake)
+		total += n.Stake
+	}
+	require.ElementsMatch(t, []uint64{6, 1, 1, 1}, weights)
+	require.EqualValues(t, 9, total)
+	require.EqualValues(t, 7, tb.QuorumThreshold, "the weighted threshold floor(2W/3)+1 of W=9")
+	// the weights follow the --node-info order: the first file is the heavy one
+	head, err := util.ReadJsonFile(infos[0], &types.NodeInfo{})
+	require.NoError(t, err)
+	for _, n := range tb.RootNodes {
+		if n.NodeID == head.NodeID {
+			require.EqualValues(t, 6, n.Stake)
+		} else {
+			require.EqualValues(t, 1, n.Stake)
+		}
+	}
+
+	for name, tc := range map[string]struct {
+		args  []string
+		cause error
+	}{
+		"too few weights":  {[]string{"--root-weights", "6,1,1"}, ErrRootWeightsCount},
+		"too many weights": {[]string{"--root-weights", "6,1,1,1,1"}, ErrRootWeightsCount},
+		"not a number":     {[]string{"--root-weights", "6,1,x,1"}, ErrRootWeightsParse},
+		"a zero weight":    {[]string{"--root-weights", "6,1,1,0"}, weightvalidation.ErrWeight},
+		"over the cap":     {[]string{"--root-weights", "1099511627777,1,1,1"}, weightvalidation.ErrWeight},
+	} {
+		_, err := generate(tc.args...)
+		require.ErrorIs(t, err, tc.cause, name)
+	}
+}
+
+func TestTrustBaseIDIsTheGenesisHash(t *testing.T) {
+	ctx := context.Background()
+	logF := testobserve.NewFactory(t)
+	home := t.TempDir()
+	cmd := New(logF)
+	cmd.baseCmd.SetArgs([]string{"root-node", "init", "--home", home, "--generate"})
+	require.NoError(t, cmd.Execute(ctx))
+	cmd = New(logF)
+	cmd.baseCmd.SetArgs([]string{"trust-base", "generate", "--home", home, "--node-info", filepath.Join(home, nodeInfoFileName), "--network-id", "5"})
+	require.NoError(t, cmd.Execute(ctx))
+	file := filepath.Join(home, "trust-base.json")
+
+	out, err := runCLI(t, "trust-base", "id", "--trust-base", file)
+	require.NoError(t, err)
+	tb, err := util.ReadJsonFile(file, &types.RootTrustBaseV1{})
+	require.NoError(t, err)
+	want, err := tb.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprintf("0x%x\n", want), out)
+
+	tb.Epoch = 2
+	later := filepath.Join(home, "later.json")
+	require.NoError(t, util.WriteJsonFile(later, tb))
+	_, err = runCLI(t, "trust-base", "id", "--trust-base", later)
+	require.ErrorContains(t, err, "epoch-1")
 }

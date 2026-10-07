@@ -32,9 +32,12 @@ var (
 // ServiceReport is what a BFT node or a delegated shard/authority service reports about itself: the chain it is bound to and
 // the candidate it has staged. It is a claim by a co-hosted service, not an attestation.
 type ServiceReport struct {
-	Network uint64
-	Genesis [32]byte
-	Staged  [32]byte // the candidate digest the service has staged
+	Network       uint64
+	Genesis       [32]byte
+	Staged        [32]byte // the candidate digest the service has staged
+	StagedBody    [32]byte // the identity of the V3 body it staged with that digest
+	StagedAttempt uint64   // the handoff attempt it staged it for
+	StagedConfig  [32]byte // the identity of the protocol configuration that body carries
 }
 
 // Service is one of the entity's own services.
@@ -92,6 +95,9 @@ func (e Entity) Attest(ctx context.Context, rc q3format.ReceiptContext, cfg q3fo
 			return q3format.Receipt{}, fmt.Errorf("%w: %s: %w", ErrNotReady, c.name, ErrProbe)
 		}
 		r, err := c.svc.Report(ctx)
+		if errors.Is(err, ErrComponent) { // a report that arrived but names an incomplete or foreign context is a component refusal, not an outage
+			return q3format.Receipt{}, fmt.Errorf("%w: %s: %w", ErrNotReady, c.name, err)
+		}
 		if err != nil {
 			return q3format.Receipt{}, fmt.Errorf("%w: %s: %w: %v", ErrNotReady, c.name, ErrProbe, err)
 		}
@@ -118,6 +124,14 @@ func checkService(r ServiceReport, rc q3format.ReceiptContext) error {
 		return fmt.Errorf("%w: bound to another network or genesis", ErrComponent)
 	case !bytes.Equal(r.Staged[:], rc.CandidateDigest[:]):
 		return fmt.Errorf("%w: staged candidate %x, want %x", ErrComponent, r.Staged, rc.CandidateDigest)
+	// a digest does not identify the receipt's whole context: the body (its earliest activation depends on the round it was derived at), the
+	// attempt and the protocol configuration are each compared with the context the receipt would bind
+	case r.StagedBody != rc.BodyID:
+		return fmt.Errorf("%w: staged body %x, want %x", ErrComponent, r.StagedBody, rc.BodyID)
+	case r.StagedAttempt != rc.Attempt:
+		return fmt.Errorf("%w: staged attempt %d, want %d", ErrComponent, r.StagedAttempt, rc.Attempt)
+	case r.StagedConfig != rc.Config:
+		return fmt.Errorf("%w: staged protocol configuration %x, want %x", ErrComponent, r.StagedConfig, rc.Config)
 	}
 	return nil
 }

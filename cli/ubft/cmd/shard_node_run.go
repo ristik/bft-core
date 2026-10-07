@@ -1312,7 +1312,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return node.Run(gctx) })
-	g.Go(func() error { return serveShardNodeRPC(gctx, flags, node, readOperatorStatus) })
+	var laneEndpoints []func(*http.ServeMux)
+	if q3rt != nil {
+		laneEndpoints = append(laneEndpoints, (&shardQ3Staging{cfg: q3rt.ProtocolConfig}).register)
+	}
+	g.Go(func() error { return serveShardNodeRPC(gctx, flags, node, readOperatorStatus, laneEndpoints...) })
 	if handoffFollower != nil {
 		g.Go(func() error { return handoffFollower.Run(gctx) })
 	}
@@ -1334,7 +1338,7 @@ func validateExecutionJournalFlags(flags *shardNodeRunFlags, origin registrygene
 // docs/engine-api-adapter-plan.md C3.2/C3.4. Mirrors root_node.go's own
 // RPC server construction.
 func serveShardNodeRPC(ctx context.Context, flags *shardNodeRunFlags, node *shardnode.Node,
-	readOperatorStatus func(context.Context) (archivewiring.OperatorStatus, error)) error {
+	readOperatorStatus func(context.Context) (archivewiring.OperatorStatus, error), extra ...func(*http.ServeMux)) error {
 	if flags.RPCServerAddress == "" {
 		return nil // do not kill the errgroup
 	}
@@ -1351,6 +1355,9 @@ func serveShardNodeRPC(ctx context.Context, flags *shardNodeRunFlags, node *shar
 		mux.HandleFunc("GET /api/v1/operator/status", func(w http.ResponseWriter, r *http.Request) {
 			writeOperatorStatus(w, r, readOperatorStatus)
 		})
+	}
+	for _, register := range extra {
+		register(mux)
 	}
 
 	return httpsrv.Run(ctx,

@@ -248,3 +248,33 @@ func TestV3PlanKeepsTheBodyTheMembersSignedAfterTheCommittedRoundMoves(t *testin
 	_, err = f.cm.buildHandoffPlanV3FromState(&next, &later, nil, receipts)
 	require.ErrorIs(t, err, ErrV3CandidateSuperseded)
 }
+
+// A validator stages the candidate another validator derived; it refuses a body that is not the next epoch of its own chain.
+func TestAValidatorStagesAnotherValidatorsCandidateOnlyForItsOwnChain(t *testing.T) {
+	f := newPlanFixtureOpts(t, true)
+	next := f.weightedNext()
+	cand, err := f.cm.v3CandidateFromState(&next, certifiedParentState(t, f), nil)
+	require.NoError(t, err)
+
+	st, err := f.cm.Q3Status()
+	require.NoError(t, err)
+	require.Nil(t, st.Staged, "nothing staged before")
+	require.NoError(t, f.cm.StageV3Candidate(cand.Body.Encode(), cand.Candidate, cand.Attempt))
+	st, err = f.cm.Q3Status()
+	require.NoError(t, err)
+	require.Equal(t, cand.Candidate, st.Staged.CandidateDigest)
+	require.Equal(t, cand.Body.Identity(), st.Staged.BodyID)
+	require.EqualValues(t, cand.Attempt, st.Staged.Attempt)
+
+	other := cand.Body
+	other.Config.Genesis[0] ^= 1
+	require.ErrorIs(t, f.cm.StageV3Candidate(other.Encode(), cand.Candidate, 0), ErrHandoffApproval, "another root genesis")
+	later := cand.Body
+	later.Epoch = 3
+	require.ErrorIs(t, f.cm.StageV3Candidate(later.Encode(), cand.Candidate, 0), ErrHandoffApproval, "not the next epoch")
+	require.ErrorIs(t, f.cm.StageV3Candidate([]byte("not a body"), cand.Candidate, 0), ErrHandoffApproval)
+	require.ErrorIs(t, newPlanFixture(t).cm.StageV3Candidate(cand.Body.Encode(), cand.Candidate, 0), ErrHandoffApproval, "a validator with no Q3 history")
+	st, err = f.cm.Q3Status()
+	require.NoError(t, err)
+	require.Equal(t, cand.Candidate, st.Staged.CandidateDigest, "a refused candidate does not replace the staged one")
+}

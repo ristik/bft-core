@@ -29,7 +29,7 @@ var pinned = ExecutionPin{GenesisHash: fb(0x31), CodeHash: fb(0x32)}
 func goodExec() ExecutionReport { return ExecutionReport{GenesisHash: fb(0x31), CodeHash: fb(0x32)} }
 
 func goodService(rc q3format.ReceiptContext) ServiceReport {
-	return ServiceReport{Network: rc.Network, Genesis: rc.Genesis, Staged: rc.CandidateDigest}
+	return ServiceReport{Network: rc.Network, Genesis: rc.Genesis, Staged: rc.CandidateDigest, StagedBody: rc.BodyID, StagedAttempt: rc.Attempt, StagedConfig: rc.Config}
 }
 
 func goodEntity(rc q3format.ReceiptContext, id string) Entity {
@@ -58,6 +58,10 @@ func TestAttest(t *testing.T) {
 		"other genesis":    func(s *ServiceReport) { s.Genesis = fill(0x55) },
 		"staged elsewhere": func(s *ServiceReport) { s.Staged = fill(0x56) },
 		"nothing staged":   func(s *ServiceReport) { s.Staged = [32]byte{} },
+		"another body":     func(s *ServiceReport) { s.StagedBody = fill(0x57) },
+		"no body":          func(s *ServiceReport) { s.StagedBody = [32]byte{} },
+		"another attempt":  func(s *ServiceReport) { s.StagedAttempt++ },
+		"another config":   func(s *ServiceReport) { s.StagedConfig = fill(0x58) },
 	}
 	type tc struct {
 		name string
@@ -190,4 +194,24 @@ func TestRequireReadiness(t *testing.T) {
 			require.ErrorIs(t, err, c.want)
 		})
 	}
+}
+
+// A staged digest alone does not identify the receipt's context: each of body, attempt and protocol configuration is refused on its own.
+func TestAServiceMustHaveStagedTheWholeContextTheReceiptBinds(t *testing.T) {
+	rc := q3format.ReceiptContext{Network: 5, Genesis: [32]byte{1}, Attempt: 2, CandidateDigest: [32]byte{2}, BodyID: [32]byte{3}, Config: [32]byte{4}}
+	good := ServiceReport{Network: 5, Genesis: rc.Genesis, Staged: rc.CandidateDigest, StagedBody: rc.BodyID, StagedAttempt: rc.Attempt, StagedConfig: rc.Config}
+	require.NoError(t, checkService(good, rc))
+
+	body := good
+	body.StagedBody[0] ^= 1
+	require.ErrorIs(t, checkService(body, rc), ErrComponent)
+	require.ErrorContains(t, checkService(body, rc), "staged body")
+	attempt := good
+	attempt.StagedAttempt++
+	require.ErrorContains(t, checkService(attempt, rc), "staged attempt")
+	config := good
+	config.StagedConfig[0] ^= 1
+	require.ErrorContains(t, checkService(config, rc), "staged protocol configuration")
+	require.ErrorIs(t, checkService(config, rc), ErrComponent)
+	require.ErrorIs(t, checkService(attempt, rc), ErrComponent)
 }
