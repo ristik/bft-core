@@ -113,6 +113,7 @@ type (
 		recoveryHistory  *trusthistorystore.Store
 		q3               Q3Authority                 // the verified Q3 history, nil when the binary does not know it
 		v3Planned        atomic.Pointer[V3Candidate] // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
+		q3Staged         atomic.Pointer[Q3Staged]    // the V3 candidate this validator last derived for its operator
 		epochAnchor      *drctypes.EpochAnchor
 		handoffMu        sync.Mutex
 		handoffPlans     map[[32]byte]*pendingHandoff

@@ -133,7 +133,38 @@ func (x *ConsensusManager) PlanV3Candidate(next *types.RootTrustBaseV1, proposal
 		return V3Candidate{}, err
 	}
 	x.v3Planned.Store(&c)
+	// The candidate this validator derived is the one its operator will have the entity attest readiness for: the staged value a
+	// readiness check compares with the candidate a receipt binds. It is a report of what this node holds, not an authority.
+	x.q3Staged.Store(&Q3Staged{CandidateDigest: c.Candidate, BodyID: c.Body.Identity(), Attempt: c.Attempt})
 	return c, nil
+}
+
+// Q3Staged is the candidate this validator last derived for its operator.
+type Q3Staged struct {
+	CandidateDigest [32]byte
+	BodyID          [32]byte
+	Attempt         uint64
+}
+
+// Q3Status is what this validator reports about itself for a readiness check: the chain it is bound to and the candidate it has staged.
+// Staged is nil when no candidate was derived.
+type Q3Status struct {
+	Network     uint64
+	Genesis     [32]byte
+	Staged      *Q3Staged
+	ActiveEpoch uint64
+}
+
+// Q3Status reports the chain this node's verified history is rooted in, the staged candidate and the installed epoch.
+func (x *ConsensusManager) Q3Status() (Q3Status, error) {
+	if x.q3 == nil {
+		return Q3Status{}, fmt.Errorf("%w: no Q3 history", ErrHandoffApproval)
+	}
+	cfg, err := x.q3.ProtocolConfig()
+	if err != nil {
+		return Q3Status{}, err
+	}
+	return Q3Status{Network: cfg.Network, Genesis: cfg.Genesis, Staged: x.q3Staged.Load(), ActiveEpoch: x.InstalledRootEpoch()}, nil
 }
 
 // ErrV3CandidateSuperseded is returned when the candidate the members signed readiness for is not the one this validator would derive any
