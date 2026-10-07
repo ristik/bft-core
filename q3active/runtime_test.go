@@ -218,7 +218,8 @@ func TestActivationRefusals(t *testing.T) {
 		p := newProcess(t, f) // this chain's genesis, the other chain's activation
 		rt := p.start()
 		err := rt.Activate(ctx, q3active.Bundle{Envelope: other.EnvelopeBytes, Snapshot: other.Snapshot})
-		require.Error(t, err)
+		require.ErrorIs(t, err, q3install.ErrBundle)
+		require.ErrorIs(t, err, q3format.ErrGenesis, "the other chain's genesis is not this history's")
 		_, ok := rt.Activated(2)
 		require.False(t, ok)
 	})
@@ -228,7 +229,8 @@ func TestActivationRefusals(t *testing.T) {
 		require.NoError(t, rt.Activate(ctx, p.bundle()))
 		other := q3fixture.New(t, q3fixture.Options{})
 		err := rt.Activate(ctx, q3active.Bundle{Envelope: other.EnvelopeBytes, Snapshot: other.Snapshot})
-		require.Error(t, err)
+		require.ErrorIs(t, err, q3install.ErrBundle)
+		require.ErrorIs(t, err, q3format.ErrConflict, "the retained envelope of the epoch is another claim")
 		require.Equal(t, 1, p.root.Installs)
 	})
 }
@@ -351,7 +353,7 @@ func TestGuardedTrustServesTheVerifiedHistory(t *testing.T) {
 		_, err = rt.Trust(staticTrust{epoch: map[uint64]*types.RootTrustBaseV1{1: other.Old}}).GetByEpoch(ctx, 1)
 		require.ErrorIs(t, err, q3active.ErrConflict, "another committee of the same epoch")
 		_, err = rt.Trust(staticTrust{}).GetByEpoch(ctx, 1)
-		require.Error(t, err, "a base that lacks the epoch is an error, not the history's view")
+		require.ErrorIs(t, err, errNoSuchEpoch, "a base that lacks the epoch is an error, not the history's view")
 		_, err = rt.Trust(staticTrust{epoch: map[uint64]*types.RootTrustBaseV1{1: &bent}}).RootTrustBase(ctx, 1)
 		require.ErrorIs(t, err, q3active.ErrConflict, "the verified trust base is the same refusal")
 	})
@@ -398,6 +400,9 @@ func TestSnapshotsNeverGoBack(t *testing.T) {
 	require.Equal(t, first.ConfigID(), rt.Snapshot().ConfigID())
 }
 
+// errNoSuchEpoch is the base's own refusal of an epoch it lacks.
+var errNoSuchEpoch = errors.New("no such epoch")
+
 type staticTrust struct {
 	epoch map[uint64]*types.RootTrustBaseV1
 }
@@ -406,7 +411,7 @@ func (s staticTrust) GetByEpoch(_ context.Context, e uint64) (*types.RootTrustBa
 	if tb, ok := s.epoch[e]; ok {
 		return tb, nil
 	}
-	return nil, errors.New("no such epoch")
+	return nil, errNoSuchEpoch
 }
 
 type noopComponent struct{}

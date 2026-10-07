@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/q3format"
 	tbstore "github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
@@ -71,6 +72,7 @@ func TestInstallVerifiedEpochIsolatedRefusals(t *testing.T) {
 		empty := *w.f.Snapshot
 		empty.ShardInfo = nil
 		_, err := r.manager.InstallVerifiedEpoch(w.activated, w.f.Proof, &empty, nil)
+		require.ErrorIs(t, err, ErrNoCheckpoint)
 		require.ErrorContains(t, err, "no shards")
 	})
 	t.Run("the old committee's valid proof of another record", func(t *testing.T) {
@@ -84,6 +86,7 @@ func TestInstallVerifiedEpochIsolatedRefusals(t *testing.T) {
 		stranger := q3fixture.New(t, q3fixture.Options{})
 		r := w.replica(t)
 		_, err := r.manager.InstallVerifiedEpoch(w.activated, stranger.Proof, w.f.Snapshot, nil)
+		require.ErrorIs(t, err, handoff.ErrProof)
 		require.ErrorContains(t, err, "old handoff commit proof")
 	})
 	t.Run("another record's epoch anchor is already durable", func(t *testing.T) {

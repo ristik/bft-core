@@ -127,11 +127,12 @@ func TestRecoverDoesNotRestoreAnUnfinishedActivation(t *testing.T) {
 	var events []string
 	v := newVolatile(s, &events)
 	// the shard step fails: the journal stays unfinished
-	s.installErr[StepShard] = errors.New("down")
+	down := errors.New("down")
+	s.installErr[StepShard] = down
 	j, err := s.openVolatile(t, v)
 	require.NoError(t, err)
 	c := claim(5)
-	require.Error(t, j.Install(ctx, c, bundleFor(c)))
+	require.ErrorIs(t, j.Install(ctx, c, bundleFor(c)), down, "the participant's own refusal is what surfaces")
 
 	delete(s.installErr, StepShard)
 	events = nil

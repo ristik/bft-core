@@ -16,7 +16,7 @@ import (
 // No synthetic V1 endorsement signatures are created.
 func (s *TrustBaseStore) InstallV2Projection(projected *types.RootTrustBaseV1) (*types.RootTrustBaseV1, error) {
 	if projected == nil || projected.Epoch < 2 {
-		return nil, errors.New("invalid successor projection")
+		return nil, fmt.Errorf("%w: invalid successor projection", ErrNoProjection)
 	}
 	old, err := s.GetByEpoch(projected.Epoch - 1)
 	if err != nil || old.Epoch+1 != projected.Epoch || old.NetworkID != projected.NetworkID {
@@ -62,7 +62,7 @@ func (s *TrustBaseStore) InstallV2Projection(projected *types.RootTrustBaseV1) (
 // otherwise InstallV2Projection (a different projection for an installed epoch is ErrAlreadyExists).
 func (s *TrustBaseStore) InstallVerified(projected *types.RootTrustBaseV1, cfg votesig.Config) (*types.RootTrustBaseV1, error) {
 	if projected == nil {
-		return nil, errors.New("invalid successor projection")
+		return nil, fmt.Errorf("%w: invalid successor projection", ErrNoProjection)
 	}
 	s.mu.RLock()
 	authority := s.signing.authority

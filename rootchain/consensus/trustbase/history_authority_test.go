@@ -140,7 +140,7 @@ func TestInstallVerifiedNeedsTheHistoryAndItsExactConfiguration(t *testing.T) {
 		s, _ := build(t)
 		require.NoError(t, s.BindSigningAuthority(historyOf{4: cfg2()}))
 		_, err := s.InstallVerified(nil, cfg2())
-		require.Error(t, err)
+		require.ErrorIs(t, err, ErrNoProjection)
 	})
 	t.Run("acceptance control, and idempotence", func(t *testing.T) {
 		s, next := build(t)

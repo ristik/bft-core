@@ -13,6 +13,8 @@ var (
 	// ErrSigningHistory is returned when the signing configuration of an epoch cannot be established from the authenticated
 	// history: an unknown epoch, or an activation that does not fit the recorded ones.
 	ErrSigningHistory = errors.New("signing configuration history")
+	// ErrNoProjection is returned when a verified epoch is installed without its trust base projection.
+	ErrNoProjection = errors.New("no trust base projection")
 )
 
 // signingRegistry is the authenticated history of the epochs that activated the domain-bound scheme. The scheme is a

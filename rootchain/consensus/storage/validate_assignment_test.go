@@ -33,10 +33,10 @@ func TestValidateAssignmentByMode(t *testing.T) {
 	require.NoError(t, validateAssignment(assignmentWith(t, 1, 1, 1), unit))
 	require.NoError(t, validateAssignment(assignmentWith(t, 1, 1, 1), weighted))
 	require.NoError(t, validateAssignment(assignmentWith(t, 6, 1, 1, 1), weighted))
-	require.Error(t, validateAssignment(assignmentWith(t, 6, 1, 1, 1), unit), "weights are a Q3 activation's")
+	require.ErrorIs(t, validateAssignment(assignmentWith(t, 6, 1, 1, 1), unit), evmassign.ErrAssignment, "weights are a Q3 activation's")
 	unordered := assignmentWith(t, 1, 1, 1)
 	unordered.Validators[0], unordered.Validators[2] = unordered.Validators[2], unordered.Validators[0]
-	require.Error(t, validateAssignment(unordered, unit), "the unit rules include evmassign's own set rules, strict order among them")
+	require.ErrorIs(t, validateAssignment(unordered, unit), evmassign.ErrValidators, "the unit rules include evmassign's own set rules, strict order among them")
 	require.ErrorIs(t, validateAssignment(nil, unit), evmassign.ErrAssignment)
 	require.ErrorIs(t, validateAssignment(nil, weighted), evmassign.ErrAssignment)
 

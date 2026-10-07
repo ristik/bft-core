@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -14,6 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	tbstore "github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
 
 // Slice D2 of Q3 #50: a real in-process activation at a committed boundary, through the verified history and the durable install
@@ -150,7 +153,7 @@ func TestOldFormMessagesOfTheActivatedEpochAreRefused(t *testing.T) {
 	t.Run("a vote with a swapped signature", func(t *testing.T) {
 		forged := *vote
 		forged.Signature = c.voteOf(c.lights()[0]).Signature
-		require.Error(t, collector.manager.onVoteMsg(ctx, &forged))
+		require.ErrorIs(t, collector.manager.onVoteMsg(ctx, &forged), votesig.ErrBadSignature)
 	})
 	t.Run("nothing was counted", func(t *testing.T) {
 		require.EqualValues(t, anchor.Slot+1, collector.manager.pacemaker.GetCurrentRound())
@@ -220,7 +223,7 @@ func TestRestartAcrossTheBoundary(t *testing.T) {
 	t.Run("a binary that does not know the history cannot take the activated epoch", func(t *testing.T) {
 		voter.close()
 		err := voter.open(false)
-		require.Error(t, err, "the anchor's lineage is a V3 body the V1/V2 recovery history does not hold")
+		require.ErrorIs(t, err, trusthistorystore.ErrNotFound, "the anchor's lineage is a V3 body the V1/V2 recovery history does not hold")
 		require.Nil(t, voter.manager)
 	})
 
@@ -329,7 +332,7 @@ func TestInstallVerifiedEpochRefusals(t *testing.T) {
 		other := q3fixture.New(t, q3fixture.Options{})
 		r := fresh(t)
 		_, err := r.manager.InstallVerifiedEpoch(activated, other.Proof, f.Snapshot, nil)
-		require.Error(t, err)
+		require.ErrorIs(t, err, handoff.ErrProof)
 		_, err = r.trust.GetByEpoch(2)
 		require.ErrorIs(t, err, tbstore.ErrNotFound)
 	})
@@ -339,14 +342,14 @@ func TestInstallVerifiedEpochRefusals(t *testing.T) {
 		tampered.ShardInfo = append([]abdrc.ShardInfo(nil), f.Snapshot.ShardInfo...)
 		tampered.ShardInfo[0].IRTR.Round++
 		_, err := r.manager.InstallVerifiedEpoch(activated, f.Proof, &tampered, nil)
-		require.Error(t, err)
+		require.ErrorIs(t, err, handoffdelivery.ErrBundle)
 		_, err = r.trust.GetByEpoch(2)
 		require.ErrorIs(t, err, tbstore.ErrNotFound, "nothing was installed")
 	})
 	t.Run("no snapshot", func(t *testing.T) {
 		r := fresh(t)
 		_, err := r.manager.InstallVerifiedEpoch(activated, f.Proof, nil, nil)
-		require.Error(t, err)
+		require.ErrorIs(t, err, ErrNoCheckpoint)
 	})
 	t.Run("a trust store that is not bound to the history", func(t *testing.T) {
 		r := newQ3Replica(t, f, f.NewNodes[0])
@@ -369,7 +372,7 @@ func TestInstallVerifiedEpochRefusals(t *testing.T) {
 	})
 	t.Run("holding is checked, not assumed", func(t *testing.T) {
 		r := fresh(t)
-		require.Error(t, r.manager.HoldsVerifiedEpoch(activated), "before the install the store lacks the epoch")
+		require.ErrorIs(t, r.manager.HoldsVerifiedEpoch(activated), tbstore.ErrNotFound, "before the install the store lacks the epoch")
 		require.ErrorIs(t, r.manager.HoldsVerifiedEpoch(q3format.Entry{}), ErrNotVerifiedEpoch)
 		_, err := r.manager.InstallVerifiedEpoch(activated, f.Proof, f.Snapshot, nil)
 		require.NoError(t, err)

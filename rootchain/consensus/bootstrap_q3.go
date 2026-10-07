@@ -26,6 +26,9 @@ var (
 	// ErrQ3Candidate is returned for a V3 install that carries an EVM assignment candidate: its derivation still takes a V2 body,
 	// so a root-only activation is the only one wired.
 	ErrQ3Candidate = errors.New("a Q3 install with an EVM assignment candidate is not wired")
+	// ErrNoCheckpoint is returned for a V3 install whose handoff snapshot is absent or holds no shards: there is no committed
+	// checkpoint to verify or to anchor the epoch on.
+	ErrNoCheckpoint = errors.New("handoff snapshot is not a checkpoint")
 )
 
 // InstallVerifiedEpoch installs the first epoch of a Q3 activation. Every fact it installs (the epoch, its weights and threshold,
@@ -56,7 +59,7 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 		return nil, fmt.Errorf("%w: the committed candidate is not the root-only operator candidate", ErrQ3Candidate)
 	}
 	if head == nil || len(head.ShardInfo) == 0 {
-		return nil, errors.New("handoff snapshot has no shards")
+		return nil, fmt.Errorf("%w: no shards", ErrNoCheckpoint)
 	}
 	old, err := x.trustBaseStore.GetByEpoch(v.Epoch)
 	if err != nil {
