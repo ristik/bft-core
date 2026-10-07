@@ -1,6 +1,7 @@
 package rootrecords
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -113,6 +114,34 @@ func TestDecodeImportRefusals(t *testing.T) {
 	}
 }
 
+// The decoder accepts only the exact canonical encoding of the value it reads: a non-shortest integer anywhere and an indefinite-length
+// array are well-formed CBOR that decode to the same value, and both are refused.
+func TestDecodeImportRefusesNonCanonicalCBOR(t *testing.T) {
+	rec := Record{Index: 0, Kind: KindSessionClosed, Progress: 90, UCTime: 91, Data: make([]byte, 32)}
+	rec.ID = RecordID(rec.Index, rec.Predecessor, rec.Kind, rec.Progress, rec.UCTime, rec.Data)
+	imp := Import{Progress: 77, UCTime: 1000, TargetCount: 1, TargetTip: rec.ID, Entries: []ImportEntry{{Record: rec}}}
+	enc, err := imp.Encode()
+	require.NoError(t, err)
+	_, err = DecodeImport(enc)
+	require.NoError(t, err, "control: the canonical bytes decode")
+
+	patch := func(old, replacement []byte) []byte {
+		require.Equal(t, 1, bytes.Count(enc, old), "the patched integer occurs exactly once")
+		return bytes.Replace(enc, old, replacement, 1)
+	}
+	cases := map[string][]byte{
+		"a non-shortest p":                   patch([]byte{0x18, 77}, []byte{0x19, 0x00, 77}),
+		"a non-shortest integer in an entry": patch([]byte{0x18, 90}, []byte{0x19, 0x00, 90}),
+		"a non-shortest UC time in an entry": patch([]byte{0x18, 91}, []byte{0x1a, 0x00, 0x00, 0x00, 91}),
+		"an indefinite-length outer array":   append(append([]byte{0x9f}, enc[1:]...), 0xff),
+	}
+	require.Equal(t, byte(0x86), enc[0], "the outer array has six elements")
+	for name, data := range cases {
+		_, err := DecodeImport(data)
+		require.ErrorIs(t, err, ErrImport, name)
+	}
+}
+
 func hx(b []byte) string { return "0x" + hex.EncodeToString(b) }
 
 // import-vectors.json: the registry's importRootRecords calls the model owes, block by block, replayed by the contracts' tests.
@@ -176,7 +205,14 @@ func buildImportVectors(t *testing.T) []importScenario {
 	require.NoError(t, err)
 	b2, err := long.ImportBatch(32)
 	require.NoError(t, err)
-	return []importScenario{mixed, {Name: "backlog-40", Blocks: []importBlock{blockOf(t, 1, b1), blockOf(t, 2, b2)}}}
+	// a primary and its recovery acknowledged together: the only kind that fills all nine payload words
+	rp := newProj(t)
+	require.NoError(t, rp.Tracker.Observe(1, 50))
+	_, err = rp.RecoveryAck(label("result/J"), label("assignment/K"), 100, 2, 101, 130, 3, 131, 3)
+	require.NoError(t, err)
+	rimp, err := rp.ImportBatch(0)
+	require.NoError(t, err)
+	return []importScenario{mixed, {Name: "backlog-40", Blocks: []importBlock{blockOf(t, 1, b1), blockOf(t, 2, b2)}}, {Name: "recovery-ack", Blocks: []importBlock{blockOf(t, 1, rimp)}}}
 }
 
 func TestImportVectorsAreTheProjection(t *testing.T) {

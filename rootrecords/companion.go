@@ -50,6 +50,10 @@ func (i Import) shapeValid() error {
 	return nil
 }
 
+// Encode checks the shape only: at most MaxImport entries, the exact payload width of each kind, a closed epoch only on a closure and a
+// zero tip for a zero target. It does not check indices, links, record identifiers or the uint64 payload words; a producer derives the
+// batch from its own log (ImportBatch) and every verifier recomputes it and compares the bytes, and the registry checks the rest.
+//
 // Encode is the canonical CBOR ["UNICITY_P85_RECORD_IMPORT", p, t, targetCount, targetTip, entries] with entries
 // [index, recordID, predecessor, kind, progress, ucTime, data, closedEpoch].
 func (i Import) Encode() ([]byte, error) {
@@ -84,7 +88,8 @@ func b32(v any) (a [32]byte, ok bool) {
 	return a, true
 }
 
-// DecodeImport parses a companion and refuses anything that is not the exact canonical encoding of the value it decodes to.
+// DecodeImport parses a companion and refuses anything that is not the exact canonical encoding of the value it decodes to (a
+// non-shortest integer or an indefinite-length array decodes to the same value and is refused). Like Encode it checks shape only.
 func DecodeImport(data []byte) (Import, error) {
 	var out Import
 	var raw []any
