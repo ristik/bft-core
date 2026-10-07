@@ -305,6 +305,9 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 			}
 		}
 	}
+	if err := sm.verifyTimestamps(); err != nil {
+		return err
+	}
 	for _, c := range sm.CommittedHead.ShardInfo {
 		ucTrust := tb
 		if history != nil {

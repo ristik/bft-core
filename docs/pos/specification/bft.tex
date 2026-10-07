@@ -1759,8 +1759,14 @@ rollback, and refuses to propose if the parent timestamp cannot be incremented.
 Before issuing any live vote, including a recovery-triggered vote or a durable
 vote retry after restart, a voter rejects a timestamp more than
 \texttt{MaxClockSkew} (DEV: 30 seconds) ahead of its current local clock.
-Missing executed parent state prevents voting. Scheme 2 QCs omit timestamps;
-validators therefore read the timestamp from executed storage rather than the QC.
+Missing executed parent state prevents voting. New scheme 2 votes bind the proposed timestamp in the vote-info hash and carry
+it in the QC. Validators compare the executed block time with that signed time
+before recovery installs it or an incoming QC promotes it to a live parent.
+The committed head must match its signed native commit-seal time. Historical
+timestamp-less scheme 2 QCs still verify, but only an independently verified
+commit seal can authenticate their block time. A timestamp-less uncommitted QC
+is insufficient evidence for a live parent floor. No local-clock cutoff is used
+for this proof-to-time check.
 
 There is no past-time cutoff: delayed proposals can safely advance a recovering
 node, while a cutoff could stall it after a long outage. Local-clock checks must
@@ -1779,3 +1785,20 @@ reconfiguration exception). See the pinned implementation:
 \url{https://github.com/aptos-labs/aptos-core/blob/4ee095f5cd2b2448ba92bb06729e1c0be7be172d/consensus/src/liveness/proposal_generator.rs}
 and
 \url{https://github.com/aptos-labs/aptos-core/blob/4ee095f5cd2b2448ba92bb06729e1c0be7be172d/consensus/src/block_storage/block_store.rs}.
+
+\paragraph{Timestamp-bound scheme 2 extension.}
+For new live votes, append the nonzero proposal timestamp to the scheme 2
+VoteInfo preimage (seven fields rather than six, including network and domain)
+and to its wire VoteInfo (five fields rather than four). The vote-info hash,
+vote signature, and committing seal's PreviousHash bind this extension. Zero
+retains the historical encodings and signing preimages exactly; the five-field
+wire form with a zero timestamp is refused. Old readers fail closed on the new
+arity, so DEV validators must upgrade together. Native seal and timeout
+preimages are unchanged. Timestamp-less history is never reinterpreted as
+having a signed proposal timestamp.
+
+Recovery verifies all relevant certificate signatures before comparing block
+times to those proofs, and performs these comparisons before its first write.
+Once replay and store installation complete, an ordinary live timestamp refusal
+of the recovery trigger is not a persistence fault and must not disable frontier
+serving. The trigger can be voted on once the voter's clock permits it.

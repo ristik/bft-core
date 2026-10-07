@@ -48,8 +48,8 @@ type (
 		storage  SafetyStorage
 		// signing selects the scheme per epoch; nil keeps every vote and timeout legacy.
 		signing SigningResolver
-		// committed gives the executed block behind a committed round: scheme 2 votes sign no timestamp, so the native seal
-		// timestamp comes from the locally executed block, never from the (timestamp-less) QC.
+		// committed gives the executed block behind the committed round. Native seal time
+		// comes from that block, rather than the QC voting for its successor.
 		committed CommittedLookup
 		// gate admits signing in an epoch; nil admits every epoch the signing resolver knows (the legacy behaviour).
 		gate       ActivationGate
@@ -217,7 +217,7 @@ func (s *SafetyModule) constructCommitInfo(block *drctypes.BlockData, voteInfoHa
 }
 
 // WithParentTimestamp binds live voting to the locally executed parent, including
-// scheme 2 QCs which carry no timestamp. The lookup must follow store replacement.
+// historical scheme 2 QCs which carry no timestamp. The lookup follows store replacement.
 func WithParentTimestamp(lookup func(uint64) (uint64, error)) SafetyOption {
 	return func(s *SafetyModule) { s.parentTime = lookup }
 }
@@ -396,8 +396,8 @@ func (s *SafetyModule) makeVoteDomainBound(cfg votesig.Config, block *drctypes.B
 		return nil, err
 	}
 	qcRound := block.GetParentRound()
-	info := &drctypes.RoundInfo{Version: 1, RoundNumber: block.Round, Epoch: block.Epoch, ParentRoundNumber: qcRound, CurrentRootHash: execStateID}
-	vi := votesig.VoteInfo{Epoch: info.Epoch, Round: info.RoundNumber, Parent: qcRound}
+	info := &drctypes.RoundInfo{Version: 1, RoundNumber: block.Round, Epoch: block.Epoch, ParentRoundNumber: qcRound, CurrentRootHash: execStateID, Timestamp: block.Timestamp}
+	vi := votesig.VoteInfo{Epoch: info.Epoch, Round: info.RoundNumber, Parent: qcRound, Timestamp: info.Timestamp}
 	copy(vi.Exec[:], execStateID)
 	vh, err := cfg.VoteInfoHash(vi)
 	if err != nil {

@@ -31,16 +31,9 @@ type VoteMsg struct {
 	SealSignature hex.Bytes `cbor:"-" json:"sealSignature,omitempty"`
 }
 
-// voteInfoV2Wire is the scheme 2 vote info: the four fields the signed VoteInfo takes from the message. The network, the
-// domain and the root-chain genesis come from the authenticated configuration of the epoch, never from the wire; there is
-// no timestamp, which a scheme 2 vote does not sign.
-type voteInfoV2Wire struct {
-	_      struct{} `cbor:",toarray"`
-	Epoch  uint64
-	Round  uint64
-	Parent uint64
-	Exec   hex.Bytes
-}
+// voteInfoV2Wire carries the signed round data, appending time on new votes.
+// Network, domain and root-chain genesis come from authenticated epoch configuration.
+type voteInfoV2Wire = drctypes.DomainBoundVoteInfo
 
 type voteV2Payload struct {
 	_                struct{} `cbor:",toarray"`
@@ -84,7 +77,7 @@ func (x *VoteMsg) MarshalCBOR() ([]byte, error) {
 			return nil, fmt.Errorf("%w: scheme 2 vote has no vote info", votesig.ErrStatement)
 		}
 		return types.Cbor.Marshal(voteV2Wire{Scheme: x.Scheme, Payload: voteV2Payload{
-			VoteInfo:         voteInfoV2Wire{Epoch: x.VoteInfo.Epoch, Round: x.VoteInfo.RoundNumber, Parent: x.VoteInfo.ParentRoundNumber, Exec: x.VoteInfo.CurrentRootHash},
+			VoteInfo:         voteInfoV2Wire{Epoch: x.VoteInfo.Epoch, Round: x.VoteInfo.RoundNumber, Parent: x.VoteInfo.ParentRoundNumber, Exec: x.VoteInfo.CurrentRootHash, Timestamp: x.VoteInfo.Timestamp},
 			LedgerCommitInfo: x.LedgerCommitInfo, HighQc: x.HighQc, Author: x.Author, VoteSignature: x.Signature,
 			SealSignature: x.SealSignature, Anchor: x.Anchor}})
 	}
@@ -108,11 +101,11 @@ func (x *VoteMsg) UnmarshalCBOR(data []byte) error {
 		}
 		p := w.Payload
 		// The vote info is carried in the legacy in-memory shape so that the handlers in front of Verify can read its round;
-		// it has no timestamp and is validated by the scheme 2 rules, never by RoundInfo.IsValid.
+		// historical votes omit time and use the scheme 2 rules, never RoundInfo.IsValid.
 		*x = VoteMsg{Scheme: votesig.SchemeDomainBound, LedgerCommitInfo: p.LedgerCommitInfo, HighQc: p.HighQc, Anchor: p.Anchor,
 			Author: p.Author, Signature: p.VoteSignature, SealSignature: p.SealSignature,
 			VoteInfo: &drctypes.RoundInfo{Version: 1, RoundNumber: p.VoteInfo.Round, Epoch: p.VoteInfo.Epoch,
-				ParentRoundNumber: p.VoteInfo.Parent, CurrentRootHash: p.VoteInfo.Exec}}
+				ParentRoundNumber: p.VoteInfo.Parent, CurrentRootHash: p.VoteInfo.Exec, Timestamp: p.VoteInfo.Timestamp}}
 		return nil
 	}
 	var anchor voteAnchorWire

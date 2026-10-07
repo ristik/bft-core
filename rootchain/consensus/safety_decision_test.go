@@ -154,7 +154,7 @@ func TestDomainBoundVoteSignsBothStatementsFromTheExecutedBlock(t *testing.T) {
 	r.verifyVote(v)
 	require.NotEmpty(t, v.SealSignature, "a committing vote carries the second signature")
 	require.EqualValues(t, 4242, v.LedgerCommitInfo.Timestamp, "the seal timestamp is the executed block's, not the QC's")
-	require.Zero(t, v.VoteInfo.Timestamp, "a scheme 2 vote info signs no timestamp")
+	require.EqualValues(t, 5000, v.VoteInfo.Timestamp, "scheme 2 authenticates the proposed block time")
 
 	block, tc := r.nonCommittingBlock(8)
 	v, err = m.MakeVote(block, hash32(2), nil, tc)

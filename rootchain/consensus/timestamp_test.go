@@ -129,8 +129,7 @@ func TestVoteTimestampRestartRechecksClockBeforeRecordedDecision(t *testing.T) {
 	replay, err := restarted.MakeVote(block, hash32(2), nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, vote, replay)
-	// Scheme 2 proposal statements omit timestamps; a changed proposal still must
-	// satisfy the guard before it can reach the recorded-decision retry path.
+	// A changed proposal must satisfy live admission before the recorded-decision retry.
 	block.Timestamp = 100
 	_, err = restarted.MakeVote(block, hash32(2), nil, nil)
 	require.ErrorIs(t, err, ErrTimestampNotIncreasing)
@@ -159,11 +158,12 @@ func TestManagerTimestampBuilderAndEarlyRefusal(t *testing.T) {
 	qc := cm.blockStore.GetHighQc()
 	parent, err := cm.blockStore.Block(qc.GetRound())
 	require.NoError(t, err)
-	parent.BlockData.Timestamp = basetypes.NewTimestamp() + 2
+	before := basetypes.NewTimestamp()
 	cm.pacemaker.Reset(ctx, qc.GetRound(), nil, nil)
 	cm.processNewRoundEvent(ctx)
 	proposal := net.WaitRootProposal(t)
-	require.Equal(t, parent.BlockData.Timestamp+1, proposal.Block.Timestamp)
+	require.GreaterOrEqual(t, proposal.Block.Timestamp, before)
+	require.Greater(t, proposal.Block.Timestamp, parent.BlockData.Timestamp)
 	original := proposal.Block.Timestamp
 	for _, tc := range []struct {
 		name      string

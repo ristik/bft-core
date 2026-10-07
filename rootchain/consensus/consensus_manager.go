@@ -1069,7 +1069,7 @@ func (x *ConsensusManager) checkRecoveryNeeded(qc *drctypes.QuorumCert) error {
 	if !bytes.Equal(qc.VoteInfo.CurrentRootHash, block.RootHash) {
 		return fmt.Errorf("unexpected round %d state - expected %X, local %X", qc.VoteInfo.RoundNumber, qc.VoteInfo.CurrentRootHash, block.RootHash)
 	}
-	return nil
+	return drctypes.VerifyTimestampProof(block.BlockData, qc)
 }
 
 // onProposalMsg handles block proposal messages from other validators.
@@ -1162,6 +1162,15 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 	}
 	if x.epochAnchor != nil && (qc.VoteInfo == nil || qc.VoteInfo.Epoch != x.epochAnchor.Epoch) {
 		return
+	}
+	if parent, err := x.blockStore.Block(qc.GetRound()); err == nil && parent.BlockData.Anchor == nil {
+		if err := drctypes.VerifyTimestampProof(parent.BlockData, qc); err != nil {
+			x.log.WarnContext(ctx, "QC timestamp differs from executed block", logger.Error(err))
+			if e := x.sendRecoveryRequests(ctx, qc); e != nil {
+				x.log.WarnContext(ctx, "timestamp recovery request failed", logger.Error(e))
+			}
+			return
+		}
 	}
 	certs, err := x.blockStore.ProcessQc(qc)
 	if err != nil {
@@ -1588,7 +1597,15 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			x.frontier.latchFault()
 		}
 	}
+	// Replay is complete. Ordinary live admission errors below are not uncertain writes.
+	recoveryWriteStarted = false
 	if prop, ok := triggerMsg.(*abdrc.ProposalMsg); ok {
+		// Authenticate the trigger QC against its executed parent before live time admission.
+		if prop.Block.Qc != nil {
+			if err := x.checkRecoveryNeeded(prop.Block.Qc); err != nil {
+				return fmt.Errorf("recovery trigger parent: %w", err)
+			}
+		}
 		// Recheck after recovery with the current store and current clock.
 		if err := x.safety.validateVoteTimestamp(prop.Block); err != nil {
 			return fmt.Errorf("recovery proposal timestamp: %w", err)

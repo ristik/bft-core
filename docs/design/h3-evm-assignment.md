@@ -240,8 +240,11 @@ in production, and there is no migration (greenroom, one format).
 Live root voting requires a proposal timestamp strictly greater than its executed
 QC parent's timestamp and at most `MaxClockSkew` (DEV: 30 seconds) ahead of the
 voter's local clock. Proposers use `max(now, parent+1)`, including TC rounds and
-restart/recovery; epoch anchors retain the old checkpoint time. Scheme 2 QCs have
-no timestamp, so the time floor comes from local executed storage. UC sealing
+restart/recovery; epoch anchors retain the old checkpoint time. New scheme 2 votes and QCs authenticate the timestamp through an appended
+VoteInfo field. Recovery compares executed times against verified QCs and the
+committed head against its signed native seal before installing a time floor.
+Old timestamp-less QCs retain their exact historical verification bytes, but
+need a separate signed commit seal to authenticate a block time. UC sealing
 uses the committed block time. Importers keep their monotonic checks.
 
 Clock checks apply only to live voting, never certified-history verification or
@@ -250,3 +253,9 @@ Whole-second strict increases may force voting to wait for wall clocks under
 subsecond production. The root specification's UC seal timestamp section records
 the rationale and pinned Aptos references; this DEV rule requires validators to
 upgrade together.
+
+The timestamp-bound scheme 2 extension uses a five-field wire VoteInfo and a
+seven-field signed VoteInfo preimage. Old four/six-field encodings remain valid
+history; old readers refuse the new arity. DEV validators must upgrade together.
+A completed replay followed by a live timestamp refusal leaves frontier serving
+unfaulted; it is not an incomplete or uncertain recovery write.
