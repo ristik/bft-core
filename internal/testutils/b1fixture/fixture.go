@@ -33,6 +33,7 @@ type Fixture struct {
 	TR          *certification.TechnicalRecord
 	Chain       *certifiedchain.Chain
 	History     *q3format.History
+	Runtime     *q3active.Runtime
 }
 
 func New(t *testing.T, w uint64) *Fixture { return NewWithReservation(t, w, 65536) }
@@ -64,7 +65,7 @@ func newFixture(t *testing.T, w, other, start uint64) *Fixture {
 	require.NoError(t, err)
 	rt, err := q3active.New(q3active.Config{DB: memorydb.New(), Genesis: c.TrustBase})
 	require.NoError(t, err)
-	pair := &b1paired.Config{Profile: p, Runtime: rt, Proofs: func(_ context.Context, s registryproof.Snapshot, keys []common.Hash) ([][][]byte, error) {
+	pair := &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Proofs: func(_ context.Context, s registryproof.Snapshot, keys []common.Hash) ([][][]byte, error) {
 		return g.B1Proofs(keys), nil
 	}}
 	tr := certifiedchain.Technical(0)
@@ -81,5 +82,5 @@ func newFixture(t *testing.T, w, other, start uint64) *Fixture {
 	require.NoError(t, uc.UnicitySeal.Sign(id.String(), c.Signer))
 	observation, err := rootinput.AuthenticateObservationV2(context.Background(), rootinput.ObservationContextV2{NetworkID: 5, PartitionID: 8, ShardID: types.ShardID{}, ShardConfHash: g.FullShardConfHash().Bytes(), RootEpoch: 1, TrustBases: rt.Trust(nil)}, uc, tr)
 	require.NoError(t, err)
-	return &Fixture{pair, g, origin, parent, observation, uc, tr, c, h}
+	return &Fixture{pair, g, origin, parent, observation, uc, tr, c, h, rt}
 }

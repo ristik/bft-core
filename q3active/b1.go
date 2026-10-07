@@ -1,6 +1,9 @@
 package q3active
 
-import "github.com/unicitynetwork/bft-core/q3format"
+import (
+	"github.com/unicitynetwork/bft-core/internal/b1authority"
+	"github.com/unicitynetwork/bft-core/q3format"
+)
 
 // B1History freezes one immutable authenticated history and refuses every
 // incomplete intervening install, including expired epochs with no EVM block.
@@ -24,3 +27,7 @@ func (r *Runtime) B1History(origin uint64) (*q3format.History, error) {
 	}
 	return h, nil
 }
+
+// B1Authority binds an opaque admission capability to this runtime. It keeps
+// shared execution-input code independent of root storage consumers.
+func (r *Runtime) B1Authority() *b1authority.Source { return b1authority.Bind(r.B1History) }

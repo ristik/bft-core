@@ -19,7 +19,7 @@ import (
 
 func TestB1BuildSealsTheLocallyDerivedUpdate(t *testing.T) {
 	f := b1fixture.New(t, 0)
-	v := &VerifierContext{B1: f.Pair, NetworkID: 5, PartitionID: 8, ShardConfHash: f.Origin.FullShardConfHash().Bytes(), RootEpoch: 1, TrustBases: f.Pair.Runtime.Trust(nil), GenesisOrigin: f.Origin, BootstrapSnapshot: f.Parent}
+	v := &VerifierContext{B1: f.Pair, NetworkID: 5, PartitionID: 8, ShardConfHash: f.Origin.FullShardConfHash().Bytes(), RootEpoch: 1, TrustBases: f.Runtime.Trust(nil), GenesisOrigin: f.Origin, BootstrapSnapshot: f.Parent}
 	p := shardnode.RoundParams{Round: 1, Parent: shardnode.BlockRef{Hash: f.Parent.ParentHash().Bytes(), StateRoot: f.Parent.StateRoot().Bytes()}, AuthorizingCertificate: f.UC, AuthorizingTechnicalRecord: f.TR}
 	engine, eth := newMockReth(t, Secret{}), newMockReth(t, Secret{})
 	eth.on("eth_getBlockByHash", func(json.RawMessage) (any, *rpcError) {
@@ -178,7 +178,7 @@ func TestB1BuildSealsTheLocallyDerivedUpdate(t *testing.T) {
 
 func TestB1ActualCompanionReservation(t *testing.T) {
 	f := b1fixture.NewWithReservation(t, 0, 1)
-	v := &VerifierContext{B1: f.Pair, NetworkID: 5, PartitionID: 8, ShardConfHash: f.Origin.FullShardConfHash().Bytes(), RootEpoch: 1, TrustBases: f.Pair.Runtime.Trust(nil), GenesisOrigin: f.Origin, BootstrapSnapshot: f.Parent}
+	v := &VerifierContext{B1: f.Pair, NetworkID: 5, PartitionID: 8, ShardConfHash: f.Origin.FullShardConfHash().Bytes(), RootEpoch: 1, TrustBases: f.Runtime.Trust(nil), GenesisOrigin: f.Origin, BootstrapSnapshot: f.Parent}
 	p := shardnode.RoundParams{Round: 1, Parent: shardnode.BlockRef{Hash: f.Parent.ParentHash().Bytes(), StateRoot: f.Parent.StateRoot().Bytes()}, AuthorizingCertificate: f.UC, AuthorizingTechnicalRecord: f.TR}
 	a := NewAdapter(Config{Verifier: v}, nil)
 	_, err := a.deriveV2(context.Background(), p, f.UC, f.TR)

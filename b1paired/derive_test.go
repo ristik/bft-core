@@ -85,7 +85,7 @@ func TestPairRejectsMissingAuthorityAndParentProof(t *testing.T) {
 		observation rootinput.VerifiedObservationV2
 		want        error
 	}{
-		{"missing-runtime", func(c *b1paired.Config) { c.Runtime = nil }, f.Parent, f.Observation, b1paired.ErrAdmission},
+		{"missing-runtime", func(c *b1paired.Config) { c.Authority = nil }, f.Parent, f.Observation, b1paired.ErrAdmission},
 		{"unproven-parent", func(c *b1paired.Config) {}, registryproof.Snapshot{}, f.Observation, b1paired.ErrAdmission},
 		{"unauthenticated-origin", func(c *b1paired.Config) {}, f.Parent, rootinput.VerifiedObservationV2{}, b1paired.ErrAdmission},
 		{"missing-proof-source", func(c *b1paired.Config) { c.Proofs = nil }, f.Parent, f.Observation, b1paired.ErrAdmission},
@@ -176,7 +176,7 @@ func TestPairRechecksObservationUnderItsOwnRootCommittee(t *testing.T) {
 	foreign, err := q3active.New(q3active.Config{DB: memorydb.New(), Genesis: attackerBase})
 	require.NoError(t, err)
 	pair := *f.Pair
-	pair.Runtime = foreign
+	pair.Authority = foreign.B1Authority()
 	_, err = pair.Derive(context.Background(), f.Parent, f.Observation)
 	require.ErrorIs(t, err, b1paired.ErrAdmission)
 }

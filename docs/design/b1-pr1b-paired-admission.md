@@ -31,7 +31,11 @@ historical schemes/configurations cannot silently become legacy authority.
 an expired epoch that produced no EVM block. This uses the same durable journal
 and root installer that verifies coupled assignments. History extension uses
 consecutive bounded Q3 segments, without bounding total skipped epochs by K.
-Restart must recover the journal before admitting any activated epoch.
+Restart must recover the journal before admitting any activated epoch. The shared
+input API holds an opaque `internal/b1authority.Source` created only by
+`Runtime.B1Authority`; it cannot accept an injected authority callback. The
+internal constructor/importer guard keeps root storage out of the input API
+dependency graph while preserving the concrete runtime's admission checks.
 
 `rootinput.B1Config.Derive` (also exported as `b1paired.Config`) freezes that history at the authenticated origin, rechecks
 the certificate under its own committee, and proves the full parent live set

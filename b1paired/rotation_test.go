@@ -40,7 +40,7 @@ func TestAuthenticatedSupersessionProjectsOnlySurvivingEpochs(t *testing.T) {
 			require.NoError(t, err)
 			parent, err := registryproof.Verify(g.ProofContext(), g.EVMGenesisHash(), g.Evidence())
 			require.NoError(t, err)
-			pair := &b1paired.Config{Profile: p, Runtime: rt, Proofs: func(_ context.Context, _ registryproof.Snapshot, keys []common.Hash) ([][][]byte, error) {
+			pair := &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Proofs: func(_ context.Context, _ registryproof.Snapshot, keys []common.Hash) ([][][]byte, error) {
 				return g.B1Proofs(keys), nil
 			}}
 			signed := func(epoch, round uint64) rootinput.VerifiedObservationV2 {

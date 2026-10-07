@@ -29,7 +29,7 @@ A='registryproof/registryproof.go'
 guard('literal-initialization',A,'(lay.version == FreshB1 && s.B1Initialized != 1)','registryproof','TestFreshB1FixedProofInvariants')
 for n,c in [('network-nonzero','s.B1Network == 0'),('network-width','s.B1Network > 65535'),('window-measured','s.B1WCert >= 16'),('queue-head','s.B1Head > s.B1WCert'),('queue-count-nonzero','s.B1Count == 0'),('queue-count-cap','s.B1Count > s.B1WCert+1'),('profile-present','s.B1ProfileHash == (common.Hash{})')]:guard(n,A,c,'registryproof','TestB1OrdinaryParentHeadBound' if n == 'queue-head' else 'TestFreshB1FixedProofInvariants')
 A='rootinput/b1.go'
-guard('pair-evidence-present',A,'c == nil || c.Runtime == nil || !parent.Valid() || !o.Valid()','b1paired','TestPairRejectsMissingAuthorityAndParentProof')
+guard('pair-evidence-present',A,'c == nil || c.Authority == nil || !parent.Valid() || !o.Valid()','b1paired','TestPairRejectsMissingAuthorityAndParentProof')
 replace('pair-profile-validity',A,'if err := b1registry.ValidateProfile(p); err != nil {','if err := b1registry.ValidateProfile(p); err != nil && false {','b1paired','TestPairRejectsMissingAuthorityAndParentProof')
 guard('pair-parent-profile-binding',A,'f.Layout != registryproof.FreshB1 || f.B1Network != uint64(p.Network) || f.B1WCert != p.WCert || f.B1ProfileHash != common.Hash(profileHash) || origin.NetworkID != uint64(p.Network) || parent.VerifiedContext().RegistryCodeHash != common.Hash(p.RuntimeHash)','b1paired','TestPairRejectsMissingAuthorityAndParentProof')
 guard('pair-history-root-binding',A,'h.Genesis() != p.RootGenesisID || h.Network() != uint64(p.Network)','b1paired','TestPairRechecksObservationUnderItsOwnRootCommittee')
@@ -75,6 +75,7 @@ for n,c in [('retention-update','!bytes.Equal(envelope.SealCompanion.B1Update, i
 replace('bootstrap-parent-clock','rootinput/b1.go','if parent.Genesis() {','if false && parent.Genesis() {','b1paired','TestBootstrapInstallsAuthorityBeforeOperationalClock')
 replace('export-entry-validity','b1state/storage.go','if err := e.Validate(); err != nil {','if err := e.Validate(); err != nil && false {','b1paired','TestEntryStorageRefusesInvalidAuthorityEntry')
 guard('fresh-allocation-config-required','registrygenesis/registrygenesis.go','art.b1 == nil','registrygenesis','TestFreshB1ArtifactGuards')
+guard('authority-capability-present','internal/b1authority/source.go','s == nil || s.history == nil','internal/b1authority','TestUnavailableCapabilityCannotGrantAuthority')
 # Error propagation / duplicated defense guards can be dominated. Record honestly.
 if len(sys.argv)>1:cases=[c for c in cases if c[0] in sys.argv[1:]]
 env=os.environ.copy();assert env['GOCACHE'].startswith('/private/tmp/')

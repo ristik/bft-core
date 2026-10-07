@@ -10,7 +10,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/b1state"
-	"github.com/unicitynetwork/bft-core/q3active"
+	"github.com/unicitynetwork/bft-core/internal/b1authority"
 	"github.com/unicitynetwork/bft-core/registryproof"
 )
 
@@ -20,8 +20,9 @@ var ErrB1Admission = errors.New("b1paired: missing or inconsistent authenticated
 // proof nodes for the named verified parent; it cannot grant authority.
 type B1Config struct {
 	Profile b1state.Profile
-	Runtime *q3active.Runtime
-	Proofs  func(context.Context, registryproof.Snapshot, []common.Hash) ([][][]byte, error)
+	// Authority is minted by q3active.Runtime.B1Authority.
+	Authority *b1authority.Source
+	Proofs    func(context.Context, registryproof.Snapshot, []common.Hash) ([][][]byte, error)
 }
 type B1Result struct {
 	Update       []byte
@@ -30,7 +31,7 @@ type B1Result struct {
 }
 
 func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o VerifiedObservationV2) (B1Result, error) {
-	if c == nil || c.Runtime == nil || !parent.Valid() || !o.Valid() {
+	if c == nil || c.Authority == nil || !parent.Valid() || !o.Valid() {
 		return B1Result{}, ErrB1Admission
 	}
 	p := c.Profile
@@ -43,7 +44,7 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 	if f.Layout != registryproof.FreshB1 || f.B1Network != uint64(p.Network) || f.B1WCert != p.WCert || f.B1ProfileHash != common.Hash(profileHash) || origin.NetworkID != uint64(p.Network) || parent.VerifiedContext().RegistryCodeHash != common.Hash(p.RuntimeHash) {
 		return B1Result{}, ErrB1Admission
 	}
-	h, err := c.Runtime.B1History(origin.RootRound)
+	h, err := c.Authority.B1History(origin.RootRound)
 	if err != nil {
 		return B1Result{}, err
 	}
