@@ -150,3 +150,13 @@ func (a *v1HandoffAuthority) verifyFreezeV3(r evmroot.OrderedHandoffRecord, proo
 	}
 	return bytes.Clone(proof.Parent), nil
 }
+
+// VerifyFreezeCompanion runs the configured handoff authority's Freeze verification over an ordered record and its companion, exactly as
+// block admission does, and returns the frozen parent it vouches for. It changes nothing: it is how a leader or a test confirms a
+// companion it built is one the old committee's rules accept.
+func (x *BlockStore) VerifyFreezeCompanion(record evmroot.OrderedHandoffRecord, companion []byte) ([]byte, error) {
+	if x.handoffAuth == nil {
+		return nil, ErrHandoffRecord
+	}
+	return x.handoffAuth.VerifyFreeze(record, companion)
+}

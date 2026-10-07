@@ -25,4 +25,8 @@ type HandoffApprovalMsg struct {
 	// digest is Candidate. It is empty for a root-only plan, and then Candidate
 	// is the legacy operator candidate hash.
 	CandidatePreimage []byte
+	// Receipts is the canonical readiness receipt set of a V3 plan's successor members (q3format.EncodeReceipts). It is empty for a
+	// V2 plan. It is evidence the Freeze companion carries, not something an endorsement signs: every approval's receipts are checked
+	// against the body, and the first valid set a validator holds is the one its leader orders.
+	Receipts []byte
 }

@@ -188,7 +188,10 @@ type fakeQ3 struct{ entries map[uint64]q3format.Entry }
 
 func (f fakeQ3) Admit(uint64) error                                                 { return nil }
 func (f fakeQ3) Lineage(base abdrc.HistoricalTrustBases) abdrc.HistoricalTrustBases { return base }
-func (f fakeQ3) FreezeRules() storage.V3FreezeRules                                 { return nil }
+func (f fakeQ3) ProtocolConfig() (q3format.ProtocolConfig, error) {
+	return q3format.ProtocolConfig{}, nil
+}
+func (f fakeQ3) FreezeRules() storage.V3FreezeRules { return nil }
 func (f fakeQ3) Activated(epoch uint64) (q3format.Entry, bool) {
 	e, ok := f.entries[epoch]
 	return e, ok

@@ -60,3 +60,12 @@ func (FreezeRules) VerifyReceipts(body, receipts []byte, attempt uint64, candida
 	}
 	return nil
 }
+
+// ProtocolConfig is the tuple of a V3 body planned on this history: the fixed Q3 rule set over its network and root genesis.
+func (r *Runtime) ProtocolConfig() (q3format.ProtocolConfig, error) {
+	h := r.History()
+	if h == nil {
+		return q3format.ProtocolConfig{}, ErrFreeze
+	}
+	return q3format.Q3Config(h.Network(), h.Genesis()), nil
+}
