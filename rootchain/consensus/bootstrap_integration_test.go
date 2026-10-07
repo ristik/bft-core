@@ -598,8 +598,10 @@ func TestEpochAnchorRecoveryRefusesOldEpochHeadWithoutChangingAnchor(t *testing.
 	oldHead.Qc = oldHead.CommitQc
 	oldHeadPtr := &oldHead
 	require.Greater(t, oldHeadPtr.Block.Round, anchor.Slot)
-	require.NoError(t, (&abdrc.StateMsg{CommittedHead: oldHeadPtr}).Verify(crypto.SHA256, manager.trustBase.Load()),
-		"overlapping old-set keys should satisfy the successor threshold in the legacy verifier")
+	require.NoError(t, oldHead.CommitQc.Verify(manager.trustBase.Load()),
+		"overlapping old-set keys satisfy the successor threshold")
+	require.ErrorIs(t, (&abdrc.StateMsg{CommittedHead: oldHeadPtr}).Verify(crypto.SHA256, manager.trustBase.Load()),
+		abdrc.ErrRecoveryTimestamp, "a moved block cannot retain the old authenticated round/time proof")
 	before, err := replica.db.LoadBlocks()
 	require.NoError(t, err)
 	recoveryQC := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: oldHeadPtr.Block.Round + 1,

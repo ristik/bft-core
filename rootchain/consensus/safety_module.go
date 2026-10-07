@@ -5,6 +5,7 @@ import (
 	gocrypto "crypto"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
@@ -15,7 +16,11 @@ import (
 )
 
 var (
-	ErrAlreadyVotedForRound = errors.New("already voted for round")
+	ErrTimestampNotIncreasing     = errors.New("proposal timestamp does not exceed parent timestamp")
+	ErrTimestampTooFarAhead       = errors.New("proposal timestamp exceeds voter clock skew")
+	ErrTimestampOverflow          = errors.New("parent timestamp cannot be incremented")
+	ErrTimestampParentUnavailable = errors.New("parent timestamp unavailable")
+	ErrAlreadyVotedForRound       = errors.New("already voted for round")
 	// ErrNotSafeToVote and ErrNotSafeToTimeout classify a refusal by the voting and timeout rules (as opposed to a storage or
 	// signing failure); ErrBlockNotExtendingQC and ErrHighQcRoundTooLow name the two rules the decision tests isolate.
 	ErrNotSafeToVote       = errors.New("not safe to vote")
@@ -43,11 +48,13 @@ type (
 		storage  SafetyStorage
 		// signing selects the scheme per epoch; nil keeps every vote and timeout legacy.
 		signing SigningResolver
-		// committed gives the executed block behind a committed round: scheme 2 votes sign no timestamp, so the native seal
-		// timestamp comes from the locally executed block, never from the (timestamp-less) QC.
+		// committed gives the executed block behind the committed round. Native seal time
+		// comes from that block, rather than the QC voting for its successor.
 		committed CommittedLookup
 		// gate admits signing in an epoch; nil admits every epoch the signing resolver knows (the legacy behaviour).
-		gate ActivationGate
+		gate       ActivationGate
+		parentTime func(uint64) (uint64, error)
+		now        func() uint64
 	}
 
 	// ActivationGate is the verified history's signer admission (q3active.Runtime). It refuses an epoch the history does not hold
@@ -130,7 +137,7 @@ func NewSafetyModule(network types.NetworkID, id string, signer crypto.Signer, d
 		return nil, fmt.Errorf("invalid root validator signing key: %w", err)
 	}
 
-	m := &SafetyModule{network: network, peerID: id, signer: signer, verifier: ver, storage: db}
+	m := &SafetyModule{network: network, peerID: id, signer: signer, verifier: ver, storage: db, now: types.NewTimestamp}
 	for _, o := range opts {
 		o(m)
 	}
@@ -209,11 +216,56 @@ func (s *SafetyModule) constructCommitInfo(block *drctypes.BlockData, voteInfoHa
 	}
 }
 
+// WithParentTimestamp binds live voting to the locally executed parent, including
+// historical scheme 2 QCs which carry no timestamp. The lookup follows store replacement.
+func WithParentTimestamp(lookup func(uint64) (uint64, error)) SafetyOption {
+	return func(s *SafetyModule) { s.parentTime = lookup }
+}
+
+// proposalTimestamp fails closed at uint64 overflow instead of wrapping to zero.
+func proposalTimestamp(now, parent uint64) (uint64, error) {
+	if parent == math.MaxUint64 {
+		return 0, ErrTimestampOverflow
+	}
+	return max(now, parent+1), nil
+}
+
+// validateVoteTimestamp is only for live voting, never certified history verification.
+func (s *SafetyModule) validateVoteTimestamp(block *drctypes.BlockData) error {
+	var parent uint64
+	if s.parentTime != nil {
+		var err error
+		parent, err = s.parentTime(block.GetParentRound())
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrTimestampParentUnavailable, err)
+		}
+	} else if block.Qc != nil && block.Qc.VoteInfo != nil && block.Qc.Scheme != votesig.SchemeDomainBound {
+		parent = block.Qc.VoteInfo.Timestamp
+	} else {
+		return ErrTimestampParentUnavailable
+	}
+	if block.Timestamp <= parent {
+		return ErrTimestampNotIncreasing
+	}
+	now := s.now()
+	// Subtract only after comparison, avoiding overflow at either end of uint64.
+	if block.Timestamp > now && block.Timestamp-now > uint64(MaxClockSkew.Seconds()) {
+		return ErrTimestampTooFarAhead
+	}
+	return nil
+}
+
 func (s *SafetyModule) MakeVote(block *drctypes.BlockData, execStateID []byte, highQC *drctypes.QuorumCert, lastRoundTC *drctypes.TimeoutCert) (*abdrc.VoteMsg, error) {
+	if block == nil {
+		return nil, fmt.Errorf("block is nil")
+	}
 	// The overall validity of the block must be checked prior to calling this method
 	// However since we are de-referencing QC make sure it is not nil
 	if block.Qc == nil && block.Anchor == nil {
 		return nil, fmt.Errorf("make vote error, block is missing quorum certificate")
+	}
+	if err := s.validateVoteTimestamp(block); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrNotSafeToVote, err)
 	}
 	qcRound := block.GetParentRound()
 	votingRound := block.Round
@@ -344,8 +396,8 @@ func (s *SafetyModule) makeVoteDomainBound(cfg votesig.Config, block *drctypes.B
 		return nil, err
 	}
 	qcRound := block.GetParentRound()
-	info := &drctypes.RoundInfo{Version: 1, RoundNumber: block.Round, Epoch: block.Epoch, ParentRoundNumber: qcRound, CurrentRootHash: execStateID}
-	vi := votesig.VoteInfo{Epoch: info.Epoch, Round: info.RoundNumber, Parent: qcRound}
+	info := &drctypes.RoundInfo{Version: 1, RoundNumber: block.Round, Epoch: block.Epoch, ParentRoundNumber: qcRound, CurrentRootHash: execStateID, Timestamp: block.Timestamp}
+	vi := votesig.VoteInfo{Epoch: info.Epoch, Round: info.RoundNumber, Parent: qcRound, Timestamp: info.Timestamp}
 	copy(vi.Exec[:], execStateID)
 	vh, err := cfg.VoteInfoHash(vi)
 	if err != nil {

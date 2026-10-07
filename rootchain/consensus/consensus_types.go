@@ -14,6 +14,8 @@ const (
 	BlockRate     = 900
 	LocalTimeout  = 10000
 	HashAlgorithm = crypto.SHA256
+	// MaxClockSkew is the DEV live-voting tolerance for UC seal time.
+	MaxClockSkew = 30 * time.Second
 )
 
 type (

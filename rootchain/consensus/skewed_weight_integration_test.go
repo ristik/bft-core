@@ -675,8 +675,10 @@ func TestSkewedWeightRestartMidRoundKeepsOneDecisionAndNeverDoubleSigns(t *testi
 	restarted := c.manager(victim)
 	require.GreaterOrEqual(t, restarted.safety.storage.GetHighestVotedRound(), highWater, "the restarted node reads the durable decision")
 	// a second statement for a round already voted is refused by the restarted safety module
-	conflicting := &drctypes.BlockData{Round: highWater, Epoch: 1, Qc: &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: highWater - 1}}}
-	_, err := restarted.safety.MakeVote(conflicting, bytes.Repeat([]byte{0xee}, 32), nil, nil)
+	parent, err := restarted.blockStore.Block(highWater - 1)
+	require.NoError(t, err)
+	conflicting := &drctypes.BlockData{Round: highWater, Epoch: 1, Timestamp: parent.BlockData.Timestamp + 1, Qc: &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: highWater - 1}}}
+	_, err = restarted.safety.MakeVote(conflicting, bytes.Repeat([]byte{0xee}, 32), nil, nil)
 	require.ErrorIs(t, err, ErrAlreadyVotedForRound)
 
 	// the cluster, with the restarted node, goes on, and the restarted node itself votes above the stopped store's high-water mark
@@ -878,7 +880,7 @@ func TestSkewedWeightScheme2DecisionSurvivesRestart(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, sent, recorded, "the file holds the complete vote that was sent, byte for byte")
 
-	restarted, err := NewSafetyModule(old.network, old.peerID, old.signer, reopened, WithDomainBoundSigning(hr.store, old.committed))
+	restarted, err := NewSafetyModule(old.network, old.peerID, old.signer, reopened, WithDomainBoundSigning(hr.store, old.committed), WithParentTimestamp(old.parentTime))
 	require.NoError(t, err)
 	again, err := restarted.MakeVote(block, vote.VoteInfo.CurrentRootHash, nil, nil)
 	require.NoError(t, err, "the recorded vote is reproduced after the restart")
