@@ -3,7 +3,10 @@ package bridgeprofile
 import (
 	"bytes"
 	stdcrypto "crypto"
+	stdhex "encoding/hex"
 	"encoding/json"
+	"sort"
+	"strconv"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -40,52 +43,165 @@ type TrustInput struct {
 // ID is trustBaseId = SHA256(B).
 func (t *TrustInput) ID() [32]byte { return H(t.JSON) }
 
-// trustDoc fixes the SDK's emitted top-level order (changeRecordHash, epoch,
-// epochStartRound, networkId, previousEntryHash, quorumThreshold, rootNodes,
-// signatures, stateHash, version); each node emits nodeId, sigKey, stake. The
-// oracle's own rendering is a CANDIDATE: the authoritative B is the one the
-// pinned JS SDK 3.0.1 emits, published by native-bridge-plugins; the oracle
-// consumes B as opaque bytes.
-type trustDoc struct {
-	ChangeRecordHash  hex.Bytes            `json:"changeRecordHash"`
-	Epoch             uint64               `json:"epoch"`
-	EpochStart        uint64               `json:"epochStartRound"`
-	NetworkID         types.NetworkID      `json:"networkId"`
-	PreviousEntryHash hex.Bytes            `json:"previousEntryHash"`
-	QuorumThreshold   uint64               `json:"quorumThreshold"`
-	RootNodes         []*types.NodeInfo    `json:"rootNodes"`
-	Signatures        map[string]hex.Bytes `json:"signatures"`
-	StateHash         hex.Bytes            `json:"stateHash"`
-	Version           types.Version        `json:"version"`
-}
-
-// RenderTrustBaseJSON renders tb in the SDK's documented field order.
+// RenderTrustBaseJSON renders tb exactly as the pinned JS SDK 3.0.1 emits it,
+// UTF8(JSON.stringify(RootTrustBase.fromJSON(source).toJSON())): top-level
+// order changeRecordHash, epoch, epochStartRound, networkId, previousEntryHash,
+// quorumThreshold, rootNodes, signatures, stateHash, version; node fields
+// nodeId, sigKey, stake; uint64 values and the version as decimal strings,
+// networkId as a number, hex lowercase without a prefix, absent hashes null,
+// no whitespace. The native-bridge-plugins tooling checks that every document
+// in the corpus is byte-identical to the SDK's own emission; the oracle
+// consumes the published B as opaque bytes.
 func RenderTrustBaseJSON(tb *types.RootTrustBaseV1) ([]byte, error) {
-	return json.Marshal(trustDoc{ChangeRecordHash: tb.ChangeRecordHash, Epoch: tb.Epoch, EpochStart: tb.EpochStart, NetworkID: tb.NetworkID,
-		PreviousEntryHash: tb.PreviousEntryHash, QuorumThreshold: tb.QuorumThreshold, RootNodes: tb.RootNodes,
-		Signatures: tb.Signatures, StateHash: tb.StateHash, Version: tb.Version})
+	var w bytes.Buffer
+	str := func(s string) {
+		e := json.NewEncoder(&w)
+		e.SetEscapeHTML(false)
+		_ = e.Encode(s)
+		w.Truncate(w.Len() - 1) // Encode appends a newline
+	}
+	opt := func(b hex.Bytes) {
+		if len(b) == 0 {
+			w.WriteString("null")
+			return
+		}
+		str(stdhex.EncodeToString(b))
+	}
+	num := func(u uint64) { str(strconv.FormatUint(u, 10)) }
+	w.WriteString(`{"changeRecordHash":`)
+	opt(tb.ChangeRecordHash)
+	w.WriteString(`,"epoch":`)
+	num(tb.Epoch)
+	w.WriteString(`,"epochStartRound":`)
+	num(tb.EpochStart)
+	w.WriteString(`,"networkId":` + strconv.FormatUint(uint64(tb.NetworkID), 10))
+	w.WriteString(`,"previousEntryHash":`)
+	opt(tb.PreviousEntryHash)
+	w.WriteString(`,"quorumThreshold":`)
+	num(tb.QuorumThreshold)
+	w.WriteString(`,"rootNodes":[`)
+	for i, n := range tb.RootNodes {
+		if i > 0 {
+			w.WriteByte(',')
+		}
+		w.WriteString(`{"nodeId":`)
+		str(n.NodeID)
+		w.WriteString(`,"sigKey":`)
+		str(stdhex.EncodeToString(n.SigKey))
+		w.WriteString(`,"stake":`)
+		num(n.Stake)
+		w.WriteByte('}')
+	}
+	w.WriteString(`],"signatures":{`)
+	ids := make([]string, 0, len(tb.Signatures))
+	for id := range tb.Signatures {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for i, id := range ids {
+		if i > 0 {
+			w.WriteByte(',')
+		}
+		str(id)
+		w.WriteByte(':')
+		str(stdhex.EncodeToString(tb.Signatures[id]))
+	}
+	w.WriteString(`},"stateHash":`)
+	str(stdhex.EncodeToString(tb.StateHash))
+	w.WriteString(`,"version":`)
+	num(uint64(tb.Version))
+	w.WriteByte('}')
+	return w.Bytes(), nil
 }
 
-// LoadTrustInput parses the installed bytes B and checks the fixed profile at
-// installation: version 1, an epoch, N distinct validators each of weight 1 and
-// quorumThreshold = N - (N-1)/3. Anything else is unsupported (never flattened
-// into unit weights): trust-base evolution and arbitrary weights are common SDK
-// work for later.
+// sdkTrustDoc is the SDK's JSON representation of a RootTrustBase.
+type sdkTrustDoc struct {
+	ChangeRecordHash  *string           `json:"changeRecordHash"`
+	Epoch             string            `json:"epoch"`
+	EpochStart        string            `json:"epochStartRound"`
+	NetworkID         uint32            `json:"networkId"`
+	PreviousEntryHash *string           `json:"previousEntryHash"`
+	QuorumThreshold   string            `json:"quorumThreshold"`
+	RootNodes         []sdkTrustNode    `json:"rootNodes"`
+	Signatures        map[string]string `json:"signatures"`
+	StateHash         string            `json:"stateHash"`
+	Version           string            `json:"version"`
+}
+
+type sdkTrustNode struct {
+	NodeID string `json:"nodeId"`
+	SigKey string `json:"sigKey"`
+	Stake  string `json:"stake"`
+}
+
+func sdkUint(s string) (uint64, bool) {
+	u, err := strconv.ParseUint(s, 10, 64)
+	return u, err == nil && strconv.FormatUint(u, 10) == s
+}
+
+func sdkHex(s string) (hex.Bytes, bool) {
+	b, err := stdhex.DecodeString(s)
+	return b, err == nil && stdhex.EncodeToString(b) == s
+}
+
+// LoadTrustInput parses the installed bytes B (the SDK JSON representation)
+// and checks the fixed profile at installation: version 1, an epoch, N
+// distinct validators each of weight 1 and quorumThreshold = N - (N-1)/3.
+// Anything else is unsupported (never flattened into unit weights):
+// trust-base evolution and arbitrary weights are common SDK work for later.
 func LoadTrustInput(b []byte) (*TrustInput, error) {
-	var tb types.RootTrustBaseV1
-	if err := json.Unmarshal(b, &tb); err != nil {
+	var d sdkTrustDoc
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&d); err != nil || dec.More() {
 		return nil, ErrTrustConfig
+	}
+	tb := types.RootTrustBaseV1{NetworkID: types.NetworkID(d.NetworkID), Signatures: map[string]hex.Bytes{}}
+	var ok [5]bool
+	var ver uint64
+	ver, ok[0] = sdkUint(d.Version)
+	tb.Epoch, ok[1] = sdkUint(d.Epoch)
+	tb.EpochStart, ok[2] = sdkUint(d.EpochStart)
+	tb.QuorumThreshold, ok[3] = sdkUint(d.QuorumThreshold)
+	tb.StateHash, ok[4] = sdkHex(d.StateHash)
+	for _, k := range ok {
+		if !k {
+			return nil, ErrTrustConfig
+		}
+	}
+	tb.Version = types.Version(ver)
+	for _, h := range []struct {
+		src *string
+		dst *hex.Bytes
+	}{{d.ChangeRecordHash, &tb.ChangeRecordHash}, {d.PreviousEntryHash, &tb.PreviousEntryHash}} {
+		if h.src != nil {
+			v, k := sdkHex(*h.src)
+			if !k {
+				return nil, ErrTrustConfig
+			}
+			*h.dst = v
+		}
+	}
+	for id, s := range d.Signatures {
+		v, k := sdkHex(s)
+		if !k {
+			return nil, ErrTrustConfig
+		}
+		tb.Signatures[id] = v
+	}
+	seen := map[string]bool{}
+	for _, n := range d.RootNodes {
+		key, k1 := sdkHex(n.SigKey)
+		stake, k2 := sdkUint(n.Stake)
+		if !k1 || !k2 || stake != 1 || seen[n.NodeID] {
+			return nil, ErrTrustConfig
+		}
+		seen[n.NodeID] = true
+		tb.RootNodes = append(tb.RootNodes, &types.NodeInfo{NodeID: n.NodeID, SigKey: key, Stake: stake})
 	}
 	n := uint64(len(tb.RootNodes))
 	if tb.Version != 1 || tb.Epoch == 0 || n == 0 || tb.QuorumThreshold != n-(n-1)/3 {
 		return nil, ErrTrustConfig
-	}
-	seen := map[string]bool{}
-	for _, v := range tb.RootNodes {
-		if v == nil || v.Stake != 1 || seen[v.NodeID] {
-			return nil, ErrTrustConfig
-		}
-		seen[v.NodeID] = true
 	}
 	return &TrustInput{JSON: bytes.Clone(b), Base: &tb}, nil
 }

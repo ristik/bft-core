@@ -230,7 +230,7 @@ func TestLockProofFixedProfile(t *testing.T) {
 	require.NoError(t, err)
 	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, h, inst(rtb), e.Pin), ErrTrustBaseDigest)
 	// The digest is of the installed bytes: a semantically equal re-serialisation is another id.
-	re := bytes.Replace(e.Trust.JSON, []byte(`"epoch":1`), []byte(`"epoch": 1`), 1)
+	re := bytes.Replace(e.Trust.JSON, []byte(`"epoch":"1"`), []byte(`"epoch": "1"`), 1)
 	require.NotEqual(t, e.Trust.JSON, re)
 	rti, err := LoadTrustInput(re)
 	require.NoError(t, err)

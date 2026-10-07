@@ -8,7 +8,7 @@ for the passages it names. Where they differ, this text governs for the **whole-
 
 Nothing here activates in production. No native precompile, vault, gas price or benchmark acceptance is claimed; the
 reference oracle is `bridgeprofile/`. It is an independent executable oracle and corpus *generator*, not a golden-file authority: the
-sole normative bytes and released vectors live in `native-bridge-plugins/protocol/`, and `go run ./bridgeprofile/cmd/gencorpus -out DIR`
+sole normative bytes and released vectors live in `native-bridge-plugins/protocol/`, and `go run ./cmd/gencorpus -out DIR`
 writes the candidate tree (`bridgeprofile/testdata/corpus-candidate.digest` pins its content address until the merged protocol
 commit is pinned).
 
@@ -104,8 +104,10 @@ the state root with its code hash equal to the pin; the lock word at `keccak256(
 account's storage root and equals the digest reconstructed from the actual mint. The MPT walk rejects non-canonical RLP, hash
 references to nodes that must be embedded, unconsumed or over-consumed keys and every duplicate, unused or out-of-order node.
 There is no mint-proof circularity: the lock digest commits cfg, nonce, amount, ID and recipient, not J or the mint hash. The
-oracle's own rendering of `B` (`RenderTrustBaseJSON`, the SDK's documented field order) is a candidate for fixtures only; the
-authoritative `B` and its digest are the ones published by native-bridge-plugins from the pinned JS SDK.
+oracle renders `B` (`RenderTrustBaseJSON`) exactly as the pinned JS SDK 3.0.1 emits it (decimal-string numbers, unprefixed
+lower-case hex, null absent hashes) and `LoadTrustInput` parses that form; native-bridge-plugins' `tools/sdk_trust_fixture.mjs --corpus`
+requires every trust document of the corpus to be byte-identical to the SDK's own emission, and the Rust SDK 3.0.1 `from_json`
+parses the same bytes. The pinned `B` is published as `config/sdk-root-trust-base.json` with its provenance.
 
 **DEFERRED: common SDK trust-base work (ristik/bft-core#421), unsupported in the current bridge profile.** Epoch changes,
 appended trust-base records, caller-driven retrieval of newer bases, arbitrary weights such as `(98,1,1)`, mixed
@@ -167,8 +169,10 @@ canonical minimal RLP integers, left-padded to recover the bytes32 digest.
 
 ## E. Candidate corpus and fixture
 
-`go run ./bridgeprofile/cmd/gencorpus -out DIR` writes the `protocol/vectors/{config,wire,unlock,policy,lock,history,proof,return,vault}/cases.json`
-tree, `config/fixtures.json`, `VERSION`, `PROVENANCE.json` and a SHA-256 `MANIFEST.sha256`; the output is deterministic. Every case
+`go run ./cmd/gencorpus -out DIR` writes the `protocol/vectors/{config,wire,unlock,policy,lock,history,proof,return,vault}/cases.json`
+tree, `config/fixtures.json`, `config/semantic-profile.json` (a byte copy of native-bridge-plugins `protocol/profile-v2.json`) and the
+pinned SDK trust document with its provenance; the output is deterministic. VERSION, `provenance.json` and the digests are added
+by `tools/vectors.py seal`, which records the generator commit. Every case
 carries its input bytes, operation, auxiliary inputs and the expected status, error family, exact sentinel name, relation result
 with leaves `(sid,txHash,t,v)` and the canonical kernel output. `Replay` is the executable definition of each op; the Go test
 replays every case from the generated files alone. All fixture values are DEV inputs (chain ID 31337, EVM partition 7, aggregator

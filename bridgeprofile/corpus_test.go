@@ -2,7 +2,6 @@ package bridgeprofile
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -33,14 +32,14 @@ func TestCorpusIsDeterministicAndPinned(t *testing.T) {
 	require.NoError(t, err, "UPDATE_CORPUS_PIN=1 go test ./bridgeprofile -run TestCorpusIsDeterministicAndPinned")
 	require.Equal(t, strings.TrimSpace(string(want)), a.Digest(),
 		"the candidate corpus changed; review the diff of the generated tree and update the pin")
-	// The manifest lists every other file with its SHA-256.
-	for _, line := range strings.Split(strings.TrimSpace(string(a.Files["MANIFEST.sha256"])), "\n") {
-		f := strings.SplitN(line, "  ", 2)
-		require.Len(t, f, 2)
-		sum := sha256.Sum256(a.Files[f[1]])
-		require.Equal(t, hex.EncodeToString(sum[:]), f[0], f[1])
+	// The tree is exactly what native-bridge-plugins' tools/vectors.py seals: the nine
+	// family directories plus the semantic profile and the pinned SDK trust document.
+	for p := range a.Files {
+		dir, _, _ := strings.Cut(p, "/")
+		require.Contains(t, families, dir, p)
+		require.NotContains(t, []string{"VERSION", "provenance.json", "SHA256SUMS", "MANIFEST.sha256", "PROVENANCE.json"}, p)
 	}
-	require.Contains(t, string(a.Files["VERSION"]), "NATIVE_BRIDGE_PROTO_VERSION=2")
+	require.Equal(t, semanticProfile, a.Files["config/semantic-profile.json"])
 }
 
 // TestCorpusReplay re-executes every case from the bytes in the generated
@@ -96,6 +95,9 @@ func TestCorpusCoversTheDesign(t *testing.T) {
 		"justification-bound-header-over": "ErrLockProofTooLarge", "justification-over-64k": "ErrJustificationTooLarge",
 		"mint-two-assets": "ErrMintData", "return-partial-amount": "ErrReturnAmount",
 		"kernel-return-valid": "", "token-third-slot": "ErrShape", "backing-header-not-bound": "ErrLockHeader",
+		"backing-quorum-n3-signers3": "", "backing-quorum-n3-signers2": "ErrLockUC",
+		"backing-quorum-n4-signers3": "", "backing-quorum-n4-signers2": "ErrLockUC",
+		"backing-quorum-n7-signers5": "", "backing-quorum-n7-signers4": "ErrLockUC",
 	}
 	got := map[string]Expect{}
 	for _, fam := range families {

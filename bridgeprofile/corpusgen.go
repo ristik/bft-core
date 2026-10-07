@@ -3,6 +3,7 @@ package bridgeprofile
 import (
 	"bytes"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -15,17 +16,12 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// Provenance of the candidate corpus: the immutable sources the profile was
-// written against (briefs/nbp-design.md, section 1).
-var Provenance = map[string]string{
-	"profile":     "native bridge profile v2 on SDK 3.0.1 (NATIVE_BRIDGE_PROTO_VERSION=2)",
-	"sdk-js":      "state-transition-sdk-js v3.0.1 f5f0737306901215860aa920a6ab570b699efba8",
-	"sdk-rust":    "state-transition-sdk-rust v3.0.1 635011b3d7066db6f3296e9cb8d2f24d4bd1fec7",
-	"bridge":      "unicity-bridge deb2b86c0a1fa0398928cb88caac9feccda6f4e9",
-	"generator":   "bft-core bridgeprofile (go run ./bridgeprofile/cmd/gencorpus)",
-	"status":      "CANDIDATE: produced by bft-core PR2; the released corpus is the one merged at native-bridge-plugins protocol/vectors",
-	"fixtureSeed": "native-bridge-corpus-v2",
-}
+// semanticProfile is the canonical native-bridge profile artifact, byte for
+// byte native-bridge-plugins protocol/profile-v2.json at the revision this
+// generator was written against.
+//
+//go:embed testdata/semantic-profile.json
+var semanticProfile []byte
 
 // Notes qualify every number in the corpus.
 var Notes = []string{
@@ -33,7 +29,7 @@ var Notes = []string{
 	"Signatures are RFC 6979 deterministic with low-s; every implementation must reproduce them byte for byte.",
 	"No gas price is frozen by this corpus. Bounds are provisional DEV ceilings.",
 	"Supported authority is one fixed SDK trust base, unit weights, count quorum N-(N-1)/3. DEFERRED (common SDK trust-base work, bft-core#421): weighted acceptance such as (98,1,1), mixed historical/current committees, trust-base append/fetch, interval closure, old-J validity through rotation, full B1/SDK seal parity; they have no cases.",
-	"The trust-base documents in fixtures.json are candidate renderings in the SDK field order; the authoritative bytes B and digest come from the pinned JS SDK via native-bridge-plugins.",
+	"The trust-base documents in fixtures.json are the exact bytes the pinned JS SDK 3.0.1 emits; native-bridge-plugins checks each against the SDK, and config/sdk-root-trust-base.json is the pinned B.",
 	"B1 in compose cases is the claim set in aux.claims plus the real RSMT_MEMBER_V1; UC verification behind 0x0100 is B1's own conformance.",
 	"referenceTime and nonce are decimal strings; amounts are minimal big-endian hex.",
 }
@@ -107,9 +103,22 @@ func BuildCorpus() (*Corpus, error) {
 	otherNet, err := d.Auth.TrustBase(DevNetwork+1, 1)
 	g0.must(err)
 	fs.TrustBases["other-network"] = jsonHex(otherNet)
-	wrongThr := *d.TB
+	// Four validators with threshold 2: a valid SDK document whose threshold is
+	// not the supported count quorum N-(N-1)/3 = 3.
+	quad, err := NewCommittee("quorum-4", 4)
+	g0.must(err)
+	wrongThr, err := quad.TrustBase(DevNetwork, 1)
+	g0.must(err)
 	wrongThr.QuorumThreshold = 2
-	fs.TrustBases["threshold-not-n-minus-third"] = jsonHex(&wrongThr)
+	fs.TrustBases["threshold-not-n-minus-third"] = jsonHex(wrongThr)
+	// Unit-weight committees for the count-quorum boundaries.
+	for _, n := range []int{3, 4, 7} {
+		com, err := NewCommittee(fmt.Sprintf("quorum-%d", n), n)
+		g0.must(err)
+		ctb, err := com.TrustBase(DevNetwork, 1)
+		g0.must(err)
+		fs.TrustBases[fmt.Sprintf("committee-%d", n)] = jsonHex(ctb)
+	}
 	heavy := *d.TB
 	heavy.RootNodes = []*types.NodeInfo{{NodeID: d.TB.RootNodes[0].NodeID, SigKey: d.TB.RootNodes[0].SigKey, Stake: 2}}
 	fs.TrustBases["non-unit-weight"] = jsonHex(&heavy)
@@ -886,6 +895,28 @@ func (g *gen) lock() {
 	back("backing-rogue-authority", "a document whose only authority is another key is installed", h, "rogue-authority", "dev")
 	back("backing-non-unit-weight", "unsupported configuration: a validator of weight 2", h, "non-unit-weight", "dev")
 	back("backing-threshold", "unsupported configuration: quorumThreshold is not N-(N-1)/3", h, "threshold-not-n-minus-third", "dev")
+	// Unit-weight count-quorum boundaries: N-(N-1)/3 distinct valid signers accept, one fewer rejects.
+	for _, c := range []struct{ n, q int }{{3, 3}, {4, 3}, {7, 5}} {
+		name := fmt.Sprintf("committee-%d", c.n)
+		raw, _ := hex.DecodeString(g.fs.TrustBases[name])
+		ti, err := LoadTrustInput(raw)
+		g.must(err)
+		com, err := NewCommittee(fmt.Sprintf("quorum-%d", c.n), c.n)
+		g.must(err)
+		if ti == nil || com == nil {
+			continue
+		}
+		for _, k := range []int{c.q, c.q - 1} {
+			com.Signers = k
+			p, err := d.World.Certified(f, com, d.EVMPDR, ti, DevRootRound, 5, 9)
+			g.must(err)
+			if p == nil {
+				continue
+			}
+			id, desc := fmt.Sprintf("backing-quorum-n%d-signers%d", c.n, k), fmt.Sprintf("%d validators, threshold %d: %d distinct valid signers", c.n, c.q, k)
+			back(id, desc, remint(func(lp *LockProof) { *lp = *p }), name, "dev")
+		}
+	}
 	// A proof that names the installed document but whose certificate lies outside the one pinned base.
 	for _, c := range []struct{ id, desc, base string }{
 		{"backing-epoch-mismatch", "the proof names the installed document (epoch 2) but its certificate is sealed in root epoch 1", "next-epoch-same-keys"},
@@ -1032,8 +1063,8 @@ func rewriteIRBytes(raw []byte, mut func(r *types.InputRecord)) []byte {
 	return out
 }
 
-// pack renders the family files, the fixture set, VERSION, PROVENANCE and the
-// SHA-256 file manifest.
+// pack renders the family files, the fixture set, the semantic profile and the
+// pinned SDK trust-base document with its provenance.
 func (g *gen) pack() (*Corpus, error) {
 	out := &Corpus{Files: map[string][]byte{}, Set: g.fs, Cases: g.cases}
 	js := func(v any) ([]byte, error) {
@@ -1061,27 +1092,46 @@ func (g *gen) pack() (*Corpus, error) {
 		}
 		out.Files[fam+"/cases.json"] = b
 	}
-	out.Files["VERSION"] = []byte(fmt.Sprintf("NATIVE_BRIDGE_PROTO_VERSION=%d\nformat=%s\n", NativeBridgeProtoVersion, CorpusFormat))
-	pv, err := js(Provenance)
+	out.Files["config/semantic-profile.json"] = semanticProfile
+	b, err := g.d.sdkTrustFixture()
 	if err != nil {
 		return nil, err
 	}
-	out.Files["PROVENANCE.json"] = pv
+	out.Files["config/sdk-root-trust-base.json"] = g.d.Trust.JSON
+	out.Files["config/sdk-root-trust-base.provenance.json"] = b
+	return out, nil
+}
+
+// sdkTrustFixture is the provenance record published beside the pinned B; it
+// has the bytes native-bridge-plugins' tools/sdk_trust_fixture.mjs writes.
+func (d *Deployment) sdkTrustFixture() ([]byte, error) {
+	sum := sha256.Sum256(d.Trust.JSON)
+	b, err := json.MarshalIndent(struct {
+		Fixture       string `json:"fixture"`
+		SDKVersion    string `json:"sdkVersion"`
+		SDKCommit     string `json:"sdkCommit"`
+		Serialization string `json:"serialization"`
+		ByteLength    int    `json:"byteLength"`
+		SHA256        string `json:"sha256"`
+	}{"synthetic-fixed-base-not-authenticated", "3.0.1", "f5f0737306901215860aa920a6ab570b699efba8",
+		"UTF8(JSON.stringify(RootTrustBase.fromJSON(source).toJSON()))", len(d.Trust.JSON), hex.EncodeToString(sum[:])}, "", "  ")
+	return append(b, '\n'), err
+}
+
+// Digest is the SHA-256 of the sorted "sha256  path" listing of every
+// generated file: the content address of the unsealed tree. The sealed corpus
+// digest of native-bridge-plugins (tools/vectors.py seal) additionally covers
+// VERSION and the provenance record, which name this generator's commit.
+func (c *Corpus) Digest() string {
 	var names []string
-	for p := range out.Files {
+	for p := range c.Files {
 		names = append(names, p)
 	}
 	sort.Strings(names)
 	var man bytes.Buffer
 	for _, p := range names {
-		fmt.Fprintf(&man, "%x  %s\n", sha256.Sum256(out.Files[p]), p)
+		fmt.Fprintf(&man, "%x  %s\n", sha256.Sum256(c.Files[p]), p)
 	}
-	out.Files["MANIFEST.sha256"] = man.Bytes()
-	return out, nil
-}
-
-// Digest is the SHA-256 of the file manifest: the corpus's content address.
-func (c *Corpus) Digest() string {
-	d := sha256.Sum256(c.Files["MANIFEST.sha256"])
+	d := sha256.Sum256(man.Bytes())
 	return hex.EncodeToString(d[:])
 }
