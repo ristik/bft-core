@@ -114,6 +114,10 @@ func (h *RequestHistory) Chain(partition types.PartitionID, shard types.ShardID)
 			}
 			continue
 		}
+		act, err := storage.ActivationFromVerifiedV3(e, v.Record, preimage, h.cfg.HashAlg, h.cfg.Version)
+		if err != nil {
+			return nil, errors.Join(ErrRequestHistory, err)
+		}
 		c, err := evmassign.DecodeCandidate(preimage)
 		if err != nil {
 			return nil, errors.Join(ErrRequestHistory, err)
@@ -136,10 +140,6 @@ func (h *RequestHistory) Chain(partition types.PartitionID, shard types.ShardID)
 		}
 		if evm.PartitionID != partition || !evm.ShardID.Equal(shard) {
 			continue // the assignment of the designated EVM shard is not this shard's history
-		}
-		act, err := storage.ActivationFromVerifiedV3(e, v.Record, preimage, h.cfg.HashAlg, h.cfg.Version)
-		if err != nil {
-			return nil, err
 		}
 		chain = append(chain, act)
 	}

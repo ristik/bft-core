@@ -92,6 +92,17 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	if _, err := handoffdelivery.VerifySnapshot(proof, verified, head, first.Partition, first.Shard, first.ShardConfHash); err != nil {
 		return nil, err
 	}
+	if len(candidate) != 0 {
+		if err := x.blockStore.ValidateCommittedAssignment(head, v.Record, entry.BodyEncoding(), candidate,
+			func(epoch uint64) (storage.VerifiedActivation, bool) {
+				if x.q3 == nil {
+					return nil, false
+				}
+				return x.q3.Activated(epoch)
+			}); err != nil {
+			return nil, errors.Join(ErrQ3Candidate, err)
+		}
+	}
 	projected := entry.Projection()
 	projected.PreviousEntryHash = oldID
 	signing := votesig.Config{Scheme: cfg.SigningScheme, Network: cfg.Network, Genesis: cfg.Genesis}
@@ -140,6 +151,7 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	x.handoffAborts = nil
 	x.handoffMu.Unlock()
 	x.leaderSelector = selector
+	carryRequestHistory(x.irReqVerifier, reqVerifier)
 	x.irReqVerifier = reqVerifier
 	x.t2Timeouts = t2Timeouts
 	x.epochAnchor = a
