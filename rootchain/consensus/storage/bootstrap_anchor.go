@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"crypto"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -363,40 +365,161 @@ func installCommittedAssignmentFrom(db PersistentStore, orchestration Orchestrat
 	if err != nil || len(rawBody) == 0 {
 		return fmt.Errorf("%w: successor body unavailable", ErrAssignmentHistory)
 	}
-	body, err := DecodeHandoffBody(rawBody)
+	body, err := decodeRetainedBody(rawBody)
 	if err != nil {
 		return err
 	}
-	confs, provenance, changes, err := DeriveActivatedConfigs(record, body, preimage, control.FrozenParent)
+	confs, provenance, err := validateCommittedAssignment(orchestration, hashAlg, oldRoot, record, body, preimage, configs, key)
 	if err != nil {
 		return err
+	}
+	return InstallDerived(orchestration, confs, provenance)
+}
+
+// ValidateCommittedAssignment checks a candidate against the authenticated old checkpoint
+// and this store's committed assignment history before the caller writes any successor trust.
+// Installation and startup repair repeat the state-dependent checks before writing the derived index.
+func (x *BlockStore) ValidateCommittedAssignment(head *abdrc.CommittedBlock, record evmroot.OrderedHandoffRecord, rawBody, preimage []byte, lookup func(uint64) (VerifiedActivation, bool)) error {
+	oldRoot, err := NewRootBlock(head, x.hash, x.orchestration, ProfileHandoff)
+	if err != nil {
+		return err
+	}
+	configs, err := x.orchestration.ShardConfigs(record.OrderedRound)
+	if err != nil {
+		return err
+	}
+	key, err := frozenShard(oldRoot.ShardState, configs, oldRoot.ShardState.Control.FrozenParent)
+	if err != nil {
+		return err
+	}
+	body, err := decodeRetainedBody(rawBody)
+	if err != nil {
+		return err
+	}
+	c, err := evmassign.DecodeCandidate(preimage)
+	if err != nil {
+		return err
+	}
+	if c.Supersedes != nil {
+		si := oldRoot.ShardState.States[key]
+		if si.TR.Epoch == si.IR.Epoch {
+			return errors.Join(ErrSupersessionInvalid, ErrNothingToSupersede)
+		}
+		chain, err := CommittedChain(x.orchestration, si.PartitionID, si.ShardID, si.IR.Epoch)
+		if err != nil {
+			return errors.Join(ErrSupersessionInvalid, err)
+		}
+		chain.Steps = slices.DeleteFunc(chain.Steps, func(step evmassign.ChainStep) bool { return step.ShardEpoch > si.TR.Epoch })
+		if err := x.authenticateSupersessionChain(chain, key, lookup); err != nil {
+			return errors.Join(ErrSupersessionInvalid, err)
+		}
+	}
+	_, _, err = validateCommittedAssignment(x.orchestration, x.hash, oldRoot, record, body, preimage, configs, key)
+	return err
+}
+
+// authenticateSupersessionChain treats the derived index only as a list of links to
+// reconstruct. Every link must be this pair's verified record and retained preimage,
+// derive the indexed configuration, and independently bind its own pending prefix.
+func (x *BlockStore) authenticateSupersessionChain(chain evmassign.Chain, key basetypes.PartitionShardID,
+	lookup func(uint64) (VerifiedActivation, bool)) error {
+	previous := chain.BaseActiveHash
+	for i, step := range chain.Steps {
+		if lookup == nil {
+			return ErrAssignmentHistory
+		}
+		entry, ok := lookup(step.RootEpoch)
+		if !ok {
+			return ErrAssignmentHistory
+		}
+		v, _, ok := entry.Handoff()
+		if !ok || !bytes.Equal(v.RecordID, step.RecordID) {
+			return ErrAssignmentHistory
+		}
+		id := entry.BodyID()
+		preimage, err := x.HandoffCandidate(id[:])
+		if err != nil {
+			return errors.Join(ErrAssignmentHistory, err)
+		}
+		act, err := ActivationFromVerifiedV3(entry, v.Record, preimage, x.hash, 1)
+		if err != nil {
+			return err
+		}
+		c, err := evmassign.DecodeCandidate(preimage)
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(preimage)
+		if act.pdr.PartitionID != key.PartitionID || act.pdr.ShardID.Key() != key.ShardID ||
+			act.pdr.Epoch != step.ShardEpoch || !bytes.Equal(act.confHash, step.ConfHash) ||
+			!bytes.Equal(digest[:], step.CandidateDigest) || c.OldShardEpoch != chain.BaseShardEpoch+uint64(i) ||
+			!bytes.Equal(c.OldActiveHash, previous) {
+			return ErrAssignmentHistory
+		}
+		if i == 0 && c.Supersedes != nil {
+			return errors.Join(ErrSupersessionInvalid, ErrNothingToSupersede)
+		}
+		if i > 0 {
+			prefix := chain
+			prefix.Steps = chain.Steps[:i]
+			if err := CheckSupersessionChainLength(i); err != nil {
+				return err
+			}
+			if err := evmassign.VerifyChain(c.Supersedes, prefix); err != nil {
+				return errors.Join(ErrSupersessionInvalid, err)
+			}
+		}
+		previous = step.ConfHash
+	}
+	return nil
+}
+
+func validateCommittedAssignment(orchestration Orchestration, hashAlg crypto.Hash, oldRoot *ExecutedBlock,
+	record evmroot.OrderedHandoffRecord, body retainedBody, preimage []byte,
+	configs map[basetypes.PartitionShardID]*basetypes.PartitionDescriptionRecord, key basetypes.PartitionShardID) ([]*basetypes.PartitionDescriptionRecord, []byte, error) {
+	si := oldRoot.ShardState.States[key]
+	confs, provenance, _, err := deriveActivatedConfigs(record, body, preimage)
+	if err != nil {
+		return nil, nil, err
 	}
 	pdr := confs[0]
 	c, err := evmassign.DecodeCandidate(preimage)
 	if err != nil {
-		return errors.Join(ErrAssignmentHistory, err)
+		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
 	succ, err := c.Successor()
 	if err != nil {
-		return errors.Join(ErrAssignmentHistory, err)
+		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
-	if err := evmassign.VerifyInstalled(c, succ, configs[key], nil); err != nil {
-		return errors.Join(ErrAssignmentHistory, err)
-	}
-	for _, d := range changes {
-		if err := evmassign.VerifyChangeInstalled(d, configs[d.Key()]); err != nil {
-			return errors.Join(ErrAssignmentHistory, err)
+	if c.Supersedes != nil {
+		chain, err := CommittedChain(orchestration, si.PartitionID, si.ShardID, si.IR.Epoch)
+		if err != nil {
+			return nil, nil, errors.Join(ErrSupersessionInvalid, err)
 		}
+		// Recovery may already hold this handoff's derived successor. Reconstruct only the
+		// committed prefix installed in the authenticated old checkpoint, never that successor.
+		chain.Steps = slices.DeleteFunc(chain.Steps, func(step evmassign.ChainStep) bool { return step.ShardEpoch > si.TR.Epoch })
+		if err := verifySupersessionChain(c.Supersedes, si, chain); err != nil {
+			return nil, nil, err
+		}
+	} else if si.TR.Epoch != si.IR.Epoch {
+		return nil, nil, ErrAssignmentAckPending
+	}
+	if err := verifyShardChanges(c, oldRoot.ShardState.States, configs); err != nil {
+		return nil, nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	if err := evmassign.VerifyInstalledWith(weightvalidation.EVMRules(body.mode), c, succ, configs[key], nil); err != nil {
+		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
 	tr, err := successorTechnicalRecord(si, pdr, hashAlg)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	digest, err := tr.Hash()
 	if err != nil || !bytes.Equal(digest, record.SuccessorTRHash) {
-		return fmt.Errorf("%w: derived successor technical record differs from H", ErrAssignmentHistory)
+		return nil, nil, fmt.Errorf("%w: derived successor technical record differs from H", ErrAssignmentHistory)
 	}
-	return InstallDerived(orchestration, confs, provenance)
+	return confs, provenance, nil
 }
 
 // repairCommittedAssignment runs before the block tree is loaded. When the

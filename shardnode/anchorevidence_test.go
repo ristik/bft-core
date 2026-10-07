@@ -89,16 +89,16 @@ func (f *evidenceFixture) quietTail() (AnchorEvidence, AnchorEvidenceContext) {
 	head := f.cert(16, 120, stateB, stateB, nil, 19)
 
 	return AnchorEvidence{
-		Source:          source.UC,
-		SourceTechnical: source.Technical,
-		Tail:            []EvidenceLink{mid, head},
-	}, AnchorEvidenceContext{
-		PartitionID:   evidencePartitionID,
-		ShardID:       types.ShardID{},
-		ShardConfHash: f.conf,
-		TrustBases:    f.trust,
-		Held:          head.UC,
-	}
+			Source:          source.UC,
+			SourceTechnical: source.Technical,
+			Tail:            []EvidenceLink{mid, head},
+		}, AnchorEvidenceContext{
+			PartitionID:   evidencePartitionID,
+			ShardID:       types.ShardID{},
+			ShardConfHash: f.conf,
+			TrustBases:    f.trust,
+			Held:          head.UC,
+		}
 }
 
 func verifyFixture(t *testing.T, ev AnchorEvidence, c AnchorEvidenceContext) (*ExecutionAnchor, error) {

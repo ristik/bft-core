@@ -489,6 +489,16 @@ func verifySupersession(s *evmassign.Supersession, si *ShardInfo, orchestration 
 	if err != nil || len(chain.Steps) == 0 {
 		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid, err)
 	}
+	return verifySupersessionChain(s, si, chain)
+}
+
+func verifySupersessionChain(s *evmassign.Supersession, si *ShardInfo, chain evmassign.Chain) error {
+	if si.TR.Epoch == si.IR.Epoch {
+		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid, ErrNothingToSupersede)
+	}
+	if len(chain.Steps) == 0 {
+		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid)
+	}
 	// The chain is folded into one acknowledgement under handoff.MaxSupersessionSpan: a supersession that would lengthen it past
 	// that could be admitted here and then never acknowledged.
 	if err := CheckSupersessionChainLength(len(chain.Steps)); err != nil {

@@ -1,21 +1,35 @@
 name: bridgeprofile
+
+# Normal bridgeprofile coverage belongs to go-ci.yml's full-suite shards.
+# Keep a focused manual entry point rather than running ./... a second time.
 on:
-  push:
-    branches: [bridge/sdk3-rebase]
-    paths: ['bridgeprofile/**', 'cmd/gencorpus/**', 'tools/import-bridge-corpus.py', 'go.mod', 'go.sum', '.github/workflows/bridgeprofile.yml']
-  pull_request:
-    paths: ['bridgeprofile/**', 'cmd/gencorpus/**', 'tools/import-bridge-corpus.py', 'go.mod', 'go.sum', '.github/workflows/bridgeprofile.yml']
+  workflow_dispatch:
+
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   replay:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Test full Go suite and exact external corpus replay
-        run: go test -p 4 ./... -count=1 -timeout 20m
-        env:
-          GOMAXPROCS: '4'
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Test bridgeprofile
+        shell: bash
+        run: go test ./bridgeprofile -json -count=1 -timeout 10m 2>&1 | tee test-log.json
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridgeprofile-failure
+          path: test-log.json
+          retention-days: 7

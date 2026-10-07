@@ -127,7 +127,7 @@ func Test_SendRejection_TruncationBoundary(t *testing.T) {
 	cr := &CertificationResponse{
 		Partition: 1,
 		UC: types.UnicityCertificate{
-			Version: 1,
+			Version:                1,
 			UnicityTreeCertificate: &types.UnicityTreeCertificate{Version: 1, Partition: 1},
 		},
 		Status:  CertStatusFatal,

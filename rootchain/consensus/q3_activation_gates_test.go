@@ -113,21 +113,23 @@ func TestACoupledHandoffIsNotInstalledAsRootOnly(t *testing.T) {
 		require.ErrorIs(t, err, tbstore.ErrNotFound, "nothing was installed")
 		require.Nil(t, r.manager.epochAnchor)
 	})
-	t.Run("the manager refuses the supplied candidate of an assignment", func(t *testing.T) {
+	t.Run("the manager installs the committed candidate of an assignment", func(t *testing.T) {
 		r := newQ3Replica(t, f, f.NewNodes[0])
 		r.mustOpen(false)
 		t.Cleanup(r.close)
 		require.NoError(t, r.trust.BindSigningAuthority(coupled))
-		_, err := r.manager.InstallVerifiedEpoch(coupled.Tip(), f.Proof, f.Snapshot, f.Candidate)
-		require.ErrorIs(t, err, ErrQ3Candidate)
-		require.NotContains(t, err.Error(), "operator candidate")
+		anchor, err := r.manager.InstallVerifiedEpoch(coupled.Tip(), f.Proof, f.Snapshot, f.Candidate)
+		require.NoError(t, err)
+		require.EqualValues(t, 6, anchor.Slot)
 	})
 	t.Run("the runtime does not admit an epoch whose candidate was omitted", func(t *testing.T) {
 		r := newQ3Replica(t, f, f.NewNodes[0])
 		r.mustOpen(true)
 		t.Cleanup(r.close)
 		require.NoError(t, r.rt.Recover(context.Background()))
-		err := r.rt.Activate(context.Background(), r.bundle())
+		omitted := r.bundle()
+		omitted.Candidate = nil
+		err := r.rt.Activate(context.Background(), omitted)
 		require.ErrorIs(t, err, ErrQ3Candidate)
 		require.ErrorIs(t, r.rt.Admit(2), q3active.ErrNotActive)
 	})

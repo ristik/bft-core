@@ -114,9 +114,12 @@ func TestAuthorityAdvanceRejectsIsolatedInvalidContexts(t *testing.T) {
 			require.NoError(t, a.CompleteEnrollment(conf))
 			before := a.Enrollment()
 			next := *conf
-			original := conf.Validators[0]
-			validator := types.NodeInfo{NodeID: original.NodeID, SigKey: bytes.Clone(original.SigKey), Stake: original.Stake}
-			next.Validators = []*types.NodeInfo{&validator}
+			validator := conf.Validators[0]
+			next.Validators = []*types.NodeInfo{{
+				NodeID: validator.NodeID,
+				SigKey: bytes.Clone(validator.SigKey),
+				Stake:  validator.Stake,
+			}}
 			next.Epoch++
 			tb := successorTrust(f, 2)
 			tc.mutate(&next, tb)

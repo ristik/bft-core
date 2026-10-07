@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontiertransport"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/internal/frontiercodec"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
@@ -36,7 +37,15 @@ func DefaultFrontierServerLimits() frontiertransport.Limits {
 // 2N/3 < q <= N, one epoch). A root whose trust base fails it cannot serve
 // frontier replies and must not enable the sampler.
 func ValidateFrontierProfile(trust *types.RootTrustBaseV1) error {
-	_, err := newFrontierSampler(DefaultFrontierSamplerConfig(trust), unusedSafetyReader{})
+	return ValidateFrontierProfileMode(trust, weightvalidation.ModeUnit)
+}
+
+// ValidateFrontierProfileMode is ValidateFrontierProfile under the validation rules of the committee's epoch: weightvalidation.ModeFor
+// of the verified history (unit for a legacy epoch, weighted for an activated one).
+func ValidateFrontierProfileMode(trust *types.RootTrustBaseV1, mode weightvalidation.Mode) error {
+	c := DefaultFrontierSamplerConfig(trust)
+	c.Mode = mode
+	_, err := newFrontierSampler(c, unusedSafetyReader{})
 	return err
 }
 

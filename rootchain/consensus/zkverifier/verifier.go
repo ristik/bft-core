@@ -69,7 +69,7 @@ type Config struct {
 	// For RISC0: path to the verification key
 	VerificationKeyPath string
 
-    // chainID: chain identifier of the EVM partition from the partition config (invariant)
+	// chainID: chain identifier of the EVM partition from the partition config (invariant)
 	// must match the chain_id in proof public values
 	ChainID uint64
 

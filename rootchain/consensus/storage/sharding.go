@@ -10,6 +10,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -528,13 +529,24 @@ func (si *ShardInfo) resetFeeList(shardConf *types.PartitionDescriptionRecord) {
 // resetTrustBase derives the verifiers and the request quorum context from shardConf. The context is bound to committed,
 // the configuration hash the caller has authenticated for shardConf (the ShardInfo's own ShardConfHash wherever the site
 // verifies it); shardConf must hash to it under hashAlg. Every validator must be unit-weight: a non-unit configuration is
-// refused, not normalised.
+// refused, not normalised, except a weighted EVM assignment, which has no request context here (see below).
 func (si *ShardInfo) resetTrustBase(shardConf *types.PartitionDescriptionRecord, hashAlg crypto.Hash, committed []byte) error {
-	reqCtx, err := quorumweight.NewUnitRequestContext(shardConf, hashAlg, committed)
-	if err != nil {
-		return fmt.Errorf("request quorum context: %w", err)
+	if weightedEVM(shardConf) {
+		// A coupled EVM assignment with weights: only a verified Q3 activation installs one (ordinary configurations are unit by
+		// their own validity rule). The members and their verifiers are installed and no unit request context: counting under it is
+		// refused (errNoRequestContext), never a fallback to counting members, and the weighted count is the request view's, which
+		// derives it from the activation's coupling.
+		if h, err := shardConf.Hash(hashAlg); err != nil || len(committed) == 0 || !bytes.Equal(h, committed) {
+			return fmt.Errorf("request quorum context: %w: configuration is not the committed one", quorumweight.ErrRequestContext)
+		}
+		si.requestCtx = nil
+	} else {
+		reqCtx, err := quorumweight.NewUnitRequestContext(shardConf, hashAlg, committed)
+		if err != nil {
+			return fmt.Errorf("request quorum context: %w", err)
+		}
+		si.requestCtx = reqCtx
 	}
-	si.requestCtx = reqCtx
 	si.nodeIDs = make([]string, 0, len(shardConf.Validators))
 	si.trustBase = make(map[string]abcrypto.Verifier)
 	for _, v := range shardConf.Validators {
@@ -548,6 +560,15 @@ func (si *ShardInfo) resetTrustBase(shardConf *types.PartitionDescriptionRecord,
 	slices.Sort(si.nodeIDs)
 
 	return si.IsValid()
+}
+
+// weightedEVM reports whether conf is an EVM-type configuration with a non-unit validator weight. An aggregator configuration is
+// never weighted: it falls through to the unit rule, which refuses it.
+func weightedEVM(conf *types.PartitionDescriptionRecord) bool {
+	if conf == nil || conf.PartitionTypeID != evmassign.EVMPartitionTypeID {
+		return false
+	}
+	return slices.ContainsFunc(conf.Validators, func(v *types.NodeInfo) bool { return v != nil && v.Stake != 1 })
 }
 
 // RequestContext is the immutable request quorum context of the installed configuration (nil until resetTrustBase ran).

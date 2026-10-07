@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/logger"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
@@ -362,7 +363,7 @@ func (o *Orchestration) InstallDerivedShardConfigs(confs []*types.PartitionDescr
 		if conf.NetworkID != o.networkID {
 			return fmt.Errorf("invalid networkID %d, expected %d", conf.NetworkID, o.networkID)
 		}
-		if err := conf.IsValid(); err != nil {
+		if err := validDerived(conf); err != nil {
 			return err
 		}
 	}
@@ -378,6 +379,17 @@ func (o *Orchestration) InstallDerivedShardConfigs(confs []*types.PartitionDescr
 		}
 		return nil
 	})
+}
+
+// validDerived is the validity of a configuration a committed handoff derived. An aggregator configuration is the unit rule, as
+// always. A designated EVM assignment may carry the bounded weights of a coupled Q3 activation: the derivation that produced it
+// (storage.deriveActivatedPDR, under the weighted rules, from a verified V3 body) is the only way one reaches this store, because
+// every other path (genesis, AddShardConfig) keeps go-base's unit validity.
+func validDerived(conf *types.PartitionDescriptionRecord) error {
+	if conf.PartitionTypeID != evmassign.EVMPartitionTypeID {
+		return weightvalidation.PDR(conf, weightvalidation.RoleAggregator, weightvalidation.ModeUnit)
+	}
+	return weightvalidation.PDR(conf, weightvalidation.RoleEVM, weightvalidation.ModeWeighted)
 }
 
 func installDerived(tx *bolt.Tx, derived *bolt.Bucket, conf *types.PartitionDescriptionRecord, provenance []byte) error {

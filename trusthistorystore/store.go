@@ -64,6 +64,10 @@ type Record struct {
 	V1                *bfttypes.RootTrustBaseV1
 	V2                *evmroot.TrustBaseBodyV2
 	BodyID            [32]byte
+	// Verified is the exact-weight projection of an epoch the verified Q3 history activated (q3active's lineage), never one this
+	// store holds or persists: it is only what a lineage view serves, in place of V1 and V2, so that the certificates of that epoch
+	// are verified under its own committee and weights. A record carries exactly one of V1, V2 and Verified.
+	Verified *bfttypes.RootTrustBaseV1
 }
 
 type Store struct {

@@ -2,17 +2,21 @@ package q3active_test
 
 import (
 	"context"
+	"crypto"
 	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/q3install"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -413,3 +417,150 @@ type noopComponent struct{}
 
 func (noopComponent) Install(context.Context, q3install.Activation) error { return nil }
 func (noopComponent) Verify(context.Context, q3install.Activation) error  { return nil }
+
+type staticHistory map[uint64]trusthistorystore.Record
+
+func (h staticHistory) ByEpoch(epoch uint64) (trusthistorystore.Record, error) {
+	if r, ok := h[epoch]; ok {
+		return r, nil
+	}
+	return trusthistorystore.Record{}, trusthistorystore.ErrNotFound
+}
+
+func TestLineageServesTheVerifiedProjectionOfAnActivatedEpoch(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{})
+	p := newProcess(t, f)
+	rt := p.start()
+	base := staticHistory{1: {Epoch: 1, V1: f.Old}}
+	lineage := rt.Lineage(base)
+	var beforeInstall error
+	p.root.OnInstall = func(q3format.Entry) { _, beforeInstall = lineage.ByEpoch(2) }
+	require.NoError(t, rt.Activate(ctx, p.bundle()))
+	require.ErrorIs(t, beforeInstall, q3active.ErrNotActive, "an epoch whose installation is incomplete is not served")
+
+	t.Run("an activated epoch is the history's own projection, with its weights", func(t *testing.T) {
+		rec, err := lineage.ByEpoch(2)
+		require.NoError(t, err)
+		require.Nil(t, rec.V1)
+		require.Nil(t, rec.V2)
+		require.NotNil(t, rec.Verified)
+		require.EqualValues(t, 2, rec.Epoch)
+		require.EqualValues(t, 7, rec.Start)
+		require.EqualValues(t, 7, rec.Verified.QuorumThreshold)
+		var total uint64
+		for _, n := range rec.Verified.RootNodes {
+			total += n.Stake
+		}
+		require.EqualValues(t, 9, total)
+		require.Equal(t, epoch2(t, rt).BodyID(), rec.BodyID)
+		rec.Verified.RootNodes[0].Stake = 1000
+		again, err := lineage.ByEpoch(2)
+		require.NoError(t, err)
+		require.NotEqual(t, uint64(1000), again.Verified.RootNodes[0].Stake, "the served projection is a copy")
+	})
+	t.Run("the genesis epoch is the base's record once it agrees with the history", func(t *testing.T) {
+		rec, err := lineage.ByEpoch(1)
+		require.NoError(t, err)
+		require.Same(t, f.Old, rec.V1)
+	})
+	t.Run("the base never answers where the history disagrees or holds nothing", func(t *testing.T) {
+		bent := *f.Old
+		bent.QuorumThreshold = 1
+		for name, rec := range map[string]trusthistorystore.Record{
+			"another committee":     {Epoch: 1, V1: &bent},
+			"a V2 body":             {Epoch: 1, V1: f.Old, V2: &evmroot.TrustBaseBodyV2{}},
+			"a verified projection": {Epoch: 1, V1: f.Old, Verified: f.Old},
+			"no V1":                 {Epoch: 1},
+		} {
+			_, err := rt.Lineage(staticHistory{1: rec}).ByEpoch(1)
+			require.ErrorIs(t, err, q3active.ErrConflict, name)
+		}
+		_, err := rt.Lineage(nil).ByEpoch(1)
+		require.ErrorIs(t, err, trusthistorystore.ErrNotFound, "no base, no genesis record")
+		_, err = rt.Lineage(staticHistory{}).ByEpoch(1)
+		require.ErrorIs(t, err, trusthistorystore.ErrNotFound)
+	})
+	t.Run("an epoch the history does not hold is refused, whatever the base says", func(t *testing.T) {
+		_, err := rt.Lineage(staticHistory{3: {Epoch: 3, V1: f.Old}}).ByEpoch(3)
+		require.ErrorIs(t, err, q3format.ErrUnknownEpoch)
+	})
+}
+
+type retainedCandidates map[string][]byte
+
+func (r retainedCandidates) HandoffCandidate(id []byte) ([]byte, error) { return r[string(id)], nil }
+
+// The request history is the anchor followed by the weighted assignment the verified history activated, served only once the
+// activation is installed, and for the designated shard alone; a committed assignment whose candidate is not retained is missing
+// history, never the anchor alone.
+func TestRequestHistoryServesTheActivatedAssignmentOfItsShard(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{Assignment: true})
+	p := newProcess(t, f)
+	rt := p.start()
+	id := f.Body.Identity()
+	config := func(c q3active.CandidateSource) q3active.RequestHistoryConfig {
+		return q3active.RequestHistoryConfig{Candidates: c, HashAlg: crypto.SHA256, Network: q3fixture.Network, Version: 1,
+			Anchor: func(types.PartitionID, types.ShardID) (*types.PartitionDescriptionRecord, error) {
+				return f.ShardConf, nil
+			}}
+	}
+	retained := retainedCandidates{string(id[:]): f.Candidate}
+	hist, err := rt.RequestHistory(config(retained))
+	require.NoError(t, err)
+
+	var incompleteChain, incompleteRoot error
+	p.root.OnInstall = func(q3format.Entry) {
+		_, incompleteChain = hist.Chain(q3fixture.PartitionID, types.ShardID{})
+		_, _, incompleteRoot = hist.RootIdentity(7)
+	}
+	require.NoError(t, rt.Activate(ctx, p.bundle()))
+	require.ErrorIs(t, incompleteChain, q3active.ErrNotActive, "an installation that is not complete serves no history")
+	require.ErrorIs(t, incompleteRoot, q3active.ErrNotActive)
+	require.ErrorIs(t, incompleteChain, q3active.ErrRequestHistory)
+
+	chain, err := hist.Chain(q3fixture.PartitionID, types.ShardID{})
+	require.NoError(t, err)
+	require.Len(t, chain, 2, "the anchor and the activated assignment")
+
+	t.Run("another shard's history is its anchor alone", func(t *testing.T) {
+		chain, err := hist.Chain(q3fixture.PartitionID+1, types.ShardID{})
+		require.NoError(t, err)
+		require.Len(t, chain, 1)
+	})
+	t.Run("a committed assignment whose candidate is not retained is missing history", func(t *testing.T) {
+		missing, err := rt.RequestHistory(config(retainedCandidates{}))
+		require.NoError(t, err)
+		_, err = missing.Chain(q3fixture.PartitionID, types.ShardID{})
+		require.ErrorIs(t, err, q3active.ErrRequestHistory)
+		require.ErrorIs(t, err, storage.ErrAssignmentHistory)
+	})
+	t.Run("a retained candidate that is not the committed one is refused", func(t *testing.T) {
+		other := append([]byte(nil), f.Candidate...)
+		other[len(other)/2] ^= 1
+		bad, err := rt.RequestHistory(config(retainedCandidates{string(id[:]): other}))
+		require.NoError(t, err)
+		_, err = bad.Chain(q3fixture.PartitionID, types.ShardID{})
+		require.ErrorIs(t, err, storage.ErrAssignmentHistory)
+	})
+	t.Run("the root identity follows the verified intervals", func(t *testing.T) {
+		epoch, body, err := hist.RootIdentity(7)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, epoch)
+		require.Equal(t, id[:], body)
+		epoch, _, err = hist.RootIdentity(6)
+		require.NoError(t, err)
+		require.EqualValues(t, 1, epoch, "before the boundary the genesis epoch authorises")
+	})
+	t.Run("an incomplete configuration", func(t *testing.T) {
+		for name, c := range map[string]q3active.RequestHistoryConfig{
+			"no candidates": {HashAlg: crypto.SHA256, Network: 5, Version: 1, Anchor: config(retained).Anchor},
+			"no anchor":     {Candidates: retained, HashAlg: crypto.SHA256, Network: 5, Version: 1},
+			"no network":    {Candidates: retained, HashAlg: crypto.SHA256, Version: 1, Anchor: config(retained).Anchor},
+			"no version":    {Candidates: retained, HashAlg: crypto.SHA256, Network: 5, Anchor: config(retained).Anchor},
+			"no hash":       {Candidates: retained, Network: 5, Version: 1, Anchor: config(retained).Anchor},
+		} {
+			_, err := rt.RequestHistory(c)
+			require.ErrorIs(t, err, q3active.ErrRequestHistory, name)
+		}
+	})
+}

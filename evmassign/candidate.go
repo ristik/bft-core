@@ -127,7 +127,13 @@ func (c Candidate) Successor() (*types.PartitionDescriptionRecord, error) {
 // successor key signs PoPMessage for this context before propose.
 func NewCandidate(c PoPContext, root []RootMember, current, succ *types.PartitionDescriptionRecord,
 	pops []PoP, supersedes *Supersession, bindings []Binding, changes []Change) (Candidate, error) {
-	if err := ValidateSuccessor(current, succ); err != nil {
+	return NewCandidateWith(UnitRules, c, root, current, succ, pops, supersedes, bindings, changes)
+}
+
+// NewCandidateWith is NewCandidate with the successor's validator set checked under the rules r.
+func NewCandidateWith(r Rules, c PoPContext, root []RootMember, current, succ *types.PartitionDescriptionRecord,
+	pops []PoP, supersedes *Supersession, bindings []Binding, changes []Change) (Candidate, error) {
+	if err := ValidateSuccessorWith(r, current, succ); err != nil {
 		return Candidate{}, err
 	}
 	if err := ValidateCoupling(root, succ, bindings); err != nil {
@@ -163,6 +169,15 @@ type BindingContext struct {
 	Digest []byte
 	// ControlPartition is the reserved control partition id, which no change may target.
 	ControlPartition types.PartitionID
+	// Rules are the validator weight rules of the successor assignment; nil is UnitRules. Only a verified Q3 activation sets them.
+	Rules Rules
+}
+
+func (b BindingContext) rules() Rules {
+	if b.Rules == nil {
+		return UnitRules
+	}
+	return b.Rules
 }
 
 // VerifyContext adds the authenticated installed EVM configuration.
@@ -274,7 +289,7 @@ func VerifyBinding(data []byte, v BindingContext) (Candidate, *types.PartitionDe
 	if err != nil {
 		return Candidate{}, nil, err
 	}
-	if err := ValidateAssignment(succ); err != nil {
+	if err := ValidateAssignmentWith(v.rules(), succ); err != nil {
 		return Candidate{}, nil, err
 	}
 	if err := ValidateCoupling(c.RootMembers, succ, c.Bindings); err != nil {
@@ -300,7 +315,12 @@ func VerifyBinding(data []byte, v BindingContext) (Candidate, *types.PartitionDe
 // refused (ErrEVMOnly). A caller that has only the installed configuration (re-derivation at activation, after the
 // freeze already enforced this) passes nil.
 func VerifyInstalled(c Candidate, succ, current *types.PartitionDescriptionRecord, currentRoot []RootMember) error {
-	if err := ValidateSuccessor(current, succ); err != nil {
+	return VerifyInstalledWith(UnitRules, c, succ, current, currentRoot)
+}
+
+// VerifyInstalledWith is VerifyInstalled under the rules r.
+func VerifyInstalledWith(r Rules, c Candidate, succ, current *types.PartitionDescriptionRecord, currentRoot []RootMember) error {
+	if err := ValidateSuccessorWith(r, current, succ); err != nil {
 		return err
 	}
 	if currentRoot != nil && sameRoot(c.RootMembers, currentRoot) && !sameValidators(succ.Validators, current.Validators) {
@@ -325,7 +345,7 @@ func Verify(data []byte, v VerifyContext) (Candidate, *types.PartitionDescriptio
 	if err != nil {
 		return Candidate{}, nil, err
 	}
-	if err := VerifyInstalled(c, succ, v.Current, v.CurrentRoot); err != nil {
+	if err := VerifyInstalledWith(v.rules(), c, succ, v.Current, v.CurrentRoot); err != nil {
 		return Candidate{}, nil, err
 	}
 	return c, succ, nil

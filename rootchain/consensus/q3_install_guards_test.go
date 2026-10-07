@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -184,7 +185,8 @@ func TestSameCommitteeComparesEveryField(t *testing.T) {
 // fakeQ3 is the verified history as the manager sees it: which epochs are activations.
 type fakeQ3 struct{ entries map[uint64]q3format.Entry }
 
-func (f fakeQ3) Admit(uint64) error { return nil }
+func (f fakeQ3) Admit(uint64) error                                                 { return nil }
+func (f fakeQ3) Lineage(base abdrc.HistoricalTrustBases) abdrc.HistoricalTrustBases { return base }
 func (f fakeQ3) Activated(epoch uint64) (q3format.Entry, bool) {
 	e, ok := f.entries[epoch]
 	return e, ok
