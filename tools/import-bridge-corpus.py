@@ -20,7 +20,7 @@ def git(*args):
 assert git('rev-parse', revision).decode().strip() == revision
 prefix = 'protocol/vectors/'
 names = git('ls-tree', '-r', '--name-only', revision, '--', prefix).decode().splitlines()
-files = {n[len(prefix):]: git('show', f'{revision}:{n}') for n in names}
+files = {n[len(prefix):]: git('show', f'{revision}:{n}') for n in names if pathlib.PurePosixPath(n).name not in {'README.md', '.gitkeep'}}
 manifest = files['SHA256SUMS']
 assert hashlib.sha256(manifest).hexdigest() == digest
 assert files['MANIFEST.sha256'].decode().strip() == digest
