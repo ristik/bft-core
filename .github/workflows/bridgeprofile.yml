@@ -1,0 +1,21 @@
+name: bridgeprofile
+on:
+  push:
+    branches: [bridge/sdk3-rebase]
+    paths: ['bridgeprofile/**', 'cmd/gencorpus/**', 'go.mod', 'go.sum', '.github/workflows/bridgeprofile.yml']
+  pull_request:
+    paths: ['bridgeprofile/**', 'cmd/gencorpus/**', 'go.mod', 'go.sum', '.github/workflows/bridgeprofile.yml']
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test shared SDK profile and exact corpus replay
+        run: go test ./bridgeprofile -count=1 -timeout 10m
+        env:
+          GOMAXPROCS: '4'
