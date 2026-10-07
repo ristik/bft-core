@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -189,7 +191,7 @@ func TestLockProofBindsTheMint(t *testing.T) {
 	require.NoError(t, err)
 	h, err := e.F.BuildTokenWith(7, amt, keys, BuildOpts{Proof: zp})
 	require.NoError(t, err)
-	require.Error(t, VerifyMintBacking(e.F.Cfg, h, e.Trust, e.Pin))
+	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, h, e.Trust, e.Pin), ErrLockDigest)
 }
 
 func lpFor(lp *LockProof, f *Fixture, n uint64) *LockProof { c := *lp; c.Cfg = f.Cfg.Hash(); return &c }
@@ -291,6 +293,25 @@ func TestTrustInputRejectsUnsupportedConfiguration(t *testing.T) {
 	}
 	_, err := LoadTrustInput([]byte("not json"))
 	require.ErrorIs(t, err, ErrTrustConfig)
+	// One-byte textual edits of the valid document, each isolated: an out-of-range number is never read as its low bits, and nothing
+	// may follow the single JSON value.
+	good := e.Trust.JSON
+	edit := func(old, repl string) []byte {
+		require.Contains(t, string(good), old)
+		return []byte(strings.Replace(string(good), old, repl, 1))
+	}
+	for name, doc := range map[string][]byte{
+		"version 2^32+1 narrows to 1": edit(`"version":"1"`, `"version":"4294967297"`),
+		"networkId 2^16+3 narrows":    edit(fmt.Sprintf(`"networkId":%d`, e.TB.NetworkID), fmt.Sprintf(`"networkId":%d`, 65536+uint64(e.TB.NetworkID))),
+		"trailing bracket":            append(bytes.Clone(good), ']'),
+		"trailing second document":    append(bytes.Clone(good), good...),
+		"trailing whitespace garbage": append(bytes.Clone(good), " x"...),
+	} {
+		_, err := LoadTrustInput(doc)
+		require.ErrorIs(t, err, ErrTrustConfig, name)
+	}
+	_, err = LoadTrustInput(append(bytes.Clone(good), '\n'))
+	require.NoError(t, err, "trailing whitespace alone is not a second value")
 	// N=4 requires 3, N=7 requires 5, N=3 requires 3 (N-(N-1)/3).
 	for _, c := range []struct{ n, q uint64 }{{1, 1}, {3, 3}, {4, 3}, {7, 5}, {10, 7}} {
 		tb := *e.TB

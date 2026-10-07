@@ -100,6 +100,7 @@ func TestTokenDecodeRejections(t *testing.T) {
 
 func TestTokenCumulativePathSteps(t *testing.T) {
 	e := newEnv(t)
+	realUC := e.composed(t, 2, irTimeOK).cert.InclusionProofs()[0].UC
 	build := func(transfers int) error {
 		keys := manyKeys(transfers + 1)
 		h, err := e.F.BuildToken(5, amt, keys)
@@ -110,7 +111,7 @@ func TestTokenCumulativePathSteps(t *testing.T) {
 				proofs[i].Bitmap[j] = 0xff
 			}
 			proofs[i].Siblings = make([][32]byte, 256)
-			proofs[i].UC = CTag(1, CBytes([]byte{1}))
+			proofs[i].UC = realUC
 		}
 		_, err = DecodeToken(TokenFromHistory(h, proofs).Bytes())
 		return err
@@ -228,10 +229,12 @@ func TestKernelFramingRejections(t *testing.T) {
 	require.ErrorIs(t, err, ErrResultFrame)
 	// valid=false must be the all-zero empty result.
 	zero, _ := EncodeResult(false, nil)
-	nz := bytes.Clone(zero)
-	nz[95] = 1 // cfg word's last byte inside the Result
-	_, _, err = DecodeResult(nz)
-	require.Error(t, err)
+	for name, at := range map[string]int{"tuple offset word": 95, "cfg word": 127} {
+		nz := bytes.Clone(zero)
+		nz[at] = 1 // words: 0 marker, 1 valid, 2 tuple offset (64..95), 3 the Result's cfg (96..127)
+		_, _, err = DecodeResult(nz)
+		require.ErrorIs(t, err, ErrResultFrame, name)
+	}
 	// Kernel input framing.
 	in, _ := EncodeKernelInput(OpReturn, f.Cfg.Bytes(), h.Bytes())
 	for name, b := range map[string][]byte{"trailing": append(bytes.Clone(in), make([]byte, 32)...), "short": in[:64], "unaligned": in[:len(in)-1]} {
@@ -241,4 +244,28 @@ func TestKernelFramingRejections(t *testing.T) {
 	_, _, _, err = DecodeKernelInput(make([]byte, MaxKernelInputBytes+32))
 	require.ErrorIs(t, err, ErrInputTooLarge)
 	_ = big.NewInt
+}
+
+// The kernel judges the Cfg before any operation: a Cfg whose identifiers are not derived is the false output for every operation, so
+// the check is not backstopped by the relation it guards.
+func TestKernelRejectsUnderivedCfgForEveryOperation(t *testing.T) {
+	e := newEnv(t)
+	bad := *e.F.Cfg
+	bad.Ty[0] ^= 1
+	require.Error(t, bad.Validate(), "the mutation must make the Cfg invalid, not merely different")
+	falseOut, err := EncodeResult(false, nil)
+	require.NoError(t, err)
+	good, err := Kernel(mustKernelIn(t, OpPrepareLock, e.F.Cfg.Bytes(), PreparePayload(5, amt, sigPred(KeyFromSeed("kc")).Bytes())))
+	require.NoError(t, err)
+	require.NotEqual(t, falseOut, good, "with the derived Cfg the same prepare input holds")
+	out, err := Kernel(mustKernelIn(t, OpPrepareLock, bad.Bytes(), PreparePayload(5, amt, sigPred(KeyFromSeed("kc")).Bytes())))
+	require.NoError(t, err)
+	require.Equal(t, falseOut, out)
+}
+
+func mustKernelIn(t *testing.T, op uint8, cfg, payload []byte) []byte {
+	t.Helper()
+	b, err := EncodeKernelInput(op, cfg, payload)
+	require.NoError(t, err)
+	return b
 }

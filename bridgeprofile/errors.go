@@ -38,6 +38,9 @@ var (
 	ErrBadOperation  = newSentinel(ErrMalformed, "unknown kernel operation")
 	ErrDeadline      = newSentinel(ErrMalformed, "deadline is neither null nor an integer in [1,2^64-1]")
 	ErrRLP           = newSentinel(ErrMalformed, "noncanonical or malformed RLP")
+	// A certificate outside the intersection of the native bounded scan and the SDK 3.0.1 codec.
+	ErrCertScan      = newSentinel(ErrMalformed, "certificate outside the native bounded scan")
+	ErrCertSigLength = newSentinel(ErrMalformed, "certificate seal signature is not 65 bytes")
 )
 
 // Budget reasons.

@@ -5,6 +5,9 @@ import (
 	stdcrypto "crypto"
 	stdhex "encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
+	"math"
 	"sort"
 	"strconv"
 
@@ -23,7 +26,8 @@ import (
 
 // verifyNativeUC is the Go SDK's own UC verification, used as is. The repository
 // routes every production UC verification through quorumweight.Checked, which
-// only guards stake overflow; it adds no weighted-authority logic.
+// guards stake overflow and rejects unknown signers (the SDK skips them); it adds no weighted-authority logic, and full seal
+// acceptance parity with the SDK is not claimed.
 func verifyNativeUC(tb types.RootTrustBase, uc *types.UnicityCertificate, partition types.PartitionID, shard types.ShardID, conf []byte) error {
 	return uc.Verify(quorumweight.Checked(tb), stdcrypto.SHA256, partition, shard, conf)
 }
@@ -119,7 +123,7 @@ type sdkTrustDoc struct {
 	ChangeRecordHash  *string           `json:"changeRecordHash"`
 	Epoch             string            `json:"epoch"`
 	EpochStart        string            `json:"epochStartRound"`
-	NetworkID         uint32            `json:"networkId"`
+	NetworkID         uint64            `json:"networkId"`
 	PreviousEntryHash *string           `json:"previousEntryHash"`
 	QuorumThreshold   string            `json:"quorumThreshold"`
 	RootNodes         []sdkTrustNode    `json:"rootNodes"`
@@ -153,7 +157,15 @@ func LoadTrustInput(b []byte) (*TrustInput, error) {
 	var d sdkTrustDoc
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&d); err != nil || dec.More() {
+	if err := dec.Decode(&d); err != nil {
+		return nil, ErrTrustConfig
+	}
+	// Exactly one JSON value: anything after it, a stray bracket included, is rejected as the SDK's parser rejects it.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return nil, ErrTrustConfig
+	}
+	// Range checks precede every narrowing conversion: an out-of-range number is never read as its low bits.
+	if d.NetworkID > math.MaxUint16 {
 		return nil, ErrTrustConfig
 	}
 	tb := types.RootTrustBaseV1{NetworkID: types.NetworkID(d.NetworkID), Signatures: map[string]hex.Bytes{}}
@@ -168,6 +180,9 @@ func LoadTrustInput(b []byte) (*TrustInput, error) {
 		if !k {
 			return nil, ErrTrustConfig
 		}
+	}
+	if ver != 1 {
+		return nil, ErrTrustConfig
 	}
 	tb.Version = types.Version(ver)
 	for _, h := range []struct {

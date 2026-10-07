@@ -66,6 +66,10 @@ func VerifyLockProof(p *LockProof, cfg *Cfg, n uint64, want [32]byte, tr *TrustI
 		return ErrEpochMismatch
 	}
 	tb := tr.Base
+	var steps uint64
+	if err := scanCertificate(p.UC, &steps); err != nil {
+		return fmt.Errorf("%w: %w", ErrLockUC, err)
+	}
 	var uc types.UnicityCertificate
 	if err := types.Cbor.Unmarshal(p.UC, &uc); err != nil {
 		return fmt.Errorf("%w: decode: %v", ErrLockUC, err)

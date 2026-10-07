@@ -127,7 +127,7 @@ var reasons = []struct {
 	{"ErrTruncated", ErrTruncated}, {"ErrTrailing", ErrTrailing}, {"ErrNonCanonical", ErrNonCanonical},
 	{"ErrForbiddenCBOR", ErrForbiddenCBOR}, {"ErrShape", ErrShape}, {"ErrTag", ErrTag}, {"ErrVersion", ErrVersion},
 	{"ErrLength", ErrLength}, {"ErrIntRange", ErrIntRange}, {"ErrABIFraming", ErrABIFraming}, {"ErrBadOperation", ErrBadOperation},
-	{"ErrDeadline", ErrDeadline}, {"ErrRLP", ErrRLP}, {"ErrResultFrame", ErrResultFrame},
+	{"ErrDeadline", ErrDeadline}, {"ErrRLP", ErrRLP}, {"ErrCertSigLength", ErrCertSigLength}, {"ErrCertScan", ErrCertScan}, {"ErrResultFrame", ErrResultFrame},
 	{"ErrInputTooLarge", ErrInputTooLarge}, {"ErrTooManyTx", ErrTooManyTx}, {"ErrTooManyItems", ErrTooManyItems},
 	{"ErrTooDeep", ErrTooDeep}, {"ErrTooManyPaths", ErrTooManyPaths},
 	{"ErrJustificationTooLarge", ErrJustificationTooLarge}, {"ErrLockProofTooLarge", ErrLockProofTooLarge},

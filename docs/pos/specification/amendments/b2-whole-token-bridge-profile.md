@@ -130,8 +130,9 @@ token identity and lock digest globally; old locks and tokens are not reinterpre
 `80`, at most 128 bytes, aggregator partition differs from `Cfg.evmPartition`, `aggregatorPolicyHash = H(exact bytes)`).
 
 **Projection (proof versus projection arities).** The B2 history is `C([M,CD0,t0],[[T1,CD1,t1],…])`. These are *projection*
-tuples (arity 3), not SDK certified-transaction tuples (arity 2: `[tx, proof]`). The kernel strictly decodes the whole SDK token
-before export (`ProjectToken`), takes every `t` solely from its proof, reconstructs transactions, sources and CDs, applies the
+tuples (arity 3), not SDK certified-transaction tuples (arity 2: `[tx, proof]`). The wrapper/exporter (`ProjectToken`) strictly decodes the whole SDK token, including every embedded certificate under the
+SDK/native intersection scan (`scanCertificate`: native shape and sublimits, SDK 65-byte seal signatures, cumulative path steps),
+before export; the kernel consumes the projection, takes every `t` solely from its proof, reconstructs transactions, sources and CDs, applies the
 deadline equality and `t < e`, validates the strict unlocks and profile, rejects repeated SIDs, computes `v` and exports the
 ordered leaves `(sid, txHash, referenceTime, leafValue)`. All projected times are untrusted until the leaf value is proven under
 an admitted root. Aggregator refresh keeps `M`/`T`, CD, J and the original `t` byte for byte and only rebuilds paths against a
@@ -199,3 +200,11 @@ verification with the strict checks above.
 No native kernel at 0x0104, no B1 integration, no vault or composing contract, no gas price and no activation. Measured oracle
 timings are reported in the PR; they price nothing. B3 multi-shard lineage, B5 public proof service and B7/B8 public exit remain
 their own gates.
+
+**Certificate intersection and conformance limit.** Every embedded or token-carried certificate passes `scanCertificate` before
+allocation or cryptography: `b1ref.ScanUC` (the native bounded scan: byte cap, CBOR bounds, field shapes, summary/shard/step/
+signature sublimits, native decode and byte-exact re-encode) intersected with the SDK 3.0.1 codec subset (seal signatures exactly
+65 bytes). Native verification afterwards is unchanged. Conformance limitation: the Go oracle's quorum check goes through
+`quorumweight.Checked`, which besides guarding stake overflow also rejects unknown signers, whereas the SDK counts valid known
+signatures and skips unknown ones. Full seal-acceptance parity with the SDK is not claimed (deferred with weighted/mixed
+committees under #421).

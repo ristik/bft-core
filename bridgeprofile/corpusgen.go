@@ -686,6 +686,8 @@ func (g *gen) wire() {
 	tadd("token-proof-bad-path-length", "path one byte short", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path[:len(path)-1]), uc0)))
 	tadd("token-proof-extra-sibling", "a sibling beyond the bitmap", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(append(bytes.Clone(path), make([]byte, 32)...)), uc0)))
 	tadd("token-proof-no-certificate", "null certificate", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), CNull)))
+	tadd("token-proof-certificate-not-decodable", "a tagged item that is not an SDK-decodable certificate", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), CTag(1, CBytes([]byte{1})))))
+	tadd("token-proof-signature-64-bytes", "certificate whose seal signatures are 64 bytes", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.shortSigUC(uc0))))
 	tadd("token-proof-oversized-certificate", "certificate over the proof bound", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), CTag(1, CBytes(make([]byte, MaxProofUCBytes))))))
 	// Kernel ABI.
 	cfgB := f.Cfg.Bytes()
@@ -848,6 +850,11 @@ func (g *gen) lock() {
 				uc.UnicitySeal.Signatures[k] = flip(uc.UnicitySeal.Signatures[k], 3)
 			}
 		})},
+		{"backing-uc-signature-64-bytes", "every seal signature cut to 64 bytes: inside native B1's accepted widths, outside the SDK codec", reUC(func(uc *types.UnicityCertificate) {
+			for k, sig := range uc.UnicitySeal.Signatures {
+				uc.UnicitySeal.Signatures[k] = sig[:64]
+			}
+		})},
 		{"backing-uc-state-root", "certified state hash altered", reUC(func(uc *types.UnicityCertificate) { uc.InputRecord.Hash[0] ^= 1 })},
 		{"backing-uc-network", "seal names another network", reUC(func(uc *types.UnicityCertificate) { uc.UnicitySeal.NetworkID++ })},
 		{"backing-uc-noncanonical", "certificate with a trailing byte", func(lp *LockProof) { lp.UC = append(bytes.Clone(lp.UC), 0) }},
@@ -877,6 +884,7 @@ func (g *gen) lock() {
 	}
 	isolated("backing-ir-state-root-differs", "certified state hash is not the header's state root; the block hash still matches", func(ir *types.InputRecord) { ir.Hash = sl(H([]byte("unrelated-state-root"))) })
 	isolated("backing-ir-block-hash-differs", "certified block hash is not keccak256 of the header; the state root still matches", func(ir *types.InputRecord) { ir.BlockHash = sl(H([]byte("unrelated-block"))) })
+	isolated("backing-ir-summary-over-native-sublimit", "certified input record with a 257-byte summary: over the native 256-byte sublimit", func(ir *types.InputRecord) { ir.SummaryValue = bytes.Repeat([]byte{1}, MaxSummaryBytes+1) })
 	isolated("backing-ir-epoch-differs-from-pdr", "certified shard epoch differs from the carried configuration's epoch", func(ir *types.InputRecord) { ir.Epoch = 5 })
 	back("backing-other-runtime-pin", "the vault runtime pin differs", h, "pinned", "other-runtime")
 	back("backing-other-genesis-pin", "the pinned genesis configuration differs", h, "pinned", "other-genesis")
@@ -1134,4 +1142,16 @@ func (c *Corpus) Digest() string {
 	}
 	d := sha256.Sum256(man.Bytes())
 	return hex.EncodeToString(d[:])
+}
+
+// shortSigUC re-encodes a certificate with every seal signature cut to 64 bytes.
+func (g *gen) shortSigUC(uc []byte) []byte {
+	var c types.UnicityCertificate
+	g.must(types.Cbor.Unmarshal(uc, &c))
+	for k, sig := range c.UnicitySeal.Signatures {
+		c.UnicitySeal.Signatures[k] = sig[:64]
+	}
+	b, err := types.Cbor.Marshal(&c)
+	g.must(err)
+	return b
 }

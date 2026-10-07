@@ -93,14 +93,7 @@ func TestMPTVerifyShapes(t *testing.T) {
 	t.Run("absent key", func(t *testing.T) {
 		o := key("not-there")
 		_, err := mptVerify(root, o, prove(o))
-		require.Error(t, err)
-	})
-	t.Run("non-minimal RLP node", func(t *testing.T) {
-		m := cloneNodes(nodes)
-		// A long-form length for a short list: same content, noncanonical head.
-		root0 := m[0]
-		require.True(t, root0[0] >= 0xf8)
-		_ = root0
+		require.True(t, errorsAnyOf(err, ErrMPTAbsent, ErrMPTNode, ErrMPTPath), "%v", err)
 	})
 }
 
@@ -150,7 +143,7 @@ func TestMPTRejectsNonCanonicalReferences(t *testing.T) {
 	r := keccak(root)
 	var k [32]byte
 	_, err := mptVerify(r, k, [][]byte{root, leaf})
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrMPTNode, "an empty-path extension: the extension itself is the failing relation")
 
 	// An extension without nibbles, over a node of the right size: the extension
 	// itself is the failing relation.
@@ -267,4 +260,40 @@ func rlpList(items ...[]byte) []byte {
 		return append([]byte{0xc0 + byte(len(body))}, body...)
 	}
 	return append([]byte{0xf8, byte(len(body))}, body...)
+}
+
+// Each guard below is the only thing wrong with its input, so removing it makes the input verify.
+
+// A hash reference to a node of fewer than 32 bytes is noncanonical even when everything else, the full-key extension included, is
+// well formed: the trie embeds such a node and never hashes it.
+func TestMPTHashReferenceToShortNodeIsRejectedOnItsOwn(t *testing.T) {
+	k := key("short-leaf")
+	short := rlpList(rlpBytes([]byte{0x20}), rlpBytes([]byte{0x01})) // empty-path leaf, 3 bytes
+	require.Len(t, short, 3)
+	h := keccak(short)
+	path := append([]byte{0x00}, k[:]...) // extension over all 64 nibbles
+	root := rlpList(rlpBytes(path), rlpBytes(h[:]))
+	_, err := mptVerify(keccak(root), k, [][]byte{root, short})
+	require.ErrorIs(t, err, ErrMPTNode)
+	// the same shape with a node of 32 or more bytes verifies, so the size is the only difference
+	long := rlpList(rlpBytes([]byte{0x20}), rlpBytes(bytes.Repeat([]byte{7}, 40)))
+	lh := keccak(long)
+	root = rlpList(rlpBytes(path), rlpBytes(lh[:]))
+	got, err := mptVerify(keccak(root), k, [][]byte{root, long})
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte{7}, 40), got)
+}
+
+// A leaf whose value item uses a long-form length for a one byte string has the right content and a noncanonical head.
+func TestMPTNonMinimalRLPNodeIsRejected(t *testing.T) {
+	k := key("non-minimal")
+	path := append([]byte{0x20}, k[:]...)
+	canonical := rlpList(rlpBytes(path), rlpBytes(bytes.Repeat([]byte{9}, 40)))
+	got, err := mptVerify(keccak(canonical), k, [][]byte{canonical})
+	require.NoError(t, err)
+	require.Len(t, got, 40)
+	item := rlpBytes(bytes.Repeat([]byte{9}, 40))
+	nonMinimal := rlpList(rlpBytes(path), append([]byte{0xb9, 0x00, 0x28}, item[2:]...)) // 0xb8 0x28 written as 0xb9 0x00 0x28
+	_, err = mptVerify(keccak(nonMinimal), k, [][]byte{nonMinimal})
+	require.ErrorIs(t, err, ErrMPTNode)
 }
