@@ -685,7 +685,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if q3rt, jErr = q3active.New(q3active.Config{DB: journalDB, Genesis: trustBases[0]}); jErr != nil {
 				return fmt.Errorf("q3 runtime: %w", jErr)
 			}
-			if q3Admit, jErr = wireQ3Pair(executor, q3rt, uint64(shardConf.NetworkID), origin); jErr != nil {
+			if q3Admit, jErr = wireQ3Pair(executor, q3rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr
 			}
 			q3Trust = q3shard.NewQ3TrustStore(historical, q3rt)
