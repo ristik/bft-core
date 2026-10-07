@@ -254,8 +254,9 @@ func TestStateMsg_Verify(t *testing.T) {
 					ShardConfHash: test.DoHash(t, &shardConf),
 				}},
 				Block: &rctypes.BlockData{
-					Round:   5,
-					Payload: &rctypes.Payload{},
+					Round:     5,
+					Timestamp: r5vInfo.Timestamp,
+					Payload:   &rctypes.Payload{},
 					Qc: &rctypes.QuorumCert{
 						VoteInfo: r4vInfo,
 						LedgerCommitInfo: &types.UnicitySeal{
@@ -280,6 +281,7 @@ func TestStateMsg_Verify(t *testing.T) {
 					LedgerCommitInfo: &types.UnicitySeal{
 						Version:              1,
 						PreviousHash:         h6,
+						Timestamp:            r5vInfo.Timestamp,
 						RootChainRoundNumber: 5, // the head's commit QC commits the head: it names what it commits
 						Hash:                 test.RandomBytes(32),
 						Signatures:           map[string]hex.Bytes{"test": test.RandomBytes(65)},
@@ -288,8 +290,9 @@ func TestStateMsg_Verify(t *testing.T) {
 				},
 			},
 			Pending: []*rctypes.BlockData{{
-				Round:   6,
-				Payload: &rctypes.Payload{},
+				Round:     6,
+				Timestamp: r6vInfo.Timestamp,
+				Payload:   &rctypes.Payload{},
 				Qc: &rctypes.QuorumCert{
 					VoteInfo: r5vInfo,
 					LedgerCommitInfo: &types.UnicitySeal{
@@ -383,7 +386,7 @@ func TestStateMsg_Verify(t *testing.T) {
 		sm = makeState()
 		commitQc := *sm.CommittedHead.CommitQc
 		seal := *commitQc.LedgerCommitInfo
-		seal.RootChainRoundNumber, seal.Hash = 0, nil
+		seal.RootChainRoundNumber, seal.Hash, seal.Timestamp = 0, nil, 0
 		commitQc.LedgerCommitInfo = &seal
 		sm.CommittedHead.CommitQc = &commitQc
 		require.ErrorIs(t, sm.VerifyWithHistory(crypto.SHA256, current, history), ErrRecoveryEpoch)

@@ -127,7 +127,7 @@ func (r *decisionRig) nonCommittingBlock(round uint64) (*drctypes.BlockData, *dr
 	qc, err := newQuorumCertificate(r.t, info, nil)
 	require.NoError(r.t, err)
 	tc := &drctypes.TimeoutCert{Timeout: &drctypes.Timeout{Epoch: 1, Round: round - 1, HighQc: qc}}
-	return &drctypes.BlockData{Round: round, Epoch: 1, Qc: qc}, tc
+	return &drctypes.BlockData{Round: round, Epoch: 1, Timestamp: 100, Qc: qc}, tc
 }
 
 func (r *decisionRig) verifyVote(v *abdrc.VoteMsg) {
@@ -154,7 +154,7 @@ func TestDomainBoundVoteSignsBothStatementsFromTheExecutedBlock(t *testing.T) {
 	r.verifyVote(v)
 	require.NotEmpty(t, v.SealSignature, "a committing vote carries the second signature")
 	require.EqualValues(t, 4242, v.LedgerCommitInfo.Timestamp, "the seal timestamp is the executed block's, not the QC's")
-	require.Zero(t, v.VoteInfo.Timestamp, "a scheme 2 vote info signs no timestamp")
+	require.EqualValues(t, 5000, v.VoteInfo.Timestamp, "scheme 2 authenticates the proposed block time")
 
 	block, tc := r.nonCommittingBlock(8)
 	v, err = m.MakeVote(block, hash32(2), nil, tc)
@@ -412,7 +412,7 @@ func TestSafetyModuleKeepsTheLegacyFormWhereTheEpochIsLegacy(t *testing.T) {
 	info.Epoch = 1
 	qc, err := newQuorumCertificate(t, info, nil)
 	require.NoError(t, err)
-	v, err := m.MakeVote(&drctypes.BlockData{Round: 5, Epoch: 1, Qc: qc}, hash32(2), nil, nil)
+	v, err := m.MakeVote(&drctypes.BlockData{Round: 5, Epoch: 1, Timestamp: info.Timestamp + 1, Qc: qc}, hash32(2), nil, nil)
 	require.NoError(t, err)
 	require.Zero(t, v.Scheme)
 	require.Empty(t, v.SealSignature)

@@ -295,6 +295,13 @@ func NewConsensusManager(
 	// The manager is assigned below, before anything can sign.
 	var manager *ConsensusManager
 	safetyOptions := []SafetyOption{
+		WithParentTimestamp(func(round uint64) (uint64, error) {
+			b, err := manager.blockStore.Block(round)
+			if err != nil {
+				return 0, err
+			}
+			return b.BlockData.Timestamp, nil
+		}),
 		WithDomainBoundSigning(trustBaseStore, func(round uint64) (CommittedBlockInfo, error) {
 			b, err := manager.blockStore.Block(round)
 			if err != nil {
@@ -1062,7 +1069,7 @@ func (x *ConsensusManager) checkRecoveryNeeded(qc *drctypes.QuorumCert) error {
 	if !bytes.Equal(qc.VoteInfo.CurrentRootHash, block.RootHash) {
 		return fmt.Errorf("unexpected round %d state - expected %X, local %X", qc.VoteInfo.RoundNumber, qc.VoteInfo.CurrentRootHash, block.RootHash)
 	}
-	return nil
+	return drctypes.VerifyTimestampProof(block.BlockData, qc)
 }
 
 // onProposalMsg handles block proposal messages from other validators.
@@ -1100,6 +1107,10 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 	}
 	if l.String() != proposal.Block.Author {
 		return fmt.Errorf("expected %s to be leader of the round %d but got proposal from %s", l, proposal.Block.Round, proposal.Block.Author)
+	}
+	// Refuse invalid live time before executing or mutating the pacemaker.
+	if err := x.safety.validateVoteTimestamp(proposal.Block); err != nil {
+		return fmt.Errorf("proposal timestamp: %w", err)
 	}
 	// Every proposal must carry a QC or TC for previous round
 	// Process QC first, update round
@@ -1151,6 +1162,15 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 	}
 	if x.epochAnchor != nil && (qc.VoteInfo == nil || qc.VoteInfo.Epoch != x.epochAnchor.Epoch) {
 		return
+	}
+	if parent, err := x.blockStore.Block(qc.GetRound()); err == nil && parent.BlockData.Anchor == nil {
+		if err := drctypes.VerifyTimestampProof(parent.BlockData, qc); err != nil {
+			x.log.WarnContext(ctx, "QC timestamp differs from executed block", logger.Error(err))
+			if e := x.sendRecoveryRequests(ctx, qc); e != nil {
+				x.log.WarnContext(ctx, "timestamp recovery request failed", logger.Error(e))
+			}
+			return
+		}
 	}
 	certs, err := x.blockStore.ProcessQc(qc)
 	if err != nil {
@@ -1390,13 +1410,27 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	if x.epochAnchor != nil && parentQC == nil {
 		parentAnchor = x.epochAnchor
 	}
+	parentRound := parentQC.GetRound()
+	if parentAnchor != nil {
+		parentRound = parentAnchor.Slot
+	}
+	parent, err := x.blockStore.Block(parentRound)
+	if err != nil {
+		x.log.WarnContext(ctx, "cannot read proposal parent timestamp", logger.Error(err))
+		return
+	}
+	timestamp, err := proposalTimestamp(types.NewTimestamp(), parent.BlockData.Timestamp)
+	if err != nil {
+		x.log.WarnContext(ctx, "cannot advance proposal timestamp", logger.Error(err))
+		return
+	}
 	proposalMsg := &abdrc.ProposalMsg{
 		Block: &drctypes.BlockData{
 			Version:   types.Version(profile),
 			Author:    x.id.String(),
 			Round:     round,
 			Epoch:     x.trustBase.Load().Epoch,
-			Timestamp: types.NewTimestamp(),
+			Timestamp: timestamp,
 			Payload:   payload,
 			Qc:        parentQC,
 			Anchor:    parentAnchor,
@@ -1563,7 +1597,22 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			x.frontier.latchFault()
 		}
 	}
+	// Replay is complete. Ordinary live admission errors below are not uncertain writes.
+	recoveryWriteStarted = false
 	if prop, ok := triggerMsg.(*abdrc.ProposalMsg); ok {
+		// Authenticate the trigger QC against its executed parent before live time admission.
+		if prop.Block.Qc != nil {
+			if err := x.checkRecoveryNeeded(prop.Block.Qc); err != nil {
+				return fmt.Errorf("recovery trigger parent: %w", err)
+			}
+		}
+		// Recheck after recovery with the current store and current clock.
+		if err := x.safety.validateVoteTimestamp(prop.Block); err != nil {
+			return fmt.Errorf("recovery proposal timestamp: %w", err)
+		}
+		// Live execution and signing can write again. Preserve conservative fault
+		// handling for failures after admission, including the recovered vote path.
+		recoveryWriteStarted = true
 		// the proposal was verified when it was received, so try and execute it now
 		// Every proposal must carry a QC or TC for previous round
 		// Process QC first, update round

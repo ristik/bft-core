@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 
@@ -34,24 +36,59 @@ type QuorumCert struct {
 	// Scheme is the signing scheme of the wire form: 0 or 1 legacy, 2 the domain-bound wrapper [2, payload]. Not part of the
 	// legacy encoding. In a scheme 2 certificate Signatures are the vote signatures over PV and SealSignatures, present only
 	// when the certificate commits, the same signers' signatures over the unchanged native seal bytes; VoteInfo carries the
-	// four signed fields and no timestamp.
+	// signed round data, including the timestamp on new votes.
 	Scheme         uint64               `cbor:"-" json:"-"`
 	SealSignatures map[string]hex.Bytes `cbor:"-" json:"sealSignatures,omitempty"`
 }
 
 type qcWire QuorumCert
 
-type qcVoteInfoV2 struct {
-	_      struct{} `cbor:",toarray"`
-	Epoch  uint64
-	Round  uint64
-	Parent uint64
-	Exec   hex.Bytes
+type DomainBoundVoteInfo struct {
+	_         struct{} `cbor:",toarray"`
+	Epoch     uint64
+	Round     uint64
+	Parent    uint64
+	Exec      hex.Bytes
+	Timestamp uint64
+}
+
+// MarshalCBOR preserves the four-field historical form. New votes append their
+// authenticated timestamp; old readers fail closed on the new arity.
+func (v DomainBoundVoteInfo) MarshalCBOR() ([]byte, error) {
+	fields := []any{v.Epoch, v.Round, v.Parent, v.Exec}
+	if v.Timestamp != 0 {
+		fields = append(fields, v.Timestamp)
+	}
+	return types.Cbor.Marshal(fields)
+}
+
+func (v *DomainBoundVoteInfo) UnmarshalCBOR(data []byte) error {
+	var fields []cbor.RawMessage
+	if err := types.Cbor.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if len(fields) != 4 && len(fields) != 5 {
+		return votesig.ErrStatement
+	}
+	*v = DomainBoundVoteInfo{}
+	values := []any{&v.Epoch, &v.Round, &v.Parent, &v.Exec}
+	if len(fields) == 5 {
+		values = append(values, &v.Timestamp)
+	}
+	for i, dst := range values {
+		if err := types.Cbor.Unmarshal(fields[i], dst); err != nil {
+			return err
+		}
+	}
+	if len(fields) == 5 && v.Timestamp == 0 {
+		return votesig.ErrStatement
+	}
+	return nil
 }
 
 type qcV2Payload struct {
 	_                struct{} `cbor:",toarray"`
-	VoteInfo         qcVoteInfoV2
+	VoteInfo         DomainBoundVoteInfo
 	LedgerCommitInfo *types.UnicitySeal
 	VoteSignatures   map[string]hex.Bytes
 	SealSignatures   map[string]hex.Bytes
@@ -74,7 +111,7 @@ func (x QuorumCert) MarshalCBOR() ([]byte, error) {
 			return nil, fmt.Errorf("%w: scheme 2 certificate has no vote info", votesig.ErrStatement)
 		}
 		return types.Cbor.Marshal(qcV2Wire{Scheme: x.Scheme, Payload: qcV2Payload{
-			VoteInfo:         qcVoteInfoV2{Epoch: x.VoteInfo.Epoch, Round: x.VoteInfo.RoundNumber, Parent: x.VoteInfo.ParentRoundNumber, Exec: x.VoteInfo.CurrentRootHash},
+			VoteInfo:         DomainBoundVoteInfo{Epoch: x.VoteInfo.Epoch, Round: x.VoteInfo.RoundNumber, Parent: x.VoteInfo.ParentRoundNumber, Exec: x.VoteInfo.CurrentRootHash, Timestamp: x.VoteInfo.Timestamp},
 			LedgerCommitInfo: x.LedgerCommitInfo, VoteSignatures: x.Signatures, SealSignatures: x.SealSignatures}})
 	}
 	return types.Cbor.Marshal(qcWire(x))
@@ -96,7 +133,7 @@ func (x *QuorumCert) UnmarshalCBOR(data []byte) error {
 			return fmt.Errorf("%w: scheme 2 certificate has no commit info: %w", ErrMalformedQC, votesig.ErrStatement)
 		}
 		*x = QuorumCert{Scheme: votesig.SchemeDomainBound, LedgerCommitInfo: p.LedgerCommitInfo, Signatures: p.VoteSignatures, SealSignatures: p.SealSignatures,
-			VoteInfo: &RoundInfo{Version: 1, RoundNumber: p.VoteInfo.Round, Epoch: p.VoteInfo.Epoch, ParentRoundNumber: p.VoteInfo.Parent, CurrentRootHash: p.VoteInfo.Exec}}
+			VoteInfo: &RoundInfo{Version: 1, RoundNumber: p.VoteInfo.Round, Epoch: p.VoteInfo.Epoch, ParentRoundNumber: p.VoteInfo.Parent, CurrentRootHash: p.VoteInfo.Exec, Timestamp: p.VoteInfo.Timestamp}}
 		return nil
 	}
 	var legacy qcWire
@@ -126,7 +163,7 @@ func DomainBoundStatement(cfg votesig.Config, info *RoundInfo, seal *types.Unici
 	if len(info.CurrentRootHash) != 32 {
 		return nil, nil, false, fmt.Errorf("%w: executed state hash is %d bytes", votesig.ErrStatement, len(info.CurrentRootHash))
 	}
-	vi := votesig.VoteInfo{Epoch: info.Epoch, Round: info.RoundNumber, Parent: info.ParentRoundNumber}
+	vi := votesig.VoteInfo{Epoch: info.Epoch, Round: info.RoundNumber, Parent: info.ParentRoundNumber, Timestamp: info.Timestamp}
 	copy(vi.Exec[:], info.CurrentRootHash)
 	vh, err := cfg.VoteInfoHash(vi)
 	if err != nil {
@@ -189,7 +226,7 @@ func (x *QuorumCert) IsValid() error {
 		return errVoteInfoIsNil
 	}
 	if x.Scheme == votesig.SchemeDomainBound {
-		// a scheme 2 certificate has no timestamp; its statement is validated by the scheme 2 rules
+		// historical scheme 2 certificates omit time; validate their statement by the scheme 2 rules
 		if x.VoteInfo.RoundNumber == 0 || x.VoteInfo.ParentRoundNumber >= x.VoteInfo.RoundNumber || len(x.VoteInfo.CurrentRootHash) != 32 {
 			return fmt.Errorf("invalid vote info: %w", votesig.ErrStatement)
 		}
