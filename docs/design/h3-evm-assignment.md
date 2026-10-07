@@ -249,8 +249,8 @@ in production, and there is no migration (greenroom, one format).
 - **Open: the root's own timestamp rule.** The UC seal timestamp is the proposer's wall clock (`types.NewTimestamp()` in the proposal
   builder) and block validation only requires it nonzero: no rule bounds it against the parent block or a local clock. The import above
   enforces monotonicity on the importer's side, but a single proposer could still commit a far-future time that every honest importer
-  must then accept. Bounding it (greater than the parent QC's time, within a skew of the validator's clock) is a root consensus rule and
-  is not part of this change.
+  must then accept. Bounding it (greater than the parent QC's time, within a skew of the validator's clock) is a root consensus rule tracked
+  separately as ristik/bft-core#445 and is not part of this change.
 - **Not implemented here:** the on-chain `IRootRecords` implementation in the SealRegistry and its feed from Ureth; the reference model
   above and the vectors are what it must match. The Closure and Retirement digest words (exposure, key history, reference digest) are
   contract-derived and opaque labels in the vectors.
