@@ -1,7 +1,7 @@
 name: ci
 
-# Checks are visible on every PR; merging remains a human decision.
-# No branch protection or required checks (owner decision, 2026-09-06).
+# Go checks run for code changes on the two integration targets, not feature pushes.
+# Owner addendum, 2026-10-07: protection may be enabled only after merge and a green integration run.
 on:
   push:
     branches:
@@ -26,17 +26,61 @@ defaults:
     shell: bash
 
 jobs:
+  changes:
+    name: Filter Go paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.paths.outputs.go }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Filter documentation and briefs
+        id: paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          # Keep the workflow/check names present on docs-only PRs so future
+          # required checks do not stay pending when a whole workflow is filtered out.
+          if [[ "$EVENT" == workflow_dispatch || -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+            echo 'go=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git cat-file -e "$BASE_SHA^{commit}"; then
+            git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          fi
+          git diff --name-only -z "$BASE_SHA" HEAD > changed-paths.txt
+          run_go=false
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              docs/*.go|docs/*/testdata/*) run_go=true; break ;;
+              docs/*|briefs/*|*.md) ;;
+              *) run_go=true; break ;;
+            esac
+          done < changed-paths.txt
+          echo "go=$run_go" >> "$GITHUB_OUTPUT"
+          echo "Go checks needed: $run_go" >> "$GITHUB_STEP_SUMMARY"
+
   gofmt:
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Skip Go work for documentation-only changes
+        if: needs.changes.outputs.go != 'true'
+        run: echo 'Documentation/briefs only; 0 Go packages run.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.go == 'true'
       - uses: actions/setup-go@v5
+        if: needs.changes.outputs.go == 'true'
         with:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
       - name: Check formatting (including files behind build tags)
+        if: needs.changes.outputs.go == 'true'
         run: |
           git ls-files -z '*.go' | xargs -0 gofmt -l > gofmt.txt
           if [[ -s gofmt.txt ]]; then
@@ -46,29 +90,43 @@ jobs:
           fi
 
   build:
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Skip Go work for documentation-only changes
+        if: needs.changes.outputs.go != 'true'
+        run: echo 'Documentation/briefs only; 0 Go packages run.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.go == 'true'
       - uses: actions/setup-go@v5
+        if: needs.changes.outputs.go == 'true'
         with:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
       - name: Build (without FFI)
+        if: needs.changes.outputs.go == 'true'
         run: make build
 
   vet:
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Skip Go work for documentation-only changes
+        if: needs.changes.outputs.go != 'true'
+        run: echo 'Documentation/briefs only; 0 Go packages run.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.go == 'true'
       - uses: actions/setup-go@v5
+        if: needs.changes.outputs.go == 'true'
         with:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
       - name: Vet all packages
+        if: needs.changes.outputs.go == 'true'
         run: |
           go list ./... > packages.txt
           echo "Vet: $(wc -l < packages.txt) packages" >> "$GITHUB_STEP_SUMMARY"
@@ -84,6 +142,7 @@ jobs:
           retention-days: 7
 
   test:
+    needs: changes
     name: Test shard ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -92,13 +151,19 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
+      - name: Skip Go work for documentation-only changes
+        if: needs.changes.outputs.go != 'true'
+        run: echo 'Documentation/briefs only; 0 Go packages run.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.go == 'true'
       - uses: actions/setup-go@v5
+        if: needs.changes.outputs.go == 'true'
         with:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
       - name: Select packages
+        if: needs.changes.outputs.go == 'true'
         run: |
           go list ./... > all-packages.txt
           python3 scripts/ci-packages.py '${{ matrix.shard }}' < all-packages.txt > packages.txt
@@ -110,6 +175,7 @@ jobs:
             echo '</details>'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Test (without FFI)
+        if: needs.changes.outputs.go == 'true'
         run: |
           mapfile -t packages < packages.txt
           go test "${packages[@]}" -json -count=1 -timeout 30m 2>&1 | tee test-log.json
@@ -125,17 +191,24 @@ jobs:
           retention-days: 7
 
   race:
+    needs: changes
     name: Race (fast unit packages)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Skip Go work for documentation-only changes
+        if: needs.changes.outputs.go != 'true'
+        run: echo 'Documentation/briefs only; 0 Go packages run.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.go == 'true'
       - uses: actions/setup-go@v5
+        if: needs.changes.outputs.go == 'true'
         with:
           go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
       - name: Select race packages
+        if: needs.changes.outputs.go == 'true'
         run: |
           go list ./... > all-packages.txt
           python3 scripts/ci-packages.py race < all-packages.txt > packages.txt
@@ -144,6 +217,7 @@ jobs:
             cat packages.txt
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Test with the race detector
+        if: needs.changes.outputs.go == 'true'
         run: |
           mapfile -t packages < packages.txt
           go test "${packages[@]}" -race -json -count=1 -timeout 15m 2>&1 | tee test-log.json
@@ -156,6 +230,7 @@ jobs:
             test-log.json
             packages.txt
           retention-days: 7
+
 
   # evm-shard-chaos and evm-shard-compose-e2e are the "compose E2E" and live-fault-injection legs
   # of docs/engine-api-adapter-plan.md T1.7 — the test shards above already cover unit tests, the

@@ -286,17 +286,32 @@ func TestAdmissionCancellationWhileBlockedAtGateDoesNotCommit(t *testing.T) {
 	gate := &admissionGate{}
 	gate.mu.Lock()
 	var invalidations atomic.Int32
-	c := newTestAdmission(t, f, s, gate, wallAdmissionClock{}, admissionPolicy{attempts: 3, duration: time.Second, cooldown: time.Hour}, func() { invalidations.Add(1) }, func(context.Context, rootinput.VerifiedObservationV2) error { return nil })
+	clock := newControlledClock()
+	c := newTestAdmission(t, f, s, gate, clock, admissionPolicy{attempts: 3, duration: time.Second, spacing: time.Second, cooldown: time.Hour}, func() { invalidations.Add(1) }, func(context.Context, rootinput.VerifiedObservationV2) error { return nil })
+	authenticated := make(chan struct{})
+	c.onAuthenticated = func(rootinput.VerifiedObservationV2) { close(authenticated) }
 	u, tr := f.sign(f.c.InputRecord(1), 2, 5)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { _, e := c.Submit(ctx, u, tr); done <- e }()
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-authenticated:
+	case <-time.After(2 * time.Second):
+		gate.mu.Unlock()
+		t.Fatal("submission did not authenticate")
+	}
 	cancel()
 	gate.mu.Unlock()
 	require.ErrorIs(t, <-done, context.Canceled)
 	require.True(t, c.Status().BootstrapInvalidated, "authenticated ordinary knowledge is sticky even when gate acquisition is canceled")
-	waitAdmission(t, func() bool { return invalidations.Load() == 1 })
+	// The retained observation is intentionally worker-owned after caller cancellation.
+	// Pause after worker invalidation so persistence cannot race this assertion.
+	select {
+	case <-clock.waits:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not pause after invalidation")
+	}
+	require.EqualValues(t, 1, invalidations.Load())
 	st, _, err := s.Load(context.Background(), f.ctx)
 	require.NoError(t, err)
 	require.Zero(t, st.Revision())
