@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/q3format"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	tbstore "github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
@@ -187,6 +188,7 @@ type fakeQ3 struct{ entries map[uint64]q3format.Entry }
 
 func (f fakeQ3) Admit(uint64) error                                                 { return nil }
 func (f fakeQ3) Lineage(base abdrc.HistoricalTrustBases) abdrc.HistoricalTrustBases { return base }
+func (f fakeQ3) FreezeRules() storage.V3FreezeRules                                 { return nil }
 func (f fakeQ3) Activated(epoch uint64) (q3format.Entry, bool) {
 	e, ok := f.entries[epoch]
 	return e, ok

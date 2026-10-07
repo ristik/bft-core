@@ -279,9 +279,17 @@ func NewConsensusManager(
 		if err := bStore.ConfigureHandoffAuthority(trustBase); err != nil {
 			return nil, fmt.Errorf("handoff authority: %w", err)
 		}
+		if optional.Q3 != nil { // the genesis committee may order the first V3 activation
+			if err := bStore.EnableV3Freeze(optional.Q3.FreezeRules()); err != nil {
+				return nil, fmt.Errorf("handoff authority: %w", err)
+			}
+		}
 	} else if cParams.NetworkProfileVersion == storage.ProfileHandoff && installedAnchor != nil && q3Activated(optional.Q3, installedAnchor) {
 		// The anchor is the first epoch of a Q3 activation: its lineage is the verified history, and the V2 handoff authority has no
-		// body to be built from. No handoff authority is configured, so a further handoff from this epoch is refused.
+		// body to be built from. Its authority is the verified entry's: the activated epoch orders V3 successors only.
+		if err := configureV3Authority(bStore, optional.Q3, trustBase, installedAnchor.Epoch); err != nil {
+			return nil, fmt.Errorf("handoff authority: %w", err)
+		}
 	} else if cParams.NetworkProfileVersion == storage.ProfileHandoff && installedAnchor != nil {
 		prior, historyErr := optional.RecoveryHistory.ByEpoch(installedAnchor.Epoch)
 		if historyErr != nil {
@@ -1504,7 +1512,11 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			if err := blockStore.ConfigureHandoffAuthority(x.trustBase.Load()); err != nil {
 				return fmt.Errorf("recovery handoff authority: %w", err)
 			}
-		} else if !q3Activated(x.q3, x.epochAnchor) {
+		} else if q3Activated(x.q3, x.epochAnchor) {
+			if err := configureV3Authority(blockStore, x.q3, x.trustBase.Load(), x.epochAnchor.Epoch); err != nil {
+				return fmt.Errorf("recovery handoff authority: %w", err)
+			}
+		} else {
 			prior, historyErr := x.recoveryHistory.ByEpoch(x.epochAnchor.Epoch)
 			if historyErr != nil {
 				return fmt.Errorf("recovery handoff authority lineage: %w", historyErr)
@@ -1512,7 +1524,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			if err := blockStore.ConfigureHandoffV2Authority(x.trustBase.Load(), prior); err != nil {
 				return fmt.Errorf("recovery handoff authority: %w", err)
 			}
-		} // else: the anchor is a Q3 activation; as at construction, no handoff authority is configured for its epoch
+		}
 	}
 	// create new verifier
 	reqVerifier, err := NewIRChangeReqVerifier(x.params, blockStore)
