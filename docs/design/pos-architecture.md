@@ -86,7 +86,11 @@ not delegation of other people's stake.
 The root authenticates the validator entity by its root consensus key. The EVM key is procedurally delegated,
 distinct, and bound to the same identity and weight. Duplicate or cross-role keys are rejected. Rotation
 activates only with committed membership; historical bindings and permanent key tombstones prevent reassignment
-of an old key to another identity. Owner role changes cannot revoke already committed recovery duties.
+of an old key to another identity. On Ack import, install each acknowledged exposure's frozen root key as
+current even if another key has since been staged. Clear only a matching staged nomination; preserve a distinct
+later one. Reserving B, then staging C, then acknowledging B therefore installs B and leaves C staged; an Ack
+with an unchanged current key also preserves a distinct staged key. Owner role changes cannot revoke already
+committed recovery duties.
 
 ## 3. Components and contract boundary
 
@@ -111,6 +115,16 @@ seals initialization permanently. Operation IDs bind network, chain, deployment,
 hash domains prevent cross-operation replay. Contracts authenticate fixed callers, never `tx.origin`. State
 changes and replay markers commit atomically.
 
+The contracts build/deployment manifest must pin Solidity `0.8.37`, EVM target `cancun`, `via_ir = true`,
+optimizer enabled, `bytecode_hash = "none"` and `cbor_metadata = false`. Use one optimizer run only for
+`src/p85/**`; keep 200 runs for the existing SealRegistry and other sources. Pin Foundry `v1.8.1`,
+forge-std revision `bf647bd6046f2f7da30d0c2bf435e5c76a780c1b` and OpenZeppelin Contracts v5.4.0 revision
+`c64a1edb67b6e3f4a15cca8909c9482ad33a02b0`. Record resulting bytecode/code hashes and verify
+runtime/initcode size limits and the unchanged SealRegistry code hash and empty Solidity storage layout.
+Scope bounded-loop lint suppressions to the P85 sources and justify them with enforced resource ceilings.
+These settings are reproducibility requirements, not a relaxation of protocol rules or evidence of
+worst-case system gas acceptance.
+
 No proxy, `delegatecall`, arbitrary call, sweep, administrator withdrawal, module setter, arbitrary penalty
 list, or migration entry point exists. Only claims transfer funds out. Claims debit the caller's credit before
 transfer and reject reentrancy; a failed recipient reverts that claim without trapping other creditors.
@@ -132,7 +146,7 @@ authorize downstream action.
 | Custody: `register(rootKey,proof,roles)` | Owner; identity/domain/nonce-bound root PoP and unique key; allocate id | `Registered(id,owner,rootKey,roles)` |
 | Custody: `bond(id)` payable | Owner; open generation and capacity; create lot for actual received value | `Bonded(id,generation,lotID,amount)` |
 | Custody: `proposeRootKey(id,key,proof)` | Owner; possession, uniqueness, role nonce; stage future binding | `RootKeyProposed(id,key,nonce)` |
-| Custody: `proposeRoles`, `acceptRoles` | Current/nominated holders; exact tuple and nonce, withdrawal consent, all required acceptance; atomic installation | `RolesProposed(id,roles,nonce)`, `RolesAccepted(id,roles,nonce)` |
+| Custody: `proposeRoles`, `acceptRoles(id,nonce,newOwner,newWithdrawal)` | Current/nominated holders; every acceptance, including existing-withdrawal consent, binds both nominated addresses and current role nonce; replacement resets consent; atomic installation advances nonce | `RolesProposed(id,roles,nonce)`, `RolesAccepted(id,roles,nonce)` |
 | Custody: `requestRetirement(id)` | Owner; once per generation; exclude future primary snapshots, without releasing funds | `RetirementRequested(id,generation)` |
 | Election: `admitDelegation(binding,proof)` | Anyone relaying owner authorization and EVM PoP over the full tuple including operatorPayee; network/chain/Election address/operation, identity/generation, root/EVM bindings, role/delegation nonces, expiry; atomically stage binding/payee and consume the identity/generation nonce | `DelegationAdmitted(id,bindingHash,operatorPayee,nonce)` |
 | Election: `elect(origin)` | Hook; threshold, predecessor/attempt, policy, and no unresolved result; freeze snapshot | `ElectionFrozen(resultID,snapshotHash)` or `NoCandidate(origin,reason)` |
@@ -155,6 +169,12 @@ authorize downstream action.
 | Rewards: `settleRewards(intervalID,batch)` | Anyone; next ascending identity prefix, fixed weights/payees/budget; once per member, return final residue | `RewardAllocated(intervalID,id,payee,amount)`, `RewardIntervalSettled(intervalID,residue)` |
 | Rewards: `claim(amount,to)` | Credited operator payee; own balance, debit before guarded transfer | `RewardClaimed(payee,to,amount)` |
 
+`acceptRoles(id,nonce,newOwner,newWithdrawal)` must match the pending tuple exactly. A transaction
+prepared for a superseded different tuple fails with `RoleTupleMismatch`, including consent from the
+existing withdrawal authority. Replacing a pending proposal clears all collected consent; nominated role
+holders must accept and the existing withdrawal authority must consent to its replacement. Successful
+installation advances the role nonce and leaves existing credits with their creditor.
+
 `admitDelegation` is the sole post-genesis operator-payee nomination path; `proposeRoles/acceptRoles` does not
 nominate reward payees. Its canonical signed payload is
 `(network,chain,ElectionPolicyAddress,admitDelegation,StakingID,generation,rootNodeID,rootVerificationKey,evmNodeID,evmVerificationKey,operatorPayee,roleNonce,delegationNonce,expiry)`.
@@ -167,10 +187,14 @@ subsequent nominations affect only later election snapshots and become reward de
 later acknowledged assignment. Neither nomination nor a role change edits frozen records, exact K, or existing
 credits.
 
-Permissionless getters expose `position`, `lot`, `keyHistory`, `exposure`, `credit`, `coverage`, `snapshot`,
-`candidate`, `recoveryAuthorization`, `releaseState(lotID)`, `case`, `excluded`, `params`, `progress`, `ucTime`,
-`closure`, `retirement`, and reward interval/budget state. `releaseState` reports authenticated closures,
-deadlines, and accepted-case holds; it needs no off-chain clearance.
+Permissionless reads expose position/lot/exposure/assignment records, `credit`, `snapshot`, `candidate`,
+`recoveryAuthorization`, `Evidence.releaseState(lotID)`, case/exclusion state, `params`, `progress`, `ucTime`,
+closure/retirement records, and reward interval/budget state. `Evidence.releaseState(lotID)` combines custody
+reference/retirement status and authenticated deadlines with accepted-case holds and settlement state; it needs
+no off-chain clearance. There is no separate `keyHistory` or `coverage` getter requirement. Reconstruct historical
+keys and liability from retained exposure key hashes and assignment epoch records, `exposureChain(id,generation)`,
+and permanent `keyOwner` tombstones. Reconstruct primary coverage from `generationLots`/`exposureLots`, remaining
+lot principal, committed weights, and `bondUnit`. Attribution and liability rules are unchanged.
 
 ## 4. Registration, bonding, and handoff lifecycle
 
@@ -193,6 +217,13 @@ Bond creates a new lot; all contributing snapshot lots, including weight-roundin
 deposits never become liable for earlier assignments. Compatible consecutive assignments may reference the same
 lot only for the same identity on one authenticated lineage. References are not additional assets. Record
 nominal exposure and assigned weight separately from backing.
+
+After adding the primary references, `reserveCandidate` must leave one reference slot free on every
+incumbent lot (`refCount < R_max`), including lots of excluded or retiring incumbents and lots with zero
+remaining principal. Otherwise it reverts atomically with `ReferenceCapacity` before publication; no
+partial reservation survives. The reserved slot admits the derived K exposure before replaced references
+close, so recovery import cannot stall on reference capacity. This limits new primary reservations and
+never suppresses an existing exact K.
 
 Lots are free bonded, encumbered by references, or draining after release from assignments. Maturity converts
 remaining principal into a withdrawal credit. `requestRetirement` is the full-generation unbond request: it
@@ -249,7 +280,9 @@ Payee changes alone are not signing-binding replacements. Forced exits, shrinkin
 weight-only changes consume the applicable budgets. Failure emits an ordered
 `NoCandidate` reason (profile/capacity, size, membership churn, weight/overlap churn, or reservation
 incompatibility), with no new reservation. Current authority continues. This bounded greedy procedure can miss a
-feasible alternative; rotation may wait without stopping the chain.
+feasible alternative; rotation may wait without stopping the chain. PR3 must translate primary
+`ReferenceCapacity` refusal into ordered `NoCandidate` and current-authority continuation, never omission or
+modification of K.
 
 Every primary member, including retained incumbents, supplies a fresh assignment PoP over network,
 partition/shard identifiers, assignment hash, predecessor, attempt, and node identifier. A **partition/shard
@@ -265,7 +298,9 @@ Publish K with every J, even if an incumbent retired, was excluded, has insuffic
 principal. K uses existing locked exposures, never spent or previously released assets. It has no optional
 availability flag, collateral threshold, or fresh owner-consent requirement. Genesis supplies authenticated
 initial membership, initial operator payees, possession, and exposure records; a missing baseline is invalid
-configuration. Reserve capacity for the primary/K union, up to twice maximum committee size.
+configuration. Reserve capacity for the primary/K union, up to twice maximum committee size, and keep the
+per-incumbent-lot reference slot required in section 4 free for recovery. K's membership, keys, weights, payees,
+lots, and captured policy remain immutable despite retirement, exclusion, or slashing.
 
 Store `RecoveryAuthorization` binding network, chain, contract addresses/code hashes, result, snapshot digest,
 incumbent root-body/assignment hashes, K records/bindings, exposure digest, and captured policies. K records and
@@ -434,6 +469,12 @@ lots per generation, and live references per lot.
 | Reward rate; genesis pool | 1 UCT per 1,000 ordinary progress rounds; 10,000 UCT | Rate 0–10 UCT per 1,000 rounds; no minting or minimum funding guarantee |
 | Capacity | V_max=128; L_max=8; R_max=4; batches ≤32; body ≤256 KiB; witness ≤1 MiB | Fixed resource ceilings; primary/K union provisioned for 64 identities, not governance knobs |
 
+Custody initialization, including deployment through the fixed factory, must enforce `1 ≤ V_max ≤ 128`,
+`1 ≤ L_max ≤ 8`, `3 ≤ R_max ≤ 4` and `1 ≤ maxBatch ≤ 32`; out-of-range genesis fails with
+`InvalidGenesis`. Alternative test genesis values may be smaller only within these bounds. Check each
+ceiling independently, including V=129, L=9, R=5 and batch=33, and accept exact ceilings and valid
+smaller configurations. Resource ceilings remain immutable after deployment.
+
 For ten equal-weight members, two identity replacements use M=4 and satisfy strict one-third turnover, but produce D=0.4
 and fail the default 1/4 distance cap; one replacement gives D=0.2. For four equal-weight members, one
 replacement meets strict overlap but gives D=0.5 and fails the default distance cap. In that case retain
@@ -517,6 +558,9 @@ The following are **required future implementation evidence, not tests executed 
 | Acceptance trace | Observable pass condition |
 |---|---|
 | Register → bond → J → H → acknowledge → replacement → retirement → maturity → claim | Exact custody conservation after every call; forced transfers, callbacks, and reverting claim recipients cannot bypass isolation or release rules. |
+| Role proposal replacement | Prepare consent for tuple B, replace either nominated address at the same nonce, then submit old consent: reject; replacement clears collected consent and completed installation advances the nonce. |
+| Delayed key activation | Reserve B, stage C, import B Ack: current B and staged C; B remains usable for delegation/reservation. Matching staging clears; unchanged-current Ack preserves a distinct nomination; historical liability remains attributable. |
+| Recovery reference capacity | Fill incumbent references to the permitted primary limit, refuse another primary atomically with ReferenceCapacity/NoCandidate, then derive K without capacity failure before closing references, including excluded, retiring and zero-balance incumbents. Paired-node recovery and worst-case system gas remain integration obligations. |
 | Historical evidence and lot attribution | Reordered/re-encoded pairs and a third statement debit once; another round respects lifetime cap; rotated keys charge only historical lots; chunking preserves bounty; zero balance still records exclusion. |
 | Evidence/maturity boundary and censorship | Cutoff equality admits and holds the lot through delayed settlement; next progress unit rejects; mempool submission has no effect; freeze can make unexecuted evidence late. |
 | Closure and exit protection | Arbitrarily late suffix proof works after restored quorum; alternative proofs give identical offsets; duplicate closures do not extend deadlines; missing history/import blocks maturity; round equality fails and UC-time equality passes; unrelated clean lots remain claimable. |
@@ -536,3 +580,13 @@ Before authoritative development PoS, pin native denomination and reproducible p
 recovery possession exception against actual root/EVM validation, prove weighted quorums throughout, confirm
 authenticated UC-time enforcement, and measure resource ceilings. Architecture acceptance alone satisfies none
 of these implementation gates.
+
+## Review fixes 2026-10-07
+
+- Accept one reserved reference slot per incumbent lot after primary reservation, with atomic `ReferenceCapacity` refusal mapped by PR3 to `NoCandidate`; this prevents capacity from blocking exact-K import without weakening recovery or replacing paired/gas acceptance.
+- Accept historical keys and liability reconstruction from retained exposures/assignments, `exposureChain` and permanent `keyOwner` tombstones, with coverage reconstructed from lots, remainders, weights and `bondUnit`; separate `keyHistory`/`coverage` getters are unnecessary for the same liability semantics.
+- Accept `Evidence.releaseState(lot)` as the release-status surface; combining custody deadlines/reference status with accepted-case holds keeps release checks available without enlarging custody's getter surface.
+- Clarify `acceptRoles(id,nonce,newOwner,newWithdrawal)`, replacement consent reset and nonce advance on installation; exact-tuple consent prevents a superseded transaction authorizing another recipient and preserves the existing rule.
+- Clarify Ack activation from the frozen exposure, clearing only matching staging and preserving a later nomination; delayed imports must install the acknowledged key regardless of mutable staging.
+- Clarify factory/custody genesis lower and upper bounds for V/L/R/batches, with isolated boundary checks; bounded test genesis cannot exceed immutable development resource ceilings.
+- Accept the pinned compiler/toolchain/dependency manifest and P85-only one-run optimizer profile, retaining 200 runs elsewhere and source-scoped bounded-loop lint suppressions; reproducibility and deployable size must preserve SealRegistry artifacts and enforced ceilings.
