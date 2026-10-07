@@ -1,0 +1,13 @@
+{
+  "chain_id": 31337,
+  "genesis_hash": "REPLACE_WITH_OPERATOR_VERIFIED_BLOCK_ZERO_HASH",
+  "funding_address": "REPLACE_WITH_DEDICATED_FAUCET_ADDRESS",
+  "rpc_url": "http://relay:8545",
+  "validator_rpc_urls": ["http://ureth1:8545", "http://ureth2:8545", "http://ureth3:8545", "http://ureth4:8545"],
+  "backend_url": "http://signer:8080",
+  "captcha_sitekey": "REPLACE_WITH_HCAPTCHA_SITEKEY",
+  "minimum_balance_wei": 20000000000000000,
+  "daily_claims": 100,
+  "trusted_proxy_ip": "172.30.88.1",
+  "dev_only": false
+}

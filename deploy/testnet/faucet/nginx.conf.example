@@ -1,0 +1,19 @@
+# Include in the host nginx http {} context. Add your TLS certificate paths.
+limit_req_zone $binary_remote_addr zone=faucet:10m rate=1r/s;
+limit_conn_zone $binary_remote_addr zone=faucet_conn:10m;
+server {
+    listen 443 ssl;
+    server_name faucet.testnet.example;
+    # ssl_certificate ...;
+    # ssl_certificate_key ...;
+    client_max_body_size 2k;
+    client_body_timeout 10s;
+    location / {
+        limit_req zone=faucet burst=5 nodelay;
+        limit_conn faucet_conn 5;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header Host $host;
+        proxy_pass http://127.0.0.1:8088;
+        proxy_read_timeout 30s;
+    }
+}

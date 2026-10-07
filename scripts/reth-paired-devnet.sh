@@ -834,6 +834,12 @@ fi
 if [ -n "$postM2aMode" ]; then
   post_m2a_after_bootstrap || { fail "post-M2a transaction evidence failed"; exit 1; }
 fi
+if [ "${FAUCET_PROBE:-0}" = 1 ]; then
+  python3 deploy/testnet/faucet/devnet_probe.py || { fail "faucet acceptance probe failed"; exit 1; }
+  pass "faucet fresh wallet, paid transfer, limits and identity checks"
+  echo "FAUCET probe complete; stopping paired nodes before unrelated handoff/continuous-execution probes"
+  exit "$failures"
+fi
 
 # Wait until the bootstrap partition certificate is committed before joining the three
 # independent aggregator shards. Their handshakes ask roots for partition state, so starting
