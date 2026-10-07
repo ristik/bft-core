@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	p2ptest "github.com/libp2p/go-libp2p/core/test"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -515,4 +516,68 @@ func TestWeightedCallbacksDoNotChangeTheSchedule(t *testing.T) {
 		require.Equal(t, nodes[want[r-1]].NodeID, id.String())
 	}
 	_ = fmt.Sprint
+}
+
+// BenchmarkQ4Selector measures the supported-scale lookup cost of the #399 selector for the Q4 query-cost gate: a cold restart or
+// catch-up (a fresh selector asked for a round d rounds past the epoch start), an old uncached query (the cache is far ahead, the
+// ring does not hold the round, so the schedule is replayed in scratch state) and concurrent callers on one selector, which share its
+// mutex. The lookup is O(n*d); the benchmark reports ns/op and allocations per lookup. The supported membership and distances are
+// not chosen here: they are frozen before acceptance, and a failing budget is a separate prerequisite, not waived by schedule density.
+func BenchmarkQ4Selector(b *testing.B) {
+	members := func(n int) []*types.NodeInfo {
+		names := make([]string, n)
+		for i := range names {
+			id, err := p2ptest.RandPeerID()
+			require.NoError(b, err)
+			names[i] = id.String()
+		}
+		sort.Strings(names)
+		nodes := make([]*types.NodeInfo, n)
+		for i := range nodes {
+			nodes[i] = &types.NodeInfo{NodeID: names[i], Stake: 1<<40 + uint64(i)} // large, unequal weights
+		}
+		return nodes
+	}
+	for _, n := range []int{10, 100} {
+		nodes := members(n)
+		for _, d := range []uint64{1_000, 10_000, 100_000} {
+			b.Run(fmt.Sprintf("cold-restart/n=%d/d=%d", n, d), func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					w, err := NewWeighted(1, nodes)
+					require.NoError(b, err)
+					_, err = w.GetLeaderForRound(1 + d)
+					require.NoError(b, err)
+				}
+			})
+			b.Run(fmt.Sprintf("old-uncached/n=%d/d=%d", n, d), func(b *testing.B) {
+				w, err := NewWeighted(1, nodes)
+				require.NoError(b, err)
+				_, err = w.GetLeaderForRound(1 + d + 2*recentRounds) // the cache is ahead; round 1+d is no longer in the ring
+				require.NoError(b, err)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					_, err = w.GetLeaderForRound(1 + d)
+					require.NoError(b, err)
+				}
+			})
+			b.Run(fmt.Sprintf("concurrent-old-uncached/n=%d/d=%d", n, d), func(b *testing.B) {
+				w, err := NewWeighted(1, nodes)
+				require.NoError(b, err)
+				_, err = w.GetLeaderForRound(1 + d + 2*recentRounds)
+				require.NoError(b, err)
+				b.ReportAllocs()
+				b.ResetTimer()
+				b.RunParallel(func(pb *testing.PB) {
+					for pb.Next() {
+						if _, err := w.GetLeaderForRound(1 + d); err != nil {
+							b.Error(err)
+							return
+						}
+					}
+				})
+			})
+		}
+	}
 }
