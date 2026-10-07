@@ -110,6 +110,14 @@ func TestRecordIDMatchesAbiEncode(t *testing.T) {
 	want := ethcrypto.Keccak256(enc)
 	got := RecordID(3, pred, KindAck, 11, 1_700_000_000, data)
 	require.Equal(t, want, got[:])
+	// full-width numbers and payloads that are not a whole number of words
+	for _, n := range []int{0, 31, 33} {
+		d := make([]byte, n)
+		enc, err := args.Pack(uint64(1<<63+5), pred, uint8(KindClosure), uint64(1<<62+1), uint64(1<<57), d)
+		require.NoError(t, err)
+		g := RecordID(1<<63+5, pred, KindClosure, 1<<62+1, 1<<57, d)
+		require.Equal(t, ethcrypto.Keccak256(enc), g[:], "len %d", n)
+	}
 }
 
 func TestLogLinksAndVerifies(t *testing.T) {
@@ -343,4 +351,24 @@ func TestClosureBeforeSuccessorProgress(t *testing.T) {
 	_, _, err = p.Close(ClosureKey{1, id32(1), 8}, Closure{})
 	require.ErrorIs(t, err, ErrClosureEarly)
 	require.Equal(t, uint64(1), p.Log.Len())
+}
+
+func TestObserveBoundariesAndLogAt(t *testing.T) {
+	tr := NewGenesis(1, 1)
+	require.NoError(t, tr.Observe(1, 5))
+	require.NoError(t, tr.Observe(1, 5)) // the same round again is not a regress
+	_, err := tr.OrderH(5, 2, 20)
+	require.NoError(t, err)
+	require.NoError(t, tr.Observe(2, 20)) // exactly the successor's first round
+	require.Equal(t, uint64(5), tr.Progress())
+
+	var l Log
+	_, ok := l.At(0)
+	require.False(t, ok)
+	_, err = l.Append(KindSessionClosed, make([]byte, 32), Anchor{1, 1})
+	require.NoError(t, err)
+	_, ok = l.At(0)
+	require.True(t, ok)
+	_, ok = l.At(1)
+	require.False(t, ok)
 }
