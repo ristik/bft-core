@@ -199,38 +199,90 @@ func DecodeEnvelope(b []byte) (*Envelope, error) {
 }
 
 // boundEnvelopeCounts reads the declared array lengths straight from the head
-// words, so an over-budget count is rejected before any allocation.
+// words, so an over-budget count is rejected before any allocation. It walks
+// the leaf proofs in order with overflow-safe offset arithmetic and rejects a
+// cumulative sibling count above MaxPathSteps; a layout it cannot follow is
+// ErrABIFraming.
 func boundEnvelopeCounts(b []byte) error {
+	n := uint64(len(b))
+	// word reads the 32-byte word at off; a value above 2^64-1 or a read past
+	// the end is a framing error.
 	word := func(off uint64) (uint64, bool) {
-		if off+32 > uint64(len(b)) {
+		end := off + 32
+		if end < off || end > n {
 			return 0, false
 		}
-		v := new(big.Int).SetBytes(b[off : off+32])
-		if !v.IsUint64() || v.Uint64() > uint64(len(b)) {
+		v := new(big.Int).SetBytes(b[off:end])
+		if !v.IsUint64() {
 			return 0, false
 		}
 		return v.Uint64(), true
 	}
+	// add is a checked sum.
+	add := func(a, c uint64) (uint64, bool) {
+		s := a + c
+		return s, s >= a
+	}
 	offAnchors, ok1 := word(64)
 	offLeaves, ok2 := word(96)
-	if !ok1 || !ok2 {
+	if !ok1 || !ok2 || offAnchors > n || offLeaves > n {
 		return ErrABIFraming
 	}
 	na, ok := word(offAnchors)
-	if !ok {
+	if !ok || na > n {
 		return ErrABIFraming
 	}
 	if na > MaxAnchors {
 		return ErrTooManyPaths
 	}
 	nl, ok := word(offLeaves)
-	if !ok {
+	if !ok || nl > n {
 		return ErrABIFraming
 	}
 	if nl > MaxLeaves {
 		return ErrTooManyPaths
 	}
+	var steps uint64
+	for i := uint64(0); i < nl; i++ {
+		headAt, ok := add(offLeaves, 32+32*i)
+		if !ok {
+			return ErrABIFraming
+		}
+		rel, ok := word(headAt)
+		if !ok {
+			return ErrABIFraming
+		}
+		t, ok := add(offLeaves+32, rel)
+		if !ok {
+			return ErrABIFraming
+		}
+		sRel, ok := wordAt(word, add, t, 64)
+		if !ok {
+			return ErrABIFraming
+		}
+		sOff, ok := add(t, sRel)
+		if !ok {
+			return ErrABIFraming
+		}
+		ns, ok := word(sOff)
+		if !ok {
+			return ErrABIFraming
+		}
+		if ns > MaxPathSteps-steps {
+			return ErrTooManyPaths
+		}
+		steps += ns
+	}
 	return nil
+}
+
+// wordAt reads the word at base+delta with a checked sum.
+func wordAt(word func(uint64) (uint64, bool), add func(a, c uint64) (uint64, bool), base, delta uint64) (uint64, bool) {
+	o, ok := add(base, delta)
+	if !ok {
+		return 0, false
+	}
+	return word(o)
 }
 
 // CheckPolicy is the composing verifier's opening and tuple check, run before

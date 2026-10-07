@@ -346,6 +346,110 @@ func BuildManifest() (*Manifest, error) {
 		Description: "anchors offset aliases the leaf proof array", Input: hx(alias), Extra: "2",
 		Expected: Expect{Status: "error", Family: "malformed", Reason: "ErrABIFraming"}})
 
+	// Cumulative path budget, exact caps and nested-offset overflow.
+	addEncoded := func(id, desc string, b []byte, leaves int) {
+		var err error
+		if d, derr := DecodeEnvelope(b); derr != nil {
+			err = derr
+		} else {
+			_, err = CheckPolicy(f.Cfg, d, leaves)
+		}
+		ex := Expect{Status: "ok"}
+		if err != nil {
+			ex = expectFor(nil, err)
+		}
+		add(Vector{ID: id, Family: "envelope", Op: "envelope-policy", Cfg: "dev", Description: desc,
+			Input: hx(b), Extra: fmt.Sprintf("%d", leaves), Expected: ex})
+	}
+	sibs := func(n int) [][32]byte {
+		out := make([][32]byte, n)
+		for i := range out {
+			out[i] = H([]byte{byte(i), byte(i >> 8)})
+		}
+		return out
+	}
+	withLeaves := func(counts ...int) *Envelope {
+		return envFor(func(e *Envelope) {
+			e.LeafProofs = nil
+			for _, c := range counts {
+				e.LeafProofs = append(e.LeafProofs, LeafProof{Bitmap: H([]byte{byte(c)}), Siblings: sibs(c)})
+			}
+		})
+	}
+	rep := func(n, c int) []int {
+		out := make([]int, n)
+		for i := range out {
+			out[i] = c
+		}
+		return out
+	}
+	addEnv("envelope-paths-2048-eight-leaves", "eight leaves of 256 siblings: exactly MaxPathSteps", withLeaves(rep(8, 256)...), 8)
+	addEnv("envelope-paths-2049-nine-leaves", "nine leaves with sibling counts 256 x8 and 1: one step over MaxPathSteps", withLeaves(append(rep(8, 256), 1)...), 9)
+	addEnv("envelope-paths-2048-one-leaf", "one leaf with 2048 siblings", withLeaves(2048), 1)
+	addEnv("envelope-paths-2049-one-leaf", "one leaf with 2049 siblings", withLeaves(2049), 1)
+	addEnv("envelope-paths-2049-split", "two leaves of 1024 and 1025 siblings", withLeaves(1024, 1025), 2)
+	// Hand-patched layouts.
+	base, _ := envFor(nil).Encode()
+	putWord := func(b []byte, off int, v *big.Int) []byte {
+		out := append([]byte{}, b...)
+		w := v.FillBytes(make([]byte, 32))
+		copy(out[off:off+32], w)
+		return out
+	}
+	u64max := new(big.Int).SetUint64(1<<64 - 1)
+	word := func(b []byte, off int) int { return int(new(big.Int).SetBytes(b[off : off+32]).Uint64()) }
+	offL := word(base, 96)
+	leafT := func(i int) int { return offL + 32 + word(base, offL+32+32*i) }
+	offA := word(base, 64)
+	anchT := offA + 32 + word(base, offA+32)
+	addEncoded("envelope-sibling-count-u64max", "first leaf sibling count is 2^64-1", putWord(base, leafT(0)+word(base, leafT(0)+64), u64max), 2)
+	addEncoded("envelope-sibling-count-2pow64", "first leaf sibling count word exceeds 64 bits",
+		putWord(base, leafT(0)+word(base, leafT(0)+64), new(big.Int).Lsh(big.NewInt(1), 64)), 2)
+	addEncoded("envelope-offset-sibling-u64max", "first leaf sibling offset is 2^64-1", putWord(base, leafT(0)+64, u64max), 2)
+	addEncoded("envelope-offset-leaf-head-u64max", "first leaf head offset is 2^64-1", putWord(base, offL+32, u64max), 2)
+	addEncoded("envelope-offset-anchor-head-u64max", "first anchor head offset is 2^64-1", putWord(base, offA+32, u64max), 2)
+	addEncoded("envelope-offset-shard-u64max", "anchor shard offset is 2^64-1", putWord(base, anchT+32, u64max), 2)
+	addEncoded("envelope-offset-uc-u64max", "anchor uc offset is 2^64-1", putWord(base, anchT+5*32, u64max), 2)
+	addEncoded("envelope-offset-sibling-near-max", "first leaf sibling offset is 2^64-32", putWord(base, leafT(0)+64, new(big.Int).SetUint64(1<<64-32)), 2)
+	// Exact caps.
+	anchors := func(n int) *Envelope {
+		return envFor(func(e *Envelope) {
+			for len(e.Anchors) < n {
+				e.Anchors = append(e.Anchors, e.Anchors[0])
+			}
+		})
+	}
+	addEnv("envelope-anchors-8", "eight anchors pass the count bound and fail the one-anchor policy", anchors(8), 2)
+	addEnv("envelope-anchors-9", "nine anchors exceed MaxAnchors", anchors(9), 2)
+	leaves := func(n int) *Envelope {
+		return envFor(func(e *Envelope) {
+			e.LeafProofs = nil
+			for i := 0; i < n; i++ {
+				e.LeafProofs = append(e.LeafProofs, LeafProof{Bitmap: H([]byte{byte(i)})})
+			}
+		})
+	}
+	addEnv("envelope-leaves-65", "sixty-five leaves, the maximum history", leaves(65), 65)
+	addEnv("envelope-leaves-66", "sixty-six leaves exceed MaxLeaves", leaves(66), 66)
+	sized := func(extra int) []byte {
+		e0 := envFor(func(e *Envelope) { e.History = nil })
+		b0, _ := e0.Encode()
+		e0.History = make([]byte, MaxEnvelopeBytes-len(b0)+extra)
+		b, _ := e0.Encode()
+		return b
+	}
+	addEncoded("envelope-size-262144", "envelope of exactly MaxEnvelopeBytes", sized(0), 2)
+	addEncoded("envelope-size-262176", "envelope one word over MaxEnvelopeBytes", sized(32), 2)
+
+	for _, nv := range []struct{ id, desc, in string }{
+		{"return-negative-integer", "CBOR major type 1 (-1) as the whole return input", "20"},
+		{"return-negative-integer-nonminimal", "major type 1 with a non-shortest head", "3800"},
+	} {
+		in, _ := hex.DecodeString(nv.in)
+		res, err := VerifyReturn(f.Cfg, in)
+		add(Vector{ID: nv.id, Family: "wire", Op: "return", Cfg: "dev", Description: nv.desc, Input: nv.in, Expected: expectFor(res, err)})
+	}
+
 	// ---- prepareLock -------------------------------------------------------
 	okKeys := []*secp256k1.PrivateKey{KeyFromSeed("v-a"), KeyFromSeed("v-b"), KeyFromSeed("v-c")}
 	p0 := sigPred(okKeys[0]).Bytes()

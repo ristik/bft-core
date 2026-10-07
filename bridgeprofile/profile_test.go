@@ -814,3 +814,28 @@ func TestHighRecoveryIDsAcceptOnlyOnMatch(t *testing.T) {
 	// A different expected key under the same signature fails the equality.
 	require.ErrorIs(t, VerifyUnlock(KeyFromSeed("hr").PubKey(), sh, th, u), ErrUnlockKey)
 }
+
+// TestScannerExactCaps pins the boundary of each scanner ceiling: the cap
+// itself is accepted and one more is rejected with the specific sentinel.
+func TestScannerExactCaps(t *testing.T) {
+	nest := func(n int) []byte {
+		b := bytes.Repeat([]byte{0x81}, n)
+		return append(b, 0xf6)
+	}
+	_, err := scanOne(nest(MaxCBORDepth))
+	require.NoError(t, err)
+	_, err = scanOne(nest(MaxCBORDepth + 1))
+	require.ErrorIs(t, err, ErrTooDeep)
+
+	flat := func(items int) []byte { // array head plus items-1 nulls: items tokens
+		n := items - 1
+		return append([]byte{0x99, byte(n >> 8), byte(n)}, bytes.Repeat([]byte{0xf6}, n)...)
+	}
+	_, err = scanOne(flat(MaxCBORItems))
+	require.NoError(t, err)
+	_, err = scanOne(flat(MaxCBORItems + 1))
+	require.ErrorIs(t, err, ErrTooManyItems)
+
+	_, err = scanOne([]byte{0x20})
+	require.ErrorIs(t, err, ErrForbiddenCBOR)
+}

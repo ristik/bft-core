@@ -182,6 +182,8 @@ func (s *scanner) item(depth int) (item, error) {
 		}
 	case majSimp:
 		it.null = true
+	default:
+		return item{}, ErrForbiddenCBOR
 	}
 	it.end = s.pos
 	return it, nil
