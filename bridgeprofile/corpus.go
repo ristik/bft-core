@@ -322,6 +322,12 @@ func Replay(fs *FixtureSet, c Case) Expect {
 		copy(aid[:], a)
 		amt, _ := new(big.Int).SetString(p[1], 10)
 		return okValues("data", hx(ValueData(aid, amt)))
+	case "trust-input":
+		_, err := LoadTrustInput(in)
+		if err != nil {
+			return errExpect(err)
+		}
+		return okValues()
 	case "cfg-decode":
 		cfg, err := DecodeCfg(in)
 		if err != nil {

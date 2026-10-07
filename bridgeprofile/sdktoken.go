@@ -54,7 +54,7 @@ func (t *Token) Bytes() []byte {
 	return CTag(TagToken, CArr(CUint(TokenVersion), CArr(t.Mint.Bytes(), t.MintProof.Bytes()), CArr(pairs...)))
 }
 
-func decodeProof(it *item, b []byte, steps, ucSteps *uint64) (*InclusionProof, error) {
+func decodeProof(it *item, b []byte, steps *uint64) (*InclusionProof, error) {
 	c, err := it.tagContent(TagInclusion)
 	if err != nil {
 		return nil, err
@@ -90,13 +90,8 @@ func decodeProof(it *item, b []byte, steps, ucSteps *uint64) (*InclusionProof, e
 	if len(path) != 32+32*pop {
 		return nil, ErrLength
 	}
-	if *steps += uint64(pop); *steps > MaxPathSteps {
-		return nil, ErrTooManyPaths
-	}
-	for i := 0; i < pop; i++ {
-		var s [32]byte
-		copy(s[:], path[32+32*i:])
-		p.Siblings = append(p.Siblings, s)
+	if err := addPathSteps(steps, uint64(pop)); err != nil {
+		return nil, err
 	}
 	if k[4].end-k[4].start > MaxProofUCBytes {
 		return nil, ErrInputTooLarge
@@ -107,8 +102,13 @@ func decodeProof(it *item, b []byte, steps, ucSteps *uint64) (*InclusionProof, e
 	p.UC = k[4].raw(b)
 	// A certificate that is not decodable under the SDK/native intersection is never projected: the structure is checked here, the
 	// signatures and quorum stay the verifier's.
-	if err := scanCertificate(p.UC, ucSteps); err != nil {
+	if err := scanCertificate(p.UC, steps); err != nil {
 		return nil, err
+	}
+	for i := 0; i < pop; i++ {
+		var s [32]byte
+		copy(s[:], path[32+32*i:])
+		p.Siblings = append(p.Siblings, s)
 	}
 	return p, nil
 }
@@ -149,9 +149,9 @@ func DecodeToken(b []byte) (*Token, error) {
 		return nil, err
 	}
 	t.mintRaw = g.kids[0].raw(b)
-	// steps counts sibling hashes, ucSteps the certificates' own tree paths; each is bounded by MaxPathSteps across the whole token
-	var steps, ucSteps uint64
-	mp, err := decodeProof(&g.kids[1], b, &steps, &ucSteps)
+	// UC tree paths and RSMT siblings share one budget across the whole token.
+	var steps uint64
+	mp, err := decodeProof(&g.kids[1], b, &steps)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func DecodeToken(b []byte) (*Token, error) {
 		if err := decodeTransfer(&p.kids[0], &tx); err != nil {
 			return nil, err
 		}
-		pr, err := decodeProof(&p.kids[1], b, &steps, &ucSteps)
+		pr, err := decodeProof(&p.kids[1], b, &steps)
 		if err != nil {
 			return nil, err
 		}

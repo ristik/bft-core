@@ -92,3 +92,71 @@ func TestTokenProjectionDecodesEveryCertificate(t *testing.T) {
 		require.ErrorIs(t, err, ErrCertSigLength)
 	})
 }
+
+func TestCertificateSDKIntersectionSentinels(t *testing.T) {
+	e := newEnv(t)
+	_, lp := e.backedToken(t, 5, amt, oneKey())
+	tok, _ := e.composed(t, 2, irTimeOK).token(t)
+	for _, mutation := range certificateMutations() {
+		t.Run(mutation.name, func(t *testing.T) {
+			raw, err := replaceCertificateItem(tok.MintProof.UC, mutation.replacement, mutation.path...)
+			require.NoError(t, err)
+			if mutation.nativeAccepted {
+				_, err = b1ref.ScanUC(raw)
+				require.NoError(t, err, "native B1 acceptance is preserved")
+			}
+			cp := *tok
+			cp.MintProof.UC = raw
+			_, err = ProjectToken(cp.Bytes())
+			require.ErrorIs(t, err, ErrCertScan)
+			backed := e.remint(t, lp, func(p *LockProof) {
+				p.UC, err = replaceCertificateItem(p.UC, mutation.replacement, mutation.path...)
+				require.NoError(t, err)
+			})
+			err = VerifyMintBacking(e.F.Cfg, backed, e.Trust, e.Pin)
+			require.ErrorIs(t, err, ErrCertScan)
+			require.ErrorIs(t, err, ErrLockUC)
+		})
+	}
+}
+
+func TestCertificateCumulativeUnicitySteps(t *testing.T) {
+	e := newEnv(t)
+	raw, err := certificateWithSteps(e.composed(t, 2, irTimeOK).cert.InclusionProofs()[0].UC, 32)
+	require.NoError(t, err)
+	var steps uint64
+	for i := 0; i < 64; i++ {
+		require.NoError(t, scanCertificate(raw, &steps))
+	}
+	require.Equal(t, uint64(2048), steps)
+	require.ErrorIs(t, scanCertificate(raw, &steps), ErrTooManyPaths)
+	require.Equal(t, uint64(2048), steps, "a rejected charge leaves the account intact")
+}
+
+func TestTokenCombinedPathBudget(t *testing.T) {
+	e := newEnv(t)
+	raw, err := certificateWithSteps(e.composed(t, 2, irTimeOK).cert.InclusionProofs()[0].UC, 32)
+	require.NoError(t, err)
+	h, err := e.F.BuildToken(5, amt, manyKeys(8))
+	require.NoError(t, err)
+	for _, extra := range []int{0, 1} {
+		proofs := make([]InclusionProof, 8)
+		for i := range proofs {
+			n := 224
+			if i == 0 {
+				n += extra
+			}
+			for bit := 0; bit < n; bit++ {
+				proofs[i].Bitmap[bit/8] |= 1 << (bit % 8)
+			}
+			proofs[i].Siblings = make([][32]byte, n)
+			proofs[i].UC = raw
+		}
+		_, err := ProjectToken(TokenFromHistory(h, proofs).Bytes())
+		if extra == 0 {
+			require.NoError(t, err)
+		} else {
+			require.ErrorIs(t, err, ErrTooManyPaths)
+		}
+	}
+}

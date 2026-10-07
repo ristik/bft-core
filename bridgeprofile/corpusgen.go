@@ -140,6 +140,14 @@ func BuildCorpus() (*Corpus, error) {
 	fs.Cfgs["dev-replacement-vault"] = fixtureJSON("dev-replacement-vault", &dev2)
 	g.fs = fs
 
+	for _, network := range []uint64{0, 65536} {
+		var doc map[string]any
+		g.must(json.Unmarshal(d.Trust.JSON, &doc))
+		doc["networkId"] = network
+		raw, err := json.Marshal(doc)
+		g.must(err)
+		g.add(Case{ID: fmt.Sprintf("trust-network-%d", network), Family: "config", Op: "trust-input", Description: "network rejected before narrowing", Input: hx(raw)})
+	}
 	g.networkBoundaries()
 	g.config()
 	g.vault()
@@ -740,6 +748,34 @@ func (g *gen) wire() {
 	tadd("token-proof-no-certificate", "null certificate", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), CNull)))
 	tadd("token-proof-certificate-not-decodable", "a tagged item that is not an SDK-decodable certificate", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), CTag(1, CBytes([]byte{1})))))
 	tadd("token-proof-signature-64-bytes", "certificate whose seal signatures are 64 bytes", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.shortSigUC(uc0))))
+	for _, mutation := range certificateMutations() {
+		uc, err := replaceCertificateItem(uc0, mutation.replacement, mutation.path...)
+		g.must(err)
+		tadd("token-certificate-"+mutation.name, "isolated certificate intersection: "+mutation.name, replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), uc)))
+	}
+	for _, n := range []int{224, 225} {
+		uc, err := certificateWithSteps(uc0, 32)
+		g.must(err)
+		keys := make([]*secp256k1.PrivateKey, 8)
+		for i := range keys {
+			keys[i] = KeyFromSeed(fmt.Sprintf("budget-owner-%d", i))
+		}
+		h, err := g.d.F.BuildToken(5, big.NewInt(123), keys)
+		g.must(err)
+		proofs := make([]InclusionProof, 8)
+		for i := range proofs {
+			proofs[i].UC = uc
+			siblings := 224
+			if i == 0 {
+				siblings = n
+			}
+			for bit := 0; bit < siblings; bit++ {
+				proofs[i].Bitmap[bit/8] |= 1 << (bit % 8)
+			}
+			proofs[i].Siblings = make([][32]byte, siblings)
+		}
+		tadd(fmt.Sprintf("token-combined-path-%d", 2048+n-224), "combined RSMT and Unicity path budget", TokenFromHistory(h, proofs).Bytes())
+	}
 	tadd("token-proof-oversized-certificate", "certificate over the proof bound", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), CTag(1, CBytes(make([]byte, MaxProofUCBytes))))))
 	// Kernel ABI.
 	cfgB := f.Cfg.Bytes()
@@ -874,6 +910,13 @@ func (g *gen) lock() {
 		hh, err := f.BuildTokenWith(5, amount, keys, BuildOpts{Proof: &c})
 		g.must(err)
 		return hh
+	}
+	for _, mutation := range certificateMutations() {
+		back("backing-certificate-"+mutation.name, "isolated certificate intersection: "+mutation.name, remint(func(p *LockProof) {
+			var err error
+			p.UC, err = replaceCertificateItem(p.UC, mutation.replacement, mutation.path...)
+			g.must(err)
+		}), "pinned", "dev")
 	}
 	flip := func(b []byte, i int) []byte { c := bytes.Clone(b); c[i] ^= 1; return c }
 	reUC := func(fn func(uc *types.UnicityCertificate)) func(lp *LockProof) {

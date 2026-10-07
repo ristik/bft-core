@@ -302,6 +302,7 @@ func TestTrustInputRejectsUnsupportedConfiguration(t *testing.T) {
 	}
 	for name, doc := range map[string][]byte{
 		"version 2^32+1 narrows to 1": edit(`"version":"1"`, `"version":"4294967297"`),
+		"networkId zero":              edit(fmt.Sprintf(`"networkId":%d`, e.TB.NetworkID), `"networkId":0`),
 		"networkId 2^16+3 narrows":    edit(fmt.Sprintf(`"networkId":%d`, e.TB.NetworkID), fmt.Sprintf(`"networkId":%d`, 65536+uint64(e.TB.NetworkID))),
 		"trailing bracket":            append(bytes.Clone(good), ']'),
 		"trailing second document":    append(bytes.Clone(good), good...),

@@ -252,7 +252,7 @@ func TestKernelRejectsUnderivedCfgForEveryOperation(t *testing.T) {
 	e := newEnv(t)
 	bad := *e.F.Cfg
 	bad.Ty[0] ^= 1
-	require.Error(t, bad.Validate(), "the mutation must make the Cfg invalid, not merely different")
+	require.ErrorIs(t, bad.Validate(), ErrCfgMismatch, "the mutation must make the Cfg invalid, not merely different")
 	falseOut, err := EncodeResult(false, nil)
 	require.NoError(t, err)
 	good, err := Kernel(mustKernelIn(t, OpPrepareLock, e.F.Cfg.Bytes(), PreparePayload(5, amt, sigPred(KeyFromSeed("kc")).Bytes())))

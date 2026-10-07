@@ -104,6 +104,14 @@ func TestCorpusCoversTheDesign(t *testing.T) {
 		"backing-quorum-n4-signers3": "", "backing-quorum-n4-signers2": "ErrLockUC",
 		"backing-quorum-n7-signers5": "", "backing-quorum-n7-signers4": "ErrLockUC",
 	}
+	for _, mutation := range certificateMutations() {
+		want["token-certificate-"+mutation.name] = "ErrCertScan"
+		want["backing-certificate-"+mutation.name] = "ErrCertScan"
+	}
+	want["trust-network-0"] = "ErrTrustConfig"
+	want["trust-network-65536"] = "ErrTrustConfig"
+	want["token-combined-path-2048"] = ""
+	want["token-combined-path-2049"] = "ErrTooManyPaths"
 	got := map[string]Expect{}
 	for _, fam := range families {
 		for _, cs := range c.Cases[fam] {

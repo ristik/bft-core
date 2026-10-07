@@ -165,7 +165,7 @@ func LoadTrustInput(b []byte) (*TrustInput, error) {
 		return nil, ErrTrustConfig
 	}
 	// Range checks precede every narrowing conversion: an out-of-range number is never read as its low bits.
-	if d.NetworkID > math.MaxUint16 {
+	if d.NetworkID == 0 || d.NetworkID > math.MaxUint16 {
 		return nil, ErrTrustConfig
 	}
 	tb := types.RootTrustBaseV1{NetworkID: types.NetworkID(d.NetworkID), Signatures: map[string]hex.Bytes{}}
